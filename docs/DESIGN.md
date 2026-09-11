@@ -16,8 +16,8 @@
 
 ```
 草稿(Parakeet 实时):  ▸ I'm contacting you in relation to Eco.
-句末定稿 + 流式中文:   🌐 我是在就 Econ 10790 与你联系。   ← 中文先出(~0.6s)
-                       EN: I'm contacting you in relation to Econ 10790.
+句末定稿 + 流式中文:   🌐 我是在就 Econ 10101 与你联系。   ← 中文先出(~0.6s)
+                       EN: I'm contacting you in relation to Econ 10101.
 ```
 
 ## 架构
@@ -75,7 +75,7 @@ mkdir -p ~/models/vad && curl -sL -o ~/models/vad/silero_vad.onnx \
 cl                    # 线下课(麦克风) + 悬浮窗     ← 零参数, 打开就能用
 cl online             # 线上课(系统声, 需先切 Multi-Output Device)
 cl file 录音.m4a       # 转录已有录音(终端输出)
-cl course ECON10790   # 记住课程名(之后自动写 Obsidian 笔记)
+cl course ECON10101   # 记住课程名(之后自动写 Obsidian 笔记)
 cl local              # 强制本地引擎(不出网)
 cl help               # 帮助
 ```
@@ -89,7 +89,7 @@ cl help               # 帮助
 
 ```bash
 cd ~/lecture-live
-.venv/bin/python main.py --source mic --ui overlay --course ECON10790
+.venv/bin/python main.py --source mic --ui overlay --course ECON10101
 .venv/bin/python main.py --source file --path 录音.m4a --speed 4
 ```
 
@@ -200,21 +200,21 @@ glossary.txt          ← 公共: 课号、考核相关(所有课通用) — 由
 glossary/             ← 分课程(每行一个术语, 文件名 = 课号; 自备, 不入库)
 ```
 
-- **课号必须全列在公共表里**:`10770/10730/10740/10790` 发音极近(ten-seven-seventy/thirty/forty/ninety),
-  不给候选必然听混。
+- **课号必须全列在公共表里**:同一院系的课号往往发音极近(如 `…-70 / …-30 / …-40 / …-90`
+  只差一个词),不给候选必然听混。
 - **当前课号常驻注入**(`core_terms(course)`),其余按句子动态召回 Top-3(注入 ~40 token)。
 - **术语表是最大的质量杠杆,远大于 prompt 措辞**。实测:ASR 听成 "essential means" 时,
   无术语表 → 翻成「小测验」(崩);有术语表 → 「小测验也是基于必读材料的」+ 英文行也纠正。
 - 加词方式:直接往对应 `glossary/<课号>.txt` 加行即可(上课听到新术语就补)。
-- **课号可用短代号**:`cl course 10730` 会存进 `.course`,载入时按**后缀**匹配到
-  `glossary/ECON10730.txt`。严格拼 `glossary/10730.txt` 会**静默落空** ——
+- **课号可用短代号**:`cl course 10202` 会存进 `.course`,载入时按**后缀**匹配到
+  `glossary/ECON10202.txt`。严格拼 `glossary/10202.txt` 会**静默落空** ——
   实测只加载到 38 条公共术语、79 条课程术语一条没进(已修)。
 - **别放单字母词**(如把 R 语言写成 `R`):`select_terms` 的"整句包含"判断会让
   `"r" in sentence` 几乎**每句都真**,于是每句都把它注入到翻译 prompt(已删)。
 
 ```bash
 cl course             # 列出可选课程(带 * 标当前)
-cl course ECON10790   # 切换课程
+cl course ECON10101   # 切换课程
 ```
 
 ## 记录落盘(先落盘,再询问 —— 永不丢)
@@ -314,7 +314,7 @@ Subify 那种 2 秒自动消失的 tooltip 被公认为反面案例。
 |---|---|---|---|
 | `gloss` | 学生知识之外、真需要展开的难点 | **完整解析**(80–160 字) | `endogeneity`、`constrained optimization`、`Byzantine Empire` |
 | `basic` | 本课程基础概念,但英文↔中文要即时对上 | **一行速查**(≤30 字) | `demand`、`marginal cost`、`standard deviation` |
-| `skip` | 后勤词 / 课号 / 自明词 | **永不显示** | `deadline`、`module`、`ECON10730` |
+| `skip` | 后勤词 / 课号 / 自明词 | **永不显示** | `deadline`、`module`、`ECON10202` |
 
 **`gloss` 与 `basic` 都参与运行时匹配** —— `basic` 曾因"学生看名字就懂"被排除,
 但那等于砍掉一半该显示的词:依赖变量 / 哑变量 / 直方图…**"看中文名字就懂"≠"看英文词就懂"**。
@@ -349,7 +349,7 @@ r"\b" + term + r"(?:s|'s)?\b"     # 允许复数, 不允许子串
 
 ```bash
 python build_notes.py            # 增量: 只为新术语生成解释
-python build_notes.py SOC10020   # 只为某门课
+python build_notes.py SOC10101   # 只为某门课
 python build_notes.py --rebuild  # 全量重分类 + 扩写 + 清掉自动回写的垃圾
 ```
 

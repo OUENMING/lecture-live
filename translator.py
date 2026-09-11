@@ -54,10 +54,10 @@ def _load_terms(path: str | None) -> list[str]:
 def course_terms_path(glossary_path: str, course: str) -> pathlib.Path | None:
     """定位分课程术语表 glossary/<课号>.txt。
 
-    ⚠️ 容错: 用户常用短代号(`cl course 10730` 会把 `10730` 写进 .course), 而文件是
-    全名 `ECON10730.txt` —— 严格拼路径会**静默落空**(实测只加载到公共术语,
+    ⚠️ 容错: 用户常用短代号(`cl course 10202` 会把 `10202` 写进 .course), 而文件是
+    全名 `ECON10202.txt` —— 严格拼路径会**静默落空**(实测只加载到公共术语,
     课程术语一条没进)。故精确路径不存在时, 退而在 glossary/ 里按**后缀**匹配;
-    仅当唯一命中时才采用(防 `070` 这类歧义前缀误配)。
+    仅当唯一命中时才采用(防 `202` 这类歧义前缀误配)。
     """
     d = pathlib.Path(glossary_path).parent / "glossary"
     exact = d / f"{course}.txt"

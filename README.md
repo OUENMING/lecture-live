@@ -46,8 +46,8 @@ ClassLive 是一个跑在你自己电脑上的**实时课堂字幕工具**：老
 
 ```
 草稿(Parakeet 实时):  ▸ I'm contacting you in relation to Eco.
-句末定稿 + 流式中文:   🌐 我是在就 Econ 10790 与你联系。   ← 中文先出(~0.6s)
-                       EN: I'm contacting you in relation to Econ 10790.
+句末定稿 + 流式中文:   🌐 我是在就 Econ 10101 与你联系。   ← 中文先出(~0.6s)
+                       EN: I'm contacting you in relation to Econ 10101.
 ```
 
 悬浮窗长这样（收起态 3 句 + 底部术语行；展开态可滚动查阅全部历史）：
@@ -59,8 +59,8 @@ ClassLive 是一个跑在你自己电脑上的**实时课堂字幕工具**：老
 │  ... the slope of the demand curve reflects ...  │
 │  需求曲线的斜率反映了边际效用……                     │
 │                                                  │
-│  ... in relation to Econ 10790 ...               │
-│  我是在就 Econ 10790 与你联系……                    │
+│  ... in relation to Econ 10101 ...               │
+│  我是在就 Econ 10101 与你联系……                    │
 ├──────────────────────────────────────────────────┤
 │  ◈ demand · marginal utility   ▸ 点开解析          │
 └──────────────────────────────────────────────────┘
@@ -210,7 +210,7 @@ cp glossary.example.txt glossary.txt
 cl                    # 线下课(麦克风) + 悬浮窗     ← 零参数，打开就能用
 cl online             # 线上课(系统声，需先切 Multi-Output Device)
 cl file 录音.m4a       # 转录已有录音(终端输出)
-cl course ECON10790   # 记住课程名(之后自动写 Obsidian 笔记)
+cl course ECON10101   # 记住课程名(之后自动写 Obsidian 笔记)
 cl local              # 强制本地引擎(断网 / 不想出网)
 cl last               # 查看最近一次课堂记录
 cl help               # 帮助
@@ -225,7 +225,7 @@ cl help               # 帮助
 
 ```bash
 cd ~/lecture-live
-.venv/bin/python main.py --source mic --ui overlay --course ECON10790
+.venv/bin/python main.py --source mic --ui overlay --course ECON10101
 .venv/bin/python main.py --source file --path 录音.m4a --speed 4
 ```
 
@@ -313,13 +313,13 @@ cl course ECON10101   # 切换课程
 |---|---|---|---|
 | `gloss` | 学生知识之外、真需要展开的难点 | **完整解析**（80–160 字） | `endogeneity`、`constrained optimization` |
 | `basic` | 本课程基础概念，但英文↔中文要即时对上 | **一行速查**（≤30 字） | `demand`、`marginal cost` |
-| `skip` | 后勤词 / 课号 / 自明词 | **永不显示** | `deadline`、`module`、`ECON10730` |
+| `skip` | 后勤词 / 课号 / 自明词 | **永不显示** | `deadline`、`module`、`ECON10202` |
 
 匹配用**词边界正则**（`\bterm(?:s|'s)?\b`），不是子串 —— 旧实现 `if tl in low` 会让 `GG` 命中 *suggest / struggle / bigger*，`Four` 命中 *fourth*。
 
 ```bash
 python build_notes.py            # 增量：只为新术语生成解释
-python build_notes.py SOC10020   # 只为某门课
+python build_notes.py SOC10101   # 只为某门课
 python build_notes.py --rebuild  # 全量重分类 + 扩写 + 清掉自动回写的垃圾
 ```
 

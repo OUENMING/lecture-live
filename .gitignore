@@ -1,0 +1,23 @@
+# ── 密钥 / 个人配置（绝不入库）─────────────────────────
+.deepseek_key
+.course
+
+# ── 本地术语数据（含学校课号，按需自备）──────────────────
+# glossary.txt 由 glossary.example.txt 复制而来
+glossary.txt
+glossary/
+term_notes.json
+term_notes_auto.json
+term_notes*.bak
+
+# ── 课堂记录（个人内容，不入库）────────────────────────
+sessions/
+
+# ── Python ───────────────────────────────────────────
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ── macOS ────────────────────────────────────────────
+.DS_Store

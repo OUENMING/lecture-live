@@ -1,0 +1,42 @@
+# 公共术语表（所有课程通用）—— 复制成 glossary.txt 后按自己情况改。
+#
+# 格式：每行一个术语，# 开头是注释。分课程术语放 glossary/<课号>.txt。
+#
+# ⚠️ 课号必须全列在这里：同一院系的课号往往发音极近
+#    （例如 ...-70 / -30 / -40 / -90 只差一个词），
+#    不给模型候选，它必然听混，并把这个错误带进译文。
+#
+# 把下面几行替换成你自己学校的课号 ↓
+YOUR-COURSE-101
+YOUR-COURSE-102
+
+# 教务/平台词（这些在大多数学校通用，可保留）
+Brightspace
+module
+lecture
+tutorial
+seminar
+workshop
+quiz
+midterm
+final exam
+final test
+final assessment component
+grade scale
+grade point average
+GPA
+pass mark
+essay
+assignment
+deadline
+reading week
+essential readings
+reading list
+academic integrity
+plagiarism
+generative AI
+professor
+lecturer
+programme director
+student desk
+autumn trimester

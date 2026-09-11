@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12-blue?style=flat-square)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey?style=flat-square)](#环境要求)
-[![Offline](https://img.shields.io/badge/runs-offline-success?style=flat-square)](#翻译引擎云端--本地)
+[![Offline](https://img.shields.io/badge/runs-offline-success?style=flat-square)](#常见问题)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](#贡献)
 
 ClassLive 是一个跑在你自己电脑上的**实时课堂字幕工具**：老师在讲台上说英文，屏幕上滚出中文双语字幕。

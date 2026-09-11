@@ -2,7 +2,7 @@
 
 用法:
   python build_notes.py             # 增量: 给缺 level/detail 的术语补齐
-  python build_notes.py SOC10020    # 只为某门课
+  python build_notes.py SOC10101    # 只为某门课
   python build_notes.py --rebuild   # 全量重分类+重展开, 并清掉历史自动缓存的垃圾条目
 
 数据分两层:

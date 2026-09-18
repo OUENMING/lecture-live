@@ -777,7 +777,18 @@ def run(args) -> None:
             drain()
         finally:
             running.clear()
-            msg = writer.close(ask=_ask_save_notes)
+
+            def qa_snapshot():
+                """「我问过什么」交给笔记(Phase 4)。⚠️ 在 qa_lock 下**拷贝一份**:
+                answer_worker 是 daemon 且**从不 join**, 收尾时它可能正卡在
+                translator.answer() 里, 回来仍会往 history 追加 —— 传活引用等于让
+                writer 边写边看它改。⚠️ 做成函数而不是先取好: close() 里还要等
+                用户回答"是否保存"再精修, 早取会漏掉这段时间里回来的那一条问答。
+                """
+                with qa_lock:
+                    return list(qa["history"])
+
+            msg = writer.close(ask=_ask_save_notes, qa=qa_snapshot)
             if msg:
                 echo(msg)
 

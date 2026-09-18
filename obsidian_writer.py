@@ -8,6 +8,8 @@
   <vault>/Lectures/<日期>_<课程>.md   ← **双层笔记**:
         复习层在上(英文知识点详解 / 英文自测 / 术语表 / 重点),
         完整逐句转录折叠在下。
+        自测区**最前面**是"我课上问过的问题"(问答线程, 见 `close(qa=...)`)——
+        自己卡过的问题才是复习的第一顺位。
 
 ⚠️ 双层不是"摘要 + 原文": 复习层只是**入口**, 下面那份转录是**逐字保留、未做任何删改**
 的 —— 复习要的是"不遗漏", 摘要会把细节吃掉, 所以转录永远完整地在文件里。
@@ -33,6 +35,27 @@ _FIELDS = (("en", "EN"), ("zh", "ZH"), ("asr", "ASR"))
 
 REVIEW_CHUNK = 70           # 复习层每次请求喂多少句; 长课分块, 避免超长 JSON 被截断
 REVIEW_MAX_TOKENS = 3000    # 单块输出上限
+
+# 「我问过什么」(Phase 4) 在复习自测区里每条占**一行** `问题::答案` —— Spaced
+# Repetition 插件按 `::` 切卡片, 所以不能有多行。讲解的自然长度实测 375–786
+# completion token(见 cloud_translator.ANSWER_MAX_TOKENS 的实测注), 换算 1500–3200
+# 字符, 直接铺进一行没法读。500 字符的依据: sessions/ 里 2555 句真实课堂英文,
+# 中位句长 54 字符、p90 116 字符 —— 500 字符够装 4–9 句, 留得下 ANSWER_SYSTEM
+# 结构里"先回答问题 + 它在课上哪一段"这两步, Obsidian 里折 ~4 行。这是**上限不是
+# 目标**: 短回答原样保留。
+QA_ANSWER_MAX_CHARS = 500
+
+# 「我课上问过的问题」块的抬头行。刻意用 callout 而不是列表项: 列表项会被
+# Spaced Repetition 当成潜在卡片, callout 不会。也不写"下面是自动生成的题" ——
+# 没配 key 时下面根本没有自动生成的题, 那句话就成了假话。
+QA_MARKER = "> [!question] 🙋 我课上问过的问题 · 先自测这些"
+
+# `中：` 点睛尾巴的上限。按 ANSWER_SYSTEM, 点睛只该是"几个词"; 模型漂移写成长句时
+# 一行会涨到近 600 字符, 卡片背面就读不动了。这只是安全网, 不是目标长度。
+QA_GLOSS_MAX_CHARS = 120
+
+_ZH_GLOSS = re.compile(r"^中[：:]")
+_ASKED = "Question: "       # 格式契约见 cloud_translator.answer_user_content()
 
 REVIEW_SYS = """你是课堂笔记助手, 为一名靠中文听英文课的中国经济学/社会学本科生整理复习层。
 用户给你一节课**一段**的逐句中英对照转录。你只依据转录内容输出, 绝不引入外部知识、绝不猜测。
@@ -72,6 +95,69 @@ OVERVIEW_SYS = """你在为一节英文课堂的笔记写抬头。输入是这�
 def _one_line(v) -> str:
     """压成单行; 非字符串 -> 空串。渲染层据此丢弃任何多余换行。"""
     return " ".join(v.split()) if isinstance(v, str) else ""
+
+
+def _asked_question(turn_content: str) -> str:
+    """从问答线程的 user turn 里取回**用户原话**。
+
+    turn 正文由 `cloud_translator.answer_user_content()` 生成, 末尾那一段永远是
+    `Question: <原话>`（前面可选的转录底座以空行隔开）。问题必须是用户自己的
+    文字, 不重新生成、不改写 —— 复习钩子要的正是"我当时卡在哪"。
+    拿不到就返回空串(这条问答不写进笔记), 绝不让猜出来的问题进笔记。
+    """
+    # ⚠️ 用**第一个**分隔符(partition)而不是最后一个(rpartition): 用户原话里若又
+    # 出现一次 `\n\nQuestion: `, rpartition 只取后半段, 前半段**静默消失**(独立验证
+    # 实测)。分隔符是我们自己追加在最后的, 而转录底座按句拼、不含空行, 所以第一个
+    # 出现的就是真分隔符。
+    head, sep, tail = turn_content.partition("\n\n" + _ASKED)
+    if not sep:                       # 首次提问且当时还没有转录 -> 正文就是这一行
+        if not turn_content.startswith(_ASKED):
+            return ""
+        return _one_line(turn_content[len(_ASKED):])
+    return _one_line(tail)
+
+
+def _qa_answer(raw: str) -> tuple[str, str]:
+    """讲解原文 -> (单行英文正文, 中文点睛)。
+
+    `中：` 点睛行是 ANSWER_SYSTEM 要求的**独立行**。压进 `::` 一行时若原样内联,
+    英文句子里会嵌进中文短语 —— 所以把点睛整行抽出来, 按复习层既有的
+    `　（中：…）` 尾巴挂到行尾, 正文保持连续英文(与笔记"英文为主、中文点睛"一致)。
+    `背景：` 行**保留在正文里**(它的标签本身是"这段不是课上讲的"的凭据, 摘掉即失真)。
+    """
+    body: list[str] = []
+    gloss: list[str] = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = _ZH_GLOSS.match(line)
+        if m:
+            g = _one_line(line[m.end():])
+            if g:
+                gloss.append(g)
+            continue
+        body.append(line)
+    return _one_line(" ".join(body)), " · ".join(gloss)
+
+
+def _truncate(text: str, limit: int) -> str:
+    """超长回答截到 limit 字符, **只落在句末**; 整段没句末才退到词边界。
+
+    切半句比短句子更难读(尤其对非母语阅读): 宁可早一句收, 不要留一个残句。
+
+    ⚠️ 返回值**保证不超过 limit**。原来的写法 `cut = text[:limit]` 再加结尾的 " …"
+    会到 limit+2(独立验证实测 499+2=502), 注释里的数字与实现不符。
+    """
+    if len(text) <= limit:
+        return text
+    cut = text[:max(1, limit - 2)]    # 先给结尾的 " …" 留两个字符
+    if cut[-1] not in ".!?":          # 没停在句末 -> 退到最近的句末或词边界
+        k = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+        if k <= 0:
+            k = cut.rfind(" ")
+        cut = cut[:k + 1] if k > 0 else cut    # +1: 句号跟着句子
+    return cut.rstrip() + " …"
 
 
 def _clean_review(obj) -> dict:
@@ -315,8 +401,61 @@ class ObsidianWriter:
             out["qa"] = dedup[:8]
         return out
 
+    # ---- 我课上问过什么(Phase 4) ----
+    @staticmethod
+    def _qa_items(history) -> list[str]:
+        """问答线程 -> `- 问题::答案` 行(问题用原话, 答案压成单行)。
+
+        **只写"我问过什么"**: 讲解正文不进笔记, 问答线程也不进 `sessions/`。
+        为什么这些行就是复习钩子(而非又一个"记下来就算学了"的地方) —— 调研里那条
+        3937 赞反思帖的原话是"先问 AI 再做成卡片, 最后只能学到关键词", 所以问过又
+        不回来的问题必须自动变成复习项; `::` 这个格式 Spaced Repetition 插件直接认,
+        零新增机制(PLAN-ai-explain-qa.md 0.6)。
+
+        ⚠️ 收尾时 answer_worker **从不 join**: 它可能正在 `translator.answer()` 里,
+        之后仍会往 history 追加。所以 `close()` 收到的是**快照**(list)或取快照的
+        函数, 不是那个活着的 list 本身。
+        """
+        out: list[str] = []
+        if not isinstance(history, list):
+            return out
+        for i, turn in enumerate(history):
+            if not isinstance(turn, dict) or turn.get("role") != "user":
+                continue
+            q = _asked_question(turn.get("content") or "")
+            if not q:
+                continue
+            nxt = history[i + 1] if i + 1 < len(history) else None
+            body, gloss = ("", "")
+            if isinstance(nxt, dict) and nxt.get("role") == "assistant":
+                body, gloss = _qa_answer(nxt.get("content") or "")
+            # 没有答案(收尾时答案还在流里 —— worker 从不 join, 快照里就没有它)或
+            # 整条就是一句报错(main.py 的失败兜底)时: 只留问题、**不加 `::`**。
+            # 空答案的卡片比没有卡片更糟; 但问题本身是"我卡在哪"的唯一凭据,
+            # 静默丢掉它等于把这条钩子废掉 —— 所以留着, 只是不假装能自测。
+            # ⚠️ 问题里出现 `::` 会**伪造一个卡片边界**: Spaced Repetition 按第一个
+            # `::` 切, 于是正面只剩半句、背面粘着问题剩下的部分(独立验证实测:
+            # "What is a::b in stats?" 被切成 front="What is a")。插一个空格拆开 ——
+            # 读起来还是 "a::b", 但不再被当分隔符。
+            qd = q.replace("::", ": :")
+            # 没有答案(收尾时答案还在流里 —— worker 从不 join, 快照里就没有它)或
+            # 整条就是一句报错(main.py 的失败兜底)时: 只留问题、**不加 `::`**。
+            # 空答案的卡片比没有卡片更糟; 但问题本身是"我卡在哪"的唯一凭据,
+            # 静默丢掉它等于把这条钩子废掉 —— 所以留着, 只是不假装能自测。
+            if not body or body.startswith("⚠"):
+                out.append(f"- {qd}　（这次没等到回答）")
+                continue
+            tail = ""
+            if gloss:
+                g = (gloss if len(gloss) <= QA_GLOSS_MAX_CHARS
+                     else gloss[:QA_GLOSS_MAX_CHARS].rstrip() + "…")
+                tail = f"　（中：{g}）"
+            out.append(f"- {qd}::{_truncate(body, QA_ANSWER_MAX_CHARS)}{tail}")
+        return out
+
     # ---- 组装双层笔记 ----
-    def _render_note(self, entries: list[dict], review: dict) -> str:
+    def _render_note(self, entries: list[dict], review: dict,
+                     qa_items: list[str] | None = None) -> str:
         ts0 = entries[0]["ts"] if entries else "—"
         ts1 = entries[-1]["ts"] if entries else "—"
         stars = [e for e in entries if e["star"]]
@@ -372,6 +511,11 @@ class ObsidianWriter:
 
         # 复习自测: 英文问答, 中文要点附后; 保持 `问题::答案` 便于 Spaced Repetition
         L += ["## ❓ Review 复习自测", ""]
+        # 自己问过的问题排在**最前**: 卡住过的地方才是复习的第一顺位, 也免得被自动
+        # 生成的那 8 条挤到看不见。注意这里是**插进已有区块**, 不是另开一节 ——
+        # 同一份内容写两遍(可读区一遍 + `::` 一遍)只会变噪音。
+        if qa_items:
+            L += [QA_MARKER, *qa_items, ""]
         if qa:
             L += ["> [!tip] 🤖 自动生成 · 请核对后再用于复习",
                   "> <sub>写成 `问题::答案`，可被 Spaced Repetition 插件识别</sub>", ""]
@@ -415,9 +559,32 @@ class ObsidianWriter:
         return "\n".join(L) + "\n"
 
     # ---- 结束: 询问是否进 Obsidian ----
-    def close(self, ask=None) -> str:
-        if not self.enabled or not self.session_path or self._n == 0:
+    def close(self, ask=None, qa=None) -> str:
+        """`qa` = 问答线程 history 的快照(list), 或**取快照的函数**。
+
+        ⚠️ 不能走构造函数: writer 在 run() 里**先**建, qa 状态比它晚。
+        ⚠️ 要函数而不是 list 的场景: 收尾里答案可能还在流(`answer_worker` 是 daemon,
+        从不 join), 而"询问是否保存"可以停很久 —— 早取的快照会把这轮问答整条丢掉
+        (问题还在, 答案没了)。函数形式把"取"推迟到真正要渲染的那一刻。
+        ⚠️ 问答**只进 vault 笔记**, 不进 `sessions/` —— 那份逐句日志是三方共享
+        契约(见 CLAUDE.md), 语义也不同(问答不是"课上讲了什么")。
+        """
+        if not self.enabled or not self.session_path:
             return ""
+        if self._n == 0:
+            # ⚠️ 原来是 `self._n == 0` 直接 return —— 但"有提问、零句转录"(麦克风故障,
+            # 或开课十几秒就问了一句然后退出)会把**问答静默丢掉**, 而问题正是这个
+            # 功能唯一要保住的东西(它不进 sessions/, 终端 echo 也不落盘, 丢了就真没了)。
+            # 所以零句时再探一次"有没有问答", 有就继续往下走去写笔记。
+            # 取舍: 这一次探测取快照**早于**保存询问, 而 callable 的意义正是把取快照
+            # 推迟到询问之后。零句场景下没有转录在跑, "答案晚到"那个顾虑不成立 ——
+            # 折中是有界的。
+            try:
+                n_qa = len(qa() if callable(qa) else qa) if qa else 0
+            except Exception:                     # noqa: BLE001
+                n_qa = 0
+            if not n_qa:
+                return ""
         save = self.mode == "yes"
         if self.mode == "ask":
             save = True if ask is None else bool(ask(self._n))
@@ -442,7 +609,16 @@ class ObsidianWriter:
         if self._key:
             print("🤖 正在生成复习层(知识点详解 + 自测)…", flush=True)
         review = self._review(entries)
-        note = self._render_note(entries, review)
+        # 问答行自带 try/except: close() 这里**没有**异常护栏, 外层 finally 只接
+        # KeyboardInterrupt —— 渲染问答抛出去就再也没有那份转录笔记了。隔离是硬要求:
+        # 笔记的底座是逐句转录, 它是不能丢的那件事; 问答只是额外一层。
+        qa_items: list[str] = []
+        if qa:
+            try:
+                qa_items = self._qa_items(qa() if callable(qa) else qa)
+            except Exception as e:                        # noqa: BLE001
+                print(f"⚠ 问答落盘失败({str(e)[:60]}); 笔记照常生成")
+        note = self._render_note(entries, review, qa_items)
 
         d = Path(self._vault) / "Lectures"
         d.mkdir(parents=True, exist_ok=True)

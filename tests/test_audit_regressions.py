@@ -16,6 +16,8 @@
       —— 两者都是"不报错但悄悄错"的类型, 正是本文件要拦的东西
   R8  答案折行完整性 + 两个状态缺陷(2026-09-18 独立验证发现): 超长词被静默裁掉 /
       空回答清空屏幕 / 追问时两轮答案粘在一起
+  R9  复习钩子里必须是**用户原话**(Phase 4 独立验证): 问句含分隔符被吞前半段 /
+      问句含 `::` 伪造卡片边界 / 截断超上限 / 点睛尾巴不设限
 """
 from __future__ import annotations
 import json
@@ -562,6 +564,45 @@ class R8_AnswerRowIntegrity(unittest.TestCase):
             self.assertIn("SECOND", txt)
         finally:
             o.close()
+
+
+class R9_QAQuestionFidelity(unittest.TestCase):
+    """复习钩子里必须是**用户原话**(2026-09-18, 独立验证发现, 都已修)。
+
+    这一条的重要性来自设计前提本身: 问过的问题自动变成复习项, 是为了防"先问 AI
+    再做成卡片, 最后只学到关键词"。所以问题被改坏或被静默丢掉, 等于把这条钩子
+    整个废掉 —— 而这三种失败都不报错。
+      R9a 问句里再出现一次分隔符 -> rpartition 取最后一个, 前半段**静默消失**
+      R9b 问句里含 `::` -> 伪造卡片边界, Spaced Repetition 把正面切成半句
+      R9c 截断的实际长度**超过上限**(注释说截到 N, 实现到 N+2)
+      R9d 有点睛尾巴时整行涨到近 600 字符, 卡片背面读不动
+    """
+
+    def test_question_containing_separator_survives(self):
+        from obsidian_writer import _asked_question
+        got = _asked_question("tr\n\nQuestion: First part.\n\nQuestion: second?")
+        self.assertEqual(got, "First part. Question: second?")
+
+    def test_double_colon_in_question_cannot_forge_a_card(self):
+        from obsidian_writer import ObsidianWriter
+        items = ObsidianWriter._qa_items([
+            {"role": "user", "content": "Question: What is a::b in stats?"},
+            {"role": "assistant", "content": "It means scope."}])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].count("::"), 1, "问句里的 :: 伪造了卡片边界")
+
+    def test_truncate_never_exceeds_limit(self):
+        from obsidian_writer import _truncate
+        for text in ("A" * 499 + ". tail", "word " * 300, "X" * 2000):
+            self.assertLessEqual(len(_truncate(text, 500)), 500)
+
+    def test_gloss_tail_is_capped(self):
+        from obsidian_writer import ObsidianWriter, QA_GLOSS_MAX_CHARS
+        items = ObsidianWriter._qa_items([
+            {"role": "user", "content": "Question: q?"},
+            {"role": "assistant", "content": "Body.\n中：" + "点" * 300}])
+        self.assertEqual(len(items), 1)
+        self.assertLess(len(items[0]), QA_GLOSS_MAX_CHARS + 100)
 
 
 if __name__ == "__main__":

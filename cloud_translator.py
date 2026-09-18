@@ -115,7 +115,10 @@ def answer_user_content(question: str, transcript: list[str], follow_up: bool) -
 
     转录块只出现在这**一个** user turn 里: 不新开一个 user turn 专门塞转录 ——
     user/assistant 严格交替是各 OpenAI 兼容实现都吃的最安全形状(DeepSeek 在
-    部分模型上明确要求交替), 连续同角色消息的容忍度不统一。"""
+    部分模型上明确要求交替), 连续同角色消息的容忍度不统一。
+
+    ⚠️ 末尾那行 `Question: <原话>` 会被 `obsidian_writer._asked_question()` 反解
+    回来 —— 落盘"我问过什么"要的是用户原话, 不去猜。改这里的形状 = 同时改那边。"""
     block = "\n".join(t for t in transcript if t)
     parts: list[str] = []
     if block:

@@ -61,19 +61,29 @@ cl → main.run()
                    → TermNotes.match() → ("terms", …) → streamq
                    → detect_proper_nouns() ≥2 次 → properq
                          └ 专有名词线程 proper_worker: lookup_term() → notes.add() → ("terms", …)
+                   → 输入框回车 / 「讲一下」→ answerq
+                         └ 问答线程 answer_worker: 冻结转录快照(list(finals), 只追加)
+                               → EngineRouter.answer → CloudTranslator.answer_stream
+                               → ("answer", delta) → streamq          ← 流式, 非紧急
+                               → ("answer_done", q, text) → streamq
         │
-        主线程 drain()  ← 唯一的 tag 分发点
+        主线程 drain()  ← 唯一的 tag 分发点(无 else 分支, 漏注册即静默丢弃)
               "zh"/"en" → ui.stream_*          "terms" → ui.terms()
               "notice"  → ui.notice()          "final" → ui.finalize() + writer.append()
+              "answer"/"answer_done" → ui.answer_delta() / ui.answer_done()(getattr 守卫)
         │
-        退出(✕ / Ctrl+C / 文件播完): seg.flush() → finalq.put(_QUIT)
+        退出(✕ / Ctrl+C / 文件播完): stopping.set() → seg.flush() → finalq.put(_QUIT)
+              ⚠️ ✕ 只置 stopping, **不**直接 running.clear(): 收尾要先把 _QUIT 交给
+                 final_worker 收摊, 而它的循环判据正是 running —— 提前清掉 = 没人取
+                 哨兵, finalq 永远非空, all_settled() 永不成立, 每次退出卡满 15s
+                 (实测 15.03s → 0.30s; 且修复前还会丢掉正在转写的那一句)
               → 等 all_settled()(队列 + busy + carry 四项)→ writer.close():
                     polish_entries()  整课二次精修(30 句/批, 以直播 EN 为基准)
                     → _review()        按 70 句分块生成知识点+自测 JSON
                     → _render_note()   双层笔记 → <vault>/Lectures/<日期>_<课>.md
 ```
 
-**关键文件**: `main.py`(主循环 + 队列 + 线程)、`capture.py`(音源 + 电平)、`vad.py`(断句)、`asr.py`(转写)、`translator.py` / `cloud_translator.py`(修正+翻译, 同一套 interface)、`obsidian_writer.py`(落盘)、`polish.py`(二级精修)、`build_notes.py`(术语查表)、`overlay.py` + `transcript_view.py`(显示)。
+**关键文件**: `main.py`(主循环 + 队列 + 线程)、`capture.py`(音源 + 电平)、`vad.py`(断句)、`asr.py`(转写)、`translator.py` / `cloud_translator.py`(修正+翻译, 同一套 interface)、`obsidian_writer.py`(落盘)、`polish.py`(二级精修)、`build_notes.py`(术语查表)、`overlay.py` + `transcript_view.py`(显示)。`transcript_view.py` 的核心是**固定行高**——它让"滚动偏移→行索引"变成 O(1) 除法, 回收池全靠这条; Phase 3 的答案接管也复用它(答案先按测量预折成固定行)。
 
 ---
 

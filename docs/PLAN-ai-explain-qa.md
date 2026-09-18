@@ -135,6 +135,33 @@ Apple 文档：窗口无标题栏时该属性为 false，且 *"Attempts to make 
 
 **→ 从调研推出的三条设计落点**：①英文为主输出；②只按需；③提问后要有复习钩子。
 
+### 0.7 Phase 2/3 勘察结论（2026-09-18，实读代码）
+
+**⚠️ 行号漂移**：0.1 表里的行号整体偏 ~8 行。实际：`drain()` **529-558**、`busy` **332**、`finals` **328**、三个 worker **338-375 / 443-495 / 503-517**。`running` 288 与 `_use_cloud` 145 是对的。
+
+**✅ 顶栏放得下**：现有 5 个按钮实测占 242px（含间隔），起点 x=402，**可用 386px**。加「讲一下」+「新话题」约 124px，仍余 262px。`_layout` 是右对齐自适应宽度，**不硬编码 x**，无重叠风险。
+⚠️ 但 `_btn_latest` 隐藏时**仍占 63px 看不见的空位**；新按钮若要靠左，得插在它前面（循环是 `reversed(self._bar)`）。
+
+**❌ 「独立槽位」物理上不存在（计划要改）**：面板是**严格加和**的 `顶栏 + 转录区 + 固定栈`，固定栈高度**只由 `gloss_h` 一个参数**决定——
+`_pinned(gloss_h) = INPUT_H + INPUT_GAP + gloss_h + 4 + DRAFT_H + DRAFT_ZH_H + 4`
+**没有未分配区域。** 三个真实选项：
+- **A（采纳）**：面板**长高**——`_pinned(gloss_h, answer_h)` + 每次答案高度变化重跑 `_apply_mode` 的重算路径。⚠️ 只在**开始/结束**时改高度，别每个 token 都改窗口尺寸。
+- B：绝对定位盖在转录区上 → **遮挡字幕**，不采。
+- C：替换草稿两行 → ❌ 违反"不被新字幕顶掉"（`finalize` 会清空 `_draft`）。
+
+**加答案块时五处必须一起动**（漏一处就错位）：`_pinned()` 的和 · `_layout()` 的 y 游标 · `PINNED_H`/`BASE_H`（派生，自动）· `_expanded_scroll_h()` · `_apply_mode`。**只有 `_layout` 的游标是手工重复的**，代码里有两处警告注释指这条。
+
+**⚠️ 三条与计划不符的实现事实**
+1. **本地没有 `answer_stream`** —— `translator.Translator` 的方法到 `translate_draft` 就结束了。计划说"异常降级本地"，但**没有降级目标**：`--engine local` 或无 API key 时会直接 `AttributeError`。必须补本地实现或显式守卫。
+2. **`_use_cloud` 竞态是真的**（0.5 说"全部不触发"是错的）：问答 worker 与**常驻翻译 worker 并发**，两个线程可能同时进 `_fallback`（无锁）。本地降级还会排在 `translator.py:373` 的全局锁上。
+3. **`collect_usage` 没接到线上路径** —— 只有 `cache_probe.py` 传 True，没有 CLI 开关。Phase 2 验证项"检查 `prompt_cache_hit_tokens`"**目前没有管道**。
+
+**⚠️ 不能复用的现成件**：`_StreamParser`/`_retry_plain` 是 ZH/EN 双行形状；`max_tokens=220` 是**句子**预算，对讲解太小；`context[-max_ctx:]` 是缓存反模式（见 0.4）。
+
+**⚠️ `TerminalUI`**：新增 UI 方法必须在它上面加桩，或用 `getattr` 守卫——`drain()` 没有 try/except，`AttributeError` 会**直接打死主循环**。
+
+**⚠️ `_submit_input` 先清空再调回调** —— 回调抛错则问题丢失。Phase 2 要接网络，这条会变重要。
+
 ---
 
 ## Phase 1 — 让悬浮窗能打字（地基）  ✅ **已实现并通过独立验证（2026-09-18）**

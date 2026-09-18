@@ -20,7 +20,8 @@ from capture import load_source, SR
 from vad import Segmenter
 from asr import load_asr
 from translator import load_translator
-from cloud_translator import load_api_key, load_translator as load_cloud_translator
+from cloud_translator import (load_api_key, load_translator as load_cloud_translator,
+                              answer_user_content)
 from obsidian_writer import ObsidianWriter, DEFAULT_VAULT
 from build_notes import (TermNotes, format_gloss, detect_proper_nouns, lookup_term)
 
@@ -127,6 +128,10 @@ def _ask_save_notes(n: int) -> bool:
     return ans in ("", "y", "yes", "是", "好", "存")
 
 
+NO_CLOUD_ANSWER = ("⚠ 讲解需要云端引擎(DeepSeek): 本地的 1.7B 模型只会翻译, 没有讲解能力。"
+                   "用 --engine auto/cloud 并配好 API key 后可用。")
+
+
 class EngineRouter:
     """翻译引擎路由: cloud 优先, 失败自动降级本地(断网兜底)。
 
@@ -144,6 +149,11 @@ class EngineRouter:
         self._notify = notify or (lambda msg, warn=False: None)
         self._use_cloud = bool(cloud) and mode in ("auto", "cloud")
         self._probe_lock = threading.Lock()   # 防降级→恢复→再降级重复起探针线程
+        # 降级是一条**状态迁移**, 不是一次赋值。Phase 2 起有第二条并发路径会进来
+        # (问答 worker 与常驻翻译 worker 同时在跑), 两个线程可能同时读到 True,
+        # 各自广播一次"已降级本地" —— 用户看到两条重复通知, 且两次都去起探针。
+        # 加锁把"判断 + 翻转"并成一步。只护这一处, _use_cloud 本身仍是普通 bool。
+        self._state_lock = threading.Lock()
 
     def warmup(self) -> None:
         if self._mode == "local":
@@ -153,12 +163,14 @@ class EngineRouter:
         # auto: 不预热本地, 省内存/启动时间; 真降级时再懒加载
 
     def _fallback(self, e: Exception) -> None:
-        if self._use_cloud:
+        with self._state_lock:                    # 见 __init__: 迁移只能发生一次
+            if not self._use_cloud:
+                return
             self._use_cloud = False
-            self._notify(
-                f"云端翻译失败({str(e)[:60]}); 已降级本地引擎, "
-                f"每 {self.RETRY_PROBE_S:.0f}s 自动重试", warn=True)
-            self._start_probe()
+        self._notify(
+            f"云端翻译失败({str(e)[:60]}); 已降级本地引擎, "
+            f"每 {self.RETRY_PROBE_S:.0f}s 自动重试", warn=True)
+        self._start_probe()
 
     def _start_probe(self) -> None:
         if self._cloud is None:
@@ -172,7 +184,8 @@ class EngineRouter:
                     if self._use_cloud:           # 别处已恢复(理论不可达, 保险)
                         return
                     if self._cloud.probe():
-                        self._use_cloud = True
+                        with self._state_lock:
+                            self._use_cloud = True
                         self._notify("云端翻译已恢复", warn=False)
                         return
             finally:
@@ -205,11 +218,39 @@ class EngineRouter:
                 self._fallback(e)
         return self._local.translate_draft(en, on_zh)
 
+    def answer(self, question, transcript, history, on_delta=None) -> str:
+        """按需讲解 / 追问。形状照抄 fix_stream: 云端优先, 异常降级。
+
+        ⚠️ 降级目标**不是** `self._local.answer_stream(...)`: `translator.Translator`
+        的方法到 `translate_draft` 就结束了, 本地根本没有 answer_stream, 那样写
+        在 `--engine local` / 没配 key 时是 AttributeError —— 会把问答线程直接
+        打死(而且是在 daemon 线程里, 表现成"点了没反应")。改成**显式守卫**,
+        返回一句能直接上屏的说明。
+        为什么不补一个本地实现: 1.7B 的翻译模型解释课堂内容只会编, 而且生成期间
+        要抢 `translator.py` 那条本地全局锁, 会把正在进行的翻译整段卡住 ——
+        宁可不做, 也不能给一个会撒谎的答案。
+        """
+        if self._use_cloud:
+            try:
+                return self._cloud.answer_stream(question, transcript, history,
+                                                 on_delta)
+            except Exception as e:                # noqa: BLE001
+                # ⚠️ **刻意不走 `_fallback`**。`_fallback` 会把 `_use_cloud` 翻成
+                # False —— 于是**一次纯问答的失败会把整节课的翻译也降级到本地**
+                # (独立验证实测: 问答抛错后下一句翻译真的走了本地)。问答失败
+                # (例如上下文超限)完全不能说明翻译链路有问题。
+                # 而且 `_fallback` 的提示语写死是"云端翻译失败", 在这里是**误导**;
+                # 它还会起一个 90s 探针线程去计费的 ping。翻译路径下一句自己会发现
+                # 真问题并降级 —— 各管各的。
+                return f"⚠ 讲解失败({str(e)[:60]})"
+        return NO_CLOUD_ANSWER
+
 
 class TerminalUI:
     def __init__(self):
         self._zh = ""
         self._en = ""
+        self._answer = ""
 
     def add_draft(self, en: str):
         echo(f"[{now()}] ▸ {en}")
@@ -229,6 +270,14 @@ class TerminalUI:
     def finalize(self, en: str, zh: str):
         echo(f"[{now()}] ✅ {en}\n         🌐 {zh}")
         self._zh = self._en = ""
+
+    def answer_delta(self, delta: str):
+        # 只累加不上屏: 与 stream_zh 同规矩 —— 完整回答由 drain() 一次性 echo
+        # (逐 delta 打印会和字幕行交错成一片糊)。
+        self._answer += delta
+
+    def answer_done(self, question: str, text: str):
+        self._answer = ""
 
     def notice(self, msg: str, warn: bool = False):
         echo(("⚠ " if warn else "✅ ") + msg)
@@ -287,6 +336,13 @@ def run(args) -> None:
 
     running = threading.Event()
     running.set()
+    # ✕ / 菜单栏「退出」请求停机。**必须与 running 分开 —— 这是个真 bug 的修法**:
+    # 原来 ✕ 回调直接 running.clear(), 而收尾要先 finalq.put(_QUIT) 交给
+    # final_worker 让它收摊; worker 的循环判据正是 running, 提前清掉 = 没人取那个
+    # 哨兵 -> finalq 永远非空 -> all_settled() 永远不成立 -> **每次点 ✕ 都卡满
+    # 15s deadline**(独立验证实测 15.02s, 而且**完全不提问也一样**)。
+    # 现在 ✕ 只置这个标志(主循环据此退出), running 留到收尾真正结束才清。
+    stopping = threading.Event()
     flagged = {"on": False}                             # ⭐ 标记当前句
     translating = {"on": True}                          # 🌐 翻译开关(悬浮窗按钮可随时切)
     writer = ObsidianWriter(args.vault, args.course, mode=args.save_notes,
@@ -298,9 +354,10 @@ def run(args) -> None:
 
     drafts: "queue.Queue[str]" = queue.Queue()          # 草稿文本 -> 主线程
     drafts_zh: "queue.Queue[str]" = queue.Queue()       # 草稿译文 -> 主线程
-    streamq: "queue.Queue[tuple]" = queue.Queue()       # ("zh"/"en"/"final"/"terms"/"notice") -> 主线程
+    streamq: "queue.Queue[tuple]" = queue.Queue()       # ("zh"/"en"/"final"/"terms"/"notice"/"answer"/"answer_done") -> 主线程
     draftq: "queue.Queue" = queue.Queue(maxsize=1)      # 待译草稿(只保留最新)
     properq: "queue.Queue" = queue.Queue()              # 待查专有名词
+    answerq: "queue.Queue[str]" = queue.Queue()         # 待讲解的问题(Phase 2)
 
     def notify(msg: str, warn: bool = False) -> None:
         """引擎状态广播 -> streamq -> 主线程 drain() -> UI(悬浮窗要求主线程)。"""
@@ -310,14 +367,17 @@ def run(args) -> None:
     translator.warmup()
 
     def submit_question(q: str) -> None:
-        """悬浮窗输入框回车回调(Phase 1: 只做可观测回显; 问答引擎在 Phase 2)。
+        """悬浮窗输入框回车回调 -> 把问题投进问答线程(Phase 2)。
 
-        ⚠️ 在主线程被 AppKit 调用 —— 这里只准做立刻返回的事(不阻塞不变量)。
+        ⚠️ 这个函数是在**主线程**被 AppKit 调用的: 只能做立刻返回的事。
+        这里只有一次 `queue.put`(无界队列, 不阻塞); 网络与模型全在
+        answer_worker 里。echo 是既有行为, 保留它 —— 终端里留一条"我问过什么"。
         """
         echo(f"[{now()}] 🙋 {q}")
+        answerq.put(q)
 
     ui = TerminalUI() if args.ui == "terminal" else _load_overlay(
-        on_quit=lambda: running.clear(),
+        on_quit=stopping.set,
         on_flag=lambda: flagged.__setitem__("on", True),
         on_translate=lambda on: translating.__setitem__("on", on),
         on_submit=submit_question,
@@ -330,6 +390,22 @@ def run(args) -> None:
     finalq: "queue.Queue" = queue.Queue()
     _QUIT = object()
     busy = {"on": False}          # 定稿线程正在处理一句(ASR+LLM), 冲刷等待要等它归零
+
+    # ---- 问答线程状态(Phase 2) ----
+    # 一节课一条线程: 一个**冻结的转录快照** + 一个只追加的 turns 列表。
+    # ⚠️ 转录快照必须是 `list(finals)` 的拷贝: finals 由定稿线程持续 append,
+    #    持活引用 = 快照会边问边变, 消息前缀不再稳定(缓存全废)。
+    # consumed = 已经附进历史的 finals 条数; 之后的追问只补新增的那一段。
+    qa_lock = threading.Lock()
+    qa = {"history": [], "consumed": 0, "gen": 0}
+
+    def start_new_topic() -> None:
+        """清空问答线程(Phase 3 的「新话题」按钮)。下次提问会重新冻结转录底座 ——
+        底座仍是"这节课到此刻为止", 只是不再背着上一个话题的问答历史。"""
+        with qa_lock:
+            qa["history"].clear()
+            qa["consumed"] = 0
+            qa["gen"] += 1                     # 在途的那一轮回来时会被丢弃
 
     # ---- 草稿线程 ----
     # 每定稿一句 +1; 草稿线程据此重置节流(见 partial_worker 里的说明)。
@@ -516,11 +592,65 @@ def run(args) -> None:
                 notes.add(term, res["note"], res["type"])   # 写 auto 文件, 下次查表命中
                 streamq.put(("terms", [(term, res["note"])]))
 
+    # ---- 问答线程(Phase 2) ----
+    # 形状照抄 proper_worker: daemon + 只认自己的队列 + 只判 running。
+    # ⚠️ **绝不碰 busy / finalq / carry**: 那三个是 all_settled() 收尾闸门的输入
+    #    (见 all_settled 的注释), 问答去动它们会让"文件播完"的冲刷判断误判 ——
+    #    轻则丢最后一句, 重则提前 break 掉整段收尾。问答是**可以丢的**: 进程退出
+    #    就走, 答案没写完就算了, 落盘才是不能丢的那件事。
+    def answer_worker():
+        while running.is_set():
+            try:
+                q = answerq.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if q is None:
+                break
+            with qa_lock:
+                gen = qa["gen"]
+                first = not qa["history"]
+                # 首次提问 = 冻结整段快照; 追问 = 只补上次提问之后新讲的句子
+                # (锁定需求是"整节课转录至今", 不是"第一次提问那一刻的转录")。
+                # ⚠️ 只快照**一次**。写成 `list(finals[consumed:])` 再 `len(finals)`
+                # 是两次独立读取, final_worker 的 append 可以插在中间 —— 那几句
+                # 会被**永久跳过**(consumed 已越过它们), 且只在后续追问里静默少掉,
+                # 无从察觉。独立验证用强制线程切换复现: 300000 轮里 3283 轮不一致,
+                # 共 265801 句被静默丢弃(默认切换间隔下 4/300000)。
+                snap = list(finals)
+                block = snap if first else snap[qa["consumed"]:]
+                qa["consumed"] = len(snap)
+                hist = [dict(t) for t in qa["history"]]
+            # 用户 turn 的正文由 answer_user_content 统一生成 —— 下面要把它**逐字**
+            # 写回历史, 必须与 answer_stream 内部发给模型的那一份完全一致。
+            content = answer_user_content(q, block, not first)
+
+            def _emit(d):
+                # ⚠️ 收尾中就不再往 streamq 写。streamq 是 `all_settled()` 的**五个
+                # 输入之一**, 答案还在流就会一直等不到收尾(独立验证实测: 0.38s
+                # -> 15.2s)。答案在退出时本来就是可以丢的(见上方注释)——
+                # **卡住收尾才是真损失**。
+                # ⚠️ 判据是 stopping 而不是 running: running 要到收尾之后才清,
+                # 用它等于没写守卫(实测自然结束时密集流仍卡 15s)。
+                if not stopping.is_set():
+                    streamq.put(("answer", d))
+
+            try:
+                text = translator.answer(q, block, hist, on_delta=_emit)
+            except Exception as e:                # noqa: BLE001
+                text = f"⚠ 讲解失败: {str(e)[:80]}"
+            with qa_lock:
+                if gen == qa["gen"]:              # 期间按过「新话题」-> 丢弃这轮
+                    qa["history"].append({"role": "user", "content": content})
+                    qa["history"].append({"role": "assistant", "content": text})
+            if not stopping.is_set():
+                streamq.put(("answer_done", q, text))
+
     t1 = threading.Thread(target=partial_worker, daemon=True)
     t2 = threading.Thread(target=final_worker, daemon=True)
     t3 = threading.Thread(target=proper_worker, daemon=True)
-    t1.start(); t2.start()
-    if api_key_val:
+    t4 = threading.Thread(target=answer_worker, daemon=True, name="answer-qa")
+    t1.start(); t2.start(); t4.start()            # 问答不需要 key 就能起步
+    if api_key_val:                               # (没 key 时它只回一句说明)
         t3.start()
 
     echo(f"▶ 开始: source={args.source}" + (f" path={args.path}" if args.path else ""))
@@ -552,13 +682,27 @@ def run(args) -> None:
             elif item[0] == "notice":
                 msg, warn = item[1]
                 ui.notice(msg, warn)
+            elif item[0] == "answer":               # ("answer", delta) 讲解流式增量
+                # ⚠️ 用 getattr 守卫: 悬浮窗的渲染是 Phase 3, Overlay 现在**没有**
+                # answer_delta。drain() 没有 try/except, 直接调会 AttributeError
+                # 打死主循环(与下面 close() 的守卫同一个理由)。
+                fn = getattr(ui, "answer_delta", None)
+                if callable(fn):
+                    fn(item[1])
+            elif item[0] == "answer_done":          # ("answer_done", 问题, 回答)
+                fn = getattr(ui, "answer_done", None)
+                if callable(fn):
+                    fn(item[1], item[2])
+                # Phase 2 只要求"可观测/可测": 回答在终端整段打出来(悬浮窗渲染
+                # 留给 Phase 3)。与 🙋 那行配对, 终端日志一眼能读完整条问答。
+                echo(f"[{now()}] 🤖 {item[2]}")
             elif item[0] == "final":                # ("final", en, zh, asr_raw)
                 ui.finalize(item[1] or item[3], item[2])   # 翻译失败时至少显示转录
                 writer.append(item[1], item[2], flagged=flagged["on"], raw=item[3])
                 flagged["on"] = False
 
     try:
-        while running.is_set():
+        while running.is_set() and not stopping.is_set():
             chunk = src.poll()
             if chunk is not None and len(chunk):
                 seg.accept(chunk)
@@ -572,6 +716,13 @@ def run(args) -> None:
     except KeyboardInterrupt:
         echo("\n⏹ 手动停止")
     finally:
+        # 收尾一开始就置停机标志 —— 覆盖**所有**进入收尾的路径(文件播完 / ✕ /
+        # Ctrl+C)。它同时是问答的"别再往 streamq 写了"判据: 收尾等的是
+        # all_settled(), 而 streamq 是它的五个输入之一, 答案还在流就会一直
+        # 等不到(实测密集流把 0.38s 拖到 15.2s)。
+        # ⚠️ 判据**不能**用 running: running 要到下面内层 finally 才清, 收尾
+        # 期间它一直是 set, 守卫等于没写。
+        stopping.set()
         # 先撤悬浮窗: 后面可能等冲刷 + 阻塞问"是否存 Obsidian", 窗口留着不动
         # 就是"点了 ✕ / 按了 Ctrl+C 就卡死"。TerminalUI 没有 close, 故用 getattr。
         # (✕ 按钮已经在自己的回调里关过一次, close() 幂等。)

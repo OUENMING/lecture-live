@@ -58,6 +58,70 @@ rewrite, polish, shorten, reorder or summarise it (guard against over-correction
 Output ONLY the corrected English sentence on one line. No label, no quotes, no explanation,
 and never any Chinese."""
 
+# ---- 按需讲解 / 追问(Phase 2) ----
+# 讲解**不是翻译**: 上面两个 prompt 的产物是 ZH:/EN: 两行, 讲解是一段散文。
+# 所以 answer_stream 自己发请求、自己收流, 不复用 _StreamParser / _retry_plain。
+ANSWER_SYSTEM = """You explain a university lecture to a student who is listening to it live.
+
+The user gives you lecture speech (the lecturer's own words, transcribed by ASR, in
+chronological order) and one question asked by the student. Answer the question.
+
+LANGUAGE — this is a hard requirement:
+- Write the answer in ENGLISH. The student is a non-native speaker who is right now
+  listening to this lecture in English; English keeps them inside the language of the
+  class. Plain wording, concrete nouns, short sentences.
+- Chinese is allowed only as a gloss: where it truly helps, put ONE short Chinese line
+  starting with "中：". A few words, not a sentence, and never a translation of the
+  answer or of the transcript. Do at most a few of these per answer.
+- Do NOT produce a Chinese version of the answer. Do NOT label anything "ZH:".
+
+STRUCTURE:
+1. First answer the question about what the lecturer just said: what the thing is and
+   why they are saying it. Quote the lecturer's exact words when the wording matters.
+2. Then ONE line placing it in the lecture — where this sits in what has been said so far.
+3. Only if it genuinely helps: outside background, on its own line starting with the
+   exact label "背景：" (those two characters and the full-width colon — do not write
+   "Background:", do not translate the label). Everything under "背景：" is NOT from the
+   lecture. Never blur the two, and never present outside knowledge as if the lecturer
+   had said it.
+
+RULES:
+- Ground every claim about the lecture in the transcript you were given. If the
+  transcript does not contain the answer, say so plainly rather than inventing what
+  the lecturer said.
+- Length is not the problem — understanding in the moment is. You may be much longer
+  than a subtitle, but every sentence must help that. No filler, no restating the
+  question, no summary of the whole lecture.
+- Use the course terms exactly as they are written in the course-terms list."""
+
+# 讲解的 max_tokens。220(翻译路径各处用的)是**单句**预算, 讲解必须长得多。
+# 1400 的依据(实测, 非估计): 用 sessions/ 里一节真课(326 句真实转录)连问 3 轮,
+# DeepSeek 官方 usage.completion_tokens = 499 / 375 / 786 —— 即一次"讲清楚"的自然
+# 长度 400–800 token。先按 900 试过, 最长那次(786)离上限只剩 15%, 会被截在半句上,
+# 故取 ~1.8x 最长实测 = 1400。这是**上限不是目标**: 实测三次都在自然处收尾,
+# 没有一次顶到上限。
+# (DeepSeek 官方: 非思考模式 max_tokens 默认 8K、允许 1–384K —— 显式给一个小值
+#  是刻意的反啰嗦选择, 不是接口要求。)
+ANSWER_MAX_TOKENS = 1400
+
+
+def answer_user_content(question: str, transcript: list[str], follow_up: bool) -> str:
+    """本轮 user turn 的正文 —— **公开**给调用方: 追问线程要把**逐字相同**的字符串
+    写回 history(否则下一轮的前缀就变了, 转录底座会在历史里凭空消失)。
+
+    转录块只出现在这**一个** user turn 里: 不新开一个 user turn 专门塞转录 ——
+    user/assistant 严格交替是各 OpenAI 兼容实现都吃的最安全形状(DeepSeek 在
+    部分模型上明确要求交替), 连续同角色消息的容忍度不统一。"""
+    block = "\n".join(t for t in transcript if t)
+    parts: list[str] = []
+    if block:
+        head = ("New lecture speech since your last answer (chronological):"
+                if follow_up else "Lecture transcript so far (chronological):")
+        parts.append(f"{head}\n{block}")
+    parts.append(f"Question: {question}")
+    return "\n\n".join(parts)
+
+
 KEY_FILE = pathlib.Path(__file__).with_name(".deepseek_key")
 DEFAULT_BASE = "https://api.deepseek.com/v1"
 
@@ -216,6 +280,46 @@ class CloudTranslator:
             if on_en:
                 on_en(delta)
         return _clean_fix("".join(buf), en)
+
+    # ---- 按需讲解 / 追问(Phase 2) ----
+    def answer_stream(self, question: str, transcript: list[str],
+                      history: list[dict] | None = None,
+                      on_delta=None) -> str:
+        """讲清"教授刚说的这段", 并接续同一条线程里的追问。
+
+        - `transcript`: 要附在这次提问上的**课堂转录**。首次提问 = 线程开头冻结的
+          整段快照; 之后的追问 = 自上次提问以来新增的句子(由调用方切好)。
+        - `history`: 线程既有 turns([{"role","content"}], 只追加, 不回填/不重排)。
+        - **不套 `context[-self._max_ctx:]` 滑动窗口**: 那是逐句翻译(一节课上千次
+          独立调用)的策略; 问答是真多轮且轮数少, 只追加才让前缀稳定、缓存命中,
+          成本模型完全不同(见 PLAN-ai-explain-qa.md 0.4 的实测两栏)。
+        - 返回**完整回答文本**; 不是生成器 —— 请求必须在这一行就发出去, 否则
+          EngineRouter 的"云端优先/异常降级" try/except 会抓不到任何失败。
+        """
+        msgs: list[dict] = [{"role": "system", "content": self._answer_system()}]
+        for turn in history or []:
+            msgs.append({"role": turn["role"], "content": turn["content"]})
+        msgs.append({"role": "user",
+                     "content": answer_user_content(question, transcript,
+                                                    bool(history))})
+        buf: list[str] = []
+        for delta in self._stream_chat(msgs, max_tokens=ANSWER_MAX_TOKENS):
+            buf.append(delta)
+            if on_delta:
+                on_delta(delta)                  # 边到边推, 不等整段
+        return "".join(buf).strip()
+
+    def _answer_system(self) -> str:
+        """讲解 system prompt = 常量 + 本课领域/术语。
+        术语走**全量注入**(course_term_list, 与逐句翻译路径的 always 同源),
+        保证讲解里的术语与字幕上的写法一致。"""
+        out = ANSWER_SYSTEM
+        if self._domain:
+            out += f"\n\n{domain_block(self._domain).strip()}"
+        if self._course_terms:
+            out += ("\n\nCourse terms (use exactly these renderings):\n"
+                    + "\n".join(self._course_terms))
+        return out
 
     def _retry_plain(self, en: str) -> Result:
         """回显后的极简重试。

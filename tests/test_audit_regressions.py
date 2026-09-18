@@ -416,7 +416,7 @@ class R7_AnswerTakeover(unittest.TestCase):
     """
 
     ANS = ("Regression here means the econometric procedure.\n"
-           "中：这里的 regression 是计量意义上的回归\n"
+           "EN：regression (econometric procedure)\n"
            "You fit a line through a cloud of points so the sum of squared vertical\n"
            "distances is as small as possible.")
 
@@ -450,8 +450,8 @@ class R7_AnswerTakeover(unittest.TestCase):
             self.assertEqual(len(o._history), n0, "_history 被答案污染了")
             flat = " ".join(t for row in o._tv._items for t in row if t)
             self.assertEqual(flat, " ".join(self.ANS.split()), "答案行有丢字")
-            self.assertTrue(any(s.startswith("中：") for _, s in o._tv._items),
-                            "中：点睛没有进小字位")
+            self.assertTrue(any(s.startswith("EN：") for _, s in o._tv._items),
+                            "EN：英文辅助行没有进小字位")
 
             # ---- 答案在屏上时到新字幕: 不能顶掉答案, 也不能丢字幕 ----
             for i in range(6, 10):
@@ -596,13 +596,13 @@ class R9_QAQuestionFidelity(unittest.TestCase):
         for text in ("A" * 499 + ". tail", "word " * 300, "X" * 2000):
             self.assertLessEqual(len(_truncate(text, 500)), 500)
 
-    def test_gloss_tail_is_capped(self):
-        from obsidian_writer import ObsidianWriter, QA_GLOSS_MAX_CHARS
+    def test_aux_tail_is_capped(self):
+        from obsidian_writer import ObsidianWriter, QA_AUX_MAX_CHARS
         items = ObsidianWriter._qa_items([
             {"role": "user", "content": "Question: q?"},
-            {"role": "assistant", "content": "Body.\n中：" + "点" * 300}])
+            {"role": "assistant", "content": "正文。\nEN：" + "word " * 300}])
         self.assertEqual(len(items), 1)
-        self.assertLess(len(items[0]), QA_GLOSS_MAX_CHARS + 100)
+        self.assertLess(len(items[0]), QA_AUX_MAX_CHARS + 100)
 
 
 if __name__ == "__main__":

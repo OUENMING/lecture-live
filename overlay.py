@@ -62,7 +62,7 @@ RULE_A_FOCUS = 0.45                               # 细线聚焦不透明度(白
 # 的整个转录区(210px)还高, 连展开态(440px)都能吃满。只有"本来就最大的那块区域"
 # 装得下。接管也顺带让"新字幕顶掉答案"不可能发生: 渲染源被整个换掉, 而 _history
 # 只由 finalize() 追加、_render 从不碰它 —— 字幕在后台继续累积, 退出接管即重现。
-GLOSS_PREFIX = ("中：", "中:")                     # 中文点睛行前缀(ANSWER_SYSTEM 锁定全角)
+GLOSS_PREFIX = ("EN：", "EN:")                     # 英文辅助行前缀(ANSWER_SYSTEM 锁定全角)
 # 答案折行的上限。行槽的大字位是按"18pt 两行"标定的(ROW_ZH_H=47.0): 实测 18pt
 # 一行 = 21.0px, 两行 = 42.0px, 三行 = 63.0px —— 所以阈值取在两行与三行之间。
 # 答案沿用同一档, 读起来就是"更长的字幕卡片", 不需要任何新排版机制。
@@ -458,7 +458,7 @@ class Overlay:
         # 「讲一下」= 用固定问题开一轮讲解; 「新话题」= 清掉问答线程并回到字幕。
         self._btn_ask = self._button(
             "讲一下", self._ask,
-            "把刚讲的这一段讲清楚(英文为主, 关键处一行 中：点睛)")
+            "把刚讲的这一段讲清楚(中文讲解, 关键处留一行 EN：英文原文)")
         self._btn_topic = self._button(
             "新话题", self._new_topic, "结束当前问答线程, 回到字幕")
         # 展开/收回: 展开时显示更长的历史(固定占屏高 60%), 收回回到 3 句
@@ -1048,9 +1048,9 @@ class Overlay:
     def _answer_commit_line(self, raw: str):
         """一条源行闭合: 把折好的词收成行, 提交进 _answer_rows。
 
-        唯一的特例是 `中：` 点睛行 —— 它是**上一行的小字**, 不是一张新卡片
-        (这正是「英文为主 + 中文点睛」在行槽里的落法: 18pt 大字位 = 英文,
-        11pt 小字位 = 中：)。"""
+        唯一的特例是 `EN：` 英文辅助行 —— 它是**上一行的小字**, 不是一张新卡片
+        (这正是「中文为主 + 英文辅助」在行槽里的落法: 18pt 大字位 = 中文讲解,
+        11pt 小字位 = EN：教授的原文措辞/术语)。"""
         self._answer_wrap_pending()           # 收尾时可能一次折进很多词, 先闭合能闭合的
         s = (raw or "").strip()
         pw = self._answer_pw
@@ -1337,7 +1337,7 @@ class Overlay:
             rows = self._answer_view_rows()
             if self._tv_mode != "ans":
                 self._tv_mode = "ans"
-                self._tv.set_rows_verbatim(True)    # 行 = (大字英文, 小字 中：)
+                self._tv.set_rows_verbatim(True)    # 行 = (大字中文讲解, 小字 EN：英文)
                 self._tv.set_scroll_hold(True)      # 读答案期间不许自动回底(坑 1)
                 self._tv.replace_items(rows)
                 # 答案是从第一行读起的**文档**, 不是"最新在最下"的字幕流

@@ -50,11 +50,12 @@ QA_ANSWER_MAX_CHARS = 500
 # 没配 key 时下面根本没有自动生成的题, 那句话就成了假话。
 QA_MARKER = "> [!question] 🙋 我课上问过的问题 · 先自测这些"
 
-# `中：` 点睛尾巴的上限。按 ANSWER_SYSTEM, 点睛只该是"几个词"; 模型漂移写成长句时
-# 一行会涨到近 600 字符, 卡片背面就读不动了。这只是安全网, 不是目标长度。
-QA_GLOSS_MAX_CHARS = 120
+# `EN：` 英文辅助尾巴的上限。按 ANSWER_SYSTEM, 那一行只该是"几个词"(教授的原文
+# 措辞/术语); 模型漂移写成长句时整行会涨到近 600 字符, 卡片背面就读不动了。
+# 这只是安全网, 不是目标长度。
+QA_AUX_MAX_CHARS = 120
 
-_ZH_GLOSS = re.compile(r"^中[：:]")
+_EN_KEEP = re.compile(r"^EN[：:]")          # ANSWER_SYSTEM 锁定的英文辅助行
 _ASKED = "Question: "       # 格式契约见 cloud_translator.answer_user_content()
 
 REVIEW_SYS = """你是课堂笔记助手, 为一名靠中文听英文课的中国经济学/社会学本科生整理复习层。
@@ -118,27 +119,33 @@ def _asked_question(turn_content: str) -> str:
 
 
 def _qa_answer(raw: str) -> tuple[str, str]:
-    """讲解原文 -> (单行英文正文, 中文点睛)。
+    """讲解原文 -> (单行**中文**正文, **英文**辅助)。
 
-    `中：` 点睛行是 ANSWER_SYSTEM 要求的**独立行**。压进 `::` 一行时若原样内联,
-    英文句子里会嵌进中文短语 —— 所以把点睛整行抽出来, 按复习层既有的
-    `　（中：…）` 尾巴挂到行尾, 正文保持连续英文(与笔记"英文为主、中文点睛"一致)。
+    ⚠️ 方向在 2026-09-18 反过来了(原设计是英文为主 + `中：`点睛): 作者实测后说
+    "中文为主英文辅助吧 要不看不懂"。理由决定性 —— 讲解存在的全部意义就是让人
+    **看懂**, 而他的英语不是母语(理解有词汇覆盖率阈值, 不到 90% 就是读不动)。
+    英文并没有被丢掉, 而是换了位置: 讲清用中文, **教授的原文措辞/术语仍留一行英文**
+    —— 考试是英文的, 那个词必须在考卷上认得出。
+
+    `EN：` 行是 ANSWER_SYSTEM 要求的**独立行**。压进 `::` 一行时若原样内联, 中文
+    段落里会嵌进一个英文短语 —— 所以把它整行抽出来, 按复习层既有的
+    `　（EN：…）` 尾巴挂到行尾, 正文保持连续中文。
     `背景：` 行**保留在正文里**(它的标签本身是"这段不是课上讲的"的凭据, 摘掉即失真)。
     """
     body: list[str] = []
-    gloss: list[str] = []
+    keep: list[str] = []
     for line in (raw or "").splitlines():
         line = line.strip()
         if not line:
             continue
-        m = _ZH_GLOSS.match(line)
+        m = _EN_KEEP.match(line)
         if m:
             g = _one_line(line[m.end():])
             if g:
-                gloss.append(g)
+                keep.append(g)
             continue
         body.append(line)
-    return _one_line(" ".join(body)), " · ".join(gloss)
+    return _one_line(" ".join(body)), " · ".join(keep)
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -447,9 +454,9 @@ class ObsidianWriter:
                 continue
             tail = ""
             if gloss:
-                g = (gloss if len(gloss) <= QA_GLOSS_MAX_CHARS
-                     else gloss[:QA_GLOSS_MAX_CHARS].rstrip() + "…")
-                tail = f"　（中：{g}）"
+                g = (gloss if len(gloss) <= QA_AUX_MAX_CHARS
+                     else gloss[:QA_AUX_MAX_CHARS].rstrip() + "…")
+                tail = f"　（EN：{g}）"
             out.append(f"- {qd}::{_truncate(body, QA_ANSWER_MAX_CHARS)}{tail}")
         return out
 

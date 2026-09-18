@@ -160,12 +160,16 @@ def _make_panel(rect, style, backing, defer):
 _InputDelegateCls = None
 
 
-def _make_input_delegate(on_submit, on_cancel, on_focus=None, on_blur=None):
-    """输入框委托: 回车/Esc 走 doCommandBySelector, 聚焦/失焦走 controlTextDid*Editing。
+def _make_input_delegate(on_submit, on_cancel):
+    """输入框委托: 回车/Esc 走 control:textView:doCommandBySelector:。
 
     ⚠️ 不用 target/action: 后者在 Tab 与失焦时也会触发(换个焦点 = 误提交)。
     收到的 selectors 是运行时字符串: `insertNewline:`(Return) / `cancelOperation:`(Esc)。
     PyObjC 把 `control:textView:doCommandBySelector:` 映射成下划线形式的方法名。
+
+    ⚠️ **刻意不实现 `controlTextDidBeginEditing_` / `…EndEditing_`**: 实测 Begin 在
+    真实启动路径下从不触发(见 show()), 拿它做聚焦反馈会得到一个永远不亮的界面。
+    细线与光标一律由 `_sync_focus_look()` 在 pump 里按状态同步。
     """
     global _InputDelegateCls
     from AppKit import NSObject
@@ -182,22 +186,10 @@ def _make_input_delegate(on_submit, on_cancel, on_focus=None, on_blur=None):
                     cb()
                 return True
 
-            def controlTextDidBeginEditing_(self, note):        # noqa: N802
-                cb = getattr(self, "_on_focus", None)
-                if cb:
-                    cb()
-
-            def controlTextDidEndEditing_(self, note):          # noqa: N802
-                cb = getattr(self, "_on_blur", None)
-                if cb:
-                    cb()
-
         _InputDelegateCls = _InputDelegate
     d = _InputDelegateCls.alloc().init()
     d._on_submit = on_submit
     d._on_cancel = on_cancel
-    d._on_focus = on_focus
-    d._on_blur = on_blur
     return d
 
 
@@ -369,8 +361,7 @@ class Overlay:
         except Exception:                               # noqa: BLE001
             self._input.setPlaceholderString_("提问或追问…")
         self._input_delegate = _make_input_delegate(
-            self._submit_input, self._cancel_input,
-            self._on_input_focus, self._on_input_blur)
+            self._submit_input, self._cancel_input)
         self._targets.append(self._input_delegate)      # 保持强引用, 防 GC
         self._input.setDelegate_(self._input_delegate)
         ve.addSubview_(self._input)
@@ -378,6 +369,7 @@ class Overlay:
         # 用与 scrim 同一个 pattern(setWantsLayer_ + layer().setBackgroundColor_)。
         self._input_rule = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 0, 0))
         self._input_rule.setWantsLayer_(True)
+        self._focus_look_on = None          # 未知 -> 第一次 _sync_focus_look 必然生效
         self._set_rule_focus(False)
         ve.addSubview_(self._input_rule)
         # 术语行(命中术语表时显示, 暖黄色); 钉在面板底部, 不随句子滚动。
@@ -503,11 +495,15 @@ class Overlay:
 
         field editor 存在 = 正在编辑。NSTextField 拿到焦点时 first responder 是
         AppKit 临时建的 field editor(NSTextView), **不是输入框自己** —— 所以判据
-        不是 `firstResponder() is self._input`。"""
+        不是 `firstResponder() is self._input`。
+
+        ⚠️ 出错时返回 **True**(不是 False): 这个值决定"面板能不能保持 key",
+        返回 False 会让不变量在没有可靠依据的情况下**主动抢走焦点** —— 正在打字
+        时被抢是最坏的失败模式。检测不出来就当作在打字, 保守。"""
         try:
             return self._input.currentEditor() is not None
         except Exception:                     # noqa: BLE001
-            return False
+            return True
 
     def _set_rule_focus(self, on: bool) -> None:
         """细线: 白 α0.18(静止) <-> 白 α0.45(聚焦)。
@@ -541,6 +537,24 @@ class Overlay:
     def _on_input_blur(self) -> None:
         self._set_rule_focus(False)
 
+    def _sync_focus_look(self) -> None:
+        """按**实际编辑状态**同步细线与光标。每帧调一次, 状态没变就直接返回。
+
+        ⚠️ 为什么不用委托的 `controlTextDidBeginEditing_`/`…EndEditing_`:
+        实测**从不触发**(见 show() 里的说明) —— `orderFrontRegardless()` 时
+        AppKit 已经把 field editor 装成了 first responder, "开始编辑"这个状态
+        转换根本没发生过, 那个回调永远等不到。委托回调不可依赖, 所以改成在
+        pump 里比对状态: **一个机制覆盖**「点进来 / 点出去 / 提交 / Esc /
+        程序自己退让」全部路径, 而不是逐个交互点打补丁。"""
+        on = self._is_editing()
+        if on == self._focus_look_on:
+            return
+        self._focus_look_on = on
+        if on:
+            self._on_input_focus()
+        else:
+            self._on_input_blur()
+
     def _release_focus(self):
         """主动把 key window 交还出去。
 
@@ -550,8 +564,14 @@ class Overlay:
         (改之前面板永远不会 key, 所以这条回归是本次改动引入的)。
         "用户没在打字"的一切交互结束后都必须退让。
         """
+        # ⚠️ 两个调用**分开** try: 合在一起时 makeFirstResponder_ 抛错会连
+        # resignKeyWindow 一起跳过 —— 面板留在 key 状态, 而不变量下一帧再调一次,
+        # 变成无界重试(实测模拟: 400 帧调 400 次仍未释放)。
         try:
             self._panel.makeFirstResponder_(None)
+        except Exception:                     # noqa: BLE001
+            pass
+        try:
             self._panel.resignKeyWindow()
         except Exception:                     # noqa: BLE001
             pass
@@ -704,6 +724,12 @@ class Overlay:
         self._install_edit_menu()
         # orderFrontRegardless 不变: 显示不激活 app(绝不调 NSApp.activate —— 已废弃且会抢焦点)
         self._panel.orderFrontRegardless()
+        # ⚠️ 必须显式清掉 first responder。实测: orderFrontRegardless 之后 AppKit 会
+        # **自动**把输入框的 field editor 装成 first responder —— 于是 `_is_editing()`
+        # 从启动那一刻起就恒为 True, pump 里那条"键盘不自留"不变量被**永久短路**,
+        # 一次都不会触发。踩过: 三轮验证全绿, 因为都用手动 makeFirstResponder_ 驱动,
+        # 没复现"启动即编辑态"这个真实状态。清掉之后, 只有用户真的点了输入框才进编辑态。
+        self._release_focus()
 
     def close(self) -> None:
         """撤掉面板与菜单栏图标。**幂等**, 可重复调用(✕ / Ctrl+C / 正常结束都会走)。
@@ -853,6 +879,7 @@ class Overlay:
         # 转 False, 本条不再触发(不是每轮都调)。
         if self._panel.isKeyWindow() and not self._is_editing():
             self._release_focus()
+        self._sync_focus_look()      # 细线/光标跟着真实编辑状态走(委托回调不可靠)
         now = time.monotonic()
         if busy:
             self._last_ev_t = now

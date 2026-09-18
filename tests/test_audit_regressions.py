@@ -331,5 +331,71 @@ class R6_OverlayConstructs(unittest.TestCase):
             o.close()
 
 
+    def test_show_does_not_start_in_editing_state(self):
+        """⚠️ 回归(2026-09-18): `orderFrontRegardless()` 之后 AppKit 会**自动**把
+        输入框的 field editor 装成 first responder —— 于是 `_is_editing()` 从启动
+        那一刻起恒为 True, pump 里"键盘不自留"那条不变量被**永久短路**。
+
+        为什么三轮独立验证都没抓到: 它们一律用 `makeFirstResponder_` 手动驱动,
+        **没有复现"启动即编辑态"这个唯一真实的初始状态** —— 而它正好让不变量永不触发。
+        同批还导致聚焦反馈(细线变亮/白色光标)因为依赖 `controlTextDidBeginEditing_`
+        (同样从不触发)而完全不工作。
+
+        本测试会**短暂显示一次悬浮窗** —— 这是覆盖该缺陷的唯一方式(`show()` 是触发点)。
+        """
+        try:
+            from overlay import Overlay
+        except Exception as e:                       # noqa: BLE001
+            self.skipTest(f"AppKit 不可用, 跳过: {type(e).__name__}: {e}")
+        try:
+            o = Overlay()
+        except Exception as e:                       # noqa: BLE001
+            self.fail(f"Overlay() 构造失败: {type(e).__name__}: {e}")
+        try:
+            o.show()
+            self.assertFalse(
+                o._is_editing(),
+                "show() 之后就已处于编辑态 -> pump 的键盘不变量会被永久短路")
+            # 面板被点成 key 后, pump 必须让它退让(这正是真机路径)
+            o._panel.makeKeyWindow()
+            self.assertTrue(o._panel.isKeyWindow())
+            o.pump()
+            self.assertFalse(o._panel.isKeyWindow(),
+                             "面板成了 key, pump 一轮之后没有退让")
+        finally:
+            o.close()
+
+    def test_focus_look_syncs_with_editing_state(self):
+        """聚焦反馈由 `_sync_focus_look()` 在 pump 里按状态同步 —— 不依赖
+        委托回调(实测 `controlTextDidBeginEditing_` 从不触发)。"""
+        try:
+            from overlay import Overlay
+            from Quartz import CGColorGetComponents, CGColorGetNumberOfComponents
+        except Exception as e:                       # noqa: BLE001
+            self.skipTest(f"AppKit/Quartz 不可用, 跳过: {type(e).__name__}: {e}")
+        try:
+            o = Overlay()
+        except Exception as e:                       # noqa: BLE001
+            self.fail(f"Overlay() 构造失败: {type(e).__name__}: {e}")
+        try:
+            def alpha():
+                c = o._input_rule.layer().backgroundColor()
+                n = CGColorGetNumberOfComponents(c)
+                return round(CGColorGetComponents(c)[n - 1], 3)
+
+            o.show()
+            o._sync_focus_look()
+            idle = alpha()
+            o._panel.makeFirstResponder_(o._input)
+            o._sync_focus_look()
+            focused = alpha()
+            self.assertNotEqual(idle, focused, "进入编辑态后细线没有变化")
+            o._release_focus()
+            o._sync_focus_look()
+            self.assertEqual(idle, alpha(), "退出编辑态后细线没有复位")
+        finally:
+            o.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

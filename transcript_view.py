@@ -94,6 +94,8 @@ class TranscriptView:
         self._last_user_t = 0.0
         self._new_since_leave = False
         self._pending_appends = 0
+        self._hold = False          # 答案接管期间: 不自动回底(见 set_scroll_hold)
+        self._verbatim = False      # 行 = (大字, 小字) 原样, 不做中英对调(见 set_rows_verbatim)
 
         self._dirty = False
         self._urgent = False
@@ -151,16 +153,33 @@ class TranscriptView:
           ② 实时行既在历史末尾又在实时位 -> 最新一句**重复**(finalize 时必现)
         这正是"定稿瞬间屏上多一行、最新句画两遍"的成因。
         """
+        self._set_items(list(items), (en, zh) if live_visible else None,
+                        bool(live_visible), bulk=False)
+
+    def replace_items(self, items) -> None:
+        """**整体替换**内容(答案接管 / 退出接管), 不做追加记账。
+
+        为什么不能直接用 set_content: 它把"条数变多"一律当成"字幕追加了新句"。
+        答案接管时条数会从 N 条字幕整体换成 M 条答案行、退出时再换回来, 差值本来
+        没有语义, 却会凭空记成"来了 N-M 句新话": _pending_appends 于是触发浏览保护
+        位移(把视口推到一个无意义的位置), 并置 _new_since_leave 让闲置回底在 6s
+        后把读者拽走。换内容 = 换一整套坐标系, 记账必须清零重来。"""
+        self._set_items(list(items), None, False, bulk=True)
+
+    def _set_items(self, items, live, live_visible: bool, bulk: bool) -> None:
         n = len(items)
-        if n > len(self._items):
+        if not bulk and n > len(self._items):
             self._pending_appends += n - len(self._items)
             if not self._follow:
                 # "只有真的有新内容才回底": 新句子(定稿)才算新内容。
                 # 流式增量不算 —— 行高固定, 实时行增长不会移动文档。
                 self._new_since_leave = True
-        self._items = list(items)
-        self._live = (en, zh) if live_visible else None
-        self._live_visible = bool(live_visible)
+        elif bulk:
+            self._pending_appends = 0
+            self._new_since_leave = False
+        self._items = items
+        self._live = live
+        self._live_visible = live_visible
         self.mark_dirty(urgent=True)
 
     def set_items(self, items) -> None:
@@ -168,6 +187,37 @@ class TranscriptView:
 
     def set_live(self, en: str, zh: str, visible: bool) -> None:
         self.set_content(self._items, en, zh, visible)
+
+    def set_rows_verbatim(self, on: bool) -> None:
+        """行内容是否**原样解释**为 (大字, 小字)。
+
+        默认(False)是字幕卡片的语义: 元组是 (英文, 中文), 中文进 18pt 大字位、
+        英文进 11pt 小字位, 中文为空时英文顶上去。答案行要的正好相反(英文在
+        大字位、`中：`点睛在小字位), 所以给它一条显式通道 —— 而不是靠"把中文
+        塞进第一个字段"这种反向 trick 去骗过 _row_texts。"""
+        self._verbatim = bool(on)
+        self.mark_dirty(urgent=True)
+
+    def set_scroll_hold(self, on: bool) -> None:
+        """接管期间冻住自动滚动: 不自动跟随、不闲置回底。
+
+        ⚠️ 为什么必须显式关: 答案可能比视口长得多, 读长答案时 `tick()` 有两条
+        路径会**主动移动视口** —— ① 视口一到 0(内容短于视口, 顶部=底部)就被判成
+        "用户回到底部" 而重新跟随, 内容一长就每帧钉回底部; ② 新行追加后闲置 6s
+        回底。两条都会把正在读长答案的人拽走。
+        用户仍然可以自由滚动、也可以点 ↓最新 去看最新一行(那不是自动的)。"""
+        self._hold = bool(on)
+        if on:
+            self._follow = False
+            self._new_since_leave = False
+            self._expected_origin = self._scroll.contentView().bounds().origin.y
+            self._on_follow_change(False)
+
+    def text_width(self) -> float:
+        """文档视图当前宽度 —— **折行实测**用的宽度(不是面板宽度猜出来的值:
+        展开态挂竖向滚动条时 clip 会比面板窄)。"""
+        w = self._doc.frame().size.width
+        return w if w > 40.0 else self._width - 2 * self._pad
 
     def set_frame(self, y: float, h: float) -> None:
         self._scroll.setFrame_(((self._pad, y), (self._width - 2 * self._pad, h)))
@@ -198,6 +248,17 @@ class TranscriptView:
         if not self._follow:
             self._follow = True
             self._on_follow_change(True)
+
+    def scroll_to_top(self) -> None:
+        """滚到文档**顶部**(最早的一行) —— 答案接管时的落点。
+
+        字幕流是"最新在最下", 竖着读的文档不是: 答案要从第一行读起。取 doc 视图
+        自己的高度(不翻转坐标系, origin.y = 0 是底部, 所以顶部 = docH - 视口高)。"""
+        clip = self._scroll.contentView()
+        h = self._doc.frame().size.height
+        clip.scrollToPoint_((0.0, max(0.0, h - clip.bounds().size.height)))
+        self._expected_origin = clip.bounds().origin.y
+        self._new_since_leave = False
 
     @property
     def following(self) -> bool:
@@ -246,11 +307,14 @@ class TranscriptView:
             self.mark_dirty(urgent=True)
             return
         if not self._follow:
-            if cur <= BOTTOM_EPS:               # 用户自己滚回底部
+            # ⚠️ _hold(答案接管)期间这两条自动回底都必须关掉: "视口回到 0" 在答案
+            # 比视口短时**恒成立**(顶部即底部), 一旦据此重新跟随, 内容长过视口后
+            # 每帧都会被钉回底部; 闲置回底同理, 读长答案读到一半就被拽走。
+            if not self._hold and cur <= BOTTOM_EPS:   # 用户自己滚回底部
                 self._follow = True
                 self._new_since_leave = False
                 self._on_follow_change(True)
-            elif (self._new_since_leave
+            elif (self._new_since_leave and not self._hold
                   and time.monotonic() - self._last_user_t >= IDLE_S):
                 self.scroll_to_bottom()
 
@@ -261,6 +325,10 @@ class TranscriptView:
             en, zh = self._items[r]
         else:
             en, zh = self._live or ("", "")
+        if self._verbatim:
+            # 答案行: 元组就是 (大字, 小字) 本身, 不做中英对调。is_zh 只用来选字体,
+            # 而大字位的两个字体对象是同一个(18pt Medium), 所以这里恒返回 False。
+            return en, zh, False
         if zh:
             return zh, en, True
         # 翻译关闭/失败时 zh 为空: 把英文提到大字行, 否则大字行空白

@@ -12,6 +12,10 @@
   R5  断句/悬挂词/流式解析的关键行为(此前靠手测)
   R6  悬浮窗必须真的能构造(2026-09-18): 构造期 NameError 曾被 _load_overlay
       静默吞掉、退化成终端 UI —— 表现成"一切正常", 而 --ui overlay 全不可用
+  R7  答案接管转录区(Phase 3)不得吃掉字幕; 连续输入不得把「键盘不自留」不变量弄丢
+      —— 两者都是"不报错但悄悄错"的类型, 正是本文件要拦的东西
+  R8  答案折行完整性 + 两个状态缺陷(2026-09-18 独立验证发现): 超长词被静默裁掉 /
+      空回答清空屏幕 / 追问时两轮答案粘在一起
 """
 from __future__ import annotations
 import json
@@ -358,7 +362,11 @@ class R6_OverlayConstructs(unittest.TestCase):
                 "show() 之后就已处于编辑态 -> pump 的键盘不变量会被永久短路")
             # 面板被点成 key 后, pump 必须让它退让(这正是真机路径)
             o._panel.makeKeyWindow()
-            self.assertTrue(o._panel.isKeyWindow())
+            if not o._panel.isKeyWindow():
+                # ⚠️ 锁屏 / 没有窗口服务的会话里,**任何**窗口都无法成为 key window
+                # (实测 frontmost = loginwindow)。此时下面那条断言没有意义 ——
+                # 跳过而不是失败, 否则这条测试会随"机器锁没锁"忽红忽绿。
+                self.skipTest("当前会话无法授予 key window(锁屏?), 跳过键位断言")
             o.pump()
             self.assertFalse(o._panel.isKeyWindow(),
                              "面板成了 key, pump 一轮之后没有退让")
@@ -393,6 +401,165 @@ class R6_OverlayConstructs(unittest.TestCase):
             o._release_focus()
             o._sync_focus_look()
             self.assertEqual(idle, alpha(), "退出编辑态后细线没有复位")
+        finally:
+            o.close()
+
+
+class R7_AnswerTakeover(unittest.TestCase):
+    """答案接管转录区(Phase 3)。
+
+    ⚠️ 盯住的是**静默**失败: 答案活跃时新字幕若把答案顶掉、或者退出接管时接管期间
+    到达的字幕丢了, 都不会抛异常 —— 前者看着像"答案自己没了", 后者看着像"漏听了
+    几句", 都要等到复习笔记时才发觉。所以这两条进闸门。
+    """
+
+    ANS = ("Regression here means the econometric procedure.\n"
+           "中：这里的 regression 是计量意义上的回归\n"
+           "You fit a line through a cloud of points so the sum of squared vertical\n"
+           "distances is as small as possible.")
+
+    def _overlay(self):
+        try:
+            from overlay import Overlay
+        except Exception as e:                       # noqa: BLE001
+            self.skipTest(f"AppKit 不可用, 跳过: {type(e).__name__}: {e}")
+        try:
+            o = Overlay()
+        except Exception as e:                       # noqa: BLE001
+            self.fail(f"Overlay() 构造失败: {type(e).__name__}: {e}")
+        return o
+
+    def test_takeover_never_eats_captions_and_is_reversible(self):
+        o = self._overlay()
+        try:
+            for i in range(6):
+                o.finalize(f"caption {i}", f"字幕 {i}")
+            o.pump()
+            h0, n0 = o._panel.frame().size.height, len(o._history)
+
+            # ---- 流式喂答案(在词中间切开, 模拟 SSE 分片) ----
+            for i in range(0, len(self.ANS), 13):
+                o.answer_delta(self.ANS[i:i + 13])
+                o.pump()
+            o.answer_done("讲一下", self.ANS)
+            o.pump()
+            self.assertEqual(o._tv_mode, "ans", "答案没接管转录区")
+            self.assertGreater(o._panel.frame().size.height, h0, "接管后没有自动展开")
+            self.assertEqual(len(o._history), n0, "_history 被答案污染了")
+            flat = " ".join(t for row in o._tv._items for t in row if t)
+            self.assertEqual(flat, " ".join(self.ANS.split()), "答案行有丢字")
+            self.assertTrue(any(s.startswith("中：") for _, s in o._tv._items),
+                            "中：点睛没有进小字位")
+
+            # ---- 答案在屏上时到新字幕: 不能顶掉答案, 也不能丢字幕 ----
+            for i in range(6, 10):
+                o.finalize(f"caption {i}", f"字幕 {i}")
+            for _ in range(4):
+                o.pump()
+            flat2 = " ".join(t for row in o._tv._items for t in row if t)
+            self.assertEqual(flat2, flat, "新字幕把答案顶掉了")
+            self.assertEqual(len(o._history), n0 + 4, "接管期间的字幕没进 _history")
+
+            # ---- 退出接管: 字幕重现 + 面板还原 ----
+            o._clear_answer()
+            for _ in range(3):
+                o.pump()
+            self.assertEqual(o._tv_mode, "cap")
+            self.assertEqual(len(o._tv._items), len(o._history))
+            self.assertAlmostEqual(o._panel.frame().size.height, h0, delta=0.5)
+        finally:
+            o.close()
+
+    def test_enter_keeps_focus_but_esc_releases(self):
+        """连续输入(Phase 3): 回车后保持焦点, Esc 让出。
+
+        ⚠️ 面板是否真能变 key 在无头环境里不可复现(`makeKeyWindow` 在别的 app 是
+        前台时返回后 `isKeyWindow()` 仍是 False —— 原始代码单独跑 R6 也一样),
+        所以把 isKeyWindow 打桩成 True, **直接验 pump 里那条分支**: 编辑态下不能
+        让出焦点, 非编辑态必须让出。"""
+        o = self._overlay()
+        try:
+            o._input.setStringValue_("what is regression")
+            o._submit_input()
+            self.assertEqual(o._input.stringValue(), "", "回车后没清空输入框")
+            self.assertTrue(o._is_editing(), "回车后输入框丢了焦点 -> 下一问还要再点一次")
+
+            o._panel.isKeyWindow = lambda: True       # 打桩, 见 docstring
+            freed = []
+            real_release = o._release_focus
+            o._release_focus = lambda: freed.append(1)
+            try:
+                o.pump()
+                self.assertFalse(freed, "正在输入时 pump 把焦点夺走了")
+                o._cancel_input()                     # Esc = "我打完了"
+                o.pump()
+                self.assertTrue(freed, "Esc 之后也没让出焦点 -> 键盘不自留失效")
+            finally:
+                o._release_focus = real_release
+        finally:
+            o.close()
+
+
+class R8_AnswerRowIntegrity(unittest.TestCase):
+    """答案折行的完整性 + 两个状态缺陷(2026-09-18, 独立验证发现, 都已修)。
+
+    三条全是**静默**失败, 真机上一眼看不出:
+      R8a 单个超长词(长 URL / 一长串 CJK)会**超出槽位被裁掉** —— NSTextField 超过
+          maximumNumberOfLines 既不留省略号也不报错(阈值为单 token >102 ASCII /
+          >68 CJK 字符)。根因: `_answer_take_row` 的 fit 判定写成 `if cur and ...`,
+          cur 为空时直接 append, 单体就超宽的词绕过了检查。
+      R8b 空回答会**把屏幕整个清空**: 接管换上 0 行的渲染源, 字幕被藏、面板还自动
+          展开(362→519), 而且没有任何自动恢复路径。
+      R8c 追问时新一轮的增量**接在上一轮答案后面**, 屏上两轮粘成一段读不通的文字,
+          要等 answer_done 对账才恢复。
+    """
+
+    def _overlay(self):
+        try:
+            from overlay import Overlay
+        except Exception as e:                       # noqa: BLE001
+            self.skipTest(f"AppKit 不可用, 跳过: {type(e).__name__}: {e}")
+        try:
+            o = Overlay()
+        except Exception as e:                       # noqa: BLE001
+            self.fail(f"Overlay() 构造失败: {type(e).__name__}: {e}")
+        return o
+
+    def test_unbreakable_token_is_split_not_clipped(self):
+        """超长无空格词必须被切开成多行, 而不是画成一行被裁掉。"""
+        o = self._overlay()
+        try:
+            for tag, txt in (("cjk600", "中" * 600), ("ascii3000", "A" * 3000)):
+                o._answer_reset()
+                o.answer_delta(txt)
+                o.answer_done("q", txt)
+                rows = o._answer_view_rows()
+                self.assertGreater(len(rows), 1, f"{tag}: 超长词没被切开")
+                bad = [r for r in rows if not o._answer_fits(r[0])]
+                self.assertEqual(
+                    bad, [], f"{tag}: 仍有 {len(bad)} 行超出槽位(会被静默裁掉)")
+        finally:
+            o.close()
+
+    def test_empty_answer_does_not_take_over(self):
+        """空回答什么都别做 —— 接管会把屏幕清空且无法自动恢复。"""
+        o = self._overlay()
+        try:
+            o.answer_done("q", "")
+            self.assertFalse(o._answer_on, "空回答也进了接管 -> 屏幕会被清空")
+            self.assertEqual(o._tv_mode, "cap")
+        finally:
+            o.close()
+
+    def test_followup_does_not_concatenate_previous_answer(self):
+        """追问时屏上只显示**本轮**答案, 不与上一轮粘在一起。"""
+        o = self._overlay()
+        try:
+            o.answer_delta("FIRST"); o.answer_done("q1", "FIRST")
+            o.answer_delta("SECOND")
+            txt = " ".join(r[0] for r in o._answer_view_rows())
+            self.assertNotIn("FIRST", txt, "新一轮答案粘在上一轮后面")
+            self.assertIn("SECOND", txt)
         finally:
             o.close()
 

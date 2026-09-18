@@ -56,6 +56,18 @@ RULE_H = 1.0                                      # 输入框下方的细线: �
 RULE_A = 0.18                                     # 细线静止不透明度(白)
 RULE_A_FOCUS = 0.45                               # 细线聚焦不透明度(白) —— 提到草稿那一档
 
+# ---- 答案接管(Phase 3) ----
+# 答案**接管转录区**渲染, 而不是新开一个槽位: 一段真实答案是 2000/1500/3150 字符
+# (实测 3 轮 completion_tokens 499/375/786), 按 13pt 折行就有 250-535px —— 比收起态
+# 的整个转录区(210px)还高, 连展开态(440px)都能吃满。只有"本来就最大的那块区域"
+# 装得下。接管也顺带让"新字幕顶掉答案"不可能发生: 渲染源被整个换掉, 而 _history
+# 只由 finalize() 追加、_render 从不碰它 —— 字幕在后台继续累积, 退出接管即重现。
+GLOSS_PREFIX = ("中：", "中:")                     # 中文点睛行前缀(ANSWER_SYSTEM 锁定全角)
+# 答案折行的上限。行槽的大字位是按"18pt 两行"标定的(ROW_ZH_H=47.0): 实测 18pt
+# 一行 = 21.0px, 两行 = 42.0px, 三行 = 63.0px —— 所以阈值取在两行与三行之间。
+# 答案沿用同一档, 读起来就是"更长的字幕卡片", 不需要任何新排版机制。
+ANSWER_TEXT_H = 45.0
+
 
 def _pinned(gloss_h: float) -> float:
     """底部固定区高度(⌨ 输入行 + 💡 + 英文草稿 + 中文草稿 + 各条间隔)。
@@ -110,6 +122,20 @@ def _make_shadow():
     sh.setShadowBlurRadius_(1.5)
     sh.setShadowOffset_((0.0, -1.0))
     return sh
+
+
+def _measure_text_h(text: str, width: float, font) -> float:
+    """文本按给定宽度折行后的**实测**高度(px)。主线程调用(AppKit)。
+
+    用 AppKit 自己的排版引擎量, 不猜字符宽度: 折行的判据必须与标签渲染时的
+    换行规则**同源**, 否则会出现"我们以为放得下、标签却静默裁掉第三行"
+    (NSTextField 在 maximumNumberOfLines 超限时不留省略号也不报错)。"""
+    from AppKit import (NSAttributedString, NSMakeSize, NSFontAttributeName,
+                        NSStringDrawingUsesLineFragmentOrigin)
+    a = NSAttributedString.alloc().initWithString_attributes_(
+        text, {NSFontAttributeName: font})
+    return a.boundingRectWithSize_options_(
+        NSMakeSize(width, 1e7), NSStringDrawingUsesLineFragmentOrigin).size.height
 
 
 _ButtonTargetCls = None
@@ -226,7 +252,8 @@ def _make_click_view(on_click):
 
 
 class Overlay:
-    def __init__(self, on_quit=None, on_flag=None, on_translate=None, on_submit=None):
+    def __init__(self, on_quit=None, on_flag=None, on_translate=None, on_submit=None,
+                 on_ask=None, on_new_topic=None):
         from AppKit import (NSWindow, NSPanel, NSMakeRect, NSColor, NSTextField,
                             NSVisualEffectView, NSVisualEffectMaterialHUDWindow,
                             NSVisualEffectStateActive, NSWindowStyleMaskBorderless,
@@ -242,6 +269,8 @@ class Overlay:
         self._on_flag = on_flag or (lambda: None)
         self._on_translate = on_translate or (lambda on: None)
         self._on_submit = on_submit or (lambda q: None)
+        self._on_ask = on_ask or (lambda: None)
+        self._on_new_topic = on_new_topic or (lambda: None)
         # 全量历史(不再 deque(maxlen=3) —— 展开态要能翻到更早的句子)。
         # 一节课 544 句约 <200KB, 无需上限。
         self._history: list = []
@@ -257,6 +286,31 @@ class Overlay:
         self._shadow = _make_shadow()
         self._targets = []        # ⚠️ 必须常驻: NSControl.setTarget_ 是弱引用,
                                   # 不保存就会被 Python GC 回收 -> target() 变 None -> 点击失效
+        self._label_cache = {}    # 标签文本缓存, 见 _set_cached
+
+        # ---- 答案接管状态(Phase 3) ----
+        # ⚠️ 命名: `_pinned` 已被"底部固定区高度"占用, `_pinned_term` 是术语,
+        #    答案一律用 `_answer*` 前缀, 三者互不干扰。
+        # 折行状态机(全部随增量推进, 不做全量重排):
+        #   _answer_text   累积的原文(answer_done 时用来与完整回答对账)
+        #   _answer_rows   已定稿的行 [(大字, 小字)] —— 答案行的唯一真源
+        #   _answer_pend   当前**未闭合的源行**原文(模型换行才算闭合)
+        #   _answer_fold   上面这段里已被折进折行状态机的字符数
+        #   _answer_pr     当前源行已闭合的行(下一个词放不下才闭合)
+        #   _answer_pw     当前源行里还没落行的词
+        self._answer_on = False
+        self._answer_text = ""
+        self._answer_rows: list = []
+        self._answer_pend = ""
+        self._answer_fold = 0
+        self._answer_pr: list = []
+        self._answer_pw: list = []
+        self._mode_before_answer = True     # 接管前是"收起"吗(dismiss 时还原)
+        self._tv_mode = "cap"               # 转录区当前喂的是字幕还是答案
+        # 上一轮是否已经 answer_done。追问时用它判断"这是一轮新的回答" ——
+        # 不重置的话新一轮的流式增量会**接在上一轮答案后面**, 屏上是两轮粘在一起
+        # (实测: 4 行的答案涨到 8 行, 直到 answer_done 对账才恢复)。
+        self._answer_finished = False
 
         style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
         self._panel = _make_panel(
@@ -289,6 +343,9 @@ class Overlay:
         self._scrim = scrim
 
         self._NSFont, self._NSTF = NSFont, NSTextField
+        # 答案折行的实测字体: 必须与转录区大字位用的是**同一个** 18pt Medium,
+        # 否则量出来的行高与标签实际排版对不上, 折行判据就是假的。
+        self._answer_font = NSFont.systemFontOfSize_weight_(18.0, WEIGHT)
         # 存成实例属性而不靠局部作用域: 后面 _set_rule_focus / _on_input_focus
         # 是**方法**, 那里没有 __init__ 的局部名 —— 早先直接写 NSColor 会 NameError,
         # 且被 except 吞掉, 症状是"细线永远不上色"这种完全静默的失败。
@@ -397,6 +454,13 @@ class Overlay:
         self._btn_flag = self._button(
             "⭐", self._flag, "标记当前句为重点(写入 Obsidian 时加 ⭐ Exam Focus)")
         self._btn_close = self._button("✕", self._quit, "退出")
+        # 答案接管期间显示「新话题」的位置:
+        # 「讲一下」= 用固定问题开一轮讲解; 「新话题」= 清掉问答线程并回到字幕。
+        self._btn_ask = self._button(
+            "讲一下", self._ask,
+            "把刚讲的这一段讲清楚(英文为主, 关键处一行 中：点睛)")
+        self._btn_topic = self._button(
+            "新话题", self._new_topic, "结束当前问答线程, 回到字幕")
         # 展开/收回: 展开时显示更长的历史(固定占屏高 60%), 收回回到 3 句
         self._btn_expand = self._button(
             "▾ 展开", self._toggle_mode, "展开/收回更多历史")
@@ -409,8 +473,12 @@ class Overlay:
         # 宽度 = sizeToFit + 内边距(图标保底 28px 点击区)。旧代码硬编码 x, "展开"
         # 占 [W-170,W-108] 而"译 开"占 [W-130,W-74], **交叉 22px**, 渲染出来糊成
         # 一团("展开译 开")。自适应宽度后中英/展开收回换字都不会重叠。
-        self._bar = [self._btn_latest, self._btn_expand,
-                     self._btn_trans, self._btn_flag, self._btn_close]
+        # ⚠️ 两个新按钮插在 index 2(展开位的右边): 循环是 reversed + 右对齐, 所以
+        #    列表顺序就是视觉从左到右。插在 index 0 会把 _btn_latest 那个**隐藏但仍
+        #    占 63px** 的空位塞进按钮组内部(看起来像凭空一段间隔)。
+        self._bar = [self._btn_latest, self._btn_expand, self._btn_ask,
+                     self._btn_topic, self._btn_trans, self._btn_flag,
+                     self._btn_close]
         self._sync_trans_button()
         self._install_status_item()               # 菜单栏: 鼠标穿透开关 + 退出
 
@@ -577,15 +645,35 @@ class Overlay:
             pass
 
     def _submit_input(self):
-        """回车: 取文字 -> 清空 -> 交还焦点 -> 交出去。空输入只清空。"""
+        """回车: 取文字 -> 清空 -> **重新装上 field editor**(连续输入), 交出去。
+
+        ⚠️ 这里刻意**不**调 _release_focus()。连续输入(Phase 3)要求提交后能接着打
+        下一问, 而每次追问都要重新点一次输入框是实测确认的现状。
+
+        ⚠️ 代价: 它与 pump() 里那条"键盘不自留"不变量正面冲突 —— 那条的判据是
+        `isKeyWindow() and not _is_editing()`, 输入框一旦保持焦点, `_is_editing()`
+        恒为真, 不变量就再也不触发, 面板可以无限期保持 key window, 于是"点面板空白
+        处之后别的 app 按键被吞"那个 Phase 1 修过的 bug 有复活的口子。
+        取舍(作者定案): 提交动作本身就是"我正在跟这个框交互"的强信号, 此刻让出
+        焦点是错的 —— 所以让不变量在编辑态下显式让位, 靠三条护栏兜住:
+          ① 进编辑态的**唯一**入口是用户真的点输入框: show() 显式清过一次
+             (见 show()), 顶栏按钮与术语行点击都会 _release_focus;
+          ② Esc(_cancel_input) 是显式的"我打完了"出口, 仍然让出 key;
+          ③ 切到别的 app 会自然夺走 key(面板是 NonactivatingPanel, 从不激活 app)。
+        仍未验证(自动化测不了): 连续问 3 轮后切到浏览器按方向键/空格是否正常。
+        若被吞 -> 退回"提交后让出焦点"的旧行为, 或改成"答案流结束后再让出"。"""
         text = (self._input.stringValue() or "").strip()
         self._input.setStringValue_("")
-        self._release_focus()
         if text:
             self._on_submit(text)
+        # 放在回调**之后**: 回调抛错也不能把焦点丢掉(否则下一问又要重新点一次)。
+        try:
+            self._panel.makeFirstResponder_(self._input)
+        except Exception:                     # noqa: BLE001
+            pass
 
     def _cancel_input(self):
-        """Esc: 清空 + 交还焦点。"""
+        """Esc: 清空 + 交还焦点 —— 连续输入的唯一显式出口。"""
         self._input.setStringValue_("")
         self._release_focus()
 
@@ -618,6 +706,7 @@ class Overlay:
     def _apply_mode(self, collapsed: bool):
         """切换展开/收回。面板原点在左下、向上长高, 所以**顶边保持不动**,
         否则顶栏按钮会跟着跳。"""
+        from AppKit import NSScreen
         self._collapsed = collapsed
         # 展开高度现场重算, 不用 __init__ 里那个 —— 那时面板可能还没落到目标屏幕,
         # _expanded_scroll_h 会退化到 900px 兜底值, 复用就会算出错的总高。
@@ -631,10 +720,15 @@ class Overlay:
 
         f = self._panel.frame()
         top = f.origin.y + f.size.height
-        vis = self._panel.screen().visibleFrame()
         oy = top - new_h
-        oy = max(vis.origin.y + 20,
-                 min(oy, vis.origin.y + vis.size.height - new_h - 20))
+        # ⚠️ screen() 可能为 None(面板还没 orderFront)。答案出现时的自动展开是在
+        # 这个前提下也会走到这条路径的, 直接 .visibleFrame() 会 AttributeError 并把
+        # 整个按钮回调打死 —— 取不到屏幕就不夹取, 只保持顶边不动。
+        scr = self._panel.screen() or NSScreen.mainScreen()
+        if scr is not None:
+            vis = scr.visibleFrame()
+            oy = max(vis.origin.y + 20,
+                     min(oy, vis.origin.y + vis.size.height - new_h - 20))
         self._panel.setFrame_display_(
             ((f.origin.x, oy), (self._width, new_h)), True)
         self._layout()
@@ -818,6 +912,260 @@ class Overlay:
         self._draft_zh_val = ""
         self._mark_dirty(urgent=True)
 
+    # ---- 答案接管(Phase 3) ----
+    # 一条线程两个入口(「讲一下」按钮 / 输入框追问), 共用一块渲染区: 答案活跃时
+    # 转录区喂**答案行**, 否则喂字幕行。为什么是接管而不是新开一块: 见模块顶部
+    # GLOSS_PREFIX 那一段(真实答案比整个转录区还高, 没有别的槽位装得下)。
+    def answer_delta(self, delta: str):
+        """答案流式增量。
+
+        ⚠️ **非紧急** mark_dirty(与 stream_zh 同规矩): 16ms 合并闸门本来就是给流式
+        增量用的; urgent 只留给离散事件(接管开始 / answer_done / 退出接管)。"""
+        if not delta:
+            return
+        if self._answer_finished:
+            # 上一轮已经结束 -> 这是**新一轮**的第一个增量。先清掉上一轮的答案,
+            # 否则两轮会粘成一段读不通的文字(实测: 4 行涨到 8 行, 直到
+            # answer_done 对账才恢复)。
+            # 取舍: **一轮显示一轮的答案**。追问本身就说明上一轮已经看过 ——
+            # 继续堆在屏上只会把两轮混起来。完整线程仍然全部落进 Obsidian
+            # 笔记与终端日志, 不丢。
+            self._answer_reset()
+        self._answer_enter()
+        self._answer_feed(delta)
+        self._mark_dirty()
+
+    def answer_done(self, question: str, text: str):
+        """一轮回答结束。`text` 是引擎给的**完整**回答, 以它为准对账: 失败路径
+        (没 key / 云端异常 / 上下文超限)一个字都不流, 全部内容只在这一次调用里。
+
+        (question 只有日志/落盘用途, 渲染只用回答正文。)"""
+        text = text or ""
+        if not text and not self._answer_text:
+            # 空回答 -> **不要**进入接管。接管会把渲染源换成 0 行的答案: 屏幕整个
+            # 空掉、字幕被藏起来、面板还自动展开, 而且**没有任何自动恢复路径**
+            # (实测: 5 句字幕不可见 + 面板 362→519, 只能靠「新话题」救回来)。
+            # 一个字都没产出, 就当这一轮没发生过。
+            return
+        self._answer_enter()
+        got = self._answer_text
+        if text and text != got:
+            if text.startswith(got):
+                self._answer_feed(text[len(got):])
+            else:                             # 对不上就以引擎的完整版为准
+                self._answer_reset()
+                self._answer_feed(text)
+        self._answer_feed("", flush=True)     # 收尾: 最后那条没有换行的源行也要闭合
+        self._answer_finished = True          # 下一轮的增量据此判断"该重置了"
+        self._mark_dirty(urgent=True)
+
+    def _answer_enter(self):
+        """第一份答案内容到达 -> 进入接管(含自动展开)。"""
+        if self._answer_on:
+            return
+        self._answer_on = True
+        # 自动展开到既有的"展开态"(屏可见高 60%, 与 ▾ 展开 是同一个状态)。
+        # ⚠️ **只在接管开始与结束时改窗口尺寸**: _apply_mode 会取 NSScreen、重设全部
+        # subview frame、setFrame_display_(窗口 resize + 整窗重绘), 并让转录池按新高度
+        # 重建 —— 按 token 调它等于每个增量把整个面板重建一次。
+        # 用户原来的收起/展开选择记下来, 退出接管时还原。
+        self._mode_before_answer = self._collapsed
+        if self._collapsed:
+            self._apply_mode(False)
+
+    def _clear_answer(self):
+        """退出接管: 清答案缓冲 + 还原面板状态 + 字幕重现(「新话题」按钮走这里)。
+
+        **字幕不会丢** —— 这是接管方案的核心安全性质: _history 只由 finalize() 追加,
+        _render 从不碰它, 所以接管期间到达的句子一直在后台累积, 这里只是把渲染源
+        换回它, 停下期间的字幕会一次性全部出现。"""
+        if not self._answer_on and self._tv_mode == "cap":
+            return
+        self._answer_on = False
+        self._answer_reset()
+        if self._collapsed != self._mode_before_answer:
+            self._apply_mode(self._mode_before_answer)
+        self._mark_dirty(urgent=True)
+
+    def _answer_reset(self):
+        self._answer_text = ""
+        self._answer_rows = []
+        self._answer_pend = ""
+        self._answer_fold = 0
+        self._answer_pr = []
+        self._answer_pw = []
+        self._answer_finished = False
+
+    def _answer_feed(self, delta: str, flush: bool = False):
+        """把新到的答案文本喂进折行状态机。
+
+        源行(模型输出的换行)一旦闭合就折成行**定稿**; 只有最后那条未闭合的源行会
+        随增量重排, 而重排只从"还没落行的词"开始 —— 已闭合的行不再测量。
+        (全量重排的代价是实测出来的: boundingRectWithSize_ 单次 66µs, 2000 字符的
+         答案每来一个增量重排一次要 5-10ms, 而这是主线程 —— 它还背着音频循环。)"""
+        if delta:
+            self._answer_text += delta
+            self._answer_pend += delta
+        while True:
+            raw = self._answer_take_closed_line(flush)
+            if raw is None:
+                break
+            self._answer_commit_line(raw)
+        self._answer_wrap_pending()
+
+    def _answer_take_closed_line(self, flush: bool):
+        """取出一条**已闭合的源行**原文(没有就 None), 并把它的词折进折行状态。"""
+        s = self._answer_pend
+        nl = s.find("\n", self._answer_fold)
+        if nl < 0:
+            if flush and s:
+                nl = len(s)                   # 收尾: 结尾没有换行的那条也算闭合
+            else:
+                self._answer_fold_words()
+                return None
+        self._answer_pw.extend(s[self._answer_fold:nl].split())
+        raw = s[:nl]
+        self._answer_pend = s[nl + 1:]
+        self._answer_fold = 0
+        return raw
+
+    def _answer_fold_words(self):
+        """把未闭合区里的**完整词**折进 _answer_pw。
+
+        ⚠️ 只折到最后一个空白为止: SSE 分片会把一个词切成两半, 把半个词当成一个
+        词, 下一片到达时就会变成两个词("regres" + "sion")。"""
+        s = self._answer_pend
+        rest = s[self._answer_fold:]
+        if rest and not rest[-1].isspace():
+            j = max(rest.rfind(" "), rest.rfind("\t"))
+            if j < 0:
+                return
+            rest = rest[:j + 1]
+        if rest:
+            self._answer_pw.extend(rest.split())
+            self._answer_fold += len(rest)
+
+    def _answer_commit_line(self, raw: str):
+        """一条源行闭合: 把折好的词收成行, 提交进 _answer_rows。
+
+        唯一的特例是 `中：` 点睛行 —— 它是**上一行的小字**, 不是一张新卡片
+        (这正是「英文为主 + 中文点睛」在行槽里的落法: 18pt 大字位 = 英文,
+        11pt 小字位 = 中：)。"""
+        self._answer_wrap_pending()           # 收尾时可能一次折进很多词, 先闭合能闭合的
+        s = (raw or "").strip()
+        pw = self._answer_pw
+        pr = list(self._answer_pr)
+        self._answer_pw, self._answer_pr = [], []
+        if not s:
+            return
+        if s.startswith(GLOSS_PREFIX):
+            rows = self._answer_rows
+            if rows and not rows[-1][1]:
+                rows[-1] = (rows[-1][0], s)
+            else:
+                rows.append((s, ""))          # 罕见: 没有上一行可挂 -> 自己占一行
+            return
+        if pw:
+            # 到这里 pw 里的词必然**合起来放得下**: _answer_wrap_pending 只在
+            # "下一个词加上去就放不下"时闭合, 而"单个词自己就放不下"的超长词
+            # (长 URL / 长 CJK) 已经在 _answer_take_row 的空行分支里按字符切开了。
+            pr.append(" ".join(pw))
+        for r in pr:
+            self._answer_rows.append((r, ""))
+
+    def _answer_wrap_pending(self):
+        w = self._answer_pw
+        # ⚠️ 判据是 `while w` 而**不是** `while len(w) > 1`: 只剩一个词时，它也可能
+        # 是"自己就放不下"的超长词(长 URL / 一长串 CJK)，必须交给 _answer_take_row
+        # 切开；用 >1 会让它绕过 fit 判定，直接落到 _answer_commit_line 的
+        # 无检查 append 上并被静默裁掉。单个放得下的词会让 _answer_take_row 返回
+        # (None, w) 而正常 break —— 既不会提前闭合该等的行，也不会死循环。
+        while w:
+            row, rest = self._answer_take_row(w)
+            if row is None:
+                break
+            self._answer_pr.append(row)
+            w = rest
+        self._answer_pw = w
+
+    def _answer_take_row(self, words: list):
+        """贪心收一行: 返回 (行文本, 剩余词); 还没法闭合就 (None, words)。
+
+        ⚠️ 只在"下一个词已经到齐、且加上它就放不下"时才闭合 —— 文本只追加, 一个词
+        一旦放不进当前行就**永远**放不进, 所以那一刻的 cur 就是定稿。于是每个词只
+        参与一次测量, 增量代价与新增词数成正比, 不随答案总长增长。"""
+        cur: list = []
+        for i, w in enumerate(words):
+            if not cur and not self._answer_fits(w):
+                # ⚠️ 空行 + **单个词自己就放不下**。上面那条 `cur and ...` 判不到它
+                # (cur 为空就直接 append)，于是这一行超出槽位会被**静默裁掉** ——
+                # NSTextField 超过 maximumNumberOfLines 既不留省略号也不报错。
+                # 实测触发阈值: 单个 token > 102 ASCII / > 68 CJK 字符
+                # (长 URL、一长串汉字、无空格的语言都会踩到)。
+                cut = self._answer_split_to_fit(w) or w[:1]   # 保底一个字符, 防死循环
+                rest = w[len(cut):]
+                return cut, ([rest] if rest else []) + words[i + 1:]
+            cand = " ".join(cur + [w])
+            if cur and not self._answer_fits(cand):
+                return " ".join(cur), words[i:]
+            cur.append(w)
+        return None, words
+
+    def _answer_split_to_fit(self, word: str) -> str:
+        """把放不下的**无空格长词**按字符切成能放下的最长前缀(二分, O(log n) 次测量)。
+
+        为什么是切而不是丢: 长 URL、长 CJK 串在课堂内容里真会出现(链接、引文、
+        外文), 丢掉就是信息损失; 切开至少全都看得见。"""
+        lo, hi, best = 1, len(word), 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if self._answer_fits(word[:mid]):
+                best, lo = mid, mid + 1
+            else:
+                hi = mid - 1
+        return word[:best]
+
+    def _answer_fits(self, text: str) -> bool:
+        """这段文本在当前文档宽度下放得下 ANSWER_MAX_LINES 个视觉行吗。
+
+        宽度取 TranscriptView 的**实测**文档宽度, 不是面板宽度猜出来的值: 展开态挂
+        竖向滚动条时 clip 比面板窄十几 px, 猜宽了标签会静默裁掉第三行(NSTextField
+        的 maxLines 超限既不留省略号也不报错 —— 见模块顶部那段)。"""
+        if len(text) <= 24:
+            # 最宽的字符在 18pt 下约 18px -> 24 字符 <= 432px, 一定只占一行。
+            # 这是纯粹的快速路径: 它把大部分词从 66µs 的实测里省掉。
+            return True
+        try:
+            h = _measure_text_h(text, self._tv.text_width() - 2.0, self._answer_font)
+        except Exception:                     # noqa: BLE001
+            return True                       # 量不出来就放行: 宁可多一行风险, 也别整段不显示
+        return h <= ANSWER_TEXT_H
+
+    def _answer_view_rows(self) -> list:
+        """当前该渲染的行 = 已定稿行 + 未闭合源行的临时行。
+
+        最后那行含尚未折行的残词(可能是个还没写完的词), 它就是打字机效果的来源。"""
+        rows = list(self._answer_rows)
+        rows.extend((r, "") for r in self._answer_pr)
+        tail = " ".join(self._answer_pw)
+        rest = self._answer_pend[self._answer_fold:].strip()
+        if rest:
+            tail = f"{tail} {rest}".strip()
+        if tail:
+            rows.append((tail, ""))
+        return rows
+
+    def _set_cached(self, key: str, lbl, text: str):
+        """标签文本按 key 缓存, 相同就跳过写入。
+
+        ⚠️ _render 每 16ms 就可能跑一次(答案流式期间每帧都会走到这), 而
+        NSTextField.setStringValue_ 是 O(len) 的排版 + 重绘。与 transcript_view
+        的槽位缓存同一个理由。"""
+        if self._label_cache.get(key) == text:
+            return
+        self._label_cache[key] = text
+        lbl.setStringValue_(text)
+
     # ---- 渲染合并 ----
     # 现状: main.py::drain() 会把 streamq 排空, 而每个增量都触发一次完整 _render
     # (11 次无条件 setStringValue_)。一个音频 tick 内排空 N 个增量 = N 次全量重绘。
@@ -907,6 +1255,20 @@ class Overlay:
     def _flag(self):
         self._on_flag()
 
+    def _ask(self):
+        """「讲一下」: 用固定问题开一轮讲解。
+
+        ⚠️ 这是 AppKit 主线程回调(pump -> sendEvent_ 派发进来的): 只能 queue.put /
+        置标志 / 打印, **不许联网、不许 sleep、不许长持 qa_lock** —— 主线程同时还在
+        跑音频循环与渲染, 在这里做任何慢事都是整条流水线停顿。
+        (问题文本是常量: 转录底座由 answer_worker / answer_user_content 稍后附加。)"""
+        self._on_ask()
+
+    def _new_topic(self):
+        """「新话题」: 清空问答线程 + 退出答案接管、回到字幕。"""
+        self._on_new_topic()
+        self._clear_answer()
+
     def _sync_trans_button(self):
         """按钮文字直接写状态(不靠颜色/图标变暗 —— emoji 不吃 tint, 且弱显色看不清)。"""
         from AppKit import NSColor
@@ -929,6 +1291,10 @@ class Overlay:
             self._draft_zh_val = ""
             self._terms = []
             self._pinned_term = None
+            # ⚠️ 答案缓冲(_answer_*)刻意**不在这里清**: 讲解是独立入口, 不被「译 开/
+            # 译 关」替代、也不依赖它(Phase 3 锁定需求)。译关时「讲一下」照常可用,
+            # 已经在屏上的回答也不该被这个开关抹掉 —— 往这个清理块里加答案状态就是
+            # 把"译关仍可用"这条需求悄悄打掉。
         self._sync_trans_button()
         self._mark_dirty(urgent=True)
         self._on_translate(self._translating)
@@ -962,13 +1328,37 @@ class Overlay:
         # 转录区(含历史/实时行/回收/跟随)整个交给 TranscriptView。
         # ⚠️ 一次 set_content 原子写完 —— 拆成 set_items + set_live 会让最新句
         #    既进历史又留在实时位, 屏上重复一行(见 TranscriptView.set_content)。
-        self._tv.set_content(
-            self._history, self._cur_en, self._cur_zh,
-            bool(self._streaming or self._cur_zh or self._cur_en))
+        #
+        # 答案接管: 这里按"答案是否活跃"分支 —— 这是**唯一**喂 self._tv 的地方,
+        # 所以答案要上屏只需要改这一处(Phase 3 的接管方案就建立在这条上)。
+        # 切进/切出那一帧用 replace_items(整体替换, 不记追加): 条数从 N 条字幕变成
+        # M 条答案行再换回来, 按差值记账会凭空多出 N-M 次"新句到达"(见它的注释)。
+        if self._answer_on:
+            rows = self._answer_view_rows()
+            if self._tv_mode != "ans":
+                self._tv_mode = "ans"
+                self._tv.set_rows_verbatim(True)    # 行 = (大字英文, 小字 中：)
+                self._tv.set_scroll_hold(True)      # 读答案期间不许自动回底(坑 1)
+                self._tv.replace_items(rows)
+                # 答案是从第一行读起的**文档**, 不是"最新在最下"的字幕流
+                self._tv.scroll_to_top()
+            else:
+                self._tv.set_content(rows, "", "", False)
+        elif self._tv_mode != "cap":
+            self._tv_mode = "cap"
+            self._tv.set_rows_verbatim(False)
+            self._tv.set_scroll_hold(False)
+            self._tv.replace_items(self._history)
+            self._tv.scroll_to_bottom()
+        else:
+            self._tv.set_content(
+                self._history, self._cur_en, self._cur_zh,
+                bool(self._streaming or self._cur_zh or self._cur_en))
         # 草稿与 💡 术语解析钉在面板底部, 不参与滚动
         show_draft = (not self._streaming) and bool(self._draft)
-        self._draft_lbl.setStringValue_(f"▸ {self._draft}" if show_draft else "")
-        self._draft_zh.setStringValue_(
-            self._draft_zh_val if (not self._streaming and self._draft_zh_val) else "")
-        self._gloss_lbl.setStringValue_(self._gloss_text())
+        self._set_cached("draft", self._draft_lbl,
+                         f"▸ {self._draft}" if show_draft else "")
+        self._set_cached("draft_zh", self._draft_zh,
+                         self._draft_zh_val if (not self._streaming and self._draft_zh_val) else "")
+        self._set_cached("gloss", self._gloss_lbl, self._gloss_text())
         # 不再每次渲染都 orderFrontRegardless(会高频打扰窗口服务)

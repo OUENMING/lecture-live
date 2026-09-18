@@ -92,6 +92,10 @@ RULES:
 - Length is not the problem — understanding in the moment is. You may be much longer
   than a subtitle, but every sentence must help that. No filler, no restating the
   question, no summary of the whole lecture.
+- PLAIN TEXT ONLY. The answer is rendered in a small caption panel with no markdown
+  renderer: `**bold**`, `#` headings, bullet markers, backticks, tables and LaTeX all
+  show up literally as punctuation and turn the answer into noise. Emphasis comes from
+  word order and the "中：" lines, never from markup.
 - Use the course terms exactly as they are written in the course-terms list."""
 
 # 讲解的 max_tokens。220(翻译路径各处用的)是**单句**预算, 讲解必须长得多。

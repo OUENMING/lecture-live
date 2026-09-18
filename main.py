@@ -131,6 +131,11 @@ def _ask_save_notes(n: int) -> bool:
 NO_CLOUD_ANSWER = ("⚠ 讲解需要云端引擎(DeepSeek): 本地的 1.7B 模型只会翻译, 没有讲解能力。"
                    "用 --engine auto/cloud 并配好 API key 后可用。")
 
+# 「讲一下」按钮的固定问题(作者锁定: "讲清楚刚讲的这段")。
+# 可以是常量 —— 转录底座由 answer_worker 快照后经 answer_user_content 附在同一
+# 个 user turn 里, 问题本身不需要携带任何上下文。
+ASK_QUESTION = "讲清楚刚讲的这段: 核心是什么、教授为什么现在要讲它。"
+
 
 class EngineRouter:
     """翻译引擎路由: cloud 优先, 失败自动降级本地(断网兜底)。
@@ -376,11 +381,24 @@ def run(args) -> None:
         echo(f"[{now()}] 🙋 {q}")
         answerq.put(q)
 
+    def ask_about_this() -> None:
+        """悬浮窗「讲一下」按钮 -> 用固定问题开一轮(与输入框共用同一条线程)。
+
+        与 submit_question 同规矩: 主线程回调, 只做一次 queue.put —— 不许联网、
+        不许 sleep、不许长持 qa_lock(主线程同时还背着音频循环与渲染)。
+        """
+        echo(f"[{now()}] 🙋 [讲一下] {ASK_QUESTION}")
+        answerq.put(ASK_QUESTION)
+
     ui = TerminalUI() if args.ui == "terminal" else _load_overlay(
         on_quit=stopping.set,
         on_flag=lambda: flagged.__setitem__("on", True),
         on_translate=lambda on: translating.__setitem__("on", on),
         on_submit=submit_question,
+        on_ask=ask_about_this,
+        # late binding: start_new_topic 定义在下面的问答状态块里, 这里只是把回调
+        # 装上(按钮到点名前一定已经定义好了)。
+        on_new_topic=lambda: start_new_topic(),
     )
 
     seen_proper: collections.Counter = collections.Counter()   # 出现次数(≥2 才查)
@@ -631,7 +649,11 @@ def run(args) -> None:
                 # **卡住收尾才是真损失**。
                 # ⚠️ 判据是 stopping 而不是 running: running 要到收尾之后才清,
                 # 用它等于没写守卫(实测自然结束时密集流仍卡 15s)。
-                if not stopping.is_set():
+                # ⚠️ 再叠 `gen == qa["gen"]`: 按过「新话题」的那一轮**已经在途的增量
+                # 也必须停**。否则 ① 线程历史把它丢了(下面的判断), ② 面板却被它重新
+                # 接管 —— 用户按「新话题」要的就是"回到字幕", 结果 0.2s 后答案又回到
+                # 屏上, 按钮等于没生效。与下面那条"丢弃这一轮"是同一条规则。
+                if not stopping.is_set() and gen == qa["gen"]:
                     streamq.put(("answer", d))
 
             try:
@@ -642,7 +664,9 @@ def run(args) -> None:
                 if gen == qa["gen"]:              # 期间按过「新话题」-> 丢弃这轮
                     qa["history"].append({"role": "user", "content": content})
                     qa["history"].append({"role": "assistant", "content": text})
-            if not stopping.is_set():
+            # 同上: 被「新话题」作废的那一轮连收尾包也不发 —— 连终端那份 echo 一起
+            # 丢掉, 与"它不进线程历史"保持一致(半途被作废的回答不该留下记录)。
+            if not stopping.is_set() and gen == qa["gen"]:
                 streamq.put(("answer_done", q, text))
 
     t1 = threading.Thread(target=partial_worker, daemon=True)
@@ -758,11 +782,13 @@ def run(args) -> None:
                 echo(msg)
 
 
-def _load_overlay(on_quit=None, on_flag=None, on_translate=None, on_submit=None):
+def _load_overlay(on_quit=None, on_flag=None, on_translate=None, on_submit=None,
+                  on_ask=None, on_new_topic=None):
     try:
         from overlay import Overlay
         o = Overlay(on_quit=on_quit, on_flag=on_flag, on_translate=on_translate,
-                    on_submit=on_submit)
+                    on_submit=on_submit, on_ask=on_ask,
+                    on_new_topic=on_new_topic)
         o.show()
         return o
     except Exception as e:       # noqa: BLE001

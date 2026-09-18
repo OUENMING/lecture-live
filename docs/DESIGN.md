@@ -30,10 +30,10 @@
   → Parakeet-TDT-0.6B-v3 int8(sherpa-onnx, CPU, ~28× 实时)
        说话中每 1s 刷草稿 / 句末整句重转定稿
   → 标点断句 → 逐句流式: Qwen3-1.7B-4bit(mlx-lm, GPU)
-       RAG-lite 术语筛选(核心词常驻 + 动态召回 Top-3)
+       RAG-lite 术语筛选(核心词常驻 + 动态召回 Top-3 + 课程术语全量 + 领域声明)
        输出 ZH: ... / EN: ...  → 中文逐字打字机 → 英文随后
   → 卡片式悬浮窗(中英垂直贴合) / 终端
-  → ObsidianWriter 逐句落盘(--course 时)
+  → ObsidianWriter 逐句落盘 → 课后二次精修(领域+术语整批重矫正/重译) → 双层笔记
 ```
 
 ## 实测性能(M1 Pro 16GB)
@@ -100,7 +100,9 @@ cd ~/lecture-live
 | `--engine` | `auto`(默认,云端优先失败降级)/ `cloud` / `local` |
 | `--cloud-model` | 云端模型(默认 `deepseek-flash`;可选 `deepseek-v4-pro`) |
 | `--api-key` | DeepSeek key(默认读 `DEEPSEEK_API_KEY` 或 `.deepseek_key` 文件) |
-| `--course` | 课程代码;**给了才写 Obsidian 笔记** |
+| `--course` | 课程代码;不设也能写笔记(课名默认 `LECTURE`) |
+| `--polish` | `auto`(默认)/`off`;落笔前二次精修转录(需 key) |
+| `--polish-model` | 精修模型(默认同 `--cloud-model`) |
 | `--vault` | Obsidian 库路径(默认 `~/Obsidian/Vault`,可用 `OBSIDIAN_VAULT` 覆盖) |
 | `--speed` | file 模式回放倍速(测试用) |
 | `--llm` | 默认 `mlx-community/Qwen3-1.7B-4bit` |
@@ -217,6 +219,24 @@ cl course             # 列出可选课程(带 * 标当前)
 cl course ECON10101   # 切换课程
 ```
 
+## 两级矫正(实时 + 课后)
+
+实时字幕求快,落笔记求准,矫正分两级:
+
+- **一级(实时,`translator.py` / `cloud_translator.py`)**:每句单次调用。prompt 里放
+  ①领域声明(`domain_block`,由课程术语表首行提取)②**课程术语全量注入**(`always=`,
+  不再只召回 Top-3)③few-shot 听错样例(`max chocolate`→`macroscopic` 等)④防过度矫正规则
+  (已正确的词原样保留)。**中文必须译"矫正后的读法",绝不直译原始噪声**。
+- **二级(课后,`polish.py` + `--polish`)**:落笔前把整节课按 30 句一批重做,带
+  领域 + 全课术语 + 前几行已精修上下文。**关键**:输入同时给"直播已矫正的 EN"与"原始 ASR",
+  以 **EN 为基准** —— 只喂 ASR 会让模型对着原始噪声重新判断,把直播已改对的词又抄回错的
+  (实测 `lattice`→`lacker`、`statistics`→`stalcy`、`binding`→`burn`)。判断标准是
+  "在本课语境里讲不讲得通",不是"是不是真实英文单词"(听错常落在真实单词上,如 `chocolate`)。
+  实测一堂 482 句热力学课:修正 16 句(`delta T`→`delta U`、`end of combustion`→`enthalpy of
+  combustion`、`letter Jones`→`Lennard-Jones`、`torque figures`→`torsion angles`…),0 句倒退。
+- 会话文件里实时落盘的 **ASR 原文与直播译文保持不动** —— 原始 ASR 是复核凭据,精修版只是
+  "更好读的那一版"。精修批次失败原样保留,绝不因 API 问题丢内容。
+
 ## 记录落盘(先落盘,再询问 —— 永不丢)
 
 ```
@@ -229,7 +249,7 @@ cl course ECON10101   # 切换课程
 **为什么这样设计**:曾经出现过一次事故 —— 45 分钟、544 句的课堂记录,在"是否保存"提示处误按 **Ctrl+C**,旧版本把它当成"不要保存"直接丢弃,且当时用的是悬浮窗模式,终端里没有任何副本,**内容永久丢失**。
 
 现在的保证:
-- **实时落盘**:每句定稿立即写文件,`kill -9` 强杀 / 断电 / 崩溃都只损失最后一句;
+- **实时落盘**:每句定稿立即写文件,`kill -9` 强杀 / 断电 / 崩溃都只损失最后一句;✕ / Ctrl+C 会先冲刷分段器残余语音再退出(在途半句不丢,收尾等待有界 15s);
 - **Ctrl+C 与 EOF 一律默认保存**(绝不再因一次误按丢整节课);
 - **答"否"也不会丢**:会话文件仍在,用 `cl last` 可查看。
 
@@ -265,7 +285,7 @@ cl last          # 查看最近一次课堂记录(含句数与前几行)
 | **音频** | ❌ **从不** | 只读音频流做转写,不写任何音频文件;要留录音请自己另外录 |
 | **原始 ASR 转录** | ✅ **总是** | 每句记 `**ASR**:` 行(未修正)。LLM 偶尔过度修正,原始版是复核凭据 |
 | 双语文字(会话文件) | ✅ **总是** | `sessions/` 实时写入,防丢底稿 |
-| 双语文字(Obsidian) | ⚠️ 询问后 | 需 `--course`;答"是"才复制进库 |
+| 双语文字(Obsidian) | ⚠️ 询问后 | 答"是"才复制进库;**不设 `--course` 也会写**(课名默认 `LECTURE`) |
 | 草稿译文 / 💡 术语行 | ❌ | 只在屏幕上显示(点开的解析也不落盘) |
 | `term_notes.json` | ✅ | 术语解释**策展库**(三档,非课堂内容) |
 | `term_notes_auto.json` | ✅ | 专有名词**自动缓存**(可整文件删,非课堂内容) |
@@ -370,7 +390,7 @@ python build_notes.py --rebuild  # 全量重分类 + 扩写 + 清掉自动回写
 | `deepseek-v4-pro` | ⭐⭐⭐⭐⭐ | ~0.8s | ~0.25 元 | 同族更强档;实测本任务上未见明显优势, 按需切换 |
 | 本地 Qwen3-1.7B | ⭐⭐ | ~0.6s | $0 | 断网兜底;占 GPU,有驱动崩溃风险 |
 
-- **`--engine auto`(默认)**:云端优先,失败/断网自动降级本地(降级时才加载本地模型,平时不占 GPU)。
+- **`--engine auto`(默认)**:云端优先,失败/断网自动降级本地(降级时才加载本地模型,平时不占 GPU)。降级不是永久的:每 90s 用 1-token 探针试云端,通了自动切回并通知(菜单栏图标恢复 🎧)。
 - **key 放哪**:`export DEEPSEEK_API_KEY=sk-...`,或写入 `~/lecture-live/.deepseek_key`(已 chmod 600)。
 - ⚠️ DeepSeek 有**峰谷价**:UTC 01:00–04:00 与 06:00–10:00 翻倍(= 本地时间 07:00–11:00 早课),翻倍后仍仅 ~0.16 元/课。
 - ⚠️ 云端必须**显式关思考模式**(`thinking: {type: disabled}`):V4 默认输出 `reasoning_content`,不关则首字延迟翻几倍且拿不到译文。
@@ -447,5 +467,6 @@ python build_notes.py --rebuild  # 全量重分类 + 扩写 + 清掉自动回写
 | `overlay.py` | 卡片式悬浮窗 UI(含 🌐 翻译开关 + 顶栏) |
 | `transcript_view.py` | NSScrollView 转录区:池化回收 + 跟随状态机(overlay 委托给它) |
 | `build_notes.py` | 术语三档分类/扩写(basic 一行速查 + gloss 完整解析) + 专有名词查询闸门 |
+| `polish.py` | 课后二次精修:整批重矫正 + 重译(领域+全课术语+前文, 以直播 EN 为基准) |
 | `obsidian_writer.py` | Obsidian **双层**笔记落盘(复习层 + 折叠逐字转录) |
 | `test_pipeline.py` | 集成测试(可加速回放) |

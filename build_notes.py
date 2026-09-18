@@ -328,12 +328,21 @@ def _looks_like_vocabulary(phrase: str, words: list[str]) -> bool:
 
 def detect_proper_nouns(text: str, known: set[str], max_n: int = 2) -> list[str]:
     """找出可能是专有名词的短语(人名/机构/地名): 连续首字母大写的词。
-    过滤句首词、常见词、普通词汇、已收录术语。"""
+    过滤句首词、常见词、普通词汇、已收录术语。
+
+    ⚠️ 前导用 `(?<![A-Za-z0-9_\\-])` 而非 `\\b`: `\\b` 在连字符后也成立, 于是
+    "Lennard-Jones" 会被切成 "Jones" 单独匹配到(实测它真被当成姓氏查了一次, 还进了
+    自动缓存)。全大写缩写要求 ≥3 字母, 挡掉 "DW" 这类两字母噪声。"""
     out: list[str] = []
-    for m in re.finditer(r"\b([A-Z][a-zA-Z'\-]+(?:\s+[A-Z][a-zA-Z'\-]+)*)\b", text or ""):
+    for m in re.finditer(
+            r"(?<![A-Za-z0-9_\-])([A-Z][a-zA-Z'\-]+(?:\s+[A-Z][a-zA-Z'\-]+)*)\b",
+            text or ""):
         phrase = re.sub(r"^(The|A|An)\s+", "", m.group(1))   # 去掉前导冠词
         words = phrase.split()
-        if len(phrase) < 4 and not phrase.isupper():    # 放行 MIT/IMF 这类全大写缩写
+        if phrase.isupper():
+            if len(phrase) < 3:                     # 放行 MIT/IMF/GDP, 挡掉 DW/OK
+                continue
+        elif len(phrase) < 4:
             continue
         if all(w in STOP for w in words):
             continue

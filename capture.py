@@ -141,10 +141,11 @@ class CallbackSource:
 
 
 class FileSource:
-    """把音频文件按真实时间喂出(可加速), 用于无 UI 测试。"""
+    """把音频按真实时间喂出(可加速)。path=读文件, samples=已解码的样本数组。"""
 
-    def __init__(self, path: str, speed: float = 1.0):
-        self._samples = load_file(path)
+    def __init__(self, path: str | None = None, speed: float = 1.0,
+                 samples: np.ndarray | None = None):
+        self._samples = samples if samples is not None else load_file(path)
         self._idx = 0
         self._speed = max(speed, 0.01)
         self._next_due = time.monotonic()

@@ -23,17 +23,27 @@ CORE_TERMS = [
 MAX_DYNAMIC_TERMS = 3
 
 
-SYSTEM_PROMPT = """你是英文课堂字幕校正+翻译助手。给你一句 ASR 转写的英文, 以及最近几句上下文。
+SYSTEM_PROMPT = """你是英文课堂字幕校正+翻译助手。给你一句 ASR 转写的英文、课程领域、本课术语表, 以及最近几句上下文。
 请严格按下面两行格式输出, 不要任何多余文字:
 ZH: <中文译文>
 EN: <修正后的英文>
 
 要求:
 1) 中文译文自然、准确, 专业术语用中文习惯表达;
-2) 英文只修正明显的语音识别错听(音近词、漏词、专有名词), 例如 nation to→relation to;
-   本来就正确的词句原样保留, 不要改写或润色;
-3) 输入若是名词列表/大纲词条(如课程名、术语串), 逐词直译即可,
+2) **先在心里把听错的词改对, 再翻译改对后的句子**。中文必须译自修正后的读法 —— 你在 EN 行改掉的词,
+   ZH 行绝不能还按错词直译(实测: EN 已修成 "the velocity", 中文却是"所以 74 速度…", 就是没做到这条);
+3) 英文只修正明显的语音识别错听(音近词、漏词、专有名词、术语)。**优先采纳课程术语表里的词**:
+   当某个词音近术语表条目时, 几乎可以断定是听错, 直接改成该术语。例如:
+   "we're max chocolate properties" -> "we're macroscopic properties";
+   "how we measure the stalcy" -> "how we measure the statistics";
+   "average on the lacker level" -> "average on the lattice level";
+4) 本来就正确、也不音近任何术语的词句**原样保留**, 不要改写、润色或调整语序 —— 防范过度矫正;
+5) 输入若是名词列表/大纲词条(如课程名、术语串), 逐词直译即可,
    严禁输出"课程术语""翻译""总结"之类的概括性标题。"""
+
+
+def domain_block(title: str) -> str:
+    return f"Course: {title}\n" if title else ""
 
 
 class Result:
@@ -42,6 +52,22 @@ class Result:
     def __init__(self, en_fixed: str, zh: str):
         self.en_fixed = en_fixed
         self.zh = zh
+
+
+def _has_cjk(s: str) -> bool:
+    return any("一" <= c <= "鿿" for c in s)
+
+
+def guard_zh_result(res: Result, en: str) -> Result:
+    """本地引擎结果守卫: 译文里一个汉字都没有 = 模型把英文原样吐回来了
+    (云端降级后的小模型实测会这样), 不是翻译。
+
+    置空 zh 走"只显示英文"的既有路径 —— 屏上出现两行一样的英文, 用户会以为
+    是翻译坏了; 空译文则明确表示"这句没翻出来"。云端路径有自己的回显检测
+    (cloud_translator._looks_like_echo + 极简重试), 不走这里。"""
+    if res.zh and not _has_cjk(res.zh):
+        return Result(res.en_fixed, "")
+    return res
 
 
 def _load_terms(path: str | None) -> list[str]:
@@ -86,6 +112,38 @@ def load_terms(glossary_path: str | None, course: str | None = None) -> list[str
     return out
 
 
+def course_term_list(glossary_path: str | None, course: str | None) -> list[str]:
+    """**只**取分课程术语(不含公共表)。这些词每句全量注入 —— 见 select_terms 的说明。"""
+    if not course or not glossary_path:
+        return []
+    p = course_terms_path(glossary_path, course)
+    return _load_terms(str(p)) if p is not None else []
+
+
+def course_title(glossary_path: str | None, course: str | None) -> str:
+    """从分课程术语表里取课程标题, 当**领域先验**用。
+
+    例: "# ECON10101 Data Analysis for Economists(经济数据分析)" ->
+        "ECON10101 Data Analysis for Economists(经济数据分析)"。
+    ⚠️ 为什么要它: 模型知道"这是热力学课"才修得回听错的领域词(macroscopic / enthalpy),
+    光给术语表不够 —— 被听错的词根本匹配不上术语表(见 select_terms)。"""
+    if not course or not glossary_path:
+        return ""
+    p = course_terms_path(glossary_path, course)
+    if p is None:
+        return ""
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                return s.lstrip("#").strip()
+            if s:
+                return s
+    except OSError:
+        return ""
+    return ""
+
+
 def core_terms(course: str | None = None) -> list[str]:
     """常驻核心词: 通用核心 + 当前课号(课号发音极近, 必须常驻防听混)。"""
     core = list(CORE_TERMS)
@@ -95,26 +153,30 @@ def core_terms(course: str | None = None) -> list[str]:
 
 
 def select_terms(sentence: str, terms: list[str],
-                 core: list[str] | None = None, max_dyn: int = MAX_DYNAMIC_TERMS) -> str:
-    """RAG-lite: 核心词常驻 + 动态召回最相关的几个术语。
-    收益: 注入从 ~187 token 降到 ~40 token, 缩短 prefill、降低显存压力。
-    匹配: 字面包含优先, 否则与句中词的模糊相似度(difflib); 音近错听(如 nation→relation)
-    相似度也较高, 能被召回。
+                 core: list[str] | None = None, max_dyn: int = MAX_DYNAMIC_TERMS,
+                 always: list[str] | None = None) -> str:
+    """核心词常驻 + **课程术语全量** + 动态召回最相关的几个。
 
-    性能: 先用 `real_quick_ratio` 的上界 `2·min(len)/len和` 做**纯算术**预筛, 免掉长度
-    悬殊的比对(真实课堂语料实测 2.06→1.35ms/句)。**不做记忆化** —— 试过 `lru_cache`,
-    唯一 (术语, 词) 组合随课时长线性增长(120 句已 5.3 万, 2 小时约 24 万), 缓存永远
-    装不下, 命中率随时长漂移; 而整节课本来只花 ~1s, 省下的时间是块里的 0.1%。"""
+    ⚠️ 为什么课程术语要**全量**注入: 纯按匹配筛选会**死循环** —— 句子被 ASR 听错时
+    (macroscopic→"max chocolate")术语匹配不到, 于是不注入, 模型没有领域先验, 永远修不回来。
+    实测一堂真实热力学课: 65% 的句子矫正后与原文逐字相同, "max chocolate / apple
+    temperature / chocolate bonds" 一路留着。课程术语表通常只有几十条(~100 token),
+    全量注入的代价可接受。
+
+    匹配: 字面包含优先, 否则与句中词的模糊相似度(difflib); 音近错听(如 nation→relation)
+    相似度也较高, 能被召回。"""
     core = core if core is not None else CORE_TERMS
+    always = always or []
     sent_l = sentence.lower()
     words = [w.strip(".,!?\"'()[]").lower() for w in sentence.split()]
     words = [w for w in words if len(w) > 3]
 
-    scored: list[tuple[float, str]] = []
     core_l = {c.lower() for c in core}
+    always_l = {a.lower() for a in always}
+    scored: list[tuple[float, str]] = []
     for t in terms:
         tl = t.lower()
-        if tl in core_l:
+        if tl in core_l or tl in always_l:
             continue
         if tl in sent_l:
             scored.append((1.0, t))
@@ -133,16 +195,24 @@ def select_terms(sentence: str, terms: list[str],
         if best >= 0.6:
             scored.append((best, t))
     scored.sort(key=lambda x: x[0], reverse=True)
-    picked = list(core) + [t for _, t in scored[:max_dyn]]
+    seen, picked = set(), []
+    for t in list(core) + list(always) + [t for _, t in scored[:max_dyn]]:
+        k = t.lower()
+        if k not in seen:
+            seen.add(k); picked.append(t)
     return "\n".join(picked) if picked else "(无特定术语)"
 
 
 DRAFT_SYSTEM = "你是实时字幕翻译器。把用户给的英文口语快速译成中文, 只输出中文译文。"
 
 # 只矫正、不翻译(关闭翻译时用): 同一个模型、同一份上下文, 只是不要中文。
-FIX_SYSTEM = """你是英文课堂字幕校正助手。给你一句 ASR 转写的英文, 以及最近几句上下文。
-请只修正明显的语音识别错听(音近词、漏词、专有名词、术语), 例如 nation to→relation to。
-本来就正确的词句**原样保留**, 不要改写、润色、缩写或调整语序。
+FIX_SYSTEM = """你是英文课堂字幕校正助手。给你一句 ASR 转写的英文、课程领域、本课术语表, 以及最近几句上下文。
+请只修正明显的语音识别错听(音近词、漏词、专有名词、术语)。**优先采纳课程术语表里的词**:
+当某个词音近术语表条目时, 几乎可以断定是听错, 直接改成该术语。例如:
+"we're max chocolate properties" -> "we're macroscopic properties";
+"how we measure the stalcy" -> "how we measure the statistics";
+"average on the lacker level" -> "average on the lattice level"。
+本来就正确、也不音近任何术语的词句**原样保留**, 不要改写、润色、缩写或调整语序(防范过度矫正)。
 只输出修正后的那一句英文, 不要任何前缀、标签、解释或中文。"""
 
 # 模型偶尔给结果加标签(EN: / 修正后: …), 或干脆跑偏去翻译/概括。清一遍。
@@ -253,7 +323,7 @@ class _StreamParser:
 
     @staticmethod
     def _has_cjk(s: str) -> bool:
-        return any("一" <= c <= "鿿" for c in s)
+        return _has_cjk(s)
 
     def result(self, en_raw: str) -> Result:
         if self._buf:                              # 收尾: 未消费的尾巴
@@ -296,6 +366,8 @@ class Translator:
         self._model = None
         self._tokenizer = None
         self._terms = load_terms(glossary_path, course)
+        self._course_terms = course_term_list(glossary_path, course)
+        self._domain = course_title(glossary_path, course)
         self._core = core_terms(course)
         self._max_ctx = max_context
         self._lock = threading.Lock()
@@ -316,8 +388,10 @@ class Translator:
     def _terms_context(self, en: str, context: list[str]) -> str:
         ctx = context[-self._max_ctx:]
         ctx_block = "\n".join(f"- {c}" for c in ctx) if ctx else "(无)"
-        terms = select_terms(en, self._terms, core=self._core)
-        return (f"课程术语(相关):\n{terms}\n\n"
+        terms = select_terms(en, self._terms, core=self._core,
+                             always=self._course_terms)
+        return (f"{domain_block(self._domain)}"
+                f"课程术语:\n{terms}\n\n"
                 f"最近上下文(已校正):\n{ctx_block}\n\n"
                 f"待处理这句 ASR:\n{en}")
 
@@ -339,7 +413,7 @@ class Translator:
                 parser.feed(getattr(resp, "text", "") or "")
             # 刻意**不**调用 mx.clear_cache(): 频繁释放/重建 Metal 缓冲是
             # IOGPUFamily 驱动断言的已知竞态窗口(见 _configure_mlx 注释)。
-        return parser.result(en)
+        return guard_zh_result(parser.result(en), en)
 
     # ---- 只矫正英文(关闭中文翻译时用): 不出译文, 但仍吃上下文修 ASR 错听 ----
     def fix_stream(self, en: str, context: list[str], on_en=None) -> str:
@@ -377,7 +451,7 @@ class Translator:
                                         sampler=make_sampler(temp=0.1, top_p=0.9)):
                 buf.append(getattr(resp, "text", "") or "")
         text = "".join(buf).strip()
-        if on_zh and text:
+        if on_zh and text and _has_cjk(text):    # 英文回显不是译文, 不上屏
             on_zh(text)
         return text
 

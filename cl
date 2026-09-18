@@ -3,7 +3,7 @@
 #   cl                 线下课(麦克风) + 悬浮窗   ← 最常用, 零参数
 #   cl online          线上课(系统声; 需先把系统输出切到 Multi-Output Device)
 #   cl file <音频>      转录已有录音(终端输出)
-#   cl course ECON10101 记住课程名(之后自动写 Obsidian 笔记)
+#   cl course ECON10101 记住课程名(之后自动写 Obsidian 笔记 + 用该课术语表)
 #   cl local           强制本地引擎(不出网)
 #   cl help            帮助
 set -u
@@ -41,6 +41,8 @@ ClassLive —— 本地实时课堂双语字幕
 
 停止：点悬浮窗右上角 ✕,或在本终端按 Ctrl+C
 说明：运行中每句都实时写入 sessions/,误按 Ctrl+C 或崩溃都不会丢
+     (✕/Ctrl+C 时在途的最后一句也会冲刷落盘;同日同课的多节笔记不互相覆盖)
+     不设课程代码也照常写笔记(课程名默认 LECTURE);设了则用该课术语表。
 EOF
 }
 
@@ -86,10 +88,12 @@ case "${1:-}" in
   *) echo "未知参数: $1"; echo; usage; exit 1 ;;
 esac
 
-# 有课程就落盘 Obsidian
+# Obsidian 落盘: 没设课号也照常写(课程名默认 LECTURE, 见 obsidian_writer.py);
+# 设了课号则带上它, 用该课术语表。
+ARGS+=(--vault "${OBSIDIAN_VAULT:-$HOME/Obsidian/Vault}")
 if [ -n "$COURSE" ]; then
-  ARGS+=(--course "$COURSE" --vault "${OBSIDIAN_VAULT:-$HOME/Obsidian/Vault}")
+  ARGS+=(--course "$COURSE")
 fi
 
-echo "▶ ClassLive · 音源=$SRC · 引擎=$ENGINE · 课程=${COURSE:-未设置(用 cl course 设定)}"
-exec "$PY" main.py --source "$SRC" --ui "$UI" --engine "$ENGINE" "${ARGS[@]}"
+echo "▶ ClassLive · 音源=$SRC · 引擎=$ENGINE · 课程=${COURSE:-(未设置, 默认 LECTURE)}"
+exec "$PY" main.py --source "$SRC" --ui "$UI" --engine "$ENGINE" ${ARGS[@]+"${ARGS[@]}"}

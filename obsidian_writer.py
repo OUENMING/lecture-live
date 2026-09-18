@@ -6,10 +6,14 @@
   sessions/<日期>_<时间>_<课程>.md   ← 运行中实时写的**原始逐句日志**(crash-safe)
         ↓ 结束时组装 + 询问
   <vault>/Lectures/<日期>_<课程>.md   ← **双层笔记**:
-        复习层在上(概览 / 自测 / 术语表 / 重点), 完整逐句转录折叠在下。
+        复习层在上(英文知识点详解 / 英文自测 / 术语表 / 重点),
+        完整逐句转录折叠在下。
 
 ⚠️ 双层不是"摘要 + 原文": 复习层只是**入口**, 下面那份转录是**逐字保留、未做任何删改**
 的 —— 复习要的是"不遗漏", 摘要会把细节吃掉, 所以转录永远完整地在文件里。
+
+复习层以**英文为主、中文为辅**: 知识点用英文陈述并展开细节, 中文只做点睛, 关键词给中英对照。
+没设课程代码也能写(课程名默认 LECTURE)。
 
   --save-notes ask   结束时问(默认;答否则保留会话文件)
   --save-notes yes   不问,直接进 Obsidian
@@ -20,39 +24,127 @@ import json, os, re, time
 from pathlib import Path
 
 DEFAULT_VAULT = "~/Obsidian/Vault"
+DEFAULT_COURSE = "LECTURE"          # 没设课程代码时的占位名(线下课常不设)
 SESSIONS = Path(__file__).with_name("sessions")
 
 # 会话文件里一条定稿块的抬头: "> [!abstract] 14:02:18" / "... ⭐ Exam Focus"
 _TS = re.compile(r"^> \[!abstract\] (\d\d:\d\d:\d\d)( ⭐ Exam Focus)?\s*$")
 _FIELDS = (("en", "EN"), ("zh", "ZH"), ("asr", "ASR"))
 
-REVIEW_SYS = """你是课堂笔记助手。用户给你一节课的逐句中英对照转录(每行 [时间] 英文)。
-只依据转录内容, 输出严格 JSON:
-{"overview": "一句话概括这节课讲了什么(不超过 60 字)",
- "qa": [{"q": "复习问题", "a": "答案"}]}
+REVIEW_CHUNK = 70           # 复习层每次请求喂多少句; 长课分块, 避免超长 JSON 被截断
+REVIEW_MAX_TOKENS = 3000    # 单块输出上限
+
+REVIEW_SYS = """你是课堂笔记助手, 为一名靠中文听英文课的中国经济学/社会学本科生整理复习层。
+用户给你一节课**一段**的逐句中英对照转录。你只依据转录内容输出, 绝不引入外部知识、绝不猜测。
+
+英文为主、中文为辅: 知识点用英文陈述并展开细节, 中文只做点睛, 关键词给中英对照。
+输出严格 JSON, 结构如下:
+{"title": "本课主题(英文, 不超过 12 词)",
+ "overview_en": "一句话英文概括本段讲了什么(不超过 35 词)",
+ "overview_zh": "同一句话的中文(不超过 60 字)",
+ "sections": [
+   {"heading": "英文小标题(一个知识板块, 如 'Internal energy as a state function')",
+    "points": [
+      {"en": "该知识点的英文陈述(1-2 句, 完整、能独立读懂)",
+       "detail_en": "英文细节展开(2-5 句): 为什么重要 / 怎么用 / 关键细节 / 常见误解 / 例子",
+       "zh": "中文辅助说明(1-2 句, 点睛即可, 不必逐句翻译英文)",
+       "terms": [{"en": "本知识点最该记住的英文术语/短语", "zh": "对应中文"}]}
+    ]}
+ ],
+ "qa": [{"q": "英文复习问题", "a": "英文答案(直接来自转录)", "zh": "答案的中文要点(不超过 30 字)"}]}
+
 硬性要求:
-- 只写转录里**确实讲过**的内容, 不得引入任何外部知识、不得猜测; 拿不准就不写。
-- qa 提 3-6 条, 覆盖本课的核心概念 / 结论 / 易错点; 答案简短、直接来自转录。
-- overview 和答案里都不要出现换行符或 markdown。"""
+- 英文为主: en / detail_en / heading / q / a 都用英文, 且完整准确; 中文只出现在 zh 字段与 terms 的中文侧。
+- **穷尽本段的知识点与关键细节**: sections 给 2-6 个板块, 每个板块 points 2-6 条; 宁可多写, 不要漏要点, 也不要只挑一两个概括。
+- 每条 point 的 terms 给 0-4 个英文术语 + 中文对照, 挑真正该记住的。
+- qa 提 3-6 条, 覆盖核心概念 / 结论 / 易错点。
+- 每个字段值都是**单行**: 不出现换行符、markdown 标记或引号。
+- 只写转录里确实讲过的内容; 拿不准就不写。不要输出 JSON 以外的任何内容。"""
+
+OVERVIEW_SYS = """你在为一节英文课堂的笔记写抬头。输入是这节课**知识点小标题**的列表(已按时间顺序)。
+只依据这些标题, 输出严格 JSON:
+{"title": "本课主题(英文, 不超过 12 词)",
+ "overview_en": "一句话英文概括本课讲了什么(不超过 40 词)",
+ "overview_zh": "同一句话的中文(不超过 60 字)"}
+不要引入标题之外的信息。不要输出 JSON 以外的任何内容。"""
+
+
+def _one_line(v) -> str:
+    """压成单行; 非字符串 -> 空串。渲染层据此丢弃任何多余换行。"""
+    return " ".join(v.split()) if isinstance(v, str) else ""
+
+
+def _clean_review(obj) -> dict:
+    """LLM 返回的复习层 JSON -> 规范化的 dict, 缺字段/类型不对一律丢弃。"""
+    if not isinstance(obj, dict):
+        return {}
+    r: dict = {}
+    for src, dst in (("title", "title"), ("overview_en", "overview_en"),
+                     ("overview_zh", "overview_zh")):
+        v = _one_line(obj.get(src))
+        if v:
+            r[dst] = v
+    sections = []
+    for s in (obj.get("sections") or []):
+        if not isinstance(s, dict):
+            continue
+        head = _one_line(s.get("heading"))
+        pts = []
+        for p in (s.get("points") or []):
+            if not isinstance(p, dict):
+                continue
+            en = _one_line(p.get("en"))
+            if not en:
+                continue
+            terms = []
+            for tm in (p.get("terms") or []):
+                if not isinstance(tm, dict):
+                    continue
+                te, tz = _one_line(tm.get("en")), _one_line(tm.get("zh"))
+                if te:
+                    terms.append((te, tz))
+            pts.append({"en": en, "detail": _one_line(p.get("detail_en")),
+                        "zh": _one_line(p.get("zh")), "terms": terms})
+        if head and pts:
+            sections.append({"heading": head, "points": pts})
+    if sections:
+        r["sections"] = sections
+    qa = []
+    for x in (obj.get("qa") or []):
+        if not isinstance(x, dict):
+            continue
+        q, a = _one_line(x.get("q")), _one_line(x.get("a"))
+        if q and a:
+            qa.append({"q": q, "a": a, "zh": _one_line(x.get("zh"))})
+    if qa:
+        r["qa"] = qa
+    return r
 
 
 class ObsidianWriter:
     def __init__(self, vault: str | None, course: str | None, mode: str = "ask",
-                 api_key: str | None = None, model: str = "deepseek-flash"):
+                 api_key: str | None = None, model: str = "deepseek-flash",
+                 glossary_path: str | None = None, polish: bool = True,
+                 polish_model: str | None = None):
         self.mode = mode
-        self.enabled = bool(vault and course) and mode != "no"
+        # 没设课程代码也照常落盘: 线下课常常没课号, 不该因此丢掉整节课的笔记。
+        self.enabled = bool(vault) and mode != "no"
         self._vault = os.path.expanduser(vault) if vault else None
-        self._course = course
+        self._course = course or DEFAULT_COURSE
         self._date = time.strftime("%Y-%m-%d")
-        self._key = api_key                 # 有 key 才生成"概览 + 自测"复习层
+        self._key = api_key                 # 有 key 才生成"知识点详解 + 自测"复习层
         self._model = model
+        self._glossary_path = glossary_path or str(
+            Path(__file__).with_name("glossary.txt"))
+        self._polish = polish               # 落笔前二次精修(见 polish.py)
+        self._polish_model = polish_model or model
         self._n = 0
         self.session_path: Path | None = None
         self.vault_path: Path | None = None
         if self.enabled:
             SESSIONS.mkdir(exist_ok=True)
             self.session_path = SESSIONS / (
-                f"{self._date}_{time.strftime('%H%M%S')}_{course}.md")
+                f"{self._date}_{time.strftime('%H%M%S')}_{self._course}.md")
             self.session_path.write_text(
                 f"# {course} · {self._date} · 实时会话日志\n\n", encoding="utf-8")
 
@@ -122,47 +214,116 @@ class ObsidianWriter:
                     out.append((t, d, e["ts"]))
         return out
 
-    def _review(self, entries: list[dict]) -> tuple[str | None, list[dict]]:
-        """LLM 生成"一句话概览 + 复习自测"。无 key / 失败 -> (None, [])。
-        失败是**正常路径**(断网、没配 key 都要能落盘), 所以绝不抛。"""
-        if not self._key or not entries:
-            return None, []
-        transcript = "\n".join(
-            f"[{e['ts']}] {e['en'] or e['asr']}"
-            for e in entries if (e["en"] or e["asr"]))
-        if not transcript:
-            return None, []
+    def _call_review(self, transcript: str) -> dict:
+        """对一段转录调一次 LLM, 返回规范化后的复习层 dict。失败 -> {}。"""
         try:
             import httpx
-            payload = {"model": self._model, "stream": False, "max_tokens": 1200,
-                       "temperature": 0.2, "thinking": {"type": "disabled"},
+            payload = {"model": self._model, "stream": False,
+                       "max_tokens": REVIEW_MAX_TOKENS,
+                       "temperature": 0.3, "thinking": {"type": "disabled"},
                        "response_format": {"type": "json_object"},
                        "messages": [{"role": "system", "content": REVIEW_SYS},
                                     {"role": "user", "content": transcript}]}
             r = httpx.post("https://api.deepseek.com/v1/chat/completions",
                            headers={"Authorization": f"Bearer {self._key}"},
-                           json=payload, timeout=120)
+                           json=payload, timeout=180)
             r.raise_for_status()
             obj = json.loads(r.json()["choices"][0]["message"]["content"])
         except Exception:                                 # noqa: BLE001
-            return None, []
-        ov = obj.get("overview")
-        ov = " ".join(ov.split()) if isinstance(ov, str) and ov.strip() else None
-        qa = []
-        for x in (obj.get("qa") or []):
-            if isinstance(x, dict):
-                q = x.get("q"); a = x.get("a")
-                if isinstance(q, str) and isinstance(a, str) and q.strip() and a.strip():
-                    qa.append({"q": " ".join(q.split()), "a": " ".join(a.split())})
-        return ov, qa
+            return {}
+        return _clean_review(obj)
+
+    def _overview(self, headings: list[str]) -> dict:
+        """多块时用各块小标题再写一次**全课**总览。失败 -> {}（保留局部概览）。"""
+        if not headings:
+            return {}
+        try:
+            import httpx
+            payload = {"model": self._model, "stream": False, "max_tokens": 500,
+                       "temperature": 0.2, "thinking": {"type": "disabled"},
+                       "response_format": {"type": "json_object"},
+                       "messages": [{"role": "system", "content": OVERVIEW_SYS},
+                                    {"role": "user", "content": "\n".join(headings)}]}
+            r = httpx.post("https://api.deepseek.com/v1/chat/completions",
+                           headers={"Authorization": f"Bearer {self._key}"},
+                           json=payload, timeout=60)
+            r.raise_for_status()
+            obj = json.loads(r.json()["choices"][0]["message"]["content"])
+        except Exception:                                 # noqa: BLE001
+            return {}
+        if not isinstance(obj, dict):
+            return {}
+        out = {}
+        for k in ("title", "overview_en", "overview_zh"):
+            v = _one_line(obj.get(k))
+            if v:
+                out[k] = v
+        return out
+
+    def _review(self, entries: list[dict]) -> dict:
+        """LLM 生成复习层(英文知识点详解 + 概览 + 自测)。无 key / 失败 -> {}。
+
+        长课**分块**生成再合并: 一堂 40 分钟的课有数百句, 一次性输出会撑爆
+        max_tokens 被截断, 截断的 JSON 解析失败 -> 整份复习层丢失。分块既避开
+        截断, 也让每段都被讲细。失败是**正常路径**(断网、没配 key 都要能落盘), 绝不抛。
+        """
+        if not self._key or not entries:
+            return {}
+        lines = [f"[{e['ts']}] {e['en'] or e['asr']}"
+                 for e in entries if (e["en"] or e["asr"])]
+        if not lines:
+            return {}
+        chunks = [lines[i:i + REVIEW_CHUNK]
+                  for i in range(0, len(lines), REVIEW_CHUNK)]
+        multi = len(chunks) > 1
+        meta: dict = {}
+        sections: list[dict] = []
+        plain: list[str] = []                 # 未加时间前缀的小标题(供总览使用)
+        qa: list[dict] = []
+        for ci, chunk in enumerate(chunks):
+            r = self._call_review("\n".join(chunk))
+            if not r:
+                continue
+            if ci == 0:
+                for k in ("title", "overview_en", "overview_zh"):
+                    if r.get(k):
+                        meta[k] = r[k]
+            prefix = f"[{chunk[0][1:6]}] " if multi else ""   # [HH:MM]
+            for sec in (r.get("sections") or []):
+                plain.append(sec["heading"])
+                if prefix:
+                    sec = {"heading": prefix + sec["heading"],
+                           "points": sec["points"]}
+                sections.append(sec)
+            qa.extend(r.get("qa") or [])
+        # 多块时, 上面 meta 里的概览只描述第一段 —— 用小标题重写一份全课的。
+        if multi and sections:
+            full = self._overview(plain)
+            if full:
+                meta = full
+        seen, dedup = set(), []
+        for x in qa:
+            k = x["q"].strip().lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            dedup.append(x)
+        out = dict(meta)
+        if sections:
+            out["sections"] = sections
+        if dedup:
+            out["qa"] = dedup[:8]
+        return out
 
     # ---- 组装双层笔记 ----
-    def _render_note(self, entries: list[dict], overview: str | None,
-                     qa: list[dict]) -> str:
+    def _render_note(self, entries: list[dict], review: dict) -> str:
         ts0 = entries[0]["ts"] if entries else "—"
         ts1 = entries[-1]["ts"] if entries else "—"
         stars = [e for e in entries if e["star"]]
         gloss = self._glossary(entries)
+        sections = review.get("sections") or []
+        qa = review.get("qa") or []
+        title = review.get("title")
         L: list[str] = []
         L += ["---",
               f"date: {self._date}",
@@ -171,30 +332,58 @@ class ObsidianWriter:
               "type: lecture-notes",
               "---", "",
               f"# {self._course} · 课堂笔记 {self._date}", "",
-              "> [!info] 本课信息",
-              f"> 🕐 {ts0} – {ts1} · 🗣 {len(entries)} 句 · "
+              "> [!info] 本课信息", ]
+        if title:
+            L.append(f"> 📖 **{title}**")
+        L += [f"> 🕐 {ts0} – {ts1} · 🗣 {len(entries)} 句 · "
               f"⭐ {len(stars)} 处重点 · 💡 {len(gloss)} 个术语", ""]
 
-        L += ["## 🎯 一句话概览", ""]
-        if overview:
-            L += [f"> {overview}",
-                  ">",
-                  "> <sub>🤖 自动生成 · 依据本课转录</sub>"]
+        # 概览: 英文为主, 中文辅助
+        L += ["## 🎯 Overview 概览", ""]
+        oe, oz = review.get("overview_en"), review.get("overview_zh")
+        if oe or oz:
+            if oe:
+                L.append(f"> **EN** — {oe}")
+            if oz:
+                L.append(f"> **中** — {oz}")
+            L += [">", "> <sub>🤖 自动生成 · 依据本课转录</sub>"]
         else:
-            L += ["> *（未自动生成 —— 未配 API key 或调用失败；可课后自行补一句）*"]
+            L += ["> *（未自动生成 —— 未配 API key 或调用失败）*"]
         L += [""]
 
-        L += ["## ❓ 复习自测", ""]
+        # 知识点详解: 英文陈述 + 英文细节 + 中文点睛 + 关键词中英对照
+        L += ["## 📚 Key Concepts 知识点详解", ""]
+        if sections:
+            for i, sec in enumerate(sections, 1):
+                L += [f"### {i}. {sec['heading']}", ""]
+                for p in sec["points"]:
+                    L.append(f"- **{p['en']}**")
+                    if p["detail"]:
+                        L.append(f"  {p['detail']}")
+                    if p["zh"]:
+                        L.append(f"  · 中：{p['zh']}")
+                    if p["terms"]:
+                        pairs = " · ".join(
+                            f"`{t}` {z}" if z else f"`{t}`" for t, z in p["terms"])
+                        L.append(f"  · 🔑 {pairs}")
+                    L.append("")
+        else:
+            L += ["*（未自动生成 —— 未配 API key 或调用失败；可课后自行补）*", ""]
+
+        # 复习自测: 英文问答, 中文要点附后; 保持 `问题::答案` 便于 Spaced Repetition
+        L += ["## ❓ Review 复习自测", ""]
         if qa:
             L += ["> [!tip] 🤖 自动生成 · 请核对后再用于复习",
                   "> <sub>写成 `问题::答案`，可被 Spaced Repetition 插件识别</sub>", ""]
-            L += [f"- {x['q']}::{x['a']}" for x in qa]
+            for x in qa:
+                tail = f"　（中：{x['zh']}）" if x["zh"] else ""
+                L.append(f"- {x['q']}::{x['a']}{tail}")
         else:
             L += ["> [!tip] 用 `问题::答案` 写自测题（可被 Spaced Repetition 插件识别）", "",
                   "- "]
         L += [""]
 
-        L += ["## 💡 本课术语表", ""]
+        L += ["## 💡 Terminology 本课术语表", ""]
         if gloss:
             L += [f"- **{t}** — {d}　`{ts}`" for t, d, ts in gloss]
         else:
@@ -237,15 +426,35 @@ class ObsidianWriter:
                     f"记录仍保留在:\n   {self.session_path}")
 
         entries = self._parse(self.session_path.read_text(encoding="utf-8"))
+        # 落笔前二次精修: 直播矫正太保守(实测 65% 未改), 这里用领域 + 全课术语 + 前后文重做一遍。
+        if self._key and self._polish and entries:
+            try:
+                from translator import course_term_list, course_title
+                from polish import polish_entries
+                print("🔧 正在精修转录(二次矫正 + 重译)…", flush=True)
+                entries = polish_entries(
+                    entries, self._key, self._polish_model,
+                    course_term_list(self._glossary_path, self._course),
+                    course_title(self._glossary_path, self._course),
+                    on_progress=print)
+            except Exception as e:                        # noqa: BLE001
+                print(f"⚠ 精修失败({str(e)[:60]}); 用直播版转录生成笔记")
         if self._key:
-            print("🤖 正在生成复习层(概览 + 自测)…", flush=True)
-        overview, qa = self._review(entries)
-        note = self._render_note(entries, overview, qa)
+            print("🤖 正在生成复习层(知识点详解 + 自测)…", flush=True)
+        review = self._review(entries)
+        note = self._render_note(entries, review)
 
         d = Path(self._vault) / "Lectures"
         d.mkdir(parents=True, exist_ok=True)
-        self.vault_path = d / f"{self._date}_{self._course}.md"
-        self.vault_path.write_text(note, encoding="utf-8")   # 覆盖式(同日同课取最近)
-        layer = "概览+自测+术语表+重点" if overview else "术语表+重点(未生成概览)"
+        path = d / f"{self._date}_{self._course}.md"
+        if path.exists():
+            # 同日同课已有一份(lecture + tutorial 常共用同一课号, 一天两节很现实):
+            # 直接覆盖会把上一节的笔记抹掉 —— 会话日志还在 sessions/, 但复习层
+            # 只此一份。加时间戳并存, 不覆盖。
+            path = d / f"{self._date}_{time.strftime('%H%M%S')}_{self._course}.md"
+        self.vault_path = path
+        self.vault_path.write_text(note, encoding="utf-8")
+        layer = ("知识点详解+自测+术语表+重点" if review.get("sections")
+                 else "术语表+重点(未生成详解)")
         return (f"📝 已存入 Obsidian({self._n} 句, 复习层: {layer}) → {self.vault_path}\n"
                 f"   原始逐句日志: {self.session_path}")

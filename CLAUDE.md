@@ -1,0 +1,60 @@
+# CLAUDE.md
+
+## 这是什么
+
+ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音频 → 转写 → 逐句修正并翻译 → 悬浮字幕 → 实时落盘、课后渲染双层 Obsidian 笔记。零参数 `cl` 启动；跑在本机，音频不出机器，只发文本。MIT 开源，已脱敏。
+
+## 文件地图
+
+每行是一个 context pointer：先读命中的那一行，再顺着 target 往下。整体地图见 `ARCHITECTURE.md`。
+
+| 分支（什么时候读） | 读哪个 |
+|---|---|
+| 整体架构、模块深度、seam、深化机会 —— 动代码前先读 | `ARCHITECTURE.md` |
+| 启动、命令行参数、课程切换 | `cl` → `main.py` |
+| 主循环、后台线程、队列、UI 路由与落盘分发 | `main.py` |
+| 音频采集、麦克风/系统声、电平归一化 | `capture.py` |
+| 断句、VAD、静音阈值 | `vad.py` |
+| 转写、ASR、Parakeet、听错修正 | `asr.py` |
+| 翻译、prompt、DeepSeek 云端、mlx 本地、引擎降级 | `translator.py`、`cloud_translator.py` |
+| 术语表、课号、术语查表与注入 | `build_notes.py`、`glossary/`（样例 `glossary.example.txt`） |
+| 笔记落盘、`sessions/` 文件格式、Obsidian 双层笔记 | `obsidian_writer.py` |
+| 整课二级精修（polish） | `polish.py` |
+| 悬浮窗、字幕显示、滚动、槽位池化 | `overlay.py`、`transcript_view.py` |
+| 滚动行为验收探针（不在运行路径上） | `probe_scroll.py` |
+| 回归测试 R1–R5、毫秒级断言 | `tests/test_audit_regressions.py` |
+| 端到端、拿真实录音跑通 | `test_pipeline.py` |
+| 面向用户的功能说明、开源与脱敏须知 | `README.md` |
+| 环境搭建、依赖清单、选型理由 | `docs/DESIGN.md` |
+
+产物位置：实时会话写 `sessions/`，课后笔记写 `<vault>/Lectures/`；vault 由 `--vault` / `$OBSIDIAN_VAULT` 指定，默认值写在 `cl` 里。
+
+## 本仓库特有雷区
+
+- **EN 为基准防倒退**：整课精修同时收到直播定稿的 EN 与 ASR 原文，**EN 是基准**；中文只能由 EN 修正，不能反过来改写 EN。
+- **`polish.py` 与 `tests/` 不在 git 里**：`git ls-files` 查不到，只在工作区。`obsidian_writer.close()` 的 `from polish import polish_entries` 被 `try/except` 包着 —— 文件缺失时只在收尾前打一行 ⚠，笔记照样生成（退回直播版转录）。clone 后这两块直接没有，README/DESIGN 却把精修写成现成功能。
+- **不阻塞不变量**：`capture` / `vad` 的回调必须立刻返回；AppKit 的调用只能发生在主线程。往流水线里加活先想这两条。
+- **新增 streamq tag 必须在 `main.drain()` 加同分支** —— 它是唯一的 tag 分发点，漏改即静默丢弃。
+- **会话 Markdown 格式是三方共享契约**：`obsidian_writer` 写它、`_parse` 读回它、`cl last` 用 grep 匹配它；改格式会同时打断三处。
+- **`--context` 有两个默认值**：CLI 是 5，`translator.load_translator` / `CloudTranslator` 是 2；直接调库拿到的行为与 `cl` 不同。
+- **环境不可复现**：没有 `requirements.txt` / `pyproject.toml` / `uv.lock`，依赖只写在 `docs/DESIGN.md` 的安装片段里。
+- **`IOGPUFamily` 内核崩溃史**：2026-09-10 本工具触发过一次 GPU 驱动断言 panic（非 OOM）；`translator._configure_mlx` 是缓解措施。动 mlx / 本地模型路径时留意。
+- **`sessions/` 只追加**：曾误删过一节真实课堂记录、不可恢复；里面的 `*_TEST.md` 是测试残留，也留着。
+- **个人数据保持不入库**：`.gitignore` 覆盖 `sessions/`、`glossary/`、`.course`、`.deepseek_key`、`term_notes*.json`；真实课号已三次脱敏。改 `.gitignore` 前先想清楚这一条。
+
+## 当前状态 —— 现查，别抄
+
+提交数、日期、"当前在哪个 Phase" 这类数值会腐坏（rot）。这份文档每行都在每轮付 context load，所以状态只放指针：
+
+| 想知道 | 命令 / 位置 |
+|---|---|
+| 未提交改动、未跟踪文件 | `git status --porcelain` |
+| 已落地历史（HEAD 停在哪） | `git log --oneline -15` |
+| 当前执行计划 | `docs/PLAN-ai-explain-qa.md` |
+
+## 完成判据
+
+- 默认闸门：`.venv/bin/python tests/test_audit_regressions.py` 全绿（无网络、无模型、毫秒级）。注意 R1/R4 复刻了实现逻辑 —— 绿 ≠ 真实流水线通过。
+- 碰过流水线 / 音频路径：`.venv/bin/python test_pipeline.py <音频> [start] [dur] [speed]` 能跑完。
+- 碰过 `overlay.py` / `transcript_view.py`：`.venv/bin/python probe_scroll.py` 验滚动行为。
+- 报"可用"之前先跑上面命中的那条、贴出输出，再下结论。

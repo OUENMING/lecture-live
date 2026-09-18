@@ -1,7 +1,8 @@
 """macOS 悬浮窗: 卡片式双语流动排版 + 流式打字机 + 文字描边。
 
 布局(自下而上):
-  💡 术语行(钉在面板底部, 不随句子走): **默认只列术语名**, 点一下才展开解析并钉住
+  ⌨ 输入行(单行可编辑, Enter 提交 / Esc 取消) —— 钉在面板最底部
+  💡 术语行(钉在底部固定区, 不随句子走): **默认只列术语名**, 点一下才展开解析并钉住
   ▸ 草稿行(灰, 仅在没有流式时显示) / 草稿即时中文译文
   转录区 ×3: 每句 中文(18pt Medium, 最多两行)+ 英文(11pt Medium)
              最下是当前句(流式), 其上为历史 —— 上方旧、下方新。
@@ -49,19 +50,26 @@ GLOSS_H = 20.0                                    # 💡 解析: 收回态 = 一
 GLOSS_H_BIG = 46.0                                # 💡 解析: 展开态 = 三行(实测 42.0)+ 余量
 DRAFT_H = 18.0
 DRAFT_ZH_H = 20.0
+INPUT_H = 26.0                                    # ⌨ 单行输入框(含下方 1px 细线)
+INPUT_GAP = 6.0                                   # 输入框与它上面那行(💡)的间隔
+RULE_H = 1.0                                      # 输入框下方的细线: 取代填充块
+RULE_A = 0.18                                     # 细线静止不透明度(白)
+RULE_A_FOCUS = 0.45                               # 细线聚焦不透明度(白) —— 提到草稿那一档
 
 
 def _pinned(gloss_h: float) -> float:
-    """底部固定区高度(💡 + 英文草稿 + 中文草稿 + 三条间隔)。
-    💡 会随展开/收回改变行数, 所以它是参数而非常量 —— 面板总高才不会算错。"""
-    return gloss_h + 4 + DRAFT_H + DRAFT_ZH_H + 4
+    """底部固定区高度(⌨ 输入行 + 💡 + 英文草稿 + 中文草稿 + 各条间隔)。
+    💡 会随展开/收回改变行数, 所以它是参数而非常量 —— 面板总高才不会算错。
+    输入行必须算进来: _pinned 同时喂 PINNED_H / BASE_H / _apply_mode 的总高重算,
+    漏掉任何一处, 面板高度与实际内容就会错位(输入框被裁掉或盖住滚动区)。"""
+    return INPUT_H + INPUT_GAP + gloss_h + 4 + DRAFT_H + DRAFT_ZH_H + 4
 
 
-PINNED_H = _pinned(GLOSS_H)                     # = 66.0 收回态固定区(不含 8px 间隔)
+PINNED_H = _pinned(GLOSS_H)                     # = 98.0 收回态固定区(不含 8px 间隔)
 BOTTOM_PAD = 12.0
 HEADER_H = 34.0                                   # 顶部按钮条(与正文不重叠)
-BASE_H = BOTTOM_PAD + PINNED_H + 8 + HEADER_H     # = 120.0(收起态除转录区外的固定高度)
-HEIGHT = BASE_H + VISIBLE_ROWS * ROW_H            # = 330.0
+BASE_H = BOTTOM_PAD + PINNED_H + 8 + HEADER_H     # = 152.0(收起态除转录区外的固定高度)
+HEIGHT = BASE_H + VISIBLE_ROWS * ROW_H            # = 362.0
 
 WEIGHT = 0.23                                     # NSFontWeightMedium
 FLUSH_DT = 0.016                                  # 渲染合并闸门 = 一帧(约 60Hz)
@@ -125,6 +133,74 @@ def _make_button_target(on_click):
     return t
 
 
+_PanelCls = None
+
+
+def _make_panel(rect, style, backing, defer):
+    """无边框 NonactivatingPanel。
+
+    ⚠️ 必须 override **ObjC 名** `canBecomeKeyWindow`: 窗口无标题栏时基类返 False,
+    AppKit 会据此放弃把它变成 key window —— 那样输入框永远拿不到键盘。
+    Swift 名 `canBecomeKey` 无效(PyObjC 会把它注册进 runtime, 但 AppKit 从不调用)。
+    `canBecomeMainWindow` 不用动: key 与 main 无关。
+    类只定义一次(重复定义会报 override 错), 同 _ButtonTargetCls。
+    """
+    global _PanelCls
+    from AppKit import NSPanel
+    if _PanelCls is None:
+        class _Panel(NSPanel):
+            def canBecomeKeyWindow(self):           # noqa: N802
+                return True
+
+        _PanelCls = _Panel
+    return _PanelCls.alloc().initWithContentRect_styleMask_backing_defer_(
+        rect, style, backing, defer)
+
+
+_InputDelegateCls = None
+
+
+def _make_input_delegate(on_submit, on_cancel, on_focus=None, on_blur=None):
+    """输入框委托: 回车/Esc 走 doCommandBySelector, 聚焦/失焦走 controlTextDid*Editing。
+
+    ⚠️ 不用 target/action: 后者在 Tab 与失焦时也会触发(换个焦点 = 误提交)。
+    收到的 selectors 是运行时字符串: `insertNewline:`(Return) / `cancelOperation:`(Esc)。
+    PyObjC 把 `control:textView:doCommandBySelector:` 映射成下划线形式的方法名。
+    """
+    global _InputDelegateCls
+    from AppKit import NSObject
+    if _InputDelegateCls is None:
+        class _InputDelegate(NSObject):
+            def control_textView_doCommandBySelector_(self, control, textview, selector):  # noqa: N802
+                if selector == "insertNewline:":
+                    cb = getattr(self, "_on_submit", None)
+                elif selector == "cancelOperation:":
+                    cb = getattr(self, "_on_cancel", None)
+                else:
+                    return False            # 方向键/Tab/⌘C 等交给默认实现
+                if cb:
+                    cb()
+                return True
+
+            def controlTextDidBeginEditing_(self, note):        # noqa: N802
+                cb = getattr(self, "_on_focus", None)
+                if cb:
+                    cb()
+
+            def controlTextDidEndEditing_(self, note):          # noqa: N802
+                cb = getattr(self, "_on_blur", None)
+                if cb:
+                    cb()
+
+        _InputDelegateCls = _InputDelegate
+    d = _InputDelegateCls.alloc().init()
+    d._on_submit = on_submit
+    d._on_cancel = on_cancel
+    d._on_focus = on_focus
+    d._on_blur = on_blur
+    return d
+
+
 _ClickViewCls = None
 
 
@@ -135,8 +211,8 @@ def _make_click_view(on_click):
     NSCellHitNone, hitTest 直接把它漏掉 —— 我们要的恰恰是一块**没有内容**的
     矩形。NSView 只看 frame, 稳。
 
-    ⚠️ acceptsFirstMouse 必须 True: 面板是 NonactivatingPanel, 永不成为 key,
-    而默认实现会把"未激活窗口上的第一次点击"吞掉用于激活 —— 那正好是用户
+    ⚠️ acceptsFirstMouse 必须 True: 面板是 NonactivatingPanel, 从不激活 app,
+    默认实现会把"非 key 窗口上的第一次点击"吞掉用于激活 —— 那正好是用户
     唯一的那次点击。
     """
     global _ClickViewCls
@@ -158,20 +234,22 @@ def _make_click_view(on_click):
 
 
 class Overlay:
-    def __init__(self, on_quit=None, on_flag=None, on_translate=None):
+    def __init__(self, on_quit=None, on_flag=None, on_translate=None, on_submit=None):
         from AppKit import (NSWindow, NSPanel, NSMakeRect, NSColor, NSTextField,
                             NSVisualEffectView, NSVisualEffectMaterialHUDWindow,
                             NSVisualEffectStateActive, NSWindowStyleMaskBorderless,
                             NSWindowStyleMaskNonactivatingPanel, NSBackingStoreBuffered,
                             NSTextAlignmentLeft, NSFont, NSLineBreakByWordWrapping,
                             NSLineBreakByTruncatingTail, NSView,
-                            NSFloatingWindowLevel, NSWindowCollectionBehaviorCanJoinAllSpaces)
+                            NSFloatingWindowLevel, NSWindowCollectionBehaviorCanJoinAllSpaces,
+                            NSFocusRingTypeNone)
 
         self._width = WIDTH
         self._height = HEIGHT
         self._on_quit = on_quit or (lambda: None)
         self._on_flag = on_flag or (lambda: None)
         self._on_translate = on_translate or (lambda on: None)
+        self._on_submit = on_submit or (lambda q: None)
         # 全量历史(不再 deque(maxlen=3) —— 展开态要能翻到更早的句子)。
         # 一节课 544 句约 <200KB, 无需上限。
         self._history: list = []
@@ -189,8 +267,9 @@ class Overlay:
                                   # 不保存就会被 Python GC 回收 -> target() 变 None -> 点击失效
 
         style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
-        self._panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, self._width, self._height), style, NSBackingStoreBuffered, False)
+        self._panel = _make_panel(
+            NSMakeRect(0, 0, self._width, self._height), style,
+            NSBackingStoreBuffered, False)
         self._panel.setLevel_(NSFloatingWindowLevel)
         self._panel.setCollectionBehavior_(NSWindowCollectionBehaviorCanJoinAllSpaces)
         self._panel.setOpaque_(False)
@@ -218,6 +297,10 @@ class Overlay:
         self._scrim = scrim
 
         self._NSFont, self._NSTF = NSFont, NSTextField
+        # 存成实例属性而不靠局部作用域: 后面 _set_rule_focus / _on_input_focus
+        # 是**方法**, 那里没有 __init__ 的局部名 —— 早先直接写 NSColor 会 NameError,
+        # 且被 except 吞掉, 症状是"细线永远不上色"这种完全静默的失败。
+        self._NSColor = NSColor
         self._align, self._wrap = NSTextAlignmentLeft, NSLineBreakByWordWrapping
         self._trunc = NSLineBreakByTruncatingTail
 
@@ -249,6 +332,54 @@ class Overlay:
         self._draft_zh = self._label(12.5, NSColor.whiteColor().colorWithAlphaComponent_(0.78), 1)
         self._draft_zh_val = ""
         ve.addSubview_(self._draft_zh)
+
+        # ---- 单行输入框(Phase 1: 只把文字交给回调, 问答引擎是 Phase 2) ----
+        # 钉在面板最底部(见 _layout 的自下而上游标)。不用 _label(): 那个强制
+        # setEditable_(False)。⚠️ setDelegate_ 与 setTarget_ 一样是**弱引用** ——
+        # 委托对象必须进 _targets 保命, 否则被 GC 后回车直接没反应。
+        # 裸 NSTextField 即可: 实测非 key 面板上的首次点击能正常拿到 field editor
+        # (NSControl 对控件默认 acceptsFirstMouse=YES), 不需要子类。
+        #
+        # 视觉: 与面板里其它文字**同一套规则**, 不填背景色。
+        # 既定决策是"可读性由紧凑描边承担而非填充色"(见 SCRIM_ALPHA 注释), 其它
+        # 内容都是直接浮在玻璃上、靠描边立住; 一个黑方块会立刻读成贴上去的外来
+        # 控件。改成字段下方一条 1px 细线: 平时近乎隐形, 聚焦时才亮 —— 它的身份
+        # 是"字幕流里一条可以打字的线", 不是表单框。
+        self._input = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 0, 0))
+        self._input.setEditable_(True)
+        self._input.setSelectable_(True)
+        self._input.setBezeled_(False)
+        self._input.setBordered_(False)
+        self._input.setDrawsBackground_(False)
+        self._input.setFocusRingType_(NSFocusRingTypeNone)  # 去掉 AppKit 默认蓝环
+        self._input.setFont_(NSFont.systemFontOfSize_weight_(14.0, WEIGHT))
+        self._input.setTextColor_(NSColor.whiteColor())
+        self._input.setMaximumNumberOfLines_(1)
+        self._input.setLineBreakMode_(self._trunc)      # Tail 模式强制单行(见顶部注释)
+        self._input.setStringValue_("")
+        self._input.setShadow_(self._shadow)            # 与所有其它文字同一描边
+        self._input.setToolTip_("Enter 提交 · Esc 取消")
+        try:
+            from AppKit import NSAttributedString, NSForegroundColorAttributeName
+            self._input.setPlaceholderAttributedString_(
+                NSAttributedString.alloc().initWithString_attributes_(
+                    "提问或追问…",
+                    {NSForegroundColorAttributeName:
+                     NSColor.whiteColor().colorWithAlphaComponent_(0.50)}))
+        except Exception:                               # noqa: BLE001
+            self._input.setPlaceholderString_("提问或追问…")
+        self._input_delegate = _make_input_delegate(
+            self._submit_input, self._cancel_input,
+            self._on_input_focus, self._on_input_blur)
+        self._targets.append(self._input_delegate)      # 保持强引用, 防 GC
+        self._input.setDelegate_(self._input_delegate)
+        ve.addSubview_(self._input)
+        # 细线: 1px NSView, 颜色随焦点切换(见 _on_input_focus / _on_input_blur)。
+        # 用与 scrim 同一个 pattern(setWantsLayer_ + layer().setBackgroundColor_)。
+        self._input_rule = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 0, 0))
+        self._input_rule.setWantsLayer_(True)
+        self._set_rule_focus(False)
+        ve.addSubview_(self._input_rule)
         # 术语行(命中术语表时显示, 暖黄色); 钉在面板底部, 不随句子滚动。
         # 默认**只列术语名**, 完整解析要点击才展开(见 _on_gloss_click)。
         self._gloss_lbl = self._label(
@@ -266,6 +397,7 @@ class Overlay:
         # 所以穿透只从菜单栏 🎧 切换。
         self._through = False
         self._translating = True
+        self._engine_warn = False        # 云端翻译降级中(菜单栏图标提示用)
         self._btn_trans = self._button(
             "译 开", self._toggle_translate,
             "开启/关闭中文翻译。关闭后只出英文 —— 英文仍做上下文矫正(ASR 错听照修)，"
@@ -317,7 +449,14 @@ class Overlay:
         b.setFont_(self._NSFont.systemFontOfSize_(14))
         if tooltip:
             b.setToolTip_(tooltip)
-        target = _make_button_target(cb)
+
+        def _clicked():
+            # 点按钮不是"要打字" -> 先交还 key, 再做事。否则面板会把用户在自己
+            # app 里按的快捷键吃掉(见 _release_focus 的键盘回归说明)。
+            self._release_focus()
+            cb()
+
+        target = _make_button_target(_clicked)
         self._targets.append(target)          # 保持强引用, 防 GC(否则 target 变 None)
         b.setTarget_(target); b.setAction_("clicked:")
         self._ve.addSubview_(b)
@@ -357,6 +496,78 @@ class Overlay:
             else NSScreen.mainScreen().visibleFrame()
         self._panel.setFrameOrigin_((scr.origin.x + scr.size.width - self._width - 40,
                                      scr.origin.y + 78))
+
+    # ---- 输入框 ----
+    def _is_editing(self) -> bool:
+        """用户此刻是否真的在输入框里打字。
+
+        field editor 存在 = 正在编辑。NSTextField 拿到焦点时 first responder 是
+        AppKit 临时建的 field editor(NSTextView), **不是输入框自己** —— 所以判据
+        不是 `firstResponder() is self._input`。"""
+        try:
+            return self._input.currentEditor() is not None
+        except Exception:                     # noqa: BLE001
+            return False
+
+    def _set_rule_focus(self, on: bool) -> None:
+        """细线: 白 α0.18(静止) <-> 白 α0.45(聚焦)。
+
+        ⚠️ **刻意不用暖黄**。这个 app 的层次轴是**白字 alpha**, 不是色相
+        (正文 1.00 / 英文 0.80 / 草稿 0.50); 而暖黄在这个世界里**已经被术语行占用** ——
+        让它同时表示"聚焦"会稀释那个信号。复用已承载语义的强调色是稀释, 不是节省。
+        所以聚焦只沿用自己的语言: 把细线提到草稿那一档(光标同理, 见 _on_input_focus)。
+        """
+        try:
+            c = self._NSColor.whiteColor().colorWithAlphaComponent_(
+                RULE_A_FOCUS if on else RULE_A)
+            self._input_rule.layer().setBackgroundColor_(c.CGColor())
+        except Exception:                     # noqa: BLE001
+            pass
+
+    def _on_input_focus(self) -> None:
+        self._set_rule_focus(True)
+        try:
+            # 光标显式设白。⚠️ **不设的话 AppKit 给的是 Catalog 语义色
+            # `System textInsertionPointColor`** —— 实测 sRGB (0.0, 0.478, 1.0),
+            # 即系统蓝, 比暖黄更外来。
+            # ⚠️ 且 setInsertionPointColor_ 在 NSTextField 上**不存在**(实测),
+            # 它在 NSTextView 上 —— 必须经 field editor 设。
+            ed = self._input.currentEditor()
+            if ed is not None:
+                ed.setInsertionPointColor_(self._NSColor.whiteColor())
+        except Exception:                     # noqa: BLE001
+            pass
+
+    def _on_input_blur(self) -> None:
+        self._set_rule_focus(False)
+
+    def _release_focus(self):
+        """主动把 key window 交还出去。
+
+        ⚠️ 为什么每次交互都要调: override canBecomeKeyWindow=True 之后, AppKit
+        不再查询 needsPanelToBecomeKey —— 点面板任何地方(包括顶栏按钮)都可能让
+        面板成为 key window, 于是**用户在自己 app 里按的键会被面板吃掉**
+        (改之前面板永远不会 key, 所以这条回归是本次改动引入的)。
+        "用户没在打字"的一切交互结束后都必须退让。
+        """
+        try:
+            self._panel.makeFirstResponder_(None)
+            self._panel.resignKeyWindow()
+        except Exception:                     # noqa: BLE001
+            pass
+
+    def _submit_input(self):
+        """回车: 取文字 -> 清空 -> 交还焦点 -> 交出去。空输入只清空。"""
+        text = (self._input.stringValue() or "").strip()
+        self._input.setStringValue_("")
+        self._release_focus()
+        if text:
+            self._on_submit(text)
+
+    def _cancel_input(self):
+        """Esc: 清空 + 交还焦点。"""
+        self._input.setStringValue_("")
+        self._release_focus()
 
     # ---- 展开 / 收回 ----
     def _gloss_h(self) -> float:
@@ -421,7 +632,16 @@ class Overlay:
         w = self._width - 2 * pad
         y = BOTTOM_PAD
         gh = self._gloss_h()
-        # 💡 钉在面板最底部: 收回态一行(尾部省略), 展开态三行铺满完整解析。
+        # ⌨ 输入行钉在面板最底部。y 从这里往上走, 与 _pinned() 的加和顺序必须
+        # 逐项一致(输入行 + 间隔 + 💡 + 间隔 + 草稿 + 间隔 + 草稿译文),
+        # 否则面板总高与内容会错位。
+        # 细线在输入框正下方 1px, 输入框占剩下的 INPUT_H - RULE_H —— 文字底部贴着
+        # 细线, 细线即"基线"。两者高度之和仍等于 INPUT_H, 所以 _pinned() / BASE_H /
+        # 高度重算都不用动。
+        self._input_rule.setFrame_(NSMakeRect(pad, y, w, RULE_H))
+        self._input.setFrame_(NSMakeRect(pad, y + RULE_H, w, INPUT_H - RULE_H))
+        y += INPUT_H + INPUT_GAP
+        # 💡 钉在固定区顶部: 收回态一行(尾部省略), 展开态三行铺满完整解析。
         # 文字不变, 只改 frame 高度/行数上限/换行模式 —— 一份字符串两态通用。
         # (AppKit: 要换行必须 WordWrapping; 单行才用 TruncatingTail 拿省略号。)
         self._gloss_lbl.setMaximumNumberOfLines_(1 if self._collapsed else 3)
@@ -448,11 +668,41 @@ class Overlay:
         self._ve.setFrame_(self._panel.contentView().bounds())
         self._scrim.setFrame_(self._ve.bounds())
 
+    def _install_edit_menu(self):
+        """挂最小 Edit 菜单。
+
+        ⚠️ 为什么需要: Accessory app 默认没有主菜单, 而 ⌘X/⌘C/⌘V/⌘A 是**经主菜单
+        的 keyEquivalent** 路由到 first responder 的 —— 不挂这份菜单, 输入框里
+        这些键就是死的。这是计划里标注的"最大残留风险"; 构造已通过, 但
+        **运行时是否真生效需要真人按键验证**(见 Phase 1 未验证项)。
+        """
+        try:
+            from AppKit import NSApplication, NSMenu, NSMenuItem
+            app = NSApplication.sharedApplication()
+            if app.mainMenu() is not None:
+                return                        # 已有主菜单就别覆盖
+            main = NSMenu.alloc().init()
+            holder = NSMenuItem.alloc().init()
+            edit = NSMenu.alloc().initWithTitle_("Edit")
+            # target 留空 -> 走响应链(编辑动作由当前 field editor 实现)
+            for title, sel, key in (("Cut", "cut:", "x"), ("Copy", "copy:", "c"),
+                                    ("Paste", "paste:", "v"),
+                                    ("Select All", "selectAll:", "a")):
+                edit.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                    title, sel, key))
+            holder.setSubmenu_(edit)
+            main.addItem_(holder)
+            app.setMainMenu_(main)
+        except Exception:                     # noqa: BLE001
+            pass
+
     # ---- 对外 ----
     def show(self):
         from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
         app = NSApplication.sharedApplication()
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        self._install_edit_menu()
+        # orderFrontRegardless 不变: 显示不激活 app(绝不调 NSApp.activate —— 已废弃且会抢焦点)
         self._panel.orderFrontRegardless()
 
     def close(self) -> None:
@@ -514,6 +764,7 @@ class Overlay:
         """点术语行: 未钉 -> 钉住当前术语展开解析; 已钉 -> 取消, 退回术语名列表。"""
         self._pinned_term = None if self._pinned_term is not None \
             else (self._terms[0] if self._terms else None)
+        self._release_focus()        # 点这里也会让面板变 key(见 _release_focus)
         self._mark_dirty(urgent=True)
 
     def _gloss_text(self) -> str:
@@ -593,6 +844,15 @@ class Overlay:
                 break
             app.sendEvent_(ev)
             busy = True
+        # 键盘不自留 —— 用**不变量**兜住所有路径, 而不是逐个交互点打补丁。
+        # override canBecomeKeyWindow=True 之后, 点面板的**任何**非控件区域
+        # (转录区 / 草稿行 / 顶栏空白 / 缝隙)都会让面板变成 key window 并赖在那里,
+        # 于是用户在别的 app 里按的键被吃掉。独立验证实测确认了这四条路径都中招,
+        # 而逐点补 _release_focus() 只能覆盖已知的那几个。
+        # 判据: 只有真的在编辑输入框时, 面板才允许是 key。退让后 isKeyWindow()
+        # 转 False, 本条不再触发(不是每轮都调)。
+        if self._panel.isKeyWindow() and not self._is_editing():
+            self._release_focus()
         now = time.monotonic()
         if busy:
             self._last_ev_t = now
@@ -653,6 +913,22 @@ class Overlay:
         if getattr(self, "_status", None) and getattr(self, "_mi_through", None):
             self._mi_through.setTitle_(
                 "关闭鼠标穿透" if self._through else "开启鼠标穿透")
+
+    def notice(self, msg: str, warn: bool = False):
+        """引擎状态通知(云端降级/恢复), 由 main 经 streamq 转到主线程调用。
+
+        字幕区不打断 —— 课上看的是内容; 状态走菜单栏图标(🎧→⚠️)加 tooltip,
+        终端里留一份文字记录。"""
+        self._engine_warn = warn
+        status = getattr(self, "_status", None)
+        if status is not None:
+            try:
+                btn = status.button()
+                btn.setTitle_("⚠️" if warn else "🎧")
+                btn.setToolTip_(msg if warn else "")
+            except Exception:                 # noqa: BLE001
+                pass
+        print(("⚠ " if warn else "✅ ") + msg, flush=True)
 
     # ---- 渲染 ----
     def _render(self):

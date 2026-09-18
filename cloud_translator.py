@@ -9,21 +9,32 @@ DEEPSEEK_API_KEY, 再次 ~/lecture-live/.deepseek_key 文件。
 from __future__ import annotations
 import json, os, pathlib
 
-from translator import Result, _StreamParser, _clean_fix
+from translator import Result, _StreamParser, _clean_fix, domain_block
 
 # 云端用**英文** system prompt: 实测比中文指令首字快约 15%(0.51s vs 0.60s),
 # 译文也更自然; 符合 DeepSeek 官方"提示词保持单一语言"的建议。
 SYSTEM_PROMPT_CLOUD = """You are a simultaneous interpreter for university lectures.
-The user gives one utterance of English lecture speech (already transcribed by ASR), plus recent context.
+The user gives one utterance of English lecture speech (already transcribed by ASR),
+the course title, the course terminology, and recent context.
 
 Output exactly two lines and nothing else:
-ZH: <fluent, accurate Chinese translation>
-EN: <the same sentence with obvious ASR mishearings fixed; keep correct wording as-is>
+ZH: <fluent, accurate Chinese translation OF THE CORRECTED SENTENCE>
+EN: <the same sentence with ASR mishearings fixed>
 
 Rules:
-1) Chinese must read naturally; render technical terms the way Chinese textbooks do.
-2) Only fix clear ASR errors (homophones, missing words, proper nouns). Do NOT rewrite or polish correct text.
-3) If the input is just a list of terms or syllabus keywords, translate them word by word;
+1) Silently fix mishearings FIRST, then translate the fixed reading. If you change a word
+   on the EN line, the ZH line must reflect the fix — never translate an uncorrected
+   garble literally.
+2) Fix only clear ASR mishearings (homophones, missing words, proper nouns, technical
+   terms). When a word is close in sound to a course term, it is almost certainly a
+   mishearing — use the term. Examples:
+   "we're max chocolate properties" -> "we're macroscopic properties";
+   "how we measure the stalcy" -> "how we measure the statistics";
+   "average on the lacker level" -> "average on the lattice level".
+3) Keep wording that is already correct and not close to any term exactly as-is.
+   Do NOT rewrite, polish, reorder or summarise it (guard against over-correction).
+4) Render technical terms the way Chinese textbooks do.
+5) If the input is just a list of terms or syllabus keywords, translate them word by word;
    never output a summary heading like "课程术语" or "翻译". """
 
 DRAFT_SYSTEM_CLOUD = ("You are a real-time subtitle translator. "
@@ -32,11 +43,17 @@ DRAFT_SYSTEM_CLOUD = ("You are a real-time subtitle translator. "
 
 # 只矫正、不翻译。同样用英文 prompt(与 SYSTEM_PROMPT_CLOUD 同理由: 首字更快)。
 FIX_SYSTEM_CLOUD = """You are an ASR transcript corrector for university lectures.
-The user gives one utterance of English lecture speech transcribed by ASR, plus recent context.
+The user gives one utterance of English lecture speech transcribed by ASR, the course title,
+the course terminology, and recent context.
 
 Fix ONLY clear ASR mishearings (homophones, missing words, proper nouns, technical terms).
-Keep wording that is already correct exactly as-is. Do NOT rewrite, polish, shorten,
-reorder or summarise it.
+When a word is close in sound to a course term, it is almost certainly a mishearing — use
+the term. Examples:
+"we're max chocolate properties" -> "we're macroscopic properties";
+"how we measure the stalcy" -> "how we measure the statistics";
+"average on the lacker level" -> "average on the lattice level".
+Keep wording that is already correct and not close to any term exactly as-is. Do NOT
+rewrite, polish, shorten, reorder or summarise it (guard against over-correction).
 
 Output ONLY the corrected English sentence on one line. No label, no quotes, no explanation,
 and never any Chinese."""
@@ -74,16 +91,27 @@ class CloudTranslator:
 
     def __init__(self, api_key: str, model: str, base_url: str = DEFAULT_BASE,
                  glossary_terms: list[str] | None = None, max_context: int = 2,
-                 timeout: float = 30.0, core: list[str] | None = None):
+                 timeout: float = 30.0, core: list[str] | None = None,
+                 course_terms: list[str] | None = None, domain: str = "",
+                 collect_usage: bool = False):
         import httpx
-        self._httpx = httpx
         self._key = api_key
         self._model = model
         self._base = base_url.rstrip("/")
         self._terms = glossary_terms or []
         self._core = core or []
+        self._course_terms = course_terms or []
+        self._domain = domain
         self._max_ctx = max_context
         self._timeout = timeout
+        # 汇总最近一次请求的 usage(含 prompt_cache_hit_tokens / miss)。
+        # 开着才给请求加 stream_options, 否则线上请求体一字不变。
+        self._collect_usage = collect_usage
+        self.last_usage: dict = {}
+        # 共享连接池: 一节课上千次请求, 每次重建 TLS 握手白白多 ~100ms 首字延迟。
+        # Client 对并发请求线程安全(官方文档保证); 断网时池中陈旧连接会抛错,
+        # 由 EngineRouter 降级 -> 探针恢复, 语义与每次新建连接一致。
+        self._client = httpx.Client(timeout=timeout)
 
     def warmup(self) -> None:
         pass                                   # 云端无需预热
@@ -100,9 +128,12 @@ class CloudTranslator:
         payload = {"model": self._model, "messages": messages,
                    "stream": True, "max_tokens": max_tokens, "temperature": 0.2,
                    "thinking": {"type": "disabled"}}
-        with self._httpx.stream("POST", f"{self._base}/chat/completions",
-                                headers=self._headers(), json=payload,
-                                timeout=self._timeout) as r:
+        if self._collect_usage:
+            # usage 只在流末尾那个 choices 为空的块里返回, 由下面的循环接住。
+            payload["stream_options"] = {"include_usage": True}
+        with self._client.stream("POST", f"{self._base}/chat/completions",
+                                 headers=self._headers(), json=payload,
+                                 timeout=self._timeout) as r:
             r.raise_for_status()
             for line in r.iter_lines():
                 if not line or not line.startswith("data:"):
@@ -112,26 +143,44 @@ class CloudTranslator:
                     break
                 try:
                     obj = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("usage"):
+                    self.last_usage = obj["usage"]
+                try:
                     delta = obj["choices"][0].get("delta", {}).get("content")
-                except (json.JSONDecodeError, KeyError, IndexError):
+                except (KeyError, IndexError):
                     continue
                 if delta:
                     yield delta
 
+    def probe(self) -> bool:
+        """云端可用性探针(降级后的自动恢复用): 1 token, 尽量便宜、尽量短。
+        探针失败只当"还没恢复", 不产生副作用; 成功由 EngineRouter 切回云端。"""
+        try:
+            for _ in self._stream_chat(
+                    [{"role": "user", "content": "ping"}], max_tokens=1):
+                return True
+            return False
+        except Exception:                        # noqa: BLE001
+            return False
+
     def _terms_block(self, en: str) -> str:
         from translator import select_terms
-        return select_terms(en, self._terms, core=self._core)
+        return select_terms(en, self._terms, core=self._core,
+                            always=self._course_terms)
 
     # ---- 与本地 Translator 同接口 ----
     def fix_and_translate_stream(self, en: str, context: list[str],
                                  on_zh=None, on_en=None) -> Result:
         ctx = context[-self._max_ctx:]
         ctx_block = "\n".join(f"- {c}" for c in ctx) if ctx else "(none)"
-        user = (f"Course terms:\n{self._terms_block(en)}\n\n"
+        user = (f"{domain_block(self._domain)}"
+                f"Course terms:\n{self._terms_block(en)}\n\n"
                 f"Recent context (already corrected):\n{ctx_block}\n\n"
                 f"ASR utterance:\n{en}\n\n"
                 f"Now translate the ASR utterance above into Chinese and output exactly:\n"
-                f"ZH: <Chinese translation>\n"
+                f"ZH: <Chinese translation of the CORRECTED sentence>\n"
                 f"EN: <same utterance with ASR mishearings fixed>\n"
                 f"Do not repeat the course-terms list. No headings."
                 )
@@ -153,7 +202,8 @@ class CloudTranslator:
     def fix_stream(self, en: str, context: list[str], on_en=None) -> str:
         ctx = context[-self._max_ctx:]
         ctx_block = "\n".join(f"- {c}" for c in ctx) if ctx else "(none)"
-        user = (f"Course terms:\n{self._terms_block(en)}\n\n"
+        user = (f"{domain_block(self._domain)}"
+                f"Course terms:\n{self._terms_block(en)}\n\n"
                 f"Recent context (already corrected):\n{ctx_block}\n\n"
                 f"ASR utterance:\n{en}\n\n"
                 f"Now output that same utterance with ASR mishearings fixed. "
@@ -201,7 +251,9 @@ class CloudTranslator:
 
 def load_translator(api_key: str, model: str, glossary_path: str | None,
                     max_context: int = 2, course: str | None = None):
-    from translator import load_terms, core_terms
+    from translator import (load_terms, core_terms, course_term_list, course_title)
     return CloudTranslator(api_key, model,
                            glossary_terms=load_terms(glossary_path, course),
-                           max_context=max_context, core=core_terms(course))
+                           max_context=max_context, core=core_terms(course),
+                           course_terms=course_term_list(glossary_path, course),
+                           domain=course_title(glossary_path, course))

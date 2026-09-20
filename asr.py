@@ -11,10 +11,25 @@ import glob, os, threading
 
 
 def _find_file(dirname: str, patterns) -> str:
+    """按 patterns 的**优先级**取第一个命中的文件。
+
+    ⚠️ 两个坑:
+    1) glob 的返回顺序取决于文件系统目录迭代顺序(OS 相关且不确定), 不排序则
+       同一目录在不同机器/不同次运行可能选到不同文件;
+    2) 通配("*.txt")命中多个时**不许猜** —— 猜错会静默用错词表(README.txt 也是
+       .txt), 或 int8 与非 int8 混用, 而识别结果是"看起来正常但全错"。报出来
+       让调用方决定。精确名(无通配)最多命中一个, 不受此限。
+    """
     for pat in patterns:
-        hits = glob.glob(os.path.join(dirname, pat))
-        if hits:
-            return hits[0]
+        hits = sorted(glob.glob(os.path.join(dirname, pat)))
+        if not hits:
+            continue
+        if "*" in pat and len(hits) > 1:
+            names = [os.path.basename(h) for h in hits[:6]]
+            raise FileNotFoundError(
+                f"模型目录 {dirname} 里 {pat} 命中 {len(hits)} 个文件, "
+                f"无法确定用哪个: {names}{' …' if len(hits) > 6 else ''}")
+        return hits[0]
     raise FileNotFoundError(
         f"模型目录 {dirname} 里找不到 {' 或 '.join(patterns)}")
 

@@ -763,6 +763,11 @@ def run(args) -> None:
         # 外层 try/finally 保证用户在等待中再按一次 Ctrl+C 也会走到 writer.close。
         try:
             seg.flush()
+            # 收尾诊断: 句尾有没有被切、有没有整段丢掉。一切正常时 report() 为空串,
+            # 不产生噪音; 有数就说明这节课的转录值得回头看那几处。
+            _diag = seg.report()
+            if _diag:
+                echo(_diag)
             finalq.put(_QUIT)
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:

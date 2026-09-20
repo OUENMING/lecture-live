@@ -48,12 +48,16 @@ class SileroVad:
         self._vad = sherpa_onnx.VadModel.create(cfg)
         self._ws = self._vad.window_size()
         self._rem = np.zeros(0, dtype=np.float32)
+        # 本块里判为语音的窗占比(0~1), 供尾部诊断读 —— 0.4 阈值下"没过阈值"
+        # 与"完全没有语音"是两件事, 后者才说明这块是真静音。
+        self.last_ratio = 0.0
 
     def is_speech(self, chunk: np.ndarray) -> bool:
         buf = np.concatenate([self._rem, chunk.astype(np.float32)])
         n = (len(buf) // self._ws) * self._ws
         if n == 0:
             self._rem = buf
+            self.last_ratio = 0.0
             return False
         votes = total = 0
         for i in range(0, n, self._ws):
@@ -61,6 +65,7 @@ class SileroVad:
             if self._vad.is_speech(buf[i:i + self._ws]):
                 votes += 1
         self._rem = buf[n:]
+        self.last_ratio = votes / total
         return votes * 2 >= total          # 多数票
 
 
@@ -70,12 +75,14 @@ class _EnergyVad:
     def __init__(self, min_rms: float = 0.008):
         self.min_rms = min_rms
         self.noise_floor = min_rms
+        self.last_ratio = 0.0              # 能量 VAD 只有二值, 见 SileroVad.last_ratio
 
     def is_speech(self, chunk: np.ndarray) -> bool:
         r = float(np.sqrt(np.mean(chunk ** 2))) if chunk.size else 0.0
         sp = r > max(self.min_rms, self.noise_floor * 2.5)
         if not sp:
             self.noise_floor = 0.99 * self.noise_floor + 0.01 * max(r, 1e-6)
+        self.last_ratio = 1.0 if sp else 0.0
         return sp
 
 
@@ -111,6 +118,17 @@ class Segmenter:
         self.silence_run = 0.0
         self.last_partial = 0.0
         self.last_speech_s: float | None = None
+        # --- 尾部诊断(只计数, 绝不参与切分判定) ---
+        # 对应 Handy 的 VadTailReport: 把"句尾被切掉 / 整段被丢"变成可观测的数字,
+        # 而不是只能事后翻音频猜。四个数各有明确含义, 全为零时收尾不打印任何东西:
+        #   cuts         正常静音断句次数
+        #   hard_cuts    命中 12s 上限被硬切 —— 段内没有够长的静音, 切点不对齐词边界
+        #   dropped      收尾时因不足 MIN_UTTERANCE_S 被整段丢弃 —— 真实的丢内容
+        #   weak_blocks  说话期间判静音、但块里其实**有**语音窗的块数, 会让
+        #                silence_run 多走一格。实测远场课堂里很小(6 块/3min), 不是
+        #                断句不准的主因 —— 真正的大头是 hard_cuts。
+        self.diag = {"cuts": 0, "hard_cuts": 0, "dropped": 0,
+                     "dropped_s": 0.0, "weak_blocks": 0}
 
     @property
     def dur(self) -> float:
@@ -138,7 +156,26 @@ class Segmenter:
             self._reset()
             self.on_utterance_end(buf)
         else:
+            if self.has_speech:        # 有语音但不够长 -> 整段丢弃, 记一笔
+                self.diag["dropped"] += 1
+                self.diag["dropped_s"] += self.dur
             self._reset()
+
+    def report(self) -> str:
+        """收尾诊断快照(对应 Handy 的 VadTailReport)。只报**发生过**的事,
+        一切正常时返回空串 —— 不产生噪音。三个可疑数各自指向不同的修法。"""
+        d = self.diag
+        if not (d["hard_cuts"] or d["dropped"] or d["weak_blocks"]):
+            return ""
+        bits = [f"断句 {d['cuts']} 次"]
+        if d["hard_cuts"]:
+            bits.append(f"12s 硬切 {d['hard_cuts']} 次(段内没有够长的静音, 只能撞上限切)")
+        if d["dropped"]:
+            bits.append(f"收尾丢弃 {d['dropped']} 段/{d['dropped_s']:.1f}s"
+                        f"(有语音但不足 {MIN_UTTERANCE_S}s)")
+        if d["weak_blocks"]:
+            bits.append(f"句内弱音 {d['weak_blocks']} 块(有语音窗却没过阈值)")
+        return "🎧 VAD 诊断: " + " · ".join(bits)
 
     def accept(self, chunk: np.ndarray) -> None:
         chunk = chunk.astype(np.float32, copy=False)
@@ -159,6 +196,11 @@ class Segmenter:
                 self._pre_roll.append(chunk)
                 return
 
+        # 已在说话中、这块判静音、但块里确实有语音窗 -> VAD 漏检。
+        # 记它是因为这类块会让 silence_run 提前走完, 是"切早了"的直接嫌疑。
+        if not sp and float(getattr(self._vad, "last_ratio", 0.0)) > 0.0:
+            self.diag["weak_blocks"] += 1
+
         if sp:
             self.is_speaking = True
             self.silence_run = 0.0
@@ -176,8 +218,15 @@ class Segmenter:
             self.silence_run += CHUNK_DUR
 
         dur = self.dur
-        if (self.silence_run >= _end_silence_threshold(dur) and dur >= MIN_UTTERANCE_S) \
-                or dur >= MAX_UTTERANCE_S:
+        silence_cut = (self.silence_run >= _end_silence_threshold(dur)
+                       and dur >= MIN_UTTERANCE_S)
+        hard_cut = dur >= MAX_UTTERANCE_S
+        if silence_cut or hard_cut:
+            # 诊断: 分得清"正常断句"和"撞上限硬切"—— 后者必然切在词中间
+            if hard_cut and not silence_cut:
+                self.diag["hard_cuts"] += 1
+            else:
+                self.diag["cuts"] += 1
             buf = self._buf().copy()
             self._reset()
             if len(buf) / SR >= MIN_UTTERANCE_S:

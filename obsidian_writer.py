@@ -214,6 +214,24 @@ def _clean_review(obj) -> dict:
     return r
 
 
+# 精修状态 -> 写进笔记的一行提醒。终端的 ⚠ 翻页就没了, 笔记得自己留证据:
+# 一节课精修没生效时, 笔记外观与精修成功时**完全一样**(实测直播版 65% 的句子与原始 ASR 相同),
+# 事后分不出来就意味着把未精修的转录当成了精修版在读。
+_POLISH_NOTE = {
+    "off": "⚠ 本课**未精修** —— 未配 API key 或精修已关, EN/ZH 为直播版。",
+    "failed": "⚠ 本课**精修未生效** —— 调用失败或返回结构异常, EN/ZH 为直播版。",
+    "partial": "⚠ 本课**部分批次精修失败** —— 失败批次保留直播版, 见下逐句转录。",
+}
+
+
+def _polish_state(stats: dict | None) -> str:
+    """精修到底生效了没有。失败是 fail-soft 的(见 polish.polish_entries): 全失败时
+    返回值与全成功时一模一样, 只改了几句话也算"生效" —— 所以判据是 applied。"""
+    if not stats or stats.get("applied", 0) == 0:
+        return "failed"
+    return "partial" if stats.get("failed") else "ok"
+
+
 class ObsidianWriter:
     def __init__(self, vault: str | None, course: str | None, mode: str = "ask",
                  api_key: str | None = None, model: str = "deepseek-flash",
@@ -462,7 +480,8 @@ class ObsidianWriter:
 
     # ---- 组装双层笔记 ----
     def _render_note(self, entries: list[dict], review: dict,
-                     qa_items: list[str] | None = None) -> str:
+                     qa_items: list[str] | None = None,
+                     polish_state: str = "ok") -> str:
         ts0 = entries[0]["ts"] if entries else "—"
         ts1 = entries[-1]["ts"] if entries else "—"
         stars = [e for e in entries if e["star"]]
@@ -476,13 +495,18 @@ class ObsidianWriter:
               f"course: {self._course}",
               "tags: [lecture, live-transcript, review]",
               "type: lecture-notes",
+              f"polish: {polish_state}",
               "---", "",
               f"# {self._course} · 课堂笔记 {self._date}", "",
               "> [!info] 本课信息", ]
         if title:
             L.append(f"> 📖 **{title}**")
         L += [f"> 🕐 {ts0} – {ts1} · 🗣 {len(entries)} 句 · "
-              f"⭐ {len(stars)} 处重点 · 💡 {len(gloss)} 个术语", ""]
+              f"⭐ {len(stars)} 处重点 · 💡 {len(gloss)} 个术语"]
+        _warn = _POLISH_NOTE.get(polish_state)
+        if _warn:
+            L.append(f"> {_warn}")
+        L.append("")
 
         # 概览: 英文为主, 中文辅助
         L += ["## 🎯 Overview 概览", ""]
@@ -601,17 +625,25 @@ class ObsidianWriter:
 
         entries = self._parse(self.session_path.read_text(encoding="utf-8"))
         # 落笔前二次精修: 直播矫正太保守(实测 65% 未改), 这里用领域 + 全课术语 + 前后文重做一遍。
+        polish_state = "off"
         if self._key and self._polish and entries:
             try:
                 from translator import course_term_list, course_title
                 from polish import polish_entries
                 print("🔧 正在精修转录(二次矫正 + 重译)…", flush=True)
+                pstats: dict = {}
                 entries = polish_entries(
                     entries, self._key, self._polish_model,
                     course_term_list(self._glossary_path, self._course),
                     course_title(self._glossary_path, self._course),
-                    on_progress=print)
+                    on_progress=print, stats=pstats)
+                polish_state = _polish_state(pstats)
+                if polish_state != "ok":
+                    print(f"⚠ 精修只生效了一部分(applied={pstats.get('applied')} 句, "
+                          f"失败批次 {pstats.get('failed')}/{pstats.get('batches')}); "
+                          f"状态已写进笔记 frontmatter")
             except Exception as e:                        # noqa: BLE001
+                polish_state = "failed"
                 print(f"⚠ 精修失败({str(e)[:60]}); 用直播版转录生成笔记")
         if self._key:
             print("🤖 正在生成复习层(知识点详解 + 自测)…", flush=True)
@@ -625,7 +657,7 @@ class ObsidianWriter:
                 qa_items = self._qa_items(qa() if callable(qa) else qa)
             except Exception as e:                        # noqa: BLE001
                 print(f"⚠ 问答落盘失败({str(e)[:60]}); 笔记照常生成")
-        note = self._render_note(entries, review, qa_items)
+        note = self._render_note(entries, review, qa_items, polish_state)
 
         d = Path(self._vault) / "Lectures"
         d.mkdir(parents=True, exist_ok=True)

@@ -69,14 +69,22 @@ def _chat(key: str, model: str, system: str, user: str,
 def polish_entries(entries: list[dict], api_key: str, model: str,
                    course_terms: list[str] | None = None, domain: str = "",
                    batch: int = POLISH_BATCH, timeout: float = 180.0,
-                   on_progress=None) -> list[dict]:
-    """返回精修后的新 entries 列表(不改入参)。无 key / 无内容 -> 原样返回。"""
+                   on_progress=None, stats: dict | None = None) -> list[dict]:
+    """返回精修后的新 entries 列表(不改入参)。无 key / 无内容 -> 原样返回。
+
+    stats: 可选 dict, 函数把 {"batches", "failed", "applied"} 写进去。精修失败是
+    **fail-soft** 的 —— 失败的批次静默保留原文, 返回值与全成功时看不出差别;
+    调用方(落盘笔记)只能靠这三个数判断这课到底精修了没有。"""
     if not api_key or not entries:
+        if stats is not None:
+            stats.update({"batches": 0, "failed": 0, "applied": 0})
         return entries
     out = [dict(e) for e in entries]
     n = len(out)
     terms = "\n".join(course_terms or []) or "(无)"
+    batches = failed = applied = 0
     for start in range(0, n, batch):
+        batches += 1
         chunk = out[start:start + batch]
         lines = []
         for k, e in enumerate(chunk):
@@ -97,11 +105,16 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
             obj = _chat(api_key, model, POLISH_SYS, user,
                         POLISH_MAX_TOKENS, timeout)
         except Exception:                                 # noqa: BLE001
+            failed += 1
             if on_progress:
                 on_progress(f"  ⚠ 精修批次 [{start}-{start+len(chunk)}] 失败, 保留原样")
             continue
         items = obj.get("items")
         if not isinstance(items, list):
+            failed += 1
+            if on_progress:
+                on_progress(f"  ⚠ 精修批次 [{start}-{start+len(chunk)}] 返回结构异常"
+                            f"(items 不是列表), 保留原样")
             continue
         got = 0
         for it in items:
@@ -117,6 +130,9 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
             if zh:
                 out[i]["zh"] = zh
             got += 1
+        applied += got
         if on_progress:
             on_progress(f"  [{min(start + len(chunk), n)}/{n}] 精修 +{got}")
+    if stats is not None:
+        stats.update({"batches": batches, "failed": failed, "applied": applied})
     return out

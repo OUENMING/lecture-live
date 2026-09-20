@@ -122,15 +122,21 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
                 continue
             i = it.get("i")
             if not isinstance(i, int) or not (start <= i < start + len(chunk)):
-                continue
+                continue                    # 序号非法: 定位不到句子, 只能丢
             en = " ".join((it.get("en") or "").split())
             zh = " ".join((it.get("zh") or "").split())
+            if not (en or zh):
+                continue                    # 两个字段都空: 一个字都没写回, 不算精修过
             if en:
                 out[i]["en"] = en
             if zh:
                 out[i]["zh"] = zh
             got += 1
         applied += got
+        if got == 0:
+            # 请求成功但**一条都没采纳**(空条目 / 序号全越界 / items 为空)——
+            # 对这一批而言与失败等价。不记的话调用方会把它当"精修过了"。
+            failed += 1
         if on_progress:
             on_progress(f"  [{min(start + len(chunk), n)}/{n}] 精修 +{got}")
     if stats is not None:

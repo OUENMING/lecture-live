@@ -178,7 +178,12 @@ def build(course: str | None = None, api_key: str | None = None,
     targets = collect_terms(course)
     keep = set(targets) | set(KEEP_EXTRA)
 
-    if rebuild:
+    if rebuild and course:
+        # keep 只含"公共表 + 这一课", 拿它当清理范围会把**其他课程**已构建的条目
+        # 全算成垃圾删掉(那些要花 API 钱重建)。格式迁移同理。清理只在全量重建时做。
+        print(f"⚠ --rebuild 带了课号({course}): 会误删其他课程的条目, 已跳过清理。"
+              f"要清理请不带课号跑: python build_notes.py --rebuild")
+    elif rebuild:
         dropped = [t for t in terms if t not in keep]
         terms = {t: e for t, e in terms.items() if t in keep}
         if not was_new:                       # 旧扁平格式: 层级全是猜的, 全部重判

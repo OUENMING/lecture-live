@@ -219,14 +219,16 @@ def _clean_review(obj) -> dict:
 # 事后分不出来就意味着把未精修的转录当成了精修版在读。
 _POLISH_NOTE = {
     "off": "⚠ 本课**未精修** —— 未配 API key 或精修已关, EN/ZH 为直播版。",
-    "failed": "⚠ 本课**精修未生效** —— 调用失败或返回结构异常, EN/ZH 为直播版。",
+    "failed": "⚠ 本课**精修未生效** —— 调用失败、返回结构异常, 或一条都没采纳; EN/ZH 为直播版。",
     "partial": "⚠ 本课**部分批次精修失败** —— 失败批次保留直播版, 见下逐句转录。",
 }
 
 
 def _polish_state(stats: dict | None) -> str:
     """精修到底生效了没有。失败是 fail-soft 的(见 polish.polish_entries): 全失败时
-    返回值与全成功时一模一样, 只改了几句话也算"生效" —— 所以判据是 applied。"""
+    返回值与全成功时一模一样, 只改了几句话也算"生效" —— 所以判据是 applied。
+    polish_entries 保证「一条都没采纳」的批次同样计入 failed, 于是 applied == 0
+    必然 failed == batches, 归为 failed 是准确的。"""
     if not stats or stats.get("applied", 0) == 0:
         return "failed"
     return "partial" if stats.get("failed") else "ok"
@@ -552,7 +554,11 @@ class ObsidianWriter:
                   "> <sub>写成 `问题::答案`，可被 Spaced Repetition 插件识别</sub>", ""]
             for x in qa:
                 tail = f"　（中：{x['zh']}）" if x["zh"] else ""
-                L.append(f"- {x['q']}::{x['a']}{tail}")
+                # 题干里的 `::` 必须拆开 —— Spaced Repetition 按第一个 `::` 切,
+                # 否则「什么是 a::b」会被切成 front="什么是 a"。与用户提问路径
+                # (_qa_items) 同一处理, 那边早就消毒了, 这边漏了。
+                q_text = x["q"].replace("::", ": :")
+                L.append(f"- {q_text}::{x['a']}{tail}")
         else:
             L += ["> [!tip] 用 `问题::答案` 写自测题（可被 Spaced Repetition 插件识别）", "",
                   "- "]
@@ -638,7 +644,11 @@ class ObsidianWriter:
                     course_title(self._glossary_path, self._course),
                     on_progress=print, stats=pstats)
                 polish_state = _polish_state(pstats)
-                if polish_state != "ok":
+                if polish_state == "failed":
+                    print(f"⚠ 精修未生效(applied=0 句, 失败批次 "
+                          f"{pstats.get('failed')}/{pstats.get('batches')}); "
+                          f"状态已写进笔记 frontmatter")
+                elif polish_state == "partial":
                     print(f"⚠ 精修只生效了一部分(applied={pstats.get('applied')} 句, "
                           f"失败批次 {pstats.get('failed')}/{pstats.get('batches')}); "
                           f"状态已写进笔记 frontmatter")

@@ -18,13 +18,19 @@ QUEUE_MAX = 200     # 最多缓冲 20s, 满了丢旧保新
 # ---------- 音频解码(ffmpeg, 任意格式 -> 16kHz mono f32) ----------
 def load_file(path: str) -> np.ndarray:
     """把任意音频文件解码成 16kHz 单声道 float32 [-1,1]。用 ffmpeg。"""
-    p = subprocess.run(
-        ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path),
-         "-f", "f32le", "-acodec", "pcm_f32le", "-ac", "1", "-ar", str(SR), "-"],
-        capture_output=True,
-    )
+    try:
+        p = subprocess.run(
+            ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path),
+             "-f", "f32le", "-acodec", "pcm_f32le", "-ac", "1", "-ar", str(SR), "-"],
+            capture_output=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired as e:
+        # 损坏/超大/含异常流的文件会让 ffmpeg 挂住不退出 —— 而调用方假定这层不阻塞
+        raise RuntimeError(f"ffmpeg 解码超时(300s): {path}") from e
     if p.returncode != 0:
-        raise RuntimeError(p.stderr.decode("utf-8", "ignore"))
+        err = p.stderr.decode("utf-8", "ignore").strip()
+        raise RuntimeError(f"ffmpeg 解码失败({p.returncode}): {path}"
+                           + (f": {err[:300]}" if err else ""))
     return np.frombuffer(p.stdout, dtype=np.float32)
 
 

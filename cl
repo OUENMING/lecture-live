@@ -75,10 +75,20 @@ case "${1:-}" in
   last) show_last; exit 0 ;;
   course)
     if [ -z "${2:-}" ]; then list_courses; exit 0; fi
-    if [ ! -f "glossary/$2.txt" ] && [ "$(ls glossary/*"$2".txt 2>/dev/null | wc -l)" -ne 1 ]; then
-      echo "⚠ 没有 glossary/$2.txt(术语表没建)。仍会记住课程名。"
+    # ⚠️ 要写进 .course 的是**下游真正会加载的那个术语表名**, 不是原始输入:
+    #    原来模糊命中("cl course 1077" 命中 ECON10770.txt)时只跳过警告, 写入的
+    #    仍是 1077 —— 下游按 glossary/1077.txt 找不到, 静默退回只用公共术语表。
+    COURSE_ARG="$2"
+    if [ ! -f "glossary/$COURSE_ARG.txt" ]; then
+      _hit="$(find glossary -maxdepth 1 -name "*${COURSE_ARG}*.txt" 2>/dev/null | head -1)"
+      if [ -n "$_hit" ]; then
+        COURSE_ARG="$(basename "$_hit" .txt)"
+        echo "⚠ glossary/$2.txt 不存在, 用最接近的术语表: $COURSE_ARG"
+      else
+        echo "⚠ 没有 glossary/$2.txt(术语表没建)。仍会记住课程名。"
+      fi
     fi
-    printf '%s' "$2" > "$CFG"; echo "✅ 课程已设为 $2"; exit 0 ;;
+    printf '%s' "$COURSE_ARG" > "$CFG"; echo "✅ 课程已设为 $COURSE_ARG"; exit 0 ;;
   online|net) SRC=blackhole; shift ;;
   file)
     [ -n "${2:-}" ] || { echo "用法: cl file <音频文件>"; exit 1; }

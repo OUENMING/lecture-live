@@ -50,4 +50,8 @@ while i < len(clip):
     seg.accept(norm.process(clip[i:i + CHUNK]))
     i += CHUNK
     time.sleep(chunk_dur / speed)
+seg.flush()                 # 收尾: 否则最后一段"语音已起、还没等到静音"的缓冲会被丢掉
+_diag = seg.report()        # 与生产路径一致(main.py 收尾同样打这一行)
+if _diag:
+    print(_diag)
 print("=== 结束 ===")

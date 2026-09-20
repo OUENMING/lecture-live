@@ -316,11 +316,17 @@ class _Latest:
 def run(args) -> None:
     # 音源最先打开: 失败(没麦/没 BlackHole/坏文件)在这里就给友好提示退出,
     # 不再走完 ASR/LLM 加载 + 悬浮窗后才崩出一个裸 traceback。
+    # ⚠️ 这次只是**试开**: 验证完立刻关。句柄留着不关的话, mic 的 InputStream
+    #    已经 start() 了, 下面会再开一个 —— 设备被占 + 句柄泄漏两头不讨好。
     try:
-        src = load_source(args.source, args.path, args.speed)
+        probe_src = load_source(args.source, args.path, args.speed)
     except Exception as e:                       # noqa: BLE001
         echo(f"⚠ 无法打开音源({args.source}): {e}")
         return
+    try:
+        probe_src.close()
+    except Exception:                            # noqa: BLE001
+        pass
 
     asr = load_asr(args.model_dir)
     local_tr = load_translator(args.llm, args.glossary, args.context,
@@ -605,10 +611,15 @@ def run(args) -> None:
             if term in queried_proper:
                 continue
             queried_proper.add(term)
-            res = lookup_term(term, api_key_val, args.cloud_model)
-            if res:
-                notes.add(term, res["note"], res["type"])   # 写 auto 文件, 下次查表命中
-                streamq.put(("terms", [(term, res["note"])]))
+            try:
+                res = lookup_term(term, api_key_val, args.cloud_model)
+                if res:
+                    notes.add(term, res["note"], res["type"])   # 写 auto 文件, 下次查表命中
+                    streamq.put(("terms", [(term, res["note"])]))
+            except Exception as e:                                 # noqa: BLE001
+                # 单条失败就放过去。线程一旦死掉, 之后**所有**专有名词都静默停摆 ——
+                # 而这条链本就是可有可无的(不影响字幕主链路), 不值得为它陪葬。
+                echo(f"⚠ 专有名词查询失败({term[:24]}): {str(e)[:60]}")
 
     # ---- 问答线程(Phase 2) ----
     # 形状照抄 proper_worker: daemon + 只认自己的队列 + 只判 running。
@@ -678,7 +689,12 @@ def run(args) -> None:
         t3.start()
 
     echo(f"▶ 开始: source={args.source}" + (f" path={args.path}" if args.path else ""))
-    src = load_source(args.source, args.path, args.speed)
+    try:
+        src = load_source(args.source, args.path, args.speed)
+    except Exception as e:                       # noqa: BLE001
+        # 走到这里模型已加载、会话文件已建 —— 绝不能裸崩, 那会把这次课的转录一起丢掉
+        echo(f"⚠ 无法打开音源({args.source}): {e}")
+        return
 
     def drain():
         while True:

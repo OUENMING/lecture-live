@@ -194,7 +194,17 @@ PUMP_ACTIVE_S = 0.15             # 距上次事件在此窗口内 = 手势进行
 # 想纯靠填充色达到 AA(4.5:1) 需要 a≈0.85, 那等于放弃毛玻璃。
 # 所以采用字幕界通行做法: 中等 scrim 压底 + 紧凑描边勾轮廓 —— 轮廓不透明度
 # 决定可读性, 底子只需压暗到让轮廓有依托。实测在纯白 PPT 上清晰可读。
-SCRIM_ALPHA = 0.45
+#
+# 2026-09-24 用"黑底/白底双拍"复量(采样在转录区空白处, 面板 frame 内 55%W/62%H):
+#     scrim  黑底    白底    透射率(Lw-Lb)  白字对比度(1.05/(Lw+0.05))
+#     0.45   0.049   0.354   0.306          2.60:1   ← 改之前
+#     0.38   0.056   0.401   0.345          2.33:1   ← 现在(用户要"透明感强一点点")
+#     0.32   0.060   0.437   0.376          2.16:1
+#     0.26   0.065   0.477   0.411          1.99:1
+# ⚠️ 上面那行"a=0.45 → 3.33:1"是**旧配方**下测的, 与本次实测(2.60:1)对不上,
+#    别引用那三个数。真数看这张表。可读性实际由描边(见 _make_shadow)承担,
+#    纯白底上仍清晰; 但继续往下调 scrim 收益递减、白底最先失守, 0.32 是底线。
+SCRIM_ALPHA = 0.38
 
 
 def _make_shadow():
@@ -461,7 +471,7 @@ def _make_window_delegate(on_resize):
 
 class Overlay:
     def __init__(self, on_quit=None, on_flag=None, on_translate=None, on_submit=None,
-                 on_ask=None, on_new_topic=None):
+                 on_ask=None, on_new_topic=None, whatsnew=None):
         from AppKit import (NSWindow, NSPanel, NSMakeRect, NSColor, NSTextField,
                             NSVisualEffectView, NSVisualEffectMaterialHUDWindow,
                             NSVisualEffectStateActive, NSWindowStyleMaskBorderless,
@@ -496,6 +506,9 @@ class Overlay:
         # 我们自己调 setFrame（展开 / 答案接管）时置真 —— 让 _sync_panel_size
         # 别把我们自己的改动当成用户拖了窗口。见该函数的说明。
         self._programmatic_resize = False
+        # 「本次更新」卡片的内容 (version, 摘要) 或 None；由 show() 弹（见 whatsnew.py）
+        self._whatsnew = whatsnew
+        self._whatsnew_card = None      # 持有卡片对象，否则 ObjC 侧被 GC
         self._on_quit = on_quit or (lambda: None)
         self._on_flag = on_flag or (lambda: None)
         self._on_translate = on_translate or (lambda on: None)
@@ -1395,6 +1408,61 @@ class Overlay:
         # 一次都不会触发。踩过: 三轮验证全绿, 因为都用手动 makeFirstResponder_ 驱动,
         # 没复现"启动即编辑态"这个真实状态。清掉之后, 只有用户真的点了输入框才进编辑态。
         self._release_focus()
+        self._show_whatsnew_card()
+
+    def _show_whatsnew_card(self) -> None:
+        """更新后弹一张**非模态毛玻璃卡片**（见 whatsnew.py）。
+
+        ⚠️ 三条刻意的选择：
+          · **非模态** —— 不 runModal。这是上课录课用的工具，一个 on-load 的模态框
+            会**直接卡住主任务**（Apple HIG 也明说别用 alert 传达纯信息、别在 on-load 打扰）。
+            它只是浮在旁边，你不理它也照样开始转录；
+          · **在这里弹而不是 main.run() 开头** —— 那时 app 的 activation policy 还是
+            `Regular`（实测），NSAlert 会带**宿主解释器（Python）的图标**并在 Dock 里冒出来。
+            走到这里时 `setActivationPolicy_(Accessory)` 已经执行过（本方法上面几行）；
+          · **失败静默** —— 它只是说明，不能因为它让课起不来。
+        """
+        if not self._whatsnew:
+            return
+        try:
+            import whatsnew
+            from AppKit import NSScreen
+            self._whatsnew_card = whatsnew.build(
+                self._whatsnew[0], self._whatsnew[1],
+                flag_path=whatsnew.skip_flag_path())
+            if self._whatsnew_card is None:
+                return
+            # ---- 定位: 找一个"完整放得进可见区、且不压住主面板"的位置 ----
+            # ⚠️ 不能只算一个位置就 setFrameOrigin_。踩过: 原本算的是"面板正下方",
+            # 算出来 y=-123 放不下 -> 退回"面板正上方" y=822, 但屏幕可见区顶只有
+            # 944, 而 AppKit 会**把窗口夹回可见区**(944-273=671) —— 于是卡片掉下来
+            # 正好盖住面板上半。必须**先检查再落位**, 不能交给 AppKit 去夹。
+            pf = self._panel.frame()
+            card = self._whatsnew_card["panel"]
+            cf = card.frame()
+            GAP = 10.0
+            vis = NSScreen.mainScreen().visibleFrame()
+            top = pf.origin.y + pf.size.height - cf.size.height   # 与面板顶对齐
+            placed = None
+            for x, y in (
+                (pf.origin.x - cf.size.width - GAP, top),         # 左
+                (pf.origin.x + pf.size.width + GAP, top),         # 右
+                (pf.origin.x + pf.size.width - cf.size.width,
+                 pf.origin.y - cf.size.height - GAP),             # 下
+                (pf.origin.x + pf.size.width - cf.size.width,
+                 pf.origin.y + pf.size.height + GAP),             # 上
+            ):
+                if (x >= vis.origin.x and y >= vis.origin.y
+                        and x + cf.size.width <= vis.origin.x + vis.size.width
+                        and y + cf.size.height <= vis.origin.y + vis.size.height):
+                    placed = (x, y)
+                    break
+            if placed is None:                # 四个方向都放不下 -> 贴可见区左上角
+                placed = (vis.origin.x + GAP,
+                          vis.origin.y + vis.size.height - cf.size.height - GAP)
+            card.setFrameOrigin_(placed)
+        except Exception:                                 # noqa: BLE001
+            self._whatsnew_card = None
 
     def close(self) -> None:
         """撤掉面板与菜单栏图标。**幂等**, 可重复调用(✕ / Ctrl+C / 正常结束都会走)。

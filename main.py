@@ -355,27 +355,59 @@ def _disp_w(s: str) -> int:
     return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
 
 
-def _show_whats_new(version: str, body: str) -> None:
-    """弹原生说明框。**GUI 拿不到时退化成在终端里印一个框**（终端模式也要能用）。"""
-    title = f"ClassLive 已更新到 {version}"
-    full = (body + "\n\n完整说明见 CHANGELOG.md") if body else "完整说明见 CHANGELOG.md"
+def _whatsnew_payload() -> tuple[str, str] | None:
+    """该不该弹「本次更新」卡片；该的话返回 (版本, 摘要)，否则 None。
+
+    ⚠️ **只判断、不弹** —— 弹的动作交给 UI 层：
+      · 悬浮窗模式 → `overlay.show()` 里用**非模态毛玻璃卡片**（见 whatsnew.py）；
+      · 终端模式   → 印一个字符框。
+    为什么不在这里弹：① 这里是 `run()` 第一行，那时 app 的 activation policy 还是
+    `Regular`（实测），NSAlert 会带 Python 的图标 + 在 Dock 里冒出来；② 模态框会
+    卡住启动 —— 而这个工具是**上课录课**用的。
+    """
+    if os.environ.get("CLASSLIVE_NO_UPDATE_CHECK"):
+        return None
     try:
-        from AppKit import NSAlert, NSApplication
-        NSApplication.sharedApplication()
-        a = NSAlert.alloc().init()
-        a.setMessageText_(title)
-        a.setInformativeText_(full)
-        a.addButtonWithTitle_("知道了")
-        a.runModal()
-        return
+        root = os.path.dirname(os.path.abspath(__file__))
+        # 勾过「以后不再提示」-> 永不再弹
+        if os.path.exists(os.path.join(root, ".update-skip")):
+            return None
+        ver_file = os.path.join(root, "VERSION")
+        cur = (open(ver_file, encoding="utf-8").read().strip()
+               if os.path.exists(ver_file) else "?")
+        if cur == "?":
+            return None
+        seen_file = os.path.join(root, ".update-seen")
+        seen = (open(seen_file, encoding="utf-8").read().strip()
+                if os.path.exists(seen_file) else "")
+        if cur == seen:
+            return None
+        # 第一次跑（seen 为空）不弹 —— 那不是"更新"是全新安装，
+        # 对着一条长长的 changelog 弹卡片没有意义。
+        payload = (cur, _changelog_summary(cur)) if seen else None
+        with open(seen_file, "w", encoding="utf-8") as f:   # 记下来，别重复弹
+            f.write(cur)
+        return payload
     except Exception:                                     # noqa: BLE001
-        pass
-    lines = full.splitlines()
+        return None
+
+
+def _print_whatsnew_box(version: str, body: str) -> None:
+    """终端模式下的退化：印一个字符框。宽度按**显示宽度**算（中文占两列）。"""
+    title = f"ClassLive 已更新到 {version}"
+    lines = [x for x in (body or "").splitlines() if x.strip()] or ["见 CHANGELOG.md"]
+    lines.append("")
+    lines.append("完整说明见 CHANGELOG.md")
     w = max([_disp_w(title)] + [_disp_w(x) for x in lines]) + 2
     echo("╭─ " + title + " " + "─" * max(0, w - _disp_w(title) - 3) + "╮")
     for x in lines:
         echo("│ " + x + " " * (w - _disp_w(x) - 1) + "│")
     echo("╰" + "─" * (w + 1) + "╯")
+
+
+def _show_whats_new(version: str, body: str) -> None:
+    """[已弃用] 原来的 NSAlert 弹框。保留仅为兼容，新路径走 whatsnew.py 的非模态卡片。"""
+    _print_whatsnew_box(version, body)
 
 
 def _maybe_notice_update() -> None:
@@ -394,49 +426,38 @@ def _maybe_notice_update() -> None:
     if os.environ.get("CLASSLIVE_NO_UPDATE_CHECK"):
         return
     try:
-        root = os.path.dirname(os.path.abspath(__file__))
-        ver_file = os.path.join(root, "VERSION")
-        cur = (open(ver_file, encoding="utf-8").read().strip()
-               if os.path.exists(ver_file) else "?")
-
-        # ---- ① 版本号变了 -> 弹「本次更新」说明框（不需要 git）----
-        # ⚠️ 放在 run() 一进来就调的地方**打开音源之前**: 弹框是模态的, 若在音源
-        #    打开之后才弹, 用户不点就会卡在一个"半启动"状态。这里没点就还没开始采,
-        #    不会留下半截会话。
-        seen_file = os.path.join(root, ".update-seen")
-        seen = (open(seen_file, encoding="utf-8").read().strip()
-                if os.path.exists(seen_file) else "")
-        if cur != "?" and cur != seen:
-            # 第一次跑(seen 为空)不弹 —— 那不是"更新", 是全新安装,
-            # 对着一条长长的 changelog 弹框没有意义。
-            if seen:
-                _show_whats_new(cur, _changelog_summary(cur))
-            with open(seen_file, "w", encoding="utf-8") as f:
-                f.write(cur)
+        # ---- ① 该不该弹「本次更新」卡片（只判断，弹的动作交给 UI 层）----
+        payload = _whatsnew_payload()
 
         # ---- ② 落后远程 -> 一行提示（需要 git）----
+        root = os.path.dirname(os.path.abspath(__file__))
+        cur = (open(os.path.join(root, "VERSION"), encoding="utf-8").read().strip()
+               if os.path.exists(os.path.join(root, "VERSION")) else "?")
         if not os.path.isdir(os.path.join(root, ".git")):
-            return
+            return payload
         import subprocess
         behind = subprocess.run(["git", "rev-list", "--count", "HEAD..@{u}"],
                                 cwd=root, capture_output=True, text=True,
                                 timeout=3).stdout.strip()
         if not behind.isdigit() or int(behind) == 0:
-            return
+            return payload
         stamp = os.path.join(root, ".update-notice")
         if os.path.exists(stamp) and open(stamp, encoding="utf-8").read().strip() == cur:
-            return                                  # 这个版本已经提示过了
+            return payload                          # 这个版本已经提示过了
         echo(f"↑ 有新版本（本地 {cur}，远程领先 {behind} 个提交）"
-             f"—— 升级: git pull；升级后跑 `cl doctor` 看缺什么"
-             f"（变更清单见 CHANGELOG.md）")
+             f"—— 升级: cl update（变更清单见 CHANGELOG.md）")
         with open(stamp, "w", encoding="utf-8") as f:
             f.write(cur)
+        return payload
     except Exception:                               # noqa: BLE001
-        pass                                        # 提示而已, 任何失败都静默
+        return None                                 # 提示而已, 任何失败都静默
 
 
 def run(args) -> None:
-    _maybe_notice_update()
+    # 该不该弹「本次更新」卡片 —— 只判断，不弹。弹的动作交给 UI 层：
+    # 悬浮窗模式在 overlay.show() 里用非模态毛玻璃卡片（那时 activation policy
+    # 已经是 Accessory，不会带 Python 图标，也不阻塞）；终端模式印字符框。
+    whatsnew = _maybe_notice_update()
     # 音源最先打开: 失败(没麦/没 BlackHole/坏文件)在这里就给友好提示退出,
     # 不再走完 ASR/LLM 加载 + 悬浮窗后才崩出一个裸 traceback。
     # ⚠️ 这次只是**试开**: 验证完立刻关。句柄留着不关的话, mic 的 InputStream
@@ -553,7 +574,11 @@ def run(args) -> None:
         # late binding: start_new_topic 定义在下面的问答状态块里, 这里只是把回调
         # 装上(按钮到点名前一定已经定义好了)。
         on_new_topic=lambda: start_new_topic(),
+        whatsnew=whatsnew,
     )
+    # 终端模式拿不到悬浮窗，退化成字符框（两种模式都要能看到）
+    if args.ui == "terminal" and whatsnew:
+        _print_whatsnew_box(*whatsnew)
 
     seen_proper: collections.Counter = collections.Counter()   # 出现次数(≥2 才查)
     queried_proper: set = set()                         # 已发起过查询的(防重复请求)
@@ -1026,12 +1051,12 @@ def run(args) -> None:
 
 
 def _load_overlay(on_quit=None, on_flag=None, on_translate=None, on_submit=None,
-                  on_ask=None, on_new_topic=None):
+                  on_ask=None, on_new_topic=None, whatsnew=None):
     try:
         from overlay import Overlay
         o = Overlay(on_quit=on_quit, on_flag=on_flag, on_translate=on_translate,
                     on_submit=on_submit, on_ask=on_ask,
-                    on_new_topic=on_new_topic)
+                    on_new_topic=on_new_topic, whatsnew=whatsnew)
         o.show()
         return o
     except Exception as e:       # noqa: BLE001

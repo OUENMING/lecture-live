@@ -314,6 +314,70 @@ class _Latest:
             return b
 
 
+def _changelog_summary(version: str, max_lines: int = 7) -> str:
+    """从 CHANGELOG.md 取某个版本的**摘要** —— 弹框用的短版本，不是全文。
+
+    ⚠️ 弹框里不能塞整段 changelog，那没人看。只取每个"### 小节"的**标题 + 第一条**，
+    并优先保留「破坏性变更」。取不到就返回空串（调用方退化成只报版本号）。
+    """
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md")
+        text = open(p, encoding="utf-8").read()
+    except Exception:                                     # noqa: BLE001
+        return ""
+    m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
+                  text, re.S | re.M)
+    if not m:
+        return ""
+    out, cur = [], None
+    for line in m.group(1).splitlines():
+        s = line.strip()
+        if s.startswith("### "):
+            cur = s[4:].strip()
+        elif s.startswith(("- ", "* ")) and cur:
+            body = re.sub(r"\*\*|`", "", s[2:]).strip()
+            body = re.split(r"[。；;]", body)[0][:58]     # 弹框一行放不下整段
+            out.append(f"{cur} · {body}")
+            cur = None                                    # 每节只取第一条
+        if len(out) >= max_lines:
+            break
+    out.sort(key=lambda x: 0 if ("Breaking" in x or "破坏" in x) else 1)
+    return "\n".join(out)
+
+
+def _disp_w(s: str) -> int:
+    """终端里的**显示宽度** —— 中文/全角算 2 列。
+
+    ⚠️ 直接用 `len()` 会让框的右边框对不齐: 一个汉字在终端占两列，但只算 1 个字符。
+    (2026-09-24 实测发现。)
+    """
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
+
+
+def _show_whats_new(version: str, body: str) -> None:
+    """弹原生说明框。**GUI 拿不到时退化成在终端里印一个框**（终端模式也要能用）。"""
+    title = f"ClassLive 已更新到 {version}"
+    full = (body + "\n\n完整说明见 CHANGELOG.md") if body else "完整说明见 CHANGELOG.md"
+    try:
+        from AppKit import NSAlert, NSApplication
+        NSApplication.sharedApplication()
+        a = NSAlert.alloc().init()
+        a.setMessageText_(title)
+        a.setInformativeText_(full)
+        a.addButtonWithTitle_("知道了")
+        a.runModal()
+        return
+    except Exception:                                     # noqa: BLE001
+        pass
+    lines = full.splitlines()
+    w = max([_disp_w(title)] + [_disp_w(x) for x in lines]) + 2
+    echo("╭─ " + title + " " + "─" * max(0, w - _disp_w(title) - 3) + "╮")
+    for x in lines:
+        echo("│ " + x + " " * (w - _disp_w(x) - 1) + "│")
+    echo("╰" + "─" * (w + 1) + "╯")
+
+
 def _maybe_notice_update() -> None:
     """**一次性**的更新提示: 检测到落后于远程就打印一行, 之后不再打扰。
 
@@ -330,17 +394,35 @@ def _maybe_notice_update() -> None:
     if os.environ.get("CLASSLIVE_NO_UPDATE_CHECK"):
         return
     try:
-        import subprocess
         root = os.path.dirname(os.path.abspath(__file__))
+        ver_file = os.path.join(root, "VERSION")
+        cur = (open(ver_file, encoding="utf-8").read().strip()
+               if os.path.exists(ver_file) else "?")
+
+        # ---- ① 版本号变了 -> 弹「本次更新」说明框（不需要 git）----
+        # ⚠️ 放在 run() 一进来就调的地方**打开音源之前**: 弹框是模态的, 若在音源
+        #    打开之后才弹, 用户不点就会卡在一个"半启动"状态。这里没点就还没开始采,
+        #    不会留下半截会话。
+        seen_file = os.path.join(root, ".update-seen")
+        seen = (open(seen_file, encoding="utf-8").read().strip()
+                if os.path.exists(seen_file) else "")
+        if cur != "?" and cur != seen:
+            # 第一次跑(seen 为空)不弹 —— 那不是"更新", 是全新安装,
+            # 对着一条长长的 changelog 弹框没有意义。
+            if seen:
+                _show_whats_new(cur, _changelog_summary(cur))
+            with open(seen_file, "w", encoding="utf-8") as f:
+                f.write(cur)
+
+        # ---- ② 落后远程 -> 一行提示（需要 git）----
         if not os.path.isdir(os.path.join(root, ".git")):
             return
+        import subprocess
         behind = subprocess.run(["git", "rev-list", "--count", "HEAD..@{u}"],
                                 cwd=root, capture_output=True, text=True,
                                 timeout=3).stdout.strip()
         if not behind.isdigit() or int(behind) == 0:
             return
-        ver_file = os.path.join(root, "VERSION")
-        cur = open(ver_file, encoding="utf-8").read().strip() if os.path.exists(ver_file) else "?"
         stamp = os.path.join(root, ".update-notice")
         if os.path.exists(stamp) and open(stamp, encoding="utf-8").read().strip() == cur:
             return                                  # 这个版本已经提示过了

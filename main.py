@@ -344,7 +344,8 @@ def _maybe_notice_update() -> None:
         if os.path.exists(stamp) and open(stamp, encoding="utf-8").read().strip() == cur:
             return                                  # 这个版本已经提示过了
         echo(f"↑ 有新版本（本地 {cur}，远程领先 {behind} 个提交）"
-             f"—— 升级: git pull；查看变化: cl doctor")
+             f"—— 升级: git pull；升级后跑 `cl doctor` 看缺什么"
+             f"（变更清单见 CHANGELOG.md）")
         with open(stamp, "w", encoding="utf-8") as f:
             f.write(cur)
     except Exception:                               # noqa: BLE001

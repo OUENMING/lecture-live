@@ -234,6 +234,18 @@ git pull
 uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
+**v3.5.0 起有 `cl update`** —— 拉代码 + 按需补依赖 + 自检，一条命令：
+
+```bash
+cl update
+```
+
+> ⚠️ **第一次得用 `git pull`**：旧版本的 `cl` 还不认识 `update` 子命令（实测报"未知参数"）。
+> 工具没法用自己更新出"能更新的自己" —— **引导一次，之后 `cl update` 永久可用。**
+>
+> `cl update` 的边界：工作区有本地改动时**停手**（绝不 stash/丢弃你的改动）；
+> 本地和远程分叉时**响亮失败**（不静默造 merge）；**绝不自动下模型**（只打印命令）。
+
 **升级后建议扫一眼这三处**（`git pull` 补不到的东西）：
 
 | 检查 | 为什么 |

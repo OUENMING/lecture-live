@@ -10,12 +10,15 @@
 clamp 边界与静止位置重合, clamp 永远在帮你; 内容短于视口时也无需 padding 技巧。
 
 行几何: `level 0` = 最新句, 在 y=0; `level L` 在 `y = L * row_h`。
-一行内部从下到上是 英文小字 → 中文大字(与既有阅读流一致)。
+一行内部两条标签的上下顺序见 `EN_LINE_ON_TOP`。
 
 为什么固定行高是命门
 --------------------
 固定 `row_h` 让"滚动偏移 → 行索引"变成 O(1) 的除法。可变行高会逼出前缀和
-布局缓存, 并推翻整套回收方案。所以主行封顶 2 行 + 尾部省略号, 不做自适应。
+布局缓存, 并推翻整套回收方案。所以**所有行等高**、不做逐行自适应。
+⚠️ "等高"指的是**同一时刻所有行共享同一个高度**, 不是"高度恒为 70":
+`set_row_metrics` 会在窗口变窄时把这一组统一尺寸换成 3/4/5 行(中文需要更多行才不
+被静默截断), 而 O(1) 除法这条命门仍然成立 —— 因为它只依赖"等高", 不依赖具体值。
 
 回收
 ----
@@ -33,6 +36,16 @@ BOTTOM_EPS = 3.0      # origin.y <= 此值即视为在底部(橡皮筋的负值�
 MOVE_EPS = 1.5        # 与期望 origin 相差超过此值 -> 判定为用户/惯性滚动
 FLUSH_DT = 0.016      # 渲染合并闸门 = 一帧
 
+# ---- 双语行的竖排顺序 ----
+# True = 英文小字在上、中文大字在下(当前)   False = 反过来(2026-09-24 之前)
+#
+# 为什么换: 三条独立同行评审研究(SSLA / Bilingualism: L&C / JoSTrans)都发现双语
+# 字幕里 L2 行被系统性略读, 而**唯一被证实能改变注意分配的是"哪一行在上面"**,
+# 不是字重/字号/颜色(同批研究还报告注视时长与理解成绩无显著相关)。作者考试是
+# 英文的, 所以把 L2 行放上去。想回退改这一个常量。
+# 只作用于**双语行**; 答案行与"翻译关闭时英文顶上"的行仍是大字在上(见 _layout)。
+EN_LINE_ON_TOP = True
+
 _ScrollCls = None
 _DocCls = None
 
@@ -46,7 +59,9 @@ def _view_classes():
 
         class _TranscriptScroll(NSScrollView):
             def scrollWheel_(self, event):        # noqa: N802
-                # 收回态吞掉滚轮: 不改 origin、不起橡皮筋。
+                # 这个开关**不再区分收起/展开**(2026-09-24 解耦, 见 set_collapsed):
+                # 内容永远溢出, 所以恒为 True —— 保留它只是为了留一个统一的闸门,
+                # 以及保住下面这条注释里的坑。
                 # 不用 setIgnoresMouseEvents_ —— 那会连带杀掉内容区的拖拽移动,
                 # 且和悬浮窗"鼠标穿透"同类的单向死锁。
                 # (NSScrollView 没有 setScrollEnabled_, 所以开关放在自己的标志位上。
@@ -134,7 +149,8 @@ class TranscriptView:
         zh.setHidden_(True); en.setHidden_(True)
         self._doc.addSubview_(zh)
         self._doc.addSubview_(en)
-        self._slots.append({"zh": zh, "en": en, "level": None, "hidden": True})
+        self._slots.append({"zh": zh, "en": en, "level": None, "hidden": True,
+                            "en_top": None})
         self._cache.append({})
 
     def _ensure_pool(self, view_h: float) -> None:
@@ -219,6 +235,45 @@ class TranscriptView:
         w = self._doc.frame().size.width
         return w if w > 40.0 else self._width - 2 * self._pad
 
+    def set_row_metrics(self, zh_h: float, row_h: float, lines: int) -> None:
+        """行尺寸随窗口宽度变(窄窗里中文要更多行才不吞字)。
+
+        ⚠️ 变的只是"等高的那个值", **所有行依然等高** —— 回收池依赖的不变量是
+        "所有行等高", 不是"高 == 70", 所以换一组统一尺寸是安全的。
+        池的容量 K=ceil(视口高/行高)+2 会跟着变小, 多余的槽位被 `_paint` 藏起来,
+        不够时 `_ensure_pool` 会补 —— 两个方向都不用额外处理。
+
+        槽位必须**重排**: 清掉每个槽位的 level, `_paint` 会把它们按新行高重新放置。
+        文字缓存不清(文本没变, 变的只有 frame), 所以 `_set_text` 会照旧跳过。
+        """
+        if abs(float(row_h) - self._row_h) < 0.5:
+            return
+        self._zh_h = float(zh_h)
+        self._row_h = float(row_h)
+        for s in self._slots:
+            s["level"] = None
+            s["zh"].setMaximumNumberOfLines_(int(lines))
+        self._doc_h = -1.0
+        # ⚠️ 行高变了 -> 内容总高按新 row_h 重算, 而 clip origin 的**数值**不变,
+        # 它代表的却是另一行了。若不回写 _expected_origin, 下一个 tick 会把这个
+        # 位移误判成"用户滚动" -> 跟随状态机被无端打断, 可见的句子会跳一下。
+        # 只在**离开底部**时才需要回写(跟随态本来就钉在 0, 不需要动)。
+        if not self._follow:
+            self._expected_origin = self._scroll.contentView().bounds().origin.y
+        self.mark_dirty(urgent=True)
+
+    def set_width(self, width: float) -> None:
+        """面板宽度变了。
+
+        槽位与文档视图的宽度在 `_paint` 里由 clip 的**实际**宽度决定, 会自动跟上;
+        这里只需记住新宽度 —— 供 `set_frame()` 和 `text_width()` 的兜底值使用。
+        行高(`_row_h`)不跟着变: 回收池的不变量是"所有行等高", 与宽度无关。
+        """
+        if abs(float(width) - self._width) < 0.5:
+            return
+        self._width = float(width)
+        self.mark_dirty(urgent=True)
+
     def set_frame(self, y: float, h: float) -> None:
         self._scroll.setFrame_(((self._pad, y), (self._width - 2 * self._pad, h)))
         self.mark_dirty(urgent=True)
@@ -226,12 +281,15 @@ class TranscriptView:
     def set_collapsed(self, collapsed: bool) -> None:
         from AppKit import NSScrollElasticityAutomatic
         self._collapsed = collapsed
-        # NSScrollView 没有 setScrollEnabled_; 收回态的不可滚性由
-        # _TranscriptScroll.scrollWheel_ 的开标志位 + 关掉橡皮筋共同保证。
-        self._scroll._scroll_enabled = not collapsed
-        self._scroll.setHasVerticalScroller_(not collapsed)
-        self._scroll.setVerticalScrollElasticity_(
-            0 if collapsed else NSScrollElasticityAutomatic)
+        # ⚠️ 滚动权限**与收起/展开解耦**(2026-09-24 改): 内容永远溢出(一节真实课
+        # 1000+ 句 vs 可见 3 行), 所以**始终允许滚动**。
+        # 原先写成 `_scroll_enabled = not collapsed`, 后果是"把窗口拉大也不能滚"——
+        # 于是顶栏那个展开按钮被迫承担"解锁滚动"的职责(它的名字里完全没写这件事)。
+        # 解耦后: 拉窗口 = 看几句; 滚动 = 往回翻。两个正交。
+        # (橡皮筋一并常开; `setAutohidesScrollers_(True)` 在构造里已设, 滚动条不会常驻。)
+        self._scroll._scroll_enabled = True
+        self._scroll.setHasVerticalScroller_(True)
+        self._scroll.setVerticalScrollElasticity_(NSScrollElasticityAutomatic)
         if collapsed:
             self.scroll_to_bottom()
         self.mark_dirty(urgent=True)
@@ -352,19 +410,32 @@ class TranscriptView:
         lbl.setStringValue_(text)
 
     def _place(self, j: int, level: int, count: int, doc_w: float) -> None:
+        """把第 level 层(＝第 count-1-level 行)摆进槽位 j。"""
+        big, sub, is_zh = self._row_texts(count - 1 - level)
+        self._layout(j, level, doc_w, big, sub, is_zh)
+
+    def _layout(self, j: int, level: int, doc_w: float,
+                big: str, sub: str, is_zh: bool) -> None:
+        """摆一行的两个标签: 几何 + 文本。
+
+        竖排顺序**逐行判定** —— 同屏会混着双语行和答案行, 判据见 EN_LINE_ON_TOP。"""
         s = self._slots[j]
-        r = count - 1 - level
-        big, sub, is_zh = self._row_texts(r)
         y = level * self._row_h
         w = doc_w
-        s["en"].setFrame_(((0.0, y), (w, self._en_h)))
-        s["zh"].setFrame_(((0.0, y + self._en_h + self._gap), (w, self._zh_h)))
+        en_top = EN_LINE_ON_TOP and is_zh
+        if en_top:                                   # 英文小字在上, 中文大字在下
+            s["en"].setFrame_(((0.0, y + self._zh_h + self._gap), (w, self._en_h)))
+            s["zh"].setFrame_(((0.0, y), (w, self._zh_h)))
+        else:                                        # 大字在上
+            s["en"].setFrame_(((0.0, y), (w, self._en_h)))
+            s["zh"].setFrame_(((0.0, y + self._en_h + self._gap), (w, self._zh_h)))
         self._set_text(j, "zh", big, self._font_zh[0] if is_zh else self._font_en_big[0])
         self._set_text(j, "en", sub, self._font_en[0])
         if s["hidden"]:
             s["zh"].setHidden_(False); s["en"].setHidden_(False)
             s["hidden"] = False
         s["level"] = level
+        s["en_top"] = en_top
 
     def _hide(self, j: int) -> None:
         s = self._slots[j]
@@ -375,6 +446,7 @@ class TranscriptView:
             s["zh"].setHidden_(True); s["en"].setHidden_(True)
             s["hidden"] = True
         s["level"] = None
+        s["en_top"] = None
 
     def _paint(self) -> None:
         clip = self._scroll.contentView()
@@ -426,6 +498,12 @@ class TranscriptView:
         # 已定稿的行文本不变(缓存跳过), 真正会写的是流式中的实时行。
         for lv, j in keep.items():
             big, sub, is_zh = self._row_texts(count - 1 - lv)
+            # 竖排顺序会随内容变(实时行从"还没译文"变成"有译文")。变了必须重摆:
+            # _place 只在槽位**新进入**时调用, 光刷文本会把 frame 留在旧顺序上,
+            # 同屏于是出现"有的英文在上、有的在下"。
+            if self._slots[j].get("en_top") != (EN_LINE_ON_TOP and is_zh):
+                self._layout(j, lv, doc_w, big, sub, is_zh)
+                continue
             self._set_text(j, "zh", big,
                            self._font_zh[0] if is_zh else self._font_en_big[0])
             self._set_text(j, "en", sub, self._font_en[0])

@@ -17,6 +17,7 @@
 调用约定: main.py 保证所有方法都在主线程调用。
 """
 from __future__ import annotations
+import pathlib
 import time
 
 try:
@@ -83,8 +84,91 @@ HEADER_H = 34.0                                   # 顶部按钮条(与正文不
 BASE_H = BOTTOM_PAD + PINNED_H + 8 + HEADER_H     # = 152.0(收起态除转录区外的固定高度)
 HEIGHT = BASE_H + VISIBLE_ROWS * ROW_H            # = 362.0
 
+# ---- 用户可缩放 ----
+# 行高**随宽度变**: 窄窗里中文一行装不下, 需要更多行才不吞字。
+# 分档来自**实测 p100**(用 _measure_text_h 对 4797 句真实中文定稿逐句量折行高度,
+# 取每个宽度下的最大所需行数):
+#     面板 >=620px -> 2 行 (47px)      >=440px -> 3 行 (68px)
+#     面板 >=360px -> 4 行 (89px)      更窄   -> 5 行 (110px)
+# 这样最窄到 280px 仍然**一句不吞**。
+# ⚠️ 关键: 变的只是"等高的那个值", **所有行依然等高** —— 回收池依赖的不变量
+#    ("所有行等高")没有被破坏, 所以换一组统一尺寸是安全的。
+LINE_H = 21.0                                     # 18pt Medium 一行实测 21.0px
+LINE_TIERS = ((620.0, 2), (440.0, 3), (360.0, 4))
+MAX_LINES = 5
+MIN_WIDTH = 280.0                                 # 实测: 280px 时 5 行即可零吞字
+MIN_ROWS = 1                                      # 最少露 1 句(作者: "一个句子也没关系")
+EDGE_BAND = 5.0                                   # 缩放抓取带宽(px)
+# ---- 窗口类型开关 ----
+# 两条配方都实测过, 改这一个常量即可整条切换。详见 docs/OVERLAY-RESIZE-REVIEW.md
+#
+#   "titled"     Titled | FullSizeContentView + 隐藏标题栏 + 隐藏红绿灯
+#                -> **原生四角 + 四边 8 向缩放、原生缩放光标、原生 live resize**
+#                (AppKit 对无边框窗口只注册四条边的缩放区, 四角完全没有)
+#                代价: AppKit 会给 Titled 窗口自动加一个标题栏 visual effect view,
+#                      在浅色系统下把材质染灰 —— 靠 setAppearance_(DarkAqua) 抵消
+#                      (实测面板中心亮度 0.314 -> 0.113)。
+#
+#   "borderless" 纯无边框
+#                -> 材质外观最干净(不依赖上面那个经验补偿)
+#                代价: **四角不能原生缩放**, 要自己实现; 而且自己实现时
+#                      `movableByWindowBackground` 会吞掉 mouseDown, 两者互斥
+#                      (实测: movable=True 时 pump 只看得到 MouseEntered/Moved)
+#                移动仍然可用: movable=True + 视图 mouseDownCanMoveWindow->True
+#
+# ⚠️ 何时该切回 "borderless": 如果 macOS 升级后 Titled 那套坏掉。
+#    已知先例: Warp #12393 / #12389 (macOS 27.0 beta) —— 红绿灯与四角/边缘
+#    全部对鼠标无反应(辅助功能 API 仍可缩放)。**但那条的根因是 Warp 自己
+#    额外加了一层 mouseDragged/Up 转发**, 与 Titled 配方本身无关; 我们没那层转发。
+#    Ghostty #7568 (macOS 26) 则是 `macos-titlebar-style = transparent` 失效。
+WINDOW_STYLE = "titled"
+
+# 尺寸记忆。与 .course / .deepseek_key 同级同风格(各自模块管自己的小文件)。
+# 读不到/写不进一律 fail-soft —— 缩放是便利功能, 不能因为它让课上崩。
+WINDOW_STATE_FILE = pathlib.Path(__file__).with_name(".window")
+
+
+def _lines_for_width(w: float) -> int:
+    for thr, n in LINE_TIERS:
+        if w >= thr:
+            return n
+    return MAX_LINES
+
+
+def _zh_h_for(lines: int) -> float:
+    return lines * LINE_H + 5.0                   # 与既有 2*21+5 = 47 同口径
+
+
+def _row_h_for(lines: int) -> float:
+    return ROW_EN_H + ROW_GAP + _zh_h_for(lines)
+
 WEIGHT = 0.23                                     # NSFontWeightMedium
 FLUSH_DT = 0.016                                  # 渲染合并闸门 = 一帧(约 60Hz)
+
+# ---- 三档模式(顶栏按钮循环切换) ----
+# 为什么要三档而不是两档: 原来只有一个"译 开/关", 但**关掉后英文仍然过 DeepSeek 做
+# 上下文矫正**(见 main.py `_emit` 的 `translating["on"]` 分支) —— 对"我根本不需要
+# 翻译、也不想联 API"的人, 没有可选项。第三档把"完全不调 LLM"变成显式选择:
+# 全程离线、零 API 成本、零首字延迟、也最省电。
+#   both  双语     —— DeepSeek 矫正英文错听 + 出中文
+#   en    只英·校  —— 只矫正英文, 不出中文(旧"译 关"的行为)
+#   raw   纯转录   —— ASR 直出, 一个 LLM 请求都不发
+TRANS_MODE_TITLE = {"both": "双语", "en": "只英·校", "raw": "纯转录"}
+TRANS_MODE_DESC = {
+    "both": "DeepSeek 矫正英文错听 + 出中文",
+    "en": "只矫正英文, 不出中文",
+    "raw": "完全不调 LLM, ASR 直出",
+}
+# 延迟导入: 颜色是锦上添花, 拿不到也不该让模块导入失败
+def _mode_color(name: str):
+    def get():
+        from AppKit import NSColor
+        return {"both": NSColor.systemGreenColor(),
+                "en": NSColor.systemYellowColor(),
+                "raw": NSColor.secondaryLabelColor()}[name]
+    return get
+
+TRANS_MODE_COLOR = {k: _mode_color(k) for k in TRANS_MODE_TITLE}
 
 # pump() 每轮的让步窗口。**这是滚动跟手度的天花板**:
 # 固定 8ms 让步会让 pump 只有 ~113Hz, 而此时触控板手势正以 120Hz 投递事件 ——
@@ -162,6 +246,20 @@ def _make_button_target(on_click):
 _PanelCls = None
 
 
+def _xy(p) -> tuple:
+    """把 PyObjC 返回的点统一成 (x, y) 浮点元组。
+
+    ⚠️ 同一类坑在本文件踩过多次: `CGEventGetLocation` / `NSEvent.mouseLocation`
+    / `NSEvent.locationInWindow` 在 PyObjC 里返回的**不一定是结构体**(有的是元组),
+    直接写 `.x` 会 AttributeError —— 而 PyObjC 会把这类异常**静默吞掉**,
+    症状是"代码看着在、其实一次都没跑"。所有取点的地方一律过这个函数。
+    """
+    try:
+        return float(p.x), float(p.y)
+    except AttributeError:
+        return float(p[0]), float(p[1])
+
+
 def _make_panel(rect, style, backing, defer):
     """无边框 NonactivatingPanel。
 
@@ -170,13 +268,35 @@ def _make_panel(rect, style, backing, defer):
     Swift 名 `canBecomeKey` 无效(PyObjC 会把它注册进 runtime, 但 AppKit 从不调用)。
     `canBecomeMainWindow` 不用动: key 与 main 无关。
     类只定义一次(重复定义会报 override 错), 同 _ButtonTargetCls。
+
+    `sendEvent_` 保留一处: 点面板时手动激活 app(macOS 只让活跃 app 改光标,
+    而 NonactivatingPanel 按定义不会自激活)。移动与缩放的实际处理在拖拽层,
+    见 `Overlay._on_drag_layer_mousedown` / `_track_loop`。
     """
     global _PanelCls
     from AppKit import NSPanel
     if _PanelCls is None:
+        import objc
+
         class _Panel(NSPanel):
             def canBecomeKeyWindow(self):           # noqa: N802
                 return True
+
+            def sendEvent_(self, event):            # noqa: N802
+                """窗口收到的**每一个**事件都经过这里 —— 这是唯一绕不开的位置。
+
+                ⚠️ 为什么不去 override 某个视图的 mouseDown_: 实测(2026-09-24)
+                即使 `contentView.hitTest_()` 明确返回了我们的拖拽层,
+                它的 `mouseDown_` **一次都没被调用**(没有报错, 静默)。
+                窗口级的 sendEvent_ 没有这个问题。
+                """
+                if event.type() == 1:               # NSEventTypeLeftMouseDown
+                    try:
+                        from AppKit import NSApplication
+                        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                    except Exception:               # noqa: BLE001
+                        pass
+                objc.super(_Panel, self).sendEvent_(event)
 
         _PanelCls = _Panel
     return _PanelCls.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -251,6 +371,94 @@ def _make_click_view(on_click):
     return v
 
 
+_DragLayerCls = None
+
+
+def _make_drag_layer(on_mousedown=None):
+    """整面板的背景拖拽层 —— 让"空白处任意位置都能拖窗口"。
+
+    为什么必须显式加这一层(2026-09-24 实测的拖动意图地图):
+        转录区   -> 移动 ✅(那里 _TranscriptDoc 自己调了 performWindowDragWithEvent_)
+        顶栏空白 -> **无反应** ❌
+        输入行   -> **无反应** ❌
+    于是用户按正常习惯去抓顶栏想移动窗口时什么都没发生, 再往外一点就落进 5px 缩放带
+    —— 体验就成了"想拖动却变成缩放"。
+
+    放在 z 序**最底**(紧跟 scrim), 所以控件、转录区、缩放抓取带都在它上面、各自照常
+    收事件; 只有真正的空白处才落到这一层。
+    """
+    global _DragLayerCls
+    from AppKit import NSView
+    if _DragLayerCls is None:
+        class _DragLayer(NSView):
+            def mouseDownCanMoveWindow(self):   # noqa: N802
+                # ⚠️ 必须 **True**(2026-09-24 实测定位): 这个返回值是 AppKit
+                # "按下背景即拖动窗口"的开关。设成 False 会让**背景完全拖不动**
+                # (而且 mouseDown_ 也收不到 —— 两边都落空)。
+                # 症状就是作者报的"只有按住转录区才拖得动": 转录区的文档视图恰好是
+                # True, 而这一层被我写成了 False 却盖住了顶栏等区域。
+                return True
+
+            def mouseDown_(self, event):        # noqa: N802
+                win = self.window()
+                if win is None:
+                    return
+                # 点面板任意空白处 -> 手动激活 app。macOS 只让**活跃 app** 改光标,
+                # 而面板带 NonactivatingPanel(那是"非激活时仍被合成"的前提)不会自激活。
+                try:
+                    from AppKit import NSApplication
+                    NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                except Exception:               # noqa: BLE001
+                    pass
+                cb = getattr(self, "_cb", None)
+                if cb is not None:
+                    cb(event)                     # 最外一圈 -> 自己的嵌套循环缩放
+                # 其余情况 AppKit 会凭 mouseDownCanMoveWindow=True 自己拖动窗口
+
+        _DragLayerCls = _DragLayer
+    v = _DragLayerCls.alloc().initWithFrame_(((0.0, 0.0), (100.0, 100.0)))
+    v._cb = on_mousedown
+    return v
+
+
+_WindowDelegateCls = None
+
+
+def _make_window_delegate(on_resize):
+    """窗口委托 —— 只为一件事: **live resize 期间也要重排内容**。
+
+    ⚠️ 为什么必须用委托, 不能继续在 `pump()` 里轮询(2026-09-24 实测):
+    原生拖边缘缩放时 AppKit 会进入它自己的事件跟踪循环, **我们的整个主循环被
+    卡住 1239.8ms**(实测: 空闲期 pump 最大间隔 9.6ms, 拖拽期 1239.8ms)。
+    那 1.2 秒里 `_sync_panel_size()` 一次都跑不到 -> 窗口框在动、内容冻着,
+    松手才跳一下。手感就是作者说的"卡顿不够丝滑"。
+    `windowDidResize:` 是在那个跟踪循环**内部**回调的, 所以拖拽期间它能持续重排
+    —— 这才是 AppKit 给 live resize 的正规钩子。
+
+    这不违反本仓库"轮询而非观察者"的既定做法: 那条针对的是**滚动视图的 bounds
+    通知**(弱引用 + 自我 setFrame 期间重入); 窗口尺寸变化没有那个重入面,
+    而且轮询在拖拽期间**根本跑不到**, 除了委托没有别的办法。
+    """
+    global _WindowDelegateCls
+    from AppKit import NSObject
+    if _WindowDelegateCls is None:
+        class _WindowDelegate(NSObject):
+            def windowDidResize_(self, note):      # noqa: N802
+                cb = getattr(self, "_cb", None)
+                if cb:
+                    cb()
+
+            def windowDidEndLiveResize_(self, note):   # noqa: N802
+                cb = getattr(self, "_cb", None)
+                if cb:
+                    cb()
+
+        _WindowDelegateCls = _WindowDelegate
+    d = _WindowDelegateCls.alloc().init()
+    d._cb = on_resize
+    return d
+
+
 class Overlay:
     def __init__(self, on_quit=None, on_flag=None, on_translate=None, on_submit=None,
                  on_ask=None, on_new_topic=None):
@@ -258,6 +466,10 @@ class Overlay:
                             NSVisualEffectView, NSVisualEffectMaterialHUDWindow,
                             NSVisualEffectStateActive, NSWindowStyleMaskBorderless,
                             NSWindowStyleMaskNonactivatingPanel, NSBackingStoreBuffered,
+                            NSWindowStyleMaskResizable, NSWindowStyleMaskTitled,
+                            NSWindowStyleMaskClosable, NSWindowStyleMaskFullSizeContentView,
+                            NSWindowTitleHidden,
+                            NSAppearance, NSAppearanceNameDarkAqua,
                             NSTextAlignmentLeft, NSFont, NSLineBreakByWordWrapping,
                             NSLineBreakByTruncatingTail, NSView,
                             NSFloatingWindowLevel, NSWindowCollectionBehaviorCanJoinAllSpaces,
@@ -265,6 +477,22 @@ class Overlay:
 
         self._width = WIDTH
         self._height = HEIGHT
+        # ---- 用户缩放状态 ----
+        # 收回态/展开态的转录区高度各自记住用户拖出来的值(None = 用默认)。
+        # 为什么要分开记: 展开/收回会把面板高度整个重算, 如果只记一个值,
+        # 用户在收回态调好的高度一按「展开」就没了。
+        self._collapsed_scroll_h = VISIBLE_ROWS * ROW_H
+        # 当前生效的行尺寸(随宽度变, 见 _apply_row_metrics)。默认 = 2 行那一档。
+        self._row_h = ROW_H
+        self._zh_h = ROW_ZH_H
+        self._expanded_h_user: float | None = None
+        # pump 里轮询面板实际尺寸的缓存。**刻意不用 NSWindowDelegate 的
+        # windowDidResize:** —— 本仓库既定做法是轮询而非观察者(见
+        # transcript_view.tick 的说明: 观察者是弱引用 GC 陷阱 + 会在我们自己
+        # 的 setFrame 期间重入)。缩放是低频事件, 每帧比两个浮点几乎免费。
+        self._last_panel_size: tuple[float, float] | None = None
+        # 只有用户真的拖过才写 .window。见 _sync_panel_size 里的说明。
+        self._user_resized = False
         self._on_quit = on_quit or (lambda: None)
         self._on_flag = on_flag or (lambda: None)
         self._on_translate = on_translate or (lambda on: None)
@@ -312,14 +540,64 @@ class Overlay:
         # (实测: 4 行的答案涨到 8 行, 直到 answer_done 对账才恢复)。
         self._answer_finished = False
 
-        style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+        # 尺寸记忆要在建面板**之前**读 —— 初始 frame 就用它, 否则会先闪一下默认尺寸。
+        self._load_window_state()
+
+        # ---- 窗口类型: 见模块顶部的 WINDOW_STYLE 开关 ----
+        # ⚠️ `NonactivatingPanel` **两条路都必须保留** —— 实测去掉它, 窗口在 app
+        # 非激活时 `occlusionState` 丢掉 Visible 位(8194->8192), **界面完全不可见**。
+        # ⚠️ `Resizable` 必须**构造时**给, 不能运行时改: NSWindow.h:341 原文说改
+        # styleMask 会重建视图层级(无边框与有标题栏的顶层视图是不同子类)。
+        if WINDOW_STYLE == "titled":
+            style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                     | NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView
+                     | NSWindowStyleMaskNonactivatingPanel)
+        else:
+            style = (NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                     | NSWindowStyleMaskResizable)
         self._panel = _make_panel(
             NSMakeRect(0, 0, self._width, self._height), style,
             NSBackingStoreBuffered, False)
+        # 宽度下限见 MIN_WIDTH 的实测依据。
+        # ⚠️ **不设 `setContentResizeIncrements_`** —— 试过按 ROW_H 吸附高度, 手感是
+        # "拖 30px 没反应、突然跳 70px", 作者的原话是"完全不跟手"。缩放要像拉窗口一样
+        # 连续跟手, 所以让高度自由; 视口底部露半行字是可接受的(滚动视图本来就该这样)。
+        self._panel.setContentMinSize_((MIN_WIDTH, self._min_height()))
+        # live resize 期间也要重排内容(否则拖拽那 1.2 秒里内容冻着, 松手才跳)。
+        # ⚠️ setDelegate_ 是**弱引用** -> 必须进 _targets 保命; 被 GC 掉的后果是
+        #    拖拽期间内容又冻回去, 而且**完全不报错**(与 _targets 里其它目标同理)。
+        self._win_delegate = _make_window_delegate(self._sync_panel_size)
+        self._targets.append(self._win_delegate)
+        self._panel.setDelegate_(self._win_delegate)
+        # ⚠️ 轮询缓存必须在这里就用**真实 frame** 初始化。留成 None 的话, 第一次
+        # _sync_panel_size 必然判成"尺寸变了" -> 把构造本身误记成"用户拖过" ->
+        # 于是光是构造+close() 就会往仓库写 .window(跑一次测试落一个文件)。
+        _f0 = self._panel.frame()
+        self._last_panel_size = (_f0.size.width, _f0.size.height)
+        # 藏标题文字 + 标题栏透明 —— 配合 Titled|FullSizeContentView 就是"看着无边框、
+        # 行为是正常窗口"。这两条与 fullSizeContentView 互为前提(Apple 文档原文)。
+        if WINDOW_STYLE == "titled":
+            self._panel.setTitleVisibility_(NSWindowTitleHidden)
+            self._panel.setTitlebarAppearsTransparent_(True)
+        # ⚠️ 必须**显式指定深色外观**。像素级实测(2026-09-24): 系统处于浅色模式时,
+        # Titled 窗口的 NSVisualEffectView 会跟随窗口 appearance, `.hudWindow` 被渲染
+        # 成灰色 —— 面板中心平均亮度 **0.314**; 强制 DarkAqua 后降到 **0.113**
+        # (暗 2.8 倍), 通透感恢复。
+        # 这就是"换成 Titled 之后变灰"的**真因**: 与 material / blendingMode / opaque
+        # 都无关(那三项实测本来就是对的: HUDWindow=13, BehindWindow=0, state=Active)。
+        # Borderless 时不明显, 因为那时窗口没有主题框架、外观继承路径不同。
+        self._panel.setAppearance_(
+            NSAppearance.appearanceNamed_(NSAppearanceNameDarkAqua))
+        # 红绿灯只存在于 Titled 窗口; borderless 下 standardWindowButton_ 全返回
+        # None, 这个调用是安全的空操作, 所以不额外加条件。
+        self._hide_traffic_lights()
         self._panel.setLevel_(NSFloatingWindowLevel)
         self._panel.setCollectionBehavior_(NSWindowCollectionBehaviorCanJoinAllSpaces)
         self._panel.setOpaque_(False)
         self._panel.setBackgroundColor_(NSColor.clearColor())
+        # ⚠️ 必须 **True**(2026-09-24 实测): 它是"按下背景即拖动窗口"的总开关,
+        # 配合拖拽层的 `mouseDownCanMoveWindow -> True` 才生效。
+        # 试过设 False 想自己接管拖拽, 结果是**背景完全拖不动**(见拖拽层的说明)。
         self._panel.setMovableByWindowBackground_(True)
 
         content = self._panel.contentView()
@@ -342,6 +620,11 @@ class Overlay:
         ve.addSubview_(scrim)
         self._scrim = scrim
 
+        # 背景拖拽层: 紧跟 scrim 加入 = z 序最底, 所以后面所有控件/转录区/缩放带
+        # 都在它上面, 各自照常收事件; 只有空白处落到这里 -> 拖窗口。
+        self._drag_layer = _make_drag_layer(self._on_drag_layer_mousedown)
+        ve.addSubview_(self._drag_layer)
+
         self._NSFont, self._NSTF = NSFont, NSTextField
         # 答案折行的实测字体: 必须与转录区大字位用的是**同一个** 18pt Medium,
         # 否则量出来的行高与标签实际排版对不上, 折行判据就是假的。
@@ -359,7 +642,7 @@ class Overlay:
         # 藏在你不看的地方。
         self._collapsed = True
         self._scroll_y = BOTTOM_PAD + PINNED_H
-        self._scroll_h = VISIBLE_ROWS * ROW_H
+        self._scroll_h = self._collapsed_scroll_h
         self._pinned = PINNED_H
         self._expanded_h = self._expanded_scroll_h()
         f_zh = (NSFont.systemFontOfSize_weight_(18.0, WEIGHT),
@@ -374,6 +657,9 @@ class Overlay:
             max_scroll_h=self._expanded_h,
             on_follow_change=self._on_follow_change)
         self._tv.set_collapsed(True)      # 初始收回态: 滚轮必须从一开始就被吞掉
+        # 载入的宽度可能是窄窗(上次拖过) -> 立刻按它定行尺寸, 否则会先用 2 行的
+        # 默认尺寸画一帧, 再跳成 4/5 行。默认宽度下这个调用是空操作。
+        self._apply_row_metrics(self._width)
 
         self._draft_lbl = self._label(11.0, NSColor.whiteColor().colorWithAlphaComponent_(0.50), 1)
         ve.addSubview_(self._draft_lbl)
@@ -445,12 +731,16 @@ class Overlay:
         # 鼠标穿透不能放在面板上: 开启后窗口忽略所有鼠标事件, 按钮会集体失效(单向死锁),
         # 所以穿透只从菜单栏 🎧 切换。
         self._through = False
-        self._translating = True
+        self._trans_mode = "both"        # both | en | raw, 见 _cycle_translate
+        self._translating = True         # 派生: mode != "raw"
+        self._correcting = True          # 派生: mode != "raw" —— 是否调 LLM 矫正
         self._engine_warn = False        # 云端翻译降级中(菜单栏图标提示用)
         self._btn_trans = self._button(
-            "译 开", self._toggle_translate,
-            "开启/关闭中文翻译。关闭后只出英文 —— 英文仍做上下文矫正(ASR 错听照修)，"
-            "只是不显示中文，也不再查中文术语解析")
+            TRANS_MODE_TITLE["both"], self._cycle_translate,
+            "点一下循环三种模式:\n"
+            "  双语     —— DeepSeek 矫正英文错听 + 出中文\n"
+            "  只英·校  —— 只矫正英文, 不出中文\n"
+            "  纯转录   —— 完全不调 LLM, ASR 直出(零 API、零延迟、最省电)")
         self._btn_flag = self._button(
             "⭐", self._flag, "标记当前句为重点(写入 Obsidian 时加 ⭐ Exam Focus)")
         self._btn_close = self._button("✕", self._quit, "退出")
@@ -461,9 +751,10 @@ class Overlay:
             "把刚讲的这一段讲清楚(中文讲解, 关键处留一行 EN：英文原文)")
         self._btn_topic = self._button(
             "新话题", self._new_topic, "结束当前问答线程, 回到字幕")
-        # 展开/收回: 展开时显示更长的历史(固定占屏高 60%), 收回回到 3 句
-        self._btn_expand = self._button(
-            "▾ 展开", self._toggle_mode, "展开/收回更多历史")
+        # ⚠️ 「展开/收回」按钮已删(2026-09-24)。它原本承担的是"解锁滚动"——
+        # 而滚动权限已与收起/展开解耦(见 transcript_view.set_collapsed), 现在
+        # **拉窗口 = 看几句, 滚动 = 往回翻**, 两者正交, 不需要这个按钮。
+        # `_apply_mode` 保留: **答案接管**仍在用它自动展开/还原(见 answer 接管那段)。
         # "回到最新": 只在用户翻到上面去了以后出现。它同时是滚轮若投递失败时的
         # 保底导航(按钮已被实测证明可点)。
         self._btn_latest = self._button(
@@ -472,11 +763,10 @@ class Overlay:
         # 顶栏按钮按**右对齐**摆放(列表为左->右顺序), 实际 x/宽度在 _layout() 现算:
         # 宽度 = sizeToFit + 内边距(图标保底 28px 点击区)。旧代码硬编码 x, "展开"
         # 占 [W-170,W-108] 而"译 开"占 [W-130,W-74], **交叉 22px**, 渲染出来糊成
-        # 一团("展开译 开")。自适应宽度后中英/展开收回换字都不会重叠。
-        # ⚠️ 两个新按钮插在 index 2(展开位的右边): 循环是 reversed + 右对齐, 所以
-        #    列表顺序就是视觉从左到右。插在 index 0 会把 _btn_latest 那个**隐藏但仍
-        #    占 63px** 的空位塞进按钮组内部(看起来像凭空一段间隔)。
-        self._bar = [self._btn_latest, self._btn_expand, self._btn_ask,
+        # 一团("展开译 开")。自适应宽度后中英换字都不会重叠。
+        # ⚠️ _btn_latest 是**隐藏但仍占位**的, 所以它必须留在列表最前(视觉最左),
+        #    插到中间会在按钮组内部凭空留一段间隔。
+        self._bar = [self._btn_latest, self._btn_ask,
                      self._btn_topic, self._btn_trans, self._btn_flag,
                      self._btn_close]
         self._sync_trans_button()
@@ -694,29 +984,38 @@ class Overlay:
         主屏, **不要**退到某个写死的高度: 这个返回值还决定了滚动池大小 K
         (K = ceil(h/row_h)+2), 猜小了会在展开后露出空白行。"""
         from AppKit import NSScreen
+        if self._expanded_h_user is not None:
+            # 用户自己拖过展开态高度, 听他的 —— 但**地板仍然要过**: 否则在展开态把
+            # 高度拖小之后, 按「展开」会让窗口比收回态还矮, 按钮语义直接反了。
+            # (实测: 展开 518 -> 展开态拖到 292 -> 收回 362 -> 再展开只有 292。)
+            return max(self._expanded_h_user, self._collapsed_scroll_h + self._row_h)
         scr = self._panel.screen() or NSScreen.mainScreen()
         vis_h = scr.visibleFrame().size.height if scr else 900.0
         total = min(0.60 * vis_h, vis_h - 40)
-        return max(2 * ROW_H,
+        # ⚠️ 展开必须**至少多露出一行**。用户把收回态拖得比"屏高 60%"还高时,
+        # 光按屏高算会让展开态比收回态还矮 -> 按「展开」什么都不发生, 按钮像坏的。
+        # (回归测试 R7 就是这么抓到的: 残留尺寸 521 时 assertGreater 失败。)
+        return max(2 * self._row_h,
+                   self._collapsed_scroll_h + self._row_h,
                    total - BOTTOM_PAD - _pinned(GLOSS_H_BIG) - 8 - HEADER_H)
 
-    def _toggle_mode(self):
-        self._apply_mode(not self._collapsed)
-
     def _apply_mode(self, collapsed: bool):
-        """切换展开/收回。面板原点在左下、向上长高, 所以**顶边保持不动**,
-        否则顶栏按钮会跟着跳。"""
+        """切换收起/展开。面板原点在左下、向上长高, 所以**顶边保持不动**,
+        否则顶栏按钮会跟着跳。
+
+        ⚠️ 顶栏的「展开」按钮已删, 所以现在**只有答案接管会调它**
+        (答案出现时展开、退出接管时还原)。保留它是因为那条路径仍需要这个能力。
+        """
         from AppKit import NSScreen
         self._collapsed = collapsed
         # 展开高度现场重算, 不用 __init__ 里那个 —— 那时面板可能还没落到目标屏幕,
         # _expanded_scroll_h 会退化到 900px 兜底值, 复用就会算出错的总高。
         self._expanded_h = self._expanded_scroll_h()
-        self._scroll_h = VISIBLE_ROWS * ROW_H if collapsed else self._expanded_h
+        self._scroll_h = self._collapsed_scroll_h if collapsed else self._expanded_h
         self._pinned = self._pinned_h()
         new_h = BOTTOM_PAD + self._pinned + 8 + HEADER_H + self._scroll_h
         self._height = new_h
         self._tv.set_collapsed(collapsed)
-        self._btn_expand.setTitle_("▾ 展开" if collapsed else "▴ 收回")
 
         f = self._panel.frame()
         top = f.origin.y + f.size.height
@@ -731,6 +1030,15 @@ class Overlay:
                      min(oy, vis.origin.y + vis.size.height - new_h - 20))
         self._panel.setFrame_display_(
             ((f.origin.x, oy), (self._width, new_h)), True)
+        # ⚠️ 必须回写轮询缓存: 这是**我们自己**改的 frame, 不是用户拖的。
+        # 不回写的话下一轮 pump 的 _sync_panel_size 会把它当成用户缩放,
+        # 于是展开时那个屏高 60% 的高度会被记成"用户拖出来的展开态高度"。
+        # ⚠️ 要读**真实 frame** 而不是我们算的 new_h: AppKit 可能按
+        # contentMinSize / resizeIncrements 微调落地高度, 记成 new_h 就会留下
+        # 一个对不上的缓存值, 下一轮 sync 又把它当成用户拖拽(踩过: 跑一次
+        # 回归测试就往仓库落一个 .window)。
+        _fa = self._panel.frame()
+        self._last_panel_size = (_fa.size.width, _fa.size.height)
         self._layout()
 
     def _on_follow_change(self, follow: bool):
@@ -739,6 +1047,233 @@ class Overlay:
             self._btn_latest.setHidden_(follow)
         except Exception:                     # noqa: BLE001
             pass
+
+    # ---- 用户缩放 ----
+    def _load_window_state(self) -> None:
+        """读回上次的窗口尺寸。fail-soft: 读不到/格式坏就用默认, 绝不抛。"""
+        try:
+            raw = WINDOW_STATE_FILE.read_text(encoding="utf-8").strip().lower()
+            w_s, h_s = raw.split("x")
+            w, h = float(w_s), float(h_s)
+        except Exception:                     # noqa: BLE001
+            return
+        # 换过屏幕、手改坏了、或存了个荒唐值 -> 退回默认, 别把面板放到屏外
+        if not (MIN_WIDTH <= w <= 8000.0 and self._min_height() <= h <= 8000.0):
+            return
+        # ⚠️ 还要按**当前屏幕**夹一次: 在外接大屏上调好的尺寸, 拔掉显示器后再启动
+        # 会让面板出屏。实测 `.window=900x4000` 时上下都出屏, **顶栏的展开/退出按钮
+        # 点不到 = 退不出程序**。这里只夹尺寸, 原点由 _move_to_corner 负责。
+        from AppKit import NSScreen
+        scr = NSScreen.mainScreen()
+        if scr is not None:
+            vis = scr.visibleFrame()
+            w = min(w, max(MIN_WIDTH, vis.size.width - 40.0))
+            h = min(h, max(self._min_height(), vis.size.height - 40.0))
+        self._width, self._height = w, h
+        self._collapsed_scroll_h = max(
+            ROW_H, h - BOTTOM_PAD - PINNED_H - 8 - HEADER_H)
+
+    def _save_window_state(self) -> None:
+        # 尺寸 == 默认时没什么可记的 —— 直接不写文件。
+        # ⚠️ 这一条也是**测试隔离**的关键: 回归测试里 R8(答案接管)会改面板尺寸,
+        # 于是 `_user_resized` 被置真、close() 就往仓库落一个 `.window`。跑一次测试
+        # 落一个文件, 而且残留值会改变下一次运行的行为。
+        # ⚠️ 比的是**要写出去的值**(收回态高度), 不是 self._height ——
+        # self._height 在答案接管时是展开态的高度(实测 518), 拿它比永远不等,
+        # 守卫形同虚设。踩过。
+        if (abs(self._width - WIDTH) < 0.5
+                and abs(BASE_H + self._collapsed_scroll_h - HEIGHT) < 0.5):
+            return
+        try:
+            # 存**收回态**的高度, 不是 self._height: 收回态占 99% 使用时间, 是用户
+            # 平时看到的样子。存 self._height 的话, 在展开态退出 -> 下次启动的
+            # 收回态会莫名其妙变很高(踩过: 存下来是 620x521 而不是 620x292)。
+            WINDOW_STATE_FILE.write_text(
+                f"{self._width:.0f}x{BASE_H + self._collapsed_scroll_h:.0f}\n",
+                encoding="utf-8")
+        except Exception:                     # noqa: BLE001
+            pass
+
+    def _min_height(self) -> float:
+        """最小高度 = 固定区 + MIN_ROWS 行。行高随宽度变, 所以它必须现算。"""
+        return BASE_H + self._row_h * MIN_ROWS
+
+    def _apply_row_metrics(self, width: float) -> None:
+        """按当前宽度算行尺寸并推给转录区(窄窗中文要更多行才不吞字)。"""
+        lines = _lines_for_width(width)
+        zh_h, row_h = _zh_h_for(lines), _row_h_for(lines)
+        if abs(row_h - self._row_h) < 0.5:
+            return
+        self._row_h, self._zh_h = row_h, zh_h
+        self._tv.set_row_metrics(zh_h, row_h, lines)
+        # 行高变了 -> 最小高度也变了, 得同步给窗口, 否则缩不到新下限
+        try:
+            self._panel.setContentMinSize_((MIN_WIDTH, self._min_height()))
+        except Exception:                     # noqa: BLE001
+            pass
+
+    def _hide_traffic_lights(self) -> None:
+        """藏掉左上角三个系统按钮 —— 但**保留** Titled 带来的原生缩放能力。
+
+        这是 macOS 社区的既有做法: Christian Tietze 2020-10 那篇博客的标题就是
+        《Hide Traffic Light Buttons in NSWindow Without Removing Resize Functionality》,
+        Ghostty 的 `HiddenTitlebarTerminalWindow.swift` 同款。
+        Tietze 藏的是**四个**(含 .fullScreenButton); 我们实测只有 3 个
+        (styleMask 没设 FullScreen 位, type 7 为 None), 所以循环写成 0..7 防御。
+
+        ⚠️ 用 `setHidden_(True)` 而**不是** `removeFromSuperview()` —— 后者查不到
+        任何来源支持(搜 `standardWindowButton removeFromSuperview` 零命中), 而
+        Tietze 与 mkll/NSWindowStyles 两处有出处的做法都用 isHidden。
+        「红绿灯会自己回来」的社区实证指的是**位置**在 resize 后复位, 不是可见性。
+        ⚠️ 必须**可重复调用**: Ghostty 的注释原文 "macOS breaks it usually",
+        所以 show() 里也再调一次。
+        """
+        try:
+            for i in range(8):
+                b = self._panel.standardWindowButton_(i)
+                if b is not None:
+                    b.setHidden_(True)
+        except Exception:                     # noqa: BLE001
+            pass
+
+    # ---- 窗口级鼠标分派(移动 + 缩放, 含四角) ----
+    def _zone_(self, lx: float, ly: float, w: float, h: float):
+        """点 (lx,ly)(面板内坐标, y 向上) 落在哪个缩放区; 不在最外一圈则 None。"""
+        e = EDGE_BAND
+        left, right = lx < e, lx > w - e
+        bottom, top = ly < e, ly > h - e
+        if top and left:
+            return "tl"
+        if top and right:
+            return "tr"
+        if bottom and left:
+            return "bl"
+        if bottom and right:
+            return "br"
+        if left:
+            return "l"
+        if right:
+            return "r"
+        if top:
+            return "t"
+        if bottom:
+            return "b"
+        return None
+
+    def _resized_frame(self, zone: str, start, dx: float, dy: float):
+        """按 zone 决定哪条边跟手, **对边固定** —— 与正常窗口一致。
+
+        `start` 是 mouseDown 时的 frame; `dx/dy` 是 AppKit 屏幕坐标增量(y 向上)。
+        """
+        from AppKit import NSScreen
+        sx, sy = start.origin.x, start.origin.y
+        sw, sh = start.size.width, start.size.height
+        right, top = sx + sw, sy + sh
+        w = max(MIN_WIDTH, sw + dx if "r" in zone else (sw - dx if "l" in zone else sw))
+        h = sh + dy if "t" in zone else (sh - dy if "b" in zone else sh)
+        h = max(self._min_height(), h)
+        x = right - w if "l" in zone else sx
+        y = sy if "t" in zone else top - h
+        scr = self._panel.screen() or NSScreen.mainScreen()
+        if scr is not None:
+            vis = scr.visibleFrame()
+            x = max(vis.origin.x, min(x, vis.origin.x + vis.size.width - w))
+            y = max(vis.origin.y, min(y, vis.origin.y + vis.size.height - h))
+        return ((x, y), (w, h))
+
+    def _track_loop(self, zone, start, mouse0) -> None:
+        """**嵌套事件循环**: 自己抽拖拽事件, 不依赖主循环。
+
+        ⚠️ 这是本功能的关键(2026-09-24 实测): 原生拖边缘缩放时 AppKit 进入它自己的
+        事件跟踪循环, **我们的主循环被卡住 1239.8ms**(实测: 空闲期 pump 最大间隔
+        9.6ms, 拖拽期 1239.8ms)。所以"在 pump 里轮询尺寸再重排"这条路**根本跑不到**
+        —— 窗口框在动、内容冻着, 松手才跳一下。手感就是作者说的"卡顿不够丝滑"。
+        嵌套循环跑在 `NSEventTrackingRunLoopMode` 里, 事件立刻到手, 每一步都**同步**
+        重排 -> 真正跟手。这也是 Cocoa 社区做自定义窗口缩放的经典手法。
+
+        ⚠️ mask 必须**同时**含 LeftMouseDragged 与 LeftMouseUp: 只匹配前者的话
+        松手后循环会一直转下去(表现为"手松了还在缩")。
+        """
+        from AppKit import (NSLeftMouseDraggedMask, NSLeftMouseUpMask,
+                            NSEventTrackingRunLoopMode, NSDate, NSEvent,
+                            NSEventTypeLeftMouseUp)
+        win = self._panel
+        mask = NSLeftMouseDraggedMask | NSLeftMouseUpMask
+        while True:
+            e = win.nextEventMatchingMask_untilDate_inMode_dequeue_(
+                mask, NSDate.distantFuture(), NSEventTrackingRunLoopMode, True)
+            if e is None or e.type() == NSEventTypeLeftMouseUp:
+                break
+            mx, my = _xy(NSEvent.mouseLocation())
+            dx, dy = mx - mouse0[0], my - mouse0[1]
+            # 只有 "resize" 一种模式(移动由 AppKit 的 movableByWindowBackground
+            # 自己处理, 不走这里)。原先还有个 "move" 分支, 全仓无调用点, 已删。
+            new = self._resized_frame(zone, start, dx, dy)
+            win.setFrame_display_(new, True)
+            self._sync_panel_size()            # 每一步同步重排 -> 丝滑
+
+    def _on_drag_layer_mousedown(self, event) -> bool:
+        """拖拽层收到 mouseDown: 在**最外一圈(含四角)**就自己跑嵌套循环缩放,
+        否则返回 False 让调用方走 AppKit 原生的 performWindowDragWithEvent_(移动)。
+
+        ⚠️ 四角必须自己来: AppKit 对无边框窗口**只给四条边注册缩放区, 四角没有**
+        (实测: 四角有缩放光标, 但拖拽完全无反应)。
+        """
+        from AppKit import NSEvent
+        f = self._panel.frame()
+        mx, my = _xy(NSEvent.mouseLocation())
+        zone = self._zone_(mx - f.origin.x, my - f.origin.y,
+                           f.size.width, f.size.height)
+        if not zone:
+            return False
+        self._track_loop(zone, f, (mx, my))
+        return True
+
+    def _sync_panel_size(self) -> None:
+        """轮询面板实际尺寸; 用户拖过就把布局跟上。
+
+        ⚠️ 刻意**不用** NSWindowDelegate 的 windowDidResize: 与本仓库"轮询而非
+        观察者"的既定做法一致(理由见 transcript_view.tick —— 观察者是弱引用 GC
+        陷阱, 且会在我们自己 setFrame 期间重入)。每帧只比两个浮点, 近乎免费。
+
+        ⚠️ 宽度变化会**连带改行高**(窄窗中文要更多行才不吞字, 见 _apply_row_metrics)。
+        回收池依赖的不变量是"所有行**等高**", 不是"行高 == 70" —— 换一组统一尺寸
+        是安全的, 池的容量会跟着重算。
+        """
+        try:
+            f = self._panel.frame()
+        except Exception:                     # noqa: BLE001
+            return
+        size = (f.size.width, f.size.height)
+        if size == self._last_panel_size:
+            return
+        old_w = self._width                   # ⚠️ 必须在覆盖 _width **之前**取
+        self._last_panel_size = size
+        self._width, self._height = size
+        # 只有**用户拖出来的**尺寸才值得记。没有这个标志的话, 光是构造+close()
+        # 就会往仓库里写 .window —— 跑一次回归测试就落一个文件, 而且残留值会
+        # 改变下一次运行的行为(测试结果依赖上次留下的状态)。
+        self._user_resized = True
+        scroll_h = max(self._row_h, self._height - BOTTOM_PAD - self._pinned - 8 - HEADER_H)
+        # 回写给他**当前所在的那个态**: 收回态调好的高度不该按一次「展开」就消失。
+        if self._collapsed:
+            self._collapsed_scroll_h = scroll_h
+        else:
+            self._expanded_h_user = scroll_h
+        self._scroll_h = scroll_h
+        # 宽度变了 -> 先按新宽度定行尺寸(窄窗中文要更多行), 再推宽度、重折答案。
+        # 顺序要紧: 行高决定槽位容量, 槽位容量又决定答案行够不够放。
+        if abs(self._width - old_w) > 0.5:
+            self._apply_row_metrics(self._width)
+        self._tv.set_width(self._width)
+        # 宽度变了 -> 答案行必须**重折**: `_answer_rows` 是按折行**当时的宽度**实测
+        # 出来的, 宽度一变就是陈的。窗口缩窄后每行需要更多行, 超过槽位容量
+        # (ROW_ZH_H) 的部分会被 AppKit **静默截断**(不留省略号)。
+        # ⚠️ MIN_WIDTH 只保护**字幕**(字幕每次按新宽度重渲), **不保护答案**(答案是
+        # 缓存值) —— 这是 2026-09-24 代码审计抓出来的漏网路径。
+        if abs(self._width - old_w) > 0.5:
+            self._answer_refold()
+        self._layout()
 
     def _layout(self):
         from AppKit import NSMakeRect
@@ -779,6 +1314,7 @@ class Overlay:
             x -= w
             b.setFrame_(NSMakeRect(x, self._height - 28, w, 24))
             x -= gap
+        self._drag_layer.setFrame_(((0.0, 0.0), (self._width, self._height)))
         self._ve.setFrame_(self._panel.contentView().bounds())
         self._scrim.setFrame_(self._ve.bounds())
 
@@ -818,6 +1354,7 @@ class Overlay:
         self._install_edit_menu()
         # orderFrontRegardless 不变: 显示不激活 app(绝不调 NSApp.activate —— 已废弃且会抢焦点)
         self._panel.orderFrontRegardless()
+        self._hide_traffic_lights()   # 红绿灯会自己回来(社区实证), 每次显示都再藏一遍
         # ⚠️ 必须显式清掉 first responder。实测: orderFrontRegardless 之后 AppKit 会
         # **自动**把输入框的 field editor 装成 first responder —— 于是 `_is_editing()`
         # 从启动那一刻起就恒为 True, pump 里那条"键盘不自留"不变量被**永久短路**,
@@ -841,6 +1378,10 @@ class Overlay:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        # 先收一次尺寸再落盘: 用户拖完**立刻**按 ✕ 时, pump 可能还没来得及轮询到。
+        self._sync_panel_size()
+        if self._user_resized:
+            self._save_window_state()
         try:
             self._panel.orderOut_(None)
         except Exception:                     # noqa: BLE001
@@ -995,6 +1536,24 @@ class Overlay:
         self._answer_pr = []
         self._answer_pw = []
         self._answer_finished = False
+
+    def _answer_refold(self) -> None:
+        """按**当前宽度**把答案重新折一遍。宽度变化时调用(见 _sync_panel_size)。
+
+        只清折行产物, 不动 `_answer_text` —— 它是重折的输入, 也是 answer_done 对账
+        的真源。实现上就是把它清空再喂回去, 复用 `_answer_feed` 这一条路径,
+        不另写一套折行逻辑。
+        """
+        if not self._answer_on or not self._answer_text:
+            return
+        text = self._answer_text
+        self._answer_rows = []
+        self._answer_pend = ""
+        self._answer_fold = 0
+        self._answer_pr = []
+        self._answer_pw = []
+        self._answer_text = ""
+        self._answer_feed(text, flush=True)
 
     def _answer_feed(self, delta: str, flush: bool = False):
         """把新到的答案文本喂进折行状态机。
@@ -1228,6 +1787,9 @@ class Overlay:
         if self._panel.isKeyWindow() and not self._is_editing():
             self._release_focus()
         self._sync_focus_look()      # 细线/光标跟着真实编辑状态走(委托回调不可靠)
+        # 用户拖过窗口边缘 -> 把宽度/转录区高度收进来并重排。放在 tick 之前:
+        # tick 要基于更新后的几何算池, 顺序反了会画一帧旧几何。
+        self._sync_panel_size()
         now = time.monotonic()
         if busy:
             self._last_ev_t = now
@@ -1272,32 +1834,47 @@ class Overlay:
     def _sync_trans_button(self):
         """按钮文字直接写状态(不靠颜色/图标变暗 —— emoji 不吃 tint, 且弱显色看不清)。"""
         from AppKit import NSColor
-        self._btn_trans.setTitle_("译 开" if self._translating else "译 关")
+        self._btn_trans.setTitle_(TRANS_MODE_TITLE[self._trans_mode])
         try:                                  # 颜色只是锦上添花, 拿不到也不影响可用
-            self._btn_trans.setContentTintColor_(
-                NSColor.systemGreenColor() if self._translating
-                else NSColor.secondaryLabelColor())
+            self._btn_trans.setContentTintColor_(TRANS_MODE_COLOR[self._trans_mode]())
         except Exception:                     # noqa: BLE001
             pass
 
-    def _toggle_translate(self):
-        """切换翻译开关。关闭后主链路跳过 LLM, 只保留英文转录。"""
-        self.set_translating(not self._translating)
+    def _cycle_translate(self):
+        """在三种模式间循环: 双语 → 只英文(矫正) → 纯转录 → 双语。
 
-    def set_translating(self, on: bool) -> None:
-        self._translating = bool(on)
-        if not self._translating:
-            # 关掉翻译: 清掉可能在途的草稿译文/术语, 别让它们留在屏上误导
+        单按钮循环而不是两个独立开关: 顶栏宽度不增, 且三态互斥本就是一个枚举,
+        拆成两个布尔会造出一个无意义组合(译开 + AI 关 = 要中文但不调模型, 做不到)。
+        想从双语直达纯转录要点两下 —— 那是低频操作, 换来的是永远看得见全部三态。"""
+        order = ("both", "en", "raw")
+        self.set_trans_mode(order[(order.index(self._trans_mode) + 1) % len(order)])
+
+    def _toggle_translate(self):
+        """[已弃用] 旧的两态切换。保留以免外部调用点报错, 内部改走 _cycle_translate。"""
+        self._cycle_translate()
+
+    def set_trans_mode(self, mode: str) -> None:
+        """三种模式(见 TRANS_MODE_TITLE)。旧接口 set_translating(bool) 仍可用, 会映射成
+        both/en —— 保持向后兼容, 调用方不必一次改完。"""
+        if mode not in TRANS_MODE_TITLE:
+            return
+        self._trans_mode = mode
+        self._translating = mode != "raw"          # "raw" = 不翻译也不矫正
+        self._correcting = mode != "raw"           # 只有"纯转录"完全不调 LLM
+        if mode != "both":
+            # 不出中文: 清掉可能在途的草稿译文/术语, 别让它们留在屏上误导
             self._draft_zh_val = ""
             self._terms = []
             self._pinned_term = None
-            # ⚠️ 答案缓冲(_answer_*)刻意**不在这里清**: 讲解是独立入口, 不被「译 开/
-            # 译 关」替代、也不依赖它(Phase 3 锁定需求)。译关时「讲一下」照常可用,
-            # 已经在屏上的回答也不该被这个开关抹掉 —— 往这个清理块里加答案状态就是
-            # 把"译关仍可用"这条需求悄悄打掉。
+            # ⚠️ 答案缓冲(_answer_*)刻意**不在这里清**: 讲解是独立入口, 不被这个开关
+            # 替代、也不依赖它。往这个清理块里加答案状态就是把"译关仍可用"打掉。
         self._sync_trans_button()
         self._mark_dirty(urgent=True)
-        self._on_translate(self._translating)
+        self._on_translate(mode)
+
+    def set_translating(self, on: bool) -> None:
+        """向后兼容旧调用点: 开=双语, 关=只英文(矫正)。"""
+        self.set_trans_mode("both" if on else "en")
 
     def _toggle_through(self):
         """切换鼠标穿透(仅从菜单栏调用; 面板按钮在穿透后会失效)。"""

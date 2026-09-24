@@ -3,10 +3,13 @@
 **闸门(已通过 2026-09-11)**: 真实双指滚动能到达未激活的 NonactivatingPanel
 并真正移动视口 —— 原方案成立, 不需要降级阶梯。
 
-**本脚本额外验两件事**(都只能真机测, 合成事件测不出来):
-  ① 收起态: 滚轮必须被**吞掉**(面板纹丝不动)。这是 99% 的使用状态,
-     平时滚轮若无效应, 上课时面板会被滚走。
-  ② 展开态: 滚上去后右上角**出现 ↓ 最新**, 滚回底部后**消失**。
+**本脚本验两件事**(都只能真机测, 合成事件测不出来):
+  ① 收起态: 滚轮**必须生效**, 滚上去后出现 ↓ 最新。
+     ⚠️ 2026-09-24 解耦后**行为与旧版相反**: 滚动权限原先绑在"收没收起"上
+     (收起态吞滚轮), 导致"把窗口拉大也不能滚", 于是顶栏那个展开按钮被迫承担
+     "解锁滚动"的职责。现在解耦成"**始终可滚**" —— 拉窗口 = 看几句, 滚动 = 往回翻。
+     收起态是 99% 的使用状态, 所以它能不能滚是这条改动的主要验收点。
+  ② 展开态: 同上(展开态现在只由答案接管触发, 不再是用户手动切)。
      (跟随状态机用真实事件走一遍, 之前只用程序化滚动验过。)
 
 **帧率诊断**(2026-09-11 加): 光看"帧间隔"会被用户停手污染 —— 抬手那几秒没有
@@ -43,8 +46,8 @@ SENTS = [
 PROBE_N = 60
 
 PHASES = [
-    (0.0, 16.0, True,  "① 收起态：双指滚动 -> 面板应【纹丝不动】"),
-    (16.0, 40.0, False, "② 展开态：滚动 -> 应能【自由滚动】；滚上去后右上角出现 ↓ 最新"),
+    (0.0, 16.0, True,  "① 收起态：滚动 -> 应能【自由滚动】；滚上去后出现 ↓ 最新"),
+    (16.0, 40.0, False, "② 展开态：滚动 -> 应能【自由滚动】；滚上去后出现 ↓ 最新"),
 ]
 
 
@@ -110,7 +113,7 @@ def report(a):
           % (a["out_med"] * 1e3, a["out_p90"] * 1e3))
     print("  停手间隔 %d 次(最长 %.0fms)" % (a["n_idle"], a["idle_max"] * 1e3))
     if a["n_pump"] < 50:
-        print("  ⚠️ 采样太少, 请在展开阶段持续滚十来秒")
+        print("  ⚠️ 采样太少, 请在该阶段持续滚十来秒")
     elif a["p99"] <= 8.3 and a["slow120"] == 0:
         print("  ✅ 每轮 pump 都在 120Hz 一帧内(p99 %.2fms), 我们不是瓶颈" % a["p99"])
     elif a["slow60"] == 0:
@@ -143,7 +146,7 @@ def main():
     for _ in range(4):
         o.pump()
 
-    # 从收起态开始(闸门探针是直接展开, 这里要测收起态的吞轮行为)
+    # 从收起态开始(收起态占 99% 使用时间, 所以它能不能滚是主要验收点)
     o._apply_mode(PHASES[0][2])
     for _ in range(3):
         o.pump()
@@ -168,8 +171,8 @@ def main():
 
     print("=" * 66)
     print("验收探针: %d 句历史, 收起 -> 展开 两阶段自动切换" % PROBE_N)
-    print("  ① 0-16s  收起态 —— 滚轮应无任何反应")
-    print("  ② 16-40s 展开态 —— 应能滚动; 滚上去出现 ↓最新, 滚回底部消失")
+    print("  ① 0-16s  收起态 —— 应能滚动; 滚上去出现 ↓最新")
+    print("  ② 16-40s 展开态 —— 同上(展开态现在只由答案接管触发)")
     print("=" * 66)
 
     t0 = time.monotonic()
@@ -259,25 +262,21 @@ def main():
     ok_all = True
     for st in stats:
         moved = (st["omax"] - st["omin"]) if st["omin"] is not None else 0.0
-        if st["collapsed"]:
-            good = st["recv"] > 0 and moved < 1.0
-            verdict = ("✅ 收到 %d 个滚轮事件但视口未动 —— 正确吞掉"
-                       % st["recv"]) if good else \
-                      ("❌ recv=%d 视口移动 %.0fpx —— 收起态不该能滚"
-                       % (st["recv"], moved))
+        # ⚠️ 2026-09-24 解耦后, **收起态与展开态的期望行为相同**(都该能滚) ——
+        # 旧版这里对收起态断言"视口必须纹丝不动", 那条不变量已被有意去掉。
+        good = moved > 5.0 and st["latest_seen_visible"] \
+            and not st["latest_seen_hidden_after_scroll"]
+        if moved <= 5.0:
+            verdict = ("❌ 视口没动(移动 %.0fpx, 收到 %d 个滚轮事件)"
+                       % (moved, st["recv"]))
+        elif not st["latest_seen_visible"]:
+            verdict = "❌ 滚上去了但 ↓最新 没出现"
+        elif st["latest_seen_hidden_after_scroll"]:
+            verdict = ("⚠️ 滚上去时 ↓最新 曾经是隐藏的"
+                       + ("  (首次见于 origin=%.1f following=%s recv=%d)"
+                          % st["bad_at"] if st["bad_at"] else ""))
         else:
-            good = moved > 5.0 and st["latest_seen_visible"] \
-                and not st["latest_seen_hidden_after_scroll"]
-            if moved <= 5.0:
-                verdict = "❌ 视口没动(移动 %.0fpx)" % moved
-            elif not st["latest_seen_visible"]:
-                verdict = "❌ 滚上去了但 ↓最新 没出现"
-            elif st["latest_seen_hidden_after_scroll"]:
-                verdict = ("⚠️ 滚上去时 ↓最新 曾经是隐藏的"
-                           + ("  (首次见于 origin=%.1f following=%s recv=%d)"
-                              % st["bad_at"] if st["bad_at"] else ""))
-            else:
-                verdict = "✅ 视口移动 %.0fpx, ↓最新 出现/消失正确" % moved
+            verdict = "✅ 视口移动 %.0fpx, ↓最新 出现/消失正确" % moved
         ok_all = ok_all and good
         print("  阶段 %d (%s): %s" % (st["i"] + 1,
                                      "收起" if st["collapsed"] else "展开", verdict))

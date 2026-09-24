@@ -133,20 +133,25 @@ lecture-live/
 ├── main.py                # CLI 入口；事件驱动主循环 + 三个 worker 线程
 ├── capture.py             # 音源(回调式异步采集 / 文件) + PeakNormalizer 电平归一化
 ├── vad.py                 # Silero VAD + 梯级静音 + pre-roll 分段
-├── asr.py                 # Parakeet 转写(带锁, 线程安全)
+├── asr.py                 # Parakeet 转写(带锁, 线程安全) + 可选定稿模型 Whisper
 ├── translator.py          # 本地流式 ZH/EN + RAG-lite 术语筛选 + 仅英文矫正
 ├── cloud_translator.py    # DeepSeek 云端翻译(同接口, 失败降级本地)
-├── overlay.py             # 卡片式悬浮窗 UI(含翻译开关 + 顶栏)
+├── overlay.py             # 卡片式悬浮窗 UI(含三档模式按钮 + 顶栏)
 ├── transcript_view.py     # NSScrollView 转录区：池化回收 + 跟随状态机
 ├── obsidian_writer.py     # Obsidian 双层笔记落盘
 ├── build_notes.py         # 术语三档分类/扩写 + 专有名词查询闸门
 ├── cl                     # 一键启动器(软链到 ~/.local/bin/cl)
+├── requirements.txt       # 运行依赖（README 安装段的机器可读版本）
 ├── docs/DESIGN.md         # 深度工程笔记：全部实测数据、踩坑、设计论证
+├── docs/experiments/      # 可复跑的对照实验（换模型 / 降噪 A/B / VAD 调参 / 缩放探针）
 ├── glossary.example.txt   # 公共术语表模板 → 复制成 glossary.txt 后自填课号
 ├── probe_scroll.py        # 滚动行为验收探针
 ├── test_pipeline.py       # 集成测试(走终端路径，可加速回放)
 └── sessions/              # 运行时产物：逐句实时落盘的会话文件(不入库)
 ```
+
+> `docs/experiments/` 里的脚本是**结论的证据**：README/DESIGN 里那些"实测"数字，
+> 大多能在这里找到对应的可复跑脚本（用法见各文件开头的 docstring）。
 
 > `glossary/`（分课程术语表）、`term_notes.json`（术语解释库）、`sessions/`（课堂记录）
 > 都是**你本地的数据**，随 `.gitignore` 排除，需要自己准备 —— 见下方[术语表](#术语表分课程)。
@@ -158,11 +163,12 @@ lecture-live/
 | 指标 | 值 |
 |---|---|
 | ASR | Parakeet 12s 音频 0.43s（**≈28× 实时**） |
+| ASR（可选定稿模型） | Whisper-turbo 同段 **2.19s（≈4× 实时）** —— 只用在定稿路径 |
 | 首字中文 | **0.60s** |
 | 句末 → 中文完成 | ~1.0s |
-| 内存峰值 | ~1.3GB |
-| 磁盘（模型） | ~2GB |
-| 每节 2h 课成本 | **0.08–0.19 元**（DeepSeek 云端） |
+| 内存峰值 | ~1.3GB（**加装定稿模型 +~1.0GB**） |
+| 磁盘（模型） | ~2GB（**加装定稿模型 ~3GB**） |
+| 每节 2h 课成本 | **0.08–0.19 元**（DeepSeek 云端；「纯转录」档为 **0**） |
 | 悬浮窗 pump 耗时 | 中位 **0.01ms** / p99 0.03ms；超帧率轮次 0.009% |
 
 > ⚠️ **本机模型上限**：OOM 由「模型大小 × prompt 长度」共同触发。
@@ -203,7 +209,43 @@ mkdir -p ~/models/vad && curl -sL -o ~/models/vad/silero_vad.onnx \
 
 # 术语表模板 → 自己的公共术语表
 cp glossary.example.txt glossary.txt
+
+# 【可选】定稿增强模型（~1GB，不下也能跑，只是定稿质量差一档）
+curl -sL -o /tmp/wt.tar.bz2 \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-turbo.tar.bz2
+tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2
 ```
+
+依赖也可以一条命令装：`uv pip install --python .venv/bin/python -r requirements.txt`
+
+---
+
+## 升级到新版本
+
+本项目**没有 pip 包、没有 release 包** —— 安装方式就是 `git clone`，所以升级就是 `git pull`：
+
+```bash
+cd lecture-live
+git pull
+# 依赖有新变化时（pull 后如果 requirements.txt 变了）
+uv pip install --python .venv/bin/python -r requirements.txt
+```
+
+**升级后建议扫一眼这三处**（`git pull` 补不到的东西）：
+
+| 检查 | 为什么 |
+|---|---|
+| `requirements.txt` 有没有变 | `git pull` 只更新代码，**不装依赖** |
+| `~/models/` 里模型齐不齐 | 新增的模型不会自动下来。缺了会警告并回退，不会崩 |
+| README 这个「升级」段 | 破坏性变更会在这里列出来 |
+
+### 破坏性变更记录
+
+- **2026-09-24**
+  - 新增可选定稿模型 `whisper-turbo`（~1GB）。**不装也能用**，只是少一档质量。
+  - 新增 `--final-model-dir` 参数（默认指向 whisper-turbo；传 `""` 关闭）。
+  - 悬浮窗「翻译开关」由 **2 态改为 3 态**（双语 / 只英·校 / 纯转录）。旧的两态行为 = 新的「只英·校」。
+  - 新增 `requirements.txt`（此前只在 README 里手打依赖列表）。
 
 ---
 
@@ -279,15 +321,31 @@ cd ~/lecture-live
 
 > 为什么穿透不在面板上：开启后窗口忽略**所有**鼠标事件，面板按钮集体失效（单向死锁）。所以只从**菜单栏** 🎧 切换 —— 菜单栏永远可点。
 
-### 🌐 翻译开关
+### 🌐 三档模式（顶栏一个按钮循环）
 
-点一下即在「双语」和「只英文」间切，不用重启。
+点一下循环：**双语 → 只英·校 → 纯转录 → 双语**。不用重启。
 
-- **关闭时**：只停**中文** —— 不产译文、不查术语解析（解析本身是中文）。**英文仍走同一模型做上下文矫正**，ASR 错听照修，阅读流向不变。落盘写 `**EN**: <矫正后>` + `**ASR**: <原始>` 两行。
-- **随时可逆**：重新打开即刻恢复双语，上下文一直连着，不断链。
+| 档 | 行为 | 什么时候用 |
+|---|---|---|
+| **双语** | DeepSeek 矫正英文错听 **+** 出中文 | 默认 |
+| **只英·校** | 只矫正英文，不出中文 | 要英文原文，不要中文 |
+| **纯转录** | **一个 LLM 请求都不发**，ASR 直出 | 不想联网 / 不想花 API / 最省电最跟手 |
+
+- **「只英·校」不是终点**：这一档**仍会调模型**做英文上下文矫正（ASR 错听照修），落盘写 `**EN**: <矫正后>` + `**ASR**: <原始>` 两行。
+- **「纯转录」才是真离线**：定稿、草稿译文、专有名词查询**全部**跳过模型 —— 零 API、零首字延迟。这也是**唯一**能保证"音频不出机器、文本也不出"的档位。
+- **随时可逆**：切回双语即刻恢复，上下文一直连着，不断链。
 - **矫正结果三重把关**（`_clean_fix`），不满足就回退原始 ASR：① 混入中文（模型跑偏去翻译了）② 空 ③ **明显变长**（在改写而非矫正）。
 
-> 「不翻译」≠「不联网」：关掉中文后**仍会调模型做英文矫正** —— 刻意如此，理由不是"不要修正"，而是"不要中文"。要零模型 / 零网络，用 `--engine local` 断网跑（或不配 key），失败时自动退成纯 ASR 转录。
+> 三档而非两档的原因：原来只有「译 开/关」，但**关掉后英文仍然过模型**。对"我根本不需要翻译、也不想联 API"的人没有可选项 —— 第三档把这个诉求变成显式选择。
+
+### 定稿用更准的模型（可选，~1GB）
+
+定稿路径可以额外接一个 **Whisper-large-v3-turbo**，输出明显更准。同一批真实课堂录音实测：有效词数 **+33%**、段尾无终止标点 **22%→14%**、空转写 **9%→2%**；逐段能看到它把 Parakeet 听错的词听对了（`part`→`pot`、`he jokes`→`heat up`）。
+
+- **草稿路径不变**（仍用 Parakeet）—— Whisper 只有 4× 实时，供不上"每秒出一份草稿"。
+- **模型缺失不影响使用**：会警告并回退 Parakeet，课上不会崩。
+- 关闭 / 换别的：`cl --final-model-dir ""` 或 `--final-model-dir /path/to/model`。
+- ⚠️ Whisper 偶尔会**退化**（吐省略号 / 整句复读），有 `is_degenerate()` 拦截，命中就回退 Parakeet。
 
 ### 术语表（分课程）
 

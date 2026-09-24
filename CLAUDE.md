@@ -32,7 +32,12 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 ## 本仓库特有雷区
 
 - **EN 为基准防倒退**：整课精修同时收到直播定稿的 EN 与 ASR 原文，**EN 是基准**；中文只能由 EN 修正，不能反过来改写 EN。
-- **`polish.py` 与 `tests/` 不在 git 里**：`git ls-files` 查不到，只在工作区。`obsidian_writer.close()` 的 `from polish import polish_entries` 被 `try/except` 包着 —— 文件缺失时只在收尾前打一行 ⚠，笔记照样生成（退回直播版转录）。clone 后这两块直接没有，README/DESIGN 却把精修写成现成功能。
+- **`polish.py` / `tests/` 是在 git 里的**（`git ls-tree -r HEAD` 可验；2026-09-24 核实）。
+  ⚠️ 本条曾写成"不在 git 里、clone 后没有" —— 那是 2026-09-18 的旧状态（当时它们确实
+  还是未跟踪的 `??`），之后已提交。留这段是因为 `obsidian_writer.close()` 的
+  `from polish import polish_entries` 确实被 `try/except` 包着（文件缺失时打一行 ⚠，
+  笔记照样生成、退回直播版转录）—— **这个 fail-soft 设计本身值得保留**，但它防的是
+  "文件被删/环境不完整"，不是"新 clone 拿不到"。
 - **不阻塞不变量**：`capture` / `vad` 的回调必须立刻返回；AppKit 的调用只能发生在主线程。往流水线里加活先想这两条。
 - **新增 streamq tag 必须在 `main.drain()` 加同分支** —— 它是唯一的 tag 分发点，漏改即静默丢弃。
 - **会话 Markdown 格式是三方共享契约**：`obsidian_writer` 写它、`_parse` 读回它、`cl last` 用 grep 匹配它；改格式会同时打断三处。

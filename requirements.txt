@@ -1,0 +1,27 @@
+# ClassLive 运行依赖（版本 = 作者 2026-09-24 实测可用的组合）
+#
+# 安装（与本仓库的 .venv 约定一致）:
+#   uv venv --python 3.12 .venv
+#   uv pip install --python .venv/bin/python -r requirements.txt
+#
+# ⚠️ 这些是**下界**而非锁死版本。本项目没有 lock 文件，因为它的目标环境只有
+# 作者自己那台 M1 Pro —— 与其维护一份很快腐坏的 lock，不如写清"实测可用的
+# 最低版本"，并在 README 里说明升级前先跑一遍验证。
+# 单位是">= 而非 ==": 除 sherpa-onnx 外，其余 API 都稳定，卡死版本只会带来
+# 升级时的无谓摩擦。sherpa-onnx 例外 —— 它的 C API 每个小版本都可能加/改符号
+# （本仓库用到的 OnlineRecognizer / OfflineSpeechDenoiser 都是新增能力）。
+
+sherpa-onnx>=1.13.7        # ASR + VAD + 降噪；1.13 起才有 OfflineSpeechDenoiser
+numpy>=2.0
+sounddevice>=0.5           # 麦克风/系统声采集
+
+# 本地翻译兜底（断网时降级用；云端走 httpx）
+mlx-lm>=0.31               # Apple Silicon GPU；已验证 3B/4B 必 OOM，只用 1.7B
+httpx>=0.28                # DeepSeek 云端翻译
+
+# macOS 悬浮窗（无 GUI 会话时自动回退终端，不装也能跑终端模式）
+pyobjc-framework-Cocoa>=12.2
+pyobjc-framework-Quartz>=12.2
+
+# 模型下载（首次安装用）
+huggingface-hub>=1.30

@@ -1,0 +1,36 @@
+# Thermodynamics and Statistical Mechanics(热力学与统计力学)
+macroscopic
+microscopic
+internal energy
+enthalpy
+entropy
+state function
+path function
+heat
+work
+piston
+system
+surroundings
+kinetic energy
+potential energy
+temperature
+pressure
+volume
+ideal gas
+thermodynamics
+classical mechanics
+quantum mechanics
+atom
+electron
+nucleus
+covalent bond
+ionic bond
+hydrogen bond
+chemical bond
+binding energy
+kinetic theory
+momentum
+velocity
+particle
+extensive property
+intensive property

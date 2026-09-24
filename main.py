@@ -18,7 +18,7 @@ import argparse, collections, os, queue, re, sys, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from capture import load_source, SR
 from vad import Segmenter
-from asr import load_asr
+from asr import load_asr, load_final_asr, is_degenerate
 from translator import load_translator
 from cloud_translator import (load_api_key, load_translator as load_cloud_translator,
                               answer_user_content)
@@ -313,7 +313,46 @@ class _Latest:
             return b
 
 
+def _maybe_notice_update() -> None:
+    """**一次性**的更新提示: 检测到落后于远程就打印一行, 之后不再打扰。
+
+    ⚠️ 三条自我约束(理由见 README「升级到新版本」):
+      1. **默认静默** —— 断网/代理/限流/没有 git 一律什么都不说, 绝不阻塞启动;
+      2. **每个版本只提示一次** —— 提示过就写 `.update-notice` 记下当前版本号,
+         所以"用户已经看到了但还没升"不会每次上课都被念一遍;
+      3. **不自动升级** —— `git pull` 由用户自己敲。启动时改用户的工作区
+         是同一条硬规矩("不擅自改环境")的越界。
+
+    为什么可以联网: 只在本地问 `git`(远端 ref 已经在本地仓库里), **不发 HTTP**。
+    所以既不碰 GitHub 的未认证限流(60/h), 也不需要用户登录。
+    """
+    if os.environ.get("CLASSLIVE_NO_UPDATE_CHECK"):
+        return
+    try:
+        import subprocess
+        root = os.path.dirname(os.path.abspath(__file__))
+        if not os.path.isdir(os.path.join(root, ".git")):
+            return
+        behind = subprocess.run(["git", "rev-list", "--count", "HEAD..@{u}"],
+                                cwd=root, capture_output=True, text=True,
+                                timeout=3).stdout.strip()
+        if not behind.isdigit() or int(behind) == 0:
+            return
+        ver_file = os.path.join(root, "VERSION")
+        cur = open(ver_file, encoding="utf-8").read().strip() if os.path.exists(ver_file) else "?"
+        stamp = os.path.join(root, ".update-notice")
+        if os.path.exists(stamp) and open(stamp, encoding="utf-8").read().strip() == cur:
+            return                                  # 这个版本已经提示过了
+        echo(f"↑ 有新版本（本地 {cur}，远程领先 {behind} 个提交）"
+             f"—— 升级: git pull；查看变化: cl doctor")
+        with open(stamp, "w", encoding="utf-8") as f:
+            f.write(cur)
+    except Exception:                               # noqa: BLE001
+        pass                                        # 提示而已, 任何失败都静默
+
+
 def run(args) -> None:
+    _maybe_notice_update()
     # 音源最先打开: 失败(没麦/没 BlackHole/坏文件)在这里就给友好提示退出,
     # 不再走完 ASR/LLM 加载 + 悬浮窗后才崩出一个裸 traceback。
     # ⚠️ 这次只是**试开**: 验证完立刻关。句柄留着不关的话, mic 的 InputStream
@@ -329,6 +368,9 @@ def run(args) -> None:
         pass
 
     asr = load_asr(args.model_dir)
+    # 定稿路径的 ASR(可选)。草稿仍用 parakeet —— 它每秒就要一份, whisper 的
+    # 4× 实时供不上; 质量收益只在定稿上兑现。
+    asr_final = load_final_asr(args.final_model_dir) if args.final_model_dir else None
     local_tr = load_translator(args.llm, args.glossary, args.context,
                                course=args.course)
     cloud_tr = None
@@ -355,7 +397,8 @@ def run(args) -> None:
     # 现在 ✕ 只置这个标志(主循环据此退出), running 留到收尾真正结束才清。
     stopping = threading.Event()
     flagged = {"on": False}                             # ⭐ 标记当前句
-    translating = {"on": True}                          # 🌐 翻译开关(悬浮窗按钮可随时切)
+    trans = {"mode": "both"}                            # 🌐 三档: both 双语 / en 只英·校 / raw 纯转录
+    translating = {"on": True}                          # 兼容旧读法: raw 之外都算"开"
     writer = ObsidianWriter(args.vault, args.course, mode=args.save_notes,
                             api_key=api_key_val, model=args.cloud_model,
                             glossary_path=args.glossary,
@@ -399,7 +442,7 @@ def run(args) -> None:
     ui = TerminalUI() if args.ui == "terminal" else _load_overlay(
         on_quit=stopping.set,
         on_flag=lambda: flagged.__setitem__("on", True),
-        on_translate=lambda on: translating.__setitem__("on", on),
+        on_translate=lambda mode: trans.__setitem__("mode", mode),
         on_submit=submit_question,
         on_ask=ask_about_this,
         # late binding: start_new_topic 定义在下面的问答状态块里, 这里只是把回调
@@ -461,7 +504,7 @@ def run(args) -> None:
                     last_tr, last_len = 0.0, 0
                 # 草稿译文: 距上次 ≥2.5s 且新增 ≥6 词才送(避免刷爆 LLM)
                 now = time.monotonic()
-                if translating["on"] and now - last_tr >= 2.5 \
+                if trans["mode"] == "both" and now - last_tr >= 2.5 \
                         and len(t.split()) - last_len >= 6:
                     last_tr, last_len = now, len(t.split())
                     try:
@@ -484,9 +527,16 @@ def run(args) -> None:
     def _emit(text: str) -> None:
         final_gen["n"] += 1                      # 通知草稿线程: 重置节流
         for sent in split_sentences(text):
-            if not translating["on"]:
-                # 关的只是**中文**, 不是模型: 英文仍做上下文矫正(ASR 错听照修),
-                # 只是不产出译文、也不查术语(术语解析本身是中文, 与"不要中文"冲突)。
+            if trans["mode"] == "raw":
+                # 纯转录: 一个 LLM 请求都不发。ASR 原样上屏、原样落盘。
+                # 这是给"不需要翻译、也不想联 API"的场景 —— 离线、零成本、零首字延迟。
+                # ⚠️ 与下面两档的关键差别: 不产出 `en` 流(没有矫正可流式), 直接给
+                #    ("final", "", "", sent), 让 en 走 final 那一趟。
+                finals.append(sent)
+                streamq.put(("final", "", "", sent))
+                continue
+            if trans["mode"] == "en":
+                # 只矫正英文: 中文不出, 但 ASR 错听照修(仍要联模型)。
                 # 失败则回退原始 ASR —— 与翻译路径同规矩, 绝不因模型问题丢转录。
                 try:
                     fixed = translator.fix_stream(
@@ -518,7 +568,7 @@ def run(args) -> None:
             streamq.put(("terms", hits))
             # 术语表没覆盖的专有名词(人名/机构/地名) -> 第 2 次出现才后台查一次并缓存
             # (一次性的 ASR 误听往往只出现一次, 2 次门槛把它们挡在门外)
-            if not hits and api_key_val:
+            if not hits and api_key_val and trans["mode"] != "raw":
                 for pn in detect_proper_nouns(sent, notes.known()):
                     seen_proper[pn] += 1
                     if seen_proper[pn] == 2:
@@ -528,11 +578,13 @@ def run(args) -> None:
         if not carry["text"]:
             return
         t = carry["text"]
-        carry["text"], carry["since"] = "", 0.0
-        # busy 必须在清空 carry 之前、LLM 调用之前置位: 收尾判据靠"carry 空 + busy 空"
-        # 两个条件接棒 —— 缺了这里, 强制送出的 LLM 输出落地前判据就会假性满足,
-        # 冲刷循环提前 break 把这句丢了(实测复现)。
+        # ⚠️ 顺序是命门: busy 必须在**清空 carry 之前**置位。
+        # 收尾判据 all_settled() 靠"carry 空 + busy 空"两个条件接棒 —— 先清 carry
+        # 会在这两条字节码之间让**四项同时为空**, 冲刷循环的"双检查"(间隔 0.25s)
+        # 若两次都落进这个窗口就提前 break, 这句永久丢失(实测复现过的丢句 bug)。
+        # (2026-09-24 全仓审计发现: 注释一直这么写, 代码却是反的 —— 已按注释修回。)
         busy["on"] = True
+        carry["text"], carry["since"] = "", 0.0
         try:
             _emit(t.rstrip() + " …")
         except Exception:                               # noqa: BLE001
@@ -556,7 +608,7 @@ def run(args) -> None:
                     dtext = draftq.get_nowait()
                 except queue.Empty:
                     dtext = None
-                if dtext and translating["on"]:
+                if dtext and trans["mode"] == "both":
                     try:
                         translator.translate_draft(
                             dtext, lambda d: drafts_zh.put(d))
@@ -569,7 +621,13 @@ def run(args) -> None:
                     _force_emit_carry()
                 continue
             try:
-                text = asr.transcribe(buf)
+                # ⚠️ 顺序: **先跑定稿模型**, 退化才回头跑草稿模型。
+                # 反过来写(先 parakeet 再 whisper)会让 parakeet 那 0.36s 白花 ——
+                # 实测它的结果只在 whisper 退化时用得上, 而 64 段里退化 0 次。
+                # 先跑慢的那个, 命中就省下整个快的那趟; 退化时多花的 0.36s 无所谓。
+                text = asr_final.transcribe(buf) if asr_final is not None else ""
+                if not text or is_degenerate(text):
+                    text = asr.transcribe(buf)      # 退化/空 -> 用草稿模型(并兜底)
                 if not text:
                     continue
                 if carry["text"]:                           # 与上句半截拼接
@@ -581,10 +639,14 @@ def run(args) -> None:
                     if not carry["since"]:
                         carry["since"] = time.monotonic()
                     continue
-                carry["text"], carry["since"] = "", 0.0
-                # busy 覆盖 ASR + _emit 全程: 冲刷等待循环若只看队列, 会在
-                # "buf 已出队、结果还没进 streamq"的窗口里误判空闲(丢这句)。
+                # ⚠️ 顺序同 _force_emit_carry: busy 先置位、再清 carry, 否则这两条
+                # 字节码之间四项同时为空 -> 冲刷循环可能提前 break 丢掉这句。
+                # (注释旧版写的是"busy 覆盖 ASR + _emit 全程" —— 那与实现不符:
+                #  asr.transcribe 在这之前就已执行, busy 并没有覆盖 ASR。而且真把
+                #  busy 提到 ASR 之前, 下面几条 `continue` 路径都会忘记清 busy,
+                #  反而会让冲刷循环空等到 15s 上限。故只修顺序, 并改正这句注释。)
                 busy["on"] = True
+                carry["text"], carry["since"] = "", 0.0
                 try:
                     _emit(text)
                 finally:
@@ -609,6 +671,8 @@ def run(args) -> None:
             if term is None:
                 break
             if term in queried_proper:
+                continue
+            if trans["mode"] == "raw":       # 纯转录: 不联模型, 专有名词查询整条跳过
                 continue
             queried_proper.add(term)
             try:
@@ -694,6 +758,13 @@ def run(args) -> None:
     except Exception as e:                       # noqa: BLE001
         # 走到这里模型已加载、会话文件已建 —— 绝不能裸崩, 那会把这次课的转录一起丢掉
         echo(f"⚠ 无法打开音源({args.source}): {e}")
+        # ⚠️ 早退也要收尾: 会话文件已经建了(带抬头), 直接 return 会跳过 writer.close(),
+        # 留下一个只有抬头、没走笔记流程的半成品文件 + 泄漏的文件句柄。
+        # (2026-09-24 OCR 发现。)
+        try:
+            writer.close(ask=False)
+        except Exception:                        # noqa: BLE001
+            pass
         return
 
     def drain():
@@ -769,7 +840,15 @@ def run(args) -> None:
         close_ui = getattr(ui, "close", None)
         if callable(close_ui):
             close_ui()
-        src.close()
+        # ⚠️ 必须包住: src.close() 抛异常的话, 下面的 seg.flush() / finalq 排空 /
+        # writer.close()(会话落盘 + Obsidian 写入 + 精修)**全部会被跳过** ——
+        # 与"落盘才是不能丢的事"这条核心约定直接冲突。
+        # 上面 probe 阶段的 probe_src.close() 就是包了 try/except 的(作者已知它会抛)。
+        # (2026-09-24 OCR 全量审计发现。)
+        try:
+            src.close()
+        except Exception:                           # noqa: BLE001
+            pass
         # ---- 统一冲刷: 文件播完 / ✕ / Ctrl+C 走同一条路 ----
         # 旧代码只在"文件播完"才冲刷, 手动停止会把分段器里在途的整句话
         # (最多 12s 音频)直接丢掉 —— 实测 SIGINT 复现; 而冲刷等待只看队列,
@@ -835,7 +914,10 @@ def main():
     p.add_argument("--speed", type=float, default=1.0, help="file 模式回放倍速(测试用)")
     p.add_argument("--ui", choices=["terminal", "overlay"], default="terminal")
     p.add_argument("--model-dir", default=os.path.expanduser("~/models/parakeet-tdt-0.6b-v3-int8"),
-                   help="Parakeet 模型目录")
+                   help="草稿+兜底的 ASR 模型目录(要求够快, 每秒要出一份草稿)")
+    p.add_argument("--final-model-dir",
+                   default=os.path.expanduser("~/models/sherpa-onnx-whisper-turbo"),
+                   help="定稿专用 ASR 模型目录(更准但更慢); 传空串关闭")
     p.add_argument("--llm", default="mlx-community/Qwen3-1.7B-4bit")
     p.add_argument("--glossary", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "glossary.txt"))

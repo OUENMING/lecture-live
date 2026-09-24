@@ -493,6 +493,9 @@ class Overlay:
         self._last_panel_size: tuple[float, float] | None = None
         # 只有用户真的拖过才写 .window。见 _sync_panel_size 里的说明。
         self._user_resized = False
+        # 我们自己调 setFrame（展开 / 答案接管）时置真 —— 让 _sync_panel_size
+        # 别把我们自己的改动当成用户拖了窗口。见该函数的说明。
+        self._programmatic_resize = False
         self._on_quit = on_quit or (lambda: None)
         self._on_flag = on_flag or (lambda: None)
         self._on_translate = on_translate or (lambda on: None)
@@ -1028,8 +1031,16 @@ class Overlay:
             vis = scr.visibleFrame()
             oy = max(vis.origin.y + 20,
                      min(oy, vis.origin.y + vis.size.height - new_h - 20))
-        self._panel.setFrame_display_(
-            ((f.origin.x, oy), (self._width, new_h)), True)
+        # ⚠️ 置标志再改 frame，最后**必须**在 finally 里复位：AppKit 会在
+        # setFrame_display_ **内部同步**回调 windowDidResize → _sync_panel_size。
+        # 那一刻下面那句缓存回写还没执行，缓存还是旧尺寸 —— 没有这个标志的话，
+        # _sync_panel_size 会把我们自己展开误判成用户拖了窗口。
+        self._programmatic_resize = True
+        try:
+            self._panel.setFrame_display_(
+                ((f.origin.x, oy), (self._width, new_h)), True)
+        finally:
+            self._programmatic_resize = False
         # ⚠️ 必须回写轮询缓存: 这是**我们自己**改的 frame, 不是用户拖的。
         # 不回写的话下一轮 pump 的 _sync_panel_size 会把它当成用户缩放,
         # 于是展开时那个屏高 60% 的高度会被记成"用户拖出来的展开态高度"。
@@ -1232,9 +1243,14 @@ class Overlay:
     def _sync_panel_size(self) -> None:
         """轮询面板实际尺寸; 用户拖过就把布局跟上。
 
-        ⚠️ 刻意**不用** NSWindowDelegate 的 windowDidResize: 与本仓库"轮询而非
-        观察者"的既定做法一致(理由见 transcript_view.tick —— 观察者是弱引用 GC
-        陷阱, 且会在我们自己 setFrame 期间重入)。每帧只比两个浮点, 近乎免费。
+        兼顾两条路径：
+        · **轮询**（每帧比两个浮点，近乎免费）—— 覆盖非拖拽期间的变化；
+        · **windowDidResize 委托** —— 原生缩放期间 AppKit 在自己的跟踪循环里回调它，
+          而那时轮询**根本跑不到**（实测 pump 相邻两次调用间隔 1239.8ms）。
+          委托是 live resize 唯一的正规钩子。
+
+        ⚠️ 委托会在 `setFrame_display_` **内部同步**回调进来，所以调用方若是在
+        程序性改尺寸，必须先置 `_programmatic_resize`（见 _apply_mode）。
 
         ⚠️ 宽度变化会**连带改行高**(窄窗中文要更多行才不吞字, 见 _apply_row_metrics)。
         回收池依赖的不变量是"所有行**等高**", 不是"行高 == 70" —— 换一组统一尺寸
@@ -1250,17 +1266,24 @@ class Overlay:
         old_w = self._width                   # ⚠️ 必须在覆盖 _width **之前**取
         self._last_panel_size = size
         self._width, self._height = size
-        # 只有**用户拖出来的**尺寸才值得记。没有这个标志的话, 光是构造+close()
-        # 就会往仓库里写 .window —— 跑一次回归测试就落一个文件, 而且残留值会
-        # 改变下一次运行的行为(测试结果依赖上次留下的状态)。
-        self._user_resized = True
         scroll_h = max(self._row_h, self._height - BOTTOM_PAD - self._pinned - 8 - HEADER_H)
-        # 回写给他**当前所在的那个态**: 收回态调好的高度不该按一次「展开」就消失。
-        if self._collapsed:
-            self._collapsed_scroll_h = scroll_h
-        else:
-            self._expanded_h_user = scroll_h
         self._scroll_h = scroll_h
+        # ⚠️ 只有**用户拖出来的**尺寸才值得记。没有这个守卫的话，光是构造 + close()
+        # 就会往仓库里写 .window —— 跑一次回归测试就落一个文件，而且残留值会改变
+        # 下一次运行的行为（测试结果依赖上次留下的状态）。**这个坑踩过两次。**
+        #
+        # `_programmatic_resize` 这一层是第三次：前两次修补（下面那句缓存回写、
+        # 以及 _save_window_state 改成比"要写出去的值"）只堵住了**轮询**路径。
+        # 后来为 live resize 加了 windowDidResize 委托，它会**同步**回调进本函数 ——
+        # 于是我们自己展开面板（答案接管 / 收起展开）时，这里又把用户调好的高度
+        # 顶掉成接管态的高度，并让 .window 被写出去。（2026-09-24 OCR 分块审计发现）
+        if not self._programmatic_resize:
+            self._user_resized = True
+            # 回写给他**当前所在的那个态**：收回态调好的高度不该按一次「展开」就消失。
+            if self._collapsed:
+                self._collapsed_scroll_h = scroll_h
+            else:
+                self._expanded_h_user = scroll_h
         # 宽度变了 -> 先按新宽度定行尺寸(窄窗中文要更多行), 再推宽度、重折答案。
         # 顺序要紧: 行高决定槽位容量, 槽位容量又决定答案行够不够放。
         if abs(self._width - old_w) > 0.5:

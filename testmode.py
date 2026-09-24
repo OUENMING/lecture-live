@@ -26,10 +26,12 @@
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import pathlib
 import resource
+import sys
 import time
 import wave
 
@@ -153,6 +155,16 @@ class TestSession:
             self._wav.setnchannels(1)
             self._wav.setsampwidth(2)
             self._wav.setframerate(SR)
+            # 查过 CPython 源码 + 实测，把这件事说准：
+            # · **wav 不会"头损坏"** —— `Wave_write.writeframes()` 每次调用都会
+            #   `_patchheader()` 修正 RIFF 长度字段（`writeframesraw` 才不会），
+            #   本模块用的正是 writeframes。
+            # · 但 `_patchheader()` 只在**长度变了**时才 seek，而那个 seek 顺带刷
+            #   缓冲。所以真正会丢数据的窗口很窄：**总写入量还小于文件缓冲
+            #   （Python 默认 ~8KB）就硬退出**。实测 1 块(3.2KB) + `os._exit()`
+            #   → 文件 0 字节读不出；2 块(6.4KB) 就正常了。
+            #   对真实课堂（几千块）不可能发生，但兜一层也就 6 行，且幂等。
+            atexit.register(self._close_wav)
         else:
             self._wav = None
 
@@ -164,6 +176,15 @@ class TestSession:
         self._cpu0 = self._cpu()
         self._rss_peak = 0
 
+    def _close_wav(self) -> None:
+        """幂等关闭 WAV —— `finish()` 与 `atexit` 都会调它。"""
+        w, self._wav = self._wav, None
+        if w is not None:
+            try:
+                w.close()
+            except Exception:                             # noqa: BLE001
+                pass
+
     # ---- 内部 ----
     @staticmethod
     def _cpu() -> float:
@@ -171,7 +192,12 @@ class TestSession:
         return r.ru_utime + r.ru_stime
 
     def _rss_mb(self) -> float:
-        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
+        # ⚠️ `ru_maxrss` 的单位**跨平台不一致**：macOS 是**字节**，Linux 是 **KB**。
+        # 项目只支持 macOS，但报告里采了 os/machine（那正是为了跨环境比），
+        # 所以按平台换算 —— 免得这份报告哪天在 Linux 上跑出小 1000 倍的数。
+        # （2026-09-24 OCR 分块审计发现。）
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return rss / 1e6 if sys.platform == "darwin" else rss / 1e3
 
     # ---- 采集点（全部 fail-soft）----
     @_safe
@@ -223,8 +249,7 @@ class TestSession:
     def finish(self, vad_report: str = "", note_path: str = "",
                bundle: bool = True) -> str | None:
         if self._wav is not None:
-            self._wav.close()
-            self._wav = None
+            self._close_wav()
         if self.stem is None:
             return None
 

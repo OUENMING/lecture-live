@@ -83,7 +83,14 @@ def main() -> int:
     if sys.version_info[:2] != (3, 12):
         print("   ⚠️ 本项目在 3.12 上实测, 其他版本未验证")
     venv = HERE / ".venv"
-    print(f"{_mark(venv.exists())} 虚拟环境      {'.venv 就位' if venv.exists() else '缺 .venv → 见 README 安装段'}")
+    if not venv.exists():
+        # ⚠️ 计入硬缺失：没有 .venv 就跑不了 `cl`（`cl` 用的就是 .venv/bin/python），
+        # 而且**这个脚本本身**通常也是靠它跑的。原来这里只印 ❌ 不加计数，最后仍
+        # 输出"可以跑"并返回 0 —— 与文件头"1 = 有硬缺失"的约定矛盾，也会让按
+        # 退出码判断的脚本得到错的结论。(2026-09-24 OCR 分块审计发现。)
+        hard_missing += 1
+    print(f"{_mark(venv.exists())} 虚拟环境      "
+          f"{'.venv 就位' if venv.exists() else '缺 .venv → 见 README 安装段'}")
 
     # ---- 版本 / 更新 ----
     head, behind = git_info()
@@ -94,14 +101,21 @@ def main() -> int:
     # ---- 依赖 ----
     print()
     for mod, why in REQUIRED:
+        # ⚠️ 导入与版本查询**分开判**：`md.version()` 在"能导入但查不到发行元数据"
+        # 时会抛 PackageNotFoundError（源码/vendored 安装、发行名与导入名不一致
+        # 等），那不该被判成"缺失"—— 那会把一个可用的环境误报成跑不起来。
+        # (2026-09-24 OCR 分块审计发现。)
         try:
-            importlib.import_module(mod if mod != "sherpa-onnx" else "sherpa_onnx")
-            v = md.version(mod)
-            print(f"✅ {mod:<18}{v}")
+            importlib.import_module("sherpa_onnx" if mod == "sherpa-onnx" else mod)
         except Exception:                                 # noqa: BLE001
             hard_missing += 1
             print(f"❌ {mod:<18}缺失{(' — ' + why) if why else ''}")
             print(f"   → uv pip install --python .venv/bin/python -r requirements.txt")
+            continue
+        try:
+            print(f"✅ {mod:<18}{md.version(mod)}")
+        except Exception:                                 # noqa: BLE001
+            print(f"✅ {mod:<18}(已装; 查不到版本号, 不影响可用)")
     for mod, why in OPTIONAL:
         try:
             importlib.import_module(mod)
@@ -113,11 +127,17 @@ def main() -> int:
     print()
     for path, label, required, cmd in MODELS:
         p = pathlib.Path(os.path.expanduser(path))
-        ok = p.exists()
+        # ⚠️ 不能只看 exists()：下载中断会留下空目录，解压失败也会。用户看到 ✅
+        # 就以为模型可用，直到跑课才炸。目录要求非空、文件要求大小 > 0。
+        # (2026-09-24 OCR 分块审计发现。)
+        if p.is_dir():
+            ok = any(f.is_file() and f.stat().st_size > 0 for f in p.rglob("*"))
+        else:
+            ok = p.is_file() and p.stat().st_size > 0
         if not ok and required:
             hard_missing += 1
         print(f"{_mark(ok) if ok else ('❌' if required else '⚪')} {label:<30}"
-              f"{'就位' if ok else '缺失'}")
+              f"{'就位' if ok else ('空目录/空文件' if p.exists() else '缺失')}")
         if not ok:
             print(f"   → {cmd}")
 

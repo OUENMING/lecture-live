@@ -9,6 +9,8 @@
 from __future__ import annotations
 import glob, os, re, threading
 
+import numpy as np
+
 
 def _find_file(dirname: str, patterns) -> str:
     """按 patterns 的**优先级**取第一个命中的文件。
@@ -52,6 +54,7 @@ class ParakeetASR:
             encoder=enc, decoder=dec, joiner=join, tokens=toks,
             num_threads=num_threads, model_type="nemo_transducer")
         self._lock = threading.Lock()
+        self.last_logprob: float | None = None
 
     def transcribe(self, samples) -> str:
         if len(samples) < 1600:            # 不足 0.1s
@@ -60,7 +63,12 @@ class ParakeetASR:
             stream = self._rec.create_stream()
             stream.accept_waveform(16000, samples)
             self._rec.decode_stream(stream)
-            return stream.result.text.strip()
+            r = stream.result
+            # 顺手留下置信度供测试模式采集 —— 不改接口(仍返回 str), 只多一个属性。
+            # 实测真实课堂平均 logprob ≈ −0.4、干净 TTS ≈ −0.013(差 30 倍),
+            # 拿它当"这句可能没听准"的信号是可行的。
+            self.last_logprob = float(np.mean(r.ys_log_probs)) if len(r.ys_log_probs) else None
+            return r.text.strip()
 
 
 def load_asr(model_dir: str):
@@ -78,8 +86,10 @@ def load_asr(model_dir: str):
 
 
 # ---- 定稿用: Whisper(large-v3-turbo) ----
-# 为什么值得多背一个模型: 同一批真实课堂录音上实测比 Parakeet 强不少 ——
-#   有效词数 +33%、段尾无终止标点率 22%→14%、空转写 9%→2%
+# 为什么值得多背一个模型: 8 窗口 / 95 段 / 3 份真实课堂录音实测 ——
+#   有效词数 **+44%**(8/8 窗口一致, 同向概率 0.4%), 空转写 4%→0;
+#   ⚠️ 段尾无终止标点 26%→16% 的幅度**落在噪声带内**(n≈11 段时底线 ±18pp),
+#      不足以判定 —— 但逐段对照是定性硬证据
 # 逐段对照能看到它把 Parakeet 听错的词听对了("part"→"pot"、"he jokes"→"heat up")。
 # 代价是慢 8 倍(4.0× vs 31.8× 实时), 所以**只用在定稿路径**, 草稿仍走 Parakeet
 # (草稿每秒就要一份, 4× 实时根本供不上)。
@@ -144,6 +154,7 @@ class WhisperASR:
             tokens=pick("turbo-tokens.txt", "tokens.txt"),
             language=language, num_threads=num_threads)
         self._lock = threading.Lock()
+        self.last_logprob: float | None = None
 
     def transcribe(self, samples) -> str:
         if len(samples) < 1600:            # 不足 0.1s
@@ -152,14 +163,17 @@ class WhisperASR:
             stream = self._rec.create_stream()
             stream.accept_waveform(16000, samples)
             self._rec.decode_stream(stream)
-            return stream.result.text.strip()
+            r = stream.result
+            lp = getattr(r, "ys_log_probs", None)
+            self.last_logprob = float(np.mean(lp)) if lp is not None and len(lp) else None
+            return r.text.strip()
 
 
 def load_final_asr(model_dir: str):
     """定稿路径的 ASR(Whisper-turbo)。**必需模型 —— 缺失直接抛, 不做静默回退。**
 
-    为什么不留回退: 定稿模型是转写质量的主要来源(实测有效词数 +33%、
-    段尾无终止标点 22%→14%、空转写 9%→2%)。静默少掉它 = "看着正常但打了折",
+    为什么不留回退: 定稿模型是转写质量的主要来源(实测**有效词数 +44%**,
+    8/8 窗口一致)。静默少掉它 = "看着正常但打了折",
     而用户永远不会知道。**启动时说清楚, 比课上悄悄降质好。**
     """
     try:

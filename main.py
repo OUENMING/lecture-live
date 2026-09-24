@@ -24,6 +24,7 @@ from cloud_translator import (load_api_key, load_translator as load_cloud_transl
                               answer_user_content)
 from obsidian_writer import ObsidianWriter, DEFAULT_VAULT
 from build_notes import (TermNotes, format_gloss, detect_proper_nouns, lookup_term)
+from testmode import TestSession
 
 PARTIAL_MAX_S = 10          # 草稿只转写最近 N 秒, 限制单次耗时
 
@@ -412,6 +413,14 @@ def run(args) -> None:
                             polish_model=args.polish_model or None)
     notes = TermNotes()                                 # 术语通俗解析(查表)
 
+    # 测试模式: 采一份完整报告 + 留音频。**任何采集失败都不能影响上课** ——
+    # TestSession 的所有 note_* 都自带 try/except(见 testmode.py)。
+    tester = None
+    if args.test_mode:
+        tester = TestSession(getattr(writer, "session_path", None),
+                             record_audio=not args.no_record_audio)
+        echo(f"🧪 测试模式: 报告与音频将写到 {tester.stem}")
+
     drafts: "queue.Queue[str]" = queue.Queue()          # 草稿文本 -> 主线程
     drafts_zh: "queue.Queue[str]" = queue.Queue()       # 草稿译文 -> 主线程
     streamq: "queue.Queue[tuple]" = queue.Queue()       # ("zh"/"en"/"final"/"terms"/"notice"/"answer"/"answer_done") -> 主线程
@@ -631,9 +640,17 @@ def run(args) -> None:
                 # 反过来写(先 parakeet 再 whisper)会让 parakeet 那 0.36s 白花 ——
                 # 实测它的结果只在 whisper 退化时用得上, 而 64 段里退化 0 次。
                 # 先跑慢的那个, 命中就省下整个快的那趟; 退化时多花的 0.36s 无所谓。
+                _t_asr = time.monotonic()
                 text = asr_final.transcribe(buf)
+                _used, _lp = "whisper", asr_final.last_logprob
                 if not text or is_degenerate(text):
                     text = asr.transcribe(buf)      # 退化/空 -> 用草稿模型(并兜底)
+                    _used, _lp = "parakeet", asr.last_logprob
+                if tester is not None:
+                    tester.note_segment(buf, text, (time.monotonic() - _t_asr) * 1000,
+                                        _used, logprob=_lp,
+                                        fell_back=(_used == "parakeet"),
+                                        n_sentences=len(split_sentences(text)))
                 if not text:
                     continue
                 if carry["text"]:                           # 与上句半截拼接
@@ -823,6 +840,8 @@ def run(args) -> None:
             chunk = src.poll()
             if chunk is not None and len(chunk):
                 seg.accept(chunk)
+                if tester is not None:
+                    tester.note_chunk(chunk)
             drain()
             if src.is_done():
                 break
@@ -897,6 +916,23 @@ def run(args) -> None:
             msg = writer.close(ask=_ask_save_notes, qa=qa_snapshot)
             if msg:
                 echo(msg)
+            if tester is not None:
+                _rep = tester.finish(vad_report=locals().get("_diag", ""),
+                                     note_path=str(getattr(writer, "note_path", "") or ""))
+                if _rep:
+                    echo(f"\n🧪 测试报告: {_rep}")
+                if tester.bundle_path:
+                    _sz = os.path.getsize(tester.bundle_path)
+                    _mb = f"{_sz / 1e6:.1f} MB" if _sz > 1e6 else f"{_sz / 1024:.0f} KB"
+                    echo(f"📦 数据包:   {tester.bundle_path}  ({_mb})")
+                    if tester.record_audio:
+                        echo("   ⚠️ 内含**课堂音频** + 逐字转录(可能有其他同学的声音)"
+                             " —— 发出去前自己确认一下。")
+                    else:
+                        echo("   ℹ️ 只含指标与转录文本, **不含音频**（--no-record-audio）。")
+                    echo("   发给作者即可, 不用解压。")
+                else:
+                    echo("⚠ 数据包生成失败, 但报告已写出(见上面的路径)")
 
 
 def _load_overlay(on_quit=None, on_flag=None, on_translate=None, on_submit=None,
@@ -921,6 +957,13 @@ def main():
     p.add_argument("--ui", choices=["terminal", "overlay"], default="terminal")
     p.add_argument("--model-dir", default=os.path.expanduser("~/models/parakeet-tdt-0.6b-v3-int8"),
                    help="草稿+兜底的 ASR 模型目录(要求够快, 每秒要出一份草稿)")
+    p.add_argument("--test-mode", action="store_true",
+                   help="测试模式: 采集一份完整指标报告(逐段 ASR 耗时/电平/置信度/"
+                        "资源占用), 并在会话文件旁留一份音频, 供以后优化用")
+    p.add_argument("--no-record-audio", action="store_true",
+                   help="测试模式下不留音频(只要指标; 包会小很多)")
+    p.add_argument("--no-bundle", action="store_true",
+                   help="测试模式下不打包成可发送的单个 zip")
     p.add_argument("--final-model-dir",
                    default=os.path.expanduser("~/models/sherpa-onnx-whisper-turbo"),
                    help="定稿专用 ASR 模型目录(必需; 用 `cl doctor` 检查)")

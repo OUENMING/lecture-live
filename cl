@@ -5,6 +5,7 @@
 #   cl file <音频>      转录已有录音(终端输出)
 #   cl course ECON10101 记住课程名(之后自动写 Obsidian 笔记 + 用该课术语表)
 #   cl local           强制本地引擎(不出网)
+#   cl test            测试模式: 采集完整指标 + 留音频, 收尾打成可发送的单个 zip
 #   cl doctor          自检: 版本/依赖/模型/术语表, 缺什么告诉你跑哪条命令
 #   cl help            帮助
 set -u
@@ -38,6 +39,7 @@ ClassLive —— 本地实时课堂双语字幕
   cl course ECON10101  切换课程(之后自动写 Obsidian 笔记 + 用该课术语表)
   cl last              查看最近一次课堂记录(实时落盘的会话文件)
   cl local             强制本地引擎(断网/不想出网)
+  cl test              测试模式: 采集完整指标 + 留音频, 收尾打成一个可发送的 zip
   cl doctor            自检: 依赖/模型/术语表, 缺什么告诉你跑哪条命令
   cl help              显示本帮助
 
@@ -100,6 +102,12 @@ case "${1:-}" in
     SRC=file; UI=terminal; ARGS+=(--path "$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"); shift 2 ;;
   local) ENGINE=local; shift ;;
   doctor) "$PY" doctor.py; exit $? ;;
+  test)
+    # 测试模式: 采全量指标 + 录音频, 收尾打包。额外参数透传(如 --no-record-audio)。
+    # ⚠️ 只在**跑课**时用 —— 它会往 sessions/ 旁写一份音频。
+    shift
+    ARGS+=(--test-mode "$@")
+    ;;
   "") ;;
   *) echo "未知参数: $1"; echo; usage; exit 1 ;;
 esac

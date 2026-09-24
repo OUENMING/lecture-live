@@ -299,6 +299,50 @@ cd ~/lecture-live
 
 </details>
 
+### 🧪 测试模式（`cl test`）
+
+跑一节真实课，把**能采的都采下来**，收尾打成**一个 zip** 方便发给作者。
+
+```bash
+cl test                      # 悬浮窗 + 全量采集（默认录音频）
+cl test --no-record-audio    # 只要指标，不留音频（包从 ~12MB 降到 ~10KB）
+cl test --no-bundle          # 不打包，只写报告
+```
+
+**采什么**
+
+| 层 | 内容 |
+|---|---|
+| 音频 | 逐块峰值/RMS/波峰因数 → 电平分布、动态范围 |
+| 分段 | 每段时长、电平、波峰因数、ASR 耗时、**用了哪个模型**、是否回退、词数、有无句末标点、文本 |
+| 资源 | CPU 秒、**每音频秒的 CPU 秒**（与回放倍速无关）、峰值内存 |
+| 诊断 | VAD 的 `report()`（硬切/丢弃/弱音） |
+
+**产出**（写在 `sessions/` 旁，与会话文件同名）
+
+```
+<session>.report.json    指标（可被脚本读）
+<session>.wav            课堂音频（--no-record-audio 时不生成）
+<session>.bundle.zip     ★ 发给作者的就是这一个文件
+```
+
+包内：`README.txt` / `env.json`（系统+依赖版本+模型大小+git 提交）/ `report.json` /
+`session.md` / `audio.wav`（若含）。
+
+> ⚠️ **隐私**：`session.md` 与 `audio.wav` 是**这节课的真实内容**，可能包含其他同学的
+> 声音或个人信息。**发出去前请自己确认可以分享。** 只需要指标的话用
+> `--no-record-audio`，包只有 10KB 左右，不含音频。
+>
+> 数据只用于优化远场收音与转写质量 —— 有了真实音频，作者才能在本机复跑 A/B 对照实验。
+>
+> **测试模式绝不影响上课**：所有采集点都包在 `try/except` 里（见 `testmode.py`），
+> 采集失败只是少一份数据，不会让课跑不下去。
+
+> 📌 读报告时注意三条（`report.json` 里的 `notes` 也写了）：
+> ① `logprob` 只有用 Parakeet 时才填（Whisper 不暴露），默认走 Whisper 所以通常是 `null`；
+> ② `cpu_pct_of_walltime` 在倍速回放里会被放大，跨机器比较请用 `cpu_s_per_audio_s`；
+> ③ `no_end_punct_pct` 在 n<30 段时噪声很大（实测底线 ±18 个百分点），单节课的数字别当结论。
+
 ### 悬浮窗
 
 卡片式双语流动排版，每卡**英文（11pt Medium，一行）在上、中文（18pt Medium，最多两行）在下**。

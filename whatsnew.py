@@ -30,17 +30,20 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 
 # 复用 overlay.py 已经调好的那套（材质、圆角、发灰补偿都实测过），不另起一套
-WIDTH = 560.0
+WIDTH = 620.0
 PAD = 20.0
 TITLE_H = 30.0
 LINE_H = 21.0
+LOG_H = 360.0          # 可滚动日志区的高度（有 log 时用它，没 log 时按摘要行数算）
 FOOT_H = 46.0          # 底部那行：勾选框 + 按钮
 CORNER = 16.0
 SCRIM_ALPHA = 0.38     # 与 overlay.SCRIM_ALPHA 同值：白底 PPT 上也要能读
 
 _W = 0.23              # NSFontWeightMedium，同 overlay.WEIGHT
+_STRONG = 0.55         # NSFontWeightSemibold，日志里的小标题用
 
 _Cls = None
 
@@ -74,9 +77,105 @@ def _classes():
     return _Cls
 
 
-def build(version: str, body: str, date: str = "",
+def _log_attr(text: str):
+    """把 CHANGELOG 的 Markdown 文本转成带样式的 NSAttributedString。
+
+    只认四档（一级标题 / 版本标题 / 小节标题 / 正文与列表）—— 不为一个更新卡片
+    引一套完整 Markdown 解析器。`**` / 反引号直接去掉：卡片是纯文本观感，
+    留着会显示成字面的星号（踩过）。
+    """
+    from AppKit import (NSAttributedString, NSMutableAttributedString, NSColor,
+                        NSFont, NSMutableParagraphStyle, NSFontAttributeName,
+                        NSForegroundColorAttributeName, NSParagraphStyleAttributeName)
+
+    def para(before: float) -> NSMutableParagraphStyle:
+        st = NSMutableParagraphStyle.alloc().init()
+        st.setParagraphSpacingBefore_(before)
+        return st
+
+    # ⚠️ 必须用 **Mutable** —— 不可变的 NSAttributedString 没有 append 方法，
+    # 调 `attributedStringByAppendingAttributedString_` 会 AttributeError（踩过）。
+    out = NSMutableAttributedString.alloc().init()
+    for raw in (text or "").splitlines():
+        s = raw.rstrip()
+        if s.startswith("## ["):
+            size, w, alpha, before, body = 14.0, 0.45, 1.0, 16.0, s[3:]
+        elif s.startswith("### "):
+            size, w, alpha, before, body = 12.5, _STRONG, 0.98, 12.0, s[4:]
+        elif s.startswith("# "):
+            size, w, alpha, before, body = 15.0, 0.45, 1.0, 2.0, s[2:]
+        elif s.startswith("> "):
+            size, w, alpha, before, body = 12.0, 0.0, 0.72, 0.0, "      " + s[2:]
+        elif s.startswith(("- ", "* ")):
+            size, w, alpha, before, body = 12.0, 0.0, 0.88, 0.0, "   •  " + s[2:]
+        else:
+            size, w, alpha, before, body = 12.0, 0.0, 0.78, 0.0, s
+        body = body.replace("**", "").replace("`", "")
+        body = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", body)   # 链接只留文字
+        one = NSAttributedString.alloc().initWithString_attributes_(
+            body + "\n",
+            {NSFontAttributeName: NSFont.systemFontOfSize_weight_(size, w),
+             NSForegroundColorAttributeName: NSColor.whiteColor().colorWithAlphaComponent_(alpha),
+             NSParagraphStyleAttributeName: para(before)})
+        out.appendAttributedString_(one)
+    return out
+
+
+def _add_log_view(parent, attr, x, y, w, h):
+    """在卡片里放一个**可滚动**的日志区。滚动条按需出现（overlay 风格）。
+
+    ⚠️ 四件套缺一不可，否则滚不动或不换行：
+      `setVerticallyResizable_` + `setMaxSize_`（文本长了要长高）
+      `textContainer().setWidthTracksTextView_`（宽度跟着视图走才会自动折行）
+    """
+    from AppKit import (NSMakeRect, NSScrollView, NSTextView, NSViewWidthSizable,
+                        NSScrollerStyleOverlay)
+    sc = NSScrollView.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
+    sc.setDrawsBackground_(False)
+    sc.setBorderType_(0)                                  # NSNoBorder
+    sc.setHasVerticalScroller_(True)
+    sc.setAutohidesScrollers_(True)
+    sc.setScrollerStyle_(NSScrollerStyleOverlay)
+    sc.setHorizontalScrollElasticity_(0)
+
+    tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
+    tv.setEditable_(False)
+    tv.setSelectable_(True)                               # 允许选中复制
+    tv.setDrawsBackground_(False)
+    tv.setRichText_(True)
+    tv.setTextContainerInset_((10.0, 6.0))
+    tv.setVerticallyResizable_(True)
+    tv.setHorizontallyResizable_(False)
+    tv.setAutoresizingMask_(NSViewWidthSizable)
+    tv.setMinSize_((0.0, h))
+    tv.setMaxSize_((w, 1e7))
+    tv.textContainer().setWidthTracksTextView_(True)
+    tv.textContainer().setContainerSize_((w, 1e7))
+    # ⚠️ NSTextView **没有** `setAttributedString_` —— 要走 textStorage（踩过）。
+    tv.textStorage().setAttributedString_(attr)
+    # ⚠️ 量高度这两个坑都踩过：
+    #   · `sizeToFit()` 在容器宽度定稿前算 -> 算**高**（滚到底有几百像素空白）；
+    #   · 直接量 `usedRect` 在视图还很矮时 -> 懒排版只排了可视部分 -> 算**矮**
+    #     （结果滚不到底，末尾内容永远看不到）。
+    # 正确做法：先把视图撑到很大迫使全量排版，再量，最后设成实测值。
+    lm = tv.layoutManager()
+    tc = tv.textContainer()
+    tv.setFrame_(NSMakeRect(0, 0, w, 1e6))
+    lm.ensureLayoutForTextContainer_(tc)
+    used = lm.usedRectForTextContainer_(tc).size.height
+    tv.setFrame_(NSMakeRect(0, 0, w, max(used + 16.0, h)))
+    sc.setDocumentView_(tv)
+    parent.addSubview_(sc)
+    return sc
+
+
+def build(version: str, summary: str, date: str = "", log: str = "",
           flag_path: pathlib.Path | None = None, on_dismiss=None):
-    """构造并显示卡片。失败返回 None（调用方不必管）。"""
+    """构造并显示卡片。失败返回 None（调用方不必管）。
+
+    `log` 非空 -> 中间是**可滚动的完整更新日志**（所有版本，新的在上）；
+    为空 -> 退回"摘要几行"的紧凑版。两条路都是非模态、不抢焦点。
+    """
     try:
         from AppKit import (NSAppearance, NSAppearanceNameDarkAqua, NSButton,
                             NSButtonTypeSwitch, NSColor, NSFont, NSMakeRect,
@@ -88,14 +187,13 @@ def build(version: str, body: str, date: str = "",
         Panel, DragLayer = _classes()
 
         # ⚠️ 摘要是从 CHANGELOG.md 里抠出来的 **Markdown**, 而这里只画纯文本 ——
-        # 不处理就会出现字面的 `**上面**`(实测踩过)。只去 `**`, 不做真渲染:
-        # 卡片是"扫一眼知道改了啥", 不值得为粗体引一套 attributed string。
-        lines = [x.replace("**", "") for x in (body or "").splitlines() if x.strip()]
-        if not lines:
-            lines = ["完整说明见仓库里的 CHANGELOG.md"]
-        lines.append("")
-        lines.append("完整说明见 CHANGELOG.md")
-        h = PAD + TITLE_H + len(lines) * LINE_H + 10 + FOOT_H + PAD
+        # 不处理就会出现字面的 `**上面**`(实测踩过)。
+        summary_lines = [x.replace("**", "").replace("`", "")
+                         for x in (summary or "").splitlines() if x.strip()]
+        if not log and not summary_lines:
+            summary_lines = ["完整说明见仓库里的 CHANGELOG.md"]
+        body_h = LOG_H if log else len(summary_lines) * LINE_H + 10
+        h = PAD + TITLE_H + body_h + 12 + FOOT_H + PAD
 
         style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
         p = Panel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -147,9 +245,13 @@ def build(version: str, body: str, date: str = "",
         _title = f"ClassLive 已更新到 {version}" + (f" · {date}" if date else "")
         ve.addSubview_(label(_title, y, 17.0, bold=True))
 
-        for i, ln in enumerate(lines):
-            y -= LINE_H
-            ve.addSubview_(label(ln, y, 12.5, alpha=0.92 if ln else 0.0))
+        if log:
+            _add_log_view(ve, _log_attr(log), PAD, FOOT_H + PAD,
+                          WIDTH - 2 * PAD, LOG_H)
+        else:
+            for ln in summary_lines:
+                y -= LINE_H
+                ve.addSubview_(label(ln, y, 12.5, alpha=0.92))
 
         # ---- 底部：不再提示 + 关闭 ----
         fy = PAD
@@ -197,6 +299,12 @@ def build(version: str, body: str, date: str = "",
         p.orderFrontRegardless()      # ⚠️ 不是 makeKeyAndOrderFront —— 绝不抢焦点
         return {"panel": p, "close": on_close, "_targets": [_wire, _wire2]}
     except Exception:                                     # noqa: BLE001
+        # fail-soft 是本模块的**既定设计**（见文件头：它只是说明，不能因为它让课起不来）。
+        # 但它已经**两次**把真 bug 藏起来（ObjC 类名撞车、不可变的 NSAttributedString），
+        # 排查成本很高 —— 所以留一个显式开关，`CLASSLIVE_DEBUG=1` 就能看到真实异常。
+        if os.environ.get("CLASSLIVE_DEBUG"):
+            import traceback
+            traceback.print_exc()
         return None
 
 

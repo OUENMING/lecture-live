@@ -394,6 +394,60 @@ def _changelog_summary(version: str, max_lines: int = 6) -> str:
     return "\n".join(out)
 
 
+def _changelog_full() -> str:
+    """CHANGELOG.md 全文 —— 卡片里的可滚动更新日志用。取不到返回空串。
+
+    ⚠️ **从第一个 `## [` 开始截** —— 文件开头是"本文件遵循什么格式""每个版本要怎么写
+    `### 更新看点`"那类**维护者约定**，不是更新内容。整段塞进卡片会让人看到
+    "每个版本请写一节…"这种跟自己无关的话（实测渲染出来过）。
+    """
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md")
+        text = open(p, encoding="utf-8").read()
+    except Exception:                                     # noqa: BLE001
+        return ""
+    m = re.search(r"^## \[", text, re.M)
+    return text[m.start():] if m else text
+
+
+def _changelog_versions() -> list[str]:
+    """CHANGELOG.md 里所有版本号，**新到旧**（文件里的出现顺序）。"""
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md")
+        text = open(p, encoding="utf-8").read()
+    except Exception:                                     # noqa: BLE001
+        return []
+    return re.findall(r"^## \[([^\]]+)\]", text, re.M)
+
+
+def _whatsnew_body(seen: str, cur: str, max_lines: int = 7) -> str:
+    """该给用户看的内容。
+
+    ⚠️ **必须跨版本合并** —— 有人会从 3.4.0 直接跳到 3.6.0。只看 `cur` 的话，
+    他会**永远看不到 3.5.0 那条破坏性变更**（"两个 ASR 模型改为必装、
+    第一次要手动 git pull"）—— 恰恰是跳过版本的人最需要看到的那一条。
+
+    取法: 从最新往下数，直到遇到 `seen` 为止；那之间的所有版本都算"他没看过的"。
+    多版本时每行前面标版本号，并把带 ⚠️ 的（要先做/破坏性）排到最前。
+    """
+    vers = _changelog_versions()
+    if not vers:
+        return _changelog_summary(cur, max_lines)
+    if seen not in vers:                # seen 未知(比库里最新还新/被改过) -> 只报当前版
+        return _changelog_summary(cur, max_lines)
+    todo = vers[:vers.index(seen)]      # seen 之前的都是新的
+    if not todo:                        # seen 已是最新 -> 没有可报的
+        return ""
+    if len(todo) == 1:
+        return _changelog_summary(todo[0], max_lines)
+    rows = [(v, ln)
+            for v in todo
+            for ln in _changelog_summary(v, max_lines).splitlines()]
+    # 稳定排序: 带 ⚠️ / Breaking 的提到最前, 其余保持"新版本在前"
+    rows.sort(key=lambda r: 0 if ("⚠" in r[1] or "Breaking" in r[1]) else 1)
+    return "\n".join(f"{v} · {ln}" for v, ln in rows[:max_lines])
+
+
 def _disp_w(s: str) -> int:
     """终端里的**显示宽度** —— 中文/全角算 2 列。
 
@@ -433,7 +487,11 @@ def _whatsnew_payload() -> tuple[str, str] | None:
             return None
         # 第一次跑（seen 为空）不弹 —— 那不是"更新"是全新安装，
         # 对着一条长长的 changelog 弹卡片没有意义。
-        payload = ((cur, _changelog_date(cur), _changelog_summary(cur))
+        # ⚠️ 注意这里传的是 `seen` 而不是只看 `cur`：跨版本升级要把中间的版本一起报
+        # （有人会从 3.4.0 直接跳到 3.6.0，那中间的破坏性变更不能漏）。
+        payload = ({"version": cur, "date": _changelog_date(cur),
+                    "summary": _whatsnew_body(seen, cur),
+                    "log": _changelog_full()}
                    if seen else None)
         with open(seen_file, "w", encoding="utf-8") as f:   # 记下来，别重复弹
             f.write(cur)
@@ -442,13 +500,15 @@ def _whatsnew_payload() -> tuple[str, str] | None:
         return None
 
 
-def _print_whatsnew_box(version: str, date: str, body: str) -> None:
+def _print_whatsnew_box(version: str, date: str, summary: str,
+                        log: str = "") -> None:
     """终端模式下的退化：印一个字符框。宽度按**显示宽度**算（中文占两列）。
 
-    参数顺序与 `_whatsnew_payload()` 的返回元组一致，调用方可以直接 `*payload`。
+    参数名与 `_whatsnew_payload()` 返回的 dict 键一致，调用方可以直接 `**payload`。
+    `log`（全量日志）在终端里印不下，忽略 —— 终端没有滚动区。
     """
     title = f"ClassLive 已更新到 {version}" + (f" · {date}" if date else "")
-    lines = [x for x in (body or "").splitlines() if x.strip()] or ["见 CHANGELOG.md"]
+    lines = [x for x in (summary or "").splitlines() if x.strip()] or ["见 CHANGELOG.md"]
     lines.append("")
     lines.append("完整说明见 CHANGELOG.md")
     w = max([_disp_w(title)] + [_disp_w(x) for x in lines]) + 2
@@ -458,9 +518,10 @@ def _print_whatsnew_box(version: str, date: str, body: str) -> None:
     echo("╰" + "─" * (w + 1) + "╯")
 
 
-def _show_whats_new(version: str, date: str, body: str) -> None:
+def _show_whats_new(version: str, date: str, summary: str,
+                    log: str = "") -> None:
     """[已弃用] 原来的 NSAlert 弹框。保留仅为兼容，新路径走 whatsnew.py 的非模态卡片。"""
-    _print_whatsnew_box(version, date, body)
+    _print_whatsnew_box(version, date, summary, log)
 
 
 def _maybe_notice_update() -> None:
@@ -631,7 +692,7 @@ def run(args) -> None:
     )
     # 终端模式拿不到悬浮窗，退化成字符框（两种模式都要能看到）
     if args.ui == "terminal" and whatsnew:
-        _print_whatsnew_box(*whatsnew)
+        _print_whatsnew_box(**whatsnew)
 
     seen_proper: collections.Counter = collections.Counter()   # 出现次数(≥2 才查)
     queried_proper: set = set()                         # 已发起过查询的(防重复请求)

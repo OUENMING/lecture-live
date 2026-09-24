@@ -1427,10 +1427,8 @@ class Overlay:
         try:
             import whatsnew
             from AppKit import NSScreen
-            _ver, _date, _body = self._whatsnew
             self._whatsnew_card = whatsnew.build(
-                _ver, _body, date=_date,
-                flag_path=whatsnew.skip_flag_path())
+                **self._whatsnew, flag_path=whatsnew.skip_flag_path())
             if self._whatsnew_card is None:
                 return
             # ---- 定位: 找一个"完整放得进可见区、且不压住主面板"的位置 ----

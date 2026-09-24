@@ -838,7 +838,20 @@ class Overlay:
 
             self._status.setMenu_(menu)
         except Exception:                     # noqa: BLE001
-            self._status = None
+            # ⚠️ 走到这里时 `statusItemWithLength_` 可能**已经成功**、图标已经挂在
+            # 菜单栏上了 —— 后面任何一步（建菜单项 / setTarget_ / setMenu_）失败都会
+            # 跳到这里。直接 `= None` 会**丢掉引用**，而 close() 只在 `_status` 非 None
+            # 时才 removeStatusItem_ → 留下一个**永远清不掉的孤儿图标**：
+            # 点它没反应（没有菜单），而它偏偏是穿透模式下**唯一的恢复入口**。
+            # 所以先把已创建的撤掉，再置 None。(2026-09-24 OCR 分块审计发现。)
+            try:
+                if self._status is not None:
+                    from AppKit import NSStatusBar
+                    NSStatusBar.systemStatusBar().removeStatusItem_(self._status)
+            except Exception:                 # noqa: BLE001
+                pass
+            finally:
+                self._status = None
 
     def _move_to_corner(self):
         from AppKit import NSScreen
@@ -1574,7 +1587,14 @@ class Overlay:
         self._answer_pr = []
         self._answer_pw = []
         self._answer_text = ""
-        self._answer_feed(text, flush=True)
+        # ⚠️ `flush` 必须跟"答案流完了没"走，**不能恒为 True**：
+        # 这个函数会在**流式期间**被触发（用户读答案时拖窗口改宽度 → _sync_panel_size
+        # → 这里）。`flush=True` 会把**还在流式中的最后一行**当成已闭合提交，于是
+        # 下次增量到来时它只能另起一行 —— 被 SSE 切开的半截词（"regres" + "sion"）
+        # 就这样变成屏上两行。
+        # 流完时（_answer_finished）才该 flush，否则最后一行反而会悬着不落行。
+        # (2026-09-24 OCR 分块审计发现。)
+        self._answer_feed(text, flush=self._answer_finished)
 
     def _answer_feed(self, delta: str, flush: bool = False):
         """把新到的答案文本喂进折行状态机。

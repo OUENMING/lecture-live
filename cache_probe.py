@@ -41,11 +41,16 @@ class Acc:
     def __init__(self, label):
         self.label = label
         self.hit = self.miss = 0
-        self.calls = 0
+        self.calls = 0        # 有 usage 的请求数（算平均 prompt 只能用这个）
+        self.requests = 0     # 实际发出的请求数
         self.t0 = time.time()
 
     def add(self, usage):
+        self.requests += 1
         if not usage:
+            # ⚠️ 空流/中断的请求没有 usage 块。原来直接 return 导致 calls 偏小,
+            # 而 report() 拿它当"请求次数"还用它算平均 prompt —— 两边同时失真。
+            # (2026-09-24 OCR 发现。)
             return
         self.hit += usage.get("prompt_cache_hit_tokens", 0) or 0
         self.miss += usage.get("prompt_cache_miss_tokens", 0) or 0
@@ -54,7 +59,9 @@ class Acc:
     def report(self):
         tot = self.hit + self.miss
         rate = (self.hit / tot * 100) if tot else 0
-        print(f"\n[{self.label}]  {self.calls} 次请求, 用时 {time.time()-self.t0:.0f}s")
+        print(f"\n[{self.label}]  {self.requests} 次请求"
+              + (f"（其中 {self.calls} 次拿到 usage）" if self.requests != self.calls else "")
+              + f", 用时 {time.time()-self.t0:.0f}s")
         print(f"  命中 {self.hit:,} tok / 未命中 {self.miss:,} tok  =>  命中率 {rate:.1f}%")
         if self.calls:
             print(f"  平均每请求 prompt {tot/self.calls:,.0f} tok")
@@ -67,13 +74,22 @@ def main():
     sess = pathlib.Path(sys.argv[1])
     if not sess.exists():
         sys.exit(f"文件不存在: {sess}")
-    n = int(sys.argv[2]) if len(sys.argv) > 2 else 40
+    try:
+        n = int(sys.argv[2]) if len(sys.argv) > 2 else 40
+    except ValueError:
+        sys.exit(f"第二个参数应是句数(整数), 收到 {sys.argv[2]!r}\n"
+                 f"用法: cache_probe.py <session.md> [n] [course]")
+    if n <= 0:
+        sys.exit(f"句数要 >0, 收到 {n} —— 否则会静默跑出 0.0% 命中率, "
+                 "看起来像「结论」其实是空跑。")
     course = sys.argv[3] if len(sys.argv) > 3 else ""
 
     utts = [m.group(1).strip() for m in
             re.finditer(r"^>\s*\*\*ASR\*\*: (.+)$",
                         sess.read_text(encoding="utf-8"), re.M)]
     utts = [u for u in utts if u][:n]
+    if not utts:
+        sys.exit(f"这个会话文件里没解析出 ASR 行(找的是 '> **ASR**: …'): {sess.name}")
     print(f"回放 {len(utts)} 句, 课程={course!r}, 文件={sess.name}")
 
     key = load_api_key()

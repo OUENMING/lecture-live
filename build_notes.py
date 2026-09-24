@@ -248,7 +248,11 @@ def build(course: str | None = None, api_key: str | None = None,
         print("⚠ 没有 API key"); return
 
     try:
-        meta, terms, extra, was_new = normalize(load_raw())
+        # ⚠️ 显式传参, 不用 `load_raw()` 的无参默认值 —— 那个默认值在**函数定义时**
+        # 绑定到当时的 NOTES_FILE, 而下面 save_to(NOTES_FILE) 是**调用时**取全局。
+        # 两者一旦不一致(比如有人为了测试改了 NOTES_FILE), 就会"读一个文件、写另一个",
+        # 而那正是 2026-09-24 那次把 term_notes.json 从 41KB 写成 4.8KB 的机制。
+        meta, terms, extra, was_new = normalize(load_raw(NOTES_FILE))
     except ValueError as e:
         # 术语库读不出 -> **停手**, 不要用空表覆盖它(见 load_raw 的说明)。
         print(f"⚠ {e}"); return

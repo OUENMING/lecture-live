@@ -50,6 +50,18 @@ def main() -> int:
         print(f"✗ 无法从文件名推日期: {sess.name}")
         return 1
 
+    # ⚠️ 先校验 vault。下面会强制 `w.enabled = True` 绕过构造期的保护
+    # (`enabled = bool(vault) and mode != "no"`), 所以 vault 为空时 close()
+    # 里 `Path(self._vault)` 会抛 TypeError —— 用户只看到堆栈, 不知道是 vault 配错。
+    # (2026-09-24 OCR 发现。)
+    # 特别地: `os.environ.get("OBSIDIAN_VAULT", 默认)` 在变量**存在但为空**时
+    # 返回空串而不是默认值, 所以这条路径真的会走到。
+    if not args.vault:
+        print("✗ --vault 是空的 —— 得知道笔记写到哪个 Obsidian 库。\n"
+              "  例: --vault ~/Obsidian/Vault   或设环境变量 OBSIDIAN_VAULT\n"
+              "  ⚠️ OBSIDIAN_VAULT 设成空串时**不会**回退到默认值。")
+        return 1
+
     w = ObsidianWriter(vault=args.vault, course=args.course, mode="no",
                        api_key=load_api_key(None), model=args.model,
                        glossary_path=args.glossary, polish=not args.no_polish)

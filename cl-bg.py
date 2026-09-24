@@ -15,7 +15,14 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-LOG = sys.argv[1] if len(sys.argv) > 1 else "/tmp/classlive_bg.log"
+# ⚠️ 默认日志**不放 /tmp**: 那是全局可写的, 固定名字有两个真实风险 ——
+#   ① 别人可预建同名文件 → 启动即 EACCES 失败(拒绝服务);
+#   ② 可预置指向任意文件的符号链接 → 追加写命中目标(符号链接跟随)。
+#   放 macOS 惯例的 ~/Library/Logs/<App>/ 下, 只有本用户可写。
+#   (2026-09-24 OCR 发现。)
+_DEFAULT_LOG = os.path.expanduser("~/Library/Logs/ClassLive/bg.log")
+LOG = sys.argv[1] if len(sys.argv) > 1 else _DEFAULT_LOG
+os.makedirs(os.path.dirname(LOG), exist_ok=True)
 
 
 def daemonize() -> None:
@@ -38,7 +45,8 @@ devnull = os.open(os.devnull, os.O_RDONLY)
 os.dup2(devnull, 0)                              # 先把 stdin 接上, 再开日志
 if devnull > 2:
     os.close(devnull)
-fd = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+# O_NOFOLLOW: 拒绝跟随符号链接 —— 即使路径可由他人预置, 也写不进去。
+fd = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
 os.dup2(fd, 1)
 os.dup2(fd, 2)
 if fd > 2:

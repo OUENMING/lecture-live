@@ -151,10 +151,10 @@ def main():
     for _ in range(3):
         o.pump()
 
-    H = o._panel.frame().size.height
+    _labels: list = []
 
-    def mk(y, size, color, bold=False):
-        l = NSTextField.alloc().initWithFrame_(((16.0, y), (620.0, 22.0)))
+    def mk(dy, size, color, bold=False):
+        l = NSTextField.alloc().initWithFrame_(((16.0, 0.0), (620.0, 22.0)))
         l.setEditable_(False); l.setSelectable_(False)
         l.setBezeled_(False); l.setDrawsBackground_(False)
         l.setFont_((NSFont.boldSystemFontOfSize_(size) if bold
@@ -162,11 +162,23 @@ def main():
         l.setTextColor_(color)
         l.setStringValue_("")
         o._ve.addSubview_(l)
+        _labels.append((l, dy))
         return l
 
-    phase_lbl = mk(H - 74.0, 15.0, NSColor.systemYellowColor(), bold=True)
-    read_lbl = mk(H - 96.0, 13.0, NSColor.whiteColor())
-    hint_lbl = mk(H - 116.0, 11.0, NSColor.whiteColor().colorWithAlphaComponent_(0.65))
+    def reflow():
+        """阶段切换会改面板高度 —— 提示标签必须跟着重算 y。
+
+        ⚠️ 原来只在开始时取一次 `H`, 三个标签写死 `H-74/H-96/H-116` 且只摆一次。
+        `_apply_mode` 改高度后, 它们在屏幕上会整体错位, 可能被转录区盖住 ——
+        探针自己是靠这些提示操作, 提示看不见就白跑了。(2026-09-24 OCR 发现。)"""
+        h = o._panel.frame().size.height
+        for l, dy in _labels:
+            l.setFrame_(((16.0, h - dy), (620.0, 22.0)))
+
+    phase_lbl = mk(74.0, 15.0, NSColor.systemYellowColor(), bold=True)
+    read_lbl = mk(96.0, 13.0, NSColor.whiteColor())
+    hint_lbl = mk(116.0, 11.0, NSColor.whiteColor().colorWithAlphaComponent_(0.65))
+    reflow()
     hint_lbl.setStringValue_("鼠标移到本窗上双指滚动；阶段会自动前进")
 
     print("=" * 66)

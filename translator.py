@@ -406,7 +406,16 @@ class Translator:
                 if self._model is None:
                     _configure_mlx()
                     from mlx_lm import load
-                    self._model, self._tokenizer = load(self._model_name)
+                    # ⚠️ **赋值顺序是这里的关键**: 必须先 tokenizer、后 model。
+                    # 上面那句 `if self._model is None` 是**无锁**读的 —— 它把
+                    # `_model` 当成就绪标志。原来写成 `self._model, self._tokenizer
+                    # = load(...)`, 是两条 STORE_ATTR 且 **model 在前**: 另一线程可能
+                    # 恰在两条之间读到 `_model` 已非 None, 于是跳过整段、拿着还是 None
+                    # 的 `_tokenizer` 去 `apply_chat_template` → AttributeError。
+                    # 换成 tokenizer 先落地, 则"看到 _model 有值"就等于"两样都齐了"。
+                    _m, _tok = load(self._model_name)
+                    self._tokenizer = _tok
+                    self._model = _m
 
     def warmup(self) -> None:
         self._ensure()

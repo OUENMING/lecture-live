@@ -71,10 +71,23 @@ def guard_zh_result(res: Result, en: str) -> Result:
 
 
 def _load_terms(path: str | None) -> list[str]:
-    if not path or not pathlib.Path(path).exists():
+    """读一份术语表(每行一条, # 开头为注释)。读不出 -> 空列表并出声。
+
+    ⚠️ 不裸读: 术语表是手写的(常从网页/Word 粘来), 可能不是 UTF-8; 也可能在
+    exists() 之后被删或改权限。裸 read_text 会抛 UnicodeDecodeError/OSError,
+    而这是启动路径 —— 术语表坏了不该让整节课起不来。"""
+    if not path:
         return []
-    lines = pathlib.Path(path).read_text(encoding="utf-8").splitlines()
-    return [t.strip() for t in lines if t.strip() and not t.strip().startswith("#")]
+    p = pathlib.Path(path)
+    if not p.exists():          # 没自备术语表是**正常**状态(公开仓库不含 glossary.txt)
+        return []
+    try:
+        text = p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"⚠ 术语表读取失败, 本次忽略: {path} ({e})")
+        return []
+    return [t.strip() for t in text.splitlines()
+            if t.strip() and not t.strip().startswith("#")]
 
 
 def course_terms_path(glossary_path: str, course: str) -> pathlib.Path | None:
@@ -139,7 +152,10 @@ def course_title(glossary_path: str | None, course: str | None) -> str:
                 return s.lstrip("#").strip()
             if s:
                 return s
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # ⚠️ UnicodeDecodeError 必须一起接: 术语表是手写的, 可能不是 UTF-8。
+        # 它在 __init__ 的启动路径上 —— 漏掉就是"术语表编码不对 -> 整节课起不来"。
+        # (`_load_terms` 一直是这么接的, 这里当初漏了。2026-09-24 OCR 发现。)
         return ""
     return ""
 
@@ -371,13 +387,26 @@ class Translator:
         self._core = core_terms(course)
         self._max_ctx = max_context
         self._lock = threading.Lock()
+        self._load_lock = threading.Lock()   # 保护 _ensure 的懒加载(见该处说明)
         self._model_name = model
 
     def _ensure(self) -> None:
+        """懒加载(双重检查加锁)。
+
+        ⚠️ 必须自己加锁: 4 个调用点(fix_and_translate_stream / fix_stream /
+        translate_draft / warmup)都在 `with self._lock` **之外**调它, 而草稿线程与
+        定稿线程会并发进来。原先只做 check-then-act: 两线程可能同时看到
+        `_model is None` 而**重复 load()**(显存翻倍); 更糟的是
+        `self._model, self._tokenizer = load(...)` 是两条 STORE_ATTR, 另一线程可能
+        读到 `_model` 已赋值而 `_tokenizer` 仍是 None -> `_apply_chat` 里
+        `apply_chat_template` 抛 AttributeError。
+        (2026-09-24 OCR 全量审计发现。)"""
         if self._model is None:
-            _configure_mlx()
-            from mlx_lm import load
-            self._model, self._tokenizer = load(self._model_name)
+            with self._load_lock:
+                if self._model is None:
+                    _configure_mlx()
+                    from mlx_lm import load
+                    self._model, self._tokenizer = load(self._model_name)
 
     def warmup(self) -> None:
         self._ensure()
@@ -386,7 +415,7 @@ class Translator:
         return _apply_chat_generic(self._tokenizer, user_content, system)
 
     def _terms_context(self, en: str, context: list[str]) -> str:
-        ctx = context[-self._max_ctx:]
+        ctx = context[-self._max_ctx:] if self._max_ctx > 0 else []
         ctx_block = "\n".join(f"- {c}" for c in ctx) if ctx else "(无)"
         terms = select_terms(en, self._terms, core=self._core,
                              always=self._course_terms)

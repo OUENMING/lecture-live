@@ -93,6 +93,17 @@ OVERVIEW_SYS = """你在为一节英文课堂的笔记写抬头。输入是这�
 不要引入标题之外的信息。不要输出 JSON 以外的任何内容。"""
 
 
+def _flat(v: str) -> str:
+    """把可能带换行的文本压成一行。
+
+    ⚠️ 会话格式是三方共享契约(callout 行 + `_parse` 只取每个字段的**第一行**):
+    值里混进换行会同时造成两件事 —— ① 插出没有 `>` 前缀的裸行, callout 结构裂开;
+    ② 第二行起被 `_parse` 静默丢弃, 最终笔记缺内容而外观完全正常。
+    实测 187 份真实会话里一次都没发生过, 但这是**静默**的, 所以落盘前压一下。
+    (2026-09-24 OCR 发现。)"""
+    return " ".join((v or "").split())
+
+
 def _one_line(v) -> str:
     """压成单行; 非字符串 -> 空串。渲染层据此丢弃任何多余换行。"""
     return " ".join(v.split()) if isinstance(v, str) else ""
@@ -259,7 +270,7 @@ class ObsidianWriter:
             self.session_path = SESSIONS / (
                 f"{self._date}_{time.strftime('%H%M%S')}_{self._course}.md")
             self.session_path.write_text(
-                f"# {course} · {self._date} · 实时会话日志\n\n", encoding="utf-8")
+                f"# {self._course} · {self._date} · 实时会话日志\n\n", encoding="utf-8")
 
     # ---- 运行中: 每句立刻落盘(flush) ----
     def append(self, en: str, zh: str, flagged: bool = False, raw: str = "") -> None:
@@ -275,11 +286,11 @@ class ObsidianWriter:
         mark = " ⭐ Exam Focus" if flagged else ""
         lines = [f"> [!abstract] {ts}{mark}"]
         if en:
-            lines.append(f"> **EN**: {en}")
+            lines.append(f"> **EN**: {_flat(en)}")
         if zh:
-            lines.append(f"> **ZH**: {zh}")
+            lines.append(f"> **ZH**: {_flat(zh)}")
         if raw:
-            lines.append(f"> **ASR**: {raw}")
+            lines.append(f"> **ASR**: {_flat(raw)}")
         with self.session_path.open("a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n\n")
 
@@ -410,10 +421,12 @@ class ObsidianWriter:
                 sections.append(sec)
             qa.extend(r.get("qa") or [])
         # 多块时, 上面 meta 里的概览只描述第一段 —— 用小标题重写一份全课的。
+        # ⚠️ 用 update 而非整体替换: _overview 只返回它真正生成出来的字段, 模型漏一个
+        # (比如只回了 title) 时整体替换会把第一段已算好的概览整段抹掉。
         if multi and sections:
             full = self._overview(plain)
             if full:
-                meta = full
+                meta.update(full)
         seen, dedup = set(), []
         for x in qa:
             k = x["q"].strip().lower()

@@ -62,7 +62,11 @@ class Acc:
 
 
 def main():
+    if len(sys.argv) < 2:
+        sys.exit("用法: cache_probe.py <session.md> [n] [course]")
     sess = pathlib.Path(sys.argv[1])
+    if not sess.exists():
+        sys.exit(f"文件不存在: {sess}")
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 40
     course = sys.argv[3] if len(sys.argv) > 3 else ""
 
@@ -120,4 +124,5 @@ def main():
     print(f"\n结论: B 比 A 命中率高 {rB - rA:+.1f} 个百分点")
 
 
-main()
+if __name__ == "__main__":
+    main()

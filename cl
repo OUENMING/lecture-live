@@ -5,6 +5,7 @@
 #   cl file <音频>      转录已有录音(终端输出)
 #   cl course ECON10101 记住课程名(之后自动写 Obsidian 笔记 + 用该课术语表)
 #   cl local           强制本地引擎(不出网)
+#   cl doctor          自检: 版本/依赖/模型/术语表, 缺什么告诉你跑哪条命令
 #   cl help            帮助
 set -u
 # 解析符号链接(可能被 ln -s 到 ~/.local/bin)
@@ -37,6 +38,7 @@ ClassLive —— 本地实时课堂双语字幕
   cl course ECON10101  切换课程(之后自动写 Obsidian 笔记 + 用该课术语表)
   cl last              查看最近一次课堂记录(实时落盘的会话文件)
   cl local             强制本地引擎(断网/不想出网)
+  cl doctor            自检: 依赖/模型/术语表, 缺什么告诉你跑哪条命令
   cl help              显示本帮助
 
 停止：点悬浮窗右上角 ✕,或在本终端按 Ctrl+C
@@ -92,8 +94,12 @@ case "${1:-}" in
   online|net) SRC=blackhole; shift ;;
   file)
     [ -n "${2:-}" ] || { echo "用法: cl file <音频文件>"; exit 1; }
-    SRC=file; UI=terminal; ARGS+=(--path "$2"); shift 2 ;;
+    # ⚠️ 本脚本开头已 cd 到安装目录, 用户在自己工作目录传相对路径会解析错 ->
+    # "文件不存在"。这里先校验再转绝对路径。(2026-09-24 OCR 全量审计发现。)
+    [ -f "$2" ] || { echo "❌ 找不到音频文件: $2" >&2; exit 1; }
+    SRC=file; UI=terminal; ARGS+=(--path "$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"); shift 2 ;;
   local) ENGINE=local; shift ;;
+  doctor) "$PY" doctor.py; exit $? ;;
   "") ;;
   *) echo "未知参数: $1"; echo; usage; exit 1 ;;
 esac

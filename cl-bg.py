@@ -29,8 +29,16 @@ def daemonize() -> None:
 
 daemonize()
 
-fd = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-os.dup2(os.open(os.devnull, os.O_RDONLY), 0)     # stdin -> /dev/null
+# ⚠️ 顺序与临时 fd 都要管: 若调用方关了标准 fd(如 `cl-bg.py <&-`), 下面
+# `os.open(LOG)` 可能拿到 fd 0, 紧接着 `dup2(devnull, 0)` 就会把它关掉 ——
+# 日志描述符当场丢失, 后面 dup2(fd,1) 实际把 stdout 指向 /dev/null, 日志与 EXIT 行
+# 全写不进去, 而这正是本脚本存在的意义。另外临时 fd 不关会一路泄漏给 exec 后的 bash。
+# (2026-09-24 OCR 全量审计发现。)
+devnull = os.open(os.devnull, os.O_RDONLY)
+os.dup2(devnull, 0)                              # 先把 stdin 接上, 再开日志
+if devnull > 2:
+    os.close(devnull)
+fd = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
 os.dup2(fd, 1)
 os.dup2(fd, 2)
 if fd > 2:
@@ -45,6 +53,11 @@ if fd > 2:
 #   0  = 主循环真的退出了(有人置了 stopping / running)  -> 查 quit 路径
 #   137/143 = 被 SIGKILL/SIGTERM  -> 查外部谁在杀它
 # 不带这行, 下次复发还是只能靠猜。
+# ⚠️ LOG 与 HERE 都经**环境变量**传, 都不拼进命令串: LOG 来自 sys.argv[1],
+# HERE 来自脚本所在目录 —— 只要有一个被插值进 bash -c, 就是拿外部字符串当代码执行
+# (目录名里带 `"` 或 `$(...)` 就会真跑起来)。LOG 先修过, HERE 漏了。
+os.environ["CLASSLIVE_LOG"] = LOG
+os.environ["CLASSLIVE_HERE"] = HERE
 os.execv("/bin/bash", ["/bin/bash", "-c",
-                       f'"{os.path.join(HERE, "cl")}"; '
-                       f'echo "EXIT=$? at $(date \'+%H:%M:%S\')" >> "{LOG}"'])
+                       f'"$CLASSLIVE_HERE/cl"; '
+                       f'echo "EXIT=$? at $(date \'+%H:%M:%S\')" >> "$CLASSLIVE_LOG"'])

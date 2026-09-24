@@ -75,14 +75,30 @@ note 要求: 80-160 个中文字符; 第一句是一句话的完整定义、能�
 # ---- 读写 / 结构规范化 ----
 
 def load_raw(path: pathlib.Path = NOTES_FILE) -> dict:
-    if path.exists():
-        try:
-            obj = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(obj, dict):
-                return obj
-        except json.JSONDecodeError:
-            pass
-    return {}
+    """读回术语库原始 JSON。
+
+    ⚠️ **"文件损坏"必须与"文件不存在"区分开**(2026-09-24 OCR 全量审计发现)。
+    旧写法把两者都 `return {}`, 而 `build()` 拿到空 dict 后会**无条件**
+    `save_to()` 覆盖写回 —— 于是一个损坏的 `term_notes.json`(人工整理 + 已付费
+    构建的 206 条)会被**静默清空**, 只在同目录留下一个 41KB→几KB 的文件。
+    `TermNotes.add()` 对 `term_notes_auto.json` 同病。
+
+    现在: 不存在 -> 空 dict(正常首次运行); **存在但读不出 -> 抛 ValueError**,
+    由调用方决定是中止写回还是降级只读 —— 绝不静默覆盖。
+    """
+    if not path.exists():
+        return {}
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        raise ValueError(
+            f"{path.name} 存在但读不出({type(e).__name__}) —— 为免覆盖掉其中"
+            f"已构建/人工整理的内容而中止。请先检查或备份该文件。") from e
+    if not isinstance(obj, dict):
+        raise ValueError(
+            f"{path.name} 顶层不是对象(是 {type(obj).__name__}) —— "
+            f"为免覆盖而中止。请先检查该文件。")
+    return obj
 
 
 def normalize_entry(v) -> dict:
@@ -126,8 +142,23 @@ def dump(meta: dict, terms: dict, extra: dict) -> dict:
 
 
 def save_to(path: pathlib.Path, meta: dict, terms: dict, extra: dict = None) -> None:
-    path.write_text(json.dumps(dump(meta, terms, extra or {}),
-                               ensure_ascii=False, indent=1), encoding="utf-8")
+    """写回术语库。**覆盖前先把旧文件留一份 `.bak`**。
+
+    ⚠️ 这个 .bak 是 2026-09-24 一次事故换来的: 我自己写测试时 patch 了 `load_raw`
+    却忘了 patch `save_to` 的目标, 于是 `build()` 读了临时文件、写回了真的
+    `term_notes.json` —— 41KB/206 条当场变成 4.8KB。该文件在 .gitignore 里、
+    无 APFS 快照、无 Time Machine, 只能靠同目录的旧 .bak 拼回来。
+    留一份 .bak 的成本是一次拷贝, 收益是这类事故从"不可恢复"变成"一条 cp"。
+    """
+    body = json.dumps(dump(meta, terms, extra or {}),
+                      ensure_ascii=False, indent=1)
+    if path.exists():
+        try:
+            path.with_name(path.name + ".bak").write_text(
+                path.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception:                                 # noqa: BLE001
+            pass                                          # 备份失败不阻塞主写入
+    path.write_text(body, encoding="utf-8")
 
 
 def collect_terms(course: str | None = None) -> list[str]:
@@ -174,7 +205,11 @@ def build(course: str | None = None, api_key: str | None = None,
     if not key:
         print("⚠ 没有 API key"); return
 
-    meta, terms, extra, was_new = normalize(load_raw())
+    try:
+        meta, terms, extra, was_new = normalize(load_raw())
+    except ValueError as e:
+        # 术语库读不出 -> **停手**, 不要用空表覆盖它(见 load_raw 的说明)。
+        print(f"⚠ {e}"); return
     targets = collect_terms(course)
     keep = set(targets) | set(KEEP_EXTRA)
 
@@ -399,13 +434,29 @@ class TermNotes:
     """
 
     def __init__(self, path: pathlib.Path = NOTES_FILE):
+        # ⚠️ auto_path 必须存下来给 add() 用。add() 曾硬编码全局 AUTO_FILE —— 传自定义
+        # path 时读的是 <path 同级>/term_notes_auto.json、写的却是真的 AUTO_FILE, 两边
+        # 不是同一个文件。测试里 `TermNotes(临时目录)` 会因此写坏真实缓存。
         if path == NOTES_FILE:
             auto_path = AUTO_FILE
         else:
             auto_path = pathlib.Path(path).parent / "term_notes_auto.json"
-        _, self._curated, _, _ = normalize(load_raw(path))
-        _, self._auto, _, _ = normalize(load_raw(auto_path))
+        # 只读路径: 读不出就降级成"没有术语表"继续跑(上课不能因为术语库坏了就崩),
+        # 但**必须出声** —— 否则用户会以为术语表在正常工作。写回路径在 add() 里另行保护。
+        # ⚠️ 两份文件**分别**加载、各自失败各自清空。合在一个 try 里会让一份坏文件
+        # 把另一份也清掉 —— 而 auto 是运行时缓存(设计上"可直接删除"), 它坏掉不该
+        # 连带把人工/付费构建的 curated 术语整节课废掉。(2026-09-24 OCR 发现。)
+        self._curated, self._auto = {}, {}
+        for _p, _attr in ((path, "_curated"), (auto_path, "_auto")):
+            try:
+                _, _v, _, _ = normalize(load_raw(_p))
+                setattr(self, _attr, _v)
+            except ValueError as e:
+                print(f"⚠ {pathlib.Path(_p).name} 读不出, 本次忽略: {e}")
+        if not self._curated:
+            print("⚠ 术语表未加载: 没有可用的 curated 术语")
         self._path = path
+        self._auto_path = auto_path
         self._build_index()
 
     def _build_index(self) -> None:
@@ -435,10 +486,18 @@ class TermNotes:
         entry = {"level": "gloss", "detail": note}
         if type_:
             entry["type"] = type_
-        _, auto, extra, _ = normalize(load_raw(AUTO_FILE))
+        try:
+            _, auto, extra, _ = normalize(load_raw(self._auto_path))
+        except ValueError as e:
+            # 缓存文件坏了: **不写回**(否则等于把已有缓存清空), 只更新内存索引,
+            # 本次运行照常能查到新词。见 load_raw 的说明。
+            print(f"⚠ {e} 本次只更新内存, 未落盘。")
+            self._auto[term] = entry
+            self._build_index()
+            return
         auto[term] = entry
         try:
-            save_to(AUTO_FILE, {"built": datetime.date.today().isoformat()},
+            save_to(self._auto_path, {"built": datetime.date.today().isoformat()},
                     auto, extra)
         except Exception:                                 # noqa: BLE001
             pass

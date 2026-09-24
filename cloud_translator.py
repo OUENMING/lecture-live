@@ -198,6 +198,9 @@ class CloudTranslator:
         """生成增量文本。必须显式关掉思考模式:
         DeepSeek V4 默认输出 reasoning_content, 真正译文才在 content 里,
         不关会让首字延迟翻好几倍且拿不到内容。"""
+        # 每次请求重新计: usage 只在流末尾那块返回, 这一轮要是没拿到(空流/中断),
+        # 留着上一轮的会让读 last_usage 的人把同一次用量算两遍。
+        self.last_usage = {}
         payload = {"model": self._model, "messages": messages,
                    "stream": True, "max_tokens": max_tokens, "temperature": 0.2,
                    "thinking": {"type": "disabled"}}
@@ -246,7 +249,7 @@ class CloudTranslator:
     # ---- 与本地 Translator 同接口 ----
     def fix_and_translate_stream(self, en: str, context: list[str],
                                  on_zh=None, on_en=None) -> Result:
-        ctx = context[-self._max_ctx:]
+        ctx = context[-self._max_ctx:] if self._max_ctx > 0 else []
         ctx_block = "\n".join(f"- {c}" for c in ctx) if ctx else "(none)"
         user = (f"{domain_block(self._domain)}"
                 f"Course terms:\n{self._terms_block(en)}\n\n"
@@ -273,7 +276,7 @@ class CloudTranslator:
 
     # ---- 只矫正英文(关闭中文翻译时用) ----
     def fix_stream(self, en: str, context: list[str], on_en=None) -> str:
-        ctx = context[-self._max_ctx:]
+        ctx = context[-self._max_ctx:] if self._max_ctx > 0 else []
         ctx_block = "\n".join(f"- {c}" for c in ctx) if ctx else "(none)"
         user = (f"{domain_block(self._domain)}"
                 f"Course terms:\n{self._terms_block(en)}\n\n"
@@ -299,7 +302,7 @@ class CloudTranslator:
         - `transcript`: 要附在这次提问上的**课堂转录**。首次提问 = 线程开头冻结的
           整段快照; 之后的追问 = 自上次提问以来新增的句子(由调用方切好)。
         - `history`: 线程既有 turns([{"role","content"}], 只追加, 不回填/不重排)。
-        - **不套 `context[-self._max_ctx:]` 滑动窗口**: 那是逐句翻译(一节课上千次
+        - **不套 `context[-self._max_ctx:] if self._max_ctx > 0 else []` 滑动窗口**: 那是逐句翻译(一节课上千次
           独立调用)的策略; 问答是真多轮且轮数少, 只追加才让前缀稳定、缓存命中,
           成本模型完全不同(见 PLAN-ai-explain-qa.md 0.4 的实测两栏)。
         - 返回**完整回答文本**; 不是生成器 —— 请求必须在这一行就发出去, 否则
@@ -343,11 +346,12 @@ class CloudTranslator:
                  "ZH: <Chinese>\nEN: <corrected English>"},
                 {"role": "user", "content": en}]
         parser = _StreamParser(self._noop, self._noop)
-        try:
-            for delta in self._stream_chat(msgs, max_tokens=220):
-                parser.feed(delta)
-        except Exception:                                 # noqa: BLE001
-            pass
+        # ⚠️ 这里**不吞**异常。吞掉的后果不只是"少一次重试": parser.result() 在没有
+        # 中文时用 `zh or en_raw` 兜底, 会安静地把**英文原文当译文**上屏; 而且异常
+        # 不外抛 -> EngineRouter 的 `except -> _fallback` 永不触发 -> 本地降级也不发生。
+        # 让异常上抛, 走既有的降级路径(与 fix_and_translate_stream 的主路径一致)。
+        for delta in self._stream_chat(msgs, max_tokens=220):
+            parser.feed(delta)
         return parser.result(en)
 
     def translate_draft(self, en: str, on_zh=None) -> str:

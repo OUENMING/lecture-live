@@ -735,8 +735,6 @@ class Overlay:
         # 所以穿透只从菜单栏 🎧 切换。
         self._through = False
         self._trans_mode = "both"        # both | en | raw, 见 _cycle_translate
-        self._translating = True         # 派生: mode != "raw"
-        self._correcting = True          # 派生: mode != "raw" —— 是否调 LLM 矫正
         self._engine_warn = False        # 云端翻译降级中(菜单栏图标提示用)
         self._btn_trans = self._button(
             TRANS_MODE_TITLE["both"], self._cycle_translate,
@@ -1882,8 +1880,6 @@ class Overlay:
         if mode not in TRANS_MODE_TITLE:
             return
         self._trans_mode = mode
-        self._translating = mode != "raw"          # "raw" = 不翻译也不矫正
-        self._correcting = mode != "raw"           # 只有"纯转录"完全不调 LLM
         if mode != "both":
             # 不出中文: 清掉可能在途的草稿译文/术语, 别让它们留在屏上误导
             self._draft_zh_val = ""

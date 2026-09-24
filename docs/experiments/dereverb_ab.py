@@ -1,39 +1,71 @@
 #!/usr/bin/env python3
-"""实验: 远场**去混响(WPE)** 对 ASR 有用吗? —— **本机实测: 有, 且是本轮唯一正收益。**
+"""实验: 去混响(WPE) 对远场 ASR 有用吗? —— **结论: 至今未知。曾报过"有效", 已撤回。**
 
 用法:
-    .venv/bin/python docs/experiments/dereverb_ab.py <音频> <起秒> <时长秒> [音频 起 时 ...]
+    .venv/bin/python docs/experiments/dereverb_ab.py <音频> <起秒> <时长秒> [...]
+    .venv/bin/python docs/experiments/dereverb_ab.py --noise-floor <音频> <起秒> <时长秒>
 
-前置: `uv pip install nara_wpe`（MIT, 依赖仅 numpy/tqdm/soundfile/bottleneck/click,
-      纯 Numpy 实现, 明确支持**单通道**）
+⚠️⚠️ 先读这段: 这个脚本曾经报出过一个**假结果**, 原因是两层错误叠加
+------------------------------------------------------------------
+**第一层: 调用错了 —— 它做的是恒等变换, 根本没去混响。**
 
-为什么值得单独查这一条
-----------------------
-此前几轮我测的都是**降噪**(GTCRN/DPDFNet), 结论是负收益(−41% 词数)。但那条结论
-**只覆盖降噪, 不覆盖去混响** —— Iwamoto 2022 原文明确限定 *"this paper focuses on
-the single-channel SE (**noise reduction**) task"*。而教室远场里, **晚期混响**往往
-才是退化主因(ScienceDirect 2017 综合评测: *"Late reverberation... contributes most
-to the degradation"*)。
+`nara_wpe.wpe()` 的 docstring 第一行是:
+    Y: Complex valued STFT signal with shape (..., D, T)
+**它要的是复数 STFT 频谱, 不是时域波形。** 当时传的是 `(1, N)` 时域 float64 ——
+形状校验**静默通过**（被当成 `D=1`），但内部算的不是去混响。实测:
 
-**所以"降噪有害"不能拿来否决"去混响"。** 这是我先前的一个方向性错误。
+    wpe(x[None, :])   # x 是时域
+      输入 RMS 1.00079  →  输出 RMS 1.00079
+      与原信号相关 = 1.0000        ← 恒等变换
 
-实测结果(2026-09-24, 8 窗口 / 95 段 / 3 份真实课堂录音)
-------------------------------------------------------
-    配置            词数   段数   无终止标点   空转写   平均 logprob
-    关(现状)        1409    95    25 (26%)    4 ( 4%)   -0.397
-    WPE t=10 d=3    1380    95    16 (17%)    4 ( 4%)   -0.400
-    WPE t=40 d=3    1382    95    17 (18%)    3 ( 3%)   -0.389
+**第二层: 就算调用对了, 那个指标在这个样本量下也测不出东西。**
 
-**唯一一条"改善了碎片指标、其它都没退步"的路。**
-- 无终止标点率 **26% → 17~18%**(相对 −31%)—— 我的自动判据大约对应人工判定碎片率的 60%
-- 词数 −2%(噪声级)、空转写 4%→3%、logprob 略好(t=40)
-- **成本 ~0.1% 实时**: 120s 音频的 WPE 只要 0.2s
+对**同一段音频**只加 ±1e-6 的数值扰动（人耳绝对听不出），重跑同一条链路:
 
-⚠️ 尚未验证的三条(caveat, 别当成已解决)
-1. **这是离线 WPE**(整段 120s 一次性算)。生产是流式, 要用 `nara_wpe` 的
-   block-online 变体, 效果**未测**
-2. **参数是在子集上选的**(t=40 d=3 先在单窗口上最好), 换房间/讲师要重调
-3. **样本仍是 1 位讲师 / 3 份录音**; 现代教室若吸音好(RT60 低), 收益可能更小
+    原样            无终止标点 36.4%   词数 152
+    扰动 seed=1      无终止标点 18.2%   词数 165    ← −18.2 个百分点!
+    扰动 seed=2      无终止标点 27.3%   词数 161
+    扰动 seed=3      无终止标点 27.3%   词数 161
+    扰动 seed=4      无终止标点 18.2%   词数 163    ← −18.2 个百分点!
+
+**「无终止标点率」在 n≈11 段时的噪声底线约 ±18 个百分点**, 词数约 ±8%。
+而当时报出的"改善"只有 8 个百分点 —— **完全落在噪声里。**
+（运行 `--noise-floor` 可以在你自己的音频上重测这个底线。）
+
+所以那个 "碎片 26%→18%（−31%）" **两个理由都不成立, 已从 README 撤下**。
+
+## 据此修正的判据（本项目所有 A/B 都该遵守）
+
+| 指标 | 可判定的最小效应 |
+|---|---|
+| 无终止标点率 | **> ±18 个百分点**（n≈11 段时） |
+| 词数 | **> ±8%** |
+| 空转写率 | 样本太小时不可判 |
+
+**按这个底线重判旧结论**: 降噪词数 −41% ✅ 成立; whisper 词数 +33% ✅ 成立;
+whisper 碎片 26%→14%(12pp) ⚠️ 落在噪声带内（但词数+逐段对照是硬的）;
+OA 空转写 15%→0% ❌ 撤回。
+
+## 正确的流式 API（如果将来要做）
+
+`OnlineWPE(taps, delay, alpha, power_estimate, channel, frequency_bins)`
+- ⚠️ `channel` **默认是 8** —— 单通道必须显式传 `channel=1`
+- ⚠️ `frequency_bins` 必须 = `size//2+1`（512 点 FFT → 257）
+- `.step_frame((F, D))` 或 `.step_block(...)`（源码注释: 只有 `block_shift=1` 可用）
+- 实测 `taps=10, delay=3`: 3s 音频 0.09s CPU ≈ **0.6% 单核**, 内存平稳
+- ⚠️ **`taps=40` 掉到 2.3× 实时**（贵 13 倍）—— 离线用的 40 不适合流式
+
+⚠️ **离线 `wpe_v8` 在本机是坏的**: 5s 音频要 **3.7 GB** 内存（两次 OOM 被杀）,
+且输出 −79 dBFS ≈ 静音。**根因未查明。**
+
+依赖: WPE 做 STFT 要用 `nara_wpe.utils`, 它 **import scipy** —— 不在
+`nara_wpe` 声称的 5 个轻依赖里, 要单独装。
+
+## 下一步（如果还要追这条）
+
+1. 先解决"离线版为何吐静音" —— 那是校验实现的基准
+2. 用**正确管线**（STFT → OnlineWPE → iSTFT）在 **≥8 窗口**上重跑, 并按下面的噪声底线判读
+3. 判据: 无终止标点要 **>18 个百分点**、词数要 **>8%** 才算数
 """
 import sys
 import os
@@ -67,55 +99,64 @@ def segments(x):
     return got
 
 
-def main():
-    if len(sys.argv) < 4:
-        sys.exit(__doc__.strip().splitlines()[3].strip())
-    from nara_wpe.wpe import wpe
+def measure(rec, x):
+    texts = []
+    for g in segments(x):
+        st = rec.create_stream()
+        st.accept_waveform(SR, g)
+        rec.decode_stream(st)
+        texts.append(st.result.text.strip())
+    n = max(len(texts), 1)
+    return {
+        "words": sum(len(t.split()) for t in texts),
+        "seg": len(texts),
+        "noend": sum(1 for t in texts if t and not t.rstrip().endswith(TERM)),
+        "empty": sum(1 for t in texts if not t),
+    }
 
-    rec = sherpa_onnx.OfflineRecognizer.from_transducer(
+
+def load_recognizer():
+    return sherpa_onnx.OfflineRecognizer.from_transducer(
         encoder=f"{MODEL}/encoder.int8.onnx", decoder=f"{MODEL}/decoder.int8.onnx",
         joiner=f"{MODEL}/joiner.int8.onnx", tokens=f"{MODEL}/tokens.txt",
         num_threads=4, model_type="nemo_transducer")
 
-    def decode(x):
-        st = rec.create_stream()
-        st.accept_waveform(SR, x)
-        rec.decode_stream(st)
-        r = st.result
-        return (r.text.strip(),
-                float(np.mean(r.ys_log_probs)) if len(r.ys_log_probs) else 0.0)
 
+def noise_floor(audio_path, a, b, seeds=(1, 2, 3, 4)):
+    """⚠️ 必读: 量化这套指标在本样本量下的**噪声底线**。
+
+    对同一段音频只加 ±1e-6 的扰动重跑, 看指标自己会晃多少。
+    **任何小于这个晃动幅度的"改善"都是噪声, 不是效应。**"""
+    rec = load_recognizer()
+    base = normalize(load_file(audio_path)[int(a * SR):int((a + b) * SR)])
+    m0 = measure(rec, base)
+    print(f"  原样         无终止 {m0['noend'] / m0['seg'] * 100:5.1f}%   "
+          f"词数 {m0['words']}  段数 {m0['seg']}")
+    rates = []
+    for s in seeds:
+        rng = np.random.default_rng(s)
+        pert = base + rng.standard_normal(len(base)).astype(np.float32) * 1e-6
+        m = measure(rec, pert)
+        r = m["noend"] / m["seg"] * 100
+        rates.append(r)
+        print(f"  扰动 seed={s}   无终止 {r:5.1f}%   "
+              f"词数 {m['words']}  段数 {m['seg']}   ({r - m0['noend'] / m0['seg'] * 100:+.1f} pp)")
+    r0 = m0["noend"] / m0["seg"] * 100
+    print(f"\n  → 噪声底线: 无终止标点 **±{max(abs(r - r0) for r in rates):.1f} 个百分点**")
+    print("     （小于这个幅度的「改善」都是噪声，不是效应）")
+
+
+def main():
     args = sys.argv[1:]
-    wins = [(args[i], float(args[i + 1]), float(args[i + 2]))
-            for i in range(0, len(args) - 2, 3)]
-    conds = [("关(现状)", None), ("WPE t=10 d=3", (10, 3)), ("WPE t=40 d=3", (40, 3))]
-    agg = {k: dict(w=0, seg=0, noend=0, empty=0, lp=[]) for k, _ in conds}
-
-    for path, a, b in wins:
-        src = load_file(path)
-        clip = src[int(a * SR): int((a + b) * SR)].astype(np.float64)
-        for name, prm in conds:
-            x = (normalize(clip.astype(np.float32)) if prm is None else
-                 normalize(wpe(clip[None, :], taps=prm[0], delay=prm[1],
-                               iterations=3)[0].astype(np.float32)))
-            res = [decode(g) for g in segments(x)]
-            ts = [t for t, _ in res]
-            A = agg[name]
-            A["w"] += sum(len(t.split()) for t in ts)
-            A["seg"] += len(ts)
-            A["noend"] += sum(1 for t in ts if t and not t.rstrip().endswith(TERM))
-            A["empty"] += sum(1 for t in ts if not t)
-            A["lp"] += [l for _, l in res]
-        print(f"  {pathlib.Path(path).name[:12]} {a:.0f}-{b:.0f}s  ✓", flush=True)
-
-    print(f"\n{'配置':<16}{'词数':>6}{'段数':>6}{'无终止':>10}{'空转写':>10}{'平均logprob':>13}")
-    for name, _ in conds:
-        A = agg[name]
-        n = max(A["seg"], 1)
-        print(f"  {name:<14}{A['w']:>6}{A['seg']:>6}"
-              f"{A['noend']:>6}({A['noend'] / n * 100:>3.0f}%)"
-              f"{A['empty']:>6}({A['empty'] / n * 100:>3.0f}%)"
-              f"{np.mean(A['lp']):>13.3f}")
+    if not args:
+        sys.exit(__doc__.strip().splitlines()[3].strip())
+    if args[0] == "--noise-floor":
+        if len(args) < 4:
+            sys.exit("用法: --noise-floor <音频> <起秒> <时长秒>")
+        print("噪声底线测量（同一音频，只加 ±1e-6 扰动）:")
+        noise_floor(args[1], float(args[2]), float(args[3]))
+        return
+    sys.exit(__doc__.strip().splitlines()[3].strip())
 
 
 if __name__ == "__main__":

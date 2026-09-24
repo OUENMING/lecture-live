@@ -506,7 +506,7 @@ class Overlay:
         # 我们自己调 setFrame（展开 / 答案接管）时置真 —— 让 _sync_panel_size
         # 别把我们自己的改动当成用户拖了窗口。见该函数的说明。
         self._programmatic_resize = False
-        # 「本次更新」卡片的内容 (version, 摘要) 或 None；由 show() 弹（见 whatsnew.py）
+        # 「本次更新」卡片的内容 (version, date, 摘要) 或 None；由 show() 弹（见 whatsnew.py）
         self._whatsnew = whatsnew
         self._whatsnew_card = None      # 持有卡片对象，否则 ObjC 侧被 GC
         self._on_quit = on_quit or (lambda: None)
@@ -1427,8 +1427,9 @@ class Overlay:
         try:
             import whatsnew
             from AppKit import NSScreen
+            _ver, _date, _body = self._whatsnew
             self._whatsnew_card = whatsnew.build(
-                self._whatsnew[0], self._whatsnew[1],
+                _ver, _body, date=_date,
                 flag_path=whatsnew.skip_flag_path())
             if self._whatsnew_card is None:
                 return

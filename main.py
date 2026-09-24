@@ -314,12 +314,8 @@ class _Latest:
             return b
 
 
-def _changelog_summary(version: str, max_lines: int = 7) -> str:
-    """从 CHANGELOG.md 取某个版本的**摘要** —— 弹框用的短版本，不是全文。
-
-    ⚠️ 弹框里不能塞整段 changelog，那没人看。只取每个"### 小节"的**标题 + 第一条**，
-    并优先保留「破坏性变更」。取不到就返回空串（调用方退化成只报版本号）。
-    """
+def _changelog_section(version: str) -> str:
+    """取 CHANGELOG.md 里某个版本的正文（不含标题行）。取不到返回空串。"""
     try:
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md")
         text = open(p, encoding="utf-8").read()
@@ -327,17 +323,70 @@ def _changelog_summary(version: str, max_lines: int = 7) -> str:
         return ""
     m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
                   text, re.S | re.M)
-    if not m:
+    return m.group(1) if m else ""
+
+
+def _changelog_date(version: str) -> str:
+    """版本日期（`## [1.2.0] - 2026-09-24` 里的那串）。取不到返回空串。"""
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md")
+        text = open(p, encoding="utf-8").read()
+    except Exception:                                     # noqa: BLE001
         return ""
+    # ⚠️ 这里**不能**写成 rf"..."：`\d{4}` 里的 `{4}` 会被当成 f-string 表达式求值，
+    # 模式会变成 `(\d4-\d2-\d2)` —— 编译通过、永不匹配、静默返回空串。踩过。
+    m = re.search(r"^## \[" + re.escape(version)
+                  + r"\][^\n]*?-\s*(\d{4}-\d{2}-\d{2})", text, re.M)
+    return m.group(1) if m else ""
+
+
+def _changelog_summary(version: str, max_lines: int = 6) -> str:
+    """更新卡片上显示的那几行。
+
+    写法参考 Keep a Changelog 与各家 "What's New" 的共识（2026-09-24 调研）：
+      · **破坏性 / 要先做的**放最前；
+      · **说影响，不说实现** —— "笔记写入可能丢数据" 而不是
+        "save_to 改为原子写 (.tmp + os.replace)"；
+      · **一条一事**，不要把无关改动捆一行；
+      · 短、能扫，前几行就要给出重要信息。
+
+    ⚠️ 为什么优先读「### 更新看点」而不是抓 `### Added`/`### Fixed`：
+    那些小节是写给**维护者**的（有文件名、符号名、代码片段），卡片是给**用的人**看的。
+    两个读者、两份文字。抓出来会出现 `self._model, self._tokenizer = load(...`
+    这种屏上没人看得懂的行（实测踩过）。所以由作者在 CHANGELOG 里显式写一小节，
+    没有该小节时才退化成抓取（老版本兼容）。
+    """
+    body = _changelog_section(version)
+    if not body:
+        return ""
+
+    # ---- 优先：显式的「更新看点」小节 ----
+    m = re.search(r"^###\s*更新看点[^\n]*\n(.*?)(?=^### |\Z)", body, re.S | re.M)
+    if m:
+        out = []
+        for line in m.group(1).splitlines():
+            s = line.strip()
+            if s.startswith(("- ", "* ")):
+                out.append(re.sub(r"\*\*|`", "", s[2:]).strip())
+            if len(out) >= max_lines:
+                break
+        if out:
+            return "\n".join(out)
+
+    # ---- 兜底：抓每个 ### 小节的第一条（给没有「更新看点」的老版本）----
     out, cur = [], None
-    for line in m.group(1).splitlines():
+    for line in body.splitlines():
         s = line.strip()
-        if s.startswith("### "):
+        if s.startswith("### ") and "更新看点" not in s:
             cur = s[4:].strip()
         elif s.startswith(("- ", "* ")) and cur:
-            body = re.sub(r"\*\*|`", "", s[2:]).strip()
-            body = re.split(r"[。；;]", body)[0][:58]     # 弹框一行放不下整段
-            out.append(f"{cur} · {body}")
+            b = re.sub(r"\*\*|`", "", s[2:]).strip()
+            b = re.split(r"[。；;]", b)[0]
+            if len(b) > 58:                               # 掐在标点处，不切字中间
+                cut = max(b.rfind("，", 0, 58), b.rfind("、", 0, 58),
+                          b.rfind(" ", 0, 58))
+                b = (b[:cut] if cut > 20 else b[:57]) + "…"
+            out.append(f"{cur} · {b}")
             cur = None                                    # 每节只取第一条
         if len(out) >= max_lines:
             break
@@ -384,7 +433,8 @@ def _whatsnew_payload() -> tuple[str, str] | None:
             return None
         # 第一次跑（seen 为空）不弹 —— 那不是"更新"是全新安装，
         # 对着一条长长的 changelog 弹卡片没有意义。
-        payload = (cur, _changelog_summary(cur)) if seen else None
+        payload = ((cur, _changelog_date(cur), _changelog_summary(cur))
+                   if seen else None)
         with open(seen_file, "w", encoding="utf-8") as f:   # 记下来，别重复弹
             f.write(cur)
         return payload
@@ -392,9 +442,12 @@ def _whatsnew_payload() -> tuple[str, str] | None:
         return None
 
 
-def _print_whatsnew_box(version: str, body: str) -> None:
-    """终端模式下的退化：印一个字符框。宽度按**显示宽度**算（中文占两列）。"""
-    title = f"ClassLive 已更新到 {version}"
+def _print_whatsnew_box(version: str, date: str, body: str) -> None:
+    """终端模式下的退化：印一个字符框。宽度按**显示宽度**算（中文占两列）。
+
+    参数顺序与 `_whatsnew_payload()` 的返回元组一致，调用方可以直接 `*payload`。
+    """
+    title = f"ClassLive 已更新到 {version}" + (f" · {date}" if date else "")
     lines = [x for x in (body or "").splitlines() if x.strip()] or ["见 CHANGELOG.md"]
     lines.append("")
     lines.append("完整说明见 CHANGELOG.md")
@@ -405,9 +458,9 @@ def _print_whatsnew_box(version: str, body: str) -> None:
     echo("╰" + "─" * (w + 1) + "╯")
 
 
-def _show_whats_new(version: str, body: str) -> None:
+def _show_whats_new(version: str, date: str, body: str) -> None:
     """[已弃用] 原来的 NSAlert 弹框。保留仅为兼容，新路径走 whatsnew.py 的非模态卡片。"""
-    _print_whatsnew_box(version, body)
+    _print_whatsnew_box(version, date, body)
 
 
 def _maybe_notice_update() -> None:

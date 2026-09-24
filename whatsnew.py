@@ -74,8 +74,8 @@ def _classes():
     return _Cls
 
 
-def build(version: str, body: str, flag_path: pathlib.Path | None = None,
-          on_dismiss=None):
+def build(version: str, body: str, date: str = "",
+          flag_path: pathlib.Path | None = None, on_dismiss=None):
     """构造并显示卡片。失败返回 None（调用方不必管）。"""
     try:
         from AppKit import (NSAppearance, NSAppearanceNameDarkAqua, NSButton,
@@ -144,7 +144,8 @@ def build(version: str, body: str, flag_path: pathlib.Path | None = None,
 
         # 从顶部往下摆（这版窗口坐标是**不翻转**的，y=0 在底部，所以从 h 往下减）
         y = h - PAD - TITLE_H
-        ve.addSubview_(label(f"ClassLive 已更新到 {version}", y, 17.0, bold=True))
+        _title = f"ClassLive 已更新到 {version}" + (f" · {date}" if date else "")
+        ve.addSubview_(label(_title, y, 17.0, bold=True))
 
         for i, ln in enumerate(lines):
             y -= LINE_H

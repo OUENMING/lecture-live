@@ -271,3 +271,7 @@ cl → main.run()
 **Top 3 深化机会**: ① 抽出唯一的 LLM 调用 module(消掉 4 处手写 httpx, 让精修/复习层第一次可测)→ ② 把 `run()` 收成可注入依赖的流水线 module(让 15s 冲刷、carry/busy 竞态、✕ 与 Ctrl+C 等价性变成毫秒级断言, 不再靠复刻逻辑)→ ③ glossary 收成一个 module。
 
 **最大风险**: 13 条未提交, 其中 `polish.py` 与 `tests/` **完全不在 HEAD**, 而 README/DESIGN 已把精修写成功能 —— 全新 clone 会静默少掉一整块功能与全部回归测试。
+
+> ⚠️ **2026-09-24 更正**: 上句**已不成立**。`polish.py` 与 `tests/test_audit_regressions.py`
+> 当时确实还是未跟踪的 `??`，但随后已被提交 —— `git ls-tree -r HEAD` 两个都能查到，
+> 全新 clone 拿得到。此处保留原文是为了不改写审查当天的记录，**请不要据此判断现状**。

@@ -6,6 +6,7 @@
 #   cl course ECON10101 记住课程名(之后自动写 Obsidian 笔记 + 用该课术语表)
 #   cl local           强制本地引擎(不出网)
 #   cl test            测试模式: 采集完整指标 + 留音频, 收尾打成可发送的单个 zip
+#   cl update          更新到最新版(git pull + 补依赖), 然后自检
 #   cl doctor          自检: 版本/依赖/模型/术语表, 缺什么告诉你跑哪条命令
 #   cl help            帮助
 set -u
@@ -40,6 +41,7 @@ ClassLive —— 本地实时课堂双语字幕
   cl last              查看最近一次课堂记录(实时落盘的会话文件)
   cl local             强制本地引擎(断网/不想出网)
   cl test              测试模式: 采集完整指标 + 留音频, 收尾打成一个可发送的 zip
+  cl update            更新到最新版(git pull + 补依赖), 然后自检
   cl doctor            自检: 依赖/模型/术语表, 缺什么告诉你跑哪条命令
   cl help              显示本帮助
 
@@ -62,6 +64,69 @@ show_last() {
   echo "---"
   echo "完整路径: $(cd "$(dirname "$f")" && pwd)/$(basename "$f")"
 }
+
+update_classlive() {
+  # 一条命令更新: 拉代码 + 补依赖 + 自检。
+  #
+  # ⚠️ 三条边界(与"不擅自改用户环境"同源):
+  #   ① **工作区有本地改动时停手** —— 绝不 stash、绝不丢弃。那些改动可能是用户
+  #      自己改的配置, 弃掉就没了; 让用户自己决定去留。
+  #   ② `--ff-only` 而不是默认合并 —— 分叉时**响亮失败**, 不静默造一个 merge commit。
+  #   ③ **绝不自动下模型** —— 1GB 的东西要不要下是用户的决定, 只打印命令。
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "✗ 这不是 git 仓库, 没法用 cl update 更新。"; return 1
+  fi
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    echo "⚠ 工作区有未提交的本地改动 —— 先处理它们再更新。"
+    echo "   （更新会动工作区; 这些改动是你自己的, 我不替你决定去留。）"
+    echo
+    git status --short
+    echo
+    echo "   想留着:  git stash     想提交: git add -A && git commit -m '...'"
+    return 1
+  fi
+
+  _before="$(cat VERSION 2>/dev/null || echo '?')"
+  _req_before="$(shasum requirements.txt 2>/dev/null | cut -d' ' -f1)"
+  _head_before="$(git rev-parse --short HEAD)"
+
+  echo "▶ 当前 $_before ($_head_before), 正在拉取…"
+  if ! git pull --ff-only; then
+    echo
+    echo "✗ 拉取失败。常见两种:"
+    echo "   · 网络不通 —— 过会儿再试"
+    echo "   · 本地和远程**分叉**了(你自己在本地提交过) —— 这个我不替你合,"
+    echo "     请自己决定: git rebase origin/main  或  git merge origin/main"
+    return 1
+  fi
+
+  _after="$(cat VERSION 2>/dev/null || echo '?')"
+  _head_after="$(git rev-parse --short HEAD)"
+  if [ "$_head_before" = "$_head_after" ]; then
+    echo "✅ 已经是最新的 ($_after)。"
+  else
+    echo "✅ $_before → $_after   ($(git rev-list --count "$_head_before..$_head_after" 2>/dev/null || echo '?') 个提交)"
+    echo
+    echo "   这次改了什么:"
+    git log --oneline "$_head_before..$_head_after" 2>/dev/null | sed 's/^/     /'
+  fi
+
+  # 依赖变了才装 —— 每次都装会白等, 且可能把环境改坏
+  if [ "$_req_before" != "$(shasum requirements.txt 2>/dev/null | cut -d' ' -f1)" ]; then
+    echo
+    echo "🔧 依赖清单有变化, 正在安装…"
+    if command -v uv >/dev/null 2>&1; then
+      uv pip install --python "$PY" -q -r requirements.txt 2>&1 | tail -3
+    else
+      "$PY" -m pip install -q -r requirements.txt 2>&1 | tail -3
+    fi
+  fi
+
+  echo
+  "$PY" doctor.py || true
+  echo "   （模型不会自动下载 —— 要装哪个按上面的命令来。）"
+}
+
 
 list_courses() {
   echo "可选课程(术语表在 glossary/):"
@@ -102,6 +167,7 @@ case "${1:-}" in
     SRC=file; UI=terminal; ARGS+=(--path "$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"); shift 2 ;;
   local) ENGINE=local; shift ;;
   doctor) "$PY" doctor.py; exit $? ;;
+  update) update_classlive; exit $? ;;
   test)
     # 测试模式: 采全量指标 + 录音频, 收尾打包。额外参数透传(如 --no-record-audio)。
     # ⚠️ 只在**跑课**时用 —— 它会往 sessions/ 旁写一份音频。

@@ -64,6 +64,16 @@ class ParakeetASR:
 
 
 def load_asr(model_dir: str):
+    """加载草稿/兜底 ASR(Parakeet)。
+
+    ⚠️ **别给这个模型挂热词偏置**(`hotwords_file`) —— 本机实测(2026-09-24)是三条死路:
+      ① 用默认 `greedy_search` 挂热词 → 直接 ValueError(它要求 modified_beam_search)
+      ② 换 `modified_beam_search` + `modeling_unit="bpe"` 但**不给 `bpe_vocab`**
+         → **SIGSEGV 段错误, 整个进程当场死**。上课中途崩, 正是最不能发生的事。
+      ③ 就算参数配全了也不划算: 光换 beam search 就词数 −36%、CPU +39%;
+         而热词权重没有可用区间 —— 2.0 完全不触发, 8.0 输出崩坏, 20.0 直接背诵热词表。
+    详见 `docs/experiments/hotwords_ab.py`。
+    """
     return ParakeetASR(model_dir)
 
 

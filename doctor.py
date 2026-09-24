@@ -38,11 +38,11 @@ OPTIONAL = [
     ("huggingface_hub", "首次下模型用"),
 ]
 MODELS = [
-    ("~/models/parakeet-tdt-0.6b-v3-int8", "Parakeet ASR 模型(必需)",
+    ("~/models/parakeet-tdt-0.6b-v3-int8", "Parakeet ASR 模型(必需)", True,
      "见 README 安装段"),
-    ("~/models/vad/silero_vad.onnx", "Silero VAD(必需)",
+    ("~/models/vad/silero_vad.onnx", "Silero VAD(必需)", True,
      "见 README 安装段"),
-    ("~/models/sherpa-onnx-whisper-turbo", "定稿增强模型(可选, ~1GB)",
+    ("~/models/sherpa-onnx-whisper-turbo", "定稿 Whisper 模型(必需, ~1GB)", True,
      "curl -sL -o /tmp/wt.tar.bz2 "
      "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
      "asr-models/sherpa-onnx-whisper-turbo.tar.bz2 && tar xjf /tmp/wt.tar.bz2 -C ~/models/"),
@@ -111,12 +111,12 @@ def main() -> int:
 
     # ---- 模型 ----
     print()
-    for path, label, cmd in MODELS:
+    for path, label, required, cmd in MODELS:
         p = pathlib.Path(os.path.expanduser(path))
         ok = p.exists()
-        if not ok and "可选" not in label:
+        if not ok and required:
             hard_missing += 1
-        print(f"{_mark(ok) if ok else ('⚪' if '可选' in label else '❌')} {label:<28}"
+        print(f"{_mark(ok) if ok else ('❌' if required else '⚪')} {label:<30}"
               f"{'就位' if ok else '缺失'}")
         if not ok:
             print(f"   → {cmd}")

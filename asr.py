@@ -146,10 +146,16 @@ class WhisperASR:
 
 
 def load_final_asr(model_dir: str):
-    """定稿路径的 ASR。模型不在就返回 ``None``, 调用方退回只用 Parakeet ——
-    定稿模型是可选的增强, 缺了不能让课上崩。"""
+    """定稿路径的 ASR(Whisper-turbo)。**必需模型 —— 缺失直接抛, 不做静默回退。**
+
+    为什么不留回退: 定稿模型是转写质量的主要来源(实测有效词数 +33%、
+    段尾无终止标点 22%→14%、空转写 9%→2%)。静默少掉它 = "看着正常但打了折",
+    而用户永远不会知道。**启动时说清楚, 比课上悄悄降质好。**
+    """
     try:
         return WhisperASR(model_dir)
     except Exception as e:                                # noqa: BLE001
-        print(f"⚠ 定稿 ASR 未加载({e}); 定稿回退 {os.path.basename(model_dir)}")
-        return None
+        raise RuntimeError(
+            f"定稿模型加载失败: {model_dir}\n"
+            f"    原因: {e}\n"
+            f"    这是必需模型 —— 跑 `cl doctor` 看怎么装。") from e

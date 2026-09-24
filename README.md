@@ -31,7 +31,7 @@ ClassLive 是跑在你自己电脑上的**实时课堂字幕工具**：老师讲
   - **输出**：中文讲清为主，英文另起一行 `EN：` 保留教授原话措辞与术语（不整段翻译 —— 考试是英文的，那词要在考卷上认得出）；外部背景另起 `背景：` 一行，与课堂内容分开；转录里没依据就直说没有，不编。
   - **流式接管字幕区**：读答案时字幕后台继续累积，退出后一条不少地回来。
   - **追问**：不用再点输入框，回车后接着打即可；问过的每一条课后自动变成笔记里的 `问题::答案` 复习项。
-- **聊天式悬浮窗** — 不是只能看最近三句。可展开到 60% 屏高**回看整节课**，翻上去看历史不会被新内容拽下来
+- **聊天式悬浮窗** — 不是只能看最近三句。窗口**可随意拉大，翻上去看整节课的历史不会被新内容拽下来**
 - **远场收音** — 讲台离你 10 米也能收。靠滑动峰值归一化补电平（实测可用动态范围扩大 ~24dB），不靠降 VAD 阈值
 - **课后自动归档** — 逐句实时落盘（`kill -9` 只丢最后一句；✕ / Ctrl+C 停止时在途半句也冲刷落盘），结束生成**双层 Obsidian 笔记**：复习层（**英文知识点详解** + 英文自测 + 本课术语表 + 标星重点，中文辅助）+ 默认折叠的**逐字完整转录**。**不设课程代码也照常归档**。
 - **三档模式（一键循环）** — 双语 / 只英·校 / 纯转录。第三档**一个模型请求都不发**（零 API、零延迟）；「只英·校」关掉中文**仍做英文矫正**，不退回原始 ASR 错听
@@ -136,7 +136,7 @@ lecture-live/
 ├── main.py                # CLI 入口；事件驱动主循环 + 三个 worker 线程
 ├── capture.py             # 音源(回调式异步采集 / 文件) + PeakNormalizer 电平归一化
 ├── vad.py                 # Silero VAD + 梯级静音 + pre-roll 分段
-├── asr.py                 # Parakeet 转写(带锁, 线程安全) + 可选定稿模型 Whisper
+├── asr.py                 # Parakeet 转写(草稿/兜底) + Whisper 定稿(两个模型都必装)
 ├── translator.py          # 本地流式 ZH/EN + RAG-lite 术语筛选 + 仅英文矫正
 ├── cloud_translator.py    # DeepSeek 云端翻译(同接口, 失败降级本地)
 ├── overlay.py             # 卡片式悬浮窗 UI(含三档模式按钮 + 顶栏)
@@ -166,7 +166,7 @@ lecture-live/
 | 指标 | 值 |
 |---|---|
 | ASR | Parakeet 12s 音频 0.43s（**≈28× 实时**） |
-| ASR（可选定稿模型） | Whisper-turbo 同段 **2.19s（≈4× 实时）** —— 只用在定稿路径 |
+| ASR（定稿） | Whisper-turbo 同段 **2.19s（≈4× 实时）** —— 只用在定稿路径 |
 | 首字中文 | **0.60s** |
 | 句末 → 中文完成 | ~1.0s |
 | 内存峰值 | ~1.3GB（**加装定稿模型 +~1.0GB**） |
@@ -185,7 +185,7 @@ lecture-live/
 
 - **macOS + Apple Silicon**（M1/M2/M3/M4）—— 本地推理依赖 MLX（Metal），悬浮窗依赖 AppKit
 - Python **3.12**
-- 约 **2GB** 磁盘放模型（另加一个可选的定稿增强模型 ~1GB，见安装段）
+- 约 **3GB** 磁盘放模型（Parakeet + VAD + Whisper 定稿，**三个都必装**）
 - 磁盘里跑，不需要 GPU 服务器
 
 ## 安装
@@ -213,7 +213,7 @@ mkdir -p ~/models/vad && curl -sL -o ~/models/vad/silero_vad.onnx \
 # 术语表模板 → 自己的公共术语表
 cp glossary.example.txt glossary.txt
 
-# 【可选】定稿增强模型（~1GB，不下也能跑，只是定稿质量差一档）
+# 定稿 Whisper 模型（~1GB，**必装** —— 缺了启动时会直接告诉你）
 curl -sL -o /tmp/wt.tar.bz2 \
   https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-turbo.tar.bz2
 tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2
@@ -245,7 +245,7 @@ uv pip install --python .venv/bin/python -r requirements.txt
 ### 破坏性变更记录
 
 - **2026-09-24**
-  - 新增可选定稿模型 `whisper-turbo`（~1GB）。**不装也能用**，只是少一档质量。
+  - 新增定稿模型 `whisper-turbo`（~1GB）。**必装** —— 缺了启动即报错并提示 `cl doctor`。
   - 新增 `--final-model-dir` 参数（默认指向 whisper-turbo；传 `""` 关闭）。
   - 悬浮窗「翻译开关」由 **2 态改为 3 态**（双语 / 只英·校 / 纯转录）。旧的两态行为 = 新的「只英·校」。
   - 新增 `requirements.txt`（此前只在 README 里手打依赖列表）。
@@ -347,13 +347,14 @@ cd ~/lecture-live
 
 > 三档而非两档的原因：原来只有「译 开/关」，但**关掉后英文仍然过模型**。对"我根本不需要翻译、也不想联 API"的人没有可选项 —— 第三档把这个诉求变成显式选择。
 
-### 定稿用更准的模型（可选，~1GB）
+### 定稿用更准的模型（必装，~1GB）
 
 定稿路径可以额外接一个 **Whisper-large-v3-turbo**，输出明显更准。同一批真实课堂录音实测：有效词数 **+33%**、段尾无终止标点 **22%→14%**、空转写 **9%→2%**；逐段能看到它把 Parakeet 听错的词听对了（`part`→`pot`、`he jokes`→`heat up`）。
 
 - **草稿路径不变**（仍用 Parakeet）—— Whisper 只有 4× 实时，供不上"每秒出一份草稿"。
-- **模型缺失不影响使用**：会警告并回退 Parakeet，课上不会崩。
-- 关闭 / 换别的：`cl --final-model-dir ""` 或 `--final-model-dir /path/to/model`。
+- **模型缺失会在启动时报错并退出** —— 不做静默降级。定稿模型是质量的主要来源，
+  悄悄少掉它等于"看着正常但打了折"，用户不会知道。
+- 换路径：`cl --final-model-dir /path/to/model`（默认 `~/models/sherpa-onnx-whisper-turbo`）。
 - ⚠️ Whisper 偶尔会**退化**（吐省略号 / 整句复读），有 `is_degenerate()` 拦截，命中就回退 Parakeet。
 
 ### 术语表（分课程）

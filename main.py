@@ -368,10 +368,15 @@ def run(args) -> None:
     except Exception:                            # noqa: BLE001
         pass
 
-    asr = load_asr(args.model_dir)
-    # 定稿路径的 ASR(可选)。草稿仍用 parakeet —— 它每秒就要一份, whisper 的
-    # 4× 实时供不上; 质量收益只在定稿上兑现。
-    asr_final = load_final_asr(args.final_model_dir) if args.final_model_dir else None
+    # 两个 ASR 模型都是**必需**的: 草稿/兜底用 Parakeet, 定稿用 Whisper。
+    # 缺任何一个都在这里说清楚然后退出 —— 不在课上静默降质。
+    try:
+        asr = load_asr(args.model_dir)
+        asr_final = load_final_asr(args.final_model_dir)
+    except Exception as e:                       # noqa: BLE001
+        echo(f"⚠ {e}")
+        echo("  装好模型再跑：`cl doctor` 会列出缺哪个、该跑哪条命令。")
+        return
     local_tr = load_translator(args.llm, args.glossary, args.context,
                                course=args.course)
     cloud_tr = None
@@ -626,7 +631,7 @@ def run(args) -> None:
                 # 反过来写(先 parakeet 再 whisper)会让 parakeet 那 0.36s 白花 ——
                 # 实测它的结果只在 whisper 退化时用得上, 而 64 段里退化 0 次。
                 # 先跑慢的那个, 命中就省下整个快的那趟; 退化时多花的 0.36s 无所谓。
-                text = asr_final.transcribe(buf) if asr_final is not None else ""
+                text = asr_final.transcribe(buf)
                 if not text or is_degenerate(text):
                     text = asr.transcribe(buf)      # 退化/空 -> 用草稿模型(并兜底)
                 if not text:
@@ -918,7 +923,7 @@ def main():
                    help="草稿+兜底的 ASR 模型目录(要求够快, 每秒要出一份草稿)")
     p.add_argument("--final-model-dir",
                    default=os.path.expanduser("~/models/sherpa-onnx-whisper-turbo"),
-                   help="定稿专用 ASR 模型目录(更准但更慢); 传空串关闭")
+                   help="定稿专用 ASR 模型目录(必需; 用 `cl doctor` 检查)")
     p.add_argument("--llm", default="mlx-community/Qwen3-1.7B-4bit")
     p.add_argument("--glossary", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "glossary.txt"))

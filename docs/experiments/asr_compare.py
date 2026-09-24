@@ -79,6 +79,9 @@ def build(kind):
             tokens=_pick(d, "turbo-tokens.txt", "tokens.txt"),
             language="en", num_threads=4)
     if kind == "canary-180m":
+        # ⚠️ 已实测**否决**: 对本项目的远场课堂录音 100% 空输出(12s/30s/60s、原始/归一化/
+        # ×0.3/×2 全试过), 而它在自带样例上是正常的 —— 是模型对该声学条件不适用, 不是
+        # 集成问题。留着这个分支只为可复现, 别再下载它指望有提升。
         d = f"{MODELS_DIR}/canary"
         return sherpa_onnx.OfflineRecognizer.from_nemo_canary(
             encoder=_pick(d, "encoder.int8.onnx", "encoder.onnx"),

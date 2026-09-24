@@ -449,14 +449,47 @@ def _changelog_full() -> str:
     return _reorder_log(text[m.start():]) if m else text
 
 
-def _changelog_versions() -> list[str]:
-    """CHANGELOG.md 里所有版本号，**新到旧**（文件里的出现顺序）。"""
+def _changelog_versions(text: str | None = None) -> list[str]:
+    """CHANGELOG.md 里所有版本号，**新到旧**（文件里的出现顺序）。
+
+    实现委托给 `update.versions_in` —— 更新决策的解析**只有一份**，
+    否则卡片显示和自动更新判断会各说各话。
+    """
+    import update as _u
+    if text is None:
+        try:
+            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md")
+            text = open(p, encoding="utf-8").read()
+        except Exception:                                 # noqa: BLE001
+            return []
+    return _u.versions_in(text)
+
+
+def _update_mode_in(text: str, version: str) -> str:
+    """该版本能否后台自动应用。委托 `update.update_mode_in`（见那里的说明）。"""
+    import update as _u
+    return _u.update_mode_in(text, version)
+
+
+def _auto_update_on_exit() -> None:
+    """退出时**在独立进程里**检查/应用小更新。父进程立刻返回，**零退出延迟**。
+
+    为什么必须是独立进程（2026-09-24 调研，见 `docs/PLAN-update-mechanism.md` §7）：
+      · Mozilla Silent Update 把 **"We don't want to delay shutdown"** 列为设计目标；
+      · Firefox 的后台更新器本身就是独立进程，且"主进程在跑时它直接退出"；
+      · atomic（Go 工具自更新）的原话是 **"the parent process never touches the network"**。
+    同步跑的话，断网时用户要干等超时才关得掉 —— 这是**上课录课**用的工具，不能这样。
+
+    "环境不全"全都在子进程里静默降级（没 git / 没 upstream / remote 名不同 /
+    浅克隆 / 目录不可写…），父进程这一侧只有一个 `Popen`，失败就算了。
+    """
+    if os.environ.get("CLASSLIVE_NO_AUTO_UPDATE"):
+        return
     try:
-        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md")
-        text = open(p, encoding="utf-8").read()
+        import update as _u
+        _u.spawn_auto_update()
     except Exception:                                     # noqa: BLE001
-        return []
-    return re.findall(r"^## \[([^\]]+)\]", text, re.M)
+        pass                                              # 绝不因为自动更新影响退出
 
 
 def _whatsnew_body(seen: str, cur: str, max_lines: int = 7) -> str:
@@ -1201,6 +1234,11 @@ def run(args) -> None:
                     echo("   发给作者即可, 不用解压。")
                 else:
                     echo("⚠ 数据包生成失败, 但报告已写出(见上面的路径)")
+
+            # ---- 小更新：退出时在**独立进程**里自动拉（详见 _auto_update_on_exit）----
+            # 放在 finally 的**最末**：等用户答完"是否保存笔记"、测试报告也打完，
+            # 再起子进程。父进程只 spawn 一下就返回，**零退出延迟**。
+            _auto_update_on_exit()
 
 
 def _load_overlay(on_quit=None, on_flag=None, on_translate=None, on_submit=None,

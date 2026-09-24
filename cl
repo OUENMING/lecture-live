@@ -68,48 +68,18 @@ show_last() {
 update_classlive() {
   # 一条命令更新: 拉代码 + 补依赖 + 自检。
   #
-  # ⚠️ 三条边界(与"不擅自改用户环境"同源):
-  #   ① **工作区有本地改动时停手** —— 绝不 stash、绝不丢弃。那些改动可能是用户
-  #      自己改的配置, 弃掉就没了; 让用户自己决定去留。
-  #   ② `--ff-only` 而不是默认合并 —— 分叉时**响亮失败**, 不静默造一个 merge commit。
+  # ⚠️ **拉代码那部分全部在 `update.py`** —— 与更新卡片上的「立即更新」按钮共用
+  #    同一份实现。两条路径的安全规则必须逐字一致，各写一份迟早在某一边漂移。
+  #
+  # 三条边界(与"不擅自改用户环境"同源, 实现在 update.py):
+  #   ① **工作区有本地改动时停手** —— 绝不 stash、绝不丢弃。
+  #   ② `--ff-only` —— 分叉时**响亮失败**, 不静默造 merge commit。
   #   ③ **绝不自动下模型** —— 1GB 的东西要不要下是用户的决定, 只打印命令。
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "✗ 这不是 git 仓库, 没法用 cl update 更新。"; return 1
-  fi
-  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-    echo "⚠ 工作区有未提交的本地改动 —— 先处理它们再更新。"
-    echo "   （更新会动工作区; 这些改动是你自己的, 我不替你决定去留。）"
-    echo
-    git status --short
-    echo
-    echo "   想留着:  git stash     想提交: git add -A && git commit -m '...'"
-    return 1
-  fi
-
-  _before="$(cat VERSION 2>/dev/null || echo '?')"
+  #
+  # 这里只留两件 bash 更合适的事: **补依赖** + **跑 doctor**（环境关注点）。
   _req_before="$(shasum requirements.txt 2>/dev/null | cut -d' ' -f1)"
-  _head_before="$(git rev-parse --short HEAD)"
 
-  echo "▶ 当前 $_before ($_head_before), 正在拉取…"
-  if ! git pull --ff-only; then
-    echo
-    echo "✗ 拉取失败。常见两种:"
-    echo "   · 网络不通 —— 过会儿再试"
-    echo "   · 本地和远程**分叉**了(你自己在本地提交过) —— 这个我不替你合,"
-    echo "     请自己决定: git rebase origin/main  或  git merge origin/main"
-    return 1
-  fi
-
-  _after="$(cat VERSION 2>/dev/null || echo '?')"
-  _head_after="$(git rev-parse --short HEAD)"
-  if [ "$_head_before" = "$_head_after" ]; then
-    echo "✅ 已经是最新的 ($_after)。"
-  else
-    echo "✅ $_before → $_after   ($(git rev-list --count "$_head_before..$_head_after" 2>/dev/null || echo '?') 个提交)"
-    echo
-    echo "   这次改了什么:"
-    git log --oneline "$_head_before..$_head_after" 2>/dev/null | sed 's/^/     /'
-  fi
+  "$PY" update.py || return $?
 
   # 依赖变了才装 —— 每次都装会白等, 且可能把环境改坏
   if [ "$_req_before" != "$(shasum requirements.txt 2>/dev/null | cut -d' ' -f1)" ]; then

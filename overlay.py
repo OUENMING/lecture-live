@@ -17,6 +17,7 @@
 调用约定: main.py 保证所有方法都在主线程调用。
 """
 from __future__ import annotations
+import os
 import pathlib
 import time
 
@@ -1428,7 +1429,8 @@ class Overlay:
             import whatsnew
             from AppKit import NSScreen
             self._whatsnew_card = whatsnew.build(
-                **self._whatsnew, flag_path=whatsnew.skip_flag_path())
+                **self._whatsnew, flag_path=whatsnew.skip_flag_path(),
+                on_update=self._whatsnew_update)
             if self._whatsnew_card is None:
                 return
             # ---- 定位: 找一个"完整放得进可见区、且不压住主面板"的位置 ----
@@ -1462,6 +1464,66 @@ class Overlay:
             card.setFrameOrigin_(placed)
         except Exception:                                 # noqa: BLE001
             self._whatsnew_card = None
+
+    def _whatsnew_update(self, set_status, set_title, done) -> None:
+        """「立即更新」按钮的干活处。**后台线程跑网络，UI 回写一律回主线程。**
+
+        ⚠️ 两条硬约束：
+          · AppKit 只能在主线程碰 —— 所以线程里每一次回写都过 `callAfter`；
+          · 这个工具正在上课录课 —— 所以**只换代码、不装依赖、不重启**，
+            依赖有变化就把命令打出来让用户自己敲。
+
+        更新逻辑全部在 `update.py`（与 `cl update` 共用一份，避免漂移）。
+        """
+        import threading
+
+        from PyObjCTools import AppHelper
+
+        def ui(fn, *a) -> None:
+            try:
+                AppHelper.callAfter(fn, *a)
+            except Exception:                             # noqa: BLE001
+                pass
+
+        def work() -> None:
+            # ⚠️ 最外层必须是 try/finally：任何**没预料到**的异常（包括 except 分支
+            # 自己再抛，比如曾经在没 import os 时用 os.environ）都会让线程静默死掉、
+            # `done()` 永不执行 —— 按钮就永远卡在「更新中…」。踩过。
+            try:
+                try:
+                    import update
+                    r = update.pull()
+                except Exception as e:                    # noqa: BLE001
+                    if os.environ.get("CLASSLIVE_DEBUG"):
+                        import traceback
+                        traceback.print_exc()
+                    ui(set_status, f"更新出错：{e}", 1.0)
+                    ui(set_title, "更新失败")
+                    return
+                if not r["ok"]:
+                    first = (r["error"] or "未知错误").splitlines()[0]
+                    if r.get("blocked"):
+                        # **主动停手**，不是失败 —— 措辞必须不一样，否则用户以为工具坏了
+                        ui(set_status, f"⚠️ {first} 跑 cl update 看详情。", 1.0)
+                        ui(set_title, "需先处理改动")
+                    else:
+                        ui(set_status, f"⚠️ {first}", 1.0)
+                        ui(set_title, "更新失败")
+                elif r["skipped"]:
+                    ui(set_status, f"已经是最新的（{r['after']}）")
+                    ui(set_title, "已是最新")
+                elif r["reqs_changed"]:
+                    ui(set_status,
+                       f"已更新到 {r['after']}；依赖有变化 —— 重启后跑一次 cl update 补依赖",
+                       1.0)
+                    ui(set_title, "重启后生效")
+                else:
+                    ui(set_status, f"已更新到 {r['after']} —— 下次启动生效")
+                    ui(set_title, "重启后生效")
+            finally:
+                ui(done)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def close(self) -> None:
         """撤掉面板与菜单栏图标。**幂等**, 可重复调用(✕ / Ctrl+C / 正常结束都会走)。

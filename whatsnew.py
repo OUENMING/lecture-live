@@ -38,7 +38,7 @@ PAD = 20.0
 TITLE_H = 30.0
 LINE_H = 21.0
 LOG_H = 360.0          # 可滚动日志区的高度（有 log 时用它，没 log 时按摘要行数算）
-FOOT_H = 46.0          # 底部那行：勾选框 + 按钮
+FOOT_H = 68.0          # 底部两行：状态行 + (勾选框｜立即更新｜知道了)
 CORNER = 16.0
 SCRIM_ALPHA = 0.38     # 与 overlay.SCRIM_ALPHA 同值：白底 PPT 上也要能读
 
@@ -170,11 +170,15 @@ def _add_log_view(parent, attr, x, y, w, h):
 
 
 def build(version: str, summary: str, date: str = "", log: str = "",
-          flag_path: pathlib.Path | None = None, on_dismiss=None):
+          flag_path: pathlib.Path | None = None, on_dismiss=None, on_update=None):
     """构造并显示卡片。失败返回 None（调用方不必管）。
 
     `log` 非空 -> 中间是**可滚动的完整更新日志**（所有版本，新的在上）；
     为空 -> 退回"摘要几行"的紧凑版。两条路都是非模态、不抢焦点。
+
+    `on_update` 给了才会建「立即更新」按钮。它的签名是
+    `on_update(set_status, set_title, done)` —— 由调用方在**后台线程**里跑，
+    跑完用这三个回调把进度写回卡片（绝不在主线程做网络）。
     """
     try:
         from AppKit import (NSAppearance, NSAppearanceNameDarkAqua, NSButton,
@@ -253,7 +257,10 @@ def build(version: str, summary: str, date: str = "", log: str = "",
                 y -= LINE_H
                 ve.addSubview_(label(ln, y, 12.5, alpha=0.92))
 
-        # ---- 底部：不再提示 + 关闭 ----
+        # ---- 底部：状态行 + 勾选框 + 按钮 ----
+        # ⚠️ 为什么要单独一行状态：卡片原本只在 `VERSION` 变了时弹（= 已经拉完了），
+        # 那一刻没什么可拉的 —— 「立即更新」按钮会显得没意义。加一行常驻状态
+        # （当前版本 / 是否落后 / 更新结果），按钮才有上下文。
         fy = PAD
         state_holder = {"skip": False}
 
@@ -273,11 +280,22 @@ def build(version: str, summary: str, date: str = "", log: str = "",
                 except Exception:                         # noqa: BLE001
                     pass
 
+        # 状态行（常驻）。内容由调用方通过 set_status 改；默认显示当前版本。
+        # ⚠️ y 取 fy+34 而不是贴 footer 顶 —— 贴顶会让它顶到日志区最后一行（实测差 3px）。
+        status = label(f"当前 {version}", fy + 34.0, 11.5, alpha=0.75)
+
+        def set_status(text: str, alpha: float = 0.75) -> None:
+            try:
+                status.setStringValue_(text)
+                status.setTextColor_(
+                    NSColor.whiteColor().colorWithAlphaComponent_(alpha))
+            except Exception:                             # noqa: BLE001
+                pass
+
         chk = NSButton.alloc().initWithFrame_(NSMakeRect(PAD, fy + 4, 190.0, 22.0))
         chk.setButtonType_(NSButtonTypeSwitch)
         chk.setTitle_("以后不再提示")
         chk.setFont_(NSFont.systemFontOfSize_(12.0))
-        chk.setTarget_(chk); chk.setAction_("")           # 只当勾选框用，不需要动作
         try:
             chk.setContentTintColor_(NSColor.whiteColor().colorWithAlphaComponent_(0.85))
         except Exception:                                 # noqa: BLE001
@@ -291,13 +309,50 @@ def build(version: str, summary: str, date: str = "", log: str = "",
         btn.setTitle_("知道了")
         btn.setBezelStyle_(1)                             # rounded
         btn.setFont_(NSFont.systemFontOfSize_weight_(13.0, _W))
-        _wire = _make_target(toggle); _wire2 = _make_target(on_close)
+
+        # 「立即更新」—— 只在给了 on_update 时才建。点了之后**在后台线程**跑，
+        # 结果用 set_status / set_update_title 回写到卡片上，绝不阻塞主线程。
+        ubtn = None
+        if on_update:
+            ubtn = NSButton.alloc().initWithFrame_(
+                NSMakeRect(WIDTH - PAD - 92.0 - 8.0 - 104.0, fy + 2, 104.0, 28.0))
+            ubtn.setTitle_("立即更新")
+            ubtn.setBezelStyle_(1)
+            ubtn.setFont_(NSFont.systemFontOfSize_weight_(12.5, _W))
+
+            def on_update_clicked(_=None):
+                try:
+                    if ubtn is not None:
+                        ubtn.setEnabled_(False)
+                        ubtn.setTitle_("更新中…")
+                    set_status("正在检查远程…", 0.75)
+                    on_update(set_status, lambda t: ubtn and ubtn.setTitle_(t),
+                              lambda: ubtn and ubtn.setEnabled_(True))
+                except Exception:                         # noqa: BLE001
+                    if os.environ.get("CLASSLIVE_DEBUG"):
+                        import traceback
+                        traceback.print_exc()
+                    set_status("更新按钮出错", 1.0)
+
+        _wire = _make_target(toggle)
+        _wire2 = _make_target(on_close)
         chk.setTarget_(_wire); chk.setAction_("clicked:")
         btn.setTarget_(_wire2); btn.setAction_("clicked:")
         ve.addSubview_(chk); ve.addSubview_(btn)
+        ve.addSubview_(status)
+        targets = [_wire, _wire2]
+        if ubtn is not None:
+            _wire3 = _make_target(on_update_clicked)
+            ubtn.setTarget_(_wire3); ubtn.setAction_("clicked:")
+            ve.addSubview_(ubtn)
+            targets.append(_wire3)
 
         p.orderFrontRegardless()      # ⚠️ 不是 makeKeyAndOrderFront —— 绝不抢焦点
-        return {"panel": p, "close": on_close, "_targets": [_wire, _wire2]}
+        return {"panel": p, "close": on_close, "set_status": set_status,
+                "set_update_title": (lambda t: ubtn and ubtn.setTitle_(t)),
+                "set_update_enabled": (lambda on: ubtn and ubtn.setEnabled_(on)),
+                "has_update_button": ubtn is not None,
+                "_targets": targets}
     except Exception:                                     # noqa: BLE001
         # fail-soft 是本模块的**既定设计**（见文件头：它只是说明，不能因为它让课起不来）。
         # 但它已经**两次**把真 bug 藏起来（ObjC 类名撞车、不可变的 NSAttributedString），

@@ -419,7 +419,15 @@ def run(args) -> None:
     if args.test_mode:
         tester = TestSession(getattr(writer, "session_path", None),
                              record_audio=not args.no_record_audio)
-        echo(f"🧪 测试模式: 报告与音频将写到 {tester.stem}")
+        echo(f"🧪 测试模式: 报告将写到 {tester.stem}.report.json")
+        # ⚠️ 隐私提醒必须放在**启动时** —— 收尾才说就晚了: 那时整节课已经录完,
+        #    想改成 --no-record-audio 也来不及。让人在**开始之前**就能决定。
+        if tester.record_audio:
+            echo("   ⚠️ 会录制**课堂音频**(约 28MB/15 分钟), 收尾打成一个 zip。")
+            echo("      音频与逐字转录可能含**其他同学的声音** —— 发出去前请自己确认。")
+            echo("      只要指标、不留音频:  Ctrl+C 退出后改用 `cl test --no-record-audio`")
+        else:
+            echo("   ℹ️ 只采指标, 不录音频（--no-record-audio）。")
 
     drafts: "queue.Queue[str]" = queue.Queue()          # 草稿文本 -> 主线程
     drafts_zh: "queue.Queue[str]" = queue.Queue()       # 草稿译文 -> 主线程

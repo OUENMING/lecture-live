@@ -4,7 +4,7 @@
 用法:
     .venv/bin/python docs/experiments/denoise_ab.py <音频> <起始秒> <时长秒> [音频2 起 时 ...]
 
-前置: 需要 sherpa-onnx 的降噪模型(不在仓库里), 下载到 ~/models/denoise/:
+前置: 降噪模型**已被删除**（本实验否决了降噪后清理掉了），复跑前先下回来：
     gtcrn_simple.onnx     535 KB   https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx
     dpdfnet_baseline.onnx 8.8 MB   https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/dpdfnet_baseline.onnx
 
@@ -56,9 +56,14 @@ arXiv 2404.14860 提出两条缓解伪影误差的办法, 其中 **Observation A
 **OA 确实缓解了降噪的伤害**: 空转写从 15% 直接归零、词数从 298 回到 422–469。
 调研说的"OA 能减少伪影误差"**在本机成立**。
 
-**但它被去混响压过** —— 对比 `dereverb_ab.py`: WPE 是**词数 −2% + 碎片 −31%**,
-而 OA 是**词数 −22% + 碎片 −57%**。**WPE 几乎不动词数, OA 砍掉两成。**
-所以优先做 WPE, OA 只作为"如果非要降噪"的备选。
+⚠️ 但**两条都别做**：
+- OA 的"空转写 15%→0%"**落在噪声带内**（该指标 n≈11 段时噪声底线 ±18 个百分点），
+  词数还砍掉两成（541→422~469）。**不作为方案。**
+- 去混响 WPE 曾一度被当成"唯一正收益"，**已撤回** —— 那次调用传的是时域波形而
+  `nara_wpe.wpe()` 要复数 STFT（实测是恒等变换）；用正确管线重测后**测不出效果**。
+  详见 `dereverb_ab.py` 开头的完整记录。
+
+→ **结论：远场收音的软件侧手段到这里全部穷尽，剩下的是硬件（把麦放到讲台附近）。**
 """
 import os
 import sys

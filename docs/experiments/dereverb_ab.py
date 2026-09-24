@@ -82,8 +82,12 @@ OA 空转写 15%→0% ❌ 撤回。
 ⚠️ **离线 `wpe_v8` 在本机是坏的**: 5s 音频要 **3.7 GB** 内存（两次 OOM 被杀）,
 且输出 −79 dBFS ≈ 静音。**根因未查明。**
 
-依赖: WPE 做 STFT 要用 `nara_wpe.utils`, 它 **import scipy** —— 不在
-`nara_wpe` 声称的 5 个轻依赖里, 要单独装。
+⚠️ **这两个依赖已被卸载**（WPE 否决后清理掉了，它们不进 `requirements.txt`）。
+要复跑本脚本先装回来:
+    uv pip install --python .venv/bin/python nara_wpe scipy
+（`nara_wpe.utils` 做 STFT 时 **import scipy** —— 不在它自称的 5 个轻依赖里。
+ 另 `soundfile` / `bottleneck` 是 nara_wpe 的传递依赖, `soundfile` 因
+ huggingface_hub 已需要而保留。）
 
 ## 下一步（如果还要追这条）
 

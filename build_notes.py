@@ -17,7 +17,7 @@
 旧格式 {"term": "解释"} 仍可读, 一律当作 gloss。
 """
 from __future__ import annotations
-import datetime, json, pathlib, re, sys
+import datetime, json, os, pathlib, re, sys
 
 HERE = pathlib.Path(__file__).parent
 NOTES_FILE = HERE / "term_notes.json"
@@ -154,11 +154,53 @@ def save_to(path: pathlib.Path, meta: dict, terms: dict, extra: dict = None) -> 
                       ensure_ascii=False, indent=1)
     if path.exists():
         try:
-            path.with_name(path.name + ".bak").write_text(
-                path.read_text(encoding="utf-8"), encoding="utf-8")
-        except Exception:                                 # noqa: BLE001
-            pass                                          # 备份失败不阻塞主写入
-    path.write_text(body, encoding="utf-8")
+            # 备份也走原子写: 否则 .bak 本身可能被写一半, 真出事时它是坏的
+            _atomic_write(path.with_name(path.name + ".bak"),
+                          path.read_text(encoding="utf-8"))
+        except Exception as e:                            # noqa: BLE001
+            # ⚠️ 出声, 不静默。原来这里是 `pass`, 用户以为有一份可回滚的副本,
+            # 实际上没有 —— 而这正是 .bak 存在的唯一理由。(2026-09-24 OCR 发现)
+            print(f"⚠ 备份失败({str(e)[:60]}); 仍继续写入 —— 本次没有可回滚的副本")
+    _atomic_write(path, body)
+
+
+def _atomic_write(path: pathlib.Path, text: str) -> None:
+    """先写同目录临时文件, 再 `os.replace` 原子替换。
+
+    为什么必须: 这个文件是人工/付费整理出来的术语库, 在 .gitignore 里、
+    本机无 APFS 快照、无 Time Machine。`write_text` 是"先截断再写" ——
+    写一半被杀(断电/强杀/磁盘满)就只剩半截 JSON: 内容回不来, 下次
+    `load_raw` 会按设计抛 ValueError 中止构建(不会静默覆盖, 这点是好的),
+    但"中止构建"救不回已经丢掉的那半截。
+    `os.replace` 在同一文件系统上是原子的: 要么全新, 要么原样。
+
+    (2026-09-24 OCR 发现。)
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)     # 成功替换后 tmp 已不存在; 失败时清干净
+        except Exception:                   # noqa: BLE001
+            pass
+
+
+def _fallback_level(entry: dict) -> str:
+    """模型没给出可识别档位时的兜底。
+
+    **有 detail 的当 gloss(不降级), 空的才给 basic。**
+
+    ⚠️ 原来是无条件塞 "basic" —— 那会把已经有 detail 的条目造成错位:
+    level=basic, 而 detail 仍是 80-160 字的整段解析(违反 basic "≤30 字一行速查"
+    的约定); 更糟的是 `todo_short` 会因为 detail 非空跳过它, 错位永久留在库里。
+    (2026-09-24 OCR 发现。)
+
+    抽成独立函数是为了**能单独测** —— 内联在 build() 里的话, 测它需要真 API key
+    加上会读写真实术语库, 而那个文件上次刚被测试写坏过一次。
+    """
+    return "gloss" if (entry.get("detail") or "").strip() else "basic"
 
 
 def collect_terms(course: str | None = None) -> list[str]:
@@ -237,12 +279,24 @@ def build(course: str | None = None, api_key: str | None = None,
             obj = _chat_json(key, model, SYS_CLASSIFY, "\n".join(chunk),
                              1600, 0.2)
             got = 0
+            miss = 0
             for t in chunk:
                 lv = _pick(obj or {}, t)
                 lv = lv.strip().lower() if isinstance(lv, str) else ""
-                terms[t]["level"] = lv if lv in LEVELS else "basic"
+                if lv in LEVELS:
+                    terms[t]["level"] = lv
+                else:
+                    # 模型没给出可识别的档位(键带冠词/改词形/多个候选取不到…)。
+                    # ⚠️ 原来无条件塞 "basic" —— 那会把**已经有 detail 的条目**
+                    # 造成错位状态: level=basic, 而 detail 仍是 80-160 字的整段
+                    # 解析(违反 basic "≤30 字一行速查"的约定); 更糟的是
+                    # `todo_short` 会因为 detail 非空跳过它, 这个错位会**永久留在库里**。
+                    # 现在: 有 detail 就当 gloss(不降级), 空条目才给 basic。
+                    miss += 1
+                    terms[t]["level"] = _fallback_level(terms[t])
                 got += 1
-            print(f"  [{i + len(chunk)}/{len(todo_cls)}] 分类完成")
+            print(f"  [{i + len(chunk)}/{len(todo_cls)}] 分类完成"
+                  + (f"（{miss} 条模型没给可识别档位, 按有无 detail 兜底）" if miss else ""))
         except Exception as e:                            # noqa: BLE001
             print(f"  ⚠ 分类批次失败: {str(e)[:80]}")
 

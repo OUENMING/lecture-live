@@ -366,8 +366,15 @@ def _changelog_summary(version: str, max_lines: int = 6) -> str:
         out = []
         for line in m.group(1).splitlines():
             s = line.strip()
-            if s.startswith(("- ", "* ")):
-                out.append(re.sub(r"\*\*|`", "", s[2:]).strip())
+            # ⚠️ **容错**：不要求每行都以 `- ` 开头。踩过 —— 作者手写时漏了 `- `，
+            # 那几行就被**静默丢掉**，卡片上不出现，而且没有任何提示。
+            # 现在除了空行/小标题/引用/代码块，其余都当条目。
+            if not s or s.startswith(("#", ">", "|", "```")):
+                continue
+            s = re.sub(r"^[-*]\s*", "", s)                # 有就吃掉，没有也认
+            s = re.sub(r"\*\*|`", "", s).strip()
+            if s:
+                out.append(s)
             if len(out) >= max_lines:
                 break
         if out:
@@ -394,6 +401,38 @@ def _changelog_summary(version: str, max_lines: int = 6) -> str:
     return "\n".join(out)
 
 
+def _reorder_log(text: str) -> str:
+    """把每个版本里的 `### 更新看点` 提到最前、`### 升级须知` 紧随其后。
+
+    为什么在**代码里**做、而不是靠作者手写顺序：手写顺序会漂 —— 有的版本先写
+    升级须知、有的先写更新看点，卡片上看到的东西就忽前忽后。这里统一，
+    作者写哪样都行。
+
+    每个版本内按 `### ` 切块，按 (`更新看点`=0 / `升级须知`=1 / 其余=2) **稳定排序**，
+    所以其余小节仍保持作者写的相对顺序。
+    """
+    def rank(title: str) -> int:
+        if "更新看点" in title:
+            return 0
+        if "升级须知" in title:
+            return 1
+        return 2
+
+    out = []
+    for part in re.split(r"(?m)^(?=## \[)", text):
+        m = re.match(r"(## \[[^\n]*\n)(.*)\Z", part, re.S)
+        if not m:                          # 不是版本段（比如空串）→ 原样
+            out.append(part)
+            continue
+        head, body = m.group(1), m.group(2)
+        chunks = re.split(r"(?m)^(?=### )", body)
+        pre = "" if chunks and chunks[0].startswith("### ") else chunks.pop(0)
+        idx = list(enumerate(chunks))
+        idx.sort(key=lambda t: (rank(t[1].split("\n", 1)[0]), t[0]))   # 稳定
+        out.append(head + pre + "".join(c for _, c in idx))
+    return "".join(out)
+
+
 def _changelog_full() -> str:
     """CHANGELOG.md 全文 —— 卡片里的可滚动更新日志用。取不到返回空串。
 
@@ -407,7 +446,7 @@ def _changelog_full() -> str:
     except Exception:                                     # noqa: BLE001
         return ""
     m = re.search(r"^## \[", text, re.M)
-    return text[m.start():] if m else text
+    return _reorder_log(text[m.start():]) if m else text
 
 
 def _changelog_versions() -> list[str]:

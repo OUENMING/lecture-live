@@ -123,7 +123,11 @@ def main():
     agg = {k: {"seg": 0, "empty": 0, "noend": 0, "words": 0, "term": 0} for k in conds}
     for path, a, b in windows:
         src = load_file(path)
-        base = normalize(src[int(a * SR): int(b * SR)])
+        # ⚠️ 2026-09-25 修：原为 `src[int(a*SR): int(b*SR)]`，但 `b` 是**时长**不是
+        # 结束时间（见上面的用法说明）。起始秒非 0 时切出来的是**更短甚至空的**音频，
+        # 而且不报错、屏幕上完全看不出异常 —— 也就是说**本脚本此前所有起始秒非 0 的
+        # 运行，量的都是错的音频**。对比 `hotwords_ab.py:79` 用的是 `(a + b)`，那才对。
+        base = normalize(src[int(a * SR): int((a + b) * SR)])
         for cond in conds:
             x = base
             if denoisers.get(cond) is not None:

@@ -1501,14 +1501,17 @@ class Overlay:
                     ui(set_title, "更新失败")
                     return
                 if not r["ok"]:
+                    # ⚠️ 卡片上**优先用 `user_msg`**（面向用户，无 git 术语）。
+                    # `error` 是给命令行/日志的，里面全是「工作区」「stash」「未提交」
+                    # 这种词 —— 用工具的人看到只会以为哪儿坏了。
+                    # 没有 `user_msg` 的失败路径（断网、分叉…）就退回 `error` 首行。
+                    friendly = (r.get("user_msg") or "").strip()
                     first = (r["error"] or "未知错误").splitlines()[0]
-                    if r.get("blocked"):
-                        # **主动停手**，不是失败 —— 措辞必须不一样，否则用户以为工具坏了
-                        ui(set_status, f"⚠️ {first} 跑 cl update 看详情。", 1.0)
-                        ui(set_title, "需先处理改动")
-                    else:
-                        ui(set_status, f"⚠️ {first}", 1.0)
-                        ui(set_title, "更新失败")
+                    # 前缀只加一次：`friendly` 是完整句子，不加 ⚠️；兜底的 error 首行要加。
+                    ui(set_status, friendly or f"⚠️ {first}", 1.0)
+                    # 「停手」和「失败」的按钮文案必须不一样：前者是**正常的保护**，
+                    # 后者才是出事了。混为一谈会让用户以为工具坏了。
+                    ui(set_title, "这次先不更新" if r.get("blocked") else "更新失败")
                 elif r["skipped"]:
                     ui(set_status, f"已经是最新的（{r['after']}）")
                     ui(set_title, "已是最新")

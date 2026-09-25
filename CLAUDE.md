@@ -10,7 +10,10 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 
 | 分支（什么时候读） | 读哪个 |
 |---|---|
-| 整体架构、模块深度、seam、深化机会 —— 动代码前先读 | `ARCHITECTURE.md` |
+| **架构判断、模块深度、seam** —— 动代码前读，但它是 **2026-09-18 的历史快照**，**正文行号一律别抄** | `ARCHITECTURE.md`（文首有横幅说明哪几条已解决） |
+| 更新机制（分级 / 自动更新 / 卡片） | `docs/PLAN-update-mechanism.md` |
+| 笔记复习层重做 + 课件联动 + 多用户 + UI 动效 | `docs/PLAN-notes-and-ui.md` |
+| 外部评审（功能/架构/技术/思路，含**已知薄弱点**） | `docs/REVIEW-2026-09-24.md` |
 | 启动、命令行参数、课程切换 | `cl` → `main.py` |
 | 主循环、后台线程、队列、UI 路由与落盘分发 | `main.py` |
 | 音频采集、麦克风/系统声、电平归一化 | `capture.py` |
@@ -31,6 +34,12 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 
 ## 本仓库特有雷区
 
+- **发版时必须写 `### 更新方式`**（`CHANGELOG.md` 里该版本下，一行 `auto` 或 `manual`）。
+  它决定这个版本能不能**后台自动更新**：`auto` → 用户关掉工具后自动拉；**不写 = manual**。
+  ⚠️ **唯一需要人判断的地方**，而且**不能靠版本号推**：`3.4.0 → 3.5.0` 是 minor 号却是
+  breaking（模型改必装）。判据是"有没有依赖变化 / 要不要新模型 / 有没有破坏性变更"。
+  ⚠️ 自动更新的日志在 `~/Library/Logs/ClassLive/update.log`（静默失败**只**写这里）；
+  `CLASSLIVE_NO_AUTO_UPDATE=1` 可关掉它（排查用）。
 - **EN 为基准防倒退**：整课精修同时收到直播定稿的 EN 与 ASR 原文，**EN 是基准**；中文只能由 EN 修正，不能反过来改写 EN。
 - **`polish.py` / `tests/` 是在 git 里的**（`git ls-tree -r HEAD` 可验；2026-09-24 核实）。
   ⚠️ 本条曾写成"不在 git 里、clone 后没有" —— 那是 2026-09-18 的旧状态（当时它们确实
@@ -55,11 +64,14 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 |---|---|
 | 未提交改动、未跟踪文件 | `git status --porcelain` |
 | 已落地历史（HEAD 停在哪） | `git log --oneline -15` |
-| 当前执行计划 | `docs/PLAN-ai-explain-qa.md` |
+| 计划在哪 | `ls -t docs/PLAN-*.md`（**别写死文件名** —— 做完的那份会腐坏） |
 
 ## 完成判据
 
 - 默认闸门：`.venv/bin/python tests/test_audit_regressions.py` 全绿（无网络、无模型、毫秒级）。注意 R1/R4 复刻了实现逻辑 —— 绿 ≠ 真实流水线通过。
+- **碰过更新机制**（`update.py` / `cl update` / 卡片按钮）：`.venv/bin/python tests/test_update.py` 全绿。
+  ⚠️ 它**不在**默认闸门里，要单独跑 —— 覆盖 `pull()` 的三条安全边界（脏树停手且**文件数不变** /
+  `--ff-only` 不造 merge / 已最新跳过）与自动更新的分级（默认拒绝 / 跨版本夹 manual 拒绝 / 限频 / 并发锁）。
 - 碰过流水线 / 音频路径：`.venv/bin/python test_pipeline.py <音频> [start] [dur] [speed]` 能跑完。
 - 碰过 `overlay.py` / `transcript_view.py`：`.venv/bin/python probe_scroll.py` 验滚动行为。
 - 报"可用"之前先跑上面命中的那条、贴出输出，再下结论。

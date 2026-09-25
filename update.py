@@ -147,6 +147,27 @@ def check() -> dict:
     return out
 
 
+def _friendly(out: dict) -> str:
+    """把 `pull()` 的失败**派生**成一句面向用户的话（无 git 术语）。
+
+    ⚠️ 为什么派生而不是每条失败路径各自填 `user_msg`：
+    那样新加的失败路径**会忘记填**，卡片上就会冒出「工作区」「stash」这类词。
+    这里只认 `blocked` / 几种已知原因，其余统一给一句通用的话 + 提示看日志。
+    """
+    if not out.get("ok") and out.get("blocked"):
+        return "这个文件夹里有你自己改过的内容，这次就先不更新了（怕覆盖掉）。"
+    err = out.get("error") or ""
+    if "不是 git 仓库" in err:
+        return "这个文件夹不是从网上下载的那种，没法自动更新。"
+    # ⚠️ 分叉要**先**判：它的 error 里也含「拉取失败」，会被下面那条网络判据吃掉，
+    # 于是把"分叉"说成"网络不通" —— 那是误导，两者要做的事完全不同。
+    if "分叉" in err:
+        return "这个文件夹里的版本和网上的对不上了（你自己改过并提交过），这次先不更新。"
+    if "拉取失败" in err or "fetch 失败" in err or "网络" in err:
+        return "网络好像不通，这次先不更新了。过会儿再试就行。"
+    return "这次没能更新成功（详情看 ~/Library/Logs/ClassLive/ 里的日志）。"
+
+
 def pull() -> dict:
     """真正应用更新。**先检查再动手**，任何一条边界不满足就返回 `ok=False`。
 
@@ -155,19 +176,22 @@ def pull() -> dict:
     """
     out = {"ok": False, "error": "", "skipped": False, "blocked": False,
            "before": _version(), "after": _version(), "commits": 0, "log": [],
-           "reqs_changed": False}
+           "reqs_changed": False, "user_msg": ""}
     if not is_repo():
         out["error"] = "这不是 git 仓库，没法更新。"
-        return out
+        return {**out, "user_msg": _friendly(out)}
     # ⚠️ 边界①：脏就停手。放在 fetch 之前 —— 连探测都不该动用户的工作区。
     # `blocked=True` 与"失败"分开：这是**主动拒绝**，不是出错。UI 措辞要不一样
     # （"需先处理改动" 而不是 "更新失败"），否则用户以为工具坏了。
     dirty = _git("status", "--porcelain")[1]
     if dirty:
         out["blocked"] = True
+        # `error` 给开发者/命令行看（含 git 术语）；`user_msg` 给**卡片**看。
+        # 面向用户那条**不许出现「工作区」「stash」「未提交」**这类词 ——
+        # 用工具的人不知道 git，看到这些只会以为哪儿坏了。
         out["error"] = ("工作区有未提交的本地改动，已停手（绝不 stash、绝不丢弃）。\n"
                         + "\n".join("    " + x for x in dirty.splitlines()[:8]))
-        return out
+        return {**out, "user_msg": _friendly(out)}
 
     head_before = _git("rev-parse", "--short", "HEAD")[1]
     reqs_before = _reqs_hash()
@@ -175,7 +199,7 @@ def pull() -> dict:
     rc, _, err = _git("fetch", "--quiet")
     if rc != 0:
         out["error"] = f"拉取失败（网络？）：{err or rc}"
-        return out
+        return {**out, "user_msg": _friendly(out)}
 
     rc, b, _ = _git("rev-list", "--count", "HEAD..@{u}")
     behind = int(b) if b.isdigit() else 0
@@ -191,7 +215,7 @@ def pull() -> dict:
                         "    · 本地和远程**分叉**了（你自己在本地提交过）—— 需要你自己决定\n"
                         "      `git rebase origin/main` 还是 `git merge origin/main`\n"
                         f"    原文：{se or so or rc}")
-        return out
+        return {**out, "user_msg": _friendly(out)}
 
     head_after = _git("rev-parse", "--short", "HEAD")[1]
     out["after"] = _version()
@@ -243,6 +267,7 @@ def auto_update() -> dict:
     """
     out = {"ok": False, "skipped": False, "error": "", "reason": "", "after": ""}
     lock = STATE_DIR / "update.lock"
+    held = False          # ⚠️ **只删自己拿到的锁** —— 见下面的 finally
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
     except Exception:                                     # noqa: BLE001
@@ -258,6 +283,7 @@ def auto_update() -> dict:
             if lock.exists() and (time.time() - lock.stat().st_mtime) < LOCK_STALE_S:
                 return {**out, "skipped": True, "reason": "已有更新在跑"}
             lock.write_text(str(os.getpid()), encoding="utf-8")
+            held = True                               # 从这里起，锁才是**我们的**
         except Exception:                                 # noqa: BLE001
             pass
         try:
@@ -307,16 +333,32 @@ def auto_update() -> dict:
         if r.get("error"):
             msg += f"  err={r['error'][:160]}"
         _log(msg)
+        # ⚠️ 一并透传 `user_msg` —— 否则正常路径与异常路径的返回结构不一致，
+        # 上层（卡片）复用这个返回值时，失败文案会退回含 git 术语的 `error`。
+        # (2026-09-25 ocr review 发现)
         return {**out, "ok": r["ok"], "after": r.get("after", ""),
-                "error": r.get("error", "")}
+                "error": r.get("error", ""), "user_msg": r.get("user_msg", "")}
     except Exception as e:                                # noqa: BLE001
         _log(f"自动更新异常：{type(e).__name__}: {e}")
-        return {**out, "error": str(e)}
+        out["error"] = str(e)
+        return {**out, "user_msg": _friendly(out)}
     finally:
-        try:
-            lock.unlink(missing_ok=True)
-        except Exception:                                 # noqa: BLE001
-            pass
+        # ⚠️ **只删还属于自己那把锁。**
+        #
+        # 两个坑，都是实测/复审发现的：
+        #   ① 无条件 unlink 会删掉**别的进程持有的锁**：进程 B 因"已有更新在跑"早退时
+        #      并没持锁，却把 A 的锁删了 -> 进程 C 立刻能拿到 -> **两个更新器同时 pull**。
+        #      (2026-09-25 全量 OCR 发现)
+        #   ② 光记一个 `held` 标志**还不够**：它只证明"我写过锁"，不证明"锁现在还是我的"。
+        #      若 A 持锁超过 STALE 被 B 抢走，A 的 finally 仍会删掉 B 的锁。
+        #      (同日 ocr review 发现)
+        # 所以按**锁里的内容**核对：锁里存的就是 pid，是我的才删。
+        if held:
+            try:
+                if lock.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                    lock.unlink(missing_ok=True)
+            except Exception:                            # noqa: BLE001
+                pass
 
 
 def spawn_auto_update() -> bool:

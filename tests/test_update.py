@@ -180,10 +180,37 @@ print("\n--- B7 并发锁 ---")
 tmp, seed, clone = new_world()
 release(seed, "0.0.2", "auto")
 update.STATE_DIR.mkdir(parents=True, exist_ok=True)
-(update.STATE_DIR / "update.lock").write_text("99999", encoding="utf-8")
+lk = update.STATE_DIR / "update.lock"
+lk.write_text("99999", encoding="utf-8")          # 假装**别的进程**持有锁
 r = update.auto_update()
 check("B7 有锁 -> 跳过", bool(r.get("skipped")) and "跑" in r.get("reason", ""),
       f"reason={r.get('reason', '')}")
+# ⚠️ 关键断言：早退时**绝不能删掉别人的锁**。
+# 漏了这条，就抓不住"无条件 unlink 把别人锁删了 -> 两个更新器同时 pull"那个 bug
+# （2026-09-25 全量 OCR 发现；当时 B7 只测了"跳过"，所以没拦住）。
+check("B7b 早退时**不动**别人的锁", lk.exists(),
+      f"锁文件还在={lk.exists()}（旧代码会把它删掉）")
+lk.unlink(missing_ok=True)
+
+# B7c: 锁**被别人抢走**后，也不能删别人的。
+# ⚠️ 光记 `held` 标志不够 —— 它只证明"我写过锁"，不证明"锁现在还是我的"。
+# (2026-09-25 ocr review 发现)
+tmp2, seed2, clone2 = new_world()
+release(seed2, "0.0.2", "auto")
+update.STATE_DIR.mkdir(parents=True, exist_ok=True)
+lk2 = update.STATE_DIR / "update.lock"
+# 让 auto_update 拿到锁，但桩掉 pull() 使其在持锁期间"被别人抢走"
+_real_pull = update.pull
+def _steal(*a, **kw):
+    lk2.write_text("99999", encoding="utf-8")      # 模拟别的进程抢走
+    return {"ok": True, "skipped": True, "after": "0.0.1", "error": "",
+            "commits": 0, "reqs_changed": False}
+update.pull = _steal
+update.auto_update()
+update.pull = _real_pull
+check("B7c 锁被抢走后**不删**别人的锁", lk2.exists() and lk2.read_text().strip() == "99999",
+      f"锁内容={lk2.read_text().strip()!r}（期望 '99999'，即抢走者的 pid）")
+lk2.unlink(missing_ok=True)
 
 print("\n--- B8 没有 upstream ---")
 tmp = ROOT / "noup"

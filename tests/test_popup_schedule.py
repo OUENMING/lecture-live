@@ -55,9 +55,9 @@ def world(version, *, seen=None, skip=None):
     #    没法测"出了新版本" —— 而用不存在的版本号会让 todo 算空（我第一版就这么错的）。
     # 3.6.5 **故意不给任何小节** -> 用来测"看点为空不弹"那条守卫。
     chunks = []
-    for v in ("3.7.0", "3.6.5", "3.6.4", "3.6.3", "3.6.2", "3.6.1", "3.6.0"):
-        if v == "3.6.5":
-            chunks.append("## [3.6.5] - 2026-01-01\n\n（这个版本故意没有任何小节）\n\n")
+    for v in ("3.7.0", "3.6.9", "3.6.5", "3.6.4", "3.6.3", "3.6.2", "3.6.1", "3.6.0"):
+        if v == "3.6.9":
+            chunks.append("## [3.6.9] - 2026-01-01\n\n（这个版本故意没有任何小节）\n\n")
         else:
             chunks.append(f"## [{v}] - 2026-01-01\n\n### 更新看点\n\n- {v} 的看点\n\n")
     (d / "CHANGELOG.md").write_text("# Changelog\n\n" + "".join(chunks), encoding="utf-8")
@@ -107,15 +107,63 @@ run("I 环境变量关 -> 不弹", "3.6.3", seen="3.6.2", env_off=True, expect=F
 
 print("\nG：看点为空 -> 不弹（防空白卡片）")
 # 3.6.5 在 fixture 里**故意没写「更新看点」也没有任何小节** -> summary 应为空
-d = world("3.6.5", seen="3.6.4")
+d = world("3.6.9", seen="3.6.5")
 m = load_main_isolated(d)
-summ = m._whatsnew_body(m._prev_version("3.6.5"), "3.6.5")
+summ = m._whatsnew_body(m._prev_version("3.6.9"), "3.6.9")
 r = m._whatsnew_payload()
 ok_g = (not (summ or "").strip()) and (r is None)
 RESULTS.append(("G 看点为空时不弹", ok_g))
-print(f"  _whatsnew_body(prev=3.6.4, cur=3.6.5) = {summ!r}")
+print(f"  _whatsnew_body(prev=3.6.5, cur=3.6.9) = {summ!r}")
 print(f"  _whatsnew_payload() = {r!r}")
 print(f"  {'✅' if ok_g else '❌'} 空看点被拦住，没有弹出空白卡片")
+
+print("\n=== ocr review 发现的四个回归（2026-09-25）===")
+
+# J 旧格式 .update-skip = "1" —— 老用户本地会残留，不能让 todo 退化成"全部版本"
+d = world("3.6.5", seen="3.6.4", skip="1")
+m = load_main_isolated(d)
+summ = m._whatsnew_body(m._prev_version("3.6.5"), "3.6.5")
+r = m._whatsnew_payload()
+mm = dict(RESULTS)
+ok_j = r is not None and "3.6.3" not in r["summary"] and "3.6.0" not in r["summary"]
+RESULTS.append(("J 旧格式 skip='1' 不会报出全部历史", ok_j))
+print(f"  {'✅' if ok_j else '❌'} J 旧格式 skip='1'")
+print(f"        summary = {r['summary']!r}" if r else "        （不弹）")
+print(f"        期望：只含 3.6.5，不含 3.6.3/3.6.0 这些无关旧版")
+
+# K 跨版本合并：seen=3.6.0 跳到 3.6.5，必须报中间的
+d = world("3.6.5", seen="3.6.0")
+m = load_main_isolated(d)
+r = m._whatsnew_payload()
+s = r["summary"] if r else ""
+ok_k = all(v in s for v in ("3.6.4", "3.6.3", "3.6.2", "3.6.1"))
+RESULTS.append(("K 跨版本升级必须合并中间的版本", ok_k))
+print(f"\n  {'✅' if ok_k else '❌'} K 跨版本合并（seen=3.6.0 -> cur=3.6.5）")
+print(f"        summary = {s!r}")
+print(f"        期望：含 3.6.1 / 3.6.2 / 3.6.3 / 3.6.4")
+
+# L seen 不在 CHANGELOG 里 -> 只报当前版，不能退化成"全部"
+d = world("3.6.5", seen="9.9.9")
+m = load_main_isolated(d)
+r = m._whatsnew_payload()
+s = (r["summary"] if r else "")
+ok_l = ("3.6.0" not in s) and ("3.6.1" not in s)
+RESULTS.append(("L seen 不在库里时只报当前版", ok_l))
+print(f"\n  {'✅' if ok_l else '❌'} L seen 不在库里（seen=9.9.9）")
+print(f"        summary = {s!r}")
+
+# M 全新 clone 的用户必须**迟早**能弹出来（首次不弹，但 seen 要种下去）
+d = world("3.6.5")
+m = load_main_isolated(d)
+r1 = m._whatsnew_payload()          # 首次 -> 不弹
+seeded = (d / ".update-seen").exists()
+r2 = m._whatsnew_payload()          # 第二次 -> 应当弹（seen 已种下）
+ok_m = (r1 is None) and seeded and (r2 is not None)
+RESULTS.append(("M 首次安装种下 seen，第二次能弹", ok_m))
+print(f"\n  {'✅' if ok_m else '❌'} M 全新 clone：首次不弹 -> 种 seen -> 第二次弹")
+print(f"        首次={'弹' if r1 else '不弹'}  .update-seen 被种下={seeded}"
+      f"  第二次={'弹' if r2 else '不弹'}")
+print(f"        ⚠️ 不种的话：文件永远不存在 -> 每次启动都命中\"首次安装\" -> **永远不弹**")
 
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}\n{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

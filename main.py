@@ -510,7 +510,10 @@ def _whatsnew_body(seen: str, cur: str, max_lines: int = 7) -> str:
     if not vers or cur not in vers:
         return _changelog_summary(cur, max_lines)
     lo = vers.index(cur)                  # cur 的位置（越小越新）
-    hi = vers.index(seen) if seen in vers else len(vers)
+    # ⚠️ `seen` 不在库里时**收敛到只报当前版**（`lo + 1`），不能退化成 `len(vers)`——
+    # 那会把 cur 及更旧的版本全算成"看点"（2026-09-25 ocr review 发现；
+    # 旧实现在这里本来有守卫，本次改动删掉了）。
+    hi = vers.index(seen) if seen in vers else lo + 1
     todo = vers[lo:hi]                    # ⚠️ 只取 (seen, cur]；比 cur 新的在 vers[:lo]
     if not todo:
         return ""
@@ -593,6 +596,13 @@ def _whatsnew_payload() -> dict | None:
         if skip == cur:                                   # ① 勾了「本版本不再提示」
             return None
         if not seen and not skip:                         # ② 首次安装
+            # ⚠️ **必须在这里把 `seen` 种下去**，否则全新 clone 的用户**永远弹不出来**：
+            # `.update-seen` 全仓库只有本函数会创建，而这个分支直接 return 了 ->
+            # 文件永远不存在 -> 每次启动都命中"首次安装"（2026-09-25 ocr review 发现，
+            # 是本次改动引入的回归；旧实现在 return 之前**无条件**写这个文件）。
+            # 补种不影响"每次启动都弹"——弹不弹只看 skip 与降级。
+            with open(os.path.join(root, ".update-seen"), "w", encoding="utf-8") as f:
+                f.write(cur)
             return None
         if seen and _ver_key(cur) < _ver_key(seen):       # ③ 降级
             return None
@@ -603,7 +613,17 @@ def _whatsnew_payload() -> dict | None:
         # 优先用 `skip`（他明确表示看过那个版本）；没有就用 **库里 cur 的前一版**。
         # ⚠️ 不能用 `seen` 当起点：它每次弹完都被改写成 cur，起点会跟着往后跑，
         #    第二次弹就变成"从 cur 到 cur" -> 空内容。用"前一版"则**每次都一样**。
-        start = skip if (skip and _ver_key(skip) < _ver_key(cur)) else _prev_version(cur)
+        # ⚠️ 候选必须**在 CHANGELOG 里**且**比 cur 旧**，两个条件缺一不可：
+        #   · 不在库里（老格式的 `.update-skip = "1"`、被手工改过的 seen、
+        #     或 CHANGELOG 里已删掉的版本号）会让 `_whatsnew_body` 的上界退化成
+        #     「倒数到最旧」-> 卡片混进一堆与本机版本无关的旧条目。
+        #   · 比 cur 新不是"没看过"。
+        # 取 **min**（较旧的那个）：`skip` 是用户明说看过的、`seen` 是自动记的，
+        # 宁可他多看几条，也不要漏掉破坏性变更。
+        _vers = _changelog_versions()
+        cand = [v for v in (skip, seen)
+                if v in _vers and _ver_key(v) < _ver_key(cur)]
+        start = min(cand, key=_ver_key) if cand else _prev_version(cur)
         summary = _whatsnew_body(start, cur)
         if not (summary or "").strip():                   # ⑤ 看点为空（防空白卡片）
             return None

@@ -493,22 +493,26 @@ def _auto_update_on_exit() -> None:
 
 
 def _whatsnew_body(seen: str, cur: str, max_lines: int = 7) -> str:
-    """该给用户看的内容。
+    """该给用户看的内容 —— **`(seen, cur]` 这个区间**，不含比 `cur` 更新的版本。
 
     ⚠️ **必须跨版本合并** —— 有人会从 3.4.0 直接跳到 3.6.0。只看 `cur` 的话，
     他会**永远看不到 3.5.0 那条破坏性变更**（"两个 ASR 模型改为必装、
     第一次要手动 git pull"）—— 恰恰是跳过版本的人最需要看到的那一条。
 
-    取法: 从最新往下数，直到遇到 `seen` 为止；那之间的所有版本都算"他没看过的"。
-    多版本时每行前面标版本号，并把带 ⚠️ 的（要先做/破坏性）排到最前。
+    ⚠️ **上界必须是 `cur`，不能"从最新往下数到 seen"**。第一版就是那么写的
+    （`vers[:vers.index(seen)]`），结果是：**只要 CHANGELOG 里有比 `cur` 更新的
+    版本，它就会被报进来** —— 用户会看到自己**还没装的版本**的说明。
+    (2026-09-25 隔离测试发现：`(3.6.4, 3.6.5)` 报出了 `3.7.0` 的看点。)
+
+    多版本时每行前面标版本号；带 ⚠️ 的（破坏性/要先做的）排最前。
     """
-    vers = _changelog_versions()
-    if not vers:
+    vers = _changelog_versions()          # 新到旧
+    if not vers or cur not in vers:
         return _changelog_summary(cur, max_lines)
-    if seen not in vers:                # seen 未知(比库里最新还新/被改过) -> 只报当前版
-        return _changelog_summary(cur, max_lines)
-    todo = vers[:vers.index(seen)]      # seen 之前的都是新的
-    if not todo:                        # seen 已是最新 -> 没有可报的
+    lo = vers.index(cur)                  # cur 的位置（越小越新）
+    hi = vers.index(seen) if seen in vers else len(vers)
+    todo = vers[lo:hi]                    # ⚠️ 只取 (seen, cur]；比 cur 新的在 vers[:lo]
+    if not todo:
         return ""
     if len(todo) == 1:
         return _changelog_summary(todo[0], max_lines)
@@ -530,8 +534,8 @@ def _disp_w(s: str) -> int:
     return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
 
 
-def _whatsnew_payload() -> tuple[str, str] | None:
-    """该不该弹「本次更新」卡片；该的话返回 (版本, 摘要)，否则 None。
+def _whatsnew_payload() -> dict | None:
+    """该不该弹「本次更新」卡片；该的话返回 payload dict，否则 None。
 
     ⚠️ **只判断、不弹** —— 弹的动作交给 UI 层：
       · 悬浮窗模式 → `overlay.show()` 里用**非模态毛玻璃卡片**（见 whatsnew.py）；
@@ -539,37 +543,108 @@ def _whatsnew_payload() -> tuple[str, str] | None:
     为什么不在这里弹：① 这里是 `run()` 第一行，那时 app 的 activation policy 还是
     `Regular`（实测），NSAlert 会带 Python 的图标 + 在 Dock 里冒出来；② 模态框会
     卡住启动 —— 而这个工具是**上课录课**用的。
+
+    ## 弹窗节奏（2026-09-25 按作者要求重定，逐条都有实测/调研依据）
+
+    **不勾「本版本不再提示」→ 每次启动都弹**，直到勾了它。
+    勾了 → 这个版本彻底不弹；出了新版本 → 重新开始弹。如此重复。
+
+    推断「上次看过哪个版本」= `max(.update-seen, .update-skip)`：
+      · `.update-seen`  —— 每次弹完都写当前版本（只用来算"从哪报起"）
+      · `.update-skip`  —— 勾了才写，值是**版本号**（不是 `1`），所以新版本自动失效
+
+    ⚠️ **三道不能省的判据**（每一条都对应一个实测出来的坏行为）：
+
+    ① **比大小，不是比不等**（`cur <= newest_seen` 就不弹）。
+       业界用 `lastVersion < version`；Electron 的 `autoUpdater` 默认
+       `allowAnyVersion=false`（默认不允许降级）。**用 `!=` 会让降级也弹。**
+
+    ② **首次安装不弹**（`newest_seen` 为空）。那不是"更新"是全新安装，
+       对着一条长长的 changelog 弹卡片没有意义。
+
+    ③ **看点为空就不弹**（`summary` 为空 → 返回 None）。
+       降级且 CHANGELOG 里没有该版本的看点时会走到这里 ——
+       **实测过：会弹出一张要点空白的卡片**（`_whatsnew_body` 返回 `''`）。
+
+    ⚠️ **写在 card 之前**：`.update-seen` 在**构造 payload 时**就写，
+    所以即使 UI 层构造失败，也不会每次启动重复算 —— 但这个不影响"每次弹"，
+    因为弹不弹由 `skip` 决定，不看 `seen`。
     """
     if os.environ.get("CLASSLIVE_NO_UPDATE_CHECK"):
         return None
     try:
         root = os.path.dirname(os.path.abspath(__file__))
-        # 勾过「以后不再提示」-> 永不再弹
-        if os.path.exists(os.path.join(root, ".update-skip")):
-            return None
         ver_file = os.path.join(root, "VERSION")
         cur = (open(ver_file, encoding="utf-8").read().strip()
                if os.path.exists(ver_file) else "?")
         if cur == "?":
             return None
-        seen_file = os.path.join(root, ".update-seen")
-        seen = (open(seen_file, encoding="utf-8").read().strip()
-                if os.path.exists(seen_file) else "")
-        if cur == seen:
+
+        def _read(name: str) -> str:
+            f = os.path.join(root, name)
+            return (open(f, encoding="utf-8").read().strip()
+                    if os.path.exists(f) else "")
+
+        seen, skip = _read(".update-seen"), _read(".update-skip")
+
+        # ---- 弹不弹：四个"不弹"的理由，其余都弹 ----
+        # ⚠️ `seen` **只用来判降级**，绝不用来判"看过了" —— 否则弹完写回 seen，
+        #    下次就变成"已看过" -> **把"每次启动都弹"挡死**（第一版就是这么错的）。
+        if skip == cur:                                   # ① 勾了「本版本不再提示」
             return None
-        # 第一次跑（seen 为空）不弹 —— 那不是"更新"是全新安装，
-        # 对着一条长长的 changelog 弹卡片没有意义。
-        # ⚠️ 注意这里传的是 `seen` 而不是只看 `cur`：跨版本升级要把中间的版本一起报
-        # （有人会从 3.4.0 直接跳到 3.6.0，那中间的破坏性变更不能漏）。
-        payload = ({"version": cur, "date": _changelog_date(cur),
-                    "summary": _whatsnew_body(seen, cur),
-                    "log": _changelog_full()}
-                   if seen else None)
-        with open(seen_file, "w", encoding="utf-8") as f:   # 记下来，别重复弹
+        if not seen and not skip:                         # ② 首次安装
+            return None
+        if seen and _ver_key(cur) < _ver_key(seen):       # ③ 降级
+            return None
+        if skip and _ver_key(cur) <= _ver_key(skip):      # ④ 勾的是更新的版本
+            return None
+
+        # ---- 起点：报"从哪一版到这一版" ----
+        # 优先用 `skip`（他明确表示看过那个版本）；没有就用 **库里 cur 的前一版**。
+        # ⚠️ 不能用 `seen` 当起点：它每次弹完都被改写成 cur，起点会跟着往后跑，
+        #    第二次弹就变成"从 cur 到 cur" -> 空内容。用"前一版"则**每次都一样**。
+        start = skip if (skip and _ver_key(skip) < _ver_key(cur)) else _prev_version(cur)
+        summary = _whatsnew_body(start, cur)
+        if not (summary or "").strip():                   # ⑤ 看点为空（防空白卡片）
+            return None
+        payload = {"version": cur, "date": _changelog_date(cur),
+                   "summary": summary, "log": _changelog_full()}
+        with open(os.path.join(root, ".update-seen"), "w", encoding="utf-8") as f:
             f.write(cur)
         return payload
     except Exception:                                     # noqa: BLE001
         return None
+
+
+def _prev_version(cur: str) -> str:
+    """CHANGELOG 里 `cur` 的**前一版**（比它旧的那个）。取不到就返回 `cur` 自己。
+
+    用途见 `_whatsnew_payload`：弹窗的起点必须是**稳定的**，不能随
+    `.update-seen` 往后跑。
+    """
+    vers = _changelog_versions()
+    if cur in vers:
+        i = vers.index(cur)
+        if i + 1 < len(vers):
+            return vers[i + 1]
+    return cur
+
+
+def _ver_key(v: str) -> tuple:
+    """版本号排序键。`3.10.0` 必须排在 `3.9.0` 之后 —— 纯字符串比不出来。
+
+    非数字段退化成 0，所以 `3.6.3` vs `3.6.3-rc1` 这类也**不会抛异常**。
+    """
+    parts = []
+    for seg in (v or "").split("."):
+        num = ""
+        for ch in seg:
+            if ch.isdigit():
+                num += ch
+            else:
+                break
+        parts.append(int(num) if num else 0)
+    return tuple(parts)
 
 
 def _print_whatsnew_box(version: str, date: str, summary: str,

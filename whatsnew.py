@@ -267,7 +267,13 @@ def build(version: str, summary: str, date: str = "", log: str = "",
         def on_close(_=None):
             try:
                 if state_holder["skip"] and flag_path:
-                    flag_path.write_text("1", encoding="utf-8")
+                    # ⚠️ 写**版本号**而不是 "1"：跳过只对**这个版本**生效，
+                    # 出了新版本要重新弹（作者 2026-09-25 定的节奏）。
+                    # 写 "1" 会让它变成**永久关闭**，而且没有恢复入口 ——
+                    # VS Code 就是栽在这上面（issue #109912：误点后只能删掉整个
+                    # workspace 或全局状态，维护者 closed as out-of-scope，
+                    # 社区被迫去教改 state.vscdb 数据库）。
+                    flag_path.write_text(version, encoding="utf-8")
             except Exception:                             # noqa: BLE001
                 pass
             try:
@@ -294,7 +300,7 @@ def build(version: str, summary: str, date: str = "", log: str = "",
 
         chk = NSButton.alloc().initWithFrame_(NSMakeRect(PAD, fy + 4, 190.0, 22.0))
         chk.setButtonType_(NSButtonTypeSwitch)
-        chk.setTitle_("以后不再提示")
+        chk.setTitle_("本版本不再提示")
         chk.setFont_(NSFont.systemFontOfSize_(12.0))
         try:
             chk.setContentTintColor_(NSColor.whiteColor().colorWithAlphaComponent_(0.85))
@@ -387,5 +393,9 @@ def seen_flag_path() -> pathlib.Path:
 
 
 def skip_flag_path() -> pathlib.Path:
-    """勾了「以后不再提示」就写这个文件 —— 之后永不再弹。"""
+    """勾了「本版本不再提示」就写这个文件，**内容是版本号**。
+
+    ⚠️ 存版本号而不是 `1`：跳过只对**该版本**生效，新版本会重新弹。
+    判定在 `main._whatsnew_payload`（它取 `max(.update-seen, .update-skip)`）。
+    """
     return pathlib.Path(__file__).with_name(".update-skip")

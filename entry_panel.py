@@ -59,6 +59,10 @@ BODY_SCREEN_FRACTION = 0.60
 
 # 卡片里的三个高度
 L1_H, L2_H, BTN_H = 18.0, 16.0, 24.0
+CARD_GAP_V = 8.0       # 卡片内：按钮块 ↔ 文字块（`card_height` 的算式里有它）
+# 结果列表（plan §3.6）：跑完在**卡片里**展开，不是一个弹窗
+RESULT_LEAD = 26.0     # 「本次加了 N 个」那一行
+RESULT_ROW = 22.0      # 一个词一行
 
 # ── 颜色 ────────────────────────────────────────────────────────────
 # ⚠️ **深色模式的卡片配色没有实测过**（System Settings 跟随系统外观，本机是浅色，
@@ -82,7 +86,10 @@ class Handles(typing.NamedTuple):
     set_status: typing.Callable[..., None]
 
 
-S = {"panel": None}          # 同进程只允许一个（菜单栏/双击两条入口可能都来）
+S = {                              # 同进程只允许一个面板（菜单栏/双击两条入口可能都来）
+    "panel": None,
+    "result": {},                  # 课号 -> {added, not_added, failed, removed, undo}
+}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -141,6 +148,56 @@ def body_height(n: int, screen_h: float) -> float:
     return min(natural, cap)
 
 
+def kept_added(entry) -> list[str]:
+    """结果列表里**还在表里**的那些（已删的不再列）。
+
+    ⚠️ 头部那个「本次加了 N 个」和这个列表**必须同源** —— 两处各算一遍迟早对不上，
+       而计数撒谎会直接让用户失去信任（`PLAN-entry-panel.md` §2.5 C 的
+       Anki「18 added, **148 updated**」与 LingQ「says 1 new word but it does not」两次）。
+    """
+    e = entry or {}
+    gone = set(e.get("removed") or ())
+    return [t for t in (e.get("added") or []) if t not in gone]
+
+
+def result_header(entry) -> str:
+    """结果区那一行。**计数从 `kept_added` 来**，不另存一个数、也不另算一遍。"""
+    e = entry or {}
+    parts = [f"本次加了 {len(kept_added(e))} 个"]
+    if e.get("removed"):
+        parts.append(f"已删 {len(e['removed'])}")
+    if e.get("not_added"):
+        parts.append(f"另有 {len(e['not_added'])} 个没加")
+    if e.get("failed"):
+        parts.append(f"⚠️ {len(e['failed'])} 个文件失败")
+    return "　·　".join(parts)
+
+
+def card_height(entry=None) -> float:
+    """卡片高度 —— **按内容累加推导，不是抄一个数**。
+
+    ⚠️ 它必须和 `_make_card` 里那些 `y` 用**同一组常数**推出来。抄一个固定高度的话，
+       加了结果列表之后内容会**溢出卡片**，而且**不报错**（只是画到框外面）。
+
+    ⚠️⚠️ **`card_height(None) == CARD_H` 那条断言不是锁** —— 我一开始以为它是，
+       实测：把整个算式换成 `h = 88.0`（写死）**照样全绿**，因为硬编码的 88 恰好
+       等于正确值。真正的锁在 `tests/test_panel.py`：**把卡片建出来，断言没有子视图
+       超出 `card_height(entry)`** —— 那条不管你常数怎么改都成立。
+
+    无结果时的算式（= `CARD_H` 那个 88）：
+        上内边距 10 + 两行标题（18 + 16+2） + 块间距 8 + 按钮 24 + 下内边距 10
+    """
+    h = (CARD_PAD                                     # 上
+         + L1_H + L2_H + 2.0                          # 课号+课名 / 准备度
+         + CARD_GAP_V                                 # 结果块与文字块之间
+         + BTN_H                                      # 按钮（锚在底部）
+         + CARD_PAD)                                  # 下
+    if entry is not None:
+        n = len(kept_added(entry)) + (1 if entry.get("undo") else 0)
+        h += RESULT_LEAD + n * RESULT_ROW
+    return h
+
+
 def progress_text(stage: str, done: int, total: int) -> str:
     """进度文案。stage 是 `prep` 给的机器名，这里只做**显示**。
 
@@ -189,8 +246,23 @@ def _button_class():
 
     def act(self, _sender):
         fn = getattr(self, "_fn", None)
-        if fn is not None:
+        if fn is None:
+            return
+        try:
             fn()
+        except Exception as e:                            # noqa: BLE001
+            # ⚠️⚠️ **AppKit 会吞掉 action 里的异常** —— 症状是「点了没反应」，
+            #     和「按钮根本没接上」一模一样，而且**单元测试全绿也照样发生**
+            #     （它们测的是被调用的那个函数，不是接线）。
+            #     2026-09-26 实测踩到：`_make_card` 调 `on_delete(t)` 只传了词，
+            #     而 `do_delete(course, term)` 要两个 → `TypeError` 被吞 →
+            #     **点「删」静默无效**。端到端点一下才发现。
+            #     → 所以这条路径**出声**，代价只是出错时多打一行。
+            import traceback
+            print(f"[entry_panel] 按钮动作出错（点了不会有反应）："
+                  f"{type(e).__name__}: {e}", flush=True)
+            if os.environ.get("CLASSLIVE_DEBUG"):
+                traceback.print_exc()
 
     return objc_own.own("EntryBtn", NSObject, {"act_": act})
 
@@ -206,8 +278,9 @@ def _target(fn):
     return t
 
 
-def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width):
-    """一张卡 = 一个落点 + 三行内容。"""
+def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width,
+               entry=None, on_delete=None, on_undo=None):
+    """一张卡 = 一个落点 + 三行内容（+ 跑过之后的结果列表）。"""
     from AppKit import NSButton, NSColor, NSFont, NSMakeRect
 
     holder: dict = {}
@@ -235,7 +308,8 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width)
 
     view = panel.make_drop_target(_enter, _drop, _exit)
     holder["view"] = view
-    view.setFrame_(NSMakeRect(0.0, 0.0, width, CARD_H))
+    # ⚠️ 高度用 `card_height(entry)`，**不是 `CARD_H`** —— 有结果列表的卡会更高。
+    view.setFrame_(NSMakeRect(0.0, 0.0, width, card_height(entry)))
     view._course = r.course
     view._tag = r.course
     view._targets = []
@@ -248,17 +322,20 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width)
     _bg(CARD_FILL_A)
 
     inner_w = width - 2 * CARD_PAD
-    top = CARD_H - CARD_PAD
+    # ⚠️⚠️ **从上往下排。** 卡片是**非翻转**坐标（y 向上），所以「往下」= y **递减**。
+    #    第一版让结果块从卡片底部往上长 —— 于是**列表是倒的**（最后加的排最上面），
+    #    而且**头部跑到了列表下面**（2026-09-26 跑第一遍看出来的）。
+    #    → 凡是「按阅读顺序排」的内容块，一律从顶部往下算，别从底部往上堆。
+    y = card_height(entry) - CARD_PAD
+    y -= L1_H
     view.addSubview_(panel.make_label(
-        card_title(r),
-        NSMakeRect(CARD_PAD, top - L1_H, inner_w, L1_H), 13.0, bold=True))
+        card_title(r), NSMakeRect(CARD_PAD, y, inner_w, L1_H), 13.0, bold=True))
+    y -= (L2_H + 2.0)
     view.addSubview_(panel.make_label(
-        readiness_line(r),
-        NSMakeRect(CARD_PAD, top - L1_H - L2_H - 2.0, inner_w, L2_H), 11.0, alpha=DIM))
+        readiness_line(r), NSMakeRect(CARD_PAD, y, inner_w, L2_H), 11.0, alpha=DIM))
 
-    def mk(title, x, action):
-        b = NSButton.alloc().initWithFrame_(
-            NSMakeRect(x, CARD_PAD, 92.0, BTN_H))
+    def mk(title, x, action, y=CARD_PAD, w=92.0, h=BTN_H):
+        b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
         b.setTitle_(title)
         b.setBezelStyle_(1)                             # rounded
         b.setFont_(NSFont.systemFontOfSize_(12.0))
@@ -268,6 +345,7 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width)
         view._targets.append(t)
         return b
 
+    # 按钮**锚在卡片底部** —— 它们不是阅读顺序的一部分，是固定动作区。
     # ⚠️ 「开始上课」**只在调用方能兑现时才建**。
     #    `on_start is None` = 这个面板是**上课中**从菜单栏打开的，那时再「开始一节课」
     #    没有意义、而且有害（会去写 `.course` 并试着再起一份录音）。
@@ -277,6 +355,39 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width)
         view.addSubview_(mk("开始上课", x, lambda: on_start(r.course)))
         x += 92.0 + 8.0
     view.addSubview_(mk("选择文件…", x, lambda: on_prep(r.course)))
+
+    # ── 结果列表（plan §3.6）────────────────────────────────────────
+    # ⚠️ **就在卡片里，不是一个弹窗** —— 这是相对「一个文件夹」的真优势，
+    #    也是调研里那条真空（没有一个产品把「导入结果 + 回头删」做进主界面）。
+    if entry is not None:
+        y -= CARD_GAP_V
+        y -= RESULT_LEAD
+        view.addSubview_(panel.make_label(
+            result_header(entry),
+            NSMakeRect(CARD_PAD, y + 6.0, inner_w, RESULT_LEAD - 6.0), 11.0, alpha=DIM))
+        for t in kept_added(entry):
+            y -= RESULT_ROW
+            view.addSubview_(panel.make_label(
+                t, NSMakeRect(CARD_PAD, y + 3.0, inner_w - 52.0, 16.0), 12.0))
+            # ⚠️ 「删」**不做确认框**（HIG › Alerts 逐字：「Avoid displaying alerts for
+            #    common, undoable actions, even when they're destructive」；理由是同一条
+            #    「A confirmation on an obvious action teaches people to dismiss
+            #    confirmations reflexively」）—— 改成**撤销**，见下面那一段。
+            view.addSubview_(mk("删", width - CARD_PAD - 44.0,
+                                (lambda t=t: on_delete(t)) if on_delete else (lambda: None),
+                                y=y + 1.0, w=44.0, h=RESULT_ROW - 6.0))
+        undo = entry.get("undo")
+        if undo:
+            y -= RESULT_ROW
+            view.addSubview_(panel.make_label(
+                f"已删除 {undo.get('text', '')}",
+                NSMakeRect(CARD_PAD, y + 3.0, inner_w - 76.0, 16.0), 11.0, alpha=DIM))
+            view.addSubview_(mk("撤销", width - CARD_PAD - 68.0,
+                                on_undo or (lambda: None),
+                                y=y + 1.0, w=68.0, h=RESULT_ROW - 6.0))
+        # 排完之后 y 应当**恰好**等于 `CARD_PAD + BTN_H`（`card_height` 的算式保证）。
+        # 对不上就是算式与坐标漂了 —— 那正是 `tests/test_panel.py` 第 ⑥ 组在量的东西。
+
     return view
 
 
@@ -357,15 +468,30 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             pass
 
     def refresh():
-        """重画卡片（跑完 prep 之后数字会变）。"""
+        """重画卡片（跑完 prep / 删词 / 撤销都走它）。
+
+        ⚠️ **一处重建，不做增量打补丁。** 每张卡的高度不一样（有结果列表的更高），
+           增量改高度是布局 bug 的温床；整块重画只有 ~10 张卡，代价可以忽略。
+        ⚠️ 高度与坐标都从 `card_height()` 来 —— **同一个算式**，所以不会算错。
+        """
         for sub in list(doc.subviews()):
             sub.removeFromSuperview()
-        for i, r in enumerate(load()):
-            card = _make_card(r, on_start=on_start,
-                              on_prep=choose_files, on_drop_files=run_prep,
-                              width=WIDTH - 2 * PAD)
-            card.setFrameOrigin_((0.0, i * (CARD_H + CARD_GAP)))
+        y = 0.0
+        for r in load():
+            entry = S["result"].get(r.course)
+            card = _make_card(r, on_start=on_start, on_prep=choose_files,
+                              on_drop_files=run_prep, width=WIDTH - 2 * PAD,
+                              entry=entry,
+                              # ⚠️ **课号要在这里绑好。** `_make_card` 只传词
+                              #    （它不知道也不该知道课号之外的上下文）——
+                              #    第一版直接传 `do_delete`（两个参数），调用点只给一个，
+                              #    于是 TypeError 被 AppKit 吞掉、点「删」静默无效。
+                              on_delete=lambda t, c=r.course: do_delete(c, t),
+                              on_undo=lambda c=r.course: do_undo(c))
+            card.setFrameOrigin_((0.0, y))
             doc.addSubview_(card)
+            y += card_height(entry) + CARD_GAP
+        doc.setFrameSize_((WIDTH - 2 * PAD, max(y, body_h)))
 
     # ── 长任务：拖/选完就跑，跑起来后关窗也继续 ────────────────────
     def run_prep(course: str, paths: list[str]) -> bool:
@@ -415,11 +541,21 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                     from cloud_translator import load_api_key
                     res = prep_mod.prepare(
                         course, keep,
-                        glossary_dir=root / "glossary",
+                        glossary_dir=courses.glossary_dir(glossary),
                         state_path=state_file,
                         materials_dir=mats,
                         api_key=load_api_key(None) or "",
                         on_progress=on_progress)
+                # ⚠️ 存**逐条列表**，不只是一个计数 —— 卡片里要能一条一条删。
+                #    「计数和列表对不上」会让用户直接失去信任（§2.5 C 两次事故），
+                #    所以两边都由 `kept_added()` 从这一份数据算出来。
+                S["result"][course] = {
+                    "added": list(getattr(res, "added", None) or []),
+                    "not_added": list(getattr(res, "not_added", None) or []),
+                    "failed": list(getattr(res, "failed", None) or []),
+                    "removed": set(),
+                    "undo": None,
+                }
                 txt = summarize(res)
                 if getattr(res, "aborted", False):
                     detail = getattr(res, "aborted", "")
@@ -455,6 +591,75 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         S["panel"] = None
         if on_close:
             on_close()
+
+    # ── 删词 / 撤销（`remove_terms` / `restore_lines` 的调用方）──────────
+    def glossary_of(course):
+        """这门课的术语表文件 —— **与 prep 写进去的是同一个答案**。
+
+        ⚠️ **必须走 `courses.glossary_dir(glossary)`，不能写死 `root / "glossary"`。**
+           第一版就是写死的 —— 后果是**`build(glossary=…)` 这个注入点根本没生效**：
+           验收跑器以为自己在改 /tmp 的副本，**实际指向的是真实的 `glossary/`**。
+           2026-09-26 那次没删到真东西，纯粹是因为那个词不在真文件里（运气，不是设计）。
+           → 这也是「验收隔离」本身必须被验证的原因：**隔离跑器里的路径也得有人量**。
+
+        ⚠️ 也别自己裸 join。`prep.course_glossary_path` 的 docstring 讲了为什么：
+           裸 join 会在「`.course` 存的是短代号」时写到一个 translator 永远不加载的文件上，
+           而两边都报成功。
+        """
+        import prep as prep_mod
+        return prep_mod.course_glossary_path(courses.glossary_dir(glossary), course)
+
+    def do_delete(course, term):
+        """删掉结果列表里的一条。
+
+        ⚠️ **不做确认框**（HIG › Alerts 逐字：常见且可撤销的动作不要弹确认，
+        理由是那会训练用户条件反射地点掉确认，把真正重要的那个也一起点掉）。
+        改成**可撤销** —— 卡片上会出现一行「已删除 X · 撤销」。
+
+        ⚠️ 这一步**改的是手写文件**（`glossary/<课号>.txt`），是整套东西里唯一
+        会碰用户手写内容的地方。所以：走 `prep.remove_terms`（带「除被删行外逐字不变」
+        的闸门），并且撤销**按原位置插回**。
+        ⚠️ 同步 I/O 跑在主线程上（按钮 action 本来就在主线程）。这个文件几十行，
+        毫秒级 —— 不值得为它引一套线程。
+        """
+        entry = S["result"].get(course)
+        if entry is None:
+            return
+        try:
+            import prep as prep_mod
+            res = prep_mod.remove_terms(glossary_of(course), [term])
+        except Exception as e:                            # noqa: BLE001
+            set_status(f"删不掉：{type(e).__name__}: {e}", 1.0)
+            return
+        if not res.removed:
+            set_status(f"「{term}」不在表里 —— 可能已经被删过了")
+            return
+        entry["removed"].add(term)
+        # ⚠️ **只留最近一次删除的撤销（一层）。** 多层的代价是另一套状态机，
+        #    而这里真正要防的是「手滑删错一条」—— 一层够用，而且不会撒谎。
+        entry["undo"] = {"text": term,
+                         "entries": list(zip(res.positions, res.removed))}
+        set_status(f"已删除 {term} —— 卡片上有「撤销」")
+        refresh()
+
+    def do_undo(course):
+        entry = S["result"].get(course)
+        u = (entry or {}).get("undo")
+        if not u:
+            return
+        try:
+            import prep as prep_mod
+            n = prep_mod.restore_lines(glossary_of(course), u["entries"])
+        except Exception as e:                            # noqa: BLE001
+            set_status(f"撤销失败：{type(e).__name__}: {e}", 1.0)
+            return
+        if not n:
+            set_status("撤销没写进去 —— 看日志", 1.0)
+            return
+        entry["removed"].discard(u["text"])
+        entry["undo"] = None
+        set_status(f"已把「{u['text']}」放回原位置")
+        refresh()
 
     from AppKit import NSButton, NSObject
 

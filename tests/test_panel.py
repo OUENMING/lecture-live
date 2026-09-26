@@ -399,6 +399,162 @@ def main() -> int:
               f"{type(e).__name__}: {e}")
     check("cls_of('Panel') 就是面板类", objc_own.cls_of("Panel") is type(fp3.window))
 
+    print("\n--- ⑥ entry_panel 的卡片：内容不许溢出卡片 ---")
+    # ⭐ 这是 `card_height()` 那条推导**真正的锁**。
+    #    `card_height(None) == CARD_H` 不是锁 —— 实测把整个算式换成写死的 `h = 88.0`
+    #    照样全绿（硬编码的 88 恰好等于正确值）。而「建出卡片、量有没有子视图超出」
+    #    不管你把常数改成什么、也不管高度是不是算出来的，都成立。
+    import entry_panel as EP
+    import courses as _c
+
+    def _r(code="ECON10740", title="Exploring Economics"):
+        return _c.Readiness(code, title, 36, 0, 0, "2026-09-22")
+
+    for tag, ent in (("无结果", None),
+                     ("1 条结果", {"added": ["elasticity"], "removed": set()}),
+                     ("5 条 + 已删 1 + 撤销",
+                      {"added": list("abcde"), "removed": {"b"},
+                       "undo": {"text": "b"}}),
+                     ("全删光（0 条但仍要显示头部）",
+                      {"added": ["a"], "removed": {"a"}, "undo": {"text": "a"}}),
+                     # ⭐ **这一条才是真正的探测器。** 行内容与卡片高度之间有一圈
+                     #    **恒定的 ~54pt 余量**（`CARD_GAP_V` + `RESULT_TAIL` 那块），
+                     #    所以 5 行的漂移吃不满它 —— 实测：把行距改成 `RESULT_ROW + 12`
+                     #    或把高度算少 20，前四个用例**照样全绿**。
+                     #    20 行（一门课加 40 个词是常态，所以这是真实数量级）
+                     #    才让漂移累积到超过那圈余量。
+                     ("20 条（漂移探测器）",
+                      {"added": [f"term{i:02d}" for i in range(20)],
+                       "removed": set()})):
+        card = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+                             on_drop_files=lambda c, p: False, width=640.0,
+                             entry=ent, on_delete=lambda t: None, on_undo=lambda: None)
+        ch = float(card.frame().size.height)
+        over = [(type(v).__name__, round(float(v.frame().origin.y
+                                             + v.frame().size.height), 1))
+                for v in card.subviews()
+                if float(v.frame().origin.y + v.frame().size.height) > ch + 0.01]
+        check(f"{tag}：没有子视图超出卡片高度（{ch:.0f}）", not over, str(over[:4]))
+        check(f"{tag}：高度与 card_height() 一致",
+              abs(ch - EP.card_height(ent)) < 0.01, f"{ch} vs {EP.card_height(ent)}")
+
+    # ⭐⭐ **阅读顺序**：把文字标签按 y 从高到低排，必须与期望的阅读顺序一致。
+    #     2026-09-26 真出过这个 bug —— 结果块从卡片底部往上长，于是
+    #     **列表是倒的**（最后加的排最上面）、**头部跑到了列表下面**。
+    #     上一条「没有子视图超出去」**抓不到**它：溢出和顺序是两件事。
+    from AppKit import NSTextField as _TF
+
+    def _reading_order(card):
+        items = [(float(v.frame().origin.y), v.stringValue())
+                 for v in card.subviews() if isinstance(v, _TF)]
+        return [t for _, t in sorted(items, reverse=True)]
+
+    e1 = {"added": ["第一", "第二", "第三"], "removed": set(), "undo": None}
+    c1 = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+                       on_drop_files=lambda c, p: False, width=640.0, entry=e1,
+                       on_delete=lambda t: None, on_undo=lambda: None)
+    check("⭐⭐ 从上到下：课名 → 准备度 → 结果头 → 逐条（**正序**）",
+          _reading_order(c1) == [EP.card_title(_r()), EP.readiness_line(_r()),
+                                 EP.result_header(e1), "第一", "第二", "第三"],
+          str(_reading_order(c1)))
+
+    e2 = {"added": ["甲", "乙"], "removed": {"乙"}, "undo": {"text": "乙"}}
+    seq2 = _reading_order(EP._make_card(
+        _r(), on_start=None, on_prep=lambda c: None,
+        on_drop_files=lambda c, p: False, width=640.0, entry=e2,
+        on_delete=lambda t: None, on_undo=lambda: None))
+    check("⭐ 删过的那条不再列；「已删除」+「撤销」在**最下面**",
+          seq2 == [EP.card_title(_r()), EP.readiness_line(_r()),
+                   EP.result_header(e2), "甲", "已删除 乙"], str(seq2))
+
+    print("\n--- ⑦ 删 / 撤销：**点得到底**（接线，不是被调用的那个函数）---")
+    # ⚠️⚠️ 这一组存在的唯一理由：**单元测试全绿接线也可能是断的。**
+    #     2026-09-26 实测：`_make_card` 调的是 `on_delete(t)`（只传词），而
+    #     `do_delete(course, term)` 要两个参数 → `TypeError` **被 AppKit 吞掉** →
+    #     **点「删」静默无效**。而 `remove_terms` 自己的 95 条测试**全绿** ——
+    #     它们测的是「被调用的那个函数」，不是接线。
+    #     同一轮还挖出 `glossary_of` 写死 `root/"glossary"`，导致 `build(glossary=…)`
+    #     这个注入点根本没生效（**验收跑器以为在改 /tmp 的副本，实际指向真实 glossary**）。
+    import shutil as _sh
+    import tempfile as _tf
+    import entry_panel as EP2
+
+    iso = pathlib.Path(_tf.mkdtemp(prefix="cl-test-del-"))
+    real = HERE / "glossary" / "ECON10740.txt"
+    real_before = real.read_bytes()
+    try:
+        (iso / "courses").mkdir()
+        _sh.copytree(HERE / "glossary", iso / "glossary")
+        (iso / "glossary.txt").write_text("", encoding="utf-8")
+        gpath = iso / "glossary" / "ECON10740.txt"
+        before = gpath.read_text(encoding="utf-8")
+        term = [x.strip() for x in before.splitlines()
+                if x.strip() and not x.startswith("#")][0]
+
+        def _card_btns(root, course, title):
+            """那门课卡片上、按**视觉顺序**（y 降序）排的按钮。
+
+            ⚠️ **不能靠遍历顺序** —— 用 `stack.pop()` 递归是 LIFO，顺序是反的：
+              `[0]` 会拿到**最后一行**的按钮。症状极具欺骗性（点了「删」、
+              状态行说另一个词不在表里，看着像产品 bug，其实是跑器点错了）。
+              视觉顺序只能从几何 `frame().origin.y` 来。
+            """
+            from AppKit import NSButton
+            stack = [root]
+            while stack:
+                v = stack.pop()
+                if getattr(v, "_course", None) == course:
+                    hits = [(float(b.frame().origin.y), b) for b in v.subviews()
+                            if isinstance(b, NSButton) and b.title() == title]
+                    return [b for _, b in sorted(hits, key=lambda x: x[0],
+                                                 reverse=True)]
+                try:
+                    stack.extend(v.subviews())
+                except Exception:                                 # noqa: BLE001
+                    pass
+            return []
+
+        def _click(b):
+            """⚠️ `performClick_(None)` 在**不起事件循环**的进程里不派发（实测：
+            按钮 enabled、target/action 都在、也在窗口里，点了什么都不发生）。
+            走 `NSApp.sendAction_to_from_` —— AppKit 自己派发时走的那一步。"""
+            from AppKit import NSApplication
+            return bool(NSApplication.sharedApplication().sendAction_to_from_(
+                b.action(), b.target(), b))
+
+        EP2.close_panel()
+        EP2.S["result"].clear()
+        EP2.S["result"]["ECON10740"] = {"added": [term], "not_added": [],
+                                        "failed": [], "removed": set(), "undo": None}
+        h2 = EP2.open_panel(glossary=iso / "glossary.txt", state_root=iso)
+        check("entry_panel 起得来（隔离 glossary）", h2 is not None)
+        if h2 is not None:
+            dels = _card_btns(h2.window.contentView(), "ECON10740", "删")
+            check("卡片上有「删」按钮且派发得动", len(dels) == 1 and _click(dels[0]),
+                  f"找到 {len(dels)} 个")
+            after = gpath.read_text(encoding="utf-8")
+            check("⭐ 点「删」-> **隔离副本**里那一行真的没了",
+                  term not in after.splitlines() and term in before.splitlines())
+            # ⚠️⚠️ **这条必须在「删」之后立刻判，不能只在最后判。**
+            #     2026-09-26：我把 `glossary_of` 变异回「写死 root/glossary」来验上面那条，
+            #     结果删除**真的落在了真 glossary 上** —— 而末尾那条检查**报绿**，
+            #     因为「撤销」已经把它逐字放回去了（末尾再比当然相同）。
+            #     → **判据要在事情发生的那一刻成立，不是等一切回滚之后再判。**
+            check("⚠️ 点「删」的那一刻真 glossary 就没被碰（隔离是真的）",
+                  real.read_bytes() == real_before)
+            undos = _card_btns(h2.window.contentView(), "ECON10740", "撤销")
+            check("⭐ 出现「撤销」按钮（HIG：删东西用撤销，不用确认框）",
+                  len(undos) == 1, f"找到 {len(undos)} 个")
+            if undos:
+                _click(undos[0])
+                check("⭐⭐ 点「撤销」-> 副本**逐字回到原样**",
+                      gpath.read_text(encoding="utf-8") == before)
+        check("⚠️ 真 glossary 逐字节未变（隔离真的成立）",
+              real.read_bytes() == real_before)
+    finally:
+        EP2.close_panel()
+        _sh.rmtree(iso, ignore_errors=True)
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

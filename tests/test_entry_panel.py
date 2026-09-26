@@ -113,6 +113,55 @@ def main() -> int:
     check("计数为 0 的项不出现（别塞一堆 0）",
           "另有 0" not in E.summarize(FakeRes(added=list("a"))))
 
+    print("\n--- ⑦ 结果列表：计数与列表**必须同源** ---")
+    e = {"added": ["a", "b", "c"], "removed": set(), "not_added": [], "failed": []}
+    check("没删过 -> 三条都在", E.kept_added(e) == ["a", "b", "c"], str(E.kept_added(e)))
+    e["removed"] = {"b"}
+    check("删过的**不再列**（列表跟着走）", E.kept_added(e) == ["a", "c"],
+          str(E.kept_added(e)))
+    check("⭐ 头部计数 == 列表长度（**同一个来源**）",
+          f"本次加了 {len(E.kept_added(e))} 个" in E.result_header(e), E.result_header(e))
+    # ⭐ 这一条是防 Anki / LingQ 那两次事故的：
+    #    「18 added, 148 updated」和「says 1 new word but it does not」都是**计数撒谎**，
+    #    而根因是计数和列表各算一遍。这里把它们逼成同一个来源，逐个规模都验一遍。
+    check("⭐ 对每个删除规模，计数都与列表对得上（各算一遍必在这里红）",
+          all(f"本次加了 {len(E.kept_added({'added': ['a', 'b', 'c', 'd'],
+                                           'removed': set(list('abcd')[:k])}))} 个"
+              in E.result_header({'added': ['a', 'b', 'c', 'd'],
+                                  'removed': set(list('abcd')[:k])})
+              for k in range(5)))
+    check("删光了 -> 加了 0 个，且列表是空的",
+          E.kept_added({"added": ["a"], "removed": {"a"}}) == []
+          and "本次加了 0 个" in E.result_header({"added": ["a"], "removed": {"a"}}))
+    check("「没加」只在非空时才出现",
+          "没加" not in E.result_header({"added": ["a"]})
+          and "没加" in E.result_header({"added": ["a"], "not_added": ["x"]}))
+    check("失败项单独报（逐文件那条的落点）",
+          "1 个文件失败" in E.result_header({"added": [], "failed": [("f", "why")]}),
+          E.result_header({"added": [], "failed": [("f", "why")]}))
+    for junk in ({}, None, {"added": None, "removed": None}):
+        E.result_header(junk)                # 不该抛
+    check("空/None entry 不抛", True)
+    check("unknown 的 removed 用 set 存（去重，删两次不会算成两条）",
+          len({"removed": {"a", "a"}}["removed"]) == 1)
+
+    print("\n--- ⑧ 卡片高度：**与坐标同一组常数推导** ---")
+    check("⭐ card_height(None) == CARD_H —— 这条把推导锁住",
+          E.card_height(None) == E.CARD_H,
+          f"{E.card_height(None)} vs {E.CARD_H}")
+    check("有结果 -> 变高",
+          E.card_height({"added": ["a"], "removed": set()}) > E.CARD_H)
+    h1 = E.card_height({"added": ["a"], "removed": set()})
+    h2 = E.card_height({"added": ["a", "b"], "removed": set()})
+    check("每多一个词 -> 恰好高一行（RESULT_ROW）",
+          abs((h2 - h1) - E.RESULT_ROW) < 1e-9, f"{h1} -> {h2}")
+    check("删掉一条 -> 卡片跟着缩（删光了也不留空行）",
+          E.card_height({"added": ["a", "b"], "removed": {"b"}}) < h2)
+    check("有「撤销」那一行 -> 再高一行",
+          abs(E.card_height({"added": ["a"], "removed": {"a"},
+                             "undo": {"text": "a"}})
+              - E.card_height({"added": ["a"], "removed": {"a"}}) - E.RESULT_ROW) < 1e-9)
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

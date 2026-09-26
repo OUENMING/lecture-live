@@ -739,8 +739,12 @@ def _rank(rows: list) -> list:
     return ranked
 
 
-def _course_glossary_path(glossary_dir, course: str) -> pathlib.Path:
+def course_glossary_path(glossary_dir, course: str) -> pathlib.Path:
     """定位这门课的术语表 —— **与运行时同一套解析**。
+
+    ⚠️ **公开的（没有下划线）是刻意的**：面板的「删词」要删的**就是写进去的那个文件**，
+       而删错文件是静默的（词还在，用户以为删了）。所以这个答案必须能被别的模块拿到，
+       而不是让调用方各自 `glossary_dir / f"{course}.txt"` 裸 join 一份。
 
     ⚠️ 别自己裸 join。`translator.course_terms_path` 在后面加了
        「精确路径不存在就按**后缀**唯一匹配」的容错（对付 `.course` 里存短代号那种情况）。
@@ -820,7 +824,7 @@ def prepare(course: str, files: list, *, glossary_dir, state_path,
     if not files:
         return _empty("no_files")
 
-    glossary_path = _course_glossary_path(glossary_dir, course)
+    glossary_path = course_glossary_path(glossary_dir, course)
     state_path = pathlib.Path(state_path)
     # 并发锁：`append_terms` 是读-改-写，两个 `cl prep` 同时跑会互相吃掉对方的追加。
     # ⚠️ 复用 `instance_lock.acquire(path)`（它本来就收自定义路径），锁**本课专属**的

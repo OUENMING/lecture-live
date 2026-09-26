@@ -218,10 +218,10 @@ def readiness(glossary_txt, course: str, *, sessions_dir=None,
         course=course,
         title=_title(g, course),
         terms=_count_terms(g),
-        materials=_count_materials(paths.materials_dir(course) if state_root is None
-                                   else root / "courses" / course / "materials"),
-        auto_added=_count_auto_added(paths.prep_state(course) if state_root is None
-                                     else root / "courses" / course / "prep-state.json"),
+        # ⚠️ 布局一律走 `paths.*`（它的 `root=` 口子）——**别在这里再拼一遍**
+        #    `root/"courses"/<课号>`：那是把布局定义成第二份，加个目录就要改 N 处。
+        materials=_count_materials(paths.materials_dir(course, root=root)),
+        auto_added=_count_auto_added(paths.prep_state(course, root=root)),
         last_session=last_session(sessions_dir, course) if sessions_dir else None,
     )
 

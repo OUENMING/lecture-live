@@ -43,23 +43,35 @@ import pathlib
 STATE_ROOT = pathlib.Path.home() / ".classlive"
 
 
-def course_dir(course: str) -> pathlib.Path:
-    return STATE_ROOT / "courses" / course
+def course_dir(course: str, *, root=None) -> pathlib.Path:
+    """`root` 给了就用它 —— **别让调用方自己拼 `root/"courses"/<课号>`**。
+
+    ⚠️ 加这个口子的理由（2026-09-26 审查指出）：面板要能指到别处（验收用隔离目录），
+       于是每个调用点都手抄了一遍布局 —— 布局就有了**第二份定义**。加一个目录（P4 的
+       数据目录）要改 N 处，而且读端/写端一旦漂开就是本仓库栽过的那类静默事故。
+    """
+    root = pathlib.Path(root) if root is not None else STATE_ROOT
+    return root / "courses" / course
 
 
-def materials_dir(course: str) -> pathlib.Path:
+def materials_dir(course: str, *, root=None) -> pathlib.Path:
     """课件归档处 —— 拖进来的 PDF/PPTX 放这里。
 
     归档（而不只在原地读）的三个理由：① 课件原件可能被用户从下载目录删掉；
     ② 重跑 prep 不必再找原文件；③ P4 的数据目录从这里长出来。
+
+    ⚠️ **归档本身由 `prep._archive` 做，不要在别处再写一份拷贝循环** ——
+       那份的纪律是「同名但大小不同的加 `-2` 后缀，绝不覆盖」（覆盖等于静默丢掉
+       上一份课件）。面板曾经自己 `shutil.copy2` 覆盖，而且因为它在 `prepare` **之前**
+       拷，`_archive` 看到的文件已经在归档目录里 → **它那道保护永远触发不到**。
     """
-    return course_dir(course) / "materials"
+    return course_dir(course, root=root) / "materials"
 
 
-def prep_state(course: str) -> pathlib.Path:
+def prep_state(course: str, *, root=None) -> pathlib.Path:
     """prep 的状态文件 —— 记「曾经追加过哪些词」。
 
     它是**墓碑**：用户从 `glossary/<课号>.txt` 里删掉的词，重跑时不许复活。
     （行业里的对应物是 memoQ 的 `stop word list`，见 `docs/PLAN-p3-prep.md` §6.1.2。）
     """
-    return course_dir(course) / "prep-state.json"
+    return course_dir(course, root=root) / "prep-state.json"

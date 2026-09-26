@@ -520,8 +520,19 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         doc.setFrameSize_((WIDTH - 2 * PAD, max(y, body_h)))
 
     # ── 长任务：拖/选完就跑，跑起来后关窗也继续 ────────────────────
-    def run_prep(course: str, paths: list[str]) -> bool:
-        if not paths:
+    def run_prep(course: str, files: list) -> bool:
+        """拖进来的（或选中的）课件 → 跑 prep。
+
+        ⚠️⚠️ **参数名叫 `files` 不是 `paths`** —— 第一版叫 `paths`，把模块 `paths`
+           **遮蔽**了，于是 `paths.materials_dir(course)`（`state_root` 为空那支）
+           变成「对列表取属性」→ `AttributeError`。而它发生在 `S["busy"] = True`
+           **之后** → 那个异常一旦逃出，`busy` 永远卡 True，**这个进程再也拖不动**。
+           ⚠️ 更毒的是：它在拖拽路径上被 `panel.make_drop_target` 的异常守卫吞掉
+           （只在 `CLASSLIVE_DEBUG` 下出声）→ 松手后**毫无反应**。
+           **验收跑器一直传 `state_root=ISO`，所以这条生产路径（`state_root=None`）
+           从来没被跑到过。** → 隔离跑器会把「生产路径」整个绕过。
+        """
+        if not files:
             set_status("没读到文件路径 —— 看日志", 1.0)
             return False
         if S.get("busy"):
@@ -529,26 +540,17 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             return False
         S["busy"] = True
 
-        # ⚠️ 归档：把原件拷进 materials/（`prep.prepare` 不搬文件，只读）
-        mats = (state_root / "courses" / course / "materials") if state_root \
-            else paths.materials_dir(course)
-        state_file = (state_root / "courses" / course / "prep-state.json") \
-            if state_root else paths.prep_state(course)
-        keep: list[str] = []
-        try:
-            mats.mkdir(parents=True, exist_ok=True)
-            import shutil
-            for p in paths:
-                src = pathlib.Path(p)
-                if src.is_file():
-                    dst = mats / src.name
-                    if src.resolve() != dst.resolve():
-                        shutil.copy2(src, dst)
-                    keep.append(str(dst))
-        except OSError as e:
-            set_status(f"课件归档失败：{e}", 1.0)
-            S["busy"] = False
-            return False
+        # ⚠️⚠️ **面板不做归档 —— 那是 `prep._archive` 的活，别在这里再写一份。**
+        #    第一版自己 `shutil.copy2` 拷进 `materials/`，两个后果：
+        #    ① 它是**无条件覆盖**，而 `_archive` 的纪律是「同名但大小不同的加 `-2`
+        #       后缀，**覆盖等于静默丢掉上一份课件**」→ 从面板拖入同名不同内容的
+        #       第二份 → 上一份**无痕消失**；
+        #    ② 它跑在 `prepare` **之前**，于是 `_archive` 看到的文件已经在归档目录里
+        #       → 走「已在归档目录」分支 → **它那道保护永远触发不到**。
+        #    → 直接把**源路径**交给 `prepare`（它自己 `_archive`，`prep.py:848`）。
+        mats = paths.materials_dir(course, root=state_root)
+        state_file = paths.prep_state(course, root=state_root)
+        keep = [str(p) for p in files]
 
         set_status(f"{course}：抽文本 0/{len(keep)}…")
 

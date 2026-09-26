@@ -601,6 +601,57 @@ def main() -> int:
         if closes and closes[0].target() is not None:
             _click(closes[0])
             check("⭐ 点「关闭」-> 窗口真的关掉了", not bool(h2.window.isVisible()))
+
+        # ⭐⭐⭐ **生产路径：`state_root=None`。** 这一条是本轮最该有的测试。
+        #     隔离跑器一直传 `state_root=ISO`，把生产那支**整个绕过**了 ——
+        #     而那一支里 `run_prep` 的参数名 `paths` **遮蔽了模块 `paths`**：
+        #     `paths.materials_dir(course)` 变成「对列表取属性」→ `AttributeError`，
+        #     且它发生在 `S["busy"]=True` **之后** → 异常一逃出，`busy` 永久卡 True
+        #     → **这个进程再也拖不动**；而症状在拖拽路径上还被异常守卫吞掉。
+        #     ⚠️ 教训：**隔离跑器会把生产路径整个绕过 —— 两种都得跑。**
+        #     ⚠️ 本组**只读**真 `~/.classlive`（`prepare_fn` 是桩，不写任何东西）。
+        called: dict = {}
+
+        def _stub(course, files, *, on_progress=None):
+            called["course"] = course
+            called["files"] = list(files)
+            if on_progress:
+                on_progress("build", 1, 1)
+            return type("R", (), {"added": [], "not_added": [], "failed": [],
+                                  "aborted": False, "notes_added": None})()
+
+        EP2.close_panel()
+        EP2.S["result"].clear()
+        EP2.S.pop("busy", None)
+        h4 = EP2.open_panel(prepare_fn=_stub)       # ← **不传 state_root / glossary**
+        check("state_root=None（生产那支）面板也起得来", h4 is not None)
+        if h4 is not None:
+            _cards, _stack = [], [h4.window.contentView()]
+            while _stack:
+                v = _stack.pop()
+                if getattr(v, "_course", None):
+                    _cards.append(v)
+                try:
+                    _stack.extend(v.subviews())
+                except Exception:                                 # noqa: BLE001
+                    pass
+            check("有卡片可以落", len(_cards) > 0, f"{len(_cards)} 张")
+            if _cards:
+                _fake = ["/tmp/（桩不会读它）不存在的文件.pdf"]
+                check("⭐ 落点返回 True（没在 busy 之前抛异常）",
+                      bool(_cards[0]._on_drop(_fake)))
+                from AppKit import NSDate, NSRunLoop
+                for _ in range(40):                # 等工作线程 + 让 callAfter 跑掉
+                    NSRunLoop.mainRunLoop().runUntilDate_(
+                        NSDate.dateWithTimeIntervalSinceNow_(0.05))
+                    if not EP2.S.get("busy"):
+                        break
+                check("⭐⭐ `busy` 回到 False（**没卡死** —— 卡死就再也拖不动）",
+                      not EP2.S.get("busy"), f"busy={EP2.S.get('busy')}")
+                check("⭐⭐ 桩真的被调到了（说明整条生产路径走通了）",
+                      called.get("course") == _cards[0]._course
+                      and called.get("files") == _fake, str(called))
+        EP2.close_panel()
     finally:
         EP2.close_panel()
         _sh.rmtree(iso, ignore_errors=True)

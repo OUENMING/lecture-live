@@ -41,7 +41,18 @@ if [ "${1:-}" = "--check" ]; then
   say "──────────────────────────────────"
   if [ -d "$APP" ]; then
     say "✅ .app 存在         $(du -sh "$APP" | cut -f1)"
-    say "   MacOS/python      $([ -e "$APP/Contents/MacOS/python" ] && echo 就位 || echo '❌ 缺')"
+    # ⚠️ 单列这一条：符号链接的 CFBundleExecutable 会让 LaunchServices
+    #    **静默拒绝启动**（双击完全没反应、无报错）。别的检查都看不出这个 ——
+    #    `-e` / `-x` 都会**跟随**符号链接，所以上面那几行照样报"就位"。
+    _EXE_C="$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist" 2>/dev/null)"
+    if [ -n "$_EXE_C" ] && [ -L "$APP/Contents/MacOS/$_EXE_C" ]; then
+      # ⚠️ 报了就**不再报"就位"** —— `-e` / `-x` 都会跟随符号链接，
+      #    两条一起打出来会自相矛盾（"是符号链接" + "就位"），反而让人困惑。
+      say "   ⚠️ MacOS/$_EXE_C   **符号链接** → 双击会没反应！重跑 ./make-app.sh"
+    else
+      say "   MacOS/python      $([ -e "$APP/Contents/MacOS/python" ] && echo 就位 || echo '❌ 缺')"
+      [ -n "$_EXE_C" ] && say "   MacOS/$_EXE_C   真文件 ✅"
+    fi
     say "   lib/              $([ -d "$APP/Contents/lib" ] && echo 就位 || echo '❌ 缺')"
     say "   pyvenv.cfg        $([ -f "$APP/Contents/pyvenv.cfg" ] && echo 就位 || echo '❌ 缺')"
     say "   Info.plist        $([ -f "$APP/Contents/Info.plist" ] && echo 就位 || echo '❌ 缺')"
@@ -255,6 +266,27 @@ PY
 
 # ---------- ⑦ 自检 ----------
 say "⑦ 自检 …"
+
+# ⚠️⚠️ 头一条，也是**最容易被漏掉的一条**：`Contents/MacOS/<CFBundleExecutable>`
+#     必须是**真文件**，不能是符号链接。
+#
+#     为什么单列：LaunchServices **不会启动符号链接的 CFBundleExecutable** ——
+#     退出码 0、无报错、无弹窗、连 python 都不起来，表现就是**双击完全没反应**。
+#     （2026-09-26 实测踩到，排查了一轮。）
+#
+#     而下面那段 Python 自检**查不出这个** —— 它自己就是拿那个 python 跑的，
+#     能跑通说明"这个 python 可用"，不能说明"LaunchServices 肯启动它"。
+#     两条是**不同的问题**：前者是解释器可用性，后者是 bundle 合法性。
+_EXE="$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist" 2>/dev/null)"
+if [ -L "$APP/Contents/MacOS/$_EXE" ]; then
+  fail "Contents/MacOS/$_EXE 是**符号链接** ——
+   LaunchServices 不会启动它，双击会完全没反应（且没有任何报错）。
+   见 ③ 那一步：必须换成真拷贝。"
+fi
+[ -f "$APP/Contents/MacOS/$_EXE" ] && [ -x "$APP/Contents/MacOS/$_EXE" ] \
+  || fail "Contents/MacOS/$_EXE 不存在或不可执行"
+say "   ✅ $_EXE 是真文件且可执行（LaunchServices 肯启动的那种）"
+
 "$APP/Contents/MacOS/python" - <<'PY' || fail "自检没过 —— 上面标 ❌ 的就是原因"
 import sys
 from Foundation import NSBundle

@@ -183,7 +183,17 @@ test_courses.py 46 · test_extract.py 24 · test_instance_lock.py 22 · test_aud
      PYTHONDONTWRITEBYTECODE=1 ClassLive.app/Contents/MacOS/python tests/$t.py | tail -2
    done
    ```
-3. **`git status --porcelain` 应当是空的**（`git log --oneline -1` 应当是本批**收尾提交** —— 看文首那一行；**别在这儿写死 SHA**，写一次腐坏一次）
+3. **`git status --porcelain` 应当是空的**；再核一遍所有 SHA 引用都还有效：
+   ```bash
+   grep -ohE '`[0-9a-f]{6,40}`' docs/HANDOFF-entry-panel.md docs/PLAN-entry-panel.md \
+     | tr -d '`' | sort -u | while read s; do git cat-file -t "$s" >/dev/null 2>&1 || echo "❌ $s"; done
+   ```
+   ⚠️ **下界必须是 `{6,` 不是 `{7,`** —— 本轮那个坏引用是把下面这个 SHA **抄漏了一位**
+   （`80e8abd` 少个字符 → 只剩 6 位），`{7,40}` 的检查**看不见它**
+   （我第一版就是这么写的，变异测试当场没抓到）。**少一位正是这类错最可能的形态。**
+   ⚠️ 顺带：别在本文档里把坏 SHA 写字面量 —— 这条命令会**把自己写的例子抓出来**。
+   ⚠️ **别校验「HEAD == 某个 SHA」** —— 收尾提交之后还会有文档提交，写死当场就不成立
+   （本书面化过一次：写死 `e79c3c7`，提交完自己就过期了）。要的是**引用有效**，不是 HEAD 等于谁。
 4. **动手第一件：§8 那条删词锁**（先读 `instance_lock.py` 的文件头）
 
 ⚠️ **别碰 `glossary/<课号>.txt` 与 `~/.classlive/`** 除非在隔离目录里 ——

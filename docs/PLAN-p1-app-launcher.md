@@ -523,7 +523,7 @@ x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone
 
 作者 2026-09-26 问的。**两轮独立调研 + 本机实测，结论一致：走符号链接，不做真安装。**
 
-#### 层次一：`/Applications` 里放**符号链接**（推荐）
+#### 层次一：`/Applications` 里放**符号链接**（⭐ **作者定了：做这个**）
 
 ```bash
 ln -s ~/lecture-live/ClassLive.app /Applications/ClassLive.app
@@ -578,13 +578,54 @@ ln -s ~/lecture-live/ClassLive.app /Applications/ClassLive.app
 
 **bundle 保持"出厂状态" —— 那正是签名想要的。** 本来以为自包含是"更正确的形状"，**其实反了**。
 
-#### 什么时候改回来
+#### 什么时候改回来（改走"真安装"）
 
 | 触发条件 | 那时**必须**改 |
 |---|---|
 | **要签名 / 公证（$99）** | ✅ 签名的前提就是 bundle 只读 |
 | 朋友里有人不懂 git | ✅ 该做 `.dmg` 拖拽 |
 | 朋友 > 3 个 | ✅ 手工步骤开始亏 |
+
+#### 实施计划（作者 2026-09-26 定：做）
+
+**模块**：「把 ClassLive 装成系统里能直接启动的 app」
+
+**接口**（就三条 —— 其余全是藏起来的复杂度）：
+
+```
+./install.sh              构建（需要时）+ 装。幂等，可重复跑
+./install.sh --check      只报告，不改任何东西
+./install.sh --uninstall  撤掉（**只删我们建的链接**）
+```
+
+**藏起来的复杂度：**
+
+| | |
+|---|---|
+| **冲突处理** | ⚠️ **只在目标"不存在"或"是我们的符号链接"时才动它**。已经是个**真 `.app`**（别人装的/你手动拷的）→ **拒绝并说清**，绝不覆盖。这是唯一有破坏性的分支，必须最保守 |
+| **仓库挪位** | 符号链接指向的路径没了 → `--check` 报得出来（这是链接**唯一**的失效方式） |
+| **幂等** | 重复跑结果一样 |
+| **降级** | `/Applications` 不可写（非管理员用户）→ 退到 `~/Applications` 并说明 |
+| **构建** | 内部调 `make-app.sh` —— **不重复那份逻辑**（同一个道理：两处各记一次迟早漂移） |
+
+**为什么装 `/Applications` 而不是 `~/Applications`**（实测）：
+两个都合法（`~/Applications` 里有 9 个 app），但**Finder 侧边栏默认只有 `/Applications`** ——
+而"用户会在那里找"正是这条路唯一的真好处（§3.11 上面那张表）。
+`/Applications` 是 `drwxrwxr-x root:admin`，**admin 组直接可写，不要密码**（实测）。
+
+**不做**：不自动固定到 Dock（那是用户的选择）；不碰 `.app` 本体（它在仓库里，归 `git pull` 管）；
+不用 `.pkg` / DMG（上面已论证）。
+
+**验收判据：**
+
+- [ ] `./install.sh` 后 `/Applications/ClassLive.app` **是符号链接**、指向仓库
+- [ ] `open -a ClassLive` 能起
+- [ ] **重复跑两次，结果一样**（幂等）
+- [ ] 目标是**真 `.app`** 时**拒绝且不破坏**（红绿各验一次）
+- [ ] 仓库挪位后 `--check` 报得出来
+- [ ] `--uninstall` **只删我们建的链接**
+
+---
 
 #### ⚠️ 两条顺带查实、将来会用到的
 

@@ -92,13 +92,13 @@ say "─────────────────────────
 say "① 准备 Python ${PYVER} …"
 uv python install "$PYVER" --managed-python >/dev/null 2>&1 || true
 BASEPY="$(uv python find "$PYVER" --managed-python 2>/dev/null)" \
-  || fail "拿不到 uv 管理的 Python $PYVER。跑一次：uv python install $PYVER"
+  || fail "拿不到 uv 管理的 Python ${PYVER}。跑一次：uv python install $PYVER"
 
 # 前置检查：确认它不是 framework 构建（否则整个方案的前提不成立）
 _BASE_REAL="$(cd "$(dirname "$BASEPY")" && pwd -P)/$(basename "$BASEPY")"
 case "$_BASE_REAL" in
   *"/Frameworks/"*|*"/Python.framework/"*)
-    fail "拿到的是 framework 构建的 python（$_BASE_REAL）
+    fail "拿到的是 framework 构建的 python（${_BASE_REAL}）
    这种 python 的 mainBundle() 永远指向它自己，授权框改不成「ClassLive」。
    需要 uv 管理的独立构建：uv python install $PYVER --managed-python" ;;
 esac

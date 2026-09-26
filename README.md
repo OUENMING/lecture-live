@@ -195,8 +195,8 @@ lecture-live/
 git clone https://github.com/OUENMING/lecture-live.git
 cd lecture-live
 
-# 构建可双击的 ClassLive.app —— 它自带一份独立的 Python 和全部依赖
-./make-app.sh
+# 构建 + 装成系统里能直接启动的 app（自带一份独立的 Python 和全部依赖）
+./install.sh
 
 # Parakeet ASR 模型（~600MB）
 ClassLive.app/Contents/MacOS/python -c "from huggingface_hub import snapshot_download; \
@@ -220,9 +220,15 @@ tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2
 
 **装完之后双击 `ClassLive.app` 就能上课**（第一次会弹一个麦克风授权，点允许）。
 
+装完还能：**在 Spotlight / 启动台里搜 ClassLive 启动**，或者 `open -a ClassLive`。
+（`./install.sh` 在 `/Applications` 里建了一个**符号链接**指向仓库里的 `.app` ——
+这样 `git pull` 之后它自动就是最新那份，不存在"两份要同步"。）
+
 > **为什么是 `.app` 而不是 `.venv`** —— 让 macOS 认这个目录为「一个应用」，
 > 授权框上才会写 **ClassLive** 而不是 `python3.11`。
 > 技术细节见 [`docs/PLAN-p1-app-launcher.md`](docs/PLAN-p1-app-launcher.md) §1.5。
+
+想只构建不安装：`./make-app.sh`。查装机现状：`./install.sh --check`。撤掉：`./install.sh --uninstall`。
 
 依赖清单变了要重装时：
 

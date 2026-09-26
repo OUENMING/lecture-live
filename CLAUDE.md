@@ -41,6 +41,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 悬浮窗、字幕显示、滚动、槽位池化 | `overlay.py`、`transcript_view.py` |
 | 滚动行为验收探针（不在运行路径上） | `probe_scroll.py` |
 | **拖拽落点验收探针**（不在运行路径上；**改拖拽相关代码前跑它**，作者手拖一次即可） | `probe_drag.py` |
+| **课程卡片面板验收跑器**（不在运行路径上；**隔离模式** —— 术语表是 /tmp 的副本，删词/撤销都改副本） | `probe_entry_panel.py` |
 | 回归测试 R1–R5、毫秒级断言 | `tests/test_audit_regressions.py` |
 | 端到端、拿真实录音跑通 | `test_pipeline.py` |
 | 面向用户的功能说明、开源与脱敏须知 | `README.md` |

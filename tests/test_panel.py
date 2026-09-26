@@ -551,6 +551,34 @@ def main() -> int:
                       gpath.read_text(encoding="utf-8") == before)
         check("⚠️ 真 glossary 逐字节未变（隔离真的成立）",
               real.read_bytes() == real_before)
+
+        # ⚠️⚠️ `setTarget_` 是**弱引用** —— target 一被 GC，`target()` 变 None，
+        #     症状是「点了完全没反应，也不报错」（2026-09-26 作者实测「关闭无反应」）。
+        #     → 必须**先 gc.collect() 再查**，否则这条测不到那个 bug。
+        import gc as _gc
+        _gc.collect()
+
+        def _all_btns(root):
+            from AppKit import NSButton
+            out, stack = [], [root]
+            while stack:
+                v = stack.pop()
+                if isinstance(v, NSButton):
+                    out.append(v)
+                try:
+                    stack.extend(v.subviews())
+                except Exception:                                 # noqa: BLE001
+                    pass
+            return out
+
+        closes = [b for b in _all_btns(h2.window.contentView())
+                  if b.title() == "关闭"]
+        check("⭐「关闭」的 target 还在（没被 GC）—— 弱引用的经典坑",
+              len(closes) == 1 and closes[0].target() is not None,
+              f"target={[str(b.target()) for b in closes]}")
+        if closes and closes[0].target() is not None:
+            _click(closes[0])
+            check("⭐ 点「关闭」-> 窗口真的关掉了", not bool(h2.window.isVisible()))
     finally:
         EP2.close_panel()
         _sh.rmtree(iso, ignore_errors=True)

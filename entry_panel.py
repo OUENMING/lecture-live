@@ -668,15 +668,24 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         NSMakeRect(PAD, PAD + 6.0, WIDTH - 2 * PAD - 100.0, 18.0), 11.0, alpha=DIM)
     ve.addSubview_(status_holder["label"])
 
-    btn_tgt = objc_own.own("EntryClose", NSObject,
-                           {"close_": lambda self, _: do_close()}).alloc().init()
+    # ⚠️⚠️ **关闭按钮曾两次踩同一个坑**（2026-09-26 作者实测「关闭无反应」）：
+    #   1. 第一版是 `objc_own.own("EntryClose", …, {"close_": lambda …: do_close()})`
+    #      + 一个**局部变量** `btn_tgt`。函数一返回就没人引用它 → 被 GC →
+    #      而 `setTarget_` 是**弱引用** → `target()` 变成 `None` → **点了完全没反应，
+    #      也不报错**。实测：连 `gc.collect()` 都不用，检查时它已经是 None 了。
+    #   2. 同一个 key 的类**被缓存** → 面板关掉再开，那个 lambda 还是**第一次**的
+    #      `do_close`，会去关一个已经不在的窗口。
+    #   → 正确答案仓库里早就有：走 `_target()`（**回调挂实例**），
+    #     并把 target **留住**（`_targets` 那份约定）。我在这里没照做。
+    btn_tgt = _target(do_close)
     btn = NSButton.alloc().initWithFrame_(
         NSMakeRect(WIDTH - PAD - 76.0, PAD + 2.0, 76.0, 26.0))
     btn.setTitle_("关闭")
     btn.setBezelStyle_(1)
-    btn.setTarget_(btn_tgt)
-    btn.setAction_("close:")
+    btn.setTarget_(btn_tgt)                             # ⚠️ 弱引用 —— 靠下面那行留住
+    btn.setAction_("act:")
     ve.addSubview_(btn)
+    win._entry_targets = [btn_tgt]                      # ← 留住它，否则被 GC
 
     refresh()
 

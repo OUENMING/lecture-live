@@ -78,6 +78,32 @@ HILITE_A = 0.16        # 拖拽悬停
 DIM = 0.62             # 次要文字（白字降 alpha）
 
 
+def _later(fn, *a):
+    """把 UI 重建**推迟到下一轮 runloop**。
+
+    ⚠️⚠️ **绝不能在按钮的 action 里拆掉那个按钮自己所在的视图树。**
+       作者 2026-09-26 实测报的症状：**删到最后一个会卡顿 → 之后「删」和「撤销」
+       都点不动 → 第二次尝试又正常**。
+
+       机制：`NSButton` 的点击走 `NSCell` 的**跟踪循环**
+       （`trackMouse:inRect:ofView:untilMouseUp:` —— 那是一个**模态事件循环**），
+       我们的 action 是从那个循环**里面**被调用的。此刻 `refresh()` 把卡片
+       （连同那个按钮）`removeFromSuperview` 掉 —— 跟踪循环还在栈上，
+       而它的视图已经不在窗口里了，AppKit 卡在那儿。
+       → **主线程被占住 → 所有按钮都没反应**（不只是被点的那个），
+         这正好解释「第二次又正常」（那时点的是新建的按钮）。
+
+       ⚠️ 同一件事的另一面：`_target` 对象**只被卡片的 `_targets` 引用**，
+          而它此刻**正在执行自己的方法**。同步拆树 = 在方法执行期间把 `self` 释放掉。
+
+       → 推迟一轮：那时跟踪循环已经退干净、按钮也不再是 sender 了。
+         用 `AppHelper.callAfter`（＝ `performSelectorOnMainThread:…waitUntilDone:NO`），
+         **仍在主线程**，只是晚一个 runloop 周期（毫秒级，看不出延迟）。
+    """
+    from PyObjCTools import AppHelper
+    AppHelper.callAfter(fn, *a)
+
+
 class Handles(typing.NamedTuple):
     """`build()` 的把手。**调用方必须留住它**（里面有被弱引用的 delegate/target）。"""
     window: typing.Any
@@ -640,7 +666,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         entry["undo"] = {"text": term,
                          "entries": list(zip(res.positions, res.removed))}
         set_status(f"已删除 {term} —— 卡片上有「撤销」")
-        refresh()
+        _later(refresh)                # ⚠️ **必须推迟** —— 见 `_later` 的说明
 
     def do_undo(course):
         entry = S["result"].get(course)
@@ -659,7 +685,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         entry["removed"].discard(u["text"])
         entry["undo"] = None
         set_status(f"已把「{u['text']}」放回原位置")
-        refresh()
+        _later(refresh)                # ⚠️ 同上：别在 action 里拆 sender 的视图
 
     from AppKit import NSButton, NSObject
 

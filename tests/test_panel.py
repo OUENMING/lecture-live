@@ -542,11 +542,33 @@ def main() -> int:
             #     → **判据要在事情发生的那一刻成立，不是等一切回滚之后再判。**
             check("⚠️ 点「删」的那一刻真 glossary 就没被碰（隔离是真的）",
                   real.read_bytes() == real_before)
+
+            # ⭐⭐ **重建必须是推迟的。** 作者 2026-09-26 报「删到最后一个会卡顿 →
+            #     删/撤销都点不动 → 第二次又正常」：在按钮 action 里同步拆掉
+            #     那个按钮自己所在的视图树，而 `NSButton` 的点击是在 `NSCell` 的
+            #     **模态跟踪循环**里回调的 —— 循环还在栈上、视图已经没了 → 主线程卡住。
+            #     → 点完**立刻查**应当查不到重建结果；pump 一轮之后才查到。
+            check("⭐ 点完「删」立刻查 -> 还没重建（证明真的推迟了，不是同步拆的）",
+                  len(_card_btns(h2.window.contentView(), "ECON10740", "撤销")) == 0,
+                  "同步重建了 —— 那正是会卡住的那个写法")
+
+            def _pump(sec=0.3):
+                """跑一小会儿主 runloop，让 `_later()` 排的回调真的执行。
+
+                ⚠️ 不 pump 的话 `AppHelper.callAfter` 一直排队里 —— 测试会看到
+                   「推迟了但永远不发生」，而那是个假绿。
+                """
+                from AppKit import NSDate, NSRunLoop
+                NSRunLoop.mainRunLoop().runUntilDate_(
+                    NSDate.dateWithTimeIntervalSinceNow_(sec))
+
+            _pump()
             undos = _card_btns(h2.window.contentView(), "ECON10740", "撤销")
-            check("⭐ 出现「撤销」按钮（HIG：删东西用撤销，不用确认框）",
+            check("⭐ pump 一轮之后出现「撤销」按钮（HIG：删东西用撤销，不用确认框）",
                   len(undos) == 1, f"找到 {len(undos)} 个")
             if undos:
                 _click(undos[0])
+                _pump()
                 check("⭐⭐ 点「撤销」-> 副本**逐字回到原样**",
                       gpath.read_text(encoding="utf-8") == before)
         check("⚠️ 真 glossary 逐字节未变（隔离真的成立）",

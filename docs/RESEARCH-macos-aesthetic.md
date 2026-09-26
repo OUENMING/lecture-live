@@ -145,21 +145,26 @@ to the bottom of the window, where the concentricity does not match any elements
 - ✅ 「**inactive windows don't use materials**」（HIG › Windows 逐字）—— **已实测（2026-09-26）**，
   结论是**没问题，但依赖一行代码**：
 
-  | `glass.state()` | 离屏渲染均亮 | hash |
-  |---|---|---|
-  | **`Active`**（`panel.py` 显式设的） | **57.4** | `1ab4a24ac066` |
-  | `FollowsWindowActiveState`（**AppKit 的默认值**） | **24.7** | `d9103c7d5152` |
+  | `glass.state()` | 离屏渲染均亮 | 上屏 · 白底 | 上屏 · 深底 |
+  |---|---|---|---|
+  | **`Active`**（`panel.py` 显式设的） | 57.4 | **168.7** | **27.3** |
+  | `FollowsWindowActiveState`（AppKit 默认） | 24.7 | **168.7** | **27.3** |
 
-  **在 app 不激活时（= 上课时的常态）两者差 2.3 倍亮度。**
-  HIG 那句描述的**就是默认行为** —— 我们绕开它的方式正是那行 `setState_(Active)`，
-  而 `NSVisualEffectView.state` 默认是 `FollowsWindowActiveState`，对一个几乎不激活的
-  `.accessory` app **等于默认失效**。
-  ⚠️ **删掉那一行不会有任何症状，只是面板每节课暗 2.3 倍。**
+  ⚠️⚠️ **离屏那 2.3 倍的差，上屏量不到** —— 白底、深底都**一模一样**。
+  离屏渲染没有「窗口背后是什么」可合成，那个差是这个退化情形的产物。
 
-  ⚠️ **这次量的限制**：`app.isActive()` 在四个条件里**全是 False**
-  （`.accessory` + 没有真事件循环，`activateIgnoringOtherApps_` 不生效），
-  所以「app 激活」那条轴**没驱动起来** —— 上面的对比是**同一个状态下的两个 `state` 取值**，
-  不是「激活 vs 不激活」。要驱动那条轴得开真事件循环再量。
+  ⭐ **所以别把离屏的差值当成用户看得见的差值。** 我第一版就是这么写错的
+  （原文：「删掉那一行面板每节课暗 2.3 倍」），**上屏实测推翻了它**。
+
+  ⭐ **这条对仓库的闸门有直接影响**：`test_panel.py` 的 `render_hash` 是**离屏**的 ——
+  它是有效的**回归探测器**（确定性、对内容层属性敏感），但**它的幅度不是屏幕上的幅度**。
+  **它红了不等于用户看得出。**
+
+  ⚠️ 那 `panel.py` 那行 `setState_(Active)` 还要不要留？**留** ——
+  它是配方的一部分、有官方依据（`NSVisualEffectView.state` 默认跟随窗口激活态，
+  而我们是几乎不激活的 `.accessory` app），**只是别声称「不留会暗 2.3 倍」**。
+  本次没能驱动「app 激活」那条轴（`app.isActive()` 恒 False），
+  所以「激活时两者是否有别」**仍未知**。
 
 ⭐ **窗口阴影**：`NSVisualEffectView.h` 原文 —— `maskImage` 用在一个**作为 window contentView**
 的 effect view 上时，「**will correctly influence the window's shadow**」。

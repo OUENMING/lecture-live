@@ -10,10 +10,13 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 
 | 分支（什么时候读） | 读哪个 |
 |---|---|
+| ⭐ **该做什么、按什么顺序做** —— 动手前先读这份 | `docs/PLAN-roadmap.md` |
 | **架构判断、模块深度、seam** —— 动代码前读，但它是 **2026-09-18 的历史快照**，**正文行号一律别抄** | `ARCHITECTURE.md`（文首有横幅说明哪几条已解决） |
 | 更新机制（分级 / 自动更新 / 卡片） | `docs/PLAN-update-mechanism.md` |
 | 笔记复习层重做 + 课件联动 + 多用户 + UI 动效 | `docs/PLAN-notes-and-ui.md` |
-| 外部评审（功能/架构/技术/思路，含**已知薄弱点**） | `docs/REVIEW-2026-09-24.md` |
+| **导入入口 + 无 Obsidian 时的导出**（调研 + 设计，含全部实测数字） | `docs/RESEARCH-entry-and-export.md` |
+| **产品形态（要不要做成 .app）+ VPS 评估 + 课件→关键词** | `docs/RESEARCH-product-shape.md` |
+| 外部评审（功能/架构/技术/思路，含**已知薄弱点**） | ⚠️ **不在仓库里**（作者决定不推送评审文档）。在 `~/Desktop/classlive-review/REVIEW-2026-09-24.md` |
 | 启动、命令行参数、课程切换 | `cl` → `main.py` |
 | 主循环、后台线程、队列、UI 路由与落盘分发 | `main.py` |
 | 音频采集、麦克风/系统声、电平归一化 | `capture.py` |
@@ -54,7 +57,11 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 - **新增 streamq tag 必须在 `main.drain()` 加同分支** —— 它是唯一的 tag 分发点，漏改即静默丢弃。
 - **会话 Markdown 格式是三方共享契约**：`obsidian_writer` 写它、`_parse` 读回它、`cl last` 用 grep 匹配它；改格式会同时打断三处。
 - **`--context` 有两个默认值**：CLI 是 5，`translator.load_translator` / `CloudTranslator` 是 2；直接调库拿到的行为与 `cl` 不同。
-- **环境不可复现**：没有 `requirements.txt` / `pyproject.toml` / `uv.lock`，依赖只写在 `docs/DESIGN.md` 的安装片段里。
+- **环境不可复现**：`requirements.txt` 存在（只有下界、无 lock），没有 `pyproject.toml` / `uv.lock`；
+  选型理由写在 `docs/DESIGN.md`。
+  ⚠️ 本条曾写成「**没有** `requirements.txt`」—— 那是 2026-09-24 之前的旧状态，该文件之后已建。
+  ⚠️ `.venv` 是 uv 建的，**里面没有 pip**（`.venv/bin/python -m pip` 会失败）；装包用
+  `uv pip install --python .venv/bin/python …`。
 - **`IOGPUFamily` 内核崩溃史**：2026-09-10 本工具触发过一次 GPU 驱动断言 panic（非 OOM）；`translator._configure_mlx` 是缓解措施。动 mlx / 本地模型路径时留意。
 - **`sessions/` 只追加**：曾误删过一节真实课堂记录、不可恢复；里面的 `*_TEST.md` 是测试残留，也留着。
 - **个人数据保持不入库**：`.gitignore` 覆盖 `sessions/`、`glossary/`、`.course`、`.deepseek_key`、`term_notes*.json`；真实课号已三次脱敏。改 `.gitignore` 前先想清楚这一条。

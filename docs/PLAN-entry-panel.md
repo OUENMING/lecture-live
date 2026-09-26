@@ -367,7 +367,7 @@ ECON10740  Exploring Economics              ← 课名 = glossary 首行（trans
 - 仍走 `_atomic_write`（复用 `build_notes._atomic_write`）
 - ~~**删除也要进墓碑**（`prep-state.json`）~~ ⚠️ **这句是错的，2026-09-26 实现时纠正**：
   墓碑 `appended` 记的是「prep **曾经加过**哪些词」，而 `prepare()` 里
-  `if k in have or k in tomb: skipped`（`prep.py:796`）**已经在跳过墓碑里的词**。
+  `if k in have or k in tomb: skipped`（`prep.py:962`）**已经在跳过墓碑里的词**。
   删掉术语表里那一行**不影响** `appended` → **重跑照样不会复活**。
   → **删除只写术语表一个文件**；多写一次 `prep-state.json` 是白加一条写路径与失败面。
 

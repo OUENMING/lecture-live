@@ -32,76 +32,19 @@ import os
 import pathlib
 import re
 
-# 复用 overlay.py 已经调好的那套（材质、圆角、发灰补偿都实测过），不另起一套
+import panel
+
+# 复用 panel.py 那套配方（材质、圆角、发灰补偿都实测过），**不另起一套** ——
+# 以前这里抄了一份，连 SCRIM_ALPHA 都各写一遍。
 WIDTH = 620.0
 PAD = 20.0
 TITLE_H = 30.0
 LINE_H = 21.0
 LOG_H = 360.0          # 可滚动日志区的高度（有 log 时用它，没 log 时按摘要行数算）
 FOOT_H = 68.0          # 底部两行：状态行 + (勾选框｜立即更新｜知道了)
-CORNER = 16.0
-SCRIM_ALPHA = 0.38     # 与 overlay.SCRIM_ALPHA 同值：白底 PPT 上也要能读
 
 _W = 0.23              # NSFontWeightMedium，同 overlay.WEIGHT
 _STRONG = 0.55         # NSFontWeightSemibold，日志里的小标题用
-
-_Cls = None
-
-
-def _classes():
-    """延迟定义两个 ObjC 子类（⚠️ 只能定义一次，重复会报 override 错 —— overlay 踩过）。"""
-    global _Cls
-    if _Cls is None:
-        import objc
-        from AppKit import NSPanel, NSView
-
-        # ⚠️⚠️ 类名**必须全局唯一**：ObjC 运行时按名字注册类，重名会抛
-        # `_Panel is overriding existing Objective-C class`。overlay.py 里已经有
-        # `_Panel` / `_DragLayer`，所以这里绝不能照抄那两个名字 —— 踩过：
-        # build() 的 fail-soft except 把这条吞了，卡片**静默**变 None，
-        # 独立测试却全绿（那时 overlay 没加载）。
-        class _CLWhatPanel(NSPanel):
-            # 非模态卡片：能成为 key（按钮可点），但不用它来激活 app
-            def canBecomeKeyWindow(self):            # noqa: N802
-                return True
-
-            def canBecomeMainWindow(self):           # noqa: N802
-                return False
-
-            def sendEvent_(self, event):             # noqa: N802
-                """点击时先激活 app —— 与 `overlay._Panel.sendEvent_` 同款处理。
-
-                理由（overlay 那边实测出来的）：面板是 `NonactivatingPanel` 且只用
-                `orderFrontRegardless()` 显示，app 从不激活；此时 AppKit 会把第一次
-                点击**先用于激活窗口**、不送给控件（NSButton 的 `acceptsFirstMouse`
-                默认 False）—— 表现为"按钮点了没反应，也不报错"。
-
-                ⚠️ **2026-09-26 留下这段的经过，别当它是实测结论**：
-                当时是拿一个自制脚手架测出"三个按钮一个都点不动"就下了判断，
-                后来发现**脚手架本身是坏的** —— `AppHelper.runConsoleEventLoop()`
-                只转 `NSRunLoop`，**从不调 `[NSApp run]`**，所以窗口服务器的事件
-                根本没被取出（面板收到 **0** 个事件；换 `runEventLoop()` 后同一个
-                卡片收到 76 个事件、按钮正常响应）。
-                **所以"卡片按钮坏了"这个观察是假的。**
-                这段保留，是因为它对齐 overlay 那套**已验证可用**的写法
-                （真 app 里 app 不激活、面板不 key，与 overlay 面板处境相同），
-                不是因为被实测证明必需。
-                """
-                if event.type() == 1:                # NSEventTypeLeftMouseDown
-                    try:
-                        from AppKit import NSApplication
-                        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-                    except Exception:                # noqa: BLE001
-                        pass
-                objc.super(_CLWhatPanel, self).sendEvent_(event)
-
-        class _CLWhatDrag(NSView):
-            """整块背景可拖（和 overlay 同一个做法：mouseDownCanMoveWindow 是总开关）。"""
-            def mouseDownCanMoveWindow(self):        # noqa: N802
-                return True
-
-        _Cls = (_CLWhatPanel, _CLWhatDrag)
-    return _Cls
 
 
 def _log_attr(text: str):
@@ -217,14 +160,10 @@ def build(version: str, summary: str, date: str = "", log: str = "",
     跑完用这三个回调把进度写回卡片（绝不在主线程做网络）。
     """
     try:
-        from AppKit import (NSAppearance, NSAppearanceNameDarkAqua, NSButton,
-                            NSButtonTypeSwitch, NSColor, NSFont, NSMakeRect,
-                            NSFloatingWindowLevel, NSLineBreakByWordWrapping,
-                            NSTextField, NSTextAlignmentLeft, NSVisualEffectMaterialHUDWindow,
-                            NSVisualEffectStateActive, NSVisualEffectView, NSView,
-                            NSWindowCollectionBehaviorCanJoinAllSpaces,
-                            NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel)
-        Panel, DragLayer = _classes()
+        from AppKit import (NSButton, NSButtonTypeSwitch, NSColor, NSFont,
+                            NSMakeRect, NSLineBreakByWordWrapping, NSTextField,
+                            NSTextAlignmentLeft, NSWindowStyleMaskBorderless,
+                            NSWindowStyleMaskNonactivatingPanel)
 
         # ⚠️ 摘要是从 CHANGELOG.md 里抠出来的 **Markdown**, 而这里只画纯文本 ——
         # 不处理就会出现字面的 `**上面**`(实测踩过)。
@@ -235,36 +174,13 @@ def build(version: str, summary: str, date: str = "", log: str = "",
         body_h = LOG_H if log else len(summary_lines) * LINE_H + 10
         h = PAD + TITLE_H + body_h + 12 + FOOT_H + PAD
 
-        style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
-        p = Panel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, WIDTH, h), style, 2, False)
-        # ⚠️ 必须显式 DarkAqua —— overlay 那边像素级实测过：系统浅色时 `.hudWindow`
-        # 会被渲染成灰（面板中心亮度 0.314 → 强制深色后 0.113）。这里同款材质，同款毛病。
-        p.setAppearance_(NSAppearance.appearanceNamed_(NSAppearanceNameDarkAqua))
-        p.setLevel_(NSFloatingWindowLevel)
-        p.setCollectionBehavior_(NSWindowCollectionBehaviorCanJoinAllSpaces)
-        p.setOpaque_(False)
-        p.setBackgroundColor_(NSColor.clearColor())
-        p.setMovableByWindowBackground_(True)
+        # ---- 窗口 + 磨砂 chrome 全在 panel.py（**唯一定义点**），这里没有第二份配方 ----
+        fp = panel.build(NSMakeRect(0, 0, WIDTH, h),
+                         NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
+        p, ve, scrim, drag = fp.window, fp.glass, fp.scrim, fp.drag
+        # ⚠️ 这行**不是**配方的一部分：overlay（Titled）默认就有阴影，而 borderless
+        #    面板默认没有 —— 所以留在调用点，不进 panel.py。
         p.setHasShadow_(True)
-
-        content = p.contentView()
-        ve = NSVisualEffectView.alloc().initWithFrame_(content.bounds())
-        ve.setMaterial_(NSVisualEffectMaterialHUDWindow)
-        ve.setState_(NSVisualEffectStateActive)
-        ve.setWantsLayer_(True)
-        ve.layer().setCornerRadius_(CORNER)
-        ve.layer().setMasksToBounds_(True)
-        content.addSubview_(ve)
-
-        scrim = NSView.alloc().initWithFrame_(ve.bounds())
-        scrim.setWantsLayer_(True)
-        scrim.layer().setBackgroundColor_(
-            NSColor.blackColor().colorWithAlphaComponent_(SCRIM_ALPHA).CGColor())
-        ve.addSubview_(scrim)
-
-        drag = DragLayer.alloc().initWithFrame_(ve.bounds())
-        ve.addSubview_(drag)
 
         def label(text, y, size, alpha=1.0, bold=False, wrap=False):
             lb = NSTextField.alloc().initWithFrame_(

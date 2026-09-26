@@ -22,6 +22,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | **构建可双击的 `.app`**（方案 I：`.app` 就是安装目录） | `make-app.sh`（**动手前先读它的注释**） |
 | **装成系统里能直接启动的 app**（`/Applications` 符号链接） | `install.sh`（**动手前先读它的注释**，§3.11 有完整论证） |
 | **单实例锁**（为什么用 flock 不用 pidfile） | `instance_lock.py` |
+| **磨砂面板配方**（材质/scrim/拖拽层/ObjC 类）—— overlay 与 whatsnew 的唯一真源 | `panel.py`（**动手前先读它的文件头**） |
 | **面向用户的提示**：说人话的弹窗 / 麦克风权限三态 / 跳系统设置 | `notice.py` |
 | 主循环、后台线程、队列、UI 路由与落盘分发 | `main.py` |
 | 音频采集、麦克风/系统声、电平归一化 | `capture.py` |
@@ -127,5 +128,12 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   ⚠️ 核心那条是「被 kill -9 之后锁自动释放」—— 但**它单独是恒真的**，
   必须和 C1/C2 连读（见那个测试的 docstring）。
 - 碰过流水线 / 音频路径：`ClassLive.app/Contents/MacOS/python test_pipeline.py <音频> [start] [dur] [speed]` 能跑完。
-- 碰过 `overlay.py` / `transcript_view.py`：`ClassLive.app/Contents/MacOS/python probe_scroll.py` 验滚动行为。
+- **碰过面板**（`panel.py` / `overlay.py` 的窗口构造 / `whatsnew.py`）：`ClassLive.app/Contents/MacOS/python tests/test_panel.py` 全绿。
+  ⚠️ 它**不在**默认闸门里，要单独跑。三组断言各管一件事，**不能只跑其中一组**：
+  ① 属性（覆盖 `level` / `collectionBehavior` 这些**离屏渲染看不见**的窗口层属性）
+  ② 离屏渲染哈希（覆盖内容层：材质 / DarkAqua / 圆角 / masksToBounds / scrim 透明度）
+  ③ **单进程**同时装 overlay + whatsnew —— 这条以前从来没人测过，而它正是
+  2026-09-26「更新卡片静默变 None」的现场（当时的独立测试全绿，因为 overlay 没被 import）。
+  ⚠️ 量具灵敏度是实测过的：**离屏渲染对窗口层属性是瞎的**，所以①不能省。
+- 碰过 `overlay.py` / `transcript_view.py` 的**布局或滚动**：`ClassLive.app/Contents/MacOS/python probe_scroll.py` 验滚动行为。
 - 报"可用"之前先跑上面命中的那条、贴出输出，再下结论。

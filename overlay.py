@@ -17,9 +17,12 @@
 调用约定: main.py 保证所有方法都在主线程调用。
 """
 from __future__ import annotations
+
 import os
 import pathlib
 import time
+
+import panel
 
 try:
     from AppKit import NSRunLoop, NSDate
@@ -205,7 +208,7 @@ PUMP_ACTIVE_S = 0.15             # 距上次事件在此窗口内 = 手势进行
 # ⚠️ 上面那行"a=0.45 → 3.33:1"是**旧配方**下测的, 与本次实测(2.60:1)对不上,
 #    别引用那三个数。真数看这张表。可读性实际由描边(见 _make_shadow)承担,
 #    纯白底上仍清晰; 但继续往下调 scrim 收益递减、白底最先失守, 0.32 是底线。
-SCRIM_ALPHA = 0.38
+SCRIM_ALPHA = panel.SCRIM_ALPHA   # ⚠️ 数值的唯一定义点在 panel.py（配方在那边），别在这里改
 
 
 def _make_shadow():
@@ -254,9 +257,6 @@ def _make_button_target(on_click):
     return t
 
 
-_PanelCls = None
-
-
 def _xy(p) -> tuple:
     """把 PyObjC 返回的点统一成 (x, y) 浮点元组。
 
@@ -269,49 +269,6 @@ def _xy(p) -> tuple:
         return float(p.x), float(p.y)
     except AttributeError:
         return float(p[0]), float(p[1])
-
-
-def _make_panel(rect, style, backing, defer):
-    """无边框 NonactivatingPanel。
-
-    ⚠️ 必须 override **ObjC 名** `canBecomeKeyWindow`: 窗口无标题栏时基类返 False,
-    AppKit 会据此放弃把它变成 key window —— 那样输入框永远拿不到键盘。
-    Swift 名 `canBecomeKey` 无效(PyObjC 会把它注册进 runtime, 但 AppKit 从不调用)。
-    `canBecomeMainWindow` 不用动: key 与 main 无关。
-    类只定义一次(重复定义会报 override 错), 同 _ButtonTargetCls。
-
-    `sendEvent_` 保留一处: 点面板时手动激活 app(macOS 只让活跃 app 改光标,
-    而 NonactivatingPanel 按定义不会自激活)。移动与缩放的实际处理在拖拽层,
-    见 `Overlay._on_drag_layer_mousedown` / `_track_loop`。
-    """
-    global _PanelCls
-    from AppKit import NSPanel
-    if _PanelCls is None:
-        import objc
-
-        class _Panel(NSPanel):
-            def canBecomeKeyWindow(self):           # noqa: N802
-                return True
-
-            def sendEvent_(self, event):            # noqa: N802
-                """窗口收到的**每一个**事件都经过这里 —— 这是唯一绕不开的位置。
-
-                ⚠️ 为什么不去 override 某个视图的 mouseDown_: 实测(2026-09-24)
-                即使 `contentView.hitTest_()` 明确返回了我们的拖拽层,
-                它的 `mouseDown_` **一次都没被调用**(没有报错, 静默)。
-                窗口级的 sendEvent_ 没有这个问题。
-                """
-                if event.type() == 1:               # NSEventTypeLeftMouseDown
-                    try:
-                        from AppKit import NSApplication
-                        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-                    except Exception:               # noqa: BLE001
-                        pass
-                objc.super(_Panel, self).sendEvent_(event)
-
-        _PanelCls = _Panel
-    return _PanelCls.alloc().initWithContentRect_styleMask_backing_defer_(
-        rect, style, backing, defer)
 
 
 _InputDelegateCls = None
@@ -380,94 +337,6 @@ def _make_click_view(on_click):
     v = _ClickViewCls.alloc().initWithFrame_(((0, 0), (0, 0)))
     v._cb = on_click
     return v
-
-
-_DragLayerCls = None
-
-
-def _make_drag_layer(on_mousedown=None):
-    """整面板的背景拖拽层 —— 让"空白处任意位置都能拖窗口"。
-
-    为什么必须显式加这一层(2026-09-24 实测的拖动意图地图):
-        转录区   -> 移动 ✅(那里 _TranscriptDoc 自己调了 performWindowDragWithEvent_)
-        顶栏空白 -> **无反应** ❌
-        输入行   -> **无反应** ❌
-    于是用户按正常习惯去抓顶栏想移动窗口时什么都没发生, 再往外一点就落进 5px 缩放带
-    —— 体验就成了"想拖动却变成缩放"。
-
-    放在 z 序**最底**(紧跟 scrim), 所以控件、转录区、缩放抓取带都在它上面、各自照常
-    收事件; 只有真正的空白处才落到这一层。
-    """
-    global _DragLayerCls
-    from AppKit import NSView
-    if _DragLayerCls is None:
-        class _DragLayer(NSView):
-            def mouseDownCanMoveWindow(self):   # noqa: N802
-                # ⚠️ 必须 **True**(2026-09-24 实测定位): 这个返回值是 AppKit
-                # "按下背景即拖动窗口"的开关。设成 False 会让**背景完全拖不动**
-                # (而且 mouseDown_ 也收不到 —— 两边都落空)。
-                # 症状就是作者报的"只有按住转录区才拖得动": 转录区的文档视图恰好是
-                # True, 而这一层被我写成了 False 却盖住了顶栏等区域。
-                return True
-
-            def mouseDown_(self, event):        # noqa: N802
-                win = self.window()
-                if win is None:
-                    return
-                # 点面板任意空白处 -> 手动激活 app。macOS 只让**活跃 app** 改光标,
-                # 而面板带 NonactivatingPanel(那是"非激活时仍被合成"的前提)不会自激活。
-                try:
-                    from AppKit import NSApplication
-                    NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-                except Exception:               # noqa: BLE001
-                    pass
-                cb = getattr(self, "_cb", None)
-                if cb is not None:
-                    cb(event)                     # 最外一圈 -> 自己的嵌套循环缩放
-                # 其余情况 AppKit 会凭 mouseDownCanMoveWindow=True 自己拖动窗口
-
-        _DragLayerCls = _DragLayer
-    v = _DragLayerCls.alloc().initWithFrame_(((0.0, 0.0), (100.0, 100.0)))
-    v._cb = on_mousedown
-    return v
-
-
-_WindowDelegateCls = None
-
-
-def _make_window_delegate(on_resize):
-    """窗口委托 —— 只为一件事: **live resize 期间也要重排内容**。
-
-    ⚠️ 为什么必须用委托, 不能继续在 `pump()` 里轮询(2026-09-24 实测):
-    原生拖边缘缩放时 AppKit 会进入它自己的事件跟踪循环, **我们的整个主循环被
-    卡住 1239.8ms**(实测: 空闲期 pump 最大间隔 9.6ms, 拖拽期 1239.8ms)。
-    那 1.2 秒里 `_sync_panel_size()` 一次都跑不到 -> 窗口框在动、内容冻着,
-    松手才跳一下。手感就是作者说的"卡顿不够丝滑"。
-    `windowDidResize:` 是在那个跟踪循环**内部**回调的, 所以拖拽期间它能持续重排
-    —— 这才是 AppKit 给 live resize 的正规钩子。
-
-    这不违反本仓库"轮询而非观察者"的既定做法: 那条针对的是**滚动视图的 bounds
-    通知**(弱引用 + 自我 setFrame 期间重入); 窗口尺寸变化没有那个重入面,
-    而且轮询在拖拽期间**根本跑不到**, 除了委托没有别的办法。
-    """
-    global _WindowDelegateCls
-    from AppKit import NSObject
-    if _WindowDelegateCls is None:
-        class _WindowDelegate(NSObject):
-            def windowDidResize_(self, note):      # noqa: N802
-                cb = getattr(self, "_cb", None)
-                if cb:
-                    cb()
-
-            def windowDidEndLiveResize_(self, note):   # noqa: N802
-                cb = getattr(self, "_cb", None)
-                if cb:
-                    cb()
-
-        _WindowDelegateCls = _WindowDelegate
-    d = _WindowDelegateCls.alloc().init()
-    d._cb = on_resize
-    return d
 
 
 class Overlay:
@@ -572,20 +441,27 @@ class Overlay:
         else:
             style = (NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
                      | NSWindowStyleMaskResizable)
-        self._panel = _make_panel(
+        # ---- 建窗口 + 配 chrome。配方与 ObjC 类都在 panel.py（**唯一定义点**）----
+        # ⚠️ `on_resize` 构造时就得给：live resize 期间靠窗口委托重排内容。
+        fp = panel.build(
             NSMakeRect(0, 0, self._width, self._height), style,
-            NSBackingStoreBuffered, False)
+            on_background_click=self._on_drag_layer_mousedown,
+            on_resize=self._sync_panel_size)
+        self._panel, self._ve = fp.window, fp.glass
+        self._scrim, self._drag_layer = fp.scrim, fp.drag
+        self._win_delegate = fp.resize_delegate
+        # ⚠️ 下面还有一大片继续用短名 `ve`（重构前它就是个局部变量）。
+        #    别因为「self._ve 已经有了」就把这行删掉 —— 删了会在 __init__ 后半段
+        #    抛 NameError，而且是在**构造真 Overlay 时**才暴露（tests/test_panel.py 抓到过）。
+        ve = self._ve
+        # ⚠️ **必须留住 fp**：里面的 resize_delegate 是被 `setDelegate_` **弱引用**的
+        #    —— 丢了会被 GC，拖拽期间内容又冻回去，而且**完全不报错**。
+        self._targets.append(fp)
         # 宽度下限见 MIN_WIDTH 的实测依据。
         # ⚠️ **不设 `setContentResizeIncrements_`** —— 试过按 ROW_H 吸附高度, 手感是
         # "拖 30px 没反应、突然跳 70px", 作者的原话是"完全不跟手"。缩放要像拉窗口一样
         # 连续跟手, 所以让高度自由; 视口底部露半行字是可接受的(滚动视图本来就该这样)。
         self._panel.setContentMinSize_((MIN_WIDTH, self._min_height()))
-        # live resize 期间也要重排内容(否则拖拽那 1.2 秒里内容冻着, 松手才跳)。
-        # ⚠️ setDelegate_ 是**弱引用** -> 必须进 _targets 保命; 被 GC 掉的后果是
-        #    拖拽期间内容又冻回去, 而且**完全不报错**(与 _targets 里其它目标同理)。
-        self._win_delegate = _make_window_delegate(self._sync_panel_size)
-        self._targets.append(self._win_delegate)
-        self._panel.setDelegate_(self._win_delegate)
         # ⚠️ 轮询缓存必须在这里就用**真实 frame** 初始化。留成 None 的话, 第一次
         # _sync_panel_size 必然判成"尺寸变了" -> 把构造本身误记成"用户拖过" ->
         # 于是光是构造+close() 就会往仓库写 .window(跑一次测试落一个文件)。
@@ -596,51 +472,9 @@ class Overlay:
         if WINDOW_STYLE == "titled":
             self._panel.setTitleVisibility_(NSWindowTitleHidden)
             self._panel.setTitlebarAppearsTransparent_(True)
-        # ⚠️ 必须**显式指定深色外观**。像素级实测(2026-09-24): 系统处于浅色模式时,
-        # Titled 窗口的 NSVisualEffectView 会跟随窗口 appearance, `.hudWindow` 被渲染
-        # 成灰色 —— 面板中心平均亮度 **0.314**; 强制 DarkAqua 后降到 **0.113**
-        # (暗 2.8 倍), 通透感恢复。
-        # 这就是"换成 Titled 之后变灰"的**真因**: 与 material / blendingMode / opaque
-        # 都无关(那三项实测本来就是对的: HUDWindow=13, BehindWindow=0, state=Active)。
-        # Borderless 时不明显, 因为那时窗口没有主题框架、外观继承路径不同。
-        self._panel.setAppearance_(
-            NSAppearance.appearanceNamed_(NSAppearanceNameDarkAqua))
         # 红绿灯只存在于 Titled 窗口; borderless 下 standardWindowButton_ 全返回
         # None, 这个调用是安全的空操作, 所以不额外加条件。
-        self._hide_traffic_lights()
-        self._panel.setLevel_(NSFloatingWindowLevel)
-        self._panel.setCollectionBehavior_(NSWindowCollectionBehaviorCanJoinAllSpaces)
-        self._panel.setOpaque_(False)
-        self._panel.setBackgroundColor_(NSColor.clearColor())
-        # ⚠️ 必须 **True**(2026-09-24 实测): 它是"按下背景即拖动窗口"的总开关,
-        # 配合拖拽层的 `mouseDownCanMoveWindow -> True` 才生效。
-        # 试过设 False 想自己接管拖拽, 结果是**背景完全拖不动**(见拖拽层的说明)。
-        self._panel.setMovableByWindowBackground_(True)
-
-        content = self._panel.contentView()
-        ve = NSVisualEffectView.alloc().initWithFrame_(content.bounds())
-        ve.setMaterial_(NSVisualEffectMaterialHUDWindow)
-        ve.setState_(NSVisualEffectStateActive)
-        ve.setWantsLayer_(True)
-        ve.layer().setCornerRadius_(16.0)
-        ve.layer().setMasksToBounds_(True)   # scrim 是矩形, 靠这里裁成圆角
-        content.addSubview_(ve)
-        self._ve = ve
-
-        # 白底可读性: 材质之上、文字之下压一层半透明黑。
-        # 必须是 ve 的子视图、且在下面所有文字之前加入 —— 材质画在 drawRect,
-        # 设不了背景色, 只能靠这层 scrim 把白底压暗(3.4:1 -> 4.7:1)。
-        scrim = NSView.alloc().initWithFrame_(ve.bounds())
-        scrim.setWantsLayer_(True)
-        scrim.layer().setBackgroundColor_(
-            NSColor.blackColor().colorWithAlphaComponent_(SCRIM_ALPHA).CGColor())
-        ve.addSubview_(scrim)
-        self._scrim = scrim
-
-        # 背景拖拽层: 紧跟 scrim 加入 = z 序最底, 所以后面所有控件/转录区/缩放带
-        # 都在它上面, 各自照常收事件; 只有空白处落到这里 -> 拖窗口。
-        self._drag_layer = _make_drag_layer(self._on_drag_layer_mousedown)
-        ve.addSubview_(self._drag_layer)
+        panel.hide_traffic_lights(self._panel)
 
         self._NSFont, self._NSTF = NSFont, NSTextField
         # 答案折行的实测字体: 必须与转录区大字位用的是**同一个** 18pt Medium,
@@ -1149,28 +983,13 @@ class Overlay:
             pass
 
     def _hide_traffic_lights(self) -> None:
-        """藏掉左上角三个系统按钮 —— 但**保留** Titled 带来的原生缩放能力。
+        """转发到 `panel.hide_traffic_lights` —— 实现在配方那边（**唯一定义点**）。
 
-        这是 macOS 社区的既有做法: Christian Tietze 2020-10 那篇博客的标题就是
-        《Hide Traffic Light Buttons in NSWindow Without Removing Resize Functionality》,
-        Ghostty 的 `HiddenTitlebarTerminalWindow.swift` 同款。
-        Tietze 藏的是**四个**(含 .fullScreenButton); 我们实测只有 3 个
-        (styleMask 没设 FullScreen 位, type 7 为 None), 所以循环写成 0..7 防御。
-
-        ⚠️ 用 `setHidden_(True)` 而**不是** `removeFromSuperview()` —— 后者查不到
-        任何来源支持(搜 `standardWindowButton removeFromSuperview` 零命中), 而
-        Tietze 与 mkll/NSWindowStyles 两处有出处的做法都用 isHidden。
-        「红绿灯会自己回来」的社区实证指的是**位置**在 resize 后复位, 不是可见性。
-        ⚠️ 必须**可重复调用**: Ghostty 的注释原文 "macOS breaks it usually",
-        所以 show() 里也再调一次。
+        保留这个方法名是因为 `show()` 里也要再调一次（红绿灯的**位置**会在 resize
+        后自己复位，社区实证）。为什么用 setHidden_ 而不是 removeFromSuperview、
+        为什么循环写 0..7 —— 全在 `panel.hide_traffic_lights` 的 docstring 里。
         """
-        try:
-            for i in range(8):
-                b = self._panel.standardWindowButton_(i)
-                if b is not None:
-                    b.setHidden_(True)
-        except Exception:                     # noqa: BLE001
-            pass
+        panel.hide_traffic_lights(self._panel)
 
     # ---- 窗口级鼠标分派(移动 + 缩放, 含四角) ----
     def _zone_(self, lx: float, ly: float, w: float, h: float):

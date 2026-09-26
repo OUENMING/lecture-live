@@ -60,7 +60,7 @@ CHUNK_CHARS = 30_000
 DEFAULT_MAX_AUTO = 40
 DEFAULT_MAX_TOTAL = 120
 
-# ⚠️ 判断标准逐字沿用 `build_notes.py:39-45` 的 SYS_CLASSIFY —— **同一个人的口味，
+# ⚠️ 判断标准逐字沿用 `build_notes.SYS_CLASSIFY` 的 SYS_CLASSIFY —— **同一个人的口味，
 #    两条路一致**。但职责不重叠：那边是「给已有的术语分档」，这里是「从散文里抽词」。
 SYS_EXTRACT = """你在为一门大学课程整理**术语候选表**，供课堂实时字幕的翻译环节使用。
 
@@ -244,7 +244,7 @@ def _atomic_write(path: pathlib.Path, text: str) -> None:
 #   而第 5 行正是本模块 prompt **自己要求 LLM 做的剥离** —— 不改的话，
 #   LLM 只要顺手写成单数，就会被自己的复核判成幻觉。
 #
-# ⚠️ **不抽成共享模块、也不改 `build_notes.compile_term`**（`build_notes.py:482`）——
+# ⚠️ **不抽成共享模块、也不改 `build_notes.compile_term`**（`build_notes.compile_term`）——
 #    不是因为「那边在翻译主链路上」（**那句是错的**：`compile_term` 全仓只有一个调用点
 #    `build_notes.py` 的 `TermNotes._build_index`，而 `TermNotes` 只服务字幕上的术语解析；
 #    `translator` 根本不 import `build_notes`，它按行读字符串，一个正则都不用）。
@@ -445,7 +445,7 @@ def _repeated_lines(blocks, threshold: float = REPEAT_PAGE_RATIO) -> list:
 def _domain_prior(glossary_dir, course: str) -> str:
     """这门课的领域先验 —— 取 `glossary/<课号>.txt` 首行的注释。
 
-    ⚠️ **复用 `translator.course_title`**（`translator.py:136`）而不是自己再读一遍：
+    ⚠️ **复用 `translator.course_title`**（`translator.course_title`）而不是自己再读一遍：
     里面那套「精确路径不存在就按后缀模糊匹配」的容错逻辑（`course_terms_path`）
     正是「`cl course 1077` 写进去的是短代号」那种情况要的，抄一份就会漂移。
     它要的是**公共术语表**的路径，从它推出 `glossary/` 目录 —— 与运行时同一条路。
@@ -838,7 +838,7 @@ def prepare(course: str, files: list, *, glossary_dir, state_path,
 
         # ---- ⑥ 出口②：生成中文释义（已有流水线）----
         # ⚠️ `build_notes.build()` **返回 None**，而且没 key 时只打一行就 return
-        #    （`build_notes.py:247-248`）。所以：
+        #    （`build_notes.build`）。所以：
         #    · key 我们自己判，不让它那句「⚠ 没有 API key」混在进度里当成成功
         #    · 加了几条不能从返回值拿 —— 读 `term_notes.json` 前后条数做差
         notes_before = _notes_count()

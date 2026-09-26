@@ -101,6 +101,13 @@ main.py:845  TermNotes()                    →  读一次 term_notes.json
 
 ### 2.1 唯一的公开接口（`prep.py`）
 
+> ⚠️ **下面是方案期的草图，别照它调用。** 真实签名有 13 个参数
+> （多了 `glossary_dir` / `state_path` / `materials_dir` / `skip` / `api_key` /
+> `model` / `max_auto` / `max_total` / `ocr` / `chat` / `build_fn`），
+> **以 `prep.py` 的 `prepare()` 为准**（`inspect.signature(prep.prepare)` 一眼看到）。
+> 本节保留草图是因为它表达的是**设计意图**（只有课号与文件是必须的，
+> 其余都该有默认值），那一条实现时守住了。
+
 ```python
 def prepare(course: str, files: list[pathlib.Path], *,
             on_progress=None) -> PrepResult

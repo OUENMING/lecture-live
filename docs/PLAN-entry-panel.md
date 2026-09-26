@@ -361,7 +361,18 @@ ECON10740  Exploring Economics              ← 课名 = glossary 首行（trans
 ⚠️ 实现要求：
 - 删的是**行**（按内容精确匹配），不是「按出现位置」—— 位置会因并发而漂
 - 仍走 `_atomic_write`（复用 `build_notes._atomic_write`）
-- **删除也要进墓碑**（`prep-state.json`）—— 否则重跑同一份课件会把它加回来（已有的机制）
+- ~~**删除也要进墓碑**（`prep-state.json`）~~ ⚠️ **这句是错的，2026-09-26 实现时纠正**：
+  墓碑 `appended` 记的是「prep **曾经加过**哪些词」，而 `prepare()` 里
+  `if k in have or k in tomb: skipped`（`prep.py:796`）**已经在跳过墓碑里的词**。
+  删掉术语表里那一行**不影响** `appended` → **重跑照样不会复活**。
+  → **删除只写术语表一个文件**；多写一次 `prep-state.json` 是白加一条写路径与失败面。
+
+✅ **步 4 已实现**（2026-09-26）：`prep.remove_terms()` + `prep.removed_lines()`。
+`removed_lines` 是那条不变量的**可执行定义**（子序列判定），**实现与测试共用同一份** ——
+别在测试里另写一份判据，那会漂移，而漂移之后两边都「通过」。
+⚠️ **写盘前有闸门**：`removed_lines(old, new) is None` 就抛错**拒绝写入** ——
+让不变量**承重**，不是写在注释里（实测把它改成 `if False` 会让两条断言变红）。
+测试在 `tests/test_prep.py` 尾部（56 → 84 条）。
 
 ### 3.4 ⭐ 卡片本身就是拖拽目标（我的补充，也是最值的一条）
 
@@ -568,3 +579,137 @@ UI 回写一律 `AppHelper.callAfter` 回主线程。
 - ❌ 不做 watched folder（Zotero 官方拒绝过；旧调研已判）
 - ❌ 不改 `main.py` / `translator.py` / `drain()` 的语义
 - ❌ 不做常驻窗口（作者选了菜单栏入口）
+
+---
+
+## 7. ⭐ 批量分类（作者 2026-09-26 提的第二套交互）
+
+**作者原话大意**：拖**一堆**文件到面板空白处 → 自动判断每份归哪门课 → 落到那门课术语表。
+**作者已认可的形状**：`本地先分 → 分不出的才问模型 → ⚠️ 先把映射摆给他看，他点头才写`。
+
+⚠️ **本节是调研结论 + 设计，尚未实现。** 两份补调研 + 一条我自己的实测。
+
+### 7.1 ⚠️ 先纠我自己一句错话
+
+我一度说「4/5 个文件不用问模型」——**那句是错的**。我拿的是碰巧在上下文里见过的 5 个文件名，
+**分母一换结论就翻**。真扫 `~/Downloads` 的 **468 份**候选文件（`/tmp/classify_probe.py`，未入库）：
+
+```
+唯一命中 7   ·   打平→拒绝 1   ·   一点线索都没有 460
+                                    本地只能解决 7/468 = 1%
+```
+
+⭐ **根因不是「文件名不够好」，是四门 ECON 课的课名几乎是同一句话**：
+
+| 课 | 有效词 |
+|---|---|
+| ECON10730 | econ, **economists** |
+| ECON10740 | econ, **economics**, exploring |
+| ECON10770 | econ, **economics** |
+| ECON10790 | econ, **economists**, **mathematics** |
+| SOC10020 | **sociology** ← 独一份 |
+
+**`econ` 四门共有** → 任何带 economics 的文件同时给几门打分 → 打平 → 拒绝。
+实测那条：`Linear functions in MICROECONOMICS.pdf → [(2,ECON10770), (2,ECON10740), (1,ECON10790)]`。
+
+→ **本地匹配只能吃掉代号有独有词的课（SOC）；ECON 那四门必须看内容。**
+
+### 7.2 ⭐ 调研：Jev 是什么（`[官方]`，与仓库旧结论**不同**）
+
+| 项 | 值 |
+|---|---|
+| 身份 | TypeSafe AI 的 System One，`jev-1.13.0`（2026-09-15） |
+| ⭐ 本质 | **不生成文本**。只答**类型化问题**，返回**概率** |
+| 端点 | `POST https://api.commandcode.ai/provider/v1/systemone` —— ⚠️ **不是 `/chat/completions`** |
+| 认证 | `Authorization: Bearer <CMD_API_KEY>` |
+| 请求体 | TypeSafe 原形 `{model, state, questions}` —— **不是 chat messages** |
+| ⭐ 三原语 | `noul`（0–1 是非概率）· **`choice`（≤255 选项，返回全概率分布 + confidence）** · `score` |
+| 上下文 | 32k（CommandCode 侧） |
+| 套餐 | **GOAT 及以上**才有 Provider API 权限；$1 的 Go 档没有 |
+| 价格 | 输入 **$0.042/M**、输出 $0。⚠️ **免费额度已于 2026-09-24 结束**（原以为还有） |
+| 流式 | **从不流式**（官方原话「it never streams」） |
+
+⚠️⚠️ **仓库旧结论 `commandcode-endpoint-routing.md`（「非 Claude 模型只走 /v1/chat/completions」）
+对 Jev 不适用** —— Jev 根本不是 chat 模型。**别再拿那条去选端点。**
+
+⚠️ **一条会让请求直接失败的**：`typesafe/jev` **没有 ZDR-capable 上游** ——
+带 `x-cmd-zdr: 1`（或 `CMD_ZDR=1`）会被 **422 拒绝**。
+
+⚠️ **中文：官方文档自己写明的短板**（逐字）：
+> 「English is the primary training language… **Other languages, including CJK scripts, are handled
+> but not equally well**; test on your own content before relying on Jev for a non-English workload」
+
+→ **判据只用英文那半**（课号 + 英文课名），中文不进 `state`。
+
+### 7.3 ⭐ 两份调研**独立指向同一个设计**
+
+| 来源 | 说法 |
+|---|---|
+| DEVONthink `[厂商]` | 「**This command is disabled if DEVONthink is not sure enough** about possible destinations」→ **不确定就不给结论** |
+| paperless-ngx `[厂商]` | 措辞是「can **suggest** tags」—— **suggest，不是 assign** |
+| Jev `[官方]` | `choice` **原生返回全概率分布 + confidence**，官方原话：「Set the thresholds for when it acts **autonomously** and when it **asks for review**」 |
+
+→ ⭐ **置信度门槛不是我们发明的，是三处独立要求的同一件事。** 而 Jev 是三个里唯一**原生**给的。
+
+### 7.4 ⭐ 先例：「先看映射再落盘」是**行业标准**，不是过度谨慎
+
+| 产品 | 做法 | 档 |
+|---|---|---|
+| **DEVONthink** | 建议列表**带相关性分数**（"heat-mapped score"），选了才落盘 | `[厂商]` |
+| **CSV 导入这一族** | 「an **import preview where you can confirm field mappings**」 | `[厂商]` |
+| **导入 UX 共识** | 「A good CSV importer is not an upload form. It is a **staged workflow** that helps users **inspect, fix, validate, and only then commit**」 | `[设计]` |
+
+⚠️ **但我们要的那个形态没有现成可抄**：DEVONthink 是**逐条**、CSV 那族是**字段**映射，
+**「N 个文件 → N 门课的映射表」夹在两者之间** —— 这是要自己设计的（也是差异化空间）。
+
+### 7.5 ⚠️ 失败模式：我们的版本比 paperless-ngx 那次更毒
+
+`[社区]` paperless-ngx 真实事故：**464 份文档全被分给同一个错的人和同一个错标签** ——
+不是随机错，是**自信地系统性错**。
+
+**翻译成我们的场景**：错词进了 `glossary/<课号>.txt` → 而术语表**会被注入翻译 prompt**
+（`translator.select_terms`）→ 那门课**以后每一句都在用错词**，且**要到课上才发现**。
+→ **比「没加进去」糟得多。这就是「先看映射」那一刀不能省的量化理由。**
+
+⚠️ **paperless-ngx 还有一条规则我们要照抄**：**未归档桶里的文档不参与它的学习。**
+我们没有学习型分类器，所以那条的直接版本不适用 —— 但**类比版本适用**：
+**没确认的东西不许进术语表**（术语表就是我们的「训练集」，因为它进 prompt）。
+
+### 7.6 设计（**尚未实现**）
+
+```
+把一堆文件拖到面板空白处（不是某张卡）
+  ↓
+① 本地：文件名 × (课号 + 英文课名单词)  →  唯一最优才算命中   [免费·瞬时·不受中文影响]
+  ↓  剩下的
+② 抽一小段正文（extract.py 已有）+ Jev `choice`(选项 = 各课号)
+      ⚠️ 官方三条硬约束：**一份文件一个问题**（别把多个判断塞进一问）·
+         **只给文件名或极短摘要**（context rot：无关材料会损害准确率）·
+         **计数用代码**（官方：Jev 的计数不可靠）
+  ↓
+③ confidence < 门槛 → **不猜**，进「未分类」
+  ↓
+④ ⭐ **把映射摆出来给作者看** → 点头才逐课跑 prep
+```
+
+**为什么是「兜底」不是「主力」**（这条与作者提的顺序一致，不是我的偏好）：
+仓库对「要不要上模型」有一条翻转条件 —— 高频重复 · 答案空间可穷举 · **且没有确定性替代**。
+前两条成立，**第三条不成立**：本地匹配免费、确定、瞬时、且完全不受 CJK 短板影响。
+
+⚠️ **成本不是理由**（几十份文件名 ≈ $0.0001），**准确率也不是** —— 是「有确定解就别上模型」。
+
+### 7.7 ⚠️ 两个 key 的形状对不上文档
+
+作者贴的两个串，形状与官方文档的 `<CMD_API_KEY>` **不一致**（一个 `apikey_…`、一个 `user_…`）。
+**不调用无法判断哪个是 Provider API key** —— 要去 Command Code Studio 的 API keys 页面对。
+⚠️ 两个都**明文贴进过对话**，逐字记录已落盘；连同那笔「5 个泄露 key 待轮换」的账，**用前先轮换**。
+
+### 7.8 未核实（诚实清单）
+
+| 想查 | 结果 |
+|---|---|
+| 「本地先筛、模型兜底」的干净先例 | ⚠️ **没找到**（最接近的是 paperless-ngx 按字段选算法，那是配置项不是级联） |
+| 自动分类的可信准确率基准 | ⚠️ **没有**，只有单用户自报「~90%」（无分母，不是基准） |
+| Jev 在**短英文文件名**上的 calibration | **无公开实测** |
+| CommandCode 套餐页里 Jev 现在确切额度 | **未取到**（计价器是动态组件） |
+| 那两个 key 能不能用 | **未验证**（全程零认证请求，故意的） |

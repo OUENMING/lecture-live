@@ -324,6 +324,109 @@ def main() -> int:
         finally:
             build_notes.NOTES_FILE, build_notes.AUTO_FILE = _saved
 
+        # ══════════════════════════════════════════════════════════════
+        print("\n--- removed_lines：不变量的**可执行定义**（本函数与实现共用一份）---")
+        check("纯删行 -> 返回被删的那些行",
+              prep.removed_lines("a\nb\nc\n", "a\nc\n") == ["b"])
+        check("什么都没删 -> 空列表（**不是 None**，两者含义不同）",
+              prep.removed_lines("a\nb\n", "a\nb\n") == [])
+        check("全删 -> 全是删的", prep.removed_lines("a\nb\n", "") == ["a", "b"])
+        check("⚠️ 改了某行内容 -> None", prep.removed_lines("a\nb\n", "a\nX\n") is None)
+        check("⚠️ 换了顺序 -> None", prep.removed_lines("a\nb\n", "b\na\n") is None)
+        check("⚠️ 追加了东西 -> None", prep.removed_lines("a\n", "a\nb\n") is None)
+        check("空→空 -> 空列表", prep.removed_lines("", "") == [])
+
+        print("\n--- 删词：不变量「除被删行外**逐字不变**」 ---")
+        gt = tmp / "glossary_remove_test.txt"
+        ORIG = ("# ECON10740 Exploring Economics\n"      # 课号行：谁也不许动
+                "\n"
+                "# 教务词（手写）\n"
+                "Brightspace\n"
+                "tutorial\n"
+                "\n"
+                "elasticity\n"
+                "opportunity cost\n"
+                "deadweight loss\n"
+                "elasticity\n")                          # 故意重复一行
+        gt.write_text(ORIG, encoding="utf-8")
+
+        r = prep.remove_terms(gt, ["opportunity cost"])
+        after = gt.read_text(encoding="utf-8")
+        check("删一行 -> removed 就那一条", r.removed == ["opportunity cost"], str(r.removed))
+        check("⭐⭐ 不变量成立：结果确实是「原文件删掉若干行」",
+              prep.removed_lines(ORIG, after) == ["opportunity cost"],
+              str(prep.removed_lines(ORIG, after)))
+        check("⭐ 首行（课号）逐字未变",
+              after.splitlines()[0] == "# ECON10740 Exploring Economics")
+        check("⭐ 手写教务词逐字未变（Brightspace / tutorial 都还在）",
+              "Brightspace" in after and "tutorial" in after)
+        check("剩下的术语**按原顺序**",
+              [x for x in after.splitlines() if x.strip() and not x.startswith("#")]
+              == ["Brightspace", "tutorial", "elasticity", "deadweight loss", "elasticity"],
+              str([x for x in after.splitlines() if x.strip()]))
+        check("kept_terms 数对（5 条术语）", r.kept_terms == 5, str(r.kept_terms))
+
+        r2 = prep.remove_terms(gt, ["elasticity"])
+        check("⚠️ 重复行 -> 两条一起删（按内容匹配，不是按位置）",
+              r2.removed == ["elasticity", "elasticity"], str(r2.removed))
+        check("删干净了", "elasticity" not in gt.read_text(encoding="utf-8"))
+        check("not_found 为空", r2.not_found == [], str(r2.not_found))
+
+        before = gt.read_text(encoding="utf-8")
+        r3 = prep.remove_terms(gt, ["根本不存在的词"])
+        check("删不存在的词 -> not_found 有它", r3.not_found == ["根本不存在的词"])
+        check("⚠️ 且**文件一个字节都没动**", gt.read_text(encoding="utf-8") == before)
+
+        # ⭐⭐ **混合情形**：一部分命中、一部分没有。
+        #     ⚠️ 这一条是变异测试逼出来的 —— 只测「全都不存在」会走**提前返回**那支，
+        #     于是「最后那条 return 的 not_found 算错了」这个 bug **测不出来**
+        #     （实测：把 not_found 写死成 [] 仍然 82/82 全绿）。
+        r3b = prep.remove_terms(gt, ["deadweight loss", "另一个不存在的词"])
+        check("⭐ 混合：命中的删掉、没命中的进 not_found",
+              r3b.removed == ["deadweight loss"]
+              and r3b.not_found == ["另一个不存在的词"],
+              f"removed={r3b.removed} not_found={r3b.not_found}")
+        check("混合情形下 not_found **不能是空的**（否则就是上面那个 bug）",
+              r3b.not_found != [])
+
+        r4 = prep.remove_terms(gt, ["# ECON10740 Exploring Economics", "Brightspace", "  "])
+        body4 = gt.read_text(encoding="utf-8")
+        check("⚠️ 注释形态的请求被忽略 —— 课号行删不掉",
+              "# ECON10740 Exploring Economics" in body4)
+        check("⚠️ 空串请求也被忽略（不会把空行删掉）", r4.removed == ["Brightspace"],
+              str(r4.removed))
+        check("手写词是**可以**删的（用户是文件的主人）", "Brightspace" not in body4)
+
+        bad8 = tmp / "glossary_bad8.txt"
+        bad8.write_bytes(b"# X\n\xff\xfe bad\n")
+        try:
+            prep.remove_terms(bad8, ["bad"])
+            check("非 UTF-8 -> 拒绝改写（不「出声后忽略」）", False, "竟然没抛")
+        except prep.GlossaryError:
+            check("非 UTF-8 -> 拒绝改写（不「出声后忽略」）", True)
+        check("⚠️ 且原文件没被写坏", bad8.read_bytes() == b"# X\n\xff\xfe bad\n")
+
+        print("\n--- ⭐ 那道闸门是**承重**的，不是注释里的承诺 ---")
+        gate = tmp / "glossary_gate.txt"
+        gate.write_text("# X\nkeep\nkill\n", encoding="utf-8")
+        _orig_rl = prep.removed_lines
+        try:
+            prep.removed_lines = lambda a, b: None       # 模拟「结果不是纯删行」
+            try:
+                prep.remove_terms(gate, ["kill"])
+                check("拦下「不是纯删行」的写入", False, "没抛 = 闸门是假的")
+            except prep.GlossaryError:
+                check("拦下「不是纯删行」的写入", True)
+        finally:
+            prep.removed_lines = _orig_rl
+        check("⭐ 被拦下时**文件保持原样**（一个字都没写）",
+              gate.read_text(encoding="utf-8") == "# X\nkeep\nkill\n",
+              repr(gate.read_text(encoding="utf-8")))
+
+        check("⭐ 删词**结构上拿不到** prep-state（不写墓碑 —— 见它的 docstring 那段更正）",
+              list(inspect.signature(prep.remove_terms).parameters) == ["path", "terms"],
+              str(list(inspect.signature(prep.remove_terms).parameters)))
+
         bad = [n for n, ok in RESULTS if not ok]
         print(f"\n{'=' * 62}")
         print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

@@ -217,6 +217,113 @@ def _atomic_write(path: pathlib.Path, text: str) -> None:
     _impl(path, text)
 
 
+# ================================================================ 删词
+class RemoveResult(typing.NamedTuple):
+    """`remove_terms` 的返回。
+
+    字段与 `AppendResult` 对称，但**语义相反的那个位置**值得说清：
+    `AppendResult.skipped_dup` 是「已经在表里所以没加」，
+    这里的 `not_found` 是「**表里本来就没有，所以没删**」。
+    """
+    removed: list          # 真删掉的行（按原样；一行术语在文件里出现两次就删两次）
+    not_found: list        # 请求删、但表里本来就没有的
+    kept_terms: int        # 剩下的术语条数（不含注释与空行）
+
+
+def removed_lines(old: str, new: str) -> list[str] | None:
+    """那条新不变量的**可执行定义**：`new` 是不是「`old` 删掉若干行」得到的？
+
+    是 → 返回被删的那些行；否 → `None`（说明除了删行还动了别的，**绝不能写盘**）。
+
+    做法是**子序列判定**（贪心；对「是不是子序列」这个判定本身就是正确的）：
+    顺序不变 + 只少不多 ⟺ `new` 的行序列是 `old` 行序列的子序列。
+
+    ⚠️ 重复行存在时，「被删的是哪几个」解不唯一 —— 但**判定**是唯一的，
+    而这里要的就是判定。别把它当 diff 库用。
+    """
+    a, b = old.splitlines(), new.splitlines()
+    i = 0
+    out: list[str] = []
+    for line in a:
+        if i < len(b) and line == b[i]:
+            i += 1
+        else:
+            out.append(line)
+    return out if i == len(b) else None
+
+
+def remove_terms(path, terms: list) -> RemoveResult:
+    """按**行**精确删掉 `terms`。
+
+    ## ⚠️ 不变量**换成了一条更窄的**
+
+    `append_terms` 的硬不变量是「**只追加**」（`new.startswith(old)` 一句话盖住课号行 /
+    教务词 / 首行 / 用户手写的一切）。删词会打破它，所以换成：
+
+    > **除了被删的那几行，其余字节逐字不变，且顺序不变。**
+
+    判据形状就是 `removed_lines()` —— 它是这条不变量的**可执行定义**，
+    **本函数与测试共用同一份**。别在测试里另写一份判据：那会漂移，
+    而漂移之后两边都「通过」，谁也不知道到底哪条成立。
+
+    ⚠️ **写盘之前先自检**：把「原文件去掉那几行」算出来，与实际要写的内容比；
+    不是纯删行就**抛错拒绝写入**。让不变量**承重**，而不是写在注释里。
+    （这也顺手挡住「未来有人改这段时不小心顺手改了别的行」。）
+
+    ⚠️ **注释行与空行永不删** —— 它们是手写内容（课号、教务词、标题）。
+    ⚠️ **按内容匹配，不按位置** —— 位置会因并发而漂。
+
+    ## ⚠️ 墓碑**不需要动**（这里纠正方案里一句话）
+
+    方案 §3.3 写「删除也要进墓碑，否则重跑同一份课件会把它加回来」——
+    **那句是错的。** 墓碑 `prep-state.json` 的 `appended` 记的是「prep 曾经加过哪些词」，
+    而 `prepare()` 里 `if k in have or k in tomb: skipped`（见下方候选筛选那段）
+    **已经在跳过墓碑里的词**。删掉术语表里那一行**不影响** `appended` → 重跑照样不复活。
+    → **删除只写术语表一个文件。** 多写一次 `prep-state.json` 是白加一条写路径与失败面。
+    """
+    p = pathlib.Path(path)
+    want = [t.strip() for t in ((x or "") for x in terms)]
+    want = [t for t in want if t and not t.startswith("#")]
+    drop = {t.lower() for t in want}
+
+    if not p.exists():
+        return RemoveResult([], want, 0)
+    try:
+        old = p.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        # 同 `append_terms`：手写术语表可能不是 UTF-8。**不能跟着「出声后忽略」** ——
+        # 忽略会让人以为删掉了，而文件一个字没动。
+        raise GlossaryError(f"{p.name} 不是 UTF-8，拒绝改写（免得把原内容写坏）。") from e
+    except OSError as e:
+        raise GlossaryError(f"{p.name} 读不出：{e}") from e
+
+    kept_lines: list[str] = []
+    removed: list[str] = []
+    kept_terms = 0
+    for ln in old.splitlines(keepends=True):
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            kept_lines.append(ln)
+            continue
+        if s.lower() in drop:
+            removed.append(s)
+        else:
+            kept_lines.append(ln)
+            kept_terms += 1
+
+    if not removed:
+        return RemoveResult([], want, kept_terms)
+
+    new = "".join(kept_lines)
+    if removed_lines(old, new) is None:                 # ⚠️ 闸门：不是纯删行就不写
+        raise GlossaryError(
+            "内部不一致：结果不是「原文件删掉若干行」—— 拒绝写入。"
+            "（这是防手滑的闸门；正常路径下不该发生。）")
+    _atomic_write(p, new)
+    found = {r.lower() for r in removed}
+    return RemoveResult(removed, [t for t in want if t.lower() not in found], kept_terms)
+
+
 # ================================================================ 候选词复核
 #
 # ⚠️ 这一节是**反幻觉护栏**：LLM 抽出来的候选必须**在语料里真的出现过**，

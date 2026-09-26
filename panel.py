@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import os
 import typing
 
 import objc_own
@@ -238,6 +239,181 @@ def build(rect, style, *, on_background_click=None, on_resize=None) -> FrostedPa
         window.setDelegate_(delegate)
 
     return FrostedPanel(window, glass, scrim, drag, delegate)
+
+
+def make_scroll_view(rect, *, has_vertical=True, on_scroll=None):
+    """在面板里建一个**观感正确**的 NSScrollView（文档视图由调用方自己塞）。
+
+    ⚠️ **只抽这四行，不是抽整份实现。** 2026-09-26 逐行比对过现存两个滚动区
+    （`whatsnew._add_log_view` 与 `transcript_view`）：真正重合的**只有这四行**，
+    其余都是各自场景的行为（一个是 NSTextView 的文本管道，一个是「所有行等高 →
+    O(1) 除法」的槽位池）。把它们一起抽过来是白带的复杂度。
+
+    这四行**有原因，所以值得有唯一定义点**：
+      · `drawsBackground_(False)` —— 面板是 vibrancy，HIG 明说别在控件下垫不透明底
+      · `borderType_(0)` —— 不要 bezel
+      · overlay 滚动条 + 按需出现 —— 本 app 既有的观感（overlay 与 whatsnew 都这么设）
+
+    ⚠️ **不含 `setVerticalScrollElasticity_`** —— `transcript_view` 那项是**动态**的
+    （构造设 0，之后按状态改 Automatic），不是静态约定，硬抄会把一个行为塞进配方。
+    """
+    from AppKit import NSScrollView, NSScrollerStyleOverlay
+
+    sc = NSScrollView.alloc().initWithFrame_(rect)
+    sc.setDrawsBackground_(False)
+    sc.setBorderType_(0)                                  # NSNoBorder
+    sc.setHasVerticalScroller_(has_vertical)
+    sc.setAutohidesScrollers_(True)
+    sc.setScrollerStyle_(NSScrollerStyleOverlay)
+    sc.setHorizontalScrollElasticity_(0)                  # 0 = None
+    if on_scroll is not None:
+        sc._on_scroll = on_scroll
+    return sc
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 拖拽落点
+# ══════════════════════════════════════════════════════════════════════
+def file_paths(pasteboard) -> list[str] | None:
+    """从 pasteboard 里取文件路径。
+
+    ⚠️⚠️ **`None` 是「读失败」、`[]` 是「没有文件」—— 必须分开。**
+    `readObjectsForClasses:options:` 的 `nil` 是错误，不是空。合成一个判断的话
+    「读失败」会被当成「拖了个非文件」，归因就全错了（`RESEARCH-macos-aesthetic.md` §11）。
+
+    ⚠️ 按 UTI 过滤（`.urlReadingFileURLsOnly`）而不是自己判后缀 —— 后缀不代表类型。
+    """
+    from AppKit import NSURL, NSPasteboardURLReadingFileURLsOnlyKey
+    try:
+        got = pasteboard.readObjectsForClasses_options_(
+            [NSURL], {NSPasteboardURLReadingFileURLsOnlyKey: True})
+    except Exception:                                     # noqa: BLE001
+        return None
+    if got is None:
+        return None
+    out: list[str] = []
+    for u in got:
+        try:
+            p = u.path()
+        except Exception:                                 # noqa: BLE001
+            continue
+        if p:
+            out.append(str(p))
+    return out
+
+
+def make_drop_target(on_enter, on_drop, on_exit=None, *, types=None):
+    """一个**只做落点**的视图：把 AppKit 那五个选择子收在一处。
+
+    接口故意**不暴露 `NSDraggingInfo`** —— 调用方拿到的是
+    `on_enter(pasteboard) -> bool` 与 `on_drop(paths: list[str])`。
+    读 URL 那套（含 `nil`/空数组的区分、UTI 过滤）归这里的 `file_paths()`，
+    于是每个落点不用各写一遍、也不会各错一遍。
+
+    ⚠️⚠️ **回调是挂在实例上的，不是烙进类里的 —— 这一条是必须的，不是风格。**
+    `objc_own.own()` **按 key 缓存类**：同一个 key 第二次调用拿回的是**同一个类对象**，
+    所以任何写进 namespace 的闭包都还是**第一次**那个。要是图省事写成
+    `own("DropTarget", NSView, {"draggingEntered_": lambda self, s: ...on_enter...})`，
+    那么**第二个落点会调用第一个落点的回调** —— 今天 5 张卡就是「点哪张都进同一门课」。
+    本函数因此把回调存成 `self._on_*`，方法体里 `getattr(self, ...)` 现取。
+    （`entry_panel._button_class` 那边是同一个坑的另一半。）
+
+    ⚠️ **五条踩过的约定**（都在 `RESEARCH-macos-aesthetic.md` §11）：
+      · 「收不收」由 `draggingEntered_` 的返回值决定，**不是** `prepareForDragOperation_`
+      · `performDragOperation_` **默认返回 false** —— 忘了实现 = 静默不收
+      · 在 `draggingEntered_` 里查 pasteboard（**只查一次**），别放 `draggingUpdated_`
+      · 返回 `NSDragOperationNone` 之后**仍会**收到 `draggingUpdated_`/`draggingExited_`
+      · ⚠️ 用 `sender.draggingPasteboard()`，**别自己开 `NSPasteboard(name:)`** ——
+        跨进程时「there is NO guarantee that this will be the pasteboard used」
+
+    ⚠️ **回调里一律 `except` 并记日志。** AppKit 会吞掉回调里的异常，
+       症状和「这个回调根本没被调用」一模一样 —— 不记下来就等于没有量具。
+       （`probe_drag.py` 的 v1 就因为少了这层，把一次 `AttributeError` 看成了「拖拽收不到」。）
+
+    ⚠️ **落点成功时不会收到 `draggingExited_`** —— 悬停高亮要在 `on_drop` 里也撤一次，
+       不能只靠 `on_exit`。（HIG 逐字要求「people drag the content away 时撤掉」。）
+    """
+    from AppKit import (NSDragOperationCopy, NSDragOperationNone, NSView,
+                        NSPasteboardTypeFileURL)
+
+    def _log(what: str) -> None:
+        if os.environ.get("CLASSLIVE_DEBUG"):
+            print(f"[drop] {what}", flush=True)
+
+    def _call(self, which, *a, default=None):
+        """取实例上的回调并调它。**异常必须落到日志**（见上面那条）。"""
+        fn = getattr(self, which, None)
+        if fn is None:
+            return default
+        try:
+            return fn(*a)
+        except Exception as e:                            # noqa: BLE001
+            _log(f"{which} 抛异常 —— 这次观察无效：{type(e).__name__}: {e}")
+            if os.environ.get("CLASSLIVE_DEBUG"):
+                import traceback
+                traceback.print_exc()
+            return default
+
+    def dragging_entered(self, sender):
+        pb = sender.draggingPasteboard()
+        self._n_upd = 0
+        ok = bool(_call(self, "_on_enter", pb, default=False))
+        _log(f"[{getattr(self, '_tag', '?')}] entered -> {'收' if ok else '拒'}  "
+             f"types={list(pb.types() or [])}")
+        return NSDragOperationCopy if ok else NSDragOperationNone
+
+    def dragging_updated(self, sender):
+        self._n_upd = getattr(self, "_n_upd", 0) + 1
+        return NSDragOperationCopy
+
+    def dragging_exited(self, sender):
+        _log(f"exited（期间 {getattr(self, '_n_upd', 0)} 次 draggingUpdated）")
+        _call(self, "_on_exit")
+
+    def prepare_for_drag(self, sender):
+        return True
+
+    def perform_drag(self, sender):
+        paths = file_paths(sender.draggingPasteboard())
+        _log(f"drop -> {paths!r}")
+        return bool(_call(self, "_on_drop", paths, default=False))
+
+    cls = objc_own.own("DropTarget", NSView, {
+        "draggingEntered_": dragging_entered,
+        "draggingUpdated_": dragging_updated,
+        "draggingExited_": dragging_exited,
+        "prepareForDragOperation_": prepare_for_drag,
+        "performDragOperation_": perform_drag,
+    })
+    v = cls.alloc().initWithFrame_(((0.0, 0.0), (100.0, 100.0)))
+    v._n_upd = 0
+    v._on_enter, v._on_drop, v._on_exit = on_enter, on_drop, on_exit
+    v.registerForDraggedTypes_(list(types) if types else [NSPasteboardTypeFileURL])
+    return v
+
+
+def make_label(text, rect, size, *, alpha=1.0, bold=False, wrap=False,
+               color=None, selectable=False):
+    """面板里的一行文字。**默认不可选、无 bezel、无底色** —— 这三样是每条都要设的。
+
+    ⚠️ 别用 `NSFont.systemFontOfSize_` 之外的自造字号（HIG 那 11 档，
+       见 `RESEARCH-macos-aesthetic.md` §2.1）；字距也不要手动加（系统字体自带，
+       同节实测证伪过「HIG 那张表是让人手动加的」）。
+    """
+    from AppKit import NSColor, NSFont, NSTextField
+
+    lb = NSTextField.alloc().initWithFrame_(rect)
+    lb.setStringValue_(text or "")
+    lb.setEditable_(False)
+    lb.setSelectable_(selectable)
+    lb.setBezeled_(False)
+    lb.setDrawsBackground_(False)
+    lb.setFont_(NSFont.boldSystemFontOfSize_(size) if bold
+                else NSFont.systemFontOfSize_(size))
+    lb.setTextColor_(color or NSColor.whiteColor().colorWithAlphaComponent_(alpha))
+    if wrap:
+        lb.cell().setWraps_(True)
+    return lb
 
 
 def hide_traffic_lights(window) -> None:

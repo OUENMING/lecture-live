@@ -204,10 +204,10 @@ def _caption_bars(x, y, w, h, small=False):
 
 
 def draw(px: int, small: bool = False):
-    """渲一张。`small` 是给 16/32 用的简化版（减行数、加粗、加粗描边）。"""
+    """渲一张。`small` 是给 16/32 用的简化版（减少字幕行数、加粗行高）。"""
     from AppKit import (NSBitmapImageRep, NSColor, NSGradient, NSGraphicsContext,
-                        NSMakeRect, NSRectFill, NSPNGFileType)
-    from Quartz import CGContextScaleCTM
+                        NSMakeRect, NSPNGFileType)
+    from Quartz import CGContextScaleCTM, CGContextClearRect
 
     rep = NSBitmapImageRep.alloc(
     ).initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
@@ -218,8 +218,13 @@ def draw(px: int, small: bool = False):
     # ⚠️ 下面的几何全是 **1024 画布单位** —— 必须按 px 缩放，
     #    否则小尺寸会画成一张被裁掉的大图（踩过）。
     CGContextScaleCTM(ctx.CGContext(), px / CANVAS, px / CANVAS)
-    NSColor.clearColor().set()
-    NSRectFill(NSMakeRect(0, 0, px, px))
+    # ⚠️ 清屏必须用 `CGContextClearRect` + **CANVAS** 尺寸，不能写 `clearColor` + `(0,0,px,px)`：
+    #    ① 上一行已把 CTM 缩放成 px/CANVAS，所以 `(0,0,px,px)` 落到设备像素只有
+    #       px²/1024（16px 时约 **0.25 像素**），根本盖不住整张图；
+    #    ② `clearColor` 的 alpha 是 0，在默认的 source-over 合成下**等于没画**。
+    #    两条叠加 = 清屏完全没生效，四角透明全靠位图缓冲区碰巧被清零（实现细节，不该依赖）。
+    #    （2026-09-26 OCR 审查发现；实测当时四角确实是 0，所以没暴露出来。）
+    CGContextClearRect(ctx.CGContext(), NSMakeRect(0, 0, CANVAS, CANVAS))
 
     # 底：超椭圆 + **径向**渐变（光源偏上）
     NSGradient.alloc().initWithStartingColor_endingColor_(
@@ -258,9 +263,16 @@ def main() -> int:
         px = base * scale
         name = f"icon_{base}x{base}{'@2x' if scale == 2 else ''}.png"
         # ⚠️ 每一档**单独渲**，不是从 1024 那张缩 —— 因为 16/32 要用**简化版**
-        draw(px, small=(px <= 32)).writeToFile_atomically_(str(iconset / name), True)
+        # ⚠️ `writeToFile_atomically_` 返回 BOOL、**失败不抛异常** —— 不检查的话
+        #    磁盘满/权限不足只会让 PNG 静默缺失，然后在 iconutil 那里报一个
+        #    定位不到的错，把真正的失败点盖掉。
+        if not draw(px, small=(px <= 32)).writeToFile_atomically_(str(iconset / name), True):
+            print(f"❌ 写不出 {name}（磁盘满？权限？）", file=sys.stderr)
+            return 1
     # 留一张 1024 主图，给 Git / 文档 / 以后重制用
-    draw(1024).writeToFile_atomically_(str(OUT / "ClassLive-1024.png"), True)
+    if not draw(1024).writeToFile_atomically_(str(OUT / "ClassLive-1024.png"), True):
+        print("❌ 写不出 ClassLive-1024.png", file=sys.stderr)
+        return 1
 
     icns = OUT / "ClassLive.icns"
     r = subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)],

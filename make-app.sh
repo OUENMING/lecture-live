@@ -58,7 +58,14 @@ if [ "${1:-}" = "--check" ]; then
       say "   ⚠️ MacOS/$_EXE_C   **符号链接** → 双击会没反应！重跑 ./make-app.sh"
     else
       say "   MacOS/python      $([ -e "$APP/Contents/MacOS/python" ] && echo 就位 || echo '❌ 缺')"
-      [ -n "$_EXE_C" ] && say "   MacOS/$_EXE_C   真文件 ✅"
+      # ⚠️ 这里必须同时判 `-f`：上面的 `-e` 查的是**硬编码的 python**，
+      #    而这一行查的是 `$_EXE_C`（Info.plist 里那个名字）—— 两者可以不是同一个。
+      #    只判 `-n` 的话，Info.plist 指向一个不存在的文件时照样打「真文件 ✅」。
+      if [ -n "$_EXE_C" ] && [ -f "$APP/Contents/MacOS/$_EXE_C" ]; then
+        say "   MacOS/$_EXE_C   真文件 ✅"
+      elif [ -n "$_EXE_C" ]; then
+        say "   MacOS/$_EXE_C   ❌ 缺（Info.plist 指向它，但文件不在）"
+      fi
     fi
     say "   lib/              $([ -d "$APP/Contents/lib" ] && echo 就位 || echo '❌ 缺')"
     say "   pyvenv.cfg        $([ -f "$APP/Contents/pyvenv.cfg" ] && echo 就位 || echo '❌ 缺')"

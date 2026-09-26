@@ -177,7 +177,7 @@ def build(version: str, summary: str, date: str = "", log: str = "",
         # ---- 窗口 + 磨砂 chrome 全在 panel.py（**唯一定义点**），这里没有第二份配方 ----
         fp = panel.build(NSMakeRect(0, 0, WIDTH, h),
                          NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
-        p, ve, scrim, drag = fp.window, fp.glass, fp.scrim, fp.drag
+        p, ve = fp.window, fp.glass
         # ⚠️ 这行**不是**配方的一部分：overlay（Titled）默认就有阴影，而 borderless
         #    面板默认没有 —— 所以留在调用点，不进 panel.py。
         p.setHasShadow_(True)

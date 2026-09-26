@@ -208,7 +208,9 @@ PUMP_ACTIVE_S = 0.15             # 距上次事件在此窗口内 = 手势进行
 # ⚠️ 上面那行"a=0.45 → 3.33:1"是**旧配方**下测的, 与本次实测(2.60:1)对不上,
 #    别引用那三个数。真数看这张表。可读性实际由描边(见 _make_shadow)承担,
 #    纯白底上仍清晰; 但继续往下调 scrim 收益递减、白底最先失守, 0.32 是底线。
-SCRIM_ALPHA = panel.SCRIM_ALPHA   # ⚠️ 数值的唯一定义点在 panel.py（配方在那边），别在这里改
+# ⚠️ 数值的唯一定义点在 `panel.py`（配方在那边）。**这里不放别名** ——
+#    放了就等于同一个数字有两个看起来都权威的名字，下一个人有五成概率改错那一个。
+#    要读它：`panel.SCRIM_ALPHA`。（下面注释里提到的 SCRIM_ALPHA 也是指那一个。）
 
 
 def _make_shadow():
@@ -342,17 +344,19 @@ def _make_click_view(on_click):
 class Overlay:
     def __init__(self, on_quit=None, on_flag=None, on_translate=None, on_submit=None,
                  on_ask=None, on_new_topic=None, whatsnew=None):
-        from AppKit import (NSWindow, NSPanel, NSMakeRect, NSColor, NSTextField,
-                            NSVisualEffectView, NSVisualEffectMaterialHUDWindow,
-                            NSVisualEffectStateActive, NSWindowStyleMaskBorderless,
-                            NSWindowStyleMaskNonactivatingPanel, NSBackingStoreBuffered,
+        # ⚠️ 窗口 chrome / 材质 / scrim 那几样已经搬进 panel.py 了，这里的名字要
+        #    跟着删干净 —— 留着会让「材质在哪配的」这个问题仍然答成 overlay.py，
+        #    等于配方原料还散在两个文件里。
+        from AppKit import (NSMakeRect, NSColor, NSTextField,
+                            NSVisualEffectView,
+                            NSWindowStyleMaskBorderless,
+                            NSWindowStyleMaskNonactivatingPanel,
                             NSWindowStyleMaskResizable, NSWindowStyleMaskTitled,
                             NSWindowStyleMaskClosable, NSWindowStyleMaskFullSizeContentView,
                             NSWindowTitleHidden,
-                            NSAppearance, NSAppearanceNameDarkAqua,
                             NSTextAlignmentLeft, NSFont, NSLineBreakByWordWrapping,
                             NSLineBreakByTruncatingTail, NSView,
-                            NSFloatingWindowLevel, NSWindowCollectionBehaviorCanJoinAllSpaces,
+                            NSFloatingWindowLevel,
                             NSFocusRingTypeNone)
 
         self._width = WIDTH
@@ -454,9 +458,12 @@ class Overlay:
         #    别因为「self._ve 已经有了」就把这行删掉 —— 删了会在 __init__ 后半段
         #    抛 NameError，而且是在**构造真 Overlay 时**才暴露（tests/test_panel.py 抓到过）。
         ve = self._ve
-        # ⚠️ **必须留住 fp**：里面的 resize_delegate 是被 `setDelegate_` **弱引用**的
-        #    —— 丢了会被 GC，拖拽期间内容又冻回去，而且**完全不报错**。
-        self._targets.append(fp)
+        # ⚠️ `setDelegate_` 是**弱引用** —— 得有人替它保命，否则被 GC 掉、
+        #    拖拽期间内容又冻回去，而且**完全不报错**。
+        #    替它保命的是上面那行 `self._win_delegate`（强引用实例属性，全文件只此一处、
+        #    不会被清空）。这里再 append 进 `_targets` 是**沿用原有的双保险写法**，
+        #    不是为了 fp 本身 —— fp 里另外三个视图由窗口层级持着，不需要这里再留一份。
+        self._targets.append(self._win_delegate)
         # 宽度下限见 MIN_WIDTH 的实测依据。
         # ⚠️ **不设 `setContentResizeIncrements_`** —— 试过按 ROW_H 吸附高度, 手感是
         # "拖 30px 没反应、突然跳 70px", 作者的原话是"完全不跟手"。缩放要像拉窗口一样
@@ -474,7 +481,8 @@ class Overlay:
             self._panel.setTitlebarAppearsTransparent_(True)
         # 红绿灯只存在于 Titled 窗口; borderless 下 standardWindowButton_ 全返回
         # None, 这个调用是安全的空操作, 所以不额外加条件。
-        panel.hide_traffic_lights(self._panel)
+        # 走自己的转发方法（**统一入口**）—— `show()` 里那次重藏也走它。
+        self._hide_traffic_lights()
 
         self._NSFont, self._NSTF = NSFont, NSTextField
         # 答案折行的实测字体: 必须与转录区大字位用的是**同一个** 18pt Medium,

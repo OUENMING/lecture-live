@@ -207,16 +207,6 @@ class FrostedPanel(typing.NamedTuple):
     drag: typing.Any              # 背景拖拽层，z 序最低
     resize_delegate: typing.Any   # 没传 on_resize 时为 None
 
-    def fit(self) -> None:
-        """把三层贴回窗口内容区尺寸。
-
-        调用方在**改了窗口尺寸之后**要调它（overlay 有自己的一套布局，不用这个）。
-        """
-        c = self.window.contentView().bounds()
-        self.glass.setFrame_(c)
-        self.scrim.setFrame_(self.glass.bounds())
-        self.drag.setFrame_(self.glass.bounds())
-
 
 def build(rect, style, *, on_background_click=None, on_resize=None) -> FrostedPanel:
     """建一个配好 chrome 的磨砂面板。
@@ -227,13 +217,16 @@ def build(rect, style, *, on_background_click=None, on_resize=None) -> FrostedPa
     `on_background_click` 只在点到**空白处**时触发（最外一圈，给嵌套循环缩放用）。
     `on_resize` 给了才装窗口委托 —— 不给就不装（不缩放的面板不需要它）。
     """
-    from AppKit import (NSAppearance, NSAppearanceNameDarkAqua, NSColor,
-                        NSFloatingWindowLevel, NSView, NSVisualEffectMaterialHUDWindow,
-                        NSVisualEffectStateActive, NSVisualEffectView,
-                        NSWindowCollectionBehaviorCanJoinAllSpaces)
+    from AppKit import (NSAppearance, NSAppearanceNameDarkAqua, NSBackingStoreBuffered,
+                        NSColor, NSFloatingWindowLevel, NSView,
+                        NSVisualEffectMaterialHUDWindow, NSVisualEffectStateActive,
+                        NSVisualEffectView, NSWindowCollectionBehaviorCanJoinAllSpaces)
 
+    # ⚠️ 用**具名常量**不要写字面量 2 —— 这里是全仓唯一一份配方了，
+    #    写死数字等于把这个模块降级成一份「看不懂的拷贝」。
     window = _panel_class().alloc(
-    ).initWithContentRect_styleMask_backing_defer_(rect, style, 2, False)
+    ).initWithContentRect_styleMask_backing_defer_(rect, style,
+                                                   NSBackingStoreBuffered, False)
 
     # ⚠️ 必须**显式指定深色外观**。像素级实测（2026-09-24）：系统处于浅色模式时，
     #    Titled 窗口的 NSVisualEffectView 会跟随窗口 appearance，`.hudWindow` 被渲染

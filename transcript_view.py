@@ -31,6 +31,8 @@ from __future__ import annotations
 import math
 import time
 
+import objc_own
+
 IDLE_S = 6.0          # 闲置多久才自动回底(仅在离开底部后又有新句定稿时)
 BOTTOM_EPS = 3.0      # origin.y <= 此值即视为在底部(橡皮筋的负值也算)
 MOVE_EPS = 1.5        # 与期望 origin 相差超过此值 -> 判定为用户/惯性滚动
@@ -46,43 +48,41 @@ FLUSH_DT = 0.016      # 渲染合并闸门 = 一帧
 # 只作用于**双语行**; 答案行与"翻译关闭时英文顶上"的行仍是大字在上(见 _layout)。
 EN_LINE_ON_TOP = True
 
-_ScrollCls = None
-_DocCls = None
 
 
 def _view_classes():
-    """定义两个 ObjC 视图子类。⚠️ 只能定义一次(重复定义会报 override 错)。"""
-    global _ScrollCls, _DocCls
-    if _ScrollCls is None:
-        import objc
-        from AppKit import NSScrollView
+    """两个 ObjC 视图子类。
 
-        class _TranscriptScroll(NSScrollView):
-            def scrollWheel_(self, event):        # noqa: N802
-                # 这个开关**不再区分收起/展开**(2026-09-24 解耦, 见 set_collapsed):
-                # 内容永远溢出, 所以恒为 True —— 保留它只是为了留一个统一的闸门,
-                # 以及保住下面这条注释里的坑。
-                # 不用 setIgnoresMouseEvents_ —— 那会连带杀掉内容区的拖拽移动,
-                # 且和悬浮窗"鼠标穿透"同类的单向死锁。
-                # (NSScrollView 没有 setScrollEnabled_, 所以开关放在自己的标志位上。
-                #  PyObjC 的 ObjC 子类必须用 objc.super, 内置 super() 不认。)
-                if getattr(self, "_scroll_enabled", True):
-                    objc.super(_TranscriptScroll, self).scrollWheel_(event)
+    ⚠️ 类名由 `objc_own` 生成（key `TranscriptScroll` / `TranscriptDoc`）——
+       **调用方从不提名，所以撞不了名**。以前这里是「模块级全局 + 手挑名字 +
+       自己写闩锁」，那种写法在 2026-09-26 真出过一次静默事故（见 objc_own 文件头）。
+    """
+    import objc
 
-        _ScrollCls = _TranscriptScroll
-    if _DocCls is None:
-        from AppKit import NSView
+    def scroll_wheel(self, event):              # noqa: N802
+        # 这个开关**不再区分收起/展开**（2026-09-24 解耦，见 set_collapsed）：
+        # 内容永远溢出，所以恒为 True —— 保留它只是为了留一个统一的闸门，
+        # 以及保住下面这条注释里的坑。
+        # 不用 setIgnoresMouseEvents_ —— 那会连带杀掉内容区的拖拽移动，
+        # 且和悬浮窗「鼠标穿透」同类的单向死锁。
+        # （NSScrollView 没有 setScrollEnabled_，所以开关放在自己的标志位上。
+        #  PyObjC 的 ObjC 子类必须用 objc.super，内置 super() 不认。）
+        # ⚠️ 用 `cls_of(key)` 取回本类，**别写 `type(self)`** —— 子类化时行为会变。
+        if getattr(self, "_scroll_enabled", True):
+            objc.super(objc_own.cls_of("TranscriptScroll"), self).scrollWheel_(event)
 
-        class _TranscriptDoc(NSView):
-            def mouseDown_(self, event):          # noqa: N802
-                # 整个转录区都是拖拽面。不赌 AppKit"背景拖拽"的启发式认不认
-                # NSScrollView; 滚轮和按键拖拽是两条独立事件流, 互不干扰。
-                win = self.window()
-                if win is not None:
-                    win.performWindowDragWithEvent_(event)
+    def doc_mouse_down(self, event):            # noqa: N802
+        # 整个转录区都是拖拽面。不赌 AppKit「背景拖拽」的启发式认不认
+        # NSScrollView；滚轮和按键拖拽是两条独立事件流，互不干扰。
+        win = self.window()
+        if win is not None:
+            win.performWindowDragWithEvent_(event)
 
-        _DocCls = _TranscriptDoc
-    return _ScrollCls, _DocCls
+    from AppKit import NSScrollView, NSView
+    return (
+        objc_own.own("TranscriptScroll", NSScrollView, {"scrollWheel_": scroll_wheel}),
+        objc_own.own("TranscriptDoc", NSView, {"mouseDown_": doc_mouse_down}),
+    )
 
 
 class TranscriptView:

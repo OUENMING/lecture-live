@@ -23,6 +23,7 @@ import pathlib
 import time
 
 import panel
+import objc_own
 
 try:
     from AppKit import NSRunLoop, NSDate
@@ -238,23 +239,21 @@ def _measure_text_h(text: str, width: float, font) -> float:
         NSMakeSize(width, 1e7), NSStringDrawingUsesLineFragmentOrigin).size.height
 
 
-_ButtonTargetCls = None
-
-
 def _make_button_target(on_click):
-    """返回一个 ObjC 按钮目标。类只定义一次(重复定义会报 override 错)。"""
-    global _ButtonTargetCls
-    import objc
-    from AppKit import NSObject
-    if _ButtonTargetCls is None:
-        class _ButtonTarget(NSObject):
-            def clicked_(self, sender):        # noqa: N802
-                cb = getattr(self, "_cb", None)
-                if cb:
-                    cb()
+    """返回一个 ObjC 按钮目标。
 
-        _ButtonTargetCls = _ButtonTarget
-    t = _ButtonTargetCls.alloc().init()
+    ⚠️ 类名由 `objc_own` 生成（key `ButtonTarget`）—— **调用方从不提名，所以撞不了名**。
+       `whatsnew.py` 的按钮目标用**同一个 key**：两边本来就是逐字节相同的类，
+       现在真的只有一个。
+    """
+    from AppKit import NSObject
+
+    def clicked(self, sender):                  # noqa: N802
+        cb = getattr(self, "_cb", None)
+        if cb:
+            cb()
+
+    t = objc_own.own("ButtonTarget", NSObject, {"clicked_": clicked}).alloc().init()
     t._cb = on_click
     return t
 
@@ -273,9 +272,6 @@ def _xy(p) -> tuple:
         return float(p[0]), float(p[1])
 
 
-_InputDelegateCls = None
-
-
 def _make_input_delegate(on_submit, on_cancel):
     """输入框委托: 回车/Esc 走 control:textView:doCommandBySelector:。
 
@@ -287,29 +283,24 @@ def _make_input_delegate(on_submit, on_cancel):
     真实启动路径下从不触发(见 show()), 拿它做聚焦反馈会得到一个永远不亮的界面。
     细线与光标一律由 `_sync_focus_look()` 在 pump 里按状态同步。
     """
-    global _InputDelegateCls
     from AppKit import NSObject
-    if _InputDelegateCls is None:
-        class _InputDelegate(NSObject):
-            def control_textView_doCommandBySelector_(self, control, textview, selector):  # noqa: N802
-                if selector == "insertNewline:":
-                    cb = getattr(self, "_on_submit", None)
-                elif selector == "cancelOperation:":
-                    cb = getattr(self, "_on_cancel", None)
-                else:
-                    return False            # 方向键/Tab/⌘C 等交给默认实现
-                if cb:
-                    cb()
-                return True
 
-        _InputDelegateCls = _InputDelegate
-    d = _InputDelegateCls.alloc().init()
+    def do_command(self, control, textview, selector):      # noqa: N802
+        if selector == "insertNewline:":
+            cb = getattr(self, "_on_submit", None)
+        elif selector == "cancelOperation:":
+            cb = getattr(self, "_on_cancel", None)
+        else:
+            return False                    # 方向键/Tab/⌘C 等交给默认实现
+        if cb:
+            cb()
+        return True
+
+    d = objc_own.own("InputDelegate", NSObject, {
+        "control_textView_doCommandBySelector_": do_command}).alloc().init()
     d._on_submit = on_submit
     d._on_cancel = on_cancel
     return d
-
-
-_ClickViewCls = None
 
 
 def _make_click_view(on_click):
@@ -323,20 +314,20 @@ def _make_click_view(on_click):
     默认实现会把"非 key 窗口上的第一次点击"吞掉用于激活 —— 那正好是用户
     唯一的那次点击。
     """
-    global _ClickViewCls
     from AppKit import NSView
-    if _ClickViewCls is None:
-        class _ClickView(NSView):
-            def acceptsFirstMouse_(self, event):        # noqa: N802
-                return True
 
-            def mouseDown_(self, event):                # noqa: N802
-                cb = getattr(self, "_cb", None)
-                if cb:
-                    cb()
+    def accepts_first_mouse(self, event):       # noqa: N802
+        return True
 
-        _ClickViewCls = _ClickView
-    v = _ClickViewCls.alloc().initWithFrame_(((0, 0), (0, 0)))
+    def mouse_down(self, event):                # noqa: N802
+        cb = getattr(self, "_cb", None)
+        if cb:
+            cb()
+
+    v = objc_own.own("ClickView", NSView, {
+        "acceptsFirstMouse_": accepts_first_mouse,
+        "mouseDown_": mouse_down,
+    }).alloc().initWithFrame_(((0, 0), (0, 0)))
     v._cb = on_click
     return v
 

@@ -33,6 +33,7 @@ import pathlib
 import re
 
 import panel
+import objc_own
 
 # 复用 panel.py 那套配方（材质、圆角、发灰补偿都实测过），**不另起一套** ——
 # 以前这里抄了一份，连 SCRIM_ALPHA 都各写一遍。
@@ -311,6 +312,13 @@ def build(version: str, summary: str, date: str = "", log: str = "",
                 "set_update_enabled": (lambda on: ubtn and ubtn.setEnabled_(on)),
                 "has_update_button": ubtn is not None,
                 "_targets": targets}
+    except objc_own.ObjcNameCollision:
+        # ⚠️⚠️ **这一类不吞。**
+        # fail-soft 的道理是「卡片只是说明，不能因为它让课起不来」—— 那适用于
+        # AppKit 的偶发问题。但「有人撞了 ObjC 类名」是**程序缺陷**，不是偶发：
+        # 吞掉它，症状就精确回到 2026-09-26 那次「更新卡片静默变 None、而独立测试全绿」。
+        # 所以让它炸出来 —— 上课起不来的代价，小于一个静默失效的更新提示。
+        raise
     except Exception:                                     # noqa: BLE001
         # fail-soft 是本模块的**既定设计**（见文件头：它只是说明，不能因为它让课起不来）。
         # 但它已经**两次**把真 bug 藏起来（ObjC 类名撞车、不可变的 NSAttributedString），
@@ -321,21 +329,22 @@ def build(version: str, summary: str, date: str = "", log: str = "",
         return None
 
 
-_TargetCls = None
-
-
 def _make_target(cb):
-    """包一个 ObjC target 对象。⚠️ 与 overlay 一样: 必须由调用方持引用，否则被 GC。"""
-    global _TargetCls
+    """包一个 ObjC target 对象。
+
+    ⚠️ 与 `overlay._make_button_target` **共用同一个类**（`objc_own` 的 key
+       `ButtonTarget`）—— 它们本来就是逐字节相同的，以前是两份拷贝。
+       类名由 `objc_own` 生成，调用方从不提名，所以撞不了名。
+    ⚠️ 必须由调用方持引用，否则被 GC。
+    """
     from AppKit import NSObject
-    if _TargetCls is None:
-        class _T(NSObject):
-            def clicked_(self, sender):                   # noqa: N802
-                f = getattr(self, "_cb", None)
-                if f:
-                    f()
-        _TargetCls = _T
-    t = _TargetCls.alloc().init()
+
+    def clicked(self, sender):                            # noqa: N802
+        f = getattr(self, "_cb", None)
+        if f:
+            f()
+
+    t = objc_own.own("ButtonTarget", NSObject, {"clicked_": clicked}).alloc().init()
     t._cb = cb
     return t
 

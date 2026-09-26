@@ -152,6 +152,60 @@ def main() -> int:
               str(cp.appearance().name()) if cp else "panel 不在返回值里")
         cp.orderOut_(None)
 
+    print("\n--- ④ 撞名守卫：要炸，而且不能被吞 ---")
+    import objc
+    import objc_own
+    from AppKit import NSObject
+
+    # 手工占住一个本模块会生成的名字
+    probe_name = objc_own._PREFIX + "ProbeCollide"
+    try:
+        objc.lookUpClass(probe_name)
+    except Exception:                                   # noqa: BLE001 — nosuchclass_error
+        type(probe_name, (NSObject,), {})
+    try:
+        objc_own.own("ProbeCollide", NSObject, {})
+        check("名字被占时 own() 抛错", False, "没抛 = 守卫失效")
+    except objc_own.ObjcNameCollision:
+        check("名字被占时 own() 抛 ObjcNameCollision", True)
+    except Exception as e:                              # noqa: BLE001
+        check("名字被占时 own() 抛 ObjcNameCollision", False, f"抛的是 {type(e).__name__}")
+
+    # ⚠️ 关键那条：whatsnew 的 fail-soft **不能**把它吞成 None。
+    #    那个 fail-soft 是既定设计（卡片只是说明），但它以前正好把这次事故吞了 ——
+    #    症状就是「卡片静默变 None，而独立测试全绿」。
+    _orig = panel.build
+
+    def _boom(*a, **kw):
+        raise objc_own.ObjcNameCollision("测试用：模拟撞名")
+
+    panel.build = _boom
+    try:
+        whatsnew.build("0.0.0", "撞名测试", date="2026-09-26")
+        check("撞名不会被 whatsnew 的 fail-soft 吞成 None", False, "被吞了 —— 事故会复现")
+    except objc_own.ObjcNameCollision:
+        check("撞名不会被 whatsnew 的 fail-soft 吞成 None", True)
+    except Exception as e:                              # noqa: BLE001
+        check("撞名不会被 whatsnew 的 fail-soft 吞成 None", False, f"抛的是 {type(e).__name__}")
+    finally:
+        panel.build = _orig
+
+    print("\n--- ⑤ sendEvent_ 真能分派（不是只「能解析」）---")
+    from AppKit import NSEvent
+    fp3 = panel.build(NSMakeRect(0, 0, 200, 100), MASK_OV)
+    ev = NSEvent.mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
+        1, (10.0, 10.0), 0, 0.0, 0, None, 0, 1, 1.0)
+    try:
+        fp3.window.sendEvent_(ev)
+        check("左键事件走通 sendEvent_（激活 + objc.super 分派）", True)
+    except Exception as e:                              # noqa: BLE001
+        check("左键事件走通 sendEvent_（激活 + objc.super 分派）", False,
+              f"{type(e).__name__}: {e}")
+    # ⚠️ 用 cls_of 取本类而不是 type(self)：类被继承时 type(self) 是子类，
+    #    objc.super 的行为会变。这条断言把「方法体拿的是面板类本身」钉住。
+    check("cls_of('Panel') 就是面板类", objc_own.cls_of("Panel") is type(fp3.window),
+          f"{objc_own.cls_of('Panel').__name__}")
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

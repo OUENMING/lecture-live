@@ -31,46 +31,12 @@ from __future__ import annotations
 
 import typing
 
+import objc_own
+
 # 白底可读性：材质之上压的半透明黑。可读性其实由文字的紧凑描边承担
 # （见 overlay.py 顶部那段），这一层只负责把白底压到让描边有依托。
 SCRIM_ALPHA = 0.38
 CORNER_RADIUS = 16.0
-
-#: 本模块拥有的 ObjC 类。key 是内部标识，值是类 —— **单一 definition point**。
-_OWNED: "dict[str, type]" = {}
-
-#: 所有本模块生成的 ObjC 类名都用这个前缀。改它没有意义，除非你同时确认
-#: 进程里没有别的代码在用同一个前缀。
-_PREFIX = "_ClassLive"
-
-
-def _own_class(key: str, base: type, namespace: dict) -> type:
-    """取（或首次定义）一个由本模块拥有的 ObjC 子类。
-
-    ⚠️ **绝不 fail-soft、绝不返回 None。** 名字被占用时立刻抛 —— 静默失败正是
-       2026-09-26 那次事故里最贵的部分（卡片不显示，而测试全绿）。
-    ⚠️ 别用 `objc.getClassList()` 做预检：**实测它在定义前后都返回 `False`**
-       （2026-09-26 独立复现），拿它当判据等于永远查不到。
-       `objc.lookUpClass` 才是对的：缺了抛 `nosuchclass_error`，在则返回类。
-    """
-    got = _OWNED.get(key)
-    if got is not None:
-        return got
-    import objc
-    name = _PREFIX + key
-    try:
-        existing = objc.lookUpClass(name)
-    except Exception:                       # noqa: BLE001 — nosuchclass_error
-        existing = None
-    if existing is not None:
-        raise RuntimeError(
-            f"ObjC 类名 {name} 已被占用（拿到的是 {existing}）——\n"
-            f"  进程里有两份 panel.py，或者有人手工用了这个前缀。\n"
-            f"  ⚠️ 别改这里去绕开：2026-09-26 那次「更新卡片静默变 None」"
-            f"就是撞名被 fail-soft 吞掉的结果。先查清是谁占的。")
-    cls = type(name, (base,), namespace)
-    _OWNED[key] = cls
-    return cls
 
 
 def _panel_class() -> type:
@@ -89,7 +55,6 @@ def _panel_class() -> type:
     """
     from AppKit import NSPanel
     import objc
-    _super = objc.super          # 捕获一次 —— send_event 是**每个事件**都会跑的
 
     def send_event(self, event):
         """窗口收到的**每一个**事件都经过这里 —— 唯一绕不开的位置。
@@ -97,6 +62,8 @@ def _panel_class() -> type:
         ⚠️ 为什么不 override 某个视图的 `mouseDown_`：实测（2026-09-24）即使
            `contentView.hitTest_()` 明确返回了我们的拖拽层，它的 `mouseDown_`
            **一次都没被调用**（没有报错，静默）。窗口级的 sendEvent_ 没这个问题。
+        ⚠️ 用 `objc_own.cls_of("Panel")` 取回本类，**不要写 `type(self)`** ——
+           类被继承时 `type(self)` 是子类，`objc.super` 的行为会变。见 objc_own 的说明。
         """
         if event.type() == 1:               # NSEventTypeLeftMouseDown
             try:
@@ -104,9 +71,9 @@ def _panel_class() -> type:
                 NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
             except Exception:               # noqa: BLE001
                 pass
-        _super(type(self), self).sendEvent_(event)
+        objc.super(objc_own.cls_of("Panel"), self).sendEvent_(event)
 
-    return _own_class("Panel", NSPanel, {
+    return objc_own.own("Panel", NSPanel, {
         "canBecomeKeyWindow": lambda self: True,
         "sendEvent_": send_event,
     })
@@ -151,7 +118,7 @@ def make_drag_layer(on_mousedown=None):
             cb(event)                       # 最外一圈 -> 调用方自己的嵌套循环缩放
         # 其余情况 AppKit 会凭 mouseDownCanMoveWindow=True 自己拖动窗口
 
-    cls = _own_class("DragLayer", NSView, {
+    cls = objc_own.own("DragLayer", NSView, {
         "mouseDownCanMoveWindow": can_move_window,
         "mouseDown_": mouse_down,
     })
@@ -184,7 +151,7 @@ def make_resize_delegate(on_resize):
         if cb:
             cb()
 
-    cls = _own_class("ResizeDelegate", NSObject, {
+    cls = objc_own.own("ResizeDelegate", NSObject, {
         "windowDidResize_": did_resize,
         "windowDidEndLiveResize_": did_resize,
     })

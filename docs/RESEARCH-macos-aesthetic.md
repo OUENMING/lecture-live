@@ -374,3 +374,37 @@ end tell
 → 想知道这个值，只能改条件：把桌面壁纸换成**纯色**再量。
 ⚠️ 这跟「截图差分法不可用」是**两件事**：差分是被**动态背景**毁掉的，
 圆角是被**羽化边**毁掉的。
+
+
+---
+
+## 11. ⚠️ 一条**会毁掉拖拽功能**的实现坑（2026-09-26，做第二批时挖到）
+
+`[二手]` Michael Tsai，<https://mjtsai.com/blog/2024/01/10/mac-app-sandboxing-interferes-with-drag-drop/>，逐字：
+
+> 「Merely inspecting the UTIs in the pasteboard is fine... But if you want to only react to
+> some types of files or folders, you need to know more. **If you ask for the URL – even
+> without actually using it – you trigger some behind the scenes activity involving app
+> sandboxing. This prevents the file being made accessible to your app if & when it actually
+> is dropped into your app.**」
+
+→ **「悬停时判断这是不是 PDF/PPTX」正好踩这一条** —— 而那是任何拖拽区最自然的写法。
+
+**规范做法**（`[一手]` AppKit 归档指南 + `NSDraggingInfo` 文档）：
+
+| 要点 | 原文 / 说明 |
+|---|---|
+| 「收不收」由谁决定 | **`draggingEntered:` / `draggingUpdated:` 的返回值**，不是 `prepareForDragOperation:` |
+| ⚠️ 返回 `NSDragOperationNone` 之后 | **仍会**收到 `draggingUpdated:` / `draggingExited:` —— 别以为返回 None 就清净了 |
+| ⚠️ `performDragOperation:` | **默认返回 `false`** —— 忘了实现 = 静默不收 |
+| 在哪查 pasteboard | **`draggingEntered:` 里**（只查一次）；别放 `draggingUpdated:`（会调多次） |
+| ⚠️ 跨进程 | **必须用 `sender.draggingPasteboard`**，不能自己开 `NSPasteboard(name:)`（原文：「there is **NO guarantee** that this will be the pasteboard used」） |
+| 文件类型 | **`NSPasteboardTypeFileURL`**；⚠️ `NSFilenamesPboardType` **已废弃**（10.14） |
+| 读法 | `readObjects(forClasses:options:)` —— ⚠️ **`nil` 是错误、空数组是「没有」**，别写成一个判断 |
+| 多文件 | `NSDraggingInfo.numberOfValidItemsForDrop`：只收一部分时**设成收的数量**，拖拽管理器会更新徽章 |
+
+**另外两条待实测**（`[二手]`/`[未找到]`）：
+- 非原生框架在 macOS 上「**窗口没有焦点时收不到 drop**」，而「native macOS apps do」。
+  ⚠️ HIG 只明文写了「**源**可以从非活动窗口拖」，**接收侧一字未提** → **我们的浮动面板要实测**。
+- **Apple 侧没有任何「drop 目标长什么样」的设计规范**（appcoda 原文：
+  「**There's no recipe on how to do that however**」）；「虚线框」是 Web 惯例不是 Apple 规范。

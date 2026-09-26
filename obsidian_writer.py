@@ -564,7 +564,7 @@ class ObsidianWriter:
             L += [QA_MARKER, *qa_items, ""]
         if qa:
             L += ["> [!tip] 🤖 自动生成 · 请核对后再用于复习",
-                  "> <sub>写成 `问题::答案`，可被 Spaced Repetition 插件识别</sub>", ""]
+                  "> <sub>写成 `问题::答案`；装了 Spaced Repetition 插件就能当卡片复习</sub>", ""]
             for x in qa:
                 tail = f"　（中：{x['zh']}）" if x["zh"] else ""
                 # 题干里的 `::` 必须拆开 —— Spaced Repetition 按第一个 `::` 切,
@@ -573,7 +573,7 @@ class ObsidianWriter:
                 q_text = x["q"].replace("::", ": :")
                 L.append(f"- {q_text}::{x['a']}{tail}")
         else:
-            L += ["> [!tip] 用 `问题::答案` 写自测题（可被 Spaced Repetition 插件识别）", "",
+            L += ["> [!tip] 用 `问题::答案` 写自测题（装了 Spaced Repetition 插件就能当卡片复习）", "",
                   "- "]
         L += [""]
 

@@ -148,6 +148,7 @@ lecture-live/
 ├── docs/DESIGN.md         # 深度工程笔记：全部实测数据、踩坑、设计论证
 ├── docs/experiments/      # 可复跑的对照实验（换模型 / 降噪 A/B / VAD 调参 / 缩放探针）
 ├── glossary.example.txt   # 公共术语表模板 → 复制成 glossary.txt 后自填课号
+├── materials.example/     # 课程资料目录模板 → 复制进 <vault>/Study/<课号>/materials/
 ├── probe_scroll.py        # 滚动行为验收探针
 ├── test_pipeline.py       # 集成测试(走终端路径，可加速回放)
 └── sessions/              # 运行时产物：逐句实时落盘的会话文件(不入库)
@@ -476,7 +477,7 @@ python build_notes.py --rebuild  # 全量重分类 + 扩写 + 清掉自动回写
 ├── 复习层（自动生成，一分钟看完；**英文为主、中文辅助**）
 │   ├── 🎯 Overview 概览        ← 一句英文概括 + 其中文
 │   ├── 📚 Key Concepts 知识点详解 ← **按主题分组**：英文陈述 + 英文细节 + 中文点睛 + 关键词中英对照
-│   ├── ❓ Review 复习自测       ← `问题::答案`，可被 Spaced Repetition 插件识别（自动生成题英文为主；课上自己问过的为中文 + `（EN：…）`）
+│   ├── ❓ Review 复习自测       ← `问题::答案` 格式，**装了 Spaced Repetition 插件**就能当卡片复习（自动生成题英文为主；课上自己问过的为中文 + `（EN：…）`）
 │   ├── 💡 Terminology 术语表    ← 带首次出现时间戳，本地查表（零网络）
 │   └── ⭐ 我标记的重点          ← 课上按过 ⭐ 的句子（原文 + EN）
 └── 📜 完整逐句转录（默认折叠） ← **逐字保留**：EN / ZH / 原始 ASR，一句不删
@@ -485,6 +486,38 @@ python build_notes.py --rebuild  # 全量重分类 + 扩写 + 清掉自动回写
 **长课分块生成**：40 分钟的课数百句，复习层一次生成会撑爆输出上限、**整份丢失**；故按 ~70 句分块生成知识点再合并，块间用 `[HH:MM]` 前缀标注进度，最后用各块小标题重写一份**全课**概览。
 
 **双层 ≠ 摘要**。复习层只是**入口**；下面那份转录**逐字保留、未做任何删改** —— "不遗漏任何要点"靠它，摘要必然把细节吃掉。复习层生成失败不影响内容，转录永远完整落盘。
+
+### 库里的目录结构
+
+**ClassLive 只写 `Lectures/`；`Study/` 它不碰** —— 那是你（或 AI）消化后的学习区。
+
+```
+<vault>/
+├── Lectures/                     ← ClassLive 写这里（每节课一份双层笔记）
+│   ├── 2026-09-22_ECON10740.md
+│   └── _index.md                 ← 可选：自己维护的索引
+└── Study/                        ← 学习区，**ClassLive 不写**，留给你
+    └── ECON10740/
+        ├── EXAM-MOC.md           ← 考点地图
+        ├── cards.md              ← 卡片（中→英）
+        ├── 复习排程.md            ← 间隔重复排程
+        ├── exam/题库与错题本.md
+        └── materials/            ← ⭐ **课程资料放这里**
+            ├── week1-crisis.md
+            └── wade-ch1-the-self.md
+```
+
+**`Study/` 是可选约定，不是要求** —— 不用它也能正常跑，笔记照写 `Lectures/`。
+用它有两个好处：① 笔记和资料放一起；② 让 AI 读着资料帮你整理复习。
+
+> 📁 **`materials/` 怎么用** —— 把课件/教材/讲义（**Markdown**）丢进去就行，
+> 模板见 [`materials.example/README.md`](materials.example/README.md)：
+> ```bash
+> mkdir -p "<vault>/Study/<课号>/materials"
+> cp materials.example/README.md "<vault>/Study/<课号>/materials/"
+> ```
+> ⚠️ 现在**只有 Markdown**（PDF/PPTX 的自动转换还没做），
+> 且 **ClassLive 自动生成笔记时还不会读它**（那部分在做）。
 
 ### 数据落盘（回答"录音和文字会保存吗"）
 

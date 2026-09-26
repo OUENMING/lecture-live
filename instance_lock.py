@@ -45,6 +45,9 @@ def acquire(path: pathlib.Path | None = None):
     ⚠️ **返回值里的文件对象必须被调用方一直持有到进程结束** ——
        它一旦被 GC 回收，文件描述符关闭，锁就跟着释放了。
        所以别写成 `acquire()` 之后不接返回值。
+
+    ⚠️ 「被占用」与「连锁文件都建不出来」在这个返回值里**分不开**（都是 `None`）。
+       只想知道状态、或要区分这两种情况，用 `probe()`。
     """
     p = pathlib.Path(path) if path else (STATE_DIR / LOCK_NAME)
     try:
@@ -74,6 +77,73 @@ def acquire(path: pathlib.Path | None = None):
     except OSError:
         pass
     return f, None
+
+
+def release(lock) -> None:
+    """放掉 `acquire()` 拿到的锁。拿 `None`（没拿到）是合法的空操作。"""
+    if lock is None:
+        return
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        lock.close()
+    except OSError:
+        pass
+
+
+def probe(path: pathlib.Path | None = None) -> tuple[str, int | None]:
+    """只回答「现在有没有人在跑」—— **不改任何东西**。
+
+    返回 `(state, holder_pid)`，state ∈ `{"free", "held", "unknown"}`。
+
+    ⚠️ **为什么不复用 `acquire()`**，两条都是实测出来的：
+      · `acquire()` 在锁文件不存在时会**创建**它（`mkdir` + `open(..., "a+")`）——
+        一个只想知道状态的调用不该在文件系统上留痕
+      · `acquire()` 把「被占用」和「建不出锁」**压成同一个返回值** `(None, …)`，
+        照它写的探针会把「磁盘满/权限不够」报成「**正在上课**」—— 方向正好反了，
+        而本仓库的规矩是「凡是要给别的脚本看的判据，先问它出错时倒向哪边」
+    """
+    p = pathlib.Path(path) if path else (STATE_DIR / LOCK_NAME)
+    try:
+        f = open(p, "r", encoding="utf-8")       # ⚠️ 只读打开，不存在就 FileNotFoundError
+    except FileNotFoundError:
+        return "free", None                      # 文件都没有 = 从没人拿过 = 空
+    except OSError:
+        return "unknown", None                   # 建不出/读不出 —— 当作没锁，别拦人
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        holder = None
+        try:
+            f.seek(0)
+            holder = int((f.read() or "").strip() or 0) or None
+        except (OSError, ValueError):
+            pass
+        f.close()
+        return "held", holder
+    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    f.close()
+    return "free", None
+
+
+def is_held(path: pathlib.Path | None = None) -> tuple[bool, int | None]:
+    """`probe()` 的布尔投影 —— 「现在是不是有人在跑」。
+
+    ⚠️ 与 `acquire()` 的语义区别：`acquire()` 拿到就**一直持有**（那才是互斥）；
+    这里探完就放，**不持有、不创建、不戳 pid**。
+
+    ⚠️ `"unknown"`（锁文件建不出）算 **`False`** —— 与 `acquire()` 的降级方向一致：
+    锁坏掉时不该拦住任何事。
+
+    ⚠️ **为什么只是告知、不做成互斥**：术语表只在启动时读一次
+    （`translator.py` 的 `Translator.__init__`），所以 prep 和上课同时跑
+    **没有竞态可防**。做成互斥反而会让「开课前想补两个词」被一句「正在上课」挡在门外
+    —— 而那正是要它跑的场合。
+    """
+    state, holder = probe(path)
+    return state == "held", holder
 
 
 def describe_holder(pid: int | None) -> str:

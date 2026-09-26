@@ -8,6 +8,7 @@
 #   cl test            测试模式: 采集完整指标 + 留音频, 收尾打成可发送的单个 zip
 #   cl update          更新到最新版(git pull + 补依赖), 然后自检
 #   cl doctor          自检: 版本/依赖/模型/术语表, 缺什么告诉你跑哪条命令
+#   cl prep <课件…>     开课前的准备: 从课件抽候选术语, 追加进该课术语表
 #   cl help            帮助
 set -u
 # 解析符号链接(可能被 ln -s 到 ~/.local/bin)
@@ -19,6 +20,10 @@ while [ -L "$SELF" ]; do
     *)  SELF="$(dirname "$SELF")/$TARGET" ;;
   esac
 done
+# ⚠️ 在 cd 之前记住「用户敲命令时所在的目录」。本脚本下面会 cd 到安装目录，
+#    那会让 `cl prep week5.pptx` 这类**相对路径**按安装目录解析 —— 结果是
+#    「所有文件都打不开（损坏）」，与真因无关。`prep` 分支把它传给 prep.py。
+_ORIG_PWD="$PWD"
 cd "$(cd "$(dirname "$SELF")" && pwd)" || exit 1
 
 # ⚠️ 补两条 Finder 启动时**缺失**的 PATH。
@@ -63,6 +68,7 @@ ClassLive —— 本地实时课堂双语字幕
   cl test              测试模式: 采集完整指标 + 留音频, 收尾打成一个可发送的 zip
   cl update            更新到最新版(git pull + 补依赖), 然后自检
   cl doctor            自检: 依赖/模型/术语表, 缺什么告诉你跑哪条命令
+  cl prep <课件…>       开课前的准备: 从课件抽候选术语, 追加进该课术语表
   cl help              显示本帮助
 
 停止：点悬浮窗右上角 ✕,或在本终端按 Ctrl+C
@@ -161,6 +167,9 @@ case "${1:-}" in
     SRC=file; UI=terminal; ARGS+=(--path "$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"); shift 2 ;;
   local) ENGINE=local; shift ;;
   doctor) "$PY" doctor.py; exit $? ;;
+  # 开课前的准备。照 doctor 的形状：转发 + 透传退出码（prep.py 用非零表示失败）。
+  # ⚠️ 课号在这里解析一次（`$COURSE` 来自上面读的 .course），prep.py 不自己去读环境。
+  prep) shift; "$PY" prep.py --course "${COURSE:-}" --cwd "$_ORIG_PWD" "$@"; exit $? ;;
   update) update_classlive; exit $? ;;
   test)
     # 测试模式: 采全量指标 + 录音频, 收尾打包。额外参数透传(如 --no-record-audio)。

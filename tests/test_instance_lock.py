@@ -120,11 +120,69 @@ def test_degrade(tmp):
           instance_lock.describe_holder(None) == "已经有一个 ClassLive 在跑")
 
 
+# ---- E. is_held：探锁**不持有** ----
+#
+# `is_held()` 是给 `cl prep` 用的 —— 它只想**知道**现在是不是在上课，
+# 不想因此挡住自己（做成互斥会让「开课前补两个词」正好被挡在门外）。
+# ⚠️ 同进程也能测：flock 的锁挂在**打开的文件描述**上，同一进程再 open 一次
+#    是**另一个**描述符，所以第二把锁会被第一把挡住。
+
+def test_is_held(tmp):
+    import os
+    p = pathlib.Path(tmp) / "probe.lock"
+
+    check("E1 没人持有时 -> False", instance_lock.is_held(p) == (False, None))
+
+    lock, _ = instance_lock.acquire(p)                 # 自己持着（另一个 fd）
+    try:
+        held, pid = instance_lock.is_held(p)
+        check("E2 有人持有时 -> True 且报出 pid",
+              held is True and pid == os.getpid(), f"held={held} pid={pid}")
+        check("E3 有人在跑时，is_held 不改锁文件",
+              p.read_text(encoding="utf-8") == str(os.getpid()))
+    finally:
+        instance_lock.release(lock)
+
+    check("E4 ⭐ 放掉之后立刻 False —— 说明 is_held 没留下自己的锁",
+          instance_lock.is_held(p)[0] is False)
+
+    # ⚠️ 这一段是**唯一**会走到「拿到就放」那条路的地方 ——
+    #    上面 E2/E3 锁是被占着的，`acquire` 直接失败返回，碰不到戳 pid 的代码。
+    #    所以把 pid 戳在**别人**的号码上，才能测出 is_held 到底写不写。
+    p.write_text("999999", encoding="utf-8")
+    instance_lock.is_held(p)
+    check("E5 ⭐ is_held 不写 pid（别覆盖占用者的诊断信息）",
+          p.read_text(encoding="utf-8") == "999999",
+          f"现在是 {p.read_text(encoding='utf-8')!r}")
+    check("E6 release(None) 是合法的空操作", instance_lock.release(None) is None)
+
+    # ⭐ E7/E8：探锁**不该在文件系统上留痕**，也不该把「锁坏了」说成「在上课」
+    #    （这两条是审查抓出来的：老写法走 acquire()，而它会 mkdir + open("a+") 建文件。）
+    ghost = pathlib.Path(tmp) / "never" / "x.lock"
+    check("E7 ⭐ probe 不创建锁文件（父目录也不建）",
+          instance_lock.probe(ghost) == ("free", None) and not ghost.parent.exists(),
+          f"父目录存在? {ghost.parent.exists()}")
+
+    # ⚠️ 触发 "unknown" 要的是「**存在但读不出**」，不是「不存在」——
+    #    不存在本来就是 free（第一版拿 /proc/nonexistent 当样本，测错了东西）。
+    unreadable = pathlib.Path(tmp) / "unreadable.lock"
+    unreadable.write_text("4242", encoding="utf-8")
+    os.chmod(unreadable, 0o000)
+    try:
+        state, _ = instance_lock.probe(unreadable)
+        check("E8 ⭐ 锁文件读不出时是 'unknown'，且 is_held 读成 False（别冒充在上课）",
+              state == "unknown" and instance_lock.is_held(unreadable) == (False, None),
+              f"probe={instance_lock.probe(unreadable)}")
+    finally:
+        os.chmod(unreadable, 0o600)
+
+
 def main():
     print("\n单实例锁 · 回归测试\n" + "─" * 46)
     tmp = tempfile.mkdtemp(prefix="classlive_lock_")
     try:
-        for fn in (test_basic, test_release_on_exit, test_release_on_kill9, test_degrade):
+        for fn in (test_basic, test_release_on_exit, test_release_on_kill9,
+                   test_degrade, test_is_held):
             fn(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

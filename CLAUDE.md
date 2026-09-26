@@ -24,6 +24,9 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | **单实例锁**（为什么用 flock 不用 pidfile） | `instance_lock.py` |
 | **磨砂面板配方**（材质/scrim/拖拽层）—— overlay 与 whatsnew 的唯一真源 | `panel.py`（**动手前先读它的文件头**） |
 | **ObjC 类名归属** —— 全项目定义 ObjC 子类只此一处 | `objc_own.py`（**动手前先读它的文件头**） |
+| **开课前的准备**（课件 → 候选术语 → 该课术语表） | `prep.py`（**动手前先读它的文件头**）、`extract.py` |
+| **`~/.classlive/` 那族新路径的唯一定义点** | `paths.py` |
+| **macOS 视觉语言**（同心圆角/字号字距/对比度门槛/材质硬规则/原生指纹）—— 动 `overlay.py` 外观或做第二批面板前读 | `docs/RESEARCH-macos-aesthetic.md` |
 | **面向用户的提示**：说人话的弹窗 / 麦克风权限三态 / 跳系统设置 | `notice.py` |
 | 主循环、后台线程、队列、UI 路由与落盘分发 | `main.py` |
 | 音频采集、麦克风/系统声、电平归一化 | `capture.py` |
@@ -142,6 +145,11 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   逼你想清楚「这次是有意改行为，还是改坏了」。
   ⚠️ **它盖不住什么也要清楚**：那是**静态摊平**，所以**行为**（拖拽、live resize）
   不在里面（`sendEvent_` 的分派单独由第 ⑤ 组钉住）。别把「两条腿」讲得比实际强。
+- **碰过开课前的准备**（`prep.py` / `extract.py` / `paths.py`）：
+  `ClassLive.app/Contents/MacOS/python tests/test_extract.py` 与 `tests/test_prep.py` 全绿。
+  ⚠️ **两条都不在默认闸门里**，要单独跑。**它们钉住了什么看两个文件自己的 docstring** —— 那是判据的唯一定义点，别在这里再抄一份（抄了会腐坏）。
+  ⚠️ **改 `glossary/<课号>.txt` 的行为前先想清楚**：它是**手写内容与自动内容共处**的文件，
+  纪律是**只追加**（见 `prep.py` 文件头）。
 - 碰过 `overlay.py` / `transcript_view.py` 的**布局或滚动**：`ClassLive.app/Contents/MacOS/python probe_scroll.py` 验滚动行为。
   ⚠️ **它本身不稳定**（2026-09-26 实测）：**改动前的代码连跑三次**，两次「阶段 1 ✅ / 阶段 2 ❌」、
   一次反过来 —— 每次都是**恰好一个阶段收到 0 个滚轮事件**，而失败的阶段会翻转。

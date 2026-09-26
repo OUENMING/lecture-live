@@ -162,6 +162,52 @@ def main() -> int:
                              "undo": {"text": "a"}})
               - E.card_height({"added": ["a"], "removed": {"a"}}) - E.RESULT_ROW) < 1e-9)
 
+    print("\n--- ⑨ 零参数入口的退出码（`cl` 只读得动这个）---")
+    # ⚠️ 这一组的判据是**三条退出码必须互不相同**：「用户取消」和「面板挂了」
+    #    混在一起的话，要么违背用户意图（他取消了还录课），要么录不了课
+    #    （正是作者拍第 1 条时要防的那件事）。
+    #
+    # ⚠️ 它会写**真的 `.course`**（`entry_launch.CFG`），所以按仓库「测试必须隔离写端」
+    #    的规矩**先备份、跑完逐字还原**。同 `test_panel.py` 对 `.window` 的做法。
+    import entry_launch
+    import entry_panel as _EP
+
+    cfg = HERE / ".course"
+    saved = cfg.read_bytes() if cfg.exists() else None
+    _orig_open = _EP.open_panel
+    try:
+        def _run(fake):
+            _EP.open_panel = fake
+            return entry_launch.main()
+
+        rc = _run(lambda **kw: (kw["on_start"]("ZZTEST"), object())[1])
+        check("① 点了「开始上课」-> 0，且 .course 写成那门课",
+              rc == entry_launch.PICKED and cfg.read_text(encoding="utf-8") == "ZZTEST",
+              f"rc={rc} course={cfg.read_text(encoding='utf-8')!r}")
+
+        cfg.write_text("KEEPME", encoding="utf-8")
+        rc = _run(lambda **kw: (kw["on_close"](), object())[1])
+        check("⭐ ② 用户关掉面板 -> 1，且 **.course 一个字没动**（取消 ≠ 故障）",
+              rc == entry_launch.CANCELLED
+              and cfg.read_text(encoding="utf-8") == "KEEPME",
+              f"rc={rc} course={cfg.read_text(encoding='utf-8')!r}")
+
+        rc = _run(lambda **kw: None)
+        check("⭐ ③ 面板起不来 -> 2（`cl` 据此**退回照旧立刻录课**）",
+              rc == entry_launch.UNAVAILABLE, f"rc={rc}")
+
+        check("⭐ 三条码互不相同（`cl` 的 case 分支靠这个分清）",
+              len({entry_launch.PICKED, entry_launch.CANCELLED,
+                   entry_launch.UNAVAILABLE, entry_launch.NO_COURSES}) == 4)
+    finally:
+        _EP.open_panel = _orig_open
+        if saved is not None:
+            cfg.write_bytes(saved)
+        elif cfg.exists():
+            cfg.unlink()
+    check("⚠️ 跑完 .course 逐字还原（隔离真的成立）",
+          (cfg.read_bytes() if cfg.exists() else None) == saved)
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

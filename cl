@@ -21,6 +21,17 @@ while [ -L "$SELF" ]; do
 done
 cd "$(cd "$(dirname "$SELF")" && pwd)" || exit 1
 
+# ⚠️ 补两条 Finder 启动时**缺失**的 PATH。
+#    从 .app 双击启动时 PATH 只剩 `/usr/bin:/bin:/usr/sbin:/sbin`，于是：
+#      · `uv`（~/.local/bin）找不到 → 下面的 `cl update` 补依赖分支整个失效
+#      · 而它备用的 `$PY -m pip` **也不通** —— .app 里那个 python 是 uv 建的空 venv，
+#        **不带 pip**（见 CLAUDE.md）。两条路一起断。
+#      · `ffmpeg`（/opt/homebrew/bin）找不到 → `cl file` 跑不了
+#    只**追加**，不会挤掉原有路径，终端里跑也完全无副作用。
+#    （路线图把这条件算在 P1 里，2026-09-26 核实时发现其实一直没做。）
+PATH="$PATH:$HOME/.local/bin:/opt/homebrew/bin"
+export PATH
+
 # ⚠️ Python 解释器住在 ClassLive.app **里面**，不是仓库根目录的 .venv ——
 #    这么放是为了让 macOS 认这个目录为 bundle：授权框才会写「ClassLive」
 #    而不是「python3.11」。根因与完整配方见 docs/PLAN-p1-app-launcher.md §1.5。

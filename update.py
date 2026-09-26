@@ -414,6 +414,22 @@ def mark_reqs_installed() -> None:
         pass
 
 
+def _child_env() -> dict:
+    """给子进程的环境：补两条 Finder 启动时缺失的 PATH。
+
+    ⚠️ 从 `.app` 双击启动时 PATH 只剩 `/usr/bin:/bin:/usr/sbin:/sbin`，
+       而 `uv` 在 `~/.local/bin`、`ffmpeg` 在 `/opt/homebrew/bin` —— 都会找不到。
+       （路线图 §5.2 实测列过这两条。只**追加**路径，不会挤掉原有的。）
+    """
+    env = dict(os.environ)
+    have = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+    for extra in (str(pathlib.Path.home() / ".local" / "bin"), "/opt/homebrew/bin"):
+        if extra not in have:
+            have.append(extra)
+    env["PATH"] = os.pathsep.join(have)
+    return env
+
+
 def pending_steps() -> list[dict]:
     """更新之后还有哪些重活没做。按该做的顺序返回。
 
@@ -452,6 +468,27 @@ def pending_steps() -> list[dict]:
             })
     except Exception:                                     # noqa: BLE001
         pass
+
+    # ③ 重建 .app：锚在上面两条之后（它是最后一道打包，也最重）。
+    # ⚠️ 为什么需要：`cl update` **只拉代码、不重建 .app** ——
+    #    `make-app.sh` / `tools/make_icon.py` / `VERSION` 的改动于是在用户那儿
+    #    永远不生效（图标就是这么丢的：代码更新了，Dock 上还是旧图）。
+    # ⚠️ 判据问 `make-app.sh --up-to-date`，**不在这里重算指纹** —— 两处记一次迟早漂。
+    #    ⚠️ 是 `--up-to-date` 且判**非零**：这样脚本自身出错也倒向「重建」。
+    #       若反过来问「stale 吗」，出错会落成非零 → 被读成「最新」→ 静默跳过。
+    try:
+        r = subprocess.run([str(HERE / "make-app.sh"), "--up-to-date"], cwd=HERE,
+                           env=_child_env(), capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            steps.append({
+                "key": "app",
+                "label": "重建 .app",
+                "detail": "约 1–3 分钟",
+                "why": f"{r.stdout.strip() or '构建输入变了'} —— "
+                       "不重建的话图标 / 启动器改动不会生效。",
+            })
+    except Exception:                                     # noqa: BLE001
+        pass
     return steps
 
 
@@ -475,7 +512,7 @@ def run_step(key: str, on_line=None) -> dict:
             r = subprocess.run(
                 ["uv", "pip", "install", "--python", sys.executable, "-q",
                  "-r", str(HERE / "requirements.txt")],
-                cwd=HERE, capture_output=True, text=True, timeout=900)
+                cwd=HERE, env=_child_env(), capture_output=True, text=True, timeout=900)
             if r.returncode != 0:
                 err = (r.stderr or r.stdout or "").strip().splitlines()
                 return {"ok": False, "error": err[-1] if err else "装依赖失败"}
@@ -498,6 +535,19 @@ def run_step(key: str, on_line=None) -> dict:
                     return {"ok": False,
                             "error": f"{m.label} 下载失败：{err[-1] if err else '未知原因'}"}
             say("模型齐了")
+            return {"ok": True, "error": ""}
+
+        if key == "app":
+            # 重建整个 .app。make-app.sh 自己会装依赖、写戳记，并把旧的那份
+            # 改名备份、失败时恢复 —— 这里只负责把它跑起来。
+            say("正在重建 .app（约 1–3 分钟，期间别退出）…")
+            r = subprocess.run([str(HERE / "make-app.sh")], cwd=HERE,
+                               env=_child_env(), capture_output=True, text=True,
+                               timeout=1800)
+            if r.returncode != 0:
+                err = (r.stderr or r.stdout or "").strip().splitlines()
+                return {"ok": False, "error": err[-1] if err else "重建 .app 失败"}
+            say(".app 重建好了")
             return {"ok": True, "error": ""}
 
         return {"ok": False, "error": f"未知步骤 {key!r}"}

@@ -50,7 +50,7 @@ ClassLive 是一个**跑在作者自己 Mac 上的实时英译中课堂字幕工
 
 | 层 | 选型 | 说明 |
 |---|---|---|
-| 语言/运行时 | Python 3.12(`uv venv .venv`) | ⚠️ **2026-09-25 更正**：`requirements.txt` **已有**（v3.4.0 起）；`pyproject.toml` / `setup.py` / `uv.lock` 仍无 |
+| 语言/运行时 | Python 3.12（住在 `ClassLive.app/Contents/` 里） | ⚠️ **2026-09-25 更正**：`requirements.txt` **已有**（v3.4.0 起）；`pyproject.toml` / `setup.py` / `uv.lock` 仍无。⚠️ **2026-09-26 更正**：原写 `uv venv .venv`，那个布局已弃用、目录已删 —— 见下方「入口与启动链」的说明 |
 | ASR | `sherpa-onnx` + NVIDIA **Parakeet-TDT-0.6B-v3 int8** | CPU, 实测 ~28× 实时; 模型在 `~/models/parakeet-tdt-0.6b-v3-int8` |
 | VAD | `sherpa-onnx` + **Silero VAD** | 缺失时回退 `_EnergyVad`(能量阈值) |
 | 本地翻译 | **`mlx-lm`** + `Qwen3-1.7B-4bit`(GPU) | 断网兜底; 已实测 3B/4B 必 OOM |
@@ -60,7 +60,12 @@ ClassLive 是一个**跑在作者自己 Mac 上的实时英译中课堂字幕工
 | 存储 | 纯文件(Markdown + JSON), 无数据库 | `sessions/`、`<vault>/Lectures/`、`term_notes*.json` |
 | 测试 | `unittest`(`tests/test_audit_regressions.py`, 无网络无模型) + `test_pipeline.py`(需真实模型) | 无 CI / lint / 类型检查配置 |
 
-**入口与启动链**: `cl`(bash, 被软链到 `~/.local/bin/cl`; 解析符号链接后 `cd` 到仓库)→ 把课程号从 `.course` 读出来 → `exec .venv/bin/python main.py --source {mic|blackhole|file} --ui {overlay|terminal} --engine {auto|cloud|local} --vault ... [--course ...]` → `main.main()` 解析 argparse → `main.run(args)`。另有两条旁路入口: `cl last`(bash 直接 grep 最新 `sessions/*.md`)与 `python build_notes.py [course] [--rebuild]`(术语库构建期 CLI)。
+**入口与启动链**: `cl`(bash, 被软链到 `~/.local/bin/cl`; 解析符号链接后 `cd` 到仓库)→ 把课程号从 `.course` 读出来 → `exec ClassLive.app/Contents/MacOS/python main.py --source {mic|blackhole|file} --ui {overlay|terminal} --engine {auto|cloud|local} --vault ... [--course ...]` → `main.main()` 解析 argparse → `main.run(args)`。另有两条旁路入口: `cl last`(bash 直接 grep 最新 `sessions/*.md`)与 `python build_notes.py [course] [--rebuild]`(术语库构建期 CLI)。
+
+> ⚠️ **2026-09-26 更正**：这里原写 `.venv/bin/python`。那个路径**已不存在** ——
+> 解释器现在住在 `.app` 里面（v3.7.0 起），仓库根目录的 `.venv` 已删。
+> 这么放是为了让 macOS 认那个目录为 bundle，授权框才写「ClassLive」。
+> 根因见 `docs/PLAN-p1-app-launcher.md` §1.5。
 
 ---
 

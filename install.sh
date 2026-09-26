@@ -156,9 +156,18 @@ say "─────────────────────────
 # ---------- ① 确保 .app 已构建 ----------
 # ⚠️ 复用 make-app.sh，**不在这里重写构建逻辑** —— 同一个道理：
 #    两处各记一次，迟早漂移。（cl-bg.py 的注释里也写着这条。）
+# ⚠️ 判据**不只是「不存在才建」** —— 还要看构建戳记。
+#    `cl update` 只拉代码、**不重建 .app**，所以 `make-app.sh` / `tools/make_icon.py`
+#    / `VERSION` 的改动不会自己生效（图标就是这么丢的：代码更新了、Dock 上还是旧图）。
+#    ⚠️ 判据交给 `make-app.sh --up-to-date` —— **只有那一份实现**，不在这里重算指纹。
+#    ⚠️ 注意是 `--up-to-date` 且用 `!`：**出错也要倒向重建**。
+#       若反过来问「stale 吗」，脚本自身出错会落成非零 → 被读成「最新」→ 静默跳过。
 if [ ! -d "$APP" ]; then
   say "① .app 还没构建 —— 交给 make-app.sh"
   "$HERE/make-app.sh" || fail "构建失败"
+elif ! _why="$("$HERE/make-app.sh" --up-to-date 2>&1)"; then
+  say "① .app 该重建：${_why}"
+  "$HERE/make-app.sh" || fail "重建失败"
 else
   say "① .app 已就位（$(du -sh "$APP" | cut -f1)）"
 fi

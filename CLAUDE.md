@@ -78,6 +78,17 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   ⚠️ 最阴的是它**只在出错路径上咬人** —— 两个实际案例都是 `||` 后面的提示文案，
   平时跑不到，等真出错时才发现「本来要打印提示，结果崩了」。
   自查：`grep -nP '\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]' *.sh cl`（注释命中是正常的，那是讲这个坑的）
+  ⚠️ **2026-09-26 又踩了两次**，都是在新写的出错路径上（`|| fail \"…$VAR（…\"`）——
+  这条不是历史记录，是活的。
+- ⚠️ **`make-app.sh --up-to-date` 的退出码方向是故意的**（`0` = 最新，**非 0 = 该重建**）。
+  反过来（`0` = 该重建）看着更自然，但**脚本自身一出错也落成非零** → 调用方读成「最新」
+  → **静默跳过重建**。2026-09-26 实测踩到：`$_want）` 触发上面那条 $VAR 雷区，
+  `install.sh` 当场静默跳过。**凡是要给别的脚本/进程看的判据，先问「它出错时倒向哪边」**。
+- **构建戳记 `ClassLive.app/Contents/.build-stamp`**（2026-09-26 起）：记的是构建输入的指纹。
+  `cl update` **只拉代码、不重建 `.app`** —— 没有戳记的话 `make-app.sh` /
+  `tools/make_icon.py` / `VERSION` 的改动在用户那儿**永远不生效**（图标就是这么丢的）。
+  判据只在 `make-app.sh --up-to-date` **一份实现**里；别在 `install.sh` / `update.py` 各算一遍指纹。
+  ⚠️ 它**不含 `requirements.txt`** —— 依赖是 deps 步骤直接装进 `.app` 那个 python 的，不需要重建。
 - **新增 streamq tag 必须在 `main.drain()` 加同分支** —— 它是唯一的 tag 分发点，漏改即静默丢弃。
 - **会话 Markdown 格式是三方共享契约**：`obsidian_writer` 写它、`_parse` 读回它、`cl last` 用 grep 匹配它；改格式会同时打断三处。
 - **`--context` 有两个默认值**：CLI 是 5，`translator.load_translator` / `CloudTranslator` 是 2；直接调库拿到的行为与 `cl` 不同。

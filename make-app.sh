@@ -35,6 +35,51 @@ BUNDLE_ID="page.bldcam.classlive"
 say()  { printf '%s\n' "$*"; }
 fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 
+# ---------- 构建戳记：判断「要不要重建」 ----------
+# ⚠️ 为什么需要它：`cl update` 只拉代码、**不重建 .app** ——
+#    于是 `make-app.sh` / `tools/make_icon.py` / `VERSION` 的改动
+#    在用户那儿**永远不生效**（图标就是这么丢的：代码拉下来了，Dock 上还是旧图）。
+#    有戳记才判断得出来，`install.sh` 和 `update.py` 才有依据。
+#
+# ⚠️ 只含**烤进 .app 的东西**：
+#      make-app.sh      → bundle 结构 + Info.plist
+#      tools/make_icon.py → 图标
+#      VERSION          → Info.plist 里的 CFBundleShortVersionString
+#    **不含 requirements.txt** —— 依赖是 `cl update` 的 deps 步骤**直接装进 .app 那个
+#    python** 的（`--python sys.executable`），本来就不需要重建；写进来只会造成
+#    无谓的 3 分钟重建。
+#
+# ⚠️ 戳记放在 **.app 里面**（不是 ~/Library/Logs）：它描述的是**这个产物**，
+#    跟着产物走才对 —— .app 被删了自然就没有戳记，也就自然该重建。
+STAMP="$APP/Contents/.build-stamp"
+
+fingerprint() {
+  cat "$HERE/make-app.sh" "$HERE/tools/make_icon.py" "$HERE/VERSION" 2>/dev/null \
+    | shasum -a 256 | cut -d' ' -f1 | cut -c1-16
+}
+
+# ---------- --up-to-date：这个 .app 是最新的吗？**唯一判据就在这一份实现里** ----------
+# 退出码：0 = 是最新的；**非 0 = 该重建**。
+#
+# ⚠️⚠️ 方向是**故意**选的。反过来（0 = 该重建）看着更自然，但脚本自身一旦出错
+#     （比如下面那句里一个未定义变量）也会落到非零 —— 调用方就读成「是最新的」，
+#     **静默跳过重建**。那正好复现了我们要修的那个 bug：代码更新了、图标不生效。
+#     现在这样，任何意外都倒向「重建」—— 白花 3 分钟，但绝不会静默不生效。
+#     （2026-09-26 实测踩到：`$_want）` 触发 unbound，`install.sh` 当场静默跳过。）
+#
+# ⚠️ 别在 install.sh / update.py 里各算一遍指纹 —— 两处记一次迟早漂。
+if [ "${1:-}" = "--up-to-date" ]; then
+  [ -d "$APP" ]    || { say ".app 还没构建"; exit 1; }
+  [ -f "$STAMP" ]  || { say "没有构建戳记（老版本建的这个 .app）"; exit 1; }
+  _want="$(fingerprint)"
+  _have="$(tr -d '[:space:]' < "$STAMP" 2>/dev/null || true)"
+  if [ "${_want}" != "${_have}" ]; then
+    say "构建输入变了（戳记 ${_have} → 现在 ${_want}）"
+    exit 1
+  fi
+  exit 0
+fi
+
 # ---------- --check：只报告现状 ----------
 if [ "${1:-}" = "--check" ]; then
   say "ClassLive.app 构建现状"
@@ -70,6 +115,14 @@ if [ "${1:-}" = "--check" ]; then
     say "   lib/              $([ -d "$APP/Contents/lib" ] && echo 就位 || echo '❌ 缺')"
     say "   pyvenv.cfg        $([ -f "$APP/Contents/pyvenv.cfg" ] && echo 就位 || echo '❌ 缺')"
     say "   Info.plist        $([ -f "$APP/Contents/Info.plist" ] && echo 就位 || echo '❌ 缺')"
+    # 戳记：对不上说明 make-app.sh / make_icon.py / VERSION 改过了，这个 .app 该重建
+    if [ ! -f "$STAMP" ]; then
+      say "   构建戳记          ⚠️ 没有（老版本建的）—— 跑 ./make-app.sh 重建"
+    elif [ "$(cat "$STAMP" | tr -d '[:space:]')" != "$(fingerprint)" ]; then
+      say "   构建戳记          ⚠️ 对不上（构建输入变了）—— 跑 ./make-app.sh 重建"
+    else
+      say "   构建戳记          ✅ 是最新的"
+    fi
     # 图标：Info.plist 里声明了、Resources 里也得真有那个文件，缺一不可。
     # ⚠️ 只查一边不够 —— CFBundleIconFile 指向不存在的文件时**不报错**，
     #    只是 Dock/Finder 上悄悄退回系统通用图标（"看着像没做"）。
@@ -91,8 +144,10 @@ if [ "${1:-}" = "--check" ]; then
     say "⚪ .app 不存在 —— 跑 ./make-app.sh 构建"
   fi
   say ""
-  say "旧布局（重构前的 .venv）："
-  say "   .venv             $([ -d "$HERE/.venv" ] && du -sh "$HERE/.venv" | cut -f1 || echo '（无）')"
+  if [ -d "$HERE/.venv" ]; then
+    say "旧布局（重构前的 .venv，现在可以删）："
+    say "   .venv             $(du -sh "$HERE/.venv" | cut -f1)"
+  fi
   exit 0
 fi
 
@@ -408,8 +463,9 @@ for m in ("sounddevice", "numpy", "AppKit", "httpx"):
 sys.exit(1 if bad else 0)
 PY
 
-# ⚠️ 只有走到这里才算构建成功 —— 此时才删掉 ③ 留的备份。
+# ⚠️ 只有走到这里才算构建成功 —— 此时才写戳记、删掉 ③ 留的备份。
 #    中途任何一步 fail / 报错，都由 ③ 的 trap 把旧 .app 移回来。
+fingerprint > "$STAMP"
 _BUILD_OK=1
 rm -rf "$_BAK"
 
@@ -419,6 +475,12 @@ say "─────────────────────────
 say "   .app        $APP  ($(du -sh "$APP" | cut -f1))"
 say "   双击它就能上课（第一次会弹麦克风授权，点允许）"
 say ""
-say "⚠️ 旧的 .venv/ $( [ -d "$HERE/.venv" ] && echo "($(du -sh "$HERE/.venv" | cut -f1)) 先别删" ) ——"
-say "   等 cl 改完、确认 .app 能跑之后再说。"
-say "   查现状：./make-app.sh --check"
+# ⚠️ 只在**确实还存在**时才提。`.venv` 是重构前的遗留，现在可以删了 ——
+#    提示语如果反过来写「先别删」，等用户真删了之后就变成一句误导。
+if [ -d "$HERE/.venv" ]; then
+  say "ℹ️ 旧的 .venv/ ($(du -sh "$HERE/.venv" | cut -f1)) 可以删了 ——"
+  say "   cl 现在用的是 .app 里那个 python，.venv 是重构前的遗留，删掉不影响。"
+  say "   要删：rm -rf $HERE/.venv"
+else
+  say "   查现状：./make-app.sh --check   ·   装进系统：./install.sh"
+fi

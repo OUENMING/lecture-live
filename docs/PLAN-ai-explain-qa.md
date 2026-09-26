@@ -450,10 +450,10 @@ Apple 文档：窗口无标题栏时该属性为 false，且 *"Attempts to make 
 2. **实机打字测试**：Phase 1 的风险项（\(\Cmd\) 键、焦点归还）只能在真机确认。
 3. **缓存命中率实测**：跑 5 轮追问，记录 `prompt_cache_hit_tokens`，与 0.4 理论对照。
 4. **回归：用仓库既有的三道闸门（见 `CLAUDE.md`「完成判据」）**
-   - 默认闸门：`.venv/bin/python tests/test_audit_regressions.py` 全绿（无网络、无模型、毫秒级）。
+   - 默认闸门：`ClassLive.app/Contents/MacOS/python tests/test_audit_regressions.py` 全绿（无网络、无模型、毫秒级）。
      ⚠️ R1/R4 **复刻了实现逻辑** —— **绿 ≠ 真实流水线通过**
-   - 碰过流水线 / 音频路径：`.venv/bin/python test_pipeline.py <音频>`
-   - 碰过 `overlay.py` / `transcript_view.py`：`.venv/bin/python probe_scroll.py`
+   - 碰过流水线 / 音频路径：`ClassLive.app/Contents/MacOS/python test_pipeline.py <音频>`
+   - 碰过 `overlay.py` / `transcript_view.py`：`ClassLive.app/Contents/MacOS/python probe_scroll.py`
    - **报"可用"之前先跑上面命中的那条、贴出输出，再下结论。**
 5. 更新 `README.md` 路线图与 `docs/DESIGN.md`。
 

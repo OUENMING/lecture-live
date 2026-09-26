@@ -56,18 +56,28 @@
 
 ```bash
 cd ~/lecture-live
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python sherpa-onnx mlx-lm sounddevice numpy \
-    huggingface_hub pyobjc-framework-Cocoa pyobjc-framework-Quartz
-# Parakeet 模型
-.venv/bin/python -c "from huggingface_hub import snapshot_download; \
+./install.sh        # 构建 ClassLive.app 并装进 /Applications（依赖它会自己装）
+                    # 只构建不安装：./make-app.sh
+
+# Parakeet ASR 模型
+ClassLive.app/Contents/MacOS/python -c "from huggingface_hub import snapshot_download; \
   snapshot_download('csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8', \
   local_dir='$HOME/models/parakeet-tdt-0.6b-v3-int8')"
 # Silero VAD
 mkdir -p ~/models/vad && curl -sL -o ~/models/vad/silero_vad.onnx \
   https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
+# 定稿 Whisper 模型：命令见 `cl doctor` 的输出
 # Qwen3-1.7B 首次运行自动下载
 ```
+
+> ⚠️ **2026-09-26 更正**：这一段以前写的是 `uv venv --python 3.12 .venv` 再手动装依赖。
+> 现在运行环境住在 **`ClassLive.app/Contents/` 里面**（v3.7.0 起）—— 这么放是为了让
+> macOS 认那个目录为 bundle，麦克风授权框才会写「ClassLive」而不是「python3.11」。
+> 仓库根目录的 `.venv` **已经不再使用、也已删除**；根因与完整配方见
+> `docs/PLAN-p1-app-launcher.md` §1.5。
+>
+> ⚠️ 里面那个 python **不带 pip**（uv 建的 venv 默认没有）——
+> 装包一律走 `uv pip install --python ClassLive.app/Contents/MacOS/python …`。
 
 ## 用法(推荐:一键 `cl`)
 
@@ -89,8 +99,8 @@ cl help               # 帮助
 
 ```bash
 cd ~/lecture-live
-.venv/bin/python main.py --source mic --ui overlay --course ECON10101
-.venv/bin/python main.py --source file --path 录音.m4a --speed 4
+ClassLive.app/Contents/MacOS/python main.py --source mic --ui overlay --course ECON10101
+ClassLive.app/Contents/MacOS/python main.py --source file --path 录音.m4a --speed 4
 ```
 
 | 参数 | 说明 |

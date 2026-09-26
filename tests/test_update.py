@@ -232,6 +232,29 @@ update.HERE, update.STATE_DIR = tmp, ROOT / "plain_logs"
 r = update.auto_update()
 check("B10 不是 git 仓库 -> 静默跳过", bool(r.get("skipped") and not r.get("error")), f"{r}")
 
+# ============== B11 构建判据的方向：出错要倒向「重建」 ==============
+# ⚠️ `make-app.sh --up-to-date` 的退出码方向是**故意的**：0 = 最新、**非 0 = 该重建**。
+#    反过来（0 = 该重建）看着更自然，但**脚本自身一出错也落成非零** → 被读成「最新」
+#    → **静默跳过重建** —— 正好复现要修的那个 bug（代码更新了、图标不生效）。
+#    2026-09-26 实测就踩到过一次：`$_want）` 触发本仓库那条「$VAR 后紧跟全角字符
+#    会被吞」的雷区 → unbound → install.sh 当场静默跳过。
+#    这条一反过来就**静默退化**，所以两侧都钉住。
+print("\n--- B11 构建判据的方向 ---")
+from unittest import mock as _mock                                       # noqa: E402
+
+
+def _pending_keys(rc: int, out: str = "") -> list[str]:
+    """把 `make-app.sh --up-to-date` 的返回**假造**成指定的退出码/输出。"""
+    with _mock.patch.object(update.subprocess, "run",
+                            return_value=subprocess.CompletedProcess([], rc, out, "")):
+        return [s["key"] for s in update.pending_steps()]
+
+
+check("B11 退出码非零（含脚本自身出错）→ 出「重建 .app」",
+      "app" in _pending_keys(1, "./make-app.sh: line 76: _want: unbound variable"))
+check("B11 退出码为 0 → 不出「重建 .app」",
+      "app" not in _pending_keys(0))
+
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}")

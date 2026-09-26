@@ -130,7 +130,7 @@ SOC10020 有 22 份 908K，含教材章节 / slides / syllabus；ECON10740 有 1
 #### 复现方式
 
 ```bash
-.venv/bin/python docs/experiments/review_prompt_ab.py sessions/<课>.md <课号>
+ClassLive.app/Contents/MacOS/python docs/experiments/review_prompt_ab.py sessions/<课>.md <课号>
 # 明细落 /tmp/review_ab.json —— **必须人工复核**（词表只是粗筛）
 ```
 
@@ -145,7 +145,7 @@ SOC10020 有 22 份 908K，含教材章节 / slides / syllabus；ECON10740 有 1
 
 ```bash
 # 复用已有的 rebuild_note.py（从 sessions/ 重建笔记，不新建会话文件）
-.venv/bin/python rebuild_note.py sessions/<某节真实课>.md <课号> [--no-polish]
+ClassLive.app/Contents/MacOS/python rebuild_note.py sessions/<某节真实课>.md <课号> [--no-polish]
 ```
 
 ⚠️ **改 prompt 时不要在生产路径上做 A/B** —— 那会同时改掉你在用的行为。

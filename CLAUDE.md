@@ -25,6 +25,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | **磨砂面板配方**（材质/scrim/拖拽层）—— overlay 与 whatsnew 的唯一真源 | `panel.py`（**动手前先读它的文件头**） |
 | **ObjC 类名归属** —— 全项目定义 ObjC 子类只此一处 | `objc_own.py`（**动手前先读它的文件头**） |
 | **开课前的准备**（课件 → 候选术语 → 该课术语表） | `prep.py`（**动手前先读它的文件头**）、`extract.py` |
+| **课程清单 / 片段解析 / 每课的「准备度」**（`cl course` 与第二批面板共用；`glossary/` ∪ `~/.classlive/courses/` 的**并集**） | `courses.py`（⚠️ **`cl course` 的模糊匹配只此一处** —— 别在 shell 里再写一份） |
 | **`~/.classlive/` 那族新路径的唯一定义点** | `paths.py` |
 | **macOS 视觉语言**（同心圆角/字号字距/对比度门槛/材质硬规则/原生指纹）—— 动 `overlay.py` 外观或做第二批面板前读 | `docs/RESEARCH-macos-aesthetic.md` |
 | **P3 第二批：课程卡片面板**（三份 UX 调研 + 作者的 6 个决定 + 美感取向 + 动手前先验的两条）—— **做面板前先读** | `docs/PLAN-entry-panel.md` |
@@ -39,6 +40,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 整课二级精修（polish） | `polish.py` |
 | 悬浮窗、字幕显示、滚动、槽位池化 | `overlay.py`、`transcript_view.py` |
 | 滚动行为验收探针（不在运行路径上） | `probe_scroll.py` |
+| **拖拽落点验收探针**（不在运行路径上；**改拖拽相关代码前跑它**，作者手拖一次即可） | `probe_drag.py` |
 | 回归测试 R1–R5、毫秒级断言 | `tests/test_audit_regressions.py` |
 | 端到端、拿真实录音跑通 | `test_pipeline.py` |
 | 面向用户的功能说明、开源与脱敏须知 | `README.md` |
@@ -151,6 +153,10 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   ⚠️ **两条都不在默认闸门里**，要单独跑。**它们钉住了什么看两个文件自己的 docstring** —— 那是判据的唯一定义点，别在这里再抄一份（抄了会腐坏）。
   ⚠️ **改 `glossary/<课号>.txt` 的行为前先想清楚**：它是**手写内容与自动内容共处**的文件，
   纪律是**只追加**（见 `prep.py` 文件头）。
+- **碰过课程清单 / `cl course`**（`courses.py` / `cl` 的 `course` 分支）：
+  `ClassLive.app/Contents/MacOS/python tests/test_courses.py` 全绿。**不在默认闸门里**。
+  判据、以及**做变异测试时的两条自测纪律**（`.pyc` 会让「还原」变成假的；测试数据会把自己的断言遮住）
+  都写在那个文件的 docstring 里 —— 那是唯一定义点，别在这儿再抄一份。
 - 碰过 `overlay.py` / `transcript_view.py` 的**布局或滚动**：`ClassLive.app/Contents/MacOS/python probe_scroll.py` 验滚动行为。
   ⚠️ **它本身不稳定**（2026-09-26 实测）：**改动前的代码连跑三次**，两次「阶段 1 ✅ / 阶段 2 ❌」、
   一次反过来 —— 每次都是**恰好一个阶段收到 0 个滚轮事件**，而失败的阶段会翻转。

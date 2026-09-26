@@ -128,14 +128,12 @@ update_classlive() {
 }
 
 
+# 课程清单 —— **实现在 courses.py 一处**。
+# ⚠️ 原来这里自己遍历 glossary/*.txt，于是漏掉「拖了课件但还没建术语表」的课
+#    （那些只在 ~/.classlive/courses/ 里有）。courses.py 的 list_courses 是**并集**。
 list_courses() {
-  echo "可选课程(术语表在 glossary/):"
-  for f in glossary/*.txt; do
-    [ -e "$f" ] || continue
-    code="$(basename "$f" .txt)"
-    mark=" "; [ "$code" = "$COURSE" ] && mark="*"
-    echo "  $mark $code"
-  done
+  echo "可选课程(术语表在 glossary/, 课件在 ~/.classlive/courses/):"
+  "$PY" courses.py --list --current "${COURSE:-}" 2>/dev/null || true
   echo "  当前: ${COURSE:-未设置}"
 }
 
@@ -147,17 +145,33 @@ case "${1:-}" in
     # ⚠️ 要写进 .course 的是**下游真正会加载的那个术语表名**, 不是原始输入:
     #    原来模糊命中("cl course 1077" 命中 ECON10770.txt)时只跳过警告, 写入的
     #    仍是 1077 —— 下游按 glossary/1077.txt 找不到, 静默退回只用公共术语表。
-    COURSE_ARG="$2"
-    if [ ! -f "glossary/$COURSE_ARG.txt" ]; then
-      _hit="$(find glossary -maxdepth 1 -name "*${COURSE_ARG}*.txt" 2>/dev/null | head -1)"
-      if [ -n "$_hit" ]; then
-        COURSE_ARG="$(basename "$_hit" .txt)"
-        echo "⚠ glossary/$2.txt 不存在, 用最接近的术语表: $COURSE_ARG"
-      else
-        echo "⚠ 没有 glossary/$2.txt(术语表没建)。仍会记住课程名。"
-      fi
-    fi
-    printf '%s' "$COURSE_ARG" > "$CFG"; echo "✅ 课程已设为 $COURSE_ARG"; exit 0 ;;
+    #
+    # ⚠️ **解析只在 courses.py 一处实现。** 原来这里是自己一句
+    #    `find … -name "*${COURSE_ARG}*" | head -1` —— 实测 `cl course 107`
+    #    会**静默选中 ECON10770**（`head -1` 的产物，既不是「最接近」也不是
+    #    用户意图），后果是那节课用错术语表。现在歧义就拒绝并列出候选。
+    #
+    # courses.py 的退出码约定（bash 只读得动这个）：
+    #    0 = 唯一命中，stdout 是规范课号
+    #    2 = 歧义，stderr 每行一个候选
+    #    1 = 没命中（**此时 stdout 是空的**；非空 = python 自己炸了，那要分开报）
+    _out="$("$PY" courses.py --resolve="${2}" 2>&1)"
+    _rc=$?
+    case "$_rc" in
+      0) printf '%s' "$_out" > "$CFG"; echo "✅ 课程已设为 ${_out}"; exit 0 ;;
+      2) echo "⚠ 「${2}」命中多门课，请写全其中一个："
+         printf '%s\n' "$_out" | sed 's/^/       /'
+         exit 1 ;;
+      *) # ⚠️ **判据出错时要倒向「叫人来看」，不能倒向「当成没命中」。**
+         #    倒错的话，python 一炸就会伪装成「术语表没建」，然后一路往下走。
+         if [ -n "$_out" ]; then
+           echo "⚠ 课程解析出错了 —— 不是「没找到」："
+           printf '%s\n' "$_out" | sed 's/^/       /'
+           exit 1
+         fi
+         echo "⚠ 没有 glossary/${2}.txt(术语表没建)。仍会记住课程名。"
+         printf '%s' "${2}" > "$CFG"; echo "✅ 课程已设为 ${2}"; exit 0 ;;
+    esac ;;
   online|net) SRC=blackhole; shift ;;
   file)
     [ -n "${2:-}" ] || { echo "用法: cl file <音频文件>"; exit 1; }

@@ -460,11 +460,25 @@ cl materials                         ← 一条命令：转 markdown + 落到约
 
 `Study/<课号>/materials/` **是作者 vault 里已经在用的路径**，不新造概念。
 
-### 7.3 转换工具：选 **Docling**（IBM）
+### 7.3 转换工具：选 ~~**Docling**（IBM）~~ ⚠️ **本节已作废**（2026-09-26）
+
+> ⚠️ **下面的结论不再成立，只当历史记录读。**
+>
+> 作者在 `docs/BRIEF-p3-author.md`（2026-09-26 16:32，比本节晚 48 分钟）明确：
+> 「**不需要 Docling 那套重的**」。P3 的选型改成了 **macOS 原生三件套**
+> —— `from Quartz import PDFKit` + stdlib `zipfile`/`xml.etree` + Vision OCR，
+> **新增依赖 0**（`pyobjc-framework-Quartz` 本来就在 `requirements.txt` 里）。
+>
+> 拒绝 Docling 的理由是**重量**，不是许可证：实测 **103 个依赖条目**、`torch` wheel
+> 121MB、还要另下模型权重 —— 换一份**本来就自带文字层的** PDF 文本，不值。
+> 完整调研与实测见 `docs/RESEARCH-p3-extract.md`，落地见 `docs/PLAN-p3-prep.md`。
+>
+> ⚠️ 顺带纠正本节表格里的一条：**Marker 现在代码是 Apache-2.0**（不再是「GPL 系」），
+> 但它的**权重**是 OpenRAIL-M（有营收/融资上限条款），别混为一谈。
 
 | 工具 | 纯 CPU | 许可 | 判断 |
 |---|---|---|---|
-| **Docling** | ✅ **明确支持离线 / air-gap** | **MIT** | ✅ **选它** —— 与 ClassLive 同为 MIT，小 VLM（258M），LangChain/LlamaIndex 官方集成 |
+| **Docling** | ✅ **明确支持离线 / air-gap** | **MIT** | ~~✅ **选它**~~ ← **已作废，见上** |
 | markitdown（微软） | ✅ | MIT | 最轻，**但它的 OCR 插件是调 LLM vision API** —— 扫描件必须上云 |
 | MinerU | ✅ | ⚠️ **AGPL-3.0** | 分数最高，**但 AGPL 对一个 MIT 项目是法律问题**，且要 16GB+ 内存 / 20GB+ 存储 |
 | Marker | ⚠️ | GPL 系 | 学术论文准确率最高（96.67%），**但要 4GB VRAM** |

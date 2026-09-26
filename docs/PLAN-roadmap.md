@@ -51,8 +51,11 @@ ClassLive 是一个 macOS 本地实时英译中课堂字幕工具：`cl` 是 bas
 
 ```
   课件 PDF/PPTX
-        ↓ Docling 抽文本
-        ↓ LLM 抽候选词（用已有的 SYS_CLASSIFY）
+        ↓ PDFKit + stdlib zipfile 抽文本（零新增依赖）
+          ⚠️ **不是 Docling** —— 见 PLAN-notes-and-ui.md §7.3 的作废横幅
+        ↓ LLM 抽候选词（**新写的 prompt**）
+          ⚠️ **`SYS_CLASSIFY` 抽不出词** —— 它的输入是「已存在的术语列表」，职责是分档。
+             判据照抄它（中英对照价值），但抽取本身要新写。2026-09-26 回源码核实。
    候选词列表
         ├──→ glossary/<课号>.txt      ← 注入翻译 prompt（一行一个英文词）
         └──→ term_notes.json          ← 屏幕上的通俗解释（已有流水线）
@@ -93,7 +96,15 @@ ClassLive 是一个 macOS 本地实时英译中课堂字幕工具：`cl` 是 bas
 | **P0** | **清账** | 提交已完成但没提交的东西 | — | 小 | ✅ 做完 |
 | **P1** | **脱离终端** | `.app` 启动器 + 单实例锁 + PATH 补丁 | 无 | **小** | ✅ 做完（v3.7.0） |
 | **P2** | **界面地基** | 抽 `panel.py`（**纯搬家**） | 无 | 中 | ⬜ **下一个** |
-| **P3** | ⭐ **开课前的准备** | 入口面板 = 选课 + 拖课件 + 批量抽词 → 候选术语表 | P2 | 中 | ⬜ |
+| **P3** | ⭐ **开课前的准备** | 见下：**第一批（链路 + CLI）已做完**，面板待做 | P2 | 中 | 🔶 **第一批完** |
+
+> **P3 第一批（2026-09-26 完成）**：`extract.py`（PDFKit + stdlib PPTX + Vision 兜底，零新增依赖）
+> + `prep.py`（`prepare()` 接缝 + 只追加写入器 + 候选词 prompt + 反幻觉复核）
+> + `cl prep` + `paths.py`。**两个出口都复用现成的**：`glossary/<课号>.txt` 喂翻译 prompt，
+> `build_notes.build()` 顺手产 `term_notes.json`。
+> **第二批待做**：拖拽入口面板（`entry_panel.py`），含 `panel.py` 今天完全没有的
+> 拖拽投放支持，以及**必备的 NSOpenPanel**（HIG 要求「拖拽必须配另一条路」）。
+> 方案与全部实测：`docs/PLAN-p3-prep.md`。
 | **P4** | **拆渲染 + 数据自立** | 拆出内容模型；ClassLive 自己的数据目录；vault 降级为可选出口 | 无 | 中 | ⬜ |
 | **P5** | **PDF 输出** | 新增一个渲染目标（HTML → PDF） | P4 | 中 | ⬜ |
 | **P6** | **验证术语表** | 带**随机术语对照**的 A/B | P3 | 中 | ⬜ |

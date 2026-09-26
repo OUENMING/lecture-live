@@ -49,14 +49,17 @@ SYSTEM_SETTINGS_MIC = (
 _PERM_NAMES = {0: "notDetermined", 1: "restricted", 2: "denied", 3: "authorized"}
 
 
-def _has_terminal() -> bool:
-    """要不要走"打印"而不是"弹框"。
+def _can_alert() -> bool:
+    """要不要走"弹框"而不是"打印"。
 
     ⚠️ **判据是 `CLASSLIVE_FROM_APP`，不是 `sys.stdout.isatty()`。**
        用 isatty 会误判：`cl | tee log`、被别的程序捕获输出、CI 里跑 ——
        这些情况下 stdout 都不是 tty，于是会去弹一个**模态**框，
        在没有图形会话的地方（或没人看的地方）**永久挂住**。
        （2026-09-26 实测踩到：在管道里跑 `notice.alert` 直接卡死。）
+
+    ⚠️ 名字说的是它**真正回答的问题**（"能不能弹框"），不是"有没有终端" ——
+       那两个今天恰好重合，但不是一回事，名字骗人迟早有人拿它判错事。
 
     `CLASSLIVE_FROM_APP=1` 由 `ClassLive.app` 里的 sitecustomize 设 ——
     那才是"这是双击启动、没有终端"的精确信号。
@@ -73,7 +76,7 @@ def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
 
     返回被点按钮的标题。没有终端/弹不出来时返回 `buttons[0]`。
     """
-    if _has_terminal():
+    if not _can_alert():
         # 终端里就跑 —— 打印比弹框好（能复制、能滚回去看、不打断脚本）
         print(f"\n{'─' * 46}\n⚠ {title}\n{message}\n{'─' * 46}", flush=True)
         if url:
@@ -81,8 +84,7 @@ def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
         return buttons[0]
 
     try:
-        from AppKit import (NSAlert, NSApplication, NSApplicationActivationPolicyAccessory,
-                            NSApplicationActivationPolicyRegular)
+        from AppKit import NSAlert, NSApplication, NSApplicationActivationPolicyAccessory
         app = NSApplication.sharedApplication()
         # ⚠️ 必须**先**设成 Accessory 再弹 —— 否则 Dock 里冒出一个 Python 图标
         #    （当年 NSAlert 被弃用的两个实测根因之一，见模块 docstring）
@@ -102,7 +104,8 @@ def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
         a.window().orderFrontRegardless()
         idx = a.runModal() - 1000                          # NSAlertFirstButtonReturn = 1000
 
-        app.setActivationPolicy_(_prev) if _prev == NSApplicationActivationPolicyRegular else None
+        # 设回原值永远是对的（值没变时就是无操作）—— 不用加条件
+        app.setActivationPolicy_(_prev)
         if _url_btn is not None and idx == len(buttons):
             open_mic_settings()
             return "打开系统设置"

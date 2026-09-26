@@ -130,7 +130,7 @@ rm -rf "$BUILD"
 # 为什么可以直接拷：uv 管理的独立 python 是**真 Mach-O 二进制**，且只链接系统库
 # （`otool -L` 实测：CoreFoundation / libSystem / ncurses，**没有相对路径的 libpython**），
 # 所以拷到别处照样能跑；stdlib 靠 Contents/pyvenv.cfg 的 `home` 找回去。
-say "③b 把 python 的符号链接换成真文件（LaunchServices 不认符号链接）…"
+say "③ 顺带把 python 的符号链接换成真文件（LaunchServices 不认符号链接）…"
 for f in "$APP/Contents/MacOS"/python "$APP/Contents/MacOS"/python3 "$APP/Contents/MacOS"/python3.*; do
   [ -L "$f" ] || continue
   _tgt="$(readlink "$f")"
@@ -170,7 +170,7 @@ say "   $(ls "$APP/Contents/lib/python"*/site-packages/ 2>/dev/null | wc -l | tr
 # ---------- ⑥ 双击启动的入口 ----------
 # ⚠️⚠️ 这就是"双击为什么能跑起来"的那一环。
 #
-# macOS 启动 .app 时会执行 `ChContents/MacOS/<CFBundleExecutable>`，**不带任何参数**。
+# macOS 启动 .app 时会执行 `Contents/MacOS/<CFBundleExecutable>`，**不带任何参数**。
 # 我们的 CFBundleExecutable 是 python —— 于是它进 REPL、等 stdin、没有输入就退出，
 # 表现就是**双击了但什么都没发生**。（2026-09-26 实测踩到。）
 #
@@ -196,6 +196,24 @@ _REPO = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))))
 # __file__ = <repo>/ClassLive.app/Contents/lib/python3.X/site-packages/sitecustomize.py
 
+
+def _own_bundle_id():
+    """从**这个 .app 自己的 Info.plist** 读 bundle id。
+
+    ⚠️ 不在这里硬编码一份 —— 那会和 `make-app.sh` 里写进 Info.plist 的那份
+       形成两处真源。它是**与 TCC 的契约**（授权锚在 bundle id 上），
+       两边不一致时**全程不报错**，只是权限提示和授权记录对不上。
+       （2026-09-26 审查发现。）
+    """
+    import plistlib
+    # ⚠️ 从 site-packages 往上要 **3** 层才到 Contents：
+    #    site-packages → python3.X → lib → Contents
+    here = os.path.dirname(os.path.abspath(__file__))          # …/site-packages
+    contents = os.path.dirname(os.path.dirname(os.path.dirname(here)))
+    with open(os.path.join(contents, "Info.plist"), "rb") as f:
+        return plistlib.load(f).get("CFBundleIdentifier")
+
+
 _SHOULD_START = (
     # ① 是裸启动 —— 双击时 macOS 就是这么调的：`sys.argv == ['']`
     #    ⚠️ 别写成 `len(sys.argv) == 1`：`python -c …` 和 `-m …` 的 argv 长度**也是 1**
@@ -203,7 +221,7 @@ _SHOULD_START = (
     sys.argv[0] == ""
     # ② 是 LaunchServices 启动的、而且启动的就是我们这一个 bundle
     #    （从终端跑时这个环境变量是终端的 ID，不会误判）
-    and os.environ.get("__CFBundleIdentifier") == "page.bldcam.classlive"
+    and os.environ.get("__CFBundleIdentifier") == _own_bundle_id()
     # ③ 仓库确实在那儿
     and os.path.exists(os.path.join(_REPO, "cl"))
 )

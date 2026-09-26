@@ -1485,7 +1485,9 @@ class Overlay:
         # ⚠️ 这一段**必须**在起线程之前 —— 模态框只能在主线程弹，
         #    而这个方法本身就是按钮 action，天然在主线程上。
         # ⚠️ `pending_steps()` 只查本地（requirements 指纹 + 模型文件在不在），不联网。
-        approved: list[str] = []
+        # ⚠️ 存的是 `steps` 的**子列表**（dict），不是 key 列表 ——
+        #    存 key 的话循环里还得反查 label，多一次查找 + 一个对不上的失败分支。
+        approved: list[dict] = []
         try:
             import update
             steps = update.pending_steps()
@@ -1502,7 +1504,7 @@ class Overlay:
                 f"现在一起做吗？（要联网，可能要几分钟）",
                 buttons=("现在做", "先不做"))
             if ans == "现在做":
-                approved = [s["key"] for s in steps]
+                approved = list(steps)
                 set_status("正在更新…", 0.75)
 
         def ui(fn, *a) -> None:
@@ -1546,15 +1548,14 @@ class Overlay:
                     ui(set_status, f"已更新到 {r['after']}")
 
                 # ---- 跑用户批准的重活 ----
-                if approved:
-                    for i, key in enumerate(approved, 1):
-                        label = next((s["label"] for s in steps if s["key"] == key), key)
-                        ui(set_status, f"（{i}/{len(approved)}）{label} 中…", 0.6)
-                        res = update.run_step(key, on_line=lambda s: ui(set_status, s, 0.6))
-                        if not res["ok"]:
-                            ui(set_status, f"⚠️ {res['error']}", 1.0)
-                            ui(set_title, "重启后重试")
-                            return
+                for i, s in enumerate(approved, 1):
+                    ui(set_status, f"（{i}/{len(approved)}）{s['label']} 中…", 0.6)
+                    res = update.run_step(s["key"],
+                                          on_line=lambda t: ui(set_status, t, 0.6))
+                    if not res["ok"]:
+                        ui(set_status, f"⚠️ {res['error']}", 1.0)
+                        ui(set_title, "重启后重试")
+                        return
 
                 # ---- 收尾 ----
                 left = []
@@ -1566,9 +1567,8 @@ class Overlay:
                     ui(set_status, f"还有 {len(left)} 件事没做：{left[0]['label']}"
                                    f"（{left[0]['detail']}）—— 再点一次这个按钮", 1.0)
                     ui(set_title, left[0]["label"])
-                elif r["skipped"] and not approved:
-                    pass                                       # 上面已经写过"已是最新"
-                else:
+                elif not (r["skipped"] and not approved):
+                    # 上面 r["skipped"] 那条已经写过"已是最新"了，别覆盖它
                     ui(set_status, f"都齐了（{r['after']} 或更新）—— 重启后生效", 1.0)
                     ui(set_title, "重启后生效")
             finally:

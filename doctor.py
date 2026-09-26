@@ -77,6 +77,23 @@ def _mark(ok: bool) -> str:
     return "✅" if ok else "❌"
 
 
+def model_present(path: str) -> bool:
+    """模型是不是**真的**就位。
+
+    ⚠️ 不能只看 exists()：下载中断会留下空目录，解压失败也会。用户看到 ✅
+       就以为模型可用，直到跑课才炸。目录要求非空、文件要求大小 > 0。
+       (2026-09-24 OCR 分块审计发现。)
+
+    ⚠️ **这条判据只有这一份**。`doctor` 自己、`update.pending_steps()`、
+    `update.run_step()` 都调它 —— 之前三处各写了一遍（2026-09-26 四个审查代理
+    独立都指到了），而它恰恰是"改一处要记得改三处"的典型。
+    """
+    p = pathlib.Path(os.path.expanduser(path))
+    if p.is_dir():
+        return any(f.is_file() and f.stat().st_size > 0 for f in p.rglob("*"))
+    return p.is_file() and p.stat().st_size > 0
+
+
 def version() -> str:
     f = HERE / "VERSION"
     return f.read_text(encoding="utf-8").strip() if f.exists() else "?"
@@ -137,8 +154,8 @@ def main() -> int:
         except Exception:                                 # noqa: BLE001
             hard_missing += 1
             print(f"❌ {mod:<18}缺失{(' — ' + why) if why else ''}")
-            print(f"   → uv pip install --python ClassLive.app/Contents/MacOS/python"
-                  f" -r requirements.txt")
+            # ⚠️ 绝对路径 —— 这行是给用户**拷去执行**的，相对路径从别的 cwd 跑就错。
+            print(f"   → uv pip install --python {app_py} -r requirements.txt")
             continue
         try:
             print(f"✅ {mod:<18}{md.version(mod)}")
@@ -154,18 +171,11 @@ def main() -> int:
     # ---- 模型 ----
     print()
     for path, label, required, cmd, size in MODELS:
-        p = pathlib.Path(os.path.expanduser(path))
-        # ⚠️ 不能只看 exists()：下载中断会留下空目录，解压失败也会。用户看到 ✅
-        # 就以为模型可用，直到跑课才炸。目录要求非空、文件要求大小 > 0。
-        # (2026-09-24 OCR 分块审计发现。)
-        if p.is_dir():
-            ok = any(f.is_file() and f.stat().st_size > 0 for f in p.rglob("*"))
-        else:
-            ok = p.is_file() and p.stat().st_size > 0
+        ok = model_present(path)
         if not ok and required:
             hard_missing += 1
         print(f"{_mark(ok) if ok else ('❌' if required else '⚪')} {label:<30}"
-              f"{'就位' if ok else ('空目录/空文件' if p.exists() else '缺失')}")
+              f"{'就位' if ok else ('空目录/空文件' if os.path.exists(os.path.expanduser(path)) else '缺失')}")
         if not ok:
             # ⚠️ 报体积 —— 引导式更新要拿同一个数问用户「要下 X 吗」，
             #    这里也报出来，两边口径才不会漂。

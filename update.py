@@ -437,16 +437,11 @@ def pending_steps() -> list[dict]:
         })
 
     # ② 下模型：直接问 doctor（同一份定义，口径不会漂）
+    # ⚠️ 判据走 `doctor.model_present()` —— 只有那一份。
+    #    之前这里和 `run_step()` 各抄了一遍（四个审查代理独立都指到了）。
     try:
         import doctor
-        missing = []
-        for m in doctor.MODELS:
-            import pathlib as _pl
-            p = _pl.Path(os.path.expanduser(m.path))
-            ok = (any(f.is_file() and f.stat().st_size > 0 for f in p.rglob("*"))
-                  if p.is_dir() else (p.is_file() and p.stat().st_size > 0))
-            if not ok:
-                missing.append(m)
+        missing = [m for m in doctor.MODELS if not doctor.model_present(m.path)]
         if missing:
             total = "、".join(f"{m.label.split('(')[0].strip()} {m.size}" for m in missing)
             steps.append({
@@ -491,11 +486,7 @@ def run_step(key: str, on_line=None) -> dict:
         if key == "models":
             import doctor
             for m in doctor.MODELS:
-                import pathlib as _pl
-                p = _pl.Path(os.path.expanduser(m.path))
-                ok = (any(f.is_file() and f.stat().st_size > 0 for f in p.rglob("*"))
-                      if p.is_dir() else (p.is_file() and p.stat().st_size > 0))
-                if ok:
+                if doctor.model_present(m.path):
                     continue
                 say(f"正在下 {m.label}（{m.size}）…")
                 # doctor 里的命令是给人看的 shell 串（含 ~ 和 &&）——

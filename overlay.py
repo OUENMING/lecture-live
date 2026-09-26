@@ -661,13 +661,37 @@ class Overlay:
         return b
 
     def _install_status_item(self):
-        """菜单栏图标: 穿透模式下面板忽略鼠标事件, 只能从这里切回来/退出。"""
+        """菜单栏图标: 穿透模式下面板忽略鼠标事件, 只能从这里切回来/退出。
+
+        ⚠️ **图标用模板图，不用 emoji。** HIG › The menu bar › Menu bar extras 逐字：
+
+        > 「**Consider using a symbol to represent your menu bar extra.**」
+        > 「Both interface icons and symbols **use black and clear colors** to define
+        >   their shapes; the system can apply other colors to the black areas in each
+        >   image **so it looks good on both dark and light menu bars, and when your
+        >   menu bar extra is selected**.」
+
+        emoji 是**彩色**的 → 系统改不了它的颜色 → **深色菜单栏上不适配、被选中时也不变**。
+        模板图（黑 + 透明）才会跟随菜单栏明暗与选中态。
+        """
         try:
             from AppKit import (NSStatusBar, NSVariableStatusItemLength,
-                                NSMenu, NSMenuItem)
+                                NSMenu, NSMenuItem, NSImage)
             self._status = NSStatusBar.systemStatusBar().statusItemWithLength_(
                 NSVariableStatusItemLength)
-            self._status.button().setTitle_("🎧")
+            btn = self._status.button()
+            icon = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                "headphones", "ClassLive")
+            if icon is not None:
+                # ⚠️ `setTemplate_(True)` 是**必须的** —— 不设的话系统不会替它上色，
+                #    深色菜单栏上就是一团黑。
+                icon.setTemplate_(True)
+                btn.setImage_(icon)
+                btn.setTitle_("")
+            else:
+                # fail-soft：拿不到 SF Symbol 时退回 emoji（老系统 / 符号被移除），
+                # **宁可图标不适配，也不能没有图标** —— 穿透模式下这是唯一的入口。
+                btn.setTitle_("🎧")
             menu = NSMenu.alloc().init()
 
             self._mi_through = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(

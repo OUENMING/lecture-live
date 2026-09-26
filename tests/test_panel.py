@@ -151,6 +151,23 @@ def _ns(c):
 def _tree(v) -> dict:
     import objc_own
     lay = v.layer()
+    # ⚠️ **NSVisualEffectView 自己的三个属性也要比** —— 它们决定「材质到底渲不渲染」，
+    #    而且**掉一个不会有任何症状**：离屏实测（2026-09-26），把 `state` 从
+    #    `Active` 换成 AppKit 的默认 `FollowsWindowActiveState`，
+    #    **在 app 不激活时面板暗 2.3 倍**（均亮 57.4 → 24.7）——
+    #    而上课时 app 就是**一直不激活**。
+    #
+    #    ⚠️ **这三项加进来不是为了「抓得到」**（实测：删掉 `panel.py` 的 `setState_`，
+    #    「离屏渲染与老配方一致」那条腿**本来就会红**，2 条断言、12/14）。
+    #    加它是因为**原来报的信息没用** —— 只告诉你「两个哈希不同」，
+    #    你得自己回去二分是哪一项。现在报的是 `effect.state: 0 vs 1`，直接点到项。
+    #
+    #    （没有 `material` 属性的视图就是普通 NSView，记 None。）
+    try:
+        effect = {"material": v.material(), "blendingMode": v.blendingMode(),
+                  "state": v.state()}
+    except AttributeError:
+        effect = None
     return {
         # ⚠️ 类名归一成 "custom"：两边用的是各自的 key（`DragLayer` vs `FrozenDrag`），
         #    比原始类名会永远不等。层级、顺序、层的属性照比。
@@ -158,6 +175,7 @@ def _tree(v) -> dict:
                 else type(v).__name__),
         "frame": _rect(v.frame()),
         "hidden": bool(v.isHidden()),
+        "effect": effect,
         "layer": None if lay is None else {
             "cornerRadius": lay.cornerRadius(),
             "masksToBounds": bool(lay.masksToBounds()),

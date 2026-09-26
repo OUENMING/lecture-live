@@ -519,6 +519,84 @@ x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone
 实测：不提供图标时，TCC 弹窗上是一个**通用图标**（蓝色方块 + 手/麦克风徽标）。
 **P1 不做**，但和 §3.7 的预热说明是**同一个体验目的的两半** —— 哪天顺手做图标时放一起考虑。
 
+### 3.11 ⭐ 要不要「走安装程序装进 `/Applications`」—— **结论：不做**
+
+作者 2026-09-26 问的。**两轮独立调研 + 本机实测，结论一致：走符号链接，不做真安装。**
+
+#### 层次一：`/Applications` 里放**符号链接**（推荐）
+
+```bash
+ln -s ~/lecture-live/ClassLive.app /Applications/ClassLive.app
+```
+
+**实测能起**，而且 `mdls` 认它是 `com.apple.application-bundle`（Spotlight / Launchpad 当成 app）。
+⭐ **它永远指向最新的那个 `.app`** —— `git pull` 后重建，链接自动跟上，不存在"两处要同步"。
+
+**唯一要加固的**：链接指向仓库路径，**仓库一挪就断**。`install.sh` 里加一句自检即可。
+
+#### 为什么**不**做"真安装"（`.dmg` / `.pkg` / Cask）
+
+**① `/Applications` 的系统级好处，实测几乎为零。** 四条常见说法全被推翻：
+
+| 常见说法 | 本机实测 |
+|---|---|
+| Spotlight 只索引 `/Applications` | ❌ 假 —— `mdfind` 索引到了 `~/lecture-live/ClassLive.app` |
+| `open -a ClassLive` 找不到别处的 | ❌ 假 —— 实测找得到（`open -Ra` 定位到仓库里） |
+| Time Machine 对两处策略不同 | ❌ 假 —— 两个都是 `[Included]` |
+| `/Applications` 要管理员密码 | ❌ 假 —— `drwxrwxr-x root:admin`，admin 组直接可写 |
+| Gatekeeper 对两处不同 | ❌ 无关 —— quarantine 是**文件扩展属性**，跟位置无关 |
+
+**唯一真好处是「用户会在那里找」**（心智模型 + Finder 侧边栏）—— **符号链接就能给**。
+
+**② ⭐ "真安装"会把项目推进「必须签名」的坑。** 三种形态现在都要了：
+
+| | 要签名吗 | 权限 |
+|---|---|---|
+| `.dmg` | ⚠️ 要 | 用户级 |
+| `.pkg` | ⚠️ 要 | **管理员密码** |
+| Homebrew Cask | ⚠️ **从 5.0.0 起也要**（未签名的 cask **2026-09 起从官方 Tap 移除**） | 用户级 |
+
+而且 **macOS 15 (Sequoia) 起「右键 → 打开」绕过 Gatekeeper 的做法没了** ——
+用户必须去系统设置里手动放行。
+
+**③ 而现在的分发方式（`git clone` / `curl`）天然避开了这一切** ——
+`git` / `curl` 下载的文件**不打 quarantine**（§1.5 已实测），**Gatekeeper 根本不介入**。
+**改成发 DMG 正中枪口，体验反而更差。**
+
+**④ 自包含和签名天生冲突。** Apple 原文（TN2206）：
+
+> "**Bundles should be treated as read-only once they have been signed.**"
+
+把代码放进 bundle 之后，`git pull` 直写就是篡改 → macOS 报 *"The app has been modified or damaged"*。
+
+**反过来说 —— 我们现在这个形状（运行时在 bundle 内、代码在外）恰恰是签名友好的：**
+
+| | 装什么 | `git pull` 会碰它吗 |
+|---|---|---|
+| bundle 内 | 构建时就不变的东西（python + 依赖） | ❌ 永远不碰 |
+| bundle 外 | 代码 | ✅ 随便改 |
+
+**bundle 保持"出厂状态" —— 那正是签名想要的。** 本来以为自包含是"更正确的形状"，**其实反了**。
+
+#### 什么时候改回来
+
+| 触发条件 | 那时**必须**改 |
+|---|---|
+| **要签名 / 公证（$99）** | ✅ 签名的前提就是 bundle 只读 |
+| 朋友里有人不懂 git | ✅ 该做 `.dmg` 拖拽 |
+| 朋友 > 3 个 | ✅ 手工步骤开始亏 |
+
+#### ⚠️ 两条顺带查实、将来会用到的
+
+1. **`ClassLive.app` 现在是 adhoc 签名** —— `codesign -dv` 显示
+   `flags=0x20002(adhoc,linker-signed)`、`TeamIdentifier=not set`。
+   那是 **Apple Silicon 链接器自动给的，不是真签名**，Gatekeeper 不认。
+   **别误以为"已经签了"。**
+2. **Apple 说 Python 脚本该放 `Contents/Resources/`**（[TN2206](https://developer.apple.com/library/archive/technotes/tn2206/_index.html) 原文：
+   *"Store Python, Perl, shell, and other script files … in your app's `Contents/Resources` directory"*）。
+   我们现在把 `sitecustomize.py` 放在 `Contents/lib/python3.12/site-packages/` ——
+   **不签名时无害，但真要签名时得挪。**
+
 ---
 
 ## 4. 陷阱清单（都是实测踩出来的，不是推测）
@@ -619,6 +697,7 @@ x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone
 | **P1.5** | 引导式更新（`update.pending_steps()` + 卡片按钮） | ✅ **完成** |
 | **P1.6** | 更新后自动重启（§3.9） | ⬜ 可选项，不阻塞 |
 | **P1.7** | 图标（§3.10） | ⬜ 延后 |
+| **P1.8** | `/Applications` 符号链接（§3.11 层次一） | ⬜ 待作者定 —— **10 分钟、零风险** |
 
 **P1.0 / P1.0.5 都已过。P1.1 没有阻塞项。**
 

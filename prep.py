@@ -224,10 +224,15 @@ class RemoveResult(typing.NamedTuple):
     字段与 `AppendResult` 对称，但**语义相反的那个位置**值得说清：
     `AppendResult.skipped_dup` 是「已经在表里所以没加」，
     这里的 `not_found` 是「**表里本来就没有，所以没删**」。
+
+    `positions` 与 `removed` **平行**：`positions[i]` 是 `removed[i]` 在**原文件里**的
+    行号（0 基，**连注释与空行一起数**）。它是 `restore_lines()` 唯一的输入 ——
+    没有它就只能 append，而 append 会打乱顺序（见 `restore_lines` 那条事故）。
     """
     removed: list          # 真删掉的行（按原样；一行术语在文件里出现两次就删两次）
     not_found: list        # 请求删、但表里本来就没有的
     kept_terms: int        # 剩下的术语条数（不含注释与空行）
+    positions: list        # 与 removed 平行：各自在原文件里的行号（0 基）
 
 
 def removed_lines(old: str, new: str) -> list[str] | None:
@@ -287,7 +292,7 @@ def remove_terms(path, terms: list) -> RemoveResult:
     drop = {t.lower() for t in want}
 
     if not p.exists():
-        return RemoveResult([], want, 0)
+        return RemoveResult([], want, 0, [])
     try:
         old = p.read_text(encoding="utf-8")
     except UnicodeDecodeError as e:
@@ -299,20 +304,22 @@ def remove_terms(path, terms: list) -> RemoveResult:
 
     kept_lines: list[str] = []
     removed: list[str] = []
+    positions: list[int] = []
     kept_terms = 0
-    for ln in old.splitlines(keepends=True):
+    for idx, ln in enumerate(old.splitlines(keepends=True)):
         s = ln.strip()
         if not s or s.startswith("#"):
             kept_lines.append(ln)
             continue
         if s.lower() in drop:
             removed.append(s)
+            positions.append(idx)                       # 供 restore_lines 原样插回
         else:
             kept_lines.append(ln)
             kept_terms += 1
 
     if not removed:
-        return RemoveResult([], want, kept_terms)
+        return RemoveResult([], want, kept_terms, [])
 
     new = "".join(kept_lines)
     if removed_lines(old, new) is None:                 # ⚠️ 闸门：不是纯删行就不写
@@ -321,7 +328,55 @@ def remove_terms(path, terms: list) -> RemoveResult:
             "（这是防手滑的闸门；正常路径下不该发生。）")
     _atomic_write(p, new)
     found = {r.lower() for r in removed}
-    return RemoveResult(removed, [t for t in want if t.lower() not in found], kept_terms)
+    return RemoveResult(removed, [t for t in want if t.lower() not in found],
+                        kept_terms, positions)
+
+
+def restore_lines(path, entries) -> int:
+    """把删掉的行**按原位置**插回去。`entries` = `[(行号, 行文本), …]`。返回插回几条。
+
+    ⚠️⚠️ **不是 append —— 按位置插回。** 依据是一次**真实事故**（NoteExpress 官方论坛）：
+    从回收站恢复到原文件夹，**导致原文件夹里所有题录全部消失**（原帖：「辛辛苦苦收集了
+    几个月的题录，灰飞烟灭」）。append 版本的问题是把顺序打乱，而
+    `glossary/<课号>.txt` 的**顺序是有意义的**（它逐行喂进 prompt）。
+    → 所以 `remove_terms` 必须把 `positions` 带出来，这个函数才有东西可用。
+    （这条是补调研挖出来的，`docs/PLAN-entry-panel.md` §3.6 第 4 条硬要求。）
+
+    行号按**降序**插（从后往前），这样每次插入不会让还没处理的行号失效。
+
+    ⚠️ **越界行号夹到末尾，不丢行。** 别写成「越界就跳过」——
+    实测踩过：删掉**最后一行**时，它的原行号恰好等于还原后的 `len(lines)`，
+    那是**合法的插入位置**（`insert` 会追加），当成越界会把这一行永久丢掉
+    （第一次跑就是只插回了 1/2 条）。丢一行比位置偏一点糟得多。
+    → `pos = min(idx, len(lines))`，负号或非整数才真的跳过。
+
+    返回值是**真正插回去的条数**，不是请求条数。
+    """
+    p = pathlib.Path(path)
+    if not p.exists():
+        return 0
+    try:
+        old = p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise GlossaryError(f"{p.name} 读不出：{e}") from e
+
+    lines = old.splitlines(keepends=True)
+    # ⚠️ **先过滤再排序。** 第一版是「边排边判」—— 而 `sorted(key=…)` 会拿
+    #    混进来的非整数行号去比，直接 `TypeError` 炸掉。
+    #    这里的输入来自 `RemoveResult.positions`（可信），但**「可信」不是「不会坏」**：
+    #    调用方可能存过 json（int 变 float）、或被别的进程改过。**跳过坏条目，不炸。**
+    clean = [e for e in entries
+             if e and len(e) == 2
+             and isinstance(e[0], int) and not isinstance(e[0], bool) and e[0] >= 0]
+    done = 0
+    for idx, text in sorted(clean, key=lambda e: e[0], reverse=True):
+        # ⚠️ 夹住而不是跳过 —— 见 docstring 里那条实测。
+        lines.insert(min(idx, len(lines)),
+                     text if text.endswith("\n") else text + "\n")
+        done += 1
+    if done:
+        _atomic_write(p, "".join(lines))
+    return done
 
 
 # ================================================================ 候选词复核

@@ -406,6 +406,49 @@ def main() -> int:
             check("非 UTF-8 -> 拒绝改写（不「出声后忽略」）", True)
         check("⚠️ 且原文件没被写坏", bad8.read_bytes() == b"# X\n\xff\xfe bad\n")
 
+        print("\n--- 撤销：**按原位置**插回（不是 append）---")
+        rt = tmp / "glossary_roundtrip.txt"
+        ORIG2 = ("# ECON10740 Exploring Economics\n"
+                 "\n"
+                 "Brightspace\n"
+                 "elasticity\n"
+                 "# 手写备注\n"
+                 "deadweight loss\n"
+                 "externality\n"
+                 "monopoly power\n")
+        rt.write_text(ORIG2, encoding="utf-8")
+        d = prep.remove_terms(rt, ["elasticity", "monopoly power"])
+        check("positions 与 removed 平行、且按文件顺序（升序）",
+              len(d.positions) == 2 and d.positions == sorted(d.positions)
+              and d.positions == [3, 7],
+              f"{d.removed} @ {d.positions}")
+        check("删完之后确实少了那两行",
+              "elasticity" not in rt.read_text(encoding="utf-8"))
+        back = prep.restore_lines(rt, list(zip(d.positions, d.removed)))
+        check("插回两条", back == 2, str(back))
+        check("⭐⭐ **往返之后与原文件逐字相同** —— 撤销的正确性判据就只有这一条",
+              rt.read_text(encoding="utf-8") == ORIG2,
+              repr(rt.read_text(encoding="utf-8")))
+        check("⚠️ 顺序也对（**append 版本会在这里红**，不只是内容对）",
+              rt.read_text(encoding="utf-8").splitlines() == ORIG2.splitlines())
+        check("往返幂等：再删一次还是同样两条",
+              prep.remove_terms(rt, ["elasticity", "monopoly power"]).removed
+              == ["elasticity", "monopoly power"])
+        prep.restore_lines(rt, [(3, "elasticity"), (7, "monopoly power")])
+        check("用**原始行号**再插一次也逐字相同（降序插入的性质）",
+              rt.read_text(encoding="utf-8") == ORIG2,
+              repr(rt.read_text(encoding="utf-8")))
+        check("⚠️ 越界行号**夹到末尾不丢行**（删最后一行时原行号 == 新 len，是合法插入）",
+              prep.restore_lines(rt, [(9999, "nope")]) == 1
+              and "nope" in rt.read_text(encoding="utf-8"))
+        prep.restore_lines(rt, [])                       # 复位
+        rt.write_text(ORIG2, encoding="utf-8")
+        check("负数/非整数行号才真的跳过",
+              prep.restore_lines(rt, [(-1, "x"), ("a", "y")]) == 0)
+        check("空 entries -> 0", prep.restore_lines(rt, []) == 0)
+        check("文件不存在 -> 0（不抛）",
+              prep.restore_lines(tmp / "根本不存在.txt", [(0, "x")]) == 0)
+
         print("\n--- ⭐ 那道闸门是**承重**的，不是注释里的承诺 ---")
         gate = tmp / "glossary_gate.txt"
         gate.write_text("# X\nkeep\nkill\n", encoding="utf-8")

@@ -332,6 +332,17 @@ def main() -> int:
               f"{_head(live_dump['contentView'])}")
         check("真 Overlay 的拖拽层能拖窗口",
               bool(ov._drag_layer.mouseDownCanMoveWindow()))
+
+        # ⭐ 菜单栏那一项必须钉住。`_install_status_item` 整段在 try/except fail-soft 里
+        #    （那是**对的** —— 图标不能因为建菜单项失败就整个消失），但后果是
+        #    **写坏了完全静默**：图标还在，菜单少一项，而那一项恰好是
+        #    「上课中加课件的唯一入口」。
+        #    ⚠️ 拿不到 status item / 菜单时**报红**，不跳过 ——
+        #       「验不了」和「验过了」必须分开（同 `readiness` 那条 None vs 0）。
+        _menu = ov._status.menu() if ov._status is not None else None
+        _titles = [mi.title() for mi in _menu.itemArray()] if _menu is not None else None
+        check("菜单栏有「开课前的准备…」（不是静默少一项）",
+              _titles == ["开启鼠标穿透", "开课前的准备…", "退出"], str(_titles))
         ov.close()
     os.environ["CLASSLIVE_DEBUG"] = "1"
     card = whatsnew.build("0.0.0", "测试摘要", date="2026-09-26")

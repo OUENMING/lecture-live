@@ -268,8 +268,15 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width)
         view._targets.append(t)
         return b
 
-    view.addSubview_(mk("开始上课", CARD_PAD, lambda: on_start(r.course)))
-    view.addSubview_(mk("选择文件…", CARD_PAD + 92.0 + 8.0, lambda: on_prep(r.course)))
+    # ⚠️ 「开始上课」**只在调用方能兑现时才建**。
+    #    `on_start is None` = 这个面板是**上课中**从菜单栏打开的，那时再「开始一节课」
+    #    没有意义、而且有害（会去写 `.course` 并试着再起一份录音）。
+    #    同 `prep.prepare` 的 `chat=None` / `build_fn=None`：**能兑现才给，不给就不画**。
+    x = CARD_PAD
+    if on_start is not None:
+        view.addSubview_(mk("开始上课", x, lambda: on_start(r.course)))
+        x += 92.0 + 8.0
+    view.addSubview_(mk("选择文件…", x, lambda: on_prep(r.course)))
     return view
 
 
@@ -354,7 +361,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         for sub in list(doc.subviews()):
             sub.removeFromSuperview()
         for i, r in enumerate(load()):
-            card = _make_card(r, on_start=on_start or (lambda c: None),
+            card = _make_card(r, on_start=on_start,
                               on_prep=choose_files, on_drop_files=run_prep,
                               width=WIDTH - 2 * PAD)
             card.setFrameOrigin_((0.0, i * (CARD_H + CARD_GAP)))

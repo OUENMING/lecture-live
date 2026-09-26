@@ -701,6 +701,15 @@ class Overlay:
             self._mi_through.setTarget_(t1); self._mi_through.setAction_("clicked:")
             menu.addItem_(self._mi_through)
 
+            # ⭐ 「开课前的准备…」—— 上课中再拖课件用的（作者 2026-09-26 的决定）。
+            #    放在穿透与退出之间：三个都是「对这次运行做的事」，退出在最下（惯用位置）。
+            mi_prep = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "开课前的准备…", None, "")
+            t3 = _make_button_target(self._open_prep)
+            self._targets.append(t3)
+            mi_prep.setTarget_(t3); mi_prep.setAction_("clicked:")
+            menu.addItem_(mi_prep)
+
             mi_quit = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("退出", None, "")
             t2 = _make_button_target(self._quit)
             self._targets.append(t2)
@@ -723,6 +732,28 @@ class Overlay:
                 pass
             finally:
                 self._status = None
+
+    def _open_prep(self):
+        """上课中再拖课件 —— 从菜单栏开「开课前的准备」面板。
+
+        ⚠️ **`on_start=None`。** 上课中打开的面板**不该**给「开始上课」按钮：
+        那会去写 `.course`，还会试着再起一份录音。见 `entry_panel._make_card`。
+
+        ⚠️ **不起事件循环。** 这个 app 的循环已经在跑；AppKit 的调用只能在主线程，
+        而本方法是菜单项的 action —— 它本来就在主线程上。
+        （`entry_panel.build()` 从不起循环，起循环的只有那几个一次性探针脚本。）
+
+        ⚠️ **面板起不来不许影响正在上的这节课。** 所以这里只记日志，不弹窗、不往外抛 ——
+        课还在录，那是第一位的。
+        """
+        self._release_focus()              # 同按钮：别把用户在自己 app 里按的快捷键吃掉
+        try:
+            import entry_panel
+            entry_panel.open_panel(on_start=None)
+        except Exception:                  # noqa: BLE001
+            if os.environ.get("CLASSLIVE_DEBUG"):
+                import traceback
+                traceback.print_exc()
 
     def _move_to_corner(self):
         from AppKit import NSScreen

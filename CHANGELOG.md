@@ -65,6 +65,51 @@
 （`_whatsnew_body` 从最新往下数到「你上次看过的版本」为止），多版本时每行前面标版本号。
 所以**每个版本的看点都要能独立看懂**，不要写"同上""见上一条"。
 
+## [3.6.5] - 2026-09-26
+
+### 更新看点
+
+- 🌕 **中秋快乐**
+- 📁 **笔记库里多了一条目录约定**：ClassLive 只写 `Lectures/`；`Study/` 它不碰 ——
+  那是你自己消化后的学习区，课件、考点地图、错题本放那儿就行
+- **Fixed** 笔记里说 `问题::答案`「可被 Spaced Repetition 插件识别」这句不够准确 ——
+  那是**社区插件，要自己装**（作者自己就没装）。改成「装了 Spaced Repetition 就能当卡片复习」
+- **Added** `materials.example/` —— 课程资料目录的模板，照 `glossary.example.txt` 的先例
+  （⚠️ 现在只认 Markdown，PDF / PPTX 的自动转换还在做）
+
+### 升级须知（3.6.4 → 3.6.5）
+
+**不需要补依赖，也不需要动模型。** 点卡片上的「立即更新」就行。
+
+> 习惯终端的话，`cl update` 是同一条路（同一份实现）。
+> **只有带依赖变化的版本才必须走终端** —— 按钮只换代码、不装依赖；
+> 真遇到那种版本，这一节会写明要跑哪条命令。
+
+### Added
+
+- `materials.example/README.md` —— 课程资料目录模板，`cp` 进
+  `<vault>/Study/<课号>/materials/`。**写明了现在还不能做的事**
+  （ClassLive 自动生成笔记时还不会读这个目录），不是承诺。
+- `README.md` 新增「库里的目录结构」一节：写清 `Lectures/`（ClassLive 写）
+  与 `Study/`（它不碰）的分工，并标明「`Study/` 是可选约定，不是要求」。
+- `docs/PLAN-roadmap.md`（新的入口文档：该做什么、按什么顺序做）、
+  `docs/RESEARCH-entry-and-export.md`、`docs/RESEARCH-product-shape.md`。
+
+### Fixed
+
+- `obsidian_writer.py` 两处提示语把 `问题::答案` 说成「可被 Spaced Repetition
+  插件识别」，但那是**社区插件**（实测 `~/.obsidian/plugins/` 里没有），
+  对没装的人是一句用不上的话。改成明说要自己装。
+
+### Changed
+
+- `CLAUDE.md` 修两条腐化指针：
+  - `docs/REVIEW-2026-09-24.md` **既不在 git 里、也不在磁盘上**
+    （实际在 `~/Desktop/classlive-review/`，作者决定不推送评审文档）。
+  - 「**没有** `requirements.txt`」是 2026-09-24 之前的旧状态，该文件现在存在
+    （实测 1374 字节）。顺带补一条会让人白踩一次的坑：`.venv` 是 uv 建的，
+    **里面没有 pip**。
+
 ## [3.6.4] - 2026-09-25
 
 ### 更新方式

@@ -68,6 +68,33 @@ def _classes():
             def canBecomeMainWindow(self):           # noqa: N802
                 return False
 
+            def sendEvent_(self, event):             # noqa: N802
+                """点击时先激活 app —— 与 `overlay._Panel.sendEvent_` 同款处理。
+
+                理由（overlay 那边实测出来的）：面板是 `NonactivatingPanel` 且只用
+                `orderFrontRegardless()` 显示，app 从不激活；此时 AppKit 会把第一次
+                点击**先用于激活窗口**、不送给控件（NSButton 的 `acceptsFirstMouse`
+                默认 False）—— 表现为"按钮点了没反应，也不报错"。
+
+                ⚠️ **2026-09-26 留下这段的经过，别当它是实测结论**：
+                当时是拿一个自制脚手架测出"三个按钮一个都点不动"就下了判断，
+                后来发现**脚手架本身是坏的** —— `AppHelper.runConsoleEventLoop()`
+                只转 `NSRunLoop`，**从不调 `[NSApp run]`**，所以窗口服务器的事件
+                根本没被取出（面板收到 **0** 个事件；换 `runEventLoop()` 后同一个
+                卡片收到 76 个事件、按钮正常响应）。
+                **所以"卡片按钮坏了"这个观察是假的。**
+                这段保留，是因为它对齐 overlay 那套**已验证可用**的写法
+                （真 app 里 app 不激活、面板不 key，与 overlay 面板处境相同），
+                不是因为被实测证明必需。
+                """
+                if event.type() == 1:                # NSEventTypeLeftMouseDown
+                    try:
+                        from AppKit import NSApplication
+                        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                    except Exception:                # noqa: BLE001
+                        pass
+                objc.super(_CLWhatPanel, self).sendEvent_(event)
+
         class _CLWhatDrag(NSView):
             """整块背景可拖（和 overlay 同一个做法：mouseDownCanMoveWindow 是总开关）。"""
             def mouseDownCanMoveWindow(self):        # noqa: N802
@@ -98,6 +125,15 @@ def _log_attr(text: str):
     out = NSMutableAttributedString.alloc().init()
     for raw in (text or "").splitlines():
         s = raw.rstrip()
+        # ⚠️ 代码围栏整行丢掉。不丢的话，下面那句 `.replace("`", "")` 会把
+        #    ```bash 剥成光秃秃一个 "bash" 印在卡片上（收尾的 ``` 则变成空行）——
+        #    实测 3.6.5 的卡片就是这样，升级须知里多出一行孤零零的 "bash"。
+        #    引用块里的围栏（`> ```bash`）同样要丢 —— 只判开头会漏掉它。
+        _probe = s.lstrip()
+        if _probe.startswith("> "):
+            _probe = _probe[2:].lstrip()
+        if _probe.startswith("```"):
+            continue
         if s.startswith("## ["):
             size, w, alpha, before, body = 14.0, 0.45, 1.0, 16.0, s[3:]
         elif s.startswith("### "):

@@ -126,7 +126,7 @@ self.enabled = bool(vault) and mode != "no"
 | 撇号 | ✅ 正常（修正 CSS 后同样正常） | ✅ 正常 |
 | 标点 `「」——《》……` / 表格 | ✅ | ✅ |
 | **CIDFontType0 命中** | **0** | **0** |
-| 速度（真实笔记 515 行） | 5.7 s | **0.7 s** |
+| 速度 | 跑 **515 行真实笔记**：**5.5 s** | **0.7 s** —— ⚠️ 但那是 **31,941 B 的小测试文档**，WebKit **没在真实笔记上跑过**（见本节末尾附录） |
 | 要装什么 | `uv pip install weasyprint` **+ `brew install python pango libffi`** | `uv pip install pyobjc-framework-WebKit` |
 | 跨平台 | ✅ | ❌ 仅 macOS |
 | 要不要 NSApplication | 不要 | **不要**（实测：不建 `NSApplication.sharedApplication()` 也能出，0.7 s） |

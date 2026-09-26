@@ -2,7 +2,7 @@
 
 > 把英文课实时变成「英文草稿 → 句末定稿 → 中文流式打字机」，全本地、离线、$0。
 
-[![Version](https://img.shields.io/badge/version-3.4.0-blueviolet?style=flat-square)](#路线图)
+[![Version](https://img.shields.io/badge/version-3.7.0-blueviolet?style=flat-square)](#路线图)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12-blue?style=flat-square)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey?style=flat-square)](#环境要求)

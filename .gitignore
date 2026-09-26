@@ -40,3 +40,7 @@ __pycache__/
 
 # 用户在卡片上勾了「以后不再提示」才会出现(每台机器自己的状态)
 .update-skip
+
+# 构建产物：双击启动用的 .app（由 make-app.sh 生成，不入库）
+ClassLive.app/
+.build/

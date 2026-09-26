@@ -25,6 +25,8 @@ from cloud_translator import (load_api_key, load_translator as load_cloud_transl
 from obsidian_writer import ObsidianWriter, DEFAULT_VAULT
 from build_notes import (TermNotes, format_gloss, detect_proper_nouns, lookup_term)
 from testmode import TestSession
+import instance_lock
+import notice
 
 PARTIAL_MAX_S = 10          # 草稿只转写最近 N 秒, 限制单次耗时
 
@@ -735,6 +737,48 @@ def _maybe_notice_update() -> None:
 
 
 def run(args) -> None:
+    # ---- 单实例锁 ----
+    # ⚠️ 必须是 run() 的**第一件事**：抢在开音频设备、弹更新卡片、加载模型之前 ——
+    #    否则第二个实例已经抢走了麦克风、已经烧了 API 调用，再说"你重复了"就晚了。
+    #    ⚠️ `_lock` 必须一直活到 run() 结束 —— 文件对象一被回收，锁就释放了。
+    #    理由（为什么用 flock 不用 pidfile / 为什么 .app 那条路不靠它）见 instance_lock.py。
+    _instance_lock, _holder = instance_lock.acquire()
+    if _instance_lock is None:
+        echo(f"⚠ {instance_lock.describe_holder(_holder)}。")
+        echo("   同时跑两个会抢同一个麦克风、叠两个悬浮窗、翻译费用也翻倍。")
+        echo("   要停掉那一个：点它悬浮窗右上角的 ✕，或在它的终端按 Ctrl+C。")
+        return
+
+    # ---- 麦克风权限：三条路径都要说人话 ----
+    # ⚠️ 为什么必须做：Apple 原文 —— 被拒时**录音里只有静音**（不是报错、不是崩溃）。
+    #    不做这个判断的话，程序看起来一切正常、字幕一直空着，用户完全不知道为什么。
+    #    完整理由与实测见 docs/PLAN-p1-app-launcher.md §3.7。
+    # ⚠️ `cl file` 放录音不碰麦克风，不能被权限拦住（那正是课上出问题时复现用的手段）。
+    if notice.needs_mic(args.source):
+        _perm = notice.mic_permission()
+        if _perm == "denied":
+            notice.alert(
+                "ClassLive 拿不到麦克风",
+                "之前你点了「不允许」，macOS 就不会再自动问了。\n"
+                "要去「系统设置 → 隐私与安全性 → 麦克风」里把 ClassLive 打开。",
+                buttons=("知道了",), url=notice.SYSTEM_SETTINGS_MIC)
+            echo("   （打开之后重新启动 ClassLive。）")
+            return
+        if _perm == "restricted":
+            notice.alert(
+                "这台机器不允许使用麦克风",
+                "麦克风被系统策略限制住了（家长控制 / 描述文件 / MDM）。\n"
+                "要找管这台机器的人，或者换一台设备。")
+            return
+        if _perm == "notDetermined":
+            # 预热：系统框一冒出来就是「ClassLive.app 想要访问麦克风」，
+            # 对第一次用的人毫无预警 —— 先说一句它要干嘛、为什么需要。
+            notice.alert(
+                "ClassLive 要申请麦克风",
+                "接下来系统会弹一个授权框，请点「允许」。\n\n"
+                "没有麦克风权限的话，ClassLive 录到的会是一片安静 —— "
+                "程序看着在跑，但字幕一直是空的。")
+
     # 该不该弹「本次更新」卡片 —— 只判断，不弹。弹的动作交给 UI 层：
     # 悬浮窗模式在 overlay.show() 里用非模态毛玻璃卡片（那时 activation policy
     # 已经是 Accessory，不会带 Python 图标，也不阻塞）；终端模式印字符框。
@@ -746,7 +790,10 @@ def run(args) -> None:
     try:
         probe_src = load_source(args.source, args.path, args.speed)
     except Exception as e:                       # noqa: BLE001
-        echo(f"⚠ 无法打开音源({args.source}): {e}")
+        # ⚠️ 走 notice.alert 而不是 echo：`.app` 双击启动时没有终端，
+        #    echo 出去的东西**没人看得见** —— 用户看到的是"双击了、什么都没发生"。
+        #    （错误文本本身是好的，BlackHole 那条甚至带了 brew 安装命令。）
+        notice.alert(f"无法打开音源（{args.source}）", f"{e}")
         return
     try:
         probe_src.close()
@@ -759,8 +806,8 @@ def run(args) -> None:
         asr = load_asr(args.model_dir)
         asr_final = load_final_asr(args.final_model_dir)
     except Exception as e:                       # noqa: BLE001
-        echo(f"⚠ {e}")
-        echo("  装好模型再跑：`cl doctor` 会列出缺哪个、该跑哪条命令。")
+        notice.alert("模型没装好",
+                     f"{e}\n\n装好再跑 —— `cl doctor` 会列出缺哪个、该跑哪条命令。")
         return
     local_tr = load_translator(args.llm, args.glossary, args.context,
                                course=args.course)
@@ -1176,7 +1223,10 @@ def run(args) -> None:
         src = load_source(args.source, args.path, args.speed)
     except Exception as e:                       # noqa: BLE001
         # 走到这里模型已加载、会话文件已建 —— 绝不能裸崩, 那会把这次课的转录一起丢掉
-        echo(f"⚠ 无法打开音源({args.source}): {e}")
+        # ⚠️ 这是**运行中**的失败（不是启动失败）：上面那次试开明明成功了。
+        #    仍然要说人话 —— 下面还会走 writer.close() 把已录到的内容落盘。
+        notice.alert(f"音源断了（{args.source}）",
+                     f"{e}\n\n已经录到的内容会照常存下来。")
         # ⚠️ 早退也要收尾: 会话文件已经建了(带抬头), 直接 return 会跳过 writer.close(),
         # 留下一个只有抬头、没走笔记流程的半成品文件 + 泄漏的文件句柄。
         # (2026-09-24 OCR 发现。)

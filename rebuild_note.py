@@ -7,7 +7,7 @@
 不新建会话文件：先用 mode='no' 构造（__init__ 里 enabled=False 会跳过建文件），
 再把 session_path 指到既有文件上。
 
-用法： .venv/bin/python rebuild_note.py <会话文件> <课号> [--no-polish]
+用法： ClassLive.app/Contents/MacOS/python rebuild_note.py <会话文件> <课号> [--no-polish]
 """
 import argparse
 import os

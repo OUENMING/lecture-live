@@ -17,7 +17,7 @@
 「间隔期间确有事件到达」的那些间隔, 那才是真正的处理卡顿。同时报输入节奏
 (触控板交付频率)与画面节奏(我们更新频率)的对比 —— 两者贴近 = 我们跟得上。
 
-用法: .venv/bin/python3 probe_scroll.py
+用法: ClassLive.app/Contents/MacOS/python3 probe_scroll.py
       按屏幕提示, 在每一阶段把鼠标移到悬浮窗上双指滚动。阶段会自动前进。
 """
 import bisect

@@ -2,7 +2,7 @@
 """实验: 换 ASR 模型对远场课堂的转写质量有多大影响?
 
 用法:
-    .venv/bin/python docs/experiments/asr_compare.py <音频> <起秒> <时长秒> \\
+    ClassLive.app/Contents/MacOS/python docs/experiments/asr_compare.py <音频> <起秒> <时长秒> \\
         [--models parakeet,whisper-turbo] [--dump 6]
 
 前置(模型不在仓库里, 自己下):

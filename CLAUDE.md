@@ -11,6 +11,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 分支（什么时候读） | 读哪个 |
 |---|---|
 | ⭐ **该做什么、按什么顺序做** —— 动手前先读这份 | `docs/PLAN-roadmap.md` |
+| **P1：脱离终端（`.app` 启动器 + 引导式更新）** —— 动手前读 | `docs/PLAN-p1-app-launcher.md` |
 | **架构判断、模块深度、seam** —— 动代码前读，但它是 **2026-09-18 的历史快照**，**正文行号一律别抄** | `ARCHITECTURE.md`（文首有横幅说明哪几条已解决） |
 | 更新机制（分级 / 自动更新 / 卡片） | `docs/PLAN-update-mechanism.md` |
 | 笔记复习层重做 + 课件联动 + 多用户 + UI 动效 | `docs/PLAN-notes-and-ui.md` |
@@ -18,6 +19,9 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | **产品形态（要不要做成 .app）+ VPS 评估 + 课件→关键词** | `docs/RESEARCH-product-shape.md` |
 | 外部评审（功能/架构/技术/思路，含**已知薄弱点**） | ⚠️ **不在仓库里**（作者决定不推送评审文档）。在 `~/Desktop/classlive-review/REVIEW-2026-09-24.md` |
 | 启动、命令行参数、课程切换 | `cl` → `main.py` |
+| **构建可双击的 `.app`**（方案 I：`.app` 就是安装目录） | `make-app.sh`（**动手前先读它的注释**） |
+| **单实例锁**（为什么用 flock 不用 pidfile） | `instance_lock.py` |
+| **面向用户的提示**：说人话的弹窗 / 麦克风权限三态 / 跳系统设置 | `notice.py` |
 | 主循环、后台线程、队列、UI 路由与落盘分发 | `main.py` |
 | 音频采集、麦克风/系统声、电平归一化 | `capture.py` |
 | 断句、VAD、静音阈值 | `vad.py` |
@@ -60,8 +64,13 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 - **环境不可复现**：`requirements.txt` 存在（只有下界、无 lock），没有 `pyproject.toml` / `uv.lock`；
   选型理由写在 `docs/DESIGN.md`。
   ⚠️ 本条曾写成「**没有** `requirements.txt`」—— 那是 2026-09-24 之前的旧状态，该文件之后已建。
-  ⚠️ `.venv` 是 uv 建的，**里面没有 pip**（`.venv/bin/python -m pip` 会失败）；装包用
-  `uv pip install --python .venv/bin/python …`。
+  ⚠️ **运行环境住在 `ClassLive.app/Contents/` 里，不是仓库根目录的 `.venv`**（2026-09-26 起）。
+  里面的 python **没有 pip**（uv venv 默认不带）—— `… -m pip` 会失败，装包一律走
+  `uv pip install --python ClassLive.app/Contents/MacOS/python …`。
+  **为什么这么放**：让 macOS 认那个目录为 bundle，麦克风授权框才写「ClassLive」
+  而不是「python3.11」。根因与配方见 `docs/PLAN-p1-app-launcher.md` §1.5。
+  ⚠️ **别用 `uv python find 3.12` 拿基础解释器** —— 不加 `--managed-python` 它会返回
+  项目自己的 venv，而那是基于 Homebrew 的 framework 构建，整个方案的前提就不成立。
 - **`IOGPUFamily` 内核崩溃史**：2026-09-10 本工具触发过一次 GPU 驱动断言 panic（非 OOM）；`translator._configure_mlx` 是缓解措施。动 mlx / 本地模型路径时留意。
 - **`sessions/` 只追加**：曾误删过一节真实课堂记录、不可恢复；里面的 `*_TEST.md` 是测试残留，也留着。
 - **个人数据保持不入库**：`.gitignore` 覆盖 `sessions/`、`glossary/`、`.course`、`.deepseek_key`、`term_notes*.json`；真实课号已三次脱敏。改 `.gitignore` 前先想清楚这一条。
@@ -78,10 +87,14 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 
 ## 完成判据
 
-- 默认闸门：`.venv/bin/python tests/test_audit_regressions.py` 全绿（无网络、无模型、毫秒级）。注意 R1/R4 复刻了实现逻辑 —— 绿 ≠ 真实流水线通过。
-- **碰过更新机制**（`update.py` / `cl update` / 卡片按钮）：`.venv/bin/python tests/test_update.py` 全绿。
+- 默认闸门：`ClassLive.app/Contents/MacOS/python tests/test_audit_regressions.py` 全绿（无网络、无模型、毫秒级）。注意 R1/R4 复刻了实现逻辑 —— 绿 ≠ 真实流水线通过。
+- **碰过更新机制**（`update.py` / `cl update` / 卡片按钮）：`ClassLive.app/Contents/MacOS/python tests/test_update.py` 全绿。
   ⚠️ 它**不在**默认闸门里，要单独跑 —— 覆盖 `pull()` 的三条安全边界（脏树停手且**文件数不变** /
   `--ff-only` 不造 merge / 已最新跳过）与自动更新的分级（默认拒绝 / 跨版本夹 manual 拒绝 / 限频 / 并发锁）。
-- 碰过流水线 / 音频路径：`.venv/bin/python test_pipeline.py <音频> [start] [dur] [speed]` 能跑完。
-- 碰过 `overlay.py` / `transcript_view.py`：`.venv/bin/python probe_scroll.py` 验滚动行为。
+- **碰过单实例锁**（`instance_lock.py` / `main.run()` 开头）：
+  `ClassLive.app/Contents/MacOS/python tests/test_instance_lock.py` 全绿。
+  ⚠️ 核心那条是「被 kill -9 之后锁自动释放」—— 但**它单独是恒真的**，
+  必须和 C1/C2 连读（见那个测试的 docstring）。
+- 碰过流水线 / 音频路径：`ClassLive.app/Contents/MacOS/python test_pipeline.py <音频> [start] [dur] [speed]` 能跑完。
+- 碰过 `overlay.py` / `transcript_view.py`：`ClassLive.app/Contents/MacOS/python probe_scroll.py` 验滚动行为。
 - 报"可用"之前先跑上面命中的那条、贴出输出，再下结论。

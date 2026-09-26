@@ -21,6 +21,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+from typing import NamedTuple
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -37,15 +38,38 @@ OPTIONAL = [
     ("AppKit", "悬浮窗(缺了回退终端)"),
     ("huggingface_hub", "首次下模型用"),
 ]
+
+
+class Model(NamedTuple):
+    """一个要检查的模型。
+
+    `size` 是**下载体积**（不是装完的体积）—— 引导式更新要拿它问
+    「要下 X 吗（约 N MB）」，用户关心的是要等多久、占多少带宽。
+    体积都是 2026-09-26 实测的：Parakeet 640 MB / Whisper 压缩包 538 MB / VAD 0.61 MB。
+    """
+    path: str
+    label: str
+    required: bool
+    cmd: str          # ⚠️ 必须**可直接执行**（引导式更新会真的跑它）
+    size: str
+
+
 MODELS = [
-    ("~/models/parakeet-tdt-0.6b-v3-int8", "Parakeet ASR 模型(必需)", True,
-     "见 README 安装段"),
-    ("~/models/vad/silero_vad.onnx", "Silero VAD(必需)", True,
-     "见 README 安装段"),
-    ("~/models/sherpa-onnx-whisper-turbo", "定稿 Whisper 模型(必需, ~1GB)", True,
-     "curl -sL -o /tmp/wt.tar.bz2 "
-     "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-     "asr-models/sherpa-onnx-whisper-turbo.tar.bz2 && tar xjf /tmp/wt.tar.bz2 -C ~/models/"),
+    Model("~/models/parakeet-tdt-0.6b-v3-int8", "Parakeet ASR 模型(必需)", True,
+          f'{sys.executable} -c "from huggingface_hub import snapshot_download; '
+          f"snapshot_download('csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8', "
+          f"local_dir='$HOME/models/parakeet-tdt-0.6b-v3-int8')\"",
+          "约 640 MB"),
+    Model("~/models/vad/silero_vad.onnx", "Silero VAD(必需)", True,
+          "mkdir -p ~/models/vad && curl -sL -o ~/models/vad/silero_vad.onnx "
+          "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+          "约 0.6 MB"),
+    Model("~/models/sherpa-onnx-whisper-turbo", "定稿 Whisper 模型(必需)", True,
+          "curl -sL -o /tmp/wt.tar.bz2 "
+          "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+          "asr-models/sherpa-onnx-whisper-turbo.tar.bz2 && "
+          "tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2",
+          "约 538 MB（解开后 989 MB）"),
 ]
 
 
@@ -82,15 +106,18 @@ def main() -> int:
     print(f"✅ Python        {sys.version.split()[0]}")
     if sys.version_info[:2] != (3, 12):
         print("   ⚠️ 本项目在 3.12 上实测, 其他版本未验证")
-    venv = HERE / ".venv"
-    if not venv.exists():
-        # ⚠️ 计入硬缺失：没有 .venv 就跑不了 `cl`（`cl` 用的就是 .venv/bin/python），
+    # ⚠️ 运行环境住在 ClassLive.app 里面，不是仓库根目录的 .venv ——
+    #    这么放是为了让 macOS 认那个目录为 bundle（授权框才写「ClassLive」而不是
+    #    「python3.11」）。根因见 docs/PLAN-p1-app-launcher.md §1.5。(2026-09-26 改)
+    app_py = HERE / "ClassLive.app" / "Contents" / "MacOS" / "python"
+    if not app_py.exists():
+        # ⚠️ 计入硬缺失：没有它就跑不了 `cl`（`cl` 用的就是它），
         # 而且**这个脚本本身**通常也是靠它跑的。原来这里只印 ❌ 不加计数，最后仍
         # 输出"可以跑"并返回 0 —— 与文件头"1 = 有硬缺失"的约定矛盾，也会让按
         # 退出码判断的脚本得到错的结论。(2026-09-24 OCR 分块审计发现。)
         hard_missing += 1
-    print(f"{_mark(venv.exists())} 虚拟环境      "
-          f"{'.venv 就位' if venv.exists() else '缺 .venv → 见 README 安装段'}")
+    print(f"{_mark(app_py.exists())} 运行环境      "
+          f"{'ClassLive.app 就位' if app_py.exists() else '缺 ClassLive.app → 跑 ./make-app.sh'}")
 
     # ---- 版本 / 更新 ----
     head, behind = git_info()
@@ -110,7 +137,8 @@ def main() -> int:
         except Exception:                                 # noqa: BLE001
             hard_missing += 1
             print(f"❌ {mod:<18}缺失{(' — ' + why) if why else ''}")
-            print(f"   → uv pip install --python .venv/bin/python -r requirements.txt")
+            print(f"   → uv pip install --python ClassLive.app/Contents/MacOS/python"
+                  f" -r requirements.txt")
             continue
         try:
             print(f"✅ {mod:<18}{md.version(mod)}")
@@ -125,7 +153,7 @@ def main() -> int:
 
     # ---- 模型 ----
     print()
-    for path, label, required, cmd in MODELS:
+    for path, label, required, cmd, size in MODELS:
         p = pathlib.Path(os.path.expanduser(path))
         # ⚠️ 不能只看 exists()：下载中断会留下空目录，解压失败也会。用户看到 ✅
         # 就以为模型可用，直到跑课才炸。目录要求非空、文件要求大小 > 0。
@@ -139,7 +167,10 @@ def main() -> int:
         print(f"{_mark(ok) if ok else ('❌' if required else '⚪')} {label:<30}"
               f"{'就位' if ok else ('空目录/空文件' if p.exists() else '缺失')}")
         if not ok:
-            print(f"   → {cmd}")
+            # ⚠️ 报体积 —— 引导式更新要拿同一个数问用户「要下 X 吗」，
+            #    这里也报出来，两边口径才不会漂。
+            print(f"   → 要下 {size}：")
+            print(f"     {cmd}")
 
     # ---- 数据文件 ----
     print()

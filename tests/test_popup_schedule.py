@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """复核「更新弹窗什么时候弹」—— 隔离在临时目录，**不碰真仓库**。
 
-    .venv/bin/python tests/test_popup_schedule.py
+    ClassLive.app/Contents/MacOS/python tests/test_popup_schedule.py
 
 为什么单独一个文件：这段判定链的每个分支都对应一个**实测出来的坏行为**
 （降级弹空白卡、勾了永久失明、被 `.update-seen` 挡死），

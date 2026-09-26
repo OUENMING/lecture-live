@@ -2,7 +2,7 @@
 """实验: 改 VAD 参数能不能减少碎片? —— **答案是不能。**
 
 用法:
-    .venv/bin/python docs/experiments/vad_params.py <音频> [起始秒] [时长秒]
+    ClassLive.app/Contents/MacOS/python docs/experiments/vad_params.py <音频> [起始秒] [时长秒]
 
 结论(2026-09-24, 本机实测, 详见下方"实测结果")
 ---------------------------------------------

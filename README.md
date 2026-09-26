@@ -195,13 +195,11 @@ lecture-live/
 git clone https://github.com/OUENMING/lecture-live.git
 cd lecture-live
 
-# 虚拟环境 + 依赖
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python sherpa-onnx mlx-lm sounddevice numpy \
-    huggingface_hub pyobjc-framework-Cocoa pyobjc-framework-Quartz
+# 构建可双击的 ClassLive.app —— 它自带一份独立的 Python 和全部依赖
+./make-app.sh
 
 # Parakeet ASR 模型（~600MB）
-.venv/bin/python -c "from huggingface_hub import snapshot_download; \
+ClassLive.app/Contents/MacOS/python -c "from huggingface_hub import snapshot_download; \
   snapshot_download('csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8', \
   local_dir='\$HOME/models/parakeet-tdt-0.6b-v3-int8')"
 
@@ -220,7 +218,17 @@ curl -sL -o /tmp/wt.tar.bz2 \
 tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2
 ```
 
-依赖也可以一条命令装：`uv pip install --python .venv/bin/python -r requirements.txt`
+**装完之后双击 `ClassLive.app` 就能上课**（第一次会弹一个麦克风授权，点允许）。
+
+> **为什么是 `.app` 而不是 `.venv`** —— 让 macOS 认这个目录为「一个应用」，
+> 授权框上才会写 **ClassLive** 而不是 `python3.11`。
+> 技术细节见 [`docs/PLAN-p1-app-launcher.md`](docs/PLAN-p1-app-launcher.md) §1.5。
+
+依赖清单变了要重装时：
+
+```bash
+uv pip install --python ClassLive.app/Contents/MacOS/python -r requirements.txt
+```
 
 ---
 
@@ -232,7 +240,7 @@ tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2
 cd lecture-live
 git pull
 # 依赖有新变化时（pull 后如果 requirements.txt 变了）
-uv pip install --python .venv/bin/python -r requirements.txt
+uv pip install --python ClassLive.app/Contents/MacOS/python -r requirements.txt
 ```
 
 **v3.5.0 起有 `cl update`** —— 拉代码 + 按需补依赖 + 自检，一条命令：
@@ -240,6 +248,9 @@ uv pip install --python .venv/bin/python -r requirements.txt
 ```bash
 cl update
 ```
+
+> ✅ **平时更新不用重建 `.app`** —— 代码在仓库里、依赖在 `.app` 里，`git pull` 换的是前者。
+> 只有依赖变化时按上面的 `uv pip install` 补一次，也**不用**重跑 `make-app.sh`。
 
 > ⚠️ **第一次得用 `git pull`**：旧版本的 `cl` 还不认识 `update` 子命令（实测报"未知参数"）。
 > 工具没法用自己更新出"能更新的自己" —— **引导一次，之后 `cl update` 永久可用。**
@@ -291,8 +302,8 @@ cl help               # 帮助
 
 ```bash
 cd ~/lecture-live
-.venv/bin/python main.py --source mic --ui overlay --course ECON10101
-.venv/bin/python main.py --source file --path 录音.m4a --speed 4
+ClassLive.app/Contents/MacOS/python main.py --source mic --ui overlay --course ECON10101
+ClassLive.app/Contents/MacOS/python main.py --source file --path 录音.m4a --speed 4
 ```
 
 | 参数 | 说明 |

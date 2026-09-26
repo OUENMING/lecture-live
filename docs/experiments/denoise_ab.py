@@ -2,7 +2,7 @@
 """实验: 降噪对远场课堂 ASR 是帮忙还是添乱? —— **实测是添乱。**
 
 用法:
-    .venv/bin/python docs/experiments/denoise_ab.py <音频> <起始秒> <时长秒> [音频2 起 时 ...]
+    ClassLive.app/Contents/MacOS/python docs/experiments/denoise_ab.py <音频> <起始秒> <时长秒> [音频2 起 时 ...]
 
 前置: 降噪模型**已被删除**（本实验否决了降噪后清理掉了），复跑前先下回来：
     gtcrn_simple.onnx     535 KB   https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx

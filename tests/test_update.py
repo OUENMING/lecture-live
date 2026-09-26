@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`update.py` 的回归测试 —— 全部在临时目录里，**绝不碰真仓库、真日志**。
 
-    .venv/bin/python tests/test_update.py
+    ClassLive.app/Contents/MacOS/python tests/test_update.py
 
 覆盖两块：
 

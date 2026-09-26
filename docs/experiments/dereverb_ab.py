@@ -26,8 +26,8 @@
 
 
 用法:
-    .venv/bin/python docs/experiments/dereverb_ab.py <音频> <起秒> <时长秒> [...]
-    .venv/bin/python docs/experiments/dereverb_ab.py --noise-floor <音频> <起秒> <时长秒>
+    ClassLive.app/Contents/MacOS/python docs/experiments/dereverb_ab.py <音频> <起秒> <时长秒> [...]
+    ClassLive.app/Contents/MacOS/python docs/experiments/dereverb_ab.py --noise-floor <音频> <起秒> <时长秒>
 
 ⚠️⚠️ 先读这段: 这个脚本曾经报出过一个**假结果**, 原因是两层错误叠加
 ------------------------------------------------------------------
@@ -84,7 +84,7 @@ OA 空转写 15%→0% ❌ 撤回。
 
 ⚠️ **这两个依赖已被卸载**（WPE 否决后清理掉了，它们不进 `requirements.txt`）。
 要复跑本脚本先装回来:
-    uv pip install --python .venv/bin/python nara_wpe scipy
+    uv pip install --python ClassLive.app/Contents/MacOS/python nara_wpe scipy
 （`nara_wpe.utils` 做 STFT 时 **import scipy** —— 不在它自称的 5 个轻依赖里。
  另 `soundfile` / `bottleneck` 是 nara_wpe 的传递依赖, `soundfile` 因
  huggingface_hub 已需要而保留。）

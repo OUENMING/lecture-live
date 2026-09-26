@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """探针 A：**只换 prompt 任务框架**，看复述率降不降。
 
-    .venv/bin/python docs/experiments/review_prompt_ab.py sessions/<课>.md <课号> [--chunks N]
+    ClassLive.app/Contents/MacOS/python docs/experiments/review_prompt_ab.py sessions/<课>.md <课号> [--chunks N]
 
 ## 为什么单独写、不走 rebuild_note.py
 

@@ -22,6 +22,10 @@ httpx>=0.28                # DeepSeek 云端翻译
 # macOS 悬浮窗（无 GUI 会话时自动回退终端，不装也能跑终端模式）
 pyobjc-framework-Cocoa>=12.2
 pyobjc-framework-Quartz>=12.2
+# ⚠️ 只为了**查麦克风授权状态**（AVCaptureDevice.authorizationStatus）。
+#    实测边际成本约 2 MB（wheel 84 KB + CoreMedia 29 KB + CoreAudio 34 KB）。
+#    不加它的后果很隐蔽：被拒时录音里**只有静音**，程序看起来正常跑、字幕一直空着。
+pyobjc-framework-AVFoundation>=12.2
 
 # 模型下载（首次安装用）
 huggingface-hub>=1.30

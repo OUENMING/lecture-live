@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """审计回归测试(2026-09-11): 覆盖本次修复的缺陷, 防止它们悄悄回来。
 
-跑法: .venv/bin/python tests/test_audit_regressions.py   (或 pytest tests/)
+跑法: ClassLive.app/Contents/MacOS/python tests/test_audit_regressions.py   (或 pytest tests/)
 全部无网络、无模型加载 —— 毫秒级, 可以随手跑。
 
 覆盖的回归:

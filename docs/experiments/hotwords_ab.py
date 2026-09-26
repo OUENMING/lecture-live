@@ -2,7 +2,7 @@
 """实验: sherpa-onnx 的**热词偏置**(hotwords_file) 对 Parakeet 有没有用? —— **没有, 而且没有可用区间。**
 
 用法:
-    .venv/bin/python docs/experiments/hotwords_ab.py <音频> <起始秒> <时长秒>
+    ClassLive.app/Contents/MacOS/python docs/experiments/hotwords_ab.py <音频> <起始秒> <时长秒>
 
 结论(2026-09-24, 本机实测)
 --------------------------

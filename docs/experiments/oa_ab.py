@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Observation Adding (OA) 的 α 扫描 —— 降噪输出与原始信号按比例混合。
 
-    .venv/bin/python docs/experiments/oa_ab.py [每个窗口的秒数] [窗口数]
+    ClassLive.app/Contents/MacOS/python docs/experiments/oa_ab.py [每个窗口的秒数] [窗口数]
 
 ## 为什么单独写这个脚本
 

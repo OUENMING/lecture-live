@@ -1468,16 +1468,42 @@ class Overlay:
     def _whatsnew_update(self, set_status, set_title, done) -> None:
         """「立即更新」按钮的干活处。**后台线程跑网络，UI 回写一律回主线程。**
 
-        ⚠️ 两条硬约束：
+        ⚠️ 三条硬约束：
           · AppKit 只能在主线程碰 —— 所以线程里每一次回写都过 `callAfter`；
-          · 这个工具正在上课录课 —— 所以**只换代码、不装依赖、不重启**，
-            依赖有变化就把命令打出来让用户自己敲。
+          · 这个工具正在上课录课 —— 更新**只换代码**，不重启；
+          · **重活（补依赖 / 下模型）必须先问** —— 点了按钮人就走了，
+            不能静默跑几分钟的网络。
 
         更新逻辑全部在 `update.py`（与 `cl update` 共用一份，避免漂移）。
+        重活清单也在那儿（`update.pending_steps()`），两边口径不会漂。
         """
         import threading
 
         from PyObjCTools import AppHelper
+
+        # ---- 主线程：先问要不要做重活 ----
+        # ⚠️ 这一段**必须**在起线程之前 —— 模态框只能在主线程弹，
+        #    而这个方法本身就是按钮 action，天然在主线程上。
+        # ⚠️ `pending_steps()` 只查本地（requirements 指纹 + 模型文件在不在），不联网。
+        approved: list[str] = []
+        try:
+            import update
+            steps = update.pending_steps()
+        except Exception as e:                            # noqa: BLE001
+            steps = []
+            if os.environ.get("CLASSLIVE_DEBUG"):
+                print(f"[whatsnew] pending_steps 失败: {e}")
+        if steps:
+            import notice
+            todo = "\n".join(f"· {s['label']} —— {s['detail']}" for s in steps)
+            ans = notice.alert(
+                "更新之外还有几件事要做",
+                f"{todo}\n\n{steps[0]['why']}\n\n"
+                f"现在一起做吗？（要联网，可能要几分钟）",
+                buttons=("现在做", "先不做"))
+            if ans == "现在做":
+                approved = [s["key"] for s in steps]
+                set_status("正在更新…", 0.75)
 
         def ui(fn, *a) -> None:
             try:
@@ -1512,16 +1538,38 @@ class Overlay:
                     # 「停手」和「失败」的按钮文案必须不一样：前者是**正常的保护**，
                     # 后者才是出事了。混为一谈会让用户以为工具坏了。
                     ui(set_title, "这次先不更新" if r.get("blocked") else "更新失败")
-                elif r["skipped"]:
+                    return
+                if r["skipped"]:
                     ui(set_status, f"已经是最新的（{r['after']}）")
                     ui(set_title, "已是最新")
-                elif r["reqs_changed"]:
-                    ui(set_status,
-                       f"已更新到 {r['after']}；依赖有变化 —— 重启后跑一次 cl update 补依赖",
-                       1.0)
-                    ui(set_title, "重启后生效")
                 else:
-                    ui(set_status, f"已更新到 {r['after']} —— 下次启动生效")
+                    ui(set_status, f"已更新到 {r['after']}")
+
+                # ---- 跑用户批准的重活 ----
+                if approved:
+                    for i, key in enumerate(approved, 1):
+                        label = next((s["label"] for s in steps if s["key"] == key), key)
+                        ui(set_status, f"（{i}/{len(approved)}）{label} 中…", 0.6)
+                        res = update.run_step(key, on_line=lambda s: ui(set_status, s, 0.6))
+                        if not res["ok"]:
+                            ui(set_status, f"⚠️ {res['error']}", 1.0)
+                            ui(set_title, "重启后重试")
+                            return
+
+                # ---- 收尾 ----
+                left = []
+                try:
+                    left = update.pending_steps()
+                except Exception:                         # noqa: BLE001
+                    pass
+                if left:
+                    ui(set_status, f"还有 {len(left)} 件事没做：{left[0]['label']}"
+                                   f"（{left[0]['detail']}）—— 再点一次这个按钮", 1.0)
+                    ui(set_title, left[0]["label"])
+                elif r["skipped"] and not approved:
+                    pass                                       # 上面已经写过"已是最新"
+                else:
+                    ui(set_status, f"都齐了（{r['after']} 或更新）—— 重启后生效", 1.0)
                     ui(set_title, "重启后生效")
             finally:
                 ui(done)

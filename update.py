@@ -382,10 +382,155 @@ def spawn_auto_update() -> bool:
         return False
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 引导式更新：更新之后还有哪些"重活"没做
+#
+# 背景：`cl update`（bash）本来就把四件事串好了 —— 记哈希 → pull → 补依赖 → doctor。
+# 但**更新卡片上的「立即更新」按钮只做了 pull**，剩下的要用户回终端敲命令。
+# 作者 2026-09-26 的要求就是把这个缺口补上：「能不能也点击立即更新也能更新」。
+#
+# ⚠️ 设计原则（照抄仓库已有的两条立场）：
+#   1. **重活先问、要报大小** —— 点了按钮人就走了，不能静默跑几分钟
+#   2. **绝不静默下模型** —— README 明写「模型不会自动下载」（1.6 GB 是用户的决定）
+#   3. **正在录课时不自作主张** —— overlay.py 的立场：只换代码、不装依赖、不重启
+# ══════════════════════════════════════════════════════════════════════
+
+# ⚠️ 记的是「**上次成功装完依赖时** requirements.txt 的指纹」。
+#    用它而不是"这次 pull 有没有改 requirements" —— 后者只在同一次会话里有效，
+#    用户今天更新、明天才补依赖就丢了。
+REQS_STAMP = STATE_DIR / "reqs-installed"
+
+
+def mark_reqs_installed() -> None:
+    """记下"当前这份 requirements.txt 已经装好了"。
+
+    `cl update` 装完依赖后要调它（`update.py --mark-reqs`），
+    否则终端路径装完了、卡片还以为没装，会一直提示补依赖。
+    """
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        REQS_STAMP.write_text(_reqs_hash(), encoding="utf-8")
+    except Exception:                                     # noqa: BLE001
+        pass
+
+
+def pending_steps() -> list[dict]:
+    """更新之后还有哪些重活没做。按该做的顺序返回。
+
+    每项：`{"key", "label", "detail", "why"}` —— **只描述，不执行**。
+    执行交给 `run_step()`，这样 UI 层可以先问用户「要现在做吗（约 N MB）」。
+    """
+    steps: list[dict] = []
+
+    # ① 补依赖：requirements.txt 的指纹和"上次装完时"对不上
+    cur = _reqs_hash()
+    try:
+        done = REQS_STAMP.read_text(encoding="utf-8").strip() if REQS_STAMP.exists() else ""
+    except OSError:
+        done = ""
+    if cur and cur != done:
+        steps.append({
+            "key": "deps",
+            "label": "补依赖",
+            "detail": "约 1–3 分钟",
+            "why": "代码更新后依赖清单变了 —— 不补的话可能起不来。",
+        })
+
+    # ② 下模型：直接问 doctor（同一份定义，口径不会漂）
+    try:
+        import doctor
+        missing = []
+        for m in doctor.MODELS:
+            import pathlib as _pl
+            p = _pl.Path(os.path.expanduser(m.path))
+            ok = (any(f.is_file() and f.stat().st_size > 0 for f in p.rglob("*"))
+                  if p.is_dir() else (p.is_file() and p.stat().st_size > 0))
+            if not ok:
+                missing.append(m)
+        if missing:
+            total = "、".join(f"{m.label.split('(')[0].strip()} {m.size}" for m in missing)
+            steps.append({
+                "key": "models",
+                "label": f"下载模型（{len(missing)} 个）",
+                "detail": total,
+                "why": "缺模型的话课上会直接起不来（不是降质，是跑不了）。",
+            })
+    except Exception:                                     # noqa: BLE001
+        pass
+    return steps
+
+
+def run_step(key: str, on_line=None) -> dict:
+    """执行一个 `pending_steps()` 里的步骤。返回 `{"ok", "error"}`。
+
+    ⚠️ 会跑网络 + 写磁盘，**调用方要在后台线程里调**。
+    `on_line(str)` 用来把进度回传给 UI（可选）。
+    """
+    def say(s: str) -> None:
+        if on_line:
+            try:
+                on_line(s)
+            except Exception:                             # noqa: BLE001
+                pass
+
+    try:
+        if key == "deps":
+            # ⚠️ 用 sys.executable —— 本模块自己就跑在那个解释器里，永远是对的；
+            #    写死路径在布局变动时会变成一句误导。
+            r = subprocess.run(
+                ["uv", "pip", "install", "--python", sys.executable, "-q",
+                 "-r", str(HERE / "requirements.txt")],
+                cwd=HERE, capture_output=True, text=True, timeout=900)
+            if r.returncode != 0:
+                err = (r.stderr or r.stdout or "").strip().splitlines()
+                return {"ok": False, "error": err[-1] if err else "装依赖失败"}
+            mark_reqs_installed()
+            say("依赖装好了")
+            return {"ok": True, "error": ""}
+
+        if key == "models":
+            import doctor
+            for m in doctor.MODELS:
+                import pathlib as _pl
+                p = _pl.Path(os.path.expanduser(m.path))
+                ok = (any(f.is_file() and f.stat().st_size > 0 for f in p.rglob("*"))
+                      if p.is_dir() else (p.is_file() and p.stat().st_size > 0))
+                if ok:
+                    continue
+                say(f"正在下 {m.label}（{m.size}）…")
+                # doctor 里的命令是给人看的 shell 串（含 ~ 和 &&）——
+                # 这里就是要**原样执行**它，所以走 shell。
+                r = subprocess.run(m.cmd, shell=True, cwd=HERE,     # noqa: S602
+                                   capture_output=True, text=True, timeout=3600)
+                if r.returncode != 0:
+                    err = (r.stderr or r.stdout or "").strip().splitlines()
+                    return {"ok": False,
+                            "error": f"{m.label} 下载失败：{err[-1] if err else '未知原因'}"}
+            say("模型齐了")
+            return {"ok": True, "error": ""}
+
+        return {"ok": False, "error": f"未知步骤 {key!r}"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "超时了（网络太慢或卡住了）"}
+    except Exception as e:                                # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"}
+
+
 def _cli() -> int:
-    """命令行：`python update.py [--check] [--quiet] [--auto]`。"""
+    """命令行：`python update.py [--check] [--quiet] [--auto] [--mark-reqs] [--steps]`。"""
     check_only = "--check" in sys.argv
     quiet = "--quiet" in sys.argv
+
+    if "--mark-reqs" in sys.argv:
+        # `cl update` 装完依赖后叫它 —— 否则终端路径装完了，卡片还以为没装
+        mark_reqs_installed()
+        return 0
+
+    if "--steps" in sys.argv:
+        # 引导式更新用：还有哪些重活没做（给脚本/调试看）
+        for s in pending_steps():
+            print(f"{s['key']}\t{s['label']}\t{s['detail']}")
+        return 0
 
     if "--auto" in sys.argv:
         auto_update()
@@ -417,7 +562,9 @@ def _cli() -> int:
             print(f"     {x}")
     if r["reqs_changed"]:
         print("\n🔧 依赖清单有变化 —— 需要你自己装（本模块不替你改环境）：")
-        print("   uv pip install --python .venv/bin/python -r requirements.txt")
+        # ⚠️ 用 sys.executable 而不是写死路径 —— 本模块自己就跑在那个解释器里，
+        #    它永远是对的；写死一个路径在布局变动时会变成一句误导。
+        print(f"   uv pip install --python {sys.executable} -r requirements.txt")
     return 0
 
 

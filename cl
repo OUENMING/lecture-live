@@ -21,7 +21,16 @@ while [ -L "$SELF" ]; do
 done
 cd "$(cd "$(dirname "$SELF")" && pwd)" || exit 1
 
-PY=".venv/bin/python"
+# ⚠️ Python 解释器住在 ClassLive.app **里面**，不是仓库根目录的 .venv ——
+#    这么放是为了让 macOS 认这个目录为 bundle：授权框才会写「ClassLive」
+#    而不是「python3.11」。根因与完整配方见 docs/PLAN-p1-app-launcher.md §1.5。
+#    （2026-09-26 起，.venv 不再是安装目录；下面是**唯一**定义点，改这里就够。）
+PY="ClassLive.app/Contents/MacOS/python"
+if [ ! -x "$PY" ]; then
+  echo "❌ 找不到 $PY" >&2
+  echo "   还没构建过。跑一次：  ./make-app.sh" >&2
+  exit 1
+fi
 CFG=".course"
 COURSE="$(cat "$CFG" 2>/dev/null || true)"
 ENGINE=auto
@@ -90,6 +99,10 @@ update_classlive() {
     else
       "$PY" -m pip install -q -r requirements.txt 2>&1 | tail -3
     fi
+    # ⚠️ 告诉 update.py「这份 requirements 已经装好了」——
+    #    卡片上的「立即更新」按钮靠这个标记判断还要不要提示补依赖。
+    #    不记的话终端这边装完了、卡片那边还会一直让你再装一次。
+    "$PY" update.py --mark-reqs
   fi
 
   echo

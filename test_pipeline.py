@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """集成测试: 把一段真实课程录音喂进 分段→ASR→LLM 全链路, 打印草稿/定稿/中文。
-用法: .venv/bin/python test_pipeline.py <m4a> [start_s] [dur_s] [speed]
+用法: ClassLive.app/Contents/MacOS/python test_pipeline.py <m4a> [start_s] [dur_s] [speed]
 """
 import sys, time, os
 sys.path.insert(0, ".")

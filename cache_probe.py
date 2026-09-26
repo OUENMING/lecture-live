@@ -2,7 +2,7 @@
 """测 DeepSeek 缓存在真实课堂回放下的命中率。
 
 用法(必须在 venv 里跑):
-    .venv/bin/python cache_probe.py <session.md> [n] [course]
+    ClassLive.app/Contents/MacOS/python cache_probe.py <session.md> [n] [course]
 
 对照两种 prompt 形态(每轮发给模型的"句子内容"完全相同，只改排列方式):
   A = 现状: 每轮一个全新的 user 消息(内含滑动窗口的最近 2 句) -> 前缀每轮都变

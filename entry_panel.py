@@ -556,8 +556,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
         def on_progress(stage, done, total):
             # ⚠️ 这个回调在**工作线程**里被调 —— UI 回写一律回主线程（CLAUDE.md 的不变量）
+            # ⚠️ 用 `_status`（查**当前**面板），不要捕获本代的 `set_status` —— 见它的说明。
             from PyObjCTools import AppHelper
-            AppHelper.callAfter(set_status, progress_text(stage, done, total))
+            AppHelper.callAfter(_status, progress_text(stage, done, total))
 
         def work():
             try:
@@ -595,8 +596,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
         def _done(txt):
             S["busy"] = False
-            set_status(f"{course}：{txt}")
-            refresh()
+            # ⚠️ 写给 / 重画**当前**打开的面板 —— 可能已经不是发起这次跑的那一个了。
+            _status(f"{course}：{txt}")
+            cur = S.get("panel")
+            if cur is not None:
+                cur.refresh()
 
         threading.Thread(target=work, daemon=True).start()
         return True
@@ -616,7 +620,37 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             win.orderOut_(None)
         except Exception:                                 # noqa: BLE001
             pass
+        # ⚠️⚠️ **必须断环，否则每开/关一次漏掉一整个面板。**
+        #     实测（审查代理量的，连跑两遍一致）：开/关 3 轮之后
+        #     `{'Panel': 3, 'DropTarget': 15, 'EntryBtn': 18, 'EntryDoc': 3}`，
+        #     `NSApp.windows()` 仍是 3 —— 关闭后面板不可见，但**整棵树都还活着**，
+        #     连两次 `gc.collect()` 都收不回。
+        #     环在哪：`win._entry_targets` → `target._fn = do_close` → 闭包持有 `win`；
+        #     每张卡的 `_targets` → `_fn` = refresh/do_delete/do_undo → 持有 doc/ve/win。
+        #     面板每次「开课前的准备」都要开关 → 一学期累积**无上界**。
+        try:
+            for _card in doc.subviews():
+                _card._targets = []          # 断卡片 → target → 闭包 → win 那条
+                # ⚠️ **落点回调也必须断。** 只清 `_targets` 不够 —— 还有一圈：
+                #    卡片 → `_on_drop` → `run_prep` → `set_status` → 状态标签
+                #    → 它的 superview(`ve`) → 子树 → 卡片。那一圈不含 `win`
+                #    （所以窗口能走），但它自己是个**孤岛**，`gc` 收不回
+                #    （实测：只 `setContentView_(None)` 时 3 轮后仍有 16 个 DropTarget）。
+                _card._on_enter = _card._on_drop = _card._on_exit = None
+            win._entry_targets = []          # 断关闭按钮那条
+            status_holder["label"] = None    # 断 `set_status` → 标签 → `ve` 那条
+            win.setContentView_(None)        # 丢掉整棵视图树
+        except Exception:                                 # noqa: BLE001
+            pass
+        # ⚠️⚠️ **必须 `close()`，不是 `orderOut_`。** 实测：只 `orderOut_` 的话
+        #     开/关 3 轮之后 `NSApp.windows()` 仍是 3 —— 窗口只是**不可见**，
+        #     对象还活着（`orderOut_` 不释放）。而我们再也不需要它了。
+        try:
+            win.close()
+        except Exception:                                 # noqa: BLE001
+            pass
         S["panel"] = None
+        S.pop("panel_key", None)
         if on_close:
             on_close()
 
@@ -726,13 +760,38 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
 
 def open_panel(**kw) -> Handles | None:
-    """确保同进程只有一份面板（菜单栏 + 双击两条入口都可能来）。"""
-    if S.get("panel") is not None:
-        S["panel"].window.orderFrontRegardless()
-        return S["panel"]
+    """确保同进程只有一份面板（菜单栏 + 双击两条入口都可能来）。
+
+    ⚠️⚠️ **按「有没有 `on_start`」定键，不是拿整个 `kw` 比。**
+       最要命的一种：先在上课中从菜单栏开过（`on_start=None`，**故意不建**「开始上课」），
+       那个面板还开着时再双击 `.app`（`on_start` 能兑现）——
+       直接复用旧面板的话，**双击打开的面板没有「开始上课」按钮**。
+       ⚠️ 但**别拿整个 `kw` 比**：调用方每次传一个新的 lambda 就永远不等，
+       于是每次打开都白重建（实测踩到）。`on_start` 有没有，正是**改变界面结构**的那一项。
+    """
+    cur = S.get("panel")
+    if cur is not None:
+        if S.get("panel_key") == (kw.get("on_start") is None):
+            cur.window.orderFrontRegardless()
+            return cur
+        cur.close()                       # 结构不同 -> 关掉重建（`S["result"]` 在模块级，不丢）
     h = build(**kw)
     S["panel"] = h
+    S["panel_key"] = kw.get("on_start") is None
     return h
+
+
+def _status(text, alpha=1.0) -> None:
+    """把状态写进**当前**打开的那个面板 —— **不是**发起这次跑的那个。
+
+    ⚠️ 跑 prep 中途关窗再开：旧的 `_done` 闭包捕获的是**旧面板**的 `set_status`/`refresh`
+       → 结果写进一个已经 `orderOut` 的窗口 → **新面板永远看不到结果列表**，
+       而 `busy` 已经清了 → 新面板里拖东西又被拒成「另一门课还在跑」= 幽灵在跑。
+       → 一律走这里「查当前面板」，别捕获某一代。
+    """
+    h = S.get("panel")
+    if h is not None:
+        h.set_status(text, alpha)
 
 
 def close_panel() -> None:

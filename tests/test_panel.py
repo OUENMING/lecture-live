@@ -656,6 +656,30 @@ def main() -> int:
         EP2.close_panel()
         _sh.rmtree(iso, ignore_errors=True)
 
+    print("\n--- ⑧ 开/关不许漏面板（闭包成环）---")
+    # ⚠️ 审查代理量出来的：开/关 3 轮后 `{'Panel': 3, 'DropTarget': 15, …}` —— **每轮漏一整个面板**。
+    #    环有多条：`win._entry_targets` → target → `do_close` → win；
+    #    卡片 `_targets` → refresh/do_delete/do_undo → doc/ve/win；
+    #    以及**卡片落点回调** → `run_prep` → `set_status` → 状态标签 → superview(ve) → 子树 → 卡片
+    #    （最后这条不含 win，所以窗口能走，但它是个**孤岛**，gc 收不回）。
+    #    → `do_close` 必须把这几条全断掉，并 `close()`（`orderOut_` 不释放窗口）。
+    #    ⚠️ 判据是**不随轮数增长**，不是「等于 0」：最后一轮那份会被 AppKit 自己留着。
+    def _ours():
+        import gc as _g
+        _g.collect(); _g.collect()
+        return sum(1 for o in _g.get_objects()
+                   if type(o).__name__.startswith("_ClassLive"))
+
+    counts = []
+    for rounds in (3, 9):
+        for _ in range(rounds):
+            _hh = EP2.open_panel(state_root=iso)
+            if _hh is not None:
+                _hh.close()
+        counts.append(_ours())
+    check(f"⭐ 开/关 3 轮与 9 轮后存活对象**一样多**（{counts}）—— 不随轮数增长",
+          counts[0] == counts[1], str(counts))
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

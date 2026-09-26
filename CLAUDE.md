@@ -130,12 +130,18 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   必须和 C1/C2 连读（见那个测试的 docstring）。
 - 碰过流水线 / 音频路径：`ClassLive.app/Contents/MacOS/python test_pipeline.py <音频> [start] [dur] [speed]` 能跑完。
 - **碰过面板**（`panel.py` / `overlay.py` 的窗口构造 / `whatsnew.py`）：`ClassLive.app/Contents/MacOS/python tests/test_panel.py` 全绿。
-  ⚠️ 它**不在**默认闸门里，要单独跑。三组断言各管一件事，**不能只跑其中一组**：
-  ① 属性（覆盖 `level` / `collectionBehavior` 这些**离屏渲染看不见**的窗口层属性）
-  ② 离屏渲染哈希（覆盖内容层：材质 / DarkAqua / 圆角 / masksToBounds / scrim 透明度）
-  ③ **单进程**同时装 overlay + whatsnew —— 这条以前从来没人测过，而它正是
-  2026-09-26「更新卡片静默变 None」的现场（当时的独立测试全绿，因为 overlay 没被 import）。
-  ⚠️ 量具灵敏度是实测过的：**离屏渲染对窗口层属性是瞎的**，所以①不能省。
+  ⚠️ 它**不在**默认闸门里，要单独跑。判据是**同进程跟「抽取前的配方」对拍** ——
+  那份老配方**逐字冻在测试文件里**（`frozen_recipe`），当场再建一个面板，两边用
+  **同一份枚举**（`dump` + `render_hash`）比。这样做的两个理由（2026-09-26 审查指出）：
+  · **不绑机器** —— 原来写死一个 sha256 常量，对 backing scale / 系统版本敏感，
+    换台 Mac 必假失败，而它被当仓库闸门。同进程对拍比的是「有没有差别」。
+  · **不靠手挑** —— 原来「手挑 13 个属性 + 一个哈希」，而手挑清单**不是闭集**：
+    `hasShadow` / `contentMinSize` / `titleVisibility` / `isMovable` 两条腿都盖不住。
+    现在两边比同一份 `dump`（21 项 + 递归视图树），名单里有什么就比什么。
+  ⚠️ **别改 `frozen_recipe`** —— 它是参照物。真想改配方时这条测试会红，那正是要的：
+  逼你想清楚「这次是有意改行为，还是改坏了」。
+  ⚠️ **它盖不住什么也要清楚**：那是**静态摊平**，所以**行为**（拖拽、live resize）
+  不在里面（`sendEvent_` 的分派单独由第 ⑤ 组钉住）。别把「两条腿」讲得比实际强。
 - 碰过 `overlay.py` / `transcript_view.py` 的**布局或滚动**：`ClassLive.app/Contents/MacOS/python probe_scroll.py` 验滚动行为。
   ⚠️ **它本身不稳定**（2026-09-26 实测）：**改动前的代码连跑三次**，两次「阶段 1 ✅ / 阶段 2 ❌」、
   一次反过来 —— 每次都是**恰好一个阶段收到 0 个滚轮事件**，而失败的阶段会翻转。

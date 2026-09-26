@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
-"""磨砂面板：配方抽出来之后，两个调用方**行为一模一样**。
+"""磨砂面板：配方抽出来之后，行为与**抽取前那份配方**逐项相同。
 
     ClassLive.app/Contents/MacOS/python tests/test_panel.py
 
-三组断言，各管一件不同的事：
+## 判据长什么样
 
-① **属性** —— 构造出来的窗口/材质/scrim 逐项对。覆盖 `level` / `collectionBehavior`
-   这些**离屏渲染看不见**的窗口层属性。
-② **离屏渲染哈希** —— 内容层（材质 / DarkAqua / 圆角 / masksToBounds / scrim 透明度）
-   有没有变。⚠️ 量具自身实测过灵敏度：它对上面五个属性敏感，
-   而**对 `level` 那类窗口层属性是瞎的** —— 所以①和②缺一不可，不能只靠像素。
-③ **单进程同时装两个消费者** —— 这条**以前从来没人测过**，而它正是 2026-09-26
-   那次事故的现场：overlay 与 whatsnew 各自定义 `_Panel`，ObjC 按名字全局注册，
-   第二个抛 `overriding existing Objective-C class`，被 fail-soft 吞掉 →
-   卡片静默变 None，而**当时的独立测试全绿**（那些测试里 overlay 没被 import）。
+**不是**「跟一个写死的哈希比」，而是**同进程对拍**：
+把抽取前那份配方**逐字冻在下面**（`frozen_recipe`），当场再建一个面板，
+两边用**同一份枚举**（`dump` + `render_hash`）比。
+
+这样做的两个好处（2026-09-26 由 altitude 审查指出原来的写法有问题）：
+
+1. **不绑机器**。原来的判据是 sha256(离屏位图) 写死一个常量 ——
+   它对 backing scale / 系统版本敏感，而 CLAUDE.md 把它当仓库闸门 →
+   换台 Mac 必假失败。现在两边跑在**同一台机器**上，比的是「有没有差别」。
+2. **不靠我预先挑**。原来是「手挑 13 个属性 + 一个哈希」，
+   而手挑的清单**不是闭集** —— `hasShadow` / `contentMinSize` / `titleVisibility` /
+   `isMovable` 两条腿都盖不住（同一个审查指出）。现在两边比的是**同一份 `dump`**，
+   名单里有什么就比什么；名单随「又发现一个可观察量」加长。
+
+⚠️ **仍然要说清楚它盖不住什么**，别把「两条腿」讲得比实际强：
+这是**静态摊平**，所以**行为**（`sendEvent_` 的分派、拖拽、live resize）
+不在这里面 —— `sendEvent_` 单独由第 ⑤ 组钉住；拖拽与 live resize 至今没有自动化覆盖。
 
 ⚠️ 构造真 `Overlay` 会往仓库根写 `.window`（窗口尺寸记忆）。按「测试必须隔离写端」
-   的规矩，这里**先备份、跑完还原**，绝不留下痕迹。
+的规矩，这里**先备份、跑完还原**，绝不留下痕迹。
 """
 from __future__ import annotations
 
@@ -37,22 +45,192 @@ def check(name: str, ok: bool, detail: str = "") -> None:
     print(f"  {'✅' if ok else '❌'} {name}" + (f"  {detail}" if detail else ""))
 
 
-def render_hash(window) -> str:
-    """离屏渲染内容区，返回哈希。
+# ══════════════════════════════════════════════════════════════════════
+# 冻结的参照物：抽取**之前**那份配方
+# （c76cac4 的父提交里的 overlay.py：`_make_panel` + 构造块 + 拖拽层，逐字抄来）
+#
+# ⚠️ **别改它。** 它是「纯搬家」的参照物 —— 将来真要改 panel.py 的配方，
+#    这条测试会红，那正是要的：逼你想清楚「这次是有意改行为，还是改坏了」。
+# ⚠️ 它也用 `objc_own` 取名，**测试里不手挑 ObjC 类名** ——
+#    那正是 objc_own 要消灭的东西，参照物没理由是例外。
+# ══════════════════════════════════════════════════════════════════════
+def frozen_recipe(rect, style):
+    """抽取前的磨砂面板配方。返回 `(window, glass, scrim, drag)`。"""
+    from AppKit import (NSAppearance, NSAppearanceNameDarkAqua, NSBackingStoreBuffered,
+                        NSColor, NSFloatingWindowLevel, NSPanel, NSView,
+                        NSVisualEffectMaterialHUDWindow, NSVisualEffectStateActive,
+                        NSVisualEffectView, NSWindowCollectionBehaviorCanJoinAllSpaces)
+    import objc
+    import objc_own
 
-    ⚠️ 同一个面板渲两次哈希是**确定**的（实测两个进程都是 `af7aef7457c1b8f8`），
-       所以可以拿来当等价比对。
+    def send_event(self, event):
+        if event.type() == 1:                            # NSEventTypeLeftMouseDown
+            try:
+                from AppKit import NSApplication
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            except Exception:                            # noqa: BLE001
+                pass
+        objc.super(objc_own.cls_of("FrozenPanel"), self).sendEvent_(event)
+
+    panel_cls = objc_own.own("FrozenPanel", NSPanel, {
+        "canBecomeKeyWindow": lambda self: True,
+        "sendEvent_": send_event,
+    })
+    win = panel_cls.alloc().initWithContentRect_styleMask_backing_defer_(
+        rect, style, NSBackingStoreBuffered, False)
+    win.setAppearance_(NSAppearance.appearanceNamed_(NSAppearanceNameDarkAqua))
+    win.setLevel_(NSFloatingWindowLevel)
+    win.setCollectionBehavior_(NSWindowCollectionBehaviorCanJoinAllSpaces)
+    win.setOpaque_(False)
+    win.setBackgroundColor_(NSColor.clearColor())
+    win.setMovableByWindowBackground_(True)
+
+    content = win.contentView()
+    glass = NSVisualEffectView.alloc().initWithFrame_(content.bounds())
+    glass.setMaterial_(NSVisualEffectMaterialHUDWindow)
+    glass.setState_(NSVisualEffectStateActive)
+    glass.setWantsLayer_(True)
+    glass.layer().setCornerRadius_(16.0)
+    glass.layer().setMasksToBounds_(True)
+    content.addSubview_(glass)
+
+    scrim = NSView.alloc().initWithFrame_(glass.bounds())
+    scrim.setWantsLayer_(True)
+    scrim.layer().setBackgroundColor_(
+        NSColor.blackColor().colorWithAlphaComponent_(0.38).CGColor())
+    glass.addSubview_(scrim)
+
+    drag_cls = objc_own.own("FrozenDrag", NSView, {
+        "mouseDownCanMoveWindow": lambda self: True,
+    })
+    drag = drag_cls.alloc().initWithFrame_(glass.bounds())
+    glass.addSubview_(drag)
+    return win, glass, scrim, drag
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 可观测量摊平
+# ══════════════════════════════════════════════════════════════════════
+def _pair(s) -> tuple:
+    return (round(float(s.width), 3), round(float(s.height), 3))
+
+
+def _rect(r) -> tuple:
+    return (round(float(r.origin.x), 3), round(float(r.origin.y), 3),
+            round(float(r.size.width), 3), round(float(r.size.height), 3))
+
+
+def _cg(c):
+    """CGColor → 四元组。⚠️ 转回 NSColor 再走 `_ns` —— Quartz 只导出了
+    `CGColorGetAlpha` / `CGColorGetComponents`，没有 `CGColorGetRed` 那几个
+    （而且灰度空间的 CGColor 分量个数也不一样）。绕这一下两个问题一起躲开。"""
+    if c is None:
+        return None
+    from AppKit import NSColor
+    return _ns(NSColor.colorWithCGColor_(c))
+
+
+def _ns(c):
+    """NSColor → 四元组。
+
+    ⚠️ 必须先转色彩空间：`clearColor` 是 **Generic Gray** 空间，
+       直接调 `.redComponent()` 会抛 `getRed:green:blue:alpha: not valid for
+       the NSColor … colorspace`（第一次跑就撞上了）。
     """
+    if c is None:
+        return None
+    from AppKit import NSColorSpace
+    for space in (NSColorSpace.sRGBColorSpace(), NSColorSpace.genericRGBColorSpace()):
+        c2 = c.colorUsingColorSpace_(space)
+        if c2 is not None:
+            return (round(c2.redComponent(), 4), round(c2.greenComponent(), 4),
+                    round(c2.blueComponent(), 4), round(c2.alphaComponent(), 4))
+    return ("unconvertible", str(c.colorSpaceName()))
+
+
+def _tree(v) -> dict:
+    import objc_own
+    lay = v.layer()
+    return {
+        # ⚠️ 类名归一成 "custom"：两边用的是各自的 key（`DragLayer` vs `FrozenDrag`），
+        #    比原始类名会永远不等。层级、顺序、层的属性照比。
+        "cls": ("custom" if type(v).__name__.startswith(objc_own._PREFIX)
+                else type(v).__name__),
+        "frame": _rect(v.frame()),
+        "hidden": bool(v.isHidden()),
+        "layer": None if lay is None else {
+            "cornerRadius": lay.cornerRadius(),
+            "masksToBounds": bool(lay.masksToBounds()),
+            "bg": _cg(lay.backgroundColor()),
+        },
+        "subviews": [_tree(s) for s in v.subviews()],
+    }
+
+
+def dump(win) -> dict:
+    """摊平一个面板的**可观测量**，供两边对拍。
+
+    ⚠️ 这是一份**枚举**，不是「闭集证明」—— 名单外的属性它看不见。
+       但它由**两边同一份代码**跑，所以在名单里的任何差异都会露出来。
+       `hasShadow` / `contentMinSize` / `titleVisibility` / `isMovable` 是
+       2026-09-26 审查指出后补进来的（原来两条腿都盖不住）。
+    """
+    return {
+        "appearance": win.appearance().name(),
+        "styleMask": win.styleMask(),
+        "level": win.level(),
+        "collectionBehavior": win.collectionBehavior(),
+        "opaque": win.isOpaque(),
+        "backgroundColor": _ns(win.backgroundColor()),
+        "alphaValue": win.alphaValue(),
+        "movable": bool(win.isMovable()),
+        "movableByWindowBackground": bool(win.isMovableByWindowBackground()),
+        "hasShadow": bool(win.hasShadow()),
+        "ignoresMouseEvents": bool(win.ignoresMouseEvents()),
+        "titleVisibility": win.titleVisibility(),
+        "titlebarAppearsTransparent": bool(win.titlebarAppearsTransparent()),
+        "minSize": _pair(win.minSize()),
+        "maxSize": _pair(win.maxSize()),
+        "contentMinSize": _pair(win.contentMinSize()),
+        "contentMaxSize": _pair(win.contentMaxSize()),
+        "contentResizeIncrements": _pair(win.contentResizeIncrements()),
+        "canBecomeKey": bool(win.canBecomeKeyWindow()),
+        "canBecomeMain": bool(win.canBecomeMainWindow()),
+        "contentView": _tree(win.contentView()),
+    }
+
+
+def diff(a: dict, b: dict, path: str = "") -> list[str]:
+    """返回两份摊平结果的所有差异（含嵌套路径）。"""
+    out: list[str] = []
+    for k in sorted(set(a) | set(b)):
+        p = f"{path}.{k}" if path else k
+        if k not in a or k not in b:
+            out.append(f"{p}: 只有一边有")
+        elif isinstance(a[k], dict) and isinstance(b[k], dict):
+            out += diff(a[k], b[k], p)
+        elif isinstance(a[k], list) and isinstance(b[k], list):
+            if len(a[k]) != len(b[k]):
+                out.append(f"{p}: 长度 {len(a[k])} vs {len(b[k])}")
+            else:
+                for i, (x, y) in enumerate(zip(a[k], b[k])):
+                    if isinstance(x, dict) and isinstance(y, dict):
+                        out += diff(x, y, f"{p}[{i}]")
+                    elif x != y:
+                        out.append(f"{p}[{i}]: {x!r} vs {y!r}")
+        elif a[k] != b[k]:
+            out.append(f"{p}: {a[k]!r} vs {b[k]!r}")
+    return out
+
+
+def render_hash(window) -> str:
+    """离屏渲染内容区。⚠️ **只用来和同一台机器上另一个面板比**，
+    绝不写死成常量（原写法对 backing scale / 系统版本敏感，换机器必假失败）。"""
     cv = window.contentView()
     rep = cv.bitmapImageRepForCachingDisplayInRect_(cv.bounds())
     cv.cacheDisplayInRect_toBitmapImageRep_(cv.bounds(), rep)
-    data = bytes(rep.bitmapData()[: rep.bytesPerRow() * rep.pixelsHigh()])
-    return hashlib.sha256(data).hexdigest()
-
-
-# ⚠️ overlay 那边重构前的基线（改动前实测，见提交信息）
-BASELINE_OVERLAY = "af7aef7457c1b8f8"
-BASELINE_WHATSNEW = "cd20b263f4226bf9"
+    return hashlib.sha256(bytes(rep.bitmapData()[: rep.bytesPerRow() * rep.pixelsHigh()])
+                          ).hexdigest()[:16]
 
 
 @contextlib.contextmanager
@@ -70,56 +248,36 @@ def restore_window_file():
 
 
 def main() -> int:
-    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
-    app = NSApplication.sharedApplication()
-    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-
-    import panel
-    from Quartz import CGColorGetAlpha
-
-    print("\n--- ① panel.build 的属性 ---")
-    from AppKit import (NSWindowStyleMaskBorderless, NSWindowStyleMaskClosable,
+    from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
+                        NSWindowStyleMaskBorderless, NSWindowStyleMaskClosable,
                         NSWindowStyleMaskFullSizeContentView, NSWindowStyleMaskNonactivatingPanel,
                         NSWindowStyleMaskResizable, NSWindowStyleMaskTitled)
     from Foundation import NSMakeRect
 
+    app = NSApplication.sharedApplication()
+    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
+    import objc
+    import objc_own
+    import panel
+
     MASK_OV = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                | NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView
                | NSWindowStyleMaskNonactivatingPanel)
-    fp = panel.build(NSMakeRect(0, 0, 660, 330), MASK_OV, on_resize=lambda: None)
-    w, g, s, d = fp.window, fp.glass, fp.scrim, fp.drag
-    check("appearance 强制 DarkAqua", w.appearance().name() == "NSAppearanceNameDarkAqua",
-          str(w.appearance().name()))
-    check("material = HUDWindow(13)", g.material() == 13, str(g.material()))
-    check("state = Active(1)", g.state() == 1, str(g.state()))
-    check("cornerRadius = 16", g.layer().cornerRadius() == 16.0, str(g.layer().cornerRadius()))
-    check("masksToBounds", bool(g.layer().masksToBounds()))
-    check("scrim alpha = 0.38",
-          abs(CGColorGetAlpha(s.layer().backgroundColor()) - 0.38) < 1e-6,
-          f"{CGColorGetAlpha(s.layer().backgroundColor()):.3f}")
-    check("level = Floating(3)", w.level() == 3, str(w.level()))
-    check("collectionBehavior = CanJoinAllSpaces(1)", w.collectionBehavior() == 1,
-          str(w.collectionBehavior()))
-    check("opaque = False", not w.isOpaque())
-    check("movableByWindowBackground = True", bool(w.isMovableByWindowBackground()))
-    check("drag.mouseDownCanMoveWindow = True", bool(d.mouseDownCanMoveWindow()))
-    check("glass 子视图 z 序 = [scrim, drag]",
-          [type(v).__name__ for v in g.subviews()] == ["NSView", "_ClassLiveDragLayer"],
-          str([type(v).__name__ for v in g.subviews()]))
-    check("resize_delegate 已装到窗口上",
-          fp.resize_delegate is not None and w.delegate() is fp.resize_delegate)
+    MASK_WN = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
 
-    print("\n--- ② 离屏渲染哈希（对不过 = 内容层变了）---")
-    h = render_hash(w)
-    check(f"overlay 面板渲染与重构前一致", h.startswith(BASELINE_OVERLAY),
-          f"{h[:16]} vs 基线 {BASELINE_OVERLAY}")
-
-    fp2 = panel.build(NSMakeRect(0, 0, 300, 120),
-                      NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
-    h2 = render_hash(fp2.window)
-    check("whatsnew 面板渲染与重构前一致", h2.startswith(BASELINE_WHATSNEW),
-          f"{h2[:16]} vs 基线 {BASELINE_WHATSNEW}")
-    check("不传 on_resize 就不装 delegate", fp2.resize_delegate is None)
+    print("\n--- ①② 与「抽取前的配方」同进程对拍 ---")
+    for tag, rect, mask, kw in (
+            ("overlay 参数",  NSMakeRect(0, 0, 660, 330), MASK_OV,
+             {"on_resize": lambda: None}),
+            ("whatsnew 参数", NSMakeRect(0, 0, 300, 120), MASK_WN, {})):
+        fp = panel.build(rect, mask, **kw)
+        old = frozen_recipe(rect, mask)[0]
+        d = diff(dump(fp.window), dump(old))
+        check(f"{tag}：摊平后的可观测量逐项相同", not d,
+              "；".join(d[:4]) if d else f"{len(dump(fp.window))} 项")
+        ha, hb = render_hash(fp.window), render_hash(old)
+        check(f"{tag}：离屏渲染与老配方一致", ha == hb, f"{ha} vs {hb}")
 
     print("\n--- ③ 单进程同时装两个消费者（那次事故的现场）---")
     import overlay
@@ -127,20 +285,31 @@ def main() -> int:
     check("单进程 import overlay + whatsnew 不炸", True)
     with restore_window_file():
         ov = overlay.Overlay()
-        live = ov._panel
-        check("真 Overlay 构造出来的面板属性也对",
-              live.appearance().name() == "NSAppearanceNameDarkAqua"
-              and ov._ve.material() == 13
-              and ov._drag_layer.mouseDownCanMoveWindow()
-              and ov._win_delegate is not None,
-              f"{live.appearance().name()} / material={ov._ve.material()}")
-        # ⚠️ Overlay 的窗口与独立 build 的**不是同一个类吗**？是同一个 —— 闩锁保证。
-        check("overlay 用的是同一个 ObjC 面板类", type(live) is type(w),
-              f"{type(live).__name__}")
+        # ⚠️ 这里**不能整体对拍**：真 Overlay 在配方之外还自己加了几样 ——
+        #    `setContentMinSize_`、Titled 的 titleVisibility + titlebarAppearsTransparent、
+        #    `_layout()` 把拖拽层铺成它自己的尺寸。那些是**它的** chrome，不是配方的，
+        #    所以只比配方负责的那几项 + 内容层的**结构**。
+        ref_dump = dump(frozen_recipe(NSMakeRect(0, 0, 660, 330), MASK_OV)[0])
+        live_dump = dump(ov._panel)
+        _KEYS = ("appearance", "styleMask", "level", "collectionBehavior", "opaque",
+                 "backgroundColor", "alphaValue", "movableByWindowBackground", "canBecomeKey")
+        dd = diff({k: live_dump[k] for k in _KEYS}, {k: ref_dump[k] for k in _KEYS})
+        check("真 Overlay 的面板：配方负责的 9 项与老配方一致", not dd,
+              "；".join(dd[:3]) if dd else "9 项")
+
+        # ⚠️ 只比**配方负责的那两层**：contentView 的子视图（glass），
+        #    以及 glass 的**头两个**子视图（scrim、drag，顺序即 z 序）。
+        #    真 Overlay 在 glass 里还加了字幕/滚动区/按钮 —— 整棵树本来就不该相等。
+        def _head(t, depth=2):
+            if depth == 0:
+                return t["cls"]
+            return (t["cls"], [_head(s, depth - 1) for s in t["subviews"][:2]])
+        check("真 Overlay 的配方层结构一致（contentView → glass → [scrim, drag]）",
+              _head(live_dump["contentView"]) == _head(ref_dump["contentView"]),
+              f"{_head(live_dump['contentView'])}")
+        check("真 Overlay 的拖拽层能拖窗口",
+              bool(ov._drag_layer.mouseDownCanMoveWindow()))
         ov.close()
-    # ⚠️ 打开这个开关：`whatsnew.build` 有 fail-soft 的 `except`（那是它的既定设计 ——
-    #    卡片只是说明，不能因为它让课起不来），但它**已经两次把真 bug 藏起来**
-    #    （ObjC 类名撞车、不可变的 NSAttributedString）。调试开关会让真异常露出来。
     os.environ["CLASSLIVE_DEBUG"] = "1"
     card = whatsnew.build("0.0.0", "测试摘要", date="2026-09-26")
     check("同一进程里 whatsnew.build() 不是 None（是 None = 那次事故复现了）",
@@ -148,16 +317,11 @@ def main() -> int:
     if card is not None:
         cp = card.get("panel")
         check("卡片窗口是真窗口且 chrome 对",
-              cp is not None and cp.appearance().name() == "NSAppearanceNameDarkAqua",
-              str(cp.appearance().name()) if cp else "panel 不在返回值里")
+              cp is not None and cp.appearance().name() == "NSAppearanceNameDarkAqua")
         cp.orderOut_(None)
 
     print("\n--- ④ 撞名守卫：要炸，而且不能被吞 ---")
-    import objc
-    import objc_own
     from AppKit import NSObject
-
-    # 手工占住一个本模块会生成的名字
     probe_name = objc_own._PREFIX + "ProbeCollide"
     try:
         objc.lookUpClass(probe_name)
@@ -172,8 +336,6 @@ def main() -> int:
         check("名字被占时 own() 抛 ObjcNameCollision", False, f"抛的是 {type(e).__name__}")
 
     # ⚠️ 关键那条：whatsnew 的 fail-soft **不能**把它吞成 None。
-    #    那个 fail-soft 是既定设计（卡片只是说明），但它以前正好把这次事故吞了 ——
-    #    症状就是「卡片静默变 None，而独立测试全绿」。
     _orig = panel.build
 
     def _boom(*a, **kw):
@@ -201,10 +363,7 @@ def main() -> int:
     except Exception as e:                              # noqa: BLE001
         check("左键事件走通 sendEvent_（激活 + objc.super 分派）", False,
               f"{type(e).__name__}: {e}")
-    # ⚠️ 用 cls_of 取本类而不是 type(self)：类被继承时 type(self) 是子类，
-    #    objc.super 的行为会变。这条断言把「方法体拿的是面板类本身」钉住。
-    check("cls_of('Panel') 就是面板类", objc_own.cls_of("Panel") is type(fp3.window),
-          f"{objc_own.cls_of('Panel').__name__}")
+    check("cls_of('Panel') 就是面板类", objc_own.cls_of("Panel") is type(fp3.window))
 
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)

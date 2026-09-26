@@ -44,3 +44,11 @@ __pycache__/
 # 构建产物：双击启动用的 .app（由 make-app.sh 生成，不入库）
 ClassLive.app/
 .build/
+
+# 图标：`tools/make_icon.py` 是**生成器**，其余全是它的产物。
+# ⚠️ 产物一律不入库 —— make-app.sh 每次构建都无条件重跑生成器，
+#    入库的话每次构建都会把工作区弄脏（然后就会习惯性忽略 git status）。
+#    1024 那张主图例外：它是给人看的设计稿（README / 沟通用）。
+assets/icon/ClassLive.icns
+assets/icon/ClassLive.iconset/
+

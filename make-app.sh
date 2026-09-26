@@ -44,7 +44,14 @@ if [ "${1:-}" = "--check" ]; then
     # ⚠️ 单列这一条：符号链接的 CFBundleExecutable 会让 LaunchServices
     #    **静默拒绝启动**（双击完全没反应、无报错）。别的检查都看不出这个 ——
     #    `-e` / `-x` 都会**跟随**符号链接，所以上面那几行照样报"就位"。
-    _EXE_C="$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist" 2>/dev/null)"
+    # ⚠️ 用 PlistBuddy **不用 `plutil -extract`**：
+    #    ① key 不存在时 plutil 返回 1，而这里是 `set -e` 环境 —— 不接住的话
+    #       `--check` 会在这一行**直接退出**，连"缺什么"都报不出来（最需要它报的时候）。
+    #    ② 接住了也没用：**plutil 的报错信息会进 stdout**（`2>/dev/null` 挡不住），
+    #       于是变量里装的是那句 error，`[ -n "$VAR" ]` 判成"有值"。
+    #    PlistBuddy 读不到时只写 stderr、stdout 干净。2026-09-26 两个坑都踩过。
+    _EXE_C="$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" \
+      "$APP/Contents/Info.plist" 2>/dev/null || true)"
     if [ -n "$_EXE_C" ] && [ -L "$APP/Contents/MacOS/$_EXE_C" ]; then
       # ⚠️ 报了就**不再报"就位"** —— `-e` / `-x` 都会跟随符号链接，
       #    两条一起打出来会自相矛盾（"是符号链接" + "就位"），反而让人困惑。
@@ -56,6 +63,18 @@ if [ "${1:-}" = "--check" ]; then
     say "   lib/              $([ -d "$APP/Contents/lib" ] && echo 就位 || echo '❌ 缺')"
     say "   pyvenv.cfg        $([ -f "$APP/Contents/pyvenv.cfg" ] && echo 就位 || echo '❌ 缺')"
     say "   Info.plist        $([ -f "$APP/Contents/Info.plist" ] && echo 就位 || echo '❌ 缺')"
+    # 图标：Info.plist 里声明了、Resources 里也得真有那个文件，缺一不可。
+    # ⚠️ 只查一边不够 —— CFBundleIconFile 指向不存在的文件时**不报错**，
+    #    只是 Dock/Finder 上悄悄退回系统通用图标（"看着像没做"）。
+    _ICON_N="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" \
+      "$APP/Contents/Info.plist" 2>/dev/null || true)"
+    if [ -z "$_ICON_N" ]; then
+      say "   图标              ⚠️ Info.plist 没声明 CFBundleIconFile"
+    elif [ -f "$APP/Contents/Resources/$_ICON_N.icns" ]; then
+      say "   图标              $_ICON_N.icns ✅"
+    else
+      say "   图标              ❌ 声明了 $_ICON_N 但 Resources/$_ICON_N.icns 不存在"
+    fi
     if [ -x "$APP/Contents/MacOS/python" ]; then
       say "   能不能跑           $("$APP/Contents/MacOS/python" -c 'import sys;print(sys.version.split()[0])' 2>&1 | tail -1)"
       say "   mainBundle        $("$APP/Contents/MacOS/python" -c \
@@ -166,6 +185,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>ClassLive</string>
   <key>CFBundleDisplayName</key><string>ClassLive</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleShortVersionString</key><string>$(cat "$HERE/VERSION" 2>/dev/null || echo "0.0.0")</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSMicrophoneUsageDescription</key><string>ClassLive 需要麦克风来实时转录课堂内容</string>
@@ -178,7 +198,24 @@ say "⑤ 装依赖（可能要几分钟）…"
 uv pip install --python "$APP/Contents/MacOS/python" -q -r "$HERE/requirements.txt"
 say "   $(ls "$APP/Contents/lib/python"*/site-packages/ 2>/dev/null | wc -l | tr -d ' ') 个顶层包"
 
-# ---------- ⑥ 双击启动的入口 ----------
+# ---------- ⑥ 图标 ----------
+# ⚠️ 必须排在 ⑤ **之后** —— 生成图标要用 .app 里的 python，而 pyobjc 是 ⑤ 才装进去的。
+#
+# ⚠️ 拷进 Resources/ 而不是让 .app 直接用仓库里的文件：CFBundleIconFile 只在
+#    bundle 内部找图标，指向外面会被忽略，而且**不报错**（Dock 上悄悄退回通用图标）。
+say "⑥ 装图标 …"
+RES="$APP/Contents/Resources"
+mkdir -p "$RES"
+_icon_out="$("$APP/Contents/MacOS/python" "$HERE/tools/make_icon.py" 2>&1)" \
+  || fail "生成图标失败（tools/make_icon.py）：
+$_icon_out"
+cp "$HERE/assets/icon/ClassLive.icns" "$RES/AppIcon.icns"
+say "   Resources/AppIcon.icns  $(du -h "$RES/AppIcon.icns" | cut -f1)"
+# ⚠️ LaunchServices 会**缓存**图标。换完之后不碰 .app 的话，Finder/Dock 上可能
+#    还显示旧图标（甚至系统通用图标），让人以为没生效。touch 一下逼它重读。
+touch "$APP"
+
+# ---------- ⑦ 双击启动的入口 ----------
 # ⚠️⚠️ 这就是"双击为什么能跑起来"的那一环。
 #
 # macOS 启动 .app 时会执行 `Contents/MacOS/<CFBundleExecutable>`，**不带任何参数**。
@@ -191,7 +228,7 @@ say "   $(ls "$APP/Contents/lib/python"*/site-packages/ 2>/dev/null | wc -l | tr
 #    所以判断必须严格：**只要带了脚本参数（或 -c/-m）就绝不接管**，
 #    否则 `cl doctor` 会莫名其妙开始上课。
 SITE="$(ls -d "$APP/Contents/lib/python"*/site-packages)"
-say "⑥ 写双击入口 sitecustomize.py …"
+say "⑦ 写双击入口 sitecustomize.py …"
 cat > "$SITE/sitecustomize.py" <<'PY'
 """双击 ClassLive.app 时自动拉起主程序。
 
@@ -264,8 +301,8 @@ if _SHOULD_START:
     os.execv("/bin/bash", ["/bin/bash", os.path.join(_REPO, "cl")])
 PY
 
-# ---------- ⑦ 自检 ----------
-say "⑦ 自检 …"
+# ---------- ⑧ 自检 ----------
+say "⑧ 自检 …"
 
 # ⚠️⚠️ 头一条，也是**最容易被漏掉的一条**：`Contents/MacOS/<CFBundleExecutable>`
 #     必须是**真文件**，不能是符号链接。
@@ -277,7 +314,7 @@ say "⑦ 自检 …"
 #     而下面那段 Python 自检**查不出这个** —— 它自己就是拿那个 python 跑的，
 #     能跑通说明"这个 python 可用"，不能说明"LaunchServices 肯启动它"。
 #     两条是**不同的问题**：前者是解释器可用性，后者是 bundle 合法性。
-_EXE="$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist" 2>/dev/null)"
+_EXE="$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Contents/Info.plist" 2>/dev/null)"
 if [ -L "$APP/Contents/MacOS/$_EXE" ]; then
   fail "Contents/MacOS/$_EXE 是**符号链接** ——
    LaunchServices 不会启动它，双击会完全没反应（且没有任何报错）。
@@ -288,6 +325,7 @@ fi
 say "   ✅ $_EXE 是真文件且可执行（LaunchServices 肯启动的那种）"
 
 "$APP/Contents/MacOS/python" - <<'PY' || fail "自检没过 —— 上面标 ❌ 的就是原因"
+import os
 import sys
 from Foundation import NSBundle
 b = NSBundle.mainBundle()
@@ -302,6 +340,12 @@ chk("sys.prefix 是 Contents",    sys.prefix.endswith("/Contents"), sys.prefix)
 chk("mainBundle 是 .app",        b.bundlePath().endswith(".app"), b.bundlePath())
 chk("bundle 里有我们的名字",      info.get("CFBundleName") == "ClassLive", str(info.get("CFBundleName")))
 chk("麦克风说明文字就位",         bool(info.get("NSMicrophoneUsageDescription")))
+# 图标：声明 + 文件**两样都要在**。只声明不装文件时系统**不报错**，
+# 只是 Dock/Finder 上悄悄退回通用图标 —— 那种"做了但看着像没做"最难查。
+_icon = info.get("CFBundleIconFile")
+_icon_p = os.path.join(b.bundlePath(), "Contents", "Resources", f"{_icon}.icns") if _icon else None
+chk("图标已装进 bundle", bool(_icon) and os.path.isfile(_icon_p),
+    f"{_icon}.icns" if _icon and os.path.isfile(_icon_p) else f"未就位（{_icon or '未声明'}）")
 for m in ("sounddevice", "numpy", "AppKit", "httpx"):
     try:
         __import__(m); chk(f"import {m}", True)

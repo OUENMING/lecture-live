@@ -141,16 +141,49 @@ rm -rf "$BUILD"
 mkdir -p "$BUILD"
 uv venv "$BUILD/venv" --python "$BASEPY" -q
 
-# ---------- ③ 停掉正在跑的实例，然后替换 ----------
-# ⚠️ 正在跑的时候换掉 Contents/ 会让它读到半新半旧的文件
-if pgrep -f "$APP/Contents/MacOS/python" >/dev/null 2>&1; then
+# ---------- ③ 停掉正在跑的实例 ----------
+# ⚠️ 正在跑的时候换掉 Contents/ 会让它读到半新半旧的文件。
+#
+# ⚠️ `pkill -f` 收的是**正则**，路径里的 `.`（ClassLive.app）不转义会命中
+#    `ClassLiveXapp` 之类无关路径 → 误杀别人的进程。
+_PAT="$(printf '%s' "$APP/Contents/MacOS/python" | sed 's/[][\\.^$*?+(){}|]/\\&/g')"
+if pgrep -f "$_PAT" >/dev/null 2>&1; then
   say "③ 有实例在跑 —— 先停掉它"
-  pkill -f "$APP/Contents/MacOS/python" || true
-  sleep 2
+  pkill -f "$_PAT" || true
+  # ⚠️ 轮询确认真的退出，不要 `sleep 2` 这种魔数：进程可能要更久才收完麦克风，
+  #    也可能卡住不退 —— 那时应该**停下来问人**，而不是带着半个实例继续换文件。
+  for _ in $(seq 1 20); do
+    pgrep -f "$_PAT" >/dev/null 2>&1 || break
+    sleep 0.5
+  done
+  pgrep -f "$_PAT" >/dev/null 2>&1 \
+    && fail "旧实例 10 秒了还没退出 —— 手动退掉 ClassLive 再重跑"
 fi
 
+# ---------- ③ 备份旧的 .app（失败要能恢复）----------
+# ⚠️⚠️ 这里原来是直接 `rm -rf "$APP"` 然后逐步重建。那样**之后任何一步失败**
+#     （装依赖断网、生成图标失败、⑧ 自检不过）都会让用户**同时失去原本能用的那份**，
+#     只剩一个半成品目录 —— 而"能双击上课"正是这个 .app 的全部意义。
+#     改成：先**改名**备份（rename，不额外占空间）→ 构建 → 全部成功才删备份；
+#     中途失败由 trap 把原来那份移回来。
+_BAK="$APP.bak"
+rm -rf "$_BAK"                          # 清掉上一次失败可能留下的
+if [ -d "$APP" ]; then mv "$APP" "$_BAK"; fi
+_BUILD_OK=""
+_restore() {
+  _rc=$?
+  trap - EXIT                           # 先摘掉，否则 exit 会再触发一次
+  if [ -z "$_BUILD_OK" ] && [ -d "$_BAK" ]; then
+    say ""
+    say "⚠️ 构建没走完 —— 把原来那份 .app 恢复回来（旧版照常能用）"
+    rm -rf "$APP"
+    mv "$_BAK" "$APP"
+  fi
+  exit "$_rc"
+}
+trap _restore EXIT
+
 say "③ 搬布局进 .app（bin→MacOS、lib→lib、pyvenv.cfg→Contents）…"
-rm -rf "$APP"
 mkdir -p "$APP/Contents"
 mv "$BUILD/venv/bin"        "$APP/Contents/MacOS"
 mv "$BUILD/venv/lib"        "$APP/Contents/lib"
@@ -173,10 +206,24 @@ for f in "$APP/Contents/MacOS"/python "$APP/Contents/MacOS"/python3 "$APP/Conten
   _tgt="$(readlink "$f")"
   case "$_tgt" in /*) ;; *) _tgt="$(cd "$(dirname "$f")" && pwd)/$_tgt" ;; esac
   _real="$(cd "$(dirname "$_tgt")" && pwd -P)/$(basename "$_tgt")"
-  if [ -f "$_real" ]; then
-    rm "$f" && cp "$_real" "$f" && chmod +x "$f"
-    say "   $(basename "$f")"
-  fi
+  # ⚠️ 校验它是**真的 Mach-O 可执行文件**，不是只看"文件在不在"：
+  #    上面那个 framework 前置检查一旦被绕过、或 uv 换了实现，就会把一个非预期文件
+  #    静默拷进 MacOS/ —— 那种 bundle 只在**运行期**才暴露，而且报错离根因很远。
+  #    魔数：cffaedfe = 64 位小端；cefaedfe = 32 位小端；cafebabe/bebafeca = fat。
+  _magic=""
+  [ -f "$_real" ] && _magic="$(head -c 4 "$_real" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  case "$_magic" in
+    cffaedfe|cefaedfe|cafebabe|bebafeca)
+      # ⚠️ 先拷到临时名再 `mv` —— 直接 `rm` 后 `cp` 的话，`cp` 一失败这个可执行文件
+      #    就**直接没了**（.app 立刻进入半破坏状态，且 set -e 已经来不及救）。
+      cp "$_real" "$f.new" && chmod +x "$f.new" && mv -f "$f.new" "$f"
+      say "   $(basename "$f")" ;;
+    *)
+      # ⚠️ 以前这里是**静默跳过** —— 留下一堆指向 bundle 外的符号链接，
+      #    而 ⑧ 只校验 CFBundleExecutable 那一个，检测不出来。必须出声。
+      say "   ⚠️ $(basename "$f") 没能换成真文件（目标缺失 / 不是 Mach-O：${_magic}）"
+      say "      这种情况下双击会没反应 —— 先别继续，把上面的报错贴出来" ;;
+  esac
 done
 
 # ---------- ④ Info.plist ----------
@@ -360,6 +407,11 @@ for m in ("sounddevice", "numpy", "AppKit", "httpx"):
         chk(f"import {m}", False, str(e)[:60])
 sys.exit(1 if bad else 0)
 PY
+
+# ⚠️ 只有走到这里才算构建成功 —— 此时才删掉 ③ 留的备份。
+#    中途任何一步 fail / 报错，都由 ③ 的 trap 把旧 .app 移回来。
+_BUILD_OK=1
+rm -rf "$_BAK"
 
 say ""
 say "✅ 构建完成"

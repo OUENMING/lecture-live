@@ -43,6 +43,8 @@ __pycache__/
 
 # 构建产物：双击启动用的 .app（由 make-app.sh 生成，不入库）
 ClassLive.app/
+# make-app.sh 构建期间的备份（构建成功会自己删；失败时用来恢复旧版）
+ClassLive.app.bak/
 .build/
 
 # 图标：`tools/make_icon.py` 是**生成器**，其余全是它的产物。

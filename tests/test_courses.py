@@ -83,6 +83,46 @@ def main() -> int:
             empty / "nope.txt", state_root=empty / "nope") == [],
               str(courses.list_courses(empty / "nope.txt", state_root=empty / "nope")))
 
+        print("\n--- ②b ⭐ 同一门课的**两个写法**不许变成两张卡 ---")
+        # ⚠️ 这一组是 OCR 抓出来的真缺口：`cl` 的兜底分支会把**用户原样输入**
+        #    写进 `.course`，所以 `~/.classlive/courses/10740/` 与
+        #    `glossary/ECON10740.txt` 会**同时存在**（说的是同一门课）。
+        #    裸并集 -> 面板上两张同一门课的卡，而短代号那张按裸 join 定位术语表
+        #    -> 报「0 条术语」（模块头口径 3：0 就是谎报）。
+        g2root = tmp / "dup"
+        g2 = _mk_glossary(g2root, "ECON10740.txt", "ECON10770.txt")
+        st2 = tmp / "dup_state"
+        (st2 / "courses" / "10740").mkdir(parents=True)      # 短代号 = 同一门课
+        (st2 / "courses" / "10770").mkdir(parents=True)
+        (st2 / "courses" / "ZZ99999").mkdir(parents=True)    # 真没术语表 -> 保留原名
+        got2 = courses.list_courses(g2, state_root=st2)
+        check("⭐ 短代号目录被对账到规范课号（不出两张卡）",
+              got2 == ["ECON10740", "ECON10770", "ZZ99999"], str(got2))
+
+        check("glossary_file：精确命中",
+              courses.glossary_file(g2, "ECON10740")
+              == g2root / "glossary" / "ECON10740.txt")
+        check("glossary_file：短代号**容错**到全名（不是裸 join）",
+              courses.glossary_file(g2, "10740")
+              == g2root / "glossary" / "ECON10740.txt",
+              str(courses.glossary_file(g2, "10740")))
+        check("glossary_file：找不到就回退成路径（不抛）",
+              courses.glossary_file(g2, "nope") == g2root / "glossary" / "nope.txt")
+
+        # ⚠️ **歧义时不许归并** —— 并错了是**静默用错术语表**，比多一张卡糟得多
+        g3root = tmp / "amb"
+        g3 = _mk_glossary(g3root, "ECON202.txt", "SOC202.txt")
+        check("⚠️ 归并有歧义时**保留原名**（宁可多一张卡，也不并错课）",
+              courses.canonical_course(g3, "202") == "202",
+              courses.canonical_course(g3, "202"))
+
+        # ⭐ 短代号那张卡的术语数必须是**真数**：0 = 谎报
+        (g2root / "glossary" / "ECON10740.txt").write_text(
+            "# ECON10740 X\n\nelasticity\n", encoding="utf-8")
+        r_short = courses.readiness(g2, "10740", state_root=st2)
+        check("⭐ 短代号的 readiness 也数得到术语（不是 0 —— 0 就是谎报）",
+              r_short.terms == 1, f"terms={r_short.terms}")
+
         print("\n--- ③ resolve：精确 -> 唯一片段 -> 否则 None ---")
         known = ["ECON10730", "ECON10740", "ECON10770", "ECON10790", "SOC10020"]
         check("精确命中", courses.resolve("ECON10740", known) == "ECON10740")

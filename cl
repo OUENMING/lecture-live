@@ -155,18 +155,33 @@ case "${1:-}" in
     #    0 = 唯一命中，stdout 是规范课号
     #    2 = 歧义，stderr 每行一个候选
     #    1 = 没命中（**此时 stdout 是空的**；非空 = python 自己炸了，那要分开报）
-    _out="$("$PY" courses.py --resolve="${2}" 2>&1)"
+    # ⚠️ **stdout 与 stderr 必须分开收。**
+    #    原先是 `2>&1` —— 于是任何一次 stderr 输出（Python 的 DeprecationWarning、
+    #    依赖打的提示）都会混进 `_out`，而 `0)` 分支是把 `_out` **整段**写进 `.course`：
+    #    `.course` 就变成「警告行 + 课号」，下游按整个文件内容当课号。
+    #    分开之后，「python 炸了」的判据从「`_out` 非空」改成「**stderr 非空**」。
+    _errf="$(mktemp -t clcourse 2>/dev/null)" \
+      || { echo "⚠ 建不出临时文件 —— 课程没改（别当成「没找到」往下走）"; exit 1; }
+    _out="$("$PY" courses.py --resolve="${2}" 2>"${_errf}")"
     _rc=$?
+    _err="$(cat "${_errf}" 2>/dev/null || true)"
+    rm -f "${_errf}"
     case "$_rc" in
-      0) printf '%s' "$_out" > "$CFG"; echo "✅ 课程已设为 ${_out}"; exit 0 ;;
+      0) # ⚠️ 采信的**只有 stdout**，而且必须是**单行**（多行 = 混进了别的东西）
+         if [ -z "${_out}" ] || [ "$(printf '%s' "${_out}" | wc -l | tr -d ' ')" != "0" ]; then
+           echo "⚠ 课程解析的输出不干净（空或多行）—— 不写 .course："
+           printf '%s\n' "${_out}" | sed 's/^/       /'
+           exit 1
+         fi
+         printf '%s' "${_out}" > "$CFG"; echo "✅ 课程已设为 ${_out}"; exit 0 ;;
       2) echo "⚠ 「${2}」命中多门课，请写全其中一个："
-         printf '%s\n' "$_out" | sed 's/^/       /'
+         printf '%s\n' "${_err}" | sed 's/^/       /'
          exit 1 ;;
       *) # ⚠️ **判据出错时要倒向「叫人来看」，不能倒向「当成没命中」。**
          #    倒错的话，python 一炸就会伪装成「术语表没建」，然后一路往下走。
-         if [ -n "$_out" ]; then
+         if [ -n "${_err}" ]; then
            echo "⚠ 课程解析出错了 —— 不是「没找到」："
-           printf '%s\n' "$_out" | sed 's/^/       /'
+           printf '%s\n' "${_err}" | sed 's/^/       /'
            exit 1
          fi
          echo "⚠ 没有 glossary/${2}.txt(术语表没建)。仍会记住课程名。"

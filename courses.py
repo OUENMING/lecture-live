@@ -51,11 +51,37 @@ def glossary_dir(glossary_txt) -> pathlib.Path:
     return pathlib.Path(glossary_txt).parent / "glossary"
 
 
+def glossary_file(glossary_txt, course: str) -> pathlib.Path:
+    """`glossary/<课号>.txt` —— **容错解析的唯一入口**（与运行时加载的是同一个答案）。
+
+    ⚠️ **别裸 join** `glossary_dir(...) / f"{course}.txt"`。`.course` 里存短代号是
+       **真会发生**的（`cl` 那条兜底分支就是把用户原样输入写进去），而术语表是全名。
+       裸 join 会指到一个 translator **永远不加载**的文件上，偏偏**两边都报成功** ——
+       面板上那张卡于是显示「**0 条术语**」，正是模块头口径 3 要防的谎报。
+
+    ⚠️ 算法**不在这里**，在 `translator.course_terms_path`（运行时用的就是它）。
+       这里只做「延迟导入 + 兜底」，**绝不另写一套** —— 两套迟早漂移，而漂移是静默的。
+    """
+    from translator import course_terms_path
+    public = pathlib.Path(glossary_txt)
+    found = course_terms_path(str(public), course)
+    if found is not None:
+        return found
+    return public.parent / "glossary" / f"{course}.txt"
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 清单
 # ══════════════════════════════════════════════════════════════════════
 def list_courses(glossary_txt, *, state_root=None) -> list[str]:
-    """两边的**并集**（见模块头）。排序稳定，供界面直接铺。"""
+    """两边的**并集**（见模块头）。排序稳定，供界面直接铺。
+
+    ⚠️ **合并之前先把状态侧的目录名对账到规范课号。** 两边记的可能是同一门课的
+       两个写法：`.course` 里存短代号时，`~/.classlive/courses/10740/` 与
+       `glossary/ECON10740.txt` 说的是同一件事。不对账 → 面板上出**两张同一门课的卡**，
+       而短代号那张按错误路径算准备度 → 报「0 条术语」（谎报）。
+       对账走的是与运行时**同一套**容错（`glossary_file`），不是第二套算法。
+    """
     root = pathlib.Path(state_root) if state_root is not None else paths.STATE_ROOT
     names: set[str] = set()
 
@@ -65,9 +91,21 @@ def list_courses(glossary_txt, *, state_root=None) -> list[str]:
 
     cdir = root / "courses"
     if cdir.is_dir():
-        names |= {p.name for p in cdir.iterdir() if p.is_dir()}
+        for p in cdir.iterdir():
+            if p.is_dir():
+                names.add(canonical_course(glossary_txt, p.name))
 
     return sorted(n for n in names if n and not n.startswith("."))
+
+
+def canonical_course(glossary_txt, name: str) -> str:
+    """状态侧目录名 → 规范课号。**唯一命中才归并**，有歧义就保留原名。
+
+    ⚠️ **宁可多一张卡，也不要把两门课并成一门** —— 并错了是**静默用错术语表**，
+       比多一张卡糟得多（同 `resolve` 那条「歧义就拒绝」的取向）。
+    """
+    g = glossary_file(glossary_txt, name)
+    return g.stem if g.exists() and g.stem != name else name
 
 
 def candidates(want: str, known: list[str]) -> list[str]:
@@ -213,7 +251,8 @@ def readiness(glossary_txt, course: str, *, sessions_dir=None,
               state_root=None) -> Readiness:
     """算一张卡要显示的全部东西。**纯读，不写。**"""
     root = pathlib.Path(state_root) if state_root is not None else paths.STATE_ROOT
-    g = glossary_dir(glossary_txt) / f"{course}.txt"
+    # ⚠️ 走 `glossary_file()` 而不是裸 join —— 见它的 docstring（短代号会谎报 0 条术语）
+    g = glossary_file(glossary_txt, course)
     return Readiness(
         course=course,
         title=_title(g, course),

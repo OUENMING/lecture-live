@@ -827,11 +827,18 @@ def course_glossary_path(glossary_dir, course: str) -> pathlib.Path:
        而 prep 照样报「✅ 加了 N 个词」—— 正是本仓库最怕的那类静默失败。
     ⚠️ 同一文件里读路径（`_domain_prior` → `course_title` → `course_terms_path`）
        与写路径必须是**同一个答案**，否则一次运行就能出现「先验读 A、词写进 B」。
+
+    ⚠️ 解析本身**不在这里** —— 唯一定义点是 `courses.glossary_file()`。
+       这里只是把「目录」换算回「glossary.txt」再交给它（本函数的调用方拿的是目录）。
+
+    ⚠️ **兜底必须用调用方给的那个目录**，不能全靠 `courses.glossary_file` 反推出来的 ——
+       两者只有在目录**真的叫 `glossary`** 时才一致。生产里一直是（`courses.glossary_dir()`
+       造的就是它），但别把这条当契约：调用方传别的目录名时，反推会指到别处。
     """
-    from translator import course_terms_path
-    public = pathlib.Path(glossary_dir).parent / "glossary.txt"
-    found = course_terms_path(str(public), course)
-    return found if found is not None else pathlib.Path(glossary_dir) / f"{course}.txt"
+    import courses
+    gdir = pathlib.Path(glossary_dir)
+    found = courses.glossary_file(gdir.parent / "glossary.txt", course)
+    return found if found.exists() else gdir / f"{course}.txt"
 
 
 def _load_state(path: pathlib.Path):

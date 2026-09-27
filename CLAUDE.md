@@ -159,6 +159,14 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   `ClassLive.app/Contents/MacOS/python tests/test_courses.py` 全绿。**不在默认闸门里**。
   判据、以及**做变异测试时的两条自测纪律**（`.pyc` 会让「还原」变成假的；测试数据会把自己的断言遮住）
   都写在那个文件的 docstring 里 —— 那是唯一定义点，别在这儿再抄一份。
+- **碰过课程卡片面板 / 零参数入口**（`entry_panel.py` / `entry_launch.py` / `panel.py` 的拖拽落点）：
+  `ClassLive.app/Contents/MacOS/python tests/test_entry_panel.py` 全绿。**不在默认闸门里**。
+  它钉的是**纯函数那半**：卡片上显示什么字、结果计数与列表**同源**、卡片高度与坐标同一组常数推导、
+  以及零参数入口的**退出码契约**（0/1/2/3 —— `cl` 只读得动这个）。
+  ⚠️ **AppKit 装配那半不在这里**：配方靠 `tests/test_panel.py` 对拍，拖拽/落点靠
+  `probe_entry_panel.py`（隔离模式）作者手验。
+  ⚠️ 写这个文件的断言时**先问「改坏实现它会不会红」** —— 本文件里被抓出过 4 条没有区分能力的
+  （恒真 / 断言的是 Python 字面量 / 夹具日期不覆盖它声称的行为 / 隔离路径硬编码）。
 - 碰过 `overlay.py` / `transcript_view.py` 的**布局或滚动**：`ClassLive.app/Contents/MacOS/python probe_scroll.py` 验滚动行为。
   ⚠️ **它本身不稳定**（2026-09-26 实测）：**改动前的代码连跑三次**，两次「阶段 1 ✅ / 阶段 2 ❌」、
   一次反过来 —— 每次都是**恰好一个阶段收到 0 个滚轮事件**，而失败的阶段会翻转。

@@ -240,8 +240,13 @@ def main() -> int:
                   r.skipped_existing == ["supply"], f"{r.skipped_existing}")
             check("首行 `# ECON99999` 原样", gpath.read_text(encoding="utf-8").splitlines()[0]
                   == "# ECON99999")
+            # ⚠️ 先确认**确实有** verified 候选 —— 否则下面那条 `all()` 在**空序列上恒真**，
+            #    夹具一改就变成一条永远绿的假测试（OCR 指出）。
+            _ver = [c for c in r.candidates if c.verified]
+            check("⚠️ 先确认确实有 verified 候选（否则下面那条 `all()` 恒真）",
+                  len(_ver) >= 1, f"verified={[c.term for c in _ver]}")
             check("count/spread 是按**子串搜索**算的，不是 0",
-                  all(c.count > 0 for c in r.candidates if c.verified),
+                  all(c.count > 0 for c in _ver),
                   f"{[(c.term, c.count, c.spread) for c in r.candidates]}")
             check("state 文件记下了追加过的词",
                   set(json.loads((tmp / "st" / "prep-state.json").read_text(

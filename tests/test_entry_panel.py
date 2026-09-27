@@ -139,11 +139,23 @@ def main() -> int:
     check("失败项单独报（逐文件那条的落点）",
           "1 个文件失败" in E.result_header({"added": [], "failed": [("f", "why")]}),
           E.result_header({"added": [], "failed": [("f", "why")]}))
+    # ⚠️ 原来这里是两条**恒真**的断言（OCR 指出）：一条 `check(..., True)`，
+    #    一条断言的是 Python 字面量 `{"a","a"}` 的去重语义 —— **完全没碰被测代码**。
+    #    改成真的调用 + 断言返回值，以及走真实路径验「删过的词只算一次」。
+    _out, _err = [], ""
     for junk in ({}, None, {"added": None, "removed": None}):
-        E.result_header(junk)                # 不该抛
-    check("空/None entry 不抛", True)
-    check("unknown 的 removed 用 set 存（去重，删两次不会算成两条）",
-          len({"removed": {"a", "a"}}["removed"]) == 1)
+        try:
+            _out.append(E.result_header(junk))
+        except Exception as e:                            # noqa: BLE001
+            _err = f"{type(e).__name__}: {e}"
+            break
+    check("空/None entry 不抛，且返回的是**可显示的一行**",
+          not _err and len(_out) == 3 and all(isinstance(x, str) and x for x in _out),
+          _err or str(_out))
+    _dup = {"added": ["a", "b"], "removed": ["a", "a"]}   # 重复项：不是 set
+    check("⚠️ `removed` 传成**含重复项的 list** 也照样对（走真实路径）",
+          E.kept_added(_dup) == ["b"] and "本次加了 1 个" in E.result_header(_dup),
+          f"{E.kept_added(_dup)} / {E.result_header(_dup)}")
 
     print("\n--- ⑧ 卡片高度：**与坐标同一组常数推导** ---")
     check("⭐ card_height(None) == CARD_H —— 这条把推导锁住",
@@ -172,7 +184,11 @@ def main() -> int:
     import entry_launch
     import entry_panel as _EP
 
-    cfg = HERE / ".course"
+    # ⚠️ **路径从写端常量派生**，不要自己拼 `HERE / ".course"`（OCR 指出）：
+    #    两处一旦漂移（比如 CFG 将来跟着 state_root 走），`finally` 里的还原会
+    #    **静默指向错路径**，而末尾那条「逐字还原」比的正是同一个错路径 → 照样通过，
+    #    真 `.course` 却留着测试值。
+    cfg = entry_launch.CFG
     saved = cfg.read_bytes() if cfg.exists() else None
     _orig_open = _EP.open_panel
     try:

@@ -598,11 +598,25 @@ reveal hidden panes**… a toolbar button or a menu command — **including a ke
 - → ⚠️ **这对"AI 替你总结"是直接不利的**
 - → 第二区的价值主张**必须从「总结」挪到「导航 + 你自己的信号」**（Context Rail 的方向因此被证据支持）
 
-**③ ⭐ 草稿显示模式有权威答案**
-- `[官方]` 三模式定义见 47 CFR §79.103 与 ANSI/CEA-608-E：**pop-on / roll-up / paint-on**
+**③ ⭐ 草稿显示模式有权威答案** —— 完整台账 + 全部一手引用见 `docs/RESEARCH-live-caption-rollup.md`
+- ⚠️ **本行原写「§79.103」是我自己写错的（2026-09-27 自纠）**：§79.103 是**解码器硬件**条款
+  （eCFR 标题逐字 `Closed caption decoder and display requirements for apparatus`），**通篇无三模式字样**。
+  真正的一手是 **47 CFR §15.119**，逐字：`Roll-up style captioning is initiated by receipt of one of
+  three Miscellaneous Control Codes that determine the maximum number of rows displayed simultaneously,
+  either 2, 3 or 4 contiguous rows.`
+  同一节还定死三条我们要照做的：**base row 固定在底、只有它接收新字** ·
+  **顶出的行 `erased from memory and from the display`（无回滚缓冲）** ·
+  **上滚 `must appear smooth… no more than 0.433 second`**
+- ⚠️ **§15.119 的 roll-up 正文只存在于 2009 版**（我拉了 2025 版，grep 不到）→ **已非现行条款**；
+  接替的 ANSI/CTA-608-E 在付费墙后 → `[未核]`
+- `[官方]` ⭐ BBC **§21.5** 逐字：「**Two-lines of scrolling text should be used.**」
+  ＋「Live subtitles should appear **word by word, from left to right**」
+  ＋「`ebutts:multiRowAlign` should be avoided … since it can result in lines being moved horizontally
+  whenever a new word appears」
+- `[官方]` BBC **§3.3**：「a maximum subtitle length of **two lines** is recommended」（16:9/4:3/1:1）
 - `[官方]` W3C 逐字：「**Roll-up captions are typically used for live captioned content**」
-- roll-up 的移动单位是**整行上移**（由 CR 触发），**2/3/4 行**（RU2/3/4）
-- ⚠️ BBC §21.5 点名禁止**行内横向位移**（「`ebutts:multiRowAlign` should be avoided」）
+- `[官方]` FCC 14-12 ¶39：「Usually **two to three lines** of text appear at one time」
+- 🆕 `[实测]` 我们的草稿窗口：**1 行只装得下约一半**（🔢 数字归台账 `docs/RESEARCH-live-caption-rollup.md` §4，别在这儿再抄一份）
 - → **我们的草稿要改成「2 行 roll-up」，不是「word-wrap」** —— 后者会把长句挤成多行再裁掉
 
 ### 15.4 报告里**降级或砍掉**的
@@ -628,7 +642,7 @@ reveal hidden panes**… a toolbar button or a menu command — **including a ke
 
 | # | 做什么 | 为什么是它 | 完成判据 |
 |---|---|---|---|
-| **1** | ⭐ **草稿改「2 行 roll-up」** | 作者已定「不够，改成 2 行」；`[官方]` BBC §21.5 对**实时**字幕的规定就是两行滚动；且**它是"稳定化"的前置条件**（1 行每次整行重设，没有"前缀"可言） | ⚠️ **是 roll-up 不是 wrap**：整行上移、2 行固定、旧行被顶出。长句**不许裁**（BBC §3.8：从句边界拆） |
+| **1** | ⭐ **草稿改「2 行 roll-up」** —— ✅ **2026-09-27 已实现**（9 条规格 / 实测 / 残留见 `docs/RESEARCH-live-caption-rollup.md` §8） | 作者已定「不够，改成 2 行」；`[官方]` BBC §21.5 逐字「**Two-lines of scrolling text should be used.**」+ §3.3 两行上限 + CFR §15.119 RU2 + FCC 14-12「2–3 行」+ GY/T 359「最多不超过两行」+ Zoom 官方「two lines」；🆕 **实测 1 行只装得下约一半**（🔢 见台账 §4） | ⚠️ **是 roll-up 不是 wrap**：整行上移、2 行固定、旧行被顶出。长句**不许裁**，切分走**降级链**（BBC **§3.9**（**不是 §3.8**）从句边界拆 → 无标点时退词边界；⚠️ **标点锚点只有约四分之一**，见台账 §4）。**只有底行可改写、上滚即冻结**（CFR / Apple / Google 三条收敛）。**不许缩字号**（工藤 2005：30 字/行 评点 1.9/5「小さ過ぎて適当ではない」）。**贴底对齐**（base row 语义；✅ **作者 2026-09-27 看过贴底/贴顶两种渲染后确认贴底**）。✅ 判据 = `R10`（**6 条，在默认闸门里**）+ 6 条变异全红（第 7 条 M7 是 no-op，已在台账 §8.6 记明） |
 | **2** | ⭐ **❓「没听懂」**（与 ⭐ 同手势、两个 tag） | 作者已定要；`[论文]` 它是 Angelo & Cross 的「muddiest point」；⭐ **"回退十几秒"被 Thiede 2003 支持（gamma .37→.70）** | **记时间范围**（如 `[t−20s, t]`）不是单句；课后可让学生自己钉住是哪句；**不许当场弹解释**（那会打断跟课） |
 | **3** | **休眠 / CoreAudio** | 独立核实：**会静默录到错的设备** | 接 `NSWorkspaceWillSleep/DidWake`；WillSleep 非阻塞 flush；DidWake **重探设备并记下设备名**；字幕里打一条 `[系统休眠唤醒 HH:MM:SS]` |
 | **4** | **凭据迁出仓库** | 零成本、真风险 | 顺序：`~/.classlive/credentials` → `$DEEPSEEK_API_KEY` → 旧的 `.deepseek_key`（保留但启动告警） |

@@ -54,8 +54,22 @@ ROW_ZH_H = 47.0                                   # 每行中文两行
 ROW_H = ROW_EN_H + ROW_GAP + ROW_ZH_H             # 70.0
 GLOSS_H = 20.0                                    # 💡 解析: 收回态 = 一行(尾部省略)
 GLOSS_H_BIG = 46.0                                # 💡 解析: 展开态 = 三行(实测 42.0)+ 余量
-DRAFT_H = 18.0
-DRAFT_ZH_H = 20.0
+# 草稿块 = **2 行 roll-up**(2026-09-27 起, 原为 1 行)。
+# 高度是**实测**的: 11pt 单行 14.00px / 两行 28.00px, 12.5pt 单行 15.00px / 两行 30.00px
+# (_measure_text_h 量的)。沿用单行时代那档余量(英文 4px / 中文 5px), 不缩字号。
+# 依据与全部一手引用: docs/RESEARCH-live-caption-rollup.md §8
+DRAFT_H = 32.0                                    # 2 行英文小字(28.00 实测 + 4 余量)
+DRAFT_ZH_H = 35.0                                 # 2 行中文草稿(30.00 实测 + 5 余量)
+# 为什么是 2 行、为什么只有底行可变、为什么断点要滞回 —— 依据见
+# docs/RESEARCH-live-caption-rollup.md §8(逐条一手核过)。最短的出处:
+#  · BBC §21.5 逐字「Two-lines of scrolling text should be used.」
+#  · 47 CFR §15.119: 整行上移; 顶出的行「erased from memory and from the display」
+#  · BBC §21.5:「`ebutts:multiRowAlign` should be avoided … since it can result in
+#    lines being moved horizontally whenever a new word appears」← 断点滞回治的就是这个
+ROLL_LINES = 2
+ROLL_BREAK_WINDOW = 0.30      # 断点只在这段"理想点之前"的区间里挑
+ROLL_HYSTERESIS = 8           # 底行长度与上一帧相差在此以内 -> 沿用旧断点(字符)
+_CLAUSE_CHARS = ",;:，；：、—–"   # 从句边界锚点(中英都收: 草稿译文是中文)
 INPUT_H = 26.0                                    # ⌨ 单行输入框(含下方 1px 细线)
 INPUT_GAP = 6.0                                   # 输入框与它上面那行(💡)的间隔
 RULE_H = 1.0                                      # 输入框下方的细线: 取代填充块
@@ -237,6 +251,113 @@ def _measure_text_h(text: str, width: float, font) -> float:
         text, {NSFontAttributeName: font})
     return a.boundingRectWithSize_options_(
         NSMakeSize(width, 1e7), NSStringDrawingUsesLineFragmentOrigin).size.height
+
+
+def rollup_lines(text, height, line_h, prev_base_len=None):
+    """草稿文本 -> 至多两行的显示串(行间插 "\\n"), 外加底行长度供下帧滞回。
+
+    ⚠️ 这是**纯函数**: 高度怎么量由调用方注入。生产环境传 AppKit 实测
+    (`_measure_text_h`), 测试里传一个按字数算的假函数 —— 所以本函数不用起
+    AppKit 就能验, 而验的正是"断点挑在哪"这个真会出错的地方。
+
+    三条不变量:
+    1. **尾锚定** —— 装不下从**前面**丢字。读到的永远是最新的那一截, 旧字是
+       **整块**离场, 而不是从中间被挖掉。
+    2. **一行不占两个槽** —— 放得下一行就只给一行(草稿短时不该出现空的上行)。
+    3. **断点尽量不动** —— 新词进来时若沿用上一帧的断点仍合法, 就沿用;
+       否则整行文字会随每个新词横向跳(BBC §21.5 点名的那件事)。
+
+    返回 `(display, base_len)`:`base_len` 原样传回给下一帧的 `prev_base_len`。
+    """
+    # ⚠️ 先把文本里的**换行类字符**归一掉: 换行归我们的排版管, 文本不许自带。
+    #    否则一个 `\n` / U+0085(NEL) / U+2029(PARA SEP) 就会让**单个字符**量出两行高
+    #    (2026-09-27 实测: 11pt 下这两者都量到 28.00 = 两行), 于是下面"最长只占一行的
+    #    后缀"会变成**空串** —— 那条路一旦走到, 兜底就只能端上整段(头锚定), 而 AppKit
+    #    会把尾裁掉, 丢掉的正好是**最新的字**, 恰是本函数要防的。
+    #    归一之后非空才**可证**: 任何单字符都只占一行。
+    #    `str.split()` 一次覆盖 \t \n \v \f \r \x1c-\x1e \x85 与 U+2028/U+2029 —— 全部。
+    text = " ".join(text.split())
+    if not text:
+        return "", None
+    # 容差取**行高的 10%**, 不写死常数: 判据是 "高度 ≤ n × 行高", 而实测高度总是
+    # 行高的整数倍, 所以阈值要落在"n 行"与"n+1 行"之间的空档里 —— 按行高缩放才
+    # 始终落得进去; 写死 0.5px 时, 一旦行高不是整数(缩放/换字号)就会卡在边界上,
+    # 把"两行放得下"判成放不下 → 后缀窗口白白缩短 → **丢内容**。
+    eps = max(0.5, 0.1 * line_h)
+    if height(text) <= line_h + eps:
+        return text, None
+    # 尾锚定: 最长"折成 `ROLL_LINES` 行放得下"的后缀。
+    # ⚠️ 二分方向: 高度对**后缀长度**是单调的(越短越矮), 所以要找的是"最左边那个为真的
+    #    下标", 不是"最大下标"。写成后者会把 lo 一路留在 0 —— 因为空后缀恒为真
+    #    (height("") = 0), 于是"最长后缀"退化成**整个串**。
+    # ⚠️ 行数从 `ROLL_LINES` 来, **别在这儿写死 2**: 写死就变成盒子(用 ROLL_LINES)
+    #    与上限(用 2)两个定义点, 改 ROLL_LINES=3 会得到"三行的盒子 + 两行的上限"。
+    a, b = 0, len(text)
+    while a < b:
+        mid = (a + b) // 2
+        if height(text[mid:]) <= ROLL_LINES * line_h + eps:
+            b = mid
+        else:
+            a = mid + 1
+    s = text[a:]
+    if not s:
+        return "", None
+    # 3) 上行能有多长(理想断点)
+    a, b = 1, len(s)
+    while a < b:
+        mid = (a + b + 1) // 2
+        if height(s[:mid]) <= line_h + eps:
+            a = mid
+        else:
+            b = mid - 1
+    ideal = a
+    # 4) ⚠️ **下行自己也必须放得下一行** —— 光有第 2 步不够: "整段塞得进 2 行高度"
+    #    不等于"从中间任意一点切开后两半各占一行"。漏掉这一步, 断点稍微靠前就会让
+    #    下行溢出成第 3 行 —— 而第 3 行被 maximumNumberOfLines 静默吃掉(正是本文件
+    #    头说的那个坑)。断点下界 = 让后缀恰好放得下一行的最小下标。
+    a, b = 0, len(s)
+    while a < b:
+        mid = (a + b) // 2
+        if height(s[mid:]) <= line_h + eps:
+            b = mid
+        else:
+            a = mid + 1
+    lo_ok = a
+    # ⭐ 最长"只占一行"的后缀**不必另搜一遍**: 一行放得下 ⟹ 两行也放得下, 所以在
+    #    text 上直搜出来的下标, 就是"s 的起点 + s 上的 lo_ok" —— 即 `s[lo_ok:]`。
+    #    删掉那次二分省下约 **30%** 的测量(实测 8-9 次 / 共约 30 次), 且是**等价替换**
+    #    (41,296 例真实数据 0 处不等价)。
+    #    ⚠️ **它非空是可证的**, 靠的是开头那次归一化: 任何单字符都只占一行, 所以
+    #    `lo_ok ≤ len(s) - 1` 必然成立。**别**再给它加 `or text` 之类的兜底 ——
+    #    那会端上**整段**(头锚定), AppKit 再把尾裁掉, 丢的正是最新的字;
+    #    一个"防呆"反而违反本函数的第 1 条不变量。
+    one_line = s[lo_ok:]
+    if lo_ok > ideal:
+        # 一行 + 一行的组合根本拼不出来(极窄窗、或有个比整行还长的词):
+        # 退回只显示最后一行。**丢的是最前面的字, 也就是 roll-up 本来就会丢的那部分**,
+        # 而不是从中间挖掉一块。
+        return one_line, None
+    # 5) 候选断点, 降级链: ① 从句边界 ② 词边界 ③ 只好硬断
+    floor = max(lo_ok, int(ideal * (1.0 - ROLL_BREAK_WINDOW)))
+    clause = [i for i in range(ideal, floor - 1, -1) if s[i - 1] in _CLAUSE_CHARS]
+    words = [i for i in range(ideal, floor - 1, -1) if s[i - 1].isspace()]
+    cands = clause or words or [ideal]
+    # 别把一两个词单独留在上行(Netflix: avoid having just one or two words on the top line)
+    rich = [k for k in cands if len(s[:k].split()) > 2]
+    if rich:
+        cands = rich
+    # 滞回: 在候选里挑**底行长度最接近上一帧**的那个。⚠️ 不能写成"先按容差过滤
+    # 再取 max" —— 候选彼此只差几个字符, 那样两边通常同时入选, max 又把结果拉回原处,
+    # 等于没做。这里 prev 只会把断点**往左拉**到候选范围内, 不会拉出窗口。
+    k = max(cands)
+    if prev_base_len is not None:
+        near = [c for c in cands if abs((len(s) - c) - prev_base_len) <= ROLL_HYSTERESIS]
+        if near:
+            k = min(near, key=lambda c: abs((len(s) - c) - prev_base_len))
+    top, base = s[:k].strip(), s[k:].strip()
+    if not top or not base:
+        return one_line, None
+    return f"{top}\n{base}", len(base)
 
 
 def _make_button_target(on_click):
@@ -511,11 +632,20 @@ class Overlay:
         # 默认尺寸画一帧, 再跳成 4/5 行。默认宽度下这个调用是空操作。
         self._apply_row_metrics(self._width)
 
-        self._draft_lbl = self._label(11.0, NSColor.whiteColor().colorWithAlphaComponent_(0.50), 1)
+        # ⚠️ maxLines 必须给 ROLL_LINES(=2): 原先是 1, 而 1 + WordWrapping 正是本
+        # 文件头说的"静默吞行、不给省略号"那套配置 —— 两个草稿标签一直是那个状态,
+        # 所以长草稿被裁得无声无息。见 rollup_lines 的 docstring。
+        self._draft_lbl = self._label(11.0, NSColor.whiteColor().colorWithAlphaComponent_(0.50),
+                                      ROLL_LINES)
         ve.addSubview_(self._draft_lbl)
+        self._draft_base_len = None       # 上一帧底行长度 -> rollup_lines 的断点滞回
+        self._draft_box_y_en = self._draft_box_y_zh = 0.0    # 盒底边, 由 _layout 填
+        self._draft_cache = {}            # 每槽的 (键 -> 折行结果), 见 _roll_into
         # 草稿的即时中文译文(尽早可见; 定稿后被正式卡片取代)
-        self._draft_zh = self._label(12.5, NSColor.whiteColor().colorWithAlphaComponent_(0.78), 1)
+        self._draft_zh = self._label(12.5, NSColor.whiteColor().colorWithAlphaComponent_(0.78),
+                                     ROLL_LINES)
         self._draft_zh_val = ""
+        self._draft_zh_base_len = None
         ve.addSubview_(self._draft_zh)
 
         # ---- 单行输入框(Phase 1: 只把文字交给回调, 问答引擎是 Phase 2) ----
@@ -1219,9 +1349,15 @@ class Overlay:
             self._trunc if self._collapsed else self._wrap)
         self._gloss_lbl.setFrame_(NSMakeRect(pad, y, w, gh))
         self._gloss_hit.setFrame_(NSMakeRect(pad, y, w, gh))     # 点击区与术语行同框
-        self._draft_lbl.setFrame_(NSMakeRect(pad, y + gh + 4, w, DRAFT_H))
+        # ⚠️ 盒子的**底边**记在这里: 草稿文字是**贴底**写的(roll-up 的 base row 在底部),
+        # 而高度要按实际用了几行收缩 —— 所以 _render_draft 需要这个底边。
+        # 几何只在 _layout 里算一次, 别在两处各推一遍。
+        self._draft_box_y_en = y + gh + 4
+        self._draft_box_y_zh = y + gh + 4 + DRAFT_H + 4
+        self._draft_lbl.setFrame_(
+            NSMakeRect(pad, self._draft_box_y_en, w, DRAFT_H))
         self._draft_zh.setFrame_(
-            NSMakeRect(pad, y + gh + 4 + DRAFT_H + 4, w, DRAFT_ZH_H))
+            NSMakeRect(pad, self._draft_box_y_zh, w, DRAFT_ZH_H))
         self._scroll_y = BOTTOM_PAD + self._pinned
         self._tv.set_frame(self._scroll_y, self._scroll_h)           # 转录区
         # 顶栏: 从右边缘往左摆(列表是左->右顺序, 故 reversed)。sizeToFit 取文字
@@ -1538,6 +1674,7 @@ class Overlay:
         self._history.append((en, zh))
         self._cur_zh, self._cur_en, self._streaming, self._draft = "", "", False, ""
         self._draft_zh_val = ""
+        self._draft_base_len = self._draft_zh_base_len = None    # 断点滞回一起清
         self._mark_dirty(urgent=True)
 
     # ---- 答案接管(Phase 3) ----
@@ -1819,6 +1956,71 @@ class Overlay:
         self._label_cache[key] = text
         lbl.setStringValue_(text)
 
+    # ---- 草稿的 2 行 roll-up ----
+    def _render_draft(self) -> None:
+        """草稿两槽按 `rollup_lines` 折成至多 2 行写进标签。
+
+        ⚠️ 这里要调 AppKit 量高度(`_measure_text_h`), 所以**只能在主线程的渲染
+        路径上**调 —— 别从后台线程顺手复用。量的尺子取自标签自己(`lbl.font()`),
+        不另建一份字体, 否则"量的尺"和"画的笔"迟早漂开。
+
+        ⚠️ 行高与盒子高度是**两件事**, 别互相顶替:
+        · **行高**由字体决定, 实测 11pt = 14.00px / 12.5pt = 15.00px → 判定"放得下"用它;
+        · **盒子高度** = `ROLL_LINES × 行高 + 余量` → 贴底收缩与 frame 用它。
+        拿盒子配额(`box_h / ROLL_LINES`)当行高现在**恰好**也对(两者之间没有字符串会
+        落进去), 但一改余量或加到第三行就判错 —— 而判错的后果正是"静默吞行"。
+        """
+        active = not self._streaming
+        w = max(1.0, self._width - 2 * PAD)
+        en = f"▸ {self._draft}" if (active and self._draft) else ""
+        zh = self._draft_zh_val if (active and self._draft_zh_val) else ""
+        self._draft_base_len = self._roll_into(
+            "draft", self._draft_lbl, en, DRAFT_H, self._draft_box_y_en, w,
+            self._draft_base_len)
+        self._draft_zh_base_len = self._roll_into(
+            "draft_zh", self._draft_zh, zh, DRAFT_ZH_H, self._draft_box_y_zh, w,
+            self._draft_zh_base_len)
+
+    def _roll_into(self, key, lbl, text, box_h, box_y, w, prev_base_len):
+        """把一个草稿槽位按 2 行 roll-up 写进去; 返回新的底行长度(空则 None)。
+
+        ⚠️ **贴底对齐**, 不是贴顶。CFR §15.119 的 roll-up 里 base row 在**底部**:
+        新字从底行进、旧行被顶到上一行去。所以一行草稿要占**下面那一行**, 盒子
+        上面那行留空等旧行搬过来 —— 这样"1 行 → 2 行"时旧行是**向上**走的, 与
+        roll-up 同向; 贴顶则旧行不动、新行往下长, 到溢出时整块再跳一次。
+        做法: 文字框高度按实际行数收缩, **底边不动**。
+        """
+        from AppKit import NSMakeRect        # 本文件一贯在方法内局部导入 AppKit
+        if not text:
+            self._draft_cache.pop(key, None)
+            self._set_cached(key, lbl, "")
+            lbl.setFrame_(NSMakeRect(PAD, box_y, w, box_h))
+            return None
+        # ⭐ **记忆化**。真正的开销窗口不是草稿(≤1/s), 而是**答案流式期间**: `answer_delta`
+        # 走非紧急 `_mark_dirty`, `_render` 会跑到 ~60Hz, 而草稿文本一秒才换一次 ——
+        # 不缓存就是每秒约 **120ms**(≈12% 帧预算)在**反复量一段逐字节没变的文字**(实测)。
+        # 键必须含 `prev_base_len`: 滞回让输出依赖于它。`line_h` 由 (key, w) 决定
+        # (字体是标签自带的、每槽固定), 所以不必进键。
+        memo = (text, w, prev_base_len)
+        hit = self._draft_cache.get(key)
+        if hit is not None and hit[0] == memo:
+            display, base_len = hit[1]
+        else:
+            font = lbl.font()
+            # ⚠️ **真量行高**, 不用 `box_h / ROLL_LINES` 顶替 —— 那是盒子的**每行配额**
+            # (含余量), 不是文字的行高。
+            line_h = _measure_text_h("Hg", w, font)
+            display, base_len = rollup_lines(
+                text, lambda s: _measure_text_h(s, w, font), line_h, prev_base_len)
+            self._draft_cache[key] = (memo, (display, base_len))
+        used = display.count("\n") + 1
+        # 文字框按**配额**收缩(贴底), 两行时的框高正好等于盒子高。
+        # 不必 `min(box_h, ...)` —— `used ≤ ROLL_LINES` 由 `rollup_lines` 按 ROLL_LINES
+        # 封顶保证; 写个 min 反而会把"盒子与上限不一致"这种错**盖住**。
+        lbl.setFrame_(NSMakeRect(PAD, box_y, w, used * (box_h / ROLL_LINES)))
+        self._set_cached(key, lbl, display)
+        return base_len
+
     # ---- 渲染合并 ----
     # 现状: main.py::drain() 会把 streamq 排空, 而每个增量都触发一次完整 _render
     # (11 次无条件 setStringValue_)。一个音频 tick 内排空 N 个增量 = N 次全量重绘。
@@ -1956,6 +2158,7 @@ class Overlay:
         if mode != "both":
             # 不出中文: 清掉可能在途的草稿译文/术语, 别让它们留在屏上误导
             self._draft_zh_val = ""
+            self._draft_zh_base_len = None
             self._terms = []
             self._pinned_term = None
             # ⚠️ 答案缓冲(_answer_*)刻意**不在这里清**: 讲解是独立入口, 不被这个开关
@@ -2024,10 +2227,6 @@ class Overlay:
                 self._history, self._cur_en, self._cur_zh,
                 bool(self._streaming or self._cur_zh or self._cur_en))
         # 草稿与 💡 术语解析钉在面板底部, 不参与滚动
-        show_draft = (not self._streaming) and bool(self._draft)
-        self._set_cached("draft", self._draft_lbl,
-                         f"▸ {self._draft}" if show_draft else "")
-        self._set_cached("draft_zh", self._draft_zh,
-                         self._draft_zh_val if (not self._streaming and self._draft_zh_val) else "")
+        self._render_draft()
         self._set_cached("gloss", self._gloss_lbl, self._gloss_text())
         # 不再每次渲染都 orderFrontRegardless(会高频打扰窗口服务)

@@ -18,6 +18,11 @@
       空回答清空屏幕 / 追问时两轮答案粘在一起
   R9  复习钩子里必须是**用户原话**(Phase 4 独立验证): 问句含分隔符被吞前半段 /
       问句含 `::` 伪造卡片边界 / 截断超上限 / 点睛尾巴不设限
+  R10 草稿「2 行 roll-up」的折行与断点(2026-09-27): 一行够却给了两行 /
+      丢字从中间挖而不是从前面滑走 / **产出第 3 行**(会被静默吃掉, 不报错) /
+      断点不认从句边界 / 断点无滞回(每来一个新词整行就横向跳) /
+      容差写死 0.5px(非整数倍的实测高度会把两行判成一行) /
+      文本自带换行类字符偷走一行(NEL 与 PARA SEP 单字符就量出两行, 实测)
 """
 from __future__ import annotations
 import json
@@ -603,6 +608,146 @@ class R9_QAQuestionFidelity(unittest.TestCase):
             {"role": "assistant", "content": "正文。\nEN：" + "word " * 300}])
         self.assertEqual(len(items), 1)
         self.assertLess(len(items[0]), QA_AUX_MAX_CHARS + 100)
+
+
+def _fake_height(per_line: int):
+    """按字数算折行高度的**假尺子**: 10px/行、每行 per_line 字符。
+
+    真尺子是 AppKit 实测(`overlay._measure_text_h`) —— 那要开窗口、要主线程。
+    换成假的, `rollup_lines` 的**断点选择**就能不开 AppKit 验, 而"断点挑在哪"
+    正是这个函数唯一会悄悄错的地方。"""
+    def h(s: str) -> float:
+        return 0.0 if not s else -(-len(s) // per_line) * 10.0
+    return h
+
+
+class R10_DraftRollup(unittest.TestCase):
+    """草稿「2 行 roll-up」的折行与断点(2026-09-27) —— `overlay.rollup_lines`。
+
+    为什么值得一条独立回归: 这里全是**不报错但悄悄错**。断点挑歪之后
+    `NSTextField` 只会把多余的行**静默**吃掉(不留省略号、不报错) ——
+    屏上少一句没有任何人会发现。所以只能靠断言钉住, 不能靠"看着对"。
+
+    钉六件事: 一行够就不给两行 · 尾锚定(丢字只从**前面**丢) · **绝不产出第 3 行** ·
+    从句边界优先 + 断点滞回 · 容差按行高缩放(写死 0.5px 时非整数倍的实测高度会把
+    两行判成一行 → 丢内容) · 文本自带的换行类字符不许偷走一行(NEL / PARA SEP 单字符
+    就量出两行, 实测见台账 §8.7)。
+
+    依据与全部一手出处见 `docs/RESEARCH-live-caption-rollup.md §8`。
+    """
+
+    def test_one_line_stays_one_line(self):
+        """⚠️ 必须**带空格/逗号**的短句也算进来。只用 "x"*20 那种无空白串时,
+        候选断点是空的, 走 [ideal] 兜底恰好也只剩一行 —— 于是"砍掉那个提前返回"
+        这种变异根本红不了(写这条时实测过)。带空格的短句才会暴露它。"""
+        from overlay import rollup_lines
+        h = _fake_height(20)
+        for t in ("hi", "aa bb cc", "aaaa bbbb cccc", "aaaa,bbbb", "x" * 19, "x" * 20):
+            display, base = rollup_lines(t, h, 10.0)
+            self.assertNotIn("\n", display, t)
+            self.assertEqual(display, t)
+            self.assertIsNone(base, "一行够用就不该记底行长度")
+
+    def test_head_slides_off_instead_of_the_middle_being_cut(self):
+        from overlay import rollup_lines
+        h = _fake_height(20)
+        t = " ".join("w%02d" % i for i in range(15))       # 59 字符 = 3 行
+        display, _ = rollup_lines(t, h, 10.0)
+        self.assertNotIn("w00", display, "最早的字该随窗口滑走")
+        flat = display.replace("\n", "").replace(" ", "")
+        self.assertTrue(t.replace(" ", "").endswith(flat),
+                        f"显示出来的必须是原文的连续后缀, 不能中间被挖掉: {display!r}")
+
+    def test_never_produces_a_third_line(self):
+        """⚠️ 这条是写测试时抓出来的**真缺陷**的守卫: 光保证"整段塞得进两行高度"
+        是不够的 —— 从中间切开后, 上行放得下不代表下行也放得下。漏了这一步,
+        断点稍靠前就会让下行溢出成第 3 行, 而第 3 行会被静默裁掉。"""
+        from overlay import rollup_lines
+        h = _fake_height(20)
+        for n in range(1, 200):
+            t = " ".join("w%03d" % i for i in range(n))
+            display, _ = rollup_lines(t, h, 10.0)
+            self.assertLessEqual(display.count("\n"), 1, f"n={n}: {display!r}")
+            for part in display.split("\n"):
+                self.assertLessEqual(h(part), 10.5,
+                                     f"n={n}: 这一行本身装不下, 会被静默吃掉: {part!r}")
+
+    def test_break_prefers_clause_boundary(self):
+        from overlay import rollup_lines
+        h = _fake_height(20)
+        t = "aaaa bbbb cccc dd,eeee ffff gggg"       # 逗号后**故意没有**空格
+        display, _ = rollup_lines(t, h, 10.0)
+        self.assertTrue(display.split("\n")[0].endswith(","), display)
+        self.assertTrue(display.split("\n")[1].startswith("eeee"), display)
+
+    def test_break_hysteresis_is_not_a_no_op(self):
+        """滞回必须**真的**能改变断点, 否则它只是注释里的一句话。
+
+        ⚠️ 第一版实现写成"先按容差过滤候选、再取 max" —— 候选彼此只差几个字符,
+        那两个通常同时入选, max 又把结果拉回原处, 等于没做。这条断言就是拦它。"""
+        from overlay import rollup_lines
+        h = _fake_height(30)
+        #               0123456789...
+        t = "aaaa bbbb cccc dddd eeee,ffff,gggg hhhh iiii jjjj kkkk"
+        plain, _ = rollup_lines(t, h, 10.0)
+        seen = {plain}
+        for prev in (5, 15, 25, 29, 35, 45):
+            seen.add(rollup_lines(t, h, 10.0, prev_base_len=prev)[0])
+        self.assertGreater(len(seen), 1,
+                           "prev_base_len 完全改变不了结果 -> 滞回是 no-op")
+        held, hb = rollup_lines(t, h, 10.0, prev_base_len=29)
+        self.assertLess(len(held.split("\n")[0]), len(plain.split("\n")[0]),
+                        "上一帧底行很长 -> 断点该往左拉(上行变短)")
+        self.assertGreater(hb, 0)
+        for d in seen:
+            self.assertEqual(d.count("\n"), 1, d)
+
+
+    def test_two_lines_fit_even_when_the_height_is_not_an_exact_multiple(self):
+        """⚠️ 容差必须**按行高缩放**, 不能写死 0.5px。
+
+        判据是"高度 ≤ n × 行高", 而实测高度**当前恰好**总是行高的整数倍 —— 那是这套
+        字体与缩放下的巧合, 不是契约(换字号、系统缩放、AppKit 内部取整都能让它变成
+        28.6 这种)。写死 0.5px 时 28.6 > 28.5, "两行装得下"就被判成装不下。
+
+        ⚠️ 症状**不是**"退回一行", 而是**多丢一个头**: 后缀窗口缩到更短的那一截,
+        短到够两行 —— 行数照样是 2, 但开头那部分白白滚掉了。所以断言的是**留住了
+        多少字**, 不是行数(写这条时先按行数断言, 变异红不了, 才改成这个)。"""
+        from overlay import rollup_lines
+
+        def h(s):                      # 两行量到 28.6, 不是 28.0
+            n = -(-len(s) // 20)
+            return {0: 0.0, 1: 14.0, 2: 28.6}.get(n, 43.0)
+
+        t = " ".join("w%02d" % i for i in range(10))       # 39 字符 -> 正好两行
+        display, base = rollup_lines(t, h, 14.0)
+        self.assertEqual(display.count("\n"), 1, f"两行该折成两行: {display!r}")
+        self.assertIsNotNone(base)
+        kept = len(display.replace("\n", "").replace(" ", ""))
+        want = len(t.replace(" ", ""))
+        self.assertEqual(kept, want, f"两行装得下就该一个字不丢: 只留了 {kept}/{want}")
+
+
+    def test_a_line_break_in_the_text_cannot_steal_the_last_row(self):
+        """⚠️ 文本自带的换行类字符不许**偷走一行** —— 排版的行归我们管。
+
+        LF / U+0085(NEL) / U+2028(LINE SEP) / U+2029(PARA SEP) 会让**单个字符**量出
+        两行高(2026-09-27 实测: 11pt 下 NEL 与 PARA SEP 都量到 28.00 = 两行)。混在
+        文本里时, "最长只占一行的后缀"会变成空串 —— 那条路一走到, 兜底就只能端上
+        **整段**(头锚定), 再被 AppKit 裁掉尾巴, 丢的正好是**最新的字**。
+        归一化(`" ".join(text.split())`)把这条路封死, 这条判据就是钉它。"""
+        from overlay import rollup_lines
+        BREAKS = ("\n", "\x85", "\u2028", "\u2029")
+
+        def h(s):                      # 模拟 AppKit: 文本自带换行 = 多占一行
+            n = -(-len(s) // 20) + (1 if any(c in s for c in BREAKS) else 0)
+            return n * 10.0
+
+        for brk in BREAKS:
+            t = "aaa bbb ccc ddd" + brk
+            display, _ = rollup_lines(t, h, 10.0)
+            self.assertLessEqual(display.count("\n"), 1, f"{brk!r} -> {display!r}")
+            self.assertIn("ddd", display, f"{brk!r}: 最新的词被吃掉了 -> {display!r}")
 
 
 if __name__ == "__main__":

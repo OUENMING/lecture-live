@@ -28,6 +28,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | **课程清单 / 片段解析 / 每课的「准备度」**（`cl course` 与第二批面板共用；`glossary/` ∪ `~/.classlive/courses/` 的**并集**） | `courses.py`（⚠️ **`cl course` 的模糊匹配只此一处** —— 别在 shell 里再写一份） |
 | **`~/.classlive/` 那族新路径的唯一定义点** | `paths.py` |
 | **macOS 视觉语言**（同心圆角/字号字距/对比度门槛/材质硬规则/原生指纹）—— 动 `overlay.py` 外观或做第二批面板前读 | `docs/RESEARCH-macos-aesthetic.md` |
+| **实时字幕的行数与 roll-up**（为什么 2 行 / 断点降级链 / 上滚即冻结 / 贴底 / 全部一手出处）—— **动草稿或字幕行前读** | `docs/RESEARCH-live-caption-rollup.md` |
 | **P3 第二批：课程卡片面板**（三份 UX 调研 + 作者的 6 个决定 + 美感取向 + 动手前先验的两条）—— **做面板前先读** | `docs/PLAN-entry-panel.md` |
 | **面向用户的提示**：说人话的弹窗 / 麦克风权限三态 / 跳系统设置 | `notice.py` |
 | 主循环、后台线程、队列、UI 路由与落盘分发 | `main.py` |

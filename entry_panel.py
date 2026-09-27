@@ -717,7 +717,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         # ⚠️ **只留最近一次删除的撤销（一层）。** 多层的代价是另一套状态机，
         #    而这里真正要防的是「手滑删错一条」—— 一层够用，而且不会撒谎。
         entry["undo"] = {"text": term,
-                         "entries": list(zip(res.positions, res.removed))}
+                         "entries": list(zip(res.positions, res.originals))}
         set_status(f"已删除 {term} —— 卡片上有「撤销」")
         _later(refresh)                # ⚠️ **必须推迟** —— 见 `_later` 的说明
 

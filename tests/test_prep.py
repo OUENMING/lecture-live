@@ -424,7 +424,7 @@ def main() -> int:
               f"{d.removed} @ {d.positions}")
         check("删完之后确实少了那两行",
               "elasticity" not in rt.read_text(encoding="utf-8"))
-        back = prep.restore_lines(rt, list(zip(d.positions, d.removed)))
+        back = prep.restore_lines(rt, list(zip(d.positions, d.originals)))
         check("插回两条", back == 2, str(back))
         check("⭐⭐ **往返之后与原文件逐字相同** —— 撤销的正确性判据就只有这一条",
               rt.read_text(encoding="utf-8") == ORIG2,
@@ -446,6 +446,46 @@ def main() -> int:
         check("负数/非整数行号才真的跳过",
               prep.restore_lines(rt, [(-1, "x"), ("a", "y")]) == 0)
         check("空 entries -> 0", prep.restore_lines(rt, []) == 0)
+        # ⚠️ 必须**包住**：不包的话实现一回归就是整个脚本崩掉，
+        #    跑器分不清「产品坏了」和「测试自己写错了」（OCR 对 test_panel 报过同款）。
+        try:
+            _n_bad = prep.restore_lines(rt, [(0, None), (1, 123), ("a", "y")])
+        except Exception as _e:                           # noqa: BLE001
+            _n_bad = f"抛了 {type(_e).__name__}"
+        check("⚠️ 行文本不是 str 的坏条目也**不炸**（docstring 承诺「跳过坏条目」）",
+              _n_bad == 0, f"{_n_bad!r}"
+              "（OCR 指出：原来只校验行号，`text.endswith` 会 AttributeError）")
+
+        # ⚠️ OCR 指出：原实现存的是 `ln.strip()`、撤销时补 `"\n"` —— 那不是逐字节还原
+        #    （行首缩进被吃掉、CRLF 那行会被换回 LF）。这一组把「逐字节」钉死，
+        #    并且**反证**了一次（用 strip 过的去还原确实不一样），证明 originals 不是白加的。
+        print("\n    ⭐ 撤销必须**逐字节**还原（缩进 / 行尾空格 / CRLF 都不许被动）")
+        fid = tmp / "fidelity.txt"
+        FID = "# X\r\n\r\n  indented term  \r\nplain\r\n"
+        fid.write_bytes(FID.encode("utf-8"))
+        fid_before = fid.read_bytes()
+        d2 = prep.remove_terms(fid, ["plain", "indented term"])
+        check("⭐ 存档取的是**原始整行**（含缩进与 CRLF）",
+              d2.originals == ["  indented term  \r\n", "plain\r\n"], repr(d2.originals))
+        check("给人看的词条名仍是 strip 过的",
+              d2.removed == ["indented term", "plain"], repr(d2.removed))
+        prep.restore_lines(fid, list(zip(d2.positions, d2.removed)))     # 故意用错的
+        check("⚠️ 反证：用 `removed`（strip 过）还原**不**逐字节",
+              fid.read_bytes() != fid_before, repr(fid.read_bytes()))
+        fid.write_bytes(fid_before)
+        d3 = prep.remove_terms(fid, ["plain", "indented term"])
+        prep.restore_lines(fid, list(zip(d3.positions, d3.originals)))
+        check("⭐ 删 + 撤销后**逐字节**等于删除前（缩进与 CRLF 都还在）",
+              fid.read_bytes() == fid_before, repr(fid.read_bytes()))
+
+        # ⚠️ 追加那条路有**同一个**毛病（`read_text` 把 CRLF 归一化掉），
+        #    而且更糟：不修的话会追加成「混合行尾」（原有 CRLF、新加 LF）。
+        crlf2 = tmp / "crlf_append.txt"
+        crlf2.write_bytes("# X\r\n\r\nexisting\r\n".encode("utf-8"))
+        prep.append_terms(crlf2, ["newterm"])
+        check("追加到 CRLF 文件：**原有行尾不动**、新行也用 CRLF（不混行尾）",
+              crlf2.read_bytes() == b"# X\r\n\r\nexisting\r\nnewterm\r\n",
+              repr(crlf2.read_bytes()))
         check("文件不存在 -> 0（不抛）",
               prep.restore_lines(tmp / "根本不存在.txt", [(0, "x")]) == 0)
 

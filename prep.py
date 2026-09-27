@@ -161,7 +161,7 @@ def append_terms(path, terms: list) -> AppendResult:
 
     if p.exists():
         try:
-            old = p.read_text(encoding="utf-8")
+            old = _read_text_raw(p)
         except UnicodeDecodeError as e:
             # ⚠️ 手写术语表常从网页/Word 粘来，可能不是 UTF-8。
             #    `translator._load_terms` 对这种情况是「出声后忽略」——
@@ -196,12 +196,15 @@ def append_terms(path, terms: list) -> AppendResult:
         added.append(s)
 
     if added:
+        # ⚠️ 追加的行要用**文件自己的行尾**，不能硬写 `"\n"` —— 否则一份 CRLF 术语表会被
+        #    追加成「混合行尾」（原有行 CRLF、新加的 LF），比统一成 LF 还难查。
+        nl = "\r\n" if "\r\n" in old else "\n"
         body = old
-        if not body.endswith("\n"):
+        if not body.endswith(("\n", "\r")):
             # ⚠️ 文件末尾没有换行时先补一个 —— 否则新词会**粘在上一行的尾巴上**，
             #    把一条好好的术语毁掉，而且不报错。
-            body += "\n"
-        body += "\n".join(added) + "\n"
+            body += nl
+        body += nl.join(added) + nl
         _atomic_write(p, body)
 
     return AppendResult(added, dup, long_)
@@ -218,6 +221,20 @@ def _atomic_write(path: pathlib.Path, text: str) -> None:
     _impl(path, text)
 
 
+def _read_text_raw(p: pathlib.Path) -> str:
+    """**不做行尾归一化**地读一个文本文件。
+
+    ⚠️ `Path.read_text()` 走的是 universal newlines：`\\r\\n` **读进来的时候**就变成 `\\n`。
+       于是一份 CRLF 的术语表**只要被写一次**（删一个词、追加一个词），**整个文件**的行尾
+       就都被换成 LF —— 而本模块承诺的是「除改动行外逐字不变」，那条闸门
+       （`removed_lines`）比的也是**归一化之后**的文本，所以它**看不见**这件事。
+       → 三个写入器都必须走这里。
+       （2026-09-27 写「删 + 撤销必须逐字节还原」的测试时才把它逼出来。）
+    """
+    with open(p, encoding="utf-8", newline="") as f:
+        return f.read()
+
+
 # ================================================================ 删词
 class RemoveResult(typing.NamedTuple):
     """`remove_terms` 的返回。
@@ -229,11 +246,19 @@ class RemoveResult(typing.NamedTuple):
     `positions` 与 `removed` **平行**：`positions[i]` 是 `removed[i]` 在**原文件里**的
     行号（0 基，**连注释与空行一起数**）。它是 `restore_lines()` 唯一的输入 ——
     没有它就只能 append，而 append 会打乱顺序（见 `restore_lines` 那条事故）。
+
+    ⚠️ **`removed` 与 `originals` 是两样东西，别混用。**
+       `removed` 是**给人看的词条名**（strip 过 —— 列表里显示、以及 `not_found` 的比对都用它）；
+       `originals` 是**原始整行**（含 `\r\n` 这类行尾），与 `positions` 平行。
+       `restore_lines()` 必须吃 `originals` —— 吃 `removed` 的话「删了再撤销」**不是逐字节还原**：
+       行首缩进被吃掉、CRLF 那行被换成 LF。这是 OCR 指出来的（原实现存的是 `ln.strip()`，
+       而还原是 `text + "\n"`）。
     """
-    removed: list          # 真删掉的行（按原样；一行术语在文件里出现两次就删两次）
+    removed: list          # 删掉的**词条名**（strip 过；一行术语出现两次就删两次）
     not_found: list        # 请求删、但表里本来就没有的
     kept_terms: int        # 剩下的术语条数（不含注释与空行）
     positions: list        # 与 removed 平行：各自在原文件里的行号（0 基）
+    originals: list        # 与 positions 平行：**原始整行**（含行尾）—— 撤销用它，不用 removed
 
 
 # ================================================================ 本课写入锁
@@ -359,9 +384,9 @@ def _remove_terms(path, terms: list) -> RemoveResult:
     drop = {t.lower() for t in want}
 
     if not p.exists():
-        return RemoveResult([], want, 0, [])
+        return RemoveResult([], want, 0, [], [])
     try:
-        old = p.read_text(encoding="utf-8")
+        old = _read_text_raw(p)
     except UnicodeDecodeError as e:
         # 同 `append_terms`：手写术语表可能不是 UTF-8。**不能跟着「出声后忽略」** ——
         # 忽略会让人以为删掉了，而文件一个字没动。
@@ -372,6 +397,7 @@ def _remove_terms(path, terms: list) -> RemoveResult:
     kept_lines: list[str] = []
     removed: list[str] = []
     positions: list[int] = []
+    originals: list[str] = []
     kept_terms = 0
     for idx, ln in enumerate(old.splitlines(keepends=True)):
         s = ln.strip()
@@ -379,14 +405,15 @@ def _remove_terms(path, terms: list) -> RemoveResult:
             kept_lines.append(ln)
             continue
         if s.lower() in drop:
-            removed.append(s)
-            positions.append(idx)                       # 供 restore_lines 原样插回
+            removed.append(s)                           # 给人看的词条名（strip 过）
+            positions.append(idx)
+            originals.append(ln)                        # ⚠️ 撤销吃的是**原始整行**
         else:
             kept_lines.append(ln)
             kept_terms += 1
 
     if not removed:
-        return RemoveResult([], want, kept_terms, [])
+        return RemoveResult([], want, kept_terms, [], [])
 
     new = "".join(kept_lines)
     if removed_lines(old, new) is None:                 # ⚠️ 闸门：不是纯删行就不写
@@ -396,11 +423,14 @@ def _remove_terms(path, terms: list) -> RemoveResult:
     _atomic_write(p, new)
     found = {r.lower() for r in removed}
     return RemoveResult(removed, [t for t in want if t.lower() not in found],
-                        kept_terms, positions)
+                        kept_terms, positions, originals)
 
 
 def restore_lines(path, entries, *, lock_path=None) -> int:
     """把删掉的行**按原位置**插回去。`entries` = `[(行号, 行文本), …]`。返回插回几条。
+
+    ⚠️ **行文本要给「原始整行」（`RemoveResult.originals`），不要给 `removed` 里那个
+        strip 过的词条名** —— 后者会让「删了再撤销」不是逐字节还原（缩进丢失、CRLF 变 LF）。
 
     ⚠️⚠️ **不是 append —— 按位置插回。** 依据是一次**真实事故**（NoteExpress 官方论坛）：
     从回收站恢复到原文件夹，**导致原文件夹里所有题录全部消失**（原帖：「辛辛苦苦收集了
@@ -431,7 +461,7 @@ def _restore_lines(path, entries) -> int:
     if not p.exists():
         return 0
     try:
-        old = p.read_text(encoding="utf-8")
+        old = _read_text_raw(p)
     except (OSError, UnicodeDecodeError) as e:
         raise GlossaryError(f"{p.name} 读不出：{e}") from e
 
@@ -442,7 +472,11 @@ def _restore_lines(path, entries) -> int:
     #    调用方可能存过 json（int 变 float）、或被别的进程改过。**跳过坏条目，不炸。**
     clean = [e for e in entries
              if e and len(e) == 2
-             and isinstance(e[0], int) and not isinstance(e[0], bool) and e[0] >= 0]
+             and isinstance(e[0], int) and not isinstance(e[0], bool) and e[0] >= 0
+             # ⚠️ `e[1]` 也必须校验 —— 下面 `text.endswith` 直接当 `str` 用。
+             #    原文只校验了行号，于是 docstring 承诺的「跳过坏条目，不炸」
+             #    在「行文本是 None/数字」时不成立（OCR 指出）。
+             and isinstance(e[1], str)]
     done = 0
     for idx, text in sorted(clean, key=lambda e: e[0], reverse=True):
         # ⚠️ 夹住而不是跳过 —— 见 docstring 里那条实测。

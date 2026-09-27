@@ -200,7 +200,9 @@ always=self._course_terms)` → 拼进 `user`（`cloud_translator.py:254/281`）
 
 ### 3.2 ⚠️ 路线图说「用已有的 `SYS_CLASSIFY` 抽候选词」—— 这句不成立
 
-`docs/PLAN-roadmap.md:55` 写的是 `↓ LLM 抽候选词（用已有的 SYS_CLASSIFY）`。
+`docs/PLAN-roadmap.md` 当时那一行写的是 `↓ LLM 抽候选词（用已有的 SYS_CLASSIFY）`
+（⚠️ **该行已被改掉**：现在 `:57` 是纠正版，`:54` 是 PDFKit 那行、`:55` 是「不是 Docling」横幅
+—— 本节原先引的 `:55` 早就对不上了）。
 
 **读代码：`SYS_CLASSIFY` 的输入是一个已经存在的术语列表**（`build_notes.py:283`
 `"\n".join(chunk)`，`chunk` 来自 `todo_cls`，而 `todo_cls` 来自 `terms` 字典的键，

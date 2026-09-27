@@ -154,7 +154,7 @@ case "${1:-}" in
     # courses.py 的退出码约定（bash 只读得动这个）：
     #    0 = 唯一命中，stdout 是规范课号
     #    2 = 歧义，stderr 每行一个候选
-    #    1 = 没命中（**此时 stdout 是空的**；非空 = python 自己炸了，那要分开报）
+    #    1 = 没命中（**两个流都是空的**；stderr 非空 = python 自己炸了，那要分开报）
     # ⚠️ **stdout 与 stderr 必须分开收。**
     #    原先是 `2>&1` —— 于是任何一次 stderr 输出（Python 的 DeprecationWarning、
     #    依赖打的提示）都会混进 `_out`，而 `0)` 分支是把 `_out` **整段**写进 `.course`：

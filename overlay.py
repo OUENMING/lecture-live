@@ -360,6 +360,41 @@ def rollup_lines(text, height, line_h, prev_base_len=None):
     return f"{top}\n{base}", len(base)
 
 
+# ---- 草稿上滚的动效(机制 = 自己驱动 f(t), 见 docs/PLAN-roll-motion.md §4.2 路 A) ----
+# 时长: **三方独立收敛** —— 我们 §11 的 macOS 惯例 0.20-0.35s · 现成动效体系的 standard
+# 档 280-350ms · CFR §15.119 的上限 ≤0.433s。另: 系统默认 `NSAnimationContext.duration`
+# 实测是 0.25s(一手量的)。取 0.28s, 落在三者之内且离法典上限留 0.15s 余量。
+ROLL_DURATION_S = 0.28
+ROLL_EASE_POW = 3.0               # ease-out-cubic 的指数; 见 roll_ease 的 docstring
+
+
+def roll_ease(t: float) -> float:
+    """归一化时间 -> 进度 [0, 1]。**ease-out-cubic 的闭式**: `1 - (1-t)³`。
+
+    ⚠️ 为什么不用 `cubic-bezier(0.16, 1, 0.3, 1)`(那是现成动效体系给"快进软着陆"的控制点):
+    机制定了「**自己驱动 f(t)**」之后, "交给 AppKit 解析控制点"那条路就不存在了 ——
+    而贝塞尔缓动**要数值反解 x(t)**(迭代求根), 一个纯函数为此多带一个迭代器不划算。
+    ease-out-cubic 是**闭式、单调、端点精确**(0→0, 1→1), 性格也一致:
+    **起步快、软着陆**, 正是字幕要的「尽快就位、然后静止」(§11「rests 才让动作落地」)。
+
+    `t` 在 [0,1] 外**夹取** —— 调用方不必自己防(动效的开始/结束帧天然会越界一点点)。
+    """
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else float(t))
+    return 1.0 - (1.0 - t) ** ROLL_EASE_POW
+
+
+def roll_offset(t: float, line_h: float) -> float:
+    """归一化时间 -> 该帧的位移(px)。上滚**恰好一个行高**(见 §2)。
+
+    ⚠️ 判据 ② 是**几何的**(整块位移 == 一个行高), 不是字符层面的 ——
+    原方案写的「上一行字符串逐字不变」**是错的**: CFR §15.119 通篇没有约束
+    "已在上方的行"的内容(我做过负向核查, 0 处命中), 而它所有改字符的机制
+    **都作用在游标上**; CEA-608 里内容之所以不变, 是因为**人工速录只向前打** ——
+    我们对滑动窗口重复解码, 那个前提不存在。理由见方案 §3.4。
+    """
+    return roll_ease(t) * float(line_h)
+
+
 def _make_button_target(on_click):
     """返回一个 ObjC 按钮目标。
 

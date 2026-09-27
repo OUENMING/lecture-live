@@ -31,6 +31,9 @@
   R13 两条护栏(2026-09-27, OCR §8.3): 行距只能由行内三段推出来(双来源会静默
       重叠/留缝) / 超出档位行数的译文必须留下痕迹(原来静默裁掉且不留省略号) /
       **答案接管不许被误判成译文超限**(加完观测器实测到 R8 用例误报过)
+  R14 草稿上滚的缓动(2026-09-27) —— ⚠️ carry 判据是**几何的**(位移恰好一个行高),
+      不是字符的(原写法拿 CFR §15.119 背书, 但那条规则**不存在**, 见 PLAN-roll-motion §3.4):
+      端点精确(不许停中间) / 单调且越界夹取 / 起步快软着陆 / 时长 ≤ 法典上限 0.433s
 """
 from __future__ import annotations
 import json
@@ -920,6 +923,48 @@ class R13_RowPitchAndOverflowSignal(unittest.TestCase):
                              "接管态被误判成译文超限 —— 那是另一种内容")
         finally:
             ov.close()
+
+
+class R14_RollEase(unittest.TestCase):
+    """草稿上滚的**缓动**是纯函数, 所以判据也是纯的(2026-09-27)。
+
+    ⚠️ 判据 ② 在这里**只能是几何的** —— 理由见 `docs/PLAN-roll-motion.md` §3.4:
+    「上滚后上一行字符串逐字不变」**是错的**(CFR §15.119 通篇没有约束"已在上方的行"的
+    内容, 负向核查 0 处命中; 而它所有改字符的机制**都作用在游标上**)。
+    这里是几何的那一半: **位移恰好一个行高**。
+    """
+
+    def test_endpoints_are_exact(self):
+        """⭐ 判据 ③ 的纯函数那一半: 终态**恰好**是 1, 不是 0.999。
+
+        动画结束时位移必须精确等于目标值 —— 「停在中间」是
+        `PLAN-notes-and-ui.md` §5 记过的**可用性事故**(面板停在中间尺寸挡住字幕)。"""
+        from overlay import roll_ease, roll_offset
+        self.assertEqual(roll_ease(0.0), 0.0)
+        self.assertEqual(roll_ease(1.0), 1.0)
+        self.assertEqual(roll_offset(0.0, 16.0), 0.0)
+        self.assertEqual(roll_offset(1.0, 16.0), 16.0)     # 恰好一个行高
+
+    def test_monotone_and_clamped(self):
+        from overlay import roll_ease
+        ys = [roll_ease(i / 200) for i in range(201)]
+        self.assertEqual(ys, sorted(ys), "缓动必须单调不减, 否则文字会来回抖")
+        self.assertEqual(roll_ease(-0.5), 0.0, "越界要夹取: 动效首尾帧天然会越界")
+        self.assertEqual(roll_ease(1.5), 1.0)
+
+    def test_front_loaded(self):
+        """选 ease-out 的**理由**: 起步快、软着陆 —— 字幕要「尽快就位然后静止」。
+
+        这是"我认为对"的取舍, 所以钉住它, 免得被无意改成 ease-in(那就变成"慢慢起步、
+        突然到位", 与字幕要的相反)。"""
+        from overlay import roll_ease
+        self.assertGreater(roll_ease(0.5), 0.5, "前半程应当已走完大半")
+
+    def test_duration_within_the_legal_ceiling(self):
+        """⭐ 判据 ①: CFR §15.119 的**上限** 0.433s(`[一手]`, 见台账 §2)。"""
+        from overlay import ROLL_DURATION_S
+        self.assertGreater(ROLL_DURATION_S, 0.0)
+        self.assertLessEqual(ROLL_DURATION_S, 0.433)
 
 
 if __name__ == "__main__":

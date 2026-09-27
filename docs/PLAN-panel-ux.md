@@ -24,6 +24,54 @@
 
 ---
 
+## 0.5 ⭐ 产品定位升级（2026-09-27，作者原话）
+
+> 「产品定位已经**升级成了一个留学生的一个助手**吧，相当于上课的助手。他能听教授的总结上课所说的
+> 东西、浏览课件、并且还能给学生进行复习，包括**记住学生上课没听懂的东西**，下课也能……（待确认）」
+
+### 0.5.1 定位变了，但**筛选线不变**
+
+⚠️ **从「字幕工具」升到「上课助手」，最危险的不是野心，是它让每一件事看起来都该做。**
+过滤器仍然只有一条 —— 就是作者自己那条「**创新不能违反用户习惯、要回到产品本身的定位**」，
+落成一句可执行的：
+
+> **这件事有没有降低"每分钟的认知负荷"？**（README 的原始痛点：**跟不上语速**）
+
+**过不了这条的，一律不进来** —— 不管它看起来多智能。
+
+### 0.5.2 五项能力落进哪里 + 各自新增了什么
+
+| 能力 | 落进哪 | 新增成本 |
+|---|---|---|
+| 听教授 + **总结** | §7 原子层 + 要点视图 | **原子层（最贵的一块）** |
+| **浏览课件** | `~/.classlive/courses/<课号>/materials/` —— **已经在存了** | ⚠️ 只缺**「看」的入口**（现在只存不看） |
+| **复习** | 课后笔记的复习层 —— **已有** | — |
+| ⭐ **记住上课没听懂的东西** | **新的，而且是最值的一条** | 一个零成本动作（按一下 = 标记"这里没懂"），**与已有的 ⭐ 按钮同一形状**；课后自动变成复习项 |
+| ~~下课也能翻转录~~ | ⚠️ **待确认** —— 作者原话我没听懂（是回看录像？课后重放字幕？还是别的） | **不猜，等确认** |
+
+### 0.5.3 ⭐ 「没听懂」这一条为什么是升级里最对的
+
+- 它是产品定位那句「**跟不上语速**」的**直接解药**（不是又一个 AI 功能）
+- 它是**用户主动给的信号**，**不靠 AI 猜** —— 正合 §2 原则 ①
+- 它天然是**课后复习的锚**，而复习层**已经存在**
+- **成本极低**：与 ⭐ 按钮**共用同一个交互**，不要求用户学新动作
+
+### 0.5.4 贯穿的那根线：**一份「原子」，三个视图**
+
+```
+课前  卡片墙（frecency 排序）→ 有把握才倒计时
+课中  字幕（主区） + 一块可收放的第二区（要点 / 已标的 ⭐ / 术语）
+      插入：**只在讲者停顿处**插一行标记（常驻 · 不暂停 · 不推走正在读的）
+      「这句重不重要」= **同一个判断** → 供 ⭐ 建议 与 要点骨架 两个消费者
+课后  同一套原子跑完 → 笔记（已有）· 考试信息 brief.md（另一批）
+```
+
+→ ⭐ **这不是九个新功能，是同一份东西在三个时间点的三个渲染。**
+正是仓库已有的那条原则 —— **一份配方，多个消费者**（`panel.py` 配方 / `objc_own` /
+`paths.py` 全是这个形状）。
+
+---
+
 ## 1. 八路核查的结论（**含三处推翻了我自己先前的说法**）
 
 ### 1.1 必须改文档的两处（现在就去改，别留着挂 `[官方]` 标签）
@@ -288,16 +336,55 @@
 
 → **Photoshop 那三态（拖动停靠 / 折叠成条 / 拖出变浮动）全要自绘**，还要在无边框非激活窗上额外处理 key window、miniaturizable、激活态三条坑。**成本 = 自己写一个小型 dock 容器。**
 
-### 7.2 两个形状
+### 7.2 形状定案：**主窗内一块可收放的分栏，用「固定两态切换」而不是可拖分割**
 
-**形状 A（主线）· 主窗内一条可收放的分栏**
-`[惯例]` Xcode 的 Editor Pane Below / VS Code 的 Panel（默认就在下方）就是这个形状，且**都是窗口内分栏，不产生第二个系统窗口**。
-- 优势：**零新窗口** → 没有跟随/最小化/激活三类问题，观感上「收起成一条」**就是 Photoshop 折叠图标条那一下**
-- ⭐ **还有一条架构理由**：实时总结要读**正在进行的转录**，所以**必须在主进程里**；而项目的硬约束是「面板崩了不能影响录音」。**每多一个窗口就多一条能让主进程崩的路** —— 形状 A 让这条风险**结构上不存在**
+**决定**：面板内让出一块区域，**一条按钮/轻标签在「全宽字幕 ↔ 62/38 两栏」之间切**。
+左边字幕、右边要点列表，两边**各自独立滚动**。
 
-**形状 B（备选）· child window 跟随主窗**
-用 `addChildWindow`：**子随父是白拿的**，主窗被拖走就交给 movement group（⚠️ 不要自己写 `setFrameOrigin_`，拖拽中每帧重算会漂移）。
-⚠️ **代价**：新窗 = 新崩溃面；**「最小化」必须换成「收起/关闭」**（`close()`，不是 `orderOut_` —— `[实测]` 只 orderOut 对象还活着，`NSApp.windows()` 会累积）。
+⭐ **这不是「打不过约束才退让」—— 它本来就是更贴这个场景的交互。**
+自由拖拽的分割线，对付的是「**用户每次想要的比例都不一样**」那种需求。
+而我们这里：**只有两块内容，且合理比例基本不会因人而异**。
+真正有用的操作是「**我现在只想看字幕**」或「**我现在想两个都看**」，
+**不是「我想把总结区调到精确 43%」**。
+→ **约束只是提前排除了一个本来就不该选的选项。**
+
+`[惯例]` 佐证：主流产品里「显示/隐藏一个 pane」**全是二元开关** ——
+Xcode 的 `Focus/Unfocus this Editor Pane`、VS Code 的 `Toggle Side Bar ⌘B` /
+`Toggle Panel ⌘J`、Keynote 隐藏导航器、访达边栏。**没有一个把"调比例"当主要操作。**
+`[官方]` HIG 也只说「**Consider letting people hide a pane**」+「**Provide multiple ways to
+reveal hidden panes**… a toolbar button or a menu command — **including a keyboard shortcut**」
+—— **它要求的是"能藏能露"，不是"能调比例"。**
+
+**顺序**：**先做壳**（切两态），里面**先放已经存在的东西**（这节课已标的 ⭐ 重点 / 术语表），
+**AI 要点后填**。→ 壳第一天就有用，而最难的那块（原子层，§7.3）可以单独成熟。
+
+#### 7.2.1 为什么不做可拖分割（三条，都回源核过）
+
+| # | 事实 |
+|---|---|
+| 1 | ⚠️ **掐断点不是"抓不到分割线"。** `[实测]`（本机 runtime 探针）：`NSSplitView` 自己 `acceptsFirstMouse` 返回 **True**、`mouseDownCanMoveWindow` 是 **False**、`.thin` **画 1pt 抓 5pt** —— **拖动本身完全成立**。真正掐断它的是**我们自己的三处**：① `panel.py` 的 `sendEvent_` 每次左键都 `activateIgnoringOtherApps_(True)`（与浮层"永不抢焦点"哲学冲突）② `overlay.py` 那条「非编辑态即 `_release_focus()`」会在分割线刚让面板成 key 的那一刻**把 key 抽走** —— 这是**时序竞态**，会做出**发抖/失灵**的拖拽 ③ ⚠️ **pane 用的裸 `NSView`/`NSVisualEffectView` 的 `mouseDownCanMoveWindow` 是 `True`** → **拖 pane 会变成拖窗口** |
+| 2 | ⚠️ **鼠标穿透**：`ignoresMouseEvents` **只存在于 NSWindow**（子代理把整个 AppKit 头目录 grep 过，**NSView 没有** —— 网上写 `view.ignoresMouseEvents = true` 的是错的）→ **穿透开着，分割线必然全失效**，而且**没有"部分区域可交互"的官方 API**。⚠️ 仓库现状：穿透是**持久开关**，**唯一出口是菜单栏**（`overlay.py:581`：「开启后窗口忽略所有鼠标事件, 按钮会集体失效(单向死锁)」）→ 分割线会**加入那份"穿透下集体失效"的名单** |
+| 3 | 另省三个坑：`autosaveName` 同名多实例互踩 / Auto Layout 下常不恢复 / 折叠态易丢；**裸 `NSSplitView` 没有折叠 API**（官方动画只在 `NSSplitViewController` 侧）；`splitView(_:constrainMinCoordinate:)` 官方 **Important** 明写「**If your split view uses Auto Layout to size its subviews, don't implement this method**」 |
+
+⚠️ **诚实记录一条反向证据**：`[官方]` HIG › Split views **开门第一句**就把它定位成
+「show **multiple levels of your app's hierarchy**… support **navigation between them**」（主从/层级）。
+我们这两个 pane（**字幕 | 要点**）是**平级的两个流**，不是层级 ——
+**就算做分栏，也是在用一个不在 HIG 描述范围内的用法。** 这条要留住，别装作有官方背书。
+
+#### 7.2.2 将来若真要可拖分割 —— 抄这几条（都 `[官方]`/`[实测]`）
+
+- ⚠️ **`isVertical` 是命名陷阱**：官方逐字「默认 **false**，表示水平分割线、视图**上下堆叠**」；
+  要**左右并排必须显式设 `True`**（SDK 头最无歧义：*"whether the long axes of a split view's
+  dividers are oriented **up-and-down (YES)** or **left-and-right (NO)**"*）
+- **分割线不用加宽**：官方说 thin 会「propose an effective frame that's a little larger than the
+  drawn frame, **to make it easier for the user to actually grab**」→ **实测 1pt 画 / 5pt 抓**
+- `dividerThickness` 是 **readonly**，只能子类 override；⚠️ KVC `setValue(forKey:"dividerThickness")`
+  **会抛 `NSUnknownKeyException`**（`setDividerThickness:` 不存在）——**偏方已死**
+- **别补 `acceptsFirstMouse`** —— `NSSplitView` 自己 override 了并返回 True
+- 用裸 `NSSplitView` 而不是 `NSSplitViewController`（后者逼你给每个 pane 造 `NSViewController`，
+  且官方明说改某些属性**会抛异常**）
+- ⚠️ **每一个 pane 都要显式 `mouseDownCanMoveWindow -> False`** —— 见 `CLAUDE.md` 雷区那条
+  （这是同一个根因的**第三次**：默认值是 `!isOpaque`，所以磨砂面板上的新视图一出生就是 `True`）
 
 ### 7.3 ⭐ 分层：**原子层只增不改，视图可随时重算**
 

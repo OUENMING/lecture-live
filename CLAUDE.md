@@ -80,6 +80,19 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   笔记照样生成、退回直播版转录）—— **这个 fail-soft 设计本身值得保留**，但它防的是
   "文件被删/环境不完整"，不是"新 clone 拿不到"。
 - **不阻塞不变量**：`capture` / `vad` 的回调必须立刻返回；AppKit 的调用只能发生在主线程。往流水线里加活先想这两条。
+- ⚠️ **加在磨砂面板上的新交互元素，先查 `mouseDownCanMoveWindow`。**
+  **根因**：它是 AppKit「按下背景即拖动窗口」的开关，**默认值是 `!isOpaque`**
+  （`docs/OVERLAY-RESIZE-REVIEW.md` §2.4 量的）→ **我们的面板是不透明的反面，
+  所以每个新视图一出生就是 `True`，鼠标按下会被当成"拖窗口"而不是你的手势。**
+  ⚠️ **已经咬过两次**：① 窗口四角缩放（`OVERLAY-RESIZE-REVIEW.md` §2.4/§2.6）·
+  ② 加 `NSSplitView` 的 pane（本轮调研：**裸 `NSView`/`NSVisualEffectView` 的 pane 是
+  `True`，拖 pane 会拖窗口**；`NSSplitView` 自己是 `False`，所以只坑 pane）。
+  → **清单项：新交互视图必须显式设 `mouseDownCanMoveWindow -> False`，并加一条断言。**
+  （`tests/test_panel.py` 已有先例：它断言拖拽层那个是 `True`。）
+  ⚠️ 相关的还有一条**只存在于 NSWindow 的属性**：`ignoresMouseEvents`
+  （整个 AppKit 头目录只有 `NSWindow.h` 一处，**NSView 没有** —— 网上写
+  `view.ignoresMouseEvents = true` 的是错的）→ **穿透一开，面板内一切交互必然失效**。
+
 - ⚠️ **shell 脚本里 `$VAR` 后面紧跟任何非 ASCII 字符都会被吞** ——
   bash 在 UTF-8 locale 下把那个字符的首字节当成标识符的一部分，
   于是 `$PYVER）` 被解析成「名为 `PYVER）` 的变量」→ `set -u` 直接报 unbound。

@@ -140,11 +140,18 @@ class TranscriptView:
         # 顶部就会露空白行。所以 _paint 每轮按实际视口高度调 _ensure_pool 兜底。
         self._slots = []
         self._cache = []
+        # ⭐ **当前档位的行数上限, 池里每个槽位都得用它** —— 构造参数给的那套
+        #    (ROW_ZH_H / ROW_H) 就是 2 行档, 之后 `set_row_metrics` 会覆盖。
+        #    ⚠️ 必须存成状态, 不能靠 `_add_slot` 写死: `_ensure_pool` 会在**视口变大时**
+        #    继续新增槽位, 而那些新槽位没有机会被 `set_row_metrics` 回填 —— 窄窗
+        #    (档位 3/4/5 行)下它们只允许 2 行, 第 3 行起**静默裁掉且不给省略号**。
+        #    (2026-09-27 OCR 抓出, 与 overlay.py 的草稿标签是同一类缺陷。)
+        self._lines = 2
         for j in range(int(math.ceil(max_scroll_h / row_h)) + 2):
             self._add_slot()
 
     def _add_slot(self) -> None:
-        zh = self._make_label(18.0, self._font_zh[1], 2, self._font_zh[2])
+        zh = self._make_label(18.0, self._font_zh[1], self._lines, self._font_zh[2])
         en = self._make_label(11.0, self._font_en[1], 1, self._font_en[2])
         zh.setHidden_(True); en.setHidden_(True)
         self._doc.addSubview_(zh)
@@ -250,6 +257,7 @@ class TranscriptView:
             return
         self._zh_h = float(zh_h)
         self._row_h = float(row_h)
+        self._lines = int(lines)          # 见 __init__: 供 _ensure_pool 新增的槽位用
         for s in self._slots:
             s["level"] = None
             s["zh"].setMaximumNumberOfLines_(int(lines))

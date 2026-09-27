@@ -26,6 +26,8 @@
   R11 草稿标签的 frame 只能有**一个写者**(2026-09-27, OCR 抓出): `_layout` 被
       `_sync_panel_size`(pump 每帧 + live resize 每步)反复调用, 它也写一次 frame 就会
       把 1 行草稿撑回整盒高 → 文字停在**顶行**, 与「贴底」的 roll-up 语义相反
+  R12 池扩容的新槽位必须继承**当前档位**的行数(2026-09-27, OCR 抓出): `_add_slot`
+      写死 2 行, 而窄窗档位是 3/4/5 行 → 新槽位第 3 行起被**静默裁掉**
 """
 from __future__ import annotations
 import json
@@ -765,35 +767,78 @@ class R11_DraftFrameOneWriter(unittest.TestCase):
     """
 
     def _ov(self):
+        """⚠️ 用完**必须** `close()`: `Overlay.__init__` 末尾会 `_install_status_item()`
+        在真菜单栏注册一个 status item —— 不关就是每次测试在菜单栏留一个孤儿 🎧
+        (且断言一失败就永远不会被拆)。R6/R7/R8 一律 `try/finally: o.close()`。
+        (2026-09-27 OCR 抓出。)
+        """
         import overlay
         return overlay.Overlay()
 
     def test_layout_does_not_inflate_a_one_line_draft(self):
         import overlay
         ov = self._ov()
-        ov.add_draft("hi")                       # 短 -> 只占一行
-        one_line_h = overlay.DRAFT_H / overlay.ROLL_LINES
-        h1 = ov._draft_lbl.frame().size.height
-        self.assertLess(h1, overlay.DRAFT_H - 0.01, f"1 行草稿不该占整盒高: {h1}")
-        self.assertAlmostEqual(h1, one_line_h, places=3)
-        for i in range(3):                       # 模拟 pump 每帧 / 拖拽缩放的每一步
-            ov._layout()
-            h = ov._draft_lbl.frame().size.height
-            self.assertAlmostEqual(h, h1, places=3,
-                                   msg=f"第 {i+1} 次 _layout 把 1 行草稿撑回了整盒高")
-        # 贴底: frame 的底边必须就是盒底边(不贴顶)
-        self.assertAlmostEqual(ov._draft_lbl.frame().origin.y,
-                               ov._draft_box_y_en, places=3)
+        try:
+            ov.add_draft("hi")                   # 短 -> 只占一行
+            one_line_h = overlay.DRAFT_H / overlay.ROLL_LINES
+            h1 = ov._draft_lbl.frame().size.height
+            self.assertLess(h1, overlay.DRAFT_H - 0.01, f"1 行草稿不该占整盒高: {h1}")
+            self.assertAlmostEqual(h1, one_line_h, places=3)
+            for i in range(3):                   # 模拟 pump 每帧 / 拖拽缩放的每一步
+                ov._layout()
+                h = ov._draft_lbl.frame().size.height
+                self.assertAlmostEqual(h, h1, places=3,
+                                       msg=f"第 {i+1} 次 _layout 把 1 行草稿撑回了整盒高")
+            # 贴底: frame 的底边必须就是盒底边(不贴顶)
+            self.assertAlmostEqual(ov._draft_lbl.frame().origin.y,
+                                   ov._draft_box_y_en, places=3)
+        finally:
+            ov.close()
 
     def test_a_two_line_draft_still_fills_the_box(self):
         import overlay
         ov = self._ov()
-        ov.add_draft(" ".join("w%02d" % i for i in range(40)))    # 长 -> 两行
-        self.assertAlmostEqual(ov._draft_lbl.frame().size.height, overlay.DRAFT_H,
-                               places=3)
-        ov._layout()
-        self.assertAlmostEqual(ov._draft_lbl.frame().size.height, overlay.DRAFT_H,
-                               places=3)
+        try:
+            ov.add_draft(" ".join("w%02d" % i for i in range(40)))   # 长 -> 两行
+            self.assertAlmostEqual(ov._draft_lbl.frame().size.height,
+                                   overlay.DRAFT_H, places=3)
+            ov._layout()
+            self.assertAlmostEqual(ov._draft_lbl.frame().size.height,
+                                   overlay.DRAFT_H, places=3)
+        finally:
+            ov.close()
+
+
+class R12_PoolGrowthKeepsTheTierLineCount(unittest.TestCase):
+    """池扩容产生的新槽位必须拿到**当前档位**的行数上限(2026-09-27, OCR 抓出)。
+
+    `set_row_metrics` 只遍历**当时**的槽位, 而 `_ensure_pool`(视口变大 / 换大屏时)
+    之后还会新增槽位。新槽位若拿写死的 2 行上限, 窄窗(档位 3/4/5 行)下第 3 行起
+    就被**静默裁掉**(WordWrapping 不给省略号, 见 overlay.py 文件头的实测记录)——
+    与 `overlay.py` 草稿标签那次是同一类缺陷。
+
+    ⚠️ 这条只能靠**真 Overlay** 验: 缺陷在 `_add_slot` 的实参里, 纯函数看不见。
+    """
+
+    def test_new_slots_inherit_the_current_tier(self):
+        import overlay as O
+        ov = O.Overlay()
+        try:
+            narrow = O.MIN_WIDTH
+            ov._width = narrow
+            ov._apply_row_metrics(narrow)          # 落到窄档位(>=3 行)
+            tier = O._lines_for_width(narrow)
+            self.assertGreaterEqual(tier, 3, "用例前提: 这个宽度得落在 >=3 行的档位")
+            before = len(ov._tv._slots)
+            ov._tv._ensure_pool(3000.0)            # 模拟视口变高 / 换到更大的屏
+            fresh = ov._tv._slots[before:]
+            self.assertTrue(fresh, "用例前提: 这次要真的扩容")
+            got = sorted({int(s["zh"].maximumNumberOfLines()) for s in fresh})
+            self.assertEqual(got, [tier],
+                             f"新槽位的行数上限应等于当前档位 {tier}, 实际 {got}"
+                             " -> 会静默裁掉第 3 行起")
+        finally:
+            ov.close()
 
 
 if __name__ == "__main__":

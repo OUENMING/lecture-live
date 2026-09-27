@@ -628,10 +628,21 @@ UI 回写一律 `AppHelper.callAfter` 回主线程。
 | 认证 | `Authorization: Bearer <CMD_API_KEY>` |
 | 请求体 | TypeSafe 原形 `{model, state, questions}` —— **不是 chat messages** |
 | ⭐ 三原语 | `noul`（0–1 是非概率）· **`choice`（≤255 选项，返回全概率分布 + confidence）** · `score` |
-| 上下文 | 32k（CommandCode 侧） |
-| 套餐 | **GOAT 及以上**才有 Provider API 权限；$1 的 Go 档没有 |
-| 价格 | 输入 **$0.042/M**、输出 $0。⚠️ **免费额度已于 2026-09-24 结束**（原以为还有） |
-| 流式 | **从不流式**（官方原话「it never streams」） |
+| 上下文 | ⚠️ **64k / 请求**；其中 **`state` + 最长的那一个问题 ≤ 32k**（见下） |
+| 套餐 | **GOAT 及以上**才有 Provider API 权限；$1 的 Go 档没有（403 `upgrade_required`） |
+| 价格 | 输入 **$0.042/M**、输出 $0（输出免费）。⚠️ **CommandCode 侧限时免费到 2026-09-24** |
+| 流式 | **从不流式**（官方原话「it never streams」）· **`never in /model`**，不能驱动交互式会话 |
+| 缓存 | ⚠️ **没有 prompt cache** —— 官方原话「**every request is one fresh state**」（对成本估算有意义） |
+
+⚠️⚠️ **2026-09-27 更正「上下文」那一行**：原来只写「32k」，会误导。
+`[官方]` `docs.typesafe.ai/models` 逐字：
+> "The **64k** budget covers the `state` plus **all questions combined**; the **32k** budget applies to the `state` plus the **single longest question**."
+
+→ **32K 与 64K 不是"两个来源打架"，是同一套限制的嵌套。**
+
+⚠️ 另：**「免费额度」这条只对 CommandCode 成立。** TypeSafe 直连侧**从来没有过免费层**
+（只写输入 $0.042/MTok、输出免费）。说「Jev 没有免费层」在 CommandCode 这条路上**是错的**；
+两边答案不一样，写的时候必须带渠道。
 
 ⚠️⚠️ **仓库旧结论 `commandcode-endpoint-routing.md`（「非 Claude 模型只走 /v1/chat/completions」）
 对 Jev 不适用** —— Jev 根本不是 chat 模型。**别再拿那条去选端点。**
@@ -639,9 +650,17 @@ UI 回写一律 `AppHelper.callAfter` 回主线程。
 ⚠️ **一条会让请求直接失败的**：`typesafe/jev` **没有 ZDR-capable 上游** ——
 带 `x-cmd-zdr: 1`（或 `CMD_ZDR=1`）会被 **422 拒绝**。
 
-⚠️ **中文：官方文档自己写明的短板**（逐字）：
-> 「English is the primary training language… **Other languages, including CJK scripts, are handled
-> but not equally well**; test on your own content before relying on Jev for a non-English workload」
+⚠️ **中文：官方文档自己写明的短板**（`[官方]` `docs.typesafe.ai/models#language-support`）
+—— 下面是**带省略号的引文，不是逐字**（2026-09-27 更正：原来的引文省掉了两句，却标着「逐字」）：
+
+> 「English is the primary training language … **and where accuracy is currently best.**
+> Other languages, including CJK scripts, are handled but not equally well; test on your own
+> content before relying on Jev for a non-English workload, **and pay close attention to
+> Confidence when routing.**」
+
+⚠️ 省掉的两处（加粗）正是**结论的限定条件**：① 英文是「目前最准」的，不是「只有英文能用」；
+② 官方给的补救是「**看 confidence 再决定路由**」—— 这条正好支持我们「置信度门槛」的设计。
+**引文别剥掉这两句，否则读起来比原文更绝对。**
 
 → **判据只用英文那半**（课号 + 英文课名），中文不进 `state`。
 

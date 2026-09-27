@@ -1349,15 +1349,16 @@ class Overlay:
             self._trunc if self._collapsed else self._wrap)
         self._gloss_lbl.setFrame_(NSMakeRect(pad, y, w, gh))
         self._gloss_hit.setFrame_(NSMakeRect(pad, y, w, gh))     # 点击区与术语行同框
-        # ⚠️ 盒子的**底边**记在这里: 草稿文字是**贴底**写的(roll-up 的 base row 在底部),
-        # 而高度要按实际用了几行收缩 —— 所以 _render_draft 需要这个底边。
-        # 几何只在 _layout 里算一次, 别在两处各推一遍。
+        # ⚠️ 草稿标签的 frame **只有 `_roll_into` 一个写者**(贴底 + 按实际行数收缩)。
+        #    这里只算底边, 然后请它来摆 —— **别在这儿自己 setFrame_**。
+        #    为什么: `_layout` 会被 `_sync_panel_size`(**pump 每帧** + live resize 的
+        #    每一步)反复调用, 而 `_render_draft` 只在脏标记时跑。所以只要这里也写一次
+        #    frame, 屏上有 1 行草稿时**拖动缩放面板**就会每一步把它撑回整盒高 →
+        #    文字停在**顶行**, 与「贴底、1→2 行时旧行向上搬」的 roll-up 语义相反,
+        #    而且会一直错到下一次草稿更新(~1s)。(2026-09-27 OCR 抓出。)
         self._draft_box_y_en = y + gh + 4
         self._draft_box_y_zh = y + gh + 4 + DRAFT_H + 4
-        self._draft_lbl.setFrame_(
-            NSMakeRect(pad, self._draft_box_y_en, w, DRAFT_H))
-        self._draft_zh.setFrame_(
-            NSMakeRect(pad, self._draft_box_y_zh, w, DRAFT_ZH_H))
+        self._render_draft()
         self._scroll_y = BOTTOM_PAD + self._pinned
         self._tv.set_frame(self._scroll_y, self._scroll_h)           # 转录区
         # 顶栏: 从右边缘往左摆(列表是左->右顺序, 故 reversed)。sizeToFit 取文字

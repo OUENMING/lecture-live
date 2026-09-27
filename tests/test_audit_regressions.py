@@ -23,6 +23,9 @@
       断点不认从句边界 / 断点无滞回(每来一个新词整行就横向跳) /
       容差写死 0.5px(非整数倍的实测高度会把两行判成一行) /
       文本自带换行类字符偷走一行(NEL 与 PARA SEP 单字符就量出两行, 实测)
+  R11 草稿标签的 frame 只能有**一个写者**(2026-09-27, OCR 抓出): `_layout` 被
+      `_sync_panel_size`(pump 每帧 + live resize 每步)反复调用, 它也写一次 frame 就会
+      把 1 行草稿撑回整盒高 → 文字停在**顶行**, 与「贴底」的 roll-up 语义相反
 """
 from __future__ import annotations
 import json
@@ -748,6 +751,49 @@ class R10_DraftRollup(unittest.TestCase):
             display, _ = rollup_lines(t, h, 10.0)
             self.assertLessEqual(display.count("\n"), 1, f"{brk!r} -> {display!r}")
             self.assertIn("ddd", display, f"{brk!r}: 最新的词被吃掉了 -> {display!r}")
+
+
+class R11_DraftFrameOneWriter(unittest.TestCase):
+    """草稿标签的 frame 只能有**一个**写者(2026-09-27, OCR 抓出)。
+
+    `_layout` 会被 `_sync_panel_size`(**pump 每帧** + live resize 的每一步)反复调用,
+    而 `_render_draft` 只在脏标记时跑。所以只要 `_layout` 也写一次 frame, 屏上有 1 行
+    草稿时**拖动缩放面板**就会每一步把它撑回**整盒高** → 文字停在**顶行**, 与
+    「贴底 + 1→2 行时旧行向上搬」的 roll-up 语义相反, 且一直错到下次草稿更新(~1s)。
+
+    这条判据钉的就是「谁是唯一写者」: `_layout` 之后, 1 行草稿必须**还是 1 行的框**。
+    """
+
+    def _ov(self):
+        import overlay
+        return overlay.Overlay()
+
+    def test_layout_does_not_inflate_a_one_line_draft(self):
+        import overlay
+        ov = self._ov()
+        ov.add_draft("hi")                       # 短 -> 只占一行
+        one_line_h = overlay.DRAFT_H / overlay.ROLL_LINES
+        h1 = ov._draft_lbl.frame().size.height
+        self.assertLess(h1, overlay.DRAFT_H - 0.01, f"1 行草稿不该占整盒高: {h1}")
+        self.assertAlmostEqual(h1, one_line_h, places=3)
+        for i in range(3):                       # 模拟 pump 每帧 / 拖拽缩放的每一步
+            ov._layout()
+            h = ov._draft_lbl.frame().size.height
+            self.assertAlmostEqual(h, h1, places=3,
+                                   msg=f"第 {i+1} 次 _layout 把 1 行草稿撑回了整盒高")
+        # 贴底: frame 的底边必须就是盒底边(不贴顶)
+        self.assertAlmostEqual(ov._draft_lbl.frame().origin.y,
+                               ov._draft_box_y_en, places=3)
+
+    def test_a_two_line_draft_still_fills_the_box(self):
+        import overlay
+        ov = self._ov()
+        ov.add_draft(" ".join("w%02d" % i for i in range(40)))    # 长 -> 两行
+        self.assertAlmostEqual(ov._draft_lbl.frame().size.height, overlay.DRAFT_H,
+                               places=3)
+        ov._layout()
+        self.assertAlmostEqual(ov._draft_lbl.frame().size.height, overlay.DRAFT_H,
+                               places=3)
 
 
 if __name__ == "__main__":

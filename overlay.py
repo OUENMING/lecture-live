@@ -626,7 +626,8 @@ class Overlay:
             ve, self._label, f_zh, f_en, f_big,
             self._width, PAD, ROW_EN_H, ROW_GAP, ROW_ZH_H, ROW_H,
             max_scroll_h=self._expanded_h,
-            on_follow_change=self._on_follow_change)
+            on_follow_change=self._on_follow_change,
+            measure=_measure_text_h)
         self._tv.set_collapsed(True)      # 初始收回态: 滚轮必须从一开始就被吞掉
         # 载入的宽度可能是窄窗(上次拖过) -> 立刻按它定行尺寸, 否则会先用 2 行的
         # 默认尺寸画一帧, 再跳成 4/5 行。默认宽度下这个调用是空操作。
@@ -1159,7 +1160,7 @@ class Overlay:
         if abs(row_h - self._row_h) < 0.5:
             return
         self._row_h, self._zh_h = row_h, zh_h
-        self._tv.set_row_metrics(zh_h, row_h, lines)
+        self._tv.set_row_metrics(zh_h, lines)
         # 行高变了 -> 最小高度也变了, 得同步给窗口, 否则缩不到新下限
         try:
             self._panel.setContentMinSize_((MIN_WIDTH, self._min_height()))

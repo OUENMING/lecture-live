@@ -28,6 +28,9 @@
       把 1 行草稿撑回整盒高 → 文字停在**顶行**, 与「贴底」的 roll-up 语义相反
   R12 池扩容的新槽位必须继承**当前档位**的行数(2026-09-27, OCR 抓出): `_add_slot`
       写死 2 行, 而窄窗档位是 3/4/5 行 → 新槽位第 3 行起被**静默裁掉**
+  R13 两条护栏(2026-09-27, OCR §8.3): 行距只能由行内三段推出来(双来源会静默
+      重叠/留缝) / 超出档位行数的译文必须留下痕迹(原来静默裁掉且不留省略号) /
+      **答案接管不许被误判成译文超限**(加完观测器实测到 R8 用例误报过)
 """
 from __future__ import annotations
 import json
@@ -837,6 +840,84 @@ class R12_PoolGrowthKeepsTheTierLineCount(unittest.TestCase):
             self.assertEqual(got, [tier],
                              f"新槽位的行数上限应等于当前档位 {tier}, 实际 {got}"
                              " -> 会静默裁掉第 3 行起")
+        finally:
+            ov.close()
+
+
+class R13_RowPitchAndOverflowSignal(unittest.TestCase):
+    """两条护栏(2026-09-27, OCR §8.3 的 medium + low)。
+
+    ① **行距只有一个来源**: `row_h` 由行内三段(en_h + gap + zh_h)推出来, 不再收
+       调用方传的值。同一几何量有两个来源时, 两份漂开的表现是行与行**静默**重叠或
+       留缝 —— 没有报错、没有日志, 只能靠肉眼。
+    ② **超出档位行数不再静默**: 档位(2/3/4/5)来自一个**闭样本**(overlay.py 对
+       4797 句真实中文定稿按宽度取 p100)。样本外的更长译文会被 AppKit 在
+       `maximumNumberOfLines` 处**无声**吃掉(不留省略号)。现在会记数 + 首次打一行。
+    """
+
+    def _ov(self):
+        import overlay
+        return overlay.Overlay()
+
+    def test_row_pitch_is_derived_from_the_intra_row_parts(self):
+        import overlay as O
+        ov = self._ov()
+        try:
+            for w in (O.MIN_WIDTH, 360.0, 440.0, 620.0, 900.0):   # 覆盖 5/4/3/2 行各档
+                ov._width = w
+                ov._apply_row_metrics(w)
+                tv = ov._tv
+                self.assertAlmostEqual(
+                    tv._row_h, tv._en_h + tv._gap + tv._zh_h, places=3,
+                    msg=f"宽 {w}: 行距与行内三段漂开了 "
+                        f"({tv._row_h} vs {tv._en_h + tv._gap + tv._zh_h})")
+        finally:
+            ov.close()
+
+    def test_overlong_translation_leaves_a_trace(self):
+        import overlay as O
+        ov = self._ov()
+        try:
+            ov._width = O.MIN_WIDTH
+            ov._apply_row_metrics(O.MIN_WIDTH)
+            ov.finalize("short english", "短译文。")
+            for _ in range(3):
+                ov.pump()
+            n0 = ov._tv._overflow_n
+            self.assertEqual(n0, 0, "正常长度的译文不该被判超限")
+            import contextlib, io
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):        # 别把警告喷进测试输出
+                ov.finalize("long english", "这是一句非常长的中文译文，" * 20)
+                for _ in range(3):
+                    ov.pump()
+            self.assertGreater(ov._tv._overflow_n, n0,
+                               "超长的译文必须留下痕迹 —— 原来它是**静默**裁掉的")
+            self.assertIn("超出档位行数", buf.getvalue(),
+                          "除了记数, 首次还该打一行 —— 否则日志里根本看不到")
+        finally:
+            ov.close()
+
+    def test_answer_takeover_is_not_mistaken_for_an_overlong_translation(self):
+        """⚠️ 接管态那一列装的是**中文讲解**, 不是译文 —— 不许拿译文的档位去判它。
+
+        写这条之前**实测**过: R8 那个超长词用例会让观测器误报一次
+        ("有译文超出档位行数")。答案内容由 `_answer_view_rows` 自己保证每行放得下,
+        是另一套排版。(2026-09-27 抓出。)
+        """
+        import overlay as O
+        ov = self._ov()
+        try:
+            ov._width = O.MIN_WIDTH
+            ov._apply_row_metrics(O.MIN_WIDTH)
+            for txt in ("中" * 600, "超长的一段中文讲解文字，" * 30):
+                ov._answer_reset()
+                ov.answer_delta(txt)
+                ov.answer_done("q", txt)
+                for _ in range(3):
+                    ov.pump()
+            self.assertEqual(ov._tv._overflow_n, 0,
+                             "接管态被误判成译文超限 —— 那是另一种内容")
         finally:
             ov.close()
 

@@ -88,7 +88,7 @@ def _view_classes():
 class TranscriptView:
     def __init__(self, parent, make_label, font_zh, font_en, font_en_big,
                  width, pad, en_h, gap, zh_h, row_h, max_scroll_h,
-                 on_follow_change=None):
+                 on_follow_change=None, *, measure):
         ScrollCls, DocCls = _view_classes()
         self._parent = parent
         self._make_label = make_label
@@ -98,6 +98,16 @@ class TranscriptView:
         self._width = width
         self._pad = pad
         self._en_h, self._gap, self._zh_h, self._row_h = en_h, gap, zh_h, row_h
+        # ⚠️ 量文字高度的**注入**函数(`measure(text, width, font) -> px`), 与
+        #    `make_label` 同一个套路 —— 本模块**不能** import overlay(会成环),
+        #    注入才能既拿到同一把尺、又不引入依赖。
+        #    用途只有一个: 把"文本超出档位行数"这个**静默裁切**变成可观测(见 _set_text)。
+        self._measure = measure
+        # 观测计数器: 超出档位行数的次数。⚠️ 设它是为了**不再静默** ——
+        # 档位行数来自一个闭样本(p100 of 4797 句, 见 overlay.py 的行数分档注释),
+        # 一旦真实文本比样本更长, 原来会**无声无息**被裁掉(既不报错也不给省略号)。
+        self._overflow_n = 0
+        self._overflow_warned = False
         self._on_follow_change = on_follow_change or (lambda follow: None)
 
         self._items: list[tuple[str, str]] = []     # 已定稿 [(en, zh)]
@@ -242,7 +252,7 @@ class TranscriptView:
         w = self._doc.frame().size.width
         return w if w > 40.0 else self._width - 2 * self._pad
 
-    def set_row_metrics(self, zh_h: float, row_h: float, lines: int) -> None:
+    def set_row_metrics(self, zh_h: float, lines: int) -> None:
         """行尺寸随窗口宽度变(窄窗里中文要更多行才不吞字)。
 
         ⚠️ 变的只是"等高的那个值", **所有行依然等高** —— 回收池依赖的不变量是
@@ -252,7 +262,13 @@ class TranscriptView:
 
         槽位必须**重排**: 清掉每个槽位的 level, `_paint` 会把它们按新行高重新放置。
         文字缓存不清(文本没变, 变的只有 frame), 所以 `_set_text` 会照旧跳过。
+
+        ⚠️ **行距(`row_h`)不收参数, 由行内三段推出来** —— 同一个几何量不能有两个
+        来源: 上游若改了公式(加余量 / 改字重)而两份各自漂开, 表现是行与行**静默**
+        重叠或留缝, 没有任何报错。行内三段(en_h / gap / zh_h)构造时就收到了,
+        推得出来就推。(2026-09-27 OCR 指出这条双来源。)
         """
+        row_h = self._en_h + self._gap + float(zh_h)      # ← 唯一来源, 见 docstring
         if abs(float(row_h) - self._row_h) < 0.5:
             return
         self._zh_h = float(zh_h)
@@ -416,6 +432,41 @@ class TranscriptView:
         if font is not None and lbl.font() != font:
             lbl.setFont_(font)
         lbl.setStringValue_(text)
+        # ⚠️ 只在**译文行**上查超限 —— 答案接管期间(`_verbatim`, 与 `_hold` 同时置位)
+        #    这一列装的是**中文讲解**, 是另一种内容, 由 `_answer_view_rows` 自己保证
+        #    每行放得下; 拿译文的档位去量它只会误报(实测: R8 那个超长词用例就报了一次)。
+        if which == "zh" and text and not self._verbatim:
+            self._note_overflow(lbl, text)
+
+    def _note_overflow(self, lbl, text: str) -> None:
+        """把「文本超出档位行数」从**静默裁切**变成**可观测**。
+
+        ⚠️ 为什么要它: 档位行数(2/3/4/5)**来自一个闭样本** —— `overlay.py` 里对
+        4797 句真实中文定稿按宽度取 p100。样本之外的更长文本会被 AppKit 在
+        `maximumNumberOfLines` 处**无声**吃掉(不留省略号, 见 `overlay.py` 文件头实测)。
+        这条**不改变渲染**, 只保证发生时有痕迹: 记数 + 首次打一行。
+
+        判据用**盒子自己的高度**: 盒子就是 `_lines` 行 + 一点余量, 所以量出来的高度
+        一旦超过 `self._zh_h` 就是装不下 —— 不必知道行高是多少。
+
+        ⚠️ 只在**文本变了**的时候调(缓存未命中), 所以开销是每改一句一次, 不是每帧。
+        """
+        w = float(lbl.frame().size.width)
+        if w < 20.0:
+            return                      # 还没摆过(宽度没定): 量了没意义, 别误报
+        try:
+            need = self._measure(text, w, lbl.font())
+        except Exception:               # noqa: BLE001
+            return                      # 量不了就算了 —— 这是观测, 不该影响功能
+        if need <= self._zh_h + 0.5:
+            return
+        self._overflow_n += 1
+        if not self._overflow_warned:
+            self._overflow_warned = True
+            print(f"⚠ transcript_view: 有译文超出档位行数({self._lines} 行 / 盒高 "
+                  f"{self._zh_h:.0f}px, 实测需 {need:.0f}px) —— 超出部分会被**静默裁掉"
+                  f"且不留省略号**。若某门课的译文普遍更长, 请调大 "
+                  f"overlay.LINE_TIERS / MAX_LINES 的档位。", flush=True)
 
     def _place(self, j: int, level: int, count: int, doc_w: float) -> None:
         """把第 level 层(＝第 count-1-level 行)摆进槽位 j。"""

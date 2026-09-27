@@ -33,6 +33,7 @@ import hashlib
 import os
 import pathlib
 import sys
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
@@ -344,8 +345,18 @@ def main() -> int:
         check("菜单栏有「开课前的准备…」（不是静默少一项）",
               _titles == ["开启鼠标穿透", "开课前的准备…", "退出"], str(_titles))
         ov.close()
+    # ⚠️ `CLASSLIVE_DEBUG` 是**进程级**副作用 —— 不还原的话，同一进程里后面的断言
+    #    都带着「上一次的调试环境」跑（debug 开/关会改变被测代码的日志与分支），
+    #    可能把只在 debug 关闭时出现的回归遮掉（OCR 指出）。
+    _dbg_prev = os.environ.get("CLASSLIVE_DEBUG")
     os.environ["CLASSLIVE_DEBUG"] = "1"
-    card = whatsnew.build("0.0.0", "测试摘要", date="2026-09-26")
+    try:
+        card = whatsnew.build("0.0.0", "测试摘要", date="2026-09-26")
+    finally:
+        if _dbg_prev is None:
+            os.environ.pop("CLASSLIVE_DEBUG", None)
+        else:
+            os.environ["CLASSLIVE_DEBUG"] = _dbg_prev
     check("同一进程里 whatsnew.build() 不是 None（是 None = 那次事故复现了）",
           card is not None)
     if card is not None:
@@ -488,8 +499,13 @@ def main() -> int:
         (iso / "glossary.txt").write_text("", encoding="utf-8")
         gpath = iso / "glossary" / "ECON10740.txt"
         before = gpath.read_text(encoding="utf-8")
-        term = [x.strip() for x in before.splitlines()
-                if x.strip() and not x.startswith("#")][0]
+        # ⚠️ 先判空再取 `[0]` —— 否则隔离副本一旦没有可删的词，整组断言以 **IndexError
+        #    崩掉**，跑器分不清「产品坏了」和「测试数据空了」（OCR 指出）。
+        _terms = [x.strip() for x in before.splitlines()
+                  if x.strip() and not x.startswith("#")]
+        check("隔离副本里至少有一条术语可删（否则下面那组测不了）",
+              bool(_terms), f"{len(_terms)} 条：{before!r}")
+        term = _terms[0] if _terms else ""
 
         def _card_btns(root, course, title):
             """那门课卡片上、按**视觉顺序**（y 降序）排的按钮。
@@ -641,13 +657,17 @@ def main() -> int:
                 check("⭐ 落点返回 True（没在 busy 之前抛异常）",
                       bool(_cards[0]._on_drop(_fake)))
                 from AppKit import NSDate, NSRunLoop
-                for _ in range(40):                # 等工作线程 + 让 callAfter 跑掉
+                # ⚠️ 用**截止时间**而不是固定轮数（原来 40×0.05s = 2s 挂钟预算）：
+                #    机器一忙、callAfter 排队一慢就会假红，而且假红看起来像真卡死。
+                _dl = time.monotonic() + 15.0
+                while time.monotonic() < _dl:
                     NSRunLoop.mainRunLoop().runUntilDate_(
                         NSDate.dateWithTimeIntervalSinceNow_(0.05))
                     if not EP2.S.get("busy"):
                         break
                 check("⭐⭐ `busy` 回到 False（**没卡死** —— 卡死就再也拖不动）",
-                      not EP2.S.get("busy"), f"busy={EP2.S.get('busy')}")
+                      not EP2.S.get("busy"),
+                      f"busy={EP2.S.get('busy')}；等了 15s 仍是 True = 真卡死")
                 check("⭐⭐ 桩真的被调到了（说明整条生产路径走通了）",
                       called.get("course") == _cards[0]._course
                       and called.get("files") == _fake, str(called))

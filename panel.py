@@ -241,7 +241,7 @@ def build(rect, style, *, on_background_click=None, on_resize=None) -> FrostedPa
     return FrostedPanel(window, glass, scrim, drag, delegate)
 
 
-def make_scroll_view(rect, *, has_vertical=True, on_scroll=None):
+def make_scroll_view(rect, *, has_vertical=True):
     """在面板里建一个**观感正确**的 NSScrollView（文档视图由调用方自己塞）。
 
     ⚠️ **只抽这四行，不是抽整份实现。** 2026-09-26 逐行比对过现存两个滚动区
@@ -266,8 +266,6 @@ def make_scroll_view(rect, *, has_vertical=True, on_scroll=None):
     sc.setAutohidesScrollers_(True)
     sc.setScrollerStyle_(NSScrollerStyleOverlay)
     sc.setHorizontalScrollElasticity_(0)                  # 0 = None
-    if on_scroll is not None:
-        sc._on_scroll = on_scroll
     return sc
 
 

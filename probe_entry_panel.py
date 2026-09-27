@@ -39,7 +39,6 @@ sys.path.insert(0, str(HERE))
 import entry_panel                                                  # noqa: E402
 
 ISO = pathlib.Path("/tmp/classlive-probe-entry")
-COURSE = "ECON10740"
 
 
 class StubRes:

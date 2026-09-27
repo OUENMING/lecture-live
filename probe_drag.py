@@ -52,7 +52,7 @@ def log(msg: str) -> None:
     _logf.write(line + "\n")
 
 
-S = {"status": None, "drop": None, "hits": [], "in_drag": False}
+S = {"status": None, "drop": None, "hits": []}
 
 
 def _guard(fn):
@@ -114,7 +114,6 @@ def _drop_class():
         else:
             ok = "public.file-url" in types
             log(f"    只判 UTI -> {'收' if ok else '拒'}")
-        S["in_drag"] = True
         if ok:
             _paint(self, True, "★ 收到拖拽！松手试试", "")
         else:
@@ -127,7 +126,6 @@ def _drop_class():
 
     @_guard
     def dragging_exited(self, sender):
-        S["in_drag"] = False
         log("draggingExited（鼠标移开了）")
         _paint(self, False, "鼠标移开了 —— 再拖进来一次", "")
 
@@ -150,7 +148,6 @@ def _drop_class():
         from AppKit import NSApplication
         log("【鼠标按下到了面板】—— 说明输入路由是通的")
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-        from AppKit import NSDragOperationNone  # noqa: F401
         return None
 
     cls = objc_own.own("ProbeDropWhole", NSView, {

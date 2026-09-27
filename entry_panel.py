@@ -444,7 +444,7 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
 
 def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
            prepare_fn=None) -> Handles:
-    from AppKit import (NSApplication, NSColor, NSScreen, NSWindowStyleMaskBorderless,
+    from AppKit import (NSColor, NSScreen, NSWindowStyleMaskBorderless,
                         NSWindowStyleMaskNonactivatingPanel)
     from Foundation import NSMakeRect
 

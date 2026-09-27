@@ -439,10 +439,21 @@ def main() -> int:
         check("往返幂等：再删一次还是同样两条",
               prep.remove_terms(rt, ["elasticity", "monopoly power"]).removed
               == ["elasticity", "monopoly power"])
-        prep.restore_lines(rt, [(3, "elasticity"), (7, "monopoly power")])
+        # ⚠️ `entries` 现在是**整行**（含行尾）—— 见 `restore_lines` 的契约。
+        #    原来这里传的是裸词条名，靠实现「缺行尾就补一个」兜着；
+        #    而那个兜底会毁掉「末行本来没有行尾」的逐字节还原，已经去掉了。
+        prep.restore_lines(rt, [(3, "elasticity\n"), (7, "monopoly power\n")])
         check("用**原始行号**再插一次也逐字相同（降序插入的性质）",
               rt.read_text(encoding="utf-8") == ORIG2,
               repr(rt.read_text(encoding="utf-8")))
+        # ⚠️ 中间位置插「没有行尾」的整行 = 会把两行粘起来 -> **出声拒绝**，不静默补
+        rt.write_text(ORIG2, encoding="utf-8")
+        try:
+            prep.restore_lines(rt, [(3, "elasticity")])
+            check("⚠️ 中间插无行尾的行 -> 出声拒绝（不静默粘行）", False, "没抛")
+        except prep.GlossaryError:
+            check("⚠️ 中间插无行尾的行 -> 出声拒绝（不静默粘行）", True)
+        check("被拒时文件没被动过", rt.read_text(encoding="utf-8") == ORIG2)
         check("⚠️ 越界行号**夹到末尾不丢行**（删最后一行时原行号 == 新 len，是合法插入）",
               prep.restore_lines(rt, [(9999, "nope")]) == 1
               and "nope" in rt.read_text(encoding="utf-8"))
@@ -474,9 +485,14 @@ def main() -> int:
               d2.originals == ["  indented term  \r\n", "plain\r\n"], repr(d2.originals))
         check("给人看的词条名仍是 strip 过的",
               d2.removed == ["indented term", "plain"], repr(d2.removed))
-        prep.restore_lines(fid, list(zip(d2.positions, d2.removed)))     # 故意用错的
-        check("⚠️ 反证：用 `removed`（strip 过）还原**不**逐字节",
-              fid.read_bytes() != fid_before, repr(fid.read_bytes()))
+        try:
+            prep.restore_lines(fid, list(zip(d2.positions, d2.removed)))  # 故意用错的
+            _bad = fid.read_bytes()
+        except prep.GlossaryError:
+            _bad = None
+        check("⚠️ 反证：用 `removed`（strip 过）还原**要么被拒、要么不逐字节**"
+              "（所以 originals 不是白加的）",
+              _bad is None or _bad != fid_before, repr(_bad))
         fid.write_bytes(fid_before)
         d3 = prep.remove_terms(fid, ["plain", "indented term"])
         prep.restore_lines(fid, list(zip(d3.positions, d3.originals)))
@@ -491,6 +507,23 @@ def main() -> int:
         check("追加到 CRLF 文件：**原有行尾不动**、新行也用 CRLF（不混行尾）",
               crlf2.read_bytes() == b"# X\r\n\r\nexisting\r\nnewterm\r\n",
               repr(crlf2.read_bytes()))
+
+        # ⚠️ 末行**本来就没有行尾**时，撤销不许补一个（补了就多一字节）。
+        #    上一组夹具的末行带 `\r\n`，所以漏过了这一种（审查指出）。
+        fi2 = tmp / "no_eol.txt"
+        fi2.write_bytes(b"# X\nkeep\nplain")
+        b2 = fi2.read_bytes()
+        d4 = prep.remove_terms(fi2, ["plain"])
+        prep.restore_lines(fi2, list(zip(d4.positions, d4.originals)))
+        check("⭐ 末行本来没有行尾 -> 撤销后**也不许多一个**",
+              fi2.read_bytes() == b2, repr(fi2.read_bytes()))
+
+        # ⚠️ CR-only（老 Mac 行尾）：只判 `"\r\n" in old` 会把它追加成混合行尾。
+        cr = tmp / "cr_only.txt"
+        cr.write_bytes(b"# X\r\rexisting\r")
+        prep.append_terms(cr, ["newterm"])
+        check("追加到 CR-only 老文件：行尾跟着文件走（不混）",
+              cr.read_bytes() == b"# X\r\rexisting\rnewterm\r", repr(cr.read_bytes()))
         check("文件不存在 -> 0（不抛）",
               prep.restore_lines(tmp / "根本不存在.txt", [(0, "x")]) == 0)
 
@@ -582,6 +615,35 @@ def main() -> int:
               and guard.read_text(encoding="utf-8") == "# X\nkeep\n",
               f"state={pst.read_text(encoding='utf-8')!r} "
               f"glossary={guard.read_text(encoding='utf-8')!r}")
+
+        print("\n--- ⭐ 同一门课的两个写法必须指到**同一个目录** ---")
+        # ⚠️ 这一组是**跨提交回归**逼出来的：`cl` 的兜底分支会把短代号写进 `.course`，
+        #    于是 `cl prep` 建的是 `courses/10740/`，而面板拿到的是规范全名 `ECON10740`。
+        #    不解析的话两个后果都不报错：准备度**谎报 0**，以及**写入锁各拿各的**
+        #    （互斥静默失效 —— 正是 `d935d5a` 那条提交明令禁止的失败形态）。
+        import paths
+        st_root = tmp / "state_tol"
+        (st_root / "courses" / "10740" / "materials").mkdir(parents=True)
+        (st_root / "courses" / "10740" / "prep-state.json").write_text("{}", encoding="utf-8")
+        check("⭐ 短代号建的目录，用**规范全名**也找得到（否则准备度谎报 0）",
+              paths.prep_state("ECON10740", root=st_root).exists(),
+              str(paths.prep_state("ECON10740", root=st_root)))
+        check("反过来也一样（全名建的目录，短代号找得到）",
+              paths.materials_dir("10740", root=st_root).is_dir())
+        check("⭐ 两条路算出**同一把锁**（互斥才有意义）",
+              prep.state_lock_path(paths.prep_state("ECON10740", root=st_root))
+              == prep.state_lock_path(paths.prep_state("10740", root=st_root)),
+              str(prep.state_lock_path(paths.prep_state("ECON10740", root=st_root))))
+        (st_root / "courses" / "ECON10740").mkdir(parents=True)
+        check("⚠️ 两个目录都在时**精确优先**（不许并到别人家）",
+              paths.course_dir("ECON10740", root=st_root)
+              == st_root / "courses" / "ECON10740")
+        amb2 = tmp / "state_amb2"
+        for _n in ("1040", "2040"):
+            (amb2 / "courses" / _n).mkdir(parents=True)
+        check("⚠️ 容错有歧义时**退回精确路径**（宁可指到不存在的，也不指到别人的）",
+              not paths.course_dir("040", root=amb2).exists(),
+              str(paths.course_dir("040", root=amb2)))
 
         bad = [n for n, ok in RESULTS if not ok]
         print(f"\n{'=' * 62}")

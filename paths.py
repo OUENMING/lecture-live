@@ -49,9 +49,23 @@ def course_dir(course: str, *, root=None) -> pathlib.Path:
     ⚠️ 加这个口子的理由（2026-09-26 审查指出）：面板要能指到别处（验收用隔离目录），
        于是每个调用点都手抄了一遍布局 —— 布局就有了**第二份定义**。加一个目录（P4 的
        数据目录）要改 N 处，而且读端/写端一旦漂开就是本仓库栽过的那类静默事故。
+
+    ⚠️ **容错解析（2026-09-27 补，修一个真事故）**：目录名是「建它的时候 `.course`
+       里的那个写法」，可能短（`cl` 的兜底分支就是把用户原样输入写进去的），
+       而面板拿到的是规范全名。**两边必须指到同一个目录**，否则后果有两个、都不报错：
+         · 准备度**谎报 0**（目录找不到 → 课件 0 份、自动加过 0 个）
+         · **写入锁各拿各的**（`prep.state_lock_path` 明令禁止的那种「互斥静默失效」）
+       规则与 `translator.course_terms_path` 同源：**精确优先，否则只认唯一命中**；
+       有歧义就**退回精确路径**（宁可指到不存在的目录，也不能指到**别人的**目录）。
     """
     root = pathlib.Path(root) if root is not None else STATE_ROOT
-    return root / "courses" / course
+    exact = root / "courses" / course
+    cdir = exact.parent
+    if exact.exists() or not cdir.is_dir():
+        return exact
+    hits = [p for p in sorted(cdir.iterdir())
+            if p.is_dir() and (p.name.endswith(course) or course.endswith(p.name))]
+    return hits[0] if len(hits) == 1 else exact
 
 
 def materials_dir(course: str, *, root=None) -> pathlib.Path:

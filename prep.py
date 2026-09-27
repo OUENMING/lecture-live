@@ -198,7 +198,10 @@ def append_terms(path, terms: list) -> AppendResult:
     if added:
         # ⚠️ 追加的行要用**文件自己的行尾**，不能硬写 `"\n"` —— 否则一份 CRLF 术语表会被
         #    追加成「混合行尾」（原有行 CRLF、新加的 LF），比统一成 LF 还难查。
-        nl = "\r\n" if "\r\n" in old else "\n"
+        #    ⚠️ 用**第一行的那个行尾**，不要只判 `"\r\n" in old` —— 那只认两种，
+        #       一份 CR-only 的老文件（`\r`）会被追成混合行尾。
+        _m = re.search(r"\r\n|\r|\n", old)
+        nl = _m.group(0) if _m else "\n"
         body = old
         if not body.endswith(("\n", "\r")):
             # ⚠️ 文件末尾没有换行时先补一个 —— 否则新词会**粘在上一行的尾巴上**，
@@ -431,6 +434,9 @@ def restore_lines(path, entries, *, lock_path=None) -> int:
 
     ⚠️ **行文本要给「原始整行」（`RemoveResult.originals`），不要给 `removed` 里那个
         strip 过的词条名** —— 后者会让「删了再撤销」不是逐字节还原（缩进丢失、CRLF 变 LF）。
+    ⚠️ **`entries` 是「整行」，含行尾**。中间位置插一行没有行尾的文本会把两行粘起来，
+       所以那种输入**出声拒绝**（`GlossaryError`），不静默补一个 `"\n"`。
+       唯一允许没有行尾的是末行 —— 原文末尾本来就没有换行时，补了就多一字节。
 
     ⚠️⚠️ **不是 append —— 按位置插回。** 依据是一次**真实事故**（NoteExpress 官方论坛）：
     从回收站恢复到原文件夹，**导致原文件夹里所有题录全部消失**（原帖：「辛辛苦苦收集了
@@ -480,8 +486,19 @@ def _restore_lines(path, entries) -> int:
     done = 0
     for idx, text in sorted(clean, key=lambda e: e[0], reverse=True):
         # ⚠️ 夹住而不是跳过 —— 见 docstring 里那条实测。
-        lines.insert(min(idx, len(lines)),
-                     text if text.endswith("\n") else text + "\n")
+        pos = min(idx, len(lines))
+        if text.endswith(("\n", "\r")) or pos == len(lines):
+            # ⚠️ **末行本来就没有行尾时不许补一个** —— 补了就多一字节，
+            #    「逐字节还原」不成立（实测：`# X\nkeep\nplain` 删了再撤
+            #    -> `# X\nkeep\nplain\n`）。只有末行才允许没有行尾。
+            lines.insert(pos, text)
+        else:
+            # 中间位置插一行**没有行尾**的文本 = 会跟下一行粘成一行。
+            # 这是调用方给错了（该传 `RemoveResult.originals` 里的**原样整行**）——
+            # **出声**比静默粘出一行好。
+            raise GlossaryError(
+                f"要插回的第 {idx} 行没有行尾，而它不是最后一行 —— 插进去会把两行粘起来。"
+                "请传 `RemoveResult.originals` 里的原样整行（含行尾）。")
         done += 1
     if done:
         _atomic_write(p, "".join(lines))

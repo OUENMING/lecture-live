@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import datetime
 import json
 import pathlib
@@ -235,6 +236,61 @@ class RemoveResult(typing.NamedTuple):
     positions: list        # 与 removed 平行：各自在原文件里的行号（0 基）
 
 
+# ================================================================ 本课写入锁
+#
+# ⚠️ **同一门课的「读-改-写」必须互斥** —— 现在有三条路会写 `glossary/<课号>.txt`：
+#    `prepare()` 的追加、面板上的删、面板上的撤销。它们都是「读全文 → 改 → 整份写回」，
+#    并发时**后写的会静默吃掉先写的**（删掉的词被追加覆盖回来，或反之）。
+#
+# ⚠️ 锁**按课分开**（一个 `prep-state.json.lock`）—— 不同课之间互不相干，
+#    而且绝不碰上课用的 `instance.lock`（那会把「正在上课」和「正在改术语表」搅在一起）。
+
+LOCKED_MSG = ("另一个「cl prep」（或面板上的准备）正在写这门课的术语表 —— "
+              "等它跑完再试。")
+
+
+def state_lock_path(state_path) -> pathlib.Path:
+    """本课专属写入锁的**唯一定义点**。
+
+    ⚠️ **别在调用点再拼一次** `with_name(name + ".lock")` —— 那是把命名约定定义成
+       第二份。两边一旦漂移，两条路就会**各拿各的锁**：互斥静默失效，而且什么错都不报
+       （这正是本仓库反复踩的「一条纪律两处定义」）。
+    """
+    p = pathlib.Path(state_path)
+    return p.with_name(p.name + ".lock")
+
+
+@contextlib.contextmanager
+def _course_write_lock(lock_path):
+    """围住「读-改-写术语表」那一段。`lock_path=None` 时不加锁。
+
+    ⚠️ 与 `prepare()` 同一套 probe→acquire 形状，理由同那儿的注释：
+       `acquire()` 把「已被占用」和「连锁文件都建不出来（磁盘满/权限）」
+       **压成同一个 `(None, …)`** —— 照它报 `locked` 会把磁盘/权限问题误诊成
+       「另一个 `cl prep` 正在跑」，方向正好反。所以 `unknown` 一律 **fail-open**
+       （锁坏掉时不该拦住任何事）。
+
+    ⚠️ 拿不到锁时**抛异常**而不是静默返回「没删到」：
+       调用方（面板）对「没删到」有自己的文案（「不在表里」），
+       两者混起来就会**跟用户说错原因**。
+    """
+    if lock_path is None:
+        yield
+        return
+    import instance_lock
+    lp = pathlib.Path(lock_path)
+    state0, _ = instance_lock.probe(lp)
+    if state0 == "held":
+        raise GlossaryError(LOCKED_MSG)
+    lock, _holder = instance_lock.acquire(lp)
+    if lock is None and state0 != "unknown":
+        raise GlossaryError(LOCKED_MSG)
+    try:
+        yield
+    finally:
+        instance_lock.release(lock)
+
+
 def removed_lines(old: str, new: str) -> list[str] | None:
     """那条新不变量的**可执行定义**：`new` 是不是「`old` 删掉若干行」得到的？
 
@@ -257,7 +313,7 @@ def removed_lines(old: str, new: str) -> list[str] | None:
     return out if i == len(b) else None
 
 
-def remove_terms(path, terms: list) -> RemoveResult:
+def remove_terms(path, terms: list, *, lock_path=None) -> RemoveResult:
     """按**行**精确删掉 `terms`。
 
     ## ⚠️ 不变量**换成了一条更窄的**
@@ -285,7 +341,18 @@ def remove_terms(path, terms: list) -> RemoveResult:
     而 `prepare()` 里 `if k in have or k in tomb: skipped`（见下方候选筛选那段）
     **已经在跳过墓碑里的词**。删掉术语表里那一行**不影响** `appended` → 重跑照样不复活。
     → **删除只写术语表一个文件。** 多写一次 `prep-state.json` 是白加一条写路径与失败面。
+
+    ⚠️ **`lock_path` = 本课写入锁**（用 `state_lock_path()` 算，**别自己拼名字**）。
+       拿不到锁 -> **抛 `GlossaryError`**，不静默返回「没删到」——
+       后者会让调用方把「正在并发」说成「这个词不在表里」，**跟用户说错原因**。
+       面板必须传；不传 = 不加锁，只留给「确认无人并发」的调用点。
     """
+    with _course_write_lock(lock_path):
+        return _remove_terms(path, terms)
+
+
+def _remove_terms(path, terms: list) -> RemoveResult:
+    """无锁实现 —— 取锁与并发纪律见 `remove_terms`。"""
     p = pathlib.Path(path)
     want = [t.strip() for t in ((x or "") for x in terms)]
     want = [t for t in want if t and not t.startswith("#")]
@@ -332,7 +399,7 @@ def remove_terms(path, terms: list) -> RemoveResult:
                         kept_terms, positions)
 
 
-def restore_lines(path, entries) -> int:
+def restore_lines(path, entries, *, lock_path=None) -> int:
     """把删掉的行**按原位置**插回去。`entries` = `[(行号, 行文本), …]`。返回插回几条。
 
     ⚠️⚠️ **不是 append —— 按位置插回。** 依据是一次**真实事故**（NoteExpress 官方论坛）：
@@ -351,7 +418,15 @@ def restore_lines(path, entries) -> int:
     → `pos = min(idx, len(lines))`，负号或非整数才真的跳过。
 
     返回值是**真正插回去的条数**，不是请求条数。
+
+    ⚠️ **`lock_path` = 本课写入锁** —— 与 `remove_terms` 同一把，理由见它那段。
     """
+    with _course_write_lock(lock_path):
+        return _restore_lines(path, entries)
+
+
+def _restore_lines(path, entries) -> int:
+    """无锁实现 —— 取锁与并发纪律见 `restore_lines`。"""
     p = pathlib.Path(path)
     if not p.exists():
         return 0
@@ -830,7 +905,7 @@ def prepare(course: str, files: list, *, glossary_dir, state_path,
     # ⚠️ 复用 `instance_lock.acquire(path)`（它本来就收自定义路径），锁**本课专属**的
     #    一个文件 —— 不碰上课用的 instance.lock，也不拦 `cl` 启动。
     import instance_lock
-    lock_path = state_path.with_name(state_path.name + ".lock")
+    lock_path = state_lock_path(state_path)
     # ⚠️ 先 `probe()` 再 `acquire()`。`acquire()` 把「已被占用」和「连锁文件都建不出来
     #    （磁盘满 / 权限）」**压成同一个 `(None, …)`** —— 直接照它报 `locked`
     #    会把磁盘/权限问题误诊成「另一个 cl prep 正在写」，方向正好反了

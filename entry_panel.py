@@ -671,6 +671,17 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         import prep as prep_mod
         return prep_mod.course_glossary_path(courses.glossary_dir(glossary), course)
 
+    def lock_of(course):
+        """这门课的写入锁 —— **与 `prep.prepare()` 同一把**。
+
+        ⚠️ 路径一律由 `prep.state_lock_path()` 算，**这里不许自己拼 `.lock`** ——
+           拼第二份就会两边各拿各的锁：互斥**静默失效**，什么错都不报。
+        ⚠️ 锁的就是 `prep-state.json.lock`，所以 `state_root` 必须与跑 prep 时一致
+           （同 `glossary_of` 的道理：注入点必须真的生效）。
+        """
+        import prep as prep_mod
+        return prep_mod.state_lock_path(paths.prep_state(course, root=state_root))
+
     def do_delete(course, term):
         """删掉结果列表里的一条。
 
@@ -687,9 +698,15 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         entry = S["result"].get(course)
         if entry is None:
             return
+        import prep as prep_mod
         try:
-            import prep as prep_mod
-            res = prep_mod.remove_terms(glossary_of(course), [term])
+            res = prep_mod.remove_terms(glossary_of(course), [term],
+                                        lock_path=lock_of(course))
+        except prep_mod.GlossaryError as e:
+            # ⚠️ 术语表自身的问题（**含「正被另一个写入器占用」**）——
+            #    `LOCKED_MSG` 本来就是人话，别再往上叠一层类型名。
+            set_status(f"删不掉：{e}", 1.0)
+            return
         except Exception as e:                            # noqa: BLE001
             set_status(f"删不掉：{type(e).__name__}: {e}", 1.0)
             return
@@ -709,9 +726,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         u = (entry or {}).get("undo")
         if not u:
             return
+        import prep as prep_mod
         try:
-            import prep as prep_mod
-            n = prep_mod.restore_lines(glossary_of(course), u["entries"])
+            n = prep_mod.restore_lines(glossary_of(course), u["entries"],
+                                       lock_path=lock_of(course))
+        except prep_mod.GlossaryError as e:
+            set_status(f"撤销失败：{e}", 1.0)
+            return
         except Exception as e:                            # noqa: BLE001
             set_status(f"撤销失败：{type(e).__name__}: {e}", 1.0)
             return

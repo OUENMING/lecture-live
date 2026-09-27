@@ -466,9 +466,77 @@ def main() -> int:
               gate.read_text(encoding="utf-8") == "# X\nkeep\nkill\n",
               repr(gate.read_text(encoding="utf-8")))
 
-        check("⭐ 删词**结构上拿不到** prep-state（不写墓碑 —— 见它的 docstring 那段更正）",
-              list(inspect.signature(prep.remove_terms).parameters) == ["path", "terms"],
-              str(list(inspect.signature(prep.remove_terms).parameters)))
+        print("\n--- ⭐ 写入锁：并发时**拒绝**，而不是互相吃掉 ---")
+        import instance_lock
+        check("⭐ 锁路径**只有一个定义点**（调用点不许自己拼 `.lock`）",
+              prep.state_lock_path("/a/b/prep-state.json")
+              == pathlib.Path("/a/b/prep-state.json.lock"),
+              str(prep.state_lock_path("/a/b/prep-state.json")))
+
+        lk = tmp / "lock_glossary.txt"
+        lk.write_text("# X\nkeep\nkill\n", encoding="utf-8")
+        lk_before = lk.read_bytes()
+        st = tmp / "st_lock" / "prep-state.json"       # 它的 .lock 就是本课那把
+        lp = prep.state_lock_path(st)
+        held, _ = instance_lock.acquire(lp)
+        try:
+            for nm, call in (
+                ("remove_terms",
+                 lambda: prep.remove_terms(lk, ["kill"], lock_path=lp)),
+                ("restore_lines",
+                 lambda: prep.restore_lines(lk, [(2, "kill")], lock_path=lp)),
+            ):
+                try:
+                    call()
+                    check(f"⭐ 锁被占时 `{nm}` **拒绝**", False, "没抛 = 锁是假的")
+                except prep.GlossaryError as e:
+                    check(f"⭐ 锁被占时 `{nm}` **拒绝**，且给的是人话",
+                          str(e) == prep.LOCKED_MSG, str(e))
+            check("⭐ 被拒时**文件一个字节都没动**（不是「删了一半」）",
+                  lk.read_bytes() == lk_before, repr(lk.read_text(encoding="utf-8")))
+
+            # ⚠️ **「同一把锁」必须这样证** —— 只测写入器「会拿被告知的那把锁」，
+            #    测不到 `prepare()` 用的是不是**同一把**。这一步才把它钉住。
+            r_lk = prep.prepare("ECON99999", [lk], glossary_dir=tmp / "gl",
+                                state_path=st, chat=lambda *a: None,
+                                build_fn=lambda c: None)
+            check("⭐ 两边**确实是同一把锁**：`prepare()` 也被同一把挡下",
+                  r_lk.aborted == "locked", f"aborted={r_lk.aborted!r}")
+        finally:
+            instance_lock.release(held)
+
+        r_ok = prep.remove_terms(lk, ["kill"], lock_path=lp)
+        check("放开后**能删**（证明上一步不是「永远删不掉」）",
+              r_ok.removed == ["kill"], str(r_ok.removed))
+        chk, _ = instance_lock.acquire(lp)
+        check("⭐ 写完**把锁放掉了** —— 没放的话这门课往后永远锁着",
+              chk is not None, "再 acquire 拿不到 = 说明没 release")
+        instance_lock.release(chk)
+
+        held2, _ = instance_lock.acquire(lp)
+        try:
+            check("不传 `lock_path` = **不加锁**（留给「确认无人并发」的调用点）",
+                  prep.remove_terms(lk, ["keep"]).removed == ["keep"],
+                  "传 None 反而被挡住了 = 默认值写错了")
+        finally:
+            instance_lock.release(held2)
+
+        # ⚠️ 原来这条是**查签名**（`parameters == ["path","terms"]`）来证「结构上拿不到
+        #    prep-state」。加了 `lock_path=` 之后那个代理不成立了；而且它本来就在
+        #    **验措辞不验行为**（本文件别处自己就写过这条纪律）。
+        #    改成：**摆一个真的 prep-state 在旁边**，跑完看它动没动。
+        pst = tmp / "guard" / "prep-state.json"
+        pst.parent.mkdir(parents=True, exist_ok=True)
+        pst.write_text('{"appended": {"elasticity": {}}}', encoding="utf-8")
+        pst_before = pst.read_bytes()
+        guard = tmp / "guard_glossary.txt"
+        guard.write_text("# X\nkeep\nkill\n", encoding="utf-8")
+        prep.remove_terms(guard, ["kill"], lock_path=prep.state_lock_path(pst))
+        check("⭐ 删词**不写墓碑** —— 用行为验（比查签名强）：旁边的 prep-state 逐字节未变",
+              pst.read_bytes() == pst_before
+              and guard.read_text(encoding="utf-8") == "# X\nkeep\n",
+              f"state={pst.read_text(encoding='utf-8')!r} "
+              f"glossary={guard.read_text(encoding='utf-8')!r}")
 
         bad = [n for n, ok in RESULTS if not ok]
         print(f"\n{'=' * 62}")

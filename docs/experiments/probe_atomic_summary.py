@@ -41,43 +41,16 @@ WINDOW_MIN = 5.0                     # 一个窗口喂多少分钟的转录
 API = "https://api.deepseek.com/v1/chat/completions"
 MODEL = "deepseek-chat"
 
-SYS = """你在听一节课的实时转录, 每段给你该段新增的英文定稿(带行号)。
-你的任务**不是**写摘要, 而是**记下这段里真正新出现的信息**, 供学生课上快速重入。
-
-输出严格 JSON:
-{"topic": "本段主题(中文为主, 术语保留英文, 不超过 12 字)",
- "points": [{"text": "一条要点(中文, 一句话)",
-             "kind": "主题|要点|定义|例子|课务|明示强调",
-             "src": [3, 4]}]}
-
-硬性要求:
-- **没有可记的就返回 `{"topic": "", "points": []}`** —— 闲聊、点名、设备调试、
-  重复上段已经说过的东西, 都属于"没有可记的"。**宁可空, 不要凑**。
-- 每条 point 的 `src` 必须是给你的行号里**真实存在**的; 不许编。
-- `text` 里不许出现行号以外的引用标记; 单行, 不带换行。
-- 最多 5 条。只依据给的内容, 不引入外部知识。"""
+# ⚠️ `SYS` 与 `traceable` **都不是本文件定义的** —— 它们是 `atom.py` 的
+#    （`kind` 枚举的唯一定义点、机械闸门的唯一定义点）。
+#    2026-09-28 从本文件**搬进** `atom.py`：这里是探针，不该是第三处定义。
+#    ⚠️ 顺带一处**消歧**：那个 kind 从 `明示强调` 改名成 **`讲者强调`** ——
+#       实测那 24 条里只有 2 条真的含考试字样，其余是"讲者强调了这段"的**语义**判断，
+#       与 `PLAN-panel-ux.md §9` 定义的「明示用语」（字符串、可机械核验）**不是一回事**。
+from atom import SYS, KINDS, MAX_POINTS, traceable          # noqa: E402
 
 
 # ---------------- 判据（先自测再用） ----------------
-def traceable(points, lo_line: int, hi_line: int) -> tuple[int, int]:
-    """(可追溯条数, 总条数)。`src` 是**行号**, 必须落在 [lo_line, hi_line] 内且非空。
-
-    ⚠️⚠️ **参数是行号, 不是时间跨度。** 第一版我传的是窗口的当日秒数
-    (`50836..51101`), 而模型返回的 `src` 是 `[17]` 这种行号 —— 两个域根本不是一个,
-    于是可追溯率**按构造恒为 0**, 看起来像"模型在编引用"。判据自测当时也过了
-    (合成数据里两边都是小整数, 撞不出这个错), **是拿真实输出对不上才发现的**。
-    → 这正是 `measure-before-claiming` 里那条: 判据要拿**真实形状**的输入试一次。
-    """
-    ok = tot = 0
-    for p in points:
-        tot += 1
-        src = p.get("src") or []
-        if isinstance(src, list) and src and all(
-                isinstance(x, int) and lo_line <= x <= hi_line for x in src):
-            ok += 1
-    return ok, tot
-
-
 def is_silent(points) -> bool:
     return not points
 

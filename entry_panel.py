@@ -75,6 +75,9 @@ BATCH_HEAD = 18.0      # 组标题（「已认出归属」/「认不出来的」
 BATCH_SEP = 15.0       # 两组之间的分隔
 BATCH_CHIP_W = 138.0   # 右侧课号选择器
 BATCH_UNDECIDED = "未分类"
+SEARCH_W = 220.0       # 标题行右侧搜索框的宽
+SEARCH_ROW = 22.0      # 一条搜索结果一行
+SEARCH_LIMIT = 80      # 一次最多显示多少条（`find` 会报 `truncated`）
 
 # ── 颜色 ────────────────────────────────────────────────────────────
 # ⚠️ **深色模式的卡片配色没有实测过**（System Settings 跟随系统外观，本机是浅色，
@@ -126,6 +129,8 @@ class Handles(typing.NamedTuple):
     # 而 `probe_entry_panel.py` 必须能把这条链路整个跑一遍。同 `refresh` 的理由：
     # 外部调用方需要一个戳面板的口子。⚠️ 生产路径不调它。
     start_batch: typing.Callable[[list], bool]
+    # 同理：搜索那条路也走不到验收跑器里（没有真键盘输入）。
+    search: typing.Callable[[str], None]
 
 
 S = {                              # 同进程只允许一个面板（菜单栏/双击两条入口可能都来）
@@ -320,6 +325,54 @@ def group_for_archive(rows) -> dict:
     return out
 
 
+def search_card_height(n: int) -> float:
+    """搜索结果卡的高度 —— **与 `_make_search_card` 的排版循环成对**。
+
+    ⚠️ 同 `card_height` / `batch_card_height` 那条纪律：别抄固定值。
+       行数是**搜出几条**决定的，写死就会溢出（且**不报错**，只是画到框外）。
+    """
+    return CARD_PAD + max(n, 1) * SEARCH_ROW + CARD_PAD
+
+
+def _make_search_card(hits, *, width):
+    """搜索结果列表。返回视图。**排一行是一条命中**。
+
+    ⚠️ 排版一律**从顶部往下**（y 递减，卡片是非翻转坐标）—— 同 `_make_card`。
+    """
+    from AppKit import NSColor, NSView, NSMakeRect
+
+    h = search_card_height(len(hits))
+    inner_w = width - 2 * CARD_PAD
+    view = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, h))
+    view.setWantsLayer_(True)
+    view.layer().setCornerRadius_(CARD_RADIUS)
+    view.layer().setBorderWidth_(HAIRLINE)
+    white = NSColor.whiteColor()
+    view.layer().setBorderColor_(white.colorWithAlphaComponent_(CARD_LINE_A).CGColor())
+    view.layer().setBackgroundColor_(white.colorWithAlphaComponent_(CARD_FILL_A).CGColor())
+
+    meta_w, line_w = 178.0, 46.0
+    body_x = CARD_PAD + meta_w + line_w
+    body_w = max(40.0, inner_w - meta_w - line_w)
+    y = h - CARD_PAD
+    for hit in hits or [None]:
+        y -= SEARCH_ROW
+        if hit is None:                                   # 空结果：说一句话，别留白板
+            view.addSubview_(panel.make_label(
+                "没搜到 —— 换个词试试", NSMakeRect(CARD_PAD, y + 4.0, inner_w, 16.0),
+                12.0, alpha=DIM))
+            continue
+        who = " · ".join(x for x in (hit.course, hit.date) if x) or "—"
+        view.addSubview_(panel.make_label(
+            who, NSMakeRect(CARD_PAD, y + 5.0, meta_w - 8.0, 15.0), 10.0,
+            alpha=DIM, truncate=True))
+        view.addSubview_(panel.make_label(
+            f"L{hit.line}", NSMakeRect(CARD_PAD + meta_w, y + 5.0, line_w - 6.0, 15.0),
+            10.0, alpha=DIM))
+        view.addSubview_(panel.make_label(
+            hit.text or "", NSMakeRect(body_x, y + 4.0, body_w, 16.0), 12.0,
+            truncate=True))
+    return view
 def batch_card_height(verdicts) -> float:
     """映射卡高度 —— **按内容累加推导**，与 `_make_batch_card` 的排版循环成对。
 
@@ -721,7 +774,7 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
 
 def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
            prepare_fn=None, suggest_fn=None) -> Handles:
-    from AppKit import (NSButton, NSColor, NSFont, NSScreen,
+    from AppKit import (NSButton, NSColor, NSFont, NSScreen, NSSearchField,
                         NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel)
     from Foundation import NSMakeRect
 
@@ -750,10 +803,28 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     win.setHasShadow_(True)
 
     # 标题在批量模式下会换字 —— 存进 holder，别让 `refresh()` 摸不到它。
+    # ⚠️ 2026-09-28 起标题右边多了个搜索框，所以标题**只占左边那段**。
     title_lbl = panel.make_label(
         "开课前的准备", NSMakeRect(PAD, h - PAD - TITLE_H + 6.0,
-                                 WIDTH - 2 * PAD, TITLE_H - 6.0), 15.0, bold=True)
+                                 WIDTH - 2 * PAD - SEARCH_W - 10.0, TITLE_H - 6.0),
+        15.0, bold=True)
     ve.addSubview_(title_lbl)
+
+    # ── 标题行右侧：全局搜索（`find.search()`，plan §2.3）──────────────
+    # ⚠️⚠️ **这是本面板第一个文本输入控件** —— 在此之前它从不变成 key window。
+    #    于是「面板赖在 key 上、吃掉用户在别的 app 里按的键」这条**从今天起才存在**。
+    #    解法照 `overlay` 那条**不变量**（它逐字写着「用不变量兜住所有路径,
+    #    而不是逐个交互点打补丁」）：**只有真的在编辑时才允许是 key**。
+    #    ⚠️ `overlay` 靠每帧 `pump()` 跑它，本面板没有 pump → 用轮询定时器。
+    search_field = NSSearchField.alloc().initWithFrame_(
+        NSMakeRect(PAD + WIDTH - 2 * PAD - SEARCH_W, h - PAD - TITLE_H + 4.0,
+                   SEARCH_W, TITLE_H - 10.0))
+    search_field.setPlaceholderString_("搜索转录 / 笔记…")
+    search_field.setFont_(NSFont.systemFontOfSize_(12.0))
+    search_field.setTarget_(_target(lambda: run_search(search_field.stringValue())))
+    search_field.setAction_("act:")            # NSSearchField 的回车走 action
+    search_field.setSendsWholeSearchString_(True)   # 回车才发，别边打边搜
+    ve.addSubview_(search_field)
 
     # ── 卡片区（可滚动；今天 5 门课用不到，但第 6 门不该引发断崖）──────
     from AppKit import NSView, NSViewWidthSizable
@@ -883,6 +954,105 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         except Exception:                                 # noqa: BLE001
             pass
 
+    # ── 键盘焦点：**只允许在真的编辑时持有**（不变量，抄 overlay）────────
+    def _is_editing() -> bool:
+        """面板现在是 key，是不是因为在输入框里编辑？
+
+        ⚠️ 判据抄 `overlay._is_editing`：**field editor 存在 = 正在编辑**。
+           `NSTextField` 拿到焦点时 first responder 是它的 field editor
+           （一个 `NSTextView`），**不是控件自己**。
+        """
+        try:
+            fr = win.firstResponder()
+            return bool(fr) and fr is not win and bool(fr.isFieldEditor())
+        except Exception:                                     # noqa: BLE001
+            return False
+
+    def _release_focus() -> None:
+        """把键盘还出去。
+
+        ⚠️ 两个调用**分开 try** —— 合在一起时前一个抛错会连后一个都不做
+           （`overlay._release_focus` 的注释逐字记过这条）。
+        """
+        try:
+            win.makeFirstResponder_(None)
+        except Exception:                                     # noqa: BLE001
+            pass
+        try:
+            win.resignKeyWindow()
+        except Exception:                                     # noqa: BLE001
+            pass
+
+    def _focus_guard() -> None:
+        """⭐ 不变量：**只有真的在编辑时，面板才允许是 key**。
+
+        ⚠️ 为什么是**不变量**而不是逐点补：点面板任何非控件区域（卡片空白、落点条、
+           标题行）都会让它变 key 并赖着，于是用户在别的 app 里按的键被吃掉。
+           逐点补只能覆盖已知的那几处（`overlay` 的独立验证实测过四条路径都中招）。
+        ⚠️ `overlay` 靠每帧 `pump()` 跑这条；本面板**没有 pump 循环**，所以用
+           0.5 秒定时器。代价是"最多赖 0.5 秒"，换来的好处是不必给这个面板再造一个 pump。
+        ⚠️ 窗口一关就**不再续期** —— 否则定时器会跟着进程活到天荒地老。
+        """
+        try:
+            if not win.isVisible():
+                return
+            if win.isKeyWindow() and not _is_editing():
+                _release_focus()
+        except Exception:                                     # noqa: BLE001
+            pass
+        from PyObjCTools import AppHelper
+        AppHelper.callLater(0.5, _focus_guard)
+
+    _focus_guard()
+
+    # ── 全库搜索（`find.search`，plan §2.3）──────────────────────────
+    def run_search(q: str):
+        """标题行搜索框回车 → 全库搜。**只读**，不改任何文件。"""
+        q = (q or "").strip()
+        if not q:
+            S["search"] = None
+            set_status("已清除搜索", 1.0)
+            _later(refresh)
+            return
+        S["search"] = {"q": q, "hits": [], "total": 0, "truncated": False,
+                       "busy": True, "err": ""}
+        set_status(f"搜「{q}」…")
+        _later(refresh)
+
+        def work():
+            try:
+                import find as find_mod
+                r = find_mod.search(q, limit=SEARCH_LIMIT)
+                got = {"hits": r.hits, "total": r.total, "truncated": r.truncated}
+            except Exception as e:                            # noqa: BLE001
+                got = {"hits": [], "total": 0, "truncated": False,
+                       "err": f"{type(e).__name__}: {e}"}
+            s = S.get("search")
+            if s is None or s.get("q") != q:
+                return                                        # 期间又搜了别的
+            s.update(got)
+            s["busy"] = False
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(_search_ready)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _search_ready():
+        s = S.get("search")
+        if s is None:
+            return
+        if s.get("err"):
+            set_status(f"搜索失败：{s['err']}", 1.0)
+        else:
+            # ⚠️ 截断了就说出来 —— 别让一个被截断的结果读起来像"就这些"
+            #    （`minutes` 的 retrieval.rs 逐字：截断会「let a negative result
+            #    appear exhaustive when it is not」）。
+            more = (f" · 只显示前 {len(s['hits'])} 条" if s.get("truncated") else "")
+            set_status(f"「{s['q']}」命中 {s['total']} 处{more}", 1.0)
+        cur = S.get("panel")
+        if cur is not None:
+            cur.refresh()
+
     # ── 批量归档（plan §7.12）────────────────────────────────────────
     def run_batch(paths):
         """拖/选一堆文件 → 后台分类 → 映射卡。**只出建议，不写盘**（写盘归 `prep`）。"""
@@ -989,6 +1159,19 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
     strip_holder["actions"] = _batch_buttons()                # 建在函数定义之后
 
+    # 搜索模式下那一块的动作区（**位置与批量那对完全重合** —— 换着显示，不同时出现）。
+    _clr = NSButton.alloc().initWithFrame_(
+        NSMakeRect(W_IN - CARD_PAD - 100.0, (DROP_H - BTN_H) / 2.0, 100.0, BTN_H))
+    _clr.setTitle_("清除")
+    _clr.setBezelStyle_(1)
+    _clr.setFont_(NSFont.systemFontOfSize_(12.0))
+    _clr_t = _target(lambda: run_search(""))
+    _clr.setTarget_(_clr_t)                                   # ⚠️ 弱引用 —— 靠这里留
+    _clr.setAction_("act:")
+    _clr.setHidden_(True)
+    strip.addSubview_(_clr)
+    strip_holder["search_btns"] = [(_clr, _clr_t)]
+
     def refresh():
         """重画（跑完 prep / 删词 / 撤销 / 批量扫描完 都走它）。
 
@@ -1003,10 +1186,30 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             sub.removeFromSuperview()
 
         b = S.get("batch")
+        s = S.get("search")
         for _v in strip_holder["hint"]:
-            _v.setHidden_(b is not None)
+            _v.setHidden_(b is not None or s is not None)
         for _btn, _t in strip_holder["actions"]:
             _btn.setHidden_(b is None)
+        for _btn, _t in strip_holder.get("search_btns", []):
+            _btn.setHidden_(s is None)
+
+        if s is not None:
+            # ── 搜索模式：卡片列表换成命中列表 ────────────────────────
+            # ⚠️ 与批量模式**互斥**：`run_search` 不清 `S["batch"]`，但 `run_batch`
+            #    也不清 `S["search"]`。两条路都从自己的入口进，不会同时开 ——
+            #    真同时开了，这里是 search 优先，`strip` 会把批量那对按钮也亮着，
+            #    所以上面那两圈 hidden 是**分开判**的（各按各的）。
+            title_lbl.setStringValue_(f"搜索：{s.get('q', '')}")
+            if s.get("busy"):
+                doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, 120.0)))
+                return
+            card = _make_search_card(s.get("hits") or [], width=WIDTH - 2 * PAD)
+            card.setFrameOrigin_((0.0, 0.0))
+            doc.addSubview_(card)
+            doc.setFrameSize_((WIDTH - 2 * PAD,
+                               max(body_h, card.frame().size.height)))
+            return
 
         if b is not None:
             # ── 批量核对模式：卡片列表整块换成映射表 ──────────────────
@@ -1199,10 +1402,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             strip_holder["view"] = None
             strip_holder["hint"] = []
             strip_holder["actions"] = []
+            strip_holder["search_btns"] = []
             # ⚠️ 批量状态是**模块级**的，跨面板存活 —— 不清的话，关掉面板再打开
             #    会直接落进"上次那批还没确认"的模式里。
             #    （`S["result"]` 是**故意**跨面板的，别把这条规矩套到它头上。）
             S["batch"] = None
+            S["search"] = None
             S.pop("queue", None)
             # ⚠️ 映射表那批选择器也要断 —— 它们自己抓着菜单，而菜单抓着 target。
             #    与卡片 `_targets` 是**同一类**孤岛（那次实测：只 setContentView_(None)
@@ -1356,7 +1561,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     win.setFrameOrigin_(((scr.size.width - WIDTH) / 2.0,
                          max(60.0, scr.size.height - h - 140.0)))
     win.orderFrontRegardless()
-    return Handles(win, do_close, refresh, set_status, run_batch)
+    return Handles(win, do_close, refresh, set_status, run_batch, run_search)
 
 
 def open_panel(**kw) -> Handles | None:

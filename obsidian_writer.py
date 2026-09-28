@@ -585,6 +585,33 @@ class ObsidianWriter:
                 pass
             self._lost_h = None
 
+    # ---- 原子层：旁路文件 `sessions/<同名>.atoms.jsonl`（plan §1）----
+    def _atom_writer(self):
+        """懒建 `atom.AtomWriter`。⚠️ **复用那个类，不在这里重写路径拼法** ——
+        路径形状（`<同名>.atoms.jsonl`）在那儿是唯一定义点。"""
+        w = getattr(self, "_atom_w", None)
+        if w is None and self.session_path:
+            import atom as atom_mod
+            w = atom_mod.AtomWriter(self.session_path)
+            self._atom_w = w
+        return w
+
+    def append_atoms(self, atoms) -> int:
+        """写一批 atom。⚠️ **不做任何 LLM 调用** —— 那些在 worker 里，
+        这个方法只负责落盘（与 `mark_lost` 同一条纪律：这里是主线程回调）。"""
+        w = self._atom_writer()
+        return w.append(atoms) if w is not None else 0
+
+    def close_atom(self) -> None:
+        """幂等。文件**不删**（它是这份笔记的证据，同 `close_lost`）。"""
+        w = getattr(self, "_atom_w", None)
+        if w is not None:
+            try:
+                w.close()
+            except Exception:                             # noqa: BLE001
+                pass
+            self._atom_w = None
+
     def _lost_marks(self) -> list[tuple[int, int | None]]:
         """旁路文件 -> `[(按下时刻的当日秒数, 按下时已定稿几句), ...]`。
 
@@ -846,6 +873,7 @@ class ObsidianWriter:
         #    用户答"不保存"），放在后面就会在那些路径上漏掉它。幂等，重复调无妨。
         #    2026-09-28 由作者那句"不用保存笔记"提醒才发现 —— 那正是会走到早退的路径。
         self.close_lost()
+        self.close_atom()      # ⚠️ 同一条教训：**都在早退之前**（下面有三条早退）
         if not self.enabled or not self.session_path:
             return ""
         if self._n == 0:

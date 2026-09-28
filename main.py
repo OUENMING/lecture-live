@@ -228,7 +228,8 @@ class EngineRouter:
                 self._fallback(e)
         return self._local.translate_draft(en, on_zh)
 
-    def answer(self, question, transcript, history, on_delta=None) -> str:
+    def answer(self, question, transcript, history, on_delta=None,
+               context: str = "") -> str:
         """按需讲解 / 追问。形状照抄 fix_stream: 云端优先, 异常降级。
 
         ⚠️ 降级目标**不是** `self._local.answer_stream(...)`: `translator.Translator`
@@ -243,7 +244,7 @@ class EngineRouter:
         if self._use_cloud:
             try:
                 return self._cloud.answer_stream(question, transcript, history,
-                                                 on_delta)
+                                                 on_delta, context=context)
             except Exception as e:                # noqa: BLE001
                 # ⚠️ **刻意不走 `_fallback`**。`_fallback` 会把 `_use_cloud` 翻成
                 # False —— 于是**一次纯问答的失败会把整节课的翻译也降级到本地**
@@ -1199,9 +1200,21 @@ def run(args) -> None:
                 block = snap if first else snap[qa["consumed"]:]
                 qa["consumed"] = len(snap)
                 hist = [dict(t) for t in qa["history"]]
+            # ⭐ **全库检索**：拿问题去搜一遍，把**历史课**里的相关材料并进这一轮。
+            #    （plan §2.3。数据源是 `find.search()`，实测全量 34–100 ms。）
+            # ⚠️⚠️ **必须在这里算一次，然后把同一个字符串给两边** —— 下面 `content`
+            #    要**逐字**写回历史，而 `answer_stream` 内部会拿 `context` 再拼一遍。
+            #    两处各算一次 = 历史里的前缀与真正发出去的对不上（那条警告就在下面）。
+            # ⚠️ 检索失败**绝不能让问答挂掉** —— 捞不到材料只是少点背景。
+            ctx = ""
+            try:
+                import find as _find
+                ctx = _find.as_context(_find.search(q, limit=8))
+            except Exception:                             # noqa: BLE001
+                ctx = ""
             # 用户 turn 的正文由 answer_user_content 统一生成 —— 下面要把它**逐字**
             # 写回历史, 必须与 answer_stream 内部发给模型的那一份完全一致。
-            content = answer_user_content(q, block, not first)
+            content = answer_user_content(q, block, not first, context=ctx)
 
             def _emit(d):
                 # ⚠️ 收尾中就不再往 streamq 写。streamq 是 `all_settled()` 的**五个
@@ -1218,7 +1231,7 @@ def run(args) -> None:
                     streamq.put(("answer", d))
 
             try:
-                text = translator.answer(q, block, hist, on_delta=_emit)
+                text = translator.answer(q, block, hist, on_delta=_emit, context=ctx)
             except Exception as e:                # noqa: BLE001
                 text = f"⚠ 讲解失败: {str(e)[:80]}"
             with qa_lock:
@@ -1255,6 +1268,78 @@ def run(args) -> None:
         except Exception:                        # noqa: BLE001
             pass
         return
+
+    # ══════════════════════════════════════════════════════════════════
+    # 原子层 worker（`docs/PLAN-roadmap.md §2.6` / 计划 §1）
+    # 把一节课切成可单独引用的小块，供**三条线共用**（重点标注 / 全局检索 / 声纹）。
+    # ⚠️ **独立线程 + 只读快照**，与 `entry_launch` 同一条结构保证：它崩了
+    #    只是没有 atom，**录课一个字都不受影响**。
+    # ⚠️⚠️ **纯转录档整条不开** —— `DESIGN.md:187` 逐字「纯转录 | 一个模型请求都不发」。
+    #     判据在**取件时**（`drain` 那一支），**不是启动时判一次** ——
+    #     那三档是**课中可切**的（🌐 按钮循环），启动时判会漏掉后来切进去的。
+    # ══════════════════════════════════════════════════════════════════
+    import atom
+
+    ATOM_EVERY_S = 75.0     # 窗口上限（计划 §17.3 的「60–90 秒」）
+    # ⚠️ 停顿阈值 —— **8 秒是错的，2026-09-28 真课上量出来的**：
+    #    实测批次间隔**中位 24 秒**（最小 8s），折合**每小时 150 次调用**，
+    #    而计划的设计节奏是 60–90 秒 → 12.5 倍。根因：讲课里的自然停顿
+    #    （翻页、思考、学生提问）**经常超过 8 秒**，于是"停顿提前跑"这条
+    #    几乎每次都先于 75 秒上限触发，**把上限整个架空了**。
+    #    → 抬到 30 秒（那才算真的中断）。⚠️ 这个数**还没有第二次实测**背书。
+    ATOM_PAUSE_S = 30.0
+    atomq: queue.Queue = queue.Queue()
+    atom_st = {"buf": [], "t0": 0.0, "last": 0.0, "prev": "", "n": 0}
+
+    def _atom_chat(block):
+        """⚠️ 复用 `build_notes._chat_json` —— **不做第 7 处手写 httpx**
+        （仓库已有 5 处各自手写调 DeepSeek 的，`classify.py` 也复用的是它）。"""
+        from build_notes import _chat_json
+        if not api_key_val:
+            return None
+        return _chat_json(api_key_val, atom.MODEL, atom.SYS, block,
+                          atom.MAX_TOKENS, atom.TEMPERATURE)
+
+    def _atom_flush():
+        buf, atom_st["buf"] = atom_st["buf"], []
+        if not buf:
+            return
+        sents = [it[2] for it in buf]
+        base = buf[0][0]                       # 窗口第一句的**全局序号**（1-based）
+        try:
+            obj = _atom_chat(atom.build_prompt(sents, atom_st["prev"]))
+        except Exception as e:                 # noqa: BLE001
+            # ⚠️ 提不出来是"少几条要点"，**不是"课跑不下去"**（同 mark_lost 的纪律）。
+            echo(f"⚠ atom 提取失败({str(e)[:50]}); 课堂不受影响")
+            return
+        if obj is None:
+            return
+        got = atom.rebase(
+            atom.parse_reply(obj, len(sents), base_id=atom_st["n"],
+                             stamp=atom.now_stamp()), base)
+        atom_st["n"] += writer.append_atoms(got)
+        topic = atom.topic_of(obj)
+        if topic:
+            atom_st["prev"] = topic        # 只做上下文提示，不落盘（plan §17.2 没这个字段）
+
+    def atom_worker():
+        while running.is_set():
+            try:
+                it = atomq.get(timeout=1.0)
+            except queue.Empty:
+                it = None
+            if it is not None:
+                if not atom_st["buf"]:
+                    atom_st["t0"] = time.monotonic()
+                atom_st["buf"].append(it)
+                atom_st["last"] = time.monotonic()
+            if not atom_st["buf"]:
+                continue
+            if (time.monotonic() - atom_st["t0"] >= ATOM_EVERY_S
+                    or time.monotonic() - atom_st["last"] >= ATOM_PAUSE_S):
+                _atom_flush()
+
+    threading.Thread(target=atom_worker, daemon=True).start()
 
     def drain():
         while True:
@@ -1300,6 +1385,16 @@ def run(args) -> None:
                 ui.finalize(item[1] or item[3], item[2])   # 翻译失败时至少显示转录
                 writer.append(item[1], item[2], flagged=flagged["on"], raw=item[3])
                 flagged["on"] = False
+                # 🆕 原子层：把这一句转给 worker。⚠️ **`put_nowait`（非阻塞）** ——
+                #    `drain()` 在主循环里，这里是「不阻塞不变量」管着的地方。
+                #    ⚠️ 档位判在**这里**，不是启动时 —— 三档课中可切（见 worker 那段）。
+                #    ⚠️ 整段包 `try`：转不过去只是少几条 atom，绝不能让 drain 抛。
+                if trans["mode"] != "raw":
+                    try:
+                        atomq.put_nowait((writer._n, time.strftime("%H:%M:%S"),
+                                          item[1] or item[3], item[2]))
+                    except Exception:               # noqa: BLE001
+                        pass
 
     try:
         _dev = {"wall": time.time(), "next": 0.0}

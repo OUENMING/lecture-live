@@ -1334,5 +1334,87 @@ class R17_ChangelogSummary(unittest.TestCase):
         self.assertEqual(got.splitlines(), ["粗体和代码"])
 
 
+class R18_AnswerContextContract(unittest.TestCase):
+    """问答线程「全库检索并进 prompt」之后，那条**跨模块契约**还在不在（2026-09-28）。
+
+    链路：`main.answer_worker` 拼 user turn → 逐字写回 history →
+    `obsidian_writer._asked_question()` 用 `partition("\\n\\nQuestion: ")` **反解**出
+    用户原话（落盘"我问过什么"）。`find.as_context()` 给的那段**插在最前面**之后，
+    这条契约有两个会静默坏掉的地方：
+
+    1. `Question: ` 那行**不再是最后一段** → 反解把后面的话也当成问题
+    2. 检索回来的材料里**恰好含 `"\\n\\nQuestion: "`** → `partition` 取**第一个**匹配，
+       于是反解出的是材料里的那句话，**不是你问的**
+
+    ⚠️ 两条都不报错 —— 只是笔记里"我问过什么"从此是错的。所以钉在这里（默认闸门）。
+    """
+
+    Q = "上周讲过什么垄断?"
+    CTX = "- [ECON10770 · 2026-09-18] 相反，在垄断的情况下。"
+    # ⚠️⚠️ **冻结的字面量，不是"再调一次比一比"。**
+    #    第一版写的是 `assertEqual(self._content(""), ct.answer_user_content(q, ...))`
+    #    —— 那**两次都走同一个（可能已经坏掉的）函数**，于是"给空 context 也塞一段头"
+    #    这种变异**两边一起变**，判据照样绿。`/simplify` 之后的变异验证抓出来的
+    #    （M5 没红）。要防"老形状被改掉"，参照物必须是**写死的**。
+    EXPECTED_NO_CTX = ("Lecture transcript so far (chronological):\n"
+                       "first sentence\n\n"
+                       f"Question: {Q}")
+
+    def _content(self, context):
+        import cloud_translator as ct
+        return ct.answer_user_content(self.Q, ["first sentence"], False, context=context)
+
+    def test_question_line_stays_last(self):
+        c = self._content(self.CTX)
+        self.assertTrue(c.rstrip().endswith(f"Question: {self.Q}"))
+
+    def test_reverse_parse_still_works(self):
+        import obsidian_writer as ow
+        self.assertEqual(ow._asked_question(self._content(self.CTX)), self.Q)
+
+    def test_empty_context_changes_nothing(self):
+        """没有检索结果时，形状必须与**加这个功能之前逐字相同**。"""
+        self.assertEqual(self._content(""), self.EXPECTED_NO_CTX)
+        self.assertNotIn("Related material", self._content(""))
+
+    def test_context_is_present_when_given(self):
+        c = self._content(self.CTX)
+        self.assertIn(self.CTX, c)
+        self.assertTrue(c.index(self.CTX) < c.index("Question:"))
+
+    def test_context_containing_the_marker_does_not_hijack(self):
+        """⚠️ 这条是**真威胁**：材料里出现 `Question: ` 时反解不能认错。
+
+        ⚠️ 已知且**接受**的边界：材料里带**换行 + `Question: `** 时仍会被抢
+        （`partition` 取第一个）。检索回来的片段是**单行**的
+        （`find.Hit.text` 就是一行），所以现实中构造不出这个形状 ——
+        这条只钉"单行里出现 `Question: ` 不抢"。
+        """
+        import obsidian_writer as ow
+        c = self._content("- [x] the professor said: Question: is that clear?")
+        self.assertEqual(ow._asked_question(c), self.Q)
+
+
+    def test_answer_worker_passes_context_to_both(self):
+        """⚠️ 这条是**静态的**（读源码），因为它防的那件事**运行时测不到**。
+
+        `answer_worker` 有**两个**调用点要用同一个 `ctx`：
+        ① `answer_user_content(..., context=ctx)` → 这段要**逐字**写回 history
+        ② `translator.answer(..., context=ctx)` → 真正发出去的那一份
+        只要漏掉 ②，模型就**收不到检索材料**，而**不报任何错** ——
+        表现成"这个功能好像没生效"，查起来极难。所以要一条静态断言钉住。
+
+        ⚠️ 它**只能**证明"那行 C 里写了 `context=`"，证明不了值对不对。
+           运行时那半边由上面几条钉。
+        """
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parent.parent / "main.py").read_text(
+            encoding="utf-8")
+        calls = [ln for ln in src.splitlines() if "translator.answer(" in ln]
+        self.assertTrue(calls, "main.py 里找不到 translator.answer( 的调用")
+        self.assertTrue(any("context=" in ln for ln in calls),
+                        f"translator.answer 没把 context 传下去：{calls}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

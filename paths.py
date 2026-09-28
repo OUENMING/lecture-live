@@ -102,3 +102,40 @@ def credentials(*, root=None) -> pathlib.Path:
     不该由程序替用户做（见 `secrets-via-interactive-login`）。
     """
     return (pathlib.Path(root) if root is not None else STATE_ROOT) / "credentials"
+
+
+def voice_dir(*, root=None) -> pathlib.Path:
+    """声纹材料目录（`~/.classlive/voice/`）—— 录下来的课音频 + 档案 + 状态机。
+
+    ⚠️ **为什么是这里而不是 `sessions/`**：`sessions/` 有一条硬规矩
+    「**只读不删、禁通配符**」（曾误删过一节真实课堂记录）。把"默认自动录、
+    96 MB/节"的东西往里堆，等于**在一个不许清理的地方堆垃圾**。
+    放这里之后清理规则是清晰的：**这个目录就是注册材料，攒够了整个可以删**。
+
+    ⚠️ 它同时是**两份不同生命周期**的东西的家（`PLAN` §5）：
+      · `<日期>_<时间>_<课号>.wav`       ← 声纹注册语料（攒到 done 才能删）
+      · `<日期>_<时间>_<课号>.test.wav`  ← `cl test --record-audio` 的调试素材（随时可删）
+    文件名带 `.test` 那一档把两者分开，**免得删一种时误删另一种**。
+    """
+    return (pathlib.Path(root) if root is not None else STATE_ROOT) / "voice"
+
+
+def voice_state(*, root=None) -> pathlib.Path:
+    """声纹注册的**状态机**（`voice-enroll.json`，形状见 `PLAN` §1）。
+
+    它是**唯一的真源**：`cl` 靠 `done` 决定要不要自动加 `--record-audio`，
+    面板靠 `pending` 决定要不要问「上节课听着像 X，对吗」。
+    """
+    return voice_dir(root=root) / "voice-enroll.json"
+
+
+def voice_profiles(*, root=None) -> pathlib.Path:
+    """各课声纹档案（`profiles.json`）—— `{课号: [[float, …], …]}`。
+
+    ⚠️⚠️ **这一份是唯一真源，不是缓存。** `sherpa-onnx` 在 **Python 侧没有
+    "把 embedding 读回来"的接口**（官方 PR #3950 作者逐字：「once an embedding is
+    enrolled there is **no way to read that vector back out**」；本机 1.13.8 与
+    master 的 pybind 都核过）→ 管理器里那份**取不出来**，必须自己另存一份。
+    """
+    return voice_dir(root=root) / "profiles.json"
+

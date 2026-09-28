@@ -206,6 +206,12 @@ def main() -> int:
         if os.environ.get("PROBE_DUMP"):
             _schedule_dump(h, 5.0)
 
+    # `PROBE_SEARCH=<词>` —— 直接跑一遍全库搜索（**只读**，不改任何东西）。
+    if os.environ.get("PROBE_SEARCH"):
+        q = os.environ["PROBE_SEARCH"]
+        print(f"\nPROBE_SEARCH={q!r} —— 直接搜（只读）")
+        AppHelper.callAfter(h.search, q)
+
     AppHelper.runEventLoop()
 
     # 退出后核对：真 glossary 有没有被动过

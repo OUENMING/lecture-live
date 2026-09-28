@@ -112,7 +112,8 @@ RULES:
 ANSWER_MAX_TOKENS = 1400
 
 
-def answer_user_content(question: str, transcript: list[str], follow_up: bool) -> str:
+def answer_user_content(question: str, transcript: list[str], follow_up: bool,
+                        context: str = "") -> str:
     """本轮 user turn 的正文 —— **公开**给调用方: 追问线程要把**逐字相同**的字符串
     写回 history(否则下一轮的前缀就变了, 转录底座会在历史里凭空消失)。
 
@@ -120,10 +121,21 @@ def answer_user_content(question: str, transcript: list[str], follow_up: bool) -
     user/assistant 严格交替是各 OpenAI 兼容实现都吃的最安全形状(DeepSeek 在
     部分模型上明确要求交替), 连续同角色消息的容忍度不统一。
 
+    `context`: **全库检索**捞回来的历史材料（`find.as_context()` 的输出）。
+    ⚠️ 它插在**最前面**，而 `Question: <原话>` 仍然**在最后** —— 那是刻意的：
+       `obsidian_writer._asked_question()` 用 `partition("\\n\\nQuestion: ")` **反解**
+       用户原话（`partition` 取的是**第一个**匹配），所以
+       ① `Question: ` 那行必须是最后一段，② 前面任何一段都**不能**含这个串。
+    ⚠️ 空串 = **整段不加**。别在这里写"没搜到"——prompt 里多一句这种话只会让模型围着它绕。
+
     ⚠️ 末尾那行 `Question: <原话>` 会被 `obsidian_writer._asked_question()` 反解
     回来 —— 落盘"我问过什么"要的是用户原话, 不去猜。改这里的形状 = 同时改那边。"""
     block = "\n".join(t for t in transcript if t)
     parts: list[str] = []
+    if context:
+        parts.append("Related material retrieved from **earlier lectures** by keyword "
+                     "search. It may be irrelevant — judge for yourself, and say so "
+                     "if it doesn't help:\n" + context)
     if block:
         head = ("New lecture speech since your last answer (chronological):"
                 if follow_up else "Lecture transcript so far (chronological):")
@@ -322,7 +334,7 @@ class CloudTranslator:
     # ---- 按需讲解 / 追问(Phase 2) ----
     def answer_stream(self, question: str, transcript: list[str],
                       history: list[dict] | None = None,
-                      on_delta=None) -> str:
+                      on_delta=None, context: str = "") -> str:
         """讲清"教授刚说的这段", 并接续同一条线程里的追问。
 
         - `transcript`: 要附在这次提问上的**课堂转录**。首次提问 = 线程开头冻结的
@@ -339,7 +351,7 @@ class CloudTranslator:
             msgs.append({"role": turn["role"], "content": turn["content"]})
         msgs.append({"role": "user",
                      "content": answer_user_content(question, transcript,
-                                                    bool(history))})
+                                                    bool(history), context=context)})
         buf: list[str] = []
         for delta in self._stream_chat(msgs, max_tokens=ANSWER_MAX_TOKENS):
             buf.append(delta)

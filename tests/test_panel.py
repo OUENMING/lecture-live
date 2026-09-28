@@ -912,6 +912,18 @@ def main() -> int:
     check("⭐ 真 `entry_panel._enter`：混合 -> 收（HIG 子集语义）",
           bool(_card._on_enter(_PB(["/x/a.pdf", "/x/Downloads"]))) is True)
 
+    # ⭐⭐ **跨层端到端**：`_drop` 的返回值必须**跟 `on_drop_files` 走**。
+    #    这一环是 `performDragOperation:` 认不认这次落地的**唯一**依据：
+    #    `panel.perform_drag` 拿到的就是它的返回值（`None` 现在算收，但**真值必须传得上来**）。
+    #    真调用方是 `run_prep`（它 `return True/False`）—— 这里用桩把那条契约钉死。
+    _cd1 = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+                         on_drop_files=lambda c, p: True, width=640.0)
+    _cd0 = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+                         on_drop_files=lambda c, p: False, width=640.0)
+    check("⭐⭐ 真 `_drop` 的返回值**跟 `on_drop_files` 走**（真值传得上来）",
+          _cd1._on_drop(["/x/a.pdf"]) is True and _cd0._on_drop(["/x/a.pdf"]) is False,
+          f"{_cd1._on_drop(['/x/a.pdf'])!r} / {_cd0._on_drop(['/x/a.pdf'])!r}")
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

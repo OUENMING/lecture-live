@@ -112,7 +112,6 @@ else:
     card["set_buttons"]([("按钮一", lambda: None), ("按钮二", lambda: None),
                          ("按钮三", lambda: None)])
 
-from AppKit import NSScreen                                               # noqa: E402
 import panel                                                              # noqa: E402
 panel.place_beside(anchor, card["panel"])
 

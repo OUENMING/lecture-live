@@ -402,22 +402,14 @@ def roll_offset(t: float, line_h: float) -> float:
 
 
 def _make_button_target(on_click):
-    """返回一个 ObjC 按钮目标。
+    """返回一个 ObjC 按钮目标。**定义点已经搬到 `panel.make_button_target`。**
 
-    ⚠️ 类名由 `objc_own` 生成（key `ButtonTarget`）—— **调用方从不提名，所以撞不了名**。
-       `whatsnew.py` 的按钮目标用**同一个 key**：两边本来就是逐字节相同的类，
-       现在真的只有一个。
+    ⚠️ 原来这里是三份逐字节相同的拷贝（本处、`whatsnew._make_target`、`panel` 那份），
+       它们共用 `objc_own` 的同一个 key —— 也就是说**改其中任意一份的闭包体，
+       三处行为会一起变，但只有先被调用的那一份的实现生效**，另外两份成了摆设。
+       2026-09-28 OCR 审计指出这一点，现在只剩 `panel` 那一份真实现。
     """
-    from AppKit import NSObject
-
-    def clicked(self, sender):                  # noqa: N802
-        cb = getattr(self, "_cb", None)
-        if cb:
-            cb()
-
-    t = objc_own.own("ButtonTarget", NSObject, {"clicked_": clicked}).alloc().init()
-    t._cb = on_click
-    return t
+    return panel.make_button_target(on_click)
 
 
 def _xy(p) -> tuple:
@@ -551,6 +543,10 @@ class Overlay:
         self._last_flush = 0.0
         self._last_ev_t = 0.0        # 上次派发事件的时间(决定让步时长, 见 pump)
         self._closed = False         # close() 幂等标志(✕ / Ctrl+C / 正常结束)
+        # ⚠️ 收尾循环靠这个决定「pump 还是 sleep」（见 `main._spin`）——
+        #    不能拿 `args.ui == "overlay"` 当判据：`_load_overlay` 失败时会静默回退
+        #    `TerminalUI()`，那时 args 还写着 overlay → 每轮调空 pump、一次 sleep 都没有。
+        self.drives_appkit = True
         self._cur_zh = ""
         self._cur_en = ""
         self._streaming = False
@@ -1512,7 +1508,6 @@ class Overlay:
             return
         try:
             import whatsnew
-            from AppKit import NSScreen
             self._whatsnew_card = whatsnew.build(
                 **self._whatsnew, flag_path=whatsnew.skip_flag_path(),
                 on_update=self._whatsnew_update)
@@ -2300,10 +2295,20 @@ class Overlay:
             time.sleep(0.05)
 
         if self._closed:
-            self._wrapup_card = None
+            # ⚠️ 要**真的把卡片收掉**，不能只清引用 —— `wrapup.build()` 已经
+            #    `orderFrontRegardless` 了，屏上那张卡会一直留着；而引用一清，
+            #    main 最后调的那个 `ui.wrapup_close()` 就变成**空转**（它读的正是
+            #    这个引用），卡片只能等进程退出才被销毁。
+            #    （2026-09-28 OCR 审计发现。）
+            self.wrapup_close()
             return None
         if ans["v"] is None:
-            return True                                   # 超时 → 默认存
+            # 超时 → 默认存（与终端那条同一个纪律）。⚠️ 但必须**和"点了存入"走同一段
+            # 状态切换**：原来这里直接 `return True`，于是整个精修期间卡上一直留着
+            # 「存入 / 不存」两个按钮（回调只写 `ans`，此后没人再读）和最后那句
+            # 「0 秒后自动存入…」—— 用户点「不存」会以为反悔生效了。
+            # （2026-09-28 OCR 审计发现。）
+            ans["v"] = True
         if ans["v"]:
             # 继续用它显示进度：切成「干活中」，不换卡（换卡会闪一下）。
             card["set_status"]("正在收尾…")
@@ -2313,6 +2318,35 @@ class Overlay:
             card["close"]()
             self._wrapup_card = None
         return bool(ans["v"])
+
+    def wrapup_begin(self, cancel) -> None:
+        """进入「干活中」阶段：给卡装一个 [跳过精修] 按钮。
+
+        ⚠️ `cancel` 是个 `threading.Event`（由 main 建、worker 读）。这里的回调
+           **只置位**，真正停下来发生在 worker 的**批次边界**
+           （见 `polish.polish_entries` 里那段注释）。
+        ⚠️ 卡上这个按钮与终端的 **Ctrl+C 走同一条路** —— 两者都只能靠标志跨线程，
+           因为收尾跑在 worker 上、而 Python 的信号只在主线程跑（PEP 475）。
+        ⚠️ 这是 AppKit 主线程回调：**不许联网、不许 sleep**（见 `_ask` 上方那条）。
+        """
+        card = getattr(self, "_wrapup_card", None)
+        if card is None:
+            return
+        try:
+            def skip():
+                try:
+                    cancel.set()
+                except Exception:                         # noqa: BLE001
+                    pass
+                try:
+                    card["set_buttons"]([])
+                    card["set_hint"]("已请求跳过 —— 正在把笔记写出来…")
+                except Exception:                         # noqa: BLE001
+                    pass
+
+            card["set_buttons"]([("跳过精修", skip)])
+        except Exception:                                 # noqa: BLE001
+            pass
 
     def wrapup_progress(self, stage: str, done: int, total: int) -> None:
         """⚠️ 这个**从工作线程被调** —— UI 回写一律回主线程（`CLAUDE.md` 的不变量）。
@@ -2328,6 +2362,15 @@ class Overlay:
 
     def wrapup_done(self, ok: bool, msg: str) -> None:
         """⚠️ 同样**从工作线程被调**。看板不自动关 —— 由 main 决定去留。"""
+        # ⚠️⚠️ **必须在这里同步置位，不能等 `_wrapup_finish` 去置。**
+        #    `_wrapup_ui` 走 `AppHelper.callAfter`（= `performSelectorOnMainThread:
+        #    withObject:waitUntilDone:NO`）—— **即使从主线程调也只是入队**，要等下一轮
+        #    runloop 才执行。而调用方（main 的「失败留住」循环）紧接着就求值
+        #    `wrapup_acknowledged()`，而那次求值**先于任何 `pump()`** → 此刻
+        #    `_wrapup_finish` 还没跑，`getattr(..., True)` 的默认值 `True` 直接放行
+        #    → 循环一次都不转：失败结论一闪而过、卡也没等到用户点「关闭」就被收掉。
+        #    （2026-09-28 OCR 审计发现。）
+        self._wrapup_acked = False
         self._wrapup_ui(self._wrapup_finish, bool(ok), str(msg or ""))
 
     def _wrapup_ui(self, fn, *a) -> None:

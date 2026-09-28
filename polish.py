@@ -87,7 +87,8 @@ def _chat(key: str, model: str, system: str, user: str,
 def polish_entries(entries: list[dict], api_key: str, model: str,
                    course_terms: list[str] | None = None, domain: str = "",
                    batch: int = POLISH_BATCH, timeout: float = 180.0,
-                   on_progress=None, stats: dict | None = None) -> list[dict]:
+                   on_progress=None, stats: dict | None = None,
+                   cancel=None) -> list[dict]:
     """返回精修后的新 entries 列表(不改入参)。无 key / 无内容 -> 原样返回。
 
     stats: 可选 dict, 函数把 {"batches", "failed", "applied"} 写进去。精修失败是
@@ -111,6 +112,16 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
     terms = "\n".join(course_terms or []) or "(无)"
     batches = failed = applied = 0
     for start in range(0, n, batch):
+        # ⚠️ **取消只在批次边界生效** —— 一次请求已经在飞了就不再掐它（掐了也是一样的
+        #    等待时间，却会白白丢掉这一批的结果）。所以「跳过」最多晚一批。
+        #    ⚠️ 2026-09-28 由 OCR 审计逼出来的：收尾搬进 worker 之后，**Ctrl+C 只投递到
+        #    主线程**，worker 再也收不到 KeyboardInterrupt —— 那道
+        #    `except KeyboardInterrupt` 护栏在真流程里是死的。取消标志是唯一能跨线程
+        #    让「跑了一半的长活」停下来的东西（卡上那个 [跳过精修] 按钮走同一条路）。
+        if cancel is not None and cancel.is_set():
+            if stats is not None:
+                stats["cancelled"] = True
+            break
         batches += 1
         chunk = out[start:start + batch]
         lines = []
@@ -164,7 +175,11 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
             # 对这一批而言与失败等价。不记的话调用方会把它当"精修过了"。
             failed += 1
         if on_progress:
-            on_progress("polish", min(start + len(chunk), n), n)
+            # ⚠️ `got == 0`（请求成功但**一条都没采纳**）也算这一批没成 —— 与上面两个
+            #    失败分支**口径一致**。只报 `polish` 的话，一整节课精修全挂掉时
+            #    进度条照样走到 100%，读起来像成功了。（2026-09-28 OCR 审计发现。）
+            on_progress("polish_partial" if got == 0 else "polish",
+                        min(start + len(chunk), n), n)
     if stats is not None:
         stats.update({"batches": batches, "failed": failed, "applied": applied})
     return out

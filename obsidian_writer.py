@@ -316,9 +316,12 @@ _POLISH_NOTE = {
     "off": "⚠ 本课**未精修** —— 未配 API key 或精修已关, EN/ZH 为直播版。",
     "failed": "⚠ 本课**精修未生效** —— 调用失败、返回结构异常, 或一条都没采纳; EN/ZH 为直播版。",
     "partial": "⚠ 本课**部分批次精修失败** —— 失败批次保留直播版, 见下逐句转录。",
-    # ⚠️ 用户按 Ctrl+C 主动跳过。它**不是失败**（调用没出错），所以单独一档 ——
-    #    写成 failed 会让人以为 API 出问题了，然后去查一个不存在的问题。
-    "interrupted": "⚠ 本课**精修被跳过**（收尾时中断）—— EN/ZH 为直播版。",
+    # ⚠️ 用户主动跳过（Ctrl+C / 卡上的 [跳过精修]）。它**不是失败**（调用没出错），
+    #    所以单独一档 —— 写成 failed 会让人以为 API 出问题了，然后去查一个不存在的问题。
+    #    ⚠️ 措辞要同时盖住两种情形：① 一批都没跑（KeyboardInterrupt 在半路抛的，
+    #       `entries` 原封不动）② 跑到某个批次边界才取消（前面几批**已经生效**）。
+    #       所以不能写死「EN/ZH 为直播版」。
+    "interrupted": "⚠ 本课**精修被跳过** —— 未跑到的那部分是直播版，已生效的批次保留。",
 }
 
 
@@ -472,7 +475,7 @@ class ObsidianWriter:
                 out[k] = v
         return out
 
-    def _review(self, entries: list[dict]) -> dict:
+    def _review(self, entries: list[dict], on_progress=None) -> dict:
         """LLM 生成复习层(英文知识点详解 + 概览 + 自测)。无 key / 失败 -> {}。
 
         长课**分块**生成再合并: 一堂 40 分钟的课有数百句, 一次性输出会撑爆
@@ -493,6 +496,15 @@ class ObsidianWriter:
         plain: list[str] = []                 # 未加时间前缀的小标题(供总览使用)
         qa: list[dict] = []
         for ci, chunk in enumerate(chunks):
+            # ⚠️ `review` 这个 stage 名定义在 `polish.STAGE_NAME` 里却**从来没有发出过**
+            #    （2026-09-28 OCR 审计发现）—— 复习层按 `REVIEW_CHUNK` 分块、579 句
+            #    不止一轮 LLM，而收尾卡上这一段**一点进度都看不到**，正是把收尾搬进
+            #    worker + 做卡片的主要动机所在。这里补上。
+            if on_progress is not None:
+                try:
+                    on_progress("review", ci, len(chunks))
+                except Exception:                         # noqa: BLE001
+                    pass
             r = self._call_review("\n".join(chunk))
             if not r:
                 continue
@@ -862,7 +874,7 @@ class ObsidianWriter:
         return "\n".join(L) + "\n"
 
     # ---- 结束: 询问是否进 Obsidian ----
-    def close(self, ask=None, qa=None, on_progress=None) -> str:
+    def close(self, ask=None, qa=None, on_progress=None, cancel=None) -> str:
         """`qa` = 问答线程 history 的快照(list), 或**取快照的函数**。
 
         ⚠️ 不能走构造函数: writer 在 run() 里**先**建, qa 状态比它晚。
@@ -876,6 +888,13 @@ class ObsidianWriter:
         (2026-09-28 起收尾整段可以跑在 worker 上), 所以实现里**不许碰 AppKit**。
         形状与 `prep.py:952` 一致; stage 的取值见 `polish.STAGE_NAME`。
         ⚠️ 它只是**额外**的通路 —— 终端那行人话照旧 `print` 出去, 两者都要有。
+
+        `cancel`: 一个 `threading.Event`, 置位后**在批次边界**放弃精修/复习层,
+        **但仍然把笔记写出来**(用直播版 / 已精修到一半的那一份)。
+        ⚠️ 为什么需要它: 收尾跑在 worker 上之后, **`KeyboardInterrupt` 只投递到主线程**,
+           worker **永远收不到** —— 上面那两处 `except KeyboardInterrupt` 护栏在真实
+           流程里是死的。跨线程让长活停下来只能靠标志。卡上的 [跳过精修] 按钮
+           与终端的 Ctrl+C 走的是同一条路。
         """
         # ⚠️ 关旁路句柄放在**最前面**：`close()` 有三条早退（未启用 / 零句又无问答 /
         #    用户答"不保存"），放在后面就会在那些路径上漏掉它。幂等，重复调无妨。
@@ -930,8 +949,14 @@ class ObsidianWriter:
                     entries, self._key, self._polish_model,
                     course_term_list(self._glossary_path, self._course),
                     course_title(self._glossary_path, self._course),
-                    on_progress=_prog, stats=pstats)
+                    on_progress=_prog, stats=pstats, cancel=cancel)
                 polish_state = _polish_state(pstats)
+                if pstats.get("cancelled"):
+                    # 用户在批次边界叫停了（Ctrl+C / 卡上的 [跳过精修]）。
+                    # ⚠️ 与 `polish: failed` **分开记**：那不是调用出错，别让人去查
+                    #    一个不存在的问题。已生效的批次照旧留在 entries 里。
+                    polish_state = "interrupted"
+                    print("⚠ 精修被跳过（用户取消）；已生效的批次保留", flush=True)
                 if polish_state == "failed":
                     print(f"⚠ 精修未生效(applied=0 句, 失败批次 "
                           f"{pstats.get('failed')}/{pstats.get('batches')}); "
@@ -959,11 +984,15 @@ class ObsidianWriter:
             print("🤖 正在生成复习层(知识点详解 + 自测)…", flush=True)
         # ⚠️ 同 `polish` 那条：`_review` 也要跑好几轮 LLM（按 REVIEW_CHUNK 分块，
         #    579 句不止一轮），中断它同样**不许**带走底座。
-        try:
-            review = self._review(entries)
-        except KeyboardInterrupt:
+        if cancel is not None and cancel.is_set():
             review = {}
-            print("⚠ 复习层被中断；笔记照常生成（只有逐句转录）", flush=True)
+            print("⚠ 已跳过复习层（用户取消）；笔记照常生成", flush=True)
+        else:
+            try:
+                review = self._review(entries, on_progress=_prog)
+            except KeyboardInterrupt:
+                review = {}
+                print("⚠ 复习层被中断；笔记照常生成（只有逐句转录）", flush=True)
         # 问答行自带 try/except: 渲染问答抛出去就再也没有那份转录笔记了。隔离是硬要求:
         # 笔记的底座是逐句转录, 它是不能丢的那件事; 问答只是额外一层。
         # ⚠️ 2026-09-28 起这条纪律**四层都补齐了**（polish / review / qa / lost）；

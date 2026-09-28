@@ -91,7 +91,11 @@ def build(*, title: str = "收尾", on_close=None):
         f_status = NSFont.systemFontOfSize_(STATUS_FONT_SZ)
         f_hint = NSFont.systemFontOfSize_(HINT_FONT_SZ)
 
-        def mk(text, size, alpha, font, bold=False, wrap=False):
+        def mk(text, alpha, font, wrap=False):
+            # ⚠️ 不要加 `size` / `bold` 形参 —— 字号与字重**都在 `font` 里**
+            #    （调用点自己 `systemFontOfSize_weight_` 构造）。2026-09-28 OCR 审计
+            #    指出：原来那两个形参在函数体里从没被用过，`bold=True` 被静默忽略，
+            #    维护者会以为「标题的粗体靠 bold 生效」从而改错地方。
             lb = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10))
             lb.setEditable_(False)
             lb.setSelectable_(False)
@@ -107,9 +111,9 @@ def build(*, title: str = "收尾", on_close=None):
             ve.addSubview_(lb)
             return lb
 
-        title_lbl = mk(title, TITLE_FONT_SZ, 1.0, f_title, bold=True)
-        status_lbl = mk("", STATUS_FONT_SZ, 0.92, f_status, wrap=True)
-        hint_lbl = mk("", HINT_FONT_SZ, 0.55, f_hint)
+        title_lbl = mk(title, 1.0, f_title)
+        status_lbl = mk("", 0.92, f_status, wrap=True)
+        hint_lbl = mk("", 0.55, f_hint)
         inner_w = WIDTH - 2 * PAD
 
         targets: list = []
@@ -127,6 +131,22 @@ def build(*, title: str = "收尾", on_close=None):
             f = p.frame()
             top = f.origin.y + f.size.height          # 顶边固定，往下长
             p.setFrame_display_(NSMakeRect(f.origin.x, top - h, WIDTH, h), True)
+            # ⚠️⚠️ **三层必须跟着窗口一起改**（2026-09-28 OCR 审计发现，实测确认）。
+            #    `panel.build` 那一刻按初始尺寸定死了它们，而它们是 `contentView` 的
+            #    **子视图** —— AppKit 对代码建的视图**默认不自动缩放**。于是卡片一变高，
+            #    `glass` 还停在旧高度：**实测窗口 380×272 / glass 380×200**，
+            #    顶部 72px **没有磨砂背景**。
+            #    ⚠️ 变矮时反而看不出来（glass 从底部往上盖，多出来那截被窗口裁掉）
+            #       ——所以这个 bug **只在状态文字变长时露头**，四个渲染阶段里
+            #       只有"超长状态"那一个能撞到，我恰好没渲染过它。
+            inner = NSMakeRect(0, 0, WIDTH, h)
+            for layer in (fp.glass, getattr(fp, "scrim", None),
+                          getattr(fp, "drag", None)):
+                if layer is not None:
+                    try:
+                        layer.setFrame_(inner)
+                    except Exception:                     # noqa: BLE001
+                        pass
             for lb, y_, h_ in (
                 (title_lbl, h - PAD - TITLE_H, TITLE_H),
                 (status_lbl, PAD + BTN_H + GAP_BTN + HINT_H + GAP_HINT, sh + 2),

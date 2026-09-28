@@ -183,12 +183,33 @@ def t_review_interrupt():
     with tempfile.TemporaryDirectory() as d:
         w = _writer(d, api_key="k", polish=False)
 
-        def boom(entries):
+        def boom(entries, on_progress=None):       # 签名要跟实现走（多了 on_progress）
             raise KeyboardInterrupt
         w._review = boom
         w.close()
         assert w.vault_path and pathlib.Path(w.vault_path).exists(), (
             "复习层被打断后笔记没写出来")
+
+
+@case("⭐⭐ 取消标志置位 → 跳过精修，但笔记**仍然**写出来")
+def t_cancel_still_writes():
+    """⭐ 这条是「Ctrl+C / [跳过精修] 不丢笔记」的核心保证。
+
+    ⚠️ 为什么要靠标志而不是 KeyboardInterrupt：收尾跑在 **worker** 上，而 Python
+       的信号只在主线程跑（PEP 475）—— worker 永远收不到中断。所以上面那两条
+       `except KeyboardInterrupt` 判据**在真实流程里是死的**，真正兜底的是这个标志。
+    """
+    import threading
+    with tempfile.TemporaryDirectory() as d:
+        w = _writer(d, api_key="k", polish=True)
+        cancel = threading.Event()
+        cancel.set()                               # 一进来就叫停
+        w.close(cancel=cancel)
+        assert w.vault_path and pathlib.Path(w.vault_path).exists(), (
+            "取消后笔记没写出来 —— 取消的语义是「跳过精修」，不是「放弃笔记」")
+        txt = pathlib.Path(w.vault_path).read_text(encoding="utf-8")
+        assert "未跑到的那部分是直播版" in txt, (
+            f"frontmatter 该记「精修被跳过」那一档，实际没找到：\n{txt[:300]}")
 
 
 @case("中断那一档在 frontmatter 与人话里都写得明白（不是 failed）")
@@ -209,7 +230,60 @@ def t_interrupt_state():
         assert "精修被跳过" in txt, "该有人话解释，不是只写个代号"
 
 
-# ---------------------------------------------------------------- 进度回调
+@case("⭐⭐ 窗口在问话前就关了（✕ 正常停止）→ 走终端，不许跳过 writer.close()")
+def t_route_after_close():
+    """⭐ 2026-09-28 的回归就是这一条。
+
+    `✕` 是 overlay 模式的**正常停止方式**（`README.md:310` 逐字：「点悬浮窗右上角
+    ✕，或终端按 Ctrl+C（两者都是优雅退出：冲刷队列 + **落盘**）」），而
+    `ask_save()` 一看到 `_closed` 就返回 `None` → `give_up` → **整份
+    `writer.close()` 被跳过，这节课一个字笔记都不写**。
+    """
+    class _Shut:
+        _closed = True
+
+        def ask_save(self, n, timeout=60.0):
+            return None                      # 关着的窗口只会返回 None
+    assert main._wrapup_route(_Shut(), True) == "terminal", (
+        "窗口已关时必须退回终端那条（它默认存），"
+        "走 UI 那条会 give_up → 整节课没笔记")
+
+
+@case("窗口还开着 → 走 UI（在卡上问）")
+def t_route_open():
+    class _Open:
+        _closed = False
+
+        def ask_save(self, n, timeout=60.0):
+            return True
+    assert main._wrapup_route(_Open(), False) == "ui"
+
+
+@case("TerminalUI（有 ask_save 但没驱动 AppKit）→ 仍走终端那条实现")
+def t_route_terminal():
+    assert main._wrapup_route(main.TerminalUI(), False) == "ui", (
+        "TerminalUI.ask_save 本身就是终端实现，走它没问题")
+    assert main.TerminalUI().drives_appkit is False
+
+
+@case("⭐ 卡片变高时 glass 跟着变（不跟的话顶部就没有磨砂底）")
+def t_card_layers_follow_height():
+    """⚠️ 2026-09-28 OCR 审计发现：`glass`/`scrim`/`drag` 是 `contentView` 的
+    **子视图**，AppKit 对代码建的视图**默认不自动缩放** → 卡片一变高，glass 还停在
+    初始高度（实测窗口 380×272 / glass 380×200）。
+    ⚠️ 变矮时看不出来（glass 从底部往上盖，多出来那截被窗口裁掉）——
+       所以只有"状态文字变长"能撞到它。
+    """
+    import wrapup
+    card = wrapup.build()
+    assert card is not None, "卡片没建起来（这条判据需要 AppKit）"
+    card["set_status"]("很长" * 200)          # 逼它变高
+    win_h = card["panel"].frame().size.height
+    glass_h = card["_fp"].glass.frame().size.height
+    assert abs(win_h - glass_h) < 1.0, (
+        f"窗口高 {win_h:.0f} 而 glass 高 {glass_h:.0f} —— "
+        f"顶部 {win_h - glass_h:.0f}px 没有磨砂背景")
+    card["close"]()
 @case("⭐ `polish_entries` 的 on_progress 是 (stage, done, total) 三元组")
 def t_progress_shape():
     seen: list[tuple] = []

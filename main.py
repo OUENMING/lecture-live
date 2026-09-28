@@ -165,6 +165,27 @@ def _input_timed(prompt: str, timeout: float) -> str | None:
     return None if line == "" else line.strip()
 
 
+def _wrapup_route(ui, ui_gone: bool) -> str:
+    """收尾那句「存不存」走哪条路：`"ui"` 还是 `"terminal"`。
+
+    ⚠️⚠️ **「窗口在问话之前就关了」≠「用户想放弃这份笔记」。**
+       `✕` 正是 overlay 模式的**正常停止方式** —— `README.md:310` 逐字写着
+       「点悬浮窗右上角 **✕**，或终端按 **Ctrl+C**（两者都是**优雅退出**：
+       冲刷队列 + **落盘**）」，`docs/DESIGN.md:92` 同款，六处文档一致。
+
+       2026-09-28 的回归就出在这里：`Overlay.ask_save()` 一进来看到 `_closed`
+       就返回 `None`，于是一路 `give_up` → **整份 `writer.close()` 被跳过，
+       这节课一个字笔记都不写**。改前 ✕ 走的是 `_ask_save_notes`，那条对超时 /
+       EOF **一律默认存**。
+
+       → 窗口**已经**关了的时候退回终端那条；只有「问话**期间**被关窗」才算真的放弃。
+       （由 OCR 审计发现，`main.py` 那一段现在直接调它。）
+    """
+    if ui_gone:
+        return "terminal"
+    return "ui" if callable(getattr(ui, "ask_save", None)) else "terminal"
+
+
 def _ask_save_notes(n: int) -> bool:
     """结束时问是否存入 Obsidian。
 
@@ -305,6 +326,13 @@ class EngineRouter:
 
 
 class TerminalUI:
+    # ⚠️ 这个类**不驱动 AppKit** —— `pump()` 是空操作。收尾循环靠它决定
+    #    「pump 还是 sleep」：拿 `args.ui == "overlay"` 当判据是错的，
+    #    因为 `_load_overlay` 失败时会**静默回退** `TerminalUI()`，那时 args 还写着
+    #    overlay → 每轮都调一个空 pump、**一次 sleep 都没有 → 纯烧 CPU**。
+    #    （2026-09-28 OCR 审计发现。）
+    drives_appkit = False
+
     def __init__(self):
         self._zh = ""
         self._en = ""
@@ -351,6 +379,11 @@ class TerminalUI:
         return _ask_save_notes(n)
 
     def wrapup_progress(self, stage, done, total):
+        pass
+
+    def wrapup_begin(self, cancel):
+        # 终端那条路没有可点的按钮 —— 「跳过精修」在那里就是 Ctrl+C，
+        # 而 Ctrl+C 由 `run()` 的收尾循环接住并置同一个 `cancel`。
         pass
 
     def wrapup_done(self, ok: bool, msg: str):
@@ -1580,43 +1613,74 @@ def run(args) -> None:
 
                 ⚠️⚠️ **这一步就是"不冻主线程"本身** —— 没有它，收尾期间窗口是死的，
                    ✕ 按不动，`terminate:` 也收不到。
-                ⚠️ TerminalUI 的 pump 是空操作，得给它加个 sleep，否则纯烧 CPU。"""
+                ⚠️ 判据是 `drives_appkit`（**UI 对象自己说的**），不是 `args.ui`：
+                   `_load_overlay` 失败时会**静默回退** `TerminalUI()`，那时 args 还写着
+                   overlay → 每轮都调一个空 pump、**一次 sleep 都没有 → 纯烧 CPU**。
+                   （2026-09-28 OCR 审计发现。）"""
+                appkit = bool(getattr(ui, "drives_appkit", False))
                 while not until() and not _ui_gone():
-                    if args.ui == "overlay":
+                    if appkit:
                         ui.pump()
                     else:
                         time.sleep(0.02)
 
             save, give_up, _box = True, False, {}
             if writer.mode == "ask":
-                _ask = getattr(ui, "ask_save", None)
-                ans = (_ask_save_notes(writer.count) if _ask is None
-                       else _ask(writer.count))
-                if ans is None:
-                    # ⚠️ 只有 Overlay 会返回 None（用户按了 ✕ / 菜单退出）——
-                    #    `TerminalUI.ask_save` 走 `_ask_save_notes`，那条对超时与 EOF
-                    #    一律返回 True，永远不会是 None。所以这句话不会误报。
-                    give_up = True
-                    echo("⏹ 收尾中止：窗口已关闭（笔记未写；逐句日志仍在 sessions/）")
+                if _wrapup_route(ui, _ui_gone()) == "terminal":
+                    # 窗口已经关了（✕ = 正常停止）或这个 UI 没有卡 —— 走终端那条，
+                    # 它对超时 / EOF 一律**默认存**。理由见 `_wrapup_route` 的 docstring。
+                    ans = _ask_save_notes(writer.count)
+                else:
+                    ans = ui.ask_save(writer.count)
+                    if ans is None:
+                        # ⚠️ 只有「问话**期间**被关窗」才走到这里 —— 那是用户看着
+                        #    卡上那句「关窗 = 放弃这份笔记」做的决定。
+                        give_up = True
+                        echo("⏹ 收尾中止：窗口在问话时被关掉"
+                             "（笔记未写；逐句日志仍在 sessions/）")
                 save = bool(ans)
 
+            _cancel = threading.Event()
             if not give_up:
+                # 卡上装一个 [跳过精修]（终端那条是空操作）。与 Ctrl+C 同一条路。
+                _ui_begin = getattr(ui, "wrapup_begin", None)
+                if callable(_ui_begin):
+                    _ui_begin(_cancel)
                 _done = threading.Event()
 
                 def _wrap():
                     try:
                         _box["msg"] = writer.close(ask=lambda n: save,
                                                    qa=qa_snapshot,
-                                                   on_progress=_ui_progress)
+                                                   on_progress=_ui_progress,
+                                                   cancel=_cancel)
                     except BaseException as e:            # noqa: BLE001
                         _box["err"] = e
                     finally:
                         _done.set()                       # ⚠️ 不置的话主线程等到天荒
 
                 threading.Thread(target=_wrap, daemon=True).start()
-                _spin(_done.is_set)
-                # ⚠️ Ctrl+C 落在 worker 上是打不到的（信号只进主线程）—— 它会打在主
-                #    线程的 `_spin` 上，异常从这里穿出去，与今天的行为一致。
+                # ⚠️⚠️ **Ctrl+C 打不到 worker 上** —— Python 的信号 handler 只在主线程跑
+                #    （PEP 475），所以中断永远落在这一句 `_spin` 里。不接住的话异常从这里
+                #    穿出去，进程立刻退出，**把正在写盘的 daemon worker 连同写到一半的
+                #    笔记一起杀掉** —— 那正是 `obsidian_writer` 里那两处
+                #    `except KeyboardInterrupt` 要防的事，而它们**在真实流程里收不到中断**
+                #    （只有 `rebuild_note.py` 那种同步调 `close()` 的路径才收得到，
+                #     所以 `tests/test_wrapup.py` 全绿也说明不了这条）。
+                #    （2026-09-28 OCR 审计发现。）
+                #    → 第一次 Ctrl+C：置 `_cancel`，让它在**批次边界**停下来、**笔记照写**。
+                #      第二次：真要立刻走，放它抛。
+                while True:
+                    try:
+                        _spin(_done.is_set)
+                        break
+                    except KeyboardInterrupt:
+                        if _cancel.is_set():
+                            echo("\n⏹ 强制退出 —— 笔记没写完，逐句日志仍在 sessions/")
+                            raise
+                        _cancel.set()
+                        echo("\n⏹ 已请求跳过精修，正在把笔记写出来…"
+                             "（再按一次 Ctrl+C 强制退出，笔记不会写）")
                 if "err" in _box:
                     raise _box["err"]
 
@@ -1625,7 +1689,14 @@ def run(args) -> None:
                 echo(msg)
 
             # ---- 结论：成功自动退，失败留住 -------------------------------
-            _ok = "err" not in _box and bool(msg) and not give_up
+            # ⚠️ 判据**只看 worker 有没有抛异常** —— 不能拿 `bool(msg)`。
+            #    `close()` 有两条**合法的空返回**：① `not enabled or not session_path`；
+            #    ② 零句又无问答（麦克风故障 / 开课十几秒就退 —— `close()` 那段注释里
+            #    明说这是真实场景）。拿 `bool(msg)` 判会把它们当成失败：卡上打
+            #    「⚠ 收尾失败」（**其实什么都没失败**），还卡在「失败留住」等用户
+            #    点关闭；而重构前那两条是**静默成功退出**的。
+            #    （2026-09-28 OCR 审计发现。）
+            _ok = "err" not in _box and not give_up
             _done_ui = getattr(ui, "wrapup_done", None)
             if _done_ui is not None:
                 _done_ui(_ok, msg or ("收尾失败" if not _ok else "收尾结束"))

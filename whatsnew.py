@@ -330,23 +330,15 @@ def build(version: str, summary: str, date: str = "", log: str = "",
 
 
 def _make_target(cb):
-    """包一个 ObjC target 对象。
+    """包一个 ObjC target 对象。**定义点已经搬到 `panel.make_button_target`。**
 
-    ⚠️ 与 `overlay._make_button_target` **共用同一个类**（`objc_own` 的 key
-       `ButtonTarget`）—— 它们本来就是逐字节相同的，以前是两份拷贝。
-       类名由 `objc_own` 生成，调用方从不提名，所以撞不了名。
-    ⚠️ 必须由调用方持引用，否则被 GC。
+    ⚠️ 原来这里与 `overlay._make_button_target` 是两份逐字节相同的拷贝，共用
+       `objc_own` 的同一个 key —— 也就是**改其中任意一份的闭包体，三处行为会一起变，
+       但只有先被调用的那一份实现生效**，另两份成了摆设。2026-09-28 OCR 审计指出，
+       现在只剩 `panel` 那一份真实现。
+    ⚠️ 必须由调用方持引用，否则被 GC（`setTarget_` 是弱引用）。
     """
-    from AppKit import NSObject
-
-    def clicked(self, sender):                            # noqa: N802
-        f = getattr(self, "_cb", None)
-        if f:
-            f()
-
-    t = objc_own.own("ButtonTarget", NSObject, {"clicked_": clicked}).alloc().init()
-    t._cb = cb
-    return t
+    return panel.make_button_target(cb)
 
 
 def seen_flag_path() -> pathlib.Path:

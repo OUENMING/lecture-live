@@ -186,6 +186,43 @@ def kept_added(entry) -> list[str]:
     return [t for t in (e.get("added") or []) if t not in gone]
 
 
+def abort_msg(code) -> str:
+    """prep 的 abort 代号 -> **人话**。
+
+    ⚠️ 文案的**唯一定义点是 `prep.ABORT_MSG`**（9 条，多条还带「**术语表一个字没动**」
+       —— 那正是用户此刻最要知道的事）。这里只做**取值 + 兜底**，不重写文案。
+    ⚠️ 兜底返回**代号本身**：宁可难看也别给空白 —— 空白会被读成"没出错"。
+    """
+    if not code:
+        return ""
+    try:
+        import prep as prep_mod
+        return prep_mod.ABORT_MSG.get(str(code)) or str(code)
+    except Exception:                                     # noqa: BLE001
+        return str(code)
+
+
+def failure_text(fr) -> str:
+    """一条失败记录 -> **一行人话**：`⚠️ 文件名 — 原因`。
+
+    ⭐ **纯函数**（可单测，不用 AppKit）。喂它 `prep.FileReport`
+      （`prep.py:647-654`：`path, status, chars, blocks, skipped_shapes, ocr_pages, error`）。
+
+    ⚠️ 已有数据里就有原因 —— `entry_panel.py` 原来只 `len()` 它，所以用户看到
+       「N 个文件失败」而**不知道是哪个、为什么**（`PLAN-entry-panel §3.6` 三条硬要求
+       里差的那两条；调研抄的措辞是 `'Upload failed' is not a message`）。
+    ⚠️ 取 `error` 优先、`status` 兜底。实测 `failed` 只会是 `empty`/`unreadable`/
+       `unsupported` 三种，而这三条的 `error` **全都非空**（`extract.py:123/126/135/140`）
+       → 兜底**实践中走不到**，留它是安全网。
+    ⚠️ 必须**单行**：那一行的框只有 16pt 高，换行会被静默吃掉（异常串里常带换行）。
+    """
+    p = getattr(fr, "path", None)
+    name = getattr(p, "name", None) or str(p or "").rsplit("/", 1)[-1] or "(未知文件)"
+    why = (getattr(fr, "error", "") or "") or (getattr(fr, "status", "") or "")
+    why = " ".join(str(why).split())
+    return f"⚠️ {name} — {why}" if why else f"⚠️ {name}"
+
+
 def result_header(entry) -> str:
     """结果区那一行。**计数从 `kept_added` 来**，不另存一个数、也不另算一遍。"""
     e = entry or {}
@@ -196,6 +233,10 @@ def result_header(entry) -> str:
         parts.append(f"另有 {len(e['not_added'])} 个没加")
     if e.get("failed"):
         parts.append(f"⚠️ {len(e['failed'])} 个文件失败")
+    if e.get("aborted"):
+        # ⚠️ 头部**只给状态**，人话落在结果区的行里（`abort_msg` 那 9 条是整句，
+        #    塞进这行紧凑的 `　·　` 串里会把它撑爆）。
+        parts.append("⚠️ 没跑完")
     return "　·　".join(parts)
 
 
@@ -219,7 +260,16 @@ def card_height(entry=None) -> float:
          + BTN_H                                      # 按钮（锚在底部）
          + CARD_PAD)                                  # 下
     if entry is not None:
-        n = len(kept_added(entry)) + (1 if entry.get("undo") else 0)
+        # ⚠️⚠️ **这里的项数必须与 `_make_card` 里那几圈行循环逐项对应** ——
+        #     两处是同一件事的两个定义点，没有机制保证同步，只有
+        #     `tests/test_panel.py` 那条「没有子视图超出卡片高度」能兜住（它要求
+        #     夹具里**真的有**这些内容，否则兜不住）。
+        #     2026-09-28 加 `failed` / `not_added` / `aborted` 三档时就是成对改的。
+        n = (len(kept_added(entry))                        # 加了（每条一个「删」按钮）
+             + (1 if entry.get("undo") else 0)             # 撤销
+             + len(entry.get("failed") or [])              # 失败（逐文件，带原因）
+             + len(entry.get("not_added") or [])           # 没加（逐条）
+             + (1 if entry.get("aborted") else 0))         # 没跑完的人话
         h += RESULT_LEAD + n * RESULT_ROW
     return h
 
@@ -227,10 +277,16 @@ def card_height(entry=None) -> float:
 def progress_text(stage: str, done: int, total: int) -> str:
     """进度文案。stage 是 `prep` 给的机器名，这里只做**显示**。
 
+    ⚠️ **表只有一份，在 `prep.STAGE_NAME`。** 原来这里自己抄了一张，于是它漂了：
+       `append` 文案不一致、`notes` 成了**死键**、而 `build` 落到 `names.get` 的兜底
+       → **把英文原名显示给用户**（本仓库明令的「一条纪律两处定义」，`SCRIM_ALPHA` 同款）。
     ⚠️ 不认识 stage 也不要显示空白 —— 宁可显示原名，也别让人以为卡住了。
     """
-    names = {"extract": "抽文本", "candidates": "抽候选词",
-             "append": "写入", "notes": "生成释义"}
+    try:
+        import prep as prep_mod
+        names = prep_mod.STAGE_NAME
+    except Exception:                                     # noqa: BLE001
+        names = {}
     label = names.get(stage, stage)
     return f"{label} {done}/{total}…" if total > 0 else f"{label}…"
 
@@ -391,10 +447,19 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width,
         view.addSubview_(panel.make_label(
             result_header(entry),
             NSMakeRect(CARD_PAD, y + 6.0, inner_w, RESULT_LEAD - 6.0), 11.0, alpha=DIM))
+        # 「没跑完」的人话紧跟头部 —— **它是那一屏的头版**（读序上不该被埋在最后）。
+        # ⚠️ 与 `card_height` 的项数**成对**，见那里的注。
+        if entry.get("aborted"):
+            y -= RESULT_ROW
+            view.addSubview_(panel.make_label(
+                abort_msg(entry["aborted"]),
+                NSMakeRect(CARD_PAD, y + 3.0, inner_w, 16.0), 11.0, alpha=DIM,
+                truncate=True))
         for t in kept_added(entry):
             y -= RESULT_ROW
             view.addSubview_(panel.make_label(
-                t, NSMakeRect(CARD_PAD, y + 3.0, inner_w - 52.0, 16.0), 12.0))
+                t, NSMakeRect(CARD_PAD, y + 3.0, inner_w - 52.0, 16.0), 12.0,
+                truncate=True))               # ⚠️ 长词条名会被静默换行吃掉第二行
             # ⚠️ 「删」**不做确认框**（HIG › Alerts 逐字：「Avoid displaying alerts for
             #    common, undoable actions, even when they're destructive」；理由是同一条
             #    「A confirmation on an obvious action teaches people to dismiss
@@ -411,6 +476,20 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width,
             view.addSubview_(mk("撤销", width - CARD_PAD - 68.0,
                                 on_undo or (lambda: None),
                                 y=y + 1.0, w=68.0, h=RESULT_ROW - 6.0))
+        # ⚠️ 下面两组**没有按钮**（它们不是可操作项，是要看的信息），所以能用满 `inner_w`。
+        # ⚠️ 都传 `truncate=True` —— 不传的话默认是 `wraps=True`，超长文本会被**静默换行
+        #    吃掉第二行**（`panel.make_label` 的 docstring 记了这条实测）。
+        for fr in (entry.get("failed") or []):
+            y -= RESULT_ROW
+            view.addSubview_(panel.make_label(
+                failure_text(fr),
+                NSMakeRect(CARD_PAD, y + 3.0, inner_w, 16.0), 11.0, alpha=DIM,
+                truncate=True))
+        for t in (entry.get("not_added") or []):
+            y -= RESULT_ROW
+            view.addSubview_(panel.make_label(
+                t, NSMakeRect(CARD_PAD, y + 3.0, inner_w, 16.0), 12.0,
+                truncate=True))
         # 排完之后 y 应当**恰好**等于 `CARD_PAD + BTN_H`（`card_height` 的算式保证）。
         # 对不上就是算式与坐标漂了 —— 那正是 `tests/test_panel.py` 第 ⑥ 组在量的东西。
 
@@ -584,11 +663,15 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                     "failed": list(getattr(res, "failed", None) or []),
                     "removed": set(),
                     "undo": None,
+                    # ⚠️ abort 代号**存进 entry**：原来只进临时状态行，面板一关就没了。
+                    #    存下来卡片才**持久**说得清"为什么没跑完"（人话在结果区的行里）。
+                    "aborted": str(getattr(res, "aborted", "") or ""),
                 }
                 txt = summarize(res)
                 if getattr(res, "aborted", False):
-                    detail = getattr(res, "aborted", "")
-                    txt = f"{txt}（{detail}）" if isinstance(detail, str) else txt
+                    # ⚠️ 人话优先 —— 原来直接把代号拼上去，用户看到 `all_files_failed`
+                    #    这种机器名（`§9.2 #5`）。
+                    txt = f"{txt}（{abort_msg(getattr(res, 'aborted', ''))}）"
             except Exception as e:                        # noqa: BLE001
                 txt = f"跑失败了：{type(e).__name__}: {e}"
             from PyObjCTools import AppHelper
@@ -697,6 +780,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         """
         entry = S["result"].get(course)
         if entry is None:
+            return
+        # ⚠️ **早拒**：prep 正在跑的时候不要动术语表。
+        #    `prep._course_write_lock` 已经挡住了**破坏**（拿不到锁会抛，见 `d935d5a`），
+        #    但那是"点下去、跑一圈、再报错"；早拒把话说在前面 ——
+        #    用户不会先看到那一行从屏幕上消失、再看到一行失败。
+        if S.get("busy"):
+            set_status("正在跑准备 —— 等它完再删", 1.0)
             return
         import prep as prep_mod
         try:

@@ -391,12 +391,21 @@ def make_drop_target(on_enter, on_drop, on_exit=None, *, types=None):
 
 
 def make_label(text, rect, size, *, alpha=1.0, bold=False, wrap=False,
-               color=None, selectable=False):
+               color=None, selectable=False, truncate=False):
     """面板里的一行文字。**默认不可选、无 bezel、无底色** —— 这三样是每条都要设的。
 
     ⚠️ 别用 `NSFont.systemFontOfSize_` 之外的自造字号（HIG 那 11 档，
        见 `RESEARCH-macos-aesthetic.md` §2.1）；字距也不要手动加（系统字体自带，
        同节实测证伪过「HIG 那张表是让人手动加的」）。
+
+    ⚠️⚠️ **`wrap=False`（默认）不等于"1 行 + 省略号"** —— 实测（2026-09-28）：
+       走默认路时**根本没有调 `setWraps_`**，于是拿到 `NSTextFieldCell` 自己的默认值
+       **`wraps=True` + `byWordWrapping`**。配上 16pt 高的框，效果是
+       **"文字换行、第二行起被悄悄吃掉，而且没有省略号"** ——
+       正是本仓库记过的那个坑（`overlay.py` 文件头：**`1 行 + WordWrapping` 静默吞第二行**），
+       比"硬切"更坏，因为看着像句子就到这儿了。
+       → **长文本要单行省略号，必须显式传 `truncate=True`**（那会设
+       `wraps=False` + `byTruncatingTail`，实测 `lineBreakMode == 4`）。
     """
     from AppKit import NSColor, NSFont, NSTextField
 
@@ -411,6 +420,9 @@ def make_label(text, rect, size, *, alpha=1.0, bold=False, wrap=False,
     lb.setTextColor_(color or NSColor.whiteColor().colorWithAlphaComponent_(alpha))
     if wrap:
         lb.cell().setWraps_(True)
+    elif truncate:
+        from AppKit import NSLineBreakByTruncatingTail
+        lb.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
     return lb
 
 

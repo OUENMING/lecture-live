@@ -82,9 +82,19 @@ def main() -> int:
 
     print("\n--- ④ 进度文案 ---")
     check("认识的 stage -> 中文名", E.progress_text("extract", 3, 7) == "抽文本 3/7…")
-    check("total=0 -> 不带分母", E.progress_text("notes", 0, 0) == "生成释义…")
+    check("total=0 -> 不带分母", E.progress_text("build", 0, 0) == "生成中文释义…")
     check("⚠️ 不认识的 stage -> 显示原名，**不留空白**",
           E.progress_text("weird", 1, 2) == "weird 1/2…")
+    # ⭐⭐ 反向判据：面板的表**就是** `prep.STAGE_NAME`（一份实现）。
+    #    ⚠️ 这条原来钉的是 `progress_text("notes", …) == "生成释义…"` —— 而 `notes`
+    #    **正是面板自己抄的那张表里的死键**（`prep.STAGE_NAME` 用的是 `build`）。
+    #    于是那条断言在**钉住缺陷本身**：换掉面板的表之后它才红。
+    import prep as _prep
+    _bad = [k for k in _prep.STAGE_NAME if E.progress_text(k, 1, 2).startswith(k)]
+    check("⭐ `prep.STAGE_NAME` 的每个 key 都落成中文（没有退化成英文原名）",
+          not _bad, str(_bad))
+    check("⭐ 面板不再认识那个死键 `notes`（它本就不在 prep 的表里）",
+          E.progress_text("notes", 0, 0) == "notes…")
 
     print("\n--- ⑤ body 高度：装得下就长，装不下才滚 ---")
     natural5 = 5 * (E.CARD_H + E.CARD_GAP) - E.CARD_GAP
@@ -136,9 +146,40 @@ def main() -> int:
     check("「没加」只在非空时才出现",
           "没加" not in E.result_header({"added": ["a"]})
           and "没加" in E.result_header({"added": ["a"], "not_added": ["x"]}))
+    # ⚠️⚠️ 这条原来喂的是 `("f", "why")` 这个**元组** —— 生产**永远不产生**这个形状
+    #     （`failed` 的元素是 `prep.FileReport`）。于是它只钉住了计数串，还**遮住了
+    #     形状不符**：换上真形状才知道渲染得对不对。2026-09-28 换成真形状 + 加守卫。
+    import prep as _prep
+    _fr = _prep.FileReport(path=pathlib.Path("/x/讲义.docx"), status="unsupported",
+                           chars=0, blocks=0, skipped_shapes=0, ocr_pages=0,
+                           error="不支持的格式：.docx")
+    check("⭐ 失败夹具是生产**真形状**（`prep.FileReport`，不是一个随手元组）",
+          isinstance(_fr, _prep.FileReport) and hasattr(_fr, "error"),
+          type(_fr).__name__)
     check("失败项单独报（逐文件那条的落点）",
-          "1 个文件失败" in E.result_header({"added": [], "failed": [("f", "why")]}),
-          E.result_header({"added": [], "failed": [("f", "why")]}))
+          "1 个文件失败" in E.result_header({"added": [], "failed": [_fr]}),
+          E.result_header({"added": [], "failed": [_fr]}))
+    check("失败行 = `⚠️ 文件名 — 原因`",
+          E.failure_text(_fr) == "⚠️ 讲义.docx — 不支持的格式：.docx",
+          E.failure_text(_fr))
+    check("原因取 `error`；`error` 空才退 `status`（安全网）",
+          E.failure_text(_prep.FileReport(
+              path=pathlib.Path("/x/a.pdf"), status="unreadable", chars=0, blocks=0,
+              skipped_shapes=0, ocr_pages=0, error="")) == "⚠️ a.pdf — unreadable")
+    check("⭐ 失败行必须**单行**（那框只有 16pt，换行会被静默吃掉）",
+          "\n" not in E.failure_text(_prep.FileReport(
+              path=pathlib.Path("/x/b.pdf"), status="unreadable", chars=0, blocks=0,
+              skipped_shapes=0, ocr_pages=0, error="ValueError: 一\n二")))
+    # ⭐ `_ABORT_MSG` 的人话：**不许把代号漏给用户**（`§9.2 #5` 那条：
+    #    用户看到的是 `all_files_failed` 这种机器名）
+    _leak = [c for c in sorted(_prep.ABORT_MSG) if E.abort_msg(c) == c]
+    check("⭐ 每条 abort 代号都有中文人话（不是原代号）", not _leak, str(_leak))
+    check("未知代号退原名（宁可难看也别空白）",
+          E.abort_msg("something_new") == "something_new")
+    check("⭐ 卡片头只说状态 —— 整句人话落成结果区的一行",
+          E.result_header({"added": [], "aborted": "all_files_failed"})
+          == "本次加了 0 个　·　⚠️ 没跑完",
+          E.result_header({"added": [], "aborted": "all_files_failed"}))
     # ⚠️ 原来这里是两条**恒真**的断言（OCR 指出）：一条 `check(..., True)`，
     #    一条断言的是 Python 字面量 `{"a","a"}` 的去重语义 —— **完全没碰被测代码**。
     #    改成真的调用 + 断言返回值，以及走真实路径验「删过的词只算一次」。

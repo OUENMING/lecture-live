@@ -472,6 +472,7 @@ def main() -> int:
     def _r(code="ECON10740", title="Exploring Economics"):
         return _c.Readiness(code, title, 36, 0, 0, "2026-09-22")
 
+    import prep as _prep        # 只为造**生产真形状**的失败项（`FileReport`）
     for tag, ent in (("无结果", None),
                      ("1 条结果", {"added": ["elasticity"], "removed": set()}),
                      ("5 条 + 已删 1 + 撤销",
@@ -480,13 +481,34 @@ def main() -> int:
                      ("全删光（0 条但仍要显示头部）",
                       {"added": ["a"], "removed": {"a"}, "undo": {"text": "a"}}),
                      # ⭐ **这一条才是真正的探测器。** 行内容与卡片高度之间有一圈
-                     #    **恒定的 ~54pt 余量**（`CARD_GAP_V` + `RESULT_TAIL` 那块），
-                     #    所以 5 行的漂移吃不满它 —— 实测：把行距改成 `RESULT_ROW + 12`
-                     #    或把高度算少 20，前四个用例**照样全绿**。
+                     #    **恒定的余量** —— 2026-09-28 实测 = **10.0pt**（就是那个
+                     #    `CARD_PAD`，与行数**无关**：n=0/1/5/20 都是 10.0）。
+                     #    ⚠️ 本注释原写「~54pt（`CARD_GAP_V` + `RESULT_TAIL` 那块）」——
+                     #    两个数都站不住：实测是 10；而 **`RESULT_TAIL` 这个符号全仓不存在**
+                     #    （只在注释里），是本文件第 ⑧ 类"死引用"。
+                     #    ⚠️ 原作者写的「把行距 +12 / 把高度算少 20，前四个用例照样全绿」
+                     #    **我没能复现其机制**（10pt 余量看着不该容得下 +12/行）——
+                     #    **不替它背书**，留在这里等下一次有人真去查。
                      #    20 行（一门课加 40 个词是常态，所以这是真实数量级）
-                     #    才让漂移累积到超过那圈余量。
+                     #    被当成能累积到暴露漂移的那一档。
                      ("20 条（漂移探测器）",
                       {"added": [f"term{i:02d}" for i in range(20)],
+                       "removed": set()}),
+                     # ⭐ **新三档行**（失败逐文件 / 没加逐条 / 没跑完的人话）：
+                     #    它们**必须真的出现在夹具里** —— 原来四个夹具全是 `failed: []`，
+                     #    于是"没有子视图超出卡片高度"那条断言对这三档**一条都盖不到**。
+                     ("失败+没加+没跑完（新三档行）",
+                      {"added": ["a"],
+                       "failed": [_prep.FileReport(
+                           path=pathlib.Path("/x/讲义.docx"), status="unsupported",
+                           chars=0, blocks=0, skipped_shapes=0, ocr_pages=0,
+                           error="不支持的格式：.docx"),
+                           _prep.FileReport(
+                           path=pathlib.Path("/x/b.pdf"), status="unreadable",
+                           chars=0, blocks=0, skipped_shapes=0, ocr_pages=0,
+                           error="ValueError: boom")],
+                       "not_added": ["term-x", "term-y"],
+                       "aborted": "all_files_failed",
                        "removed": set()})):
         card = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
                              on_drop_files=lambda c, p: False, width=640.0,
@@ -499,6 +521,17 @@ def main() -> int:
         check(f"{tag}：没有子视图超出卡片高度（{ch:.0f}）", not over, str(over[:4]))
         check(f"{tag}：高度与 card_height() 一致",
               abs(ch - EP.card_height(ent)) < 0.01, f"{ch} vs {EP.card_height(ent)}")
+        # ⚠️⚠️ **上面两条都抓不到「`card_height` 与行循环脱钩」**：
+        #    · 「高度一致」是**同义反复** —— 卡片的 frame 本来就是 `card_height(entry)` 设的；
+        #    · 「没有子视图超出高度」只看**顶端** —— 而 `card_height` **少算**时所有行
+        #      **整体下移**（`y` 从 `card_height - CARD_PAD` 起算），顶端不会超，
+        #      倒是**底部掉出卡片**（负坐标）。
+        #    → 少算是**危险方向**，补这一条把它钉住。（2026-09-28 加 `failed`/`not_added`/
+        #      `aborted` 三档行时才查清这套断言的覆盖边界；作者原注说"没有子视图超出高度"
+        #      是"真正的锁"，实际它锁的是"行有没有参与 y 链"，不是"高度算得对不对"。）
+        _low = min(float(v.frame().origin.y) for v in card.subviews())
+        check(f"{tag}：没有子视图掉出卡片底部（最低 y={_low:.1f}）", _low >= -0.01,
+              f"最低 y={_low:.1f} —— 高度少算了？")
 
     # ⭐⭐ **阅读顺序**：把文字标签按 y 从高到低排，必须与期望的阅读顺序一致。
     #     2026-09-26 真出过这个 bug —— 结果块从卡片底部往上长，于是
@@ -519,6 +552,32 @@ def main() -> int:
           _reading_order(c1) == [EP.card_title(_r()), EP.readiness_line(_r()),
                                  EP.result_header(e1), "第一", "第二", "第三"],
           str(_reading_order(c1)))
+
+    # ⭐⭐ 结果区的行必须是 **1 行 + 省略号**（`NSLineBreakByTruncatingTail` == 4）。
+    #     ⚠️ 不传 `truncate=True` 时 `make_label` 拿到的是 **`wraps=True` + `byWordWrapping`**
+    #     （2026-09-28 实测，不是"硬切"）→ 超长文本**静默换行、第二行起被吃掉，且没有省略号**
+    #     —— 看着像句子就到这儿了。这条钉的是"会不会被静默吃掉"，不是样式。
+    #     ⚠️ 只挑**结果区那三条**来判（标题/准备度/头部本来就走默认，不该按这条要求）。
+    _long_term, _long_not = "很长的词条名" * 20, "另一个很长的术语" * 20
+    e3 = {"added": [_long_term], "removed": set(),
+          "failed": [_prep.FileReport(path=pathlib.Path("/x/讲义.docx"),
+                                      status="unsupported", chars=0, blocks=0,
+                                      skipped_shapes=0, ocr_pages=0,
+                                      error="不支持的格式：.docx" * 12)],
+          "not_added": [_long_not]}
+    c3 = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+                       on_drop_files=lambda c, p: False, width=640.0, entry=e3,
+                       on_delete=lambda t: None, on_undo=lambda: None)
+    _want = {_long_term, EP.failure_text(e3["failed"][0]), _long_not}
+    _texts = [v.stringValue() for v in c3.subviews() if isinstance(v, _TF)]
+    _notrunc = [t[:14] for t in _want
+                if t in _texts
+                and next(v for v in c3.subviews()
+                         if isinstance(v, _TF) and v.stringValue() == t
+                         ).cell().lineBreakMode() != 4]
+    check("⭐ 结果区的长行是 1 行 + 省略号（不是被静默换行吃掉第二行）",
+          not _notrunc and not (_want - set(_texts)),
+          f"未截断={_notrunc} 没找到={_want - set(_texts)}")
 
     e2 = {"added": ["甲", "乙"], "removed": {"乙"}, "undo": {"text": "乙"}}
     seq2 = _reading_order(EP._make_card(

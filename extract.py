@@ -109,6 +109,22 @@ class ExtractResult(typing.NamedTuple):
 _SUPPORTED = {".pdf", ".pptx"}
 
 
+def is_supported(path_or_suffix) -> bool:
+    """这份课件**能不能被抽取** —— 支持集的**唯一定义点**。
+
+    ⚠️ 存在的理由：**悬停**时要判"这个收不收"，**跑的时候**也要判同一件事。两处各写
+    一份判据，用户就会看到「高亮说能收、跑完说 unsupported」。`REVIEW-midpoint §9.2 #5`
+    那条「悬停收文件夹」只是它的一个**特例** —— 文件夹不过是"不属于支持集"的一个例子，
+    `.docx` 一模一样。
+
+    ⚠️ 按**后缀**判（与 `extract()` 同一条路），不按 UTI/内容 —— 后者要读文件，而悬停
+    阶段**不该读**（`RESEARCH-macos-aesthetic.md` §11）。
+    """
+    s = str(path_or_suffix)
+    suffix = s if s.startswith(".") else pathlib.Path(s).suffix
+    return suffix.lower() in _SUPPORTED
+
+
 def extract(path, *, ocr: bool = True, on_progress=None) -> ExtractResult:
     """把一份课件抽成带标签的文本块。
 
@@ -119,7 +135,7 @@ def extract(path, *, ocr: bool = True, on_progress=None) -> ExtractResult:
     p = pathlib.Path(path)
     empty_stats = ExtractStats(0, 0, 0, {}, 0, {})
 
-    if p.suffix.lower() not in _SUPPORTED:
+    if not is_supported(p):
         return ExtractResult(p, "unsupported", [], 0, empty_stats,
                              f"不支持的格式：{p.suffix or '(无扩展名)'}")
     if not p.exists():

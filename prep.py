@@ -1215,6 +1215,14 @@ _ABORT_MSG = {
 _STAGE_NAME = {"extract": "抽文本", "candidates": "抽候选词",
                "append": "写入术语表", "build": "生成中文释义"}
 
+# ⚠️ 给**公开别名**：面板要念这两张表（abort 文案 / stage 名），而
+#    `entry_panel` 去 import 一个下划线开头的名字 = 把"私有"变成"事实公开"但**没留痕**，
+#    下一个人就不知道该不该改。加了别名，依赖是**明写**的，定义仍然只此一份。
+#    （2026-09-28：面板原来自己抄了一份 stage 表，结果 `append` 文案漂了、
+#     `notes` 成了死键、`build` 把英文原名显示给用户 —— 正是"一条纪律两处定义"。）
+ABORT_MSG = _ABORT_MSG
+STAGE_NAME = _STAGE_NAME
+
 
 def main(argv=None) -> int:
     import argparse

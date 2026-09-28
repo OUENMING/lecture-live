@@ -326,7 +326,7 @@ ClassLive.app/Contents/MacOS/python main.py --source file --path 录音.m4a --sp
 | `--ui` | `terminal` / `overlay`(卡片式悬浮窗) |
 | `--engine` | `auto`(默认，云端优先失败降级) / `cloud` / `local` |
 | `--cloud-model` | 云端模型（默认 `deepseek-flash`；可选 `deepseek-v4-pro`） |
-| `--api-key` | DeepSeek key（默认读 `DEEPSEEK_API_KEY` 或 `.deepseek_key` 文件） |
+| `--api-key` | DeepSeek key（默认读 `DEEPSEEK_API_KEY` 或 `~/.classlive/credentials`） |
 | `--course` | 课程代码（如 `ECON10101`）；不设也能写笔记，课程名默认 `LECTURE` |
 | `--polish` | `auto`(默认) / `off`；落笔前二次精修转录（需 API key，`off` 直接用直播版） |
 | `--polish-model` | 精修用的模型（默认同 `--cloud-model`） |
@@ -342,8 +342,8 @@ ClassLive.app/Contents/MacOS/python main.py --source file --path 录音.m4a --sp
 跑一节真实课，把**能采的都采下来**，收尾打成**一个 zip** 方便发给作者。
 
 ```bash
-cl test                      # 悬浮窗 + 全量采集（默认录音频）
-cl test --no-record-audio    # 只要指标，不留音频（包从 ~12MB 降到 ~10KB）
+cl test                      # 悬浮窗 + 全量采集（默认**不**留音频）
+cl test --record-audio       # 额外留下课堂音频（包从 ~10KB 涨到 ~12MB）
 cl test --no-bundle          # 不打包，只写报告
 ```
 
@@ -360,7 +360,7 @@ cl test --no-bundle          # 不打包，只写报告
 
 ```
 <session>.report.json    指标（可被脚本读）
-<session>.wav            课堂音频（--no-record-audio 时不生成）
+<session>.wav            课堂音频（--record-audio 时才生成）
 <session>.bundle.zip     ★ 发给作者的就是这一个文件
 ```
 
@@ -368,8 +368,8 @@ cl test --no-bundle          # 不打包，只写报告
 `session.md` / `audio.wav`（若含）。
 
 > ⚠️ **隐私**：`session.md` 与 `audio.wav` 是**这节课的真实内容**，可能包含其他同学的
-> 声音或个人信息。**发出去前请自己确认可以分享。** 只需要指标的话用
-> `--no-record-audio`，包只有 10KB 左右，不含音频。
+> 声音或个人信息。**发出去前请自己确认可以分享。** 默认就只采指标，
+> 包只有 10KB 左右、不含音频（要留音频才加 `--record-audio`）。
 >
 > 数据只用于优化远场收音与转写质量 —— 有了真实音频，作者才能在本机复跑 A/B 对照实验。
 >
@@ -558,7 +558,7 @@ python build_notes.py --rebuild  # 全量重分类 + 扩写 + 清掉自动回写
 | 双语文字（会话文件） | ✅ **总是** | `sessions/` 实时写入，防丢底稿 |
 | 双语文字（Obsidian） | ⚠️ 询问后 | 答"是"才复制进库；**不设 `--course` 也会写**（课名默认 `LECTURE`） |
 | 草稿译文 / 💡 术语行 | ❌ | 只在屏幕上显示 |
-| `.deepseek_key` | ✅ | 配置，非课堂内容（**已在 `.gitignore` 中**） |
+| API key | ✅ | 配置，非课堂内容。**推荐放 `~/.classlive/credentials`**（不住在安装目录，`cl update` 动不到它）；旧位置的 `.deepseek_key` 仍认，且**已在 `.gitignore` 中** |
 
 > **为什么实时落盘**：一次事故 —— 45 分钟、544 句的课堂记录，在"是否保存"提示处误按 **Ctrl+C**，旧版当成"不要保存"直接丢弃，永久丢失。现在每句定稿立即写文件，`kill -9` 只丢最后一句；Ctrl+C 与 EOF 一律默认保存；答"否"也不丢（会话文件仍在，`cl last` 可查）。
 

@@ -54,6 +54,32 @@ def _find_input_named(substr: str) -> int:
         f"然后在 Audio MIDI Setup 里创建多输出设备。")
 
 
+def resolve_input_device(source: str) -> tuple[int, str]:
+    """按音源名解析出**当前**的输入设备 -> `(索引, 名字)`。
+
+    ⚠️ 这是「录哪个设备」的**唯一定义点**：`load_source` 开流时走它，上课中途
+    重新探查也走它 —— 两处各写一份迟早漂。
+    ⚠️ 名字要**一起**返回：索引会漂（睡一觉、插拔耳机、切默认输入都会），
+    名字才是能打给用户看的凭据。
+    """
+    import sounddevice as sd
+    src = source.lower()
+    if src == "mic":
+        idx = sd.default.device[0]
+    elif src == "blackhole":
+        idx = _find_input_named("BlackHole")
+    else:
+        raise ValueError(f"{source!r} 不是实时设备音源(只有 mic|blackhole)")
+    if idx is None or int(idx) < 0:
+        raise RuntimeError(f"系统没有可用的默认输入设备({source})")
+    idx = int(idx)
+    try:
+        name = str(sd.query_devices(idx)["name"])
+    except Exception:                                 # noqa: BLE001
+        name = f"device#{idx}"
+    return idx, name
+
+
 # ---------- 电平归一化 ----------
 class PeakNormalizer:
     """把输入电平拉到接近满刻度但不削顶 —— 远场收音的前提。
@@ -103,18 +129,70 @@ class _NormalizedSource:
     def close(self) -> None:
         self._inner.close()
 
+    @property
+    def device_name(self) -> str:
+        return getattr(self._inner, "device_name", "")
+
+    def switch_device(self, device_idx: int, device_name: str = "") -> bool:
+        """透传到内层。文件源没有这个方法 → `False`（那不是错误，是"没得换"）。"""
+        fn = getattr(self._inner, "switch_device", None)
+        return bool(fn(device_idx, device_name)) if callable(fn) else False
+
 
 # ---------- 音源对象: 统一 poll() 接口 ----------
 class CallbackSource:
     """麦克风 / BlackHole: 声卡回调线程推块, poll() 非阻塞取。"""
 
-    def __init__(self, device_idx: int):
-        import sounddevice as sd
+    def __init__(self, device_idx: int, device_name: str = ""):
         self._q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=QUEUE_MAX)
+        self._device_idx = int(device_idx)
+        self._device_name = device_name
+        self._stream = None
+        self._open()
+
+    def _open(self) -> None:
+        import sounddevice as sd
         self._stream = sd.InputStream(
-            device=device_idx, samplerate=SR, channels=1,
+            device=self._device_idx, samplerate=SR, channels=1,
             dtype="float32", blocksize=CHUNK, callback=self._cb)
         self._stream.start()
+
+    @property
+    def device_name(self) -> str:
+        return self._device_name or f"device#{self._device_idx}"
+
+    def switch_device(self, device_idx: int, device_name: str = "") -> bool:
+        """换输入设备：**就地**重开流（对象身份不变 → 下游不用重新绑定）。
+        返回**是否真的换了**（同一个索引直接 False，不白折腾一次开流）。
+
+        ⚠️ **先开新的、成功了才关旧的，失败必须回滚。** 反过来写（先关旧再开新）
+        一旦新设备开不起来，对象就停在**半换**状态：流没了、索引指向坏设备 ——
+        表现成「从此再也收不到音频，而屏上一切正常」。这个坑是我自己写第一版时
+        踩到的，`R16` 钉住它。
+        ⚠️ 队列**刻意不清空**：里面那几块旧设备的音频会被下游自然消费掉（最多
+        `QUEUE_MAX` 块 = 2 秒），而清空会在 VAD 眼里造出一个空洞 —— 更容易误切句。
+        `_q` 对象自始至终是同一个，`poll()` 那边不受影响。
+        """
+        if int(device_idx) == self._device_idx:
+            return False
+        old = (self._device_idx, self._device_name, self._stream)
+        self._device_idx, self._device_name = int(device_idx), device_name
+        try:
+            self._open()                      # 新流起来之前不碰旧流
+        except Exception:
+            self._device_idx, self._device_name, self._stream = old
+            raise
+        self._close_stream(old[2])            # 成功了才关旧的
+        return True
+
+    @staticmethod
+    def _close_stream(stream) -> None:
+        if stream is None:
+            return
+        try:
+            stream.stop(); stream.close()
+        except Exception:                     # noqa: BLE001
+            pass
 
     def _cb(self, indata, frames, time_info, status):
         blk = _mono(indata).copy()
@@ -140,10 +218,8 @@ class CallbackSource:
         return False                              # 实时源永不结束
 
     def close(self):
-        try:
-            self._stream.stop(); self._stream.close()
-        except Exception:                          # noqa: BLE001
-            pass
+        self._close_stream(self._stream)
+        self._stream = None
 
 
 class FileSource:
@@ -175,12 +251,11 @@ class FileSource:
 def load_source(source: str, path: str | None = None, speed: float = 1.0):
     """返回带 poll()/close() 的音频源(已套电平归一化)。
     source: mic | blackhole | file。"""
-    import sounddevice as sd
     src = source.lower()
-    if src == "mic":
-        inner = CallbackSource(sd.default.device[0])
-    elif src == "blackhole":
-        inner = CallbackSource(_find_input_named("BlackHole"))
+    if src in ("mic", "blackhole"):
+        # ⚠️ 设备解析只有 `resolve_input_device` 一份 —— 上课中途重探走的是同一条
+        idx, name = resolve_input_device(src)
+        inner = CallbackSource(idx, name)
     elif src == "file":
         if not path or not Path(path).exists():
             raise FileNotFoundError(f"文件不存在: {path}")

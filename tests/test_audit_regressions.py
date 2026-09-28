@@ -34,6 +34,14 @@
   R14 草稿上滚的缓动(2026-09-27) —— ⚠️ carry 判据是**几何的**(位移恰好一个行高),
       不是字符的(原写法拿 CFR §15.119 背书, 但那条规则**不存在**, 见 PLAN-roll-motion §3.4):
       端点精确(不许停中间) / 单调且越界夹取 / 起步快软着陆 / 时长 ≤ 法典上限 0.433s
+  R15 ❓「没听懂」的课后时间反查(2026-09-28) —— 本特性的**深度就在这条纯函数里**
+      (按下只记一个时刻, 回退范围课后算)。防的是: 锚点取错(取成按下之后那句) /
+      起点越界 / 窗口把两端切开(交回半段语音) / 不足下限或越过上限 /
+      开课头十几秒按下时崩掉 / **拿字符串直接比大小**(跨午夜会把 00:05 排到 23:50 前)
+  R16 实时音源换设备的**半换**防护(2026-09-28): `CallbackSource` 按设备索引绑定,
+      而索引会漂(睡一觉/插拔耳机/切默认输入)。第一版 `switch_device` 先关旧流再开
+      新流 —— 新设备开不起来就停在半换状态(流没了、索引指向坏设备), 表现成
+      「从此再也收不到音频, 而屏上一切正常」。**全部用桩, 不起真设备**。
 """
 from __future__ import annotations
 import json
@@ -51,7 +59,8 @@ import main as main_mod
 from main import all_settled, is_incomplete, split_sentences
 from translator import Result, guard_zh_result, _StreamParser, _clean_fix
 from cloud_translator import _looks_like_echo
-from obsidian_writer import ObsidianWriter
+from obsidian_writer import (ObsidianWriter, monotone_secs, resolve_lost_range,
+                             _hms_sec)
 
 
 class R1_Settle(unittest.TestCase):
@@ -965,6 +974,316 @@ class R14_RollEase(unittest.TestCase):
         from overlay import ROLL_DURATION_S
         self.assertGreater(ROLL_DURATION_S, 0.0)
         self.assertLessEqual(ROLL_DURATION_S, 0.433)
+
+
+class R15_LostRange(unittest.TestCase):
+    """❓「没听懂」的课后时间反查(2026-09-28)。
+
+    本特性的**深度**就在这条纯函数里: 按下只记一个时刻(T_按下), 「回退到哪几句」
+    是课后算的 —— 因为意识到没懂时话已经过去几句了, 再加字幕延迟。
+    常数来自**实测**(20 节非测试课 / 5026 句): 回退 15s 覆盖 p05=2 p50=4 p95=7;
+    相邻句间隔 ≤3s 占 57%(同一段语音内)、≥8s 占 36%(段与段之间)。
+
+    ⚠️ 这些用例**不引 Thiede 2003 当依据** —— 那是「读完文章延迟写关键词再判断
+       学没学会」, 与「回退一段标一下」是两回事(见 `obsidian_writer.LOST_*`)。
+    """
+
+    # 按实测的"成簇"形态造: 段内间隔 2s, 段间 12s / 10s
+    BURSTY = ["10:00:00", "10:00:02", "10:00:04",
+              "10:00:16", "10:00:18",
+              "10:00:30", "10:00:32", "10:00:34"]
+
+    @staticmethod
+    def _press(hms: str) -> int:
+        s = _hms_sec(hms)
+        assert s is not None
+        return s
+
+    def test_anchor_is_the_last_sentence_at_or_before_the_press(self):
+        """锚点必须是**按下之前**最后落盘的那句, 不是之后的。"""
+        secs = monotone_secs(self.BURSTY)
+        press = self._press("10:00:33")
+        i0, i1 = resolve_lost_range(press, secs)
+        anchor = max(i for i, s in enumerate(secs) if s <= press)
+        self.assertEqual(anchor, 6, "10:00:33 之前最后一句是 idx6(10:00:32)")
+        self.assertLessEqual(i0, anchor, "锚点被切掉了")
+        self.assertLessEqual(anchor, i1, "锚点被切掉了")
+        self.assertLess(i1, len(secs))
+
+    def test_both_ends_snap_to_the_whole_burst(self):
+        """⭐ 两端都吸到**整段语音**的边界 —— 不交回半段(实测段内 ≤3s, 段间 ≥8s)。"""
+        secs = monotone_secs(self.BURSTY)
+        i0, i1 = resolve_lost_range(self._press("10:00:33"), secs)
+        self.assertEqual(secs[i0], self._press("10:00:16"),
+                         "起点要吸到那一段的头(10:00:16), 不是窗口硬切的 10:00:18")
+        self.assertEqual(secs[i1], self._press("10:00:34"))
+
+    def test_window_does_not_over_extend_when_there_is_no_burst(self):
+        """没有同段可吸时, 15s 窗口就是 15s(不硬扩)。"""
+        secs = monotone_secs(self.BURSTY)
+        i0, i1 = resolve_lost_range(self._press("10:00:36"), secs)
+        self.assertEqual((i0, i1), (5, 7))
+
+    def test_never_shorter_than_the_floor(self):
+        """窗口算出来只有 1 句时, 往前补到下限(实测 p05=2, 慢速段落会更短)。"""
+        secs = monotone_secs(["10:00:00", "10:01:00", "10:02:00", "10:03:00"])
+        i0, i1 = resolve_lost_range(self._press("10:03:00"), secs)
+        self.assertEqual((i0, i1), (1, 3))
+
+    def test_never_longer_than_the_cap_and_shaves_the_old_end(self):
+        """⭐ 超上限时**只从旧的那头削** —— 宁可少给一句, 也不能削掉用户真没听懂那句。"""
+        secs = monotone_secs([f"10:00:{i * 2:02d}" for i in range(12)])
+        i0, i1 = resolve_lost_range(self._press("10:00:22"), secs)
+        self.assertEqual(i1, 11, "新那头(锚点)必须保住")
+        self.assertEqual(i1 - i0 + 1, 8)
+
+    def test_press_before_the_first_sentence_degrades_to_the_opening(self):
+        """开课头十几秒就按了 —— 退化成"开头那几句", 这是真话, 不假装知道更多。"""
+        secs = monotone_secs(self.BURSTY)
+        i0, i1 = resolve_lost_range(self._press("10:00:01"), secs)
+        self.assertEqual(i0, 0)
+        self.assertEqual(i1, 2, "同段往后再吸, 但不越过 12s 那个段间空隙")
+
+    def test_start_is_clamped_even_when_the_floor_cannot_be_met(self):
+        secs = monotone_secs(["10:00:00", "10:00:30", "10:01:00"])
+        self.assertEqual(resolve_lost_range(self._press("10:00:00"), secs), (0, 0))
+
+    def test_empty_returns_none_not_a_crash(self):
+        self.assertIsNone(resolve_lost_range(36000, []))
+        self.assertIsNone(resolve_lost_range(36000, [], i_max=5))
+
+    def test_anchor_is_inside_the_range_for_every_press(self):
+        """不变量: 范围**必定含锚点那句**。
+
+        ⚠️ 锚点这里用**线性扫描**独立算, 不复刻 bisect 那条实现路径 ——
+           复刻出来的断言是恒真的(R1/R4 就是这么被点名的)。
+        """
+        secs = monotone_secs(self.BURSTY)
+        for m in range(0, 60, 3):
+            press = self._press("10:00:00") + m
+            rng = resolve_lost_range(press, secs)
+            self.assertIsNotNone(rng)
+            i0, i1 = rng
+            anchor = 0
+            for i, s in enumerate(secs):
+                if s <= press:
+                    anchor = i
+            self.assertLessEqual(i0, anchor, f"press+{m}s: 锚点被切掉了")
+            self.assertLessEqual(anchor, i1, f"press+{m}s: 锚点被切掉了")
+            self.assertGreaterEqual(i0, 0)
+            self.assertLess(i1, len(secs))
+            self.assertLessEqual(i1 - i0 + 1, 8)
+
+    def test_midnight_is_monotone(self):
+        """⭐ 跨午夜不许把 `00:05` 排到 `23:50` 前面 —— 这正是不能拿字符串比大小的理由。"""
+        self.assertEqual(monotone_secs(["23:59:58", "00:00:01"]), [86398, 86401])
+        self.assertEqual(monotone_secs(["10:00:00", "00:00:01", "00:00:03"]),
+                         [36000, 86401, 86403])
+
+    def test_unparseable_timestamps_are_skipped_not_fatal(self):
+        self.assertIsNone(_hms_sec("坏"))
+        self.assertIsNone(_hms_sec(None))
+        self.assertEqual(monotone_secs(["10:00:00", "坏", "10:00:05"]),
+                         [36000, 36005])
+
+
+    def test_mark_lost_writes_a_well_formed_sidecar_line(self):
+        """端到端(临时目录): 按下 -> 旁路文件真的多一行, 且形状对。"""
+        with tempfile.TemporaryDirectory() as d:
+            w = ObsidianWriter(None, "TESTX", mode="no")
+            w.session_path = Path(d) / "s.md"
+            w._n = 7
+            self.assertTrue(w.mark_lost())
+            w.close_lost()
+            p = Path(d) / "s.lost.jsonl"
+            self.assertTrue(p.exists(), "旁路文件没写出来")
+            row = json.loads(p.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(row["kind"], "lost")
+            self.assertEqual(row["n"], 7)
+            self.assertIsNotNone(_hms_sec(row["t"]), "t 必须是能解出的 HH:MM:SS")
+
+    def test_sidecar_joins_back_to_a_range_and_tolerates_bad_lines(self):
+        """旁路事件 -> 那一段句子。坏行(崩坏截断/上一个进程写的)必须被跳过。"""
+        with tempfile.TemporaryDirectory() as d:
+            w = ObsidianWriter(None, "TESTX", mode="no")
+            w.session_path = Path(d) / "s.md"
+            (Path(d) / "s.lost.jsonl").write_text(
+                json.dumps({"epoch": 0.0, "t": "10:00:33", "n": 8, "kind": "lost"})
+                + "\n这不是 JSON\n", encoding="utf-8")
+            entries = [{"ts": t, "en": "E", "zh": "Z" + t, "asr": "", "star": False}
+                       for t in self.BURSTY]
+            items = w._lost_items(entries)
+            self.assertEqual(len(items), 1, "坏行不该变成第二条标记")
+            self.assertIn("共 5 句", items[0])
+            self.assertIn("`10:00:16`", items[0])
+            self.assertIn("`10:00:34`", items[0])
+
+    def test_press_before_any_sentence_is_dropped_not_pointed_forward(self):
+        """⭐ **真数据抓出来的缺陷**（2026-09-28，作者真按出来的）：
+
+        一段 mic 会话开了 20 秒、一句都还没定稿就按了 ❓ —— 事件里 `n = 0`。
+        第一版**没接** `n`（`i_max` 参数在、没人传），于是反查把**第一句**当答案，
+        而那一句比按下时刻晚 19 秒 → 「回退到」变成了**往后指**。
+        判据: 按下时没有可回退的句子 -> **不编一个出来**。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            w = ObsidianWriter(None, "TESTX", mode="no")
+            w.session_path = Path(d) / "s.md"
+            (Path(d) / "s.lost.jsonl").write_text(
+                json.dumps({"epoch": 1.0, "t": "09:59:40", "n": 0, "kind": "lost"})
+                + "\n", encoding="utf-8")
+            entries = [{"ts": t, "en": "E", "zh": "Z", "asr": "", "star": False}
+                       for t in self.BURSTY]
+            self.assertEqual(w._lost_items(entries), [],
+                             "按下时一句都没有 -> 不许指向后面才出现的那句")
+
+    def test_close_releases_the_sidecar_handle_on_every_early_return(self):
+        """⭐ 答"不保存笔记"时**也必须**关掉旁路句柄。
+
+        2026-09-28 由作者一句"不用保存笔记"提醒才发现：`close()` 有三条早退
+        （未启用 / 零句又无问答 / 用户答否），句柄关闭原来放在后面 → 三条路径全漏。
+        数据不会丢（每按一次都 flush），但句柄会跟着进程或被后续 close 覆盖而悬着。
+        """
+        import obsidian_writer as ow
+        with tempfile.TemporaryDirectory() as d:
+            old = ow.SESSIONS
+            ow.SESSIONS = Path(d)              # 隔离: 不往真 sessions/ 写测试会话
+            try:
+                w = ow.ObsidianWriter(str(d), "TESTX", mode="ask")
+                self.assertTrue(w.mark_lost())
+                self.assertIsNotNone(w._lost_h, "按过之后句柄该开着")
+                w.close(ask=lambda n: False)   # 用户答"不保存" -> 早退
+                self.assertIsNone(w._lost_h, "答否时旁路句柄也必须关掉")
+            finally:
+                ow.SESSIONS = old
+
+    def test_range_is_bounded_by_the_sentence_count_at_press_time(self):
+        """范围的上界 = **按下那一刻已定稿的句数**，不许越过它去引用后来的句子。"""
+        with tempfile.TemporaryDirectory() as d:
+            w = ObsidianWriter(None, "TESTX", mode="no")
+            w.session_path = Path(d) / "s.md"
+            (Path(d) / "s.lost.jsonl").write_text(
+                json.dumps({"epoch": 1.0, "t": "10:00:33", "n": 4, "kind": "lost"})
+                + "\n", encoding="utf-8")
+            entries = [{"ts": t, "en": "E", "zh": "Z" + t, "asr": "", "star": False}
+                       for t in self.BURSTY]
+            items = w._lost_items(entries)
+            self.assertEqual(len(items), 1)
+            self.assertIn("`10:00:16`", items[0], "上界应停在按下时那句(idx3)")
+            self.assertNotIn("`10:00:30`", items[0], "不许引用按下之后才落盘的句子")
+
+    def test_render_note_carries_the_block_and_the_count(self):
+        """接线: 块与信息行里的计数都要出现(与 ⭐ 块并排, 不合并)。"""
+        w = ObsidianWriter(None, "TESTX", mode="no")
+        entries = [{"ts": "10:00:00", "en": "a", "zh": "b", "asr": "", "star": False}]
+        out = w._render_note(entries, {}, [], "ok", ["- 一块"])
+        self.assertIn("## 🤔 我标了没听懂的地方", out)
+        self.assertIn("- 一块", out)
+        self.assertIn("❓ 1 处没听懂", out)
+        self.assertIn("## ⭐ 我标记的重点", out, "⭐ 块必须还在(两块并排)")
+
+
+class R16_DeviceSwitchRollback(unittest.TestCase):
+    """实时音源换设备时的**半换**防护(2026-09-28)。
+
+    防的是: 新设备开不起来时把旧流也弄丢了(症状 = 静默收不到音频) /
+    同一个索引白开一次流 / 文件源被当成能换设备 / 文件源也去查默认输入。
+    ⚠️ 这里**一根真设备都不碰** —— 本文件是默认闸门, 不能绑在"这台机器有麦克风"上。
+    """
+
+    @staticmethod
+    def _src(name="旧设备"):
+        from capture import CallbackSource
+        s = CallbackSource.__new__(CallbackSource)     # 绕过 __init__: 不开真流
+        s._q = queue.Queue()
+        s._device_idx, s._device_name = 1, name
+        s._stream = object()
+        return s
+
+    def test_same_index_is_a_noop(self):
+        src = self._src()
+        opened = []
+        src._open = lambda: opened.append(1)
+        self.assertFalse(src.switch_device(1, "旧设备"))
+        self.assertEqual(opened, [], "同一个索引不该白开一次流")
+
+    def test_failed_open_rolls_back_and_keeps_the_old_stream(self):
+        """⭐ 本组最要紧的一条。"""
+        src = self._src()
+        old = src._stream
+
+        def boom():
+            raise OSError("PortAudioError: Error querying device 999")
+        src._open = boom
+        with self.assertRaises(OSError):
+            src.switch_device(999, "坏设备")
+        self.assertEqual(src._device_idx, 1, "索引必须回滚")
+        self.assertEqual(src._device_name, "旧设备")
+        self.assertIs(src._stream, old, "旧流必须保住 —— 丢了就是静默收不到音频")
+
+    def test_successful_switch_commits_and_closes_the_old_stream(self):
+        src = self._src()
+        old = src._stream
+        closed = []
+        src._open = lambda: setattr(src, "_stream", "新流")
+        src._close_stream = lambda s: closed.append(s)
+        self.assertTrue(src.switch_device(7, "新设备"))
+        self.assertEqual((src._device_idx, src._device_name), (7, "新设备"))
+        self.assertEqual(src._stream, "新流")
+        self.assertEqual(closed, [old], "成功了才关旧的")
+
+    def test_wrapper_passes_through_and_tolerates_sources_that_cannot_switch(self):
+        from capture import _NormalizedSource
+
+        class Can:
+            def switch_device(self, i, n=""):
+                return True
+
+        class Cannot:
+            pass
+
+        self.assertTrue(_NormalizedSource(Can()).switch_device(2, "x"))
+        self.assertFalse(_NormalizedSource(Cannot()).switch_device(2, "x"))
+
+    def test_resolve_input_device_rejects_file_sources(self):
+        from capture import resolve_input_device
+        with self.assertRaises(ValueError):
+            resolve_input_device("file")
+
+    def test_check_clock_and_device_reports_a_sleep_and_skips_file_sources(self):
+        from main import check_clock_and_device
+        msgs: list[str] = []
+        switched = []
+
+        class Src:
+            def switch_device(self, i, n=""):
+                switched.append((i, n))
+                return True
+
+        # wall=0 → 与"现在"的差必然 > SLEEP_GAP_S, 所以必然判成睡过一觉
+        check_clock_and_device(Src(), "file", lambda m, warn=False: msgs.append(m),
+                               {"wall": 0.0})
+        self.assertTrue(any("系统休眠唤醒" in m for m in msgs), msgs)
+        self.assertEqual(switched, [], "文件源不该去换设备")
+
+    def test_check_clock_and_device_switches_when_the_default_input_moves(self):
+        import capture
+        from unittest import mock
+        from main import check_clock_and_device
+        msgs: list[str] = []
+        switched = []
+
+        class Src:
+            def switch_device(self, i, n=""):
+                switched.append((i, n))
+                return True
+
+        with mock.patch.object(capture, "resolve_input_device",
+                               return_value=(9, "外接麦克风")):
+            check_clock_and_device(Src(), "mic", lambda m, warn=False: msgs.append(m),
+                                   {"wall": time.time()})
+        self.assertEqual(switched, [(9, "外接麦克风")])
+        self.assertTrue(any("外接麦克风" in m for m in msgs), msgs)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,8 @@ import instance_lock
 import notice
 
 PARTIAL_MAX_S = 10          # 草稿只转写最近 N 秒, 限制单次耗时
+DEVICE_CHECK_S = 2.0        # 实时音源: 多久重探一次「默认输入设备还是不是那个」
+SLEEP_GAP_S = 10.0          # 墙钟一次跳这么多 = 系统睡过一觉(见 check_clock_and_device)
 
 # 以这些词收尾(且无句末标点)→ 句子没说完, 不能单独送 LLM 翻译
 DANGLING_TAILS = {
@@ -820,8 +822,8 @@ def run(args) -> None:
                                              course=args.course)
             echo(f"☁ 引擎: {args.engine} (云端 {args.cloud_model})")
         else:
-            echo("⚠ 未找到 DeepSeek API key(--api-key / DEEPSEEK_API_KEY / .deepseek_key); "
-                 "回退本地引擎")
+            echo("⚠ 未找到 DeepSeek API key(--api-key / DEEPSEEK_API_KEY / "
+                 "~/.classlive/credentials); 回退本地引擎")
     else:
         echo(f"💻 引擎: local ({args.llm})")
 
@@ -849,16 +851,16 @@ def run(args) -> None:
     tester = None
     if args.test_mode:
         tester = TestSession(getattr(writer, "session_path", None),
-                             record_audio=not args.no_record_audio)
+                             record_audio=args.record_audio)
         echo(f"🧪 测试模式: 报告将写到 {tester.stem}.report.json")
-        # ⚠️ 隐私提醒必须放在**启动时** —— 收尾才说就晚了: 那时整节课已经录完,
-        #    想改成 --no-record-audio 也来不及。让人在**开始之前**就能决定。
+        # ⚠️ 默认**不留音频**（2026-09-28 翻的）。原来是默认录 —— 那意味着
+        #    一次误启动就静默录下整节课（含其他同学的声音）。现在要留必须显式说。
+        #    而提醒仍然放在**启动时**：收尾才说就晚了，那时整节课已经录完。
         if tester.record_audio:
             echo("   ⚠️ 会录制**课堂音频**(约 28MB/15 分钟), 收尾打成一个 zip。")
             echo("      音频与逐字转录可能含**其他同学的声音** —— 发出去前请自己确认。")
-            echo("      只要指标、不留音频:  Ctrl+C 退出后改用 `cl test --no-record-audio`")
         else:
-            echo("   ℹ️ 只采指标, 不录音频（--no-record-audio）。")
+            echo("   ℹ️ 只采指标, 不留音频（要留: 加 `--record-audio`）。")
 
     drafts: "queue.Queue[str]" = queue.Queue()          # 草稿文本 -> 主线程
     drafts_zh: "queue.Queue[str]" = queue.Queue()       # 草稿译文 -> 主线程
@@ -896,6 +898,12 @@ def run(args) -> None:
     ui = TerminalUI() if args.ui == "terminal" else _load_overlay(
         on_quit=stopping.set,
         on_flag=lambda: flagged.__setitem__("on", True),
+        # ❓ 与 ⭐ 不同: ⭐ 是**一次性闩锁**(被下一个 "final" 消费, 见 drain),
+        # 而 ❓ 要的是**按下那一刻** —— 所以它不设标志位, 直接落盘一个时间戳。
+        # ⚠️ 这里带上 `writer` 是刻意的: `mark_lost()` 只做"拼一行 + 写 + flush",
+        #    全是主线程能扛的量; 而且它就是 `writer` 自己的方法, 不像 ⭐ 那样要
+        #    绕一圈到 drain 里去补 `flagged`。
+        on_lost=lambda: writer.mark_lost(),
         on_translate=lambda mode: trans.__setitem__("mode", mode),
         on_submit=submit_question,
         on_ask=ask_about_this,
@@ -1282,6 +1290,7 @@ def run(args) -> None:
                 flagged["on"] = False
 
     try:
+        _dev = {"wall": time.time(), "next": 0.0}
         while running.is_set() and not stopping.is_set():
             chunk = src.poll()
             if chunk is not None and len(chunk):
@@ -1291,6 +1300,9 @@ def run(args) -> None:
             drain()
             if src.is_done():
                 break
+            if time.monotonic() >= _dev["next"]:
+                _dev["next"] = time.monotonic() + DEVICE_CHECK_S
+                check_clock_and_device(src, args.source, notify, _dev)
             if args.ui == "overlay":
                 ui.pump()
             else:
@@ -1375,7 +1387,7 @@ def run(args) -> None:
                         echo("   ⚠️ 内含**课堂音频** + 逐字转录(可能有其他同学的声音)"
                              " —— 发出去前自己确认一下。")
                     else:
-                        echo("   ℹ️ 只含指标与转录文本, **不含音频**（--no-record-audio）。")
+                        echo("   ℹ️ 只含指标与转录文本, **不含音频**（要留: --record-audio）。")
                     echo("   发给作者即可, 不用解压。")
                 else:
                     echo("⚠ 数据包生成失败, 但报告已写出(见上面的路径)")
@@ -1386,13 +1398,50 @@ def run(args) -> None:
             _auto_update_on_exit()
 
 
+def check_clock_and_device(src, source_name: str, notify, state: dict) -> None:
+    """上课中途的定时保安: ① 系统睡过一觉就打一条 ② 默认输入设备变了就跟着换。
+
+    **为什么必须有**：`CallbackSource` 按**设备索引**绑定，而索引会漂 ——
+    睡一觉、插拔耳机、切默认输入都会让它指向另一个设备，症状是**静默录到错的
+    设备**（或干脆什么都没录到），而屏上一切正常。
+
+    ⚠️ **机制为什么是轮询，不是 `NSWorkspace` 的休眠/唤醒通知**（我回源核过两条）：
+      · Apple 那两条通知的文档各有一个 **Important** 逐字写着必须用
+        `NSWorkspace.notificationCenter()` 注册（QA1340 更直白：`These notifications
+        are filed on NSWorkspace's notification center, not the default`）→ 不能挂
+        defaultCenter；
+      · 但更要紧的是它们**靠 run loop 投递** —— `--ui terminal` 那条路没有 run loop，
+        通知根本到不了，bug 照旧；
+      · 轮询覆盖得更全：睡醒、插拔耳机、手动切默认输入**都能发现**；
+      · 成本实测：`sd.query_devices()` 中位 **0.004ms**（50 次），2 秒一次可忽略。
+    ⚠️ 探查失败**不上报**：那多半是切换过程中设备列表短暂为空，报出来只是噪音。
+    """
+    import time as _t
+    now_wall = _t.time()
+    if now_wall - state.get("wall", now_wall) > SLEEP_GAP_S:
+        notify(f"[系统休眠唤醒 {_t.strftime('%H:%M:%S')}]", warn=True)
+    state["wall"] = now_wall
+    if source_name.lower() not in ("mic", "blackhole"):
+        return
+    try:
+        from capture import resolve_input_device
+        idx, name = resolve_input_device(source_name)
+    except Exception:                                     # noqa: BLE001
+        return
+    try:
+        if src.switch_device(idx, name):
+            notify(f"[输入设备变了 {_t.strftime('%H:%M:%S')}] 换成「{name}」", warn=True)
+    except Exception as e:                                # noqa: BLE001
+        notify(f"⚠ 换输入设备失败({str(e)[:60]}); 仍在录上一个设备", warn=True)
+
+
 def _load_overlay(on_quit=None, on_flag=None, on_translate=None, on_submit=None,
-                  on_ask=None, on_new_topic=None, whatsnew=None):
+                  on_ask=None, on_new_topic=None, on_lost=None, whatsnew=None):
     try:
         from overlay import Overlay
         o = Overlay(on_quit=on_quit, on_flag=on_flag, on_translate=on_translate,
                     on_submit=on_submit, on_ask=on_ask,
-                    on_new_topic=on_new_topic, whatsnew=whatsnew)
+                    on_new_topic=on_new_topic, on_lost=on_lost, whatsnew=whatsnew)
         o.show()
         return o
     except Exception as e:       # noqa: BLE001
@@ -1411,8 +1460,9 @@ def main():
     p.add_argument("--test-mode", action="store_true",
                    help="测试模式: 采集一份完整指标报告(逐段 ASR 耗时/电平/置信度/"
                         "资源占用), 并在会话文件旁留一份音频, 供以后优化用")
-    p.add_argument("--no-record-audio", action="store_true",
-                   help="测试模式下不留音频(只要指标; 包会小很多)")
+    p.add_argument("--record-audio", action="store_true",
+                   help="测试模式下**额外留下课堂音频**(默认不留; 约 28MB/15 分钟, "
+                        "内含其他同学的声音)")
     p.add_argument("--no-bundle", action="store_true",
                    help="测试模式下不打包成可发送的单个 zip")
     p.add_argument("--final-model-dir",
@@ -1427,7 +1477,7 @@ def main():
                    help="翻译引擎: auto(云端优先,失败降级)/cloud/local")
     p.add_argument("--cloud-model", default="deepseek-flash",
                    help="云端模型名")
-    p.add_argument("--api-key", help="DeepSeek API key(默认读 DEEPSEEK_API_KEY 或 .deepseek_key)")
+    p.add_argument("--api-key", help="DeepSeek API key(默认读 DEEPSEEK_API_KEY 或 ~/.classlive/credentials)")
     p.add_argument("--course", help="课程代码(如 ECON10101); 不设也能写笔记(课名默认 LECTURE)")
     p.add_argument("--save-notes", choices=["ask", "yes", "no"], default="ask",
                    help="笔记保存策略: ask(默认,结束时问)/ yes(直接存)/ no(不存)")

@@ -4,7 +4,8 @@
 方便 run() 里用 --engine 切换与自动降级。
 
 注意: 只有 **文本** 出本机(音频仍全本地);key 优先取 --api-key, 其次环境变量
-DEEPSEEK_API_KEY, 再次 ~/lecture-live/.deepseek_key 文件。
+DEEPSEEK_API_KEY, 再次 `~/.classlive/credentials`(见 `paths.credentials`),
+最后才是旧位置的 `<仓库>/.deepseek_key`(仍认, 但启动会告警提示搬家)。
 """
 from __future__ import annotations
 import json, os, pathlib
@@ -149,12 +150,37 @@ def _looks_like_echo(zh: str, en: str) -> bool:
 
 
 def load_api_key(explicit: str | None = None) -> str | None:
+    """key 来源顺序: `--api-key` → `$DEEPSEEK_API_KEY` → `~/.classlive/credentials`
+    → 旧的 `<仓库>/.deepseek_key`（**仍认**，但打一行带确切命令的搬家提示）。
+
+    ⚠️ 为什么要搬出仓库: 旧位置住在**安装目录**里，而那个目录会被 `cl update` 的
+    `git pull` 更新 —— 用户数据不该住在会被更新覆盖的地方（`paths.py` 文件头那两套
+    约定就是这个理由）。`.gitignore` 挡的是"被推上 GitHub"，挡不住"被更新洗掉"。
+    ⚠️ **不自动搬**用户的密钥 —— 只提示，命令由他自己跑（`secrets-via-interactive-login`）。
+    """
     if explicit:
         return explicit.strip()
     env = os.environ.get("DEEPSEEK_API_KEY")
     if env:
         return env.strip()
+    try:
+        from paths import credentials as _credentials
+        c = _credentials()
+    except Exception:                                     # noqa: BLE001
+        c = None
+    if c is not None and c.exists():
+        try:
+            mode = c.stat().st_mode & 0o777
+            if mode & 0o077:
+                print(f"⚠ {c} 权限是 {mode:o} —— 别的用户也读得到, 建议 chmod 600")
+        except OSError:
+            pass
+        return c.read_text(encoding="utf-8").strip()
     if KEY_FILE.exists():
+        if c is not None:
+            print(f"⚠ 正在用旧位置的 key（{KEY_FILE}）—— 它在安装目录里, "
+                  f"`cl update` 的 git pull 可能把它弄丢。建议搬走:")
+            print(f"     mkdir -p {c.parent} && mv {KEY_FILE} {c} && chmod 600 {c}")
         return KEY_FILE.read_text(encoding="utf-8").strip()
     return None
 

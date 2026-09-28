@@ -115,7 +115,13 @@ HEIGHT = BASE_H + VISIBLE_ROWS * ROW_H            # = 362.0
 LINE_H = 21.0                                     # 18pt Medium 一行实测 21.0px
 LINE_TIERS = ((620.0, 2), (440.0, 3), (360.0, 4))
 MAX_LINES = 5
-MIN_WIDTH = 280.0                                 # 实测: 280px 时 5 行即可零吞字
+# ⚠️ 下限取**两个约束里更紧的那个**：
+#   · 文字: 实测 **280px** 时 5 行即可零吞字（行数需求随宽度**单调不增** → 320 仍零吞字）
+#   · 顶栏: 6 个可见按钮 + 间距实测需要 **286px**，加两侧 pad → **318px**
+#     （2026-09-28 加第 7 个按钮时量的。⚠️ 在这之前 280 也放不下 —— 只是被切的是
+#      **隐藏**的 `↓ 最新`，看不出来；加了 ❓ 之后被切的是一个**看得见**的按钮。）
+#   `test_panel.py` 有一条按宽度扫的断言钉住这条：任何可见按钮都不许跑到面板外。
+MIN_WIDTH = 320.0
 MIN_ROWS = 1                                      # 最少露 1 句(作者: "一个句子也没关系")
 EDGE_BAND = 5.0                                   # 缩放抓取带宽(px)
 # ---- 窗口类型开关 ----
@@ -490,7 +496,7 @@ def _make_click_view(on_click):
 
 class Overlay:
     def __init__(self, on_quit=None, on_flag=None, on_translate=None, on_submit=None,
-                 on_ask=None, on_new_topic=None, whatsnew=None):
+                 on_ask=None, on_new_topic=None, on_lost=None, whatsnew=None):
         # ⚠️ 窗口 chrome / 材质 / scrim 那几样已经搬进 panel.py 了，这里的名字要
         #    跟着删干净 —— 留着会让「材质在哪配的」这个问题仍然答成 overlay.py，
         #    等于配方原料还散在两个文件里。
@@ -532,6 +538,7 @@ class Overlay:
         self._whatsnew_card = None      # 持有卡片对象，否则 ObjC 侧被 GC
         self._on_quit = on_quit or (lambda: None)
         self._on_flag = on_flag or (lambda: None)
+        self._on_lost = on_lost or (lambda: None)
         self._on_translate = on_translate or (lambda on: None)
         self._on_submit = on_submit or (lambda q: None)
         self._on_ask = on_ask or (lambda: None)
@@ -757,6 +764,10 @@ class Overlay:
             "  纯转录   —— 完全不调 LLM, ASR 直出(零 API、零延迟、最省电)")
         self._btn_flag = self._button(
             "⭐", self._flag, "标记当前句为重点(写入 Obsidian 时加 ⭐ Exam Focus)")
+        # ❓「没听懂」: 与 ⭐ 同为"逐句打一个时间锚", 但记的是**另一类信号** ——
+        # 它落到旁路文件 `sessions/<同名>.lost.jsonl`, 课后回退到前面那几句。
+        self._btn_lost = self._button(
+            "❓", self._lost, "没听懂(记下这一刻, 课后回退到前面那几句)")
         self._btn_close = self._button("✕", self._quit, "退出")
         # 答案接管期间显示「新话题」的位置:
         # 「讲一下」= 用固定问题开一轮讲解; 「新话题」= 清掉问答线程并回到字幕。
@@ -780,7 +791,11 @@ class Overlay:
         # 一团("展开译 开")。自适应宽度后中英换字都不会重叠。
         # ⚠️ _btn_latest 是**隐藏但仍占位**的, 所以它必须留在列表最前(视觉最左),
         #    插到中间会在按钮组内部凭空留一段间隔。
-        self._bar = [self._btn_latest, self._btn_ask,
+        # ⚠️ _btn_latest 是**隐藏但仍占位**的, 所以它必须留在列表最前(视觉最左)。
+        # ⚠️❓ 插在**第二位**(不是最前), 图的是: 布局从右往左摆, 插在第二位之后
+        #    **可见那一组的左边缘不动**(只有隐藏的 _btn_latest 往外挪) —— 顶栏看着
+        #    没变宽, 左侧留白从 124px 降到 ≈90px 全被那个不可点的隐藏按钮吃掉。
+        self._bar = [self._btn_latest, self._btn_lost, self._btn_ask,
                      self._btn_topic, self._btn_trans, self._btn_flag,
                      self._btn_close]
         self._sync_trans_button()
@@ -1401,10 +1416,22 @@ class Overlay:
         # 实际宽度, 加内边距; 图标(⭐/✕)保底 28px 点击区 —— 它们的字形只有 15-24px,
         # 直接按字宽会给一个点不中的小目标。
         gap = 6.0
-        x = self._width - pad
-        for b in reversed(self._bar):
+        # ⚠️ **先算总宽**：放不下时把**隐藏**按钮从这一行里去掉。
+        #    `_btn_latest` 隐藏时仍占位，图的是它出现/消失时按钮不跳；但面板窄到
+        #    放不下时那个理由不成立 —— 它本来整块就在面板外，而占位会把**可见**按钮
+        #    顶出去。实测(2026-09-28, 宽 280 = `setContentMinSize_` 的下限, 拖得到)：
+        #    `↓ 最新` 占 x=-79..-22(整块在面板外)、`❓` 被挤到 x=-16..18 **左半被切**。
+        #    加这个按钮之前只切隐藏的那个；加了之后切到一个**看得见**的，那是退化。
+        pairs = []
+        for b in self._bar:
             b.sizeToFit()
-            w = max(b.frame().size.width + 10.0, 28.0)
+            pairs.append((b, max(b.frame().size.width + 10.0, 28.0)))
+        need = sum(w + gap for _, w in pairs)
+        row = pairs
+        if self._width - pad - need < pad:
+            row = [(b, w) for b, w in pairs if not b.isHidden()]
+        x = self._width - pad
+        for b, w in reversed(row):
             x -= w
             b.setFrame_(NSMakeRect(x, self._height - 28, w, 24))
             x -= gap
@@ -2149,6 +2176,11 @@ class Overlay:
 
     def _flag(self):
         self._on_flag()
+
+    def _lost(self):
+        # ⚠️ `_button()` 的 `_clicked` 已经先 `_release_focus()` 了, 与 ⭐ 同路。
+        #    真正落盘那一步(mark_lost)只做"拼一行 + 写 + flush", 见它的 docstring。
+        self._on_lost()
 
     def _ask(self):
         """「讲一下」: 用固定问题开一轮讲解。

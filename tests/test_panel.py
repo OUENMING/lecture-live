@@ -334,6 +334,40 @@ def main() -> int:
         check("真 Overlay 的拖拽层能拖窗口",
               bool(ov._drag_layer.mouseDownCanMoveWindow()))
 
+        # ⭐ 与上面那条**互补**：术语行那次点击**真的会触发回调**。
+        #    为什么必须有它：`mouseDownCanMoveWindow` 是本仓库咬过两次的雷区
+        #    （窗口四角缩放 / `NSSplitView` 的 pane），而 `ClickView` 的默认值是
+        #    `True` —— **只看 flag 值会得出「它是坏的」这个错误结论**。
+        #    2026-09-28 实测（`/tmp/probe_gloss_click_v3.py`，含量具自测）：
+        #    视图**自己实现了 `mouseDown_`** 时 AppKit 把事件交给它、不拖窗口
+        #    （红/绿两态都响；`postEvent_` 走真实派发路径也响）。
+        #    → 那条雷区的**正确机制**是「不接管 mouseDown 的新视图才要显式设 False」，
+        #      不是「所有新视图」。所以这里钉**行为**，不钉 flag。
+        #    ⚠️ 没覆盖的一条：app **处于激活态**时没测过（那要 `activateIgnoringOtherApps_`，
+        #      会抢用户焦点）。本 app 是 `.accessory`、面板是 NonactivatingPanel，
+        #      正常使用不会走到那个状态。
+        try:
+            from AppKit import NSApplication, NSEvent, NSLeftMouseDown
+            ov._terms = [("Marginal cost", "边际成本")]
+            ov._layout()
+            ov._panel.setFrameOrigin_((-4000.0, 0.0))   # 离屏显示: 不闪, 但必须真 isVisible
+            ov._panel.orderFrontRegardless()
+            _gh = ov._gloss_hit.frame()
+            _pt = (_gh.origin.x + _gh.size.width / 2.0,
+                   _gh.origin.y + _gh.size.height / 2.0)
+            _hit = ov._panel.contentView().hitTest_(_pt)
+            _ev = NSEvent.mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
+                NSLeftMouseDown, _pt, 0, 0.0, ov._panel.windowNumber(), None, 0, 1, 1.0)
+            NSApplication.sharedApplication().sendEvent_(_ev)
+            check("⭐ 术语行点击真的触发回调（钉行为，不钉 flag 值）",
+                  ov._pinned_term is not None,
+                  f"落点={_hit.__class__.__name__ if _hit else None} "
+                  f"flag={bool(ov._gloss_hit.mouseDownCanMoveWindow())} "
+                  f"_pinned_term={ov._pinned_term}")
+        except Exception as e:                          # noqa: BLE001
+            check("⭐ 术语行点击真的触发回调（钉行为，不钉 flag 值）", False,
+                  f"{type(e).__name__}: {e}")
+
         # ⭐ 菜单栏那一项必须钉住。`_install_status_item` 整段在 try/except fail-soft 里
         #    （那是**对的** —— 图标不能因为建菜单项失败就整个消失），但后果是
         #    **写坏了完全静默**：图标还在，菜单少一项，而那一项恰好是
@@ -344,6 +378,23 @@ def main() -> int:
         _titles = [mi.title() for mi in _menu.itemArray()] if _menu is not None else None
         check("菜单栏有「开课前的准备…」（不是静默少一项）",
               _titles == ["开启鼠标穿透", "开课前的准备…", "退出"], str(_titles))
+
+        # ⭐ 窄面板下**可见**按钮不许跑到面板外。
+        #    ⚠️ 宽度从 `MIN_WIDTH` **派生**，不许写死 —— 写死的话下限一改断言就腐坏
+        #    （而且会变成"钉住一个过时的宽度"）。260928 实测：7 个按钮里 6 个可见，
+        #    它们 + 间距需要 286px、加两侧 pad = 318px，所以 MIN_WIDTH 从 280 抬到 320。
+        #    ⚠️ `_width` 是布局的输入，改完要还原。
+        _w0, _h0 = ov._width, ov._height
+        try:
+            for _w in (overlay.MIN_WIDTH, overlay.MIN_WIDTH + 40.0, 360.0, 455.0):
+                ov._width = _w
+                ov._layout()
+                _off = [(b.title(), round(b.frame().origin.x, 1)) for b in ov._bar
+                        if not b.isHidden() and b.frame().origin.x < overlay.PAD]
+                check(f"宽 {_w:.0f} 时没有可见按钮挤进左边距", not _off, str(_off))
+        finally:
+            ov._width, ov._height = _w0, _h0
+            ov._layout()
         ov.close()
     # ⚠️ `CLASSLIVE_DEBUG` 是**进程级**副作用 —— 不还原的话，同一进程里后面的断言
     #    都带着「上一次的调试环境」跑（debug 开/关会改变被测代码的日志与分支），

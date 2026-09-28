@@ -22,7 +22,7 @@
   --save-notes no    完全不写(会话文件也不建)
 """
 from __future__ import annotations
-import json, os, re, time
+import bisect, json, os, re, time
 from pathlib import Path
 
 DEFAULT_VAULT = "~/Obsidian/Vault"
@@ -57,6 +57,90 @@ QA_AUX_MAX_CHARS = 120
 
 _EN_KEEP = re.compile(r"^EN[：:]")          # ANSWER_SYSTEM 锁定的英文辅助行
 _ASKED = "Question: "       # 格式契约见 cloud_translator.answer_user_content()
+
+# ---- ❓「没听懂」：按下只记时刻，回退范围**课后**才算 ------------------------
+# 为什么是课后：意识到没懂时话已经过去几句了，再加字幕延迟 —— 所以记的是
+# 「回退一段」，不是「这一句」。常数全部来自**实测**（20 节非测试课 / 5026 句）：
+#   回退 15s 覆盖的句数  p05=2  p50=4  p95=7  max=16
+#   相邻句落盘间隔 ≤3s 占 57%（同一段语音内）· ≥8s 占 36%（段与段之间）
+# ⚠️ 这两个数**不引 Thiede 2003 当依据** —— 那是「读完文章延迟写关键词再判断
+#    学没学会」，与「回退 20 秒标一段」是两回事。窗口就是参数，用真实按下时间校准。
+LOST_TAIL = ".lost.jsonl"
+LOST_LOOKBACK_S = 15.0      # 作者原话「回退十几秒」
+LOST_MIN_SENT = 3           # 15s 窗口 p05=2；慢速段落会短到 2，兜到 3
+LOST_MAX_SENT = 8           # p95=7；封顶才读得动
+LOST_BURST_S = 3.0          # 段内间隔 ≤3s —— 用它把两端吸到整段语音的边界
+
+
+def _hms_sec(t) -> int | None:
+    """`HH:MM:SS` -> 当日秒数。解不出返回 `None`（**不抛**）。"""
+    try:
+        h, m, s = str(t).split(":")
+        return int(h) * 3600 + int(m) * 60 + int(s)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _hms_str(sec: int) -> str:
+    """当日秒数 -> `HH:MM:SS`（`_hms_sec` 的逆，只给显示用）。"""
+    sec = int(sec) % 86400
+    return f"{sec // 3600:02d}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
+
+
+def monotone_secs(tss) -> list[int]:
+    """`HH:MM:SS` 列表 -> **单调不减**的当日秒数。
+
+    ⚠️ **不许拿字符串直接比大小**：跨午夜时 `00:05` 会排在 `23:50` 前面，
+    而系统休眠还会让墙钟跳。遇到「比上一条小」就 +1 天（86400）—— 一节课不会
+    跨两天，这一步是把序列拉直，不是在猜时区。
+    """
+    out: list[int] = []
+    day, prev = 0, -1
+    for t in tss:
+        s = _hms_sec(t)
+        if s is None:
+            continue
+        while s + day < prev:
+            day += 86400
+        prev = s + day
+        out.append(prev)
+    return out
+
+
+def resolve_lost_range(press_sec: int, secs: list[int], *,
+                       i_max: int | None = None) -> tuple[int, int] | None:
+    """按下时刻（当日秒数）-> entries 的**整句**下标区间 `[i0, i1]`（闭区间）。
+
+    入参全是纯数据、返回纯数据 —— **这条就是本特性的深度所在**，AppKit 与文件
+    都不在这条路上（`R15` 钉的就是它）。`secs` 是 `monotone_secs` 的输出（升序）。
+
+    - 锚点 `i1` = 最后一条 ≤ `press_sec` 的句子；**一条都没有**（开课头十几秒就按了）
+      则取 0 —— 那是"开头那几句"的**真话**，不假装知道更多
+    - 起点从 `press_sec - LOST_LOOKBACK_S` 起，再往前吸到**整段语音的开头**
+      （间隔 ≤ `LOST_BURST_S` 就一直往前）；终点同理往后 —— **不交回半段**
+    - 兜底：不足 `LOST_MIN_SENT` 往前补；超过 `LOST_MAX_SENT` **只从旧的那头削**
+      （宁可多给一句让人读，也不能把真没听懂的那句削掉）
+    """
+    n = len(secs) if i_max is None else min(len(secs), i_max + 1)
+    if n <= 0:
+        return None
+    i1 = bisect.bisect_right(secs, press_sec, 0, n) - 1
+    if i1 < 0:
+        i1 = 0
+    i0 = max(0, bisect.bisect_left(secs, press_sec - LOST_LOOKBACK_S, 0, n))
+    # ⚠️ 夹到 `i1`：按下时刻远在最后一句**之后**（窗口整段落在末尾之外）时,
+    #    `bisect_left` 会返回 `n`（全小于下界），随后 `secs[i0]` 直接越界。
+    #    R15 的遍历用例抓到的就是这个。
+    i0 = min(i0, i1)
+    while i0 > 0 and secs[i0] - secs[i0 - 1] <= LOST_BURST_S:
+        i0 -= 1
+    while i1 + 1 < n and secs[i1 + 1] - secs[i1] <= LOST_BURST_S:
+        i1 += 1
+    if i1 - i0 + 1 < LOST_MIN_SENT:
+        i0 = max(0, i1 - LOST_MIN_SENT + 1)
+    if i1 - i0 + 1 > LOST_MAX_SENT:
+        i0 = i1 - LOST_MAX_SENT + 1
+    return i0, i1
 
 REVIEW_SYS = """你是课堂笔记助手, 为一名靠中文听英文课的中国经济学/社会学本科生整理复习层。
 用户给你一节课**一段**的逐句中英对照转录。你只依据转录内容输出, 绝不引入外部知识、绝不猜测。
@@ -265,6 +349,7 @@ class ObsidianWriter:
         self._n = 0
         self.session_path: Path | None = None
         self.vault_path: Path | None = None
+        self._lost_h = None                 # ❓ 旁路文件句柄(懒开, 见 mark_lost)
         if self.enabled:
             SESSIONS.mkdir(exist_ok=True)
             self.session_path = SESSIONS / (
@@ -441,6 +526,130 @@ class ObsidianWriter:
             out["qa"] = dedup[:8]
         return out
 
+    # ---- ❓「没听懂」：旁路文件 + 课后反查 ----
+    def _lost_path(self) -> Path | None:
+        """`sessions/<同名>.lost.jsonl`。
+
+        ⚠️ **旁路文件，绝不改会话抬头。** 抬头正则 `_TS` 是**行尾锚定**的，而会话
+        格式是 `obsidian_writer` 写 / `_parse` 读回 / `cl last` grep 的**三方共享
+        契约** —— 抬头多一个后缀，`_parse` 就认不出那一条，会把它的 EN/ZH/ASR
+        静默盖到**上一条**头上（上一条被替换、这一条消失）。
+        与 `testmode` 的 `<stem>.report.json` 同一个套路。
+        """
+        if not self.session_path:
+            return None
+        return Path(str(self.session_path.with_suffix("")) + LOST_TAIL)
+
+    def _lost_handle(self):
+        """懒开常驻句柄。**不注册 atexit** —— 每次按下都 flush 了，没有缓冲尾巴。"""
+        if self._lost_h is None:
+            p = self._lost_path()
+            if p is None:
+                return None
+            self._lost_h = p.open("a", encoding="utf-8")
+        return self._lost_h
+
+    def mark_lost(self) -> bool:
+        """按一下 ❓：把**这一刻**立刻追加到旁路文件。返回是否写成。
+
+        ⚠️ 这是 AppKit 主线程回调，所以只做「拼一行 + 写 + flush」，不联网不 sleep。
+        `flush()` 必须（Python 的 8KB 缓冲正是 `testmode.py` 文档里那个坑）；
+        `fsync` 刻意不做 —— 会话 `.md` 本身也只到页缓存，只给旁路文件更硬的保证
+        是**假契约**。
+        """
+        p = self._lost_path()
+        if p is None:
+            return False
+        try:
+            h = self._lost_handle()
+            if h is None:
+                return False
+            h.write(json.dumps({"epoch": round(time.time(), 3),
+                                "t": time.strftime("%H:%M:%S"),
+                                "n": self._n, "kind": "lost"},
+                               ensure_ascii=False) + "\n")
+            h.flush()
+            return True
+        except Exception as e:                            # noqa: BLE001
+            # 记不下来是"少一个标记", 不是"课跑不下去" —— 与 testmode 同一条纪律
+            print(f"⚠ ❓ 记录失败({str(e)[:60]}); 课堂不受影响")
+            return False
+
+    def close_lost(self) -> None:
+        """幂等。文件**不删** —— 它是这份笔记的证据（与 `_POLISH_NOTE` 同一条纪律）。"""
+        h = getattr(self, "_lost_h", None)
+        if h is not None:
+            try:
+                h.close()
+            except Exception:                             # noqa: BLE001
+                pass
+            self._lost_h = None
+
+    def _lost_marks(self) -> list[tuple[int, int | None]]:
+        """旁路文件 -> `[(按下时刻的当日秒数, 按下时已定稿几句), ...]`。
+
+        ⚠️ **第二个值必须带上**：它是「按下时到底有没有东西可回退」的唯一凭据。
+        2026-09-28 从**真实按下**里发现的缺陷：一段 mic 会话开了 20 秒、一句都还没
+        定稿，这时按 ❓ 的事件 `n = 0`，而反查把**第一句**当答案返回了 —— 于是
+        「回退到」指着一个**比按下时刻晚 19 秒**的句子。`n` 就是为拦这个而记的
+        （见 `resolve_lost_range` 的 `i_max`）。`n` 缺失/非整数 -> `None`（不设上界）。
+
+        ⚠️ 这是**系统边界**（文件可能是上一个进程写的、末行可能被崩坏截断），
+        所以逐行 try/except、坏行跳过 —— 与 `_parse` 对会话文件的宽容度一致。
+        """
+        p = self._lost_path()
+        if p is None or not p.exists():
+            return []
+        out: list[tuple[int, int | None]] = []
+        try:
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line) or {}
+                    s = _hms_sec(row.get("t"))
+                except Exception:                         # noqa: BLE001
+                    continue
+                if s is None:
+                    continue
+                n = row.get("n")
+                out.append((s, int(n) if isinstance(n, int) else None))
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ ❓ 旁路文件读不出({str(e)[:60]}); 笔记照常生成")
+        return out
+
+    def _lost_items(self, entries: list[dict]) -> list[str]:
+        """旁路事件 -> 笔记里的块（**一块一个标记**，块内已含它的那几句）。
+
+        范围反查全在 `resolve_lost_range`（纯函数）；这里只做 I/O 与拼字。
+        """
+        marks = self._lost_marks()
+        if not marks or not entries:
+            return []
+        # `ts` 解不出的 entry 不进 secs，否则下标会与 entries 错位 —— 用 idx 映射回去
+        idx = [i for i, e in enumerate(entries) if _hms_sec(e.get("ts")) is not None]
+        if not idx:
+            return []
+        secs = monotone_secs([entries[i]["ts"] for i in idx])
+        out: list[str] = []
+        for t, n_at_press in marks:
+            # ⚠️ `i_max` **必须传**：它把范围封在"按下那一刻已经存在的句子"之内。
+            #    不传的话，按下时一句都没有（`n = 0`）会把**第一句**当答案返回，
+            #    而那一句可能比按下时刻晚十几秒 —— 那就成了"往后指"。（真事。）
+            i_max = None if n_at_press is None else n_at_press - 1
+            rng = resolve_lost_range(t, secs, i_max=i_max)
+            if rng is None:
+                continue          # 按下时还没有可回退的句子 -> 不编一个出来
+            j0, j1 = rng
+            i0, i1 = idx[j0], idx[j1]
+            lines = [f"- 按于 `{_hms_str(t)}` · 回退到 `{entries[i0]['ts']}`–"
+                     f"`{entries[i1]['ts']}` 共 {i1 - i0 + 1} 句"]
+            for e in entries[i0:i1 + 1]:
+                lines.append(f"  - `{e['ts']}` {e['zh'] or e['en'] or e['asr']}")
+            out.append("\n".join(lines))
+        return out
+
     # ---- 我课上问过什么(Phase 4) ----
     @staticmethod
     def _qa_items(history) -> list[str]:
@@ -496,7 +705,8 @@ class ObsidianWriter:
     # ---- 组装双层笔记 ----
     def _render_note(self, entries: list[dict], review: dict,
                      qa_items: list[str] | None = None,
-                     polish_state: str = "ok") -> str:
+                     polish_state: str = "ok",
+                     lost_items: list[str] | None = None) -> str:
         ts0 = entries[0]["ts"] if entries else "—"
         ts1 = entries[-1]["ts"] if entries else "—"
         stars = [e for e in entries if e["star"]]
@@ -517,7 +727,8 @@ class ObsidianWriter:
         if title:
             L.append(f"> 📖 **{title}**")
         L += [f"> 🕐 {ts0} – {ts1} · 🗣 {len(entries)} 句 · "
-              f"⭐ {len(stars)} 处重点 · 💡 {len(gloss)} 个术语"]
+              f"⭐ {len(stars)} 处重点 · 💡 {len(gloss)} 个术语 · "
+              f"❓ {len(lost_items or [])} 处没听懂"]
         _warn = _POLISH_NOTE.get(polish_state)
         if _warn:
             L.append(f"> {_warn}")
@@ -584,6 +795,18 @@ class ObsidianWriter:
             L += ["*（本课没有命中术语表）*"]
         L += [""]
 
+        # ❓ 与 ⭐ 是**兄弟**（都是用户逐句打的时间锚），所以并排放在 ⭐ 上面。
+        # ⚠️ 抬头刻意用 `🤔` 而不是 `❓` —— 这份笔记里已经有一个 `## ❓ Review
+        #    复习自测`，两个同名抬头会让 grep 分不清。按钮仍是 ❓（按钮上只有一个
+        #    字符的位置），靠 tooltip 把两者连起来。
+        L += ["## 🤔 我标了没听懂的地方", ""]
+        if lost_items:
+            for blk in lost_items:
+                L += blk.splitlines()
+        else:
+            L += ["*（课上没按 ❓；听到没跟上的地方就按一下，课后会回退到那几句）*"]
+        L += [""]
+
         L += ["## ⭐ 我标记的重点", ""]
         if stars:
             for e in stars:
@@ -619,6 +842,10 @@ class ObsidianWriter:
         ⚠️ 问答**只进 vault 笔记**, 不进 `sessions/` —— 那份逐句日志是三方共享
         契约(见 CLAUDE.md), 语义也不同(问答不是"课上讲了什么")。
         """
+        # ⚠️ 关旁路句柄放在**最前面**：`close()` 有三条早退（未启用 / 零句又无问答 /
+        #    用户答"不保存"），放在后面就会在那些路径上漏掉它。幂等，重复调无妨。
+        #    2026-09-28 由作者那句"不用保存笔记"提醒才发现 —— 那正是会走到早退的路径。
+        self.close_lost()
         if not self.enabled or not self.session_path:
             return ""
         if self._n == 0:
@@ -680,7 +907,13 @@ class ObsidianWriter:
                 qa_items = self._qa_items(qa() if callable(qa) else qa)
             except Exception as e:                        # noqa: BLE001
                 print(f"⚠ 问答落盘失败({str(e)[:60]}); 笔记照常生成")
-        note = self._render_note(entries, review, qa_items, polish_state)
+        # ❓ 同一条纪律：它是额外一层，**逐句转录才是不能丢的那件事**。
+        lost_items: list[str] = []
+        try:
+            lost_items = self._lost_items(entries)
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ ❓ 反查失败({str(e)[:60]}); 笔记照常生成")
+        note = self._render_note(entries, review, qa_items, polish_state, lost_items)
 
         d = Path(self._vault) / "Lectures"
         d.mkdir(parents=True, exist_ok=True)

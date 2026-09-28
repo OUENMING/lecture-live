@@ -201,8 +201,8 @@ case "${1:-}" in
   prep) shift; "$PY" prep.py --course "${COURSE:-}" --cwd "$_ORIG_PWD" "$@"; exit $? ;;
   update) update_classlive; exit $? ;;
   test)
-    # 测试模式: 采全量指标 + 录音频, 收尾打包。额外参数透传(如 --no-record-audio)。
-    # ⚠️ 只在**跑课**时用 —— 它会往 sessions/ 旁写一份音频。
+    # 测试模式: 采全量指标, 收尾打包。额外参数透传(如 --record-audio)。
+    # ⚠️ 默认**不**留音频; 加了 --record-audio 才会往 sessions/ 旁写一份。
     shift
     ARGS+=(--test-mode "$@")
     ;;

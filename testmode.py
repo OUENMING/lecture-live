@@ -6,8 +6,11 @@
 1. **绝不能影响上课。** 所有采集点都包在 try/except 里 —— 记录失败是"少一份数据",
    不是"课跑不下去"。这条比拿到数据重要。
 2. **采到的数据要能回放。** 只存指标不存音频, 以后想复跑实验就只能干瞪眼。
-   所以音频默认录（16kHz int16 单声道, 15 分钟约 28MB), 可用 `--no-record-audio` 关。
-   ⚠️ 音频**只写本机**（`sessions/` 同级), 不改变"音频不出机器"这条前提。
+   所以**想留音频时留得住**（16kHz int16 单声道, 15 分钟约 28MB）——
+   但**默认不留**, 要显式加 `--record-audio`。
+   ⚠️ 2026-09-28 翻的默认值。原来是默认录 —— 那意味着一次误启动就静默录下
+   整节课（含其他同学的声音）。音频**只写本机**（`sessions/` 同级),
+   不改变"音频不出机器"这条前提。
 3. **落盘格式要能被脚本读。** 一个 JSON, 字段名直白, 不要嵌套太深。
 
 采什么
@@ -21,8 +24,8 @@
 
 用法
 ----
-    cl test                     # 悬浮窗 + 测试模式（默认录音）
-    cl test --no-record-audio   # 只要指标, 不留音频
+    cl test                     # 悬浮窗 + 测试模式（默认**不**留音频）
+    cl test --record-audio      # 额外留下课堂音频（约 28MB/15 分钟）
 """
 from __future__ import annotations
 
@@ -137,7 +140,7 @@ def make_bundle(stem: pathlib.Path, report_path: str | os.PathLike,
 class TestSession:
     """一次测试课的采集器。所有 note_* 方法都保证不抛。"""
 
-    def __init__(self, session_path: pathlib.Path | None, record_audio: bool = True):
+    def __init__(self, session_path: pathlib.Path | None, record_audio: bool = False):
         self.t0 = time.monotonic()
         self.session_path = session_path
         self.stem = session_path.with_suffix("") if session_path else None

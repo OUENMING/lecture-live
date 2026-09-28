@@ -19,7 +19,7 @@ P3 就会成为**又一批**各自算路径的地方 —— `CLAUDE.md` 对同�
 | | 放哪 | 例子 |
 |---|---|---|
 | **旧** | 代码旁（安装目录） | 上面那一列 |
-| **新** | `~/.classlive/` | `courses/<课号>/materials/`、`prep-state.json` |
+| **新** | `~/.classlive/` | `courses/<课号>/materials/`、`prep-state.json`、`credentials` |
 | **系统惯例** | `~/Library/Logs/ClassLive/` | 日志、`instance.lock`、`update.lock` |
 
 - **新的为什么单开一支**：这里放的是**用户数据**（课件原件），不该住在会被 `cl update`
@@ -89,3 +89,16 @@ def prep_state(course: str, *, root=None) -> pathlib.Path:
     （行业里的对应物是 memoQ 的 `stop word list`，见 `docs/PLAN-p3-prep.md` §6.1.2。）
     """
     return course_dir(course, root=root) / "prep-state.json"
+
+
+def credentials(*, root=None) -> pathlib.Path:
+    """DeepSeek API key 的**新家**（纯文本，第一行就是 key，权限 600）。
+
+    ⚠️ 为什么要搬：旧位置 `<仓库>/.deepseek_key` 住在**安装目录**里，而那个目录会被
+    `cl update` 的 `git pull` 更新 —— **用户数据不该住在会被更新覆盖的地方**（本文件
+    文件头那两套约定的理由就是这个）。`.gitignore` 挡住了"被推上 GitHub"，
+    挡不住"被更新洗掉"。
+    ⚠️ `load_api_key` 仍然**认**旧位置（保留可用 + 启动告警），因为"搬"这件事
+    不该由程序替用户做（见 `secrets-via-interactive-login`）。
+    """
+    return (pathlib.Path(root) if root is not None else STATE_ROOT) / "credentials"

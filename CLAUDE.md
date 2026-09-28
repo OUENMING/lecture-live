@@ -32,12 +32,12 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | **P3 第二批：课程卡片面板**（三份 UX 调研 + 作者的 6 个决定 + 美感取向 + 动手前先验的两条）—— **做面板前先读** | `docs/PLAN-entry-panel.md` |
 | **面向用户的提示**：说人话的弹窗 / 麦克风权限三态 / 跳系统设置 | `notice.py` |
 | 主循环、后台线程、队列、UI 路由与落盘分发 | `main.py` |
-| 音频采集、麦克风/系统声、电平归一化 | `capture.py` |
+| 音频采集、麦克风/系统声、电平归一化、**上课中途换输入设备**（`resolve_input_device` 是「录哪个设备」的唯一定义点） | `capture.py` |
 | 断句、VAD、静音阈值 | `vad.py` |
 | 转写、ASR、Parakeet、听错修正 | `asr.py` |
 | 翻译、prompt、DeepSeek 云端、mlx 本地、引擎降级 | `translator.py`、`cloud_translator.py` |
 | 术语表、课号、术语查表与注入 | `build_notes.py`、`glossary/`（样例 `glossary.example.txt`） |
-| 笔记落盘、`sessions/` 文件格式、Obsidian 双层笔记 | `obsidian_writer.py` |
+| 笔记落盘、`sessions/` 文件格式、Obsidian 双层笔记、**❓「没听懂」的旁路文件 + 课后反查**（`sessions/<同名>.lost.jsonl`，**绝不改会话抬头**） | `obsidian_writer.py` |
 | 整课二级精修（polish） | `polish.py` |
 | 悬浮窗、字幕显示、滚动、槽位池化 | `overlay.py`、`transcript_view.py` |
 | 滚动行为验收探针（不在运行路径上） | `probe_scroll.py` |
@@ -84,14 +84,25 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   "文件被删/环境不完整"，不是"新 clone 拿不到"。
 - **不阻塞不变量**：`capture` / `vad` 的回调必须立刻返回；AppKit 的调用只能发生在主线程。往流水线里加活先想这两条。
 - ⚠️ **加在磨砂面板上的新交互元素，先查 `mouseDownCanMoveWindow`。**
-  **根因**：它是 AppKit「按下背景即拖动窗口」的开关，**默认值是 `!isOpaque`**
+  **事实**：它是 AppKit「按下背景即拖动窗口」的开关，**默认值是 `!isOpaque`**
   （`docs/OVERLAY-RESIZE-REVIEW.md` §2.4 量的）→ **我们的面板是不透明的反面，
-  所以每个新视图一出生就是 `True`，鼠标按下会被当成"拖窗口"而不是你的手势。**
+  所以每个新视图一出生就是 `True`。**
   ⚠️ **已经咬过两次**：① 窗口四角缩放（`OVERLAY-RESIZE-REVIEW.md` §2.4/§2.6）·
   ② 加 `NSSplitView` 的 pane（本轮调研：**裸 `NSView`/`NSVisualEffectView` 的 pane 是
   `True`，拖 pane 会拖窗口**；`NSSplitView` 自己是 `False`，所以只坑 pane）。
-  → **清单项：新交互视图必须显式设 `mouseDownCanMoveWindow -> False`，并加一条断言。**
-  （`tests/test_panel.py` 已有先例：它断言拖拽层那个是 `True`。）
+  ⚠️ **2026-09-28 修正 —— 下面这句曾写成「默认 `True` → 鼠标按下就会被当成拖窗口」，
+  那是把机制写宽了**（实测见 `tests/test_panel.py` 那条「术语行点击真的触发回调」）：
+  · **视图自己实现了 `mouseDown_` → AppKit 把事件交给它，`True` 也不拖窗口**
+    （`overlay.ClickView` 就是：`flag=True` 而回调照常触发，红/绿两态都响）
+  · ⭐ **之前咬人的两次，受害视图都没有 `mouseDown_`** —— 那才是真条件
+  → **清单项**：新交互视图**自己接管 `mouseDown_`**、**或**显式设
+  `mouseDownCanMoveWindow -> False`（**任取其一**），并加一条**行为**断言 ——
+  **钉「回调真的触发」，别钉 flag 值**（钉 flag 会得出「它是坏的」这个错误结论，
+  因为 `ClickView` 现在就是 `True` 且完全正常）。
+  ⚠️ 未覆盖：app **激活态**下没测过（要 `activateIgnoringOtherApps_`，会抢用户焦点）；
+  本 app 是 `.accessory`、面板是 NonactivatingPanel，正常使用走不到那个状态。
+  （`tests/test_panel.py` 有**两条互补**的先例：一条断言拖拽层那个是 `True`、
+  一条断言术语行点击真的触发回调。）
   ⚠️ 相关的还有一条**只存在于 NSWindow 的属性**：`ignoresMouseEvents`
   （整个 AppKit 头目录只有 `NSWindow.h` 一处，**NSView 没有** —— 网上写
   `view.ignoresMouseEvents = true` 的是错的）→ **穿透一开，面板内一切交互必然失效**。
@@ -117,6 +128,9 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   ⚠️ 它**不含 `requirements.txt`** —— 依赖是 deps 步骤直接装进 `.app` 那个 python 的，不需要重建。
 - **新增 streamq tag 必须在 `main.drain()` 加同分支** —— 它是唯一的 tag 分发点，漏改即静默丢弃。
 - **会话 Markdown 格式是三方共享契约**：`obsidian_writer` 写它、`_parse` 读回它、`cl last` 用 grep 匹配它；改格式会同时打断三处。
+  ⚠️ **抬头正则 `_TS` 是行尾锚定的** —— 所以「课上按下的标记」一律走**旁路文件**
+  （`sessions/<同名>.lost.jsonl`），**不许**往抬头加字段：多一个后缀 `_parse` 就认不出
+  那一条，会把它的 EN/ZH/ASR **静默盖到上一条**头上（上一条被替换、这一条消失）。
 - **`--context` 有两个默认值**：CLI 是 5，`translator.load_translator` / `CloudTranslator` 是 2；直接调库拿到的行为与 `cl` 不同。
 - **环境不可复现**：`requirements.txt` 存在（只有下界、无 lock），没有 `pyproject.toml` / `uv.lock`；
   选型理由写在 `docs/DESIGN.md`。

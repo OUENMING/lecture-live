@@ -37,6 +37,7 @@ import time
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import classify                                                      # noqa: E402
 import entry_panel                                                  # noqa: E402
 
 ISO = pathlib.Path("/tmp/classlive-probe-entry")
@@ -93,6 +94,80 @@ def stub_prepare(course, files, *, on_progress=None):
     return StubRes(added, not_added)
 
 
+def stub_suggest(files, *, courses, course_briefs, head_of, ask, on_progress=None):
+    """假「批量分类」：**不读文件、不出网**，返回一份固定建议。
+
+    ⚠️ 形状必须与 `classify.suggest` **逐参对齐** —— 它是通过
+       `entry_panel` 的 `suggest_fn` 注入点顶替真实现的那个函数。
+
+    这份样本刻意复制 2026-09-28 那轮**真跑**的形状：5 份认得出来（其中 2 份带课号）、
+    7 份认不出来。这样渲染出来的映射卡与当时给作者看的那张**同形**。
+    """
+    rows = [("Intro 2026 Theme 2 Sociology - Copy.pdf", "SOC10020", "标题写着 Introduction to Sociology"),
+            ("Exploring Economics_Outline 2026.pdf", "ECON10740", "标题里就有课号"),
+            ("ECON10740 Task 1 - Ou Enming 25242844.pdf", "ECON10740", "文件名里有课号"),
+            ("Syllabus - Introduction to Sociology 2026.pdf", "SOC10020", "正文标题 SOC10020"),
+            ("ECON10740 Task 1 - Information Literacy.pdf", "ECON10740", "文件名里有课号")]
+    left = [("ps-8.pdf", None, "都不属于（Math10260）"),
+            ("1_fundamental.pdf", None, "都不属于（C 语言课）"),
+            ("chen10040_2025-26_Assignment_1.pdf", None, "都不属于（CHEM10040）"),
+            ("OP0145-HPR_Rheumatoid_arthriti.pdf", None, "都不属于（医学论文）"),
+            ("1-s2.0-S0003687015000198-main.pdf", None, "都不属于（期刊论文）"),
+            ("EEEN10010 - Power and energy systems.pdf", None, "都不属于（能源工程）"),
+            ("Template for Assignment 2 in PSY10140 Mind and Brain (1).pdf", None,
+             "都不属于（PSY10140）")]
+    out = []
+    for i, (name, c, why) in enumerate(rows + left, 1):
+        if on_progress:
+            on_progress(i, len(rows) + len(left), name)
+            time.sleep(0.12)
+        out.append(classify.Verdict(
+            f"/tmp/假课件/{name}", c, why, "code" if "课号" in why and "标题" not in why else "model"))
+    return out
+
+
+def _schedule_dump(h, secs: float) -> None:
+    """临时仪表：几秒后把窗口的视图树打出来（排查"卡在不在"用，不是产品的一部分）。
+
+    ⚠️ 走 `AppHelper.callLater` —— **AppKit 只能在主线程碰**，从 worker 线程摸视图树
+       是这个仓库明令的不变量。
+    """
+    def _walk(v, depth=0):
+        try:
+            f = v.frame()
+            print(f"{'  ' * depth}{type(v).__name__} "
+                  f"({f.origin.x:.0f},{f.origin.y:.0f} {f.size.width:.0f}×{f.size.height:.0f}) "
+                  f"hidden={bool(v.isHidden())}", flush=True)
+        except Exception as e:                                # noqa: BLE001
+            print(f"{'  ' * depth}<{type(v).__name__}: {e}>", flush=True)
+            return
+        if depth < 6:
+            for c in (v.subviews() or []):
+                _walk(c, depth + 1)
+
+    def _go():
+        print("\n===== 视图树 dump =====", flush=True)
+        b = entry_panel.S.get("batch")
+        print("S['batch'] =", None if b is None else
+              {k: (len(v) if isinstance(v, list) else v) for k, v in b.items()},
+              flush=True)
+        print("S['panel'] is None?", entry_panel.S.get("panel") is None,
+              "| S['busy'] =", entry_panel.S.get("busy"), flush=True)
+        _walk(h.window.contentView())
+        print("--- 手动再 refresh() 一次 ---", flush=True)
+        try:
+            h.refresh()
+        except Exception:                                     # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            print("❌ refresh 抛了（上面那个 traceback）", flush=True)
+        _walk(h.window.contentView())
+        print("===== dump 结束 =====\n", flush=True)
+
+    from PyObjCTools import AppHelper
+    AppHelper.callLater(secs, _go)
+
+
 def main() -> int:
     if ISO.exists():
         shutil.rmtree(ISO)
@@ -114,12 +189,23 @@ def main() -> int:
     from PyObjCTools import AppHelper
     h = entry_panel.open_panel(glossary=ISO / "glossary.txt", state_root=ISO,
                                prepare_fn=stub_prepare,
+                               suggest_fn=stub_suggest,
                                on_close=AppHelper.stopEventLoop)
     if h is None:
         print("❌ build 返回 None")
         return 1
 
     from PyObjCTools import AppHelper
+
+    # `PROBE_BATCH=1` —— 一上来就把批量那条链路整个跑一遍（映射卡直接上屏），
+    # 不用手拖。⚠️ 走的是 `Handles.start_batch` 那个**程序化入口**，因为
+    # 真拖拽进不了验收跑器（`test_panel.py` 第 ⑨ 组有同样的说明）。
+    if os.environ.get("PROBE_BATCH"):
+        print("\nPROBE_BATCH=1 —— 直接跑批量：13 份假课件（5 份有归属 / 7 份未分类）")
+        AppHelper.callAfter(h.start_batch, [f"/tmp/假课件/样本{i}.pdf" for i in range(13)])
+        if os.environ.get("PROBE_DUMP"):
+            _schedule_dump(h, 5.0)
+
     AppHelper.runEventLoop()
 
     # 退出后核对：真 glossary 有没有被动过

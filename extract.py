@@ -1,13 +1,13 @@
-"""课件抽文本 —— PDF / PPTX → 带标签的文本块。**只读，永不写文件。**
+"""课件抽文本 —— PDF / PPTX / DOCX → 带标签的文本块。**只读，永不写文件。**
 
 这是 P3「开课前的准备」的第一环：`prep.py` 拿这里的 `Block` 去抽候选术语。
 
 ## 为什么不用第三方库
 
-三样能力这台机器已经付过钱了：PDF 文字层（PDFKit）、PPTX 解包（stdlib `zipfile`）、
-图像 OCR（Vision）。`pyobjc-framework-Quartz` 本来就在 `requirements.txt` 里，
-所以**新增依赖 = 0**。实测 1336 页 PDF 4.29 秒、一门课的课件 ≤2 秒
-（原始数据见 `docs/RESEARCH-p3-extract.md`）。
+四样能力这台机器已经付过钱了：PDF 文字层（PDFKit）、OOXML 解包（stdlib `zipfile`）、
+图像 OCR（Vision）。**PPTX 与 DOCX 同属 OOXML**，所以加 docx 支持也是零依赖。
+`pyobjc-framework-Quartz` 本来就在 `requirements.txt` 里，所以**新增依赖 = 0**。
+实测 1336 页 PDF 4.29 秒、一门课的课件 ≤2 秒（原始数据见 `docs/RESEARCH-p3-extract.md`）。
 
 ## ⚠️ 两个会静默丢内容的坑（都实测过，都在这份代码里堵了）
 
@@ -54,6 +54,10 @@ _PH_EXCLUDED = frozenset({
 
 _NS_A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 _NS_P = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+# ⚠️ DOCX 用的是 **wordprocessingml**，与上面两个不是同一套前缀。
+#    pptx 的 `_paragraphs()` 按 `a:p`/`a:t` 取，对 docx **一个都命中不了** ——
+#    所以下面有 `_w_para` / `_w_paras` 两个姊妹函数，而不是把 `_paragraphs` 参数化。
+_NS_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _SLIDE_RE = re.compile(r"ppt/slides/slide(\d+)\.xml$")
 _NOTES_RE = re.compile(r"ppt/notesSlides/notesSlide(\d+)\.xml$")
 
@@ -106,7 +110,7 @@ class ExtractResult(typing.NamedTuple):
     error: str = ""
 
 
-_SUPPORTED = {".pdf", ".pptx"}
+_SUPPORTED = {".pdf", ".pptx", ".docx"}
 
 
 def is_supported(path_or_suffix) -> bool:
@@ -115,7 +119,9 @@ def is_supported(path_or_suffix) -> bool:
     ⚠️ 存在的理由：**悬停**时要判"这个收不收"，**跑的时候**也要判同一件事。两处各写
     一份判据，用户就会看到「高亮说能收、跑完说 unsupported」。`REVIEW-midpoint §9.2 #5`
     那条「悬停收文件夹」只是它的一个**特例** —— 文件夹不过是"不属于支持集"的一个例子，
-    `.docx` 一模一样。
+    `.txt` / `.xlsx` / 没有扩展名 一模一样。
+    ⚠️ **`.docx` 2026-09-28 起进了支持集**（作者定：`~/Downloads` 里有 52 份）——
+    这条注释里的例子据此换过；`_SUPPORTED` 是集合，别再举它当反例。
 
     ⚠️ 按**后缀**判（与 `extract()` 同一条路），不按 UTI/内容 —— 后者要读文件，而悬停
     阶段**不该读**（`RESEARCH-macos-aesthetic.md` §11）。
@@ -125,12 +131,58 @@ def is_supported(path_or_suffix) -> bool:
     return suffix.lower() in _SUPPORTED
 
 
-def extract(path, *, ocr: bool = True, on_progress=None) -> ExtractResult:
+def expand(paths) -> tuple[list[str], list[str]]:
+    """把拖进来的一串路径摊平：**文件夹取一层**里能抽的文件。
+
+    返回 `(可抽的文件, 被丢掉的)`，两边都是原样的字符串路径。顺序保持输入顺序。
+
+    ⚠️ **必须走 `is_supported`** —— 它是"能不能收"的唯一定义点（见它 docstring 里
+       那条「高亮说能收、跑完说 unsupported」）。
+
+    ⚠️ 拖拽**悬停**阶段会调它，于是会 `iterdir()` **列一层目录** —— 与 `is_supported`
+       那条「悬停不该读**文件**」不冲突：这里不打开任何文件、不读一个字节的内容，
+       问的只是名字。会咬人的是 UTI/内容嗅探那类**要打开并解析**的判定。
+
+    ⚠️ 只展开**一层**，不递归 —— 课件目录不会嵌套，而递归会在用户拖错一个根目录时
+       把几千份文件塞进队列。
+    """
+    ok: list[str] = []
+    dropped: list[str] = []
+    for p in paths or []:
+        s = str(p)
+        d = pathlib.Path(s)
+        try:
+            is_dir = d.is_dir()
+        except OSError:
+            is_dir = False
+        if is_dir:
+            try:
+                kids = sorted(c for c in d.iterdir() if c.is_file())
+            except OSError:
+                dropped.append(s)
+                continue
+            got = [str(c) for c in kids if is_supported(c)]
+            ok.extend(got)
+            if not got:
+                dropped.append(s)          # 文件夹里一个能抽的都没有 -> 整个算丢掉
+        elif is_supported(s):
+            ok.append(s)
+        else:
+            dropped.append(s)
+    return ok, dropped
+
+
+def extract(path, *, ocr: bool = True, on_progress=None,
+            max_pages: int | None = None) -> ExtractResult:
     """把一份课件抽成带标签的文本块。
 
     `ocr=False` 关掉扫描页兜底（快，但扫描件会得到空文本）。
     `on_progress(done, total)` 在每页后回调一次 —— **由调用方决定放哪个线程**，
     本函数自己不起线程、不画界面。
+    `max_pages` 只看头几页 —— 给**分类**用（判归属看第一页就够，见
+    `docs/PLAN-entry-panel.md` §7.10 的实测）。⚠️ 设了它**就不抽 PPTX 备注页**
+    （备注不是页，且它按文件名后缀映射到 slide，截断后映射会错位）。
+    `stats.pages` 报的始终是**文件真实页数**，不是看了几页。
     """
     p = pathlib.Path(path)
     empty_stats = ExtractStats(0, 0, 0, {}, 0, {})
@@ -143,9 +195,11 @@ def extract(path, *, ocr: bool = True, on_progress=None) -> ExtractResult:
 
     try:
         if p.suffix.lower() == ".pdf":
-            blocks, stats = _pdf_blocks(p, ocr, on_progress)
+            blocks, stats = _pdf_blocks(p, ocr, on_progress, max_pages)
+        elif p.suffix.lower() == ".docx":
+            blocks, stats = _docx_blocks(p, ocr, on_progress, max_pages)
         else:
-            blocks, stats = _pptx_blocks(p, ocr, on_progress)
+            blocks, stats = _pptx_blocks(p, ocr, on_progress, max_pages)
     except Exception as e:                                    # noqa: BLE001
         # 抽取失败**不能**让整场 prep 挂掉，也不能静默 —— 说清是哪个文件、什么原因。
         return ExtractResult(p, "unreadable", [], 0, empty_stats,
@@ -159,7 +213,7 @@ def extract(path, *, ocr: bool = True, on_progress=None) -> ExtractResult:
 
 # ---------------------------------------------------------------- PDF
 
-def _pdf_blocks(path: pathlib.Path, ocr: bool, on_progress):
+def _pdf_blocks(path: pathlib.Path, ocr: bool, on_progress, max_pages=None):
     from Foundation import NSURL
     from Quartz import PDFKit
 
@@ -177,8 +231,9 @@ def _pdf_blocks(path: pathlib.Path, ocr: bool, on_progress):
         pass                                                  # 老版本没这个方法，跳过
 
     n = doc.pageCount()
+    lim = n if not max_pages else min(n, max_pages)
     blocks, ocr_pages = [], 0
-    for i in range(n):
+    for i in range(lim):
         page = doc.pageAtIndex_(i)
         text = (page.string() or "") if page is not None else ""
         if not text.strip() and ocr:
@@ -187,14 +242,14 @@ def _pdf_blocks(path: pathlib.Path, ocr: bool, on_progress):
                 ocr_pages += 1
                 blocks.append(Block(got.strip(), "ocr", i + 1))
                 if on_progress:
-                    on_progress(i + 1, n)
+                    on_progress(i + 1, lim)
                 continue
         # PDF 没有占位符结构，认不出层级 —— 全部 body。
         # （所以「标题加权」是 PPTX 独享的免费信号，见模块文档。)
         for para in _pdf_paragraphs(text):
             blocks.append(Block(para, "body", i + 1))
         if on_progress:
-            on_progress(i + 1, n)
+            on_progress(i + 1, lim)
 
     stats = ExtractStats(pages=n, shapes_seen=n, shapes_skipped=0,
                          skipped_by_reason={}, ocr_pages=ocr_pages,
@@ -282,7 +337,7 @@ def _ocr_pdf_page(pdf_page) -> str:
 
 # ---------------------------------------------------------------- PPTX
 
-def _pptx_blocks(path: pathlib.Path, ocr: bool, on_progress):
+def _pptx_blocks(path: pathlib.Path, ocr: bool, on_progress, max_pages=None):
     import zipfile
 
     with zipfile.ZipFile(path) as zf:
@@ -295,7 +350,8 @@ def _pptx_blocks(path: pathlib.Path, ocr: bool, on_progress):
         reasons: dict = {}
         blocks: list = []
         total = len(slides)
-        for done, (num, name) in enumerate(slides, 1):
+        lim = total if not max_pages else min(total, max_pages)
+        for done, (num, name) in enumerate(slides[:lim], 1):
             root = _parse(zf.read(name))
             b, s = _slide_blocks(root, num)
             blocks += b
@@ -303,20 +359,85 @@ def _pptx_blocks(path: pathlib.Path, ocr: bool, on_progress):
             for k, v in s["reasons"].items():
                 reasons[k] = reasons.get(k, 0) + v
             if on_progress:
-                on_progress(done, total)
+                on_progress(done, lim)
 
         # 备注页：结构上完全可达、成本≈0，但真实语料里只有 2.03% 的字来自它
         # （`docs/RESEARCH-p3-extract.md` §5.2）→ 顺手抽，不为它做任何设计。
         # ⚠️ 页码按文件名后缀映射到 slide —— 这是常见约定，不是规范保证。
-        for num, name in _numbered(names, _NOTES_RE):
-            root = _parse(zf.read(name))
-            for para in _paragraphs(root):
-                blocks.append(Block(para, "notes", num))
+        # ⚠️ `max_pages` 截断时**整段跳过**：备注不是页，且截断后那份映射会错位。
+        if not max_pages:
+            for num, name in _numbered(names, _NOTES_RE):
+                root = _parse(zf.read(name))
+                for para in _paragraphs(root):
+                    blocks.append(Block(para, "notes", num))
 
     stats = ExtractStats(pages=total, shapes_seen=seen, shapes_skipped=skipped,
                          skipped_by_reason=reasons, ocr_pages=0,
                          by_kind=_count_kinds(blocks))
     return blocks, stats
+
+
+def _docx_blocks(path: pathlib.Path, ocr: bool, on_progress, max_pages=None):
+    """DOCX → 文本块。与 PPTX 同属 OOXML，所以还是 `zipfile` + 标准库 XML，**零新依赖**。
+
+    ⚠️ **DOCX 没有"页"。** 它是流式文档，分页由渲染器按纸张大小和字体算出来，
+       **文件里不存**。所以 `Block.page` 一律 `1`、`stats.pages` 也是 `1`（"一份文档"）。
+       模块头那条「`page` 是 slide spread 的唯一来源」对 docx 是**平凡成立**的。
+    ⚠️ `ocr` 与 `max_pages` 对 docx **都无意义**（没有页面图像、没有页）——
+       签名保留只为与另两条路一致，不为它加特例分支。
+    ⚠️ 段落用 `_w_para`（`w:` 命名空间），**不能借 pptx 的 `_paragraphs`** ——
+       后者按 `a:p`/`a:t` 取，对 docx 一个都命中不了（且**不报错**，只是抽到空）。
+    """
+    import zipfile
+
+    with zipfile.ZipFile(path) as zf:
+        try:
+            raw = zf.read("word/document.xml")
+        except KeyError:
+            raise RuntimeError("zip 里没有 word/document.xml —— 不是 DOCX？")
+    body = _parse(raw).find(_NS_W + "body")
+    if body is None:
+        return [], ExtractStats(1, 0, 0, {}, 0, {})
+
+    # ⚠️ **按 body 的直接子元素顺序走一遍**（而不是 `iter(tbl)` 与 `iter(p)` 各扫一次）——
+    #    两次扫描会把全部表格排到全部段落前面（pptx 那条路就是这么写的，它认这个代价）。
+    #    这里能便宜地保序，就保。
+    blocks: list = []
+    seen = 0
+    for el in body:
+        if el.tag == _NS_W + "p":
+            seen += 1
+            t = _w_para(el)
+            if t:
+                blocks.append(Block(t, "body", 1))
+        elif el.tag == _NS_W + "tbl":
+            # 表格按 `<w:tr>` 行成块、行内单元格 `" | "` 连 —— 与 pptx 那条**同一口径**
+            # （拆到单元格会丢上下文，整表一块会丢行内共现）。
+            for tr in el.iter(_NS_W + "tr"):
+                cells = [" ".join(_w_paras(tc)) for tc in tr.iter(_NS_W + "tc")]
+                line = " | ".join(c for c in cells if c).strip()
+                if line:
+                    seen += 1
+                    blocks.append(Block(line, "table", 1))
+
+    stats = ExtractStats(pages=1, shapes_seen=seen, shapes_skipped=0,
+                         skipped_by_reason={}, ocr_pages=0,
+                         by_kind=_count_kinds(blocks))
+    return blocks, stats
+
+
+def _w_para(el) -> str:
+    """一个 `<w:p>` 的纯文本：段内所有 `<w:t>` 拼起来。
+
+    ⚠️ 与 `_paragraphs()`（pptx）同一条纪律 —— **按段落分**。只 `.iter(w:t)` 会把
+       不同段落的 run 粘成一行。
+    """
+    return "".join(t.text or "" for t in el.iter(_NS_W + "t")).strip()
+
+
+def _w_paras(el) -> list:
+    """`el` 里所有 `<w:p>` 的文本（表格单元格走它）。"""
+    return [s for s in (_w_para(p) for p in el.iter(_NS_W + "p")) if s]
 
 
 def _parse(raw: bytes):

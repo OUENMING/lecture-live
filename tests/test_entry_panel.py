@@ -265,6 +265,54 @@ def main() -> int:
     check("⚠️ 跑完 .course 逐字还原（隔离真的成立）",
           (cfg.read_bytes() if cfg.exists() else None) == saved)
 
+    print("\n--- ⑩ 批量归档：映射表高度 + 分组（plan §7.12）---")
+
+    def V(path, course, why="理由", source="model"):
+        import classify as _cl
+        return _cl.Verdict(path, course, why, source)
+
+    vs = [V("a.pdf", "ECON10740"), V("b.pdf", "ECON10740"),
+          V("c.pdf", "SOC10020"), V("d.pdf", None), V("e.pdf", None)]
+    hit, left = E.split_verdicts(vs)
+    check("split_verdicts：有归属的 3 份、认不出来的 2 份",
+          len(hit) == 3 and len(left) == 2, f"{len(hit)}/{len(left)}")
+    check("split_verdicts 是**划分**（两组不重不漏）",
+          {id(v) for v in hit} | {id(v) for v in left} == {id(v) for v in vs}
+          and not ({id(v) for v in hit} & {id(v) for v in left}))
+
+    h1 = E.batch_card_height([V("a.pdf", "ECON10740")])
+    h2 = E.batch_card_height([V("a.pdf", "ECON10740"), V("b.pdf", "ECON10740")])
+    check("每多一行有归属的 -> 恰好高 BATCH_ROW",
+          abs((h2 - h1) - E.BATCH_ROW) < 1e-9, f"{h1} -> {h2}")
+    h3 = E.batch_card_height([V("a.pdf", "ECON10740"), V("d.pdf", None)])
+    h4 = E.batch_card_height([V("a.pdf", "ECON10740"), V("d.pdf", None),
+                              V("e.pdf", None)])
+    # ⚠️ 拿**已经有两个组**的两张表比 —— 直接拿"只有 hit"去比会把
+    #    「第一条未分类行顺带带来的 分隔线 + 组标题」算进去（那是 57，不是 24）。
+    check("每多一行认不出来的 -> 也恰好高 BATCH_ROW",
+          abs((h4 - h3) - E.BATCH_ROW) < 1e-9, f"{h3} -> {h4}")
+    check("第一条未分类行要顺带带出 分隔线 + 组标题",
+          abs((h3 - h1) - (E.BATCH_SEP + E.BATCH_HEAD + E.BATCH_ROW)) < 1e-9,
+          f"{h1} -> {h3}")
+    # ⭐ 没有"认不出来的"那组时，分隔线 + 组标题**不该**算进去。
+    check("⭐ 没有未分类 -> 不算分隔与第二个组标题",
+          abs(h1 - (E.CARD_PAD * 2 + E.BATCH_HEAD + E.BATCH_ROW)) < 1e-9, str(h1))
+    check("空表 -> 只有上下的内边距（不崩、不为负）",
+          E.batch_card_height([]) == E.CARD_PAD * 2, str(E.batch_card_height([])))
+
+    print("\n--- ⑪ ⭐「未分类」不进队列（分错会污染术语表）---")
+    g = E.group_for_archive([("a.pdf", "ECON10740"), ("b.pdf", "ECON10740"),
+                             ("c.pdf", "SOC10020"), ("d.pdf", E.BATCH_UNDECIDED),
+                             ("e.pdf", None), ("f.pdf", "")])
+    check("⭐ 有归属的按课归组", g == {"ECON10740": ["a.pdf", "b.pdf"],
+                                      "SOC10020": ["c.pdf"]}, str(g))
+    check("⭐ 未分类 / 空标题 / None —— 一份都不进队列",
+          "d.pdf" not in [x for v in g.values() for x in v]
+          and "e.pdf" not in [x for v in g.values() for x in v]
+          and "f.pdf" not in [x for v in g.values() for x in v], str(g))
+    check("分组保持输入顺序", E.group_for_archive(
+        [("z.pdf", "X"), ("a.pdf", "X")]) == {"X": ["z.pdf", "a.pdf"]})
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

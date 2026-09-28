@@ -891,8 +891,10 @@ def main() -> int:
     check("收下之后 `draggingUpdated:` **也**是收（回放 entered 的决定）",
           _t.draggingUpdated_(_s) == _COPY)
 
-    _t2, _s2, _ = _mk(["/x/讲义.docx"])
-    check("⭐ 不支持的输入（`.docx`）-> `draggingEntered:` 拒",
+    # ⚠️ 2026-09-28：**`.docx` 进支持集了**（作者定），所以这里的"不支持"样本
+    #    换成 `.txt`。原来钉的是 `.docx` —— 那条判据没坏，是**被支持集的变化作废了**。
+    _t2, _s2, _ = _mk(["/x/notes.txt"])
+    check("⭐ 不支持的输入（`.txt`）-> `draggingEntered:` 拒",
           _t2.draggingEntered_(_s2) == _NONE)
     check("⭐⭐ enter 拒了之后 `draggingUpdated:` **必须也拒**"
           "（原来无条件返 Copy —— `§9.2 #5` 的 P/1）",
@@ -927,9 +929,31 @@ def main() -> int:
     #      **要测"接线"，不是测"被调用的那个函数"**）。
     _card = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
                           on_drop_files=lambda c, p: True, width=640.0)
-    check("⭐⭐ 真 `entry_panel._enter`：`.docx` **拒**"
+    check("⭐⭐ 真 `entry_panel._enter`：`.txt` **拒**"
           "（原来只看『非空文件列表』→ 高亮说能收、跑完说 unsupported）",
-          bool(_card._on_enter(_PB(["/x/讲义.docx"]))) is False)
+          bool(_card._on_enter(_PB(["/x/notes.txt"]))) is False)
+    # ⚠️ 2026-09-28 起 `.docx` 进支持集 —— 这条钉的是**新行为**，
+    #    与上面那条 `.txt` 是一对（改 `_SUPPORTED` 就会有一条红）。
+    check("⭐ 真 `entry_panel._enter`：`.docx` 现在**收**（2026-09-28 进支持集）",
+          bool(_card._on_enter(_PB(["/x/讲义.docx"]))) is True)
+    # ⭐ 文件夹：走 `extract.expand()`，**一层**里找得到能抽的就收。
+    #    ⚠️ 这两条需要真目录（`expand` 会 `iterdir`）—— 用 tempfile，不碰仓库任何东西。
+    import shutil as _sh
+    import tempfile as _tf
+    _tmpd = _tf.mkdtemp(prefix="cl_enter_")
+    try:
+        _with = pathlib.Path(_tmpd) / "有"
+        _with.mkdir()
+        (_with / "a.pdf").write_bytes(b"")
+        _without = pathlib.Path(_tmpd) / "无"
+        _without.mkdir()
+        (_without / "a.txt").write_bytes(b"")
+        check("⭐ 真 `_enter`：文件夹里有能抽的 -> **收**",
+              bool(_card._on_enter(_PB([str(_with)]))) is True)
+        check("⭐ 真 `_enter`：文件夹里一个能抽的都没有 -> **拒**（别高亮说能收）",
+              bool(_card._on_enter(_PB([str(_without)]))) is False)
+    finally:
+        _sh.rmtree(_tmpd, ignore_errors=True)
     check("⭐ 真 `entry_panel._enter`：目录也拒（它同样不在支持集里）",
           bool(_card._on_enter(_PB(["/x/Downloads"]))) is False)
     check("⭐ 真 `entry_panel._enter`：`.pdf` / `.pptx` 收",

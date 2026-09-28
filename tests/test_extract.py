@@ -198,6 +198,92 @@ def main() -> int:
             check("关 OCR 时同文件字符更少（证明 OCR 真的加了东西）",
                   on.chars > off.chars, f"on={on.chars} off={off.chars}")
 
+        print("\n10. DOCX（2026-09-28 进支持集）")
+        W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        docx = tmp / "s.docx"
+        with zipfile.ZipFile(docx, "w") as z:
+            z.writestr("word/document.xml", f"""<?xml version="1.0"?>
+<w:document xmlns:w="{W}"><w:body>
+<w:p><w:r><w:t>ECON10740 Exploring Economics</w:t></w:r></w:p>
+<w:p><w:r><w:t>Week 3 </w:t></w:r><w:r><w:t>Lecture Notes</w:t></w:r></w:p>
+<w:tbl><w:tr><w:tc><w:p><w:r><w:t>SDG</w:t></w:r></w:p></w:tc>
+<w:tc><w:p><w:r><w:t>Goal 4</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:p><w:r><w:t>AFTER_THE_TABLE</w:t></w:r></w:p>
+</w:body></w:document>""".encode())
+
+        r = extract.extract(docx)
+        texts = [b.text for b in r.blocks]
+        check("DOCX 抽得到字", r.status == "ok" and r.chars > 0, f"{r.status} {r.chars}")
+        check("同段多个 run 不粘连（按 w:p 分）",
+              "Week 3 Lecture Notes" in texts, str(texts[:3]))
+        check("表格行成块、单元格用 ' | ' 连",
+              any(b.kind == "table" and " | " in b.text for b in r.blocks),
+              str([b.text for b in r.blocks if b.kind == "table"]))
+        # ⭐ 这条是**区分性**的：把实现写成「两次 iter()`（先全部表格再全部段落）」
+        #    —— 那是 pptx 那条路的写法 —— 这条就会红。见 `_docx_blocks` 的注释。
+        check("⭐ 顺序保真：表格后面的段落仍在表格之后",
+              texts.index("AFTER_THE_TABLE") > max(
+                  i for i, b in enumerate(r.blocks) if b.kind == "table"),
+              str(texts))
+        check("DOCX 没有页的概念 -> page 一律 1",
+              all(b.page == 1 for b in r.blocks))
+
+        bad_docx = tmp / "notzip.docx"
+        bad_docx.write_bytes(b"definitely not a zip")
+        rb = extract.extract(bad_docx)
+        check("非 zip 的 .docx -> unreadable，**异常没逃出去**",
+              rb.status == "unreadable" and "ZipFile" in rb.error, f"{rb.status} {rb.error}")
+
+        noxml = tmp / "noxml.docx"
+        with zipfile.ZipFile(noxml, "w") as z:
+            z.writestr("hello.txt", b"hi")
+        rn = extract.extract(noxml)
+        check("zip 里没有 word/document.xml -> unreadable",
+              rn.status == "unreadable" and "document.xml" in rn.error,
+              f"{rn.status} {rn.error}")
+
+        print("\n11. expand()：文件夹取一层（拖拽落点用）")
+        d = tmp / "mats" / "sub"
+        d.mkdir(parents=True)
+        (tmp / "mats" / "a.pdf").write_bytes(b"")
+        (tmp / "mats" / "b.pptx").write_bytes(b"")
+        (tmp / "mats" / "c.txt").write_bytes(b"")
+        (d / "deep.pdf").write_bytes(b"")           # 第二层：**不该**被取到
+
+        ok1, drop1 = extract.expand([str(tmp / "mats")])
+        names = sorted(pathlib.Path(p).name for p in ok1)
+        check("文件夹里支持的都被取到", names == ["a.pdf", "b.pptx"], str(names))
+        # ⭐ 变异点：把 `iterdir()` 换成 `rglob()` 这条就红。
+        check("⭐ 只展开一层，不递归（子文件夹里的不取）",
+              "deep.pdf" not in names, str(names))
+        check("文件夹本身不算 dropped", drop1 == [], str(drop1))
+
+        empty_dir = tmp / "nothing"
+        empty_dir.mkdir()
+        (empty_dir / "x.txt").write_bytes(b"")
+        ok2, drop2 = extract.expand([str(empty_dir)])
+        check("文件夹里一个能抽的都没有 -> 整体进 dropped",
+              ok2 == [] and drop2 == [str(empty_dir)], f"{ok2} {drop2}")
+
+        ok3, drop3 = extract.expand([str(docx), "/nope/x.txt", "/nope/y.pdf"])
+        check("散文件：不支持的进 dropped",
+              str(docx) in ok3 and drop3 == ["/nope/x.txt"], f"{ok3} {drop3}")
+        # ⚠️ **不存在的路径只要后缀支持就放行** —— 这是刻意的，不是漏判：
+        #    `expand` 只按后缀认（那正是 `is_supported` 的口径），**存在性是
+        #    `extract()` 的活**（它会返回 status="unreadable" 并写人话）。
+        #    在这里多查一次 `exists()` 就等于把「能不能收」的判据写成两份。
+        check("⚠️ 不存在的路径：按后缀放行（存在性归 extract() 管）",
+              "/nope/y.pdf" in ok3 and "/nope/y.pdf" not in drop3,
+              f"{ok3} {drop3}")
+        check("expand 保持输入顺序", [pathlib.Path(p).name for p in
+                                     extract.expand(
+                                         [str(tmp / "mats" / "b.pptx"),
+                                          str(tmp / "mats" / "a.pdf")])[0]]
+              == ["b.pptx", "a.pdf"])
+
+        check("is_supported 认 .docx（且它是支持集的唯一定义点）",
+              extract.is_supported("x.docx") and not extract.is_supported("x.txt"))
+
         bad = [n for n, ok in RESULTS if not ok]
         print(f"\n{'=' * 62}")
         print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

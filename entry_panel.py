@@ -64,6 +64,18 @@ CARD_GAP_V = 8.0       # 卡片内：按钮块 ↔ 文字块（`card_height` 的
 RESULT_LEAD = 26.0     # 「本次加了 N 个」那一行
 RESULT_ROW = 22.0      # 一个词一行
 
+# ── 批量归档（plan §7.12）────────────────────────────────────────────
+# 面板底部那条**常驻**落点条。⚠️ 常驻是刻意的：HIG › Drag and drop 逐字
+# 「As much as possible, support drag and drop throughout your app」，而且
+# 面板高度是按卡片数长出来的 —— **没有"空白处"可以拖**（§7.12 开头那条）。
+DROP_H = 44.0
+DROP_GAP = 8.0
+BATCH_ROW = 24.0       # 映射表一行
+BATCH_HEAD = 18.0      # 组标题（「已认出归属」/「认不出来的」）
+BATCH_SEP = 15.0       # 两组之间的分隔
+BATCH_CHIP_W = 138.0   # 右侧课号选择器
+BATCH_UNDECIDED = "未分类"
+
 # ── 颜色 ────────────────────────────────────────────────────────────
 # ⚠️ **深色模式的卡片配色没有实测过**（System Settings 跟随系统外观，本机是浅色，
 #    改外观属于「不擅自改系统设置」）。所以下面这几个值是**从实测比例推的**，
@@ -110,6 +122,10 @@ class Handles(typing.NamedTuple):
     close: typing.Callable[[], None]
     refresh: typing.Callable[[], None]
     set_status: typing.Callable[..., None]
+    # 批量归档的**程序化入口** —— 拖拽那条路走不到验收跑器里（没有真拖拽），
+    # 而 `probe_entry_panel.py` 必须能把这条链路整个跑一遍。同 `refresh` 的理由：
+    # 外部调用方需要一个戳面板的口子。⚠️ 生产路径不调它。
+    start_batch: typing.Callable[[list], bool]
 
 
 S = {                              # 同进程只允许一个面板（菜单栏/双击两条入口可能都来）
@@ -274,6 +290,55 @@ def card_height(entry=None) -> float:
     return h
 
 
+def split_verdicts(verdicts) -> tuple[list, list]:
+    """`classify.suggest()` 的结果 → `(已认出归属, 认不出来的)`。
+
+    ⚠️ **高度算式与排版循环都从这一个结果来** —— 各自 `filter` 一遍迟早对不上，
+       而对不上表现为「有的行画到卡片外」，**不报错**（同 `card_height` 那条纪律）。
+    ⚠️ 判据是 `v.course` 真值，不是 `source`：机械层与模型层都会给课号，
+       而未分类那条路 `course` 恒为 `None`。
+    """
+    return ([v for v in verdicts if v.course],
+            [v for v in verdicts if not v.course])
+
+
+def group_for_archive(rows) -> dict:
+    """`[(路径, 选择器给的课号), …]` → `{课号: [路径, …]}`。
+
+    ⚠️⚠️ **「未分类」不进结果 —— 这就是"未分类不排队"那条规矩的唯一定义点。**
+       分错课会污染那门课的术语表（之后**每一句翻译都在用错术语**，且要到课上才发现），
+       所以认不出来的那些必须留在原处，一份都不许被静默归档。
+
+    ⚠️ 空标题也算未分类（模型/机械层都答 `None` 时，选择器就停在这个字面上）。
+    """
+    out: dict = {}
+    for path, title in rows:
+        t = str(title or "").strip() or BATCH_UNDECIDED
+        if t == BATCH_UNDECIDED:
+            continue
+        out.setdefault(t, []).append(path)
+    return out
+
+
+def batch_card_height(verdicts) -> float:
+    """映射卡高度 —— **按内容累加推导**，与 `_make_batch_card` 的排版循环成对。
+
+    ⚠️ 同样别抄一个固定值：行数是**拖进来几份**决定的，写死就会溢出（且不报错）。
+    ⚠️ 与 `card_height` 一样：`batch_card_height([])` 恰好是"只有标题 + 上下内边距"，
+       那条不是锁；真锁在 `tests/test_panel.py` 的「没有子视图掉出卡片底部」。
+    """
+    hit, left = split_verdicts(verdicts)
+    # ⚠️ 每一项都必须与 `_make_batch_card` 的排版循环**逐项对应** —— 包括
+    #    「`hit` 为空时**不画**那个组标题」这一条。不对应的症状是**高度算多一截
+    #    而循环没画**（或反过来），卡片会空一截或把内容挤出去，都**不报错**。
+    h = CARD_PAD
+    if hit:
+        h += BATCH_HEAD + len(hit) * BATCH_ROW
+    if left:
+        h += BATCH_SEP + BATCH_HEAD + len(left) * BATCH_ROW
+    return h + CARD_PAD
+
+
 def progress_text(stage: str, done: int, total: int) -> str:
     """进度文案。stage 是 `prep` 给的机器名，这里只做**显示**。
 
@@ -406,15 +471,17 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width,
     #    落点成功时**不会**再收到 `draggingExited:`，只在 exit 里撤会留下一张
     #    永久高亮的卡（见 `panel.make_drop_target` 的说明）。
     def _enter(pb):
-        # ⚠️ 判据是「**至少一个文件是能抽的**」（`extract.is_supported` —— 支持集的
-        #    唯一定义点，与流水线共用一份），不是「拖进来一个非空文件列表」。
-        #    原来只看 `bool(panel.file_paths(pb))` → **文件夹、`.docx`、`.txt` 全都高亮
+        # ⚠️ 判据是「**摊平后有能抽的**」（`extract.expand` 走 `is_supported` ——
+        #    支持集的唯一定义点，与流水线共用一份），不是「拖进来一个非空文件列表」。
+        #    原来只看 `bool(panel.file_paths(pb))` → **文件夹、`.txt`、`.docx` 全都高亮
         #    说"能收"**，松手才在 `prep` 里判 unsupported（`REVIEW §9.2 #5`）。
+        #    ⚠️ 2026-09-28 起走 `expand()`：**文件夹取一层**，两个入口行为一致
+        #    （落点条那条也用它；两处不一致比不支持更糟）。
         #    ⚠️ 拒的时候**也要不高亮**：HIG 逐字要求"收不了时给显式反馈（`circle.slash`）、
         #       **别给高亮**" —— 只改返回值会留下"高亮着但收不了"。
-        from extract import is_supported
+        from extract import expand as _expand
         paths = panel.file_paths(pb) or []
-        ok = any(is_supported(p) for p in paths)
+        ok = bool(_expand(paths)[0])
         _bg(HILITE_A if ok else CARD_FILL_A)
         return ok
 
@@ -538,9 +605,97 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width,
     return view
 
 
+def _make_batch_card(verdicts, *, width, course_names):
+    """待确认的映射表。返回 `(view, rows)`，`rows = [(路径, 选择器), …]`。
+
+    两组：**已认出归属** / **认不出来的**（分隔线 + 降透明度）。
+
+    ⚠️⚠️ **「认不出来的」那组不许预填猜测。** `[论文]` AAAI-22（Bondi et al.）四组
+       消息对照实测，逐字：「participants are **significantly less accurate when the
+       prediction is shown**」（57.8% vs 60.2%，**p = 0.003**）、「exposing humans to
+       **incorrect** predictions of an AI makes them **even more likely to be
+       incorrect**」。机制怀疑是 anchoring。
+       我们这里"认不出来"的那些**恰恰最可能是模型会猜错的**，所以那一组的选择器
+       一律停在「未分类」，理由那列照写原因，**不写"我猜是 X"**。
+
+    ⚠️ 排版一律**从顶部往下**（y 递减，卡片是非翻转坐标）—— 同 `_make_card` 那条；
+       反过来堆会让列表倒过来（那次事故的说明在 `_make_card` 里）。
+    """
+    from AppKit import (NSBox, NSBoxSeparator, NSColor, NSFont, NSPopUpButton,
+                        NSView, NSMakeRect)
+
+    hit, left = split_verdicts(verdicts)
+    h = batch_card_height(verdicts)
+    inner_w = width - 2 * CARD_PAD
+    white = NSColor.whiteColor()
+
+    view = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, h))
+    view.setWantsLayer_(True)
+    view.layer().setCornerRadius_(CARD_RADIUS)
+    view.layer().setBorderWidth_(HAIRLINE)
+    view.layer().setBorderColor_(
+        white.colorWithAlphaComponent_(CARD_LINE_A).CGColor())
+    view.layer().setBackgroundColor_(
+        white.colorWithAlphaComponent_(CARD_FILL_A).CGColor())
+
+    # 三列：文件名 | 理由 | 课号。理由列给足宽度 —— 它是作者复核**唯一的依据**，
+    # 挤成 7 个字（等于看不见）就白做了。
+    chip_x = CARD_PAD + inner_w - BATCH_CHIP_W
+    why_w = 150.0
+    why_x = chip_x - 10.0 - why_w
+    name_w = max(40.0, why_x - CARD_PAD - 12.0)
+
+    rows: list = []
+    y = h - CARD_PAD
+
+    def head(text):
+        nonlocal y
+        y -= BATCH_HEAD
+        view.addSubview_(panel.make_label(
+            text, NSMakeRect(CARD_PAD, y, inner_w, BATCH_HEAD - 2.0), 11.0, alpha=DIM))
+
+    def row(v, dim):
+        nonlocal y
+        y -= BATCH_ROW
+        view.addSubview_(panel.make_label(
+            pathlib.Path(v.path).name,
+            NSMakeRect(CARD_PAD, y + 4.0, name_w, 16.0), 12.0,
+            alpha=(DIM if dim else 1.0), truncate=True))
+        view.addSubview_(panel.make_label(
+            v.why, NSMakeRect(why_x, y + 5.0, why_w, 15.0), 10.0,
+            alpha=DIM * 0.9, truncate=True))
+        # ⚠️ 选择器**从不预设"最佳猜测"** —— 见 docstring 那条 AAAI-22。
+        p = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(chip_x, y + 1.5, BATCH_CHIP_W, 21.0), False)
+        p.addItemsWithTitles_([BATCH_UNDECIDED] + list(course_names))
+        want = (0 if not v.course else
+                (list(course_names).index(v.course) + 1
+                 if v.course in list(course_names) else 0))
+        p.selectItemAtIndex_(want)
+        p.setFont_(NSFont.systemFontOfSize_(11.0))
+        p.setControlSize_(1)                                       # small
+        view.addSubview_(p)
+        rows.append((v.path, p))
+
+    if hit:
+        head("已认出归属")
+        for v in hit:
+            row(v, dim=False)
+    if left:
+        y -= BATCH_SEP
+        sep = NSBox.alloc().initWithFrame_(
+            NSMakeRect(CARD_PAD, y + BATCH_SEP / 2.0, inner_w, 1.0))
+        sep.setBoxType_(NSBoxSeparator)
+        view.addSubview_(sep)
+        head("认不出来的")
+        for v in left:
+            row(v, dim=True)
+
+    return view, rows
+
 
 def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
-          on_close=None, prepare_fn=None) -> Handles | None:
+          on_close=None, prepare_fn=None, suggest_fn=None) -> Handles | None:
     """建并显示面板。**失败返回 `None`**（调用方不必管 —— 同 `whatsnew.build`）。
 
     `prepare_fn` 是**验收用的注入点**，默认就是真的 `prep.prepare`：
@@ -553,7 +708,8 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
     """
     try:
         return _build(on_start=on_start, glossary=glossary, sessions_dir=sessions_dir,
-                      state_root=state_root, on_close=on_close, prepare_fn=prepare_fn)
+                      state_root=state_root, on_close=on_close, prepare_fn=prepare_fn,
+                      suggest_fn=suggest_fn)
     except objc_own.ObjcNameCollision:
         raise
     except Exception:                                     # noqa: BLE001
@@ -564,9 +720,9 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
 
 
 def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
-           prepare_fn=None) -> Handles:
-    from AppKit import (NSColor, NSScreen, NSWindowStyleMaskBorderless,
-                        NSWindowStyleMaskNonactivatingPanel)
+           prepare_fn=None, suggest_fn=None) -> Handles:
+    from AppKit import (NSButton, NSColor, NSFont, NSScreen,
+                        NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel)
     from Foundation import NSMakeRect
 
     root = pathlib.Path(__file__).resolve().parent
@@ -580,7 +736,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
     rs = load()
     body_h = body_height(len(rs), NSScreen.mainScreen().frame().size.height)
-    h = PAD + TITLE_H + body_h + 8.0 + FOOT_H + PAD
+    # ⚠️ 高度**从下往上推**：页脚 → 落点条 → 滚动区 → 标题。改任何一条边距时，
+    #    `h` 与视图的 y **用的是同一组常数**，不是各写一遍（`card_height` 那条纪律）。
+    drop_y = PAD + FOOT_H + DROP_GAP
+    sc_y = drop_y + DROP_H + DROP_GAP
+    h = sc_y + body_h + 8.0 + TITLE_H + PAD
 
     mask = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
     fp = panel.build(NSMakeRect(0.0, 0.0, WIDTH, h), mask)
@@ -589,18 +749,127 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    留在调用点、不进 panel.py 的配方。
     win.setHasShadow_(True)
 
-    ve.addSubview_(panel.make_label(
+    # 标题在批量模式下会换字 —— 存进 holder，别让 `refresh()` 摸不到它。
+    title_lbl = panel.make_label(
         "开课前的准备", NSMakeRect(PAD, h - PAD - TITLE_H + 6.0,
-                                 WIDTH - 2 * PAD, TITLE_H - 6.0), 15.0, bold=True))
+                                 WIDTH - 2 * PAD, TITLE_H - 6.0), 15.0, bold=True)
+    ve.addSubview_(title_lbl)
 
     # ── 卡片区（可滚动；今天 5 门课用不到，但第 6 门不该引发断崖）──────
     from AppKit import NSView, NSViewWidthSizable
     doc = _flipped_doc_class().alloc().initWithFrame_(
         NSMakeRect(0.0, 0.0, WIDTH - 2 * PAD, max(body_h, len(rs) * (CARD_H + CARD_GAP))))
     doc.setAutoresizingMask_(NSViewWidthSizable)
-    sc = panel.make_scroll_view(NSMakeRect(PAD, PAD + FOOT_H, WIDTH - 2 * PAD, body_h))
+    sc = panel.make_scroll_view(NSMakeRect(PAD, sc_y, WIDTH - 2 * PAD, body_h))
     sc.setDocumentView_(doc)
     ve.addSubview_(sc)
+
+    # ── 底部常驻落点条：批量归档的入口（plan §7.12）────────────────────
+    # ⭐ 常驻而不是"先点按钮再弹一个拖拽框"：HIG › Drag and drop 逐字
+    #    「As much as possible, support drag and drop throughout your app」；
+    #    而 HIG › Modality 逐字「Present content modally only when there's a
+    #    clear benefit」判了那个弹框死刑 —— 它既不是 critical information 也不是 options。
+    # ⚠️ 面板高度是按卡片数长出来的，**没有"空白处"可以拖** —— 所以这条得自己占位。
+    strip_holder: dict = {"view": None, "hint": [], "actions": []}
+    # 映射表的 `[(路径, 选择器), …]` —— ⚠️ **不能挂在卡片视图上**：`_make_batch_card`
+    # 返回的是纯 `NSView`，而纯 ObjC 对象**不接受任意 Python 属性**
+    # （`card._rows = rows` 会 AttributeError，而它被 `callAfter` 吞掉 → 表永远不出现。
+    #  卡片那条路能挂 `_targets` 是因为 `make_drop_target` 返回的是 `objc_own` 造的
+    #  **Python 子类**）。放这里，作用域与面板同生共死。
+    batch_rows: list = []
+    W_IN = WIDTH - 2 * PAD
+
+    def _strip_bg(alpha):
+        v = strip_holder.get("view")
+        if v is not None:
+            try:
+                v.layer().setBackgroundColor_(
+                    NSColor.whiteColor().colorWithAlphaComponent_(alpha).CGColor())
+            except Exception:                                 # noqa: BLE001
+                pass
+
+    def _drop_enter(pb):
+        # ⚠️ 判据是「**摊平后有能抽的**」（`extract.expand` 走 `is_supported`，
+        #    那是"能不能收"的唯一定义点）—— 与卡片同一条。
+        #    原来只看 `bool(file_paths(pb))` → 文件夹、`.txt` 全高亮说"能收"，
+        #    松手才在 prep 里判 unsupported（`REVIEW §9.2 #5`）。
+        from extract import expand as _expand
+        paths = panel.file_paths(pb) or []
+        ok = bool(_expand(paths)[0])
+        _strip_bg(HILITE_A if ok else CARD_FILL_A)
+        return ok
+
+    def _drop_exit():
+        _strip_bg(CARD_FILL_A)
+
+    def _drop_batch(paths):
+        _strip_bg(CARD_FILL_A)
+        return run_batch(paths)
+
+    strip = panel.make_drop_target(_drop_enter, _drop_batch, _drop_exit)
+    strip.setFrame_(NSMakeRect(PAD, drop_y, W_IN, DROP_H))
+    strip.setWantsLayer_(True)
+    strip.layer().setCornerRadius_(CARD_RADIUS)
+    strip.layer().setBorderWidth_(HAIRLINE)
+    strip.layer().setBorderColor_(
+        NSColor.whiteColor().colorWithAlphaComponent_(CARD_LINE_A).CGColor())
+    strip_holder["view"] = strip
+    _strip_bg(CARD_FILL_A)
+    ve.addSubview_(strip)
+
+    strip_holder["hint"] = [
+        panel.make_label("把一堆课件拖到这里 · 自动分到各课",
+                         NSMakeRect(CARD_PAD, DROP_H - 22.0, W_IN - 140.0, 17.0), 12.0),
+        panel.make_label("文件夹也行（取里面一层）",
+                         NSMakeRect(CARD_PAD, DROP_H - 38.0, W_IN - 140.0, 14.0),
+                         10.0, alpha=DIM),
+    ]
+    for _v in strip_holder["hint"]:
+        strip.addSubview_(_v)
+
+    def _pick_batch_files():
+        from AppKit import NSOpenPanel
+        p = NSOpenPanel.openPanel()
+        p.setAllowsMultipleSelection_(True)
+        p.setCanChooseDirectories_(True)                  # 文件夹走 expand()
+        p.setMessage_("选一堆课件 —— 会自动分到各课")
+        if p.runModal() == 1:                             # NSModalResponseOK
+            run_batch([str(u.path()) for u in p.URLs()])
+
+    _pick_btn = NSButton.alloc().initWithFrame_(
+        NSMakeRect(W_IN - CARD_PAD - 104.0, (DROP_H - BTN_H) / 2.0, 104.0, BTN_H))
+    _pick_btn.setTitle_("选择文件…")
+    _pick_btn.setBezelStyle_(1)
+    _pick_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+    _pick_t = _target(_pick_batch_files)
+    _pick_btn.setTarget_(_pick_t)                         # ⚠️ 弱引用 —— 靠这里留
+    _pick_btn.setAction_("act:")
+    strip._targets = [_pick_t]
+    strip.addSubview_(_pick_btn)
+    strip_holder["hint"].append(_pick_btn)
+
+    def _batch_buttons():
+        """批量模式下的动作区 —— **与提示**同一块地方**换着显示**（位置固定、永远看得见）。
+
+        ⚠️ 不放进映射卡里：卡比视口高时按钮会滚出屏幕。
+        """
+        out = []
+        for title, fn, x, w, primary in (
+                ("取消", _cancel_batch, W_IN - CARD_PAD - 100.0, 100.0, False),
+                ("确认", _confirm_batch, W_IN - CARD_PAD - 100.0 - 8.0 - 100.0,
+                 100.0, True)):
+            b = NSButton.alloc().initWithFrame_(
+                NSMakeRect(x, (DROP_H - BTN_H) / 2.0, w, BTN_H))
+            b.setTitle_(title)
+            b.setBezelStyle_(1)
+            b.setFont_(NSFont.systemFontOfSize_(12.0))
+            t = _target(fn)
+            b.setTarget_(t)
+            b.setAction_("act:")
+            b.setHidden_(True)
+            strip.addSubview_(b)
+            out.append((b, t))
+        return out
 
     status_holder: dict = {"label": None}
 
@@ -614,15 +883,152 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         except Exception:                                 # noqa: BLE001
             pass
 
+    # ── 批量归档（plan §7.12）────────────────────────────────────────
+    def run_batch(paths):
+        """拖/选一堆文件 → 后台分类 → 映射卡。**只出建议，不写盘**（写盘归 `prep`）。"""
+        if S.get("batch") is not None:
+            set_status("已经在核对这一批了 —— 先确认或取消", 1.0)
+            return False
+        from extract import expand as _expand
+        files, dropped = _expand(paths)
+        if not files:
+            set_status("这些都不收（只认 PDF / PPTX / DOCX；文件夹取里面一层）", 1.0)
+            return False
+        names = courses.list_courses(glossary, state_root=state_root)
+        S["batch"] = {"verdicts": [], "busy": True, "total": len(files),
+                      "dropped": len(dropped), "error": ""}
+        title_lbl.setStringValue_(f"准备归档 {len(files)} 份课件")
+        _later(refresh)
+        set_status(f"扫描 0/{len(files)}…")
+
+        def work():
+            got, err = [], ""
+            try:
+                import classify
+                from cloud_translator import load_api_key
+                key = load_api_key(None)
+                briefs = classify.briefs(courses.glossary_dir(glossary), names)
+                ask = classify.make_ask(key) if key else (lambda prompt: None)
+
+                def prog(i, n, name):
+                    # ⚠️ 在工作线程里被调 —— UI 回写一律回主线程（CLAUDE.md 的不变量）。
+                    #    用 `_status`（查**当前**面板），不要捕获本代的 `set_status`。
+                    from PyObjCTools import AppHelper
+                    AppHelper.callAfter(_status, f"扫描 {i}/{n}：{name[:38]}")
+
+                # ⚠️ `suggest_fn` 是**验收用的注入点**（同 `prepare_fn` 那条）——
+                #    验收批量那条路时真跑会调 DeepSeek 花钱，所以要能换掉。
+                suggest = suggest_fn or classify.suggest
+                got = suggest(files, courses=names, course_briefs=briefs,
+                              head_of=classify.head_of, ask=ask,
+                              on_progress=prog)
+            except Exception as e:                            # noqa: BLE001
+                err = f"{type(e).__name__}: {e}"
+            b = S.get("batch")
+            if b is None:                                     # 期间被取消了
+                return
+            b["verdicts"], b["busy"], b["error"] = got, False, err
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(_batch_ready)
+
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def _batch_ready():
+        b = S.get("batch")
+        if b is None:
+            return
+        if b.get("error"):
+            set_status(f"扫描失败：{b['error']}", 1.0)
+        else:
+            hit = len([v for v in b["verdicts"] if v.course])
+            tail = f"（另有 {b['dropped']} 份格式不收，没进表）" if b.get("dropped") else ""
+            set_status(f"认出 {hit} 份，{len(b['verdicts']) - hit} 份认不出来 —— "
+                       f"核对后点确认{tail}", 1.0)
+        cur = S.get("panel")
+        if cur is not None:
+            cur.refresh()
+
+    def _cancel_batch():
+        S["batch"] = None
+        set_status("已取消 —— 什么都没动", 1.0)
+        _later(refresh)
+
+    def _confirm_batch():
+        """把映射表上的选择**分组、排队**，然后踢第一门。
+
+        ⚠️ **未分类的不进队列** —— 它们留在原处，一份都不会被静默归档。
+        ⚠️ 队列由 `_done` 逐门排空（复用 `busy` 当串行器），**这里不自己跑 `prepare`** ——
+           那会把这批"结果记进 `S['result']`"的逻辑抄第二份。
+        """
+        rows = list(batch_rows)
+        pairs = []
+        for path, popup in rows:
+            try:
+                pairs.append((path, popup.titleOfSelectedItem()))
+            except Exception:                                 # noqa: BLE001
+                pairs.append((path, BATCH_UNDECIDED))
+        # ⚠️ 分组走**纯函数** —— 「未分类不排队」那条规矩在 `group_for_archive` 里，
+        #    只有一处定义，也只有那一处需要判据。
+        by_course = group_for_archive(pairs)
+        S["batch"] = None
+        if not by_course:
+            set_status("一份都没归课 —— 什么都没动", 1.0)
+            _later(refresh)
+            return
+        for _p, _popup in rows:
+            try:
+                _popup.removeFromSuperview()
+            except Exception:                                 # noqa: BLE001
+                pass
+        S["queue"] = sorted(by_course.items())                # 顺序稳定（按课号）
+        n_course, n_file = len(S["queue"]), sum(len(v) for v in by_course.values())
+        set_status(f"开始跑 {n_course} 门课 / {n_file} 份课件…", 1.0)
+        _later(refresh)
+        run_prep(*S["queue"].pop(0))
+
+    strip_holder["actions"] = _batch_buttons()                # 建在函数定义之后
+
     def refresh():
-        """重画卡片（跑完 prep / 删词 / 撤销都走它）。
+        """重画（跑完 prep / 删词 / 撤销 / 批量扫描完 都走它）。
 
         ⚠️ **一处重建，不做增量打补丁。** 每张卡的高度不一样（有结果列表的更高），
            增量改高度是布局 bug 的温床；整块重画只有 ~10 张卡，代价可以忽略。
-        ⚠️ 高度与坐标都从 `card_height()` 来 —— **同一个算式**，所以不会算错。
+        ⚠️ 高度与坐标都从 `card_height()` / `batch_card_height()` 来 —— **同一个算式**，
+           所以不会算错。
+        ⚠️ 它同时负责**切换落点条的两个状态**（提示 ↔ 批量动作）—— 那是唯一需要
+           "面板级"而非"卡片级"改动的东西，塞在这里比另开一条更新路径省事。
         """
         for sub in list(doc.subviews()):
             sub.removeFromSuperview()
+
+        b = S.get("batch")
+        for _v in strip_holder["hint"]:
+            _v.setHidden_(b is not None)
+        for _btn, _t in strip_holder["actions"]:
+            _btn.setHidden_(b is None)
+
+        if b is not None:
+            # ── 批量核对模式：卡片列表整块换成映射表 ──────────────────
+            title_lbl.setStringValue_(f"准备归档 {b.get('total', 0)} 份课件")
+            if b.get("busy") or not b.get("verdicts"):
+                doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, 120.0)))
+                return
+            card, rows = _make_batch_card(
+                b["verdicts"], width=WIDTH - 2 * PAD,
+                course_names=courses.list_courses(glossary, state_root=state_root))
+            # ⚠️ **原地改 `batch_rows`，不要重新绑定** —— `_confirm_batch` 闭包抓的是
+            #    同一个列表对象。写 `batch_rows = rows` 会让它变成 `refresh` 的局部变量，
+            #    而 `_confirm_batch` 永远看到空表（且**不报错**，只是点了没反应）。
+            batch_rows[:] = rows
+            card.setFrameOrigin_((0.0, 0.0))
+            doc.addSubview_(card)
+            doc.setFrameSize_((WIDTH - 2 * PAD,
+                               max(body_h, card.frame().size.height)))
+            return
+
+        # ── 正常模式：课程卡片 ────────────────────────────────────────
+        title_lbl.setStringValue_("开课前的准备")
         y = 0.0
         for r in load():
             entry = S["result"].get(r.course)
@@ -731,6 +1137,18 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             cur = S.get("panel")
             if cur is not None:
                 cur.refresh()
+            # ── 批量：接着踢下一门（plan §7.12）─────────────────────────
+            # ⭐ 上面那句 `S["busy"] = False` 就是**串行器**：`run_prep` 开头那句
+            #    `if S["busy"]: return False` 保证一次只跑一门。这里只要在它清空
+            #    **之后**接着踢，不必另写一套并发控制，也不必自己再跑一遍
+            #    `prep.prepare`（那会把"结果记进 S['result']"的逻辑抄第二份）。
+            # ⚠️ 此时面板可能已经关了（`cur is None`）—— 队列照跑，只是不重画。
+            queue = S.get("queue") or []
+            if queue:
+                nxt = queue.pop(0)
+                if not queue:
+                    S.pop("queue", None)                  # 排空了就撤掉那个键
+                run_prep(*nxt)
 
         threading.Thread(target=work, daemon=True).start()
         return True
@@ -769,6 +1187,27 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 _card._on_enter = _card._on_drop = _card._on_exit = None
             win._entry_targets = []          # 断关闭按钮那条
             status_holder["label"] = None    # 断 `set_status` → 标签 → `ve` 那条
+            # ⚠️ 落点条（批量入口）也要断 —— 它的 `_targets` 里那个 target 的
+            #    `_fn` 是 `run_batch` → `_later(refresh)` → 闭包持有 `title_lbl`/`doc`
+            #    → `ve` → `win`。与卡片那条**同一条环**，只是入口不同。
+            strip._targets = []
+            strip._on_enter = strip._on_drop = strip._on_exit = None
+            # ⚠️ **落点条自己那三份 Python 引用也要断。** `strip._targets` 只断了
+            #    「条 → target」，可 `strip_holder` 里还各攥着一份子视图与 target：
+            #    `["actions"]` → target → `_confirm_batch` 闭包 → `win`。
+            #    实测漏掉它：开/关 3 轮 144 个 `_ClassLive*`、9 轮 180 —— **随轮数增长**。
+            strip_holder["view"] = None
+            strip_holder["hint"] = []
+            strip_holder["actions"] = []
+            # ⚠️ 批量状态是**模块级**的，跨面板存活 —— 不清的话，关掉面板再打开
+            #    会直接落进"上次那批还没确认"的模式里。
+            #    （`S["result"]` 是**故意**跨面板的，别把这条规矩套到它头上。）
+            S["batch"] = None
+            S.pop("queue", None)
+            # ⚠️ 映射表那批选择器也要断 —— 它们自己抓着菜单，而菜单抓着 target。
+            #    与卡片 `_targets` 是**同一类**孤岛（那次实测：只 setContentView_(None)
+            #    时 3 轮后仍有 16 个 DropTarget）。
+            batch_rows.clear()
             win.setContentView_(None)        # 丢掉整棵视图树
         except Exception:                                 # noqa: BLE001
             pass
@@ -917,7 +1356,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     win.setFrameOrigin_(((scr.size.width - WIDTH) / 2.0,
                          max(60.0, scr.size.height - h - 140.0)))
     win.orderFrontRegardless()
-    return Handles(win, do_close, refresh, set_status)
+    return Handles(win, do_close, refresh, set_status, run_batch)
 
 
 def open_panel(**kw) -> Handles | None:

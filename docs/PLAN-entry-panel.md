@@ -743,6 +743,282 @@ UI 回写一律 `AppHelper.callAfter` 回主线程。
 | CommandCode 套餐页里 Jev 现在确切额度 | **未取到**（计价器是动态组件） |
 | 那两个 key 能不能用 | **未验证**（全程零认证请求，故意的） |
 
+### 7.9 ⚠️ 实测推翻了 §7.6 的第一步（2026-09-28）
+
+§7.6 的第 ① 步是「本地：文件名 × 课名 → 唯一最优才算命中」。
+**本轮在作者真实的 457 份 `~/Downloads` 上把这条路量穿了 —— 它不该存在。**
+
+| 机械信号 | 覆盖 | 精确率 | 判定 |
+|---|---|---|---|
+| 文件名 × 课名单词（§7.6 原设计） | 8/457 = **1.8%** | **6/8 = 75%** | ❌ 砍 |
+| 文件名，只取「5 门里唯一」的词 | — | 更差；且 ECON10770 **一个唯一词都没有** | ❌ |
+| 正文第一页 × 课名单词 | 28/444 = 6.3% | **≈2/28 = 7%** | ❌ |
+| 正文 × **术语表撞词**（184 条手写术语） | 32/444 = 7.2% | **≈4/32 = 12%** | ❌ |
+| ⭐ **课号字面命中** | 3/444 = **0.7%** | **3/3 = 100%** | ✅ **留** |
+
+**根因：判别词全是通用学术词。** 实测误判样本（都不是那 5 门课）：
+
+```
+[ECON10730] OP0145-HPR_Rheumatoid_arthriti.pdf      ← mean/population/regression/sample
+[ECON10790] chen10040_2025-26_Mon11_assign2.pdf     ← function/graph/variable/plot
+[ECON10740] Template for Assignment 2 in PSY10140   ← efficiency/equity/policy
+```
+
+**想救它的阈值曲线 —— 没有可用工作点**（已要求「第一名 ≥ 1.5× 第二名」）：
+
+| 撞中条数 ≥ | 声称 | 真的 | 精确率 |
+|---|---|---|---|
+| 3 | 32 | ~4 | 12% |
+| 5 | 6 | 2 | 33% |
+| 6 | 4 | 2 | 50% |
+| 8 | 1 | 1 | 100%（**但只剩 1 份**） |
+
+⚠️ 这一格值得记住：**「命中了很多条术语」看着像有信号，加了一刀仍然 12%** ——
+因为**被比较的两边都是噪声**。同族教训见 `measure-before-claiming` 的
+「相关性判据必须做零假设对照」。
+
+⭐ 另一条**推翻报告前提**的实测：`~/Downloads` 的 457 份里**绝大多数根本不是这 5 门的课件**
+（房信 / 求职信 / 期刊论文 / CHEM·MEEN·PSY 的）。**所以本地匹配的 KPI 不是覆盖率，是精确率** ——
+而它的精确率恰好最差。
+
+**结论**：机械层砍到只剩 **课号字面**（0.7% 覆盖、100% 精确、免费、离线）。
+**其余 99.3% 全部交给模型 + 人工确认。**
+
+### 7.10 设计（取代 §7.6 的四步）
+
+```
+拖一堆文件到面板空白处（不是某张卡）
+  ↓
+① 机械层：**只认课号字面**（ECON10740 这种）—— 免费 / 瞬时 / 离线 / 不联网
+  ↓  剩下的 99.3%
+② 模型层：读**第一页** + 5 门课各自的（课号+课名+**术语样本**）
+     输出 = 课号 或 `none`，外加**一句理由**（供作者扫读时用）
+  ↓
+③ ⭐ **确认屏 —— 唯一的闸门**：把映射摆出来 → 作者改 → 点头才逐课跑 prep
+     ⚠️「未分类」桶必须有，不许硬猜
+  ↓
+④ 按课分组、**串行**跑 prep（`S["busy"]` 只允许一门课在跑）
+```
+
+#### 三条硬约束，各有出处（不是我的偏好）
+
+| # | 约束 | 出处 |
+|---|---|---|
+| 1 | ⚠️ **不用模型自报置信度当门槛** | `[论文]` ICLR 2024 逐字「LLMs, when verbalizing their confidence, **tend to be overconfident**」；且两篇研究结论**冲突**（另一篇说特定 prompt 下可校准）→ **不裁决 ⇒ 不采信** |
+| 2 | ⚠️ **必须有「未分类」桶** | `[官方]` paperless-ngx 逐字：闭世界下「paperless will assign one of these correspondents to **ANY** new document」 |
+| 3 | ⭐ **人工确认不是兜底，是设计** | `[官方]` DEVONthink 逐字「The highest ranked suggestion is **presented first**」+ **不自动归档**；`[论文]` arXiv 2510.05307：**81%** 偏好中间确认，耗时 **−13.54%** |
+
+⚠️ 顺带否掉「级联省成本」这个动机：实测**廉价那步只覆盖 1%** → 贵的那步扛 99%，
+**级联在这批数据上什么也省不下**。
+
+#### ⭐ 给模型的标签要带**术语样本**（这是 ACL 2025 推荐的修法）
+
+`[论文]` ACL 2025《Dynamic Label Name Refinement》：三个意图标签嵌入相似度到 **0.91** 时，
+CoT「easily misled by similar label names」，**6 个数据集里 4 个反而掉分**；
+**提升标签区分度后 +0.48 ~ +5.23 点**。
+
+→ 我们四门 ECON 的课名**几乎同义**，正撞在这个坑上。→ **不给模型光看课名**：
+
+```
+ECON10730 Data Analysis for Economists  术语样本: mean, median, regression, Excel, dataset…
+ECON10740 Exploring Economics           术语样本: exploring economics, group project, SDG…
+ECON10770 Introduction to Economics     术语样本: scarcity, demand, supply, monopoly…
+ECON10790 Mathematics for Economists    术语样本: fraction, slope, intercept, arithmetic…
+SOC10020  Introduction to Sociology     术语样本: sociological imagination, inequality, norm…
+（外加一句：**都不像就回 none**）
+```
+
+✅ 这条**不需要新数据**：`glossary/*.txt` 就是 5 门课共 **184 条**人工术语，
+只有 **8 个词跨课共享、167 个独有**。
+
+#### 抽样：第一页就够（实测）
+
+第一页实测能读到 `INTRODUCTION TO SOCIOLOGY` / `ECON10740 – Exploring Economics` /
+`Math10260: Linear Algebra for Engineers` —— 连**「不是我那 5 门」**都看得出来（文件名那侧做不到）。
+`[官方]` paperless 也是截首尾两段，方向一致。
+
+⚠️ `extract.extract()` **没有页数上限**（整份解析 + 可选 OCR）→ 要加 `max_pages`。
+⚠️ 实测 **55/444 = 12.4% 的 PDF 第一页抽不出字**（扫描件）→ 那些直接进「未分类」，**不 OCR**（分类不值得付 OCR 的钱和时间）。
+
+#### `.docx` 要不要收 —— **要作者定**
+
+`~/Downloads` 里有 **52 份 `.docx`**，而 `extract._SUPPORTED` 只有 `{.pdf, .pptx}`。
+⚠️ `extract.is_supported` 是**悬停高亮与实跑共用的唯一定义点**（它自己的 docstring 逐字：
+「两处各写一份判据，用户就会看到『高亮说能收、跑完说 unsupported』」）
+→ **要么整个支持 `.docx`，要么整个不支持；不能只在分类那侧偷偷认它。**
+
+### 7.11 模型层首轮实测（2026-09-28 · `classify.py`）
+
+**同一批文件，机械层与模型层的对照** —— 12 份**手挑**样本（挑的是"容易骗过机械层"的那类，
+⚠️ **不是随机样本**，所以下面是**信号不是准确率**）：
+
+| 文件 | 机械层 | 模型层 | 真值 |
+|---|---|---|---|
+| `Intro 2026 Theme 2 Sociology.pdf` | ✅ | ✅ SOC10020 | SOC10020 |
+| `Exploring Economics_Outline 2026.pdf` | ❌ | ✅ ECON10740 | ECON10740 |
+| `ECON10740 Task 1 - Ou Enming.pdf` | ✅ | ✅（**课号，零 API**） | ECON10740 |
+| `Syllabus - Introduction to Sociology 2026.pdf` | ❌ | ✅ SOC10020 | SOC10020 |
+| `ECON10740 Task 1 - Information Literacy.pdf` | ✅ | ✅（**课号，零 API**） | ECON10740 |
+| `ps-8.pdf` | ❌ **误判 10790** | ✅ 未分类 | Math10260 |
+| `1_fundamental.pdf` | ❌ | ✅ 未分类 | C 语言课 |
+| `chen10040_…_Assignment_1.pdf` | ❌ **误判 10790** | ✅ 未分类 | CHEM10040 |
+| `OP0145-HPR_Rheumatoid_arthriti.pdf` | ❌ **误判 10730** | ✅ 未分类 | 医学论文 |
+| `1-s2.0-S0003687015000198-main.pdf` | ❌ | ✅ 未分类 | 期刊论文 |
+| `EEEN10010 - Power and energy systems.pdf` | ❌ **误判 10740** | ✅ 未分类 | 能源工程 |
+| `Template for Assignment 2 in PSY10140.pdf` | ❌ **误判 10740** | ✅ 未分类 | PSY10140 |
+
+**12/12 全对；机械层那 4 条误判模型全躲过了。**
+
+⭐ 两条附带结论：
+- **`都不属于` 真的会被用上**（12 份里 7 份）—— 这正是机械层**结构上做不到**的事，
+  也对应 paperless 那条闭世界教训（§7.10 约束 2）
+- **课号命中一分支零 API 成本**，且它不是摆设（12 份里 2 份走它）
+
+⚠️ **诚实边界**：n=12、我手挑的，**不能当准确率**。要真数字得跑随机样本，
+且要作者给真值。**先用起来、攒真数据**，别拿这 12 份当验收。
+
+#### 落地状态（2026-09-28）
+
+| 件 | 状态 |
+|---|---|
+| `extract.extract(max_pages=…)` | ✅ 已加（PDF 截页；⚠️ 截断时**不抽 PPTX 备注页**，见它的 docstring） |
+| `classify.py` | ✅ 新模块，`suggest()` 注入 `head_of`/`ask`，**不写盘、不碰 AppKit** |
+| 复用而不是第 6 处手写 httpx | ✅ 走 `build_notes._chat_json`；配判据 `test_no_new_httpx_site` 拦住它长 |
+| 判据 `tests/test_classify.py` | ✅ 20/20；**4 条变异全红**（幻觉课号 / 短路 / 扫描件 / 多课号弃权） |
+| 面板那条路（拖到空白处 + 确认屏） | ⬜ **未做** —— UI 要先给作者看效果（仓库硬规矩） |
+
+### 7.13 落地完成（2026-09-28 夜）· 含真文件实测
+
+**⚠️ §7.12 的「拖到空白处」作废** —— 面板高度是按卡片数长出来的，**没有空白处**。
+改成**底部常驻落点条**（`DROP_H = 44`），HIG 逐字支持见 §7.12 开头那段。
+
+#### ⭐ 真文件 + 真模型实测（作者往 `~/Downloads` 放了一批）
+
+| 文件 | 结果 | 核对 |
+|---|---|---|
+| `Chapter 3.pptx` | ECON10790 | ✅ 标题 Maths for Economics |
+| `Percentages.pdf` | ECON10790 | ✅ 百分比/分数 |
+| `Intro 2026 Theme 3 Society - Copy.pdf` | SOC10020 | ✅ 标题 INTRODUCTION TO SOCIOLOGY |
+| `Intro 2026 City.pdf` | SOC10020 | ✅ UCD 社会学系 Kondakov |
+| `ESDG Policy Challenge Card.docx` | ECON10740 | ✅ policy challenge / SDG |
+| `Task 2 - SDG Policy Challenge Card.docx` | ECON10740 | ✅ 同上 |
+| `Week2_Communicating_Ideas_SLIDES_26_fin.pptx` | ECON10740 | ✅ 标题 Exploring Economics |
+| ⭐ `~$DG Policy Challenge Card.docx` | **未分类** | ✅ **Word 的锁文件**（162 字节、不是 zip）—— 正确拒绝 |
+
+**8/8。** ⚠️ 这一轮**零条走课号字面**（7 条全靠模型），与 §7.11 那轮不同 —— 说明两层的分工是活的。
+
+#### 探针抓到一个**真产品缺陷**（离线判据全绿时）
+
+`card._rows = rows` → `AttributeError: 'NSView' object has no attribute '_rows'`。
+**纯 ObjC 的 `NSView` 不接受任意 Python 属性**（卡片能挂 `_targets` 是因为
+`make_drop_target` 返回的是 `objc_own` 造的 **Python 子类**，映射卡是裸 `NSView`）。
+⚠️ 而这个异常**被 `AppHelper.callAfter` 吞掉了** → 症状是**真拖拽时卡片永远不出现、且毫无痕迹**。
+→ 改成 `_build` 作用域里的 `batch_rows`。
+
+**⚠️ 同一条纪律的第二次**：只看"窗口在不在屏幕上"不够，**必须截图看内容**才发现的。
+
+#### 顺带修掉的真缺陷
+
+| 缺陷 | 怎么发现的 |
+|---|---|
+| **每开/关一次漏一个面板**（144→180 随轮数涨） | `test_panel` 的存活对象判据。根因：`strip_holder` 里还各攥着一份子视图与 target（→ 闭包 → `win`）。修后 **130→130** |
+| `batch_card_height` 空表时多算一个组标题（算式与循环脱钩） | 新判据「空表 -> 只有上下内边距」 |
+| 卡片 `_enter` 没用 `expand()`（文件夹不展开） | 新判据「文件夹里有能抽的 -> 收」 |
+| 3 条旧判据钉着 `.docx` 被拒 | `.docx` 进支持集后**判据过时**（不是坏了）→ 样本换成 `.txt`，另补两条钉新行为 |
+
+#### 判据与变异
+
+```
+test_classify   20 · test_extract  39 · test_entry_panel 62 · test_panel 81
+默认闸门 80 · test_prep 119 · 其余四套 107 —— 十套全绿
+变异 4/4 全红（算式脱钩 / 未分类泄漏进队列 / 文件夹不展开 / strip 不断环）
+```
+
+#### 落地清单
+
+| 件 | 状态 |
+|---|---|
+| `extract._SUPPORTED` + `.docx`（`w:` 命名空间，**保文档顺序**） | ✅ |
+| `extract.expand()`（文件夹**一层**，走 `is_supported` 唯一定义点） | ✅ |
+| `classify.py` + `suggest` 注入点 | ✅ |
+| 底部常驻落点条 + `Handles.start_batch` 程序化入口 | ✅ |
+| 映射卡（`batch_card_height` / `split_verdicts` / `group_for_archive`） | ✅ |
+| 串行队列（复用 `busy` 当串行器，`_done` 排空） | ✅ |
+| `probe_entry_panel.py` 的 `PROBE_BATCH=1` + `PROBE_DUMP=1` 场景 | ✅ |
+
+⚠️ **仍未手验**：真拖拽（`probe_entry_panel.py` 手拖一次）、`NSPopUpButton` 在真面板里点开
+（`/tmp/probe_popup.py` 那版验过了，但那是独立探针不是真面板）。
+
+### 7.12 落地：入口形态 + file:line（2026-09-28 作者已看渲染后定）
+
+#### ⚠️ 「拖到空白处」不成立 —— 面板没有空白处
+
+面板高度是**按卡片数算出来的**（`body_height`），5 张卡几乎占满。作者提的
+「按钮 → 弹拖拽提示框 → 拖进去 → 确认 → 再出结果」**多一个窗口、多一步**，
+而那个提示框唯一的用处是教你"往这儿拖"——**它自己就是要被拖的地方，绕了一圈**。
+
+**定案**：卡片区下面**常驻一条落点条**（`DROP_H = 44`）。
+
+```
+┌──────────────────────────────────────────────┐
+│  ⬇  把一堆课件拖到这里 · 自动分到各课          │ ← 它本身就是落点
+│     或者点这里选文件…                          │ ← HIG 要求的"不用拖"那条路
+└──────────────────────────────────────────────┘
+```
+
+三个入口各司其职、不打架：
+
+| 入口 | 语义 | 状态 |
+|---|---|---|
+| 拖到**某张卡** | 就归那门课 | ✅ 已上线 |
+| 卡上「选择文件…」 | 单课挑选 | ✅ 已上线 |
+| 拖到**落点条** / 点它 | **批量 → 自动分流** | 🆕 本批 |
+
+#### 流程（3 步，不是 5 步）
+
+```
+拖进来 → 扫描（复用 progress_text 那套）→ 映射表（标题就是「准备归档 N 份课件」）
+       → 确认 → 按课串行跑 prep → 回到卡片列表，每张卡出结果
+```
+
+#### 改哪（`entry_panel.py`）
+
+| # | 位置 | 改什么 |
+|---|---|---|
+| 1 | `:583` `h = PAD + TITLE_H + body_h + 8.0 + FOOT_H + PAD` | 加 `+ DROP_H + 8.0` |
+| 2 | `:601` `sc = make_scroll_view(NSMakeRect(PAD, PAD + FOOT_H, …))` | 下边距改 `PAD + FOOT_H + DROP_H + 8.0` |
+| 3 | `:603` 之后 | 加落点条：`panel.make_drop_target(_enter, _drop, _exit)` + 两行 label + 一个「选择文件…」 |
+| 4 | `S` 新增两键 | `S["batch"]`（`None` 或 `{"verdicts": [...], "busy": bool}`）· `S["queue"]`（待跑的 `(课程, 文件)` 列表） |
+| 5 | `:617` `refresh()` 开头 | `if S.get("batch"): 画映射卡并 return`（**一处重建**，同它的既有纪律） |
+| 6 | 新纯函数 | `batch_card_height(n_hit, n_left)` —— ⚠️ **与排版循环成对**，同 `card_height` 那条纪律 |
+| 7 | 新 | `run_batch(paths)`：工作线程跑 `classify.suggest`，`on_progress` 走 `AppHelper.callAfter` 回主线程 |
+| 8 | 新 | `_confirm_batch()`：按课分组 → 填 `S["queue"]` → 踢第一门 |
+| 9 | `:727` `_done(txt)` | 清完 `busy` 后**排空 `S["queue"]`** —— ⭐ **复用 `busy` 当串行器**，不另写一套并发控制 |
+
+⭐ **第 9 条是这次的关键接缝**：`run_prep` 里那句 `if S["busy"]: return False` 已经是个
+"一次只跑一门"的闸门。批量只需**在它清空之后接着踢下一门**，而**不是**在批量里
+自己再跑一遍 `prep.prepare` —— 那会把这批结果记进 `S["result"]` 的逻辑抄第二份
+（`run_prep` 的 `_done` 里那段，含 `aborted` 代号存进 entry 那条）。
+
+⚠️ `_done` 里排空队列时**面板可能已经关了**（`S.get("panel")` 为 `None`）——
+队列照跑，只是不重画。
+
+#### 不在本批
+
+- **`.docx`** —— 要作者定（`§7.10`）；`is_supported` 是悬停与实跑共用的唯一定义点，只认一侧会撒谎
+- **自动写盘**（连课号命中也不自动）—— 见 `§7.10` 约束 3 与 §7.11 的代价分析
+
+#### 判据落点（`tests/test_entry_panel.py`）
+
+| 判据 | 钉什么 |
+|---|---|
+| `batch_card_height` 与排版循环同源 | 改一处不同步就红（沿用结果卡那条「没有子视图掉出卡底」的既有范式） |
+| `course=None` 的文件**不进队列** | 未分类不许被静默归档 |
+| 队列排空顺序 = 分组顺序 | 「按课串行」不是「随机顺序」 |
+| `busy` 期间第二次 `run_prep` 仍返回 False | 串行器没被批量路径绕过 |
+| 映射卡里的行数与 `suggest()` 返回条数相等 | 计数与列表同源（§2.5 C 那两次事故的同族） |
+
+
 ---
 
 ## 8. 审查遗留（2026-09-26，两个独立代理 + 一轮 `ocr`）

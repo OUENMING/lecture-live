@@ -50,38 +50,54 @@ _PERM_NAMES = {0: "notDetermined", 1: "restricted", 2: "denied", 3: "authorized"
 
 
 def _can_alert() -> bool:
-    """要不要走"弹框"而不是"打印"。
+    """要不要走"弹框"而不是"打印"。**`True` = 弹框。**
 
-    ⚠️ **判据是 `CLASSLIVE_FROM_APP`，不是 `sys.stdout.isatty()`。**
-       用 isatty 会误判：`cl | tee log`、被别的程序捕获输出、CI 里跑 ——
-       这些情况下 stdout 都不是 tty，于是会去弹一个**模态**框，
-       在没有图形会话的地方（或没人看的地方）**永久挂住**。
-       （2026-09-26 实测踩到：在管道里跑 `notice.alert` 直接卡死。）
+    ⚠️⚠️ **判据是 `CLASSLIVE_FROM_APP`，不是 `sys.stdout.isatty()`** ——
+       而且**方向是"设了才弹"**（2026-09-28 修正，见下）。
 
-    ⚠️ 名字说的是它**真正回答的问题**（"能不能弹框"），不是"有没有终端" ——
-       那两个今天恰好重合，但不是一回事，名字骗人迟早有人拿它判错事。
+    `CLASSLIVE_FROM_APP=1` 由 `ClassLive.app` 里的 sitecustomize 设，而它设的**同时**
+       把 stdout/stderr 改道去了 `~/Library/Logs/ClassLive/app.log`。
+       所以这个变量的准确含义不是"从 app 来的"，而是
+       **「我是个没人看的进程，print 出去没人看得见」** → 这种时候**才必须弹框**。
 
-    `CLASSLIVE_FROM_APP=1` 由 `ClassLive.app` 里的 sitecustomize 设 ——
-    那才是"这是双击启动、没有终端"的精确信号。
+    ⚠️ 为什么不能用 `isatty`：`cl | tee log`、被别的程序捕获输出、CI 里跑 ——
+       这些情况 stdout 都不是 tty。拿 isatty 当判据会去弹一个**模态**框，
+       在没有图形会话的地方**永久挂住**（2026-09-26 实测踩到，管道里跑 `alert` 直接卡死）。
+       而 `FROM_APP` 没被设 → 走 print，永远不会挂在弹框上。
+       ⭐ 换句话说：这一条要成立，**必须**是"设了才弹"。
+
+    ⚠️ **2026-09-28 之前这里是 `return not os.environ.get(...)`，方向是反的。**
+       实测后果：双击启动（没终端、print 进日志）时**什么都不弹**，用户看到的是
+       「双击了、什么都没发生」—— 正是 `main.py:876` 那条注释要防的事；
+       而终端里 `cl` 反而弹模态框。四处文档（`alert()` 的 docstring、本函数的 docstring、
+       `main.py:876`、引入它的提交 `e0b3b91` 的正文）写的都是"没有终端时弹框"，
+       只有代码是反的，而且**没有任何判据钉过它**，所以从 09-26 落地起一直没人发现。
     """
-    return not os.environ.get("CLASSLIVE_FROM_APP")
+    return bool(os.environ.get("CLASSLIVE_FROM_APP"))
 
 
 def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
-          url: str | None = None) -> str:
+          url: str | None = None, fallback: str | None = None) -> str:
     """弹一个模态提示框；**没有终端**时才弹。
 
     `url` 给了的话，会在按钮**之外**多一个「打开系统设置」，
     点了就 `open` 那个 URL scheme（用来引导用户去开被拒的权限）。
 
-    返回被点按钮的标题。没有终端/弹不出来时返回 `buttons[0]`。
+    返回被点按钮的标题。没有终端 / 弹不出来 / 点了个奇怪的返回值时返回 `fallback`。
+
+    ⚠️⚠️ **`fallback` 默认是 `buttons[0]` —— 也就是说 `buttons[0]` 是"问不到人时的答案"。**
+       所以**它必须是安全的那一个**：
+       · 纯告知（`("知道了",)`）无所谓，只有一个按钮；
+       · ⚠️ **确认框必须显式给 `fallback`** —— 不给就等于「问不到人 = 自动批准」。
+         踩过：更新流程那个 `buttons=("现在做", "先不做")` 没给 fallback，
+         弹不出来时直接返回「现在做」→ **不问就替用户批准了要联网跑几分钟的重活**。
     """
     if not _can_alert():
         # 终端里就跑 —— 打印比弹框好（能复制、能滚回去看、不打断脚本）
         print(f"\n{'─' * 46}\n⚠ {title}\n{message}\n{'─' * 46}", flush=True)
         if url:
             print(f"   → 去这里打开：{url}")
-        return buttons[0]
+        return fallback if fallback is not None else buttons[0]
 
     try:
         from AppKit import NSAlert, NSApplication, NSApplicationActivationPolicyAccessory
@@ -109,11 +125,12 @@ def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
         if _url_btn is not None and idx == len(buttons):
             open_mic_settings()
             return "打开系统设置"
-        return buttons[idx] if 0 <= idx < len(buttons) else buttons[0]
+        return buttons[idx] if 0 <= idx < len(buttons) else (
+            fallback if fallback is not None else buttons[0])
     except Exception:                                     # noqa: BLE001
         # 弹不出来也不能让程序静默 —— 至少留下文字
         print(f"\n⚠ {title}\n{message}", flush=True)
-        return buttons[0]
+        return fallback if fallback is not None else buttons[0]
 
 
 def open_mic_settings() -> bool:

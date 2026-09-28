@@ -40,6 +40,7 @@ import courses
 import objc_own
 import panel
 import paths
+import ready
 
 # ── 尺寸（每条都有出处，见模块头）────────────────────────────────────
 PAD = 20.0             # 面板内边距（实测：System Settings 20pt）
@@ -68,7 +69,9 @@ RESULT_ROW = 22.0      # 一个词一行
 # 面板底部那条**常驻**落点条。⚠️ 常驻是刻意的：HIG › Drag and drop 逐字
 # 「As much as possible, support drag and drop throughout your app」，而且
 # 面板高度是按卡片数长出来的 —— **没有"空白处"可以拖**（§7.12 开头那条）。
-DROP_H = 44.0
+DROP_H = 96.0          # ⚠️ 2026-09-28 从 44 抬到 96（≈ 一张卡那么高）。作者：
+                       #    「那个统一的入口我感觉太小了」—— 它才是「把课件全丢进来」
+                       #    的主入口，44pt 的页脚条读起来像说明文字，不像可操作的东西。
 DROP_GAP = 8.0
 BATCH_ROW = 24.0       # 映射表一行
 BATCH_HEAD = 18.0      # 组标题（「已认出归属」/「认不出来的」）
@@ -78,6 +81,70 @@ BATCH_UNDECIDED = "未分类"
 SEARCH_W = 220.0       # 标题行右侧搜索框的宽
 SEARCH_ROW = 22.0      # 一条搜索结果一行
 SEARCH_LIMIT = 80      # 一次最多显示多少条（`find` 会报 `truncated`）
+
+# ── 就绪条（2026-09-28）──────────────────────────────────────────────
+# 插在标题行与卡片区之间。**高度算在 `build()` 那条从下往上的推法里**，
+# 与视图的 y 用同一组常数（`card_height` 那条纪律）。
+READY_H = 40.0
+READY_GAP = 10.0       # 就绪条 ↔ 标题
+READY_ITEM_GAP = 16.0  # 项与项之间
+READY_PAD = 12.0       # 条内左右留白
+
+# ⚠️⚠️ **状态一律「形状 + 文字」，不许只靠颜色** ——
+#    `[一手]` HIG › Accessibility（2025-03-07）逐字：「**Offer visual indicators,
+#    like distinct shapes or icons, in addition to color**」。
+#    这也是为什么每一项都带一个词，而不是一个小圆点。
+# ⚠️ 「未配」这类**可选未做**不许画成警告 —— HIG 没有这个概念，跨应用约定是
+#    中性次要文字，「never red, never a warning triangle」。所以它用 `○` 不用 `⚠`。
+_MARK = {"ok": "✓", "todo": "○", "warn": "⚠", "unknown": "—", "busy": "◌"}
+
+# 每一项的短名字。⚠️ 长名字会把 680pt 的面板撑爆 —— 短名 + 状态词就够，
+#    详情交给点击之后的动作。
+_READY_NAME = {"mic": "麦克风", "models": "语音模型", "engine": "翻译引擎"}
+
+
+def ready_item_text(it: dict) -> str:
+    """就绪条上**一项**的那句话。**纯函数**（判据盖这里，不用起窗口）。
+
+    形状：`<形状标记> <名字>  <短状态>`
+    ⚠️ 形状标记在前、文字在后 —— 标记是给"扫一眼"的，文字是给"看明白"的，
+       两者都不能省（见上面 HIG 那条）。
+    """
+    mark = _MARK.get(it.get("state", "unknown"), "—")
+    name = _READY_NAME.get(it.get("key", ""), it.get("key", ""))
+    return f"{mark}  {name}  {ready_short(it)}"
+
+
+def ready_short(it: dict) -> str:
+    """状态词 —— **要短**（一行放三项）。太长就在 `find` 之前先折在这里。
+
+    ⚠️ 进度**不报百分比**：`[一手]` HIG › Progress indicators（2023-09-12）
+       「**Don't switch from the circular style to the bar style**」+
+       「**Keep progress indicators moving**」。而我们拿不到字节数
+       （`update.run_step` 是 subprocess + `capture_output`）→ 只能给状态词。
+       Apple 自己那颗 SS 也是「Checking for updates…」这种**状态词 + 转圈**，
+       而不是一根假进度条。
+    """
+    st = it.get("state")
+    if it.get("key") == "models":
+        if st == "todo":
+            return f"缺 {it.get('detail', '').split('还差 ')[-1] or ''}".strip() or "缺"
+        if st == "warn":
+            return "有旧版"
+        return "已就绪"
+    if it.get("key") == "engine":
+        return "云端" if st == "ok" and "云端" in it.get("detail", "") else (
+            "本地" if st == "ok" else "未配")
+    return {  # mic
+        "ok": "已允许", "todo": "未授权", "warn": "被拒",
+        "unknown": "查不到", "busy": "询问中",
+    }.get(st, "—")
+
+
+def ready_line_text(items: list) -> str:
+    """整条就绪条上所有项拼成一行（`·` 分隔）。给状态行/终端用。"""
+    return "　·　".join(ready_item_text(i) for i in items)
+
 
 # ── 颜色 ────────────────────────────────────────────────────────────
 # ⚠️ **深色模式的卡片配色没有实测过**（System Settings 跟随系统外观，本机是浅色，
@@ -184,15 +251,31 @@ def readiness_line(r: courses.Readiness) -> str:
             f" · 上次上课 {_short_date(r.last_session)}")
 
 
-def body_height(n: int, screen_h: float) -> float:
+def body_height(n: int, screen_h: float, *, card_h: float = CARD_H) -> float:
     """卡片区高度：**先按内容长，超过屏幕 60% 才开始滚**。
 
     一个公式管两种情形 —— 不做「≤N 静态 / >N 才滚」两套路径（那会在第 N+1 门课
     上出现断崖，而且两套路径迟早只维护一套）。
     """
-    natural = max(1, n) * (CARD_H + CARD_GAP) - CARD_GAP
-    cap = max(CARD_H + CARD_GAP, screen_h * BODY_SCREEN_FRACTION)
+    natural = max(1, n) * (card_h + CARD_GAP) - CARD_GAP
+    cap = max(card_h + CARD_GAP, screen_h * BODY_SCREEN_FRACTION)
     return min(natural, cap)
+
+
+def empty_state_lines() -> list:
+    """零课程时那张卡上要说的话。**纯函数**（判据盖这里，不用起窗口）。
+
+    ⚠️ 今天这里是**一片空白**：`body_height(0)` 老老实实留了 `CARD_H` 那么高，
+       然后什么也不画 —— 用户盯着一个空面板，不知道下一步干什么。
+       （2026-09-28 由探索代理核实：`refresh()` 画零张卡，一个字都不说。）
+
+    ⚠️ **两条路都要给**，而且顺序有讲究：先「新建」是因为它才是本面板原来缺的那个
+       （`docs/PLAN-entry-panel.md:542` 记着这个缺口）；拖课件那条本来就能用，
+       但用户不知道 —— 顺带说出来。
+    """
+    return ["还没有课",
+            "① 点右上角的「＋ 新增课程」，输一个课号（如 ECON10740）",
+            "② 或者把课件直接拖进这个窗口 —— 会自动建课"]
 
 
 def kept_added(entry) -> list[str]:
@@ -261,7 +344,7 @@ def result_header(entry) -> str:
     return "　·　".join(parts)
 
 
-def card_height(entry=None) -> float:
+def card_height(entry=None, *, has_actions: bool = True) -> float:
     """卡片高度 —— **按内容累加推导，不是抄一个数**。
 
     ⚠️ 它必须和 `_make_card` 里那些 `y` 用**同一组常数**推出来。抄一个固定高度的话，
@@ -277,9 +360,12 @@ def card_height(entry=None) -> float:
     """
     h = (CARD_PAD                                     # 上
          + L1_H + L2_H + 2.0                          # 课号+课名 / 准备度
-         + CARD_GAP_V                                 # 结果块与文字块之间
-         + BTN_H                                      # 按钮（锚在底部）
          + CARD_PAD)                                  # 下
+    if has_actions:
+        # ⚠️ **只有真的会画按钮时才留这块高度。** `on_start is None` = 上课中从菜单栏
+        #    打开的面板，那时不画「开始上课」—— 而 2026-09-28 之前「选择文件…」是
+        #    **永远在**的，所以这个空档看不出来；删掉它之后卡片下半截就空了一截。
+        h += CARD_GAP_V + BTN_H
     if entry is not None:
         # ⚠️⚠️ **这里的项数必须与 `_make_card` 里那几圈行循环逐项对应** ——
         #     两处是同一件事的两个定义点，没有机制保证同步，只有
@@ -507,9 +593,9 @@ def _scroll_undo_into_view(doc, course) -> bool:
     return False
 
 
-def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width,
+def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
                entry=None, on_delete=None, on_undo=None):
-    """一张卡 = 一个落点 + 三行内容（+ 跑过之后的结果列表）。"""
+    """一张卡 = 一个落点 + 两行内容（+ 跑过之后的结果列表）。"""
     from AppKit import NSButton, NSColor, NSFont, NSMakeRect
 
     holder: dict = {}
@@ -548,7 +634,9 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width,
     view = panel.make_drop_target(_enter, _drop, _exit)
     holder["view"] = view
     # ⚠️ 高度用 `card_height(entry)`，**不是 `CARD_H`** —— 有结果列表的卡会更高。
-    view.setFrame_(NSMakeRect(0.0, 0.0, width, card_height(entry)))
+    # ⚠️ 还要把「画不画按钮」告诉它 —— 否则不画按钮的那些卡下半截是空的。
+    _acts = on_start is not None
+    view.setFrame_(NSMakeRect(0.0, 0.0, width, card_height(entry, has_actions=_acts)))
     view._course = r.course
     view._tag = r.course
     view._targets = []
@@ -565,7 +653,7 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width,
     #    第一版让结果块从卡片底部往上长 —— 于是**列表是倒的**（最后加的排最上面），
     #    而且**头部跑到了列表下面**（2026-09-26 跑第一遍看出来的）。
     #    → 凡是「按阅读顺序排」的内容块，一律从顶部往下算，别从底部往上堆。
-    y = card_height(entry) - CARD_PAD
+    y = card_height(entry, has_actions=_acts) - CARD_PAD
     y -= L1_H
     view.addSubview_(panel.make_label(
         card_title(r), NSMakeRect(CARD_PAD, y, inner_w, L1_H), 13.0, bold=True))
@@ -593,7 +681,15 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width,
     if on_start is not None:
         view.addSubview_(mk("开始上课", x, lambda: on_start(r.course)))
         x += 92.0 + 8.0
-    view.addSubview_(mk("选择文件…", x, lambda: on_prep(r.course)))
+    # ⚠️ 原来这里还有一个「选择文件…」（单课加课件）。2026-09-28 删掉 ——
+    #    作者说「卡片看着太繁杂」，而它确实是卡里唯一的边框元素、占 27% 的高度，
+    #    五门课就是五个。
+    #    **能力没丢**：
+    #      · 拖到某张卡上 = 加到那门课（卡片本来就是落点，零视觉重量）；
+    #      · 不想拖 → 用底部那个统一入口，选完文件在批量卡上**手动指定课号**
+    #        （`BATCH_CHIP_W` 那个下拉，`["未分类"] + 各课号`）。
+    #    ⚠️ 但**「开始上课」留着** —— 它是这个面板的主线动作
+    #       （双击 → 选课 → 写 `.course` → 开录），删了主线就断了。
 
     # ── 结果列表（plan §3.6）────────────────────────────────────────
     # ⚠️ **就在卡片里，不是一个弹窗** —— 这是相对「一个文件夹」的真优势，
@@ -747,6 +843,94 @@ def _make_batch_card(verdicts, *, width, course_names):
     return view, rows
 
 
+def _mic_perm() -> str:
+    """麦克风权限四态。⚠️ 查不出来给 `"unknown"`，**绝不因此拦人** ——
+    `notice.mic_permission` 那条注释逐字：「调用方**必须按老行为继续**」。"""
+    try:
+        import notice
+        return notice.mic_permission()
+    except Exception:                                      # noqa: BLE001
+        return "unknown"
+
+
+def _has_api_key() -> bool:
+    """配没配云端 key。⚠️ 纯本地读（env + 一个文件），不联网、不验证 ——
+    验真要花一次 1-token 请求，那是用户点了「设置」之后的事。"""
+    try:
+        from cloud_translator import load_api_key
+        return bool(load_api_key(None))
+    except Exception:                                      # noqa: BLE001
+        return False
+
+
+def _ready_dismissed(state_root) -> bool:
+    try:
+        return ready.dismissed(root=state_root)
+    except Exception:                                      # noqa: BLE001
+        return False
+
+
+def make_ready_strip(parent, y: float, w: float, items: list, *, on_click):
+    """顶部就绪条 —— 「这台机器能不能上课」的三项。
+
+    ⚠️ **每一项自己就是一个按钮**（无边框 `NSButton`），点了就地修那一项。
+       不做「图标 + 分开的小按钮」：那会让一行里出现两种可点目标，而
+       `[一手]` HIG › Feedback 那条要的是「状态就在它所描述的东西旁边」——
+       一项一句话、点它就有动作，最直白。
+
+    ⚠️ **宽度按实测文字定**（`sizeToFit()`），不写死 —— 三项的中文长短差很多，
+       写死就会有一项被截断（`NSTextField` 超限**不报错也不省略号**）。
+
+    ⚠️ 返回的 target 列表**必须由调用方持有** —— `setTarget_` 是弱引用，
+       被 GC 掉就是「点了没反应，也不报错」。
+
+    ⚠️ 只画**状态**，不画假进度条：见 `ready_short` 里那条 HIG 引用。
+    """
+    from AppKit import NSButton, NSColor, NSFont, NSMakeRect, NSView
+
+    box = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, w, READY_H))
+    box.setWantsLayer_(True)
+    box.layer().setCornerRadius_(CARD_RADIUS)          # ⚠️ 与卡片同一档，别硬编码别的数
+    box.layer().setBorderWidth_(HAIRLINE)
+    box.layer().setBorderColor_(
+        NSColor.whiteColor().colorWithAlphaComponent_(CARD_LINE_A).CGColor())
+    box.layer().setBackgroundColor_(
+        NSColor.whiteColor().colorWithAlphaComponent_(CARD_FILL_A).CGColor())
+
+    targets: list = []
+    buttons: dict = {}                                 # key -> NSButton（下载完改它的标题）
+    x = READY_PAD
+    btn_h = 22.0
+    for it in items:
+        b = NSButton.alloc().initWithFrame_(
+            NSMakeRect(x, (READY_H - btn_h) / 2.0, 10.0, btn_h))
+        b.setTitle_(ready_item_text(it))
+        b.setBordered_(False)
+        b.setFont_(NSFont.systemFontOfSize_(12.0))
+        try:
+            # ⚠️ **不是靠颜色区分状态** —— 颜色只是让"已就绪"那项稍微亮一点，
+            #    真正的区分在 `ready_item_text` 那个形状标记和状态词上（HIG a11y）。
+            b.setContentTintColor_(NSColor.whiteColor().colorWithAlphaComponent_(
+                0.92 if it.get("state") == "ok" else 0.80))
+        except Exception:                                  # noqa: BLE001
+            pass
+        t = _target(lambda k=it.get("key"): on_click(k))
+        targets.append(t)
+        b.setTarget_(t)
+        b.setAction_("act:")
+        b.sizeToFit()                                      # 宽度按实测文字
+        b.setFrame_(NSMakeRect(x, (READY_H - btn_h) / 2.0,
+                               b.frame().size.width + 8.0, btn_h))
+        box.addSubview_(b)
+        buttons[it.get("key")] = b
+        x += b.frame().size.width + READY_ITEM_GAP
+
+    parent.addSubview_(box)
+    # ⚠️ 按钮也返回 —— 下载完要**就地改那一个的标题**，而不是整块重建
+    #    （重建会连带把滚动位置和焦点都抖一下）。
+    return targets, buttons
+
+
 def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
           on_close=None, prepare_fn=None, suggest_fn=None) -> Handles | None:
     """建并显示面板。**失败返回 `None`**（调用方不必管 —— 同 `whatsnew.build`）。
@@ -788,12 +972,30 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                                   state_root=state_root) for c in names]
 
     rs = load()
-    body_h = body_height(len(rs), NSScreen.mainScreen().frame().size.height)
-    # ⚠️ 高度**从下往上推**：页脚 → 落点条 → 滚动区 → 标题。改任何一条边距时，
+    body_h = body_height(len(rs), NSScreen.mainScreen().frame().size.height,
+                         card_h=card_height(has_actions=(on_start is not None)))
+    # ── 就绪条（2026-09-28）──────────────────────────────────────────
+    # ⚠️ 算它要问权限、stat 四个模型目录 —— 都在本地、没网络。实测 ~85ms
+    #    （其中 Qwen3 那条走 HF cache 的 `try_to_load_from_cache`，占大头）。
+    #    面板打开不是一个热路径，先同步算；真变慢了再说（见 `ready.model_states`）。
+    ready_items = []
+    ready_targets: list = []
+    if not _ready_dismissed(state_root):
+        try:
+            ready_items = ready.items(
+                perm=_mic_perm(), states=ready.model_states(root=state_root),
+                has_key=_has_api_key())
+        except Exception:                                  # noqa: BLE001
+            ready_items = []                               # 算不出来不该拦住面板
+    rh = READY_H if ready_items else 0.0
+    rg = READY_GAP if ready_items else 0.0
+
+    # ⚠️ 高度**从下往上推**：页脚 → 落点条 → 滚动区 → 就绪条 → 标题。改任何一条边距时，
     #    `h` 与视图的 y **用的是同一组常数**，不是各写一遍（`card_height` 那条纪律）。
     drop_y = PAD + FOOT_H + DROP_GAP
     sc_y = drop_y + DROP_H + DROP_GAP
-    h = sc_y + body_h + 8.0 + TITLE_H + PAD
+    ready_y = sc_y + body_h + 8.0                          # 就绪条的底边
+    h = ready_y + rh + rg + TITLE_H + PAD
 
     mask = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
     fp = panel.build(NSMakeRect(0.0, 0.0, WIDTH, h), mask)
@@ -825,6 +1027,94 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     search_field.setAction_("act:")            # NSSearchField 的回车走 action
     search_field.setSendsWholeSearchString_(True)   # 回车才发，别边打边搜
     ve.addSubview_(search_field)
+
+    # ── 就绪条（2026-09-28）──────────────────────────────────────────
+    # `[一手]` HIG › Feedback 逐字：「Consider integrating status feedback into your
+    # interface. When status feedback is available **near the items it describes**,
+    # people get important information without having to take action or leave their
+    # current context.」—— 这条就是它放在卡片区正上方、而不是弹一个向导的理由。
+    ready_buttons: dict = {}          # key -> NSButton（下载完改它那一项的标题）
+    ready_targets: list = []          # ⚠️ 必须活到面板结束（`setTarget_` 是弱引用）
+
+    def _retitle(key: str, text: str) -> None:
+        b = ready_buttons.get(key)
+        if b is None:
+            return
+        b.setTitle_(text)
+        b.sizeToFit()
+        b.setFrame_(NSMakeRect(b.frame().origin.x, (READY_H - 22.0) / 2.0,
+                               b.frame().size.width + 8.0, 22.0))
+
+    def _download_required() -> None:
+        """把那三件必下的补齐。**在后台线程跑**，主线程只回写文字。
+
+        ⚠️⚠️ **只下 `required=True` 的。** 可选的 Qwen3（938 MB）**必须由用户点**
+           —— 作者 2026-09-28 的口径，也是 `doctor`/`update` 那条「大模型要不要下
+           是用户的决定」。这里与 `update.run_step("models")` 用同一套口径。
+        ⚠️ **不占 `S["busy"]`** —— 那是 prep 的串行器。占着它，用户在这十几分钟里
+           就没法拖课件配课表了，而 HIG 那条恰恰说「别让大下载挡住 onboarding」。
+        """
+        if S.get("downloading"):
+            return
+        S["downloading"] = True
+        _status("正在下语音模型 —— 你可以同时配课表 / 拖课件")
+
+        def work() -> None:
+            try:
+                import doctor
+                import update as update_mod
+                left = [m for m in doctor.MODELS
+                        if m.required and not doctor.model_present(m.path)]
+                if not left:
+                    _later(_retitle, "models", ready.ready_item_text(
+                        {"key": "models", "state": "ok", "detail": "已就绪"}))
+                    _later(_status, "语音模型已经齐了")
+                    return
+                for m in left:
+                    # ⚠️ 进度只能是**行级**（`download_model` 是 subprocess +
+                    #    capture_output），所以转圈 + 换状态词，不做假的百分比条。
+                    r = update_mod.download_model(
+                        m, say=lambda s: _later(_status, s))
+                    if not r["ok"]:
+                        _later(_status, r["error"])
+                        return
+                _later(_retitle, "models", ready.ready_item_text(
+                    {"key": "models", "state": "ok", "detail": "已就绪"}))
+                _later(_status, "语音模型齐了 —— 启动！")
+            except Exception as e:                         # noqa: BLE001
+                _later(_status, f"下载失败：{str(e)[:70]}")
+            finally:
+                S["downloading"] = False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_ready_click(key: str) -> None:
+        """点就绪条上的某一项 —— 就地修那一项。
+
+        ⚠️ 这是 AppKit 主线程回调（按钮 action）：**只许置标志 / 起线程 / 打印**，
+           不许在这儿联网、sleep、下载 —— 同 `overlay._ask` 上方那条纪律。
+        """
+        if key == "mic":
+            try:
+                import notice
+                if notice.mic_permission() == "denied":
+                    notice.open_mic_settings()
+                    _status("已打开系统设置 —— 在「隐私与安全性 → 麦克风」里打开 ClassLive")
+                    return
+            except Exception:                              # noqa: BLE001
+                pass
+            _status("麦克风没问题就不用管它；被拒时点这里会打开系统设置")
+        elif key == "models":
+            _download_required()
+        elif key == "engine":
+            # ⚠️ 这一版**只说明，不做**：填 key 的输入框与「下本地模型」的按钮
+            #    是下一步（见计划 §1）。先把状态和人话摆出来，不假装能点。
+            _status("翻译引擎：填云端 key（推荐，质量好）或下载本地模型（免费、离线、质量差些）"
+                    " —— 两条路见 README 的「安装」段")
+
+    if ready_items:
+        ready_targets, ready_buttons = make_ready_strip(
+            ve, ready_y, WIDTH - 2 * PAD, ready_items, on_click=on_ready_click)
 
     # ── 卡片区（可滚动；今天 5 门课用不到，但第 6 门不该引发断崖）──────
     from AppKit import NSView, NSViewWidthSizable
@@ -889,14 +1179,35 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     ve.addSubview_(strip)
 
     strip_holder["hint"] = [
-        panel.make_label("把一堆课件拖到这里 · 自动分到各课",
-                         NSMakeRect(CARD_PAD, DROP_H - 22.0, W_IN - 140.0, 17.0), 12.0),
-        panel.make_label("文件夹也行（取里面一层）",
-                         NSMakeRect(CARD_PAD, DROP_H - 38.0, W_IN - 140.0, 14.0),
-                         10.0, alpha=DIM),
+        panel.make_label("把课件全拖到这里",
+                         NSMakeRect(CARD_PAD, DROP_H - 40.0, W_IN - 150.0, 22.0), 15.0),
+        panel.make_label("PDF / PPTX / DOCX · 文件夹也行（取里面一层）",
+                         NSMakeRect(CARD_PAD, DROP_H - 60.0, W_IN - 150.0, 16.0),
+                         11.0, alpha=DIM),
+        panel.make_label("自动认出哪份属于哪门课 —— 认不出的会让你核对",
+                         NSMakeRect(CARD_PAD, DROP_H - 78.0, W_IN - 150.0, 16.0),
+                         11.0, alpha=DIM),
     ]
     for _v in strip_holder["hint"]:
         strip.addSubview_(_v)
+
+    # ⭐ 虚线描边 —— macOS 里「这是拖拽落点」的通用画法（实线读起来像卡片）。
+    # ⚠️ `CAShapeLayer` 包 try：画不出虚线不该让整个面板起不来，退回上面那圈实线。
+    try:
+        from Quartz import CGPathCreateWithRoundedRect, CAShapeLayer
+        _dash = CAShapeLayer.layer()
+        _dash.setFrame_(strip.bounds())
+        _dash.setPath_(CGPathCreateWithRoundedRect(
+            NSMakeRect(0.5, 0.5, W_IN - 1.0, DROP_H - 1.0), CARD_RADIUS, CARD_RADIUS, None))
+        _dash.setFillColor_(None)
+        _dash.setStrokeColor_(NSColor.whiteColor()
+                              .colorWithAlphaComponent_(0.22).CGColor())
+        _dash.setLineWidth_(1.0)
+        _dash.setLineDashPattern_([5.0, 4.0])
+        strip.layer().addSublayer_(_dash)
+        strip.layer().setBorderWidth_(0.0)         # 实线让位给虚线，别叠着
+    except Exception:                                  # noqa: BLE001
+        pass
 
     def _pick_batch_files():
         from AppKit import NSOpenPanel
@@ -1233,9 +1544,34 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         # ── 正常模式：课程卡片 ────────────────────────────────────────
         title_lbl.setStringValue_("开课前的准备")
         y = 0.0
-        for r in load():
+        rows = load()
+        if not rows:
+            # ⭐ 零课程的空状态（2026-09-28）—— 原来这里是**一片空白**。
+            from AppKit import NSColor, NSMakeRect, NSView
+            card = NSView.alloc().initWithFrame_(
+                NSMakeRect(0.0, 0.0, WIDTH - 2 * PAD, CARD_H))
+            card.setWantsLayer_(True)
+            card.layer().setCornerRadius_(CARD_RADIUS)
+            # ⚠️ 虚线感的弱描边：它是**提示**不是内容，别长得和课程卡一样实
+            card.layer().setBorderWidth_(HAIRLINE)
+            card.layer().setBorderColor_(NSColor.whiteColor()
+                                         .colorWithAlphaComponent_(CARD_LINE_A * 0.7).CGColor())
+            card.layer().setBackgroundColor_(NSColor.whiteColor()
+                                             .colorWithAlphaComponent_(CARD_FILL_A * 0.5).CGColor())
+            _ly = CARD_H - CARD_PAD
+            for _i, _txt in enumerate(empty_state_lines()):
+                _ly -= (L1_H if _i == 0 else L2_H)
+                card.addSubview_(panel.make_label(
+                    _txt,
+                    NSMakeRect(CARD_PAD, _ly, WIDTH - 2 * PAD - 2 * CARD_PAD, L1_H),
+                    13.0 if _i == 0 else 12.0, bold=(_i == 0),
+                    alpha=1.0 if _i == 0 else DIM))
+            doc.addSubview_(card)
+            doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, CARD_H)))
+            return
+        for r in rows:
             entry = S["result"].get(r.course)
-            card = _make_card(r, on_start=on_start, on_prep=choose_files,
+            card = _make_card(r, on_start=on_start,
                               on_drop_files=run_prep, width=WIDTH - 2 * PAD,
                               entry=entry,
                               # ⚠️ **课号要在这里绑好。** `_make_card` 只传词
@@ -1246,7 +1582,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                               on_undo=lambda c=r.course: do_undo(c))
             card.setFrameOrigin_((0.0, y))
             doc.addSubview_(card)
-            y += card_height(entry) + CARD_GAP
+            y += card_height(entry, has_actions=(on_start is not None)) + CARD_GAP
         doc.setFrameSize_((WIDTH - 2 * PAD, max(y, body_h)))
         # ⚠️ 滚**必须在重画之后**：上面那圈把旧卡片全 `removeFromSuperview` 了，
         #    所以只能拿**新**卡片的 `_undo_lbl`。意图是**一次性**的（`pop` 掉）。
@@ -1356,15 +1692,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         threading.Thread(target=work, daemon=True).start()
         return True
 
-    def choose_files(course: str):
-        """HIG 要求的那条「不用拖」的路 —— 必须存在，不是备选。"""
-        from AppKit import NSOpenPanel
-        p = NSOpenPanel.openPanel()
-        p.setAllowsMultipleSelection_(True)
-        p.setCanChooseDirectories_(False)
-        p.setMessage_(f"给 {course} 选课件")
-        if p.runModal() == 1:                             # NSModalResponseOK
-            run_prep(course, [str(u.path()) for u in p.URLs()])
+    # ⚠️ `choose_files(course)` —— 单课的文件选择器 —— 2026-09-28 删掉了：
+    #    它只服务卡片上那个已删的「选择文件…」。**「不用拖」这条路没消失** ——
+    #    底部统一入口有它自己的「选择文件…」（`_pick_batch_files`，还多选 + 收文件夹），
+    #    选完在批量卡上指定课号即可。
 
     def do_close():
         try:
@@ -1531,7 +1862,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     from AppKit import NSButton, NSObject
 
     status_holder["label"] = panel.make_label(
-        "拖课件到某张卡上 = 加到那门课　·　也可以点卡片上的「选择文件…」",
+        "拖课件到某张卡上 = 加到那门课　·　拖到下面那个虚线框 = 自动分到各课",
         NSMakeRect(PAD, PAD + 6.0, WIDTH - 2 * PAD - 100.0, 18.0), 11.0, alpha=DIM)
     ve.addSubview_(status_holder["label"])
 

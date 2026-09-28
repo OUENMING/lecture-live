@@ -492,6 +492,44 @@ def pending_steps() -> list[dict]:
     return steps
 
 
+def download_model(model, *, say=None) -> dict:
+    """下**一个**模型。返回 `{"ok", "error"}`。⚠️ 要跑网络 —— 调用方在后台线程里调。
+
+    ⚠️ 为什么单独抽出来：它现在有**两个口径不同**的调用方 ——
+      · `run_step("models")`（更新流程）**只下必下的**；
+      · 就绪条上用户**显式点**某一条 —— 那条**包括可选的 Qwen3**。
+        Qwen3 混进上面那个循环就是静默下 938 MB（2026-09-28 差点这么发出去）。
+    """
+    import doctor
+    if doctor.model_present(model.path):
+        return {"ok": True, "error": ""}
+
+    def _say(s: str) -> None:
+        if say:
+            try:
+                say(s)
+            except Exception:                              # noqa: BLE001
+                pass
+
+    _say(f"正在下 {model.label}（{model.size}）…")
+    # ⚠️ doctor 里的命令是给人看的 shell 串（含 `~` 和 `&&`）——
+    #    这里就是要**原样执行**它，所以走 shell。别改成列表参数（那样 `&&` 会失效）。
+    r = subprocess.run(model.cmd, shell=True, cwd=HERE,         # noqa: S602
+                       capture_output=True, text=True, timeout=3600)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip().splitlines()
+        return {"ok": False,
+                "error": f"{model.label} 下载失败：{err[-1] if err else '未知原因'}"}
+    # ⭐ 记戳 —— 「这一份是我们装的、装的是什么」。⚠️ 只有活着的 `ready` 才写，
+    #    它不在（比如被裁剪过的安装）就当没这回事，绝不因此让下载算失败。
+    try:
+        import ready
+        ready.mark_installed(model)
+    except Exception:                                      # noqa: BLE001
+        pass
+    return {"ok": True, "error": ""}
+
+
 def run_step(key: str, on_line=None) -> dict:
     """执行一个 `pending_steps()` 里的步骤。返回 `{"ok", "error"}`。
 
@@ -523,17 +561,19 @@ def run_step(key: str, on_line=None) -> dict:
         if key == "models":
             import doctor
             for m in doctor.MODELS:
+                # ⚠️⚠️ **只下必下的。** 可选的（Qwen3-1.7B，938 MB）**必须由用户点**
+                #    —— 作者 2026-09-28 拍的口径，也正是 doctor/update 那条
+                #    「大模型要不要下是用户的决定」。
+                #    ⚠️ 2026-09-28 给 `MODELS` 加那条**可选**条目时，这个循环会
+                #       **连它一起下** —— 当场引入的静默下载，正是要防的事。
+                #    要下某一条可选的，用下面的 `download_model(m)` 显式点。
+                if not m.required:
+                    continue
                 if doctor.model_present(m.path):
                     continue
-                say(f"正在下 {m.label}（{m.size}）…")
-                # doctor 里的命令是给人看的 shell 串（含 ~ 和 &&）——
-                # 这里就是要**原样执行**它，所以走 shell。
-                r = subprocess.run(m.cmd, shell=True, cwd=HERE,     # noqa: S602
-                                   capture_output=True, text=True, timeout=3600)
-                if r.returncode != 0:
-                    err = (r.stderr or r.stdout or "").strip().splitlines()
-                    return {"ok": False,
-                            "error": f"{m.label} 下载失败：{err[-1] if err else '未知原因'}"}
+                r = download_model(m, say=say)
+                if not r["ok"]:
+                    return r
             say("模型齐了")
             return {"ok": True, "error": ""}
 

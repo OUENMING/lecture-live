@@ -532,7 +532,7 @@ def main() -> int:
                        "not_added": ["term-x", "term-y"],
                        "aborted": "all_files_failed",
                        "removed": set()})):
-        card = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+        card = EP._make_card(_r(), on_start=None,
                              on_drop_files=lambda c, p: False, width=640.0,
                              entry=ent, on_delete=lambda t: None, on_undo=lambda: None)
         ch = float(card.frame().size.height)
@@ -541,8 +541,12 @@ def main() -> int:
                 for v in card.subviews()
                 if float(v.frame().origin.y + v.frame().size.height) > ch + 0.01]
         check(f"{tag}：没有子视图超出卡片高度（{ch:.0f}）", not over, str(over[:4]))
-        check(f"{tag}：高度与 card_height() 一致",
-              abs(ch - EP.card_height(ent)) < 0.01, f"{ch} vs {EP.card_height(ent)}")
+        # ⚠️ 必须和 `_make_card` 传**同一个 `has_actions`** —— 它这轮传的是
+        #    `on_start=None`（不画按钮），高度就少了 `CARD_GAP_V + BTN_H` 那一块。
+        #    2026-09-28 之前「选择文件…」永远在，所以这个参数不存在。
+        check(f"{tag}：高度与 card_height(has_actions=False) 一致",
+              abs(ch - EP.card_height(ent, has_actions=False)) < 0.01,
+              f"{ch} vs {EP.card_height(ent, has_actions=False)}")
         # ⚠️⚠️ **上面两条都抓不到「`card_height` 与行循环脱钩」**：
         #    · 「高度一致」是**同义反复** —— 卡片的 frame 本来就是 `card_height(entry)` 设的；
         #    · 「没有子视图超出高度」只看**顶端** —— 而 `card_height` **少算**时所有行
@@ -554,6 +558,15 @@ def main() -> int:
         _low = min(float(v.frame().origin.y) for v in card.subviews())
         check(f"{tag}：没有子视图掉出卡片底部（最低 y={_low:.1f}）", _low >= -0.01,
               f"最低 y={_low:.1f} —— 高度少算了？")
+
+    # ⭐ **按钮画不画，卡片高度要跟着变** —— 2026-09-28 删掉卡片上的「选择文件…」
+    #    之后才暴露出来的：`card_height` 原来**不管按钮画不画都留 `BTN_H`**，
+    #    而以前「选择文件…」永远在，所以看不出来；删掉之后 `on_start is None`
+    #    （上课中从菜单栏打开的面板）那一档的卡片下半截就是**空白**。
+    check("card_height：画按钮比不画正好多 CARD_GAP_V + BTN_H",
+          abs((EP.card_height() - EP.card_height(has_actions=False))
+              - (EP.CARD_GAP_V + EP.BTN_H)) < 0.01,
+          f"{EP.card_height()} vs {EP.card_height(has_actions=False)}")
 
     # ⭐⭐ **阅读顺序**：把文字标签按 y 从高到低排，必须与期望的阅读顺序一致。
     #     2026-09-26 真出过这个 bug —— 结果块从卡片底部往上长，于是
@@ -567,7 +580,7 @@ def main() -> int:
         return [t for _, t in sorted(items, reverse=True)]
 
     e1 = {"added": ["第一", "第二", "第三"], "removed": set(), "undo": None}
-    c1 = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+    c1 = EP._make_card(_r(), on_start=None,
                        on_drop_files=lambda c, p: False, width=640.0, entry=e1,
                        on_delete=lambda t: None, on_undo=lambda: None)
     check("⭐⭐ 从上到下：课名 → 准备度 → 结果头 → 逐条（**正序**）",
@@ -587,7 +600,7 @@ def main() -> int:
                                       skipped_shapes=0, ocr_pages=0,
                                       error="不支持的格式：.docx" * 12)],
           "not_added": [_long_not]}
-    c3 = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+    c3 = EP._make_card(_r(), on_start=None,
                        on_drop_files=lambda c, p: False, width=640.0, entry=e3,
                        on_delete=lambda t: None, on_undo=lambda: None)
     _want = {_long_term, EP.failure_text(e3["failed"][0]), _long_not}
@@ -603,7 +616,7 @@ def main() -> int:
 
     e2 = {"added": ["甲", "乙"], "removed": {"乙"}, "undo": {"text": "乙"}}
     seq2 = _reading_order(EP._make_card(
-        _r(), on_start=None, on_prep=lambda c: None,
+        _r(), on_start=None,
         on_drop_files=lambda c, p: False, width=640.0, entry=e2,
         on_delete=lambda t: None, on_undo=lambda: None))
     check("⭐ 删过的那条不再列；「已删除」+「撤销」在**最下面**",
@@ -927,7 +940,7 @@ def main() -> int:
     #    → 必须**走真正的 `_enter`**。`_make_card` 返回的就是那个 DropTarget，
     #      所以它的 `_on_enter` 就是真回调（这正是 ⑦ 组那条教训：
     #      **要测"接线"，不是测"被调用的那个函数"**）。
-    _card = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+    _card = EP._make_card(_r(), on_start=None,
                           on_drop_files=lambda c, p: True, width=640.0)
     check("⭐⭐ 真 `entry_panel._enter`：`.txt` **拒**"
           "（原来只看『非空文件列表』→ 高亮说能收、跑完说 unsupported）",
@@ -966,9 +979,9 @@ def main() -> int:
     #    这一环是 `performDragOperation:` 认不认这次落地的**唯一**依据：
     #    `panel.perform_drag` 拿到的就是它的返回值（`None` 现在算收，但**真值必须传得上来**）。
     #    真调用方是 `run_prep`（它 `return True/False`）—— 这里用桩把那条契约钉死。
-    _cd1 = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+    _cd1 = EP._make_card(_r(), on_start=None,
                          on_drop_files=lambda c, p: True, width=640.0)
-    _cd0 = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+    _cd0 = EP._make_card(_r(), on_start=None,
                          on_drop_files=lambda c, p: False, width=640.0)
     check("⭐⭐ 真 `_drop` 的返回值**跟 `on_drop_files` 走**（真值传得上来）",
           _cd1._on_drop(["/x/a.pdf"]) is True and _cd0._on_drop(["/x/a.pdf"]) is False,
@@ -988,7 +1001,7 @@ def main() -> int:
     _sc10.setHasVerticalScroller_(True)
     _doc10 = _FlipDoc.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 600))
     _sc10.setDocumentView_(_doc10)
-    _card10 = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+    _card10 = EP._make_card(_r(), on_start=None,
                             on_drop_files=lambda c, p: False, width=300.0, entry=_e10)
     _card10._course = "ZZ"
     _doc10.addSubview_(_card10)

@@ -6,9 +6,24 @@
 面板浮在屏幕中上。可以做的：
 
     1. 往**任意一张卡**上拖一个文件（Finder 里随便什么文件都行）
-    2. 点卡片上的「选择文件…」
-    3. 跑完之后，点结果里某一条右边的「删」，再点「撤销」
-    4. 点右下角「关闭」
+    2. 点底部那条上的「选择文件…」（选一堆课件 → 批量归档）
+    3. 点底部那条上的「＋ 新增课程」→ 输个课号 → 回车 / Esc
+       ⚠️ 卡片上的「选择文件…」**2026-09-28 已删**（作者：看着太繁）——
+          那条路现在只有底部这一个入口。
+    4. 跑完之后，点结果里某一条右边的「删」，再点「撤销」
+    5. ⭐ **右键任意一张卡 → 「删除课程…」** —— 会弹确认框（全部删除 / 只删课号 / 取消）
+       ⚠️ 确认框只在 `CLASSLIVE_FROM_APP=1` 时弹（`notice.alert` 的既有判据）——
+          跑器默认**不弹**，那时会看到状态行说「要在 ClassLive.app 里确认」。
+          想看弹框就这样起：`CLASSLIVE_FROM_APP=1 … probe_entry_panel.py`
+       ⚠️ 删的是 **`/tmp` 那份副本**；但「全部删除」会把副本文件真的送进你的废纸篓。
+    6. 点右下角「关闭」
+
+环境变量（不进交互）：
+
+    PROBE_BATCH=1       一上来就跑批量归档（13 份假课件）
+    PROBE_SEARCH=<词>    直接全库搜（只读）
+    PROBE_ADD=<课号>     走新增课程那条路；**留空**（`PROBE_ADD=`）= 只打开那一行
+    PROBE_ABORT=1       隔离地看「没跑完 + 逐文件失败」两行长什么样
 
 ## ⚠️ 隔离在哪（三条都是「上一版跑器踩过」的教训）
 
@@ -172,7 +187,12 @@ def main() -> int:
     if ISO.exists():
         shutil.rmtree(ISO)
     (ISO / "courses").mkdir(parents=True)
-    shutil.copytree(HERE / "glossary", ISO / "glossary")
+    if os.environ.get("PROBE_ZERO"):
+        # ⭐ **造一次"一门课都没有"** —— 这是 A（零课程不跑模型 + 就地建课 +
+        #    按文件名免费先分）唯一能被看到的路径。不拷任何术语表。
+        (ISO / "glossary").mkdir()
+    else:
+        shutil.copytree(HERE / "glossary", ISO / "glossary")
     (ISO / "glossary.txt").write_text("", encoding="utf-8")
     real = HERE / "glossary"
 
@@ -195,8 +215,6 @@ def main() -> int:
         print("❌ build 返回 None")
         return 1
 
-    from PyObjCTools import AppHelper
-
     # `PROBE_BATCH=1` —— 一上来就把批量那条链路整个跑一遍（映射卡直接上屏），
     # 不用手拖。⚠️ 走的是 `Handles.start_batch` 那个**程序化入口**，因为
     # 真拖拽进不了验收跑器（`test_panel.py` 第 ⑨ 组有同样的说明）。
@@ -212,12 +230,44 @@ def main() -> int:
         print(f"\nPROBE_SEARCH={q!r} —— 直接搜（只读）")
         AppHelper.callAfter(h.search, q)
 
+    # `PROBE_ZERO=1` —— 零课程那一档。造几个假课件直接走批量那条路；
+    #   再加 `PROBE_ZERO_ADD=<课号>` 就在 3 秒后建这门课 ——
+    #   用来验收「建一门，名字里带那个课号的**立刻**归好（0 次 API）」。
+    if os.environ.get("PROBE_ZERO"):
+        zdir = pathlib.Path("/tmp/classlive-probe-zero")
+        zdir.mkdir(exist_ok=True)
+        names = ["ECON10740_Lecture3.pdf", "ECON10740_Lecture4.pdf",
+                 "SOC10020_reading.pdf", "别人的讲义.pdf", "期刊论文样本.pdf"]
+        for n in names:
+            (zdir / n).write_bytes(b"%PDF-1.4\n% fake\n")
+        files = [str(zdir / n) for n in names]
+        print(f"\nPROBE_ZERO=1 —— 零课程：{len(files)} 份假课件走批量那条路")
+        AppHelper.callAfter(h.start_batch, files)
+        _add = os.environ.get("PROBE_ZERO_ADD")
+        if _add:
+            print(f"  3 秒后建课 {_add!r}（看「免费按文件名分」那一步）")
+            AppHelper.callLater(3.0, lambda: h.add_course(_add))
+
+    # `PROBE_ADD=<课号>` —— 走新增课程那条路（等价于点 «＋ 新增课程» → 敲入 → 回车）。
+    # ⚠️ 留空（`PROBE_ADD=`）就是**只打开那一行、什么都不提交** —— 看输入行长什么样
+    #    用这个。（跑器里没有真键盘，`add_course` 是 `Handles` 上的程序化入口。）
+    if os.environ.get("PROBE_ADD") is not None:
+        txt = os.environ["PROBE_ADD"]
+        print(f"\nPROBE_ADD={txt!r} —— 新增课程"
+              f"（{'只打开那一行' if not txt else '敲入并回车'}）")
+        AppHelper.callAfter(h.add_course, txt)
+
     AppHelper.runEventLoop()
 
     # 退出后核对：真 glossary 有没有被动过
     bad = []
     for f in real.glob("*.txt"):
-        if (ISO / "glossary" / f.name).read_bytes() != f.read_bytes():
+        copy = ISO / "glossary" / f.name
+        # ⚠️ 副本可能**根本不存在**：`PROBE_ZERO=1` 那条路只 `mkdir`、一份都不拷。
+        #    原来直接 `read_bytes()` → 每个文件抛 FileNotFoundError、整段自检崩掉，
+        #    **拿不到「真 glossary 未变」这个结论**（而它是隔离跑器最关键的保障）。
+        #    缺副本 = ❌，不是异常。
+        if not copy.exists() or copy.read_bytes() != f.read_bytes():
             bad.append(f.name)
     print("\n" + ("✅ 真 glossary 逐字节未变" if not bad
                   else f"❌ 这些被动过了：{bad}"))

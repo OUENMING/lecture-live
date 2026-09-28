@@ -30,6 +30,11 @@
 
 本模块**不碰 AppKit**，只回答「有哪些课、每门课准备到什么程度」。
 谁画、画多大、什么颜色，是 `entry_panel.py` 的事。
+
+⚠️ **唯一一处例外是 `create()`（2026-09-28 起）**：它真的建文件。放这里是因为
+「一门课的身份 = `glossary/<课号>.txt`」这件事只有本模块知道（`glossary_file` /
+`list_courses` 都建在它上面）—— 让界面自己去拼那个路径，就等于把这条知识抄第二份。
+其余函数一律**只读**。
 """
 from __future__ import annotations
 
@@ -140,6 +145,262 @@ def resolve(want: str, known: list[str]) -> str | None:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# 新增课程（2026-09-28）
+#
+# 面板上那个「＋ 新增课程」的全部判断都在这里，`entry_panel` 只负责画。
+# 分开的理由与上面 `resolve` 同一条：**规则只留一份**，谁调都一样。
+# ══════════════════════════════════════════════════════════════════════
+#: 课号长度上限。⚠️ 不是为了好看：macOS 单个文件名的上限是 255 **字节**，
+#: 而中文课号一个字 3 字节 —— 不设限的话，粘错一整段话会得到一个
+#: 「写到一半 ENAMETOOLONG」的半截文件。60 是个宽到不可能挡人的数。
+MAX_CODE = 60
+
+#: 不能出现在课号里的字符 → 人话原因。
+#: ⚠️ 判据是**两件事**：① 能不能安全地变成一个文件名；② 建完能不能在面板上看见。
+#: `:` 在 APFS 上合法，但 Finder 把它**显示成 `/`** → 用户看到的文件名和真名不是一个。
+_FORBIDDEN = {"/": "斜杠", "\\": "反斜杠", ":": "冒号（Finder 会把它显示成斜杠）",
+              "\x00": "空字符", "\n": "换行", "\t": "制表符"}
+
+
+def valid_code(want: str) -> str:
+    """课号能不能当文件名。返回 `""` = 可以；否则**一句人话**说明为什么不行。
+
+    ⚠️ 纯函数，不碰磁盘 —— 判据全在 `tests/test_courses.py`。
+    """
+    w = (want or "").strip()
+    if not w:
+        return "先输一个课号"
+    if len(w) > MAX_CODE:
+        return f"太长了（{len(w)} 个字）—— 课号一般不超过 {MAX_CODE} 个字"
+    for ch, why in _FORBIDDEN.items():
+        if ch in w:
+            return f"课号里不能有{why}"
+    if w.startswith("."):
+        # ⚠️ 不是洁癖：`list_courses` 明确跳过 `.` 开头的名字（那是隐藏文件），
+        #    所以以点开头建出来的课**面板上永远不出现** —— 用户会以为没建成。
+        return "课号不能以点开头 —— 那样建出来是隐藏文件，面板上看不见"
+    return ""
+
+
+def plan_add(want: str, known) -> dict:
+    """输入 → **该干什么**。纯函数（界面只负责把 `text` 画出来）。
+
+    返回 `{"action", "course", "hits", "text"}`，`action` 四选一：
+
+    | action | 意思 | 界面该做什么 |
+    |---|---|---|
+    | `bad` | 这个课号当不了文件名 | 说 `text`，**别建** |
+    | `exists` | 已经有了（`course` 是规范课号） | 说 `text`，**别重复建** |
+    | `pick` | 片段命中多门（`hits` 是候选） | 说 `text`，让他写全 |
+    | `create` | 建它 | 走 `create()` |
+
+    ⚠️ ⭐ **`exists` / `pick` 两档存在的理由与 `resolve` 那条一致**：`resolve` 遇歧义
+       返回 `None` 是**拒绝猜**。这里更进一步 —— 它把「你输的其实已经有了」
+       也拦下来（`resolve` 会把它解析成那门课，于是调用方以为要新建、实际重名）。
+       后果不是"少建一门课"，是**两门课共用一份术语表**：静默用错术语表，
+       正是本模块最怕的那类失败。
+    """
+    w = (want or "").strip()
+    why = valid_code(w)
+    if why:
+        return {"action": "bad", "course": "", "hits": [], "text": why}
+    hits = candidates(w, list(known))
+    if len(hits) == 1:
+        return {"action": "exists", "course": hits[0], "hits": hits,
+                "text": f"已经有这门课了：{hits[0]} —— 没重复建"}
+    if hits:
+        # ⚠️ 候选**只列前 3 门**：这一行在面板底部那条上，宽度有限、换行会被吃掉。
+        #    多出来的用计数说清楚 —— 别让一个截断的列表读起来像"就这些"。
+        shown = " · ".join(hits[:3])
+        more = f" 等 {len(hits)} 门" if len(hits) > 3 else ""
+        return {"action": "pick", "course": "", "hits": hits,
+                "text": f"{len(hits)} 门课都含「{w}」：{shown}{more} —— 写全一点"}
+    return {"action": "create", "course": w, "hits": [], "text": f"建 {w}"}
+
+
+def create(path, course: str) -> bool:
+    """建一门新课的术语表。返回**有没有真的建**。
+
+    ⚠️ **写路径是参数，不由本函数算** —— 同 `prep.append_terms` 那条纪律
+       （`term_notes.json` 从 41KB 被写成 4.8KB 那次换来的）：调用方给什么路径就写什么。
+       生产里那个路径是 `prep.course_glossary_path(...)` 算的，**与 prep 写词时同一个答案**。
+
+    ⚠️⚠️ **只建不覆盖。** 文件已存在就**一个字都不动**、返回 `False`。
+       这不只是防手滑：`plan_add` 判完到真写之间隔着一次界面往返，用户完全可能
+       在别处（`cl course`、Finder）已经把课建好了 —— 那时**覆盖就等于删掉他刚写的东西**。
+
+    ⚠️ 首行写 `# <课号>` 是**既有约定**（`prep.append_terms` 建新课时逐字写的就是它）。
+       它同时是卡片标题的来源（`_title`）与模型判领域的先验，所以**不猜课名** ——
+       猜错比空着更糟（同 `prep.append_terms` 的注释）。
+    """
+    p = pathlib.Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # ⚠️ **排他创建**（`"x"`）而不是 `exists()` + `write_text`：后者两步之间留着窗口，
+        #    别处（Finder / `cl` / 另一个进程）恰好在这一瞬间建好文件的话，
+        #    `write_text` 会**直接截断覆盖** —— 正是上面那段要防的事。
+        #    `"x"` 把这个判断交给内核，没有窗口（2026-09-28 审查指出）。
+        with p.open("x", encoding="utf-8") as fh:
+            fh.write(f"# {course}\n")
+    except FileExistsError:
+        return False
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 删除一门课（2026-09-28）
+# ══════════════════════════════════════════════════════════════════════
+def facts(glossary_txt, course, *, sessions_dir=None, state_root=None) -> dict:
+    """确认框要说的那几件事：**这门课到底有什么**。纯读，不写任何东西。
+
+    ⭐ 存在的理由：删除是**少见且破坏性**的动作，而我们的「课」由两个互不相干的
+       半边拼成（见模块头那张表）。用户有权在点之前知道**具体会动什么** ——
+       `[一手]` Apple 支持文档《Delete or uninstall apps on Mac》的口径正是这个：
+       当删除会波及「other data the app might have stored in other locations」时，
+       要**提供一个统一的入口把它说清楚**，而不是让用户自己去各处清。
+
+    ⚠️ **`sessions` 只是"报出来"，不是"会被删"** —— 上课记录是历史，见 `delete()`。
+    """
+    root = pathlib.Path(state_root) if state_root is not None else paths.STATE_ROOT
+    g = glossary_file(glossary_txt, course)
+    mats = paths.materials_dir(course, root=root)
+    # ⚠️ 走 `_count_materials`（本模块那份唯一定义），**不在这里再数一遍**。
+    #    原来这里自己数，三处与它不一致：读失败降级成 `0`（口径 3 要求 `None`）、
+    #    `.DS_Store` 被算成一份课件、以及"同一件事两份实现"。
+    #    而这里是**删除确认框**的数字 —— `0` 会让用户在破坏性操作前
+    #    以为"没有课件会被动"（2026-09-28 审查指出）。
+    n_mat = _count_materials(mats)
+    try:
+        n_bytes = g.stat().st_size if g.exists() else 0
+    except OSError:
+        n_bytes = None          # ⚠️ 同上：读不出是「未知」，不是「0 字节」
+    return {"glossary": g, "glossary_bytes": n_bytes,
+            "course_dir": paths.course_dir(course, root=root), "materials": n_mat,
+            "sessions": len(session_files(sessions_dir, course))}
+
+
+#: 日志最多留这么多条。⚠️ 它会**一直长**（一学期几百条），而用途只是
+#: 「看看准了多少 / 攒 few-shot 例子」—— 旧的几十条价值一样，所以砍尾不砍头。
+MAX_CORRECTIONS = 500
+
+
+def record_batch(pairs, *, root=None, ai=None, at=None) -> int:
+    """把一批「文件 → 用户最终认定的课号」记下来。返回追加了几条。
+
+    `pairs` = `[(路径, 课号)]`（`_confirm_batch` 里现成的那个）。
+    `ai` = `{路径: 模型当时说的课号}` —— ⭐ **有它才算得出"改对了几条"**。
+
+    ⚠️⚠️ **只记录，不训练、不影响分类。** 它先当**度量**用：
+       「上了转录语料之后到底准了多少」—— 没有它，"要不要继续投入"只能靠感觉
+       （同 `voice.DEFAULT_THRESHOLD` 那条「零背书」：**没有量就别定数**）。
+    ⚠️ **本函数不判断"哪些才算标注"** —— 那是「未分类不排队」那条规矩的事，
+       定义在 `entry_panel.group_for_archive`（唯一一处）。调用方传进来的应该是
+       **真的会归档的那些**。（这里只挡空课号这一种明显无意义的行。）
+    ⚠️ 参数名不叫 `store` —— 那是模块名，会**静默遮蔽**（`voice.save_store` 栽过）。
+    """
+    import time
+    import paths
+    import store
+    rows = []
+    for path, course in pairs:
+        if not course:
+            continue                              # 「未分类」不是标注
+        rows.append({"path": str(path), "course": str(course),
+                     "ai": (ai or {}).get(str(path)) or None,
+                     "at": at if at is not None else time.time()})
+    if not rows:
+        return 0
+    p = paths.corrections_log(root=root)
+    try:
+        old = store.load_json(p, default={})
+    except store.StoreError:
+        # ⚠️ 读不出来时**不覆盖**：那本日志是唯一一份（同 `voice.load_store` 那条）。
+        raise
+    # ⚠️ **日志是 `{"rows": [...]}`，不是裸 list** —— `store.save_json` 靠
+    #    `{_v: 1, **obj}` 盖版本号，那个展开**只对 dict 成立**（第一版塞了 list
+    #    进去，当场 TypeError）。附带好处：这本日志也就有了版本约定。
+    prev = (old or {}).get("rows") if isinstance(old, dict) else None
+    store.save_json(p, {"rows": (list(prev or []) + rows)[-MAX_CORRECTIONS:]})
+    return len(rows)
+
+
+def corrections(*, root=None) -> list:
+    """读回那本日志。**读不出来返回空表、不抛**（它丢了不影响上课）。"""
+    import paths
+    import store
+    try:
+        got = store.load_json(paths.corrections_log(root=root), default={})
+    except store.StoreError:
+        return []
+    rows = (got or {}).get("rows") if isinstance(got, dict) else None
+    return list(rows) if isinstance(rows, list) else []
+
+
+def delete(glossary_txt, course, *, sessions_dir=None, state_root=None,
+           keep_materials: bool = False, trash_fn=None) -> dict:
+    """删一门课。⭐ **这是全项目唯一会删东西的入口。**
+
+    | `keep_materials` | 术语表 | 课程目录（课件 + prep 状态）|
+    |---|---|---|
+    | `False`（**全部删除**）| → 废纸篓 | → 废纸篓 |
+    | `True`（**只删课号**）| → 废纸篓 | → **搬进保留区**（`paths.removed_dir`）|
+
+    ⭐ 「只删课号」为什么要**搬**而不是留着：面板上的课是
+       `glossary/*.txt` **∪** `~/.classlive/courses/*/` 的并集 ——
+       只删术语表的话**卡片不会消失**，只会变成一张「0 条术语」的空卡。
+       搬进点开头的保留区，`list_courses` 就看不见它了，而课件还在磁盘上。
+
+    ⚠️⚠️ **`sessions/` 一个字节都不碰。** 上课记录是**历史**，不是课程的一部分 ——
+       它记的是"那节课发生过"。后果（**界面上必须说出来**）：删了课再建同名课，
+       历史会**自己接回来**（`session_files` 按课号后缀匹配）。
+       业界三种解法（墓碑 / 改名换 ID / 唯一约束算进软删记录），**我们都不做**。
+
+    ⚠️ 删路径 / 写路径**全由 `paths.*` 与 `glossary_file` 算**，不在这里手拼。
+    ⚠️ **幂等**：东西本来就不在 → 照常返回，不算错误（`trash_fn` 自己也幂等）。
+
+    `trash_fn(path) -> (ok, why)` 是**验收注入点**（同 `prep.prepare` 的 `chat=`）——
+       判据**不能真往用户的废纸篓里扔东西**。
+
+    返回 `{"facts", "trashed": [路径…], "kept": 路径|None, "errors": [人话…]}`。
+    """
+    if trash_fn is None:
+        import trash as trash_mod
+        trash_fn = trash_mod.to_trash
+    f = facts(glossary_txt, course, sessions_dir=sessions_dir, state_root=state_root)
+    out = {"facts": f, "trashed": [], "kept": None, "errors": []}
+
+    def _burn(p) -> None:
+        ok, why = trash_fn(p)
+        if ok:
+            out["trashed"].append(str(p))
+        else:
+            out["errors"].append(f"{pathlib.Path(p).name}：{why}")
+
+    if f["glossary"].exists():
+        _burn(f["glossary"])
+
+    if f["course_dir"].is_dir():
+        if keep_materials:
+            dest = paths.removed_dir(root=state_root) / course
+            # ⚠️ 保留区里已有同名就加 `-2` 后缀 —— 与 `prep._archive` **同一套约定**：
+            #    **绝不覆盖**（覆盖 = 静默丢掉上一次搬走的那批课件）。
+            n = 2
+            while dest.exists():
+                dest = paths.removed_dir(root=state_root) / f"{course}-{n}"
+                n += 1
+            try:
+                import shutil
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(f["course_dir"]), str(dest))
+                out["kept"] = str(dest)
+            except OSError as e:
+                out["errors"].append(f"课件搬不动：{e}")
+        else:
+            _burn(f["course_dir"])
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════
 # 准备度
 # ══════════════════════════════════════════════════════════════════════
 @dataclass(frozen=True)
@@ -212,39 +473,53 @@ def _session_course(stem: str) -> str | None:
 
     ⚠️ 课号本身可能含 `_`（用户能写任意 `.course`），所以用 `split("_", 2)`：
        前两段固定是日期和时间，**剩下的整段**才是课号。
+    ⚠️⚠️ **空课号段（`…_140200_.md`）也当"形状不对"。** 放它过去的话
+       `course.endswith("")` **恒为真** → 这个文件被算进**每一门课**：
+       `facts()` 的节数虚高、`readiness.last_session` 还会把它当成那门课的最后一次上课。
+       （2026-09-28 审查指出；当天真实 `sessions/` 里实测 **0 个**这种文件，
+       但录课中断 / 测试残留正是这么长出来的。`find.py` 共用本函数，一并受益。）
     """
     parts = stem.split("_", 2)
-    return parts[2] if len(parts) == 3 else None
+    return (parts[2] or None) if len(parts) == 3 else None
 
 
-def last_session(sessions_dir, course: str) -> str | None:
-    """这门课最后一次上课的日期。
+def session_files(sessions_dir, course: str) -> list:
+    """这门课在 `sessions/` 下的**上课记录**文件。**匹配规则只此一处。**
 
     ⚠️ **必须容错匹配**（模块头第 1 条）：文件名里可能是短号 `10730`，
        而传进来的 `course` 是 `ECON10730`。
     ⚠️ `*_TEST.md` 之类的残留不在 `known` 里就自然被排除 ——
        所以这里按**课程名匹配**，不是按「所有文件」。
+
+    ⭐ 抽出来给两个视图共用：`last_session`（要最新那个日期）与
+       `facts`（确认框要报「几节」）。**它们是同一条规则的两个视图** ——
+       各写一遍迟早一个算 46、一个算 47。
     """
+    if sessions_dir is None:
+        return []
     d = pathlib.Path(sessions_dir)
     if not d.is_dir():
-        return None
-    best: str | None = None
+        return []
     try:
         entries = list(d.iterdir())
     except OSError:
-        return None
+        return []
+    out = []
     for p in entries:
         if p.suffix != ".md":
             continue
         c = _session_course(p.stem)
         if c is None:
             continue
-        if not (course == c or course.endswith(c)):
-            continue
-        date = p.stem.split("_", 1)[0]
-        if best is None or date > best:
-            best = date
-    return best
+        if course == c or course.endswith(c):
+            out.append(p)
+    return out
+
+
+def last_session(sessions_dir, course: str) -> str | None:
+    """这门课最后一次上课的日期。**规则见 `session_files`，这里只取最大。**"""
+    dates = [p.stem.split("_", 1)[0] for p in session_files(sessions_dir, course)]
+    return max(dates) if dates else None
 
 
 def readiness(glossary_txt, course: str, *, sessions_dir=None,

@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 import unittest
 
@@ -84,6 +85,53 @@ class ParseReply(unittest.TestCase):
         self.assertEqual(hi, "ECON10740")
 
 
+class BriefsInjection(unittest.TestCase):
+    """⭐ **课程描述是注入的** —— `classify` 不认识 `sessions/`，也不认识 `corpus`。
+
+    2026-09-28 起，描述优先用**上课转录**（`corpus.py`：每门课 19%-56% 的词是它独有的），
+    拿不到才退回术语表。这一组钉的是**那条缝**：换 `corpus=` 就能换 prompt 的内容，
+    而 `classify.py` 一个字都不用动。
+    """
+
+    def _tmp_glossary(self):
+        # ⚠️ `mkdtemp` 建了就没人删（2026-09-28 审查指出）：这一支被 3 个以上用例
+        #    反复调，跑一次测试就在 /tmp 落一个 `tmpXXXX`；断言一失败更是全留下。
+        #    改用 `TemporaryDirectory` + `addCleanup` —— 成功失败都收掉。
+        import tempfile, pathlib
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        root = pathlib.Path(td.name)
+        (root / "glossary").mkdir()
+        (root / "glossary" / "ECON10770.txt").write_text(
+            "# ECON10770 经济学导论\n边际\n垄断\n", encoding="utf-8")
+        return root / "glossary.txt"
+
+    def test_corpus_wins_when_present(self):
+        import classify
+        gl = self._tmp_glossary()
+        b = classify.briefs(gl, ["ECON10770"],
+                            corpus={"ECON10770": "monopoly、marginal、utility"})
+        self.assertIn("上课讲过", b["ECON10770"])
+        self.assertIn("monopoly", b["ECON10770"])
+        # ⚠️ 有语料时**不该**再塞术语样本（那会挤掉 prompt 预算，而且更弱的信号）
+        self.assertNotIn("术语样本", b["ECON10770"])
+
+    def test_falls_back_to_glossary_when_corpus_empty(self):
+        import classify
+        gl = self._tmp_glossary()
+        # ⭐ **空串 = 这门课没有够格的转录** → 退回术语表（不是显示"无"之类的占位）
+        for corpus in ({}, {"ECON10770": ""}, {"ECON10770": "   "}):
+            b = classify.briefs(gl, ["ECON10770"], corpus=corpus)
+            self.assertIn("术语样本", b["ECON10770"], f"corpus={corpus!r}")
+            self.assertNotIn("上课讲过", b["ECON10770"])
+
+    def test_no_corpus_kwarg_still_works(self):
+        # ⚠️ 不传 `corpus` 是**合法**的（老调用方 / 一条转录都没有的机器）
+        import classify
+        b = classify.briefs(self._tmp_glossary(), ["ECON10770"])
+        self.assertIn("ECON10770", b["ECON10770"])
+
+
 class Prompt(unittest.TestCase):
     def test_prompt_carries_every_brief_and_the_head(self):
         p = classify.build_prompt("MAGIC_HEAD_TEXT", BRIEFS)
@@ -92,8 +140,13 @@ class Prompt(unittest.TestCase):
             self.assertIn(c, p, f"候选 {c} 没进 prompt")
 
     def test_prompt_head_is_capped(self):
+        # ⚠️ 原来断的是「总长 < HEAD_CHARS*2+2000」—— 太宽（2026-09-28 审查指出）：
+        #    输入 3×HEAD_CHARS、正常输出约 HEAD_CHARS+模板，只有把截断**整段删掉**
+        #    才越得过去；改成 `head[:HEAD_CHARS*2]` 这种「截得不够狠」照样绿。
+        #    → 直接钉**边界**：恰好留 HEAD_CHARS 个 x，多一个都不许有。
         p = classify.build_prompt("x" * (classify.HEAD_CHARS * 3), BRIEFS)
-        self.assertLess(len(p), classify.HEAD_CHARS * 2 + 2000)
+        self.assertIn("x" * classify.HEAD_CHARS, p)
+        self.assertNotIn("x" * (classify.HEAD_CHARS + 1), p)
 
 
 class Suggest(unittest.TestCase):
@@ -191,12 +244,20 @@ class ModuleHygiene(unittest.TestCase):
         """
         code = self._code()
         self.assertNotIn("import httpx", code)
-        self.assertNotIn("httpx.post", code)
+        # ⚠️ 只堵两个字面量不够（2026-09-28 审查指出）：`from httpx import post`、
+        #    `httpx.request(...)`、`httpx.Client()` 全都绕得过去 → 改**正则**。
+        #    ⚠️ 也别图省事查裸的 "httpx"：`_code()` 只剥**模块**那一个 docstring，
+        #    函数 docstring 里就有这两个字（`_ask` 那句），查裸词会**假红**。
+        for pat in (r"\bhttpx\s*\.", r"\bfrom\s+httpx\s+import\b"):
+            self.assertIsNone(re.search(pat, code), f"出现了 httpx 调用点：{pat}")
 
     def test_module_does_not_write(self):
         """本模块只出建议 —— 不许有任何写盘调用（归档是 `prep._archive` 的活）。"""
         code = self._code()
-        for bad in ("write_text", "shutil.", "copyfile", "os.remove", "unlink("):
+        # ⚠️ 补几条常见写法（2026-09-28 审查指出）：原来的清单漏了
+        #    `open(p, "w")` / `write_bytes` / `touch()` / `os.rename` / `os.makedirs`。
+        for bad in ("write_text", "write_bytes", "shutil.", "copyfile", "os.remove",
+                    "unlink(", "os.rename", "os.makedirs", ".touch("):
             self.assertNotIn(bad, code, f"classify.py 里出现了写盘迹象：{bad}")
 
 

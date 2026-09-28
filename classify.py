@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
-import re
 
 MODEL = "deepseek-chat"
 MAX_TOKENS = 300
@@ -51,7 +50,6 @@ TEMPERATURE = 0.0
 HEAD_PAGES = 2                  # 判归属看头两页就够（§7.10 实测）
 HEAD_CHARS = 2000               # 再多的正文对判断没帮助，只烧 token
 TERMS_PER_COURSE = 12           # 给模型看的术语样本条数
-NONE = ""                       # 模型答"都不属于"时返回的空课号
 
 
 @dataclasses.dataclass(frozen=True)
@@ -73,17 +71,28 @@ def by_code(name: str, courses) -> str | None:
     return hit[0] if len(hit) == 1 else None
 
 
-def briefs(glossary_dir, courses, *, terms: int = TERMS_PER_COURSE) -> dict:
+def briefs(glossary_dir, courses, *, terms: int = TERMS_PER_COURSE,
+           corpus: dict | None = None) -> dict:
     """课号 → 给模型看的一段自我介绍。
 
     ⚠️ **不能只给课名。** `[论文]` ACL 2025《Dynamic Label Name Refinement》：
     标签嵌入相似度到 **0.91** 时 CoT「easily misled by similar label names」，
     **6 个数据集里 4 个反而掉分**；提升标签区分度后 **+0.48 ~ +5.23 点**。
-    我们四门 ECON 的课名几乎同义，正撞在这个坑上
-    → **带术语样本**就是那条论文推荐的修法，而且不需要新数据：
-    `glossary/*.txt` 是 184 条人工术语，只有 8 个词跨课共享。
+    我们四门 ECON 的课名几乎同义，正撞在这个坑上 —— 所以描述必须**带区分性内容**。
+
+    ## ⭐ 描述的来源有两档，`corpus` 优先
+
+    | 来源 | 长什么样 | 实测 |
+    |---|---|---|
+    | **`corpus`（上课转录）** | `上课讲过: monopoly、marginal、utility、producer…` | 每门课 **19%-56% 的词是它独有的**（2026-09-28 在作者真实语料上量的） |
+    | 术语表（退回档） | `术语样本: 边际、垄断、需求曲线…` | ⚠️ 拿它当尺子实测精确率只有 **7-12%**（见文件头那张表） |
+
+    ⚠️ **`corpus` 是注入的，本模块不认识 `sessions/`** —— 谁去读转录、怎么读，
+       是 `corpus.py` 和调用方的事。这里只认「课号 → 一串词」这个形状。
+    ⚠️ **空串 = 这门课没有够格的转录** → 退回术语表（不是显示"无"之类的占位）。
     """
     import courses as courses_mod
+    corpus = corpus or {}
     out = {}
     for c in courses:
         title, sample = c, []
@@ -92,10 +101,18 @@ def briefs(glossary_dir, courses, *, terms: int = TERMS_PER_COURSE) -> dict:
             title = courses_mod.readiness(glossary_dir, c).title
             rows = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines()]
             sample = [r for r in rows if r and not r.startswith("#")][:terms]
-        except Exception:                                     # noqa: BLE001
-            pass                                              # 读不到就退回光课号 + 课名
-        out[c] = (f"{c} {title}" if title != c else c) + (
-            f"　术语样本: {'、'.join(sample)}" if sample else "")
+        except (OSError, UnicodeDecodeError):
+            # ⚠️ **只吞"读不出来"这一档。** 原来是裸 `except Exception` ——
+            #    于是 glossary 路径拼错、接口改名这类**真 bug** 与"这门课本来就没术语表"
+            #    在结果里长得一模一样，而且**无声**（2026-09-28 审查指出）。
+            #    意外错误现在会往上走：调用方（`entry_panel._classify`）接住并显示出来。
+            pass
+        head = f"{c} {title}" if title != c else c
+        words = (corpus.get(c) or "").strip()
+        if words:
+            out[c] = f"{head}　上课讲过: {words}"
+        else:
+            out[c] = head + (f"　术语样本: {'、'.join(sample)}" if sample else "")
     return out
 
 
@@ -206,6 +223,9 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int, default=0, help="最多判几份（0=全跑）")
     ap.add_argument("--no-model", action="store_true",
                     help="只跑机械层，不调模型（零成本、零网络）")
+    ap.add_argument("--sessions", default=str(
+        pathlib.Path(__file__).resolve().parent / "sessions"),
+        help="上课记录目录（课程关键词表的来源）")
     a = ap.parse_args(argv)
 
     paths = [pathlib.Path(p) for p in a.paths] or sorted(
@@ -216,7 +236,17 @@ def main(argv=None) -> int:
 
     names = courses_mod.list_courses(a.glossary)
     print(f"候选课程 {names}")
-    b = briefs(a.glossary, names)
+    # ⭐ 课程描述优先用**上课转录**（`corpus.py`），拿不到才退回术语表 ——
+    #    两档的实测差别写在 `briefs()` 的 docstring 里。
+    import corpus as corpus_mod
+    _w, _degraded = corpus_mod.keywords(
+        names, sessions_dir=pathlib.Path(a.sessions))
+    for _c, _why in _degraded.items():
+        # ⚠️ **降级要说出来，而且要说清楚为什么**（没有记录 / 太短 / 不是英文转录）——
+        #    同 `minutes` 那条「负结果不许读起来像穷尽」。
+        print(f"  ⚠️ {_c} 退回术语表：{_why}")
+    b = briefs(a.glossary, names,
+               corpus={c: corpus_mod.describe(v) for c, v in _w.items()})
     for k, v in b.items():
         print(f"  {v[:96]}")
     print()

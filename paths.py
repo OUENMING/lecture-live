@@ -43,6 +43,16 @@ import pathlib
 STATE_ROOT = pathlib.Path.home() / ".classlive"
 
 
+def _root(root) -> pathlib.Path:
+    """默认根 —— `~/.classlive/` 那一族的**唯一一处**解析。
+
+    ⚠️ 这条原来是每个函数里手抄一遍的三元表达式（本文件里七处）。
+       那正是本文件开头在反对的东西：加一个新的根、或者改默认位置时，
+       漏改任意一处就是**静默的路径漂移**。
+    """
+    return pathlib.Path(root) if root is not None else STATE_ROOT
+
+
 def course_dir(course: str, *, root=None) -> pathlib.Path:
     """`root` 给了就用它 —— **别让调用方自己拼 `root/"courses"/<课号>`**。
 
@@ -57,15 +67,44 @@ def course_dir(course: str, *, root=None) -> pathlib.Path:
          · **写入锁各拿各的**（`prep.state_lock_path` 明令禁止的那种「互斥静默失效」）
        规则与 `translator.course_terms_path` 同源：**精确优先，否则只认唯一命中**；
        有歧义就**退回精确路径**（宁可指到不存在的目录，也不能指到**别人的**目录）。
+
+    ⚠️ **点开头的目录一律不算候选**（2026-09-28 审查指出）：`courses/.removed/` 是
+       「只删课号」的保留区，`".removed".endswith("ed")` 为真 —— 课号 `ed` 这种短号
+       会**唯一命中它**，于是课件被读写到已删课程的归档目录里，且全程无声。
     """
-    root = pathlib.Path(root) if root is not None else STATE_ROOT
+    root = _root(root)
     exact = root / "courses" / course
     cdir = exact.parent
     if exact.exists() or not cdir.is_dir():
         return exact
     hits = [p for p in sorted(cdir.iterdir())
-            if p.is_dir() and (p.name.endswith(course) or course.endswith(p.name))]
+            if p.is_dir() and not p.name.startswith(".")
+            and (p.name.endswith(course) or course.endswith(p.name))]
     return hits[0] if len(hits) == 1 else exact
+
+
+def corrections_log(*, root=None) -> pathlib.Path:
+    """**用户纠正过的归属**（文件 → 课号）那本追加日志。
+
+    ⭐ 它是**免费拿到的标注集**：`entry_panel._confirm_batch()` 里本来就
+       读到了每个下拉框的值，只是以前读完就扔。
+    ⚠️ 放 `~/.classlive/`（**不是** `Logs/`）—— 它是要留着的**数据**，
+       不是会被清理工具扫掉的日志。
+    """
+    return _root(root) / "corrections.json"
+
+
+def removed_dir(*, root=None) -> pathlib.Path:
+    """「只删课号」时课件搬去的地方 —— `courses/.removed/`。
+
+    ⚠️⚠️ **名字以点开头是必须的，不是风格。** `courses.list_courses()` 遍历
+       `courses/` 下的目录来拼课程清单，而它最后那句是
+       `if n and not n.startswith(".")` —— 点开头才**不会**出现在面板上。
+       **把 `.removed` 改个名 = 那些已经搬走的课全部复活在面板上**（而且是空壳卡）。
+
+    ⚠️ 布局定义在这里、不在这里手拼（同 `course_dir` 那条）：调用方一律走本函数。
+    """
+    return _root(root) / "courses" / ".removed"
 
 
 def materials_dir(course: str, *, root=None) -> pathlib.Path:
@@ -101,7 +140,7 @@ def credentials(*, root=None) -> pathlib.Path:
     ⚠️ `load_api_key` 仍然**认**旧位置（保留可用 + 启动告警），因为"搬"这件事
     不该由程序替用户做（见 `secrets-via-interactive-login`）。
     """
-    return (pathlib.Path(root) if root is not None else STATE_ROOT) / "credentials"
+    return _root(root) / "credentials"
 
 
 def voice_dir(*, root=None) -> pathlib.Path:
@@ -117,7 +156,7 @@ def voice_dir(*, root=None) -> pathlib.Path:
       · `<日期>_<时间>_<课号>.test.wav`  ← `cl test --record-audio` 的调试素材（随时可删）
     文件名带 `.test` 那一档把两者分开，**免得删一种时误删另一种**。
     """
-    return (pathlib.Path(root) if root is not None else STATE_ROOT) / "voice"
+    return _root(root) / "voice"
 
 
 def voice_state(*, root=None) -> pathlib.Path:
@@ -147,7 +186,7 @@ def ready_state(*, root=None) -> pathlib.Path:
     **可清理**的（`paths.py` 文件头逐字：「用户数据不能住在会被清掉的地方」），
     而「我已经把这个提示关掉了」是**用户的决定**，清掉会把它重新弹回来。
     """
-    return (pathlib.Path(root) if root is not None else STATE_ROOT) / "ready-dismissed"
+    return _root(root) / "ready-dismissed"
 
 
 def models_stamp(*, root=None) -> pathlib.Path:
@@ -160,5 +199,5 @@ def models_stamp(*, root=None) -> pathlib.Path:
        **不等于模型不能用**（老用户 / 手动装的都会有文件没戳）。那种情况要落
        「版本没法核实」，**绝不重下** —— 重下等于白烧 1.2 GB 流量。
     """
-    return (pathlib.Path(root) if root is not None else STATE_ROOT) / "models.json"
+    return _root(root) / "models.json"
 

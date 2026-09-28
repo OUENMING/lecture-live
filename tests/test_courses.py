@@ -41,6 +41,7 @@ HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
 import courses                                                     # noqa: E402
+import paths as paths_mod                                          # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -228,6 +229,11 @@ def main() -> int:
                   #    （因为 `2026-09-25_120000_ECON10730.md` 顶了上去）。
                   "2026-09-22_120000_10800.md"):
             (sd / n).write_text("x")
+        # ⭐ 空课号段（`…_140200_.md`）：**不许混进任何一门课**。
+        #    `course.endswith("")` 恒为真 → 漏进去的话它属于每一门课，
+        #    而且日期（09-30）故意排在所有真记录之后 —— 它会顶掉下面每一条日期断言。
+        #    2026-09-28 OCR 指出；作者当天真实 sessions/ 里实测 0 个这种文件。
+        (sd / "2026-09-30_235959_.md").write_text("x")
         ls = courses.last_session(sd, "ECON10730")
         check("⭐ 短号与全名混在一起也认（取最大日期）",
               ls == "2026-09-25", str(ls))
@@ -241,6 +247,9 @@ def main() -> int:
         check("⭐ 课号中含 _ 也能切对", courses._session_course(
             "2026-09-10_140200_MY_COURSE") == "MY_COURSE")
         check("形状不对 -> None", courses._session_course("nonsense") is None)
+        check("⭐ 空课号段算「形状不对」（当成课号的话它属于每一门课）",
+              courses._session_course("2026-09-30_235959_") is None,
+              str(courses._session_course("2026-09-30_235959_")))
         # ⚠️ 原来这条是**恒真**的（`!= "2026-09-11"` —— 上一行已经确定结果是 09-25，
         #    这个不等式无论如何都成立）。改成有区分能力的形状：`.txt` 与 `*_TEST.md`
         #    的日期都排在 09-25 **之后**，于是「两者都被正确排除」是唯一能得出 09-25 的解释：
@@ -308,6 +317,250 @@ def main() -> int:
         rc, out, _ = cli("--list")
         check("⭐ --state-root 真的生效（只在该根里的课也列出来）",
               "ONLYHERE" in out, out.replace("\n", "|"))
+
+    print("\n--- ⑩ 新增课程：四个动作各走各的 ---")
+    # ⚠️ 这一节全部是**纯函数**，只碰 tempdir。
+    K = ["ECON10730", "ECON10740", "ECON10770"]
+
+    r = courses.plan_add("  ECON10999  ", K)
+    check("全新课号 -> create（两头空格会 strip）",
+          r["action"] == "create" and r["course"] == "ECON10999", str(r))
+
+    # ⭐⭐ 下面两条是这一节存在的理由：**已经有的绝不许再建一次**。
+    #    重名的后果不是"少建一门课"，是两门课共用一份术语表 —— 静默用错术语表。
+    r = courses.plan_add("ECON10740", K)
+    check("⭐ 已有课号 -> exists，**不是** create",
+          r["action"] == "exists" and r["course"] == "ECON10740", str(r))
+    r = courses.plan_add("1074", K)          # 只被 ECON10740 含
+    check("⭐ 片段唯一命中 -> exists（不是拿短号去建一门新课）",
+          r["action"] == "exists" and r["course"] == "ECON10740", str(r))
+
+    r = courses.plan_add("107", K)           # 三门都含
+    check("⭐ 歧义 -> pick，**不替用户挑一个**（同 `resolve` 的取向）",
+          r["action"] == "pick" and r["course"] == "" and len(r["hits"]) == 3,
+          str(r))
+    _t = courses.plan_add("1", ["A1", "B1", "C1", "D1", "E1"])["text"]
+    check("候选超过 3 门时：只列 3 门，但要说清一共几门（截断不许像穷尽）",
+          _t.count("·") == 2 and "5 门" in _t, _t)
+
+    check("空 -> bad", courses.plan_add("   ", K)["action"] == "bad")
+    check("带斜杠 -> bad（会变成路径）", courses.plan_add("A/B", K)["action"] == "bad")
+    check("带冒号 -> bad（Finder 会把它显示成斜杠）",
+          courses.plan_add("A:B", K)["action"] == "bad")
+    check("以点开头 -> bad（建出来是隐藏文件，面板上永远不出现）",
+          courses.plan_add(".ECON", K)["action"] == "bad"
+          and courses.plan_add(".ECON", K)["action"] != "create")
+
+    # 边界：正好 MAX_CODE 可以，多一个就不行（防 off-by-one）
+    check(f"正好 {courses.MAX_CODE} 个字 -> 可以",
+          courses.valid_code("A" * courses.MAX_CODE) == "")
+    check(f"{courses.MAX_CODE + 1} 个字 -> 不行",
+          courses.valid_code("A" * (courses.MAX_CODE + 1)) != "")
+
+    print("\n--- ⑪ create：只建不覆盖 + 建完真的会出现 ---")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        new_p = tdp / "glossary" / "ECON10999.txt"
+        check("建出新文件，首行是 `# 课号`（与 `prep.append_terms` 同一约定）",
+              courses.create(new_p, "ECON10999") is True
+              and new_p.read_text(encoding="utf-8") == "# ECON10999\n",
+              repr(new_p.read_text(encoding="utf-8") if new_p.exists() else None))
+
+        # ⭐⭐ 这条是本节的重头：判完到真写之间隔着一次界面往返，用户完全可能在
+        #     别处（cl course / Finder）已经把课建好了 —— 覆盖 = 删掉他刚写的东西。
+        new_p.write_text("# 手写的\nKuhn-Tucker 条件\n", encoding="utf-8")
+        check("⭐⭐ 已存在时**一个字都不动**，且返回 False",
+              courses.create(new_p, "ECON10999") is False
+              and new_p.read_text(encoding="utf-8") == "# 手写的\nKuhn-Tucker 条件\n",
+              repr(new_p.read_text(encoding="utf-8")))
+
+        # 建完必须能在清单里看见 —— 否则「建好了」但面板上一张卡都不多（谎报）
+        names = courses.list_courses(tdp / "glossary.txt",
+                                     state_root=tdp / "state")
+        check("⭐ 建完就出现在 `list_courses` 里（面板上真的会多一张卡）",
+              "ECON10999" in names, str(names))
+
+    print("\n--- ⑫ facts：确认框要说的那几个数 ---")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        gdir = tdp / "glossary"
+        gdir.mkdir()
+        gl = gdir / "ECON10770.txt"
+        gl.write_text("# ECON10770\n句子\n", encoding="utf-8")
+        st = tdp / "state"
+        mats = st / "courses" / "ECON10770" / "materials"
+        mats.mkdir(parents=True)
+        for n in ("a.pdf", "b.pdf"):
+            (mats / n).write_bytes(b"x" * 10)
+        ses = tdp / "sessions"
+        ses.mkdir()
+        for i in range(3):
+            (ses / f"2026-09-0{i + 1}_090000_10770.md").write_text("x", encoding="utf-8")
+
+        f = courses.facts(tdp / "glossary.txt", "ECON10770",
+                          sessions_dir=ses, state_root=st)
+        check("术语表字节数 = 文件真实大小",
+              f["glossary_bytes"] == gl.stat().st_size, str(f["glossary_bytes"]))
+        check("课件份数 = 2", f["materials"] == 2, str(f["materials"]))
+        check("⭐ 上课记录节数 = 3（文件名是短号也要认出来）",
+              f["sessions"] == 3, str(f["sessions"]))
+
+    print("\n--- ⑬ delete：唯一会删东西的入口（**假 trash，绝不碰真废纸篓**）---")
+
+    def _fixture(tdp, name="ECON10770"):
+        """造一门「三样俱全」的课：术语表 + 课件 + 一节上课记录。"""
+        gdir = tdp / "glossary"
+        gdir.mkdir(exist_ok=True)
+        (gdir / f"{name}.txt").write_text(f"# {name}\n句子\n", encoding="utf-8")
+        st = tdp / "state"
+        mats = st / "courses" / name / "materials"
+        mats.mkdir(parents=True, exist_ok=True)
+        (mats / "讲义.pdf").write_bytes(b"x" * 10)
+        ses = tdp / "sessions"
+        ses.mkdir(exist_ok=True)
+        rec = ses / f"2026-09-01_090000_{name[-5:]}.md"
+        rec.write_text("# 一节课\n", encoding="utf-8")
+        return tdp / "glossary.txt", st, ses, rec, gdir / f"{name}.txt", mats
+
+    def _fake_trash(box, bin_dir):
+        """假废纸篓：**真把东西搬走**，只是目的地是 tempdir 里的一个桶。
+
+        ⚠️ 第一版只 `box.append(p)` 就返回 —— 于是 `list_courses` 当然还看得见它，
+        三条判据全红，而红的是**量具**不是被测的东西（"东西真的不在了"这件事
+        根本没被模拟）。同 `test_voice.py` 那次：**变异体没拿去跑判据**。
+        """
+        bin_dir.mkdir(exist_ok=True)
+
+        def fn(p):
+            pp = pathlib.Path(p)
+            box.append(str(pp))
+            if pp.exists():
+                dest = bin_dir / pp.name
+                n = 2
+                while dest.exists():
+                    dest = bin_dir / f"{pp.name}-{n}"
+                    n += 1
+                import shutil
+                shutil.move(str(pp), str(dest))
+            return True, ""
+        return fn
+
+    # ── ① 全部删除 ────────────────────────────────────────────────────
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        gl, st, ses, rec, gfile, mats = _fixture(tdp)
+        box = []
+        res = courses.delete(gl, "ECON10770", sessions_dir=ses, state_root=st,
+                             keep_materials=False,
+                             trash_fn=_fake_trash(box, tdp / "_trashbox"))
+        check("全部删除：术语表 + 课程目录**两样**都进了废纸篓",
+              str(gfile) in box and str(st / "courses" / "ECON10770") in box,
+              str(box))
+        check("没有错误", res["errors"] == [] and res["kept"] is None, str(res))
+        check("⭐⭐ **`sessions/` 一个字节都不动**（硬规矩：上课记录是历史不是配置）",
+              rec.exists() and rec.read_text(encoding="utf-8") == "# 一节课\n")
+        check("⭐ 删完就不在 `list_courses` 里了（面板上那张卡真的消失）",
+              "ECON10770" not in courses.list_courses(gl, state_root=st),
+              str(courses.list_courses(gl, state_root=st)))
+
+    # ── ② 只删课号 ────────────────────────────────────────────────────
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        gl, st, ses, rec, gfile, mats = _fixture(tdp)
+        box = []
+        res = courses.delete(gl, "ECON10770", sessions_dir=ses, state_root=st,
+                             keep_materials=True,
+                             trash_fn=_fake_trash(box, tdp / "_trashbox"))
+        check("只删课号：术语表进废纸篓", str(gfile) in box, str(box))
+        check("⭐ 课程目录**没进废纸篓**（它去保留区）",
+              str(st / "courses" / "ECON10770") not in box, str(box))
+        kept = res["kept"]
+        check("⭐ 课件**真的搬到了保留区**，原件还在",
+              kept and (pathlib.Path(kept) / "materials" / "讲义.pdf").exists(),
+              str(kept))
+        check("保留区在 `courses/.removed/` 下",
+              kept and pathlib.Path(kept).parent == st / "courses" / ".removed",
+              str(kept))
+        check("⭐⭐ 上课记录照样没动", rec.exists())
+        check("⭐ 搬运之后 **`list_courses` 里也没有它了**（这才是「只删课号」能生效的原因）",
+              "ECON10770" not in courses.list_courses(gl, state_root=st),
+              str(courses.list_courses(gl, state_root=st)))
+
+        # ── ③ 幂等 ───────────────────────────────────────────────────
+        box2 = []
+        res2 = courses.delete(gl, "ECON10770", sessions_dir=ses, state_root=st,
+                              keep_materials=True,
+                              trash_fn=_fake_trash(box2, tdp / "_trashbox"))
+        check("幂等：再删一次不炸、也不算错误、什么都不用动",
+              res2["errors"] == [] and res2["trashed"] == []
+              and res2["kept"] is None and box2 == [], str(res2))
+
+    # ── ④ 保留区重名不覆盖 ────────────────────────────────────────────
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        gl, st, ses, rec, gfile, mats = _fixture(tdp)
+        old = st / "courses" / ".removed" / "ECON10770"
+        old.mkdir(parents=True)
+        (old / "上一次搬来的.txt").write_text("别动我", encoding="utf-8")
+        res = courses.delete(gl, "ECON10770", sessions_dir=ses, state_root=st,
+                             keep_materials=True,
+                             trash_fn=_fake_trash([], tdp / "_trashbox"))
+        check("⭐ 保留区已有同名 -> 加 `-2` 后缀（**绝不覆盖上一次那批课件**，"
+              "同 `prep._archive` 的约定）",
+              pathlib.Path(res["kept"]).name == "ECON10770-2"
+              and (old / "上一次搬来的.txt").read_text(encoding="utf-8") == "别动我",
+              str(res["kept"]))
+
+    # ── ⑤ 失败要报出来，不许静默 ──────────────────────────────────────
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        gl, st, ses, rec, gfile, mats = _fixture(tdp)
+        res = courses.delete(gl, "ECON10770", sessions_dir=ses, state_root=st,
+                             keep_materials=False,
+                             trash_fn=lambda p: (False, "磁盘满了"))
+        check("⭐ 删不掉时 `errors` 里有**人话原因**（不许静默当成功）",
+              len(res["errors"]) == 2 and all("磁盘满了" in e for e in res["errors"]),
+              str(res["errors"]))
+
+    print("\n--- ⑭ 纠正日志：免费拿到的标注集 ---")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        n = courses.record_batch(
+            [("/x/a.pdf", "ECON10770"), ("/x/b.pdf", "SOC10020")],
+            root=tdp, ai={"/x/a.pdf": "SOC10020", "/x/b.pdf": "SOC10020"})
+        check("⭐ 记了 2 条", n == 2, str(n))
+        got = courses.corrections(root=tdp)
+        check("读回来 2 条，路径/课号都对",
+              len(got) == 2 and got[0]["path"] == "/x/a.pdf"
+              and got[0]["course"] == "ECON10770", str(got))
+        check("⚠️ 空课号的行被挡掉（明显无意义的那种）—— "
+              "但**「哪些才算标注」不归这里管**（那是 group_for_archive 的事）",
+              courses.record_batch([("/x/z.pdf", "")], root=tdp) == 0
+              and len(courses.corrections(root=tdp)) == 2)
+        check("⭐ 同时记下**模型当时说的**（有它才算得出「改对了几条」）",
+              got[0]["ai"] == "SOC10020", str(got[0]))
+        check("每条都带时间戳", all(r.get("at") for r in got), str(got))
+
+        # ⭐ 追加而不是覆盖
+        courses.record_batch([("/x/d.pdf", "ECON10730")], root=tdp)
+        check("⭐ 是**追加**不是覆盖（第二次之后 3 条）",
+              len(courses.corrections(root=tdp)) == 3,
+              str(len(courses.corrections(root=tdp))))
+
+        # ⭐⭐ 读不出来时**不许覆盖**（这是唯一一份）
+        p2 = paths_mod.corrections_log(root=tdp)
+        p2.write_text("{ 这不是 JSON", encoding="utf-8")
+        try:
+            courses.record_batch([("/x/e.pdf", "X")], root=tdp)
+            check("⭐⭐ 日志坏了 -> **抛**，不静默覆盖真数据", False, "没抛")
+        except Exception as e:                                # noqa: BLE001
+            check("⭐⭐ 日志坏了 -> **抛**，不静默覆盖真数据",
+                  # ⚠️ 删掉恒假子句（2026-09-28 审查指出）：`"不是 JSON"` 全仓库
+                  #    没有任何代码会产出它（`store.load_json` 报的是「状态文件读不出来」），
+                  #    留着会让读者以为这条在核对消息内容。
+                  "状态文件读不出来" in str(e), type(e).__name__)
+        check("⭐⭐ 而且**真内容一个字没动**",
+              p2.read_text(encoding="utf-8") == "{ 这不是 JSON")
 
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)

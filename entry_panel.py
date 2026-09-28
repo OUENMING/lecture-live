@@ -82,6 +82,25 @@ SEARCH_W = 220.0       # 标题行右侧搜索框的宽
 SEARCH_ROW = 22.0      # 一条搜索结果一行
 SEARCH_LIMIT = 80      # 一次最多显示多少条（`find` 会报 `truncated`）
 
+# ── 新增课程（2026-09-28）────────────────────────────────────────────
+# ⭐ 形状是 **inline row**：点「＋」让**底部那条自己**换成输入行，不是弹 sheet、
+#    也不是在搜索框旁边再加一个常驻文本框。
+#    ⚠️ 面板里原来那句「点右上角的「＋ 新增课程」」是**假的**（按钮不存在）——
+#       本轮把按钮做出来，**同时**把那句话改成它真实的位置。两处共用下面这个常数，
+#       所以改标题不会再把文案甩下（`tests/test_entry_panel.py` 钉住这条）。
+ADD_TITLE = "＋ 新增课程"
+ADD_PLACEHOLDER = "课号，如 ECON10740"
+ADD_HINT = "回车建课 · Esc 取消"
+ADD_W = 116.0          # 「＋ 新增课程」按钮宽
+PICK_W = 104.0         # 「选择文件…」按钮宽
+# ⚠️ 这几个 y 与 `DROP_H` 是同一组常数推出的（顶部 25 / 行距 6 / 底部 24），
+#    和 `card_height` 那条纪律一样：改 `DROP_H` 就要一起改这里，别各写一遍。
+ADD_ROW_Y = 47.0       # 输入框 + 「新建/取消」那一行
+ADD_REPLY_Y = 24.0     # 反馈那一行（`plan_add` 的 `text` 画在这儿）
+# 落点条里提示文字的宽度：右边要给**两颗**按钮让位（「＋ 新增课程」+「选择文件…」）。
+# ⚠️ 算式与右边那两颗按钮的位置是同一件事 —— 改按钮宽度就得改它。
+HINT_W = WIDTH - 2 * PAD - (CARD_PAD + PICK_W + 8.0 + ADD_W + 16.0)
+
 # ── 就绪条（2026-09-28）──────────────────────────────────────────────
 # 插在标题行与卡片区之间。**高度算在 `build()` 那条从下往上的推法里**，
 # 与视图的 y 用同一组常数（`card_height` 那条纪律）。
@@ -198,6 +217,17 @@ class Handles(typing.NamedTuple):
     start_batch: typing.Callable[[list], bool]
     # 同理：搜索那条路也走不到验收跑器里（没有真键盘输入）。
     search: typing.Callable[[str], None]
+    # 同理：新增课程也走不到（没有真键盘）—— 「敲入 X 然后回车」的程序化版本。
+    # ⚠️ 它**与手输同一条路**（`submit_add`），判断仍在 `courses.plan_add`。
+    add_course: typing.Callable[[str], None]
+    # 删课那条路**也**走不到跑器里：右键菜单点不了，而确认框是模态的（会把跑器卡住）。
+    # → 这个入口跳过确认框（`ask=False`），**其余全同**（`courses.delete` + `delete_msg`）。
+    # ⚠️ 生产路径永远 ask=True。
+    delete_course: typing.Callable[..., None]
+    # 同理：「开始分类」那张卡上的按钮，跑器与测试也点不到 ——
+    # 而它是**唯一**能验「免费按文件名认出来的那几份，不许被模型结果覆盖」那条判据的入口
+    # （2026-09-28 OCR 审计发现过一个正好相反的静默丢失）。
+    start_classify: typing.Callable[[], None]
 
 
 S = {                              # 同进程只允许一个面板（菜单栏/双击两条入口可能都来）
@@ -222,8 +252,11 @@ def card_title(r: courses.Readiness) -> str:
     # ⚠️ 判据要带**词边界**，不能只 `startswith(课号)` ——
     #    否则课号是别门课前缀时会误判（`ECON1074` vs 标题 `ECON10740 X`：
     #    `"ECON10740 X".startswith("ECON1074")` 是 True，于是前缀该加却没加）。
+    # ⚠️⚠️ 而那个边界**只认 ASCII 字母数字**（2026-09-28 审查指出）：
+    #    中文也是 `isalnum()`，于是 `ECON10740经济学原理` 会被判成
+    #    「课号是更长课号的前缀」→ 课号拼了两遍。紧跟中文正是"课号 + 课名"的常态写法。
     rest = t[len(r.course):] if t.startswith(r.course) else None
-    if rest is not None and (not rest or not rest[0].isalnum()):
+    if rest is not None and (not rest or not (rest[0].isascii() and rest[0].isalnum())):
         return t
     return f"{r.course}   {t}"
 
@@ -239,15 +272,23 @@ def _short_date(d: str | None) -> str:
         return d
 
 
+def _num(v, unit: str) -> str:
+    """计数 + 单位。**`None`（读不出）画 `—`，不是 0** —— `courses.py` 模块头第 3 条。
+
+    ⚠️ 提到模块级是因为它现在有**两个**用户：卡片第二行与删除确认框
+       （那个框里的数字是**破坏性操作之前**给人看的，读失败被显示成 `0`
+       等于说"没有课件会被动"）。
+    """
+    return f"{v} {unit}" if v is not None else f"— {unit}"
+
+
 def readiness_line(r: courses.Readiness) -> str:
     """卡片第二行。**每个数都可能是「未知」** —— 那时画 `—` 而不是 0。
 
     ⚠️ 「未知」与「零」的区别是刻意的：把读失败显示成 0，
     等于跟用户谎称「这门课一个词都没有」（`courses.py` 模块头第 3 条）。
     """
-    def n(v, unit):
-        return f"{v} {unit}" if v is not None else f"— {unit}"
-    return (f"{n(r.materials, '份课件')} · {n(r.terms, '条术语')}"
+    return (f"{_num(r.materials, '份课件')} · {_num(r.terms, '条术语')}"
             f" · 上次上课 {_short_date(r.last_session)}")
 
 
@@ -272,10 +313,15 @@ def empty_state_lines() -> list:
     ⚠️ **两条路都要给**，而且顺序有讲究：先「新建」是因为它才是本面板原来缺的那个
        （`docs/PLAN-entry-panel.md:542` 记着这个缺口）；拖课件那条本来就能用，
        但用户不知道 —— 顺带说出来。
+
+    ⚠️⚠️ **文案里的按钮名与位置必须与真的对得上。** 上一版这里写的是
+       「点右上角的「＋ 新增课程」」，而**那个按钮根本不存在** —— 空状态在教用户
+       去点一个不存在的东西。现在按钮有了，位置是**底部那条**（`ADD_TITLE` 与
+       按钮共用同一个常数，改标题不会把这句话甩下）。
     """
     return ["还没有课",
-            "① 点右上角的「＋ 新增课程」，输一个课号（如 ECON10740）",
-            "② 或者把课件直接拖进这个窗口 —— 会自动建课"]
+            f"① 点下面的「{ADD_TITLE}」，输一个课号（如 ECON10740）",
+            "② 或者把课件拖进下面那个虚线框 —— 会自动建课"]
 
 
 def kept_added(entry) -> list[str]:
@@ -342,6 +388,46 @@ def result_header(entry) -> str:
         #    塞进这行紧凑的 `　·　` 串里会把它撑爆）。
         parts.append("⚠️ 没跑完")
     return "　·　".join(parts)
+
+
+def _short_home(p: str) -> str:
+    """把绝对路径里的家目录缩成 `~`。状态行只有一行，全路径会把它撑爆。
+
+    ⚠️ **必须带分隔符边界**（2026-09-28 审查指出）：只判 `startswith(家目录)` 的话，
+       家目录 `/Users/owen` 会把同级的 `/Users/owen2/…` 缩成 `~2/…`。
+       这个字符串正是 `delete_msg` 里那句「课件留在 …」—— 路径说错等于原件找不着。
+    """
+    s = str(p)
+    h = os.path.expanduser("~")
+    if s == h or s.startswith(h + os.sep):
+        return "~" + s[len(h):]
+    return s
+
+
+def delete_msg(course: str, res) -> str:
+    """删完一门课后，状态行上那句话。**纯函数**（判据盖这里，不用起窗口）。
+
+    ⚠️⚠️ **必须说出"什么没被删"**：`sessions/` 里的上课记录**一个字节都不动**，
+       而删了课再建同名，那些记录会**自己接回来**（`courses.session_files` 按课号
+       后缀匹配）。不说的话用户会以为"删了就全没了" —— 那是**文案撒谎**，
+       同 `empty_state_lines` 那次（教用户去点一个不存在的按钮）。
+    ⚠️ 「只删课号」时课件**不在废纸篓里**，它在保留区 —— 所以那句话要写出**去哪儿找**，
+       否则等于把原件藏起来了（而它可能是唯一副本）。
+    """
+    f = res.get("facts") or {}
+    errs = [str(e) for e in (res.get("errors") or [])]
+    if errs:
+        return f"⚠️ {course} 没删干净：{'；'.join(errs)}"
+    kept = res.get("kept")
+    if kept:
+        head = "已从面板移除，术语表进了废纸篓"
+        tail = f"课件留在 {_short_home(kept)}"
+    elif res.get("trashed"):
+        head, tail = "已进废纸篓", "能拖回来"
+    else:
+        return f"{course}：没什么可删的（本来就不在）"
+    mid = f"{f['sessions']} 节上课记录没动" if f.get("sessions") else ""
+    return f"{course}：{head}" + "".join(f" · {x}" for x in (mid, tail) if x)
 
 
 def card_height(entry=None, *, has_actions: bool = True) -> float:
@@ -564,6 +650,41 @@ def _target(fn):
     return t
 
 
+def _sever(card) -> None:
+    """断掉一张卡片上那几条 Python 引用（`do_close` 的清环用）。**每条各自 try。**
+
+    ⚠️⚠️ **容错在这里是必需的，而且必须是「每条各自」的。** 2026-09-28 实测抓到：
+       `doc` 里的卡片**不全是 Python 子类** —— 零课程的空状态卡、搜索结果卡、
+       批量映射卡都是**裸 `NSView`**（`NSView.alloc().initWithFrame_(…)`），
+       而裸 ObjC 对象**不接受任意 Python 属性**：
+           `_targets = []` → `AttributeError: 'NSView' object has no attribute '_targets'`
+       原来这四条摆在**同一个 `try`** 里，于是**一张裸视图就把后面全部跳过**：
+       断环、清 `S["batch"]`/`S["search"]`、`win.setContentView_(None)` 一条都不做，
+       而异常被那句 `except Exception: pass` 吞掉 —— **什么都不报**。
+
+       两个症状（都不是"少做一点"，是坏掉）：
+       1. **每开/关一次泄漏一整个面板** —— 正是这段代码当初存在的理由；
+          `win._entry_targets` 没断 → target → `do_close` 闭包 → `win`，环还在。
+       2. **关掉再打开还停在上次的批量/搜索/新增模式**（`S` 是模块级的）。
+
+       ⚠️ 触发它的路径正是「**零课程首次打开 → 关窗**」—— 新用户走的第一条路。
+       判据在 `tests/test_entry_panel.py` ⑬（`S["add"]` 是这整段清理的哨兵）。
+       📌 这个形状**有成文依据**：PEP 8 反对裸 `except:`，ruff 干脆把它设成 lint 规则
+       （`S110 try-except-pass`）。这里不是「要容错就随便吞」，是**每条各自 try**。
+
+    ⚠️ 为什么除了 `_targets` 还要断那三个落点回调：**它们是另一条环** ——
+       卡片 → `_on_drop` → `run_prep` → `set_status` → 状态标签 → `ve` → 子树 → 卡片。
+       那一圈**不含 `win`**（所以窗口能回收），但它自己是个**孤岛**，
+       `gc` 收不回（实测：只 `setContentView_(None)` 时 3 轮后仍有 16 个 DropTarget）。
+    """
+    for attr, val in (("_targets", []), ("_on_enter", None),
+                      ("_on_drop", None), ("_on_exit", None)):
+        try:
+            setattr(card, attr, val)
+        except Exception:                                     # noqa: BLE001
+            pass                                              # 裸视图：本来就没有这些
+
+
 def _scroll_undo_into_view(doc, course) -> bool:
     """把 `course` 那张卡的「撤销」行滚进视野。返回是否真滚了。
 
@@ -594,7 +715,7 @@ def _scroll_undo_into_view(doc, course) -> bool:
 
 
 def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
-               entry=None, on_delete=None, on_undo=None):
+               entry=None, on_delete=None, on_undo=None, on_delete_course=None):
     """一张卡 = 一个落点 + 两行内容（+ 跑过之后的结果列表）。"""
     from AppKit import NSButton, NSColor, NSFont, NSMakeRect
 
@@ -750,6 +871,39 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
                 truncate=True))
         # 排完之后 y 应当**恰好**等于 `CARD_PAD + BTN_H`（`card_height` 的算式保证）。
         # 对不上就是算式与坐标漂了 —— 那正是 `tests/test_panel.py` 第 ⑥ 组在量的东西。
+
+    # ── 右键菜单：删除课程（2026-09-28）──────────────────────────────
+    # ⭐ 为什么是右键：`[一手]` HIG › Context menus 现行版逐字 ——「A context menu provides
+    #    access to functionality that's directly related to an item, **without cluttering
+    #    the interface**」。作者刚因为"看得太繁杂"删掉卡上那个「选择文件…」，
+    #    不能再往卡上加常驻按钮。**右键零视觉重量。**
+    # ⚠️⚠️ **用 `setMenu_()`，别想给视图类加 `menuForEvent_`。** 卡片的类是
+    #    `panel.make_drop_target` 里 `objc_own.own("DropTarget", …)` 建的那个，而
+    #    `objc_own.own` **按 key 缓存类**：第二次调用拿回同一个类、**新 namespace 被丢弃**
+    #    （`make_drop_target` 注释里记着这条）。所以"从这边加个方法"是**静默无效**的。
+    #    `setMenu_` 不需要子类化。2026-09-28 实测：面板**没被激活**时真右键也能到达视图
+    #    （`menuForEvent_` 被调用，事件类型 3）。
+    # ⚠️ `NSMenuItem` 的 target 也是**弱引用**（同 `NSButton.setTarget_`）→ 必须挂进
+    #    `view._targets`。漏了就是「点菜单项静默没反应」，而 AppKit 不报错。
+    #    `do_close` 的 `_sever` 会把它一起断掉（否则又是一条环）。
+    # ⚠️⚠️ **`_target(…)` 的返回值必须在同一条语句里就绑到变量上。**
+    #    2026-09-28 实测踩到：本来写的是
+    #        `_mi.setTarget_(_target(lambda: …))`  +  下一句 `view._targets.append(_mi.target())`
+    #    —— 那个临时对象**语句一结束就被回收**（`setTarget_` 不持有它），于是下一句
+    #    拿到的是 `None`，`_targets` 里存的也是 `None`：菜单项**没有 target** →
+    #    菜单**变灰点不动**（`autoenablesItems` 默认开，它沿响应链找能响应 `act:` 的，
+    #    找不到就禁用）。**而所有单测全绿** —— 它们测的是函数，不是接线。
+    #    可复现的判据：`item.target() is None`（`tests/test_entry_panel.py` ⑬ 钉了这条）。
+    if on_delete_course is not None:
+        from AppKit import NSMenu, NSMenuItem
+        _mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "删除课程…", "act:", "")
+        _del_t = _target(lambda: on_delete_course(r.course))
+        _mi.setTarget_(_del_t)
+        view._targets.append(_del_t)
+        _menu = NSMenu.alloc().init()
+        _menu.addItem_(_mi)
+        view.setMenu_(_menu)
 
     return view
 
@@ -932,7 +1086,8 @@ def make_ready_strip(parent, y: float, w: float, items: list, *, on_click):
 
 
 def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
-          on_close=None, prepare_fn=None, suggest_fn=None) -> Handles | None:
+          on_close=None, prepare_fn=None, suggest_fn=None,
+          trash_fn=None) -> Handles | None:
     """建并显示面板。**失败返回 `None`**（调用方不必管 —— 同 `whatsnew.build`）。
 
     `prepare_fn` 是**验收用的注入点**，默认就是真的 `prep.prepare`：
@@ -946,7 +1101,7 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
     try:
         return _build(on_start=on_start, glossary=glossary, sessions_dir=sessions_dir,
                       state_root=state_root, on_close=on_close, prepare_fn=prepare_fn,
-                      suggest_fn=suggest_fn)
+                      suggest_fn=suggest_fn, trash_fn=trash_fn)
     except objc_own.ObjcNameCollision:
         raise
     except Exception:                                     # noqa: BLE001
@@ -957,8 +1112,9 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
 
 
 def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
-           prepare_fn=None, suggest_fn=None) -> Handles:
+           prepare_fn=None, suggest_fn=None, trash_fn=None) -> Handles:
     from AppKit import (NSButton, NSColor, NSFont, NSScreen, NSSearchField,
+                        NSTextField,
                         NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel)
     from Foundation import NSMakeRect
 
@@ -1023,7 +1179,16 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                    SEARCH_W, TITLE_H - 10.0))
     search_field.setPlaceholderString_("搜索转录 / 笔记…")
     search_field.setFont_(NSFont.systemFontOfSize_(12.0))
-    search_field.setTarget_(_target(lambda: run_search(search_field.stringValue())))
+    # ⚠️⚠️ **`_target(…)` 的返回值必须留住。** 写成一行 `setTarget_(_target(…))` 的话，
+    #     那个临时对象**语句一结束就被回收** → `target()` 变成 `None` →
+    #     **回车静默无反应**，而 AppKit 不报任何错。本文件 885 行那段讲的就是这个形状，
+    #     这里是全文**唯一**漏掉的一处（其余八处都显式留了引用）。
+    #     2026-09-28 OCR 审计抓出；本机实测复核：不保留时 `field.target()` 就是 `None`。
+    #     ⚠️ **只存局部变量不够** —— `_build` 一返回局部就没了，必须挂到活到面板结束的
+    #     容器上（`S`），并在 `do_close` 里像 `S["batch"]` 那样清掉。
+    _search_t = _target(lambda: run_search(search_field.stringValue()))
+    search_field.setTarget_(_search_t)
+    S["search_target"] = _search_t
     search_field.setAction_("act:")            # NSSearchField 的回车走 action
     search_field.setSendsWholeSearchString_(True)   # 回车才发，别边打边搜
     ve.addSubview_(search_field)
@@ -1115,6 +1280,15 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     if ready_items:
         ready_targets, ready_buttons = make_ready_strip(
             ve, ready_y, WIDTH - 2 * PAD, ready_items, on_click=on_ready_click)
+        # ⚠️⚠️ **`make_ready_strip` 返回的 target 列表必须活到面板结束**
+        #     （它的 docstring 逐字写着这条）。原来只接到一个**局部变量**上 ——
+        #     `_build` 一返回那个列表就随栈帧没了 → 弱引用被回收 →
+        #     **整条就绪条点了没反应，也不报错**。
+        #     2026-09-28 本机实测：不挂容器时条上按钮 `target()` 就是 `None`，
+        #     而同屏的落点条按钮**全都正常**（它们的 `_targets` 挂在自己的视图上）。
+        #     ⚠️ 挂 `S` 上而不是挂视图：这些是标准 `NSView`/`NSButton`（没有 `__dict__`），
+        #     挂不上去；`S` 是模块级、且 `do_close` 里有一处统一的断环表。
+        S["ready_targets"] = ready_targets
 
     # ── 卡片区（可滚动；今天 5 门课用不到，但第 6 门不该引发断崖）──────
     from AppKit import NSView, NSViewWidthSizable
@@ -1132,6 +1306,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    clear benefit」判了那个弹框死刑 —— 它既不是 critical information 也不是 options。
     # ⚠️ 面板高度是按卡片数长出来的，**没有"空白处"可以拖** —— 所以这条得自己占位。
     strip_holder: dict = {"view": None, "hint": [], "actions": []}
+    # ⚠️ 落点条上所有按钮的 target 集中在**一个**列表里，最后一次性挂给 `strip._targets`。
+    #    原来每加一颗按钮就写一次 `strip._targets = [...]` —— 那是**覆盖**：
+    #    后加的会把先加的挤掉 → 先建的那颗按钮静默失效（点了没反应，AppKit 不报错，
+    #    单测也全绿，因为它们测的是被调用的函数不是接线）。同 `batch_rows` 那条。
+    strip_targets: list = []
     # 映射表的 `[(路径, 选择器), …]` —— ⚠️ **不能挂在卡片视图上**：`_make_batch_card`
     # 返回的是纯 `NSView`，而纯 ObjC 对象**不接受任意 Python 属性**
     # （`card._rows = rows` 会 AttributeError，而它被 `callAfter` 吞掉 → 表永远不出现。
@@ -1180,12 +1359,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
     strip_holder["hint"] = [
         panel.make_label("把课件全拖到这里",
-                         NSMakeRect(CARD_PAD, DROP_H - 40.0, W_IN - 150.0, 22.0), 15.0),
+                         NSMakeRect(CARD_PAD, DROP_H - 40.0, HINT_W, 22.0), 15.0),
         panel.make_label("PDF / PPTX / DOCX · 文件夹也行（取里面一层）",
-                         NSMakeRect(CARD_PAD, DROP_H - 60.0, W_IN - 150.0, 16.0),
+                         NSMakeRect(CARD_PAD, DROP_H - 60.0, HINT_W, 16.0),
                          11.0, alpha=DIM),
         panel.make_label("自动认出哪份属于哪门课 —— 认不出的会让你核对",
-                         NSMakeRect(CARD_PAD, DROP_H - 78.0, W_IN - 150.0, 16.0),
+                         NSMakeRect(CARD_PAD, DROP_H - 78.0, HINT_W, 16.0),
                          11.0, alpha=DIM),
     ]
     for _v in strip_holder["hint"]:
@@ -1209,6 +1388,162 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     except Exception:                                  # noqa: BLE001
         pass
 
+    # ── 新增课程：底部那条**自己换成**输入行（2026-09-28）────────────────
+    # ⭐ 形状是 **inline row**（提醒事项那种）：点「＋」让**同一块地方**变成输入行，
+    #    不弹 sheet、也不在搜索框旁边再加一个**常驻**文本框 —— 面板里那个搜索框
+    #    已经是「要打字的控件」的第一个例外，不要有第二个常驻的。
+    # 📌 社区做法对得上（2026-09-28 调研）：这类就地输入行的通行写法是
+    #    **控件建一次、只切 `setHidden_`**，而不是每次重建一个 —— 免得输入框在
+    #    "文本 ↔ 输入框"之间换身份时丢焦点。下面四个控件就是建一次、`refresh()` 切显隐。
+    #    （焦点也**要等视图真进了窗口再给**，所以给焦点的是 `refresh()`，不是 `open_add()`。）
+    def open_add() -> None:
+        """点「＋ 新增课程」—— 让底部那条换成输入行。**只切状态，不建任何东西。**"""
+        _b = S.get("batch")
+        if S.get("search") is not None or (_b is not None and not _b.get("need_course")):
+            # ⚠️ 与批量/搜索**互斥**：那两种模式下这条的三个状态会同时亮出来。
+            #    （正常路径走不到 —— 那两种模式里 ＋ 按钮本身是藏着的。）
+            # ⭐ **例外：零课程那一档**（`need_course`）—— 那时这一行正是主线动作，
+            #    文件已经拖进来了，用户要建课才能往下走。
+            set_status("先确认或取消手上这一批，再新增课程", 1.0)
+            return
+        S["add"] = True
+        try:
+            add_field.setStringValue_("")
+            add_reply.setStringValue_(ADD_HINT)
+        except Exception:                                 # noqa: BLE001
+            pass
+        # ⚠️ 焦点交给 `refresh()` 去给，而且是**一次性**的（它 `pop` 掉这个键）——
+        #    在这里直接 `makeFirstResponder_` 会落在一个**还藏着的**文本框上。
+        S["_focus_add"] = True
+        _later(refresh)
+
+    def close_add() -> None:
+        """收起输入行。
+
+        ⚠️ **必须把键盘还出去**（`_release_focus`）：藏掉一个正被编辑的文本框，
+           焦点守卫要等最多 0.5 秒才发现 —— 那半秒里用户在别的 app 按的键被吃掉。
+           （不用恒真：`makeFirstResponder_(None)` 一调，field editor 当场就掉了。）
+        ⚠️ 隐藏与重画都交给 `_later(refresh)` —— **绝不能在按钮的 action 里拆视图树**
+           （`_later` 那条：NSButton 的跟踪循环还在栈上）。
+        """
+        _b = S.get("batch")
+        if _b is not None and _b.get("need_course"):
+            # ⚠️ **这个模式下这颗按钮的标题是「开始分类」**（`refresh()` 改的）——
+            #    文件已经拖进来了，「取消」在这儿没有意义。
+            #    ⚠️ 改标题必须和改行为在**同一条分支**上，否则会出现
+            #    「按钮写着开始分类、点了却把输入行收起来」。
+            _start_classify()
+            return
+        if S.get("add") is None:
+            return
+        S["add"] = None
+        S.pop("_focus_add", None)
+        try:
+            add_field.setStringValue_("")
+        except Exception:                                 # noqa: BLE001
+            pass
+        _later(refresh)
+        _release_focus()
+
+    def submit_add() -> None:
+        """回车 / 点「新建」。**判断交给 `courses.plan_add`，这里只执行。**"""
+        if S.get("add") is None:
+            return
+        r = courses.plan_add(add_field.stringValue(),
+                             courses.list_courses(glossary, state_root=state_root))
+        if r["action"] != "create":
+            # 没成的时候**行留着、字留着** —— 让他就地改，别把刚敲的弄丢
+            add_reply.setStringValue_(r["text"])
+            return
+        try:
+            made = courses.create(glossary_of(r["course"]), r["course"])
+        except OSError as e:
+            add_reply.setStringValue_(f"建不了：{e}")
+            return
+        _b = S.get("batch")
+        if _b is not None and _b.get("need_course"):
+            # ⭐ 零课程批量模式：建完课**立刻免费分一遍**（按文件名，0 次 API），
+            #    然后**留在输入行里**让用户接着建下一门 —— 别把他踢出去。
+            set_status(f"建好了：{r['course']} —— 名字里带它的课件已经归好，"
+                       f"继续建下一门，或点「开始分类」", 1.0)
+            _recode_pending()
+            return
+        close_add()                       # ⚠️ 它自己会 `_later(refresh)`
+        set_status(f"{'建好了' if made else '已经有'}：{r['course']}"
+                   f" —— 拖课件进来，或点卡片上的「开始上课」")
+
+    def add_course(text: str) -> None:
+        """⭐ **验收跑器的程序化入口** —— 等价于「点 ＋ → 敲入 → 回车」。
+
+        ⚠️ 与手输**走同一条路**（`submit_add`），不是另写一份判断 ——
+           `start_batch` / `search` 两条也是这个理由（跑器里没有真键盘）。
+        """
+        if S.get("add") is None:
+            open_add()
+        add_field.setStringValue_(text)
+        submit_add()
+
+    # ⚠️ 三个 `def` 必须**在**建控件之前 —— `_target(close_add)` 是**提前求值**的，
+    #    放到后面会 `UnboundLocalError`（它们是 `_build` 的局部名）。
+    #    lambda 那几处倒是可以后置（调用时才查名），但别只对一半，读起来会以为有玄机。
+    add_field = NSTextField.alloc().initWithFrame_(
+        NSMakeRect(CARD_PAD, ADD_ROW_Y, W_IN - CARD_PAD - 208.0 - 8.0 - CARD_PAD,
+                   BTN_H))
+    add_field.setPlaceholderString_(ADD_PLACEHOLDER)
+    add_field.setFont_(NSFont.systemFontOfSize_(13.0))
+    _add_submit_t = _target(submit_add)
+    add_field.setTarget_(_add_submit_t)     # ⚠️ 弱引用 —— 存进 `strip_targets` 留它
+    add_field.setAction_("act:")           # ⚠️ 回车走 action —— 2026-09-28 实测过
+    strip_targets.append(_add_submit_t)
+    add_reply = panel.make_label(ADD_HINT, NSMakeRect(
+        CARD_PAD, ADD_REPLY_Y, W_IN - 2 * CARD_PAD, 17.0), 11.0, alpha=DIM)
+
+    _add_cancel = NSButton.alloc().initWithFrame_(
+        NSMakeRect(W_IN - CARD_PAD - 100.0, ADD_ROW_Y, 100.0, BTN_H))
+    _add_cancel.setTitle_("取消")
+    _add_cancel.setBezelStyle_(1)
+    _add_cancel.setFont_(NSFont.systemFontOfSize_(12.0))
+    _add_cancel_t = _target(close_add)
+    _add_cancel.setTarget_(_add_cancel_t)                 # ⚠️ 弱引用 —— 靠这里留
+    _add_cancel.setAction_("act:")
+    # ⚠️⚠️ **Esc 靠这一行，不靠委托。** 2026-09-28 实测（真 Esc 键，CGEventPostToPid）：
+    #    非激活面板里按 Esc，`controlTextDidEndEditing:` **一条都不触发**；
+    #    同一个框上真 Return 键**会**触发（movement=0x10）且 action 也响。
+    #    ⚠️ 网上流行的那句「movement == 0 就是用户按了 Esc」**连值都是错的** ——
+    #    本机 SDK 一手（`AppKit/…/Headers/NSText.h:166-174`）逐字：
+    #      `NSTextMovementReturn = 0x10` · **`NSTextMovementCancel = 0x17`** · `Other = 0`，
+    #    而 0 那档的注释写着「movements that do not fall under any of the other values」。
+    #    （我实测到的 movement=0 全部来自「焦点被挪走」—— 正好对上 `Other`。）
+    #    换 `cancelOperation:` 也不行：`NSResponder.h:132` 逐字「NSResponder does not
+    #    implement any of them. NSTextView implements a certain subset」，
+    #    而整个 AppKit 头目录里 `cancelOperation` **只出现一处**（NSResponder.h:266 的协议声明）
+    #    —— 实测调它确实抛 unrecognized selector。
+    #    → 而「取消按钮设 `\x1b` 键等价」是 macOS 自己的机制（NSAlert 文档逐字：
+    #      any button titled "Cancel" has a key equivalent of Escape），**当场就响**。
+    #    ⚠️ 它藏起来时还吃不吃 Esc **没有可靠来源**（Apple 那句 "whether the view is hidden"
+    #      讲的是 key view loop，不是 `performKeyEquivalent:`，别混用）——
+    #      靠 `close_add()` 开头的空判兜住，行为上是无害的。
+    _add_cancel.setKeyEquivalent_("\x1b")
+    strip_targets.append(_add_cancel_t)
+
+    _add_ok = NSButton.alloc().initWithFrame_(
+        NSMakeRect(W_IN - CARD_PAD - 208.0, ADD_ROW_Y, 100.0, BTN_H))
+    _add_ok.setTitle_("新建")
+    _add_ok.setBezelStyle_(1)
+    _add_ok.setFont_(NSFont.systemFontOfSize_(12.0))
+    _add_ok_t = _target(lambda: submit_add())
+    _add_ok.setTarget_(_add_ok_t)                         # ⚠️ 弱引用 —— 靠这里留
+    _add_ok.setAction_("act:")
+    strip_targets.append(_add_ok_t)
+
+    strip_holder["add_widgets"] = [add_field, add_reply, _add_cancel, _add_ok]
+    # ⚠️ 单独留一份引用：**零课程模式**要把它的标题改成「开始分类」——
+    #    那一档下文件已经拖进来了，「取消」没有意义（见 `close_add`）。
+    strip_holder["add_cancel"] = _add_cancel
+    for _v in strip_holder["add_widgets"]:
+        _v.setHidden_(True)                               # 默认不出现
+        strip.addSubview_(_v)
+
     def _pick_batch_files():
         from AppKit import NSOpenPanel
         p = NSOpenPanel.openPanel()
@@ -1219,16 +1554,36 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             run_batch([str(u.path()) for u in p.URLs()])
 
     _pick_btn = NSButton.alloc().initWithFrame_(
-        NSMakeRect(W_IN - CARD_PAD - 104.0, (DROP_H - BTN_H) / 2.0, 104.0, BTN_H))
+        NSMakeRect(W_IN - CARD_PAD - PICK_W, (DROP_H - BTN_H) / 2.0, PICK_W, BTN_H))
     _pick_btn.setTitle_("选择文件…")
     _pick_btn.setBezelStyle_(1)
     _pick_btn.setFont_(NSFont.systemFontOfSize_(12.0))
     _pick_t = _target(_pick_batch_files)
     _pick_btn.setTarget_(_pick_t)                         # ⚠️ 弱引用 —— 靠这里留
     _pick_btn.setAction_("act:")
-    strip._targets = [_pick_t]
+    strip_targets.append(_pick_t)
     strip.addSubview_(_pick_btn)
     strip_holder["hint"].append(_pick_btn)
+
+    # ⭐ 「＋ 新增课程」（2026-09-28）—— **就放在这里，不放右上角**。
+    #    理由：点了之后出现的那一行输入框**就在它下面**（底部那条自己换成输入行）。
+    #    放在标题行右侧的话，用户在面板顶上点一下、输入框在面板最底下冒出来，
+    #    中间隔着四百点且**没有任何动效** —— 那是一处静默的可发现性失败。
+    #    （`docs/PLAN-entry-panel.md` 的草图把它画在右上角；本轮的实现挪到了这里。）
+    _add_btn = NSButton.alloc().initWithFrame_(
+        NSMakeRect(W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W, (DROP_H - BTN_H) / 2.0,
+                   ADD_W, BTN_H))
+    _add_btn.setTitle_(ADD_TITLE)
+    _add_btn.setBezelStyle_(1)
+    _add_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+    _add_t = _target(open_add)
+    _add_btn.setTarget_(_add_t)                           # ⚠️ 弱引用 —— 靠这里留
+    _add_btn.setAction_("act:")
+    strip_targets.append(_add_t)
+    strip.addSubview_(_add_btn)
+    strip_holder["hint"].append(_add_btn)
+    # ⚠️ **一次性挂上**（见 `strip_targets` 的说明）—— 别在上面每一处各写一遍。
+    strip._targets = strip_targets
 
     def _batch_buttons():
         """批量模式下的动作区 —— **与提示**同一块地方**换着显示**（位置固定、永远看得见）。
@@ -1374,7 +1729,17 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
     # ── 批量归档（plan §7.12）────────────────────────────────────────
     def run_batch(paths):
-        """拖/选一堆文件 → 后台分类 → 映射卡。**只出建议，不写盘**（写盘归 `prep`）。"""
+        """拖/选一堆文件 → 后台分类 → 映射卡。**只出建议，不写盘**（写盘归 `prep`）。
+
+        ⭐ **零课程时一次模型都不调**（2026-09-28 加）—— 那时候选列表是空的，
+        模型按 `classify.SYS` 的规矩**只能**答"都不属于"，跑 N 次纯粹烧钱，
+        而用户拿到的是 N 行「未分类」。改成先让他把课建出来（见 `_pending_card`）。
+
+        ⚠️ 这一档在业界也是同一个答案：`paperless-ngx` 没有可训练项时
+        「**不训练，还把已有模型文件删掉**」、`DEVONthink` 的 Classify
+        「**is disabled if DEVONthink is not sure enough**」、我们自己的
+        `classify.py` 早就写着「宁可答空，不要硬凑」。
+        """
         if S.get("batch") is not None:
             set_status("已经在核对这一批了 —— 先确认或取消", 1.0)
             return False
@@ -1386,17 +1751,62 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         names = courses.list_courses(glossary, state_root=state_root)
         S["batch"] = {"verdicts": [], "busy": True, "total": len(files),
                       "dropped": len(dropped), "error": ""}
+        if not names:
+            S["batch"]["busy"] = False
+            S["batch"]["need_course"] = True
+            S["batch"]["pending"] = [str(p) for p in files]
+            S["batch"]["matched"] = {}
+            title_lbl.setStringValue_(f"准备归档 {len(files)} 份课件")
+            set_status(f"还没有课 —— 先建课号，我再开始分（这 {len(files)} 份先放这儿）",
+                       1.0)
+            # ⚠️ 让底部那条变成**输入行**：这一档下它才是主线动作。
+            open_add()
+            return True
         title_lbl.setStringValue_(f"准备归档 {len(files)} 份课件")
         _later(refresh)
         set_status(f"扫描 0/{len(files)}…")
+        _classify(files)
+        return True
+
+    def _classify(files):
+        """后台跑分类。**只出建议，不写盘。**（`run_batch` 与「开始分类」共用）"""
+        S["batch"]["busy"] = True
+        _later(refresh)
 
         def work():
-            got, err = [], ""
+            # ⚠️⚠️ **两个都要在开头抓下来**：
+            #   · `got` 的预读 —— 零课程那条路先把「按文件名免费认出来的」放进去了，
+            #     下面必须**接着往后加**（见 `suggest` 那句）；
+            #   · `mine` 是**批次代际守卫** —— 这个线程比用户慢，期间用户完全可能
+            #     「取消」再拖一批，那时 `S["batch"]` 已经换成**另一个 dict**。
+            #     只判 `b is None` 的话，上一批的结果会**覆盖**用户正在核对的新批次，
+            #     连 `busy` 一起置假 → 看着像"新批次跑完了"，其实内容是旧的。
+            #     `run_search.work` 早就用 `s.get("q") != q` 防了同一件事。
+            mine = S.get("batch")
+            got, err = list((mine or {}).get("verdicts") or []), ""
             try:
                 import classify
+                import corpus as corpus_mod
                 from cloud_translator import load_api_key
                 key = load_api_key(None)
-                briefs = classify.briefs(courses.glossary_dir(glossary), names)
+                names = courses.list_courses(glossary, state_root=state_root)
+                # ⭐ **课程描述优先用上课转录**（`corpus.py`）—— 实测每门课
+                #    19%-56% 的词是它独有的（`monopoly` / `sociology` / `epistemology`…），
+                #    远好过术语表那 12 条（拿它当尺子实测精确率只有 7-12%）。
+                #    ⚠️ 读转录是 I/O（本机 2 MB）→ 放在**这个工作线程**里，别搬主线程。
+                _words, _degraded = corpus_mod.keywords(
+                    names, sessions_dir=sessions_dir)
+                briefs = classify.briefs(
+                    courses.glossary_dir(glossary), names,
+                    corpus={c: corpus_mod.describe(v) for c, v in _words.items()})
+                # ⚠️ **哪些课没有语料，界面上要说出来**（见 `_batch_ready`）——
+                #    没术语表也没上课记录的课，描述退化成一个光秃秃的课号，
+                #    判别力≈0，而用户有权知道自己"为什么它认不出来"。
+                # ⚠️ `_degraded` 已经是「拿不出词表的课 + **为什么**」——
+                #    它和"词表为空"是同一件事，**别再算一份 `no_corpus`**
+                #    （两份清单迟早对不上，而这是"哪些课认不准"的清单）。
+                S["batch"]["weak"] = dict(_degraded)
+                S["batch"]["has_key"] = bool(key)
                 ask = classify.make_ask(key) if key else (lambda prompt: None)
 
                 def prog(i, n, name):
@@ -1408,20 +1818,120 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 # ⚠️ `suggest_fn` 是**验收用的注入点**（同 `prepare_fn` 那条）——
                 #    验收批量那条路时真跑会调 DeepSeek 花钱，所以要能换掉。
                 suggest = suggest_fn or classify.suggest
-                got = suggest(files, courses=names, course_briefs=briefs,
-                              head_of=classify.head_of, ask=ask,
-                              on_progress=prog)
+                # ⚠️⚠️ **`+`：接着已有的 verdict 往后加，不能覆盖。** `suggest()` 内部是
+                #     `out = []` 从零重建，而且只为传进去的 `files`（= 还没归好的那些）
+                #     出 verdict —— 直接赋值会把免费认出来的那几份**静默丢光**
+                #     （结果列表上它们凭空消失，用户刚看着它们被认出来）。
+                #     上面那句预读本来就是为这个留的，注释写了意图而代码没照做。
+                #     2026-09-28 OCR 审计发现。
+                got = got + suggest(files, courses=names, course_briefs=briefs,
+                                    head_of=classify.head_of, ask=ask,
+                                    on_progress=prog)
             except Exception as e:                            # noqa: BLE001
                 err = f"{type(e).__name__}: {e}"
-            b = S.get("batch")
-            if b is None:                                     # 期间被取消了
+            if S.get("batch") is not mine:                    # 期间被取消 / 换了一批
                 return
-            b["verdicts"], b["busy"], b["error"] = got, False, err
+            mine["verdicts"], mine["busy"], mine["error"] = got, False, err
             from PyObjCTools import AppHelper
             AppHelper.callAfter(_batch_ready)
 
         threading.Thread(target=work, daemon=True).start()
         return True
+
+    def _recode_pending():
+        """⭐ **免费**再分一遍：只按文件名里的课号（`classify.by_code`，0 次 API）。
+
+        每建一门课就跑一次 —— 名字里带那个课号的文件立刻归好。
+        用户建 3 门课就看到 3 批自动归位，**在花一分钱之前**。
+        ⚠️ 这是**纯函数 + 字符串匹配**，不抽正文、不联网，所以可以随便跑。
+        """
+        b = S.get("batch")
+        if b is None or not b.get("need_course"):
+            return
+        import classify
+        names = courses.list_courses(glossary, state_root=state_root)
+        hit = {}
+        for p in b.get("pending") or []:
+            c = classify.by_code(pathlib.Path(p).name, names)
+            if c:
+                hit[p] = c
+        b["matched"] = hit
+        _later(refresh)
+
+    def _start_classify():
+        """「开始分类」——**这一刻才第一次花钱**。
+
+        只把**还没按文件名归好**的那些送去模型：已经免费的就不再问一遍。
+        """
+        b = S.get("batch")
+        if b is None or not b.get("need_course"):
+            return
+        names = courses.list_courses(glossary, state_root=state_root)
+        if not names:
+            set_status("还没有课 —— 先在上面建一个课号，我再开始分", 1.0)
+            return
+        matched = b.get("matched") or {}
+        left = [p for p in (b.get("pending") or []) if p not in matched]
+        # ⭐ 免费的先落成 verdict —— 它们**不经过模型**，理由也照实写。
+        # ⚠️ 必须是 `classify.Verdict`（**不是 dict**）—— 下游全程用 `v.course`，
+        #    给 dict 会 `AttributeError`，而它在工作线程里被 `_batch_ready` 吞掉。
+        import classify as _cl
+        b["verdicts"] = [_cl.Verdict(str(p), c, "文件名里有课号", "code")
+                         for p, c in matched.items()]
+        b.pop("need_course", None)
+        b.pop("pending", None)
+        _later(refresh)
+        if not left:
+            set_status(f"这 {len(b['verdicts'])} 份全都按文件名认出来了 —— "
+                       f"核对后点确认（一次都没花钱）", 1.0)
+            _batch_ready()
+            return
+        set_status(f"开始认剩下的 {len(left)} 份…")
+        _classify(left)
+
+    def _pending_card(files, matched, *, width):
+        """零课程时那张卡：**为什么分不了 + 建课就会自动归好**。纯装配，不碰状态。
+
+        ⚠️⚠️ **它必须塞得进滚动区，而滚动区的高度是建面板时算死的。**
+           零课程时 `body_height(0)` = **88pt**（一张卡的最小值），而那时还没有文件、
+           窗口高度就定下来了。第一版画了「标题 + 说明 + 最多 5 行文件名」= 156pt
+           → **真机截图里卡片被滚到底部，那句解释根本看不见**（离线判据全绿，
+           因为它只断言"函数被调用"，不断言"看得见"）。
+        ⭐ 所以这里**只留三行、不列文件**：文件在不在由**计数**回答就够了，
+           逐份的细节等「开始分类」之后那张映射卡再说。
+           ⚠️ 三行 = 20(内边距) + 18 + 16 + 16 = **70pt < 88** ✓
+        """
+        from AppKit import NSColor, NSMakeRect, NSView
+        h = CARD_PAD * 2 + L1_H + L2_H * 2
+        view = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, h))
+        view.setWantsLayer_(True)
+        view.layer().setCornerRadius_(CARD_RADIUS)
+        view.layer().setBorderWidth_(HAIRLINE)
+        view.layer().setBorderColor_(NSColor.whiteColor()
+                                     .colorWithAlphaComponent_(CARD_LINE_A * 0.7).CGColor())
+        view.layer().setBackgroundColor_(NSColor.whiteColor()
+                                         .colorWithAlphaComponent_(CARD_FILL_A * 0.5).CGColor())
+        y = h - CARD_PAD
+        y -= L1_H
+        view.addSubview_(panel.make_label(
+            "还没有课 —— 课件不知道往哪儿分",
+            NSMakeRect(CARD_PAD, y, width - 2 * CARD_PAD, L1_H), 13.0, bold=True))
+        y -= L2_H
+        # ⚠️ 这句是**流程承诺**，必须与 `_start_classify` 的行为逐字对应：
+        #    建课真的会先按文件名免费分，而模型要等用户点「开始分类」才跑。
+        # ⚠️ **不许出现 markdown 星号** —— `panel.make_label` 画的是纯文本，
+        #    星号会原样显示（我在本文件里犯这个错第三次了，真机截图才看出来）。
+        view.addSubview_(panel.make_label(
+            f"这 {len(files)} 份先放这儿。建一门课，名字里带那个课号的会立刻归好",
+            NSMakeRect(CARD_PAD, y, width - 2 * CARD_PAD, L2_H), 11.0, alpha=DIM,
+            truncate=True))
+        y -= L2_H
+        view.addSubview_(panel.make_label(
+            (f"已按文件名归好 {len(matched)} 份 —— 继续建课，或点「开始分类」"
+             if matched else "还没有按文件名认出来的 —— 建完课点「开始分类」"),
+            NSMakeRect(CARD_PAD, y, width - 2 * CARD_PAD, L2_H), 11.0,
+            alpha=1.0 if matched else DIM, truncate=True))
+        return view
 
     def _batch_ready():
         b = S.get("batch")
@@ -1432,8 +1942,20 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         else:
             hit = len([v for v in b["verdicts"] if v.course])
             tail = f"（另有 {b['dropped']} 份格式不收，没进表）" if b.get("dropped") else ""
-            set_status(f"认出 {hit} 份，{len(b['verdicts']) - hit} 份认不出来 —— "
-                       f"核对后点确认{tail}", 1.0)
+            line = (f"认出 {hit} 份，{len(b['verdicts']) - hit} 份认不出来 —— "
+                    f"核对后点确认{tail}")
+            weak = b.get("weak") or {}
+            if not b.get("has_key", True):
+                # ⚠️ 没配 key 时每行的理由会是「模型没给出可解析的结果」——
+                #    那是**我们自己的**机器话，用户读起来像"程序坏了"。
+                #    在这里一次说清（而不是让 55 行都重复同一句废话）。
+                line = "⚠️ 没配 key，只能按文件名分 —— " + line
+            elif weak:
+                # ⭐ 说**为什么**它认不准（没有记录 / 记录太短 / 不是英文转录）。
+                #    只说"认它最不准"等于让用户去猜 —— 而三种原因的修法完全不同。
+                items = [f"{c}（{why}）" for c, why in list(weak.items())[:2]]
+                line += "　⚠️ 这几门认不准：" + "、".join(items)
+            set_status(line, 1.0)
         cur = S.get("panel")
         if cur is not None:
             cur.refresh()
@@ -1460,6 +1982,25 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         # ⚠️ 分组走**纯函数** —— 「未分类不排队」那条规矩在 `group_for_archive` 里，
         #    只有一处定义，也只有那一处需要判据。
         by_course = group_for_archive(pairs)
+        # ⭐ **这里就是那本"免费标注集"的落点**（2026-09-28）——
+        #    上面那个 `pairs` 本来就读到了每个下拉框的值，以前读完就扔。
+        #    ⚠️ **只记录，不训练、不影响分类**：它先当**度量**用
+        #    （「上了转录语料之后到底准了多少」），没有它就只能靠感觉。
+        #    ⚠️ 记的是**用户的最终认定**，同时带上**模型当时说的**（`ai`）——
+        #       有它才算得出"改对了几条"。
+        try:
+            _b = S.get("batch") or {}
+            # ⚠️ 记的是 **`by_course` 里那些**（= 真的会被归档的），不是原始 `pairs`——
+            #    「未分类」不在里面（`group_for_archive` 已经把它滤掉了），
+            #    而"过滤规则"只有那一处定义，别再在这里重写一遍。
+            _assigned = [(p, c) for c, ps in by_course.items() for p in ps]
+            courses.record_batch(
+                _assigned, root=state_root,
+                ai={v.path: v.course for v in (_b.get("verdicts") or [])})
+        except Exception as e:                                # noqa: BLE001
+            # ⚠️ **出声**：它是唯一的度量来源，写不进去要说，别静默丢。
+            print(f"⚠ 纠正日志没写成（{type(e).__name__}: {e}）—— "
+                  f"这次归档照常，但少了一条可度量的数据", flush=True)
         S["batch"] = None
         if not by_course:
             set_status("一份都没归课 —— 什么都没动", 1.0)
@@ -1474,6 +2015,17 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         n_course, n_file = len(S["queue"]), sum(len(v) for v in by_course.values())
         set_status(f"开始跑 {n_course} 门课 / {n_file} 份课件…", 1.0)
         _later(refresh)
+        # ⚠️⚠️ **先判 `busy` 再 `pop`。** `run_prep` 开头那句 `if S.get("busy"): return False`
+        #    在**批量分类期间完全可达**（`S["busy"]` 是 prep 的串行器，
+        #    而批量用的是 `S["batch"]["busy"]` —— 两回事）。
+        #    原来写成 `run_prep(*S["queue"].pop(0))`：队首已经弹掉了、`run_prep` 却直接返回
+        #    False → **整批里静默少掉一门**（映射表的行也移走了，状态行还写着「开始跑 N 门课」）。
+        #    2026-09-28 OCR 审计发现。
+        #    ⚠️ 早退时**不要**把队列丢掉 —— 正在跑的那门的 `_done` 会接着从
+        #    `S["queue"]` 排空（它是在清完 `busy` **之后**才踢下一门的）。
+        if S.get("busy"):
+            set_status(f"另一门课还在跑 —— 这 {n_course} 门排在队列里等它，别关面板", 1.0)
+            return
         run_prep(*S["queue"].pop(0))
 
     strip_holder["actions"] = _batch_buttons()                # 建在函数定义之后
@@ -1506,12 +2058,31 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
         b = S.get("batch")
         s = S.get("search")
+        a = S.get("add")
         for _v in strip_holder["hint"]:
-            _v.setHidden_(b is not None or s is not None)
+            _v.setHidden_(b is not None or s is not None or a is not None)
+        _need = bool(b is not None and b.get("need_course"))
         for _btn, _t in strip_holder["actions"]:
-            _btn.setHidden_(b is None)
+            # ⚠️ 零课程那一档**不显示**取消/确认 —— 那一行被输入行占了，
+            #    两套按钮在同一块地方会**叠在一起**（y 区间真的重合）。
+            _btn.setHidden_(b is None or _need)
+        _ac = strip_holder.get("add_cancel")
+        if _ac is not None:
+            # ⚠️ 标题与行为必须一起改（行为在 `close_add` 的同名分支里）。
+            _ac.setTitle_("开始分类" if _need else "取消")
         for _btn, _t in strip_holder.get("search_btns", []):
             _btn.setHidden_(s is None)
+        # ── 新增课程那一行：显隐 + **一次性**把焦点给它 ────────────────────
+        # ⚠️ 焦点在这里给，不在 `open_add()` 里：那一刻这几个视图还藏着，
+        #    藏着的视图当第一响应者是很怪的状态。`pop` 保证只给一次 ——
+        #    否则每次 `refresh()`（跑完 prep、删词…）都会把焦点从搜索框抢过来。
+        for _v in strip_holder.get("add_widgets", []):
+            _v.setHidden_(a is None)
+        if S.pop("_focus_add", False) and a is not None:
+            try:
+                win.makeFirstResponder_(add_field)
+            except Exception:                                 # noqa: BLE001
+                pass
 
         if s is not None:
             # ── 搜索模式：卡片列表换成命中列表 ────────────────────────
@@ -1533,7 +2104,25 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if b is not None:
             # ── 批量核对模式：卡片列表整块换成映射表 ──────────────────
             title_lbl.setStringValue_(f"准备归档 {b.get('total', 0)} 份课件")
+            if b.get("need_course"):
+                # ⭐ **零课程：一次模型都没跑过。** 画说明卡，而不是一张
+                #    N 行全是「未分类」的映射表（那样用户以为"分过了，都认不出"）。
+                _pc = _pending_card(b.get("pending") or [], b.get("matched") or {},
+                                    width=WIDTH - 2 * PAD)
+                _pc.setFrameOrigin_((0.0, 0.0))
+                doc.addSubview_(_pc)
+                doc.setFrameSize_((WIDTH - 2 * PAD,
+                                   max(body_h, _pc.frame().size.height)))
+                return
             if b.get("busy") or not b.get("verdicts"):
+                # ⚠️⚠️ **早退之前必须把映射表清空。** 映射表不在屏上时，
+                #    `_confirm_batch` 那个按钮却是**可见可点**的，而它读的
+                #    `batch_rows` 里可能还留着**上一批**的行 → 点下去会把上一批的
+                #    路径重新分组入队再跑一次 prep，而 `prep._archive` 对
+                #    「同名但大小不同」是加 `-2` 后缀（不跳过）→ 归档目录里出重复课件。
+                #    （2026-09-28 OCR 审计发现；`_confirm_batch`/`_cancel_batch` 都不清它，
+                #    只有 `do_close` 清。）
+                batch_rows.clear()
                 doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, 120.0)))
                 return
             card, rows = _make_batch_card(
@@ -1587,7 +2176,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                               #    第一版直接传 `do_delete`（两个参数），调用点只给一个，
                               #    于是 TypeError 被 AppKit 吞掉、点「删」静默无效。
                               on_delete=lambda t, c=r.course: do_delete(c, t),
-                              on_undo=lambda c=r.course: do_undo(c))
+                              on_undo=lambda c=r.course: do_undo(c),
+                              on_delete_course=delete_course)
             card.setFrameOrigin_((0.0, y))
             doc.addSubview_(card)
             y += card_height(entry, has_actions=(on_start is not None)) + CARD_GAP
@@ -1627,9 +2217,22 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    ② 它跑在 `prepare` **之前**，于是 `_archive` 看到的文件已经在归档目录里
         #       → 走「已在归档目录」分支 → **它那道保护永远触发不到**。
         #    → 直接把**源路径**交给 `prepare`（它自己 `_archive`，`prep.py:848`）。
-        mats = paths.materials_dir(course, root=state_root)
-        state_file = paths.prep_state(course, root=state_root)
-        keep = [str(p) for p in files]
+        # ⚠️⚠️ **`S["busy"] = True` 之后到工作线程起来之前，一句都不许抛。**
+        #    这几句是真 I/O（`paths.course_dir` 里有 `iterdir()/is_dir()`，可抛
+        #    OSError / 权限错），而它们在任何 try 之外、也还没进工作线程 ——
+        #    异常会沿调用方（拖拽那条被 drop 守卫吞、`_confirm_batch` 里被 AppKit 吞）逃出去，
+        #    于是 `busy` **永久为真**：之后每次拖入都被开头那句挡掉（说"另一门课还在跑"），
+        #    而其实什么都没在跑，面板直到重启都救不回来（注释里记的第一版事故就是这个形状）。
+        #    2026-09-28 OCR 审计发现。
+        try:
+            mats = paths.materials_dir(course, root=state_root)
+            state_file = paths.prep_state(course, root=state_root)
+            keep = [str(p) for p in files]
+        except Exception as e:                            # noqa: BLE001
+            S["busy"] = False
+            set_status(f"{course}：路径算不出来（{type(e).__name__}: {e}）"
+                       f" —— 这次没跑，再拖一次", 1.0)
+            return False
 
         set_status(f"{course}：抽文本 0/{len(keep)}…")
 
@@ -1720,13 +2323,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #     面板每次「开课前的准备」都要开关 → 一学期累积**无上界**。
         try:
             for _card in doc.subviews():
-                _card._targets = []          # 断卡片 → target → 闭包 → win 那条
-                # ⚠️ **落点回调也必须断。** 只清 `_targets` 不够 —— 还有一圈：
-                #    卡片 → `_on_drop` → `run_prep` → `set_status` → 状态标签
-                #    → 它的 superview(`ve`) → 子树 → 卡片。那一圈不含 `win`
-                #    （所以窗口能走），但它自己是个**孤岛**，`gc` 收不回
-                #    （实测：只 `setContentView_(None)` 时 3 轮后仍有 16 个 DropTarget）。
-                _card._on_enter = _card._on_drop = _card._on_exit = None
+                _sever(_card)                # ⚠️ 逐条各自 try —— 见 `_sever` 的说明
             win._entry_targets = []          # 断关闭按钮那条
             status_holder["label"] = None    # 断 `set_status` → 标签 → `ve` 那条
             # ⚠️ 落点条（批量入口）也要断 —— 它的 `_targets` 里那个 target 的
@@ -1742,22 +2339,59 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             strip_holder["hint"] = []
             strip_holder["actions"] = []
             strip_holder["search_btns"] = []
+            # ⚠️ 新增课程那一行的四个控件也要断 —— 它们的 target 里攥着
+            #    `submit_add`/`close_add` 的闭包，而闭包持有 `add_field`/`strip`/`win`。
+            #    与上面三条是**同一条环**（漏一条就漏一整个面板，且随开关轮数增长）。
+            strip_holder["add_widgets"] = []
+            # ⚠️ 新增模式是**模块级**的，跨面板存活 —— 不清的话，关掉面板再打开
+            #    会直接落进「输入行开着」的状态（同 `S["batch"]`/`S["search"]` 那条）。
+            S["add"] = None
+            S.pop("_focus_add", None)
             # ⚠️ 批量状态是**模块级**的，跨面板存活 —— 不清的话，关掉面板再打开
             #    会直接落进"上次那批还没确认"的模式里。
             #    （`S["result"]` 是**故意**跨面板的，别把这条规矩套到它头上。）
             S["batch"] = None
             S["search"] = None
+            # ⚠️ 面板里那两个**弱引用 target 的锚点**（就绪条 / 搜索框）也要断 ——
+            #    它们不是状态，是"别让 target 被 GC 掉"的容器。留着就等于每次
+            #    开关面板多留两个对象（与上面那几条同一条纪律）。
+            S["ready_targets"] = None
+            S["search_target"] = None
             S.pop("queue", None)
             # ⚠️ 映射表那批选择器也要断 —— 它们自己抓着菜单，而菜单抓着 target。
             #    与卡片 `_targets` 是**同一类**孤岛（那次实测：只 setContentView_(None)
             #    时 3 轮后仍有 16 个 DropTarget）。
             batch_rows.clear()
             win.setContentView_(None)        # 丢掉整棵视图树
-        except Exception:                                 # noqa: BLE001
-            pass
-        # ⚠️⚠️ **必须 `close()`，不是 `orderOut_`。** 实测：只 `orderOut_` 的话
-        #     开/关 3 轮之后 `NSApp.windows()` 仍是 3 —— 窗口只是**不可见**，
-        #     对象还活着（`orderOut_` 不释放）。而我们再也不需要它了。
+        except Exception as e:                            # noqa: BLE001
+            # ⚠️ **出声。** 这一段一旦中断，后果是「泄漏一个面板 + 状态不清」，
+            #    而它以前是**静默**的 —— 于是坏了几个月没人知道（见 `_sever` 的说明）。
+            print(f"⚠ 关面板时清理没做完（{type(e).__name__}: {e}）"
+                  f" —— 这次会留下一个面板对象，且模式状态没清", flush=True)
+        # ⚠️⚠️ **必须 `close()`，不是 `orderOut_`**（后者只是让它不可见，对象照样活）。
+        # ⚠️ 但 2026-09-28 补测：**`close()` 之后它照样留在 `NSApp.windows()` 里** ——
+        #    连开/关 3 轮 → 3 个 `_ClassLivePanel`，`objc.autorelease_pool()` 也挡不住。
+        #    根因是 `isReleasedWhenClosed()` 返回 **False**，而那是 **NSPanel 的默认值**
+        #    （官方文档逐字：`NSWindow` 默认 true、**`NSPanel` 默认 false**）。
+        # ⚠️⚠️ **别把它改成 True 来"修"这个 —— 那是坑。** PyObjC（非 ARC）下改成 True 会
+        #    **过度释放**：pywebview #1799 在 macOS ARM64 上用 lldb 实证同一地址 dealloc
+        #    两次，他们的修法**正是** `setReleasedWhenClosed_(False)`；GitHub 上 20+ 个
+        #    Python 项目一致写 False。**False 才是这边公认的做法。**
+        #
+        # ⚠️ **这是一个已知的、没修的小账**（如实记，别读成"已经没问题"）：
+        #    · 实测：每开/关一轮，`NSApp.windows()` 里**多留一个窗口对象**；
+        #      逐个查身份 → 旧的那些**在 ObjC 侧活着、Python 侧已经没有对象**
+        #      （N 个窗口里只有 1 个的 `id()` 出现在 `gc.get_objects()` 里）。
+        #    · 但**它的视图树已经掏空了**（`setContentView_(None)` + `_sever` + 上面那圈
+        #      `strip_holder[...] = []`）—— 会真正累积的那一大坨是这个，而它被断掉了
+        #      （实测过：漏一条就随轮数增长）。剩下的是个**空壳 NSPanel**。
+        #    · 频率：面板每次上课开一次，不是热路径。
+        # ⭐ 社区对"反复开关的面板"给的答案**不是"释放"，是"复用"**：单例 + `orderOut_`
+        #    + `releasedWhenClosed=False`（SO 13924105 就是这个场景）。我们其实**有**单例
+        #    那条路（`open_panel` 会复用 `S["panel"]`），但 `do_close` 把窗口拆了，
+        #    所以每次重开都是新建的。
+        #    → **要真修就是改成"隐藏不销毁、复用时重建内容视图"**，那是独立一件事
+        #      （本面板的清理逻辑是围着"销毁"写的），别顺手改。
         try:
             win.close()
         except Exception:                                 # noqa: BLE001
@@ -1867,7 +2501,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         set_status(f"已把「{u['text']}」放回原位置")
         _later(refresh)                # ⚠️ 同上：别在 action 里拆 sender 的视图
 
-    from AppKit import NSButton, NSObject
+    from AppKit import NSButton
 
     status_holder["label"] = panel.make_label(
         "拖课件到某张卡上 = 加到那门课　·　拖到下面那个虚线框 = 自动分到各课",
@@ -1893,6 +2527,68 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     ve.addSubview_(btn)
     win._entry_targets = [btn_tgt]                      # ← 留住它，否则被 GC
 
+    # ── 删除课程（2026-09-28）────────────────────────────────────────
+    def delete_course(course: str, keep_materials: bool = False,
+                      *, ask: bool = True) -> None:
+        """删一门课。**右键菜单那条路与验收跑器那条路都走这里。**
+
+        `keep_materials=True` = 「只删课号」（术语表进废纸篓、课件搬进保留区）。
+        `ask=False` 跳过确认框 —— ⚠️ **只给验收跑器用**（跑器里没有真键盘，
+        而模态框会把那个进程卡住）。菜单那条路**永远** ask=True。
+
+        ⚠️⚠️ **弹窗只在 `.app` 里弹得出来**（`notice._can_alert()` = `CLASSLIVE_FROM_APP`，
+           由 app 的 sitecustomize 设）。终端里 `cl` 也能开这个面板，那时 `alert()`
+           **只打印**并返回 `fallback` —— 而这里 fallback 是「取消」，所以**不会误删**，
+           但用户会对着面板等一个永远不出现的框。
+           → 所以这里**先问 `_can_alert()`**，弹不出来就直说，别装作问过了。
+           （这正是 `notice.alert` 那条「确认框必须显式给 fallback、且 fallback 要安全」的延伸。）
+        ⚠️ **确认框的按钮顺序**：`notice.alert` 把**第一个**按钮设成默认键（实测 `\r`），
+           而 HIG › Alerts 逐字要求「you don't want to make a Cancel button the default
+           button」→ 默认键只能落在动作上。两个动作里**默认给破坏性小的那个**
+           （「只删课号」），免得顺手一个回车就把课件也扔了。
+        """
+        # ⚠️⚠️ **早拒：prep 正在跑的时候不许删课。** 与 `do_delete`（删术语）同一条纪律，
+        #    但这边更险 —— `do_delete` 还有 prep 写锁兜底，而 **`courses.delete`
+        #    全程不取本课的写锁**。不早拒的后果是**半删**：术语表进了废纸篓、
+        #    课件搬进了保留区，而 prep 收尾时照旧往原路径写回 / 往已搬走的目录写 notes
+        #    → 删掉的课**半路又冒出来，内容还是残缺的**。
+        #    （2026-09-28 OCR 审计发现；`S["busy"]` 是 prep 的串行器，跑一门十几分钟。）
+        if S.get("busy"):
+            set_status("正在跑准备 —— 等它完再删课", 1.0)
+            return
+        if ask:
+            import notice
+            if not notice._can_alert():
+                set_status("删课要在 ClassLive.app 里确认 —— 终端里弹不出框，这次没删",
+                           1.0)
+                return
+            f = courses.facts(glossary, course, sessions_dir=sessions_dir,
+                              state_root=state_root)
+            msg = (f"术语表 {_num(f['glossary_bytes'], '字节')}"
+                   f" · 课件 {_num(f['materials'], '份')}")
+            if f["sessions"]:
+                # ⚠️ 这句是**必须说的**：删除**不碰**上课记录，而删了课再建同名，
+                #    那些记录会自己接回来。不说 = 用户以为全没了（文案撒谎那类）。
+                msg += f"\n{f['sessions']} 节上课记录不受影响（它们在 sessions/）"
+            if f["materials"]:
+                what = notice.alert(f"删除「{course}」？", msg,
+                                    buttons=("只删课号", "全部删除", "取消"),
+                                    fallback="取消")
+            else:
+                # ⚠️ 没有课件时两档**完全一样** —— 别给一个不存在的选择，
+                #    那是在骗人点（同 `empty_state_lines` 那条）。
+                what = notice.alert(f"删除「{course}」？", msg,
+                                    buttons=("删除", "取消"), fallback="取消")
+            if what == "取消":
+                set_status(f"{course}：没删，什么都没动", 1.0)
+                return
+            keep_materials = (what == "只删课号")
+        res = courses.delete(glossary, course, sessions_dir=sessions_dir,
+                             state_root=state_root, keep_materials=keep_materials,
+                             trash_fn=trash_fn)
+        set_status(delete_msg(course, res), 1.0)
+        _later(refresh)
+
     refresh()
 
     # 位置：屏幕中上（AppKit 左下原点）
@@ -1900,7 +2596,30 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     win.setFrameOrigin_(((scr.size.width - WIDTH) / 2.0,
                          max(60.0, scr.size.height - h - 140.0)))
     win.orderFrontRegardless()
-    return Handles(win, do_close, refresh, set_status, run_batch, run_search)
+    return Handles(win, do_close, refresh, set_status, run_batch, run_search,
+                   add_course,
+                   lambda c, keep=False: delete_course(c, keep, ask=False),
+                   _start_classify)
+
+
+def _panel_key(kw) -> tuple:
+    """面板复用判据：**界面结构**（有没有 `on_start`）+ **读写目标**（那三个路径）。
+
+    ⚠️ 为什么路径也要进键（2026-09-28 OCR 审计指出）：这三个参数**决定读哪儿写哪儿**。
+       进了键之后，同一个进程里拿另一组根再开面板（隔离跑器与测试正是这么干的）
+       会**重建**而不是复用 —— 复用的后果是：后面每一次增删改都写向**旧**路径，
+       而本仓库有一条硬规矩「**测试必须隔离写端**」。不隔离就是写坏真数据。
+
+    ⚠️ `str()` 归一化：调用方可能传 `Path` 也可能传 `str`，同一个位置不该因为
+       类型不同就白重建一次。
+
+    ⚠️ **别拿整个 `kw` 比** —— 里面还有 `on_close` / `prepare_fn` 这类 lambda，
+       每次传一个新的就永远不等，于是每次打开都白重建（实测踩到）。
+    """
+    return (kw.get("on_start") is None,
+            str(kw.get("glossary") or ""),
+            str(kw.get("state_root") or ""),
+            str(kw.get("sessions_dir") or ""))
 
 
 def open_panel(**kw) -> Handles | None:
@@ -1915,13 +2634,13 @@ def open_panel(**kw) -> Handles | None:
     """
     cur = S.get("panel")
     if cur is not None:
-        if S.get("panel_key") == (kw.get("on_start") is None):
+        if S.get("panel_key") == _panel_key(kw):
             cur.window.orderFrontRegardless()
             return cur
         cur.close()                       # 结构不同 -> 关掉重建（`S["result"]` 在模块级，不丢）
     h = build(**kw)
     S["panel"] = h
-    S["panel_key"] = kw.get("on_start") is None
+    S["panel_key"] = _panel_key(kw)
     return h
 
 

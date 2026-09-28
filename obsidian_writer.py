@@ -87,6 +87,25 @@ def _hms_str(sec: int) -> str:
     return f"{sec // 3600:02d}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
 
 
+def note_path_for(vault, date: str, course: str) -> Path:
+    """今天这门课的笔记路径。**同日同课已有一份就加时间戳并存，绝不覆盖。**
+
+    ⚠️⚠️ **抽成模块级函数是为了让判据指得到它**（2026-09-28 审查指出）：
+       这段逻辑原来内联在落盘那一步里，而 `tests/test_audit_regressions.py` 的 R4
+       断言的是**测试里手抄的一份副本** —— 生产把冲突处理删掉/改坏，R4 照样绿。
+       同 `entry_panel.card_title` / `courses.readiness` 那几条：**判据要指向那个位置**。
+
+    ⚠️ 为什么是"并存"而不是覆盖：lecture + tutorial 常共用同一课号，一天两节很现实。
+       覆盖会把上一节的笔记抹掉 —— 会话日志还在 `sessions/`，但**复习层只此一份**。
+    """
+    d = Path(vault) / "Lectures"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{date}_{course}.md"
+    if p.exists():
+        p = d / f"{date}_{time.strftime('%H%M%S')}_{course}.md"
+    return p
+
+
 def monotone_secs(tss) -> list[int]:
     """`HH:MM:SS` 列表 -> **单调不减**的当日秒数。
 
@@ -556,7 +575,16 @@ class ObsidianWriter:
         return Path(str(self.session_path.with_suffix("")) + LOST_TAIL)
 
     def _lost_handle(self):
-        """懒开常驻句柄。**不注册 atexit** —— 每次按下都 flush 了，没有缓冲尾巴。"""
+        """懒开常驻句柄。**不注册 atexit** —— 每次按下都 flush 了，没有缓冲尾巴。
+
+        ⚠️ **关过之后不再开**（`_lost_closed`）：`close_lost()` 跑在**收尾 worker** 上，
+           而 `mark_lost()` 是 AppKit 主线程回调 —— 收尾能跑十几分钟（精修 / 复习层），
+           这期间 ❓ 按钮**仍然可点**（`overlay.wrapup_show` 只换收尾卡自己的按钮）。
+           少了这个标志，那次按下会**重新开一个再没人关的句柄**，而且这条标记
+           进不了已经建好的笔记，`mark_lost` 却仍返回 True（2026-09-28 审查指出）。
+        """
+        if getattr(self, "_lost_closed", False):
+            return None
         if self._lost_h is None:
             p = self._lost_path()
             if p is None:
@@ -591,7 +619,11 @@ class ObsidianWriter:
             return False
 
     def close_lost(self) -> None:
-        """幂等。文件**不删** —— 它是这份笔记的证据（与 `_POLISH_NOTE` 同一条纪律）。"""
+        """幂等。文件**不删** —— 它是这份笔记的证据（与 `_POLISH_NOTE` 同一条纪律）。
+
+        ⚠️ 置 `_lost_closed` 是为了让后来的 `mark_lost` **别再开新句柄**（见 `_lost_handle`）。
+        """
+        self._lost_closed = True
         h = getattr(self, "_lost_h", None)
         if h is not None:
             try:
@@ -612,10 +644,23 @@ class ObsidianWriter:
         return w
 
     def append_atoms(self, atoms) -> int:
-        """写一批 atom。⚠️ **不做任何 LLM 调用** —— 那些在 worker 里，
-        这个方法只负责落盘（与 `mark_lost` 同一条纪律：这里是主线程回调）。"""
-        w = self._atom_writer()
-        return w.append(atoms) if w is not None else 0
+        """写一批 atom。⚠️ **不做任何 LLM 调用** —— 那些在 worker 里。
+
+        ⚠️ 它跑在 **`main.atom_worker` 那个后台线程上**（旧注释写"这里是主线程回调"，
+           与事实不符 —— `mark_lost` 才是主线程回调；留着会误导后来者按 AppKit
+           主线程的约束去改这里。2026-09-28 审查指出）。
+        ⚠️⚠️ **必须 fail-soft**（与 `mark_lost` 同一条纪律）：调用点
+           `main._atom_flush()` 在 `atom_worker` 的循环里**没有被 try 包住**
+           （那里只包了 `atomq.get`）—— 这里一抛，那个 daemon 线程就**直接死掉**，
+           此后整节课的 atom 再也不落盘，日志里只留一次 traceback。
+           写不下来是"少几条要点"，不是"课跑不下去"。
+        """
+        try:
+            w = self._atom_writer()
+            return w.append(atoms) if w is not None else 0
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ atom 落盘失败({str(e)[:60]}); 课堂不受影响")
+            return 0
 
     def close_atom(self) -> None:
         """幂等。文件**不删**（它是这份笔记的证据，同 `close_lost`）。"""
@@ -729,10 +774,6 @@ class ObsidianWriter:
             # "What is a::b in stats?" 被切成 front="What is a")。插一个空格拆开 ——
             # 读起来还是 "a::b", 但不再被当分隔符。
             qd = q.replace("::", ": :")
-            # 没有答案(收尾时答案还在流里 —— worker 从不 join, 快照里就没有它)或
-            # 整条就是一句报错(main.py 的失败兜底)时: 只留问题、**不加 `::`**。
-            # 空答案的卡片比没有卡片更糟; 但问题本身是"我卡在哪"的唯一凭据,
-            # 静默丢掉它等于把这条钩子废掉 —— 所以留着, 只是不假装能自测。
             if not body or body.startswith("⚠"):
                 out.append(f"- {qd}　（这次没等到回答）")
                 continue
@@ -1011,15 +1052,7 @@ class ObsidianWriter:
             print(f"⚠ ❓ 反查失败({str(e)[:60]}); 笔记照常生成")
         note = self._render_note(entries, review, qa_items, polish_state, lost_items)
 
-        d = Path(self._vault) / "Lectures"
-        d.mkdir(parents=True, exist_ok=True)
-        path = d / f"{self._date}_{self._course}.md"
-        if path.exists():
-            # 同日同课已有一份(lecture + tutorial 常共用同一课号, 一天两节很现实):
-            # 直接覆盖会把上一节的笔记抹掉 —— 会话日志还在 sessions/, 但复习层
-            # 只此一份。加时间戳并存, 不覆盖。
-            path = d / f"{self._date}_{time.strftime('%H%M%S')}_{self._course}.md"
-        self.vault_path = path
+        self.vault_path = note_path_for(self._vault, self._date, self._course)
         self.vault_path.write_text(note, encoding="utf-8")
         layer = ("知识点详解+自测+术语表+重点" if review.get("sections")
                  else "术语表+重点(未生成详解)")

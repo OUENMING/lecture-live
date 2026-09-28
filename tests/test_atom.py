@@ -107,8 +107,17 @@ def main() -> int:
               set(back[0]) == {"id", "t", "epoch", "src", "kind", "text", "terms"},
               str(sorted(back[0])))
         w.close()
-        w.close()                                    # ⚠️ 幂等
-        check("close() 幂等（调两次不炸）", True)
+        # ⚠️ 原来是 `check("close() 幂等（调两次不炸）", True)` —— **恒真**
+        #    （2026-09-28 审查指出）：`ok` 写死 True；第二次 `close()` 真炸了的话
+        #    也是在这一行**抛出**、根本走不到那条 check。
+        #    改成真判据：第二次调用之后句柄确实被清空、且证据文件没被动过。
+        _path = pathlib.Path(sess)
+        _before_txt = _path.read_text(encoding="utf-8")
+        w.close()                                    # ⚠️ 幂等：再调一次
+        check("close() 幂等（第二次调用后句柄已清空、文件没动）",
+              getattr(w, "_h", None) is None
+              and _path.read_text(encoding="utf-8") == _before_txt,
+              f"_h={getattr(w, '_h', None)!r}")
         check("会话 .md **一个字节没动**",
               sess.read_text(encoding="utf-8") == "# ECON10740\n")
         w2 = atom.AtomWriter(sess)

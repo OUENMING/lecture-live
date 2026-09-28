@@ -953,7 +953,6 @@ def run(args) -> None:
     stopping = threading.Event()
     flagged = {"on": False}                             # ⭐ 标记当前句
     trans = {"mode": "both"}                            # 🌐 三档: both 双语 / en 只英·校 / raw 纯转录
-    translating = {"on": True}                          # 兼容旧读法: raw 之外都算"开"
     writer = ObsidianWriter(args.vault, args.course, mode=args.save_notes,
                             api_key=api_key_val, model=args.cloud_model,
                             glossary_path=args.glossary,
@@ -1028,7 +1027,10 @@ def run(args) -> None:
         whatsnew=whatsnew,
     )
     # 终端模式拿不到悬浮窗，退化成字符框（两种模式都要能看到）
-    if args.ui == "terminal" and whatsnew:
+    # ⚠️ 判据同上（`drives_appkit`，不是 `args.ui`）：overlay 载入失败会静默回退
+    #    终端 UI，那时 `args.ui` 仍是 "overlay" → 字符框不打印、真悬浮窗又不存在
+    #    → **更新卡片整个消失**。（2026-09-28 OCR 审计发现）
+    if not getattr(ui, "drives_appkit", False) and whatsnew:
         _print_whatsnew_box(**whatsnew)
 
     seen_proper: collections.Counter = collections.Counter()   # 出现次数(≥2 才查)
@@ -1512,7 +1514,12 @@ def run(args) -> None:
             if time.monotonic() >= _dev["next"]:
                 _dev["next"] = time.monotonic() + DEVICE_CHECK_S
                 check_clock_and_device(src, args.source, notify, _dev)
-            if args.ui == "overlay":
+            # ⚠️ 判据是 `drives_appkit`（**UI 对象自己说的**），不是 `args.ui`：见收尾
+            #    `_spin` 里那段同款说明 —— `_load_overlay` 失败时会**静默回退**
+            #    `TerminalUI()`，那时 args 还写着 overlay → 每轮调一个空 pump、
+            #    **一次 sleep 都没有 → 整节课纯烧 CPU**。（2026-09-28 OCR 审计发现；
+            #    收尾那处当天已改，主循环这处漏了。）
+            if getattr(ui, "drives_appkit", False):
                 ui.pump()
             else:
                 time.sleep(0.005)
@@ -1713,7 +1720,11 @@ def run(args) -> None:
                     _spin(_ack)
             if tester is not None:
                 _rep = tester.finish(vad_report=locals().get("_diag", ""),
-                                     note_path=str(getattr(writer, "note_path", "") or ""))
+                                     note_path=str(getattr(writer, "note_path", "") or ""),
+                                     # ⚠️ `--no-bundle` 原来只声明、没人读（2026-09-28
+                                     #    OCR 审计发现）—— README 写明它能「不打包，只写报告」，
+                                     #    不接上线这个开关就是个谎。
+                                     bundle=not args.no_bundle)
                 if _rep:
                     echo(f"\n🧪 测试报告: {_rep}")
                 if tester.bundle_path:

@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import pathlib
 import pty
+import shutil
 import sys
 import tempfile
 import time
@@ -33,6 +34,15 @@ sys.path.insert(0, str(HERE))
 import main                                                        # noqa: E402
 import obsidian_writer as ow                                       # noqa: E402
 import polish                                                      # noqa: E402
+
+# ⚠️⚠️ **`SESSIONS` 必须整文件指到临时目录**（2026-09-28 审查指出）：
+#    `_writer` 用的是 `mode="yes"` → `enabled=True` → `ObsidianWriter.__init__`
+#    会 `SESSIONS.mkdir()` 并往 `obsidian_writer.SESSIONS`
+#    （= **仓库真实的 `sessions/`**）写一个 `<日期>_<时间>_TESTX.md`。
+#    本文件 4 个用例每跑一次就留 4 个残留：既违背文件头「不碰 `sessions/` 一个字节」，
+#    又是在往一个**只读不删**的目录里堆垃圾（CLAUDE.md 那条硬规矩）。
+_SESSIONS_ISO = pathlib.Path(tempfile.mkdtemp(prefix="cl-wrapup-sessions-"))
+ow.SESSIONS = _SESSIONS_ISO
 
 CASES: list[tuple[str, object]] = []
 
@@ -154,6 +164,14 @@ def _writer(d: str, **kw):
        本文件测的是**中断护栏**，不是 `append()`，所以直接置数。
     """
     w = ow.ObsidianWriter(d, "TESTX", mode="yes", **kw)
+    # ⚠️⚠️ **`_review` 必须在这里就接管**（2026-09-28 审查指出）：不接管的话
+    #    `close()` 会走到 `obsidian_writer._call_review`，那里是**真的
+    #    `httpx.post("https://api.deepseek.com/v1/chat/completions", timeout=180)`**。
+    #    本文件头写着「不发任何网络请求（`polish._chat` 与 `_review` 都被替身接管）」——
+    #    而实际上只有 `t_review_interrupt` 那一支装了，另外两支**一直在真发请求**
+    #    （假 key 会 401 快速失败，所以从没人发现）。
+    #    ⚠️ 需要测复习层中断的那一支会在用例里**再覆盖一次**（那是它的被测对象）。
+    w._review = lambda *a, **k: {}
     sp = pathlib.Path(d) / "s.md"
     sp.write_text(SESSION, encoding="utf-8")
     w.session_path = sp
@@ -280,10 +298,16 @@ def t_card_layers_follow_height():
     card["set_status"]("很长" * 200)          # 逼它变高
     win_h = card["panel"].frame().size.height
     glass_h = card["_fp"].glass.frame().size.height
-    assert abs(win_h - glass_h) < 1.0, (
-        f"窗口高 {win_h:.0f} 而 glass 高 {glass_h:.0f} —— "
-        f"顶部 {win_h - glass_h:.0f}px 没有磨砂背景")
-    card["close"]()
+    try:
+        assert abs(win_h - glass_h) < 1.0, (
+            f"窗口高 {win_h:.0f} 而 glass 高 {glass_h:.0f} —— "
+            f"顶部 {win_h - glass_h:.0f}px 没有磨砂背景")
+    finally:
+        # ⚠️ **关窗要进 finally**（2026-09-28 审查指出）：上面那条断言失败的
+        #    时候（恰恰就是本用例要抓的那个 bug）原来会跳过 `close()` ——
+        #    把一个建好的窗口/AppKit 状态留给后面的用例，造成连带失败、
+        #    把真正的第一个失败点盖住。
+        card["close"]()
 @case("⭐ `polish_entries` 的 on_progress 是 (stage, done, total) 三元组")
 def t_progress_shape():
     seen: list[tuple] = []
@@ -333,6 +357,7 @@ def main_() -> int:
     print(f"{len(CASES) - len(CASES_FAIL)}/{len(CASES)} 通过")
     for n in CASES_FAIL:
         print(f"  ❌ {n}")
+    shutil.rmtree(_SESSIONS_ISO, ignore_errors=True)
     return 1 if CASES_FAIL else 0
 
 

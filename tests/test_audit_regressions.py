@@ -63,8 +63,8 @@ import main as main_mod
 from main import all_settled, is_incomplete, split_sentences
 from translator import Result, guard_zh_result, _StreamParser, _clean_fix
 from cloud_translator import _looks_like_echo
-from obsidian_writer import (ObsidianWriter, monotone_secs, resolve_lost_range,
-                             _hms_sec)
+from obsidian_writer import (ObsidianWriter, monotone_secs, note_path_for,
+                             resolve_lost_range, _hms_sec)
 
 
 class R1_Settle(unittest.TestCase):
@@ -229,14 +229,15 @@ class R4_VaultCollision(unittest.TestCase):
             d.mkdir(parents=True)
             existing = d / "2026-09-11_ECON10101.md"
             existing.write_text("上午的课", encoding="utf-8")
-            # 模拟 close() 里的选择逻辑
-            path = d / "2026-09-11_ECON10101.md"
-            if path.exists():
-                path = d / "2026-09-11_143000_ECON10101.md"
+            # ⚠️⚠️ **必须调生产那条**（2026-09-28 审查指出）：原来是测试里
+            #    手抄一遍 `if path.exists(): path = …143000…` —— 断言的对象是
+            #    **那段副本**，生产把冲突处理删掉/改坏它照样绿（"覆盖感"不是覆盖）。
+            path = note_path_for(tmp, "2026-09-11", "ECON10101")
             path.write_text("下午的课", encoding="utf-8")
             self.assertEqual(existing.read_text(encoding="utf-8"), "上午的课",
                              "旧笔记被覆盖了!")
-            self.assertIn("143000", path.name)
+            self.assertNotEqual(path, existing, "同日同课没有分叉，直接覆盖了")
+            self.assertIn("ECON10101", path.name)
 
     def test_writer_appends_session_and_parses(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -316,8 +317,16 @@ class R6_OverlayConstructs(unittest.TestCase):
     def test_overlay_constructs_and_widgets_are_live(self):
         try:
             from overlay import Overlay
+        except ModuleNotFoundError as e:
+            self.skipTest(f"AppKit 不可用, 跳过: {e}")
         except Exception as e:                       # noqa: BLE001
-            self.skipTest(f"AppKit 不可用, 跳过: {type(e).__name__}: {e}")
+            # ⚠️⚠️ **这里不许 skip**（2026-09-28 审查指出）：本用例的**存在理由**
+            #    就是拦 `Overlay.__init__` 里那个被 `_load_overlay` 静默吞掉的
+            #    `NameError`（漏 import）。而 `except Exception: skipTest` 会把
+            #    **任何**导入期错误（含 NameError）都变成"跳过" —— 一道专门防
+            #    「NameError 静默」的闸门，自己被同一个形状绕过去了。
+            self.fail(f"overlay 导入失败 —— 这不是「AppKit 不可用」，是代码坏了："
+                      f"{type(e).__name__}: {e}")
         try:
             o = Overlay()
         except Exception as e:                       # noqa: BLE001

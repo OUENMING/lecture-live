@@ -13,7 +13,15 @@
 set -u
 # 解析符号链接(可能被 ln -s 到 ~/.local/bin)
 SELF="$0"
+_hops=0
 while [ -L "$SELF" ]; do
+  # ⚠️ 互相引用的链（a→b→a）或超长链会让这一圈**永远转下去**，而且 `$SELF`
+  #    每绕一圈只增不减。加个上限直接退出（2026-09-28 审查指出）。
+  _hops=$((_hops + 1))
+  if [ "$_hops" -gt 40 ]; then
+    echo "❌ 解析 $0 的符号链接绕了 40 圈还没到头 —— 链是不是成环了？" >&2
+    exit 1
+  fi
   TARGET="$(readlink "$SELF")"
   case "$TARGET" in
     /*) SELF="$TARGET" ;;
@@ -116,6 +124,16 @@ update_classlive() {
     else
       "$PY" -m pip install -q -r requirements.txt 2>&1 | tail -3
     fi
+    # ⚠️⚠️ **管道会吞掉退出码**（2026-09-28 审查指出）：`cmd | tail -3` 的 `$?` 是
+    #    `tail` 的（恒 0）—— 于是**安装失败也照样往下走**，还顺手把 requirements
+    #    标记成"已装好"，更新卡片**再也不提示补依赖**（静默失败里最贵的一种：
+    #    用户以为环境是全的）。`PIPESTATUS[0]` 是管道里第一条命令的退出码
+    #    （bash 专有；本脚本 shebang 就是 `#!/bin/bash`）。
+    if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+      echo "❌ 依赖没装上（上面是最后几行输出）—— 这次**不**标记已装好，下次还会提示。" >&2
+      echo "   排查：uv 在不在（~/.local/bin）？网络通不通？" >&2
+      return 1
+    fi
     # ⚠️ 告诉 update.py「这份 requirements 已经装好了」——
     #    卡片上的「立即更新」按钮靠这个标记判断还要不要提示补依赖。
     #    不记的话终端这边装完了、卡片那边还会一直让你再装一次。
@@ -133,7 +151,12 @@ update_classlive() {
 #    （那些只在 ~/.classlive/courses/ 里有）。courses.py 的 list_courses 是**并集**。
 list_courses() {
   echo "可选课程(术语表在 glossary/, 课件在 ~/.classlive/courses/):"
-  "$PY" courses.py --list --current "${COURSE:-}" 2>/dev/null || true
+  # ⚠️ **别把 stderr 一起吞掉**（2026-09-28 审查指出）：原来是
+  #    `... 2>/dev/null || true` —— `courses.py` 一崩，用户只看到标题 +「当前: xxx」，
+  #    会以为**一门课都没有**，而真相是解析失败。`course` 分支刻意区分
+  #    「故障 vs 没命中」，这里要对齐。`|| true` 留着（列课程失败不该拦住后面的流程）。
+  "$PY" courses.py --list --current "${COURSE:-}" || \
+    echo "  ⚠️ 列课程失败（见上面的报错）—— 这**不是**「一门课都没有」"
   echo "  当前: ${COURSE:-未设置}"
 }
 
@@ -190,10 +213,18 @@ case "${1:-}" in
   online|net) SRC=blackhole; shift ;;
   file)
     [ -n "${2:-}" ] || { echo "用法: cl file <音频文件>"; exit 1; }
-    # ⚠️ 本脚本开头已 cd 到安装目录, 用户在自己工作目录传相对路径会解析错 ->
-    # "文件不存在"。这里先校验再转绝对路径。(2026-09-24 OCR 全量审计发现。)
-    [ -f "$2" ] || { echo "❌ 找不到音频文件: $2" >&2; exit 1; }
-    SRC=file; UI=terminal; ARGS+=(--path "$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"); shift 2 ;;
+    # ⚠️⚠️ **相对路径必须挂回用户原来那个目录再判**（2026-09-28 审查指出）：
+    #    本脚本开头已经 `cd` 到安装目录，所以 `[ -f "$2" ]` 和 `dirname "$2"`
+    #    全是**相对安装目录**解析的 —— 用户在自己目录敲 `cl file week5.mp3`
+    #    仍然报"找不到"，而他明明就在那个文件旁边。
+    #    上面那句注释写着"(2026-09-24 OCR 全量审计发现)"，但**只改了注释没改代码**；
+    #    `prep` 分支是传了 `_ORIG_PWD` 的，这里要对齐。
+    case "$2" in
+      /*) _AUDIO="$2" ;;                       # 本来就给的绝对路径 -> 别动它
+      *)  _AUDIO="$_ORIG_PWD/$2" ;;
+    esac
+    [ -f "$_AUDIO" ] || { echo "❌ 找不到音频文件: $2" >&2; exit 1; }
+    SRC=file; UI=terminal; ARGS+=(--path "$_AUDIO"); shift 2 ;;
   local) ENGINE=local; shift ;;
   doctor) "$PY" doctor.py; exit $? ;;
   # 开课前的准备。照 doctor 的形状：转发 + 透传退出码（prep.py 用非零表示失败）。

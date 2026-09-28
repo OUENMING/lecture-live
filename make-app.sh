@@ -222,8 +222,15 @@ fi
 #     改成：先**改名**备份（rename，不额外占空间）→ 构建 → 全部成功才删备份；
 #     中途失败由 trap 把原来那份移回来。
 _BAK="$APP.bak"
-rm -rf "$_BAK"                          # 清掉上一次失败可能留下的
-if [ -d "$APP" ]; then mv "$APP" "$_BAK"; fi
+# ⚠️⚠️ **只在「马上要用 `$APP` 覆盖它」时才清备份**（2026-09-28 审查指出）。
+#     原来这里无条件 `rm -rf "$_BAK"`：上一次构建被强杀（SIGKILL / 掉电）时，
+#     磁盘上是「半成品 `$APP`」+「好副本 `$_BAK`」—— 重跑会**先删掉那个好副本**，
+#     再把半成品改名成备份；这一轮若再失败，trap 恢复回来的就是**半成品**，
+#     用户唯一能用的旧版就这么没了。（`$APP` 在的时候才安全：那份马上要被覆盖。）
+if [ -d "$APP" ]; then
+  rm -rf "$_BAK"                        # 清掉上一次失败可能留下的
+  mv "$APP" "$_BAK"
+fi
 _BUILD_OK=""
 _restore() {
   _rc=$?
@@ -231,8 +238,15 @@ _restore() {
   if [ -z "$_BUILD_OK" ] && [ -d "$_BAK" ]; then
     say ""
     say "⚠️ 构建没走完 —— 把原来那份 .app 恢复回来（旧版照常能用）"
-    rm -rf "$APP"
-    mv "$_BAK" "$APP"
+    # ⚠️ **两步必须绑定**（2026-09-28 审查指出）：`rm -rf` 万一只删掉一部分
+    #    （权限不对 / 文件被占用 / SIP），`$APP` 目录还在，后面的 `mv` 会把备份
+    #    **移进 `$APP/` 里面**变成一个子目录 —— 旧版再也回不到原位。
+    if rm -rf "$APP" && mv "$_BAK" "$APP"; then
+      say "   （已恢复）"
+    else
+      say "❌ 自动恢复没成功 —— 旧版还在：$APP.bak"
+      say "   手工执行：rm -rf '$APP' && mv '$APP.bak' '$APP'"
+    fi
   fi
   exit "$_rc"
 }
@@ -276,8 +290,12 @@ for f in "$APP/Contents/MacOS"/python "$APP/Contents/MacOS"/python3 "$APP/Conten
     *)
       # ⚠️ 以前这里是**静默跳过** —— 留下一堆指向 bundle 外的符号链接，
       #    而 ⑧ 只校验 CFBundleExecutable 那一个，检测不出来。必须出声。
-      say "   ⚠️ $(basename "$f") 没能换成真文件（目标缺失 / 不是 Mach-O：${_magic}）"
-      say "      这种情况下双击会没反应 —— 先别继续，把上面的报错贴出来" ;;
+      # ⚠️⚠️ 而且**必须真的停下来**（2026-09-28 审查指出）：原话写着"先别继续"，
+      #    代码却只是 `say` 一句就接着跑 —— 后面照旧写戳记、报"✅ 构建完成"，
+      #    而 ⑧ 自检**只验 CFBundleExecutable 指的那一个** `python`，
+      #    `python3` / `python3.X` 仍是坏链接也照样判成功。
+      #    `fail` 会触发 trap → 把备份恢复回来，用户手上那份能用的旧版不受影响。
+      fail "$(basename "$f") 没能换成真文件（目标缺失 / 不是 Mach-O：${_magic}）—— 双击会没反应。见上面的报错" ;;
   esac
 done
 
@@ -367,8 +385,18 @@ def _own_bundle_id():
     #    site-packages → python3.X → lib → Contents
     here = os.path.dirname(os.path.abspath(__file__))          # …/site-packages
     contents = os.path.dirname(os.path.dirname(os.path.dirname(here)))
-    with open(os.path.join(contents, "Info.plist"), "rb") as f:
-        return plistlib.load(f).get("CFBundleIdentifier")
+    # ⚠️⚠️ **绝不能让它抛，也不能返回 `None`**（2026-09-28 审查指出）：
+    #    · 这个模块是**解释器每次启动**都会 import 的（site.py → sitecustomize）——
+    #      Info.plist 缺失/读不了时抛出去，就是 `cl`、测试、所有脚本**每次启动
+    #      刷一段 traceback**；
+    #    · 而 `None` 会和"环境变量没设"（同样是 `None`）**相等** → Info.plist 缺键时
+    #      `_SHOULD_START` 恒为假 → 这个 .app **永远不接管**，
+    #      表现正是"双击了、什么都没发生" —— 本文件存在的全部意义就是修那个 bug。
+    try:
+        with open(os.path.join(contents, "Info.plist"), "rb") as f:
+            return plistlib.load(f).get("CFBundleIdentifier") or ""
+    except Exception:
+        return ""
 
 
 _SHOULD_START = (

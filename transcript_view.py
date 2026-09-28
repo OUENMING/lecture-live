@@ -127,7 +127,6 @@ class TranscriptView:
         self._last_flush = 0.0
         self._doc_h = -1.0
         self._doc_w = -1.0
-        self._collapsed = True
 
         self._scroll = ScrollCls.alloc().initWithFrame_(((0.0, 0.0), (width, 210.0)))
         # 默认 NSClipView 会画不透明底色, 会把毛玻璃和 scrim 整个盖掉
@@ -304,7 +303,6 @@ class TranscriptView:
 
     def set_collapsed(self, collapsed: bool) -> None:
         from AppKit import NSScrollElasticityAutomatic
-        self._collapsed = collapsed
         # ⚠️ 滚动权限**与收起/展开解耦**(2026-09-24 改): 内容永远溢出(一节真实课
         # 1000+ 句 vs 可见 3 行), 所以**始终允许滚动**。
         # 原先写成 `_scroll_enabled = not collapsed`, 后果是"把窗口拉大也不能滚"——

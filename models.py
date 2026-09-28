@@ -87,13 +87,18 @@ PARAKEET = Model(
 
 VAD = Model(
     "vad", f"{MODELS_ROOT}/vad/silero_vad.onnx", "Silero VAD(必需)", True,
-    "mkdir -p ~/models/vad && curl -sL -o ~/models/vad/silero_vad.onnx " + VAD_URL,
+    # ⚠️ **`-f` 不能漏**（2026-09-28 审查指出）：没有它时 HTTP 404/5xx **curl 照样以 0 退出**，
+    #    把错误页（HTML）**原样写成 `silero_vad.onnx`** —— 于是 `doctor` 看见"文件在"、
+    #    报 ✅，而 VAD 其实是坏的。`-S` 让 `-f` 失败时**打出原因**（否则 `-s` 把它吞了）。
+    "mkdir -p ~/models/vad && curl -fsSL -o ~/models/vad/silero_vad.onnx " + VAD_URL,
     0.61, src=VAD_URL)
 
 WHISPER = Model(
     "whisper", f"{MODELS_ROOT}/sherpa-onnx-whisper-turbo",
     "定稿 Whisper 模型(必需)", True,
-    "curl -sL -o /tmp/wt.tar.bz2 " + WHISPER_URL + " && "
+    # ⚠️ 同 `VAD` 那条：`-f` 加上（这里即使漏了，后面 `tar` 也会失败 —— 但错误信息
+    #    会指向"tar 解不开"，而不是"下载就是 404"）。
+    "curl -fsSL -o /tmp/wt.tar.bz2 " + WHISPER_URL + " && "
     "tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2",
     538.0, src=WHISPER_URL, extra="（解开后 989 MB）")
 
@@ -139,13 +144,21 @@ def path_of(key: str, default: str = "") -> str:
 
 
 def basename_of(key: str, default: str = "") -> str:
-    """某一条**在 `~/models/` 下的那个目录名**（给 `testmode` 报体积用）。
+    """某一条**在 `~/models/` 下的那个顶层条目名**（给 `testmode` 报体积用）。
 
-    ⚠️ 从**路径形状**推，不 stat 硬盘（本模块不碰 I/O）：带后缀 = 是个文件 → 取父目录名
-       （VAD 是 `~/models/vad/silero_vad.onnx` → `vad`）；没后缀 = 本身就是目录。
+    ⚠️⚠️ **别用 `Path.suffix` 猜「是文件还是目录」**（2026-09-28 审查指出）：
+       `parakeet-tdt-0.6b-v3-int8` 这种**目录名里带点**的，`suffix` 是
+       `.6b-v3-int8`（真值）→ 会被当成文件 → 取到父目录名 `models`
+       → 报出来的体积指向一个**根本不存在**的路径。
+       改成「相对 `MODELS_ROOT` 取第一段」：既不用 stat 硬盘（本模块不碰 I/O
+       这条不变），也对带点的名字免疫。
     """
     m = by_key(key)
     if not m:
         return default
-    p = pathlib.Path(m.path)
-    return p.name if not p.suffix else p.parent.name
+    try:
+        rel = pathlib.Path(os.path.expanduser(m.path)).relative_to(
+            os.path.expanduser(MODELS_ROOT))
+    except ValueError:
+        return default
+    return rel.parts[0] if rel.parts else default

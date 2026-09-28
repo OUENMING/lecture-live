@@ -97,11 +97,15 @@ def _pinned(gloss_h: float) -> float:
     return INPUT_H + INPUT_GAP + gloss_h + 4 + DRAFT_H + DRAFT_ZH_H + 4
 
 
-PINNED_H = _pinned(GLOSS_H)                     # = 98.0 收回态固定区(不含 8px 间隔)
+PINNED_H = _pinned(GLOSS_H)                     # = 127.0 收回态固定区(不含 8px 间隔)
 BOTTOM_PAD = 12.0
 HEADER_H = 34.0                                   # 顶部按钮条(与正文不重叠)
-BASE_H = BOTTOM_PAD + PINNED_H + 8 + HEADER_H     # = 152.0(收起态除转录区外的固定高度)
-HEIGHT = BASE_H + VISIBLE_ROWS * ROW_H            # = 362.0
+BASE_H = BOTTOM_PAD + PINNED_H + 8 + HEADER_H     # = 181.0(收起态除转录区外的固定高度)
+HEIGHT = BASE_H + VISIBLE_ROWS * ROW_H            # = 391.0
+# ⚠️ 上面三个数**是派生量**，唯一定义点在 `_pinned` / 这几个常量 —— 2026-09-28 审查
+#    发现它们还写着改行数之前的旧值（98/152/362，那是 1 行草稿时代）。数错了会让人
+#    拿错误的基准去核对布局。**改常量时顺手重算这三个注释**（当场这么算出来的：
+#    26+6+20+4+32+35+4 = 127；12+127+8+34 = 181；181+3×70 = 391）。
 
 # ---- 用户可缩放 ----
 # 行高**随宽度变**: 窄窗里中文一行装不下, 需要更多行才不吞字。
@@ -169,6 +173,9 @@ def _row_h_for(lines: int) -> float:
 
 WEIGHT = 0.23                                     # NSFontWeightMedium
 FLUSH_DT = 0.016                                  # 渲染合并闸门 = 一帧(约 60Hz)
+#: 拖拽缩放那条**嵌套事件循环**的单次等待上限（秒）。只在整个 1 秒里**一个事件都没有**
+#: 时才走得到，所以与跟手感无关；它的作用见 `_track_loop` 里那段（防主线程永久卡死）。
+TRACK_TIMEOUT_S = 1.0
 
 # ---- 三档模式(顶栏按钮循环切换) ----
 # 为什么要三档而不是两档: 原来只有一个"译 开/关", 但**关掉后英文仍然过 DeepSeek 做
@@ -493,7 +500,6 @@ class Overlay:
         #    跟着删干净 —— 留着会让「材质在哪配的」这个问题仍然答成 overlay.py，
         #    等于配方原料还散在两个文件里。
         from AppKit import (NSMakeRect, NSColor, NSTextField,
-                            NSVisualEffectView,
                             NSWindowStyleMaskBorderless,
                             NSWindowStyleMaskNonactivatingPanel,
                             NSWindowStyleMaskResizable, NSWindowStyleMaskTitled,
@@ -501,7 +507,6 @@ class Overlay:
                             NSWindowTitleHidden,
                             NSTextAlignmentLeft, NSFont, NSLineBreakByWordWrapping,
                             NSLineBreakByTruncatingTail, NSView,
-                            NSFloatingWindowLevel,
                             NSFocusRingTypeNone)
 
         self._width = WIDTH
@@ -894,13 +899,18 @@ class Overlay:
             menu.addItem_(mi_quit)
 
             self._status.setMenu_(menu)
-        except Exception:                     # noqa: BLE001
+        except Exception as e:                # noqa: BLE001
             # ⚠️ 走到这里时 `statusItemWithLength_` 可能**已经成功**、图标已经挂在
             # 菜单栏上了 —— 后面任何一步（建菜单项 / setTarget_ / setMenu_）失败都会
             # 跳到这里。直接 `= None` 会**丢掉引用**，而 close() 只在 `_status` 非 None
             # 时才 removeStatusItem_ → 留下一个**永远清不掉的孤儿图标**：
             # 点它没反应（没有菜单），而它偏偏是穿透模式下**唯一的恢复入口**。
             # 所以先把已创建的撤掉，再置 None。(2026-09-24 OCR 分块审计发现。)
+            # ⚠️ **而且必须出声**（2026-09-28 审查指出）：软失败不等于静默
+            #    —— 同 `_open_prep` 那条。用户侧的表现是「点菜单栏图标没反应」，
+            #    没有这一行就查不出为什么。
+            print(f"⚠ 菜单栏图标没建起来（{type(e).__name__}: {e}）—— "
+                  f"穿透模式下就没有恢复入口了", flush=True)
             try:
                 if self._status is not None:
                     from AppKit import NSStatusBar
@@ -1012,11 +1022,16 @@ class Overlay:
         on = self._is_editing()
         if on == self._focus_look_on:
             return
-        self._focus_look_on = on
+        # ⚠️ **标志要放在副作用之后写**（2026-09-28 审查指出）：`_on_input_focus` /
+        #    `_on_input_blur` 内部把异常全吞了，先写标志的话，万一那一刻
+        #    `layer()` 取不到 / `currentEditor()` 为空导致设置失败，标志已经变成
+        #    "已同步" → 之后每帧都在上面那个 `return` 直接返回、**永不重试**
+        #    —— 正是本文件反复提到的「细线永不上色、完全静默」那类失败。
         if on:
             self._on_input_focus()
         else:
             self._on_input_blur()
+        self._focus_look_on = on
 
     def _release_focus(self):
         """主动把 key window 交还出去。
@@ -1196,6 +1211,14 @@ class Overlay:
         # 守卫形同虚设。踩过。
         if (abs(self._width - WIDTH) < 0.5
                 and abs(BASE_H + self._collapsed_scroll_h - HEIGHT) < 0.5):
+            # ⚠️⚠️ **回到默认值时要把残留的状态文件删掉，不能只是不写。**
+            #    「不写」只在**从来没写过**时才等价于「记住默认」：用户上一轮拖成 900、
+            #    这一轮又拖回默认 660，文件里还留着 900 → 下次启动 `_load_window_state`
+            #    又把它读回来 —— 用户**最后一次选择**被静默丢弃（2026-09-28 审查指出）。
+            try:
+                WINDOW_STATE_FILE.unlink(missing_ok=True)
+            except OSError:                    # noqa: BLE001
+                pass
             return
         try:
             # 存**收回态**的高度, 不是 self._height: 收回态占 99% 使用时间, 是用户
@@ -1299,8 +1322,23 @@ class Overlay:
         mask = NSLeftMouseDraggedMask | NSLeftMouseUpMask
         while True:
             e = win.nextEventMatchingMask_untilDate_inMode_dequeue_(
-                mask, NSDate.distantFuture(), NSEventTrackingRunLoopMode, True)
-            if e is None or e.type() == NSEventTypeLeftMouseUp:
+                mask, NSDate.dateWithTimeIntervalSinceNow_(TRACK_TIMEOUT_S),
+                NSEventTrackingRunLoopMode, True)
+            if e is None:
+                # ⚠️⚠️ **超时兜底**（2026-09-28 审查指出）：原来是 `NSDate.distantFuture()`
+                #     —— 无上限等待，`e is None` 那条分支**永远不会命中**，唯一出口是
+                #    真的收到 LeftMouseUp。而这个循环跑在**主线程**上：
+                #     只要那一下 mouseUp 没送到本窗口（拖拽中途弹了系统/别的 App 的模态框、
+                #     ⌘-Tab 切走、或被另一个跟踪循环吃掉），主循环就**永久卡死** ——
+                #     字幕停摆，且与 `close()` 注释里担心的「退不出程序」是同一类后果。
+                #     本仓库在探针里踩过同一个形状（`cl_resize_probe.py`）。
+                #    ⭐ 判据用「左键还按着吗」而不是计时：`pressedMouseButtons()` 的
+                #      bit0 就是左键。真拖拽时它一直置位 → 继续等；松了却没收到事件
+                #      → 收工走人。（1 秒只在**没有事件**时才会走到，跟手感无关。）
+                if not (NSEvent.pressedMouseButtons() & 1):
+                    break
+                continue
+            if e.type() == NSEventTypeLeftMouseUp:
                 break
             mx, my = _xy(NSEvent.mouseLocation())
             dx, dy = mx - mouse0[0], my - mouse0[1]
@@ -1718,6 +1756,13 @@ class Overlay:
         self._mark_dirty()
 
     def stream_en(self, delta: str):
+        # ⚠️ **这里刻意不置 `_streaming`**（与 `stream_zh` 不对称）—— 2026-09-28 OCR
+        #    审查把这一点列为「要么补上、要么写明」，我选**写明**：
+        #    它现在的实际效果是「**只英·校**模式下英文答案在流时，底部草稿行仍然留在屏上」
+        #    （中文流式时会立刻清空两槽 —— `_render_draft` 的 `active = not _streaming`）。
+        #    ⚠️ 这是作者调过观感的地方（`both` 模式下 `stream_zh` 已经把标志置上了，
+        #    所以两种模式的差别**只**出现在"只英·校"那一档），**改它等于改界面行为**：
+        #    要改先跟作者确认，别由审查代劳。
         self._cur_en += delta
         self._mark_dirty()
 
@@ -2091,7 +2136,8 @@ class Overlay:
             now = time.monotonic()
             if now - self._last_flush < FLUSH_DT:
                 return
-            self._last_flush = now
+            # ⚠️ 这里**不要**再写 `self._last_flush = now` —— 下面那一句无条件覆盖它
+            #    （两者只差几微秒）。留着会让读者以为两处语义不同（2026-09-28 审查指出）。
         self._dirty = False
         self._urgent = False
         self._last_flush = time.monotonic()
@@ -2395,6 +2441,15 @@ class Overlay:
     def _wrapup_finish(self, ok: bool, msg: str) -> None:
         card = getattr(self, "_wrapup_card", None)
         if card is None:
+            # ⚠️⚠️ **没有卡就没有「看没看见」可等 —— 必须在这里就置位。**
+            #    `wrapup_done()` 是在**工作线程**里同步把 `_wrapup_acked` 置 False 的，
+            #    而这条提前返回会让它永远停在 False → main 的「失败留住」循环
+            #    `_spin(ack)` 会一直等到用户**关掉主窗口**才退出 —— 而屏上既没有卡、
+            #    也没有「关闭」可点，看着就是**收尾卡住不动**。
+            #    这条路可达：用户点「不存」之后 `_wrapup_card` 已是 None；
+            #    或者 `import wrapup` / `wrapup.build()` 失败时也没有卡。
+            #    （2026-09-28 审查指出。）
+            self._wrapup_acked = True
             return
         try:
             card["set_status"](("✅ " if ok else "⚠ ") + (msg or "收尾结束"))

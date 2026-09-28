@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import math
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -257,7 +258,13 @@ def main() -> int:
              (256, 1), (256, 2), (512, 1), (512, 2)]
 
     iconset = OUT / "ClassLive.iconset"
-    subprocess.run(["rm", "-rf", str(iconset)], check=True)
+    # ⚠️ 与本文件其它分支同一风格（2026-09-28 审查指出）：原来用
+    #    `subprocess.run(["rm", "-rf", ...], check=True)` —— 失败时抛
+    #    `CalledProcessError`，那个异常**不带 `rm` 的 stderr**，
+    #    以堆栈退出，定位信息比旁边 `writeToFile_atomically_` / `iconutil`
+    #    那两条（都显式判断 + `return 1`）还差。
+    #    仓库内删目录的既有约定是 `shutil.rmtree(..., ignore_errors=True)`。
+    shutil.rmtree(iconset, ignore_errors=True)
     iconset.mkdir(parents=True)
     for base, scale in SIZES:
         px = base * scale

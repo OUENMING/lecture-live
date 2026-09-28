@@ -142,10 +142,15 @@ def call(key: str, block: str) -> dict:
     try:
         obj = json.loads(txt)
     except Exception:                                     # noqa: BLE001
-        return {"topic": "", "points": [], "_bad_json": txt[:120]}
+        # ⚠️⚠️ **必须和「模型说这窗口没要点」区分开**（2026-09-28 审查指出）：
+        #    两者都长成 `points: []`，而下面那个**静默率**会把它算成
+        #    「正确地什么都没输出」—— **量具自己的失败会抬高头号指标**。
+        return {"topic": "", "points": [], "_bad_json": txt[:120], "failed": True}
     pts = obj.get("points")
-    pts = [p for p in pts if isinstance(p, dict)] if isinstance(pts, list) else []
-    return {"topic": str(obj.get("topic") or ""), "points": pts}
+    if not isinstance(pts, list):
+        return {"topic": str(obj.get("topic") or ""), "points": [], "failed": True}
+    return {"topic": str(obj.get("topic") or ""),
+            "points": [p for p in pts if isinstance(p, dict)]}
 
 
 def main() -> int:
@@ -200,7 +205,9 @@ def main() -> int:
         got["_tail"] = [r["en"][:110] for r in w[-2:]]
         results.append(got)
         topics.append(got["topic"])
-        tag = "空" if is_silent(got["points"]) else f"{len(got['points'])} 条"
+        tag = ("‼失败" if got.get("failed")
+               else ("空" if is_silent(got["points"])
+                     else f"{len(got['points'])} 条"))
         at_min = w[0]["sec"] // 60
         print(f"  [{i:2}] {name[:28]:28} {at_min:>3}min+ {tag:>6}  "
               f"主题={got['topic'][:18]!r}", flush=True)
@@ -211,11 +218,20 @@ def main() -> int:
         ok += a_
         tot += b_
 
-    silent = sum(1 for r in results if is_silent(r["points"]))
+    # ⚠️⚠️ **失败样本不许混进静默率**（2026-09-28 审查指出）：`call()` 在
+    #    JSON 解析失败 / `points` 形状不对时也给空表 —— 混进来会被算成
+    #    「模型正确地什么都没输出」，**量具自己的失败抬高这个头号指标**。
+    #    先剔除、再单独报数（本探针自己的纪律：判据自测那段写的就是这个）。
+    ok_results = [r for r in results if not r.get("failed")]
+    n_fail = len(results) - len(ok_results)
+    silent = sum(1 for r in ok_results if is_silent(r["points"]))
     print("\n" + "=" * 74)
     print("四个数 —— ⚠️ **不设阈值, 先出数**")
-    print(f"  静默率      : {silent}/{len(results)} = "
-          f"{silent / max(len(results), 1) * 100:.0f}%  （空窗口占多少）")
+    print(f"  静默率      : {silent}/{len(ok_results)} = "
+          f"{silent / max(len(ok_results), 1) * 100:.0f}%  （空窗口占多少）")
+    if n_fail:
+        print(f"  ⚠️⚠️ **另有 {n_fail} 个窗口测量失败**（JSON 解析不了 / 形状不对）"
+              f" —— 已从上表剔除；别把这 {n_fail} 个读成「模型沉默了」。")
     print(f"  可追溯率    : {ok}/{tot} = {ok / max(tot, 1) * 100:.0f}%  "
           f"（引用行号真在窗口内的比例; 机械半边）")
     if tot and ok == 0:

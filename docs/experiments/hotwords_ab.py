@@ -94,8 +94,12 @@ def main():
                       ("beam+热词 8.0", make("modified_beam_search", 8.0)),
                       ("beam+热词 20.0", make("modified_beam_search", 20.0))):
         ts = run(rec, segs)
+        # ⚠️ `ts[0]` 原来没护栏（2026-09-28 审查指出）：后半段用了 `len(ts) > 1`，
+        #    前半段却直接下标 —— VAD 一段都没切出来时（整窗静音 / 全被
+        #    `MIN_UTTERANCE_S` 丢掉）`ts == []` → **IndexError，打印第一行就崩**。
+        _t0 = ts[0][:40] if ts else ""
         print(f"{name:<20}{sum(len(t.split()) for t in ts):>6}   "
-              f"{ts[0][:40]!r} / {ts[1][:40] if len(ts) > 1 else ''!r}", flush=True)
+              f"{_t0!r} / {ts[1][:40] if len(ts) > 1 else ''!r}", flush=True)
 
 
 if __name__ == "__main__":

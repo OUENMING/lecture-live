@@ -76,6 +76,29 @@ def t_future_version():
             f"未来版本被当成普通文件读成了 {got!r} —— 按老格式解释新数据只会解释错")
 
 
+@case("⭐⭐ 坏版本号的其他形态也一律抛（bool / 类型错 / 0 / 负数）")
+def t_bad_version_forms():
+    """⚠️ 只钉「未来版本」一种是不够的（2026-09-28 审查指出）：
+
+    `store.load_json` 里那三条是**分开挡**的，每条都对应一个具体的坑：
+      · `_v: true` —— `bool` 是 `int` 的子类、`True == 1`，光判 `> V` 会**静默当成 v1**；
+      · `_v: "1"` —— 类型错，与「版本更新」是两件事（报错文案不该共用）；
+      · `_v: 0 / -1` —— 根本不是版本号。
+    退化成「只判 `got > V`」的话，`_v: true` 会被当 v1 读出来，而下一次
+    `save_json` 就把真内容**整个覆盖** —— 正是本文件头号要防的失败形态。
+    """
+    for bad in (True, False, "1", 0, -1, 2.0):
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d) / "s.json"
+            p.write_text(json.dumps({"_v": bad, "a": 1}), encoding="utf-8")
+            try:
+                got = store.load_json(p)
+            except store.StoreError:
+                continue
+            raise AssertionError(f"_v={bad!r} 没抛，被读成了 {got!r} —— "
+                                 f"这几种必须和「未来版本」一样被挡住")
+
+
 @case("⭐⭐ 变异验证：让未来版本也照读 → 上面那条必须红")
 def t_mutation():
     orig = store.load_json

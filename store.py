@@ -58,8 +58,13 @@ class StoreError(RuntimeError):
 
 
 def stamp(obj: dict) -> dict:
-    """给一份要写出去的数据盖上版本号。**不改入参**。"""
-    return {K: V, **obj}
+    """给一份要写出去的数据盖上版本号。**不改入参**。
+
+    ⚠️ `obj` 展开在**前**：反过来的话，调用方手里那份 dict 一旦含 `_v`
+       （手工拼装的、或从旧代码里带来的），就会**盖掉本模块写的版本号**，
+       记账当场失效（2026-09-28 审查指出）。
+    """
+    return {**obj, K: V}
 
 
 def load_json(path, default=None):
@@ -86,11 +91,30 @@ def load_json(path, default=None):
         # ⚠️ 没有 `_v` = **本约定上线之前写的文件**。按 v1 认它 ——
         #    否则今天所有老文件一夜之间全变「不认识」，等于把用户数据判死刑。
         return obj
-    if not isinstance(got, int) or got > V:
+    if isinstance(got, bool) or not isinstance(got, int) or got < 1:
+        # ⚠️ 三条要分开挡（2026-09-28 审查指出）：
+        #    · `bool` 是 `int` 的子类 —— `_v: true` 过得了 `isinstance(_, int)`，
+        #      而且 `True == 1` 就会**静默当成 v1**；
+        #    · 类型错（`_v: "x"`）与「版本更新」原来共用一句报错，排障的人会被
+        #      误导去怀疑版本回退 —— 那是两件完全不同的事；
+        #    · 0 / 负数根本不是版本号。
         raise StoreError(
-            f"状态文件是更新的版本（{K}={got!r}，本程序只认 ≤{V}）：{p}\n"
+            f"状态文件的版本号不是个正经版本（{K}={got!r}）：{p}\n"
+            f"  ⚠️ 版本号是从 1 开始的整数。这个值既不是它，就别猜它的意思。")
+    if got > V:
+        raise StoreError(
+            f"状态文件是更新的版本（{K}={got}，本程序只认 ≤{V}）：{p}\n"
             f"  ⚠️ 多半是「装过更新的版本又退回来」。按老格式解释它只会解释错，\n"
             f"     所以这里抛，而不是猜。处理：用回新版本，或手工备份后移走它。")
+    if got < V:
+        # ⚠️ 今天走不到（只有 V=1），但**必须留着**：将来把 V 提到 2 的那一刻，
+        #    老文件（`_v: 1`）会走到这里。少了这一条，它会**静默按 v2 的格式解释** ——
+        #    正是本模块文件头点名要防的那个失败形态。
+        raise StoreError(
+            f"状态文件是旧版本（{K}={got}，本程序现在是 {V}）：{p}\n"
+            f"  ⚠️ 本模块**还没有迁移代码** —— 所以这里抛，而不是按新格式猜着读。\n"
+            f"     处理：写迁移（文件头那段就是迁移该写的地方），"
+            f"或手工备份后移走它。")
     # ⚠️ **版本号在返回前剥掉** —— 它是本模块的记账，不是业务字段。
     #    留着的话「存进去再读回来」就不等于原来那份，每个调用方都得记得 `pop(_v)`，
     #    而漏掉的那个（迟早有）会把 `_v` 当成一条业务数据写回去。
@@ -99,14 +123,21 @@ def load_json(path, default=None):
 
 
 def save_json(path, obj: dict) -> None:
-    """原子写（同目录 `.tmp` + `replace`），自动盖版本号。
+    """原子写（同目录唯一 `.tmp` + `replace`），自动盖版本号。
 
     ⚠️ 原子写是**必须的**：这些文件被 GUI 与后台线程两头读写
        （`voice.py` / `ready.py` / `prep.py` 的文件头都写了这条）。
+    ⚠️ 临时名**必须唯一**（2026-09-28 审查指出）：写死 `<name>.tmp` 的话，
+       两个线程同时 `save_json` 同一个 path 会**交错写同一个临时文件** ——
+       而 `replace` 只保证"发布出去的那一刻是完整的"，挡不住 A 已经把 tmp
+       `rename` 走、B 还攥着那个 fd 继续往里写，最终落盘的可能是**两份内容的混血**。
+       `pid` + 线程 id 就够区分并发的写者了（同进程多线程、或两个进程）。
     """
+    import os
+    import threading
     p = pathlib.Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(stamp(obj), ensure_ascii=False, indent=1),
                    encoding="utf-8")
     tmp.replace(p)

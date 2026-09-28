@@ -152,10 +152,21 @@ class CallbackSource:
 
     def _open(self) -> None:
         import sounddevice as sd
-        self._stream = sd.InputStream(
+        st = sd.InputStream(
             device=self._device_idx, samplerate=SR, channels=1,
             dtype="float32", blocksize=CHUNK, callback=self._cb)
-        self._stream.start()
+        try:
+            st.start()
+        except Exception:
+            # ⚠️⚠️ **半开的流必须自己关掉**（2026-09-28 审查指出）：构造成功、
+            #    `start()` 抛异常时，调用方 `switch()` 的回滚只把**引用**拨回旧流，
+            #    这个新流就再也没人引用了 —— 而它已经向 PortAudio 申请过设备，
+            #    很可能**一直占着你的麦克风**，界面上还一切正常。
+            self._close_stream(st)
+            raise
+        # ⚠️ 赋值放到 start() **之后**：失败路径上 `self._stream` 从头到尾
+        #    指的都是旧流，"半开的新流挂在 self._stream 上"那个窗口也就不存在了。
+        self._stream = st
 
     @property
     def device_name(self) -> str:
@@ -170,7 +181,9 @@ class CallbackSource:
         表现成「从此再也收不到音频，而屏上一切正常」。这个坑是我自己写第一版时
         踩到的，`R16` 钉住它。
         ⚠️ 队列**刻意不清空**：里面那几块旧设备的音频会被下游自然消费掉（最多
-        `QUEUE_MAX` 块 = 2 秒），而清空会在 VAD 眼里造出一个空洞 —— 更容易误切句。
+        `QUEUE_MAX` 块 = **20 秒**），而清空会在 VAD 眼里造出一个空洞 —— 更容易误切句。
+        ⚠️ 原来这里写的是「2 秒」（2026-09-28 审查指出）：`QUEUE_MAX=200` ×
+           `CHUNK/SR = 0.1s` = **20 秒** —— 差十倍会让人误判"队列滞留量/丢帧延迟"。
         `_q` 对象自始至终是同一个，`poll()` 那边不受影响。
         """
         if int(device_idx) == self._device_idx:

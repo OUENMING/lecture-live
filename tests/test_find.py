@@ -116,8 +116,12 @@ def main() -> int:
               r_mix.total >= 1, f"total={r_mix.total}（按行搜时这里恒为 0）")
         r_mix2 = find.search("monopolist 垄断", roots=roots, limit=99)
         check("⭐⭐ 同上，另一个方向也命中", r_mix2.total >= 1, f"total={r_mix2.total}")
+        # ⚠️ `hits[0]` 原来没护栏（2026-09-28 审查指出）：底层回归导致命中变 0 时
+        #    这里抛 `IndexError` → `main()` 中断，后面的 ⑥⑦⑧⑨ 全不跑、汇总也没有 ——
+        #    本该干净显示一条 ❌ 的，变成难以归因的异常栈。
+        _ln = r_blk.hits[0].line if r_blk.hits else None
         check("命中行落在**真正匹配的那一行**（read 才落得准）",
-              r_blk.hits[0].line == 4, f"line={r_blk.hits[0].line}")
+              _ln == 4, f"line={_ln}")
 
         print("\n--- ⑥ 元数据从文件名来 ---")
         h = find.search("垄断者", roots=roots).hits[0]
@@ -132,7 +136,20 @@ def main() -> int:
         got = find.read(p, 3, 5)
         check("只回那几行（1-based 闭区间）",
               "14:08:06" in got and "14:09:10" not in got, got.splitlines()[0])
-        check("⭐ 大范围会**明说**被截断", "被截断" in find.read(p, 1, 9999))
+        # ⚠️⚠️ 这一条原来是**假判据**（2026-09-28 审查把根因挖出来了）：
+        #    夹具只有 14 行，而当时 `capped` 是按**请求的范围**算的
+        #    （`(9999-1+1) > MAX_READ_LINES`）→ 一个装得下的文件也报「被截断」，
+        #    **那句话是假的**，而模型会因此以为自己没看全。
+        #    拆成两条，各钉一个真行为：够长才说、装得下**不许**说。
+        long_p = tmp / "long.md"          # ⚠️ 放 tmp 根，别落进 sessions/ 影响后面那些检索断言
+        long_p.write_text("\n".join(f"第 {i} 行" for i in range(1, find.MAX_READ_LINES + 60)),
+                          encoding="utf-8")
+        check("⭐ 真超过上限 -> 明说被截断",
+              "被截断" in find.read(str(long_p), 1, find.MAX_READ_LINES + 50),
+              find.read(str(long_p), 1, find.MAX_READ_LINES + 50).splitlines()[-1])
+        check("⭐⭐ 装得下就**不许**谎报被截断（14 行 < 上限）",
+              "被截断" not in find.read(p, 1, 9999),
+              find.read(p, 1, 9999).splitlines()[-1])
         check("行号越界不崩", isinstance(find.read(p, 9000, 9100), str))
 
         print("\n--- ⑧ as_context：把命中拼成给模型的材料 ---")

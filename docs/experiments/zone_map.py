@@ -46,26 +46,40 @@ def drive(o):
     S["go"] = False
 
 
+#: ⚠️ 隐藏/恢复用**同一个谓词**（`background only is false`）—— 见下面 finally 那段。
+_VIS = ('tell application "System Events" to set visible of '
+        'every process whose background only is false ')
+
+
 def main():
-    subprocess.run(["osascript", "-e",
-        'tell application "System Events" to set visible of every process whose background only is false to false'], check=False)
+    subprocess.run(["osascript", "-e", _VIS + "to false"], check=False)
     time.sleep(0.9)
-    o = Overlay(); o.show()
-    for i in range(20): o.finalize(f"S{i}.", f"第 {i} 句。")
-    APP.activateIgnoringOtherApps_(True)
-    threading.Thread(target=drive, args=(o,), daemon=True).start()
-    t0 = time.monotonic()
-    while time.monotonic()-t0 < 110:
-        if S["reset"]:
-            o._panel.setFrame_display_(NSMakeRect(X0, Y0, W0, H0), True)
-            S["reset"] = False
-        o.pump()
-        if not S["go"]:
-            break
-    for l in S["out"]: print(l)
-    o.close()
-    subprocess.run(["osascript", "-e",
-        'tell application "System Events" to set visible of every process to true'], check=False)
+    o = None
+    try:
+        o = Overlay(); o.show()
+        for i in range(20): o.finalize(f"S{i}.", f"第 {i} 句。")
+        APP.activateIgnoringOtherApps_(True)
+        threading.Thread(target=drive, args=(o,), daemon=True).start()
+        t0 = time.monotonic()
+        while time.monotonic()-t0 < 110:
+            if S["reset"]:
+                o._panel.setFrame_display_(NSMakeRect(X0, Y0, W0, H0), True)
+                S["reset"] = False
+            o.pump()
+            if not S["go"]:
+                break
+        for l in S["out"]: print(l)
+    finally:
+        # ⚠️⚠️ **恢复必须在 `finally` 里，而且谓词要和隐藏时一模一样**
+        #    （2026-09-28 审查指出）：
+        #    · 原来它裸放在末尾 —— 中途任何一步抛异常（Overlay 构造 / pump /
+        #      finalize / 线程里冒出来的错），用户桌面上**所有应用会一直藏着**。
+        #      这是这个探针能造成的最坏后果。
+        #    · 而恢复原来写的是 `every process`（**不带** background only 谓词），
+        #      比隐藏宽 —— 会把用户本来就没显示的后台应用一并翻出来。
+        if o is not None:
+            o.close()
+        subprocess.run(["osascript", "-e", _VIS + "to true"], check=False)
 
 
 main()

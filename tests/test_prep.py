@@ -218,9 +218,11 @@ def main() -> int:
                 {"term": "supply", "confidence": 0.99, "why": "已在表里"},
                 {"term": "quantum flux capacitor", "confidence": 0.99, "why": "编造"},
             ]}
-            calls = []
+            # ⚠️ 原来这里有个 `calls = []` + `calls.append(len(u))`，
+            #    **全文件没有任何地方读它**（2026-09-28 审查指出）—— 死变量，
+            #    还会让人以为"prompt 拼得对不对"已经测过了。
+            #    `chat` 是否被调用由下面的结果断言间接钉住（`r.added` 非空 ⇒ 调过）。
             def chat(s, u):
-                calls.append(len(u))
                 return CAND
             def run(**kw):
                 return prep.prepare("ECON99999", [deck], glossary_dir=gdir,
@@ -324,7 +326,9 @@ def main() -> int:
             check(f"置信度相差 >{(thr - 1) * 100:.1f}% -> 顺序不可能被频率/标题翻盘",
                   prep._rank([hi, lo])[0]["term"] == "high", f"翻盘阈值 = {thr:.4f}")
             lo2 = _row("low2", 0.90 / thr * 1.05, 1.0, 1)    # 差 < 阈值
-            check("差 <21.6% 时**确实会**被翻盘（证明这条乘子不是死的）",
+            # ⚠️ 文案里的阈值也必须**从常量算**（2026-09-28 审查指出）——
+            #    正上方那句注释刚立了这条规矩，这里却抄死了 21.6%。
+            check(f"差 <{(thr - 1) * 100:.1f}% 时**确实会**被翻盘（证明这条乘子不是死的）",
                   prep._rank([_row("hi2", 0.90, 0.0, 0), lo2])[0]["term"] == "low2")
         finally:
             build_notes.NOTES_FILE, build_notes.AUTO_FILE = _saved
@@ -644,6 +648,15 @@ def main() -> int:
         check("⚠️ 容错有歧义时**退回精确路径**（宁可指到不存在的，也不指到别人的）",
               not paths.course_dir("040", root=amb2).exists(),
               str(paths.course_dir("040", root=amb2)))
+        # ⭐ 点开头的目录**不算候选**：`courses/.removed/` 是「只删课号」的保留区，
+        #    而 `".removed".endswith("ed")` 为真 —— 短号 `ed` 会**唯一命中它**，
+        #    于是课件被读写到已删课程的归档目录里，且全程无声。
+        #    （2026-09-28 OCR 指出；去掉 don't-count-dot-dirs 这半，下面这条当场变红。）
+        rem = tmp / "state_removed"
+        (rem / "courses" / ".removed").mkdir(parents=True)
+        check("⭐ 点开头的目录不当课目录（`.removed` 会被短号 ed 命中）",
+              not paths.course_dir("ed", root=rem).exists(),
+              str(paths.course_dir("ed", root=rem)))
 
         bad = [n for n, ok in RESULTS if not ok]
         print(f"\n{'=' * 62}")

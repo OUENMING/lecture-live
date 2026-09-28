@@ -38,7 +38,11 @@ RESULTS: list[tuple[str, bool]] = []
 
 def sh(*a, cwd):
     r = subprocess.run(a, cwd=cwd, capture_output=True, text=True)
-    assert r.returncode == 0, f"{a} -> {r.stderr}"
+    # ⚠️ **不能用 `assert`**（2026-09-28 审查指出）：`python -O` 会把 assert
+    #    **整条剥掉**，于是 git 命令失败被静默忽略 —— 测试世界（origin/seed/clone）
+    #    自己先坏了，后面全是难以定位的假绿/假红。
+    if r.returncode != 0:
+        raise RuntimeError(f"{a} -> {r.stderr}")
     return r.stdout.strip()
 
 
@@ -87,7 +91,10 @@ def release(seed, ver, mode=None, reqs=None):
     sh("git", "add", "-A", cwd=seed)
     sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", f"rel {ver}", cwd=seed)
     sh("git", "push", cwd=seed)
-    assert update.versions_in(cl)[0] == ver, "测试脚本自己错了：CHANGELOG 顺序不是新的在上"
+    # ⚠️ 同上：这条护栏防的是「顺序倒置 → `todo` 算空 → 本该跳过的却拉了」，
+    #    被 `-O` 剥掉就等于**顺序倒置的 bug 重新变成假绿**。改显式 raise。
+    if update.versions_in(cl)[0] != ver:
+        raise RuntimeError("测试脚本自己错了：CHANGELOG 顺序不是新的在上")
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -139,6 +146,20 @@ check("A3 分叉 -> --ff-only 失败且不造 merge",
 print("\nB. auto_update() 的分级与降级\n")
 
 
+def _snapshot(root) -> dict:
+    """工作区快照：**每个文件的相对路径 → 内容 sha256**。
+
+    ⚠️ 跳过 `.git/` —— 那是测试自己造的仓库内务，不是"用户的工作区内容"。
+    """
+    import hashlib
+    out = {}
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or ".git" in p.parts:
+            continue
+        out[p.relative_to(root).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return out
+
+
 def auto_case(name, releases, expect_pull, dirty=False):
     tmp, seed, clone = new_world()
     for item in releases:
@@ -146,11 +167,20 @@ def auto_case(name, releases, expect_pull, dirty=False):
     if dirty:
         (clone / "MY_EDIT.txt").write_text("别丢我\n", encoding="utf-8")
     before = (clone / "VERSION").read_text().strip()
-    files_before = sorted(p.name for p in clone.iterdir())
+    names_before = sorted(p.name for p in clone.iterdir())
+    snap_before = _snapshot(clone)
     r = update.auto_update()
     after = (clone / "VERSION").read_text().strip()
-    files_after = sorted(p.name for p in clone.iterdir())
-    no_loss = files_before == files_after
+    names_after = sorted(p.name for p in clone.iterdir())
+    snap_after = _snapshot(clone)
+    # ⚠️⚠️ 「无损」要分**两档**（2026-09-28 审查指出）：原来只比 `iterdir()` 的
+    #    **顶层文件名** —— `VERSION` / `requirements.txt` / `CHANGELOG.md` 被
+    #    **改写或截断**时名字一个都没变，于是「脏工作区停手、一个字节都不动」
+    #    这条核心安全断言是**弱的**。
+    #    · **该拒绝**的那几档：内容也必须逐字节相同（那才是"停手"）；
+    #    · **真拉**的那一档：内容本来就会变（那是它的目的）—— 要求的是**没丢文件**。
+    no_loss = ((snap_before == snap_after) if not expect_pull
+               else (names_before == names_after))
     check(name, (before != after) == expect_pull and no_loss,
           f"{before}->{after} pulled={before != after} 期望={expect_pull} "
           f"reason={r.get('reason', '') or '-'} 文件无损={no_loss}")
@@ -205,9 +235,14 @@ def _steal(*a, **kw):
     lk2.write_text("99999", encoding="utf-8")      # 模拟别的进程抢走
     return {"ok": True, "skipped": True, "after": "0.0.1", "error": "",
             "commits": 0, "reqs_changed": False}
-update.pull = _steal
-update.auto_update()
-update.pull = _real_pull
+# ⚠️ **还原必须走 `finally`**（2026-09-28 审查指出）：原来只在正常返回时才
+#    `update.pull = _real_pull` —— `auto_update()` 一抛异常，桩就残留下来
+#    污染后面的 B8/B10/B11（而且本文件顶层没有 try，`shutil.rmtree` 与汇总也不会跑）。
+try:
+    update.pull = _steal
+    update.auto_update()
+finally:
+    update.pull = _real_pull
 check("B7c 锁被抢走后**不删**别人的锁", lk2.exists() and lk2.read_text().strip() == "99999",
       f"锁内容={lk2.read_text().strip()!r}（期望 '99999'，即抢走者的 pid）")
 lk2.unlink(missing_ok=True)

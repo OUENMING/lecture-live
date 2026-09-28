@@ -35,7 +35,18 @@ def check(name: str, ok: bool, detail: str = "") -> None:
     print(f"  {'✅' if ok else '❌'} {name}" + (f"\n      {detail}" if detail else ""))
 
 
+SKIPPED: list[tuple[str, str]] = []
+
+
 def skip(name: str, why: str) -> None:
+    """跳过一条**依赖本机真实样本**的判据。
+
+    ⚠️⚠️ **必须进统计**（2026-09-28 审查指出）：原来只打印一行，于是
+       `~/UCD` 不存在时（换台机器 / CI / 样本被删）依赖真样本的**关键用例全部
+       静默跳过**，结算行照样 `0/0 通过`、退出码 0 —— 一个"看起来绿、其实
+       什么都没验"的绿。下面结算时会把跳过当成**没通过**处理。
+    """
+    SKIPPED.append((name, why))
     print(f"  ⚪ {name}（跳过：{why}）")
 
 
@@ -138,7 +149,12 @@ def main() -> int:
         cases = {
             "空文件": b"",
             "非 PDF（纯文本改名）": b"this is not a pdf at all\n" * 40,
-            "截断的真 PDF": real.read_bytes()[:8000] if real else b"%PDF-1.4",
+            # ⚠️ 两个小问题（2026-09-28 审查指出）：① `read_bytes()[:8000]` 先把
+            #    整个 PDF 读进内存再切片（`open().read(8000)` 就够）；
+            #    ② 回退桩 `b"%PDF-1.4"` 是**完整**的一个头、不是"截断的" ——
+            #    那测的是"只有头"这种坏输入，与这一档声称的对不上。
+            "截断的真 PDF": ((real.open("rb").read(8000) if real
+                              else (b"%PDF-1.4\n" + b"%" * 400)[:60])),
         }
         for i, (label, data) in enumerate(cases.items()):
             p = tmp / f"bad{i}.pdf"
@@ -221,10 +237,16 @@ def main() -> int:
               str([b.text for b in r.blocks if b.kind == "table"]))
         # ⭐ 这条是**区分性**的：把实现写成「两次 iter()`（先全部表格再全部段落）」
         #    —— 那是 pptx 那条路的写法 —— 这条就会红。见 `_docx_blocks` 的注释。
+        # ⚠️⚠️ 两处都会**抛 ValueError 而不是报 ❌**（2026-09-28 审查指出）：
+        #    · `texts.index(…)` 找不到那个标记就抛；
+        #    · `max(…)` 在**一个表格块都没有**时抛空序列 —— 而"表格抽不出来"
+        #      恰恰就是这条判据要守的那个失败 → 测试**崩掉**，后面所有断言不跑，
+        #      汇总行也没有。先算好、判存在性，再比大小。
+        _tbl = [i for i, b in enumerate(r.blocks) if b.kind == "table"]
         check("⭐ 顺序保真：表格后面的段落仍在表格之后",
-              texts.index("AFTER_THE_TABLE") > max(
-                  i for i, b in enumerate(r.blocks) if b.kind == "table"),
-              str(texts))
+              ("AFTER_THE_TABLE" in texts and bool(_tbl)
+               and texts.index("AFTER_THE_TABLE") > max(_tbl)),
+              f"tbl={_tbl} texts={texts}")
         check("DOCX 没有页的概念 -> page 一律 1",
               all(b.page == 1 for b in r.blocks))
 
@@ -291,6 +313,17 @@ def main() -> int:
             print("失败：")
             for n in bad:
                 print(f"  ❌ {n}")
+        if SKIPPED:
+            print(f"\n⚠️ 另有 {len(SKIPPED)} 条**跳过**（依赖本机真实样本）：")
+            for _n, _w in SKIPPED:
+                print(f"  ⚪ {_n} —— {_w}")
+        # ⚠️⚠️ **"没跑全"与"跑过且通过"必须分开**（2026-09-28 审查指出）：
+        #    有跳过（或一条判据都没跑到）时返回非零 —— 否则换台机器跑出来的
+        #    `0/0 通过` 会被当成真绿。这条是本仓库「负结果不许读起来像穷尽」
+        #    在测试结算行上的同一形状。
+        if SKIPPED or not RESULTS:
+            print("⚠️ 有跳过 / 根本没跑到判据 —— 这次**不足以**当作通过。")
+            return 1
         return 1 if bad else 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

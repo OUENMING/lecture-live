@@ -4,10 +4,22 @@
 # 通用密钥形态：仓库是公开的，误放一个文件就会永久留在 git 历史里
 .env
 .env.*
+# ⚠️ 但**模板要放行**（2026-09-28 审查指出）：`.env.*` 会连带把 `.env.example`
+#    这类要给人复制的样板也忽略掉，而且整个文件没有一条 `!` 规则 ——
+#    将来真加了模板会**静默不入库**（`git status` 里根本不出现，很难察觉）。
+!.env.example
+!.env.sample
+!.env.template
 *.key
 *.pem
 id_rsa*
 credentials*
+# ⚠️ 补四种**最常见的密钥容器**（2026-09-28 审查指出）：这个项目自己就在
+#    构建 macOS `.app`，而签名证书导出就是 `.p12` —— 误提交会永久留在 git 历史里。
+*.p12
+*.pfx
+*.jks
+*.keystore
 
 # ── 本地术语数据（含学校课号，按需自备）──────────────────
 # glossary.txt 由 glossary.example.txt 复制而来

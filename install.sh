@@ -43,9 +43,23 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 
 # 比较两个路径是不是同一个地方（都先规范化成物理路径）。
 same_as_app() {
-  local _t="$1" _real
-  _real="$(cd "$(dirname "$_t")" 2>/dev/null && pwd -P)/$(basename "$_t")" || return 1
-  [ "$_real" = "$APP" ]
+  # ⚠️⚠️ `$2` = **链接自己所在的那个目录**。相对目标必须靠它解析（2026-09-28 审查指出）：
+  #    `readlink` 对相对目标**原样返回字符串**（如 `ClassLive.app`），
+  #    这时 `dirname` 只能给出 `.`，而 `cd .` 是按**当前工作目录**解析的 ——
+  #    跟链接在哪儿毫无关系。后果：`--check` 误报「指向别的副本」，
+  #    `--uninstall` 更会**拒绝删掉本属于自己的链接**。
+  # ⚠️ 拼出来还可能是 `a/../b` 这种**没归一化**的形式（`../repoA/ClassLive.app`），
+  #    直接比字符串照样误判 —— 所以两边都 `cd` 进去取**物理路径**（`pwd -P`
+  #    顺带解掉中间那层符号链接）。实测四种形态（绝对/相对/带 `../`/指向别处）都对。
+  local _t="$1" _base="${2:-.}" _real _dir _name _app
+  case "$_t" in
+    /*) _real="$_t" ;;
+    *)  _real="$_base/$_t" ;;
+  esac
+  _dir="$(cd "$(dirname "$_real")" 2>/dev/null && pwd -P)" || return 1
+  _name="$(basename "$_real")"
+  _app="$(cd "$(dirname "$APP")" 2>/dev/null && pwd -P)/$(basename "$APP")" || return 1
+  [ "$_dir/$_name" = "$_app" ]
 }
 
 # ⚠️⚠️ 参数白名单必须排在**任何会写盘的分支之前**。
@@ -93,7 +107,7 @@ if [ "${1:-}" = "--check" ]; then
     say "   指向           $_tgt"
     if [ -d "$_tgt" ]; then
       say "   目标还在吗     ✅ 在"
-      if same_as_app "$_tgt"; then
+      if same_as_app "$_tgt" "$(dirname "$TARGET")"; then
         say "   是不是这一份   ✅ 是（当前仓库）"
       else
         say "   是不是这一份   ⚠️ 不是 —— 指向别的副本（仓库挪过位置？）"; _bad=1
@@ -133,7 +147,7 @@ if [ "${1:-}" = "--uninstall" ]; then
   #    这个脚本没有资格替用户决定"那个东西该不该删"。
   if [ -L "$TARGET" ]; then
     _tgt="$(readlink "$TARGET")"
-    if same_as_app "$_tgt"; then
+    if same_as_app "$_tgt" "$(dirname "$TARGET")"; then
       # ⚠️ 不要写成 `rm ... && say ...`：`rm` 失败时 `&&` 短路跳过了成功提示，
       #    但后面的说明行照打、最后仍然 `exit 0` —— 用户以为删掉了，其实没删。
       rm "$TARGET" || fail "删不掉 ${TARGET}（权限不足？）—— 它还在那儿。"
@@ -176,7 +190,7 @@ fi
 say "② 检查 $TARGET …"
 if [ -L "$TARGET" ]; then
   _cur="$(readlink "$TARGET")"
-  if same_as_app "$_cur"; then
+  if same_as_app "$_cur" "$(dirname "$TARGET")"; then
     say "   ✅ 已经是我们要的链接（幂等，什么都不用做）"
     exit 0
   fi
@@ -217,8 +231,16 @@ say "④ 自检 …"
 _bad=0
 chk() { if [ "$2" = 1 ]; then say "   ✅ $1"; else say "   ❌ $1"; _bad=1; fi; }
 
-[ -L "$TARGET" ] && chk "链接在 $TARGET" 1 || chk "链接在 $TARGET" 0
-same_as_app "$(readlink "$TARGET")" && chk "指向当前仓库" 1 || chk "指向当前仓库" 0
+# ⚠️ 链接不在时**别接着往下判**（2026-09-28 审查指出）：`readlink` 返回空串，
+#    于是这里会再打一行 ❌「指向当前仓库」—— 把"链接根本没建起来"这个真因
+#    盖在两条看着独立的失败下面，排查方向被带偏。
+if [ -L "$TARGET" ]; then
+  chk "链接在 $TARGET" 1
+  same_as_app "$(readlink "$TARGET")" "$(dirname "$TARGET")" \
+    && chk "指向当前仓库" 1 || chk "指向当前仓库" 0
+else
+  chk "链接没建起来（上面那几步的报错才是真因）" 0
+fi
 [ -x "$TARGET/Contents/MacOS/python" ] && chk "透过链接能摸到可执行文件" 1 \
                                        || chk "透过链接能摸到可执行文件" 0
 

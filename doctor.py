@@ -21,7 +21,6 @@ import pathlib
 import shutil
 import subprocess
 import sys
-from typing import NamedTuple
 
 HERE = pathlib.Path(__file__).resolve().parent
 

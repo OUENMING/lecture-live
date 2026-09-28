@@ -165,11 +165,21 @@ def _blocks(lines: list, *, is_session: bool):
     out, start = [], None
     for i, ln in enumerate(lines, 1):
         if _TS.match(ln):
-            if start is not None:
+            if start is None:
+                # ⚠️ **第一条抬头之前的内容也成一块**（2026-09-28 审查指出）：
+                #    `obsidian_writer` 在会话文件开头写的是标题行
+                #    （`# 课号 · 日期`），原来它**整段被丢掉** ——
+                #    "搜课号看哪几节课提过"这种用法会**一条都搜不到**，且无声。
+                if i > 1:
+                    out.append((1, i - 1, "\n".join(lines[:i - 1])))
+            else:
                 out.append((start, i - 1, "\n".join(lines[start - 1:i - 1])))
             start = i
-    if start is not None:
-        out.append((start, len(lines), "\n".join(lines[start - 1:])))
+    if start is None:
+        # ⚠️ 一份会话**一条抬头都没有**（录课中断 / 格式变过）——
+        #    别把整份文件丢掉，退回一行一块（与拿不到 `_TS` 时同一条退化路径）。
+        return [(i, i, ln) for i, ln in enumerate(lines, 1)]
+    out.append((start, len(lines), "\n".join(lines[start - 1:])))
     return out
 
 
@@ -319,13 +329,19 @@ def read(path, lo: int, hi: int) -> str:
     p = pathlib.Path(path)
     lo = max(1, int(lo))
     hi = max(lo, int(hi))
-    capped = (hi - lo + 1) > MAX_READ_LINES
-    if capped:
-        hi = lo + MAX_READ_LINES - 1
     try:
         lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
     except OSError as e:
         return f"⚠ 读不了 {p.name}：{e}"
+    # ⚠️⚠️ **先把 `hi` 夹到真实行数，再判「有没有被上限截断」**（2026-09-28 审查指出）：
+    #    顺序反了的话，`read(p, 1, 99)` 对一份只有 50 行的文件会算出 `capped=True`
+    #    → 给模型那句「⚠️ 这里被截断了」是**假话**（50 行一条没少），
+    #    而模型会因此以为自己没看全（本模块的纪律是"截断必须说出来"，
+    #    但**没说到的也绝不能谎报**）。
+    hi = min(hi, len(lines))
+    capped = (hi - lo + 1) > MAX_READ_LINES
+    if capped:
+        hi = lo + MAX_READ_LINES - 1
     body = "\n".join(lines[lo - 1:hi])
     cut = len(body) > MAX_READ_CHARS
     body = body[:MAX_READ_CHARS]                    # 越界切片本就是 no-op

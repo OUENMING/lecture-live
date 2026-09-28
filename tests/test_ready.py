@@ -211,7 +211,10 @@ def t_hf_cached_usable():
     cache = (pathlib.Path.home() / ".cache/huggingface/hub"
              / "models--mlx-community--Qwen3-1.7B-4bit")
     if not cache.is_dir():
-        return                                    # 这台机器没下过 → 跳过，别假红
+        # ⚠️ **用 `_Skip`，不要 `return`**（2026-09-28 审查指出）：运行器把
+        #    「正常返回」打成 ✅，于是没有这个缓存的干净机器/CI 上，这条**关键回归**
+        #    （「可用但 HF 判为不完整 → 必须 True」）会被计成"通过"，其实一次都没跑。
+        raise _Skip("这台机器没下过 Qwen3 的 HF 缓存")
     assert OPT[0].at_hf, "（夹具自检：Qwen3 那条该标了 at_hf）"
     got = doctor.hf_cached(OPT[0].src)
     assert got is True, (
@@ -219,11 +222,23 @@ def t_hf_cached_usable():
         f"两个文档文件；权重与 config 都在")
 
 
+class _Skip(Exception):
+    """这台机器**没有这个前提**（例如没下过那个 HF 缓存）—— 不等于通过。"""
+
+
+SKIP: list[tuple[str, str]] = []
+
+
 def main_() -> int:
     print("=" * 60)
     for name, fn in CASES:
         try:
             fn()
+        except _Skip as e:
+            # ⚠️ 「没跑过」必须和「跑过且通过」分开（2026-09-28 审查指出）：
+            #    原来靠 `return` 跳过，而下面那个 `else` 会把它打成 ✅。
+            print(f"  ⚪ {name}\n      （跳过：{e}）")
+            SKIP.append((name, str(e)))
         except AssertionError as e:
             print(f"  ❌ {name}\n      {str(e)[:220]}")
             FAIL.append(name)
@@ -234,6 +249,10 @@ def main_() -> int:
             print(f"  ✅ {name}")
     print("=" * 60)
     print(f"{len(CASES) - len(FAIL)}/{len(CASES)} 通过")
+    if SKIP:
+        print(f"⚠️ 另有 {len(SKIP)} 条**跳过**（前提不在本机，没跑过）：")
+        for _n, _w in SKIP:
+            print(f"  ⚪ {_n} —— {_w}")
     for n in FAIL:
         print(f"  ❌ {n}")
     return 1 if FAIL else 0

@@ -282,7 +282,6 @@ def build(course: str | None = None, api_key: str | None = None,
         try:
             obj = _chat_json(key, model, SYS_CLASSIFY, "\n".join(chunk),
                              1600, 0.2)
-            got = 0
             miss = 0
             for t in chunk:
                 lv = _pick(obj or {}, t)
@@ -298,7 +297,6 @@ def build(course: str | None = None, api_key: str | None = None,
                     # 现在: 有 detail 就当 gloss(不降级), 空条目才给 basic。
                     miss += 1
                     terms[t]["level"] = _fallback_level(terms[t])
-                got += 1
             print(f"  [{i + len(chunk)}/{len(todo_cls)}] 分类完成"
                   + (f"（{miss} 条模型没给可识别档位, 按有无 detail 兜底）" if miss else ""))
         except Exception as e:                            # noqa: BLE001
@@ -557,8 +555,12 @@ class TermNotes:
         try:
             save_to(self._auto_path, {"built": datetime.date.today().isoformat()},
                     auto, extra)
-        except Exception:                                 # noqa: BLE001
-            pass
+        except Exception as e:                            # noqa: BLE001
+            # ⚠️ **出声**（2026-09-28 审查指出）：同一个函数里上面那条「缓存坏了」
+            #    是会打印的，唯独这条落盘失败静默 —— 后果是"这次查得到、下次查不到"，
+            #    而用户（和后来的我）无从知道为什么。
+            print(f"⚠ 专有名词缓存没写成（{type(e).__name__}: {e}）"
+                  f" —— 本次运行照常，下次启动会少这条", flush=True)
         self._auto[term] = entry
         self._build_index()
 

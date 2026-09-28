@@ -306,7 +306,15 @@ def main() -> int:
     print("\n--- ③ 单进程同时装两个消费者（那次事故的现场）---")
     import overlay
     import whatsnew
-    check("单进程 import overlay + whatsnew 不炸", True)
+    # ⚠️ 原来这里是 `check("单进程 import overlay + whatsnew 不炸", True)` —— **恒真**
+    #    （2026-09-28 审查指出）：上面两句 import 真要炸，进程早就 traceback 崩了，
+    #    根本轮不到这一行；它把"导入没抛"伪装成"验证了两个消费者能共存"。
+    #    真判据在下面（`overlay.Overlay()` 真的构造出来 + 与老配方对拍）。
+    #    这里只断言**两个模块都带着自己的对象工厂**——事故现场是 ObjC 类名撞车。
+    check("两个模块都导进来了、且各自的对象工厂在",
+          callable(getattr(overlay, "Overlay", None))
+          and callable(getattr(whatsnew, "skip_flag_path", None)),
+          f"overlay.Overlay={getattr(overlay, 'Overlay', None)}")
     with restore_window_file():
         ov = overlay.Overlay()
         # ⚠️ 这里**不能整体对拍**：真 Overlay 在配方之外还自己加了几样 ——
@@ -758,14 +766,19 @@ def main() -> int:
                     pass
             return out
 
-        closes = [b for b in _all_btns(h2.window.contentView())
-                  if b.title() == "关闭"]
-        check("⭐「关闭」的 target 还在（没被 GC）—— 弱引用的经典坑",
-              len(closes) == 1 and closes[0].target() is not None,
-              f"target={[str(b.target()) for b in closes]}")
-        if closes and closes[0].target() is not None:
-            _click(closes[0])
-            check("⭐ 点「关闭」-> 窗口真的关掉了", not bool(h2.window.isVisible()))
+        # ⚠️ 这两条原来在 `if h2 is not None` **外面**（2026-09-28 审查指出）：
+        #    面板起不来时会走到 `h2.window` → `AttributeError` → **整个进程崩掉**，
+        #    后面的断言全不跑、"失败"退化成"崩溃且不可读"（连 `n/N 通过` 都没有）。
+        if h2 is not None:
+            closes = [b for b in _all_btns(h2.window.contentView())
+                      if b.title() == "关闭"]
+            check("⭐「关闭」的 target 还在（没被 GC）—— 弱引用的经典坑",
+                  len(closes) == 1 and closes[0].target() is not None,
+                  f"target={[str(b.target()) for b in closes]}")
+            if closes and closes[0].target() is not None:
+                _click(closes[0])
+                check("⭐ 点「关闭」-> 窗口真的关掉了",
+                      not bool(h2.window.isVisible()))
 
         # ⭐⭐⭐ **生产路径：`state_root=None`。** 这一条是本轮最该有的测试。
         #     隔离跑器一直传 `state_root=ISO`，把生产那支**整个绕过**了 ——
@@ -823,6 +836,20 @@ def main() -> int:
         EP2.close_panel()
     finally:
         EP2.close_panel()
+        # ⚠️⚠️ **隔离失效时要还原现场**（2026-09-28 审查指出）：本文件开头那条
+        #    「测试必须隔离写端……先备份、跑完还原」原来只做到**备份 + 检查**，
+        #    缺了「还原」这半 —— 万一 `glossary_of` 回归写死成真实路径，
+        #    这一节会**真的改掉用户手写的词表**，而测试只报一条红就完了
+        #    （上面那几条 `real_before` 断言正是为这种情况写的，但它们**不会修**）。
+        #    这里做逐字节兜底还原：没变就什么都不做。
+        try:
+            if real.exists() and real.read_bytes() != real_before:
+                real.write_bytes(real_before)
+                print("  ⚠️ 真 glossary 被动过 —— 已按内存备份**逐字节还原**"
+                      "（说明隔离失效了，去查 `glossary_of`）")
+        except OSError as e:
+            print(f"  ❗ 真 glossary 被改过，而还原失败：{e}")
+            print(f"     ⚠️ 备份只有内存这一份（{len(real_before)} 字节），别关这个终端")
         _sh.rmtree(iso, ignore_errors=True)
 
     print("\n--- ⑧ 开/关不许漏面板（闭包成环）---")
@@ -931,8 +958,12 @@ def main() -> int:
 
     # ⚠️ 假 pb 的 `types()` 是硬要求 —— 少了它上面**每一条都会抛异常**。
     #    （先崩在 `draggingEntered` 里，异常从 `_call` 的 try 外面逃出去。）
-    check("假 pasteboard 满足 `types()` 这条硬要求（不是可选的）",
-          isinstance(_PB([]).types(), list))
+    # ⚠️ 原来这里有一条 `check("假 pasteboard 满足 types() …",
+    #    isinstance(_PB([]).types(), list))` —— **恒真**（2026-09-28 审查指出）：
+    #    `_PB` 是本文件自己的假对象，断它自己的属性永远不会红；真缺了 `types()`
+    #    是**抛 AttributeError**（上面那几条会当场崩），也不是这条抓得到的。
+    #    → 删掉假断言，只留这条**说明**：`panel.dragging_entered` 里那句
+    #    `types=` 是**提前求值**的、且在 `_call` 的 try 外面，所以假 pb 必须有它。
 
     # ⚠️⚠️ 上面那些用的是**本地的判据替身**（`_e` 里内联了 `is_supported`）——
     #    那钉的是 `make_drop_target` 的契约，**不是 `entry_panel._enter`**。

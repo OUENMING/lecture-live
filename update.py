@@ -279,10 +279,36 @@ def auto_update() -> dict:
         if stamp.exists() and (time.time() - stamp.stat().st_mtime) < RATE_LIMIT_S:
             return {**out, "skipped": True, "reason": "限频（一小时一次）"}
         # ---- 并发保护（陈旧锁自过期）----
+        # ⚠️⚠️ **抢锁必须原子**（2026-09-28 审查指出）：原来是
+        #    `if lock.exists() and 不陈旧: 返回` 然后再 `lock.write_text(...)` ——
+        #    那是 check-then-act，两个更新器可以**同时**通过那一关、各自把锁写下去。
+        #    而这道锁护的正是「同时跑 `git pull` / 下 1.2 GB 模型」。
+        #    改走 `O_EXCL` **排他创建**：判断交给内核，没有窗口。
+        def _take_lock() -> bool:
+            """建锁文件。文件已存在 -> False（锁是别人的）。"""
+            try:
+                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                return False
+            try:
+                os.write(fd, str(os.getpid()).encode("utf-8"))
+            finally:
+                os.close(fd)
+            return True
+
         try:
-            if lock.exists() and (time.time() - lock.stat().st_mtime) < LOCK_STALE_S:
-                return {**out, "skipped": True, "reason": "已有更新在跑"}
-            lock.write_text(str(os.getpid()), encoding="utf-8")
+            if not _take_lock():
+                # 文件在。**只**在它确实陈旧（上次崩了没清）时才删掉重抢一次，
+                # 否则认输 —— 「删了再抢」本身也可能把别人刚建的锁删掉，
+                # 所以判陈旧要尽量准。
+                try:
+                    stale = (time.time() - lock.stat().st_mtime) >= LOCK_STALE_S
+                    if stale:
+                        lock.unlink()
+                except OSError:
+                    stale = False
+                if not (stale and _take_lock()):
+                    return {**out, "skipped": True, "reason": "已有更新在跑"}
             held = True                               # 从这里起，锁才是**我们的**
         except Exception:                                 # noqa: BLE001
             pass
@@ -466,8 +492,12 @@ def pending_steps() -> list[dict]:
                 "detail": total,
                 "why": "缺模型的话课上会直接起不来（不是降质，是跑不了）。",
             })
-    except Exception:                                     # noqa: BLE001
-        pass
+    except Exception as e:                                # noqa: BLE001
+        # ⚠️ **别静默**（2026-09-28 审查指出）：`import doctor` 失败 / 探测出错时，
+        #    「下载模型」这一步会**从卡片上整条消失** —— 用户看到的是"没有要下的东西"，
+        #    而真相是"我们没查出来"。同本模块「软失败不等于静默」那条。
+        print(f"⚠ 探模型没探成（{type(e).__name__}: {e}）—— 卡片上不会列「下载模型」",
+              flush=True)
 
     # ③ 重建 .app：锚在上面两条之后（它是最后一道打包，也最重）。
     # ⚠️ 为什么需要：`cl update` **只拉代码、不重建 .app** ——

@@ -280,7 +280,6 @@ class _StreamParser:
         self._en: list[str] = []
         self._buf = ""
         self._pre: list[str] = []          # 未出现 ZH: 前的累积(防丢弃)
-        self._en_seen = False
 
     @staticmethod
     def _find_marker(s: str, marker: str) -> int:
@@ -329,7 +328,6 @@ class _StreamParser:
                 self._buf = self._buf[k + 3:]
                 if emit:
                     self._zh.append(emit); self.on_zh(emit)
-                self._en_seen = True
                 self.state = "in_en"
                 continue
             if self.state == "in_en":

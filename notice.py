@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 
 # ⚠️ bundle id 与 `make-app.sh` 里写死的那个必须一致
 SYSTEM_SETTINGS_MIC = (
@@ -107,30 +106,52 @@ def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
         _prev = app.activationPolicy()
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
-        a = NSAlert.alloc().init()
-        a.setMessageText_(title)
-        a.setInformativeText_(message)
-        for b in buttons:
-            a.addButtonWithTitle_(b)
-        _url_btn = None
-        if url:
-            _url_btn = a.addButtonWithTitle_("打开系统设置")
+        try:
+            a = NSAlert.alloc().init()
+            a.setMessageText_(title)
+            a.setInformativeText_(message)
+            for b in buttons:
+                a.addButtonWithTitle_(b)
+            _url_btn = None
+            if url:
+                _url_btn = a.addButtonWithTitle_("打开系统设置")
 
-        a.window().center()
-        a.window().orderFrontRegardless()
-        idx = a.runModal() - 1000                          # NSAlertFirstButtonReturn = 1000
+            a.window().center()
+            a.window().orderFrontRegardless()
+            idx = a.runModal() - 1000                      # NSAlertFirstButtonReturn = 1000
 
-        # 设回原值永远是对的（值没变时就是无操作）—— 不用加条件
-        app.setActivationPolicy_(_prev)
-        if _url_btn is not None and idx == len(buttons):
-            open_mic_settings()
-            return "打开系统设置"
-        return buttons[idx] if 0 <= idx < len(buttons) else (
-            fallback if fallback is not None else buttons[0])
+            if _url_btn is not None and idx == len(buttons):
+                # ⚠️ 开的是**调用方给的那个 URL**，不是写死的麦克风页 ——
+                #    原来这里无脑调 `open_mic_settings()`，于是「传别的 URL 也会
+                #    跳到麦克风页」，与 docstring / 上面那条 print 分支都对不上
+                #    （2026-09-28 审查指出）。
+                open_url(url)
+                return "打开系统设置"
+            return buttons[idx] if 0 <= idx < len(buttons) else (
+                fallback if fallback is not None else buttons[0])
+        finally:
+            # ⚠️ **必须在 `finally` 里设回**：放在 try 里的话，`runModal()` 一抛异常
+            #    就被下面那个 `except` 接走，policy 残留成 Accessory
+            #    —— 之后这个进程在 Dock / 窗口激活上的行为就一直是错的。
+            #    「设回原值永远是对的（值没变时就是无操作）」—— 不用加条件。
+            app.setActivationPolicy_(_prev)
     except Exception:                                     # noqa: BLE001
         # 弹不出来也不能让程序静默 —— 至少留下文字
         print(f"\n⚠ {title}\n{message}", flush=True)
         return fallback if fallback is not None else buttons[0]
+
+
+def open_url(url: str) -> bool:
+    """用 `open` 打开一个 URL。返回**系统有没有接受**。
+
+    ⚠️ `check=False` 之下 `subprocess.run` 几乎不抛，所以原来那个「恒返回 True」
+       等于没有返回值的意义（2026-09-28 审查指出）—— 现在看返回码。
+    """
+    try:
+        done = subprocess.run(["open", url], check=False, timeout=10)
+        return done.returncode == 0
+    except Exception:                                     # noqa: BLE001
+        return False
 
 
 def open_mic_settings() -> bool:
@@ -141,11 +162,7 @@ def open_mic_settings() -> bool:
        —— 两个在磁盘上都存在，但只有前者能在新版 System Settings 里定位到那一页。
        2026-09-26 实测有效（系统设置打开后右侧就是麦克风列表）。
     """
-    try:
-        subprocess.run(["open", SYSTEM_SETTINGS_MIC], check=False, timeout=10)
-        return True
-    except Exception:                                     # noqa: BLE001
-        return False
+    return open_url(SYSTEM_SETTINGS_MIC)
 
 
 def mic_permission() -> str:

@@ -55,6 +55,24 @@ def _safe(fn):
     return wrapper
 
 
+def _safe_loud(fn):
+    """与 `_safe` 同一件事，**但失败要出声**。
+
+    ⚠️ 专给「写最终报告」那种步骤用（2026-09-28 审查指出）：它失败之后用户
+       **什么都拿不到**，而 `@_safe` 会连一句话都不留 —— 屏上就只有"跑了测试模式、
+       没有任何报告"。热路径上的采集（逐块电平之类）仍然用静默那版，
+       否则一秒钟能刷一屏。
+    """
+    def wrapper(*a, **kw):
+        try:
+            return fn(*a, **kw)
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ {fn.__name__} 失败：{type(e).__name__}: {e}"
+                  f" —— 这次的测试报告没写成", flush=True)
+            return None
+    return wrapper
+
+
 def collect_env() -> dict:
     """环境快照 —— 没有它, 对方发来的报告里"为什么他的数不一样"无从判断。"""
     import platform
@@ -160,10 +178,21 @@ class TestSession:
         self._block_rms: list[float] = []
 
         if self.record_audio:
-            self._wav = wave.open(str(self.stem) + ".wav", "wb")
-            self._wav.setnchannels(1)
-            self._wav.setsampwidth(2)
-            self._wav.setframerate(SR)
+            # ⚠️⚠️ **这一段必须包起来**（2026-09-28 审查指出）：模块头的承诺是
+            #    「所有采集点都包在 try/except 里 / **绝不能影响上课**」，
+            #    而 `wave.open` 这一段整个在 try 外面 —— 磁盘满 / `sessions/` 只读 /
+            #    路径被占都会抛，把测试模式的构造（乃至整个进程）带下去。
+            #    失败就**降级成「不录音频」**，报告照出（同 `_wav = None` 那条既有路径）。
+            self._wav = None
+            try:
+                self._wav = wave.open(str(self.stem) + ".wav", "wb")
+                self._wav.setnchannels(1)
+                self._wav.setsampwidth(2)
+                self._wav.setframerate(SR)
+            except Exception as e:                        # noqa: BLE001
+                print(f"⚠ 音频录制开不了（{type(e).__name__}: {e}）"
+                      f" —— 测试模式照跑，只是没有音频", flush=True)
+                self._wav = None
             # 查过 CPython 源码 + 实测，把这件事说准：
             # · **wav 不会"头损坏"** —— `Wave_write.writeframes()` 每次调用都会
             #   `_patchheader()` 修正 RIFF 长度字段（`writeframesraw` 才不会），
@@ -254,7 +283,9 @@ class TestSession:
                             "kind": kind, "detail": detail[:200]})
 
     # ---- 收尾 ----
-    @_safe
+    # ⚠️ 这里是**唯一**用 `_safe_loud` 的地方：它是最终落盘，失败了用户手里
+    #    什么都没有 —— 静默吞掉等于"跑了测试模式但没有报告"，且查不出为什么。
+    @_safe_loud
     def finish(self, vad_report: str = "", note_path: str = "",
                bundle: bool = True) -> str | None:
         if self._wav is not None:

@@ -118,19 +118,66 @@ def echo(msg: str) -> None:
     print(msg, flush=True)
 
 
+# 终端提示等多久算「人不在」。⚠️ **这个数是拍的，没有测量背书** ——
+# 真正该测的是「作者离开键盘多久」，无从测。改这里**不影响 UI 那条路**（那条走卡片倒计时）。
+ASK_TIMEOUT_S = 60.0
+
+
+def _input_timed(prompt: str, timeout: float) -> str | None:
+    """带超时的 `input()`。**超时 / EOF / Ctrl+C 一律返回 `None`**（三态合一）。
+
+    ⚠️ 为什么不走 `input()` + `signal.alarm`（那是 SO 上的第二高票做法）：
+       本仓库的收尾**可以跑在工作线程上**，而 Python 的信号 handler
+       **只能在主线程装、也只在主线程跑**（PEP 475）。从工作线程 `signal.signal`
+       直接 `ValueError`；`signal.alarm` 虽然能设，但投递到的是**主线程** ——
+       等于把此刻正在跑 run loop 的主线程叫醒。`select` 没有这个问题。
+
+    ⚠️ 四条实测坑（macOS + 真 pty 量的，不知道就会写错）：
+      · 规范模式下**打了字但没回车，fd 不算可读** → 超时可能落在半句输入中间；
+      · ⚠️ **残留输入会被下一个提示吃掉**（实测：提示 1 里打 `abc` 不回车，
+        提示 2 直接返回 `'abc\\n'`）→ 所以超时必须 `tcflush`。**这不是保险丝，是修 bug**；
+      · `readline()` 遇 EOF 返回 `''` **不抛** `EOFError`（`input()` 才抛）→ 要判空串；
+      · `select` 对 `/dev/null` 与普通文件**恒报就绪** → 必须按 `isatty()` 分支，
+        不能靠 `select` 的返回值推断"有没有人"。
+    """
+    import select
+    import sys
+    try:
+        fd = sys.stdin.fileno()
+    except (OSError, ValueError):
+        return None                       # stdin 被关了（句柄没了 / 无控制台）
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    try:
+        if sys.stdin.isatty():
+            if not select.select([fd], [], [], timeout)[0]:
+                try:
+                    import termios
+                    termios.tcflush(fd, termios.TCIFLUSH)
+                except Exception:                     # noqa: BLE001
+                    pass                              # 冲不掉也不该因此不返回
+                return None
+        line = sys.stdin.readline()       # 非 tty：立刻返回（EOF 给空串）
+    except KeyboardInterrupt:
+        return None
+    except (OSError, ValueError):
+        return None
+    return None if line == "" else line.strip()
+
+
 def _ask_save_notes(n: int) -> bool:
     """结束时问是否存入 Obsidian。
-    ⚠️ 这里按 Ctrl+C / 非交互环境一律**默认保存** —— 会话文件已实时落盘,
-    这一步只决定要不要复制进 Obsidian 库, 绝不能因为一次误按丢掉整节课。"""
-    try:
-        ans = input(f"\n📝 本次共记录 {n} 句双语。存入 Obsidian 吗? [Y/n] ").strip().lower()
-    except KeyboardInterrupt:
-        echo("\n(Ctrl+C → 默认存入 Obsidian, 避免误丢)")
+
+    ⚠️ **超时 / Ctrl+C / 非交互环境一律默认保存** —— 会话文件已实时落盘,
+    这一步只决定要不要复制进 Obsidian 库, **绝不能因为一次误按或走开丢掉整节课**。
+    ⚠️ 2026-09-28 加的超时：原来是个裸 `input()`，作者走开时它**永远不返回** ——
+       实测挂过 4 小时 12 分，而且主线程卡在这里 → 界面冻死、退不掉。"""
+    ans = _input_timed(
+        f"\n📝 本次共记录 {n} 句双语。存入 Obsidian 吗? [Y/n] ", ASK_TIMEOUT_S)
+    if ans is None:
+        echo(f"\n(没等到回应（{ASK_TIMEOUT_S:.0f} 秒）/ 非交互环境 → 默认存入 Obsidian)")
         return True
-    except EOFError:
-        echo("\n(非交互环境 → 默认存入 Obsidian)")
-        return True
-    return ans in ("", "y", "yes", "是", "好", "存")
+    return ans.lower() in ("", "y", "yes", "是", "好", "存")
 
 
 NO_CLOUD_ANSWER = ("⚠ 讲解需要云端引擎(DeepSeek): 本地的 1.7B 模型只会翻译, 没有讲解能力。"

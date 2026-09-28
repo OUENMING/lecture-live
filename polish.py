@@ -20,6 +20,24 @@ from translator import domain_block
 POLISH_BATCH = 30           # 每次请求精修多少句(太长会漏行/被截断)
 POLISH_MAX_TOKENS = 4000
 
+# `on_progress(stage, done, total)` 里 stage 的**唯一定义点**（形状对齐 `prep.py:952`，
+# 显示名表对齐 `prep.STAGE_NAME` —— 面板那边照抄这张表就会漂，`entry_panel` 栽过一次）。
+# `polish_partial` 是**这一批没成**：它仍然算「这一批做完了」，但要让人当场看见，
+# 否则一节精修全失败时进度条照样走到 100%，读起来像成功。
+_STAGE_NAME = {"polish": "精修", "polish_partial": "精修（有批次没成）",
+               "review": "生成复习层"}
+STAGE_NAME = _STAGE_NAME
+
+
+def progress_text(stage: str, done: int, total: int) -> str:
+    """`(stage, done, total)` -> 一行人话。
+
+    ⚠️ 表只有一份（上面那张），这里只做显示。不认识的 stage **显示原名**，
+       别显示空白 —— 空白看起来像卡住了（同 `entry_panel.progress_text` 的取舍）。
+    """
+    label = STAGE_NAME.get(stage, stage)
+    return f"{label} {done}/{total}…" if total > 0 else f"{label}…"
+
 POLISH_SYS = """你是英文课堂笔记的精修助手。输入是一门课**一段**的逐句记录, 每行形如:
 [序号] 时间戳 | EN: <直播时已做初步矫正的英文> | ASR: <原始语音识别>
 另附课程领域、全课术语表、前几行已精修的上下文。
@@ -74,7 +92,16 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
 
     stats: 可选 dict, 函数把 {"batches", "failed", "applied"} 写进去。精修失败是
     **fail-soft** 的 —— 失败的批次静默保留原文, 返回值与全成功时看不出差别;
-    调用方(落盘笔记)只能靠这三个数判断这课到底精修了没有。"""
+    调用方(落盘笔记)只能靠这三个数判断这课到底精修了没有。
+
+    on_progress: `(stage, done, total)` —— 形状照 `prep.py:952` 的既有约定来,
+    stage 的取值见本文件的 `STAGE_NAME`。**逐条消息不是回调的形状** —— 那种写法
+    每加一个事件就要多一种字符串, 调用方只能靠认字。
+
+    ⚠️ 这个回调**在工作线程里被调**(收尾阶段)，UI 回写一律回主线程 —— 见
+       `entry_panel.py:1293` 同款注释。所以它**不许**碰 AppKit、不许 sleep。
+    ⚠️ 批次的失败/异常**也走这个回调**(`polish_partial`) —— 只报进度不报失败的话,
+       一整节精修全挂掉时进度照样走到 100%, 读起来像成功了。"""
     if not api_key or not entries:
         if stats is not None:
             stats.update({"batches": 0, "failed": 0, "applied": 0})
@@ -107,14 +134,13 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
         except Exception:                                 # noqa: BLE001
             failed += 1
             if on_progress:
-                on_progress(f"  ⚠ 精修批次 [{start}-{start+len(chunk)}] 失败, 保留原样")
+                on_progress("polish_partial", min(start + len(chunk), n), n)
             continue
         items = obj.get("items")
         if not isinstance(items, list):
             failed += 1
             if on_progress:
-                on_progress(f"  ⚠ 精修批次 [{start}-{start+len(chunk)}] 返回结构异常"
-                            f"(items 不是列表), 保留原样")
+                on_progress("polish_partial", min(start + len(chunk), n), n)
             continue
         got = 0
         for it in items:
@@ -138,7 +164,7 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
             # 对这一批而言与失败等价。不记的话调用方会把它当"精修过了"。
             failed += 1
         if on_progress:
-            on_progress(f"  [{min(start + len(chunk), n)}/{n}] 精修 +{got}")
+            on_progress("polish", min(start + len(chunk), n), n)
     if stats is not None:
         stats.update({"batches": batches, "failed": failed, "applied": applied})
     return out

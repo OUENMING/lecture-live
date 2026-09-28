@@ -316,6 +316,9 @@ _POLISH_NOTE = {
     "off": "⚠ 本课**未精修** —— 未配 API key 或精修已关, EN/ZH 为直播版。",
     "failed": "⚠ 本课**精修未生效** —— 调用失败、返回结构异常, 或一条都没采纳; EN/ZH 为直播版。",
     "partial": "⚠ 本课**部分批次精修失败** —— 失败批次保留直播版, 见下逐句转录。",
+    # ⚠️ 用户按 Ctrl+C 主动跳过。它**不是失败**（调用没出错），所以单独一档 ——
+    #    写成 failed 会让人以为 API 出问题了，然后去查一个不存在的问题。
+    "interrupted": "⚠ 本课**精修被跳过**（收尾时中断）—— EN/ZH 为直播版。",
 }
 
 
@@ -859,7 +862,7 @@ class ObsidianWriter:
         return "\n".join(L) + "\n"
 
     # ---- 结束: 询问是否进 Obsidian ----
-    def close(self, ask=None, qa=None) -> str:
+    def close(self, ask=None, qa=None, on_progress=None) -> str:
         """`qa` = 问答线程 history 的快照(list), 或**取快照的函数**。
 
         ⚠️ 不能走构造函数: writer 在 run() 里**先**建, qa 状态比它晚。
@@ -868,6 +871,11 @@ class ObsidianWriter:
         (问题还在, 答案没了)。函数形式把"取"推迟到真正要渲染的那一刻。
         ⚠️ 问答**只进 vault 笔记**, 不进 `sessions/` —— 那份逐句日志是三方共享
         契约(见 CLAUDE.md), 语义也不同(问答不是"课上讲了什么")。
+
+        `on_progress(stage, done, total)`: 精修/复习层的进度, **从工作线程里被调**
+        (2026-09-28 起收尾整段可以跑在 worker 上), 所以实现里**不许碰 AppKit**。
+        形状与 `prep.py:952` 一致; stage 的取值见 `polish.STAGE_NAME`。
+        ⚠️ 它只是**额外**的通路 —— 终端那行人话照旧 `print` 出去, 两者都要有。
         """
         # ⚠️ 关旁路句柄放在**最前面**：`close()` 有三条早退（未启用 / 零句又无问答 /
         #    用户答"不保存"），放在后面就会在那些路径上漏掉它。幂等，重复调无妨。
@@ -897,6 +905,18 @@ class ObsidianWriter:
             return (f"📝 未存入 Obsidian({self._n} 句)。"
                     f"记录仍保留在:\n   {self.session_path}")
 
+        # ⚠️ 进度一律**先 print（终端照旧）再转发给 UI**，两条路都要有 ——
+        #    `--ui terminal` 那条没有 UI，而 UI 那条也不该逼人回头看终端。
+        #    ⚠️ 转发那步包 try：一个坏的回调不该把整节课的笔记带下水。
+        def _prog(stage, done, total):
+            from polish import progress_text
+            print(f"  {progress_text(stage, done, total)}", flush=True)
+            if on_progress is not None:
+                try:
+                    on_progress(stage, done, total)
+                except Exception:                         # noqa: BLE001
+                    pass
+
         entries = self._parse(self.session_path.read_text(encoding="utf-8"))
         # 落笔前二次精修: 直播矫正太保守(实测 65% 未改), 这里用领域 + 全课术语 + 前后文重做一遍。
         polish_state = "off"
@@ -910,7 +930,7 @@ class ObsidianWriter:
                     entries, self._key, self._polish_model,
                     course_term_list(self._glossary_path, self._course),
                     course_title(self._glossary_path, self._course),
-                    on_progress=print, stats=pstats)
+                    on_progress=_prog, stats=pstats)
                 polish_state = _polish_state(pstats)
                 if polish_state == "failed":
                     print(f"⚠ 精修未生效(applied=0 句, 失败批次 "
@@ -920,15 +940,34 @@ class ObsidianWriter:
                     print(f"⚠ 精修只生效了一部分(applied={pstats.get('applied')} 句, "
                           f"失败批次 {pstats.get('failed')}/{pstats.get('batches')}); "
                           f"状态已写进笔记 frontmatter")
+            except KeyboardInterrupt:
+                # ⚠️⚠️ **绝不能让它穿出去** —— 这一层是"额外的"，底座（逐句转录）在
+                #    `entries` 里，已经解析好了。放它出去 = **整份笔记不写**。
+                #    2026-09-28 查出的真缺陷：原来下一支是 `except Exception`，而
+                #    `KeyboardInterrupt` **不是** `Exception` 的子类 → 在最长的那一段
+                #    （实测 579 句要 11 分钟）按 Ctrl+C，会把整节课的 Obsidian 笔记
+                #    **静默丢掉**，只剩 `sessions/` 里的原始文件。
+                #    ⚠️ 中断发生在 `polish_entries` 内部时它**没有返回**，所以 `entries`
+                #       仍是直播版 —— 下面那句文案是准确的，不是安慰话。
+                #    同一条纪律代码在 `qa` / `lost` 两处已经写过：「额外一层不该拖垮底座」。
+                polish_state = "interrupted"
+                print("⚠ 精修被中断；用直播版转录生成笔记", flush=True)
             except Exception as e:                        # noqa: BLE001
                 polish_state = "failed"
                 print(f"⚠ 精修失败({str(e)[:60]}); 用直播版转录生成笔记")
         if self._key:
             print("🤖 正在生成复习层(知识点详解 + 自测)…", flush=True)
-        review = self._review(entries)
-        # 问答行自带 try/except: close() 这里**没有**异常护栏, 外层 finally 只接
-        # KeyboardInterrupt —— 渲染问答抛出去就再也没有那份转录笔记了。隔离是硬要求:
+        # ⚠️ 同 `polish` 那条：`_review` 也要跑好几轮 LLM（按 REVIEW_CHUNK 分块，
+        #    579 句不止一轮），中断它同样**不许**带走底座。
+        try:
+            review = self._review(entries)
+        except KeyboardInterrupt:
+            review = {}
+            print("⚠ 复习层被中断；笔记照常生成（只有逐句转录）", flush=True)
+        # 问答行自带 try/except: 渲染问答抛出去就再也没有那份转录笔记了。隔离是硬要求:
         # 笔记的底座是逐句转录, 它是不能丢的那件事; 问答只是额外一层。
+        # ⚠️ 2026-09-28 起这条纪律**四层都补齐了**（polish / review / qa / lost）；
+        #    原来只有后两层有护栏，而前两层才是跑得最久的。
         qa_items: list[str] = []
         if qa:
             try:

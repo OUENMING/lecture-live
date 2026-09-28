@@ -461,6 +461,62 @@ def make_label(text, rect, size, *, alpha=1.0, bold=False, wrap=False,
     return lb
 
 
+def make_button_target(cb):
+    """把一个 Python 回调包成 ObjC target（`NSControl.setTarget_` 是**弱引用**）。
+
+    ⚠️ **返回值必须由调用方持住**，否则被 Python GC 回收 —— 按钮点了没反应，
+       而且 AppKit 不报错。`whatsnew` / `overlay` 各自持在 `_targets` 列表里。
+
+    ⚠️ 与 `overlay._make_button_target` / `whatsnew._make_target` **共用同一个
+       ObjC 类**（`objc_own` 的 key `ButtonTarget`，那正是"想共用就用同一个 key"
+       的场合）。三处的闭包体是同一件事，收尾卡起用这一份。
+    """
+    import objc_own
+    from AppKit import NSObject
+
+    def clicked(self, sender):                            # noqa: N802
+        f = getattr(self, "_cb", None)
+        if f:
+            f()
+
+    t = objc_own.own("ButtonTarget", NSObject, {"clicked_": clicked}).alloc().init()
+    t._cb = cb
+    return t
+
+
+def place_beside(anchor, card) -> None:
+    """把浮卡摆在主面板旁边，**放不下就换一边，四边都放不下才贴可见区左上角**。
+
+    ⚠️ **必须先检查再落位**，不能算一个位置就 `setFrameOrigin_` —— 踩过：原本算的是
+       「面板正下方」，算出来 y=-123 放不下 → 退回「面板正上方」，但屏幕可见区顶
+       放不下，而 **AppKit 会把窗口夹回可见区** → 卡片掉下来正好盖住面板上半。
+       （2026-09-28 从 `overlay._show_whatsnew_card` 提出来，两份浮卡共用一份定义。）
+
+    ⚠️ 顺序是「左·右·下·上」：竖排（左/右）优先，因为主面板是横长条，
+       摆在旁边不会压住字幕区。
+    """
+    from AppKit import NSScreen
+    pf, cf = anchor.frame(), card.frame()
+    gap = 10.0
+    vis = NSScreen.mainScreen().visibleFrame()
+    top = pf.origin.y + pf.size.height - cf.size.height      # 与面板顶对齐
+    for x, y in (
+        (pf.origin.x - cf.size.width - gap, top),            # 左
+        (pf.origin.x + pf.size.width + gap, top),            # 右
+        (pf.origin.x + pf.size.width - cf.size.width,
+         pf.origin.y - cf.size.height - gap),                # 下
+        (pf.origin.x + pf.size.width - cf.size.width,
+         pf.origin.y + pf.size.height + gap),                # 上
+    ):
+        if (x >= vis.origin.x and y >= vis.origin.y
+                and x + cf.size.width <= vis.origin.x + vis.size.width
+                and y + cf.size.height <= vis.origin.y + vis.size.height):
+            card.setFrameOrigin_((x, y))
+            return
+    card.setFrameOrigin_((vis.origin.x + gap,                   # 四边都放不下
+                          vis.origin.y + vis.size.height - cf.size.height - gap))
+
+
 def hide_traffic_lights(window) -> None:
     """藏掉左上角三个系统按钮 —— 但**保留** Titled 带来的原生缩放能力。
 

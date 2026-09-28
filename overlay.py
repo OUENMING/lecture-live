@@ -1518,35 +1518,9 @@ class Overlay:
                 on_update=self._whatsnew_update)
             if self._whatsnew_card is None:
                 return
-            # ---- 定位: 找一个"完整放得进可见区、且不压住主面板"的位置 ----
-            # ⚠️ 不能只算一个位置就 setFrameOrigin_。踩过: 原本算的是"面板正下方",
-            # 算出来 y=-123 放不下 -> 退回"面板正上方" y=822, 但屏幕可见区顶只有
-            # 944, 而 AppKit 会**把窗口夹回可见区**(944-273=671) —— 于是卡片掉下来
-            # 正好盖住面板上半。必须**先检查再落位**, 不能交给 AppKit 去夹。
-            pf = self._panel.frame()
-            card = self._whatsnew_card["panel"]
-            cf = card.frame()
-            GAP = 10.0
-            vis = NSScreen.mainScreen().visibleFrame()
-            top = pf.origin.y + pf.size.height - cf.size.height   # 与面板顶对齐
-            placed = None
-            for x, y in (
-                (pf.origin.x - cf.size.width - GAP, top),         # 左
-                (pf.origin.x + pf.size.width + GAP, top),         # 右
-                (pf.origin.x + pf.size.width - cf.size.width,
-                 pf.origin.y - cf.size.height - GAP),             # 下
-                (pf.origin.x + pf.size.width - cf.size.width,
-                 pf.origin.y + pf.size.height + GAP),             # 上
-            ):
-                if (x >= vis.origin.x and y >= vis.origin.y
-                        and x + cf.size.width <= vis.origin.x + vis.size.width
-                        and y + cf.size.height <= vis.origin.y + vis.size.height):
-                    placed = (x, y)
-                    break
-            if placed is None:                # 四个方向都放不下 -> 贴可见区左上角
-                placed = (vis.origin.x + GAP,
-                          vis.origin.y + vis.size.height - cf.size.height - GAP)
-            card.setFrameOrigin_(placed)
+            # ---- 定位: 交给 `panel.place_beside`（**唯一定义点**）----
+            # 2026-09-28 从这里提炼出去的：收尾卡要用同一套摆法，两份实现必然漂。
+            panel.place_beside(self._panel, self._whatsnew_card["panel"])
         except Exception:                                 # noqa: BLE001
             self._whatsnew_card = None
 
@@ -2275,6 +2249,133 @@ class Overlay:
             except Exception:                 # noqa: BLE001
                 pass
         print(("⚠ " if warn else "✅ ") + msg, flush=True)
+
+    # ---- 收尾卡（2026-09-28）----------------------------------------------
+    # 为什么要有这一组：收尾原来是「关掉窗口 → 在终端里问 → 同步精修 11 分钟」，
+    # 而收尾跑在 AppKit 主线程上 → 界面冻死、退不掉（实测挂过 4 小时 12 分）。
+    # 现在窗口全程留着，✕ 就是退出口，问话与进度都在卡上。
+    def ask_save(self, n: int, timeout: float = 60.0):
+        """问「这笔笔记存不存」。**自己 pump ** —— 所以这些秒里窗口一直是活的。
+
+        ⚠️ **问话必须留在主线程**，不能丢进 worker：实测「worker 线程里做 `input()`
+           会偷走后续输入」（在第 2 个提示按的回车被第 1 个的孤儿 reader 吃掉）。
+           而且 AppKit 本来就只能在主线程碰。
+
+        返回 `True`=存 / `False`=不存 / ⚠️ `None`=**用户把窗口关了**（放弃这份笔记）。
+        ⚠️ 超时按 `True` 走 —— 与终端那条同一个纪律：「绝不能因为一次走开丢掉整节课」。
+        """
+        try:
+            import wrapup as wrapup_mod
+        except Exception:                                 # noqa: BLE001
+            return None if self._closed else True
+        ans: dict = {"v": None}
+        card = wrapup_mod.build(title="收尾")
+        if card is None:
+            # 卡起不来不该让收尾停 —— 退回「默认存」，与终端超时同一条路。
+            return None if self._closed else True
+        self._wrapup_card = card
+        card["set_status"](f"本次共记录 {n} 句双语。\n存入 Obsidian 吗？")
+        card["set_buttons"]([("存入", lambda: ans.__setitem__("v", True)),
+                             ("不存", lambda: ans.__setitem__("v", False))])
+        try:
+            panel.place_beside(self._panel, card["panel"])
+        except Exception:                                 # noqa: BLE001
+            pass
+
+        deadline = time.monotonic() + timeout
+        while ans["v"] is None and not self._closed:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            card["set_hint"](f"{left:.0f} 秒后自动存入 · 关窗 = 放弃这份笔记")
+            self.pump()
+            time.sleep(0.05)
+
+        if self._closed:
+            self._wrapup_card = None
+            return None
+        if ans["v"] is None:
+            return True                                   # 超时 → 默认存
+        if ans["v"]:
+            # 继续用它显示进度：切成「干活中」，不换卡（换卡会闪一下）。
+            card["set_status"]("正在收尾…")
+            card["set_hint"]("")
+            card["set_buttons"]([])
+        else:
+            card["close"]()
+            self._wrapup_card = None
+        return bool(ans["v"])
+
+    def wrapup_progress(self, stage: str, done: int, total: int) -> None:
+        """⚠️ 这个**从工作线程被调** —— UI 回写一律回主线程（`CLAUDE.md` 的不变量）。
+
+        形状照 `entry_panel.py:1292` 那份来：回调在工作线程里，`callAfter` 回主线程。
+        """
+        try:
+            from polish import progress_text
+            txt = progress_text(stage, done, total)
+        except Exception:                                 # noqa: BLE001
+            txt = f"{stage} {done}/{total}…"
+        self._wrapup_ui(self._wrapup_show, f"正在收尾…\n{txt}")
+
+    def wrapup_done(self, ok: bool, msg: str) -> None:
+        """⚠️ 同样**从工作线程被调**。看板不自动关 —— 由 main 决定去留。"""
+        self._wrapup_ui(self._wrapup_finish, bool(ok), str(msg or ""))
+
+    def _wrapup_ui(self, fn, *a) -> None:
+        """把一次 UI 回写送回主线程。**卡不在就静默** —— 收尾的显示不该反过来拦住收尾。"""
+        from PyObjCTools import AppHelper
+
+        def go():
+            try:
+                fn(*a)
+            except Exception:                             # noqa: BLE001
+                pass
+        try:
+            AppHelper.callAfter(go)
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _wrapup_show(self, text: str) -> None:
+        card = getattr(self, "_wrapup_card", None)
+        if card is not None:
+            card["set_status"](text)
+
+    def _wrapup_finish(self, ok: bool, msg: str) -> None:
+        card = getattr(self, "_wrapup_card", None)
+        if card is None:
+            return
+        try:
+            card["set_status"](("✅ " if ok else "⚠ ") + (msg or "收尾结束"))
+            card["set_hint"]("")
+            # ⚠️ 留一个「关闭」按钮而不是自动消失：**失败时不能一闪而过**。
+            #    作者 2026-09-28 选的是「成功自动退，失败留住」—— 去留由 main 决定，
+            #    这里只保证两种情况下都有一个能点的出口，并把「点了」记下来。
+            def ack():
+                self._wrapup_acked = True
+                card["close"]()
+            self._wrapup_acked = False
+            card["set_buttons"]([("关闭", ack)])
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def wrapup_acknowledged(self) -> bool:
+        """用户看完成功/失败的结论了吗（点了卡上的「关闭」）。
+
+        ⚠️ 只有 Overlay 有「看没看见」这个概念 —— TerminalUI 那条路结论是直接
+           `print` 的，从来不需要等确认，它的实现恒返回 True。
+        """
+        return bool(getattr(self, "_wrapup_acked", True))
+
+    def wrapup_close(self) -> None:
+        card = getattr(self, "_wrapup_card", None)
+        if card is not None:
+            try:
+                card["close"]()
+            except Exception:                             # noqa: BLE001
+                pass
+            self._wrapup_card = None
+
 
     # ---- 渲染 ----
     def _render(self):

@@ -343,6 +343,27 @@ class TerminalUI:
     def pump(self):
         pass
 
+    # ---- 收尾（2026-09-28）----
+    # ⚠️ 终端这条路**本来就是它的主场**：问话走 `_ask_save_notes`，进度与结果由
+    #    `obsidian_writer` 自己 `print` 出来。所以后两个是**有意的空操作** ——
+    #    接了反而会让同一行打两遍。它们存在只为让 `main` 不必区分两条 UI。
+    def ask_save(self, n: int):
+        return _ask_save_notes(n)
+
+    def wrapup_progress(self, stage, done, total):
+        pass
+
+    def wrapup_done(self, ok: bool, msg: str):
+        pass
+
+    def wrapup_acknowledged(self) -> bool:
+        # 终端那条路结论是直接 print 的，没有「看没看见」这个概念 —— 恒 True，
+        # 于是 main 的「失败留住」循环一次都不转，与今天的行为一致。
+        return True
+
+    def wrapup_close(self):
+        pass
+
 
 class _Latest:
     """latest-wins 槽位: 草稿只保留最新一份, 旧的自然丢弃。"""
@@ -1471,12 +1492,15 @@ def run(args) -> None:
         # ⚠️ 判据**不能**用 running: running 要到下面内层 finally 才清, 收尾
         # 期间它一直是 set, 守卫等于没写。
         stopping.set()
-        # 先撤悬浮窗: 后面可能等冲刷 + 阻塞问"是否存 Obsidian", 窗口留着不动
-        # 就是"点了 ✕ / 按了 Ctrl+C 就卡死"。TerminalUI 没有 close, 故用 getattr。
-        # (✕ 按钮已经在自己的回调里关过一次, close() 幂等。)
-        close_ui = getattr(ui, "close", None)
-        if callable(close_ui):
-            close_ui()
+        # ⚠️⚠️ **不再先撤悬浮窗**（2026-09-28 把这个决定反过来）。
+        #    原来关它的理由是「后面要等冲刷 + 阻塞问是否存笔记，窗口留着不动 =
+        #    点了 ✕ 也卡死」。那个理由**只在收尾阻塞主线程时才成立** —— 现在收尾
+        #    搬到 worker、主线程继续 pump，窗口留着不但不卡，它还是**唯一的退出口**：
+        #      · ✕ 在窗口上；
+        #      · 而 `cl` 从终端起的是普通进程，activation policy 又是 `.accessory`
+        #        （`overlay.show` 里设的）→ **不出现在「强制退出」窗口里**。
+        #        实测作者在收尾卡住时连找都找不到它，只能强退。
+        #    `close()` 仍然要调，但挪到收尾**真正结束**之后（见下面 `_close_ui`）。
         # ⚠️ 必须包住: src.close() 抛异常的话, 下面的 seg.flush() / finalq 排空 /
         # writer.close()(会话落盘 + Obsidian 写入 + 精修)**全部会被跳过** ——
         # 与"落盘才是不能丢的事"这条核心约定直接冲突。
@@ -1525,9 +1549,96 @@ def run(args) -> None:
                 with qa_lock:
                     return list(qa["history"])
 
-            msg = writer.close(ask=_ask_save_notes, qa=qa_snapshot)
+            # ══ 收尾（2026-09-28 重排）══════════════════════════════════════
+            # 原来这一整段同步跑在**主线程**上，而主线程就是 AppKit 的 run loop 线程
+            # → 界面冻死、退不掉。实测：一节 579 句的 tut 跑完后挂了 4 小时 12 分，
+            # 作者只能强制退出（而 `.accessory` 的进程连强制退出窗口里都没有）。
+            #
+            # `[官方]` Mac App Programming Guide「Don't Block the Main Thread」逐字:
+            #   "never use the main thread to perform long-running or potentially
+            #    unbounded tasks, such as tasks that require network access"
+            # 精修实测 11 分钟（579 句 ÷ 30 一批 = 20 批），全在这一条上。
+            #
+            # 现在分两段：
+            #   ① 问「存不存」—— **留在主线程**。两条硬约束：worker 里做 `input()`
+            #      会偷走后续输入（实测）；且 AppKit 只能主线程碰。Overlay 自己
+            #      pump，所以这几秒窗口一直是活的。
+            #   ② 重活进 worker，**主线程继续 pump** 到它结束。窗口全程留着 = ✕ 有效。
+
+            def _ui_progress(stage, done_, total):
+                """⚠️ **从工作线程被调** —— 只许往 UI 的队列里塞，不许碰 AppKit。"""
+                fn = getattr(ui, "wrapup_progress", None)
+                if fn is not None:
+                    fn(stage, done_, total)
+
+            def _ui_gone() -> bool:
+                """用户把窗口关了吗（Overlay 的 ✕）。TerminalUI 没有这个概念。"""
+                return bool(getattr(ui, "_closed", False))
+
+            def _spin(until) -> None:
+                """守着 pump 等 `until()` 为真，或用户关窗。
+
+                ⚠️⚠️ **这一步就是"不冻主线程"本身** —— 没有它，收尾期间窗口是死的，
+                   ✕ 按不动，`terminate:` 也收不到。
+                ⚠️ TerminalUI 的 pump 是空操作，得给它加个 sleep，否则纯烧 CPU。"""
+                while not until() and not _ui_gone():
+                    if args.ui == "overlay":
+                        ui.pump()
+                    else:
+                        time.sleep(0.02)
+
+            save, give_up, _box = True, False, {}
+            if writer.mode == "ask":
+                _ask = getattr(ui, "ask_save", None)
+                ans = (_ask_save_notes(writer.count) if _ask is None
+                       else _ask(writer.count))
+                if ans is None:
+                    # ⚠️ 只有 Overlay 会返回 None（用户按了 ✕ / 菜单退出）——
+                    #    `TerminalUI.ask_save` 走 `_ask_save_notes`，那条对超时与 EOF
+                    #    一律返回 True，永远不会是 None。所以这句话不会误报。
+                    give_up = True
+                    echo("⏹ 收尾中止：窗口已关闭（笔记未写；逐句日志仍在 sessions/）")
+                save = bool(ans)
+
+            if not give_up:
+                _done = threading.Event()
+
+                def _wrap():
+                    try:
+                        _box["msg"] = writer.close(ask=lambda n: save,
+                                                   qa=qa_snapshot,
+                                                   on_progress=_ui_progress)
+                    except BaseException as e:            # noqa: BLE001
+                        _box["err"] = e
+                    finally:
+                        _done.set()                       # ⚠️ 不置的话主线程等到天荒
+
+                threading.Thread(target=_wrap, daemon=True).start()
+                _spin(_done.is_set)
+                # ⚠️ Ctrl+C 落在 worker 上是打不到的（信号只进主线程）—— 它会打在主
+                #    线程的 `_spin` 上，异常从这里穿出去，与今天的行为一致。
+                if "err" in _box:
+                    raise _box["err"]
+
+            msg = _box.get("msg", "")
             if msg:
                 echo(msg)
+
+            # ---- 结论：成功自动退，失败留住 -------------------------------
+            _ok = "err" not in _box and bool(msg) and not give_up
+            _done_ui = getattr(ui, "wrapup_done", None)
+            if _done_ui is not None:
+                _done_ui(_ok, msg or ("收尾失败" if not _ok else "收尾结束"))
+            if _ok:
+                # 让「已写入 …」在屏上留 3 秒 —— 一闪而过等于没说。
+                _t3 = time.monotonic() + 3.0
+                _spin(lambda: time.monotonic() >= _t3)
+            elif not give_up:
+                # ⚠️ **失败不自动退**（作者 2026-09-28 定的口径）：留到他看见为止。
+                #    出口有两个：卡上的「关闭」，或直接关窗口。
+                _ack = getattr(ui, "wrapup_acknowledged", None)
+                if _ack is not None:
+                    _spin(_ack)
             if tester is not None:
                 _rep = tester.finish(vad_report=locals().get("_diag", ""),
                                      note_path=str(getattr(writer, "note_path", "") or ""))
@@ -1549,6 +1660,16 @@ def run(args) -> None:
             # ---- 小更新：退出时在**独立进程**里自动拉（详见 _auto_update_on_exit）----
             # 放在 finally 的**最末**：等用户答完"是否保存笔记"、测试报告也打完，
             # 再起子进程。父进程只 spawn 一下就返回，**零退出延迟**。
+            # ---- 收尾真结束了，**现在**才撤悬浮窗（见上面那段：为什么挪到这儿）----
+            # ⚠️ 放在最末：前面每一步（tester 报告 / 更新子进程）都可能还在窗口上
+            #    留话，提前关就等于没说过。TerminalUI 没有 close，故用 getattr。
+            # ⚠️ 先关收尾卡再关主窗口 —— 反过来的话卡片会孤零零留在屏上。
+            _wk = getattr(ui, "wrapup_close", None)
+            if callable(_wk):
+                _wk()
+            _close_ui = getattr(ui, "close", None)
+            if callable(_close_ui):
+                _close_ui()
             _auto_update_on_exit()
 
 

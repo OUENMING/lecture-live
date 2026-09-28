@@ -369,15 +369,27 @@ def _changelog_summary(version: str, max_lines: int = 6) -> str:
     if m:
         out = []
         for line in m.group(1).splitlines():
-            s = line.strip()
+            raw = line.rstrip()
+            s = raw.strip()
             # ⚠️ **容错**：不要求每行都以 `- ` 开头。踩过 —— 作者手写时漏了 `- `，
             # 那几行就被**静默丢掉**，卡片上不出现，而且没有任何提示。
             # 现在除了空行/小标题/引用/代码块，其余都当条目。
             if not s or s.startswith(("#", ">", "|", "```")):
                 continue
+            # ⚠️⚠️ **缩进的行是上一条的续行，不是新条目。**
+            #   卡片按**物理行**取，而看点写得长时必然折行（源码里缩进两格）——
+            #   当成新条目的话，**一条看点会裂成两条**，而且合并多版本时后半截会被
+            #   冠上**别的版本号**。3.7.0 那版实测就是这个症状：
+            #       `3.6.5 · （⚠️ 现在只认 Markdown，PDF / PPTX 的自动转换还在做）`
+            #   —— 那其实是 3.7.0 某条的后半截。（2026-09-28 写 3.8.0 时才发现。）
+            continued = bool(out) and (len(raw) - len(raw.lstrip()) > 0)
             s = re.sub(r"^[-*]\s*", "", s)                # 有就吃掉，没有也认
             s = re.sub(r"\*\*|`", "", s).strip()
-            if s:
+            if not s:
+                continue
+            if continued:
+                out[-1] = f"{out[-1]} {s}".strip()
+            else:
                 out.append(s)
             if len(out) >= max_lines:
                 break

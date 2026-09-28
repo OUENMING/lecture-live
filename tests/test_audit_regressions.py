@@ -42,6 +42,10 @@
       而索引会漂(睡一觉/插拔耳机/切默认输入)。第一版 `switch_device` 先关旧流再开
       新流 —— 新设备开不起来就停在半换状态(流没了、索引指向坏设备), 表现成
       「从此再也收不到音频, 而屏上一切正常」。**全部用桩, 不起真设备**。
+  R17 更新卡片的「更新看点」(2026-09-28): 卡片按**物理行**取条目, 而看点写长了必然折行
+      —— 折行被当成新条目的话, 一条变两条, 且**合并多版本时后半截会被冠上别的版本号**
+      (3.7.0 那版实测就是这个症状)。防的是: 缩进行当成新条目 / 上限数的是物理行而不是条目 /
+      那条"漏写 `- ` 也认"的容错被顺手弄丢 / 粗体与反引号没剥掉
 """
 from __future__ import annotations
 import json
@@ -1284,6 +1288,50 @@ class R16_DeviceSwitchRollback(unittest.TestCase):
                                    {"wall": time.time()})
         self.assertEqual(switched, [(9, "外接麦克风")])
         self.assertTrue(any("外接麦克风" in m for m in msgs), msgs)
+
+
+class R17_ChangelogSummary(unittest.TestCase):
+    """更新卡片的「更新看点」（2026-09-28）。
+
+    防的是：**折行的看点裂成两条**。卡片按**物理行**取条目，而看点写长了必然折行
+    （源码里缩进两格）—— 当成新条目的话，一条看点变两条，而且**合并多版本时后半截
+    会被冠上别的版本号**。`3.7.0` 那版实测就是这个症状：
+        `3.6.5 · （⚠️ 现在只认 Markdown，PDF / PPTX 的自动转换还在做）`
+    —— 那其实是 3.7.0 某条的后半截。（写 3.8.0 的文案时才发现，之前两个测试的夹具
+    都是单行 bullet，正好把这条绕过去了。）
+    """
+
+    @staticmethod
+    def _summ(body: str, max_lines: int = 7) -> str:
+        from unittest import mock
+        with mock.patch.object(main_mod, "_changelog_section", return_value=body):
+            return main_mod._changelog_summary("X", max_lines)
+
+    def test_indented_line_continues_the_previous_item(self):
+        got = self._summ("### 更新看点\n\n"
+                         "- 第一条很长很长，长到在源码里折了行\n"
+                         "  这是它的后半截\n"
+                         "- 第二条\n")
+        self.assertEqual(got.splitlines(),
+                         ["第一条很长很长，长到在源码里折了行 这是它的后半截", "第二条"])
+
+    def test_max_lines_counts_items_not_physical_lines(self):
+        """⚠️ 上限数的是**条目** —— 折行不该吃掉配额。"""
+        got = self._summ("### 更新看点\n\n"
+                         "- 甲甲甲甲\n  折行一\n"
+                         "- 乙乙乙乙\n  折行二\n"
+                         "- 丙丙丙丙\n", max_lines=3)
+        self.assertEqual(len(got.splitlines()), 3, got)
+        self.assertTrue(got.splitlines()[2].startswith("丙丙丙丙"), got)
+
+    def test_unindented_lines_are_still_separate_items(self):
+        """⚠️ 容错那条不能丢：漏写 `- ` 的**不缩进**行仍要算独立条目。"""
+        got = self._summ("### 更新看点\n\n甲没有减号\n乙也没有\n")
+        self.assertEqual(got.splitlines(), ["甲没有减号", "乙也没有"])
+
+    def test_markup_is_stripped(self):
+        got = self._summ("### 更新看点\n\n- **粗体**和`代码`\n")
+        self.assertEqual(got.splitlines(), ["粗体和代码"])
 
 
 if __name__ == "__main__":

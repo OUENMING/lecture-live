@@ -105,8 +105,16 @@ def main() -> int:
     print(f"真 glossary = {real}   ← **一个字都不会动**")
     print("\n拖一个文件到任意一张卡上试试；跑完点「删」再点「撤销」。")
 
+    # ⚠️⚠️ **`on_close=AppHelper.stopEventLoop` 不是可选的**（`PLAN-entry-panel §8.1 #12`）：
+    #    下面那条「真 glossary 逐字节未变」的自检在 `runEventLoop()` **之后**，
+    #    而 `entry_panel.do_close()` **自己不停事件循环** —— 不传这个钩子，
+    #    点「关闭」之后循环照跑，**那条自检是死代码**（只有 Ctrl+C 才可能走到，
+    #    而 Ctrl+C 在这个进程里不一定送达）。
+    #    `on_close` 是 `entry_panel` 现成的口子（`_build` 的形参，`do_close` 末尾断环之后才调）。
+    from PyObjCTools import AppHelper
     h = entry_panel.open_panel(glossary=ISO / "glossary.txt", state_root=ISO,
-                               prepare_fn=stub_prepare)
+                               prepare_fn=stub_prepare,
+                               on_close=AppHelper.stopEventLoop)
     if h is None:
         print("❌ build 返回 None")
         return 1

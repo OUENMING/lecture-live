@@ -924,14 +924,26 @@ class Overlay:
         而本方法是菜单项的 action —— 它本来就在主线程上。
         （`entry_panel.build()` 从不起循环，起循环的只有那几个一次性探针脚本。）
 
-        ⚠️ **面板起不来不许影响正在上的这节课。** 所以这里只记日志，不弹窗、不往外抛 ——
+        ⚠️ **面板起不来不许影响正在上的这节课。** 所以这里不弹窗、不往外抛 ——
         课还在录，那是第一位的。
+        ⚠️⚠️ **但"软失败"不等于"静默"**（`PLAN-entry-panel §8.1 #14`）：原来只在
+        `CLASSLIVE_DEBUG` 下才 `traceback.print_exc()` → **默认路径上用户点了菜单栏
+        那一项、什么都没发生、也没留下任何痕迹**，排查时无从下手。
+        → 现在**无条件**往 stderr 打一行（`cl` 那条路终端看得见；`.app` 从访达起时
+        进统一日志），`DEBUG` 下再叠 traceback。
+        ⚠️ 刻意**不走 `self.notice()`** —— 那会把菜单栏图标从 🎧 改成 ⚠️，而那个图标
+        **已经**表示"云端降级中"；把两种完全不同的警告挤进同一个图标是**稀释信号**。
         """
         self._release_focus()              # 同按钮：别把用户在自己 app 里按的快捷键吃掉
         try:
             import entry_panel
             entry_panel.open_panel(on_start=None)
-        except Exception:                  # noqa: BLE001
+        except Exception as e:             # noqa: BLE001
+            import sys as _sys
+            print(f"⚠ [overlay] 开课前准备的面板起不来："
+                  f"{type(e).__name__}: {str(e)[:120]}"
+                  f"（课照常在录；要完整栈设 CLASSLIVE_DEBUG=1）", file=_sys.stderr,
+                  flush=True)
             if os.environ.get("CLASSLIVE_DEBUG"):
                 import traceback
                 traceback.print_exc()

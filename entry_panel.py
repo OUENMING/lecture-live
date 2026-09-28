@@ -360,6 +360,35 @@ def _target(fn):
     return t
 
 
+def _scroll_undo_into_view(doc, course) -> bool:
+    """把 `course` 那张卡的「撤销」行滚进视野。返回是否真滚了。
+
+    ⚠️ **HIG › Undo and redo 逐字要求 `Show the results of an undo or redo.`** ——
+       不滚的话，`kept_added` 有 20 条时「撤销」落在**视口之外**，用户
+       **以为没生效、反复撤**（`PLAN-entry-panel §8.1 #7` 点名的那条）。
+    ⚠️ 目标是**那一行可见**，不是"滚到底"：撤销行下面还有失败/没加那些行、以及
+       卡片底部的按钮区 —— 滚到底会把按钮顶出视野。
+    ⚠️ 坐标换算交给 AppKit（`convertRect_toView_`）：**卡片自身是非翻转的**（内容从
+       卡片顶往下排），而**文档视图是翻转的**（`EntryDoc.isFlipped`）—— 手算这个
+       必然错，别自己加加减减。
+    """
+    for card in doc.subviews():
+        if getattr(card, "_course", None) != course:
+            continue
+        lbl = getattr(card, "_undo_lbl", None)
+        if lbl is None:
+            return False
+        try:
+            doc.scrollRectToVisible_(lbl.convertRect_toView_(lbl.bounds(), doc))
+            return True
+        except Exception as e:                            # noqa: BLE001
+            # 滚不动不影响"删除已经生效"这件事 —— 说一句就够，别把它变成失败
+            print(f"⚠ 滚到「撤销」行失败({type(e).__name__}: {str(e)[:50]})；"
+                  f"删除本身已生效", flush=True)
+            return False
+    return False
+
+
 def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width,
                entry=None, on_delete=None, on_undo=None):
     """一张卡 = 一个落点 + 三行内容（+ 跑过之后的结果列表）。"""
@@ -478,9 +507,14 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width,
         undo = entry.get("undo")
         if undo:
             y -= RESULT_ROW
-            view.addSubview_(panel.make_label(
+            _undo_lbl = panel.make_label(
                 f"已删除 {undo.get('text', '')}",
-                NSMakeRect(CARD_PAD, y + 3.0, inner_w - 76.0, 16.0), 11.0, alpha=DIM))
+                NSMakeRect(CARD_PAD, y + 3.0, inner_w - 76.0, 16.0), 11.0, alpha=DIM,
+                truncate=True)
+            view.addSubview_(_undo_lbl)
+            # ⚠️ **存下来**：删完之后要把它滚进视野 —— 见 `_scroll_undo_into_view`。
+            #    只留最近一次删除的撤销（一层），所以一个卡片一个引用就够。
+            view._undo_lbl = _undo_lbl
             view.addSubview_(mk("撤销", width - CARD_PAD - 68.0,
                                 on_undo or (lambda: None),
                                 y=y + 1.0, w=68.0, h=RESULT_ROW - 6.0))
@@ -605,6 +639,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             doc.addSubview_(card)
             y += card_height(entry) + CARD_GAP
         doc.setFrameSize_((WIDTH - 2 * PAD, max(y, body_h)))
+        # ⚠️ 滚**必须在重画之后**：上面那圈把旧卡片全 `removeFromSuperview` 了，
+        #    所以只能拿**新**卡片的 `_undo_lbl`。意图是**一次性**的（`pop` 掉）。
+        _want = S.pop("_undo_scroll", None)
+        if _want:
+            _scroll_undo_into_view(doc, _want)
 
     # ── 长任务：拖/选完就跑，跑起来后关窗也继续 ────────────────────
     def run_prep(course: str, files: list) -> bool:
@@ -816,6 +855,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    而这里真正要防的是「手滑删错一条」—— 一层够用，而且不会撒谎。
         entry["undo"] = {"text": term,
                          "entries": list(zip(res.positions, res.originals))}
+        # ⚠️ 一次性意图：`refresh` 重画**之后**把这一行滚进视野（HIG：撤销的结果要看得见）。
+        #    必须**推迟到重画之后** —— 重画是整块重建卡片，旧对象全没了。
+        S["_undo_scroll"] = course
         set_status(f"已删除 {term} —— 卡片上有「撤销」")
         _later(refresh)                # ⚠️ **必须推迟** —— 见 `_later` 的说明
 

@@ -368,6 +368,28 @@ def main() -> int:
             check("⭐ 术语行点击真的触发回调（钉行为，不钉 flag 值）", False,
                   f"{type(e).__name__}: {e}")
 
+        # ⭐ `_open_prep`（菜单栏「开课前的准备…」）起不来时**不许默认静默**。
+        #    `PLAN-entry-panel §8.1 #14`：那一段原来只在 `CLASSLIVE_DEBUG` 下才出声 →
+        #    **默认路径上用户点了那一项、什么都没发生、也没留下任何痕迹**。
+        #    ⚠️ 这里钉的是"**留了痕迹**"，不是"痕迹长什么样"。
+        import io as _io
+        import contextlib as _ctx
+        import entry_panel as _EPmod
+        _orig_open = _EPmod.open_panel
+
+        def _boom(*a, **k):
+            raise RuntimeError("桩：面板起不来")
+        _EPmod.open_panel = _boom
+        try:
+            _buf = _io.StringIO()
+            with _ctx.redirect_stderr(_buf):
+                ov._open_prep()
+            _err = _buf.getvalue()
+        finally:
+            _EPmod.open_panel = _orig_open
+        check("⭐ 面板起不来时**留了痕迹**（不是默认静默 —— §8.1 #14）",
+              "面板起不来" in _err and "RuntimeError" in _err, repr(_err[:100]))
+
         # ⭐ 菜单栏那一项必须钉住。`_install_status_item` 整段在 try/except fail-soft 里
         #    （那是**对的** —— 图标不能因为建菜单项失败就整个消失），但后果是
         #    **写坏了完全静默**：图标还在，菜单少一项，而那一项恰好是
@@ -692,6 +714,10 @@ def main() -> int:
             undos = _card_btns(h2.window.contentView(), "ECON10740", "撤销")
             check("⭐ pump 一轮之后出现「撤销」按钮（HIG：删东西用撤销，不用确认框）",
                   len(undos) == 1, f"找到 {len(undos)} 个")
+            # ⭐ **接线**：⑩ 组只证明"那个函数会滚"，这条证明**`refresh` 真的调了它** ——
+            #    意图是**一次性**的，重画之后必须被 `pop` 掉；留着没消费就是没接上。
+            check("⭐ 「删」之后那个一次性滚动意图**已被 `refresh` 消费**",
+                  EP2.S.get("_undo_scroll") is None, repr(EP2.S.get("_undo_scroll")))
             if undos:
                 _click(undos[0])
                 _pump()
@@ -923,6 +949,39 @@ def main() -> int:
     check("⭐⭐ 真 `_drop` 的返回值**跟 `on_drop_files` 走**（真值传得上来）",
           _cd1._on_drop(["/x/a.pdf"]) is True and _cd0._on_drop(["/x/a.pdf"]) is False,
           f"{_cd1._on_drop(['/x/a.pdf'])!r} / {_cd0._on_drop(['/x/a.pdf'])!r}")
+
+    print("\n--- ⑩ 「撤销」行必须**滚进视野**（§8.1 #7 / HIG › Undo and redo）---")
+    # ⚠️⚠️ **这条判据必须自带区分能力，而且要带零假设对照。**
+    #     我第一版把它塞进 ⑦ 组的**真面板**里 —— 而那里**可视区高 482、卡只有 158**
+    #     → 整张卡都看得见，**滚不滚都绿**（变异没变红才发现）。这是"假信心判据"。
+    #     这里另起一个小视口（88pt）+ 一张高卡（576pt）：**不滚就一定看不见**，
+    #     并且**先断言"不滚时确实看不见"**（零假设对照）—— 否则下面那条可能是空的。
+    from AppKit import NSScrollView as _SV, NSView as _NSV
+    _FlipDoc = objc_own.own("ProbeFlipDoc", _NSV, {"isFlipped": lambda self: True})
+    _e10 = {"added": [f"t{i:02d}" for i in range(20)], "not_added": [], "failed": [],
+            "removed": set(), "undo": {"text": "t00", "entries": [(1, "t00\n")]}}
+    _sc10 = _SV.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 88))
+    _sc10.setHasVerticalScroller_(True)
+    _doc10 = _FlipDoc.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 600))
+    _sc10.setDocumentView_(_doc10)
+    _card10 = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+                            on_drop_files=lambda c, p: False, width=300.0, entry=_e10)
+    _card10._course = "ZZ"
+    _doc10.addSubview_(_card10)
+    _doc10.setFrameSize_((300.0, EP.card_height(_e10)))
+
+    def _undo_seen():
+        _v = _sc10.documentVisibleRect()
+        _q = _card10._undo_lbl.convertRect_toView_(_card10._undo_lbl.bounds(), _doc10)
+        return (_q.origin.y < _v.origin.y + _v.size.height
+                and _q.origin.y + _q.size.height > _v.origin.y)
+
+    check("⚠️ 零假设对照：**不滚时「撤销」行确实在视野外**"
+          "（否则下面那条是空的 —— 我第一版就栽在这）", _undo_seen() is False)
+    check("⭐⭐ 滚一下 -> 「撤销」行进视野（§8.1 #7 / HIG）",
+          EP._scroll_undo_into_view(_doc10, "ZZ") is True and _undo_seen() is True)
+    check("⚠️ 课号对不上 -> 返回 False，不抛",
+          EP._scroll_undo_into_view(_doc10, "NOT_THERE") is False)
 
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)

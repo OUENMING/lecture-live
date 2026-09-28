@@ -139,3 +139,26 @@ def voice_profiles(*, root=None) -> pathlib.Path:
     """
     return voice_dir(root=root) / "profiles.json"
 
+
+def ready_state(*, root=None) -> pathlib.Path:
+    """就绪条被用户关掉了吗（`ready-dismissed`，形状照 `whatsnew` 的 `.update-seen`）。
+
+    ⚠️ **放 `~/.classlive/` 而不是 `~/Library/Logs/ClassLive/`** —— 那个 root 是
+    **可清理**的（`paths.py` 文件头逐字：「用户数据不能住在会被清掉的地方」），
+    而「我已经把这个提示关掉了」是**用户的决定**，清掉会把它重新弹回来。
+    """
+    return (pathlib.Path(root) if root is not None else STATE_ROOT) / "ready-dismissed"
+
+
+def models_stamp(*, root=None) -> pathlib.Path:
+    """各模型**装的是哪个版本**（`models.json`）—— `{路径: {"src":…, "rev":…, "at":…}}`。
+
+    它回答的问题是 `doctor.model_present()` 答不了的那个：**「在」不等于「是我要的那版」**。
+    一个老用户手里可能有旧版、或者装了一半，只看"目录非空"会一律报 ✅。
+
+    ⚠️ **这份文件是"我们自己装的"的凭据，不是模型自身的属性** —— 所以它缺失
+       **不等于模型不能用**（老用户 / 手动装的都会有文件没戳）。那种情况要落
+       「版本没法核实」，**绝不重下** —— 重下等于白烧 1.2 GB 流量。
+    """
+    return (pathlib.Path(root) if root is not None else STATE_ROOT) / "models.json"
+

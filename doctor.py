@@ -46,30 +46,64 @@ class Model(NamedTuple):
     `size` 是**下载体积**（不是装完的体积）—— 引导式更新要拿它问
     「要下 X 吗（约 N MB）」，用户关心的是要等多久、占多少带宽。
     体积都是 2026-09-26 实测的：Parakeet 640 MB / Whisper 压缩包 538 MB / VAD 0.61 MB。
+
+    `src` 是**这东西从哪来**（HF repo id 或下载 URL），`at_hf` 说明它住在
+    HF 的 cache 里而不是一个普通目录 —— 两者都是给**版本核实**用的（见 `ready.py`）。
+    ⚠️ `model_present()` 对 HF cache 目录**会误报**（见它的 docstring），所以 `at_hf`
+       那条要走 `hf_cached()`。
     """
     path: str
     label: str
     required: bool
     cmd: str          # ⚠️ 必须**可直接执行**（引导式更新会真的跑它）
-    size: str
+    mb: float         # **下载**体积（MB）—— 做加法用（「一共还差 1.2 GB」）
+    src: str = ""     # HF repo id 或下载 URL —— 版本核实的**身份**
+    at_hf: bool = False
+    extra: str = ""   # 体积后面那句话里 `mb` 之外的信息（如「解开后 989 MB」）
 
+    @property
+    def size(self) -> str:
+        """给人看的那句话。**由 `mb` 推出来，不是第二个定义点。**
+
+        ⚠️ 原来它是个独立字段，于是「一共还差多少」要么再写一个数（两处定义）、
+           要么去 parse 这句话（脆）。2026-09-28 改成派生 —— `mb` 是唯一定义点。
+        """
+        return f"约 {self.mb:g} MB{self.extra}"
+
+
+PARAKEET = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
+VAD_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+           "asr-models/silero_vad.onnx")
+WHISPER_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+               "asr-models/sherpa-onnx-whisper-turbo.tar.bz2")
+QWEN = "mlx-community/Qwen3-1.7B-4bit"
 
 MODELS = [
     Model("~/models/parakeet-tdt-0.6b-v3-int8", "Parakeet ASR 模型(必需)", True,
           f'{sys.executable} -c "from huggingface_hub import snapshot_download; '
-          f"snapshot_download('csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8', "
+          f"snapshot_download('{PARAKEET}', "
           f"local_dir='$HOME/models/parakeet-tdt-0.6b-v3-int8')\"",
-          "约 640 MB"),
+          640.0, src=PARAKEET),
     Model("~/models/vad/silero_vad.onnx", "Silero VAD(必需)", True,
           "mkdir -p ~/models/vad && curl -sL -o ~/models/vad/silero_vad.onnx "
-          "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
-          "约 0.6 MB"),
+          + VAD_URL,
+          0.61, src=VAD_URL),
     Model("~/models/sherpa-onnx-whisper-turbo", "定稿 Whisper 模型(必需)", True,
           "curl -sL -o /tmp/wt.tar.bz2 "
-          "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-          "asr-models/sherpa-onnx-whisper-turbo.tar.bz2 && "
+          + WHISPER_URL + " && "
           "tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2",
-          "约 538 MB（解开后 989 MB）"),
+          538.0, src=WHISPER_URL, extra="（解开后 989 MB）"),
+    # ⚠️ **可选**，但它是"没配 API key 时唯一的翻译引擎"，所以必须让人**看得见**。
+    #    它今天完全在 doctor 视野之外：`mlx_lm.load()` 会在第一次翻译时**隐式**
+    #    `snapshot_download` 938 MB —— README 和 doctor 都写着「模型不会自动下」。
+    #    （2026-09-28 查出。）
+    #    ⚠️ **它住在 HF 的 cache 里**（`~/.cache/huggingface/hub/models--…`），
+    #       不是 `~/models/` —— `mlx_lm` 就是从那儿读的。搬走 = 制造"两份"。
+    Model("~/.cache/huggingface/hub/models--mlx-community--Qwen3-1.7B-4bit",
+          "本地翻译模型 Qwen3-1.7B(可选)", False,
+          f'{sys.executable} -c "from huggingface_hub import snapshot_download; '
+          f"snapshot_download('{QWEN}')\"",
+          938.0, src=QWEN, at_hf=True),
 ]
 
 
@@ -92,6 +126,113 @@ def model_present(path: str) -> bool:
     if p.is_dir():
         return any(f.is_file() and f.stat().st_size > 0 for f in p.rglob("*"))
     return p.is_file() and p.stat().st_size > 0
+
+
+def hf_cached(repo_id: str, *, must: tuple = ("config.json",),
+              any_of: tuple = ("model.safetensors", "model.safetensors.index.json",
+                               "pytorch_model.bin")) -> bool | None:
+    """HF cache 里**跑得起来**的那几个文件在不在。`True` / `False` / ⚠️ `None`。
+
+    ⚠️⚠️ **不要用 `snapshot_download(local_files_only=True)` 当判据** ——
+       它问的是「整个 repo 的文件全不全」，而 `mlx_lm.load()` **只下它要用的那些**。
+       实测（2026-09-28，本机）它抛 `IncompleteSnapshotError`，缺的是
+       **`.gitattributes` 和 `README.md`** —— 两个文档文件，而
+       `model.safetensors`（938 MB 权重）、`config.json`、tokenizer **全都在**。
+       拿它当判据就会给一个**完全可用的模型**报「缓存可能不完整」——
+       正是本仓库最忌讳的那种谎报。
+
+    `must` 全要有；`any_of` 里**任一**有即可（权重可能是单文件，也可能是分片索引，
+    两种布局都得认）。`config.json` 与权重分列两边，是为了不让「只缓存了配置」
+    这种半截状态蒙混过去。
+
+    ⚠️ `try_to_load_from_cache` 是**离线**的（不联网），返回缓存的真实路径，
+       没缓存时返回 `None` 或 `_CACHED_NO_EXIST` 哨兵 —— 所以判据是
+       `isinstance(got, str)`，不是真值判断。
+
+    ⚠️ `None`（`huggingface_hub` 导不进来）的倒向是 **`unknown`（当成有）**，
+       不是 `missing` —— 与 `model_present` 那条「不确定就别报缺」同一条纪律。
+    """
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        return None
+    try:
+        for f in must:
+            if not isinstance(try_to_load_from_cache(repo_id, f), str):
+                return False
+        return any(isinstance(try_to_load_from_cache(repo_id, f), str)
+                   for f in any_of)
+    except Exception:                                     # noqa: BLE001
+        return None                                       # 问不出来 → 当成有
+
+
+def model_state(model) -> str:
+    """`"missing"` / `"ok"` / ⚠️ `"unknown"` / ⚠️ `"stale"` —— **不是 `bool`**。
+
+    ⚠️⚠️ **`unknown` 绝不等于 `missing`。** 老用户 / 手动装的模型**没有戳**
+       （`~/.classlive/models.json` 是 2026-09-28 才有的东西），它们**能用** ——
+       判成 `missing` 就是白烧几百 MB 流量重下一份。同族错误：
+       `readiness_line` 那条「把读失败显示成 0，等于跟用户谎报」。
+
+    ⚠️ **只认规范路径**（`MODELS[i].path`）—— 「一台机器两份」就靠这条堵：
+       下载只写那一个路径，核实也只读那一个路径。
+
+    ⚠️ HF cache 那条要**两个判据配合**：`model_present()` 答「有没有」，
+       `hf_cached()` 答「完不完整」。只有前者会**把下了一半的报成 ✅**
+       （HF 中途留下 `blobs/*.incomplete`，大小 > 0）。第二个答不出来 → `unknown`。
+    """
+    if not model_present(model.path):
+        return "missing"
+    if model.at_hf and hf_cached(model.src) is not True:
+        # ⚠️ 可能是「下了一半」，也可能是「问不出来」——**两种都不自动下**。
+        return "unknown"
+    stamp = _stamp_for(model.path)
+    if stamp is None:
+        return "unknown"                                   # 没戳：老用户 / 手动装的
+    if model.src and stamp.get("src") != model.src:
+        return "stale"
+    if stamp.get("fp") and stamp["fp"] != manifest_fp(model.path):
+        return "stale"                                     # 文件被人动过 / 换过版
+    return "ok"
+
+
+def manifest_fp(path: str) -> str:
+    """一份**清单指纹** —— 排序后的 `(相对路径, 字节数)` 列表的 sha256。
+
+    ⚠️ **只取路径与大小，不读文件内容。** 989 MB 的 Whisper 树逐字节哈希要几十秒，
+       而这里要抓的是「文件被换过/删过/改过大小」，尺寸清单就够。
+       （换掉一个同字节数的不同模型，这条抓不到 —— 但那不是现实里的失败形态。）
+
+    ⚠️ 跳过 `.incomplete` / `.locks` —— HF 的半成品文件会让同一份模型的指纹每次都变。
+    """
+    import hashlib
+    p = pathlib.Path(os.path.expanduser(path))
+    rows: list[str] = []
+    if p.is_dir():
+        for f in sorted(p.rglob("*")):
+            if not f.is_file():
+                continue
+            if f.name.endswith(".incomplete") or f.suffix == ".lock":
+                continue
+            try:
+                rows.append(f"{f.relative_to(p)}\t{f.stat().st_size}")
+            except OSError:
+                continue
+    elif p.is_file():
+        rows.append(f"{p.name}\t{p.stat().st_size}")
+    return hashlib.sha256("\n".join(rows).encode()).hexdigest()[:32]
+
+
+def _stamp_for(path: str) -> dict | None:
+    """读 `~/.classlive/models.json` 里那一条。**只读** —— 写戳是 `ready.py` 的事。"""
+    import json
+    try:
+        import paths
+        obj = json.loads(paths.models_stamp().read_text(encoding="utf-8"))
+    except Exception:                                     # noqa: BLE001
+        return None
+    got = obj.get(path) if isinstance(obj, dict) else None
+    return got if isinstance(got, dict) else None
 
 
 def version() -> str:
@@ -170,17 +311,27 @@ def main() -> int:
 
     # ---- 模型 ----
     print()
-    for path, label, required, cmd, size in MODELS:
-        ok = model_present(path)
-        if not ok and required:
+    for m in MODELS:
+        # ⚠️ 用属性，别位置解包 —— 2026-09-28 给 `Model` 加 `mb`/`src`/`at_hf` 时
+        #    这里还写着 `for path, label, required, cmd, size in MODELS`，
+        #    于是 `doctor.py` 自己**当场 ValueError 崩掉**。加字段时这类解包是隐形的雷。
+        ok = model_present(m.path)
+        if not ok and m.required:
             hard_missing += 1
-        print(f"{_mark(ok) if ok else ('❌' if required else '⚪')} {label:<30}"
-              f"{'就位' if ok else ('空目录/空文件' if os.path.exists(os.path.expanduser(path)) else '缺失')}")
+        print(f"{_mark(ok) if ok else ('❌' if m.required else '⚪')} {m.label:<30}"
+              f"{'就位' if ok else ('空目录/空文件' if os.path.exists(os.path.expanduser(m.path)) else '缺失')}")
+        if ok:
+            # ⭐ 新增：`就位` 不等于「是我们要的那版」（2026-09-28 起）。
+            #    ⚠️ 只在**能说点什么**的时候多打一行 —— 问不出来（老用户没戳）
+            #       不该在这里刷屏，那是正常状态。
+            st = model_state(m)
+            if st == "stale":
+                print("   ⚠️ 版本对不上（戳在 ~/.classlive/models.json）—— 能用，要不要换由你定")
         if not ok:
             # ⚠️ 报体积 —— 引导式更新要拿同一个数问用户「要下 X 吗」，
             #    这里也报出来，两边口径才不会漂。
-            print(f"   → 要下 {size}：")
-            print(f"     {cmd}")
+            print(f"   → 要下 {m.size}：")
+            print(f"     {m.cmd}")
 
     # ---- 数据文件 ----
     print()

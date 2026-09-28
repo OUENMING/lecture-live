@@ -26,6 +26,7 @@ from obsidian_writer import ObsidianWriter, DEFAULT_VAULT
 from build_notes import (TermNotes, format_gloss, detect_proper_nouns, lookup_term)
 from testmode import TestSession
 import instance_lock
+import models
 import notice
 
 PARTIAL_MAX_S = 10          # 草稿只转写最近 N 秒, 限制单次耗时
@@ -1801,7 +1802,7 @@ def main():
     p.add_argument("--path", help="--source file 时的音频路径")
     p.add_argument("--speed", type=float, default=1.0, help="file 模式回放倍速(测试用)")
     p.add_argument("--ui", choices=["terminal", "overlay"], default="terminal")
-    p.add_argument("--model-dir", default=os.path.expanduser("~/models/parakeet-tdt-0.6b-v3-int8"),
+    p.add_argument("--model-dir", default=models.path_of("parakeet"),
                    help="草稿+兜底的 ASR 模型目录(要求够快, 每秒要出一份草稿)")
     p.add_argument("--test-mode", action="store_true",
                    help="测试模式: 采集一份完整指标报告(逐段 ASR 耗时/电平/置信度/"
@@ -1812,9 +1813,9 @@ def main():
     p.add_argument("--no-bundle", action="store_true",
                    help="测试模式下不打包成可发送的单个 zip")
     p.add_argument("--final-model-dir",
-                   default=os.path.expanduser("~/models/sherpa-onnx-whisper-turbo"),
+                   default=models.path_of("whisper"),
                    help="定稿专用 ASR 模型目录(必需; 用 `cl doctor` 检查)")
-    p.add_argument("--llm", default="mlx-community/Qwen3-1.7B-4bit")
+    p.add_argument("--llm", default=models.by_key("llm").src)
     p.add_argument("--glossary", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "glossary.txt"))
     p.add_argument("--context", type=int, default=5,

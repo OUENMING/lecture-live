@@ -34,6 +34,8 @@ import json
 import os
 import pathlib
 import resource
+
+import models
 import sys
 import time
 import wave
@@ -64,11 +66,15 @@ def collect_env() -> dict:
         except Exception:                                 # noqa: BLE001
             return None
 
-    models = {}
-    for d in ("parakeet-tdt-0.6b-v3-int8", "sherpa-onnx-whisper-turbo", "vad"):
-        p = pathlib.Path(os.path.expanduser("~/models")) / d
-        models[d] = (round(sum(f.stat().st_size for f in p.rglob("*")
-                               if f.is_file()) / 1e6, 1) if p.exists() else None)
+    models_sz = {}
+    # ⚠️ 目录名从注册表来 —— 这里原来是**抄死的三个字面量**
+    #    （`models.py` 的文件头把这一处点名了）。换一个模型目录名就得记得改这里，
+    #    而忘了改的症状是「报告里某个模型体积是 None」，不报错。
+    for _m in models.REQUIRED:
+        d = models.basename_of(_m.key)
+        p = pathlib.Path(os.path.expanduser(models.MODELS_ROOT)) / d
+        models_sz[d] = (round(sum(f.stat().st_size for f in p.rglob("*")
+                                  if f.is_file()) / 1e6, 1) if p.exists() else None)
     try:
         import subprocess
         root = pathlib.Path(__file__).resolve().parent
@@ -86,7 +92,7 @@ def collect_env() -> dict:
         "git_commit": commit,
         "packages": {n: pkg(n) for n in
                      ("sherpa-onnx", "numpy", "sounddevice", "mlx-lm", "httpx")},
-        "models_mb": models,
+        "models_mb": models_sz,
     }
 
 

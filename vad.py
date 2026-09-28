@@ -17,6 +17,10 @@ import time
 from collections import deque
 import numpy as np
 
+# ⚠️ `models.py` **只有数据、没有 I/O** —— 所以核心音频模块可以放心 import 它，
+#    而**不该**是 `import doctor`（那是个诊断脚本，依赖方向是反的）。
+import models
+
 SR = 16000
 CHUNK = 1600                     # 0.1s
 CHUNK_DUR = CHUNK / SR
@@ -25,7 +29,7 @@ MAX_UTTERANCE_S = 12.0
 HANGOVER = 0.35                  # 说话结束后保持"说话"这么久(防词间短停顿)
 PARTIAL_INTERVAL_S = 1.0
 PRE_ROLL_CHUNKS = 3              # 3 × 0.1s = 300ms
-VAD_MODEL = "~/models/vad/silero_vad.onnx"
+VAD_MODEL = models.path_of("vad", "~/models/vad/silero_vad.onnx")
 VAD_THRESHOLD = 0.4              # Silero 语音概率阈值。别为了"更灵敏"调低:
                                  # 实测 0.2 在弱信号下能多触发, 但 VAD 会近乎恒
                                  # 为"有语音", 句子再也断不开, 只能靠 12s 硬切,

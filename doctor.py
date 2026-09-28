@@ -40,71 +40,17 @@ OPTIONAL = [
 ]
 
 
-class Model(NamedTuple):
-    """一个要检查的模型。
-
-    `size` 是**下载体积**（不是装完的体积）—— 引导式更新要拿它问
-    「要下 X 吗（约 N MB）」，用户关心的是要等多久、占多少带宽。
-    体积都是 2026-09-26 实测的：Parakeet 640 MB / Whisper 压缩包 538 MB / VAD 0.61 MB。
-
-    `src` 是**这东西从哪来**（HF repo id 或下载 URL），`at_hf` 说明它住在
-    HF 的 cache 里而不是一个普通目录 —— 两者都是给**版本核实**用的（见 `ready.py`）。
-    ⚠️ `model_present()` 对 HF cache 目录**会误报**（见它的 docstring），所以 `at_hf`
-       那条要走 `hf_cached()`。
-    """
-    path: str
-    label: str
-    required: bool
-    cmd: str          # ⚠️ 必须**可直接执行**（引导式更新会真的跑它）
-    mb: float         # **下载**体积（MB）—— 做加法用（「一共还差 1.2 GB」）
-    src: str = ""     # HF repo id 或下载 URL —— 版本核实的**身份**
-    at_hf: bool = False
-    extra: str = ""   # 体积后面那句话里 `mb` 之外的信息（如「解开后 989 MB」）
-
-    @property
-    def size(self) -> str:
-        """给人看的那句话。**由 `mb` 推出来，不是第二个定义点。**
-
-        ⚠️ 原来它是个独立字段，于是「一共还差多少」要么再写一个数（两处定义）、
-           要么去 parse 这句话（脆）。2026-09-28 改成派生 —— `mb` 是唯一定义点。
-        """
-        return f"约 {self.mb:g} MB{self.extra}"
-
-
-PARAKEET = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
-VAD_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-           "asr-models/silero_vad.onnx")
-WHISPER_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-               "asr-models/sherpa-onnx-whisper-turbo.tar.bz2")
-QWEN = "mlx-community/Qwen3-1.7B-4bit"
-
-MODELS = [
-    Model("~/models/parakeet-tdt-0.6b-v3-int8", "Parakeet ASR 模型(必需)", True,
-          f'{sys.executable} -c "from huggingface_hub import snapshot_download; '
-          f"snapshot_download('{PARAKEET}', "
-          f"local_dir='$HOME/models/parakeet-tdt-0.6b-v3-int8')\"",
-          640.0, src=PARAKEET),
-    Model("~/models/vad/silero_vad.onnx", "Silero VAD(必需)", True,
-          "mkdir -p ~/models/vad && curl -sL -o ~/models/vad/silero_vad.onnx "
-          + VAD_URL,
-          0.61, src=VAD_URL),
-    Model("~/models/sherpa-onnx-whisper-turbo", "定稿 Whisper 模型(必需)", True,
-          "curl -sL -o /tmp/wt.tar.bz2 "
-          + WHISPER_URL + " && "
-          "tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2",
-          538.0, src=WHISPER_URL, extra="（解开后 989 MB）"),
-    # ⚠️ **可选**，但它是"没配 API key 时唯一的翻译引擎"，所以必须让人**看得见**。
-    #    它今天完全在 doctor 视野之外：`mlx_lm.load()` 会在第一次翻译时**隐式**
-    #    `snapshot_download` 938 MB —— README 和 doctor 都写着「模型不会自动下」。
-    #    （2026-09-28 查出。）
-    #    ⚠️ **它住在 HF 的 cache 里**（`~/.cache/huggingface/hub/models--…`），
-    #       不是 `~/models/` —— `mlx_lm` 就是从那儿读的。搬走 = 制造"两份"。
-    Model("~/.cache/huggingface/hub/models--mlx-community--Qwen3-1.7B-4bit",
-          "本地翻译模型 Qwen3-1.7B(可选)", False,
-          f'{sys.executable} -c "from huggingface_hub import snapshot_download; '
-          f"snapshot_download('{QWEN}')\"",
-          938.0, src=QWEN, at_hf=True),
-]
+# ⚠️⚠️ **模型注册表已经搬到 `models.py`**（2026-09-28）。
+#    为什么搬：它原来住在这里，于是 `vad.py`（核心音频模块）要用 VAD 的路径就得
+#    `import doctor`（一个**诊断脚本**）—— **依赖方向是反的**。而且一个模型的身份
+#    当时散在 3~4 处（这里 · `main.py` 的 argparse 默认值 · `vad.py` 的常量 ·
+#    `testmode.py` 的目录名元组），换一个模型要同时改四处、而且它们会漂。
+#    `models.py` **只有数据、没有 I/O**，谁都能 import 而不触发副作用。
+# ⚠️⚠️ **只 import `MODELS`，别 import `REQUIRED`** —— 本文件上面第 29 行已经有一个
+#    同名的 `REQUIRED`（那是**硬依赖清单**，`(包名, 用途)` 的列表）。两个都叫
+#    `REQUIRED` 的话后来者覆盖先来者，而 import 在下面 → **依赖自检会拿到模型元组**。
+#    要用必下模型就写 `[m for m in MODELS if m.required]`。
+from models import MODELS  # noqa: F401
 
 
 def _mark(ok: bool) -> str:

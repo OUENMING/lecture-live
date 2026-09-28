@@ -62,25 +62,26 @@ test_courses.py 46 · test_extract.py 24 · test_instance_lock.py 22 · test_aud
 
 ## 2. ⚠️ 下一轮第一件事：`docs/PLAN-entry-panel.md` §8 那批审查遗留
 
-**两个独立代理 + 一轮 `ocr` 的结论，剔掉已修的，还剩一批。头一条是新的、最要紧的：**
+**两份审查（两个独立代理 + 一轮 `ocr`）的结论，剔掉已修的，还剩一批。**
 
-### ⭐⭐ `remove_terms` / `restore_lines` **不持锁**
+### ✅ `remove_terms` / `restore_lines` **不持锁** —— **2026-09-27 已修**（提交 `d935d5a`，已推送）
 
-`prep.prepare` 对**同一个文件**持本课专属锁（`prep.py:830-841` 取、`:1045` 释放），
-而**我新加的删词/撤销一个锁都没上**。→ **两个写入器对同一文件读-改-写 → 后写的吃掉先写的。**
+⚠️ **这一段原来写的是"最要紧、还没修"，2026-09-28 核实时发现它已经做完了** ——
+留在这里当"别再照抄本文档"的例子。现状（都已一手核过）：
 
-`prep.py:828` 自己就写着：「`append_terms` 是读-改-写，两个 `cl prep` 同时跑会互相吃掉
-对方的追加」—— 它**为这件事上了锁**，新加的删词没上。
+- `prep.state_lock_path()` 是**锁文件名的唯一定义点**（`prep.py:280`，docstring 明写
+  「别在调用点再拼一次 `with_name(name + ".lock")`」）
+- `prep._course_write_lock(lock_path)` 围住「读-改-写」那一段；两个写入器
+  `remove_terms` / `restore_lines` 都收 `lock_path=None`，且真正的实现拆到了
+  `_remove_terms` / `_restore_lines`（**无锁版**），取锁纪律集中在 docstring 里
+- 面板两个调用点**都真传了**：`entry_panel.py:703`（删）/ `:731`（撤销），
+  值由 `lock_of(course)` 算出 → `prep.state_lock_path(paths.prep_state(...))`
+- 「正被另一个写入器占用」走 `GlossaryError` + `LOCKED_MSG`（人话，不叠类型名）
+- `tests/test_prep.py` 有争用判据（两个写入器各一条）+ `state_lock_path` 与
+  **课号模糊解析**（`ECON10740` / `10740` 指向同一个锁文件）的一致性
 
-可达路径：prep 正在跑（或终端里 `cl prep`）时点面板上的「删」。
-
-**修法**：给两个写入器加 `lock_path=None` 参数，面板调用点传
-`state_file.with_name(state_file.name + ".lock")` —— 与 `prepare` 同一把锁。
-
-⚠️ **这是并发改动，本轮我特意没写**（宁可不写也不写错）。改之前先读
-`instance_lock.py` 的文件头与 `prep.py` 那段取锁/释放的形状。
-
-完整的剩余清单（每条带位置与修法）在 `docs/PLAN-entry-panel.md` §8.1。
+→ **本节其余条目仍以 `docs/PLAN-entry-panel.md §8.1` 为唯一定义点**（那份也在维护）。
+⚠️ **但它同样会腐坏**：下面那条已经过期了。**用它之前先逐条核代码。**
 
 ---
 

@@ -749,7 +749,7 @@ UI 回写一律 `AppHelper.callAfter` 回主线程。
 
 | # | 问题 | 在哪 | 为什么 |
 |---|---|---|---|
-| **L** ⭐⭐ | **`remove_terms` / `restore_lines` 不持锁** —— 而 `prep.prepare` 对**同一个文件**持有本课专属锁（`prep.py:830-841`，1045 释放） | `prep.py` | **两个写入器对同一文件读-改-写 → 后写的吃掉先写的。** `prep.py:828` 自己就写着「两个 `cl prep` 同时跑会互相吃掉对方的追加」——它为这件事上了锁，**新加的删词没上**。可达路径：prep 正在跑（或终端里跑 `cl prep`）时点面板上的「删」。修法：面板调用点用 `state_file + ".lock"` 取同一把锁 |
+| ~~**L** ⭐⭐~~ | ✅ **已修**（`d935d5a`，2026-09-27，已推送）—— `prep.state_lock_path()` 是锁文件名的唯一定义点；两个写入器都收 `lock_path=None` 并把无锁实现拆到 `_remove_terms` / `_restore_lines`；面板 `entry_panel.py:703/731` 两个调用点都真传了。**2026-09-28 核实**：`HANDOFF-entry-panel.md §2` 那一大段"最要紧、还没修"**已过期** | `prep.py` / `entry_panel.py` | —— |
 | **1** | `dragging_updated_` 无条件返回 `NSDragOperationCopy` —— 即使 `draggingEntered` 已经**拒了** | `panel.py` | 拖拽管理器看**最近一次**的返回值 → 被拒的拖拽会被重新接受。修法：记住 enter 的决定，updated 原样返回 |
 | **P** | 拖**文件夹**在悬停时被当「收」（`panel.file_paths` 按 `urlBasedFileURLsOnly` 不过滤目录）→ 跑完是 `all_files_failed` | `panel.py` / `entry_panel.py` | 悬停时该拒。用户拿到的是「本次加了 0 个」+ 一个代号，像坏了 |
 | **12** | `probe_entry_panel.py` 的「真 glossary 未变」自检**永远不会跑到** —— `runEventLoop()` 之后没有任何退出口 | 探针 | Ctrl+C 在这个进程里不一定送达 → 自检是死代码。修法：给个退出按钮 / 让它调 `AppHelper.stopEventLoop()` |

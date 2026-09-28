@@ -28,6 +28,7 @@
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import shutil
 import sys
@@ -43,13 +44,16 @@ ISO = pathlib.Path("/tmp/classlive-probe-entry")
 
 class StubRes:
     """形状对齐 `prep.PrepResult` 的那几个字段。"""
-    def __init__(self, added, not_added):
-        self.aborted = False
+    def __init__(self, added, not_added, failed=None, aborted=""):
+        self.aborted = aborted
         self.added = added
         self.not_added = not_added
         self.skipped_existing = 0
         self.notes_added = len(added)
-        self.failed = []
+        # ⚠️ 2026-09-28 起面板会**逐文件**渲染失败、并把 `aborted` 说成人话 ——
+        #    而原来的桩 `failed = []`、`aborted = False`，**这两档在隔离跑器里根本出不来**，
+        #    于是作者手验看不见它们（`PROBE_ABORT=1` 就是为这个加的）。
+        self.failed = failed or []
 
 
 def stub_prepare(course, files, *, on_progress=None):
@@ -58,8 +62,23 @@ def stub_prepare(course, files, *, on_progress=None):
     ⭐ 返回的 `added` 是**副本里真实存在的行** —— 这样「删」那条链路才验得动
     （上一版返回 `term0`…`term6`，作者一眼看出「不是 PPT 的词汇」，
     而那也导致点「删」必然 `not_found`）。
+
+    `PROBE_ABORT=1` —— 隔离地看「没跑完 + 逐文件失败」两行长什么样（不碰任何真数据）。
     """
     print(f"\n★ 落点：课 = {course}   文件 = {list(files)}", flush=True)
+    if os.environ.get("PROBE_ABORT"):
+        import prep as _p
+        bad = _p.FileReport(
+            path=pathlib.Path("/tmp/（桩造的）假课件.pdf"), status="unreadable",
+            chars=0, blocks=0, skipped_shapes=0, ocr_pages=0,
+            error="ValueError: 不是 PDF（桩造的样本，用来验失败行）")
+        for stage, total in (("extract", 1), ("candidates", 0)):
+            for i in range(1, total + 1):
+                if on_progress:
+                    on_progress(stage, i, total)
+                time.sleep(0.5)
+        print("  桩返回：all_files_failed（+1 条失败）", flush=True)
+        return StubRes([], [], failed=[bad], aborted="all_files_failed")
     g = ISO / "glossary" / f"{course}.txt"
     terms = [x.strip() for x in g.read_text(encoding="utf-8").splitlines()
              if x.strip() and not x.startswith("#")] if g.exists() else []

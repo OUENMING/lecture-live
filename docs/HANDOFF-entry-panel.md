@@ -81,7 +81,17 @@ test_courses.py 46 · test_extract.py 24 · test_instance_lock.py 22 · test_aud
   **课号模糊解析**（`ECON10740` / `10740` 指向同一个锁文件）的一致性
 
 → **本节其余条目仍以 `docs/PLAN-entry-panel.md §8.1` 为唯一定义点**（那份也在维护）。
-⚠️ **但它同样会腐坏**：下面那条已经过期了。**用它之前先逐条核代码。**
+⚠️ **但它同样会腐坏**：L 行早已过期（上面已改）；"死代码"那 4 条里 3 条也已不存在。
+**用它之前先逐条核代码。**
+
+### ✅ 2026-09-28 一批修掉的（`78560cb` 结果面 + 同批的拖拽提交）
+
+结果列表（失败逐文件 + 原因上屏 · `not_added` 逐条 · `abort` 说人话）·
+`dragging_updated` 改**回放 entered 的决定** · 悬停判据改成 `extract.is_supported`
+（`.docx` / 目录同样被拒）· `on_drop` 返回 `None` 与"回调缺失"分开 ·
+stage 表改调 `prep.STAGE_NAME` · `do_delete` 早拒 · 拖拽**第一次**有自动化判据（第 ⑨ 组）。
+⚠️ **仍开着**：`probe_entry_panel.py` 自检是死代码 · `not_added` 的**可下载清单** ·
+「撤销」行在视口外不滚动（`§8.1 #7`）· `_open_prep` 默认静默（`#14`）。
 
 ---
 

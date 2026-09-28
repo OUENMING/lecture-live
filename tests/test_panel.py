@@ -810,6 +810,108 @@ def main() -> int:
     check(f"⭐ 开/关 3 轮与 9 轮后存活对象**一样多**（{counts}）—— 不随轮数增长",
           counts[0] == counts[1], str(counts))
 
+    print("\n--- ⑨ 拖拽契约：收不收**由返回值决定**（原来零覆盖）---")
+    # ⚠️⚠️ 这一组是**本文件第一次能自动回答"拖进来会发生什么"**。
+    #    原来全仓唯一碰拖拽的断言直接调 Python 回调（`_on_drop(_fake)`）——
+    #    于是 `draggingEntered:` 的返回值、`draggingUpdated:` 的无条件 Copy、
+    #    `performDragOperation:` 的 default-False，**一条都没被测过**。
+    #    契约就是「收不收由**返回值**决定」，而返回值**不需要真拖拽、不需要事件循环、
+    #    不需要窗口** —— 桩 sender + 假 pasteboard 就够。
+    from AppKit import NSDragOperationCopy as _COPY, NSDragOperationNone as _NONE
+
+    class _URL:
+        def __init__(self, p):
+            self._p = p
+        def path(self):
+            return self._p
+
+    class _PB:
+        """假 pasteboard。
+
+        ⚠️ **必须实现 `types()`** —— `panel.dragging_entered` 里那行
+        `_log(f"…types={list(pb.types() …)}")` 的 f-string 是**提前求值**的
+        （在 `_log` 检查 `CLASSLIVE_DEBUG` **之前**），而那行**在 `_call` 的 try 外面**
+        → 假 pb 缺 `types()` 会让 `draggingEntered:` **抛异常逃出去**。
+        ⚠️ `readObjectsForClasses_options_` 也必须有：`file_paths` 缺了会走 except →
+        返回 `None`（="读失败"，与 `[]` 刻意分开）→ 于是你会**自然地测到拒收**。
+        """
+        def __init__(self, paths):
+            self._paths = paths
+        def types(self):
+            return ["public.file-url"]
+        def readObjectsForClasses_options_(self, cls, opts):
+            return [_URL(p) for p in self._paths]
+
+    class _Sender:
+        def __init__(self, pb):
+            self._pb = pb
+        def draggingPasteboard(self):
+            return self._pb
+
+    def _mk(paths, on_drop="unset"):
+        calls = []
+        def _e(pb):
+            from extract import is_supported
+            return any(is_supported(p) for p in (panel.file_paths(pb) or []))
+        if on_drop == "unset":                      # 忘写 return 的那种回调
+            def _d(ps):
+                calls.append(ps)
+        else:
+            _d = on_drop
+        return panel.make_drop_target(_e, _d), _Sender(_PB(paths)), calls
+
+    _t, _s, _ = _mk(["/x/讲义.pdf"])
+    check("支持的输入 -> `draggingEntered:` 收", _t.draggingEntered_(_s) == _COPY)
+    check("收下之后 `draggingUpdated:` **也**是收（回放 entered 的决定）",
+          _t.draggingUpdated_(_s) == _COPY)
+
+    _t2, _s2, _ = _mk(["/x/讲义.docx"])
+    check("⭐ 不支持的输入（`.docx`）-> `draggingEntered:` 拒",
+          _t2.draggingEntered_(_s2) == _NONE)
+    check("⭐⭐ enter 拒了之后 `draggingUpdated:` **必须也拒**"
+          "（原来无条件返 Copy —— `§9.2 #5` 的 P/1）",
+          _t2.draggingUpdated_(_s2) == _NONE)
+
+    _t3, _s3, _ = _mk(["/x/a.pdf", "/x/Downloads"])
+    check("⭐ 混合输入（1 支持 + 1 目录）-> ≥1 个支持就收"
+          "（HIG 的子集语义 + 失败逐文件）", _t3.draggingEntered_(_s3) == _COPY)
+
+    _t4, _s4, _c4 = _mk(["/x/a.pdf"])
+    check("⭐ 回调返回 `None` -> **算收**（调用方忘写 `return` 时不许说成『没收下』）",
+          _t4.performDragOperation_(_s4) is True)
+    check("  而且回调**真的被调到了**", _c4 == [["/x/a.pdf"]], str(_c4))
+
+    _t5, _s5, _ = _mk(["/x/a.pdf"], on_drop=lambda ps: False)
+    check("回调显式 `False` -> 拒", _t5.performDragOperation_(_s5) is False)
+
+    _t6 = panel.make_drop_target(lambda pb: True, None)      # 回调**缺失**
+    check("⚠️ 回调**缺失** -> 拒（与『返回 None』必须分开）",
+          _t6.performDragOperation_(_Sender(_PB(["/x/a.pdf"]))) is False)
+
+    # ⚠️ 假 pb 的 `types()` 是硬要求 —— 少了它上面**每一条都会抛异常**。
+    #    （先崩在 `draggingEntered` 里，异常从 `_call` 的 try 外面逃出去。）
+    check("假 pasteboard 满足 `types()` 这条硬要求（不是可选的）",
+          isinstance(_PB([]).types(), list))
+
+    # ⚠️⚠️ 上面那些用的是**本地的判据替身**（`_e` 里内联了 `is_supported`）——
+    #    那钉的是 `make_drop_target` 的契约，**不是 `entry_panel._enter`**。
+    #    变异验证当场抓到：把 `_enter` 改回"只看非空文件列表"，上面**一条都不红**。
+    #    → 必须**走真正的 `_enter`**。`_make_card` 返回的就是那个 DropTarget，
+    #      所以它的 `_on_enter` 就是真回调（这正是 ⑦ 组那条教训：
+    #      **要测"接线"，不是测"被调用的那个函数"**）。
+    _card = EP._make_card(_r(), on_start=None, on_prep=lambda c: None,
+                          on_drop_files=lambda c, p: True, width=640.0)
+    check("⭐⭐ 真 `entry_panel._enter`：`.docx` **拒**"
+          "（原来只看『非空文件列表』→ 高亮说能收、跑完说 unsupported）",
+          bool(_card._on_enter(_PB(["/x/讲义.docx"]))) is False)
+    check("⭐ 真 `entry_panel._enter`：目录也拒（它同样不在支持集里）",
+          bool(_card._on_enter(_PB(["/x/Downloads"]))) is False)
+    check("⭐ 真 `entry_panel._enter`：`.pdf` / `.pptx` 收",
+          bool(_card._on_enter(_PB(["/x/讲义.pdf"]))) is True
+          and bool(_card._on_enter(_PB(["/x/讲义.pptx"]))) is True)
+    check("⭐ 真 `entry_panel._enter`：混合 -> 收（HIG 子集语义）",
+          bool(_card._on_enter(_PB(["/x/a.pdf", "/x/Downloads"]))) is True)
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

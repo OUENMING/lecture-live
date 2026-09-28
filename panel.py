@@ -300,6 +300,11 @@ def file_paths(pasteboard) -> list[str] | None:
     return out
 
 
+# ⚠️ 哨兵：用来区分「**回调缺失**」（该拒）与「**回调返回了 `None`**」（算收）。
+#    两者都必须和"回调抛异常"（也是拒）分开，见 `perform_drag`。
+_NO_CALLBACK = object()
+
+
 def make_drop_target(on_enter, on_drop, on_exit=None, *, types=None):
     """一个**只做落点**的视图：把 AppKit 那五个选择子收在一处。
 
@@ -356,15 +361,32 @@ def make_drop_target(on_enter, on_drop, on_exit=None, *, types=None):
         pb = sender.draggingPasteboard()
         self._n_upd = 0
         ok = bool(_call(self, "_on_enter", pb, default=False))
+        # ⚠️ 决定**存下来** —— `draggingUpdated:` 要原样回放它（见那个方法）。
+        self._accept = ok
         _log(f"[{getattr(self, '_tag', '?')}] entered -> {'收' if ok else '拒'}  "
              f"types={list(pb.types() or [])}")
         return NSDragOperationCopy if ok else NSDragOperationNone
 
     def dragging_updated(self, sender):
+        """**回放 `draggingEntered:` 的决定**，不重新判定。
+
+        ⚠️ 契约（AppKit 归档指南逐字，见 `PLAN-entry-panel.md §2.3`）：
+           「`prepareForDragOperation:` 取决于 **the most recent invocation of
+             `draggingEntered:` or `draggingUpdated:`**」—— 也就是说 updated 也在投票。
+           原来这里**无条件返 `Copy`**：enter 已经拒了，updated 又把它收回来 →
+           **用户悬停时看到"能收"，松手却什么都不会发生**（正是 `REVIEW §9.2 #5` 那条）。
+        ⚠️ 为什么**不在这里重查 pasteboard**：公开约定是「在 `draggingEntered:` 里查
+           （**只查一次**），别放 `draggingUpdated:`（那个会调多次）」。
+        ⚠️ 为什么**存自己的决定**、而不是假设"返了 None 就不再被问"：契约另有一条
+           「返回 `NSDragOperationNone` 之后**仍会**收到 `draggingUpdated:` /
+             `draggingExited:`」。
+        """
         self._n_upd = getattr(self, "_n_upd", 0) + 1
-        return NSDragOperationCopy
+        return (NSDragOperationCopy if getattr(self, "_accept", False)
+                else NSDragOperationNone)
 
     def dragging_exited(self, sender):
+        self._accept = False
         _log(f"exited（期间 {getattr(self, '_n_upd', 0)} 次 draggingUpdated）")
         _call(self, "_on_exit")
 
@@ -374,7 +396,16 @@ def make_drop_target(on_enter, on_drop, on_exit=None, *, types=None):
     def perform_drag(self, sender):
         paths = file_paths(sender.draggingPasteboard())
         _log(f"drop -> {paths!r}")
-        return bool(_call(self, "_on_drop", paths, default=False))
+        # ⚠️⚠️ **「有回调但返回 `None`」算收；「回调缺失」算拒** —— 两者必须分开。
+        #    · 返回 `None`：调用方**忘写 `return`** 时 `bool(None)` 会把一次**已经发生**的
+        #      落盘说成"没收下"，而 `on_drop` 往往已经把事情做完了
+        #      （`entry_panel.run_prep` 就是"跑起来了"）→ 用户看到文件弹回去 + 它自己在干活。
+        #    · 缺回调：那是"这个落点没接线"，该拒。
+        #    用一个**哨兵**把这两种 `None` 区分开（`_call` 的 `default` 同时覆盖"缺失"与"抛异常"）。
+        got = _call(self, "_on_drop", paths, default=_NO_CALLBACK)
+        if got is _NO_CALLBACK:
+            return False
+        return True if got is None else bool(got)
 
     cls = objc_own.own("DropTarget", NSView, {
         "draggingEntered_": dragging_entered,
@@ -385,6 +416,10 @@ def make_drop_target(on_enter, on_drop, on_exit=None, *, types=None):
     })
     v = cls.alloc().initWithFrame_(((0.0, 0.0), (100.0, 100.0)))
     v._n_upd = 0
+    # ⚠️ `_accept` 初值必须是 **False**：`draggingUpdated:` 可能在 `draggingEntered:`
+    #    之前被问到（契约没保证顺序），那时"还没判过"只能当**拒** —— 当"收"就是在替
+    #    调用方承诺一件没人答应过的事。
+    v._accept = False
     v._on_enter, v._on_drop, v._on_exit = on_enter, on_drop, on_exit
     v.registerForDraggedTypes_(list(types) if types else [NSPasteboardTypeFileURL])
     return v

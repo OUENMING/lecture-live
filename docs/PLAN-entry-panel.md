@@ -400,12 +400,18 @@ glossary 的词留着**（因为那是「只追加」的语义，回滚反而危
 
 ### 3.6 结果列表
 
-| 组 | 显示 | 能做什么 |
+> **落地状态（2026-09-28，`78560cb`）**：下面四行的**显示**部分全部做到；
+> ⚠️ **`没加` 的「可下载清单」仍是 ⬜**（它是新出口/新文件/新交互，另开一批）。
+> 顺带新增两类行：**没跑完的人话**（`_ABORT_MSG`）与 `aborted` 存进 entry（面板关掉再开还看得见）。
+
+| 组 | 显示 | 状态 |
 |---|---|---|
-| **加了** N 个 | 逐条列出 | **删**（真删，写回文件；用 undo 不用确认框） |
-| **没加** M 个 | 逐条列出 + **可下载清单** | 手动加进去 |
-| **已在表里/你删过** K 个 | 折叠，只给数 | — |
-| **失败的文件** | ⚠️ **逐文件标**（不是整批）+ **行内说原因** | 重试 |
+| **加了** N 个 | 逐条列出 + 每行一个「删」 | ✅ `78560cb` |
+| **没加** M 个 | 逐条列出 | ✅ `78560cb` |
+| **没加** M 个 | **可下载清单** | ⬜ **仍缺** |
+| **失败的文件** | ⚠️ **逐文件标**（不是整批）+ **行内说原因** | ✅ `78560cb`（`failure_text`：`error` 优先 / `status` 兜底 / 压单行） |
+| **没跑完** | 人话（`prep.ABORT_MSG` 9 条，多条带「术语表一个字没动」） | ✅ `78560cb` |
+| **已在表里/你删过** K 个 | 折叠，只给数 | ⬜ 未做（`result_header` 只给计数） |
 
 ⭐ 三条来自调研的硬要求：
 1. **失败要逐文件**，不是整批（Untitled UI）
@@ -747,16 +753,20 @@ UI 回写一律 `AppHelper.callAfter` 回主线程。
 
 ### 8.1 ⚠️ 还没修，按我建议的顺序
 
+> ⚠️ **这份表会腐坏** —— 2026-09-28 已核实：**L 行早就修完了**（`d935d5a`），
+> 而"死代码"那 4 条里 **3 条也已经不存在了**。**用它之前先逐条核代码**，
+> 别照抄（我就是照它去"修锁"，查了才发现不用修）。
+
 | # | 问题 | 在哪 | 为什么 |
 |---|---|---|---|
 | ~~**L** ⭐⭐~~ | ✅ **已修**（`d935d5a`，2026-09-27，已推送）—— `prep.state_lock_path()` 是锁文件名的唯一定义点；两个写入器都收 `lock_path=None` 并把无锁实现拆到 `_remove_terms` / `_restore_lines`；面板 `entry_panel.py:703/731` 两个调用点都真传了。**2026-09-28 核实**：`HANDOFF-entry-panel.md §2` 那一大段"最要紧、还没修"**已过期** | `prep.py` / `entry_panel.py` | —— |
-| **1** | `dragging_updated_` 无条件返回 `NSDragOperationCopy` —— 即使 `draggingEntered` 已经**拒了** | `panel.py` | 拖拽管理器看**最近一次**的返回值 → 被拒的拖拽会被重新接受。修法：记住 enter 的决定，updated 原样返回 |
-| **P** | 拖**文件夹**在悬停时被当「收」（`panel.file_paths` 按 `urlBasedFileURLsOnly` 不过滤目录）→ 跑完是 `all_files_failed` | `panel.py` / `entry_panel.py` | 悬停时该拒。用户拿到的是「本次加了 0 个」+ 一个代号，像坏了 |
+| ~~**1**~~ ✅ | **已修**（2026-09-28，本批拖拽提交）—— 改成 **回放 `draggingEntered:` 的决定**（存进 `self._accept`），不再无条件返 `Copy`。契约逐字：「`prepareForDragOperation:` 取决于 **the most recent invocation of `draggingEntered:` or `draggingUpdated:`**」。原来： `panel.py` | 拖拽管理器看**最近一次**的返回值 → 被拒的拖拽会被重新接受。修法：记住 enter 的决定，updated 原样返回 |
+| ~~**P**~~ ✅ | **已修**（2026-09-28）—— 悬停判据改成「**至少一个 `extract.is_supported`**」（悬停与流水线**共用一份**支持集），不支持就**不高亮 + 拒**。⚠️ 真门槛是 `{".pdf",".pptx"}`，所以 **`.docx` / `.txt` 是同一个病**，文件夹只是一个特例。原来： `panel.py` / `entry_panel.py` | 悬停时该拒。用户拿到的是「本次加了 0 个」+ 一个代号，像坏了 |
 | **12** | `probe_entry_panel.py` 的「真 glossary 未变」自检**永远不会跑到** —— `runEventLoop()` 之后没有任何退出口 | 探针 | Ctrl+C 在这个进程里不一定送达 → 自检是死代码。修法：给个退出按钮 / 让它调 `AppHelper.stopEventLoop()` |
 | **14** | `_open_prep` 的注释说「只记日志，不弹窗、不往外抛」，而它**只在 `CLASSLIVE_DEBUG` 下才记** → 默认整条路径完全静默 | `overlay.py` | 同「按钮 action 静默吞异常」那条教训的另一面 |
-| **15** | `progress_text` 的 stage 表抄自 `prep._STAGE_NAME` 且**已漂移**：`build` 显示成英文、`notes` 那个 key **永远跑不到** | `entry_panel.py` | 本仓库明令的「一条纪律两处定义」（`SCRIM_ALPHA` 同款）。`prep._STAGE_NAME` 是唯一定义点 |
-| **2** | `on_drop` 返回 `None` → `bool(None)` = False → **静默不收**（调用方忘了 return 就中招） | `panel.py` | 契约陷阱。修法：`None` 当「收」，或把注释写死 |
-| **4/6** | `_ABORT_MSG` 有人话却没用（用户看到 `all_files_failed` 这种代号）；失败**只有计数**、逐文件原因从不渲染 | `entry_panel.py` | 分别是 plan 的硬要求（§3.6）和「最要紧那句」 |
+| ~~**15**~~ ✅ | **已修**（2026-09-28）—— 面板改调 `prep.STAGE_NAME`（并给它加了公开别名 `prep.STAGE_NAME` / `prep.ABORT_MSG`，跨模块依赖**明写**）。⚠️ 有一条断言原来**在钉住这个缺陷**（`progress_text("notes", …) == "生成释义…"`，而 `notes` 正是那张漂移表里的死键）—— 已改。原来： `entry_panel.py` | 本仓库明令的「一条纪律两处定义」（`SCRIM_ALPHA` 同款）。`prep._STAGE_NAME` 是唯一定义点 |
+| ~~**2**~~ ✅ | **已修**（2026-09-28，本批拖拽提交）—— `perform_drag` 用**哨兵**把三种 `None` 分开：「回调返回 `None`」算**收**、「回调缺失/抛异常」算**拒**。⚠️ 核实：`entry_panel.run_prep` **本来就 `return True/False`**（两条 `return False` + 一条 `return True`），所以这是**潜在契约陷阱**（下一个人忘写 `return` 才中招），**不是活的 bug** —— 原文措辞"调用方忘了 return 就中招"本来是对的。原来： `panel.py` | 契约陷阱。修法：`None` 当「收」，或把注释写死 |
+| ~~**4/6**~~ ✅ | **已修**（2026-09-28，`78560cb`）—— 失败**逐文件 + 原因上屏**（`failure_text` 纯函数：`error` 优先、`status` 兜底、压单行）、`not_added` 逐条、`_ABORT_MSG` **两个出口都接**（卡片头只说状态，整句人话落成结果区一行）。⭐ **原因早就在数据里**（`prep.FileReport.error`），只是从没被读过 → **没动 `prep` 的形状**。⚠️ **可下载清单仍缺**（硬要求第三条，另开）。原来： `entry_panel.py` | 分别是 plan 的硬要求（§3.6）和「最要紧那句」 |
 | **7** | 「撤销」行落在**视口外**（n≥20 时），且从不滚动到它 | `entry_panel.py` | HIG 点名要防的「用户以为没生效、反复撤」 |
 | **A2/A3/A4/B/C** | `_target` 是第 3 份实现 · `make_label` 没迁旧的（字重已不一致）· `make_scroll_view` 自称「只抽 4 行」实测 whatsnew 是 6 行逐字相同 · `sc._on_scroll` 是**死钩子**（全仓库无读取者）· `last_session` 每门课扫一遍 `sessions/`（3.1ms/3.5ms，**代理自己标了「不是性能问题」**） | 多处 | 整洁性 |
-| **死代码** | `probe_entry_panel.py` 的 `COURSE` 没被引用 · `probe_drag.py` 的 `S["in_drag"]` 只写不读 · `mouse_down` 里一个没用到的导入 · 测试注释里的 `RESULT_TAIL` 全仓库不存在 | 探针/测试 | 顺手可清 |
+| **死代码** | ⚠️ **2026-09-28 逐条核实后：4 条里 3 条已经不存在**（`probe_entry_panel` 的 `COURSE` 无命中 · `probe_drag` 的 `in_drag` 全仓零命中 · `mouse_down` 里那个"没用到的导入"其实 `NSApplication` **在用**）。**唯一还在的是**那条注释里的 `RESULT_TAIL`（**代码里没有这个符号**），已修。原来的四项： 探针/测试 | 顺手可清 |

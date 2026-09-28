@@ -377,7 +377,15 @@ def _make_card(r: courses.Readiness, *, on_start, on_prep, on_drop_files, width,
     #    落点成功时**不会**再收到 `draggingExited:`，只在 exit 里撤会留下一张
     #    永久高亮的卡（见 `panel.make_drop_target` 的说明）。
     def _enter(pb):
-        ok = bool(panel.file_paths(pb))
+        # ⚠️ 判据是「**至少一个文件是能抽的**」（`extract.is_supported` —— 支持集的
+        #    唯一定义点，与流水线共用一份），不是「拖进来一个非空文件列表」。
+        #    原来只看 `bool(panel.file_paths(pb))` → **文件夹、`.docx`、`.txt` 全都高亮
+        #    说"能收"**，松手才在 `prep` 里判 unsupported（`REVIEW §9.2 #5`）。
+        #    ⚠️ 拒的时候**也要不高亮**：HIG 逐字要求"收不了时给显式反馈（`circle.slash`）、
+        #       **别给高亮**" —— 只改返回值会留下"高亮着但收不了"。
+        from extract import is_supported
+        paths = panel.file_paths(pb) or []
+        ok = any(is_supported(p) for p in paths)
         _bg(HILITE_A if ok else CARD_FILL_A)
         return ok
 

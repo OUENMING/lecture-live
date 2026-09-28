@@ -178,8 +178,15 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
     现在两边比同一份 `dump`（21 项 + 递归视图树），名单里有什么就比什么。
   ⚠️ **别改 `frozen_recipe`** —— 它是参照物。真想改配方时这条测试会红，那正是要的：
   逼你想清楚「这次是有意改行为，还是改坏了」。
-  ⚠️ **它盖不住什么也要清楚**：那是**静态摊平**，所以**行为**（拖拽、live resize）
-  不在里面（`sendEvent_` 的分派单独由第 ⑤ 组钉住）。别把「两条腿」讲得比实际强。
+  ⚠️ **它盖不住什么也要清楚**：那是**静态摊平**，所以 **live resize** 不在里面
+  （`sendEvent_` 的分派单独由第 ⑤ 组钉住）。
+  ⚠️ **拖拽的接受行为 2026-09-28 起有判据了**（原来"拖拽不在这里面"）：
+  第 ⑨ 组直接调 `draggingEntered:` / `draggingUpdated:` / `performDragOperation:`
+  的**返回值**（契约就是"收不收由返回值决定"），配一个**桩 sender + 假 pasteboard** ——
+  不需要真拖拽、不需要事件循环、不需要窗口。⚠️ 假 pasteboard **必须实现 `types()`**
+  （`panel.dragging_entered` 那行 `_log(f"…types=…")` 是**提前求值**的，且在 `_call` 的
+  try **外面** → 缺了它 `draggingEntered:` 会**抛异常逃出去**）。
+  仍**只靠手验**的：真实 Finder 拖拽（`probe_drag.py`）、live resize。
 - **碰过开课前的准备**（`prep.py` / `extract.py` / `paths.py`）：
   `ClassLive.app/Contents/MacOS/python tests/test_extract.py` 与 `tests/test_prep.py` 全绿。
   ⚠️ **两条都不在默认闸门里**，要单独跑。**它们钉住了什么看两个文件自己的 docstring** —— 那是判据的唯一定义点，别在这里再抄一份（抄了会腐坏）。

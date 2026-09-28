@@ -29,6 +29,8 @@ import pathlib
 import re
 import typing
 
+import store
+
 # 单条术语的 token 数上限。EAMT 2023（TransPerfect）做工业术语库清洗时把
 # 「超过 5 个空格分隔 token」的条目当噪声 —— 术语不该是一句话。
 MAX_TERM_TOKENS = 5
@@ -905,17 +907,18 @@ def _load_state(path: pathlib.Path):
     if not path.exists():
         return {}
     try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+        obj = store.load_json(path, default={})
+    except store.StoreError as e:
         print(f"⚠ {path.name} 存在但读不出（{type(e).__name__}）—— 本次**不覆盖**它。")
+        print(f"   {e}")
         return None
     got = obj.get("appended") if isinstance(obj, dict) else None
     return dict(got) if isinstance(got, dict) else None
 
 
 def _save_state(path: pathlib.Path, appended: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(path, json.dumps({"appended": appended}, ensure_ascii=False, indent=1))
+    # ⚠️ 原子写 + 盖版本号，都由 `store` 管 —— 这里原来是自己 `_atomic_write`。
+    store.save_json(path, {"appended": appended})
 
 
 def _default_chat(api_key: str, model: str):

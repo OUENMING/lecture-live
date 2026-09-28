@@ -167,24 +167,19 @@ def mark_installed(model, *, root=None) -> None:
 
     ⚠️ 失败**静默**：戳只是"锦上添花"，写不进去（权限/磁盘）不该拦住装好的模型。
     """
-    import json
     import time
 
     import paths
+    import store
     try:
         p = paths.models_stamp(root=root)
         try:
-            obj = json.loads(p.read_text(encoding="utf-8"))
-            if not isinstance(obj, dict):
-                obj = {}
-        except Exception:                                 # noqa: BLE001
-            obj = {}
+            obj = store.load_json(p, default={})   # `_v` 已由 store 剥掉
+        except store.StoreError:
+            obj = {}          # 戳读不出来就当没有 —— 它的倒向是 unknown（**不重下**），安全
         obj[model.path] = {"src": model.src, "at": time.time(),
                            "fp": doctor.manifest_fp(model.path)}
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
-        tmp.replace(p)                                    # 原子写，同 voice.py 的纪律
+        store.save_json(p, obj)
     except Exception:                                     # noqa: BLE001
         pass
 

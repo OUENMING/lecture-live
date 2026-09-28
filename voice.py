@@ -46,6 +46,11 @@ import dataclasses
 import json
 import pathlib
 
+# ⚠️ 注意本模块里有**几个参数也叫 `store`**（`add_sample` / `rebuild` 的第一个形参）。
+#    那些函数**不用**这个模块，所以在它们体内 `store` 是那个 dict —— 无害。
+#    但**别**在需要这个模块的函数里把形参命名成 `store`（`save_store` 就栽过一次）。
+import store
+
 # 官方示例的默认值。⚠️ **零背书**（见模块头），真实值要靠数据定。
 DEFAULT_THRESHOLD = 0.4
 # 确认够几次就停止录音（作者拍的）
@@ -67,27 +72,29 @@ class Identify:
 
 # ---------------------------------------------------------------- 状态机
 def load_state(path) -> dict:
-    """读注册状态。**读不出就给一份全新的**（不抛）—— 它是可重建的计数，
-    不像 `term_notes.json` 那样丢了会出事。"""
+    """读注册状态。
+
+    ⚠️ **读不出来会抛**（`store.StoreError`），不再「给一份全新的」。
+       2026-09-28 改：原来写的理由也是「它是可重建的计数」—— 但**重建的后果不是无害的**：
+       一份新状态是 `done: False` → **下次上课又开始录你的音**。
+       「可重建」说的是内容，不是**副作用**。
+       （同 `_is_editing` / `load_store` 那两次：理由被搬到了不成立的地方。）
+    """
     base = {"confirmed": 0, "skipped": 0, "lectures": 0, "done": False,
             "pending": None}
     try:
-        obj = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return base
-    if not isinstance(obj, dict):
-        return base
-    base.update({k: v for k, v in obj.items() if k in base})
+        obj = store.load_json(path, default={})
+    except store.StoreError:
+        raise
+    for k in list(base):
+        if k in obj:
+            base[k] = obj[k]
     return base
 
 
 def save_state(path, st: dict) -> None:
-    """原子写（同目录 `.tmp` + `replace`）—— 这个文件被 `cl` 和面板两头读写。"""
-    p = pathlib.Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(p)
+    """原子写 + 盖版本号（`store.save_json` 管这两件事）。"""
+    store.save_json(path, st)
 
 
 def should_record(st: dict) -> bool:
@@ -134,32 +141,26 @@ def load_store(path) -> dict:
     if not p.exists():
         return {}                                    # 全新安装：真的什么都没有
     try:
-        obj = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        # ⚠️ **不返回空表** —— 那会让随后的 save_store 覆盖掉真数据。
-        raise ValueError(
-            f"声纹档案读不出来：{p}\n"
-            f"  {type(e).__name__}: {e}\n"
-            f"  ⚠️ 这份文件**丢了就真丢了**（`sherpa-onnx` 读不回 embedding），"
-            f"所以这里**不**当它是空的。\n"
-            f"  处理：修好它，或者确认不要了再手工移走。") from e
-    if not isinstance(obj, dict):
-        raise ValueError(f"声纹档案格式不对（顶层该是 dict）：{p}")
+        obj = store.load_json(p, default={})
+    except store.StoreError as e:
+        # ⚠️ **不返回空表** —— 那会让随后的 save_store 覆盖掉真数据（见 docstring）。
+        raise ValueError(str(e)) from e
     out = {}
     for k, v in obj.items():
+        # ⚠️ 这里**不用**跳过 `_v` —— `store.load_json` 返回前已经剥掉了。
         if isinstance(v, list) and v and all(isinstance(x, list) for x in v):
             out[str(k)] = [[float(y) for y in vec] for vec in v]
     return out
 
 
-def save_store(path, store: dict) -> None:
+def save_store(path, data: dict) -> None:
     """⚠️ **这份文件丢了就真丢了** —— 管理器里那份读不回来（模块头第 1 条）。
-    所以用原子写，且**不 truncate 原文件**（先写 `.tmp` 再 `replace`）。"""
-    p = pathlib.Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(store), encoding="utf-8")
-    tmp.replace(p)
+    原子写 + 盖版本号，两件事都由 `store.save_json` 管。
+
+    ⚠️ 参数叫 `data` 不叫 `store` —— 后者会和本模块 import 的 `store` **撞名**，
+       在函数体里永远拿到的是那个 dict，模块一根手指都碰不到（2026-09-28 踩到）。
+    """
+    store.save_json(path, data)
 
 
 def add_sample(store: dict, course: str, emb: list) -> bool:

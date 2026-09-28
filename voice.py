@@ -114,13 +114,37 @@ def mark_done(st: dict) -> dict:
 
 # ---------------------------------------------------------------- 档案（唯一真源）
 def load_store(path) -> dict:
-    """`{课号: [[float, …], …]}`。读不出就给空表（同 `load_state` 的理由）。"""
+    """`{课号: [[float, …], …]}`。
+
+    ⚠️⚠️ **「文件不存在」给空表，「文件坏了」抛异常 —— 两者绝不能混。**
+       这里原来写的是「读不出就给空表（**同 `load_state` 的理由**）」，
+       而 `load_state` 的理由是「它是**可重建的计数**」—— **那个理由搬不过来**：
+       本函数管的是 `profiles.json`，`save_store` 自己的 docstring 逐字写着
+       「**这份文件丢了就真丢了** —— 管理器里那份读不回来」。
+
+       混起来的后果是**静默全损**：
+         `load_store()` 读到坏文件 → `{}` → 调用方 `add_sample` 加一条 →
+         `save_store({新课: [一条]})` → **把原文件整个覆盖掉**，其余全没了。
+       ⚠️ 与 `_is_editing` 那次、以及 `classify` 那次是**同一个形状**：
+          「同 X 的理由」被搬到了 X 的理由不成立的地方。
+       ⚠️ 与 `minutes` 那条「**截断必须说出来**」也是同族 ——
+          负结果不许读起来像穷尽。（2026-09-28 架构评估时查出。）
+    """
+    p = pathlib.Path(path)
+    if not p.exists():
+        return {}                                    # 全新安装：真的什么都没有
     try:
-        obj = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+        obj = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        # ⚠️ **不返回空表** —— 那会让随后的 save_store 覆盖掉真数据。
+        raise ValueError(
+            f"声纹档案读不出来：{p}\n"
+            f"  {type(e).__name__}: {e}\n"
+            f"  ⚠️ 这份文件**丢了就真丢了**（`sherpa-onnx` 读不回 embedding），"
+            f"所以这里**不**当它是空的。\n"
+            f"  处理：修好它，或者确认不要了再手工移走。") from e
     if not isinstance(obj, dict):
-        return {}
+        raise ValueError(f"声纹档案格式不对（顶层该是 dict）：{p}")
     out = {}
     for k, v in obj.items():
         if isinstance(v, list) and v and all(isinstance(x, list) for x in v):

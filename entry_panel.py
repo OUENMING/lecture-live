@@ -1269,15 +1269,23 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     def _is_editing() -> bool:
         """面板现在是 key，是不是因为在输入框里编辑？
 
-        ⚠️ 判据抄 `overlay._is_editing`：**field editor 存在 = 正在编辑**。
-           `NSTextField` 拿到焦点时 first responder 是它的 field editor
-           （一个 `NSTextView`），**不是控件自己**。
+        ⚠️ 判据与 `overlay._is_editing` **同源但更强**：那边只问自己那一个 `_input`，
+           这里问「**任何** field editor」—— 本面板会有**两个**文本框（搜索 + 新增课程），
+           盯单个控件会漏掉另一个。
+
+        ⚠️⚠️ **出错时返回 `True`，不是 `False`** —— 2026-09-28 修正。
+           这里原来返回 `False`，而它自己的注释写着「判据抄 `overlay._is_editing`」——
+           **判据抄了，倒向抄反了**，理由没跟着过来。overlay 那段逐字写着：
+             「返回 False 会让不变量在没有可靠依据的情况下**主动抢走焦点** ——
+               正在打字时被抢是最坏的失败模式。检测不出来就当作在打字, 保守。」
+           → 两份拷贝各自漂、而且漂在**最不该漂的那一位**上，这正是本仓库
+             「一条纪律两处定义」的同族事故。
         """
         try:
             fr = win.firstResponder()
             return bool(fr) and fr is not win and bool(fr.isFieldEditor())
         except Exception:                                     # noqa: BLE001
-            return False
+            return True                                       # 判不出来 = 当他在打字
 
     def _release_focus() -> None:
         """把键盘还出去。

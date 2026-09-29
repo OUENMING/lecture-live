@@ -77,7 +77,7 @@ def main() -> int:
         args.vault = resolve_vault(None)
     if not args.vault:
         print("✗ 找不到 Obsidian 库 —— 得知道笔记写到哪儿。\n"
-              "  例: --vault ~/Obsidian/SecondBrain   或设环境变量 OBSIDIAN_VAULT\n"
+              "  例: --vault ~/Obsidian/MyVault   或设环境变量 OBSIDIAN_VAULT\n"
               "  也可以先用 `cl` 跑一次（它会把选过的库记进 ~/.classlive/vault）。")
         return 1
 

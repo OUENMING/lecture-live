@@ -141,7 +141,7 @@ elif phase == "work":
     card["set_buttons"]([("跳过精修", lambda: print("跳过")),
                          ("中止并退出", lambda: print("退出"))])
 elif phase == "done":
-    card["set_status"]("✅ 已存入 Obsidian\n～/Obsidian/SecondBrain/Lectures/"
+    card["set_status"]("✅ 已存入 Obsidian\n～/Obsidian/MyVault/Lectures/"
                        "2026-09-28_SOC10020.md")
     card["set_hint"]("3 秒后自动关闭")
     card["set_buttons"]([("立即关闭", lambda: print("关闭"))])

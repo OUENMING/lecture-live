@@ -1006,6 +1006,23 @@ def main() -> int:
     check("⭐ 真 `entry_panel._enter`：混合 -> 收（HIG 子集语义）",
           bool(_card._on_enter(_PB(["/x/a.pdf", "/x/Downloads"]))) is True)
 
+    # ⭐⭐ `.ics`：**悬停必须说"收"** —— 2026-09-29 实测的缺口。
+    #    松手那条是真的会导入（`run_prep:2848` → `run_import`），但悬停判据当时
+    #    只问 `extract.expand()`（= 能不能被**抽取**），而 `.ics` 不在支持集里
+    #    → 屏上「不高亮（说收不了）」，一松手**东西真进去了**。
+    #    ⚠️ 这是 `REVIEW §9.2 #5` 那条的**镜像**：那次是"高亮着却收不了"，
+    #       这次是"不高亮却收下了"。两者同源 —— 悬停判的和松手做的是两件事。
+    #    ⚠️ 判据钉的是**真 `_enter`**（不是替身）：替身只证明 `make_drop_target`
+    #       的契约，而这条缺陷住在本文件的 `_enter` 里。
+    check("⭐⭐ 真 `_enter`：`.ics` **收**（松手那条真会导入，悬停不许说收不了）",
+          bool(_card._on_enter(_PB(["/x/timetable.ics"]))) is True)
+    check("⭐ 真 `_enter`：`.ical` 也收（`timetable_files` 认两个后缀）",
+          bool(_card._on_enter(_PB(["/x/timetable.ical"]))) is True)
+    check("⭐ 真 `_enter`：`.ics` + 课件混拖 -> 收",
+          bool(_card._on_enter(_PB(["/x/a.pdf", "/x/t.ics"]))) is True)
+    check("⚠️ 真 `_enter`：`.ics` 不是万能通行证 —— `.txt` 仍然拒",
+          bool(_card._on_enter(_PB(["/x/notes.txt"]))) is False)
+
     # ⭐⭐ **跨层端到端**：`_drop` 的返回值必须**跟 `on_drop_files` 走**。
     #    这一环是 `performDragOperation:` 认不认这次落地的**唯一**依据：
     #    `panel.perform_drag` 拿到的就是它的返回值（`None` 现在算收，但**真值必须传得上来**）。

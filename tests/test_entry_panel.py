@@ -505,6 +505,22 @@ def main() -> int:
     check("挑课表：空 / None 不炸", E.timetable_files([]) == []
           and E.timetable_files(None) == [])
 
+    # ⭐⭐ `acceptable()` —— 「面板收不收」的唯一定义点（悬停高亮 + 松手分流共用）。
+    #    2026-09-29 加的：之前悬停只问 `extract.expand()`（能不能被**抽取**），
+    #    而 `.ics` 不在支持集里 → 拖课表时**不高亮（说收不了）**，可一松手
+    #    `run_prep` 真的把它导入了。判据钉的是**并集**这个形状。
+    check("⭐ acceptable：课件收（走 extract 那条）",
+          E.acceptable(["/x/讲义.pdf"]) is True)
+    check("⭐⭐ acceptable：`.ics` 也收（走 timetable_files 那条 —— 这是那个缺口）",
+          E.acceptable(["/x/timetable.ics"]) is True)
+    check("⭐ acceptable：两条都落空 -> 拒（`.txt` 不是万能通行证的漏网）",
+          E.acceptable(["/x/notes.txt"]) is False)
+    check("⭐ acceptable：混拖 -> 收（HIG 子集语义）",
+          E.acceptable(["/x/a.pdf", "/x/t.ics"]) is True
+          and E.acceptable(["/x/a.pdf", "/x/Downloads"]) is True)
+    check("⚠️ acceptable：空 / None -> 拒（不许把「什么都没有」当能收）",
+          E.acceptable([]) is False and E.acceptable(None) is False)
+
     # ⭐⭐ `plan_add` 的四个动作是 `bad` / **`exists`** / `pick` / `create`。
     #    第一版只把 `create` 当新建、其余全当「课号形状不对」→ **现成的课被标成
     #    "形状不对，跳过"**，而它一个字都没说错。变异验证（实跑过）：把

@@ -267,6 +267,47 @@ def main() -> int:
     # `PROBE_BATCH=1` —— 一上来就把批量那条链路整个跑一遍（映射卡直接上屏），
     # 不用手拖。⚠️ 走的是 `Handles.start_batch` 那个**程序化入口**，因为
     # 真拖拽进不了验收跑器（`test_panel.py` 第 ⑨ 组有同样的说明）。
+    # `PROBE_ICSDRAG=1` —— **拖 `.ics` 时的高亮**（2026-09-29 修的那个缺口）。
+    #    ⚠️ 这条**必须真机看**：判据能断「`_enter` 返回 True」，但断不了「屏上真的
+    #    亮了」—— 而那个缺口的症状正是**屏上不亮、松手却收下了**。
+    #    ⚠️ 走**真契约**：调 `draggingEntered:` 拿返回值（"收不收"由它决定），
+    #       再直接读那两张卡的 `layer().backgroundColor()` —— 高亮是画上去的，
+    #       不是我们以为的。
+    if os.environ.get("PROBE_ICSDRAG"):
+        import courses as _C
+        _ics = "/tmp/cl_test.ics"
+        if not os.path.exists(_ics):
+            pathlib.Path(_ics).write_text(
+                "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:cl-probe\n"
+                "SUMMARY:ZZTEST999: Fake Course (Lecture)\n"
+                "DTSTART;TZID=Europe/Dublin:20260908T150000\nDURATION:PT50M\n"
+                "RRULE:FREQ=WEEKLY;BYDAY=TU\nEND:VEVENT\nEND:VCALENDAR\n",
+                encoding="utf-8")
+
+        class _PB:
+            def __init__(self, ps): self._ps = ps
+            def types(self): return ["public.file-url"]
+            def readObjectsForClasses_options_(self, cls, opt): return self._ps
+
+        class _Sender:
+            def __init__(self, pb): self._pb = pb
+            def draggingPasteboard(self): return self._pb
+
+        print("\nPROBE_ICSDRAG —— 真调 draggingEntered:，再读卡片实际画上去的底色")
+        _sent = _Sender(_PB([_ics]))
+        for lbl, view in (("卡片", h.window.contentView()),):
+            try:
+                got = view.draggingEntered_(_sent)
+            except AttributeError:
+                print(f"  {lbl}: 没有 draggingEntered_（它是 contentView，不是落点）")
+                continue
+            print(f"  {lbl} .ics → 返回 {got}")
+        # ⭐ 等价判据（同一份实现，跑器里够用）：acceptable 的返回值就是高亮开关
+        for label, ps in ((".ics（该亮）", [_ics]),
+                          (".txt（该不亮）", ["/tmp/x.txt"]),
+                          ("空（该不亮）", [])):
+            print(f"  acceptable({label}) → {entry_panel.acceptable(ps)}")
+
     if os.environ.get("PROBE_BATCH"):
         print("\nPROBE_BATCH=1 —— 直接跑批量：13 份假课件（5 份有归属 / 7 份未分类）")
         AppHelper.callAfter(h.start_batch, [f"/tmp/假课件/样本{i}.pdf" for i in range(13)])

@@ -773,6 +773,24 @@ def timetable_files(files) -> list:
             if str(p).lower().endswith((".ics", ".ical"))]
 
 
+def acceptable(paths) -> bool:
+    """这一串拖进来的，**面板收不收** —— 悬停高亮与松手分流**共用这一条**。纯函数。
+
+    ⚠️ 存在的理由同 `extract.is_supported`：两个入口（底部落点条 / 课程卡片）各写一份
+       判据，用户就会看到「高亮说能收、松手说不要」。
+    ⚠️ 它是**并集**，因为下游有**两条**：
+       · 课件 → `run_prep`（判据是 `extract.is_supported`，走 `expand` 摊平）
+       · `.ics` → `run_import`（判据是 `timetable_files`，**只看扩展名**）
+       少了任何一条都会出错，而且方向相反：
+       · 只判课件 → 拖 `.ics` **不高亮**（说"收不了"），松手**却真导入了**（2026-09-29 实测）；
+       · 只判课表 → 拖 pdf 不高亮，松手却归档了。
+       ⚠️ 这正是 `REVIEW §9.2 #5` 那条的镜像 —— 那次是"高亮着却收不了"，
+          这次是"不高亮却收下了"。两种都源自「悬停判的和松手做的是两件事」。
+    """
+    from extract import expand as _expand
+    return bool(_expand(paths)[0]) or bool(timetable_files(paths))
+
+
 def ics_course_row(c, *, known=None) -> dict:
     """`timetable.Course` → 导入确认卡的一行。**纯函数。**
 
@@ -1050,17 +1068,14 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     #    落点成功时**不会**再收到 `draggingExited:`，只在 exit 里撤会留下一张
     #    永久高亮的卡（见 `panel.make_drop_target` 的说明）。
     def _enter(pb):
-        # ⚠️ 判据是「**摊平后有能抽的**」（`extract.expand` 走 `is_supported` ——
-        #    支持集的唯一定义点，与流水线共用一份），不是「拖进来一个非空文件列表」。
-        #    原来只看 `bool(panel.file_paths(pb))` → **文件夹、`.txt`、`.docx` 全都高亮
-        #    说"能收"**，松手才在 `prep` 里判 unsupported（`REVIEW §9.2 #5`）。
-        #    ⚠️ 2026-09-28 起走 `expand()`：**文件夹取一层**，两个入口行为一致
-        #    （落点条那条也用它；两处不一致比不支持更糟）。
+        # ⚠️ 判据是 `acceptable()` —— 「面板收不收」的**唯一定义点**（与落点条共用）。
+        #    它比"摊平后有能抽的"宽：下游有**两条**（课件走 `prep`、`.ics` 走
+        #    `run_import`），少了 `.ics` 那条就会「不高亮却收下了」（2026-09-29 实测）。
+        #    更早的错法（原来只看 `bool(panel.file_paths(pb))` → 文件夹、`.txt`
+        #    全高亮说"能收"）见 `REVIEW §9.2 #5`。
         #    ⚠️ 拒的时候**也要不高亮**：HIG 逐字要求"收不了时给显式反馈（`circle.slash`）、
         #       **别给高亮**" —— 只改返回值会留下"高亮着但收不了"。
-        from extract import expand as _expand
-        paths = panel.file_paths(pb) or []
-        ok = bool(_expand(paths)[0])
+        ok = acceptable(panel.file_paths(pb) or [])
         _bg(HILITE_A if ok else CARD_FILL_A)
         return ok
 
@@ -1744,13 +1759,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 pass
 
     def _drop_enter(pb):
-        # ⚠️ 判据是「**摊平后有能抽的**」（`extract.expand` 走 `is_supported`，
-        #    那是"能不能收"的唯一定义点）—— 与卡片同一条。
+        # ⚠️ 判据是 `acceptable()` —— 与卡片那条**共用同一个定义点**
+        #    （`extract.is_supported` 只管"能不能被抽取"，而下游还有 `.ics`→`run_import`）。
         #    原来只看 `bool(file_paths(pb))` → 文件夹、`.txt` 全高亮说"能收"，
         #    松手才在 prep 里判 unsupported（`REVIEW §9.2 #5`）。
-        from extract import expand as _expand
-        paths = panel.file_paths(pb) or []
-        ok = bool(_expand(paths)[0])
+        ok = acceptable(panel.file_paths(pb) or [])
         _strip_bg(HILITE_A if ok else CARD_FILL_A)
         return ok
 
@@ -1775,7 +1788,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     strip_holder["hint"] = [
         panel.make_label("把课件全拖到这里",
                          NSMakeRect(CARD_PAD, DROP_H - 40.0, HINT_W, 22.0), 15.0),
-        panel.make_label("PDF / PPTX / DOCX · 文件夹也行（取里面一层）",
+        panel.make_label("PDF / PPTX / DOCX · 课表 .ics · 文件夹也行",
                          NSMakeRect(CARD_PAD, DROP_H - 60.0, HINT_W, 16.0),
                          11.0, alpha=DIM),
         panel.make_label("自动认出哪份属于哪门课 —— 认不出的会让你核对",
@@ -2319,7 +2332,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         from extract import expand as _expand
         files, dropped = _expand(paths)
         if not files:
-            set_status("这些都不收（只认 PDF / PPTX / DOCX；文件夹取里面一层）", 1.0)
+            set_status("这些都不收（只认课件 PDF / PPTX / DOCX、课表 .ics；"
+                       "文件夹取里面一层）", 1.0)
             return False
         names = courses.list_courses(glossary, state_root=state_root)
         S["batch"] = {"verdicts": [], "busy": True, "total": len(files),

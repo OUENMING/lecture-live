@@ -23,6 +23,7 @@
     PROBE_BATCH=1       一上来就跑批量归档（13 份假课件）
     PROBE_SEARCH=<词>    直接全库搜（只读）
     PROBE_ADD=<课号>     走新增课程那条路；**留空**（`PROBE_ADD=`）= 只打开那一行
+    PROBE_SESSIONS=<课号>  直接开那门课的课次列表（读**替身** `sessions/`，见下）
     PROBE_ABORT=1       隔离地看「没跑完 + 逐文件失败」两行长什么样
 
 ## ⚠️ 隔离在哪（三条都是「上一版跑器踩过」的教训）
@@ -207,7 +208,55 @@ def main() -> int:
     #    而 Ctrl+C 在这个进程里不一定送达）。
     #    `on_close` 是 `entry_panel` 现成的口子（`_build` 的形参，`do_close` 末尾断环之后才调）。
     from PyObjCTools import AppHelper
+    # ⚠️⚠️ **课次列表也读 `sessions/` —— 跑器必须隔离它。**
+    #    不隔离的话「判给本课」会往**真的 `sessions/`** 里写一个 `.attribution.json`
+    #    （不是删数据，但"隔离跑器"这条性质就破了）。这里造**同名但内容是我们自己写的**
+    #    替身：名字取真的（列表渲染得像），字数是特意配好的 —— 一半够格、一半是空壳，
+    #    好让两档状态都看得到。
+    sess_iso = ISO / "sessions"
+    sess_iso.mkdir(exist_ok=True)
+    _STUBS = [("2026-09-22_150213_ECON10740", "ok"), ("2026-09-15_150616_ECON10740", "ok"),
+              ("2026-09-08_150000_ECON10740", "thin"),
+              ("2026-09-24_202216_LECTURE", "ok"), ("2026-09-28_120341_ECON10xxx", "ok"),
+              ("2026-09-26_051548_ECON10770", "thin")]
+    for _stem, _kind in _STUBS:
+        _p = sess_iso / f"{_stem}.md"
+        if not _p.exists():
+            # ⚠️ 会话正文的**唯一读法**是 `obsidian_writer._parse`，它的抬头正则
+            #    `_TS` 是**行首锚定**的（`^> [!abstract]`）—— 行首多一个空格就一条都认不出，
+            #    而且**不报错**，只是每行显示 `0 句`。（第一版替身就是这么写的，已修。）
+            _line = ("the quick brown fox jumps over the lazy dog while the lecture "
+                     "continues through every single chapter of this course today")
+            _body = ""
+            if _kind == "ok":
+                _body = "\n".join(f"> [!abstract] 09:0{i}:00\n> **EN**: {_line}\n"
+                                  for i in range(4))
+            _p.write_text(f"# {_stem.split('_', 2)[-1]} · stub\n\n{_body}", encoding="utf-8")
+
+    # `PROBE_TIMETABLE=1` —— **预选**那条路：造一份「时段就是现在」的课表塞进隔离根，
+    #    好让面板把某张卡排到第一、并在按钮上说清为什么。
+    #    ⚠️ 时段是**按当前时刻算的**（不是写死的）—— 写死的话这个跑器只在某个小时有效。
+    #    ⚠️⚠️ **必须在 `open_panel` 之前写** —— 面板是在 build 那一刻就算好 `S["guesses"]` 的。
+    if os.environ.get("PROBE_TIMETABLE"):
+        import datetime as _dt
+        import json as _json
+        _now = _dt.datetime.now()
+        _slot = {"d": _now.weekday(), "h": _now.hour, "m": 0, "min": 60,
+                 "iv": 1, "a": _now.date().isoformat(), "skip": []}
+        (ISO / "timetable.json").write_text(
+            _json.dumps({"_v": 1, "ECON10740": [_slot]}, ensure_ascii=False),
+            encoding="utf-8")
+        print(f"\nPROBE_TIMETABLE —— 造了「周{_now.weekday() + 1} {_now.hour}:00」的课表"
+              f"（ECON10740），面板应把它排第一")
+
     h = entry_panel.open_panel(glossary=ISO / "glossary.txt", state_root=ISO,
+                               sessions_dir=sess_iso,
+                               # ⚠️ `on_start` 必须给个桩 —— 不给的话卡片上**一个按钮都不画**
+                               #    （`_acts = on_start is not None`），于是「开始上课」/「课次」/
+                               #    「不是这门？」这条按钮行在跑器里**整个看不到**，
+                               #    而它正是出过 bug 的那一行（按钮叠在就绪行上）。
+                               #    桩只打印，**不写 `.course`、不起录音**。
+                               on_start=lambda c: print(f"（桩）开始上课：{c}"),
                                prepare_fn=stub_prepare,
                                suggest_fn=stub_suggest,
                                on_close=AppHelper.stopEventLoop)
@@ -229,6 +278,30 @@ def main() -> int:
         q = os.environ["PROBE_SEARCH"]
         print(f"\nPROBE_SEARCH={q!r} —— 直接搜（只读）")
         AppHelper.callAfter(h.search, q)
+
+    # `PROBE_ICS=1` —— 造一份假课表走导入那条路（**只到确认卡，不落盘**）。
+    if os.environ.get("PROBE_ICS"):
+        _p = ISO / "probe-timetable.ics"
+        _p.write_bytes(
+            b"BEGIN:VCALENDAR\r\n"
+            b"BEGIN:VEVENT\r\nUID:a\r\nSUMMARY:ECON10740: Exploring Economics (Lecture)\r\n"
+            b"DTSTART;TZID=Europe/Dublin:20260908T150000\r\n"
+            b"DTEND;TZID=Europe/Dublin:20260908T160000\r\n"
+            b"RRULE:FREQ=WEEKLY;BYDAY=TU\r\nEND:VEVENT\r\n"
+            b"BEGIN:VEVENT\r\nUID:b\r\nSUMMARY:ECS 170 001 Introduction to AI (Lecture)\r\n"
+            b"DTSTART:20260914T141000Z\r\nRRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE\r\n"
+            b"END:VEVENT\r\n"
+            b"BEGIN:VEVENT\r\nUID:c\r\nSUMMARY:ECON10770: Introduction to Economics (Tutorial)\r\n"
+            b"DTSTART:20260908T120000\r\nEND:VEVENT\r\n"
+            b"END:VCALENDAR\r\n")
+        print(f"\nPROBE_ICS —— 导入 {_p.name}（只解析，不落盘）")
+        AppHelper.callAfter(h.import_timetable, [str(_p)])
+
+    # `PROBE_SESSIONS=<课号>` —— 直接打开那门课的课次列表（读的是**替身目录**）。
+    if os.environ.get("PROBE_SESSIONS"):
+        _c = os.environ["PROBE_SESSIONS"]
+        print(f"\nPROBE_SESSIONS={_c!r} —— 直接开课次列表")
+        AppHelper.callAfter(h.show_sessions, _c)
 
     # `PROBE_ZERO=1` —— 零课程那一档。造几个假课件直接走批量那条路；
     #   再加 `PROBE_ZERO_ADD=<课号>` 就在 3 秒后建这门课 ——

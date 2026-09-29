@@ -169,6 +169,16 @@ def _score(df_in: int, courses_with: int, n_courses: int) -> float:
     return df_in * math.log(1 + max(1, n_courses) / max(1, courses_with))
 
 
+def session_words(text: str) -> int:
+    """一份会话转录里有多少个**英文词** —— `MIN_WORDS` 那道闸量的就是它。
+
+    ⚠️ 抽出来是**为了让判据和视图同源**：面板要显示「这节 83 句」，而
+       `_session_tokens` 要靠它决定"算不算一节课"。各写一遍迟早一个说 83、
+       一个说 30 —— 本仓库记过的「一条纪律两处定义」。
+    """
+    return sum(_counts(_english(text)).values())
+
+
 def _session_tokens(course: str, *, sessions_dir, sessions_of) -> list:
     """这门课**每节课**的词频表。读法唯一的定义点在 `obsidian_writer`。"""
     out = []

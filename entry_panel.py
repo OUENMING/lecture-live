@@ -31,16 +31,20 @@
 """
 from __future__ import annotations
 
+import datetime
 import os
 import pathlib
+import re
 import threading
 import typing
 
+import corpus
 import courses
 import objc_own
 import panel
 import paths
 import ready
+import timetable as T
 
 # ── 尺寸（每条都有出处，见模块头）────────────────────────────────────
 PAD = 20.0             # 面板内边距（实测：System Settings 20pt）
@@ -81,6 +85,14 @@ BATCH_UNDECIDED = "未分类"
 SEARCH_W = 220.0       # 标题行右侧搜索框的宽
 SEARCH_ROW = 22.0      # 一条搜索结果一行
 SEARCH_LIMIT = 80      # 一次最多显示多少条（`find` 会报 `truncated`）
+READ_BEFORE = 2        # 点开一条命中时，往前给几句
+READ_AFTER = 6         # 往后给几句 —— 一屏读得下，且够看出上下文
+READ_LINE_H = 15.0     # 展开块每行的高度（与 `search_card_height` 成对）
+SESS_ROW = 22.0        # 课次列表一行
+SESS_HEAD = 20.0       # 一组的标题行（「这门课的上课记录」/「没归课的」）
+SESS_SEP = 10.0        # 两组之间的分隔（`sessions_card_height` 的算式里有它）
+IMPORT_ROW = 22.0      # 导入确认卡一行一门课
+IMPORT_HEAD = 20.0     # 导入确认卡的标题行
 
 # ── 新增课程（2026-09-28）────────────────────────────────────────────
 # ⭐ 形状是 **inline row**：点「＋」让**底部那条自己**换成输入行，不是弹 sheet、
@@ -220,6 +232,12 @@ class Handles(typing.NamedTuple):
     # 同理：新增课程也走不到（没有真键盘）—— 「敲入 X 然后回车」的程序化版本。
     # ⚠️ 它**与手输同一条路**（`submit_add`），判断仍在 `courses.plan_add`。
     add_course: typing.Callable[[str], None]
+    # 同理：课次列表那条路也走不到验收跑器里（要点卡上那个「课次」按钮）。
+    # ⚠️ 它**只读** `sessions/`；「判给本课」写的是旁路文件 `courses.set_attribution`。
+    show_sessions: typing.Callable[[str], None]
+    # 同理：导入课表那条路也走不到跑器里（要真拖一个 `.ics`）。
+    # ⚠️ 它**只解析、不落盘** —— 建课要人点「新建这些课」。
+    import_timetable: typing.Callable[[list], None]
     # 删课那条路**也**走不到跑器里：右键菜单点不了，而确认框是模态的（会把跑器卡住）。
     # → 这个入口跳过确认框（`ask=False`），**其余全同**（`courses.delete` + `delete_msg`）。
     # ⚠️ 生产路径永远 ask=True。
@@ -497,23 +515,93 @@ def group_for_archive(rows) -> dict:
     return out
 
 
-def search_card_height(n: int) -> float:
+def read_span(line: int, *, before: int = READ_BEFORE, after: int = READ_AFTER) -> tuple:
+    """命中行 → 交给 `find.read` 的闭区间（**1-based**）。**纯函数** —— 判据指得到它。
+
+    ⚠️ **窗口是面板定的，不是 `find.read` 定的。** 它自己的上限是 200 行 / 6000 字符
+       （那是给模型看的量级），直接铺进卡片会撑爆。面板要的是"这一句的前后文"。
+    """
+    n = int(line)
+    return max(1, n - before), n + after
+
+
+def open_block_lines(text) -> int:
+    """展开块占**几行** —— 高度与排版**共用同一份文本**，所以两边必然一致。
+
+    ⚠️ 别改成"估一个行数"：算多算少**都不报错**，卡片会空一截或把内容挤出去
+       （同 `search_card_height` / `card_height` 那条纪律）。
+    """
+    return len(text.splitlines()) if text else 0
+
+
+# `find.read` 的输出是**给模型看的**：`> [!abstract] 14:08:06` 抬头 +
+# `> **EN**:` / `> **ZH**:` / `> **ASR**:` 三个字段。铺给人读会碎。
+_QUOTE = re.compile(r"^>\s?")
+_TS_LINE = re.compile(r"^> \[!abstract\]\s*(.*)$")
+_FIELD = re.compile(r"^>\s?\*\*(EN|ZH|ASR)\*\*:\s*(.*)$")
+
+
+def clean_read_text(text: str) -> str:
+    """`find.read` 的输出 → 面板里**给人读**的样子。**纯函数**（2026-09-29 作者拍板）。
+
+    - 抬头 `# 文件名 第 X–Y 行` **留着** —— 它回答「这段来自哪、第几行」，
+      那正是展开这一步的意义（`find.read` 的 docstring：命中只是提示，读全文是另一步）
+    - `> [!abstract] 14:08:06` → `14:08:06` · `> **EN**: x` → `x`
+    - ⭐ **同一时间块里 ASR 与 EN 一字不差就整行丢掉** —— 会话文件里这很常见，
+      不丢就是同一句话连读两遍。
+
+    ⚠️ 这条**必须按字段比，不能按相邻行比**（2026-09-29 判据抓出来的）：
+       真实顺序是 `EN / ZH / ASR`，EN 与 ASR **隔着 ZH**，相邻去重永远不会触发。
+    """
+    out: list = []
+    en: str | None = None
+    for ln in (text or "").splitlines():
+        m = _TS_LINE.match(ln)
+        if m:
+            en = None                                    # 新的一句，EN 基准重置
+            out.append(m.group(1).rstrip())
+            continue
+        f = _FIELD.match(ln)
+        if f:
+            field, body = f.group(1), f.group(2).strip()
+            if field == "EN":
+                en = body
+            elif field == "ASR" and body and body == en:
+                continue                                 # 与 EN 一字不差 —— 不读两遍
+            if body:
+                out.append(body)
+            continue
+        s = _QUOTE.sub("", ln).rstrip()
+        if s and out and s == out[-1]:
+            continue
+        out.append(s)
+    return "\n".join(out)
+
+
+def search_card_height(n: int, open_lines: int = 0) -> float:
     """搜索结果卡的高度 —— **与 `_make_search_card` 的排版循环成对**。
 
     ⚠️ 同 `card_height` / `batch_card_height` 那条纪律：别抄固定值。
        行数是**搜出几条**决定的，写死就会溢出（且**不报错**，只是画到框外）。
+    ⚠️ `open_lines` 必须与循环里**真的画了几行**同源（都来自 `open_block_lines`）。
     """
-    return CARD_PAD + max(n, 1) * SEARCH_ROW + CARD_PAD
+    return (CARD_PAD + max(n, 1) * SEARCH_ROW + open_lines * READ_LINE_H + CARD_PAD)
 
 
-def _make_search_card(hits, *, width):
-    """搜索结果列表。返回视图。**排一行是一条命中**。
+def _make_search_card(hits, *, width, open_idx=None, open_text=None,
+                      on_open=None, targets=None):
+    """搜索结果列表。返回 `(视图, targets)`。**排一行是一条命中**。
 
     ⚠️ 排版一律**从顶部往下**（y 递减，卡片是非翻转坐标）—— 同 `_make_card`。
+    ⚠️ `on_open` 给定时，命中那行的**正文变成按钮**（点它就地展开 / 收起原文）。
+       ⚠️ 无边框 `NSButton` 是本仓库既有的可点做法（`make_ready_strip` 同款），
+          它自己接管点击 —— **不必碰 `mouseDownCanMoveWindow` 那个雷**。
+       ⚠️ 回来的 target 必须由调用方持有（`setTarget_` 是**弱引用**）。
     """
-    from AppKit import NSColor, NSView, NSMakeRect
+    from AppKit import NSButton, NSColor, NSFont, NSView, NSMakeRect
 
-    h = search_card_height(len(hits))
+    spans = (open_text or "").splitlines()
+    h = search_card_height(len(hits), open_block_lines(open_text))
     inner_w = width - 2 * CARD_PAD
     view = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, h))
     view.setWantsLayer_(True)
@@ -527,7 +615,7 @@ def _make_search_card(hits, *, width):
     body_x = CARD_PAD + meta_w + line_w
     body_w = max(40.0, inner_w - meta_w - line_w)
     y = h - CARD_PAD
-    for hit in hits or [None]:
+    for i, hit in enumerate(hits or [None]):
         y -= SEARCH_ROW
         if hit is None:                                   # 空结果：说一句话，别留白板
             view.addSubview_(panel.make_label(
@@ -541,10 +629,240 @@ def _make_search_card(hits, *, width):
         view.addSubview_(panel.make_label(
             f"L{hit.line}", NSMakeRect(CARD_PAD + meta_w, y + 5.0, line_w - 6.0, 15.0),
             10.0, alpha=DIM))
+        rect = NSMakeRect(body_x, y + 4.0, body_w, 16.0)
+        if on_open is None:
+            view.addSubview_(panel.make_label(hit.text or "", rect, 12.0, truncate=True))
+        else:
+            b = NSButton.alloc().initWithFrame_(rect)
+            b.setTitle_(hit.text or "")
+            b.setBordered_(False)
+            b.setAlignment_(0)                            # 左对齐（NSTextAlignmentLeft）
+            b.setFont_(NSFont.systemFontOfSize_(12.0))
+            try:
+                b.setContentTintColor_(white.colorWithAlphaComponent_(
+                    0.98 if i == open_idx else 0.86))
+            except Exception:                             # noqa: BLE001
+                pass
+            t = _target(lambda k=i: on_open(k))
+            b.setTarget_(t)
+            b.setAction_("act:")
+            if targets is not None:
+                targets.append(t)
+            view.addSubview_(b)
+        if i == open_idx:
+            for ln in spans:                              # 展开块：与 open_block_lines 同源
+                y -= READ_LINE_H
+                view.addSubview_(panel.make_label(
+                    ln, NSMakeRect(CARD_PAD, y + 2.0, inner_w, 13.0), 11.0,
+                    alpha=0.70, truncate=True))
+    return view, (targets or [])
+
+def sessions_card_height(n_rows: int, n_orphans: int = 0) -> float:
+    """课次列表卡的高度 —— **与 `_make_sessions_card` 的排版循环逐项对应**。
+
+    ⚠️ 同 `search_card_height` / `card_height` 那条纪律：别抄固定值，别让两边漂。
+       `n_orphans > 0` 时多一组标题 + 分隔（**空组不画，也不留高**）。
+    """
+    h = CARD_PAD + SESS_HEAD + max(n_rows, 1) * SESS_ROW
+    if n_orphans:
+        h += SESS_SEP + SESS_HEAD + n_orphans * SESS_ROW
+    return h + CARD_PAD
+
+
+def session_row(p, sents: int) -> dict:
+    """`sessions/2026-09-24_202216_LECTURE.md` → 课次表的一行。**纯函数**。
+
+    ⚠️ 文件名形状的**唯一来源是 `courses._session_course`** —— 这里只做显示用的
+       切分（日期 / HH:MM），**不做归属判断**。归属走 `courses.session_files`。
+    """
+    parts = p.stem.split("_", 2)
+    date = parts[0] if parts else p.stem
+    raw = parts[1] if len(parts) > 1 else ""
+    hhmm = f"{raw[:2]}:{raw[2:4]}" if len(raw) >= 4 else ""
+    return {"stem": p.stem, "name": p.stem, "date": date, "hhmm": hhmm,
+            "sents": sents, "state": "ok" if sents >= corpus.MIN_WORDS else "thin"}
+
+
+def session_row_text(date: str, hhmm: str, sents: int, state: str) -> str:
+    """一行课次的人话。**纯函数** —— 判据指得到它。
+
+    `state` 只有两档：`ok`（够格）/ `thin`（空壳，录了一半或测试残留）。
+    ⚠️ **空壳要说出来** —— 它们在 `sessions/` 里跟真课长得一模一样，
+       而 `corpus` 那道 `MIN_WORDS` 闸是**静默**把它们排除的。
+    """
+    tag = "" if state == "ok" else "   ⚠️ 空壳（录了一半？）"
+    return f"{date}  {hhmm}   ·   {sents} 句{tag}"
+
+
+def _make_sessions_card(rows, *, width, title, on_back, on_adopt=None,
+                        orphans=(), targets=None):
+    """一门课的**课次列表** + 「没归课的上课记录」那一组。返回 `(视图, targets)`。
+
+    ⚠️ 排版一律从顶部往下（y 递减）—— 同 `_make_card` / `_make_search_card`。
+    ⚠️ 回来的 target 必须由调用方持有（`setTarget_` 是**弱引用**）。
+    ⚠️ **只读**：这一屏不改任何文件。「判给本课」写的是**旁路文件**
+       （`courses.set_attribution`），会话 `.md` 一个字节都不动。
+    """
+    from AppKit import NSButton, NSColor, NSFont, NSView, NSMakeRect
+
+    h = sessions_card_height(len(rows), len(orphans))
+    inner_w = width - 2 * CARD_PAD
+    view = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, h))
+    view.setWantsLayer_(True)
+    view.layer().setCornerRadius_(CARD_RADIUS)
+    view.layer().setBorderWidth_(HAIRLINE)
+    white = NSColor.whiteColor()
+    view.layer().setBorderColor_(white.colorWithAlphaComponent_(CARD_LINE_A).CGColor())
+    view.layer().setBackgroundColor_(white.colorWithAlphaComponent_(CARD_FILL_A).CGColor())
+    targets = targets if targets is not None else []
+
+    def _btn(text, x, y, w, action, size=11.0):
+        b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, BTN_H))
+        b.setTitle_(text)
+        b.setBezelStyle_(1)
+        b.setFont_(NSFont.systemFontOfSize_(size))
+        t = _target(action)
+        b.setTarget_(t)                                  # ⚠️ 弱引用 —— 靠 targets 留
+        b.setAction_("act:")
+        targets.append(t)
+        view.addSubview_(b)
+        return b
+
+    y = h - CARD_PAD
+    y -= SESS_HEAD
+    view.addSubview_(panel.make_label(title, NSMakeRect(CARD_PAD, y, inner_w - 96.0,
+                                                        SESS_HEAD - 4.0), 12.0,
+                                      truncate=True))
+    _btn("返回", width - CARD_PAD - 88.0, y - 2.0, 88.0, on_back)
+    for r in rows or [None]:
+        y -= SESS_ROW
+        if r is None:
+            view.addSubview_(panel.make_label(
+                "这门课还没有上课记录", NSMakeRect(CARD_PAD, y + 4.0, inner_w, 16.0),
+                11.0, alpha=DIM))
+            continue
         view.addSubview_(panel.make_label(
-            hit.text or "", NSMakeRect(body_x, y + 4.0, body_w, 16.0), 12.0,
-            truncate=True))
-    return view
+            session_row_text(r["date"], r["hhmm"], r["sents"], r["state"]),
+            NSMakeRect(CARD_PAD, y + 4.0, inner_w, 16.0), 11.0,
+            alpha=(1.0 if r["state"] == "ok" else DIM), truncate=True))
+    if orphans:
+        y -= SESS_SEP
+        y -= SESS_HEAD
+        view.addSubview_(panel.make_label(
+            f"没归课的上课记录（{len(orphans)} 节）—— 判给这门课？",
+            NSMakeRect(CARD_PAD, y, inner_w, SESS_HEAD - 4.0), 12.0, truncate=True))
+        for o in orphans:
+            y -= SESS_ROW
+            view.addSubview_(panel.make_label(
+                f"{o['name']}   ·   {o['sents']} 句",
+                NSMakeRect(CARD_PAD, y + 4.0, inner_w - 100.0, 16.0), 11.0,
+                alpha=DIM, truncate=True))
+            if on_adopt is not None:
+                _btn("判给本课", width - CARD_PAD - 88.0, y + 1.0, 88.0,
+                     (lambda s=o["stem"]: on_adopt(s)))
+    return view, targets
+
+
+def timetable_files(files) -> list:
+    """从拖进来的一堆文件里挑出**课表**。**纯函数** —— 判据指得到它。
+
+    ⚠️ 只按扩展名挑，**不按内容** —— 拖错一个 `.ics` 进去最坏是"认不出课"，
+       而按内容猜（比如试着解析每个文件）会让一次误拖变成一次静默的解析尝试。
+    """
+    return [p for p in (files or [])
+            if str(p).lower().endswith((".ics", ".ical"))]
+
+
+def ics_course_row(c, *, known=None) -> dict:
+    """`timetable.Course` → 导入确认卡的一行。**纯函数。**
+
+    `state`：`new`（会新建）· `exists`（这门课已经有了）· `bad`（课号形状不对）。
+    ⚠️ 判据是 `courses.plan_add` —— **别在这里再写一份**（它才是「能不能建」的
+       唯一定义点，`cl course` 与新增课程那条路共用它）。
+    """
+    import courses as C
+    want = T.suggest_code(c.name) or c.name
+    plan = C.plan_add(want, list(known or ()))
+    action = plan.get("action")
+    # ⚠️ `plan_add` 的四个动作是 `bad` / **`exists`** / `pick` / `create` ——
+    #    **`exists` 是「已经有这门课了」，`pick` 是「多命中、要你挑」**，两个都要算「已有」。
+    #    第一版只判了 `pick` → 现成的课全被标成「课号形状不对，跳过」，而它一个字都没说错。
+    state = "new" if action == "create" else (
+        "exists" if action in ("exists", "pick") else "bad")
+    whens = []
+    for s in sorted(c.slots, key=lambda x: (x.weekday, x.hh, x.mm)):
+        d = "一二三四五六日"[s.weekday]
+        extra = f" 每{s.interval}周" if s.interval > 1 else ""
+        whens.append(f"周{d} {s.hh:02d}:{s.mm:02d}{extra}")
+    return {"name": c.name, "want": want, "state": state,
+            "when": " · ".join(sorted(set(whens))) or "（没说时间）",
+            "events": c.events}
+
+
+def import_card_height(rows) -> float:
+    """导入确认卡的高度 —— **与 `_make_import_card` 的排版循环逐项对应**。"""
+    return CARD_PAD + IMPORT_HEAD + max(len(rows or []), 1) * IMPORT_ROW + CARD_PAD
+
+
+def _make_import_card(rows, *, width, warn, on_confirm, on_cancel, targets=None):
+    """导入确认卡。返回 `(视图, targets)`。**确认之前一个字节都不落盘。**
+
+    ⚠️ 回来的 target 必须由调用方持有（`setTarget_` 是**弱引用**）。
+    """
+    from AppKit import NSButton, NSColor, NSFont, NSView, NSMakeRect
+
+    h = import_card_height(rows)
+    inner_w = width - 2 * CARD_PAD
+    view = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, h))
+    view.setWantsLayer_(True)
+    view.layer().setCornerRadius_(CARD_RADIUS)
+    view.layer().setBorderWidth_(HAIRLINE)
+    white = NSColor.whiteColor()
+    view.layer().setBorderColor_(white.colorWithAlphaComponent_(CARD_LINE_A).CGColor())
+    view.layer().setBackgroundColor_(white.colorWithAlphaComponent_(CARD_FILL_A).CGColor())
+    targets = targets if targets is not None else []
+
+    def _btn(text, x, y, w, action):
+        b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, BTN_H))
+        b.setTitle_(text)
+        b.setBezelStyle_(1)
+        b.setFont_(NSFont.systemFontOfSize_(12.0))
+        t = _target(action)
+        b.setTarget_(t)                                  # ⚠️ 弱引用 —— 靠 targets 留
+        b.setAction_("act:")
+        targets.append(t)
+        view.addSubview_(b)
+
+    y = h - CARD_PAD
+    y -= IMPORT_HEAD
+    n_new = sum(1 for r in rows or [] if r["state"] == "new")
+    view.addSubview_(panel.make_label(
+        f"认出了 {len(rows or [])} 门课 —— 新建其中 {n_new} 门？",
+        NSMakeRect(CARD_PAD, y, inner_w, IMPORT_HEAD - 4.0), 12.0, truncate=True))
+    for r in rows or [None]:
+        y -= IMPORT_ROW
+        if r is None:
+            view.addSubview_(panel.make_label(
+                "这份课表里没认出任何课程", NSMakeRect(CARD_PAD, y + 4.0, inner_w, 16.0),
+                11.0, alpha=DIM))
+            continue
+        tag = {"new": "", "exists": "（已有）", "bad": "⚠️ 课号形状不对，跳过"}[r["state"]]
+        view.addSubview_(panel.make_label(
+            f"{r['want']}{tag}", NSMakeRect(CARD_PAD, y + 4.0, 200.0, 16.0), 11.0,
+            alpha=(1.0 if r["state"] == "new" else DIM), truncate=True))
+        view.addSubview_(panel.make_label(
+            r["when"], NSMakeRect(CARD_PAD + 208.0, y + 4.0, inner_w - 208.0, 16.0),
+            11.0, alpha=DIM, truncate=True))
+    y = CARD_PAD
+    _btn("新建这些课", width - CARD_PAD - 200.0, y, 100.0, on_confirm)
+    _btn("取消", width - CARD_PAD - 92.0, y, 92.0, on_cancel)
+    if warn:
+        view.addSubview_(panel.make_label(
+            "；".join(warn)[:120], NSMakeRect(CARD_PAD, y + 4.0, inner_w - 216.0, 16.0),
+            10.0, alpha=DIM, truncate=True))
+    return view, targets
+
+
 def batch_card_height(verdicts) -> float:
     """映射卡高度 —— **按内容累加推导**，与 `_make_batch_card` 的排版循环成对。
 
@@ -715,7 +1033,8 @@ def _scroll_undo_into_view(doc, course) -> bool:
 
 
 def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
-               entry=None, on_delete=None, on_undo=None, on_delete_course=None):
+               entry=None, on_delete=None, on_undo=None, on_delete_course=None,
+               on_sessions=None, hinted=False, on_not_this=None):
     """一张卡 = 一个落点 + 两行内容（+ 跑过之后的结果列表）。"""
     from AppKit import NSButton, NSColor, NSFont, NSMakeRect
 
@@ -800,8 +1119,33 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     #    同 `prep.prepare` 的 `chat=None` / `build_fn=None`：**能兑现才给，不给就不画**。
     x = CARD_PAD
     if on_start is not None:
-        view.addSubview_(mk("开始上课", x, lambda: on_start(r.course)))
-        x += 92.0 + 8.0
+        # ⭐ **预选的那张卡，按钮标题自己说清楚**（作者 2026-09-29 的 ③）。
+        #    `[一手]` Microsoft HAX G11 逐字：「**Make clear why the system did what it
+        #    did**」—— 不说清楚的话，"为什么这张排第一"对用户就是猜的，
+        #    而认错课的代价是**整节课术语表全错**。
+        #    ⚠️ 理由塞进**按钮标题**而不是新加一行：加行会动 `card_height` 的算式，
+        #       而那个算式与 `refresh` 的排版循环是**成对**的（本文件反复记过这条）。
+        _label = "开始上课 · 就是这门" if hinted else "开始上课"
+        view.addSubview_(mk(_label, x, lambda: on_start(r.course),
+                            w=(148.0 if hinted else 92.0)))
+        x += (148.0 if hinted else 92.0) + 8.0
+    # ⭐ **纠错入口**（HAX G8「Support efficient dismissal」/ G9「efficient correction」）。
+    #    只有被预选的那张卡有它 —— 其余四张本来就不需要纠错。
+    # ⚠️⚠️ **必须和上面那道 `on_start is not None` 同进同出。** 按钮行的高度
+    #    （`card_height` 的 `CARD_GAP_V + BTN_H`）**只在 `on_start is not None` 时才留**，
+    #    而 `on_start is None`（上课中从菜单栏打开的面板，或验收跑器）时这一行**没有高度**。
+    #    第一版漏了这道守卫 → 按钮照画在 `y=CARD_PAD` → **压在那条就绪行上**
+    #    （实测截图抓到的；判据只查"有没有掉出卡片底部"，查不出"两行叠在一起"）。
+    if on_start is not None and hinted and on_not_this is not None:
+        view.addSubview_(mk("不是这门？", x, on_not_this, w=84.0))
+        x += 84.0 + 8.0
+    # ⭐ 「课次」= 这门课的上课记录（+ 没归课的那些，可以就地判给本课）。
+    # ⚠️ 做成**按钮**而不是"双击卡片"：双击要自己接管 `mouseDown_` 并判 `clickCount`，
+    #    而这块面板是磨砂的 —— `mouseDownCanMoveWindow` 那个雷本仓库咬过两次。
+    #    按钮是这个面板既有的做法，零风险。（与设计稿的"双击课号"有偏差，已报备。）
+    if on_sessions is not None and on_start is not None:
+        view.addSubview_(mk("课次", x, lambda: on_sessions(r.course), w=68.0))
+        x += 68.0 + 8.0
     # ⚠️ 原来这里还有一个「选择文件…」（单课加课件）。2026-09-28 删掉 ——
     #    作者说「卡片看着太繁杂」，而它确实是卡里唯一的边框元素、占 27% 的高度，
     #    五门课就是五个。
@@ -1128,6 +1472,47 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                                   state_root=state_root) for c in names]
 
     rs = load()
+    # ⭐⭐ **课表预选**（plan §5.4.4）。两条信号，都只说"时段对得上"，不猜内容：
+    #    ① 导入过的课表（`.ics` 解析结果，存在 `~/.classlive/timetable.json`）
+    #    ② **历史**：这门课过去常在周几几点上（零权限的兜底）—— 实测留一法 10/10
+    #    ⚠️ **只改顺序、只改按钮标题**，**一个状态都不写**（`courses.set_attribution`
+    #       那种都不碰）—— 认错课的代价是"那门课每一句翻译都在用错词"（§2.4 B 已定）。
+    def _guesses():
+        import store
+        known = [r.course for r in rs]
+        ent = T.load(store.load_json(paths.timetable(root=state_root), {}))
+        hist = {}
+        for c in known:
+            slots = []
+            for p in courses.session_files(sessions_dir, c):
+                parts = p.stem.split("_", 2)
+                if len(parts) == 3 and len(parts[1]) >= 2:
+                    try:
+                        slots.append((datetime.date.fromisoformat(parts[0]).weekday(),
+                                      int(parts[1][:2])))
+                    except ValueError:
+                        continue
+            if slots:
+                hist[c] = slots
+        return T.suggest(ent, datetime.datetime.now(), history=hist)
+
+    S["guesses"] = _guesses()
+    S["guess_i"] = 0
+
+    def next_guess():
+        """「不是这门？」→ 换下一条猜测；没有了就**不猜了**（`guess_i = -1`）。
+
+        ⚠️ 不弹确认框：`[一手]` NN/g 逐字「Do not use confirmation dialogs for routine
+           actions… if you cry wolf too many times, people will stop paying attention」。
+        ⚠️ 也不写任何持久状态 —— 下一次开面板重新按课表/历史算，这是**每节课**的事。
+        """
+        g = S.get("guesses") or []
+        i = S.get("guess_i", 0) + 1
+        S["guess_i"] = i if i < len(g) else -1
+        if S["guess_i"] < 0:
+            set_status("好，那我不猜了 —— 你自己挑", 2.0)
+        refresh()
+
     body_h = body_height(len(rs), NSScreen.mainScreen().frame().size.height,
                          card_h=card_height(has_actions=(on_start is not None)))
     # ── 就绪条（2026-09-28）──────────────────────────────────────────
@@ -1159,6 +1544,16 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # ⚠️ borderless 默认没有阴影（Titled 的 overlay 才有）—— 同 whatsnew 的处理，
     #    留在调用点、不进 panel.py 的配方。
     win.setHasShadow_(True)
+    # ⚠️ 这一句**没有**解决聚焦环（2026-09-29 实测）：设上之后
+    #    `becomesKeyOnlyIfNeeded` 读回来确实是 `True`、`isKeyWindow` 也确实变 `False`，
+    #    **但 `firstResponder` 仍是那个 `NSTextView`（搜索框的 field editor），蓝环照画**。
+    #    → 学到一条：**聚焦环是按「控件是不是第一响应者」画的，和窗口 key 不 key 无关。**
+    #    保留它是因为「面板弹出不抢 key」本身是想要的行为；治环的是搜索框那对
+    #    `refusesFirstResponder`。
+    try:
+        win.setBecomesKeyOnlyIfNeeded_(True)
+    except Exception as _e:                                   # noqa: BLE001
+        print(f"⚠ 面板不抢 key 的开关没设上：{_e}")
 
     # 标题在批量模式下会换字 —— 存进 holder，别让 `refresh()` 摸不到它。
     # ⚠️ 2026-09-28 起标题右边多了个搜索框，所以标题**只占左边那段**。
@@ -1179,6 +1574,26 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                    SEARCH_W, TITLE_H - 10.0))
     search_field.setPlaceholderString_("搜索转录 / 笔记…")
     search_field.setFont_(NSFont.systemFontOfSize_(12.0))
+    # ⭐⭐ **开局拒绝当第一响应者**，等面板真的上屏之后再放行 —— 这就是治那圈蓝环的那一步。
+    #    机制（本机实测，2026-09-29）：**聚焦环是按「控件是不是第一响应者」画的，
+    #    和窗口 key 不 key 无关** —— 把窗口弄成不 key（`becomesKeyOnlyIfNeeded`）后
+    #    `isKeyWindow=False` 了，`firstResponder` 仍是这个框的 field editor，环照画。
+    #    所以要在**控件这一层**拒绝，而不是在窗口那一层。
+    # ⚠️ 这是 AppKit 社区的既有配方（SO 7024224 最高赞）：**开局 `refusesFirstResponder=YES`，
+    #    出现之后再改回 `NO`** —— 不放回去的话用户**点它也没反应**（键盘永远进不去）。
+    search_field.setRefusesFirstResponder_(True)
+    # ⚠️⚠️ **别碰 `setBezeled_` / `setDrawsBackground_`。** 2026-09-29 试过一次，
+    #     两件事同时发生：
+    #     ① 那个蓝框**一点没变** —— 它是**聚焦环**，和 bezel 是分开画的两样东西；
+    #     ② ⚠️ **搜索图标压到占位文字上** —— `NSSearchFieldCell` 给放大镜留的内边距
+    #        是挂在 bezel 那套布局里的，关掉 bezel 就一起没了。
+    #
+    # ⭐ **那个蓝环的正解不在这里，在窗口那边** —— 见 `win.setBecomesKeyOnlyIfNeeded_(True)`
+    #    那一段：让面板弹出时**不成为 key**，环就不出现；用户真点搜索框时才出现。
+    # ⚠️ 而**改环的颜色/自己画**这条路是死的：Apple 没有设色的 API（`NSFocusRingType`
+    #    只有三个枚举、无颜色参数），它**就是用户的系统强调色**（HIG 逐字
+    #    「the system applies their chosen color… **replacing your accent color**」），
+    #    而关掉默认指示不补替代 = **W3C F78**（违反 1.4.11 + 2.4.7）。
     # ⚠️⚠️ **`_target(…)` 的返回值必须留住。** 写成一行 `setTarget_(_target(…))` 的话，
     #     那个临时对象**语句一结束就被回收** → `target()` 变成 `None` →
     #     **回车静默无反应**，而 AppKit 不报任何错。本文件 885 行那段讲的就是这个形状，
@@ -1689,7 +2104,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             _later(refresh)
             return
         S["search"] = {"q": q, "hits": [], "total": 0, "truncated": False,
-                       "busy": True, "err": ""}
+                       "busy": True, "err": "", "open": None, "open_text": None}
         set_status(f"搜「{q}」…")
         _later(refresh)
 
@@ -1710,6 +2125,164 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             AppHelper.callAfter(_search_ready)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def toggle_hit(i: int):
+        """点一条命中：**就地展开 / 收起**那段原文（`find.read`）。
+
+        ⚠️ 这是「命中的路径只是个提示，读全文是另一步」那半 —— 本仓库
+           `find.read` 的 docstring 逐字引的就是 `silverstein/minutes` 的成例。
+        ⚠️ 展开的是**会话/笔记原文**，不是 `find` 给模型的那种带抬头与截断警告的格式：
+           面板只要「这一句的前后文」。
+        """
+        s = S.get("search")
+        if not s or s.get("busy"):
+            return
+        if s.get("open") == i:
+            s["open"], s["open_text"] = None, None
+            _later(refresh)
+            return
+        hits = s.get("hits") or []
+        if not (0 <= i < len(hits)):
+            return
+        import find as find_mod
+        h = hits[i]
+        try:
+            s["open_text"] = clean_read_text(find_mod.read(h.path, *read_span(h.line)))
+        except Exception as e:                                # noqa: BLE001
+            s["open_text"] = f"⚠ 读不了这份原文：{type(e).__name__}: {e}"
+        s["open"] = i
+        _later(refresh)
+
+    # ── 课次列表（卡上那个「课次」按钮进的）────────────────────────────
+    def open_sessions(course: str):
+        """一门课的**上课记录** + 「没归课的那些」。⚠️ 要读盘 → 工作线程。"""
+        S["sessions"] = {"course": course, "rows": [], "orphans": [],
+                         "busy": True, "err": ""}
+        _later(refresh)
+
+        def work():
+            import corpus as corpus_mod
+            try:
+                known = courses.list_courses(glossary, state_root=state_root)
+                rows = [session_row(p, _sess_words(p))
+                        for p in sorted(courses.session_files(sessions_dir, course),
+                                        reverse=True)]
+                orph = [session_row(p, _sess_words(p))
+                        for p in courses.orphan_files(sessions_dir, known)]
+                got = {"rows": rows, "orphans": orph}
+            except Exception as e:                            # noqa: BLE001
+                got = {"rows": [], "orphans": [],
+                       "err": f"{type(e).__name__}: {e}"}
+            s = S.get("sessions")
+            if s is None or s.get("course") != course:
+                return                                        # 期间又开了别的课
+            s.update(got)
+            s["busy"] = False
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(refresh)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _sess_words(p) -> int:
+        try:
+            return corpus.session_words(
+                p.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            return 0
+
+    def adopt_session(stem: str):
+        """把一节没归课的记录判给当前这门课。
+
+        ⚠️ 写的是**旁路文件**（`courses.set_attribution`），会话 `.md` 一个字节不动
+           —— 抬头是三方共享契约（`obsidian_writer` 写 / `_parse` 读回 / `cl last` grep）。
+        """
+        s = S.get("sessions")
+        if not s or s.get("busy"):
+            return
+        courses.set_attribution(sessions_dir, stem, s["course"])
+        set_status(f"已把 {stem[-14:]} 判给 {s['course']}", 2.0)
+        open_sessions(s["course"])            # 重开一次，两组列表都刷新
+
+    def close_sessions():
+        S["sessions"] = None
+        _later(refresh)
+
+    # ── 课表导入（把 `.ics` 拖进来）──────────────────────────────────
+    def run_import(files: list):
+        """⭐ **先解析给你看清楚，确认了才建课** —— 这一步一个字节都不落盘。
+
+        ⚠️ **批量必确认**：业界对批量动作的通行做法，而且 Google / Apple 的日历
+           导入**都没有撤销功能**（调研核过）→ 猜错了只能自己收拾。
+        ⚠️ 解析在工作线程里（读文件 + 可能上兆的字节）。
+        """
+        S["ics"] = {"rows": [], "warn": [], "slots": {}, "busy": True, "err": ""}
+        _later(refresh)
+
+        def work():
+            keep: dict = {}
+            try:
+                known = courses.list_courses(glossary, state_root=state_root)
+                rows, warn = [], []
+                for f in files:
+                    data = pathlib.Path(str(f)).read_bytes()
+                    got, w = T.parse(data)
+                    warn.extend(w)
+                    for c in got:
+                        r = ics_course_row(c, known=known)
+                        rows.append(r)
+                        # ⭐ 把**时段**留下来 —— 导入完 `.ics` 就扔的话，
+                        #    §5.4.4 那个预选**没有数据源**（作者 2026-09-29 发现的缺口）。
+                        if r["state"] != "bad":
+                            keep.setdefault(r["want"], []).extend(c.slots)
+                res = {"rows": rows, "warn": warn, "slots": T.dump(sorted(keep.items()))}
+            except Exception as e:                            # noqa: BLE001
+                res = {"rows": [], "warn": [],
+                       "err": f"{type(e).__name__}: {e}"}
+            s = S.get("ics")
+            if s is None:
+                return
+            s.update(res)
+            s["busy"] = False
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(refresh)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def confirm_import():
+        """确认 → 真的建课。**只建 `state == "new"` 那些**（已有的跳过、坏的跳过）。"""
+        s = S.get("ics")
+        if not s or s.get("busy"):
+            return
+        made = []
+        for r in s.get("rows") or []:
+            if r["state"] != "new":
+                continue
+            try:
+                if courses.create(courses.glossary_file(glossary, r["want"]), r["want"]):
+                    made.append(r["want"])
+            except Exception:                                 # noqa: BLE001
+                pass                                          # 一门坏不影响其余
+        S["ics"] = None
+        # ⭐ **把时段存下来** —— 这是预选（§5.4.4）唯一的数据源。
+        #    ⚠️ 只在用户**点了确认**之后写（前面一直没落盘）。
+        if s.get("slots"):
+            try:
+                import store
+                store.save_json(paths.timetable(root=state_root), s["slots"])
+                S["guesses"] = _guesses()          # 立刻生效，不用重开面板
+                S["guess_i"] = 0
+            except Exception as _e:                            # noqa: BLE001
+                print(f"⚠ 课表存不下来（预选会没有数据源）：{_e}")
+        # ⚠️ 有几个没建成也要说 —— 别让"新建了 3 门"读起来像"4 门都成了"
+        _skip = len([r for r in (s.get("rows") or []) if r["state"] != "new"])
+        set_status(f"新建了 {len(made)} 门课" +
+                   (f"，跳过 {_skip} 门" if _skip else ""), 3.0)
+        refresh()
+
+    def cancel_import():
+        S["ics"] = None
+        _later(refresh)
+
 
     def _search_ready():
         s = S.get("search")
@@ -2059,8 +2632,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         b = S.get("batch")
         s = S.get("search")
         a = S.get("add")
+        q = S.get("sessions")
         for _v in strip_holder["hint"]:
-            _v.setHidden_(b is not None or s is not None or a is not None)
+            _v.setHidden_(b is not None or s is not None or a is not None
+                          or q is not None or S.get("ics") is not None)
         _need = bool(b is not None and b.get("need_course"))
         for _btn, _t in strip_holder["actions"]:
             # ⚠️ 零课程那一档**不显示**取消/确认 —— 那一行被输入行占了，
@@ -2084,6 +2659,47 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             except Exception:                                 # noqa: BLE001
                 pass
 
+        _i = S.get("ics")
+        if _i is not None:
+            # ── 导入确认模式：**确认之前一个字节都不落盘** ──────────────
+            title_lbl.setStringValue_("导入课表")
+            if _i.get("busy"):
+                doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, 120.0)))
+                return
+            if _i.get("err"):
+                set_status(f"读课表失败：{_i['err']}", 1.0)
+            card, _imp_t = _make_import_card(
+                _i.get("rows") or [], width=WIDTH - 2 * PAD,
+                warn=_i.get("warn") or [], on_confirm=confirm_import,
+                on_cancel=cancel_import, targets=[])
+            strip_holder["import_rows"] = _imp_t
+            card.setFrameOrigin_((0.0, 0.0))
+            doc.addSubview_(card)
+            doc.setFrameSize_((WIDTH - 2 * PAD,
+                               max(body_h, card.frame().size.height)))
+            return
+
+        if q is not None:
+            # ── 课次模式：一门课的上课记录 + 「没归课的那些」──────────────
+            # ⚠️ 与搜索/批量**互斥**（各从自己的入口进，不共用一个状态位）。
+            title_lbl.setStringValue_(f"{q.get('course', '')} · 上课记录")
+            if q.get("busy"):
+                doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, 120.0)))
+                return
+            if q.get("err"):
+                set_status(f"读上课记录失败：{q['err']}", 1.0)
+            _rows = q.get("rows") or []
+            card, _sess_t = _make_sessions_card(
+                _rows, width=WIDTH - 2 * PAD, title=f"这门课 {len(_rows)} 节",
+                on_back=close_sessions, on_adopt=adopt_session,
+                orphans=q.get("orphans") or [], targets=[])
+            strip_holder["sess_rows"] = _sess_t
+            card.setFrameOrigin_((0.0, 0.0))
+            doc.addSubview_(card)
+            doc.setFrameSize_((WIDTH - 2 * PAD,
+                               max(body_h, card.frame().size.height)))
+            return
+
         if s is not None:
             # ── 搜索模式：卡片列表换成命中列表 ────────────────────────
             # ⚠️ 与批量模式**互斥**：`run_search` 不清 `S["batch"]`，但 `run_batch`
@@ -2094,7 +2710,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             if s.get("busy"):
                 doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, 120.0)))
                 return
-            card = _make_search_card(s.get("hits") or [], width=WIDTH - 2 * PAD)
+            # ⚠️ 回来的 targets **必须留住** —— `setTarget_` 是弱引用，
+            #    GC 掉就是「点了没反应，也不报错」（本轮就绪条踩过同一形状）。
+            card, _rows_t = _make_search_card(
+                s.get("hits") or [], width=WIDTH - 2 * PAD,
+                open_idx=s.get("open"), open_text=s.get("open_text"),
+                on_open=toggle_hit, targets=[])
+            strip_holder["search_rows"] = _rows_t
             card.setFrameOrigin_((0.0, 0.0))
             doc.addSubview_(card)
             doc.setFrameSize_((WIDTH - 2 * PAD,
@@ -2142,6 +2764,18 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         title_lbl.setStringValue_("开课前的准备")
         y = 0.0
         rows = load()
+        # ⭐ 课表预选：把猜的那门**排到第一**，并把理由挂到状态行。
+        #    ⚠️ **只改顺序** —— 不预选、不自动应用（`[一手]` Apple HIG 是「把最可能的
+        #       放第一」，但它那句「select the first option by default」在这里被否掉了：
+        #       认错课 = 整节课术语表全错，而作者拍的是「预选 + 显式纠错入口」）。
+        _gs = S.get("guesses") or []
+        _gi = S.get("guess_i", 0)
+        _hint = _gs[_gi].course if 0 <= _gi < len(_gs) else None
+        if _hint:
+            rows.sort(key=lambda r: (r.course != _hint,))
+            set_status(f"课表推测：{_hint} —— {_gs[_gi].why}", 0)   # 0 = 不自动消失
+        elif _gs:
+            set_status("你自己挑一门 —— 我不猜了", 0)
         if not rows:
             # ⭐ 零课程的空状态（2026-09-28）—— 原来这里是**一片空白**。
             from AppKit import NSColor, NSMakeRect, NSView
@@ -2170,7 +2804,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             entry = S["result"].get(r.course)
             card = _make_card(r, on_start=on_start,
                               on_drop_files=run_prep, width=WIDTH - 2 * PAD,
-                              entry=entry,
+                              entry=entry, on_sessions=open_sessions,
+                              hinted=(r.course == _hint),
+                              on_not_this=next_guess,
                               # ⚠️ **课号要在这里绑好。** `_make_card` 只传词
                               #    （它不知道也不该知道课号之外的上下文）——
                               #    第一版直接传 `do_delete`（两个参数），调用点只给一个，
@@ -2204,6 +2840,15 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if not files:
             set_status("没读到文件路径 —— 看日志", 1.0)
             return False
+        # ⭐ **拖进来的是课表（`.ics`）→ 走去导入那条路**，不当课件处理。
+        #    ⚠️ 放在 `S["busy"]` 检查**之前**：导入自己也有一条独立的忙状态，
+        #       而"另一门课在跑"跟"能不能导入课表"是两件事。
+        #    ⚠️ `.ics` 拖到**哪张卡上**都走同一条路 —— 导入本来就要你确认，
+        #       卡片上那个课号在这条路上没有意义。
+        _ics = timetable_files(files)
+        if _ics:
+            run_import(_ics)
+            return True
         if S.get("busy"):
             set_status("另一门课还在跑 —— 等它完", 1.0)
             return False
@@ -2352,6 +2997,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    （`S["result"]` 是**故意**跨面板的，别把这条规矩套到它头上。）
             S["batch"] = None
             S["search"] = None
+            S["sessions"] = None
             # ⚠️ 面板里那两个**弱引用 target 的锚点**（就绪条 / 搜索框）也要断 ——
             #    它们不是状态，是"别让 target 被 GC 掉"的容器。留着就等于每次
             #    开关面板多留两个对象（与上面那几条同一条纪律）。
@@ -2596,10 +3242,30 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     win.setFrameOrigin_(((scr.size.width - WIDTH) / 2.0,
                          max(60.0, scr.size.height - h - 140.0)))
     win.orderFrontRegardless()
-    return Handles(win, do_close, refresh, set_status, run_batch, run_search,
-                   add_course,
-                   lambda c, keep=False: delete_course(c, keep, ask=False),
-                   _start_classify)
+    # ⭐ 面板**已经上屏**了 → 现在把搜索框放回"可以被点进焦点"的状态。
+    #    过早放行 = 白做（AppKit 会在上屏那一刻把它设成第一响应者）；
+    #    这一小段延时是必须的，和窗口建立初始第一响应者是同一个时刻的事。
+    #    ⚠️ 放行**不是** promise 它会拿焦点 —— 只是允许用户点进去。
+    from PyObjCTools import AppHelper as _AH
+    _AH.callLater(0.2, lambda: search_field.setRefusesFirstResponder_(False))
+    # ⚠️⚠️ **一律用关键字构造** —— 这里原先是按位置传的，2026-09-29 加
+    #    `show_sessions` 时把参数插错了格：`open_sessions` 落进 `delete_course`、
+    #    那个删课 lambda 落进 `show_sessions` → **调 `h.show_sessions('ECON10740')`
+    #    实际执行的是删课**，而且一个错都不报（`NamedTuple` 位置构造对类型不做检查）。
+    #    关键字构造让顺序不再有意义，整类 bug 消失。
+    return Handles(
+        window=win,
+        close=do_close,
+        refresh=refresh,
+        set_status=set_status,
+        start_batch=run_batch,
+        search=run_search,
+        add_course=add_course,
+        show_sessions=open_sessions,
+        import_timetable=run_import,
+        delete_course=lambda c, keep=False: delete_course(c, keep, ask=False),
+        start_classify=_start_classify,
+    )
 
 
 def _panel_key(kw) -> tuple:

@@ -365,8 +365,225 @@ def main() -> int:
     _add_wiring_section()
     _target_liveness_section()
 
-    bad = [n for n, ok, _ in RESULTS if not ok]
+    # ⚠️⚠️ **`bad` 不许在这里算！**（2026-09-29 抓到的假绿）
+    #    原来这一行在这里算了一份 `RESULTS` 的快照，而后面还有 ⑮⑯⑰ 三组判据 ——
+    #    于是**加在它后面的判据只打印、不进统计，失败了也不影响退出码**。
+    #    实测：⑰ 里一条明明 ❌ 了，结算照报「137/137 通过」、`rc=0`。
+    #    同族：`judges-that-look-like-they-test` 里那条「结算行比判据先算」。
+    #    → 挪到最后，与结算行**同一个地方**（`return` 也跟着它）。
+    print("\n--- ⑮ 搜索结果：点一条就地展开原文（`find.read`）---")
+    check("read_span 前端不越到 0（命中第 1 行时）",
+          E.read_span(1)[0] == 1, f"给的是 {E.read_span(1)}")
+    check("read_span 的窗口宽度 = before + after + 1",
+          E.read_span(50)[1] - E.read_span(50)[0] + 1
+          == E.READ_BEFORE + E.READ_AFTER + 1,
+          f"给的是 {E.read_span(50)}")
+
+    # ⭐ 展开块：`find.read` 的输出是**给模型看的**，面板要剥壳（作者 2026-09-29 拍板）
+    #    夹具用**真实会话格式**（含第二个时间块 + 一处 ASR 与 EN 不同）
+    _raw = ("# f.md 第 2–10 行\n"
+            "> [!abstract] 14:08:06\n"
+            "> **EN**: The conventional energy removes negative energy.\n"
+            "> **ZH**: 这些正能量会消除负能量。\n"
+            "> **ASR**: The conventional energy removes negative energy.\n"
+            "\n"
+            "> [!abstract] 14:08:08\n"
+            "> **EN**: What is it?\n"
+            "> **ZH**: 那是什么?\n"
+            "> **ASR**: What is it, though?\n")
+    _clean = E.clean_read_text(_raw).splitlines()
+    check("剥壳：抬头 `# 文件名 第 X–Y 行` **必须留着**",
+          _clean[0] == "# f.md 第 2–10 行", f"给的是 {_clean[0]!r}")
+    check("剥壳：`> [!abstract] 14:08:06` → 只剩时间",
+          _clean[1] == "14:08:06", f"给的是 {_clean[1]!r}")
+    check("剥壳：`**EN**: ` 前缀去掉",
+          _clean[2] == "The conventional energy removes negative energy.",
+          f"给的是 {_clean[2]!r}")
+    check("剥壳：中文行原样（壳去掉了，内容一个字没动）",
+          _clean[3] == "这些正能量会消除负能量。", f"给的是 {_clean[3]!r}")
+    # ⭐ 同一时间块里 ASR 与 EN 一字不差 → 丢掉（不丢就是同一句连读两遍）
+    #    ⚠️ 这条**必须按字段比**：真实顺序是 EN/ZH/ASR，EN 与 ASR 隔着 ZH。
+    check("剥壳：与 EN 相同的 ASR 行被丢掉",
+          "The conventional energy removes negative energy." not in _clean[4:],
+          f"第 4 行起还有它：{_clean[4:]}")
+    # ⭐ 反方向：ASR **不同**时不许误丢
+    check("剥壳：ASR 与 EN 不同时必须留着",
+          any("What is it, though?" in x for x in _clean), f"拿到 {_clean}")
+    check("剥壳：空输入 → 空（不是 None、不抛）", E.clean_read_text("") == "")
+    check("剥壳：第二块的时间戳照样剥壳",
+          "14:08:08" in _clean, f"拿到 {_clean}")
+
+    # ⭐⭐ 高度与排版**同一个来源**：展开 k 行，卡片就正好高 k * READ_LINE_H。
+    #    变异验证（实跑过）：把 `search_card_height` 里的 `open_lines * READ_LINE_H`
+    #    删掉 → 这四条立刻红。
+    _base = E.search_card_height(5)
+    for k in (0, 1, 9, 40):
+        check(f"高度：5 条命中 + 展开 {k} 行 正好多 {k * E.READ_LINE_H}pt",
+              abs((E.search_card_height(5, k) - _base) - k * E.READ_LINE_H) < 0.01,
+              f"实际多 {E.search_card_height(5, k) - _base}")
+
+    # ⭐⭐ 真的画一遍。**「没有子视图掉出卡片底部」是高度算少了的唯一症状**
+    #     —— 而它**不报错**，只是把内容挤到框外（本仓库对 height 函数的既有锁，
+    #     见 `tests/test_panel.py` ⑧ 组）。
+    from find import Hit as _Hit
+    _hits = [_Hit(path="/tmp/x.md", line=1 + i, text=f"命中 {i}", course="C",
+                  date="2026-09-29", kind="session") for i in range(5)]
+    for k in (0, 9):
+        card, _tg = E._make_search_card(
+            _hits, width=600.0, open_idx=(0 if k else None),
+            open_text=("\n".join(f"第 {i} 行" for i in range(k)) or None),
+            on_open=lambda i: None, targets=[])
+        _low = min(float(v.frame().origin.y) for v in card.subviews())
+        check(f"展开 {k} 行时没有子视图掉出卡片底部", _low >= -0.01,
+              f"最低 y={_low:.1f}")
+        # ⚠️ 弱引用：`setTarget_` 不持有 target，**必须由调用方留住**
+        check(f"展开 {k} 行时把 targets 交回来了（弱引用要有人留）", len(_tg) == 5,
+              f"拿到 {len(_tg)} 个")
+        check(f"展开 {k} 行时交回来的 target 是活的（不是 None）",
+              all(t is not None for t in _tg))
+
+    print("\n--- ⑯ 课次列表（卡上「课次」按钮进的）---")
+    # ⭐ `Handles` 是**位置构造**踩过坑的地方：2026-09-29 插 `show_sessions` 时参数
+    #    错了一格 —— `open_sessions` 落进 `delete_course`、删课 lambda 落进
+    #    `show_sessions` → **调 show_sessions 实际在删课**，一个错都不报。
+    #    修法是把构造改成关键字；这条钉住**字段名与顺序**，将来再有人插错至少看得见。
+    check("Handles 的字段名与顺序（改构造方式后仍要一致）",
+          E.Handles._fields == ("window", "close", "refresh", "set_status",
+                                "start_batch", "search", "add_course",
+                                "show_sessions", "import_timetable",
+                                "delete_course", "start_classify"),
+          f"实际 {E.Handles._fields}")
+
+    import pathlib as _pl
+    from tempfile import TemporaryDirectory as _TD
+    with _TD() as _d:
+        _p = _pl.Path(_d) / "2026-09-24_202216_LECTURE.md"
+        _r = E.session_row(_p, 44)
+        check("session_row 从文件名取日期与时间",
+              (_r["date"], _r["hhmm"], _r["stem"]) ==
+              ("2026-09-24", "20:22", "2026-09-24_202216_LECTURE"), _r)
+        check("⭐ 字数够 → ok（判据用的是 corpus.MIN_WORDS，不是抄来的数）",
+              _r["state"] == "ok"
+              and E.session_row(_p, E.corpus.MIN_WORDS - 1)["state"] == "thin",
+              f"MIN_WORDS={E.corpus.MIN_WORDS}")
+    # ⚠️ 空壳必须**说出来** —— 它们在 sessions/ 里跟真课长得一模一样，
+    #    而 corpus 那道闸是**静默**排除它们的。
+    check("空壳在行里明说", "空壳" in E.session_row_text("2026-09-26", "05:15", 2, "thin"))
+    check("够格的**不许**被标成空壳",
+          "空壳" not in E.session_row_text("2026-09-22", "15:02", 44, "ok"))
+
+    # ⭐⭐ 高度与排版同源：**空组不留高，有组才留**（同 search_card_height 那条纪律）
+    #     变异验证：把 `sessions_card_height` 的 `if n_orphans:` 去掉 → 第一条红。
+    _base = E.sessions_card_height(6)
+    check("高度：没有孤儿组时**一点都不多留**",
+          abs(E.sessions_card_height(6, 0) - _base) < 0.01)
+    check("高度：有 k 个孤儿就正好多 SEP + HEAD + k*ROW",
+          abs((E.sessions_card_height(6, 3) - _base)
+              - (E.SESS_SEP + E.SESS_HEAD + 3 * E.SESS_ROW)) < 0.01)
+
+    # ⭐⭐ 真的画一遍：**没有子视图掉出卡片底部**（高度算少的唯一症状，且**不报错**）
+    from find import Hit as _H  # noqa: F401   （只为确认这个模块能 import）
+    _rows = [E.session_row(_pl.Path(f"2026-09-{d:02d}_150000_ECON10740.md"), 44)
+             for d in (8, 15, 22)]
+    _orph = [E.session_row(_pl.Path("2026-09-24_202216_LECTURE.md"), 44)]
+    for _n in (0, 1):
+        _card, _tg = E._make_sessions_card(
+            _rows, width=600.0, title="这门课 3 节", on_back=lambda: None,
+            on_adopt=(lambda s: None) if _n else None,
+            orphans=(_orph if _n else []), targets=[])
+        _low = min(float(v.frame().origin.y) for v in _card.subviews())
+        check(f"课次卡（孤儿组 {'有' if _n else '无'}）没有子视图掉出底部",
+              _low >= -0.01, f"最低 y={_low:.1f}")
+        # ⚠️ 弱引用：没有孤儿时只有「返回」一个 target
+        check(f"课次卡（孤儿组 {'有' if _n else '无'}）targets 交回来了",
+              len(_tg) == (2 if _n else 1), f"拿到 {len(_tg)} 个")
+
+    print("\n--- ⑰ 导入课表（拖 `.ics` 进来）---")
+    check("挑课表：只认 .ics / .ical，且大小写不敏感",
+          E.timetable_files(["/a/b.pdf", "/a/x.ICS", "/c/y.ics", "/d/z.txt"])
+          == ["/a/x.ICS", "/c/y.ics"])
+    check("挑课表：空 / None 不炸", E.timetable_files([]) == []
+          and E.timetable_files(None) == [])
+
+    # ⭐⭐ `plan_add` 的四个动作是 `bad` / **`exists`** / `pick` / `create`。
+    #    第一版只把 `create` 当新建、其余全当「课号形状不对」→ **现成的课被标成
+    #    "形状不对，跳过"**，而它一个字都没说错。变异验证（实跑过）：把
+    #    `action in ("exists", "pick")` 改回 `action == "pick"` → 第 1、2 条立刻红。
+    import timetable as _TT
+    _ICS = (b"BEGIN:VCALENDAR\r\n"
+            b"BEGIN:VEVENT\r\nUID:a\r\nSUMMARY:ECON10740: Exploring Economics (Lecture)\r\n"
+            b"DTSTART;TZID=Europe/Dublin:20260908T150000\r\n"
+            b"RRULE:FREQ=WEEKLY;BYDAY=TU\r\nEND:VEVENT\r\n"
+            b"BEGIN:VEVENT\r\nUID:b\r\nSUMMARY:ECON10770: Introduction to Economics (Tutorial)\r\n"
+            b"DTSTART:20260908T120000\r\nEND:VEVENT\r\n"
+            b"BEGIN:VEVENT\r\nUID:c\r\nSUMMARY:!!!\r\nDTSTART:20260908T090000\r\nEND:VEVENT\r\n"
+            b"END:VCALENDAR\r\n")
+    _cs, _ = _TT.parse(_ICS)
+    _rows = {c.name.split(":")[0]: E.ics_course_row(c, known=["ECON10770"])
+             for c in _cs}
+    check("⭐ 已有这门课 → `exists`（**不是**「形状不对」）",
+          _rows["ECON10770"]["state"] == "exists", _rows["ECON10770"])
+    check("不在清单里 → `new`（会新建）",
+          _rows["ECON10740"]["state"] == "new", _rows["ECON10740"])
+    check("课号猜得出（UCD 五位）", _rows["ECON10740"]["want"] == "ECON10740")
+    check("时段渲染成人话（周几 + 时间）", "周二" in _rows["ECON10740"]["when"],
+          _rows["ECON10740"]["when"])
+    check("猜不出课号时退回课名（不硬猜）", _rows["!!!"]["want"] == "!!!", _rows["!!!"])
+
+    # ⭐ 高度与排版同源（同 search/sessions 卡那条纪律）。
+    #    ⚠️ 基线是**一行**不是零行 —— 空表也留一行（给「这份课表里没认出任何课程」那句），
+    #       第一版拿空表当基线，于是期望写成 4×ROW 而实际是 3×ROW。**代码对、判据错。**
+    check("导入卡高度：从 1 行到 k 行，每行正好 IMPORT_ROW",
+          abs((E.import_card_height([{}] * 4) - E.import_card_height([{}]))
+              - 3 * E.IMPORT_ROW) < 0.01,
+          f"{E.import_card_height([{}] * 4)} vs {E.import_card_height([{}])}")
+    check("导入卡高度：空表仍然留一行（那句话要有地方放）",
+          abs(E.import_card_height([]) - E.import_card_height([{}])) < 0.01)
+
+    print("\n--- ⑱ 课表预选 + 纠错入口 ---")
+    # ⭐⭐ **不变量：`on_start is None` 时「预选」一个像素都不许加。**
+    #     按钮行的高度（`card_height` 的 `CARD_GAP_V + BTN_H`）**只在 `on_start is not None`
+    #     时才留**，所以那一档下卡片矮一截、就绪行本来就贴到 `y=CARD_PAD` ——
+    #     再加一个按钮就是**叠在就绪行上**。
+    #     变异验证（实跑过）：把「不是这门？」那个 `if` 的 `on_start is not None` 去掉
+    #     → 这条立刻红。⚠️ **实测是先被截图抓到的**：既有判据只问"有没有掉出卡片底部"，
+    #     而"两行叠在一起"根本没越界。
+    from courses import Readiness as _RD
+    _r0 = _RD("ECON10740", "Exploring Economics", 36, 0, 0, "2026-09-22")
+
+    def _mk(**kw):
+        return E._make_card(_r0, on_start=None, on_drop_files=lambda *a: None,
+                            width=600.0, **kw)
+
+    def _sig(c):
+        return sorted((type(v).__name__, round(float(v.frame().origin.x), 1),
+                       round(float(v.frame().origin.y), 1)) for v in c.subviews())
+
+    check("⭐ on_start=None 时，「预选」一个像素都不许加（否则叠在就绪行上）",
+          _sig(_mk(hinted=True, on_not_this=lambda: None)) == _sig(_mk()),
+          f"预选版 {len(_mk(hinted=True, on_not_this=lambda: None).subviews())} 个子视图，"
+          f"普通版 {len(_mk().subviews())} 个")
+
+    # 反方向：**有按钮行时**，「开始上课」与「不是这门？」两个都必须在
+    # （否则上面那条会因为"什么都不画"而假绿）
+    def _mk_act(**kw):
+        return E._make_card(_r0, on_start=lambda c: None,
+                            on_drop_files=lambda *a: None, width=600.0, **kw)
+
+    _btns = [v for v in _mk_act(hinted=True, on_not_this=lambda: None).subviews()
+             if float(v.frame().origin.y) < E.CARD_PAD + E.BTN_H - 0.01]
+    check("有按钮行时：预选那张卡上「开始上课」与「不是这门？」都在",
+          len(_btns) == 2, f"按钮行里拿到 {len(_btns)} 个")
+    _btns2 = [v for v in _mk_act().subviews()
+              if float(v.frame().origin.y) < E.CARD_PAD + E.BTN_H - 0.01]
+    check("有按钮行时：**没预选**的卡只有一个按钮（不许到处挂「不是这门？」）",
+          len(_btns2) == 1, f"拿到 {len(_btns2)} 个")
+
     print("\n" + "=" * 60)
+    # ⚠️⚠️ `bad` **必须在这里算** —— 它是最后一句，所有判据都跑完了。
+    #    这条纪律在本文件里被抓到过**两次**：第一次它在 368 行、第二次我把新判据
+    #    又插到了它后面。**判据加在它之后 = 只打印、不进统计、失败也不影响退出码。**
+    bad = [n for n, ok, _ in RESULTS if not ok]
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")
     for n in bad:
         print(f"  ❌ {n}")

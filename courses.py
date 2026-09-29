@@ -483,6 +483,76 @@ def _session_course(stem: str) -> str | None:
     return (parts[2] or None) if len(parts) == 3 else None
 
 
+#: 「这节课其实属于哪门课」。⚠️ **住在 `sessions/` 里，不住 `~/.classlive/`** ——
+#: 它描述的就是那些会话，放在旁边才自洽；而且**临时目录天然隔离**
+#: （判据不用额外做任何事）。同 `.lost.jsonl` / `.atoms.jsonl` 的成例：
+#: 旁路文件，**绝不改会话抬头**。
+ATTRIBUTION_NAME = ".attribution.json"
+
+
+def attribution_path(sessions_dir) -> pathlib.Path:
+    return pathlib.Path(sessions_dir) / ATTRIBUTION_NAME
+
+
+def attribution_map(sessions_dir) -> dict:
+    """`{会话 stem: 课号}` —— 用户手改过的归属。**只读**，读不出当空。
+
+    ⚠️ 录课时没设课号会落成 `LECTURE` / `ECON10xxx` 这种**占位符**，
+       而文件名一旦写下就不再改（会话抬头是三方共享契约）。实测作者的
+       `sessions/` 里躺着 8 个 `LECTURE` + 1 个 2897 行的 `ECON10xxx`。
+    """
+    import store
+    if sessions_dir is None:
+        return {}
+    got = store.load_json(attribution_path(sessions_dir), {})
+    return got if isinstance(got, dict) else {}
+
+
+def set_attribution(sessions_dir, stem: str, course) -> dict:
+    """把一节课判给某门课；`course=None` = 撤销，回到按文件名认。返回改完的表。
+
+    ⚠️⚠️ **只写这个旁路文件，绝不碰会话 `.md`。**
+       会话抬头是**三方共享契约**（`obsidian_writer` 写 / `_parse` 读回 /
+       `cl last` grep），改一个后缀 `_parse` 就认不出那一条，
+       会把 EN/ZH/ASR **静默盖到上一条头上**（`obsidian_writer` 文件头逐字记着）。
+    ⚠️ 撤销是**删键**而不是写空串 —— 空串会让「改过」和「没改过」长得一样。
+    """
+    import store
+    m = {k: v for k, v in attribution_map(sessions_dir).items() if k != store.K}
+    if course:
+        m[stem] = str(course)
+    else:
+        m.pop(stem, None)
+    store.save_json(attribution_path(sessions_dir), m)
+    return m
+
+
+def orphan_files(sessions_dir, known) -> list:
+    """**不属于任何已知课程**的上课记录 —— 录课时没设课号留下的占位符。
+
+    ⚠️ 判据是「**名字不在已知课表里**」，**不是**「等于 `LECTURE`」——
+       占位符是任意字符串。实测作者手里有三种：`LECTURE`（8 节）、
+       `ECON10xxx`（2 节），还有一份抬头直接写着 `# None`。
+    ⚠️ 只在**文件名**上判；用户已经判过课的（`attribution_map`）不算孤儿。
+    """
+    if sessions_dir is None:
+        return []
+    d = pathlib.Path(sessions_dir)
+    if not d.is_dir():
+        return []
+    known = set(known or ())
+    amap = attribution_map(d)
+    out = []
+    for p in sorted(d.iterdir()):
+        if p.suffix != ".md":
+            continue
+        c = amap.get(p.stem) or _session_course(p.stem)
+        if c is None or c in known:
+            continue
+        out.append(p)
+    return out
+
+
 def session_files(sessions_dir, course: str) -> list:
     """这门课在 `sessions/` 下的**上课记录**文件。**匹配规则只此一处。**
 
@@ -494,6 +564,10 @@ def session_files(sessions_dir, course: str) -> list:
     ⭐ 抽出来给两个视图共用：`last_session`（要最新那个日期）与
        `facts`（确认框要报「几节」）。**它们是同一条规则的两个视图** ——
        各写一遍迟早一个算 46、一个算 47。
+
+    ⭐⭐ **用户指定优先于文件名**（`attribution_map`）：录课时没设课号会落成
+       `LECTURE` / `ECON10xxx` 这种占位符，而文件名**一旦写下就不再改**
+       （抬头是三方共享契约）→ 那是**占位符，不是事实**。
     """
     if sessions_dir is None:
         return []
@@ -504,11 +578,12 @@ def session_files(sessions_dir, course: str) -> list:
         entries = list(d.iterdir())
     except OSError:
         return []
+    amap = attribution_map(d)          # ⚠️ 读一次，别在循环里逐文件读盘
     out = []
     for p in entries:
         if p.suffix != ".md":
             continue
-        c = _session_course(p.stem)
+        c = amap.get(p.stem) or _session_course(p.stem)
         if c is None:
             continue
         if course == c or course.endswith(c):

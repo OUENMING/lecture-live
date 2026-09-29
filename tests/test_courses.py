@@ -562,6 +562,31 @@ def main() -> int:
         check("⭐⭐ 而且**真内容一个字没动**",
               p2.read_text(encoding="utf-8") == "{ 这不是 JSON")
 
+    print("\n--- orphan_files 与 session_files 必须走**同一条**匹配规则 ---")
+    # ⭐⭐ 2026-09-29 修：`orphan_files` 原来用精确集合判定（`c in known`），
+    #    而 `session_files` 用容错匹配（`course == c or course.endswith(c)`）→
+    #    **短号文件同时出现在两组列表里**（既算进这门课的 rows，又被当成"没归课"），
+    #    还会诱使用户把它「判给」错误的课。
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as _d:
+        _dd = pathlib.Path(_d)
+        (_dd / "2026-09-10_140200_10730.md").write_text("# x", encoding="utf-8")
+        (_dd / "2026-09-11_140200_LECTURE.md").write_text("# x", encoding="utf-8")
+        _known = ["ECON10730"]
+        _rows = courses.session_files(_dd, "ECON10730")
+        _orph = courses.orphan_files(_dd, _known)
+        check("⭐ 短号文件算进这门课的课次（`session_files`）",
+              [p.name for p in _rows] == ["2026-09-10_140200_10730.md"],
+              str([p.name for p in _rows]))
+        check("⭐⭐ 同一个短号文件**不许**同时出现在孤儿组里（`orphan_files`）",
+              [p.name for p in _orph] == ["2026-09-11_140200_LECTURE.md"],
+              f"孤儿组拿到 {[p.name for p in _orph]}")
+        check("⭐ 两组**没有交集**（这才是这两条判据真正要的）",
+              not (set(_rows) & set(_orph)))
+        check("`course_matches` 就是那条规则（单一定义点）",
+              courses.course_matches("10730", "ECON10730")
+              and not courses.course_matches("99999", "ECON10730"))
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

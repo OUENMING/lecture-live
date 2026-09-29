@@ -527,6 +527,20 @@ def set_attribution(sessions_dir, stem: str, course) -> dict:
     return m
 
 
+def course_matches(c: str, course: str) -> bool:
+    """文件名里那个课号 `c` 与课程名 `course` 是不是同一门。**匹配规则只此一处。**
+
+    ⚠️ **必须容错**（模块头第 1 条）：文件名里可能是**短号** `10730`，
+       而传进来的 `course` 是 `ECON10730`。
+    ⚠️ 抽出来是因为 `session_files` 与 `orphan_files` **都要这一条** ——
+       2026-09-29 之前 `orphan_files` 用的是精确集合判定（`c in known`），
+       于是短号文件**同时出现在两组列表里**（被算进这门课的 `rows`，
+       又被当成"没归课"的孤儿），还会诱使用户把它「判给」错误的课。
+       两处规则不一致的教训同 `facts`/`last_session` 那条：**各写一遍迟早分叉**。
+    """
+    return course == c or course.endswith(c)
+
+
 def orphan_files(sessions_dir, known) -> list:
     """**不属于任何已知课程**的上课记录 —— 录课时没设课号留下的占位符。
 
@@ -534,20 +548,28 @@ def orphan_files(sessions_dir, known) -> list:
        占位符是任意字符串。实测作者手里有三种：`LECTURE`（8 节）、
        `ECON10xxx`（2 节），还有一份抬头直接写着 `# None`。
     ⚠️ 只在**文件名**上判；用户已经判过课的（`attribution_map`）不算孤儿。
+    ⚠️ 与 `session_files` 走**同一条匹配规则**（`course_matches`）——
+       不然同一节课会同时出现在两组列表里。
     """
     if sessions_dir is None:
         return []
     d = pathlib.Path(sessions_dir)
     if not d.is_dir():
         return []
-    known = set(known or ())
+    known = list(known or ())
     amap = attribution_map(d)
+    try:
+        entries = sorted(d.iterdir())
+    except OSError:
+        # ⚠️ 与 `session_files` 同款兜底：目录存在、`is_dir()` 通过，
+        #    并不保证随后 `iterdir()` 成功（权限 / 读盘途中被删）。
+        return []
     out = []
-    for p in sorted(d.iterdir()):
+    for p in entries:
         if p.suffix != ".md":
             continue
         c = amap.get(p.stem) or _session_course(p.stem)
-        if c is None or c in known:
+        if c is None or any(course_matches(c, k) for k in known):
             continue
         out.append(p)
     return out
@@ -586,7 +608,7 @@ def session_files(sessions_dir, course: str) -> list:
         c = amap.get(p.stem) or _session_course(p.stem)
         if c is None:
             continue
-        if course == c or course.endswith(c):
+        if course_matches(c, course):
             out.append(p)
     return out
 

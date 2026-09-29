@@ -26,7 +26,12 @@ CHUNK = 1600                     # 0.1s
 CHUNK_DUR = CHUNK / SR
 MIN_UTTERANCE_S = 0.6
 MAX_UTTERANCE_S = 12.0
-HANGOVER = 0.35                  # 说话结束后保持"说话"这么久(防词间短停顿)
+# ⚠️⚠️ **`HANGOVER` 目前对行为没有任何影响**（2026-09-29 核实）——
+#    它只用来把 `self.is_speaking` 从 True 翻回 False，而**那个标志的唯一读者
+#    就是把它翻回来的那一行**（下面的 `elif`）。全仓没有别的地方读 `is_speaking`。
+#    → 「防词间短停顿」这句**是假的**：切句只看 `silence_run` 与 `dur`。
+#    ⚠️ 留着没删是因为它可能是有意给将来用的；**但它现在不做事，别照着这句注释改参**。
+HANGOVER = 0.35
 PARTIAL_INTERVAL_S = 1.0
 PRE_ROLL_CHUNKS = 3              # 3 × 0.1s = 300ms
 VAD_MODEL = models.path_of("vad", "~/models/vad/silero_vad.onnx")
@@ -212,6 +217,9 @@ class Segmenter:
             self.silence_run = 0.0
             self.last_speech_s = now
         elif self.is_speaking and now - (self.last_speech_s or now) >= HANGOVER:
+            # ⚠️ 这一行的**唯一效果**就是把它刚读的那个标志翻回 False ——
+            #    而 `is_speaking` 全仓没有别的读者（见 `HANGOVER` 那里的说明）。
+            #    所以它目前是**空转**：既不影响切句，也不被外部读。
             self.is_speaking = False
 
         self._parts.append(chunk)
@@ -235,6 +243,14 @@ class Segmenter:
                 self.diag["cuts"] += 1
             buf = self._buf().copy()
             self._reset()
+            # ⚠️⚠️ **这个守卫恒为真，是安全网不是判据**（2026-09-29 核实）。
+            #    `silence_cut` 的**定义里就含** `dur >= MIN_UTTERANCE_S`（见上面），
+            #    而 `hard_cut` 是 `dur >= MAX_UTTERANCE_S(12s)`，
+            #    且 `len(buf)/SR` 恒等于刚才那个 `self.dur` → 条件永远成立。
+            #    ⚠️ **留着是刻意的**：它挡的是「将来有人改了 `silence_cut` 的定义、
+            #       却忘了这里」—— 那时它会真的开始丢内容。
+            #    ⚠️ 但**丢了不报**：本分支没有 diag 计数（`_reset` 那条路有 `dropped`）。
+            #       真开始丢的时候看不出来 —— 要查就先看这里。
             if len(buf) / SR >= MIN_UTTERANCE_S:
                 self.on_utterance_end(buf)
         elif sp and now - self.last_partial >= PARTIAL_INTERVAL_S:

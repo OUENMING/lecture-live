@@ -78,6 +78,44 @@ def t_partial_dict_is_unknown():
         "全 missing 却一个都不算缺 —— 修过头了，那用户永远补不上模型"
 
 
+@case("⭐⭐ 戳文件读不出来时 -> **放弃写入**（不许拿空壳抹掉别的模型的记录）")
+def t_corrupt_stamp_abandons_write():
+    """⭐ 2026-09-29 修，**数据丢失**。
+
+    原来 `except store.StoreError: obj = {}` 之后**继续 `save_json`** ——
+    那份空壳会**覆盖整份戳文件**，其他所有模型的记录一次全没。
+    注释写的「倒向是 `unknown`（不重下），安全」**只对读那一侧成立**：
+    读的倒向安全，**写的倒向是"整份丢"**。
+    ⚠️ `StoreError` 单独一个异常类存在的理由，就是让调用方**放弃写入**。
+    """
+    import pathlib
+    import tempfile
+
+    import paths
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        p = paths.models_stamp(root=root)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"_v": 1, "别的模型": {"src": "x"}}', encoding="utf-8")
+        # ⚠️ **必须真把戳弄坏** —— 上面那份是**合法** JSON，`load_json` 会成功，
+        #    于是 `StoreError` 分支**根本走不到**（第一版就是这么写的，
+        #    变异验证当场指出：把实现改回 `obj = {}` 它照样绿 = 判据没有区分能力）。
+        p.write_text("{这不是 JSON", encoding="utf-8")
+        before = p.read_text(encoding="utf-8")
+
+        ready.mark_installed(doctor.MODELS[0], root=root)      # 戳是坏的 → 该放弃
+
+        got = p.read_text(encoding="utf-8")
+        assert got == before, (
+            f"坏戳文件被**覆盖**了 —— 其他模型的记录全丢。现在文件里是：{got[:120]!r}")
+        # 反面：戳**好着**的时候必须照写（别修成"永远不写"）
+        p.write_text('{"_v": 1, "别的模型": {"src": "x"}}', encoding="utf-8")
+        ready.mark_installed(doctor.MODELS[0], root=root)
+        got2 = p.read_text(encoding="utf-8")
+        assert "别的模型" in got2 and doctor.MODELS[0].path in got2, (
+            f"好戳也没写进去 —— 修过头了：{got2[:120]!r}")
+
+
 @case("⭐⭐ 变异验证：把 unknown 并进 missing → 上面那条必须红")
 def t_unknown_mutation():
     orig = ready.required_left

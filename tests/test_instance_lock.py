@@ -176,6 +176,33 @@ def test_is_held(tmp):
     finally:
         os.chmod(unreadable, 0o600)
 
+    # ⭐⭐ **只有"竞争"算 held，锁机制自己坏掉要算 unknown**（2026-09-29 修）。
+    #    非阻塞 flock **只在竞争时**抛 EAGAIN/EWOULDBLOCK（Python 映射成
+    #    `BlockingIOError`）；其余（ENOLCK / EBADF / EINVAL…）是**锁坏了**。
+    #    原来两者共用一支 `except OSError` → 全报 `held` →
+    #    用户看到「另一个 ClassLive 在跑」而其实一个都没有，且他无从分辨。
+    _f = pathlib.Path(tmp) / "flock_broken.lock"
+    _f.write_text("7", encoding="utf-8")
+    import errno as _errno
+    _orig = instance_lock.fcntl.flock
+    try:
+        # ⚠️ **用 `errno.*` 符号，别写数字** —— 第一版写了 37（我以为那是 ENOLCK），
+        #    而 `OSError.__new__` 会按 errno 重映射子类：**macOS 上 37 恰好映射成
+        #    `BlockingIOError`** → 判据测的是"真竞争"那一支，结论是假的。
+        #    （这条错误是被判据自己暴露的：它报 `probe=('held', 7)`。）
+        instance_lock.fcntl.flock = lambda *a, **k: (_ for _ in ()).throw(
+            OSError(_errno.ENOLCK, "No locks available"))       # 锁机制坏了
+        check("⭐⭐ flock 因**非竞争**原因失败 -> unknown（不许冒充在上课）",
+              instance_lock.probe(_f) == ("unknown", None),
+              f"probe={instance_lock.probe(_f)}")
+        instance_lock.fcntl.flock = lambda *a, **k: (_ for _ in ()).throw(
+            OSError(_errno.EAGAIN, "Resource temporarily unavailable"))  # 真竞争
+        check("⭐ 真竞争（EAGAIN）-> 仍然是 held（别修过头）",
+              instance_lock.probe(_f)[0] == "held",
+              f"probe={instance_lock.probe(_f)}")
+    finally:
+        instance_lock.fcntl.flock = _orig
+
 
 def main():
     print("\n单实例锁 · 回归测试\n" + "─" * 46)

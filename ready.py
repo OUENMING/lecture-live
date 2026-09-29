@@ -182,7 +182,16 @@ def mark_installed(model, *, root=None) -> None:
         try:
             obj = store.load_json(p, default={})   # `_v` 已由 store 剥掉
         except store.StoreError:
-            obj = {}          # 戳读不出来就当没有 —— 它的倒向是 unknown（**不重下**），安全
+            # ⚠️⚠️ **放弃写入，不许拿空壳覆盖**（2026-09-29 修）。
+            #    原来这里是 `obj = {}` 然后**继续往下 save_json** —— 那会把
+            #    **其他所有模型的戳**一次抹掉（文件里只剩刚写的那一个）。
+            #    上面那句「倒向是 unknown（不重下），安全」**只对读那一侧成立**：
+            #    读的倒向确实安全，**写的倒向是"整份丢"**。
+            #    ⚠️ `StoreError` 单独一个异常类存在的理由，就是让调用方
+            #       **放弃写入**（见 `store.py` 的类 docstring）—— 这里正是那个约定。
+            print(f"⚠ 模型戳读不出来，这次**不写**（免得抹掉别的模型的记录）：{p}",
+                  flush=True)
+            return
         obj[model.path] = {"src": model.src, "at": time.time(),
                            "fp": doctor.manifest_fp(model.path)}
         store.save_json(p, obj)

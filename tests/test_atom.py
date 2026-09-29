@@ -45,6 +45,12 @@ def main() -> int:
         check("越界 -> 不可追溯", atom.traceable([{"src": [9]}], 0, 3) == (0, 1))
         check("空 src / 缺字段 / 非整数 -> 都不可追溯",
               atom.traceable([{"src": []}, {"text": "x"}, {"src": ["1"]}], 0, 3) == (0, 3))
+        # ⭐⭐ **非 dict 元素不许把闸门炸掉**（2026-09-29 修）——
+        #    本函数**专门用来兜模型脏输出**，而 `points` 就是模型给的。
+        #    原来 `p.get("src")` 遇 `"foo"` 抛 AttributeError 从闸门里逃出去，
+        #    反倒把调用方炸掉，而且 `tot` 已先 +1 → 统计也不可用。
+        check("⭐⭐ 混入非 dict 元素 -> 不抛，且计进分母不计进分子",
+              atom.traceable(["foo", {"src": [1]}, None, 42], 0, 3) == (1, 4))
 
         print("\n--- ② parse_reply：越界整条丢（不修剪）---")
         got = atom.parse_reply({"points": [

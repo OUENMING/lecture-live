@@ -106,6 +106,14 @@ def traceable(points, lo_line: int, hi_line: int) -> tuple:
     ok = tot = 0
     for p in points:
         tot += 1
+        # ⚠️⚠️ **非 dict 元素要跳过，不许炸**（2026-09-29 修）。
+        #    本函数是**专门用来兜模型脏输出**的闸门 —— 而 `points` 是模型给的，
+        #    `["foo", {...}]` 这种混入完全可能。原来直接 `p.get("src")` →
+        #    `AttributeError` 从闸门里逃出去，**反倒把调用方炸掉**，
+        #    而且 `tot` 已经先 +1 了 → 统计结果也不可用了。
+        #    跳过 = 计进分母、不计进分子（它确实不可追溯），这才是闸门该有的行为。
+        if not isinstance(p, dict):
+            continue
         src = p.get("src") or []
         if isinstance(src, list) and src and all(
                 isinstance(x, int) and lo_line <= x <= hi_line for x in src):

@@ -442,6 +442,38 @@ def t_progress_shape():
     assert seen[-1][0] == "polish" and seen[-1][2] == 5, f"最后一条 {seen[-1]!r}"
 
 
+@case("⭐⭐ 模型给非字符串的 en/zh -> 不抛（原来整节课精修中断）")
+def t_polish_nonstring_fields():
+    """⭐ 2026-09-29 修。`(it.get("en") or "").split()` —— `12 or ""` 是 **`12`**，
+    不是 `""` → `.split()` 抛 `AttributeError`。而这一段在 `_chat` 的 try
+    **之外** → **整节课的精修中断**（不只是那一条丢掉）。
+
+    ⚠️ 上面已经挡了「`it` 不是 dict」—— 同一条纪律，字段也要挡。
+    """
+    entries = [dict(ts="10:00:00", en="orig", zh="原", asr="", star=False)]
+    orig = polish._chat
+    # 各种模型可能吐出来的脏形状
+    for bad in ({"i": 0, "en": 12, "zh": 34},
+                {"i": 0, "en": ["a", "b"], "zh": "好"},
+                {"i": 0, "en": {"x": 1}, "zh": None}):
+        polish._chat = lambda *a, **k: {"items": [bad]}
+        try:
+            got = polish.polish_entries([dict(e) for e in entries], "k", "m",
+                                        batch=5)
+        except Exception as e:                                 # noqa: BLE001
+            raise AssertionError(f"{bad!r} 让精修抛了 {type(e).__name__}: {e}")
+        finally:
+            polish._chat = orig
+        assert isinstance(got, list) and len(got) == 1, f"{bad!r} -> {got!r}"
+    # 反面：**正常字符串照样要采纳**（别修成"一律丢掉"）
+    polish._chat = lambda *a, **k: {"items": [{"i": 0, "en": " fixed ", "zh": "改"}]}
+    try:
+        got2 = polish.polish_entries([dict(e) for e in entries], "k", "m", batch=5)
+    finally:
+        polish._chat = orig
+    assert got2[0]["en"] == "fixed", f"正常字符串没被采纳：{got2[0]!r}"
+
+
 @case("stage 显示名只有一份表；未知名显示原名，不显示空白")
 def t_stage_table():
     assert polish.progress_text("polish", 3, 10) == "精修 3/10…"

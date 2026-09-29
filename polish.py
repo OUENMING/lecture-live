@@ -160,8 +160,15 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
             i = it.get("i")
             if not isinstance(i, int) or not (start <= i < start + len(chunk)):
                 continue                    # 序号非法: 定位不到句子, 只能丢
-            en = " ".join((it.get("en") or "").split())
-            zh = " ".join((it.get("zh") or "").split())
+            # ⚠️⚠️ **类型也要挡**（2026-09-29 修）：模型可能给数字 / 列表
+            #    （`{"i": 3, "en": 12}` 或 `"en": ["a","b"]`）——
+            #    原来 `(it.get("en") or "").split()` 对它们**直接抛 AttributeError**
+            #    （`12 or ""` 是 `12`，不是 `""`），而这一段在 `_chat` 的 try
+            #    **之外** → 整节课的精修中断。
+            #    ⚠️ 上面已经挡了 `it` 不是 dict —— 同一条纪律，这里挡字段。
+            _en, _zh = it.get("en"), it.get("zh")
+            en = " ".join(_en.split()) if isinstance(_en, str) else ""
+            zh = " ".join(_zh.split()) if isinstance(_zh, str) else ""
             if not (en or zh):
                 continue                    # 两个字段都空: 一个字都没写回, 不算精修过
             if en:

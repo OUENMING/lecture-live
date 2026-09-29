@@ -114,7 +114,9 @@ def probe(path: pathlib.Path | None = None) -> tuple[str, int | None]:
         return "unknown", None                   # 建不出/读不出 —— 当作没锁，别拦人
     try:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    except BlockingIOError:
+        # ⚠️ **只有这一种算「已被占用」**（2026-09-29 修）。非阻塞 flock **只在竞争时**
+        #    抛 `EAGAIN`/`EWOULDBLOCK`，而 Python 把它映射成 `BlockingIOError`。
         holder = None
         try:
             f.seek(0)
@@ -123,6 +125,13 @@ def probe(path: pathlib.Path | None = None) -> tuple[str, int | None]:
             pass
         f.close()
         return "held", holder
+    except OSError:
+        # ⚠️ 其余 `OSError`（`ENOLCK` / `EBADF` / `EINVAL`…）是**锁机制本身出了问题**，
+        #    **不是"有人在用"**。原来和竞争共用一支 → 一律报 `held` →
+        #    用户看到「另一个 ClassLive 在跑」，而其实一个都没有，且他无从分辨。
+        #    `unknown` 的语义是「判断不了」—— 调用方对它的处理是**不拦人**，那才对。
+        f.close()
+        return "unknown", None
     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     f.close()
     return "free", None

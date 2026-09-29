@@ -266,9 +266,29 @@ def main() -> int:
         check("⭐ ③ 面板起不来 -> 2（`cl` 据此**退回照旧立刻录课**）",
               rc == entry_launch.UNAVAILABLE, f"rc={rc}")
 
-        check("⭐ 三条码互不相同（`cl` 的 case 分支靠这个分清）",
+        # ⭐⭐ ④ **选了课但 `.course` 写不下去** -> 4（**不录**）
+        #    2026-09-29 加。原来这一档复用 `2` → `cl` 照旧开麦，
+        #    而盘上那份 `.course` 还是**上一门课**的 → 这节课**静默记到上一门课名下**
+        #    （笔记/术语/课次全挂错门，不可逆）。文案当时写的却是「这次不录」。
+        cfg.write_text("PREVIOUS", encoding="utf-8")     # 盘上留一门「上一门课」
+        _good = entry_launch.CFG
+        entry_launch.CFG = pathlib.Path("/nonexistent-cl-xyz/.course")  # 写必失败
+        try:
+            rc = _run(lambda **kw: (kw["on_start"]("ZZTEST"), object())[1])
+        finally:
+            entry_launch.CFG = _good
+        _after = cfg.read_text(encoding="utf-8") if cfg.exists() else None
+        check("⭐⭐ ④ 选了课但存不下来 -> 4（专属码，**不许**复用 2）",
+              rc == entry_launch.UNSAVED,
+              f"rc={rc} —— 若等于 2(UNAVAILABLE)，`cl` 会照旧录课、"
+              f"并把它记到上一门课名下")
+        check("⭐⭐ 而且盘上那份旧 `.course` **一个字没动**",
+              _after == "PREVIOUS", f"现在是 {_after!r}")
+
+        check("⭐ 四条码互不相同（`cl` 的 case 分支靠这个分清）",
               len({entry_launch.PICKED, entry_launch.CANCELLED,
-                   entry_launch.UNAVAILABLE, entry_launch.NO_COURSES}) == 4)
+                   entry_launch.UNAVAILABLE, entry_launch.NO_COURSES,
+                   entry_launch.UNSAVED}) == 5)
     finally:
         _EP.open_panel = _orig_open
         if saved is not None:

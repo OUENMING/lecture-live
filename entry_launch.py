@@ -26,9 +26,17 @@
     1 = 用户**主动关掉**了面板       → 不录（这不是故障，是意图）
     2 = **面板起不来**               → `cl` 退回「照旧立刻开麦」
     3 = 没课程可显示                 → 退回「照旧立刻开麦」（没课可选时不该卡住人）
+    4 = 选了课但 **`.course` 写不下去** → **不录**
+        ⚠️ 2026-09-29 加。原来这一档复用了 `2`，于是 `cl` 照旧开麦 ——
+           而盘上那份 `.course` 还是**上一门课**的 → 这节课**静默记到上一门课名下**。
+           文案当时写的是「这次不录」，**和实际行为正好相反**。
+        ⚠️ 为什么是「不录」而不是「照旧录」：记到错课上的代价**不可逆**
+           （笔记、术语表、课次全都挂错门），而少录一次用户当场就能发现。
 
 ⚠️ 1 和 2 必须分开：把「用户取消」也当成故障去录课，等于**违背用户意图**；
    把「面板挂了」当成取消，等于**录不了课**（正是要防的那件事）。
+⚠️ 4 必须与 2 分开：**「面板能用」和「选的结果存得下来」是两件事** ——
+   混在一起就会用一份陈旧的 `.course` 去录，而那比不录坏得多。
 """
 from __future__ import annotations
 
@@ -39,7 +47,7 @@ import traceback
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-PICKED, CANCELLED, UNAVAILABLE, NO_COURSES = 0, 1, 2, 3
+PICKED, CANCELLED, UNAVAILABLE, NO_COURSES, UNSAVED = 0, 1, 2, 3, 4
 CFG = HERE / ".course"
 
 
@@ -78,8 +86,11 @@ def main() -> int:
             print(f"✅ 课程已设为 {course}")
             rc["code"] = PICKED
         except OSError as e:
-            print(f"⚠ 写 .course 失败：{e} —— 这次不录")
-            rc["code"] = UNAVAILABLE
+            # ⚠️ 用**专属**退出码 `UNSAVED`，不是 `UNAVAILABLE`（2026-09-29 修）。
+            #    复用 2 会让 `cl` 照旧开麦，而盘上那份 `.course` 还是上一门课的
+            #    → 这节课**静默记到上一门课名下**（不可逆：笔记/术语/课次全挂错门）。
+            print(f"⚠ 写 .course 失败：{e} —— 这次不录（免得记到上一门课上）")
+            rc["code"] = UNSAVED
         finally:
             _stop()
 

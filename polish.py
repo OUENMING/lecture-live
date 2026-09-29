@@ -100,7 +100,7 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
     每加一个事件就要多一种字符串, 调用方只能靠认字。
 
     ⚠️ 这个回调**在工作线程里被调**(收尾阶段)，UI 回写一律回主线程 —— 见
-       `entry_panel.py:1293` 同款注释。所以它**不许**碰 AppKit、不许 sleep。
+       `entry_panel._make_batch_card` 同款注释。所以它**不许**碰 AppKit、不许 sleep。
     ⚠️ 批次的失败/异常**也走这个回调**(`polish_partial`) —— 只报进度不报失败的话,
        一整节精修全挂掉时进度照样走到 100%, 读起来像成功了。"""
     if not api_key or not entries:

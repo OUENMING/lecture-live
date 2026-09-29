@@ -39,8 +39,12 @@ import polish                                                      # noqa: E402
 #    `_writer` 用的是 `mode="yes"` → `enabled=True` → `ObsidianWriter.__init__`
 #    会 `SESSIONS.mkdir()` 并往 `obsidian_writer.SESSIONS`
 #    （= **仓库真实的 `sessions/`**）写一个 `<日期>_<时间>_TESTX.md`。
-#    本文件 4 个用例每跑一次就留 4 个残留：既违背文件头「不碰 `sessions/` 一个字节」，
+#    **本文件的每个用例都会留一个残留**：既违背文件头「不碰 `sessions/` 一个字节」，
 #    又是在往一个**只读不删**的目录里堆垃圾（CLAUDE.md 那条硬规矩）。
+#    ⚠️ 2026-09-29 实测**同类漏网**：`test_audit_regressions` 的
+#       `test_writer_appends_session_and_parses` 只换了 `vault`、没换 `SESSIONS`
+#       → **一天里往真 `sessions/` 堆了 91 个 `_TEST.md`**。已修。
+#       ⚠️ 教训：**写端**（`SESSIONS`）和读端都要换 —— 只换 `vault` 不够。
 _SESSIONS_ISO = pathlib.Path(tempfile.mkdtemp(prefix="cl-wrapup-sessions-"))
 ow.SESSIONS = _SESSIONS_ISO
 

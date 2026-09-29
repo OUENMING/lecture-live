@@ -240,16 +240,38 @@ class R4_VaultCollision(unittest.TestCase):
             self.assertIn("ECON10101", path.name)
 
     def test_writer_appends_session_and_parses(self):
+        """⚠️⚠️ **必须连 `SESSIONS` 一起换掉**（2026-09-29 修）—— 这条原来只把
+        `vault` 指到临时目录，**没管 `SESSIONS`**，而 `ObsidianWriter.__init__`
+        会 `SESSIONS.mkdir()` 再写一个 `<日期>_<时间>_TEST.md`。
+        于是每跑一次这个文件，**真 `sessions/` 里就多一个测试残留**。
+        实测：2026-09-29 一天里攒了 **91 个** `_TEST.md`。
+        ⚠️ 本仓库的硬规矩是「**测试必须隔离写端 —— 读端和写端都要替换**；
+           只 patch 读端会写坏真文件」。这里漏的是**写端**。
+        ⚠️ 那不是"不小心手滑"能解释的类别：`*_TEST.md` 混在真课堂记录里，
+           而 `sessions/` 是**只读不删**的目录（删错过一次，不可恢复）。
+        """
+        import obsidian_writer as _ow
         with tempfile.TemporaryDirectory() as tmp:
-            w = ObsidianWriter(vault=tmp, course="TEST", mode="yes")
-            w.append("fixed english", "中文", flagged=True, raw="raw asr")
-            w.append("", "", raw="only asr")            # 翻译失败也要落盘
-            self.assertEqual(w.count, 2)
-            entries = ObsidianWriter._parse(w.session_path.read_text(encoding="utf-8"))
-            self.assertEqual(entries[0]["en"], "fixed english")
-            self.assertEqual(entries[0]["zh"], "中文")
-            self.assertTrue(entries[0]["star"])
-            self.assertEqual(entries[1]["asr"], "only asr")
+            old_sessions = _ow.SESSIONS
+            _ow.SESSIONS = Path(tmp) / "sessions"      # ⚠️ 写端也要换
+            try:
+                w = ObsidianWriter(vault=tmp, course="TEST", mode="yes")
+                w.append("fixed english", "中文", flagged=True, raw="raw asr")
+                w.append("", "", raw="only asr")            # 翻译失败也要落盘
+                self.assertEqual(w.count, 2)
+                self.assertEqual(w.session_path.parent, _ow.SESSIONS,
+                                 "会话文件写到真 sessions/ 去了")
+                entries = ObsidianWriter._parse(
+                    w.session_path.read_text(encoding="utf-8"))
+                self.assertEqual(entries[0]["en"], "fixed english")
+                self.assertEqual(entries[0]["zh"], "中文")
+                self.assertTrue(entries[0]["star"])
+                self.assertEqual(entries[1]["asr"], "only asr")
+            finally:
+                # ⚠️ **还原写端**（进 `finally`：断言失败时也要还回来，
+                #    否则后面的用例会继续往临时目录里写 —— 那还算轻的，
+                #    真正要防的是"忘了还原"变成下一个人照抄的样板）。
+                _ow.SESSIONS = old_sessions
 
 
 class R5_CoreBehaviour(unittest.TestCase):
@@ -351,7 +373,9 @@ class R6_OverlayConstructs(unittest.TestCase):
         """⭐ 2026-09-29 合并：⭐ 按钮没了，它的意思并进 ❓。
 
         为什么合并：**两个按钮记的是同一件事**（"这一刻值得回头看"），只落两个
-        不同的地方 —— 而实测 675 个会话里，真实课堂按 ⭐ 一共只有 2 下。
+        不同的地方 —— 而实测（2026-09-29 重测）`sessions/` 里 **97 份真实课堂
+        记录**，按 ⭐ 的一共**只有 3 下**。⚠️ 早先写的是「675 个会话里只有 2 下」：
+        `675` 数的是**全目录**（含 600+ 个 `_TEST` 残留），那个数也早已漂移。
         留两个按钮，等于让用户在课上现猜它们的区别。
 
         ⚠️ **删的只是按下去的那个按钮**：历史会话里的 `⭐ Exam Focus` 抬头仍由
@@ -1189,6 +1213,8 @@ class R15_LostRange(unittest.TestCase):
 
         2026-09-28 由作者一句"不用保存笔记"提醒才发现：`close()` 有三条早退
         （未启用 / 零句又无问答 / 用户答否），句柄关闭原来放在后面 → 三条路径全漏。
+        ⚠️ 那是**当时**的条数；2026-09-29 起是**四条**（多了「没有 Obsidian 库」
+        那条）—— **规矩不变：护栏永远挂在早退之前**，所以这条判据照旧有效。
         数据不会丢（每按一次都 flush），但句柄会跟着进程或被后续 close 覆盖而悬着。
         """
         import obsidian_writer as ow

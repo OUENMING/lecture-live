@@ -374,14 +374,14 @@ def failure_text(fr) -> str:
     """一条失败记录 -> **一行人话**：`⚠️ 文件名 — 原因`。
 
     ⭐ **纯函数**（可单测，不用 AppKit）。喂它 `prep.FileReport`
-      （`prep.py:647-654`：`path, status, chars, blocks, skipped_shapes, ocr_pages, error`）。
+      （字段：`path, status, chars, blocks, skipped_shapes, ocr_pages, error`）。
 
     ⚠️ 已有数据里就有原因 —— `entry_panel.py` 原来只 `len()` 它，所以用户看到
        「N 个文件失败」而**不知道是哪个、为什么**（`PLAN-entry-panel §3.6` 三条硬要求
        里差的那两条；调研抄的措辞是 `'Upload failed' is not a message`）。
     ⚠️ 取 `error` 优先、`status` 兜底。实测 `failed` 只会是 `empty`/`unreadable`/
-       `unsupported` 三种，而这三条的 `error` **全都非空**（`extract.py:123/126/135/140`）
-       → 兜底**实践中走不到**，留它是安全网。
+       `unsupported` 三种，而这三条的 `error` **全都非空**（`extract.py` 里那三个
+       `return ExtractResult(...)`）→ 兜底**实践中走不到**，留它是安全网。
     ⚠️ 必须**单行**：那一行的框只有 16pt 高，换行会被静默吃掉（异常串里常带换行）。
     """
     p = getattr(fr, "path", None)
@@ -1639,8 +1639,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    而关掉默认指示不补替代 = **W3C F78**（违反 1.4.11 + 2.4.7）。
     # ⚠️⚠️ **`_target(…)` 的返回值必须留住。** 写成一行 `setTarget_(_target(…))` 的话，
     #     那个临时对象**语句一结束就被回收** → `target()` 变成 `None` →
-    #     **回车静默无反应**，而 AppKit 不报任何错。本文件 885 行那段讲的就是这个形状，
-    #     这里是全文**唯一**漏掉的一处（其余八处都显式留了引用）。
+    #     **回车静默无反应**，而 AppKit 不报任何错。`_target()` 的 docstring 讲的就是
+    #     这个形状，这里是全文**唯一**漏掉的一处（其余八处都显式留了引用）。
     #     2026-09-28 OCR 审计抓出；本机实测复核：不保留时 `field.target()` 就是 `None`。
     #     ⚠️ **只存局部变量不够** —— `_build` 一返回局部就没了，必须挂到活到面板结束的
     #     容器上（`S`），并在 `do_close` 里像 `S["batch"]` 那样清掉。
@@ -2946,7 +2946,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #       第二份 → 上一份**无痕消失**；
         #    ② 它跑在 `prepare` **之前**，于是 `_archive` 看到的文件已经在归档目录里
         #       → 走「已在归档目录」分支 → **它那道保护永远触发不到**。
-        #    → 直接把**源路径**交给 `prepare`（它自己 `_archive`，`prep.py:848`）。
+        #    → 直接把**源路径**交给 `prepare`（它自己 `_archive`，见 `prep._archive`）。
         # ⚠️⚠️ **`S["busy"] = True` 之后到工作线程起来之前，一句都不许抛。**
         #    这几句是真 I/O（`paths.course_dir` 里有 `iterdir()/is_dir()`，可抛
         #    OSError / 权限错），而它们在任何 try 之外、也还没进工作线程 ——

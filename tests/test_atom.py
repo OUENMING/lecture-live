@@ -159,7 +159,8 @@ def main() -> int:
         check("⭐ 用的是 `put_nowait` 而不是 `put`（drain 在主循环里，不能阻塞）",
               bool(put_idx) and all("put_nowait" in lines[i] for i in put_idx))
 
-        # ② ⚠️ 复刻 ❓ 那次**真事故**的形状：`close()` 有三条早退，
+        # ② ⚠️ 复刻 ❓ 那次**真事故**的形状：`close()` 有三条早退（2026-09-29 起
+        #    是四条，多了「没有 Obsidian 库」那条 —— **规矩不变：护栏在早退之前**），
         #    旁路句柄若放在它们**之后**，答"不保存笔记"那条路上就漏关。
         import obsidian_writer as ow
         tmp2 = pathlib.Path(tempfile.mkdtemp())

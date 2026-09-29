@@ -766,7 +766,10 @@ class Overlay:
         # `sessions/<同名>.lost.jsonl`, 课后指回前面那几句。
         # ⭐ 2026-09-29 合并: 原来还有一个 ⭐「标记重点」, 和它其实是**同一个动作**
         #    （都是"这一刻值得回头看"）, 只是落到两个地方、还要用户去猜区别。
-        #    实测 675 个会话里, 真实课堂按 ⭐ 一共只有 2 下。
+        #    实测（2026-09-29 重测）`sessions/` 里 **97 份真实课堂记录**，
+        #    按 ⭐ 的一共**只有 3 下**（2 个文件各 1–2 下）。
+        #    ⚠️ 早先这里写的是「675 个会话里只有 2 下」—— `675` 数的是**全目录**
+        #       （含 600+ 个 `_TEST` 残留），且那个数早已漂移。结论不变。
         #    → 一个按钮、一个旁路文件、一个意思。
         #    ⚠️ **历史会话里的 `⭐ Exam Focus` 抬头必须照旧渲染** ——
         #    那是 `obsidian_writer._TS` 的事, 删的只是按下去的那个按钮。
@@ -2415,7 +2418,7 @@ class Overlay:
     def wrapup_progress(self, stage: str, done: int, total: int) -> None:
         """⚠️ 这个**从工作线程被调** —— UI 回写一律回主线程（`CLAUDE.md` 的不变量）。
 
-        形状照 `entry_panel.py:1292` 那份来：回调在工作线程里，`callAfter` 回主线程。
+        形状照 `entry_panel._make_batch_card` 那份来：回调在工作线程里，`callAfter` 回主线程。
         """
         try:
             from polish import progress_text

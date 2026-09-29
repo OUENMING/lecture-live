@@ -83,7 +83,7 @@ _CODE_LEAD = re.compile(rf"^\s*({_CODE_RE}(?:\s\d{{1,3}}[A-Z]?)?)\s+(\S.*)$")
 
 @dataclasses.dataclass(frozen=True)
 class Slot:
-    """「每周几的几点有课」。**不展开 RRULE** —— 只记模式，`active_on()` 判这一周上不上。"""
+    """「每周几的几点有课」。**不展开 RRULE** —— 只记模式，`active_at()` 判这一周上不上。"""
     weekday: int              # 0 = 周一（`datetime.weekday()` 同义）
     hh: int
     mm: int

@@ -10,7 +10,7 @@
 
 ## 探什么
 
-病根（`obsidian_writer.py:61` 的 `REVIEW_SYS`）：
+病根（`obsidian_writer.REVIEW_SYS`）：
 
     你只依据转录内容输出, 绝不引入外部知识、绝不猜测。
     - 只写转录里确实讲过的内容; 拿不准就不写。

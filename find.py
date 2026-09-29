@@ -44,7 +44,7 @@ ASCII 按 `\\b` 词边界。多个词之间是 **AND**，且**不管顺序**。
 ## ⚠️ 不重复造的三样
 
 1. **不写第五份"会话抬头解析器"。** 全仓已有**四处**独立实现
-   （`obsidian_writer.py:33` 是唯一带 `$` 锚的）→ 用 `obsidian_writer._TS`，
+   （`obsidian_writer._TS` 是唯一带 `$` 锚的那个）→ 用 `obsidian_writer._TS`，
    它是**唯一定义点**。
 2. **字段前缀从 `obsidian_writer._FIELDS` 生成** —— 不再手写一遍 `EN/ZH/ASR`。
 3. **课号解析复用 `courses._session_course()`** —— 「文件名 → 课号」的既有唯一定义点。
@@ -234,7 +234,7 @@ def default_roots() -> list:
     ⚠️ **单元名跟着根走，不在匹配处按目录名反推。** 第一版在循环里写
        `p.parent.name == "sessions"` —— 传自定义 `roots=` 时 kind 全退成 `"note"`，
        而且"这个根是不是会话格式"这件事被埋进了目录名字符串里。
-    ⚠️ 会话目录用 `_OW.SESSIONS`（`obsidian_writer.py:30` 的唯一定义点），
+    ⚠️ 会话目录用 `_OW.SESSIONS`（`obsidian_writer` 里的唯一定义点），
        **不在这里手拼 `here / "sessions"`** —— 布局一变两边指的就不是同一处。
     """
     roots = []

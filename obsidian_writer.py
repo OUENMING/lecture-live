@@ -773,15 +773,18 @@ class ObsidianWriter:
            `_render_note` 里面。理由（2026-09-29 挪的）：
            · `_render_note` 是**纯函数**（判据靠它、不碰 AppKit / 网络），
              让它发请求是一条**没人知道的隐式契约**；
-           · `close():1115` 那条「四层纪律」的注释要能一眼数出是**五层**。
+           · `close()` 里那段「五层护栏」的注释要能一眼数出是**五层**。
 
         ⚠️ 传给 `keypoints_fn` 的是**句子**，不是 entries —— 读法唯一的定义点
            在本文件 `_parse`，判据/生产都不该自己再抄一份"哪些算句子"。
 
         ⚠️ **本函数自己兜错**（不是只靠 `close()` 那层）：它是唯一会联网的地方，
-           而 `close()` 里另外四层（qa / lost / review / polish）都在**各自的
-           取数函数内部**就包了护栏。两层都包是刻意的 —— 少了这层，
-           "收尾这一步绝不抛"就成了一句只对调用方成立的话（判据当场抓过）。
+           而另外三层取数也各自兜了 —— `_review`（docstring 逐字「失败是**正常
+           路径**…绝不抛」）· `_lost_items`（内部接住并打「旁路文件读不出」）·
+           `polish_entries`（无 key / 失败原样返回）。⚠️ `_qa_items` 例外：它是**纯
+           字符串处理**，没有外部依赖，所以护栏只在 `close()` 那一层。
+           两层都包是刻意的 —— 少了这层，"收尾这一步绝不抛"就成了一句
+           只对调用方成立的话（判据当场抓过）。
         """
         kp = list(self._keypoints)
         if kp or self._keypoints_fn is None:
@@ -1050,7 +1053,7 @@ class ObsidianWriter:
         #    幂等，重复调无妨。
         #    2026-09-28 由作者那句"不用保存笔记"提醒才发现 —— 那正是会走到早退的路径。
         self.close_lost()
-        self.close_atom()      # ⚠️ 同一条教训：**都在早退之前**（下面有三条早退）
+        self.close_atom()      # ⚠️ 同一条教训：**都在早退之前**（下面有四条早退）
         if not self.enabled or not self.session_path:
             return ""
         # ⚠️ **没有库 = 只跳过「笔记」那一半** —— `sessions/` 已经在了（每句定稿

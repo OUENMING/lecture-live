@@ -67,9 +67,10 @@ def _can_alert() -> bool:
 
     ⚠️ **2026-09-28 之前这里是 `return not os.environ.get(...)`，方向是反的。**
        实测后果：双击启动（没终端、print 进日志）时**什么都不弹**，用户看到的是
-       「双击了、什么都没发生」—— 正是 `main.py:876` 那条注释要防的事；
+       「双击了、什么都没发生」—— 正是 `main.py` 里 `run()` 那处
+       `notice.alert`（音源打不开那条路）的注释要防的事；
        而终端里 `cl` 反而弹模态框。四处文档（`alert()` 的 docstring、本函数的 docstring、
-       `main.py:876`、引入它的提交 `e0b3b91` 的正文）写的都是"没有终端时弹框"，
+       `main.py` 那条注释、引入它的提交 `e0b3b91` 的正文）写的都是"没有终端时弹框"，
        只有代码是反的，而且**没有任何判据钉过它**，所以从 09-26 落地起一直没人发现。
     """
     return bool(os.environ.get("CLASSLIVE_FROM_APP"))

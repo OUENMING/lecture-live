@@ -265,7 +265,15 @@ esac
 
 # Obsidian 落盘: 没设课号也照常写(课程名默认 LECTURE, 见 obsidian_writer.py);
 # 设了课号则带上它, 用该课术语表。
-ARGS+=(--vault "${OBSIDIAN_VAULT:-$HOME/Obsidian/Vault}")
+# ⚠️⚠️ **不在这里兜底** —— 原来写的是 `${OBSIDIAN_VAULT:-$HOME/Obsidian/Vault}`，
+#    而双击 `.app` 起的那条路**没有 shell 环境**（Finder 给的是 launchd 的环境，
+#    实测 `launchctl getenv OBSIDIAN_VAULT` 是空的）→ 笔记被写进 `~/Obsidian/Vault/`。
+#    那个目录连 `.obsidian` 都没有，**不是 vault**，实测里面躺着 9 个笔记。
+#    现在收口到 `obsidian_writer.resolve_vault()`：`--vault` → `$OBSIDIAN_VAULT`
+#    → `~/.classlive/vault`（上次用过的）→ **都没有就不写 Obsidian**（会话照常落 sessions/）。
+if [ -n "${OBSIDIAN_VAULT:-}" ]; then
+  ARGS+=(--vault "$OBSIDIAN_VAULT")
+fi
 if [ -n "$COURSE" ]; then
   ARGS+=(--course "$COURSE")
 fi

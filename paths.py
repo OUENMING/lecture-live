@@ -201,3 +201,44 @@ def models_stamp(*, root=None) -> pathlib.Path:
     """
     return _root(root) / "models.json"
 
+
+def vault_config(*, root=None) -> pathlib.Path:
+    """用户选过的 Obsidian 库路径（纯文本一行）—— `~/.classlive/vault`。
+
+    ⚠️ **为什么不能只靠 `$OBSIDIAN_VAULT`**：那个环境变量只在**交互式 shell** 里有
+    （`~/.zshrc`），而双击 `.app` 起的那条路继承的是 **launchd 的环境** ——
+    实测 `launchctl getenv OBSIDIAN_VAULT` 是空的，`make-app.sh` 里也没有
+    `LSEnvironment`。于是「从终端跑」和「双击跑」会落到两个不同的库。
+    **实测后果**：`~/Obsidian/Vault/Lectures/` 里躺着 9 个笔记，而那个目录
+    连 `.obsidian` 都没有 —— 它不是 vault，是应用自己 `mkdir` 出来的。
+
+    这个文件就是那个缺口的补丁：**用户选过一次就记住**，下次没有 shell 环境也找得到。
+    """
+    return _root(root) / "vault"
+
+
+def timetable(*, root=None) -> pathlib.Path:
+    """导入过的那份课表（`{课号: [时段…]}`）—— **解析结果，不是原始 `.ics`**。
+
+    ⚠️ 为什么放这儿而不是 `<sessions>/`：它**不是课堂记录**，是用户倒进来的一份配置
+       （删掉只是回到「不预选」，一个字都不会丢）。同 `vault` 那一族。
+    ⚠️ 为什么必须存：`.ics` 原本解析完就扔了 → **预选没有数据源**。
+       原始文件可能上兆，而这里只要 `(周几, 时分, 时长, 间隔, 锚点, 停课日)`。
+    """
+    return _root(root) / "timetable.json"
+
+
+def jev_token(*, root=None) -> pathlib.Path:
+    """Jev（TypeSafe System One）的 token —— 纯文本一行，权限 600。
+
+    ⚠️ **与 `credentials()` 分开两份。** 那个文件装的是 **DeepSeek** 的 key，
+       两个是不同厂商、不同用途、可以各自单独撤销的凭证 —— 塞一个文件里
+       会让「我只想关掉重点句」变成「我得把翻译也一起停了」。
+    ⚠️ 没有这个文件 = **这个功能就是关的**，不是错误：`keypoints` 那条路
+       在课后跑、失败不影响任何东西（同 `polish` 的 fail-soft）。
+    """
+    return _root(root) / "jev-token"
+
+
+
+

@@ -25,9 +25,49 @@ from __future__ import annotations
 import bisect, json, os, re, time
 from pathlib import Path
 
-DEFAULT_VAULT = "~/Obsidian/Vault"
+import paths
+
 DEFAULT_COURSE = "LECTURE"          # 没设课程代码时的占位名(线下课常不设)
 SESSIONS = Path(__file__).with_name("sessions")
+
+
+def resolve_vault(cli: str | None = None, *, env=None, root=None) -> str | None:
+    """Obsidian 库路径：`--vault` → `$OBSIDIAN_VAULT` → `~/.classlive/vault` → **None**。
+
+    ⚠️⚠️ **没有兜底目录。** 返回 `None` = 不写 Obsidian（会话照常落 `sessions/`，
+       那才是主记录 —— `ObsidianWriter.enabled` 本来就是这么用的）。
+
+    这里**曾经**有一条 `~/Obsidian/Vault` 兜底，实测后果：
+    双击 `.app` 启动时 `$OBSIDIAN_VAULT` **不在环境里**（它只定义在 `~/.zshrc`，
+    Finder 起的是 launchd 环境），于是笔记被写进一个**用户从没选过的目录** ——
+    `~/Obsidian/Vault/Lectures/` 里躺着 9 个笔记，而那个目录连 `.obsidian` 都没有。
+    「凭空造一个目录再把笔记放进去」比「不写」坏得多：用户永远找不到它们。
+    """
+    if cli:
+        return os.path.expanduser(cli)
+    env = os.environ if env is None else env
+    if env.get("OBSIDIAN_VAULT"):
+        return os.path.expanduser(env["OBSIDIAN_VAULT"])
+    p = paths.vault_config(root=root)
+    try:
+        t = p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return os.path.expanduser(t) if t else None
+
+
+def remember_vault(vault: str, *, root=None) -> None:
+    """把用户选过的库记下来 —— **下次双击启动（没有 shell 环境）才找得到它**。
+
+    ⚠️ 失败**不出声**：记不住只影响下一次，本次照常运行，为它中断录课不值得。
+    """
+    p = paths.vault_config(root=root)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(vault.strip() + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
 
 # 会话文件里一条定稿块的抬头: "> [!abstract] 14:02:18" / "... ⭐ Exam Focus"
 _TS = re.compile(r"^> \[!abstract\] (\d\d:\d\d:\d\d)( ⭐ Exam Focus)?\s*$")

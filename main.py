@@ -22,7 +22,7 @@ from asr import load_asr, load_final_asr, is_degenerate
 from translator import load_translator
 from cloud_translator import (load_api_key, load_translator as load_cloud_translator,
                               answer_user_content)
-from obsidian_writer import ObsidianWriter, DEFAULT_VAULT
+from obsidian_writer import ObsidianWriter, resolve_vault, remember_vault
 from build_notes import (TermNotes, format_gloss, detect_proper_nouns, lookup_term)
 from testmode import TestSession
 import instance_lock
@@ -953,7 +953,17 @@ def run(args) -> None:
     stopping = threading.Event()
     flagged = {"on": False}                             # ⭐ 标记当前句
     trans = {"mode": "both"}                            # 🌐 三档: both 双语 / en 只英·校 / raw 纯转录
-    writer = ObsidianWriter(args.vault, args.course, mode=args.save_notes,
+    # ⚠️ 库路径在这里**收口**（`resolve_vault` 是唯一定义点）：`--vault` → `$OBSIDIAN_VAULT`
+    #    → 上次用过的。**没有兜底目录** —— 拿不到就不写 Obsidian，绝不凭空造一个。
+    #    拿到了就**记下来**：双击 `.app` 起的那条路没有 shell 环境变量，不记下次还是找不到。
+    vault = resolve_vault(args.vault)
+    if vault:
+        remember_vault(vault)
+    elif args.save_notes != "no":
+        print("⚠ 没设 Obsidian 库路径(设上 OBSIDIAN_VAULT, 或用 --vault 指定) —— "
+              "这次只写 sessions/, 不写 Obsidian 笔记")
+
+    writer = ObsidianWriter(vault, args.course, mode=args.save_notes,
                             api_key=api_key_val, model=args.cloud_model,
                             glossary_path=args.glossary,
                             polish=args.polish != "off",
@@ -1842,7 +1852,7 @@ def main():
     p.add_argument("--polish", choices=["auto", "off"], default="auto",
                    help="落笔前二次精修转录(需 API key; 默认 auto); off 直接用直播版")
     p.add_argument("--polish-model", help="精修用的模型(默认同 --cloud-model)")
-    p.add_argument("--vault", default=DEFAULT_VAULT, help="Obsidian 库路径")
+    p.add_argument("--vault", help="Obsidian 库路径(默认取 $OBSIDIAN_VAULT 或上次用过的; 都没有就不写 Obsidian)")
     args = p.parse_args()
     run(args)
 

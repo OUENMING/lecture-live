@@ -242,7 +242,7 @@ def default_roots() -> list:
         roots.append((_OW.SESSIONS, "session"))
     here = pathlib.Path(__file__).resolve().parent
     roots.append((here / "glossary", "glossary"))
-    vault = getattr(_OW, "DEFAULT_VAULT", None)
+    vault = _OW.resolve_vault()
     if vault:
         roots.append((pathlib.Path(vault).expanduser() / "Lectures", "note"))
     return roots

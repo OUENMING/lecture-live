@@ -753,6 +753,33 @@ class ObsidianWriter:
             print(f"⚠ ❓ 旁路文件读不出({str(e)[:60]}); 笔记照常生成")
         return out
 
+    def _keypoint_items(self, entries: list[dict]) -> list:
+        """🎯 Jev 的重点句 → `[(概率, 句子, [原始行下标]), …]`。
+
+        ⚠️⚠️ **这是唯一一处会联网的取数**（`keypoints.pick` → CommandCode），
+           所以它**住在 `close()` 的护栏区里**，和 qa / lost 并列 —— 而不是在
+           `_render_note` 里面。理由（2026-09-29 挪的）：
+           · `_render_note` 是**纯函数**（判据靠它、不碰 AppKit / 网络），
+             让它发请求是一条**没人知道的隐式契约**；
+           · `close():1115` 那条「四层纪律」的注释要能一眼数出是**五层**。
+
+        ⚠️ 传给 `keypoints_fn` 的是**句子**，不是 entries —— 读法唯一的定义点
+           在本文件 `_parse`，判据/生产都不该自己再抄一份"哪些算句子"。
+
+        ⚠️ **本函数自己兜错**（不是只靠 `close()` 那层）：它是唯一会联网的地方，
+           而 `close()` 里另外四层（qa / lost / review / polish）都在**各自的
+           取数函数内部**就包了护栏。两层都包是刻意的 —— 少了这层，
+           "收尾这一步绝不抛"就成了一句只对调用方成立的话（判据当场抓过）。
+        """
+        kp = list(self._keypoints)
+        if kp or self._keypoints_fn is None:
+            return kp
+        try:
+            return list(self._keypoints_fn(
+                [e["en"] for e in entries if e.get("en")]) or ())
+        except Exception:                                     # noqa: BLE001
+            return []                                         # ⚠️ 收尾这一步绝不抛
+
     def _lost_items(self, entries: list[dict]) -> list[str]:
         """旁路事件 -> 笔记里的块（**一块一个标记**，块内已含它的那几句）。
 
@@ -836,7 +863,8 @@ class ObsidianWriter:
     def _render_note(self, entries: list[dict], review: dict,
                      qa_items: list[str] | None = None,
                      polish_state: str = "ok",
-                     lost_items: list[str] | None = None) -> str:
+                     lost_items: list[str] | None = None,
+                     keypoint_items: list | None = None) -> str:
         ts0 = entries[0]["ts"] if entries else "—"
         ts1 = entries[-1]["ts"] if entries else "—"
         stars = [e for e in entries if e["star"]]
@@ -952,19 +980,11 @@ class ObsidianWriter:
             L += [""]
 
         # ── 🎯 Jev 的重点句（2026-09-29）──────────────────────────────────
-        # ⚠️ **句子到收尾这一刻才齐**，所以不能在构造 writer 时算 —— 这里现算。
+        # ⚠️ **取数在 `close()` 那边**（`_keypoint_items`），这里只排版 ——
+        #    本函数是纯的，判据靠它，所以它**不发请求**。
         # ⚠️ **默认没有**（没配 token / raw 档 / 调用失败 → 空），那时**整节不出现**
         #    —— 不写一句"（没有）"，那会让读者以为读过而没结果。
-        kp = list(self._keypoints)
-        if not kp and self._keypoints_fn is not None:
-            try:
-                # ⚠️ **把句子交给它** —— 判据/生产都不该自己再抄一份"哪些算句子"
-                #    （读法唯一的定义点在本文件 `_parse`）。
-                kp = list(self._keypoints_fn(
-                    [e["en"] for e in entries if e.get("en")]) or ())
-            except Exception:                                 # noqa: BLE001
-                kp = []                                       # ⚠️ 收尾这一步绝不抛
-        if kp:
+        if keypoint_items:
             L += ["## 🎯 这节课最值得记的几句", "",
                   "*（按 Jev 给「值不值得抄进复习纸」的概率排的序。⚠️ **它是排序信号，"
                   "不是考试预测** —— 实测同一句换个问法能从 0.77 掉到 0.61，"
@@ -1112,8 +1132,10 @@ class ObsidianWriter:
                 print("⚠ 复习层被中断；笔记照常生成（只有逐句转录）", flush=True)
         # 问答行自带 try/except: 渲染问答抛出去就再也没有那份转录笔记了。隔离是硬要求:
         # 笔记的底座是逐句转录, 它是不能丢的那件事; 问答只是额外一层。
-        # ⚠️ 2026-09-28 起这条纪律**四层都补齐了**（polish / review / qa / lost）；
+        # ⚠️ 2026-09-28 起这条纪律**五层都补齐了**（polish / review / qa / lost / keypoints）；
         #    原来只有后两层有护栏，而前两层才是跑得最久的。
+        #    ⚠️ 五层**住在这里**，不许藏进 `_render_note` —— 那个函数是纯的，
+        #       让它发请求是一条没人知道的隐式契约（keypoints 2026-09-29 挪出来的原因）。
         qa_items: list[str] = []
         if qa:
             try:
@@ -1126,7 +1148,16 @@ class ObsidianWriter:
             lost_items = self._lost_items(entries)
         except Exception as e:                            # noqa: BLE001
             print(f"⚠ ❓ 反查失败({str(e)[:60]}); 笔记照常生成")
-        note = self._render_note(entries, review, qa_items, polish_state, lost_items)
+        # 🎯 同上。⚠️ 这一层是**唯一会联网的**（一节课实测约 6 秒 / 20 次请求），
+        #    所以它更不能把笔记带下水。`_keypoint_items` 自己也会兜一层，这里再兜
+        #    一次是因为上面两层都这么写 —— 五层并排读起来才是同一条纪律。
+        keypoint_items: list = []
+        try:
+            keypoint_items = self._keypoint_items(entries)
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ 🎯 重点句失败({str(e)[:60]}); 笔记照常生成")
+        note = self._render_note(entries, review, qa_items, polish_state, lost_items,
+                                 keypoint_items)
 
         self.vault_path = note_path_for(self._vault, self._date, self._course)
         self.vault_path.write_text(note, encoding="utf-8")

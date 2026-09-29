@@ -1250,6 +1250,59 @@ class R15_LostRange(unittest.TestCase):
         self.assertIn("## ⭐ 我标记的重点", out,
                       "历史会话里的 ⭐ 必须照旧渲染（抬头仍写着 Exam Focus）")
 
+    def test_render_note_never_calls_the_keypoints_fn(self):
+        """⭐ `_render_note` 是**纯函数**, 取数那一步（会联网）在 `close()` 里。
+
+        2026-09-29 挪的。原来它在 `_render_note` 内部现算 —— 后果是这条判据
+        依赖的"纯渲染"契约被悄悄破掉了：改这个函数的人不知道它会发 20 次请求
+        （一节课实测 11 秒）。`close():` 那段「五层护栏」的注释也数不出它是第五层。
+
+        ⚠️ 判据钉的是**行为**：把 `keypoints_fn` 换成一个**一调就炸**的替身，
+        正常渲染必须一声不吭地过 —— 反过来，只要有人在 `_render_note` 里碰它，
+        这条立刻红。
+        """
+        w = ObsidianWriter(None, "TESTX", mode="no")
+
+        def boom(_sents):
+            raise AssertionError("_render_note 里不许调 keypoints_fn（那是联网的）")
+        w._keypoints_fn = boom
+
+        entries = [{"ts": "10:00:00", "en": "a", "zh": "b", "asr": "", "star": False}]
+        out = w._render_note(entries, {}, [], "ok", [])          # 不许抛
+        self.assertNotIn("这节课最值得记的几句", out, "没传 keypoint_items 就不许有那一节")
+
+    def test_keypoint_items_wraps_the_fn_and_survives_failure(self):
+        """`_keypoint_items` 是取数那一步 —— 它自己兜错, 还兜得住"没配 token"。
+
+        ⚠️ 三态都要断：
+          · 没配（`keypoints_fn is None`）→ 空表，**不去调任何东西**
+          · 调了但炸了 → 空表（收尾这一步绝不抛，否则整节课丢笔记）
+          · 调了给了值 → 原样带出来，而且要**传句子**（不是 entries）
+        """
+        w = ObsidianWriter(None, "TESTX", mode="no")
+        entries = [{"ts": "10:00:00", "en": "hello", "zh": "你好", "asr": "", "star": False},
+                   {"ts": "10:00:05", "en": "", "zh": "", "asr": "", "star": False}]
+
+        # ① 没配 = 功能关着
+        self.assertEqual(w._keypoint_items(entries), [], "没配 token 该给空表")
+
+        # ② 传进去的必须是**句子**，且空的 EN 不许混进去
+        seen = {}
+
+        def ok(sents):
+            seen["sents"] = list(sents)
+            return [(0.77, "hello", [0])]
+        w._keypoints_fn = ok
+        self.assertEqual(w._keypoint_items(entries), [(0.77, "hello", [0])])
+        self.assertEqual(seen["sents"], ["hello"],
+                         "要传句子、不许带空 EN —— 读法唯一的定义点在 writer._parse")
+
+        # ③ 炸了也要给空表（收尾这一步绝不抛）
+        def boom(_sents):
+            raise RuntimeError("Jev 502")
+        w._keypoints_fn = boom
+        self.assertEqual(w._keypoint_items(entries), [], "取数失败不许把笔记带下水")
+
 
 class R16_DeviceSwitchRollback(unittest.TestCase):
     """实时音源换设备时的**半换**防护(2026-09-28)。

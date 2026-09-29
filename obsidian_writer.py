@@ -398,7 +398,8 @@ class ObsidianWriter:
     def __init__(self, vault: str | None, course: str | None, mode: str = "ask",
                  api_key: str | None = None, model: str = "deepseek-flash",
                  glossary_path: str | None = None, polish: bool = True,
-                 polish_model: str | None = None):
+                 polish_model: str | None = None, keypoints=None,
+                 keypoints_fn=None):
         self.mode = mode
         # 没设课程代码也照常落盘: 线下课常常没课号, 不该因此丢掉整节课的笔记。
         self.enabled = bool(vault) and mode != "no"
@@ -411,6 +412,12 @@ class ObsidianWriter:
             Path(__file__).with_name("glossary.txt"))
         self._polish = polish               # 落笔前二次精修(见 polish.py)
         self._polish_model = polish_model or model
+        #: 🎯 Jev 的重点句：`[(概率, 句子, [原始行下标]), …]`。
+        #: ⚠️ **空表 = 不加那一节**（没配 token / raw 档 / 调用失败）。
+        self._keypoints = list(keypoints or ())
+        #: ⚠️ 句子**到收尾才齐**，所以生产那条走**回调**（`close()` 里现算），
+        #:    不是构造时传值。传值那条留给判据。
+        self._keypoints_fn = keypoints_fn
         self._n = 0
         self.session_path: Path | None = None
         self.vault_path: Path | None = None
@@ -942,6 +949,29 @@ class ObsidianWriter:
                 L += [f"- `{e['ts']}` {e['zh'] or e['en'] or e['asr']}"]
                 if e["en"] and e["zh"]:
                     L += [f"  - EN: {e['en']}"]
+            L += [""]
+
+        # ── 🎯 Jev 的重点句（2026-09-29）──────────────────────────────────
+        # ⚠️ **句子到收尾这一刻才齐**，所以不能在构造 writer 时算 —— 这里现算。
+        # ⚠️ **默认没有**（没配 token / raw 档 / 调用失败 → 空），那时**整节不出现**
+        #    —— 不写一句"（没有）"，那会让读者以为读过而没结果。
+        kp = list(self._keypoints)
+        if not kp and self._keypoints_fn is not None:
+            try:
+                # ⚠️ **把句子交给它** —— 判据/生产都不该自己再抄一份"哪些算句子"
+                #    （读法唯一的定义点在本文件 `_parse`）。
+                kp = list(self._keypoints_fn(
+                    [e["en"] for e in entries if e.get("en")]) or ())
+            except Exception:                                 # noqa: BLE001
+                kp = []                                       # ⚠️ 收尾这一步绝不抛
+        if kp:
+            L += ["## 🎯 这节课最值得记的几句", "",
+                  "*（按 Jev 给「值不值得抄进复习纸」的概率排的序。⚠️ **它是排序信号，"
+                  "不是考试预测** —— 实测同一句换个问法能从 0.77 掉到 0.61，"
+                  "所以**看顺序，别卡分数**。）*", ""]
+            for p, text, ix in kp:
+                tag = f"L{ix[0] + 1}" if len(ix) == 1 else f"L{ix[0] + 1}–{ix[-1] + 1}"
+                L += [f"- `{p:.2f}` `{tag}` {text}"]
             L += [""]
 
         # 完整转录: 折叠 callout 包全套逐句块。**逐字保留**, 是这份笔记的底座。

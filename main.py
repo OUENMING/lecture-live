@@ -995,11 +995,26 @@ def run(args) -> None:
         print("⚠ 没设 Obsidian 库路径(设上 OBSIDIAN_VAULT, 或用 --vault 指定) —— "
               "这次只写 sessions/, 不写 Obsidian 笔记")
 
+    # 🎯 Jev 的重点句（2026-09-29）—— **收尾那一步**才跑，而且是 fail-soft。
+    # ⚠️⚠️ **纯转录档一个模型请求都不发** —— 仓库的硬契约（`DESIGN.md:187`：
+    #    「纯转录 | 一个模型请求都不发」）。所以挡在**发请求之前**。
+    # ⚠️ 没配 token → 空表（= 功能关着，不是错误）。同 `polish` 的 fail-soft。
+    # ⚠️ 同步跑，一节课实测约 6 秒 —— 收尾可以接受（那一步本来就在等精修）。
+    def _keypoints_for(sents):
+        if args.save_notes == "no" or trans.get("mode") == "raw":
+            return []
+        try:
+            import keypoints as _kp
+            return _kp.pick(sents)
+        except Exception:                                     # noqa: BLE001
+            return []
+
     writer = ObsidianWriter(vault, args.course, mode=args.save_notes,
                             api_key=api_key_val, model=args.cloud_model,
                             glossary_path=args.glossary,
                             polish=args.polish != "off",
-                            polish_model=args.polish_model or None)
+                            polish_model=args.polish_model or None,
+                            keypoints_fn=_keypoints_for)
     notes = TermNotes()                                 # 术语通俗解析(查表)
 
     # 测试模式: 采一份完整报告 + 留音频。**任何采集失败都不能影响上课** ——

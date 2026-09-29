@@ -833,8 +833,15 @@ def ics_course_row(c, *, known=None) -> dict:
 
 
 def import_card_height(rows) -> float:
-    """导入确认卡的高度 —— **与 `_make_import_card` 的排版循环逐项对应**。"""
-    return CARD_PAD + IMPORT_HEAD + max(len(rows or []), 1) * IMPORT_ROW + CARD_PAD
+    """导入确认卡的高度 —— **与 `_make_import_card` 的排版循环逐项对应**。
+
+    ⚠️⚠️ **必须留出底部按钮行**（2026-09-29 修的）：`_make_import_card` 在行循环
+       结束后把「新建这些课」/「取消」画在 `y = CARD_PAD`，而循环推导出的**最后
+       一行 y 也正好是 `CARD_PAD`** → 最后一门课那行**与按钮叠在一起**。
+       对照 `card_height`：有按钮时它额外加了 `CARD_GAP_V + BTN_H`。
+    """
+    return (CARD_PAD + IMPORT_HEAD + max(len(rows or []), 1) * IMPORT_ROW
+            + CARD_GAP_V + BTN_H + CARD_PAD)
 
 
 def _make_import_card(rows, *, width, warn, on_confirm, on_cancel, targets=None):
@@ -1541,7 +1548,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         S["guess_i"] = i if i < len(g) else -1
         if S["guess_i"] < 0:
             set_status("好，那我不猜了 —— 你自己挑", 2.0)
-        refresh()
+        # ⚠️⚠️ **必须 `_later`**（2026-09-29 修）—— 这是卡上「不是这门？」按钮的
+        #    action，同步 `refresh()` 会把 sender 所在那张卡整块拆掉，而
+        #    `NSCell` 的跟踪循环**还在栈上** → 主线程被占住、**所有按钮都没反应**。
+        #    同批新增的其它 action（`toggle_hit` / `close_sessions` / `cancel_import`
+        #    / `adopt_session` / `confirm_import`）都规规矩矩用 `_later(refresh)`，
+        #    这里漏了。机制见 `_later` 的 docstring。
+        _later(refresh)
 
     body_h = body_height(len(rs), NSScreen.mainScreen().frame().size.height,
                          card_h=card_height(has_actions=(on_start is not None)))
@@ -2305,7 +2318,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _skip = len([r for r in (s.get("rows") or []) if r["state"] != "new"])
         set_status(f"新建了 {len(made)} 门课" +
                    (f"，跳过 {_skip} 门" if _skip else ""), 3.0)
-        refresh()
+        # ⚠️⚠️ **必须 `_later`**（2026-09-29 修）—— 这是导入确认卡上「新建这些课」
+        #    那个 `NSButton` 的 action，同步 `refresh()` 会把 sender 所在的导入卡
+        #    （连同 sender 自己）在 `NSCell` 的跟踪循环**还在栈上**时拆掉。
+        #    症状见 `_later` 的说明：**主线程被占住 → 之后所有按钮都点不动**。
+        _later(refresh)
 
     def cancel_import():
         S["ics"] = None
@@ -2341,11 +2358,25 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         「**is disabled if DEVONthink is not sure enough**」、我们自己的
         `classify.py` 早就写着「宁可答空，不要硬凑」。
         """
+        # ⭐ **落点条与卡片走同一条分流**（2026-09-29 补的这一半）。
+        #    原来这里只 `_expand`，而 `.ics` 不在课件支持集里 → 拖课表到**底部落点条**
+        #    时 `acceptable()`（高亮）说"收"、这里却回"这些都不收" ——
+        #    **悬停判的和松手做的是两件事**，正是 `acceptable()` 的 docstring 里
+        #    想消灭的那个形状。⚠️ 与 `run_prep` 同形，两处不许再分叉。
+        #    ⚠️ 放在批量忙检查**之前**：导入有自己独立的忙状态，"另一批在核对"
+        #       跟"能不能导入课表"是两件事（同 `run_prep` 的理由）。
+        _ics, _rest = drop_split(paths)
+        if _ics:
+            run_import(_ics)
+            if _rest:
+                set_status(f"课表先导入了 —— 剩下这 {len(_rest)} 份课件请再拖一次",
+                           3.0)
+            return True
         if S.get("batch") is not None:
             set_status("已经在核对这一批了 —— 先确认或取消", 1.0)
             return False
         from extract import expand as _expand
-        files, dropped = _expand(paths)
+        files, dropped = _expand(_rest)
         if not files:
             set_status("这些都不收（只认课件 PDF / PPTX / DOCX、课表 .ics；"
                        "文件夹取里面一层）", 1.0)
@@ -3030,6 +3061,17 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    `submit_add`/`close_add` 的闭包，而闭包持有 `add_field`/`strip`/`win`。
             #    与上面三条是**同一条环**（漏一条就漏一整个面板，且随开关轮数增长）。
             strip_holder["add_widgets"] = []
+            # ⚠️ **三个 `*_rows` 也要断**（2026-09-29 补）—— 它们是后加的
+            #    三张卡的 target 容器（搜索命中 / 课次 / 导入确认），只被写、没被读，
+            #    作用就是留住弱引用的 target。
+            #    漏掉的话：`holder → target → act 闭包 → refresh → doc/win` 是一条环，
+            #    `gc` 收不回 —— 与上面 `["actions"]` 那条**同一形状**
+            #    （那条注释里记着实测：开/关 3 轮 144 个 `_ClassLive*`、9 轮 180，
+            #     **随轮数增长**）。⚠️ 这几张卡是裸 `NSView`，`_sever` 对它们只会
+            #    `AttributeError` 后跳过 —— 所以只能靠这里断。
+            strip_holder["search_rows"] = []
+            strip_holder["sess_rows"] = []
+            strip_holder["import_rows"] = []
             # ⚠️ 新增模式是**模块级**的，跨面板存活 —— 不清的话，关掉面板再打开
             #    会直接落进「输入行开着」的状态（同 `S["batch"]`/`S["search"]` 那条）。
             S["add"] = None
@@ -3040,6 +3082,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             S["batch"] = None
             S["search"] = None
             S["sessions"] = None
+            # ⚠️ 导入那条也是**模块级**的，同上面三条 —— 2026-09-29 补。
+            #    原来漏了它：`.ics` 拖进来、看到确认卡之后**直接关面板** →
+            #    `S["ics"]` 残留 → 下次开面板 `refresh` 里 `_i = S.get("ics")` 非空
+            #    → **又弹出一张陈旧的导入确认卡**（行数据还是上一轮的）。
+            S["ics"] = None
             # ⚠️ 面板里那两个**弱引用 target 的锚点**（就绪条 / 搜索框）也要断 ——
             #    它们不是状态，是"别让 target 被 GC 掉"的容器。留着就等于每次
             #    开关面板多留两个对象（与上面那几条同一条纪律）。

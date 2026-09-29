@@ -521,6 +521,31 @@ def main() -> int:
     check("⚠️ acceptable：空 / None -> 拒（不许把「什么都没有」当能收）",
           E.acceptable([]) is False and E.acceptable(None) is False)
 
+    # ⭐⭐ 导入确认卡：**最后一行不许与底部按钮叠住**（2026-09-29 修）。
+    #    `_make_import_card` 把按钮画在 `y = CARD_PAD`，而行循环推导出的**最后
+    #    一行 y 也正好是 `CARD_PAD`** —— 高度少留了 `CARD_GAP_V + BTN_H`。
+    #    ⚠️⚠️ **现有的「没有子视图掉出卡片底部」判据抓不到它**：那只查 `y >= 0`，
+    #       而**叠住的两样东西都在 0 以上**。所以要查的是**重叠**，不是越界。
+    #       这正是本仓库「判据要指向那个位置」那条 —— 换个症状就要换条判据。
+    from AppKit import NSButton as _NSB
+    from AppKit import NSIntersectsRect as _hits
+    for _n in (1, 2, 5):
+        _rows = [{"name": f"ECON1074{i}", "want": f"ECON1074{i}",
+                  "state": "new", "when": "周二 15:00", "events": 1}
+                 for i in range(_n)]
+        _card, _tg = E._make_import_card(
+            _rows, width=600.0, warn=[], on_confirm=lambda: None,
+            on_cancel=lambda: None, targets=[])
+        _btns = [v for v in _card.subviews() if isinstance(v, _NSB)]
+        _lbls = [v for v in _card.subviews() if not isinstance(v, _NSB)]
+        _bad = [(b.frame(), l.frame()) for b in _btns for l in _lbls
+                if _hits(b.frame(), l.frame())]
+        check(f"⭐ 导入卡（{_n} 门）最后一行不与按钮叠住"
+              f"（高度要留 `CARD_GAP_V + BTN_H`）", not _bad,
+              f"叠了 {len(_bad)} 处：{_bad[:1]}")
+        check(f"⭐ 导入卡（{_n} 门）也没有子视图掉出底部",
+              min(float(v.frame().origin.y) for v in _card.subviews()) >= -0.01)
+
     # ⭐ `drop_split()` —— 「哪些算课表、剩下哪些」的唯一定义点（2026-09-29 抽的）。
     #    抽它是因为那个分流原来是 `run_prep` 里内联的一行，而 `run_prep` 要起整个
     #    面板才跑得动 → 那一行**从来没有判据**。混拖会**丢掉课件那半边**，

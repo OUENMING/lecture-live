@@ -169,6 +169,13 @@ def ask_commandcode(state: str, questions: dict, *, token: str, timeout: float =
         #    （`at most 20 questions per call` 那种），只报状态码等于没说。
         detail = e.read().decode("utf-8", "replace")[:300]
         raise RuntimeError(f"Jev {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        # ⚠️ **`URLError` 不是 `HTTPError` 的父类，反过来才对** ——
+        #    原来只接 `HTTPError`，于是断网 / DNS 失败 / 连接被拒 / 读超时
+        #    一律**裸 traceback 崩掉**（2026-09-29 修）。CLI 那条路
+        #    （`main()` 里 `score(sents, ask=ask)` 直连本函数）没有任何兜底，
+        #    所以用户看到的就是一个栈，而不是"连不上"。
+        raise RuntimeError(f"Jev 连不上（{e.reason}）—— 检查网络或代理") from e
 
 
 def sentences(path) -> list:
@@ -212,7 +219,9 @@ def token(*, root=None) -> str:
 
     ⚠️ **不是错误** —— 没配 token 就是不用这个功能（同 `polish` 的 fail-soft）。
     """
-    import pathlib
+    # ⚠️ 这里**不需要 `import pathlib`** —— `paths.jev_token()` 返回的就是 `Path`，
+    #    直接调它的 `read_text()` 即可。（原来那个 import 是死代码，
+    #    会让读者以为这里在自行拼路径。2026-09-29 删。）
     try:
         import paths
         p = paths.jev_token(root=root)
@@ -229,14 +238,23 @@ def token_from_cc_switch() -> str:
 
     ⚠️ **这是实验用的近路**，不是产品的取凭证方式 —— 产品那条走
        `paths.credentials()`（`~/.classlive/credentials`）。
+
+    ⚠️ 2026-09-29 修两处：① 连接原来没有 `with`/`close()`，查询抛异常时泄漏；
+       ② `fetchone()` 在 `providers` 里没有 `commandcode` 那一行时返回 `None`，
+       而 `None[0]` 抛的是 `TypeError` —— 不如直接说清"没找到"。
     """
     import pathlib
     import sqlite3
     db = pathlib.Path.home() / ".cc-switch/cc-switch.db"
-    con = sqlite3.connect("file:" + str(db) + "?mode=ro", uri=True)
-    cfg = json.loads(con.execute(
-        "select settings_config from providers where name='commandcode'"
-    ).fetchone()[0])
+    if not db.exists():
+        raise RuntimeError(f"没有 cc-switch 库：{db}")
+    with sqlite3.connect("file:" + str(db) + "?mode=ro", uri=True) as con:
+        row = con.execute(
+            "select settings_config from providers where name='commandcode'"
+        ).fetchone()
+    if not row:
+        raise RuntimeError("cc-switch 里没有 commandcode 这个 provider")
+    cfg = json.loads(row[0])
     return cfg["env"]["ANTHROPIC_AUTH_TOKEN"]
 
 
@@ -248,11 +266,32 @@ def main(argv=None) -> int:
         print(__doc__)
         return 2
     path = argv[0]
+
+    def _opt(name):
+        """取 `--name <值>`；没有返回 `None`。⚠️ **判越界**（2026-09-29 修）。
+
+        原来写的是 `argv[argv.index(name) + 1]` —— 把 `--top` / `--unit` 写在
+        **最后一个参数**时（`keypoints.py sess.md --unit`）直接 `IndexError`。
+        ⚠️ `--unit` 那行尤其毒：`and` 的短路顺序让右侧索引**一定**被求值，
+           所以**只要命令行末尾出现 `--unit` 就必崩**。
+        """
+        if name not in argv:
+            return None
+        i = argv.index(name) + 1
+        if i >= len(argv):
+            print(f"⚠️ `{name}` 后面没跟值")
+            return None
+        return argv[i]
+
     k = 12
-    if "--top" in argv:
-        k = int(argv[argv.index("--top") + 1])
-    unit = "thought" if "--unit" in argv and argv[argv.index("--unit") + 1] == "thought" \
-        else "line"
+    _t = _opt("--top")
+    if _t is not None:
+        try:
+            k = int(_t)
+        except ValueError:
+            print(f"⚠️ `--top` 要一个整数，拿到 {_t!r}")
+            return 2
+    unit = "thought" if _opt("--unit") == "thought" else "line"
     raw = sentences(path)
     if not raw:
         print("这份文件里没读到英文句子")

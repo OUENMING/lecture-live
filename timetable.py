@@ -36,14 +36,17 @@ Teamarb.u.Teamleitg.iProj              ← 德语缩写，什么都没有 (德�
 两条路在这里都只看 `DTSTART` / `BYDAY`）。
 
 ⚠️ **但 `INTERVAL` 与 `EXDATE` 必须读** —— 否则「这周到底上不上」会错（双周 tutorial、
-停课日）。它们挂在 `Slot` 上，由 `active_on()` 判。
+停课日）。它们挂在 `Slot` 上，由 `Slot.active_at()` 判（`active_on()` 与 `suggest()`
+都走它 —— 那条规则**只此一处**）。
 
 ## 隐私
 
-只读 `SUMMARY / DTSTART / DTEND / LOCATION / UID / RRULE / EXDATE`。
-⚠️ **`DESCRIPTION` 不看** —— `[一手]` UBC 的提醒逐字：「Shared calendars often contain
-**other people's sensitive information that they haven't consented to share**」。
-那些字段里常有教师名、同学名，而这个软件会把内容写进笔记。
+只读 `SUMMARY / DTSTART / DTEND / RRULE / EXDATE`。
+⚠️ **`DESCRIPTION` / `LOCATION` / `UID` 一律不看** —— `[一手]` UBC 的提醒逐字：
+「Shared calendars often contain **other people's sensitive information that they
+haven't consented to share**」。那些字段里常有教师名、同学名，而这个软件会把内容
+写进笔记。（`UID` 我们只在「重复导入去重」的讨论里提过，**实现里没用它** ——
+ 2026-09-29 修正这里的字段表：它原来把 `LOCATION` / `UID` 也列成"只读"，与实现不符。）
 """
 from __future__ import annotations
 
@@ -89,9 +92,20 @@ class Slot:
     anchor: datetime.date | None = None   # `DTSTART` 那天 —— 算 INTERVAL 相位用
     skip: tuple = ()          # `EXDATE` 的日期（停课日）
 
-    def starts_at(self, when: datetime.datetime) -> bool:
-        """`when` 这一天、这个时刻**是不是这节课的开课点**（分钟级容差由调用方给）。"""
-        return self.weekday == when.weekday() and self.hh == when.hour
+    def active_at(self, when: datetime.datetime) -> bool:
+        """`when` 这一刻，这个 slot **正该在上**吗 —— 那条规则的**唯一定义点**。
+
+        ⚠️ **只看周几 + 小时 + 是不是该出现的那一周**，不看分钟（面板要的是
+           「现在大概是哪门」，不是精确排课）。
+        ⚠️ 2026-09-29 立：原来这条判据在本文件里**写了两遍** —— `active_on()`
+           一处、`suggest()` 内层又一处 —— 而文件注释多处写「由 `active_on()` 判」。
+           两处规则分叉的话，`suggest`（面板真正走的那条）会和文档说的不一致。
+        ⚠️ 它替掉了原来那个无人调用的 `starts_at()`：那个**漏了 `on_week`**
+           （于是双周课/停课日会误判），而且 docstring 说「分钟级容差由调用方给」
+           却没留参数 —— 调用方根本给不了。**留着比删掉危险**，所以删。
+        """
+        return (self.weekday == when.weekday() and self.hh == when.hour
+                and self.on_week(when.date()))
 
     def on_week(self, when: datetime.date) -> bool:
         """⭐ **双周课 / 停课日** —— 不看这一条，`INTERVAL=2` 的课会周周误报。"""
@@ -270,7 +284,20 @@ def parse(data: bytes, *, tz=None):
         elif name == "DTEND":
             dt = _local(_parse_dt(val, params), tz)
             if dt is not None and cur.get("start") is not None:
-                cur["dur"] = max(0, int((dt - cur["start"]).total_seconds() // 60))
+                # ⚠️⚠️ **两侧 tzinfo 形态必须一致才相减**（2026-09-29 修）。
+                #    `_parse_dt` 对「浮动时间 / `VALUE=DATE`」返回 **naive**，对带 `Z`
+                #    或 `TZID` 的返回 **aware** —— 一条 VEVENT 里两种混用时
+                #    `dt - cur["start"]` 抛 `TypeError: can't subtract offset-naive
+                #    and offset-aware datetimes`，**整个 `parse()` 中断**，
+                #    违反本模块自述的「坏一条不该让整份导入失败」。
+                #    形态不一致就**不记时长**（`minutes=0` 表示"文件里没说"），
+                #    其余字段照收 —— 比整份导入失败好得多。
+                a, b = cur["start"], dt
+                if (a.tzinfo is None) == (b.tzinfo is None):
+                    cur["dur"] = max(0, int((b - a).total_seconds() // 60))
+                else:
+                    warn.append(f"「{cur['summary'][:30]}」的 DTEND 与 DTSTART "
+                                f"时区形态不一致，这条不记时长")
         elif name == "RRULE":
             cur["rrule"] = _parse_rrule(val)
         elif name == "EXDATE":
@@ -321,9 +348,7 @@ def active_on(course: Course, when: datetime.datetime) -> list:
     ⚠️ **只看周几 + 小时 + 是不是该出现的那一周**，不看分钟 —— 面板要的是
        「现在大概是哪门」，不是精确排课。`minute` 留给调用方按需收紧。
     """
-    return [s for s in course.slots
-            if s.weekday == when.weekday() and s.hh == when.hour
-            and s.on_week(when.date())]
+    return [s for s in course.slots if s.active_at(when)]
 
 
 # ------------------------------------------------------------------ 存 / 取
@@ -345,11 +370,28 @@ def dump(entries) -> dict:
 
 def load(obj) -> list:
     """`dump()` 的逆。**读不懂的条目直接跳过**（不抛）—— 一份坏数据
-    不该让整个面板起不来。"""
+    不该让整个面板起不来。
+
+    ⚠️⚠️ **两道形状守卫是 2026-09-29 补的**：原来只有 `Slot(...)` 的构造在 `try` 里，
+    而下面两种形状会让异常**逃出整个 `load()`** ——
+      · `{"X": [1]}`（行不是 dict）→ `r.get("a")` 抛 `AttributeError`，
+        它**不在** `except (KeyError, TypeError, ValueError)` 里；
+      · `{"X": 5}`（`rows` 不可迭代）→ `for r in rows` 抛 `TypeError`，
+        而它在 `try` **之外**（`TypeError` 虽在列表里也救不到这条语句）。
+    ⚠️ 唯一的调用方是 `entry_panel._guesses()`，那里 `T.load(...)` **没有兜底**，
+       而 `store.load_json` **只校验顶层是 dict、不校验嵌套形状** →
+       一份被手改坏的 `timetable.json` 会让**整个面板 build 时抛异常**。
+    """
     out = []
-    for code, rows in (obj or {}).items():
+    if not isinstance(obj, dict):
+        return out
+    for code, rows in obj.items():
+        if not isinstance(rows, (list, tuple)):
+            continue
         slots = []
-        for r in rows or ():
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
             try:
                 a = r.get("a")
                 slots.append(Slot(
@@ -396,9 +438,9 @@ def suggest(entries, when, *, history=None, limit=3) -> list:
     """
     found: dict = {}
     for code, slots in entries or ():
-        hit = [s for s in (slots or ())
-               if s.weekday == when.weekday() and s.hh == when.hour
-               and s.on_week(when.date())]
+        # ⚠️ 走 `active_at` —— 与 `active_on()` **同一个定义点**（2026-09-29）。
+        #    原来这里内联了一份同样的判定，而文件注释写着「由 `active_on()` 判」。
+        hit = [s for s in (slots or ()) if s.active_at(when)]
         if hit:
             found[str(code)] = Guess(
                 str(code), f"课表上这个点就是这门（{hit[0].hh:02d}:{hit[0].mm:02d}）", 1.0)

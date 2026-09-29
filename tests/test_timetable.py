@@ -305,6 +305,74 @@ def t_dump_load():
     assert T.load({"X": [{"d": "nope"}, {"h": 1}]}) == []      # 坏条目跳过，不抛
 
 
+@case("⭐⭐ `load()` 对**坏形状**不许抛（它唯一的调用方没有兜底）")
+def t_load_bad_shapes():
+    """2026-09-29 修。原来只有 `Slot(...)` 的构造在 `try` 里，两种形状会逃出去：
+      · `{"X": [1]}`（行不是 dict）→ `r.get("a")` 抛 `AttributeError`，
+        它**不在** `except (KeyError, TypeError, ValueError)` 里；
+      · `{"X": 5}`（`rows` 不可迭代）→ `for r in rows` 抛 `TypeError`，
+        而它在 `try` **之外**（`TypeError` 虽在列表里也救不到这条语句）。
+
+    ⚠️ 为什么这条重要：唯一的调用方 `entry_panel._guesses()` 那行
+       `T.load(store.load_json(paths.timetable(...), {}))` **没有兜底**，
+       而 `store.load_json` **只校验顶层是 dict、不校验嵌套形状** →
+       一份被手改坏的 `timetable.json` 会让**整个面板 build 时抛异常**。
+    """
+    for bad in ({"X": [1]}, {"X": {"d": 1}}, {"X": 5}, {"X": None},
+                {"X": [{"d": "x"}]}, [], None, 5, {"X": [None]}):
+        try:
+            T.load(bad)
+        except Exception as e:                                 # noqa: BLE001
+            raise AssertionError(f"{bad!r} 让 load() 抛了 {type(e).__name__}: {e}")
+    # 正常形状仍然读得出来（守卫不许把好数据也挡了）
+    good = {"ECON10740": [{"d": 1, "h": 15, "m": 0, "min": 50, "iv": 1, "a": None,
+                           "skip": []}]}
+    assert [c for c, _ in T.load(good)] == ["ECON10740"], "好数据被守卫误挡"
+
+
+@case("⭐ DTEND 与 DTSTART 时区形态不一致 -> **不记时长**，不是整份导入失败")
+def t_dtend_tz_mismatch():
+    """2026-09-29 修。`_parse_dt` 对浮动时间/`VALUE=DATE` 返回 naive，
+    对带 `Z`/`TZID` 的返回 aware —— 混用时 `dt - start` 抛 `TypeError`，
+    **整个 `parse()` 中断**，违反本模块自述的「坏一条不该让整份导入失败」。
+    """
+    ics = (b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"
+           b"BEGIN:VEVENT\r\nUID:mix\r\nSUMMARY:ZZTEST: Mixed (Lecture)\r\n"
+           b"DTSTART;TZID=Europe/Dublin:20260908T150000\r\n"
+           b"DTEND:20260908T160000\r\n"          # ← 浮动（naive），与上面 aware 不配
+           b"END:VEVENT\r\nEND:VCALENDAR\r\n")
+    try:
+        got, warn = T.parse(ics)
+    except Exception as e:                                     # noqa: BLE001
+        raise AssertionError(f"混用时区形态让 parse() 抛了 {type(e).__name__}: {e}")
+    assert got, "整份导入因为一条坏 DTEND 就没了"
+    # 课时长记成 0（"文件里没说"），而不是编一个出来
+    assert any(s.minutes == 0 for s in got[0].slots), \
+        f"该不记时长，拿到 {[s.minutes for s in got[0].slots]}"
+    assert any("时区形态" in w for w in warn), f"该出声说一声，warn={warn}"
+
+
+@case("⭐ `active_at` 是那条规则的唯一定义点（`active_on` 与 `suggest` 共用）")
+def t_active_at_single_definition():
+    """2026-09-29 立。原来这条判据在本文件里**写了两遍**（`active_on()` 一处、
+    `suggest()` 内层又一/处），而文件注释多处写「由 `active_on()` 判」。
+
+    ⚠️ 判据钉的是**行为一致**：对同一批 slot，`active_on()` 给出的集合
+       必须与 `suggest()` 认出的那门课一致 —— 两处规则分叉时这条就红。
+    """
+    s = T.Slot(weekday=1, hh=15, mm=0, minutes=50)          # 周二 15:00
+    for when, want in ((datetime.datetime(2026, 9, 8, 15, 5), True),
+                       (datetime.datetime(2026, 9, 8, 14, 5), False),
+                       (datetime.datetime(2026, 9, 9, 15, 5), False)):
+        assert s.active_at(when) is want, f"{when} 该是 {want}"
+    c = T.Course("ZZTEST", (s,), 1)
+    at = datetime.datetime(2026, 9, 8, 15, 5)
+    assert T.active_on(c, at) == [s], "active_on 认不出它自己那个 slot"
+    g = T.suggest([("ZZTEST", [s])], at)
+    assert g and g[0].course == "ZZTEST", \
+        f"suggest 与 active_on 分叉了 —— 同一时刻 suggest 给了 {g}"
+
+
 def main_() -> int:
 
     print("=" * 60)

@@ -36,6 +36,10 @@ HINT_H = 17.0
 BTN_H = 26.0
 BTN_W = 100.0
 BTN_GAP = 10.0
+#: 按钮的**最小可读宽度**。按钮多了就按这个下限判「放不下」并**报错**，
+#: 而不是悄悄裁掉一个（见 `set_buttons` 里那段）。⚠️ 12pt 字号下 `存 入` 两字
+#: 加按钮内衬大约要 56pt，60 是留了余量的下限。
+BTN_MIN_W = 60.0
 GAP_TITLE = 8.0
 GAP_HINT = 12.0
 GAP_BTN = 14.0
@@ -61,6 +65,31 @@ def measure_text_h(text: str, width: float, font) -> float:
         text, {NSFontAttributeName: font})
     return a.boundingRectWithSize_options_(
         NSMakeSize(width, 1e7), NSStringDrawingUsesLineFragmentOrigin).size.height
+
+
+def btn_geom(count: int) -> float:
+    """`count` 个按钮时**每个多宽** —— 按钮几何的**唯一定义点**。
+
+    ⚠️⚠️ 抽出来的理由（2026-09-29）：原来 `set_buttons` 与 `_relayout` **各写一份**，
+        都用写死的 `BTN_W`。只改一处 → 另一处**立刻把它覆盖回去**。
+        实测：给 `set_buttons` 算好 `bw=78.5`，量出来的按钮**还是 100 宽** ——
+        因为 `set_buttons` 结尾就调 `_relayout()`，而它按 `BTN_W` 重排了一遍。
+        （判据当场抓到的：同一轮里既打印 `n=4 bw=78.5`，又量到宽度 100.0。）
+    ⚠️ `BTN_W` 只作**上限**：按钮一律等宽，所以「有几个按钮」不改变单个按钮的观感
+        （≤3 个时与从前完全一样）。
+    """
+    if count <= 0:
+        return BTN_W
+    bw = BTN_W
+    if count > 1:
+        bw = min(BTN_W, (WIDTH - 2 * PAD - (count - 1) * BTN_GAP) / count)
+    if bw < BTN_MIN_W:
+        # 那是**编程错误**（调用方给了太多按钮），不是用户错误 ——
+        # 悄悄裁掉一个按钮比报错坏得多。
+        raise ValueError(
+            f"按钮太多：{count} 个至少需要 {count * BTN_MIN_W + (count - 1) * BTN_GAP:.0f}pt，"
+            f"卡片内宽只有 {WIDTH - 2 * PAD:.0f}pt")
+    return bw
 
 
 def build(*, title: str = "收尾", on_close=None):
@@ -153,9 +182,12 @@ def build(*, title: str = "收尾", on_close=None):
                 (hint_lbl, PAD + BTN_H + GAP_BTN, HINT_H),
             ):
                 lb.setFrame_(NSMakeRect(PAD, y_, inner_w, h_))
+            # ⚠️ **宽度走 `btn_geom`**（唯一定义点）—— 与 `set_buttons` 同一份。
+            #    两处各写一份的话，改一处会被另一处覆盖（2026-09-29 实测踩到）。
+            _bw = btn_geom(len(live))
             for i, b in enumerate(live):              # 按钮永远贴着底
-                b.setFrame_(NSMakeRect(PAD + i * (BTN_W + BTN_GAP), PAD,
-                                       BTN_W, BTN_H))
+                b.setFrame_(NSMakeRect(PAD + i * (_bw + BTN_GAP), PAD,
+                                       _bw, BTN_H))
 
         def set_status(text, alpha=0.92):
             try:
@@ -182,9 +214,15 @@ def build(*, title: str = "收尾", on_close=None):
                     pass
             live.clear()
             targets.clear()                               # ⚠️ 一并放掉旧的 target
-            for i, (text, cb) in enumerate(specs or []):
+            specs = list(specs or [])
+            # ⚠️⚠️ **宽度走 `btn_geom`**（唯一定义点，与 `_relayout` 共用）。
+            #    原来这里和 `_relayout` **各写一份**都用 `BTN_W` —— 只改一处，
+            #    结尾那次 `_relayout()` 会**立刻把它覆盖回去**（2026-09-29 实测）。
+            n = len(specs)
+            bw = btn_geom(n)
+            for i, (text, cb) in enumerate(specs):
                 b = NSButton.alloc().initWithFrame_(
-                    NSMakeRect(PAD + i * (BTN_W + BTN_GAP), PAD, BTN_W, BTN_H))
+                    NSMakeRect(PAD + i * (bw + BTN_GAP), PAD, bw, BTN_H))
                 b.setTitle_(text)
                 # ⚠️ `setBezelStyle_(1)` = rounded，与 `entry_panel.mk` 同一档 ——
                 #    收尾卡上的按钮必须**看起来像按钮**（第一版用无边框，渲染出来

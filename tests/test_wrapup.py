@@ -419,6 +419,50 @@ def t_card_layers_follow_height():
         #    把一个建好的窗口/AppKit 状态留给后面的用例，造成连带失败、
         #    把真正的第一个失败点盖住。
         card["close"]()
+@case("⭐⭐ 按钮多了**不许溢出卡片**（4 个原来右边界 448 > 380，被静默裁掉）")
+def t_buttons_never_overflow():
+    """⭐ 2026-09-29 修。原来固定 `PAD + i*(BTN_W+BTN_GAP)`：
+    3 个刚好（3×100+2×10 = 320 ≤ 344），**第 4 个右边界 448 > 380**
+    → 溢出卡片被裁，而 **AppKit 不报错**（按钮一半在窗外、点不到）。
+
+    ⚠️ 现在按个数均分（`BTN_W` 只作上限），按钮**一律等宽** ——
+       所以「有几个按钮」不再改变单个按钮的观感（≤3 个时与以前完全一样）。
+    """
+    import wrapup
+    card = wrapup.build()
+    assert card is not None, "卡片没建起来（这条判据需要 AppKit）"
+    try:
+        for n in (1, 2, 3, 4, 5):
+            card["set_buttons"]([(f"按{i}", (lambda: None)) for i in range(n)])
+            card["panel"].displayIfNeeded()
+            btns = [v for v in card["_fp"].glass.subviews()
+                    if type(v).__name__ == "NSButton"]
+            assert len(btns) == n, f"画出来 {len(btns)} 个按钮，期望 {n}"
+            right = max(float(b.frame().origin.x) + float(b.frame().size.width)
+                        for b in btns)
+            assert right <= wrapup.WIDTH - wrapup.PAD + 0.01, (
+                f"{n} 个按钮时最右边界 {right:.1f} 超出卡片"
+                f"（上限 {wrapup.WIDTH - wrapup.PAD:.1f}）—— 会被静默裁掉")
+    finally:
+        card["close"]()
+
+
+@case("⚠️ 按钮**多到放不下** -> 报错，不许悄悄少画一个")
+def t_too_many_buttons_raises():
+    import wrapup
+    card = wrapup.build()
+    assert card is not None, "卡片没建起来（这条判据需要 AppKit）"
+    try:
+        n = 20                                   # 20×60 + 19×10 = 1390 ≫ 344
+        try:
+            card["set_buttons"]([(f"按{i}", (lambda: None)) for i in range(n)])
+        except ValueError:
+            return                               # ✅ 正是要的行为
+        raise AssertionError(f"{n} 个按钮没报错 —— 会静默裁掉几个，用户点不到")
+    finally:
+        card["close"]()
+
+
 @case("⭐ `polish_entries` 的 on_progress 是 (stage, done, total) 三元组")
 def t_progress_shape():
     seen: list[tuple] = []

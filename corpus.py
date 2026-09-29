@@ -169,14 +169,21 @@ def _score(df_in: int, courses_with: int, n_courses: int) -> float:
     return df_in * math.log(1 + max(1, n_courses) / max(1, courses_with))
 
 
-def session_words(text: str) -> int:
-    """一份会话转录里有多少个**英文词** —— `MIN_WORDS` 那道闸量的就是它。
+def tokens(text: str) -> collections.Counter:
+    """一份会话转录 → **英文词频表**。**口径只此一处。**
 
-    ⚠️ 抽出来是**为了让判据和视图同源**：面板要显示「这节 83 句」，而
-       `_session_tokens` 要靠它决定"算不算一节课"。各写一遍迟早一个说 83、
-       一个说 30 —— 本仓库记过的「一条纪律两处定义」。
+    ⚠️ 2026-09-29 抽出来。`session_words()` 与 `_session_tokens()` 原来各写了一遍
+    `_counts(_english(text))` —— 那正是本文件自己抱怨的「一条纪律两处定义」：
+    一旦 `_counts` 或 `_english` 的口径变了（加过滤 / 换读法），
+    面板显示的「这节 83 句」与"算不算一节课"的闸门就会分叉。
+    现在两边都走这里，`sum(c.values())` 只是 stdlib 的一行，不是规则。
     """
-    return sum(_counts(_english(text)).values())
+    return _counts(_english(text))
+
+
+def session_words(text: str) -> int:
+    """一份会话转录里有多少个**英文词** —— `MIN_WORDS` 那道闸量的就是它。"""
+    return sum(tokens(text).values())
 
 
 def _session_tokens(course: str, *, sessions_dir, sessions_of) -> list:
@@ -187,7 +194,7 @@ def _session_tokens(course: str, *, sessions_dir, sessions_of) -> list:
             text = p.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        c = _counts(_english(text))
+        c = tokens(text)
         if sum(c.values()) >= MIN_WORDS:      # 空的 / 测试残留 / 录一半的，不算一节课
             out.append(c)
     return out

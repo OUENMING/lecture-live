@@ -773,6 +773,21 @@ def timetable_files(files) -> list:
             if str(p).lower().endswith((".ics", ".ical"))]
 
 
+def drop_split(paths) -> tuple[list, list]:
+    """拖进来的一串 → `(课表, 其余)`。**纯函数。**
+
+    ⚠️ 抽出来是因为「**哪些算课表、剩下哪些**」是本文件里唯一处分流判断，
+       而它原来是内联在 `run_prep` 里的一行 —— `run_prep` 要起整个面板才能跑，
+       于是那一行**没有任何判据**（本文件一直被这种事咬）。
+
+    ⚠️ **`其余` 不是「能归档的」** —— 它是「不是课表的那部分」，里面可能有
+       `.txt` / 文件夹这种**两条下游都不收**的东西。谁用它谁自己再过一遍
+       `extract.is_supported`（`run_prep` 走的就是那条）。
+    """
+    ics = timetable_files(paths)
+    return ics, [p for p in (paths or []) if p not in ics]
+
+
 def acceptable(paths) -> bool:
     """这一串拖进来的，**面板收不收** —— 悬停高亮与松手分流**共用这一条**。纯函数。
 
@@ -2859,9 +2874,22 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #       而"另一门课在跑"跟"能不能导入课表"是两件事。
         #    ⚠️ `.ics` 拖到**哪张卡上**都走同一条路 —— 导入本来就要你确认，
         #       卡片上那个课号在这条路上没有意义。
-        _ics = timetable_files(files)
+        _ics, _rest = drop_split(files)
         if _ics:
             run_import(_ics)
+            # ⚠️⚠️ **混拖时课件那半边会掉**（2026-09-29）：`.ics` 先摘走就 `return`，
+            #     剩下的 pdf/docx 从来没人处理。**本轮不修**（记为下一件，见
+            #     `docs/PLAN-entry-panel.md §8.1` 的 `MIX` 那行），
+            #     但**必须说出来** —— 原来是不说话地丢掉，用户看到"拖了 4 个文件、
+            #     只有一个有反应"却不知道为什么。
+            #     为什么不当场两条都跑：`run_import` 是**异步**的（起线程解析后就返回），
+            #     紧接 `run_prep` 会让"确认卡还没点、课件已经在归档"两件事同时压在屏上，
+            #     而且随后那张批量映射卡会把确认卡挤掉。串行要碰确认卡的生命周期 ——
+            #     那是刚做完、还没被实机用过的东西，不值得为这个罕见场景动它。
+            #     ⚠️ 真实使用里两者**时间上不重合**：课表开学导入一次，课件每周拖。
+            if _rest:
+                set_status(f"课表先导入了 —— 剩下这 {len(_rest)} 份课件请再拖一次",
+                           3.0)
             return True
         if S.get("busy"):
             set_status("另一门课还在跑 —— 等它完", 1.0)

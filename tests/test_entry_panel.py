@@ -521,6 +521,21 @@ def main() -> int:
     check("⚠️ acceptable：空 / None -> 拒（不许把「什么都没有」当能收）",
           E.acceptable([]) is False and E.acceptable(None) is False)
 
+    # ⭐ `drop_split()` —— 「哪些算课表、剩下哪些」的唯一定义点（2026-09-29 抽的）。
+    #    抽它是因为那个分流原来是 `run_prep` 里内联的一行，而 `run_prep` 要起整个
+    #    面板才跑得动 → 那一行**从来没有判据**。混拖会**丢掉课件那半边**，
+    #    本轮只做到「说出来」（状态行提示再拖一次），这一条钉的就是那个分流。
+    _i, _r = E.drop_split(["/a/x.ics", "/a/m.pdf", "/b/n.docx", "/c/y.ICAL"])
+    check("⭐ drop_split：课表归课表、其余归其余（大小写都认）",
+          _i == ["/a/x.ics", "/c/y.ICAL"] and _r == ["/a/m.pdf", "/b/n.docx"],
+          f"ics={_i} rest={_r}")
+    check("⭐ drop_split：没有课表时 ics 空、其余原样（顺序不许乱）",
+          E.drop_split(["/a/1.pdf", "/a/2.pdf"]) == ([], ["/a/1.pdf", "/a/2.pdf"]))
+    check("⚠️ drop_split：全是课表 -> 其余为空（那一档不该多说一句）",
+          E.drop_split(["/a/x.ics"])[1] == [])
+    check("⚠️ drop_split：空 / None 不炸",
+          E.drop_split([]) == ([], []) and E.drop_split(None) == ([], []))
+
     # ⭐⭐ `plan_add` 的四个动作是 `bad` / **`exists`** / `pick` / `create`。
     #    第一版只把 `create` 当新建、其余全当「课号形状不对」→ **现成的课被标成
     #    "形状不对，跳过"**，而它一个字都没说错。变异验证（实跑过）：把

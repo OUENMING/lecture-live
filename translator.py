@@ -419,10 +419,18 @@ class Translator:
     """懒加载 mlx-lm 模型; 生成用锁串行; chat template 提升指令遵循。"""
 
     def __init__(self, model: str, glossary_path: str | None, max_context: int = 2,
-                 course: str | None = None):
+                 course: str | None = None, extra_terms: list | None = None):
         self._model = None
         self._tokenizer = None
-        self._terms = load_terms(glossary_path, course)
+        # ⚠️⚠️ **`extra_terms` 只进「候选池」，绝不进 `course_terms`**（2026-09-29）。
+        #    池子里的词按相似度**动态召回**（`select_terms` 的 `scored[:max_dyn]`），
+        #    而 `course_terms` 是**每句全量注入**的。
+        #    实测（作者的 ECON10770/10740，各 448/1003 句真实课堂）：
+        #      · 池子 +25 个转录词 → 注入结果**变了 63–74% 的句子**（新词真被召回）
+        #      · ⚠️ 但手写术语**只被挤掉 3–4%** → **名额不用改**
+        #    而如果把词**写进术语表文件**（走全量注入），120 条时术语块占整条
+        #    prompt 的 **60%**（实测 1544 字符 / 总 ~2582 字符）→ 那条路会过量。
+        self._terms = load_terms(glossary_path, course) + list(extra_terms or [])
         self._course_terms = course_term_list(glossary_path, course)
         self._domain = course_title(glossary_path, course)
         self._core = core_terms(course)
@@ -536,5 +544,6 @@ class Translator:
 
 
 def load_translator(model: str, glossary_path: str | None, max_context: int = 2,
-                    course: str | None = None):
-    return Translator(model, glossary_path, max_context, course=course)
+                    course: str | None = None, extra_terms: list | None = None):
+    return Translator(model, glossary_path, max_context, course=course,
+                      extra_terms=extra_terms)

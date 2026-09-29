@@ -959,15 +959,41 @@ def run(args) -> None:
         notice.alert("模型没装好",
                      f"{e}\n\n装好再跑 —— `cl doctor` 会列出缺哪个、该跑哪条命令。")
         return
+    # ⭐⭐ 转录里挖出来的词 → 术语**候选池**（2026-09-29 加）。
+    #    ⚠️⚠️ **只进候选池，不进 `course_terms`（那档是每句全量注入）** ——
+    #       实测：池子 +25 个转录词，注入结果变了 **63–74%** 的句子，
+    #       而**手写术语只被挤掉 3–4%**（名额还有余量，所以 `MAX_DYNAMIC_TERMS` 不用动）。
+    #       反过来，把词**写进术语表文件**会让术语块在 120 条时占整条 prompt 的 60%。
+    #    ⚠️ **fail-soft**：拿不到就空表 —— 它只是锦上添花，绝不能挡住开课。
+    #    ⚠️ `known` 必须传**全部课号**：打分用跨课 IDF，只传当前一门会改变语义。
+    #       实测 0.07s（作者的 6 门课）→ 启动期一次性算，不在热路径上。
+    extra_terms: list = []
+    if args.course:
+        try:
+            import corpus as _cp
+            import courses as _cs
+            import obsidian_writer as _ow
+            _names = list(_cs.list_courses(args.glossary, state_root=None))
+            if args.course not in _names:
+                _names.append(args.course)
+            _got, _deg = _cp.keywords(_names, sessions_dir=_ow.SESSIONS)
+            extra_terms = list(_got.get(args.course, []))
+            if extra_terms:
+                echo(f"📚 转录词表：{len(extra_terms)} 个词进候选池"
+                     f"（另有 {len(_deg)} 门课没语料）")
+        except Exception as _e:                       # noqa: BLE001
+            print(f"⚠ 转录词表拿不到（只影响术语召回）：{type(_e).__name__}: {_e}")
+
     local_tr = load_translator(args.llm, args.glossary, args.context,
-                               course=args.course)
+                               course=args.course, extra_terms=extra_terms)
     cloud_tr = None
     api_key_val = load_api_key(args.api_key)
     if args.engine in ("auto", "cloud"):
         if api_key_val:
             cloud_tr = load_cloud_translator(api_key_val, args.cloud_model,
                                              args.glossary, args.context,
-                                             course=args.course)
+                                             course=args.course,
+                                             extra_terms=extra_terms)
             echo(f"☁ 引擎: {args.engine} (云端 {args.cloud_model})")
         else:
             echo("⚠ 未找到 DeepSeek API key(--api-key / DEEPSEEK_API_KEY / "

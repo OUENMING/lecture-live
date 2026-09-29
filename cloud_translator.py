@@ -405,10 +405,12 @@ class CloudTranslator:
 
 
 def load_translator(api_key: str, model: str, glossary_path: str | None,
-                    max_context: int = 2, course: str | None = None):
+                    max_context: int = 2, course: str | None = None,
+                    extra_terms: list | None = None):
     from translator import (load_terms, core_terms, course_term_list, course_title)
     return CloudTranslator(api_key, model,
-                           glossary_terms=load_terms(glossary_path, course),
+                           glossary_terms=(load_terms(glossary_path, course)
+                                           + list(extra_terms or [])),
                            max_context=max_context, core=core_terms(course),
                            course_terms=course_term_list(glossary_path, course),
                            domain=course_title(glossary_path, course))

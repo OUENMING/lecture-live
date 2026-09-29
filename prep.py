@@ -60,7 +60,11 @@ TITLE_MULT = 1.1
 CHUNK_CHARS = 30_000
 
 DEFAULT_MAX_AUTO = 40
-DEFAULT_MAX_TOTAL = 120
+#: 术语表总条数上限 —— **实测定的**：课程术语**每句全量注入**，所以它直接是
+#: 每句的 prompt 成本。实测 36 条 = 597 字符（占整条 prompt 23%），
+#: 120 条 = 1544 字符（占 **60%**）。取 60 ≈ 1000 字符，**刚好压在
+#: system prompt（1358 字符）之下** —— 这是算出来的线，不是拍的。
+DEFAULT_MAX_TOTAL = 60
 
 # ⚠️ 判断标准逐字沿用 `build_notes.SYS_CLASSIFY` 的 SYS_CLASSIFY —— **同一个人的口味，
 #    两条路一致**。但职责不重叠：那边是「给已有的术语分档」，这里是「从散文里抽词」。

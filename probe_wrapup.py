@@ -79,6 +79,46 @@ if phase == "live":
     print("live：" + ("全过 ✅" if not fail else "❌ " + " · ".join(fail)))
     sys.exit(1 if fail else 0)
 
+if phase == "afterclose":
+    # ⭐ **双击启动那条路的收尾**（2026-09-29 修的洞）：`✕` **已经按过**（窗口已撤），
+    #    问话仍然必须落在卡上。
+    #    ⚠️ 判据测不出「卡到底有没有出现在屏上」—— 这一档**必须拍图**：
+    #    改前 `_wrapup_route` 返回 `"terminal"`，而双击那条路没有终端，
+    #    问句只写进 `~/Library/Logs/ClassLive/app.log`，屏上从头到尾是空的。
+    #    ⚠️ 跑法必须带 `</dev/null`，**不要**在这里传 `terminal=` 参数 ——
+    #    要测的正是 `_terminal_usable()` 真的问了一回 `sys.stdin`。
+    import time
+
+    import main as M
+
+    from overlay import Overlay
+
+    o = Overlay()
+    o.show()
+    time.sleep(2.0)
+    o.pump()
+    print(f"afterclose：主面板已起 · 路由={M._wrapup_route(o, False)}"
+          f"（现在拍第 1 张：✕ 之前）", flush=True)
+    time.sleep(2.5)
+
+    o.close()                                       # ← 等价于点 ✕
+    print(f"afterclose：✕ 之后 _closed={o._closed} · 面板可见={o._panel.isVisible()}"
+          f" · 路由={M._wrapup_route(o, True)}", flush=True)
+    print("afterclose：卡该出现了 —— 现在拍第 2 张（20 秒后自动存入）", flush=True)
+
+    t0 = time.monotonic()
+    got = o.ask_save(481, timeout=20.0)
+    card = getattr(o, "_wrapup_card", None)
+    print(f"afterclose：ask_save 返回 {got!r}（{time.monotonic() - t0:.1f}s）"
+          f" · 卡还在={card is not None}", flush=True)
+    fail = []
+    if got is not True:
+        fail.append(f"✕ 过之后必须默认存，拿到 {got!r}（None = 整节课没笔记）")
+    if card is None:
+        fail.append("卡没建起来")
+    print("afterclose：" + ("全过 ✅" if not fail else "❌ " + " · ".join(fail)))
+    sys.exit(1 if fail else 0)
+
 # 一个假的主面板当锚点（真面板是横长条，这里照那个比例）
 anchor = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
     NSMakeRect(400, 500, 900, 260), NSWindowStyleMaskTitled, 2, False)

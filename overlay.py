@@ -12,7 +12,7 @@
       0.363, 白字只有 2.54:1 —— 白底 PPT 上就看不清了。scrim 把底压暗, 描边
       负责把字从任意底色里切出来(字幕界通行做法: 轮廓比填充对比度更管用)。
 
-按钮: 🌐 翻译开关 | ⭐ 标记重点 | ✕ 退出(走回调, 不硬杀进程)
+按钮: 🌐 翻译开关 | ❓ 重点/没听懂 | ✕ 退出(走回调, 不硬杀进程)
      鼠标穿透不在面板上(开启后窗口忽略鼠标事件, 按钮会集体失效), 只从菜单栏 🎧 切换。
 调用约定: main.py 保证所有方法都在主线程调用。
 """
@@ -494,7 +494,7 @@ def _make_click_view(on_click):
 
 
 class Overlay:
-    def __init__(self, on_quit=None, on_flag=None, on_translate=None, on_submit=None,
+    def __init__(self, on_quit=None, on_translate=None, on_submit=None,
                  on_ask=None, on_new_topic=None, on_lost=None, whatsnew=None):
         # ⚠️ 窗口 chrome / 材质 / scrim 那几样已经搬进 panel.py 了，这里的名字要
         #    跟着删干净 —— 留着会让「材质在哪配的」这个问题仍然答成 overlay.py，
@@ -534,7 +534,6 @@ class Overlay:
         self._whatsnew = whatsnew
         self._whatsnew_card = None      # 持有卡片对象，否则 ObjC 侧被 GC
         self._on_quit = on_quit or (lambda: None)
-        self._on_flag = on_flag or (lambda: None)
         self._on_lost = on_lost or (lambda: None)
         self._on_translate = on_translate or (lambda on: None)
         self._on_submit = on_submit or (lambda q: None)
@@ -763,12 +762,18 @@ class Overlay:
             "  双语     —— DeepSeek 矫正英文错听 + 出中文\n"
             "  只英·校  —— 只矫正英文, 不出中文\n"
             "  纯转录   —— 完全不调 LLM, ASR 直出(零 API、零延迟、最省电)")
-        self._btn_flag = self._button(
-            "⭐", self._flag, "标记当前句为重点(写入 Obsidian 时加 ⭐ Exam Focus)")
-        # ❓「没听懂」: 与 ⭐ 同为"逐句打一个时间锚", 但记的是**另一类信号** ——
-        # 它落到旁路文件 `sessions/<同名>.lost.jsonl`, 课后回退到前面那几句。
+        # ❓「重点 / 没听懂」: 给**这一刻**打一个时间锚, 落到旁路文件
+        # `sessions/<同名>.lost.jsonl`, 课后指回前面那几句。
+        # ⭐ 2026-09-29 合并: 原来还有一个 ⭐「标记重点」, 和它其实是**同一个动作**
+        #    （都是"这一刻值得回头看"）, 只是落到两个地方、还要用户去猜区别。
+        #    实测 675 个会话里, 真实课堂按 ⭐ 一共只有 2 下。
+        #    → 一个按钮、一个旁路文件、一个意思。
+        #    ⚠️ **历史会话里的 `⭐ Exam Focus` 抬头必须照旧渲染** ——
+        #    那是 `obsidian_writer._TS` 的事, 删的只是按下去的那个按钮。
         self._btn_lost = self._button(
-            "❓", self._lost, "没听懂(记下这一刻, 课后回退到前面那几句)")
+            "❓", self._lost,
+            "重点 / 没听懂(记下这一刻)\n"
+            "  两个意思都按它 —— 课后会指回前面那几句")
         self._btn_close = self._button("✕", self._quit, "退出")
         # 答案接管期间显示「新话题」的位置:
         # 「讲一下」= 用固定问题开一轮讲解; 「新话题」= 清掉问答线程并回到字幕。
@@ -797,7 +802,7 @@ class Overlay:
         #    **可见那一组的左边缘不动**(只有隐藏的 _btn_latest 往外挪) —— 顶栏看着
         #    没变宽, 左侧留白从 124px 降到 ≈90px 全被那个不可点的隐藏按钮吃掉。
         self._bar = [self._btn_latest, self._btn_lost, self._btn_ask,
-                     self._btn_topic, self._btn_trans, self._btn_flag,
+                     self._btn_topic, self._btn_trans,
                      self._btn_close]
         self._sync_trans_button()
         self._install_status_item()               # 菜单栏: 鼠标穿透开关 + 退出
@@ -2209,11 +2214,8 @@ class Overlay:
         self.close()
         self._on_quit()
 
-    def _flag(self):
-        self._on_flag()
-
     def _lost(self):
-        # ⚠️ `_button()` 的 `_clicked` 已经先 `_release_focus()` 了, 与 ⭐ 同路。
+        # ⚠️ `_button()` 的 `_clicked` 已经先 `_release_focus()` 了。
         #    真正落盘那一步(mark_lost)只做"拼一行 + 写 + flush", 见它的 docstring。
         self._on_lost()
 
@@ -2310,18 +2312,31 @@ class Overlay:
            会偷走后续输入」（在第 2 个提示按的回车被第 1 个的孤儿 reader 吃掉）。
            而且 AppKit 本来就只能在主线程碰。
 
-        返回 `True`=存 / `False`=不存 / ⚠️ `None`=**用户把窗口关了**（放弃这份笔记）。
+        返回 `True`=存 / `False`=不存 / ⚠️ `None`=**问话期间**用户把窗口关了（放弃这份笔记）。
         ⚠️ 超时按 `True` 走 —— 与终端那条同一个纪律：「绝不能因为一次走开丢掉整节课」。
+
+        ⚠️⚠️ **「进来时窗口已经关过」不算放弃**（`already_closed` 那两行）。
+           ✕ 是 overlay 模式的**正常停止方式**（`README.md:310`），而 main 那条路由
+           **在没有终端时会照样把问话送到这里**（见 `main._wrapup_route`）。
+           `_closed` 一个标志扛了两件事 ——「课已经停了」和「用户正看着卡说不存」——
+           而它一进这里就是 `True`：整段问话被跳过、直接返回 `None` → `give_up`
+           → **这节课一个字笔记都不写**。（2026-09-29 实测，双击 + ✕ 那条路。）
         """
+        already_closed = bool(self._closed)
+
+        def _abandoned() -> bool:
+            """用户是**在这次问话期间**关的窗吗（只有这才算放弃）。"""
+            return self._closed and not already_closed
+
         try:
             import wrapup as wrapup_mod
         except Exception:                                 # noqa: BLE001
-            return None if self._closed else True
+            # 卡起不来不该让收尾停 —— 退回「默认存」，与终端超时同一条路。
+            return True
         ans: dict = {"v": None}
         card = wrapup_mod.build(title="收尾")
         if card is None:
-            # 卡起不来不该让收尾停 —— 退回「默认存」，与终端超时同一条路。
-            return None if self._closed else True
+            return True
         self._wrapup_card = card
         card["set_status"](f"本次共记录 {n} 句双语。\n存入 Obsidian 吗？")
         card["set_buttons"]([("存入", lambda: ans.__setitem__("v", True)),
@@ -2332,15 +2347,18 @@ class Overlay:
             pass
 
         deadline = time.monotonic() + timeout
-        while ans["v"] is None and not self._closed:
+        while ans["v"] is None and not _abandoned():
             left = deadline - time.monotonic()
             if left <= 0:
                 break
-            card["set_hint"](f"{left:.0f} 秒后自动存入 · 关窗 = 放弃这份笔记")
+            # ⚠️ 窗口**已经**关着时不许再说「关窗 = 放弃这份笔记」—— 那句此刻是假的
+            #    （没窗可关），而它是用户判断这张卡的唯一依据。
+            card["set_hint"](f"{left:.0f} 秒后自动存入"
+                            + ("" if already_closed else " · 关窗 = 放弃这份笔记"))
             self.pump()
             time.sleep(0.05)
 
-        if self._closed:
+        if _abandoned():
             # ⚠️ 要**真的把卡片收掉**，不能只清引用 —— `wrapup.build()` 已经
             #    `orderFrontRegardless` 了，屏上那张卡会一直留着；而引用一清，
             #    main 最后调的那个 `ui.wrapup_close()` 就变成**空转**（它读的正是

@@ -284,8 +284,10 @@ class R5_CoreBehaviour(unittest.TestCase):
         self.assertFalse(_looks_like_echo("这是正常译文", "english"))
 
     def test_sentence_state_machine_via_queues(self):
-        """录音状态机的核心不变量: 'final' 必然晚于它的流式增量出现,
-        且 drain 后 flagged 复位(逻辑级验证, 与 drain() 同构)。"""
+        """录音状态机的核心不变量: 'final' 必然晚于它的流式增量出现
+        (逻辑级验证, 与 drain() 同构)。
+        ⚠️ 从前这里还写着「drain 后 flagged 复位」—— 那个标志位 2026-09-29
+           随 ⭐ 并进 ❓ 一起删了（❓ 是直接落盘时间戳，不设标志位），故删去。"""
         streamq: queue.Queue = queue.Queue()
         streamq.put(("zh", "你"))
         streamq.put(("zh", "好"))
@@ -342,6 +344,38 @@ class R6_OverlayConstructs(unittest.TestCase):
                 "细线必须有颜色 —— 无色说明 _set_rule_focus 静默失败了")
             self.assertFalse(o._is_editing(),
                              "没在打字时不该报告为编辑中")
+        finally:
+            o.close()
+
+    def test_flag_button_merged_into_lost(self):
+        """⭐ 2026-09-29 合并：⭐ 按钮没了，它的意思并进 ❓。
+
+        为什么合并：**两个按钮记的是同一件事**（"这一刻值得回头看"），只落两个
+        不同的地方 —— 而实测 675 个会话里，真实课堂按 ⭐ 一共只有 2 下。
+        留两个按钮，等于让用户在课上现猜它们的区别。
+
+        ⚠️ **删的只是按下去的那个按钮**：历史会话里的 `⭐ Exam Focus` 抬头仍由
+        `obsidian_writer._TS` 照旧渲染，`R4.test_writer_appends_session_and_parses`
+        钉住了那个写入格式 —— 所以**不许**顺手把 writer 的能力也删掉。
+        """
+        try:
+            from overlay import Overlay
+        except ModuleNotFoundError as e:
+            self.skipTest(f"AppKit 不可用, 跳过: {e}")
+        except Exception as e:                       # noqa: BLE001
+            self.fail(f"overlay 导入失败 —— 这不是「AppKit 不可用」，是代码坏了："
+                      f"{type(e).__name__}: {e}")
+        try:
+            o = Overlay()
+        except Exception as e:                       # noqa: BLE001
+            self.fail(f"Overlay() 构造失败: {type(e).__name__}: {e}")
+        try:
+            titles = [b.title() for b in o._bar]
+            self.assertNotIn("⭐", titles, f"⭐ 按钮还在，合并没做干净：{titles}")
+            self.assertIn("❓", titles, f"❓ 是合并后的落点，不许一起删：{titles}")
+            tip = o._btn_lost.toolTip() or ""
+            self.assertIn("重点", tip, f"❓ 的 tooltip 该同时说两件事：{tip!r}")
+            self.assertIn("没听懂", tip, f"❓ 的 tooltip 该同时说两件事：{tip!r}")
         finally:
             o.close()
 
@@ -1186,14 +1220,35 @@ class R15_LostRange(unittest.TestCase):
             self.assertNotIn("`10:00:30`", items[0], "不许引用按下之后才落盘的句子")
 
     def test_render_note_carries_the_block_and_the_count(self):
-        """接线: 块与信息行里的计数都要出现(与 ⭐ 块并排, 不合并)。"""
+        """接线: 块要出现, 汇总行数的是**标记**（❓ 兼表重点/没听懂, 2026-09-29）。"""
         w = ObsidianWriter(None, "TESTX", mode="no")
         entries = [{"ts": "10:00:00", "en": "a", "zh": "b", "asr": "", "star": False}]
         out = w._render_note(entries, {}, [], "ok", ["- 一块"])
-        self.assertIn("## 🤔 我标了没听懂的地方", out)
+        self.assertIn("## 🤔 我标的地方（重点 / 没听懂）", out)
         self.assertIn("- 一块", out)
-        self.assertIn("❓ 1 处没听懂", out)
-        self.assertIn("## ⭐ 我标记的重点", out, "⭐ 块必须还在(两块并排)")
+        self.assertIn("❓ 1 处标记", out)
+
+    def test_star_section_renders_only_when_there_are_stars(self):
+        """⭐ 按钮 2026-09-29 并进 ❓ 之后, **空 ⭐ 块不许再渲染**。
+
+        空的时候它写的是「*（课上没按 ⭐；觉得哪句重要就按一下）*」——
+        那是在叫一个**已经不存在**的按钮（`R6.test_flag_button_merged_into_lost`
+        钉住了按钮确实没了）。同一条笔记里还留着 ⭐，等于对着空气说话。
+        ⚠️ **历史会话里的 ⭐ 必须照旧渲染**：抬头 `⭐ Exam Focus` 由
+        `obsidian_writer._TS` 解析（`R4` 钉住了那个写入格式），
+        `rebuild_note.py` 重建时走的是同一条路 —— 所以这里两态都要断。
+        """
+        w = ObsidianWriter(None, "TESTX", mode="no")
+        plain = [{"ts": "10:00:00", "en": "a", "zh": "b", "asr": "", "star": False}]
+        self.assertNotIn("## ⭐ 我标记的重点", w._render_note(plain, {}, [], "ok", []),
+                         "没按过 ⭐ 却渲染了 ⭐ 块 —— 空状态那句话是假话")
+        self.assertNotIn("处重点", w._render_note(plain, {}, [], "ok", []),
+                         "汇总行还在数一个恒为 0 的量")
+
+        starred = [dict(plain[0], star=True)]
+        out = w._render_note(starred, {}, [], "ok", [])
+        self.assertIn("## ⭐ 我标记的重点", out,
+                      "历史会话里的 ⭐ 必须照旧渲染（抬头仍写着 Exam Focus）")
 
 
 class R16_DeviceSwitchRollback(unittest.TestCase):

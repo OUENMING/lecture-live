@@ -166,7 +166,25 @@ def _input_timed(prompt: str, timeout: float) -> str | None:
     return None if line == "" else line.strip()
 
 
-def _wrapup_route(ui, ui_gone: bool) -> str:
+def _terminal_usable(stream=None) -> bool:
+    """收尾那句问话落在终端上，用户**看得见**吗。
+
+    ⚠️⚠️ 双击 `ClassLive.app` 那条路**根本没有终端**：`sitecustomize.py` 把
+       stdout/stderr 接进 `~/Library/Logs/ClassLive/app.log`，stdin 也不是 tty，
+       于是 `_ask_save_notes` 的 `readline()` **立刻**拿到 EOF。
+       （2026-09-29 实测：双击 + ✕ 的一节课，日志里只有那句问话，
+       屏上从头到尾什么都没有。）
+    ⚠️ `isatty()` 在流已关闭时抛 `ValueError` —— 必须接住。
+       收尾路径上再抛一次，就等于丢整节课的笔记。
+    """
+    s = sys.stdin if stream is None else stream
+    try:
+        return bool(s is not None and s.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _wrapup_route(ui, ui_gone: bool, terminal: bool | None = None) -> str:
     """收尾那句「存不存」走哪条路：`"ui"` 还是 `"terminal"`。
 
     ⚠️⚠️ **「窗口在问话之前就关了」≠「用户想放弃这份笔记」。**
@@ -181,10 +199,25 @@ def _wrapup_route(ui, ui_gone: bool) -> str:
 
        → 窗口**已经**关了的时候退回终端那条；只有「问话**期间**被关窗」才算真的放弃。
        （由 OCR 审计发现，`main.py` 那一段现在直接调它。）
+
+    ⚠️⚠️ **2026-09-29 补的那个洞：退回终端，前提是「有终端」。**
+       双击启动时 `_closed` 一定为真（✕ 是那条路上**唯一**的停止方式），
+       而终端不存在 → 上面那条「退回终端」实际是**退回虚空**：
+       问话只写进日志、默认存，而**收尾卡一次都不出现** ——
+       11 分钟精修全程屏上空的。这正是 `wrapup.py` 当初要消灭的那种「卡住不动」。
+       → 没有终端时，关过窗也照样走 UI（`ask_save` 那边同步改了
+         「已经关过的窗不算放弃」，两处缺一不可）。
+
+    ⚠️ `terminal` 是个**注入的依赖**（默认才是真去问 `sys.stdin`）：不注入的话，
+       这条判据的结果会跟着**跑测试的那个终端**变 —— 同一个缺陷 CI 上绿、本机红。
     """
-    if ui_gone:
+    if not callable(getattr(ui, "ask_save", None)):
         return "terminal"
-    return "ui" if callable(getattr(ui, "ask_save", None)) else "terminal"
+    if not ui_gone:
+        return "ui"
+    if terminal is None:
+        terminal = _terminal_usable()
+    return "terminal" if terminal else "ui"
 
 
 def _ask_save_notes(n: int) -> bool:
@@ -951,7 +984,6 @@ def run(args) -> None:
     # 15s deadline**(独立验证实测 15.02s, 而且**完全不提问也一样**)。
     # 现在 ✕ 只置这个标志(主循环据此退出), running 留到收尾真正结束才清。
     stopping = threading.Event()
-    flagged = {"on": False}                             # ⭐ 标记当前句
     trans = {"mode": "both"}                            # 🌐 三档: both 双语 / en 只英·校 / raw 纯转录
     # ⚠️ 库路径在这里**收口**（`resolve_vault` 是唯一定义点）：`--vault` → `$OBSIDIAN_VAULT`
     #    → 上次用过的。**没有兜底目录** —— 拿不到就不写 Obsidian，绝不凭空造一个。
@@ -1021,12 +1053,11 @@ def run(args) -> None:
 
     ui = TerminalUI() if args.ui == "terminal" else _load_overlay(
         on_quit=stopping.set,
-        on_flag=lambda: flagged.__setitem__("on", True),
-        # ❓ 与 ⭐ 不同: ⭐ 是**一次性闩锁**(被下一个 "final" 消费, 见 drain),
-        # 而 ❓ 要的是**按下那一刻** —— 所以它不设标志位, 直接落盘一个时间戳。
+        # ❓ 要的是**按下那一刻** —— 所以它不设标志位, 直接落盘一个时间戳。
         # ⚠️ 这里带上 `writer` 是刻意的: `mark_lost()` 只做"拼一行 + 写 + flush",
-        #    全是主线程能扛的量; 而且它就是 `writer` 自己的方法, 不像 ⭐ 那样要
-        #    绕一圈到 drain 里去补 `flagged`。
+        #    全是主线程能扛的量; 而且它就是 `writer` 自己的方法, 不像从前那个 ⭐
+        #    那样要绕一圈到 `drain()` 里去补标志位。
+        #    （⭐ 已于 2026-09-29 并进 ❓ —— 两个按钮记的是同一件事。）
         on_lost=lambda: writer.mark_lost(),
         on_translate=lambda mode: trans.__setitem__("mode", mode),
         on_submit=submit_question,
@@ -1497,8 +1528,7 @@ def run(args) -> None:
                 echo(f"[{now()}] 🤖 {item[2]}")
             elif item[0] == "final":                # ("final", en, zh, asr_raw)
                 ui.finalize(item[1] or item[3], item[2])   # 翻译失败时至少显示转录
-                writer.append(item[1], item[2], flagged=flagged["on"], raw=item[3])
-                flagged["on"] = False
+                writer.append(item[1], item[2], raw=item[3])
                 # 🆕 原子层：把这一句转给 worker。⚠️ **`put_nowait`（非阻塞）** ——
                 #    `drain()` 在主循环里，这里是「不阻塞不变量」管着的地方。
                 #    ⚠️ 档位判在**这里**，不是启动时 —— 三档课中可切（见 worker 那段）。
@@ -1803,11 +1833,11 @@ def check_clock_and_device(src, source_name: str, notify, state: dict) -> None:
         notify(f"⚠ 换输入设备失败({str(e)[:60]}); 仍在录上一个设备", warn=True)
 
 
-def _load_overlay(on_quit=None, on_flag=None, on_translate=None, on_submit=None,
+def _load_overlay(on_quit=None, on_translate=None, on_submit=None,
                   on_ask=None, on_new_topic=None, on_lost=None, whatsnew=None):
     try:
         from overlay import Overlay
-        o = Overlay(on_quit=on_quit, on_flag=on_flag, on_translate=on_translate,
+        o = Overlay(on_quit=on_quit, on_translate=on_translate,
                     on_submit=on_submit, on_ask=on_ask,
                     on_new_topic=on_new_topic, on_lost=on_lost, whatsnew=whatsnew)
         o.show()

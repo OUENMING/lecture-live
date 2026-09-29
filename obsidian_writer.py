@@ -770,8 +770,8 @@ class ObsidianWriter:
                 continue          # 按下时还没有可回退的句子 -> 不编一个出来
             j0, j1 = rng
             i0, i1 = idx[j0], idx[j1]
-            lines = [f"- 按于 `{_hms_str(t)}` · 回退到 `{entries[i0]['ts']}`–"
-                     f"`{entries[i1]['ts']}` 共 {i1 - i0 + 1} 句"]
+            lines = [f"- 按于 `{_hms_str(t)}` · 这几句（`{entries[i0]['ts']}`–"
+                     f"`{entries[i1]['ts']}`，共 {i1 - i0 + 1} 句）"]
             for e in entries[i0:i1 + 1]:
                 lines.append(f"  - `{e['ts']}` {e['zh'] or e['en'] or e['asr']}")
             out.append("\n".join(lines))
@@ -849,9 +849,11 @@ class ObsidianWriter:
               "> [!info] 本课信息", ]
         if title:
             L.append(f"> 📖 **{title}**")
+        # ⚠️ 汇总行**不再数 ⭐**（2026-09-29）：⭐ 按钮已并进 ❓，新会话里 ⭐ 恒为 0，
+        #    「⭐ 0 处重点」是在告诉用户一个**已经不存在**的动作。
+        #    历史会话（`rebuild_note.py` 重建）里那两处 ⭐ 由下面那一节照旧渲染。
         L += [f"> 🕐 {ts0} – {ts1} · 🗣 {len(entries)} 句 · "
-              f"⭐ {len(stars)} 处重点 · 💡 {len(gloss)} 个术语 · "
-              f"❓ {len(lost_items or [])} 处没听懂"]
+              f"💡 {len(gloss)} 个术语 · ❓ {len(lost_items or [])} 处标记"]
         _warn = _POLISH_NOTE.get(polish_state)
         if _warn:
             L.append(f"> {_warn}")
@@ -918,29 +920,33 @@ class ObsidianWriter:
             L += ["*（本课没有命中术语表）*"]
         L += [""]
 
-        # ❓ 与 ⭐ 是**兄弟**（都是用户逐句打的时间锚），所以并排放在 ⭐ 上面。
-        # ⚠️ 抬头刻意用 `🤔` 而不是 `❓` —— 这份笔记里已经有一个 `## ❓ Review
-        #    复习自测`，两个同名抬头会让 grep 分不清。按钮仍是 ❓（按钮上只有一个
-        #    字符的位置），靠 tooltip 把两者连起来。
-        L += ["## 🤔 我标了没听懂的地方", ""]
+        # ❓ 按钮 2026-09-29 起**兼**表「重点」和「没听懂」（⭐ 按钮已并进来），
+        # 所以抬头也照实说。⚠️ 抬头刻意用 `🤔` 而不是 `❓` —— 这份笔记里已经有一个
+        #    `## ❓ Review 复习自测`，两个同名抬头会让 grep 分不清。按钮仍是 ❓
+        #    （按钮上只有一个字符的位置），靠 tooltip 把两者连起来。
+        L += ["## 🤔 我标的地方（重点 / 没听懂）", ""]
         if lost_items:
             for blk in lost_items:
                 L += blk.splitlines()
         else:
-            L += ["*（课上没按 ❓；听到没跟上的地方就按一下，课后会回退到那几句）*"]
+            L += ["*（课上没按 ❓；觉得哪句重要、或哪里没跟上，都按它）*"]
         L += [""]
 
-        L += ["## ⭐ 我标记的重点", ""]
+        # ⭐ 那一节**只在真有 ⭐ 时渲染**（2026-09-29）：按钮已经没了，
+        # 空的时候再写一句「课上没按 ⭐」是**假话** —— 它描述的是一个用户
+        # 按不到的动作。历史会话里的 ⭐ 照旧渲染（`stars` 来自会话抬头的
+        # `⭐ Exam Focus`，`rebuild_note.py` 重建时同样走这条路）。
         if stars:
+            L += ["## ⭐ 我标记的重点", ""]
             for e in stars:
                 L += [f"- `{e['ts']}` {e['zh'] or e['en'] or e['asr']}"]
                 if e["en"] and e["zh"]:
                     L += [f"  - EN: {e['en']}"]
-        else:
-            L += ["*（课上没按 ⭐；觉得哪句重要就按一下，会自动归到这里）*"]
-        L += [""]
+            L += [""]
 
         # 完整转录: 折叠 callout 包全套逐句块。**逐字保留**, 是这份笔记的底座。
+
+
         L += [f"## 📜 完整逐句转录（点击展开 · {len(entries)} 句）", "",
               "> [!note]- 逐句双语 + 原始 ASR（未做任何删改）", "> "]
         for e in entries:

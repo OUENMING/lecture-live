@@ -248,7 +248,7 @@ def t_interrupt_state():
         assert "精修被跳过" in txt, "该有人话解释，不是只写个代号"
 
 
-@case("⭐⭐ 窗口在问话前就关了（✕ 正常停止）→ 走终端，不许跳过 writer.close()")
+@case("⭐ 窗口在问话前就关了（✕ 正常停止）**但有终端** → 退回终端那条")
 def t_route_after_close():
     """⭐ 2026-09-28 的回归就是这一条。
 
@@ -256,15 +256,122 @@ def t_route_after_close():
     ✕，或终端按 Ctrl+C（两者都是优雅退出：冲刷队列 + **落盘**）」），而
     `ask_save()` 一看到 `_closed` 就返回 `None` → `give_up` → **整份
     `writer.close()` 被跳过，这节课一个字笔记都不写**。
+
+    ⚠️ `terminal=True` 是**注入**的，不是真去看 `sys.stdin` ——
+       否则这条判据的结果会跟着「跑测试的那个终端」变。
     """
     class _Shut:
         _closed = True
 
         def ask_save(self, n, timeout=60.0):
-            return None                      # 关着的窗口只会返回 None
-    assert main._wrapup_route(_Shut(), True) == "terminal", (
-        "窗口已关时必须退回终端那条（它默认存），"
-        "走 UI 那条会 give_up → 整节课没笔记")
+            return True                  # 与生产同款：关过窗不再等于放弃
+    assert main._wrapup_route(_Shut(), True, terminal=True) == "terminal", (
+        "有终端时退回终端那条（它默认存）")
+
+
+@case("⭐⭐ 双击启动（✕ 过 + **没有终端**）→ 必须走 UI，不许退回虚空")
+def t_route_after_close_no_terminal():
+    """⭐ 2026-09-29 实测的洞 —— 上面那条在**有终端**时是对的，双击那条路上是错的。
+
+    双击 `ClassLive.app` 时 `✕` 是**唯一**的停止方式，所以 `_closed` 一定为真；
+    而 `sitecustomize.py` 把 stdout/stderr 接进日志文件、stdin 也不是 tty
+    → 「退回终端」实际是**退回虚空**：问句只写进 `app.log`、默认存，
+    而**收尾卡一次都不出现**，11 分钟精修全程屏上空的。
+
+    证据（2026-09-29 11:14 那节课，481 句）：日志里只有
+    `📝 本次共记录 481 句双语。存入 Obsidian 吗? [Y/n]`，
+    而 `TerminalUI` 的逐句输出（`▸` / `✅`）和字符框**一个都没有**
+    → `ui` 是浮窗、`ask_save` 在，只剩 `_closed=True` 这一个分支。
+    """
+    class _Shut:
+        _closed = True
+
+        def ask_save(self, n, timeout=60.0):
+            return True
+    assert main._wrapup_route(_Shut(), True, terminal=False) == "ui", (
+        "没有终端时「退回终端」= 退回虚空：卡不出现、精修期间屏上什么都没有")
+
+
+@case("_terminal_usable：非 tty / 已关闭的流 / None 一律算「没有终端」")
+def t_terminal_usable():
+    class _Tty:
+        def isatty(self):
+            return True
+
+    class _Pipe:
+        def isatty(self):
+            return False
+
+    class _Boom:
+        def isatty(self):
+            raise ValueError("I/O operation on closed file")
+
+    assert main._terminal_usable(_Tty()) is True
+    assert main._terminal_usable(_Pipe()) is False
+    assert main._terminal_usable(_None()) is False
+    assert main._terminal_usable(_Boom()) is False, (
+        "流已关闭时 isatty() 抛 ValueError —— 收尾路径上再抛一次就等于丢整节课")
+
+
+class _None:
+    def isatty(self):
+        return False
+
+
+@case("⭐⭐ 已经按过 ✕ 的浮窗：ask_save 返回 True（笔记照写），不是 None")
+def t_ask_save_after_close():
+    """⭐ 这条钉的是那个洞的**第二半** —— 只改路由是不够的。
+
+    `_closed` 一个标志扛了两件事：「课已经停了」和「用户正看着卡说不存」。
+    混在一起时，双击那条路会：路由走 UI（上面那条判据）→ 可 `ask_save` 一进来
+    就因为 `_closed` 跳过整段问话、返回 `None` → `give_up` →
+    **整份 `writer.close()` 被跳过，这节课一个字笔记都不写**。
+
+    ⚠️ 驱动的是 `Overlay.ask_save` **本体**（不是抄一份逻辑），
+       只借一个最小替身喂 `_panel` / `pump` / `wrapup_close`。
+    """
+    import overlay as ov
+
+    class _Fake:
+        _closed = True
+        _panel = None
+
+        def pump(self):
+            pass
+
+        def wrapup_close(self):
+            self.card_closed = True
+
+    f = _Fake()
+    got = ov.Overlay.ask_save(f, 3, timeout=0.01)
+    assert got is True, (
+        f"已经关过窗不算放弃 —— 该默认存，拿到 {got!r}"
+        "（None = give_up = 整节课没笔记）")
+
+
+@case("⭐ 问话**期间**关窗 → ask_save 返回 None（真的放弃），且卡被收掉")
+def t_ask_save_closed_during_question():
+    import overlay as ov
+
+    class _Fake:
+        _closed = False
+        _panel = None
+
+        def __init__(self):
+            self.card_closed = False
+
+        def pump(self):
+            self._closed = True          # 用户在问话期间按了 ✕
+
+        def wrapup_close(self):
+            self.card_closed = True
+
+    f = _Fake()
+    got = ov.Overlay.ask_save(f, 3, timeout=5.0)
+    assert got is None, f"问话期间关窗 = 放弃，拿到 {got!r}"
+    assert f.card_closed is True, (
+        "卡必须**真的**收掉 —— `wrapup.build()` 已经 orderFrontRegardless 了，"
+        "只清引用的话那张卡会一直留在屏上")
 
 
 @case("窗口还开着 → 走 UI（在卡上问）")

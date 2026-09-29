@@ -2146,6 +2146,18 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             return
         S["search"] = {"q": q, "hits": [], "total": 0, "truncated": False,
                        "busy": True, "err": "", "open": None, "open_text": None}
+        # ⚠️⚠️ **三个模式必须真互斥**（2026-09-29 修）。它们各从自己的入口进、
+        #    不共用一个状态位，而 `refresh` 里是按 `ics → 课次 → 搜索` 的顺序
+        #    挨个 `return` 的 —— 所以只设 `S["search"]` 是**不够**的：
+        #    在课次卡或导入卡上敲回车，`refresh` 会先撞上前面那两支并 `return`，
+        #    状态行报「命中 N 处」而屏上**毫无变化**。
+        #    （原来那句注释写着"真同时开了，这里是 search 优先" —— 新增
+        #     `ics`/`课次` 两支之后它就**不成立了**，这正是本条要修的。）
+        #    ⚠️ 选「进来就清掉另外两个」而不是「把搜索那支提到最前」：后者要搬代码块，
+        #       而且会让屏上优先级与实际入口脱节；清掉之后三个状态是**真的**互斥，
+        #       与文件里那条设计声明一致。代价只是回到课次卡要多点一下。
+        S["sessions"] = None
+        S["ics"] = None
         set_status(f"搜「{q}」…")
         _later(refresh)
 

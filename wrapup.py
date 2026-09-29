@@ -104,7 +104,8 @@ def build(*, title: str = "收尾", on_close=None):
     """
     try:
         from AppKit import (NSButton, NSColor, NSFont, NSMakeRect, NSTextField,
-                            NSTextAlignmentLeft, NSLineBreakByWordWrapping,
+                            NSTextAlignmentLeft, NSLineBreakByTruncatingTail,
+                            NSLineBreakByWordWrapping,
                             NSWindowStyleMaskBorderless,
                             NSWindowStyleMaskNonactivatingPanel)
 
@@ -137,6 +138,14 @@ def build(*, title: str = "收尾", on_close=None):
             lb.setLineBreakMode_(NSLineBreakByWordWrapping)
             if wrap:
                 lb.setMaximumNumberOfLines_(0)
+            else:
+                # ⚠️⚠️ **非折行标签必须显式关掉折行 + 给省略号**（2026-09-29 修）。
+                #    `NSTextField` 默认 `wraps=True` + WordWrapping，配上固定高度
+                #    （`HINT_H = 17` 只够一行）的效果是「**换行、第二行被静默吃掉**」
+                #    —— 不留省略号、不报错。同 `panel.make_label` 文件头记的那个坑。
+                #    标题 / hint 都走这一支（只有状态行 `wrap=True`）。
+                lb.setMaximumNumberOfLines_(1)
+                lb.setLineBreakMode_(NSLineBreakByTruncatingTail)
             ve.addSubview_(lb)
             return lb
 
@@ -263,5 +272,13 @@ def build(*, title: str = "收尾", on_close=None):
                 #    只能靠回读控件的真实字符串来断言「进度真的上屏了」。
                 "_status_lbl": status_lbl, "_hint_lbl": hint_lbl,
                 "_height": lambda: p.frame().size.height}
-    except Exception:                                     # noqa: BLE001
+    except Exception as e:                                # noqa: BLE001
+        # ⚠️⚠️ **软失败不等于静默**（2026-09-29 修）。原来这里 `return None` ——
+        #    调用方（`overlay.ask_save`）只能退化成「**默认存**」，而屏上、
+        #    日志里**一点痕迹都没有**：用户看到的是"收尾卡没出现"，
+        #    查的时候也无从下手。与本文件 `_install_status_item` 那条同一条纪律。
+        #    ⚠️ 收尾这条路**绝不能抛**（抛了整节课的笔记就没了），所以是**打一行**
+        #       而不是 re-raise。
+        print(f"⚠ 收尾卡建不起来({type(e).__name__}: {str(e)[:80]})；"
+              f"问话退回默认（存）—— 这次没有卡片", flush=True)
         return None

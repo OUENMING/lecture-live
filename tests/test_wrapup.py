@@ -463,6 +463,42 @@ def t_too_many_buttons_raises():
         card["close"]()
 
 
+@case("⭐ 非折行标签（标题 / hint）真的关掉了折行 + 给了省略号")
+def t_nonwrap_labels_truncate():
+    """⭐ 2026-09-29 修。`NSTextField` 默认 `wraps=True` + `WordWrapping`，
+    配上固定高度（`HINT_H = 17` 只够一行）的效果是「**换行、第二行被静默吃掉**」
+    —— 不留省略号、不报错。同 `panel.make_label` 文件头记的那个坑。
+
+    ⚠️ 判据钉**行为**：超长标题不许折成两行（`maximumNumberOfLines` 为 1），
+       且截断方式必须是**尾部省略号**（不是直接切掉）。
+    """
+    import wrapup
+    long_title = "很长的标题" * 20
+    card = wrapup.build(title=long_title)
+    assert card is not None, "卡片没建起来（这条判据需要 AppKit）"
+    try:
+        from AppKit import (NSLineBreakByTruncatingTail,
+                            NSLineBreakByWordWrapping)
+        # ⚠️⚠️ **必须用卡片自己的读回口，不能靠遍历 + 「跳过 0」** ——
+        #    `NSTextField` 的 `maximumNumberOfLines` **默认就是 0**（实测），
+        #    与 `wrap=True` 那支设的值**一模一样**，所以"跳过 0"会把变异的标签
+        #    也一起跳过 → 判据没有区分能力（第一版就是这么写的，
+        #    变异验证当场指出：把非折行那支删掉它照样绿）。
+        #    本文件 `get_app_state` 那类教训：**用一个能把两态分开的量**。
+        hint = card["_hint_lbl"]
+        assert int(hint.maximumNumberOfLines()) == 1, (
+            f"hint 没关折行 —— 长文本会换行、第二行被静默吃掉（不留省略号）"
+            f"（maximumNumberOfLines={hint.maximumNumberOfLines()}）")
+        assert int(hint.lineBreakMode()) == NSLineBreakByTruncatingTail, (
+            f"hint 截断方式不是尾部省略号：{hint.lineBreakMode()}")
+        # 反面：状态行**必须**保持可折行（它是唯一会长的那一个）
+        st = card["_status_lbl"]
+        assert int(st.lineBreakMode()) == NSLineBreakByWordWrapping, (
+            f"状态行被改成不折行了 —— 长状态会被截断：{st.lineBreakMode()}")
+    finally:
+        card["close"]()
+
+
 @case("⭐ `polish_entries` 的 on_progress 是 (stage, done, total) 三元组")
 def t_progress_shape():
     seen: list[tuple] = []

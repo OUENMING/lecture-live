@@ -111,6 +111,8 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
     n = len(out)
     terms = "\n".join(course_terms or []) or "(无)"
     batches = failed = applied = 0
+    #: ⚠️ **第一条失败的原因** —— 见下面 except 里那段（2026-09-29 修）。
+    first_err = None
     for start in range(0, n, batch):
         # ⚠️ **取消只在批次边界生效** —— 一次请求已经在飞了就不再掐它（掐了也是一样的
         #    等待时间，却会白白丢掉这一批的结果）。所以「跳过」最多晚一批。
@@ -142,8 +144,16 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
         try:
             obj = _chat(api_key, model, POLISH_SYS, user,
                         POLISH_MAX_TOKENS, timeout)
-        except Exception:                                 # noqa: BLE001
+        except Exception as e:                            # noqa: BLE001
             failed += 1
+            # ⚠️⚠️ **把原因记下来**（2026-09-29 修）。原来只 `failed += 1` ——
+            #    整节精修全挂时调用方只看得到 `failed/batches` 两个数字，
+            #    分不清是「API key 失效」/「429 或 5xx」/「`POLISH_MAX_TOKENS`
+            #    截断导致 JSON 解析失败」—— 排障成本很高。
+            #    ⚠️ **只留第一条**：同一种失败通常整节重复，全存会撑爆 stats，
+            #       而排障只需要知道"是哪一类的"。
+            if first_err is None:
+                first_err = f"{type(e).__name__}: {str(e)[:120]}"
             if on_progress:
                 on_progress("polish_partial", min(start + len(chunk), n), n)
             continue
@@ -188,5 +198,6 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
             on_progress("polish_partial" if got == 0 else "polish",
                         min(start + len(chunk), n), n)
     if stats is not None:
-        stats.update({"batches": batches, "failed": failed, "applied": applied})
+        stats.update({"batches": batches, "failed": failed, "applied": applied,
+                      "error": first_err or ""})
     return out

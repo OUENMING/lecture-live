@@ -499,6 +499,44 @@ def t_nonwrap_labels_truncate():
         card["close"]()
 
 
+@case("⭐ 精修整批失败时，`stats` 里要记下**原因**（原来只有两个数字）")
+def t_polish_records_error_reason():
+    """⭐ 2026-09-29 修。原来 `except Exception: failed += 1; continue` ——
+    整节精修全挂时调用方只看到 `failed/batches` 两个数字，
+    分不清是「API key 失效」/「429 或 5xx」/「截断导致 JSON 解析失败」——
+    排障成本很高（而本模块的立身处就是"把丢内容变成可观测"）。
+
+    ⚠️ 只留**第一条**：同一种失败整节重复，全存会撑爆 stats。
+    """
+    import polish
+    entries = [dict(ts="10:00:00", en=f"e{i}", zh="z", asr="") for i in range(5)]
+    st: dict = {}
+    orig = polish._chat
+
+    def boom(*a, **k):
+        raise RuntimeError("401 Unauthorized")
+    polish._chat = boom
+    try:
+        polish.polish_entries(entries, "k", "m", batch=5, stats=st)
+    finally:
+        polish._chat = orig
+    assert st.get("failed") == 1, f"failed 计数不对：{st!r}"
+    assert "401" in str(st.get("error") or ""), \
+        f"没记下失败原因 —— 排障只剩两个数字：{st!r}"
+
+    # 反面：**成功时不该有 error**（别修成"永远记一句"）
+    st2: dict = {}
+    polish._chat = lambda *a, **k: {"items": [{"i": i, "en": "E", "zh": "Z"}
+                                              for i in range(5)]}
+    try:
+        polish.polish_entries([dict(e) for e in entries], "k", "m", batch=5,
+                              stats=st2)
+    finally:
+        polish._chat = orig
+    assert st2.get("error") == "" and st2.get("failed") == 0, \
+        f"成功时不该记失败原因：{st2!r}"
+
+
 @case("⭐ `polish_entries` 的 on_progress 是 (stage, done, total) 三元组")
 def t_progress_shape():
     seen: list[tuple] = []

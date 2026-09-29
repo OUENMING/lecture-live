@@ -25,8 +25,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("session")
     ap.add_argument("course")
-    ap.add_argument("--vault", default=os.environ.get(
-        "OBSIDIAN_VAULT", os.path.expanduser("~/Obsidian/Vault")))
+    # ⚠️⚠️ **默认值不能再写 `~/Obsidian/Vault`**（2026-09-29 修）—— 那是**废弃的**
+    #    那个「用户从没选过」的兜底目录（见 `obsidian_writer.resolve_vault` 的 docstring：
+    #    实测那个目录里躺着 9 个笔记，连 `.obsidian` 都没有）。
+    #    改成 `None` + 走 `resolve_vault()` —— 与 `cl` / `main.py` **同一条路**
+    #    （`--vault` → `$OBSIDIAN_VAULT` → `~/.classlive/vault` → 都没有就报错）。
+    ap.add_argument("--vault", default=None)
     ap.add_argument("--glossary", default=str(
         Path(__file__).resolve().parent / "glossary.txt"))
     ap.add_argument("--model", default="deepseek-flash")
@@ -68,9 +72,13 @@ def main() -> int:
     # 特别地: `os.environ.get("OBSIDIAN_VAULT", 默认)` 在变量**存在但为空**时
     # 返回空串而不是默认值, 所以这条路径真的会走到。
     if not args.vault:
-        print("✗ --vault 是空的 —— 得知道笔记写到哪个 Obsidian 库。\n"
-              "  例: --vault ~/Obsidian/Vault   或设环境变量 OBSIDIAN_VAULT\n"
-              "  ⚠️ OBSIDIAN_VAULT 设成空串时**不会**回退到默认值。")
+        # ⚠️ 先看还有没有**记住过的**库（`~/.classlive/vault`）—— 与 `cl` 同一条路。
+        from obsidian_writer import resolve_vault
+        args.vault = resolve_vault(None)
+    if not args.vault:
+        print("✗ 找不到 Obsidian 库 —— 得知道笔记写到哪儿。\n"
+              "  例: --vault ~/Obsidian/SecondBrain   或设环境变量 OBSIDIAN_VAULT\n"
+              "  也可以先用 `cl` 跑一次（它会把选过的库记进 ~/.classlive/vault）。")
         return 1
 
     w = ObsidianWriter(vault=args.vault, course=args.course, mode="no",
@@ -85,7 +93,16 @@ def main() -> int:
     w._n = n
 
     print(f"▶ 重建 {sess.name} → {args.course} · {date} · {n} 句")
-    print(w.close())
+    try:
+        print(w.close())
+    except Exception as e:                                    # noqa: BLE001
+        # ⚠️⚠️ **不许把裸堆栈甩给用户**（2026-09-29 修）。`close()` 才是真正
+        #    跑精修 / 复习层 / 写盘的那一步，可能因 API key、模型调用、模板、IO
+        #    抛异常 —— 而本脚本为**其它每一类失败**都给了可读中文提示 + 非零返回码，
+        #    唯独这里让人吃一坨 traceback。风格要一致。
+        print(f"✗ 重建失败：{type(e).__name__}: {str(e)[:200]}")
+        print("  会话文件本身没动；修好原因后重跑即可。")
+        return 1
     return 0
 
 

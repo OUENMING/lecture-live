@@ -10,7 +10,6 @@
 
 只读 token 用量，不写任何文件。
 """
-import json
 import pathlib
 import re
 import sys

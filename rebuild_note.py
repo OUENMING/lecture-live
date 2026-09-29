@@ -38,9 +38,17 @@ def main() -> int:
         print(f"✗ 会话文件不存在: {sess}")
         return 1
     text = sess.read_text(encoding="utf-8")
-    n = len(re.findall(r"^> \[!abstract\]", text, re.M))
+    # ⚠️⚠️ **用真正的解析器数，别用前缀正则**（2026-09-29 修）。
+    #    原来写的是 `re.findall(r"^> \[!abstract\]", text, re.M)` —— 只匹配**前缀**，
+    #    而 `_TS`（真解析器）要求**完整时间戳**：
+    #        `^> \[!abstract\] \d\d:\d\d:\d\d( ⭐ Exam Focus)?\s*$`
+    #    → 手改过 / 写入被截断的文件（有抬头、时间戳坏了）会 `n > 0` 通过校验，
+    #      而下面 `close()` 里 `_parse` 解析出 **0 条** → **正是这道保护要防的
+    #      「生成空笔记」被绕过去了**。
+    #    ⚠️ 读法唯一的定义点在 `obsidian_writer._parse` —— 别在这儿再写一份。
+    n = len(ObsidianWriter._parse(text))
     if n == 0:
-        print("✗ 会话文件里没有任何句段，拒绝生成空笔记")
+        print("✗ 会话文件里没有任何**能读懂的**句段，拒绝生成空笔记")
         return 1
 
     # 从会话文件名推日期，而不是用「今天」—— 补生成常常隔天才做

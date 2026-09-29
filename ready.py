@@ -139,21 +139,6 @@ def _local_path() -> str:
     return ""
 
 
-def ready_line(*, perm: str, states: dict, has_key: bool) -> str:
-    """状态行上那一句话（面板底部常驻那行）。
-
-    ⚠️ 全绿时给一句**正在发生什么**，不是「一切正常」—— `entry_panel` 那条
-       「只报真实事实，不编比率」同理。
-    """
-    left = required_left(states)
-    if left:
-        return (f"还差 {len(left)} 件语音模型（{_mb(sum(m.mb for m in left))}）"
-                f" —— 正在后台下载，你可以先配课程")
-    if perm == "denied":
-        return "麦克风被拒了 —— 上面那一条点一下去系统设置"
-    return "就绪 · 拖课件到某张卡上 = 加到那门课"
-
-
 def _mb(v: float) -> str:
     """体积说人话。⚠️ 与 `doctor.Model.size` 同一套口径。"""
     return f"{v / 1024:.1f} GB" if v >= 1024 else f"{v:g} MB"

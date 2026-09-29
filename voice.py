@@ -280,7 +280,11 @@ def embed(audio_path, *, extract_fn=None) -> list:
     """
     if extract_fn is not None:
         return list(extract_fn(audio_path))
-    import sherpa_onnx
+    # ⚠️⚠️ **这里不许 `import sherpa_onnx`**（2026-09-29 删）。
+    #    原来导了它、然后立刻 `raise NotImplementedError` —— 名字从未被用到，
+    #    而**副作用是致命的**：没装 sherpa_onnx 时这里抛的是 `ModuleNotFoundError`，
+    #    把下面那条**可执行的提示**（"先用 extract_fn 注入，或等 doctor 装上模型"）
+    #    整个盖掉 —— 用户看到的是"没有这个模块"，而不是"该怎么办"。
     raise NotImplementedError(
         "真提取要指定模型路径（~/.classlive/voice/ 那族）—— "
         "先用 extract_fn 注入，或等 doctor 装上模型")

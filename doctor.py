@@ -111,7 +111,7 @@ def hf_cached(repo_id: str, *, must: tuple = ("config.json",),
         return None                                       # 问不出来 → 当成有
 
 
-def model_state(model) -> str:
+def model_state(model, *, root=None) -> str:
     """`"missing"` / `"ok"` / ⚠️ `"unknown"` / ⚠️ `"stale"` —— **不是 `bool`**。
 
     ⚠️⚠️ **`unknown` 绝不等于 `missing`。** 老用户 / 手动装的模型**没有戳**
@@ -131,7 +131,7 @@ def model_state(model) -> str:
     if model.at_hf and hf_cached(model.src) is not True:
         # ⚠️ 可能是「下了一半」，也可能是「问不出来」——**两种都不自动下**。
         return "unknown"
-    stamp = _stamp_for(model.path)
+    stamp = _stamp_for(model.path, root=root)
     if stamp is None:
         return "unknown"                                   # 没戳：老用户 / 手动装的
     if model.src and stamp.get("src") != model.src:
@@ -168,12 +168,17 @@ def manifest_fp(path: str) -> str:
     return hashlib.sha256("\n".join(rows).encode()).hexdigest()[:32]
 
 
-def _stamp_for(path: str) -> dict | None:
-    """读 `~/.classlive/models.json` 里那一条。**只读** —— 写戳是 `ready.py` 的事。"""
+def _stamp_for(path: str, *, root=None) -> dict | None:
+    """读 `models.json` 里那一条。**只读** —— 写戳是 `ready.py` 的事。
+
+    ⚠️ **`root` 要一路透传**（2026-09-29 修）：`ready.mark_installed(model, root=…)`
+       按 `root` **写**，而这里原来按**默认路径读** → 隔离运行时读写分家。
+       （本仓库的硬规矩「测试必须隔离写端 —— 读端和写端都要替换」。）
+    """
     import json
     try:
         import paths
-        obj = json.loads(paths.models_stamp().read_text(encoding="utf-8"))
+        obj = json.loads(paths.models_stamp(root=root).read_text(encoding="utf-8"))
     except Exception:                                     # noqa: BLE001
         return None
     got = obj.get(path) if isinstance(obj, dict) else None

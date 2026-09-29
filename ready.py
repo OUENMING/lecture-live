@@ -146,8 +146,13 @@ def _mb(v: float) -> str:
 
 # ---------------------------------------------------------------- 脏活都在这儿
 def model_states(*, root=None) -> dict:
-    """`{path: state}` —— 逐个问 `doctor.model_state()`。"""
-    return {m.path: doctor.model_state(m) for m in doctor.MODELS}
+    """`{path: state}` —— 逐个问 `doctor.model_state()`。
+
+    ⚠️ **`root` 必须传下去**（2026-09-29 修）：原来收了 `root` 却**从不使用**
+       → 本模块按 `root` **写戳**、却按**默认路径读戳**，隔离运行时两边分家。
+       生产环境 `root=None` 时看不出差别，所以一直没被发现。
+    """
+    return {m.path: doctor.model_state(m, root=root) for m in doctor.MODELS}
 
 
 def mark_installed(model, *, root=None) -> None:

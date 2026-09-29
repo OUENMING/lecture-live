@@ -116,7 +116,37 @@ def t_corrupt_stamp_abandons_write():
             f"好戳也没写进去 —— 修过头了：{got2[:120]!r}")
 
 
-@case("⭐⭐ 变异验证：把 unknown 并进 missing → 上面那条必须红")
+@case("⭐⭐ 戳的**读端也认 `root`**（原来只有写端认 → 隔离运行时读写分家）")
+def t_stamp_read_honours_root():
+    """⭐ 2026-09-29 修。`model_states(root=…)` 收了 `root` 却**从不传下去** ——
+    而 `mark_installed(model, root=…)` 按 `root` **写**。
+    于是隔离运行（探针 / 判据）里**按 root 写、按默认路径读** → 两边分家。
+    生产环境 `root=None` 时看不出差别，所以一直没被发现。
+
+    ⚠️ 本仓库的硬规矩：「**测试必须隔离写端 —— 读端和写端都要替换**」。
+       这条钉住的就是"读端有没有真的被换掉"。
+
+    ⚠️ 钉在 `_stamp_for` 这个 seam 上，**不依赖真模型文件** ——
+       `doctor.model_state()` 要先过 `model_present()`，那需要真模型在盘上。
+    """
+    import pathlib
+    import tempfile
+
+    import doctor
+    import paths
+    import store
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        p = paths.models_stamp(root=root)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        store.save_json(p, {"/x/model": {"src": "s", "at": 1.0, "fp": "f"}})
+
+        got = doctor._stamp_for("/x/model", root=root)
+        assert got is not None and got.get("src") == "s", \
+            f"按 root 读不到刚写进去的戳：{got!r}"
+        # 反面：**默认路径**不该看见它（否则"隔离"是假的）
+        assert doctor._stamp_for("/x/model") is None, \
+            "默认路径也读到了隔离根里的戳 —— 那 root 根本没起作用"
 def t_unknown_mutation():
     orig = ready.required_left
 

@@ -31,6 +31,10 @@ from __future__ import annotations
 #: key → 类。**单一 definition point**：每个 key 在进程里只可能定义一次。
 _OWNED: dict = {}
 
+#: key → **当初传进来的那个 `base`**（不是 `cls.__bases__` —— PyObjC 会包一层）。
+#: 用来在缓存命中时判「同一个 key 换了基类」= 语义冲突。
+_ASKED_BASE: dict = {}
+
 #: 所有本模块生成的类名都用这个前缀。改它没有意义，
 #: 除非你同时确认进程里没有别的代码在用同一个前缀。
 _PREFIX = "_ClassLive"
@@ -56,12 +60,31 @@ def own(key: str, base: type, namespace: dict) -> type:
     """
     got = _OWNED.get(key)
     if got is not None:
+        # ⚠️⚠️ **命中缓存也要校验「当初要的基类」是不是同一个**（2026-09-29 修）。
+        #    原来直接 `return got` —— 于是同一个 key 换基类时，
+        #    **第二次调用拿到的是第一次那个类**，而调用方以为拿到的是新基类的子类。
+        #    本仓库因此踩过「同一个 key 第二次调用拿回同一个类、
+        #    **点哪张卡都触发第一张的动作**」。
+        #    ⚠️⚠️ **比的是 `_ASKED_BASE`，不是 `got.__bases__`** ——
+        #       PyObjC 会把基类**包一层**（`_PyObjCIntermediate_NSView`），
+        #       所以 `NSView in got.__bases__` 恒为假。
+        #       （第一版就是这么写的，**判据当场把它按住**：正常路径反而抛了。）
+        if _ASKED_BASE.get(key) is not base:
+            raise ObjcNameCollision(
+                f"key {key!r} 已经用过一次，当初要的基类是 "
+                f"{_ASKED_BASE.get(key)}，这次却要 {base} —— "
+                f"**同一个 key 不能有两种语义**。\n"
+                f"  要么换一个 key，要么让两处共用同一个 base（见 docstring）。")
         return got
     import objc
     name = _PREFIX + key
     try:
         existing = objc.lookUpClass(name)
-    except Exception:                       # noqa: BLE001 — nosuchclass_error
+    except objc.nosuchclass_error:
+        # ⚠️⚠️ **只接这一种**（2026-09-29 修）。原来写的是 `except Exception` ——
+        #    于是 `lookUpClass` 因**别的原因**失败（运行时不正常、名字非法…）
+        #    也被当成「类不存在」，随后 `type(name, ...)` 直接定义 ——
+        #    正好把本模块要消灭的那种「**静默覆盖已有类**」重新引回来。
         existing = None
     if existing is not None:
         raise ObjcNameCollision(
@@ -71,6 +94,7 @@ def own(key: str, base: type, namespace: dict) -> type:
             f"就是撞名被 fail-soft 吞掉的结果。先查清是谁占的。")
     cls = type(name, (base,), namespace)
     _OWNED[key] = cls
+    _ASKED_BASE[key] = base            # ⚠️ 记「当初要的」，供上面那条冲突判据用
     return cls
 
 

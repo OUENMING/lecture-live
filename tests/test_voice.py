@@ -71,6 +71,38 @@ def t_corrupt_raises():
             f"下一次 save_store 就**把真数据整个覆盖掉**")
 
 
+@case("⭐⭐ 形状不对的条目 → 抛，**绝不**静默丢掉（丢了会被 save_store 永久擦掉）")
+def t_malformed_entry_raises():
+    """2026-09-29 修。原来形状不对的条目只是 `continue` 掉，于是
+    `{"A": [[…]], "B": "oops"}` 读回来只剩 A，随后 `save_store` 把 B
+    **永久擦掉**，而且没有任何信号 —— 正是本模块 docstring 反复警告的
+    「负结果不许读起来像穷尽」/「静默全损」，与上面那条**同一层次**。"""
+    with tempfile.TemporaryDirectory() as d:
+        from store import save_json
+        for label, payload in (
+            ("值不是列表", {"A": [[1.0, 2.0]], "B": "oops"}),
+            ("元素不是向量", {"A": [[1.0, 2.0]], "B": [1.0, 2.0]}),
+            ("向量里混了非数", {"A": [[1.0, 2.0]], "B": [[1.0], ["oops"]]}),
+            ("空列表（形状上算坏）", {"A": [[1.0, 2.0]], "B": []}),
+        ):
+            p = pathlib.Path(d) / f"{abs(hash(label))}.json"
+            save_json(p, payload)
+            try:
+                got = voice.load_store(p)
+            except ValueError:
+                continue                               # ✅ 正是要的行为
+            raise AssertionError(
+                f"[{label}] 静默丢了坏条目、返回 {got!r} —— "
+                f"调用方 save_store 会把丢掉的那条**永久擦掉**")
+
+
+@case("⚠️ 但「文件不存在」**不许**抛 —— 全新安装是真的什么都没有")
+def t_missing_is_not_an_error():
+    with tempfile.TemporaryDirectory() as d:
+        assert voice.load_store(pathlib.Path(d) / "nope.json") == {}, \
+            "文件不存在该给空表；它是全新安装，不是坏数据"
+
+
 @case("⭐⭐ 变异验证：让坏文件也返回空表 → 上面那条必须红")
 def t_mutation():
     """⚠️ 第一版这条是**空的**：它只定义了一个 mutant 函数就直接断言 `got != {}`，

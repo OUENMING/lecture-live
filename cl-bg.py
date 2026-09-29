@@ -22,7 +22,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 #   (2026-09-24 OCR 发现。)
 _DEFAULT_LOG = os.path.expanduser("~/Library/Logs/ClassLive/bg.log")
 LOG = sys.argv[1] if len(sys.argv) > 1 else _DEFAULT_LOG
-os.makedirs(os.path.dirname(LOG), exist_ok=True)
+# ⚠️⚠️ **相对路径时 `dirname` 是空串，`makedirs("")` 直接抛 FileNotFoundError**
+#    （2026-09-29 全量 OCR 抓到）。用法那行写的是「任意日志路径」，所以
+#    `python3 cl-bg.py bg.log` 是**可复现的崩溃**，而且崩在任何 fork 之前。
+#    空串就跳过 —— 当前目录本来就存在，没什么要建的。
+_LOG_DIR = os.path.dirname(LOG)
+if _LOG_DIR:
+    os.makedirs(_LOG_DIR, exist_ok=True)
 
 
 def daemonize() -> None:

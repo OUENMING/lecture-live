@@ -211,10 +211,15 @@ class AtomWriter:
         """追加一批。返回**写成了几条**（写失败不是致命错 —— 见下）。"""
         if not atoms:
             return 0
-        h = self._handle()
-        if h is None:
-            return 0
         try:
+            # ⚠️⚠️ **`_handle()` 必须在 `try` 里面**（2026-09-29 修）—— 它是本方法
+            #    唯一做 I/O 的地方（`path.open("a", ...)`）。原来在 `try` **外面**，
+            #    于是磁盘只读 / 目录被删 / 权限不足时 `OSError` **直接向上抛**，
+            #    与紧随其后那句「绝不让它把流水线带崩」**自相矛盾**。
+            #    调用方是 `main` 的 atom 工作线程 —— 一抛就整节课不再落原子。
+            h = self._handle()
+            if h is None:
+                return 0
             for a in atoms:
                 h.write(json.dumps(a.as_json(), ensure_ascii=False) + "\n")
             h.flush()

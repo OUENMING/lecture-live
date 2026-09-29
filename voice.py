@@ -146,10 +146,27 @@ def load_store(path) -> dict:
         # ⚠️ **不返回空表** —— 那会让随后的 save_store 覆盖掉真数据（见 docstring）。
         raise ValueError(str(e)) from e
     out = {}
+    bad = []
     for k, v in obj.items():
         # ⚠️ 这里**不用**跳过 `_v` —— `store.load_json` 返回前已经剥掉了。
         if isinstance(v, list) and v and all(isinstance(x, list) for x in v):
-            out[str(k)] = [[float(y) for y in vec] for vec in v]
+            try:
+                out[str(k)] = [[float(y) for y in vec] for vec in v]
+            except (TypeError, ValueError):
+                # 形状对但元素不是数（`[[1],["oops"]]`）—— 与下面那条**同一类**。
+                bad.append(str(k))
+        else:
+            bad.append(str(k))
+    # ⚠️⚠️ **形状不对的条目必须出声，不许静默丢掉**（2026-09-29 修）。
+    #    原来只是 `continue` —— 于是 `{"A": [[…]], "B": "oops"}` 读回来只剩 A，
+    #    而调用方随后的 `save_store` 就把 B **永久擦掉**了，**没有任何信号**。
+    #    这正是本模块 docstring 反复警告的那条「负结果不许读起来像穷尽」/
+    #    「静默全损」—— 与上面 `StoreError` 那条**同一层次**，所以同样**抛**。
+    #    （`path.exists()` 为假那条**不算错**：全新安装是真的什么都没有，早退不抛。）
+    if bad:
+        raise ValueError(
+            f"档案里有 {len(bad)} 条读不懂的条目（{', '.join(sorted(bad)[:5])}）—— "
+            f"不覆盖它。要么手工修这份文件，要么先备份再删。")
     return out
 
 

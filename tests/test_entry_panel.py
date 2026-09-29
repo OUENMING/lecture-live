@@ -639,6 +639,31 @@ def main() -> int:
     # ⚠️⚠️ `bad` **必须在这里算** —— 它是最后一句，所有判据都跑完了。
     #    这条纪律在本文件里被抓到过**两次**：第一次它在 368 行、第二次我把新判据
     #    又插到了它后面。**判据加在它之后 = 只打印、不进统计、失败也不影响退出码。**
+    print("\n--- ⑲ 跨模块 API：引用了 `ready.X` 就必须真的存在 X ---")
+    # ⭐⭐ 2026-09-29 加。OCR 审计（b8）抓到一条**真且用户可见**的：
+    #    `_download_required().work()` 里写的是 `ready.ready_item_text(...)`,
+    #    而 `ready.py` **从来没有这个函数**（它在 `entry_panel` 自己家里）。
+    #    那两句在 `try` 内 → `AttributeError` 被吞 → 用户看到
+    #    **「下载失败: module 'ready' has no attribute 'ready_item_text'」**，
+    #    而模型其实**已经下好了**。
+    #    ⚠️ 判据泛化到**整类**，不只这一处：把 `entry_panel` 里所有 `ready.X`
+    #       都叠一遍 —— 跨模块引用打错名字是"静默吞掉"的重灾区。
+    import ast as _ast
+    import ready as _ready
+    _src = pathlib.Path(__file__).resolve().parent.parent / "entry_panel.py"
+    _tree = _ast.parse(_src.read_text(encoding="utf-8"))
+    _used = set()
+    for _n in _ast.walk(_tree):
+        if (isinstance(_n, _ast.Attribute)
+                and isinstance(_n.value, _ast.Name) and _n.value.id == "ready"):
+            _used.add(_n.attr)
+    _missing = sorted(a for a in _used if not hasattr(_ready, a))
+    check("⭐⭐ `entry_panel` 引用的每个 `ready.X` 都真的存在"
+          "（打错名字会被 try 吞成『下载失败』）",
+          not _missing, f"不存在的: {_missing}")
+    check("⚠️ 而且确实扫到了东西（空集会让上一条恒真）",
+          len(_used) >= 3, f"只扫到 {sorted(_used)}")
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")
     for n in bad:

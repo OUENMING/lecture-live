@@ -180,6 +180,35 @@ def main() -> int:
             import shutil
             shutil.rmtree(tmp2, ignore_errors=True)
 
+        # ⭐⭐ 取句柄那一步的 I/O **也必须在护栏里**（2026-09-29 修）。
+        #    `AtomWriter._handle()` 做的是 `path.open("a")` —— 磁盘只读 / 目录被删 /
+        #    权限不足都会抛 `OSError`。它原来在 `try` **外面** →
+        #    与紧随其后那句「绝不让它把流水线带崩」**自相矛盾**，
+        #    而调用方是 `main` 的 atom 工作线程：一抛就整节课不再落原子。
+        #    ⚠️ 造这个失败**要绕一下**：`AtomWriter.__init__` 会把传进来的路径
+        #       `with_suffix("") + ATOM_TAIL` —— 所以**派的路径**才是真正 open 的那个。
+        #       让**派生后**那个名字是个目录，`open(..., "a")` 必抛 IsADirectoryError。
+        #       （第一版直接传了个目录进去，派生出来却是个文件 → open 成功、
+        #         `append` 正常返回 1，判据在**修好的代码上也红** —— 夹具错，不是实现错。）
+        import shutil as _sh
+        import atom as _atom
+        _td = tempfile.mkdtemp(prefix="cl-atom-")
+        try:
+            _sess = pathlib.Path(_td) / "x.md"
+            (_sess.with_suffix("")).with_name(
+                _sess.stem + _atom.ATOM_TAIL).mkdir()
+            _w2 = _atom.AtomWriter(str(_sess))
+            try:
+                _n = _w2.append([_atom.Atom(1, "14:08:06", 1.0, [0], "要点", "x")])
+                check("⭐⭐ 句柄打不开时 `append` **返回 0 而不是抛**"
+                      "（否则 atom 线程死、整节课不再落原子）", _n == 0, f"拿到 {_n!r}")
+            except Exception as _e:                            # noqa: BLE001
+                check("⭐⭐ 句柄打不开时 `append` **返回 0 而不是抛**"
+                      "（否则 atom 线程死、整节课不再落原子）", False,
+                      f"{type(_e).__name__}: {_e}")
+        finally:
+            _sh.rmtree(_td, ignore_errors=True)
+
         bad = [n for n, ok, _ in RESULTS if not ok]
         print("\n" + "=" * 60)
         print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

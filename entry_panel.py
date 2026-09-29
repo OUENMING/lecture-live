@@ -1689,7 +1689,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 left = [m for m in doctor.MODELS
                         if m.required and not doctor.model_present(m.path)]
                 if not left:
-                    _later(_retitle, "models", ready.ready_item_text(
+                    _later(_retitle, "models", ready_item_text(
                         {"key": "models", "state": "ok", "detail": "已就绪"}))
                     _later(_status, "语音模型已经齐了")
                     return
@@ -1701,7 +1701,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                     if not r["ok"]:
                         _later(_status, r["error"])
                         return
-                _later(_retitle, "models", ready.ready_item_text(
+                _later(_retitle, "models", ready_item_text(
                     {"key": "models", "state": "ok", "detail": "已就绪"}))
                 _later(_status, "语音模型齐了 —— 启动！")
             except Exception as e:                         # noqa: BLE001

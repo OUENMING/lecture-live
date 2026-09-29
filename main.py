@@ -967,20 +967,36 @@ def run(args) -> None:
     #    ⚠️ **fail-soft**：拿不到就空表 —— 它只是锦上添花，绝不能挡住开课。
     #    ⚠️ `known` 必须传**全部课号**：打分用跨课 IDF，只传当前一门会改变语义。
     #       实测 0.07s（作者的 6 门课）→ 启动期一次性算，不在热路径上。
+    #    ⚠️⚠️ **课号必须先归一**（2026-09-29 OCR 指出）：`args.course` 可能是
+    #       **短代号**（`10740`）或带课型后缀（`ECON0070 TUT`），而 `list_courses()`
+    #       返回**规范名**。原来 `not in names 就 append` → 同一门课在 `known` 里
+    #       占两项 → **跨课 IDF 的语义被改**（正是上面那句注释要防的），
+    #       而且 `_got.get(args.course)` 用**另一个写法**去取 → **取不到**，
+    #       这个功能对短代号用户**静默什么都不做**（实测 `10740` 那份是 0 个词）。
     extra_terms: list = []
     if args.course:
         try:
             import corpus as _cp
             import courses as _cs
             import obsidian_writer as _ow
+            _canon = _cs.canonical_course(args.glossary, args.course)
             _names = list(_cs.list_courses(args.glossary, state_root=None))
-            if args.course not in _names:
-                _names.append(args.course)
-            _got, _deg = _cp.keywords(_names, sessions_dir=_ow.SESSIONS)
-            extra_terms = list(_got.get(args.course, []))
-            if extra_terms:
-                echo(f"📚 转录词表：{len(extra_terms)} 个词进候选池"
-                     f"（另有 {len(_deg)} 门课没语料）")
+            if _canon in _names:
+                _got, _deg = _cp.keywords(_names, sessions_dir=_ow.SESSIONS)
+                extra_terms = list(_got.get(_canon, []))
+                if _canon in _deg:
+                    # ⚠️⚠️ **降级也要出声**（2026-09-29 OCR 指出）：`corpus` 是
+                    #    **故意**把「拿不到词表的课 + 原因」一起报出来的
+                    #    （`corpus.py` 模块头：「静默的空表是这里最坏的失败模式」）。
+                    #    原来只在 `extra_terms` 非空时才打 —— 于是**新课本该降级**的
+                    #    那一刻（正是作者要"如实说"的那档）一个字都不打。
+                    echo(f"📚 {_canon} 这次没有转录词表（{_deg[_canon]}）"
+                         f" —— 术语召回只用手写术语表")
+                elif extra_terms:
+                    echo(f"📚 转录词表：{len(extra_terms)} 个词进候选池")
+            elif args.course != _canon:
+                echo(f"⚠ 课号 {args.course!r} 归一成了 {_canon!r}，但它不在课程清单里"
+                     f" —— 不加转录词")
         except Exception as _e:                       # noqa: BLE001
             print(f"⚠ 转录词表拿不到（只影响术语召回）：{type(_e).__name__}: {_e}")
 

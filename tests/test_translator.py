@@ -122,6 +122,49 @@ def t_fuzzy_recall_is_partial():
         f"  ⚠️ 它靠的是**全量注入**那一档（课程术语），不是匹配。")
 
 
+@case("⭐⭐ 池子里有重复会**白占一个动态名额** —— `merge_terms` 就是防这个")
+def t_duplicate_costs_a_slot():
+    """⭐ 2026-09-29 OCR 抓到的：`load_terms(...) + list(extra_terms)` 这种
+    **外面拼**的写法绕过了 `load_terms` 内部的去重。转录词与术语表撞词很常见，
+    于是池子里有两条同词 —— 而 `select_terms` 是 `scored[:max_dyn]`
+    **先截断、再去重** → **重复条目白占一个名额**。
+
+    ⚠️ 这条先**证明缺陷真实存在**（拿未去重的列表跑），再**证明修法有效**
+       （`merge_terms` 之后不多占）—— 两半都要，否则只是"看起来修了"。
+    """
+    dup = ["marginal", "marginal", "marginal utility", "marginalism"]
+    en = "the marginal utility of the last unit"
+    raw = [t for t in _lines(T.select_terms(en, dup, core=[], always=[],
+                                            max_dyn=3)) if t != "(无特定术语)"]
+    assert len(raw) == 2, (
+        f"这条判据的前提变了 —— 未去重时本该只注入 2 个（被重复占掉一个名额），"
+        f"实测 {len(raw)}：{raw}")
+
+    clean = T.merge_terms(dup)                 # 去重
+    got = [t for t in _lines(T.select_terms(en, clean, core=[], always=[],
+                                            max_dyn=3)) if t != "(无特定术语)"]
+    assert len(got) == 3, f"去重后该拿回第 3 个名额，实测 {len(got)}：{got}"
+
+
+@case("⭐ `merge_terms` 跨组去重、保序、大小写不敏感")
+def t_merge_terms():
+    got = T.merge_terms(["Alpha", "beta"], ["alpha", "Gamma"], None, [])
+    assert got == ["Alpha", "beta", "Gamma"], f"得到 {got}"
+    assert T.merge_terms() == [] and T.merge_terms(None) == []
+
+
+@case("⭐⭐ `load_terms` 走的就是 `merge_terms`（唯一定义点，没有第二份去重）")
+def t_load_terms_uses_merge():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        g = pathlib.Path(d) / "g.txt"
+        g.write_text("Alpha\nalpha\nBeta\n", encoding="utf-8")
+        got = T.load_terms(str(g))
+        assert got == ["Alpha", "Beta"], f"得到 {got}"
+        # 与 merge_terms 逐字一致（同一份实现，不是复制来的）
+        assert got == T.merge_terms(T._load_terms(str(g))), "两份去重逻辑分叉了"
+
+
 @case("⚠️ `_load_terms` 跳注释/跳空行；**去重在 `load_terms` 那一层**")
 def t_load_terms_dedup():
     """⚠️ 第一版把这条写在 `_load_terms` 上 —— 而**去重不在那儿**（实测

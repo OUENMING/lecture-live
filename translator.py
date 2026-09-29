@@ -152,20 +152,34 @@ def course_terms_path(glossary_path: str, course: str) -> pathlib.Path | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def merge_terms(*groups) -> list:
+    """把几组词拼起来并按 `lower` **去重保序** —— 「拼接术语」的**唯一定义点**。
+
+    ⚠️⚠️ 2026-09-29 抽出来的理由：`load_terms(...) + list(extra_terms)` 这种
+       **外面拼**的写法会**绕过** `load_terms` 内部的去重 —— 转录词与术语表撞词时
+       池子里会有两条，而 `select_terms` 是 `scored[:max_dyn]` **先截断、再去重**
+       → **重复条目白占一个动态名额**。
+       实测：池子里放两条 `marginal`（`max_dyn=3`）→ 只注入了 **2** 个，本该 3 个。
+    ⚠️ 两处（本地 / 云端）都要走它 —— 各写一份迟早分叉。
+    """
+    seen, out = set(), []
+    for g in groups:
+        for t in g or ():
+            k = str(t).lower()
+            if k not in seen:
+                seen.add(k)
+                out.append(t)
+    return out
+
+
 def load_terms(glossary_path: str | None, course: str | None = None) -> list[str]:
     """公共术语 + 分课程术语(glossary/<课号>.txt)。"""
-    terms = _load_terms(glossary_path)
+    g = [_load_terms(glossary_path)]
     if course and glossary_path:
         p = course_terms_path(glossary_path, course)
         if p is not None:
-            terms += _load_terms(str(p))
-    # 去重保序
-    seen, out = set(), []
-    for t in terms:
-        k = t.lower()
-        if k not in seen:
-            seen.add(k); out.append(t)
-    return out
+            g.append(_load_terms(str(p)))
+    return merge_terms(*g)
 
 
 def course_term_list(glossary_path: str | None, course: str | None) -> list[str]:
@@ -430,7 +444,7 @@ class Translator:
         #      · ⚠️ 但手写术语**只被挤掉 3–4%** → **名额不用改**
         #    而如果把词**写进术语表文件**（走全量注入），120 条时术语块占整条
         #    prompt 的 **60%**（实测 1544 字符 / 总 ~2582 字符）→ 那条路会过量。
-        self._terms = load_terms(glossary_path, course) + list(extra_terms or [])
+        self._terms = merge_terms(load_terms(glossary_path, course), extra_terms)
         self._course_terms = course_term_list(glossary_path, course)
         self._domain = course_title(glossary_path, course)
         self._core = core_terms(course)

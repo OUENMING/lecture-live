@@ -110,6 +110,36 @@ def main() -> int:
         check("glossary_file：找不到就回退成路径（不抛）",
               courses.glossary_file(g2, "nope") == g2root / "glossary" / "nope.txt")
 
+        # ⭐⭐ **课型后缀剥掉、用主课那份**（2026-09-29 加，作者拍板）。
+        #    理由（作者原话）：「TUT 基本上就是在正课的基础上进行一些细化，
+        #    所以共用一个会更好，因为都是正相关的术语。」
+        import translator as _tr
+        for _s, _want in (
+            ("ECON10070 TUT", "ECON10070"),
+            ("ECON10070", "ECON10070"),
+            ("Introduction to Economics (Tutorial)", "Introduction to Economics"),
+            ("ECON10770: Intro (Seminar)", "ECON10770: Intro"),
+            ("SOC10020", "SOC10020"),
+            # ⚠️ 反例：**只剥末尾那一个词**，课名中间的不管
+            ("Data Analysis (Lab) extra", "Data Analysis (Lab) extra"),
+            # ⚠️ 不是课型的括号也别动
+            ("Maths (Advanced)", "Maths (Advanced)"),
+        ):
+            _got = _tr.base_course(_s)
+            check(f"⭐ `base_course({_s!r})` -> {_want!r}", _got == _want, f"得到 {_got!r}")
+
+        g4root = tmp / "sharing"
+        g4 = _mk_glossary(g4root, "ECON10070.txt", "ECON10070 TUT.txt")
+        check("⭐⭐ 主课与 TUT 都在 -> 用**主课**那份（作者拍板：共用一个）",
+              courses.glossary_file(g4, "ECON10070 TUT")
+              == g4root / "glossary" / "ECON10070.txt",
+              str(courses.glossary_file(g4, "ECON10070 TUT")))
+        (g4root / "glossary" / "ECON10070.txt").unlink()
+        check("⭐ 主课那份不在 -> 落回全名那份（不让人白建的表变成死文件）",
+              courses.glossary_file(g4, "ECON10070 TUT")
+              == g4root / "glossary" / "ECON10070 TUT.txt",
+              str(courses.glossary_file(g4, "ECON10070 TUT")))
+
         # ⚠️ **歧义时不许归并** —— 并错了是**静默用错术语表**，比多一张卡糟得多
         g3root = tmp / "amb"
         g3 = _mk_glossary(g3root, "ECON202.txt", "SOC202.txt")

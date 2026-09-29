@@ -10,7 +10,7 @@
 用一把锁保证串行生成(GPU 上顺序执行)。
 """
 from __future__ import annotations
-import difflib, pathlib, threading
+import difflib, pathlib, re, threading
 
 
 # 常驻核心词(高频概念): 无论句子内容都注入, 约 15 token。
@@ -90,8 +90,46 @@ def _load_terms(path: str | None) -> list[str]:
             if t.strip() and not t.strip().startswith("#")]
 
 
+#: 课型后缀 —— 带上它们的是**同一门课的分支**（习题课 / 研讨课 / 实验课）。
+#: ⚠️ 作者的原话：「TUT 基本上就是在正课的基础上进行一些细化，所以共用一个会更好，
+#:    因为都是正相关的术语。」
+_CLASS_KINDS = frozenset((
+    "tutorial", "tut", "lecture", "lec", "seminar", "sem",
+    "lab", "workshop", "practice", "practical", "class",
+))
+
+
+def base_course(course: str) -> str:
+    """`ECON10070 TUT` -> `ECON10070`；没有课型后缀就**原样返回**。
+
+    ⚠️ 同时认两种真形态：
+       · **括号**：`Introduction to Economics (Tutorial)`（UCD 课表里的样子）
+       · **裸空格**：作者手打的 `ECON10070 TUT`
+    ⚠️ 只剥**末尾**那一个词 —— 课名中间出现 "tutorial" 不该动它。
+    """
+    s = (course or "").strip()
+    if not s:
+        return s
+    # ⚠️ 组里**不许含括号** —— 否则 `re.search` 会从**最早**那个空格起匹配，
+    #    把 `to Economics (Tutorial` 整个吃进去（实测踩过）。
+    m = re.search(r"\s*[（(]\s*([^（()）]+?)\s*[)）]\s*$", s)
+    if m and m.group(1).strip().lower() in _CLASS_KINDS:
+        return s[:m.start()].strip()
+    parts = s.rsplit(None, 1)
+    if len(parts) == 2 and parts[1].strip().lower() in _CLASS_KINDS:
+        return parts[0].strip()
+    return s
+
+
 def course_terms_path(glossary_path: str, course: str) -> pathlib.Path | None:
     """定位分课程术语表 glossary/<课号>.txt。
+
+    ⭐⭐ **课型后缀先剥掉、用主课那份**（2026-09-29 加，作者拍板）。
+       `ECON10070 TUT` → 用 `glossary/ECON10070.txt`。
+       理由见 `_CLASS_KINDS` 上面那句作者原话。
+       ⚠️ **主课优先**：两个文件都在时用主课那份（作者拍板）——
+          所以 `ECON10070 TUT.txt` 会被**忽略**；那是刻意的（"共用一个会更好"）。
+       ⚠️ 主课那份**不存在**时才落回全名那份 —— 不让人白建的表变成死文件。
 
     ⚠️ 容错: 用户常用短代号(`cl course 10202` 会把 `10202` 写进 .course), 而文件是
     全名 `ECON10202.txt` —— 严格拼路径会**静默落空**(实测只加载到公共术语,
@@ -99,6 +137,11 @@ def course_terms_path(glossary_path: str, course: str) -> pathlib.Path | None:
     仅当唯一命中时才采用(防 `202` 这类歧义前缀误配)。
     """
     d = pathlib.Path(glossary_path).parent / "glossary"
+    _base = base_course(course)
+    if _base and _base != course:
+        _main = d / f"{_base}.txt"
+        if _main.exists():
+            return _main
     exact = d / f"{course}.txt"
     if exact.exists():
         return exact

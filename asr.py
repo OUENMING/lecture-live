@@ -49,7 +49,13 @@ class ParakeetASR:
             raise FileNotFoundError(
                 f"模型目录 {model_dir} 里 int8 与非 int8 混用: "
                 f"{[os.path.basename(p) for p in (enc, dec, join)]}")
-        toks = _find_file(model_dir, ["tokens.txt", "*.txt"])
+        # ⚠️⚠️ **tokens 只认精确名，不许退到 `*.txt`**（2026-09-29 修）。
+        #    `_find_file` 自己的 docstring 就写着「猜错会**静默用错词表**
+        #    （README.txt 也是 .txt）」—— 而这里原来传的是 `["tokens.txt", "*.txt"]`，
+        #    正好是它警告的那种猜法：`tokens.txt` 缺失时，若目录里只有一个别的
+        #    `.txt`，会把它**当词表**返回，识别结果是「看起来正常但全错」。
+        #    ⚠️ 它不是"多个才报错"能挡住的 —— 命中**一个**时那条歧义闸门根本不触发。
+        toks = _find_file(model_dir, ["tokens.txt"])
         self._rec = sherpa_onnx.OfflineRecognizer.from_transducer(
             encoder=enc, decoder=dec, joiner=join, tokens=toks,
             num_threads=num_threads, model_type="nemo_transducer")

@@ -56,6 +56,28 @@ def t_unknown_is_not_missing():
         f"老用户的模型**能用**，没戳只说明「不是我们装的」")
 
 
+@case("⭐⭐ `states` 是**部分字典**（键缺失）→ 那一项也不算缺")
+def t_partial_dict_is_unknown():
+    """⭐ 2026-09-29 修。上面那条用的是 `_ALL_UNKNOWN`（**每个键都在**），
+    所以「键**根本不在**」这一态没被覆盖 —— 而正是它踩了坑：
+
+        states.get(m.path, "missing")
+
+    键不在时默认成 `missing` = 「缺」→ **直接给出重下入口**。
+    触发它不需要意外：上游 `model_states` 失败 / 调用方漏填 → 字典是**部分**的。
+    ⚠️ 对 `qwen3` 那种 1GB 级的东西，误报一次就是白烧一遍流量 ——
+       而上面那条纪律「`unknown` ≠ `missing`」说的**就是这个**。
+    """
+    partial = {m.path: "ok" for m in doctor.MODELS[:1]}      # 只有一个键
+    got = ready.required_left(partial)
+    assert got == [], (
+        f"键缺失被判成「缺」了 —— 会重下 {sum(m.mb for m in got):.0f} MB。"
+        f"「我们不知道」和「确定没有」是两件事（`unknown` ≠ `missing`）")
+    # 反面：**真的**写 missing 时仍然算缺（别把这条修成"永远不缺"）
+    assert ready.required_left(_ALL_MISSING) != [], \
+        "全 missing 却一个都不算缺 —— 修过头了，那用户永远补不上模型"
+
+
 @case("⭐⭐ 变异验证：把 unknown 并进 missing → 上面那条必须红")
 def t_unknown_mutation():
     orig = ready.required_left

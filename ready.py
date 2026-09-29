@@ -68,9 +68,15 @@ def required_left(states: dict) -> list:
 
     ⚠️ **只有 `missing` 算缺。** `unknown`（老用户没戳）与 `stale`（版本对不上）
        都**不算** —— 它们能用，重下是白烧流量（纪律 1、2）。
+
+    ⚠️⚠️ **查不到的那一项按 `unknown` 算，不许按 `missing` 算**（2026-09-29 修）。
+       `states` 可能是**部分字典**（上游 `model_states` 失败 / 调用方漏填），
+       而 `missing` 会**直接给出重下入口** —— 对 `qwen3` 那种 1GB 级的东西，
+       误报一次就是白烧一遍流量。上面那条纪律「`unknown` ≠ `missing`」**就是指这个**，
+       而原来 `states.get(m.path, "missing")` 恰好把它写反了。
     """
     return [m for m in doctor.MODELS
-            if m.required and states.get(m.path, "missing") == "missing"]
+            if m.required and states.get(m.path, "unknown") == "missing"]
 
 
 def models_item(states: dict) -> dict:

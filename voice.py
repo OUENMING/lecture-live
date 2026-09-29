@@ -185,13 +185,19 @@ def add_sample(store: dict, course: str, emb: list) -> bool:
 
     ⚠️ 上限 `MAX_SAMPLES`：官方 `add(列表)` 会**平均**，
        样本太多会把早期的稀释掉（而越早的越可能是干净的信道）。
+
+    ⚠️⚠️ **满了就拒收，不是"滚动窗口"**（2026-09-29 修）—— 上面那句
+       「越早的越可能是**干净的信道**」就是取舍理由，所以保住的是**最早那批**。
+       原来写的是 `del vecs[0]`，**恰好把最早那条删掉**，与它自己给的理由相反。
+       ⚠️ 也不写成"先 append 再删最新" —— 那样 store 内容不变，
+          而这个函数的契约是「返回**有没有真的变**」，一直返 True 就是撒谎。
     """
     vecs = store.setdefault(course, [])
     if any(_close(a, emb) for a in vecs):
         return False                                  # 同一个向量，别重复记
+    if len(vecs) >= MAX_SAMPLES:
+        return False                                  # 满了：保住最早那批
     vecs.append([float(x) for x in emb])
-    if len(vecs) > MAX_SAMPLES:
-        del vecs[0]
     return True
 
 

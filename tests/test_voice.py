@@ -71,6 +71,28 @@ def t_corrupt_raises():
             f"下一次 save_store 就**把真数据整个覆盖掉**")
 
 
+@case("⭐⭐ 档案满了**拒收**，保住最早那批（与它自己写的理由一致）")
+def t_full_store_keeps_earliest():
+    """⭐ 2026-09-29 修。`add_sample` 的 docstring 写着「越早的越可能是**干净的信道**」
+    —— 上限存在的理由就是**别把早期样本稀释掉**，所以该保住**最早那批**。
+    而原来写的是 `del vecs[0]`，**恰好把最早那条删掉**，与它自己给的理由相反。
+
+    ⚠️ 也不许写成"先 append 再删最新" —— 那样 store 内容**不变**，而本函数
+       的契约是「返回**有没有真的变**」，一直返 True 就是撒谎。
+    """
+    st: dict = {}
+    n = voice.MAX_SAMPLES
+    rets = [voice.add_sample(st, "C", [float(i), 0.0]) for i in range(n + 3)]
+    got = [int(v[0]) for v in st["C"]]
+    assert len(got) == n, f"该封顶到 {n}，得到 {len(got)}"
+    assert got == list(range(n)), (
+        f"最早那批没被保住 —— 得到 {got}，应有 {list(range(n))}"
+        f"（`del vecs[0]` 会把 0 删掉，那正是 docstring 说要保的）")
+    assert rets[:n] == [True] * n, f"前 {n} 条该都算「真的变了」：{rets[:n]}"
+    assert rets[n:] == [False] * 3, (
+        f"满了之后该返 False（**内容没变**）—— 返 True 就是撒谎：{rets[n:]}")
+
+
 @case("⭐⭐ 形状不对的条目 → 抛，**绝不**静默丢掉（丢了会被 save_store 永久擦掉）")
 def t_malformed_entry_raises():
     """2026-09-29 修。原来形状不对的条目只是 `continue` 掉，于是

@@ -105,10 +105,69 @@ def t_no_default_vault():
         "DEFAULT_VAULT 回来了 —— 那意味着又有一个「用户没选过」的兜底目录"
 
 
-@case("⭐⭐ 没有库时 ObsidianWriter 整个关掉（这才是「不写」而不是「写错地方」）")
-def t_writer_disabled_without_vault():
-    w = ow.ObsidianWriter(None, "ECON10740", mode="ask")
-    assert w.enabled is False, "没有库却仍然 enabled —— 接下来就会 mkdir 一个凭空目录"
+@case("⭐⭐ 没有库时,**逐句底稿照写**（`sessions/` 那一层不许跟着一起没）")
+def t_sessions_still_written_without_vault():
+    """⭐⭐ 2026-09-29 修的真缺陷 —— 而**上一条判据原本正钉着它**。
+
+    原来 `enabled = bool(vault) and mode != "no"`，一个标志扛两件事：
+    「要不要记录」和「要不要写 Obsidian 笔记」。于是没有库时
+    `session_path is None` → `append()` 首行就 return → **整节课一个字都不落盘**。
+
+    ⚠️ 这**绕过了本模块的立身之本**「先落盘, 再询问」（文件头），
+       而命令行那句提示还写着"这次只写 sessions/" —— 假话。
+    ⚠️ 触发它不需要意外：全新安装、或双击 `.app`（没有 `$OBSIDIAN_VAULT`、
+       也还没记住过库）。那正是**最需要底稿**的人 —— 将来"打包成 MD/PDF"
+       导出的也就是这一层。
+
+    ⚠️ 上一条判据（`t_writer_disabled_without_vault`）当时的理由是
+       「没有库却仍然 enabled —— 接下来就会 mkdir 一个凭空目录」。
+       **那理由只对了一半**：会凭空造目录的是 Obsidian 那一半（`note_path_for`），
+       不是 `sessions/`（`SESSIONS` 是仓库自己那个目录，与用户选的库无关）。
+       判据把两件事当成一件 → 保护了后半、牺牲了前半。**判据钉住的正是缺陷本身。**
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        old = ow.SESSIONS
+        ow.SESSIONS = pathlib.Path(d)          # 隔离：别往真 sessions/ 写
+        try:
+            w = ow.ObsidianWriter(None, "ECON10740", mode="ask")   # 没有库
+            assert w.session_path is not None, \
+                "没有库时 session_path 是 None —— 逐句底稿会整节丢掉"
+            assert pathlib.Path(w.session_path).exists(), "会话文件没建起来"
+            w.append("hello world", "你好世界", raw="hello world")
+            assert w.count == 1, "append 被守卫挡掉了 —— 这一句没落盘"
+            txt = pathlib.Path(w.session_path).read_text(encoding="utf-8")
+            assert "hello world" in txt, "落盘的内容里没有那一句"
+            # 收尾不许写笔记（没地方写），但**不许抛**，而且要说实话
+            msg = w.close()
+            assert "已记录" in msg and "没设 Obsidian 库" in msg, \
+                f"收尾那句话没说实话：{msg!r}"
+            assert w.vault_path is None, "没有库却设了 vault_path"
+        finally:
+            ow.SESSIONS = old
+
+
+@case("⚠️ `--save-notes no` 仍然整个关掉（拆 `enabled` 不许把这个也放了）")
+def t_save_notes_no_still_disables():
+    """拆 `enabled` 时最容易顺手放走的一条 —— `mode="no"` 必须照旧什么都不写。
+
+    ⚠️ 这条是上一条的**对价**：修「没库也要写」的时候，不许把
+       「用户明确说了不写」也一起放了。
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        old = ow.SESSIONS
+        ow.SESSIONS = pathlib.Path(d)
+        try:
+            for vault in (None, d):                 # 有没有库都不许写
+                w = ow.ObsidianWriter(vault, "TESTX", mode="no")
+                assert w.enabled is False, f"vault={vault!r} 时 mode=no 却没关掉"
+                assert w.session_path is None
+                w.append("x", "y")
+                assert w.count == 0, "mode=no 却记录了内容"
+            assert not list(pathlib.Path(d).glob("*.md")), "mode=no 却建了会话文件"
+        finally:
+            ow.SESSIONS = old
 
 
 @case("有库时笔记真的落在那库里（端到端那条链）")

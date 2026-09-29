@@ -1250,6 +1250,25 @@ class R15_LostRange(unittest.TestCase):
         self.assertIn("## ⭐ 我标记的重点", out,
                       "历史会话里的 ⭐ 必须照旧渲染（抬头仍写着 Exam Focus）")
 
+    def test_render_note_renders_the_keypoint_section(self):
+        """⭐⭐ **非空**那一态必须真的渲染出来 —— 我原来只测了空态。
+
+        2026-09-29 OCR 抓到的真缺陷：`_render_note` 的签名改成 `keypoint_items`
+        之后，里面那个循环还写着 `for p, text, ix in kp:` —— `kp` 是上一版
+        `_keypoint_items` 里的局部名。于是**只要 Jev 成功**（非空）就 `NameError`，
+        而 `close()` 调 `_render_note` **没有 try/except** → **整份笔记写不出来**。
+
+        ⚠️ 教训写在判据里：**只测空态等于没测这一节**。空态走的是 `if` 的假分支，
+           而缺陷住在真分支里 —— 本仓库的「判据要指向那个位置」那条的又一例。
+        """
+        w = ObsidianWriter(None, "TESTX", mode="no")
+        entries = [{"ts": "10:00:00", "en": "hello", "zh": "你好", "asr": "",
+                    "star": False}]
+        out = w._render_note(entries, {}, [], "ok", [], [(0.90, "hello", [0])])
+        self.assertIn("## 🎯 这节课最值得记的几句", out, "有重点句却没渲染那一节")
+        self.assertIn("`0.90`", out, "概率没写进去")
+        self.assertIn("hello", out, "句子没写进去")
+
     def test_render_note_never_calls_the_keypoints_fn(self):
         """⭐ `_render_note` 是**纯函数**, 取数那一步（会联网）在 `close()` 里。
 

@@ -401,8 +401,20 @@ class ObsidianWriter:
                  polish_model: str | None = None, keypoints=None,
                  keypoints_fn=None):
         self.mode = mode
-        # 没设课程代码也照常落盘: 线下课常常没课号, 不该因此丢掉整节课的笔记。
-        self.enabled = bool(vault) and mode != "no"
+        # ⚠️⚠️ **`enabled` 只管一件事：要不要记录**（`sessions/` 那层底稿）。
+        #    **「写不写 Obsidian 笔记」是另一件事** —— 由 `self._vault is not None` 判
+        #    （见 `close()` 里那处早退）。
+        #
+        #    2026-09-29 拆开。原来写的是 `enabled = bool(vault) and mode != "no"`：
+        #    一个标志扛两件事，于是**没有库时连 `sessions/` 都不建**
+        #    （实测：`ObsidianWriter(None, …)` → `session_path is None` → `append()`
+        #    首行就 return）→ **整节课一个字都不落盘**。
+        #    ⚠️ 这恰好绕过了本模块的立身之本：「**先落盘, 再询问**」（见文件头），
+        #       而且命令行那句提示还写着"这次只写 sessions/" —— 那是假话。
+        #    ⚠️ 触发它不需要意外：全新安装、或双击 `.app`（没有 `$OBSIDIAN_VAULT`
+        #       也还没记住过库）就会命中。而那些正是**最需要会话底稿**的人
+        #       —— 将来的「打包成 MD/PDF」导出的也就是它。
+        self.enabled = mode != "no"
         self._vault = os.path.expanduser(vault) if vault else None
         self._course = course or DEFAULT_COURSE
         self._date = time.strftime("%Y-%m-%d")
@@ -989,7 +1001,7 @@ class ObsidianWriter:
                   "*（按 Jev 给「值不值得抄进复习纸」的概率排的序。⚠️ **它是排序信号，"
                   "不是考试预测** —— 实测同一句换个问法能从 0.77 掉到 0.61，"
                   "所以**看顺序，别卡分数**。）*", ""]
-            for p, text, ix in kp:
+            for p, text, ix in keypoint_items:
                 tag = f"L{ix[0] + 1}" if len(ix) == 1 else f"L{ix[0] + 1}–{ix[-1] + 1}"
                 L += [f"- `{p:.2f}` `{tag}` {text}"]
             L += [""]
@@ -1033,13 +1045,23 @@ class ObsidianWriter:
            流程里是死的。跨线程让长活停下来只能靠标志。卡上的 [跳过精修] 按钮
            与终端的 Ctrl+C 走的是同一条路。
         """
-        # ⚠️ 关旁路句柄放在**最前面**：`close()` 有三条早退（未启用 / 零句又无问答 /
-        #    用户答"不保存"），放在后面就会在那些路径上漏掉它。幂等，重复调无妨。
+        # ⚠️ 关旁路句柄放在**最前面**：`close()` 有四条早退（未启用 / **没库** /
+        #    零句又无问答 / 用户答"不保存"），放在后面就会在那些路径上漏掉它。
+        #    幂等，重复调无妨。
         #    2026-09-28 由作者那句"不用保存笔记"提醒才发现 —— 那正是会走到早退的路径。
         self.close_lost()
         self.close_atom()      # ⚠️ 同一条教训：**都在早退之前**（下面有三条早退）
         if not self.enabled or not self.session_path:
             return ""
+        # ⚠️ **没有库 = 只跳过「笔记」那一半** —— `sessions/` 已经在了（每句定稿
+        #    都 `append()` 过）。2026-09-29 加的。（`enabled` 拆开之前这里到不了。）
+        #    ⚠️ 必须**早退在这之前**：下面的精修 / 复习层要跑好几轮 LLM（花 API 钱），
+        #       而它们**只服务于笔记** —— 没有库就没有笔记可写，跑了是白烧钱。
+        #    ⚠️ 将来的「打包成 MD/PDF」接的正是这一档：`_render_note()` 是**纯函数**
+        #       （不碰 vault），导出直接复用它换落点即可。
+        if self._vault is None:
+            return (f"📄 已记录 {self._n} 句 → {self.session_path}\n"
+                    f"   （没设 Obsidian 库，这次不生成笔记 —— 逐句底稿在上面那个文件里）")
         if self._n == 0:
             # ⚠️ 原来是 `self._n == 0` 直接 return —— 但"有提问、零句转录"(麦克风故障,
             # 或开课十几秒就问了一句然后退出)会把**问答静默丢掉**, 而问题正是这个

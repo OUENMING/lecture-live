@@ -51,9 +51,12 @@ def main() -> int:
         return 1
 
     # ⚠️ 先校验 vault。下面会强制 `w.enabled = True` 绕过构造期的保护
-    # (`enabled = bool(vault) and mode != "no"`), 所以 vault 为空时 close()
-    # 里 `Path(self._vault)` 会抛 TypeError —— 用户只看到堆栈, 不知道是 vault 配错。
-    # (2026-09-24 OCR 发现。)
+    # (`enabled = mode != "no"`, 见 `obsidian_writer.__init__`)。
+    # ⚠️ 2026-09-29 起那两件事已经分开了：`enabled` 只管"要不要记录"，
+    #    而"写不写笔记"由 `self._vault is not None` 判（`close()` 里那处早退）。
+    #    所以 vault 为空时 `close()` 不再抛 `TypeError` 了 —— 它会**老老实实**
+    #    说"没设库、不生成笔记"。这条校验留着是因为**重建这个脚本本来就要写笔记**，
+    #    没有库它没有意义（不是防崩，是防无意义地白跑）。
     # 特别地: `os.environ.get("OBSIDIAN_VAULT", 默认)` 在变量**存在但为空**时
     # 返回空串而不是默认值, 所以这条路径真的会走到。
     if not args.vault:

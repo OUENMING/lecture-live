@@ -406,8 +406,37 @@ def main() -> int:
         #       「验不了」和「验过了」必须分开（同 `readiness` 那条 None vs 0）。
         _menu = ov._status.menu() if ov._status is not None else None
         _titles = [mi.title() for mi in _menu.itemArray()] if _menu is not None else None
+        # ⚠️ 2026-09-30：列表里多了「课堂纲要」（计划 §9.9），插在准备之前。
+        #    判据的**意图没变** —— 钉的是「`开课前的准备…` 不许静默少一项」，
+        #    不是那个固定长度。所以这里比对**完整列表**，改动一眼能看见。
         check("菜单栏有「开课前的准备…」（不是静默少一项）",
-              _titles == ["开启鼠标穿透", "开课前的准备…", "退出"], str(_titles))
+              _titles == ["开启鼠标穿透", "课堂纲要", "开课前的准备…", "退出"], str(_titles))
+        # ⭐⭐ T25（计划 §9.9 标的风险）：`NSMenu` 默认 `autoenablesItems = True`，
+        #    它会**按 target 响不响应 action 自动改 `enabled`** ——
+        #    而我们的 target 是响应的 → 有可能把 `setEnabled_(False)` **覆盖掉**。
+        #    ⚠️ 这条**必须实测**，不能靠读文档：`isEnabled()` 在 autoenable 生效前
+        #    读到的可能还是我们设的那个值（**假绿**）。这里让 AppKit 真的走一遍
+        #    菜单校验（`menu.update()`），再读。
+        _m = ov._mi_outline
+        check("⭐ 菜单栏有「课堂纲要」", _m is not None and _m.title() == "课堂纲要")
+        if _m is not None:
+            ov.set_trans_mode("raw")
+            try:
+                ov._status.menu().update()
+            except Exception:                              # noqa: BLE001
+                pass
+            _raw_enabled = _m.isEnabled()
+            ov.set_trans_mode("both")
+            try:
+                ov._status.menu().update()
+            except Exception:                              # noqa: BLE001
+                pass
+            _both_enabled = _m.isEnabled()
+            # 改坏：把 `set_trans_mode` 里那句 `setEnabled_(mode != "raw")` 删掉 -> 上面那条红
+            check("⭐⭐ 纯转录档下菜单项**真的置灰**（autoenable 没把它覆盖掉）",
+                  _raw_enabled is False, f"raw 档 isEnabled={_raw_enabled}")
+            check("⭐ 切回双语后**恢复可点**", _both_enabled is True,
+                  f"both 档 isEnabled={_both_enabled}")
 
         # ⭐ 窄面板下**可见**按钮不许跑到面板外。
         #    ⚠️ 宽度从 `MIN_WIDTH` **派生**，不许写死 —— 写死的话下限一改断言就腐坏
@@ -415,13 +444,58 @@ def main() -> int:
         #    它们 + 间距需要 286px、加两侧 pad = 318px，所以 MIN_WIDTH 从 280 抬到 320。
         #    ⚠️ `_width` 是布局的输入，改完要还原。
         _w0, _h0 = ov._width, ov._height
+        # ⭐ 章节条（计划 §9.8）的宽度扫描断言 —— 喂一条章，否则它一直是空的。
+        ov.summary_update({"kind": "chapter", "chapter": {
+            "id": 0, "status": "final", "title": "A Rather Long Chapter Title Here",
+            "title_zh": "题", "t0": "15:05:27", "t1": "15:16:35", "lo": 1, "hi": 9,
+            "sentences": []}})
+        ov._outline_new = False
         try:
-            for _w in (overlay.MIN_WIDTH, overlay.MIN_WIDTH + 40.0, 360.0, 455.0):
+            # ⚠️ **必须带一个小数宽度**（455.5）—— 否则「`floor` 生效」那条**没有区分能力**：
+            #    320/360/455/900 这几个宽度下可用宽度**碰巧都是整数**，
+            #    把 `math.floor` 删掉判据照样绿（我第一版就是这么假绿的）。
+            #    455.5 未取整是 120.5 ✅ 真能判。live resize 之后宽度本来就是小数。
+            for _w in (overlay.MIN_WIDTH, overlay.MIN_WIDTH + 40.0, 360.0, 455.0,
+                       455.5, 900.0):
                 ov._width = _w
                 ov._layout()
                 _off = [(b.title(), round(b.frame().origin.x, 1)) for b in ov._bar
                         if not b.isHidden() and b.frame().origin.x < overlay.PAD]
-                check(f"宽 {_w:.0f} 时没有可见按钮挤进左边距", not _off, str(_off))
+                check(f"宽 {_w:.1f} 时没有可见按钮挤进左边距", not _off, str(_off))
+                # ---- 章节条 ----
+                _lb = ov._chapter_lbl
+                if _lb.isHidden():
+                    check(f"宽 {_w:.1f} 时章节条隐藏（可用宽度不够）", True, "")
+                    continue
+                # ⚠️ 这条**挡不住**把 `avail = (x+gap) - pad` 写成 `x - pad` ——
+                #    那样只会让条**窄 6px**、不会压到按钮（⚠️ **计划 §1.3① 的措辞反了**：
+                #    它说那样会"多算一个 gap"、压到最左按钮，实测是**少** 6px）。
+                #    留着它是因为**不重叠**才是真正要守的那条。
+                _bx = _lb.frame().origin.x + _lb.frame().size.width
+                _hit = [b.title() for b in ov._bar
+                        if not b.isHidden() and b.frame().origin.x < _bx]
+                check(f"⭐⭐ 宽 {_w:.1f} 时章节条**不压到任何可见按钮**", not _hit, str(_hit))
+                check(f"⭐ 宽 {_w:.1f} 时章节条从左边距起", _lb.frame().origin.x == overlay.PAD,
+                      str(_lb.frame().origin.x))
+                # 改坏：把 `math.floor(avail)` 换成 `avail` -> **在 455.5 那一档**红。
+                check(f"⭐⭐ 宽 {_w:.1f} 时章节条宽度是**整数**（`floor` 生效；不取整文字会发虚）",
+                      float(_lb.frame().size.width).is_integer(),
+                      str(_lb.frame().size.width))
+                check(f"⭐ 宽 {_w:.1f} 时点击区与标签**同框**（同一个数，别各算各的）",
+                      ov._chapter_hit.frame().size.width == _lb.frame().size.width
+                      and ov._chapter_hit.frame().origin.x == _lb.frame().origin.x,
+                      f"hit={ov._chapter_hit.frame()} lbl={_lb.frame()}")
+        finally:
+            ov._width, ov._height = _w0, _h0
+            ov._layout()
+        # ⚠️ 可用宽度**不够 90** 时必须隐藏（计划 §9.8 的三个条件之一）。
+        try:
+            ov._width = 340.0
+            ov._layout()
+            _avail = ov._chapter_lbl.frame().size.width if not ov._chapter_lbl.isHidden() else 0.0
+            check("⭐ 窄到放不下时章节条**隐藏**（而不是画成半截）",
+                  ov._chapter_lbl.isHidden() or _avail >= overlay.CHAPTER_MIN_W,
+                  f"hidden={ov._chapter_lbl.isHidden()} w={_avail}")
         finally:
             ov._width, ov._height = _w0, _h0
             ov._layout()

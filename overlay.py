@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import pathlib
 import time
@@ -386,40 +387,33 @@ OUTLINE_DIVIDER = "— 上次看到这里 —"
 
 #: 章节条的字号与文字透明度。
 #:
-#: ⚠️⚠️ **这个数只对「暗背景下的面板」成立，见下面那张表** —— 单纯看它是会误判的。
+#: ⚠️⚠️ **单看这个 α 会误判可读性** —— 面板的设计是「**低 scrim + 黑描边**」：
+#:    `_label` 给每个标签挂 `setShadow_(self._shadow)`（`_make_shadow`：黑 α0.80 /
+#:    blur 1.5 / offset (0,−1)），逐字「在任意底色（纯白 PPT / 彩图）上把字从背景里切出来」。
+#:    ⚠️ **这一点本文件 228–252 行早有记录**（2026-09-24 黑底/白底双拍实测：
+#:    scrim α0.38 → 白底之上白字对比度只有 **2.33:1**，而结论是
+#:    「可读性**实际由描边承担**，纯白底上仍清晰」）。
+#:    → ⭐ 所以 HIG 那条「小字 7:1」在这块面板上**本来就不适用**（面板有意用通透换对比度）。
+#:      ⚠️ 我 2026-09-30 重测了一遍（满屏纯黑/纯白当底、上屏截图取样），
+#:      数对得上（白底之上 2.7–3.5），**但把它当成新发现是错的 —— 它早就写在上面了。**
 #:
-#: 12pt 属于**小字**，HIG 的目标是 **7:1**（最低 4.5:1；`docs/RESEARCH-macos-aesthetic.md §4`）。
+#: 那这个 α 还量它干嘛 —— 量的是**它和邻居齐不齐**（沿用既有视觉词汇，不发明新的）：
+#: 面板内部底色**跟着底走**（实测 纯黑底 `#100d0e` L=0.0043 / 纯白底 `#686566` L=0.1321，差 30.7 倍），
+#: 12pt 的小字在这两端分别是：
 #:
-#: 量法（⚠️ 照那份调研自己那条纪律：**离屏的幅度不是屏幕上的幅度**，§3 实测过）
-#: → **上屏截图取样**：铺一块满屏纯色当底，再把面板压上去，**每张都亲眼看**。
+#: | α | 黑底之上 | 白底之上 | |
+#: |---|---|---|---|
+#: | 0.50（`_draft_lbl`） | 5.34 | 2.73 | |
+#: | **0.65（本条）** | **8.38** | **3.49** | 落在邻居中间 ✅ |
+#: | 0.78（`_draft_zh`） | 11.79 | 4.26 | |
 #:
-#: ⭐ **面板内部的底色随后面是什么而剧烈变化**（面板内部本身是完全均匀的）：
-#:
-#: | 面板底下 | 实测底色 | 亮度 |
-#: |---|---|---|
-#: | 纯黑铺满 | `#100d0e` | 0.0043 |
-#: | 纯白铺满（= **白幻灯片**） | `#686566` | 0.1321 |
-#: | | | **差 30.7 倍** |
-#:
-#: → 白色文字在各 α 上的对比度：
-#:
-#: | α | 黑底之上 | 白底之上 |
-#: |---|---|---|
-#: | 0.50（`_draft_lbl`） | 5.34 | **2.73 ❌** |
-#: | **0.65（本常量）** | **8.38 ✅7:1** | **3.49 ❌** |
-#: | 0.78（`_draft_zh`） | 11.79 | 4.26 ⚠️ |
-#: | 0.95（`_gloss_lbl`） | 11.15 | **3.48 ❌** |
-#: | 1.00 | 19.34 | 5.77 |
-#:
-#: ⚠️⚠️ **结论：白底之下，面板里没有一档文字够得着 4.5:1** ——
-#:    要够到需要 α≈**0.818**，而 **7:1 在任何 α 下都到不了**。
-#:    这是**面板整体的既有性质**（不是本章节条引入的），根子在 `panel.py` 的黑纱强度。
-#: ⭐ 所以本条选 **0.65**：它在**暗底**上稳稳过 7:1，在**白底**上与既有各档**同一水平**
-#:    （术语行 3.48 / 草稿行 2.73）—— 沿用既有层次，不让章节条变成一个异类。
-#: ⚠️ **治本要动 `panel.py` 的 `SCRIM_ALPHA`**，那是另一件事、影响整块面板，单独评估。
 #: ⚠️ 用白色而**不是**暖黄 —— 暖黄已被术语行占着（`_gloss_lbl`），HUD 章说「use color sparingly」。
 CHAPTER_FONT_SIZE = 12.0
 CHAPTER_TEXT_ALPHA = 0.65
+#: 章节条**至少**要有这么宽才显示（计划 §9.8 的三个条件之一）。
+#: ⚠️ 低于它时标签和点击区**一起隐藏** —— 半个标题比没有标题更让人分心，
+#:    而且点击区太小会变成"点不中"的挫败源。
+CHAPTER_MIN_W = 90.0
 
 
 def fold_rows(text, fits, split) -> list:
@@ -978,6 +972,28 @@ class Overlay:
         self._gloss_hit = _make_click_view(self._on_gloss_click)
         ve.addSubview_(self._gloss_hit)
 
+        # ---- 章节条（计划 §9.8）----
+        # 摆在收起态/展开态**顶栏的最左侧**，位置在 `_layout` 里算（要用到按钮摆完后的 `x`）。
+        # ⚠️ 透明点击区**后加** —— 它是 `ve` 的最后一个 subview，会盖在标签上面，
+        #    这是有意的（同 `_gloss_hit`：裸标签收不到鼠标）。
+        # ⚠️ 它的 `mouseDown_` 由 `_make_click_view` 接管 —— 这一点关系到
+        #    `mouseDownCanMoveWindow`：**视图自己实现了 `mouseDown_` 时 AppKit 就不会
+        #    把事件拿去拖窗口**（CLAUDE.md 那条清单项：「自己接管 mouseDown_ 或显式设
+        #    `mouseDownCanMoveWindow -> False`，任取其一」）。
+        self._chapter_lbl = self._label(
+            CHAPTER_FONT_SIZE,
+            NSColor.whiteColor().colorWithAlphaComponent_(CHAPTER_TEXT_ALPHA),
+            1, self._trunc)
+        ve.addSubview_(self._chapter_lbl)
+        self._chapter_hit = _make_click_view(self._on_chapter_click)
+        ve.addSubview_(self._chapter_hit)
+        self._chapter_lbl.setHidden_(True)
+        self._chapter_hit.setHidden_(True)
+        #: 菜单栏那一项（`_install_status_item` 里建）。⚠️ 先给 `None` ——
+        #: 那个函数整段包在 `try` 里（拿不到状态栏图标是**已知**的失败模式），
+        #: 不给初值的话 `set_trans_mode` 会在那条路上 `AttributeError`。
+        self._mi_outline = None
+
         # 面板按钮只保留"永远点得到"的两个。
         # 鼠标穿透不能放在面板上: 开启后窗口忽略所有鼠标事件, 按钮会集体失效(单向死锁),
         # 所以穿透只从菜单栏 🎧 切换。
@@ -1118,6 +1134,18 @@ class Overlay:
             self._targets.append(t1)
             self._mi_through.setTarget_(t1); self._mi_through.setAction_("clicked:")
             menu.addItem_(self._mi_through)
+
+            # ⭐ 「课堂纲要」—— 章节条的**备用入口**（计划 §9.9）。
+            #    它**不占顶栏宽度、永远点得到**：顶栏挤到放不下章节条时，它就是唯一入口。
+            #    ⚠️ 摆位在「开课前的准备…」**之前** —— 三个都是"对这次运行做的事"，
+            #       而纲要是**课中**用的，比"开课前的准备"更常按到。
+            mi_outline = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "课堂纲要", None, "")
+            t4 = _make_button_target(self._toggle_outline)
+            self._targets.append(t4)
+            mi_outline.setTarget_(t4); mi_outline.setAction_("clicked:")
+            self._mi_outline = mi_outline        # ⚠️ 常驻：置灰 / 恢复要按它
+            menu.addItem_(mi_outline)
 
             # ⭐ 「开课前的准备…」—— 上课中再拖课件用的（作者 2026-09-26 的决定）。
             #    放在穿透与退出之间：三个都是「对这次运行做的事」，退出在最下（惯用位置）。
@@ -1657,6 +1685,20 @@ class Overlay:
         # 缓存值) —— 这是 2026-09-24 代码审计抓出来的漏网路径。
         if abs(self._width - old_w) > 0.5:
             self._answer_refold()
+        # ---- 课堂纲要：同一处、同一个理由（计划 §9.7）----
+        # ⚠️ `_outline_snapshot` 同样是**按折行当时的宽度**实测出来的**缓存值** ——
+        #    宽度一变就是陈的，超过槽位的部分会被 AppKit **静默截断**（不留省略号）。
+        #    理由逐字同上：`MIN_WIDTH` 保护的是**字幕**（每次按新宽度重渲），
+        #    **不保护这些缓存行**。
+        # ⚠️ 插在这儿是因为 `_answer_refold()` 的调用点**就这一处**，
+        #    两者本来就是同一件事（宽度变了 → 缓存的行要重折）。
+        if self._outline_on and abs(self._width - old_w) > 0.5:
+            self._outline_snapshot = self._build_rows()
+            # ⚠️ 置成 `None` **不是**"清空" —— `_render` 里那句
+            #    `if self._tv_mode != "outline"` 据此判"要重新灌一次"。
+            #    不置的话下一帧走 else 分支、**新快照根本不会上屏**。
+            self._tv_mode = None
+            self._scroll_outline_to_divider()
         self._layout()
 
     def _layout(self):
@@ -1717,6 +1759,30 @@ class Overlay:
             x -= w
             b.setFrame_(NSMakeRect(x, self._height - 28, w, 24))
             x -= gap
+        # ---- 章节条摆进**最左按钮左边的空档**（计划 §9.8）----
+        # ⚠️⚠️ 算术：循环体**最后还减了一个 `gap`**，所以结束时
+        #    `x` = 最左按钮的左边缘 **− gap**。→ 左边缘 = `x + gap`，
+        #    可用宽度 = `(x + gap) - pad`。
+        #    ⚠️ 计划 §1.3① 更正过原稿的写法：原稿是 `x - pad`，
+        #       那会**多算一个 gap、少算 pad** → 章节条压到最左那个按钮上。
+        left = x + gap
+        avail = left - pad
+        _ctext = self._chapter_bar_text()
+        # 三个条件**全**满足才显示；否则标签和点击区**一起**隐藏（计划 §9.8）。
+        _cshow = bool(_ctext) and avail >= CHAPTER_MIN_W and self._trans_mode != "raw"
+        if self._chapter_lbl is not None:
+            self._chapter_lbl.setHidden_(not _cshow)
+        if self._chapter_hit is not None:
+            self._chapter_hit.setHidden_(not _cshow)
+        if _cshow:
+            # ⚠️ **宽度必须 `floor`** —— 可用宽度是「从右边缘逐个减 `sizeToFit()` 出来的
+            #    按钮宽」累减得到的，**几乎必然是小数**；不取整会让标签和点击区落在
+            #    **半像素**上 → 文字发虚（`RESEARCH-macos-aesthetic.md §7` 的指纹表）。
+            #    ⚠️ 取整之后标签与点击区**用同一个数**（同框），别各算各的。
+            _cw = float(math.floor(avail))
+            self._chapter_lbl.setStringValue_(_ctext)
+            self._chapter_lbl.setFrame_(NSMakeRect(pad, self._height - 28, _cw, 24))
+            self._chapter_hit.setFrame_(((pad, self._height - 28), (_cw, 24)))
         self._drag_layer.setFrame_(((0.0, 0.0), (self._width, self._height)))
         self._ve.setFrame_(self._panel.contentView().bounds())
         self._scrim.setFrame_(self._ve.bounds())
@@ -2133,6 +2199,33 @@ class Overlay:
                 self._tv.scroll_to_index(i)
                 return
         self._tv.scroll_to_top()
+
+    def _chapter_bar_text(self) -> str:
+        """章节条那一行。**没有可显示的东西就返回空串**（调用方据此隐藏）。
+
+        ⚠️ 用**开始时间**而不是"已进行 N 分钟" —— 那样**不需要定时刷新**
+           （计划 §9.8 明写）。每分钟重画一次顶栏是白烧电、还会让文字跳。
+        ⭐ 标题取**最新的那一章**（按 `t0`）；**一章都没有时退回当前主题**
+           （`windows[-1].topic`）—— 开课头十分钟本来就只有主题没有章。
+        """
+        chs = list((self._outline.get("chapters") or {}).values())
+        dot = " ●  " if self._outline_new else ""
+        if chs:
+            c = max(chs, key=lambda x: (x.get("t0") or ""))
+            return f"{dot}▸ {c.get('title') or '（无标题）'} · since {c.get('t0') or ''}"
+        wins = self._outline.get("windows") or []
+        topic = (wins[-1].get("topic") if wins else "") or ""
+        if not topic:
+            return ""
+        return f"{dot}▸ {topic} · since {wins[-1].get('t') or ''}"
+
+    def _on_chapter_click(self) -> None:
+        """章节条被点 → 开关纲要。**主入口**（计划 §9.9）。
+
+        ⚠️ 走 `_toggle_outline` 而不是 `_open_outline` —— 再点一下要能收起来，
+           否则用户被关在纲要里出不去（唯一的出口就剩菜单栏了）。
+        """
+        self._toggle_outline()
 
     def _toggle_outline(self) -> None:
         """纲要的主入口（章节条 / 菜单栏都调它）。
@@ -2574,6 +2667,11 @@ class Overlay:
     def _lost(self):
         # ⚠️ `_button()` 的 `_clicked` 已经先 `_release_focus()` 了。
         #    真正落盘那一步(mark_lost)只做"拼一行 + 写 + flush", 见它的 docstring。
+        # ⭐ 顺带往纲要里记一笔（计划 §9.10）—— 它让纲要能画出
+        #    「❓ 你在 时间 标记了这里」（`build_outline_rows` 按章的 `t0`–`t1` 认领）。
+        # ⚠️ 放在 `_on_lost()` **之前**：那一步写盘失败也不该让纲要少一个标记
+        #    （两者互不依赖，而且纲要这边是纯内存操作、不会抛）。
+        self._outline["marks"].append(time.strftime("%H:%M:%S"))
         self._on_lost()
 
     def _ask(self):
@@ -2626,6 +2724,24 @@ class Overlay:
             self._pinned_term = None
             # ⚠️ 答案缓冲(_answer_*)刻意**不在这里清**: 讲解是独立入口, 不被这个开关
             # 替代、也不依赖它。往这个清理块里加答案状态就是把"译关仍可用"打掉。
+        # ⭐ **纯转录档：纲要是死的**（`DESIGN.md:187`「纯转录 | 一个模型请求都不发」，
+        #    那一档下 `drain()` 根本不喂数据 → 纲要永远是空的）。
+        #    → 关掉已经开着的纲要，并把**章节条隐藏、菜单项置灰**，
+        #      三处判据必须一致 —— 否则用户点了没反应，会以为功能坏了（计划 §9.9/§9.10）。
+        if mode == "raw":
+            if self._outline_on:
+                self._close_outline()
+        if self._mi_outline is not None:
+            # ⚠️⚠️ **光 `setEnabled_(False)` 没用 —— 实测（判据 T25）被 `autoenable` 覆盖掉了。**
+            #    `NSMenu` 默认 `autoenablesItems = True`：它**按 target 响不响应 action
+            #    自动改 `enabled`**，而我们的 target 永远响应 `clicked:`
+            #    → `raw` 档下 `isEnabled()` 实测仍然是 `True`。
+            # ⭐ 所以改用 AppKit 认可的信号：**把 action 拿掉**。没有 action 的菜单项
+            #    autoenable 就判它不可用 → 变灰且点不动 ✅；切回来时把 action 放回去。
+            #    ⚠️ 不用 `menu.setAutoenablesItems_(False)` —— 那会连**其余三项**一起
+            #       变成"必须显式 enable"，等于为了这一项改了整张菜单的规则。
+            self._mi_outline.setAction_(
+                None if mode == "raw" else "clicked:")
         self._sync_trans_button()
         self._mark_dirty(urgent=True)
         self._on_translate(mode)

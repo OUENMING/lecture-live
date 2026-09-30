@@ -394,6 +394,52 @@ def _polish_state(stats: dict | None) -> str:
     return "partial" if stats.get("failed") else "ok"
 
 
+def _render_outline_section(items: dict) -> list:
+    """课堂纲要 -> 笔记里那一节。**纯函数**（不起窗口、不联网、可单测）。
+
+    ⚠️ **返回空列表 = 这一节什么都不该写**（既没课务也没正式章）——
+       调用方据此**整节跳过**，不是写一个空标题。
+    ⭐ **排法①**（作者 2026-09-30）：**中文当正文、英文原句降小字** ——
+       与直播字幕、面板里的纲要**同一条排法**。⚠️ 计划 §10.2 原写的是
+       「英文合成句 + 括注中文术语」，作者后来两次要求「中文占比再提高」→ 按①实现。
+       ⚠️ `en` 一个字没丢：它在小字那行。
+    ⚠️ 没有合成句的章**退回它的原子要点**（不写"（空）"）。
+    """
+    ds = list(items.get("deadlines") or ())
+    chs = [c for c in (items.get("chapters") or ()) if c.get("status") == "final"]
+    if not ds and not chs:
+        return []
+    out: list = ["## 📑 课堂纲要", ""]
+    if ds:
+        out += ["### Deadlines · 课务", ""]
+        for d in ds:
+            out.append(f"- **{d.get('quote', '')}**")
+            out.append(f"  · {d.get('t', '')} · 来源 {d.get('source', '')}"
+                       f" · **待确认**" + ("  · **已改期**" if d.get("changed") else ""))
+        out.append("")
+    for c in chs:
+        out += [f"### {c.get('title_zh') or c.get('title') or '（无标题）'}"
+                f"（{c.get('t0', '')}–{c.get('t1', '')}）", ""]
+        sents = c.get("sentences") or []
+        if sents:
+            for sn in sents:
+                flag = {"board": "⚠ 依赖板书或图，转录不完整",
+                        "discussion": "课堂讨论"}.get(sn.get("flag"), "")
+                zh = (sn.get("zh") or "").strip()
+                en = sn.get("en", "")
+                terms = " · ".join(f"{a} {b}" for a, b in (sn.get("terms") or []))
+                out.append(f"- **{zh or en}**")
+                sub = " · ".join(x for x in ((en if zh else ""), terms, flag) if x)
+                if sub:
+                    out.append(f"  · {sub}")
+        else:
+            for a in (items.get("atoms") or ()):
+                if (c.get("lo") or 0) <= (a.get("src") or [0])[0] <= (c.get("hi") or 0):
+                    out.append(f"- **{(a.get('zh') or '').strip() or a.get('text', '')}**")
+        out.append("")
+    return out
+
+
 class ObsidianWriter:
     def __init__(self, vault: str | None, course: str | None, mode: str = "ask",
                  api_key: str | None = None, model: str = "deepseek-flash",
@@ -795,6 +841,28 @@ class ObsidianWriter:
         except Exception:                                     # noqa: BLE001
             return []                                         # ⚠️ 收尾这一步绝不抛
 
+    def _chapter_items(self) -> dict:
+        """课堂纲要 -> `{"windows","chapters","deadlines","atoms"}`（笔记那一节用）。
+
+        ⚠️ **它不联网**（只读两个旁路文件），但仍**住在 `close()` 的护栏区里** ——
+           和 qa / lost / keypoint 并排，几层读起来才是同一条纪律。
+        ⭐ **边界全在 `chapter.load` / `atom.load` 那一处兜**（`None` 路径 / 文件不存在 /
+           坏行 / 写到一半被杀）—— 这里**不重复兜**，否则就是"一条纪律两处定义"。
+        ⚠️ **文件不存在是正常路径**：旧会话 / 纯转录档 / `CLASSLIVE_LIVE_SUMMARY=0` 都走这条
+           → 返回空 → `_render_outline_section` 整节跳过、笔记照常生成。
+        """
+        import atom as _atom
+        import chapter
+        got = chapter.load(chapter.chapter_path_for(self.session_path))
+        # ⭐ 原子要点也要 —— 「**没有合成句的章，列出它的原子要点**」（计划 §10.2）。
+        # ⚠️ 路径推导**交给 `AtomWriter` 自己**：`<同名>.atoms.jsonl` 在那儿是唯一定义点。
+        try:
+            got["atoms"] = (_atom.load(_atom.AtomWriter(str(self.session_path)).path)
+                            if self.session_path else [])
+        except Exception:                                     # noqa: BLE001
+            got["atoms"] = []
+        return got
+
     def _lost_items(self, entries: list[dict]) -> list[str]:
         """旁路事件 -> 笔记里的块（**一块一个标记**，块内已含它的那几句）。
 
@@ -879,7 +947,8 @@ class ObsidianWriter:
                      qa_items: list[str] | None = None,
                      polish_state: str = "ok",
                      lost_items: list[str] | None = None,
-                     keypoint_items: list | None = None) -> str:
+                     keypoint_items: list | None = None,
+                     chapter_items: dict | None = None) -> str:
         ts0 = entries[0]["ts"] if entries else "—"
         ts1 = entries[-1]["ts"] if entries else "—"
         stars = [e for e in entries if e["star"]]
@@ -921,6 +990,18 @@ class ObsidianWriter:
         else:
             L += ["> *（未自动生成 —— 未配 API key 或调用失败）*"]
         L += [""]
+
+        # 📑 课堂纲要（计划 §10.2）—— **紧跟在概览之后、知识点之前**。
+        #    位置的理由：纲要是「这节课的**结构**」，与概览同类；
+        #    插在术语表和复习自测之前，读者才**先看骨架再看细节**。
+        #    ⚠️ 整节包 `try`：**附加层不许拖垮主体**（同 `close()` 那几层护栏的纪律）。
+        try:
+            if chapter_items:
+                _sec = _render_outline_section(chapter_items)
+                if _sec:
+                    L += _sec
+        except Exception as e:                                # noqa: BLE001
+            print(f"⚠ 📑 纲要那一节没渲染出来({str(e)[:60]}); 笔记其余部分照写")
 
         # 知识点详解: 英文陈述 + 英文细节 + 中文点睛 + 关键词中英对照
         L += ["## 📚 Key Concepts 知识点详解", ""]
@@ -1181,8 +1262,15 @@ class ObsidianWriter:
             keypoint_items = self._keypoint_items(entries)
         except Exception as e:                            # noqa: BLE001
             print(f"⚠ 🎯 重点句失败({str(e)[:60]}); 笔记照常生成")
+        # 📑 课堂纲要。⚠️ **不联网**（只读旁路文件），但仍并排放在这里 ——
+        #    几层护栏读起来才是同一条纪律（详见 `_chapter_items` 的 docstring）。
+        chapter_items: dict = {}
+        try:
+            chapter_items = self._chapter_items()
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ 📑 课堂纲要失败({str(e)[:60]}); 笔记照常生成")
         note = self._render_note(entries, review, qa_items, polish_state, lost_items,
-                                 keypoint_items)
+                                 keypoint_items, chapter_items)
 
         self.vault_path = note_path_for(self._vault, self._date, self._course)
         self.vault_path.write_text(note, encoding="utf-8")

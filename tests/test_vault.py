@@ -187,6 +187,47 @@ def t_paths_owns_it():
     assert paths.vault_config(root=r).exists()
 
 
+@case("📑 课堂纲要那一节（§10.2）：空跳过 / 临时章不算 / 排法① / 退回原子要点")
+def _case_outline_section():
+    """📑 课堂纲要那一节（计划 §10.2）。**纯函数**，不碰文件、不联网。
+
+    ⚠️ 钉住四条：空 -> **整节跳过**（不是空标题）· 临时章**不许出现** ·
+    排法①（中文当正文）· 没有合成句的章**退回原子要点**。
+    """
+    import obsidian_writer as OW
+    assert OW._render_outline_section({}) == [], "空输入该返回空表（整节跳过）"
+    assert OW._render_outline_section({"windows": [1]}) == [], "只有窗口也该跳过"
+    assert OW._render_outline_section(
+        {"chapters": [{"status": "interim", "title": "临时"}]}) == [], "临时章不算数"
+    sec = OW._render_outline_section({
+        "deadlines": [{"quote": "Due next Friday.", "t": "15:40:16",
+                       "source": "regex/model", "changed": True}],
+        "chapters": [
+            {"id": 0, "status": "final", "title": "From GDP to GNI", "title_zh": "从GDP到GNI",
+             "t0": "15:05:27", "t1": "15:16:35", "lo": 1, "hi": 9,
+             "sentences": [{"en": "EN sentence.", "zh": "中文译文。",
+                            "terms": [["income method", "收入法"]],
+                            "src": [2], "flag": "board"}]},
+            {"id": 1, "status": "final", "title": "Prices", "title_zh": "价格",
+             "t0": "15:20", "t1": "15:30", "lo": 10, "hi": 20, "sentences": []}],
+        "atoms": [{"text": "Prices are key.", "zh": "价格是关键。", "src": [12]}]})
+    txt = "\n".join(sec)
+    assert "待确认" in txt and "已改期" in txt, "课务那条的两个标记都该在"
+    # ⚠️⚠️ **必须钉「那一行本身」** —— 第一版只查 `"EN sentence." in txt`，
+    #    而**英文在小字那行也还在** → 把大字换成英文（排法① 失效）**判据照样绿**
+    #    （变异验证抓到的）。判据要指向**那个位置**，不是"整个文本里有没有"。
+    assert "- **中文译文。**" in txt, "排法①：合成句的**大字**必须是中文"
+    assert "- **EN sentence.**" not in txt, "排法①：英文**不许**当大字（它该降小字）"
+    assert "EN sentence." in txt, "⚠️ 但英文原句**不许丢**（它该在小字那行）"
+    assert "### 从GDP到GNI（" in txt, "章标题也是排法①（中文当标题，英文进小字）"
+    assert "收入法" in txt, "术语对照要带上"
+    assert "价格是关键。" in txt, "没有合成句的章要退回**中文**原子要点"
+    assert "临时" not in txt, "临时章不该出现"
+    # 改坏：把 `_render_outline_section` 里的 `if not ds and not chs: return []` 删掉
+    #       -> 第一条断言红。
+    # 改坏：把大字的 `zh or en` 换成 `en` -> 「排法①」那条红。
+
+
 def main_() -> int:
     print("=" * 60)
     for name, fn in CASES:

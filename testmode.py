@@ -44,6 +44,17 @@ import numpy as np
 
 SR = 16000
 
+#: `TestSession.note_block()` 认的名字（见那个方法的 docstring）。
+#: ⚠️ **多一格就在这儿加一行** —— 名字打错**不会**静默建键，会进 `events` 报一声。
+#: 每一项都是「一整份快照」，与 `note_event` 的时间轴事件分工不同。
+BLOCKS = frozenset({
+    "norm",     # `capture.PeakNormalizer.stats()` —— 归一化**之前**的电平
+    "vad",      # `vad.Segmenter.diag` —— 断句 / 12s 硬切 / 丢弃
+    "live",     # `live_summary.LiveSummarizer.stats()` —— 窗口/章/Jev/积压
+    "terms",    # 术语注入条数（core / always / scored）
+    "ui",       # UI 使用度（纲要开了几次、点了哪些按钮）
+})
+
 
 def _safe(fn):
     """任何采集失败都吞掉 —— 记录是"锦上添花", 绝不能把课搞崩。"""
@@ -210,6 +221,7 @@ class TestSession:
         self.bundle_path: str | None = None
         self.segments: list[dict] = []
         self.events: list[dict] = []
+        self._extra: dict = {}          # `note_block` 收下的整块快照（见 `BLOCKS`）
         self._seg_no = 0
         self._cpu0 = self._cpu()
         self._rss_peak = 0
@@ -281,6 +293,25 @@ class TestSession:
     def note_event(self, kind: str, detail: str = "") -> None:
         self.events.append({"t": round(time.monotonic() - self.t0, 2),
                             "kind": kind, "detail": detail[:200]})
+
+    @_safe
+    def note_block(self, name: str, data) -> None:
+        """收下一块**「整块」**的数据（不是流式事件）—— 收尾时原样进 `report.json`。
+
+        与 `note_event` 的分工：事件是**时间轴上的点**（按钮点了、设备换了），
+        块是**一整份快照**（归一化器计数器、VAD 诊断、实时总结的 stats…）。
+        ⚠️ 名字必须在 `BLOCKS` 里 —— 写错的名字**不会**悄悄建一个新键，
+           而是进 `events` 报一声（见下）。这一条防的是「打错一个字母，
+           报告里多一个空键，而你以为采到了」。
+        ⚠️ **不深拷贝** —— 调用方在 `finish()` 之前别再改那块数据。
+           （真要改的场合：先 `dict(...)` 一份再传。）
+        """
+        if name not in BLOCKS:
+            self.events.append({"t": round(time.monotonic() - self.t0, 2),
+                                "kind": "bad_block",
+                                "detail": f"未登记的块名 {name!r}（已知：{sorted(BLOCKS)}）"})
+            return
+        self._extra[name] = data
 
     # ---- 收尾 ----
     # ⚠️ 这里是**唯一**用 `_safe_loud` 的地方：它是最终落盘，失败了用户手里
@@ -356,6 +387,11 @@ class TestSession:
                 "单节课的数字不要当结论。",
             ],
             "vad_report": vad_report,
+            # ⭐ 七格采集面里那些「整块快照」（`note_block` 收的）。
+            # ⚠️ `block_names` 是**该有哪几块**的清单 —— 缺了就一眼看得出来
+            #    （不然读报告的人分不清「没采到」和「本来就没有」）。
+            "blocks": self._extra,
+            "block_names": sorted(BLOCKS),
             "events": self.events,
             "segments": segs,
         }

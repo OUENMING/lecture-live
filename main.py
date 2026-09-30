@@ -1877,6 +1877,13 @@ def run(args) -> None:
                 if _ack is not None:
                     _spin(_ack)
             if tester is not None:
+                # ⭐ 七格采集面里那两格「整块快照」—— 收尾一次性交出去。
+                #    ⚠️ 都走 `note_block`（它自己 fail-soft），且**只读**：
+                #       `src.stats()` 给的是归一化器内部那个 dict 本身，不拷贝。
+                #    ⚠️ `norm` 描述的是**归一化之前**的电平 —— 与 `report.audio`
+                #       里那组（量的是**之后**）是两组不同的数，别混。
+                tester.note_block("norm", src.stats())
+                tester.note_block("vad", dict(getattr(seg, "diag", {}) or {}))
                 _rep = tester.finish(vad_report=locals().get("_diag", ""),
                                      note_path=str(getattr(writer, "note_path", "") or ""),
                                      # ⚠️ `--no-bundle` 原来只声明、没人读（2026-09-28

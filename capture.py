@@ -14,6 +14,12 @@ SR = 16000          # 采样率
 CHUNK = 1600        # 0.1s
 QUEUE_MAX = 200     # 最多缓冲 20s, 满了丢旧保新
 
+#: `PeakNormalizer.stats["peak_db"]` 那个直方图的两端（1 dB 一格）。
+#: ⚠️ 定死两端而不是动态算 —— 直方图要能**跨节课比**，bin 边界一变就没法比了。
+#: -80 dBFS 以下全算"几乎无声"（16bit 的量化底噪在 -96 左右，所以 -80 够低）。
+HIST_DB_MIN = -80
+HIST_BINS = 81      # [-80, 0]，含两端
+
 
 # ---------- 音频解码(ffmpeg, 任意格式 -> 16kHz mono f32) ----------
 def load_file(path: str) -> np.ndarray:
@@ -102,6 +108,21 @@ class PeakNormalizer:
         self.smooth = smooth
         self.peak = 1e-4
         self.gain = 1.0
+        # ⭐ 只读计数器 —— 给 `docs/PLAN-audio-gain.md` 的**步 1** 用。
+        #    ⚠️⚠️ 它们描述的是**归一化之前**的输入。而 `testmode` 那边现有的
+        #       `audio.block_rms_dbfs_*` / `dynamic_range_db` 量的是**归一化之后**
+        #       的块（`load_source()` 返回的就是套过这一层的 `_NormalizedSource`，
+        #       主循环拿到的 `chunk` 已经乘过 gain）——
+        #       **所以那组数答不了「原始电平多少、加了多少增益」。两组要一起读。**
+        #    ⚠️ 只计数，**不参与任何判定、不改 `process()` 的输出**（改了就动行为）。
+        self.stats = {
+            "blocks": 0,
+            "capped": 0,          # 「想要更多、但被 max_gain 卡住」的块数
+            "clamped": 0,         # `min(gain, ceiling/p)` 真正生效的块数
+            "peak_db": [0] * HIST_BINS,   # 逐块峰值直方图（1dB 一格，-80..0）
+            "gain_db_max": -999.0,
+            "gain_db_sum": 0.0,
+        }
 
     def process(self, chunk: np.ndarray) -> np.ndarray:
         p = float(np.max(np.abs(chunk))) if chunk.size else 0.0
@@ -109,6 +130,25 @@ class PeakNormalizer:
         want = min(self.ceiling / max(self.peak, 1e-9), self.max_gain)
         self.gain += (want - self.gain) * self.smooth
         g = min(self.gain, self.ceiling / p) if p > 1e-9 else self.gain
+        # ---- ⭐ 以下是**纯计数**，一行都不影响上面的输出 ----
+        st = self.stats
+        st["blocks"] += 1
+        # ⚠️⚠️ **不能写成 `want > self.max_gain`** —— `want` 就是 `min(…, max_gain)`，
+        #    那个判据**恒为假**，计数器会永远停在 0（而 0 看起来像"没撞过上限"，
+        #    正是最危险的那种假绿）。要问的是「**没被卡的话它想要多少**」：
+        _want_uncapped = self.ceiling / max(self.peak, 1e-9)
+        if _want_uncapped > self.max_gain:
+            st["capped"] += 1
+        if p > 1e-9 and self.ceiling / p < self.gain:
+            st["clamped"] += 1
+        if p > 0:
+            _db = 20 * np.log10(p)
+            _i = int(_db) - HIST_DB_MIN
+            if 0 <= _i < HIST_BINS:
+                st["peak_db"][_i] += 1
+        _gdb = 20 * np.log10(max(g, 1e-9))
+        st["gain_db_sum"] += _gdb
+        st["gain_db_max"] = max(st["gain_db_max"], _gdb)
         return chunk * g
 
 
@@ -132,6 +172,15 @@ class _NormalizedSource:
     @property
     def device_name(self) -> str:
         return getattr(self._inner, "device_name", "")
+
+    def stats(self) -> dict:
+        """归一化器的只读计数（**归一化之前**的电平）。
+
+        ⚠️ 照它已有的 `device_name` / `switch_device` 同形 —— 光透传，不加工。
+        ⚠️ 返回的是**内部那个 dict 本身**（不拷贝）：调用方只读，别改。
+           每块都拷贝一次的话，那是每次 0.1 秒来一回的分配。
+        """
+        return self._norm.stats
 
     def switch_device(self, device_idx: int, device_name: str = "") -> bool:
         """透传到内层。文件源没有这个方法 → `False`（那不是错误，是"没得换"）。"""

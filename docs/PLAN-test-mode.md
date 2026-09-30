@@ -117,16 +117,20 @@
 
 | # | 面 | 改哪 | 加什么 |
 |---|---|---|---|
-| **1** | **收音** | `capture.PeakNormalizer.process()` | 照 `vad.Segmenter.diag` 的 dict 形状加三个：`capped`（说话期 `want > max_gain`）· `clamped`（`min(gain, ceiling/p)` 真生效）· `peak_db`（说话期块峰值直方图）。⭐ **这是 `PLAN-audio-gain.md §步 1`，它自己在等这一步** |
-| **1b** | 收音·传出 | `capture._NormalizedSource.stats()` | 透传上面那个 dict（**照它已有的 `device_name` / `switch_device` 同形**） |
-| **2** | **VAD** | ⭐ **一行** —— `main.py` 收尾时 `tester.finish(..., seg_diag=locals().get("_seg"))` | ⚠️ **不用加计数器** —— `Segmenter.diag` 已经在算 `cuts` / `hard_cuts` / `dropped` / `dropped_s` / `weak_blocks`，现在只存了**中文文本**。**把那个 dict 直接进 report** |
-| **3** | **ASR** | `main.py` 那个 `note_segment` 调用点 | 加两个字段：**草稿文本 vs 定稿文本的差异**（改了几个词）· **是否被 `fix_stream` 改过**。⚠️ 先确认那个作用域里拿不拿得到草稿——拿不到就**只记定稿侧的量**（词数/句数），别硬凑 |
-| **4** | **翻译 / 术语** | `translator.select_terms(...)` 的调用点 | 注入的**条数**（core / always / scored 各几条）· 句子用上了几条术语。⭐ `select_terms` **返回注入后那串文本**，条数**数得出来**，**不用改它的契约** |
-| **5** | **实时总结** ⭐ | `live_summary.LiveSummarizer` 加一个 `stats()` | 窗口数 · 章数 · 空窗比 · **`finish()` 耗时** · **积压峰值** · `calls` / `gate_calls`（已有）。⭐ **在线采这一套 == 离线探针的 `metrics.json`** → **两边能直接对拍** |
-| **6** | **失败路径** | `testmode._safe`（现在是静默吞）+ `main.py` 的 `except` | **异常类型 + 截断的 traceback** 进 `note_event("exc", ...)`。⚠️ **不是把 `_safe` 改成会抛** —— 它「绝不能影响上课」那条纪律不动，**只是别静默** |
-| **7** | **环境** | `testmode.collect_env()` | GPU / MLX 后端 · **中途换设备事件**（`switch_device` 已有，进 `events` 就行） |
+| **1** ✅ | **收音** | `capture.PeakNormalizer.process()` | 三个只读计数器 + `_NormalizedSource.stats()` 透传。**已做**（2026-09-30）。<br>⚠️⚠️ **计划原文那条判据写错了**：它写「说话期间 `want > max_gain`」——而 `want = min(ceiling/peak, max_gain)`，**那个条件恒为假**，计数器会永远停在 0（0 看起来像"没撞过上限"，最危险的那种假绿）。**正确写法是 `ceiling / peak > max_gain`**。已按正确的实现，并加了一条变异判据钉住它。<br>⭐ 另查明：`testmode` 已有的 `audio.block_rms_dbfs_*` 量的是**归一化之后**的块（`load_source()` 返回的就是套过这一层的）—— **那组数答不了「原始电平多少、加了多少增益」**，两组要一起读 |
+| **2** ✅ | **VAD** | ⭐ **一行** —— `main.py` 收尾 `tester.note_block("vad", dict(seg.diag))` | **已做**。⚠️ **不用加计数器** —— `Segmenter.diag` 早就在算 `cuts`/`hard_cuts`/`dropped`/`dropped_s`/`weak_blocks` |
+| **3** | **ASR** | ⚠️ **计划里写错了位置** —— **不在 `note_segment`，在 `drain()` 的 final 分支** | `("final", en, zh, sent)` 里 **`en` = 矫正后、`sent` = 原始 ASR** —— 那一对才是一"两级矫正改了什么"。⭐ `obsidian_writer.append` 的 docstring 自己点名了风险：**「LLM 偶尔会过度修正（把正确的词改错）」**。⭐ `note_segment` 那边**拿不到**草稿（草稿走的是另一条 `draftq` 管线、而且是逐句翻译过的），**别硬凑** |
+| **4** | **翻译 / 术语** | `translator.select_terms(...)`（生产走 `cloud_translator.py`） | 给 `select_terms` 加**可选 `stats` 出参**让它填计数（**不改返回值契约**）· `CloudTranslator` 自己持一个 dict 传进去 · `main.py` 收尾读。⭐ 它已经算出 core/always/scored 三个列表，不用改算法 |
+| **5** | **实时总结** ⭐ | `live_summary.LiveSummarizer` 加 `stats()` | 窗口数 · 章数 · 空窗比 · **`finish()` 耗时** · **积压峰值** · `calls`/`gate_calls`（已有）。⭐ **口径要与离线探针的 `metrics.json` 一致**，两边才能对拍 |
+| **6** | **失败路径** | `testmode._safe` + `main.py` 的 `except` | **异常类型 + 截断 traceback** 进 `note_event("exc", …)`。⚠️ **不是把 `_safe` 改成会抛** —— 「绝不能影响上课」那条纪律不动，**只是别静默** |
+| **7** | **UI 使用度** ⭐ | `main.py` 那几个 `on_*` 回调 + 给 `Overlay` 加一个可选 `note` 回调 | 纲要开了几次 · 点了哪些按钮 · 切没切过档。⭐ **我认为最值钱的一格**：纲要从没被打开过 = 最大的产品信号，而现在**一条数据都没有** |
 
-**成本估计**：`PeakNormalizer` 三计数器 ~10 行 · `LiveSummarizer.stats()` ~15 行 · 其余是**已有数据的搬运**。
+**接缝形状（已落地）**：`TestSession.note_block(name, data)` —— 整块快照走它，
+时间轴事件走 `note_event`。⚠️ **名字必须在 `BLOCKS` 里**，打错**不会**静默建键，
+而是进 `events` 报一声（防「打错一个字母，报告里多一个空键，而你以为采到了」）。
+报告里还有 `block_names`（**该有哪几块**的清单）—— 缺了一格一眼看得出来。
+
+**成本估计**：`PeakNormalizer` 三计数器 ~25 行 · `LiveSummarizer.stats()` ~15 行 · 其余是**已有数据的搬运**。
 ⚠️ **不改任何生产行为的默认值** —— 七格全是**只读计数**。
 
 ---

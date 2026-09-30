@@ -24,8 +24,16 @@
 
 用法
 ----
-    cl test                     # 悬浮窗 + 测试模式（默认**不**留音频）
-    cl test --record-audio      # 额外留下课堂音频（约 28MB/15 分钟）
+    cl test                     # 悬浮窗 + 测试模式（**默认留音频**，见下）
+    cl test --no-record-audio   # 这节不留音频
+
+⚠️⚠️ **2026-09-30 又翻了一次默认值**（作者拍板）：
+   **测试模式下默认录**，正常 `cl` **仍然一个字都不录**。
+   ⚠️ 这与 2026-09-28 那次（把默认从"录"改成"不录"）**不冲突** ——
+      那次针对的是**正常上课那条路**，它**一个字没动**。
+   ⚠️ 翻了之后的代价要记住：**`cl test` 一开就录**，所以披露（跟同学说一声）
+      必须在**开课之前**做，不是课后补。
+   音频格式见 `AUDIO_SEG_S` / `AUDIO_OPUS_BITRATE`（分段 Opus 24k，约 9MB/50 分钟）。
 """
 from __future__ import annotations
 
@@ -34,6 +42,7 @@ import json
 import os
 import pathlib
 import resource
+import subprocess
 
 import models
 import sys
@@ -43,6 +52,18 @@ import wave
 import numpy as np
 
 SR = 16000
+
+#: ⭐ 录音**分段**长度（秒）。每 10 分钟一个文件。
+#: ⚠️ 切点按**样本数**整除，**不按墙钟** —— 按墙钟会在段与段之间丢样本
+#:    （`note_chunk` 一次来一整块，落在边界上的那块会被整块归到某一边）。
+AUDIO_SEG_S = 600
+
+#: Opus 码率。⚠️ 依据与**诚实前提**（`docs/PLAN-test-mode.md` §5.2）：
+#: NoLACE(Amazon 2024) 测得 Opus 20k 在 LibriSpeech clean 上 WER 2.03%（无损 2.01%）；
+#: Khare 2020：16k → +12.6% / 32k → +6.6%。
+#: ⚠️ **那些全是朗读或远场数据，没有一条是教室噪声录音** → 这是**外推**，不是实测背书。
+#: → 24k 起步、**不要低于 16**。
+AUDIO_OPUS_BITRATE = "24k"
 
 #: `TestSession.note_block()` 认的名字（见那个方法的 docstring）。
 #: ⚠️ **多一格就在这儿加一行** —— 名字打错**不会**静默建键，会进 `events` 报一声。
@@ -153,7 +174,7 @@ def collect_env() -> dict:
 
 
 def make_bundle(stem: pathlib.Path, report_path: str | os.PathLike,
-                session_path, include_audio: bool) -> str | None:
+                session_path, audio_paths: list | None = None) -> str | None:
     """把一次测试打包成**一个文件**, 方便发给作者。
 
     ⚠️ **包里含隐私内容**: 课堂音频 + 完整逐字转录 —— 可能有其他同学的声音。
@@ -191,9 +212,12 @@ def make_bundle(stem: pathlib.Path, report_path: str | os.PathLike,
                 z.write(report_path, "report.json")
             if session_path and os.path.exists(session_path):
                 z.write(session_path, "session.md")
-            wav = pathlib.Path(str(stem) + ".wav")
-            if include_audio and wav.exists():
-                z.write(wav, "audio.wav")
+            # ⭐ 分段之后音频有**多个**文件（`<stem>.001.opus` …）——
+            #    打进包里 `audio/` 子目录下，保持分段结构。
+            for ap in (audio_paths or []):
+                ap = pathlib.Path(ap)
+                if ap.exists():
+                    z.write(ap, f"audio/{ap.name}")
     except Exception:                                     # noqa: BLE001
         return None
     return str(out)
@@ -215,22 +239,24 @@ class TestSession:
         self._block_peaks: list[float] = []
         self._block_rms: list[float] = []
 
+        # ⚠️ 这几个**必须在 `if` 外面**：不录音时 `_close_wav` / `finish` 也会碰它们。
+        self._wav = None
+        self._wav_path = None
+        self._wav_paths: list = []       # 已经写出来的分段（含当前那个）
+        self._seg_i = 0                  # 当前是第几段（从 1 起）
+        self._seg_n = 0                  # 当前段已写入多少样本（切点判据用这个）
+        self.audio_files: list = []      # 收尾转码后的 Opus 分段（`finish` 里填）
+
         if self.record_audio:
             # ⚠️⚠️ **这一段必须包起来**（2026-09-28 审查指出）：模块头的承诺是
             #    「所有采集点都包在 try/except 里 / **绝不能影响上课**」，
             #    而 `wave.open` 这一段整个在 try 外面 —— 磁盘满 / `sessions/` 只读 /
             #    路径被占都会抛，把测试模式的构造（乃至整个进程）带下去。
             #    失败就**降级成「不录音频」**，报告照出（同 `_wav = None` 那条既有路径）。
-            self._wav = None
-            try:
-                self._wav = wave.open(str(self.stem) + ".wav", "wb")
-                self._wav.setnchannels(1)
-                self._wav.setsampwidth(2)
-                self._wav.setframerate(SR)
-            except Exception as e:                        # noqa: BLE001
-                print(f"⚠ 音频录制开不了（{type(e).__name__}: {e}）"
-                      f" —— 测试模式照跑，只是没有音频", flush=True)
-                self._wav = None
+            # ⭐ 2026-09-30 起**分段**（每 `AUDIO_SEG_S` 一个文件）——
+            #    理由：① 避开"一次误启动留下整节课"那个隐私顾虑（随时能看到录了几段）
+            #          ② 上传能断点续传 ③ 收尾转码可以逐段做、内存不堆积
+            self._rotate_wav()
             # 查过 CPython 源码 + 实测，把这件事说准：
             # · **wav 不会"头损坏"** —— `Wave_write.writeframes()` 每次调用都会
             #   `_patchheader()` 修正 RIFF 长度字段（`writeframesraw` 才不会），
@@ -241,8 +267,6 @@ class TestSession:
             #   → 文件 0 字节读不出；2 块(6.4KB) 就正常了。
             #   对真实课堂（几千块）不可能发生，但兜一层也就 6 行，且幂等。
             atexit.register(self._close_wav)
-        else:
-            self._wav = None
 
         # 分段
         self.bundle_path: str | None = None
@@ -257,8 +281,67 @@ class TestSession:
         self._cpu0 = self._cpu()
         self._rss_peak = 0
 
+    def _to_opus(self) -> list:
+        """把 wav 分段转成 Opus，**转成功一个删一个**。返回 opus 路径表。
+
+        ⚠️ 跑在**收尾**，不在上课路径上 —— 实测 5.1 分钟音频转 2.13 秒
+           （折合 50 分钟约 21 秒）。「绝不能影响上课」那条纪律因此自动满足。
+        ⚠️ **失败就保留那个 wav**（宁可占地方，别丢音频）—— 并记进 `events`。
+        ⚠️ PATH：照 `capture.load_file` 的形状调（`ffmpeg` 是外部二进制；
+           `.app` 双击那条路靠 `cl` 补的 PATH，不是这里补）。
+        ⚠️ 3 分钟超时：正常一条分段约 20 秒，卡住说明 ffmpeg 出问题了。
+        """
+        out = []
+        for wav in list(self._wav_paths):
+            opus = wav.with_suffix(".opus")
+            try:
+                pr = subprocess.run(
+                    ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(wav),
+                     "-c:a", "libopus", "-b:a", AUDIO_OPUS_BITRATE,
+                     "-ac", "1", "-ar", str(SR), str(opus)],
+                    capture_output=True, timeout=180)
+                if pr.returncode == 0 and opus.exists() and opus.stat().st_size > 0:
+                    out.append(opus)
+                    wav.unlink(missing_ok=True)          # ⚠️ 转成了才删
+                else:
+                    self.events.append({
+                        "t": round(time.monotonic() - self.t0, 2),
+                        "kind": "transcode_failed",
+                        "detail": f"{wav.name}: rc={pr.returncode} "
+                                  f"{pr.stderr.decode('utf-8', 'ignore')[:100]}"})
+            except Exception as e:                       # noqa: BLE001
+                self.events.append({
+                    "t": round(time.monotonic() - self.t0, 2),
+                    "kind": "transcode_failed",
+                    "detail": f"{wav.name}: {type(e).__name__}: {str(e)[:100]}"})
+        return out
+
+    def _rotate_wav(self) -> None:
+        """关掉当前段、开下一段。**失败就降级成「不再录」**，不抛。"""
+        self._close_wav()
+        self._seg_i += 1
+        self._seg_n = 0
+        path, w = self._open_wav(self._seg_i)
+        self._wav, self._wav_path = w, path
+        if path is not None:
+            self._wav_paths.append(path)
+
+    def _open_wav(self, idx: int):
+        """开第 `idx` 个 wav 分段（从 1 起）。返回 `(path, handle)`，失败返回 `(None, None)`。"""
+        p = pathlib.Path(f"{self.stem}.{idx:03d}.wav")
+        try:
+            w = wave.open(str(p), "wb")
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SR)
+            return p, w
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ 音频录制开不了（{type(e).__name__}: {e}）"
+                  f" —— 测试模式照跑，只是没有音频", flush=True)
+            return None, None
+
     def _close_wav(self) -> None:
-        """幂等关闭 WAV —— `finish()` 与 `atexit` 都会调它。"""
+        """幂等关闭**当前**分段 —— `finish()` 与 `atexit` 都会调它。"""
         w, self._wav = self._wav, None
         if w is not None:
             try:
@@ -293,6 +376,10 @@ class TestSession:
         if self._wav is not None:
             self._wav.writeframes(
                 (np.clip(chunk, -1.0, 1.0) * 32767).astype("<i2").tobytes())
+            self._seg_n += len(chunk)
+            # ⚠️ 切点按**样本数**，不按墙钟（见 `AUDIO_SEG_S` 的注释）。
+            if self._seg_n >= AUDIO_SEG_S * SR:
+                self._rotate_wav()
         self._rss_peak = max(self._rss_peak, self._rss_mb())
 
     @_safe
@@ -396,6 +483,10 @@ class TestSession:
             self._close_wav()
         if self.stem is None:
             return None
+        # ⭐ 收尾转码：wav 分段 -> Opus，转成了就删 wav（见 `_to_opus`）。
+        #    ⚠️ 排在**最前面**（报告落盘之前），这样报告里那个 `audio_saved`
+        #       和 `audio_files` 说的是**最终状态**。
+        self.audio_files = self._to_opus() if self.record_audio else []
 
         dur = time.monotonic() - self.t0
         cpu = self._cpu() - self._cpu0
@@ -423,6 +514,9 @@ class TestSession:
             "session_file": str(self.session_path) if self.session_path else None,
             "note_file": note_path,
             "audio_saved": bool(self.record_audio),
+            # ⭐ 分段之后是**多个**文件（`<stem>.001.opus` …）。⚠️ 空表 = 没录，
+            #    或者**转码全失败了**（后者看 `events` 里的 `transcode_failed`）。
+            "audio_files": [str(x) for x in getattr(self, "audio_files", [])],
             "duration_s": round(dur, 1),
             "audio": {
                 "n_samples": self._n_samples,
@@ -489,5 +583,5 @@ class TestSession:
             json.dump(report, f, ensure_ascii=False, indent=1)
         if bundle:
             self.bundle_path = make_bundle(self.stem, out, self.session_path,
-                                           include_audio=self.record_audio)
+                                           audio_paths=getattr(self, "audio_files", []))
         return out

@@ -363,6 +363,111 @@ def main() -> int:
         check("⭐⭐ 程序化点「讲一下」与「纲要」-> `note` 回调真的响了",
               "ask" in _seen and _seen.count("outline") == 2, str(_seen))
 
+    print("\n--- T13 ⭐⭐ 分段录音：段与段之间**一个样本都不许丢** ---")
+    # ⚠️ 变异验证：把切点从「按样本数」改成按墙钟（或漏掉最后一段）
+    #    -> 这条红。**这是分段最容易出的错，而且它不报错。**
+    import shutil
+    import tempfile
+    import wave
+
+    _d = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_rec_"))
+    _old_seg = tm.AUDIO_SEG_S
+    tm.AUDIO_SEG_S = 1                       # 1 秒一段，方便测（生产是 600）
+    try:
+        _t = tm.TestSession(_d / "x.md", record_audio=True)
+        _n_in = 0
+        for _ in range(25):                  # 25 × 0.1s = 2.5 秒 → 该切 3 段
+            _blk = np.zeros(tm.SR // 10, dtype=np.float32)
+            _n_in += len(_blk)
+            _t.note_chunk(_blk)
+        _t._close_wav()
+        _n_out = 0
+        for _p in _t._wav_paths:
+            with wave.open(str(_p)) as _w:
+                _n_out += _w.getnframes()
+        check("⭐⭐ 写进去的样本数 == 所有分段加起来（**段间不丢**）",
+              _n_out == _n_in, f"进 {_n_in} / 出 {_n_out}")
+        check("⭐ 而且真的**切成了多段**（不然上面那条是恒真的）",
+              len(_t._wav_paths) >= 2, f"{len(_t._wav_paths)} 段")
+        # ⭐⭐ **更强的那条**：除了最后一段，**每段必须正好是 `AUDIO_SEG_S * SR` 帧**。
+        #    守恒那条抓不住「轮转时机错」——错位写会把某个边界块**写到另一段**，
+        #    总数照样守恒，但段的边界全歪了。这一条抓得住。
+        #    ⚠️ 变异验证：把 `_rotate_wav()` 那行**挪到 `writeframes` 之前** -> 这条红。
+        _sizes = []
+        for _p in _t._wav_paths:
+            with wave.open(str(_p)) as _w:
+                _sizes.append(_w.getnframes())
+        _want = tm.AUDIO_SEG_S * tm.SR
+        _bad_seg = [n for n in _sizes[:-1] if n != _want]
+        check(f"⭐⭐ 除最后一段外，每段**正好 {_want} 帧**（轮转时机不许错位）",
+              not _bad_seg, f"段大小={_sizes} 期望={_want}")
+    finally:
+        tm.AUDIO_SEG_S = _old_seg
+        shutil.rmtree(_d, ignore_errors=True)
+
+    print("\n--- T14 ⭐⭐ 收尾转码：wav → Opus，转了才删 wav ---")
+    _d2 = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_opus_"))
+    try:
+        _t2 = tm.TestSession(_d2 / "y.md", record_audio=True)
+        _n_chunks = 20
+        for _ in range(_n_chunks):
+            _t2.note_chunk((np.random.rand(tm.SR // 10).astype(np.float32) - 0.5) * 0.4)
+        _t2._close_wav()
+        _wavs = list(_t2._wav_paths)
+        _sec = _n_chunks * (tm.SR // 10) / tm.SR        # ⚠️ 从块数算 —— **别去读 wav**
+        _ops = _t2._to_opus()                           #     （下面那一步已经把它删了）
+        _left = [p for p in _wavs if p.exists()]
+        check("⭐⭐ 转出了 opus、而且 **wav 被删掉了**",
+              bool(_ops) and all(p.suffix == ".opus" for p in _ops) and not _left,
+              f"opus={[p.name for p in _ops]} 残留 wav={[p.name for p in _left]}")
+        check("⭐ opus 非空（0 字节算失败）",
+              all(p.stat().st_size > 0 for p in _ops),
+              str([p.stat().st_size for p in _ops]))
+        # ⚠️⚠️ **这条第一版被 `except FileNotFoundError` 吞成了「没装 ffmpeg」并跳过** ——
+        #    而 ffmpeg 明明装着，真因是我在删掉之后才去 `wave.open` 那个 wav。
+        #    **判定：跳过不计入统计 = 判据没跑还报 ✅**（本仓记过这个形态）。
+        #    → 现在时长的来源改成**块数**，而且**不再吞 FileNotFoundError**。
+        if _ops:
+            _kbps = _ops[0].stat().st_size * 8 / _sec / 1000
+            check(f"⭐ 码率落在 Opus 24k 附近（实测 {_kbps:.1f} kbps）",
+                  15 < _kbps < 40, f"{_kbps:.1f} kbps / {_sec:.1f} 秒")
+    finally:
+        shutil.rmtree(_d2, ignore_errors=True)
+
+    print("\n--- T15 ⭐⚠️ 转码失败：**保留 wav**，别丢音频 ---")
+    _d3 = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_fail_"))
+    _old_ff = tm.subprocess.run
+    try:
+        _t3 = tm.TestSession(_d3 / "z.md", record_audio=True)
+        for _ in range(20):
+            _t3.note_chunk(np.zeros(tm.SR // 10, dtype=np.float32))
+        _t3._close_wav()
+        _w3 = list(_t3._wav_paths)
+
+        def _boom(*a, **k):
+            raise FileNotFoundError("ffmpeg 假装没装")
+        tm.subprocess.run = _boom
+        _ops3 = _t3._to_opus()
+        check("⭐ 转码全失败 -> 不返回 opus，且**记进 events**",
+              _ops3 == [] and any(e["kind"] == "transcode_failed" for e in _t3.events),
+              f"ops={_ops3} events={[e['kind'] for e in _t3.events]}")
+        check("⭐⭐ **wav 必须还在** —— 宁可占地方，不许丢音频",
+              all(p.exists() for p in _w3), str([p.name for p in _w3 if not p.exists()]))
+    finally:
+        tm.subprocess.run = _old_ff
+        shutil.rmtree(_d3, ignore_errors=True)
+
+    print("\n--- T16 ⭐ 默认值：测试模式下默认录，正常 cl 一个字不录 ---")
+    _src_main = (HERE / "main.py").read_text(encoding="utf-8")
+    check("⭐⭐ `--record-audio` 的 default 是 **None**（这样才关得掉）",
+          'action="store_true", default=None' in _src_main)
+    check("⭐⭐ 有一个**反向旗标** `--no-record-audio` 绑同一个 dest",
+          '--no-record-audio", dest="record_audio", action="store_false"' in _src_main)
+    check("⭐ 真正默认值按「是不是测试模式」判（且显式旗标优先）",
+          "args.record_audio if args.record_audio is not None" in _src_main)
+    check("⭐⭐ 而**正常上课那条路的默认没被动**（D1 的边界）",
+          "record_audio=args.record_audio)" not in _src_main)
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

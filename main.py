@@ -1084,14 +1084,19 @@ def run(args) -> None:
     # TestSession 的所有 note_* 都自带 try/except(见 testmode.py)。
     tester = None
     if args.test_mode:
+        # ⭐⭐ **2026-09-30 又翻了一次默认值**（作者拍板）：**测试模式下默认录**。
+        #    ⚠️ 与 2026-09-28 那次**不冲突** —— 那次翻的是**正常上课**那条路的默认，
+        #       而这条路（`args.test_mode` 为真）**当时还没有**。正常 `cl` 仍然不录。
+        #    ⚠️ **翻了之后披露更要紧**：`cl test` 一开就录 → 得**开课前**跟同学说。
+        _rec = (args.record_audio if args.record_audio is not None
+                else True)
         tester = TestSession(getattr(writer, "session_path", None),
-                             record_audio=args.record_audio)
+                             record_audio=_rec)
         echo(f"🧪 测试模式: 报告将写到 {tester.stem}.report.json")
-        # ⚠️ 默认**不留音频**（2026-09-28 翻的）。原来是默认录 —— 那意味着
-        #    一次误启动就静默录下整节课（含其他同学的声音）。现在要留必须显式说。
-        #    而提醒仍然放在**启动时**：收尾才说就晚了，那时整节课已经录完。
+        # ⚠️ 提醒**放在启动时**：收尾才说就晚了，那时整节课已经录完。
+        #    （2026-09-30 起测试模式下默认录 —— 见上面 `_rec` 那段。）
         if tester.record_audio:
-            echo("   ⚠️ 会录制**课堂音频**(约 28MB/15 分钟), 收尾打成一个 zip。")
+            echo("   ⚠️ 会录制**课堂音频**(分段 Opus, 约 9MB/50 分钟), 收尾打成一个 zip。")
             echo("      音频与逐字转录可能含**其他同学的声音** —— 发出去前请自己确认。")
         else:
             echo("   ℹ️ 只采指标, 不留音频（要留: 加 `--record-audio`）。")
@@ -1922,6 +1927,7 @@ def run(args) -> None:
                              " —— 发出去前自己确认一下。")
                     else:
                         echo("   ℹ️ 只含指标与转录文本, **不含音频**（要留: --record-audio）。")
+                    # ⚠️ 转码失败时音频还是 wav 分段 —— 报告与屏上都看得见。
                     echo("   发给作者即可, 不用解压。")
                 else:
                     echo("⚠ 数据包生成失败, 但报告已写出(见上面的路径)")
@@ -2004,9 +2010,14 @@ def main():
     p.add_argument("--test-mode", action="store_true",
                    help="测试模式: 采集一份完整指标报告(逐段 ASR 耗时/电平/置信度/"
                         "资源占用), 并在会话文件旁留一份音频, 供以后优化用")
-    p.add_argument("--record-audio", action="store_true",
-                   help="测试模式下**额外留下课堂音频**(默认不留; 约 28MB/15 分钟, "
-                        "内含其他同学的声音)")
+    # ⚠️⚠️ **两个旗标，不是一个**：`--record-audio` 的默认值**不能改成 True** ——
+    #      改了就没法关掉它了（`store_true` 没有反向）。所以用 `default=None` +
+    #      一对互斥旗标，真正的默认在下面按「是不是测试模式」判。
+    p.add_argument("--record-audio", action="store_true", default=None,
+                   help="留下课堂音频（**测试模式下这是默认**；约 9MB/50 分钟, "
+                        "内含其他同学的声音）")
+    p.add_argument("--no-record-audio", dest="record_audio", action="store_false",
+                   help="这一节不留音频（覆盖测试模式的默认）")
     p.add_argument("--no-bundle", action="store_true",
                    help="测试模式下不打包成可发送的单个 zip")
     p.add_argument("--final-model-dir",

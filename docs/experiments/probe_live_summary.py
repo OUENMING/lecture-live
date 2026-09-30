@@ -55,8 +55,12 @@
 
 ## ⚠️ 还没做的（阶段 2 的后续）
 
-- **`--fail-window`**（断网 → 积压 → 重试 → `gap`）：参数实现了，**一次没跑过**。
 - 「静默」人工检查（随机看几个空窗口的来源句是不是真闲聊）。
+- ⚠️ **已知缺陷（2026-09-30 跑 `--fail-window` 挖出来的）**：断网恢复那一刻
+  积压的窗口**全部共享同一个 `now`** → `MIN_CHAPTER_S`（180s）把每一个主题切换
+  都并回当前章 → **那一段内容（可达二三十分钟）塌成单独一章**。
+  详见 `RESULTS-live-summary.md` 的「断网 / 积压 / 重试」一节（含决定性对照实验）。
+  **没修** —— 三个候选修法都在动一个标定过的机制，交回作者定。
 """
 from __future__ import annotations
 
@@ -79,7 +83,19 @@ import obsidian_writer as OW                                         # noqa: E40
 
 # ---------------------------------------------------------------- 读输入
 def _secs(ts: str) -> int:
-    h, m, s = (int(x) for x in ts.split(":"))
+    """`"HH:MM:SS"` 或 `"HH:MM"` → 当日秒数。
+
+    ⚠️ 两种都要收：会话里的时间戳一定是 `HH:MM:SS`，而 `--fail-window` 写的是
+       **`HH:MM`**（argparse 的 help 和计划 D10 的例子都是这个形状）。
+       ⚠️ 2026-09-30 实测：**只收三段的版本让 `--fail-window` 一解析就崩**
+       （`ValueError: not enough values to unpack`）——
+       也就是说这个参数**从加进来那天起就一次没跑成过**，
+       而它在文档里一直写着"参数实现了，没实测过"。
+    """
+    parts = [int(x) for x in ts.split(":")]
+    while len(parts) < 3:
+        parts.append(0)
+    h, m, s = parts[:3]
     return h * 3600 + m * 60 + s
 
 
@@ -105,7 +121,7 @@ def read_session(path: pathlib.Path) -> list:
 
 
 # ---------------------------------------------------------------- 假模型
-def dry_chat(counter: dict, now_fn):
+def dry_chat(counter: dict, now_fn, fail_window=None):
     """`--dry` 的桩：**不联网**，但让状态机走**与真跑同一条路**。
 
     ⚠️ 第一版这里返回「空主题」，结果**合成次数少算得离谱**：空主题只会并进当前章，
@@ -114,8 +130,13 @@ def dry_chat(counter: dict, now_fn):
       这样原子次数是**精确的**（窗口规则确定性），合成次数是**估算**（明写在输出里）。
 
     ⚠️ 它**不产生内容**（`text` 为空）→ `--dry` 的 `outline.md` 是空的，**别拿它评审**。
+    ⭐ 但 `--fail-window` **它是认的** —— 离线/积压/丢弃这条路是**纯状态机**，
+      不依赖真模型，所以可以**不花钱先验一遍**（不认的话就只能花钱去试一条没验过的路）。
     """
     def chat(sysp, block, max_tokens, temperature):
+        if fail_window and fail_window[0] <= fail_window[2]() <= fail_window[1]:
+            counter["failed"] += 1
+            raise RuntimeError("probe: --fail-window 里，这次调用按设计失败")
         counter["in_chars"] += len(block or "")
         if sysp is atom.SYS:
             counter["atom"] += 1
@@ -253,7 +274,7 @@ def run_one(session: pathlib.Path, outdir: pathlib.Path, args) -> dict:
         fw = (_secs(a), _secs(b), lambda: wall0 + holder["now"])
 
     if args.dry:
-        chat = dry_chat(counter, lambda: holder["now"])
+        chat = dry_chat(counter, lambda: holder["now"], fw)
     else:
         sys.path.insert(0, str(ROOT))
         from cloud_translator import load_api_key
@@ -297,6 +318,7 @@ def run_one(session: pathlib.Path, outdir: pathlib.Path, args) -> dict:
     # ---- 驱动 ----
     t_wall = time.time()
     prev = 0.0
+    peak = 0                                   # ⭐ D8：积压峰值（每步采一次 `pending`）
     for gid, ts, text, zh in entries:
         target = (_secs(ts) - t0) % 86400          # ⚠️ 跨零点要取模，否则会出现负数
         while target < prev:                       # 跨零点后再加一天的偏移
@@ -305,8 +327,10 @@ def run_one(session: pathlib.Path, outdir: pathlib.Path, args) -> dict:
         while holder["now"] < target:
             holder["now"] = min(target, holder["now"] + 1.0)
             summ.step(holder["now"])
+            peak = max(peak, summ.pending)
         summ.feed((gid, ts, text, zh))
         summ.step(holder["now"])
+        peak = max(peak, summ.pending)
     # 收尾：残余窗口 + 正式合成
     summ.finish(timeout_s=args.finish_timeout)
     atom_w.close()
@@ -358,6 +382,11 @@ def run_one(session: pathlib.Path, outdir: pathlib.Path, args) -> dict:
         "deadlines_regex": len(reg), "deadlines_model": len(mod),
         "jev_gate_calls": summ.gate_calls,
         "gaps": len(insights["gaps"]),
+        # ---- D8 要的四个可调量（后两个 `chapters_interim` / `chapter_avg_seconds` 在上头）----
+        "backlog_peak": peak,
+        "retries": counter["failed"],
+        "fail_window": args.fail_window or "",
+        "gap_states": sorted({g.get("state") for g in insights["gaps"]}),
         "elapsed_s": round(elapsed, 1),
     }
     if args.coverage:

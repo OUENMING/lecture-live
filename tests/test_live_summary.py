@@ -898,6 +898,36 @@ def main() -> int:
                                  {"atoms": [], "chapters": {}},
                                  token_value="") is None)
 
+        print("\n--- ㉜ `--fail-window` 的口径（计划 T24）---")
+        # ⚠️ 2026-09-30 实测：**这个参数从加进来那天起就没跑成过** ——
+        #    `_secs()` 只吃 `"HH:MM:SS"`，而参数格式是 `"HH:MM"`（argparse 的 help
+        #    和计划 D10 的例子都是这个形状）→ 一解析就 `ValueError`。
+        #    ⚠️ 也就是说「参数实现了」和「这条路能跑」是两件事。
+        check("⭐⭐ `_secs` 收 `HH:MM`（`--fail-window` 的形状）",
+              P._secs("14:12") == 14 * 3600 + 12 * 60, str(P._secs("14:12")))
+        check("⭐ `_secs` 仍收 `HH:MM:SS`（会话时间戳的形状，没变）",
+              P._secs("14:12:30") == 14 * 3600 + 12 * 60 + 30, str(P._secs("14:12:30")))
+        # 改坏：把 `_secs` 换回三段解包 -> 第一条红。
+        _clock = {"now": 0.0}
+        _cnt = {"atom": 0, "chap": 0, "in_chars": 0, "failed": 0}
+        _dc = P.dry_chat(_cnt, lambda: _clock["now"], (100.0, 200.0, lambda: _clock["now"]))
+
+        def _try():
+            try:
+                _dc(atom.SYS, "b", 10, 0.0)
+                return False
+            except RuntimeError:
+                return True
+
+        check("⭐ 调用时**钟在窗外** -> 不失败", not _try())
+        _clock["now"] = 150.0
+        check("⭐ 钟**进窗** -> 失败", _try())
+        _clock["now"] = 250.0
+        check("⭐⭐⭐ 判据看的是**调用那一刻**的钟（同一个 chat 对象，钟一挪就翻）"
+              "—— 不是窗口里句子的时间戳", not _try())
+        check("⭐ 失败单独计数（`failed` 不与正常调用混）",
+              _cnt["failed"] == 1 and _cnt["atom"] == 2, str(_cnt))
+
     except BaseException as e:                            # noqa: BLE001
         # ⚠️⚠️ **一条判据自己抛了，不许把整个文件带崩。**
         #    崩了的话：后面的组**一条都不跑**、只留一个 traceback、**没有 ❌ 行** ——

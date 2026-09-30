@@ -737,7 +737,8 @@ def _make_click_view(on_click):
 
 class Overlay:
     def __init__(self, on_quit=None, on_translate=None, on_submit=None,
-                 on_ask=None, on_new_topic=None, on_lost=None, whatsnew=None):
+                 on_ask=None, on_new_topic=None, on_lost=None, whatsnew=None,
+                 note=None):
         # ⚠️ 窗口 chrome / 材质 / scrim 那几样已经搬进 panel.py 了，这里的名字要
         #    跟着删干净 —— 留着会让「材质在哪配的」这个问题仍然答成 overlay.py，
         #    等于配方原料还散在两个文件里。
@@ -781,6 +782,13 @@ class Overlay:
         self._on_submit = on_submit or (lambda q: None)
         self._on_ask = on_ask or (lambda: None)
         self._on_new_topic = on_new_topic or (lambda: None)
+        #: ⭐ **UI 使用度**（测试模式采集面 ⑦）—— 每次交互报一声给采集器。
+        #:    ⚠️ 与上面那七个 `on_*` 不是一类：那些**干活**，这个**只记账**。
+        #:    形状（一个名字字符串）与 `testmode.TestSession.note_ui` 对齐。
+        #:    ⚠️ 默认空 lambda：不装采集器时**零开销、零行为**（这是刻意的）。
+        #:    ⚠️ 它跑在 AppKit 主线程回调里 → **调用方必须 O(1) 不阻塞**
+        #:       （`note_ui` 就是一次 dict 自增）。
+        self._note = note or (lambda _name: None)
         # 全量历史(不再 deque(maxlen=3) —— 展开态要能翻到更早的句子)。
         # 一节课 544 句约 <200KB, 无需上限。
         self._history: list = []
@@ -1371,6 +1379,7 @@ class Overlay:
         text = (self._input.stringValue() or "").strip()
         self._input.setStringValue_("")
         if text:
+            self._note("submit")
             self._on_submit(text)
         # 放在回调**之后**: 回调抛错也不能把焦点丢掉(否则下一问又要重新点一次)。
         try:
@@ -2292,6 +2301,7 @@ class Overlay:
         """
         if self._trans_mode == "raw":
             return
+        self._note("outline")          # ⭐ 采集面 ⑦：纲要被打开/关掉了几次
         if self._outline_on:
             self._close_outline()
         else:
@@ -2725,6 +2735,7 @@ class Overlay:
         # 先撤窗口再回调: 用户点了 ✕, 必须**立刻**看到它消失。之后的收尾
         # (冲刷/询问是否存 Obsidian)会阻塞主线程, 窗口留着不动 = 看起来卡死。
         self.close()
+        self._note("quit")
         self._on_quit()
 
     def _lost(self):
@@ -2735,6 +2746,7 @@ class Overlay:
         # ⚠️ 放在 `_on_lost()` **之前**：那一步写盘失败也不该让纲要少一个标记
         #    （两者互不依赖，而且纲要这边是纯内存操作、不会抛）。
         self._outline["marks"].append(time.strftime("%H:%M:%S"))
+        self._note("lost")
         self._on_lost()
 
     def _ask(self):
@@ -2744,6 +2756,7 @@ class Overlay:
         置标志 / 打印, **不许联网、不许 sleep、不许长持 qa_lock** —— 主线程同时还在
         跑音频循环与渲染, 在这里做任何慢事都是整条流水线停顿。
         (问题文本是常量: 转录底座由 answer_worker / answer_user_content 稍后附加。)"""
+        self._note("ask")
         self._on_ask()
 
     def _new_topic(self):
@@ -2757,6 +2770,7 @@ class Overlay:
         ⚠️ 顺序：先关纲要（它会还原尺寸）→ 再清答案 → **最后**滚到底
            （滚早了会被后面那两次 `_apply_mode` 的重新布局顶掉）。
         """
+        self._note("new_topic")
         self._on_new_topic()
         if self._outline_on:
             self._close_outline()
@@ -2818,6 +2832,7 @@ class Overlay:
                 None if mode == "raw" else "clicked:")
         self._sync_trans_button()
         self._mark_dirty(urgent=True)
+        self._note("trans_mode")
         self._on_translate(mode)
 
     def set_translating(self, on: bool) -> None:

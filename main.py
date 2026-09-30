@@ -1146,6 +1146,9 @@ def run(args) -> None:
         # 装上(按钮到点名前一定已经定义好了)。
         on_new_topic=lambda: start_new_topic(),
         whatsnew=whatsnew,
+        # ⭐ 采集面 ⑦：UI 使用度。⚠️ `tester` 是 `None` 时传 `None`（不是传个假
+        #    回调）—— `Overlay` 那边默认就是空 lambda，**零开销零行为**。
+        note=(tester.note_ui if tester is not None else None),
     )
     # 终端模式拿不到悬浮窗，退化成字符框（两种模式都要能看到）
     # ⚠️ 判据同上（`drives_appkit`，不是 `args.ui`）：overlay 载入失败会静默回退

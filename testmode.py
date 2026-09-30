@@ -250,6 +250,7 @@ class TestSession:
         self.events: list[dict] = []
         self._extra: dict = {}          # `note_block` 收下的整块快照（见 `BLOCKS`）
         self._safe_bad: dict = {}       # `_safe` 吞掉的异常按方法名计数（见 `_safe`）
+        self._ui: dict = {}             # UI 使用度（`note_ui` 的累加器）
         self._corr = {"pairs": 0, "changed": 0, "identical": 0, "no_fix": 0,
                       "words_raw": 0, "words_fixed": 0}
         self._seg_no = 0
@@ -352,6 +353,21 @@ class TestSession:
             c["changed"] += 1
 
     @_safe
+    def note_ui(self, name: str) -> None:
+        """⭐ **UI 使用度**（采集面 ⑦）：某个交互被用了几次。
+
+        名字由 `overlay` 那边给（`submit` / `ask` / `new_topic` / `lost` /
+        `outline` / `trans_mode` / `quit`）。
+
+        ⚠️ **只自增一个计数，不 append 事件** —— 它跑在 AppKit **主线程回调**里，
+           而按钮可以连点几十下。「每次一个事件」会把 `events` 撑爆、
+           也会把真正的时间轴事件挤没（同 `_safe` 那条防刷屏的理由）。
+        ⭐ 用途：**功能有没有被用**。纲要从没被打开过 = 最大的产品信号，
+           而在这之前**一条数据都没有**。
+        """
+        self._ui[name] = self._ui.get(name, 0) + 1
+
+    @_safe
     def note_block(self, name: str, data) -> None:
         """收下一块**「整块」**的数据（不是流式事件）—— 收尾时原样进 `report.json`。
 
@@ -398,6 +414,10 @@ class TestSession:
         # 动态范围 = 响块的峰值(p95) 减 静块的底噪(p5) —— 远场衰减大的课这个数会很大
         dyn_range = float(np.percentile(peak_dbfs, 95) - np.percentile(rms_dbfs, 5))
 
+        # ⭐ UI 使用度是**累加**出来的（`note_ui` 每次自增），不经 `note_block` ——
+        #    收尾这里补进 `_extra`，让七格在报告里**形状一致**（都在 `blocks` 下）。
+        #    ⚠️ 用 `setdefault` 是防"调用方也显式 note_block 过一次 ui"（那样以它为准）。
+        self._extra.setdefault("ui", dict(self._ui))
         report = {
             "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
             "session_file": str(self.session_path) if self.session_path else None,

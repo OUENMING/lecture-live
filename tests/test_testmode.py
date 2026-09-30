@@ -310,6 +310,59 @@ def main() -> int:
     check("⭐ 空窗被记下（假模型回的是空 points）-> `empty_window_ratio` > 0",
           _d1["empty_window_ratio"] > 0, str(_d1["empty_window_ratio"]))
 
+    print("\n--- T10 ⭐⭐ UI 使用度：累加计数，不是一条一个事件 ---")
+    t10 = _T()
+    t10._ui = {}
+    for _ in range(5):
+        t10.note_ui("outline")
+    t10.note_ui("ask")
+    check("⭐ 同一个交互累加（连点 5 次 = 5）",
+          t10._ui.get("outline") == 5 and t10._ui.get("ask") == 1, str(t10._ui))
+    # ⚠️ 变异验证：把 `note_ui` 改成 append 一个事件 -> 这条红。
+    check("⭐⭐ **不许**往 `events` 里塞 —— 按钮能连点几十下，会把时间轴挤没",
+          not any(e.get("kind") == "ui" for e in t10.events), str(t10.events))
+
+    print("\n--- T11 ⭐ `Overlay` 真的接上了那个回调 ---")
+    import inspect
+    import overlay as ov
+    _sig = inspect.signature(ov.Overlay.__init__)
+    check("⭐ `Overlay.__init__` 有 `note` 形参（默认 None = 零开销）",
+          "note" in _sig.parameters
+          and _sig.parameters["note"].default is None, str(_sig))
+    # ⚠️ 变异验证：把 overlay 里那 7 处 `self._note(...)` 删掉 -> 这条红。
+    _src = pathlib.Path(ov.__file__).read_text(encoding="utf-8")
+    _todo = ["submit", "quit", "lost", "ask", "new_topic", "trans_mode", "outline"]
+    _missing = [n for n in _todo if f'self._note("{n}")' not in _src]
+    check("⭐⭐ 七个交互点**每个都真的记了一笔**（少一个就红）",
+          not _missing, f"没记的：{_missing}")
+    check("⭐ 而且默认值是个**空 lambda**（不装采集器时零行为）",
+          "(lambda _name: None)" in _src)
+
+    print("\n--- T12 ⭐⭐ 真的点一下：`_note` 把交互报出去 ---")
+    # ⚠️ 这条是**行为**判据，不是源码串匹配（T11 那条才是串匹配）——
+    #    它真的构造一个 Overlay、真的调那两个交互方法，看回调有没有响。
+    # ⚠️ 变异验证：把 `_toggle_outline` 里那行 `self._note("outline")` 删掉 -> 这条红。
+    _seen: list = []
+    try:
+        import overlay as _ovmod
+        _o = _ovmod.Overlay(note=_seen.append)
+    except Exception as _e:                                   # noqa: BLE001
+        print(f"  ⏭️  AppKit 不可用，跳过：{type(_e).__name__}")
+    else:
+        try:
+            _o._ask()                      # 「讲一下」
+            _o._toggle_outline()           # 纲要（章节条/菜单栏都走它）
+            _o._toggle_outline()           # 再点一次 = 关掉
+        finally:
+            close = getattr(_o, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:                             # noqa: BLE001
+                    pass
+        check("⭐⭐ 程序化点「讲一下」与「纲要」-> `note` 回调真的响了",
+              "ask" in _seen and _seen.count("outline") == 2, str(_seen))
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

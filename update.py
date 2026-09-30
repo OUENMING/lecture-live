@@ -599,6 +599,30 @@ def _child_env() -> dict:
     return env
 
 
+def _app_stale_reason() -> str:
+    """`.app` 该不该重建。**最新就返回空串**，否则返回一句给人看的原因。
+
+    ⚠️ 判据**问 `make-app.sh --up-to-date`**（构建指纹的唯一定义点），
+       不在这里重算 —— 本仓的规矩：别在两处各算一遍指纹。
+    ⚠️ 是 `--up-to-date` 且判**非零**：这样**脚本自身出错也倒向「重建」**。
+       反过来问「stale 吗」时，出错会落成非零 → 被读成「最新」→ **静默跳过**。
+       （`make-app.sh` 的退出码方向是刻意反的，那里有完整说明。）
+    ⚠️ 拿不到答案（没有 `make-app.sh` / 跑不起来）→ 返回空串：**判断不了就不该凭空多出一个步骤**。
+       ⚠️ 这条**靠下面那个 `except` 兜**，不要再在前面加一句 `if not mk.exists()` ——
+          那会让「用 mock 假造退出码」的判据（`tests/test_update.py` B11）**落空**，
+          而 B11 钉的是**退出码方向**（出错要倒向重建）。2026-09-30 实测踩到过。
+    """
+    mk = HERE / "make-app.sh"
+    try:
+        r = subprocess.run([str(mk), "--up-to-date"], cwd=HERE,
+                           env=_child_env(), capture_output=True, text=True, timeout=60)
+    except Exception:                                     # noqa: BLE001
+        return ""
+    if r.returncode == 0:
+        return ""
+    return (r.stdout or r.stderr or "构建输入变了").strip().splitlines()[0]
+
+
 def pending_steps() -> list[dict]:
     """更新之后还有哪些重活没做。按该做的顺序返回。
 
@@ -645,23 +669,16 @@ def pending_steps() -> list[dict]:
     # ③ 重建 .app：锚在上面两条之后（它是最后一道打包，也最重）。
     # ⚠️ 为什么需要：`cl update` **只拉代码、不重建 .app** ——
     #    `make-app.sh` / `tools/make_icon.py` / `VERSION` 的改动于是在用户那儿
-    #    永远不生效（图标就是这么丢的：代码更新了，Dock 上还是旧图）。
-    # ⚠️ 判据问 `make-app.sh --up-to-date`，**不在这里重算指纹** —— 两处记一次迟早漂。
-    #    ⚠️ 是 `--up-to-date` 且判**非零**：这样脚本自身出错也倒向「重建」。
-    #       若反过来问「stale 吗」，出错会落成非零 → 被读成「最新」→ 静默跳过。
-    try:
-        r = subprocess.run([str(HERE / "make-app.sh"), "--up-to-date"], cwd=HERE,
-                           env=_child_env(), capture_output=True, text=True, timeout=60)
-        if r.returncode != 0:
-            steps.append({
-                "key": "app",
-                "label": "重建 .app",
-                "detail": "约 1–3 分钟",
-                "why": f"{r.stdout.strip() or '构建输入变了'} —— "
-                       "不重建的话图标 / 启动器改动不会生效。",
-            })
-    except Exception:                                     # noqa: BLE001
-        pass
+    #    永远不生效（**图标就是这么丢的**：代码更新了，Dock 上还是旧图）。
+    # ⚠️ 判据只有一份（`_app_stale_reason()`），`run_step("app")` 与终端那条路共用它。
+    _why = _app_stale_reason()
+    if _why:
+        steps.append({
+            "key": "app",
+            "label": "重建 .app",
+            "detail": "约 1–3 分钟",
+            "why": f"{_why} —— 不重建的话图标 / 启动器改动不会生效。",
+        })
     return steps
 
 
@@ -753,7 +770,14 @@ def run_step(key: str, on_line=None) -> dict:
         if key == "app":
             # 重建整个 .app。make-app.sh 自己会装依赖、写戳记，并把旧的那份
             # 改名备份、失败时恢复 —— 这里只负责把它跑起来。
-            say("正在重建 .app（约 1–3 分钟，期间别退出）…")
+            # ⚠️ **先问一次要不要重建**：`cl update` 是**无条件**调这一步的
+            #    （它不知道戳记对不对），所以这一步必须自己幂等 ——
+            #    最新时直接跳过，别让 `cl update` 每次都白等三分钟。
+            _why = _app_stale_reason()
+            if not _why:
+                say(".app 已经是最新的，跳过")
+                return {"ok": True, "error": ""}
+            say(f"正在重建 .app（{_why}；约 1–3 分钟，期间别退出）…")
             r = subprocess.run([str(HERE / "make-app.sh")], cwd=HERE,
                                env=_child_env(), capture_output=True, text=True,
                                timeout=1800)
@@ -784,6 +808,18 @@ def _cli() -> int:
         # 引导式更新用：还有哪些重活没做（给脚本/调试看）
         for s in pending_steps():
             print(f"{s['key']}\t{s['label']}\t{s['detail']}")
+        return 0
+
+    if "--run-step" in sys.argv:
+        # ⭐ `cl update` 用：把某一步**真的跑起来**（与卡片上「立即更新」**同一条路**，
+        #    所以「要不要做」的判断也只有一份）。⚠️ 步骤本身幂等（比如 `app` 会自己
+        #    先问戳记），所以调用方可以无条件调它。
+        _i = sys.argv.index("--run-step")
+        _key = sys.argv[_i + 1] if len(sys.argv) > _i + 1 else ""
+        _r = run_step(_key, on_line=lambda s: print(f"   {s}", flush=True))
+        if not _r["ok"]:
+            print(f"⚠ {_key or '(没给 key)'} 没做成：{_r['error']}")
+            return 1
         return 0
 
     if "--auto" in sys.argv:

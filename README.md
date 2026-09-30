@@ -214,7 +214,7 @@ ClassLive.app/Contents/MacOS/python -c "from huggingface_hub import snapshot_dow
   local_dir='\$HOME/models/parakeet-tdt-0.6b-v3-int8')"
 
 # Silero VAD
-mkdir -p ~/models/vad && curl -sL -o ~/models/vad/silero_vad.onnx \
+mkdir -p ~/models/vad && curl -fsSL -o ~/models/vad/silero_vad.onnx \
   https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
 
 # Qwen3-1.7B 首次运行自动下载（仅降级时用到）
@@ -223,10 +223,14 @@ mkdir -p ~/models/vad && curl -sL -o ~/models/vad/silero_vad.onnx \
 cp glossary.example.txt glossary.txt
 
 # 定稿 Whisper 模型（~1GB，**必装** —— 缺了启动时会直接告诉你）
-curl -sL -o /tmp/wt.tar.bz2 \
+curl -fsSL -o /tmp/wt.tar.bz2 \
   https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-turbo.tar.bz2
 tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2
 ```
+
+> ⚠️ **两条 `curl` 都带 `-f`** —— 少了它，HTTP 404/500 时 `curl` **照样以 0 退出**，
+> 把错误页（HTML）原样写成一个 `.onnx` / `.tar.bz2`，而自检只看"文件在不在"。
+> 装完跑一次 `cl doctor` 复核：模型那几行应该是 ✅。
 
 **装完之后双击 `ClassLive.app` 就能上课**（第一次会弹一个麦克风授权，点允许）。
 
@@ -286,6 +290,11 @@ cl update
 >
 > 不确定自己站在哪条线上？`cl doctor` 会直接说出来（`分支 main（正式版线）`
 > 或一句 `⚠️ 跟的是开发分支 …`）。
+>
+> ⭐ **v3.8.0 起 `cl update` 还会把 `.app` 一起跟上**（换新图标、把新版本号写进 Info.plist、
+> 补一处启动器容错）。判据是构建戳记：**只有构建输入真的变了才重建**（约 1–3 分钟），
+> 没变就跳过 —— 所以它不会每次都让你等。想先看要做什么：
+> `ClassLive.app/Contents/MacOS/python update.py --steps`。
 
 **升级后建议扫一眼这三处**（`git pull` 补不到的东西）：
 
@@ -307,15 +316,23 @@ cl update
 
 ## 使用说明
 
-### 快速开始（推荐：一键 `cl`）
+### 快速开始（推荐：双击 `.app`）
+
+**双击 `ClassLive.app`** —— 先开**课程卡片面板**（一门课一张卡），点某张卡的「开始上课」才开麦。
+课件可以直接**拖到卡上**（自动认出归哪门课，认不出的会让你核对）。
+
+终端里也一样（`cl` 零参数走的**就是**面板那条路）：
 
 ```bash
-cl                    # 线下课(麦克风) + 悬浮窗     ← 零参数，打开就能用
+cl                    # 线下课(麦克风) + 悬浮窗     ← 零参数 = 先开面板
+cl prep 第5周.pptx     # 开课前的准备：课件 → 候选术语 → 追加进该课术语表
 cl online             # 线上课(系统声，需先切 Multi-Output Device)
 cl file 录音.m4a       # 转录已有录音(终端输出)
 cl course ECON10101   # 记住课程名(之后用该课术语表)
+cl setkey             # 填 API key（面板就绪条上点「翻译引擎」也行）
 cl local              # 强制本地引擎(断网 / 不想出网)
 cl last               # 查看最近一次课堂记录
+cl doctor             # 自检：版本 / 依赖 / 模型 / 站在哪条分支上
 cl help               # 帮助
 ```
 

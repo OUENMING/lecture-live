@@ -146,6 +146,12 @@ update_classlive() {
   fi
 
   echo
+  # ⭐ 重建 .app —— **只有构建输入（图标 / VERSION / make-app.sh）变了才真重建**。
+  #    ⚠️ 判据与重建**都在 `update.py` 的 `app` 那一步里**（与卡片上「立即更新」
+  #       是同一条路），这里只负责把它跑起来。不跑的话桌面图标**永远停在旧的那份**。
+  #    ⚠️ 那一步自己幂等（先问 `make-app.sh --up-to-date`），所以这里无条件调。
+  "$PY" update.py --run-step app || echo "   ⚠ .app 没重建成功（原因见上）—— 图标/启动器还是旧的"
+  echo
   "$PY" doctor.py || true
   echo "   （模型不会自动下载 —— 要装哪个按上面的命令来。）"
 }

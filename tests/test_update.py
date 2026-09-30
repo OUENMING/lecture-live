@@ -498,6 +498,92 @@ finally:
 check("⚠️ 对照：非 git 仓库 -> 不提分支（第三项是 None）",
       _gi[2] is None and "非 git 仓库" in _gi[0], str(_gi))
 
+# ======================= D. 重建 .app（图标那条路）=======================
+# ⭐ 2026-09-30 加。作者的原话：「要让新用户有新图标才行，这个也想办法更新到新图标」。
+#    `.app` 里的图标 / Info.plist 版本号 / 启动器**只有 `make-app.sh` 会写**，
+#    而 `cl update` 只拉代码 —— 所以「重建」必须是更新流程里的一步，
+#    否则用户代码更新了、Dock 上还是旧图。
+print("\nD. 重建 .app（图标 / 版本号）\n")
+
+_STUB = """#!/bin/bash
+# 桩：`--up-to-date` 时有 STALE 就报「该重建」（非零），否则 0。
+# 不带参数（= 真构建）时记一笔到 CALLS，然后按 FAIL 决定成败。
+if [ "${1:-}" = "--up-to-date" ]; then
+  [ -f STALE ] && { echo "桩：构建输入变了"; exit 1; }
+  exit 0
+fi
+echo build >> CALLS
+[ -f FAIL ] && exit 1
+exit 0
+"""
+
+
+def _app_world():
+    """一个带 `make-app.sh` 桩的沙盒。返回 (tmp, clone)。"""
+    tmp, seed, clone = new_world()
+    mk = clone / "make-app.sh"
+    mk.write_text(_STUB, encoding="utf-8")
+    mk.chmod(0o755)
+    return tmp, clone
+
+
+def _count(clone) -> int:
+    """`make-app.sh` 桩被「真构建」调用了几次（它每跑一次往 CALLS 里记一笔）。"""
+    p = clone / "CALLS"
+    return len(p.read_text(encoding="utf-8").split()) if p.exists() else 0
+
+
+def _app_pending() -> list:
+    return [s["key"] for s in update.pending_steps()]
+
+
+tmp, clone = _app_world()
+check("D1 戳记对得上 -> **不列**「重建 .app」（不然 `cl update` 每次都白等三分钟）",
+      "app" not in _app_pending(), str(_app_pending()))
+(clone / "STALE").write_text("", encoding="utf-8")
+check("⭐⭐ 戳记对不上 -> 列出「重建 .app」（**图标就是这么丢的**那一条）",
+      "app" in _app_pending(), str(_app_pending()))
+_st = [s for s in update.pending_steps() if s["key"] == "app"]
+check("⭐ 而且 why 里带着 `make-app.sh` 给的那句原因（不是我们自己编的）",
+      bool(_st) and "构建输入变了" in _st[0]["why"], str(_st))
+
+(clone / "STALE").unlink()
+r = update.run_step("app")
+check("⭐⭐ `run_step('app')` 在**最新**时直接跳过、不跑构建"
+      "（`cl update` 是无条件调它的，所以这一步必须自己幂等）",
+      r["ok"] and not (clone / "CALLS").exists(), f"{r} calls={_count(clone)}")
+(clone / "STALE").write_text("", encoding="utf-8")
+r = update.run_step("app")
+check("⭐ 该重建时**真的跑**了 make-app.sh（桩记了一笔）",
+      r["ok"] and _count(clone) == 1, f"{r} calls={_count(clone)}")
+(clone / "FAIL").write_text("", encoding="utf-8")
+r = update.run_step("app")
+check("⚠️ 构建失败 -> `ok=False` **且带原因**（不许静默当成功）",
+      (not r["ok"]) and bool(r["error"]), f"{r}")
+
+tmp, _seed, clone = new_world()          # 没有 make-app.sh 的那一档
+check("⚠️ 没有 `make-app.sh` -> 不列这一步（**判断不了就不该凭空多一步**）",
+      "app" not in _app_pending(), str(_app_pending()))
+
+print("--- D2 `cl update` 真的会去跑那一步（沙盒里真跑 cl，假解释器）---")
+import shutil as _sh                                             # noqa: E402
+import subprocess as _sp                                         # noqa: E402
+
+_sand = ROOT / "sandbox_upd"
+(_sand / "ClassLive.app" / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
+_sh.copy2(pathlib.Path(update.__file__).resolve().parent / "cl", _sand / "cl")
+_fake = _sand / "ClassLive.app" / "Contents" / "MacOS" / "python"
+_fake.write_text('#!/bin/sh\necho "FAKEPY $@"\nexit 0\n', encoding="utf-8")
+_fake.chmod(0o755)
+_pr = _sp.run(["bash", str(_sand / "cl"), "update"], capture_output=True, text=True,
+              timeout=60, env={"PATH": "/usr/bin:/bin", "HOME": "/Users/owen"})
+_out = _pr.stdout + _pr.stderr
+check("⭐⭐ `cl update` 里**真的**出现了 `update.py --run-step app`"
+      "（少了它，更新的人永远拿不到新图标）",
+      "--run-step app" in _out, _out.strip()[-200:])
+check("⚠️ 前置：那一次确实走到了收尾（否则上一条可能只是空转）",
+      "FAKEPY doctor.py" in _out, _out.strip()[-200:])
+
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}")

@@ -127,9 +127,12 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   → **静默跳过重建**。2026-09-26 实测踩到：`$_want）` 触发上面那条 $VAR 雷区，
   `install.sh` 当场静默跳过。**凡是要给别的脚本/进程看的判据，先问「它出错时倒向哪边」**。
 - **构建戳记 `ClassLive.app/Contents/.build-stamp`**（2026-09-26 起）：记的是构建输入的指纹。
-  `cl update` **只拉代码、不重建 `.app`** —— 没有戳记的话 `make-app.sh` /
-  `tools/make_icon.py` / `VERSION` 的改动在用户那儿**永远不生效**（图标就是这么丢的）。
-  判据只在 `make-app.sh --up-to-date` **一份实现**里；别在 `install.sh` / `update.py` 各算一遍指纹。
+  ⚠️ **2026-09-30 起 `cl update` 会把 `.app` 一起跟上**（`update.py` 的 `app` 那一步：
+  `cl update` → `update.py --run-step app`；卡片那条路走同一个 `run_step`）——
+  在那之前它**只拉代码**，于是 `make-app.sh` / `tools/make_icon.py` / `VERSION` 的改动
+  在用户那儿**永远不生效**（**图标就是这么丢的**）。那一步自己幂等：先问戳记，没变就跳过。
+  判据只在 `make-app.sh --up-to-date` **一份实现**里（`update._app_stale_reason()` 调它）；
+  别在 `install.sh` / `update.py` 各算一遍指纹。
   ⚠️ 它**不含 `requirements.txt`** —— 依赖是 deps 步骤直接装进 `.app` 那个 python 的，不需要重建。
 - **新增 streamq tag 必须在 `main.drain()` 加同分支** —— 它是唯一的 tag 分发点，漏改即静默丢弃。
   ⚠️ **2026-09-30 起末尾有一条兜底 `else`**：未识别的 tag 会 `echo` 一行告警（**出声**，不再静默丢）。

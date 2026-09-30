@@ -1119,6 +1119,21 @@ def main() -> int:
         check("⭐⭐ 没有合成句的章 -> **退回它的原子要点**（不是留空）",
               any(b.startswith("• a-point") for b, _ in _R), str(_big[-3:]))
         check("⭐ 离线空档渲染成一行", any("未生成：离线" in b for b, _ in _R))
+        # ⭐⭐ 原子要点也吃 `zh`（2026-09-30 加）—— 与合成句/章标题同一条排法①。
+        #    改坏：把 `overlay._atom_big` 里的 `zh or` 去掉 -> 这条红。
+        _ol2 = dict(_ol)
+        _ol2["atoms"] = [{"text": "The supply curve slopes upward.",
+                          "zh": "供给曲线向上倾斜。", "src": [15], "terms": []},
+                         {"text": "Old atom without zh.", "src": [16], "terms": []}]
+        # ⚠️ **夹具要放宽**：上面那个假 `fits` 只允许 10 字符，而
+        #    `• 供给曲线向上倾斜。` 是 11 个 → 会被折成两行，判据假红。
+        #    （第一版就是这么红的 —— 是**夹具**的问题，不是代码的。）
+        _fold2 = lambda t: _ov.fold_rows(t, lambda x: len(x) <= 60, lambda w: w[:60])  # noqa: E731
+        _R2 = _ov.build_outline_rows(_ol2, None, "both", _fold2)
+        _bigs2 = [b for b, _ in _R2]
+        check("⭐⭐ 原子大字吃 `zh`；**没有 `zh` 的旧数据退回英文**（不丢）",
+              "• 供给曲线向上倾斜。" in _bigs2 and "• Old atom without zh." in _bigs2,
+              str([b for b in _bigs2 if b.startswith("•")]))
         check("⭐ 没有 `current_*` 字段也推得出「进行中」—— 推出来是空的就不打标题",
               all("进行中" not in b for b, _ in _R),
               "本夹具的原子全被已合成章覆盖了")

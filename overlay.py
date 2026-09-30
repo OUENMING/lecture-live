@@ -541,7 +541,7 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
         else:
             # ⚠️ 没有合成句（还没合成 / 合成失败）→ **退回它的原子要点**，不是留空
             for a in _atoms_in(c, outline):
-                _push(f"• {a.get('text', '')}", _terms(a), c.get("t0") or "")
+                _push(_atom_big(a), _terms(a), c.get("t0") or "")
         # 落在本章时间段里的 ❓
         for m in outline.get("marks") or []:
             if (c.get("t0") or "") <= str(m) <= (c.get("t1") or ""):
@@ -561,7 +561,7 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
         topic = (wins[-1].get("topic") if wins else "") or "当前主题"
         _push(f"▍{topic} · 进行中")
         for a in live:
-            _push(f"• {a.get('text', '')}", _terms(a))
+            _push(_atom_big(a), _terms(a))
 
     # ⑤ 「上次看到这里」分隔线 —— 插在**第一条时刻晚于 `seen_t`** 的行**之前**。
     #    ⚠️ 时刻单独记在 `at[]` 里，**不从渲染出来的文字里反解** ——
@@ -587,6 +587,17 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
             # 连窗口都没有 = 刚开课头几十秒
             _push("▍ 还在记 · 等第一段内容")
     return out
+
+
+def _atom_big(a) -> str:
+    """原子要点的**大字**：有中文用中文，没有退回英文。
+
+    ⭐ 排法① 的同一套（作者 2026-09-30：「中文占比再提高一点」）——
+       ⚠️ 与合成句 / 章标题同一条规矩，别让纲要里三种行三种排法。
+    ⚠️ `zh` 是**后加的字段**（2026-09-30），旧 `.atoms.jsonl` 里没有 → 必然退回英文 ✅
+    """
+    zh = (a.get("zh") or "").strip()
+    return f"• {zh or a.get('text', '')}"
 
 
 def _atoms_in(c, outline) -> list:
@@ -910,7 +921,6 @@ class Overlay:
             ve, self._label, f_zh, f_en, f_big,
             self._width, PAD, ROW_EN_H, ROW_GAP, ROW_ZH_H, ROW_H,
             max_scroll_h=self._expanded_h,
-            on_follow_change=self._on_follow_change,
             measure=_measure_text_h)
         self._tv.set_collapsed(True)      # 初始收回态: 滚轮必须从一开始就被吞掉
         # 载入的宽度可能是窄窗(上次拖过) -> 立刻按它定行尺寸, 否则会先用 2 行的
@@ -1053,24 +1063,16 @@ class Overlay:
         # 而滚动权限已与收起/展开解耦(见 transcript_view.set_collapsed), 现在
         # **拉窗口 = 看几句, 滚动 = 往回翻**, 两者正交, 不需要这个按钮。
         # `_apply_mode` 保留: **答案接管**仍在用它自动展开/还原(见 answer 接管那段)。
-        # "回到最新": 只在用户翻到上面去了以后出现。它同时是滚轮若投递失败时的
-        # 保底导航(按钮已被实测证明可点)。
-        self._btn_latest = self._button(
-            "↓ 最新", self._tv.scroll_to_bottom, "回到最新一句")
-        self._btn_latest.setHidden_(True)
         # 顶栏按钮按**右对齐**摆放(列表为左->右顺序), 实际 x/宽度在 _layout() 现算:
         # 宽度 = sizeToFit + 内边距(图标保底 28px 点击区)。旧代码硬编码 x, "展开"
         # 占 [W-170,W-108] 而"译 开"占 [W-130,W-74], **交叉 22px**, 渲染出来糊成
         # 一团("展开译 开")。自适应宽度后中英换字都不会重叠。
-        # ⚠️ _btn_latest 是**隐藏但仍占位**的, 所以它必须留在列表最前(视觉最左),
-        #    插到中间会在按钮组内部凭空留一段间隔。
-        # ⚠️ _btn_latest 是**隐藏但仍占位**的, 所以它必须留在列表最前(视觉最左)。
-        # ⚠️❓ 插在**第二位**(不是最前), 图的是: 布局从右往左摆, 插在第二位之后
-        #    **可见那一组的左边缘不动**(只有隐藏的 _btn_latest 往外挪) —— 顶栏看着
-        #    没变宽, 左侧留白从 124px 降到 ≈90px 全被那个不可点的隐藏按钮吃掉。
-        self._bar = [self._btn_latest, self._btn_lost, self._btn_ask,
-                     self._btn_topic, self._btn_trans,
-                     self._btn_close]
+        # ⚠️ 2026-09-30：**`↓ 最新` 删了** —— 它的活并进了「字幕」
+        #    （`_new_topic` 现在也 `scroll_to_bottom()`）。
+        #    ⚠️ 顺带的好处：`❓` 成了最左那个按钮，**章节条多出约 90px 可用宽度**
+        #    （原来那份宽度被一个不可点的隐藏按钮吃掉 —— 见下面 `_layout` 的注释）。
+        self._bar = [self._btn_lost, self._btn_ask, self._btn_topic,
+                     self._btn_trans, self._btn_close]
         self._sync_trans_button()
         self._install_status_item()               # 菜单栏: 鼠标穿透开关 + 退出
 
@@ -1455,13 +1457,6 @@ class Overlay:
         self._last_panel_size = (_fa.size.width, _fa.size.height)
         self._layout()
 
-    def _on_follow_change(self, follow: bool):
-        """跟随状态变化 -> 显示/隐藏"↓ 最新"按钮。"""
-        try:
-            self._btn_latest.setHidden_(follow)
-        except Exception:                     # noqa: BLE001
-            pass
-
     # ---- 用户缩放 ----
     def _load_window_state(self) -> None:
         """读回上次的窗口尺寸。fail-soft: 读不到/格式坏就用默认, 绝不抛。"""
@@ -1763,8 +1758,6 @@ class Overlay:
         # 直接按字宽会给一个点不中的小目标。
         gap = 6.0
         # ⚠️ **先算总宽**：放不下时把**隐藏**按钮从这一行里去掉。
-        #    `_btn_latest` 隐藏时仍占位，图的是它出现/消失时按钮不跳；但面板窄到
-        #    放不下时那个理由不成立 —— 它本来整块就在面板外，而占位会把**可见**按钮
         #    顶出去。实测(2026-09-28, 宽 280 = `setContentMinSize_` 的下限, 拖得到)：
         #    `↓ 最新` 占 x=-79..-22(整块在面板外)、`❓` 被挤到 x=-16..18 **左半被切**。
         #    加这个按钮之前只切隐藏的那个；加了之后切到一个**看得见**的，那是退化。

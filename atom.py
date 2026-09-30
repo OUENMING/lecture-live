@@ -59,6 +59,10 @@ MAX_POINTS = 5
 #:   上限的理由同 `MAX_POINTS`：它是**注入 prompt 的成本闸门**，不是模型的自觉。
 MAX_TERMS = 3
 TERM_MAX_CHARS = 60
+#: `zh`（要点中文译文）的长度上限。⚠️ 比 `text` 的 200 **紧**：中文密，
+#:   200 个中文字符是一大段，那是正文不是摘要了。
+#: ⚠️ 超长 / 缺失 / 非字符串一律置空，**不丢条目** —— `text` 才是依据。
+TEXT_ZH_MAX_CHARS = 120
 
 #: `topic` / `topic_zh` 的截断长度。
 #: ⚠️ `topic` 原来是 **12** —— 那是**按中文**定的，换成英文主题后会把标题**拦腰截断**
@@ -77,6 +81,7 @@ SYS = """你在听一节课的实时转录, 每段给你该段新增的英文定
 {"topic": "本段主题(不超过 8 个英文词)",
  "topic_zh": "中文标题(术语保留英文)",
  "points": [{"text": "一条要点(英文, 一句简短的话)",
+             "zh": "这一条的中文译文",
              "kind": "主题|要点|定义|例子|课务|讲者强调",
              "src": [3, 4],
              "terms": [["price elasticity of demand", "需求价格弹性"]]}]}
@@ -101,7 +106,10 @@ SYS = """你在听一节课的实时转录, 每段给你该段新增的英文定
 - ⭐ **英文写简单句、用常用词** —— 它是给非英语母语的人**一眼扫过**的, 不是写作文。
   长从句、生僻词、口语填充词（um / you know）一律不要。
 - ⭐ `terms` 只放**关键术语和关键短语**（学生真会抄进复习纸的那种),
-  每条 point **最多 3 对**, 形如 `[["英文", "中文"]]`。没把握就留空数组 —— 宁可空, 不要凑。"""
+  每条 point **最多 3 对**, 形如 `[["英文", "中文"]]`。没把握就留空数组 —— 宁可空, 不要凑。
+- ⭐ 每条都要给 `zh`: **忠实翻译那一条 `text`** 的中文, 不是概括、也不是另写一句。
+  ⚠️ `text` 才是**唯一依据**(`src` 指回英文原句); `zh` 只供阅读。
+  ⚠️ 不许在 `zh` 里加 `text` 没有的信息。公式照抄, 别改写。"""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -114,11 +122,18 @@ class Atom:
     kind: str
     text: str
     terms: list = dataclasses.field(default_factory=list)
+    #: ⭐ 要点正文的**中文译文**（2026-09-30 加，作者：「实时总结的中文占比也稍微提高一点」）。
+    #: ⚠️ `text` 仍是**唯一依据**（`src` 指回英文原句）；`zh` 只供阅读，不算引用来源。
+    #: ⚠️⚠️ 加它**改了 `as_json()` 的键集合**（7 → 8）—— 这正是判据 T16 当初钉死的东西：
+    #:    那条判据的本意是「别悄悄改 `.atoms.jsonl` 的格式契约」，而这次是**有意的**，
+    #:    所以 T16 跟着改成 8 个键，并把新键写进去。
+    #:    风险低：`find.py` 不索引 `.atoms.jsonl`、`atom.load` 生产调用方为零（计划 §1.4 #3）。
+    zh: str = ""
 
     def as_json(self) -> dict:
         return {"id": self.id, "t": self.t, "epoch": self.epoch,
                 "src": list(self.src), "kind": self.kind, "text": self.text,
-                "terms": list(self.terms)}
+                "terms": list(self.terms), "zh": self.zh}
 
 
 # ---------------------------------------------------------------- 机械闸门
@@ -232,6 +247,11 @@ def parse_reply(obj, n_sent: int, *, base_id: int = 0,
         text = str(p.get("text") or "").strip().replace("\n", " ")
         if not text or len(text) > 200:
             continue
+        # ⭐ `zh`：坏形状**置空、条目照留**（同 `chapter.parse_reply`）——
+        #    ⚠️ `text` 才是依据（`src` 指回英文原句），`zh` 只是给人读的。
+        zh = str(p.get("zh") or "").strip().replace("\n", " ")
+        if len(zh) > TEXT_ZH_MAX_CHARS:
+            zh = ""
         raw_src = p.get("src")
         if not isinstance(raw_src, (list, tuple)):
             continue                                     # 形状不对 = 整条丢
@@ -243,7 +263,7 @@ def parse_reply(obj, n_sent: int, *, base_id: int = 0,
             kind = "要点"                                 # fail-open
         out.append(Atom(id=base_id + len(out), t=t, epoch=epoch,
                         src=sorted(set(src)), kind=kind, text=text,
-                        terms=terms_of(p)))
+                        zh=zh, terms=terms_of(p)))
         if len(out) >= MAX_POINTS:
             break
     return out

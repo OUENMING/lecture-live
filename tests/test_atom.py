@@ -109,8 +109,11 @@ def main() -> int:
         back = atom.load(w.path)
         check("⭐ 立刻读得回来（证明 flush 了）",
               len(back) == 1 and back[0]["text"] == "测试条目", str(back))
-        check("字段齐全（id/t/epoch/src/kind/text/terms）",
-              set(back[0]) == {"id", "t", "epoch", "src", "kind", "text", "terms"},
+        # ⚠️ 2026-09-30：这条也是**键集合**判据（和上面 T16 那条是两处）——
+        #    加 `zh` 时**两处都要改**，改一处会漏（我第一版就漏了这条）。
+        check("字段齐全（id/t/epoch/src/kind/text/terms/zh —— 8 个）",
+              set(back[0]) == {"id", "t", "epoch", "src", "kind", "text",
+                               "terms", "zh"},
               str(sorted(back[0])))
         w.close()
         # ⚠️ 原来是 `check("close() 幂等（调两次不炸）", True)` —— **恒真**
@@ -297,9 +300,25 @@ def main() -> int:
                   {"text": "t", "kind": "要点", "src": [0], "terms": None}]}, 1)[0].terms == []
               and atom.parse_reply({"topic": "T", "points": [
                   {"text": "t", "kind": "要点", "src": [0], "terms": "nope"}]}, 1)[0].terms == [])
-        check("⭐ `.atoms.jsonl` 的键集合**逐字不变**（`terms` 本来就在，不是新字段）",
-              sorted(_got[0].as_json()) == ["epoch", "id", "kind", "src", "t", "terms", "text"],
+        # ⚠️ 2026-09-30：键集合 **7 → 8**（加了 `zh`）。
+        #    这条判据的本意是「别**悄悄**改 `.atoms.jsonl` 的格式契约」——
+        #    而这次是**有意的**（作者要求给要点也加中文译文），所以这里**跟着改**，
+        #    并把新键写进名单。要再加字段，**先改这一行**。
+        #    风险低：`find.py` 不索引 `.atoms.jsonl`、`atom.load` 生产调用方为零。
+        check("⭐ `.atoms.jsonl` 的键集合恰好这 8 个（加 `zh` 是**有意的**，见上）",
+              sorted(_got[0].as_json()) == ["epoch", "id", "kind", "src", "t",
+                                            "terms", "text", "zh"],
               str(sorted(_got[0].as_json())))
+        _z = lambda **kw: atom.parse_reply(                          # noqa: E731
+            {"points": [dict({"text": "T", "kind": "要点", "src": [0]}, **kw)]}, 1)
+        # 改坏：把 `if len(zh) > TEXT_ZH_MAX_CHARS: zh = ""` 改成 `continue` -> 这条红。
+        check("⭐⭐ `zh`：正常带出 · 缺/None/超长**置空但条目照留**",
+              _z(zh="中译")[0].zh == "中译" and len(_z()) == 1 and _z()[0].zh == ""
+              and len(_z(zh=None)) == 1 and _z(zh=None)[0].zh == ""
+              and len(_z(zh="长" * (atom.TEXT_ZH_MAX_CHARS + 1))) == 1
+              and _z(zh="长" * (atom.TEXT_ZH_MAX_CHARS + 1))[0].zh == "",
+              repr([_z(zh="中译")[0].zh, _z()[0].zh,
+                    _z(zh="长" * (atom.TEXT_ZH_MAX_CHARS + 1))[0].zh]))
 
         print("\n--- ⑩ ⭐ 主题截断：英文标题不许被拦腰截断 ---")
         # ⚠️ 变异验证：把 `TOPIC_MAX` 改回 12 → 第一条红。

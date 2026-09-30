@@ -1511,14 +1511,15 @@ def run(args) -> None:
     import chapter as ch
     import live_summary as _live
 
-    #: ⭐ 开关：**阶段 3 默认关**，阶段 4 翻成默认开（计划 D14）。
+    #: ⭐ 开关：**阶段 4 起默认开**（计划 §8.4 / D14：阶段 3 默认 `"0"`，阶段 4 翻成 `"1"`）。
+    #: ⚠️ 想关掉就 `CLASSLIVE_LIVE_SUMMARY=0 cl`（比如只想省 API 调用时）。
     #: ⚠️ 它关的是**章节合成 / 纲要落盘 / 往 streamq 发消息**这三件新事。
     #: ⚠️⚠️ 另外**两处改进不在开关后面**（作者明确要求，D14）：
     #:    ① 模型调用失败时窗口**不再丢弃**，改为留着 `RETRY_S` 后重试；
     #:    ② 下课时**残余窗口补提交**一次。
     #:    这两条修的是今天确实存在的**丢数据**问题 —— 是**有意的改进**，
     #:    不是新功能，所以开关关着它们也生效。
-    _summary_on = os.environ.get("CLASSLIVE_LIVE_SUMMARY", "0") == "1"
+    _summary_on = os.environ.get("CLASSLIVE_LIVE_SUMMARY", "1") == "1"
 
     def _summ_chat(sysp, block, max_tokens, temperature):
         """⚠️ 复用 `build_notes._chat_json` —— **不做第 7 处手写 httpx**

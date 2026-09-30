@@ -410,7 +410,7 @@ def main() -> int:
         #    判据的**意图没变** —— 钉的是「`开课前的准备…` 不许静默少一项」，
         #    不是那个固定长度。所以这里比对**完整列表**，改动一眼能看见。
         check("菜单栏有「开课前的准备…」（不是静默少一项）",
-              _titles == ["开启鼠标穿透", "课堂纲要", "开课前的准备…", "退出"], str(_titles))
+              _titles == ["开启鼠标穿透", "实时总结", "开课前的准备…", "退出"], str(_titles))
         # ⭐⭐ T25（计划 §9.9 标的风险）：`NSMenu` 默认 `autoenablesItems = True`，
         #    它会**按 target 响不响应 action 自动改 `enabled`** ——
         #    而我们的 target 是响应的 → 有可能把 `setEnabled_(False)` **覆盖掉**。
@@ -418,7 +418,7 @@ def main() -> int:
         #    读到的可能还是我们设的那个值（**假绿**）。这里让 AppKit 真的走一遍
         #    菜单校验（`menu.update()`），再读。
         _m = ov._mi_outline
-        check("⭐ 菜单栏有「课堂纲要」", _m is not None and _m.title() == "课堂纲要")
+        check("⭐ 菜单栏有「实时总结」", _m is not None and _m.title() == "实时总结")
         if _m is not None:
             ov.set_trans_mode("raw")
             try:

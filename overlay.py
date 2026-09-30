@@ -1156,7 +1156,9 @@ class Overlay:
             #    ⚠️ 摆位在「开课前的准备…」**之前** —— 三个都是"对这次运行做的事"，
             #       而纲要是**课中**用的，比"开课前的准备"更常按到。
             mi_outline = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "课堂纲要", None, "")
+            # ⚠️ 名字与顶栏那个入口**必须一致** —— 同一个功能两个名字，
+            #    用户会以为是两件事（作者 2026-09-30：「入口标签写成实时总结」）。
+            "实时总结", None, "")
             t4 = _make_button_target(self._toggle_outline)
             self._targets.append(t4)
             mi_outline.setTarget_(t4); mi_outline.setAction_("clicked:")
@@ -2170,6 +2172,17 @@ class Overlay:
             self._outline["atoms"].extend(p.get("items") or [])
         elif k == "window":
             self._outline["windows"].append(dict(p))
+        # ⚠️⚠️ **必须自己补一次 `_layout()`**（2026-09-30 实测，**不补章节条永远不出现**）：
+        #    章节条那一行是**布局**的一部分（文字 + 显隐 + 宽度都算在 `_layout` 里），
+        #    而 `_layout` **只在尺寸/档位变化时**才被调 —— `_sync_panel_size` 是**轮询**，
+        #    面板尺寸没变就**早退**，压根到不了 `_layout`。
+        #    实测：喂了窗口/章节、`_chapter_bar_text()` 也算得出正确文案，
+        #    但标签一直是 `hidden=True` / `0×0`（`_layout` 被调 **0 次**）。
+        #    ⚠️ 探针里之所以看得见，是因为它 `_open_outline()` → `_apply_mode` 顺带跑了
+        #       `_layout` —— **真跑里没有那一步**。
+        #    ⚠️ 代价可忽略：`summary_update` 是**每条 payload 一次**（一节几十次），
+        #       不是每帧；`_layout` 里就是几个 `sizeToFit()`。
+        self._layout()
         self._mark_dirty(urgent=True)
 
     def _merge_deadline(self, p) -> None:
@@ -2229,12 +2242,14 @@ class Overlay:
         self._tv.mark_dirty(urgent=True)
 
     def _chapter_bar_text(self) -> str:
-        """章节条那一行。**没有可显示的东西就返回空串**（调用方据此隐藏）。
+        """章节条那一行。**永远不返回空串** —— 它是**入口**，入口第一职责是能被找到。
 
         ⚠️ 用**开始时间**而不是"已进行 N 分钟" —— 那样**不需要定时刷新**
            （计划 §9.8 明写）。每分钟重画一次顶栏是白烧电、还会让文字跳。
-        ⭐ 标题取**最新的那一章**（按 `t0`）；**一章都没有时退回当前主题**
-           （`windows[-1].topic`）—— 开课头十分钟本来就只有主题没有章。
+        ⭐ 三档（作者 2026-09-30 拍板的「实时总结」）：
+           有章节 → `▸ 最新一章标题 · since 开始时间`
+           有窗口没章节 → `▸ 当前主题 · since 时间`
+           什么都没有 → `▸ 实时总结`（**占位入口**，别让开课头几分钟找不到它）
         """
         chs = list((self._outline.get("chapters") or {}).values())
         dot = " ●  " if self._outline_new else ""
@@ -2244,7 +2259,11 @@ class Overlay:
         wins = self._outline.get("windows") or []
         topic = (wins[-1].get("topic") if wins else "") or ""
         if not topic:
-            return ""
+            # ⭐ **还没有内容时也要有入口**（作者 2026-09-30）：
+            #    原来返回空串 → 整条**隐藏** → 开课头几分钟**根本找不到入口**
+            #    （实测反馈：「我进去没有看到面板」）。
+            #    ⚠️ 它是**入口**，不是"信息" —— 入口的第一职责是**能被找到**。
+            return f"{dot}▸ 实时总结"
         return f"{dot}▸ {topic} · since {wins[-1].get('t') or ''}"
 
     def _on_chapter_click(self) -> None:

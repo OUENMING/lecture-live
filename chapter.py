@@ -45,10 +45,17 @@ import atom
 
 #: ⚠️ **沿用 `atom.MODEL` 这一个定义点**，不在这里再写一个字符串。
 MODEL = atom.MODEL
-MAX_TOKENS = 900          # 比 atom 的 700 大：一章要出 2–4 句 + 术语对
+MAX_TOKENS = 1400         # ⚠️ 2026-09-30 从 900 抬上来：加了 `zh` 之后**一句话两遍**
+                          # （英文 + 中文译文），4 句 × (en≈60 + zh≈150 + terms≈30)
+                          # 再加标题和 JSON 壳 ≈ 1100 —— 900 会**从尾巴上截断**，
+                          # 而截断的表现是"最后一句莫名其妙没了"，不像报错。
+                          # ⚠️ 它只是**上限**：模型写得短就花得少。
 TEMPERATURE = 0.0         # 同 atom：要可复现
 MAX_SENTENCES = 4
 SENT_MAX_CHARS = 400      # 单句长度上限（同 atom 的 200，放宽 —— 合成句比要点长）
+#: `zh` 的上限。⚠️ 中文比英文密，同样内容字数少一截 —— 拿 `SENT_MAX_CHARS` 卡它会**卡不住**。
+#: ⚠️ 超长 / 缺失 / 非字符串一律置空，**不丢句** —— `en` 才是唯一依据，`zh` 只供阅读。
+SENT_ZH_MAX_CHARS = 200
 CHAPTER_TAIL = ".chapters.jsonl"
 
 #: `flag` 的唯一定义点。不在里面的一律当 `None`（**fail-open**，同 `atom.KINDS` 的取舍：
@@ -64,6 +71,7 @@ SYS_CHAPTER = """你在听一节课的转录, 手里是**一章**的原料: 这�
 {"title": "本章标题(不超过 8 个英文词)",
  "title_zh": "中文标题",
  "sentences": [{"en": "一句简短的英文",
+                "zh": "这一句的中文译文",
                 "terms": [["price elasticity of demand", "需求价格弹性"]],
                 "src": [12, 13],
                 "flag": null}]}
@@ -76,6 +84,9 @@ SYS_CHAPTER = """你在听一节课的转录, 手里是**一章**的原料: 这�
 - 每条 `src` 必须是给你的**全局句号**里真实存在的; 不许编。
   ⚠️ 它只能落在本章范围内 —— 越界的整句会被丢掉。
 - 英文写**简单句、常用词** —— 它是给非英语母语的人一眼扫过的。
+- ⭐ 每句都要给 `zh`: **忠实翻译那一句 `en`** 的中文, 不是概括、也不是另写一句。
+  ⚠️ `en` 才是**唯一依据**(`src` 指的是英文原句); `zh` 只供阅读, 不算引用来源。
+  ⚠️ 不许在 `zh` 里加 `en` 没有的信息。公式照抄, 别改写。
 - `terms` 只放关键术语和关键短语, **每句最多 3 对**, 形如 `[["英文", "中文"]]`。
   没把握就留空数组。
 - `flag` 只有两种取值:
@@ -189,11 +200,13 @@ def build_prompt(sentences, atoms, prior_titles) -> str:
 
 
 def parse_reply(obj, lo: int, hi: int) -> list:
-    """模型回的 dict → `[{"en","src","terms","flag"}, …]`。**这里是全部的机械闸门。**
+    """模型回的 dict → `[{"en","zh","src","terms","flag"}, …]`。**这里是全部的机械闸门。**
 
     - `src` 为空、或**越出 `[lo, hi]`** → **整句丢掉，不修剪**
     - `flag` 不在 `FLAGS` 里 → 一律当 `None`
     - `terms` 走 `atom.terms_of`（**同一条校验，不是抄一份**）
+    - ⭐ `zh` 不合法（缺 / 非字符串 / 超长）→ **置空串，句子照留** ——
+      `en` 才是唯一依据，`zh` 只是给人读的；为一个阅读字段丢内容不划算
     - 最多 `MAX_SENTENCES` 句
 
     ⚠️ 丢掉而不是修剪：`src` 越界意味着这句**引用不实**，
@@ -224,7 +237,10 @@ def parse_reply(obj, lo: int, hi: int) -> list:
         flag = s.get("flag")
         if flag not in FLAGS:
             flag = None                                  # fail-open
-        out.append({"en": en, "src": sorted(set(src)),
+        zh = str(s.get("zh") or "").strip().replace("\n", " ")
+        if len(zh) > SENT_ZH_MAX_CHARS:
+            zh = ""                                      # ⚠️ 置空，**不丢句**
+        out.append({"en": en, "zh": zh, "src": sorted(set(src)),
                     "terms": atom.terms_of(s), "flag": flag})
         if len(out) >= MAX_SENTENCES:
             break

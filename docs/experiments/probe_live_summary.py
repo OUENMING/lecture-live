@@ -228,10 +228,21 @@ def render_outline(name: str, entries: list, res: dict) -> str:
                 flag = {"board": " ⚠ 依赖板书或图，转录不完整",
                         "discussion": " · 课堂讨论"}.get(s.get("flag"), "")
                 terms = s.get("terms") or []
-                tail = ("  " + " · ".join(f"{a} {b}" for a, b in terms)) if terms else ""
-                L_ += [f"- {s.get('en', '')}"
-                       f"{tail}"
-                       f"  <sub>src {s.get('src')}{flag}</sub>"]
+                tail = (" · " + " · ".join(f"{a} {b}" for a, b in terms)) if terms else ""
+                en = s.get("en", "")
+                zh = (s.get("zh") or "").strip()
+                # ⭐ **排法①（作者 2026-09-30 拍板）：中文当主行、英文降小字。**
+                #    理由：与**直播字幕一致**（那边也是中文那行更大）——
+                #    仓库纪律「沿用既有视觉词汇，不发明新的」。
+                #    ⚠️ `en` 和 `src` 一个都没丢：可追溯性靠小字那行。
+                if zh:
+                    L_ += [f"- **{zh}**",
+                           f"  <sub>{en}{tail} · src {s.get('src')}{flag}</sub>"]
+                else:
+                    # ⚠️ 没有 `zh`（旧数据 / 模型这次没给）→ **退回英文当主行**，
+                    #    不是留空 —— `zh` 缺失不该让内容消失。
+                    L_ += [f"- {en}{tail}",
+                           f"  <sub>src {s.get('src')}{flag}</sub>"]
             L_.append("")
         else:
             pts = [a for a in res["atoms"] if c["lo"] <= (a.get("src") or [0])[0] <= c["hi"]]

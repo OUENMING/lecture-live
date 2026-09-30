@@ -307,6 +307,40 @@ def main() -> int:
               ch.parse_reply(None, 1, 9) == [] and ch.parse_reply({}, 1, 9) == []
               and ch.parse_reply({"sentences": "nope"}, 1, 9) == [])
 
+        print("\n--- ⑧b ⭐ `zh`（中文译文）：坏形状**置空，但句子照留** ---")
+        # ⚠️ 判据指向的是**这个字段**，不是「整句还在不在」——
+        #    它的失效形态是「内容还在、只是没中文」，丢句就过头了。
+        # ⚠️ **取值器要安全**：`_one(...)[0]` 写在 `check()` 的参数里是**急切求值**的 ——
+        #    句子被丢掉时它先抛 `IndexError`，报告变成「判据自己抛了」而不是那条断言红
+        #    （诊断差一档，而这一条恰恰是「内容被静默丢掉」的形态，最需要说清楚）。
+        def _p(**kw):
+            kw.setdefault("en", "X")
+            kw.setdefault("src", [1])
+            return ch.parse_reply({"sentences": [kw]}, 1, 1)
+
+        def _zh(**kw):
+            got = _p(**kw)
+            return got[0].get("zh", "<没有 zh 键>") if got else "<整句被丢了>"
+
+        _over = "长" * (ch.SENT_ZH_MAX_CHARS + 1)
+        check("⭐ 正常 `zh` 原样带出（换行拍平成空格，同 `en`）",
+              _zh(zh="甲译文") == "甲译文" and _zh(zh="带\n换行") == "带 换行",
+              repr(_zh(zh="带\n换行")))
+        # 改坏：把 `if len(zh) > SENT_ZH_MAX_CHARS: zh = ""` 改成 `continue` -> 这条红。
+        # 改坏：把 `str(s.get("zh") or "")` 那个兜底去掉 -> 缺 `zh` 那条也红。
+        check("⭐⭐ 缺 / `None` / 超长 -> 一律空串，**句子照留**（不丢内容）",
+              _zh() == "" and len(_p()) == 1
+              and _zh(zh=None) == "" and len(_p(zh=None)) == 1
+              and _zh(zh=_over) == "" and len(_p(zh=_over)) == 1,
+              repr([_zh(), len(_p()), _zh(zh=None), _zh(zh=_over)]))
+        check("⭐ 正好卡在上限上的 `zh` **不算超长**（边界，`>` 不是 `>=`）",
+              _zh(zh="长" * ch.SENT_ZH_MAX_CHARS) != "")
+        # ⚠️ 非字符串走 `str()` —— 这是**跟 `en` 逐字一致**的处理（`str(s.get("en") or "")`），
+        #    不是"校验"：一个数字 `zh` 会变成 `"12345"` 显示出来（垃圾进垃圾出）。
+        #    刻意**不**在这里引入第二套规则 —— 两个字段两种脾气比一个坏字段更糟。
+        check("⭐ 非字符串走 `str()`（与 `en` 同一条规则，不另立一套）",
+              _zh(zh=12345) == "12345", repr(_zh(zh=12345)))
+
         print("\n--- ⑨ `build_prompt`：句号必须是**全局**的 ---")
         _p = ch.build_prompt([(12, "Supply slopes up."), (13, "Demand slopes down.")],
                              [atom.Atom(0, "t", 0.0, [12], "定义", "供给曲线向上")],

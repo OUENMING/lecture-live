@@ -149,21 +149,37 @@ def main() -> int:
         #       时机那半由注释钉（**取件时**判，因为三档课中可切）。
         src_main = (HERE / "main.py").read_text(encoding="utf-8")
         lines = src_main.splitlines()
-        # ⚠️⚠️ **只看 `put_nowait` 附近那几行**，不能 `'!= "raw"' in src_main` ——
+        # ⚠️⚠️ **只看那一行附近**，不能 `'!= "raw"' in src_main` ——
         #    `raw` 档在 main.py 别处也判（`:1009` 那支）→ "把 drain 里那道闸删掉"
         #    **查不出来**。2026-09-28 变异 M6 抓到的，**同一类错这是第三次**：
         #    判据要指向**那个位置**，不要指向"整个文件里有没有"。
-        put_idx = [i for i, ln in enumerate(lines) if "atomq.put_nowait" in ln]
-        check("找得到 `atomq.put_nowait` 那一行（否则下面那条是空的）", bool(put_idx),
+        #
+        # ⚠️ 2026-09-30 阶段 3 接线：调用点从 `atomq.put_nowait(...)` 换成了
+        #    `summ.feed(...)`（`live_summary.LiveSummarizer`）。
+        #    ⭐ **不变量一条没变，但「非阻塞」那半换了住处** ——
+        #    它现在住在 `live_summary.feed()` 里面（那边 `put_nowait`）。
+        #    → 所以下面**分两处钉**：闸门钉 main.py 那个调用点，
+        #      非阻塞钉 `live_summary.py` 里 `feed` 的实现。
+        #      （只把 `atomq.put_nowait` 改名成 `summ.feed` 就是**假绿**：
+        #        `feed` 里换成 `put` 的话判据照样过，而主循环会开始阻塞。）
+        CALL = "summ.feed("
+        put_idx = [i for i, ln in enumerate(lines) if CALL in ln]
+        check(f"找得到 `{CALL}` 那一行（否则下面那条是空的）", bool(put_idx),
               str(len(put_idx)))
         gate_ok = False
         for i in put_idx:
             window = "\n".join(lines[max(0, i - 6):i])
             if '!= "raw"' in window:
                 gate_ok = True
-        check('⭐ `put_nowait` **上面几行**有 `trans["mode"] != "raw"` 那道闸', gate_ok)
-        check("⭐ 用的是 `put_nowait` 而不是 `put`（drain 在主循环里，不能阻塞）",
-              bool(put_idx) and all("put_nowait" in lines[i] for i in put_idx))
+        check(f'⭐ `{CALL}` **上面几行**有 `trans["mode"] != "raw"` 那道闸', gate_ok)
+        # ⭐ 非阻塞那半 —— 钉实现，不钉"调用点上写没写 `put_nowait`"。
+        src_ls = (HERE / "live_summary.py").read_text(encoding="utf-8")
+        body = src_ls[src_ls.index("    def feed(self"):]
+        body = body[:body.index("\n    def ")]
+        check("⭐⭐ `live_summary.feed()` 里用的是 `put_nowait` 而不是 `put`"
+              "（drain 在主循环里，不能阻塞）",
+              "put_nowait(" in body and "\n" + " " * 8 + "self._q.put(" not in body,
+              f"feed 里 put_nowait={body.count('put_nowait(')}")
 
         # ② ⚠️ 复刻 ❓ 那次**真事故**的形状：`close()` 有三条早退（2026-09-29 起
         #    是四条，多了「没有 Obsidian 库」那条 —— **规矩不变：护栏在早退之前**），

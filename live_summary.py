@@ -154,9 +154,17 @@ def jev_deadline_gate(*, token_value=None):
     ⚠️ 走 `keypoints.ask_one`（**Jev 的唯一接入点**），不在这里重写 HTTP / schema。
     ⚠️ 一问一次网络往返。一节 50 分钟的课大约 10 个候选 → 10 次调用、每次约 0.5 秒，
        摊在整节课上可以忽略。
+    ⚠️⚠️ **token 必须取 `provider_token()`，不能取 `token()`**（2026-09-30 实测栽的）：
+       `token()` 是**CommandCode 代理**那一条，而 `ask_commandcode` 的
+       endpoint / model 是从 `_provider()` 解析的 —— 有官方 key 时它走**官方**。
+       于是「官方端点 + 代理 token」= **401**，闸门**一条都不放行**。
+       ⚠️ 而它的表象是「模型报的课务 0 条」—— **和上一版 `q1` 那个 bug 一模一样**：
+          「闸门坏了」看起来像「闸门把假阳性全拦住了」。
+       ⚠️ 它只在**官方 key 落盘之后**才暴露（那之前两端点一致），
+          所以 A5 探针（02:52，key 落盘是 02:55）那一批数是**有效的**。
     """
     import keypoints
-    tok = token_value or keypoints.token()
+    tok = token_value or keypoints.provider_token()
     if not tok:
         return None                      # ⚠️ 没配 -> 闸门不存在 -> 模型路径一条不报
 

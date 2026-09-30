@@ -38,6 +38,8 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 翻译、prompt、DeepSeek 云端、mlx 本地、引擎降级 | `translator.py`、`cloud_translator.py` |
 | 术语表、课号、术语查表与注入 | `build_notes.py`、`glossary/`（样例 `glossary.example.txt`） |
 | 笔记落盘、`sessions/` 文件格式、Obsidian 双层笔记、**❓「没听懂」的旁路文件 + 课后反查**（`sessions/<同名>.lost.jsonl`，**绝不改会话抬头**） | `obsidian_writer.py` |
+| **实时总结（原子 + 章节纲要）** —— 窗口规则 / 重试与积压 / 章节状态机 / 课务 / 草稿与调试入口。⚠️ `main.py` 那边**只接线**，逻辑全在这里 | `live_summary.py`（**动手前先读文件头**） |
+| **章节层** —— `.chapters.jsonl` 的三种记录、写入器、`parse_reply` 的机械闸门、课务正则、`chapter_path_for` | `chapter.py` |
 | 整课二级精修（polish） | `polish.py` |
 | 悬浮窗、字幕显示、滚动、槽位池化 | `overlay.py`、`transcript_view.py` |
 | 滚动行为验收探针（不在运行路径上） | `probe_scroll.py` |
@@ -127,6 +129,12 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   判据只在 `make-app.sh --up-to-date` **一份实现**里；别在 `install.sh` / `update.py` 各算一遍指纹。
   ⚠️ 它**不含 `requirements.txt`** —— 依赖是 deps 步骤直接装进 `.app` 那个 python 的，不需要重建。
 - **新增 streamq tag 必须在 `main.drain()` 加同分支** —— 它是唯一的 tag 分发点，漏改即静默丢弃。
+  ⚠️ **2026-09-30 起末尾有一条兜底 `else`**：未识别的 tag 会 `echo` 一行告警（**出声**，不再静默丢）。
+  但它**只是告警**，不改变「必须加同分支」这条 —— 加了 tag 却不加分支 = 数据照丢，只是你能看见。
+- **实时总结的开关是 `CLASSLIVE_LIVE_SUMMARY`**（阶段 3 默认 `"0"` 关、阶段 4 翻成 `"1"`）。
+  ⚠️ 它关的是**章节合成 / 纲要落盘 / 往 `streamq` 发消息**这三件。
+  ⚠️⚠️ **两处改进不在开关后面**（有意为之）：① 模型调用失败时窗口**留着重试**而不是丢弃；
+  ② 下课时**残余窗口补提交**。它们修的是今天确实存在的丢数据问题。
 - **会话 Markdown 格式是三方共享契约**：`obsidian_writer` 写它、`_parse` 读回它、`cl last` 用 grep 匹配它；改格式会同时打断三处。
   ⚠️ **抬头正则 `_TS` 是行尾锚定的** —— 所以「课上按下的标记」一律走**旁路文件**
   （`sessions/<同名>.lost.jsonl`），**不许**往抬头加字段：多一个后缀 `_parse` 就认不出

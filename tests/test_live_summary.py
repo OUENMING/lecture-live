@@ -928,6 +928,44 @@ def main() -> int:
         check("⭐ 失败单独计数（`failed` 不与正常调用混）",
               _cnt["failed"] == 1 and _cnt["atom"] == 2, str(_cnt))
 
+        print("\n--- ㉝ ⭐⭐ 课务闸门的 token 必须和**端点同源** ---")
+        # ⚠️⚠️ 2026-09-30 阶段 3 验收时实测栽的：`jev_deadline_gate` 取的是
+        #    `keypoints.token()`（**CommandCode 代理**那条），而 endpoint / model
+        #    由 `_provider()` 解析（**有官方 key 时走官方**）
+        #    → 「官方端点 + 代理 token」= **401** → **闸门一条都不放行**。
+        #    ⚠️ 它的表象是「模型报的课务 0 条」—— 和上一版 `q1` 那个 bug **一模一样**：
+        #       「闸门坏了」看起来像「闸门把假阳性全拦住了」。
+        #    ⚠️ 它只在**官方 key 落盘之后**才暴露（在那之前两端点一致、看不出来）。
+        import keypoints as KP
+        _seen: dict = {}
+        _orig = (KP.ask_one, KP._provider, KP.token)
+
+        def _spy(state, instruction, *, token_value="", timeout=30.0):
+            _seen["tok"] = token_value
+            return 0.9
+
+        KP.ask_one = _spy
+        KP._provider = lambda *a, **k: {"name": "typesafe", "endpoint": "https://官方.example",
+                                        "model": "jev-1.13.0", "token": "官方-TOKEN"}
+        KP.token = lambda *a, **k: "代理-TOKEN"
+        try:
+            L.jev_deadline_gate()("The essay is due Friday.")
+            # 改坏：把 `provider_token()` 换回 `token()` -> 这条红。
+            check("⭐⭐ 用的是**供应商**的 token（与端点同源），不是 `token()` 那条",
+                  _seen.get("tok") == "官方-TOKEN", repr(_seen.get("tok")))
+            _seen.clear()
+            L.jev_deadline_gate(token_value="显式传的")("x")
+            check("⭐ 显式传 `token_value` 优先（判据 / 探针要能注入）",
+                  _seen.get("tok") == "显式传的", repr(_seen.get("tok")))
+            _seen.clear()
+            KP._provider = lambda *a, **k: {"name": "", "endpoint": "", "model": "",
+                                            "token": ""}
+            check("⭐ 一条 token 都没有 -> 返回 `None`（= 闸门**不存在**；"
+                  "`_deadline_ok` 那边 fail-closed，一条不报）",
+                  L.jev_deadline_gate() is None)
+        finally:
+            KP.ask_one, KP._provider, KP.token = _orig
+
     except BaseException as e:                            # noqa: BLE001
         # ⚠️⚠️ **一条判据自己抛了，不许把整个文件带崩。**
         #    崩了的话：后面的组**一条都不跑**、只留一个 traceback、**没有 ❌ 行** ——

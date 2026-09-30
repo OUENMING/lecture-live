@@ -32,6 +32,11 @@ import notice
 PARTIAL_MAX_S = 10          # 草稿只转写最近 N 秒, 限制单次耗时
 DEVICE_CHECK_S = 2.0        # 实时音源: 多久重探一次「默认输入设备还是不是那个」
 SLEEP_GAP_S = 10.0          # 墙钟一次跳这么多 = 系统睡过一觉(见 check_clock_and_device)
+#: 收尾时留给实时总结的上限（秒）——提残余窗口 + 给当前章做一次正式合成。
+#: ⚠️ 它只是**上限**，不是固定等待：正常那一节实测 6–9 秒就走完了。
+#: ⚠️ 定这个数的约束是**收尾不能明显变慢**（那一步本来就在等精修），而不是"够用"。
+#: 比它更长的一律放弃 —— 放弃之后 `ChapterWriter` 已关，迟到的写入是 no-op。
+SUMMARY_FINISH_S = 25
 
 # 以这些词收尾(且无句末标点)→ 句子没说完, 不能单独送 LLM 翻译
 DANGLING_TAILS = {
@@ -1077,7 +1082,9 @@ def run(args) -> None:
 
     drafts: "queue.Queue[str]" = queue.Queue()          # 草稿文本 -> 主线程
     drafts_zh: "queue.Queue[str]" = queue.Queue()       # 草稿译文 -> 主线程
-    streamq: "queue.Queue[tuple]" = queue.Queue()       # ("zh"/"en"/"final"/"terms"/"notice"/"answer"/"answer_done") -> 主线程
+    streamq: "queue.Queue[tuple]" = queue.Queue()       # ("zh"/"en"/"final"/"terms"/"notice"/"answer"/"answer_done"/"summary") -> 主线程
+    # ⚠️ 加新 tag **必须**在 `drain()` 加同分支 —— 它是唯一的分发点，漏改即静默丢弃。
+    #    2026-09-30 起 `drain()` 末尾有一条**兜底告警**（未识别的 tag 会 echo 一行）。
     draftq: "queue.Queue" = queue.Queue(maxsize=1)      # 待译草稿(只保留最新)
     properq: "queue.Queue" = queue.Queue()              # 待查专有名词
     answerq: "queue.Queue[str]" = queue.Queue()         # 待讲解的问题(Phase 2)
@@ -1472,76 +1479,67 @@ def run(args) -> None:
         return
 
     # ══════════════════════════════════════════════════════════════════
-    # 原子层 worker（`docs/PLAN-roadmap.md §2.6` / 计划 §1）
-    # 把一节课切成可单独引用的小块，供**三条线共用**（重点标注 / 全局检索 / 声纹）。
+    # 实时总结 worker（`live_summary.LiveSummarizer`）—— 原子层 + 章节纲要
+    # 把一节课切成可单独引用的小块（原子），再把同主题连续的原子合成**章节**，
+    # 供三条线共用（重点标注 / 全局检索 / 声纹）与**课中纲要**。
     # ⚠️ **独立线程 + 只读快照**，与 `entry_launch` 同一条结构保证：它崩了
-    #    只是没有 atom，**录课一个字都不受影响**。
+    #    只是没有纲要，**录课一个字都不受影响**。
     # ⚠️⚠️ **纯转录档整条不开** —— `DESIGN.md:187` 逐字「纯转录 | 一个模型请求都不发」。
     #     判据在**取件时**（`drain` 那一支），**不是启动时判一次** ——
     #     那三档是**课中可切**的（🌐 按钮循环），启动时判会漏掉后来切进去的。
+    # ⚠️ 逻辑**全在 `live_summary.py` 里**（阶段 1/2 建的、有 120 条判据），
+    #    本文件这一段只做**接线** —— 给它四个依赖：
+    #    `chat` / `append_atoms` / `chapter_path` / `emit`。
     # ══════════════════════════════════════════════════════════════════
     import atom
+    import chapter as ch
+    import live_summary as _live
 
-    ATOM_EVERY_S = 75.0     # 窗口上限（计划 §17.3 的「60–90 秒」）
-    # ⚠️ 停顿阈值 —— **8 秒是错的，2026-09-28 真课上量出来的**：
-    #    实测批次间隔**中位 24 秒**（最小 8s），折合**每小时 150 次调用**，
-    #    而计划的设计节奏是 60–90 秒 → 12.5 倍。根因：讲课里的自然停顿
-    #    （翻页、思考、学生提问）**经常超过 8 秒**，于是"停顿提前跑"这条
-    #    几乎每次都先于 75 秒上限触发，**把上限整个架空了**。
-    #    → 抬到 30 秒（那才算真的中断）。⚠️ 这个数**还没有第二次实测**背书。
-    ATOM_PAUSE_S = 30.0
-    atomq: queue.Queue = queue.Queue()
-    atom_st = {"buf": [], "t0": 0.0, "last": 0.0, "prev": "", "n": 0}
+    #: ⭐ 开关：**阶段 3 默认关**，阶段 4 翻成默认开（计划 D14）。
+    #: ⚠️ 它关的是**章节合成 / 纲要落盘 / 往 streamq 发消息**这三件新事。
+    #: ⚠️⚠️ 另外**两处改进不在开关后面**（作者明确要求，D14）：
+    #:    ① 模型调用失败时窗口**不再丢弃**，改为留着 `RETRY_S` 后重试；
+    #:    ② 下课时**残余窗口补提交**一次。
+    #:    这两条修的是今天确实存在的**丢数据**问题 —— 是**有意的改进**，
+    #:    不是新功能，所以开关关着它们也生效。
+    _summary_on = os.environ.get("CLASSLIVE_LIVE_SUMMARY", "0") == "1"
 
-    def _atom_chat(block):
+    def _summ_chat(sysp, block, max_tokens, temperature):
         """⚠️ 复用 `build_notes._chat_json` —— **不做第 7 处手写 httpx**
         （仓库已有 5 处各自手写调 DeepSeek 的，`classify.py` 也复用的是它）。"""
         from build_notes import _chat_json
         if not api_key_val:
             return None
-        return _chat_json(api_key_val, atom.MODEL, atom.SYS, block,
-                          atom.MAX_TOKENS, atom.TEMPERATURE)
+        return _chat_json(api_key_val, atom.MODEL, sysp, block,
+                          max_tokens, temperature)
 
-    def _atom_flush():
-        buf, atom_st["buf"] = atom_st["buf"], []
-        if not buf:
+    def _summ_emit(payload: dict) -> None:
+        """推给界面。⚠️ **带 `stopping` 守卫** —— 窗口关掉之后不再往里塞。
+
+        ⚠️ 整段包 `try`：转不过去只是少一条纲要，**绝不能让 worker 抛**
+        （同原 `atomq.put_nowait` 那条纪律 —— `drain` 没有 try/except，
+        但这条是反方向：worker 抛了会**静默带走整条总结线**）。
+        """
+        if stopping.is_set():
             return
-        sents = [it[2] for it in buf]
-        base = buf[0][0]                       # 窗口第一句的**全局序号**（1-based）
         try:
-            obj = _atom_chat(atom.build_prompt(sents, atom_st["prev"]))
-        except Exception as e:                 # noqa: BLE001
-            # ⚠️ 提不出来是"少几条要点"，**不是"课跑不下去"**（同 mark_lost 的纪律）。
-            echo(f"⚠ atom 提取失败({str(e)[:50]}); 课堂不受影响")
-            return
-        if obj is None:
-            return
-        got = atom.rebase(
-            atom.parse_reply(obj, len(sents), base_id=atom_st["n"],
-                             stamp=atom.now_stamp()), base)
-        atom_st["n"] += writer.append_atoms(got)
-        topic = atom.topic_of(obj)
-        if topic:
-            atom_st["prev"] = topic        # 只做上下文提示，不落盘（plan §17.2 没这个字段）
+            streamq.put_nowait(("summary", payload))
+        except Exception:                                # noqa: BLE001
+            pass
 
-    def atom_worker():
-        while running.is_set():
-            try:
-                it = atomq.get(timeout=1.0)
-            except queue.Empty:
-                it = None
-            if it is not None:
-                if not atom_st["buf"]:
-                    atom_st["t0"] = time.monotonic()
-                atom_st["buf"].append(it)
-                atom_st["last"] = time.monotonic()
-            if not atom_st["buf"]:
-                continue
-            if (time.monotonic() - atom_st["t0"] >= ATOM_EVERY_S
-                    or time.monotonic() - atom_st["last"] >= ATOM_PAUSE_S):
-                _atom_flush()
+    summ = _live.LiveSummarizer(
+        chat=_summ_chat,
+        append_atoms=writer.append_atoms,
+        # ⚠️ `session_path` 可能是 `None`（`--save-notes no`）→ `chapter_path_for`
+        #    收 `None` 返回 `None`，`ChapterWriter` 那时不建文件、不写盘。
+        # ⚠️ 它在 **`chapter.py`** 里，不在 `live_summary.py`（探针那边也是这么调的）。
+        chapter_path=ch.chapter_path_for(writer.session_path) if _summary_on else None,
+        emit=_summ_emit if _summary_on else (lambda _p: None),
+        chapters_enabled=_summary_on,
+        deadline_gate=_live.jev_deadline_gate() if _summary_on else None)
 
-    threading.Thread(target=atom_worker, daemon=True).start()
+    threading.Thread(target=summ.run, args=(running,), daemon=True,
+                     name="live-summary").start()
 
     def drain():
         while True:
@@ -1583,19 +1581,39 @@ def run(args) -> None:
                 # Phase 2 只要求"可观测/可测": 回答在终端整段打出来(悬浮窗渲染
                 # 留给 Phase 3)。与 🙋 那行配对, 终端日志一眼能读完整条问答。
                 echo(f"[{now()}] 🤖 {item[2]}")
+            elif item[0] == "summary":              # ("summary", payload)
+                # ⭐ 实时总结推给界面。⚠️ **`getattr` 守卫** —— `TerminalUI` 没有
+                #    `summary_update`，而 `drain()` 没有 try/except，
+                #    直接调会 AttributeError **打死主循环**（同上面 answer 那条）。
+                fn = getattr(ui, "summary_update", None)
+                if callable(fn):
+                    fn(item[1])
+                # ⚠️ 终端里只打**正式章**的标题 —— 临时版每 4 分钟一刷，会刷屏。
+                # ⚠️ 取字段一律走 `.get` + `isinstance`：这条分支在 `drain` 里，
+                #    **不许抛**（这里的 payload 由 `_summ_emit` 产出，形状是可控的，
+                #     但 `streamq` 是共享的，守一道不花钱）。
+                p = item[1] if isinstance(item[1], dict) else {}
+                c = p.get("chapter") or {}
+                if p.get("kind") == "chapter" and c.get("status") == "final":
+                    echo(f"[{now()}] 📑 {c.get('title', '')}")
             elif item[0] == "final":                # ("final", en, zh, asr_raw)
                 ui.finalize(item[1] or item[3], item[2])   # 翻译失败时至少显示转录
                 writer.append(item[1], item[2], raw=item[3])
-                # 🆕 原子层：把这一句转给 worker。⚠️ **`put_nowait`（非阻塞）** ——
+                # 🆕 实时总结：把这一句转给 worker。⚠️ **非阻塞** ——
                 #    `drain()` 在主循环里，这里是「不阻塞不变量」管着的地方。
                 #    ⚠️ 档位判在**这里**，不是启动时 —— 三档课中可切（见 worker 那段）。
-                #    ⚠️ 整段包 `try`：转不过去只是少几条 atom，绝不能让 drain 抛。
+                #    ⚠️ 整段包 `try`：转不过去只是少几条，绝不能让 drain 抛。
                 if trans["mode"] != "raw":
                     try:
-                        atomq.put_nowait((writer._n, time.strftime("%H:%M:%S"),
-                                          item[1] or item[3], item[2]))
+                        summ.feed((writer._n, time.strftime("%H:%M:%S"),
+                                   item[1] or item[3], item[2]))
                     except Exception:               # noqa: BLE001
                         pass
+            else:
+                # ⚠️ **兜底告警**：往 `streamq` 里加了新 tag 却忘了在 `drain` 加分支时
+                #    **出声**，而不是静默丢弃。`drain()` 是**唯一**的 tag 分发点。
+                #    ⚠️ 只 `echo`，不做任何可能抛的事 —— 这里没有 try/except。
+                echo(f"⚠ drain: 未识别的 streamq tag {item[0]!r}（已丢弃）")
 
     try:
         _dev = {"wall": time.time(), "next": 0.0}
@@ -1755,6 +1773,18 @@ def run(args) -> None:
 
                 def _wrap():
                     try:
+                        # ⭐ 实时总结先收尾：**必须在 `writer.close()` 之前**。
+                        # ⚠️ 理由不是顺序好看 —— `AtomWriter` 的 `_handle()` 发现句柄为
+                        #    `None` 会**重新打开文件写入**（`atom.py` 那条 `_closed` 判据
+                        #    是这一轮才加的）。在 `writer.close()` 之后再产原子 =
+                        #    **静默重开 + 泄漏句柄**（原 `main.py` 内联那版就有这个暴露面）。
+                        # ⚠️ 它自己带 `timeout_s` 兜底；这里再包一层 `try` 是因为
+                        #    **收尾失败绝不能连累笔记**（笔记才是这一节课的主产物）。
+                        try:
+                            summ.finish(timeout_s=SUMMARY_FINISH_S, cancel=_cancel)
+                        except BaseException as e:        # noqa: BLE001
+                            echo(f"⚠ 实时总结收尾失败（笔记照写）："
+                                 f"{type(e).__name__}: {str(e)[:80]}")
                         _box["msg"] = writer.close(ask=lambda n: save,
                                                    qa=qa_snapshot,
                                                    on_progress=_ui_progress,
@@ -1788,6 +1818,16 @@ def run(args) -> None:
                              "（再按一次 Ctrl+C 强制退出，笔记不会写）")
                 if "err" in _box:
                     raise _box["err"]
+            else:
+                # ⚠️ **放弃路径**（问话时被关窗）：上面整块被跳过 → `writer.close()`
+                #    不会跑，所以实时总结的写入器也没人关。
+                # ⭐ `close()` **只关文件、一个模型都不调** —— 用户已经说了不要这份笔记，
+                #    这时候再花他的钱去合成章节是错的。
+                # ⚠️ 包 `try`：这条路上笔记本来就没写，更不该因为关个句柄而崩。
+                try:
+                    summ.close()
+                except BaseException as e:                # noqa: BLE001
+                    echo(f"⚠ 实时总结关闭失败：{type(e).__name__}: {str(e)[:80]}")
 
             msg = _box.get("msg", "")
             if msg:

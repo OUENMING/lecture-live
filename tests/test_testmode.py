@@ -199,6 +199,46 @@ def main() -> int:
     check("⭐ `pairs` 数的是**全部**收下的对（含 no_fix 那类）",
           t_sum._corr["pairs"] == 3, str(t_sum._corr["pairs"]))
 
+    print("\n--- T7 ⭐⭐ 采集失败不平：吞掉，但**别无声** ---")
+    # ⚠️ 变异验证：把 `_safe` 里那半段记账删掉（退回纯 `return None`）
+    #    -> 前两条红（「采集坏了」与「本来就没数据」会变得分不出来）。
+    class _T2(tm.TestSession):
+        def __init__(self):
+            self.t0 = 0.0
+            self.session_path = None
+            self.stem = None
+            self._wav = None
+            self.record_audio = False
+            self.segments = []
+            self.events = []
+            self._extra = {}
+            self._safe_bad = {}
+            self._corr = {"pairs": 0, "changed": 0, "identical": 0, "no_fix": 0,
+                          "words_raw": 0, "words_fixed": 0}
+            self._seg_no = 0
+
+        @tm._safe
+        def boom(self):
+            raise ValueError("故意的")
+
+    t7 = _T2()
+    check("⭐⭐ 采集抛了**不许**把调用方带崩（这条纪律一个字没动）",
+          t7.boom() is None)
+    check("⭐⭐ 但必须在 `events` 里出声（记方法名 + 异常类型）",
+          any(e["kind"] == "safe_exc" and "boom" in e["detail"] and
+              "ValueError" in e["detail"] for e in t7.events),
+          str(t7.events[:1]))
+    check("⭐ 而且按方法名计数（`collector_errors`）",
+          t7._safe_bad.get("boom") == 1, str(t7._safe_bad))
+
+    for _ in range(20):                       # 热路径：失败会一秒几十次
+        t7.boom()
+    _n_ev = sum(1 for e in t7.events if e["kind"] == "safe_exc")
+    check(f"⭐⭐ **不刷屏**：每个方法最多记 {tm._SAFE_MAX_PER_FN} 条事件",
+          _n_ev == tm._SAFE_MAX_PER_FN, f"记了 {_n_ev} 条")
+    check("⭐ 但计数要接着涨（21 次全算上，没丢）",
+          t7._safe_bad["boom"] == 21, str(t7._safe_bad))
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

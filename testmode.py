@@ -56,12 +56,39 @@ BLOCKS = frozenset({
 })
 
 
+#: 静默采集最多为**每个方法**记几条异常 —— 热路径上失败会一秒刷几十次，
+#: 全记会把 `events` 撑爆、也会把真正的时间轴事件挤没。超出的只累加计数。
+_SAFE_MAX_PER_FN = 2
+
+
 def _safe(fn):
-    """任何采集失败都吞掉 —— 记录是"锦上添花", 绝不能把课搞崩。"""
+    """任何采集失败都吞掉 —— 记录是"锦上添花", 绝不能把课搞崩。
+
+    ⚠️ 2026-09-30 改：**吞掉，但不再无声**（`PLAN-test-mode.md` 采集面 ⑥）。
+       原来纯 `return None` 的后果是「采集坏了」和「本来就没数据」在报告里
+       **长得一模一样** —— 那正是这一格要修的东西。
+    ⚠️ 但**不能出声到刷屏**：热路径（`note_chunk` 每 0.1 秒一次）一失败就是
+       一秒几十条 → **每个方法最多记 `_SAFE_MAX_PER_FN` 条**，之后只计数。
+    ⚠️ 而且**「不许把课搞崩」这条一个字不变**：整个包装体仍然只吞不抛，
+       连记账自己失败都再吞一层（然后彻底闭嘴）。
+    """
+    name = getattr(fn, "__name__", "?")
+
     def wrapper(*a, **kw):
         try:
             return fn(*a, **kw)
-        except Exception:                                 # noqa: BLE001
+        except Exception as e:                            # noqa: BLE001
+            try:
+                slf = a[0] if a else None
+                bad = slf._safe_bad
+                bad[name] = bad.get(name, 0) + 1
+                if bad[name] <= _SAFE_MAX_PER_FN:
+                    slf.events.append({
+                        "t": round(time.monotonic() - slf.t0, 2),
+                        "kind": "safe_exc",
+                        "detail": f"{name}: {type(e).__name__}: {str(e)[:120]}"})
+            except Exception:                             # noqa: BLE001
+                pass
             return None
     return wrapper
 
@@ -222,6 +249,7 @@ class TestSession:
         self.segments: list[dict] = []
         self.events: list[dict] = []
         self._extra: dict = {}          # `note_block` 收下的整块快照（见 `BLOCKS`）
+        self._safe_bad: dict = {}       # `_safe` 吞掉的异常按方法名计数（见 `_safe`）
         self._corr = {"pairs": 0, "changed": 0, "identical": 0, "no_fix": 0,
                       "words_raw": 0, "words_fixed": 0}
         self._seg_no = 0
@@ -430,6 +458,9 @@ class TestSession:
             #    （不然读报告的人分不清「没采到」和「本来就没有」）。
             "blocks": self._extra,
             "block_names": sorted(BLOCKS),
+            # ⚠️ `_safe` 吞掉的采集异常按方法名计数 —— **空 = 采集全干净**。
+            #    没有它，「采集坏了」和「本来就没数据」在报告里长得一模一样。
+            "collector_errors": self._safe_bad,
             "events": self.events,
             "segments": segs,
         }

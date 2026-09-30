@@ -116,7 +116,10 @@ check("A1 干净+落后 -> 拉到", r["ok"] and r["after"] == "0.0.2",
       f"{r['before']}->{r['after']} commits={r['commits']}")
 check("A5 requirements 变化被检出", r["reqs_changed"], f"reqs_changed={r['reqs_changed']}")
 
-(clone / "EDIT.txt").write_text("x\n", encoding="utf-8")
+# ⚠️ **2026-09-30 起「脏」只算改过的跟踪文件**（未跟踪的不再挡路 —— 见
+#    `update._dirty_report()` 那张实测表）→ 夹具必须改一个**仓库里已有的**文件，
+#    否则这条测的就不是「脏」了。
+(clone / "requirements.txt").write_text("numpy>=2.0\n# 我改的\n", encoding="utf-8")
 c = update.check()
 check("A6 check() 不动工作区（只报 dirty）", c["ok"] and c["dirty"],
       f"ok={c['ok']} dirty={c['dirty']}")
@@ -124,13 +127,16 @@ check("A6 check() 不动工作区（只报 dirty）", c["ok"] and c["dirty"],
 print("\n--- A2 脏工作区 ---")
 tmp, seed, clone = new_world()
 release(seed, "0.0.2")
-(clone / "MY_EDIT.txt").write_text("别丢我\n", encoding="utf-8")
+(clone / "requirements.txt").write_text("numpy>=2.0\n# 别丢我\n", encoding="utf-8")
 before_v, before_files = (clone / "VERSION").read_text().strip(), sorted(p.name for p in clone.iterdir())
 r = update.pull()
 after_v, after_files = (clone / "VERSION").read_text().strip(), sorted(p.name for p in clone.iterdir())
 check("A2 脏工作区 -> 停手且不动任何文件",
       (not r["ok"]) and r.get("blocked") and before_v == after_v and before_files == after_files,
       f"blocked={r.get('blocked')} VERSION {before_v}->{after_v} 文件数 {len(before_files)}->{len(after_files)}")
+check("⭐⭐ 而且我改的那一行**逐字还在**（停手 = 真没动）",
+      (clone / "requirements.txt").read_text() == "numpy>=2.0\n# 别丢我\n",
+      repr((clone / "requirements.txt").read_text()))
 
 print("\n--- A3 分叉 ---")
 tmp, seed, clone = new_world()
@@ -165,7 +171,8 @@ def auto_case(name, releases, expect_pull, dirty=False):
     for item in releases:
         release(seed, item[0], item[1])
     if dirty:
-        (clone / "MY_EDIT.txt").write_text("别丢我\n", encoding="utf-8")
+        # ⚠️ 同 A2：改的是**仓库里已有的**文件（2026-09-30 起未跟踪不算脏）。
+        (clone / "requirements.txt").write_text("numpy>=2.0\n# 别丢我\n", encoding="utf-8")
     before = (clone / "VERSION").read_text().strip()
     names_before = sorted(p.name for p in clone.iterdir())
     snap_before = _snapshot(clone)
@@ -461,7 +468,7 @@ sh("git", "checkout", "--detach", "HEAD", cwd=clone)
 _msgs["detached"] = update.pull().get("user_msg", "")
 sh("git", "checkout", "-b", "mine", cwd=clone)
 _msgs["无上游"] = update.pull().get("user_msg", "")
-(clone / "EDIT.txt").write_text("x\n", encoding="utf-8")
+(clone / "requirements.txt").write_text("numpy>=2.0\n# 我改的\n", encoding="utf-8")
 sh("git", "checkout", "main", cwd=clone)
 _msgs["工作区脏"] = update.pull().get("user_msg", "")
 check("⚠️ 四种停手各有各的话（并成一句 -> 用户会去做错的事）",
@@ -583,6 +590,49 @@ check("⭐⭐ `cl update` 里**真的**出现了 `update.py --run-step app`"
       "--run-step app" in _out, _out.strip()[-200:])
 check("⚠️ 前置：那一次确实走到了收尾（否则上一条可能只是空转）",
       "FAKEPY doctor.py" in _out, _out.strip()[-200:])
+
+# ======================= E. 工作区里的「东西」挡不挡更新 =======================
+# ⭐ 2026-09-30 加。作者的原话：「有没有办法让朋友那边工作区有东西也能正常更新？」
+#    实测四种情形（见 `update._dirty_report()` 那张表）：**未跟踪文件挡不住 `git pull`** ——
+#    唯一危险的那一格 git 自己会拦、而且拦得对。所以前置检查**只算改过的跟踪文件**。
+print("\nE. 工作区里的东西挡不挡更新\n")
+
+print("--- E1 ⭐⭐ 未跟踪的文件不再挡路 ---")
+tmp, seed, clone = new_world()
+(clone / "mynote.txt").write_text("我的便签\n", encoding="utf-8")      # 未跟踪
+release(seed, "0.0.2")
+r = update.pull()
+check("⭐⭐ 目录里躺着未跟踪文件 -> **照样更新**（以前整条更新链一步都不跑）",
+      r["ok"] and r["after"] == "0.0.2", f"{r['before']}->{r['after']} ok={r['ok']}")
+check("⭐ 而且那个文件**一个字节没动**", (clone / "mynote.txt").read_text() == "我的便签\n")
+check("⚠️ `check()['dirty']` 与 `pull()` 同源（未跟踪不算脏）",
+      update.check()["dirty"] is False, str(update.check()["dirty"]))
+
+print("--- E2 ⭐ 改过的**跟踪**文件仍然停手（边界①不松）---")
+tmp, seed, clone = new_world()
+release(seed, "0.0.2")
+(clone / "VERSION").write_text("9.9.9-我改的\n", encoding="utf-8")     # 跟踪文件被改
+r = update.pull()
+check("⭐ 改过仓库里的文件 -> 停手 + blocked（绝不覆盖）",
+      (not r["ok"]) and r.get("blocked"), (r.get("error") or "")[:60])
+check("⭐ 而且我的改动**逐字还在**", (clone / "VERSION").read_text() == "9.9.9-我改的\n")
+check("⚠️ 这一档 `check()['dirty']` 必须是 True（卡片要靠它说人话）",
+      update.check()["dirty"] is True, str(update.check()["dirty"]))
+
+print("--- E3 ⭐⭐ 唯一危险的那一格：远端要建**同名**文件 ---")
+# 安全网交给 git —— 但要钉住「它真的拦住了，而且我的文件没被覆盖、话也没说错」。
+tmp, seed, clone = new_world()
+(clone / "mynote.txt").write_text("我的便签\n", encoding="utf-8")
+(seed / "mynote.txt").write_text("origin 的版本\n", encoding="utf-8")
+commit(seed, "origin: 新建 mynote.txt")
+sh("git", "push", cwd=seed)
+r = update.pull()
+check("⭐⭐ git 自己拒绝了这一格 —— 更新没成，**但什么都没丢**",
+      (not r["ok"]) and (clone / "mynote.txt").read_text() == "我的便签\n",
+      f"我的文件={(clone / 'mynote.txt').read_text()!r} ok={r['ok']}")
+check("⭐⭐ 而且**不许说成「网络不通」**（误诊 —— 用户会去重连 WiFi）",
+      bool(r.get("blocked")) and "网络" not in (r.get("user_msg") or ""),
+      f"blocked={r.get('blocked')} user_msg={(r.get('user_msg') or '')[:60]!r}")
 
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]

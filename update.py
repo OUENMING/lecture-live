@@ -131,6 +131,29 @@ def default_ref() -> str:
     return ""
 
 
+def _dirty_report() -> str:
+    """工作区里**会挡路的**改动（`git status --porcelain` 原文；空串 = 干净）。
+
+    ⚠️⚠️ **只列「改过的跟踪文件」，不列未跟踪文件**（`--untracked-files=no`，2026-09-30 定）。
+       实测四种情形（都是 `git pull --ff-only` 真跑）：
+
+       | 情形 | 结果 |
+       |---|---|
+       | 未跟踪文件，远端没碰它 | ✅ 拉成功，文件保住 |
+       | 未跟踪文件，远端要建**同名** | ⛔ **git 自己拒绝**，文件保住 |
+       | 改过的跟踪文件，远端也改了它 | ⛔ **git 自己拒绝**，改动保住 |
+       | 改过的跟踪文件，远端改的是别的 | ✅ 拉成功，改动保住 |
+
+       → **未跟踪文件挡不住 `git pull`**：唯一会出事的那一格 git 自己会拦（而且拦得对），
+         而我们那道前置检查挡掉的却是最普通的日常（目录里一张下载的 PDF、`.DS_Store`、
+         用户自己的笔记）—— 一挡就是**整条更新链一步都不跑**（补依赖 / 重建 `.app` 全没了），
+         用户还完全不知道为什么。**作者 2026-09-30 就是被自己那份未跟踪的文件挡住的。**
+       → **改过的跟踪文件仍然停手** —— 那是「你动过我们的代码」，边界①不为它松。
+    """
+    rc, out, _ = _git("status", "--porcelain", "--untracked-files=no")
+    return out if rc == 0 else ""
+
+
 def branch_state() -> dict:
     """**这份代码站在哪条线上** —— `pull()` 的守卫与 `cl doctor` 共用这一份判断。
 
@@ -216,7 +239,7 @@ def check() -> dict:
         out["error"] = ("不在任何分支上" if bs["detached"]
                         else f"`{bs['branch']}` 没有上游")
         return out
-    out["dirty"] = bool(_git("status", "--porcelain")[1])
+    out["dirty"] = bool(_dirty_report())          # ⚠️ 与 `pull()` **同一个定义点**
 
     rc, _, err = _git("fetch", "--quiet")
     if rc != 0:
@@ -241,9 +264,8 @@ def _friendly(out: dict) -> str:
     """
     err = out.get("error") or ""
     if not out.get("ok") and out.get("blocked"):
-        # ⚠️ **三种"主动停手"必须说三句不同的话**（2026-09-30 加后两种）：
-        #    混成一句的话，站在开发分支上的人会去翻"我改过什么"——
-        #    而他真正该做的是换个分支。三件事，三个动作。
+        # ⚠️ **几种"主动停手"必须说几句不同的话**：混成一句的话，
+        #    站在开发分支上的人会去翻"我改过什么"—— 而他真正该做的是换个分支。
         if "不在任何分支上" in err:
             return ("这份代码停在某个历史版本上（不是正式版那条线），没法自动更新。\n"
                     "   想回到正式版：在 lecture-live 目录里跑 `git checkout main`")
@@ -253,6 +275,11 @@ def _friendly(out: dict) -> str:
         if "没有对应的远程" in err:
             return ("这条分支网上没有对应的版本，没法自动更新。\n"
                     "   想回到正式版：在 lecture-live 目录里跑 `git checkout main && git pull`")
+        if "撞车" in err:
+            # ⚠️ 这一格是 **git 在保护用户的东西**（见 `_dirty_report()` 那张表）：
+            #    他自己放了个同名文件，或者改了仓库里已有、而这次更新也要动的文件。
+            return ("这个文件夹里有和更新**撞车**的东西（你自己放的文件，或者你改过的文件）——\n"
+                    "   这次先不动它，你的东西一个字节都没变。把那个文件挪走或改回去再更新。")
         return "这个文件夹里有你自己改过的内容，这次就先不更新了（怕覆盖掉）。"
     if "不是 git 仓库" in err:
         return "这个文件夹不是从网上下载的那种，没法自动更新。"
@@ -307,15 +334,15 @@ def pull() -> dict:
         return {**out, "user_msg": _friendly(out)}
 
     # ⚠️ 边界①：脏就停手。放在 fetch 之前 —— 连探测都不该动用户的工作区。
-    # `blocked=True` 与"失败"分开：这是**主动拒绝**，不是出错。UI 措辞要不一样
-    # （"需先处理改动" 而不是 "更新失败"），否则用户以为工具坏了。
-    dirty = _git("status", "--porcelain")[1]
+    # ⚠️ **「脏」的定义只有一份**（`_dirty_report()`）：只算**改过的跟踪文件**，
+    #    未跟踪的不算 —— 那句 docstring 里有实测的四种情形。
+    dirty = _dirty_report()
     if dirty:
         out["blocked"] = True
         # `error` 给开发者/命令行看（含 git 术语）；`user_msg` 给**卡片**看。
         # 面向用户那条**不许出现「工作区」「stash」「未提交」**这类词 ——
         # 用工具的人不知道 git，看到这些只会以为哪儿坏了。
-        out["error"] = ("工作区有未提交的本地改动，已停手（绝不 stash、绝不丢弃）。\n"
+        out["error"] = ("工作区里**改过仓库里的文件**，已停手（绝不 stash、绝不丢弃）。\n"
                         + "\n".join("    " + x for x in dirty.splitlines()[:8]))
         return {**out, "user_msg": _friendly(out)}
 
@@ -336,6 +363,19 @@ def pull() -> dict:
     # ⚠️ 边界②：--ff-only。分叉时这里会失败，那是**想要**的结果。
     rc, so, se = _git("pull", "--ff-only", timeout=TIMEOUT * 2)
     if rc != 0:
+        # ⚠️⚠️ **「拉不动」有三种，别都当成网络问题**（2026-09-30 加第三条）。
+        #    实测 git 的两种原文：
+        #      · `untracked working tree files would be overwritten by merge`
+        #      · `Your local changes to the following files would be overwritten by merge`
+        #    —— 那两格**不是失败，是 git 在保护用户的东西**（什么都没丢，见
+        #    `_dirty_report()` 那张表），所以标成 `blocked`，措辞也要不一样。
+        _low = ((se or "") + (so or "")).lower()
+        if "would be overwritten" in _low:
+            out["blocked"] = True
+            out["error"] = ("这份文件夹里有和更新**撞车**的东西（你自己放的文件，"
+                            "或者你改过的文件）—— 已停手，一个字节都没动。\n"
+                            f"    原文：{(se or so or '')[:200]}")
+            return {**out, "user_msg": _friendly(out)}
         out["error"] = ("拉取失败。常见两种：\n"
                         "    · 网络不通 —— 过会儿再试\n"
                         "    · 本地和远程**分叉**了（你自己在本地提交过）—— 需要你自己决定\n"

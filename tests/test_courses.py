@@ -617,6 +617,43 @@ def main() -> int:
               courses.course_matches("10730", "ECON10730")
               and not courses.course_matches("99999", "ECON10730"))
 
+    print("\n--- NO_COURSE：用户显式声明「这节不属于任何课」 ---")
+    # ⭐⭐ 2026-09-30：**短号被两门课共用** —— 作者的**朋友的课**（热力学）落成
+    #    `2026-09-11_140757_10730.md`，被 `course.endswith("10730")` 算成了 `ECON10730`，
+    #    于是那节挖出的 `force` / `pressure` / `mathematically` 进了经济课的转录词表、
+    #    被当候选术语注入翻译 prompt（实测复现过）。
+    #    用户要的是「**把它摘出去**」，不是「判给另一门课」。
+    with _tf.TemporaryDirectory() as _d:
+        _dd = pathlib.Path(_d)
+        _stem = "2026-09-11_140757_10730"
+        (_dd / f"{_stem}.md").write_text("# x", encoding="utf-8")
+        (_dd / "2026-09-10_140200_10730.md").write_text("# x", encoding="utf-8")
+
+        # ⚠️ 前置：**先证明缺陷真实存在**。少了这条，下面的「没有了」可能是假绿
+        #    （比如夹具根本没让那个文件进来过）。
+        check("⚠️ 前置：没隔离之前它**确实**被算成 ECON10730",
+              sorted(p.name for p in courses.session_files(_dd, "ECON10730"))
+              == sorted(["2026-09-10_140200_10730.md", f"{_stem}.md"]),
+              str(sorted(p.name for p in courses.session_files(_dd, "ECON10730"))))
+
+        courses.set_attribution(_dd, _stem, courses.NO_COURSE)
+
+        check("⭐⭐ 隔离之后：`session_files` 里**没有它**了",
+              [p.name for p in courses.session_files(_dd, "ECON10730")]
+              == ["2026-09-10_140200_10730.md"],
+              str([p.name for p in courses.session_files(_dd, "ECON10730")]))
+        check("⭐⭐ 而且它**不算孤儿** —— 否则等于在诱用户再点一次「判给本课」",
+              _stem not in [p.stem for p in courses.orphan_files(_dd, ["ECON10730"])],
+              str([p.stem for p in courses.orphan_files(_dd, ["ECON10730"])]))
+        check("⚠️ `NO_COURSE` **不匹配任何课，包括它自己**"
+              "（少了这条守门，哪天课号真叫那个串就会被算回来）",
+              not any(courses.course_matches(courses.NO_COURSE, k)
+                      for k in ("ECON10730", "SOC10020", courses.NO_COURSE)))
+        check("⭐ 撤销是**删键**：撤销后回到按文件名认（与「显式排除」是两回事）",
+              courses.set_attribution(_dd, _stem, None) == {}
+              and _stem in [p.stem for p in courses.session_files(_dd, "ECON10730")],
+              str([p.stem for p in courses.session_files(_dd, "ECON10730")]))
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

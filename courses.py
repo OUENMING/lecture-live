@@ -489,6 +489,18 @@ def _session_course(stem: str) -> str | None:
 #: 旁路文件，**绝不改会话抬头**。
 ATTRIBUTION_NAME = ".attribution.json"
 
+#: 用户显式声明「这节**不属于任何课**」。
+#:
+#: ⚠️ 为什么需要它（2026-09-30 实测，不是假想）：**短号会被两门课共用** ——
+#:    作者在工程学院时录过一节课朋友的课（热力学），文件名落成
+#:    `2026-09-11_140757_10730.md`，而 `course_matches` 的
+#:    `course.endswith(c)` 把它算成了 **`ECON10730`**。
+#:    后果是活的：那节挖出的 `force` / `pressure` / `mathematically`
+#:    进了 `corpus.keywords`，被当候选术语**注入 ECON10730 的翻译 prompt**。
+#: ⚠️ 它必须是**一个不可能撞上真课号的串**（`endswith` 判据下，括号开头就够）；
+#:    但**判据不能靠这个巧合** —— `course_matches` 里有一条显式守门。
+NO_COURSE = "(不属于任何课)"
+
 
 def attribution_path(sessions_dir) -> pathlib.Path:
     return pathlib.Path(sessions_dir) / ATTRIBUTION_NAME
@@ -516,6 +528,8 @@ def set_attribution(sessions_dir, stem: str, course) -> dict:
        `cl last` grep），改一个后缀 `_parse` 就认不出那一条，
        会把 EN/ZH/ASR **静默盖到上一条头上**（`obsidian_writer` 文件头逐字记着）。
     ⚠️ 撤销是**删键**而不是写空串 —— 空串会让「改过」和「没改过」长得一样。
+    ⚠️ `course` 传 **`NO_COURSE`** 是合法用法：那是「这节不属于任何课」，
+       **不等于**「没改过」（后者要靠上面的 `None` 撤销）。
     """
     import store
     m = {k: v for k, v in attribution_map(sessions_dir).items() if k != store.K}
@@ -537,7 +551,11 @@ def course_matches(c: str, course: str) -> bool:
        于是短号文件**同时出现在两组列表里**（被算进这门课的 `rows`，
        又被当成"没归课"的孤儿），还会诱使用户把它「判给」错误的课。
        两处规则不一致的教训同 `facts`/`last_session` 那条：**各写一遍迟早分叉**。
+    ⚠️ `NO_COURSE`（用户显式排除）在这里**立刻返回 False**，不是靠"碰巧不像"——
+       否则哪天课号真叫那个串就会被重新算进来。
     """
+    if c == NO_COURSE:
+        return False
     return course == c or course.endswith(c)
 
 
@@ -569,6 +587,10 @@ def orphan_files(sessions_dir, known) -> list:
         if p.suffix != ".md":
             continue
         c = amap.get(p.stem) or _session_course(p.stem)
+        if c == NO_COURSE:
+            # ⚠️ 用户**显式排除**的**不算孤儿** —— 它出现在「没归课的上课记录」那一组里，
+            #    就等于在诱他再点一次「判给本课」（那正是他要避免的）。
+            continue
         if c is None or any(course_matches(c, k) for k in known):
             continue
         out.append(p)

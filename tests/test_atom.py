@@ -134,6 +134,55 @@ def main() -> int:
         w2.close()
         check("再追加是**只增不改**（旧的还在）", len(atom.load(w.path)) == 2)
 
+        print("\n--- ⑥b ⭐⭐ 关了之后不许再写（D17，两层都要钉）---")
+        # ⚠️⚠️ **只钉一层是假绿。** 生产真正走的是第 ② 层：
+        #    `obsidian_writer.close_atom()` 会把 `_atom_w` 置空，下一次
+        #    `append_atoms` 会**新建一个 `AtomWriter`** —— 新实例的 `_closed` 是
+        #    `False`，所以第 ① 层那个标志**管不着它**。
+        #    （我第一版只加了第 ① 层，复现脚本照样红；是它把我送回 `_atom_writer` 的。）
+        # ⚠️ 变异验证：删掉 `AtomWriter.append` 里的 `if self._closed` → ①红；
+        #    删掉 `_atom_writer` 里的 `_atom_closed` 判 **或** `close_atom` 里的置位 → ②红。
+        _c = tmp / "closed.md"
+        _c.write_text("# closed\n", encoding="utf-8")
+        _aw = atom.AtomWriter(_c)
+        _aw.append([atom.Atom(0, "t", 0.0, [1], "要点", "先来的")])
+        _cp = _aw.path
+        _aw.close()
+        _n2 = _aw.append([atom.Atom(1, "t", 0.0, [2], "要点", "迟到的")])
+        check("⭐⭐① `AtomWriter.close()` 之后 `append` 是 no-op"
+              "（返回 0、句柄不重开、文件不变）",
+              _n2 == 0 and _aw._h is None and len(atom.load(_cp)) == 1,
+              f"返回 {_n2}、_h={_aw._h!r}、文件 {len(atom.load(_cp))} 条")
+
+        import obsidian_writer as _ow
+        _od = pathlib.Path(tempfile.mkdtemp(prefix="cl_atom_closed_"))
+        try:
+            _o = _ow.ObsidianWriter(str(_od), "TEST", mode="no")
+            _o.session_path = _od / "sessions" / "y.md"
+            _o.session_path.parent.mkdir(parents=True)
+            _o.session_path.write_text("# y\n", encoding="utf-8")
+            _o.append_atoms([atom.Atom(0, "t", 0.0, [1], "要点", "先来的")])
+            _op = _o._atom_writer().path
+            _o.close()                                   # ⚠️ mode="no" 会早退
+            _n3 = _o.append_atoms([atom.Atom(1, "t", 0.0, [2], "要点", "迟到的")])
+            check("⭐⭐② `ObsidianWriter.close()` 之后 `append_atoms` **不新建写入器**"
+                  "（**这才是生产走的那条路** —— 被 `finish()` 放弃的线程会走到这里）",
+                  _n3 == 0 and getattr(_o, "_atom_w", None) is None
+                  and len(atom.load(_op)) == 1,
+                  f"返回 {_n3}、_atom_w={getattr(_o, '_atom_w', '缺失')!r}、"
+                  f"文件 {len(atom.load(_op))} 条")
+            # ⚠️ 置位**只发生一次**：再关一次不许把它清掉（`_closed` 是单向的）
+            _o.close()
+            check("⚠️ 再 `close()` 一次，守卫仍然在（单向，不是开关）",
+                  getattr(_o, "_atom_closed", False) is True
+                  and _o.append_atoms([atom.Atom(2, "t", 0.0, [3], "要点", "又来")]) == 0)
+        finally:
+            # ⚠️ **不能用 `shutil` 这个名字** —— 本函数下面（⑧ 那组）有一句
+            #    `import shutil`，那会让 `shutil` 在**整个 `main()` 里**都是局部名，
+            #    于是这里提前用就会 `UnboundLocalError`（判据自己炸，不是实现的问题）。
+            import shutil as _shc
+            _shc.rmtree(_od, ignore_errors=True)
+
         bad = tmp / "bad.atoms.jsonl"
         bad.write_text('{"text": "好的"}\n这不是 json\n\n{"text": ""}\n', encoding="utf-8")
         check("坏行跳过、空 text 跳过（系统边界要宽容）",

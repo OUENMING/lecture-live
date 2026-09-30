@@ -317,6 +317,15 @@ class AtomWriter:
          三条早退**之后**，于是答"不保存笔记"时旁路句柄**没关**（2026-09-28 真事故）。
          （⚠️ 那是**当时**的条数；2026-09-29 起 `close()` 有四条早退 —— 多了
          「没有 Obsidian 库」那一条。**规矩不变：护栏永远在早退之前**。）
+       · ⭐ **`close()` 之后 `append()` 是 no-op**（`_closed` 单向）。⚠️ 原写的是
+         「照抄 `_handle()` 的重开行为」，那正是**本计划引入的暴露面**：
+         `LiveSummarizer.finish()` 拿不到 `_step_lock` 时会**放弃** worker 线程
+         （`live_summary.py` 那段注释写着这条**实测发生过**），而那个被放弃的线程
+         之后照样走到 `_absorb_window` → `append_atoms`。那条路原来会**静默重开文件**：
+         往已经渲染完笔记的 `.atoms.jsonl` 里追写，而且 `close_atom()` 已把 `_atom_w`
+         置空 → **新建的那个句柄再没人关**。
+         （2026-09-30 复现：`close()` 之后 `append_atoms` 返回 1、`_atom_w` 被重建。）
+         ⚠️ `chapter.ChapterWriter` 是同一个形状（计划 D17：「**两个写入器都加**」）。
     """
 
     def __init__(self, session_path):
@@ -326,6 +335,7 @@ class AtomWriter:
                 str(pathlib.Path(session_path).with_suffix("")) + ATOM_TAIL)
         self._h = None
         self._n = 0
+        self._closed = False
 
     @property
     def path(self):
@@ -339,6 +349,10 @@ class AtomWriter:
     def append(self, atoms) -> int:
         """追加一批。返回**写成了几条**（写失败不是致命错 —— 见下）。"""
         if not atoms:
+            return 0
+        # ⭐ **关了之后的 no-op 不是失败**，所以它**不出声** —— 迟到的线程回来
+        #    是预期内的（见类 docstring），不该刷屏。与 `chapter.ChapterWriter` 同一条。
+        if self._closed:
             return 0
         try:
             # ⚠️⚠️ **`_handle()` 必须在 `try` 里面**（2026-09-29 修）—— 它是本方法
@@ -361,7 +375,8 @@ class AtomWriter:
             return 0
 
     def close(self) -> None:
-        """幂等。文件**不删**（它是这份笔记的证据）。"""
+        """幂等。文件**不删**（它是这份笔记的证据）。⭐ 关了就再也不开（`_closed` 单向）。"""
+        self._closed = True
         if self._h is not None:
             try:
                 self._h.close()

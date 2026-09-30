@@ -290,6 +290,62 @@ check("B11 退出码非零（含脚本自身出错）→ 出「重建 .app」",
 check("B11 退出码为 0 → 不出「重建 .app」",
       "app" not in _pending_keys(0))
 
+# ============== B12 ⭐ 模型清单变了要出声（与 reqs_changed 对称）==============
+# ⚠️ 2026-09-30 审计发现的洞：后台**自动更新只拉代码、不下模型**（`run_step("models")`
+#    是**手动**那条路才跑的）。原来只有 `reqs_changed` 有警告 ——
+#    于是一个新增的**必下**模型会被静默拖到下次启动才暴露。
+#    这一组钉两件事：**别漏报**（真变了要说）· **别假阳**（没变不许说）。
+print("\n--- B12 模型清单变化 ---")
+check("⚠️ 空 sha / 相同 sha -> False（不抛）",
+      update._models_changed("", "abc") is False
+      and update._models_changed("abc", "abc") is False
+      and update._models_changed("abc", "") is False)
+
+_tmp, _seed, _clone = new_world()
+
+# ① **防假阳**：只动 CHANGELOG/VERSION -> 不许报
+release(_seed, "0.0.2")
+_r1 = update.pull()
+check("① 没碰 models.py -> `models_changed=False`（这条防的是「出过 diff 就报」）",
+      bool(_r1.get("ok")) and _r1.get("models_changed") is False,
+      f"ok={_r1.get('ok')} models_changed={_r1.get('models_changed')!r}")
+
+# ② 真的动了 models.py -> 必须报
+(_seed / "models.py").write_text("MODELS = ()\n", encoding="utf-8")
+release(_seed, "0.0.3")
+_r2 = update.pull()
+check("⭐⭐ 碰了 models.py -> `models_changed=True`",
+      bool(_r2.get("ok")) and _r2.get("models_changed") is True,
+      f"ok={_r2.get('ok')} models_changed={_r2.get('models_changed')!r}")
+# ⚠️ 同时确认它**没有**污染另一半：这次没动 requirements.txt
+check("⚠️ 那一次 `reqs_changed` 仍然 False（两半互不干扰）",
+      _r2.get("reqs_changed") is False, f"{_r2.get('reqs_changed')!r}")
+
+# ③ 自动更新那条路要把这声**真的说出来** —— 不然加 `models_changed` 等于白加。
+# ⚠️ 第一版这里写的是「`skipped` 或 `ok is not None`」，**那是假绿**（几乎恒真，
+#    而且那时 clone 已经是最新、根本不走警告那条分支）。改成**去日志里找那句话**。
+_tmp4, _seed4, _clone4 = new_world()
+release(_seed4, "0.0.2", "auto")
+(_seed4 / "models.py").write_text("MODELS = ()\n", encoding="utf-8")
+release(_seed4, "0.0.3", "auto")
+_r4 = update.auto_update()
+_ver4 = (_clone4 / "VERSION").read_text(encoding="utf-8").strip()
+_log4 = (update.STATE_DIR / "update.log").read_text(encoding="utf-8")
+check("⭐⭐ 自动更新**真的拉了**、而且日志里出现了「模型清单有变化」",
+      _ver4 == "0.0.3" and "模型清单有变化" in _log4,
+      f"版本到 {_ver4}（期望 0.0.3）、日志里有那一声={'模型清单有变化' in _log4}")
+# ⚠️ 反向对照：**没**动 models.py 的那一轮，日志里**不该**有这句话。
+#    少了这条，上面那句可能只是「无论什么都打」。
+#    ⚠️ 每个 `new_world()` 都换一个全新的 `STATE_DIR`（`tmp/logs`）——
+#       所以下面是**另一份**日志，不是上面那份的尾巴。
+_tmp5, _seed5, _clone5 = new_world()
+release(_seed5, "0.0.4", "auto")
+update.auto_update()
+_log5 = (update.STATE_DIR / "update.log").read_text(encoding="utf-8")
+check("⚠️ 对照：这一轮没碰 models.py -> 日志里**没有**那一声",
+      "模型清单有变化" not in _log5,
+      f"日志={_log5.strip().splitlines()[-1][:90]!r}")
+
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}")

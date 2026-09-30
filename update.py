@@ -8,8 +8,12 @@
 
   ① **工作区脏就停手** —— 绝不 `stash`、绝不丢弃。那些改动可能是用户自己改的。
   ② **`--ff-only`** —— 本地和远程分叉时**响亮失败**，不静默造一个 merge commit。
-  ③ **绝不自动下模型**（1GB 级的东西要不要下是用户的决定）。本模块也不装依赖 ——
-     `requirements.txt` 变了只**报出来**，让调用方决定。
+  ③ **不替用户决定"可选"的大模型**（Qwen3 那个 938 MB 要不要下是用户的事）——
+     它们只能由用户在就绪条上**显式点**。⚠️ **必下的小模型**是**另一回事**：
+     `run_step("models")` 会顺手补齐（缺了根本跑不起来）。
+     ⚠️ 而**后台自动更新**那条路（`auto_update`）**一个模型都不下** ——
+     它只拉代码、并在模型清单有变化时**出一声**（`models_changed`）。
+     本模块也不装依赖 —— `requirements.txt` 变了只**报出来**，让调用方决定。
 
 ⚠️ 与 `cl` 的分工：
     · `cl update`  = 本模块 `pull()` + 之后补依赖 + 跑 `doctor.py`（bash 侧做）
@@ -52,6 +56,29 @@ def _reqs_hash() -> str:
     import hashlib
     f = HERE / "requirements.txt"
     return hashlib.sha256(f.read_bytes()).hexdigest()[:16] if f.exists() else ""
+
+
+#: 「哪些模型是必下的」那份清单的**唯一定义点**（`models.py:MODELS`；
+#: `doctor` 只是 `from models import MODELS` 转出来）。只有这个文件动过，
+#: 才**可能**引入新的必下模型。
+_MODELS_FILE = "models.py"
+
+
+def _models_changed(before: str, after: str) -> bool:
+    """`before..after` 之间「模型清单」动过没有。
+
+    ⚠️ 这是**保守的代理**，不是精确判据 —— 改个注释也会命中。
+       **要的就是这个方向**：宁可多提醒一次，也别静默漏下模型。
+    ⚠️ 为什么不用 `_reqs_hash()` 那种「内容指纹」：`requirements.txt` 是**纯数据文件**，
+       每次从磁盘读就能拿到最新的；而 `models.py` 是**代码**，`MODELS` 在本进程里是
+       **已经 import 过的旧对象** —— 拉完代码也读不到新的。对代码只能问
+       「这个提交区间里它变没变」，那正是 git 能直接回答的。
+    ⚠️ 前缀 `_` 是刻意的：**只有 `pull()` 会调它**，它不是一个给外面用的判据。
+    """
+    if not before or not after or before == after:
+        return False
+    rc, names, _ = _git("diff", "--name-only", f"{before}..{after}")
+    return rc == 0 and _MODELS_FILE in names.splitlines()
 
 
 def is_repo() -> bool:
@@ -171,12 +198,12 @@ def _friendly(out: dict) -> str:
 def pull() -> dict:
     """真正应用更新。**先检查再动手**，任何一条边界不满足就返回 `ok=False`。
 
-    返回 `{ok, error, skipped, before, after, commits, log, reqs_changed}`。
+    返回 `{ok, error, skipped, before, after, commits, log, reqs_changed, models_changed}`。
     `skipped=True` 表示"本来就没啥可更新"（不是失败）。
     """
     out = {"ok": False, "error": "", "skipped": False, "blocked": False,
            "before": _version(), "after": _version(), "commits": 0, "log": [],
-           "reqs_changed": False, "user_msg": ""}
+           "reqs_changed": False, "models_changed": False, "user_msg": ""}
     if not is_repo():
         out["error"] = "这不是 git 仓库，没法更新。"
         return {**out, "user_msg": _friendly(out)}
@@ -221,6 +248,11 @@ def pull() -> dict:
     out["after"] = _version()
     out["commits"] = behind
     out["reqs_changed"] = (_reqs_hash() != reqs_before)
+    # ⚠️ **与 `reqs_changed` 对称**：自动更新只拉代码、不下模型（`run_step("models")`
+    #    是**手动**那条路才跑的），所以这里必须**出个声** ——
+    #    少了它，一个新增的必下模型会**静默**拖到下次启动才暴露。
+    #    （2026-09-30 审计发现：原来只有依赖那一半有警告。）
+    out["models_changed"] = _models_changed(head_before, head_after)
     out["log"] = _git("log", "--oneline", f"{head_before}..{head_after}")[1].splitlines()
     out["ok"] = True
     return out
@@ -356,6 +388,10 @@ def auto_update() -> dict:
                f"ok={r['ok']} 提交={r.get('commits')}")
         if r.get("reqs_changed"):
             msg += "  ⚠️ 依赖有变化，需要用户自己跑 cl update"
+        if r.get("models_changed"):
+            # ⚠️ 与上面那条**并列**，不是可选装饰：自动更新**不下模型**，
+            #    所以这是用户唯一能知道「可能多了一个必下模型」的地方。
+            msg += "  ⚠️ 模型清单有变化，需要用户自己跑 cl update"
         if r.get("error"):
             msg += f"  err={r['error'][:160]}"
         _log(msg)

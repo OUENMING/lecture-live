@@ -35,10 +35,11 @@
 | `coverage_of` 的 `lost` 写成 `hc - ha` | ㉛「`lost` 方向不能反」+「两个口径都算对」 |
 | `coverage_of` 空集返回 `0.0` 而不是 `None` | ㉛「一条都没挑到时返回 `None`」 |
 
-⚠️ 本文件**只覆盖 `live_summary` / `chapter` 自己的逻辑**。设计文档
-`docs/PLAN-live-summary.md` §11.1 里还差：**T17/T18**（`fold_rows` / `build_outline_rows`，
-属阶段 4）与 **T24**（`--fail-window` 的口径 —— 参数实现了，**一次没跑过**）。
-T22/T23（编号映射 / 覆盖率）**已做**，在 ㉚/㉛ 两组。
+⚠️ 本文件**只覆盖 `live_summary` / `chapter` 自己的逻辑**。
+`docs/PLAN-live-summary.md` §11.1 的 **T1–T24 已经全部落地**（2026-09-30 收尾时核过）：
+T17/T18 在 ㉟/㊱（`overlay` 的纯函数，不起窗口）· T22/T23 在 ㉚/㉛ · T24 在 ㉜。
+⚠️ 别照旧版的这句话去"补" —— 它曾写着「还差 T17/T18 与 T24」，而那三组**早就在文件里了**
+（2026-09-30 审计发现这行过期，已改）。
 """
 from __future__ import annotations
 
@@ -1120,7 +1121,8 @@ def main() -> int:
               any(b.startswith("• a-point") for b, _ in _R), str(_big[-3:]))
         check("⭐ 离线空档渲染成一行", any("未生成：离线" in b for b, _ in _R))
         # ⭐⭐ 原子要点也吃 `zh`（2026-09-30 加）—— 与合成句/章标题同一条排法①。
-        #    改坏：把 `overlay._atom_big` 里的 `zh or` 去掉 -> 这条红。
+        #    ⚠️ 改坏：把 `overlay.build_outline_rows` 里那个 `_pair` 的
+        #       `zh or en` 换成 `en` -> 这条红。
         _ol2 = dict(_ol)
         _ol2["atoms"] = [{"text": "The supply curve slopes upward.",
                           "zh": "供给曲线向上倾斜。", "src": [15], "terms": []},
@@ -1134,6 +1136,28 @@ def main() -> int:
         check("⭐⭐ 原子大字吃 `zh`；**没有 `zh` 的旧数据退回英文**（不丢）",
               "• 供给曲线向上倾斜。" in _bigs2 and "• Old atom without zh." in _bigs2,
               str([b for b in _bigs2 if b.startswith("•")]))
+
+        # ⭐⭐ 2026-09-30 作者实测反馈「**AI 总结现在只有中文，英文完全没有了**」——
+        #    根因就在这里：原子**只把术语挂小字**，英文原句**没处放**。
+        #    ⚠️ 旧判据只查了`大字`，英文不在大字上也算过 → **一直是假绿**。
+        #    改坏：把 `_pair` 里 `_sub(en if zh else "", …)` 那一半去掉 -> 这条红。
+        _small2 = [s for b, s in _R2 if b.startswith("• 供给曲线向上倾斜")]
+        check("⭐⭐ 排法① 对**原子**也成立：英文原句必须**降小字**、不许消失",
+              any("The supply curve slopes upward." in s for s in _small2),
+              f"大字那行挂的小字={_small2!r}")
+
+        # ⭐⭐ `en` 档：**原子的大字也要退回英文**（计划 §9.3 逐字）。
+        #    ⚠️ 原来那个模块级 `_atom_big` **根本不看 mode** —— 它已经被删了，
+        #       换成 `_pair`（排法① 的唯一定义点），`en` 档在那里抹空 `zh`。
+        #    ⚠️ 旧判据的夹具里原子**没有 `zh`** →「该回英文却仍是中文」这条
+        #       **一直是假绿**（2026-09-30 作者实测才暴露）。
+        _en2 = _ov.build_outline_rows(_ol2, None, "en", _fold2)
+        _enbig = [b for b, _ in _en2]
+        check("⭐⭐ `en` 档：原子大字是**英文**（不是中文），且小字里一个中文都没有",
+              "• The supply curve slopes upward." in _enbig
+              and not any("供给曲线" in b for b in _enbig)
+              and not any("供给曲线" in s for _, s in _en2),
+              str(_enbig[-4:]))
         check("⭐ 没有 `current_*` 字段也推得出「进行中」—— 推出来是空的就不打标题",
               all("进行中" not in b for b, _ in _R),
               "本夹具的原子全被已合成章覆盖了")
@@ -1155,6 +1179,64 @@ def main() -> int:
               "16:00 晚于所有时刻 -> 不该插")
         check("⭐ `seen_t=None` -> **不插**分隔线",
               not any("上次看到这里" in b for b, _ in _R))
+
+        print("\n--- ㊲ ⭐ 空状态 / 占位入口的**用户指引**（作者 2026-09-30 追加）---")
+        # ⚠️ 这一组钉的是**文案本身** —— 它不是"好不好看"，是**唯一**告诉用户
+        #    「这东西叫什么、在哪、能不能点」的地方。
+        #    来由：作者实测反馈「我进去没有看到面板」→ 加了入口之后他追加要求
+        #    「第一次打开还没有总结的时候显示 AI 实时总结点这里，
+        #      直到有总结信息再替换掉那行占位」。
+        # ⚠️ 变异验证：任一句改回旧的（`▸ 实时总结` / `▍ 还在记 · 等第一段内容`）→ 对应那条红。
+
+        class _Bare:
+            """只带 `_chapter_bar_text` 真正读的**那两个**字段。
+
+            ⚠️ 故意用鸭子类型的假 self（不建窗口）—— 它多读一个字段就会
+               `AttributeError`，那正是我们想知道的：**这个方法长胖了**。
+            """
+            _outline_new = False
+            _outline = {"chapters": {}, "windows": [], "gaps": [], "marks": [],
+                        "deadlines": [], "atoms": []}
+
+        _bare = _ov.Overlay._chapter_bar_text(_Bare())
+        check("⭐⭐ 章节条空档要**写清功能名 + 可点**（光写「实时总结」看不出它可点）",
+              "AI 实时总结" in _bare and "点这里" in _bare, repr(_bare))
+
+        class _Live(_Bare):
+            _outline = {"chapters": {"0": {"id": 0, "status": "final", "title": "T1",
+                                           "title_zh": "题一", "t0": "15:05:27"}},
+                        "windows": [], "gaps": [], "marks": [],
+                        "deadlines": [], "atoms": []}
+
+        _live = _ov.Overlay._chapter_bar_text(_Live())
+        check("⭐ 有章节之后那句占位**被替换掉**（作者原话：「直到有总结信息再替换掉」）",
+              "点这里" not in _live and "T1" in _live, repr(_live))
+
+        # ⚠️ 同一个假 `fits` 的坑：夹具放宽到 60 字符，否则空状态那行会被折成两行
+        _fold3 = lambda t: _ov.fold_rows(t, lambda x: len(x) <= 60, lambda w: w[:60])  # noqa: E731
+        _empty = [b for b, _ in _ov.build_outline_rows(
+            {"chapters": {}, "windows": [], "gaps": [], "marks": [],
+             "deadlines": [], "atoms": []}, None, "both", _fold3)]
+        check("⭐⭐ 面板空状态要说「**内容会自动出现在这里**」（不是「什么都没有」）",
+              any("AI 实时总结" in b and "会自动出现" in b for b in _empty), str(_empty))
+        # ⭐ 还没出章节、但已经有窗口 -> **也要带功能名**（占位要一直说到有总结为止）
+        _mid = [b for b, _ in _ov.build_outline_rows(
+            {"chapters": {}, "windows": [{"w": 1, "hi": 42, "topic": ""}],
+             "gaps": [], "marks": [], "deadlines": [], "atoms": []}, None, "both", _fold3)]
+        check("⭐ 有窗口没章节时也带功能名 + 进度（别只剩一句「已 42 句」）",
+              any("AI 实时总结" in b and "42" in b for b in _mid), str(_mid))
+        # ⚠️ **离线那一支 2026-09-30 已删（死代码）** —— 本组第一版断言的就是它，
+        #    结果**红的**：第 ② 步对每个 gap 都 `_push` 一行，`out` 必然非空
+        #    → `if not out:` 那整块进不去。计划 §9.11 想要的那句话**本来就送达到了**，
+        #    而且送得更好（带具体时间段、且有章节时也在）。这里改成钉**实际行为**。
+        _off = [b for b, _ in _ov.build_outline_rows(
+            {"chapters": {}, "windows": [], "gaps": [{"state": "pending",
+                                                      "t_from": "15:30", "t_to": "15:35"}],
+             "marks": [], "deadlines": [], "atoms": []}, None, "both", _fold3)]
+        check("⭐ 离线时**正文里有一行带时间段的空档**（这就是计划要的那句话）",
+              any("未生成：离线" in b and "15:30–15:35" in b for b in _off), str(_off))
+        check("⚠️ 而**不是**退化成整屏只有一句功能名（那等于没说清为什么没有）",
+              not any("会自动出现" in b for b in _off), str(_off))
 
     except BaseException as e:                            # noqa: BLE001
         # ⚠️⚠️ **一条判据自己抛了，不许把整个文件带崩。**

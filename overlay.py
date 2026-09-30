@@ -503,6 +503,24 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
     def _sub(*parts):
         return " · ".join(p for p in parts if p)
 
+    def _pair(x, terms: str, flag: str = "", prefix: str = "") -> tuple:
+        """⭐ **排法① 的唯一定义点**：`(大字, 小字)`。
+
+        ⚠️⚠️ 合成句与原子要点**必须都走这一条**。2026-09-30 作者实测反馈
+           「AI 总结现在**只有中文，英文完全没有了**」——
+           合成句那一处把英文降到了小字，而**原子那一处只挂术语**
+           （`terms` 在真实数据里常常是空的）→ 英文整条消失。
+           这就是「**一条纪律两处定义**」的坑：分开写就一定会分叉。
+        ⚠️ 字面从 `en` 或 `text` 取 —— 合成句用 `en`、原子用 `text`，
+           两个键名不同**只是因为它们是两个数据类**，排法上没区别。
+        ⚠️ `en` 档：`zh` 在这里被抹空 → 大字**退回英文**、小字不再重复英文
+           （计划 §9.3 逐字：「所有中文小字留空，**大字也退回英文**」）。
+        ⚠️ `prefix` 只有原子用（`"• "`）；合成句不带前缀。
+        """
+        en = (x.get("en") or x.get("text") or "").strip()
+        zh = "" if only_en else (x.get("zh") or "").strip()
+        return f"{prefix}{zh or en}", _sub(en if zh else "", terms, flag)
+
     # ① 课务置顶，**最新的在上**（后进来的先看到）
     for d in reversed(list(outline.get("deadlines") or [])):
         _push(f" 📌  {d.get('quote', '')}",
@@ -533,15 +551,11 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
             for s in sents:
                 flag = {"board": "⚠ 依赖板书或图，转录不完整",
                         "discussion": "课堂讨论"}.get(s.get("flag"), "")
-                en = s.get("en", "")
-                zh = "" if only_en else (s.get("zh") or "").strip()
-                _push(zh or en,
-                      _sub(en if zh else "", _terms(s), flag),
-                      c.get("t0") or "")
+                _push(*_pair(s, _terms(s), flag), c.get("t0") or "")
         else:
             # ⚠️ 没有合成句（还没合成 / 合成失败）→ **退回它的原子要点**，不是留空
             for a in _atoms_in(c, outline):
-                _push(_atom_big(a), _terms(a), c.get("t0") or "")
+                _push(*_pair(a, _terms(a), prefix="• "), c.get("t0") or "")
         # 落在本章时间段里的 ❓
         for m in outline.get("marks") or []:
             if (c.get("t0") or "") <= str(m) <= (c.get("t1") or ""):
@@ -561,7 +575,7 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
         topic = (wins[-1].get("topic") if wins else "") or "当前主题"
         _push(f"▍{topic} · 进行中")
         for a in live:
-            _push(_atom_big(a), _terms(a))
+            _push(*_pair(a, _terms(a), prefix="• "))
 
     # ⑤ 「上次看到这里」分隔线 —— 插在**第一条时刻晚于 `seen_t`** 的行**之前**。
     #    ⚠️ 时刻单独记在 `at[]` 里，**不从渲染出来的文字里反解** ——
@@ -574,30 +588,24 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
     # ⑥ ⭐ **空状态**（计划 §9.11）—— 一行都没有时**不许留白一片**。
     #    impeccable / Operate 逐字：「Empty states that **teach the interface**,
     #    not『nothing here.』」。所以要说清**现在是什么情况、在等什么**。
-    #    ⚠️ 三种情形要分开 —— 但「纯转录档」那一支**走不到这儿**
-    #       （`_toggle_outline` 直接返回，纲要根本打不开）。
+    #    ⚠️ **只有两支** —— 计划 §9.11 里那第三支（「有 gap 且 state=pending」）
+    #       **2026-09-30 查明是死代码，已删**：上面第 ② 步对**每一个** gap 都
+    #       `_push` 一行（那行文案永远非空，而 `fold_rows` 只在空串时返回 `[]`）
+    #       → 有 gap 时 `out` 必然非空 → 这一整块根本进不去。
+    #       ⭐ 计划想要的那句话**本来就送达了**，而且送得更好：② 那行带**具体时间段**
+    #          `（15:30–15:35 未生成：离线）`，且**有章节时也照常出现**。
+    #       ⚠️ 「纯转录档」那一支也走不到这儿 —— `_toggle_outline` 直接返回。
     if not out:
-        if any(g.get("state") == "pending" for g in (outline.get("gaps") or [])):
-            # ⭐ 离线中：用户看终端也可能没注意，这里要**说人话**
-            _push("（离线中 —— 这几分钟的内容没生成）")
-        elif outline.get("windows"):
-            _push(f"▍ 还在记 · 已 {outline['windows'][-1].get('hi') or 0} 句"
+        if outline.get("windows"):
+            # ⚠️ 两句都**以功能名开头**（作者 2026-09-30：占位要一直说到有总结为止）——
+            #    只给「已 N 句」的话，用户不知道这行属于哪个功能。
+            _push(f"▍ AI 实时总结 · 已 {outline['windows'][-1].get('hi') or 0} 句"
                   f" · 等主题稳定后出章节")
         else:
-            # 连窗口都没有 = 刚开课头几十秒
-            _push("▍ 还在记 · 等第一段内容")
+            # 连窗口都没有 = 刚开课头几十秒。**这是「第一次打开」那一档** ——
+            # 要说清「这里会有东西」，不是「什么都没有」。
+            _push("▍ AI 实时总结 · 内容会自动出现在这里")
     return out
-
-
-def _atom_big(a) -> str:
-    """原子要点的**大字**：有中文用中文，没有退回英文。
-
-    ⭐ 排法① 的同一套（作者 2026-09-30：「中文占比再提高一点」）——
-       ⚠️ 与合成句 / 章标题同一条规矩，别让纲要里三种行三种排法。
-    ⚠️ `zh` 是**后加的字段**（2026-09-30），旧 `.atoms.jsonl` 里没有 → 必然退回英文 ✅
-    """
-    zh = (a.get("zh") or "").strip()
-    return f"• {zh or a.get('text', '')}"
 
 
 def _atoms_in(c, outline) -> list:
@@ -2246,7 +2254,10 @@ class Overlay:
         ⭐ 三档（作者 2026-09-30 拍板的「实时总结」）：
            有章节 → `▸ 最新一章标题 · since 开始时间`
            有窗口没章节 → `▸ 当前主题 · since 时间`
-           什么都没有 → `▸ 实时总结`（**占位入口**，别让开课头几分钟找不到它）
+           什么都没有 → `▸ AI 实时总结 · 点这里`（**占位入口**，别让开课头几分钟找不到它）
+        ⚠️ 第三档那句是**用户指引**，不是信息（作者 2026-09-30 追加）：
+           「第一次打开还没有总结的时候显示 AI 实时总结点这里，直到有总结信息再替换掉」。
+           所以要写清**功能名 + 动作**，光写「实时总结」看不出它可点。
         """
         chs = list((self._outline.get("chapters") or {}).values())
         dot = " ●  " if self._outline_new else ""
@@ -2260,7 +2271,9 @@ class Overlay:
             #    原来返回空串 → 整条**隐藏** → 开课头几分钟**根本找不到入口**
             #    （实测反馈：「我进去没有看到面板」）。
             #    ⚠️ 它是**入口**，不是"信息" —— 入口的第一职责是**能被找到**。
-            return f"{dot}▸ 实时总结"
+            #    ⚠️ 面板窄时会被尾部截断（`▸ AI 实时总…`）—— 那是**既有行为**
+            #       （有标题那两档一样会截），不单独为它放宽 90px 的门槛。
+            return f"{dot}▸ AI 实时总结 · 点这里"
         return f"{dot}▸ {topic} · since {wins[-1].get('t') or ''}"
 
     def _on_chapter_click(self) -> None:

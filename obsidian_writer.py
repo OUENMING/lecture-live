@@ -417,6 +417,23 @@ def _render_outline_section(items: dict) -> list:
             out.append(f"  · {d.get('t', '')} · 来源 {d.get('source', '')}"
                        f" · **待确认**" + ("  · **已改期**" if d.get("changed") else ""))
         out.append("")
+    def _pair_md(x, en_key: str, flag: str = "") -> list:
+        """⭐ **排法① 在笔记里的唯一定义点**：Markdown 两行（中文大字 + 英文降小字）。
+
+        ⚠️⚠️ 合成句与原子要点**必须都走这一条**。2026-09-30 作者实测反馈
+           「AI 总结现在**只有中文，英文完全没有了**」—— 面板那边的原因一样
+           （原子那一处只挂术语）。**笔记这边更彻底**：它连小字行都没有，
+           整条原子只剩一行中文。同一个坑，两处各写一份就各漏一次。
+        ⚠️ `en_key`：合成句是 `en`、原子是 `text` —— 两个数据类键名不同而已。
+        ⚠️ 笔记**没有档位**（它是课后产物，生成时 `trans_mode` 早已不重要）→
+           这里恒为**双语**，不做 `en` 档退化（那是面板专有的行为）。
+        """
+        en = (x.get(en_key) or "").strip()
+        zh = (x.get("zh") or "").strip()
+        terms = " · ".join(f"{a} {b}" for a, b in (x.get("terms") or []))
+        sub = " · ".join(p for p in ((en if zh else ""), terms, flag) if p)
+        return [f"- **{zh or en}**"] + ([f"  · {sub}"] if sub else [])
+
     for c in chs:
         out += [f"### {c.get('title_zh') or c.get('title') or '（无标题）'}"
                 f"（{c.get('t0', '')}–{c.get('t1', '')}）", ""]
@@ -425,17 +442,11 @@ def _render_outline_section(items: dict) -> list:
             for sn in sents:
                 flag = {"board": "⚠ 依赖板书或图，转录不完整",
                         "discussion": "课堂讨论"}.get(sn.get("flag"), "")
-                zh = (sn.get("zh") or "").strip()
-                en = sn.get("en", "")
-                terms = " · ".join(f"{a} {b}" for a, b in (sn.get("terms") or []))
-                out.append(f"- **{zh or en}**")
-                sub = " · ".join(x for x in ((en if zh else ""), terms, flag) if x)
-                if sub:
-                    out.append(f"  · {sub}")
+                out += _pair_md(sn, "en", flag)
         else:
             for a in (items.get("atoms") or ()):
                 if (c.get("lo") or 0) <= (a.get("src") or [0])[0] <= (c.get("hi") or 0):
-                    out.append(f"- **{(a.get('zh') or '').strip() or a.get('text', '')}**")
+                    out += _pair_md(a, "text")
         out.append("")
     return out
 
@@ -740,7 +751,19 @@ class ObsidianWriter:
     # ---- 原子层：旁路文件 `sessions/<同名>.atoms.jsonl`（plan §1）----
     def _atom_writer(self):
         """懒建 `atom.AtomWriter`。⚠️ **复用那个类，不在这里重写路径拼法** ——
-        路径形状（`<同名>.atoms.jsonl`）在那儿是唯一定义点。"""
+        路径形状（`<同名>.atoms.jsonl`）在那儿是唯一定义点。
+
+        ⚠️ **关过之后不再开**（`_atom_closed`）：与 `_lost_handle` **逐字同一条纪律**
+           （那边是 `_lost_closed`，2026-09-28 审查指出）—— 这里当时漏了同样的一半。
+           少了它，`close_atom()` 之后任何一次 `append_atoms` 都会**新建一个再没人关的
+           写入器**：不但句柄泄漏，还会往**已经渲染完笔记的** `.atoms.jsonl` 里追写。
+         ⚠️ **可达路径不是理论上的**：`LiveSummarizer.finish()` 拿不到 `_step_lock`
+           时会**放弃** worker 线程（`live_summary.py` 那段注释写着这条**实测发生过**），
+           而那个被放弃的线程之后照样走到 `_absorb_window` → `append_atoms`。
+           （2026-09-30 复现：`close()` 之后 `append_atoms` 返回 1、`_atom_w` 被重建。）
+        """
+        if getattr(self, "_atom_closed", False):
+            return None
         w = getattr(self, "_atom_w", None)
         if w is None and self.session_path:
             import atom as atom_mod
@@ -768,7 +791,12 @@ class ObsidianWriter:
             return 0
 
     def close_atom(self) -> None:
-        """幂等。文件**不删**（它是这份笔记的证据，同 `close_lost`）。"""
+        """幂等。文件**不删**（它是这份笔记的证据，同 `close_lost`）。
+
+        ⚠️ 置 `_atom_closed` 是为了让后来的 `append_atoms` **别再开新写入器** ——
+           与 `close_lost` 那条**同一条纪律**（见 `_atom_writer` / `_lost_handle`）。
+        """
+        self._atom_closed = True
         w = getattr(self, "_atom_w", None)
         if w is not None:
             try:

@@ -21,7 +21,9 @@
 """
 from __future__ import annotations
 
+import json
 import pathlib
+import shutil
 import sys
 import tempfile
 
@@ -222,10 +224,87 @@ def _case_outline_section():
     assert "### 从GDP到GNI（" in txt, "章标题也是排法①（中文当标题，英文进小字）"
     assert "收入法" in txt, "术语对照要带上"
     assert "价格是关键。" in txt, "没有合成句的章要退回**中文**原子要点"
+    # ⭐⭐ 原子的小字里要有**英文原句** —— 同一个坑（2026-09-30 作者实测反馈：
+    #    「AI 总结现在只有中文，英文完全没有了」）。笔记这边**更彻底**：
+    #    原来连小字行都没有，整条原子只剩一行中文。
+    #    改坏：把 `_pair_md` 返回的第二行去掉 -> 这条红。
+    assert "  · Prices are key." in txt, "原子要点也要英文降小字（不许只剩中文）"
     assert "临时" not in txt, "临时章不该出现"
     # 改坏：把 `_render_outline_section` 里的 `if not ds and not chs: return []` 删掉
     #       -> 第一条断言红。
     # 改坏：把大字的 `zh or en` 换成 `en` -> 「排法①」那条红。
+
+
+@case("📑 纲要那一节的**文件级**接线（§10.2 / §11.2）：真读 `.chapters.jsonl` + 落在概览与知识点之间")
+def _case_outline_wiring():
+    """⭐ 计划 §11.2 阶段 5 逐字要求：「用一份**固定的 `.chapters.jsonl`** 当输入」。
+
+    ⚠️ 上面那条 `_case_outline_section` 喂的是**内存字典** —— 纯函数那半覆盖住了，
+       但另**两条腿没有判据**（2026-09-30 审计发现，计划 §11.2 与实际不符）：
+         · `_chapter_items()` 的**真读盘**（`chapter.load` + `atom.load` 那两个旁路文件）
+         · 那一节在 `_render_note` 里的**位置**（§10.2：「紧跟在概览之后、知识点之前」）
+    ⚠️ 变异验证（做实了）：
+       · 把 `_render_note` 那段 `_sec` 挪到 `## 📚 Key Concepts` **之后** → 位置那条红
+       · 把 `_chapter_items` 里 `chapter.load(...)` 换成常量 → 「真读回来了」那条红
+    """
+    import atom as _atom
+    import chapter as _ch
+
+    d = pathlib.Path(tempfile.mkdtemp(prefix="cl_vault_outline_"))
+    try:
+        sess = d / "2026-09-30_150000_ECON99999.md"
+        sess.write_text("# x\n", encoding="utf-8")
+        (d / "2026-09-30_150000_ECON99999.chapters.jsonl").write_text(
+            "\n".join(json.dumps(o, ensure_ascii=False) for o in [
+                {"type": "window", "w": 1, "t": "15:01:00", "topic": "T",
+                 "lo": 1, "hi": 9, "n_points": 1},
+                # ⚠️ 故意先写一条**临时版**再写正式版：同一个 `id`
+                #    —— `load()` 必须只留**最后一条**。
+                {"type": "chapter", "id": 0, "status": "interim",
+                 "title": "旧标题", "sentences": []},
+                {"type": "chapter", "id": 0, "status": "final",
+                 "title": "From GDP to GNI", "title_zh": "从GDP到GNI",
+                 "t0": "15:00:10", "t1": "15:10:00", "lo": 1, "hi": 9,
+                 "sentences": [{"en": "EN one.", "zh": "中文一。", "terms": [],
+                                "src": [2], "flag": None}]},
+                {"type": "deadline", "t": "15:12:00", "quote": "Due Friday.",
+                 "src": [7], "source": "regex", "changed": False},
+            ]) + "\n", encoding="utf-8")
+        (d / "2026-09-30_150000_ECON99999.atoms.jsonl").write_text(
+            json.dumps({"id": 0, "t": "15:01:00", "epoch": 1.0, "src": [3],
+                        "kind": "要点", "text": "原子要点", "terms": [], "zh": ""},
+                       ensure_ascii=False) + "\n", encoding="utf-8")
+
+        w = ow.ObsidianWriter(None, "TESTX", mode="no")     # ⚠️ mode=no：不写会话文件
+        w.session_path = sess
+        items = w._chapter_items()
+        assert len(items["chapters"]) == 1, f"同 id 该只剩一条，拿到 {len(items['chapters'])}"
+        assert items["chapters"][0]["status"] == "final", "正式版要顶掉临时版"
+        assert items["chapters"][0]["title"] == "From GDP to GNI"
+        assert items["deadlines"] and items["atoms"], "课务与原子都要真读回来"
+        assert items["windows"], "窗口流水也要（写回复查用）"
+
+        entries = [{"ts": "15:00:10", "en": "a", "zh": "b", "asr": "", "star": False}]
+        out = w._render_note(entries, {}, [], "ok", [], None, items)
+        i_ov = out.index("## 🎯 Overview 概览")
+        i_oc = out.index("## 📑 课堂纲要")
+        i_kc = out.index("## 📚 Key Concepts 知识点详解")
+        assert i_ov < i_oc < i_kc, f"位置错了：概览@{i_ov} 纲要@{i_oc} 知识点@{i_kc}"
+        assert "### Deadlines · 课务" in out
+        assert "### 从GDP到GNI（" in out
+        assert "中文一。" in out
+
+        # ⭐ 边界：没有 `.chapters.jsonl` -> 整节跳过、**笔记照常生成**（旧会话 / 纯转录档）
+        w2 = ow.ObsidianWriter(None, "TESTX", mode="no")
+        w2.session_path = d / "never-existed.md"
+        assert w2._chapter_items()["chapters"] == []
+        out2 = w2._render_note(entries, {}, [], "ok", [],
+                               None, w2._chapter_items())
+        assert "课堂纲要" not in out2, "没有旁路文件时那一节必须整节消失"
+        assert "## 🎯 Overview 概览" in out2 and "## 📚 Key Concepts 知识点详解" in out2, \
+            "但笔记其余部分照常"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def main_() -> int:

@@ -45,8 +45,27 @@ CHUNK = 20
 #: `User-Agent` —— ⚠️ **不给会被 Cloudflare 挡成 403**（见模块头）。
 UA = "ClassLive/0.0 (+https://github.com/OUENMING/lecture-live)"
 
+#: ⚠️ CommandCode **代理**那条路（`/provider/` + 官方路径）。
 ENDPOINT = "https://api.commandcode.ai/provider/v1/systemone"
 MODEL = "typesafe/jev"
+
+#: ⭐⭐ **两家供应商**（2026-09-30 实测）：请求**格式完全一样** ——
+#:    同一个 body、同一个响应结构（`answers.S1.noul`），因为 CommandCode 就是
+#:    `/provider/` + 官方路径在转发。差别只在**三处**：
+#:
+#: | | 官方 `api.typesafe.ai` | CommandCode 代理 |
+#: |---|---|---|
+#: | **model** | `jev-latest` / `jev-1.13.0` | `typesafe/jev` |
+#: | **认证** | TypeSafe 自己的 `apikey_…` | cc-switch 那条 token |
+#: | **`User-Agent`** | **不需要** | **必须给**（否则其 Cloudflare WAF 挡成 403/1010）|
+#:
+#: ⚠️ 两边 **key 互不通用**：官方 key 打 CommandCode 是 401 `UNAUTHORIZED`。
+#: ⚠️ 模型 ID 也**不通用**：官方拿 `typesafe/jev` 会 400 `Unknown model`。
+OFFICIAL_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
+#: ⭐ **钉版本号**（官方逐字：「If you have tuned confidence thresholds against a
+#:    specific version, **pin that version's ID**」）—— 我们确实标定过阈值
+#:    （`live_summary.DEADLINE_MIN_P`），所以**不跟随 `jev-latest`**。
+OFFICIAL_MODEL = "jev-1.13.0"
 
 #: 一句话、一个判据。⭐ 照官方 `primitives.md` 那个「in a second」的标准写的。
 #: ⚠️ **改这句会让绝对概率整体移动**（实测同一句 0.77 → 0.61），
@@ -152,12 +171,52 @@ def top_k(scores, sents, k: int = 12) -> list:
 
 
 # ------------------------------------------------------------------ 生产那条路
-def ask_commandcode(state: str, questions: dict, *, token: str, timeout: float = 60.0):
-    """真发一次请求。⚠️ **`User-Agent` 必须有** —— 见模块头那条 403。"""
-    body = json.dumps({"model": MODEL, "state": state,
+_PROVIDER: dict | None = None
+
+
+def _provider(*, root=None) -> dict:
+    """现在的供应商 —— `{"name", "endpoint", "model", "token"}`。
+
+    ⭐ 优先级：**有官方 key 就走官方**（能钉版本号）→ 否则 CommandCode
+       → 都没有则 `token` 为空（= 功能关着，同本模块一贯的 fail-soft）。
+    ⚠️ 解析一次就缓存：跑一节 50 分钟的课要调十几次，而 key 文件不会中途变。
+    """
+    global _PROVIDER
+    if _PROVIDER is None:
+        off = _read_key("jev_key", root=root)
+        cc = token(root=root)
+        if off:
+            _PROVIDER = {"name": "typesafe", "endpoint": OFFICIAL_ENDPOINT,
+                         "model": OFFICIAL_MODEL, "token": off}
+        else:
+            _PROVIDER = {"name": "commandcode", "endpoint": ENDPOINT,
+                         "model": MODEL, "token": cc}
+    return _PROVIDER
+
+
+def _read_key(attr: str, *, root=None) -> str:
+    """从 `paths.<attr>()` 读一行。**读不出返回空串，不抛**（同 `token()`）。"""
+    try:
+        import paths
+        return getattr(paths, attr)(root=root).read_text(
+            encoding="utf-8").splitlines()[0].strip()
+    except Exception:                                     # noqa: BLE001
+        return ""
+
+
+def ask_commandcode(state: str, questions: dict, *, token: str, timeout: float = 60.0,
+                    endpoint: str | None = None, model: str | None = None):
+    """真发一次请求。⚠️ **`User-Agent` 必须有** —— 见模块头那条 403。
+
+    ⚠️ `endpoint` / `model` 不传就用 `provider()` 解析出来的那家（见模块头那张表）。
+       ⚠️ **`User-Agent` 两家都发**：官方不需要但也不介意，CommandCode 缺了就被挡。
+    """
+    ep = endpoint or _provider()["endpoint"]
+    md = model or _provider()["model"]
+    body = json.dumps({"model": md, "state": state,
                        "questions": questions}).encode("utf-8")
     req = urllib.request.Request(
-        ENDPOINT, data=body,
+        ep, data=body,
         headers={"Authorization": "Bearer " + token,
                  "Content-Type": "application/json",
                  "User-Agent": UA})
@@ -212,6 +271,39 @@ def pick(sents, *, token_value: str = "", timeout: float = 30.0, k: int = 10) ->
         return [(p, items[i], built[i][1]) for p, i, _ in top_k(sc, items, k)]
     except Exception:                                         # noqa: BLE001
         return []
+
+
+def ask_one(state: str, instruction: str, *, token_value: str = "",
+            timeout: float = 30.0):
+    """问**一个** `noul` 判据 → `0–1` 的概率；拿不到返回 `None`。
+
+    ⚠️ 与 `pick()` 的分工：那个是「**一小批句子排 top-k**」，这个是「**一句话一个判据**」。
+       两者共用本模块这一套 HTTP / schema（**本模块是 Jev 的唯一接入点**）。
+    ⚠️ **失败一律返回 `None`，绝不抛** —— 调用方在 worker 线程上，
+       一次网络抖动不该把整节课带走（同 `pick()` 那条纪律）。
+    ⚠️ 官方 `primitives.md` 的那条要求在这里更严格：**一次只问一个判据**
+       （`questions` 里就一项）。见本模块头第 1 条。
+    """
+    if not token_value:
+        token_value = _provider()["token"]
+    if not token_value or not state:
+        return None
+    try:
+        # ⚠️⚠️ 键名**必须**是 `S1` 这种形状 —— `parse_answers` 里有一行
+        #    `if k[:1] == "S" and k[1:].isdigit()`，它只认本模块 `S1..Sn` 那套约定。
+        #    第一版这里写的是 `q1`（照官方 schema 的例子）→ **那条被静默跳过**
+        #    → 永远返回 `None` → 上游的「课务闸门」**一条都不放行**，
+        #    而看上去**像"闸门把假阳性全拦住了"**（2026-09-30 实测栽的）。
+        qs = {"S1": {"type": "noul", "instructions": instruction}}
+        got = ask_commandcode(state, qs, token=token_value, timeout=timeout)
+        vals = parse_answers(got, 1)
+        return vals[0]
+    except Exception as e:                                    # noqa: BLE001
+        # ⚠️ 失败**要出声**：fail-soft 是对的（一次网络抖动不该带走整节课），
+        #    但**完全静默**会让「闸门坏了」看起来像「闸门在正常工作」。
+        #    同 `atom._atom_flush` 那条「提不出来是少几条要点，不是课跑不下去」的写法。
+        print(f"⚠ Jev 打分失败({type(e).__name__}: {str(e)[:60]})")
+        return None
 
 
 def token(*, root=None) -> str:

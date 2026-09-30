@@ -98,8 +98,15 @@ def make(tmp: str, atom_topics=None, *, atom_fn=None, chap_fn=None,
     return s, emits, calls
 
 
-def drive(s, n_items: int, *, gap_s: float = 40.0) -> None:
-    """确定性推进时间：每句之间隔 1 秒，句后停 `gap_s` 秒（> `ATOM_PAUSE_S`）逼出窗口。"""
+def drive(s, n_items: int, *, gap_s: float = 190.0) -> None:
+    """确定性推进时间：每句之间隔 1 秒，句后停 `gap_s` 秒。
+
+    ⚠️ **默认 190 秒不是随便取的**：`MIN_CHAPTER_S = 180`（太短的章不许换），
+       所以夹具**必须推过 180 秒**，否则「换题」会被并进当前章 —— 那是**对的**行为，
+       但会让「A→B 该开两章」这类判据假红。
+    ⚠️ 又必须**停在 `MAX_CHAPTER_S = 600` 以下**（到点会强制切）——
+       190 × 3 窗 = 573 秒，正好夹在两者中间。
+    """
     col = 0.0
     for g in range(1, n_items + 1):
         s.feed((g, "10:00:%02d" % g, "sentence %d" % g, "中%d" % g))
@@ -248,13 +255,15 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as d:
             s, emits, _ = make(d, ["A"] * 6)
             col = 0.0
-            for _ in range(6):
-                s.feed((1, "10:00:00", "s", "中"))
+            for g in range(1, 4):                     # 3 窗攒内容
+                s.feed((g, "10:00:%02d" % g, "s%d" % g, "中%d" % g))
                 s.step(col)
                 col += 1.0
                 s.step(col + 40.0)
                 col += 40.0
-                col += L.INTERIM_AFTER_S              # 手动跳过 8 分钟
+            # ⚠️ 把时钟推过 `INTERIM_AFTER_S`(480) —— 但**必须停在
+            #    `MAX_CHAPTER_S`(600) 以下**，否则会被强制切章（那是另一条判据 ㉗）。
+            s.step(s._cur["t_open"] + L.INTERIM_AFTER_S + 5.0)
             cs = chapters(emits)
             check("⭐ 出现了 `interim`", any(c["status"] == "interim" for c in cs),
                   str([(c["id"], c["status"]) for c in cs]))
@@ -658,6 +667,146 @@ def main() -> int:
                 _bad25.append(f"{_s!r} -> {_got} 期望 {(_hit, _chg)}")
         check("⭐⭐ 九条全对（复数 + `moving` + 词边界仍然生效）",
               not _bad25, "; ".join(_bad25))
+
+        # ─────────────────────────────────────── ㉖㉗ 章节粒度的两个旋钮
+        # ⚠️ 2026-09-30 实测加的：**粒度不能交给 prompt 控**。同一节 42 分钟的课，
+        #    中性措辞切出 14 章（7 个不到 2 分钟），「只有真换话题才换」切出 1 章 ——
+        #    **两个方向都过了头，而给尺度提示没有用**。
+        #    同行评审（`arxiv 2512.17083` §9.1）：「separating scoring from selection
+        #    enables boundary density to be controlled independently of scoring
+        #    granularity」→ 打分归模型、**选择归状态机**。
+        print("\n--- ㉖ `MIN_CHAPTER_S`：太短的章**不许换** ---")
+        with tempfile.TemporaryDirectory() as d:
+            s, emits, _ = make(d, ["A", "B", "C"])    # 每个窗口都想换题
+            col = 0.0
+            for g in (1, 2, 3):                       # 总时长 123 秒 < 180
+                s.feed((g, "10:00:%02d" % g, "s%d" % g, "中%d" % g))
+                s.step(col)
+                col += 1.0
+                s.step(col + 40.0)
+                col += 40.0
+            s.finish(timeout_s=5.0)
+            cs = chapters(emits)
+            # 改坏：把 `_advance` 里那句 `now - self._cur["t_open"] < MIN_CHAPTER_S` 删掉
+            #       -> A/B/C 各成一章（3 章）。
+            check("⭐⭐ 三次换题都不足 180 秒 -> **只有一章**（换题被并进当前章）",
+                  len(cs) == 1, str([(c["id"], c["lo"], c["hi"]) for c in cs]))
+
+        print("\n--- ㉗ `MAX_CHAPTER_S`：太长的章**强制切** ---")
+        with tempfile.TemporaryDirectory() as d:
+            s, emits, _ = make(d, ["A"] * 19)         # 同一主题，模型永远不换
+            col = 0.0
+            for g in range(1, 20):
+                s.feed((g, "10:00:%02d" % g, "s%d" % g, "中%d" % g))
+                s.step(col)
+                col += 1.0
+                s.step(col + 190.0)
+                col += 190.0
+            s.finish(timeout_s=5.0)
+            cs = chapters(emits)
+            ids = {c["id"] for c in cs}
+            # 改坏：把 `_absorb_window` 里那句 `self._maybe_force_split(now)` 删掉
+            #       -> 整段只有 **1 个 id**（19 窗 × 191 秒 ≈ 60 分钟只有一章）。
+            # ⚠️⚠️ 第一版这里断言的是 `len(cs) >= 4`（emit 条数）—— **那是假绿**：
+            #     emit 里混着**临时合成**（同一 id 会 emit 很多次），
+            #     所以删掉 force-split 之后照样 ≥4。→ **必须数不同的 `id`。**
+            #     （2026-09-30 变异验证抓到的。）
+            check(f"⭐⭐ 同一主题讲了 {col / 60:.0f} 分钟 -> 被 `MAX_CHAPTER_S` 切成**多个不同的章**",
+                  len(ids) >= 4, f"{len(ids)} 个 id（emit 共 {len(cs)} 条）")
+
+        print("\n--- ㉘ `_topic_prev` 必须是**上一窗**主题，不是章标题 ---")
+        # ⚠️⚠️ 2026-09-30 实测：喂**章标题**会让模型**一开章就沿用** →
+        #    模型侧边界全被抑制，章全靠 `MAX_CHAPTER_S` 到点硬切
+        #    （三节课的章长中位全是 ~615 秒 = 正好撞天花板）。
+        #    原 `main.py` 的 `atom_st["prev"]` 存的是**上一窗主题**。
+        #
+        # ⚠️⚠️ **这条判据要构造「两者不同」的时刻**，否则区分不开：
+        #    第一版用的是「正常换题」的时序 —— 那时**章标题恰好等于上一窗主题**，
+        #    所以把实现改回章标题**照样绿**（2026-09-30 变异验证抓到的）。
+        #    → 必须制造一次**被 `MIN_CHAPTER_S` 拦下的换题**：那一刻
+        #      `_prev_topic` 已经是新主题 B，而章标题**还停在旧的 A**。
+        with tempfile.TemporaryDirectory() as d:
+            s, _, _ = make(d, ["A", "B", "C"])
+            seen: list = []
+            base_chat = s._chat
+
+            def spy(sysp, block, mt, tp):
+                # ⚠️ **在调用那一刻快照章标题** —— 不能等跑完再看：
+                #    第三次调用**之后**才发生的换章会把 `_cur` 变成 C，
+                #    于是「章标题还是 A」这个前置条件看起来不成立（第一版就这么红的）。
+                seen.append((block, (s._cur or {}).get("title")))
+                return base_chat(sysp, block, mt, tp)
+
+            s._chat = spy
+            s.feed((1, "10:00:00", "s1", "中")); s.step(0.0)
+            s.step(200.0)                    # w1 提交：主题 A -> 章标题 A，t_open=200
+            s.feed((2, "10:00:01", "s2", "中")); s.step(201.0)
+            s.step(300.0)                    # w2 提交：主题 B，但离 t_open 只 100s < 180 -> 被并
+            s.feed((3, "10:00:02", "s3", "中")); s.step(301.0)
+            s.step(600.0)                    # w3 提交
+            # ⚠️ 前置：**在第三次调用那一刻**，章标题还是 A（B 那次换题真的被拦了）
+            check("⚠️ 前置：第二次那次换题**真的被 `MIN_CHAPTER_S` 拦下了**"
+                  "（第三次调用时章标题还是 A）",
+                  len(seen) >= 3 and seen[2][1] == "A",
+                  f"第三次调用时的章标题={seen[2][1]!r}" if len(seen) >= 3
+                  else f"只拿到 {len(seen)} 次")
+            # 改坏：把 `_topic_prev` 改回 `self._cur["title"] if self._cur else ""`
+            #       -> 这时它会给出 **A**（章标题），而不是 **B**（上一窗主题）。
+            check("⭐⭐ 第三次调用拿到的 prev 是**上一窗**的主题 B（不是章标题 A）",
+                  len(seen) >= 3 and "上一段的主题是「B」" in seen[2][0],
+                  f"第 3 个 block：{seen[2][0][:44]!r}" if len(seen) >= 3
+                  else f"只拿到 {len(seen)} 次")
+
+        print("\n--- ㉙ 模型报的 `课务` 必须过 Jev 打分闸门 ---")
+        # ⚠️ 2026-09-30：模型报的 `课务` 假阳性 70–80%，收紧 prompt 两轮只从 14 降到 8。
+        #    → 换成**结构性闸门**：拦在模型输出后面，不靠模型自觉。
+        #    ⭐ 标定依据：3 节课 / 21 条正样本 + 21 条对照，对照的天花板 0.12–0.14 → 取 0.20。
+
+        def _mk_gate_case(gate, tmp):
+            de: list = []
+
+            def chat(sysp, block, mt, tp):
+                if sysp is atom.SYS:
+                    return {"topic": "A", "topic_zh": "",
+                            "points": [{"text": "The essay is due Friday.", "kind": "课务",
+                                        "src": [0], "terms": []}]}
+                return {"title": "T", "title_zh": "", "sentences": []}
+
+            _s = L.LiveSummarizer(
+                chat=chat, append_atoms=lambda a: len(a),
+                chapter_path=ch.chapter_path_for(pathlib.Path(tmp) / "S.md"),
+                emit=de.append, deadline_gate=gate)
+            _s.feed((1, "10:00:00", "x", "中"))
+            _s.step(0.0)
+            _s.step(40.0)
+            return [e for e in de if e.get("kind") == "deadline"], _s
+
+        with tempfile.TemporaryDirectory() as d:
+            r, s = _mk_gate_case(None, d)
+            # 改坏：把 `_deadline_ok` 的 `if self._deadline_gate is None: return False`
+            #       改成 `return True` -> 没配时也会报（假阳性全回来）。
+            check("⭐⭐ **没配闸门 -> 一条都不报**（fail-closed；模型路径没过滤时精度只有 ~25%）",
+                  not r and s.gate_calls == 0, f"报了 {len(r)} 条")
+        with tempfile.TemporaryDirectory() as d:
+            r, s = _mk_gate_case(lambda t: 0.05, d)
+            check("⭐ 低于 `DEADLINE_MIN_P` -> 不报", not r and s.gate_calls == 1,
+                  f"报了 {len(r)} 条 · gate_calls={s.gate_calls}")
+        with tempfile.TemporaryDirectory() as d:
+            r, s = _mk_gate_case(lambda t: L.DEADLINE_MIN_P + 0.01, d)
+            check("⭐⭐ 高于阈值 -> 报", len(r) == 1 and s.gate_calls == 1,
+                  f"报了 {len(r)} 条")
+        with tempfile.TemporaryDirectory() as d:
+            def _boom(t):
+                raise RuntimeError("jev 挂了")
+
+            r, s = _mk_gate_case(_boom, d)
+            check("⭐⭐ 闸门抛异常 -> **不报且不崩**（一次网络抖动不该带走整节课）",
+                  not r and s.gate_calls == 1, f"报了 {len(r)} 条")
+        with tempfile.TemporaryDirectory() as d:
+            r, s = _mk_gate_case(lambda t: None, d)      # 拿不到分（超时/没解析出来）
+            check("⭐ 闸门返回 `None` -> 不报", not r, f"报了 {len(r)} 条")
+        check("⭐ Jev 的调用次数与 DeepSeek 的**分开计**（两个服务、两笔钱）",
+              hasattr(L.LiveSummarizer, "gate_calls") and hasattr(L.LiveSummarizer, "calls"))
 
     except BaseException as e:                            # noqa: BLE001
         # ⚠️⚠️ **一条判据自己抛了，不许把整个文件带崩。**

@@ -92,19 +92,98 @@ MAX_PENDING = 20
 #: `kind` == `课务` 的原子走模型路径。⚠️ 从 `atom.KINDS` 取，不另写字符串。
 KIND_DEADLINE = "课务"
 
+#: ⭐⭐ **模型报的 `课务` 必须先过 Jev，概率低于这个就不报。**
+#:
+#: ⚠️⚠️ 为什么（2026-09-30 实测）：模型报的 `课务` **假阳性 70–80%** ——
+#:    「接下来讲什么」「邮箱在 Brightspace」「一张纸在传，只写学号」
+#:    全被当成课务。**收紧 prompt 试了两轮（14 → 8 条），根因没解决。**
+#:    → 换成**结构性闸门**：拦在模型输出后面，不靠模型自觉。
+#:
+#: ⭐ 这个数是**标定出来的**，不是拍的 —— ⚠️ 而且**跟 state 的框架绑死**：
+#:
+#: | 框架 | 对照最高（假阳性天花板） | 正样本最高 | 正样本 > 天花板 |
+#: |---|---|---|---|
+#: | 批量（42 行一个 state，问 `` `S{i}` ``） | **0.12–0.14** | 0.86 | 10/21 |
+#: | **单条（一条一个 state，问 "this line"）** | **0.05** | 0.84 | **16/21** |
+#:
+#: → 实现走的是**单条**（`jev_deadline_gate`），所以取 **0.15**（天花板的 3 倍，留余量）：
+#:   留 **10/21**、假阳性 **0**。
+#: ⚠️⚠️ **两个框架的数不能互相搬** —— 第一版就是从批量那行搬了 0.20 过来，
+#:    那会把 8/21 砍成 10/21 里的两成。这是官方 `jaggedness #5`
+#:    「state 变大、准确率掉」的**实测版**。
+#: ⚠️ **改 `DEADLINE_INSTRUCTION`、或改 state 的框架，都必须重新标定这个数。**
+#: ⚠️ 样本很小（21 条对照、3 节课）→ **更多课之后要重新标定**。
+DEADLINE_MIN_P = 0.15
+
+#: 问 Jev 的那句话。⚠️ 照官方 `primitives.md`「问一个**一秒内**能答的判据」写的 ——
+#: 用「**要不要记进日历/待办**」这个**具体动作**，比「这是不是课务」这种抽象判断硬。
+#: ⚠️ **改这句话必须重新标定 `DEADLINE_MIN_P`**（见上）。
+DEADLINE_INSTRUCTION = (
+    "Would a student need to write this line into their calendar or their to-do list? "
+    "Only deadlines, dates, exams, assignment requirements, and schedule changes count. "
+    "Describing what the class is doing right now, how to contact the instructor, "
+    "or lecture content does NOT count.")
+
+#: ⭐⭐ **章节粒度的两个确定性旋钮**（2026-09-30 加的）。
+#:
+#: ⚠️⚠️ **粒度不许交给 prompt 控。** 实测（同一节 42 分钟的热力学课）：
+#:    中性措辞 → **14 章**（7 个不到 2 分钟，太碎）；
+#:    「只有真换话题才换」→ **1 章**（太粗）；
+#:    再加「一节 50 分钟通常 4–8 章」这个尺度提示 → **还是 1 章**。
+#:    **两个方向都过了头，而给尺度数字没有用。**
+#:
+#: ⭐ 同行评审的解释 —— `arxiv 2512.17083` §9.1「Boundary Selection as a Separate Step」
+#:    逐字：「separating scoring from selection enables **boundary density to be
+#:    controlled independently of scoring granularity**」。
+#:    → **我把「粒度」（选择层）塞进了「打分/生成层」。**
+#:    正确做法同 `arxiv 2601.03276` Appendix A 逐字：
+#:    「Segments that are **too short are concatenated with a neighbouring segment**
+#:      and segments that are **too long are recursively segmented**」。
+#:    → 所以：**模型只负责说"这段在讲什么"（不管大小），切章按长度定。**
+#:
+#: ⚠️ **两个都要**（只加一个会掉进另一个极端）：
+#:    只加 `MIN` → 模型保守时整节课只有一章（实测过）；
+#:    只加 `MAX` → 模型换得勤时照样碎成十几章。
+MIN_CHAPTER_S = 180.0     # 3 分钟：比这短的「换题」一律并进当前章
+MAX_CHAPTER_S = 600.0     # 10 分钟：到点强制切开（与计划「一章 ≈ 10 分钟」一致）
+
+
+def jev_deadline_gate(*, token_value=None):
+    """造一个「课务打分闸门」：`text -> 概率 or None`。**没配 token 返回 `None`。**
+
+    ⚠️ 走 `keypoints.ask_one`（**Jev 的唯一接入点**），不在这里重写 HTTP / schema。
+    ⚠️ 一问一次网络往返。一节 50 分钟的课大约 10 个候选 → 10 次调用、每次约 0.5 秒，
+       摊在整节课上可以忽略。
+    """
+    import keypoints
+    tok = token_value or keypoints.token()
+    if not tok:
+        return None                      # ⚠️ 没配 -> 闸门不存在 -> 模型路径一条不报
+
+    def gate(text: str):
+        state = ("This is a fact extracted from a university lecture.\n\n"
+                 + str(text or "").strip())
+        return keypoints.ask_one(state, DEADLINE_INSTRUCTION, token_value=tok)
+
+    return gate
+
 
 class LiveSummarizer:
     """喂句子进去，它往外吐 `payload`（见 `emit`）。"""
 
     def __init__(self, chat, append_atoms=None, chapter_path=None, emit=None,
                  clock=time.monotonic, stamp=atom.now_stamp,
-                 chapters_enabled: bool = True):
+                 chapters_enabled: bool = True, deadline_gate=None):
         self._chat = chat
         self._append_atoms = append_atoms
         self._emit = emit
         self._clock = clock
         self._stamp = stamp
         self._chapters_on = bool(chapters_enabled)
+        #: ⭐ 模型报的 `课务` 的**打分闸门**：`text -> 概率 or None`。
+        #: `None` = 没配 → **一条都不报**（见 `_deadline_ok`）。
+        self._deadline_gate = deadline_gate
+        self._gate_calls = 0          # Jev 的调用次数（⚠️ **与 `_calls` 分开**：那是 DeepSeek）
         self._writer = ch.ChapterWriter(chapter_path)
 
         # ---- 队列（`feed` 是主线程，其余全在 worker）----
@@ -128,6 +207,7 @@ class LiveSummarizer:
         self._retry_at = 0.0          # 下次允许重试的时刻（0 = 随时）
 
         # ---- 章节 ----
+        self._prev_topic = ""         # ⭐ **上一窗**的主题（喂给下一窗的 prompt，见 `_topic_prev`）
         self._cur = None              # 当前章（dict）；`title` 为空 = 还没定题
         self._cid = 0
         self._prior: list = []        # 已经定稿的章标题（给下一章的 prompt）
@@ -142,6 +222,11 @@ class LiveSummarizer:
     def calls(self) -> int:
         """累计的**模型调用次数**。3.5 的「纯转录档不再增加」判据读它。"""
         return self._calls
+
+    @property
+    def gate_calls(self) -> int:
+        """Jev（课务闸门）的调用次数。⚠️ **与 `calls` 分开** —— 两个服务、两笔钱。"""
+        return self._gate_calls
 
     @property
     def pending(self) -> int:
@@ -338,7 +423,17 @@ class LiveSummarizer:
             return None
 
     def _topic_prev(self) -> str:
-        return self._cur["title"] if self._cur else ""
+        """⭐ **上一窗的主题**（**不是**当前章的标题）。
+
+        ⚠️⚠️ 2026-09-30 实测：返回**章标题**会让模型**一开章就沿用** ——
+           因为标题被喂回去当「上一段的主题」，模型倾向于不动。
+           后果是**模型认出的边界全被抑制**，章全靠 `MAX_CHAPTER_S` 到点硬切
+           （三节课的章长中位全是 ~615 秒 = 正好撞天花板）。
+        ⚠️ 原 `main.py` 的 `atom_st["prev"]` 存的就是**上一窗的主题**（而且**空主题不覆盖**）——
+           搬过来时改成了章标题，那是**行为变化**（独立审查当时判「语义等价」，
+           但那只在 `MIN/MAX_CHAPTER_S` 存在之前成立）。
+        """
+        return self._prev_topic
 
     def _absorb_window(self, buf: list, obj, now: float) -> None:
         """窗口提交成功之后：写原子 → 推 `atoms` → 写窗口记录 → 喂章节状态机。"""
@@ -360,6 +455,10 @@ class LiveSummarizer:
         self._window_n += 1
         topic = atom.topic_of(obj)
         topic_zh = atom.topic_zh_of(obj)
+        # ⚠️ **空主题不覆盖** —— 同原 `main.py` 的 `if topic: atom_st["prev"] = topic`。
+        #    否则一窗闲聊（主题为空）会把上文清掉，下一窗模型就接不上了。
+        if topic:
+            self._prev_topic = topic
         rec = {"type": ch.WINDOW, "w": self._window_n, "t": buf[0][1],
                "topic": topic, "topic_zh": topic_zh,
                "lo": buf[0][0], "hi": buf[-1][0], "n_points": len(got)}
@@ -368,12 +467,28 @@ class LiveSummarizer:
                                            ("t", "topic", "topic_zh", "lo", "hi", "n_points")}})
 
         for a in got:
-            if a.kind == KIND_DEADLINE:
+            if a.kind == KIND_DEADLINE and self._deadline_ok(a.text):
                 self._emit_deadline(a.t, a.text, a.src, "model", False)
 
+        self._maybe_force_split(now)                      # ⭐ 太长的章先切开
         self._advance(topic, topic_zh, buf, got, now)
 
     # ------------------------------------------------------------ 章节状态机
+    def _maybe_force_split(self, now: float) -> None:
+        """⭐ **太长的章强制切开**（`MAX_CHAPTER_S`）。与 `MIN_CHAPTER_S` 是一对。
+
+        ⚠️ 为什么必须有它（2026-09-30 实测）：只加「最短章长」的话，
+           **模型一旦保守到整节课只给一个 topic**，就再也切不开了 ——
+           一节 42 分钟的课只有一章，纲要等于没有。
+        ⚠️ 切出来的新章**沿用同一个 topic 起步**，但**合成是独立做的** ——
+           模型只看到后半段的内容，会给出更贴的标题。
+        """
+        if self._cur is None or not self._cur["sents"]:
+            return
+        if now - self._cur["t_open"] < MAX_CHAPTER_S:
+            return
+        self._finalize_current(now)
+
     def _advance(self, topic, topic_zh, buf, atoms, now: float) -> None:
         if not topic:
             # 空主题 -> 并入当前章。**还没有章就先攒着** ——
@@ -396,6 +511,12 @@ class LiveSummarizer:
             self._cur["title"], self._cur["title_zh"] = topic, topic_zh
             self._absorb(buf, atoms, now)
             return
+        # ⭐⭐ **太短的章不许换** —— 把这次「换题」并进当前章。
+        #    ⚠️ 同 `MIN_CHAPTER_S` 的说明：这是「too short → concatenate with neighbour」
+        #       那条同行评审做法的**在线版本**（离线是合并，在线是**推迟边界**）。
+        if self._cur is not None and now - self._cur["t_open"] < MIN_CHAPTER_S:
+            self._absorb(buf, atoms, now)
+            return
         # 主题不同 -> **先给当前章做正式合成，再开新章**。A→B→A 按新章处理，不解冻旧章。
         self._finalize_current(now)
         self._absorb(buf, atoms, now, title=topic, title_zh=topic_zh)
@@ -405,7 +526,11 @@ class LiveSummarizer:
         if self._cur is None:
             self._cur = {"id": self._cid, "title": "", "title_zh": "",
                          "t0": buf[0][1], "lo": buf[0][0], "hi": buf[-1][0],
-                         "sents": [], "atoms": [], "ver": 0}
+                         "sents": [], "atoms": [], "ver": 0,
+                         #: ⭐ 这一章**开张**的模拟时刻 —— `MIN/MAX_CHAPTER_S` 算的就是它。
+                         #: ⚠️ 用 `now`（**模拟时钟**），不是 `self._clock()`：
+                         #:    两个域混用会让判据**恒不成立**（2026-09-30 栽过一次，判据 ⑦）。
+                         "t_open": now}
             self._cid += 1
             self._interim_at = now
         c = self._cur
@@ -470,6 +595,23 @@ class LiveSummarizer:
         self._emit_p({"kind": "chapter", "chapter": chp.as_json()})
 
     # ------------------------------------------------------------ 课务
+    def _deadline_ok(self, text: str) -> bool:
+        """模型报的这条 `课务`，要不要留？—— **过 Jev 打分闸门**。
+
+        ⚠️⚠️ **没配闸门 / 打分失败 → 一律 `False`（不报）**。
+           这不是保守，是**有依据的**：模型路径在没有闸门时精度只有 ~25%，
+           比「不报」更糟 —— 假阳性会让读者**以后整节都不看**（真 deadline 也一起错过）。
+           正则路径**不受影响**（它本来就不调模型、也不进这里）。
+        """
+        if self._deadline_gate is None:
+            return False
+        try:
+            self._gate_calls += 1
+            p = self._deadline_gate(text)
+        except Exception:                                 # noqa: BLE001
+            return False
+        return p is not None and p >= DEADLINE_MIN_P
+
     def _hit_deadline(self, gid: int, t: str, en) -> None:
         """**正则路径**：句子一定稿就查。不调模型 → 一两秒内上屏（判据 T14）。"""
         hit = ch.deadline_hits(en)

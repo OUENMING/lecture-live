@@ -240,5 +240,18 @@ def jev_token(*, root=None) -> pathlib.Path:
     return _root(root) / "jev-token"
 
 
+def jev_key(*, root=None) -> pathlib.Path:
+    """**TypeSafe 官方**（`api.typesafe.ai`）的 API key —— 纯文本一行，权限 600。
+
+    ⚠️ 与 `jev_token()` **分开两份**：那是 CommandCode 代理那条路的 token。
+       两个厂商、两笔账、可以各自单独撤销 —— 塞一个文件里会让
+       「我只想换一家」变成「我得把另一家也停了」。
+    ⚠️ 两个 URL 的**格式完全一样**（同 schema、同响应结构，2026-09-30 实测），
+       差别只在**三处**：model ID、认证 key、要不要 `User-Agent`。
+       详见 `keypoints` 模块头那张表。
+    """
+    return _root(root) / "jev-key"
+
+
 
 

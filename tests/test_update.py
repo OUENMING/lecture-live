@@ -346,6 +346,158 @@ check("⚠️ 对照：这一轮没碰 models.py -> 日志里**没有**那一声
       "模型清单有变化" not in _log5,
       f"日志={_log5.strip().splitlines()[-1][:90]!r}")
 
+# ======================= C. 只更新「正式版那条线」 =======================
+# ⭐ 2026-09-30 加。这三条守的是**同一件事的三种形态**：站在错的线上时，
+#    `pull()` 以前是**静默**的（开发分支会一直被拉、detached 永远报「已是最新」），
+#    而那正是"朋友停在某个中间版本"的成因。判据要钉住的是：
+#    **它必须说出来，而且必须一个字节都不动。**
+print("\nC. 分支守卫（只更新正式版那条线）\n")
+
+
+def _first_line(s) -> str:
+    """把一段错误文本压成一行，给 `check` 的 detail 用。
+
+    ⚠️⚠️ **detail 是急切求值的** —— `check(cond, f"…{(r['error'] or '').splitlines()[0]}")`
+       会在 `error` 为空时**先抛 IndexError**，于是 ❌ 根本打不出来、整轮测试崩在
+       半路（第一版就这么写的，变异验证当场撞上：期望"红一条"，实际是**崩溃**）。
+       本仓把这条记在「判据的假绿形态 #6」里 —— detail 一定要**不可能抛**。
+    """
+    return repr((s or "（空）").splitlines()[0][:60])
+
+print("--- C0 前置：夹具站在正式版线上 ---")
+tmp, seed, clone = new_world()
+_bs = update.branch_state()
+check("C0 夹具自检：branch=main · upstream=origin/main · default=origin/main · on_default",
+      _bs["branch"] == "main" and _bs["upstream"] == "origin/main"
+      and _bs["default"] == "origin/main" and _bs["on_default"] and not _bs["detached"],
+      f"{_bs}")
+# ⚠️ 这条不是装饰：`default_ref()` 要是查不出远程默认分支（`on_default` 会**放行**），
+#    下面 C1 会**假绿** —— 那是"证据不足时不吓唬人"那条设计反过来咬自己。
+check("⚠️ 而且 `default` 真的查得出来（查不出会让 C1 假绿）",
+      bool(_bs["default"]), f"default={_bs['default']!r}")
+
+print("--- C1 ⭐⭐ 开发分支：不许拉它，也不许说「已是最新」 ---")
+sh("git", "checkout", "-b", "dev", cwd=clone)
+sh("git", "push", "-u", "origin", "dev", cwd=clone)
+# 开发分支那头**真有新东西**（否则"没拉"这件事证明不了什么）
+sh("git", "checkout", "-b", "dev", cwd=seed)
+commit(seed, "dev：一个中间版本", version="0.0.9-dev")
+sh("git", "push", "-u", "origin", "dev", cwd=seed)
+sh("git", "checkout", "main", cwd=seed)
+_bs1 = update.branch_state()
+r = update.pull()
+_ver1 = (clone / "VERSION").read_text().strip()
+check("C1 站在开发分支上 -> **停手**（blocked），且说得出是哪条线",
+      (not r["ok"]) and r.get("blocked") and "开发分支" in (r.get("error") or ""),
+      f"ok={r['ok']} blocked={r.get('blocked')} err={_first_line(r.get('error'))}")
+# ⚠️⚠️ **这一条是整组的核心**：老实现返回的是 `ok=True, skipped=True`
+#    （=「已是最新」）—— 一模一样的静默。变异验证：把那道 `on_default` 守卫删掉 -> 这条红。
+check("⭐⭐ 而且**不许**说「已是最新」（老实现就是这么静默的）",
+      not r.get("skipped") and r["before"] == r["after"] == _ver1,
+      f"skipped={r.get('skipped')} 版本 {r['before']}->{r['after']}")
+check("⭐⭐ 磁盘上**一个字节都没动**（开发分支那头真有新提交也不拉）",
+      _ver1 == "0.0.1", f"VERSION={_ver1}（期望仍是 0.0.1；dev 上已经是 0.0.9-dev）")
+check("⭐ 返回里带着 `branch`（卡片/日志要能看出停在哪条线上）",
+      isinstance(r.get("branch"), dict) and r["branch"].get("upstream") == "origin/dev",
+      f"{r.get('branch')}")
+check("⚠️ 说人话：不含「工作区/stash/未提交」这类词，且给出回正式版的那条命令",
+      all(w not in (r.get("user_msg") or "") for w in ("工作区", "stash", "未提交"))
+      and "git checkout main" in (r.get("user_msg") or ""),
+      f"user_msg={(r.get('user_msg') or '')!r}")
+
+print("--- C1b 对照：同一条世界，切回 main 就该能更新 ---")
+# ⚠️ 没有这条，C1 可能只是"什么都没做也 blocked"（那才是假判据）。
+sh("git", "checkout", "main", cwd=clone)
+release(seed, "0.0.2")
+r2 = update.pull()
+check("C1b 切回正式版线 -> 照常拉到（守卫钉的是分支，不是「什么都拦」）",
+      r2["ok"] and r2["after"] == "0.0.2", f"ok={r2['ok']} {r2['before']}->{r2['after']}")
+
+print("--- C2 ⭐⭐ detached HEAD：以前**永远报「已是最新」** ---")
+tmp, seed, clone = new_world()
+release(seed, "0.0.2")                       # 正式版前进了，而这份停在旧提交上
+sh("git", "fetch", "--quiet", cwd=clone)     # ⚠️ 先 fetch —— 下面那条前置量的是
+                                             #    `origin/main` 这个**本地 ref**，
+                                             #    没 fetch 的话它还是旧的（第一版就这么假红）
+sh("git", "checkout", "--detach", "HEAD", cwd=clone)
+check("C2 前置：夹具真的 detached 了", update.current_branch() == "",
+      f"branch={update.current_branch()!r}")
+check("C2 前置：它**真的**落后 origin/main（不然'没更新'证明不了什么）",
+      sh("git", "rev-list", "--count", "HEAD..origin/main", cwd=clone) == "1",
+      sh("git", "rev-list", "--count", "HEAD..origin/main", cwd=clone))
+r = update.pull()
+check("⭐⭐ detached -> 停手，并说「不在任何分支上」",
+      (not r["ok"]) and r.get("blocked") and "不在任何分支上" in (r.get("error") or ""),
+      f"ok={r['ok']} blocked={r.get('blocked')}")
+check("⭐⭐ **不许**说「已是最新」（老实现就在这一支静默卡死）",
+      not r.get("skipped"), f"skipped={r.get('skipped')} error={(r.get('error') or '')[:40]!r}")
+check("⭐ 版本没动（0.0.1 而不是 0.0.2）",
+      (clone / "VERSION").read_text().strip() == "0.0.1")
+
+print("--- C3 本地新建的分支（没有上游）---")
+tmp, seed, clone = new_world()
+release(seed, "0.0.2")
+sh("git", "checkout", "-b", "mine", cwd=clone)
+check("C3 前置：这条分支确实没有上游", update.upstream_ref() == "",
+      f"upstream={update.upstream_ref()!r}")
+check("⚠️ 但**默认分支仍查得出来**（这正是第一版 `default_ref` 的错处："
+      "它拿 upstream 推远程名 -> 无上游就全查不到 -> 又跌回静默）",
+      update.default_ref() == "origin/main", f"default={update.default_ref()!r}")
+r = update.pull()
+check("⭐⭐ 无上游 -> 停手 + 说清「没有对应的远程」，**不是**「已是最新」",
+      (not r["ok"]) and r.get("blocked") and "没有对应的远程" in (r.get("error") or "")
+      and not r.get("skipped"),
+      f"blocked={r.get('blocked')} skipped={r.get('skipped')}")
+
+print("--- C4 ⚠️ 三句停手的话必须**互不相同** ---")
+# ⚠️ 合成一句的话，站在开发分支上的人会去翻"我改过什么"—— 而他该做的是换分支。
+#    三件事，三个动作。（变异验证：把三条并成一条 -> 这条红。）
+tmp, seed, clone = new_world()
+sh("git", "checkout", "-b", "dev", cwd=clone)
+sh("git", "push", "-u", "origin", "dev", cwd=clone)
+_msgs = {}
+_msgs["开发分支"] = update.pull().get("user_msg", "")
+sh("git", "checkout", "--detach", "HEAD", cwd=clone)
+_msgs["detached"] = update.pull().get("user_msg", "")
+sh("git", "checkout", "-b", "mine", cwd=clone)
+_msgs["无上游"] = update.pull().get("user_msg", "")
+(clone / "EDIT.txt").write_text("x\n", encoding="utf-8")
+sh("git", "checkout", "main", cwd=clone)
+_msgs["工作区脏"] = update.pull().get("user_msg", "")
+check("⚠️ 四种停手各有各的话（并成一句 -> 用户会去做错的事）",
+      len(set(_msgs.values())) == 4 and all(_msgs.values()),
+      f"{ {k: v[:24] for k, v in _msgs.items()} }")
+
+print("--- C5 `cl doctor` 那一行（fix #2：让「我这份是什么」一眼看得出）---")
+import doctor                                                    # noqa: E402
+tmp, seed, clone = new_world()
+check("C5 在正式版线上 -> 平淡地说出分支名",
+      doctor._branch_note() == "分支 main（正式版线）", repr(doctor._branch_note()))
+sh("git", "checkout", "-b", "dev", cwd=clone)
+sh("git", "push", "-u", "origin", "dev", cwd=clone)
+_note = doctor._branch_note() or ""
+check("⭐⭐ 开发分支 -> 显式 ⚠️ + 说出是哪条 + 给出回正式版的命令",
+      _note.startswith("⚠️") and "origin/dev" in _note and "git checkout main" in _note,
+      repr(_note))
+sh("git", "checkout", "--detach", "HEAD", cwd=clone)
+_note2 = doctor._branch_note() or ""
+check("⭐⭐ detached -> 也显式 ⚠️（doctor 不许把这种状态说成「可以跑」就完事）",
+      _note2.startswith("⚠️") and "不在任何分支上" in _note2, repr(_note2))
+# ⚠️ 反向对照：**非 git 仓库**那一档不许冒出分支提示（那是另一码事，
+#    那一档的说法已经在 `git_info()` 第一项里了）。
+#    ⚠️ 判据要**真的把 HERE 指过去**（第一版写成 `... if not exists else True`
+#       —— 那在正常情况下恒真，是条假判据）。
+_orig_here = doctor.HERE
+_nr = ROOT / "not-a-repo"
+_nr.mkdir(exist_ok=True)
+try:
+    doctor.HERE = _nr
+    _gi = doctor.git_info()
+finally:
+    doctor.HERE = _orig_here
+check("⚠️ 对照：非 git 仓库 -> 不提分支（第三项是 None）",
+      _gi[2] is None and "非 git 仓库" in _gi[0], str(_gi))
+
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}")

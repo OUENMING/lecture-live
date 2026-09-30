@@ -14,6 +14,10 @@
      ⚠️ 而**后台自动更新**那条路（`auto_update`）**一个模型都不下** ——
      它只拉代码、并在模型清单有变化时**出一声**（`models_changed`）。
      本模块也不装依赖 —— `requirements.txt` 变了只**报出来**，让调用方决定。
+  ④ ⭐ **只更新「正式版那条线」**（2026-09-30 加）—— 站在**开发分支**上、
+     或 **detached HEAD**（checkout 过 tag/某个提交）时**一律停手**并说清楚。
+     ⚠️ 加它之前那两条路都是**静默**的：开发分支会一直被拉（朋友就此停在
+     中间版本），detached 则永远报「已是最新」。见 `branch_state()` 那张表。
 
 ⚠️ 与 `cl` 的分工：
     · `cl update`  = 本模块 `pull()` + 之后补依赖 + 跑 `doctor.py`（bash 侧做）
@@ -100,6 +104,52 @@ def upstream_ref() -> str:
     return ""
 
 
+def current_branch() -> str:
+    """当前分支短名。**detached HEAD 返回空串**（`rev-parse --abbrev-ref` 那时
+    会吐出字面量 `HEAD`，不能当分支名用）。"""
+    rc, name, _ = _git("rev-parse", "--abbrev-ref", "HEAD")
+    return name if (rc == 0 and name and name != "HEAD") else ""
+
+
+def default_ref() -> str:
+    """**远端默认分支**的 ref（如 `origin/main`）。查不到返回空串。
+
+    ⚠️ 为什么不拿 `upstream_ref()` 去推远程名（第一版就是这么写的，**错**）：
+       一条**没有上游**的本地分支（`git checkout -b mine`）推不出远程名 →
+       默认分支也查不出来 → 那条路就**又**退回「已是最新」的静默卡死。
+       所以这里**独立地问每一个 remote**。
+    ⚠️ 是**离线**查（`refs/remotes/<r>/HEAD`，clone 时就写好），不联网、不 `remote show`。
+    """
+    rc, remotes, _ = _git("remote")
+    for r in (remotes.splitlines() if rc == 0 else []):
+        r = r.strip()
+        if not r:
+            continue
+        rc2, name, _ = _git("symbolic-ref", "--short", f"refs/remotes/{r}/HEAD")
+        if rc2 == 0 and name:
+            return name
+    return ""
+
+
+def branch_state() -> dict:
+    """**这份代码站在哪条线上** —— `pull()` 的守卫与 `cl doctor` 共用这一份判断。
+
+    返回 `{branch, upstream, default, detached, on_default}`：
+
+    | 状态 | 长什么样 | 后果（没这道守卫时**实测**到的） |
+    |---|---|---|
+    | 正式版线 | `branch=main` · `upstream=origin/main` | 正常更新 |
+    | 开发分支 | `branch=feature/x` | `pull()` **只拉那条分支**：main 前进两版它说「已是最新」，分支推新版立刻就拉 |
+    | detached | `branch=""`（checkout 过 tag/某个提交） | `@{u}` 不存在 → `rev-list` 报错 → stdout 空 → `behind=0` → **永远「已是最新」，静默卡死** |
+
+    ⚠️ `default` 查不到时 `on_default` 给 **`True`** —— **证据不足时不许吓唬人**。
+    """
+    br, up, df = current_branch(), upstream_ref(), default_ref()
+    return {"branch": br, "upstream": up, "default": df,
+            "detached": not br,
+            "on_default": (not df) or (up == df)}
+
+
 def remote_file(name: str, ref: str = "") -> str:
     """读**远端 ref** 上的某个文件，**完全不动工作区**。取不到返回空串。
 
@@ -145,18 +195,26 @@ def update_mode_in(text: str, version: str) -> str:
 def check() -> dict:
     """只 `fetch` + 看落后几个提交，**不动工作区**。适合启动时/按钮点下去先探一下。
 
-    返回 `{ok, error, dirty, behind, current, ahead, detached}`。
+    返回 `{ok, error, dirty, behind, current, ahead, detached, branch, upstream,
+    default, on_default}`。
     `ok=False` 表示"查不到"（断网/无 git/无 upstream）—— 调用方应当**静默降级**，
     不要当成错误弹给用户。
+
+    ⚠️ **`detached` 是 `branch_state()` 那个意思**（真的不在任何分支上），
+       不是"没有上游"。⚠️ 2026-09-30 之前它确实是后者 —— 一个名字两种含义，
+       而 `cl doctor` 正要照着它说话，所以在这里纠正。
     """
+    bs = branch_state()
     out = {"ok": False, "error": "", "dirty": False, "behind": 0,
-           "current": _version(), "ahead": 0, "detached": False}
+           "current": _version(), "ahead": 0, "detached": bs["detached"],
+           "branch": bs["branch"], "upstream": bs["upstream"],
+           "default": bs["default"], "on_default": bs["on_default"]}
     if not is_repo():
         out["error"] = "不是 git 仓库"
         return out
-    if not has_upstream():
-        out["error"] = "没有上游分支"
-        out["detached"] = True
+    if not bs["upstream"]:
+        out["error"] = ("不在任何分支上" if bs["detached"]
+                        else f"`{bs['branch']}` 没有上游")
         return out
     out["dirty"] = bool(_git("status", "--porcelain")[1])
 
@@ -181,9 +239,21 @@ def _friendly(out: dict) -> str:
     那样新加的失败路径**会忘记填**，卡片上就会冒出「工作区」「stash」这类词。
     这里只认 `blocked` / 几种已知原因，其余统一给一句通用的话 + 提示看日志。
     """
-    if not out.get("ok") and out.get("blocked"):
-        return "这个文件夹里有你自己改过的内容，这次就先不更新了（怕覆盖掉）。"
     err = out.get("error") or ""
+    if not out.get("ok") and out.get("blocked"):
+        # ⚠️ **三种"主动停手"必须说三句不同的话**（2026-09-30 加后两种）：
+        #    混成一句的话，站在开发分支上的人会去翻"我改过什么"——
+        #    而他真正该做的是换个分支。三件事，三个动作。
+        if "不在任何分支上" in err:
+            return ("这份代码停在某个历史版本上（不是正式版那条线），没法自动更新。\n"
+                    "   想回到正式版：在 lecture-live 目录里跑 `git checkout main`")
+        if "开发分支" in err or "不是正式版" in err:
+            return ("这份跟的是一条开发分支 —— 正式版的更新永远不会进来。\n"
+                    "   想回到正式版：在 lecture-live 目录里跑 `git checkout main && git pull`")
+        if "没有对应的远程" in err:
+            return ("这条分支网上没有对应的版本，没法自动更新。\n"
+                    "   想回到正式版：在 lecture-live 目录里跑 `git checkout main && git pull`")
+        return "这个文件夹里有你自己改过的内容，这次就先不更新了（怕覆盖掉）。"
     if "不是 git 仓库" in err:
         return "这个文件夹不是从网上下载的那种，没法自动更新。"
     # ⚠️ 分叉要**先**判：它的 error 里也含「拉取失败」，会被下面那条网络判据吃掉，
@@ -207,6 +277,35 @@ def pull() -> dict:
     if not is_repo():
         out["error"] = "这不是 git 仓库，没法更新。"
         return {**out, "user_msg": _friendly(out)}
+
+    # ⚠️⚠️ **边界④：只更新「正式版那条线」**（2026-09-30 加）。放在最前面 ——
+    #    它最便宜（不含网络）、也最根本：站在错的线上，后面每一条都白搭。
+    #    加它之前 `pull()` 只问 `@{u}`，于是有两条**实测**出来的静默路：
+    #      · **开发分支**：它会**一直拉那条分支** —— main 前进两版它说「已是最新」，
+    #        而作者往分支推一版，它当场就拉下来（朋友就此停在中间版本）。
+    #      · **detached HEAD**：`@{u}` 不存在 → `git rev-list` 报错 → stdout 空 →
+    #        `behind=0` → 落进「已是最新」。实测那份离 main 差 2 个提交，照样报最新。
+    #    （两种都在沙盒里用真的 `pull()` 复现过，见 `tests/test_update.py` C 组。）
+    _bs = branch_state()
+    out["branch"] = _bs                      # ⭐ 卡片/日志要能看出停在哪条线上
+    if _bs["detached"]:
+        out["blocked"] = True
+        out["error"] = ("**这份代码不在任何分支上** —— checkout 过某个 tag / 某个提交。\n"
+                        "    自动更新拉不动它，正式版也进不来。\n"
+                        "    回正式版：git checkout main && git pull")
+        return {**out, "user_msg": _friendly(out)}
+    if not _bs["upstream"]:
+        out["blocked"] = True
+        out["error"] = (f"**`{_bs['branch']}` 这条分支没有对应的远程** —— 网上没有它的版本。\n"
+                        f"    回正式版：git checkout main && git pull")
+        return {**out, "user_msg": _friendly(out)}
+    if not _bs["on_default"]:
+        out["blocked"] = True
+        out["error"] = (f"**这份跟的是开发分支 `{_bs['upstream']}`，不是正式版 "
+                        f"`{_bs['default']}`** —— 自动更新只会拉那条线，正式版进不来。\n"
+                        f"    回正式版：git checkout main && git pull")
+        return {**out, "user_msg": _friendly(out)}
+
     # ⚠️ 边界①：脏就停手。放在 fetch 之前 —— 连探测都不该动用户的工作区。
     # `blocked=True` 与"失败"分开：这是**主动拒绝**，不是出错。UI 措辞要不一样
     # （"需先处理改动" 而不是 "更新失败"），否则用户以为工具坏了。
@@ -355,6 +454,14 @@ def auto_update() -> dict:
         if not upstream_ref():
             _log("跳过：没有配置上游分支（git remote / branch tracking 不全）")
             return {**out, "skipped": True, "reason": "无上游"}
+        # ⭐ **不在正式版那条线上，连网都不探**（2026-09-30 加）——
+        #    与 `pull()` 的边界④同一条纪律，在这里多省一次 fetch。
+        #    ⚠️ 少了它，退出时那个后台更新器会**一直拉开发分支**，
+        #       而那正是"朋友停在中间版本"的那台发动机。
+        _bs = branch_state()
+        if _bs["detached"] or not _bs["on_default"]:
+            _log(f"跳过：不在正式版那条线上（{_bs['branch'] or 'detached'}）")
+            return {**out, "skipped": True, "reason": "非正式版分支"}
 
         st = check()                                      # 只 fetch，不动工作区
         if not st["ok"]:

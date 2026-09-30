@@ -190,10 +190,18 @@ def version() -> str:
     return f.read_text(encoding="utf-8").strip() if f.exists() else "?"
 
 
-def git_info() -> tuple[str, str | None]:
-    """-> (一行描述, 落后提示或 None)。"""
+def git_info() -> tuple[str, str | None, str | None]:
+    """-> (一行描述, 落后提示或 None, 分支提示或 None)。
+
+    ⚠️ 第三条是 **2026-09-30 加的**：`update.pull()` 从那天起**只更新正式版那条线**
+       （开发分支 / detached HEAD 一律停手 —— 那两种状态下它以前是**静默**的：
+       开发分支会一直被拉、detached 永远报「已是最新」）。
+       → 所以 doctor **必须把这件事说出来**：不然一个停在开发分支上的人看到的是
+       「✅ 可以跑」，而他的更新**永远是停的**。
+    """
     if not shutil.which("git") or not (HERE / ".git").exists():
-        return "(非 git 仓库, 无法自检更新)", None
+        return "(非 git 仓库, 无法自检更新)", None, None
+
     def run(*a):
         return subprocess.run(["git", *a], cwd=HERE, capture_output=True,
                               text=True, timeout=10).stdout.strip()
@@ -201,9 +209,28 @@ def git_info() -> tuple[str, str | None]:
         head = run("log", "--oneline", "-1") or "?"
         behind = run("rev-list", "--count", "HEAD..@{u}")
         n = int(behind) if behind.isdigit() else 0
-        return head, (f"落后远程 {n} 个提交 → 运行 `git pull`" if n else None)
+        return (head, (f"落后远程 {n} 个提交 → 运行 `git pull`" if n else None),
+                _branch_note())
     except Exception:                                     # noqa: BLE001
-        return "(git 查询失败)", None
+        return "(git 查询失败)", None, None
+
+
+def _branch_note() -> str | None:
+    """现在站在**哪条线**上。判断全在 `update.branch_state()`（**唯一定义点**），
+    这里只把事实说成人话 —— 两处各判一次迟早会漂。"""
+    import update
+    bs = update.branch_state()
+    if bs["detached"]:
+        return ("⚠️ 这份代码**不在任何分支上**（checkout 过某个 tag / 某个提交）"
+                "—— 自动更新拉不动它，正式版也进不来。\n"
+                "      回正式版：`git checkout main && git pull`")
+    if not bs["on_default"]:
+        return (f"⚠️ 跟的是**开发分支** `{bs['upstream'] or bs['branch']}`，"
+                f"不是正式版 `{bs['default']}` —— 正式版的更新进不来。\n"
+                f"      回正式版：`git checkout main && git pull`")
+    if not bs["upstream"]:
+        return f"⚠️ 分支 `{bs['branch']}` 网上没有对应的版本 —— 自动更新拉不动"
+    return f"分支 {bs['branch']}（正式版线）"
 
 
 def main() -> int:
@@ -228,10 +255,12 @@ def main() -> int:
           f"{'ClassLive.app 就位' if app_py.exists() else '缺 ClassLive.app → 跑 ./make-app.sh'}")
 
     # ---- 版本 / 更新 ----
-    head, behind = git_info()
+    head, behind, branch_note = git_info()
     print(f"✅ 代码          {head}")
     if behind:
         print(f"   ↑ {behind}")
+    if branch_note:
+        print(f"   {branch_note}")
 
     # ---- 依赖 ----
     print()

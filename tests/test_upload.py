@@ -56,16 +56,26 @@ def main() -> int:
                "nested": [{"session_file": f"{home}/a/b"}]}
         got = upload.scrub(src)
         # ⚠️ 变异验证：把 `k in _SCRUB_KEYS` 去掉 -> 前两条红。
-        check("⭐⭐ `session_file` 的 home 前缀被换掉（**用户名不许传上去**）",
-              got["session_file"] == "<home>/lecture-live/sessions/x.md",
-              got["session_file"])
+        check("⭐⭐ `session_file` 的**目录结构整个被换掉**（不只换用户名）",
+              got["session_file"] == "<path>/x.md", got["session_file"])
         check("⭐ 嵌套里的也换（不是只看最外层）",
-              got["nested"][0]["session_file"] == "<home>/a/b",
-              str(got["nested"]))
+              got["nested"][0]["session_file"] == "<path>/b", str(got["nested"]))
+        # ⚠️⚠️ **这条是端到端实测逼出来的**：第一版只换 `Path.home()` 开头的，
+        #    而隔离跑的路径在 `/tmp/...` → **一个字节都没换**，真传上去的还是完整路径。
+        #    变异验证：改回「只换 home 开头」-> 这条红。
+        _tmp_path = {"session_file": "/tmp/somewhere/sessions/x.md"}
+        check("⭐⭐ **不是 home 开头的绝对路径也得换**（换个位置不许漏）",
+              upload.scrub(_tmp_path)["session_file"] == "<path>/x.md",
+              upload.scrub(_tmp_path)["session_file"])
         # ⚠️ 变异验证：把 `k in _SCRUB_KEYS` 改成「所有键」-> 这条红。
         check("⚠️ **不在名单里的键不动**（脱敏不是「把所有路径都换掉」）",
               got["other"] == src["other"], got["other"])
         check("⚠️ 空串 / 不存在的键原样（不许造出 `<home>`）", got["note_file"] == "")
+        # ⚠️⚠️ 列表那格也不能漏（端到端实测：session_file 换了、audio_files 没换）
+        _lst = upload.scrub({"audio_files": ["/tmp/a/x.opus", "/Users/owen/b/y.opus", ""]})
+        check("⭐⭐ `audio_files` 是**列表**，里面每条都得换",
+              _lst["audio_files"] == ["<path>/x.opus", "<path>/y.opus", ""],
+              str(_lst["audio_files"]))
 
         print("\n--- T8 ⭐⭐ 入队：去重 + 台账 ---")
         home_root = tmp / "cl"
@@ -157,8 +167,8 @@ def main() -> int:
         q4.pump()
         sent = json.loads((srv / upload.session_key("sess-D") / "x.report.json")
                           .read_text(encoding="utf-8"))
-        check("⭐⭐ 发出去的那份里是 `<home>/…`",
-              sent["session_file"] == "<home>/lecture-live/sessions/x.md",
+        check("⭐⭐ 发出去的那份里是 `<path>/…`",
+              sent["session_file"] == "<path>/x.md",
               sent["session_file"])
         check("⚠️ 而**本机那份一个字节没动**（脱敏只发生在发送时）",
               home in rep.read_text(encoding="utf-8"))
@@ -184,6 +194,38 @@ def main() -> int:
               "mkdir -p" in _rp, repr(_rp))
         check("⭐ 没有子目录时不套 `mkdir`（多余的一次远端命令）",
               upload.rsync_path("d", "") == "rsync")
+
+        print("\n--- T14 ⭐⭐ 崩溃恢复：开机扫残留的 `.pending` 标记 ---")
+        # ⚠️⚠️ 这条守的是**整类数据不丢**：`TestSession.finish()` 跑不到
+        #    （崩溃/强杀/关机）→ 没有 report → 而 enqueue 是在 finish 里调的
+        #    → 那一整类数据全丢。`.pending` 是**开录时就写**的，比 finish 活得久。
+        # ⚠️ 变异验证：把 `recover_pending` 里的 `q.enqueue(...)` 删掉 -> 这条红。
+        rsess = tmp / "sess"
+        rsess.mkdir()
+        stem = "2026-09-30_160000_CRASHED"
+        # 崩在现场：有半截音频、**没有 report**
+        (rsess / f"{stem}.001.opus").write_bytes(b"FAKEOPUS" * 100)
+        (rsess / f"{stem}.002.opus").write_bytes(b"FAKEOPUS" * 20)
+        (rsess / f"{stem}{upload.PENDING_TAIL}").write_text(
+            '{"stem": "x", "started": "2026-09-30 16:00:00"}', encoding="utf-8")
+        rroot = tmp / "cl3"
+        got = upload.recover_pending(
+            rsess, upload.make_local_send(str(tmp / "srv2")), root=rroot,
+            now=lambda: _now[0])
+        check("⭐⭐ 找到残留标记并**排进了队列**（不然崩溃那类数据全丢）",
+              got["found"] == 1 and got["queued"] >= 2,
+              f"found={got['found']} queued={got['queued']}")
+        q6 = upload.UploadQueue(lambda *a: True, root=rroot, now=lambda: _now[0])
+        _names = [pathlib.Path(f).name for i in q6.items() for f in i["files"]]
+        check("⭐ 半截音频也在里面（**那也是数据**）",
+              any(n.endswith(".001.opus") for n in _names), str(_names))
+        check("⭐ 写了一份 `meta.json` 标明这次是**崩过的**",
+              any(n.endswith(".meta.json") for n in _names), str(_names))
+        # ⚠️ 变异验证：把 `.replace(...)` 那句删掉 -> 这条红（会每次启动都重复排）。
+        check("⭐⭐ 标记**改名**而不是删（不再重复触发，且留痕）",
+              not (rsess / f"{stem}{upload.PENDING_TAIL}").exists()
+              and (rsess / f"{stem}.recovered.json").exists(),
+              str([p.name for p in rsess.iterdir()]))
 
         bad = [n for n, ok, _ in RESULTS if not ok]
         print("\n" + "=" * 60)

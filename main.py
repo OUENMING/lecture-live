@@ -44,6 +44,13 @@ SUMMARY_FINISH_S = 25
 UPLOAD_HOST = "bldcam"
 UPLOAD_REMOTE = "classlive-test"
 
+#: 收尾时最多**等后台上传多久**。⚠️ 实测 9 MB = 1.8 秒（一节课的 Opus），
+#: 所以 10 秒够正常那一次跑完；跑不完就留着，下次启动接着传。
+#: ⚠️⚠️ **不能不等** —— 它是 **daemon 线程**，进程一退就被杀，
+#:    结果是「报告传上去了、音频没传」（2026-09-30 实测就是这形状）。
+#: ⚠️ 也不能无限等 —— 收尾那条路上用户已经在等了。
+UPLOAD_JOIN_S = 10.0
+
 # 以这些词收尾(且无句末标点)→ 句子没说完, 不能单独送 LLM 翻译
 DANGLING_TAILS = {
     "that", "which", "who", "whom", "whose", "where", "when", "because",
@@ -263,10 +270,12 @@ def start_upload(tester) -> dict:
     q = _up.UploadQueue(_up.make_rsync_send(UPLOAD_HOST, UPLOAD_REMOTE))
     n = q.enqueue(files, tester.stem.name)
     pending = q.pending
+    th = None
     if n:
-        threading.Thread(target=q.pump, kwargs={"max_items": 1}, daemon=True,
-                         name="cl-upload").start()
-    return {"queued": n, "pending": pending}
+        th = threading.Thread(target=q.pump, kwargs={"max_items": 1}, daemon=True,
+                              name="cl-upload")
+        th.start()
+    return {"queued": n, "pending": pending, "thread": th}
 
 
 def summary_log_line(payload) -> str | None:
@@ -1110,6 +1119,30 @@ def run(args) -> None:
     notes = TermNotes()                                 # 术语通俗解析(查表)
 
     # 测试模式: 采一份完整报告 + 留音频。**任何采集失败都不能影响上课** ——
+    # ⭐ 开机扫**上次没收尾**的测试模式（`.pending` 标记）——
+    #    ⚠️ **在 `if args.test_mode` 外面**：那节课可能是崩掉的，而这次未必开测试模式。
+    #    ⚠️ 它只 glob 一个后缀、且失败全吞 —— 绝不能因为清理上一节的残局挡住这一节开课。
+    try:
+        import upload as _upmod
+        import obsidian_writer as _owmod
+        _r = _upmod.recover_pending(
+            _owmod.SESSIONS, _upmod.make_rsync_send(UPLOAD_HOST, UPLOAD_REMOTE))
+        if _r.get("queued"):
+            echo(f"📤 发现上次没收尾的测试课 {_r['found']} 节"
+                 f" —— 已把已录到的部分排进上传队列（带 crash_recovered 标记）")
+        # ⭐ **启动时把积压的队列推一把** —— 这才是「攒着下次发」的正主。
+        #    ⚠️ 上一次收尾时那个 daemon 线程多半被进程退出杀了（实测：
+        #       报告传上去了、9 MB 的音频没传完）→ 不在这里补一次，它就**永远传不完**。
+        #    ⚠️ 丢后台线程，**不阻塞启动**。
+        _q = _upmod.UploadQueue(_upmod.make_rsync_send(UPLOAD_HOST, UPLOAD_REMOTE))
+        if _q.pending:
+            _pn = _q.pending
+            threading.Thread(target=lambda: _q.pump(max_items=_pn), daemon=True,
+                             name="cl-upload-startup").start()
+            echo(f"📤 待上传 {_pn} 节 —— 后台补传中")
+    except Exception:                                     # noqa: BLE001
+        pass
+
     # TestSession 的所有 note_* 都自带 try/except(见 testmode.py)。
     tester = None
     if args.test_mode:
@@ -1955,6 +1988,15 @@ def run(args) -> None:
                         elif _u.get("queued"):
                             echo(f"   📤 已排队 {_u['queued']} 个文件"
                                  f"（待传 {_u['pending']} 节，后台上传中）")
+                        # ⚠️ **有界地等它一下** —— 不等的话进程一退，daemon 线程
+                        #    就被杀，结果是「报告传上去了、音频没传」（实测形态）。
+                        #    等不到就留着，下次启动 `pump` 接着传。
+                        _th = _u.get("thread")
+                        if _th is not None:
+                            _th.join(timeout=UPLOAD_JOIN_S)
+                            if _th.is_alive():
+                                echo(f"   📤 还没传完（超过 {UPLOAD_JOIN_S:.0f} 秒）"
+                                     f" —— 留着，下次启动接着传")
                     except Exception as _e:               # noqa: BLE001
                         echo(f"   ⚠ 上传排队失败（{type(_e).__name__}）—— 不影响其余")
                 if tester.bundle_path:

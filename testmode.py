@@ -45,6 +45,7 @@ import resource
 import subprocess
 
 import models
+import upload as upload_mod
 import sys
 import time
 import wave
@@ -257,6 +258,20 @@ class TestSession:
             #    理由：① 避开"一次误启动留下整节课"那个隐私顾虑（随时能看到录了几段）
             #          ② 上传能断点续传 ③ 收尾转码可以逐段做、内存不堆积
             self._rotate_wav()
+            # ⭐ **崩溃标记：开录时就写**（不是 finish 时）—— 这样 `finish()` 跑不到
+            #    那种情况（崩溃 / 强杀 / 关机）才留得下痕迹。
+            #    ⚠️ 收尾会删它；**没删成 = 下一次启动 `upload.recover_pending` 会把
+            #       这一节已录到的部分排进上传队列**（带 `crash_recovered: true`）。
+            #    ⚠️ 没有它，「崩溃那一整类数据」全丢 —— 而崩溃现场恰恰最该看。
+            try:
+                self._pending_marker = pathlib.Path(
+                    str(self.stem) + upload_mod.PENDING_TAIL)
+                self._pending_marker.write_text(
+                    json.dumps({"stem": self.stem.name, "pid": os.getpid(),
+                                "started": time.strftime("%Y-%m-%d %H:%M:%S")},
+                               ensure_ascii=False), encoding="utf-8")
+            except Exception:                             # noqa: BLE001
+                self._pending_marker = None
             # 查过 CPython 源码 + 实测，把这件事说准：
             # · **wav 不会"头损坏"** —— `Wave_write.writeframes()` 每次调用都会
             #   `_patchheader()` 修正 RIFF 长度字段（`writeframesraw` 才不会），
@@ -502,6 +517,13 @@ class TestSession:
         #    ⚠️ 排在**最前面**（报告落盘之前），这样报告里那个 `audio_saved`
         #       和 `audio_files` 说的是**最终状态**。
         self.audio_files = self._to_opus() if self.record_audio else []
+        # ⭐ 收尾走到了 —— 撤掉崩溃标记（`recover_pending` 靠它认「这一节没收尾」）。
+        _mk = getattr(self, "_pending_marker", None)
+        if _mk is not None:
+            try:
+                _mk.unlink(missing_ok=True)
+            except Exception:                             # noqa: BLE001
+                pass
 
         dur = time.monotonic() - self.t0
         cpu = self._cpu() - self._cpu0

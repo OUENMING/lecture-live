@@ -47,10 +47,26 @@ BACKOFF_MAX_S = 7200.0
 #: ⚠️ 它同时挡在服务端保留期前面：手动清掉的对象，本机队列**不该还想重传**。
 EXPIRE_S = 14 * 86400
 
-#: 归一到 `<home>` 的键（值里含绝对路径）。⚠️ 不做这一步就会把**用户名和目录结构**
+#: 值里含**绝对路径**、上传前要去掉的键。⚠️ 不做这一步就会把**用户名和目录结构**
 #: 一起传上去 —— 见 `docs/PLAN-test-mode.md` §6.6。
-_SCRUB_KEYS = ("session_file", "note_file")
-_HOME = str(pathlib.Path.home())
+_SCRUB_KEYS = ("session_file", "note_file", "audio_files")
+
+
+def _scrub_one(v: str) -> str:
+    """一个路径 → `<path>/<文件名>`。**跟前缀无关**。
+
+    ⚠️⚠️ 第一版只换 `Path.home()` 开头的那种（`/Users/owen/...`）。
+       那在**生产**上够用（`sessions/` 与 vault 都在 home 下），但
+       **换个位置就漏** —— 2026-09-30 端到端实测：隔离跑的路径在 `/tmp/...`，
+       于是**一个字节都没换**，真传上去的还是完整目录结构。
+       → 改成「只要是绝对路径就换成 `<path>/<名字>`」：不依赖 home 在哪，
+         而且**连目录结构都不泄漏**（比只换用户名更彻底）。
+    ⚠️ 不是绝对路径的（空串 / 相对路径 / 别的形状）**原样返回**，不硬套。
+    """
+    p = pathlib.PurePath(v)
+    if not v or not p.is_absolute():
+        return v
+    return f"<path>/{p.name}" if p.name else "<path>"
 
 
 def session_key(stem: str) -> str:
@@ -59,11 +75,25 @@ def session_key(stem: str) -> str:
 
 
 def scrub(obj):
-    """递归把已知键里的 home 前缀换成 `<home>`。⚠️ **只改值，不改结构**。"""
+    """递归把已知键里的绝对路径换成 `<path>/<文件名>`。⚠️ **只改值，不改结构**。"""
     if isinstance(obj, dict):
-        return {k: ("<home>" + v[len(_HOME):] if k in _SCRUB_KEYS
-                    and isinstance(v, str) and v.startswith(_HOME) else scrub(v))
-                for k, v in obj.items()}
+        # ⚠️⚠️ **名单里的键可能是字符串、也可能是字符串列表**（`audio_files` 就是列表）。
+        #    第一版只判 `isinstance(v, str)`，列表就落到下面那个递归分支去了 ——
+        #    而递归对**裸字符串原样返回**，于是那一格**一个字节没换**。
+        #    （2026-09-30 端到端实测：`session_file` 换了、`audio_files` 没换。）
+        out = {}
+        for k, v in obj.items():
+            if k in _SCRUB_KEYS:
+                if isinstance(v, str):
+                    out[k] = _scrub_one(v)
+                elif isinstance(v, list):
+                    out[k] = [_scrub_one(x) if isinstance(x, str) else scrub(x)
+                              for x in v]
+                else:
+                    out[k] = scrub(v)
+            else:
+                out[k] = scrub(v)
+        return out
     if isinstance(obj, list):
         return [scrub(x) for x in obj]
     return obj
@@ -237,6 +267,59 @@ def rsync_path(remote_dir: str, sub: str) -> str:
        放进 `--rsync-path` 是**一次连接**（实测 0.61s vs 分开 ssh+rsync 的 1.07s）。
     """
     return (f"mkdir -p $HOME/{remote_dir}/{sub} && rsync" if sub else "rsync")
+
+
+#: 崩溃标记的后缀。`TestSession` 开录时写、`finish()` 时删。
+#: ⚠️ **没有它，「崩溃那一整类数据」会全丢** —— 而崩溃现场恰恰是最该看的。
+PENDING_TAIL = ".pending.json"
+
+
+def recover_pending(sessions_dir, send, *, root=None, clock=time.monotonic, now=time.time) -> dict:
+    """开机扫残留的 `.pending.json`（上次跑测试模式**没收尾**），把它们排进队列。
+
+    返回 `{found, queued}`。
+
+    ⚠️⚠️ **为什么必须有这一步**：`TestSession.finish()` 跑不到（崩溃 / 强杀 / 关机）
+       → **没有 report**，而 `enqueue` 是在 `finish()` 里调的 → 那一整类数据全丢。
+       `.pending` 是**开录时就写好**的，所以它比 `finish()` 活得久。
+    ⚠️ **不删标记，改名**（`.pending.json` → `.recovered.json`）——
+       删了就再也看不出"这一节崩过"。⚠️ 而改名之后不会重复触发。
+    ⚠️ **只排真的存在的文件** —— 崩溃时音频可能是半截的，那也是数据。
+    """
+    import json as _json
+    sd = pathlib.Path(sessions_dir)
+    out = {"found": 0, "queued": 0}
+    if not sd.is_dir():
+        return out
+    q = UploadQueue(send, root=root, clock=clock, now=now)
+    for mk in sorted(sd.glob("*" + PENDING_TAIL)):
+        out["found"] += 1
+        stem = mk.name[: -len(PENDING_TAIL)]
+        files = sorted(sd.glob(stem + ".*.opus")) + sorted(sd.glob(stem + ".*.wav"))
+        rep = sd / (stem + ".report.json")
+        if rep.is_file():
+            files.append(rep)
+        sess = sd / (stem + ".md")
+        if sess.is_file():
+            files.append(sess)
+        if files:
+            # 写一份 meta，标明这次是**崩过的**
+            meta = sd / (stem + ".meta.json")
+            try:
+                info = {"crash_recovered": True, "stem": stem,
+                        "recovered_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "files": [f.name for f in files]}
+                meta.write_text(_json.dumps(info, ensure_ascii=False, indent=1),
+                                encoding="utf-8")
+                files.append(meta)
+            except Exception:                                 # noqa: BLE001
+                pass
+            out["queued"] += q.enqueue(files, stem)
+        try:
+            mk.replace(mk.with_name(mk.name.replace(PENDING_TAIL, ".recovered.json")))
+        except Exception:                                     # noqa: BLE001
+            pass
+    return out
 
 
 def make_rsync_send(host: str, remote_dir: str, *, timeout: float = 300.0):

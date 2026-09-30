@@ -200,10 +200,20 @@ class CallbackSource:
 
     @staticmethod
     def _close_stream(stream) -> None:
+        # ⚠️⚠️ **`stop()` 与 `close()` 必须各自一个 `try`**（2026-09-30 修）。
+        #    挤在同一个里的话，`stop()` 一抛就**跳过 `close()`** ——
+        #    而 `close()` 才是真正**把设备让出去**的那一步
+        #    （PortAudio 的流不关，麦克风可能一直被占着）。
+        #    `stop()` 抛是现实：设备在睡眠/拔插后被换掉时，回调线程那边的状态已经变了。
+        #    （2026-09-28 OCR 发现，2026-09-30 回原码核实为真。）
         if stream is None:
             return
         try:
-            stream.stop(); stream.close()
+            stream.stop()
+        except Exception:                     # noqa: BLE001
+            pass
+        try:
+            stream.close()
         except Exception:                     # noqa: BLE001
             pass
 

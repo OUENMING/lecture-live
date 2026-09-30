@@ -1696,5 +1696,55 @@ class R19_OutlineContract(unittest.TestCase):
         self.assertFalse(o._outline_on, "纯转录档不该能打开纲要")
 
 
+class R20_StreamCloseOnFailure(unittest.TestCase):
+    """⭐⭐ `CallbackSource._close_stream`：`stop()` 抛了也必须走到 `close()`（2026-09-30 修）。
+
+    ⚠️ 来由（2026-09-28 OCR 发现，09-30 回原码核实为真）：
+       原来是 `stream.stop(); stream.close()` 挤在**同一个 `try`** 里 ——
+       `stop()` 一抛就**跳过 `close()`**，而 `close()` 才是真正**把设备让出去**
+       的那一步（PortAudio 的流不关，麦克风可能一直被占着）。
+       `stop()` 抛是现实：设备在睡眠/拔插后被换掉时，回调线程那边的状态已经变了。
+
+    ⚠️ 变异验证：把两句塞回同一个 `try` -> `test_close_runs_even_when_stop_raises` 红。
+    """
+
+    class _Bad:
+        """`stop()` 必抛、`close()` 正常 —— 模拟设备被抽走那一刻。"""
+
+        def __init__(self):
+            self.stopped = False
+            self.closed = False
+
+        def stop(self):
+            self.stopped = True
+            raise RuntimeError("device gone")
+
+        def close(self):
+            self.closed = True
+
+    def _cls(self):
+        import capture
+        return capture.CallbackSource
+
+    def test_close_runs_even_when_stop_raises(self):
+        s = self._Bad()
+        self._cls()._close_stream(s)
+        self.assertTrue(s.stopped, "stop 该被调过")
+        self.assertTrue(
+            s.closed, "⭐⭐ stop() 抛了也必须走到 close() —— 否则设备一直被占着")
+
+    def test_both_raising_is_swallowed(self):
+        """两句都抛也不许冒出去 —— 它跑在**换设备**那条路上，抛了会把换设备整个带崩。"""
+
+        class _Worse(self._Bad):
+            def close(self):
+                raise RuntimeError("nope")
+
+        self._cls()._close_stream(_Worse())          # 不许抛
+
+    def test_none_is_a_noop(self):
+        self._cls()._close_stream(None)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

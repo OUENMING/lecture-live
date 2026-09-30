@@ -1473,7 +1473,10 @@ Equation, we'll be using this over and over again · the amount of water in the 
 | 3 | **`measure_text_h` 有两份** | ⬜ 还开着。`overlay.py:256 def _measure_text_h` + `wrapup.py:53 def measure_text_h`（**名字差一个下划线**，两个都在） |
 | 4 | **`entry_panel.py` 太大** | ⬜ 还开着，**而且涨了**：现查 **3483 行**（上面这行原来记的是「1900+」） |
 | 5 | **3.8.0 没发** | ⬜ 还开着。⚠️ **不是「文案在等确认」** —— `CHANGELOG.md:68` 的 `## [3.8.0]` **已经有了**，但 7 条看点里**这一整轮「实时总结」一个字都没有** → **要重写**。`VERSION` 仍 `3.7.0`，最新正式 tag `v3.7.0` |
-| 6 | **约 165 条未处理的 OCR 发现** | ⬜ 还开着。台账现查：**268 条 / 实修 91 / 判定不改 ~10 / 其余约 165**。（`findings/` 里那 28 个是**批次文件**，不是条数） |
+| 6 | **约 165 条未处理的 OCR 发现** | ⭐ **2026-09-30 分诊过了，结论比「165 条待办」轻得多**。台账：发现 **268** / 实修 91 / 判定不改 ~10。**分桶**：已删的 `checkpoints/` 分块副本 **80**（出局）· 一次性探针 53 · 测试副本 27 · **生产代码 108**。66 个生产代码的 high/critical **逐条回原码核实**：**13 条早已修**（09-28/09-29 那两轮）· **2 条核实为假**（`update.py` 缺 `env=` 那条机制不成立；`ready.ready_item_text` 那个名字根本不存在）· **1 条作者判过不改**（`paths.course` 路径穿越，单用户本地工具）· ⭐ **真还成立的只有 3 条，已修**（见下）。⚠️ **剩下的 medium/low 多为 C 档内部质量**，OCR 的行号已多处漂移，顺手再说 |
+| 6a | ⭐ **`extract.py` 嵌套表格重复计数** | ✅ **已修**。`tbl.iter("a:tr")` / `tr.iter("a:tc")` 都是**递归**的 → 嵌套表格的内层单元格被数两遍，而表格块的去向是**术语候选池** → 会污染它。改 `findall`（直接子节点）；⚠️ 内容不会丢（内层段落仍在外层单元格的 `_paragraphs(tc)` 里）。判据 `test_extract.py` §3b，**变异验证过** |
+| 6b | ⭐ **`capture.py._close_stream` 占住麦克风** | ✅ **已修**。`stop(); close()` 挤在同一个 `try` → `stop()` 一抛就跳过 `close()`，而 `close()` 才是**把设备让出去**的那步。拆成两个 `try`。判据 `test_audit_regressions.py` R20，**变异验证过** |
+| 6c | ⚠️ **`panel.py.make_label` 的 `wrap` 参数是死的** | ✅ **已删**。`wrap=True` 设的 `setWraps_(True)` 本来就是默认值，而**全仓零调用点**（`wrapup.py`/`whatsnew.py` 里那些 `wrap=` 是它们各自的局部 helper）。⚠️ **那条 OCR 说它是"静默吞第二行"的 bug，核实为「不是」**：docstring 早已写明这是已知行为，判据里也拍过板（「标题/准备度/头部本来就该走默认」）。删参数是**零行为变化**的清理 |
 | 7 | **`corrections.json` 不存在** | ⬜ 还开着。文件确实不存在；`courses.py:313` 写 / `:327` 读，调用方**只有测试** → **生产零调用**，那条路从没真跑过 |
 | 8 | **`PROBE_ZERO` 没写进 docstring** | ⬜ 还开着。`probe_entry_panel.py` 头部列了 6 个环境变量，它不在；代码在 `:194/:344/:355` |
 | 9 | **`classify.py --sessions` 没写文档** | ⬜ 还开着。参数在 `classify.py:237`，`docs/` + README 里的 `--sessions` 命中**全是别的东西** |

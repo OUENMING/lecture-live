@@ -483,9 +483,17 @@ def _slide_blocks(root, page: int):
         if tbl is not None:
             # 按 <a:tr> 行成块，行内单元格 `" | "` 连 —— 表头行因此是独立一块，
             # 行内共现也保住了（拆到单元格会丢上下文，整表一块会丢行内共现）。
-            for tr in tbl.iter(_NS_A + "tr"):
+            # ⚠️⚠️ **必须是 `findall`（直接子节点），不能是 `iter`（递归）** ——
+            #    `iter` 会把**嵌套表格**的行和单元格再数一遍：
+            #    外层 `tr.iter("tc")` 已经把它们（作为后代）算进这一行，
+            #    内层 `tr` 又被外层 `tbl.iter("tr")` 收一次 → **同一段文字进两次块**，
+            #    而那些块的去向是**术语候选池**。
+            #    （2026-09-28 OCR 发现，2026-09-30 回原码核实为真。）
+            #    ⚠️ 内容不会因此丢：内层表格的段落仍在外层单元格的
+            #       `_paragraphs(tc)` 里（那个是**故意**递归的，见它的 docstring）。
+            for tr in tbl.findall(_NS_A + "tr"):
                 cells = []
-                for tc in tr.iter(_NS_A + "tc"):
+                for tc in tr.findall(_NS_A + "tc"):
                     txt = " ".join(_paragraphs(tc))
                     cells.append(txt)
                 line = " | ".join(c for c in cells if c).strip()

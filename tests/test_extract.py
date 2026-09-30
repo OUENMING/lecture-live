@@ -128,6 +128,33 @@ def main() -> int:
                   any("End poverty in all its forms everywhere" in t for t in tbl),
                   f"前两块：{tbl[:2]}")
 
+        print("\n3b. ⭐⭐ 嵌套表格不重复计数（2026-09-30 修）")
+        # ⚠️⚠️ 来由：`tbl.iter("a:tr")` / `tr.iter("a:tc")` 都是**递归**的 ——
+        #    嵌套表格的内层单元格会被数**两遍**（一遍算进外层那一行、一遍自己成行），
+        #    而表格块的去向是**术语候选池** → 重复计数会污染它。
+        #    ⚠️ 内容**不会**因此丢：内层段落仍在外层单元格的 `_paragraphs(tc)` 里
+        #       （那个函数是**故意**递归的，见它自己的 docstring）。
+        #    → 所以判据钉的是「**恰好一次**」，不是「有没有」。
+        # ⚠️ 变异验证：把 `findall` 换回 `iter` -> 这条红（INNER 数到 3 次、块数 2）。
+        # ⚠️ 走内部接缝 `_slide_blocks`（它自己的 docstring 就写着「测试直接打它」），
+        #    不用往仓库塞真课件。
+        _inner = ("<a:tbl><a:tr><a:tc><a:txBody><a:bodyPr/>"
+                  "<a:p><a:r><a:t>INNER</a:t></a:r></a:p>"
+                  "</a:txBody></a:tc></a:tr></a:tbl>")
+        _xml = _slide(
+            "<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr>"
+            "<a:tc><a:txBody><a:bodyPr/>"
+            "<a:p><a:r><a:t>OUTER_LEFT</a:t></a:r></a:p></a:txBody></a:tc>"
+            "<a:tc><a:txBody><a:bodyPr/>" + _inner + "</a:txBody></a:tc>"
+            "</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>")
+        _blocks, _ = extract._slide_blocks(extract._parse(_xml.encode()), 1)
+        _tblr = [b.text for b in _blocks if b.kind == "table"]
+        check("⭐⭐ 嵌套表格：内层文字**只算一次**、块数等于**顶层**行数",
+              len(_tblr) == 1 and sum(t.count("INNER") for t in _tblr) == 1,
+              f"块={_tblr!r}")
+        check("⚠️ 但内层文字**不许丢**（它仍在外层单元格里）",
+              any("INNER" in t for t in _tblr), f"块={_tblr!r}")
+
         print("\n4. ⭐ 版式噪声：跑马灯的跨张数算得对，且不产生被排除的 kind")
         h = first("ECON10790__Chapter 14.pptx")
         if h is None:

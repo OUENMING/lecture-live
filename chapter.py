@@ -88,9 +88,13 @@ SYS_CHAPTER = """你在听一节课的转录, 手里是**一章**的原料: 这�
 #: 课务线索。⚠️ **必须按词边界** —— 否则 `exam` 会命中 `example`、
 #:    `due` 会命中 `during`（课堂里这两个词的出现频率高得离谱）。
 #: ⚠️ 不设 `final\s+exam` 这种冗余分支：`exam` 已经覆盖了它。
+#: ⚠️⚠️ **复数要收**（2026-09-30 独立审查抓到）：第一版全是单数词根 + `\b`，
+#:    于是 `The exams are next week` / `midterms` / `quizzes` / `assignments`
+#:    **一条都不命中** —— 而老师在课上说的十有八九是复数。
+#:    按本模块自己写的优先级（漏真 deadline 比多报一条重得多），这个缺口必须补。
 DEADLINE_RE = re.compile(
-    r"\b(due|deadline|submit|submission|hand\s+in|problem\s+set|homework|"
-    r"assignment|midterm|quiz|exam)\b", re.I)
+    r"\b(due|deadlines?|submits?|submissions?|hand\s+in|problem\s+sets?|"
+    r"homeworks?|assignments?|midterms?|quiz(?:zes)?|exams?)\b", re.I)
 
 #: 改期线索。命中它 = 这条课务**被改过**（界面要标「已改期」）。
 #:
@@ -102,9 +106,11 @@ DEADLINE_RE = re.compile(
 #:    → 修法：只认**动词**，不认动词后面跟什么（反正在 `DEADLINE_RE` 命中的句子里，
 #:       "push / postpone / extend / move" 不会有别的意思）。
 #:    → 纪律：**判据要指向那个字段**，不是指向"有没有命中"（同 `verify-criteria-must-point-at-the-field`）。
+#: ⚠️ 词形要收全：`moved` 之外还有 `move / moves / moving`（`I'm moving the deadline`
+#:    实测漏过）；`push` 之外还有 `pushing`。（2026-09-30 独立审查抓到。）
 CHANGED_RE = re.compile(
-    r"\b(postpon\w*|push(?:ed|es)?|extend\w*|extension|moved|reschedul\w*)\b",
-    re.I)
+    r"\b(postpon\w*|push(?:ed|es|ing)?|extend\w*|extension|"
+    r"mov(?:e|ed|es|ing)|reschedul\w*)\b", re.I)
 
 
 def deadline_hits(en) -> dict | None:
@@ -195,14 +201,24 @@ def parse_reply(obj, lo: int, hi: int) -> list:
     """
     if not isinstance(obj, dict):
         return []
+    raw_sents = obj.get("sentences")
+    if not isinstance(raw_sents, (list, tuple)):
+        return []                                        # ⚠️ 形状不对 -> 空表，**不抛**
     out: list = []
-    for s in (obj.get("sentences") or []):
+    for s in raw_sents:
         if not isinstance(s, dict):
             continue
         en = str(s.get("en") or "").strip().replace("\n", " ")
         if not en or len(en) > SENT_MAX_CHARS:
             continue
-        src = [x for x in (s.get("src") or []) if isinstance(x, int)]
+        # ⚠️⚠️ **先判形状再迭代**。`(s.get("src") or [])` 对 `"src": 12` 这种
+        #    非容器**会抛 `TypeError`**，而这个函数自称是「**全部的机械闸门**」——
+        #    **闸门自己炸掉比放过一条脏数据糟得多**（异常会冒到 worker 线程，
+        #    打死总结器，之后整节课不再出章节）。同 `atom.traceable` 那条纪律。
+        raw_src = s.get("src")
+        if not isinstance(raw_src, (list, tuple)):
+            continue                                     # 形状不对 = 整句丢
+        src = [x for x in raw_src if isinstance(x, int)]
         if not src or any(x < lo or x > hi for x in src):
             continue                                     # ⚠️ 整句丢，不修剪
         flag = s.get("flag")
@@ -284,9 +300,9 @@ class ChapterWriter:
         return self._path
 
     def _handle(self):
-        # ⭐ 关了就不再开 —— **这是与 `AtomWriter._handle()` 唯一的差别**，而且是故意的。
-        if self._closed:
-            return None
+        # ⚠️ **这里刻意不判 `_closed`** —— 那个判在 `append()` 里，一处就够。
+        #    第一版两处都判，变异验证时发现删掉这一处**判据照样全绿**
+        #    （因为 `_handle` 只被 `append` 调，根本不可达）→ 那就是死代码。
         if self._h is None and self._path is not None:
             self._h = self._path.open("a", encoding="utf-8")
         return self._h
@@ -352,6 +368,18 @@ def load(path) -> dict:
     last: dict = {}
     order: list = []
     deadlines: list = []
+    # ⚠️⚠️ **`path` 为 `None` 是预期输入，不是理论边界**：`chapter_path_for()` 在
+    #    会话路径为空时正是返回 `None`（开关关着 / 纯转录档 / 旧会话都走这条），
+    #    而 `obsidian_writer` 下课时就是拿它的返回值直接来 `load()`。
+    #    少了这一行，`pathlib.Path(None)` 抛的是 **`TypeError`**，
+    #    而下面只吞 `OSError` → 从「不抛」的契约里逃出去。
+    #    （2026-09-30 `ocr` 抓到的。我自己的判据只试了「文件不存在」，没试 `None`。）
+    # ⚠️ **不要图省事把 `TypeError` 也塞进下面那个 `except`** —— 第一版就是那么写的，
+    #    变异验证一测：**删掉这一行判据照样全绿**（因为宽吞把它兜住了）→ 那这行就是死代码。
+    #    而且宽吞 `TypeError` 会把「真出了别的类型错」伪装成「文件不存在」。
+    #    → 显式守门 + 窄 `except`，两者**各管一段**。
+    if not path:
+        return {"windows": [], "chapters": [], "deadlines": []}
     try:
         txt = pathlib.Path(path).read_text(encoding="utf-8", errors="ignore")
     except OSError:
@@ -371,10 +399,19 @@ def load(path) -> dict:
             windows.append(obj)
         elif kind == CHAPTER:
             cid = obj.get("id")
+            # ⚠️⚠️ `id` 必须是**可哈希**的。`{"id": [1]}` 会让 `cid not in last`
+            #    抛 `TypeError: unhashable type: 'list'` —— 从「坏行跳过、不抛」
+            #    的契约里逃出去，而这是**课后的笔记路径**（`obsidian_writer` 要调）。
+            #    （2026-09-30 独立审查抓到。）
+            if not isinstance(cid, (int, str)):
+                continue                                 # 坏行跳过
             if cid not in last:
                 order.append(cid)
             last[cid] = obj                              # 后写覆盖先写
         elif kind == DEADLINE:
+            # ⚠️ 同理：`src` 不是列表时 `merge_deadlines` 里的 `set(...)` 会抛。
+            if not isinstance(obj.get("src"), (list, tuple)):
+                continue
             deadlines.append(obj)
     return {"windows": windows,
             "chapters": [last[c] for c in order],

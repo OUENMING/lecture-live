@@ -20,9 +20,29 @@
 
 ## 线程纪律
 
-除 `feed()` 外，**一切只在 worker 线程里跑**。`emit` 是唯一往主线程去的口子，
-而它由调用方包上 `stopping` 守卫（同问答那条纪律：收尾开始后不再往 `streamq` 写，
-否则 `all_settled()` 会等满 15 秒冲刷上限）。
+- `feed()` 是**主线程**唯一的入口，只做 `put_nowait` + `Event.set`，**永不抛**。
+- `emit` 是唯一往主线程去的口子，由调用方包上 `stopping` 守卫。
+- ⭐⭐ **动状态机的有两条线程**：`run()` 的 worker（经 `step`）和 `finish()` 的 work 线程。
+  它们**靠 `_step_lock` 互斥** —— `step()` 全程持有，`finish()` 的 work 要
+  `acquire(timeout=timeout_s)` **拿得到才许动** `_buf` / `_pend` / `_cur`。
+
+⚠️⚠️ **为什么必须是锁**（2026-09-30 实测）：第一版用「等 `_stopped` 事件」来判断
+worker 退没退 —— 那是**靠时序**成立的。同一份代码连跑 12 次，**有 2 次仍然
+把同一个窗口投给模型两次**（双倍 API 花费），而且那次那节课的
+`.chapters.jsonl` **一条记录都没有**。换成锁之后 20/20 干净。
+→ 教训：**「不许两个线程同时进某个状态机」要写成结构，不能写成时序判断。**
+
+## ⚠️⚠️ 两个域，别混：`self._clock()` vs `step(now)` 的 `now`
+
+**所有章节侧的计时**（`_interim_at`、以及传给 `_finalize_current` 的那个时间）
+**必须用 `step(now)` 传进来的 `now`**，不许用 `self._clock()`。
+`self._clock()` 只在两处合法：`run()` 里给 `step` 供时间、`finish()` 里起算收尾。
+
+⚠️ 第一版 `_absorb` 写的是 `self._interim_at = self._clock()` —— 而 `_maybe_interim`
+拿它跟 `now`（模拟时间，从 0 开始）比 → **永远差一个天文数字 → 临时合成从不触发**。
+判据 ⑦ 抓到的。这正是 `atom.traceable` 记过的那个形状：
+**两套编号/两个时间域混用，结果不会崩，只会静默地恒不成立。**
+（那个是"当日秒数当行号"，可追溯率按构造恒为 0。见 [[measure-before-claiming]]。）
 
 ## 依赖全是**注入**的（`codebase-design`：接受依赖，不要自己造）
 
@@ -91,9 +111,12 @@ class LiveSummarizer:
         self._q: queue.Queue = queue.Queue()
         self._wake = threading.Event()
         self._stopped = threading.Event()
-        #: `run()` 有没有真的跑过。⚠️ `finish()` 靠它决定「要不要等 `_stopped`」——
-        #: 探针与单测**只调 `step()`**，等一个永不到来的事件会吃掉整个收尾预算。
-        self._running = False
+        #: ⭐⭐ **状态机的互斥锁** —— `step()` 全程持有它，`finish()` 的 work 线程
+        #: 要**拿得到**才许动 `_buf` / `_pend` / `_cur`。
+        #: ⚠️ 为什么必须是锁、不能靠 `Event` 或标志位：那是**靠时序**成立的
+        #:    （2026-09-30 实测：同一份代码连跑 12 次，有 2 次仍然重复投递）。
+        #:    锁让「不许两个线程同时进状态机」变成**结构**，与时序无关。
+        self._step_lock = threading.Lock()
         self._closed = False
         self._calls = 0
 
@@ -112,7 +135,7 @@ class LiveSummarizer:
 
         # ---- 杂项 ----
         self._window_n = 0
-        self._dropped = []            # 被积压上限挤掉的窗口时间段
+        self._atom_n = 0              # 原子的全局递增 id（**跨窗口**，不许每窗从 0 重来）
 
     # ------------------------------------------------------------ 对外
     @property
@@ -152,22 +175,27 @@ class LiveSummarizer:
         """
         if self._closed:
             return
-        self._drain_queue(now)
-        self._maybe_close_window(now)
-        self._process_pending(now)
-        self._maybe_interim(now)
+        with self._step_lock:                             # ⭐ 与 `finish()` 的 work 互斥
+            self._drain_queue(now)
+            self._maybe_close_window(now)
+            self._process_pending(now)
+            self._maybe_interim(now)
 
     def run(self, running) -> None:
         """worker 线程的循环。⚠️ **它只负责等唤醒，不消费队列** ——
         取件是 `step()` 的事。否则这里 `get()` 会吃掉一条而 `step` 看不到，
         而探针**只调 `step`** → 两条路走岔（判据 T19 钉的就是这条）。
         """
-        self._running = True
         try:
             while running.is_set():
                 self._wake.wait(1.0)
                 self._wake.clear()
-                self.step(self._clock())
+                try:
+                    self.step(self._clock())
+                except Exception as e:                    # noqa: BLE001
+                    # ⚠️ **一次 `step` 抛了不许把线程带走** —— 带走之后整节课不再出章节，
+                    #    而且只在日志里留一次 traceback。同 `atom_worker` 那条纪律。
+                    print(f"⚠ 实时总结 step 失败({type(e).__name__}: {str(e)[:60]}); 继续")
         finally:
             self._stopped.set()
 
@@ -183,19 +211,27 @@ class LiveSummarizer:
 
         def work():
             try:
-                # ⚠️⚠️ **只在 `run()` 真的跑过时才等它**。否则（探针 / 单测只调 `step`）
-                #    `_stopped` 永不置位，这一等会**吃掉整个预算**，后面的残余窗口和
-                #    正式合成**全被外面的 `join(timeout_s)` 砍掉** —— 而且**不报错**。
-                #    （2026-09-30 实测抓到：A A B 三窗只出了一章。）
-                if self._running:
-                    self._stopped.wait(timeout_s)
+                # ⚠️⚠️ **`cancel` 先判**（「跳过精修」/ Ctrl+C 那条路）。它**本来就不调模型**，
+                #    没有任何理由先等满预算 —— 原来先 `wait` 后判，白等 25 秒才关文件。
                 if cancel is not None and cancel.is_set():
                     return
-                now = self._clock()
-                self._flush_window(now)                   # 残余窗口（改进 ②）
-                self._process_pending(now, force=True)
-                if cancel is None or not cancel.is_set():
-                    self._finalize_current(now)
+                # ⚠️⚠️⚠️ **拿不到锁 = worker 正在跑状态机 → 一律不许碰共享状态。**
+                #    实测（2026-09-30）它可能正卡在一次模型调用里、手里攥着
+                #    `_pend[0]`；这边再去 `_flush_window` / `_process_pending`，
+                #    两边会**把同一个窗口投给模型两次**（双倍 API 花费，已复现），
+                #    并且先返回的那边 `pop` 到空列表 → 收尾整段被跳过
+                #    → **那节课的 `.chapters.jsonl` 一条记录都没有**。
+                #    → 超时的语义就是「**放弃剩下的步骤**」（计划 §6.3）：只关文件。
+                #    ⚠️ 别把它换成 `_stopped.wait()` —— 那是靠时序成立的：
+                #       同一份代码连跑 12 次有 2 次仍然重复投递，而加锁后 12/12 干净。
+                if not self._step_lock.acquire(timeout=timeout_s):
+                    print(f"⚠ 实时总结的 worker 还在跑（超过 {timeout_s:.0f} 秒拿不到锁）"
+                          f"—— 收尾只关文件，不再提交残余窗口")
+                    return
+                try:
+                    self._finish_locked(cancel)
+                finally:
+                    self._step_lock.release()
             except Exception as e:                        # noqa: BLE001
                 print(f"⚠ 实时总结收尾失败({type(e).__name__}: {str(e)[:60]})")
             finally:
@@ -208,6 +244,22 @@ class LiveSummarizer:
             print(f"⚠ 实时总结收尾超过 {timeout_s:.0f} 秒 —— 剩下的步骤已放弃"
                   f"（已写下的章节记录不受影响）")
         self.close()
+
+    def _finish_locked(self, cancel) -> None:
+        """收尾里**动共享状态**的那几步。⚠️ 调用方必须**已经持有 `_step_lock`**。"""
+        if cancel is not None and cancel.is_set():
+            return
+        now = self._clock()
+        # ⚠️⚠️ **先排空 `_q`**（2026-09-30 `ocr` 抓到）。
+        #    `running.clear()` 常常落在 worker 正阻塞的那次模型调用**中间** ——
+        #    那次 `step()` 返回后 while 条件已假、循环直接退出，
+        #    **调用期间 `feed()` 进来的句子还留在 `_q` 里**，永远没人取件：
+        #    既没进 `_buf` 也没进 `_pend` → 既没提交也没报错，**静默丢**。
+        self._drain_queue(now)
+        self._flush_window(now)                   # 残余窗口（改进 ②）
+        self._process_pending(now, force=True)
+        if cancel is None or not cancel.is_set():
+            self._finalize_current(now)
 
     def close(self) -> None:
         """**只关文件，不调模型。** 用户放弃笔记那条收尾路径用它（同 `give_up`）。"""
@@ -246,7 +298,6 @@ class LiveSummarizer:
         self._pend.append(buf)
         while len(self._pend) > MAX_PENDING:
             gone = self._pend.pop(0)
-            self._dropped.append(gone)
             self._emit_p({"kind": "gap", "t_from": gone[0][1], "t_to": gone[-1][1],
                           "state": "dropped"})
         self._retry_at = 0.0
@@ -264,7 +315,7 @@ class LiveSummarizer:
                 self._retry_at = now + RETRY_S
                 return
             self._pend.pop(0)
-            self._absorb_window(buf, obj)
+            self._absorb_window(buf, obj, now)
         self._retry_at = 0.0
 
     def _pending_blocked(self, now: float, force: bool) -> bool:
@@ -289,11 +340,16 @@ class LiveSummarizer:
     def _topic_prev(self) -> str:
         return self._cur["title"] if self._cur else ""
 
-    def _absorb_window(self, buf: list, obj) -> None:
+    def _absorb_window(self, buf: list, obj, now: float) -> None:
         """窗口提交成功之后：写原子 → 推 `atoms` → 写窗口记录 → 喂章节状态机。"""
         base = buf[0][0]                                  # 窗口第一句的**全局句号**
-        got = atom.rebase(atom.parse_reply(obj, len(buf), base_id=0,
+        # ⚠️⚠️ `base_id` 必须**跨窗口递增**（原 `main.py` 用 `atom_st["n"]` 记的就是这个）。
+        #    写成 `base_id=0` 会让**每个窗口的 id 都从 0 重来** → `.atoms.jsonl` 里
+        #    大量重复 id，而 `atom.rebase` 只重写 `src`、不动 `id`。
+        #    （2026-09-30 `ocr` 抓到的静默回退。）
+        got = atom.rebase(atom.parse_reply(obj, len(buf), base_id=self._atom_n,
                                            stamp=self._stamp()), base)
+        self._atom_n += len(got)
         if self._append_atoms is not None:
             try:
                 self._append_atoms(got)
@@ -315,17 +371,21 @@ class LiveSummarizer:
             if a.kind == KIND_DEADLINE:
                 self._emit_deadline(a.t, a.text, a.src, "model", False)
 
-        self._advance(topic, topic_zh, buf, got)
+        self._advance(topic, topic_zh, buf, got, now)
 
     # ------------------------------------------------------------ 章节状态机
-    def _advance(self, topic: str, topic_zh: str, buf: list, atoms: list) -> None:
+    def _advance(self, topic, topic_zh, buf, atoms, now: float) -> None:
         if not topic:
             # 空主题 -> 并入当前章。**还没有章就先攒着** ——
             # 等第一章开出时它自然在里面（判据 T5）。
-            self._absorb(buf, atoms)
+            self._absorb(buf, atoms, now)
             return
-        if self._cur is not None and topic == self._cur["title"]:
-            self._absorb(buf, atoms)
+        # ⚠️ **去空格 + 不分大小写**（计划 §6.3）。用精确相等的话，
+        #    模型把同一个主题写成 `Price elasticity` / `price elasticity` 就会被判成换题 →
+        #    **凭空多出一章 + 多花一次合成调用**。（2026-09-30 `ocr` 抓到的。）
+        if (self._cur is not None
+                and topic.strip().lower() == (self._cur["title"] or "").strip().lower()):
+            self._absorb(buf, atoms, now)
             return
         if self._cur is not None and not self._cur["title"]:
             # ⭐⭐ **当前章还没定题**（开场那几个空主题的窗口攒在这里）→
@@ -334,20 +394,20 @@ class LiveSummarizer:
             #       （点名/调试/闲聊，模型给空主题）自己成一章，正文另起一章。
             #       （2026-09-30 实测抓到，判据 T5。）
             self._cur["title"], self._cur["title_zh"] = topic, topic_zh
-            self._absorb(buf, atoms)
+            self._absorb(buf, atoms, now)
             return
         # 主题不同 -> **先给当前章做正式合成，再开新章**。A→B→A 按新章处理，不解冻旧章。
-        self._finalize_current(self._clock())
-        self._absorb(buf, atoms, title=topic, title_zh=topic_zh)
+        self._finalize_current(now)
+        self._absorb(buf, atoms, now, title=topic, title_zh=topic_zh)
 
-    def _absorb(self, buf: list, atoms: list,
+    def _absorb(self, buf: list, atoms: list, now: float,
                 title: str = None, title_zh: str = None) -> None:
         if self._cur is None:
             self._cur = {"id": self._cid, "title": "", "title_zh": "",
                          "t0": buf[0][1], "lo": buf[0][0], "hi": buf[-1][0],
                          "sents": [], "atoms": [], "ver": 0}
             self._cid += 1
-            self._interim_at = self._clock()
+            self._interim_at = now
         c = self._cur
         if title:                                         # 定题（开场那些空主题的窗口
             c["title"], c["title_zh"] = title, title_zh    # 早就攒在里面了）
@@ -366,7 +426,7 @@ class LiveSummarizer:
         if now - self._interim_at < INTERIM_AFTER_S:
             return
         self._interim_at = now
-        self._synthesize("interim", now)
+        self._synthesize("interim")
 
     def _finalize_current(self, now: float) -> None:
         """给当前章做**正式**合成并封章。没有内容就什么都不做。"""
@@ -377,12 +437,12 @@ class LiveSummarizer:
             self._cur = None
             return
         if self._chapters_on and not self._closed:
-            self._synthesize("final", now)
+            self._synthesize("final")
         if c["title"]:
             self._prior.append(c["title"])
         self._cur = None
 
-    def _synthesize(self, status: str, now: float) -> None:
+    def _synthesize(self, status: str) -> None:
         """一次章节合成。**失败重试一次**；仍失败就写一条空的（界面退回原子要点）。"""
         c = self._cur
         if c is None:

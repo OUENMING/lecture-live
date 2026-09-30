@@ -163,9 +163,15 @@ def terms_of(p: dict) -> list:
     ⚠️ 两侧都要 `strip()` 后再判空 —— 全是空格的串过得了 `isinstance` 那一关。
     ⚠️ 公开的（不是 `_terms_of`）：**`chapter.py` 的合成句用同一条校验** ——
        抄第二份迟早分叉，而分叉的表现是"原子里的术语对得上、合成句里的对不上"。
+    ⚠️⚠️ **先判形状再迭代**（2026-09-30 独立审查抓到）：`"terms": 3` / `3.5` / `true`
+       这种非容器**会抛 `TypeError`**，而调用点（`live_summary._absorb_window`）
+       **没有 try** → 异常冒到 worker 线程把它带走，之后整节课不再出原子。
     """
+    raw = p.get("terms")
+    if not isinstance(raw, (list, tuple)):
+        return []                                        # ⚠️ 形状不对 -> 空表，**不抛**
     out = []
-    for pair in (p.get("terms") or []):
+    for pair in raw:
         if not (isinstance(pair, (list, tuple)) and len(pair) == 2):
             continue
         en, zh = pair
@@ -198,15 +204,25 @@ def parse_reply(obj, n_sent: int, *, base_id: int = 0,
     """
     if not isinstance(obj, dict):
         return []
+    # ⚠️⚠️ **先判形状再迭代**（2026-09-30）：`(obj.get("points") or [])` 对
+    #    `"points": 3` 这种非容器**会抛 `TypeError`**，而本函数自称「**全部的机械闸门**」
+    #    —— **闸门自己炸掉比放过一条脏数据糟得多**：调用方（`live_summary._absorb_window`）
+    #    没有 try，异常会冒到 worker 线程把它带走，之后整节课不再出原子。
+    raw_points = obj.get("points")
+    if not isinstance(raw_points, (list, tuple)):
+        return []
     t, epoch = (stamp + ("", 0.0))[:2] if stamp else ("", 0.0)
     out = []
-    for p in (obj.get("points") or []):
+    for p in raw_points:
         if not isinstance(p, dict):
             continue
         text = str(p.get("text") or "").strip().replace("\n", " ")
         if not text or len(text) > 200:
             continue
-        src = [x for x in (p.get("src") or []) if isinstance(x, int)]
+        raw_src = p.get("src")
+        if not isinstance(raw_src, (list, tuple)):
+            continue                                     # 形状不对 = 整条丢
+        src = [x for x in raw_src if isinstance(x, int)]
         if not src or any(x < 0 or x >= n_sent for x in src):
             continue                                     # ⚠️ 整条丢，不修剪
         kind = p.get("kind")

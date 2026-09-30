@@ -181,6 +181,38 @@ def main() -> int:
               "put_nowait(" in body and "\n" + " " * 8 + "self._q.put(" not in body,
               f"feed 里 put_nowait={body.count('put_nowait(')}")
 
+        # ③ ⭐ 实时总结那一行：**由产出方打，不由 `drain` 打**（2026-09-30 实测）
+        #    ⚠️⚠️ 收尾时 `finish()` 定稿**最后一章**，而那时**主循环已经退出、
+        #       没人在 `drain`** → 那一行放在 `drain` 里 = **最后一章永远静默**
+        #       （实测：3 个正式章只打了 2 条）。
+        import main as m
+        check("⭐ `summary_log_line`：正式章 -> 那一行；临时章 / 别的 kind / 非 dict -> None",
+              m.summary_log_line({"kind": "chapter",
+                                  "chapter": {"status": "final", "title": "T"}}) == "📑 T"
+              and m.summary_log_line({"kind": "chapter",
+                                      "chapter": {"status": "interim", "title": "T"}}) is None
+              and m.summary_log_line({"kind": "atoms"}) is None
+              and m.summary_log_line({"kind": "chapter"}) is None
+              and m.summary_log_line("not a dict") is None)
+        _i = src_main.index('elif item[0] == "summary":')
+        _blk = src_main[_i:src_main.index('elif item[0] == "final":', _i)]
+        # 改坏：把那一行挪回 `drain` 的 summary 分支 -> 这条红。
+        check("⭐⭐ `drain()` 的 summary 分支只推界面、**不打终端那一行**"
+              "（打了就有**两个定义点**，而收尾那次永远跑不到）",
+              "summary_update" in _blk and "📑" not in _blk, _blk[:70].replace("\n", "⏎"))
+        _e = src_main.index("def _summ_emit")
+        _eblk = src_main[_e:src_main.index("summ = _live.LiveSummarizer", _e)]
+        _ok_order = ("summary_log_line(payload)" in _eblk
+                     and 'getattr(ui, "_closed"' in _eblk
+                     and _eblk.index("summary_log_line(payload)")
+                     < _eblk.index('getattr(ui, "_closed"'))
+        # 改坏：把那一行挪到守卫**之后** -> 这条红（收尾时 `stopping` 已置位）。
+        check("⭐⭐ 那一行排在守卫**之前** —— 收尾时 `stopping` 已置位，"
+              "排后面等于把最后一章吞掉", _ok_order)
+        check("⭐ 守卫看的是**界面还在不在**（`ui._closed`），不是 `stopping`"
+              "（\"播完\"也会置位，那时界面还活着、`finish()` 的 payload 该送达）",
+              'stopping.is_set()' not in _eblk)
+
         # ② ⚠️ 复刻 ❓ 那次**真事故**的形状：`close()` 有三条早退（2026-09-29 起
         #    是四条，多了「没有 Obsidian 库」那条 —— **规矩不变：护栏在早退之前**），
         #    旁路句柄若放在它们**之后**，答"不保存笔记"那条路上就漏关。

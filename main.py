@@ -240,6 +240,22 @@ def _ask_save_notes(n: int) -> bool:
     return ans.lower() in ("", "y", "yes", "是", "好", "存")
 
 
+def summary_log_line(payload) -> str | None:
+    """实时总结的 payload → 终端那一行；**不是正式章就返回 `None`**。**纯函数。**
+
+    ⚠️ 它是**模块级**的，不是 `drain()` 里的内联代码 —— 这一条是**实测逼出来的**：
+       收尾时 `finish()` 会定稿**最后一章**，而那时**主循环已经退出、没人在 `drain`**
+       → 最后一章的标题**永远打不出来**（2026-09-30 实测：3 个正式章只打了 2 条）。
+       ⭐ 所以这一行归**产出方**（`_summ_emit`）管，**不归消费方**（`drain`）。
+    ⚠️ 只打**正式章**（`status == "final"`）—— 临时版每 4 分钟一刷，会刷屏。
+    """
+    p = payload if isinstance(payload, dict) else {}
+    c = p.get("chapter") or {}
+    if p.get("kind") != "chapter" or c.get("status") != "final":
+        return None
+    return f"📑 {c.get('title', '')}"
+
+
 NO_CLOUD_ANSWER = ("⚠ 讲解需要云端引擎(DeepSeek): 本地的 1.7B 模型只会翻译, 没有讲解能力。"
                    "用 --engine auto/cloud 并配好 API key 后可用。")
 
@@ -1514,13 +1530,22 @@ def run(args) -> None:
                           max_tokens, temperature)
 
     def _summ_emit(payload: dict) -> None:
-        """推给界面。⚠️ **带 `stopping` 守卫** —— 窗口关掉之后不再往里塞。
+        """推给界面 **+ 打终端那一行**。**两件事都由产出方负责**（见 `summary_log_line`）。
 
+        ⚠️ 那一行排在守卫**之前**：收尾时 `stopping` 已置位，而**最后一章正是在那时
+           定稿的** —— 排在后面就等于**最后一章永远静默**（2026-09-30 实测）。
+        ⚠️ 守卫看的是**界面还在不在**，不是**用户停没停**：
+           `stopping` 在「播完」时也会置位，那时界面还活着、收尾卡还在显示，
+           而 `finish()` 那最后一个 payload **应该送达** —— 否则阶段 4 的纲要会
+           **缺最后一章**。判据与 `_wrap` 里的 `_ui_gone()` 一致
+           （`ui._closed`；`TerminalUI` 没有这个概念，永远 False）。
         ⚠️ 整段包 `try`：转不过去只是少一条纲要，**绝不能让 worker 抛**
-        （同原 `atomq.put_nowait` 那条纪律 —— `drain` 没有 try/except，
-        但这条是反方向：worker 抛了会**静默带走整条总结线**）。
+           （worker 抛了会**静默带走整条总结线**）。
         """
-        if stopping.is_set():
+        line = summary_log_line(payload)
+        if line:
+            echo(f"[{now()}] {line}")
+        if bool(getattr(ui, "_closed", False)):
             return
         try:
             streamq.put_nowait(("summary", payload))
@@ -1585,17 +1610,12 @@ def run(args) -> None:
                 # ⭐ 实时总结推给界面。⚠️ **`getattr` 守卫** —— `TerminalUI` 没有
                 #    `summary_update`，而 `drain()` 没有 try/except，
                 #    直接调会 AttributeError **打死主循环**（同上面 answer 那条）。
+                # ⚠️ **终端那一行不在这里打** —— 已归产出方 `_summ_emit` 管
+                #    （见 `summary_log_line`：收尾时主循环已退出、这里根本跑不到，
+                #     放在这儿会让**最后一章永远静默**）。
                 fn = getattr(ui, "summary_update", None)
                 if callable(fn):
                     fn(item[1])
-                # ⚠️ 终端里只打**正式章**的标题 —— 临时版每 4 分钟一刷，会刷屏。
-                # ⚠️ 取字段一律走 `.get` + `isinstance`：这条分支在 `drain` 里，
-                #    **不许抛**（这里的 payload 由 `_summ_emit` 产出，形状是可控的，
-                #     但 `streamq` 是共享的，守一道不花钱）。
-                p = item[1] if isinstance(item[1], dict) else {}
-                c = p.get("chapter") or {}
-                if p.get("kind") == "chapter" and c.get("status") == "final":
-                    echo(f"[{now()}] 📑 {c.get('title', '')}")
             elif item[0] == "final":                # ("final", en, zh, asr_raw)
                 ui.finalize(item[1] or item[3], item[2])   # 翻译失败时至少显示转录
                 writer.append(item[1], item[2], raw=item[3])

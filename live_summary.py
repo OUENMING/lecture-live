@@ -147,6 +147,27 @@ DEADLINE_INSTRUCTION = (
 MIN_CHAPTER_S = 180.0     # 3 分钟：比这短的「换题」一律并进当前章
 MAX_CHAPTER_S = 600.0     # 10 分钟：到点强制切开（与计划「一章 ≈ 10 分钟」一致）
 
+#: ⚠️⚠️ **积压里的窗口要按「它自己的内容时刻」消化，不能一律按 `now`**（2026-09-30 修）。
+#:    断网 25 分钟攒下的窗口会在**恢复那一刻被一口气消化**，它们**共享同一个 `now`**
+#:    → 章节状态机里 `now - t_open ≡ 0` → `MAX_CHAPTER_S` **一次都不触发**
+#:    → **一章盖了 34.4 分钟的课**（`--fail-window` 实测；判据 ㉞）。
+#:    ⚠️ 那批真数据里 19 个积压窗口**主题完全没变** —— 所以「放行换题」那类修法
+#:       救不了它，必须让**先后次序在时钟上体现出来**。
+#:    落点在 `_process_pending`：给每个窗口算一个「本该在什么时刻被消化」的有效时钟。
+
+
+def _span_s(a, b) -> float:
+    """两个 `HH:MM:SS` 之间**跨越的课堂秒数**（`b - a`，跨零点取模）。解不出返回 `0.0`。
+
+    ⚠️ 走 `obsidian_writer._hms_sec` —— 那是本仓 `HH:MM:SS` 解析的**唯一定义点**
+       （它自己就是 fail-soft 的，解不出返回 `None`）。
+    """
+    import obsidian_writer as _ow
+    sa, sb = _ow._hms_sec(a), _ow._hms_sec(b)
+    if sa is None or sb is None:
+        return 0.0
+    return float((sb - sa) % 86400)
+
 
 def jev_deadline_gate(*, token_value=None):
     """造一个「课务打分闸门」：`text -> 概率 or None`。**没配 token 返回 `None`。**
@@ -397,9 +418,25 @@ class LiveSummarizer:
 
     # ------------------------------------------------------------ 提交
     def _process_pending(self, now: float, force: bool = False) -> None:
-        """从**最旧**的开始提交。失败的重试（`RETRY_S` 之后），不丢。"""
+        """从**最旧**的开始提交。失败的重试（`RETRY_S` 之后），不丢。
+
+        ⭐⭐ **积压里的每个窗口按「它自己的内容时刻」消化，不是一律按 `now`**（2026-09-30 修）。
+
+        ⚠️⚠️ 为什么：断网攒下的窗口会在**恢复那一刻被一口气消化**，它们**共享同一个
+           `now`** → 章节状态机里 `now - t_open ≡ 0` → `MAX_CHAPTER_S` 一次都不触发
+           → **一章盖了 34.4 分钟的课**（`--fail-window` 实测；判据 ㉞）。
+        ⭐ 语义上本来就该如此：一个来自 14:16 的窗口，就该**当作 14:16 处理**。
+        ⚠️ 做法是把**内容时间差**搬到 `now` 这根轴上（锚在**最新的那一窗** = `now`）——
+           不是为了精确还原墙钟，而是为了让**同一批窗口的先后次序在时钟上体现出来**。
+           ⭐ 单一时钟域这个不变量**保住了**（`t_open` 仍然是 `now` 域的）。
+        ⚠️ **只有一个窗口时 `now_eff == now`**，行为与改动前**逐字一样** ——
+           正常上课永远走那一支，这条改动只对积压生效。
+        """
         if self._pending_blocked(now, force):
             return
+        #: 这批里**最新的**那个窗口的内容时刻 —— 它对应 `now`（它就是「现在」）。
+        #: ⚠️ 必须在循环**之前**取：循环里 `self._pend` 会一直缩短。
+        newest_c = self._pend[-1][-1][1]
         while self._pend:
             buf = self._pend[0]
             obj = self._call_atoms(buf)
@@ -408,7 +445,9 @@ class LiveSummarizer:
                 self._retry_at = now + RETRY_S
                 return
             self._pend.pop(0)
-            self._absorb_window(buf, obj, now)
+            # ⭐ 越旧的窗口，有效时刻越早（最新的那窗差值为 0，原样是 `now`）。
+            now_eff = now - _span_s(buf[-1][1], newest_c)
+            self._absorb_window(buf, obj, now_eff)
         self._retry_at = 0.0
 
     def _pending_blocked(self, now: float, force: bool) -> bool:

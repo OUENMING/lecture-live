@@ -966,6 +966,67 @@ def main() -> int:
         finally:
             KP.ask_one, KP._provider, KP.token = _orig
 
+        print("\n--- ㉞ ⭐⭐ 积压恢复：没有一章能盖住超过 `MAX_CHAPTER_S` 的**课堂内容** ---")
+        # ⚠️⚠️ 复刻 2026-09-30 `--fail-window` 实测的形状：断网期间积压 N 个窗口，
+        #    恢复那一刻被**一口气**消化 —— 它们**共享同一个 `now`**
+        #    → 那一刻开的章 `t_open = now`，后面每个窗口算 `now - t_open` 都是 0
+        #    → `MAX_CHAPTER_S = 600` **一次都不再触发** → **一章盖了 34.4 分钟的课**。
+        # ⚠️ 那批真数据里 19 个积压窗口**主题完全没变** —— 所以「放行换题」那类
+        #    修法救不了它，必须让**先后次序在时钟上体现出来**。
+        #
+        # ⚠️⚠️ 夹具必须**真实**：`now` 和句子时间戳**同步前进**（生产里就是这样 ——
+        #    `now` 是 `time.monotonic()`，时间戳是墙钟，两者速率相同）。
+        #    第一版夹具写成「now 每窗 +60s / 内容每窗 +360s」，两者速率不一致
+        #    → 测出来的东西在生产里不可能发生（那条判据是**假的**）。
+        with tempfile.TemporaryDirectory() as d:
+            fail = {"on": False}
+            emits2: list = []
+
+            def chat2(sysp, block, max_tokens, temperature):
+                if fail["on"]:
+                    raise RuntimeError("offline")
+                if sysp is atom.SYS:
+                    return atom_reply("Topic A")     # ⭐ 全程**同一个主题**
+                return dict(CHAP_REPLY)
+
+            s2 = L.LiveSummarizer(
+                chat=chat2, append_atoms=lambda a: len(a),
+                chapter_path=ch.chapter_path_for(pathlib.Path(d) / "S.md"),
+                emit=emits2.append)
+
+            def _feed_close(gid, hhmmss, now):
+                s2.feed((gid, hhmmss, "sentence %d" % gid, "中"))
+                s2.step(now)
+                s2.step(now + 40.0)              # 40s 静默 -> 关窗（ATOM_PAUSE_S=30）
+
+            # 每窗相隔 **6 分钟课堂时间**，`now` 同步 +360 —— 一共 6 窗 = 30 分钟
+            _feed_close(1, "10:00:00", 0.0)      # 正常开一章（t_open ≈ 40）
+            fail["on"] = True                    # ---- 断网，窗口开始积压 ----
+            for i in range(2, 7):
+                _feed_close(i, "10:%02d:00" % ((i - 1) * 6), (i - 1) * 360.0)
+            fail["on"] = False                   # ---- 恢复 ----
+            # 时钟要推过 `_retry_at`（最后一次失败在 1840 → +`RETRY_S`30 = 1870）
+            s2.step(1900.0)
+            check("⭐ 前置：恢复那一步真的把积压**一口气**消化掉了",
+                  s2.pending == 0, f"还剩 {s2.pending}")
+            s2.finish(timeout_s=5.0)
+
+            _fin = [c for c in chapters(emits2) if c["status"] == "final"]
+            _ov = [(c["id"], c.get("t0"), c.get("t1"),
+                    L._span_s(c.get("t0"), c.get("t1"))) for c in _fin]
+            # ⚠️ **上界是 `MAX + 一窗`，不是 `MAX`** —— 强制切发生在**下一个窗口边界**，
+            #    所以过冲最多一个窗口。这条**实测校准过**：真数据（`--fail-window`）
+            #    修好后每章 617–662s（窗口间隔约 77s），而 `MAX + 一窗 = 677` ✅。
+            #    ⚠️ 写成严格 `<= MAX` 会把**正确行为**判成失败（我没量的东西不许当判据）。
+            _SLACK = 360.0                    # 夹具里一窗 = 6 分钟课堂跨度
+            _bad = [x for x in _ov if x[3] > L.MAX_CHAPTER_S + _SLACK]
+            # 改坏：`_process_pending` 里把 `now_eff` 换回 `now` -> 这条红
+            #       （实测那时只有 2 章，其中一章跨度 1440s，远超 960 的上界）。
+            check("⭐⭐ **没有一章的内容跨度超过 `MAX_CHAPTER_S` + 一窗**"
+                  "（这才是 MIN/MAX 要守的不变量）",
+                  _fin and not _bad,
+                  f"{len(_fin)} 章 · 超限的 {_bad} · 全部 {_ov}")
+
     except BaseException as e:                            # noqa: BLE001
         # ⚠️⚠️ **一条判据自己抛了，不许把整个文件带崩。**
         #    崩了的话：后面的组**一条都不跑**、只留一个 traceback、**没有 ❌ 行** ——

@@ -1578,5 +1578,100 @@ class R18_AnswerContextContract(unittest.TestCase):
                         f"translator.answer 没把 context 传下去：{calls}")
 
 
+class R19_OutlineContract(unittest.TestCase):
+    """课堂纲要的**状态与合并规则**（计划 §9.2 / §9.4）。
+
+    ⚠️ 这几条**都是"顺序/合并"类**的性质 —— 正是那种"改坏了也照样跑、
+       只是结果悄悄错掉"的地方，所以必须钉住：
+       · `seen_t` 与快照的**先后**（反了的话「上次看到这里」永远落在最后一行）
+       · `deadline` 的**合并判据**（`src` 有交集）
+       · 章节**按 id 覆盖**（正式版要顶掉临时版）
+       · **只认正式章**才点亮小圆点（临时版每 4 分钟一刷，认它就一直亮）
+    """
+
+    def _ov(self):
+        try:
+            from overlay import Overlay
+        except ModuleNotFoundError as e:
+            self.skipTest(f"AppKit 不可用, 跳过: {e}")
+        except Exception as e:                       # noqa: BLE001
+            self.fail(f"overlay 导入失败（不是「AppKit 不可用」，是代码坏了）："
+                      f"{type(e).__name__}: {e}")
+        try:
+            return Overlay()
+        except Exception as e:                       # noqa: BLE001
+            self.fail(f"Overlay() 构造失败: {type(e).__name__}: {e}")
+
+    def test_deadlines_merge_when_src_overlaps(self):
+        o = self._ov()
+        o.summary_update({"kind": "deadline", "t": "15:40:16", "src": [10, 11],
+                          "quote": "problem set due", "source": "regex", "changed": False})
+        o.summary_update({"kind": "deadline", "t": "15:40:20", "src": [11, 12],
+                          "quote": "problem set due", "source": "model", "changed": True})
+        ds = o._outline["deadlines"]
+        self.assertEqual(len(ds), 1, f"`src` 有交集该合成一条，实得 {ds}")
+        # ⚠️ `source` **两个都记** —— 两条路都真实发生过，合并成一条说不清来源
+        self.assertIn("regex", ds[0]["source"])
+        self.assertIn("model", ds[0]["source"])
+        self.assertTrue(ds[0]["changed"], "任一条说改期就是改期")
+        # 无交集 -> 另起一条
+        o.summary_update({"kind": "deadline", "t": "15:50:00", "src": [99],
+                          "quote": "other", "source": "regex", "changed": False})
+        self.assertEqual(len(o._outline["deadlines"]), 2)
+
+    def test_chapter_overwrites_by_id(self):
+        o = self._ov()
+        o.summary_update({"kind": "chapter", "chapter": {"id": 3, "status": "interim",
+                                                         "title": "临时"}})
+        o.summary_update({"kind": "chapter", "chapter": {"id": 3, "status": "final",
+                                                         "title": "正式"}})
+        got = o._outline["chapters"]
+        self.assertEqual(len(got), 1, f"同 id 该覆盖，实得 {got}")
+        self.assertEqual(got[3]["status"], "final")
+
+    def test_only_final_chapters_light_the_dot(self):
+        o = self._ov()
+        o._outline_on = False
+        o.summary_update({"kind": "chapter", "chapter": {"id": 0, "status": "interim"}})
+        self.assertFalse(o._outline_new, "临时章**不该**点亮小圆点（每 4 分钟一刷 = 一直亮）")
+        o.summary_update({"kind": "chapter", "chapter": {"id": 1, "status": "final"}})
+        self.assertTrue(o._outline_new)
+
+    def test_open_outline_snapshots_before_updating_seen_t(self):
+        """⚠️⚠️ 计划 §9.4 第 2/3 步的**顺序**：**先**生成快照、**再**更新 `seen_t`。
+
+        ⚠️ 判据**不用真实的"现在"** —— 第一版是拿一句 `23:58:00` 去比，
+           而跑测试的"现在"是清晨，字典序上 `23:58 > 现在` → **顺序反了也照样有分隔线**，
+           于是那条判据**恒真**（我自己的假绿，变异验证抓出来的）。
+        ⭐ 改成**在 `_build_rows` 里当场取 `seen_t`**（同判据 ㉘ 的手法）：
+           它记下的必须是**旧值**。顺序反了就会记成"现在"。
+        """
+        o = self._ov()
+        o._outline_seen_t = "00:00:01"
+        seen_at_build: list = []
+        orig = o._build_rows
+
+        def _spy():
+            seen_at_build.append(o._outline_seen_t)
+            return orig()
+
+        o._build_rows = _spy
+        o._open_outline()
+        try:
+            self.assertEqual(
+                seen_at_build, ["00:00:01"],
+                "生成快照时 `seen_t` 已经不是旧值了 —— 第 2/3 步的顺序反了，"
+                "「上次看到这里」会永远落在最后一行（等于没有）")
+        finally:
+            o._close_outline()
+
+    def test_toggle_outline_is_a_noop_in_raw_mode(self):
+        """⚠️ 纯转录档**根本打不开纲要** —— 与章节条隐藏、菜单项置灰**同一个判据**。"""
+        o = self._ov()
+        o._trans_mode = "raw"
+        o._toggle_outline()
+        self.assertFalse(o._outline_on, "纯转录档不该能打开纲要")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

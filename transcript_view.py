@@ -340,6 +340,38 @@ class TranscriptView:
         self._expected_origin = clip.bounds().origin.y
         self._new_since_leave = False
 
+    def scroll_to_index(self, index: int) -> None:
+        """把**第 `index` 条**滚到**视口顶部**（`items[0]` = 屏幕上最上面那行）。
+
+        给课堂纲要的「上次看到这里」用: 打开纲要要**落在分隔线上**,
+        而不是落在最新一行（那正是 `scroll_to_bottom` 干的事）。
+
+        ⚠️ 三条硬约束 —— 与 `scroll_to_top` / `scroll_to_bottom` **逐字一致**:
+        1. **所有行等高**是这个回收池的不变量（`_layout` 里 `y = level * row_h`）
+           → 位置就是算出来的，不需要问任何一行真实 frame。
+        2. **坐标不翻转**: `origin.y = 0` 是**底部**，`level L` 在 `y = L * row_h`
+           → 「顶」是 y **大**的那边，所以最后要 `clamp` 到 `[0, docH - 视口高]`。
+           ⚠️ 不 clamp 的话，分隔线靠近文档头时 `scrollToPoint_` 会被 AppKit
+           夹回边界、而**我们记的 `_expected_origin` 就成了假的**。
+        3. ⚠️⚠️ **滚完必须回写 `self._expected_origin = clip.bounds().origin.y`** ——
+           不写的话 `tick()` 会把这次**程序滚动**误判成**用户滚动**、顺手把跟随关掉
+           （`scroll_to_top` / `scroll_to_bottom` 都这么做，这是既有契约）。
+        ⚠️ `index` 越界一律 clamp，**不抛** —— 打开纲要时快照可能刚被换过。
+        """
+        clip = self._scroll.contentView()
+        n = len(self._items)
+        index = max(0, min(int(index), max(0, n - 1)))
+        # `_place` 的约定: 第 level 层 = 第 (count - 1 - level) 行 → 反过来。
+        level = max(0, n - 1 - index)
+        vh = clip.bounds().size.height
+        h = self._doc.frame().size.height
+        # 目标: 这一行的**上边缘**贴视口顶。行占 `[L*row_h, (L+1)*row_h]`。
+        y = (level + 1) * self._row_h - vh
+        y = max(0.0, min(y, max(0.0, h - vh)))
+        clip.scrollToPoint_((0.0, y))
+        self._expected_origin = clip.bounds().origin.y
+        self._new_since_leave = False
+
     @property
     def following(self) -> bool:
         return self._follow

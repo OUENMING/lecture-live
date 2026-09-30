@@ -379,6 +379,12 @@ def rollup_lines(text, height, line_h, prev_base_len=None):
 #:    再切一个新字号只会多一个要维护的档位。
 
 
+#: 「上次看到这里」那条分隔线的**唯一文案**。
+#: ⚠️ 两处会用到它：`build_outline_rows` 插它、`_scroll_outline_to_divider` 找它 ——
+#:    写成两个字面量的话，改一处文案滚动就会**静默失灵**（找不到那条 → 退化成滚到顶）。
+OUTLINE_DIVIDER = "— 上次看到这里 —"
+
+
 def fold_rows(text, fits, split) -> list:
     """一段文字 → 折成若干**大字行**。**纯函数**：测量由调用方注入。
 
@@ -528,7 +534,7 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
     if seen_t:
         pos = next((i for i, t in enumerate(at) if t and t > seen_t), None)
         if pos is not None:
-            out.insert(pos, ("— 上次看到这里 —", ""))
+            out.insert(pos, (OUTLINE_DIVIDER, ""))
     return out
 
 
@@ -2015,9 +2021,135 @@ class Overlay:
         self._answer_finished = True          # 下一轮的增量据此判断"该重置了"
         self._mark_dirty(urgent=True)
 
+    # ---------------------------------------------------------------- 课堂纲要
+    def summary_update(self, payload) -> None:
+        """`drain()` 在**主线程**调它 —— 把一条实时总结的 payload 并进 `_outline`。
+
+        ⚠️⚠️ **这里绝不做文字测量**（测量只在 `_render` 里）——
+           `drain()` 的「不阻塞不变量」管着主线程，量一次文字几十微秒 ×N 就看得见。
+        ⚠️ **纲要开着时不重建行**（快照冻结）—— **不在读者眼皮底下挪动文字**。
+           关掉再打开就会刷新。这一条只影响观感，不影响正确性。
+        ⚠️ `payload` 的形状由 `live_summary.LiveSummarizer.emit` 定（计划 §8.2 那张表）。
+           形状不对一律**当没发生**，不抛 —— 它在 `drain()` 里，抛了会打死主循环。
+        """
+        p = payload if isinstance(payload, dict) else {}
+        k = p.get("kind")
+        if k == "chapter":
+            c = p.get("chapter") or {}
+            if not isinstance(c, dict) or c.get("id") is None:
+                return
+            # ⚠️ **按 `id` 覆盖** —— 正式版要能顶掉同 id 的临时版（§6.2 的 `version` 约定）
+            self._outline["chapters"][c["id"]] = c
+            # ⭐ **只认正式章**：临时版每 4 分钟一刷，拿它点亮小圆点 = 一直亮着
+            if c.get("status") == "final" and not self._outline_on:
+                self._outline_new = True
+        elif k == "deadline":
+            self._merge_deadline(p)
+        elif k == "gap":
+            self._outline["gaps"].append(dict(p))
+        elif k == "atoms":
+            self._outline["atoms"].extend(p.get("items") or [])
+        elif k == "window":
+            self._outline["windows"].append(dict(p))
+        self._mark_dirty(urgent=True)
+
+    def _merge_deadline(self, p) -> None:
+        """课务合并：`src` **有交集**就算同一条（计划 §9.2 / §10.1 的同一条规则）。
+
+        ⚠️ `source` **两个都记**（`"regex/model"`）—— 正则那条一两秒就上屏、
+           模型那条晚几十秒，两条**都真实发生过**。合成一条反而说不清是哪来的。
+        ⚠️ `changed` 取**或**：任一条说是改期，就是改期。
+        """
+        src = set(p.get("src") or ())
+        for d in self._outline["deadlines"]:
+            if src and (set(d.get("src") or ()) & src):
+                srcs = [x for x in str(d.get("source", "")).split("/") if x]
+                if p.get("source") and p["source"] not in srcs:
+                    srcs.append(p["source"])
+                d["source"] = "/".join(srcs)
+                d["changed"] = bool(d.get("changed") or p.get("changed"))
+                return
+        self._outline["deadlines"].append(dict(p))
+
+    def _fold_for_outline(self, text) -> list:
+        """纲要的折行 —— 包 `_answer_fits` / `_answer_split_to_fit`。
+
+        ⚠️ 那两个只读 `self._tv.text_width()` 与 `self._answer_font`，
+           **不读写任何可变的 `_answer_*` 状态**（2026-09-30 核实）→ 复用是安全的。
+           **这层包装也照办**：一旦这儿写了 `_answer_*`，纲要和答案就会互相踩。
+        """
+        return fold_rows(text, self._answer_fits, self._answer_split_to_fit)
+
+    def _build_rows(self) -> list:
+        """按**当前宽度**把 `_outline` 渲染成行。⚠️ 换宽度时要**重新调它**（见 `_sync_panel_size`）。"""
+        return build_outline_rows(self._outline, self._outline_seen_t,
+                                  self._trans_mode, self._fold_for_outline)
+
+    def _scroll_outline_to_divider(self) -> None:
+        """滚到「上次看到这里」那条；**没有就滚到顶**（计划 §9.6）。
+
+        ⚠️ 文案取自 `OUTLINE_DIVIDER`（唯一定义点）—— 两处各写一遍的话，
+           改一处文案滚动就会**静默失灵**（找不到 → 悄悄退化成滚到顶）。
+        """
+        for i, (big, _sub) in enumerate(self._outline_snapshot):
+            if big == OUTLINE_DIVIDER:
+                self._tv.scroll_to_index(i)
+                return
+        self._tv.scroll_to_top()
+
+    def _toggle_outline(self) -> None:
+        """纲要的主入口（章节条 / 菜单栏都调它）。
+
+        ⚠️ **纯转录档直接返回** —— 和章节条隐藏、菜单项置灰是**同一个判据**，
+           三处必须一致；否则点了没反应，用户会以为功能坏了。
+        """
+        if self._trans_mode == "raw":
+            return
+        if self._outline_on:
+            self._close_outline()
+        else:
+            self._open_outline()
+
+    def _open_outline(self) -> None:
+        """打开纲要。⚠️ **下面四步的顺序有语义，别调换。**"""
+        # ① 答案接管正在显示 → 先清掉。
+        #    `_clear_answer` 只清**屏上**的答案，`main.py` 里的问答历史不受影响。
+        if self._answer_on:
+            self._clear_answer()
+        # ② **用当前宽度**生成快照
+        self._outline_snapshot = self._build_rows()
+        # ③ ⚠️ **然后**才更新 `seen_t` —— 顺序反了的话，快照会拿**新**值去画分隔线，
+        #    于是「上次看到这里」永远落在最后一行（等于没有）。
+        self._outline_seen_t = time.strftime("%H:%M:%S")
+        # ④ 记下打开**之前**的档位；收起态先展开（纲要要的是一整屏）
+        self._mode_before_outline = self._collapsed
+        if self._collapsed:
+            self._apply_mode(False)
+        self._outline_on = True
+        self._outline_new = False
+        self._mark_dirty(urgent=True)
+
+    def _close_outline(self) -> None:
+        """关掉纲要。⚠️ 还原到**打开之前**那个档位，不是无条件收起。"""
+        self._outline_on = False
+        if self._collapsed != self._mode_before_outline:
+            self._apply_mode(self._mode_before_outline)
+        self._mark_dirty(urgent=True)
+
     def _answer_enter(self):
         """第一份答案内容到达 -> 进入接管(含自动展开)。"""
         if self._answer_on:
+            return
+        # ⚠️ **纲要开着时进来 = 让位，但别动尺寸**（计划 §9.4）：
+        #    纲要已经把我们置成展开态了，所以还原点**直接继承它**
+        #    （`_mode_before_outline`），并**跳过下面那次展开** ——
+        #    `_apply_mode` 会取 NSScreen、重设全部 subview frame、整窗重绘，
+        #    在白跑一次的同时还会把「打开纲要是收起态」那个记忆冲掉。
+        if self._outline_on:
+            self._outline_on = False
+            self._mode_before_answer = self._mode_before_outline
+            self._answer_on = True
+            self._mark_dirty(urgent=True)
             return
         self._answer_on = True
         # 自动展开到既有的"展开态"(屏可见高 60%, 与 ▾ 展开 是同一个状态)。
@@ -2710,6 +2842,21 @@ class Overlay:
                 self._tv.scroll_to_top()
             else:
                 self._tv.set_content(rows, "", "", False)
+        elif self._outline_on:
+            # 课堂纲要接管（计划 §9.5）。⚠️ 插在答案**之后**、字幕**之前** ——
+            # 那正是它的优先级：答案是一次性的深读，纲要是可反复回的骨架。
+            if self._tv_mode != "outline":
+                self._tv_mode = "outline"
+                self._tv.set_rows_verbatim(True)    # 行 = (大字, 小字)，原样解释
+                self._tv.set_scroll_hold(True)      # 读纲要期间不许自动回底
+                self._tv.replace_items(self._outline_snapshot)
+                # ⚠️ 落点是**分隔线**，不是顶也不是底（`scroll_to_index` 里有三条约束）
+                self._scroll_outline_to_divider()
+            else:
+                # ⚠️ 同答案那条：**别每帧 replace_items**。
+                #    纲要没有流式增量，所以这里**什么都不做**就够 ——
+                #    打开时已经填过一次，之后只有关掉再打开才会变（快照冻结）。
+                pass
         elif self._tv_mode != "cap":
             self._tv_mode = "cap"
             self._tv.set_rows_verbatim(False)

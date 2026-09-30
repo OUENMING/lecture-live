@@ -38,6 +38,11 @@
       (按下只记一个时刻, 回退范围课后算)。防的是: 锚点取错(取成按下之后那句) /
       起点越界 / 窗口把两端切开(交回半段语音) / 不足下限或越过上限 /
       开课头十几秒按下时崩掉 / **拿字符串直接比大小**(跨午夜会把 00:05 排到 23:50 前)
+  R17 ⭐⭐ 调用点与包装层的**形参必须对齐**(2026-09-30 全区块故障): 采集面 ⑦ 给调用点
+      和 `Overlay.__init__` 都加了 `note`, **唯独漏了中间那层 `_load_overlay`** ——
+      Python 在**绑定参数时**就抛 TypeError, 包装层自己的 try **还没进去**、接不住
+      → 进程当场死。3.8.0/1/2 上**所有走悬浮窗的入口**全崩(只有 `cl file` 能用)。
+      ⚠️ R6 拦不住它: 它**直接**构造 `Overlay`, 从没走过那层包装。
   R16 实时音源换设备的**半换**防护(2026-09-28): `CallbackSource` 按设备索引绑定,
       而索引会漂(睡一觉/插拔耳机/切默认输入)。第一版 `switch_device` 先关旧流再开
       新流 —— 新设备开不起来就停在半换状态(流没了、索引指向坏设备), 表现成
@@ -1803,6 +1808,62 @@ class TestWrapupPathsAreReachable(unittest.TestCase):
         self.assertIn("self._status = None", head[:try_at],
                       "`_status` 必须在 try **之前**预置 None —— 否则 except 分支"
                       "自己会抛 AttributeError，悬浮窗静默退化成终端（见 docstring）")
+
+
+
+class R17_WrapperSignatureMatchesCallSite(unittest.TestCase):
+    """R17 ⭐⭐ 调用点传的关键字，包装层必须**全都接得住**。
+
+    2026-09-30 的事故：`main.run()` 里给 `_load_overlay(...)` 传了 `note=`，
+    而 `_load_overlay` 自己**没有这个形参** → Python 在**绑定参数那一刻**抛
+    `TypeError`，**函数体都还没进去** → 它自己的 `try/except`（本该回退终端 UI）
+    根本没机会接 → 异常穿过 `run()` → **进程当场死**。
+
+    影响面：3.8.0 / 3.8.1 / 3.8.2 上**所有走悬浮窗的入口**（`cl` 零参数 / `online` /
+    `local` / 双击 `.app` / `cl test`）一开就崩，只有 `cl file`（终端模式）能用。
+
+    ⚠️ **为什么 R6 没拦住**：R6 是**直接** `from overlay import Overlay` 构造的，
+       从没走过这一层包装 —— 而 bug 恰恰在包装的**签名**上。
+    ⚠️ 这条是**结构判据**（AST 取调用点的关键字 + 比对签名），不真起窗口；
+       「真起窗口」那条在下面 `test_real_path_loads_overlay`。
+    """
+
+    def test_call_site_kwargs_fit_wrapper_signature(self):
+        import ast
+        import inspect
+        src = self._main_src()
+        kws = set()
+        for n in ast.walk(ast.parse(src)):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                    and n.func.id == "_load_overlay"):
+                kws |= {k.arg for k in n.keywords if k.arg}
+        self.assertTrue(kws, "一个调用点都没扫到？判据自己坏了")
+        sig = set(inspect.signature(main_mod._load_overlay).parameters)
+        missing = sorted(kws - sig)
+        self.assertEqual(missing, [], (
+            f"调用点传了 {missing}，而 `_load_overlay` 没有这些形参 —— "
+            "**绑定参数时就会抛 TypeError**，包装层的 try 接不住 → 进程直接死"))
+
+    def test_real_path_loads_overlay(self):
+        """⭐ 走**真实那一层**去建悬浮窗（R6 是绕过它直接建 Overlay 的）。"""
+        try:
+            ui = main_mod._load_overlay()
+        except TypeError as e:
+            self.fail(f"`_load_overlay()` 用**默认参数**都调不起来：{e}")
+        try:
+            self.assertTrue(getattr(ui, "drives_appkit", False),
+                            "`_load_overlay()` 回退成了终端 UI —— 真实路径建不起悬浮窗")
+        finally:
+            try:
+                ui.close()
+            except Exception:                                # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _main_src() -> str:
+        import pathlib
+        return (pathlib.Path(__file__).resolve().parent.parent / "main.py").read_text(
+            encoding="utf-8")
 
 
 if __name__ == "__main__":

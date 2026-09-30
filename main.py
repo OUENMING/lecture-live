@@ -2089,12 +2089,25 @@ def check_clock_and_device(src, source_name: str, notify, state: dict) -> None:
 
 
 def _load_overlay(on_quit=None, on_translate=None, on_submit=None,
-                  on_ask=None, on_new_topic=None, on_lost=None, whatsnew=None):
+                  on_ask=None, on_new_topic=None, on_lost=None, whatsnew=None,
+                  note=None):
+    """建悬浮窗。**失败回退终端 UI**（`drives_appkit` 为假 = 回退了）。
+
+    ⚠️⚠️ **这一层的形参必须与调用点**逐字**对齐**（2026-09-30 事故）：
+       采集面 ⑦ 那次给调用点和 `Overlay.__init__` 都加了 `note`，**唯独漏了这一层**
+       —— Python 在**绑定参数时**就抛 `TypeError`，而这个函数自己的 `try` **还没进去**、
+       根本接不住 → 异常穿过 `run()` → **进程当场死**。
+       影响面：3.8.0/1/2 上**所有走悬浮窗的入口**（`cl` 零参数 / online / local /
+       双击 `.app` / `cl test`）全部一开就崩，只有 `cl file`（终端模式）能用。
+       → 判据：`tests/test_audit_regressions.py` 的 R17（AST 取调用点的关键字，
+         逐个比对这一层的签名 —— 加形参时漏了它就会被拦住）。
+    """
     try:
         from overlay import Overlay
         o = Overlay(on_quit=on_quit, on_translate=on_translate,
                     on_submit=on_submit, on_ask=on_ask,
-                    on_new_topic=on_new_topic, on_lost=on_lost, whatsnew=whatsnew)
+                    on_new_topic=on_new_topic, on_lost=on_lost, whatsnew=whatsnew,
+                    note=note)
         o.show()
         return o
     except Exception as e:       # noqa: BLE001

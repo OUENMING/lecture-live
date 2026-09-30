@@ -268,6 +268,48 @@ def main() -> int:
     check("⚠️ 不传 `stats` 时一个键都不该被碰（老调用方零感知）",
           tr.select_terms(_s, _terms, core=_core, always=_always) == _no)
 
+    print("\n--- T9 ⭐ 实时总结 stats：口径要对齐离线探针 ---")
+    import live_summary as L
+
+    # ⚠️ 变异验证：把 `stats()` 里某个键名改掉（比如 `windows` → `window_n`）
+    #    -> 下面第一条红。这一条守的正是「两边能对拍」这个承诺。
+    _probe = {                       # 离线探针 metrics.json 里**能在线对上**的字段
+        "windows", "atom_calls", "chapter_calls", "failed_calls", "chapters",
+        "chapters_interim", "empty_window_ratio", "deadlines_regex",
+        "deadlines_model", "jev_gate_calls", "gaps", "backlog_peak", "retries",
+    }
+    _s0 = L.LiveSummarizer(chat=lambda *a, **k: {"topic": "T", "points": []},
+                           chapters_enabled=True, clock=lambda: 0.0)
+    _d = _s0.stats()
+    _missing = _probe - set(_d)
+    check("⭐⭐ `stats()` 里那 13 个字段名**与探针的 metrics.json 逐字一致**",
+          not _missing, f"缺={sorted(_missing)}")
+    check("⭐ 而且不返回那些**在线口径对不上**的（宁可缺，别给不可比的数）",
+          not ({"window_interval_median_s", "input_tokens_est", "elapsed_s",
+                "board_sentence_ratio"} & set(_d)),
+          str(sorted(set(_d))))
+    check("⭐ 全是计数器/比例，没有非 JSON 类型",
+          all(isinstance(v, (int, float, bool)) for v in _d.values()),
+          str({k: type(v).__name__ for k, v in _d.items()
+               if not isinstance(v, (int, float, bool))}))
+
+    # ⭐ 真的会动：喂句子 + 推时间走完一窗
+    _t = [0.0]
+    _s1 = L.LiveSummarizer(chat=lambda *a, **k: {"topic": "T", "points": []},
+                           chapters_enabled=False, clock=lambda: _t[0])
+    for i in range(3):
+        _s1.feed((i + 1, f"10:0{i}:00", f"sentence {i}", f"句子{i}"))
+        _t[0] += 10.0
+        _s1.step(_t[0])
+    _t[0] += 40.0                           # 超过 ATOM_PAUSE_S=30 → 该提交这一窗了
+    _s1.step(_t[0])
+    _d1 = _s1.stats()
+    check("⭐⭐ 喂 3 句 + 走完一窗 -> `windows`/`atom_calls` 都涨了",
+          _d1["windows"] >= 1 and _d1["atom_calls"] >= 1,
+          f"windows={_d1['windows']} atom_calls={_d1['atom_calls']}")
+    check("⭐ 空窗被记下（假模型回的是空 points）-> `empty_window_ratio` > 0",
+          _d1["empty_window_ratio"] > 0, str(_d1["empty_window_ratio"]))
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

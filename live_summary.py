@@ -227,6 +227,22 @@ class LiveSummarizer:
         self._step_lock = threading.Lock()
         self._closed = False
         self._calls = 0
+        #: ⭐ 只读计数（测试模式的采集面 ⑤）—— **不参与任何判定**。
+        #: ⚠️ 字段名与语义**对齐离线探针的 `metrics.json`**（`docs/experiments/
+        #:    probe_live_summary.py`），这样在线/离线两边能直接对拍。
+        #: ⚠️ 名对不上的那几项（`input_tokens_est` / `elapsed_s` / `board_sentence_ratio`
+        #:    之类）**刻意不硬凑** —— 凑出来口径不同反而是误导。
+        self._atom_calls = 0          # 里面 `_calls` 是**总**调用数（原子+章节）
+        self._chapter_calls = 0
+        self._failed = 0
+        self._empty_windows = 0
+        self._chapters_final = 0
+        self._chapters_interim = 0
+        self._deadlines_regex = 0
+        self._deadlines_model = 0
+        self._retries = 0
+        self._gap_dropped = 0
+        self._backlog_peak = 0
 
         # ---- 窗口 ----
         self._buf: list = []          # 当前窗口的 (gid, t, en, zh)
@@ -261,6 +277,37 @@ class LiveSummarizer:
     def pending(self) -> int:
         """积压深度。探针的 metrics 与判据读它。"""
         return len(self._pend)
+
+    def stats(self) -> dict:
+        """⭐ 只读快照（测试模式采集面 ⑤）。⚠️ **口径对齐离线探针的 `metrics.json`**。
+
+        ⚠️ 在线与离线**必然有一部分对不上**，别把它们当同一件事：
+        - 离线是**一次跑完**再统计；在线是**跑到哪算到哪**（收尾那一刻的快照）。
+        - `window_interval_median_s` / `input_tokens_est` / `elapsed_s` /
+          `board_sentence_ratio` 这类在线**要么拿不到、要么口径不同**
+          → **刻意不放进这里**。宁可缺，也别给一个看着像、其实不可比的数。
+        - ⭐ 能对上的那几项（窗口 / 章 / 空窗比 / Jev / 积压 / 重试 / 课务）
+          **字段名逐字一致** —— 就是为了对拍。
+        """
+        w = max(self._window_n, 1)
+        return {
+            "windows": self._window_n,
+            "atom_calls": self._atom_calls,
+            "chapter_calls": self._chapter_calls,
+            "calls_total": self._calls,
+            "failed_calls": self._failed,
+            "chapters": self._chapters_final,
+            "chapters_interim": self._chapters_interim,
+            "empty_window_ratio": round(self._empty_windows / w, 3),
+            "deadlines_regex": self._deadlines_regex,
+            "deadlines_model": self._deadlines_model,
+            "jev_gate_calls": self._gate_calls,
+            "gaps": self._gap_dropped,
+            "backlog_peak": self._backlog_peak,
+            "retries": self._retries,
+            "atoms": self._atom_n,
+            "chapters_enabled": self._chapters_on,
+        }
 
     def feed(self, item) -> None:
         """**主线程**调。只做 `put_nowait`，**永不抛异常**。
@@ -410,8 +457,11 @@ class LiveSummarizer:
         if not buf:
             return
         self._pend.append(buf)
+        if len(self._pend) > self._backlog_peak:          # ⭐ 采集面 ⑤
+            self._backlog_peak = len(self._pend)
         while len(self._pend) > MAX_PENDING:
             gone = self._pend.pop(0)
+            self._gap_dropped += 1                        # ⭐ 采集面 ⑤
             self._emit_p({"kind": "gap", "t_from": gone[0][1], "t_to": gone[-1][1],
                           "state": "dropped"})
         self._retry_at = 0.0
@@ -443,6 +493,7 @@ class LiveSummarizer:
             if obj is None:
                 # ⚠️ **留在队列里**，`RETRY_S` 后重试 —— 这就是改进 ①。
                 self._retry_at = now + RETRY_S
+                self._retries += 1                            # ⭐ 采集面 ⑤
                 return
             self._pend.pop(0)
             # ⭐ 越旧的窗口，有效时刻越早（最新的那窗差值为 0，原样是 `now`）。
@@ -462,10 +513,12 @@ class LiveSummarizer:
         sents = [it[2] for it in buf]
         try:
             self._calls += 1
+            self._atom_calls += 1                         # ⭐ 采集面 ⑤
             return self._chat(atom.SYS, atom.build_prompt(sents, self._topic_prev()),
                               atom.MAX_TOKENS, atom.TEMPERATURE)
         except Exception as e:                            # noqa: BLE001
             # ⚠️ 提不出来是"少几条要点"，**不是"课跑不下去"**（同 `mark_lost` 的纪律）。
+            self._failed += 1                             # ⭐ 采集面 ⑤
             print(f"⚠ atom 提取失败({str(e)[:50]}); 课堂不受影响")
             return None
 
@@ -499,6 +552,8 @@ class LiveSummarizer:
                 pass
         self._emit_p({"kind": "atoms", "items": [a.as_json() for a in got]})
 
+        if not got:                                       # ⭐ 采集面 ⑤
+            self._empty_windows += 1
         self._window_n += 1
         topic = atom.topic_of(obj)
         topic_zh = atom.topic_zh_of(obj)
@@ -621,13 +676,19 @@ class LiveSummarizer:
             return
         c["ver"] += 1
         obj = None
+        if status == "final":                             # ⭐ 采集面 ⑤
+            self._chapters_final += 1
+        else:
+            self._chapters_interim += 1
         for attempt in (1, 2):
             try:
                 self._calls += 1
+                self._chapter_calls += 1                  # ⭐ 采集面 ⑤
                 obj = self._chat(ch.SYS_CHAPTER,
                                  ch.build_prompt(c["sents"], c["atoms"], self._prior),
                                  ch.MAX_TOKENS, ch.TEMPERATURE)
             except Exception as e:                        # noqa: BLE001
+                self._failed += 1                         # ⭐ 采集面 ⑤
                 print(f"⚠ 章节合成失败({str(e)[:50]}); 第 {attempt} 次")
                 obj = None
             if obj is not None:
@@ -667,6 +728,11 @@ class LiveSummarizer:
         self._emit_deadline(t, str(en or ""), [gid], "regex", hit["changed"])
 
     def _emit_deadline(self, t: str, quote: str, src, source: str, changed: bool) -> None:
+        # ⭐ 采集面 ⑤ —— 按来源分（正则/模型），比在两个调用点各加一处不容易漏。
+        if source == "regex":
+            self._deadlines_regex += 1
+        else:
+            self._deadlines_model += 1
         rec = {"type": ch.DEADLINE, "t": t, "quote": quote,
                "src": sorted(set(src or ())), "source": source, "changed": bool(changed)}
         self._write(rec)

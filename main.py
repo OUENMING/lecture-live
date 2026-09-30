@@ -1898,6 +1898,10 @@ def run(args) -> None:
                     for _k, _v in (getattr(_t, "term_stats", None) or {}).items():
                         _tm[_k] = _tm.get(_k, 0) + _v
                 tester.note_block("terms", _tm)
+                # ⭐ 采集面 ⑤：实时总结的只读快照。⚠️ 口径对齐离线探针的
+                #    `metrics.json`（能对上的字段名逐字一致）；对不上的那几项
+                #    它**刻意不返回**，别在这里补 —— 见 `LiveSummarizer.stats()`。
+                tester.note_block("live", summ.stats())
                 _rep = tester.finish(vad_report=locals().get("_diag", ""),
                                      note_path=str(getattr(writer, "note_path", "") or ""),
                                      # ⚠️ `--no-bundle` 原来只声明、没人读（2026-09-28

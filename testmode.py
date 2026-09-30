@@ -222,6 +222,8 @@ class TestSession:
         self.segments: list[dict] = []
         self.events: list[dict] = []
         self._extra: dict = {}          # `note_block` 收下的整块快照（见 `BLOCKS`）
+        self._corr = {"pairs": 0, "changed": 0, "identical": 0, "no_fix": 0,
+                      "words_raw": 0, "words_fixed": 0}
         self._seg_no = 0
         self._cpu0 = self._cpu()
         self._rss_peak = 0
@@ -293,6 +295,33 @@ class TestSession:
     def note_event(self, kind: str, detail: str = "") -> None:
         self.events.append({"t": round(time.monotonic() - self.t0, 2),
                             "kind": kind, "detail": detail[:200]})
+
+    @_safe
+    def note_correction(self, fixed: str, raw: str) -> None:
+        """一句的**两级矫正对**：`fixed` = LLM 矫正后的英文，`raw` = 原始 ASR。
+
+        ⭐ 这是「**矫正到底改了什么**」唯一的量化口径 —— 在那之前这一格完全瞎。
+        ⚠️ 调用点是 `main.drain()` 的 `"final"` 分支（那里才有这一对），
+           **不是** `note_segment`（那边的草稿走另一条 `draftq` 管线，
+           而且是逐句翻译过的，凑不出这一对）。
+        ⚠️⚠️ `fixed` 为空 = **矫正失败/没做**（翻译挂了那条路会把 en 置空），
+           **不是"被改没了"** —— 要单独计 `no_fix`，别混进 `changed`。
+           `obsidian_writer.append` 的 docstring 点名了这个风险：
+           「LLM **偶尔会过度修正**（把正确的词改错）」。
+        ⚠️ **只累计计数，不存文本** —— 文本已经在 `segments[].text` 里了，别存两份。
+        """
+        c = self._corr
+        c["pairs"] += 1
+        if not fixed:
+            c["no_fix"] += 1
+            return
+        wf, wr = len(fixed.split()), len(raw.split())
+        c["words_fixed"] += wf
+        c["words_raw"] += wr
+        if fixed.strip() == (raw or "").strip():
+            c["identical"] += 1
+        else:
+            c["changed"] += 1
 
     @_safe
     def note_block(self, name: str, data) -> None:
@@ -377,6 +406,15 @@ class TestSession:
                 "logprob_mean": round(float(np.mean([s["logprob"] for s in segs
                                                      if s["logprob"] is not None])), 3)
                 if any(s["logprob"] is not None for s in segs) else None,
+            },
+            "correction": {
+                # ⭐ 「两级矫正到底改了什么」—— 在那之前这一格完全瞎。
+                **self._corr,
+                "changed_pct": round(
+                    self._corr["changed"]
+                    / max(self._corr["pairs"] - self._corr["no_fix"], 1) * 100, 1),
+                # ⚠️ 分母是「**真的比过了**的对数」（扣掉 `no_fix`）——
+                #    矫正失败那些根本没得比，算进分母会把"改了多少"稀释掉。
             },
             "notes": [
                 "logprob 只有 **Parakeet** 会填 —— Whisper 的 result.ys_log_probs 是空的。"

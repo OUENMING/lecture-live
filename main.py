@@ -1620,6 +1620,12 @@ def run(args) -> None:
             elif item[0] == "final":                # ("final", en, zh, asr_raw)
                 ui.finalize(item[1] or item[3], item[2])   # 翻译失败时至少显示转录
                 writer.append(item[1], item[2], raw=item[3])
+                # ⭐ 采集面 ③：`item[1]` 是**矫正后**的英文、`item[3]` 是**原始 ASR**
+                #    —— 只有**这里**同时拿得到这一对（`note_segment` 那边没有）。
+                #    ⚠️ `note_correction` 自己是 `_safe` 包的，**不可能抛**，
+                #       所以放在 `drain()` 里是安全的（这里没有 try/except）。
+                if tester is not None:
+                    tester.note_correction(item[1], item[3])
                 # 🆕 实时总结：把这一句转给 worker。⚠️ **非阻塞** ——
                 #    `drain()` 在主循环里，这里是「不阻塞不变量」管着的地方。
                 #    ⚠️ 档位判在**这里**，不是启动时 —— 三档课中可切（见 worker 那段）。

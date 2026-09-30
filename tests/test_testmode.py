@@ -146,6 +146,8 @@ def main() -> int:
             self.segments = []
             self.events = []
             self._extra = {}
+            self._corr = {"pairs": 0, "changed": 0, "identical": 0, "no_fix": 0,
+                          "words_raw": 0, "words_fixed": 0}
             self._seg_no = 0
 
     t = _T()
@@ -164,6 +166,38 @@ def main() -> int:
     check("⭐ `BLOCKS` 覆盖计划里那七格对应的五块",
           {"norm", "vad", "live", "terms", "ui"} <= set(tm.BLOCKS),
           str(sorted(tm.BLOCKS)))
+
+    print("\n--- T6 ⭐⭐ 两级矫正对：`note_correction(fixed, raw)` ---")
+    # ⚠️ 变异验证：把 `if not fixed: no_fix += 1; return` 那两行删掉
+    #    -> 「矫正失败不算 changed」那条红（空 en 会被当成"被改没了"）。
+    # ⚠️ 每条用**各自的新实例** —— `_corr` 是**累积**的，共用一个实例会把
+    #    前面那几条的数一起算进来（第一版就是这么假红的）。
+    t_ident = _T()
+    t_ident.note_correction("the same words", "the same words")
+    check("⭐ 一模一样的一对 -> `identical`，不是 `changed`",
+          t_ident._corr["identical"] == 1 and t_ident._corr["changed"] == 0,
+          str(t_ident._corr))
+
+    t_chg = _T()
+    t_chg.note_correction("fixed version here", "raw version here")   # 各 3 词
+    check("⭐ 不一样 -> `changed` +1，且两个词数都记了",
+          t_chg._corr["changed"] == 1 and t_chg._corr["words_fixed"] == 3
+          and t_chg._corr["words_raw"] == 3,
+          f"changed={t_chg._corr['changed']} wf={t_chg._corr['words_fixed']} "
+          f"wr={t_chg._corr['words_raw']}")
+
+    t_nofix = _T()
+    t_nofix.note_correction("", "some raw text")
+    check("⭐⭐ `fixed` 为空 = **矫正失败/没做**，要单记 `no_fix`，**不许算 changed**",
+          t_nofix._corr["no_fix"] == 1 and t_nofix._corr["changed"] == 0
+          and t_nofix._corr["words_fixed"] == 0,
+          str(t_nofix._corr))
+
+    t_sum = _T()
+    for a, b in (("a b", "a b"), ("c d", "x y"), ("", "z")):
+        t_sum.note_correction(a, b)
+    check("⭐ `pairs` 数的是**全部**收下的对（含 no_fix 那类）",
+          t_sum._corr["pairs"] == 3, str(t_sum._corr["pairs"]))
 
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)

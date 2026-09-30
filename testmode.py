@@ -281,6 +281,21 @@ class TestSession:
         self._cpu0 = self._cpu()
         self._rss_peak = 0
 
+    def upload_files(self) -> list:
+        """这节课该传哪些文件（阶段 3 的上传用）。⚠️ 只列**真的存在**的。
+
+        ⚠️ 顺序无关（上传那边按文件名定 key）。⚠️ 不含 `env.json` ——
+           那东西在 zip 包里，而上传走的是散文件；环境快照对**这一节课**的意义
+           小于它把报告搞复杂。
+        """
+        if self.stem is None:
+            return []
+        cand = [pathlib.Path(str(self.stem) + ".report.json")]
+        cand += [pathlib.Path(p) for p in (self.audio_files or [])]
+        if self.session_path:
+            cand.append(pathlib.Path(self.session_path))
+        return [p for p in cand if p.is_file()]
+
     def _to_opus(self) -> list:
         """把 wav 分段转成 Opus，**转成功一个删一个**。返回 opus 路径表。
 

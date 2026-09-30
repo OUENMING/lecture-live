@@ -40,6 +40,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 术语表、课号、术语查表与注入 | `build_notes.py`、`glossary/`（样例 `glossary.example.txt`） |
 | 笔记落盘、`sessions/` 文件格式、Obsidian 双层笔记、**❓「没听懂」的旁路文件 + 课后反查**（`sessions/<同名>.lost.jsonl`，**绝不改会话抬头**） | `obsidian_writer.py` |
 | **实时总结（原子 + 章节纲要）** —— 窗口规则 / 重试与积压 / 章节状态机 / 课务 / 草稿与调试入口。⚠️ `main.py` 那边**只接线**，逻辑全在这里 | `live_summary.py`（**动手前先读文件头**） |
+| **测试模式的上传**（队列/退避/幂等/脱敏）—— 课后把一节课的文件传去 VPS。⚠️ `send` 是唯一的传输洞；判据用**本地目录**，不碰真服务器 | `upload.py`（**动手前先读文件头**） |
 | **章节层** —— `.chapters.jsonl` 的三种记录、写入器、`parse_reply` 的机械闸门、课务正则、`chapter_path_for` | `chapter.py` |
 | 整课二级精修（polish） | `polish.py` |
 | 悬浮窗、字幕显示、滚动、槽位池化 | `overlay.py`、`transcript_view.py` |

@@ -217,6 +217,25 @@ def vault_config(*, root=None) -> pathlib.Path:
     return _root(root) / "vault"
 
 
+def upload_queue(*, root=None) -> pathlib.Path:
+    """待上传队列（测试模式的课后上传）—— `~/.classlive/upload-queue.json`。
+
+    ⚠️ **必须落盘**，不能只在内存：上传失败要留到**下次启动**再试，
+       而那时已经是另一个进程了（`upload.UploadQueue` 的 docstring 有形状）。
+    """
+    return _root(root) / "upload-queue.json"
+
+
+def upload_ledger(*, root=None) -> pathlib.Path:
+    """上传台账 —— `~/.classlive/upload-ledger.json`，`会话名 -> 对象前缀`。
+
+    ⚠️ **不是可选项**：远端的对象名是**会话名的哈希**（刻意的 —— 原文件名含
+       课号 + 精确时间戳，等于一份课表），而哈希**不可逆** →
+       没有台账就**删不掉某一节课**（作者定的是手动清，见 `PLAN-test-mode.md` D8）。
+    """
+    return _root(root) / "upload-ledger.json"
+
+
 def timetable(*, root=None) -> pathlib.Path:
     """导入过的那份课表（`{课号: [时段…]}`）—— **解析结果，不是原始 `.ics`**。
 

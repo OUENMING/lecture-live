@@ -38,6 +38,12 @@ SLEEP_GAP_S = 10.0          # 墙钟一次跳这么多 = 系统睡过一觉(见 
 #: 比它更长的一律放弃 —— 放弃之后 `ChapterWriter` 已关，迟到的写入是 no-op。
 SUMMARY_FINISH_S = 25
 
+#: 上传落点（作者 2026-09-30 定）：rsync 到那台 VPS 的 `~/classlive-test/`。
+#: ⚠️ 想换个地方改这两个；**想整个关掉**用 `CLASSLIVE_UPLOAD=0`
+#:    （判据与离线回放必须用它 —— 不然每跑一次测试就真往服务器传一份）。
+UPLOAD_HOST = "bldcam"
+UPLOAD_REMOTE = "classlive-test"
+
 # 以这些词收尾(且无句末标点)→ 句子没说完, 不能单独送 LLM 翻译
 DANGLING_TAILS = {
     "that", "which", "who", "whom", "whose", "where", "when", "because",
@@ -238,6 +244,29 @@ def _ask_save_notes(n: int) -> bool:
         echo(f"\n(没等到回应（{ASK_TIMEOUT_S:.0f} 秒）/ 非交互环境 → 默认存入 Obsidian)")
         return True
     return ans.lower() in ("", "y", "yes", "是", "好", "存")
+
+
+def start_upload(tester) -> dict:
+    """把这一节排进上传队列，并**在后台线程里试一次**。返回 `{queued, pending}`。
+
+    ⚠️⚠️ **绝不能阻塞收尾** —— 它跑在收尾那条路上，而那里本来就在等精修。
+       → 排队只写一个小 JSON（落盘，快），真正的传输丢给后台线程。
+    ⚠️ **上传失败不影响任何东西** —— 报告、包、音频都已经在盘上了。
+       失败的条目留着，`next_at` 到点后由下一次启动再试（退避 1→120 min，14 天过期）。
+    """
+    import upload as _up
+    if os.environ.get("CLASSLIVE_UPLOAD", "1") != "1":
+        return {"queued": 0, "pending": 0, "off": True}
+    files = tester.upload_files()
+    if not files:
+        return {"queued": 0, "pending": 0}
+    q = _up.UploadQueue(_up.make_rsync_send(UPLOAD_HOST, UPLOAD_REMOTE))
+    n = q.enqueue(files, tester.stem.name)
+    pending = q.pending
+    if n:
+        threading.Thread(target=q.pump, kwargs={"max_items": 1}, daemon=True,
+                         name="cl-upload").start()
+    return {"queued": n, "pending": pending}
 
 
 def summary_log_line(payload) -> str | None:
@@ -1918,6 +1947,16 @@ def run(args) -> None:
                                      bundle=not args.no_bundle)
                 if _rep:
                     echo(f"\n🧪 测试报告: {_rep}")
+                    # ⭐ 阶段 3：排进上传队列 + 后台试一次（**不阻塞收尾**）。
+                    try:
+                        _u = start_upload(tester)
+                        if _u.get("off"):
+                            echo("   📤 上传已关（CLASSLIVE_UPLOAD=0）")
+                        elif _u.get("queued"):
+                            echo(f"   📤 已排队 {_u['queued']} 个文件"
+                                 f"（待传 {_u['pending']} 节，后台上传中）")
+                    except Exception as _e:               # noqa: BLE001
+                        echo(f"   ⚠ 上传排队失败（{type(_e).__name__}）—— 不影响其余")
                 if tester.bundle_path:
                     _sz = os.path.getsize(tester.bundle_path)
                     _mb = f"{_sz / 1e6:.1f} MB" if _sz > 1e6 else f"{_sz / 1024:.0f} KB"

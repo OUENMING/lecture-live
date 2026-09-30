@@ -1146,6 +1146,16 @@ class Overlay:
         emoji 是**彩色**的 → 系统改不了它的颜色 → **深色菜单栏上不适配、被选中时也不变**。
         模板图（黑 + 透明）才会跟随菜单栏明暗与选中态。
         """
+        # ⚠️⚠️ **必须先把 `_status` 置成 `None` 再进 try**（2026-09-30 OCR 审查发现）。
+        #    它在 try **内部**才被赋值（1152），而 except 分支要读它（`_status is not None`
+        #    那行）—— 上面那个 `import` 或 `statusItemWithLength_` 一抛，
+        #    `_status` **从未被赋值** → **handler 自己抛 AttributeError** →
+        #    `_install_status_item` 抛出 → `Overlay.__init__` 失败 →
+        #    `main._load_overlay` **静默回退 TerminalUI**：悬浮窗整个消失，
+        #    屏上只剩终端，而理由要翻日志才看得见 —— 与"软失败"的意图正好相反。
+        #    ⚠️ 同文件**别处都用了防御式取**（`close()` 的 `getattr(self, "_status", None)`、
+        #       `_toggle_through` 同款）—— 约定就是这么写的，只有这一处漏了。
+        self._status = None
         try:
             from AppKit import (NSStatusBar, NSVariableStatusItemLength,
                                 NSMenu, NSMenuItem, NSImage)
@@ -2874,22 +2884,24 @@ class Overlay:
            会偷走后续输入」（在第 2 个提示按的回车被第 1 个的孤儿 reader 吃掉）。
            而且 AppKit 本来就只能在主线程碰。
 
-        返回 `True`=存 / `False`=不存 / ⚠️ `None`=**问话期间**用户把窗口关了（放弃这份笔记）。
-        ⚠️ 超时按 `True` 走 —— 与终端那条同一个纪律：「绝不能因为一次走开丢掉整节课」。
+        返回 `True`=存 / `False`=不存（**只有这两种**）。
 
-        ⚠️⚠️ **「进来时窗口已经关过」不算放弃**（`already_closed` 那两行）。
-           ✕ 是 overlay 模式的**正常停止方式**（`README.md:310`），而 main 那条路由
-           **在没有终端时会照样把问话送到这里**（见 `main._wrapup_route`）。
-           `_closed` 一个标志扛了两件事 ——「课已经停了」和「用户正看着卡说不存」——
-           而它一进这里就是 `True`：整段问话被跳过、直接返回 `None` → `give_up`
-           → **这节课一个字笔记都不写**。（2026-09-29 实测，双击 + ✕ 那条路。）
+        ⚠️ **超时 = 存**（60 秒）；**问话期间关窗也 = 存**（2026-09-30 改）。
+           两条与终端那条同一个纪律：「绝不能因为一次走开或误点丢掉整节课」。
+           **要放弃必须显式点「不存」。**
+
+        ⚠️⚠️ **为什么把「关窗」从「放弃」改成「存」**（2026-09-30，真事故）：
+           朋友的机器上就这么丢了一节课的笔记 —— 课上完点 ✕ 停止，窗口**没撤**
+           （`a96024f` 起窗口全程留着，它是唯一的退出口），旁边冒出一张卡问「存不存」，
+           他**又点了一次 ✕** 想把窗口关掉 → 落进「放弃」那条 → 一个字笔记都没写。
+           ⚠️ 卡上那句「关窗 = 放弃这份笔记」**没人会读**，而代价是整节课。
+           那两次 ✕ 都**不是**"我要丢掉笔记"的意图 —— 所以现在只有**显式点「不存」**
+           才算放弃。
+
+        ⚠️ 顺带：`_closed` 一个标志扛两件事（「课已经停了」/「用户正看着卡说不存」）——
+           **2026-09-29 那次只修了一半**（「进来时窗口已经关过」不算放弃），
+           剩下那半（问话期间关窗）拖到 2026-09-30 才按上面那条改掉。
         """
-        already_closed = bool(self._closed)
-
-        def _abandoned() -> bool:
-            """用户是**在这次问话期间**关的窗吗（只有这才算放弃）。"""
-            return self._closed and not already_closed
-
         try:
             import wrapup as wrapup_mod
         except Exception:                                 # noqa: BLE001
@@ -2909,31 +2921,22 @@ class Overlay:
             pass
 
         deadline = time.monotonic() + timeout
-        while ans["v"] is None and not _abandoned():
+        # ⚠️ 窗口被关掉也**立刻**收工（不再为剩下那几十秒空转）—— 关窗现在按「存」走，
+        #    没有任何理由等下去。
+        while ans["v"] is None and not self._closed:
             left = deadline - time.monotonic()
             if left <= 0:
                 break
-            # ⚠️ 窗口**已经**关着时不许再说「关窗 = 放弃这份笔记」—— 那句此刻是假的
-            #    （没窗可关），而它是用户判断这张卡的唯一依据。
-            card["set_hint"](f"{left:.0f} 秒后自动存入"
-                            + ("" if already_closed else " · 关窗 = 放弃这份笔记"))
+            card["set_hint"](f"{left:.0f} 秒后自动存入")
             self.pump()
             time.sleep(0.05)
 
-        if _abandoned():
-            # ⚠️ 要**真的把卡片收掉**，不能只清引用 —— `wrapup.build()` 已经
-            #    `orderFrontRegardless` 了，屏上那张卡会一直留着；而引用一清，
-            #    main 最后调的那个 `ui.wrapup_close()` 就变成**空转**（它读的正是
-            #    这个引用），卡片只能等进程退出才被销毁。
-            #    （2026-09-28 OCR 审计发现。）
-            self.wrapup_close()
-            return None
         if ans["v"] is None:
-            # 超时 → 默认存（与终端那条同一个纪律）。⚠️ 但必须**和"点了存入"走同一段
-            # 状态切换**：原来这里直接 `return True`，于是整个精修期间卡上一直留着
-            # 「存入 / 不存」两个按钮（回调只写 `ans`，此后没人再读）和最后那句
-            # 「0 秒后自动存入…」—— 用户点「不存」会以为反悔生效了。
-            # （2026-09-28 OCR 审计发现。）
+            # 超时 **或** 窗口被关掉 —— 两条都按「默认存」走（同一条纪律）。
+            # ⚠️ 必须**和"点了存入"走同一段状态切换**：原来这里直接 `return True`，
+            #    于是整个精修期间卡上一直留着「存入 / 不存」两个按钮（回调只写 `ans`，
+            #    此后没人再读）和最后那句「0 秒后自动存入…」——
+            #    用户点「不存」会以为反悔生效了。（2026-09-28 OCR 审计发现。）
             ans["v"] = True
         if ans["v"]:
             # 继续用它显示进度：切成「干活中」，不换卡（换卡会闪一下）。

@@ -1746,5 +1746,64 @@ class R20_StreamCloseOnFailure(unittest.TestCase):
         self._cls()._close_stream(None)
 
 
+
+class TestWrapupPathsAreReachable(unittest.TestCase):
+    """R16 ⭐⭐ 两条**必须可达**的路（2026-09-30 全量 OCR 审查发现，都已修）。
+
+    ⚠️ 这两条是**静态**判据（读源码文本）—— 真正跑它们要一整条收尾流程
+       （网络 / 模型 / UI），本文件买不起（它的定位是毫秒级闸门）。
+       所以这里钉的是「**别把那两行改回去**」，而不是复现那个场景。
+       两条的现场与后果都写在各自的 `assert` 消息里。
+    """
+
+    @staticmethod
+    def _src(name: str) -> str:
+        import pathlib                     # ⚠️ 本文件顶层没 import 它（其余用例用不上）
+        return (pathlib.Path(__file__).resolve().parent.parent / name).read_text(
+            encoding="utf-8")
+
+    def test_wrapup_failure_path_is_reachable(self):
+        """`main.py` 收尾块里不许再出现 `raise _box["err"]`。
+
+        它曾经把后面**整段**跳掉：测试报告 + 音频上传（`tester.finish()`）、
+        `wrapup_close()`、退出时自动更新**一条都不跑**；而且 `_ok = "err" not in _box`
+        在它**之后** → **永远算不到 `False`** → 「失败留住」那条分支与
+        `wrapup_done(False, …)` 变成**死代码**（一个"失败要留住给用户看"的设计
+        被它自己废掉）。修法是改成 echo 一行、把错误留在 `_box` 里继续走。
+        """
+        import ast
+        src = self._src("main.py")
+        # ⚠️ **必须走 AST，不能整文件搜字符串**：本文件那条注释里就引着
+        #    `raise _box["err"]` 这句话 —— 子串搜索会被**注释**绊倒（第一版就这样，
+        #    红在一条根本没问题的代码上）。判据要指向**真的语句**。
+        bad = [n.lineno for n in ast.walk(ast.parse(src))
+               if isinstance(n, ast.Raise)
+               and isinstance(n.exc, ast.Subscript)
+               and isinstance(n.exc.value, ast.Name)
+               and n.exc.value.id == "_box"]
+        self.assertEqual(bad, [],
+                         f"main.py 第 {bad} 行还有 `raise _box[...]` —— 它会把收尾后半段"
+                         "（报告/上传/关窗/自动更新）整段跳过，并让「失败留住」不可达")
+        self.assertIn('_ok = "err" not in _box', src,
+                      "失败判据本身不见了？收尾的失败分支靠它")
+
+    def test_status_item_preassigned(self):
+        """`overlay._install_status_item` 必须在 `try:` **之前**先把 `_status` 置 None。
+
+        `_status` 只在 try **内部**被赋值，而 except 分支要读它 ——
+        import 或 `statusItemWithLength_` 一抛，`_status` **从未被赋值** →
+        **handler 自己抛 `AttributeError`** → `Overlay.__init__` 失败 →
+        `_load_overlay` **静默回退 TerminalUI**：悬浮窗整个消失，屏上只剩终端。
+        （同文件别处都用 `getattr(self, "_status", None)` —— 只有这一处漏了。）
+        """
+        src = self._src("overlay.py")
+        i = src.index("def _install_status_item")
+        head = src[i:i + 4000]
+        try_at = head.index("        try:")
+        self.assertIn("self._status = None", head[:try_at],
+                      "`_status` 必须在 try **之前**预置 None —— 否则 except 分支"
+                      "自己会抛 AttributeError，悬浮窗静默退化成终端（见 docstring）")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

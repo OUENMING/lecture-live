@@ -353,8 +353,16 @@ def t_ask_save_after_close():
         "（None = give_up = 整节课没笔记）")
 
 
-@case("⭐ 问话**期间**关窗 → ask_save 返回 None（真的放弃），且卡被收掉")
+@case("⭐⭐ 问话**期间**关窗 → ask_save 也返回 True（按存走），卡留着继续显示进度")
 def t_ask_save_closed_during_question():
+    """⭐ 2026-09-30 **改了契约**（原来这条断的是 `None` = 放弃）。
+
+    **改之前那条真的让一个朋友丢了一节课的笔记**：课上完点 ✕ 停止 → 窗口没撤
+    （`a96024f` 起窗口全程留着，它是唯一的退出口）→ 旁边冒出一张卡问「存不存」
+    → 他**又点了一次 ✕** 想把窗口关掉 → 落进「放弃」→ 一个字笔记都没写。
+    ⚠️ 卡上那句「关窗 = 放弃这份笔记」没人会读，而代价是整节课。
+    → 现在**只有显式点「不存」**才算放弃（那条另有人在管：`main.py` 的 `give_up`）。
+    """
     import overlay as ov
 
     class _Fake:
@@ -372,10 +380,10 @@ def t_ask_save_closed_during_question():
 
     f = _Fake()
     got = ov.Overlay.ask_save(f, 3, timeout=5.0)
-    assert got is None, f"问话期间关窗 = 放弃，拿到 {got!r}"
-    assert f.card_closed is True, (
-        "卡必须**真的**收掉 —— `wrapup.build()` 已经 orderFrontRegardless 了，"
-        "只清引用的话那张卡会一直留在屏上")
+    assert got is True, f"关窗现在按「存」走（不能是 None/False），拿到 {got!r}"
+    assert f.card_closed is False, (
+        "卡**不能**被收掉 —— 关窗不等于放弃，它接着显示收尾进度")
+    assert not hasattr(f, "card_closed") or f.card_closed is False
 
 
 @case("窗口还开着 → 走 UI（在卡上问）")

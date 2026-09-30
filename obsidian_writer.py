@@ -1207,7 +1207,17 @@ class ObsidianWriter:
                 except Exception:                         # noqa: BLE001
                     pass
 
-        entries = self._parse(self.session_path.read_text(encoding="utf-8"))
+        # ⚠️⚠️ **`errors="replace"` 不能省**（2026-09-30 OCR 审查发现）。
+        #    写到一半被杀（崩溃 / 强杀）时，末行的**多字节汉字可能只剩半个** ——
+        #    严格 utf-8 解码会抛 `UnicodeDecodeError: unexpected end of data`，
+        #    于是**整份笔记写不出来**；而 `rebuild_note.py`（补笔记那条路）
+        #    走的正是这个 `close()` → **连补救路一起断**。
+        #    ⚠️ 同仓 8 处早就都带容错（`find.py` / `atom.py` / `chapter.py` /
+        #       `entry_panel.py` / `corpus.py` / `keypoints.py` 全是 `errors=`），
+        #       **只有这条主路径漏了**。用 `replace` 而不是 `ignore`：
+        #       坏掉的那一个字节会留下 `�` 让人看见，而不是静默少一个字。
+        entries = self._parse(self.session_path.read_text(encoding="utf-8",
+                                                          errors="replace"))
         # 落笔前二次精修: 直播矫正太保守(实测 65% 未改), 这里用领域 + 全课术语 + 前后文重做一遍。
         polish_state = "off"
         if self._key and self._polish and entries:

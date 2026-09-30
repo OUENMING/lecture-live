@@ -280,7 +280,7 @@ def facts(glossary_txt, course, *, sessions_dir=None, state_root=None) -> dict:
 
 
 #: 日志最多留这么多条。⚠️ 它会**一直长**（一学期几百条），而用途只是
-#: 「看看准了多少 / 攒 few-shot 例子」—— 旧的几十条价值一样，所以砍尾不砍头。
+#: 「看看准了多少 / 攒 few-shot 例子」—— ⚠️ 保留的是**最新**的 N 条（代码里是 `[-N:]`）—— 行按时间**追加**，所以砍的是**头**；度量日志与 few-shot 都要新鲜的。（2026-09-30 审查：原注释写反了）
 MAX_CORRECTIONS = 500
 
 

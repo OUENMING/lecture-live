@@ -76,13 +76,18 @@ QWEN_SRC = "mlx-community/Qwen3-1.7B-4bit"
 # 模型都放在这儿。⚠️ 与 `paths.py` 那族不一样：那是**用户数据**（课件、档案），
 # 这是**模型权重**（可重下、不进 git、也不算用户资产）。所以没有搬进 `~/.classlive/`。
 MODELS_ROOT = "~/models"
+#: `MODELS_ROOT` 的 **shell 形态**（`~/models` → `$HOME/models`）—— 给下面那些
+#: `cmd` 用。⚠️ 2026-09-30 全量 OCR 审查发现 `PARAKEET.cmd` 里**手写了第二份
+#: 路径**：改了 `MODELS_ROOT` 而没改它的话，引导式更新会下到旧路径、doctor 报
+#: 「缺模型」—— 而 `MODELS_ROOT` 存在的全部意义就是防这个。
+MODELS_ROOT_SH = "$HOME" + MODELS_ROOT[1:]
 
 PARAKEET = Model(
     "parakeet", f"{MODELS_ROOT}/parakeet-tdt-0.6b-v3-int8",
     "Parakeet ASR 模型(必需)", True,
     f'{sys.executable} -c "from huggingface_hub import snapshot_download; '
     f"snapshot_download('{PARAKEET_SRC}', "
-    f"local_dir='$HOME/models/parakeet-tdt-0.6b-v3-int8')\"",
+    f"local_dir='{MODELS_ROOT_SH}/parakeet-tdt-0.6b-v3-int8')\"",
     640.0, src=PARAKEET_SRC)
 
 VAD = Model(

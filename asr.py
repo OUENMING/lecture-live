@@ -73,7 +73,11 @@ class ParakeetASR:
             # 顺手留下置信度供测试模式采集 —— 不改接口(仍返回 str), 只多一个属性。
             # 实测真实课堂平均 logprob ≈ −0.4、干净 TTS ≈ −0.013(差 30 倍),
             # 拿它当"这句可能没听准"的信号是可行的。
-            self.last_logprob = float(np.mean(r.ys_log_probs)) if len(r.ys_log_probs) else None
+            # ⚠️ 走 `getattr` 与下面 Whisper 那份**对称**（2026-09-30 全量 OCR 审查发现）：
+            #    sherpa 哪天不暴露这个属性，这里抛 AttributeError → 被 `final_worker` 的
+            #    `except Exception` 吞成「⚠ 定稿失败」→ **整节课定稿全空**，而 Whisper 侧不会。
+            _lp = getattr(r, "ys_log_probs", None)
+            self.last_logprob = float(np.mean(_lp)) if _lp is not None and len(_lp) else None
             return r.text.strip()
 
 

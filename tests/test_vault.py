@@ -180,6 +180,46 @@ def t_note_lands_in_vault():
         assert p.name.startswith("2026-09-29_ECON10740"), p
 
 
+@case("⭐⭐ 会话文件尾巴被截断（半个汉字）→ 笔记照样写得出来")
+def t_torn_session_tail():
+    """⭐ 2026-09-30 全量 OCR 审查发现 → 已修（`close()` 那处读加 `errors="replace"`）。
+
+    ⚠️ 触发条件是真的：写到一半崩溃/强杀时，末行的**多字节汉字可能只剩半个**。
+       改之前这里严格 utf-8 解码 → `UnicodeDecodeError` → **整份笔记写不出来**，
+       而 `rebuild_note.py`（补笔记那条路）走的正是同一个 `close()`
+       → **连补救路一起断**。
+
+    ⚠️⚠️ **第一版这条是假绿**（记一笔）：夹具只断言「`close()` 不抛」，而
+       **没给库**（`vault=None`）时 `close()` 会**提前返回**「没设 Obsidian 库，
+       这次不生成笔记」—— 根本没走到那行读。变异验证（删掉 `errors=`）没变红
+       才发现。→ 现在给一个**真库**，断言**笔记文件真的落了盘**。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        old = ow.SESSIONS
+        ow.SESSIONS = pathlib.Path(d) / "sessions"
+        try:
+            w = ow.ObsidianWriter(d, "TESTX", mode="ask")      # ⚠️ 给了库才会真建笔记
+            w.append("Hello there.", "你好。", raw="Hello there.")
+            with open(w.session_path, "ab") as f:
+                f.write(b"\n> **ZH**: \xe4\xb8")    # 「中」的半个字节
+            # 先自证夹具真的坏了 —— 否则这条测的是别的
+            with open(w.session_path, "rb") as f:
+                raw = f.read()
+            try:
+                raw.decode("utf-8")
+                raise AssertionError("夹具没截断 —— 这条判据没测到东西")
+            except UnicodeDecodeError:
+                pass
+            w.close(ask=lambda n: True)
+            notes = list((pathlib.Path(d) / "Lectures").glob("*.md"))
+            assert notes, (
+                "尾巴被截断就把**整份笔记**带下水了（这正是那条缺陷："
+                "`close()` 里那次读会抛 UnicodeDecodeError，"
+                "连 `rebuild_note.py` 一起断）")
+        finally:
+            ow.SESSIONS = old
+
+
 @case("paths.vault_config 是那条路径的唯一定义点")
 def t_paths_owns_it():
     r = _root()

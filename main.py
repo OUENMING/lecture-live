@@ -215,8 +215,12 @@ def _wrapup_route(ui, ui_gone: bool, terminal: bool | None = None) -> str:
        这节课一个字笔记都不写**。改前 ✕ 走的是 `_ask_save_notes`，那条对超时 /
        EOF **一律默认存**。
 
-       → 窗口**已经**关了的时候退回终端那条；只有「问话**期间**被关窗」才算真的放弃。
+       → 窗口**已经**关了的时候退回终端那条。
        （由 OCR 审计发现，`main.py` 那一段现在直接调它。）
+       ⚠️ **2026-09-30 又往前走了一步**：「问话**期间**被关窗」也**不再算放弃** ——
+       它现在与超时同一条路（都按存走）。那条真的让一个朋友丢了一节课的笔记
+       （课上完点 ✕ 停止 → 窗口还在 → 又点了一次 ✕）。理由见 `Overlay.ask_save`。
+       所以**放弃只剩一个触发点**：用户显式说不（终端答 `n` / 卡上点「不存」）。
 
     ⚠️⚠️ **2026-09-29 补的那个洞：退回终端，前提是「有终端」。**
        双击启动时 `_closed` 一定为真（✕ 是那条路上**唯一**的停止方式），
@@ -1851,14 +1855,18 @@ def run(args) -> None:
                     # 它对超时 / EOF 一律**默认存**。理由见 `_wrapup_route` 的 docstring。
                     ans = _ask_save_notes(writer.count)
                 else:
+                    # ⚠️ 返回**只有 `True`/`False`**（2026-09-30 起）——「问话期间关窗」
+                    #    不再是第三种答案（那时 `None` → `give_up` → **整节课没笔记**）。
+                    #    它现在按「存」走，理由见 `Overlay.ask_save` 的 docstring：
+                    #    一个朋友就是这么丢了一节课的笔记。
                     ans = ui.ask_save(writer.count)
-                    if ans is None:
-                        # ⚠️ 只有「问话**期间**被关窗」才走到这里 —— 那是用户看着
-                        #    卡上那句「关窗 = 放弃这份笔记」做的决定。
-                        give_up = True
-                        echo("⏹ 收尾中止：窗口在问话时被关掉"
-                             "（笔记未写；逐句日志仍在 sessions/）")
                 save = bool(ans)
+                # ⚠️ `give_up` = 用户**显式说了不要**这份笔记（终端答 `n` / 卡上点「不存」）。
+                #    它与「关窗」**不是一回事** —— 关窗现在按存走。
+                #    ⭐ 这条路的意图写在下面 `else:` 那段注释里（原文）：
+                #    「用户已经说了不要这份笔记，这时候再花他的钱去合成章节是错的」
+                #    —— 所以它跳过整段收尾（不精修、不写笔记），只关文件。
+                give_up = (ans is False)
 
             _cancel = threading.Event()
             if not give_up:
@@ -1914,7 +1922,21 @@ def run(args) -> None:
                         echo("\n⏹ 已请求跳过精修，正在把笔记写出来…"
                              "（再按一次 Ctrl+C 强制退出，笔记不会写）")
                 if "err" in _box:
-                    raise _box["err"]
+                    # ⚠️⚠️ **这里原来是一句 `raise _box["err"]` —— 2026-09-30 全量 OCR
+                    #    审查发现它把后面整段都跳掉了**：
+                    #      · `tester.finish()`（**测试报告 + 9 MB 音频不会上传**）
+                    #      · `wrapup_close()`（收尾卡留着不走）
+                    #      · `_auto_update_on_exit()`
+                    #    而且异常一抛，下面那句 `_ok = "err" not in _box` **永远算不到
+                    #    False** → 「失败留住」那条分支与 `wrapup_done(False, …)`
+                    #    **不可达** —— 一个「失败要留住给用户看」的设计被它自己废掉了。
+                    #    ⚠️ 触发条件是现实的：`writer.close()` 抛（磁盘满 / vault 写不进 /
+                    #       精修崩）。
+                    #    → 改成**不出声地继续**：错误照旧留在 `_box` 里，
+                    #      交给下面那条 `_ok=False` 的路（它本来就是为这个场景写的），
+                    #      外加一行给终端/日志。
+                    echo(f"⚠ 收尾失败（笔记可能没写成）："
+                         f"{type(_box['err']).__name__}: {str(_box['err'])[:120]}")
             else:
                 # ⚠️ **放弃路径**（问话时被关窗）：上面整块被跳过 → `writer.close()`
                 #    不会跑，所以实时总结的写入器也没人关。
@@ -1938,7 +1960,7 @@ def run(args) -> None:
             #    「⚠ 收尾失败」（**其实什么都没失败**），还卡在「失败留住」等用户
             #    点关闭；而重构前那两条是**静默成功退出**的。
             #    （2026-09-28 OCR 审计发现。）
-            _ok = "err" not in _box and not give_up
+            _ok = "err" not in _box
             _done_ui = getattr(ui, "wrapup_done", None)
             if _done_ui is not None:
                 _done_ui(_ok, msg or ("收尾失败" if not _ok else "收尾结束"))
@@ -1946,7 +1968,7 @@ def run(args) -> None:
                 # 让「已写入 …」在屏上留 3 秒 —— 一闪而过等于没说。
                 _t3 = time.monotonic() + 3.0
                 _spin(lambda: time.monotonic() >= _t3)
-            elif not give_up:
+            else:
                 # ⚠️ **失败不自动退**（作者 2026-09-28 定的口径）：留到他看见为止。
                 #    出口有两个：卡上的「关闭」，或直接关窗口。
                 _ack = getattr(ui, "wrapup_acknowledged", None)

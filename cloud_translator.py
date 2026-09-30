@@ -190,8 +190,12 @@ def load_api_key(explicit: str | None = None) -> str | None:
         return c.read_text(encoding="utf-8").strip()
     if KEY_FILE.exists():
         if c is not None:
-            print(f"⚠ 正在用旧位置的 key（{KEY_FILE}）—— 它在安装目录里, "
-                  f"`cl update` 的 git pull 可能把它弄丢。建议搬走:")
+            # ⚠️ 理由改真（2026-09-30 全量 OCR 审查发现旧理由**不成立**）：
+            #    `.deepseek_key` 在 `.gitignore` 里 → `git pull` 从不碰被忽略的文件，
+            #    更不会覆盖它（真要撞车时 git 是**拒绝**）。真正该搬的理由是
+            #    「用户数据不该住在会被更新/重建动到的安装目录里」。
+            print(f"⚠ 正在用旧位置的 key（{KEY_FILE}）—— 它在**安装目录**里， "
+                  f"建议搬去 ~/.classlive/：")
             print(f"     mkdir -p {c.parent} && mv {KEY_FILE} {c} && chmod 600 {c}")
         return KEY_FILE.read_text(encoding="utf-8").strip()
     return None

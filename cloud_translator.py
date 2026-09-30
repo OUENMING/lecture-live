@@ -212,6 +212,11 @@ class CloudTranslator:
         self._terms = glossary_terms or []
         self._core = core or []
         self._course_terms = course_terms or []
+        #: ⭐ 术语注入的**只读计数**（`select_terms` 填，**不改它的返回值契约**）。
+        #: 用途：判断「术语系统值不值」—— 见 `CLAUDE.md` 提到的注入成本模型。
+        #: ⚠️ 名字与 `translator.Translator.term_stats` **必须一致** ——
+        #:    `main.py` 收尾时两个引擎各读一次再合并（它俩本来就各有一份）。
+        self.term_stats: dict = {}
         self._domain = domain
         self._max_ctx = max_context
         self._timeout = timeout
@@ -282,7 +287,7 @@ class CloudTranslator:
     def _terms_block(self, en: str) -> str:
         from translator import select_terms
         return select_terms(en, self._terms, core=self._core,
-                            always=self._course_terms)
+                            always=self._course_terms, stats=self.term_stats)
 
     # ---- 与本地 Translator 同接口 ----
     def fix_and_translate_stream(self, en: str, context: list[str],

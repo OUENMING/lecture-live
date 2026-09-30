@@ -227,7 +227,8 @@ def core_terms(course: str | None = None) -> list[str]:
 
 def select_terms(sentence: str, terms: list[str],
                  core: list[str] | None = None, max_dyn: int = MAX_DYNAMIC_TERMS,
-                 always: list[str] | None = None) -> str:
+                 always: list[str] | None = None,
+                 stats: dict | None = None) -> str:
     """核心词常驻 + **课程术语全量** + 动态召回最相关的几个。
 
     ⚠️ 为什么课程术语要**全量**注入: 纯按匹配筛选会**死循环** —— 句子被 ASR 听错时
@@ -273,6 +274,17 @@ def select_terms(sentence: str, terms: list[str],
         k = t.lower()
         if k not in seen:
             seen.add(k); picked.append(t)
+    # ⭐ 可选的只读计数（`stats` 由调用方给，**不改返回值契约**）。
+    #    用途：判断「术语系统值不值」—— 见记忆 `classlive-term-injection-cost`。
+    #    ⚠️ 记的是**去重前**每一档贡献了几条 + 去重后实际注入几条 —— 两个都要，
+    #       差值就是三档之间的重复量（重复说明表该去重了）。
+    if stats is not None:
+        stats["calls"] = stats.get("calls", 0) + 1
+        stats["core"] = stats.get("core", 0) + len(core)
+        stats["always"] = stats.get("always", 0) + len(always)
+        stats["scored"] = stats.get("scored", 0) + len(scored[:max_dyn])
+        stats["picked"] = stats.get("picked", 0) + len(picked)
+        stats["empty"] = stats.get("empty", 0) + (0 if picked else 1)
     return "\n".join(picked) if picked else "(无特定术语)"
 
 
@@ -446,6 +458,10 @@ class Translator:
         #    prompt 的 **60%**（实测 1544 字符 / 总 ~2582 字符）→ 那条路会过量。
         self._terms = merge_terms(load_terms(glossary_path, course), extra_terms)
         self._course_terms = course_term_list(glossary_path, course)
+        #: ⭐ 术语注入的**只读计数**（`select_terms` 填）。
+        #: ⚠️ 名字与 `cloud_translator.CloudTranslator.term_stats` **必须一致** ——
+        #:    `main.py` 收尾时两个引擎各读一次再合并（它俩本来就各有一份）。
+        self.term_stats: dict = {}
         self._domain = course_title(glossary_path, course)
         self._core = core_terms(course)
         self._max_ctx = max_context
@@ -490,7 +506,7 @@ class Translator:
         ctx = context[-self._max_ctx:] if self._max_ctx > 0 else []
         ctx_block = "\n".join(f"- {c}" for c in ctx) if ctx else "(无)"
         terms = select_terms(en, self._terms, core=self._core,
-                             always=self._course_terms)
+                             always=self._course_terms, stats=self.term_stats)
         return (f"{domain_block(self._domain)}"
                 f"课程术语:\n{terms}\n\n"
                 f"最近上下文(已校正):\n{ctx_block}\n\n"

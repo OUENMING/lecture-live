@@ -1890,6 +1890,14 @@ def run(args) -> None:
                 #       里那组（量的是**之后**）是两组不同的数，别混。
                 tester.note_block("norm", src.stats())
                 tester.note_block("vad", dict(getattr(seg, "diag", {}) or {}))
+                # ⭐ 采集面 ④：术语注入条数。两个引擎**各有一份**（云端/本地），
+                #    合并起来 —— 谁跑的就在谁那份上累加，另一份是空的。
+                #    ⚠️ 用 `getattr` 而不是直接取：老引擎对象/替身可能没有这个属性。
+                _tm = {}
+                for _t in (cloud_tr, local_tr):
+                    for _k, _v in (getattr(_t, "term_stats", None) or {}).items():
+                        _tm[_k] = _tm.get(_k, 0) + _v
+                tester.note_block("terms", _tm)
                 _rep = tester.finish(vad_report=locals().get("_diag", ""),
                                      note_path=str(getattr(writer, "note_path", "") or ""),
                                      # ⚠️ `--no-bundle` 原来只声明、没人读（2026-09-28

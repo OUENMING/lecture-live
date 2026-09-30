@@ -239,6 +239,35 @@ def main() -> int:
     check("⭐ 但计数要接着涨（21 次全算上，没丢）",
           t7._safe_bad["boom"] == 21, str(t7._safe_bad))
 
+    print("\n--- T8 ⭐ 术语注入计数：`select_terms(stats=…)` 不改返回值契约 ---")
+    import translator as tr
+
+    _s = "the supply curve slopes upward"
+    _core = ["demand", "supply"]
+    _always = ["elasticity", "equilibrium"]
+    _terms = ["supply curve", "price ceiling", "surplus"]
+    _no = tr.select_terms(_s, _terms, core=_core, always=_always)
+    _st = {}
+    _yes = tr.select_terms(_s, _terms, core=_core, always=_always, stats=_st)
+    # ⚠️ 变异验证：把 `stats` 那条分支写进返回值的构造里 -> 这条红。
+    check("⭐⭐ 传不传 `stats`，**返回的那个字符串必须一模一样**",
+          _no == _yes, f"{_no!r} vs {_yes!r}")
+    check("⭐ 计数：core/always 各按条数累加、calls +1",
+          _st.get("calls") == 1 and _st.get("core") == len(_core)
+          and _st.get("always") == len(_always),
+          str(_st))
+    check("⭐ `picked` 是**去重之后**实际注入的条数（<= 三档之和）",
+          isinstance(_st.get("picked"), int) and _st["picked"] > 0
+          and _st["picked"] <= _st["core"] + _st["always"] + _st["scored"],
+          f"picked={_st.get('picked')} 三档之和="
+          f"{_st.get('core', 0) + _st.get('always', 0) + _st.get('scored', 0)}")
+    _st2 = {}
+    for _ in range(3):
+        tr.select_terms(_s, _terms, core=_core, always=_always, stats=_st2)
+    check("⭐ 多次调用是**累加**（calls=3）", _st2.get("calls") == 3, str(_st2.get("calls")))
+    check("⚠️ 不传 `stats` 时一个键都不该被碰（老调用方零感知）",
+          tr.select_terms(_s, _terms, core=_core, always=_always) == _no)
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

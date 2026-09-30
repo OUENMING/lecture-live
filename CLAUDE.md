@@ -49,7 +49,8 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | **草稿上滚的动效方案**（调研 / 时长三方收敛 / 四条判据 / 谁拥有 frame）—— 做动效前读 | `docs/PLAN-roll-motion.md` |
 | **拖拽落点验收探针**（不在运行路径上；**改拖拽相关代码前跑它**，作者手拖一次即可） | `probe_drag.py` |
 | **课程卡片面板验收跑器**（不在运行路径上；**隔离模式** —— 术语表是 /tmp 的副本，删词/撤销都改副本） | `probe_entry_panel.py` |
-| **零参数入口**（双击 `.app` → 先开面板 → 点「开始上课」才录课；**独立短进程**，录课那条路一个字没动） | `entry_launch.py`（⚠️ 退出码 0/1/2/3 是它与 `cl` 的契约；`CL_NO_PANEL=1` 退回老行为） |
+| **测试模式开关的拍图探针**（不在运行路径上；**一个字节都不写盘** —— `on_test_mode` 是桩。推送给作者看效果前跑它） | `probe_test_mode.py` |
+| **零参数入口**（双击 `.app` → 先开面板 → 点「开始上课」才录课；**独立短进程**，录课那条路一个字没动） | `entry_launch.py`（⚠️ 退出码 0/1/2/3/4 是它与 `cl` 的契约；`CL_NO_PANEL=1` 退回老行为。**落点条上那颗「测试模式」开关**写 `.test-mode` → `cl` 读 → `--test-mode`） |
 | 回归测试 R1–R5、毫秒级断言 | `tests/test_audit_regressions.py` |
 | 端到端、拿真实录音跑通 | `test_pipeline.py` |
 | 面向用户的功能说明、开源与脱敏须知 | `README.md` |
@@ -154,7 +155,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   项目自己的 venv，而那是基于 Homebrew 的 framework 构建，整个方案的前提就不成立。
 - **`IOGPUFamily` 内核崩溃史**：2026-09-10 本工具触发过一次 GPU 驱动断言 panic（非 OOM）；`translator._configure_mlx` 是缓解措施。动 mlx / 本地模型路径时留意。
 - **`sessions/` 只追加**：曾误删过一节真实课堂记录、不可恢复；里面的 `*_TEST.md` 是测试残留，也留着。
-- **个人数据保持不入库**：`.gitignore` 覆盖 `sessions/`、`glossary/`、`.course`、`.deepseek_key`、`term_notes*.json`；真实课号已三次脱敏。改 `.gitignore` 前先想清楚这一条。
+- **个人数据保持不入库**：`.gitignore` 覆盖 `sessions/`、`glossary/`、`.course`、`.test-mode`、`.deepseek_key`、`term_notes*.json`；真实课号已三次脱敏。改 `.gitignore` 前先想清楚这一条。
 
 ## 当前状态 —— 现查，别抄
 

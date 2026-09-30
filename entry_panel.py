@@ -105,13 +105,25 @@ ADD_PLACEHOLDER = "课号，如 ECON10740"
 ADD_HINT = "回车建课 · Esc 取消"
 ADD_W = 116.0          # 「＋ 新增课程」按钮宽
 PICK_W = 104.0         # 「选择文件…」按钮宽
+# ── 测试模式开关（2026-09-30，`docs/PLAN-test-mode.md` §13.3）──────────
+# ⚠️ 它**无边框**（`setBordered_(False)`），和右边那两颗**长得不一样是故意的**：
+#    面板里表达「持久状态」的控件一律无边框（顶栏 🌐/❓/字幕、就绪条、卡片上可点的），
+#    有边框的那几颗留给**动作**（「选择文件…」「＋ 新增课程」「新建/取消」）。
+#    作者 2026-09-30 在「按钮 vs 勾选框」那轮拍的也是这条（§3.2）。
+TEST_W = 104.0         # 开关宽（**实测文字 71.7pt** @12pt，两态同宽，余量足够点）
 # ⚠️ 这几个 y 与 `DROP_H` 是同一组常数推出的（顶部 25 / 行距 6 / 底部 24），
 #    和 `card_height` 那条纪律一样：改 `DROP_H` 就要一起改这里，别各写一遍。
 ADD_ROW_Y = 47.0       # 输入框 + 「新建/取消」那一行
 ADD_REPLY_Y = 24.0     # 反馈那一行（`plan_add` 的 `text` 画在这儿）
-# 落点条里提示文字的宽度：右边要给**两颗**按钮让位（「＋ 新增课程」+「选择文件…」）。
-# ⚠️ 算式与右边那两颗按钮的位置是同一件事 —— 改按钮宽度就得改它。
-HINT_W = WIDTH - 2 * PAD - (CARD_PAD + PICK_W + 8.0 + ADD_W + 16.0)
+# 落点条里提示文字的宽度：右边要给**三颗**控件让位
+# （测试模式开关 +「＋ 新增课程」+「选择文件…」）。
+# ⚠️ 算式与右边那三颗的位置是同一件事 —— 改任何一颗的宽度都得改它。
+# ⚠️⚠️ **它现在只剩 29.7pt 余量了**：最宽的那条提示
+#    「自动认出哪份属于哪门课 —— 认不出的会让你核对」实测 **244.3pt**（11pt），
+#    而这个式子给出 274.0。再多塞一颗按钮，提示会**折行 + 第二行被静默吃掉**
+#    （`panel.make_label` 的默认换行行为，没有省略号）。
+#    → 判据在 `tests/test_entry_panel.py` 那一节，**加控件前先看它**。
+HINT_W = WIDTH - 2 * PAD - (CARD_PAD + PICK_W + 8.0 + ADD_W + 8.0 + TEST_W + 16.0)
 
 # ── 就绪条（2026-09-28）──────────────────────────────────────────────
 # 插在标题行与卡片区之间。**高度算在 `build()` 那条从下往上的推法里**，
@@ -175,6 +187,21 @@ def ready_short(it: dict) -> str:
 def ready_line_text(items: list) -> str:
     """整条就绪条上所有项拼成一行（`·` 分隔）。给状态行/终端用。"""
     return "　·　".join(ready_item_text(i) for i in items)
+
+
+def test_mode_title(on: bool) -> str:
+    """测试模式开关上那句话。**纯函数**（判据盖这里，不用起窗口）。
+
+    ⚠️ **就两态、没有附加说明、也没有图标** —— 作者 2026-09-30 拍板砍掉了
+       「开 · 留音频」那半句（`docs/PLAN-test-mode.md` §3.5），
+       同一天又砍掉了 🎙（原话：「不要 emoji」）。
+    ⭐ 代价：界面上**看不出「开 = 会录音 + 会上传」**。这是**有意砍的**，
+       **别哪天把它当成"用户不知道"的 bug 来修**。
+    ⚠️ 信息量全压在「开/关」两个字上 → 所以**不许靠颜色或图标**帮它表达状态
+       （没有 switch 先例，也不要系统勾选框，见 §3.2）。
+    ⚠️ 两态**字数相同** → 文字宽度一模一样（实测 71.7pt）→ 切换时按钮不抖。
+    """
+    return f"测试模式：{'开' if on else '关'}"
 
 
 # ── 颜色 ────────────────────────────────────────────────────────────
@@ -1468,7 +1495,7 @@ def make_ready_strip(parent, y: float, w: float, items: list, *, on_click):
 
 def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
           on_close=None, prepare_fn=None, suggest_fn=None,
-          trash_fn=None) -> Handles | None:
+          trash_fn=None, on_test_mode=None, test_mode=False) -> Handles | None:
     """建并显示面板。**失败返回 `None`**（调用方不必管 —— 同 `whatsnew.build`）。
 
     `prepare_fn` 是**验收用的注入点**，默认就是真的 `prep.prepare`：
@@ -1476,13 +1503,19 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
     所以那种验收必须能换掉它（同 `prep.prepare` 自己的 `chat=` / `build_fn=` 口子）。
     ⚠️ 具体签名见 `_run_prep` 里那一处调用 —— **只此一处**。
 
+    `on_test_mode` 是测试模式开关的落点（**面板自己不写盘**，同 `on_start` 那条：
+    谁去写 `.test-mode` 是调用方的事）—— 传 `None` = **不建那颗开关**
+    （上课中从菜单栏打开的那档：课早在录了，开关没有意义）。
+    `test_mode` 是它的**当前值**（调用方从盘上读来）。
+
     ⚠️ 构造失败**不能**吞掉 `objc_own.ObjcNameCollision`：那是程序缺陷，
        被吞掉会静默变成「面板打不开」，查起来极难（`objc_own.py` 文件头那次事故）。
     """
     try:
         return _build(on_start=on_start, glossary=glossary, sessions_dir=sessions_dir,
                       state_root=state_root, on_close=on_close, prepare_fn=prepare_fn,
-                      suggest_fn=suggest_fn, trash_fn=trash_fn)
+                      suggest_fn=suggest_fn, trash_fn=trash_fn,
+                      on_test_mode=on_test_mode, test_mode=test_mode)
     except objc_own.ObjcNameCollision:
         raise
     except Exception:                                     # noqa: BLE001
@@ -1493,7 +1526,8 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
 
 
 def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
-           prepare_fn=None, suggest_fn=None, trash_fn=None) -> Handles:
+           prepare_fn=None, suggest_fn=None, trash_fn=None,
+           on_test_mode=None, test_mode=False) -> Handles:
     from AppKit import (NSButton, NSColor, NSFont, NSScreen, NSSearchField,
                         NSTextField,
                         NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel)
@@ -2091,6 +2125,64 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     strip_targets.append(_add_t)
     strip.addSubview_(_add_btn)
     strip_holder["hint"].append(_add_btn)
+
+    # ⭐ 测试模式开关（2026-09-30，`docs/PLAN-test-mode.md` §13.3）──────────
+    # 📌 **放这儿不放卡片上**：作者 2026-09-28 删过卡片上的「选择文件…」，
+    #    原话「**卡片看着太繁杂**」—— 5 张卡各挂一个开关就是同样的噪音。
+    #    而这是个**全局**状态（这节课录不录、传不传），底部那条正是全局控件的位置。
+    # ⚠️ `on_test_mode is None` = 这个面板不是"开课前"那条路起的（上课中从菜单栏开的）
+    #    —— 那时**这节课早在录了**，开关没有意义 → **不建**（同 `on_start` 那条纪律）。
+    # ⚠️ 状态活在**闭包**里，不进模块级的 `S`：`S` 是跨面板共享的，
+    #    而开关的初值每次都由调用方从盘上读（`entry_launch.read_test_mode`）。
+    tm_on = [bool(test_mode)]
+    if on_test_mode is not None:
+        tm_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W - 8.0 - TEST_W,
+                       (DROP_H - BTN_H) / 2.0, TEST_W, BTN_H))
+        tm_btn.setTitle_(test_mode_title(tm_on[0]))
+        tm_btn.setBordered_(False)                 # ⚠️ 见 `TEST_W` 那段：状态→无边框
+        tm_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+        try:
+            # ⚠️ 只是深色玻璃上的可读性，**两态同一个值** —— 不许拿颜色表达状态。
+            tm_btn.setContentTintColor_(
+                NSColor.whiteColor().colorWithAlphaComponent_(0.92))
+        except Exception:                                  # noqa: BLE001
+            pass
+
+        def toggle_test_mode() -> None:
+            """点一下 = 翻一次，**当场落盘**。
+
+            ⚠️ **失败要弹回原状** —— 盘上没写成就显示「开」，用户会以为在采集，
+               其实什么都没记。同 `.course` 那次事故的形状（2026-09-29，
+               `entry_launch` 的 `UNSAVED`）：**界面说的和盘上写的是两件事**。
+            ⚠️ 回调**同步调**：它只写一个几字节的文本文件，不碰视图树 ——
+               `_later` 那条纪律管的是「别在 action 里拆自己所在的视图」，这里不适用。
+            """
+            on = not tm_on[0]
+            ok = True
+            try:
+                ok = on_test_mode(on) is not False
+            except Exception:                              # noqa: BLE001
+                ok = False
+            if not ok:
+                set_status("⚠ 测试模式没存下来（.test-mode 写不了）—— 这次不算数", 2.0)
+                return
+            tm_on[0] = on
+            try:
+                tm_btn.setTitle_(test_mode_title(on))
+            except Exception:                              # noqa: BLE001
+                pass
+
+        tm_t = _target(toggle_test_mode)
+        tm_btn.setTarget_(tm_t)                    # ⚠️ 弱引用 —— 靠 `strip_targets` 留它
+        tm_btn.setAction_("act:")
+        strip_targets.append(tm_t)
+        strip.addSubview_(tm_btn)
+        # ⚠️ 也进 `hint` 那组：**批量/搜索/新增那几档会把它藏起来**
+        #    （`refresh()` 按 `strip_holder["hint"]` 逐个 `setHidden_`）——
+        #    那些档下右下角是「取消/确认」，多一颗开关会挤在同一块地方。
+        strip_holder["hint"].append(tm_btn)
+
     # ⚠️ **一次性挂上**（见 `strip_targets` 的说明）—— 别在上面每一处各写一遍。
     strip._targets = strip_targets
 
@@ -3423,7 +3515,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
 
 def _panel_key(kw) -> tuple:
-    """面板复用判据：**界面结构**（有没有 `on_start`）+ **读写目标**（那三个路径）。
+    """面板复用判据：**界面结构**（有没有 `on_start` / `on_test_mode`）+ **读写目标**（那三个路径）。
 
     ⚠️ 为什么路径也要进键（2026-09-28 OCR 审计指出）：这三个参数**决定读哪儿写哪儿**。
        进了键之后，同一个进程里拿另一组根再开面板（隔离跑器与测试正是这么干的）
@@ -3435,8 +3527,14 @@ def _panel_key(kw) -> tuple:
 
     ⚠️ **别拿整个 `kw` 比** —— 里面还有 `on_close` / `prepare_fn` 这类 lambda，
        每次传一个新的就永远不等，于是每次打开都白重建（实测踩到）。
+
+    ⚠️ `on_test_mode` 是**第二个**会改界面结构的项（2026-09-30 加）：有它 = 落点条上
+       多一颗开关，没有 = 一颗都不画。少写这一项的话，「上课中开过面板」再
+       「双击 .app」会复用那个**没有开关**的旧面板 —— 而这一次是要开课的，
+       用户会找不到开关，且**照样不报错**（同 `on_start` 当年那条一模一样的形状）。
     """
     return (kw.get("on_start") is None,
+            kw.get("on_test_mode") is None,
             str(kw.get("glossary") or ""),
             str(kw.get("state_root") or ""),
             str(kw.get("sessions_dir") or ""))

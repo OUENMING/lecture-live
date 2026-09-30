@@ -224,6 +224,13 @@ def main() -> int:
               - E.card_height({"added": ["a"], "removed": {"a"}}) - E.RESULT_ROW) < 1e-9)
 
     print("\n--- ⑨ 零参数入口的退出码（`cl` 只读得动这个）---")
+    # ⚠️⚠️ **这一组必须跑在「建过 `NSApplication`」之前**（它现在就在 ⑬/⑭ 前面）。
+    #    理由不是洁癖，是它会**静默杀掉整个测试进程**：它调的 `on_close()`/`on_start()`
+    #    走 `AppHelper.stopEventLoop()`，而 PyObjC 那份源码在没有 run loop 时是
+    #    `if NSApp() is not None: NSApp().terminate_(None)` —— 建过 NSApp 之后
+    #    `NSApp()` 就非空了 → **进程当场退出，rc=0、一个字都不报**（汇总行也不打）。
+    #    2026-09-30 在 ⑳ 里实测踩到：日志跑到一半就没了，排查了半天。
+    #    → **别把这一组挪到任何建窗口的那几节后面。**
     # ⚠️ 这一组的判据是**三条退出码必须互不相同**：「用户取消」和「面板挂了」
     #    混在一起的话，要么违背用户意图（他取消了还录课），要么录不了课
     #    （正是作者拍第 1 条时要防的那件事）。
@@ -384,6 +391,7 @@ def main() -> int:
 
     _add_wiring_section()
     _target_liveness_section()
+    _test_mode_section()
 
     # ⚠️⚠️ **`bad` 不许在这里算！**（2026-09-29 抓到的假绿）
     #    原来这一行在这里算了一份 `RESULTS` 的快照，而后面还有 ⑮⑯⑰ 三组判据 ——
@@ -689,6 +697,348 @@ def main() -> int:
     for n in bad:
         print(f"  ❌ {n}")
     return 1 if bad else 0
+
+
+def _test_mode_section() -> None:
+    """⑳ 测试模式开关：**宽度 / 文案 / 点击真的触发回调 / 那个开关文件**。
+
+    ⚠️ 为什么要建窗口：这一节钉的全是**接线**（开关在不在、点了调没调到、
+       标题变没变、失败弹没弹回去），而接线的坏法**一律不出声** ——
+       纯函数判据全绿，症状统一是「点了没反应」或**界面说的和盘上的不是一回事**。
+
+    ⚠️ 只建窗口、**不跑事件循环** —— `performClick_` 是同步的（`sendAction:to:`）。
+
+    ⚠️ 写端全部隔离在 tempdir：面板走 `glossary=` / `state_root=`，
+       开关文件走 `read_test_mode(path=…)` / `write_test_mode(…, path=…)`。
+       ⚠️ **绝不碰仓库根目录那份真 `.test-mode`**（「测试必须隔离写端」那条硬规矩）。
+
+    ⚠️ 最后一组**真跑 `cl`**（沙盒 + 假解释器），不算越界：`cl` 那半是 shell，
+       没有别的判据盖得到，而它正是「开关按了到底生效没有」的**最后一厘米**。
+    """
+    print("\n--- ⑳ 测试模式开关：宽度 / 文案 / 点击真的触发回调 ---")
+    import shutil as _sh
+    import subprocess as _sp
+    import tempfile
+
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    try:
+        from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
+                            NSButton, NSTextField, NSFontAttributeName)
+        from Foundation import NSAttributedString
+        import entry_launch
+    except Exception as e:                                    # noqa: BLE001
+        check("AppKit 可用（这一节要真窗口）", False, f"{type(e).__name__}: {e}")
+        return
+
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory)
+
+    def _walk(v, out):
+        out.append(v)
+        for c in (v.subviews() or []):
+            _walk(c, out)
+        return out
+
+    def _rects_hit(a, b) -> bool:
+        """两个 frame 有没有**真的重叠**（不相邻才算）。"""
+        ax, ay, aw, ah = (float(a.origin.x), float(a.origin.y),
+                          float(a.size.width), float(a.size.height))
+        bx, by, bw, bh = (float(b.origin.x), float(b.origin.y),
+                          float(b.size.width), float(b.size.height))
+        return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+
+    def _text_w(s, font) -> float:
+        """按**真实的那个字体**量文字宽度（不是按字数估）。"""
+        a = NSAttributedString.alloc().initWithString_attributes_(
+            s, {NSFontAttributeName: font})
+        return float(a.size().width)
+
+    def _strip_of(h):
+        """落点条 = 窗口里那个 (W_IN × DROP_H) 的视图 —— 不靠"第几个子视图"猜。"""
+        for v in _walk(h.window.contentView(), []):
+            f = v.frame()
+            if (abs(float(f.size.width) - (E.WIDTH - 2 * E.PAD)) < 0.6
+                    and abs(float(f.size.height) - E.DROP_H) < 0.6):
+                return v
+        return None
+
+    def _toggles(h):
+        """面板上那几颗开关（按**文案前缀**找，不按下标找）。"""
+        out = []
+        for v in _walk(h.window.contentView(), []):
+            if isinstance(v, NSButton):
+                try:
+                    if (v.title() or "").startswith("测试模式："):
+                        out.append(v)
+                except Exception:                             # noqa: BLE001
+                    pass
+        return out
+
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        gl = root / "glossary.txt"
+        gl.write_text("# public table\n", encoding="utf-8")
+
+        def _build(name, **kw):
+            return E.build(glossary=gl, sessions_dir=root / ("s" + name),
+                           state_root=root / ("st" + name),
+                           on_start=lambda c: None, **kw)
+
+        calls: list = []
+        h = _build("1", on_test_mode=lambda on: (calls.append(on), True)[1],
+                   test_mode=False)
+        check("面板建起来了（⑳ 这一节要真窗口）", h is not None)
+        if h is None:
+            return
+        try:
+            # ⚠️⚠️ **期望值写字面量，不写 `E.test_mode_title(True)`。**
+            #    第一版就是拿那个函数当期望值 —— **变异验证当场抓出来**：
+            #    把函数改成「永远返回关」之后，**两边一起变**，判据照样绿。
+            #    这就是本仓记过的假绿形态「判据钉住的正是缺陷本身」。
+            #    文案是**作者拍板的那个东西**（`PLAN-test-mode.md` §3.5），
+            #    所以要逐字钉住；函数只是它的一处实现。
+            ON, OFF = "测试模式：开", "测试模式：关"
+            check("⭐ 开关文案与作者拍板的两态**逐字一致**（函数与字面量对得上）",
+                  E.test_mode_title(True) == ON and E.test_mode_title(False) == OFF,
+                  f"{E.test_mode_title(True)!r} / {E.test_mode_title(False)!r}")
+
+            strip = _strip_of(h)
+            check("找得到落点条", strip is not None)
+            if strip is None:
+                return
+            sw = [b for b in strip.subviews()
+                  if isinstance(b, NSButton) and (b.title() or "") == OFF]
+            check("⭐ 落点条上有测试模式开关，初值 =「测试模式：关」（`test_mode=False`）",
+                  len(sw) == 1, f"命中 {len(sw)} 颗")
+            if len(sw) != 1:
+                return
+            sw = sw[0]
+
+            # ── ⭐⭐ 宽度扫描（照 `tests/test_panel.py` 那条）──────────────
+            # ⚠️ 这条量的是**真几何**（两个 frame 会不会真重叠），不是照算式再算一遍 ——
+            #    照着算式算的话，算式自己写错时两边一起错，判据照样绿。
+            hit = []
+            for v in strip.subviews():
+                if v is sw or v.isHidden():
+                    continue
+                if _rects_hit(sw.frame(), v.frame()):
+                    # ⚠️ `v.frame()` **不能直接迭代**（拿到的是 CGPoint/CGSize 那两个
+                    #    结构，不是 4 个数字）—— 第一版这么写，在"真撞上"的那次
+                    #    **先抛 TypeError、连汇总行都出不来**（detail 是急切求值的，
+                    #    本仓记过这条；绿的时候看不出来）。
+                    _f = v.frame()
+                    hit.append((type(v).__name__,
+                                (v.title() if isinstance(v, NSButton)
+                                 else (v.stringValue() or ""))[:20],
+                                [round(float(_f.origin.x), 1), round(float(_f.origin.y), 1),
+                                 round(float(_f.size.width), 1),
+                                 round(float(_f.size.height), 1)]))
+            check("⭐⭐ 开关**不压到条上任何可见控件**（加它之后提示文字要缩掉一截）",
+                  not hit, str(hit))
+
+            # ⭐⭐ 提示文字塞得下 —— **反向的那一半**（上面那条只管"别压到别人"）
+            # ⚠️ 这条守的是 `HINT_W` 那个式子的余量：文字超框 → `panel.make_label`
+            #    默认就是换行 + **第二行被静默吃掉**（没有省略号，看着像句子就到这儿）。
+            over, measured = [], 0
+            for v in strip.subviews():
+                if v.isHidden() or not isinstance(v, NSTextField):
+                    continue
+                t = v.stringValue() or ""
+                if not t:
+                    continue
+                measured += 1
+                w = _text_w(t, v.font())
+                if w > float(v.frame().size.width) + 0.01:
+                    over.append((t, round(w, 1), round(float(v.frame().size.width), 1)))
+            check("⭐⭐ 条上每条提示文字**实测宽度 ≤ 它的框宽**（超了就被静默吃掉）",
+                  not over, str(over))
+            check("⚠️ 而且真的量到了那几行（量到 0 行会让上一条恒真）",
+                  measured >= 3, f"量到 {measured} 行")
+
+            # ── ⭐ 点击：**钉行为，不钉 flag** ─────────────────────────────
+            # 📌 本仓 `ClickView` 就是 `mouseDownCanMoveWindow=True` 而完全正常 ——
+            #    所以判据只看「点了之后发生了什么」。
+            sw.performClick_(None)
+            check("⭐ 点一下 → 文案变「测试模式：开」（**字面量**，不是再问一次函数）",
+                  (sw.title() or "") == ON, repr(sw.title()))
+            check("⭐⭐ 而且**回调真的被调到了**（收到 True）", calls == [True], str(calls))
+            sw.performClick_(None)
+            check("⭐ 再点一下 → 回「测试模式：关」，回调收到 False",
+                  (sw.title() or "") == OFF and calls == [True, False],
+                  f"{sw.title()!r} {calls}")
+        finally:
+            try:
+                h.close()
+            except Exception:                                 # noqa: BLE001
+                pass
+
+        # ── ⭐⭐ 落盘失败 → **弹回原状**（界面不许撒谎）────────────────────
+        # ⚠️ 照 `.course` 那次事故（2026-09-29 的 `UNSAVED`）：写不下去时不改状态。
+        #    这里更坏 —— 显示「开」而盘上是「关」= 用户以为在采集，其实什么都没记。
+        calls2: list = []
+        h2 = _build("2", on_test_mode=lambda on: (calls2.append(on), False)[1],
+                    test_mode=False)
+        try:
+            sw2 = _toggles(h2) if h2 is not None else []
+            check("（前置）第二块面板上也有开关", len(sw2) == 1, f"命中 {len(sw2)} 颗")
+            if len(sw2) == 1:
+                sw2[0].performClick_(None)
+                check("⭐⭐ 写盘失败 → 文案**弹回「关」**（不许显示成开着）",
+                      (sw2[0].title() or "") == "测试模式：关",
+                      f"{sw2[0].title()!r}，回调={calls2}")
+        finally:
+            try:
+                h2.close()
+            except Exception:                                 # noqa: BLE001
+                pass
+
+        # ── ⚠️ 结构：没有落点（`on_test_mode=None`）时**一颗都不建** ──────
+        # ⚠️ 这一档 = 上课中从菜单栏打开的面板（那时这节课早在录了），
+        #    开关在那儿没有意义 —— 建了反而像"还能改"。
+        h3 = _build("3")
+        try:
+            check("⭐ `on_test_mode=None` → 开关一颗都不建（上课中开的面板）",
+                  h3 is not None and not _toggles(h3),
+                  f"命中 {len(_toggles(h3)) if h3 is not None else '—'} 颗")
+        finally:
+            try:
+                h3.close()
+            except Exception:                                 # noqa: BLE001
+                pass
+        # 反方向：初值 True 时要显示「开」（否则上面那条会因为"永远不建"而假绿）
+        h4 = _build("4", on_test_mode=lambda on: True, test_mode=True)
+        try:
+            sw4 = _toggles(h4) if h4 is not None else []
+            check("⭐ `test_mode=True` → 初值显示「测试模式：开」",
+                  len(sw4) == 1 and (sw4[0].title() or "") == "测试模式：开",
+                  f"命中 {len(sw4)} 颗：{[b.title() for b in sw4]}")
+        finally:
+            try:
+                h4.close()
+            except Exception:                                 # noqa: BLE001
+                pass
+
+        # ── ⚠️ 两态的文字宽必须**一模一样**（切换时按钮不许抖）────────────
+        from AppKit import NSFont as _NSFont
+        _font = _NSFont.systemFontOfSize_(12.0)
+        _won = _text_w(E.test_mode_title(True), _font)
+        _woff = _text_w(E.test_mode_title(False), _font)
+        check("⚠️ 两态**实测文字宽完全相同**（切换时文字不抖）",
+              abs(_won - _woff) < 1e-9, f"开={_won:.1f} 关={_woff:.1f}")
+        check("⭐ 而且塞得进按钮框（`TEST_W` 要留得下它）",
+              max(_won, _woff) <= E.TEST_W - 8.0,
+              f"文字 {max(_won, _woff):.1f} / 框 {E.TEST_W}")
+
+        # ── ⭐ 开关文件：读写的**全部边界** ──────────────────────────────
+        # ⚠️ 走 `path=` 参数隔离 —— 绝不碰仓库根目录那份真文件。
+        _p = root / "dot-test-mode"
+        check("⭐ 写 1 → 读回 True",
+              entry_launch.write_test_mode(True, path=_p) is True
+              and entry_launch.read_test_mode(path=_p) is True)
+        check("⭐ 而且盘上**就是 `1` 两个字符**（`cl` 那边比的正是它）",
+              _p.read_text(encoding="utf-8") == "1", repr(_p.read_text(encoding="utf-8")))
+        check("⭐ 写 0 → 读回 False（**关必须能盖掉上次的开**）",
+              entry_launch.write_test_mode(False, path=_p) is True
+              and entry_launch.read_test_mode(path=_p) is False)
+        for bad in ("", "\n", "垃圾", "true", "yes", "２"):
+            _p.write_text(bad, encoding="utf-8")
+            check(f"⚠️ 内容是 {bad!r} → 算**关**（认不出来就绝不能当成开着 —— "
+                  f"那是**会录音**的一条路）",
+                  entry_launch.read_test_mode(path=_p) is False)
+        _p.unlink()
+        check("⭐ 文件不存在 → 关（**默认值**：装上就应该是关的）",
+              entry_launch.read_test_mode(path=_p) is False)
+        # ⚠️ 变异验证：把 `== "1"` 改成 `p.exists()` -> 上面「0 / 垃圾」那几条全红。
+
+        # ── ⭐⭐ 最后一厘米（前半）：`entry_launch` 真的把开关落到盘上 ──────
+        # 走 `entry_launch.main()` 那条**真路**（只把 `open_panel` 换成桩，同 ⑨ 的做法），
+        # 断言它交给面板的那个回调**一调就写盘**，而且下次开面板读得回来。
+        # ⚠️ `TESTMODE_CFG` 换到 tempdir —— 绝不碰仓库根目录那份真文件。
+        #
+        # ⚠️⚠️ **`AppHelper.stopEventLoop()` 会当场杀掉整个进程。** 实测（2026-09-30）：
+        #    PyObjC 那份源码逐字是 —— 拿不到当前 run loop 的 stopper 时，
+        #    `if NSApp() is not None: NSApp().terminate_(None)`。
+        #    而这一节**已经建过 `NSApplication.sharedApplication()`**（⑬ 也建过）
+        #    → `NSApp()` 非空 → `terminate_` → **进程直接退出，rc=0、一个字都不报**，
+        #    汇总行也不打（第一版就是这么挂的，症状是「跑到一半日志没了」）。
+        #    ⚠️ ⑨ 那组同样调 `on_close()`/`on_start()`，但它跑在**建 NSApplication 之前**
+        #    → `NSApp()` 还是 None → 无害。**别把 ⑨ 挪到 ⑬ 后面。**
+        #    → 这里把它换成空实现：我们要测的是「回调写没写盘」，不是 AppKit 的退出。
+        import PyObjCTools.AppHelper as _AH
+        _tm_saved = entry_launch.TESTMODE_CFG
+        _tm_path = root / "entry-launch-test-mode"
+        _orig_open = E.open_panel
+        _orig_stop = _AH.stopEventLoop
+        entry_launch.TESTMODE_CFG = _tm_path
+        seen: dict = {}
+
+        def _fake_open(**kw):
+            seen["has_cb"] = kw.get("on_test_mode") is not None
+            seen["init"] = kw.get("test_mode")
+            seen["ret"] = kw["on_test_mode"](True)      # = 用户在面板上点亮它
+            kw["on_close"]()                            # ⚠️ 立 `done` 闩，否则进 run loop 挂死
+            return object()
+
+        try:
+            _AH.stopEventLoop = lambda: None            # ⚠️ 见上面的说明
+            E.open_panel = _fake_open
+            entry_launch.main()
+            check("⭐⭐ 面板点了开关 → `entry_launch` **真的写了盘**（`1`）",
+                  _tm_path.exists()
+                  and _tm_path.read_text(encoding="utf-8") == "1"
+                  and seen.get("ret") is True,
+                  f"文件={_tm_path.read_text(encoding='utf-8') if _tm_path.exists() else '（没有）'} "
+                  f"回调返回={seen.get('ret')!r}")
+            check("⭐ 第一次开面板：初值给的是「关」（盘上本来没有这个文件）",
+                  seen.get("init") is False and seen.get("has_cb") is True,
+                  f"init={seen.get('init')!r} 有回调={seen.get('has_cb')}")
+            seen.clear()
+            entry_launch.main()
+            check("⭐⭐ 下次开面板：**读得回上次写的那份**（初值变「开」）",
+                  seen.get("init") is True, f"init={seen.get('init')!r}")
+        finally:
+            E.open_panel = _orig_open
+            _AH.stopEventLoop = _orig_stop
+            entry_launch.TESTMODE_CFG = _tm_saved
+
+        # ── ⭐⭐ 最后一厘米：`cl` 到底带没带 `--test-mode` ─────────────────
+        # 沙盒里真跑 `cl`：把脚本复制过去 + 造一个**假解释器**（它只 echo 收到的参数）。
+        # 于是这一条量的是**真实的参数**，不是"源码里有没有那行字"。
+        sand = root / "sandbox"
+        (sand / "ClassLive.app" / "Contents" / "MacOS").mkdir(parents=True)
+        _sh.copy2(HERE / "cl", sand / "cl")
+        _fake = sand / "ClassLive.app" / "Contents" / "MacOS" / "python"
+        _fake.write_text('#!/bin/sh\necho "FAKEPY $@"\nexit 0\n', encoding="utf-8")
+        _fake.chmod(0o755)
+        (sand / ".course").write_text("ECON10740", encoding="utf-8")
+        (sand / "a.wav").write_bytes(b"RIFF")
+
+        def _run_cl(*args):
+            pr = _sp.run(["bash", str(sand / "cl"), *args],
+                         capture_output=True, text=True, timeout=30)
+            return pr.stdout + pr.stderr
+
+        (sand / ".test-mode").write_text("1", encoding="utf-8")
+        _out = _run_cl()
+        check("⭐⭐ 开关是「1」→ `cl` 真的给 main.py 加了 `--test-mode`",
+              "--test-mode" in _out, _out.strip().splitlines()[-1] if _out.strip() else "（空）")
+        check("⭐ 而且 ▶ 那行报出来了（**不许静默**）",
+              "测试模式=开" in _out, _out.strip().splitlines()[-2] if _out.strip() else "")
+        (sand / ".test-mode").write_text("0", encoding="utf-8")
+        check("⭐ 开关是「0」→ 一个都不加",
+              "--test-mode" not in _run_cl(), "（还带着旗标）")
+        (sand / ".test-mode").unlink()
+        check("⭐ 没有那个文件 → 也不加（默认关）",
+              "--test-mode" not in _run_cl(), "（还带着旗标）")
+        (sand / ".test-mode").write_text("1", encoding="utf-8")
+        _out_f = _run_cl("file", str(sand / "a.wav"))
+        check("⭐⭐⚠️ `cl file`（回放既有录音）**不带**这个旗标 —— "
+              "否则开关还开着时，一次普通回放会变成**会上传的测试会话**",
+              "--test-mode" not in _out_f,
+              _out_f.strip().splitlines()[-1] if _out_f.strip() else "（空）")
+        check("⚠️ 前置：那条回放确实跑到了 exec（否则上一条是因为「啥都没跑」而假绿）",
+              "main.py" in _out_f, _out_f.strip()[:120])
 
 
 def _target_liveness_section() -> None:

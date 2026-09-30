@@ -57,6 +57,10 @@ if [ ! -x "$PY" ]; then
 fi
 CFG=".course"
 COURSE="$(cat "$CFG" 2>/dev/null || true)"
+# 测试模式的开关 —— **旁路文件**，同 `.course` 一族：开课面板上那颗开关写它
+# （`entry_launch.on_test_mode`），这里读它 → `--test-mode`。入口只有面板那一个。
+TMCFG=".test-mode"
+TM_TAG=""
 ENGINE=auto
 SRC=mic
 UI=overlay
@@ -287,5 +291,18 @@ if [ -n "$COURSE" ]; then
   ARGS+=(--course "$COURSE")
 fi
 
-echo "▶ ClassLive · 音源=$SRC · 引擎=$ENGINE · 课程=${COURSE:-(未设置, 默认 LECTURE)}"
+# ⭐ 测试模式：开关在**开课面板**上（那颗开关写 `.test-mode`，内容 1/0）。
+# ⚠️ 读在这里、不是某个分支里 —— 它是一个**持久状态**（同 `.course`），
+#    而"会录一节真课"的那几条路（零参数 / online / local）都该照它走。
+#    ⚠️ 面板起不来（退出码 2/3）时**也照样生效**：不这样的话，
+#    「我以为开着」和「其实没开」会在那两条兜底路上静默分叉。
+# ⚠️⚠️ **`cl file` 不算一课**（那是回放既有录音）→ 不给它加这个旗标：
+#    否则"开关还开着"会把一次普通的文件回放变成一次**会上传**的测试会话。
+#    要拿文件跑测试模式有现成的那条：`cl test --source file --path <音频>`。
+if [ "$SRC" != "file" ] && [ "$(cat "$TMCFG" 2>/dev/null || true)" = "1" ]; then
+  ARGS+=(--test-mode)
+  TM_TAG=" · 测试模式=开"
+fi
+
+echo "▶ ClassLive · 音源=$SRC · 引擎=$ENGINE · 课程=${COURSE:-(未设置, 默认 LECTURE)}${TM_TAG}"
 exec "$PY" main.py --source "$SRC" --ui "$UI" --engine "$ENGINE" ${ARGS[@]+"${ARGS[@]}"}

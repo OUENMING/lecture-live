@@ -37,6 +37,14 @@
    把「面板挂了」当成取消，等于**录不了课**（正是要防的那件事）。
 ⚠️ 4 必须与 2 分开：**「面板能用」和「选的结果存得下来」是两件事** ——
    混在一起就会用一份陈旧的 `.course` 去录，而那比不录坏得多。
+
+## 两个旁路文件（面板与 `cl` 的全部接口）
+
+    面板「开始上课」 → 写 `.course`      → cl 读 → --course
+    面板「测试模式」 → 写 `.test-mode`   → cl 读 → --test-mode
+
+⚠️ **两者都住在安装目录**（`HERE`），都是几字节的纯文本，都在 `.gitignore` 里。
+⚠️ `cl` 读的是**同一个文件**，但它先 `cd` 到安装目录再读相对路径 —— 同一份东西。
 """
 from __future__ import annotations
 
@@ -49,6 +57,42 @@ sys.path.insert(0, str(HERE))
 
 PICKED, CANCELLED, UNAVAILABLE, NO_COURSES, UNSAVED = 0, 1, 2, 3, 4
 CFG = HERE / ".course"
+#: 测试模式的开关（2026-09-30）。**旁路文件**，与 `.course` 同一族
+#: （`paths.py` 文件头那张表里的"旧"档：住在安装目录、代码旁边），
+#: 内容就是 `1` / `0`，不带换行。⚠️ `cl` 读它 → 给 `main.py` 加 `--test-mode`
+#: （**只加在会录一节真课的那几条路上**；`cl file` 回放不算，见 `cl` 里那段）。
+#: ⚠️ 它在 `.gitignore` 里（个人状态，不入库）—— 加新旁路文件时别忘了一起加。
+TESTMODE_CFG = HERE / ".test-mode"
+
+
+def read_test_mode(path=None) -> bool:
+    """盘上的开关。**只有 `1` 算开**，其余（空/`0`/没这个文件/读不了）一律算关。
+
+    ⚠️ 宽容方向是**关**：读不出来时绝不能变成"以为在测试模式里"——
+       那是**会录音**的一条路（`main.py` 里 `--test-mode` 默认 `record_audio=True`）。
+    """
+    p = pathlib.Path(path) if path is not None else TESTMODE_CFG
+    try:
+        return p.read_text(encoding="utf-8").strip() == "1"
+    except OSError:
+        return False
+
+
+def write_test_mode(on: bool, path=None) -> bool:
+    """写盘，**返回成不成**。
+
+    ⚠️⚠️ 这个返回值是**接口的一部分**（面板拿它决定要不要把开关弹回原状）：
+       盘上没写成就显示「开」，用户会以为在采集 —— 而**什么都没记**。
+       同 `.course` 那次事故的形状（2026-09-29 的 `UNSAVED`）：
+       **界面说的和盘上写的是两件事**。
+    """
+    p = pathlib.Path(path) if path is not None else TESTMODE_CFG
+    try:
+        p.write_text("1" if on else "0", encoding="utf-8")
+        return True
+    except OSError as e:
+        print(f"⚠ 写 .test-mode 失败：{e}")
+        return False
 
 
 def main() -> int:
@@ -97,13 +141,27 @@ def main() -> int:
     def on_close() -> None:
         _stop()                                 # 保持默认的 CANCELLED
 
+    def on_test_mode(on: bool) -> bool:
+        """落点条上那颗开关被点了。⚠️ **当场写盘、不等到「开始上课」** ——
+        它是个**持久状态**（"这节课怎么录"），同 `.course` 那条：
+        写盘这件事在面板外面做，面板只负责把值喊出来。
+
+        ⚠️ 返回 `False` = 没写进去 → 面板会把标题弹回原状（别让界面撒谎）。
+        """
+        ok = write_test_mode(on)
+        if ok:
+            print(f"测试模式{'已开 —— 这节课会录音频并上传' if on else '已关'}")
+        return ok
+
     def _stop() -> None:
         rc["done"] = True                       # ⚠️ 先立闩，再停循环 —— 见上面的说明
         from PyObjCTools import AppHelper
         AppHelper.stopEventLoop()
 
     try:
-        h = entry_panel.open_panel(on_start=on_start, on_close=on_close)
+        h = entry_panel.open_panel(on_start=on_start, on_close=on_close,
+                                   on_test_mode=on_test_mode,
+                                   test_mode=read_test_mode())
     except Exception:                           # noqa: BLE001
         traceback.print_exc()
         return UNAVAILABLE

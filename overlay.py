@@ -566,6 +566,22 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
         pos = next((i for i, t in enumerate(at) if t and t > seen_t), None)
         if pos is not None:
             out.insert(pos, (OUTLINE_DIVIDER, ""))
+
+    # ⑥ ⭐ **空状态**（计划 §9.11）—— 一行都没有时**不许留白一片**。
+    #    impeccable / Operate 逐字：「Empty states that **teach the interface**,
+    #    not『nothing here.』」。所以要说清**现在是什么情况、在等什么**。
+    #    ⚠️ 三种情形要分开 —— 但「纯转录档」那一支**走不到这儿**
+    #       （`_toggle_outline` 直接返回，纲要根本打不开）。
+    if not out:
+        if any(g.get("state") == "pending" for g in (outline.get("gaps") or [])):
+            # ⭐ 离线中：用户看终端也可能没注意，这里要**说人话**
+            _push("（离线中 —— 这几分钟的内容没生成）")
+        elif outline.get("windows"):
+            _push(f"▍ 还在记 · 已 {outline['windows'][-1].get('hi') or 0} 句"
+                  f" · 等主题稳定后出章节")
+        else:
+            # 连窗口都没有 = 刚开课头几十秒
+            _push("▍ 还在记 · 等第一段内容")
     return out
 
 
@@ -2193,12 +2209,24 @@ class Overlay:
 
         ⚠️ 文案取自 `OUTLINE_DIVIDER`（唯一定义点）—— 两处各写一遍的话，
            改一处文案滚动就会**静默失灵**（找不到 → 悄悄退化成滚到顶）。
+        ⚠️⚠️ **滚完必须让 `tv` 标脏**（2026-09-30 实测，**忘了会整屏空白**）：
+           两个滚动方法都会**回写** `_expected_origin`（那是防「程序滚动被
+           `tick()` 误判成用户滚动、把跟随关掉」的，计划 §9.6 也这么要求），
+           代价是 **`tick()` 随后看不出视口动过** → 那条重算回收池的分支进不去
+           → 槽位停在**滚动前**的 level 区间上。
+           实测：视口在 `y=1434`（文档顶），槽位却摆 `level 0–6`（文档底）
+           → **一个槽位都不在可视区里，屏上什么都没有**。
+           加这一句之后槽位落到 `20–24` ✅。
+        ⚠️ 修在**这里**而不是 `transcript_view`：那是答案接管也在用的共享路径，
+           在那边加一句会同时改掉答案的行为 —— 本计划不该顺手扩大改动面。
         """
-        for i, (big, _sub) in enumerate(self._outline_snapshot):
-            if big == OUTLINE_DIVIDER:
-                self._tv.scroll_to_index(i)
-                return
-        self._tv.scroll_to_top()
+        hit = next((i for i, (big, _s) in enumerate(self._outline_snapshot)
+                    if big == OUTLINE_DIVIDER), None)
+        if hit is None:
+            self._tv.scroll_to_top()
+        else:
+            self._tv.scroll_to_index(hit)
+        self._tv.mark_dirty(urgent=True)
 
     def _chapter_bar_text(self) -> str:
         """章节条那一行。**没有可显示的东西就返回空串**（调用方据此隐藏）。

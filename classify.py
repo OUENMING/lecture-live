@@ -44,7 +44,18 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 
-MODEL = "deepseek-chat"
+#: ⚠️⚠️ **2026-09-30 改：`deepseek-chat` → `deepseek-flash`**（作者拍板「全仓统一」）。
+#:    本模块原来是全仓**唯一**还在用 `deepseek-chat` 的地方（另外两处是 `atom.py`
+#:    与一个旧探针，已在 `b1c4d80` 一并改掉）。
+#:
+#:    ⚠️ **这一处会改行为**：`make_ask` 真的调模型，换个模型 = 术语分层的结果可能变。
+#:       所以它是**单独一个提交**（作者 2026-09-30 的要求），不跟别的混。
+#:    ⚠️ 没有从 `atom.MODEL` import —— **依赖方向不对**（术语分类跟原子层没关系）。
+#:       诚实记一笔：`"deepseek-flash"` 这个字面量全仓其实有 **9 处**（这里是第 10 处），
+#:       另外 8 处在 `atom.py` · `main.py` 的 `--cloud-model` · `build_notes.py` ×2 ·
+#:       `obsidian_writer.py` · `prep.py` · `rebuild_note.py` · `cache_probe.py` ·
+#:       一个探针。**要不要收成一处是另一件事**，别顺手做。
+MODEL = "deepseek-flash"
 MAX_TOKENS = 300
 TEMPERATURE = 0.0
 HEAD_PAGES = 2                  # 判归属看头两页就够（§7.10 实测）

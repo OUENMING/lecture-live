@@ -215,6 +215,83 @@ def main() -> int:
         finally:
             _sh.rmtree(_td, ignore_errors=True)
 
+        print("\n--- ⑨ ⭐⭐ `terms` 的机械闸门（2026-09-30 起不再恒空）---")
+        # ⚠️ 变异验证：
+        #    · 去掉 `len(en) > TERM_MAX_CHARS` 那半 → 「超长丢掉」红
+        #    · 去掉 `len(pair) != 2` 那半 → 「单元素丢掉」红（会抛 ValueError）
+        #    · 去掉 `if len(out) >= MAX_TERMS: break` → 「第 4 对丢掉」红
+        _p = {"text": "t", "kind": "要点", "src": [0], "terms": [
+            ["price elasticity of demand", "需求价格弹性"],   # ✅ 正常
+            ["a"],                                            # ❌ 不是对
+            ["b", "c"],                                       # ✅ 第二个
+            ["  ", "y"],                                      # ❌ 空白
+            [123, "z"],                                       # ❌ 不是字符串
+            ["x" * 61, "y"],                                  # ❌ 超长
+            ["k3", "v3"],                                     # ✅ 第三个
+            ["k4", "v4"],                                     # ❌ 超上限
+        ]}
+        _got = atom.parse_reply({"topic": "T", "points": [_p]}, 1)
+        check("⭐⭐ 只留合法的那三对，且**保序**",
+              _got and _got[0].terms == [["price elasticity of demand", "需求价格弹性"],
+                                         ["b", "c"], ["k3", "v3"]],
+              str(_got[0].terms if _got else None))
+        check("⚠️ 单元素 / 空白 / 非字符串 / 超长**各自**被丢（不是靠总数兜住的）",
+              _got and ["a"] not in _got[0].terms
+              and ["  ", "y"] not in _got[0].terms
+              and [123, "z"] not in _got[0].terms
+              and ["x" * 61, "y"] not in _got[0].terms)
+        check("⚠️ **不做修补**：`[\"a\"]` 不许被补成 `[\"a\", \"\"]`",
+              _got and all(len(t) == 2 and t[1] for t in _got[0].terms))
+        check("⚠️ `terms` 缺失 / 不是列表 / 是 None -> 空表，**不抛**",
+              atom.parse_reply({"topic": "T", "points": [
+                  {"text": "t", "kind": "要点", "src": [0]}]}, 1)[0].terms == []
+              and atom.parse_reply({"topic": "T", "points": [
+                  {"text": "t", "kind": "要点", "src": [0], "terms": None}]}, 1)[0].terms == []
+              and atom.parse_reply({"topic": "T", "points": [
+                  {"text": "t", "kind": "要点", "src": [0], "terms": "nope"}]}, 1)[0].terms == [])
+        check("⭐ `.atoms.jsonl` 的键集合**逐字不变**（`terms` 本来就在，不是新字段）",
+              sorted(_got[0].as_json()) == ["epoch", "id", "kind", "src", "t", "terms", "text"],
+              str(sorted(_got[0].as_json())))
+
+        print("\n--- ⑩ ⭐ 主题截断：英文标题不许被拦腰截断 ---")
+        # ⚠️ 变异验证：把 `TOPIC_MAX` 改回 12 → 第一条红。
+        _long = "Why the marginal utility of the last unit falls as consumption rises"
+        _o = {"topic": _long, "topic_zh": "边际效用为何随消费量上升而下降，这是一个很长的中文标题"}
+        check("⭐⭐ 英文主题**不再截在 12**（12 是按中文定的）",
+              atom.topic_of(_o) == _long and len(atom.topic_of(_o)) > 12,
+              f"拿到 {atom.topic_of(_o)!r}（{len(atom.topic_of(_o))} 字）")
+        check("⭐ 中文标题截在 `TOPIC_ZH_MAX`(=24)",
+              len(atom.topic_zh_of(_o)) == 24, str(len(atom.topic_zh_of(_o))))
+        check("⚠️ 空串是**合法**的，两个函数都不兜底",
+              atom.topic_of({}) == "" and atom.topic_zh_of({}) == ""
+              and atom.topic_of(None) == "" and atom.topic_zh_of(None) == "")
+        check("⚠️ 模型没给 `topic_zh` -> 空串（**不退回英文** —— 那是消费方的决定）",
+              atom.topic_zh_of({"topic": "T"}) == "")
+
+        print("\n--- ⑪ ⭐ SYS 的输出骨架（改英文为主之后）---")
+        # ⚠️⚠️ 第一版这里**抓子串**（找以 `"points"` 开头的那行、看它含不含 `terms`）——
+        #    结果**判据自己红了**：`terms` 在骨架的**续行**上，不在 `"points"` 那行。
+        #    → 改成**结构性断言**：把骨架当 JSON 解析，再查键。抓子串永远会漏续行。
+        import json as _json
+        _lines = atom.SYS.splitlines()
+        _s = next((i for i, ln in enumerate(_lines)
+                   if ln.strip().startswith('{"topic"')), None)
+        _e = next((i for i in range(_s or 0, len(_lines))
+                   if _lines[i].rstrip().endswith("}]}")), None)
+        _skel = _json.loads("\n".join(_lines[_s:_e + 1])) if _s is not None and _e else None
+        check("⭐ 骨架是**合法 JSON**（模型照着它回，形状错了就白搭）",
+              isinstance(_skel, dict), str(_skel)[:120])
+        check("⭐ 骨架顶层有 `topic_zh`（英文标题 + 中文标题成对）",
+              isinstance(_skel, dict) and "topic_zh" in _skel, str(sorted(_skel or ())))
+        check("⭐ `points[0]` 带 `terms` 字段",
+              isinstance(_skel, dict) and "terms" in (_skel.get("points") or [{}])[0],
+              str(sorted((_skel or {}).get("points", [{}])[0])))
+        check("⚠️ `kind` 枚举那行**仍然是**六个中文值（内部枚举不是显示文字）",
+              any('"kind": "主题|要点|定义|例子|课务|讲者强调"' in ln
+                  for ln in atom.SYS.splitlines()))
+
+        # ⚠️ `bad` 必须**就在结算这一处**算 —— `test_entry_panel.py` 栽过一次：
+        #    它算在中间，加在它后面的判据**只打印、不进统计、失败也不影响退出码**。
         bad = [n for n, ok, _ in RESULTS if not ok]
         print("\n" + "=" * 60)
         print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

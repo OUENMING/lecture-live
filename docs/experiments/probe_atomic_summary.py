@@ -39,15 +39,17 @@ sys.path.insert(0, str(ROOT))
 
 WINDOW_MIN = 5.0                     # 一个窗口喂多少分钟的转录
 API = "https://api.deepseek.com/v1/chat/completions"
-MODEL = "deepseek-chat"
 
-# ⚠️ `SYS` 与 `traceable` **都不是本文件定义的** —— 它们是 `atom.py` 的
-#    （`kind` 枚举的唯一定义点、机械闸门的唯一定义点）。
+# ⚠️ `SYS` / `KINDS` / `MAX_POINTS` / `traceable` / **`MODEL`** 都**不是本文件定义的** ——
+#    它们是 `atom.py` 的（`kind` 枚举的唯一定义点、机械闸门的唯一定义点）。
 #    2026-09-28 从本文件**搬进** `atom.py`：这里是探针，不该是第三处定义。
 #    ⚠️ 顺带一处**消歧**：那个 kind 从 `明示强调` 改名成 **`讲者强调`** ——
 #       实测那 24 条里只有 2 条真的含考试字样，其余是"讲者强调了这段"的**语义**判断，
 #       与 `PLAN-panel-ux.md §9` 定义的「明示用语」（字符串、可机械核验）**不是一回事**。
-from atom import SYS, KINDS, MAX_POINTS, traceable          # noqa: E402
+#    ⚠️⚠️ **`MODEL` 是 2026-09-30 才并进来的**（原来本文件自己写着 `deepseek-chat`，
+#       是仓库里第三处定义点）→ **本文件 2026-09-29 之前跑出来的结果用的是
+#       `deepseek-chat`，改完之后是 `deepseek-flash`，新旧结果别直接比。**
+from atom import SYS, KINDS, MAX_POINTS, MODEL, traceable   # noqa: E402
 
 
 # ---------------- 判据（先自测再用） ----------------

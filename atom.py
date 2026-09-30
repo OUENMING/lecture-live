@@ -45,10 +45,26 @@ import pathlib
 import time
 
 ATOM_TAIL = ".atoms.jsonl"
-MODEL = "deepseek-chat"
+#: ⚠️ 2026-09-30 作者拍板：全仓统一成这个 —— 原来这里是 `deepseek-chat`，
+#:    而 `--cloud-model` 默认 `deepseek-flash`（全仓 9 处用它），原子层是个特例。
+#:    换得动已验证：`deepseek-flash + json_object` **本来就在生产跑**
+#:    （`build_notes.build()` 的默认模型就是它，`:283` 把它传进 `_chat_json`），
+#:    而 `_chat_json` 里 `"thinking": {"type": "disabled"}` 已经关了思考模式。
+MODEL = "deepseek-flash"
 MAX_TOKENS = 700
 TEMPERATURE = 0.0
 MAX_POINTS = 5
+
+#: `terms` 对的个数上限与每个字符串的长度上限。⚠️ 2026-09-30 起 `terms` 不再恒空。
+#:   上限的理由同 `MAX_POINTS`：它是**注入 prompt 的成本闸门**，不是模型的自觉。
+MAX_TERMS = 3
+TERM_MAX_CHARS = 60
+
+#: `topic` / `topic_zh` 的截断长度。
+#: ⚠️ `topic` 原来是 **12** —— 那是**按中文**定的，换成英文主题后会把标题**拦腰截断**
+#:    （`Why the marginal utility falls` 在 12 字处断在 `Why the mar`）。2026-09-30 放宽到 80。
+TOPIC_MAX = 80
+TOPIC_ZH_MAX = 24
 
 # ⚠️ **this is the single definition point** for `kind`（探针的 SYS 从这里取）。
 #    `讲者强调` 刻意**不叫** `明示强调` —— 见模块头那条消歧。
@@ -58,10 +74,12 @@ SYS = """你在听一节课的实时转录, 每段给你该段新增的英文定
 你的任务**不是**写摘要, 而是**记下这段里真正新出现的信息**, 供学生课上快速重入。
 
 输出严格 JSON:
-{"topic": "本段主题(中文为主, 术语保留英文, 不超过 12 字)",
- "points": [{"text": "一条要点(中文, 一句话)",
+{"topic": "本段主题(不超过 8 个英文词)",
+ "topic_zh": "中文标题(术语保留英文)",
+ "points": [{"text": "一条要点(英文, 一句简短的话)",
              "kind": "主题|要点|定义|例子|课务|讲者强调",
-             "src": [3, 4]}]}
+             "src": [3, 4],
+             "terms": [["price elasticity of demand", "需求价格弹性"]]}]}
 
 硬性要求:
 - **没有可记的就返回 `{"topic": "", "points": []}`** —— 闲聊、点名、设备调试、
@@ -70,7 +88,11 @@ SYS = """你在听一节课的实时转录, 每段给你该段新增的英文定
 - `text` 里不许出现行号以外的引用标记; 单行, 不带换行。
 - 最多 5 条。只依据给的内容, 不引入外部知识。
 - `讲者强调` 只标**讲者明确强调**的那句（"记住这个"/"这一点很重要"），
-  **不是**"你觉得重要"。"""
+  **不是**"你觉得重要"。
+- ⭐ **英文写简单句、用常用词** —— 它是给非英语母语的人**一眼扫过**的, 不是写作文。
+  长从句、生僻词、口语填充词（um / you know）一律不要。
+- ⭐ `terms` 只放**关键术语和关键短语**（学生真会抄进复习纸的那种),
+  每条 point **最多 3 对**, 形如 `[["英文", "中文"]]`。没把握就留空数组 —— 宁可空, 不要凑。"""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -132,6 +154,34 @@ def build_prompt(sentences, prev_topic: str = "") -> str:
     return f"{head}{chr(10).join(lines)}"
 
 
+def terms_of(p: dict) -> list:
+    """`terms` 的机械闸门：**只收「两个字符串组成的对」**，每个 ≤`TERM_MAX_CHARS`
+    字符，最多 `MAX_TERMS` 对，其余一律丢。
+
+    ⚠️ 它是**系统边界**（模型回的东西）—— 形状不对就丢，**不做修补**。
+       同 `src` 那条纪律：把 `["a"]` 补成 `["a", ""]` 是**替模型编内容**。
+    ⚠️ 两侧都要 `strip()` 后再判空 —— 全是空格的串过得了 `isinstance` 那一关。
+    ⚠️ 公开的（不是 `_terms_of`）：**`chapter.py` 的合成句用同一条校验** ——
+       抄第二份迟早分叉，而分叉的表现是"原子里的术语对得上、合成句里的对不上"。
+    """
+    out = []
+    for pair in (p.get("terms") or []):
+        if not (isinstance(pair, (list, tuple)) and len(pair) == 2):
+            continue
+        en, zh = pair
+        if not (isinstance(en, str) and isinstance(zh, str)):
+            continue
+        en, zh = en.strip(), zh.strip()
+        if not en or not zh:
+            continue
+        if len(en) > TERM_MAX_CHARS or len(zh) > TERM_MAX_CHARS:
+            continue
+        out.append([en, zh])
+        if len(out) >= MAX_TERMS:
+            break
+    return out
+
+
 def parse_reply(obj, n_sent: int, *, base_id: int = 0,
                 stamp: tuple = ()) -> list:
     """模型回的 dict → `[Atom]`。**这里是全部的机械闸门。**
@@ -140,6 +190,7 @@ def parse_reply(obj, n_sent: int, *, base_id: int = 0,
     - `kind` 不在 `KINDS` 里 → 归到 `要点`（**fail-open**：宁可归错档，不可静默丢一条）
     - `text` 为空 / 超长的丢掉
     - 最多 `MAX_POINTS` 条
+    - `terms` 走 `terms_of` 的校验（**2026-09-30 起真的会填**，此前恒空）
     - **`topic` 为空且 `points` 为空 → 返回 `[]`**（"没什么可记"是合法输出）
 
     ⚠️ 丢掉而不是修剪：`src` 越界意味着这条**引用不实**，
@@ -162,7 +213,8 @@ def parse_reply(obj, n_sent: int, *, base_id: int = 0,
         if kind not in KINDS:
             kind = "要点"                                 # fail-open
         out.append(Atom(id=base_id + len(out), t=t, epoch=epoch,
-                        src=sorted(set(src)), kind=kind, text=text))
+                        src=sorted(set(src)), kind=kind, text=text,
+                        terms=terms_of(p)))
         if len(out) >= MAX_POINTS:
             break
     return out
@@ -178,9 +230,29 @@ def rebase(atoms, base: int) -> list:
     return [dataclasses.replace(a, src=[base + i for i in a.src]) for a in atoms]
 
 
+def _label_of(obj, key: str, limit: int) -> str:
+    """`topic` / `topic_zh` 的**共同**读法：取字段 → `strip` → 截断。**唯一定义点。**"""
+    return str((obj or {}).get(key) or "").strip()[:limit]
+
+
 def topic_of(obj) -> str:
-    """`topic` 字段（空串 = 这段没什么可记）。⚠️ 它**不是** atom，是窗口标签。"""
-    return str((obj or {}).get("topic") or "").strip()[:12]
+    """`topic` 字段（空串 = 这段没什么可记）。⚠️ 它**不是** atom，是窗口标签。
+
+    ⚠️ 2026-09-30 起它是**英文**，截断从 12 放宽到 `TOPIC_MAX` ——
+       12 是按中文定的，套在英文标题上会拦腰截断。
+    ⚠️ 它同时**进下一窗的 prompt**（`build_prompt` 的 `prev_topic`）→
+       放宽会让 prompt 变长一点，那是有意的（标题完整比省几个 token 重要）。
+    """
+    return _label_of(obj, "topic", TOPIC_MAX)
+
+
+def topic_zh_of(obj) -> str:
+    """`topic_zh` 字段 —— 与 `topic_of` **成对**，一个英文标题一个中文标题。
+
+    ⚠️ 空串是**合法**的（模型没给中文）→ 消费方自己决定退回英文，
+       **不在这里兜底**（兜底会把「模型没给」和「给了空的」抹成一样）。
+    """
+    return _label_of(obj, "topic_zh", TOPIC_ZH_MAX)
 
 
 # ---------------------------------------------------------------- 旁路写入器

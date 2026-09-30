@@ -373,6 +373,172 @@ def rollup_lines(text, height, line_h, prev_base_len=None):
     return f"{top}\n{base}", len(base)
 
 
+# ---------------------------------------------------------------- 课堂纲要的行
+#: 纲要里「大字」那档用的字号 —— 与答案接管**同一个字号**（`_answer_font`，18pt）。
+#: ⚠️ 刻意复用而不是另定一档：纲要和答案都是"正文级"的阅读材料，
+#:    再切一个新字号只会多一个要维护的档位。
+
+
+def fold_rows(text, fits, split) -> list:
+    """一段文字 → 折成若干**大字行**。**纯函数**：测量由调用方注入。
+
+    ⚠️ 形状照 `rollup_lines`（模块级、不 import AppKit、`fits`/`split` 由调用方给）——
+       **不起窗口就能单测**，验的正是"断点挑在哪"这个真会出错的地方。
+
+    ⚠️ 生产传进来的 `fits` / `split` 包装 `_answer_fits` / `_answer_split_to_fit`。
+       那两个**只读** `self._tv.text_width()` 与 `self._answer_font`，
+       **不读写任何可变的 `_answer_*` 状态**（2026-09-30 核实）→ 给纲要复用是安全的。
+       ⚠️ **包装层也不许读写 `_answer_*`** —— 一旦写了，纲要和答案会互相踩。
+
+    ⚠️ `split(word)` 的契约是「返回**一个**能放下的最长前缀」（不是列表），
+       所以超长词要**循环切**，不是切一次就完事（第一版就写错成切一次）。
+
+    规则：按词贪心装行；一个词**自己**就放不下时循环 `split` 切它。
+    ⚠️ 空串 → **空列表**（不是 `[""]` —— 那会白白多出一个空行槽）。
+    ⚠️ 一个字都切不下来（`split` 返回空串）时**整词独占一行**：宁可溢出被系统裁掉，
+       也不在这儿丢字（同 `_answer_split_to_fit` 自己那条「切而不是丢」的纪律）。
+    """
+    text = " ".join(str(text or "").split())
+    if not text:
+        return []
+    if fits(text):
+        return [text]
+    rows: list = []
+    cur = ""
+    for word in text.split(" "):
+        cand = f"{cur} {word}" if cur else word
+        if fits(cand):
+            cur = cand
+            continue
+        if cur:
+            rows.append(cur)
+            cur = ""
+        rest = word
+        while rest and not fits(rest):
+            piece = split(rest) or ""
+            if not piece or len(piece) >= len(rest):
+                break                          # 切不动 -> 交给下面兜底
+            rows.append(piece)
+            rest = rest[len(piece):]
+        cur = rest
+    if cur:
+        rows.append(cur)
+    return rows
+
+
+def build_outline_rows(outline, seen_t, mode, fold) -> list:
+    """纲要的原材料 → `[(大字, 小字), …]`。**纯函数**（不起窗口也能单测）。
+
+    ⚠️ **行序即屏幕顺序**：`TranscriptView` 的文档视图**不翻转**，
+       `items[0]` 在**最上方**（`_place` 用 `count - 1 - level` 取值）
+       → **列表第一个元素就是屏幕上最上面那行**。
+
+    ⭐ **排法①（作者 2026-09-30 拍板）：中文当大字、英文原句降小字。**
+       与**直播字幕一致**（那边中文那行也更大）—— 沿用既有视觉词汇。
+       ⚠️ 这条**偏离了计划 §9.3 的原规格**（那里写「大字为英文句」）；
+          作者的决定更晚，计划那一节**已同步改掉**。
+       ⚠️ `en` 和 `src` **一个都没丢**：可追溯性靠小字那行。
+       ⚠️ **没有 `zh` 时退回英文当大字** —— `zh` 缺失不该让内容消失。
+
+    ⚠️ `mode == "raw"`（纯转录档）→ **空列表**。
+    ⚠️ `mode == "en"`（只英·校）→ **所有中文小字留空**，大字也退回英文。
+    ⚠️ 行一律是 `(大字, 小字)` **二元组**；折行之后**只有第一行挂小字**
+       （小字是这条的注解，重复挂等于刷屏）。
+    """
+    if mode == "raw":
+        return []
+    only_en = (mode == "en")
+    out: list = []          # [(大字, 小字)]
+    at: list = []           # 每行挂一个「这一行是什么时刻」（给分隔线定位）；空串 = 没有时刻
+
+    def _push(big, small="", when=""):
+        rows = fold(big)
+        for i, r in enumerate(rows):
+            out.append((r, small if i == 0 else ""))
+            at.append(when if i == 0 else "")
+
+    def _terms(s):
+        """术语对照。⚠️ `en` 档下**整段留空**（那时小字里一个中文都不该有）。"""
+        if only_en:
+            return ""
+        return " · ".join(f"{a} {b}" for a, b in (s.get("terms") or []))
+
+    def _sub(*parts):
+        return " · ".join(p for p in parts if p)
+
+    # ① 课务置顶，**最新的在上**（后进来的先看到）
+    for d in reversed(list(outline.get("deadlines") or [])):
+        _push(f" 📌  {d.get('quote', '')}",
+              _sub(f"{d.get('t', '')} · 待确认",
+                   "已改期" if d.get("changed") else ""),
+              d.get("t") or "")
+
+    # ② 离线空档
+    for g in outline.get("gaps") or []:
+        _push(f"（{g.get('t_from', '')}–{g.get('t_to', '')} 未生成：离线）",
+              "", g.get("t_from") or "")
+
+    # ③ 章节：**按时间排**（`lo` 小的在前），不是按 id —— id 是产出顺序
+    chs = outline.get("chapters") or {}
+    for cid in sorted(chs, key=lambda k: (chs[k].get("lo") or 0, str(k))):
+        c = chs[cid]
+        _push(f"▍{c.get('title') or '（无标题）'}",
+              _sub(f"{c.get('t0', '')}–{c.get('t1', '')}",
+                   "" if only_en else (c.get("title_zh") or ""),
+                   "临时" if c.get("status") == "interim" else ""),
+              c.get("t0") or "")
+        sents = c.get("sentences") or []
+        if sents:
+            for s in sents:
+                flag = {"board": "⚠ 依赖板书或图，转录不完整",
+                        "discussion": "课堂讨论"}.get(s.get("flag"), "")
+                en = s.get("en", "")
+                zh = "" if only_en else (s.get("zh") or "").strip()
+                _push(zh or en,
+                      _sub(en if zh else "", _terms(s), flag),
+                      c.get("t0") or "")
+        else:
+            # ⚠️ 没有合成句（还没合成 / 合成失败）→ **退回它的原子要点**，不是留空
+            for a in _atoms_in(c, outline):
+                _push(f"• {a.get('text', '')}", _terms(a), c.get("t0") or "")
+        # 落在本章时间段里的 ❓
+        for m in outline.get("marks") or []:
+            if (c.get("t0") or "") <= str(m) <= (c.get("t1") or ""):
+                _push(f"❓ 你在 {m} 标记了这里", "", str(m))
+
+    # ④ 进行中的章 —— ⚠️ **推**出来的，不是新状态：
+    #    `_outline` 里没有 `current_*` 字段（§9.1 的数据结构就那六个键），
+    #    加字段**超出计划**。所以这里用「**没被任何已合成章覆盖**的原子」反推。
+    covered = set()
+    for c in chs.values():
+        lo, hi = c.get("lo") or 0, c.get("hi") or 0
+        covered.update(range(lo, hi + 1))
+    live = [a for a in (outline.get("atoms") or [])
+            if ((a.get("src") or [0])[0] not in covered)]
+    if live:
+        wins = outline.get("windows") or []
+        topic = (wins[-1].get("topic") if wins else "") or "当前主题"
+        _push(f"▍{topic} · 进行中")
+        for a in live:
+            _push(f"• {a.get('text', '')}", _terms(a))
+
+    # ⑤ 「上次看到这里」分隔线 —— 插在**第一条时刻晚于 `seen_t`** 的行**之前**。
+    #    ⚠️ 时刻单独记在 `at[]` 里，**不从渲染出来的文字里反解** ——
+    #       标题行的 `t0–t1` 是个带破折号的串，用小字去 split 找会漏（第一版就是这么写错的）。
+    if seen_t:
+        pos = next((i for i, t in enumerate(at) if t and t > seen_t), None)
+        if pos is not None:
+            out.insert(pos, ("— 上次看到这里 —", ""))
+    return out
+
+
+def _atoms_in(c, outline) -> list:
+    """落在这章 `[lo, hi]` 里的原子。**纯函数**（`build_outline_rows` 的小helper）。"""
+    lo, hi = c.get("lo") or 0, c.get("hi") or 0
+    return [a for a in (outline.get("atoms") or [])
+            if lo <= (a.get("src") or [0])[0] <= hi]
+
+
 # ---- 草稿上滚的动效(机制 = 自己驱动 f(t), 见 docs/PLAN-roll-motion.md §4.2 路 A) ----
 # 时长: **三方独立收敛** —— 我们 §11 的 macOS 惯例 0.20-0.35s · 现成动效体系的 standard
 # 档 280-350ms · CFR §15.119 的上限 ≤0.433s。另: 系统默认 `NSAnimationContext.duration`
@@ -578,7 +744,26 @@ class Overlay:
         self._answer_pr: list = []
         self._answer_pw: list = []
         self._mode_before_answer = True     # 接管前是"收起"吗(dismiss 时还原)
-        self._tv_mode = "cap"               # 转录区当前喂的是字幕还是答案
+        self._tv_mode = "cap"               # 转录区喂的是: "cap" 字幕 / "ans" 答案 / "outline" 纲要
+
+        # ---- 实时总结的课堂纲要（计划 §9.1）----
+        #: 纲要开着没有。⚠️ 它和 `_answer_on` **互斥**（打开纲要会先清掉答案，见 §9.4）。
+        self._outline_on = False
+        #: `summary_update` 累积出来的原材料。**只在主线程读写**。
+        #: ⚠️ `chapters` 是**按 id 的字典**（正式版要能顶掉同 id 的临时版）。
+        self._outline = {"deadlines": [], "chapters": {}, "atoms": [],
+                         "windows": [], "gaps": [], "marks": []}
+        #: 打开那一刻生成的行。**打开期间冻结** —— 不在读者眼皮底下挪动文字。
+        self._outline_snapshot: list = []
+        #: 上次打开纲要的时刻（`HH:MM:SS`）—— 给「上次看到这里」那条分隔线用。
+        self._outline_seen_t = None
+        #: 上次打开之后有没有新的**正式**章节（章节条那个小圆点）。
+        self._outline_new = False
+        #: 打开纲要**之前**是不是收起态（关上时还原到它，而不是无条件展开）。
+        self._mode_before_outline = True
+        #: 章节条：标签 + 盖在上面的透明点击区（造法照 `_gloss_hit`，见 `_layout`）。
+        self._chapter_lbl = None
+        self._chapter_hit = None
         # 上一轮是否已经 answer_done。追问时用它判断"这是一轮新的回答" ——
         # 不重置的话新一轮的流式增量会**接在上一轮答案后面**, 屏上是两轮粘在一起
         # (实测: 4 行的答案涨到 8 行, 直到 answer_done 对账才恢复)。

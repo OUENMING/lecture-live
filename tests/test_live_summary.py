@@ -1061,6 +1061,79 @@ def main() -> int:
                   _fin and not _bad,
                   f"{len(_fin)} 章 · 超限的 {_bad} · 全部 {_ov}")
 
+        print("\n--- ㉟ T17 `overlay.fold_rows`：按字数算的假 `fits` ---")
+        # ⚠️ 这是计划 §11.1 的 T17。`overlay` 的**纯函数**（不起窗口）——
+        #    测量由调用方注入，所以判据里传个按字数算的假函数就够。
+        import overlay as _ov
+        _f = lambda s: len(s) <= 10                    # noqa: E731
+        _sp = lambda w: w[:10] if w else ""            # noqa: E731
+        check("空串 -> **空列表**（不是 `['']`，那会白多一个空行槽）",
+              _ov.fold_rows("", _f, _sp) == []
+              and _ov.fold_rows("   ", _f, _sp) == [])
+        check("放得下就一行", _ov.fold_rows("hello", _f, _sp) == ["hello"])
+        _long = _ov.fold_rows("alpha beta gamma delta epsilon", _f, _sp)
+        # 改坏：去掉 `while rest and not fits(rest)` 那个循环（只切一次）-> 这条红。
+        check("⭐⭐ **没有一行超出**（含超长单词那条路）",
+              all(len(r) <= 10 for r in _long), str(_long))
+        check("⭐ 超长单词被**切开**（`split` 的契约是返回一个最长前缀 → 要**循环**切）",
+              _ov.fold_rows("x" * 25, _f, _sp) == ["x" * 10, "x" * 10, "x" * 5],
+              str(_ov.fold_rows("x" * 25, _f, _sp)))
+        check("⭐ 一个词都切不动（`split` 返回空串）-> **整词独占一行**，不丢字",
+              _ov.fold_rows("abcd", lambda s: False, lambda w: "") == ["abcd"],
+              str(_ov.fold_rows("abcd", lambda s: False, lambda w: "")))
+
+        print("\n--- ㊱ T18 `overlay.build_outline_rows`：行序与排法 ---")
+        _ol = {"deadlines": [{"t": "15:40:16", "quote": "Spend 20 minutes in the data lab",
+                              "changed": False},
+                             {"t": "15:53:16", "quote": "Make a graph", "changed": True}],
+               "chapters": {
+                   "0": {"id": 0, "status": "final", "title": "T1", "title_zh": "题一",
+                         "t0": "15:05:27", "t1": "15:16:35", "lo": 1, "hi": 10,
+                         "sentences": [{"en": "EN one", "zh": "中一",
+                                        "terms": [["a", "甲"]], "src": [2], "flag": None}]},
+                   "1": {"id": 1, "status": "interim", "title": "T2", "title_zh": "题二",
+                         "t0": "15:16:43", "t1": "15:20:00", "lo": 11, "hi": 20,
+                         "sentences": []}},
+               "atoms": [{"text": "a-point", "src": [15], "terms": [["b", "乙"]]}],
+               "windows": [{"topic": "进行中的题"}],
+               "gaps": [{"t_from": "15:30:00", "t_to": "15:35:00"}], "marks": []}
+        _fold = lambda t: _ov.fold_rows(t, _f, _sp)    # noqa: E731
+        _R = _ov.build_outline_rows(_ol, None, "both", _fold)
+        _big = [b for b, _ in _R]
+
+        check("⭐⭐ 课务**置顶**，且**最新的在上**",
+              _big[0].startswith("📌") and "Make a" in _big[0] and "Spend" in "".join(_big),
+              str(_big[:4]))
+        check("⭐⭐ 排法①：**中文当大字、英文降小字**（作者 2026-09-30 拍板）",
+              "中一" in _big and any(s.startswith("EN one") for _, s in _R),
+              str([r for r in _R if "中一" in r[0] or "EN one" in r[1]][:1]))
+        check("⭐ 已改期那条标了「已改期」", any("已改期" in s for _, s in _R))
+        check("⭐ 临时章在小字里带「临时」", any("临时" in s for _, s in _R))
+        check("⭐⭐ 没有合成句的章 -> **退回它的原子要点**（不是留空）",
+              any(b.startswith("• a-point") for b, _ in _R), str(_big[-3:]))
+        check("⭐ 离线空档渲染成一行", any("未生成：离线" in b for b, _ in _R))
+        check("⭐ 没有 `current_*` 字段也推得出「进行中」—— 推出来是空的就不打标题",
+              all("进行中" not in b for b, _ in _R),
+              "本夹具的原子全被已合成章覆盖了")
+        check("⭐⭐ `raw` 档 -> **空列表**",
+              _ov.build_outline_rows(_ol, None, "raw", _fold) == [])
+        _en = _ov.build_outline_rows(_ol, None, "en", _fold)
+        # 改坏：`_terms` 里去掉 `if only_en: return ""` -> 这条红。
+        check("⭐⭐ `en` 档：**所有中文小字留空**（大字也退回英文）",
+              all("甲" not in s and "乙" not in s and "题一" not in s for _, s in _en)
+              and any(b == "EN one" for b, _ in _en),
+              str([r for r in _en if "EN" in r[0]][:1]))
+        # ⚠️ 分隔线：插在**第一条时刻晚于 `seen_t`** 的行**之前** ——
+        #    夹具里第一条有时刻的行是课务 `15:53:16` > `15:15:00` → 落在 index 0。
+        _d = _ov.build_outline_rows(_ol, "15:15:00", "both", _fold)
+        check("⭐⭐ `seen_t` 的分隔线插在第一条更晚的行**之前**",
+              _d[0][0] == "— 上次看到这里 —", str(_d[:2]))
+        check("⭐ 分隔线的位置**不从渲染文字里反解**（标题行的 `t0–t1` 是带破折号的串）",
+              _ov.build_outline_rows(_ol, "16:00:00", "both", _fold)[0][0] != "— 上次看到这里 —",
+              "16:00 晚于所有时刻 -> 不该插")
+        check("⭐ `seen_t=None` -> **不插**分隔线",
+              not any("上次看到这里" in b for b, _ in _R))
+
     except BaseException as e:                            # noqa: BLE001
         # ⚠️⚠️ **一条判据自己抛了，不许把整个文件带崩。**
         #    崩了的话：后面的组**一条都不跑**、只留一个 traceback、**没有 ❌ 行** ——

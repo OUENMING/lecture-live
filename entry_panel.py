@@ -1755,6 +1755,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         ⚠️ **两栏都空 = 合法选择**，不是错误（HIG：配置必须能推迟）。
         """
         import keyentry
+        # ⚠️⚠️ **这一行不能省**（2026-09-30 实测抓到的真 bug）：本模块**没有**
+        #    模块级的 `notice`，另外两处用它都各自 `import`，唯独这里漏了 ——
+        #    于是点「翻译引擎」**一跑就 `NameError`**，而 AppKit 把 action 里的
+        #    异常**吞掉** → 用户看到的是「点了没反应」，跟「按钮没接上」一模一样。
+        #    从 3.8.0 起一直如此（`pyright` 的 `reportUndefinedVariable` 一跑就报）。
+        import notice
 
         got = notice.ask_text(
             "填 API key",
@@ -2572,7 +2578,26 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #     只判 `b is None` 的话，上一批的结果会**覆盖**用户正在核对的新批次，
             #     连 `busy` 一起置假 → 看着像"新批次跑完了"，其实内容是旧的。
             #     `run_search.work` 早就用 `s.get("q") != q` 防了同一件事。
+            #
+            # ⚠️⚠️ **`mine is None` 必须一起判**（2026-09-30 修，pyright 抓出来的）。
+            #    只写 `S.get("batch") is not mine` 有个洞：用户在 `_classify` 与
+            #    这个线程真正开跑之间点了「取消」→ `S["batch"] = None` →
+            #    `mine` 也是 `None` → `None is not None` 判成 **False**（"没换过"）→
+            #    **不返回** → 落到下面 `mine["verdicts"]` → `TypeError`。
+            #    ⚠️ 这一格**只有"取消"这一条路**能撞到，而且线程是 daemon、
+            #       异常没人接 —— 表现为"点了取消之后面板偶尔不刷新"，很难查。
             mine = S.get("batch")
+            if mine is None:
+                # ⚠️ **早退，不只是"最后别写回"**：下面那一大段会真干活 ——
+                #    `load_api_key` 读盘、`courses.list_courses`、
+                #    **`corpus.keywords()` 把每门课的转录全读一遍**（那是这里最贵的一步）。
+                #    批次已经取消了还跑这些，纯属白干（而且下面 `S["batch"]["weak"]`
+                #    会直接 `TypeError` 掉进 except，白跑完还得再报一次错）。
+                #    这一格只在「`_classify` 与线程真正开跑之间被取消」时命中，
+                #    窗口很小，但**它是唯一能保证下面那段一次都不跑的写法**。
+                # ⚠️ 判据两处缺一不可（变异验证抓过）：删掉它 → `corpus.keywords`
+                #    会被调；只删最后那句守卫 → 落到 `mine["verdicts"]` 崩。
+                return
             got, err = list((mine or {}).get("verdicts") or []), ""
             try:
                 import classify

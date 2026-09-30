@@ -4,7 +4,7 @@
 并真正移动视口 —— 原方案成立, 不需要降级阶梯。
 
 **本脚本验两件事**(都只能真机测, 合成事件测不出来):
-  ① 收起态: 滚轮**必须生效**, 滚上去后出现 ↓ 最新。
+  ① 收起态: 滚轮**必须生效**, 滚上去**脱离跟随**（`follow` 翻假）。
      ⚠️ 2026-09-24 解耦后**行为与旧版相反**: 滚动权限原先绑在"收没收起"上
      (收起态吞滚轮), 导致"把窗口拉大也不能滚", 于是顶栏那个展开按钮被迫承担
      "解锁滚动"的职责。现在解耦成"**始终可滚**" —— 拉窗口 = 看几句, 滚动 = 往回翻。
@@ -46,8 +46,8 @@ SENTS = [
 PROBE_N = 60
 
 PHASES = [
-    (0.0, 16.0, True,  "① 收起态：滚动 -> 应能【自由滚动】；滚上去后出现 ↓ 最新"),
-    (16.0, 40.0, False, "② 展开态：滚动 -> 应能【自由滚动】；滚上去后出现 ↓ 最新"),
+    (0.0, 16.0, True,  "① 收起态：滚动 -> 应能【自由滚动】；滚上去后脱离跟随"),
+    (16.0, 40.0, False, "② 展开态：滚动 -> 应能【自由滚动】；滚上去后脱离跟随"),
 ]
 
 
@@ -183,7 +183,7 @@ def main():
 
     print("=" * 66)
     print("验收探针: %d 句历史, 收起 -> 展开 两阶段自动切换" % PROBE_N)
-    print("  ① 0-16s  收起态 —— 应能滚动; 滚上去出现 ↓最新")
+    print("  ① 0-16s  收起态 —— 应能滚动; 滚上去脱离跟随")
     print("  ② 16-40s 展开态 —— 同上(展开态现在只由答案接管触发)")
     print("=" * 66)
 
@@ -233,7 +233,12 @@ def main():
                 st["last_oy"] = oy
                 st["last_oy_t"] = now
 
-            hidden = o._btn_latest.isHidden()
+            # ⚠️ **别读 `_btn_latest`** —— 那个按钮 2026-09-30 删了（活并进「字幕」），
+            #    探针原来读它的 `isHidden()`，于是跑到这一行就 `AttributeError`。
+            #    → 改读**它当年被谁驱动**：`_on_follow_change(follow)` 是
+            #      `setHidden_(follow)`，所以 `hidden == following`，**逐字等价**。
+            #    下面 `bad_at` 那行本来就在读 `following`，这里只是把它提上来。
+            hidden = o._tv.following
             if oy > 3.0 and not hidden:
                 st["latest_seen_visible"] = True
             # ⚠️ 只认"**持续**隐藏"才算问题: 离开底部的那一帧, 视口已动而
@@ -253,13 +258,13 @@ def main():
                 last_lbl_t = now
                 phase_lbl.setStringValue_("%s   (剩 %.0fs)" % (text, remain))
                 read_lbl.setStringValue_(
-                    "recv=%d   origin.y=%.0f   ↓最新=%s"
-                    % (st["recv"], oy, "隐藏" if hidden else "显示"))
+                    "recv=%d   origin.y=%.0f   跟随=%s"
+                    % (st["recv"], oy, "是" if hidden else "否"))
             key = (idx, int(remain))
             if key != last_print and int(remain) % 4 == 0:
                 last_print = key
-                print("   t=%.0fs recv=%-4d origin=%-7.0f ↓最新=%s"
-                      % (el, st["recv"], oy, "隐藏" if hidden else "显示"), flush=True)
+                print("   t=%.0fs recv=%-4d origin=%-7.0f 跟随=%s"
+                      % (el, st["recv"], oy, "是" if hidden else "否"), flush=True)
             # 不再 sleep: 节奏完全由 pump 的让步决定(与真身 main.py 一致)。
             # 原来的 sleep(0.01) 会把事件排空压到 ~100Hz, 探针自身就成了卡顿源。
     except KeyboardInterrupt:
@@ -282,13 +287,13 @@ def main():
             verdict = ("❌ 视口没动(移动 %.0fpx, 收到 %d 个滚轮事件)"
                        % (moved, st["recv"]))
         elif not st["latest_seen_visible"]:
-            verdict = "❌ 滚上去了但 ↓最新 没出现"
+            verdict = "❌ 滚上去了但**没脱离跟随**（follow 仍是真）"
         elif st["latest_seen_hidden_after_scroll"]:
-            verdict = ("⚠️ 滚上去时 ↓最新 曾经是隐藏的"
+            verdict = ("⚠️ 滚上去时 follow 曾经还是真"
                        + ("  (首次见于 origin=%.1f following=%s recv=%d)"
                           % st["bad_at"] if st["bad_at"] else ""))
         else:
-            verdict = "✅ 视口移动 %.0fpx, ↓最新 出现/消失正确" % moved
+            verdict = "✅ 视口移动 %.0fpx, follow 翻假/翻真正确" % moved
         ok_all = ok_all and good
         print("  阶段 %d (%s): %s" % (st["i"] + 1,
                                      "收起" if st["collapsed"] else "展开", verdict))

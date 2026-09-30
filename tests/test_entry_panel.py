@@ -1282,6 +1282,74 @@ def _add_wiring_section() -> None:
                 E.S["batch"] = None
                 E.S["add"] = None
                 E.S.pop("_focus_add", None)
+
+            # ── ⭐⭐ 「取消」那一格：`mine is None` 不许崩 ────────────────
+            # 动机（2026-09-30，pyright 抓出来的）：`work()` 里那句守卫写的是
+            #   `if S.get("batch") is not mine: return`
+            # 而用户在 `_classify` 与线程**真正开跑**之间点了「取消」时：
+            #   `S["batch"] = None` → `mine` 也是 `None`
+            #   → `None is not None` 判成 **False**（"没换过"）→ 不返回
+            #   → 落到 `mine["verdicts"] = ...` → **TypeError**（daemon 线程里，没人接）
+            # 症状：点了取消之后面板偶尔不刷新 —— 极难查。
+            #
+            # ⚠️⚠️ **必须确定性构造，不能用 sleep 赌窗口**（本文件被抓过两次：
+            #    「因为来不及所以没调」不是「没调」）。办法：**把线程 target 抓下来**，
+            #    手工决定什么时候跑它 —— 于是"取消发生在线程开跑之前"就成了必然。
+            # ⚠️ `_start_classify` 要求批次处于「等着分类」那一档
+            #    （`need_course` 为真 + 有 `pending`），而上一段刚把 batch 清成 None
+            #    → 不补状态的话它直接早退，**一个线程都不会起**，
+            #    于是下面的前置变红（第一版就是这么写的）。
+            E.S["batch"] = {"verdicts": [], "busy": False, "total": len(pdfs),
+                            "dropped": 0, "error": "", "need_course": True,
+                            "pending": list(pdfs), "matched": {}}
+            _real_thread = E.threading.Thread
+            _captured: list = []
+
+            class _NoStartThread:
+                def __init__(self, target=None, daemon=None, **kw):
+                    _captured.append(target)
+
+                def start(self):
+                    pass                              # 抓下来，不真跑
+
+            try:
+                E.threading.Thread = _NoStartThread
+                h.start_classify()
+            finally:
+                E.threading.Thread = _real_thread
+            check("⚠️ 前置：确实抓到了那个 worker（否则下面两条是空转）",
+                  len(_captured) == 1 and callable(_captured[0]),
+                  f"抓到 {len(_captured)} 个")
+            # 现在**必定**模拟出那个窗口：批次在 worker 跑之前就没了
+            E.S["batch"] = None
+            # ⚠️⚠️ **观测量选「那段最贵的 I/O」，不是 `suggest`**（第一版写的是
+            #    `len(ASKED) 不变`，**变异验证当场证明它是假绿**）：
+            #    删掉早退之后，代码在 `S["batch"]["weak"] = …` 那一行就 `TypeError`
+            #    掉进 `except` 了，**根本走不到 `suggest`** → 两边都"没调 suggest"。
+            #    而 `corpus.keywords()`（把每门课的转录全读一遍）在它**之前**，
+            #    正好是早退唯一能挡住的、也是最贵的那一步。
+            import corpus as _corpus_mod
+            _kw_calls: list = []
+            _real_kw = _corpus_mod.keywords
+
+            def _spy_kw(*a, **kw):
+                _kw_calls.append(a)
+                return _real_kw(*a, **kw)
+
+            _corpus_mod.keywords = _spy_kw
+            try:
+                _captured[0]()                        # 同步跑 worker
+                _boom = ""
+            except Exception as e:                    # noqa: BLE001
+                _boom = f"{type(e).__name__}: {str(e)[:80]}"
+            finally:
+                _corpus_mod.keywords = _real_kw
+            check("⭐⭐ 批次已被取消 -> worker **不炸**（原来 TypeError）", not _boom, _boom)
+            check("⭐⭐ 而且**早退**了 —— 那段最贵的 I/O（读全部转录）一次都没跑",
+                  _kw_calls == [], f"`corpus.keywords` 被调了 {len(_kw_calls)} 次")
+            check("⭐ 而且没把 `batch` 又变回一个 dict（取消就是取消）",
+                  E.S.get("batch") is None, str(E.S.get("batch"))[:60])
+
             check("建完输入行收起来了", E.S.get("add") is None)
 
             h.add_course("ECON10999")              # 第二次 = 已经有了

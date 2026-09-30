@@ -116,14 +116,21 @@ update_classlive() {
   #   ③ **绝不自动下模型** —— 1GB 的东西要不要下是用户的决定, 只打印命令。
   #
   # 这里只留两件 bash 更合适的事: **补依赖** + **跑 doctor**（环境关注点）。
-  _req_before="$(shasum requirements.txt 2>/dev/null | cut -d' ' -f1)"
 
   "$PY" update.py || return $?
 
-  # 依赖变了才装 —— 每次都装会白等, 且可能把环境改坏
-  if [ "$_req_before" != "$(shasum requirements.txt 2>/dev/null | cut -d' ' -f1)" ]; then
+  # 依赖要不要补 —— **判据只有一份**：`update.pending_steps()` 里有没有 `deps` 那条
+  # （它比的是 requirements.txt 的指纹 vs「上次装完」记下的那个戳记）。
+  #
+  # ⚠️⚠️ 原来这里比的是「**这次 pull 前后** requirements.txt 变没变」—— 那是**第二份
+  #    判据**，而且比戳记**窄**：戳记丢了、清单又没变的机器，它永远说"不用装"。
+  #    而这种机器是真实存在的 —— 走 `./install.sh` 装出来的**从来不写戳记**（3.8.4 前），
+  #    于是那句「补依赖」永远消不掉，更新卡片还写着「再点一次这个按钮」。
+  #    2026-09-30 实测：朋友的机器就卡在这，他跑 `cl update` 也修不好。
+  #    → 两处判据合流之后，「在终端跑 cl update」才真的能把那件事办掉。
+  if "$PY" update.py --steps 2>/dev/null | grep -q '^deps'; then
     echo
-    echo "🔧 依赖清单有变化, 正在安装…"
+    echo "🔧 正在补依赖…"
     if command -v uv >/dev/null 2>&1; then
       uv pip install --python "$PY" -q -r requirements.txt 2>&1 | tail -3
     else

@@ -634,6 +634,190 @@ check("⭐⭐ 而且**不许说成「网络不通」**（误诊 —— 用户会
       bool(r.get("blocked")) and "网络" not in (r.get("user_msg") or ""),
       f"blocked={r.get('blocked')} user_msg={(r.get('user_msg') or '')[:60]!r}")
 
+# ======================= F. 「补依赖」的戳记 =======================
+# ⭐ 2026-09-30 加。作者的朋友实测：从没跑过 `cl update` 的机器上，
+#    更新卡片永远显示「补依赖 · 约 1–3 分钟」，而点了它**永远做不成**——
+#    终端里那个确认框弹不出来（`notice._can_alert()` 只在 .app 里为真）→
+#    默默按「先不做」→ 卡上写「再点一次这个按钮」→ 再点一次还是这样。
+#    **死循环。**
+# 根因两条：① `make-app.sh`（`./install.sh` 那条）装了依赖但**从不写戳记** ——
+#    全仓只有 `cl:145` 写，所以走 install.sh 装出来的机器**永远**认为依赖没装；
+#    ② 戳记路径原来是个模块级常量，**测试的沙盒换不掉它**（见 F2）。
+print("\nF. 「补依赖」的戳记\n")
+
+print("--- F1 ⭐⭐ 装了依赖 -> 戳记写下 -> `pending_steps()` 不再喊「补依赖」---")
+tmp, seed, clone = new_world()
+(clone / "requirements.txt").write_text("numpy>=9.9\n", encoding="utf-8")
+check("F1 前置：requirements 指纹对不上 -> 确实列了「补依赖」",
+      [s["key"] for s in update.pending_steps()].count("deps") == 1,
+      str([s["key"] for s in update.pending_steps()]))
+update.mark_reqs_installed()
+check("⭐⭐ 记下之后 -> 「补依赖」**消失**（这就是朋友那个死循环的解药）",
+      "deps" not in [s["key"] for s in update.pending_steps()],
+      str([s["key"] for s in update.pending_steps()]))
+
+print("--- F2 ⭐⭐ 戳记路径必须跟着 `STATE_DIR` 走（沙盒隔离的写端）---")
+# ⚠️ 原来写的是 `REQS_STAMP = STATE_DIR / "reqs-installed"` —— **import 那一刻就绑死**，
+#    而 `new_world()` 换的是 `update.STATE_DIR` → 常量不跟着走 →
+#    沙盒里跑一次 `--mark-reqs` 会写进**用户真正的** `~/Library/Logs/ClassLive/`，
+#    而且写进去的是**沙盒那份 requirements 的指纹** → 真机上从此永远显示「补依赖」。
+#    正是 CLAUDE.md 那条「测试必须隔离写端」的形状（只换读端、没换写端）。
+check("⭐⭐ 换 `STATE_DIR` 之后，戳记路径跟着换（不跟 = 会写坏真机器）",
+      str(update._reqs_stamp()).startswith(str(tmp)),
+      f"STATE_DIR={update.STATE_DIR} 戳记={update._reqs_stamp()}")
+
+print("--- F3 ⭐⭐ `make-app.sh` 要写戳记，而且必须在**构建成功之后** ---")
+# 判据是**位置**不是「这个字符串出现过」：
+#   ① `--mark-reqs` 必须排在 `uv pip install … requirements.txt` **之后**
+#      （排前面 = 还没装就记「已装」）；
+#   ② 必须排在 `fingerprint > "$STAMP"` **之后** —— 那是脚本自己标的成功点
+#      （「只有走到这里才算构建成功」）。排前面的话，中途失败时 ③ 的 trap
+#      会把**旧** .app 移回来，而那份装的可能是旧依赖 → **戳记在说谎**。
+_mk_src = (pathlib.Path(update.__file__).resolve().parent / "make-app.sh").read_text(
+    encoding="utf-8").splitlines()
+
+
+def _line_of(needle: str) -> int:
+    """第一个**非注释**行里含 needle 的行号（0 起）。找不到 -1。
+
+    ⚠️ 跳过注释行是必须的 —— 上面那段说明文字里就有 `--mark-reqs` 这个词，
+       不跳的话这条判据会被**自己的注释**喂饱（本仓栽过一次，见
+       `test_audit_regressions` 的 R16）。
+    """
+    for i, ln in enumerate(_mk_src):
+        if needle in ln and not ln.lstrip().startswith("#"):
+            return i
+    return -1
+
+
+_i_install = _line_of("-r \"$HERE/requirements.txt\"")
+_i_stamp = _line_of('fingerprint > "$STAMP"')
+_i_mark = _line_of("--mark-reqs")
+check("⭐⭐ `make-app.sh` 真的会写戳记（少了它，install.sh 装出来的机器永远喊「补依赖」）",
+      _i_mark > 0, f"install@{_i_install} stamp@{_i_stamp} mark@{_i_mark}")
+check("⭐⭐ 而且排在**装依赖之后**（排前面 = 还没装就记「已装」）",
+      _i_install > 0 and _i_mark > _i_install,
+      f"install@{_i_install} mark@{_i_mark}")
+check("⭐⭐ 而且排在**构建成功点之后**（构建失败时旧 .app 会被移回来，那时记就是撒谎）",
+      _i_stamp > 0 and _i_mark > _i_stamp,
+      f"stamp@{_i_stamp} mark@{_i_mark}")
+
+# ======================= G. 更新卡片对终端说人话 =======================
+# ⭐ 2026-09-30 加。作者的朋友实测：终端启动 → 点卡片上的「立即更新」→
+#    「出现缺依赖，然后等了两三分钟没反应」。那两三分钟**根本没人开始跑**：
+#    `notice.alert` 只在 `.app` 里弹得出来（判据 `CLASSLIVE_FROM_APP`）——
+#    终端里它**只打印、然后立刻返回 fallback「先不做」**，不等人回答。
+#    于是重活被默默否决，而卡上接着写「再点一次这个按钮」→ 再点一次走**同一段**
+#    → 永远是这句。**死循环。**
+#    → 修法：先问「问得到人吗」，问不到就别装作问过了，直说敲哪条命令。
+print("\nG. 更新卡片对终端说人话\n")
+
+
+def _card_run(*, can_alert: bool, pending: list[str]) -> tuple[list[str], list[str]]:
+    """驱动真的 `_whatsnew_update`，返回 (卡片状态行, 卡片按钮标题)。
+
+    ⚠️ 只借一个最小替身喂 `set_status` / `set_title` / `done` ——
+       `_whatsnew_update` **不用 `self`**（逐行核过），所以不用建真窗口。
+    ⚠️ `update.pull` / `AppHelper.callAfter` 都被接住：不联网、不跑 run loop。
+    ⚠️ `pending_steps` **喂两轮**：先决定要不要问，收尾再问一次还剩什么。
+    """
+    import overlay
+    import notice
+    from PyObjCTools import AppHelper
+
+    lines: list[str] = []
+    titles: list[str] = []
+    seq = list(pending)
+
+    orig = (notice._can_alert, notice.alert, AppHelper.callAfter,
+            update.pull, update.pending_steps)
+    notice._can_alert = lambda: can_alert
+    notice.alert = lambda *a, **k: "先不做"      # 用户没点「现在做」
+    AppHelper.callAfter = lambda fn, *a: fn(*a)  # 立刻回写，不等 run loop
+    update.pull = lambda: {"ok": True, "skipped": False, "blocked": False,
+                           "error": "", "before": "0.0.1", "after": "0.0.2",
+                           "commits": 1, "log": [], "reqs_changed": False,
+                           "models_changed": False, "user_msg": ""}
+    update.pending_steps = lambda: [{"key": k, "label": f"{k} 标签",
+                                     "detail": f"{k} 明细", "why": f"{k} 为什么"}
+                                    for k in (seq if seq else [])]
+    try:
+        import threading
+        done = threading.Event()
+        overlay.Overlay._whatsnew_update(
+            None, lambda t, a=0.75: lines.append(t), titles.append, done.set)
+        done.wait(10)
+    finally:
+        (notice._can_alert, notice.alert, AppHelper.callAfter,
+         update.pull, update.pending_steps) = orig
+    return lines, titles
+
+
+_lines, _titles = _card_run(can_alert=False, pending=["deps"])
+check("⭐⭐ 终端里（弹不出框）收尾**不许**说「再点一次这个按钮」—— 那是死循环",
+      not any("再点一次" in x for x in _lines), str(_lines))
+check("⭐⭐ 而要给出**真能兑现**的那条：在终端跑 cl update",
+      any("cl update" in x for x in _lines), str(_lines))
+_lines2, _ = _card_run(can_alert=True, pending=["deps"])
+check("⚠️ 对照：`.app` 里（弹得出来）照旧说「再点一次这个按钮」",
+      any("再点一次" in x for x in _lines2), str(_lines2))
+
+print("--- G2 ⭐⭐ `cl update` 真的能把那句兑现（判据与卡片同源）---")
+# ⚠️ 上面那条话术成立的前提是：`cl update` **真的会去装**。而它原来比的是
+#    「**这次 pull 前后** requirements.txt 变没变」—— **第二份判据**，比戳记窄：
+#    戳记丢了、清单又没变的机器它永远说"不用装"。→ 改成问 `--steps`。
+_cl_src = (pathlib.Path(update.__file__).resolve().parent / "cl").read_text(
+    encoding="utf-8")
+# ⚠️ 钉**位置**不钉「整个文件里有没有」（2026-10-01 独立审核指出）：
+#    `--steps` 必须和 `grep` 出现在**同一行**（那才是那条判据本身）。
+#    单独在哪出现一次不算数 —— 判定「有没有这个字符串」的判据，
+#    被挪去注释里也照样绿。真被整行注释掉的话由下面 G2 的沙盒实跑兜底。
+_c_same_line = any("--steps" in L and "grep" in L for L in _cl_src.splitlines())
+check("⭐⭐ `cl update` 问的是 `update.py --steps`（判据与卡片同源），"
+      "不是自己算的 shasum 差",
+      _c_same_line and "_req_before" not in _cl_src,
+      f"same-line={_c_same_line} _req_before={'_req_before' in _cl_src}")
+
+# 真跑一遍：沙盒里放一个**会报 deps 待做**的假解释器，看 cl 有没有走到装依赖。
+# ⚠️⚠️ **HOME 也必须是沙盒的**：`cl` 自己会往 PATH 后面补 `$HOME/.local/bin`
+#    （那是给双击启动补 `uv` 的）—— 用真 HOME 的话 `uv` 会被找到，
+#    于是**真去联网装包**。假 HOME 下找不到 uv → 走 `$PY -m pip` 那条兜底 →
+#    仍然是被 FAKEPY 接住。判据只问「有没有走到这一步」，不碰网络。
+_sand2 = ROOT / "sandbox_deps"
+_sand_home = _sand2 / "home"
+(_sand2 / "ClassLive.app" / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
+_sand_home.mkdir(parents=True, exist_ok=True)
+_sh.copy2(pathlib.Path(update.__file__).resolve().parent / "cl", _sand2 / "cl")
+(_sand2 / "requirements.txt").write_text("numpy>=2.0\n", encoding="utf-8")
+_fake2 = _sand2 / "ClassLive.app" / "Contents" / "MacOS" / "python"
+_fake2.write_text(
+    '#!/bin/sh\n'
+    'case "$*" in\n'
+    '  *"--steps"*) printf "deps\\t补依赖\\t约 1–3 分钟\\n"; exit 0 ;;\n'
+    'esac\n'
+    'echo "FAKEPY $@"\nexit 0\n', encoding="utf-8")
+_fake2.chmod(0o755)
+
+
+def _cl_run(sand_home) -> str:
+    r = _sp.run(["bash", str(_sand2 / "cl"), "update"], capture_output=True, text=True,
+                timeout=60, env={"PATH": "/usr/bin:/bin", "HOME": str(sand_home)})
+    return r.stdout + r.stderr
+
+
+_out2 = _cl_run(_sand_home)
+check("⭐⭐ 报了 deps -> `cl update` **真的去装了**（并写了戳记）",
+      "FAKEPY update.py --mark-reqs" in _out2, _out2.strip()[-260:])
+check("⚠️ 前置：那次也确实重建了 .app（否则上一条可能只是空转）",
+      "FAKEPY update.py --run-step app" in _out2, _out2.strip()[-260:])
+
+# 对照：没报 deps 时**不许**装（别每次 cl update 都白等一次 uv）
+_fake2.write_text('#!/bin/sh\necho "FAKEPY $@"\nexit 0\n', encoding="utf-8")
+_fake2.chmod(0o755)
+_out3 = _cl_run(_sand_home)
+check("⚠️ 对照：没报 deps -> **不装**（不许每次 cl update 都白等一次）",
+      "FAKEPY update.py --mark-reqs" not in _out3, _out3.strip()[-260:])
+
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}")

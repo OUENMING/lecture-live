@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 import tempfile
@@ -175,6 +176,51 @@ def main() -> int:
             dt = (time.perf_counter() - t) * 1000
             # ⚠️ 将来语料长大这条会红 —— 那就是"该上索引了"的信号（计划 §6）
             check(f"⭐ 全量扫描 < 2000 ms（实测 {dt:.0f} ms, {rr.total} 命中）", dt < 2000)
+
+        print("\n--- ⑩ ⭐⭐ 降级档：`_OW = None`（没有 PyObjC / obsidian_writer）---")
+        # ⚠️⚠️ 本模块文件头写着「`find` 要能在没装 PyObjC 的环境里被 import」——
+        #    那条承诺的落地形状就是 `try: import obsidian_writer / except: _OW = None`。
+        #    而 `default_roots()` 里**一个护栏一个裸取**：
+        #      · `getattr(_OW, "SESSIONS", None)`   ← 有
+        #      · `_OW.resolve_vault()`              ← 没有 → `AttributeError`
+        #    → `_OW` 拿不到时整个函数炸；而**读的人看到上面那行 getattr 就会以为
+        #      整段都防住了** —— 半吊子护栏比没有更容易骗人。
+        #    变异验证（实跑过）：把 `if _OW is None: return roots` 那行删掉 → 本条变红。
+        _saved = find._OW
+        try:
+            find._OW = None
+            try:
+                _r = find.default_roots()
+                _err = ""
+            except Exception as e:                        # noqa: BLE001
+                _r, _err = None, f"{type(e).__name__}: {e}"
+            check("⭐⭐ `_OW = None` 时 `default_roots()` 不炸", _r is not None, _err)
+            check("⭐ 而且仍给出 `glossary/` 那个根（降级不等于搜不了）",
+                  bool(_r) and any(k == "glossary" for _, k in _r), str(_r))
+            # ⚠️ `_r` 为 None（上面那条已经红了）时这里必须**跟着红** —— 写成
+            #    `(_r or [])` 会变成空序列 → `all(...)` 恒真，成了「只在顺境里
+            #    成立」的判据（2026-10-01 独立审核指出）。
+            check("⚠️ 而且**没有**会话/笔记根（那两处要 obsidian_writer 才查得到）",
+                  _r is not None and all(k not in ("session", "note") for _, k in _r),
+                  str(_r))
+        finally:
+            find._OW = _saved
+        # 对照：正常那一档三个根都在（别把降级的写法反过来套到正常路上）
+        # ⚠️ **读端也要隔离**（2026-10-01 独立审核指出）：不注入 `OBSIDIAN_VAULT`
+        #    的话，这台机器上「`~/.classlive/vault` 记没记过」决定这条判据红绿 ——
+        #    没配过 vault 的机器只出两个根 → **假红**。`resolve_vault()` 只认环境
+        #    变量、不检查目录存不存在，所以给个固定串就够（不建任何目录）。
+        _saved_env = os.environ.get("OBSIDIAN_VAULT")
+        os.environ["OBSIDIAN_VAULT"] = "/tmp/cl-find-control-vault"
+        try:
+            _n = find.default_roots()
+        finally:
+            if _saved_env is None:
+                del os.environ["OBSIDIAN_VAULT"]
+            else:
+                os.environ["OBSIDIAN_VAULT"] = _saved_env
+        check("⚠️ 对照：`_OW` 正常时三个根都在（session / glossary / note）",
+              sorted(k for _, k in _n) == ["glossary", "note", "session"], str(_n))
 
         bad = [n for n, ok, _ in RESULTS if not ok]
         print("\n" + "=" * 60)

@@ -1500,6 +1500,27 @@ class R17_ChangelogSummary(unittest.TestCase):
         got = self._summ("### 更新看点\n\n- **粗体**和`代码`\n")
         self.assertEqual(got.splitlines(), ["粗体和代码"])
 
+    def test_continuation_starting_with_bold_keeps_no_orphan_star(self):
+        """⭐⭐ 续行若以 `**粗体**` 开头，不许留下一个孤儿 `*`（2026-09-30 修）。
+
+        ⚠️ 原来项目符号那行是 `re.sub(r"^[-*]\\s*", "", s)` —— `\\s*` 允许**零个**空白，
+        于是续行的第一个 `*` 被当成项目符号吃掉，剩下的 `*粗体` 里那个孤星再也没人剥。
+        真机症状（写 3.8.4 文案时撞上）：卡片上显示成「重活被 *默默跳过」。
+
+        ⚠️ **判据必须让续行真的以 `**` 开头** —— 上面那条 `test_markup_is_stripped`
+        是单行、以 `- ` 开头，从两个方向都绕过了这个 bug（写它的时候没想到）。
+        变异验证（实跑过）：把 `\\s+` 改回 `\\s*`，这条变红，其余三条不动。
+        """
+        got = self._summ("### 更新看点\n\n"
+                         "- 第一条很长，长到折了行\n"
+                         "  **后半截是粗体**，接着还有字\n")
+        self.assertEqual(got.splitlines(), ["第一条很长，长到折了行 后半截是粗体，接着还有字"])
+
+    def test_normal_bullets_still_stripped(self):
+        """⚠️ 对照：真项目符号后面**有**空白，照旧吃掉（`\\s+` 不许把这条弄丢）。"""
+        got = self._summ("### 更新看点\n\n- 甲\n* 乙\n")
+        self.assertEqual(got.splitlines(), ["甲", "乙"])
+
 
 class R18_AnswerContextContract(unittest.TestCase):
     """问答线程「全库检索并进 prompt」之后，那条**跨模块契约**还在不在（2026-09-28）。
@@ -1864,6 +1885,88 @@ class R17_WrapperSignatureMatchesCallSite(unittest.TestCase):
         import pathlib
         return (pathlib.Path(__file__).resolve().parent.parent / "main.py").read_text(
             encoding="utf-8")
+
+
+class R21_NoUnboundGlobals(unittest.TestCase):
+    """R21 ⭐⭐ 不许「当成全局用」一个**模块层根本没绑定**的名字。
+
+    2026-09-30 抓到的两个真 bug 都是这一形状：
+
+    · `entry_panel._open_key_entry()` 用了 `notice`，而**本模块从没 import 过它**
+      （另外两处用它都各自 import，唯独这里漏了）→ 点就绪条上的「翻译引擎」
+      **一跑就 `NameError`**；而 AppKit 把 action 里的异常**吞掉** →
+      用户看到的是「点了没反应」，跟「按钮根本没接上」一模一样。
+      ⚠️ **从 3.8.0 起一直如此**，`pyright` 的 `reportUndefinedVariable` 一跑就报。
+    · 3.8.3 那个「一开就崩」是它的近亲：`_load_overlay` 漏了形参 → `TypeError`
+      在**绑定参数那一刻**抛出，包装层自己的 `try` 函数体还没进去。
+
+    ⚠️ 用 `symtable`（Python 自己的作用域分析），**不手搓 AST 遍历** ——
+       本判据的第一版手搓了一版，因为用 `ast.walk` 走整棵子树，
+       把嵌套函数里的 `import notice` 算成了外层绑定的 → **对着已知的坏代码报绿**。
+       量具自己坏了比没有量具更贵。
+    ⚠️ 只扫**生产代码**（`probe_*` / `test_*` 是脚本与判据，标准不同）。
+    ⚠️ 变异验证（实跑过）：把 `entry_panel` 里那行 `import notice` 删掉 → 变红。
+    """
+
+    def test_no_global_used_but_never_bound(self):
+        import builtins
+        import pathlib
+        import symtable
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        bad: dict[str, set] = {}
+        # ⚠️ `tools/` 也是生产代码（`make-app.sh` 会调它）—— 只扫根目录会让
+        #    「只扫生产代码」这个说法比实际覆盖面大（2026-10-01 独立审核指出；
+        #    实测 tools/ + docs/experiments/ 当前是干净的。docs/experiments/
+        #    按「探针标准不同」这条不扫）。
+        for p in sorted(root.glob("*.py")) + sorted(root.glob("tools/*.py")):
+            if p.name.startswith(("probe_", "test_")):
+                continue
+            top = symtable.symtable(p.read_text(encoding="utf-8"), str(p), "exec")
+            mod = {s.get_name() for s in top.get_symbols()
+                   if s.is_assigned() or s.is_imported() or s.is_namespace()}
+            mod |= set(dir(builtins)) | {"__file__", "__name__", "__doc__"}
+
+            def walk(tbl, path=""):
+                for child in tbl.get_children():
+                    for s in child.get_symbols():
+                        n = s.get_name()
+                        if s.is_global() and not s.is_assigned() and n not in mod:
+                            bad.setdefault(p.name, set()).add((n, child.get_name()))
+                    walk(child, path + "/" + child.get_name())
+
+            walk(top)
+        self.assertEqual(
+            bad, {},
+            "这些名字被当全局用了，但模块层没绑定 —— 跑到那一行就是 NameError："
+            f"{ {k: sorted(v) for k, v in bad.items()} }")
+
+    def test_scanner_actually_catches_a_known_bad_snippet(self):
+        """⚠️ **量具自检**：喂一段**已知坏的**代码，它必须报出来。
+
+        没有这条的话，上面那条可能在「扫描器坏了、永远返回空」的情况下**恒绿**
+        —— 而它正是用来抓静默失败的那种判据。（同 `test_ocr_superset` 那条自我怀疑。）
+        """
+        import builtins
+        import symtable
+
+        src = (
+            "def outer():\n"
+            "    def inner():\n"
+            "        return notice.thing()\n"      # ← notice 从没 import
+            "    return inner\n"
+        )
+        top = symtable.symtable(src, "<test>", "exec")
+        mod = {s.get_name() for s in top.get_symbols()
+               if s.is_assigned() or s.is_imported() or s.is_namespace()}
+        mod |= set(dir(builtins)) | {"__file__", "__name__", "__doc__"}
+        hits = set()
+        for child in top.get_children():
+            for sub in child.get_children():
+                for s in sub.get_symbols():
+                    if s.is_global() and not s.is_assigned() and s.get_name() not in mod:
+                        hits.add(s.get_name())
+        self.assertIn("notice", hits, f"扫描器没抓到已知的坏样本：{hits}")
 
 
 if __name__ == "__main__":

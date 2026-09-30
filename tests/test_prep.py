@@ -248,8 +248,8 @@ def main() -> int:
             check("⚠️ 先确认确实有 verified 候选（否则下面那条 `all()` 恒真）",
                   len(_ver) >= 1, f"verified={[c.term for c in _ver]}")
             check("count/spread 是按**子串搜索**算的，不是 0",
-                  all(c.count > 0 for c in _ver),
-                  f"{[(c.term, c.count, c.spread) for c in r.candidates]}")
+                  all(c.occurrences > 0 for c in _ver),
+                  f"{[(c.term, c.occurrences, c.spread) for c in r.candidates]}")
             check("state 文件记下了追加过的词",
                   set(json.loads((tmp / "st" / "prep-state.json").read_text(
                       encoding="utf-8"))["appended"]) >= {"elasticity", "opportunity cost"})
@@ -311,6 +311,40 @@ def main() -> int:
                   prep.prepare("X", [bad_pdf], glossary_dir=gdir,
                                state_path=tmp / "x" / "s.json", chat=chat,
                                build_fn=lambda c: None).aborted == "all_files_failed")
+
+            print("\n    ⭐⭐ `--skip` 排掉一部分（pyright 抓出来的真 bug）")
+            # ⚠️⚠️ 2026-09-30：`per_file` 原来初始化成**被跳过那些文件的 `FileReport`**，
+            #    而下面往它 append 的是 `(文件名, [Block])` 二元组，`_chunks` 按二元组
+            #    解包 → `FileReport` 是 7 字段 NamedTuple → `ValueError: too many values
+            #    to unpack (expected 2)`。
+            #    ⚠️ **只在「排掉一部分但没排光」时触发** —— 全排光会早退成
+            #    `all_files_skipped`、一个都不排则那个列表本来就是空的。
+            #    所以这条判据**必须同时喂「留下的」和「跳过的」两份**，
+            #    只喂一份的话正好绕过它（本判据第一版就是这么写的）。
+            # ⚠️ 断言落在 `status` 上：修好之前这里会**直接抛 ValueError**
+            #    （不是返回某个 aborted）。⚠️ 所以必须**自己接住** ——
+            #    让异常穿出去的话整个文件当场中断，**后面所有判据都跑不到**，
+            #    而结算行还会照旧打「N/N 通过」（它数的是已登记的那几条）。
+            #    变异验证时实测踩到过：种回坏版本 → 崩在 328 行 → 台账全没了。
+            deck2 = tmp / "helper-deck.pptx"
+            shutil.copy2(deck, deck2)
+            try:
+                r_skip = prep.prepare("ECON99999", [deck, deck2], glossary_dir=gdir,
+                                      state_path=tmp / "st5" / "s.json", chat=chat,
+                                      build_fn=lambda c: None, skip=["helper-deck.pptx"])
+                _err = ""
+            except Exception as e:                            # noqa: BLE001
+                r_skip, _err = None, f"{type(e).__name__}: {str(e)[:70]}"
+            check("⭐⭐ 排掉一份、留一份 -> **不炸**（炸的是 `_chunks` 解包）",
+                  r_skip is not None and r_skip.aborted == "",
+                  _err or (f"aborted={r_skip.aborted!r} "
+                           f"files={{f.path.name: f.status for f in r_skip.files}}"))
+            if r_skip is not None:
+                _by = {f.path.name: f.status for f in r_skip.files}
+                check("⭐ 跳过的那个在清单里仍记为 skipped（用户要看得到）",
+                      _by.get("helper-deck.pptx") == "skipped", f"{_by}")
+                check("⭐ 留下的那个照常被抽（没被跳过的一起连坐）",
+                      _by.get(deck.name) == "ok", f"{_by}")
 
             print("\n    ⭐ 有界乘子：可断言的性质")
             def _row(t, c, ratio, title):

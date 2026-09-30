@@ -640,7 +640,12 @@ class Candidate(typing.NamedTuple):
     term: str
     confidence: float
     verified: bool
-    count: int
+    #: 同一个词在某一块里出现过几次。⚠️ **别叫 `count`**（2026-09-30 pyright 抓出来的）：
+    #: `NamedTuple` 继承 `tuple`，而 `tuple.count` 是个**方法** —— 字段同名会把它遮蔽，
+    #: 于是 `candidate.count(x)` 抛 `TypeError: 'int' object is not callable`。
+    #: 今天没人这么调（所以是**潜伏**的，不是活的），但那个报错完全不指向真因 ——
+    #: 谁撞上都会以为是自己写错了括号。（同类的还有 `index`。）
+    occurrences: int
     spread: int
     spread_ratio: float
     title_hits: int
@@ -1001,9 +1006,21 @@ def prepare(course: str, files: list, *, glossary_dir, state_path,
                 FileReport(f, "skipped", 0, 0, 0, 0, "按 --skip 排除") for f in skipped_files])
 
         import extract
-        reports, all_blocks, per_file = [], [], [
-            FileReport(f, "skipped", 0, 0, 0, 0, "按 --skip 排除（仍已归档）")
-            for f in skipped_files]
+        # ⚠️⚠️ **`per_file` 从空表开始**（2026-09-30 修，pyright 抓出来的真 bug）。
+        #    原来这里初始化成**被跳过那些文件的 `FileReport` 列表** —— 而下面
+        #    往它 append 的是 `(文件名, [Block])` **二元组**，`_chunks` 也按二元组
+        #    `for name, blocks in per_file` 解包 → `FileReport` 是 **7** 字段的
+        #    NamedTuple → `ValueError: too many values to unpack (expected 2)`。
+        #    ⚠️ 只在 **`--skip` 排掉了一部分但没排光**的时候触发（全排光会早退成
+        #    `all_files_skipped`，一个都不排则那个列表本来就是空的）——
+        #    所以 `--skip` 一旦真派上用场，`cl prep` 当场炸。
+        #    跳过的文件在 `reports` 里照旧有记录（那才是给用户看的清单）；
+        #    它们本来就没被读，**没有 blocks 可参与分块**。
+        reports, all_blocks, per_file = [], [], []
+        # 跳过的文件照样进 `reports`（那是给用户看的清单）—— 但它们**没被读过**，
+        # 所以不进 `per_file`（`_chunks` 只吃 `(文件名, [Block])`）。
+        reports += [FileReport(f, "skipped", 0, 0, 0, 0, "按 --skip 排除（仍已归档）")
+                    for f in skipped_files]
         for i, f in enumerate(to_read, 1):
             r = extract.extract(f, ocr=ocr)
             reports.append(FileReport(f, r.status, r.chars, len(r.blocks),

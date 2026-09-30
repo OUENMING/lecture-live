@@ -386,6 +386,65 @@ def t_ask_save_closed_during_question():
     assert not hasattr(f, "card_closed") or f.card_closed is False
 
 
+@case("⭐⭐ 关过窗之后：收尾卡**真的把问题问出来了**，不是一个闪帧")
+def t_ask_save_after_close_shows_card():
+    """⭐ 2026-09-30 加。**上面那条对这段回归完全无感** —— 它只断言返回值是
+    `True`，而返回值从头到尾都是对的；坏掉的是**行为**。
+
+    3.8.2 把循环条件写成 `not self._closed`，而 `✕` 之后 `_closed` 本来就是
+    `True`（`_quit` 先 `close()`）→ **循环一次都不跑** → 卡上「存入 / 不存」
+    活 **85 毫秒**（本机实测）就被「正在收尾…」盖掉、按钮一起撤走。
+    用户看到的是「关闭之后它没有弹窗了」。
+
+    ⚠️ 卡用**替身**（`wrapup.build` 换成记录器），不是真建 AppKit 窗口 ——
+       这条判据问的是 `ask_save` 的**时序**，渲染有它自己的判据。
+    ⚠️ 变异验证（实跑过）：把循环条件改回 `not self._closed` → 倒计时一次都不出现 → 红。
+    """
+    import overlay as ov
+    import wrapup as wrapup_mod
+
+    events: list[tuple[str, object]] = []
+
+    def _spy_build(**_kw):
+        c: dict = {"panel": None}
+        c["close"] = lambda: events.append(("close", ""))
+        c["set_status"] = lambda t: events.append(("status", t))
+        c["set_hint"] = lambda t: events.append(("hint", t))
+        c["set_buttons"] = lambda b: events.append(("buttons", len(b)))
+        return c
+
+    class _Fake:
+        _closed = True          # ← ✕ 是浮窗模式的正常停止方式
+        _panel = None
+
+        def pump(self):
+            pass
+
+        def wrapup_close(self):
+            pass
+
+    real = wrapup_mod.build
+    wrapup_mod.build = _spy_build
+    try:
+        got = ov.Overlay.ask_save(_Fake(), 3, timeout=0.3)
+    finally:
+        wrapup_mod.build = real
+
+    assert got is True, f"关过窗不算放弃，该默认存，拿到 {got!r}"
+    assert any(k == "status" and "存入 Obsidian 吗" in str(v)
+               for k, v in events), f"卡上没出现过问句：{events}"
+    assert any(k == "hint" and "自动存入" in str(v)
+               for k, v in events), (
+        f"60 秒倒计时一次都没出现 = 循环一次都没跑（那个 85 毫秒的闪帧）：{events}")
+    assert any(k == "buttons" and v == 2 for k, v in events), (
+        f"「存入 / 不存」两个按钮必须建出来：{events}")
+    kinds = [k for k, _ in events]
+    assert kinds.index("buttons") < kinds.index("hint"), (
+        f"按钮必须先于倒计时出现：{events}")
+    assert events[-1] == ("buttons", 0), (
+        f"问完之后要把按钮撤掉（超时 = 存），最后一条是 {events[-1]}")
+
+
 @case("窗口还开着 → 走 UI（在卡上问）")
 def t_route_open():
     class _Open:

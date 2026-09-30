@@ -582,7 +582,12 @@ def _changelog_summary(version: str, max_lines: int = 6) -> str:
             #       `3.6.5 · （⚠️ 现在只认 Markdown，PDF / PPTX 的自动转换还在做）`
             #   —— 那其实是 3.7.0 某条的后半截。（2026-09-28 写 3.8.0 时才发现。）
             continued = bool(out) and (len(raw) - len(raw.lstrip()) > 0)
-            s = re.sub(r"^[-*]\s*", "", s)                # 有就吃掉，没有也认
+            # ⚠️⚠️ **项目符号后面必须有空白**（`\s+` 不是 `\s*`，2026-09-30 修）。
+            #    原来写 `\s*`：**续行**若以 `**粗体**` 开头，第一个 `*` 被当成项目符号
+            #    吃掉，剩下的 `*粗体` 里那个孤星**再也没人剥** —— 卡片上就显示成
+            #    「重活被 *默默跳过」。续行本身不该有项目符号，所以「要求空白」正是
+            #    它和真项目符号的区别。
+            s = re.sub(r"^[-*]\s+", "", s)                # 有就吃掉，没有也认
             s = re.sub(r"\*\*|`", "", s).strip()
             if not s:
                 continue
@@ -906,8 +911,12 @@ def _show_whats_new(version: str, date: str, summary: str,
     _print_whatsnew_box(version, date, summary, log)
 
 
-def _maybe_notice_update() -> None:
+def _maybe_notice_update() -> dict | None:
     """**一次性**的更新提示: 检测到落后于远程就打印一行, 之后不再打扰。
+
+    **返回**：该弹的「本次更新」卡片 payload（`_whatsnew_payload()` 的产物），
+    没有就 `None`。⚠️ 调用方**直接拿它当 dict 用**（`**payload`）——
+    标注原来是 `-> None`，与四个 `return payload` 对不上（2026-09-30 pyright 抓到）。
 
     ⚠️ 三条自我约束(理由见 README「升级到新版本」):
       1. **默认静默** —— 断网/代理/限流/没有 git 一律什么都不说, 绝不阻塞启动;

@@ -1931,25 +1931,43 @@ class Overlay:
             steps = []
             if os.environ.get("CLASSLIVE_DEBUG"):
                 print(f"[whatsnew] pending_steps 失败: {e}")
+        # ⚠️⚠️ **先问「问得到人吗」，再问人**（2026-09-30 加，同 `entry_panel` 删课那条）。
+        #    `notice.alert` 只在 `.app` 里弹得出来（判据 `CLASSLIVE_FROM_APP`，由 app 的
+        #    sitecustomize 设）。终端里它**只打印、然后立刻返回 `fallback`** ——
+        #    不等人回答。而这里 fallback 是「先不做」→ 那句「补依赖」被**默默否决**，
+        #    卡上接着写「再点一次这个按钮」，而再点一次走的是**同一段代码** → 死循环。
+        #    （2026-09-30 实测：朋友的机器就卡在这 —— 他「等了两三分钟」，
+        #      而那两三分钟根本没人开始跑。）
+        # ⚠️ `import` 放在 try **外面** —— `notice` 是本仓模块，import 本身不会因为
+        #    环境而失败；要防的只是 `_can_alert()`。放里面的话 `notice` 就成了
+        #    「可能未绑定」，而**下面 `notice.alert` 离它 4 行远** —— 读的人要回头
+        #    确认那条路径，正是 3.8.3「一开就崩」那种形状。`pyright` 也会报。
+        import notice
+        can_ask = False
+        try:
+            can_ask = bool(notice._can_alert())
+        except Exception:                                 # noqa: BLE001
+            can_ask = False
         if steps:
-            import notice
             todo = "\n".join(f"· {s['label']} —— {s['detail']}" for s in steps)
-            ans = notice.alert(
-                "更新之外还有几件事要做",
-                f"{todo}\n\n{steps[0]['why']}\n\n"
-                f"现在一起做吗？（要联网，可能要几分钟）",
-                buttons=("现在做", "先不做"),
-                # ⚠️⚠️ **这是确认框，`buttons[0]` 是「现在做」—— 必须显式给安全的那一个。**
-                #    不给的话，"问不到人"（没有终端 / 弹不出来）会被当成用户批准，
-                #    于是**不问就替他跑几分钟的联网重活**。2026-09-28 查出：
-                #    这之前在双击启动那条路上是**真的会**发生的 ——
-                #    那时 `_can_alert()` 方向是反的，`.app` 恰好走"弹不出来"那一支。
-                #    （方向修好之后，双击会正常弹框；但终端里跑仍然是问不到人的，
-                #      所以这条 fallback 依然必须显式写着。）
-                fallback="先不做")
-            if ans == "现在做":
-                approved = list(steps)
-                set_status("正在更新…", 0.75)
+            if can_ask:
+                ans = notice.alert(
+                    "更新之外还有几件事要做",
+                    f"{todo}\n\n{steps[0]['why']}\n\n"
+                    f"现在一起做吗？（要联网，可能要几分钟）",
+                    buttons=("现在做", "先不做"),
+                    # ⚠️⚠️ **这是确认框，`buttons[0]` 是「现在做」—— 必须显式给安全的那一个。**
+                    #    不给的话，"问不到人"会被当成用户批准，于是**不问就替他跑
+                    #    几分钟的联网重活**。2026-09-28 查出：`_can_alert()` 方向是反的
+                    #    那阵子，`.app` 恰好走"弹不出来"那一支，是真的会发生的。
+                    fallback="先不做")
+                if ans == "现在做":
+                    approved = list(steps)
+                    set_status("正在更新…", 0.75)
+            else:
+                # 弹不出来就**别装作问过了** —— 直说那句话该在哪儿敲。
+                print(f"\n⚠ 更新之外还有几件事要做：\n{todo}\n"
+                      f"  要现在做，在终端跑：cl update", flush=True)
 
         def ui(fn, *a) -> None:
             try:
@@ -2008,8 +2026,16 @@ class Overlay:
                 except Exception:                         # noqa: BLE001
                     pass
                 if left:
-                    ui(set_status, f"还有 {len(left)} 件事没做：{left[0]['label']}"
-                                   f"（{left[0]['detail']}）—— 再点一次这个按钮", 1.0)
+                    # ⚠️⚠️ **「再点一次这个按钮」只在点得动的时候才是真的**（2026-09-30）。
+                    #    终端里那个确认框弹不出来 → 上一步的「先不做」是**默认**、不是
+                    #    用户选的 → 再点一次走**同一段** → 永远是这句 → **死循环**。
+                    #    所以话术跟着 `can_ask` 分叉：点得动就说点它，点不动就说敲哪条。
+                    if can_ask:
+                        ui(set_status, f"还有 {len(left)} 件事没做：{left[0]['label']}"
+                                       f"（{left[0]['detail']}）—— 再点一次这个按钮", 1.0)
+                    else:
+                        ui(set_status, f"还有 {len(left)} 件事没做：{left[0]['label']}"
+                                       f"（{left[0]['detail']}）—— 在终端跑 cl update", 1.0)
                     ui(set_title, left[0]["label"])
                 elif not (r["skipped"] and not approved):
                     # 上面 r["skipped"] 那条已经写过"已是最新"了，别覆盖它
@@ -2890,6 +2916,14 @@ class Overlay:
            两条与终端那条同一个纪律：「绝不能因为一次走开或误点丢掉整节课」。
            **要放弃必须显式点「不存」。**
 
+        ⚠️⚠️ **「进来时窗口就已经关着」不算「问话期间被关」**（2026-09-30 补）。
+           ✕ 是浮窗模式的**正常停止方式**，所以双击那条路走到这里时 `_closed`
+           **本来就是 True**（`_quit` 先 `close()` 再回调）。上一版把循环条件写成
+           `not self._closed` → **循环一次都不跑** → 卡上那句「存入 Obsidian 吗？」
+           只活了 **85 毫秒**（本机实测）就被「正在收尾…」盖掉、按钮一起撤走 ——
+           **用户根本来不及看见，等于每节课都不问**。
+           → 只有**这次问话期间新关的窗**才提前收工（那条按「存」走，见下）。
+
         ⚠️⚠️ **为什么把「关窗」从「放弃」改成「存」**（2026-09-30，真事故）：
            朋友的机器上就这么丢了一节课的笔记 —— 课上完点 ✕ 停止，窗口**没撤**
            （`a96024f` 起窗口全程留着，它是唯一的退出口），旁边冒出一张卡问「存不存」，
@@ -2921,9 +2955,11 @@ class Overlay:
             pass
 
         deadline = time.monotonic() + timeout
-        # ⚠️ 窗口被关掉也**立刻**收工（不再为剩下那几十秒空转）—— 关窗现在按「存」走，
-        #    没有任何理由等下去。
-        while ans["v"] is None and not self._closed:
+        # ⚠️⚠️ **进来之前就关着的窗不算数**（2026-09-30 修）。判据是「这次问话期间
+        #    新关的窗」——同 2026-09-29 那半条的做法。写成 `not self._closed` 会让
+        #    循环一次都不跑：卡建出来的 85 毫秒后就被改成「正在收尾…」，等于不问。
+        already_closed = bool(self._closed)
+        while ans["v"] is None and not (self._closed and not already_closed):
             left = deadline - time.monotonic()
             if left <= 0:
                 break

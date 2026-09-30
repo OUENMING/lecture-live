@@ -607,18 +607,28 @@ def spawn_auto_update() -> bool:
 # ⚠️ 记的是「**上次成功装完依赖时** requirements.txt 的指纹」。
 #    用它而不是"这次 pull 有没有改 requirements" —— 后者只在同一次会话里有效，
 #    用户今天更新、明天才补依赖就丢了。
-REQS_STAMP = STATE_DIR / "reqs-installed"
+#
+# ⚠️⚠️ **路径在调用点算，不做成模块级常量**（2026-09-30）。原来写的是
+#    `REQS_STAMP = STATE_DIR / "reqs-installed"` —— 它在 **import 那一刻**就绑死了，
+#    而测试的沙盒换的是 `update.STATE_DIR`（`new_world()` 逐字这么干）→
+#    常量不跟着走 → **沙盒里跑一次 `--mark-reqs` 会写进用户真正的
+#    `~/Library/Logs/ClassLive/`**，而且写进去的是**沙盒那份 requirements 的指纹**，
+#    于是真机上从此永远显示「补依赖」。正是 `CLAUDE.md` 那条「测试必须隔离写端」
+#    要防的形状（只换读端、没换写端）。
+def _reqs_stamp() -> pathlib.Path:
+    return STATE_DIR / "reqs-installed"
 
 
 def mark_reqs_installed() -> None:
     """记下"当前这份 requirements.txt 已经装好了"。
 
-    `cl update` 装完依赖后要调它（`update.py --mark-reqs`），
-    否则终端路径装完了、卡片还以为没装，会一直提示补依赖。
+    三条装依赖的路都要调它 —— **`cl update`（`cl:145`）、卡片上的 deps 步骤
+    （`run_step`）、`make-app.sh`（`./install.sh` 那条）**。少任何一条，
+    那条路装出来/更新出来的机器就会永远看到一句假的「补依赖」。
     """
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        REQS_STAMP.write_text(_reqs_hash(), encoding="utf-8")
+        _reqs_stamp().write_text(_reqs_hash(), encoding="utf-8")
     except Exception:                                     # noqa: BLE001
         pass
 
@@ -674,7 +684,8 @@ def pending_steps() -> list[dict]:
     # ① 补依赖：requirements.txt 的指纹和"上次装完时"对不上
     cur = _reqs_hash()
     try:
-        done = REQS_STAMP.read_text(encoding="utf-8").strip() if REQS_STAMP.exists() else ""
+        _stamp = _reqs_stamp()
+        done = _stamp.read_text(encoding="utf-8").strip() if _stamp.exists() else ""
     except OSError:
         done = ""
     if cur and cur != done:

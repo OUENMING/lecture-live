@@ -236,12 +236,21 @@ def default_roots() -> list:
        而且"这个根是不是会话格式"这件事被埋进了目录名字符串里。
     ⚠️ 会话目录用 `_OW.SESSIONS`（`obsidian_writer` 里的唯一定义点），
        **不在这里手拼 `here / "sessions"`** —— 布局一变两边指的就不是同一处。
+    ⚠️⚠️ **`_OW` 为 `None` 时整段都不能碰它**（2026-09-30 修）：本模块开头
+       `try: import obsidian_writer except: _OW = None`，为的是「find 要能在
+       没装 PyObjC 的环境里被 import」（判据只喂合成语料）。而第 241 行用了
+       `getattr(_OW, ...)` **有**护栏、下面那句 `_OW.resolve_vault()` **没有** ——
+       于是 `_OW is None` 时这一行 `AttributeError`，`default_roots()` 整个炸。
+       修法：**一次判空、两处共用**，不再一个护栏一个裸取（那种半吊子护栏比
+       没有更容易骗过人：读的人看到 241 行就以为整段都防住了）。
     """
-    roots = []
+    roots = [(pathlib.Path(__file__).resolve().parent / "glossary", "glossary")]
+    if _OW is None:
+        # 没有 obsidian_writer = 没有会话目录、也没有库路径可查。
+        # 只剩 `glossary/` 这一个根 —— 检索照常能用（本模块自述的降级契约）。
+        return roots
     if getattr(_OW, "SESSIONS", None):
-        roots.append((_OW.SESSIONS, "session"))
-    here = pathlib.Path(__file__).resolve().parent
-    roots.append((here / "glossary", "glossary"))
+        roots.insert(0, (_OW.SESSIONS, "session"))
     vault = _OW.resolve_vault()
     if vault:
         roots.append((pathlib.Path(vault).expanduser() / "Lectures", "note"))

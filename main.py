@@ -1171,7 +1171,7 @@ def run(args) -> None:
     qa = {"history": [], "consumed": 0, "gen": 0}
 
     def start_new_topic() -> None:
-        """清空问答线程(Phase 3 的「新话题」按钮)。下次提问会重新冻结转录底座 ——
+        """清空问答线程(Phase 3 的「字幕」按钮)。下次提问会重新冻结转录底座 ——
         底座仍是"这节课到此刻为止", 只是不再背着上一个话题的问答历史。"""
         with qa_lock:
             qa["history"].clear()
@@ -1448,9 +1448,9 @@ def run(args) -> None:
                 # **卡住收尾才是真损失**。
                 # ⚠️ 判据是 stopping 而不是 running: running 要到收尾之后才清,
                 # 用它等于没写守卫(实测自然结束时密集流仍卡 15s)。
-                # ⚠️ 再叠 `gen == qa["gen"]`: 按过「新话题」的那一轮**已经在途的增量
+                # ⚠️ 再叠 `gen == qa["gen"]`: 按过「字幕」的那一轮**已经在途的增量
                 # 也必须停**。否则 ① 线程历史把它丢了(下面的判断), ② 面板却被它重新
-                # 接管 —— 用户按「新话题」要的就是"回到字幕", 结果 0.2s 后答案又回到
+                # 接管 —— 用户按「字幕」要的就是"回到字幕", 结果 0.2s 后答案又回到
                 # 屏上, 按钮等于没生效。与下面那条"丢弃这一轮"是同一条规则。
                 if not stopping.is_set() and gen == qa["gen"]:
                     streamq.put(("answer", d))
@@ -1460,10 +1460,10 @@ def run(args) -> None:
             except Exception as e:                # noqa: BLE001
                 text = f"⚠ 讲解失败: {str(e)[:80]}"
             with qa_lock:
-                if gen == qa["gen"]:              # 期间按过「新话题」-> 丢弃这轮
+                if gen == qa["gen"]:              # 期间按过「字幕」-> 丢弃这轮
                     qa["history"].append({"role": "user", "content": content})
                     qa["history"].append({"role": "assistant", "content": text})
-            # 同上: 被「新话题」作废的那一轮连收尾包也不发 —— 连终端那份 echo 一起
+            # 同上: 被「字幕」作废的那一轮连收尾包也不发 —— 连终端那份 echo 一起
             # 丢掉, 与"它不进线程历史"保持一致(半途被作废的回答不该留下记录)。
             if not stopping.is_set() and gen == qa["gen"]:
                 streamq.put(("answer_done", q, text))

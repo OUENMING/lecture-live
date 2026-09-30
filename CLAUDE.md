@@ -26,6 +26,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | **ObjC 类名归属** —— 全项目定义 ObjC 子类只此一处 | `objc_own.py`（**动手前先读它的文件头**） |
 | **开课前的准备**（课件 → 候选术语 → 该课术语表） | `prep.py`（**动手前先读它的文件头**）、`extract.py` |
 | **课程清单 / 片段解析 / 每课的「准备度」**（`cl course` 与第二批面板共用；`glossary/` ∪ `~/.classlive/courses/` 的**并集**） | `courses.py`（⚠️ **`cl course` 的模糊匹配只此一处** —— 别在 shell 里再写一份） |
+| **一份课件该归哪门课**（机械层 + 模型层；`entry_panel` 的批量归档调它） | `classify.py`（⚠️ 命令行**只看不动**：`--limit` / `--no-model` 零成本试跑；`--sessions <目录>` 换课程关键词表的来源 —— 默认是仓库的 `sessions/`，**测的时候指向别处**） |
 | **`~/.classlive/` 那族新路径的唯一定义点** | `paths.py` |
 | **macOS 视觉语言**（同心圆角/字号字距/对比度门槛/材质硬规则/原生指纹）—— 动 `overlay.py` 外观或做第二批面板前读 | `docs/RESEARCH-macos-aesthetic.md` |
 | **实时字幕的行数与 roll-up**（为什么 2 行 / 断点降级链 / 上滚即冻结 / 贴底 / 全部一手出处）—— **动草稿或字幕行前读** | `docs/RESEARCH-live-caption-rollup.md` |

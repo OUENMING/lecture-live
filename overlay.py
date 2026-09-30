@@ -2526,7 +2526,13 @@ class Overlay:
         return word[:best]
 
     def _answer_fits(self, text: str) -> bool:
-        """这段文本在当前文档宽度下放得下 ANSWER_MAX_LINES 个视觉行吗。
+        """这段文本在当前文档宽度下折行后，**高度不超过 `ANSWER_TEXT_H`（45px）吗**。
+
+        ⚠️⚠️ **判据是"高度"，不是"行数"**。这句 docstring 原来写的是
+           「放得下 `ANSWER_MAX_LINES` 个视觉行吗」—— 而**全仓没有那个常量**
+           （2026-09-30 现查；`ANSWER_TEXT_H = 45.0` 才是真实阈值，就在下面那行）。
+           名字猜错的代价：后来者会去找一个不存在的旋钮，或者照 18pt 的字面去
+           推"应该能放 N 行" —— 而真实上限是**量出来的像素高**，随字号/行距变。
 
         宽度取 TranscriptView 的**实测**文档宽度, 不是面板宽度猜出来的值: 展开态挂
         竖向滚动条时 clip 比面板窄十几 px, 猜宽了标签会静默裁掉第三行(NSTextField

@@ -601,6 +601,37 @@ def t_stage_table():
         assert k in polish.STAGE_NAME, f"{k} 不在 STAGE_NAME 里"
 
 
+@case("⭐ `wrapup.measure_text_h` 与 `overlay._measure_text_h` **行为必须一致**")
+def t_measure_text_h_agree():
+    """§15 的一条旧账：同一段实现抄了**两份**（`overlay.py:256` / `wrapup.py:53`）。
+
+    ⚠️ **为什么不合并**（`wrapup` 那份的 docstring 自己写了）：`overlay` 那份在
+       **动画路径**上被每帧调用，搬动的收益不抵风险。⭐ **那条理由成立** ——
+       所以这里**不合并**（不替作者改那个决定）。
+    ⚠️⚠️ **但「行为必须保持一致」此前只写在注释里，没有任何东西在保证它。**
+       改一份、忘另一份，表现是「某个界面静默裁掉一行」
+       （`NSTextField` 超 `maximumNumberOfLines` 既不省略也不报错），
+       而两边**各自的判据都不会红** —— 因为它们量的都是自己那份。
+    → 所以钉的是**行为**（同输入必须同输出），不是钉源码文本。
+    ⚠️ 变异验证（做实了）：把任一处的 `- 2.0` 去掉 / 把
+       `NSStringDrawingUsesLineFragmentOrigin` 换成 0 -> 这条红。
+    """
+    import overlay
+    import wrapup
+    from AppKit import NSFont
+
+    f = NSFont.systemFontOfSize_(13.0)
+    cases = ["短",
+             "一句话中文测试，看看折行高度对不对。",
+             "A somewhat longer English sentence that must wrap at least once.",
+             "混合 mixed 中英 text " * 6]
+    for text in cases:
+        for w in (60.0, 200.0, 640.0):
+            a = overlay._measure_text_h(text, w, f)
+            b = wrapup.measure_text_h(text, w, f)
+            assert a == b, f"{text[:18]!r} @宽度{w}: overlay={a!r} wrapup={b!r}"
+
+
 def main_() -> int:
     print("=" * 60)
     for name, fn in CASES:

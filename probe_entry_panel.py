@@ -25,6 +25,9 @@
     PROBE_ADD=<课号>     走新增课程那条路；**留空**（`PROBE_ADD=`）= 只打开那一行
     PROBE_SESSIONS=<课号>  直接开那门课的课次列表（读**替身** `sessions/`，见下）
     PROBE_ABORT=1       隔离地看「没跑完 + 逐文件失败」两行长什么样
+    PROBE_ZERO=1        零课程那一档（造几个假课件直接走批量那条路）；
+                        再加 PROBE_ZERO_ADD=<课号> 就在 3 秒后建这门课
+                        ⚠️ 这两个是**在 3 秒后**才动手的 —— 起完先别急着关
     PROBE_ICSDRAG=1     验 `.ics` 在**悬停判据**上的真值（`acceptable` / `drop_split`）
                         ⚠️ **它验不了"高亮画上去了没有"** —— 那一步靠
                         `tests/test_panel.py` 第 ⑨ 组（真 `_enter`）+ 你手拖一次

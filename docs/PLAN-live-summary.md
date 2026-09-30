@@ -1480,7 +1480,7 @@ Equation, we'll be using this over and over again · the amount of water in the 
 | 10 | **两门课在降级** | ⚠️ **半开，而且换了门**：`ECON10740` 现查 **6 节 → 不再降级** ✅；`ECON10790` 8 个文件但只 **2 节够格 → 仍降级**。**新增** `ECON0070 TUT`（1 节）也在降级。⚠️ **不能再靠归课解决**（§12.2） |
 | 11 | ⭐ **`ECON10730` 的污染**（§12.1） | ✅ **已收盘** —— `courses.py:502 NO_COURSE` + 守门 `:557/:590`；`sessions/.attribution.json` 里写着 `"2026-09-11_140757_10730": "(不属于任何课)"` |
 | 12 | ⭐ **模型名统一**（D2/D3） | ✅ **已收盘** —— `atom.py:53` / `classify.py:58` 都是 `deepseek-flash`；`chapter.py:47` 是 `MODEL = atom.MODEL`；探针改成 `from atom import … MODEL` |
-| 13 | ⭐ **`ANSWER_MAX_LINES` 过期注释**（§12.4） | ⬜ 还开着，**行号也漂了**：docstring 现在在 `overlay.py:2516`（上面原记 `2025`），说「放得下 `ANSWER_MAX_LINES` 个视觉行」，而该常量**全仓不存在**；真实阈值是 `ANSWER_TEXT_H = 45.0`（`overlay.py:90`） |
+| 13 | ⭐ **`ANSWER_MAX_LINES` 过期注释**（§12.4） | ⬜ 还开着。⚠️ **别抄行号**（这一条的行号一天漂了两次：2025 → 2516 → **2529**）。`grep -n ANSWER_MAX_LINES overlay.py` 现查 —— 它在一句 docstring 里说「放得下 `ANSWER_MAX_LINES` 个视觉行」，而该常量**全仓不存在**；真实阈值是 `ANSWER_TEXT_H = 45.0`（`overlay.py:90`） |
 
 ⚠️ **顺带一条（超出这 13 条）**：`ECON0070 TUT` 自己成了一门独立课（1 节 → 降级），
 而当初为它加的规则是「`ECON10070 TUT` → 剥离课型后缀」—— **课号不一样**

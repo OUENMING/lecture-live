@@ -1107,6 +1107,13 @@ def main() -> int:
         check("⭐⭐ 排法①：**中文当大字、英文降小字**（作者 2026-09-30 拍板）",
               "中一" in _big and any(s.startswith("EN one") for _, s in _R),
               str([r for r in _R if "中一" in r[0] or "EN one" in r[1]][:1]))
+        # ⚠️ 2026-09-30 补：**章标题也要照排法①**（作者：「中文占比再提高一点」）——
+        #    标题用英文、正文用中文会让整节**一上一下**。改坏：把 `_push` 的第一个参数
+        #    换回 `c.get("title")` -> 这条红。
+        check("⭐⭐ 章标题也是排法①（中文大字 / 英文降小字）",
+              any(b.startswith("▍题一") for b, _ in _R)
+              and any(s.startswith("T1 · ") for _, s in _R),
+              str([r for r in _R if r[0].startswith("▍")][:1]))
         check("⭐ 已改期那条标了「已改期」", any("已改期" in s for _, s in _R))
         check("⭐ 临时章在小字里带「临时」", any("临时" in s for _, s in _R))
         check("⭐⭐ 没有合成句的章 -> **退回它的原子要点**（不是留空）",

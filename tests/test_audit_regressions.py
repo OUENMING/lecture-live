@@ -1665,6 +1665,29 @@ class R19_OutlineContract(unittest.TestCase):
         finally:
             o._close_outline()
 
+    def test_biao_ti_button_closes_the_outline(self):
+        """⭐⭐ 「字幕」必须能关掉纲要（2026-09-30 修的真 bug，作者实测）。
+
+        ⚠️ 症状：「点字幕有时候不会切到字幕，还是会留在总结页面」。
+        根因：`_new_topic` 只调 `_clear_answer()`，而**它不认纲要** ——
+        它的早退条件判的是 `_answer_on` / `tv_mode`，`_outline_on` 压根不在它视野里
+        → 纲要开着时点「字幕」**什么都不发生**。
+        ⭐ 顺带钉住「统一回到最新那句」（原来那是另一个按钮的活）。
+        """
+        o = self._ov()
+        o.summary_update({"kind": "chapter", "chapter": {
+            "id": 0, "status": "final", "title": "T", "title_zh": "题",
+            "t0": "15:05:27", "t1": "15:16:35", "lo": 1, "hi": 9, "sentences": []}})
+        o._panel.orderFrontRegardless()
+        o._open_outline()
+        self.assertTrue(o._outline_on, "前置：纲要该是开着的")
+        o._new_topic()                       # ← 「字幕」按钮走的就是它
+        # 改坏：把 `_new_topic` 里 `if self._outline_on: self._close_outline()` 删掉 -> 这条红。
+        self.assertFalse(o._outline_on,
+                         "点「字幕」之后纲要还开着 —— 正是作者报的那个 bug")
+        self.assertEqual(o._tv_mode, "cap", "没切回字幕")
+        self.assertTrue(o._tv.following, "「字幕」该统一回到最新那句（跟随=开）")
+
     def test_toggle_outline_is_a_noop_in_raw_mode(self):
         """⚠️ 纯转录档**根本打不开纲要** —— 与章节条隐藏、菜单项置灰**同一个判据**。"""
         o = self._ov()

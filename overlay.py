@@ -519,9 +519,13 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
     chs = outline.get("chapters") or {}
     for cid in sorted(chs, key=lambda k: (chs[k].get("lo") or 0, str(k))):
         c = chs[cid]
-        _push(f"▍{c.get('title') or '（无标题）'}",
-              _sub(f"{c.get('t0', '')}–{c.get('t1', '')}",
-                   "" if only_en else (c.get("title_zh") or ""),
+        # ⭐ **章标题也照排法①**（作者 2026-09-30：「中文占比再提高一点」）：
+        #    大字 = 中文标题，英文标题降小字。⚠️ 与合成句同一条排法 ——
+        #    标题用英文、正文用中文会让整节读起来**一上一下**。
+        _c_zh = "" if only_en else (c.get("title_zh") or "")
+        _push(f"▍{_c_zh or c.get('title') or '（无标题）'}",
+              _sub(c.get("title") if _c_zh else "",
+                   f"{c.get('t0', '')}–{c.get('t1', '')}",
                    "临时" if c.get("status") == "interim" else ""),
               c.get("t0") or "")
         sents = c.get("sentences") or []
@@ -2731,10 +2735,21 @@ class Overlay:
         self._on_ask()
 
     def _new_topic(self):
-        """「字幕」: 清空问答线程 + 退出答案接管、回到字幕。"""
+        """「字幕」: 退出**任何一种**接管 + 清空问答线程 + **统一回到最新那句**。
+        
+        ⚠️⚠️ **2026-09-30 修的真 bug**（作者实测：「点字幕有时候不会切到字幕，
+           还是会留在总结页面」）：原来只调 `_clear_answer()`，而它**不认纲要** ——
+           它的早退条件判的是 `_answer_on` / `tv_mode`，`_outline_on` **压根不在它视野里**
+           → **纲要开着时点「字幕」什么都不发生**。
+        ⭐ 顺带按作者要求让它**统一回到最新那句**（原来那是另一个按钮「↓ 最新」的活）。
+        ⚠️ 顺序：先关纲要（它会还原尺寸）→ 再清答案 → **最后**滚到底
+           （滚早了会被后面那两次 `_apply_mode` 的重新布局顶掉）。
+        """
         self._on_new_topic()
+        if self._outline_on:
+            self._close_outline()
         self._clear_answer()
-
+        self._tv.scroll_to_bottom()
     def _sync_trans_button(self):
         """按钮文字直接写状态(不靠颜色/图标变暗 —— emoji 不吃 tint, 且弱显色看不清)。"""
         from AppKit import NSColor

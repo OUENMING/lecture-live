@@ -36,11 +36,27 @@
 `--dry` 用固定返回值的桩，**不联网、不花钱**。因为窗口规则是确定性的，
 所以 `--dry` 跑出来的**调用次数就是真跑的次数** —— **拿它报价再决定要不要花钱**。
 
+## ⭐ 覆盖率（`--coverage`）
+
+答的是「**Jev 挑出来的重点句，有多少真被引用进纲要**」。计划 §7.4 的两个口径都记：
+
+| 口径 | 判据 | 低说明什么 |
+|---|---|---|
+| **(a′) 原子级** | 该句出现在**某条原子的 `src`** 里 | 连原子都没抓到它 |
+| **(b) 合成级** | 该句出现在**某条合成句的 `src`** 里 | 章节提炼漏了它 |
+
+⭐ **差值 (a′)−(b) 本身就是信号** —— 原子抓到了、合成时没引进去。
+计划原话：**这正是「读完能不能懂」最该暴露的失败形态**。
+
+⚠️ **要另花钱**（Jev，约 19 次调用/节）→ 默认**不开**，加了 `--coverage` 才跑，
+   而且**跑之前先报价**（计划 §7.4 的要求）。
+⚠️ **编号映射自检不过就不出数字** —— `with_index=True` 出来的句子必须与不带索引的
+   **逐句相同**，不同 = 过滤规则分叉了，那时算出来的是个**像模像样的错数**。
+
 ## ⚠️ 还没做的（阶段 2 的后续）
 
-- **覆盖率**（Jev 的重点句有多少落进纲要）：要先给 `keypoints.sentences()` 加
-  `with_index=True`（见计划 §7.4），还没做 —— 现在这一版**不出覆盖率**。
-- 编号映射自检同上。**在它做出来之前，别把覆盖率当结论。**
+- **`--fail-window`**（断网 → 积压 → 重试 → `gap`）：参数实现了，**一次没跑过**。
+- 「静默」人工检查（随机看几个空窗口的来源句是不是真闲聊）。
 """
 from __future__ import annotations
 
@@ -344,6 +360,8 @@ def run_one(session: pathlib.Path, outdir: pathlib.Path, args) -> dict:
         "gaps": len(insights["gaps"]),
         "elapsed_s": round(elapsed, 1),
     }
+    if args.coverage:
+        metrics["coverage"] = _run_coverage(session, insights, args)
 
     outdir.mkdir(parents=True, exist_ok=True)
     (outdir / f"{name}.outline.md").write_text(
@@ -354,6 +372,95 @@ def run_one(session: pathlib.Path, outdir: pathlib.Path, args) -> dict:
         json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_review(outdir / f"{name}.review.md", name, insights)
     return metrics
+
+
+def coverage_of(picked, atoms, chapters) -> dict:
+    """⭐ **纯函数**：Jev 挑出来的重点句，有多少真被引用了。计划 §7.4 的两个口径。
+
+    · **(a′) 原子级** —— 该句出现在**某条原子的 `src`** 里
+    · **(b) 合成级** —— 该句出现在**某条合成句的 `src`** 里
+
+    ⭐ **差值 `(a′) − (b)` 本身就是信号**：原子抓到了、合成时没引进去 ——
+      「该句确实属于这一章，但提炼漏了它」。计划原话：**这正是「读完能不能懂」最该
+      暴露的失败形态**。⚠️ 只记一个就把这个差丢了。
+
+    ⚠️⚠️ **没东西可测时返回 `None`，不是 `0.0`。**
+      「组件没跑通」和「组件把东西全过滤掉了」**读数完全一样** —— 这一轮真踩过
+      （`prev-A5-broken/`：闸门调用照跑、模型课务 0 条，看起来像"闸门全拦住了"）。
+    """
+    picked = set(picked or ())
+    if not picked:
+        return {"k": 0, "hit_atom": None, "hit_chapter": None,
+                "a_atom": None, "b_chapter": None, "lost": None}
+    a_src: set = set()
+    c_src: set = set()
+    for a in atoms or ():
+        a_src.update(a.get("src") or ())
+    for c in chapters or ():
+        for s in (c.get("sentences") or ()):
+            c_src.update(s.get("src") or ())
+    ha, hc = len(picked & a_src), len(picked & c_src)
+    return {"k": len(picked), "hit_atom": ha, "hit_chapter": hc,
+            "a_atom": round(ha / len(picked), 3),
+            "b_chapter": round(hc / len(picked), 3), "lost": ha - hc}
+
+
+def measure_coverage(session_path, insights, *, token_value: str, k: int = 12) -> dict | None:
+    """真调 Jev 算覆盖率。**拿不到就返回 `None` / 自检不过的字典，绝不出一个假数。**
+
+    ⚠️⚠️ **编号映射自检在这里**（计划 §7.4 的硬前置）。`with_index=True` 出来的句子
+       必须与不带索引的**逐句相同** —— 不同就说明过滤规则分叉了，那时算出来的
+       覆盖率是一个**像模像样的错数**（不是 0，看不出来）→ **直接作废**。
+    ⚠️ 成本：`CHUNK = 20` 分批 → 一节 40 分钟约 **19 次**调用。**跑之前先报价。**
+    """
+    import keypoints as KP
+    if not token_value:
+        return None
+    idx = KP.sentences(session_path, with_index=True)
+    sents = [s for _, s in idx]
+    plain = KP.sentences(session_path)
+    if sents != plain:
+        print(f"  ⚠️ 编号映射自检**没通过**（{len(sents)} vs {len(plain)} 句）"
+              f" → 覆盖率作废", flush=True)
+        return {"selfcheck": False, "sentences": len(sents), "plain": len(plain)}
+
+    def ask(state, qs):
+        return KP.ask_commandcode(state, qs, token=token_value)
+
+    sc = KP.score(sents, ask=ask)
+    top = KP.top_k(sc, sents, k)
+    # ⭐ **这里就是把「过滤后下标」换成「全局句号」的那一步** —— 也是整个覆盖率
+    #    唯一的对齐点。`top_k` 给的是 `sents` 里的下标，而 `sents` 是**过滤后**的。
+    picked = {idx[i][0] for _, i, _ in top}
+    cov = coverage_of(picked, insights["atoms"],
+                      list(insights["chapters"].values()))
+    cov.update({"selfcheck": True, "sentences": len(sents), "plain": len(plain),
+                "scored": sum(1 for p in sc if p is not None),
+                "top_ids": sorted(picked)})
+    return cov
+
+
+def _run_coverage(session, insights, args) -> dict | None:
+    """⭐ **先报价，再跑**（计划 §7.4 明写「跑之前告诉作者」）。"""
+    import keypoints as KP
+    tok = KP.provider_token()
+    if not tok:
+        print("  ⚠️ 没配 Jev key → 覆盖率跳过（`~/.classlive/jev-key`）", flush=True)
+        return None
+    n = len(KP.sentences(session))
+    calls = (n + KP.CHUNK - 1) // KP.CHUNK if n else 0
+    print(f"  ── 覆盖率：{n} 句 ÷ CHUNK {KP.CHUNK} = **{calls} 次 Jev 调用**", flush=True)
+    t0 = time.time()
+    cov = measure_coverage(session, insights, token_value=tok, k=args.coverage_k)
+    if cov is None:
+        print("  ⚠️ 覆盖率没跑出来", flush=True)
+    elif not cov.get("selfcheck"):
+        print("  ❌ **自检不过 → 数字作废**（见上）", flush=True)
+    else:
+        print(f"  ✅ (a′) 原子 {cov['hit_atom']}/{cov['k']} = {cov['a_atom']:.0%}"
+              f"    (b) 合成 {cov['hit_chapter']}/{cov['k']} = {cov['b_chapter']:.0%}"
+              f"    差 {cov['lost']}    {time.time() - t0:.1f}s", flush=True)
+    return cov
 
 
 def _write_review(path: pathlib.Path, name: str, insights: dict) -> None:
@@ -387,6 +494,11 @@ def main(argv=None) -> int:
     ap.add_argument("--finish-timeout", type=float, default=120.0)
     ap.add_argument("--no-jev", action="store_true",
                     help="不接 Jev 课务闸门（= 模型报的课务一条不报）。用来做「接/不接」的对照")
+    ap.add_argument("--coverage", action="store_true",
+                    help="⭐ 算覆盖率（Jev 的重点句有多少落进纲要）。"
+                         "**要花 Jev 的钱**：约 19 次调用/节，跑前会先报价")
+    ap.add_argument("--coverage-k", type=int, default=12,
+                    help="覆盖率取 Jev 概率最高的前几条（默认 12，= 生产那条的 k）")
     args = ap.parse_args(argv)
 
     outdir = pathlib.Path(os.path.expanduser(args.out))

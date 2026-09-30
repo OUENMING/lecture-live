@@ -31,10 +31,14 @@
 | `_advance` 去掉「还没定题就认领」那一段 | ⑤「只开一章」 |
 | `ChapterWriter._handle` 去掉 `if self._closed` | ⑪「关了拒写」 |
 | `finish` 不等 `_running` 就 `_stopped.wait` | ⑥「残余窗口提交了」（会被 join 砍掉） |
+| `sentences()` 的 `_parse` 版换回「EN 行的序号」 | ㉚「全局句号是 `[1,4,6]`」（错的那套给 `[1,3,5]`） |
+| `coverage_of` 的 `lost` 写成 `hc - ha` | ㉛「`lost` 方向不能反」+「两个口径都算对」 |
+| `coverage_of` 空集返回 `0.0` 而不是 `None` | ㉛「一条都没挑到时返回 `None`」 |
 
 ⚠️ 本文件**只覆盖 `live_summary` / `chapter` 自己的逻辑**。设计文档
-`docs/PLAN-live-summary.md` §11.1 的 T17/T18（`fold_rows` / `build_outline_rows`）
-属于**阶段 4**，T22–T24（编号映射 / 覆盖率 / `--fail-window`）属于**阶段 2** —— 都还没做。
+`docs/PLAN-live-summary.md` §11.1 里还差：**T17/T18**（`fold_rows` / `build_outline_rows`，
+属阶段 4）与 **T24**（`--fail-window` 的口径 —— 参数实现了，**一次没跑过**）。
+T22/T23（编号映射 / 覆盖率）**已做**，在 ㉚/㉛ 两组。
 """
 from __future__ import annotations
 
@@ -807,6 +811,92 @@ def main() -> int:
             check("⭐ 闸门返回 `None` -> 不报", not r, f"报了 {len(r)} 条")
         check("⭐ Jev 的调用次数与 DeepSeek 的**分开计**（两个服务、两笔钱）",
               hasattr(L.LiveSummarizer, "gate_calls") and hasattr(L.LiveSummarizer, "calls"))
+
+        print("\n--- ㉚ ⭐ 编号映射：`with_index=True` 的号必须是**全局句号** ---")
+        # ⚠️ 这一组是覆盖率的前置（计划 §7.4）：映射错了，覆盖率会是一个
+        #    **像模像样的错数**（不是 0，所以对账时根本看不出来）。
+        import obsidian_writer as OW
+        import keypoints as KP
+        with tempfile.TemporaryDirectory() as d:
+            sp = pathlib.Path(d) / "S.md"
+            # 三档句：长的（留）· 短的（丢）· ⭐ **`en` 为空的**（丢，但**仍然占一个号**）
+            #   —— `ObsidianWriter.append` 的四个 `if` 决定了空 `en` 不写 EN 行，
+            #      可 `self._n += 1` 在那之前就加了 → **条目在、EN 行不在**。
+            rows = [("09:00:01", "This is a long enough sentence about demand."),
+                    ("09:00:02", "Okay."),
+                    ("09:00:03", ""),          # 只写 ZH
+                    ("09:00:04", "Elasticity measures responsiveness of demand."),
+                    ("09:00:05", "Right."),
+                    ("09:00:06", "The supply curve slopes upward in most markets.")]
+            tag_en, tag_zh = dict(OW._FIELDS)["en"], dict(OW._FIELDS)["zh"]
+            lines = ["# LECTURE · test · 实时会话日志", ""]
+            for ts, en in rows:
+                hdr = f"> [!abstract] {ts}"
+                # 格式**自钉**：写出来的抬头必须被**生产那个正则**认出来 ——
+                # 否则判据就变成"在测一份过期的格式"，而它照样全绿。
+                check(f"抬头 {ts} 与 `obsidian_writer._TS` 一致",
+                      OW._TS.match(hdr) is not None, hdr)
+                lines.append(hdr)
+                lines.append(f"> **{tag_en}**: {en}" if en else f"> **{tag_zh}**: 只写了中文")
+                lines.append("")
+            sp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            flat = KP.sentences(sp)
+            idx = KP.sentences(sp, with_index=True)
+            check("句数与不带索引**逐句相同**（过滤规则没分叉）",
+                  [s for _, s in idx] == flat and len(flat) == 3, f"{len(flat)} 句")
+            gids = [g for g, _ in idx]
+            # 改坏：把 `sentences()` 换回"EN 行的序号"那版（已实测）→ 这条红。
+            # ⚠️ 那时得到的是 `[1, 3, 5]`（EN 行有 5 行：`Okay.`/`Right.` 也有 EN 行、
+            #    只有那个空 `en` 的没有）—— **不是 `[1, 2, 3]`**。
+            #    这正是要钉的形态：错的那套给出来的是**一个像模像样的数**。
+            check("⭐⭐ 全局句号是 `[1, 4, 6]` —— **空 `en` 的条目照占一个号**",
+                  gids == [1, 4, 6], str(gids))
+            check("单调递增", all(b > a for a, b in zip(gids, gids[1:])), str(gids))
+            check("确实跳过了短句（不是 `1..N` 连续号）",
+                  gids != list(range(1, len(gids) + 1)), str(gids))
+            check("⚠️ `with_index=False` 返回**字符串表**（既有调用方不用改）",
+                  all(isinstance(s, str) for s in flat), str(type(flat[0]).__name__))
+            # ⚠️ 只写抬头、一句都没记的会话（麦克风故障 / 刚开课就关）→ 空表。
+            # ⚠️ **刻意不测「文件不存在」**：旧实现（扫 `> **EN**: ` 行那版）也是**直接抛**，
+            #    那是 CLI 那条路的既有行为。生产路径根本不经过它 ——
+            #    `pick()` 收的是**已读好的句子表**，`main._keypoints_for` 自己包了
+            #    `try/except Exception: return []`。**没变的行为别在判据里改**。
+            (pathlib.Path(d) / "空.md").write_text("# LECTURE · test\n\n", encoding="utf-8")
+            check("一句都没有的会话 -> 空表，不抛",
+                  KP.sentences(pathlib.Path(d) / "空.md") == [])
+
+        print("\n--- ㉛ ⭐ 覆盖率两个口径 —— 按**手算**对拍 ---")
+        sys.path.insert(0, str(HERE / "docs" / "experiments"))
+        import probe_live_summary as P
+        # 设：Jev 挑了全局句号 {3, 7, 9, 12}
+        _atoms = [{"src": [3, 4]}, {"src": [7]}, {"src": [11, 12, 13]}]  # 并集 {3,4,7,11,12,13}
+        _chaps = [{"sentences": [{"src": [3]}, {"src": [8]}, {"src": [9]}]}]  # 并集 {3,8,9}
+        _picked = {3, 7, 9, 12}
+        # 手算：(a′) 命中 {3,7,12} = 3/4 · (b) 命中 {3,9} = 2/4 · 差 1
+        check("⭐ 两个口径都算对（原子 3/4 · 合成 2/4）",
+              P.coverage_of(_picked, _atoms, _chaps)
+              == {"k": 4, "hit_atom": 3, "hit_chapter": 2,
+                  "a_atom": 0.75, "b_chapter": 0.5, "lost": 1},
+              str(P.coverage_of(_picked, _atoms, _chaps)))
+        # 改坏：把 `lost` 写成 `hc - ha` → 这条红。
+        check("⭐⭐ `lost` = (a′) − (b)，**方向不能反**（原子抓到、合成丢了）",
+              P.coverage_of(_picked, _atoms, [{"sentences": [{"src": [3]}]}])["lost"] == 2,
+              str(P.coverage_of(_picked, _atoms, [{"sentences": [{"src": [3]}]}])))
+        check("`src` 是 `None` / 缺键 -> 当空表，不抛",
+              P.coverage_of(_picked, [{"src": None}, {}], [])["a_atom"] == 0.0)
+        # ⚠️⚠️ 空集必须是 `None`，**不是 `0.0`** —— 这一轮真踩过：
+        #    「组件没跑通」和「组件把东西全过滤掉了」读数完全一样（见 `prev-A5-broken/`）。
+        _e = P.coverage_of(set(), _atoms, _chaps)
+        check("⭐⭐ 一条都没挑到时返回 `None`，**不是 0.0**（fail-soft 假绿那条）",
+              _e["a_atom"] is None and _e["b_chapter"] is None and _e["k"] == 0,
+              str(_e))
+        # ⚠️ 没 key 时**在读文件之前**就返回 —— 所以这里给个不存在的路径也无所谓
+        #    （这也正是要钉的：功能关着时**一次 IO、一次网络都不该发生**）。
+        check("没 key -> `measure_coverage` 返回 `None`（**不读文件、不联网**）",
+              P.measure_coverage(pathlib.Path("/nonexistent/x.md"),
+                                 {"atoms": [], "chapters": {}},
+                                 token_value="") is None)
 
     except BaseException as e:                            # noqa: BLE001
         # ⚠️⚠️ **一条判据自己抛了，不许把整个文件带崩。**

@@ -194,6 +194,19 @@ def _provider(*, root=None) -> dict:
     return _PROVIDER
 
 
+def provider_token() -> str:
+    """当前供应商的 token（**有官方 key 就走官方**，见 `_provider`）。
+
+    ⚠️ **没配返回空串，不抛** —— 同本模块一贯的 fail-soft。
+    ⭐ 存在的理由：`ask_commandcode` 的 `token` 是**必填参数**（它不自己去解析），
+       所以任何要自己调 `score()` 的地方（探针、覆盖率）都得有一个公开的取值口。
+    """
+    try:
+        return _provider()["token"]
+    except Exception:                                     # noqa: BLE001
+        return ""
+
+
 def _read_key(attr: str, *, root=None) -> str:
     """从 `paths.<attr>()` 读一行。**读不出返回空串，不抛**（同 `token()`）。"""
     try:
@@ -237,16 +250,36 @@ def ask_commandcode(state: str, questions: dict, *, token: str, timeout: float =
         raise RuntimeError(f"Jev 连不上（{e.reason}）—— 检查网络或代理") from e
 
 
-def sentences(path) -> list:
-    """一份会话文件 → 英文定稿句。⚠️ 读法唯一的定义点在 `obsidian_writer._parse`。"""
+def sentences(path, *, with_index: bool = False) -> list:
+    """一份会话文件 → 英文定稿句。
+
+    ⚠️ 读法**不自己扫行**，唯一定义点在 `obsidian_writer._parse`。
+    ⭐ `with_index=True` → `[(全局句号, 句子), …]`；
+       默认 `False` 仍是 `[句子, …]` —— **既有调用方一个字都不用改**。
+
+    ⚠️⚠️ **两种编号不是一回事**（2026-09-30 实测）：
+       · **全局句号**（= `atom.src` 引的那一套）= `_parse` 的**条目下标 + 1**
+         —— `ObsidianWriter.append` 每调一次 `_n += 1`，一个条目一个号
+       · 过滤后的下标 = 另一套（丢掉了 <=15 字符的短句）
+       理工那节实测 482 条目 → 447 句，两套**平均差 17.5、最大 36**
+       → 要跟 `src` 对账**必须**用 `with_index=True`，**不许**拿 `enumerate` 的下标凑。
+
+    ⚠️⚠️ **还有第二种漂法，比上面那种更阴**：`append` 允许 `en` 为空
+       （只写 ZH/ASR 也照样落盘并占号，见它的 4 个 `if`），那时**条目在、EN 行不在**
+       → 拿「EN 行的序号」当全局句号会**从那里起整段漂 1**。
+       经济那节实测 **3 条**这样的（679 EN 行 vs 682 条目）→ 到结尾漂 3。
+       ⚠️ 因为它漂出来是**一个像模像样的数**（不是 0），对账时看不出来。
+    """
     import pathlib
+
+    import obsidian_writer
+    text = pathlib.Path(path).read_text(encoding="utf-8", errors="ignore")
     out = []
-    for ln in pathlib.Path(path).read_text(encoding="utf-8", errors="ignore").splitlines():
-        if ln.startswith("> **EN**: "):
-            t = ln[9:].strip()
-            if len(t) > 15:          # 太短的（"Okay." / "Right."）没有判断价值
-                out.append(t)
-    return out
+    for i, e in enumerate(obsidian_writer.ObsidianWriter._parse(text)):
+        t = (e.get("en") or "").strip()
+        if len(t) > 15:          # 太短的（"Okay." / "Right."）没有判断价值
+            out.append((i + 1, t))
+    return out if with_index else [t for _, t in out]
 
 
 def pick(sents, *, token_value: str = "", timeout: float = 30.0, k: int = 10) -> list:

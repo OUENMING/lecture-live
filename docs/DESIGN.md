@@ -485,17 +485,15 @@ python build_notes.py --rebuild  # 全量重分类 + 扩写 + 清掉自动回写
 
 ## 文件
 
-| 文件 | 作用 |
-|---|---|
-| `main.py` | CLI 入口;事件驱动主循环 + 三个 worker 线程 |
-| `capture.py` | 音源(回调式异步采集 / 文件) + `PeakNormalizer` 电平归一化 |
-| `vad.py` | Silero VAD + 梯级静音 + pre-roll 分段 |
-| `asr.py` | Parakeet 转写(带锁,线程安全) |
-| `translator.py` | 流式 ZH/EN 输出 + RAG-lite 术语筛选 + **仅英文矫正**(`fix_stream`) |
-| `cloud_translator.py` | DeepSeek 云端翻译(同接口,失败降级本地) |
-| `overlay.py` | 卡片式悬浮窗 UI(含 🌐 翻译开关 + 顶栏) |
-| `transcript_view.py` | NSScrollView 转录区:池化回收 + 跟随状态机(overlay 委托给它) |
-| `build_notes.py` | 术语三档分类/扩写(basic 一行速查 + gloss 完整解析) + 专有名词查询闸门 |
-| `polish.py` | 课后二次精修:整批重矫正 + 重译(领域+全课术语+前文, 以直播 EN 为基准) |
-| `obsidian_writer.py` | Obsidian **双层**笔记落盘(复习层 + 折叠逐字转录) |
-| `test_pipeline.py` | 集成测试(可加速回放) |
+⭐ **模块清单不在这份里 —— 看 `CLAUDE.md` 的「文件地图」。**
+
+理由（2026-09-30 作者拍板）：这里原来有一张 17 行的表，**已经停更很久**——
+仓库里 48 个模块它只列了 17 个，`atom.py` / `classify.py` / `corpus.py` /
+`keypoints.py` / `live_summary.py` / `chapter.py` / `store.py` / `wrapup.py` …
+**一个都不在里面**。而 `CLAUDE.md` 那张是**活的**：它按「**什么时候该读它**」组织，
+是给动手的人（和 agent）看的第一入口。
+
+⚠️ 两份清单并存 = 迟早分叉（这份已经分叉了）。**保持一份。**
+
+这份文档留着的是**别的东西**：环境搭建、依赖清单、选型理由、
+以及上面那几节的设计取舍。

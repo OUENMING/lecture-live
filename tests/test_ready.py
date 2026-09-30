@@ -193,6 +193,27 @@ def t_has_key_hides_offer():
                              local_state="missing")["offer_local"] is True
 
 
+@case("⭐ 笔记库三态：没设 = UNKNOWN（**不是** todo）· 在 = OK · 路径没了 = WARN")
+def t_vault_states():
+    it = ready.vault_item(None)
+    assert it["key"] == ready.VAULT and it["state"] == ready.UNKNOWN, it
+    assert it["state"] != ready.TODO, (
+        "没设笔记库被标成 todo —— 笔记照写 sessions/，不挡上课（同 engine 那条纪律）")
+    with tempfile.TemporaryDirectory() as td:
+        ok = ready.vault_item(td)
+        assert ok["state"] == ready.OK and td in ok["detail"], ok
+        gone = ready.vault_item(str(pathlib.Path(td) / "no-such-dir"))
+        assert gone["state"] == ready.WARN, (
+            f"记住的路径已经不在了，却没报 WARN：{gone}")
+
+
+@case("⭐ 就绪条四项、顺序固定（vault 在最后）—— 少一项或多一项都算改坏了")
+def t_items_four_keys_in_order():
+    got = [i["key"] for i in
+           ready.items(perm="authorized", states=_ALL_OK, has_key=True)]
+    assert got == [ready.MIC, ready.MODELS, ready.ENGINE, ready.VAULT], got
+
+
 @case("⭐ 麦克风 unknown 不拦人（就绪条不因此变成红的）")
 def t_mic_unknown():
     it = ready.mic_item("unknown")

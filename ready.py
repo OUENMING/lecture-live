@@ -29,10 +29,13 @@
 """
 from __future__ import annotations
 
+import pathlib
+
 import doctor
 
-# 三项的 key（面板按它排布，测试按它断言）
+# 四项的 key（面板按它排布，测试按它断言）
 MIC, MODELS, ENGINE = "mic", "models", "engine"
+VAULT = "vault"
 
 # ⚠️ 状态只有这几个值，面板与判据都按它分支（**别在别处再发明一个字符串**）
 OK, TODO, WARN, UNKNOWN, BUSY = "ok", "todo", "warn", "unknown", "busy"
@@ -126,12 +129,37 @@ def engine_item(*, has_key: bool, local_state: str) -> dict:
             "offer_local": True}
 
 
-def items(*, perm: str, states: dict, has_key: bool) -> list[dict]:
-    """就绪条要画的三项，按显示顺序。"""
+def vault_item(vault: str | None) -> dict:
+    """第四项 —— 笔记写到哪儿（Obsidian 库）。**可选项，绝不挡上课。**
+
+    ⚠️ **永远不返回 TODO**（同 `engine_item` 那条纪律）：没有库时笔记照写
+       `sessions/`（`resolve_vault` 的定性：返回 None = 不写 Obsidian，那才是主记录），
+       标成 todo 会让整条就绪条看起来"没准备好"，而实际上可以上课。
+    ⚠️ 「记住的路径已经不在了」（用户删了 / 改了名）算 WARN —— 用户以为笔记在
+       往那儿写，实际写不进去。**凭 `is_dir()` 报**，不是猜的。
+    """
+    if not vault:
+        return {"key": VAULT, "state": UNKNOWN, "label": "笔记库",
+                "detail": "没设 —— 笔记只写 sessions/，不落 Obsidian"}
+    p = pathlib.Path(vault).expanduser()
+    if not p.is_dir():
+        return {"key": VAULT, "state": WARN, "label": "笔记库",
+                "detail": f"记住的路径不在了：{p}"}
+    return {"key": VAULT, "state": OK, "label": "笔记库", "detail": str(p)}
+
+
+def items(*, perm: str, states: dict, has_key: bool,
+          vault: str | None = None) -> list[dict]:
+    """就绪条要画的四项，按显示顺序。
+
+    ⚠️ `vault` 是**已解析的库路径**（`obsidian_writer.resolve_vault()` 的产物；
+       `None` = 没设）。这里不自己去解析 —— 解析要走环境与磁盘，是调用方的脏活。
+    """
     return [mic_item(perm),
             models_item(states),
             engine_item(has_key=has_key,
-                        local_state=states.get(_local_path(), "missing"))]
+                        local_state=states.get(_local_path(), "missing")),
+            vault_item(vault)]
 
 
 def _local_path() -> str:

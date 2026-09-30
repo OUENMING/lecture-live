@@ -143,7 +143,8 @@ _MARK = {"ok": "✓", "todo": "○", "warn": "⚠", "unknown": "—", "busy": "�
 
 # 每一项的短名字。⚠️ 长名字会把 680pt 的面板撑爆 —— 短名 + 状态词就够，
 #    详情交给点击之后的动作。
-_READY_NAME = {"mic": "麦克风", "models": "语音模型", "engine": "翻译引擎"}
+_READY_NAME = {"mic": "麦克风", "models": "语音模型", "engine": "翻译引擎",
+               "vault": "笔记库"}
 
 
 def ready_item_text(it: dict) -> str:
@@ -178,6 +179,9 @@ def ready_short(it: dict) -> str:
     if it.get("key") == "engine":
         return "云端" if st == "ok" and "云端" in it.get("detail", "") else (
             "本地" if st == "ok" else "未配")
+    if it.get("key") == "vault":
+        # ⚠️ 「未设」不是错误 —— 笔记照写 `sessions/`（`ready.vault_item` 那条）
+        return {"ok": "已设", "warn": "找不到了"}.get(st, "未设")
     return {  # mic
         "ok": "已允许", "todo": "未授权", "warn": "被拒",
         "unknown": "查不到", "busy": "询问中",
@@ -1493,6 +1497,44 @@ def make_ready_strip(parent, y: float, w: float, items: list, *, on_click):
     return targets, buttons
 
 
+def pick_folder(*, start: str | None = None, message: str = "") -> str | None:
+    """弹系统「选文件夹」框 → 选中的路径；取消 / 弹不出来 → `None`。
+
+    ⚠️ **判据必须把这个函数换掉** —— 真 `runModal()` 会阻塞测试
+       （`tests/test_entry_panel.py` 的 ㉑ 就是 monkeypatch 它）。
+    ⚠️ 与 `_pick_batch_files`（选课件）同一套先例：`NSOpenPanel.openPanel()` +
+       `runModal()`，只在主线程调（系统弹窗自己转事件循环，不算"联网/sleep"）。
+    """
+    from AppKit import NSOpenPanel
+    p = NSOpenPanel.openPanel()
+    p.setCanChooseFiles_(False)
+    p.setCanChooseDirectories_(True)
+    p.setAllowsMultipleSelection_(False)
+    if message:
+        p.setMessage_(message)
+    if start:
+        from Foundation import NSURL
+        p.setDirectoryURL_(NSURL.fileURLWithPath_(start))
+    if p.runModal() == 1 and p.URLs():
+        return str(p.URLs()[0].path())
+    return None
+
+
+def _vault_now(state_root=None) -> str | None:
+    """当前解析到的笔记库路径。**与 `main.run()` 同一条路**
+    （`obsidian_writer.resolve_vault` 是唯一定义点）：`--vault` → `$OBSIDIAN_VAULT`
+    → 记住的那个 → `None`。
+
+    ⚠️ `root=state_root` **必须传** —— 否则测试沙盒里这一格读的是用户真身
+       （`~/.classlive/vault`），隔离就是假的。
+    """
+    try:
+        from obsidian_writer import resolve_vault
+        return resolve_vault(root=state_root)
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
 def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
           on_close=None, prepare_fn=None, suggest_fn=None,
           trash_fn=None, on_test_mode=None, test_mode=False) -> Handles | None:
@@ -1602,7 +1644,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         try:
             ready_items = ready.items(
                 perm=_mic_perm(), states=ready.model_states(root=state_root),
-                has_key=_has_api_key())
+                has_key=_has_api_key(), vault=_vault_now(state_root))
         except Exception:                                  # noqa: BLE001
             ready_items = []                               # 算不出来不该拦住面板
     rh = READY_H if ready_items else 0.0
@@ -1805,6 +1847,39 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                     {"key": "engine", "state": "ok", "detail": "云端翻译（推荐）"}))
         threading.Thread(target=work, daemon=True).start()
 
+    def _open_vault_picker() -> None:
+        """点「笔记库」—— 选个文件夹**就地**设好（不用重开面板）。
+
+        ⚠️ 弹窗走模块级的 `pick_folder`（判据把它换掉用）。取消 = 什么都不动。
+        ⚠️ **界面不许撒谎**（同测试模式开关那条）：写没写进盘，以
+           `paths.vault_config()` 那份**读回来**为准，不认"我以为写了"。
+        """
+        from obsidian_writer import remember_vault
+        start = _vault_now(state_root)
+        if not start:
+            # 智能起点：iCloud 的 Obsidian 容器（Mac 上最常见的库位置）
+            ic = (pathlib.Path.home()
+                  / "Library/Mobile Documents/iCloud~md~obsidian/Documents")
+            start = str(ic) if ic.is_dir() else str(pathlib.Path.home())
+        got = pick_folder(
+            start=start,
+            message="选笔记库文件夹（Obsidian 库最合适）—— 笔记会写进它的 Lectures/")
+        if not got:
+            return
+        remember_vault(got, root=state_root)
+        try:
+            ok = (paths.vault_config(root=state_root)
+                  .read_text(encoding="utf-8").strip() == got.strip())
+        except OSError:
+            ok = False
+        if not ok:
+            _status("没记住（写盘失败）—— 这次先不生效，回头再试")
+            return
+        _retitle("vault", ready_item_text(ready.vault_item(got)))
+        hint = ("" if (pathlib.Path(got) / ".obsidian").is_dir()
+                else "（没找到 .obsidian —— 笔记会写进它的 Lectures/）")
+        _status(f"笔记库设好了：{got}{hint}")
+
     def on_ready_click(key: str) -> None:
         """点就绪条上的某一项 —— 就地修那一项。
 
@@ -1827,6 +1902,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             # ⚠️ 2026-09-30 起**真的能点了** —— 之前在的那句注释写着
             #    「这一版**只说明，不做**…不假装能点」。现在开一个填 key 的框。
             _open_key_entry()
+        elif key == "vault":
+            _open_vault_picker()
 
     if ready_items:
         ready_targets, ready_buttons = make_ready_strip(

@@ -392,6 +392,7 @@ def main() -> int:
     _add_wiring_section()
     _target_liveness_section()
     _test_mode_section()
+    _vault_section()
 
     # ⚠️⚠️ **`bad` 不许在这里算！**（2026-09-29 抓到的假绿）
     #    原来这一行在这里算了一份 `RESULTS` 的快照，而后面还有 ⑮⑯⑰ 三组判据 ——
@@ -1142,6 +1143,142 @@ def _target_liveness_section() -> None:
                 _h.close()
             except Exception:                                 # noqa: BLE001
                 pass
+
+
+def _vault_section() -> None:
+    """㉑ 笔记库那一格：文案（字面量）/ 点击真的存下 / 取消与写失败都不动界面。
+
+    ⚠️ 弹窗换掉（`E.pick_folder`）—— 真 `NSOpenPanel.runModal` 会阻塞测试。
+    ⚠️ 写端全部隔离在 tempdir（`state_root=`）；**绝不碰真 `~/.classlive/vault`**。
+    ⚠️ 只建窗口、**不跑事件循环** —— `performClick_` 是同步的（同 ⑳ 那条）。
+    """
+    print("\n--- ㉑ 笔记库那一格：文案 / 点击真的存下 / 失败不许撒谎 ---")
+
+    # ---- 文案：期望值钉**字面量**（不是再问一遍 `ready_short` 算出来）----
+    _t = E.ready_item_text
+    check("未设 → `—  笔记库  未设`（字面量）",
+          _t({"key": "vault", "state": "unknown"}) == "—  笔记库  未设",
+          repr(_t({"key": "vault", "state": "unknown"})))
+    check("已设 → `✓  笔记库  已设`",
+          _t({"key": "vault", "state": "ok"}) == "✓  笔记库  已设",
+          repr(_t({"key": "vault", "state": "ok"})))
+    check("路径没了 → `⚠  笔记库  找不到了`",
+          _t({"key": "vault", "state": "warn"}) == "⚠  笔记库  找不到了",
+          repr(_t({"key": "vault", "state": "warn"})))
+
+    try:
+        import os
+        import tempfile
+
+        from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
+                            NSButton)
+    except Exception as e:                                    # noqa: BLE001
+        check("AppKit 可用（这一节要真窗口）", False, f"{type(e).__name__}: {e}")
+        return
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory)
+
+    def _walk(v, out):
+        out.append(v)
+        for c in (v.subviews() or []):
+            _walk(c, out)
+        return out
+
+    def _vault_btn(h):
+        for v in _walk(h.window.contentView(), []):
+            if isinstance(v, NSButton) and "笔记库" in (v.title() or ""):
+                return v
+        return None
+
+    orig_pick = E.pick_folder
+    # ⚠️ `$OBSIDIAN_VAULT` **必须挪开**：本机 shell 里它指着真库 → 面板一开就是
+    #    「已设」→「点了之后变已设」那条判据**恒真**（2026-10-01 变异验证抓到的）。
+    #    挪开之后才是朋友那台机器的入场状态（未设 → 点了才变）。
+    _saved_env = os.environ.pop("OBSIDIAN_VAULT", None)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            gl = root / "glossary.txt"
+            gl.write_text("# public table\n", encoding="utf-8")
+
+            def _build(name, st):
+                return E.build(glossary=gl, sessions_dir=root / name,
+                               state_root=st, on_start=lambda c: None)
+
+            # ── 点击：真的存进 `<state_root>/vault`，并且**就地**改字 ──────
+            st = root / "st1"
+            picked = root / "MyVault"
+            picked.mkdir()
+            (picked / ".obsidian").mkdir()                     # 像一个真库
+            calls: list = []
+            E.pick_folder = lambda **kw: (calls.append(kw), str(picked))[1]
+            h = _build("s1", st)
+            try:
+                btn = _vault_btn(h) if h is not None else None
+                check("（前置）面板上找得到「笔记库」那一格", btn is not None, "")
+                if btn is not None:
+                    check("（前置）这一格**一开始是「未设」**—— 环境变量挪开了才测得出「变」",
+                          (btn.title() or "") == "—  笔记库  未设", repr(btn.title()))
+                    btn.performClick_(None)
+                    check("⭐ 点了真的弹了选文件夹（一次，且带着智能起点）",
+                          len(calls) == 1 and bool(calls[0].get("start")), str(calls))
+                    check("⭐⭐ 选完**真的写进了 `<state_root>/vault`**（写端隔离）",
+                          (st / "vault").exists()
+                          and (st / "vault").read_text(encoding="utf-8").strip()
+                          == str(picked),
+                          repr((st / "vault").read_text(encoding="utf-8")
+                               if (st / "vault").exists() else None))
+                    check("⭐ 而且那一格**就地**变成「已设」（不用重开面板）",
+                          (btn.title() or "") == "✓  笔记库  已设", repr(btn.title()))
+            finally:
+                try:
+                    h.close()
+                except Exception:                              # noqa: BLE001
+                    pass
+
+            # ── 取消：什么都不动 ─────────────────────────────────────────
+            st2 = root / "st2"
+            E.pick_folder = lambda **kw: None
+            h2 = _build("s2", st2)
+            try:
+                b2 = _vault_btn(h2) if h2 is not None else None
+                before = (b2.title() or "") if b2 is not None else None
+                if b2 is not None:
+                    b2.performClick_(None)
+                    check("⭐ 取消选目录 → 标题不动、盘上什么都不写",
+                          (b2.title() or "") == before
+                          and not (st2 / "vault").exists(),
+                          f"{b2.title()!r} {(st2 / 'vault').exists()}")
+            finally:
+                try:
+                    h2.close()
+                except Exception:                              # noqa: BLE001
+                    pass
+
+            # ── 写盘失败：**界面不许撒谎**（同测试模式开关那条）──────────
+            st3 = root / "st3"
+            E.pick_folder = lambda **kw: str(picked)
+            import obsidian_writer as _OW
+            orig_remember = _OW.remember_vault
+            _OW.remember_vault = lambda *a, **k: None          # 静默失败
+            h3 = _build("s3", st3)
+            try:
+                b3 = _vault_btn(h3) if h3 is not None else None
+                before3 = (b3.title() or "") if b3 is not None else None
+                if b3 is not None:
+                    b3.performClick_(None)
+                    check("⭐⭐ 写盘失败 → 标题**不许**变成「已设」",
+                          (b3.title() or "") == before3, repr(b3.title()))
+            finally:
+                _OW.remember_vault = orig_remember
+                try:
+                    h3.close()
+                except Exception:                              # noqa: BLE001
+                    pass
+    finally:
+        if _saved_env is not None:
+            os.environ["OBSIDIAN_VAULT"] = _saved_env
+        E.pick_folder = orig_pick
 
 
 def _add_wiring_section() -> None:

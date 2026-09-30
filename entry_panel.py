@@ -1711,6 +1711,60 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _open_key_entry() -> None:
+        """点「翻译引擎」→ 填 key（DeepSeek + Jev）。**校验在后台线程跑。**
+
+        ⚠️ 这是 AppKit 主线程回调：`notice.ask_text` 自己 `runModal`（既有做法，
+           它会跑 runloop），**但校验要真调一次 API —— 那个必须丢到后台**。
+        ⚠️ 校验用**真调一次**而不是"看格式像不像"：前者还能分清
+           「key 不对」和「配额用完了」，后者两件事都报"看起来没问题"。
+        ⚠️ **两栏都空 = 合法选择**，不是错误（HIG：配置必须能推迟）。
+        """
+        import keyentry
+
+        got = notice.ask_text(
+            "填 API key",
+            "只写进这台机器的 ~/.classlive/，不上传。",
+            [{"key": "deepseek", "label": "DeepSeek key",
+              "hint": "翻译用的。不填也能上课 —— 退回本地模型，质量差一些。"},
+             {"key": "jev", "label": "Jev key · 可选",
+              "hint": "给「重点句」和「课务」用。不填这两个功能就不出现。"}],
+            fallback=None)
+        if got is None:
+            return
+        ds = (got.get("deepseek") or "").strip()
+        jv = (got.get("jev") or "").strip()
+        if not ds and not jv:
+            _status(keyentry.status_line(False, False), 2.0)
+            return
+        _status("正在验证…", 0)
+
+        def work() -> None:
+            # ⚠️ **验不过的不落盘** —— 存一把不能用的 key 只会让用户以为配好了，
+            #    而真正上课时才发现是坏的（fail-soft 会把症状藏起来）。
+            lines: list = []
+            keep_ds = keep_jv = ""
+            if ds:
+                okd, md = keyentry.validate_deepseek(ds)
+                lines.append(f"{'✅' if okd else '❌'} DeepSeek key "
+                             + (md if okd else f"用不了（{md}）"))
+                keep_ds = ds if okd else ""
+            if jv:
+                okj, mj = keyentry.validate_jev(jv)
+                lines.append(f"{'✅' if okj else '❌'} Jev key "
+                             + (mj if okj else f"用不了（{mj}）"))
+                keep_jv = jv if okj else ""
+            okk, msg = keyentry.save(deepseek=keep_ds, jev=keep_jv, root=state_root)
+            # ⚠️ **写盘失败也要把校验结果一起说出来** —— 不然用户只看到
+            #    "没写进去"，会以为是 key 的问题。
+            lines.append(msg if okk else f"❌ {msg}")
+            _later(_status, " · ".join(lines))
+            if okk and keep_ds:
+                # 就绪条就地变「云端翻译」—— 不用重开面板
+                _later(_retitle, "engine", ready_item_text(
+                    {"key": "engine", "state": "ok", "detail": "云端翻译（推荐）"}))
+        threading.Thread(target=work, daemon=True).start()
+
     def on_ready_click(key: str) -> None:
         """点就绪条上的某一项 —— 就地修那一项。
 
@@ -1730,10 +1784,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         elif key == "models":
             _download_required()
         elif key == "engine":
-            # ⚠️ 这一版**只说明，不做**：填 key 的输入框与「下本地模型」的按钮
-            #    是下一步（见计划 §1）。先把状态和人话摆出来，不假装能点。
-            _status("翻译引擎：填云端 key（推荐，质量好）或下载本地模型（免费、离线、质量差些）"
-                    " —— 两条路见 README 的「安装」段")
+            # ⚠️ 2026-09-30 起**真的能点了** —— 之前在的那句注释写着
+            #    「这一版**只说明，不做**…不假装能点」。现在开一个填 key 的框。
+            _open_key_entry()
 
     if ready_items:
         ready_targets, ready_buttons = make_ready_strip(

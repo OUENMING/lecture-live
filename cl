@@ -77,6 +77,7 @@ ClassLive —— 本地实时课堂双语字幕
   cl update            更新到最新版(git pull + 补依赖), 然后自检
   cl doctor            自检: 依赖/模型/术语表, 缺什么告诉你跑哪条命令
   cl prep <课件…>       开课前的准备: 从课件抽候选术语, 追加进该课术语表
+  cl setkey [key] [jev] 填 API key(也可以点开课面板上的「翻译引擎」那一项)
   cl help              显示本帮助
 
 停止：点悬浮窗右上角 ✕,或在本终端按 Ctrl+C
@@ -265,6 +266,9 @@ case "${1:-}" in
         4) echo "⚠ 选了课但存不下来 —— **不录**（否则会记到上一门课上）"; exit 0 ;;
       esac
     fi ;;
+  # ⚠️ 这条是**没有图形界面时的填 key 入口** —— `notice.ask_text` 弹不出来时
+  #    会在终端打一行指到这里（两句文案必须对得上，改一处就要改另一处）。
+  setkey) shift; "$PY" keyentry.py "$@"; exit $? ;;
   *) echo "未知参数: $1"; echo; usage; exit 1 ;;
 esac
 

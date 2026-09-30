@@ -119,7 +119,10 @@ def engine_item(*, has_key: bool, local_state: str) -> dict:
                 "detail": "本地模型（免费 · 离线可用 · 质量不如云端）",
                 "offer_local": False}
     return {"key": ENGINE, "state": UNKNOWN, "label": "翻译引擎",
-            "detail": "云端翻译（推荐）· 或下载本地模型",
+            # ⚠️ 2026-09-30 改的措辞：原来写「云端翻译（推荐）· 或下载本地模型」——
+            #    读起来像**说明**；改成「点一下填 key」才像**入口**
+            #    （那一项现在真的能点了，见 `entry_panel.on_ready_click`）。
+            "detail": "点一下填 key（推荐）· 或下本地模型",
             "offer_local": True}
 
 

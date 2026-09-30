@@ -142,6 +142,143 @@ def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
         return fallback if fallback is not None else buttons[0]
 
 
+def ask_text(title: str, message: str, fields: list, *,
+             buttons: tuple[str, ...] = ("保存", "以后再说"),
+             fallback=None) -> dict | None:
+    """弹一个**带输入框**的模态框 → `{key: 值}`；弹不出来 / 点了取消 → `fallback`。
+
+    `fields` = `[{"key": …, "label": …, "hint": …}, …]`（输入框一律 `NSSecureTextField`，
+    **不回显明文**）。
+
+    ⚠️⚠️ **`buttons[0]` 是最右边那颗 —— 也就是视觉上的主按钮。**
+       `NSAlert` 把**先加的排在右边**（2026-09-30 截图核对过），所以默认顺序是
+       `("保存", "以后再说")`：主操作在右，符合 macOS 惯例。
+       ⚠️ 第一版传的是 `("以后再说", "保存")` → **「以后再说」跑到了最右**，
+          看起来像主操作。**顺序不是小事**，它决定用户第一眼按哪个。
+    ⚠️⚠️ 也正因为这样，**`buttons[0]` 不再天然是"安全的那一个"** ——
+       调用方**必须显式给 `fallback`**（同 `alert()` 那条：不给就等于
+       「问不到人 = 自动保存」）。
+    ⚠️ 弹不出来时**返回 `fallback` 并把用法打出来** —— 没有 UI 的人也得有办法填
+       （`cl setkey`，见 `keyentry.py` 的 `__main__`）。
+    ⚠️ 这个函数**不写任何文件** —— 校验和落盘都在 `keyentry`，这里只负责问。
+    """
+    if not _can_alert():
+        print(f"\n{'─' * 46}\n⚠ {title}\n{message}\n{'─' * 46}", flush=True)
+        for f in fields:
+            print(f"   {f['label']}: {f.get('hint', '')}", flush=True)
+        print("   → 没有图形界面时用：`cl setkey <deepseek-key> [jev-key]`", flush=True)
+        return fallback
+
+    try:
+        from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory)
+        app = NSApplication.sharedApplication()
+        _prev = app.activationPolicy()
+        app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        try:
+            a, boxes = build_text_alert(title, message, fields, buttons)
+            a.window().center()
+            a.window().orderFrontRegardless()
+            idx = a.runModal() - 1000                      # NSAlertFirstButtonReturn = 1000
+            # ⚠️ `idx` 是**添加顺序**的下标（`buttons[0]` = 最右那颗 = 主按钮），
+            #    不是"从左数第几个"。所以「保存」就是 idx == 0。
+            if idx != 0:
+                return fallback
+            return {k: tf.stringValue().strip() for k, tf in boxes.items()}
+        finally:
+            # ⚠️ 同 `alert()`：**必须在 `finally` 里设回** —— 否则 policy 残留成
+            #    Accessory，之后这个进程在 Dock / 窗口激活上的行为一直是错的。
+            app.setActivationPolicy_(_prev)
+    except Exception:                                         # noqa: BLE001
+        print(f"\n⚠ {title}\n{message}", flush=True)
+        print("   → 没有图形界面时用：`cl setkey <deepseek-key> [jev-key]`", flush=True)
+        return fallback
+
+
+#: 那张框的几何 —— **唯一定义点**（探针按它断言，见 `tests/test_keyentry.py`）。
+TEXT_ALERT_W = 430.0
+#: 一栏占多高 = 标签/输入框那一行(22) + 间距(6) + 说明两行(34) + 栏间距(10)
+TEXT_ALERT_ROW = 72.0
+TEXT_ALERT_PAD = 12.0
+#: 标签 + 输入框**同一行**：标签这么宽，剩下的给输入框。
+TEXT_ALERT_LABEL_W = 150.0
+
+
+def text_alert_height(n_fields: int) -> float:
+    """带 `n_fields` 个输入框时，附件视图要多高。**纯函数。**"""
+    return TEXT_ALERT_PAD * 2.0 + TEXT_ALERT_ROW * max(0, int(n_fields))
+
+
+def build_text_alert(title: str, message: str, fields: list, buttons: tuple):
+    """建那张带输入框的 `NSAlert`（**不弹**）→ `(alert, {key: NSTextField})`。
+
+    ⚠️ 抽出来是为了**能在不起模态框的情况下看它的样子**（`probe_keyentry.py`）
+       —— 也顺带让几何变成可断言的纯函数（`text_alert_height`）。
+    ⚠️ 输入框一律 `NSSecureTextField`（**不回显明文**）。
+    ⚠️⚠️ **排布照作者拍过的那张稿**：`[标签] [输入框]` 同一行，说明在**下面**小字。
+       第一版把三者**竖着堆**，而且算错了 y —— 说明和输入框**重叠了 12pt**
+       （2026-09-30 探针截图 + 几何诊断抓到的）。
+    """
+    from AppKit import (NSAlert, NSView, NSTextField, NSSecureTextField, NSFont, NSColor,
+                        NSLineBreakByWordWrapping)
+    W, ROW, PAD = TEXT_ALERT_W, TEXT_ALERT_ROW, TEXT_ALERT_PAD
+    LW = TEXT_ALERT_LABEL_W
+    h = text_alert_height(len(fields))
+    box = NSView.alloc().initWithFrame_(((0.0, 0.0), (W, h)))
+    boxes: dict = {}
+    y = h - PAD
+    for f in fields:
+        # ① 标签 + 输入框：**同一行**（标签左、输入框右）
+        lbl = NSTextField.alloc().initWithFrame_(((0.0, y - 20.0), (LW, 20.0)))
+        lbl.setStringValue_(f["label"])
+        lbl.setBezeled_(False)
+        lbl.setEditable_(False)
+        lbl.setDrawsBackground_(False)
+        lbl.setSelectable_(False)
+        lbl.setFont_(NSFont.systemFontOfSize_(12.0))
+        box.addSubview_(lbl)
+
+        tf = (NSSecureTextField if f.get("secure", True)
+              else NSTextField).alloc().initWithFrame_(((LW + 8.0, y - 22.0), (W - LW - 8.0, 22.0)))
+        tf.setFont_(NSFont.systemFontOfSize_(12.0))
+        box.addSubview_(tf)
+        boxes[f["key"]] = tf
+        y -= 22.0 + 6.0
+
+        # ② 说明：**在下面**，两行、自动折行
+        if f.get("hint"):
+            ht = NSTextField.alloc().initWithFrame_(((0.0, y - 34.0), (W, 34.0)))
+            ht.setStringValue_(f["hint"])
+            ht.setBezeled_(False)
+            ht.setEditable_(False)
+            ht.setDrawsBackground_(False)
+            ht.setSelectable_(False)
+            ht.setFont_(NSFont.systemFontOfSize_(10.0))
+            ht.setTextColor_(NSColor.secondaryLabelColor())
+            # ⚠️ 不设这两条的话长说明会被**静默截断**（AppKit 默认单行）
+            ht.setLineBreakMode_(NSLineBreakByWordWrapping)
+            try:
+                ht.setMaximumNumberOfLines_(2)
+            except Exception:                                 # noqa: BLE001
+                pass
+            box.addSubview_(ht)
+        y -= 34.0 + 10.0
+
+    a = NSAlert.alloc().init()
+    a.setMessageText_(title)
+    a.setInformativeText_(message)
+    a.setAccessoryView_(box)
+    for b in buttons:
+        a.addButtonWithTitle_(b)
+    # ⚠️⚠️ **`layout()` 必须显式调**（2026-09-30 实测）：
+    #    不调的话窗口只有 **260 宽**、**附件视图根本不进视图树**、按钮被挤成**竖排**，
+    #    而 `accessoryView()` 照样返回那个对象 —— 看起来"设过了"。
+    #    `runModal()` 内部会替我们调，所以生产路径上看不出来；
+    #    但**探针（`probe_keyentry.py`）不 runModal**，不调就渲染成一张完全不同的框。
+    #    ⚠️ 这是 `build_text_alert` 抽出来之后才暴露的 —— 抽之前没人单独建过它。
+    a.layout()
+    return a, boxes
+
+
 def open_url(url: str) -> bool:
     """用 `open` 打开一个 URL。返回**系统有没有接受**。
 

@@ -285,6 +285,17 @@ S = {                              # 同进程只允许一个面板（菜单栏/
 }
 
 
+def _stale(gen, key: str) -> bool:
+    """「这一代的工作线程还许不许回写？」—— **统一判据**（2026-10-01 质量审查）。
+
+    ⚠️ 一律用**对象身份**：`S[key]` 每次重开都换一个新 dict，`is` 判的是
+       「还是不是我这一代」。比原来逐字段比对（`q` / `course`…）**更紧**、
+       而且不会再漏字段 —— 同一件事原来有四种写法（两条字段判、两条身份判）。
+    ⚠️ 调用方要**先捕获**自己那代的对象：`gen = S[key] = {...}`。
+    """
+    return S.get(key) is not gen
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 纯逻辑（可单测，不碰 AppKit）
 # ══════════════════════════════════════════════════════════════════════
@@ -2453,8 +2464,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             set_status("已清除搜索", 1.0)
             _later(refresh)
             return
-        S["search"] = {"q": q, "hits": [], "total": 0, "truncated": False,
-                       "busy": True, "err": "", "open": None, "open_text": None}
+        # ⚠️ 捕获**这一代**的对象（2026-10-01 质量审查：四处代际守卫收敛成 `_stale`）
+        gen = S["search"] = {"q": q, "hits": [], "total": 0, "truncated": False,
+                             "busy": True, "err": "", "open": None, "open_text": None}
         # ⚠️⚠️ **三个模式必须真互斥**（2026-09-29 修）。它们各从自己的入口进、
         #    不共用一个状态位，而 `refresh` 里是按 `ics → 课次 → 搜索` 的顺序
         #    挨个 `return` 的 —— 所以只设 `S["search"]` 是**不够**的：
@@ -2478,11 +2490,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             except Exception as e:                            # noqa: BLE001
                 got = {"hits": [], "total": 0, "truncated": False,
                        "err": f"{type(e).__name__}: {e}"}
-            s = S.get("search")
-            if s is None or s.get("q") != q:
-                return                                        # 期间又搜了别的
-            s.update(got)
-            s["busy"] = False
+            if _stale(gen, "search"):                         # 期间又搜了别的 / 清掉了
+                return
+            gen.update(got)
+            gen["busy"] = False
             from PyObjCTools import AppHelper
             AppHelper.callAfter(_search_ready)
 
@@ -2518,8 +2529,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # ── 课次列表（卡上那个「课次」按钮进的）────────────────────────────
     def open_sessions(course: str):
         """一门课的**上课记录** + 「没归课的那些」。⚠️ 要读盘 → 工作线程。"""
-        S["sessions"] = {"course": course, "rows": [], "orphans": [],
-                         "busy": True, "err": ""}
+        gen = S["sessions"] = {"course": course, "rows": [], "orphans": [],
+                               "busy": True, "err": ""}
         _later(refresh)
 
         def work():
@@ -2535,11 +2546,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             except Exception as e:                            # noqa: BLE001
                 got = {"rows": [], "orphans": [],
                        "err": f"{type(e).__name__}: {e}"}
-            s = S.get("sessions")
-            if s is None or s.get("course") != course:
-                return                                        # 期间又开了别的课
-            s.update(got)
-            s["busy"] = False
+            if _stale(gen, "sessions"):                       # 期间又开了别的课
+                return
+            gen.update(got)
+            gen["busy"] = False
             from PyObjCTools import AppHelper
             AppHelper.callAfter(refresh)
 
@@ -2581,8 +2591,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    状态对象抓在手里 —— 取消/重拖会把它整个换掉，旧线程回来时**认对象**，
         #    不许 `S.get("ics")` 抓到新一代再覆盖（那会用旧批结果盖新批，
         #    确认后可能建错课）。
-        st = {"rows": [], "warn": [], "slots": {}, "busy": True, "err": ""}
-        S["ics"] = st
+        gen = S["ics"] = {"rows": [], "warn": [], "slots": {}, "busy": True, "err": ""}
         _later(refresh)
 
         def work():
@@ -2605,10 +2614,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             except Exception as e:                            # noqa: BLE001
                 res = {"rows": [], "warn": [],
                        "err": f"{type(e).__name__}: {e}"}
-            if S.get("ics") is not st:                        # 这一代已被取消/重拖顶掉
+            if _stale(gen, "ics"):                            # 这一代已被取消/重拖顶掉
                 return
-            st.update(res)
-            st["busy"] = False
+            gen.update(res)
+            gen["busy"] = False
             from PyObjCTools import AppHelper
             AppHelper.callAfter(refresh)
 
@@ -2797,7 +2806,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 mine["has_key"] = bool(key)
                 # 顺带查一次代际：期间被取消 / 换批就别再往下跑 ——
                 # 下一段就是真花钱的 `suggest`（这也保住了原来靠 TypeError 偶然做到的事）。
-                if S.get("batch") is not mine:
+                if _stale(mine, "batch"):
                     return
                 ask = classify.make_ask(key) if key else (lambda prompt: None)
 
@@ -2821,7 +2830,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                                     on_progress=prog)
             except Exception as e:                            # noqa: BLE001
                 err = f"{type(e).__name__}: {e}"
-            if S.get("batch") is not mine:                    # 期间被取消 / 换了一批
+            if _stale(mine, "batch"):                    # 期间被取消 / 换了一批
                 return
             mine["verdicts"], mine["busy"], mine["error"] = got, False, err
             from PyObjCTools import AppHelper
@@ -3018,7 +3027,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if S.get("busy"):
             set_status(f"另一门课还在跑 —— 这 {n_course} 门排在队列里等它，别关面板", 1.0)
             return
-        run_prep(*S["queue"].pop(0))
+        _kick_queue()
 
     strip_holder["actions"] = _batch_buttons()                # 建在函数定义之后
 
@@ -3370,20 +3379,26 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    **之后**接着踢，不必另写一套并发控制，也不必自己再跑一遍
             #    `prep.prepare`（那会把"结果记进 S['result']"的逻辑抄第二份）。
             # ⚠️ 此时面板可能已经关了（`cur is None`）—— 队列照跑，只是不重画。
-            queue = S.get("queue") or []
-            while queue:
-                nxt = queue.pop(0)
-                # ⚠️ `run_prep` 返回 False = 这一门**没跑起来**（路径算不出等，它自己
-                #    已经出过声）。原来没人接这个返回值 —— 队列 pop 掉之后**剩下的课
-                #    静默不跑**（2026-10-01 审查 #55）。返回 True 才是"已交给工作线程"，
-                #    它的 `_done` 会接着踢下一门。
-                if run_prep(*nxt):
-                    break
-            if not queue:
-                S.pop("queue", None)                      # 排空了就撤掉那个键
+            _kick_queue()
 
         threading.Thread(target=work, daemon=True).start()
         return True
+
+    def _kick_queue():
+        """从 `S["queue"]` 里踢课 —— 跳过**没跑起来**的那几门（`run_prep` 返回
+        False 时它自己已出声）。
+
+        ⚠️ **唯一定义点**（2026-10-01 质量审查）：批量入口与每门收尾的 `_done`
+           原来各写一份 —— 「弹了不看返回值」只会在其中一处被想起来，另一处
+           静默停摆（审查 #55 修的是 `_done` 那半，入口那半还漏着）。
+        返回 True = 有一门已交给工作线程（它自己的 `_done` 会接着踢下一门）。
+        """
+        queue = S.get("queue") or []
+        while queue:
+            if run_prep(*queue.pop(0)):
+                return True
+        S.pop("queue", None)
+        return False
 
     # ⚠️ `choose_files(course)` —— 单课的文件选择器 —— 2026-09-28 删掉了：
     #    它只服务卡片上那个已删的「选择文件…」。**「不用拖」这条路没消失** ——
@@ -3744,28 +3759,20 @@ def _panel_key(kw) -> tuple:
     ⚠️ `str()` 归一化：调用方可能传 `Path` 也可能传 `str`，同一个位置不该因为
        类型不同就白重建一次。
 
-    ⚠️ **别拿整个 `kw` 比** —— 里面还有 `on_close` / `prepare_fn` 这类 lambda，
-       每次传一个新的就永远不等，于是每次打开都白重建（实测踩到）。
-
-    ⚠️ `on_test_mode` 是**第二个**会改界面结构的项（2026-09-30 加）：有它 = 落点条上
-       多一颗开关，没有 = 一颗都不画。少写这一项的话，「上课中开过面板」再
-       「双击 .app」会复用那个**没有开关**的旧面板 —— 而这一次是要开课的，
-       用户会找不到开关，且**照样不报错**（同 `on_start` 当年那条一模一样的形状）。
+    ⚠️ **别拿整个 `kw` 比** —— 里面还有数据类参数（如 whatsnew 的 payload），
+       每次都可能不同，比进去就永远不复用、每次打开都白重建（实测踩到）。
     """
-    return (kw.get("on_start") is None,
-            kw.get("on_test_mode") is None,
-            # ⭐ 两个**写端注入点**也要进键（2026-10-01 审查 #29）：它们决定"往哪写"，
-            #    同一条「测试必须隔离写端」的硬规矩。⚠️ 判 `is None` 而不是比身份 ——
-            #    lambda 每次都是新的，比身份等于永远不复用（docstring 里记过这条）。
-            kw.get("prepare_fn") is None,
-            kw.get("trash_fn") is None,
-            # ⚠️ `suggest_fn` 同族（2026-10-01 深度审查指出同文件第三处注入点）——
-            #    今天只因跑器路径不同而侥幸躲过；手动补上是止血，**机械化整个规则
-            #    （所有 callable kwarg 记 is None）才是正解，记为下一件**。
-            kw.get("suggest_fn") is None,
-            str(kw.get("glossary") or ""),
-            str(kw.get("state_root") or ""),
-            str(kw.get("sessions_dir") or ""))
+    parts = []
+    for k in sorted(kw):
+        v = kw[k]
+        if callable(v):
+            parts.append((k, "fn"))          # 只记"有没有" —— lambda 每次都是新的
+        elif isinstance(v, (str, pathlib.Path)):
+            parts.append((k, str(v)))        # 决定读哪儿写哪儿，归一化成 str
+        elif v is None:
+            parts.append((k, "-"))           # 缺席
+        # 其余（bool / dict 之类的**数据**）不进键：不改界面结构、不改写端
+    return tuple(parts)
 
 
 def open_panel(**kw) -> Handles | None:

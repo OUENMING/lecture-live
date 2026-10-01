@@ -92,20 +92,13 @@ def list_courses(glossary_txt, *, state_root=None) -> list[str]:
 
     d = glossary_dir(glossary_txt)
     if d.is_dir():
-        try:
-            names |= {p.stem for p in d.iterdir() if p.suffix == ".txt"}
-        except OSError:
-            # ⚠️ 与 `session_files`/`orphan_files` 同款兜底（2026-10-01 审查 #5）：
-            #    `is_dir()` 通过并不保证随后 `iterdir()` 成功（权限 / 读盘途中被删）。
-            pass
+        _ents = _soft_iterdir(d)
+        if _ents:
+            names |= {p.stem for p in _ents if p.suffix == ".txt"}
 
     cdir = root / "courses"
     if cdir.is_dir():
-        try:
-            entries = list(cdir.iterdir())
-        except OSError:
-            entries = []
-        for p in entries:
+        for p in (_soft_iterdir(cdir) or []):
             if p.is_dir():
                 names.add(canonical_course(glossary_txt, p.name))
 
@@ -539,6 +532,19 @@ def _attribution_map_soft(sessions_dir) -> dict:
         return {}
 
 
+def _soft_iterdir(d: pathlib.Path):
+    """`iterdir()` 的安全版：读不动 → `None`（**不是空列表** —— 「读不出来」和
+    「里面没东西」是两回事，调用方自己选怎么倒）。
+
+    ⚠️ **唯一定义点**（2026-10-01 质量审查）：这条兜底原来在 5 个调用点各贴一份
+       —— 模块头的存在理由正是反对这个（「容错规则各写一遍迟早漂移」）。
+    """
+    try:
+        return list(d.iterdir())
+    except OSError:
+        return None
+
+
 def attribution_path(sessions_dir) -> pathlib.Path:
     return pathlib.Path(sessions_dir) / ATTRIBUTION_NAME
 
@@ -618,12 +624,10 @@ def orphan_files(sessions_dir, known) -> list:
         return []
     known = list(known or ())
     amap = _attribution_map_soft(d)
-    try:
-        entries = sorted(d.iterdir())
-    except OSError:
-        # ⚠️ 与 `session_files` 同款兜底：目录存在、`is_dir()` 通过，
-        #    并不保证随后 `iterdir()` 成功（权限 / 读盘途中被删）。
-        return []
+    _ents = _soft_iterdir(d)
+    if _ents is None:
+        return []                       # 读不动 = 这一趟没有（同 `session_files`）
+    entries = sorted(_ents)
     out = []
     for p in entries:
         if p.suffix != ".md":
@@ -660,10 +664,10 @@ def session_files(sessions_dir, course: str) -> list:
     d = pathlib.Path(sessions_dir)
     if not d.is_dir():
         return []
-    try:
-        entries = list(d.iterdir())
-    except OSError:
-        return []
+    _ents = _soft_iterdir(d)
+    if _ents is None:
+        return []                       # 读不动 = 这一趟没有（`_soft_iterdir` 的 None）
+    entries = _ents
     amap = _attribution_map_soft(d)    # ⚠️ 读一次，别在循环里逐文件读盘
     out = []
     for p in entries:

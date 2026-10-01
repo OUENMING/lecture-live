@@ -215,6 +215,35 @@ uv venv "$BUILD/venv" --python "$BASEPY" -q
 #    终端起的上课实例命令行里没有 "/Users/…/lecture-live/" 前缀，绝对路径模式
 #    **匹配不到它**（2026-10-01 深度审查实测口径），③ 会把"有实例在跑"看成"没人"。
 #    尾部模式两种启动形态（绝对/相对）都命中。
+#
+# ⭐ 先问**内核**：「有没有人在上课？」—— `instance_lock` 是 flock，谁在跑谁持有
+#    它（`main.run` 的第一件事就是拿它）；比命令行文本匹配可靠得多（2026-10-01
+#    深度审查）。ps 那条继续管「要 kill 谁」，这条管「有没有活的课」。
+#    ⚠️ `CLASSLIVE_LOCK_DIR` 只为验收隔离（f1 假世界用它指到临时目录）。
+_lockdir="${CLASSLIVE_LOCK_DIR:-$HOME/Library/Logs/ClassLive}"
+# ⚠️ 探针要**限时**（2026-10-01 f1 实测教训）：`$APP` 里的解释器若被替换/异常，
+#    这个 `-c` 可能**永远不返回**（假验收世界里那就是个死循环脚本）—— 不带
+#    看门狗会把整个构建挂死。2 秒足够真解释器跑完（实测 ~百毫秒）。
+_lk_out="$(mktemp -t classlive-lk)"
+( cd "$HERE" && _CL_LOCKDIR="$_lockdir" "$APP/Contents/MacOS/python" -c 'import os, pathlib, instance_lock; print(instance_lock.probe(pathlib.Path(os.environ["_CL_LOCKDIR"]) / instance_lock.LOCK_NAME)[0])' >"$_lk_out" 2>/dev/null ) &
+_lk_pid=$!
+for _ in $(seq 1 20); do
+  kill -0 "$_lk_pid" 2>/dev/null || break
+  sleep 0.1
+done
+_lockstate=""
+if kill -0 "$_lk_pid" 2>/dev/null; then
+  pkill -P "$_lk_pid" 2>/dev/null || true    # 子进程（真跑探针的那个）也要收掉
+  kill "$_lk_pid" 2>/dev/null || true
+else
+  wait "$_lk_pid" 2>/dev/null || true
+  _lockstate="$(cat "$_lk_out" 2>/dev/null || true)"
+fi
+rm -f "$_lk_out"
+if [ "$_lockstate" = "held" ]; then
+  fail "有 ClassLive 正在上课（单实例锁被占着）—— 重建会打断它。
+    先退出 ClassLive（或等这节下课），再重跑：./make-app.sh 或 cl update"
+fi
 _PAT="$(printf '%s' "${APP#"$HERE"/}/Contents/MacOS/python" | sed 's/[][\\.^$*?+(){}|]/\\&/g')"
 _pids="$(pgrep -f "$_PAT" 2>/dev/null || true)"
 if [ -n "$_pids" ]; then
@@ -229,9 +258,24 @@ if [ -n "$_pids" ]; then
   done
   _live=""
   _doomed=""
+  # ⚠️ 物理路径归一化（2026-10-01 f1 实测）：`lsof` 给的是**解析过符号链接**的
+  #    cwd（`/private/tmp/…`），而 `$HERE` 是逻辑路径（`/tmp/…`）—— 不归一化
+  #    字符串永远不等，会把**自家实例整体跳过**（假世界全挂在这上面；仓库若放在
+  #    带符号链接的路径下，真实场景同理）。
+  _HERE_P="$(cd "$HERE" && pwd -P)"
   for _p in $_pids; do
     _cmd="$(ps -o command= -p "$_p" 2>/dev/null || true)"
     [ -n "$_cmd" ] || continue
+    # ⚠️ 相对形式的影子（2026-10-01 实查更正）：`ClassLive.app/…` 这个尾巴**任何**
+    #    克隆/任何实例都长一样 —— 不核 cwd 会把**别的目录里**的实例当成这个仓库的
+    #    （事故有两种形态：假验收世界之间互撞、以及旧夹具有 pid 捕获 bug 时漏下来的
+    #    孤儿假进程把真构建拦掉；真实例的 cwd 必然在**它自己那个仓库** ——
+    #    `.app` 启动 chdir(repo)、`cl` 也先 cd 回去）→ cwd 对不上就跳过。
+    #    ⚠️ 取不到 cwd 时**当匹配**（宁可多拦不可漏拦）。
+    _cwd="$( { lsof -a -p "$_p" -d cwd -Fn 2>/dev/null || true; } | sed -n 's/^n//p' | head -1)"
+    if [ -n "$_cwd" ] && [ "$_cwd" != "$_HERE_P" ]; then
+      continue
+    fi
     case "$_cmd" in
       *main.py*)
         # 真正在跑课的实例（`cl` 最后是 exec "$PY" main.py …）—— 杀它 = 丢这场课的收尾

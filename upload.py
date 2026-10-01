@@ -35,6 +35,8 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import re
+import threading
 import time
 
 import paths
@@ -109,6 +111,10 @@ class UploadQueue:
         self._path = paths.upload_queue(root=root)
         self._ledger = paths.upload_ledger(root=root)
         self._items = self._load()
+        #: ⚠️ 列表的读改写互斥（2026-10-01 审查 F25）：实例被收成进程级唯一一份之后，
+        #:    「启动补传」与「收尾入队」两条线程会同时碰 `_items`。**锁里绝不做 I/O**
+        #:    —— `enqueue` 在**主线程**被调，锁里带网络会让主线程等一个 rsync 超时。
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------ 读写
     def _load(self) -> list:
@@ -150,14 +156,15 @@ class UploadQueue:
         ⚠️ 同一节课**重复入队会合并**（按 `key`）—— 不然崩溃后重跑会排两遍。
         """
         key = session_key(stem)
-        if key in {i.get("key") for i in self._items}:
-            return 0                                          # 已经排过 -> 合并，不重复
         paths_ok = [str(p) for p in files if pathlib.Path(p).is_file()]
         if not paths_ok:
             return 0
-        self._items.append({"stem": str(stem), "key": key, "files": paths_ok,
-                            "tries": 0, "next_at": 0.0, "created": self._now()})
-        self._save()
+        with self._lock:                                      # ⚠️ F25：见 `_lock` 的说明
+            if key in {i.get("key") for i in self._items}:
+                return 0                                      # 已经排过 -> 合并，不重复
+            self._items.append({"stem": str(stem), "key": key, "files": paths_ok,
+                                "tries": 0, "next_at": 0.0, "created": self._now()})
+            self._save()
         self._save_ledger(stem, key)
         return len(paths_ok)
 
@@ -188,24 +195,30 @@ class UploadQueue:
            下一次重试从**整条**再来一遍 —— 但**别的条目不受影响**。
            （对象名是确定的，所以重发已经成功的那几个只是覆盖，不会重复。）
         ⚠️ 一次只试 `max_items` 条（默认 1）—— 回连后一次性倒空会被服务端风控。
+        ⚠️⚠️ **列表的读改写都过 `_lock`；网络调用不过**（2026-10-01 审查 F25）：
+           实例收成进程级唯一一份之后，两条线程（启动补传 / 收尾入队）会同时碰
+           `_items` —— 串行化全交给这把锁，而锁里绝不做 I/O（见 `_lock` 的说明）。
         """
         out = {"sent": 0, "failed": 0, "expired": 0, "pending": 0}
         now = self._now()
-        keep = []
-        for it in self._items:
-            if now - float(it.get("created") or 0) > EXPIRE_S:
-                out["expired"] += 1                           # 太久没传成 -> 丢
-                continue
-            keep.append(it)
-        self._items = keep
+        with self._lock:
+            keep = []
+            for it in self._items:
+                if now - float(it.get("created") or 0) > EXPIRE_S:
+                    out["expired"] += 1                       # 太久没传成 -> 丢
+                    continue
+                keep.append(it)
+            self._items = keep
+            #: 挑本轮要试的（取快照；网络段不持锁）
+            todo = []
+            for it in list(self._items):
+                if len(todo) >= max_items:
+                    break
+                if now < float(it.get("next_at") or 0):
+                    continue                                  # 还没到重试时刻
+                todo.append(it)
 
-        tried = 0
-        for it in list(self._items):
-            if tried >= max_items:
-                break
-            if now < float(it.get("next_at") or 0):
-                continue                                      # 还没到重试时刻
-            tried += 1
+        for it in todo:
             ok = True
             for f in list(it.get("files") or []):
                 local = pathlib.Path(f)
@@ -213,7 +226,7 @@ class UploadQueue:
                     continue                                  # 文件没了 -> 跳过（不是失败）
                 staged = self._prepare(local)
                 try:
-                    good = bool(self._send(staged, f"{it['key']}/{local.name}"))
+                    good = bool(self._send(staged, f"{it['key']}/{_remote_name(local)}"))
                 except Exception:                             # noqa: BLE001
                     good = False                              # send 不许抛，但兜一层
                 finally:
@@ -225,17 +238,20 @@ class UploadQueue:
                 if not good:
                     ok = False
                     break                                     # 这条先放下，下次整条重试
-            if ok:
-                self._items.remove(it)
-                out["sent"] += 1
-            else:
-                it["tries"] = int(it.get("tries") or 0) + 1
-                # ⚠️ 指数退避、**封顶 120 min**（照 Firefox 那套）。
-                it["next_at"] = now + min(BACKOFF_MIN_S * (2 ** (it["tries"] - 1)),
-                                          BACKOFF_MAX_S)
-                out["failed"] += 1
-        self._save()
-        out["pending"] = len(self._items)
+            with self._lock:
+                if ok:
+                    if it in self._items:                     # ⚠️ 另一线程可能已经动过
+                        self._items.remove(it)
+                    out["sent"] += 1
+                else:
+                    it["tries"] = int(it.get("tries") or 0) + 1
+                    # ⚠️ 指数退避、**封顶 120 min**（照 Firefox 那套）。
+                    it["next_at"] = now + min(BACKOFF_MIN_S * (2 ** (it["tries"] - 1)),
+                                              BACKOFF_MAX_S)
+                    out["failed"] += 1
+                self._save()
+        with self._lock:
+            out["pending"] = len(self._items)
         return out
 
     # ------------------------------------------------------------ 只读
@@ -246,6 +262,29 @@ class UploadQueue:
     def items(self) -> list:
         """只读快照（判据用）。⚠️ 别再往里写。"""
         return [dict(i) for i in self._items]
+
+
+def _remote_name(local: pathlib.Path) -> str:
+    """远端对象名 —— **不带课号 / 时间戳**（2026-10-01 审查 F26）。
+
+    ⚠️ 文件头声称「哈希目录是为了不泄漏元数据（课号 + 精确时间戳 = 课表）」，而原来
+       文件名**原样保留** → 远端目录是哈希、里面还是 `2026-09-24_140000_ECON10740.md`
+       —— 声明与实现对不上，换个收件方就是事实上的泄漏。这里按**文件类型**给稳定名。
+    ⚠️ 故意**保留类型后缀**：收件端还要一眼分清报告 / 转录 / 音频。
+    ⚠️ 同一节课内类型名互不冲突；跨课由 `{key}/` 目录分开 —— 覆盖语义与原来一致
+       （重发本来就是"同名覆盖"，见 `pump` 的 docstring）。
+    """
+    name = local.name
+    if name.endswith(".report.json"):
+        return "report.json"
+    if name.endswith(".md"):
+        return "transcript.md"
+    m = re.search(r"\.(\d{3})\.opus$", name)
+    if m:
+        return f"audio.{m.group(1)}.opus"
+    # ⚠️ 认不出的名字**原样透传**（判据里塞的任意文件名走这条），不许乱改名 ——
+    #    生产只会产出上面三类；改名只会让「名字对不上」出现在不该出现的地方。
+    return name
 
 
 def rsync_path(remote_dir: str, sub: str) -> str:

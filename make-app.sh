@@ -210,7 +210,12 @@ uv venv "$BUILD/venv" --python "$BASEPY" -q
 #   ② **正在上课的实例不许默默杀**。`main.py` 的 SIGTERM 没有 handler：
 #      杀掉 = 不冲刷在途句、不精修、不写笔记。改成**停下来问人**。
 #      （更新卡片那条路已在 overlay 里被拦住、只引导到终端，这里是第二道闸。）
-_PAT="$(printf '%s' "$APP/Contents/MacOS/python" | sed 's/[][\\.^$*?+(){}|]/\\&/g')"
+# ⚠️ 模式取**路径尾部**（`ClassLive.app/Contents/MacOS/python`），不是绝对路径：
+#    `cl:52` 的 `PY="ClassLive.app/Contents/MacOS/python"` 是**相对路径** ——
+#    终端起的上课实例命令行里没有 "/Users/…/lecture-live/" 前缀，绝对路径模式
+#    **匹配不到它**（2026-10-01 深度审查实测口径），③ 会把"有实例在跑"看成"没人"。
+#    尾部模式两种启动形态（绝对/相对）都命中。
+_PAT="$(printf '%s' "${APP#"$HERE"/}/Contents/MacOS/python" | sed 's/[][\\.^$*?+(){}|]/\\&/g')"
 _pids="$(pgrep -f "$_PAT" 2>/dev/null || true)"
 if [ -n "$_pids" ]; then
   # 自己这一棵进程树（$$ 一路往上）—— 调用方永远是我们的祖先，绝不杀

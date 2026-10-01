@@ -81,7 +81,8 @@ ClassLive —— 本地实时课堂双语字幕
   cl update            更新到最新版(git pull + 补依赖), 然后自检
   cl doctor            自检: 依赖/模型/术语表, 缺什么告诉你跑哪条命令
   cl prep <课件…>       开课前的准备: 从课件抽候选术语, 追加进该课术语表
-  cl setkey [key] [jev] 填 API key(也可以点开课面板上的「翻译引擎」那一项)
+  cl setkey            填 API key(交互式读入, 不回显、不进 shell 历史;
+                        面板上的「翻译引擎」那一项同款)
   cl help              显示本帮助
 
 停止：点悬浮窗右上角 ✕,或在本终端按 Ctrl+C

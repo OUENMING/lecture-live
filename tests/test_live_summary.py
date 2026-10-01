@@ -423,6 +423,15 @@ def main() -> int:
                   len(ds) == 1, f"命中了 {len(ds)} 条：{[d['quote'] for d in ds]}")
         with tempfile.TemporaryDirectory() as d:
             s, emits, _ = make(d, ["A"])
+            s.feed((1, "10:00:00", "It failed due to rain.", "因为下雨失败了"))
+            s.feed((2, "10:00:05", "The deadline is Friday.", "截止是周五"))
+            s.step(6.0)
+            ds = [e for e in emits if e.get("kind") == "deadline"]
+            check("⭐ `due to` 不算课务（due 后跟 to = 因为）—— 只命中 deadline 那条",
+                  len(ds) == 1 and "deadline" in ds[0]["quote"].lower(),
+                  f"命中了 {len(ds)} 条：{[d['quote'] for d in ds]}")
+        with tempfile.TemporaryDirectory() as d:
+            s, emits, _ = make(d, ["A"])
             s.feed((1, "10:00:00", "The deadline has been extended.", "截止延长了"))
             s.step(0.0)
             ds = [e for e in emits if e.get("kind") == "deadline"]

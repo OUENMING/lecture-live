@@ -470,10 +470,19 @@ class LiveSummarizer:
             self._backlog_peak = len(self._pend)
         while len(self._pend) > MAX_PENDING:
             gone = self._pend.pop(0)[1]
-            self._gap_dropped += 1                        # ⭐ 采集面 ⑤
-            self._emit_p({"kind": "gap", "t_from": gone[0][1], "t_to": gone[-1][1],
-                          "state": "dropped"})
+            self._emit_gap(gone, "dropped")
         self._retry_at = 0.0
+
+    def _emit_gap(self, gone: list, state: str) -> None:
+        """丢了一个窗口 → 计数 + 发一条 `gap`。**唯一定义点**（2026-10-01 质量审查）：
+        积压挤掉（`dropped`）与毒窗跳过（`failed`）两条路都走它 ——
+        `gap` 的字段形状只有一个生产者。
+
+        `gone` = 窗口本体（`[(gid, t, en, zh), …]`，不是 `[次数, 窗口]` 那个信封）。
+        """
+        self._gap_dropped += 1                            # ⭐ 采集面 ⑤
+        self._emit_p({"kind": "gap", "t_from": gone[0][1], "t_to": gone[-1][1],
+                      "state": state})
 
     # ------------------------------------------------------------ 提交
     def _process_pending(self, now: float, force: bool = False) -> None:
@@ -518,16 +527,14 @@ class LiveSummarizer:
                     if probe is None:
                         return
                     self._pend.pop(0)                         # 毒窗出队
-                    self._gap_dropped += 1                    # ⭐ 采集面 ⑤
-                    self._emit_p({"kind": "gap", "t_from": buf[0][1], "t_to": buf[-1][1],
-                                  "state": "failed"})
+                    self._emit_gap(buf, "failed")
                     print(f"⚠ 实时总结：一个窗口试了 {MAX_WINDOW_ATTEMPTS} 次都失败"
                           f"（{buf[0][1]}–{buf[-1][1]}），按缺口跳过；后面的窗口继续")
-                    self._pend.pop(0)                         # 下一窗（刚 probe 成功那窗）
-                    now_eff = now - _span_s(nxt[1][-1][1], newest_c)
-                    self._absorb_window(nxt[1], probe, now_eff)
-                    continue
-                return
+                    # ⚠️ 换成下一窗，**落穿到唯一的正常尾部**去消化 —— 出队/有效时刻
+                    #    公式只留一份（2026-10-01 质量审查），少一处以后漂的地方。
+                    item, buf, obj = nxt, nxt[1], probe
+                else:
+                    return
             self._pend.pop(0)
             # ⭐ 越旧的窗口，有效时刻越早（最新的那窗差值为 0，原样是 `now`）。
             now_eff = now - _span_s(buf[-1][1], newest_c)

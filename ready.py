@@ -314,7 +314,13 @@ def _scan_vaults(home: pathlib.Path) -> list:
     # ① iCloud 的 Obsidian 容器 —— Mac 上最常见的库位置（vault 是它的直接孩子）
     level1 += _kids(home / "Library/Mobile Documents/iCloud~md~obsidian/Documents")
     # ② `~/` 的一层（`Library` 跳过 —— 只有上面那条明路会看它）
-    level1 += [d for d in _kids(home) if d.name != "Library"]
+    # ⚠️⚠️ **Desktop / Documents / Downloads 也跳过**（2026-10-01 审查 F24）：
+    #    macOS 对这三处有 TCC 隐私授权 —— 没装 Obsidian 的人走这条兜底时，
+    #    `iterdir()` 会让系统弹「ClassLive 想访问桌面/文稿/下载」（在**打开面板
+    #    那一刻**，而这个工具只该要麦克风）。⚠️ `~/Obsidian`、`~/Vaults` 这类
+    #    **顶层**自定义目录照旧扫得到，能力没丢。
+    _TCC_DIRS = {"Library", "Desktop", "Documents", "Downloads"}
+    level1 += [d for d in _kids(home) if d.name not in _TCC_DIRS]
     for d in level1:
         if budget <= 0:
             break

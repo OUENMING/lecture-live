@@ -291,6 +291,12 @@ def build(version: str, summary: str, date: str = "", log: str = "",
                     if os.environ.get("CLASSLIVE_DEBUG"):
                         import traceback
                         traceback.print_exc()
+                    # ⚠️ 必须把按钮**放回可点**（2026-10-01 审查 #37）：失败路径上原来
+                    #    只改状态行，按钮永久停在禁用 +「更新中…」—— 用户既看不到真实
+                    #    结果，也无法重试。
+                    if ubtn is not None:
+                        ubtn.setEnabled_(True)
+                        ubtn.setTitle_("立即更新")
                     set_status("更新按钮出错", 1.0)
 
         _wire = _make_target(toggle)

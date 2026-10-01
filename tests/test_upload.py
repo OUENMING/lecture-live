@@ -165,11 +165,16 @@ def main() -> int:
                                 now=lambda: _now[0])
         q4.enqueue([rep], "sess-D")
         q4.pump()
-        sent = json.loads((srv / upload.session_key("sess-D") / "x.report.json")
+        sent = json.loads((srv / upload.session_key("sess-D") / "report.json")
                           .read_text(encoding="utf-8"))
         check("⭐⭐ 发出去的那份里是 `<path>/…`",
               sent["session_file"] == "<path>/x.md",
               sent["session_file"])
+        # ⚠️ F26（2026-10-01）：远端对象名改成**按类型**的稳定名 —— 文件头声称
+        #    哈希目录是为了藏元数据，而原来 `x.report.json` 把课号+时间戳又带回去了。
+        check("⭐⭐ 远端名**不再带课号/时间戳**（`x.report.json` → `report.json`）",
+              not (srv / upload.session_key("sess-D") / "x.report.json").exists(),
+              str([p.name for p in (srv / upload.session_key("sess-D")).iterdir()]))
         check("⚠️ 而**本机那份一个字节没动**（脱敏只发生在发送时）",
               home in rep.read_text(encoding="utf-8"))
         check("⚠️ 服务端**不该**多出 `.scrubbed` 临时文件",

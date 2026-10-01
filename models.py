@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shlex
 import sys
 from typing import NamedTuple
 
@@ -85,7 +86,9 @@ MODELS_ROOT_SH = "$HOME" + MODELS_ROOT[1:]
 PARAKEET = Model(
     "parakeet", f"{MODELS_ROOT}/parakeet-tdt-0.6b-v3-int8",
     "Parakeet ASR 模型(必需)", True,
-    f'{sys.executable} -c "from huggingface_hub import snapshot_download; '
+    # ⚠️ `shlex.quote`（2026-10-01 审查 F27）：仓库在含空格的路径下（朋友 clone 到
+    #    `~/My Projects/`）不引号的话，`{exe} -c …` 会被 shell 切开 → 下载直接失败。
+    f'{shlex.quote(sys.executable)} -c "from huggingface_hub import snapshot_download; '
     f"snapshot_download('{PARAKEET_SRC}', "
     f"local_dir='{MODELS_ROOT_SH}/parakeet-tdt-0.6b-v3-int8')\"",
     640.0, src=PARAKEET_SRC)
@@ -103,8 +106,10 @@ WHISPER = Model(
     "定稿 Whisper 模型(必需)", True,
     # ⚠️ 同 `VAD` 那条：`-f` 加上（这里即使漏了，后面 `tar` 也会失败 —— 但错误信息
     #    会指向"tar 解不开"，而不是"下载就是 404"）。
-    "curl -fsSL -o /tmp/wt.tar.bz2 " + WHISPER_URL + " && "
-    "tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2",
+    # ⚠️ 固定 `/tmp/wt.tar.bz2` 换成 `mktemp`（2026-10-01 审查 F27）：固定名可被同机
+    #    预置符号链接（`curl -o` 会跟随），面板下载与 `cl update` 并发时也会互相覆盖。
+    't="$(mktemp -t classlive-wt)" && curl -fsSL -o "$t" ' + WHISPER_URL + " && "
+    'tar xjf "$t" -C ~/models/ && rm -f "$t"',
     538.0, src=WHISPER_URL, extra="（解开后 989 MB）")
 
 # ⚠️ **可选**，但它是「没配 API key 时唯一的翻译引擎」，所以必须让人**看得见**。
@@ -116,7 +121,8 @@ WHISPER = Model(
 QWEN = Model(
     "llm", "~/.cache/huggingface/hub/models--mlx-community--Qwen3-1.7B-4bit",
     "本地翻译模型 Qwen3-1.7B(可选)", False,
-    f'{sys.executable} -c "from huggingface_hub import snapshot_download; '
+    # ⚠️ `shlex.quote` 同上（2026-10-01 审查 F27）。
+    f'{shlex.quote(sys.executable)} -c "from huggingface_hub import snapshot_download; '
     f"snapshot_download('{QWEN_SRC}')\"",
     938.0, src=QWEN_SRC, at_hf=True)
 

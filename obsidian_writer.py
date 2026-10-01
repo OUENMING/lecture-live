@@ -506,8 +506,12 @@ class ObsidianWriter:
         LLM 偶尔会过度修正(把正确的词改错), 没有原始转录就无从复核。
         """
         if not self.enabled or not self.session_path:
+            # ⚠️ 不落盘也要**计数**（2026-10-01 审查 F22）：句号是"第几句定稿"，
+            #    实时总结的窗口/章节区间（lo/hi、原子 src）靠它 —— `--save-notes no`
+            #    时原来恒 0，所有区间都成了 0。落盘那条路在下面**写成功后**才加
+            #    （F17：写失败不许把句号推过文件一格）。
+            self._n += 1
             return
-        self._n += 1
         ts = time.strftime("%H:%M:%S")          # 定稿那一刻
         mark = " ⭐ Exam Focus" if flagged else ""
         lines = [f"> [!abstract] {ts}{mark}"]
@@ -519,6 +523,9 @@ class ObsidianWriter:
             lines.append(f"> **ASR**: {_flat(raw)}")
         with self.session_path.open("a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n\n")
+        # ⚠️ `_n` 在**写成功之后**才加（2026-10-01 审查 F17）：原来先加后写，
+        #    写失败时 `_n` 比文件多一格 → 之后所有 `src`/全局句号整体错位 1。
+        self._n += 1
 
     @property
     def count(self) -> int:

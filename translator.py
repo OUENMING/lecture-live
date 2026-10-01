@@ -526,6 +526,14 @@ class Translator:
                     # 的 `_tokenizer` 去 `apply_chat_template` → AttributeError。
                     # 换成 tokenizer 先落地, 则"看到 _model 有值"就等于"两样都齐了"。
                     try:
+                        # ⚠️ 取数期间**强制离线**（2026-10-01 深度审查）：上面那道
+                        #    「在不在」是启发式（目录里任一非空文件就算在），半截缓存
+                        #    它能放行，然后 `load()` 对着 HF 的 repo id **联网补全**
+                        #    —— 「绝不自动下」真正的关门点在**会下载的那一层**。
+                        #    模型齐 → 离线可加载；不齐 → 立刻失败进闩（消息会出声）。
+                        #    ⚠️ 只影响本进程：`cl doctor` 的下载走独立子进程，不受影响。
+                        import os as _os
+                        _os.environ.setdefault("HF_HUB_OFFLINE", "1")
                         from mlx_lm import load
                         _m, _tok = load(self._model_name)
                     except Exception as e:                    # noqa: BLE001

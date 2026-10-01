@@ -1059,7 +1059,9 @@ def prepare(course: str, files: list, *, glossary_dir, state_path,
             for item in obj["candidates"]:
                 if not isinstance(item, dict):
                     continue
-                t = str(item.get("term", "")).strip()
+                # ⚠️ `or ""`：`term` 键在但值是 `null` 时，`str(None)` 会得到字面量
+                #    `"None"`（非空！）→ 伪词条混进候选（2026-10-01 审查 #48）。
+                t = str(item.get("term") or "").strip()
                 if not t:
                     continue
                 try:
@@ -1069,7 +1071,8 @@ def prepare(course: str, files: list, *, glossary_dir, state_path,
                 k = t.lower()
                 if k not in merged or c > merged[k]["confidence"]:
                     merged[k] = {"term": t, "confidence": max(0.0, min(1.0, c)),
-                                 "why": str(item.get("why", ""))[:24]}
+                                 # ⚠️ `or ""` 同理（深度审查）：`why:null` 别写成 "None"
+                                 "why": str(item.get("why") or "")[:24]}
             _prog("candidates", i, len(groups))
 
         # ---- ③ 确定性复核 + 排序 ----

@@ -405,7 +405,11 @@ def token_from_cc_switch() -> str:
     db = pathlib.Path.home() / ".cc-switch/cc-switch.db"
     if not db.exists():
         raise RuntimeError(f"没有 cc-switch 库：{db}")
-    with sqlite3.connect("file:" + str(db) + "?mode=ro", uri=True) as con:
+    # ⚠️ `with sqlite3.connect(...)` **不会关连接**（只包事务）—— 原注释声称
+    #    这就是修泄漏，没修到（2026-10-01 审查 F16）。`closing` 才是真的关。
+    import contextlib
+    with contextlib.closing(sqlite3.connect("file:" + str(db) + "?mode=ro",
+                                            uri=True)) as con:
         row = con.execute(
             "select settings_config from providers where name='commandcode'"
         ).fetchone()

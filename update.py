@@ -481,8 +481,11 @@ def auto_update() -> dict:
                 if not (stale and _take_lock()):
                     return {**out, "skipped": True, "reason": "已有更新在跑"}
             held = True                               # 从这里起，锁才是**我们的**
-        except Exception:                                 # noqa: BLE001
-            pass
+        except Exception as e:                            # noqa: BLE001
+            # ⚠️ 不许静默（2026-10-01 审查 F14）：原来 `pass` —— 抢锁逻辑自己崩了
+            #    之后会**无锁**继续 pull()，而屏上和日志里一个字都没有。
+            _log(f"⚠ 更新锁处理异常（{type(e).__name__}: {str(e)[:80]}）"
+                 f" —— 继续，但这次没有持锁")
         try:
             stamp.write_text("", encoding="utf-8")
         except Exception:                                 # noqa: BLE001

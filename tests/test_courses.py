@@ -654,6 +654,28 @@ def main() -> int:
               and _stem in [p.stem for p in courses.session_files(_dd, "ECON10730")],
               str([p.stem for p in courses.session_files(_dd, "ECON10730")]))
 
+    # ── 归属文件坏掉：读路径 fail-soft、写路径照旧抛（2026-10-01 审查 #4/#27）──
+    #    ⚠️ 两半都要：只测「读不抛」会把写路径也带成兜底（当空读 + 整份写 = 静默全损）。
+    with tempfile.TemporaryDirectory() as td:
+        _sd = pathlib.Path(td) / "sessions"
+        _sd.mkdir()
+        (_sd / "2026-01-02_000000_X.md").write_text("x", encoding="utf-8")
+        courses.attribution_path(_sd).write_text("{ 坏 JSON", encoding="utf-8")
+        _got = None
+        try:
+            _got = [p.name for p in courses.session_files(_sd, "X")]
+        except Exception:                                     # noqa: BLE001
+            _got = "RAISED"
+        check("⭐ 归属文件坏 -> `session_files` 不抛（显示路径 fail-soft）",
+              _got == ["2026-01-02_000000_X.md"], str(_got))
+        _raised = ""
+        try:
+            courses.set_attribution(_sd, "2026-01-02_000000_X", "NEW")
+        except Exception as e:                                # noqa: BLE001
+            _raised = type(e).__name__
+        check("⭐⭐ 而写路径**照旧抛** `StoreError`（当空读 + 整份写 = 静默全损，绝不兜）",
+              _raised == "StoreError", f"raised={_raised!r}")
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

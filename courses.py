@@ -92,11 +92,20 @@ def list_courses(glossary_txt, *, state_root=None) -> list[str]:
 
     d = glossary_dir(glossary_txt)
     if d.is_dir():
-        names |= {p.stem for p in d.iterdir() if p.suffix == ".txt"}
+        try:
+            names |= {p.stem for p in d.iterdir() if p.suffix == ".txt"}
+        except OSError:
+            # ⚠️ 与 `session_files`/`orphan_files` 同款兜底（2026-10-01 审查 #5）：
+            #    `is_dir()` 通过并不保证随后 `iterdir()` 成功（权限 / 读盘途中被删）。
+            pass
 
     cdir = root / "courses"
     if cdir.is_dir():
-        for p in cdir.iterdir():
+        try:
+            entries = list(cdir.iterdir())
+        except OSError:
+            entries = []
+        for p in entries:
             if p.is_dir():
                 names.add(canonical_course(glossary_txt, p.name))
 
@@ -502,12 +511,45 @@ ATTRIBUTION_NAME = ".attribution.json"
 NO_COURSE = "(不属于任何课)"
 
 
+#: 归属文件坏掉时**只出声一次** —— `session_files` 每门课都会被调一遍，
+#: 不收敛的话一次面板刷新能刷几十行（2026-10-01 审查 #4）。
+_ATTR_WARNED = False
+
+
+def _warn_attr_read_fail(e) -> None:
+    global _ATTR_WARNED
+    if _ATTR_WARNED:
+        return
+    _ATTR_WARNED = True
+    print(f"⚠ 归属文件读不出来（{e}）—— 这次按「没归过课」显示；"
+          f"删课/判课之前先修好它（写路径不会自动兜底）", flush=True)
+
+
+def _attribution_map_soft(sessions_dir) -> dict:
+    """**显示路径**用的归属表：坏文件 → `{}` + 出声一次（2026-10-01 审查 #4）。
+
+    ⚠️ **写路径绝不许用它** —— 当空读 + 整份写会把用户手改过的归属**静默全损**
+       （`store` 模块头那条硬规则）；`set_attribution` 照旧直接调 `attribution_map`。
+    """
+    import store
+    try:
+        return attribution_map(sessions_dir)
+    except store.StoreError as e:
+        _warn_attr_read_fail(e)
+        return {}
+
+
 def attribution_path(sessions_dir) -> pathlib.Path:
     return pathlib.Path(sessions_dir) / ATTRIBUTION_NAME
 
 
 def attribution_map(sessions_dir) -> dict:
-    """`{会话 stem: 课号}` —— 用户手改过的归属。**只读**，读不出当空。
+    """`{会话 stem: 课号}` —— 用户手改过的归属。**只读**。
+
+    ⚠️ 口径（2026-10-01 审查 #4 改口）：**文件不在** → 当空；文件在、但**读不出来**
+       → **抛 `store.StoreError`**（store 那条硬规则的刻意设计 —— 当空会让下一次
+       写入把真内容整个覆盖掉）。显示路径自己接（`session_files`/`orphan_files`
+       已接住并出声）；**写路径（`set_attribution`）绝不许接成当空**。
 
     ⚠️ 录课时没设课号会落成 `LECTURE` / `ECON10xxx` 这种**占位符**，
        而文件名一旦写下就不再改（会话抬头是三方共享契约）。实测作者的
@@ -575,7 +617,7 @@ def orphan_files(sessions_dir, known) -> list:
     if not d.is_dir():
         return []
     known = list(known or ())
-    amap = attribution_map(d)
+    amap = _attribution_map_soft(d)
     try:
         entries = sorted(d.iterdir())
     except OSError:
@@ -622,7 +664,7 @@ def session_files(sessions_dir, course: str) -> list:
         entries = list(d.iterdir())
     except OSError:
         return []
-    amap = attribution_map(d)          # ⚠️ 读一次，别在循环里逐文件读盘
+    amap = _attribution_map_soft(d)    # ⚠️ 读一次，别在循环里逐文件读盘
     out = []
     for p in entries:
         if p.suffix != ".md":

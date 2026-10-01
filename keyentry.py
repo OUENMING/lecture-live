@@ -77,13 +77,16 @@ def validate_deepseek(key: str, *, model: str = "deepseek-flash") -> tuple[bool,
         return False, "空的"
     try:
         from build_notes import _chat_json
-        got = _chat_json(key, model, 'Reply with JSON: {"ok": true}', "ping", 16, 0.0)
+        # ⚠️ 15 秒（2026-10-01 审查 F9）：面板上有个框在等人 —— 默认 180 秒
+        #    意味着「正在验证…」最多转 3 分钟。校验只需回一个词。
+        got = _chat_json(key, model, 'Reply with JSON: {"ok": true}', "ping", 16,
+                         0.0, timeout=15.0)
         return (True, "可用") if got is not None else (False, "没回内容")
     except Exception as e:                                    # noqa: BLE001
         s = str(e)
         if "401" in s or "403" in s or "Authentication" in s:
             return False, "401 —— 检查是不是复制全了"
-        if "402" in s or "Insufficient" in s.lower():
+        if "402" in s or "insufficient" in s.lower():
             return False, "配额/余额不够"
         return False, f"{type(e).__name__}: {s[:60]}"
 
@@ -203,10 +206,25 @@ def load_jev(*, root=None) -> str:
 if __name__ == "__main__":                                    # `cl setkey` 的兜底入口
     import sys
     a = sys.argv[1:]
-    if not a or a[0] in ("-h", "--help"):
-        print("用法: python keyentry.py <deepseek-key> [jev-key]")
+    if a and a[0] in ("-h", "--help"):
+        print("用法: cl setkey              # 交互式读入（不回显、不进 shell 历史）")
+        print("      cl setkey <ds> [jev]   # ⚠️ key 会进 shell 历史 / `ps`，只留作兼容")
         print("      也可以在面板里点「翻译引擎」那一项。")
         sys.exit(0)
+    if not a:
+        # ⚠️ 默认走交互读入（2026-10-01 审查 F12）：`cl setkey <key>` 会把 key 写进
+        #    shell 历史与 `ps` 输出 —— 键盘输入 + `getpass` 不回显就不落这两处。
+        import getpass
+        try:
+            ds = getpass.getpass("DeepSeek key（不回显；留空 = 跳过）: ").strip()
+            jv = getpass.getpass("Jev key（可选；留空 = 跳过）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n（取消，什么都没动）")
+            sys.exit(1)
+        a = [ds, jv]
+    else:
+        print("⚠️ key 写进了命令行 —— 它已经在 shell 历史 / `ps` 里留下了。"
+              "下次直接用 `cl setkey`（不带参数）交互式输入。", file=sys.stderr)
     _ok, _msg = save(deepseek=a[0] if a else "", jev=a[1] if len(a) > 1 else "")
     print(_msg)
     sys.exit(0 if _ok else 1)

@@ -220,7 +220,14 @@ def collect_terms(course: str | None = None) -> list[str]:
 # ---- API ----
 
 def _chat_json(key: str, model: str, system: str, user: str,
-               max_tokens: int, temperature: float = 0.2) -> dict | None:
+               max_tokens: int, temperature: float = 0.2,
+               timeout: float = 180.0) -> dict | None:
+    """⚠️ `timeout` 可选、默认 180（2026-10-01 审查 F9 / 计划 D16(b)）：
+
+    7 个既有调用方**一个都不用改**；要短超时的自己传 —— `main._summ_chat` 传 20
+    （它攥着收尾的 `_step_lock`）、`keyentry.validate_deepseek` 传 15
+    （面板上有个框在等人）。⚠️ 180 不是个安全的默认值：拿锁的那条路最长能卡 3 分钟。
+    """
     import httpx
     payload = {"model": model, "stream": False, "max_tokens": max_tokens,
                "temperature": temperature, "thinking": {"type": "disabled"},
@@ -229,7 +236,7 @@ def _chat_json(key: str, model: str, system: str, user: str,
                             {"role": "user", "content": user}]}
     r = httpx.post("https://api.deepseek.com/v1/chat/completions",
                    headers={"Authorization": f"Bearer {key}"},
-                   json=payload, timeout=180)
+                   json=payload, timeout=timeout)
     r.raise_for_status()
     obj = json.loads(r.json()["choices"][0]["message"]["content"])
     return obj if isinstance(obj, dict) else None

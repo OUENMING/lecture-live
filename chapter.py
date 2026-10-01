@@ -104,7 +104,10 @@ SYS_CHAPTER = """你在听一节课的转录, 手里是**一章**的原料: 这�
 #:    **一条都不命中** —— 而老师在课上说的十有八九是复数。
 #:    按本模块自己写的优先级（漏真 deadline 比多报一条重得多），这个缺口必须补。
 DEADLINE_RE = re.compile(
-    r"\b(due|deadlines?|submits?|submissions?|hand\s+in|problem\s+sets?|"
+    # ⚠️ `due(?!\s+to\b)`（2026-10-01 审查 F23）：`due to` 是"因为"，不是课务。
+    #    实测 200 份会话 / 7,667 行英文里正则共命中 34 行，其中 `due` 3 行、
+    #    **3 行全是 `due to`**（占 9%）。词边界管不住这个（due 本身是词）。
+    r"\b(due(?!\s+to\b)|deadlines?|submits?|submissions?|hand\s+in|problem\s+sets?|"
     r"homeworks?|assignments?|midterms?|quiz(?:zes)?|exams?)\b", re.I)
 
 #: 改期线索。命中它 = 这条课务**被改过**（界面要标「已改期」）。

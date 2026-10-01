@@ -257,6 +257,23 @@ def _ask_save_notes(n: int) -> bool:
     return ans.lower() in ("", "y", "yes", "是", "好", "存")
 
 
+#: ⭐ **进程级唯一一份上传队列**（2026-10-01 审查 F25）：`UploadQueue` 的 docstring
+#: 写着「线程不安全，调用方自己串行化」，而启动补传与收尾入队原来是**两个实例**
+#: —— 各自攥着一份内存副本，后写的 `_save()` 会把对方刚入的条目整份盖掉
+#: （新一节静默不进队列）。收成一份实例 + `upload.UploadQueue` 内部把
+#: enqueue/pump 的读改写串行化，就没有第二份副本可盖。
+_upload_q_shared = None
+
+
+def _shared_upload_queue():
+    global _upload_q_shared
+    if _upload_q_shared is None:
+        import upload as _up
+        _upload_q_shared = _up.UploadQueue(
+            _up.make_rsync_send(UPLOAD_HOST, UPLOAD_REMOTE))
+    return _upload_q_shared
+
+
 def start_upload(tester) -> dict:
     """把这一节排进上传队列，并**在后台线程里试一次**。返回 `{queued, pending}`。
 
@@ -265,13 +282,12 @@ def start_upload(tester) -> dict:
     ⚠️ **上传失败不影响任何东西** —— 报告、包、音频都已经在盘上了。
        失败的条目留着，`next_at` 到点后由下一次启动再试（退避 1→120 min，14 天过期）。
     """
-    import upload as _up
     if os.environ.get("CLASSLIVE_UPLOAD", "1") != "1":
         return {"queued": 0, "pending": 0, "off": True}
     files = tester.upload_files()
     if not files:
         return {"queued": 0, "pending": 0}
-    q = _up.UploadQueue(_up.make_rsync_send(UPLOAD_HOST, UPLOAD_REMOTE))
+    q = _shared_upload_queue()
     n = q.enqueue(files, tester.stem.name)
     pending = q.pending
     th = None
@@ -345,21 +361,20 @@ class EngineRouter:
         # ⭐⭐ **广播要说实话**（2026-10-01 审查 F2）：本地模型是**可选**的，大多数人
         #    没装 —— 没装还说「已降级本地引擎」，用户会以为有兜底，实际每句都失败。
         #    `local_ready()` 只看在不在、不加载（桩/测试没有这个方法就按可用算）。
-        _ready = getattr(self._local, "local_ready", None)
-        local_ok = True
-        if callable(_ready):
-            try:
-                local_ok = bool(_ready())
-            except Exception:                     # noqa: BLE001
-                local_ok = True
+        try:
+            local_ok = bool(self._local.local_ready())
+        except Exception:                         # noqa: BLE001
+            # 桩没有这个方法（AttributeError）/ 判据自己坏了 → 都按「可用」算
+            local_ok = True
         if local_ok:
             self._notify(
                 f"云端翻译失败({str(e)[:60]}); 已降级本地引擎, "
                 f"每 {self.RETRY_PROBE_S:.0f}s 自动重试", warn=True)
         else:
             self._notify(
-                f"云端翻译失败({str(e)[:60]}); 本地模型没装 —— 只保留转录"
-                f"（装它：cl doctor）。每 {self.RETRY_PROBE_S:.0f}s 自动重试云端", warn=True)
+                f"云端翻译失败({str(e)[:60]}); 本地模型不可用（没装，或加载失败）"
+                f"—— 只保留转录（跑 cl doctor 看看）。每 {self.RETRY_PROBE_S:.0f}s 自动重试云端",
+                warn=True)
         self._start_probe()
 
     def _start_probe(self) -> None:
@@ -979,12 +994,28 @@ def run(args) -> None:
     #    否则第二个实例已经抢走了麦克风、已经烧了 API 调用，再说"你重复了"就晚了。
     #    ⚠️ `_lock` 必须一直活到 run() 结束 —— 文件对象一被回收，锁就释放了。
     #    理由（为什么用 flock 不用 pidfile / 为什么 .app 那条路不靠它）见 instance_lock.py。
-    _instance_lock, _holder = instance_lock.acquire()
-    if _instance_lock is None:
-        echo(f"⚠ {instance_lock.describe_holder(_holder)}。")
+    # ⚠️ 先 probe 再 acquire（2026-10-01 审查 F8，同 `prep.prepare` 的先例）：
+    #    `acquire()` 把「已被占用」和「连锁文件都建不出来」**压成同一个返回**
+    #    （instance_lock.py 自己写明），照它报「已经有一个在跑」会在磁盘满/权限时
+    #    **误诊** —— 而那时用户一个实例都没在跑、却起不来。
+    _state0, _holder0 = instance_lock.probe()
+    if _state0 == "held":
+        echo(f"⚠ {instance_lock.describe_holder(_holder0)}。")
         echo("   同时跑两个会抢同一个麦克风、叠两个悬浮窗、翻译费用也翻倍。")
         echo("   要停掉那一个：点它悬浮窗右上角的 ✕，或在它的终端按 Ctrl+C。")
         return
+    _instance_lock, _holder = instance_lock.acquire()
+    if _instance_lock is None:
+        if _holder is None:
+            # probe 刚说没被占、acquire 却拿不到且读不到占用者 = **锁文件建不出来**。
+            # 按仓库既有取向 fail-open：出声放行，不拦上课（同 prep 那条）。
+            echo("⚠ 单实例锁建不出来（磁盘满 / 权限？）—— 这次不拦你，照常上课。")
+        else:
+            # 极端竞态：probe 与 acquire 之间被另一个实例抢了 —— 按「被占用」处理
+            echo(f"⚠ {instance_lock.describe_holder(_holder)}。")
+            echo("   同时跑两个会抢同一个麦克风、叠两个悬浮窗、翻译费用也翻倍。")
+            echo("   要停掉那一个：点它悬浮窗右上角的 ✕，或在它的终端按 Ctrl+C。")
+            return
 
     # ---- 麦克风权限：三条路径都要说人话 ----
     # ⚠️ 为什么必须做：Apple 原文 —— 被拒时**录音里只有静音**（不是报错、不是崩溃）。
@@ -1036,6 +1067,12 @@ def run(args) -> None:
         probe_src.close()
     except Exception:                            # noqa: BLE001
         pass
+    # ⚠️ 释放引用（2026-10-01 审查 F20）：块作用域不存在，`probe_src` 原来会一直
+    #    活到 `run()` 结束 —— 整段音频样本在内存里停着（`cl file` 回放时是两份：
+    #    试开这份 + 真跑那份）。置 None 让 GC 立刻收掉试开的那一份。
+    #    ⚠️ 「ffmpeg 解码两遍」留着 —— 试开的意义就是**先验证再承诺**，
+    #       复用同一句柄会在别处改动解码路径时把验证悄悄架空。
+    probe_src = None
 
     # 两个 ASR 模型都是**必需**的: 草稿/兜底用 Parakeet, 定稿用 Whisper。
     # 缺任何一个都在这里说清楚然后退出 —— 不在课上静默降质。
@@ -1162,7 +1199,7 @@ def run(args) -> None:
         #    ⚠️ 上一次收尾时那个 daemon 线程多半被进程退出杀了（实测：
         #       报告传上去了、9 MB 的音频没传完）→ 不在这里补一次，它就**永远传不完**。
         #    ⚠️ 丢后台线程，**不阻塞启动**。
-        _q = _upmod.UploadQueue(_upmod.make_rsync_send(UPLOAD_HOST, UPLOAD_REMOTE))
+        _q = _shared_upload_queue()          # ⚠️ 与收尾那条路**同一个实例**（审查 F25）
         if _q.pending:
             _pn = _q.pending
             threading.Thread(target=lambda: _q.pump(max_items=_pn), daemon=True,
@@ -1245,6 +1282,13 @@ def run(args) -> None:
         #    回调）—— `Overlay` 那边默认就是空 lambda，**零开销零行为**。
         note=(tester.note_ui if tester is not None else None),
     )
+    # ⭐ 直播闸门（2026-10-01 审查 F7）：把「课还在音频阶段吗」告诉悬浮窗 ——
+    #    更新卡片的重活问询**只在没课的时候弹模态**（模态卡的是主线程，而音频
+    #    `poll()/drain()` 也在主线程：弹着不答的每一秒都在丢音频）。收尾开始置 False。
+    #    TerminalUI 没有 set_live → callable 守卫跳过。
+    _set_live_ui = getattr(ui, "set_live", None)
+    if callable(_set_live_ui):
+        _set_live_ui(True)
     # 终端模式拿不到悬浮窗，退化成字符框（两种模式都要能看到）
     # ⚠️ 判据同上（`drives_appkit`，不是 `args.ui`）：overlay 载入失败会静默回退
     #    终端 UI，那时 `args.ui` 仍是 "overlay" → 字符框不打印、真悬浮窗又不存在
@@ -1625,8 +1669,11 @@ def run(args) -> None:
         from build_notes import _chat_json
         if not api_key_val:
             return None
+        # ⚠️ 短超时（2026-10-01 审查 F9 / 计划 D16）：默认 180 秒会让 worker 攥着
+        #    `_step_lock` 最长 3 分钟 —— `finish(25s)` 拿不到锁就"只关文件"，
+        #    残余窗口和最后一章的正式合成全丢。20 秒对正常调用绰绰有余。
         return _chat_json(api_key_val, atom.MODEL, sysp, block,
-                          max_tokens, temperature)
+                          max_tokens, temperature, timeout=20.0)
 
     def _summ_emit(payload: dict) -> None:
         """推给界面 **+ 打终端那一行**。**两件事都由产出方负责**（见 `summary_log_line`）。
@@ -1807,6 +1854,7 @@ def run(args) -> None:
                 echo(_diag)
             finalq.put(_QUIT)
             deadline = time.monotonic() + 15
+            _settled = False
             while time.monotonic() < deadline:
                 drain()
                 if all_settled(finalq, streamq, drafts,
@@ -1814,11 +1862,22 @@ def run(args) -> None:
                     time.sleep(0.25)
                     if all_settled(finalq, streamq, drafts,
                                    busy["on"], carry["text"]):
+                        _settled = True
                         break
                 time.sleep(0.02)
             drain()
+            if not _settled:
+                # ⚠️ 静默丢句是这里最坏的形状（2026-10-01 审查 F6）：15 秒一到、
+                #    `running.clear()` 之后 final_worker 退出，finalq 里剩的**没人处理**，
+                #    会话记录里直接少几句且一个字都不说。出声（qsize 含 `_QUIT`，
+                #    只说"约"）。
+                echo(f"⚠ 收尾等了 15 秒还没清完 —— 队列里约 {finalq.qsize()} 句没处理完"
+                     f"（这些句子不会进会话记录/笔记）")
         finally:
             running.clear()
+            # ⚠️ 音频阶段到此为止（审查 F7）—— 之后更新卡片才允许弹模态重活问询。
+            if callable(_set_live_ui):
+                _set_live_ui(False)
 
             def qa_snapshot():
                 """「我问过什么」交给笔记(Phase 4)。⚠️ 在 qa_lock 下**拷贝一份**:
@@ -2018,12 +2077,33 @@ def run(args) -> None:
                 #    `metrics.json`（能对上的字段名逐字一致）；对不上的那几项
                 #    它**刻意不返回**，别在这里补 —— 见 `LiveSummarizer.stats()`。
                 tester.note_block("live", summ.stats())
-                _rep = tester.finish(vad_report=locals().get("_diag", ""),
-                                     note_path=str(getattr(writer, "note_path", "") or ""),
-                                     # ⚠️ `--no-bundle` 原来只声明、没人读（2026-09-28
-                                     #    OCR 审计发现）—— README 写明它能「不打包，只写报告」，
-                                     #    不接上线这个开关就是个谎。
-                                     bundle=not args.no_bundle)
+                # ⚠️⚠️ `finish()` 里是 ffmpeg 转码 + 打包（注释估 ~21 秒/50 分钟）
+                #    —— 原来直接在**主线程**跑，转码期间窗口不 pump
+                #    （2026-10-01 审查 F21）。丢进线程 + `_spin` 等它 ——
+                #    `_spin` 就是"不冻主线程"本身（见它的 docstring）。
+                _vad = locals().get("_diag", "")
+                _tf: dict = {}
+
+                def _finish_worker():
+                    try:
+                        _tf["rep"] = tester.finish(
+                            vad_report=_vad,
+                            note_path=str(getattr(writer, "note_path", "") or ""),
+                            # ⚠️ `--no-bundle` 原来只声明、没人读（2026-09-28
+                            #    OCR 审计发现）—— README 写明它能「不打包，只写报告」，
+                            #    不接上线这个开关就是个谎。
+                            bundle=not args.no_bundle)
+                    except Exception as e:               # noqa: BLE001
+                        _tf["err"] = e
+
+                _thf = threading.Thread(target=_finish_worker, daemon=True,
+                                        name="tester-finish")
+                _thf.start()
+                _spin(lambda: not _thf.is_alive())
+                if "err" in _tf:
+                    echo(f"⚠ 测试报告生成失败（{type(_tf['err']).__name__}: "
+                         f"{str(_tf['err'])[:80]}）—— 笔记不受影响")
+                _rep = _tf.get("rep")
                 if _rep:
                     echo(f"\n🧪 测试报告: {_rep}")
                     # ⭐ 阶段 3：排进上传队列 + 后台试一次（**不阻塞收尾**）。

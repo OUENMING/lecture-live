@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 
 from translator import domain_block
+from translator import _clean_fix          # 精修写 en 前过同一道机械闸门（审查 F10）
 
 POLISH_BATCH = 30           # 每次请求精修多少句(太长会漏行/被截断)
 POLISH_MAX_TOKENS = 4000
@@ -181,6 +182,12 @@ def polish_entries(entries: list[dict], api_key: str, model: str,
             zh = " ".join(_zh.split()) if isinstance(_zh, str) else ""
             if not (en or zh):
                 continue                    # 两个字段都空: 一个字都没写回, 不算精修过
+            if en:
+                # ⚠️ 机械闸门（2026-10-01 审查 F10）：精修也在写 `en`，而仓库硬规矩
+                #    「EN 为基准防倒退」在这层原来**只靠 prompt**。复用直播间那条
+                #    `_clean_fix`（唯一定义点）：混入中文 / 离谱变长 → 退回原句。
+                #    被退回时只写 zh（只留中文改进，不动英文）。
+                en = _clean_fix(en, out[i].get("en") or "")
             if en:
                 out[i]["en"] = en
             if zh:

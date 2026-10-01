@@ -166,7 +166,10 @@ def t_save_notes_no_still_disables():
                 assert w.enabled is False, f"vault={vault!r} 时 mode=no 却没关掉"
                 assert w.session_path is None
                 w.append("x", "y")
-                assert w.count == 0, "mode=no 却记录了内容"
+                # ⚠️ 2026-10-01（审查 F22）**改口径**：不写盘（上面两条）不变，但
+                #    计数照走 —— 句号是"第几句定稿"，实时总结的窗口/章节 lo·hi 靠它，
+                #    原来恒 0 会让区间全失去意义。文件/路径行为逐字未动。
+                assert w.count == 1, f"mode=no 下计数该走（拿到 {w.count}）"
             assert not list(pathlib.Path(d).glob("*.md")), "mode=no 却建了会话文件"
         finally:
             ow.SESSIONS = old

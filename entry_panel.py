@@ -1623,22 +1623,34 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    ⚠️ **只改顺序、只改按钮标题**，**一个状态都不写**（`courses.set_attribution`
     #       那种都不碰）—— 认错课的代价是"那门课每一句翻译都在用错词"（§2.4 B 已定）。
     def _guesses():
+        """⚠️ 任何读失败 = **不猜**（2026-10-01 审查 #24）：预选是锦上添花的功能，
+           而这里的读路径按 store 的口径**会抛**（`timetable.json` 坏 / 版本不认识）
+           —— 原来裸奔时一个坏文件能让**整个开课面板起不来**（只剩一条 traceback）。
+           ⚠️ 修法是接住**并出声**，不是把坏文件当空（后者会让下次写入覆盖真内容）。
+           ⚠️ 「坏归属文件」那半后来走了 `courses._attribution_map_soft`（软读）——
+              这里保留宽兜底是因为它同样罩得住未来的读路径，理由别删。
+        """
         import store
         known = [r.course for r in rs]
-        ent = T.load(store.load_json(paths.timetable(root=state_root), {}))
-        hist = {}
-        for c in known:
-            slots = []
-            for p in courses.session_files(sessions_dir, c):
-                parts = p.stem.split("_", 2)
-                if len(parts) == 3 and len(parts[1]) >= 2:
-                    try:
-                        slots.append((datetime.date.fromisoformat(parts[0]).weekday(),
-                                      int(parts[1][:2])))
-                    except ValueError:
-                        continue
-            if slots:
-                hist[c] = slots
+        try:
+            ent = T.load(store.load_json(paths.timetable(root=state_root), {}))
+            hist = {}
+            for c in known:
+                slots = []
+                for p in courses.session_files(sessions_dir, c):
+                    parts = p.stem.split("_", 2)
+                    if len(parts) == 3 and len(parts[1]) >= 2:
+                        try:
+                            slots.append((datetime.date.fromisoformat(parts[0]).weekday(),
+                                          int(parts[1][:2])))
+                        except ValueError:
+                            continue
+                if slots:
+                    hist[c] = slots
+        except (store.StoreError, OSError) as e:
+            print(f"⚠ 课表/归属读不出来（{type(e).__name__}: {str(e)[:70]}）"
+                  f"—— 这次不做课表预选", flush=True)
+            return []
         return T.suggest(ent, datetime.datetime.now(), history=hist)
 
     S["guesses"] = _guesses()
@@ -2565,7 +2577,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
            导入**都没有撤销功能**（调研核过）→ 猜错了只能自己收拾。
         ⚠️ 解析在工作线程里（读文件 + 可能上兆的字节）。
         """
-        S["ics"] = {"rows": [], "warn": [], "slots": {}, "busy": True, "err": ""}
+        # ⭐ 代际守卫（2026-10-01 审查 #13，同 `open_sessions` 那条）：把**这一代**的
+        #    状态对象抓在手里 —— 取消/重拖会把它整个换掉，旧线程回来时**认对象**，
+        #    不许 `S.get("ics")` 抓到新一代再覆盖（那会用旧批结果盖新批，
+        #    确认后可能建错课）。
+        st = {"rows": [], "warn": [], "slots": {}, "busy": True, "err": ""}
+        S["ics"] = st
         _later(refresh)
 
         def work():
@@ -2588,11 +2605,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             except Exception as e:                            # noqa: BLE001
                 res = {"rows": [], "warn": [],
                        "err": f"{type(e).__name__}: {e}"}
-            s = S.get("ics")
-            if s is None:
+            if S.get("ics") is not st:                        # 这一代已被取消/重拖顶掉
                 return
-            s.update(res)
-            s["busy"] = False
+            st.update(res)
+            st["busy"] = False
             from PyObjCTools import AppHelper
             AppHelper.callAfter(refresh)
 
@@ -2603,15 +2619,21 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         s = S.get("ics")
         if not s or s.get("busy"):
             return
-        made = []
+        made, failed = [], []
         for r in s.get("rows") or []:
             if r["state"] != "new":
                 continue
             try:
                 if courses.create(courses.glossary_file(glossary, r["want"]), r["want"]):
                     made.append(r["want"])
-            except Exception:                                 # noqa: BLE001
-                pass                                          # 一门坏不影响其余
+                else:
+                    failed.append(r["want"])      # `"x"` 模式撞上已存在 → 没建成
+            except Exception as e:                            # noqa: BLE001
+                # ⚠️ 一门坏不影响其余，但**必须计数**（2026-10-01 审查 #14）：
+                #    原来 `pass` 掉，状态行的「新建 N 门 + 跳过 M 门」对不上总数，
+                #    用户看不出有一门消失了 —— 与下面那句注释自己的承诺相矛盾。
+                failed.append(r["want"])
+                print(f"⚠ 建课失败 {r['want']}：{type(e).__name__}: {str(e)[:60]}")
         S["ics"] = None
         # ⭐ **把时段存下来** —— 这是预选（§5.4.4）唯一的数据源。
         #    ⚠️ 只在用户**点了确认**之后写（前面一直没落盘）。
@@ -2626,7 +2648,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         # ⚠️ 有几个没建成也要说 —— 别让"新建了 3 门"读起来像"4 门都成了"
         _skip = len([r for r in (s.get("rows") or []) if r["state"] != "new"])
         set_status(f"新建了 {len(made)} 门课" +
-                   (f"，跳过 {_skip} 门" if _skip else ""), 3.0)
+                   (f"，跳过 {_skip} 门" if _skip else "") +
+                   (f"，⚠ {len(failed)} 门没建成" if failed else ""), 3.0)
         # ⚠️⚠️ **必须 `_later`**（2026-09-29 修）—— 这是导入确认卡上「新建这些课」
         #    那个 `NSButton` 的 action，同步 `refresh()` 会把 sender 所在的导入卡
         #    （连同 sender 自己）在 `NSCell` 的跟踪循环**还在栈上**时拆掉。
@@ -3348,11 +3371,16 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    `prep.prepare`（那会把"结果记进 S['result']"的逻辑抄第二份）。
             # ⚠️ 此时面板可能已经关了（`cur is None`）—— 队列照跑，只是不重画。
             queue = S.get("queue") or []
-            if queue:
+            while queue:
                 nxt = queue.pop(0)
-                if not queue:
-                    S.pop("queue", None)                  # 排空了就撤掉那个键
-                run_prep(*nxt)
+                # ⚠️ `run_prep` 返回 False = 这一门**没跑起来**（路径算不出等，它自己
+                #    已经出过声）。原来没人接这个返回值 —— 队列 pop 掉之后**剩下的课
+                #    静默不跑**（2026-10-01 审查 #55）。返回 True 才是"已交给工作线程"，
+                #    它的 `_done` 会接着踢下一门。
+                if run_prep(*nxt):
+                    break
+            if not queue:
+                S.pop("queue", None)                      # 排空了就撤掉那个键
 
         threading.Thread(target=work, daemon=True).start()
         return True
@@ -3641,7 +3669,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 # ⚠️ 这句是**必须说的**：删除**不碰**上课记录，而删了课再建同名，
                 #    那些记录会自己接回来。不说 = 用户以为全没了（文案撒谎那类）。
                 msg += f"\n{f['sessions']} 节上课记录不受影响（它们在 sessions/）"
-            if f["materials"]:
+            if f["materials"] is None:
+                # ⚠️ 「读不出来」≠「没有」（courses 的口径）：当"没有"会少给
+                #    「只删课号」这个选项（2026-10-01 审查 #28）—— 用户以为没有课件
+                #    可保，一按「删除」把未知那堆也送进废纸篓。
+                msg += "\n（课件数量这次读不出来 —— 按「可能还有」处理）"
+            if f["materials"] or f["materials"] is None:
                 what = notice.alert(f"删除「{course}」？", msg,
                                     buttons=("只删课号", "全部删除", "取消"),
                                     fallback="取消")
@@ -3654,9 +3687,16 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 set_status(f"{course}：没删，什么都没动", 1.0)
                 return
             keep_materials = (what == "只删课号")
-        res = courses.delete(glossary, course, sessions_dir=sessions_dir,
-                             state_root=state_root, keep_materials=keep_materials,
-                             trash_fn=trash_fn)
+        # ⚠️ 兜底（2026-10-01 审查 #27）：这条路的生产入口是右键菜单（AppKit action），
+        #    异常会被**整个吞掉** → 用户看到"点了没反应"。这里接住并说人话；
+        #    正常路径下异常多发生在动手之前（如路径/状态文件读失败）→ 不会删一半。
+        try:
+            res = courses.delete(glossary, course, sessions_dir=sessions_dir,
+                                 state_root=state_root, keep_materials=keep_materials,
+                                 trash_fn=trash_fn)
+        except Exception as e:                                # noqa: BLE001
+            set_status(f"{course}：删除没做成（{type(e).__name__}: {str(e)[:60]}）", 1.0)
+            return
         set_status(delete_msg(course, res), 1.0)
         _later(refresh)
 
@@ -3714,6 +3754,15 @@ def _panel_key(kw) -> tuple:
     """
     return (kw.get("on_start") is None,
             kw.get("on_test_mode") is None,
+            # ⭐ 两个**写端注入点**也要进键（2026-10-01 审查 #29）：它们决定"往哪写"，
+            #    同一条「测试必须隔离写端」的硬规矩。⚠️ 判 `is None` 而不是比身份 ——
+            #    lambda 每次都是新的，比身份等于永远不复用（docstring 里记过这条）。
+            kw.get("prepare_fn") is None,
+            kw.get("trash_fn") is None,
+            # ⚠️ `suggest_fn` 同族（2026-10-01 深度审查指出同文件第三处注入点）——
+            #    今天只因跑器路径不同而侥幸躲过；手动补上是止血，**机械化整个规则
+            #    （所有 callable kwarg 记 is None）才是正解，记为下一件**。
+            kw.get("suggest_fn") is None,
             str(kw.get("glossary") or ""),
             str(kw.get("state_root") or ""),
             str(kw.get("sessions_dir") or ""))

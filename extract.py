@@ -303,6 +303,14 @@ def _ocr_pdf_page(pdf_page) -> str:
     w, h = int(rect.size.width * scale), int(rect.size.height * scale)
     if w <= 0 or h <= 0:
         return ""
+    # ⚠️ 位图上限（2026-10-01 审查 F11）：超大 MediaBox / 畸形 PDF 会在
+    #    `CGBitmapContextCreate` 里按 w·h·4 字节**整块分配** → 直接 OOM，
+    #    而本文件承诺「永不抛异常」（OOM 不是异常）。超限就**降采样** ——
+    #    OCR 照样能用，精度略降，比把进程干掉强。
+    _MAX_PX = 6000
+    if max(w, h) > _MAX_PX:
+        scale *= _MAX_PX / float(max(w, h))
+        w, h = int(rect.size.width * scale), int(rect.size.height * scale)
     ctx = CGBitmapContextCreate(None, w, h, 8, 0,
                                 CGColorSpaceCreateDeviceRGB(),
                                 kCGImageAlphaPremultipliedFirst)
@@ -335,6 +343,11 @@ def _ocr_pdf_page(pdf_page) -> str:
     return "\n".join(out)
 
 
+#: 单个 zip 成员读进内存的上限（2026-10-01 审查 F11）：课件是用户自己拖的，正常
+#: `slideN.xml` / `document.xml` 远小于它；超过大概率是 **zip 炸弹**。超了不整块读。
+_MAX_XML_BYTES = 64 * 1024 * 1024
+
+
 # ---------------------------------------------------------------- PPTX
 
 def _pptx_blocks(path: pathlib.Path, ocr: bool, on_progress, max_pages=None):
@@ -352,6 +365,14 @@ def _pptx_blocks(path: pathlib.Path, ocr: bool, on_progress, max_pages=None):
         total = len(slides)
         lim = total if not max_pages else min(total, max_pages)
         for done, (num, name) in enumerate(slides[:lim], 1):
+            # ⚠️ 成员大小上限（2026-10-01 审查 F11）：zip 炸弹 / 畸形文件不许整块
+            #    进内存 —— 超限的这一页算 `skipped`（诚实进 stats），不是整份失败。
+            if zf.getinfo(name).file_size > _MAX_XML_BYTES:
+                skipped += 1
+                reasons["member_too_big"] = reasons.get("member_too_big", 0) + 1
+                if on_progress:
+                    on_progress(done, lim)
+                continue
             root = _parse(zf.read(name))
             b, s = _slide_blocks(root, num)
             blocks += b
@@ -367,6 +388,8 @@ def _pptx_blocks(path: pathlib.Path, ocr: bool, on_progress, max_pages=None):
         # ⚠️ `max_pages` 截断时**整段跳过**：备注不是页，且截断后那份映射会错位。
         if not max_pages:
             for num, name in _numbered(names, _NOTES_RE):
+                if zf.getinfo(name).file_size > _MAX_XML_BYTES:
+                    continue                                  # 同上（F11）：不读进内存
                 root = _parse(zf.read(name))
                 for para in _paragraphs(root):
                     blocks.append(Block(para, "notes", num))
@@ -392,9 +415,13 @@ def _docx_blocks(path: pathlib.Path, ocr: bool, on_progress, max_pages=None):
 
     with zipfile.ZipFile(path) as zf:
         try:
-            raw = zf.read("word/document.xml")
+            info = zf.getinfo("word/document.xml")
         except KeyError:
             raise RuntimeError("zip 里没有 word/document.xml —— 不是 DOCX？")
+        # ⚠️ 大小上限（2026-10-01 审查 F11）：同 pptx 那条 —— 整块读进来之前先拦。
+        if info.file_size > _MAX_XML_BYTES:
+            raise RuntimeError("word/document.xml 超过 64 MB —— 不是正常 DOCX？")
+        raw = zf.read("word/document.xml")
     body = _parse(raw).find(_NS_W + "body")
     if body is None:
         return [], ExtractStats(1, 0, 0, {}, 0, {})

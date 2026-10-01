@@ -22,6 +22,7 @@ import math
 import os
 import pathlib
 import time
+import typing
 
 import panel
 import objc_own
@@ -416,6 +417,18 @@ CHAPTER_TEXT_ALPHA = 0.65
 CHAPTER_MIN_W = 90.0
 
 
+class _Pair(typing.NamedTuple):
+    """`(大字, 小字)` —— 具名元组（2026-10-01 审查 F18）。
+
+    ⚠️ `_push(*_pair(…), when)` 与返回长度**绑死**：改成 3 元组就 TypeError，
+       而 AppKit 会把异常吞掉 → 表现成「点了纲要没反应」。具名之后 pyright
+       能替我们把关（原来它报的口径不一致正是这个结构没有名字）。
+    ⚠️ 仍然是 2 元组，`*` 解包行为**逐字不变**。
+    """
+    big: str
+    small: str
+
+
 def fold_rows(text, fits, split) -> list:
     """一段文字 → 折成若干**大字行**。**纯函数**：测量由调用方注入。
 
@@ -519,7 +532,7 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
         """
         en = (x.get("en") or x.get("text") or "").strip()
         zh = "" if only_en else (x.get("zh") or "").strip()
-        return f"{prefix}{zh or en}", _sub(en if zh else "", terms, flag)
+        return _Pair(f"{prefix}{zh or en}", _sub(en if zh else "", terms, flag))
 
     # ① 课务置顶，**最新的在上**（后进来的先看到）
     for d in reversed(list(outline.get("deadlines") or [])):
@@ -530,7 +543,10 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
 
     # ② 离线空档
     for g in outline.get("gaps") or []:
-        _push(f"（{g.get('t_from', '')}–{g.get('t_to', '')} 未生成：离线）",
+        # ⚠️ 按 `state` 分文案（2026-10-01 深度审查）：`failed` = 这一窗的内容模型
+        #    消化不了（毒窗放行），**不是离线** —— 混着写会让排查方向整个错。
+        _why = "这一窗内容没能生成" if g.get("state") == "failed" else "离线"
+        _push(f"（{g.get('t_from', '')}–{g.get('t_to', '')} 未生成：{_why}）",
               "", g.get("t_from") or "")
 
     # ③ 章节：**按时间排**（`lo` 小的在前），不是按 id —— id 是产出顺序
@@ -1829,41 +1845,15 @@ class Overlay:
         self._ve.setFrame_(self._panel.contentView().bounds())
         self._scrim.setFrame_(self._ve.bounds())
 
-    def _install_edit_menu(self):
-        """挂最小 Edit 菜单。
-
-        ⚠️ 为什么需要: Accessory app 默认没有主菜单, 而 ⌘X/⌘C/⌘V/⌘A 是**经主菜单
-        的 keyEquivalent** 路由到 first responder 的 —— 不挂这份菜单, 输入框里
-        这些键就是死的。这是计划里标注的"最大残留风险"; 构造已通过, 但
-        **运行时是否真生效需要真人按键验证**(见 Phase 1 未验证项)。
-        """
-        try:
-            from AppKit import NSApplication, NSMenu, NSMenuItem
-            app = NSApplication.sharedApplication()
-            if app.mainMenu() is not None:
-                return                        # 已有主菜单就别覆盖
-            main = NSMenu.alloc().init()
-            holder = NSMenuItem.alloc().init()
-            edit = NSMenu.alloc().initWithTitle_("Edit")
-            # target 留空 -> 走响应链(编辑动作由当前 field editor 实现)
-            for title, sel, key in (("Cut", "cut:", "x"), ("Copy", "copy:", "c"),
-                                    ("Paste", "paste:", "v"),
-                                    ("Select All", "selectAll:", "a")):
-                edit.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                    title, sel, key))
-            holder.setSubmenu_(edit)
-            main.addItem_(holder)
-            app.setMainMenu_(main)
-        except Exception:                     # noqa: BLE001
-            pass
-
-    # ---- 对外 ----
     def show(self):
         from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
         app = NSApplication.sharedApplication()
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-        self._install_edit_menu()
-        # orderFrontRegardless 不变: 显示不激活 app(绝不调 NSApp.activate —— 已废弃且会抢焦点)
+        # ⚠️ 这里原来有一份**私有的** `_install_edit_menu`（缺 undo/redo）—— 2026-10-01
+        #    审查 F28 确认它是**死代码**：`panel.build()` 先跑的
+        #    `panel.install_edit_menu`（全 app 唯一一份、随 mainMenu 幂等）总会先生效，
+        #    那份看到 mainMenu 非空就返回。已删除 —— 别再长出第二份，
+        #    ⌘C/V/⌘A 走 `panel.py` 那一条（`panel.build()` 里装）。
         self._panel.orderFrontRegardless()
         self._hide_traffic_lights()   # 红绿灯会自己回来(社区实证), 每次显示都再藏一遍
         # ⚠️ 必须显式清掉 first responder。实测: orderFrontRegardless 之后 AppKit 会
@@ -1873,6 +1863,15 @@ class Overlay:
         # 没复现"启动即编辑态"这个真实状态。清掉之后, 只有用户真的点了输入框才进编辑态。
         self._release_focus()
         self._show_whatsnew_card()
+
+    def set_live(self, on: bool) -> None:
+        """这堂课还在**音频阶段**吗（收尾一开始 = `False`）。`main` 在起止两处调。
+
+        ⚠️ 用途只有一个（2026-10-01 审查 F7）：更新卡片的重活问询**只在没课的时候
+           弹模态** —— 模态卡住的是主线程，而音频 `poll()/drain()` 也在主线程。
+        ⚠️ `TerminalUI` 没有这个方法 —— `main` 那边用 `getattr` + `callable` 守卫。
+        """
+        self._session_live = bool(on)
 
     def _show_whatsnew_card(self) -> None:
         """更新后弹一张**非模态毛玻璃卡片**（见 whatsnew.py）。
@@ -1938,7 +1937,7 @@ class Overlay:
         #    所以把它从 `approved` 里摘出来，只引导到终端那条路
         #    （`cl update` 发起时，调用方进程树会被 `make-app.sh` 排除；
         #     真有 main.py 实例在跑时它也会停下来问人，不默默杀）。
-        deferred_app = [s for s in steps if s["key"] == "app"]
+        deferred_app = any(s["key"] == "app" for s in steps)
         if deferred_app:
             steps = [s for s in steps if s["key"] != "app"]
         #: 给用户的说明（面向用户的文案，等作者过目）：为什么这步不在这儿做 + 去哪做。
@@ -1961,6 +1960,13 @@ class Overlay:
             can_ask = bool(notice._can_alert())
         except Exception:                                 # noqa: BLE001
             can_ask = False
+        # ⚠️⚠️ **直播中不弹模态**（2026-10-01 审查 F7）：模态 = 主线程 `runModal`，
+        #    而音频 `poll()/drain()` 也在主线程 —— 弹着不答就是一直在丢音频
+        #    （`CallbackSource` 缓冲 20 秒，超了丢最旧）。重活等课后：
+        #    走下面那条「去终端敲」的口（同 can_ask=False 的取向）。
+        if can_ask and getattr(self, "_session_live", False):
+            can_ask = False
+
         if steps:
             todo = "\n".join(f"· {s['label']} —— {s['detail']}" for s in steps)
             if can_ask:

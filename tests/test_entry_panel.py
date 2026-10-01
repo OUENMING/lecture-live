@@ -88,6 +88,21 @@ def main() -> int:
     check("形状不对 -> 原样返回，不炸", E._short_date("garbage") == "garbage")
     check("readiness_line 里也生效", "上次上课 9/22" in E.readiness_line(R()))
 
+    print("\n--- ③b 面板复用键必须含两个**写端注入点**（2026-10-01 审查 #29）---")
+    # ⚠️ 动机：隔离跑器用 `prepare_fn`/`trash_fn` 把写端换成桩。键里少这两项时，
+    #    同进程里先用真写端开过面板、再拿桩写端开 → **复用旧面板**、桩根本没生效
+    #    → 拖文件会走真 `prep.prepare` 写真实术语表（踩「测试必须隔离写端」硬规矩）。
+    #    改坏实现（把这两项从 `E._panel_key` 删掉）→ 前两条红。
+    _wfn = lambda *a, **k: None                            # noqa: E731
+    _pbase = {"glossary": "g", "state_root": "s", "sessions_dir": "d"}
+    _k0 = E._panel_key(dict(_pbase))
+    check("⭐⭐ 有 `prepare_fn` -> 复用键必须不同（否则桩写端被真实面板复用）",
+          _k0 != E._panel_key({**_pbase, "prepare_fn": _wfn}), f"{_k0}")
+    check("⭐⭐ `trash_fn` 同理",
+          _k0 != E._panel_key({**_pbase, "trash_fn": _wfn}))
+    check("⚠️ 既有口径不许被改坏：`on_start` 的存在与否仍改变键",
+          _k0 != E._panel_key({"on_start": _wfn, **_pbase}))
+
     print("\n--- ④ 进度文案 ---")
     check("认识的 stage -> 中文名", E.progress_text("extract", 3, 7) == "抽文本 3/7…")
     check("total=0 -> 不带分母", E.progress_text("build", 0, 0) == "生成中文释义…")
@@ -1263,10 +1278,16 @@ def _vault_section() -> None:
                     pass
 
             # ── 8-F①：家目录里恰好 1 个库 → 面板一开就**自动设上** ──────────
+            # ⚠️ 2026-10-01（审查 F24）：兜底扫描**跳过 TCC 三目录**（Desktop/
+            #    Documents/Downloads）—— 库放在普通顶层目录（这里 `Vaults/`），
+            #    并放一个 `Documents/` 里的诱饵钉住「跳过」这条契约。
             homeA = root / "homeA"
-            vA = homeA / "Documents" / "MyVault"
+            vA = homeA / "Vaults" / "MyVault"
             vA.mkdir(parents=True)
             (vA / ".obsidian").mkdir()
+            _decoy = homeA / "Documents" / "Decoy"
+            _decoy.mkdir(parents=True)
+            (_decoy / ".obsidian").mkdir()
             os.environ["HOME"] = str(homeA)
             stA = root / "stA"
             hA = _build("A", stA)
@@ -1277,6 +1298,9 @@ def _vault_section() -> None:
                       and (stA / "vault").read_text(encoding="utf-8").strip() == str(vA),
                       repr((stA / "vault").read_text(encoding="utf-8")
                            if (stA / "vault").exists() else None))
+                check("⭐ 而且它**不是** `Documents/` 里的诱饵（F24：TCC 目录跳过）",
+                      (stA / "vault").exists()
+                      and str(_decoy) not in (stA / "vault").read_text(encoding="utf-8"))
                 check("⭐ 而且那一格直接就是「已设」",
                       bA is not None and (bA.title() or "") == "✓  笔记库  已设",
                       repr(bA.title() if bA is not None else None))
@@ -1289,7 +1313,7 @@ def _vault_section() -> None:
 
             # ── 8-F②：多个候选 → **绝不猜**（不设、不写；点开预指向其中之一）──
             homeB = root / "homeB"
-            v1 = homeB / "Documents" / "Two"
+            v1 = homeB / "Vaults" / "Two"          # ⚠️ F24：同①，别放 Documents
             v1.mkdir(parents=True)
             (v1 / ".obsidian").mkdir()
             v2 = homeB / "Obsidian" / "One"

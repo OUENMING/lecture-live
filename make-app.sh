@@ -199,20 +199,72 @@ uv venv "$BUILD/venv" --python "$BASEPY" -q
 # ---------- ③ 停掉正在跑的实例 ----------
 # ⚠️ 正在跑的时候换掉 Contents/ 会让它读到半新半旧的文件。
 #
-# ⚠️ `pkill -f` 收的是**正则**，路径里的 `.`（ClassLive.app）不转义会命中
+# ⚠️ `pgrep -f` 收的是**正则**，路径里的 `.`（ClassLive.app）不转义会命中
 #    `ClassLiveXapp` 之类无关路径 → 误杀别人的进程。
+#
+# ⚠️⚠️ 2026-10-01 审查（F1）改掉两处会伤人的形状：
+#   ① **不许杀调用方自己那棵树**。`cl update` 这条路是
+#      `python …/ClassLive.app/Contents/MacOS/python update.py --run-step app`
+#      起的 make-app.sh —— 它的命令行**恰好**匹配下面的模式，原来的
+#      `pkill -f` 会把**发起更新的那个 python 自己**杀掉（更新输出断在半路）。
+#   ② **正在上课的实例不许默默杀**。`main.py` 的 SIGTERM 没有 handler：
+#      杀掉 = 不冲刷在途句、不精修、不写笔记。改成**停下来问人**。
+#      （更新卡片那条路已在 overlay 里被拦住、只引导到终端，这里是第二道闸。）
 _PAT="$(printf '%s' "$APP/Contents/MacOS/python" | sed 's/[][\\.^$*?+(){}|]/\\&/g')"
-if pgrep -f "$_PAT" >/dev/null 2>&1; then
-  say "③ 有实例在跑 —— 先停掉它"
-  pkill -f "$_PAT" || true
-  # ⚠️ 轮询确认真的退出，不要 `sleep 2` 这种魔数：进程可能要更久才收完麦克风，
-  #    也可能卡住不退 —— 那时应该**停下来问人**，而不是带着半个实例继续换文件。
-  for _ in $(seq 1 20); do
-    pgrep -f "$_PAT" >/dev/null 2>&1 || break
-    sleep 0.5
+_pids="$(pgrep -f "$_PAT" 2>/dev/null || true)"
+if [ -n "$_pids" ]; then
+  # 自己这一棵进程树（$$ 一路往上）—— 调用方永远是我们的祖先，绝不杀
+  _anc=" $$"
+  _q="$$"
+  for _ in $(seq 1 32); do
+    _q="$(ps -o ppid= -p "$_q" 2>/dev/null | tr -d ' ' || true)"
+    [ -n "$_q" ] || break
+    [ "$_q" -gt 1 ] 2>/dev/null || break
+    _anc="$_anc $_q"
   done
-  pgrep -f "$_PAT" >/dev/null 2>&1 \
-    && fail "旧实例 10 秒了还没退出 —— 手动退掉 ClassLive 再重跑"
+  _live=""
+  _doomed=""
+  for _p in $_pids; do
+    _cmd="$(ps -o command= -p "$_p" 2>/dev/null || true)"
+    [ -n "$_cmd" ] || continue
+    case "$_cmd" in
+      *main.py*)
+        # 真正在跑课的实例（`cl` 最后是 exec "$PY" main.py …）—— 杀它 = 丢这场课的收尾
+        _live="$_live $_p"
+        continue ;;
+    esac
+    case "$_anc " in
+      *" $_p "*) continue ;;   # 调用方自己的进程树：杀了就等于把发起更新的进程杀掉
+    esac
+    _doomed="$_doomed $_p"
+  done
+  if [ -n "$_live" ]; then
+    fail "有 ClassLive 正在跑（可能在录课）—— 重建会把它杀掉，这一步先停下来问人。
+    先退出 ClassLive（或等这节下课），再重跑：./make-app.sh 或 cl update"
+  fi
+  if [ -n "$_doomed" ]; then
+    say "③ 有旧实例在跑 —— 先停掉它"
+    # shellcheck disable=SC2086  # 就是要按空格把 pid 列表拆开
+    kill $_doomed 2>/dev/null || true
+    # ⚠️ 轮询确认真的退出，不要 `sleep 2` 这种魔数：进程可能要更久才收完麦克风，
+    #    也可能卡住不退 —— 那时应该**停下来问人**，而不是带着半个实例继续换文件。
+    #    ⚠️ 只盯 `_doomed` 这几个 pid（不能再 pgrep 全模式 —— 调用方自己那棵树
+    #    匹配模式但**不杀**，按 pgrep 轮询会永远等不到"清空"）。
+    _still=""
+    for _ in $(seq 1 20); do
+      _still=""
+      for _p in $_doomed; do
+        if kill -0 "$_p" 2>/dev/null; then
+          _still="$_still $_p"
+        fi
+      done
+      [ -z "$_still" ] && break
+      sleep 0.5
+    done
+    if [ -n "$_still" ]; then
+      fail "旧实例 10 秒了还没退出 —— 手动退掉 ClassLive 再重跑"
+    fi
+  fi
 fi
 
 # ---------- ③ 备份旧的 .app（失败要能恢复）----------

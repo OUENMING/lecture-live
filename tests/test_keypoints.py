@@ -281,6 +281,45 @@ def t_rebuild_wires_keypoints():
         assert callable(_FakeW.seen.get("keypoints_fn")), _FakeW.seen.get("keypoints_fn")
 
 
+@case("⭐⭐ `score` 失败要**出声**（F5：全失败 = 🎯 整节消失，不许零日志）")
+def t_score_prints_on_failure():
+    """动机（2026-10-01 审查 F5）：「单批不连坐」之后留下的静默面 —— key 过期 /
+    401 / 全局限流时**全部**批次记 `None` → `top_k` 排除 `None` → 空表 → 🎯 整节
+    消失，而终端和笔记里**一句话都没有**。同 `ask_one` 那条「失败要出声」。
+
+    改坏哪行会红：把 `score` 里 `if n_failed:` 那段 print 删掉 → 两条断言全红。
+    """
+    import contextlib
+
+    sents = [f"sentence {i}" for i in range(25)]           # CHUNK=20 → 2 批
+
+    def all_dead(state, questions):
+        raise RuntimeError("401")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        got = kp.score(sents, ask=all_dead)
+    out = buf.getvalue()
+    assert all(p is None for p in got), "全失败应全部记 None"
+    assert "没拿到" in out and "全部" in out, (
+        f"全失败必须打出一行 ⚠ 且点名「全部」（拿到：{out!r}）")
+
+    calls = {"n": 0}
+
+    def half(state, questions):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("500")
+        return {"answers": {k: {"type": "noul", "noul": 0.9} for k in questions}}
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        kp.score(sents, ask=half)
+    out = buf.getvalue()
+    assert "1/2" in out and "全部" not in out, (
+        f"部分失败的话术不对（拿到：{out!r}）")
+
+
 def main_() -> int:
     print("=" * 60)
     fail: list[str] = []

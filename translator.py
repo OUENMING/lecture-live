@@ -441,6 +441,22 @@ def _configure_mlx() -> None:
         pass
 
 
+def local_model_present() -> bool:
+    """本地 Qwen 兜底模型**在不在** —— `doctor.model_present` 的薄包装（判据只此一份）。
+
+    ⚠️ 惰性 import：`doctor` 与 `update`/`ready` 之间有已知的惰性环（模块地图有记），
+       模块级 import 会把 translator 拖进去 —— 函数内 import 没这个问题。
+    ⚠️ **任何异常都当「在」**（返回 True）—— 同 `doctor.model_present` 那条
+       「不确定就别报缺」的纪律：判据自己坏了宁可按原样去试 load，也不许拿它拦人。
+    """
+    try:
+        import doctor
+        import models
+        return doctor.model_present(models.QWEN.path)
+    except Exception:                             # noqa: BLE001
+        return True
+
+
 class Translator:
     """懒加载 mlx-lm 模型; 生成用锁串行; chat template 提升指令遵循。"""
 
@@ -448,6 +464,11 @@ class Translator:
                  course: str | None = None, extra_terms: list | None = None):
         self._model = None
         self._tokenizer = None
+        #: ⭐ 本地加载的**失败闩锁**（2026-10-01 审查 F2）：一旦确定「装不了 / 装不上」，
+        #:   之后每次调用都**立刻**抛同一句原因，不再重试 `load()` —— 原来云端失败后
+        #:   每一句都去 `mlx_lm.load()`（在线 = 隐式拉 938 MB 把定稿线程卡住；离线 =
+        #:   每句白等一次失败）。进程重启才清（中途装好模型需要重开，可接受）。
+        self._load_err: str | None = None
         # ⚠️⚠️ **`extra_terms` 只进「候选池」，绝不进 `course_terms`**（2026-09-29）。
         #    池子里的词按相似度**动态召回**（`select_terms` 的 `scored[:max_dyn]`），
         #    而 `course_terms` 是**每句全量注入**的。
@@ -483,8 +504,20 @@ class Translator:
         if self._model is None:
             with self._load_lock:
                 if self._model is None:
+                    # ⚠️⚠️ 两道**不联网就能答**的闸（2026-10-01 审查 F2）：
+                    #    ① 闩锁：已经确定装不上 → 立刻抛同一句，不再试 `load()`；
+                    #    ② 在不在：**先问 `doctor.model_present`** —— 没装就闩住
+                    #       「本地不可用」。绝不让 `mlx_lm.load()` 顺手去 HF 隐式
+                    #       下载 938 MB（「模型绝不自动下」那条铁律在运行期的缺口；
+                    #       离线时更是**每一句**都白等一次 load 失败）。
+                    if self._load_err is not None:
+                        raise RuntimeError(self._load_err)
+                    if not local_model_present():
+                        self._load_err = (
+                            "本地模型没装（Qwen3-1.7B，可选）—— 本次只保留转录；"
+                            "装它：跑 `cl doctor`，按它打出的命令装完再重开")
+                        raise RuntimeError(self._load_err)
                     _configure_mlx()
-                    from mlx_lm import load
                     # ⚠️ **赋值顺序是这里的关键**: 必须先 tokenizer、后 model。
                     # 上面那句 `if self._model is None` 是**无锁**读的 —— 它把
                     # `_model` 当成就绪标志。原来写成 `self._model, self._tokenizer
@@ -492,12 +525,30 @@ class Translator:
                     # 恰在两条之间读到 `_model` 已非 None, 于是跳过整段、拿着还是 None
                     # 的 `_tokenizer` 去 `apply_chat_template` → AttributeError。
                     # 换成 tokenizer 先落地, 则"看到 _model 有值"就等于"两样都齐了"。
-                    _m, _tok = load(self._model_name)
+                    try:
+                        from mlx_lm import load
+                        _m, _tok = load(self._model_name)
+                    except Exception as e:                    # noqa: BLE001
+                        # ⚠️ 失败也上闩（2026-10-01 审查 F2）：原来每次调用都重试
+                        # `load()` —— 云端挂着的时候那是**每一句**一次失败尝试。
+                        self._load_err = (f"本地模型加载失败({type(e).__name__}: "
+                                          f"{str(e)[:80]})")
+                        raise
                     self._tokenizer = _tok
                     self._model = _m
 
     def warmup(self) -> None:
         self._ensure()
+
+    def local_ready(self) -> bool:
+        """本地引擎**现在**能不能用（只看在不在 / 闩没闩，**不加载**）。
+
+        ⚠️ `EngineRouter._fallback` 的广播用它说实话（2026-10-01 审查 F2）：
+           本地模型是**可选**的，没装还说「已降级本地引擎」会让用户以为有兜底。
+        """
+        if self._load_err is not None:
+            return False
+        return local_model_present()
 
     def _apply_chat(self, user_content: str, system: str = SYSTEM_PROMPT) -> str:
         return _apply_chat_generic(self._tokenizer, user_content, system)

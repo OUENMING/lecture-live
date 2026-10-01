@@ -342,9 +342,24 @@ class EngineRouter:
             if not self._use_cloud:
                 return
             self._use_cloud = False
-        self._notify(
-            f"云端翻译失败({str(e)[:60]}); 已降级本地引擎, "
-            f"每 {self.RETRY_PROBE_S:.0f}s 自动重试", warn=True)
+        # ⭐⭐ **广播要说实话**（2026-10-01 审查 F2）：本地模型是**可选**的，大多数人
+        #    没装 —— 没装还说「已降级本地引擎」，用户会以为有兜底，实际每句都失败。
+        #    `local_ready()` 只看在不在、不加载（桩/测试没有这个方法就按可用算）。
+        _ready = getattr(self._local, "local_ready", None)
+        local_ok = True
+        if callable(_ready):
+            try:
+                local_ok = bool(_ready())
+            except Exception:                     # noqa: BLE001
+                local_ok = True
+        if local_ok:
+            self._notify(
+                f"云端翻译失败({str(e)[:60]}); 已降级本地引擎, "
+                f"每 {self.RETRY_PROBE_S:.0f}s 自动重试", warn=True)
+        else:
+            self._notify(
+                f"云端翻译失败({str(e)[:60]}); 本地模型没装 —— 只保留转录"
+                f"（装它：cl doctor）。每 {self.RETRY_PROBE_S:.0f}s 自动重试云端", warn=True)
         self._start_probe()
 
     def _start_probe(self) -> None:

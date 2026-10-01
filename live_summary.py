@@ -89,6 +89,13 @@ RETRY_S = 30.0
 #: 探针的 `--fail-window` 就是为它准备的。
 MAX_PENDING = 20
 
+#: 同一窗口**连续失败到几次**就启动「毒窗判别」：先试**下一窗**（2026-10-01 审查 F3）。
+#: ⚠️ 光有次数上限会把「断网积压」误杀 —— 断网时**每一窗**都会到上限。所以到了
+#:    上限**不直接丢**：下一窗也失败 = 断网形状（不丢、继续攒，`MAX_PENDING` 照旧管）；
+#:    下一窗成功 = 队头这窗的内容模型消化不了，丢它、发 `gap(state="failed")`、放行。
+#: 3 次 × `RETRY_S`(30) ≈ 90 秒出判定，比原来「堵到攒满 20 窗（≈15 分钟）」快一个量级。
+MAX_WINDOW_ATTEMPTS = 3
+
 #: `kind` == `课务` 的原子走模型路径。⚠️ 从 `atom.KINDS` 取，不另写字符串。
 KIND_DEADLINE = "课务"
 
@@ -248,7 +255,9 @@ class LiveSummarizer:
         self._buf: list = []          # 当前窗口的 (gid, t, en, zh)
         self._t0 = 0.0
         self._last = 0.0
-        self._pend: list = []         # 待提交的窗口，**从最旧开始处理**
+        #: 待提交的窗口，**从最旧开始处理**；元素 = `[失败次数, 窗口]` 成对存放 ——
+        #: `_process_pending` 要按窗记重试次数（2026-10-01 审查 F3），裸 list 挂不住。
+        self._pend: list = []
         self._retry_at = 0.0          # 下次允许重试的时刻（0 = 随时）
 
         # ---- 章节 ----
@@ -456,11 +465,11 @@ class LiveSummarizer:
         self._buf, buf = [], self._buf
         if not buf:
             return
-        self._pend.append(buf)
+        self._pend.append([0, buf])                       # 元素 = [失败次数, 窗口]
         if len(self._pend) > self._backlog_peak:          # ⭐ 采集面 ⑤
             self._backlog_peak = len(self._pend)
         while len(self._pend) > MAX_PENDING:
-            gone = self._pend.pop(0)
+            gone = self._pend.pop(0)[1]
             self._gap_dropped += 1                        # ⭐ 采集面 ⑤
             self._emit_p({"kind": "gap", "t_from": gone[0][1], "t_to": gone[-1][1],
                           "state": "dropped"})
@@ -486,14 +495,38 @@ class LiveSummarizer:
             return
         #: 这批里**最新的**那个窗口的内容时刻 —— 它对应 `now`（它就是「现在」）。
         #: ⚠️ 必须在循环**之前**取：循环里 `self._pend` 会一直缩短。
-        newest_c = self._pend[-1][-1][1]
+        newest_c = self._pend[-1][1][-1][1]
         while self._pend:
-            buf = self._pend[0]
+            item = self._pend[0]
+            buf = item[1]
             obj = self._call_atoms(buf)
             if obj is None:
                 # ⚠️ **留在队列里**，`RETRY_S` 后重试 —— 这就是改进 ①。
+                item[0] += 1
                 self._retry_at = now + RETRY_S
                 self._retries += 1                            # ⭐ 采集面 ⑤
+                if item[0] >= MAX_WINDOW_ATTEMPTS and len(self._pend) > 1:
+                    # ⭐⭐ **队头疑似「毒窗」—— 试下一窗做判别**（2026-10-01 审查 F3）。
+                    #    原来没有这一层：一窗确定性失败会**一直堵在队头**，直到攒满
+                    #    `MAX_PENDING`(20 窗 ≈ 15 分钟)才被当积压挤掉 —— 期间没有原子、
+                    #    没有章节，只有每 30 秒白花钱的重试。
+                    #    判别语义：下一窗也挂 = 断网形状（不丢、继续攒）；下一窗成功 =
+                    #    队头这窗的内容消化不了 → 丢它、发 `gap(state="failed")`、放行。
+                    #    ⚠️ 探测**不动**下一窗自己的失败计数 —— 它这次失败是替队头试的。
+                    nxt = self._pend[1]
+                    probe = self._call_atoms(nxt[1])
+                    if probe is None:
+                        return
+                    self._pend.pop(0)                         # 毒窗出队
+                    self._gap_dropped += 1                    # ⭐ 采集面 ⑤
+                    self._emit_p({"kind": "gap", "t_from": buf[0][1], "t_to": buf[-1][1],
+                                  "state": "failed"})
+                    print(f"⚠ 实时总结：一个窗口试了 {MAX_WINDOW_ATTEMPTS} 次都失败"
+                          f"（{buf[0][1]}–{buf[-1][1]}），按缺口跳过；后面的窗口继续")
+                    self._pend.pop(0)                         # 下一窗（刚 probe 成功那窗）
+                    now_eff = now - _span_s(nxt[1][-1][1], newest_c)
+                    self._absorb_window(nxt[1], probe, now_eff)
+                    continue
                 return
             self._pend.pop(0)
             # ⭐ 越旧的窗口，有效时刻越早（最新的那窗差值为 0，原样是 `now`）。

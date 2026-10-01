@@ -152,8 +152,11 @@ def score(sents, *, ask) -> list:
     """
     sents = list(sents or ())
     out: list = []
+    n_batches = 0
+    n_failed = 0
     for lo in range(0, len(sents), CHUNK):
         part = sents[lo:lo + CHUNK]
+        n_batches += 1
         # ⚠️⚠️ **单批失败不许连坐**（2026-10-01 实测）：一节 50 分钟的课要打
         #    29 批，原来**任何一批**网络抖一下（超时/429/5xx）就把它抛给
         #    `pick` 那个大 `try` → **整节清零** → 🎯 那节整块静默消失，
@@ -165,7 +168,16 @@ def score(sents, *, ask) -> list:
                                     build_questions(len(part))), len(part))
         except Exception:                                     # noqa: BLE001
             got = [None] * len(part)
+            n_failed += 1
         out.extend(got)
+    # ⚠️⚠️ **失败必须出声**（2026-10-01 审查 F5）：「单批不连坐」之后又留下一个
+    #    静默面 —— key 过期 / 401 / 全局限流时**全部**批次记 `None` → `top_k`
+    #    排除 `None` → 空表 → 🎯 整节消失，终端和笔记里一句话都没有，
+    #    正是 3.8.6 修掉的那个 bug 的原始症状。同 `ask_one` 那条「失败要出声」。
+    if n_failed:
+        tail = ("（**全部**失败 —— 这节不会出 🎯 最值得记的几句）"
+                if n_failed == n_batches else "（其余批次照常）")
+        print(f"⚠ Jev 打分 {n_failed}/{n_batches} 批没拿到{tail}")
     return out
 
 
@@ -318,7 +330,11 @@ def pick(sents, *, token_value: str = "", timeout: float = 30.0, k: int = 10) ->
         sc = score(items, ask=lambda st, qs: ask_commandcode(
             st, qs, token=token_value, timeout=timeout))
         return [(p, items[i], built[i][1]) for p, i, _ in top_k(sc, items, k)]
-    except Exception:                                         # noqa: BLE001
+    except Exception as e:                                    # noqa: BLE001
+        # ⚠️ 出声（2026-10-01 审查 F5）：这条兜底原来完全静默 ——
+        #    「🎯 什么都没出现」和「选句提前抛了」在屏幕上长得一模一样。
+        #    同 `ask_one` 的纪律：fail-soft 是对的，完全无声不行。
+        print(f"⚠ 🎯 选句失败({type(e).__name__}: {str(e)[:60]})")
         return []
 
 

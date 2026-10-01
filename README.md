@@ -235,7 +235,8 @@ ClassLive.app/Contents/MacOS/python -c "from huggingface_hub import snapshot_dow
 mkdir -p ~/models/vad && curl -fsSL -o ~/models/vad/silero_vad.onnx \
   https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
 
-# Qwen3-1.7B 首次运行自动下载（仅降级时用到）
+# Qwen3-1.7B 本地兜底（可选，938 MB）—— **不会自动下载**。
+# 云端翻译失败时没有它只保留转录；要装就跑 `cl doctor`，按它打出的命令装。
 
 # 术语表模板 → 自己的公共术语表
 cp glossary.example.txt glossary.txt

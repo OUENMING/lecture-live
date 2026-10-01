@@ -1931,6 +1931,19 @@ class Overlay:
             steps = []
             if os.environ.get("CLASSLIVE_DEBUG"):
                 print(f"[whatsnew] pending_steps 失败: {e}")
+        # ⚠️⚠️ **「重建 .app」不许在这个进程里做**（2026-10-01 审查 F1）：
+        #    那一步会跑 `make-app.sh`，而它的 ③ 会按命令行路径停掉「正在跑的实例」
+        #    —— 匹配到的正是**这个正在录课/收尾的自己**。SIGTERM 没有 handler：
+        #    不冲刷在途句、不精修、不写笔记（`sessions/` 逐句日志仍在，但那不是笔记）。
+        #    所以把它从 `approved` 里摘出来，只引导到终端那条路
+        #    （`cl update` 发起时，调用方进程树会被 `make-app.sh` 排除；
+        #     真有 main.py 实例在跑时它也会停下来问人，不默默杀）。
+        deferred_app = [s for s in steps if s["key"] == "app"]
+        if deferred_app:
+            steps = [s for s in steps if s["key"] != "app"]
+        #: 给用户的说明（面向用户的文案，等作者过目）：为什么这步不在这儿做 + 去哪做。
+        app_tail = ("（「重建 .app」要先退出 ClassLive —— 之后到终端跑：cl update）"
+                    if deferred_app else "")
         # ⚠️⚠️ **先问「问得到人吗」，再问人**（2026-09-30 加，同 `entry_panel` 删课那条）。
         #    `notice.alert` 只在 `.app` 里弹得出来（判据 `CLASSLIVE_FROM_APP`，由 app 的
         #    sitecustomize 设）。终端里它**只打印、然后立刻返回 `fallback`** ——
@@ -1951,9 +1964,10 @@ class Overlay:
         if steps:
             todo = "\n".join(f"· {s['label']} —— {s['detail']}" for s in steps)
             if can_ask:
+                _extra = f"\n{app_tail}" if app_tail else ""
                 ans = notice.alert(
                     "更新之外还有几件事要做",
-                    f"{todo}\n\n{steps[0]['why']}\n\n"
+                    f"{todo}\n\n{steps[0]['why']}{_extra}\n\n"
                     f"现在一起做吗？（要联网，可能要几分钟）",
                     buttons=("现在做", "先不做"),
                     # ⚠️⚠️ **这是确认框，`buttons[0]` 是「现在做」—— 必须显式给安全的那一个。**
@@ -1973,6 +1987,8 @@ class Overlay:
                     #    → **死循环换了个壳**（2026-10-01 独立审核指出）。
                     tail += ("\n  （「下载模型」不会自动做 —— "
                              "`cl update` 跑完会打出该装的命令）")
+                if app_tail:
+                    tail += f"\n  {app_tail}"
                 print(f"\n⚠ 更新之外还有几件事要做：\n{todo}\n{tail}", flush=True)
 
         def ui(fn, *a) -> None:
@@ -2039,7 +2055,13 @@ class Overlay:
                     # ⚠️ 「下载模型」还多一层（2026-10-01 审核指出）：**它不归
                     #    `cl update` 管**（铁律：绝不自动下模型）→ 对它说「跑 cl update」
                     #    是句兑现不了的话，得改指 `cl doctor` 打出来的命令。
-                    if left[0]["key"] == "models":
+                    if left[0]["key"] == "app":
+                        # ⭐⭐ F1（2026-10-01 审查）：这步**永远不在这个进程里做** ——
+                        #    在这儿跑 make-app.sh 会把正在录课的自己杀掉（见上面
+                        #    `deferred_app` 的说明）。所以别再说「再点一次这个按钮」。
+                        ui(set_status, f"还有 {len(left)} 件事没做：重建 .app —— "
+                                       f"先退出 ClassLive，再到终端跑 cl update", 1.0)
+                    elif left[0]["key"] == "models":
                         ui(set_status, f"还有 {len(left)} 件事没做：{left[0]['label']}"
                                        f"（{left[0]['detail']}）—— 不会自动下，"
                                        f"按 `cl doctor` 打出的命令装", 1.0)

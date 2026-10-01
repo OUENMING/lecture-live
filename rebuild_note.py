@@ -42,7 +42,11 @@ def main() -> int:
     if not sess.exists():
         print(f"✗ 会话文件不存在: {sess}")
         return 1
-    text = sess.read_text(encoding="utf-8")
+    # ⚠️⚠️ `errors="replace"`（2026-10-01 审查 F4）：本脚本就是给「崩溃 / 强杀、
+    #    会话文件写了一半」用的 —— 末行多字节汉字被截断时严格 utf-8 会
+    #    `UnicodeDecodeError`，裸 traceback，根本走不到下面 `close()` 那条路。
+    #    同 `obsidian_writer.close()` 补笔记的读法（那里注释点名过同一个场景）。
+    text = sess.read_text(encoding="utf-8", errors="replace")
     # ⚠️⚠️ **用真正的解析器数，别用前缀正则**（2026-09-29 修）。
     #    原来写的是 `re.findall(r"^> \[!abstract\]", text, re.M)` —— 只匹配**前缀**，
     #    而 `_TS`（真解析器）要求**完整时间戳**：

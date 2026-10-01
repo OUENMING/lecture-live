@@ -209,6 +209,45 @@ def main() -> int:
                   bool(gaps) and gaps[0]["state"] == "dropped"
                   and "t_from" in gaps[0] and "t_to" in gaps[0], str(gaps[:1]))
 
+        # ─────────────────────────── ③b 「毒窗」不许堵队头（2026-10-01 审查 F3）
+        print("\n--- ③b 一窗确定性失败 -> 试下一窗通过 = 丢它放行 ---")
+        with tempfile.TemporaryDirectory() as d:
+            def poison(sysp, block, mt, tp):
+                # 只有含 POISON 的那一窗失败 —— 「这一窗的内容模型消化不了」的确定性形状
+                if "POISON" in block:
+                    raise RuntimeError("bad content")
+                return atom_reply("A")
+
+            # ⚠️ 直接构造（照 ② 的先例）—— `make()` 的 `atom_fn` 是**零参回值**函数，
+            #    不是 4 参 chat，塞进去会 TypeError 把每窗都变成「失败」（断网形状）。
+            emits: list = []
+            s = L.LiveSummarizer(chat=poison, append_atoms=lambda a: len(a),
+                                 chapter_path=ch.chapter_path_for(pathlib.Path(d) / "S.md"),
+                                 emit=emits.append)
+            s.feed((1, "10:00:00", "POISON sentence", "中"))
+            s.step(0.0)
+            s.step(40.0)                          # 关窗 -> pend = [毒窗]
+            s.feed((2, "10:01:00", "okay one", "中"))
+            s.step(41.0)
+            s.step(81.0)                          # 关窗 -> pend = [毒窗, 好1]
+            s.feed((3, "10:02:00", "okay two", "中"))
+            s.step(82.0)
+            s.step(122.0)                         # 关窗 -> pend = [毒窗, 好1, 好2]
+            # 放行重试闸门，让队头失败计数走到上限（≥ `MAX_WINDOW_ATTEMPTS` 时
+            # 启动「试下一窗」判别；③ 那一组钉的是它的反面：全失败时**不丢**）
+            for k in range(4):
+                s._retry_at = 0.0
+                s.step(130.0 + k * 31.0)
+            gaps = [e for e in emits if e.get("kind") == "gap"]
+            check("⭐⭐ 毒窗被丢、发 `gap(state=\"failed\")`（不是苦等 `MAX_PENDING` 挤）",
+                  any(g.get("state") == "failed" for g in gaps), str(gaps[:2]))
+            check("⭐⭐ 后面的窗口被**放行**（积压清零，不用等 20 窗 ≈15 分钟）",
+                  s.pending == 0, f"pending={s.pending}")
+            wins = [e for e in emits if e.get("kind") == "window"]
+            check("⭐ 好窗真的被消化了（两个 window 记录，lo=2/3；毒窗 lo=1 不许出现）",
+                  [w.get("lo") for w in wins] == [2, 3],
+                  str([(w.get("lo"), w.get("hi")) for w in wins]))
+
         # ─────────────────────────────────────── ④ 章节状态机
         print("\n--- ④ A A B：A 恰好一次正式合成，B 另开一章 ---")
         with tempfile.TemporaryDirectory() as d:

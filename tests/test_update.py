@@ -762,6 +762,25 @@ _lines2, _ = _card_run(can_alert=True, pending=["deps"])
 check("⚠️ 对照：`.app` 里（弹得出来）照旧说「再点一次这个按钮」",
       any("再点一次" in x for x in _lines2), str(_lines2))
 
+# ⚠️ 2026-10-01 独立审核指出：「下载模型」**不归 `cl update` 管**
+# （铁律：绝不自动下模型）→ 对它说「跑 cl update」是句兑现不了的话，
+# 跑完发现没下、卡片还是同一句 = 死循环换了个壳。
+import contextlib                                                 # noqa: E402
+import io                                                         # noqa: E402
+_buf_m = io.StringIO()
+with contextlib.redirect_stdout(_buf_m):
+    _lines_m, _ = _card_run(can_alert=False, pending=["models"])
+_out_m = _buf_m.getvalue()
+check("⭐⭐ 终端 + 只有「下载模型」待做 → 打印那句**明说它不会自动做**",
+      "不会自动做" in _out_m, repr(_out_m[-180:]))
+check("⭐⭐ 而且收尾状态行**不再说「跑 cl update」**—— 改指 `cl doctor` 的命令",
+      any("cl doctor" in x for x in _lines_m)
+      and not any("在终端跑 cl update" in x for x in _lines_m),
+      str(_lines_m))
+_lines_d, _ = _card_run(can_alert=False, pending=["deps"])
+check("⚠️ 对照：deps 那档照旧说「在终端跑 cl update」（别把话术改过了头）",
+      any("在终端跑 cl update" in x for x in _lines_d), str(_lines_d))
+
 print("--- G2 ⭐⭐ `cl update` 真的能把那句兑现（判据与卡片同源）---")
 # ⚠️ 上面那条话术成立的前提是：`cl update` **真的会去装**。而它原来比的是
 #    「**这次 pull 前后** requirements.txt 变没变」—— **第二份判据**，比戳记窄：

@@ -1413,8 +1413,8 @@ def _key_entry_section() -> None:
                               by["deepseek"].get("value") == "sk-SECRET-DS"
                               and by["jev"].get("value") == "apikey-jev-SECRET",
                               str({k: v.get("value") for k, v in by.items()}))
-                        check("⭐ 已存那档的提示语换成了「已存过 · …」",
-                              all("已存过" in f.get("hint", "") for f in caps[0]),
+                        check("⭐ 已存那档的提示语就是「已存过」（钉字面量）",
+                              [f.get("hint") for f in caps[0]] == ["已存过", "已存过"],
                               str([f.get("hint") for f in caps[0]]))
             finally:
                 try:
@@ -1630,6 +1630,58 @@ def _add_wiring_section() -> None:
                   _kw_calls == [], f"`corpus.keywords` 被调了 {len(_kw_calls)} 次")
             check("⭐ 而且没把 `batch` 又变回一个 dict（取消就是取消）",
                   E.S.get("batch") is None, str(E.S.get("batch"))[:60])
+
+            # ── ⭐⭐ 「取消后又重拖」：A 批的「认不准」名单不许盖进 B 批 ──────
+            # 动机（2026-10-01 审核指出，pre-existing）：A 的 worker 跑到写回那步时，
+            # 原来写的是 `S["batch"]["weak"] = …` —— 而那个 `S["batch"]` 可能**已经是 B 批**
+            # → A 的名单出现在 B 的卡片上。修法：写捕获的 `mine` + 写前查代际。
+            # ⚠️ 确定性构造：**换批这个动作放在 `corpus.keywords` 里**（它在 `mine`
+            #    捕获之后、写回之前必然被调）—— 不用 sleep 赌窗口。
+            _A = {"verdicts": [], "busy": False, "total": len(pdfs),
+                  "dropped": 0, "error": "", "need_course": True,
+                  "pending": list(pdfs), "matched": {}}
+            _B = {"verdicts": [], "busy": True, "total": 1,
+                  "dropped": 0, "error": "", "need_course": False,
+                  "pending": [], "matched": {}}
+            E.S["batch"] = _A
+            _captured2: list = []
+
+            class _NoStartThread2:
+                def __init__(self, target=None, daemon=None, **kw):
+                    _captured2.append(target)
+
+                def start(self):
+                    pass                              # 抓下来，不真跑
+
+            try:
+                E.threading.Thread = _NoStartThread2
+                h.start_classify()
+            finally:
+                E.threading.Thread = _real_thread
+            check("⚠️ 前置：抓到第二个 worker（否则下面三条是空转）",
+                  len(_captured2) == 1 and callable(_captured2[0]),
+                  f"抓到 {len(_captured2)} 个")
+            _real_kw2 = _corpus_mod.keywords
+
+            def _swap_kw(*a, **kw):
+                E.S["batch"] = _B            # ← 换批就发生在这里（worker 已捕获 mine=_A）
+                return ({}, {"X课": "没有语料"})
+
+            _corpus_mod.keywords = _swap_kw
+            try:
+                _captured2[0]()
+                _boom2 = ""
+            except Exception as e:                    # noqa: BLE001
+                _boom2 = f"{type(e).__name__}: {str(e)[:80]}"
+            finally:
+                _corpus_mod.keywords = _real_kw2
+            check("⭐⭐ 换批窗口里 worker 不炸", not _boom2, _boom2)
+            check("⭐⭐ A 批的「认不准」名单**不许盖进 B 批**（写的是捕获的 `mine`）",
+                  _B.get("weak") is None and _B.get("has_key") is None,
+                  f"B.weak={_B.get('weak')!r} B.has_key={_B.get('has_key')!r}")
+            check("⭐ 而且那份名单**写进了 A 自己**（没白丢、也没写错人）",
+                  _A.get("weak") == {"X课": "没有语料"}, repr(_A.get("weak")))
+            E.S["batch"] = None
 
             check("建完输入行收起来了", E.S.get("add") is None)
 

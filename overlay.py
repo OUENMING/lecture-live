@@ -1966,8 +1966,14 @@ class Overlay:
                     set_status("正在更新…", 0.75)
             else:
                 # 弹不出来就**别装作问过了** —— 直说那句话该在哪儿敲。
-                print(f"\n⚠ 更新之外还有几件事要做：\n{todo}\n"
-                      f"  要现在做，在终端跑：cl update", flush=True)
+                tail = "  要现在做，在终端跑：cl update"
+                if any(s["key"] == "models" for s in steps):
+                    # ⚠️ 「下载模型」**不归 `cl update` 管**（铁律：绝不自动下模型）——
+                    #    不给这句的话，用户跑完 cl update 发现模型没下、卡片还是同一句
+                    #    → **死循环换了个壳**（2026-10-01 独立审核指出）。
+                    tail += ("\n  （「下载模型」不会自动做 —— "
+                             "`cl update` 跑完会打出该装的命令）")
+                print(f"\n⚠ 更新之外还有几件事要做：\n{todo}\n{tail}", flush=True)
 
         def ui(fn, *a) -> None:
             try:
@@ -2030,7 +2036,14 @@ class Overlay:
                     #    终端里那个确认框弹不出来 → 上一步的「先不做」是**默认**、不是
                     #    用户选的 → 再点一次走**同一段** → 永远是这句 → **死循环**。
                     #    所以话术跟着 `can_ask` 分叉：点得动就说点它，点不动就说敲哪条。
-                    if can_ask:
+                    # ⚠️ 「下载模型」还多一层（2026-10-01 审核指出）：**它不归
+                    #    `cl update` 管**（铁律：绝不自动下模型）→ 对它说「跑 cl update」
+                    #    是句兑现不了的话，得改指 `cl doctor` 打出来的命令。
+                    if left[0]["key"] == "models":
+                        ui(set_status, f"还有 {len(left)} 件事没做：{left[0]['label']}"
+                                       f"（{left[0]['detail']}）—— 不会自动下，"
+                                       f"按 `cl doctor` 打出的命令装", 1.0)
+                    elif can_ask:
                         ui(set_status, f"还有 {len(left)} 件事没做：{left[0]['label']}"
                                        f"（{left[0]['detail']}）—— 再点一次这个按钮", 1.0)
                     else:

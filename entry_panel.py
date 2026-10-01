@@ -1854,10 +1854,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             "填 API key",
             "只写进这台机器的 ~/.classlive/，不上传。",
             [{"key": "deepseek", "label": "DeepSeek key", "value": cur_ds,
-              "hint": ("已存过 · 圆点 = 原值，不动 = 不改；要换就全选粘贴。" if cur_ds
+              "hint": ("已存过" if cur_ds
                        else "翻译用的。不填也能上课 —— 退回本地模型，质量差一些。")},
              {"key": "jev", "label": "Jev key · 可选", "value": cur_jv,
-              "hint": ("已存过 · 圆点 = 原值，不动 = 不改。" if cur_jv
+              "hint": ("已存过" if cur_jv
                        else "给「重点句」和「课务」用。不填这两个功能就不出现。")}],
             fallback=None)
         if got is None:
@@ -2766,8 +2766,16 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 # ⚠️ `_degraded` 已经是「拿不出词表的课 + **为什么**」——
                 #    它和"词表为空"是同一件事，**别再算一份 `no_corpus`**
                 #    （两份清单迟早对不上，而这是"哪些课认不准"的清单）。
-                S["batch"]["weak"] = dict(_degraded)
-                S["batch"]["has_key"] = bool(key)
+                # ⚠️⚠️ **写进捕获的那一份 `mine`，不是 `S["batch"]`**（2026-10-01 审核
+                #    指出，pre-existing）：`S["batch"]` 此刻可能已经是**下一批**了 ——
+                #    「取消后又重拖」会把 A 批的「认不准」名单**盖进 B 批的字典**，
+                #    而 B 的卡片会拿它当自己的结果显示。
+                mine["weak"] = dict(_degraded)
+                mine["has_key"] = bool(key)
+                # 顺带查一次代际：期间被取消 / 换批就别再往下跑 ——
+                # 下一段就是真花钱的 `suggest`（这也保住了原来靠 TypeError 偶然做到的事）。
+                if S.get("batch") is not mine:
+                    return
                 ask = classify.make_ask(key) if key else (lambda prompt: None)
 
                 def prog(i, n, name):

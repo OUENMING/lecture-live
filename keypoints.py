@@ -293,7 +293,13 @@ def pick(sents, *, token_value: str = "", timeout: float = 30.0, k: int = 10) ->
        methodological breakthroughs` 那句就是）。
     """
     if not token_value:
-        token_value = token()
+        # ⚠️⚠️ **token 必须跟 `ask_commandcode` 解析的 endpoint/model 同一家**
+        #    （2026-10-01 实测抓到的静默故障）：原来这里写的是 `token()` ——
+        #    那是 **CommandCode 的** token，而官方 key 配好之后 endpoint/model
+        #    已经走官方 → **401** → 被本函数的 `except` 吞成空表 →
+        #    🎯「最值得记的几句」那节**静默消失**（一行报错都没有）。
+        #    `ask_one` 那边一直是对的（`_provider()["token"]`），只有这里漏改。
+        token_value = _provider()["token"]
     if not token_value or not sents:
         return []
     try:

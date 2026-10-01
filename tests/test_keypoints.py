@@ -169,26 +169,50 @@ def t_http_error_keeps_body():
 # ---------------------------------------------------------------- 没配 token
 @case("⭐⭐ 没配 token -> `pick()` 返回空表，**一个请求都不发**")
 def t_pick_without_token():
-    """⚠️ **必须 patch `kp.token`**，不能只传 `token_value=""` ——
-    空串的语义是「去查」，而查的是 `~/.classlive/jev-token`；**在作者本机上
-    那个文件是配好的**，于是"没配"根本没被测到（这条判据第一版就是这么错的，
-    它自己当场红了）。判据不能依赖跑它的那台机器上配没配。"""
+    """⚠️ 判据不能依赖跑它的那台机器上配没配 —— 所以 patch 的是
+    **解析层 `_provider`**（2026-10-01 改：`pick` 的 token 现在也走它）：
+    第一版只 patch `kp.token`，而作者本机 `jev-key` 是配好的 → "没配"没被测到
+    （那条第一版当场就红了）。"""
     import urllib.request
-    orig_url, orig_tok = urllib.request.urlopen, kp.token
+    orig_url, orig_prov = urllib.request.urlopen, kp._provider
     calls = []
 
     def boom(*a, **kw):
         calls.append(1)
         raise AssertionError("没配 token 却发了请求")
     urllib.request.urlopen = boom
-    kp.token = lambda **kw: ""
+    kp._provider = lambda **kw: {"name": "x", "endpoint": "https://e",
+                                 "model": "m", "token": ""}
     try:
-        assert kp.token() == "", "patch 没生效"
         assert kp.pick(["hello"]) == [], "没配 token 该给空表"
         assert not calls, "没配 token 却发了请求"
     finally:
         urllib.request.urlopen = orig_url
-        kp.token = orig_tok
+        kp._provider = orig_prov
+
+
+@case("⭐⭐ `pick()` 送的 token 必须跟 endpoint/model **同一家**（混用 = 401 静默空表）")
+def t_pick_uses_provider_token():
+    # 动机（2026-10-01 实测）：官方 key 配好之后，endpoint/model 走官方、
+    # token 却还是 CommandCode 的 → 401 → pick 吞成空表 → 🎯 那节**静默消失**，
+    # 一行报错都没有（`ask_one` 早就是对的，只有 `pick` 漏改）。
+    orig_prov, orig_ask = kp._provider, kp.ask_commandcode
+    seen: dict = {}
+
+    def fake_ask(state, questions, *, token, **kw):
+        seen["token"] = token
+        return {"answers": {}}
+
+    kp._provider = lambda **kw: {"name": "x", "endpoint": "https://e",
+                                 "model": "m", "token": "TOKEN-OF-PROVIDER"}
+    kp.ask_commandcode = fake_ask
+    try:
+        kp.pick(["hello world", "another sentence"], k=1)
+    finally:
+        kp._provider, kp.ask_commandcode = orig_prov, orig_ask
+    assert seen.get("token") == "TOKEN-OF-PROVIDER", (
+        f"pick 送的 token 不是 `_provider()` 那家的：{seen.get('token')!r} —— "
+        f"两家 key 互不通用，混用 = 401 → 静默空表")
 
 
 @case("⭐⭐ `rebuild_note.py` 必须接 `keypoints_fn` —— 走假写入器真跑一遍 main()")

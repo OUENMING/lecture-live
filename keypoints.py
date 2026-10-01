@@ -154,7 +154,17 @@ def score(sents, *, ask) -> list:
     out: list = []
     for lo in range(0, len(sents), CHUNK):
         part = sents[lo:lo + CHUNK]
-        got = parse_answers(ask(build_state(part), build_questions(len(part))), len(part))
+        # ⚠️⚠️ **单批失败不许连坐**（2026-10-01 实测）：一节 50 分钟的课要打
+        #    29 批，原来**任何一批**网络抖一下（超时/429/5xx）就把它抛给
+        #    `pick` 那个大 `try` → **整节清零** → 🎯 那节整块静默消失，
+        #    而且**偶发**（重跑一次可能就好），是最难查的一类。
+        #    单批挂了只让这一批记 `None` —— 本函数的语义本来就是
+        #    「`None` = 这次没拿到」（见 docstring），其余批次照常。
+        try:
+            got = parse_answers(ask(build_state(part),
+                                    build_questions(len(part))), len(part))
+        except Exception:                                     # noqa: BLE001
+            got = [None] * len(part)
         out.extend(got)
     return out
 

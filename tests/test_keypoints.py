@@ -166,6 +166,29 @@ def t_http_error_keeps_body():
         urllib.request.urlopen = orig
 
 
+@case("⭐⭐ `score`：单批失败不许连坐（29 批里挂一批 = 只有那批记 None）")
+def t_score_survives_one_bad_batch():
+    # 动机（2026-10-01 实测）：一节 50 分钟的课要打 29 批，任何一批网络抖一下
+    # （超时/429/5xx）原来会把**整节**清零（pick 的大 try 吞成空表）→ 🎯 那节
+    # 整块静默消失，而且**偶发**（重跑可能就好），最难查的一类。
+    sents = [f"sentence {i}" for i in range(45)]           # CHUNK=20 → 3 批
+    calls = {"n": 0}
+
+    def flaky(state, questions):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("Jev 500（模拟第 2 批挂）")
+        return {"answers": {k: {"type": "noul", "noul": 0.9}
+                            for k in questions}}
+
+    got = kp.score(sents, ask=flaky)
+    assert calls["n"] == 3, f"三批都要打到（打到 {calls['n']}）"
+    assert len(got) == len(sents), (len(got), len(sents))
+    assert got[:20] == [0.9] * 20, f"第 1 批应正常：{got[:20]}"
+    assert all(p is None for p in got[20:40]), f"第 2 批应记 None：{got[20:40]}"
+    assert got[40:] == [0.9] * 5, "第 3 批不许被第 2 批带走"
+
+
 # ---------------------------------------------------------------- 没配 token
 @case("⭐⭐ 没配 token -> `pick()` 返回空表，**一个请求都不发**")
 def t_pick_without_token():

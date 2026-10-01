@@ -464,7 +464,7 @@ cl materials                         ← 一条命令：转 markdown + 落到约
 
 > ⚠️ **下面的结论不再成立，只当历史记录读。**
 >
-> 作者在 `docs/BRIEF-p3-author.md`（2026-09-26 16:32，比本节晚 48 分钟）明确：
+> 作者在 `docs/archive/BRIEF-p3-author.md`（2026-09-26 16:32，比本节晚 48 分钟）明确：
 > 「**不需要 Docling 那套重的**」。P3 的选型改成了 **macOS 原生三件套**
 > —— `from Quartz import PDFKit` + stdlib `zipfile`/`xml.etree` + Vision OCR，
 > **新增依赖 0**（`pyobjc-framework-Quartz` 本来就在 `requirements.txt` 里）。

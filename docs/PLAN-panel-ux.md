@@ -7,12 +7,13 @@
 > `[实测]` = 本项目自己量出来的 · `[惯例]` = 行业做法但**没有标准背书** ·
 > `[无明文]` = 明确查过、**就是没有**。
 >
-> **分工**：这份管「面板长什么样、怎么用」。现状与演进史见 `docs/STATUS-20260926.md`；
-> 遗留清单见 `docs/REVIEW-midpoint-20260927.md` §9；美学数值见 `docs/RESEARCH-macos-aesthetic.md`。
+> **分工**：这份管「面板长什么样、怎么用」。现状与演进史见 `docs/archive/STATUS-20260926.md`；
+> 遗留清单见 `docs/archive/REVIEW-midpoint-20260927.md` §9；美学数值见 `docs/RESEARCH-macos-aesthetic.md`。
 >
-> ⚠️ **新会话先读 `docs/HANDOFF-batch3.md`** —— 那份是入口（状态 / 决定 / 第一批 / 坑），
-> 再从那里回到本文件的 **§15（调研总账）+ §16（第一批）**。
-> ⚠️ 本文件的 **§12 已被 §16 取代**（§12 写在拿到第二轮证据之前）。
+> ⚠️ **本批已交接到 2026-09-27**（`docs/archive/HANDOFF-batch3.md`，归档）——
+> 那份讲的「下一步」早已做完（面板与动效均已落地，见 `docs/HANDBOOK.md §0`）；
+> **要接着做，先读 `docs/PLAN-roadmap.md` 与 `docs/HANDBOOK.md §10` 的账。**
+> 本文件的调研总账在 **§15**，第一批实现在 **§16**（§12 已被 §16 取代）。
 
 ---
 

@@ -201,8 +201,13 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 - **碰什么就跑什么**（CLAUDE.md 的完成判据一节是权威表）：
   更新机制→`test_update` · 面板→`test_panel` · 就绪条/key→`test_ready`/`test_keyentry` ·
   开课面板→`test_entry_panel` · 课程→`test_courses` · 笔记→`test_vault`。
-- **探针**（不在运行路径上，作者手验用）：`probe_scroll` / `probe_drag` / `probe_entry_panel` /
-  `probe_test_mode` / `probe_motion`；离线全流程 `docs/experiments/run_isolated.py`（写端全隔离）。
+- **探针**（不在运行路径上，作者手验用）：都在 `scripts/` 下 —— `probe_scroll` / `probe_drag` /
+  `probe_entry_panel` / `probe_test_mode` / `probe_motion`；离线全流程
+  `docs/experiments/run_isolated.py`（写端全隔离）。
+- **探针都住在 `scripts/`**，仓库根只留**被 import 的模块** —— 与社区主流一致
+  （实测 23 个热门 Python 仓库里 16 个有 `scripts/`、`tools/`）。
+  ⚠️ 它们**自己** import 仓库模块，靠 `ROOT = Path(__file__).resolve().parent.parent` 垫片；
+  改那个垫片时**连带改正文里所有 `ROOT / "…"` 的资源路径**。
 - **任何"会写盘"的探针先把写端指到临时目录**。
 
 ---
@@ -247,6 +252,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | 问题 | 读哪份 |
 |---|---|
 | 怎么改、规矩、完成判据 | `CLAUDE.md`（仓库根，**AI 的常读入口**） |
+| docs/ 全部分区与权威状态 | `docs/README.md` |
 | 架构快照（会旧） | `ARCHITECTURE.md` |
 | 实时总结（原子/章节/纲要） | `docs/PLAN-live-summary.md` |
 | 测试模式 | `docs/PLAN-test-mode.md` |
@@ -256,6 +262,10 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | macOS 视觉语言（动外观前读） | `docs/RESEARCH-macos-aesthetic.md` |
 | 笔记复习层重做（**「知识点详解」像复述的病根诊断在这**） | `docs/PLAN-notes-and-ui.md` §0 |
 | 路线图 | `docs/PLAN-roadmap.md` |
+
+⚠️ **本表只列活文档。** 交接 / 现状 / 评审 / 作者原话这些**某一天的快照**都在
+`docs/archive/`（9 份，2026-09-24 → 09-30）—— 只当史料读，**里面的「下一步」一律不作数**。
+想找某轮的原始账就读它，但**先回本表和 `CLAUDE.md` 核实那句话今天还成不成立**。
 
 ---
 
@@ -278,6 +288,32 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 - **面板缩放 / 最小化评估**：缩放=高度可做（Titled+藏红绿灯，overlay 有先例）·宽度不建议；
   「最小化」对 accessory app 不自然，建议做「收起」形态。
 - 测试模式「阶段 5：真课留档」（可选）。
+
+### 📁 仓库布局（2026-10-01 实测定的，别再改）
+
+**根目录只留「被 import 的模块」+ 三个可执行入口**（`cl` / `make-app.sh` / `install.sh`）。
+12 个独立脚本（`probe_*` · `cache_probe` · `trash` · `rebuild_note` · `test_pipeline` · `cl-bg`）
+住在 `scripts/`。
+
+**为什么**（实测 23 个 Python 仓库，stars>1500、排除文档型仓库）：
+
+| | 数字 |
+|---|---|
+| 扁平布局（根目录直接放 .py） | **19 / 23** |
+| 用 `src/` 布局 | 4 / 23 |
+| 扁平仓库里有 `scripts/` 或 `tools/` 目录 | **16 / 23** |
+| 把工具脚本留在根目录 | 3 / 23 |
+
+⚠️ **两份结论都要记**：扁平才是主流（所以 40 个运行模块**别动**，搬进 `src/` 要改
+`make-app.sh` 的 `main.py` 特判 + 全仓 import）；但**独立脚本进 `scripts/`** 同样是主流。
+
+⚠️ **`scripts/` 里的东西自己 import 仓库模块**，靠
+`ROOT = Path(__file__).resolve().parent.parent` 垫片。改那个垫片时**连带改正文里所有
+`ROOT / "…"` 的资源路径**（`glossary.txt` / `glossary/` / `.window`）——
+漏一处就静默走错目录。
+
+**命名**：`.md` 用小写单词 / kebab-case 是主流（实测 505 个文件：小写单词 280 · kebab 142 ·
+snake 73 · SCREAMING 前缀 10）。本仓的 `PLAN-*.md` / `ARCHITECTURE.md` 已在主流里，**别改**。
 
 ---
 

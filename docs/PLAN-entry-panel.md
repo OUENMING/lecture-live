@@ -1,7 +1,8 @@
 # P3 第二批：课程卡片面板
 
 > ⭐ **本批已经在 2026-09-26 当天做完了**（六步全齐、闸门全绿、**但一次都没推**）。
-> **新会话先读 `docs/HANDOFF-entry-panel.md`** —— 那份讲「还剩什么、坑在哪、第一步做什么」。
+> ✅ **本批的交接已完成**（`docs/archive/HANDOFF-entry-panel.md`，归档）——
+> 它讲的「还剩什么」那条账已结清，**现在的账在 `docs/HANDBOOK.md §10`**。
 > 本文件现在是**设计与依据的存档**（§2 三份调研 / §7 批量分类方案 / §8 审查遗留清单）。
 >
 > 状态：**作者已拍板全部关键决定**（见 §0）。§2 是三份并行调研的结论，带出处。
@@ -109,7 +110,7 @@ git tag pre-entry-panel-20260926 && git push origin pre-entry-panel-20260926
 |---|---|---|
 | `docs/PLAN-entry-panel.md`（**新建**） | **本文件** —— §2 三份调研 + §3/§4 方案与顺序。**调研不另开一份**（它是方案的依据，不是独立主题） | ✅ |
 | `docs/PLAN-p3-prep.md` §10 | 改指针 + 标注「范围已升级成课程卡片面板」 | ✅ |
-| `docs/HANDOFF-p3-prep.md` | 新增 §8：第二批入口在 `PLAN-entry-panel.md`；模型变化的代价 | ✅ |
+| `docs/archive/HANDOFF-p3-prep.md` | 新增 §8：第二批入口在 `PLAN-entry-panel.md`；模型变化的代价 | ✅ |
 | `CLAUDE.md` 文件地图 | 加一行指向 `docs/PLAN-entry-panel.md` | ✅ |
 | `docs/RESEARCH-macos-aesthetic.md` | 补 §11：沙盒/提前读 URL 会毁掉拖放 + `NSDraggingDestination` 的坑 | ✅ |
 

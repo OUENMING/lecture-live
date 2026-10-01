@@ -1,8 +1,8 @@
 # P3 方案：开课前的准备（课件 → 候选术语 → glossary + term_notes）
 
-> 状态：**待作者点头**。仓库规矩 —— 方案先给作者看，他同意再动手。
-> 作者已拍板三条（§0.3），本方案在它们之上展开。
-> 日期 2026-09-26 · 代码状态 HEAD = `0673103`（只有文档变动，代码与 `1d1d461` 相同）
+> 状态：**✅ 已实现**（第一批，`prep.py` / `extract.py` / `classify.py` 已在线上运行）。
+> 本文件保留为**方案与依据的存档** —— ⚠️ **文首的「代码状态 HEAD」与「待作者点头」是写这份当天的快照，已过期。**
+> 现在的账见 `docs/HANDBOOK.md §10`。第二批（课程卡片面板）见 `docs/PLAN-entry-panel.md`。
 
 ---
 
@@ -12,11 +12,11 @@
 
 | 文件 | 什么时候读 |
 |---|---|
-| `BRIEF-p3-author.md` | ⭐ **作者原话**。与本方案冲突先问，别自己改 |
+| `docs/archive/BRIEF-p3-author.md` | ⭐ **作者原话**。与本方案冲突先问，别自己改 |
 | `RESEARCH-p3-seams.md` | 想知道某一跳插在哪个 `file:line` |
 | `RESEARCH-p3-extract.md` | 想知道抽文本为什么选 PDFKit / stdlib |
 | `RESEARCH-p3-community.md` | 想知道每条设计在社区里的先例与反例 |
-| `HANDOFF-p3-prep.md` | 想知道上一轮做到哪 |
+| `docs/archive/HANDOFF-p3-prep.md` | 想回看第一批交付时的状态（**已完成归档，账以本文件 §0.3 与代码为准**） |
 
 ### 0.2 本方案新增的实测（不是转述，是这次现跑的）
 

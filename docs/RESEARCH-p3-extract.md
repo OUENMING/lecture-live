@@ -30,11 +30,11 @@
 
 ### 2.1 记录在哪
 
-**在作者自己的 brief 里**（`docs/BRIEF-p3-author.md`，2026-09-26 16:32 落盘）：
+**在作者自己的 brief 里**（`docs/archive/BRIEF-p3-author.md`，2026-09-26 16:32 落盘）：
 
 ```
-docs/BRIEF-p3-author.md:17:常规情况（文件自带文本层）用 `python-pptx` / `pypdf` 这类轻量库，
-docs/BRIEF-p3-author.md:18:**不需要 Docling 那套重的**。
+docs/archive/BRIEF-p3-author.md:17:常规情况（文件自带文本层）用 `python-pptx` / `pypdf` 这类轻量库，
+docs/archive/BRIEF-p3-author.md:18:**不需要 Docling 那套重的**。
 ```
 
 ⚠️ **但仓库里有一处自相矛盾**：`docs/PLAN-notes-and-ui.md:463` 的 §7.3 **是"选它（Docling）"**
@@ -170,7 +170,7 @@ Why does communication matter for economists? | Economists don't just crunch num
 
 ### 5.1 ⭐ 作者 brief 点名的「标题占位符」，标准库能拿到，且更细
 
-`docs/BRIEF-p3-author.md:22` 要求区分标题/正文占位符，标题级词给更高权重。
+`docs/archive/BRIEF-p3-author.md:22` 要求区分标题/正文占位符，标题级词给更高权重。
 **标准库直接读 `<p:ph type=...>` 就行，粒度比 python-pptx 还多两档**（含 `ph` 无 `type` 属性 = body）：
 
 ```

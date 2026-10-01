@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """课程卡片面板 · 验收跑器（**隔离模式**）。
 
-    ClassLive.app/Contents/MacOS/python probe_entry_panel.py
+    ClassLive.app/Contents/MacOS/python scripts/probe_entry_panel.py
 
 面板浮在屏幕中上。可以做的：
 
@@ -56,8 +56,10 @@ import shutil
 import sys
 import time
 
-HERE = pathlib.Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+# ⚠️ 本文件在 `scripts/` 下，仓库根是**上一级** —— `.parent` 会指向 `scripts/`，
+#    那样这些 import 会静默找不到模块（报错点在后面，不容易看出是路径问题）。
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 import classify                                                      # noqa: E402
 import entry_panel                                                  # noqa: E402
@@ -199,9 +201,9 @@ def main() -> int:
         #    按文件名免费先分）唯一能被看到的路径。不拷任何术语表。
         (ISO / "glossary").mkdir()
     else:
-        shutil.copytree(HERE / "glossary", ISO / "glossary")
+        shutil.copytree(ROOT / "glossary", ISO / "glossary")
     (ISO / "glossary.txt").write_text("", encoding="utf-8")
-    real = HERE / "glossary"
+    real = ROOT / "glossary"
 
     print(f"隔离根     = {ISO}")
     print(f"真 glossary = {real}   ← **一个字都不会动**")

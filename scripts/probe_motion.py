@@ -1,6 +1,6 @@
 """动效的**基线**探针: 不做任何动画时, pump 一帧到底花多少时间。
 
-    ClassLive.app/Contents/MacOS/python probe_motion.py
+    ClassLive.app/Contents/MacOS/python scripts/probe_motion.py
 
 ## 为什么要有它
 
@@ -62,8 +62,10 @@ import statistics
 import sys
 import time
 
-HERE = pathlib.Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+# ⚠️ 本文件在 `scripts/` 下，仓库根是**上一级** —— `.parent` 会指向 `scripts/`，
+#    那样 import 仓库模块会静默找不到（报错点在后面，不容易看出是路径问题）。
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 FRAME_120, FRAME_60 = 8.3, 16.7          # ms; 与 probe_scroll.py 同口径
 
@@ -77,7 +79,7 @@ ANSWER = "边际成本是产量增加一个单位时总成本的变化量。在�
 
 @contextlib.contextmanager
 def isolated_window_file():
-    f = HERE / ".window"
+    f = ROOT / ".window"
     saved = f.read_bytes() if f.exists() else None
     try:
         yield

@@ -12,7 +12,7 @@
 
 ## ⭐ 当前状态（2026-09-30 收尾 —— **先读这一节再看下面**）
 
-> ⭐⭐ **要一份通的总结？读 `docs/HANDOFF-live-summary.md`** ——
+> ⭐⭐ **要一份通的总结？读 `docs/archive/HANDOFF-live-summary.md`** ——
 > 那条分支交付了什么 · 改了哪些文件 · **与计划的出入**（含计划自己写错的三处）·
 > 测试结果 · 跑真流程的隔离纪律 · 还没做的 · 32 个提交的清单。**这一节是细节索引，那份是全貌。**
 
@@ -1505,7 +1505,7 @@ Equation, we'll be using this over and over again · the amount of water in the 
 - **绝不代跑 `git config`**；**`git add -A` 不用**（按文件名加具体文件）
 - **改代码前先加载相关 skill**（硬规矩）；**文档别打开，直接说**
 - ⚠️ zsh：`$VAR` 后紧跟非 ASCII 会被吞；**zsh 不做词分割**（`for x in $IDS` 要写 `${=IDS}`）
-- ⚠️ **两份「还没修」清单会腐坏**（`docs/REVIEW-midpoint-20260927.md §9.2` 与
+- ⚠️ **两份「还没修」清单会腐坏**（`docs/archive/REVIEW-midpoint-20260927.md §9.2` 与
   `docs/PLAN-entry-panel.md §8.1`）—— 是线索不是事实，动手前 grep
 
 ---

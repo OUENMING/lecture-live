@@ -9,12 +9,14 @@
 双重 fork 之后: 进程属于**新会话**、没有控制终端，任何一方退出都带不走它。
 不是把它做成系统服务（不写 LaunchAgent、不动任何系统设置）。
 
-用法:  python3 cl-bg.py [日志路径]
+用法:  python3 scripts/cl-bg.py [日志路径]
 """
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# ⚠️ 本文件在 `scripts/` 下，但**后台进程必须在仓库根跑** —— 它 exec 的
+#    `cl` / `main.py` 按 cwd 找 `.course`、找 `sessions/`。所以是上一级。
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ⚠️ 默认日志**不放 /tmp**: 那是全局可写的, 固定名字有两个真实风险 ——
 #   ① 别人可预建同名文件 → 启动即 EACCES 失败(拒绝服务);
 #   ② 可预置指向任意文件的符号链接 → 追加写命中目标(符号链接跟随)。

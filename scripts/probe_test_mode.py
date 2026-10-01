@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """把「开课前的准备」面板上那颗**测试模式开关**渲染出来并截图。
 
-    ClassLive.app/Contents/MacOS/python probe_test_mode.py [输出目录]
+    ClassLive.app/Contents/MacOS/python scripts/probe_test_mode.py [输出目录]
 
 默认输出 `~/Desktop/classlive-review/test-mode-toggle/`，拍两张：
 `01-关.png`（默认）与 `02-开.png`（点一下之后）。
@@ -30,7 +30,9 @@ import pathlib
 import subprocess
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parent
+# ⚠️ 本文件在 `scripts/` 下，仓库根是**上一级** —— `.parent` 会指向 `scripts/`，
+#    那样 import 仓库模块会静默找不到（报错点在后面，不容易看出是路径问题）。
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 

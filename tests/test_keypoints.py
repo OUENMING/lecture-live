@@ -26,6 +26,9 @@ import urllib.error
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
+# ⚠️ `rebuild_note.py` 是**独立脚本**，住在 `scripts/` 下（不在仓库根）——
+#    下面那条用例 import 它，所以这里要一并放行。只放根会 ModuleNotFoundError。
+sys.path.insert(0, str(HERE / "scripts"))
 
 import keypoints as kp                                                 # noqa: E402
 

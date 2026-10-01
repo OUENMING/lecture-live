@@ -2,7 +2,7 @@
 """测 DeepSeek 缓存在真实课堂回放下的命中率。
 
 用法(必须在 venv 里跑):
-    ClassLive.app/Contents/MacOS/python cache_probe.py <session.md> [n] [course]
+    ClassLive.app/Contents/MacOS/python scripts/cache_probe.py <session.md> [n] [course]
 
 对照两种 prompt 形态(每轮发给模型的"句子内容"完全相同，只改排列方式):
   A = 现状: 每轮一个全新的 user 消息(内含滑动窗口的最近 2 句) -> 前缀每轮都变
@@ -15,8 +15,10 @@ import re
 import sys
 import time
 
-HERE = pathlib.Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+# ⚠️ 本文件在 `scripts/` 下，仓库根是**上一级** —— `.parent` 会指向 `scripts/`，
+#    那样这些 import 会静默找不到模块（报错点在后面，不容易看出是路径问题）。
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 from cloud_translator import CloudTranslator, SYSTEM_PROMPT_CLOUD, load_api_key  # noqa: E402
 from translator import load_terms, core_terms, course_term_list, course_title    # noqa: E402
@@ -96,10 +98,10 @@ def main():
         sys.exit("没有 API key")
 
     tr = CloudTranslator(key, "deepseek-flash",
-                         glossary_terms=load_terms(str(HERE / "glossary.txt"), course),
+                         glossary_terms=load_terms(str(ROOT / "glossary.txt"), course),
                          max_context=2, core=core_terms(course),
-                         course_terms=course_term_list(str(HERE / "glossary.txt"), course),
-                         domain=course_title(str(HERE / "glossary.txt"), course),
+                         course_terms=course_term_list(str(ROOT / "glossary.txt"), course),
+                         domain=course_title(str(ROOT / "glossary.txt"), course),
                          collect_usage=True)
 
     # ---- A: 现状(每轮全新 user 消息) ----

@@ -433,7 +433,7 @@ return {"panel": p, "close": on_close, "set_status": set_status,
 
 | # | 说法 | 实际（代码为准） | 位置 |
 |---|---|---|---|
-| 1 | 「LLM 抽候选词（**用已有的 `SYS_CLASSIFY`**）」 | `SYS_CLASSIFY` 只对**已存在的术语列表**分档，抽不出候选词。同仓库的 `docs/RESEARCH-product-shape.md:189-190` 说得对（「缺的只是把课件当候选词源喂进去」）| 作者 brief `docs/BRIEF-p3-author.md:29`（本节原写「`PLAN-roadmap.md:55`」—— 那处**已被改成纠正版**，纠正写在 `:57`） |
+| 1 | 「LLM 抽候选词（**用已有的 `SYS_CLASSIFY`**）」 | `SYS_CLASSIFY` 只对**已存在的术语列表**分档，抽不出候选词。同仓库的 `docs/RESEARCH-product-shape.md:189-190` 说得对（「缺的只是把课件当候选词源喂进去」）| 作者 brief `docs/archive/BRIEF-p3-author.md:29`（本节原写「`PLAN-roadmap.md:55`」—— 那处**已被改成纠正版**，纠正写在 `:57`） |
 | 2 | 「`glossary/<课号>.txt` 里有**两类词**（领域术语 + 课号/教务词）」 | 真实文件里**教务词确实有**（如 `glossary/SOC10020.txt` 的 `Brightspace` / `quiz` / `final test`），但**课号按设计是写在公共 `glossary.txt` 里**（`glossary.example.txt` 明写「**课号必须全列在这里**」）。另有第三类内容被漏掉了：**第一行 `# <课号> <课程名>` 是领域先验，不是术语**（`translator.py:136-160` 读它）| `docs/PLAN-roadmap.md:63-69` |
 
 第 2 条对实现有直接影响：追加写入器**必须保留首行注释**，否则领域先验静默丢失（§5.2）。

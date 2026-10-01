@@ -7,7 +7,7 @@
 不新建会话文件：先用 mode='no' 构造（__init__ 里 enabled=False 会跳过建文件），
 再把 session_path 指到既有文件上。
 
-用法： ClassLive.app/Contents/MacOS/python rebuild_note.py <会话文件> <课号> [--no-polish]
+用法： ClassLive.app/Contents/MacOS/python scripts/rebuild_note.py <会话文件> <课号> [--no-polish]
 """
 import argparse
 import os
@@ -15,7 +15,10 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# ⚠️ 本文件在 `scripts/` 下，仓库根是**上一级** —— `.parent` 会指向 `scripts/`，
+#    那样 `import cloud_translator` 与下面的 `glossary.txt` 都会静默找不到。
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 from cloud_translator import load_api_key          # noqa: E402
 import keypoints                                   # noqa: E402
@@ -33,7 +36,7 @@ def main() -> int:
     #    （`--vault` → `$OBSIDIAN_VAULT` → `~/.classlive/vault` → 都没有就报错）。
     ap.add_argument("--vault", default=None)
     ap.add_argument("--glossary", default=str(
-        Path(__file__).resolve().parent / "glossary.txt"))
+        ROOT / "glossary.txt"))
     ap.add_argument("--model", default="deepseek-flash")
     ap.add_argument("--no-polish", action="store_true")
     args = ap.parse_args()

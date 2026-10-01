@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """收尾卡的渲染探针（不在运行路径上，**改这张卡的观感前先跑它**）。
 
-    ClassLive.app/Contents/MacOS/python probe_wrapup.py ask|work|done|wide
+    ClassLive.app/Contents/MacOS/python scripts/probe_wrapup.py ask|work|done|wide
 
 ⚠️ **必须用 `AppHelper.runEventLoop()`**，不是 `runConsoleEventLoop` ——
    后者只跑 `NSRunLoop.runMode_beforeDate_`，从不排空 NSApp 事件队列，
@@ -10,8 +10,10 @@
 import pathlib
 import sys
 
-HERE = pathlib.Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+# ⚠️ 本文件在 `scripts/` 下，仓库根是**上一级** —— `.parent` 会指向 `scripts/`，
+#    那样这些 import 会静默找不到模块（报错点在后面，不容易看出是路径问题）。
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 phase = (sys.argv[1] if len(sys.argv) > 1 else "ask").lower()
 

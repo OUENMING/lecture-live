@@ -105,8 +105,8 @@ ClassLive 是一个 macOS 本地实时英译中课堂字幕工具：`cl` 是 bas
 > **P3 第二批（同日完成、未推）**：课程卡片面板 `entry_panel.py` + 零参数入口 `entry_launch.py`
 > （双击 → 面板 → 点「开始上课」才写 `.course` 并录课），含拖拽落点、「选择文件…」
 > （HIG 要求的那条替代路）与逐条删词 / 撤销。
-> ⚠️ **还剩两件**：一批审查遗留（头一条是**删词写入器不持锁**）与**发版** ——
-> 见 `docs/HANDOFF-entry-panel.md`。
+> ✅ **还剩的那两件已结清**（审查遗留随 3.8.7 收口、已发版）；
+> 当期交接见 `docs/archive/HANDOFF-entry-panel.md`，**现在的账见 `docs/HANDBOOK.md §10`**。
 > 方案与全部实测：`docs/PLAN-p3-prep.md`（第一批）、`docs/PLAN-entry-panel.md`（第二批）。
 | **P4** | **拆渲染 + 数据自立** | 拆出内容模型；ClassLive 自己的数据目录；vault 降级为可选出口 | 无 | 中 | ⬜ |
 | **P5** | **PDF 输出** | 新增一个渲染目标（HTML → PDF） | P4 | 中 | ⬜ |

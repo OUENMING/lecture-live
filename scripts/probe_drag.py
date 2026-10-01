@@ -16,8 +16,8 @@ v2 把**整个面板**做成一个落点，收到拖拽立刻**变绿 + 换大�
 
 ## 跑法
 
-    ClassLive.app/Contents/MacOS/python probe_drag.py            # 只判 UTI（默认）
-    PROBE_MODE=url ClassLive.app/Contents/MacOS/python probe_drag.py   # 在 draggingEntered 里读 URL
+    ClassLive.app/Contents/MacOS/python scripts/probe_drag.py            # 只判 UTI（默认）
+    PROBE_MODE=url ClassLive.app/Contents/MacOS/python scripts/probe_drag.py   # 在 draggingEntered 里读 URL
 
 日志写 `/tmp/classlive-probe-drag.log`（**不碰仓库、不碰用户数据**）。
 
@@ -36,7 +36,9 @@ import sys
 import time
 import traceback
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+# ⚠️ 本文件在 `scripts/` 下，仓库根是**上一级** —— `.parent` 会指向 `scripts/`，
+#    那样 import 仓库模块会静默找不到（报错点在后面，不容易看出是路径问题）。
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 LOG_PATH = "/tmp/classlive-probe-drag.log"
 MODE = os.environ.get("PROBE_MODE", "uti").strip().lower()

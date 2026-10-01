@@ -17,7 +17,7 @@
 「间隔期间确有事件到达」的那些间隔, 那才是真正的处理卡顿。同时报输入节奏
 (触控板交付频率)与画面节奏(我们更新频率)的对比 —— 两者贴近 = 我们跟得上。
 
-用法: ClassLive.app/Contents/MacOS/python3 probe_scroll.py
+用法: ClassLive.app/Contents/MacOS/python3 scripts/probe_scroll.py
       按屏幕提示, 在每一阶段把鼠标移到悬浮窗上双指滚动。阶段会自动前进。
 """
 import bisect
@@ -26,7 +26,9 @@ import sys
 import time
 import objc
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+# ⚠️ 本文件在 `scripts/` 下，仓库根是**上一级** —— `.parent` 会指向 `scripts/`，
+#    那样 import 仓库模块会静默找不到（报错点在后面，不容易看出是路径问题）。
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from AppKit import NSTextField, NSFont, NSColor
 
 from overlay import Overlay

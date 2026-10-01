@@ -8,6 +8,10 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 
 每行是一个 context pointer：先读命中的那一行，再顺着 target 往下。整体地图见 `ARCHITECTURE.md`。
 
+`docs/` 的分区（活文档 / 归档快照 / 可复跑实验）与权威状态见 `docs/README.md`。
+⚠️ `docs/archive/` 里的**全部是某一天的快照** —— 只当史料读，**其中的「下一步」一律不作数**，
+现在的账在 `docs/HANDBOOK.md §10`。
+
 | 分支（什么时候读） | 读哪个 |
 |---|---|
 | ⭐⭐ **第一次接手/新会话/新的人** —— 从零上手的全景手册（现状、硬规矩、全部事故与教训、文档索引、公开的账） | `docs/HANDBOOK.md` |
@@ -18,7 +22,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 笔记复习层重做 + 课件联动 + 多用户 + UI 动效 | `docs/PLAN-notes-and-ui.md` |
 | **导入入口 + 无 Obsidian 时的导出**（调研 + 设计，含全部实测数字） | `docs/RESEARCH-entry-and-export.md` |
 | **产品形态（要不要做成 .app）+ VPS 评估 + 课件→关键词** | `docs/RESEARCH-product-shape.md` |
-| 外部评审（功能/架构/技术/思路，含**已知薄弱点**） | ⚠️ **不在仓库里**（作者决定不推送评审文档）。在 `~/Desktop/classlive-review/REVIEW-2026-09-24.md` |
+| 外部评审（功能/架构/技术/思路，含**已知薄弱点**） | ⚠️ **不在仓库里**（作者决定不推送评审文档）。在 `~/Desktop/classlive-review/`：`CODE-REVIEW-20261001.md`（最新）· `REVIEW-2026-09-24.md` |
 | 启动、命令行参数、课程切换 | `cl` → `main.py` |
 | **构建可双击的 `.app`**（方案 I：`.app` 就是安装目录） | `make-app.sh`（**动手前先读它的注释**） |
 | **装成系统里能直接启动的 app**（`/Applications` 符号链接） | `install.sh`（**动手前先读它的注释**，§3.11 有完整论证） |
@@ -45,15 +49,15 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | **章节层** —— `.chapters.jsonl` 的三种记录、写入器、`parse_reply` 的机械闸门、课务正则、`chapter_path_for` | `chapter.py` |
 | 整课二级精修（polish） | `polish.py` |
 | 悬浮窗、字幕显示、滚动、槽位池化 | `overlay.py`、`transcript_view.py` |
-| 滚动行为验收探针（不在运行路径上） | `probe_scroll.py` |
-| **动效基线/验收探针**（不在运行路径上；**确定性**，不靠人手）—— 动 `overlay.py` 的动效前跑 | `probe_motion.py` |
+| 滚动行为验收探针（不在运行路径上） | `scripts/probe_scroll.py` |
+| **动效基线/验收探针**（不在运行路径上；**确定性**，不靠人手）—— 动 `overlay.py` 的动效前跑 | `scripts/probe_motion.py` |
 | **草稿上滚的动效方案**（调研 / 时长三方收敛 / 四条判据 / 谁拥有 frame）—— 做动效前读 | `docs/PLAN-roll-motion.md` |
-| **拖拽落点验收探针**（不在运行路径上；**改拖拽相关代码前跑它**，作者手拖一次即可） | `probe_drag.py` |
-| **课程卡片面板验收跑器**（不在运行路径上；**隔离模式** —— 术语表是 /tmp 的副本，删词/撤销都改副本） | `probe_entry_panel.py` |
-| **测试模式开关的拍图探针**（不在运行路径上；**一个字节都不写盘** —— `on_test_mode` 是桩。推送给作者看效果前跑它） | `probe_test_mode.py` |
+| **拖拽落点验收探针**（不在运行路径上；**改拖拽相关代码前跑它**，作者手拖一次即可） | `scripts/probe_drag.py` |
+| **课程卡片面板验收跑器**（不在运行路径上；**隔离模式** —— 术语表是 /tmp 的副本，删词/撤销都改副本） | `scripts/probe_entry_panel.py` |
+| **测试模式开关的拍图探针**（不在运行路径上；**一个字节都不写盘** —— `on_test_mode` 是桩。推送给作者看效果前跑它） | `scripts/probe_test_mode.py` |
 | **零参数入口**（双击 `.app` → 先开面板 → 点「开始上课」才录课；**独立短进程**，录课那条路一个字没动） | `entry_launch.py`（⚠️ 退出码 0/1/2/3/4 是它与 `cl` 的契约；`CL_NO_PANEL=1` 退回老行为。**落点条上那颗「测试模式」开关**写 `.test-mode` → `cl` 读 → `--test-mode`） |
 | 回归测试 R1–R5、毫秒级断言 | `tests/test_audit_regressions.py` |
-| 端到端、拿真实录音跑通 | `test_pipeline.py` |
+| 端到端、拿真实录音跑通 | `scripts/test_pipeline.py` |
 | 面向用户的功能说明、开源与脱敏须知 | `README.md` |
 | 环境搭建、依赖清单、选型理由 | `docs/DESIGN.md` |
 
@@ -91,7 +95,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 - **不阻塞不变量**：`capture` / `vad` 的回调必须立刻返回；AppKit 的调用只能发生在主线程。往流水线里加活先想这两条。
 - ⚠️ **加在磨砂面板上的新交互元素，先查 `mouseDownCanMoveWindow`。**
   **事实**：它是 AppKit「按下背景即拖动窗口」的开关，**默认值是 `!isOpaque`**
-  （`docs/OVERLAY-RESIZE-REVIEW.md` §2.4 量的）→ **我们的面板是不透明的反面，
+  （`docs/archive/OVERLAY-RESIZE-REVIEW.md` §2.4 量的）→ **我们的面板是不透明的反面，
   所以每个新视图一出生就是 `True`。**
   ⚠️ **已经咬过两次**：① 窗口四角缩放（`OVERLAY-RESIZE-REVIEW.md` §2.4/§2.6）·
   ② 加 `NSSplitView` 的 pane（本轮调研：**裸 `NSView`/`NSVisualEffectView` 的 pane 是
@@ -181,7 +185,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   `ClassLive.app/Contents/MacOS/python tests/test_instance_lock.py` 全绿。
   ⚠️ 核心那条是「被 kill -9 之后锁自动释放」—— 但**它单独是恒真的**，
   必须和 C1/C2 连读（见那个测试的 docstring）。
-- 碰过流水线 / 音频路径：`ClassLive.app/Contents/MacOS/python test_pipeline.py <音频> [start] [dur] [speed]` 能跑完。
+- 碰过流水线 / 音频路径：`ClassLive.app/Contents/MacOS/python scripts/test_pipeline.py <音频> [start] [dur] [speed]` 能跑完。
 - **碰过面板**（`panel.py` / `overlay.py` 的窗口构造 / `whatsnew.py`）：`ClassLive.app/Contents/MacOS/python tests/test_panel.py` 全绿。
   ⚠️ 它**不在**默认闸门里，要单独跑。判据是**同进程跟「抽取前的配方」对拍** ——
   那份老配方**逐字冻在测试文件里**（`frozen_recipe`），当场再建一个面板，两边用
@@ -201,7 +205,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   不需要真拖拽、不需要事件循环、不需要窗口。⚠️ 假 pasteboard **必须实现 `types()`**
   （`panel.dragging_entered` 那行 `_log(f"…types=…")` 是**提前求值**的，且在 `_call` 的
   try **外面** → 缺了它 `draggingEntered:` 会**抛异常逃出去**）。
-  仍**只靠手验**的：真实 Finder 拖拽（`probe_drag.py`）、live resize。
+  仍**只靠手验**的：真实 Finder 拖拽（`scripts/probe_drag.py`）、live resize。
 - **碰过开课前的准备**（`prep.py` / `extract.py` / `paths.py`）：
   `ClassLive.app/Contents/MacOS/python tests/test_extract.py` 与 `tests/test_prep.py` 全绿。
   ⚠️ **两条都不在默认闸门里**，要单独跑。**它们钉住了什么看两个文件自己的 docstring** —— 那是判据的唯一定义点，别在这里再抄一份（抄了会腐坏）。
@@ -216,10 +220,10 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   它钉的是**纯函数那半**：卡片上显示什么字、结果计数与列表**同源**、卡片高度与坐标同一组常数推导、
   以及零参数入口的**退出码契约**（0/1/2/3 —— `cl` 只读得动这个）。
   ⚠️ **AppKit 装配那半不在这里**：配方靠 `tests/test_panel.py` 对拍，拖拽/落点靠
-  `probe_entry_panel.py`（隔离模式）作者手验。
+  `scripts/probe_entry_panel.py`（隔离模式）作者手验。
   ⚠️ 写这个文件的断言时**先问「改坏实现它会不会红」** —— 本文件里被抓出过 4 条没有区分能力的
   （恒真 / 断言的是 Python 字面量 / 夹具日期不覆盖它声称的行为 / 隔离路径硬编码）。
-- 碰过 `overlay.py` / `transcript_view.py` 的**布局或滚动**：`ClassLive.app/Contents/MacOS/python probe_scroll.py` 验滚动行为。
+- 碰过 `overlay.py` / `transcript_view.py` 的**布局或滚动**：`ClassLive.app/Contents/MacOS/python scripts/probe_scroll.py` 验滚动行为。
   ⚠️ **它本身不稳定**（2026-09-26 实测）：**改动前的代码连跑三次**，两次「阶段 1 ✅ / 阶段 2 ❌」、
   一次反过来 —— 每次都是**恰好一个阶段收到 0 个滚轮事件**，而失败的阶段会翻转。
   所以它报的 ❌ **先别当成回归**：跑两三次看是不是在翻转，或者拿 `git stash` 对拍改动前的版本。

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """渲染「填 API key」那张框，**截图**给人看。⚠️ **不 `runModal`**（那会挂住）。
 
-    ClassLive.app/Contents/MacOS/python probe_keyentry.py [输出目录]
+    ClassLive.app/Contents/MacOS/python scripts/probe_keyentry.py [输出目录]
 
 ## 为什么单独一个探针
 
@@ -21,7 +21,9 @@ import subprocess
 import sys
 import time
 
-ROOT = pathlib.Path(__file__).resolve().parent
+# ⚠️ 本文件在 `scripts/` 下，仓库根是**上一级** —— `.parent` 会指向 `scripts/`，
+#    那样这些 import 会静默找不到模块（报错点在后面，不容易看出是路径问题）。
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import notice                                                        # noqa: E402

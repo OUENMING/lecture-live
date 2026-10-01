@@ -172,15 +172,19 @@ lecture-live/
 ├── upload.py              # 测试模式的课后上传（队列 / 退避 / 幂等 / 脱敏）
 ├── cl                     # 一键启动器(软链到 ~/.local/bin/cl)
 ├── requirements.txt       # 运行依赖（README 安装段的机器可读版本）
+├── docs/                  # 全部设计文档 → 从 docs/README.md 进（分区索引）
 ├── docs/DESIGN.md         # 深度工程笔记：全部实测数据、踩坑、设计论证
+├── docs/archive/          # 某一天的快照（交接/现状/评审）—— 只当史料读
 ├── docs/experiments/      # 可复跑的对照实验（换模型 / 降噪 A/B / VAD 调参 / 缩放探针）
 ├── glossary.example.txt   # 公共术语表模板 → 复制成 glossary.txt 后自填课号
 ├── materials.example/     # 课程资料目录模板 → 复制进 <vault>/Study/<课号>/materials/
 ├── tests/                 # 27 个测试文件（默认闸门是 test_audit_regressions.py）
-├── probe_*.py             # 各类验收探针（滚动 / 拖拽 / 动效 / 面板）
-├── test_pipeline.py       # 集成测试(走终端路径，可加速回放)
+├── scripts/               # 独立脚本（验收探针 / 补笔记 / 集成测试 / 后台启动），不参与 import
 └── sessions/              # 运行时产物：逐句实时落盘的会话文件(不入库)
 ```
+
+> 📚 **所有设计文档从 [`docs/README.md`](docs/README.md) 进** —— 那里说清哪份是活文档、
+> 哪份是归档快照、什么时候该读哪份。
 
 > `docs/experiments/` 里的脚本是**结论的证据**：README/DESIGN 里那些"实测"数字，
 > 大多能在这里找到对应的可复跑脚本（用法见各文件开头的 docstring）。

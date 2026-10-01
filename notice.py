@@ -76,6 +76,38 @@ def _can_alert() -> bool:
     return bool(os.environ.get("CLASSLIVE_FROM_APP"))
 
 
+def _present(win, *, app=None) -> None:
+    """把模态框**真正弄到用户眼前**。`alert()` / `ask_text()` 共用 —— **唯一定义点**。
+
+    ⚠️⚠️ 两条**缺一不可**（2026-10-01 实测抓到的「点了就假死」）：
+      ① **先把本进程激活**：本 app 是 `.accessory`、面板还是 NonactivatingPanel ——
+         用户点面板**不会**激活进程 → 弹窗排在"非活动 app"里，被别的 app 的窗口盖住。
+         官方 `activate(ignoringOtherApps:)`：「true = 无论如何都激活」。
+      ② **把窗口抬到 `NSModalPanelWindowLevel`(8)**：官方对 `orderFrontRegardless`
+         的原文是「顶到**它自己那一级**的最前」—— 而**我们自己的面板是
+         floating(3)**，不抬层级就被自家面板盖住。
+
+    实测经过（2026-10-01 凌晨，作者本机）：点就绪条上的「翻译引擎」→
+    「填 API key」**整块看不见**、主线程卡在 `runModal` 的模态循环 →
+    整个面板"点了没反应"。（那个框从 3.8.0 到 3.8.3 一直因 `NameError` 点不开，
+    3.8.4 修好后才第一次真的被点开 —— 所以这个毛病此前没人见过。）
+    ⚠️ 本函数**不许抛** —— 任何一条失败都不该把"弹框"本身弄没（那是更坏的行为）。
+    """
+    from AppKit import NSApplication, NSModalPanelWindowLevel
+    if app is None:
+        app = NSApplication.sharedApplication()
+    try:
+        app.activateIgnoringOtherApps_(True)
+    except Exception:                                     # noqa: BLE001
+        pass
+    try:
+        win.setLevel_(NSModalPanelWindowLevel)
+    except Exception:                                     # noqa: BLE001
+        pass
+    win.center()
+    win.orderFrontRegardless()
+
+
 def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
           url: str | None = None, fallback: str | None = None) -> str:
     """弹一个模态提示框；**没有终端**时才弹。
@@ -117,8 +149,7 @@ def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
             if url:
                 _url_btn = a.addButtonWithTitle_("打开系统设置")
 
-            a.window().center()
-            a.window().orderFrontRegardless()
+            _present(a.window())
             idx = a.runModal() - 1000                      # NSAlertFirstButtonReturn = 1000
 
             if _url_btn is not None and idx == len(buttons):
@@ -176,8 +207,7 @@ def ask_text(title: str, message: str, fields: list, *,
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
         try:
             a, boxes = build_text_alert(title, message, fields, buttons)
-            a.window().center()
-            a.window().orderFrontRegardless()
+            _present(a.window())
             idx = a.runModal() - 1000                      # NSAlertFirstButtonReturn = 1000
             # ⚠️ `idx` 是**添加顺序**的下标（`buttons[0]` = 最右那颗 = 主按钮），
             #    不是"从左数第几个"。所以「保存」就是 idx == 0。
@@ -240,6 +270,10 @@ def build_text_alert(title: str, message: str, fields: list, buttons: tuple):
         tf = (NSSecureTextField if f.get("secure", True)
               else NSTextField).alloc().initWithFrame_(((LW + 8.0, y - 22.0), (W - LW - 8.0, 22.0)))
         tf.setFont_(NSFont.systemFontOfSize_(12.0))
+        if f.get("value"):
+            # ⚠️ **回填**（2026-10-01 作者实测反馈：重开变空白以为没存上）——
+            #    安全框里回填显示为圆点：不是明文，但能看出"这里有东西"。
+            tf.setStringValue_(str(f["value"]))
         box.addSubview_(tf)
         boxes[f["key"]] = tf
         y -= 22.0 + 6.0

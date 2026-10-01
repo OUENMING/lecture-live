@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cloud_translator import load_api_key          # noqa: E402
+import keypoints                                   # noqa: E402
 from obsidian_writer import ObsidianWriter         # noqa: E402
 
 
@@ -83,7 +84,13 @@ def main() -> int:
 
     w = ObsidianWriter(vault=args.vault, course=args.course, mode="no",
                        api_key=load_api_key(None), model=args.model,
-                       glossary_path=args.glossary, polish=not args.no_polish)
+                       glossary_path=args.glossary, polish=not args.no_polish,
+                       # ⚠️⚠️ **这行不能省**（2026-10-01 实测抓到）：不接 `keypoints_fn`
+                       #    的话，**补生成**的笔记比直播收尾生成的**少一整节**
+                       #    「🎯 这节课最值得记的几句」，而且**不报任何错** ——
+                       #    作者在真笔记上对比才发现。`keypoints.pick` 本来就
+                       #    「失败一律返回空表、绝不抛」，直接接即可。
+                       keypoints_fn=keypoints.pick)
     # 接管成「已跑完的一节」
     w.enabled = True
     w.mode = "yes"

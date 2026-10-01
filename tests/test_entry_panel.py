@@ -393,6 +393,7 @@ def main() -> int:
     _target_liveness_section()
     _test_mode_section()
     _vault_section()
+    _key_entry_section()
 
     # ⚠️⚠️ **`bad` 不许在这里算！**（2026-09-29 抓到的假绿）
     #    原来这一行在这里算了一份 `RESULTS` 的快照，而后面还有 ⑮⑯⑰ 三组判据 ——
@@ -1195,9 +1196,15 @@ def _vault_section() -> None:
     #    「已设」→「点了之后变已设」那条判据**恒真**（2026-10-01 变异验证抓到的）。
     #    挪开之后才是朋友那台机器的入场状态（未设 → 点了才变）。
     _saved_env = os.environ.pop("OBSIDIAN_VAULT", None)
+    # ⚠️ 8-F 起**家目录也要挪**：自动探测会读**真的** Obsidian 注册表（本机就有
+    #    SecondBrain）→ 把"未设入场"的前提搅掉，还会往沙盒里写进真库路径。
+    _saved_home = os.environ.get("HOME")
     try:
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
+            _fake_home = root / "home"          # 空家目录 = 找不到任何库（8-F 的"0 个"档）
+            _fake_home.mkdir()
+            os.environ["HOME"] = str(_fake_home)
             gl = root / "glossary.txt"
             gl.write_text("# public table\n", encoding="utf-8")
 
@@ -1255,6 +1262,66 @@ def _vault_section() -> None:
                 except Exception:                              # noqa: BLE001
                     pass
 
+            # ── 8-F①：家目录里恰好 1 个库 → 面板一开就**自动设上** ──────────
+            homeA = root / "homeA"
+            vA = homeA / "Documents" / "MyVault"
+            vA.mkdir(parents=True)
+            (vA / ".obsidian").mkdir()
+            os.environ["HOME"] = str(homeA)
+            stA = root / "stA"
+            hA = _build("A", stA)
+            try:
+                bA = _vault_btn(hA) if hA is not None else None
+                check("⭐⭐ 8-F：只有 1 个库 → **自动设上**（写进 `<state_root>/vault`）",
+                      (stA / "vault").exists()
+                      and (stA / "vault").read_text(encoding="utf-8").strip() == str(vA),
+                      repr((stA / "vault").read_text(encoding="utf-8")
+                           if (stA / "vault").exists() else None))
+                check("⭐ 而且那一格直接就是「已设」",
+                      bA is not None and (bA.title() or "") == "✓  笔记库  已设",
+                      repr(bA.title() if bA is not None else None))
+            finally:
+                os.environ["HOME"] = str(_fake_home)
+                try:
+                    hA.close()
+                except Exception:                          # noqa: BLE001
+                    pass
+
+            # ── 8-F②：多个候选 → **绝不猜**（不设、不写；点开预指向其中之一）──
+            homeB = root / "homeB"
+            v1 = homeB / "Documents" / "Two"
+            v1.mkdir(parents=True)
+            (v1 / ".obsidian").mkdir()
+            v2 = homeB / "Obsidian" / "One"
+            v2.mkdir(parents=True)
+            (v2 / ".obsidian").mkdir()
+            os.environ["HOME"] = str(homeB)
+            stB = root / "stB"
+            hB = _build("B", stB)
+            try:
+                bB = _vault_btn(hB) if hB is not None else None
+                check("⭐⭐ 8-F：多个候选 → **绝不猜**（格子仍未设、一个字节不写）",
+                      bB is not None
+                      and (bB.title() or "") == "—  笔记库  未设"
+                      and not (stB / "vault").exists(),
+                      f"{bB.title() if bB is not None else None!r} "
+                      f"vault_written={(stB / 'vault').exists()}")
+                calls4: list = []
+                E.pick_folder = lambda **kw: (calls4.append(kw), None)[1]
+                if bB is not None:
+                    bB.performClick_(None)
+                    check("⭐ 点开时预指向候选之一，且框里明说找到 2 个",
+                          len(calls4) == 1
+                          and calls4[0].get("start") in (str(v1), str(v2))
+                          and "2" in str(calls4[0].get("message") or ""),
+                          str(calls4))
+            finally:
+                os.environ["HOME"] = str(_fake_home)
+                try:
+                    hB.close()
+                except Exception:                          # noqa: BLE001
+                    pass
+
             # ── 写盘失败：**界面不许撒谎**（同测试模式开关那条）──────────
             st3 = root / "st3"
             E.pick_folder = lambda **kw: str(picked)
@@ -1276,9 +1343,86 @@ def _vault_section() -> None:
                 except Exception:                              # noqa: BLE001
                     pass
     finally:
+        if _saved_home is not None:
+            os.environ["HOME"] = _saved_home
         if _saved_env is not None:
             os.environ["OBSIDIAN_VAULT"] = _saved_env
         E.pick_folder = orig_pick
+
+
+def _key_entry_section() -> None:
+    """㉒ 填 key 那格：**回填**（重开不空白）+ 点一下真的走到 `ask_text`。
+
+    ⚠️ 弹窗换掉（patch `notice.ask_text`）—— 真 `runModal` 会阻塞测试。
+    ⚠️ 读端也换（patch `cloud_translator.load_api_key` / `keyentry.load_jev`）——
+       不然判据读的是**真实用户**的 key（同 `test_keyentry` ③ 那条纪律：
+       读端和写端都要能换）。
+    """
+    print("\n--- ㉒ 填 key：回填已存的、点一下真的开框 ---")
+    try:
+        import tempfile
+
+        from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
+                            NSButton)
+    except Exception as e:                                    # noqa: BLE001
+        check("AppKit 可用（这一节要真窗口）", False, f"{type(e).__name__}: {e}")
+        return
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory)
+
+    def _walk(v, out):
+        out.append(v)
+        for c in (v.subviews() or []):
+            _walk(c, out)
+        return out
+
+    def _engine_btn(h):
+        for v in _walk(h.window.contentView(), []):
+            if isinstance(v, NSButton) and "翻译引擎" in (v.title() or ""):
+                return v
+        return None
+
+    import cloud_translator
+    import keyentry
+    import notice
+    orig = (notice.ask_text, cloud_translator.load_api_key, keyentry.load_jev)
+    caps: list = []
+    notice.ask_text = lambda title, message, fields, **kw: (
+        caps.append(fields), None)[1]
+    cloud_translator.load_api_key = lambda _=None: "sk-SECRET-DS"
+    keyentry.load_jev = lambda **kw: "apikey-jev-SECRET"
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            gl = root / "glossary.txt"
+            gl.write_text("# public table\n", encoding="utf-8")
+            h = E.build(glossary=gl, sessions_dir=root / "s", state_root=root / "st",
+                        on_start=lambda c: None)
+            try:
+                btn = _engine_btn(h) if h is not None else None
+                check("（前置）面板上找得到「翻译引擎」那一格", btn is not None, "")
+                if btn is not None:
+                    btn.performClick_(None)
+                    ok = (len(caps) == 1 and isinstance(caps[0], list)
+                          and len(caps[0]) == 2)
+                    check("⭐ 点一下真的开了填 key 框（`ask_text` 被调到）",
+                          ok, str(caps)[:200])
+                    if ok:
+                        by = {f["key"]: f for f in caps[0]}
+                        check("⭐⭐ 两栏都**回填**了已存的 key（重开不空白）",
+                              by["deepseek"].get("value") == "sk-SECRET-DS"
+                              and by["jev"].get("value") == "apikey-jev-SECRET",
+                              str({k: v.get("value") for k, v in by.items()}))
+                        check("⭐ 已存那档的提示语换成了「已存过 · …」",
+                              all("已存过" in f.get("hint", "") for f in caps[0]),
+                              str([f.get("hint") for f in caps[0]]))
+            finally:
+                try:
+                    h.close()
+                except Exception:                              # noqa: BLE001
+                    pass
+    finally:
+        (notice.ask_text, cloud_translator.load_api_key, keyentry.load_jev) = orig
 
 
 def _add_wiring_section() -> None:

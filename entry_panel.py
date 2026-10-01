@@ -1535,6 +1535,38 @@ def _vault_now(state_root=None) -> str | None:
         return None
 
 
+def _vault_autodetect(state_root=None) -> tuple:
+    """没设过笔记库时**自动找一次**（8-F；设计见 `docs/RESEARCH-entry-and-export.md §9.1`）。
+
+    返回 `(该算的库路径 or None, 要贴状态行的一句话 or "")`：
+
+      · **恰好 1 个**候选 → **自动设上**（唯一写盘处是 `~/.classlive/vault`，
+        `root=state_root` 隔离；**读回来验证**，写失败当没找到 —— 界面不许撒谎）；
+      · **多个** → **绝不猜**：不设，给一句话（点开时选择框会预指向最近那个）；
+      · 0 个 / 探测炸了 → `(None, "")`，与没有这个功能时一模一样。
+
+    ⚠️ 整段**不许抛** —— 它在面板构造路径上，任务只是"锦上添花"；
+       探测失败让就绪条整个消失，方向反了。
+    """
+    try:
+        cands = ready.vault_candidates()
+        if not cands:
+            return None, ""
+        if len(cands) > 1:
+            return None, (f"找到 {len(cands)} 个 Obsidian 库 —— "
+                          f"点就绪条最后的「笔记库」挑一个（先指到最近打开的那个）")
+        only = str(cands[0])
+        from obsidian_writer import remember_vault
+        remember_vault(only, root=state_root)
+        ok = (paths.vault_config(root=state_root)
+              .read_text(encoding="utf-8").strip() == only.strip())
+        if not ok:
+            return None, ""
+        return only, f"找到你的 Obsidian 库：{only} —— 已设为笔记库（要换再点一下这一格）"
+    except Exception:                                     # noqa: BLE001
+        return None, ""
+
+
 def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
           on_close=None, prepare_fn=None, suggest_fn=None,
           trash_fn=None, on_test_mode=None, test_mode=False) -> Handles | None:
@@ -1640,11 +1672,16 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    面板打开不是一个热路径，先同步算；真变慢了再说（见 `ready.model_states`）。
     ready_items = []
     ready_targets: list = []
+    vault_auto_msg = ""
     if not _ready_dismissed(state_root):
         try:
+            vault_now = _vault_now(state_root)
+            if not vault_now:
+                # 8-F：从没设过 → 自动找一次（唯一候选设上；多个绝不猜）
+                vault_now, vault_auto_msg = _vault_autodetect(state_root)
             ready_items = ready.items(
                 perm=_mic_perm(), states=ready.model_states(root=state_root),
-                has_key=_has_api_key(), vault=_vault_now(state_root))
+                has_key=_has_api_key(), vault=vault_now)
         except Exception:                                  # noqa: BLE001
             ready_items = []                               # 算不出来不该拦住面板
     rh = READY_H if ready_items else 0.0
@@ -1804,13 +1841,24 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    从 3.8.0 起一直如此（`pyright` 的 `reportUndefinedVariable` 一跑就报）。
         import notice
 
+        # ⚠️ **已存的 key 要回填**（2026-10-01 作者实测反馈：填完重开变空白，
+        #    以为没存上）。安全框里回填显示的是圆点 —— 不是明文，但"有东西"。
+        try:
+            from cloud_translator import load_api_key
+            cur_ds = load_api_key(None) or ""
+        except Exception:                                 # noqa: BLE001
+            cur_ds = ""
+        cur_jv = keyentry.load_jev(root=state_root)
+
         got = notice.ask_text(
             "填 API key",
             "只写进这台机器的 ~/.classlive/，不上传。",
-            [{"key": "deepseek", "label": "DeepSeek key",
-              "hint": "翻译用的。不填也能上课 —— 退回本地模型，质量差一些。"},
-             {"key": "jev", "label": "Jev key · 可选",
-              "hint": "给「重点句」和「课务」用。不填这两个功能就不出现。"}],
+            [{"key": "deepseek", "label": "DeepSeek key", "value": cur_ds,
+              "hint": ("已存过 · 圆点 = 原值，不动 = 不改；要换就全选粘贴。" if cur_ds
+                       else "翻译用的。不填也能上课 —— 退回本地模型，质量差一些。")},
+             {"key": "jev", "label": "Jev key · 可选", "value": cur_jv,
+              "hint": ("已存过 · 圆点 = 原值，不动 = 不改。" if cur_jv
+                       else "给「重点句」和「课务」用。不填这两个功能就不出现。")}],
             fallback=None)
         if got is None:
             return
@@ -1856,14 +1904,26 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         """
         from obsidian_writer import remember_vault
         start = _vault_now(state_root)
+        message = "选笔记库文件夹（Obsidian 库最合适）—— 笔记会写进它的 Lectures/"
         if not start:
-            # 智能起点：iCloud 的 Obsidian 容器（Mac 上最常见的库位置）
-            ic = (pathlib.Path.home()
-                  / "Library/Mobile Documents/iCloud~md~obsidian/Documents")
-            start = str(ic) if ic.is_dir() else str(pathlib.Path.home())
-        got = pick_folder(
-            start=start,
-            message="选笔记库文件夹（Obsidian 库最合适）—— 笔记会写进它的 Lectures/")
+            # 8-F：先看自动找的结果（唯一候选在 build 那一步就该设上了，
+            #      走到这儿多半是"多个候选不猜"那一档）——
+            #      起点指到最近打开 / 最新的那个，并在框里说清找到了几个。
+            try:
+                cands = ready.vault_candidates()
+            except Exception:                              # noqa: BLE001
+                cands = []
+            if cands:
+                start = str(cands[0])
+                if len(cands) > 1:
+                    message = (f"找到 {len(cands)} 个 Obsidian 库 —— "
+                               f"先指到最近打开的那个；也可以选别的文件夹")
+            else:
+                # 智能起点：iCloud 的 Obsidian 容器（Mac 上最常见的库位置）
+                ic = (pathlib.Path.home()
+                      / "Library/Mobile Documents/iCloud~md~obsidian/Documents")
+                start = str(ic) if ic.is_dir() else str(pathlib.Path.home())
+        got = pick_folder(start=start, message=message)
         if not got:
             return
         remember_vault(got, root=state_root)
@@ -1908,6 +1968,15 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     if ready_items:
         ready_targets, ready_buttons = make_ready_strip(
             ve, ready_y, WIDTH - 2 * PAD, ready_items, on_click=on_ready_click)
+        if vault_auto_msg:
+            # ⚠️ 走 `callAfter` 排队：这一行还在 `build()` 里跑，而 `S["panel"]`
+            #    要到 build 返回前才挂上（`_status` 查的是"当前面板"）——
+            #    直接调会写进上一个面板或写进空气。排到 run loop 起来之后再落。
+            try:
+                from PyObjCTools import AppHelper
+                AppHelper.callAfter(_status, vault_auto_msg, 2.0)
+            except Exception:                              # noqa: BLE001
+                pass
         # ⚠️⚠️ **`make_ready_strip` 返回的 target 列表必须活到面板结束**
         #     （它的 docstring 逐字写着这条）。原来只接到一个**局部变量**上 ——
         #     `_build` 一返回那个列表就随栈帧没了 → 弱引用被回收 →

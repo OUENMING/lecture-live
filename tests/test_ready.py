@@ -214,6 +214,56 @@ def t_items_four_keys_in_order():
     assert got == [ready.MIC, ready.MODELS, ready.ENGINE, ready.VAULT], got
 
 
+@case("⭐⭐ 找库①：先读 Obsidian 注册表 —— open 的排最前、死条目剔掉、不与扫盘混")
+def t_vault_candidates_registry():
+    import json
+    with tempfile.TemporaryDirectory() as td:
+        home = pathlib.Path(td)
+        a = home / "Obsidian/SecondBrain"
+        a.mkdir(parents=True)
+        (a / ".obsidian").mkdir()
+        b = home / "Obsidian/School"
+        b.mkdir()
+        (b / ".obsidian").mkdir()
+        other = home / "Documents/NotRegistered"        # 盘上的库，注册表里没有
+        other.mkdir(parents=True)
+        (other / ".obsidian").mkdir()
+        dead = home / "Obsidian/Gone"                   # 注册表里有、盘上没了
+        reg = home / "Library/Application Support/obsidian/obsidian.json"
+        reg.parent.mkdir(parents=True)
+        reg.write_text(json.dumps({"vaults": {
+            "1": {"path": str(a), "ts": 100},
+            "2": {"path": str(b), "ts": 200, "open": True},
+            "3": {"path": str(dead), "ts": 999},
+        }}), encoding="utf-8")
+        got = ready.vault_candidates(home=home)
+        assert got == [b, a], (
+            f"要 open 先、其余按 ts 新→旧、死条目剔掉、且**不与扫盘混**；得到 {got}")
+
+
+@case("⭐⭐ 找库②：没有注册表 → 浅扫兜底（iCloud 容器 / 两层 / 跳隐藏 / 深度限死）")
+def t_vault_candidates_scan():
+    with tempfile.TemporaryDirectory() as td:
+        home = pathlib.Path(td)
+        ic = home / "Library/Mobile Documents/iCloud~md~obsidian/Documents/MyVault"
+        ic.mkdir(parents=True)
+        (ic / ".obsidian").mkdir()
+        deep = home / "Documents/a/b/DeepVault"         # 第三层 —— 不许找到
+        deep.mkdir(parents=True)
+        (deep / ".obsidian").mkdir()
+        hidden = home / ".hidden/Vault"                 # 隐藏目录 —— 不许进去
+        hidden.mkdir(parents=True)
+        (hidden / ".obsidian").mkdir()
+        got = ready.vault_candidates(home=home)
+        assert got == [ic], f"浅扫结果不对（{got}）—— 深度 / 隐藏都该限住"
+
+
+@case("⭐ 找库③：什么都没有 → 空表（不是报错）")
+def t_vault_candidates_empty():
+    with tempfile.TemporaryDirectory() as td:
+        assert ready.vault_candidates(home=pathlib.Path(td)) == []
+
+
 @case("⭐ 麦克风 unknown 不拦人（就绪条不因此变成红的）")
 def t_mic_unknown():
     it = ready.mic_item("unknown")

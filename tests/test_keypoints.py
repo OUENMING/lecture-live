@@ -191,6 +191,49 @@ def t_pick_without_token():
         kp.token = orig_tok
 
 
+@case("⭐⭐ `rebuild_note.py` 必须接 `keypoints_fn` —— 走假写入器真跑一遍 main()")
+def t_rebuild_wires_keypoints():
+    # 动机（2026-10-01 作者实测）：补生成那条路漏了这一行接线 →
+    # 补出来的笔记**少一整节**「🎯 这节课最值得记的几句」，而且不报任何错。
+    import tempfile
+
+    import rebuild_note as rb
+
+    _real_parse = rb.ObsidianWriter._parse          # 真解析器（数句靠它）
+
+    class _FakeW:
+        _parse = _real_parse
+        seen: dict = {}
+
+        def __init__(self, **kw):
+            _FakeW.seen = kw
+
+        def close(self):
+            return "（假的，不落盘）"
+
+    with tempfile.TemporaryDirectory() as td:
+        td = pathlib.Path(td)
+        sess = td / "2026-01-02_000000_X.md"
+        sess.write_text(
+            "# X · 2026-01-02 · 实时会话日志\n\n"
+            "> [!abstract] 10:00:00\n> **EN**: hello world\n> **ZH**: 你好\n"
+            "> **ASR**: hello world\n", encoding="utf-8")
+        orig_w, orig_argv = rb.ObsidianWriter, sys.argv
+        rb.ObsidianWriter = _FakeW
+        sys.argv = ["rebuild_note.py", str(sess), "X",
+                    "--vault", str(td / "v"), "--no-polish"]
+        try:
+            rc = rb.main()
+        finally:
+            rb.ObsidianWriter = orig_w
+            sys.argv = orig_argv
+        assert rc == 0, f"（假写入器那一趟不该失败 rc={rc}）"
+        assert "keypoints_fn" in _FakeW.seen, (
+            "rebuild 没把 `keypoints_fn` 传给写入器 —— 补出来的笔记会少一整节"
+            "「🎯 这节课最值得记的几句」，而且**不报任何错**")
+        assert callable(_FakeW.seen.get("keypoints_fn")), _FakeW.seen.get("keypoints_fn")
+
+
 def main_() -> int:
     print("=" * 60)
     fail: list[str] = []

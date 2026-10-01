@@ -121,6 +121,64 @@ def t_confirm_site_has_fallback():
         "等于不问就替用户批准要联网跑几分钟的重活")
 
 
+@case("⭐⭐ `_present`：先激活 app、再把窗口抬到 ModalPanel 层（顺序也钉住）")
+def t_present_activates_and_raises():
+    # ⚠️ 2026-10-01 实测抓到的「点了就假死」：弹窗排在非活动 app 的层级里 +
+    #    被自家 floating(3) 的面板盖住 → 整块看不见，主线程却卡在 runModal。
+    calls: list = []
+
+    class _App:
+        def activateIgnoringOtherApps_(self, flag):
+            calls.append(("activate", bool(flag)))
+
+    class _Win:
+        def setLevel_(self, lv):
+            calls.append(("level", float(lv)))
+
+        def center(self):
+            calls.append(("center",))
+
+        def orderFrontRegardless(self):
+            calls.append(("front",))
+
+    notice._present(_Win(), app=_App())
+    kinds = [c[0] for c in calls]
+    assert kinds == ["activate", "level", "center", "front"], (
+        f"动作/顺序不对：{calls} —— 官方口径：先 activate，再抬层级，最后才 show")
+    assert calls[0][1] is True, f"activate 必须是 True（ignoringOtherApps）：{calls[0]}"
+    from AppKit import NSModalPanelWindowLevel
+    assert calls[1][1] == float(NSModalPanelWindowLevel), (
+        f"层级要抬到 ModalPanel(8)，不然被自家 floating(3) 的面板盖住：{calls[1]}")
+
+
+@case("⭐⭐ 弹框的两个入口都必须走 `_present`（绕过去 = 又变成看不见的假死）")
+def t_alert_paths_use_present():
+    seen: list = []
+    orig = notice._present
+
+    class _Boom(Exception):
+        pass
+
+    def _rec(win, **kw):
+        seen.append(win)
+        raise _Boom("sentinel：判据不许真弹模态框")
+
+    notice._present = _rec
+    try:
+        with _Env("1"):                     # 走 AppKit 那一支
+            r1 = notice.alert("t", "m", buttons=("知道了",), fallback="知道了")
+            r2 = notice.ask_text("t", "m",
+                                 fields=[{"key": "k", "label": "L", "hint": "h"}],
+                                 fallback=None)
+    finally:
+        notice._present = orig
+    assert len(seen) == 2, (
+        f"alert()/ask_text() 各要走一次 `_present`（走到 {len(seen)} 次）—— "
+        f"任一入口绕过去，它弹的框就会排在别的窗口后面看不见")
+    # 打断后走 fail-soft：返回 fallback（弹框环节出岔子也不许把调用方弄崩）
+    assert r1 == "知道了" and r2 is None, (r1, r2)
+
+
 def main_() -> int:
     print("=" * 60)
     for name, fn in CASES:

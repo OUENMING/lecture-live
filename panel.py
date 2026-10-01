@@ -176,6 +176,45 @@ class FrostedPanel(typing.NamedTuple):
     resize_delegate: typing.Any   # 没传 on_resize 时为 None
 
 
+def install_edit_menu() -> bool:
+    """给这个进程装一个**最小 Edit 菜单** —— 没有它，⌘C/⌘V/⌘A 在**所有**输入框里都是死的。
+
+    ⚠️⚠️ 事实（Apple 一手 + 社区一致口径）：文本框的 ⌘C/⌘V/⌘X/⌘A 是**经菜单栏的
+       键等价（key equivalent）分发**的，不是文本框自己处理的 ——
+       「copy & paste works on a NSTextField **as long as you do not delete the
+       Edit menu** from the standard Main menu」（kulman.sk, 2019；SO 上同题
+       9k 浏览，答案同一条：把 Paste 接到 First Responder 的 `paste:`）。
+       而本 app 是 `.accessory`、**从不建 mainMenu** → 实测（作者 2026-10-01 本机，
+       填 key 框 + 面板搜索框）：**右键菜单的 Paste 能粘，⌘V 完全没反应**。
+    ⚠️ 菜单**不用显示**也生效（accessory app 平时不显示菜单栏）。
+       target 留 nil → 走响应链 → 谁在第一响应者谁处理。
+    ⚠️ 幂等：装过就直接 True。**失败不许抛**（编辑快捷方式不该拦住面板）。
+    """
+    try:
+        from AppKit import NSApplication, NSMenu, NSMenuItem
+        app = NSApplication.sharedApplication()
+        if app.mainMenu() is not None:
+            return True
+        main = NSMenu.alloc().init()
+        edit = NSMenu.alloc().initWithTitle_("Edit")
+        holder = NSMenuItem.alloc().init()
+        holder.setSubmenu_(edit)
+        main.addItem_(holder)
+        for title, sel, key in (
+                ("撤销", "undo:", "z"),
+                ("重做", "redo:", "Z"),
+                ("剪切", "cut:", "x"),
+                ("拷贝", "copy:", "c"),
+                ("粘贴", "paste:", "v"),
+                ("全选", "selectAll:", "a")):
+            edit.addItem_(NSMenuItem.alloc(
+            ).initWithTitle_action_keyEquivalent_(title, sel, key))
+        app.setMainMenu_(main)
+        return True
+    except Exception:                                     # noqa: BLE001
+        return False
+
+
 def build(rect, style, *, on_background_click=None, on_resize=None) -> FrostedPanel:
     """建一个配好 chrome 的磨砂面板。
 
@@ -185,6 +224,9 @@ def build(rect, style, *, on_background_click=None, on_resize=None) -> FrostedPa
     `on_background_click` 只在点到**空白处**时触发（最外一圈，给嵌套循环缩放用）。
     `on_resize` 给了才装窗口委托 —— 不给就不装（不缩放的面板不需要它）。
     """
+    # ⚠️ 面板 = 这个进程里有输入框了 → 先保证 ⌘C/⌘V/⌘A 能用（幂等）。
+    #    放在这里 = **唯一岔口**，不用在 entry_launch / main / whatsnew 各调一遍。
+    install_edit_menu()
     from AppKit import (NSAppearance, NSAppearanceNameDarkAqua, NSBackingStoreBuffered,
                         NSColor, NSFloatingWindowLevel, NSView,
                         NSVisualEffectMaterialHUDWindow, NSVisualEffectStateActive,

@@ -237,3 +237,112 @@ def dismissed(*, root=None) -> bool:
         return paths.ready_state(root=root).exists()
     except Exception:                                     # noqa: BLE001
         return False
+
+
+# ---------------------------------------------------------------- 找库（8-F）
+#: 兜底浅扫最多看几个目录（防病态家目录；正常 <100）。
+_SCAN_BUDGET = 600
+
+
+def _looks_like_vault(d: pathlib.Path) -> bool:
+    """目录里有 `.obsidian/` 就算 —— Obsidian 库的判据就这一个。"""
+    try:
+        return (d / ".obsidian").is_dir()
+    except OSError:
+        return False
+
+
+def _registry_vaults(home: pathlib.Path) -> list:
+    """读 **Obsidian 自己的注册表** → `[(path, open, ts)]`，排好序。
+
+    ⚠️ 读不出来（没装过 / 文件坏了）→ `[]`，**绝不抛** —— 这是锦上添花的路径。
+    ⚠️ 每条都**验一下还在不在**（`_looks_like_vault`）：库被挪走 / 删掉之后，
+       注册表里的死条目不该被当成候选。
+    """
+    import json
+    p = home / "Library/Application Support/obsidian/obsidian.json"
+    try:
+        obj = json.loads(p.read_text(encoding="utf-8"))
+        raw = list((obj.get("vaults") or {}).values())
+    except (OSError, ValueError):
+        return []
+    out = []
+    for v in raw:
+        if not isinstance(v, dict):
+            continue
+        path = str(v.get("path") or "").strip()
+        if not path:
+            continue
+        d = pathlib.Path(path).expanduser()
+        if _looks_like_vault(d):
+            out.append((d, bool(v.get("open")), float(v.get("ts") or 0)))
+    # open 的排最前，其余按 ts 新→旧（给"选择框起点"用的排序，**不是裁决**）
+    out.sort(key=lambda t: (not t[1], -t[2]))
+    return out
+
+
+def _scan_vaults(home: pathlib.Path) -> list:
+    """兜底浅扫（注册表读不出来时才用）。
+
+    看两处：iCloud 的 Obsidian 容器 + `~/` 的一层与二层
+    （`~/Obsidian/SecondBrain` 这种就在第二层）。
+    ⚠️ 深度**限死两层**、跳过隐藏目录（`~/Library` 也只顺着容器这一条明路看），
+       总目录数有预算 —— 家目录再大也不会卡住面板。
+    """
+    found: list = []
+    seen: set = set()
+    budget = _SCAN_BUDGET
+
+    def _consider(d: pathlib.Path) -> None:
+        key = str(d)
+        if key in seen:
+            return
+        seen.add(key)
+        if _looks_like_vault(d):
+            found.append(d)
+
+    def _kids(d: pathlib.Path) -> list:
+        try:
+            # ⚠️ 排序：`iterdir()` 的顺序**不保证**，不排的话同一台机器
+            #    两次的候选顺序可能不一样（同 PYTHONHASHSEED 那条纪律）。
+            return sorted(c for c in d.iterdir()
+                          if c.is_dir() and not c.name.startswith("."))
+        except OSError:
+            return []
+
+    level1: list = []
+    # ① iCloud 的 Obsidian 容器 —— Mac 上最常见的库位置（vault 是它的直接孩子）
+    level1 += _kids(home / "Library/Mobile Documents/iCloud~md~obsidian/Documents")
+    # ② `~/` 的一层（`Library` 跳过 —— 只有上面那条明路会看它）
+    level1 += [d for d in _kids(home) if d.name != "Library"]
+    for d in level1:
+        if budget <= 0:
+            break
+        budget -= 1
+        _consider(d)
+        for sub in _kids(d):          # 第二层
+            if budget <= 0:
+                break
+            budget -= 1
+            _consider(sub)
+    return found
+
+
+def vault_candidates(*, home=None) -> list:
+    """这台机器上有哪些 Obsidian 库（8-F；设计见 `docs/RESEARCH-entry-and-export.md §9.1`）。
+
+    **只读，绝不写。** 两层，注册表优先：
+
+      ① **注册表** —— Obsidian 自己记的
+         （`~/Library/Application Support/obsidian/obsidian.json`），最准；
+         `open: true` 的排最前，其余按 `ts` 新→旧。
+      ② **兜底浅扫**（注册表读不出来才跑）—— 见 `_scan_vaults`。
+
+    ⚠️ 排序**只是给"选择框起点"用的** —— 多候选绝不替用户裁决
+       （挑错库 = 笔记默默进错地方；前车之鉴：「凭空造目录」那次）。
+    """
+    home = pathlib.Path(pathlib.Path.home() if home is None else home)
+    got = [d for d, _open, _ts in _registry_vaults(home)]
+    if got:
+        return got
+    return _scan_vaults(home)

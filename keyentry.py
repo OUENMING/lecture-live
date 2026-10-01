@@ -179,6 +179,27 @@ def has_any(*, root=None, load_key=None) -> tuple[bool, bool]:
     return ds, jv
 
 
+def load_jev(*, root=None) -> str:
+    """已存的 Jev key（`jev-key` 优先、其次 `jev-token`）—— 读不到 = `""`。
+
+    ⚠️ 给填 key 框**回填用**（2026-10-01 作者要求「不要变成空白、保留填的」）：
+       安全框里回填后显示的是圆点 —— 用户一眼能看出"已经存过了"。
+    ⚠️ **不抛**：读不出来当没有（同 `has_any` 的纪律）。
+    """
+    import paths
+    try:
+        for p in (paths.jev_key(root=root), paths.jev_token(root=root)):
+            try:
+                t = p.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if t:
+                return t
+    except Exception:                                         # noqa: BLE001
+        pass
+    return ""
+
+
 if __name__ == "__main__":                                    # `cl setkey` 的兜底入口
     import sys
     a = sys.argv[1:]

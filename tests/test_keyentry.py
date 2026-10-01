@@ -109,6 +109,16 @@ def main() -> int:
         check("⭐ 读端抛异常 -> 当没有，不崩",
               KE.has_any(root=root, load_key=lambda _: 1 / 0) == (False, True))
 
+    print("\n--- ③c `load_jev()`：读回已存的 Jev key（给填 key 框回填用）---")
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        check("空目录 -> 空串（不抛）", KE.load_jev(root=root) == "")
+        (root / "jev-token").write_text("cc-token\n", encoding="utf-8")
+        check("有 jev-token -> 读回来", KE.load_jev(root=root) == "cc-token")
+        (root / "jev-key").write_text("apikey_a_b\n", encoding="utf-8")
+        check("⭐ key 与 token 都在 -> **key 优先**",
+              KE.load_jev(root=root) == "apikey_a_b")
+
     print("\n--- ③b ⚠️ `validate_deepseek` 的 prompt 必须含 'json' ---")
     # ⚠️⚠️ `_chat_json` **永远**带 `response_format: json_object`，而 DeepSeek 对它的
     #    要求逐字是「Prompt must contain the word 'json' in some form」——
@@ -206,6 +216,36 @@ def _case_appkit() -> None:
                     and a2.origin.y < a1.origin.y + a1.size.height):
                 bad.append((v.stringValue()[:14], u.stringValue()[:14]))
     check("⭐⭐ 子视图**两两不重叠**", not bad, str(bad))
+
+    # ── ⭐ 回填：`value` 给了就预填进安全框（重开不再空白）───────────────
+    # 动机（2026-10-01 作者实测）：「我填了 API 然后退出、再点进去它又变空白了」——
+    # 空白看不出"存过没有"；改成回填（安全框里 = 圆点，不是明文）。
+    a2, boxes2 = notice.build_text_alert(
+        "T", "M", [{"key": "k", "label": "L", "value": "sekret-42",
+                    "hint": "H"}], ("保存", "以后再说"))
+    check("⭐⭐ `value` 回填进输入框（重开不空白）",
+          boxes2["k"].stringValue() == "sekret-42",
+          repr(boxes2["k"].stringValue()))
+    check("⚠️ 回填的框仍是**安全框**（圆点显示，不是明文控件）",
+          "Secure" in type(boxes2["k"]).__name__, type(boxes2["k"]).__name__)
+
+    # ── ⭐ 编辑菜单：没它 ⌘V 在**所有**输入框里都是死的 ──────────────────
+    # 动机（2026-10-01 作者实测）：右键 Paste 能粘、**⌘V 完全没反应**；
+    # 根因是 app 从不建 mainMenu —— 文本框的快捷键靠菜单栏键等价分发。
+    import panel as P
+    ok1 = P.install_edit_menu()
+    _mm = NSApplication.sharedApplication().mainMenu()
+    _sub = (_mm.itemAtIndex_(0).submenu()
+            if _mm is not None and _mm.itemAtIndex_(0) is not None else None)
+    _items = list(_sub.itemArray()) if _sub is not None else []
+    _pastes = [it for it in _items if it.keyEquivalent() == "v"]
+    check("⭐⭐ 装上了 Edit 菜单，且 ⌘V 接的是 `paste:`",
+          ok1 and len(_pastes) == 1 and "paste" in str(_pastes[0].action()),
+          f"项数={len(_items)} paste={[_pastes[0].action()] if _pastes else None}")
+    check("⭐ ⌘C / ⌘A 也在（拷贝与全选）",
+          {"c", "a", "x", "z"} <= {it.keyEquivalent() for it in _items},
+          str([it.keyEquivalent() for it in _items]))
+    check("⭐ 幂等：再装一次不重复、不炸", P.install_edit_menu() is True)
 
 
 if __name__ == "__main__":

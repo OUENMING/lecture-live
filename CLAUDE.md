@@ -138,11 +138,16 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 - **构建戳记 `ClassLive.app/Contents/.build-stamp`**（2026-09-26 起）：记的是构建输入的指纹。
   ⚠️ **2026-09-30 起 `cl update` 会把 `.app` 一起跟上**（`update.py` 的 `app` 那一步：
   `cl update` → `update.py --run-step app`；卡片那条路走同一个 `run_step`）——
-  在那之前它**只拉代码**，于是 `make-app.sh` / `tools/make_icon.py` / `VERSION` 的改动
+  在那之前它**只拉代码**，于是 `make-app.sh` / `tools/make_icon.py` 的改动
   在用户那儿**永远不生效**（**图标就是这么丢的**）。那一步自己幂等：先问戳记，没变就跳过。
   判据只在 `make-app.sh --up-to-date` **一份实现**里（`update._app_stale_reason()` 调它）；
-  别在 `install.sh` / `update.py` 各算一遍指纹。
+  别在 `install.sh` / `update.py` 各算一遍指纹（`make-app.sh --fingerprint` 是给判据取值的口子）。
   ⚠️ 它**不含 `requirements.txt`** —— 依赖是 deps 步骤直接装进 `.app` 那个 python 的，不需要重建。
+  ⚠️⚠️ **也不含 `VERSION`**（2026-10-04 改，原来在）。`VERSION` 每版都变，而它唯一的落点是
+  Info.plist 的 `CFBundleShortVersionString` —— **全仓没有一个代码读者**（读 Info.plist 的地方
+  要的都是 `CFBundleIdentifier`；代码读的是仓库根那份，见 `update._version()`），只有 Finder
+  「显示简介」看得到。它进指纹 = **每发一版所有用户白重建 1–3 分钟**，而重建是那条
+  「可能打断正在录的课」的危险路径。**别把它加回去**（`tests/test_update.py` B13 钉着）。
 - **新增 streamq tag 必须在 `main.drain()` 加同分支** —— 它是唯一的 tag 分发点，漏改即静默丢弃。
   ⚠️ **2026-09-30 起末尾有一条兜底 `else`**：未识别的 tag 会 `echo` 一行告警（**出声**，不再静默丢）。
   但它**只是告警**，不改变「必须加同分支」这条 —— 加了 tag 却不加分支 = 数据照丢，只是你能看见。

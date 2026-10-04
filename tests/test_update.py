@@ -837,6 +837,60 @@ _out3 = _cl_run(_sand_home)
 check("⚠️ 对照：没报 deps -> **不装**（不许每次 cl update 都白等一次）",
       "FAKEPY update.py --mark-reqs" not in _out3, _out3.strip()[-260:])
 
+# ============== B13 ⭐ 构建指纹**不该**被 VERSION 触发（2026-10-04）==============
+# 为什么单列：`VERSION` **每版都变**，而它唯一的落点（Info.plist 的
+# `CFBundleShortVersionString`）**全仓没有一个代码读者** —— 只有 Finder「显示简介」
+# 看得到。它留在指纹里 = **每发一版，所有用户白重建 1–3 分钟**，而重建正是那条
+# 「可能打断正在录的课」的危险路径（3.8.7 才修过）。
+#
+# ⚠️ 判据在**真脚本**上跑（沙盒里放真的 `make-app.sh` + `tools/make_icon.py`），
+#    而且**用 `--fingerprint` 取指纹、不在这儿重算一遍 sha256** —— 本仓规矩：
+#    别在两处各算一遍指纹，两处记一次迟早漂（在 Python 里再写一遍就是第二个定义点）。
+print("\n--- B13 构建指纹不该被 VERSION 触发 ---")
+
+_sb = ROOT / "appstale"
+(_sb / "tools").mkdir(parents=True)
+_real_root = pathlib.Path(update.__file__).resolve().parent
+
+
+def _app_script(*args) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", str(_sb / "make-app.sh"), *args],
+                          capture_output=True, text=True)
+
+
+def _fp() -> str:
+    return _app_script("--fingerprint").stdout.strip()
+
+
+def _stale() -> bool:
+    """真脚本的判据：True = 该重建（退出码非 0）。"""
+    return _app_script("--up-to-date").returncode != 0
+
+
+for _f in ("make-app.sh", "tools/make_icon.py"):
+    shutil.copy2(_real_root / _f, _sb / _f)
+(_sb / "ClassLive.app" / "Contents").mkdir(parents=True)
+(_sb / "VERSION").write_text("3.8.8\n", encoding="utf-8")
+(_sb / "ClassLive.app" / "Contents" / ".build-stamp").write_text(_fp(), encoding="utf-8")
+
+check("⚠️ 前置：戳记与当前指纹一致 -> 不算 stale（否则下面几条都是空转）",
+      not _stale(), f"戳记={_fp()} 却报了 stale")
+
+(_sb / "VERSION").write_text("3.9.0\n", encoding="utf-8")
+check("⭐⭐ bump 了 VERSION -> **仍然不重建**（本次要的正是这个）",
+      not _stale(), "VERSION 一变就又要重建了")
+
+(_sb / "make-app.sh").write_text(
+    (_sb / "make-app.sh").read_text(encoding="utf-8") + "\n# 结构改动\n", encoding="utf-8")
+check("⚠️ 对照：改 `make-app.sh`（结构那一类）-> **必须**还得重建",
+      _stale(), "结构变了却不重建 —— 图标就是这么丢的")
+
+(_sb / "tools" / "make_icon.py").write_text(
+    (_sb / "tools" / "make_icon.py").read_text(encoding="utf-8") + "\n# 换图\n",
+    encoding="utf-8")
+check("⚠️ 对照：改 `tools/make_icon.py` -> 还得重建（图标那半不能再丢一次）",
+      _stale(), "图标源码改了却不重建")
+
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}")

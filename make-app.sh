@@ -3,6 +3,8 @@
 #
 #   ./make-app.sh            # 构建（已存在就重建）
 #   ./make-app.sh --check    # 只检查现状，不动任何东西
+#   ./make-app.sh --up-to-date   # 构建输入没变 = 退出码 0（判据的唯一实现）
+#   ./make-app.sh --fingerprint  # 只打印当前指纹（给判据用，不建也不查）
 #
 # ## 为什么是这个形状（不是普通的 .app 打包）
 #
@@ -37,26 +39,43 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 
 # ---------- 构建戳记：判断「要不要重建」 ----------
 # ⚠️ 为什么需要它：`cl update` 只拉代码、**不重建 .app** ——
-#    于是 `make-app.sh` / `tools/make_icon.py` / `VERSION` 的改动
-#    在用户那儿**永远不生效**（图标就是这么丢的：代码拉下来了，Dock 上还是旧图）。
+#    于是 `make-app.sh` / `tools/make_icon.py` 的改动在用户那儿**永远不生效**
+#    （图标就是这么丢的：代码拉下来了，Dock 上还是旧图）。
 #    有戳记才判断得出来，`install.sh` 和 `update.py` 才有依据。
 #
 # ⚠️ 只含**烤进 .app 的东西**：
-#      make-app.sh      → bundle 结构 + Info.plist
+#      make-app.sh        → bundle 结构 + Info.plist
 #      tools/make_icon.py → 图标
-#      VERSION          → Info.plist 里的 CFBundleShortVersionString
 #    **不含 requirements.txt** —— 依赖是 `cl update` 的 deps 步骤**直接装进 .app 那个
 #    python** 的（`--python sys.executable`），本来就不需要重建；写进来只会造成
 #    无谓的 3 分钟重建。
+#
+# ⚠️⚠️ **也不含 `VERSION`**（2026-10-04 改，原来在）。理由：`VERSION` **每版都变**，
+#    而它唯一的落点是 Info.plist 的 `CFBundleShortVersionString` —— 那个键
+#    **全仓没有一个代码读者**（`install.sh` / `make-app.sh --check` 读的都是
+#    `CFBundleIdentifier`；代码读的是仓库根那份 `VERSION`，见 `update._version()`），
+#    只有 Finder「显示简介」看得到。算进指纹 = **每发一版，所有用户白重建 1–3 分钟**，
+#    而重建正是那条「可能打断正在录的课」的危险路径（3.8.7 才修过）。
+#    → Info.plist 里**照旧写当期 `VERSION`**（真重建时落一个正确值），只是它**不再触发**重建。
+#    代价：没重建过的机器，Finder 里那行版本号停在上次重建时的值。
 #
 # ⚠️ 戳记放在 **.app 里面**（不是 ~/Library/Logs）：它描述的是**这个产物**，
 #    跟着产物走才对 —— .app 被删了自然就没有戳记，也就自然该重建。
 STAMP="$APP/Contents/.build-stamp"
 
 fingerprint() {
-  cat "$HERE/make-app.sh" "$HERE/tools/make_icon.py" "$HERE/VERSION" 2>/dev/null \
+  cat "$HERE/make-app.sh" "$HERE/tools/make_icon.py" 2>/dev/null \
     | shasum -a 256 | cut -d' ' -f1 | cut -c1-16
 }
+
+# ---------- --fingerprint：只把**当前**指纹打出来 ----------
+# ⚠️ 存在的唯一理由：判据要能**用同一份定义**取指纹，而不是在测试里重算一遍
+#    （本仓规矩：别在两处各算一遍指纹 —— 两处记一次迟早漂）。取到值再自己写进
+#    `.build-stamp`，就能在**真脚本**上验「什么变了该重建、什么变了不该」。
+if [ "${1:-}" = "--fingerprint" ]; then
+  fingerprint
+  exit 0
+fi
 
 # ---------- --up-to-date：这个 .app 是最新的吗？**唯一判据就在这一份实现里** ----------
 # 退出码：0 = 是最新的；**非 0 = 该重建**。
@@ -115,7 +134,8 @@ if [ "${1:-}" = "--check" ]; then
     say "   lib/              $([ -d "$APP/Contents/lib" ] && echo 就位 || echo '❌ 缺')"
     say "   pyvenv.cfg        $([ -f "$APP/Contents/pyvenv.cfg" ] && echo 就位 || echo '❌ 缺')"
     say "   Info.plist        $([ -f "$APP/Contents/Info.plist" ] && echo 就位 || echo '❌ 缺')"
-    # 戳记：对不上说明 make-app.sh / make_icon.py / VERSION 改过了，这个 .app 该重建
+    # 戳记：对不上说明 make-app.sh / make_icon.py 改过了，这个 .app 该重建
+    # ⚠️ **`VERSION` 不在里面** —— 它每版都变，而落点只有 Finder 看得到（见文件头那张表）。
     if [ ! -f "$STAMP" ]; then
       say "   构建戳记          ⚠️ 没有（老版本建的）—— 跑 ./make-app.sh 重建"
     elif [ "$(cat "$STAMP" | tr -d '[:space:]')" != "$(fingerprint)" ]; then
@@ -403,6 +423,10 @@ done
 # ---------- ④ Info.plist ----------
 # ⚠️ CFBundleExecutable 必须指向 MacOS/ 里真实存在的那个 python ——
 #    这一条是整个方案能不能拿到 bundle 身份的开关（§1.5）
+#
+# ⚠️ `CFBundleShortVersionString` 写当期 `VERSION`，但**它不在构建指纹里**（见文件头）：
+#    只有 Finder「显示简介」读它，**代码一个读者都没有**。所以真重建时落一个正确值就行，
+#    不值得为它每次都重建 —— 没重建过的机器上这行会停在上次重建时的版本。
 say "④ 写 Info.plist …"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

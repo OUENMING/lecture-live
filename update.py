@@ -723,8 +723,11 @@ def pending_steps() -> list[dict]:
 
     # ③ 重建 .app：锚在上面两条之后（它是最后一道打包，也最重）。
     # ⚠️ 为什么需要：`cl update` **只拉代码、不重建 .app** ——
-    #    `make-app.sh` / `tools/make_icon.py` / `VERSION` 的改动于是在用户那儿
+    #    `make-app.sh` / `tools/make_icon.py` 的改动于是在用户那儿
     #    永远不生效（**图标就是这么丢的**：代码更新了，Dock 上还是旧图）。
+    # ⚠️ `VERSION` **不在**触发条件里（2026-10-04 起）：它每版都变，而落点
+    #    （Info.plist 的 `CFBundleShortVersionString`）全仓没有一个代码读者 ——
+    #    算进去等于每发一版所有用户白重建一次。见 `make-app.sh` 文件头那张表。
     # ⚠️ 判据只有一份（`_app_stale_reason()`），`run_step("app")` 与终端那条路共用它。
     _why = _app_stale_reason()
     if _why:

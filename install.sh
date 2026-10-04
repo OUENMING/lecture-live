@@ -176,10 +176,34 @@ say "─────────────────────────
 #    ⚠️ 判据交给 `make-app.sh --up-to-date` —— **只有那一份实现**，不在这里重算指纹。
 #    ⚠️ 注意是 `--up-to-date` 且用 `!`：**出错也要倒向重建**。
 #       若反过来问「stale 吗」，脚本自身出错会落成非零 → 被读成「最新」→ 静默跳过。
+# ⚠️ 构建要用 uv —— 缺它时 `make-app.sh` 只会甩一个文档链接，新手卡在这儿。
+#    这里**先**检查并把能直接粘贴的命令打出来。⚠️ 放在 install.sh 而不是 make-app.sh：
+#    后者是构建戳记的输入，改它会让所有人下次 `cl update` 白白重建一遍 .app。
+need_build_env() {
+  [ "$(uname -m)" = "arm64" ] || fail "需要 Apple Silicon（M1 及以上）的 Mac，当前是 $(uname -m)"
+  _mac="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)"
+  case "$_mac" in
+    ''|*[!0-9]*) ;;                     # 取不到版本号就不拦（别因为探测失败挡人）
+    *) [ "$_mac" -ge 13 ] || fail "需要 macOS 13 以上，当前是 macOS ${_mac}" ;;
+  esac
+  if ! command -v uv >/dev/null 2>&1; then
+    say "❌ 找不到 uv（构建要用它）。先装它，再重跑 ./install.sh："
+    say ""
+    say "     curl -LsSf https://astral.sh/uv/install.sh | sh"
+    say "     source \$HOME/.local/bin/env      # 让当前终端认到 uv（或者关掉终端重开）"
+    say "     ./install.sh"
+    say ""
+    say "   已有 Homebrew 的话：brew install uv"
+    exit 1
+  fi
+}
+
 if [ ! -d "$APP" ]; then
+  need_build_env
   say "① .app 还没构建 —— 交给 make-app.sh"
   "$HERE/make-app.sh" || fail "构建失败"
 elif ! _why="$("$HERE/make-app.sh" --up-to-date 2>&1)"; then
+  need_build_env
   say "① .app 该重建：${_why}"
   "$HERE/make-app.sh" || fail "重建失败"
 else

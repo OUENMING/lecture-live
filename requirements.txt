@@ -16,7 +16,12 @@ numpy>=2.0
 sounddevice>=0.5           # 麦克风/系统声采集
 
 # 本地翻译兜底（断网时降级用；云端走 httpx）
-mlx-lm>=0.31               # Apple Silicon GPU；已验证 3B/4B 必 OOM，只用 1.7B
+# Apple Silicon GPU；已验证 3B/4B 必 OOM，只用 1.7B
+# ⚠️ macOS 13（Darwin 22）：mlx 0.29.4 起只发 macOS 14+ 的 wheel，0.29.3 是最后一个带
+#    macosx_13_0 的 → 钉住 mlx-lm 0.29.x（解析为 mlx-lm 0.29.1 + mlx 0.29.3）。
+#    用到的只有 load / stream_generate / make_sampler / mx.set_*_limit，两条线 API 一致。
+mlx-lm>=0.31; platform_release >= '23'
+mlx-lm>=0.29,<0.30; platform_release < '23'
 httpx>=0.28                # DeepSeek 云端翻译
 
 # macOS 悬浮窗（无 GUI 会话时自动回退终端，不装也能跑终端模式）

@@ -216,8 +216,9 @@ lecture-live/
 
 ## 环境要求
 
-- **macOS + Apple Silicon**（M1/M2/M3/M4）—— 本地推理依赖 MLX（Metal），悬浮窗依赖 AppKit
-- Python **3.12**
+- **macOS 13 (Ventura) 或更高 + Apple Silicon**（M1/M2/M3/M4）—— 本地推理依赖 MLX（Metal），悬浮窗依赖 AppKit
+  （macOS 13 上本地翻译兜底用较旧的 mlx-lm 0.29，见 `requirements.txt`；macOS 14+ 用最新版）
+- 先装 [`uv`](https://docs.astral.sh/uv/)：`curl -LsSf https://astral.sh/uv/install.sh | sh`（Python 3.12 由它自动准备，不用另装）
 - 约 **3GB** 磁盘放模型（Parakeet + VAD + Whisper 定稿，**三个都必装**）
 - 磁盘里跑，不需要 GPU 服务器
 
@@ -226,10 +227,17 @@ lecture-live/
 ```bash
 git clone https://github.com/OUENMING/lecture-live.git
 cd lecture-live
+./install.sh        # 构建 + 装成系统里能直接启动的 app（自带独立的 Python 和全部依赖，要几分钟）
+cp glossary.example.txt glossary.txt    # 术语表模板 → 自己的公共术语表
+```
 
-# 构建 + 装成系统里能直接启动的 app（自带一份独立的 Python 和全部依赖）
-./install.sh
+然后双击 `ClassLive.app`，**点面板上就绪条里的「语音模型」** —— 三个必装模型（约 2GB）
+会在后台自动下载，下载期间你可以同时配课表。装完跑一次 `cl doctor` 复核：模型那几行应该是 ✅。
 
+<details>
+<summary>想在终端里手动下模型 / 装可选的本地翻译兜底</summary>
+
+```bash
 # Parakeet ASR 模型（~600MB）
 ClassLive.app/Contents/MacOS/python -c "from huggingface_hub import snapshot_download; \
   snapshot_download('csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8', \
@@ -239,21 +247,19 @@ ClassLive.app/Contents/MacOS/python -c "from huggingface_hub import snapshot_dow
 mkdir -p ~/models/vad && curl -fsSL -o ~/models/vad/silero_vad.onnx \
   https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
 
-# Qwen3-1.7B 本地兜底（可选，938 MB）—— **不会自动下载**。
-# 云端翻译失败时没有它只保留转录；要装就跑 `cl doctor`，按它打出的命令装。
-
-# 术语表模板 → 自己的公共术语表
-cp glossary.example.txt glossary.txt
-
 # 定稿 Whisper 模型（~1GB，**必装** —— 缺了启动时会直接告诉你）
 curl -fsSL -o /tmp/wt.tar.bz2 \
   https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-turbo.tar.bz2
 tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2
 ```
 
-> ⚠️ **两条 `curl` 都带 `-f`** —— 少了它，HTTP 404/500 时 `curl` **照样以 0 退出**，
-> 把错误页（HTML）原样写成一个 `.onnx` / `.tar.bz2`，而自检只看"文件在不在"。
-> 装完跑一次 `cl doctor` 复核：模型那几行应该是 ✅。
+Qwen3-1.7B 本地兜底（可选，938 MB）**不会自动下载**：云端翻译失败时没有它只保留转录；
+要装就跑 `cl doctor`，按它打出的命令装。
+
+⚠️ 两条 `curl` 都带 `-f` —— 少了它，HTTP 404/500 时 `curl` **照样以 0 退出**，
+把错误页（HTML）原样写成一个 `.onnx` / `.tar.bz2`，而自检只看"文件在不在"。
+
+</details>
 
 **装完之后双击 `ClassLive.app` 就能上课**（第一次会弹一个麦克风授权，点允许）。
 

@@ -197,8 +197,11 @@ def _hf_download(repo: str, local_dir: str | None, endpoint: str | None) -> int:
     env = dict(os.environ)
     env.setdefault("HF_HUB_ETAG_TIMEOUT", "10")
     env.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
-    if endpoint:
-        env["HF_ENDPOINT"] = endpoint
+    # ⚠️ **显式**覆盖，而不是「endpoint 非空才设」：用户环境里常有
+    #    `HF_ENDPOINT=https://hf-mirror.com`（国内惯例），`setdefault` 语义会让这条
+    #    「直连」偷偷走第三方镜像，却因为 `mirror=False` **免过 sha256 校验** ——
+    #    正好绕过本文件第 3 条「镜像来的必须过校验」。
+    env["HF_ENDPOINT"] = endpoint or "https://huggingface.co"
     code = ("import sys; from huggingface_hub import snapshot_download; "
             "snapshot_download(sys.argv[1], local_dir=sys.argv[2] or None)")
     return subprocess.run([sys.executable, "-c", code, repo, local_dir or ""], env=env).returncode
@@ -245,6 +248,13 @@ def fetch_hf(repo: str, local_dir: pathlib.Path | None, pins: dict[str, str], *,
                 continue
             say("  ✓ sha256 校验通过")
         return True, label
+    # ⚠️ 两路都没成：`local_dir` 那种下法（parakeet）会把**半截**文件留在目标目录里，
+    #    而 `doctor.model_present` 只看「目录非空、有大小 > 0 的文件」→ 下次开面板时
+    #    它被当成「已就位」，**再也不会被挑中重下**，一跑就炸。这正是本 PR 给 Whisper
+    #    修掉的那一类（那里用「临时目录 + 整体挪走」避开）。这里收尾时按 pins 复核：
+    #    对不上 = 半截 → 删掉重来；对得上 = 目录里本来就有完好的一份 → **留着**（别误删）。
+    if local_dir is not None and _verify_pins(find_dir(), pins):
+        shutil.rmtree(purge, ignore_errors=True)
     return False, "直连和镜像都没下成"
 
 
@@ -262,13 +272,20 @@ def fetch(key: str, *, say: Callable[[str], None] = print) -> tuple[bool, str]:
     if key == "parakeet":
         return fetch_hf(models.PARAKEET_SRC, path, PINS["parakeet"],
                         find_dir=lambda: path, purge=path, say=say)
-    return fetch_hf(models.QWEN_SRC, None, PINS["llm"], purge=path, say=say,
-                    find_dir=lambda: _hf_snapshot_dir(models.QWEN_SRC, "model.safetensors"))
+    if key == "llm":
+        return fetch_hf(models.QWEN_SRC, None, PINS["llm"], purge=path, say=say,
+                        find_dir=lambda: _hf_snapshot_dir(models.QWEN_SRC, "model.safetensors"))
+    # ⚠️ **响亮失败，别兜底成 llm**：原来最后一句是无条件 `return`，任何不认识的 key
+    #    都会去下 938 MB 的 Qwen3 —— 将来给 MODELS 加第 5 个模型却忘了在这里加分支时，
+    #    就是「静默下一份最大的」。`main()` 的 KEYS 只挡命令行，`fetch()` 是公开入口。
+    raise ValueError(f"未知模型 key：{key!r}（可用：{'/'.join(KEYS)}）")
 
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2 or argv[1] not in KEYS:
-        print(__doc__.split("\n\n")[0])
+        # ⚠️ 前两段一起打：第 1 段只有标题那一行，带 `<vad | whisper | parakeet | llm>`
+        #    的用法在第 2 段 —— 只打第 1 段等于不告诉用户有哪些 key。
+        print("\n\n".join(__doc__.split("\n\n")[:2]))
         return 2
     import models
     ok, why = fetch(argv[1])

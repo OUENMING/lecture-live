@@ -49,6 +49,10 @@ def main() -> int:
     check("都没填", KE.status_line(False, False) == KE.MSG_NEITHER, KE.MSG_NEITHER)
     check("⚠️ 文案里**不许**出现「失败」这类词（都没填是合法选择，不是错误）",
           "失败" not in KE.MSG_NEITHER and "错误" not in KE.MSG_NEITHER)
+    # ⚠️ 也不许承诺「本地模型照常翻译」—— 它**可选、默认没装**，对新用户那是句假话。
+    #    与 `entry_panel` 那条「不填只有英文字幕」是同一件事，两处必须一致。
+    check("⚠️ 文案里**不许**承诺本地模型会顶上（它默认没装）",
+          "本地模型照常" not in KE.MSG_NEITHER and "照常翻译" not in KE.MSG_NEITHER)
 
     print("\n--- ② `save()`：落盘 + 权限 + 不误伤 ---")
     with tempfile.TemporaryDirectory() as d:

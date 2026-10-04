@@ -1969,5 +1969,69 @@ class R21_NoUnboundGlobals(unittest.TestCase):
         self.assertIn("notice", hits, f"扫描器没抓到已知的坏样本：{hits}")
 
 
+class R18_RepoModulesLiveAtRepoRoot(unittest.TestCase):
+    """⭐⭐ 仓库根模块 `import` 的东西，必须真的能从**仓库根** import 到（2026-10-04）。
+
+    **为什么单列一条**：`trash.py` 在 2026-10-01 的「独立脚本进 `scripts/`」整理里
+    被当成脚本搬走了，但**它是库**（没有 `__main__`，被生产代码 `courses.delete()`
+    里 `import trash` 用）。`cl` / `main.py` 运行时 `sys.path` **只有仓库根** →
+    `import trash` 抛 ModuleNotFoundError，被 `entry_panel` 的兜底接成
+    「删除没做成」→ **面板上「删除课程」永远失败**。
+
+    这一条正是本仓吃过两次亏的那类（记忆 `narrow-gate-plus-no-caller-check-false-green`）：
+    **搬动被引用的文件，全套测试照旧全绿，而项目是坏的** —— 因为测试都注入了假
+    `trash_fn`，从没走过默认那条 `import`。
+
+    判据取最钝也最不容易腐坏的一刀：**根目录模块 import 的顶层名，只要仓库里
+    存在同名 `.py`，那它就必须在根目录**（在 `scripts/` / `tests/` / `docs/` 里 = 红）。
+    标准库与第三方名不满足「仓库里有同名 .py」，天然放行。
+    """
+
+    def test_every_imported_repo_module_sits_at_root(self):
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+
+        def _top_imports(p):
+            tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+            out = set()
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Import):
+                    out |= {a.name.split(".")[0] for a in n.names}
+                elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
+                    out.add(n.module.split(".")[0])
+            return out
+
+        # 仓库里**所有**同名 .py 的位置（用来判断"这个名字是仓库自己的模块"）。
+        # ⚠️ 必须跳过 `ClassLive.app/Contents/lib/.../site-packages`、`.venv`、`__pycache__` ——
+        #    不然 `json` / `math` / `numpy` 这些标准库与第三方名会在 site-packages 里
+        #    找到同名文件，被误判成「仓库模块搬错了地方」。
+        def _vendor(p):
+            parts = set(p.parts)
+            return bool(parts & {"__pycache__", ".venv", "_ocr_tmp"}) or \
+                "site-packages" in p.parts or "ClassLive.app" in p.parts
+
+        everywhere = {}
+        for p in root.rglob("*.py"):
+            if _vendor(p):
+                continue
+            everywhere.setdefault(p.stem, set()).add(p.parent)
+
+        bad = {}
+        for p in sorted(root.glob("*.py")):                    # 只看根目录的生产模块
+            for name in _top_imports(p):
+                if name not in everywhere:                     # 标准库 / 第三方 / 包
+                    continue
+                if root not in everywhere[name]:               # 仓库有它，但不在根目录
+                    bad.setdefault(p.name, set()).add(
+                        f"{name} → {sorted(str(d.relative_to(root)) for d in everywhere[name])}")
+
+        self.assertEqual(
+            bad, {},
+            "这些 import 在仓库根跑不通（`cl` / `main.py` 的 sys.path 只有根）："
+            f"{ {k: sorted(v) for k, v in bad.items()} }")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

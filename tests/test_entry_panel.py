@@ -246,7 +246,7 @@ def main() -> int:
     #    `NSApp()` 就非空了 → **进程当场退出，rc=0、一个字都不报**（汇总行也不打）。
     #    2026-09-30 在 ⑳ 里实测踩到：日志跑到一半就没了，排查了半天。
     #    → **别把这一组挪到任何建窗口的那几节后面。**
-    # ⚠️ 这一组的判据是**三条退出码必须互不相同**：「用户取消」和「面板挂了」
+    # ⚠️ 这一组的判据是**五条退出码必须互不相同**（0/1/2/3/4）：「用户取消」和「面板挂了」
     #    混在一起的话，要么违背用户意图（他取消了还录课），要么录不了课
     #    （正是作者拍第 1 条时要防的那件事）。
     #
@@ -279,10 +279,12 @@ def main() -> int:
 
         cfg.write_text("KEEPME", encoding="utf-8")
         rc = _run(lambda **kw: (kw["on_close"](), object())[1])
+        # ⚠️ `check()` 的 detail 是**急切求值**的（`ok` 里的短路护不到它）——
+        #    文件真没了的时候 `read_text` 会先抛 FileNotFoundError，连汇总行都打不出来。
+        _keep = cfg.read_text(encoding="utf-8") if cfg.exists() else None
         check("⭐ ② 用户关掉面板 -> 1，且 **.course 一个字没动**（取消 ≠ 故障）",
-              rc == entry_launch.CANCELLED
-              and cfg.read_text(encoding="utf-8") == "KEEPME",
-              f"rc={rc} course={cfg.read_text(encoding='utf-8')!r}")
+              rc == entry_launch.CANCELLED and _keep == "KEEPME",
+              f"rc={rc} course={_keep!r}")
 
         rc = _run(lambda **kw: None)
         check("⭐ ③ 面板起不来 -> 2（`cl` 据此**退回照旧立刻录课**）",
@@ -344,15 +346,15 @@ def main() -> int:
             _opened.clear()
             _EP.open_panel = lambda **kw: (kw["on_start"]("ZZNEW"), object())[1]
             rc = entry_launch.main()
+            _new = cfg.read_text(encoding="utf-8") if cfg.exists() else None
             check("⑥ 零课程的面板里建课后点「开始上课」-> 0，且 .course 写成那门课",
-                  rc == entry_launch.PICKED
-                  and cfg.read_text(encoding="utf-8") == "ZZNEW",
-                  f"rc={rc} course={cfg.read_text(encoding='utf-8')!r}")
+                  rc == entry_launch.PICKED and _new == "ZZNEW",
+                  f"rc={rc} course={_new!r}")
         finally:
             _CO.list_courses, _RD.model_states = _o_lc, _o_ms
             _EP.open_panel = _fake_open
 
-        check("⭐ 四条码互不相同（`cl` 的 case 分支靠这个分清）",
+        check("⭐ 五条码互不相同（`cl` 的 case 分支靠这个分清）",
               len({entry_launch.PICKED, entry_launch.CANCELLED,
                    entry_launch.UNAVAILABLE, entry_launch.NO_COURSES,
                    entry_launch.UNSAVED}) == 5)
@@ -1083,10 +1085,14 @@ def _test_mode_section() -> None:
 
         (sand / ".test-mode").write_text("1", encoding="utf-8")
         _out = _run_cl()
+        # ⚠️ detail 是急切求值的，且这里取的是**倒数第 2 行** —— 输出不足 2 行时会先
+        #    抛 IndexError 把整轮带崩（真因被盖掉）。先切片、再判长度。
+        _lines = _out.strip().splitlines()
         check("⭐⭐ 开关是「1」→ `cl` 真的给 main.py 加了 `--test-mode`",
-              "--test-mode" in _out, _out.strip().splitlines()[-1] if _out.strip() else "（空）")
+              "--test-mode" in _out, _lines[-1] if _lines else "（空）")
         check("⭐ 而且 ▶ 那行报出来了（**不许静默**）",
-              "测试模式=开" in _out, _out.strip().splitlines()[-2] if _out.strip() else "")
+              "测试模式=开" in _out,
+              _lines[-2] if len(_lines) >= 2 else f"（只 {len(_lines)} 行）")
         (sand / ".test-mode").write_text("0", encoding="utf-8")
         check("⭐ 开关是「0」→ 一个都不加",
               "--test-mode" not in _run_cl(), "（还带着旗标）")
@@ -1429,9 +1435,17 @@ def _vault_section() -> None:
                 except Exception:                              # noqa: BLE001
                     pass
     finally:
-        if _saved_home is not None:
+        # ⚠️ 「原本没有」这一档也要还原：只写 `if _saved is not None: environ[k] = _saved`
+        #    时，`HOME` 原本没设的话，本节点跑完它还**指着那个已被删掉的 tempdir** ——
+        #    泄漏给后面所有节点（谁 `expanduser` 一下就踩到不存在的家目录）。
+        #    本文件的立身之本就是「测试必须隔离写端」，还原要覆盖两种起点。
+        if _saved_home is None:
+            os.environ.pop("HOME", None)
+        else:
             os.environ["HOME"] = _saved_home
-        if _saved_env is not None:
+        if _saved_env is None:
+            os.environ.pop("OBSIDIAN_VAULT", None)
+        else:
             os.environ["OBSIDIAN_VAULT"] = _saved_env
         E.pick_folder = orig_pick
 

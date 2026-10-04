@@ -283,6 +283,65 @@ def t_hf_direct_ok_no_mirror():
     assert ok and log == [None], (ok, why, log)
 
 
+# ---------------------------------------------- 2026-10-04 OCR 审查补的三条
+# ⚠️ 这三条都是**「静默重活 / 静默放过」**：没判据的话，出错时没人看得见，
+#    而代价是「下错一份 938 MB」或「永远重下不了」。
+
+
+@case("⭐⭐ HF：两路都失败 → `local_dir` 里的**半截**文件要清掉（否则 doctor 当它「已就位」，再也不会重下）")
+def t_hf_partial_purged_on_total_failure():
+    with tempfile.TemporaryDirectory() as td:
+        d = pathlib.Path(td) / "model"; d.mkdir()
+        (d / "a.bin").write_bytes(OTHER)                     # 半截：pins 对不上
+        ok, why = F.fetch_hf("r/x", d, {"a.bin": SHA}, find_dir=lambda: d, purge=d,
+                             download=lambda r, l, e: 7, say=quiet)     # 两路都失败
+        assert not ok and not d.exists(), f"半截模型没清掉：{d.exists()}（{why}）"
+
+
+@case("⭐ 上面那条的**反面**：目录里本来就有一份完好的（pins 对得上）→ 失败时不许误删")
+def t_hf_good_dir_kept_on_total_failure():
+    with tempfile.TemporaryDirectory() as td:
+        d = pathlib.Path(td) / "model"; d.mkdir()
+        (d / "a.bin").write_bytes(PAYLOAD)                   # 完好：pins 对得上
+        ok, why = F.fetch_hf("r/x", d, {"a.bin": SHA}, find_dir=lambda: d, purge=d,
+                             download=lambda r, l, e: 7, say=quiet)
+        assert not ok and (d / "a.bin").exists(), f"把一份完好的模型删了（{why}）"
+
+
+@case("⭐ `fetch()` 见到不认识的 key 要**响亮失败** —— 不许兜底去下 938 MB 的 Qwen3")
+def t_fetch_unknown_key_raises():
+    try:
+        F.fetch("bogus", say=quiet)
+    except ValueError as e:
+        assert "bogus" in str(e), str(e)
+    else:
+        raise AssertionError("未知 key 没报错 —— 会静默去下 llm")
+
+
+@case("⭐ 「直连」必须显式指回官方端点：环境里的 HF_ENDPOINT（国内常用镜像）不许偷换来源")
+def t_direct_endpoint_pinned_to_official():
+    import os
+    import types
+    seen: list = []
+    real, old = F.subprocess.run, os.environ.get("HF_ENDPOINT")
+    try:
+        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"          # 用户环境里常见的镜像
+        F.subprocess.run = lambda cmd, env=None, **kw: (           # noqa: ARG005
+            seen.append(env.get("HF_ENDPOINT")),
+            types.SimpleNamespace(returncode=1))[1]
+        F._hf_download("r/x", None, None)                            # 「直连」
+        F._hf_download("r/x", None, F.HF_MIRROR)                     # 镜像
+    finally:
+        F.subprocess.run = real
+        if old is None:
+            os.environ.pop("HF_ENDPOINT", None)
+        else:
+            os.environ["HF_ENDPOINT"] = old
+    # ⚠️ 老写法（`if endpoint:` 才覆盖）在第一条断言上就红 —— 直连会沿用环境里那个镜像，
+    #    白拿 `mirror=False` 的免校验待遇。
+    assert seen == ["https://huggingface.co", F.HF_MIRROR], seen
+
+
 @case("⭐ Whisper：压缩包被截断 → 失败，模型目录里**没有**半截模型、没有临时目录")
 def t_whisper_truncated_leaves_nothing():
     tb = _tar_bytes({"sherpa-onnx-whisper-turbo/turbo-tokens.txt": b"tok" * 5000})

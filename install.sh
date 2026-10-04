@@ -180,7 +180,13 @@ say "─────────────────────────
 #    这里**先**检查并把能直接粘贴的命令打出来。⚠️ 放在 install.sh 而不是 make-app.sh：
 #    后者是构建戳记的输入，改它会让所有人下次 `cl update` 白白重建一遍 .app。
 need_build_env() {
-  [ "$(uname -m)" = "arm64" ] || fail "需要 Apple Silicon（M1 及以上）的 Mac，当前是 $(uname -m)"
+  # ⚠️ Rosetta 下的 shell 里 `uname -m` 返回 **x86_64** —— 只认它会**误拦真 Apple Silicon**
+  #    （终端勾了「使用 Rosetta 打开」，或经 x86_64 启动器进来）。`sysctl.proc_translated`
+  #    在 Rosetta 进程里是 1，刚好补上这一态。⚠️ 真 Intel Mac 上这个 sysctl **不存在**
+  #    → 取到空串 → 仍然照常拦住。
+  if [ "$(uname -m)" != "arm64" ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" != "1" ]; then
+    fail "需要 Apple Silicon（M1 及以上）的 Mac，当前是 $(uname -m)"
+  fi
   _mac="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)"
   case "$_mac" in
     ''|*[!0-9]*) ;;                     # 取不到版本号就不拦（别因为探测失败挡人）

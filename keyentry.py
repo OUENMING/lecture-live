@@ -10,7 +10,7 @@
 
 | key | 存哪 | 给谁用 | 没有会怎样 |
 |---|---|---|---|
-| **DeepSeek** | `~/.classlive/credentials` | 翻译 / 精修 / 复习层 / 讲解 | 退回本地模型（能上课，质量差些） |
+| **DeepSeek** | `~/.classlive/credentials` | 翻译 / 精修 / 复习层 / 讲解 | 只有英文字幕（本地模型是可选的、默认没装；装了才会退回它，质量差些） |
 | **Jev** | `~/.classlive/jev-key`（官方）<br>`~/.classlive/jev-token`（CommandCode 代理） | 「重点句」+「课务」闸门 | 那两个功能**静默关着** |
 
 ⚠️ 两份**刻意分开**：不同厂商、不同账、可以各自单独撤销。

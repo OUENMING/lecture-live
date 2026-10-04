@@ -241,6 +241,11 @@ cd lecture-live
 <details>
 <summary>想在终端里手动下模型 / 装可选的本地翻译兜底</summary>
 
+> **国内网络**：面板里的下载（以及 `cl doctor` 打出的命令）走 `fetch_model.py` —— 直连 8 秒连不上或太慢就自动换镜像
+> （GitHub 资产走 `ghproxy.net` / `gh-proxy.com`，HuggingFace 走 `hf-mirror.com`），**镜像来的文件必须过 sha256**，
+> 对不上就丢掉。也可以手动：`ClassLive.app/Contents/MacOS/python fetch_model.py vad|whisper|parakeet|llm`。
+> 下面是不用它的纯手动命令。
+
 ```bash
 # Parakeet ASR 模型（~600MB）
 ClassLive.app/Contents/MacOS/python -c "from huggingface_hub import snapshot_download; \
@@ -392,6 +397,7 @@ ClassLive.app/Contents/MacOS/python main.py --source file --path 录音.m4a --sp
 | `--source` | `mic` / `blackhole` / `file` |
 | `--ui` | `terminal` / `overlay`(卡片式悬浮窗) |
 | `--engine` | `auto`(默认，云端优先失败降级) / `cloud` / `local` |
+| `--cloud-context` | 云端翻译的前文块大小，默认 `10`（窗口 10–19 句、块对齐，命中 DeepSeek 前缀缓存，输入成本约 −40%，见 [`docs/experiments/context_ab.md`](docs/experiments/context_ab.md)）；`0` = 老的「最近 `--context` 句」滑动窗口。本地引擎不受影响 |
 | `--cloud-model` | 云端模型（默认 `deepseek-flash`；可选 `deepseek-v4-pro`） |
 | `--api-key` | DeepSeek key（默认读 `DEEPSEEK_API_KEY` 或 `~/.classlive/credentials`） |
 | `--course` | 课程代码（如 `ECON10101`）；不设也能写笔记，课程名默认 `LECTURE` |

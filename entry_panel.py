@@ -178,7 +178,7 @@ def ready_short(it: dict) -> str:
         return "已就绪"
     if it.get("key") == "engine":
         return "云端" if st == "ok" and "云端" in it.get("detail", "") else (
-            "本地" if st == "ok" else "未配")
+            "本地" if st == "ok" else "没配 key")
     if it.get("key") == "vault":
         # ⚠️ 「未设」不是错误 —— 笔记照写 `sessions/`（`ready.vault_item` 那条）
         return {"ok": "已设", "warn": "找不到了"}.get(st, "未设")
@@ -1878,7 +1878,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             "只写进这台机器的 ~/.classlive/，不上传。",
             [{"key": "deepseek", "label": "DeepSeek key", "value": cur_ds,
               "hint": ("已存过" if cur_ds
-                       else "翻译用的。不填也能上课 —— 退回本地模型，质量差一些。")},
+                       else "翻译用的（platform.deepseek.com 申请）。不填只有英文字幕。")},
              {"key": "jev", "label": "Jev key · 可选", "value": cur_jv,
               "hint": ("已存过" if cur_jv
                        else "给「重点句」和「课务」用。不填这两个功能就不出现。")}],

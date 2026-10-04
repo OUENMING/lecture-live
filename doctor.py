@@ -315,10 +315,14 @@ def main() -> int:
     # ---- 数据文件 ----
     print()
     gl = HERE / "glossary.txt"
-    print(f"{_mark(gl.exists())} 术语表        "
-          f"{'glossary.txt 就位' if gl.exists() else '缺 glossary.txt → cp glossary.example.txt glossary.txt'}")
-    if not gl.exists():
-        print("   (缺了也能跑, 只是不做术语注入)")
+    # ⚠️ 可选项：缺了画 ⚪ 不画 ❌ —— 红叉会让新用户以为它是上面「硬缺失」的一员，
+    #    而结论行并不把它算进去（2026-10-04 新用户实测的困惑）。
+    has_gl = gl.exists()
+    print(f"{'✅' if has_gl else '⚪'} 术语表        "
+          f"{'glossary.txt 就位' if has_gl else '没有 glossary.txt（可选）'}")
+    if not has_gl:
+        print("   (没有也能跑, 只是少了公共术语注入；想要：cp glossary.example.txt glossary.txt，"
+              "再把课号换成自己的)")
 
     # ---- 结论 ----
     print("─" * 46)

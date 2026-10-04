@@ -42,6 +42,8 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 断句、VAD、静音阈值 | `vad.py` |
 | 转写、ASR、Parakeet、听错修正 | `asr.py` |
 | 翻译、prompt、DeepSeek 云端、mlx 本地、引擎降级 | `translator.py`、`cloud_translator.py` |
+| **云端翻译的前文窗口**（块对齐 / 前缀缓存 / 为什么稳定内容放前）—— 动 `cloud_translator._user_content` 前读 | `docs/experiments/context_ab.md`（复现 `context_ab.py`） |
+| **下载模型**（直连 → 镜像 → sha256）—— 动 `models.py` 的 `cmd` / 镜像名单 / 钉死的 sha 前读 | `fetch_model.py`（文件头写了为什么镜像必须过 sha、直连不强制） |
 | 术语表、课号、术语查表与注入 | `build_notes.py`、`glossary/`（样例 `glossary.example.txt`） |
 | 笔记落盘、`sessions/` 文件格式、Obsidian 双层笔记、**❓「没听懂」的旁路文件 + 课后反查**（`sessions/<同名>.lost.jsonl`，**绝不改会话抬头**） | `obsidian_writer.py` |
 | **实时总结（原子 + 章节纲要）** —— 窗口规则 / 重试与积压 / 章节状态机 / 课务 / 草稿与调试入口。⚠️ `main.py` 那边**只接线**，逻辑全在这里 | `live_summary.py`（**动手前先读文件头**） |
@@ -92,6 +94,8 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   `from polish import polish_entries` 确实被 `try/except` 包着（文件缺失时打一行 ⚠，
   笔记照样生成、退回直播版转录）—— **这个 fail-soft 设计本身值得保留**，但它防的是
   "文件被删/环境不完整"，不是"新 clone 拿不到"。
+- **镜像名单会腐坏，校验不会。** `fetch_model.py` 里镜像来的文件必须过 sha256；`ghfast.top` 在测试网络上返回自签证书（连接被换），所以不在名单里，也不用 `-k` 绕过。加镜像前先用 `tests/test_fetch_model.py` 的本机服务器模式验一遍流程，再真下一个小文件核 sha。
+- **云端 prompt 里稳定内容在前、逐句变化的在后。** DeepSeek 前缀缓存只认「从头逐字相同」：`ctx_chunk>0` 时前文窗口同块内只往后追加，本句召回术语放在前文之后。`ctx_chunk=0` 的老布局被 `tests/test_translator.py` 逐字冻结，改它要连测试一起说明理由。
 - **不阻塞不变量**：`capture` / `vad` 的回调必须立刻返回；AppKit 的调用只能发生在主线程。往流水线里加活先想这两条。
 - ⚠️ **加在磨砂面板上的新交互元素，先查 `mouseDownCanMoveWindow`。**
   **事实**：它是 AppKit「按下背景即拖动窗口」的开关，**默认值是 `!isOpaque`**
@@ -185,6 +189,10 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   `ClassLive.app/Contents/MacOS/python tests/test_instance_lock.py` 全绿。
   ⚠️ 核心那条是「被 kill -9 之后锁自动释放」—— 但**它单独是恒真的**，
   必须和 C1/C2 连读（见那个测试的 docstring）。
+- **碰过下载 / 镜像**（`fetch_model.py` / `models.py` 的 `cmd` / `update.download_model`）：
+  `ClassLive.app/Contents/MacOS/python tests/test_fetch_model.py` 全绿。**不在默认闸门里**。全离线（本机 HTTP 服务器当上游和镜像）；
+  真网络端到端要在隔离 `HOME` 下跑（`HOME=/tmp/x …`），别写进真 `~/models/`。
+- **碰过云端翻译的 prompt 布局**：`ClassLive.app/Contents/MacOS/python tests/test_translator.py` 全绿（含老布局逐字冻结那条）。
 - 碰过流水线 / 音频路径：`ClassLive.app/Contents/MacOS/python scripts/test_pipeline.py <音频> [start] [dur] [speed]` 能跑完。
 - **碰过面板**（`panel.py` / `overlay.py` 的窗口构造 / `whatsnew.py`）：`ClassLive.app/Contents/MacOS/python tests/test_panel.py` 全绿。
   ⚠️ 它**不在**默认闸门里，要单独跑。判据是**同进程跟「抽取前的配方」对拍** ——

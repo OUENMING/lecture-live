@@ -1227,6 +1227,23 @@ def _vault_section() -> None:
           _t({"key": "vault", "state": "warn"}) == "⚠  笔记库  找不到了",
           repr(_t({"key": "vault", "state": "warn"})))
 
+    # ---- 翻译引擎那一格（2026-10-04）：「未配」→「没配 key」，说清楚要做什么 ----
+    check("翻译引擎没配 → `—  翻译引擎  没配 key`（字面量）",
+          _t({"key": "engine", "state": "unknown", "detail": "点一下填 key（推荐）· 或下本地模型"})
+          == "—  翻译引擎  没配 key",
+          repr(_t({"key": "engine", "state": "unknown", "detail": "x"})))
+    check("配了云端 → `✓  翻译引擎  云端`（没被上一条误伤）",
+          _t({"key": "engine", "state": "ok", "detail": "云端翻译（推荐）"})
+          == "✓  翻译引擎  云端",
+          repr(_t({"key": "engine", "state": "ok", "detail": "云端翻译（推荐）"})))
+    # key 对话框的提示不许再说「退回本地模型」：本地模型是可选的、默认没装，
+    # 对新用户那句话是假的（没 key + 没本地模型 = 只有英文字幕）
+    import inspect as _insp
+    _src = _insp.getsource(E)
+    check("⭐ key 对话框不再承诺「退回本地模型」（它默认没装）",
+          "不填也能上课 —— 退回本地模型" not in _src
+          and "不填只有英文字幕" in _src)
+
     try:
         import os
         import tempfile

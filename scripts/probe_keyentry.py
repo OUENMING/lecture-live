@@ -32,7 +32,7 @@ import notice                                                        # noqa: E40
 #: 两处一旦分叉，截出来的图就不再代表真实界面了。
 FIELDS = [
     {"key": "deepseek", "label": "DeepSeek key",
-     "hint": "翻译用的。不填也能上课 —— 退回本地模型，质量差一些。"},
+     "hint": "翻译用的（platform.deepseek.com 申请）。不填只有英文字幕。"},
     {"key": "jev", "label": "Jev key · 可选",
      "hint": "给「重点句」和「课务」用。不填这两个功能就不出现。"},
 ]

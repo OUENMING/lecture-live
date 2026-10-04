@@ -91,6 +91,9 @@
 
 没有新的必装模型。依赖清单有改动（macOS 13 的 mlx-lm 分流），macOS 14 以上装到的版本不变，
 补依赖那步会跑一次，无害。
+⚠️ **更新后卡片上会多一步「重建 .app · 约 1–3 分钟」，只此一次。** 这一版换了构建戳记的算法
+（指纹不再含 `VERSION`），老戳记必然对不上 → 触发一次重建。做完这次之后，**光发版本号不会再让
+任何人的 `.app` 过期**（只有图标或构建脚本真改了才会）。
 ⚠️ 国内网络下 `git pull` 若报 `HTTP2 framing layer`，用
 `git -c http.version=HTTP/1.1 pull` 重试（`cl update` 还没内置这个重试）。
 
@@ -104,6 +107,11 @@
 
 - 新增 `fetch_model.py`：直连 → 镜像 → sha256，`models.py` 的 `cmd` 都指向它；
   `update.download_model` 不再走 shell
+- 构建指纹去掉 `VERSION`：它每版都变，而唯一落点 `CFBundleShortVersionString` **全仓没有一个
+  代码读者**（读 Info.plist 的地方要的都是 `CFBundleIdentifier`；只有 Finder「显示简介」看得到）
+  → 算进指纹等于每发一版所有用户白重建一次，而重建是那条可能打断录课的路径。
+  `make-app.sh` 新增 `--fingerprint`（判据取值用，避免两处各算一遍）；`Info.plist` 照旧写当期
+  版本号，只是不再触发重建
 - `CloudTranslator` 新增 `ctx_chunk`（默认 10）：同块内前文只往后追加，本句召回术语放在
   前文之后；`ctx_chunk=0` 的老布局逐字不变，有测试钉住。`translator.select_term_parts`
   新增，`select_terms` 是它们连起来的结果

@@ -65,6 +65,54 @@
 （`_whatsnew_body` 从最新往下数到「你上次看过的版本」为止），多版本时每行前面标版本号。
 所以**每个版本的看点都要能独立看懂**，不要写"同上""见上一条"。
 
+## [3.8.8] - 2026-10-04
+
+### 更新看点
+
+- 🎉 **国庆快乐！**
+- 🐛 **修复了一些 bug，然后又增加了一些 bug**
+- ✨ **新用户第一次打开，终于能看到面板了** —— 以前全新安装没建过课，面板直接被跳过，
+  「下载语音模型」点不到，只能撞上录课时的「模型没装好」。现在没有课也会弹面板，
+  空状态里有「＋ 新增课程」
+- ✨ **优化国内网络下载模型** —— 直连 8 秒连不上就自动换镜像（GitHub 走 ghproxy.net /
+  gh-proxy.com，HuggingFace 走 hf-mirror.com），镜像来的文件必须过 sha256 才收。
+  实测 Whisper 538 MB 经镜像 116 秒下完、校验通过；面板下载总上限 1 小时 → 4 小时
+- ⚡ **云端翻译带更多前文** —— 前文从最近 5 句改成 10–19 句（块对齐），DeepSeek 前缀缓存命中
+  40% → 73%，输入成本约 −42%。译文质量没变差，专有名词略好（电力公司名那种）。
+  `--cloud-context 0` 回老行为
+- 🩹 **适配 macOS 13** —— 本地翻译兜底按系统用旧版 mlx-lm；`install.sh` 先检查芯片、
+  系统版本和 `uv`，缺 `uv` 直接打印安装命令
+- 🩹 **Whisper 解压中途出错不再留下半截模型**（以前会被当成「已就位」，之后再也修不好）
+- 📖 **改进提示** —— 填 key 的对话框不再说「不填也能上课——退回本地模型」（它默认没装，
+  没 key 就只有英文字幕）；就绪条「翻译引擎 未配」→「没配 key」；`cl doctor` 不再给可选的
+  术语表画红叉；README 补了「先装 uv / macOS 13+ / 手动下载」
+
+### 升级须知（3.8.7 → 3.8.8）
+
+没有新的必装模型。依赖清单有改动（macOS 13 的 mlx-lm 分流），macOS 14 以上装到的版本不变，
+补依赖那步会跑一次，无害。
+⚠️ 国内网络下 `git pull` 若报 `HTTP2 framing layer`，用
+`git -c http.version=HTTP/1.1 pull` 重试（`cl update` 还没内置这个重试）。
+
+### Added
+
+- `tests/test_fetch_model.py`（全离线，本机 HTTP 服务器当上游和镜像）；
+  `docs/experiments/context_ab.md` / `context_ab.py`（前文窗口 A/B 的数据与复现）；
+  `CLAUDE.md` 补了两条雷区和两条完成判据
+
+### Changed
+
+- 新增 `fetch_model.py`：直连 → 镜像 → sha256，`models.py` 的 `cmd` 都指向它；
+  `update.download_model` 不再走 shell
+- `CloudTranslator` 新增 `ctx_chunk`（默认 10）：同块内前文只往后追加，本句召回术语放在
+  前文之后；`ctx_chunk=0` 的老布局逐字不变，有测试钉住。`translator.select_term_parts`
+  新增，`select_terms` 是它们连起来的结果
+
+### Fixed
+
+- 零课程时面板被跳过（`entry_launch`：零课程一律开面板，不再按模型状态分叉）
+- `fetch_whisper` 先解到临时目录再整体挪进模型目录，路径穿越由 `filter="data"` 拦
+
 ## [3.8.7] - 2026-10-01
 
 ### 更新看点

@@ -307,6 +307,83 @@ def main() -> int:
         check("⭐⭐ 而且盘上那份旧 `.course` **一个字没动**",
               _after == "PREVIOUS", f"现在是 {_after!r}")
 
+        # ⭐⭐ ⑤ **零课程 + 必装模型没齐 -> 照常开面板**（2026-10-04 加）
+        #    全新安装满足「一门课都没有」→ 原来一律返回 3 → 面板永远不出现 →
+        #    就绪条上「下载语音模型」新用户点不到（macOS 13 新用户实测）。
+        #    ⚠️ **三样都换成桩**：课程清单（否则读真实 glossary/ 与 ~/.classlive/）、
+        #    模型状态（否则读真实 ~/models/）、`open_panel`（上面已换）—— 同「测试必须
+        #    隔离读端与写端」那条。零课程分支只读不写，`.course` 照样不会被动。
+        import contextlib as _ctx
+        import io as _io
+        import courses as _CO
+        import doctor as _DOC
+        import ready as _RD
+        _o_lc, _o_ms = _CO.list_courses, _RD.model_states
+        _opened: list = []
+
+        def _fake_open(**kw):
+            _opened.append(1)
+            kw["on_close"]()
+            return object()
+
+        def _states(v):
+            return lambda **k: {m.path: v for m in _DOC.MODELS}
+
+        def _boom(**k):
+            raise RuntimeError("probe broke")
+
+        _EP.open_panel = _fake_open
+        cfg.write_text("KEEPME", encoding="utf-8")
+        try:
+            _CO.list_courses = lambda *a, **k: []
+
+            _opened.clear(); _RD.model_states = _states("missing")
+            rc = entry_launch.main()
+            check("⭐⭐ ⑤ 零课程 + 必装模型缺 -> **开了面板**（用户关掉 -> 1，不是 3）",
+                  rc == entry_launch.CANCELLED and _opened == [1],
+                  f"rc={rc} opened={_opened}")
+
+            _opened.clear(); _RD.model_states = _states("ok")
+            rc = entry_launch.main()
+            check("⑥ 零课程 + 模型齐 -> 老行为不变：3，且**没开**面板",
+                  rc == entry_launch.NO_COURSES and _opened == [],
+                  f"rc={rc} opened={_opened}")
+
+            # 与面板就绪条同口径：只有 `missing` 算缺，`unknown`/`stale` 能用
+            for _v in ("unknown", "stale"):
+                _opened.clear(); _RD.model_states = _states(_v)
+                rc = entry_launch.main()
+                check(f"⑦ 零课程 + 模型 {_v}（能用）-> 3，没开面板",
+                      rc == entry_launch.NO_COURSES and _opened == [],
+                      f"rc={rc} opened={_opened}")
+
+            # 探测自己坏了 -> 走老路（不许因为它坏了就挡录课，也不许对所有人弹面板）
+            _opened.clear(); _RD.model_states = _boom
+            _err = _io.StringIO()
+            with _ctx.redirect_stderr(_err):
+                rc = entry_launch.main()
+            check("⑧ 探测抛异常 -> 3（走老路），没开面板，没崩",
+                  rc == entry_launch.NO_COURSES and _opened == [],
+                  f"rc={rc} opened={_opened}")
+
+            # 有课程时**根本不该去探测**（探测要 stat 模型目录，别白付）。
+            # ⚠️ 判据是**调用次数**：探测自己吞异常、返回值也被丢弃，所以只看
+            #    返回码测不出「多探了一次」（变异验证抓到：原来写成让它抛异常，
+            #    把探测挪到判断前面照样全绿）。
+            _opened.clear(); _probe_calls: list = []
+            _RD.model_states = lambda **k: (_probe_calls.append(1), {})[1]
+            _CO.list_courses = lambda *a, **k: ["ECON10101"]
+            rc = entry_launch.main()
+            check("⑨ 有课程 -> 开面板，且**一次**都没去探测模型",
+                  rc == entry_launch.CANCELLED and _opened == [1]
+                  and _probe_calls == [],
+                  f"rc={rc} opened={_opened} probe_calls={len(_probe_calls)}")
+        finally:
+            _CO.list_courses, _RD.model_states = _o_lc, _o_ms
+        check("⭐ ⑤–⑨ 跑完 `.course` 一个字没动",
+              cfg.read_text(encoding="utf-8") == "KEEPME",
+              repr(cfg.read_text(encoding="utf-8")))
+
         check("⭐ 四条码互不相同（`cl` 的 case 分支靠这个分清）",
               len({entry_launch.PICKED, entry_launch.CANCELLED,
                    entry_launch.UNAVAILABLE, entry_launch.NO_COURSES,

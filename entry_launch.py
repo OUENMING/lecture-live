@@ -25,7 +25,8 @@
     0 = 用户选了课（`.course` 已写好）→ 照常录课
     1 = 用户**主动关掉**了面板       → 不录（这不是故障，是意图）
     2 = **面板起不来**               → `cl` 退回「照旧立刻开麦」
-    3 = 没课程可显示                 → 退回「照旧立刻开麦」（没课可选时不该卡住人）
+    3 = 没课程可显示、且语音模型已齐   → 退回「照旧立刻开麦」（没课可选时不该卡住人）
+        ⚠️ 模型**没齐**时零课程**照常开面板**（`_models_missing`）—— 那里才有下载入口
     4 = 选了课但 **`.course` 写不下去** → **不录**
         ⚠️ 2026-09-29 加。原来这一档复用了 `2`，于是 `cl` 照旧开麦 ——
            而盘上那份 `.course` 还是**上一门课**的 → 这节课**静默记到上一门课名下**。
@@ -95,6 +96,22 @@ def write_test_mode(on: bool, path=None) -> bool:
         return False
 
 
+def _models_missing() -> bool:
+    """必装语音模型还有没齐的 —— 与面板就绪条「语音模型」那一项**同一个判据**
+    （`ready.required_left`：只有 `missing` 算缺，`unknown` / `stale` 不算）。
+
+    ⚠️ **探测出错按 `False`**（= 走老路、直接录课）：这条探测只是用来**多开一次面板**，
+       它自己坏了不该把原本能录的课挡掉。反过来按 `True` 的话，探测一坏
+       就对**每个零课程用户**弹面板。
+    """
+    try:
+        import ready
+        return bool(ready.required_left(ready.model_states()))
+    except Exception:                           # noqa: BLE001
+        traceback.print_exc()
+        return False
+
+
 def main() -> int:
     # ⚠️ `done` 这个闩是必需的，不是防御性冗余：**决策可能在 `runEventLoop()`
     #    之前就发生**（那时 `stopEventLoop()` 叫得太早，之后再进循环就**永远出不来**）。
@@ -112,8 +129,17 @@ def main() -> int:
 
     try:
         if not courses.list_courses(HERE / "glossary.txt"):
-            print("⚠ 一门课都没有 —— 退回直接录课（别让人卡在空面板上）")
-            return NO_COURSES
+            # ⚠️ 「一门课都没有」本来一律退回直接录课（别让人卡在空面板上）。
+            #    但**全新安装**恰好满足这一条：新 clone 里 `glossary/` 与
+            #    `~/.classlive/courses/` 都是空的 → 面板永远不出现 → 就绪条上
+            #    「下载语音模型」那个入口新用户**永远点不到**，只能看到录课
+            #    起步时弹的「模型没装好」（2026-10-04 一位 macOS 13 新用户实测）。
+            #    面板的零课程空状态（`empty_state_lines`）与「＋ 新增课程」早就有了，
+            #    所以**模型没齐时**照常开面板；模型齐了仍走老路（行为不变）。
+            if not _models_missing():
+                print("⚠ 一门课都没有 —— 退回直接录课（别让人卡在空面板上）")
+                return NO_COURSES
+            print("ℹ 一门课都没有，但语音模型还没装好 —— 先开面板（那里能下模型、建课）")
     except Exception:                           # noqa: BLE001
         traceback.print_exc()
         return UNAVAILABLE

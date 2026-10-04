@@ -228,11 +228,15 @@ lecture-live/
 git clone https://github.com/OUENMING/lecture-live.git
 cd lecture-live
 ./install.sh        # 构建 + 装成系统里能直接启动的 app（自带独立的 Python 和全部依赖，要几分钟）
-cp glossary.example.txt glossary.txt    # 术语表模板 → 自己的公共术语表
 ```
 
-然后双击 `ClassLive.app`，**点面板上就绪条里的「语音模型」** —— 三个必装模型（约 2GB）
-会在后台自动下载，下载期间你可以同时配课表。装完跑一次 `cl doctor` 复核：模型那几行应该是 ✅。
+然后双击 `ClassLive.app`。第一次打开时语音模型还没装，面板会照常弹出（即使你还没有任何课程）——
+**点就绪条里的「语音模型」**，三个必装模型（约 2GB）会在后台自动下载，下载期间你可以同时配课表。
+装完在仓库目录里跑一次 `./cl doctor` 复核：模型那几行应该是 ✅。
+
+> `cl` 是仓库里的启动器。想在任何目录直接敲 `cl`（README 后面的命令都这么写），一次性建个链接：
+> `mkdir -p ~/.local/bin && ln -sf "$PWD/cl" ~/.local/bin/cl`（`~/.local/bin` 要在 `PATH` 里）。
+> 术语表不用提前建：没有也能上课。之后把课件拖进面板，会自动建课并抽术语（抽词用云端模型，要先配好 DeepSeek key；见下面「术语表」一节）。
 
 <details>
 <summary>想在终端里手动下模型 / 装可选的本地翻译兜底</summary>

@@ -83,33 +83,38 @@ MODELS_ROOT = "~/models"
 #: 「缺模型」—— 而 `MODELS_ROOT` 存在的全部意义就是防这个。
 MODELS_ROOT_SH = "$HOME" + MODELS_ROOT[1:]
 
+def _fetch_cmd(key: str) -> str:
+    """下载统一走 `fetch_model.py`：直连 → 镜像 → sha256（见它的模块说明）。
+
+    ⚠️ 只用 `os.path` 拼路径、不碰硬盘 —— 本文件「只有数据没有 I/O」的约定不变。
+    ⚠️ 解释器与脚本路径都 `shlex.quote`：仓库在含空格的路径下不引号会被 shell 切开（F27）。
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fetch_model.py")
+    return f"{shlex.quote(sys.executable)} {shlex.quote(script)} {key}"
+
+
 PARAKEET = Model(
     "parakeet", f"{MODELS_ROOT}/parakeet-tdt-0.6b-v3-int8",
     "Parakeet ASR 模型(必需)", True,
-    # ⚠️ `shlex.quote`（2026-10-01 审查 F27）：仓库在含空格的路径下（朋友 clone 到
-    #    `~/My Projects/`）不引号的话，`{exe} -c …` 会被 shell 切开 → 下载直接失败。
-    f'{shlex.quote(sys.executable)} -c "from huggingface_hub import snapshot_download; '
-    f"snapshot_download('{PARAKEET_SRC}', "
-    f"local_dir='{MODELS_ROOT_SH}/parakeet-tdt-0.6b-v3-int8')\"",
+    # ⚠️ 命令走 `fetch_model.py`（直连 → hf-mirror → sha256）。解释器与脚本路径都 `shlex.quote`
+    #    （2026-10-01 审查 F27：仓库在含空格的路径下不引号会被 shell 切开）。
+    _fetch_cmd("parakeet"),
     640.0, src=PARAKEET_SRC)
 
 VAD = Model(
     "vad", f"{MODELS_ROOT}/vad/silero_vad.onnx", "Silero VAD(必需)", True,
-    # ⚠️ **`-f` 不能漏**（2026-09-28 审查指出）：没有它时 HTTP 404/5xx **curl 照样以 0 退出**，
-    #    把错误页（HTML）**原样写成 `silero_vad.onnx`** —— 于是 `doctor` 看见"文件在"、
-    #    报 ✅，而 VAD 其实是坏的。`-S` 让 `-f` 失败时**打出原因**（否则 `-s` 把它吞了）。
-    "mkdir -p ~/models/vad && curl -fsSL -o ~/models/vad/silero_vad.onnx " + VAD_URL,
+    # ⚠️ 原来是裸 `curl -fsSL`：`-f` 不能漏（404/5xx 时 curl 照样以 0 退出，错误页会被原样写成
+    #    `silero_vad.onnx`，doctor 见「文件在」报 ✅）。现在 `fetch_model.py` 里 `-f` 照旧，
+    #    并且多拦一层「返回的是网页」，国内直连不通时自动换镜像（镜像文件必须过 sha256）。
+    _fetch_cmd("vad"),
     0.61, src=VAD_URL)
 
 WHISPER = Model(
     "whisper", f"{MODELS_ROOT}/sherpa-onnx-whisper-turbo",
     "定稿 Whisper 模型(必需)", True,
-    # ⚠️ 同 `VAD` 那条：`-f` 加上（这里即使漏了，后面 `tar` 也会失败 —— 但错误信息
-    #    会指向"tar 解不开"，而不是"下载就是 404"）。
-    # ⚠️ 固定 `/tmp/wt.tar.bz2` 换成 `mktemp`（2026-10-01 审查 F27）：固定名可被同机
-    #    预置符号链接（`curl -o` 会跟随），面板下载与 `cl update` 并发时也会互相覆盖。
-    't="$(mktemp -t classlive-wt)" && curl -fsSL -o "$t" ' + WHISPER_URL + " && "
-    'tar xjf "$t" -C ~/models/ && rm -f "$t"',
+    # ⚠️ 临时文件、`-f`、解压都在 `fetch_model.py` 里（原来的 `mktemp` 防预置符号链接那条
+    #    用的是 `tempfile.mkdtemp`，同样不可预测）。tar 只在临时目录里，解完即删。
+    _fetch_cmd("whisper"),
     538.0, src=WHISPER_URL, extra="（解开后 989 MB）")
 
 # ⚠️ **可选**，但它是「没配 API key 时唯一的翻译引擎」，所以必须让人**看得见**。
@@ -121,9 +126,7 @@ WHISPER = Model(
 QWEN = Model(
     "llm", "~/.cache/huggingface/hub/models--mlx-community--Qwen3-1.7B-4bit",
     "本地翻译模型 Qwen3-1.7B(可选)", False,
-    # ⚠️ `shlex.quote` 同上（2026-10-01 审查 F27）。
-    f'{shlex.quote(sys.executable)} -c "from huggingface_hub import snapshot_download; '
-    f"snapshot_download('{QWEN_SRC}')\"",
+    _fetch_cmd("llm"),
     938.0, src=QWEN_SRC, at_hf=True)
 
 # 注册表本体。⚠️ 是 `tuple` 不是 `list` —— **冻结**，不给任何人 append 的机会。

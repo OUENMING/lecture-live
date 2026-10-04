@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
 import time
@@ -756,10 +757,13 @@ def download_model(model, *, say=None) -> dict:
                 pass
 
     _say(f"正在下 {model.label}（{model.size}）…")
-    # ⚠️ doctor 里的命令是给人看的 shell 串（含 `~` 和 `&&`）——
-    #    这里就是要**原样执行**它，所以走 shell。别改成列表参数（那样 `&&` 会失效）。
-    r = subprocess.run(model.cmd, shell=True, cwd=HERE,         # noqa: S602
-                       capture_output=True, text=True, timeout=3600)
+    # ⚠️ 总超时 4 小时（原来 1 小时）：慢网络下 Whisper 的 538 MB 在 100 KB/s 就要 1.5 小时；
+    #    真卡死由 `fetch_model.py` 里 curl 的 `--speed-limit/--connect-timeout` 管，不靠这个总超时。
+    # ⚠️ `cmd` 现在恒为「解释器 fetch_model.py <key>」（已 `shlex.quote`，`test_fetch_model` 钉着
+    #    `shlex.split` 后恰好 3 段）—— 所以**不走 shell**：既不再有注入面，也不依赖 `~` / `&&` 展开。
+    #    doctor 仍把同一串打出来给人复制。
+    r = subprocess.run(shlex.split(model.cmd), cwd=HERE,
+                       capture_output=True, text=True, timeout=4 * 3600)
     if r.returncode != 0:
         err = (r.stderr or r.stdout or "").strip().splitlines()
         return {"ok": False,

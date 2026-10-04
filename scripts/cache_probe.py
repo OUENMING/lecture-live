@@ -102,7 +102,7 @@ def main():
                          max_context=2, core=core_terms(course),
                          course_terms=course_term_list(str(ROOT / "glossary.txt"), course),
                          domain=course_title(str(ROOT / "glossary.txt"), course),
-                         collect_usage=True)
+                         collect_usage=True, ctx_chunk=0)   # 本探针手抄的是老布局
 
     # ---- A: 现状(每轮全新 user 消息) ----
     accA, ctx = Acc("A 现状: 滑动窗口 / 每轮新 user"), []

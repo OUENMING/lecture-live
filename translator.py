@@ -21,6 +21,7 @@ CORE_TERMS = [
     "essential readings", "tutorial", "quiz",
 ]
 MAX_DYNAMIC_TERMS = 3
+NO_TERMS = "(无特定术语)"           # `select_terms` 没有任何术语时的占位（云端 prompt 里不再用它，见 `select_term_parts`）
 
 
 SYSTEM_PROMPT = """你是英文课堂字幕校正+翻译助手。给你一句 ASR 转写的英文、课程领域、本课术语表, 以及最近几句上下文。
@@ -225,11 +226,15 @@ def core_terms(course: str | None = None) -> list[str]:
     return core
 
 
-def select_terms(sentence: str, terms: list[str],
-                 core: list[str] | None = None, max_dyn: int = MAX_DYNAMIC_TERMS,
-                 always: list[str] | None = None,
-                 stats: dict | None = None) -> str:
+def select_term_parts(sentence: str, terms: list[str],
+                      core: list[str] | None = None, max_dyn: int = MAX_DYNAMIC_TERMS,
+                      always: list[str] | None = None,
+                      stats: dict | None = None) -> tuple[list[str], list[str]]:
     """核心词常驻 + **课程术语全量** + 动态召回最相关的几个。
+
+    返回 `(stable, dyn)`：`stable` = 核心 + 课程术语（**与句子无关**、去重、保序），
+    `dyn` = 本句召回的几个（**随句变**）。拆成两段是为了让云端 prompt 把稳定的放前面、
+    随句变的放后面（前缀缓存只认「从头逐字相同」）；要老的一整串用 `select_terms`。
 
     ⚠️ 为什么课程术语要**全量**注入: 纯按匹配筛选会**死循环** —— 句子被 ASR 听错时
     (macroscopic→"max chocolate")术语匹配不到, 于是不注入, 模型没有领域先验, 永远修不回来。
@@ -269,11 +274,15 @@ def select_terms(sentence: str, terms: list[str],
         if best >= 0.6:
             scored.append((best, t))
     scored.sort(key=lambda x: x[0], reverse=True)
-    seen, picked = set(), []
-    for t in list(core) + list(always) + [t for _, t in scored[:max_dyn]]:
-        k = t.lower()
-        if k not in seen:
-            seen.add(k); picked.append(t)
+    seen: set = set()
+    stable: list[str] = []
+    dyn: list[str] = []
+    for out, group in ((stable, list(core) + list(always)), (dyn, [t for _, t in scored[:max_dyn]])):
+        for t in group:
+            k = t.lower()
+            if k not in seen:
+                seen.add(k); out.append(t)
+    picked = stable + dyn
     # ⭐ 可选的只读计数（`stats` 由调用方给，**不改返回值契约**）。
     #    用途：判断「术语系统值不值」—— 见记忆 `classlive-term-injection-cost`。
     #    ⚠️ 记的是**去重前**每一档贡献了几条 + 去重后实际注入几条 —— 两个都要，
@@ -285,7 +294,17 @@ def select_terms(sentence: str, terms: list[str],
         stats["scored"] = stats.get("scored", 0) + len(scored[:max_dyn])
         stats["picked"] = stats.get("picked", 0) + len(picked)
         stats["empty"] = stats.get("empty", 0) + (0 if picked else 1)
-    return "\n".join(picked) if picked else "(无特定术语)"
+    return stable, dyn
+
+
+def select_terms(sentence: str, terms: list[str],
+                 core: list[str] | None = None, max_dyn: int = MAX_DYNAMIC_TERMS,
+                 always: list[str] | None = None,
+                 stats: dict | None = None) -> str:
+    """`select_term_parts` 的一整串形态（逐行一个术语）。老调用点（本地引擎、`ctx_chunk=0`）用它。"""
+    stable, dyn = select_term_parts(sentence, terms, core, max_dyn, always, stats)
+    picked = stable + dyn
+    return "\n".join(picked) if picked else NO_TERMS
 
 
 DRAFT_SYSTEM = "你是实时字幕翻译器。把用户给的英文口语快速译成中文, 只输出中文译文。"
@@ -514,8 +533,7 @@ class Translator:
                         raise RuntimeError(self._load_err)
                     if not local_model_present():
                         self._load_err = (
-                            "本地模型没装（Qwen3-1.7B，可选）—— 本次只保留转录；"
-                            "装它：跑 `cl doctor`，按它打出的命令装完再重开")
+                            "本地模型没装（可选）；跑 `cl doctor` 看怎么装")
                         raise RuntimeError(self._load_err)
                     _configure_mlx()
                     # ⚠️ **赋值顺序是这里的关键**: 必须先 tokenizer、后 model。

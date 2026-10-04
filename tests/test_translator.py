@@ -216,6 +216,115 @@ def t_local_missing_latches():
         T.local_model_present = orig
 
 
+# ---------------------------------------------------------------- select_term_parts（2026-10-04）
+@case("⭐⭐ `select_term_parts`：`stable` 与句子**无关**；`dyn` 随句变；`select_terms` = 两段连起来（老行为逐字不变）")
+def t_select_term_parts_split():
+    terms = ["monopoly", "oligopoly", "elasticity", "T1"]
+    kw = dict(core=["CORE1"], always=["T1", "T2"])
+    s1, d1 = T.select_term_parts("the monopoly case", terms, **kw)
+    s2, d2 = T.select_term_parts("completely unrelated words here", terms, **kw)
+    assert s1 == s2 == ["CORE1", "T1", "T2"], f"稳定段不许随句变：{s1} {s2}"
+    assert "monopoly" in d1 and "monopoly" not in d2, f"动态段应随句变：{d1} {d2}"
+    assert not set(x.lower() for x in s1) & set(x.lower() for x in d1), "两段不许重复同一术语"
+    assert T.select_terms("the monopoly case", terms, **kw) == "\n".join(s1 + d1)
+    assert T.select_terms("x y z", [], core=[], always=[]) == T.NO_TERMS, "什么都没有时给占位串"
+    s3, d3 = T.select_term_parts("x y z", [], core=[], always=[])
+    assert s3 == [] and d3 == [], "云端布局要的是空列表，不是占位串"
+
+
+# ---------------------------------------------------------------- 云端前文窗口（2026-10-04）
+def _ct(chunk: int, max_ctx: int = 5):
+    import cloud_translator as CT
+    return CT.CloudTranslator("k", "m", glossary_terms=["T1", "T2", "monopoly", "oligopoly"],
+                              max_context=max_ctx, core=["CORE1"], course_terms=["T1", "T2"],
+                              domain="Econ 101", ctx_chunk=chunk)
+
+
+@case("⭐ 块对齐窗口：长度恒在 [chunk, 2*chunk)（够长之后），起点只在块边界上动")
+def t_chunk_window_shape():
+    tr = _ct(10)
+    hist = [f"s{i}" for i in range(80)]
+    starts = {}
+    for n in range(0, 80):
+        w = tr._ctx_window(hist[:n])
+        if n < 10:
+            assert w == hist[:n], f"不足一块时应全给：n={n} {w}"
+        else:
+            assert 10 <= len(w) < 20, f"窗口长度越界：n={n} len={len(w)}"
+        start = n - len(w)
+        starts.setdefault(n // 10, set()).add(start)
+    assert all(len(v) == 1 for v in starts.values()), f"同一块内起点必须不动：{starts}"
+    assert starts[3] == {20} and starts[7] == {60}, f"起点应为「上一块的起点」：{starts}"
+
+
+@case("⭐⭐ 同一块内：下一句的 user 消息以上一句的「前文段」为前缀（只往后追加）；跨块才重起（前缀可缓存）")
+def t_chunk_prefix_append_only_within_block():
+    """DeepSeek 前缀缓存认「从头逐字相同」。块对齐窗口的性质是：同一块内起点不动，
+    只在末尾追加新句 —— 所以上一句的「到前文末尾为止」那一段，正是下一句的前缀。
+    ⚠️ 不是「整个前文段逐字相同」（末尾每句都多一条），第一版测试就这么写错过。"""
+    tr = _ct(10)
+    hist = [f"sentence number {i}" for i in range(60)]
+    cut = "Extra terms possibly relevant to this utterance:"
+    pre = lambda n: tr._user_content("monopoly is bad", hist[:n], "TAIL").split(cut)[0].rstrip("\n")
+    for n in (31, 32, 38):
+        assert pre(n + 1).startswith(pre(n)), f"块内应只追加：n={n}"
+    assert not pre(40).startswith(pre(39)), "跨块窗口起点应变（否则窗口会无限长）"
+    # 对照：老的滑动窗口每句都整体右移 —— 前文段的**开头**就变了，这就是要换掉它的原因
+    old = _ct(0)
+    pre_old = lambda n: old._user_content("monopoly is bad", hist[:n], "TAIL").split("ASR utterance:")[0].rstrip("\n")
+    assert not pre_old(32).startswith(pre_old(31)), "老布局每句前缀都变（若这条红了，说明对照物坏了）"
+
+
+@case("⭐ 块对齐布局的顺序：课程 → 稳定术语 → 前文 → 本句召回术语 → 本句 → 指令")
+def t_chunk_layout_order():
+    tr = _ct(10)
+    u = tr._user_content("the oligopoly case", [f"c{i}" for i in range(25)], "TAIL-X")
+    marks = ["Course: Econ 101", "Course terms:", "Recent context (already corrected):",
+             "Extra terms possibly relevant to this utterance:", "ASR utterance:\nthe oligopoly case", "TAIL-X"]
+    idx = [u.index(m) for m in marks]
+    assert idx == sorted(idx), f"顺序不对：{list(zip(marks, idx))}"
+    stable_part = u.split("Recent context")[0]
+    assert "CORE1" in stable_part and "T1" in stable_part and "T2" in stable_part, "核心/课程术语应在稳定段"
+    assert "oligopoly" not in stable_part, "本句召回的术语不许进稳定段（会让前缀每句都变）"
+    assert "oligopoly" in u.split("Extra terms possibly relevant to this utterance:")[1].split("ASR utterance")[0], \
+        "本句召回的术语应在 Extra terms 段"
+
+
+@case("⭐⭐ `ctx_chunk=0` 时两条 user 消息与老版**逐字相同**（冻结的字面量 = 用 HEAD 旧代码实跑出来的，不是再调一遍函数比）")
+def t_legacy_layout_frozen():
+    tr = _ct(0, max_ctx=2)
+    got = {}
+
+    def fake(messages, max_tokens):
+        got["m"] = messages
+        return iter(["ZH: x\nEN: y"])
+
+    tr._stream_chat = fake
+    tr.fix_and_translate_stream("the oligopoly case", ["a", "b", "c"])
+    t_msg = got["m"][1]["content"]
+    tr.fix_stream("the oligopoly case", ["a", "b", "c"])
+    f_msg = got["m"][1]["content"]
+    head = ("Course: Econ 101\nCourse terms:\nCORE1\nT1\nT2\noligopoly\nmonopoly\n\n"
+            "Recent context (already corrected):\n- b\n- c\n\n"
+            "ASR utterance:\nthe oligopoly case\n\n")
+    assert t_msg == head + (
+        "Now translate the ASR utterance above into Chinese and output exactly:\n"
+        "ZH: <Chinese translation of the CORRECTED sentence>\n"
+        "EN: <same utterance with ASR mishearings fixed>\n"
+        "Do not repeat the course-terms list. No headings."), f"翻译消息被改了：{t_msg!r}"
+    assert f_msg == head + ("Now output that same utterance with ASR mishearings fixed. "
+                            "English only — no Chinese, no label."), f"矫正消息被改了：{f_msg!r}"
+
+
+@case("两种布局都不丢任何一条召回术语（只是换位置）")
+def t_no_term_lost():
+    for chunk in (0, 10):
+        tr = _ct(chunk)
+        u = tr._user_content("monopoly and oligopoly", [f"c{i}" for i in range(12)], "")
+        for t in ("CORE1", "T1", "T2", "monopoly", "oligopoly"):
+            assert t in u, f"chunk={chunk} 丢了术语 {t}"
+
+
 def main_() -> int:
     print("=" * 60)
     fail: list[str] = []

@@ -20,7 +20,8 @@ from capture import load_source, SR
 from vad import Segmenter
 from asr import load_asr, load_final_asr, is_degenerate
 from translator import load_translator
-from cloud_translator import (load_api_key, load_translator as load_cloud_translator,
+from cloud_translator import (DEFAULT_CTX_CHUNK, load_api_key,
+                              load_translator as load_cloud_translator,
                               answer_user_content)
 from obsidian_writer import ObsidianWriter, resolve_vault, remember_vault
 from build_notes import (TermNotes, format_gloss, detect_proper_nouns, lookup_term)
@@ -1133,7 +1134,8 @@ def run(args) -> None:
             cloud_tr = load_cloud_translator(api_key_val, args.cloud_model,
                                              args.glossary, args.context,
                                              course=args.course,
-                                             extra_terms=extra_terms)
+                                             extra_terms=extra_terms,
+                                             ctx_chunk=args.cloud_context)
             echo(f"☁ 引擎: {args.engine} (云端 {args.cloud_model})")
         else:
             echo("⚠ 未找到 DeepSeek API key(--api-key / DEEPSEEK_API_KEY / "
@@ -2248,6 +2250,9 @@ def main():
         os.path.dirname(os.path.abspath(__file__)), "glossary.txt"))
     p.add_argument("--context", type=int, default=5,
                    help="送翻译的最近上下文句数(默认 5; 远场听错多, 上下文越长越好修)")
+    p.add_argument("--cloud-context", type=int, default=DEFAULT_CTX_CHUNK,
+                   help="云端翻译的前文块大小(默认 %(default)s: 窗口 10–19 句、块对齐以命中 DeepSeek 前缀缓存); "
+                        "0 = 老的「最近 --context 句」滑动窗口。本地引擎不受影响(仍用 --context)")
     p.add_argument("--engine", choices=["auto", "cloud", "local"], default="auto",
                    help="翻译引擎: auto(云端优先,失败降级)/cloud/local")
     p.add_argument("--cloud-model", default="deepseek-flash",

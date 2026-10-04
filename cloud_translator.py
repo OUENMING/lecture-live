@@ -10,7 +10,7 @@ DEEPSEEK_API_KEY, 再次 `~/.classlive/credentials`(见 `paths.credentials`),
 from __future__ import annotations
 import json, os, pathlib
 
-from translator import Result, _StreamParser, _clean_fix, domain_block
+from translator import Result, _StreamParser, _clean_fix, domain_block, select_term_parts
 
 # 云端用**英文** system prompt: 实测比中文指令首字快约 15%(0.51s vs 0.60s),
 # 译文也更自然; 符合 DeepSeek 官方"提示词保持单一语言"的建议。
@@ -201,6 +201,14 @@ def load_api_key(explicit: str | None = None) -> str | None:
     return None
 
 
+def _lines_or_none(lines: list[str]) -> str:
+    return "\n".join(lines) if lines else "(none)"
+
+
+#: 云端前文块大小的默认值（CLI `--cloud-context`、构造器、`load_translator` 都用它）。0 = 老的滑动窗口。
+DEFAULT_CTX_CHUNK = 10
+
+
 class CloudTranslator:
     """DeepSeek 流式翻译。失败由调用方捕获后降级本地。"""
 
@@ -208,7 +216,7 @@ class CloudTranslator:
                  glossary_terms: list[str] | None = None, max_context: int = 2,
                  timeout: float = 30.0, core: list[str] | None = None,
                  course_terms: list[str] | None = None, domain: str = "",
-                 collect_usage: bool = False):
+                 collect_usage: bool = False, ctx_chunk: int = DEFAULT_CTX_CHUNK):
         import httpx
         self._key = api_key
         self._model = model
@@ -223,6 +231,12 @@ class CloudTranslator:
         self.term_stats: dict = {}
         self._domain = domain
         self._max_ctx = max_context
+        #: ⭐ 块对齐窗口（2026-10-04）。>0 = 以这么多句为一块；0 = 老的「最近 max_context 句」滑动窗口。
+        #: 为什么：滑动窗口每句都整体右移 → 消息前缀每句都变 → DeepSeek 前缀缓存只能命中
+        #: system + 术语那一小截（实测约 46%）。块对齐窗口在同一块内起点不动，前缀逐字相同，
+        #: 实测命中 70–75%、首字 p50 0.78s → 0.65s、输入成本约 −39%，而且带的前文更多（10–19 句）。
+        #: 数据与取舍见 docs/experiments/context_ab.md。⚠️ `ctx_chunk>0` 时 `max_context` **不起作用**。
+        self._ctx_chunk = max(0, int(ctx_chunk))
         self._timeout = timeout
         # 汇总最近一次请求的 usage(含 prompt_cache_hit_tokens / miss)。
         # 开着才给请求加 stream_options, 否则线上请求体一字不变。
@@ -293,20 +307,47 @@ class CloudTranslator:
         return select_terms(en, self._terms, core=self._core,
                             always=self._course_terms, stats=self.term_stats)
 
+    def _ctx_window(self, context: list[str]) -> list[str]:
+        """送给模型的前文。`ctx_chunk>0`：块对齐窗口，起点 = 「上一块」的起点，
+        所以窗口长度在 [chunk, 2*chunk) 内、同一块内连续请求的起点相同（前缀可缓存）；
+        `ctx_chunk==0`：老行为，最近 `max_context` 句。"""
+        n = len(context)
+        if self._ctx_chunk > 0:
+            c = self._ctx_chunk
+            return context[max(0, (n // c) * c - c):]
+        return context[-self._max_ctx:] if self._max_ctx > 0 else []
+
+    def _user_content(self, en: str, context: list[str], tail: str) -> str:
+        """一句的 user 消息。`tail` = 末尾的任务指令（翻译 / 只矫正，措辞与老版逐字相同）。
+
+        ⚠️ 老布局（`ctx_chunk==0`）**逐字不变**。块对齐布局把**稳定的**东西放前面
+        （课程 + 核心/课程术语），**随句变的**放后面（前文窗口之后才是本句召回的术语与本句）——
+        前缀缓存只认「从头开始逐字相同的那一段」，顺序错了就白搭。
+        """
+        ctx = self._ctx_window(context)
+        ctx_block = _lines_or_none([f"- {c}" for c in ctx])
+        if self._ctx_chunk <= 0:
+            return (f"{domain_block(self._domain)}"
+                    f"Course terms:\n{self._terms_block(en)}\n\n"
+                    f"Recent context (already corrected):\n{ctx_block}\n\n"
+                    f"ASR utterance:\n{en}\n\n" + tail)
+        stable, dyn = select_term_parts(en, self._terms, core=self._core,
+                                        always=self._course_terms, stats=self.term_stats)
+        return (f"{domain_block(self._domain)}"
+                f"Course terms:\n{_lines_or_none(stable)}\n\n"
+                f"Recent context (already corrected):\n{ctx_block}\n\n"
+                f"Extra terms possibly relevant to this utterance:\n{_lines_or_none(dyn)}\n\n"
+                f"ASR utterance:\n{en}\n\n" + tail)
+
     # ---- 与本地 Translator 同接口 ----
     def fix_and_translate_stream(self, en: str, context: list[str],
                                  on_zh=None, on_en=None) -> Result:
-        ctx = context[-self._max_ctx:] if self._max_ctx > 0 else []
-        ctx_block = "\n".join(f"- {c}" for c in ctx) if ctx else "(none)"
-        user = (f"{domain_block(self._domain)}"
-                f"Course terms:\n{self._terms_block(en)}\n\n"
-                f"Recent context (already corrected):\n{ctx_block}\n\n"
-                f"ASR utterance:\n{en}\n\n"
-                f"Now translate the ASR utterance above into Chinese and output exactly:\n"
-                f"ZH: <Chinese translation of the CORRECTED sentence>\n"
-                f"EN: <same utterance with ASR mishearings fixed>\n"
-                f"Do not repeat the course-terms list. No headings."
-                )
+        user = self._user_content(
+            en, context,
+            f"Now translate the ASR utterance above into Chinese and output exactly:\n"
+            f"ZH: <Chinese translation of the CORRECTED sentence>\n"
+            f"EN: <same utterance with ASR mishearings fixed>\n"
+            f"Do not repeat the course-terms list. No headings.")
         msgs = [{"role": "system", "content": SYSTEM_PROMPT_CLOUD},
                 {"role": "user", "content": user}]
         parser = _StreamParser(on_zh or (lambda s: None), on_en or (lambda s: None))
@@ -323,14 +364,10 @@ class CloudTranslator:
 
     # ---- 只矫正英文(关闭中文翻译时用) ----
     def fix_stream(self, en: str, context: list[str], on_en=None) -> str:
-        ctx = context[-self._max_ctx:] if self._max_ctx > 0 else []
-        ctx_block = "\n".join(f"- {c}" for c in ctx) if ctx else "(none)"
-        user = (f"{domain_block(self._domain)}"
-                f"Course terms:\n{self._terms_block(en)}\n\n"
-                f"Recent context (already corrected):\n{ctx_block}\n\n"
-                f"ASR utterance:\n{en}\n\n"
-                f"Now output that same utterance with ASR mishearings fixed. "
-                f"English only — no Chinese, no label.")
+        user = self._user_content(
+            en, context,
+            f"Now output that same utterance with ASR mishearings fixed. "
+            f"English only — no Chinese, no label.")
         msgs = [{"role": "system", "content": FIX_SYSTEM_CLOUD},
                 {"role": "user", "content": user}]
         buf: list[str] = []
@@ -415,7 +452,8 @@ class CloudTranslator:
 
 def load_translator(api_key: str, model: str, glossary_path: str | None,
                     max_context: int = 2, course: str | None = None,
-                    extra_terms: list | None = None):
+                    extra_terms: list | None = None, ctx_chunk: int = DEFAULT_CTX_CHUNK,
+                    collect_usage: bool = False):
     from translator import (load_terms, merge_terms, core_terms, course_term_list,
                             course_title)
     return CloudTranslator(api_key, model,
@@ -423,4 +461,5 @@ def load_translator(api_key: str, model: str, glossary_path: str | None,
                                load_terms(glossary_path, course), extra_terms),
                            max_context=max_context, core=core_terms(course),
                            course_terms=course_term_list(glossary_path, course),
-                           domain=course_title(glossary_path, course))
+                           domain=course_title(glossary_path, course),
+                           ctx_chunk=ctx_chunk, collect_usage=collect_usage)

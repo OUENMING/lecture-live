@@ -18,11 +18,13 @@
 """
 from __future__ import annotations
 
+import http.server
 import json
 import pathlib
 import shutil
 import sys
 import tempfile
+import threading
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
@@ -35,6 +37,42 @@ RESULTS: list[tuple[str, bool, str]] = []
 def check(name: str, ok: bool, detail: str = "") -> None:
     RESULTS.append((name, ok, detail))
     print(f"  {'✅' if ok else '❌'} {name}" + (f"  {detail}" if detail else ""))
+
+
+class _Srv:
+    """本机 HTTP 服务器：收 PUT，记录 `{path, auth, ct, body}`；状态码可配。
+
+    ⚠️ 照 `tests/test_fetch_model.py` 的本机服务器形状 —— **不碰真服务器、
+       不需要凭据、不联网**（生产那个 `make_http_send` 走的就是这条 PUT 契约）。
+    """
+
+    def __init__(self, status: int = 200):
+        self.reqs: list[dict] = []
+        reqs_, status_ = self.reqs, status
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_PUT(self):                                     # noqa: N802
+                n = int(self.headers.get("Content-Length") or 0)
+                reqs_.append({
+                    "path": self.path,
+                    "auth": self.headers.get("Authorization"),
+                    "ct": self.headers.get("Content-Type"),
+                    "clen": self.headers.get("Content-Length"),
+                    "body": self.rfile.read(n) if n else b"",
+                })
+                self.send_response(status_)
+                self.end_headers()
+
+            def log_message(self, *a):                            # noqa: D401
+                pass
+
+        self.s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.s.server_address[1]}"
+        threading.Thread(target=self.s.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.s.shutdown()
+        self.s.server_close()
 
 
 def main() -> int:
@@ -187,18 +225,57 @@ def main() -> int:
         check("⚠️ 队列文件坏了 -> 空队列（系统边界要宽容）", q5.pending == 0,
               str(q5.pending))
 
-        print("\n--- T13 ⭐⭐ `rsync_path`：`$HOME` **不许转义** ---")
-        # ⚠️ 这条是**真跑才发现的**（2026-09-30）：手敲 `--rsync-path="…\$HOME…"`
-        #    能过（本地 shell 吃掉反斜杠），而代码里走 argv **没有本地 shell**
-        #    → `\$` 原样到远端 → `mkdir` 拿到字面量 `$HOME` → 目录没建 → rc=3。
-        #    变异验证：把返回值里的 `$HOME` 改回 `\$HOME` -> 第一条红。
-        _rp = upload.rsync_path("classlive-test", "abc123def456")
-        check("⭐⭐ 串里**一个反斜杠都不许有**（argv 那条路没有 shell 吃它）",
-              "\\" not in _rp, repr(_rp))
-        check("⭐ 含 `mkdir -p`（本机 rsync 是 openrsync，**不支持 `--mkpath`**）",
-              "mkdir -p" in _rp, repr(_rp))
-        check("⭐ 没有子目录时不套 `mkdir`（多余的一次远端命令）",
-              upload.rsync_path("d", "") == "rsync")
+        print("\n--- T13 ⭐⭐ `_remote_name`：远端名不带课号/时间戳 ---")
+        # ⚠️ 文件名带课号 + 精确时间戳 = 一份课表 → 远端对象名必须是**按类型**的
+        #    稳定名。⚠️ 崩溃补传造的 `<stem>.meta.json` **也要认**，不然它原名透传
+        #    → 课号+时间戳又漏回去（2026-10-05 抓到的既有泄漏）。
+        #    变异验证：把 `.meta.json` 那条删掉 -> 最后一格红。
+        _stem = "2026-09-24_203440_ECON10770"
+        for _src, _want in ((f"{_stem}.report.json", "report.json"),
+                            (f"{_stem}.md", "transcript.md"),
+                            (f"{_stem}.001.opus", "audio.001.opus"),
+                            (f"{_stem}.002.wav", "audio.002.wav"),
+                            (f"{_stem}.meta.json", "meta.json")):
+            _got = upload._remote_name(pathlib.Path(_src))
+            check(f"⭐ `{_want}`", _got == _want, _got)
+            check(f"⚠️ `{_want}` 里**不含 stem**（不泄漏课号/时间戳）",
+                  _stem not in _got, _got)
+
+        print("\n--- T15 ⭐⭐ `make_http_send`：HTTPS PUT 的契约 ---")
+        # 生产那条路 = PUT 到 Worker（**用户零配置**）。判据用一个本机 HTTP 服务器
+        # 钉住「拼 URL / 带 Authorization / body 一致 / 非 2xx 与连不上都 False 且不抛」。
+        # ⚠️ 变异验证：把 `Authorization` 头删掉 -> 头那条红；把返回判据改成 `== 200`
+        #    -> 非 2xx 那几条里 204 会漏（这里用 2xx 区间）。
+        _srv = _Srv(200)
+        try:
+            _f = tmp / "audio.001.opus"
+            _f.write_bytes(b"OPUSDATA" * 100)
+            _key = upload.session_key("sess-H") + "/audio.001.opus"
+            check("⭐⭐ 成功（2xx）-> True",
+                  upload.make_http_send(_srv.url, "tok-abc")(_f, _key) is True)
+            _r = _srv.reqs[0]
+            check("⭐⭐ PUT 到了 `<endpoint>/<key>`", _r["path"] == f"/{_key}", _r["path"])
+            check("⭐⭐ `Authorization: Bearer <token>` 头对",
+                  _r["auth"] == "Bearer tok-abc", str(_r["auth"]))
+            check("⭐⭐ 带了 `Content-Length`（Worker 体积闸门读它；chunked 会被当 0 拒）",
+                  _r["clen"] == str(len(_f.read_bytes())), str(_r["clen"]))
+            check("⭐ body 字节一致", _r["body"] == _f.read_bytes(), str(len(_r["body"])))
+        finally:
+            _srv.close()
+
+        for _code in (401, 413, 400):
+            _s = _Srv(_code)
+            try:
+                check(f"⭐ 服务端 {_code} -> False",
+                      upload.make_http_send(_s.url, "t")(_f, "x/y") is False)
+            finally:
+                _s.close()
+
+        try:
+            check("⭐⭐ 连不上 -> False（**不抛** —— 调用方是退避循环）",
+                  upload.make_http_send("http://127.0.0.1:1", "t")(_f, "x/y") is False)
+        except Exception as _e:                                   # noqa: BLE001
+            check("⭐⭐ 连不上 -> False（**不抛**）", False, f"抛了 {type(_e).__name__}")
 
         print("\n--- T14 ⭐⭐ 崩溃恢复：开机扫残留的 `.pending` 标记 ---")
         # ⚠️⚠️ 这条守的是**整类数据不丢**：`TestSession.finish()` 跑不到
@@ -226,6 +303,10 @@ def main() -> int:
               any(n.endswith(".001.opus") for n in _names), str(_names))
         check("⭐ 写了一份 `meta.json` 标明这次是**崩过的**",
               any(n.endswith(".meta.json") for n in _names), str(_names))
+        # ⚠️⚠️ 正文不许带课号+时间戳（`_prepare` 的 scrub 只认路径，认不出 stem/文件名）。
+        _meta_body = (rsess / f"{stem}.meta.json").read_text(encoding="utf-8")
+        check("⭐⭐ 崩溃标记**正文不含 stem**（课号+时间戳不外漏）",
+              stem not in _meta_body, _meta_body[:100])
         # ⚠️ 变异验证：把 `.replace(...)` 那句删掉 -> 这条红（会每次启动都重复排）。
         check("⭐⭐ 标记**改名**而不是删（不再重复触发，且留痕）",
               not (rsess / f"{stem}{upload.PENDING_TAIL}").exists()

@@ -239,7 +239,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | 旁路文件 | 同目录 `.lost.jsonl` / `.atoms.jsonl` / `.chapters.jsonl` | 新数据只写这里 |
 | 课后笔记 | `<vault>/Lectures/` | **防覆盖**：同名已存在 → 新笔记带**生成时间戳** |
 | 用户状态 | `~/.classlive/`（credentials / vault / courses / 队列…） | 不进 git；`paths.py` 是唯一定义点 |
-| 测试模式上传 | VPS `ssh bldcam → ~/classlive-test/` | 默认关；上传有队列/退避/脱敏 |
+| 测试模式上传 | Cloudflare Worker + R2（`ingest.bldcam.page` → 桶 `classlive-ingest`）—— **用户零配置**；见 `docs/PLAN-zero-config-upload.md` | 默认关；上传有队列/退避/脱敏 |
 | 音频 | **正常上课从不落盘**；唯一例外 = 测试模式（开课前要跟同学说明） | |
 
 隐私红线：**音频不出机器、只发文本**；测试模式传出去的包含真实课堂内容（可能含同学声音）

@@ -65,6 +65,39 @@
 （`_whatsnew_body` 从最新往下数到「你上次看过的版本」为止），多版本时每行前面标版本号。
 所以**每个版本的看点都要能独立看懂**，不要写"同上""见上一条"。
 
+## [3.8.9] - 2026-10-05
+
+### 更新看点
+
+- ✨ **重构测试模式上传机制**
+- 🐛 **修复了一些 bug**
+
+### 升级须知（3.8.8 → 3.8.9）
+
+没有新模型、没有新依赖（`httpx` 本来就在用）。上传落点从作者的 VPS 换到 Cloudflare，
+**用户侧不需要做任何事** —— 开测试模式照旧，课后自己就传上去了。
+⚠️ 测试模式录的是**这节课的真实音频与逐字转录**，可能含其他同学的声音 —— 开课前说一句。
+
+### Added
+
+- `upload_endpoint.py`：上传落点（endpoint + 公开只写令牌）的单一来源
+- `server/upload-worker/`：Cloudflare Worker（摄入端）+ `wrangler.toml` + `test.mjs`（执行真源码的判据）
+- `docs/PLAN-zero-config-upload.md`：唯一正本（含调研出处与安全模型）
+
+### Changed
+
+- `upload.py`：`make_http_send` 替掉 `make_rsync_send`/`rsync_path`（HTTPS PUT，走已在依赖里的 `httpx`）；
+  `_remote_name` 补 `*.meta.json` / `*.NNN.wav`；`recover_pending` 的 meta 不再写 stem / 原始文件名
+- `main.py`：删 `UPLOAD_HOST`/`UPLOAD_REMOTE`，两处接线改 `make_http_send`
+- Worker 硬化（公开令牌前提下的服务端防线）：鉴权 **fail-closed**（secret 未配时不再被
+  `"Bearer undefined"` 绕过）；体积上限**按实际字节数**卡（不信 `Content-Length`）；R2 写失败回 502
+
+### Fixed
+
+- 崩溃补传的 `.wav` 分段：以前名字漏课号+时间戳，且（切到 HTTP 后）会被白名单 400 拒 →
+  那条崩溃音频永远传不上去；现补名 + Worker 放行
+- 崩溃标记 `meta.json` 的**正文**以前带 stem + 原始文件名（`scrub` 只认路径）→ 现只留哈希 key
+
 ## [3.8.8] - 2026-10-04
 
 ### 更新看点

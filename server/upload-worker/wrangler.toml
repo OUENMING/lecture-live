@@ -1,0 +1,38 @@
+# ClassLive 测试上传的摄入端 —— 校验公开 token 后把 body 写进 R2。
+#
+# 部署：
+#   cd server/upload-worker
+#   wrangler secret put INGEST_TOKEN      # 值与 upload_endpoint.py 的 TOKEN 一致
+#   wrangler deploy
+#
+# ⚠️ **只写**：不加任何读 / 列 / 删路由 —— 一旦有读，公开 token 就从
+#    「只写」变成「能读别人数据」，性质全变。
+# ⚠️ 设计与安全模型见 ../../docs/PLAN-zero-config-upload.md §5/§6。
+
+name = "classlive-upload"
+main = "src/index.js"
+compatibility_date = "2025-10-01"
+
+# 自定义域：把 ingest.bldcam.page 接到这个 Worker（Cloudflare 自动管 DNS + 证书）。
+# ⚠️⚠️ **必须写在任何 `[table]` 之前** —— TOML 里 `routes` 一旦跟在 `[ratelimits.simple]`
+#     后面，就会被解析成**那张表的键**（wrangler 只给一条 warning），于是路由根本没建
+#     → `ingest.bldcam.page` 解析不了、探针 HTTP 000。（2026-10-05 踩到）
+routes = [
+  { pattern = "ingest.bldcam.page", custom_domain = true }
+]
+
+# R2 桶（私有；无公开读 / 无 R2.dev 域）。
+# ⚠️ 180 天生命周期**不在这里配** —— wrangler.toml 不支持 lifecycle 规则；
+#    要在 Cloudflare Dashboard（桶 → Settings → Object lifecycle）或 API 里另设。
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "classlive-ingest"
+
+# ⚠️ Rate Limiting binding 需要 wrangler >= 4.36.0（官方文档注明）。
+[[ratelimits]]
+name = "INGEST_LIMITER"
+namespace_id = "1001"
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+

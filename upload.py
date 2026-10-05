@@ -2,7 +2,7 @@
 """课后上传 —— **队列 / 退避 / 幂等 / 脱敏**。给测试模式用。
 
     from upload import UploadQueue
-    q = UploadQueue(send=my_send)                 # 生产：rsync 到 VPS
+    q = UploadQueue(send=my_send)                 # 生产：HTTPS PUT 到 Cloudflare Worker
     q.enqueue([pathlib.Path("a.opus"), ...], stem="2026-09-30_154742_ECON10770")
     q.pump()                                      # 试一轮；失败就留着
 
@@ -22,7 +22,9 @@
    对象，不会变成两份。⚠️ **不能用内容哈希**：`report.json` 里有 `generated`
    时间戳，每次跑都不一样 → 内容哈希会把同一节课**变成两个对象**。
 4. ⚠️ **传输无关**：`send(local, key) -> bool` 是唯一的洞。
-   生产传 `rsync` 到 VPS；判据传一个**本地目录**（不碰真服务器、不需要凭据）。
+   生产传 **HTTPS PUT** 到 Cloudflare Worker（**用户零配置** —— 见
+   `docs/PLAN-zero-config-upload.md`）；判据传一个**本地目录**或**本机 HTTP 服务器**
+   （不碰真服务器、不需要凭据）。
 
 ## ⚠️ 为什么 key 是「会话名的哈希」
 
@@ -270,7 +272,7 @@ def _remote_name(local: pathlib.Path) -> str:
     ⚠️ 文件头声称「哈希目录是为了不泄漏元数据（课号 + 精确时间戳 = 课表）」，而原来
        文件名**原样保留** → 远端目录是哈希、里面还是 `2026-09-24_140000_ECON10740.md`
        —— 声明与实现对不上，换个收件方就是事实上的泄漏。这里按**文件类型**给稳定名。
-    ⚠️ 故意**保留类型后缀**：收件端还要一眼分清报告 / 转录 / 音频。
+    ⚠️ 故意**保留类型后缀**：收件端还要一眼分清报告 / 转录 / 音频 / 崩溃标记。
     ⚠️ 同一节课内类型名互不冲突；跨课由 `{key}/` 目录分开 —— 覆盖语义与原来一致
        （重发本来就是"同名覆盖"，见 `pump` 的 docstring）。
     """
@@ -282,30 +284,18 @@ def _remote_name(local: pathlib.Path) -> str:
     m = re.search(r"\.(\d{3})\.opus$", name)
     if m:
         return f"audio.{m.group(1)}.opus"
+    # ⚠️ 崩溃补传（`recover_pending`）会带上**没转成 opus 的 wav 分段**（`<stem>.NNN.wav`）——
+    #    不认它就会**原名透传** → 课号+时间戳漏回去，**且**切到 HTTP 后 Worker 白名单
+    #    也不认 `.wav` → 400 → 那条崩溃音频**永远传不上去**（一路退避到 14 天过期）。
+    m = re.search(r"\.(\d{3})\.wav$", name)
+    if m:
+        return f"audio.{m.group(1)}.wav"
+    # ⚠️ 崩溃补传的标记文件叫 `<stem>.meta.json` —— 同上，不认它就会漏课号+时间戳。
+    if name.endswith(".meta.json"):
+        return "meta.json"
     # ⚠️ 认不出的名字**原样透传**（判据里塞的任意文件名走这条），不许乱改名 ——
-    #    生产只会产出上面三类；改名只会让「名字对不上」出现在不该出现的地方。
+    #    生产只会产出上面几类；改名只会让「名字对不上」出现在不该出现的地方。
     return name
-
-
-def rsync_path(remote_dir: str, sub: str) -> str:
-    """`--rsync-path` 那个串。**抽出来只为一件事：让判据能钉住它。**
-
-    ⚠️⚠️ **`$HOME` 不许转义**（不能写成 `\\$HOME`）。这条是**真跑才发现的**：
-
-    · 走 **argv**（`subprocess.run([...])`）时**没有本地 shell** ——
-      `\\$` 会**原样**传到远端，远端 shell 把它当**转义过的美元**，
-      于是 `mkdir -p` 拿到的是**字面量 `$HOME`** → 目录没建 → rsync 报
-      `change_dir ... No such file or directory`（**rc=3**）。
-    · 而手工在 zsh 里敲 `--rsync-path="mkdir -p \\$HOME/… && rsync"` 时，
-      **本地 shell 先吃掉那个反斜杠** → 远端拿到 `$HOME` → 正常展开 ✓。
-    → **同一条命令，手敲能过、代码里不行。** 2026-09-30 实测两种写法：
-      转义版 rc=3（失败）、不转义版 rc=0（成功）。
-
-    ⚠️ 为什么要 `mkdir -p`：**本机的 rsync 是 openrsync**（macOS 新的替代实现，
-       报 `2.6.9 compatible`），**不支持 `--mkpath`** → 目标目录不存在就直接失败。
-       放进 `--rsync-path` 是**一次连接**（实测 0.61s vs 分开 ssh+rsync 的 1.07s）。
-    """
-    return (f"mkdir -p $HOME/{remote_dir}/{sub} && rsync" if sub else "rsync")
 
 
 #: 崩溃标记的后缀。`TestSession` 开录时写、`finish()` 时删。
@@ -345,9 +335,13 @@ def recover_pending(sessions_dir, send, *, root=None, clock=time.monotonic, now=
             # 写一份 meta，标明这次是**崩过的**
             meta = sd / (stem + ".meta.json")
             try:
-                info = {"crash_recovered": True, "stem": stem,
+                # ⚠️⚠️ **不写 stem、不写原始文件名** —— 那会把课号 + 精确时间戳带进
+                #      上传正文（`_prepare` 的 scrub 只认路径，不认这两个字段）。
+                #      要反查用哈希 `key`（与 upload-ledger.json 对得上）。
+                info = {"crash_recovered": True, "key": session_key(stem),
                         "recovered_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "files": [f.name for f in files]}
+                        "n_files": len(files),
+                        "kinds": sorted({f.suffix for f in files})}
                 meta.write_text(_json.dumps(info, ensure_ascii=False, indent=1),
                                 encoding="utf-8")
                 files.append(meta)
@@ -361,20 +355,35 @@ def recover_pending(sessions_dir, send, *, root=None, clock=time.monotonic, now=
     return out
 
 
-def make_rsync_send(host: str, remote_dir: str, *, timeout: float = 300.0):
-    """造一个「rsync 到 VPS」的 `send`。**生产用的那一个**。"""
-    import subprocess
+def make_http_send(base_url: str, token: str, *, timeout: float = 60.0):
+    """造一个「HTTPS PUT 到 Worker」的 `send`。**生产用的那一个。**
+
+    ⚠️⚠️ **为什么是 HTTP 不是 rsync**：rsync 那条路要求用户机器上有 ssh 别名 +
+       私钥（作者的是 `bldcam`）—— 而"测试模式的上传"是**给朋友的**，朋友机器上
+       没有那些东西 → 上传**静默失败**（0 条到位，见 `docs/PLAN-zero-config-upload.md`）。
+       HTTPS 任何装了 app 的机器都能直接发 → **用户零配置**。
+
+    ⚠️ `token` 是**公开**的（随 app 发出、仓库 MIT 公开）—— 它**不是密钥**，
+       只证明"这是 ClassLive 在发"。真正的防线在服务端（Worker）：路径白名单 /
+       体积上限 / 限流 / 只写。见 `docs/PLAN-zero-config-upload.md` §6。
+
+    ⚠️ 与 rsync 版**契约完全一致**：成功 True / 失败 False / **不许抛**
+       （调用方是退避循环，见 `UploadQueue.pump`）。
+    ⚠️ **整份读进来发**（`local.read_bytes()`，一节课 ≤ 约 9 MB）—— **不用**
+       `open(...)` 交给 httpx：那样 httpx 会走 **chunked**（无 `Content-Length`），
+       而 Worker 的体积闸门正是读 `Content-Length` → chunked 会被当成 0 拒掉。
+       发 bytes 才保证带上 `Content-Length`。
+    """
+    import httpx
 
     def send(local: pathlib.Path, key: str) -> bool:
-        rel = str(key)
-        sub = rel.rsplit("/", 1)[0] if "/" in rel else ""
-        rp = rsync_path(remote_dir, sub)
         try:
-            pr = subprocess.run(
-                ["rsync", "-a", "--partial", f"--rsync-path={rp}",
-                 str(local), f"{host}:{remote_dir}/{rel}"],
-                capture_output=True, timeout=timeout)
-            return pr.returncode == 0
+            with httpx.Client(timeout=timeout) as c:
+                r = c.put(f"{base_url.rstrip('/')}/{key}",
+                          content=local.read_bytes(),
+                          headers={"Authorization": f"Bearer {token}",
+                                   "Content-Type": "application/octet-stream"})
+            return 200 <= r.status_code < 300
         except Exception:                                     # noqa: BLE001
             return False
     return send

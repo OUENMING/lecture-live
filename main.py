@@ -39,11 +39,10 @@ SLEEP_GAP_S = 10.0          # 墙钟一次跳这么多 = 系统睡过一觉(见 
 #: 比它更长的一律放弃 —— 放弃之后 `ChapterWriter` 已关，迟到的写入是 no-op。
 SUMMARY_FINISH_S = 25
 
-#: 上传落点（作者 2026-09-30 定）：rsync 到那台 VPS 的 `~/classlive-test/`。
-#: ⚠️ 想换个地方改这两个；**想整个关掉**用 `CLASSLIVE_UPLOAD=0`
-#:    （判据与离线回放必须用它 —— 不然每跑一次测试就真往服务器传一份）。
-UPLOAD_HOST = "bldcam"
-UPLOAD_REMOTE = "classlive-test"
+#: 上传落点：**HTTPS PUT** 到 Cloudflare Worker（**用户零配置** —— 不再靠作者私人
+#: ssh 别名 `bldcam`，那正是"朋友传不上来"的根）。落点常量在 `upload_endpoint.py`
+#: （单一来源）。**想整个关掉**用 `CLASSLIVE_UPLOAD=0`
+#:    （判据与离线回放必须用它 —— 不然每跑一次测试就真往 R2 传一份）。
 
 #: 收尾时最多**等后台上传多久**。⚠️ 实测 9 MB = 1.8 秒（一节课的 Opus），
 #: 所以 10 秒够正常那一次跑完；跑不完就留着，下次启动接着传。
@@ -270,8 +269,9 @@ def _shared_upload_queue():
     global _upload_q_shared
     if _upload_q_shared is None:
         import upload as _up
+        import upload_endpoint as _ue
         _upload_q_shared = _up.UploadQueue(
-            _up.make_rsync_send(UPLOAD_HOST, UPLOAD_REMOTE))
+            _up.make_http_send(_ue.endpoint(), _ue.token()))
     return _upload_q_shared
 
 
@@ -1192,8 +1192,9 @@ def run(args) -> None:
     try:
         import upload as _upmod
         import obsidian_writer as _owmod
+        import upload_endpoint as _uemod
         _r = _upmod.recover_pending(
-            _owmod.SESSIONS, _upmod.make_rsync_send(UPLOAD_HOST, UPLOAD_REMOTE))
+            _owmod.SESSIONS, _upmod.make_http_send(_uemod.endpoint(), _uemod.token()))
         if _r.get("queued"):
             echo(f"📤 发现上次没收尾的测试课 {_r['found']} 节"
                  f" —— 已把已录到的部分排进上传队列（带 crash_recovered 标记）")

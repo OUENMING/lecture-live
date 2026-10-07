@@ -989,7 +989,15 @@ def _maybe_notice_update() -> dict | None:
         return None                                 # 提示而已, 任何失败都静默
 
 
-def spin_until(until, tick, ui_gone) -> None:
+#: 收尾等待的**兜底上限**（秒）。43 分钟的课转码正常约 21 秒 → 600s 是 20 倍余量。
+#: ⚠️ 为什么必须有（2026-10-07 独立复核指出）：把"窗口一关就秒退、把后台的活丢下"
+#:    修好之后，换来了一个**新**风险 —— 窗口已经关了时 `spin_until` 只等 `until()`，
+#:    万一后台那步卡住（`_to_opus` 每段 180s 超时、而段数不限），进程**永不退出**，
+#:    且**没有界面可点**。宁可超时后报一声、也不许挂死。
+SPIN_MAX_S = 600.0
+
+
+def spin_until(until, tick, ui_gone, *, max_wait_s: float = SPIN_MAX_S) -> None:
     """守着 `tick()` 等 `until()` 为真，或**用户此刻**关窗。**纯逻辑，可测。**
 
     `tick()` = 一轮等待（浮窗模式是 `ui.pump()`，终端模式是 `time.sleep`）。
@@ -1004,9 +1012,15 @@ def spin_until(until, tick, ui_gone) -> None:
        10-06 那次留下了"转到一半"的现场：`.001.opus` 生成了、`.001.wav` 却没被删
        （`_to_opus` 转成功**必删** wav）→ 正是**转码途中被杀**。
        → 窗口已经关了就没有"冻结界面"可言，**该等就得等完**；窗口还开着时才用关窗当退出口。
+    ⚠️ 但**等要有上限**：`max_wait_s` 到点就报一声放行，见 `SPIN_MAX_S`。
     """
     wait_ui = not ui_gone()
+    t0 = time.monotonic()
     while not until() and not (wait_ui and ui_gone()):
+        if max_wait_s and time.monotonic() - t0 >= max_wait_s:
+            print(f"⚠ 收尾等待超过 {max_wait_s:.0f} 秒还没完 —— 不再等，接着走"
+                  f"（那一步的结果可能不完整）", flush=True)
+            return
         tick()
 
 
@@ -1256,7 +1270,14 @@ def run(args) -> None:
             echo("   ⚠️ 会录制**课堂音频**(分段 Opus, 约 9MB/50 分钟), 收尾打成一个 zip。")
             echo("      音频与逐字转录可能含**其他同学的声音** —— 发出去前请自己确认。")
         else:
-            echo("   ℹ️ 只采指标, 不留音频（要留: 加 `--record-audio`）。")
+            echo("   ℹ️ 只采指标, 不留常规音频（要留: 加 `--record-audio`）。")
+        if tester.record_float:
+            # ⚠️ 这一条**必须单独说**（2026-10-07 OCR 指出）：在
+            #    `--no-record-audio --record-float` 的组合下，上面那句"不留常规音频"
+            #    很容易被读成"什么都没留"，而异常段其实会写一份**未压缩的原始信号**
+            #    —— 它比 opus 更"原始"，披露得说清楚，否则提示话与事实打架。
+            echo("   ⚠️ 异常段（主模型空/退化）会另存一份**送进 ASR 的原始信号**"
+                 "（`<会话名>.probe/*.npy`，只写本机、不上传）。")
 
     drafts: "queue.Queue[str]" = queue.Queue()          # 草稿文本 -> 主线程
     drafts_zh: "queue.Queue[str]" = queue.Queue()       # 草稿译文 -> 主线程
@@ -2150,9 +2171,18 @@ def run(args) -> None:
                 if "err" in _tf:
                     echo(f"⚠ 测试报告生成失败（{type(_tf['err']).__name__}: "
                          f"{str(_tf['err'])[:80]}）—— 笔记不受影响")
-                _rep = _tf.get("rep")
-                if _rep:
-                    echo(f"\n🧪 测试报告: {_rep}")
+                # ⚠️⚠️ **报告的真相以磁盘为准，而且它是这一段的唯一真源**
+                #    （2026-10-07 OCR 两轮 + 独立复核指出）：`_tf["rep"]` 是
+                #    `finish()` 的返回值，而它被 `@_safe_loud` 包着 —— **报告写完了、
+                #    随后 `make_bundle` 失败**时异常被吞、照样返回 `None`。
+                #    原来下面那句消息已改成看磁盘，**但打印路径与排队上传仍看返回值**
+                #    → 报告明明在盘上，却不打路径、也不上传。现在统一到 `_wrote`。
+                #    `stem is None`（`--save-notes no`）时报告**本来就不该存在**，不是故障。
+                _repfile = (str(tester.stem) + ".report.json"
+                            if getattr(tester, "stem", None) is not None else "")
+                _wrote = bool(_repfile) and os.path.exists(_repfile)
+                if _wrote:
+                    echo(f"\n🧪 测试报告: {_repfile}")
                     # ⭐ 阶段 3：排进上传队列 + 后台试一次（**不阻塞收尾**）。
                     try:
                         _u = start_upload(tester)
@@ -2172,15 +2202,7 @@ def run(args) -> None:
                                      f" —— 留着，下次启动接着传")
                     except Exception as _e:               # noqa: BLE001
                         echo(f"   ⚠ 上传排队失败（{type(_e).__name__}）—— 不影响其余")
-                # ⚠️⚠️ **报告的真相以磁盘为准，不许拿 `_rep` 猜**（2026-10-07 OCR 两轮指出）：
-                #    `_rep` 是 `finish()` 的返回值，而它被 `@_safe_loud` 包着 ——
-                #    **报告写完了、随后打包失败**时它照样返回 `None`（异常被吞），
-                #    只看 `_rep` 就会说"报告也没写成"——又一句假话。
-                #    `stem is None`（`--save-notes no`）时报告**本来就不该存在**，不是故障。
-                _repfile = (str(tester.stem) + ".report.json"
-                            if getattr(tester, "stem", None) is not None else "")
-                _wrote = bool(_repfile) and os.path.exists(_repfile)
-                if _repfile and not _wrote:
+                elif _repfile:
                     echo("⚠ 测试报告没写成（收尾没跑完？）"
                          " —— 详情看 ~/Library/Logs/ClassLive/app.log")
                 if tester.bundle_path:

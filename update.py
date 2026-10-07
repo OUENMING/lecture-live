@@ -228,13 +228,20 @@ def _mode_changed_paths() -> set:
     ⚠️ **必须带 `HEAD`**（2026-10-07 OCR 指出）：不带它只比"工作区 ↔ 索引"，
        而脏判定 `_dirty_report()` 走 `git status --porcelain`（**含已暂存**）——
        两边口径不一致，已 `git add` 过的权限位改动会掉出这一档、被误判成 `content`。
+    ⚠️ **路径要取 `=>` 之后那一整段**（2026-10-07 独立复核 + 实测）：原来写
+       `ln.split()[-1]`，而名字含空格时会被截掉 ——
+       ` mode change 100755 => 100644 my tool.sh` → 取到 `tool.sh` ≠ 真路径
+       → 与 porcelain 对不上 → 误判成 `content` → **拒绝更新还谎称"内容被改过"**。
     """
     rc, out, _ = _git("-c", "core.quotePath=false", "diff", "HEAD", "--summary")
     got = set()
     if rc == 0:
         for ln in out.splitlines():
-            if "mode change" in ln:
-                got.add(ln.split()[-1].strip().strip('"'))
+            if "mode change" not in ln or "=>" not in ln:
+                continue
+            rest = ln.split("=>", 1)[1].strip().split(None, 1)   # ["100644", "<路径>"]
+            if len(rest) == 2:
+                got.add(rest[1].strip().strip('"'))
     return got
 
 
@@ -313,7 +320,13 @@ def repair_generated(*, apply: bool = False) -> dict:
         for it in repairable:
             src = HERE / it["path"]
             if src.is_file():
-                shutil.copy2(src, bdir / pathlib.Path(it["path"]).name)
+                # ⚠️ **保留目录结构**（2026-10-07 独立复核指出）：原来只取 `.name`，
+                #    于是 `a/gen.png` 与 `b/gen.png` 会写进备份目录的**同一个文件** →
+                #    先备份的那份被覆盖，而 `applied` 列着两个、`ok=True` ——
+                #    docstring 承诺的"先备份"当场落空。
+                dst = bdir / it["path"]
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
         out["backup_dir"] = str(bdir)
     except OSError as e:                                  # 备份不了就**不修**（安全第一）
         out["ok"] = False
@@ -1107,8 +1120,11 @@ def _cli() -> int:
         if not r["items"]:
             print("工作区是干净的，没什么要修。")
             return 0
+        _done = set(r["applied"])
         for i in r["repairable"]:
-            print(f"  {'✅ 已恢复' if r['applied'] else '· 会恢复'} {i['path']}"
+            # ⚠️ 逐条判**它自己**有没有成功（2026-10-07 OCR 指出）：原来只要 `applied`
+            #    非空，就对**所有** repairable 打「✅ 已恢复」—— 包括 `chmod` 失败那几个。
+            print(f"  {'✅ 已恢复' if i['path'] in _done else '· 未恢复'} {i['path']}"
                   f"  —— {i['detail']}")
         if r["refused"]:
             print("⚠ 这些是**你自己改过**的，我没动（要更新得你自己处理）：")

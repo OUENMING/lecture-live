@@ -574,10 +574,10 @@ _ap = update.repair_generated(apply=True)
 check("D2b 恢复后工作区**真的干净了**",
       update._dirty_report().strip() == "" and len(_ap["applied"]) == 2,
       f"dirty={update._dirty_report()!r} applied={_ap['applied']}")
-check("D2c 恢复前**先备份**（原件还在备份目录里）",
-      bool(_ap["backup_dir"])
-      and (pathlib.Path(_ap["backup_dir"]) / "gen.png").read_bytes() == b"v2",
-      _ap["backup_dir"])
+_bk2 = pathlib.Path(_ap["backup_dir"]) / "out" / "gen.png"
+check("D2c 恢复前**先备份**，且**保留目录结构**（同名产物不许互相覆盖）",
+      bool(_ap["backup_dir"]) and _bk2.is_file() and _bk2.read_bytes() == b"v2",
+      f"{_ap['backup_dir']} 下有 out/gen.png: {_bk2.is_file()}")
 check("D2d 可执行位真的回来了",
       (clone / "tool.sh").stat().st_mode & 0o111 != 0,
       oct((clone / "tool.sh").stat().st_mode))
@@ -602,6 +602,46 @@ _r3 = update.repair_generated(apply=True)
 check("D3 ⚠️ 已暂存的产物改动 -> 恢复后树**真的**干净（判据用 `git status` 口径）",
       update._dirty_report().strip() == "" and _r3["applied"] == ["out/gen.png"],
       f"dirty={update._dirty_report()!r} applied={_r3['applied']} ok={_r3['ok']}")
+print()
+
+print("--- D4 ⚠️ 两个**同名**产物：备份不许互相覆盖 ---")
+# ⚠️ 2026-10-07 独立复核指出：原来备份只取 `basename`，`a/out/gen.png` 与 `b/out/gen.png`
+#    会写进备份目录的**同一个文件** → 先备份的那份被覆盖，而 `applied` 列两个、`ok=True`
+#    —— docstring 承诺的"先备份"当场落空。变异：退回 `.name` -> 这条红。
+tmp, seed, clone = new_world()
+(clone / ".gitignore").write_text("out/\n")
+for _d in ("a", "b"):
+    (clone / _d / "out").mkdir(parents=True)
+    (clone / _d / "out" / "gen.png").write_bytes(b"v1")
+sh("git", "add", "-A", cwd=clone)
+sh("git", "add", "-f", "a/out/gen.png", "b/out/gen.png", cwd=clone)
+sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "base", cwd=clone)
+(clone / "a" / "out" / "gen.png").write_bytes(b"AAA")
+(clone / "b" / "out" / "gen.png").write_bytes(b"BBB")
+_r4 = update.repair_generated(apply=True)
+_bk = pathlib.Path(_r4["backup_dir"])
+_ok_a = (_bk / "a" / "out" / "gen.png")
+_ok_b = (_bk / "b" / "out" / "gen.png")
+check("D4 两份原件**各留一份**（含目录结构），不是只剩一个",
+      _ok_a.is_file() and _ok_b.is_file()
+      and _ok_a.read_bytes() == b"AAA" and _ok_b.read_bytes() == b"BBB",
+      f"a={_ok_a.is_file()} b={_ok_b.is_file()} dir={_r4['backup_dir']}")
+print()
+
+print("--- D5 ⚠️ 名字含空格的 mode-only 改动不许被误判成 content ---")
+# ⚠️ 2026-10-07 独立复核指出 + 实测：`git diff --summary` 出的是
+#    ` mode change 100755 => 100644 my tool.sh`，原来取 `split()[-1]` 得到 `tool.sh`
+#    → 与 porcelain 的真路径对不上 → 判成 `content` → **拒绝更新还谎称"内容被改过"**。
+#    变异：退回 `split()[-1]` -> 这条红。
+tmp, seed, clone = new_world()
+(clone / "my tool.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+(clone / "my tool.sh").chmod(0o755)
+sh("git", "add", "-A", cwd=clone)
+sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "t", cwd=clone)
+(clone / "my tool.sh").chmod(0o644)
+_k5 = {i["path"]: i["kind"] for i in update.classify_dirt()}
+check("D5 含空格的 mode-only → `mode`（不是 `content`）",
+      _k5.get("my tool.sh") == "mode", str(_k5))
 print()
 
 print("--- C5 `cl doctor` 那一行（fix #2：让「我这份是什么」一眼看得出）---")

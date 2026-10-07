@@ -237,7 +237,10 @@ class TestSession:
         #: （float32）。⚠️ 为什么需要它（2026-10-07 实测）：拿 **16-bit** wav 离线回放去
         #: 复现实时（float）流水线时，**量化本身就会改变 ASR 结果** —— 同一节 17 段里
         #: 9 段改口（`"So it's around it."` → `"Sound next."`）。量具自己成了变量。
-        #: ⚠️ 默认**关**：比 opus 更"原始"，披露要更明确；只在异常段写，体积很小。
+        #: ⚠️ 默认值**由 `main.py` 定**：跟随 `--record-audio`（测试模式下它默认开），
+        #:    另有 `--no-record-float` 可单独关 —— 卡片那颗「测试模式」开关只传
+        #:    `--test-mode`，若这里默认关，这一格在真实使用里**永远采不到**。
+        #:    它比 opus 更"原始"，但**不含新的内容类别**（同一段音频）。
         #: ⚠️ 它**不进上传**（`upload_files` 只列 report / opus / wav / md）—— 留本机实验用。
         self.record_float = bool(record_float) and self.stem is not None
 

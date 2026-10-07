@@ -154,7 +154,7 @@ class Segmenter:
         self._vad = _make_vad(vad_model)
         self._parts: list[np.ndarray] = []
         self._n = 0
-        self._pre_roll: deque = deque(maxlen=PRE_ROLL_CHUNKS)
+        self._pre_roll: deque = deque()          # 存 `(chunk, 该块的 last_ratio)`
         self.is_speaking = False
         self.has_speech = False
         self.silence_run = 0.0
@@ -251,18 +251,26 @@ class Segmenter:
                 self.is_speaking = True
                 self.last_speech_s = now
                 self._blind_s = 0.0
-                for old in self._pre_roll:
+                for old, _r in self._pre_roll:
                     self._parts.append(old)
                     self._n += len(old)
                 self._pre_roll.clear()
             else:
                 # ⭐ 这一支是**真实丢内容**的入口: 判非语音的块既不进段、也不被计数,
                 #    所以 VAD 漂移期间整段话会无声无息消失。两条补救在这里:
-                #    ① 记一笔 `blind_dropped`（块里有语音窗 = 确实有话被丢）；
+                #    ① 记 `blind_dropped`（块里有语音窗 = 确实有话被丢）；
                 #    ② 连续非语音够久就重建 VAD（清漂移，见 `SileroVad.reset`）。
-                if float(getattr(self._vad, "last_ratio", 0.0)) > 0.0:
-                    self.diag["blind_dropped"] += 1
-                self._pre_roll.append(chunk)
+                #    ⚠️ **计数点必须在"被 pre-roll 挤出"时，不在入队时**
+                #       （2026-10-07 独立复核指出 + 我复现）：入队那几块**还可能被
+                #       pre-roll 救回**（实测 2 块被计了数，而 35200 个样本一个不少
+                #       全在段里）→ 那样报出来的"整段没进转录"是**过度声明**。
+                #       只有被挤出 `PRE_ROLL_CHUNKS` 的那一块才是真丢了。
+                self._pre_roll.append(
+                    (chunk, float(getattr(self._vad, "last_ratio", 0.0))))
+                while len(self._pre_roll) > PRE_ROLL_CHUNKS:
+                    _oc, _or = self._pre_roll.popleft()
+                    if _or > 0.0:
+                        self.diag["blind_dropped"] += 1
                 self._blind_s += CHUNK_DUR
                 if self._blind_s >= RESET_AFTER_SILENCE_S:
                     self._blind_s = 0.0

@@ -409,10 +409,9 @@ class R22_VadBlindStretchRescue(unittest.TestCase):
         seg.flush()
         self.assertTrue(got, "重建之后仍认不出语音 —— 盲区没被救回")
 
-    def test_blind_dropped_counts_blocks_that_never_start_a_segment(self):
+    def test_blind_dropped_counts_only_what_fell_out_of_pre_roll(self):
         import numpy as _np
         import vad as vad_mod
-        fake = self._DriftVad()
 
         class _WindowVad:
             """判非语音, 但块里**有**语音窗(last_ratio>0) —— 正是被丢掉的那类。"""
@@ -427,8 +426,14 @@ class R22_VadBlindStretchRescue(unittest.TestCase):
         seg, _got = self._segmenter(_WindowVad())
         for _ in range(5):
             seg.accept(_np.zeros(vad_mod.CHUNK, dtype="float32"))
-        self.assertEqual(seg.diag["blind_dropped"], 5,
-                         "有语音窗却起不了段的块没被计数 —— 丢内容依然不可见")
+        # ⚠️ 期望 **2 而不是 5**（2026-10-07 独立复核指出 + 我复现）：前 3 块还在
+        #    pre-roll 里、**还可能被救回**，只有被挤出 `PRE_ROLL_CHUNKS` 的才是真丢。
+        #    （入队时就计数 ← 旧写法；实测那样会把"35200 个样本一个不少全在段里"的两块
+        #     也报成"整段没进转录"，是过度声明。）
+        self.assertEqual(seg.diag["blind_dropped"], 2,
+                         "计数点不对 —— 该在**被 pre-roll 挤出**时，不在入队时")
+        self.assertEqual(len(seg._pre_roll), vad_mod.PRE_ROLL_CHUNKS,
+                         "pre-roll 该留满 3 块（能被救回的那几块）")
 
 
 class R23_BuildArtifactsMustNotBeTracked(unittest.TestCase):
@@ -463,6 +468,30 @@ class R23_BuildArtifactsMustNotBeTracked(unittest.TestCase):
                          f"生成器的产物被 git 跟踪了：{tracked}\n"
                          f"—— make-app.sh 每次构建都重跑生成器，入库 = 每次构建都把工作区"
                          f"弄脏 = 更新被自己的产物挡下（自锁，见 R23 docstring）")
+
+    def test_no_tracked_binary_anywhere(self):
+        """⚠️ 上一条只盯 `assets/icon/`；这一条盯**全仓**。
+
+        HANDBOOK §4.6 宣称「仓库里**没有一个被跟踪的二进制**」（那是自锁修好后的实测
+        状态）—— 宣言要有判据支撑，否则产物哪天搬到别处就没人拦（2026-10-07 独立复核指出）。
+        """
+        import subprocess
+        here = Path(__file__).resolve().parent.parent
+        try:
+            r = subprocess.run(["git", "ls-files"], cwd=here,
+                               capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:
+            self.skipTest(f"跳过（跑不了 git: {e}）")
+        if r.returncode != 0:
+            self.skipTest("跳过（不是 git 仓库）")
+        _exts = (".png", ".jpg", ".jpeg", ".gif", ".icns", ".ico", ".pdf", ".zip",
+                 ".whl", ".bin", ".so", ".dylib", ".a", ".o", ".mp3", ".wav", ".mp4",
+                 ".onnx", ".npy", ".tar", ".gz")
+        bad = [p for p in r.stdout.split()
+               if p.lower().endswith(_exts)]
+        self.assertEqual(bad, [],
+                         f"仓库里有被跟踪的二进制/产物：{bad}\n"
+                         f"—— 构建/下载出来的东西**一律不入库**（见 R23）")
 
 
 class R24_SpinWaitsWhenWindowAlreadyClosed(unittest.TestCase):
@@ -503,6 +532,24 @@ class R24_SpinWaitsWhenWindowAlreadyClosed(unittest.TestCase):
 
         main_mod.spin_until(lambda: False, tick, lambda: gone["v"])
         self.assertEqual(ticks["n"], 1, "窗口中途关了却还在空转")
+
+    def test_gives_up_after_the_deadline(self):
+        """⚠️ 「窗口一进来就是关的」修好之后**换来了挂死风险**（2026-10-07 独立复核指出）：
+        `until()` 永假（后台那步卡住）+ 窗口已关 → 原来的写法**永不退出**，
+        而且没有界面可点。所以必须有兜底上限。
+        ⚠️ 判据自带保险：`tick` 超过 1000 次就抛 —— 没上限时测试**红**而不是**挂住**。
+        """
+        ticks = {"n": 0}
+
+        def tick():
+            ticks["n"] += 1
+            if ticks["n"] > 1000:
+                raise RuntimeError("没有上限 —— 这个测试会一直转下去")
+            time.sleep(0.002)
+
+        main_mod.spin_until(lambda: False, tick, lambda: True, max_wait_s=0.05)
+        self.assertLess(ticks["n"], 1000, "没有兜底上限（会挂死）")
+        self.assertGreaterEqual(ticks["n"], 1, "上限之前一次都没等 —— 那等于没等")
 
 
 class R6_OverlayConstructs(unittest.TestCase):

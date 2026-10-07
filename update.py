@@ -29,6 +29,7 @@ import json
 import os
 import pathlib
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -195,6 +196,161 @@ def _dirty_paths(text: str) -> list[str]:
         if p:
             paths.append(p)
     return paths
+
+
+# ---- 脏的**归类**与「只恢复能证明是产物的那些」----------------------------------
+# ⭐ 2026-10-07：那次自锁（构建产物入库）暴露出一个更一般的问题 —— 更新一旦被脏工作区
+#    挡下，就**没有任何一步会自己修复它**，用户只会看到一句"你有自己改过的内容"。
+#    Homebrew 遇到同一件事的官方做法（docs.brew.sh/Common-Issues "Local changes prevent
+#    brew update"）是：列出哪个仓库脏 → 给**专用修复入口**（`brew update-reset`）→
+#    **绝不自动做** → 并明文警告「别照抄老 issue 里的 git clean / reset --hard」。
+#    这里照它的形状，但**比它保守**：它摧毁全部未提交改动，这里只动**能证明是产物**的。
+
+#: 可以安全恢复的三档；`content` **永远不在里面**。
+SAFE_DIRT_KINDS = ("generated", "mode", "eol")
+
+
+def _is_ignored(path: str) -> bool:
+    """这个路径命中 `.gitignore` 吗？**"这是产物"的判据来源。**
+
+    ⚠️⚠️ **必须带 `--no-index`**（2026-10-07 实测）：`git check-ignore` **默认会看索引**,
+       **被跟踪的文件一律报"不忽略"**（实测 rc=1）—— 而我们要的恰恰是
+       「**既被跟踪、又被声明忽略**」这个组合（= 作者自己说了"这是产物"，
+       2026-10-07 那次自锁就是 `assets/icon/ClassLive-1024.png` 两条都占）。
+       实测三种形状：未跟踪+--no-index → 0；已跟踪+默认 → **1**；已跟踪+--no-index → 0。
+    """
+    return _git("check-ignore", "-q", "--no-index", "--", path)[0] == 0
+
+
+def _mode_changed_paths() -> set:
+    """`git diff --summary` 里报"只有权限位变了"的路径（可执行位丢失那一类）。
+
+    ⚠️ **必须带 `HEAD`**（2026-10-07 OCR 指出）：不带它只比"工作区 ↔ 索引"，
+       而脏判定 `_dirty_report()` 走 `git status --porcelain`（**含已暂存**）——
+       两边口径不一致，已 `git add` 过的权限位改动会掉出这一档、被误判成 `content`。
+    """
+    rc, out, _ = _git("-c", "core.quotePath=false", "diff", "HEAD", "--summary")
+    got = set()
+    if rc == 0:
+        for ln in out.splitlines():
+            if "mode change" in ln:
+                got.add(ln.split()[-1].strip().strip('"'))
+    return got
+
+
+def _only_eol_differs(path: str) -> bool:
+    """工作区与 HEAD 的差异**只有行尾**（CRLF ↔ LF）？
+
+    ⚠️ 同族坑有先例：Homebrew 记过 `bad interpreter: /usr/bin/ruby^M`。取不到就当作
+       "不止行尾"（宁可不修，也不误判成安全）。
+    """
+    return _git("diff", "--quiet", "--ignore-cr-at-eol", "HEAD", "--", path)[0] == 0
+
+
+def classify_dirt() -> list:
+    """把「脏」的每个文件**归类**，决定能不能安全恢复。
+
+    四档（`kind`）：
+      `generated` 既被跟踪、又被 `.gitignore` 忽略 → **构建产物**，可安全恢复
+      `mode`      只有权限位变了（经 zip / FAT 盘 / 部分云盘传输会丢可执行位）
+      `eol`       差异只有行尾（CRLF ↔ LF）
+      `content`   内容真被改了 → **用户的东西，绝不碰**
+
+    ⚠️ `generated` 的名单**不手写**：手写清单会腐坏；`.gitignore` 就是作者声明的
+       "这些是产物" —— 判据只此一份。
+    """
+    paths = _dirty_paths(_dirty_report())
+    if not paths:
+        return []
+    modes = _mode_changed_paths()
+    out = []
+    for p in paths:
+        if _is_ignored(p):
+            out.append({"path": p, "kind": "generated",
+                        "detail": "构建产物（.gitignore 里声明了 → 可安全恢复）"})
+        elif p in modes:
+            out.append({"path": p, "kind": "mode",
+                        "detail": "只有权限位变了（可执行位丢了 → 可安全恢复）"})
+        elif _only_eol_differs(p):
+            out.append({"path": p, "kind": "eol",
+                        "detail": "差异只有行尾（CRLF/LF → 可安全恢复）"})
+        else:
+            out.append({"path": p, "kind": "content",
+                        "detail": "内容被改过 —— 不是我们动的，绝不碰"})
+    return out
+
+
+def repair_generated(*, apply: bool = False) -> dict:
+    """把**能证明是产物/权限/行尾**造成的「脏」恢复掉，好让更新能继续。
+
+    ⚠️ **`content` 那一档一个字节都不碰** —— 与 `pull()` 的边界①是同一条纪律
+       （「绝不 stash / 绝不丢弃」）。恢复前**先备份**到 `STATE_DIR/dirty-backup/<时间戳>/`。
+    ⚠️ 有 `content` 档时**只报不改**：光恢复产物也解不开更新（还得用户自己处理那个文件），
+       所以不假装"修好了"。
+
+    `apply=False`（默认）只报**会**做什么。
+    返回 `{ok, items, repairable, refused, backup_dir, applied, failed?, error?}`。
+    **`ok` 只有一个含义**："恢复之后树能干净"（已恢复或可恢复）。区分"已经做了"看
+    `applied` 是否非空 —— 别让 `ok` 同时表示"修好了"和"能修"，那是两种意思。
+    """
+    items = classify_dirt()
+    repairable = [i for i in items if i["kind"] in SAFE_DIRT_KINDS]
+    refused = [i for i in items if i["kind"] not in SAFE_DIRT_KINDS]
+    out = {"ok": not refused, "items": items,
+           "repairable": repairable, "refused": refused,
+           "backup_dir": "", "applied": []}
+    if refused:
+        out["error"] = ("有内容被改过的文件，得你自己处理：" +
+                        "、".join(i["path"] for i in refused[:5]))
+        return out                      # ⚠️ 有一处用户改动就**整个不动**：只恢复一半会留下
+                                        #    一个用户看不懂的"半干净"状态，而更新照样被挡
+    if not apply or not repairable:
+        return out
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    bdir = STATE_DIR / "dirty-backup" / ts
+    try:
+        bdir.mkdir(parents=True, exist_ok=True)
+        for it in repairable:
+            src = HERE / it["path"]
+            if src.is_file():
+                shutil.copy2(src, bdir / pathlib.Path(it["path"]).name)
+        out["backup_dir"] = str(bdir)
+    except OSError as e:                                  # 备份不了就**不修**（安全第一）
+        out["ok"] = False
+        out["error"] = f"备份失败，先不动：{e}"
+        return out
+    gen = [i["path"] for i in repairable if i["kind"] in ("generated", "eol")]
+    if gen:
+        # ⚠️ **`checkout HEAD --` 而不是 `checkout --`**（2026-10-07 OCR 指出）：
+        #    后者**只从索引**恢复工作区 —— 脏来自**已暂存**的改动时，恢复完
+        #    「工作区 == 索引」而索引仍 ≠ HEAD，**树照旧是脏的**，而这里会把路径
+        #    填进 `applied`、`ok=True`，与 docstring 承诺的"恢复之后树能干净"不符。
+        rc, _, err = _git("checkout", "HEAD", "--", *gen)
+        if rc != 0:
+            out["ok"] = False
+            out["error"] = f"恢复失败：{err[:120]}"
+            return out
+    applied, failed = list(gen), []
+    for i in repairable:                                  # 权限位那一档：chmod 回跟踪值
+        if i["kind"] != "mode":
+            continue
+        try:
+            rc, so, _ = _git("ls-files", "-s", "--", i["path"])
+            mode = so.split()[0].strip()[-3:] if (rc == 0 and so.strip()) else ""
+            if not mode:
+                raise ValueError("读不到跟踪的权限位")
+            (HERE / i["path"]).chmod(int(mode, 8))
+            applied.append(i["path"])
+        except (OSError, ValueError) as e:
+            # ⚠️ **不许静默 `pass`**（2026-10-07 OCR 指出）：那样 CLI 会打「✅ 已恢复」
+            #    而权限其实没改回来、树照旧脏 —— 一次"报成功但没修"的假动作。
+            failed.append({"path": i["path"], "error": str(e)})
+    out["applied"] = applied
+    if failed:
+        out["ok"] = False
+        out["failed"] = failed
+        out["error"] = "有文件没恢复成功：" + "、".join(f["path"] for f in failed)
+    return out
 
 
 def branch_state() -> dict:
@@ -939,6 +1095,35 @@ def _cli() -> int:
             print(f"⚠ {_key or '(没给 key)'} 没做成：{_r['error']}")
             return 1
         return 0
+
+    if "--dirt" in sys.argv:
+        # 卡片用：脏在哪、能不能安全恢复（JSON，给 UI 读）
+        print(json.dumps(classify_dirt(), ensure_ascii=False, indent=1))
+        return 0
+
+    if "--repair" in sys.argv:
+        # `--repair` 只报计划；`--repair --apply` 才动手（照 Homebrew：专用入口，绝不自动做）
+        r = repair_generated(apply="--apply" in sys.argv)
+        if not r["items"]:
+            print("工作区是干净的，没什么要修。")
+            return 0
+        for i in r["repairable"]:
+            print(f"  {'✅ 已恢复' if r['applied'] else '· 会恢复'} {i['path']}"
+                  f"  —— {i['detail']}")
+        if r["refused"]:
+            print("⚠ 这些是**你自己改过**的，我没动（要更新得你自己处理）：")
+            for i in r["refused"]:
+                print(f"     {i['path']}")
+        if r["applied"]:
+            print(f"（原件已备份到 {r['backup_dir']}）")
+        elif r["repairable"]:
+            # ⚠️ 别一口咬定"这是预览"（2026-10-07 OCR 指出）：备份失败 / checkout 失败
+            #    时 `applied` 也是空的，而用户**已经**加了 `--apply` —— 真实原因得说出来。
+            if r.get("error"):
+                print(f"⚠ {r['error']}")
+            else:
+                print("（这只是预览。真要恢复：加 --apply）")
+        return 0 if r["ok"] else 1
 
     if "--auto" in sys.argv:
         auto_update()

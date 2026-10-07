@@ -521,6 +521,89 @@ check("C8d 首行被 strip 掉前导空格 -> 仍取对（不许切出 quirement
       str(update._dirty_paths("M requirements.txt")))
 print()
 
+print("--- D1 `classify_dirt` 四档；有用户改动时**整个不动** ---")
+# ⚠️ 判据来源（2026-10-07）：那一周的自锁暴露出「脏了就没有任何一步会自修」这个更一般的
+#    问题。修法照 Homebrew 的 `brew update-reset`（专用修复入口、绝不自动做），但**更保守**：
+#    只恢复**能证明是产物**的那些。`generated` 的名单**不手写** —— 用 `git check-ignore`
+#    读 `.gitignore`（作者声明的"这是产物"），手写清单会腐坏。
+tmp, seed, clone = new_world()
+(clone / ".gitignore").write_text("out/\n", encoding="utf-8")
+(clone / "out").mkdir()
+(clone / "out" / "gen.png").write_bytes(b"v1")
+(clone / "tool.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+(clone / "tool.sh").chmod(0o755)
+(clone / "crlf.txt").write_text("a\nb\n", encoding="utf-8")
+sh("git", "add", "-A", cwd=clone)
+sh("git", "add", "-f", "out/gen.png", cwd=clone)          # 产物也入库 = 那次自锁的形状
+sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "base", cwd=clone)
+(clone / "out" / "gen.png").write_bytes(b"v2")            # ① 产物被重写
+(clone / "tool.sh").chmod(0o644)                          # ② 可执行位丢了
+(clone / "crlf.txt").write_bytes(b"a\r\nb\r\n")           # ③ 只有行尾变了
+(clone / "requirements.txt").write_text("numpy>=2.0\n# 我改的\n", encoding="utf-8")   # ④
+_kinds = {i["path"]: i["kind"] for i in update.classify_dirt()}
+check("D1 四档归类正确（产物 / 权限位 / 行尾 / 用户内容）",
+      _kinds == {"out/gen.png": "generated", "tool.sh": "mode",
+                 "crlf.txt": "eol", "requirements.txt": "content"},
+      str(_kinds))
+_r = update.repair_generated(apply=True)
+check("D1b 有用户改动 -> **整个不动**（只报不改，`ok=False`）",
+      _r["applied"] == [] and bool(_r["refused"]) and not _r["ok"],
+      f"applied={_r['applied']} refused={[i['path'] for i in _r['refused']]} ok={_r['ok']}")
+check("D1c 拒绝时产物原样还在（没被偷偷恢复）",
+      (clone / "out" / "gen.png").read_bytes() == b"v2",
+      str((clone / "out" / "gen.png").read_bytes()))
+print()
+
+print("--- D2 只有产物/权限位 -> 一键恢复，且**先备份** ---")
+tmp, seed, clone = new_world()
+(clone / ".gitignore").write_text("out/\n", encoding="utf-8")
+(clone / "out").mkdir()
+(clone / "out" / "gen.png").write_bytes(b"v1")
+(clone / "tool.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+(clone / "tool.sh").chmod(0o755)
+sh("git", "add", "-A", cwd=clone)
+sh("git", "add", "-f", "out/gen.png", cwd=clone)
+sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "base", cwd=clone)
+(clone / "out" / "gen.png").write_bytes(b"v2")
+(clone / "tool.sh").chmod(0o644)
+_dry = update.repair_generated()                          # 预览
+check("D2 预览模式**一个字节都不动**",
+      _dry["applied"] == [] and (clone / "out" / "gen.png").read_bytes() == b"v2",
+      f"applied={_dry['applied']}")
+_ap = update.repair_generated(apply=True)
+check("D2b 恢复后工作区**真的干净了**",
+      update._dirty_report().strip() == "" and len(_ap["applied"]) == 2,
+      f"dirty={update._dirty_report()!r} applied={_ap['applied']}")
+check("D2c 恢复前**先备份**（原件还在备份目录里）",
+      bool(_ap["backup_dir"])
+      and (pathlib.Path(_ap["backup_dir"]) / "gen.png").read_bytes() == b"v2",
+      _ap["backup_dir"])
+check("D2d 可执行位真的回来了",
+      (clone / "tool.sh").stat().st_mode & 0o111 != 0,
+      oct((clone / "tool.sh").stat().st_mode))
+print()
+
+print("--- D3 ⚠️ **已暂存**的产物改动也要修干净（`checkout --` 修不掉它）---")
+# ⚠️ 2026-10-07 OCR 指出：`git checkout -- <path>` **只从索引**恢复工作区 —— 脏来自
+#    **已暂存**的改动时，恢复完「工作区 == 索引」而索引仍 ≠ HEAD，树照旧脏，而代码
+#    却把它记成 applied/ok。修法是 `git checkout HEAD --`。变异验证：去掉 HEAD -> 这条红。
+tmp, seed, clone = new_world()
+(clone / ".gitignore").write_text("out/\n", encoding="utf-8")
+(clone / "out").mkdir()
+(clone / "out" / "gen.png").write_bytes(b"v1")
+sh("git", "add", "-A", cwd=clone)
+sh("git", "add", "-f", "out/gen.png", cwd=clone)
+sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "base", cwd=clone)
+(clone / "out" / "gen.png").write_bytes(b"v2")
+sh("git", "add", "-f", "out/gen.png", cwd=clone)          # 关键：**暂存**起来（被忽略的路径要 -f）
+check("D3 前置：暂存的改动确实被算作脏",
+      update._dirty_report().strip() != "", repr(update._dirty_report()))
+_r3 = update.repair_generated(apply=True)
+check("D3 ⚠️ 已暂存的产物改动 -> 恢复后树**真的**干净（判据用 `git status` 口径）",
+      update._dirty_report().strip() == "" and _r3["applied"] == ["out/gen.png"],
+      f"dirty={update._dirty_report()!r} applied={_r3['applied']} ok={_r3['ok']}")
+print()
+
 print("--- C5 `cl doctor` 那一行（fix #2：让「我这份是什么」一眼看得出）---")
 import doctor                                                    # noqa: E402
 tmp, seed, clone = new_world()

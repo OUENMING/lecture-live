@@ -72,4 +72,6 @@ assets/icon/ClassLive.iconset/
 # wrangler 的本地开发状态（miniflare 模拟桶等）与 node_modules：每台机器自己生成，不入库
 server/upload-worker/.wrangler/
 server/upload-worker/node_modules/
+# 在仓库根跑 wrangler 时也会生成一份（含 wrangler-account.json = 账号 ID/名），同样不入库
+/.wrangler/
 

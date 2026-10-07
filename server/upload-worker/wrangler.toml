@@ -22,8 +22,9 @@ routes = [
 ]
 
 # R2 桶（私有；无公开读 / 无 R2.dev 域）。
-# ⚠️ 180 天生命周期**不在这里配** —— wrangler.toml 不支持 lifecycle 规则；
-#    要在 Cloudflare Dashboard（桶 → Settings → Object lifecycle）或 API 里另设。
+# ⚠️ 180 天生命周期**不在这个文件里配**（wrangler.toml 不支持 lifecycle 规则），
+#    但 **`wrangler r2 bucket lifecycle add` 可以**，不必去 Dashboard：
+#    `wrangler r2 bucket lifecycle add classlive-ingest expire-180 --expire-days 180 --force`
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "classlive-ingest"

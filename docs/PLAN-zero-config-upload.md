@@ -409,7 +409,7 @@ Cloudflare **Rate Limiting rule**（dashboard 配，不是代码）：对 `inges
 - **`wrangler r2 object get/put/delete` 默认操作的是「本地模拟桶」** —— 要加 **`--remote`** 才碰真桶；否则得到的 `key does not exist` 是本地空桶的假象。
   查法：`wrangler r2 object get <bucket>/<key> --file x --remote`。
 
-⬜ **180 天生命周期尚未在 Dashboard 配**（Q1 已定，待做）。
+⬜ **180 天生命周期尚未配** —— ⚠️ 更正：`wrangler r2 bucket lifecycle add classlive-ingest expire-180 --expire-days 180 --force` 就能加（**不必**去 Dashboard；是 wrangler.toml 不支持而已）。
 
 **未做**：
 - ⬜ **零配置端到端**（§7 / T5）—— 需**朋友机器**跑，作者机器测不出（★Q3）。

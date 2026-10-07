@@ -64,9 +64,15 @@ ClassLive.app.bak/
 # 图标：`tools/make_icon.py` 是**生成器**，其余全是它的产物。
 # ⚠️ 产物一律不入库 —— make-app.sh 每次构建都无条件重跑生成器，
 #    入库的话每次构建都会把工作区弄脏（然后就会习惯性忽略 git status）。
-#    1024 那张主图例外：它是给人看的设计稿（README / 沟通用）。
+# ⚠️⚠️ 2026-10-07：**没有例外**。原来 1024 那张主图被留成"给人看的设计稿"入库，
+#    而它的 PNG 字节随 macOS 的 CoreGraphics 版本变 → **别的机器一构建就变 M**。
+#    配合 3.8.8 起 `cl update` 会自动跑 .app 重建，就构成**自锁**：
+#    构建把工作区弄脏 → 下一次更新被"工作区脏"挡下 → .app 永不重建（朋友那台
+#    shirley 卡在 3.8.7 就是这个）。而全仓没有一处读它（README 也没引用），
+#    所以直接不入库；要看效果跑 `tools/make_icon.py` 就有。
 assets/icon/ClassLive.icns
 assets/icon/ClassLive.iconset/
+assets/icon/ClassLive-1024.png
 
 # ── 上传 Worker（Cloudflare）本地状态 / 依赖 ────────────
 # wrangler 的本地开发状态（miniflare 模拟桶等）与 node_modules：每台机器自己生成，不入库

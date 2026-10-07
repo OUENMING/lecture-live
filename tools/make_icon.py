@@ -277,6 +277,11 @@ def main() -> int:
             print(f"❌ 写不出 {name}（磁盘满？权限？）", file=sys.stderr)
             return 1
     # 留一张 1024 主图，给 Git / 文档 / 以后重制用
+    # ⚠️⚠️ **这一张不许入库**（`.gitignore` 里有对应条目，别删）—— 它的 PNG
+    #    字节随 macOS 的 CoreGraphics 版本变，入库就等于"别的机器一构建就 M"，
+    #    而 3.8.8 起 `cl update` 会自动重建 .app → **构建弄脏工作区 → 下次更新被
+    #    「工作区脏」挡下 → .app 永不重建**（2026-10-07 朋友那台实测就卡在这）。
+    #    全仓没有一处读它，要看效果跑本脚本即可。
     if not draw(1024).writeToFile_atomically_(str(OUT / "ClassLive-1024.png"), True):
         print("❌ 写不出 ClassLive-1024.png", file=sys.stderr)
         return 1

@@ -989,6 +989,27 @@ def _maybe_notice_update() -> dict | None:
         return None                                 # 提示而已, 任何失败都静默
 
 
+def spin_until(until, tick, ui_gone) -> None:
+    """守着 `tick()` 等 `until()` 为真，或**用户此刻**关窗。**纯逻辑，可测。**
+
+    `tick()` = 一轮等待（浮窗模式是 `ui.pump()`，终端模式是 `time.sleep`）。
+    `ui_gone()` = 窗口关了吗。
+
+    ⚠️⚠️ **进来时窗口已经关了，就不再把"关窗"当退出条件**（2026-10-07 实测定位）。
+       浮窗模式的**正常停止就是 ✕**（`overlay.py` 自己写着"✕ 就是退出口"），所以收尾
+       跑到等 `tester.finish()` 那一步时，`_closed` **恒为真** → 循环体一次都不跑 →
+       立刻返回 → 后台那份活被丢下 → 主线程走到进程尾 → **daemon 线程被杀**。
+       ⚠️ 代价实测：**测试报告从 2026-09-24 之后再没写成过**（≈90 节；`report.json`
+       一个都没有），而 `update.log` 还照样打着「数据包生成失败，但报告已写出」——**那是假话**。
+       10-06 那次留下了"转到一半"的现场：`.001.opus` 生成了、`.001.wav` 却没被删
+       （`_to_opus` 转成功**必删** wav）→ 正是**转码途中被杀**。
+       → 窗口已经关了就没有"冻结界面"可言，**该等就得等完**；窗口还开着时才用关窗当退出口。
+    """
+    wait_ui = not ui_gone()
+    while not until() and not (wait_ui and ui_gone()):
+        tick()
+
+
 def run(args) -> None:
     # ---- 单实例锁 ----
     # ⚠️ 必须是 run() 的**第一件事**：抢在开音频设备、弹更新卡片、加载模型之前 ——
@@ -1919,20 +1940,25 @@ def run(args) -> None:
                 return bool(getattr(ui, "_closed", False))
 
             def _spin(until) -> None:
-                """守着 pump 等 `until()` 为真，或用户关窗。
+                """守着 pump 等 `until()` 为真，或用户关窗。逻辑在 `spin_until`（可测）。
 
                 ⚠️⚠️ **这一步就是"不冻主线程"本身** —— 没有它，收尾期间窗口是死的，
                    ✕ 按不动，`terminate:` 也收不到。
                 ⚠️ 判据是 `drives_appkit`（**UI 对象自己说的**），不是 `args.ui`：
                    `_load_overlay` 失败时会**静默回退** `TerminalUI()`，那时 args 还写着
                    overlay → 每轮都调一个空 pump、**一次 sleep 都没有 → 纯烧 CPU**。
-                   （2026-09-28 OCR 审计发现。）"""
+                   （2026-09-28 OCR 审计发现。）
+                ⚠️ "窗口一进来就是关的"那种情况见 `spin_until` 的 docstring —— 那正是
+                   测试报告整整一周没写成的根因。"""
                 appkit = bool(getattr(ui, "drives_appkit", False))
-                while not until() and not _ui_gone():
+
+                def _tick() -> None:
                     if appkit:
                         ui.pump()
                     else:
                         time.sleep(0.02)
+
+                spin_until(until, _tick, _ui_gone)
 
             save, give_up, _box = True, False, {}
             if writer.mode == "ask":
@@ -2128,6 +2154,15 @@ def run(args) -> None:
                                      f" —— 留着，下次启动接着传")
                     except Exception as _e:               # noqa: BLE001
                         echo(f"   ⚠ 上传排队失败（{type(_e).__name__}）—— 不影响其余")
+                elif "err" not in _tf and getattr(tester, "stem", None) is not None:
+                    # ⚠️ **哨兵**（2026-10-07）：这一次"**有会话文件**、线程正常结束、却没交出
+                    #    报告、也没抛异常"的组合，在 `spin_until` 修好之后**应当到不了** ——
+                    #    它原来正是"daemon 线程被丢下"的签名（那一周 90 节全中）。留着是为了
+                    #    下次真出现时**出声**，而不是像之前那样静默。
+                    #    ⚠️ `stem is None`（`--save-notes no` → 没有会话文件）时报告本来
+                    #       就无处可写，**不算故障**，所以排除掉（2026-10-07 OCR 指出）。
+                    echo("⚠ 测试报告没写成（后台收尾没跑完）"
+                         " —— 详情看 ~/Library/Logs/ClassLive/app.log")
                 if tester.bundle_path:
                     _sz = os.path.getsize(tester.bundle_path)
                     _mb = f"{_sz / 1e6:.1f} MB" if _sz > 1e6 else f"{_sz / 1024:.0f} KB"
@@ -2139,8 +2174,14 @@ def run(args) -> None:
                         echo("   ℹ️ 只含指标与转录文本, **不含音频**（要留: --record-audio）。")
                     # ⚠️ 转码失败时音频还是 wav 分段 —— 报告与屏上都看得见。
                     echo("   发给作者即可, 不用解压。")
-                else:
-                    echo("⚠ 数据包生成失败, 但报告已写出(见上面的路径)")
+                elif _rep and not args.no_bundle:
+                    # ⚠️ **只说真话**（2026-10-07）：这句原来无条件打「但报告已写出」，
+                    #    而那一周实测**一个 report.json 都没有** —— 假话比不说更坏。
+                    #    ⚠️ `--no-bundle`（`cl test --no-bundle`，README 写明）时
+                    #       `bundle_path` **合法地**是 None，不许拿它报警（OCR 指出）。
+                    echo("⚠ 数据包生成失败（报告已写出，见上面的路径）")
+                elif not args.no_bundle:
+                    echo("⚠ 数据包生成失败，报告也没写成")
 
             # ---- 小更新：退出时在**独立进程**里自动拉（详见 _auto_update_on_exit）----
             # 放在 finally 的**最末**：等用户答完"是否保存笔记"、测试报告也打完，

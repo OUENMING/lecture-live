@@ -58,6 +58,9 @@
   R23 构建产物**绝不许入库**(2026-10-07): make_icon.py 生成的 1024 图标被跟踪 →
      别的 macOS 重生成的字节不同 → 一构建就脏 → 更新被自己的产物挡下(而 .app 重建
      正是更新的一步)= 自锁, 朋友那台卡在 3.8.7。钉住 `git ls-files assets/icon/` 为空
+  R24 收尾等待不许因"窗口已经关了"就白等(2026-10-07): 浮窗模式的**正常停止就是 ✕**,
+     于是收尾等 `tester.finish()` 时 `_closed` 恒为真 → `_spin` 一次都不循环 → 后台的
+     报告线程被丢下、进程一退就被杀 → **report.json 从 2026-09-24 起再没写成过**
 """
 from __future__ import annotations
 import json
@@ -460,6 +463,46 @@ class R23_BuildArtifactsMustNotBeTracked(unittest.TestCase):
                          f"生成器的产物被 git 跟踪了：{tracked}\n"
                          f"—— make-app.sh 每次构建都重跑生成器，入库 = 每次构建都把工作区"
                          f"弄脏 = 更新被自己的产物挡下（自锁，见 R23 docstring）")
+
+
+class R24_SpinWaitsWhenWindowAlreadyClosed(unittest.TestCase):
+    """R24 收尾等待不许因为"窗口已经关了"就白等（2026-10-07）。
+
+    起因：**测试报告整整一周没写成过** —— `report.json` 从 2026-09-24 之后再没落盘
+    （≈90 节），而日志照样打「数据包生成失败，但报告已写出」——**那是假话**。
+    根因：浮窗模式的**正常停止就是 ✕**（`overlay.py` 自己写着"✕ 就是退出口"）→ 收尾跑到
+    等 `tester.finish()` 时 `_closed` **恒为真** → `_spin` 的循环体一次都不跑 → 后台那份活
+    被丢下 → 主线程走到进程尾 → **daemon 线程被杀**（`finish()` 跑在 daemon 线程里）。
+    ⚠️ 现场证据：10-06 那次 `.001.opus` 生成了、`.001.wav` 却没被删（`_to_opus` 转成功
+    **必删** wav）—— 正是"转码途中被杀"；`.pending` 标记也活到了次日。
+
+    ⚠️ 变异敏感：把 `spin_until` 里的 `wait_ui = not ui_gone()` 去掉（退回"无条件把关窗
+    当退出口"）→ 第一条必红。
+    """
+
+    def test_waits_even_if_window_was_already_closed(self):
+        ticks = {"n": 0}
+
+        def tick():
+            ticks["n"] += 1
+
+        def until():
+            return ticks["n"] >= 4
+
+        main_mod.spin_until(until, tick, lambda: True)     # 窗口一进来就是关的
+        self.assertEqual(ticks["n"], 4,
+                         "窗口一进来就是关的就不等了 —— 后台的活会被丢下")
+
+    def test_still_bails_when_window_closes_midway(self):
+        ticks = {"n": 0}
+        gone = {"v": False}
+
+        def tick():
+            ticks["n"] += 1
+            gone["v"] = True                               # 第一轮之后用户关窗
+
+        main_mod.spin_until(lambda: False, tick, lambda: gone["v"])
+        self.assertEqual(ticks["n"], 1, "窗口中途关了却还在空转")
 
 
 class R6_OverlayConstructs(unittest.TestCase):

@@ -34,6 +34,12 @@ MAX_UTTERANCE_S = 12.0
 HANGOVER = 0.35
 PARTIAL_INTERVAL_S = 1.0
 PRE_ROLL_CHUNKS = 3              # 3 × 0.1s = 300ms
+#: 连续判为"非语音"超过这么久 → 重建 VAD 状态（见 `SileroVad.reset`）。
+#: ⚠️ **为什么不是在切句处重建**：实测（2026-10-07 围炉谈话那节）在**每个切句点**
+#:    重建要 235 次、只把丢词压到 64；在**长静音**里重建只要 31 次、压到 50。
+#:    静音里重建是零代价的（那时本来就没语音），而切句点可能贴着下一句的起头。
+#: 阈值实测 0.6/0.8/1.0/1.5/2.0 s 都把丢词从 92 压到 49–61；1.5s 最省成本，取它。
+RESET_AFTER_SILENCE_S = 1.5
 VAD_MODEL = models.path_of("vad", "~/models/vad/silero_vad.onnx")
 VAD_THRESHOLD = 0.4              # Silero 语音概率阈值。别为了"更灵敏"调低:
                                  # 实测 0.2 在弱信号下能多触发, 但 VAD 会近乎恒
@@ -79,6 +85,20 @@ class SileroVad:
         self.last_ratio = votes / total
         return votes * 2 >= total          # 多数票
 
+    def reset(self) -> None:
+        """把 VAD 内部状态清回"刚加载"的样子。
+
+        ⭐ **为什么需要它**（2026-10-07 实测，围炉谈话那节录音）：Silero 的状态会
+           **漂移** —— 连续音频喂到 ~25s 后，它对一段真人语音给 **0/69** 个语音窗；
+           同一段音频**单独喂是 33/72**，在它前面 2s 处 `reset()` 后是 43/69。
+           漂移期间它判"非语音"的块，会被 `Segmenter` 当静音 → 那段话整段丢。
+        → 所以 `Segmenter` 在**长静音**里调它（见 `RESET_AFTER_SILENCE_S`）：静音里
+          重建状态零代价，而漂移一被清掉，紧跟着的语音立刻能检出。
+        """
+        self._vad.reset()
+        self._rem = np.zeros(0, dtype=np.float32)
+        self.last_ratio = 0.0
+
 
 class _EnergyVad:
     """退化方案: RMS 能量 + 噪声地板。"""
@@ -95,6 +115,11 @@ class _EnergyVad:
             self.noise_floor = 0.99 * self.noise_floor + 0.01 * max(r, 1e-6)
         self.last_ratio = 1.0 if sp else 0.0
         return sp
+
+    def reset(self) -> None:
+        """空操作 —— 能量 VAD **没有** Silero 那种会漂移的内部状态，且它的
+        `noise_floor` 是**学习出来的**，清掉反而是倒退（那是它抗噪的全部依据）。"""
+        pass
 
 
 def _make_vad(model_path: str = VAD_MODEL, threshold: float = VAD_THRESHOLD):
@@ -129,6 +154,9 @@ class Segmenter:
         self.silence_run = 0.0
         self.last_partial = 0.0
         self.last_speech_s: float | None = None
+        #: 连续"非语音"累计秒数（**只在还没起段时**走，与 `silence_run` 是两回事：
+        #: `silence_run` 只在 has_speech 之后才计）。到 `RESET_AFTER_SILENCE_S` 重建 VAD。
+        self._blind_s = 0.0
         # --- 尾部诊断(只计数, 绝不参与切分判定) ---
         # 对应 Handy 的 VadTailReport: 把"句尾被切掉 / 整段被丢"变成可观测的数字,
         # 而不是只能事后翻音频猜。四个数各有明确含义, 全为零时收尾不打印任何东西:
@@ -138,8 +166,13 @@ class Segmenter:
         #   weak_blocks  说话期间判静音、但块里其实**有**语音窗的块数, 会让
         #                silence_run 多走一格。实测远场课堂里很小(6 块/3min), 不是
         #                断句不准的主因 —— 真正的大头是 hard_cuts。
+        #   vad_resets   长静音里重建 VAD 状态的次数（清 Silero 状态漂移，见
+        #                `SileroVad.reset`）。正常为个位数/节；很高 = 状态漂移频繁。
+        #   blind_dropped 因"判非语音而从没起段"被丢掉的块数（**只统计有语音窗的块**）：
+        #                这是 `dropped` **看不见**的那一类真实丢内容（见 `accept`）。
         self.diag = {"cuts": 0, "hard_cuts": 0, "dropped": 0,
-                     "dropped_s": 0.0, "weak_blocks": 0}
+                     "dropped_s": 0.0, "weak_blocks": 0,
+                     "vad_resets": 0, "blind_dropped": 0}
 
     @property
     def dur(self) -> float:
@@ -158,6 +191,7 @@ class Segmenter:
         self.has_speech = False
         self.is_speaking = False
         self.silence_run = 0.0
+        self._blind_s = 0.0
         self.last_partial = time.monotonic()
 
     def flush(self) -> None:
@@ -176,7 +210,8 @@ class Segmenter:
         """收尾诊断快照(对应 Handy 的 VadTailReport)。只报**发生过**的事,
         一切正常时返回空串 —— 不产生噪音。三个可疑数各自指向不同的修法。"""
         d = self.diag
-        if not (d["hard_cuts"] or d["dropped"] or d["weak_blocks"]):
+        if not (d["hard_cuts"] or d["dropped"] or d["weak_blocks"]
+                or d["blind_dropped"] or d["vad_resets"]):
             return ""
         bits = [f"断句 {d['cuts']} 次"]
         if d["hard_cuts"]:
@@ -186,6 +221,11 @@ class Segmenter:
                         f"(有语音但不足 {MIN_UTTERANCE_S}s)")
         if d["weak_blocks"]:
             bits.append(f"句内弱音 {d['weak_blocks']} 块(有语音窗却没过阈值)")
+        if d["blind_dropped"]:
+            bits.append(f"⭐盲区丢块 {d['blind_dropped']} 块"
+                        f"(判非语音却含语音窗 → 整段没进转录)")
+        if d["vad_resets"]:
+            bits.append(f"重建 VAD {d['vad_resets']} 次(清状态漂移)")
         return "🎧 VAD 诊断: " + " · ".join(bits)
 
     def accept(self, chunk: np.ndarray) -> None:
@@ -199,12 +239,24 @@ class Segmenter:
                 self.has_speech = True
                 self.is_speaking = True
                 self.last_speech_s = now
+                self._blind_s = 0.0
                 for old in self._pre_roll:
                     self._parts.append(old)
                     self._n += len(old)
                 self._pre_roll.clear()
             else:
+                # ⭐ 这一支是**真实丢内容**的入口: 判非语音的块既不进段、也不被计数,
+                #    所以 VAD 漂移期间整段话会无声无息消失。两条补救在这里:
+                #    ① 记一笔 `blind_dropped`（块里有语音窗 = 确实有话被丢）；
+                #    ② 连续非语音够久就重建 VAD（清漂移，见 `SileroVad.reset`）。
+                if float(getattr(self._vad, "last_ratio", 0.0)) > 0.0:
+                    self.diag["blind_dropped"] += 1
                 self._pre_roll.append(chunk)
+                self._blind_s += CHUNK_DUR
+                if self._blind_s >= RESET_AFTER_SILENCE_S:
+                    self._vad.reset()
+                    self._blind_s = 0.0
+                    self.diag["vad_resets"] += 1
                 return
 
         # 已在说话中、这块判静音、但块里确实有语音窗 -> VAD 漏检。

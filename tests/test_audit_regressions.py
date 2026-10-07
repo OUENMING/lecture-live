@@ -51,6 +51,10 @@
       —— 折行被当成新条目的话, 一条变两条, 且**合并多版本时后半截会被冠上别的版本号**
       (3.7.0 那版实测就是这个症状)。防的是: 缩进行当成新条目 / 上限数的是物理行而不是条目 /
       那条"漏写 `- ` 也认"的容错被顺手弄丢 / 粗体与反引号没剥掉
+  R22 Silero VAD 的**状态漂移**必须被「长静音里重建」救回(2026-10-07): 连续流式喂
+      ~25s 后它对真人语音给 0/69 个语音窗(单独喂 33/72、前面 reset 后 43/69);
+      漂移期间判非语音的块走 pre-roll 分支 → **不进段也不计数**, 整段话无声消失
+      (实测那节: 含词丢失 79.2s/92 词 → 47.9s/50 词)。用**假 VAD** 钉, 真模型进不了本闸门
 """
 from __future__ import annotations
 import json
@@ -330,6 +334,92 @@ class R5_CoreBehaviour(unittest.TestCase):
                 finalized.append(item)
         self.assertEqual(seen.index("final"), len(seen) - 1)
         self.assertEqual(finalized[0][2], "你好")
+
+
+class R22_VadBlindStretchRescue(unittest.TestCase):
+    """R22 Silero VAD 的状态漂移必须被「在长静音里重建」救回来(2026-10-07)。
+
+    起因: 围炉谈话那节, 转录里**主持人几乎整段消失** —— 整节 43 分钟只留下 1 个
+    "Okay." 和 1 个 "Exactly.", 而音频前十分钟就有 9 个 "Yeah."。
+    实测: 把同一段真人语音**连续流式**喂给 Silero, 它在 ~25s 后给出 **0/69** 个语音窗;
+    同一段音频**单独喂是 33/72**, 在它前面 2s 处 `reset()` 后是 43/69。
+    漂移期间判"非语音"的块走 `accept()` 的 pre-roll 分支 —— **既不进段、也不被计数**
+    (`diag["dropped"]` 只数收尾时不足 0.6s 的), 所以整段话无声无息地没了。
+    修法: 连续非语音到 `RESET_AFTER_SILENCE_S` 就在静音里重建 VAD 状态。
+    实测(那节录音): 含词丢失 **79.2s/92 词 → 47.9s/50 词**, 段数不变(253)。
+
+    ⚠️ 用**假 VAD** 钉住它 —— 真模型要加载 onnx(几百 ms)且不是每个环境都有,
+       而本闸门的纪律是"无网络、无模型、毫秒级"。
+    ⚠️ **变异敏感**: 把 `accept()` 里那句 `self._vad.reset()` 删掉, 本测试必须红
+       (假 VAD 只在被 reset 过之后才认得出语音)。
+    """
+
+    class _DriftVad:
+        """最小漂移模型: 只有被 `reset()` 过之后才认得出语音。"""
+
+        def __init__(self, floor: float = 0.05):
+            self.floor = floor
+            self.last_ratio = 0.0
+            self.resets = 0
+            self.fresh = False
+
+        def reset(self):
+            self.resets += 1
+            self.fresh = True
+
+        def is_speech(self, chunk):
+            import numpy as _np
+            r = float(_np.sqrt(_np.mean(chunk ** 2))) if chunk.size else 0.0
+            sp = self.fresh and r > self.floor
+            self.last_ratio = 1.0 if sp else 0.0
+            return sp
+
+    def _segmenter(self, fake):
+        import vad as vad_mod
+        orig = vad_mod._make_vad
+        vad_mod._make_vad = lambda *a, **k: fake
+        try:
+            got = []
+            return vad_mod.Segmenter(lambda b: None, got.append), got
+        finally:
+            vad_mod._make_vad = orig
+
+    def test_blind_stretch_is_rescued_after_reset(self):
+        import numpy as _np
+        import vad as vad_mod
+        fake = self._DriftVad()
+        seg, got = self._segmenter(fake)
+        quiet = _np.zeros(vad_mod.CHUNK, dtype="float32")
+        loud = _np.full(vad_mod.CHUNK, 0.3, dtype="float32")
+        for _ in range(20):                      # 2s 静音 -> 应触发一次重建
+            seg.accept(quiet)
+        self.assertGreaterEqual(fake.resets, 1, "长静音里没重建 VAD —— 漂移清不掉")
+        self.assertEqual(seg.diag["vad_resets"], fake.resets)
+        for _ in range(10):                      # 1s 清晰语音
+            seg.accept(loud)
+        seg.flush()
+        self.assertTrue(got, "重建之后仍认不出语音 —— 盲区没被救回")
+
+    def test_blind_dropped_counts_blocks_that_never_start_a_segment(self):
+        import numpy as _np
+        import vad as vad_mod
+        fake = self._DriftVad()
+
+        class _WindowVad:
+            """判非语音, 但块里**有**语音窗(last_ratio>0) —— 正是被丢掉的那类。"""
+            def __init__(self):
+                self.last_ratio = 0.0
+            def reset(self):
+                pass
+            def is_speech(self, chunk):
+                self.last_ratio = 0.33
+                return False
+
+        seg, _got = self._segmenter(_WindowVad())
+        for _ in range(5):
+            seg.accept(_np.zeros(vad_mod.CHUNK, dtype="float32"))
+        self.assertEqual(seg.diag["blind_dropped"], 5,
+                         "有语音窗却起不了段的块没被计数 —— 丢内容依然不可见")
 
 
 class R6_OverlayConstructs(unittest.TestCase):

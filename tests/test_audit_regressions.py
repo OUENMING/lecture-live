@@ -55,6 +55,9 @@
       ~25s 后它对真人语音给 0/69 个语音窗(单独喂 33/72、前面 reset 后 43/69);
       漂移期间判非语音的块走 pre-roll 分支 → **不进段也不计数**, 整段话无声消失
       (实测那节: 含词丢失 79.2s/92 词 → 47.9s/50 词)。用**假 VAD** 钉, 真模型进不了本闸门
+  R23 构建产物**绝不许入库**(2026-10-07): make_icon.py 生成的 1024 图标被跟踪 →
+     别的 macOS 重生成的字节不同 → 一构建就脏 → 更新被自己的产物挡下(而 .app 重建
+     正是更新的一步)= 自锁, 朋友那台卡在 3.8.7。钉住 `git ls-files assets/icon/` 为空
 """
 from __future__ import annotations
 import json
@@ -420,6 +423,40 @@ class R22_VadBlindStretchRescue(unittest.TestCase):
             seg.accept(_np.zeros(vad_mod.CHUNK, dtype="float32"))
         self.assertEqual(seg.diag["blind_dropped"], 5,
                          "有语音窗却起不了段的块没被计数 —— 丢内容依然不可见")
+
+
+class R23_BuildArtifactsMustNotBeTracked(unittest.TestCase):
+    """R23 构建产物**绝不许入库**(2026-10-07)。
+
+    起因: `tools/make_icon.py` 每次构建都把生成的 1024 图标写进 `assets/icon/`，而那个
+    文件**被 git 跟踪**。PNG 字节随 macOS 版本变 → 别的机器一构建就变 `M` → 更新器的
+    前置检查（`update._dirty_report()`，**只算改过的跟踪文件**）停手 → 而 `.app` 重建
+    **是更新自己的一步** → **自锁**：构建弄脏 → 下次更新被自己的产物挡下 → 永远卡在
+    旧版本（朋友那台实测卡在 3.8.7 就是这个）。
+    `.gitignore` 里那句注释（「产物一律不入库」）本来就写对了规矩，却给这张图开了例外
+    —— **例外就是自锁**。
+    依据: Apple 官方 "A bundle is a read-only structure… modifying your app's bundle
+    isn't supported"（它举的反例正是 Python 往源码同目录写 `.pyc`，与此同形）；
+    「生成物不入库」亦为普遍共识。
+
+    ⚠️ 变异敏感: 把那张图重新 `git add` 回去，本测试必须红。
+    """
+
+    def test_generator_outputs_are_not_tracked(self):
+        import subprocess
+        here = Path(__file__).resolve().parent.parent
+        try:
+            r = subprocess.run(["git", "ls-files", "assets/icon/"], cwd=here,
+                               capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:      # 没装 git / 超时
+            self.skipTest(f"跳过（跑不了 git: {e}）")
+        if r.returncode != 0:
+            self.skipTest("跳过（不是 git 仓库 —— 解压安装的那类）")
+        tracked = [x for x in r.stdout.split() if x]
+        self.assertEqual(tracked, [],
+                         f"生成器的产物被 git 跟踪了：{tracked}\n"
+                         f"—— make-app.sh 每次构建都重跑生成器，入库 = 每次构建都把工作区"
+                         f"弄脏 = 更新被自己的产物挡下（自锁，见 R23 docstring）")
 
 
 class R6_OverlayConstructs(unittest.TestCase):

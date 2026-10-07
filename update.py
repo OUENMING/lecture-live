@@ -155,6 +155,32 @@ def _dirty_report() -> str:
     return out if rc == 0 else ""
 
 
+def _dirty_paths(text: str) -> list[str]:
+    """`_dirty_report()` 的 porcelain 原文 → 路径表。
+
+    ⚠️ **为什么要它**（2026-10-07 实测教训）：原来"工作区脏"无论是日志还是卡片上
+       都**只说「有改动」，不说改了什么**。于是朋友那台卡了两周，最后是靠他手动跑
+       `git status` 截图才定位到——挡路的只是**一个构建产物**。
+       把文件名说出来，用户/作者一眼就知道该看哪儿。
+    """
+    paths: list[str] = []
+    for ln in text.splitlines():
+        ln = ln.rstrip()
+        if len(ln) < 3:
+            continue
+        # ⚠️⚠️ **不许写 `ln[3:]`**（2026-10-07 实测踩到）：porcelain 是 `XY<空格>路径`
+        #    （路径在偏移 3），但 `_git()` 对**整段输出**做了 `strip()` —— 于是**第一行**
+        #    的前导空格被吃掉（` M x` → `M x`），固定偏移会把路径首字符切掉
+        #    （实测切出 `equirements.txt`）。改成"丢掉 2 位状态码再 lstrip"：
+        #    两种形状（有没有被 strip 过）都对。
+        p = ln[2:].lstrip()
+        if " -> " in p:                    # 重命名：`R  old -> new`，取新名
+            p = p.split(" -> ", 1)[1].strip()
+        if p:
+            paths.append(p)
+    return paths
+
+
 def branch_state() -> dict:
     """**这份代码站在哪条线上** —— `pull()` 的守卫与 `cl doctor` 共用这一份判断。
 
@@ -281,9 +307,17 @@ def _friendly(out: dict) -> str:
             #    他自己放了个同名文件，或者改了仓库里已有、而这次更新也要动的文件。
             return ("这个文件夹里有和更新**撞车**的东西（你自己放的文件，或者你改过的文件）——\n"
                     "   这次先不动它，你的东西一个字节都没变。把那个文件挪走或改回去再更新。")
+        # ⚠️ **必须把文件名说出来**（2026-10-07 实测教训）：原来只说"有改动"，
+        #    朋友那台卡了两周，最后靠他手跑 `git status` 截图才定位到挡路的只是
+        #    一个构建产物。名字一亮出来，谁都能立刻判断"这是我改的还是产物"。
+        _names = out.get("dirty_files") or []
+        if _names:
+            _shown = "、".join(_names[:5]) + (f" 等 {len(_names)} 个" if len(_names) > 5 else "")
+            return (f"这个文件夹里有你自己改过的内容，这次就先不更新了（怕覆盖掉）。\n"
+                    f"   改过的是：{_shown}\n"
+                    f"   是你的东西就别动它；要更新，先把它改回去或挪走。")
         return "这个文件夹里有你自己改过的内容，这次就先不更新了（怕覆盖掉）。"
-    if "不是 git 仓库" in err:
-        return "这个文件夹不是从网上下载的那种，没法自动更新。"
+    if "不是 git 仓库" in err:        return "这个文件夹不是从网上下载的那种，没法自动更新。"
     # ⚠️ 分叉要**先**判：它的 error 里也含「拉取失败」，会被下面那条网络判据吃掉，
     # 于是把"分叉"说成"网络不通" —— 那是误导，两者要做的事完全不同。
     if "分叉" in err:
@@ -340,6 +374,7 @@ def pull() -> dict:
     dirty = _dirty_report()
     if dirty:
         out["blocked"] = True
+        out["dirty_files"] = _dirty_paths(dirty)      # 卡片那句要点名（见 `_friendly`）
         # `error` 给开发者/命令行看（含 git 术语）；`user_msg` 给**卡片**看。
         # 面向用户那条**不许出现「工作区」「stash」「未提交」**这类词 ——
         # 用工具的人不知道 git，看到这些只会以为哪儿坏了。
@@ -512,8 +547,13 @@ def auto_update() -> dict:
             _log(f"检查失败：{st['error']}")
             return {**out, "error": st["error"]}
         if st["dirty"]:
-            _log("跳过：工作区有本地改动（绝不 stash / 绝不丢弃）")
-            return {**out, "skipped": True, "reason": "工作区脏"}
+            # ⚠️ **日志必须点名**（2026-10-07）：原来只写"有本地改动"，于是朋友那台
+            #    卡了两周、日志里一条线索都没有，最后靠他手动 `git status` 截图才找到。
+            _paths = _dirty_paths(_dirty_report())
+            _log("跳过：工作区有本地改动（绝不 stash / 绝不丢弃）"
+                 + (f" —— 挡路的是：{'、'.join(_paths[:8])}" if _paths else ""))
+            return {**out, "skipped": True, "reason": "工作区脏",
+                    "dirty_files": _paths}
         if st["behind"] <= 0:
             return {**out, "ok": True, "skipped": True, "reason": "已是最新"}
 

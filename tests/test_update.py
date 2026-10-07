@@ -475,6 +475,19 @@ check("⚠️ 四种停手各有各的话（并成一句 -> 用户会去做错�
       len(set(_msgs.values())) == 4 and all(_msgs.values()),
       f"{ {k: v[:24] for k, v in _msgs.items()} }")
 
+print("--- C6 ⚠️ 停手那句必须**点名文件**（只说「有改动」害人卡了两周）---")
+# ⚠️ 2026-10-07 实测：朋友那台被一个**构建产物**挡住，而卡片/日志都只说"你有自己
+#    改过的内容"，不给文件名 → 他卡了两周，最后靠手动 `git status` 截图才定位到。
+#    这条钉住「点名」这件事本身（变异验证：把 `dirty_files` 去掉 -> 这条红）。
+tmp, seed, clone = new_world()
+(clone / "requirements.txt").write_text("numpy>=2.0\n# 我改的\n", encoding="utf-8")
+_r6 = update.pull()
+check("C6 脏停手 -> 卡片那句里出现**具体文件名**（不许只说「有改动」）",
+      "requirements.txt" in (_r6.get("user_msg") or "")
+      and _r6.get("dirty_files") == ["requirements.txt"],
+      f"user_msg={(_r6.get('user_msg') or '')[:70]!r} dirty_files={_r6.get('dirty_files')}")
+print()
+
 print("--- C5 `cl doctor` 那一行（fix #2：让「我这份是什么」一眼看得出）---")
 import doctor                                                    # noqa: E402
 tmp, seed, clone = new_world()

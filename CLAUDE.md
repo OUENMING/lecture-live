@@ -58,6 +58,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | **拖拽落点验收探针**（不在运行路径上；**改拖拽相关代码前跑它**，作者手拖一次即可） | `scripts/probe_drag.py` |
 | **课程卡片面板验收跑器**（不在运行路径上；**隔离模式** —— 术语表是 /tmp 的副本，删词/撤销都改副本） | `scripts/probe_entry_panel.py` |
 | **测试模式开关的拍图探针**（不在运行路径上；**一个字节都不写盘** —— `on_test_mode` 是桩。推送给作者看效果前跑它） | `scripts/probe_test_mode.py` |
+| ⭐ **测试报告端到端探针**（不在运行路径上；**改收尾路径后跑它**）—— 用假 UI 复现「✕ 已按」的收尾条件，真跑一个会话。防的是**报告静默没写成**（藏过一周） | `scripts/probe_testmode_report.py` |
 | **零参数入口**（双击 `.app` → 先开面板 → 点「开始上课」才录课；**独立短进程**，录课那条路一个字没动） | `entry_launch.py`（⚠️ 退出码 0/1/2/3/4 是它与 `cl` 的契约；`CL_NO_PANEL=1` 退回老行为。**落点条上那颗「测试模式」开关**写 `.test-mode` → `cl` 读 → `--test-mode`） |
 | 回归测试 R1–R5、毫秒级断言 | `tests/test_audit_regressions.py` |
 | 端到端、拿真实录音跑通 | `scripts/test_pipeline.py` |

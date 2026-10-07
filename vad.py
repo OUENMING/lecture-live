@@ -52,6 +52,9 @@ class SileroVad:
     """sherpa-onnx Silero VAD 包装。is_speech(chunk) 按 512 样本窗多数票判定。
     模型缺失时自动退化为能量阈值(仍可用, 只是抗噪差)。"""
 
+    #: 内部状态会随时间漂移（见 `reset` 的 docstring）→ `Segmenter` 会在长静音里重建它。
+    drift_prone = True
+
     def __init__(self, model_path: str, threshold: float = VAD_THRESHOLD):
         import os
         import sherpa_onnx
@@ -102,6 +105,9 @@ class SileroVad:
 
 class _EnergyVad:
     """退化方案: RMS 能量 + 噪声地板。"""
+
+    #: 没有会漂移的内部状态 → `Segmenter` 不重建它（`reset` 是空操作）。
+    drift_prone = False
 
     def __init__(self, min_rms: float = 0.008):
         self.min_rms = min_rms
@@ -210,8 +216,13 @@ class Segmenter:
         """收尾诊断快照(对应 Handy 的 VadTailReport)。只报**发生过**的事,
         一切正常时返回空串 —— 不产生噪音。三个可疑数各自指向不同的修法。"""
         d = self.diag
+        # ⚠️ `vad_resets` **不进这个守卫**（2026-10-07 OCR 审查指出）：它只要有一处
+        #    ≥`RESET_AFTER_SILENCE_S` 的普通停顿就会自增 —— 那是**每节课的常态**，
+        #    不是异常。让它参与非空判定，`report()` 就几乎永远非空，违背本函数
+        #    「一切正常时返回空串，不产生噪音」的契约（`main.py` 收尾依赖它）。
+        #    它和 `cuts` 一样：**只在别的条目已经触发时**顺带报出来。
         if not (d["hard_cuts"] or d["dropped"] or d["weak_blocks"]
-                or d["blind_dropped"] or d["vad_resets"]):
+                or d["blind_dropped"]):
             return ""
         bits = [f"断句 {d['cuts']} 次"]
         if d["hard_cuts"]:
@@ -254,9 +265,13 @@ class Segmenter:
                 self._pre_roll.append(chunk)
                 self._blind_s += CHUNK_DUR
                 if self._blind_s >= RESET_AFTER_SILENCE_S:
-                    self._vad.reset()
                     self._blind_s = 0.0
-                    self.diag["vad_resets"] += 1
+                    # ⚠️ 只对**会漂移的** VAD 重建（2026-10-07 OCR 指出）：兜底的
+                    #    `_EnergyVad` 没有会漂移的内部状态、`reset()` 是空操作，
+                    #    无条件计数会让报告声称"清掉了漂移"，而现场根本没有漂移。
+                    if getattr(self._vad, "drift_prone", False):
+                        self._vad.reset()
+                        self.diag["vad_resets"] += 1
                 return
 
         # 已在说话中、这块判静音、但块里确实有语音窗 -> VAD 漏检。

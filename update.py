@@ -151,7 +151,14 @@ def _dirty_report() -> str:
          用户还完全不知道为什么。**作者 2026-09-30 就是被自己那份未跟踪的文件挡住的。**
        → **改过的跟踪文件仍然停手** —— 那是「你动过我们的代码」，边界①不为它松。
     """
-    rc, out, _ = _git("status", "--porcelain", "--untracked-files=no")
+    # ⚠️ `core.quotePath=false`（2026-10-07 OCR 审查指出 + 实测）：默认 git 会把
+    #    「不常见」字符做 C 转义 —— 中文名会输出成 `"\346\226\207.txt"`，
+    #    而这函数的用途恰恰是**把文件名亮给人看**，转义串等于没点名。实测对照：
+    #      默认            -> ` M "\346\226\207 \344\273\266.txt"`
+    #      quotePath=false -> ` M "文 件.txt"`
+    #    ⚠️ 注意 **引号还在**（含空格的名字 git 仍会加引号）→ `_dirty_paths` 要剥。
+    rc, out, _ = _git("-c", "core.quotePath=false", "status", "--porcelain",
+                      "--untracked-files=no")
     return out if rc == 0 else ""
 
 
@@ -174,8 +181,17 @@ def _dirty_paths(text: str) -> list[str]:
         #    （实测切出 `equirements.txt`）。改成"丢掉 2 位状态码再 lstrip"：
         #    两种形状（有没有被 strip 过）都对。
         p = ln[2:].lstrip()
-        if " -> " in p:                    # 重命名：`R  old -> new`，取新名
+        # ⚠️ 只有**重命名/复制**（X 或 Y 是 R/C）才切 `old -> new`（2026-10-07 OCR 指出）：
+        #    判据写成「路径里含 ` -> `」的话，一个名字里本来就带 ` -> ` 的普通改动文件
+        #    也会被切开，报出去的名字就成了错的 —— 而本函数的全部价值就是名字要准。
+        if ("R" in ln[:2] or "C" in ln[:2]) and " -> " in p:
             p = p.split(" -> ", 1)[1].strip()
+        # ⚠️ **剥引号必须在切分之后**（2026-10-07 OCR 指出，实测踩到）：重命名时 git 给
+        #    **两条路径各自**加引号（`R  "old name" -> "new name"`），先剥会把这"两个边缘
+        #    引号"误当成一对，剥出 `old name" -> "new name` → 取到 `"new name`（脏的）。
+        #    含空格/引号的名字 git 即便 `quotePath=false` 也仍会用 `"…"` 包起来。
+        if len(p) >= 2 and p[0] == '"' and p[-1] == '"':
+            p = p[1:-1].replace('\\"', '"').replace("\\\\", "\\")
         if p:
             paths.append(p)
     return paths
@@ -317,7 +333,8 @@ def _friendly(out: dict) -> str:
                     f"   改过的是：{_shown}\n"
                     f"   是你的东西就别动它；要更新，先把它改回去或挪走。")
         return "这个文件夹里有你自己改过的内容，这次就先不更新了（怕覆盖掉）。"
-    if "不是 git 仓库" in err:        return "这个文件夹不是从网上下载的那种，没法自动更新。"
+    if "不是 git 仓库" in err:
+        return "这个文件夹不是从网上下载的那种，没法自动更新。"
     # ⚠️ 分叉要**先**判：它的 error 里也含「拉取失败」，会被下面那条网络判据吃掉，
     # 于是把"分叉"说成"网络不通" —— 那是误导，两者要做的事完全不同。
     if "分叉" in err:

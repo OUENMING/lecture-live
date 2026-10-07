@@ -488,6 +488,39 @@ check("C6 脏停手 -> 卡片那句里出现**具体文件名**（不许只说�
       f"user_msg={(_r6.get('user_msg') or '')[:70]!r} dirty_files={_r6.get('dirty_files')}")
 print()
 
+print("--- C7 ⚠️ 中文名文件必须**原样**点名（git 默认会 C 转义）---")
+# ⚠️ 2026-10-07 OCR 审查指出 + 实测：`git status --porcelain` 默认会把「不常见」
+#    字符 C 转义 —— 中文名输出成 `"\346\226\207.txt"`。而「点名」这个功能的全部
+#    价值就是名字要**一眼能认**，转义串等于没点名。修法是加 `core.quotePath=false`。
+#    变异验证：把 `_dirty_report()` 里那个 `-c core.quotePath=false` 去掉 -> 这条红。
+tmp, seed, clone = new_world()
+(clone / "中文 名.txt").write_text("x\n", encoding="utf-8")
+sh("git", "add", "-A", cwd=clone)
+sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "cn", cwd=clone)
+(clone / "中文 名.txt").write_text("y\n", encoding="utf-8")
+_r7 = update.pull()
+check("C7 中文名文件 -> 点名里不许出现 \\346 这类 C 转义",
+      "中文 名.txt" in (_r7.get("user_msg") or "")
+      and _r7.get("dirty_files") == ["中文 名.txt"],
+      f"user_msg={(_r7.get('user_msg') or '')[:80]!r} dirty_files={_r7.get('dirty_files')}")
+print()
+
+print("--- C8 `_dirty_paths` 的纯解析（重命名 / 引号 / 前导空格被吞）---")
+# ⚠️ 这几条是 2026-10-07 OCR 两轮抓出来的形状（先切分还是先剥引号、` -> ` 判据太宽、
+#    `_git()` 会 strip 掉首行的前导空格）。纯函数入参=porcelain 原文，不需要 git 夹具。
+check("C8 两条路径各自带引号的重命名 -> 取到干净的新名",
+      update._dirty_paths('R  "old name" -> "new name"') == ["new name"],
+      str(update._dirty_paths('R  "old name" -> "new name"')))
+check("C8b 无空格重命名 -> 取新名",
+      update._dirty_paths("R  a -> b") == ["b"], str(update._dirty_paths("R  a -> b")))
+check("C8c 名字里本来就带 ` -> ` 的普通改动 -> **不切**",
+      update._dirty_paths(" M notes -> final.md") == ["notes -> final.md"],
+      str(update._dirty_paths(" M notes -> final.md")))
+check("C8d 首行被 strip 掉前导空格 -> 仍取对（不许切出 quirements.txt）",
+      update._dirty_paths("M requirements.txt") == ["requirements.txt"],
+      str(update._dirty_paths("M requirements.txt")))
+print()
+
 print("--- C5 `cl doctor` 那一行（fix #2：让「我这份是什么」一眼看得出）---")
 import doctor                                                    # noqa: E402
 tmp, seed, clone = new_world()

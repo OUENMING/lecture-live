@@ -360,6 +360,9 @@ class R22_VadBlindStretchRescue(unittest.TestCase):
     class _DriftVad:
         """最小漂移模型: 只有被 `reset()` 过之后才认得出语音。"""
 
+        #: 与 `vad.SileroVad` 一样声明"会漂移" —— `Segmenter` 只对这类 VAD 重建。
+        drift_prone = True
+
         def __init__(self, floor: float = 0.05):
             self.floor = floor
             self.last_ratio = 0.0

@@ -1268,7 +1268,11 @@ def run(args) -> None:
         #    （2026-09-30 起测试模式下默认录 —— 见上面 `_rec` 那段。）
         if tester.record_audio:
             echo("   ⚠️ 会录制**课堂音频**(分段 Opus, 约 9MB/50 分钟), 收尾打成一个 zip。")
-            echo("      音频与逐字转录可能含**其他同学的声音** —— 发出去前请自己确认。")
+            # ⚠️⚠️ **必须说"自动"**（2026-10-07）：原句是「发出去前请自己确认」——
+            #    读起来像"你要手动发"，而 `start_upload`(收尾那段) 是**自动排队 + 后台就传**。
+            #    披露与事实不一致，等于没披露。想关掉：`CLASSLIVE_UPLOAD=0`。
+            echo("      音频与逐字转录可能含**其他同学的声音** —— 收尾会**自动上传**给作者"
+                 "（Cloudflare R2）。想关掉: `CLASSLIVE_UPLOAD=0`。")
         else:
             echo("   ℹ️ 只采指标, 不留常规音频（要留: 加 `--record-audio`）。")
         if tester.record_float:
@@ -2210,12 +2214,11 @@ def run(args) -> None:
                     _mb = f"{_sz / 1e6:.1f} MB" if _sz > 1e6 else f"{_sz / 1024:.0f} KB"
                     echo(f"📦 数据包:   {tester.bundle_path}  ({_mb})")
                     if tester.record_audio:
-                        echo("   ⚠️ 内含**课堂音频** + 逐字转录(可能有其他同学的声音)"
-                             " —— 发出去前自己确认一下。")
+                        echo("   ⚠️ 内含**课堂音频** + 逐字转录(可能有其他同学的声音)")
                     else:
                         echo("   ℹ️ 只含指标与转录文本, **不含音频**（要留: --record-audio）。")
                     # ⚠️ 转码失败时音频还是 wav 分段 —— 报告与屏上都看得见。
-                    echo("   发给作者即可, 不用解压。")
+                    echo("   收尾会自动上传给作者（关掉: CLASSLIVE_UPLOAD=0）。")
                 elif not args.no_bundle:
                     # ⚠️ 只说数据包（2026-10-07 OCR 指出）：报告的实情由上面那条单独说，
                     #    两条都提"报告"会让同一件事报两遍。`--no-bundle`（README 写明可

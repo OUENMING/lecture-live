@@ -189,6 +189,11 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 
 - 默认闸门：`ClassLive.app/Contents/MacOS/python tests/test_audit_regressions.py` 全绿（无网络、无模型、毫秒级）。注意 R1/R4 复刻了实现逻辑 —— 绿 ≠ 真实流水线通过。
 - **碰过更新机制**（`update.py` / `cl update` / 卡片按钮）：`ClassLive.app/Contents/MacOS/python tests/test_update.py` 全绿。
+- ⭐ **碰过收尾路径 / 测试报告**（`main.py` 的 `spin_until` 或收尾那段、`testmode.finish`）：
+  `ClassLive.app/Contents/MacOS/python scripts/probe_testmode_report.py`
+  —— **要真跑一个会话**（约 1 分钟，会往 `sessions/` 写一节测试记录）。
+  ⚠️ 它防的是「报告**静默**没写成」那类**只有真跑才看得见**的故障 —— 那件事藏了整整一周
+  （`report.json` 从 2026-09-24 起一个都没有）。它**不在**默认闸门里（默认闸门要毫秒级）。
   ⚠️ 它**不在**默认闸门里，要单独跑 —— 覆盖 `pull()` 的三条安全边界（脏树停手且**文件数不变** /
   `--ff-only` 不造 merge / 已最新跳过）与自动更新的分级（默认拒绝 / 跨版本夹 manual 拒绝 / 限频 / 并发锁）。
 - **碰过单实例锁**（`instance_lock.py` / `main.run()` 开头）：

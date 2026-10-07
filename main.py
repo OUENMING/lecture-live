@@ -2154,14 +2154,16 @@ def run(args) -> None:
                                      f" —— 留着，下次启动接着传")
                     except Exception as _e:               # noqa: BLE001
                         echo(f"   ⚠ 上传排队失败（{type(_e).__name__}）—— 不影响其余")
-                elif "err" not in _tf and getattr(tester, "stem", None) is not None:
-                    # ⚠️ **哨兵**（2026-10-07）：这一次"**有会话文件**、线程正常结束、却没交出
-                    #    报告、也没抛异常"的组合，在 `spin_until` 修好之后**应当到不了** ——
-                    #    它原来正是"daemon 线程被丢下"的签名（那一周 90 节全中）。留着是为了
-                    #    下次真出现时**出声**，而不是像之前那样静默。
-                    #    ⚠️ `stem is None`（`--save-notes no` → 没有会话文件）时报告本来
-                    #       就无处可写，**不算故障**，所以排除掉（2026-10-07 OCR 指出）。
-                    echo("⚠ 测试报告没写成（后台收尾没跑完）"
+                # ⚠️⚠️ **报告的真相以磁盘为准，不许拿 `_rep` 猜**（2026-10-07 OCR 两轮指出）：
+                #    `_rep` 是 `finish()` 的返回值，而它被 `@_safe_loud` 包着 ——
+                #    **报告写完了、随后打包失败**时它照样返回 `None`（异常被吞），
+                #    只看 `_rep` 就会说"报告也没写成"——又一句假话。
+                #    `stem is None`（`--save-notes no`）时报告**本来就不该存在**，不是故障。
+                _repfile = (str(tester.stem) + ".report.json"
+                            if getattr(tester, "stem", None) is not None else "")
+                _wrote = bool(_repfile) and os.path.exists(_repfile)
+                if _repfile and not _wrote:
+                    echo("⚠ 测试报告没写成（收尾没跑完？）"
                          " —— 详情看 ~/Library/Logs/ClassLive/app.log")
                 if tester.bundle_path:
                     _sz = os.path.getsize(tester.bundle_path)
@@ -2174,14 +2176,11 @@ def run(args) -> None:
                         echo("   ℹ️ 只含指标与转录文本, **不含音频**（要留: --record-audio）。")
                     # ⚠️ 转码失败时音频还是 wav 分段 —— 报告与屏上都看得见。
                     echo("   发给作者即可, 不用解压。")
-                elif _rep and not args.no_bundle:
-                    # ⚠️ **只说真话**（2026-10-07）：这句原来无条件打「但报告已写出」，
-                    #    而那一周实测**一个 report.json 都没有** —— 假话比不说更坏。
-                    #    ⚠️ `--no-bundle`（`cl test --no-bundle`，README 写明）时
-                    #       `bundle_path` **合法地**是 None，不许拿它报警（OCR 指出）。
-                    echo("⚠ 数据包生成失败（报告已写出，见上面的路径）")
                 elif not args.no_bundle:
-                    echo("⚠ 数据包生成失败，报告也没写成")
+                    # ⚠️ 只说数据包（2026-10-07 OCR 指出）：报告的实情由上面那条单独说，
+                    #    两条都提"报告"会让同一件事报两遍。`--no-bundle`（README 写明可
+                    #    「不打包，只写报告」）时 `bundle_path` **合法地**是 None → 不出声。
+                    echo("⚠ 数据包生成失败" + ("（报告已写出）" if _wrote else ""))
 
             # ---- 小更新：退出时在**独立进程**里自动拉（详见 _auto_update_on_exit）----
             # 放在 finally 的**最末**：等用户答完"是否保存笔记"、测试报告也打完，

@@ -468,6 +468,41 @@ def main() -> int:
     check("⭐⭐ 而**正常上课那条路的默认没被动**（D1 的边界）",
           "record_audio=args.record_audio)" not in _src_main)
 
+    # ---- ⭐⭐ 逐段探针：主模型 / 兜底模型**分开**记 ----
+    # ⚠️ 2026-10-07 的教训：原来只记"最终用了哪个模型"一格，把两条信息压成了一个 ——
+    #    「主模型（Whisper）空了几次」与「兜底模型（Parakeet）空了几次」分不开，
+    #    于是拿兜底模型离线跑出来的空被当成了"空转写"去查（那是幽灵）。
+    print("--- ⭐⭐ 逐段探针（主模型 vs 兜底模型）+ 异常段原信号 ---")
+    _d5 = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_probe_"))
+    _t5 = tm.TestSession(_d5 / "p.md", record_audio=False, record_float=True)
+    _b = np.zeros(tm.SR, dtype=np.float32)
+    _t5.note_segment(_b, "正常一段", 100.0, "whisper",
+                     final_text="正常一段", final_degenerate=False)
+    _t5.note_segment(_b, "兜底救回来的", 120.0, "parakeet", fell_back=True,
+                     final_text="", final_degenerate=False, draft_text="兜底救回来的")
+    _p0 = _t5.segments[0]["probe"]
+    _p1 = _t5.segments[1]["probe"]
+    check("⭐⭐ 主模型那一侧**单独**记（`final_empty` / `final_degenerate`）",
+          _p0["final_empty"] is False and _p1["final_empty"] is True
+          and _p1["final_degenerate"] is False,
+          f"p0={_p0} p1={_p1}")
+    check("⭐ 没回退 → 兜底原文是 `None`（**不是空串** —— 那会把「没跑」说成「跑了但空」）",
+          _p0["draft_text"] is None and _p0["draft_empty"] is None
+          and _p1["draft_text"] == "兜底救回来的",
+          f"p0.draft={_p0['draft_text']!r} p1.draft={_p1['draft_text']!r}")
+    check("⭐⭐ 异常段（走了回退）留了原信号，正常段**没留**",
+          bool(_p1["float_saved"]) and not _p0["float_saved"]
+          and pathlib.Path(_p1["float_saved"]).exists()
+          and not (pathlib.Path(str(_t5.stem) + ".probe") / "000.npy").exists(),
+          f"p0={_p0['float_saved']!r} p1={_p1['float_saved']!r}")
+    # ⚠️ 变异敏感：把 `record_float` 那个开关去掉（无条件写），这条红。
+    _t6 = tm.TestSession(_d5 / "q.md", record_audio=False, record_float=False)
+    _t6.note_segment(_b, "x", 1.0, "parakeet", fell_back=True, final_text="")
+    check("⚠️ `record_float=False` 时快照目录**根本不该建**",
+          _t6.segments[0]["probe"]["float_saved"] == ""
+          and not pathlib.Path(str(_t6.stem) + ".probe").exists(),
+          repr(_t6.segments[0]["probe"]["float_saved"]))
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

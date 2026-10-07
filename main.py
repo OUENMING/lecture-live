@@ -1241,8 +1241,14 @@ def run(args) -> None:
         #    ⚠️ **翻了之后披露更要紧**：`cl test` 一开就录 → 得**开课前**跟同学说。
         _rec = (args.record_audio if args.record_audio is not None
                 else True)
+        # ⭐ 原信号快照（异常段才写）默认**跟随音频那个决定** —— 卡片的「测试模式」开关
+        #    只传 `--test-mode`，不能给人加旗标；若它默认关，这一格**在真实使用里永远采不到**
+        #    （实测：`cl test` 走的就是这条路）。它比 opus 更"原始"但不含**新的内容类别**
+        #    （同一段音频），所以跟随 `--record-audio` 是连贯的；不想要就 `--no-record-float`。
+        _rf = (args.record_float if args.record_float is not None else _rec)
         tester = TestSession(getattr(writer, "session_path", None),
-                             record_audio=_rec)
+                             record_audio=_rec,
+                             record_float=_rf)
         echo(f"🧪 测试模式: 报告将写到 {tester.stem}.report.json")
         # ⚠️ 提醒**放在启动时**：收尾才说就晚了，那时整节课已经录完。
         #    （2026-09-30 起测试模式下默认录 —— 见上面 `_rec` 那段。）
@@ -1498,14 +1504,26 @@ def run(args) -> None:
                 _t_asr = time.monotonic()
                 text = asr_final.transcribe(buf)
                 _used, _lp = "whisper", asr_final.last_logprob
-                if not text or is_degenerate(text):
+                # ⭐ 2026-10-07：**主模型（Whisper）的原文与判决单独留下来** —— 它本来
+                #    就是免费的（这几行已经算出来了），而少记它的代价是实打实的：
+                #    原来只记"最终用了哪个"，于是"主模型空了几次"与"兜底模型空了几次"
+                #    分不开 → 我拿**兜底模型**离线跑，把它的空当成了"空转写"去查。
+                #    兜底模型的原文只在真回退时有（那时才轮到它跑）。
+                _final_text = text
+                _final_degen = is_degenerate(text)
+                _draft_text = None
+                if not text or _final_degen:
                     text = asr.transcribe(buf)      # 退化/空 -> 用草稿模型(并兜底)
                     _used, _lp = "parakeet", asr.last_logprob
+                    _draft_text = text
                 if tester is not None:
                     tester.note_segment(buf, text, (time.monotonic() - _t_asr) * 1000,
                                         _used, logprob=_lp,
                                         fell_back=(_used == "parakeet"),
-                                        n_sentences=len(split_sentences(text)))
+                                        n_sentences=len(split_sentences(text)),
+                                        final_text=_final_text,
+                                        final_degenerate=_final_degen,
+                                        draft_text=_draft_text)
                 if not text:
                     continue
                 if carry["text"]:                           # 与上句半截拼接
@@ -2281,6 +2299,15 @@ def main():
                         "内含其他同学的声音）")
     p.add_argument("--no-record-audio", dest="record_audio", action="store_false",
                    help="这一节不留音频（覆盖测试模式的默认）")
+    # ⭐ 只在**异常段**（主模型空/退化 → 走了回退）另存一份**送进 ASR 的原信号**（float32）。
+    #    ⚠️ 默认**关**：它比 opus 更"原始"（未压缩），披露要更明确；体积很小（只有异常段写）。
+    #    ⚠️ 存在的理由：离线复现必须**喂同一份信号** —— 拿 16-bit wav 回放会改 ASR 结果
+    #       （2026-10-07 实测：同一节 17 段里 9 段改口）。
+    p.add_argument("--record-float", action="store_true", default=None,
+                   help="异常段另存一份送进 ASR 的原始 float32 信号"
+                        "（**测试模式下默认跟随 --record-audio**）")
+    p.add_argument("--no-record-float", dest="record_float", action="store_false",
+                   help="这一节不存原信号快照（覆盖测试模式的默认）")
     p.add_argument("--no-bundle", action="store_true",
                    help="测试模式下不打包成可发送的单个 zip")
     p.add_argument("--final-model-dir",

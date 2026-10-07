@@ -227,11 +227,19 @@ def make_bundle(stem: pathlib.Path, report_path: str | os.PathLike,
 class TestSession:
     """一次测试课的采集器。所有 note_* 方法都保证不抛。"""
 
-    def __init__(self, session_path: pathlib.Path | None, record_audio: bool = False):
+    def __init__(self, session_path: pathlib.Path | None, record_audio: bool = False,
+                 record_float: bool = False):
         self.t0 = time.monotonic()
         self.session_path = session_path
         self.stem = session_path.with_suffix("") if session_path else None
         self.record_audio = bool(record_audio) and self.stem is not None
+        #: ⭐ 对**异常段**（主模型空/退化 → 走了回退）另留一份**送进 ASR 的那份原信号**
+        #: （float32）。⚠️ 为什么需要它（2026-10-07 实测）：拿 **16-bit** wav 离线回放去
+        #: 复现实时（float）流水线时，**量化本身就会改变 ASR 结果** —— 同一节 17 段里
+        #: 9 段改口（`"So it's around it."` → `"Sound next."`）。量具自己成了变量。
+        #: ⚠️ 默认**关**：比 opus 更"原始"，披露要更明确；只在异常段写，体积很小。
+        #: ⚠️ 它**不进上传**（`upload_files` 只列 report / opus / wav / md）—— 留本机实验用。
+        self.record_float = bool(record_float) and self.stem is not None
 
         # 音频电平累计（流式, 不存全波形, 除了录音时）
         self._n_samples = 0
@@ -413,12 +421,39 @@ class TestSession:
         self._rss_peak = max(self._rss_peak, self._rss_mb())
 
     @_safe
+    def _save_probe_float(self, i: int, audio) -> str:
+        """异常段留一份原信号（float32）。失败返回空串 —— **绝不抛**。"""
+        try:
+            d = pathlib.Path(str(self.stem) + ".probe")
+            d.mkdir(exist_ok=True)
+            p = d / f"{i:03d}.npy"
+            np.save(p, np.asarray(audio, dtype=np.float32))
+            return str(p)
+        except Exception:                                 # noqa: BLE001
+            return ""
+
     def note_segment(self, audio, text: str, asr_ms: float, model: str,
                      logprob: float | None = None, fell_back: bool = False,
-                     n_sentences: int = 0) -> None:
+                     n_sentences: int = 0,
+                     final_text: str | None = None,
+                     final_degenerate: bool = False,
+                     draft_text: str | None = None) -> None:
+        """一段的定稿结果。`final_*` = **主模型**（Whisper）在**兜底之前**的原文与判决；
+        `draft_text` = 真回退时**兜底模型**（Parakeet）的原文；都不是就传 `None`。
+
+        ⭐ **`probe` 那一格为什么要加**（2026-10-07）：原来只记"最终用了哪个模型"一格 ——
+        而那把**两条信息压成了一个**：「主模型空了几次」与「兜底模型空了几次」分不开。
+        实际代价就是那次绕远路：我拿**兜底模型**离线跑，把它的空输出当成了"空转写"，
+        而生产里主模型根本没空（落盘文本就是主模型给的），`vad_params.py` 那句
+        「空转写 21%，这才是该查的方向」**量的是兜底模型 → 是个幽灵**。
+        ⚠️ 这两格**是免费的**：主模型的结果本来就算出来了，兜底模型只在回退时才跑。
+        ⚠️ 曾经的错误想法是"每段都多跑一次兜底模型来对照"—— 那要 +0.36s × 250 段。
+        """
         a = np.abs(audio) if len(audio) else np.zeros(1)
         rms = float(np.sqrt(np.mean(np.asarray(audio, dtype=np.float64) ** 2))) \
             if len(audio) else 0.0
+        _probe_saved = self._save_probe_float(self._seg_no, audio) \
+            if (self.record_float and fell_back) else ""
         self.segments.append({
             "i": self._seg_no,
             "t": round(time.monotonic() - self.t0, 2),
@@ -434,6 +469,14 @@ class TestSession:
             "empty": not bool(text.strip()),
             "n_sentences": n_sentences,
             "text": text,
+            "probe": {
+                "final_text": final_text,
+                "final_empty": None if final_text is None else not bool(final_text.strip()),
+                "final_degenerate": bool(final_degenerate),
+                "draft_text": draft_text,
+                "draft_empty": None if draft_text is None else not bool(draft_text.strip()),
+                "float_saved": _probe_saved,
+            },
         })
         self._seg_no += 1
 
@@ -534,6 +577,18 @@ class TestSession:
         def pct(cond) -> float:
             return round(sum(1 for s in segs if cond(s)) / n * 100, 1)
 
+        def ppct(field: str):
+            """**主模型（Whisper）那一侧**的比例 —— 这才是「空转写」的正确口径。
+
+            ⭐ 2026-10-07：原来只有「最终文本空没空」那一格，而它是**两个模型混在一起**
+            的结果（主模型空/退化时才轮到兜底模型）→ 分不出是谁空的。那次绕远路就是
+            这么来的：拿**兜底模型**离线跑，把它的空当成了"空转写"。
+            取不到（老调用方没传 `probe`）时返回 `None` —— **不许当成 0**。
+            """
+            vals = [(s.get("probe") or {}).get(field) for s in segs]
+            vals = [v for v in vals if v is not None]
+            return round(sum(1 for v in vals if v) / len(vals) * 100, 1) if vals else None
+
         # 电平的分布 —— 用逐块 RMS/峰值的百分位, 看这节课的动态范围
         rms_blocks = np.asarray([x for x in self._block_rms if x > 0] or [1e-9])
         peak_blocks = np.asarray(self._block_peaks or [1e-9])
@@ -578,6 +633,9 @@ class TestSession:
                 "segments": len(segs),
                 "words": sum(s["words"] for s in segs),
                 "empty_pct": pct(lambda s: s["empty"]),
+                # ⭐ 主模型那一侧（见 `ppct`）：`empty_pct` 是**两模型混合**的结果，这两格才分得开
+                "final_empty_pct": ppct("final_empty"),
+                "final_degenerate_pct": ppct("final_degenerate"),
                 "no_end_punct_pct": pct(lambda s: s["words"] and not s["end_punct"]),
                 "fell_back_pct": pct(lambda s: s["fell_back"]),
                 "asr_ms_p50": round(float(np.median([s["asr_ms"] for s in segs])), 1) if segs else None,

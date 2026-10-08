@@ -1,0 +1,17 @@
+# 只开「真 bug」类规则；先不自动修（fix = false），不动代码风格。
+# 想看风格类噪音：uvx ruff check --isolated --select F401,F541,F841
+target-version = "py312"
+extend-exclude = ["docs", ".venv", ".wrangler", "ClassLive.app", "sessions", "glossary", "scripts/node_modules"]
+fix = false
+
+[lint]
+select = [
+  "E9",   # 语法/IO 错误
+  "F63",  # is 比较字面量、assert 元组等恒真
+  "F7",   # return/yield/break 位置错误
+  "F82",  # 未定义名字
+  "F811", # 重复定义（会让前一个定义变成死代码）
+  "F5",   # %/format 格式串与参数不匹配
+  "F6",   # 其余明显错误（F601/F602 字典重复键等）
+]
+ignore = ["F541"]  # f-string 没有占位符：只是风格

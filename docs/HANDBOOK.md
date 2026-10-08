@@ -99,7 +99,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
    别因为"这版没依赖变化"自作主张。
 7. **更新日志文案必须先给作者确认再发版**；**推送前先给作者看效果**（UI/弹窗/文案）。
 8. **改代码前先加载相关 skill**（作者提过三次的硬规矩）。常用对应：
-   排查 bug→`systematic-debugging` · 声称完成前→`verification-before-completion` ·
+   排查 bug→`diagnosing-bugs` · 声称完成前→`verification-before-completion` ·
    动接口/模块边界→`codebase-design` · 写文档→`writing-for-agents`。
    ⚠️ `settings.json` 的 `skillOverrides` 会**静默禁用** skill（关了 12 个）。
 9. **不拿译文质量换弱防护**：任何要改 prompt 文案的"防护"，先问会不会动译文，
@@ -233,7 +233,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 
 ### 5.3 改代码时
 - **半吊子护栏比没有更骗人**（同一个函数里一个 `getattr` 有护栏、一个裸取）。
-- **挖出行为差异的根因再改**（`systematic-debugging` 四阶段），别打补丁让症状消失。
+- **挖出行为差异的根因再改**（`diagnosing-bugs`：先造能变红的反馈环），别打补丁让症状消失。
 - **`unknown ≠ missing`**、**「没答」≠「答了 0」**——这类"倒向哪边更安全"的选择，全仓一致。
 - **失败不许静默**：取数失败要么出声、要么在界面上能看出来；"穷尽地吞掉异常"是最贵的静默。
 

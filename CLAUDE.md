@@ -71,7 +71,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 
 - ⭐ **动手改代码之前，先加载相关 skill**（作者 2026-09-19 / 09-20 两次提过，硬规矩）。
   他 99 天囤了 42 个 skill 却只调用 39 次 —— **装了不用等于没装**。
-  常用对应：改完质检→`simplify` · 排查 bug→`systematic-debugging` ·
+  常用对应：改完质检→`simplify` · 排查 bug→`diagnosing-bugs` ·
   声称完成前→`verification-before-completion` · 动模块边界/接口→`codebase-design` ·
   写文档/给 agent 看的东西→`writing-for-agents`。
   ⚠️ `~/.claude/skills/` 里**看得见文件 ≠ 能用** —— `settings.json` 的 `skillOverrides`

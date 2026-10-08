@@ -62,6 +62,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | **零参数入口**（双击 `.app` → 先开面板 → 点「开始上课」才录课；**独立短进程**，录课那条路一个字没动） | `entry_launch.py`（⚠️ 退出码 0/1/2/3/4 是它与 `cl` 的契约；`CL_NO_PANEL=1` 退回老行为。**落点条上那颗「测试模式」开关**写 `.test-mode` → `cl` 读 → `--test-mode`） |
 | 回归测试 R1–R5、毫秒级断言 | `tests/test_audit_regressions.py` |
 | 端到端、拿真实录音跑通 | `scripts/test_pipeline.py` |
+| ⭐ **流式字幕量具**（草稿回改率 / 延迟 / WER，可复跑）+ 2026-10-08 夜间改动的数字与取舍（草稿前缀冻结、触发策略、本地后处理、`--source system` 未验证）—— 改草稿/ASR/音源前先读 | `docs/RESEARCH-stream-eval.md` + `scripts/stream_eval.py` |
 | 面向用户的功能说明、开源与脱敏须知 | `README.md` |
 | 环境搭建、依赖清单、选型理由 | `docs/DESIGN.md` |
 

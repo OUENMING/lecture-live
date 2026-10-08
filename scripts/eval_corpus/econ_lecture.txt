@@ -1,0 +1,11 @@
+Okay, welcome back everyone. Today we are going to talk about elasticity, and in particular price elasticity of demand.
+
+So let me start with a simple question. If the price of a coffee goes up by ten percent, how much less coffee do people buy? The answer depends on the elasticity. If demand is elastic, the quantity falls by more than ten percent. If demand is inelastic, it falls by less than ten percent.
+
+Now, why does this matter for a firm? Well, total revenue is price times quantity. When demand is inelastic, raising the price increases total revenue, because the fall in quantity is proportionally smaller. When demand is elastic, raising the price actually reduces total revenue.
+
+Let me give you an example from the lecture notes. Suppose a bus ticket in Dublin costs two euro and fifty cents, and the company sells forty thousand tickets a day. If it raises the fare to three euro, and ticket sales drop to thirty five thousand, what is the elasticity? We use the midpoint formula, so the percentage change in quantity is about minus thirteen point three percent, and the percentage change in price is about eighteen point two percent.
+
+Divide the first by the second and you get roughly zero point seven three. That is less than one, so demand is inelastic, and the company's revenue goes up. Notice that I am taking the absolute value here, because the law of demand means the sign is always negative.
+
+Finally, remember the determinants of elasticity. The availability of close substitutes, whether the good is a necessity or a luxury, how broadly the market is defined, and the time horizon. In the long run, consumers can adjust, so demand tends to be more elastic. We will come back to this next week when we discuss cross price elasticity and the income elasticity of demand.

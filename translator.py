@@ -324,6 +324,32 @@ _FIX_LABELS = ("EN:", "EN：", "FIXED:", "CORRECTED:", "OUTPUT:",
                "英文:", "英文：", "修正后:", "修正后：", "矫正后:")
 
 
+# ---- 本地小模型的输出后处理（思路来自 six-ddc/livecaption 的读码，按本项目数据重新量过阈值）----
+_META_PREFIX = re.compile(
+    r"^\s*(?:好的[，,。！!]?\s*)?(?:以下是|下面是|这是|这句的)?"
+    r"(?:中文)?(?:译文|翻译结果|翻译|中文)\s*[：:]\s*")
+
+
+def clean_local_zh(zh: str) -> str:
+    """剥掉小模型爱加的「以下是译文：」之类的元话；其余原样。只认"前缀 + 冒号"，不会动正文。"""
+    out = _META_PREFIX.sub("", zh or "", count=1).strip()
+    return out or (zh or "").strip()
+
+
+#: 译文与**上一句译文**的字符二元组重合 ≥ 此值 → 判为"模型翻的是上下文，不是这一句"。
+#: 0.45 取自 livecaption；本项目的真实数据复核（2026-10-08，39 节课 4780 对相邻句，只读）：
+#: 0.45 误伤 0.54%（26/4780，多是讲师真的重复）；0.35 为 1.1%；0.25 为 3.5%。所以沿用 0.45。
+ECHO_BIGRAM = 0.45
+
+
+def zh_echoes_previous(zh: str, prev: str) -> bool:
+    if len(prev) < 16 or len(zh) < 2:
+        return False
+    a = {prev[i:i + 2] for i in range(len(prev) - 1)}
+    b = {zh[i:i + 2] for i in range(len(zh) - 1)}
+    return len(a & b) >= ECHO_BIGRAM * len(a)
+
+
 def _clean_fix(text: str, raw: str) -> str:
     """矫正结果归一; 结果不可用时回退原始 ASR(与翻译路径同规矩: 宁可留原样)。
     判为不可用的三种情况: 空、混入中文(说明它跑偏去翻译了)、明显变长(说明在改写
@@ -508,6 +534,8 @@ class Translator:
         self._lock = threading.Lock()
         self._load_lock = threading.Lock()   # 保护 _ensure 的懒加载(见该处说明)
         self._model_name = model
+        self._last_zh = ""                   # 上一句最终译文（回显检测用）
+        self.echo_retries = 0                # 只读计数：因"翻成上一句"重试过几次
 
     def _ensure(self) -> None:
         """懒加载(双重检查加锁)。
@@ -594,10 +622,11 @@ class Translator:
 
     # ---- 流式(主用) ----
     def fix_and_translate_stream(self, en: str, context: list[str],
-                                 on_zh=None, on_en=None) -> Result:
+                                 on_zh=None, on_en=None, _retried: bool = False) -> Result:
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
         self._ensure()          # auto 模式下云端首次失败才走到这里, 那时模型还没加载
+        prev_zh = self._last_zh                  # 回显检测的参照：进来时的"上一句"，重试也比这个
         parser = _StreamParser(on_zh or (lambda s: None), on_en or (lambda s: None))
         prompt = self._apply_chat(self._user_content(en, context))
         with self._lock:
@@ -607,7 +636,18 @@ class Translator:
                 parser.feed(getattr(resp, "text", "") or "")
             # 刻意**不**调用 mx.clear_cache(): 频繁释放/重建 Metal 缓冲是
             # IOGPUFamily 驱动断言的已知竞态窗口(见 _configure_mlx 注释)。
-        return guard_zh_result(parser.result(en), en)
+        res = guard_zh_result(parser.result(en), en)
+        res = Result(res.en_fixed, clean_local_zh(res.zh))
+        # 翻成了上一句 → 不带上下文重来一次（只重试一次；仍是回显就保留，宁可有译文）。
+        # 屏上已流出的那版会被定稿覆盖，这里只管最终 res。
+        if context and not _retried and zh_echoes_previous(res.zh, prev_zh):
+            retry = self.fix_and_translate_stream(en, [], None, None, _retried=True)
+            self.echo_retries += 1
+            if retry.zh and not zh_echoes_previous(retry.zh, prev_zh):
+                res = retry
+        if not _retried:
+            self._last_zh = res.zh or self._last_zh
+        return res
 
     # ---- 只矫正英文(关闭中文翻译时用): 不出译文, 但仍吃上下文修 ASR 错听 ----
     def fix_stream(self, en: str, context: list[str], on_en=None) -> str:

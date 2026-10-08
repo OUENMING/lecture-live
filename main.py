@@ -2307,7 +2307,7 @@ def _load_overlay(on_quit=None, on_translate=None, on_submit=None,
 
 def main():
     p = argparse.ArgumentParser(description="本地实时课堂双语字幕")
-    p.add_argument("--source", choices=["mic", "blackhole", "file"], default="file")
+    p.add_argument("--source", choices=["mic", "blackhole", "system", "file"], default="file")
     p.add_argument("--path", help="--source file 时的音频路径")
     p.add_argument("--speed", type=float, default=1.0, help="file 模式回放倍速(测试用)")
     p.add_argument("--ui", choices=["terminal", "overlay"], default="terminal")

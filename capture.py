@@ -322,16 +322,23 @@ class FileSource:
 
 def load_source(source: str, path: str | None = None, speed: float = 1.0):
     """返回带 poll()/close() 的音频源(已套电平归一化)。
-    source: mic | blackhole | file。"""
+    source: mic | blackhole | system(实验) | file。"""
     src = source.lower()
     if src in ("mic", "blackhole"):
         # ⚠️ 设备解析只有 `resolve_input_device` 一份 —— 上课中途重探走的是同一条
         idx, name = resolve_input_device(src)
         inner = CallbackSource(idx, name)
+    elif src == "system":
+        # 实验：CoreAudio Process Tap，不用装 BlackHole（见 system_tap.py 文件头，**未经真机验证**）
+        import system_tap
+        ok, why = system_tap.available()
+        if not ok:
+            raise RuntimeError(f"系统声音源不可用：{why}")
+        inner = system_tap.SystemTapSource()
     elif src == "file":
         if not path or not Path(path).exists():
             raise FileNotFoundError(f"文件不存在: {path}")
         inner = FileSource(path, speed)
     else:
-        raise ValueError(f"未知音源: {source} (支持 mic|blackhole|file)")
+        raise ValueError(f"未知音源: {source} (支持 mic|blackhole|system|file)")
     return _NormalizedSource(inner)

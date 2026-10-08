@@ -18,6 +18,7 @@ import argparse, collections, os, queue, re, sys, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from capture import load_source, SR
 from vad import Segmenter
+import draft_policy
 from asr import load_asr, load_final_asr, is_degenerate
 from translator import load_translator
 from cloud_translator import (DEFAULT_CTX_CHUNK, load_api_key,
@@ -1383,6 +1384,19 @@ def run(args) -> None:
         last_tr = 0.0
         last_len = 0
         last_gen = 0
+        # 草稿显示层的前缀冻结（draft_stable.py）。**默认关**：
+        # CLASSLIVE_DRAFT_HOLDBACK=2 打开（数字 = 灰尾词数）。量具数字见 docs/RESEARCH-stream-eval.md。
+        # 只影响**上屏的草稿文本**；送去翻译的仍是最新的原始假设。
+        _hb = os.environ.get("CLASSLIVE_DRAFT_HOLDBACK", "").strip()
+        stab = None
+        if _hb.isdigit():
+            from draft_stable import DraftStabilizer
+            stab = DraftStabilizer(int(_hb))
+        stab_gen = 0
+        draft_policy_name = os.environ.get("CLASSLIVE_DRAFT_TRIGGER", "legacy").strip() or "legacy"
+        if draft_policy_name not in ("legacy", "clause"):
+            draft_policy_name = "legacy"
+        prev_tok: list = []
         while running.is_set():
             buf = latest.take(0.5)
             if buf is None or len(buf) == 0:
@@ -1396,7 +1410,13 @@ def run(args) -> None:
                 t = asr.transcribe(buf[-PARTIAL_MAX_S * SR:])
                 if not t:
                     continue
-                drafts.put(t)
+                if stab is not None:
+                    if final_gen["n"] != stab_gen:           # 定稿到了 → 冻结前缀作废
+                        stab_gen = final_gen["n"]
+                        stab.reset()
+                    drafts.put(stab.update(t))
+                else:
+                    drafts.put(t)
                 # 新句子开始 -> 重置草稿节流。**必须重置**: last_len 是**上一句**
                 # 收尾时的词数, 新句若更短(如 20 词 vs 30 词), "新增 ≥6 词"永远
                 # 不成立 -> 整句拿不到即时中文("首字中文 ~3s"特性静默失效)。
@@ -1405,8 +1425,14 @@ def run(args) -> None:
                     last_tr, last_len = 0.0, 0
                 # 草稿译文: 距上次 ≥2.5s 且新增 ≥6 词才送(避免刷爆 LLM)
                 now = time.monotonic()
-                if trans["mode"] == "both" and now - last_tr >= 2.5 \
-                        and len(t.split()) - last_len >= 6:
+                # 判据在 draft_policy.py（legacy = 原来的「≥2.5s 且新增 ≥6 词」，逐字等价，测试钉着）。
+                # CLASSLIVE_DRAFT_TRIGGER=clause 才换成「落在从句边界/前缀稳定才送」—— 默认不换。
+                _tok = [w.lower().strip(".,;:?!") for w in t.split()]
+                _append_only = _tok[:len(prev_tok)] == prev_tok
+                prev_tok = _tok
+                if trans["mode"] == "both" and draft_policy.should_translate(
+                        draft_policy_name, now=now, last_tr=last_tr, n_words=len(t.split()),
+                        last_len=last_len, text=t, append_only=_append_only):
                     last_tr, last_len = now, len(t.split())
                     try:
                         draftq.put_nowait(t)

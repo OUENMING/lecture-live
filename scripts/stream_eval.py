@@ -66,6 +66,8 @@ def replay(audio: np.ndarray, asr_draft, asr_final, *, draft_filter=None, progre
         utts.append({"start_t": clock["t"] - dur, "end_t": clock["t"], "dur": dur,
                      "final": txt, "final_compute_s": dt, "drafts": cur["drafts"]})
         cur["drafts"] = []
+        if hasattr(draft_filter, "reset"):
+            draft_filter.reset()                 # 定稿一到，冻结前缀作废
 
     try:
         seg = Segmenter(on_partial, on_end)
@@ -137,6 +139,8 @@ def main():
     ap.add_argument("--model-dir", default=os.path.expanduser("~/models/parakeet-tdt-0.6b-v3-int8"))
     ap.add_argument("--final-model-dir", default=os.path.expanduser("~/models/sherpa-onnx-whisper-turbo"))
     ap.add_argument("--k", type=int, default=2, help="hold-back 词数（只影响 beyond_k 指标）")
+    ap.add_argument("--stabilize", type=int, default=None, metavar="K",
+                    help="草稿显示层用 draft_stable（前缀冻结，灰尾 K 词）；不给 = 生产现状（直通）")
     ap.add_argument("--jsonl")
     ap.add_argument("--json")
     a = ap.parse_args()
@@ -149,13 +153,18 @@ def main():
     asr_d = load_asr(a.model_dir)
     asr_f = load_final_asr(a.final_model_dir) if a.final == "whisper" else asr_d
     t0 = time.time()
-    utts = replay(audio, asr_d, asr_f,
+    flt = None
+    if a.stabilize is not None:
+        from draft_stable import DraftStabilizer
+        flt = DraftStabilizer(a.stabilize)
+    utts = replay(audio, asr_d, asr_f, draft_filter=flt,
                   progress=lambda t: print(f"  … 回放到 {t:.0f}s", file=sys.stderr, flush=True))
     ref = open(a.ref, encoding="utf-8").read() if a.ref else None
     res = evaluate(utts, ref, k=a.k)
     res["wall_s"] = round(time.time() - t0, 1)
     res["audio_file"] = os.path.basename(a.audio)
     res["final_engine"] = a.final
+    res["stabilize_k"] = a.stabilize
     if a.jsonl:
         with open(a.jsonl, "w", encoding="utf-8") as f:
             for i, u in enumerate(utts):

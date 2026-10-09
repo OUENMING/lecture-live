@@ -4,10 +4,35 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import draft_policy as P
 
 
+#: 一份**不是** `text` 前缀的上一次草稿 —— 用来表达"前面的词被改过"（append_only=False）。
+OTHER = "zzz yyy xxx"
+
+
 def call(policy, **kw):
-    base = dict(now=10.0, last_tr=0.0, n_words=10, last_len=0, text="a b c d e f g h i j", append_only=False)
+    base = dict(now=10.0, last_tr=0.0, n_words=10, last_len=0,
+                text="a b c d e f g h i j", prev_text=OTHER)
     base.update(kw)
     return P.should_translate(policy, **base)
+
+
+class AppendOnly(unittest.TestCase):
+    """⭐ 派生量的**唯一定义点**（2026-10-09 收口）。
+
+    ⚠️ 原来主循环手搓一份、离线模拟用 `stream_metrics.normalize` 又写一份 ——
+       两份不等价，所以那份模拟预测的**不是**生产真跑的路。
+    """
+
+    def test_plain_extension_is_append_only(self):
+        self.assertTrue(P.append_only("how much less coffee", "how much less coffee do people buy"))
+        self.assertTrue(P.append_only("", "anything at all"))       # 无前文 → 从头顶起算
+
+    def test_a_changed_word_breaks_it(self):
+        self.assertFalse(P.append_only("the quantity falls", "the price falls"))
+
+    def test_case_and_trailing_clause_punct_are_ignored(self):
+        """词身份只认小写 + 尾随的从句标点 —— 与主循环原来那份**逐字一致**。"""
+        self.assertTrue(P.append_only("so the price", "So the PRICE goes up,"))
+        self.assertTrue(P.append_only("so the price.", "so the price goes up"))
 
 
 class Legacy(unittest.TestCase):
@@ -21,6 +46,11 @@ class Legacy(unittest.TestCase):
         self.assertTrue(call("legacy", now=2.5))
         self.assertTrue(call("legacy", n_words=6))
 
+    def test_legacy_never_looks_at_prev_text(self):
+        """legacy 档**不读** `prev_text` —— 派生量只有在 clause 档才算（默认档不白算）。"""
+        for prev in ("", OTHER, "a b c d e f g h i"):
+            self.assertTrue(call("legacy", prev_text=prev))
+
 
 class LegacyEquivalence(unittest.TestCase):
     def test_legacy_equals_the_old_inline_condition(self):
@@ -32,29 +62,31 @@ class LegacyEquivalence(unittest.TestCase):
             n, ll = rng.randint(0, 40), rng.randint(0, 40)
             old = (now - last_tr >= 2.5) and (n - ll >= 6)
             got = P.should_translate("legacy", now=now, last_tr=last_tr, n_words=n, last_len=ll,
-                                     text="x", append_only=rng.random() < .5)
+                                     text="x", prev_text=rng.choice(["", OTHER, "x"]))
             self.assertEqual(got, old)
 
 
 class Clause(unittest.TestCase):
     def test_midclause_unstable_is_held(self):
-        self.assertFalse(call("clause", now=10.5, last_tr=8.0, n_words=8, text="so the price of the", append_only=False))
+        self.assertFalse(call("clause", now=10.5, last_tr=8.0, n_words=8,
+                              text="so the price of the", prev_text=OTHER))
 
     def test_clause_end_or_append_only_passes(self):
-        self.assertTrue(call("clause", n_words=8, text="so the price of coffee goes up,", append_only=False))
-        self.assertTrue(call("clause", n_words=8, text="so the price of the", append_only=True))
+        self.assertTrue(call("clause", n_words=8, text="so the price of coffee goes up,", prev_text=OTHER))
+        self.assertTrue(call("clause", n_words=8, text="so the price of the", prev_text="so the price"))
 
     def test_never_starves(self):
-        self.assertTrue(call("clause", now=10.5, last_tr=8.0, n_words=12, text="x " * 12, append_only=False))      # 新增 ≥12
-        self.assertTrue(call("clause", now=7.0, n_words=7, text="x " * 7, append_only=False))  # 距上次 ≥6s
+        self.assertTrue(call("clause", now=10.5, last_tr=8.0, n_words=12, text="x " * 12, prev_text=OTHER))      # 新增 ≥12
+        self.assertTrue(call("clause", now=7.0, n_words=7, text="x " * 7, prev_text=OTHER))  # 距上次 ≥6s
 
     def test_clause_is_never_more_eager_than_legacy(self):
         import random
         rng = random.Random(2)
         for _ in range(2000):
+            text = rng.choice(["a b", "a b.", "a, b"])
             kw = dict(now=rng.uniform(0, 12), last_tr=0.0, n_words=rng.randint(0, 30),
-                      last_len=rng.randint(0, 10), text=rng.choice(["a b", "a b.", "a, b"]),
-                      append_only=rng.random() < 0.5)
+                      last_len=rng.randint(0, 10), text=text,
+                      prev_text=rng.choice(["", text[:1], OTHER]))   # 前缀 / 不是前缀 各半
             if P.should_translate("clause", **kw):
                 self.assertTrue(P.should_translate("legacy", **kw), kw)
 

@@ -3,7 +3,7 @@
 ⚠️ 盖不住的（明说）：`ProcessTapBackend` 与 `_abl_to_array` 没有真机验证 ——
    它们碰 CoreAudio，创建 tap 会弹授权框。上机先跑 `scripts/probe_system_tap.py`。
 """
-import ctypes, os, random, sys, unittest
+import os, random, sys, unittest
 
 import numpy as np
 

@@ -32,6 +32,13 @@ def _lines(path):
         return [json.loads(x) for x in f if x.strip()]
 
 
+def _mk_log():
+    """一份临时 `.live.jsonl` 里的 `LiveLog` —— 三个测试类共用一份（原先抄了三遍）。"""
+    d = tempfile.mkdtemp()
+    p = pathlib.Path(d) / "s.live.jsonl"
+    return LM.LiveLog(p), p
+
+
 class OpenFor(unittest.TestCase):
     def test_off_by_default(self):
         old = os.environ.pop("CLASSLIVE_LIVE_LOG", None)
@@ -64,13 +71,8 @@ class OpenFor(unittest.TestCase):
 
 
 class Writes(unittest.TestCase):
-    def _mk(self):
-        d = tempfile.mkdtemp()
-        p = pathlib.Path(d) / "s.live.jsonl"
-        return LM.LiveLog(p), p
-
     def test_fields_survive_the_round_trip(self):
-        log, p = self._mk()
+        log, p = _mk_log()
         log.draft("hello world", "hello world", buf_s=1.5, compute_s=0.31)
         log.draft_zh("你好")
         log.final("Hello world.", "你好世界。", "hello world")
@@ -96,7 +98,7 @@ class Writes(unittest.TestCase):
 
     def test_raw_and_shown_are_both_kept(self):
         """⭐ 同场 A/B 的**全部依据**：冻结改了上屏文本，但原始假设必须原样留着。"""
-        log, p = self._mk()
+        log, p = _mk_log()
         log.draft("the quantity falls by", "the quantity", buf_s=2.0)
         log.close()
         r = _lines(p)[1]
@@ -104,14 +106,14 @@ class Writes(unittest.TestCase):
         self.assertEqual(r["text"], "the quantity")
 
     def test_shown_defaults_to_raw(self):
-        log, p = self._mk()
+        log, p = _mk_log()
         log.draft("abc")
         log.close()
         r = _lines(p)[1]
         self.assertEqual((r["raw"], r["text"]), ("abc", "abc"))
 
     def test_final_advances_utt(self):
-        log, p = self._mk()
+        log, p = _mk_log()
         log.draft("one")
         log.final("one", "一", "one")
         log.draft("two")
@@ -124,7 +126,7 @@ class Writes(unittest.TestCase):
 
     def test_nothing_is_lost_when_the_queue_is_not_full(self):
         """不变量：不丢的时候，放进去多少行就写出来多少行。"""
-        log, p = self._mk()
+        log, p = _mk_log()
         for i in range(500):
             log.draft(f"w{i}", f"w{i}")
         log.final("end", "完", "end")
@@ -135,7 +137,7 @@ class Writes(unittest.TestCase):
 
     def test_multi_kind_order_is_preserved(self):
         """写盘线程是**单条**队列 → 顺序必须与调用顺序一致（跨 kind 也是）。"""
-        log, p = self._mk()
+        log, p = _mk_log()
         log.draft("a")
         log.draft_zh("甲")
         log.final("a", "甲", "a")
@@ -206,57 +208,52 @@ class NeverRaises(unittest.TestCase):
 
 
 class Segments(unittest.TestCase):
-    """⭐ 段号（缓冲会话）—— 现场采集的**分组键**。
+    """⭐ 段号字段 —— 现场采集的**分组键**（一段 VAD 会被切成多句定稿，草稿:定稿 ≠ 1:1）。
 
-    ⚠️ 这一组钉的是 2026-10-09 真跑抓到的缺陷：段号原来取自 `main.final_gen["n"]`，
-       而那个**要到定稿上屏时才自增**（Whisper + LLM，比段落真正结束晚 2–4 秒）
-       → 新段的前几份草稿带着上一段的编号 → `草稿→定稿` 从 10.7% 虚高到 65%。
-       现在段号由 `segment_end()` 在**段落结束回调**里推进。
+    ⚠️ 这一组钉的是 2026-10-09 真跑抓到的两个缺陷：
+    ① 按"一句定稿"分组 → 32 组里 14 组只有 0–1 份草稿，`草稿→定稿` 虚高到 93.3%；
+    ② 段号原来取自 `main.final_gen["n"]`（**定稿上屏时**才自增，比段落真正结束晚 2–4 秒）
+       → 新段前几份草稿带着上一段的号 → 虚高到 65%。
+
+    ⚠️ **计数器的所有者不是本模块**：段号是**流水线的身份**，由 `main.run()` 的
+       `seg_gen` 铸造（否则"日志一关段号恒为 0"就成了流水线数据形状的一部分）。
+       这里只钉"给什么就记什么"。
     """
 
-    def _mk(self):
-        d = tempfile.mkdtemp()
-        p = pathlib.Path(d) / "s.live.jsonl"
-        return LM.LiveLog(p), p
+    def test_draft_records_the_seg_it_is_given(self):
+        log, p = _mk_log()
+        log.draft("old one", seg=0)
+        log.draft("new one", seg=1)
+        log.close()
+        self.assertEqual([r["seg"] for r in _lines(p) if r["kind"] == "draft"], [0, 1])
 
-    def test_segment_end_returns_the_closed_one_and_advances(self):
-        log, p = self._mk()
-        self.assertEqual(log.cur_seg, 0)
+    def test_default_seg_is_zero(self):
+        log, p = _mk_log()
         log.draft("a")
-        self.assertEqual(log.segment_end(), 0)          # 关掉的是第 0 段
-        self.assertEqual(log.cur_seg, 1)
-        self.assertEqual(log.segment_end(), 1)
-        self.assertEqual(log.cur_seg, 2)
         log.close()
-        # ⚠️ 排掉开头的 `meta` 事件（它是 `__init__` 里发的，没有 `seg`）
-        kinds = [(r["kind"], r.get("seg")) for r in _lines(p)
-                 if r["kind"] in ("draft", "event") and r.get("event") != "meta"]
-        self.assertEqual(kinds[0], ("draft", 0))
-        self.assertEqual(kinds[1], ("event", 0))        # segment_end 事件带的是"刚关掉"那段
+        self.assertEqual([r["seg"] for r in _lines(p) if r["kind"] == "draft"], [0])
 
-    def test_drafts_after_a_boundary_belong_to_the_new_segment(self):
-        log, p = self._mk()
-        log.draft("old one")
-        log.segment_end()
-        log.draft("new one")
+    def test_segment_end_is_only_a_sink(self):
+        """`segment_end(k)` 记一行 event，**不改变**之后草稿的 `seg`（它不是所有者）。"""
+        log, p = _mk_log()
+        log.draft("before", seg=0)
+        log.segment_end(0)
+        log.draft("after")                       # 不给 seg → 默认 0，不因为 event 而变
         log.close()
-        drafts = [r for r in _lines(p) if r["kind"] == "draft"]
-        self.assertEqual([d["seg"] for d in drafts], [0, 1])
-
-    def test_explicit_seg_wins(self):
-        log, p = self._mk()
-        log.segment_end()
-        log.draft("x", seg=7)                            # 显式给就听显式的
-        log.close()
-        self.assertEqual([r["seg"] for r in _lines(p) if r["kind"] == "draft"], [7])
+        recs = _lines(p)
+        self.assertEqual([r["seg"] for r in recs if r["kind"] == "draft"], [0, 0])
+        ev = [r for r in recs if r.get("event") == "segment_end"]
+        self.assertEqual([r["seg"] for r in ev], [0])
 
     def test_final_carries_the_segment_it_came_from(self):
-        """定稿可以**晚于**下一段的第一份草稿到达 —— 它仍要算在原来那段上。"""
-        log, p = self._mk()
-        log.draft("d0")
-        k = log.segment_end()
-        log.draft("d1")                                  # 新段的第一份草稿
-        log.final("the sentence", "这句", "the sentence", seg=k)   # 老段的定稿姗姗来迟
+        """定稿可以**晚于**下一段的第一份草稿到达 —— 它仍要算在原来那段上。
+
+        （生产里就是这样：定稿那条路要先跑 Whisper + LLM，比段落结束晚 2–4 秒。）
+        """
+        log, p = _mk_log()
+        log.draft("d0", seg=0)
+        log.draft("d1", seg=1)                   # 新段的第一份草稿先上
+        log.final("the sentence", "这句", "the sentence", seg=0)   # 老段的定稿姗姗来迟
         log.close()
         recs = _lines(p)
         self.assertEqual([r["seg"] for r in recs if r["kind"] == "draft"], [0, 1])
@@ -265,17 +262,14 @@ class Segments(unittest.TestCase):
 
 class InterpreterAndTiming(unittest.TestCase):
     def test_t_is_monotonic_nondecreasing(self):
-        log, p = self._mk_pair()
+        log, p = _mk_log()
         for i in range(20):
             log.draft(f"w{i}")
         log.close()
         ts = [r["t"] for r in _lines(p)]
         self.assertEqual(ts, sorted(ts))
 
-    def _mk_pair(self):
-        d = tempfile.mkdtemp()
-        p = pathlib.Path(d) / "s.live.jsonl"
-        return LM.LiveLog(p), p
+
 
 
 if __name__ == "__main__":

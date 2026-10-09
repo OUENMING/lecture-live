@@ -84,7 +84,13 @@ def replay(audio: np.ndarray, asr_draft, asr_final, *, draft_filter=None, progre
     return utts
 
 
-def evaluate(utts, ref_text: str | None, k: int = 2) -> dict:
+def evaluate(utts, ref_text: str | None, k: int = M.DEFAULT_K,
+             want_disagreement: bool = True) -> dict:
+    """⚠️ `want_disagreement=False` 跳过"整课草稿 vs 定稿"那一次编辑距离 ——
+    它是**整课词表的 O(n²) DP**（2026-10-09 实测：2.4k 词 0.9s、4.9k 词 4.4s、10k 词 17.8s，
+    词数翻倍时间 ×4），而它只是 `evaluate()` 里的一个附带观测量。
+    `class_report` 出**文本表**时把它关掉（那张表不打这一项）；要 `--json` 时才开。
+    """
     n_draft = sum(len(u["drafts"]) for u in utts)
     # 回改：每句内部的相邻草稿（用"显示出来的"文本，而非 ASR 原始输出）
     # ⚠️ 缓冲超过 PARTIAL_MAX_S 后草稿窗口在滑动（开头的词滚出窗口，不是"改写"），
@@ -118,7 +124,7 @@ def evaluate(utts, ref_text: str | None, k: int = 2) -> dict:
                           "rewritten_beyond_k": beyond,
                           "rate_beyond_k": beyond / shown if shown else None},
         "draft_to_final": {"edits": fr_edits, "draft_words": fr_len,
-                           "rate": fr_edits / fr_len if fr_len else None},
+                           "rate": M.rate(fr_edits, fr_len)},
         "latency_first_visible_s": M.summarize_latency(first_vis),
         "latency_final_compute_s": M.summarize_latency(final_comp),
         "rtf_final": M.summarize_latency(rtf_final),
@@ -129,7 +135,7 @@ def evaluate(utts, ref_text: str | None, k: int = 2) -> dict:
         out["wer_vs_reference"] = w
     # 无参考时给"草稿与定稿的分歧"，明确不是对真值的 WER
     last_drafts = " ".join(u["drafts"][-1]["shown"] for u in utts if u["drafts"])
-    if last_drafts and hyp:
+    if want_disagreement and last_drafts and hyp:
         out["draft_vs_final_disagreement"] = M.wer(hyp, last_drafts)["wer"]
     return out
 
@@ -143,7 +149,8 @@ def main():
     ap.add_argument("--final", choices=["whisper", "parakeet"], default="whisper")
     ap.add_argument("--model-dir", default=os.path.expanduser("~/models/parakeet-tdt-0.6b-v3-int8"))
     ap.add_argument("--final-model-dir", default=os.path.expanduser("~/models/sherpa-onnx-whisper-turbo"))
-    ap.add_argument("--k", type=int, default=2, help="hold-back 词数（只影响 beyond_k 指标）")
+    ap.add_argument("--k", type=int, default=M.DEFAULT_K,
+                    help="hold-back 词数（只影响 beyond_k 指标）")
     ap.add_argument("--stabilize", type=int, default=None, metavar="K",
                     help="草稿显示层用 draft_stable（前缀冻结，灰尾 K 词）；不给 = 生产现状（直通）")
     ap.add_argument("--jsonl")
@@ -180,10 +187,16 @@ def main():
                                         #    有了它，`class_report.py` 能把**同一份回放**离线
                                         #    跑成 hold-back 0/1/2/3 的曲线（不必重跑 ASR），
                                         #    也能和生产的 `<会话>.live.jsonl` 用同一套分析。
-                                        "raw": d["raw"], "buf_s": round(d["buf_s"], 3)},
+                                        "raw": d["raw"], "buf_s": round(d["buf_s"], 3),
+                                        # ⭐ `seg` = 段号。回放本来就是"一段 = 一组"，
+                                        #    所以这里 = `utt`；写上是为了让**生产与离线两份
+                                        #    文件的分组键逐字同款**（`class_report` 就不用靠
+                                        #    "字段在不在"去嗅探来源）。见 §9 那条说明。
+                                        "seg": i},
                                        ensure_ascii=False) + "\n")
                 f.write(json.dumps({"utt": i, "kind": "final", "audio_t": round(u["end_t"], 2),
-                                    "compute_s": round(u["final_compute_s"], 3), "text": u["final"]},
+                                    "compute_s": round(u["final_compute_s"], 3),
+                                    "text": u["final"], "seg": i},
                                    ensure_ascii=False) + "\n")
     if a.json:
         json.dump(res, open(a.json, "w", encoding="utf-8"), ensure_ascii=False, indent=2)

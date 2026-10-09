@@ -67,6 +67,23 @@ ClassLive.app/Contents/MacOS/python scripts/stream_eval.py ~/.classlive/eval/eco
 **结论：差异很小，不建议切。** 边界命中率 +3~10 个百分点、少 1 个请求，量不出译文质量。要切必须拿真译文肉眼比一次。
 `legacy` 与原内联条件的等价性有 5000 组随机对拍钉着。
 
+**2026-10-09 用 5 片真课录音复核**（同一份模拟，但派生量已收口到 `draft_policy.append_only` —— 见下）：
+
+| 语料 | 请求数 legacy → clause | 边界命中 legacy → clause | 句末未覆盖尾巴 legacy → clause |
+|---|---|---|---|
+| ECON10770（4 分钟） | 38 → 37 | 0.79 → 0.81 | 0.17 → **0.19** |
+| ECON10740.001 | 54 → 50 | 0.59 → 0.68 | 0.11 → **0.13** |
+| ECON10740.003 | 30 → 28 | 0.57 → 0.64 | 0.26 → **0.27** |
+| SOC10020.001 | 42 → 42 | 0.69 → 0.76 | 0.20 → 0.20 |
+| SOC10020.003 | 22 → 21 | 0.59 → 0.62 | 0.24 → **0.26** |
+| 合计 | 186 → **178（−4%）** | ≈0.65 → ≈0.70 | 变差 |
+
+真课上请求只少 4%，**而且"句末未覆盖的尾巴"在 5 片里有 4 片变差**
+（等到从句边界再送 → 最后那截更晚才翻到）。**结论不变：不切。**
+⚠️ 顺带收了一个重复：`append_only`（"这一次的假设是不是原样接长"）原来在**主循环**手搓一份、
+`draft_policy_sim.py` 又用 `stream_metrics.normalize` 写了一份 —— 两份不等价，所以那份模拟
+**预测的不是生产真跑的那条路**。现在判据在 `draft_policy.append_only` 一处，两边都调它。
+
 ## 5. 本地小模型输出后处理（`translator.py`，**默认就开**——只作用于本地引擎）
 
 - 剥「以下是译文：」之类的元话前缀（只认"前缀+冒号"，`翻译是一门艺术` 这类正文不动，测试钉着）。
@@ -144,6 +161,15 @@ ClassLive.app/Contents/MacOS/python scripts/class_report.py sessions/<会话>.li
 判据：`tests/test_class_report.py::test_segment_grouping_when_seg_is_present` +
 `tests/test_livemetrics.py::Segments`（4 条）。
 
+**出报告要多久**（2026-10-09 实测，合成 4200 词的事件表、`--ks 0,1,2,3`）：
+**0.10 秒**（`--json` 时 5.4 秒）；8500 词（≈一节 50 分钟真课的词量）**0.33 秒**。
+差别全在 `draft_vs_final_disagreement` 那一项上 —— 它是**整课词表的 O(n²) 编辑距离**
+（实测 2.4k 词 0.9s、4.9k 词 4.4s、10k 词 17.8s；独立复核跑到 2.5 万词时**单遍 111 秒、
+一次报告 461 秒**），而文本表根本不打它、`pool_sweeps` 也不汇总它。
+原来 `sweep()` **每个 K 都算一遍**（默认 4 遍）→ 一节真课的报告要等 **1–8 分钟**，
+看起来就像卡死了（报告工具 99% 以上的时间花在这个没人读的标量上）。
+现在它**只在要 `--json` 时算、且只算基线那一遍**。
+
 **它给主循环加了多少活**（2026-10-09 实测，`LiveLog` 直接压测 2 万次）：
 `draft()` **1.8 微秒/次**、`final()` **4.0 微秒/次**（主线程只做一次 `put_nowait`，
 写盘在后台线程）。一节课约 2000 份草稿 → 合计约 **4 毫秒**。⛔ 卡住的地方也不反压：
@@ -152,7 +178,7 @@ ClassLive.app/Contents/MacOS/python scripts/class_report.py sessions/<会话>.li
 ⭐⭐ **同场 A/B 的关键**：`draft` 事件同时记 `raw`（模型原始假设）与 `text`（上屏的
 那份）。所以**冻结开不开都能事后算** —— 一次真课拿到两条曲线，不用跑两节课。
 
-⚠️ 判据：`tests/test_livemetrics.py`（19 条）· `tests/test_class_report.py`（20 条）。
+⚠️ 判据：`tests/test_livemetrics.py`（19 条）· `tests/test_class_report.py`（22 条）。
 其中一条钉住的是**「离线套冻结 == 回放那条路」**：拿 2026-10-08 那三份记录逐位复核过
 （baseline 10.4% / K=1 8.9% / K=2 8.9%，与 `~/.classlive/eval/out/daniel_*.json` 一致）。
 
@@ -228,6 +254,34 @@ ClassLive.app/Contents/MacOS/python scripts/class_report.py /tmp/slice1.jsonl   
    Whisper + LLM）→ 新段前几份草稿带着上一段的号 → 草稿→定稿虚高到 **65%**。
    修法：`live.segment_end()` 挂在 `Segmenter` 的 `on_utterance_end` 回调上，段号随
    `finalq` 一路带到定稿。
+
+## 9.4.1 ⚠️ 改完这一层**必须真跑一次**（默认闸门够不到）
+
+`final_worker` / `partial_worker` 都是 `main.run()` 里的**嵌套闭包** ——
+`tests/test_audit_regressions.py`（默认闸门）**一条都碰不到它们**。2026-10-09 就栽在这上面：
+
+> 简化那一轮我把 `finalq` 元素的拆包从"两个哨兵之后"提到了**之前**（还写了句
+> "走到这里一定是元组"，**那句是错的**）。而"空转"那条路**每轮都会走**（`finalq` 空时
+> `buf = EMPTY`）→ `buf, _fseg = EMPTY` 抛 `TypeError` → **`final_worker` 线程当场死掉**
+> → 没人消费 `finalq` → `partial_worker` 的"有定稿在排队就让开"永远成立
+> → **整节课一份草稿都不出**。三份毫秒级判据 + 116 条闸门**全绿**，只有真跑才抓到。
+
+所以：**动了 `finalq` / `streamq` / `drafts` 任何一个的元素形状、或动 `drain()` 的分发，
+就必须跑一次下面这条**（`--source file` 回放一段音频，喂的是 `~/.classlive/eval/` 里的 TTS 语料）：
+
+```sh
+# ⚠️ 先把 sessions 软链指到临时目录，别让这次验证往真 sessions/ 里写（吃过一次亏）
+mkdir -p /tmp/cl-probe/sessions && ln -sfn /tmp/cl-probe/sessions sessions
+CLASSLIVE_LIVE_LOG=1 ClassLive.app/Contents/MacOS/python main.py \
+    --source file --path ~/.classlive/eval/econ_daniel.wav --ui terminal \
+    --save-notes yes --vault /tmp/cl-probe/vault 2>&1 | tail -40
+ln -sfn ~/lecture-live/sessions sessions          # 还原
+# 判据：没有 Traceback；`.live.jsonl` 里 draft/final/summary **三种都有**；
+#       `class_report.py` 跑得出回改率（见 §9.4 那张对照表）
+```
+
+⚠️ **没有自动化的端到端判据**（这是个已知缺口）—— 要么把 `final_worker` 的分发抽成
+可测的纯函数（评审建议过，代价是动 `drain()` 那段"绝不能抛"的代码），要么就靠上面这条手跑。
 
 ## 9.5 还没做 / 别声称做了
 

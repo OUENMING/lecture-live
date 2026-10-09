@@ -30,15 +30,17 @@ def simulate(utts, policy):
     first_delay, tails = [], []
     for u in utts:
         last_tr, last_len = 0.0, 0
-        prev_norm = []
+        prev_text = ""
         sent = []
         for t, text in u["drafts"]:
-            norm = M.normalize(text)
-            append_only = M.lcp_len(prev_norm, norm) == len(prev_norm)
-            prev_norm = norm
             n = len(text.split())
-            if P.should_translate(policy, now=t, last_tr=last_tr, n_words=n, last_len=last_len,
-                                  text=text, append_only=append_only):
+            # ⚠️ 派生量走 `P.append_only`（**判据的唯一定义点**）—— 原来这里拿
+            #    `stream_metrics.normalize` 自己算了一份，与主循环那份不等价，
+            #    于是这份离线模拟预测的不是生产真跑的那条路。
+            ok = P.should_translate(policy, now=t, last_tr=last_tr, n_words=n, last_len=last_len,
+                                    text=text, prev_text=prev_text)
+            prev_text = text
+            if ok:
                 reqs += 1
                 bound += P.ends_at_clause(text)
                 last_tr, last_len = t, n

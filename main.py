@@ -1288,10 +1288,8 @@ def run(args) -> None:
     # ⭐ 现场采集（`livemetrics.py`）：把 drain() 那个缝上发生的事记成 JSONL。
     #    **默认关**（`CLASSLIVE_LIVE_LOG=1` 才开）—— 生产路径一个字不改。
     #    ⚠️ 它自己吞所有异常、队列有界、写盘在后台线程（见该文件头）。
-    live = None
-    _live_p = livemetrics.open_for(getattr(writer, "session_path", None))
-    if _live_p is not None:
-        live = _live_p
+    live = livemetrics.open_for(getattr(writer, "session_path", None))
+    if live is not None:
         echo(f"🎥 现场采集: {live.path}")
 
     # ⚠️ 元素是 `(原始假设, 上屏文本, 缓冲秒数, 转写耗时, 段号)`，不是裸字符串了（2026-10-09）：
@@ -1391,6 +1389,23 @@ def run(args) -> None:
             qa["consumed"] = 0
             qa["gen"] += 1                     # 在途的那一轮回来时会被丢弃
 
+    # ---- 段号（"这是这一段音频"的**身份**）----
+    # ⚠️⚠️ **它归 `main`，不归 `livemetrics`**（2026-10-09 审查指出）：段号是**流水线的
+    #    身份**，不该由"开没开日志"决定 —— 长在日志器里的话，日志一关整条流水线的
+    #    段号恒为 0。日志器只是个 sink（`live.segment_end(k)` 只记一行）。
+    # ⚠️ 它必须在 **`Segmenter` 的 `on_utterance_end`（音频真正结束那一刻）** 递增，
+    #    **不能**挂到定稿上屏 —— 那条路要先跑 Whisper + LLM，晚 2–4 秒，
+    #    新段前几份草稿会带着上一段的号（实测把 `草稿→定稿` 从 10.7% 顶到 65%）。
+    seg_gen = {"n": 0}
+
+    def _open_segment() -> int:
+        """音频结束那一刻调：返回刚结束那一段的编号，并把"当前段"推进到下一段。"""
+        k = seg_gen["n"]
+        seg_gen["n"] = k + 1
+        if live is not None:
+            live.segment_end(k)
+        return k
+
     # ---- 草稿线程 ----
     # 每定稿一句 +1; 草稿线程据此重置节流(见 partial_worker 里的说明)。
     final_gen = {"n": 0}
@@ -1411,7 +1426,7 @@ def run(args) -> None:
         draft_policy_name = os.environ.get("CLASSLIVE_DRAFT_TRIGGER", "legacy").strip() or "legacy"
         if draft_policy_name not in ("legacy", "clause"):
             draft_policy_name = "legacy"
-        prev_tok: list = []
+        prev_text = ""                        # 上一次的草稿原文（`draft_policy` 自己派生 append_only）
         while running.is_set():
             buf = latest.take(0.5)
             if buf is None or len(buf) == 0:
@@ -1437,11 +1452,8 @@ def run(args) -> None:
                 #    `<会话>.live.jsonl` 靠 `buf_s` 判"这份草稿的缓冲窗口滑了没有"
                 #    （滑了的那批**不许**进回改统计，否则长句会把回改率虚高一大截，
                 #     离线量具就是栽在这上面，见 scripts/stream_eval.py 的 `sliding`）；
-                #    `seg` = **本段草稿所属的段号** —— 由 `live.cur_seg` 给（在 Segmenter 的
-                #    段落结束回调里推进）。⚠️ 不能用 `final_gen["n"]`：那个要到定稿上屏时才自增，
-                #    比段落真正结束晚 2–4 秒，新段前几份草稿会被算进上一段（实测踩过）。
-                drafts.put((t, _shown, len(buf) / SR, _dt_draft,
-                            live.cur_seg if live is not None else 0))
+                #    `seg` = 本段草稿所属的段号（`seg_gen`，见上面那一段说明）。
+                drafts.put((t, _shown, len(buf) / SR, _dt_draft, seg_gen["n"]))
                 # 新句子开始 -> 重置草稿节流。**必须重置**: last_len 是**上一句**
                 # 收尾时的词数, 新句若更短(如 20 词 vs 30 词), "新增 ≥6 词"永远
                 # 不成立 -> 整句拿不到即时中文("首字中文 ~3s"特性静默失效)。
@@ -1452,13 +1464,17 @@ def run(args) -> None:
                 now = time.monotonic()
                 # 判据在 draft_policy.py（legacy = 原来的「≥2.5s 且新增 ≥6 词」，逐字等价，测试钉着）。
                 # CLASSLIVE_DRAFT_TRIGGER=clause 才换成「落在从句边界/前缀稳定才送」—— 默认不换。
-                _tok = [w.lower().strip(".,;:?!") for w in t.split()]
-                _append_only = _tok[:len(prev_tok)] == prev_tok
-                prev_tok = _tok
-                if trans["mode"] == "both" and draft_policy.should_translate(
-                        draft_policy_name, now=now, last_tr=last_tr, n_words=len(t.split()),
-                        last_len=last_len, text=t, append_only=_append_only):
-                    last_tr, last_len = now, len(t.split())
+                # ⚠️ 派生量（`append_only`）**归 draft_policy 自己算**（2026-10-09 收口）：
+                #    原来这里手搓一份、离线模拟里又用 `stream_metrics.normalize` 写一份，
+                #    两份不等价 → 离线模拟预测的不是生产这条路。而且 legacy 档（默认）
+                #    本来是白算的。
+                _nw = len(t.split())              # 切一次就够（这行原来切了两遍）
+                _ok = trans["mode"] == "both" and draft_policy.should_translate(
+                    draft_policy_name, now=now, last_tr=last_tr, n_words=_nw,
+                    last_len=last_len, text=t, prev_text=prev_text)
+                prev_text = t
+                if _ok:
+                    last_tr, last_len = now, _nw
                     try:
                         draftq.put_nowait(t)
                     except queue.Full:               # 只留最新
@@ -1476,11 +1492,12 @@ def run(args) -> None:
     CARRY_MAX_WORDS = 25
     carry = {"text": "", "since": 0.0}
 
-    def _emit(text: str, seg: int = 0) -> None:
-        # ⭐ `seg` = 这段文本属于哪一段缓冲。现场采集靠它把"一段里的草稿"与"这段被切出来的
-        #    若干句定稿"对上 —— 一段 VAD → N 句定稿，**不是 1:1**（见 livemetrics 的说明）。
-        #    ⚠️ 调用方给：定稿那条路是 `finalq` 带过来的段号（**音频结束那一刻**定的），
-        #       carry 兜底那条路用 `live.cur_seg`。
+    def _emit(text: str, seg: int | None = None) -> None:
+        # ⭐ `seg` = 这段文本属于哪一段缓冲（`livemetrics` 的分组键；一段 VAD → N 句定稿，
+        #    **不是 1:1**）。定稿那条路由 `finalq` 带过来（**音频结束那一刻**定的）；
+        #    carry 兜底那条路没得带，取当前段。
+        if seg is None:
+            seg = seg_gen["n"]
         final_gen["n"] += 1                      # 通知草稿线程: 重置节流
         for sent in split_sentences(text):
             if trans["mode"] == "raw":
@@ -1542,7 +1559,7 @@ def run(args) -> None:
         busy["on"] = True
         carry["text"], carry["since"] = "", 0.0
         try:
-            _emit(t.rstrip() + " …", live.cur_seg if live is not None else 0)
+            _emit(t.rstrip() + " …")
         except Exception:                               # noqa: BLE001
             pass
         finally:
@@ -1556,11 +1573,6 @@ def run(args) -> None:
                 buf = finalq.get_nowait()
             except queue.Empty:
                 buf = EMPTY
-            # ⚠️ 元素是 `(buf, seg)`（2026-10-09 加），但两个哨兵是**裸对象** ——
-            #    先判哨兵再拆，否则 `_QUIT is _QUIT` 那条会变成解包错误。
-            _fseg = live.cur_seg if live is not None else 0
-            if buf is not EMPTY and buf is not _QUIT:
-                buf, _fseg = buf
             if buf is _QUIT:
                 break
             if buf is EMPTY:
@@ -1581,6 +1593,14 @@ def run(args) -> None:
                 if carry["text"] and time.monotonic() - carry["since"] >= CARRY_MAX_S:
                     _force_emit_carry()
                 continue
+            # ⚠️⚠️ **拆包必须在两个哨兵之后**（2026-10-09 端到端跑抓回来的真 bug）：
+            #    曾经把它提到 `if buf is EMPTY:` 前面 —— 而"空转"那条路**每轮都会走**
+            #    （`finalq` 空时 `buf = EMPTY`），于是 `buf, _fseg = EMPTY` 抛
+            #    TypeError → **final_worker 线程当场死掉** → 没人消费 `finalq`
+            #    → `partial_worker` 的"有定稿在排队就让开"永远成立 → **整节课一份草稿都不出**。
+            #    形状：`("final"…)` 与 `drafts` 两处加字段都只是加法，唯独这里
+            #    把"可能是哨兵"的值当元组拆了。注释当时还写着"走到这里一定是元组"——错的。
+            buf, _fseg = buf
             try:
                 # ⚠️ 顺序: **先跑定稿模型**, 退化才回头跑草稿模型。
                 # 反过来写(先 parakeet 再 whisper)会让 parakeet 那 0.36s 白花 ——
@@ -1639,11 +1659,9 @@ def run(args) -> None:
 
     seg = Segmenter(
         on_partial=lambda buf: latest.put(buf),
-        # ⭐ 段落**真正结束**的那一刻就记段号（`live.segment_end()` 顺手推进当前段），
-        #    随 `finalq` 一路带到定稿 —— 现场采集的分组靠它。
+        # ⭐ 段落**真正结束**的那一刻就取段号，随 `finalq` 一路带到定稿 —— 现场采集的分组靠它。
         #    ⚠️ 不这么做就得等定稿上屏才自增，那比段落结束晚 2–4 秒（Whisper + LLM）。
-        on_utterance_end=lambda buf: finalq.put(
-            (buf, live.segment_end()) if live is not None else buf),
+        on_utterance_end=lambda buf: finalq.put((buf, _open_segment())),
     )
 
     # ---- 专有名词查询线程(网络请求, 异步且缓存, 不影响主链路) ----
@@ -1846,19 +1864,14 @@ def run(args) -> None:
     def _pair(item) -> tuple:
         """`drafts` 队列的元素 → `(raw, shown, buf_s, compute_s, seg)`。
 
-        ⚠️ 兼容裸字符串与二元组（替身 / 老调用方）：缺的字段一律给 0.0，
-           **不许**在这里猜一个值出来（`buf_s` 猜错会静默改掉回改率的口径）。
+        ⚠️ 产出方只有 `partial_worker` 一处（永远 5 元组），所以**按形状直接拆** ——
+           不再逐层猜"是不是裸字符串/二元组"（那种兼容梯子没有调用方，还会把
+           `buf_s` 静默猜成 0.0，而 `buf_s` 猜错 = 静默改掉回改率的口径）。
+        ⚠️ 但**必须全函数不抛**：它在 `drain()` 里，而 `drain()` 没有 try/except ——
+           这里抛一次 = 打死主循环 = 整节课的字幕停摆。形状不对就当空草稿丢掉。
         """
-        # ⚠️ 这个函数**必须全函数不抛** —— 它在 `drain()` 里，而 `drain()` 没有
-        #    try/except（这里抛一次 = 打死主循环 = 整节课的字幕停摆）。
         try:
-            if isinstance(item, str):
-                return (item, item, 0.0, 0.0, 0)
-            raw, shown = item[0], item[1]
-            buf_s = float(item[2]) if len(item) > 2 else 0.0
-            cpt = float(item[3]) if len(item) > 3 else 0.0
-            seg = int(item[4]) if len(item) > 4 else 0
-            return (raw, shown, buf_s, cpt, seg)
+            return (item[0], item[1], float(item[2]), float(item[3]), int(item[4]))
         except Exception:                                  # noqa: BLE001
             return ("", "", 0.0, 0.0, 0)
 
@@ -2326,14 +2339,10 @@ def run(args) -> None:
             # ⚠️ 只记**只读计数**，不在这里现算指标 —— 指标归 `scripts/class_report.py`
             #    （它读同一份 JSONL；生产路径只负责"如实记下来"）。
             if live is not None:
-                _loc = getattr(translator, "_local", None)
                 live.close(
-                    echo_retries=getattr(_loc, "echo_retries", None),   # 本地小模型回显重试次数
-                    mode=getattr(translator, "_mode", None),
+                    echo_retries=local_tr.echo_retries,   # 本地小模型回显重试次数（只读计数）
+                    mode=translator._mode,
                     source=args.source,
-                    drafts=live.drafts,
-                    utterances=live.utterances,
-                    err=live.err,
                 )
                 echo(f"🎥 现场采集已收尾: {live.path}")
 

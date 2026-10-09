@@ -19,7 +19,7 @@
                                                                       └▶ 1600 样本分块 ▶ 队列 ▶ poll()
 """
 from __future__ import annotations
-import ctypes, math, platform, queue, struct, threading, time, uuid
+import ctypes, math, platform, queue, struct, threading, uuid
 import numpy as np
 
 SR = 16000

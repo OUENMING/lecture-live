@@ -26,7 +26,7 @@ set -u
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-/tmp/cl-real-slices}"
 PY="$HERE/ClassLive.app/Contents/MacOS/python"
-JOBS="$HERE/scripts/stream_eval.py"
+EVAL="$HERE/scripts/stream_eval.py"
 mkdir -p "$OUT"
 
 # : 录音:起点:时长 —— 挑不同课程/不同时间点，别都落在同一节课的中段
@@ -43,7 +43,7 @@ for spec in $SLICES; do
   tag="$(basename "$f" .wav)_${st}s"
   if [ ! -f "$src" ]; then echo "⚠ 没有 ${src}，跳过"; continue; fi
   echo "▶ ${tag}（$du 秒）"
-  "$PY" "$JOBS" "$src" --start "$st" --dur "$du" \
+  "$PY" "$EVAL" "$src" --start "$st" --dur "$du" \
       --json "$OUT/$tag.json" --jsonl "$OUT/$tag.jsonl" > "$OUT/$tag.log" 2>&1 \
     || echo "  ⚠ 失败（见 $OUT/$tag.log）"
 done

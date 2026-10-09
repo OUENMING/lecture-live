@@ -5,7 +5,7 @@
 #   ./cl-x test                 # = cl test（测试模式：留音频 + 报告 + 打包上传）
 #   ./cl-x --freeze 1           # 额外打开草稿前缀冻结（灰尾 1 词）
 #   ./cl-x --trigger clause     # 额外换草稿译文触发策略
-#   ./cl-x test --freeze 2      # 组合起来
+#   ./cl-x test --freeze 2      # 组合起来（开关放哪边都行 —— 见下面那段 while）
 #
 # ## 为什么要它
 #
@@ -23,16 +23,21 @@ export CLASSLIVE_LIVE_LOG="${CLASSLIVE_LIVE_LOG:-1}"
 
 FREEZE="(关着)"
 TRIGGER="legacy"
+PASS=()
+# ⚠️ **扫完整条 argv，不是遇到第一个非开关就停**（2026-10-09 修）：原来是
+#    `*) break` —— 于是 `./cl-x test --freeze 2` 会把 `--freeze 2` **原样透传给
+#    `cl test`**，`main.py` 的 argparse 报 unrecognized arguments（文件头那个示例
+#    就演示了一条跑不通的命令）。现在开关可以从任意位置给，剩下的按原序透传。
 while [ $# -gt 0 ]; do
   case "$1" in
     --freeze)  export CLASSLIVE_DRAFT_HOLDBACK="${2:?--freeze 要给词数}"; FREEZE="$2"; shift 2 ;;
     --trigger) export CLASSLIVE_DRAFT_TRIGGER="${2:?--trigger 要给 legacy|clause}"; TRIGGER="$2"; shift 2 ;;
     --no-log)  CLASSLIVE_LIVE_LOG=0; export CLASSLIVE_LIVE_LOG; shift ;;
-    *) break ;;
+    *) PASS+=("$1"); shift ;;
   esac
 done
 
 echo "🧪 分支实验开关：现场采集=${CLASSLIVE_LIVE_LOG} · 草稿冻结=${FREEZE} · 触发策略=${TRIGGER}"
 echo "   代码: $HERE   ·   数据: $(readlink "$HERE/sessions" 2>/dev/null || echo "$HERE/sessions")"
 echo
-exec "$HERE/cl" "$@"
+exec "$HERE/cl" ${PASS[@]+"${PASS[@]}"}

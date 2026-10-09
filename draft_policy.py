@@ -23,8 +23,27 @@ def ends_at_clause(text: str) -> bool:
     return text.rstrip().endswith(_CLAUSE_END)
 
 
+def _tokens(text: str) -> list[str]:
+    """归一化到"词身份"：小写 + 去掉尾随的从句标点（与 `main.partial_worker` 原来那份逐字一致）。"""
+    return [w.lower().strip(".,;:?!") for w in text.split()]
+
+
+def append_only(prev: str, cur: str) -> bool:
+    """这一次的假设是不是把上一次**原样接长**的（前面的词一个没改）。
+
+    ⭐ **判据只在这里定义一次**（2026-10-09 收口）：原来是**主循环**里手搓一份
+    （`[w.lower().strip(".,;:?!") ...]`）、`scripts/draft_policy_sim.py` 里又拿
+    `stream_metrics.normalize` 写了**另一份**（那份还会把 `10%` 展开成 `ten percent`）
+    —— 两份逻辑相似但不等价，于是**离线模拟预测的不是生产真跑的那条路**。
+    现在两边都调这个函数；顺带主循环在 `legacy` 档（默认）不再白算它。
+    """
+    a, b = _tokens(prev), _tokens(cur)
+    return b[:len(a)] == a
+
+
 def should_translate(policy: str, *, now: float, last_tr: float, n_words: int,
-                     last_len: int, text: str, append_only: bool) -> bool:
+                     last_len: int, text: str, prev_text: str = "") -> bool:
+    """`prev_text` = 上一次的草稿原文（只给 `clause` 用；它自己派生 `append_only`）。"""
     gap_ok = now - last_tr >= MIN_GAP_S
     new = n_words - last_len
     if not (gap_ok and new >= MIN_NEW_WORDS):
@@ -32,7 +51,7 @@ def should_translate(policy: str, *, now: float, last_tr: float, n_words: int,
     if policy == "legacy":
         return True
     if policy == "clause":
-        if ends_at_clause(text) or append_only:
+        if ends_at_clause(text) or append_only(prev_text, text):
             return True
         return new >= STARVE_WORDS or now - last_tr >= STARVE_S
     raise ValueError(f"未知策略: {policy}")

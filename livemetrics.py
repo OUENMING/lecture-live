@@ -68,12 +68,9 @@ def open_for(session_path, *, enabled: bool | None = None):
     try:
         # `sessions/2026-10-10_120000_ECON10770.md` → `sessions/2026-10-10_120000_ECON10770.live.jsonl`
         stem = pathlib.Path(str(session_path)).with_suffix("")
-        return LiveLog(pathlib.Path(str(stem) + ".live.jsonl"))
+        return LiveLog(pathlib.Path(str(stem) + ".live.jsonl"), name=stem.name)
     except Exception:                                     # noqa: BLE001
         return None
-
-
-__all__ = ["LiveLog", "open_for", "QUEUE_MAX"]
 
 
 class LiveLog:
@@ -94,7 +91,6 @@ class LiveLog:
         self._f = None
         self._i = 0
         self._utt = 0                                      # 当前句子号（`final` 时 +1）
-        self._seg = 0                                      # 当前**段**号（缓冲会话；`segment_end()` 时 +1）
         self._n_draft = 0
         self._err = ""
         try:
@@ -121,47 +117,26 @@ class LiveLog:
             self.dropped += 1
             self._i -= 1                                   # 没写出去，行号还回去
 
-    # ---- 只读的计数（收尾写 summary 要，别让调用方去摸 `_n_draft`）----
-    @property
-    def drafts(self) -> int:
-        return self._n_draft
+    def segment_end(self, seg: int) -> None:
+        """记一行"第 `seg` 段结束了"。**只是个 sink —— 段号由 `main` 铸造。**
 
-    @property
-    def utterances(self) -> int:
-        return self._utt
-
-    @property
-    def err(self) -> str:
-        return self._err
-
-    @property
-    def cur_seg(self) -> int:
-        return self._seg
-
-    def segment_end(self) -> int:
-        """**一段音频真的结束了**（在 `Segmenter` 的 `on_utterance_end` 回调里调）。
-
-        返回刚关掉那一段的编号，并把"当前段"推进到下一段 —— 之后的草稿都归新段。
-
-        ⚠️⚠️ **必须挂在"音频结束"那一刻，不能挂在"定稿上屏"那一刻。** 实测
-           （2026-10-09，TTS 语料真跑）：定稿那条路要先跑 Whisper + LLM，比段落结束
-           **晚 2–4 秒**；挂在那里的话，新段前 2–4 份草稿会带着**上一段的编号**
-           → 上一段的分组里混进下一段的句子，`草稿→定稿` 从 10.7% 虚高到 65%。
+        ⚠️ 段号（"这一段是第几段"）是**流水线的身份**，不该由"开没开日志"决定；
+           所以计数器长在 `main.run()` 里（`seg_gen`），这里只负责记下来。
+        ⚠️ 它必须挂在 `Segmenter` 的 `on_utterance_end`（**音频结束那一刻**），
+           **不能**挂到定稿上屏 —— 那条路要先跑 Whisper + LLM，比段落结束晚 2–4 秒，
+           新段的前几份草稿会带着上一段的号（实测把 `草稿→定稿` 从 10.7% 顶到 65%）。
         """
-        k = self._seg
-        self._seg = k + 1
-        self._put("event", event="segment_end", seg=k)
-        return k
+        self._put("event", event="segment_end", seg=seg)
 
     # ---- 公开接口（全部吞异常；主循环调用，绝不抛）----
-    def draft(self, raw: str, shown: str | None = None, *, seg: int | None = None,
+    def draft(self, raw: str, shown: str | None = None, *, seg: int = 0,
               buf_s: float = 0.0, compute_s: float = 0.0) -> None:
         """一次草稿上屏。`raw` = 送进 ASR 的原始假设，`shown` = 实际显示的文本。
 
         ⚠️ `shown` 不给就等于 `raw`（没开冻结时的常态）。
         字段名与 `stream_eval.py --jsonl` 对齐：`text` = 上屏的那份。
 
-        ⭐ `seg` = **这一段草稿属于哪次缓冲会话**（生产里是 `main.final_gen["n"]`）。
+        ⭐ `seg` = **这一段草稿属于哪次缓冲会话**（由 `main.run()` 的 `seg_gen` 给）。
            ⚠️⚠️ **这正是分组键，不是 `utt`** —— 一段 VAD 会被 `split_sentences` 切成
            **多句定稿**，所以"草稿 : 定稿"**不是 1:1**。实测（2026-10-09 真跑 TTS 语料）：
            按定稿分组时 32 句里 14 句只分到 0–1 份草稿，草稿→定稿跳成 93%
@@ -169,8 +144,7 @@ class LiveLog:
         """
         try:
             self._n_draft += 1
-            self._put("draft", utt=self._utt, seg=self._seg if seg is None else seg,
-                      n=self._n_draft,
+            self._put("draft", utt=self._utt, seg=seg, n=self._n_draft,
                       text=shown if shown is not None else raw,
                       raw=raw, buf_s=round(buf_s, 3), compute_s=round(compute_s, 3))
         except Exception:                                  # noqa: BLE001
@@ -208,7 +182,10 @@ class LiveLog:
             # ⚠️ **无条件写这一行**（2026-10-09 被自己的判据抓到）：原来只在
             #    `summary` 非空时才写 → `close()` 不带参数时**一行收尾都没有**，
             #    读的人分不出「正常收尾」和「进程被杀了」。
-            self._put("summary", final=True, **{**summary, "dropped": self.dropped})
+            # ⚠️ 自己的三个计数**在这里自己填** —— 不必逼调用方把它们递回来
+            #    （那会造出三个只服务这一行的 property）。
+            self._put("summary", final=True, drafts=self._n_draft, utterances=self._utt,
+                      err=self._err, **{**summary, "dropped": self.dropped})
         except Exception:                                  # noqa: BLE001
             pass
         self.closed = True

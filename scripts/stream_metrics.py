@@ -112,7 +112,18 @@ def lcp_len(a: list[str], b: list[str]) -> int:
     return k
 
 
-def rewrite_stats(drafts: list[str], k: int = 2) -> dict:
+#: 「hold-back 判据」用的 k 默认值 —— **唯一定义点**（`rewrite_stats` / `stream_eval.evaluate` /
+#: `stream_eval --k` / `class_report` 全指向它）。散成四份手抄的 `2` 时，
+#: 数字就会在"同一把尺子"的旗号下悄悄不同源。
+DEFAULT_K = 2
+
+
+def rate(num: int, den: int) -> float | None:
+    """比率；分母为 0 返回 `None`（**不是 0** —— "没有数"和"比率是 0"要分得开）。"""
+    return num / den if den else None
+
+
+def rewrite_stats(drafts: list[str], k: int = DEFAULT_K) -> dict:
     """同一句内、连续草稿之间的回改。
 
     shown      = 各次"上一份草稿"的词数之和（被用户看见过的词）
@@ -132,8 +143,8 @@ def rewrite_stats(drafts: list[str], k: int = 2) -> dict:
         beyond += max(0, (len(p) - k) - l)
     return {"steps": steps, "shown": shown, "rewritten": rewritten,
             "rewritten_beyond_k": beyond, "k": k,
-            "rate": rewritten / shown if shown else None,
-            "rate_beyond_k": beyond / shown if shown else None}
+            "rate": rate(rewritten, shown),
+            "rate_beyond_k": rate(beyond, shown)}
 
 
 def final_rewrite(last_draft: str, final: str) -> dict:

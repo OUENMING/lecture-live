@@ -68,11 +68,43 @@ class BuildUtts(unittest.TestCase):
         self.assertEqual(u[0]["final"], "one two.")
         self.assertEqual(u[1]["final"], "three.")
 
-    def test_missing_audio_t_falls_back_to_event_time(self):
-        """现场那份没有音频时刻 → 用事件自己的秒数当代理（延迟那几项会因此留空）。"""
+    def test_audio_t_present_path_sets_start_end_dur(self):
+        """有 `audio_t`（离线那份）时 `start_t/end_t/dur` 必须真的填上 —— 延迟那几项靠它们。
+
+        ⚠️ 这条是**跑真数据才发现的**：`audio_t` 缺席那条分支先写对了，在场的这条
+           写成了 `u["start_t"] = u["start_t"] if ...`（键还不存在）→ 一读离线文件就 KeyError。
+           判据原来只钉了"缺席"那一半。
+        """
+        p = _write([{"kind": "draft", "utt": 0, "text": "a", "raw": "a", "t": 0.5,
+                     "audio_t": 3.0, "buf_s": 1.0, "compute_s": 0.1},
+                    {"kind": "draft", "utt": 0, "text": "a b", "raw": "a b", "t": 1.5,
+                     "audio_t": 4.0, "buf_s": 2.0, "compute_s": 0.1},
+                    {"kind": "final", "utt": 0, "text": "a b.", "t": 2.0, "audio_t": 5.0,
+                     "compute_s": 0.2}])
+        u = CR.build_utts(CR.load_events(p))
+        self.assertEqual((u[0]["start_t"], u[0]["end_t"], u[0]["dur"]), (3.0, 4.0, 1.0))
+        r = CR.SE.evaluate(u, None)
+        self.assertEqual(r["latency_first_visible_s"]["n"], 1)
+        self.assertEqual(r["latency_final_compute_s"]["n"], 1)
+
+    def test_missing_audio_t_stays_none_and_latency_comes_out_empty(self):
+        """⭐ 现场那份**没有音频时刻**，那就**必须留空**。
+
+        ⚠️ 曾经写成"拿事件入队秒数顶上" —— 那会让 `stream_eval.evaluate()` 里
+        **专为现场加的** `audio_t is not None` 守卫永远成立，于是屏上打出一个
+        **假的首字延迟**（恒等于草稿的 `compute_s`：`start_t` 就是 `draft[0].audio_t`，
+        相减恒为 0）。生产里根本没有音频时钟，这一格补不出来。
+        """
         p = _write([_draft(0, "a", t=3.0), _draft(0, "a b", t=4.0), _final(0, "a b", t=5.0)])
         u = CR.build_utts(CR.load_events(p))
-        self.assertEqual([d["audio_t"] for d in u[0]["drafts"]], [3.0, 4.0])
+        self.assertEqual([d["audio_t"] for d in u[0]["drafts"]], [None, None])
+        self.assertEqual((u[0]["start_t"], u[0]["end_t"], u[0]["dur"]), (0.0, 0.0, 0.0))
+        r = CR.SE.evaluate(u, None)
+        self.assertEqual(r["latency_first_visible_s"]["n"], 0)
+        self.assertIsNone(r["latency_first_visible_s"]["p50"])
+        self.assertEqual(r["latency_final_compute_s"]["n"], 0)
+        # 但**回改率照样算得出来**（它只读文本）—— 这才是现场那份的价值
+        self.assertIsNotNone(r["draft_rewrite"]["rate"])
 
     def test_segment_grouping_when_seg_is_present(self):
         """⭐ 现场那份按 `seg` 分组，**不是**按定稿句。
@@ -263,6 +295,42 @@ class Pooling(unittest.TestCase):
                                       "sliding_excluded": 0},
                              "sweep": {}, "warnings": []}])
         CR.render(r)                                   # 不抛就算过
+
+
+class WholeClassWerIsOptIn(unittest.TestCase):
+    """⭐ `draft_vs_final_disagreement` 是**整课词表的 O(n²) DP**，默认不许白算。
+
+    2026-10-09 实测（合成 4200 词的事件表，`--ks 0,1,2,3`）：
+    开 → 5.36 s，关 → **0.10 s**，而**文本表上的数字逐位相同**。
+    原来 `sweep()` 对每个 K 都算一遍（默认 4 遍）。
+    """
+
+    def _utts(self):
+        a = "the price of coffee goes up and demand falls"
+        b = "the price of coffee goes up and demand falls by more"
+        return [{"drafts": [{"shown": a, "raw": a, "buf_s": 1.0, "compute_s": 0.1,
+                             "audio_t": 0.0},
+                            {"shown": b, "raw": b, "buf_s": 2.0, "compute_s": 0.1,
+                             "audio_t": 1.0}],
+                 "final": b + ".", "start_t": 0.0, "end_t": 1.0, "dur": 1.0,
+                 "final_compute_s": 0.1}]
+
+    def test_off_by_default_and_the_table_is_unchanged(self):
+        off = CR.sweep(self._utts(), None, (None, 1, 2))
+        on = CR.sweep(self._utts(), None, (None, 1, 2), want_disagreement=True)
+        for name in off:
+            self.assertNotIn("draft_vs_final_disagreement", off[name])
+            # ⚠️ 关掉它**不许**动别的任何一格
+            self.assertEqual(off[name]["draft_rewrite"], on[name]["draft_rewrite"])
+            self.assertEqual(off[name]["draft_to_final"], on[name]["draft_to_final"])
+        self.assertIn("draft_vs_final_disagreement", on["baseline(raw)"])
+
+    def test_only_the_baseline_row_pays_for_it(self):
+        """即使开着，也**只有基线那一遍**算（曲线上那几行没人看这一项）。"""
+        on = CR.sweep(self._utts(), None, (None, 1, 2), want_disagreement=True)
+        self.assertIn("draft_vs_final_disagreement", on["baseline(raw)"])
+        self.assertNotIn("draft_vs_final_disagreement", on["holdback=1"])
+        self.assertNotIn("draft_vs_final_disagreement", on["holdback=2"])
 
 
 class Warnings(unittest.TestCase):

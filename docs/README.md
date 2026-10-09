@@ -49,6 +49,7 @@
 |---|---|---|
 | `RESEARCH-macos-aesthetic.md` | macOS 视觉语言 | ⭐ 动 `overlay.py` 外观前 |
 | `RESEARCH-live-caption-rollup.md` | 2 行 roll-up 的台账 | ⭐ 动草稿或字幕行前 |
+| `RESEARCH-stream-eval.md` | ⭐ **流式字幕量具 + 2026-10-08 夜间改动 + 现场采集**（回改率/延迟/WER 的口径与全部数字）| 改草稿/ASR/音源前 · **上课采数前** |
 | `RESEARCH-entry-and-export.md` | 导入入口 + 无 Obsidian 时的导出 | 做 P4/P5 前 |
 | `RESEARCH-product-shape.md` | 产品形态 + VPS 评估 | 做 P4 前 |
 | `RESEARCH-p3-seams.md` | P3 的代码接缝钉到 `file:line` | ⚠️ **行号会漂**，按符号名查 |

@@ -1,0 +1,38 @@
+#!/bin/bash
+# 分支专用的上课启动器 —— 在 `cl` 之上**只**做一件事：把实验开关打开，然后原样交给 cl。
+#
+#   ./cl-x                      # = cl（零参数 → 课程卡片面板 → 开始上课）
+#   ./cl-x test                 # = cl test（测试模式：留音频 + 报告 + 打包上传）
+#   ./cl-x --freeze 1           # 额外打开草稿前缀冻结（灰尾 1 词）
+#   ./cl-x --trigger clause     # 额外换草稿译文触发策略
+#   ./cl-x test --freeze 2      # 组合起来
+#
+# ## 为什么要它
+#
+# 这几样**默认全都是关的**（改动本身不允许动生产默认值）。而这个分支存在的意义
+# 就是"明天真上一节，把数采回来"，所以需要一个**显式**的入口把开关拨上去 ——
+# 顺便把"这次到底开了什么"打在屏幕上（日志里事后能对上，不用猜）。
+#
+# ⚠️ 跑之前先 `./scripts/link-runtime.sh` 补运行态（否则找不到 ClassLive.app / sessions/）。
+# ⚠️ 代码是**这个 worktree** 的；`sessions/` `glossary/` `.course` 是**主目录那份**（软链）。
+set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+#: 现场采集：**默认开**。写 `<会话名>.live.jsonl`（就在 sessions/ 里）
+export CLASSLIVE_LIVE_LOG="${CLASSLIVE_LIVE_LOG:-1}"
+
+FREEZE="(关着)"
+TRIGGER="legacy"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --freeze)  export CLASSLIVE_DRAFT_HOLDBACK="${2:?--freeze 要给词数}"; FREEZE="$2"; shift 2 ;;
+    --trigger) export CLASSLIVE_DRAFT_TRIGGER="${2:?--trigger 要给 legacy|clause}"; TRIGGER="$2"; shift 2 ;;
+    --no-log)  CLASSLIVE_LIVE_LOG=0; export CLASSLIVE_LIVE_LOG; shift ;;
+    *) break ;;
+  esac
+done
+
+echo "🧪 分支实验开关：现场采集=${CLASSLIVE_LIVE_LOG} · 草稿冻结=${FREEZE} · 触发策略=${TRIGGER}"
+echo "   代码: $HERE   ·   数据: $(readlink "$HERE/sessions" 2>/dev/null || echo "$HERE/sessions")"
+echo
+exec "$HERE/cl" "$@"

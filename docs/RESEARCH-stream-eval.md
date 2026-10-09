@@ -103,3 +103,106 @@ ClassLive.app/Contents/MacOS/python scripts/stream_eval.py ~/.classlive/eval/eco
 - 默认行为：除 §5（本地引擎后处理）外，其余都**默认关**。`git diff 44810e1..overnight-20261008 --stat` 看全部改动。
 - 没做：真机跑一节课、`probe_testmode_report.py`（会写 sessions/）、`main.py` 的端到端（只做了语法/ruff/默认闸门；`partial_worker` 是嵌套闭包，没法单测，
   默认路径与改前逐字等价靠 `legacy` 的随机对拍保证）。
+
+---
+
+# 9. 现场采集：让**真课**自己出数（2026-10-09 加）
+
+上面 §2 那张表里的「真实课堂」一栏只有 **3 分钟 / 17 句 / 149 份草稿** —— 而它恰恰
+是唯一能回答"这套改动有没有用"的数据。§1 的回放量具只能**回放录音**：走脚本自己搭的
+流水线、虚拟时钟、不排队，所以它量到的**不是生产真值**。
+
+所以加了 `livemetrics.py`：把 `main.drain()` 那个缝（**用户实际看见了什么**）记成
+`<会话名>.live.jsonl`，就在会话 md 旁边。
+
+## 9.1 采到了什么 / 怎么读
+
+```sh
+ClassLive.app/Contents/MacOS/python scripts/class_report.py sessions/<会话>.live.jsonl
+ClassLive.app/Contents/MacOS/python scripts/class_report.py sessions/<会话>.live.jsonl --json out.json
+```
+
+输出的每一行事件与 `stream_eval.py --jsonl` **同款字段**，于是：
+
+| 问题 | 由什么回答 |
+|---|---|
+| 真课的草稿回改率是多少 | `class_report` 的 `baseline(raw)` 那一行 |
+| 前缀冻结在真课上有多少用 | 同一个文件里 `holdback=1/2/3` 那几行 —— **同一次运行出的** |
+| 腰斩半句被臆造的地方在哪 | `腰斩臆造候选`（⚠️ 机械判据，**要人耳听**）· 每条给出定稿、最后一份草稿、站不住的尾巴 |
+| 本地小模型多久回显一次上下文 | `.live.jsonl` 最后那行 `summary` 里的 `echo_retries` |
+| 译文在草稿阶段抖不抖 | `kind=draft_zh` 那些行（**没人算过**，数据先留着） |
+
+⚠️⚠️ **分组键是 `seg`（一段缓冲 = 一次草稿会话），不是"一句定稿"。** 一段 VAD 会被
+`split_sentences` 切成**多句**定稿，所以「草稿 : 定稿」在生产里**不是 1:1**。
+2026-10-09 第一次真跑就栽在这上面：按定稿分组时 32 句里 14 句只分到 0–1 份草稿，
+`草稿→定稿` 从 10.7% 跳到 **93.3%** —— 那是**分组错了**，不是模型退化了。
+现场那份由 `main._emit` 在自增 `final_gen["n"]` **之前**取本段世代号、随 `drafts`
+队列带到 `drain()`（`tests/test_class_report.py::test_segment_grouping_when_seg_is_present` 钉着）。
+
+⭐⭐ **同场 A/B 的关键**：`draft` 事件同时记 `raw`（模型原始假设）与 `text`（上屏的
+那份）。所以**冻结开不开都能事后算** —— 一次真课拿到两条曲线，不用跑两节课。
+
+⚠️ 判据：`tests/test_livemetrics.py`（15 条）· `tests/test_class_report.py`（16 条）。
+其中一条钉住的是**「离线套冻结 == 回放那条路」**：拿 2026-10-08 那三份记录逐位复核过
+（baseline 10.4% / K=1 8.9% / K=2 8.9%，与 `~/.classlive/eval/out/daniel_*.json` 一致）。
+
+## 9.2 上课当天怎么跑（分支 `overnight-20261008`）
+
+```sh
+cd ~/lecture-live-overnight
+./scripts/link-runtime.sh            # 一次性：把主目录的 sessions/glossary/.course/ClassLive.app 软链过来
+                                     #   （代码是这个 worktree 的，数据是你原来那份）
+./cl-x test                          # 测试模式 + 现场采集（会录音频 → 开课前要跟同学说一声）
+# 或者：./cl-x --freeze 1 test        # 额外把草稿前缀冻结拨上去
+```
+
+⚠️ 跑之前的三件事：① **电池**（长跑 66%→20% 那次教训）· ② 网络（云端引擎）·
+③ 若要试系统声源，**先**在没上课时跑 `ClassLive.app/Contents/MacOS/python scripts/probe_system_tap.py 10`
+（会弹一次授权框，**别在课上弹**）。
+
+## 9.3 课后把样本做大（不用等下一节课）
+
+现有 19 份真课录音就在 `sessions/*.wav|*.opus`。挑几分钟切片各跑一次回放，
+把样本从 17 句堆到上百句：
+
+```sh
+ClassLive.app/Contents/MacOS/python scripts/stream_eval.py sessions/<录音>.wav \
+    --start 300 --dur 240 --jsonl /tmp/slice1.jsonl --json /tmp/slice1.json
+ClassLive.app/Contents/MacOS/python scripts/class_report.py /tmp/slice1.jsonl   # K 曲线
+```
+
+⚠️ 一份 `--jsonl` 就够跑整条 K 曲线（`raw` 字段在，不必对每个 K 重跑 ASR）。
+⚠️ 回放不排队 → **延迟是下限**，别拿去和现场那份比延迟；文本类指标（回改率）可比。
+
+## 9.4 ⭐ 交叉验证：现场采集的数字与离线回放对得上（2026-10-09 实测）
+
+同一份音频（`~/.classlive/eval/econ_daniel.wav`，TTS、有参考稿）两条路各跑一遍：
+`main.py --source file`（**生产真值**，`CLASSLIVE_LIVE_LOG=1`）对 `stream_eval.py`（离线回放）。
+
+| 指标 | 现场采集（生产） | 离线回放 |
+|---|---|---|
+| 段 / 句 | 12 | 12 |
+| 草稿数 | 104 | 107 |
+| 基线回改率 | **10.1%** | 10.4% |
+| hold-back K=1 | **8.6%** | 8.9% |
+| hold-back K=2 | **8.6%** | 8.9% |
+| beyond-k（k=2）基线 | **6.6%** | 6.7% |
+| 草稿→定稿编辑率 | **10.7%** | 10.7% |
+| 腰斩臆造候选 | **1 条（`the quantity is less`）** | 1 条（同一条） |
+
+**读法**：生产那份的数字可以直接和 §2/§3 那些离线基线放在一张表里比 —— 这正是
+"同一把尺子"要的证据。臆造候选两边**都只命中那一条真的**（§2 记的那个 Daniel 案例），
+说明这个机械判据不是噪声发生器。
+
+⚠️ **走到这一步踩了两个坑，都值得记**（都是"分组错了"伪装成"模型退化"）：
+1. 按"一句定稿"分组 → 32 组里 14 组只有 0–1 份草稿 → 草稿→定稿 虚高到 **93.3%**。
+2. 段号取自 `main.final_gen["n"]`（**定稿上屏时**才自增，比段落真正结束晚 2–4 秒：
+   Whisper + LLM）→ 新段前几份草稿带着上一段的号 → 草稿→定稿虚高到 **65%**。
+   修法：`live.segment_end()` 挂在 `Segmenter` 的 `on_utterance_end` 回调上，段号随
+   `finalq` 一路带到定稿。
+
+## 9.5 还没做 / 别声称做了
+
+- **`--source system`（Process Tap）在真机上仍未跑过** —— §6 那一段的结论一个字没变。
+- `draft_zh` 采了但**没有分析器**（要回答什么还没想清楚，先留数据）。
+- 臆造候选的判据是机械的：Parakeet 与 Whisper 是两个模型，正常措辞差异也会命中。

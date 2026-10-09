@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from capture import load_source, SR
 from vad import Segmenter
 import draft_policy
+import livemetrics
 from asr import load_asr, load_final_asr, is_degenerate
 from translator import load_translator
 from cloud_translator import (DEFAULT_CTX_CHUNK, load_api_key,
@@ -1284,7 +1285,21 @@ def run(args) -> None:
             echo("   ⚠️ 异常段（主模型空/退化）会另存一份**送进 ASR 的原始信号**"
                  "（`<会话名>.probe/*.npy`，只写本机、不上传）。")
 
-    drafts: "queue.Queue[str]" = queue.Queue()          # 草稿文本 -> 主线程
+    # ⭐ 现场采集（`livemetrics.py`）：把 drain() 那个缝上发生的事记成 JSONL。
+    #    **默认关**（`CLASSLIVE_LIVE_LOG=1` 才开）—— 生产路径一个字不改。
+    #    ⚠️ 它自己吞所有异常、队列有界、写盘在后台线程（见该文件头）。
+    live = None
+    _live_p = livemetrics.open_for(getattr(writer, "session_path", None))
+    if _live_p is not None:
+        live = _live_p
+        echo(f"🎥 现场采集: {live.path}")
+
+    # ⚠️ 元素是 `(原始假设, 上屏文本, 缓冲秒数, 转写耗时, 段号)`，不是裸字符串了（2026-10-09）：
+    #    前缀冻结要拿"模型原始假设"跟"上屏的那份"做**同场 A/B**，两个都得留；
+    #    后三个是现场采集要的（缓冲滑没滑 / 转写多久 / 归哪一段）。
+    #    `drafts` 只有这里一个产出方、`drain()` 一个消费方，改形状是局部的；
+    #    `drain()` 侧的 `_pair()` 仍兼容裸字符串与二元组（替身/老测试）。
+    drafts: "queue.Queue[tuple]" = queue.Queue()             # (原文, 上屏, buf_s, 耗时, seg) -> 主线程
     drafts_zh: "queue.Queue[str]" = queue.Queue()       # 草稿译文 -> 主线程
     streamq: "queue.Queue[tuple]" = queue.Queue()       # ("zh"/"en"/"final"/"terms"/"notice"/"answer"/"answer_done"/"summary") -> 主线程
     # ⚠️ 加新 tag **必须**在 `drain()` 加同分支 —— 它是唯一的分发点，漏改即静默丢弃。
@@ -1407,16 +1422,26 @@ def run(args) -> None:
             if not finalq.empty():
                 continue
             try:
+                _t_draft = time.monotonic()
                 t = asr.transcribe(buf[-PARTIAL_MAX_S * SR:])
+                _dt_draft = time.monotonic() - _t_draft
                 if not t:
                     continue
+                _shown = t
                 if stab is not None:
                     if final_gen["n"] != stab_gen:           # 定稿到了 → 冻结前缀作废
                         stab_gen = final_gen["n"]
                         stab.reset()
-                    drafts.put(stab.update(t))
-                else:
-                    drafts.put(t)
+                    _shown = stab.update(t)
+                # ⚠️ `buf_s`/`compute_s`/`seg` 要一路带到 `drain()` —— 现场采集那份
+                #    `<会话>.live.jsonl` 靠 `buf_s` 判"这份草稿的缓冲窗口滑了没有"
+                #    （滑了的那批**不许**进回改统计，否则长句会把回改率虚高一大截，
+                #     离线量具就是栽在这上面，见 scripts/stream_eval.py 的 `sliding`）；
+                #    `seg` = **本段草稿所属的段号** —— 由 `live.cur_seg` 给（在 Segmenter 的
+                #    段落结束回调里推进）。⚠️ 不能用 `final_gen["n"]`：那个要到定稿上屏时才自增，
+                #    比段落真正结束晚 2–4 秒，新段前几份草稿会被算进上一段（实测踩过）。
+                drafts.put((t, _shown, len(buf) / SR, _dt_draft,
+                            live.cur_seg if live is not None else 0))
                 # 新句子开始 -> 重置草稿节流。**必须重置**: last_len 是**上一句**
                 # 收尾时的词数, 新句若更短(如 20 词 vs 30 词), "新增 ≥6 词"永远
                 # 不成立 -> 整句拿不到即时中文("首字中文 ~3s"特性静默失效)。
@@ -1451,7 +1476,11 @@ def run(args) -> None:
     CARRY_MAX_WORDS = 25
     carry = {"text": "", "since": 0.0}
 
-    def _emit(text: str) -> None:
+    def _emit(text: str, seg: int = 0) -> None:
+        # ⭐ `seg` = 这段文本属于哪一段缓冲。现场采集靠它把"一段里的草稿"与"这段被切出来的
+        #    若干句定稿"对上 —— 一段 VAD → N 句定稿，**不是 1:1**（见 livemetrics 的说明）。
+        #    ⚠️ 调用方给：定稿那条路是 `finalq` 带过来的段号（**音频结束那一刻**定的），
+        #       carry 兜底那条路用 `live.cur_seg`。
         final_gen["n"] += 1                      # 通知草稿线程: 重置节流
         for sent in split_sentences(text):
             if trans["mode"] == "raw":
@@ -1460,7 +1489,7 @@ def run(args) -> None:
                 # ⚠️ 与下面两档的关键差别: 不产出 `en` 流(没有矫正可流式), 直接给
                 #    ("final", "", "", sent), 让 en 走 final 那一趟。
                 finals.append(sent)
-                streamq.put(("final", "", "", sent))
+                streamq.put(("final", "", "", sent, seg))
                 continue
             if trans["mode"] == "en":
                 # 只矫正英文: 中文不出, 但 ASR 错听照修(仍要联模型)。
@@ -1473,7 +1502,7 @@ def run(args) -> None:
                     echo(f"⚠ 英文矫正失败({str(e)[:50]}); 保留原始转录")
                     fixed = ""
                 finals.append(fixed or sent)
-                streamq.put(("final", fixed, "", sent))
+                streamq.put(("final", fixed, "", sent, seg))
                 continue
             # 翻译失败也要保住转录: LLM 挂了不代表这节课没听到东西。
             try:
@@ -1488,7 +1517,7 @@ def run(args) -> None:
                 en, zh = "", ""                     # 无修正版/译文, 内容全在转录里
                 finals.append(sent)                 # 上下文仍接得上
             # 第 4 项是**原始 ASR 转录**(未修正), 落盘时要一并记下
-            streamq.put(("final", en, zh, sent))
+            streamq.put(("final", en, zh, sent, seg))
             # 术语/专有名词: 命中术语表就把 (术语, 解析) 交给 UI —— 由 UI 决定
             # 什么时候展开(悬浮窗默认只列术语名, 点击才显示解析)。
             hits = notes.match(sent)
@@ -1513,7 +1542,7 @@ def run(args) -> None:
         busy["on"] = True
         carry["text"], carry["since"] = "", 0.0
         try:
-            _emit(t.rstrip() + " …")
+            _emit(t.rstrip() + " …", live.cur_seg if live is not None else 0)
         except Exception:                               # noqa: BLE001
             pass
         finally:
@@ -1527,6 +1556,11 @@ def run(args) -> None:
                 buf = finalq.get_nowait()
             except queue.Empty:
                 buf = EMPTY
+            # ⚠️ 元素是 `(buf, seg)`（2026-10-09 加），但两个哨兵是**裸对象** ——
+            #    先判哨兵再拆，否则 `_QUIT is _QUIT` 那条会变成解包错误。
+            _fseg = live.cur_seg if live is not None else 0
+            if buf is not EMPTY and buf is not _QUIT:
+                buf, _fseg = buf
             if buf is _QUIT:
                 break
             if buf is EMPTY:
@@ -1595,7 +1629,7 @@ def run(args) -> None:
                 busy["on"] = True
                 carry["text"], carry["since"] = "", 0.0
                 try:
-                    _emit(text)
+                    _emit(text, _fseg)
                 finally:
                     busy["on"] = False
             except Exception as e:                       # noqa: BLE001
@@ -1605,7 +1639,11 @@ def run(args) -> None:
 
     seg = Segmenter(
         on_partial=lambda buf: latest.put(buf),
-        on_utterance_end=lambda buf: finalq.put(buf),
+        # ⭐ 段落**真正结束**的那一刻就记段号（`live.segment_end()` 顺手推进当前段），
+        #    随 `finalq` 一路带到定稿 —— 现场采集的分组靠它。
+        #    ⚠️ 不这么做就得等定稿上屏才自增，那比段落结束晚 2–4 秒（Whisper + LLM）。
+        on_utterance_end=lambda buf: finalq.put(
+            (buf, live.segment_end()) if live is not None else buf),
     )
 
     # ---- 专有名词查询线程(网络请求, 异步且缓存, 不影响主链路) ----
@@ -1805,17 +1843,43 @@ def run(args) -> None:
     threading.Thread(target=summ.run, args=(running,), daemon=True,
                      name="live-summary").start()
 
+    def _pair(item) -> tuple:
+        """`drafts` 队列的元素 → `(raw, shown, buf_s, compute_s, seg)`。
+
+        ⚠️ 兼容裸字符串与二元组（替身 / 老调用方）：缺的字段一律给 0.0，
+           **不许**在这里猜一个值出来（`buf_s` 猜错会静默改掉回改率的口径）。
+        """
+        # ⚠️ 这个函数**必须全函数不抛** —— 它在 `drain()` 里，而 `drain()` 没有
+        #    try/except（这里抛一次 = 打死主循环 = 整节课的字幕停摆）。
+        try:
+            if isinstance(item, str):
+                return (item, item, 0.0, 0.0, 0)
+            raw, shown = item[0], item[1]
+            buf_s = float(item[2]) if len(item) > 2 else 0.0
+            cpt = float(item[3]) if len(item) > 3 else 0.0
+            seg = int(item[4]) if len(item) > 4 else 0
+            return (raw, shown, buf_s, cpt, seg)
+        except Exception:                                  # noqa: BLE001
+            return ("", "", 0.0, 0.0, 0)
+
     def drain():
         while True:
             try:
-                ui.add_draft(drafts.get_nowait())
+                _raw, _shown, _buf_s, _cpt, _seg = _pair(drafts.get_nowait())
             except queue.Empty:
                 break
+            if live is not None:
+                # 吞异常，不会打死主循环
+                live.draft(_raw, _shown, seg=_seg, buf_s=_buf_s, compute_s=_cpt)
+            ui.add_draft(_shown)
         while True:
             try:
-                ui.draft_zh(drafts_zh.get_nowait())
+                _zh = drafts_zh.get_nowait()
             except queue.Empty:
                 break
+            if live is not None:
+                live.draft_zh(_zh)
+            ui.draft_zh(_zh)
         while True:
             try:
                 item = streamq.get_nowait()
@@ -1855,7 +1919,12 @@ def run(args) -> None:
                 fn = getattr(ui, "summary_update", None)
                 if callable(fn):
                     fn(item[1])
-            elif item[0] == "final":                # ("final", en, zh, asr_raw)
+            elif item[0] == "final":                # ("final", en, zh, asr_raw[, seg])
+                if live is not None:
+                    # ⚠️ `item[4]` 用 `len` 守卫：`("final", …)` 这条 tag 有 3 个产出点，
+                    #    加第 5 项是**加法**（下标 1–3 一个没动），老形状照样能读。
+                    live.final(item[1] or item[3], item[2], item[3],
+                               seg=int(item[4]) if len(item) > 4 else 0)
                 ui.finalize(item[1] or item[3], item[2])   # 翻译失败时至少显示转录
                 writer.append(item[1], item[2], raw=item[3])
                 # ⭐ 采集面 ③：`item[1]` 是**矫正后**的英文、`item[3]` 是**原始 ASR**
@@ -2250,6 +2319,23 @@ def run(args) -> None:
                     #    两条都提"报告"会让同一件事报两遍。`--no-bundle`（README 写明可
                     #    「不打包，只写报告」）时 `bundle_path` **合法地**是 None → 不出声。
                     echo("⚠ 数据包生成失败" + ("（报告已写出）" if _wrote else ""))
+
+            # ---- 现场采集收尾 ----
+            # ⚠️ **放在 `if tester is not None` 之外**（两者互不依赖）：不开测试模式、
+            #    只开 `CLASSLIVE_LIVE_LOG=1` 时也要把 summary 写出去并关文件。
+            # ⚠️ 只记**只读计数**，不在这里现算指标 —— 指标归 `scripts/class_report.py`
+            #    （它读同一份 JSONL；生产路径只负责"如实记下来"）。
+            if live is not None:
+                _loc = getattr(translator, "_local", None)
+                live.close(
+                    echo_retries=getattr(_loc, "echo_retries", None),   # 本地小模型回显重试次数
+                    mode=getattr(translator, "_mode", None),
+                    source=args.source,
+                    drafts=live.drafts,
+                    utterances=live.utterances,
+                    err=live.err,
+                )
+                echo(f"🎥 现场采集已收尾: {live.path}")
 
             # ---- 小更新：退出时在**独立进程**里自动拉（详见 _auto_update_on_exit）----
             # 放在 finally 的**最末**：等用户答完"是否保存笔记"、测试报告也打完，

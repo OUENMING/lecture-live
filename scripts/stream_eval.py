@@ -101,10 +101,15 @@ def evaluate(utts, ref_text: str | None, k: int = 2) -> dict:
             r = M.final_rewrite(u["drafts"][-1]["shown"], u["final"])
             if r["edits"] is not None:
                 fr_edits += r["edits"]; fr_len += r["draft_len"]
+    # ⚠️ 两处 `is not None` 是给**现场采集**（`livemetrics.py` 写的 `<会话>.live.jsonl`）
+    #    留的口子：那份没有音频时刻、也没有定稿耗时 → 这几项**留空**（`n=0`），
+    #    而不是拿 0 冒充。回放那条路字段齐全，数字与以前逐位一致。
     first_vis = [u["drafts"][0]["audio_t"] - u["start_t"] + u["drafts"][0]["compute_s"]
-                 for u in utts if u["drafts"]]
-    final_comp = [u["final_compute_s"] for u in utts]
-    rtf_final = [u["final_compute_s"] / u["dur"] for u in utts if u["dur"] > 0]
+                 for u in utts
+                 if u["drafts"] and u["drafts"][0]["audio_t"] is not None]
+    final_comp = [u["final_compute_s"] for u in utts if u["final_compute_s"] is not None]
+    rtf_final = [u["final_compute_s"] / u["dur"] for u in utts
+                 if u["dur"] > 0 and u["final_compute_s"] is not None]
     out = {
         "utterances": len(utts), "drafts": n_draft,
         "audio_s": round(sum(u["dur"] for u in utts), 1),
@@ -170,7 +175,12 @@ def main():
             for i, u in enumerate(utts):
                 for d in u["drafts"]:
                     f.write(json.dumps({"utt": i, "kind": "draft", "audio_t": round(d["audio_t"], 2),
-                                        "compute_s": round(d["compute_s"], 3), "text": d["shown"]},
+                                        "compute_s": round(d["compute_s"], 3), "text": d["shown"],
+                                        # ⭐ `raw` = 冻结**之前**的模型原始假设（2026-10-09 加）。
+                                        #    有了它，`class_report.py` 能把**同一份回放**离线
+                                        #    跑成 hold-back 0/1/2/3 的曲线（不必重跑 ASR），
+                                        #    也能和生产的 `<会话>.live.jsonl` 用同一套分析。
+                                        "raw": d["raw"], "buf_s": round(d["buf_s"], 3)},
                                        ensure_ascii=False) + "\n")
                 f.write(json.dumps({"utt": i, "kind": "final", "audio_t": round(u["end_t"], 2),
                                     "compute_s": round(u["final_compute_s"], 3), "text": u["final"]},

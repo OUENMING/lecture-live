@@ -63,6 +63,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 回归测试 R1–R5、毫秒级断言 | `tests/test_audit_regressions.py` |
 | 端到端、拿真实录音跑通 | `scripts/test_pipeline.py` |
 | ⭐ **流式字幕量具**（草稿回改率 / 延迟 / WER，可复跑）+ 夜间改动的数字与取舍（草稿前缀冻结、触发策略、本地后处理、`--source system` 未验证）+ **现场采集怎么跑** —— 改草稿/ASR/音源前先读 | `docs/RESEARCH-stream-eval.md` + `scripts/stream_eval.py` |
+| ⭐⭐ **这一层的交接文档**（现状 / 怎么跑 / 全部实测数字 / 该不该用 / 缺口 / 教训）—— **先读它** | `docs/HANDOFF-20261009-stream-eval.md` |
 | ⭐ **现场采集**（把**真课**的草稿流记成 `<会话>.live.jsonl`，课后出数）—— 默认关，`CLASSLIVE_LIVE_LOG=1` 打开。⚠️ 硬前提：**绝不能影响上课**（队列有界 + 后台写盘 + 全吞异常） | `livemetrics.py`（**动手前先读文件头**）|
 | **课堂报告**（读那份 `.live.jsonl` *或* `stream_eval --jsonl` 出表：回改率 / 延迟 / 腰斩臆造候选 / 多份按计数汇总）—— 指标复用 `stream_eval.evaluate`，**不另写一份尺子** | `scripts/class_report.py` |
 | **分支上课入口**（`./cl-x`，分支专用）：开现场采集 + 可选 `--freeze K` / `--trigger clause`，其余透传 `cl` | `cl-x` + `scripts/link-runtime.sh`（⚠️ worktree 补运行态**软链**：代码用分支的、数据用主目录那份）|

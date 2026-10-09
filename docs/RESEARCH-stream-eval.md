@@ -144,6 +144,11 @@ ClassLive.app/Contents/MacOS/python scripts/class_report.py sessions/<会话>.li
 判据：`tests/test_class_report.py::test_segment_grouping_when_seg_is_present` +
 `tests/test_livemetrics.py::Segments`（4 条）。
 
+**它给主循环加了多少活**（2026-10-09 实测，`LiveLog` 直接压测 2 万次）：
+`draft()` **1.8 微秒/次**、`final()` **4.0 微秒/次**（主线程只做一次 `put_nowait`，
+写盘在后台线程）。一节课约 2000 份草稿 → 合计约 **4 毫秒**。⛔ 卡住的地方也不反压：
+队列满就丢并计数（那 2 万次的压测里丢了 11800 条 —— 真实课堂是 1 秒一份草稿，撑不满）。
+
 ⭐⭐ **同场 A/B 的关键**：`draft` 事件同时记 `raw`（模型原始假设）与 `text`（上屏的
 那份）。所以**冻结开不开都能事后算** —— 一次真课拿到两条曲线，不用跑两节课。
 

@@ -345,5 +345,36 @@ class Warnings(unittest.TestCase):
         self.assertFalse(any("buf_s" in w for w in res["warnings"]))
 
 
+class LiveLatency(unittest.TestCase):
+    def _ev(self):
+        def d(seg, t, buf_s, lag_s):
+            return {**_draft(0, "x", t=t, buf_s=buf_s), "seg": seg, "lag_s": lag_s}
+        seg_end = lambda seg, t: {"kind": "event", "event": "segment_end", "seg": seg, "t": t}
+        fin = lambda seg, t: {**_final(0, "x", t=t), "seg": seg}
+        return [d(0, 1.0, 1.0, 0.8), d(0, 2.0, 2.0, 0.6),        # 段 0：首字 = 第一份的 1.0+0.8
+                seg_end(0, 5.0), d(1, 6.0, 1.2, 1.1),            # 段 1 的草稿可以先于段 0 的定稿
+                fin(0, 8.5), fin(0, 9.0),                         # 段 0 两句定稿：取**第一句**
+                seg_end(1, 12.0), fin(1, 14.0)]
+
+    def test_numbers(self):
+        lat = CR.live_latency(self._ev())
+        self.assertEqual(lat["final_delay_s"]["n"], 2)
+        self.assertAlmostEqual(lat["final_delay_s"]["max"], 3.5)     # 段 0：8.5 − 5.0（不是 9.0 − 5.0）
+        self.assertAlmostEqual(lat["first_visible_s"]["max"], 2.3)   # 段 1：1.2 + 1.1
+        self.assertEqual(lat["first_visible_s"]["n"], 2)             # 每段只取第一份
+        self.assertEqual(lat["draft_lag_s"]["n"], 3)
+
+    def test_final_without_its_segment_end_is_not_counted(self):
+        ev = [e for e in self._ev() if not (e.get("event") == "segment_end" and e["seg"] == 1)]
+        self.assertEqual(CR.live_latency(ev)["final_delay_s"]["n"], 1)
+
+    def test_offline_replay_file_has_none(self):
+        self.assertIsNone(CR.live_latency([_draft(0, "a"), _final(0, "a")]))
+
+    def test_report_renders_it(self):
+        res = CR.build_report(_write(self._ev()), ks=(None,))
+        self.assertIn("段结束→定稿上屏", CR.render(res))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -48,6 +48,21 @@ class OpenFor(unittest.TestCase):
             if old is not None:
                 os.environ["CLASSLIVE_LIVE_LOG"] = old
 
+    def test_default_applies_only_when_env_is_unset(self):
+        """测试模式传 `default=True`：环境变量没设 → 开；显式 `0` → 仍然关。"""
+        d = tempfile.mkdtemp()
+        old = os.environ.pop("CLASSLIVE_LIVE_LOG", None)
+        try:
+            log = LM.open_for(os.path.join(d, "a.md"), default=True)
+            self.assertIsNotNone(log)
+            log.close()
+            os.environ["CLASSLIVE_LIVE_LOG"] = "0"
+            self.assertIsNone(LM.open_for(os.path.join(d, "b.md"), default=True))
+        finally:
+            os.environ.pop("CLASSLIVE_LIVE_LOG", None)
+            if old is not None:
+                os.environ["CLASSLIVE_LIVE_LOG"] = old
+
     def test_no_session_path_means_none(self):
         """没有落点就**不采**（不许退回别的目录造出第二个数据落点）。"""
         self.assertIsNone(LM.open_for(None, enabled=True))
@@ -268,6 +283,72 @@ class InterpreterAndTiming(unittest.TestCase):
         log.close()
         ts = [r["t"] for r in _lines(p)]
         self.assertEqual(ts, sorted(ts))
+
+
+class Blocks(unittest.TestCase):
+    """逐块记录（`block()` → `<会话名>.blocks.npz`）。"""
+
+    def test_values_round_trip_exactly_and_summary_points_at_the_file(self):
+        import numpy as np
+        log, p = _mk_log()
+        rows = [(0.01, 31.6, 0.0, 1600), (0.5, 1.9, 1.0, 1600), (0.03, 30.0, 0.5, 800)]
+        for r in rows:
+            log.block(*r)
+        log.close()
+        npz = p.with_name("s.blocks.npz")         # `s.live.jsonl` → `s.blocks.npz`（不是 `s.live.blocks.npz`）
+        with np.load(npz) as z:
+            for i, k in enumerate(("peak", "gain", "vad", "n")):
+                np.testing.assert_allclose(z[k], [r[i] for r in rows], rtol=1e-6)
+        summ = [r for r in _lines(p) if r["kind"] == "summary"][-1]
+        self.assertEqual(summ["blocks"], 3)
+        self.assertEqual(summ["blocks_file"], "s.blocks.npz")
+
+    def test_no_blocks_no_file(self):
+        log, p = _mk_log()
+        log.draft("x")
+        log.close()
+        self.assertFalse(p.with_name("s.blocks.npz").exists())
+        self.assertNotIn("blocks", [r for r in _lines(p) if r["kind"] == "summary"][-1])
+
+    def test_never_overwrites_an_existing_file(self):
+        """`sessions/` 只追加：同名已在 → 放弃写，原文件一个字节不动，并在 err 里说出来。"""
+        log, p = _mk_log()
+        npz = p.with_name("s.blocks.npz")
+        npz.write_bytes(b"precious")
+        log.block(0.1, 2.0, 1.0, 1600)
+        log.close()
+        self.assertEqual(npz.read_bytes(), b"precious")
+        self.assertIn("已存在", [r for r in _lines(p) if r["kind"] == "summary"][-1]["err"])
+
+    def test_block_never_raises(self):
+        log, _ = _mk_log()
+        log.block("not-a-number", None, object(), -1)   # 类型全错也不抛
+        log.close()
+        log.block(0.1, 1.0, 1.0, 1600)                   # 收尾之后也不抛
+
+    def test_a_bad_row_never_misaligns_the_columns(self):
+        """坏的一行**整行**不进；不许出现「peak 进了、gain 没进」→ 之后每一块都错位。"""
+        import numpy as np
+        log, p = _mk_log()
+        log.block(0.1, 2.0, 1.0, 1600)
+        log.block(0.2, None, 1.0, 1600)                  # 第二列坏
+        log.block(0.3, 3.0, 0.0, -5)                     # 最后一列坏
+        log.block(0.4, 4.0, 0.5, 1600)
+        log.close()
+        with np.load(p.with_name("s.blocks.npz")) as z:
+            self.assertEqual({k: len(z[k]) for k in z.files}, {"peak": 2, "gain": 2, "vad": 2, "n": 2})
+            np.testing.assert_allclose(z["gain"], [2.0, 4.0])
+
+
+class Lag(unittest.TestCase):
+    def test_lag_written_only_when_given(self):
+        log, p = _mk_log()
+        log.draft("a", buf_s=1.0, lag_s=0.4567)
+        log.draft("b", buf_s=2.0)
+        log.close()
+        d = [r for r in _lines(p) if r["kind"] == "draft"]
+        self.assertEqual(d[0]["lag_s"], 0.457)
+        self.assertNotIn("lag_s", d[1])
 
 
 

@@ -152,6 +152,7 @@ class Segmenter:
         self.on_partial = on_partial
         self.on_utterance_end = on_utterance_end
         self._vad = _make_vad(vad_model)
+        self._last_ratio = 0.0
         self._parts: list[np.ndarray] = []
         self._n = 0
         self._pre_roll: deque = deque()          # 存 `(chunk, 该块的 last_ratio)`
@@ -183,6 +184,12 @@ class Segmenter:
     @property
     def dur(self) -> float:
         return self._n / SR
+
+    @property
+    def last_ratio(self) -> float:
+        """刚 `accept()` 的那一块里被判为语音的窗占比（**生产当场的判定**，含状态漂移）。
+        只读，给现场采集逐块记；不参与切分。"""
+        return self._last_ratio
 
     def _buf(self) -> np.ndarray:
         if not self._parts:
@@ -242,6 +249,8 @@ class Segmenter:
     def accept(self, chunk: np.ndarray) -> None:
         chunk = chunk.astype(np.float32, copy=False)
         sp = self._vad.is_speech(chunk)
+        # 立刻抄下来：本块后面可能 `reset()` 重建 VAD，那会把 `_vad.last_ratio` 清零
+        self._last_ratio = self._vad.last_ratio
         now = time.monotonic()
 
         if not self.has_speech:

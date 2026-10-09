@@ -22,7 +22,17 @@
     log.draft_zh(zh)                                # 一段草稿译文增量
     log.final(en, zh, raw)                          # 一句定稿
     log.event("tap_probe", ok=True)                 # 任何别的观测
-    log.close(echo_retries=3)                       # 冲刷 + 写一行 summary
+    log.block(peak, gain, vad, n)                   # 每个音频块一次（不进 JSONL，见下）
+    log.close(echo_retries=3)                       # 冲刷 + 写一行 summary（+ `.blocks.npz`）
+
+## 逐块记录（`block()`，2026-10-09 加）
+
+每 0.1 s 一块：**原始峰值 / 实际施加的增益 / 生产当场 VAD 的语音窗占比 / 样本数**。
+它**不走队列、不进 JSONL**（一节课 ~2.6 万块，JSONL 会翻倍）—— 只往四个 `array`
+里追加（亚微秒），`close()` 时一次写成 `<会话名>.blocks.npz`（~300 KB/节）。
+为什么要：录音是归一化**之后**的信号，卡顶块丢了原始幅度，课后反推不出原始电平
+（2026-10-09 实测反推器自检不过）。有了逐块增益，`原始 = 录音 / gain` 是精确的，
+再配上**生产当场的** VAD 判定，就能回答"被增益上限卡住的块是讲话还是停顿"。
 
 ⚠️⚠️ **硬前提：绝不能影响上课**（与 `testmode.py` 同一条设计前提，那条比拿到数据重要）。
    所以：每个公开方法内部 `try/except`，队列**有界**（满了丢弃并计数），
@@ -37,6 +47,7 @@
 """
 from __future__ import annotations
 
+import array
 import json
 import os
 import pathlib
@@ -51,18 +62,25 @@ QUEUE_MAX = 8192
 _SENTINEL = object()
 
 
-def _enabled_from_env() -> bool:
-    return os.environ.get("CLASSLIVE_LIVE_LOG", "").strip().lower() in ("1", "true", "yes", "on")
+def _enabled_from_env(default: bool = False) -> bool:
+    """`CLASSLIVE_LIVE_LOG` 设了就听它的（`0` 也算"设了" → 关）；没设 → `default`。"""
+    v = os.environ.get("CLASSLIVE_LIVE_LOG", "").strip().lower()
+    if not v:
+        return default
+    return v in ("1", "true", "yes", "on")
 
 
-def open_for(session_path, *, enabled: bool | None = None):
+def open_for(session_path, *, enabled: bool | None = None, default: bool = False):
     """会话文件路径 → LiveLog（关着的时候返回 `None`）。
+
+    `default` = 环境变量**没设**时开不开。`main` 在**测试模式**下传 `True`
+    （App 里点「测试模式」就自动采；显式 `CLASSLIVE_LIVE_LOG=0` 仍能关掉）。
 
     ⚠️ `session_path` 为 `None`（没有 vault/没建会话文件）时返回 `None`：
        没有落点就没有采集，**不要**退回一个别的目录 —— 那会造出第二个数据落点。
     """
     if enabled is None:
-        enabled = _enabled_from_env()
+        enabled = _enabled_from_env(default)
     if not enabled or session_path is None:
         return None
     try:
@@ -93,6 +111,9 @@ class LiveLog:
         self._utt = 0                                      # 当前句子号（`final` 时 +1）
         self._n_draft = 0
         self._err = ""
+        # 逐块记录（见文件头「逐块记录」）：只在内存里追加，`close()` 时落成 npz
+        self._blk = {"peak": array.array("f"), "gain": array.array("f"),
+                     "vad": array.array("f"), "n": array.array("I")}
         try:
             self._f = open(self.path, "a", encoding="utf-8")
         except Exception as e:                             # noqa: BLE001
@@ -129,8 +150,27 @@ class LiveLog:
         self._put("event", event="segment_end", seg=seg)
 
     # ---- 公开接口（全部吞异常；主循环调用，绝不抛）----
+    def block(self, peak: float, gain: float, vad: float, n: int) -> None:
+        """一个音频块：原始峰值 / 实际增益 / 当场 VAD 语音窗占比 / 样本数。主循环每 0.1 s 调一次。"""
+        if self.closed:
+            return
+        try:
+            # ⚠️ **先全部转换、再一起追加**：边转边追加的话，第二个参数类型不对时
+            #    `peak` 已经进去了、`gain` 没进 → 四列从此**错位**，而且没人知道。
+            row = (float(peak), float(gain), float(vad), int(n))
+            if row[3] < 0:
+                return
+            b = self._blk
+            b["peak"].append(row[0])
+            b["gain"].append(row[1])
+            b["vad"].append(row[2])
+            b["n"].append(row[3])
+        except Exception:                                  # noqa: BLE001
+            pass
+
     def draft(self, raw: str, shown: str | None = None, *, seg: int = 0,
-              buf_s: float = 0.0, compute_s: float = 0.0) -> None:
+              buf_s: float = 0.0, compute_s: float = 0.0,
+              lag_s: float | None = None) -> None:
         """一次草稿上屏。`raw` = 送进 ASR 的原始假设，`shown` = 实际显示的文本。
 
         ⚠️ `shown` 不给就等于 `raw`（没开冻结时的常态）。
@@ -141,12 +181,18 @@ class LiveLog:
            **多句定稿**，所以"草稿 : 定稿"**不是 1:1**。实测（2026-10-09 真跑 TTS 语料）：
            按定稿分组时 32 句里 14 句只分到 0–1 份草稿，草稿→定稿跳成 93%
            （离线回放同一份音频是 10.7%）—— 那是**分组错了**，不是模型有问题。
+
+        ⭐ `lag_s` = 这份草稿的音频缓冲**被交出来**（`Segmenter.on_partial`）到它**上屏**
+           之间的墙钟秒数 —— 含排队、等 ASR 锁、转写、等主循环 drain。它比 `compute_s`
+           （只是转写那一下）更接近"用户等了多久"。实时音源下
+           **首字延迟 ≈ 该段第一份草稿的 `buf_s + lag_s`**（`class_report` 那么算）。
         """
         try:
             self._n_draft += 1
+            extra = {} if lag_s is None else {"lag_s": round(lag_s, 3)}
             self._put("draft", utt=self._utt, seg=seg, n=self._n_draft,
                       text=shown if shown is not None else raw,
-                      raw=raw, buf_s=round(buf_s, 3), compute_s=round(compute_s, 3))
+                      raw=raw, buf_s=round(buf_s, 3), compute_s=round(compute_s, 3), **extra)
         except Exception:                                  # noqa: BLE001
             pass
 
@@ -178,6 +224,9 @@ class LiveLog:
         if self._stopping:
             return
         self._stopping = True                              # ⚠️ 先于 closed：`_put` 见 closed 就不写了
+        blocks_path = self._save_blocks()
+        if blocks_path:
+            summary = {**summary, "blocks": len(self._blk["peak"]), "blocks_file": blocks_path.name}
         try:
             # ⚠️ **无条件写这一行**（2026-10-09 被自己的判据抓到）：原来只在
             #    `summary` 非空时才写 → `close()` 不带参数时**一行收尾都没有**，
@@ -200,6 +249,30 @@ class LiveLog:
         th = getattr(self, "_th", None)
         if th is not None:
             th.join(2.0)
+
+    def _save_blocks(self):
+        """把逐块记录写成 `<会话名>.blocks.npz`。没记过块 / 写失败 → `None`（**不抛**）。
+
+        ⚠️ 同步写：只在收尾跑一次，~300 KB，几十毫秒。
+        ⚠️ 不覆盖已有文件 —— `sessions/` 只追加（同名已在就放弃，宁可少一份）。
+        """
+        if not self._blk["peak"]:
+            return None
+        try:
+            import numpy as np
+            name = self.path.name
+            base = name[:-len(".live.jsonl")] if name.endswith(".live.jsonl") else self.path.stem
+            p = self.path.with_name(base + ".blocks.npz")
+            if p.exists():
+                self._err = (self._err + f"; {p.name} 已存在，没写").lstrip("; ")
+                return None
+            with open(p, "xb") as f:
+                np.savez_compressed(f, **{k: np.frombuffer(v, dtype=v.typecode)
+                                          for k, v in self._blk.items()})
+            return p
+        except Exception as e:                             # noqa: BLE001
+            self._err = (self._err + f"; 逐块记录没写成: {e!r}").lstrip("; ")
+            return None
 
     # ---- 写盘线程 ----
     def _run(self) -> None:

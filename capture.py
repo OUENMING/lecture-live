@@ -123,6 +123,12 @@ class PeakNormalizer:
             "gain_db_max": -999.0,
             "gain_db_sum": 0.0,
         }
+        # ⭐ 最近一块的**原始峰值**与**实际施加的增益**（只读，给现场采集逐块记）。
+        #    为什么要它（2026-10-09 实测）：录音是归一化**之后**的信号，卡顶块把原始
+        #    幅度压没了 → 课后反推原始电平做不到（反推器合成信号自测就差 13%，真课
+        #    `capped` 反推 22216 vs 当场 4070）。逐块记下 g，课后 `原始 = 录音 / g` 就是精确的。
+        self.last_peak = 0.0
+        self.last_gain = 1.0
 
     def process(self, chunk: np.ndarray) -> np.ndarray:
         p = float(np.max(np.abs(chunk))) if chunk.size else 0.0
@@ -131,6 +137,7 @@ class PeakNormalizer:
         self.gain += (want - self.gain) * self.smooth
         g = min(self.gain, self.ceiling / p) if p > 1e-9 else self.gain
         # ---- ⭐ 以下是**纯计数**，一行都不影响上面的输出 ----
+        self.last_peak, self.last_gain = p, g
         st = self.stats
         st["blocks"] += 1
         # ⚠️⚠️ **不能写成 `want > self.max_gain`** —— `want` 就是 `min(…, max_gain)`，
@@ -181,6 +188,10 @@ class _NormalizedSource:
            每块都拷贝一次的话，那是每次 0.1 秒来一回的分配。
         """
         return self._norm.stats
+
+    def last_block(self) -> tuple:
+        """刚 `poll()` 出来那一块的 `(原始峰值, 实际增益)`（只读，见 `PeakNormalizer.last_peak`）。"""
+        return self._norm.last_peak, self._norm.last_gain
 
     def switch_device(self, device_idx: int, device_name: str = "") -> bool:
         """透传到内层。文件源没有这个方法 → `False`（那不是错误，是"没得换"）。"""

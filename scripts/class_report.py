@@ -172,6 +172,40 @@ def sweep(utts, ref_text, ks, want_disagreement: bool = False) -> dict:
     return out
 
 
+# ---------------------------------------------------------------- 生产延迟（只有现场那份有）
+def live_latency(events) -> dict | None:
+    """现场 `.live.jsonl` 的**墙钟**延迟。离线回放那份没有这两种字段 → `None`。
+
+    - `final_delay_s`：一段音频**结束**（`segment_end` 事件，挂在 `Segmenter.on_utterance_end`）
+      到这一段**第一句定稿上屏**（`final` 事件）的秒数 = Whisper + 翻译 + 排队。
+      ⭐ 2026-10-09 之前的文件也有（`segment_end` 一直在记）。
+    - `draft_lag_s`：草稿缓冲交出 → 上屏（`lag_s`，2026-10-09 晚加的字段）。
+    - `first_visible_s`：每段**第一份**草稿的 `buf_s + lag_s`
+      ⚠️ 只在**实时音源**（麦克风/系统声）下成立：`buf_s` 是音频秒，要它等于墙钟秒，
+         音频就得按实时速度进来（`--source file --speed 2` 时会被低估一半）。
+         另含 300 ms pre-roll（`vad.PRE_ROLL_CHUNKS`）→ 偏大至多 0.3 s。
+    """
+    seg_end = {e.get("seg"): e["t"] for e in events
+               if e.get("kind") == "event" and e.get("event") == "segment_end"}
+    first_final: dict = {}
+    first_draft: dict = {}
+    lags = []
+    for e in events:
+        k = e.get("kind")
+        if k == "final" and e.get("seg") in seg_end and e.get("seg") not in first_final:
+            first_final[e["seg"]] = e["t"]
+        elif k == "draft" and e.get("lag_s") is not None:
+            lags.append(float(e["lag_s"]))
+            first_draft.setdefault(e.get("seg"), float(e.get("buf_s") or 0.0) + float(e["lag_s"]))
+    if not seg_end and not lags:
+        return None
+    return {
+        "final_delay_s": M.summarize_latency([first_final[s] - seg_end[s] for s in first_final]),
+        "draft_lag_s": M.summarize_latency(lags),
+        "first_visible_s": M.summarize_latency(list(first_draft.values())),
+    }
+
+
 # ---------------------------------------------------------------- 多节课汇总
 def pool_sweeps(res_list) -> dict:
     """把几份报告**按计数相加**再算比率 —— **不是**对比率取平均。
@@ -301,6 +335,15 @@ def render(res: dict) -> str:
         lines.append("")
         lines.append(f"WER(对参考稿): {w['wer']*100:.1f}%  "
                      f"(替 {w['sub']} / 漏 {w['del']} / 插 {w['ins']}，参考 {w['ref_len']} 词)")
+    lat = res.get("live_latency")
+    if lat:
+        lines.append("")
+        lines.append("生产延迟（墙钟秒，p50 / p95 / 样本数）：")
+        for key, label in (("first_visible_s", "首字（实时音源才准）"),
+                           ("draft_lag_s", "草稿 交出→上屏"),
+                           ("final_delay_s", "段结束→定稿上屏")):
+            v = lat[key]
+            lines.append(f"  {label:<14}{_fmt(v['p50'])} / {_fmt(v['p95'])}   n={v['n']}")
     hc = res.get("hallucination_candidates") or []
     lines.append("")
     lines.append(f"腰斩臆造候选: {len(hc)} 条（**要人耳听**，机械判据会误报）")
@@ -347,6 +390,9 @@ def build_report(path, *, ref=None, ks=DEFAULT_KS, want_disagreement=False) -> d
     summ = [e for e in events if e.get("kind") == "summary"]
     if summ:
         res["summary"] = summ[-1]
+    lat = live_latency(events)
+    if lat is not None:
+        res["live_latency"] = lat
     return res
 
 

@@ -533,12 +533,18 @@ class _Latest:
 
     def __init__(self):
         self._buf = None
+        self._t = 0.0
+        #: 上一次 `take()` 拿到的那份是**何时 `put` 进来的**（`time.monotonic()`）。
+        #: ⚠️ 只给**唯一的消费者**（`partial_worker`）在 `take()` 之后紧接着读 ——
+        #:    它和 `take()` 在同一把锁里一起换，所以不会读到下一份的时刻。
+        self.taken_t = 0.0
         self._ev = threading.Event()
         self._lock = threading.Lock()
 
     def put(self, buf) -> None:
         with self._lock:
             self._buf = buf
+            self._t = time.monotonic()
         self._ev.set()
 
     def take(self, timeout: float):
@@ -546,6 +552,7 @@ class _Latest:
             return None
         with self._lock:
             b, self._buf = self._buf, None
+            self.taken_t = self._t
             self._ev.clear()
             return b
 
@@ -1286,9 +1293,11 @@ def run(args) -> None:
                  "（`<会话名>.probe/*.npy`，只写本机、不上传）。")
 
     # ⭐ 现场采集（`livemetrics.py`）：把 drain() 那个缝上发生的事记成 JSONL。
-    #    **默认关**（`CLASSLIVE_LIVE_LOG=1` 才开）—— 生产路径一个字不改。
+    #    **普通上课默认关**（`CLASSLIVE_LIVE_LOG=1` 才开）；**测试模式默认开**
+    #    （App 里点「测试模式」= `--test-mode`，那就是要数据；`CLASSLIVE_LIVE_LOG=0` 仍可关）。
     #    ⚠️ 它自己吞所有异常、队列有界、写盘在后台线程（见该文件头）。
-    live = livemetrics.open_for(getattr(writer, "session_path", None))
+    live = livemetrics.open_for(getattr(writer, "session_path", None),
+                                default=bool(args.test_mode))
     if live is not None:
         echo(f"🎥 现场采集: {live.path}")
 
@@ -1431,6 +1440,7 @@ def run(args) -> None:
             buf = latest.take(0.5)
             if buf is None or len(buf) == 0:
                 continue
+            _t_put = latest.taken_t                  # 这份缓冲被交出来的时刻（量 `lag_s` 用）
             # 定稿是关键路径(决定你多久看到中文), 且它要抢同一把 ASR 锁。
             # 有定稿在排队时让草稿这一轮退开: 草稿迟到 1s 无感, 定稿迟到直接
             # 拖慢首字。定稿线程本来就把草稿译文排在定稿之后(见 final_worker)。
@@ -1452,8 +1462,9 @@ def run(args) -> None:
                 #    `<会话>.live.jsonl` 靠 `buf_s` 判"这份草稿的缓冲窗口滑了没有"
                 #    （滑了的那批**不许**进回改统计，否则长句会把回改率虚高一大截，
                 #     离线量具就是栽在这上面，见 scripts/stream_eval.py 的 `sliding`）；
-                #    `seg` = 本段草稿所属的段号（`seg_gen`，见上面那一段说明）。
-                drafts.put((t, _shown, len(buf) / SR, _dt_draft, seg_gen["n"]))
+                #    `seg` = 本段草稿所属的段号（`seg_gen`，见上面那一段说明）；
+                #    `_t_put` = 缓冲交出的时刻 → `drain()` 用它算上屏延迟 `lag_s`。
+                drafts.put((t, _shown, len(buf) / SR, _dt_draft, seg_gen["n"], _t_put))
                 # 新句子开始 -> 重置草稿节流。**必须重置**: last_len 是**上一句**
                 # 收尾时的词数, 新句若更短(如 20 词 vs 30 词), "新增 ≥6 词"永远
                 # 不成立 -> 整句拿不到即时中文("首字中文 ~3s"特性静默失效)。
@@ -1862,28 +1873,29 @@ def run(args) -> None:
                      name="live-summary").start()
 
     def _pair(item) -> tuple:
-        """`drafts` 队列的元素 → `(raw, shown, buf_s, compute_s, seg)`。
+        """`drafts` 队列的元素 → `(raw, shown, buf_s, compute_s, seg, t_put)`。
 
-        ⚠️ 产出方只有 `partial_worker` 一处（永远 5 元组），所以**按形状直接拆** ——
+        ⚠️ 产出方只有 `partial_worker` 一处（永远 6 元组），所以**按形状直接拆** ——
            不再逐层猜"是不是裸字符串/二元组"（那种兼容梯子没有调用方，还会把
            `buf_s` 静默猜成 0.0，而 `buf_s` 猜错 = 静默改掉回改率的口径）。
         ⚠️ 但**必须全函数不抛**：它在 `drain()` 里，而 `drain()` 没有 try/except ——
            这里抛一次 = 打死主循环 = 整节课的字幕停摆。形状不对就当空草稿丢掉。
         """
         try:
-            return (item[0], item[1], float(item[2]), float(item[3]), int(item[4]))
+            return (item[0], item[1], float(item[2]), float(item[3]), int(item[4]), float(item[5]))
         except Exception:                                  # noqa: BLE001
-            return ("", "", 0.0, 0.0, 0)
+            return ("", "", 0.0, 0.0, 0, 0.0)
 
     def drain():
         while True:
             try:
-                _raw, _shown, _buf_s, _cpt, _seg = _pair(drafts.get_nowait())
+                _raw, _shown, _buf_s, _cpt, _seg, _t_put = _pair(drafts.get_nowait())
             except queue.Empty:
                 break
             if live is not None:
-                # 吞异常，不会打死主循环
-                live.draft(_raw, _shown, seg=_seg, buf_s=_buf_s, compute_s=_cpt)
+                # 吞异常，不会打死主循环。`lag_s` 在**这里**算：drain 就是上屏那一刻
+                live.draft(_raw, _shown, seg=_seg, buf_s=_buf_s, compute_s=_cpt,
+                           lag_s=(time.monotonic() - _t_put) if _t_put else None)
             ui.add_draft(_shown)
         while True:
             try:
@@ -1964,12 +1976,17 @@ def run(args) -> None:
 
     try:
         _dev = {"wall": time.time(), "next": 0.0}
+        # 逐块记录（现场采集开着才有）：原始峰值 / 实际增益 / 当场 VAD。见 livemetrics「逐块记录」
+        _last_block = getattr(src, "last_block", None) if live is not None else None
         while running.is_set() and not stopping.is_set():
             chunk = src.poll()
             if chunk is not None and len(chunk):
                 seg.accept(chunk)
                 if tester is not None:
                     tester.note_chunk(chunk)
+                if _last_block is not None:
+                    _p, _g = _last_block()
+                    live.block(_p, _g, seg.last_ratio, len(chunk))
             drain()
             if src.is_done():
                 break

@@ -136,13 +136,18 @@ ClassLive.app/Contents/MacOS/python scripts/class_report.py sessions/<会话>.li
 `split_sentences` 切成**多句**定稿，所以「草稿 : 定稿」在生产里**不是 1:1**。
 2026-10-09 第一次真跑就栽在这上面：按定稿分组时 32 句里 14 句只分到 0–1 份草稿，
 `草稿→定稿` 从 10.7% 跳到 **93.3%** —— 那是**分组错了**，不是模型退化了。
-现场那份由 `main._emit` 在自增 `final_gen["n"]` **之前**取本段世代号、随 `drafts`
-队列带到 `drain()`（`tests/test_class_report.py::test_segment_grouping_when_seg_is_present` 钉着）。
+**段号从哪来**：`livemetrics.LiveLog.segment_end()` 挂在 `Segmenter` 的
+`on_utterance_end` 回调上（**段落真正结束那一刻**），段号随 `finalq` 一路带到定稿、
+随 `drafts` 队列带到 `drain()`。
+⚠️ **不能**用 `main.final_gen["n"]`：它要到**定稿上屏**时才自增，比段落真正结束晚
+2–4 秒（Whisper + LLM）→ 新段前几份草稿带着上一段的号，`草稿→定稿` 虚高到 **65%**（也实测踩过）。
+判据：`tests/test_class_report.py::test_segment_grouping_when_seg_is_present` +
+`tests/test_livemetrics.py::Segments`（4 条）。
 
 ⭐⭐ **同场 A/B 的关键**：`draft` 事件同时记 `raw`（模型原始假设）与 `text`（上屏的
 那份）。所以**冻结开不开都能事后算** —— 一次真课拿到两条曲线，不用跑两节课。
 
-⚠️ 判据：`tests/test_livemetrics.py`（15 条）· `tests/test_class_report.py`（16 条）。
+⚠️ 判据：`tests/test_livemetrics.py`（19 条）· `tests/test_class_report.py`（20 条）。
 其中一条钉住的是**「离线套冻结 == 回放那条路」**：拿 2026-10-08 那三份记录逐位复核过
 （baseline 10.4% / K=1 8.9% / K=2 8.9%，与 `~/.classlive/eval/out/daniel_*.json` 一致）。
 
@@ -173,6 +178,24 @@ ClassLive.app/Contents/MacOS/python scripts/class_report.py /tmp/slice1.jsonl   
 
 ⚠️ 一份 `--jsonl` 就够跑整条 K 曲线（`raw` 字段在，不必对每个 K 重跑 ASR）。
 ⚠️ 回放不排队 → **延迟是下限**，别拿去和现场那份比延迟；文本类指标（回改率）可比。
+
+**2026-10-09 实跑过一遍**（5 片 × 4 分钟，ECON10740 ×2 / SOC10020 ×2 / ECON10770 ×1；
+`scripts/class_report.py <每片 jsonl> --json` 汇总，**按计数相加**）：
+
+| 设置 | 回改率 | beyond-k |
+|---|---|---|
+| 基线(raw) | **40.9%** | 29.2% |
+| hold-back K=1 | **35.4%** | 24.3% |
+| hold-back K=2 | 36.0% | 24.7% |
+| hold-back K=3 | 37.1% | 25.7% |
+
+样本 **98 句 / 846 份草稿 / 6195 个已显示词**（原来那一栏是 17 句 / 149 份 —— 大了 5.8 倍）。
+读法：① 真课的草稿回改率就是 **40% 上下**，比 TTS（10–14%）高 3–4 倍，**这才是主问题**；
+② 前缀冻结在真课上砍掉约 **13% 相对**（40.9% → 35.4%），比 3 分钟那次的 21% 小 ——
+**样本大了之后效应变小了**，所以早先那个 −21% 是乐观的；③ 曲线**不单调**，K 越大反而略差
+（K=1 35.4% < K=2 36.0% < K=3 37.1%）→ 选 K 只能实测，不能外推。
+⚠️ 这是**回放**的数字（喂的是归一化后的 16-bit wav），不是现场真值；现场真值得等
+`<会话>.live.jsonl`。两者口径可比，但别混着写进同一句话。
 
 ## 9.4 ⭐ 交叉验证：现场采集的数字与离线回放对得上（2026-10-09 实测）
 

@@ -33,6 +33,7 @@
 |---|---|---|
 | `PLAN-live-summary.md` | AI 实时总结（原子 / 章节 / 纲要） | 改 `live_summary.py` / `chapter.py` 前 |
 | `PLAN-test-mode.md` | 测试模式（采集 → 打包 → 上传） | 改 `testmode.py` / `upload.py` 前 |
+| `PLAN-streaming-asr.md` | 草稿层换真流式 ASR（Nemotron）· 失败回退 · 验收 | 改草稿 / `asr.py` / 加 ASR 模型前 |
 | `PLAN-entry-panel.md` | P3 第二批 · 课程卡片面板 | 改 `entry_panel.py` 前 |
 | `PLAN-p3-prep.md` | P3 第一批 · 课件 → 候选术语 | 改 `prep.py` / `extract.py` 前 |
 | `PLAN-update-mechanism.md` | 分级更新 / 引导式更新 | 改 `update.py` / `whatsnew.py` 前 |

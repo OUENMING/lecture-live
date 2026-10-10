@@ -453,6 +453,14 @@ def main() -> int:
               f"ops={_ops3} events={[e['kind'] for e in _t3.events]}")
         check("⭐⭐ **wav 必须还在** —— 宁可占地方，不许丢音频",
               all(p.exists() for p in _w3), str([p.name for p in _w3 if not p.exists()]))
+        # ⭐⭐ 留下的 wav 还得**进上传清单** —— 只留在本机，作者照样收不到音频
+        #    （没装 ffmpeg 的用户正是这样：只传上去报告和转录）。
+        #    ⚠️ 变异验证：删掉 `finish` 里补 wav 的那两行 -> 这条红。
+        _t3.finish(bundle=False)
+        _up3 = _t3.upload_files()
+        check("⭐⭐ 转码失败时，**留下的 wav 进上传清单**",
+              all(p in _up3 for p in _w3) and bool(_w3),
+              f"上传清单={[p.name for p in _up3]}")
     finally:
         tm.subprocess.run = _old_ff
         shutil.rmtree(_d3, ignore_errors=True)

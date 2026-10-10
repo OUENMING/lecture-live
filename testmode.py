@@ -562,7 +562,11 @@ class TestSession:
         # ⭐ 收尾转码：wav 分段 -> Opus，转成了就删 wav（见 `_to_opus`）。
         #    ⚠️ 排在**最前面**（报告落盘之前），这样报告里那个 `audio_saved`
         #       和 `audio_files` 说的是**最终状态**。
+        #    ⚠️ 转码失败留下的 wav **也要列进去**（Worker 收 `audio.NNN.wav`）——
+        #       不然没装 ffmpeg 的机器上只传得上报告和转录，音频**静默丢**。
         self.audio_files = self._to_opus() if self.record_audio else []
+        if self.record_audio:
+            self.audio_files += [w for w in self._wav_paths if w.exists()]
         # ⭐ 收尾走到了 —— 撤掉崩溃标记（`recover_pending` 靠它认「这一节没收尾」）。
         _mk = getattr(self, "_pending_marker", None)
         if _mk is not None:

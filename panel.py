@@ -34,6 +34,15 @@ import typing
 
 import objc_own
 
+# ⚠️ 只为让 PyObjC 认得 `CGColorRef`：不导入 Quartz 时，每次 `NSColor….CGColor()`
+#    都打一条 `ObjCPointerWarning`（地址每次不同 → 警告去重拦不住，终端刷屏）。
+#    颜色照样设得上，纯噪音。overlay / entry_panel 都 import 本模块，所以放这里一处。
+#    失败就算了（没有 Quartz 的环境本来也起不了窗口）。
+try:
+    import Quartz  # noqa: F401
+except ImportError:
+    pass
+
 # 白底可读性：材质之上压的半透明黑。可读性其实由文字的紧凑描边承担
 # （见 overlay.py 顶部那段），这一层只负责把白底压到让描边有依托。
 SCRIM_ALPHA = 0.38

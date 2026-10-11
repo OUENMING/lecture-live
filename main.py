@@ -1308,6 +1308,7 @@ def run(args) -> None:
     final = final_asr.load_final(args.final_model_dir, asr, allow_cloud=_cloud_asr_ok,
                                  preload_local=_why_off is not None,  # R4: 云端开着就不加载 Whisper
                                  is_stopping=stopping.is_set,         # 收尾冲刷时云端截止更短
+                                 # `notify` 在下面才定义; 熔断只会在开课后说话, 那时早已定义好
                                  notify=lambda m, w: notify(m, w, src="转写"))
     echo("☁ 定稿: 云端(Groq → 千问 → 本地 Parakeet)" if _why_off is None
          else f"💻 定稿: 本地({_why_off})")
@@ -1455,7 +1456,9 @@ def run(args) -> None:
 
         ⚠️ 菜单栏只有**一个**图标、两路引擎(翻译 / 定稿转写)各自降级恢复:
         一路恢复时另一路还挂着, 图标得留着 ⚠️ —— 所以按来源记账, 把「还剩哪些告警」一起发。"""
-        if warn:
+        if not src:                                      # 一次性提示(休眠唤醒 / 换设备): 不记账
+            pass
+        elif warn:
             _engine_warns[src] = msg
         else:
             _engine_warns.pop(src, None)
@@ -1463,6 +1466,12 @@ def run(args) -> None:
 
     translator = EngineRouter(local_tr, cloud_tr, args.engine, notify=notify)
     translator.warmup()
+
+    def _reset_net() -> None:
+        """休眠唤醒后丢掉两边的 HTTP 连接池(睡前的连接可能半开)。"""
+        final_asr.reset_connections()
+        if cloud_tr is not None:
+            cloud_tr.reset_connections()
 
     def submit_question(q: str) -> None:
         """悬浮窗输入框回车回调 -> 把问题投进问答线程(Phase 2)。
@@ -2197,7 +2206,9 @@ def run(args) -> None:
                 break
             if time.monotonic() >= _dev["next"]:
                 _dev["next"] = time.monotonic() + DEVICE_CHECK_S
-                check_clock_and_device(src, args.source, notify, _dev)
+                check_clock_and_device(src, args.source,
+                                       lambda m, warn=False: notify(m, warn, src=""), _dev,
+                                       on_wake=_reset_net)
             # ⚠️ 判据是 `drives_appkit`（**UI 对象自己说的**），不是 `args.ui`：见收尾
             #    `_spin` 里那段同款说明 —— `_load_overlay` 失败时会**静默回退**
             #    `TerminalUI()`，那时 args 还写着 overlay → 每轮调一个空 pump、
@@ -2586,7 +2597,7 @@ def run(args) -> None:
             _auto_update_on_exit()
 
 
-def check_clock_and_device(src, source_name: str, notify, state: dict) -> None:
+def check_clock_and_device(src, source_name: str, notify, state: dict, on_wake=None) -> None:
     """上课中途的定时保安: ① 系统睡过一觉就打一条 ② 默认输入设备变了就跟着换。
 
     **为什么必须有**：`CallbackSource` 按**设备索引**绑定，而索引会漂 ——
@@ -2608,6 +2619,11 @@ def check_clock_and_device(src, source_name: str, notify, state: dict) -> None:
     now_wall = _t.time()
     if now_wall - state.get("wall", now_wall) > SLEEP_GAP_S:
         notify(f"[系统休眠唤醒 {_t.strftime('%H:%M:%S')}]", warn=True)
+        if on_wake is not None:
+            try:
+                on_wake()
+            except Exception:                             # noqa: BLE001  保安线程不能被它打死
+                pass
     state["wall"] = now_wall
     if source_name.lower() not in ("mic", "blackhole"):
         return

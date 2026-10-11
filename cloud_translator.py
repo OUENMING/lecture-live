@@ -267,6 +267,12 @@ class CloudTranslator:
     def warmup(self) -> None:
         pass                                   # 云端无需预热
 
+    def reset_connections(self) -> None:
+        """换一个新连接池(系统休眠唤醒后调): 睡前的连接可能半开, 醒来第一句会挂到读超时。
+        旧池不关 —— 可能有请求正在用它; 没人引用后由 GC 收。"""
+        import httpx
+        self._client = httpx.Client(timeout=self._timeout)
+
     # ---- 工具 ----
     def _headers(self):
         return {"Authorization": f"Bearer {self._key}",

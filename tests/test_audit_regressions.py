@@ -1665,6 +1665,23 @@ class R16_DeviceSwitchRollback(unittest.TestCase):
         self.assertTrue(any("系统休眠唤醒" in m for m in msgs), msgs)
         self.assertEqual(switched, [], "文件源不该去换设备")
 
+    def test_wake_drops_http_pools_and_a_failing_hook_is_swallowed(self):
+        # 睡前的 TCP 连接可能半开: 醒来要丢掉连接池, 否则第一段 / 第一句挂到超时才回退
+        from main import check_clock_and_device
+        import final_asr
+        woke = []
+        check_clock_and_device(None, "file", lambda m, warn=False: None, {"wall": 0.0},
+                               on_wake=lambda: woke.append(1))
+        self.assertEqual(woke, [1])
+        check_clock_and_device(None, "file", lambda m, warn=False: None, {"wall": 0.0},
+                               on_wake=lambda: 1 / 0)                     # 不许打死保安线程
+        check_clock_and_device(None, "file", lambda m, warn=False: None, {},
+                               on_wake=lambda: woke.append(2))            # 没睡 → 不调
+        self.assertEqual(woke, [1])
+        final_asr._client = object()
+        final_asr.reset_connections()
+        self.assertIsNone(final_asr._client)
+
     def test_check_clock_and_device_switches_when_the_default_input_moves(self):
         import capture
         from unittest import mock

@@ -195,6 +195,14 @@ def _http_post(body: bytes, headers: dict, timeout: float) -> tuple[int, dict | 
     return r.status_code, js if isinstance(js, dict) else None
 
 
+def reset_connections() -> None:
+    """丢掉共享连接池(系统休眠唤醒后调): 睡前的 TCP 连接可能半开, 醒来第一段会挂到截止才回退。
+    正在用旧池的请求不受影响(它手里有引用), 下一次 `_http_post` 新建一个。"""
+    global _client
+    with _client_lock:
+        _client = None
+
+
 # ---------------------------------------------------------------- 结果
 
 @dataclass(frozen=True)

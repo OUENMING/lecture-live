@@ -193,16 +193,16 @@ TRANS_MODE_DESC = {
     "en": "只矫正英文, 不出中文",
     "raw": "完全不调 LLM, ASR 直出",
 }
-# 延迟导入: 颜色是锦上添花, 拿不到也不该让模块导入失败
-def _mode_color(name: str):
-    def get():
-        from AppKit import NSColor
-        return {"both": NSColor.systemGreenColor(),
-                "en": NSColor.systemYellowColor(),
-                "raw": NSColor.secondaryLabelColor()}[name]
-    return get
-
-TRANS_MODE_COLOR = {k: _mode_color(k) for k in TRANS_MODE_TITLE}
+# 模式按钮做成「状态胶囊」：字是中性白，强调放在**底**上（浅白半透明胶囊），三档同一个样子、只换字。
+# 为什么不按档上色（2026-10-11 作者嫌「双语」的绿色不好看）—— HIG 原话：
+#   Toolbars「Reduce the use of … tinted controls」「prefer using the default monochromatic appearance」；
+#   Color「To emphasize primary actions, apply color to the background rather than to symbols or text」
+#        「Avoid redefining the semantic meanings of dynamic system colors」（绿 = 成功 / 黄 = 警告；
+#        黄档还跟底部暖黄的术语行撞色）。
+#   旁边的 ❓ / 讲一下 / 字幕 是**动作**（灰字），它是**状态** —— 胶囊把两类分开，不靠颜色区分档位。
+MODE_CHIP_TEXT_ALPHA = 0.92
+MODE_CHIP_BG_ALPHA = 0.12
+MODE_CHIP_PAD = 16.0         # 胶囊比普通按钮两侧多出的内边距（合计）
 
 # pump() 每轮的让步窗口。**这是滚动跟手度的天花板**:
 # 固定 8ms 让步会让 pump 只有 ~113Hz, 而此时触控板手势正以 120Hz 投递事件 ——
@@ -1073,6 +1073,15 @@ class Overlay:
             "  双语     —— DeepSeek 矫正英文错听 + 出中文\n"
             "  只英·校  —— 只矫正英文, 不出中文\n"
             "  纯转录   —— 完全不调 LLM, ASR 直出(零 API、零延迟、最省电)")
+        try:                                  # 外观只是锦上添花, 拿不到也不影响可用
+            self._btn_trans.setContentTintColor_(
+                NSColor.whiteColor().colorWithAlphaComponent_(MODE_CHIP_TEXT_ALPHA))
+            self._btn_trans.setWantsLayer_(True)
+            self._btn_trans.layer().setCornerRadius_(12.0)          # 按钮高 24 -> 整圆胶囊
+            self._btn_trans.layer().setBackgroundColor_(
+                NSColor.whiteColor().colorWithAlphaComponent_(MODE_CHIP_BG_ALPHA).CGColor())
+        except Exception:                     # noqa: BLE001
+            pass
         # ❓「重点 / 没听懂」: 给**这一刻**打一个时间锚, 落到旁路文件
         # `sessions/<同名>.lost.jsonl`, 课后指回前面那几句。
         # ⭐ 2026-09-29 合并: 原来还有一个 ⭐「标记重点」, 和它其实是**同一个动作**
@@ -1812,7 +1821,8 @@ class Overlay:
         pairs = []
         for b in self._bar:
             b.sizeToFit()
-            pairs.append((b, max(b.frame().size.width + 10.0, 28.0)))
+            extra = MODE_CHIP_PAD if b is self._btn_trans else 0.0
+            pairs.append((b, max(b.frame().size.width + 10.0 + extra, 28.0)))
         need = sum(w + gap for _, w in pairs)
         row = pairs
         if self._width - pad - need < pad:
@@ -2904,13 +2914,8 @@ class Overlay:
         self._clear_answer()
         self._tv.scroll_to_bottom()
     def _sync_trans_button(self):
-        """按钮文字直接写状态(不靠颜色/图标变暗 —— emoji 不吃 tint, 且弱显色看不清)。"""
-        from AppKit import NSColor
+        """按钮文字直接写状态(三档同一个胶囊外观, 不靠颜色区分 —— 见 MODE_CHIP_* 的注释)。"""
         self._btn_trans.setTitle_(TRANS_MODE_TITLE[self._trans_mode])
-        try:                                  # 颜色只是锦上添花, 拿不到也不影响可用
-            self._btn_trans.setContentTintColor_(TRANS_MODE_COLOR[self._trans_mode]())
-        except Exception:                     # noqa: BLE001
-            pass
 
     def _cycle_translate(self):
         """在三种模式间循环: 双语 → 只英文(矫正) → 纯转录 → 双语。

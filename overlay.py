@@ -2177,13 +2177,16 @@ class Overlay:
         self._cur_en += delta
         self._mark_dirty()
 
-    def finalize(self, en: str, zh: str):
+    def finalize(self, en: str, zh: str, *, clear_draft: bool = True):
+        """`clear_draft=False`: 屏上已是**更新一段**的草稿(旧段定稿晚到), 别擦掉它。"""
         if not zh and not en:
             return
         self._history.append((en, zh))
-        self._cur_zh, self._cur_en, self._streaming, self._draft = "", "", False, ""
-        self._draft_zh_val = ""
-        self._draft_base_len = self._draft_zh_base_len = None    # 断点滞回一起清
+        self._cur_zh, self._cur_en, self._streaming = "", "", False
+        if clear_draft:
+            self._draft = ""
+            self._draft_zh_val = ""
+            self._draft_base_len = self._draft_zh_base_len = None    # 断点滞回一起清
         self._mark_dirty(urgent=True)
 
     # ---- 答案接管(Phase 3) ----

@@ -10,7 +10,8 @@
 | 3.8.10 | 代码已提交在本机 `main`（`8d89ae2`、`1cc7f5c` 等，**未推送**）；CHANGELOG 条目已写、**Owen 未最终确认** |
 | 3.8.11（R1） | 代码全部完成、全部测试绿，**已在本机分 8 个提交（`47d67c6`…，未推送）**；CHANGELOG 条目已写（草稿） |
 | 发版决定 | Owen 2026-10-11（更新）：**R3 做完之后再发** —— 3.8.10 / 3.8.11 / 3.8.12 / R2 / R3 合成一版发，发前合并更新日志给 Owen 看 |
-| 下一件 | G（❓ 一句话点拨，3.8.12）→ R2（定稿上云）→ R3（草稿换 Nemotron 流式） |
+| 下一件 | G ✅ → R2 ✅（Worker 已部署）→ **R3 P1 ✅（2026-10-11 晚；本机 `main` 已快进到 `2fb8c42`，未推送）** → R3 真课闸门（`PLAN-streaming-asr.md` §6.4，Owen 已装模型）→ 后续优化 → 一人一码 |
+| 分支 `stream-asr` | 比本机 `main` 多 `7058c56`（收音静音看门狗，菜单栏文案待 Owen 看过再并） |
 
 查当前真实状态：`git status --porcelain`、`git log --oneline -15`、`git rev-list --count origin/main..HEAD`。
 
@@ -85,4 +86,8 @@ D1 用户零操作（key 全放 Owen 的 Worker）· D2 定稿链 Groq → 千�
 1. 发版：攒着一起发（Owen 定）。发之前按 CLAUDE.md 发版流程走，更新日志要再给 Owen 看一次（3.8.10 + 3.8.11 + 之后的版本合并成一张卡）。
 2. G（❓ 轻点拨）：按 `PLAN-r1-translation-gap.md` §G 执行（含审查补的三条护栏）。UI 改动要**先拍图给 Owen 看**。
 3. R2（定稿上云）：按 `PLAN-cloud-final-asr.md` §3。新 Worker 建议域名 `asr.bldcam.page`（未确认）。动手前先核 Groq / 千问的数据留存条款，并把 README 的隐私承诺改掉。
-4. R3：草稿换 Nemotron，按 `PLAN-streaming-asr.md`；做完再量「句子级提前定稿」和「投机复用」。
+4. R3：P1 已落地（见 `PLAN-streaming-asr.md` §0.1）。「句子级提前送翻」已离线量过（OCW 322 段，Nemotron 草稿）：
+   关上的句子（句末标点后还有词）与 Nemotron 自己的段定稿**逐词 100% 一致**，覆盖约 40% 的定稿词，比段结束早 p50 4.0 s；
+   与云端（Groq）定稿词级差约 18%，基本是两个模型的措辞差（Parakeet 草稿同口径 17–20%）。
+   → 值得做成草稿译文的「按句送翻」（LecSync 的显示单位）；先拿真课 `.live.jsonl` 在 `draft_gap_replay.py` 上比空窗再动 UI。
+   脚本在会话 scratchpad `early/sim.py`（未入库）。

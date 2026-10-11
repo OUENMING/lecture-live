@@ -3,7 +3,7 @@
 
     ClassLive.app/Contents/MacOS/python tests/test_silence_watch.py
 
-纯状态机、不碰音频设备、不写文件。
+纯状态机、不碰音频设备、不写文件。下半是 `main._SILENCE_WATCH`（按音源等多久、报什么）。
 """
 from __future__ import annotations
 
@@ -46,6 +46,24 @@ class Watch(unittest.TestCase):
     def test_can_alert_again_after_recovery(self):
         w = SilenceWatch(hold_s=5)
         self.assertEqual(feed(w, QUIET, 6) + feed(w, LOUD, 1) + feed(w, QUIET, 6), ["silent", "back", "silent"])
+
+
+class PerSource(unittest.TestCase):
+    """`cl online` 传的是 `--source blackhole`：曾经只认 `"system"`，网课暂停 15 秒就报「麦克风被静音」。"""
+
+    def setUp(self):
+        import main
+        self.cfg = main._SILENCE_WATCH
+
+    def test_online_class_pause_is_not_a_mic_alarm(self):
+        hold, msg = self.cfg["blackhole"]
+        self.assertEqual(feed(SilenceWatch(hold), QUIET, 30), [])     # 暂停半分钟：不吵
+        self.assertNotIn("麦克风", msg)
+
+    def test_every_live_source_is_watched(self):
+        live = {"mic", "blackhole", "system"}
+        self.assertEqual(set(self.cfg), live)                          # file 不看
+        self.assertIn("麦克风", self.cfg["mic"][1])
 
 
 if __name__ == "__main__":

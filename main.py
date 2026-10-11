@@ -2256,8 +2256,9 @@ def run(args) -> None:
         _last_block = getattr(src, "last_block", None)
         # 收音持续数字静音 → 菜单栏 ⚠️（麦克风被静音 / 设备不对时字幕只是一直空着，没有别的症状）。
         # 文件回放不看；系统声在网课暂停时本来就静音，等得久一些。
-        _silence = (SilenceWatch(60.0 if args.source == "system" else 15.0)
-                    if args.source != "file" and callable(_last_block) else None)
+        _silence_cfg = _SILENCE_WATCH.get(args.source)
+        _silence = (SilenceWatch(_silence_cfg[0])
+                    if _silence_cfg is not None and callable(_last_block) else None)
         while running.is_set() and not stopping.is_set():
             chunk = src.poll()
             if chunk is not None and len(chunk):
@@ -2270,7 +2271,7 @@ def run(args) -> None:
                         live.block(_p, _g, seg.last_ratio, len(chunk))
                     _sv = _silence.feed(_p, len(chunk)) if _silence is not None else None
                     if _sv == "silent":
-                        notify(_SILENT_MSG.get(args.source, _SILENT_MSG["mic"]), True, src="收音")
+                        notify(_silence_cfg[1], True, src="收音")
                     elif _sv == "back":
                         notify("收音恢复了", False, src="收音")
             drain()
@@ -2671,10 +2672,14 @@ def run(args) -> None:
             _auto_update_on_exit()
 
 
-#: `SilenceWatch` 报警的文案（按音源）。⚠️ 只说现象 + 最可能的两个原因，不替用户动系统设置。
-_SILENT_MSG = {
-    "mic": "15 秒收不到任何声音：麦克风被静音了，或者输入设备不对？",
-    "system": "系统声 60 秒没有任何声音：网课暂停了？没暂停就检查声音输出有没有接到 ClassLive",
+#: `SilenceWatch` 按音源的（等多久, 报什么）。⚠️ 只说现象 + 最可能的两个原因，不替用户动系统设置。
+#: 系统声那两路（`cl online` 走的是 `blackhole`，`system` 是还没上真机的 Process Tap）
+#: 在网课暂停时**本来就是**数字静音，所以等得久、文案也不提麦克风。不在表里的音源（文件回放）不看。
+_SYSTEM_SILENT = (60.0, "系统声 60 秒没有任何声音：网课暂停了？没暂停就检查声音输出有没有接到 ClassLive")
+_SILENCE_WATCH = {
+    "mic": (15.0, "15 秒收不到任何声音：麦克风被静音了，或者输入设备不对？"),
+    "blackhole": _SYSTEM_SILENT,
+    "system": _SYSTEM_SILENT,
 }
 
 

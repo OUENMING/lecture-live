@@ -1,7 +1,8 @@
 // ClassLive 定稿 ASR 代理：POST /v1/transcribe（audio/ogg Opus）-> {text, provider, model, ms, tried}
 //
 // 链：Groq（whisper-large-v3，2.5 s）优先；1.2 s 还没回就对冲启动千问；千问免费额度
-// 三个模型轮换（每个 3.5 s）；整条链总预算 5 s，客户端 6 s 截止前一定有回包。
+// 三个模型轮换（每个 3.5 s）；两路都没拿到结果且预算还有剩 -> Groq turbo（独立额度桶，最后一道）。
+// 整条链总预算 5 s，客户端 6 s 截止前一定有回包。
 // 日志只记供应商 / 模型 / 状态码 / 毫秒 —— **不记文本、不记音频**。
 // 设计与出处：docs/PLAN-r2-cloud-final-asr.md §W、docs/RESEARCH-cloud-asr.md。
 
@@ -59,6 +60,9 @@ function toBase64(buf) {
   return btoa(s);
 }
 
+import { TURBO } from "./quota-core.js";
+const V3 = "whisper-large-v3";
+
 // ---- Quota DO ----
 async function quota(env, path, payload) {
   const stub = env.QUOTA.get(env.QUOTA.idFromName(DO_NAME));
@@ -74,13 +78,21 @@ async function getPlan(env, seconds) {
   console.log(JSON.stringify({ quota: "unavailable" }));
   return { groq: true, qwen: CHAIN };
 }
+async function takeTurbo(env, seconds) {
+  try {
+    const res = await quota(env, "/plan", { chain: CHAIN, seconds, model: TURBO });
+    if (res.ok) return (await res.json()).groq === true;
+  } catch { /* 落到下面 */ }
+  return true;   // DO 不可用：同 getPlan，开放（Groq 自己 429 会兜住）
+}
 
 // ---- Groq ----
 // run = {env, audio, sig, deadline, tried, report}：一次请求内各供应商共用的上下文。
-async function tryGroq({ env, audio, sig, deadline, tried, report }) {
+async function tryGroq({ env, audio, sig, deadline, tried, report }, model = V3) {
+  const tag = model === V3 ? "groq" : "turbo";
   const form = new FormData();
   form.append("file", new Blob([audio], { type: "audio/ogg" }), "audio.ogg");
-  form.append("model", "whisper-large-v3");
+  form.append("model", model);
   form.append("language", "en");
   form.append("response_format", "verbose_json");
   form.append("temperature", "0");
@@ -89,22 +101,23 @@ async function tryGroq({ env, audio, sig, deadline, tried, report }) {
   try {
     r = await timedFetch(GROQ_URL, { method: "POST", headers: { authorization: `Bearer ${env.GROQ_KEY}` }, body: form }, T.groq, sig, deadline);
   } catch {
-    tried.push("groq:" + (sig.aborted ? "cancelled" : "timeout"));
+    tried.push(`${tag}:` + (sig.aborted ? "cancelled" : "timeout"));
     throw new Skip();
   }
-  tried.push(`groq:${r.status}`);
+  tried.push(`${tag}:${r.status}`);
   if (r.status === 429) {
-    report({ groq_cooldown_s: parseInt(r.headers.get("retry-after"), 10) || 60 });
+    const cd = parseInt(r.headers.get("retry-after"), 10) || 60;
+    report(model === V3 ? { groq_cooldown_s: cd } : { groq_cooldown_s: cd, model });
     throw new Skip();
   }
   const b = r.body;
   if (r.status !== 200 || !b || typeof b.text !== "string") throw new Skip();
   const segs = Array.isArray(b.segments) ? b.segments : [];
   if (segs.length && segs.every((s) => s.no_speech_prob > NO_SPEECH)) {
-    return { text: "", model: "whisper-large-v3" };   // 静音：当空返回，不升级千问
+    return { text: "", model };   // 静音：当空返回，不升级千问
   }
   if (segs.some((s) => s.compression_ratio > DEGENERATE_CR)) throw new Skip();   // 退化 -> 千问
-  return { text: b.text.trim(), model: "whisper-large-v3" };
+  return { text: b.text.trim(), model };
 }
 
 // ---- 千问 ----（请求体照 docs/experiments/cloud_asr_20261010/qcn.py 的 call()，已实测）
@@ -186,12 +199,16 @@ async function transcribe(env, ctx, audio, seconds, t0) {
       : Promise.reject(new Skip());
     let won = null;
     try { won = await Promise.any([groqP, qwenP]); } catch { /* 全部失败 */ }
+    // 最后一道：v3 与千问都没拿到（额度满 / 冷却 / 都挂了）且预算还够一次 Groq -> turbo。
+    if (!won && env.GROQ_KEY && deadline - Date.now() > 500 && await takeTurbo(env, seconds)) {
+      try { won = await tryGroq(run, TURBO); } catch { /* 也没拿到 */ }
+    }
     const ms = Date.now() - t0;
     if (!won) {
       console.log(JSON.stringify({ result: "all_failed", ms, tried }));
       return json(503, { error: "all_failed", tried: [...tried] });
     }
-    const provider = won.model === "whisper-large-v3" ? "groq" : "qwen";
+    const provider = won.model.startsWith("whisper") ? "groq" : "qwen";
     console.log(JSON.stringify({ provider, model: won.model, ms, tried }));
     return json(200, { text: won.text, provider, model: won.model, ms, tried: [...tried] });
   } finally {

@@ -44,7 +44,7 @@ function harness({ groq = () => groqOk(), qwen = () => qwenOk(), groqMs = 0, qwe
     const u = String(url);
     if (u.startsWith("https://api.groq.com/")) {
       calls.groq.push({ form: init.body, signal: init.signal, headers: init.headers });
-      return later(groqMs, () => groq(calls.groq.length), init.signal);
+      return later(groqMs, () => groq(calls.groq.length, init.body.get("model")), init.signal);
     }
     if (u.startsWith("https://dashscope-intl.aliyuncs.com/")) {
       const body = JSON.parse(init.body);
@@ -234,8 +234,50 @@ test("10 全挂 -> 503 带 tried", () => withHarness({ groq: () => J(500, {}), q
   assert.equal(res.status, 503);
   const j = await res.json();
   assert.equal(j.error, "all_failed");
-  assert.deepEqual(j.tried.sort(), ["groq:500", ...CHAIN3.map((m) => `${m}:502`)].sort());
+  assert.deepEqual(j.tried.sort(), ["groq:500", "turbo:500", ...CHAIN3.map((m) => `${m}:502`)].sort());
 }));
+
+// ---------- T. Groq turbo：独立额度桶的最后一道 ----------
+const TURBO = "whisper-large-v3-turbo";
+test("T1 v3 与千问都失败 -> turbo 顶上，provider=groq model=turbo", () => withHarness({
+  groq: (n, model) => (model === TURBO ? groqOk(" from turbo ") : J(500, {})), qwen: () => J(502, {}),
+}, async (h) => {
+  const j = await (await h.call(req())).json();
+  assert.deepEqual([j.provider, j.model, j.text], ["groq", TURBO, "from turbo"]);
+  assert.deepEqual(h.calls.groq.map((c) => c.form.get("model")), ["whisper-large-v3", TURBO]);
+}));
+test("T2 v3 赢 / 千问赢 -> turbo 一次都不调、不占它的额度", () => withHarness({}, async (h) => {
+  await h.call(req());
+  assert.deepEqual(h.calls.groq.map((c) => c.form.get("model")), ["whisper-large-v3"]);
+  assert.equal(h.plans.filter((p) => p.model === TURBO).length, 0);
+}));
+test("T3 v3 当日额度满 + 千问全耗尽 -> 直接 turbo（不等对冲）", () => withHarness({
+  groq: (n, model) => (model === TURBO ? groqOk(" t ") : groqOk(" v3 ")),
+}, async (h) => {
+  await h.store.set("state", { day: new Date().toISOString().slice(0, 10), groq_day: 1900,
+    qwen_exhausted: Object.fromEntries(CHAIN3.map((m) => [m, "x"])) });
+  const t0 = Date.now();
+  const j = await (await h.call(req())).json();
+  assert.equal(j.model, TURBO);
+  assert.ok(Date.now() - t0 < 1000, "不该等 1.2 s 对冲");
+  assert.equal(h.calls.qwen.length, 0);
+}));
+test("T4 Quota：turbo 桶与 v3 互不占用；turbo 冷却只冷 turbo", async () => {
+  const clock = { now: DAY };
+  const { plan, report, store } = quotaAt(clock, { day: "2026-10-11", groq_day: 1900 });
+  const q = new QuotaCore({ get: async (k) => store.get(k), put: async (k, v) => { store.set(k, structuredClone(v)); } }, () => clock.now);
+  const turbo = async () => (await (await q.handle(new Request("https://quota/plan", { method: "POST",
+    body: JSON.stringify({ chain: CHAIN3, seconds: 12, model: TURBO }) }))).json()).groq;
+  assert.equal((await plan()).groq, false, "v3 满了");
+  assert.equal(await turbo(), true, "turbo 是另一个桶");
+  await report({ groq_cooldown_s: 120, model: TURBO });
+  assert.equal(await turbo(), false);
+  store.set("state", { ...store.get("state"), groq_day: 0 });
+  assert.equal((await plan()).groq, true, "turbo 冷却不该连累 v3");
+  clock.now = Date.UTC(2026, 9, 12, 0, 0, 1);
+  store.set("state", { ...store.get("state"), turbo: { ...store.get("state").turbo, n: 1900, cooldown_until: 0 } });
+  assert.equal(await turbo(), true, "跨日清零 turbo 次数");
+});
 
 // ---------- 11. 总预算 ----------
 test("11 上游都挂 10 s -> 5.3 s 内 503", async () => {

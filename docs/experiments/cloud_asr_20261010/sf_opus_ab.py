@@ -8,7 +8,8 @@
 import sys, json, os, io, time, uuid, urllib.request, urllib.error
 import numpy as np, soundfile as sf
 D, OUT = sys.argv[1], sys.argv[2]; lvl = float(sys.argv[3]) if len(sys.argv) > 3 else None
-tag = "groq_sf" + (f"_c{lvl:g}" if lvl is not None else "")
+MODEL = os.environ.get("GROQ_MODEL", "whisper-large-v3")      # 例: GROQ_MODEL=whisper-large-v3-turbo
+tag = "groq_sf" + ("_turbo" if "turbo" in MODEL else "") + (f"_c{lvl:g}" if lvl is not None else "")
 z = np.load(D + "/segs.json.norm.npy", mmap_mode="r"); segs = json.load(open(D + "/segs.json"))
 def enc(s):
     b = io.BytesIO(); kw = {} if lvl is None else {"compression_level": lvl}
@@ -16,7 +17,7 @@ def enc(s):
     return b.getvalue()
 tok = open(os.path.expanduser("~/.classlive/groq-token")).read().strip()
 def call(data):
-    bd = uuid.uuid4().hex; f = {"model": "whisper-large-v3", "language": "en", "response_format": "json", "temperature": "0"}
+    bd = uuid.uuid4().hex; f = {"model": MODEL, "language": "en", "response_format": "json", "temperature": "0"}
     body = b"".join(f'--{bd}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode() for k, v in f.items())
     body += f'--{bd}\r\nContent-Disposition: form-data; name="file"; filename="a.ogg"\r\nContent-Type: audio/ogg\r\n\r\n'.encode() + data + f"\r\n--{bd}--\r\n".encode()
     r = urllib.request.urlopen(urllib.request.Request("https://api.groq.com/openai/v1/audio/transcriptions", data=body, headers={"Authorization": "Bearer " + tok, "Content-Type": "multipart/form-data; boundary=" + bd, "User-Agent": "classlive-eval/1.0"}), timeout=30)

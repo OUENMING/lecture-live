@@ -50,6 +50,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | **实时总结（原子 + 章节纲要）** —— 窗口规则 / 重试与积压 / 章节状态机 / 课务 / 草稿与调试入口。⚠️ `main.py` 那边**只接线**，逻辑全在这里 | `live_summary.py`（**动手前先读文件头**） |
 | **测试模式的上传**（队列/退避/幂等/脱敏）—— 课后把一节课的文件传去 **Cloudflare Worker + R2**（零配置）。⚠️ `send` 是唯一的传输洞；判据用**本地目录 / 本机 HTTP 服务器**，不碰真服务器 | `upload.py`（**动手前先读文件头**）+ `docs/PLAN-zero-config-upload.md` |
 | **章节层** —— `.chapters.jsonl` 的三种记录、写入器、`parse_reply` 的机械闸门、课务正则、`chapter_path_for` | `chapter.py` |
+| **草稿译文**（英文草稿 → 即时中文）：主线程的过期判据 `DraftView` + 只译最新的后台线程 `DraftTranslator`（依赖全注入，`step()` 可单测）；触发判据在 `draft_policy.py` | `draft_translate.py`、`draft_policy.py` |
 | 整课二级精修（polish） | `polish.py` |
 | 悬浮窗、字幕显示、滚动、槽位池化 | `overlay.py`、`transcript_view.py` |
 | 滚动行为验收探针（不在运行路径上） | `scripts/probe_scroll.py` |
@@ -64,6 +65,10 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 端到端、拿真实录音跑通 | `scripts/test_pipeline.py` |
 | ⭐ **流式字幕量具**（草稿回改率 / 延迟 / WER，可复跑）+ 夜间改动的数字与取舍（草稿前缀冻结、触发策略、本地后处理、`--source system` 未验证）+ **现场采集怎么跑** —— 改草稿/ASR/音源前先读 | `docs/RESEARCH-stream-eval.md` + `scripts/stream_eval.py` |
 | ⭐ **草稿层换真流式 ASR（Nemotron Streaming）** —— 选型 / VPS 评估 / 改动清单与锚点 / 失败回退 / 验收（**还没动代码**；动草稿或 ASR 前读） | `docs/PLAN-streaming-asr.md` |
+| ⭐⭐ **2026-10-11 交接：定稿上云调研 + R1 翻译空窗**（现状 / 未提交的改动清单 / 关键结论 / 决定 / 凭据 / 发版评估 / 教训 / 下一步）—— **新会话接这条线先读它** | `docs/HANDOFF-20261011-cloud-asr-r1.md` |
+| ⭐ **R1 执行细则（翻译空窗 3.8.11 + ❓ 轻点拨 3.8.12）**—— 逐文件改法、测试先红后绿、验收清单；**执行 R1 前读** | `docs/PLAN-r1-translation-gap.md` |
+| ⭐ **翻译空窗 + 定稿上云 + 草稿流式的实施计划**（已拍板的决定 D1–D6、R1/R2/R3 三版的逐文件改法与验收）—— **动草稿译文、定稿 ASR、隐私文案前读** | `docs/PLAN-cloud-final-asr.md` |
+| ⭐ **定稿上云选型**（MIT 公开课人工字幕真值：Groq / 千问 3.1 / Cloudflare / Mistral / 本地实测 WER·漏段·延迟·费用；Groq 额度与付费档现状；兜底链与三人一学期账；外部「降噪+Cohere」方案的逐条评估）—— **动定稿 ASR 前读** | `docs/RESEARCH-cloud-asr.md` + `docs/experiments/cloud_asr_20261010/` |
 | ⭐⭐ **这一层的交接文档**（现状 / 怎么跑 / 全部实测数字 / 该不该用 / 缺口 / 教训）—— **先读它** | `docs/HANDOFF-20261009-stream-eval.md` |
 | ⭐ **现场采集**（把**真课**的草稿流记成 `<会话>.live.jsonl`，课后出数）—— 默认关，`CLASSLIVE_LIVE_LOG=1` 打开。⚠️ 硬前提：**绝不能影响上课**（队列有界 + 后台写盘 + 全吞异常） | `livemetrics.py`（**动手前先读文件头**）|
 | **课堂报告**（读那份 `.live.jsonl` *或* `stream_eval --jsonl` 出表：回改率 / 延迟 / 腰斩臆造候选 / 多份按计数汇总）—— 指标复用 `stream_eval.evaluate`，**不另写一份尺子** | `scripts/class_report.py` |

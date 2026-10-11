@@ -1109,6 +1109,112 @@ with _mock.patch.object(update, "download_model", lambda m, say=None: _calls.app
     _r = update.run_step(update.DRAFT_MODEL)
 check("⭐ run_step(draft_model) 只下 Nemotron、失败原样回报", _calls == ["nemotron"] and _r["ok"] is False, f"{_calls} {_r}")
 
+# ======================= D. 开课前的更新入口（2026-10-12） =======================
+# offer() / apply() / defer_to_exit() / finish()。收尾子进程一律桩掉 —— 真跑会往**真的** .app python
+# 里 `uv pip install`（`run_step("deps")` 用的是 `sys.executable`），那是写端没隔离。
+print("\nD. 开课前的更新入口\n")
+_noop_steps = _mock.patch.object(update, "pending_steps", lambda: [])
+
+_tmpD, _seedD, _cloneD = new_world()
+with _noop_steps:
+    _o = update.offer()
+check("D1 已是最新、没欠账 -> none（不显示）", _o["kind"] == "none", str(_o))
+with _mock.patch.object(update, "pending_steps",
+                        lambda: [{"key": "deps", "label": "补依赖", "detail": "约 1 分钟", "why": ""},
+                                 {"key": "draft_model", "label": "x", "detail": "", "why": ""}]):
+    _o = update.offer()
+check("D2 已是最新但依赖没补 -> unfinished，只说必做的那几件",
+      _o["kind"] == "unfinished" and "补依赖" in _o["message"] and "x（" not in _o["message"], str(_o))
+
+release(_seedD, "0.0.2")
+with _noop_steps:
+    _o = update.offer()
+check("⭐ D3 有新版 -> available，带远端看点、最新版本号",
+      _o["kind"] == "available" and _o["latest"] == "0.0.2" and "rel 0.0.2" in _o["summary"], str(_o))
+check("⭐ D3b offer 只探不拉（本地版本没动）",
+      (_cloneD / "VERSION").read_text().strip() == "0.0.1")
+(_cloneD / "requirements.txt").write_text("numpy>=2.0\n# 我改的\n", encoding="utf-8")
+with _noop_steps:
+    _o = update.offer()
+check("⭐ D4 用户改过文件 -> blocked，并点名那个文件",
+      _o["kind"] == "blocked" and "requirements.txt" in _o["message"], str(_o))
+(_cloneD / "requirements.txt").write_text("numpy>=2.0\n", encoding="utf-8")
+with _mock.patch.dict(os.environ, {"CLASSLIVE_NO_UPDATE_CHECK": "1"}), _noop_steps:
+    _o = update.offer()
+check("D5 CLASSLIVE_NO_UPDATE_CHECK -> none", _o["kind"] == "none", str(_o))
+sh("git", "checkout", "-q", "-b", "dev", cwd=_cloneD)
+sh("git", "push", "-q", "-u", "origin", "dev", cwd=_cloneD)
+# 远端 dev 再前进一个提交 -> 这份 dev 落后了（没有开发分支那道守卫的话会报 available）
+sh("git", "fetch", "-q", "origin", cwd=_seedD)
+sh("git", "checkout", "-q", "-b", "dev", "origin/dev", cwd=_seedD)
+commit(_seedD, "dev 上的新提交", version="0.0.2-dev")
+sh("git", "push", "-q", "origin", "dev", cwd=_seedD)
+sh("git", "checkout", "-q", "main", cwd=_seedD)
+with _noop_steps:
+    _o = update.offer()
+check("⭐ D6 开发分支（作者自己的 worktree）-> none，不天天提示", _o["kind"] == "none", str(_o))
+sh("git", "checkout", "-q", "main", cwd=_cloneD)
+
+_fin_calls = []
+_fake_fin = lambda **kw: _fin_calls.append(kw) or {"ok": True, "error": ""}         # noqa: E731
+with _mock.patch.object(update, "_finish_in_child", _fake_fin):
+    _a = update.apply()
+check("⭐⭐ D7 apply：拉到新版、pulled=True（调用方据此重开自己）",
+      _a["ok"] and _a["pulled"] and (_cloneD / "VERSION").read_text().strip() == "0.0.2", str(_a))
+check("⭐ D7b 收尾交给子进程、而且要补必下模型", _fin_calls and _fin_calls[0].get("models") is True, str(_fin_calls))
+check("D7c 锁放掉了", not (update.STATE_DIR / "update.lock").exists())
+
+release(_seedD, "0.0.3")
+(update.STATE_DIR / "update.lock").write_text("999999", encoding="utf-8")   # 别人正拿着（新鲜）
+with _mock.patch.object(update, "_finish_in_child", _fake_fin):
+    _a = update.apply()
+check("⭐ D8 锁被别人拿着 -> 不拉、说一句人话",
+      not _a["ok"] and "另一个更新" in _a["user_msg"]
+      and (_cloneD / "VERSION").read_text().strip() == "0.0.2", str(_a))
+check("D8b 别人的锁没被删", (update.STATE_DIR / "update.lock").read_text() == "999999")
+(update.STATE_DIR / "update.lock").unlink()
+with _mock.patch.object(update, "_finish_in_child", lambda **kw: {"ok": False, "error": "依赖没装上"}):
+    _a = update.apply()
+check("⭐ D9 收尾失败不算更新失败：代码已新、照样重开，并说下次再试",
+      _a["ok"] and _a["pulled"] and "下次" in _a["user_msg"], str(_a))
+
+# ---- 下课退出时安装（同意文件）----
+_tmpE, _seedE, _cloneE = new_world()
+release(_seedE, "0.0.2", "manual")
+_stamp = lambda: (update.STATE_DIR / "last_check").unlink(missing_ok=True)       # noqa: E731
+with _mock.patch.object(update, "_finish_in_child", _fake_fin):
+    _stamp(); update.auto_update()
+    check("D10 没同意 -> manual 照旧不自动装", (_cloneE / "VERSION").read_text().strip() == "0.0.1")
+    check("D10b defer_to_exit 记上了", update.defer_to_exit("0.0.2"))
+    _fin_calls.clear(); _stamp(); update.auto_update()
+    check("⭐⭐ D11 同意过 0.0.2 -> 退出时装上", (_cloneE / "VERSION").read_text().strip() == "0.0.2")
+    check("⭐ D11b 退出时也补依赖，但**不下模型**", _fin_calls and _fin_calls[0].get("models") is False, str(_fin_calls))
+    check("D11c 装到了 -> 同意文件删掉", not (update.STATE_DIR / update.EXIT_CONSENT).exists())
+    release(_seedE, "0.0.3", "manual")
+    update.defer_to_exit("0.0.2")
+    _stamp(); update.auto_update()
+    check("⭐ D12 只同意到 0.0.2 -> 更新的 manual 0.0.3 不自动装",
+          (_cloneE / "VERSION").read_text().strip() == "0.0.2")
+
+# ---- finish()：只做必做的，`.app` 重建与可选模型绝不在这里 ----
+_ran = []
+_all_steps = [{"key": k, "label": k, "detail": "", "why": ""} for k in ("deps", "models", "draft_model", "app")]
+with _mock.patch.object(update, "pending_steps", lambda: _all_steps), \
+        _mock.patch.object(update, "run_step", lambda k, on_line=None: _ran.append(k) or {"ok": True, "error": ""}):
+    _lines = []
+    _rc = update.finish(models=False, say=_lines.append)
+    check("⭐ D13 退出时那条（no-models）只补依赖", _rc == 0 and _ran == ["deps"] and _lines[-1] == "FINISH ok",
+          f"{_ran} {_lines[-1:]}")
+    _ran.clear()
+    update.finish(models=True, say=_lines.append)
+    check("⭐⭐ D14 面板那条：依赖 + 必下模型；`.app` 重建与可选模型绝不在这里", _ran == ["deps", "models"], str(_ran))
+with _mock.patch.object(update, "pending_steps", lambda: _all_steps), \
+        _mock.patch.object(update, "run_step", lambda k, on_line=None: {"ok": False, "error": "网断了"}):
+    _lines = []
+    _rc = update.finish(models=True, say=_lines.append)
+check("D15 失败 -> 返回 1、最后一行 FINISH fail 带原因",
+      _rc == 1 and _lines[-1].startswith("FINISH fail") and "网断了" in _lines[-1], str(_lines[-1:]))
+
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}")

@@ -628,6 +628,62 @@ def _log(msg: str) -> None:
         pass
 
 
+def _acquire_lock() -> str:
+    """抢「同一时刻只许一个更新器换代码」那把锁。返回 `"held"` / `"busy"` / `"error"`。
+
+    两个持锁方：退出时的后台更新器（`auto_update`）与面板上的「现在更新」（`apply`）。
+    ⚠️⚠️ **抢锁必须原子**（2026-09-28 审查指出）：原来是
+       `if lock.exists() and 不陈旧: 返回` 然后再 `lock.write_text(...)` ——
+       那是 check-then-act，两个更新器可以**同时**通过那一关、各自把锁写下去。
+       而这道锁护的正是「同时跑 `git pull` / 下 1.2 GB 模型」。走 `O_EXCL` 排他创建。
+    ⚠️ 锁在但**陈旧**（上次崩了没清，超过 `LOCK_STALE_S`）才删掉重抢一次，否则认输 ——
+       「删了再抢」本身也可能把别人刚建的锁删掉，所以判陈旧要尽量准。
+    ⚠️ `"error"`（抢锁逻辑自己崩了）**不许静默**（2026-10-01 审查 F14）：记一行日志，
+       要不要无锁继续由调用方定。
+    """
+    lock = STATE_DIR / "update.lock"
+
+    def _take() -> bool:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        try:
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if _take():
+            return "held"
+        try:
+            stale = (time.time() - lock.stat().st_mtime) >= LOCK_STALE_S
+            if stale:
+                lock.unlink()
+        except OSError:
+            stale = False
+        return "held" if (stale and _take()) else "busy"
+    except Exception as e:                                # noqa: BLE001
+        _log(f"⚠ 更新锁处理异常（{type(e).__name__}: {str(e)[:80]}）")
+        return "error"
+
+
+def _release_lock() -> None:
+    """⚠️ **只删还属于自己那把锁**（按锁里的 pid 核对）。两个实测/复审出来的坑：
+    ① 无条件 unlink 会删掉**别的进程持有的锁**（进程 B 因"已有更新在跑"早退却删了 A 的锁 →
+       C 立刻能拿到 → 两个更新器同时 pull；2026-09-25 全量 OCR）；
+    ② 只记一个 `held` 标志不够：A 持锁超过 STALE 被 B 抢走后，A 的 finally 仍会删掉 B 的锁。
+    """
+    try:
+        lock = STATE_DIR / "update.lock"
+        if lock.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            lock.unlink(missing_ok=True)
+    except Exception:                                     # noqa: BLE001
+        pass
+
+
 def auto_update() -> dict:
     """退出时的自动更新 —— 由 `--auto` 调用，**跑在独立的后台进程里**。
 
@@ -646,8 +702,7 @@ def auto_update() -> dict:
     切了分支 / 磁盘满 / `~/Library/Logs` 不可写 —— 都只是"这次没更新成"。
     """
     out = {"ok": False, "skipped": False, "error": "", "reason": "", "after": ""}
-    lock = STATE_DIR / "update.lock"
-    held = False          # ⚠️ **只删自己拿到的锁** —— 见下面的 finally
+    held = False          # ⚠️ **只删自己拿到的锁** —— 见 `_release_lock`
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
     except Exception:                                     # noqa: BLE001
@@ -658,43 +713,11 @@ def auto_update() -> dict:
         stamp = STATE_DIR / "last_check"
         if stamp.exists() and (time.time() - stamp.stat().st_mtime) < RATE_LIMIT_S:
             return {**out, "skipped": True, "reason": "限频（一小时一次）"}
-        # ---- 并发保护（陈旧锁自过期）----
-        # ⚠️⚠️ **抢锁必须原子**（2026-09-28 审查指出）：原来是
-        #    `if lock.exists() and 不陈旧: 返回` 然后再 `lock.write_text(...)` ——
-        #    那是 check-then-act，两个更新器可以**同时**通过那一关、各自把锁写下去。
-        #    而这道锁护的正是「同时跑 `git pull` / 下 1.2 GB 模型」。
-        #    改走 `O_EXCL` **排他创建**：判断交给内核，没有窗口。
-        def _take_lock() -> bool:
-            """建锁文件。文件已存在 -> False（锁是别人的）。"""
-            try:
-                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
-                return False
-            try:
-                os.write(fd, str(os.getpid()).encode("utf-8"))
-            finally:
-                os.close(fd)
-            return True
-
-        try:
-            if not _take_lock():
-                # 文件在。**只**在它确实陈旧（上次崩了没清）时才删掉重抢一次，
-                # 否则认输 —— 「删了再抢」本身也可能把别人刚建的锁删掉，
-                # 所以判陈旧要尽量准。
-                try:
-                    stale = (time.time() - lock.stat().st_mtime) >= LOCK_STALE_S
-                    if stale:
-                        lock.unlink()
-                except OSError:
-                    stale = False
-                if not (stale and _take_lock()):
-                    return {**out, "skipped": True, "reason": "已有更新在跑"}
-            held = True                               # 从这里起，锁才是**我们的**
-        except Exception as e:                            # noqa: BLE001
-            # ⚠️ 不许静默（2026-10-01 审查 F14）：原来 `pass` —— 抢锁逻辑自己崩了
-            #    之后会**无锁**继续 pull()，而屏上和日志里一个字都没有。
-            _log(f"⚠ 更新锁处理异常（{type(e).__name__}: {str(e)[:80]}）"
-                 f" —— 继续，但这次没有持锁")
+        # ---- 并发保护（陈旧锁自过期）：与面板「现在更新」共用同一把锁 ----
+        _lk = _acquire_lock()
+        if _lk == "busy":
+            return {**out, "skipped": True, "reason": "已有更新在跑"}
+        held = _lk == "held"                          # "error" = 抢锁逻辑自己坏了：照旧无锁继续（已记日志）
         try:
             stamp.write_text("", encoding="utf-8")
         except Exception:                                 # noqa: BLE001
@@ -728,6 +751,10 @@ def auto_update() -> dict:
             return {**out, "skipped": True, "reason": "工作区脏",
                     "dirty_files": _paths}
         if st["behind"] <= 0:
+            # 代码已是新的、但上次只拉了代码没补依赖（比如旧版本的自动更新拉来的）→ 顺手补上
+            if any(x["key"] == "deps" for x in pending_steps()):
+                fin = _finish_in_child(models=False)
+                _log("补上次没补的依赖：" + ("好了" if fin["ok"] else f"没成 —— {fin['error'][:160]}"))
             return {**out, "ok": True, "skipped": True, "reason": "已是最新"}
 
         # ---- 分级：**在拉之前**判断，且要读远端 ref 的 CHANGELOG（磁盘上还没有）----
@@ -742,7 +769,11 @@ def auto_update() -> dict:
             _log(f"跳过：本地版本 {st['current']} 不在远端历史里（分叉/改名？）")
             return {**out, "skipped": True, "reason": "版本不在远端历史"}
         todo = vers[:vers.index(st["current"])]
-        manual = [v for v in todo if update_mode_in(remote_log, v) != "auto"]
+        # 用户在面板上点过「下课后自动装」→ 不晚于那个版本的 manual 也当作已同意
+        import changelog
+        consent = _consented_version()
+        manual = [v for v in todo if update_mode_in(remote_log, v) != "auto"
+                  and not (consent and changelog.ver_key(v) <= changelog.ver_key(consent))]
         if manual:
             _log(f"跳过自动更新：{'、'.join(manual)} 标了 manual（要用户自己点）")
             return {**out, "skipped": True, "reason": f"manual: {manual}"}
@@ -759,6 +790,11 @@ def auto_update() -> dict:
         if r.get("error"):
             msg += f"  err={r['error'][:160]}"
         _log(msg)
+        if r["ok"] and not r.get("skipped"):
+            # 依赖用**新代码**补（模型不在退出时下 —— 下次面板就绪条上点）
+            fin = _finish_in_child(models=False)
+            _log("退出后收尾：" + ("依赖已齐" if fin["ok"] else f"没成 —— {fin['error'][:160]}"))
+            _clear_consent_upto(r.get("after", ""))
         # ⚠️ 一并透传 `user_msg` —— 否则正常路径与异常路径的返回结构不一致，
         # 上层（卡片）复用这个返回值时，失败文案会退回含 git 术语的 `error`。
         # (2026-09-25 ocr review 发现)
@@ -769,22 +805,8 @@ def auto_update() -> dict:
         out["error"] = str(e)
         return {**out, "user_msg": _friendly(out)}
     finally:
-        # ⚠️ **只删还属于自己那把锁。**
-        #
-        # 两个坑，都是实测/复审发现的：
-        #   ① 无条件 unlink 会删掉**别的进程持有的锁**：进程 B 因"已有更新在跑"早退时
-        #      并没持锁，却把 A 的锁删了 -> 进程 C 立刻能拿到 -> **两个更新器同时 pull**。
-        #      (2026-09-25 全量 OCR 发现)
-        #   ② 光记一个 `held` 标志**还不够**：它只证明"我写过锁"，不证明"锁现在还是我的"。
-        #      若 A 持锁超过 STALE 被 B 抢走，A 的 finally 仍会删掉 B 的锁。
-        #      (同日 ocr review 发现)
-        # 所以按**锁里的内容**核对：锁里存的就是 pid，是我的才删。
         if held:
-            try:
-                if lock.read_text(encoding="utf-8").strip() == str(os.getpid()):
-                    lock.unlink(missing_ok=True)
-            except Exception:                            # noqa: BLE001
-                pass
+            _release_lock()
 
 
 def spawn_auto_update() -> bool:
@@ -1092,6 +1114,191 @@ def run_step(key: str, on_line=None) -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"}
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 开课前的更新入口（2026-10-12，`docs/PLAN-panel-slim-update.md` §8）
+#
+# 作者的要求：**以后都不让用户开终端**。面板打开时后台问一次 `offer()`，有事就在就绪条上出一格；
+# 用户点「现在更新」→ `apply()`；点「下课后自动装」→ `defer_to_exit()`，由退出时的 `auto_update` 兑现。
+# ══════════════════════════════════════════════════════════════════════
+
+EXIT_CONSENT = "install-on-exit"      # STATE_DIR 下：用户同意「下课退出时安装」到哪个版本
+
+
+def _consented_version() -> str:
+    try:
+        return (STATE_DIR / EXIT_CONSENT).read_text(encoding="utf-8").strip()
+    except Exception:                                     # noqa: BLE001
+        return ""
+
+
+def defer_to_exit(version: str) -> bool:
+    """记下「下课退出时把更新装到 `version`」。返回是否记上了。
+
+    ⚠️ 只认**这个版本号**：之后再出的新版本仍按它自己的 `更新方式` 走（manual 就再问一次）。
+    """
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        (STATE_DIR / EXIT_CONSENT).write_text(version.strip(), encoding="utf-8")
+        return True
+    except Exception:                                     # noqa: BLE001
+        return False
+
+
+def _clear_consent_upto(version: str) -> None:
+    """装到（或超过）同意的那个版本了 → 删掉同意文件。"""
+    import changelog
+    c = _consented_version()
+    if c and changelog.ver_key(version) >= changelog.ver_key(c):
+        try:
+            (STATE_DIR / EXIT_CONSENT).unlink(missing_ok=True)
+        except Exception:                                 # noqa: BLE001
+            pass
+
+
+def _finish_in_child(*, models: bool, on_line=None, timeout: float | None = None) -> dict:
+    """拉完代码之后的收尾（补依赖、补必下模型）**交给新代码的子进程**跑。返回 `{ok, error}`。
+
+    ⚠️ 为什么非得是子进程：调用方（面板 / 退出时的更新器）进程里 import 的是**拉之前**的模块。
+       拉完再 import 本仓模块就是新旧混用 —— 判据（`pending_steps`）和动作（`run_step`）
+       都该用**新版本**自己的定义（新版本可能刚加了一个必下模型）。
+    """
+    cmd = [sys.executable, str(HERE / "update.py"), "--finish"]
+    if not models:
+        cmd.append("--no-models")
+    try:
+        p = subprocess.Popen(cmd, cwd=HERE, env=_child_env(), stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True)
+    except Exception as e:                                # noqa: BLE001
+        return {"ok": False, "error": f"收尾没起来：{e}"}
+    last = ""
+    deadline = time.monotonic() + (timeout or (4 * 3600 if models else 1200))
+    assert p.stdout is not None
+    for line in p.stdout:
+        line = line.rstrip()
+        if not line:
+            continue
+        last = line
+        if on_line and not line.startswith("FINISH"):
+            try:
+                on_line(line.strip())
+            except Exception:                             # noqa: BLE001
+                pass
+        if time.monotonic() > deadline:
+            p.kill()
+            return {"ok": False, "error": "收尾超时了（网络太慢？）"}
+    rc = p.wait()
+    if rc == 0:
+        return {"ok": True, "error": ""}
+    return {"ok": False, "error": last.removeprefix("FINISH fail ").strip() or f"退出码 {rc}"}
+
+
+def finish(*, models: bool, say=print) -> int:
+    """`update.py --finish [--no-models]`：把该补的补齐（依赖；`models=True` 时再加必下模型）。
+
+    `.app` 重建与可选模型（Nemotron / Qwen3）**不在这里**：前者不能在 `.app` 里的 python 正在跑时做，
+    后者要用户自己点。最后一行是 `FINISH ok` / `FINISH fail <原因>`（给 `_finish_in_child` 读）。
+    """
+    keys = ("deps", "models") if models else ("deps",)
+    for s in pending_steps():
+        if s["key"] not in keys:
+            continue
+        say(f"正在{s['label']}（{s['detail']}）…")
+        r = run_step(s["key"], on_line=say)
+        if not r["ok"]:
+            say(f"FINISH fail {s['label']}没成：{r['error']}")
+            return 1
+    say("FINISH ok")
+    return 0
+
+
+def offer() -> dict:
+    """开课面板打开时在**后台线程**里问一次：要不要在就绪条上出「更新」那一格。⚠️ 会联网（fetch）。
+
+    返回 `{"kind", "current", "latest", "summary", "message"}`，`kind` 四选一：
+      `none`        没事 / 查不到 / 开发分支 —— **不显示**（断网时与以前一模一样）
+      `available`   有新版本，`summary` 是 (current, latest] 的看点（读**远端**那份 CHANGELOG）
+      `unfinished`  代码已是新的，但依赖 / 必下模型还没补（比如退出时的后台更新只拉了代码）
+      `blocked`     有新版本但装不上（用户改过文件 / 本地提交过），`message` 说清楚为什么
+    ⚠️ 不写任何文件。开发分支（作者自己的 worktree）一律 `none` —— 别在开发机上天天提示。
+    """
+    import changelog
+    out = {"kind": "none", "current": _version(), "latest": "", "summary": "", "message": ""}
+    if os.environ.get("CLASSLIVE_NO_UPDATE_CHECK"):
+        return out
+    try:
+        bs = branch_state()
+        if bs["detached"] or not bs["upstream"] or not bs["on_default"]:
+            return out
+        st = check()
+        if not st["ok"]:
+            return out
+        if st["behind"] <= 0:
+            steps = [s for s in pending_steps() if s["key"] in ("deps", "models")]
+            if steps:
+                out.update(kind="unfinished",
+                           message="、".join(f"{s['label']}（{s['detail']}）" for s in steps))
+            return out
+        remote_log = remote_file("CHANGELOG.md")
+        out["latest"] = remote_file("VERSION").strip() or "?"
+        out["summary"] = changelog.between(remote_log, out["current"], out["latest"])
+        if st["ahead"] > 0:
+            out.update(kind="blocked", message=_friendly(
+                {"ok": False, "error": "分叉"}))
+            return out
+        stuck = [d["path"] for d in classify_dirt() if d["kind"] == "content"]
+        if stuck:
+            out.update(kind="blocked", message=_friendly(
+                {"ok": False, "blocked": True, "error": "dirty", "dirty_files": stuck}))
+            return out
+        out["kind"] = "available"
+        return out
+    except Exception as e:                                # noqa: BLE001
+        _log(f"offer 异常：{type(e).__name__}: {e}")
+        return {**out, "kind": "none"}
+
+
+def apply(on_line=None) -> dict:
+    """面板上点了「现在更新」（或「把没装完的装完」）。⚠️ 会联网、可能要几分钟 —— **后台线程里调**。
+
+    顺序：抢锁 → 恢复能证明是产物/权限/行尾的「脏」（先备份）→ `pull()` → 新代码子进程收尾。
+    返回 `{ok, pulled, after, user_msg}`；`pulled=True` = 代码换了，调用方该**重开自己**
+    （本进程里的模块是旧的）。收尾失败不算更新失败：代码已经是新的，缺依赖时各处会自己降级，
+    下次打开面板 `offer()` 会报 `unfinished` 再给一次机会。
+    """
+    def say(s: str) -> None:
+        if on_line:
+            try:
+                on_line(s)
+            except Exception:                             # noqa: BLE001
+                pass
+
+    out = {"ok": False, "pulled": False, "after": _version(), "user_msg": ""}
+    lk = _acquire_lock()
+    if lk == "busy":
+        return {**out, "user_msg": "另一个更新正在进行（可能是下课后的自动安装），过一两分钟再点。"}
+    try:
+        dirt = classify_dirt()
+        if dirt and all(d["kind"] != "content" for d in dirt):
+            say("先把几个构建产物恢复原样（原件已备份）…")
+            repair_generated(apply=True)
+        say("正在下载新版本…")
+        r = pull()
+        if not r["ok"]:
+            _log(f"面板更新没成：{r.get('error', '')[:160]}")
+            return {**out, "user_msg": r.get("user_msg") or _friendly(r)}
+        out.update(ok=True, pulled=not r.get("skipped"), after=r.get("after", out["after"]))
+        _log(f"面板更新 {r.get('before')} → {out['after']} 提交={r.get('commits')}")
+        fin = _finish_in_child(models=True, on_line=say)
+        if not fin["ok"]:
+            _log(f"面板更新收尾没成：{fin['error'][:160]}")
+            out["user_msg"] = f"新版本已装好，但{fin['error']} —— 下次打开会再试一次。"
+        _clear_consent_upto(out["after"])
+        return out
+    finally:
+        if lk == "held":
+            _release_lock()
+
+
 def _cli() -> int:
     """命令行：`python update.py [--check] [--quiet] [--auto] [--mark-reqs] [--steps]`。"""
     check_only = "--check" in sys.argv
@@ -1155,6 +1362,11 @@ def _cli() -> int:
     if "--auto" in sys.argv:
         auto_update()
         return 0
+
+    if "--finish" in sys.argv:
+        # 拉完代码后的收尾（`apply` / `auto_update` 用**新代码**的子进程叫它）
+        return finish(models="--no-models" not in sys.argv,
+                      say=lambda x: print(x, flush=True))
 
     if check_only:
         r = check()

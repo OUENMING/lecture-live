@@ -325,6 +325,58 @@ def t_no_term_lost():
             assert t in u, f"chunk={chunk} 丢了术语 {t}"
 
 
+def _capture_draft_msgs(tr, en, context=None):
+    got = {}
+
+    def fake(messages, max_tokens):
+        got["m"] = messages
+        return iter(["中"])
+
+    tr._stream_chat = fake
+    tr.translate_draft(en, None, context)
+    return got["m"]
+
+
+@case("⭐ 草稿翻译：`CLASSLIVE_DRAFT_CONTEXT=0` 时 messages 与老版逐字相同")
+def t_draft_ctx_off_identical():
+    import os
+    import cloud_translator as CT
+    os.environ["CLASSLIVE_DRAFT_CONTEXT"] = "0"
+    try:
+        m = _capture_draft_msgs(_ct(0), "the price of", context=["prev sentence."])
+        assert m == [{"role": "system", "content": CT.DRAFT_SYSTEM_CLOUD},
+                     {"role": "user", "content": "the price of"}], f"关闭时消息被改了：{m!r}"
+    finally:
+        os.environ.pop("CLASSLIVE_DRAFT_CONTEXT", None)
+
+
+@case("⭐ 草稿翻译：默认（不设环境变量）**带上下文**（2026-10-11 Owen 看过对比后定）")
+def t_draft_ctx_default_on():
+    import os
+    os.environ.pop("CLASSLIVE_DRAFT_CONTEXT", None)
+    m = _capture_draft_msgs(_ct(0), "the price of", context=["prev sentence."])
+    assert "prev sentence." in m[1]["content"], f"默认没带上下文：{m!r}"
+
+
+@case("⭐ 草稿翻译：开时 user 消息顺序 领域 → 术语 → 上一句 → 本句；三样皆空则原样")
+def t_draft_ctx_on_order():
+    import os
+    import cloud_translator as CT
+    os.environ["CLASSLIVE_DRAFT_CONTEXT"] = "1"
+    try:
+        m = _capture_draft_msgs(_ct(0), "the price of", context=["old a.", "prev sentence."])
+        u = m[1]["content"]
+        marks = ["Course: Econ 101", "T1", "prev sentence.", "the price of"]
+        idx = [u.index(x) for x in marks]
+        assert idx == sorted(idx), f"顺序不对：{list(zip(marks, idx))}"
+        assert "old a." not in u, "只该带上一句"
+        assert "do not translate" in u.lower() and "mid-sentence" in u.lower(), u
+        bare = CT.CloudTranslator("k", "m")
+        assert _capture_draft_msgs(bare, "hello")[1]["content"] == "hello"
+    finally:
+        os.environ.pop("CLASSLIVE_DRAFT_CONTEXT", None)
+
+
 def main_() -> int:
     print("=" * 60)
     fail: list[str] = []

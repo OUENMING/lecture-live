@@ -438,9 +438,13 @@ class CloudTranslator:
             parser.feed(delta)
         return parser.result(en)
 
-    def translate_draft(self, en: str, on_zh=None) -> str:
+    def translate_draft(self, en: str, on_zh=None, context: list[str] | None = None) -> str:
+        # 默认开（2026-10-11 Owen 看过 40 条对比后定：例 "perfect competition" 不再译成「完美的比赛」）。
+        # `CLASSLIVE_DRAFT_CONTEXT=0` 关：关时消息与老版逐字相同。
+        use_ctx = os.environ.get("CLASSLIVE_DRAFT_CONTEXT", "1") != "0"
+        user = self._draft_user(en, context or []) if use_ctx else en
         msgs = [{"role": "system", "content": DRAFT_SYSTEM_CLOUD},
-                {"role": "user", "content": en}]
+                {"role": "user", "content": user}]
         buf = []
         for delta in self._stream_chat(msgs, max_tokens=120):
             buf.append(delta)
@@ -448,6 +452,23 @@ class CloudTranslator:
         if on_zh and text:
             on_zh(text)
         return text
+
+    def _draft_user(self, en: str, context: list[str]) -> str:
+        """草稿的 user 消息: 稳定内容在前(领域 → 课程术语), 随句变的在后(上一句 → 本句) ——
+        前缀缓存只认从头逐字相同的那段。三样都没有时返回 `en` 原文(与旧行为逐字相同)。"""
+        parts = []
+        dom = domain_block(self._domain).strip()
+        if dom:
+            parts.append(dom)
+        if self._course_terms:
+            parts.append("Course terms: " + ", ".join(self._course_terms[:40]))
+        prev = context[-1] if context else ""
+        if prev:
+            parts.append(f"Previous sentence (context only, do not translate):\n{prev}")
+        if not parts:
+            return en
+        parts.append(f"Current speech (may stop mid-sentence; translate only what is there):\n{en}")
+        return "\n\n".join(parts)
 
 
 def load_translator(api_key: str, model: str, glossary_path: str | None,

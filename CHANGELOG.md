@@ -65,6 +65,83 @@
 （`_whatsnew_body` 从最新往下数到「你上次看过的版本」为止），多版本时每行前面标版本号。
 所以**每个版本的看点都要能独立看懂**，不要写"同上""见上一条"。
 
+## [3.8.11] - 2026-10-11
+
+### 更新看点
+- ⚡ **中文字幕不再「憋一大段才一起冒出来」** —— 老师连着讲的时候，中文草稿会一直跟上。以前一段话讲到后半截，中文常常停住 6–15 秒，然后好几句一下子涌出来。拿 10-09 那节真课回放：老师在讲、却 6 秒以上没有新中文的情况，从 57 次（合计 7 分多钟）降到 3 次（23 秒）
+- 🎯 **草稿中文更懂这门课**：翻草稿时也带上课程领域、术语和上一句，"perfect competition" 不会再先被译成「完美的比赛」
+- ✂️ **长句硬切会找换气处下刀**：老师一口气讲满 12 秒时，往回找最安静的那一刻再切，一句话被劈成两半的情况少了约四分之一（MIT 公开课实测 118 → 86 处）
+- 🩹 句子拼接修正：一段里已经说完的句子立刻上屏，不再陪着结尾的半句一起等
+
+### 升级须知（3.8.10 → 3.8.11）
+没有新模型、没有新依赖，也**不用重建 .app**。草稿翻译的请求会多约六成（云端翻译，费用很小）。
+三处改动都有开关，出问题时可以单独退回（写在终端启动前的环境变量里）：
+`CLASSLIVE_DRAFT_TRIGGER=legacy`（旧的草稿翻译触发）· `CLASSLIVE_DRAFT_CONTEXT=0`（草稿翻译不带上下文）· `CLASSLIVE_VAD_VALLEY=0`（硬切不回退）
+
+### Added
+- `draft_translate.py`：草稿译文的两个类 —— `DraftView`（主线程的过期判据，纯状态机）与 `DraftTranslator`（只译最新的后台线程，依赖全注入、`step()` 可单测）。
+- `draft_policy`：新策略 `novel`（相对**上次送出的文本**数新词：≥2.5 s 且 ≥4 个新词，或 ≥5 s 且 ≥1 个），设为默认。
+- `vad.find_valley_cut`：硬切时在末尾 1.5 s 里找能量最低点；`Segmenter` 把切下的尾巴留作下一段开头；`diag["valley_back_s"]` 计回退秒数。
+- `scripts/draft_gap_replay.py`（用 `.live.jsonl` 回放草稿触发、量「讲话中无新中文」的空窗）、`scripts/draft_ctx_ab.py`（草稿上下文开/关的并排对比）。
+- 测试：`tests/test_draft_translate.py`、`tests/test_vad_valley.py`，`test_draft_policy` / `test_audit_regressions`（R25、R26）/ `test_translator` 新增用例。
+
+### Changed
+- 草稿译文从 `final_worker` 的空闲分支挪到独立线程（原来定稿一忙就被挤掉，回放约 27%）；过期判据用段号，不用 `final_gen`。
+- 草稿节流的重置改看 `seg_gen`（音频段结束即变），不再等上一段定稿。
+- 草稿送翻前剥掉结尾悬挂词（`main.strip_dangling`）。
+- `CloudTranslator.translate_draft` 默认带领域 / 课程术语 / 上一句（稳定内容在前，利于前缀缓存）。
+- `Overlay.finalize(..., clear_draft=)`：上一段定稿不再擦掉下一段已上屏的草稿。
+
+### Fixed
+- carry 用**整段**文本判断「没说完」：短段会把已说完的句子一起扣住最多 5 s，长段（≥25 词）则从不挂起 → 改为只看最后一句（`main.split_carry`）。
+- carry 超时补发时没带自己的段号，被盖上「正在讲的下一段」的号。
+- `partial_worker` 里「定稿与草稿抢同一把 ASR 锁」的过时注释。
+
+## [3.8.10] - 2026-10-10
+
+### 更新看点
+
+- 🐛 **测试模式按 ✕ 结束，报告和上传不再被半路掐断**
+- 🐛 **长时间安静之后，不再整段漏掉老师的话** —— 语音检测在长静音后会「睡死」，再开口那几句整段消失。现在静音里自动唤醒，实测那段录音里被吞掉的词 92 → 50
+- 🐛 **没装 ffmpeg 也能把课堂音频传上来** —— 以前转不成 Opus 时音频只留在本机，只传得上报告和转录；现在直接传原始 wav（体积大一些，但不丢）
+- 🩹 **更新不再把自己锁死** —— 构建时会改写一张被 git 跟踪的图标；现在图标不再入库，以后停手也会点名是哪个文件挡的路
+- 🧪 **测试模式多记几样**：草稿上屏的实时流与延迟、逐块的原始电平与增益、主模型 / 兜底模型的原文分开记。只是「多记」，不改上课行为；这些只留在本机，不上传
+- 🩹 本地翻译兜底剥掉「好的，以下是翻译：」这类开头；翻成上一句时去掉上下文重试一次
+- 🧹 终端不再刷满屏 `ObjCPointerWarning`
+
+### 升级须知（3.8.9 → 3.8.10）
+
+没有新模型、没有新依赖，也**不用重建 .app**。
+⚠️ **如果点「立即更新」后提示「这个文件夹里有你自己改过的内容」**：那就是上面说的图标自锁，3.8.9 的更新器自己解不开。打开终端，进到 lecture-live 目录跑一次 `git checkout -- assets/icon/ClassLive-1024.png && cl update` —— 只恢复那一张图标，不碰你的课程、术语表和笔记。
+
+### Added
+
+- `livemetrics.py`：现场采集（`<会话>.live.jsonl` 草稿流 + `lag_s`；`<会话>.blocks.npz` 逐块
+  原始峰值 / 实际增益 / 当场 VAD / 样本数）。测试模式下自动开，`CLASSLIVE_LIVE_LOG=0` 可关；
+  主循环里只做 `put_nowait`（实测 1.8 µs/次）
+- `scripts/class_report.py`：读 `.live.jsonl` 出回改率 / 生产延迟 / 腰斩臆造候选；
+  `scripts/stream_eval.py` + `stream_metrics.py`：离线回放量具
+- `update.py --dirt` / `--repair [--apply]`：工作区脏了先分类（产物 / 权限位 / 行尾 / 真改动），
+  只恢复能证明是产物的那些，先备份
+- 实验性、**默认关**：`--source system`（CoreAudio Process Tap，未经真机验证，`cl` 没有入口）、
+  草稿前缀冻结 `CLASSLIVE_DRAFT_HOLDBACK`、草稿译文触发 `CLASSLIVE_DRAFT_TRIGGER`
+
+### Changed
+
+- `assets/icon/ClassLive-1024.png` 不再入库（构建产物）；闸门 R23 防再次 `git add`。
+  `make-app.sh` 与 `tools/make_icon.py` 与 3.8.9 逐字节相同 → 构建指纹不变（`9565e6e3b944210e`），不触发重建
+- 测试报告分开记主模型（Whisper）与兜底模型（Parakeet）的原文；主模型空 / 退化的段
+  另存送进 ASR 的原始信号（`<会话>.probe/*.npy`，只写本机）
+- `panel.py` 导入 Quartz，让 PyObjC 认得 `CGColorRef`
+
+### Fixed
+
+- 收尾等待 `main.spin_until`：窗口已关时不再立即返回（闸门 R24）
+- `vad.SileroVad.reset()`：连续非语音 ≥ 1.5 s 时重建 VAD 状态；新增诊断 `vad_resets` /
+  `blind_dropped`（闸门 R22）
+- `testmode.finish`：转码失败留下的 `*.NNN.wav` 列进上传清单
+- 更新停手时列出具体挡路的文件（原来只说「有你自己改过的内容」）
+
 ## [3.8.9] - 2026-10-05
 
 ### 更新看点

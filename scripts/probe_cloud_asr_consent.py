@@ -132,8 +132,7 @@ def main(argv=None) -> int:
     a = NSAlert.alloc().init()
     a.setMessageText_("定稿转写会用云端")
     a.setInformativeText_(final_asr.consent_text())
-    for b in ("好的", "只用本地"):
-        a.addButtonWithTitle_(b)
+    a.addButtonWithTitle_("好的")
     try:
         # ⚠️ NSAlert 不 `runModal` 就不会排版（第一版拍出文字被截成两行、按钮错位、
         #    冒出「<Do not show this」的半成品）→ 先 `layout()` 让它按真实内容排一遍。

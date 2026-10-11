@@ -95,14 +95,15 @@ class TestConsent(unittest.TestCase):
         self.assertTrue(got)
         self.assertEqual(len(c["alert"]), 1)
         title, msg, buttons, fb = c["alert"][0]
-        self.assertEqual((buttons, fb), (("好的", "只用本地"), "好的"))
+        self.assertEqual(buttons, ("好的",), "只留一个按钮(Owen 2026-10-11); 想关去面板开关")
         self.assertEqual(msg, final_asr.consent_text())
         self.assertEqual(c["write"], [True])
 
-    def test_app_path_records_no(self):
-        got, c, _ = self.run_it({"enabled": True, "acknowledged": ""}, app=True, choice="只用本地")
-        self.assertFalse(got)
-        self.assertEqual(c["write"], [False])
+    def test_app_path_records_yes_whatever_alert_returns(self):
+        # 弹不出来时 alert 返回 fallback / None —— 单按钮告知, 结果都是「开 + 已告知」
+        got, c, _ = self.run_it({"enabled": True, "acknowledged": ""}, app=True, choice=None)
+        self.assertTrue(got)
+        self.assertEqual(c["write"], [True])
 
     def test_terminal_path_never_writes_acknowledged(self):
         got, c, said = self.run_it({"enabled": True, "acknowledged": ""}, app=False)

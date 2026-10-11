@@ -276,7 +276,7 @@ def cloud_asr_config(*, root=None) -> pathlib.Path:
     """云端定稿转写的开关与告知记录 —— `~/.classlive/cloud-asr.json`。
 
     形状 `{"enabled": bool, "acknowledged": "<ISO 日期>"}`；读写都在 `final_asr`。
-    ⚠️ 放 `~/.classlive/` 不放 `Logs/`：「我选了只用本地」是用户的决定，清掉会重新弹告知。
+    ⚠️ 放 `~/.classlive/` 不放 `Logs/`：「我在面板上关了云端转写」是用户的决定，清掉会重新弹告知、并回到默认开。
     ⚠️ `CLASSLIVE_CLOUD_ASR=0` 时 `final_asr` 不写它（R7）。
     """
     return _root(root) / "cloud-asr.json"

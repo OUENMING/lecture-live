@@ -1110,7 +1110,7 @@ def resolve_cloud_asr_enabled(*, read=final_asr.read_config, write=final_asr.wri
                               say=echo) -> bool:
     """配置里云端转写开不开; 没告知过就告知。**必须在开始采音之前**调用。
 
-    · `.app`(`can_alert()` 为真): 弹窗, 点过才 `write` —— 选「好的」记开、「只用本地」记关。
+    · `.app`(`can_alert()` 为真): 弹窗(只有「好的」一个按钮, Owen 2026-10-11 定 —— 想关去面板开关), 点过才 `write(True)`。
     · 终端: **只打一行提示, 不弹、不写 `acknowledged`**(R14) —— 否则终端启动一次就等于替
       `.app` 用户同意了; 终端用户想关用 `CLASSLIVE_CLOUD_ASR=0`。
     · `CLASSLIVE_CLOUD_ASR=0`: `read` 返回「关 + 已告知」, 这里什么都不做(R7)。
@@ -1124,11 +1124,9 @@ def resolve_cloud_asr_enabled(*, read=final_asr.read_config, write=final_asr.wri
         say("☁ 定稿转写默认走云端: 音频(Opus 压缩)经作者服务器转发给 Groq(美国)/阿里云百炼(中国)。"
             "不想上云: CLASSLIVE_CLOUD_ASR=0 启动")
         return True
-    choice = alert("定稿转写会用云端", final_asr.consent_text(),
-                   buttons=("好的", "只用本地"), fallback="好的")
-    enabled = choice != "只用本地"
-    write(enabled)
-    return enabled
+    alert("定稿转写会用云端", final_asr.consent_text(), buttons=("好的",))
+    write(True)
+    return True
 
 
 def run(args) -> None:

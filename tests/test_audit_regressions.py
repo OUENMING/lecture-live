@@ -61,6 +61,14 @@
   R24 收尾等待不许因"窗口已经关了"就白等(2026-10-07): 浮窗模式的**正常停止就是 ✕**,
      于是收尾等 `tester.finish()` 时 `_closed` 恒为真 → `_spin` 一次都不循环 → 后台的
      报告线程被丢下、进程一退就被杀 → **report.json 从 2026-09-24 起再没写成过**
+  R25 草稿送翻前削悬挂词 / carry 只看最后一句(2026-10-11, R1 方案 B/E)
+  R26 草稿译文独立线程 / carry 补发带自己的段号 / finalize 不清下一段草稿(2026-10-11)
+  R27 shell 里 `$VAR` 紧跟非 ASCII 会被吞成变量名的一部分(2026-10-11 从 CLAUDE.md 雷区转成断言;
+     09-26 一天踩两次, 都在只有出错才走到的提示文案里)
+  R28 每个放进 `streamq` 的 tag 都必须在 `drain()` 有分支(2026-10-11 从 CLAUDE.md 雷区转成断言;
+     漏了 = 数据静默丢, 运行时兜底只打一行告警)
+  R29 仓库(公开)里不许出现 API key: 已知前缀形状 + 本机真 key 文件的值原样出现(2026-10-11)
+  R30 代码读的每个 `CLASSLIVE_*` / `CL_*` 开关都要在 HANDBOOK §6.1 登记(2026-10-11)
 """
 from __future__ import annotations
 import json
@@ -2315,6 +2323,223 @@ class R26_DraftTranslationThread(unittest.TestCase):
         self.assertEqual(o._draft_zh_val, "下一段草稿")
         o.finalize("old2", "旧2")                    # 默认 True：照旧清
         self.assertEqual((o._draft, o._draft_zh_val), ("", ""))
+
+
+class R27_ShellVarFollowedByNonAscii(unittest.TestCase):
+    """R27 shell 脚本里 `$VAR` 后面紧跟非 ASCII 字符 → 必须写成 `${VAR}`。
+
+    bash 在 UTF-8 locale 下把那个字符的首字节当成标识符的一部分：`$PYVER）` 被解析成
+    「名为 `PYVER）` 的变量」→ `set -u` 直接 unbound。`）。，：（、】·` 实测全触发。
+    ⚠️ 最阴的是它**只在出错路径上咬人**（`|| fail "…$VAR（…"`）—— 平时跑不到。
+    2026-09-26 一天踩两次，其中一次让 `make-app.sh --up-to-date` 出错落成非零 →
+    `install.sh` 读成「最新」→ 静默跳过重建。CLAUDE.md 原来只给了一条自查 grep。
+
+    范围：仓库里 shebang 是 sh/bash/zsh 的文件（`cl`、`cl-x` 没有扩展名）。
+    整行注释不算（讲这个坑的注释本来就会命中）。
+    """
+
+    _PAT = None
+
+    @classmethod
+    def _hits(cls, text: str) -> list:
+        import re
+        if cls._PAT is None:
+            cls._PAT = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]")
+        return [(i, ln.strip()) for i, ln in enumerate(text.splitlines(), 1)
+                if not ln.lstrip().startswith("#") and cls._PAT.search(ln)]
+
+    @staticmethod
+    def _shell_files():
+        import re
+        import os
+        root = Path(__file__).resolve().parent.parent
+        skip = {"ClassLive.app", ".venv", "node_modules", ".git", "sessions",
+                "__pycache__", ".wrangler"}
+        for d, dirs, files in os.walk(root):
+            dirs[:] = sorted(x for x in dirs if x not in skip)   # 剪枝：别走进 .app / sessions
+            for f in sorted(files):
+                p = Path(d) / f
+                if p.suffix not in ("", ".sh"):
+                    continue
+                try:
+                    with p.open("rb") as fh:
+                        head = fh.readline(80)
+                except OSError:
+                    continue
+                if head.startswith(b"#!") and re.search(rb"\b(ba|z)?sh\b", head):
+                    yield p
+
+    def test_no_bare_var_before_non_ascii(self):
+        root = Path(__file__).resolve().parent.parent
+        files = list(self._shell_files())
+        names = {p.name for p in files}
+        self.assertTrue({"cl", "make-app.sh", "install.sh"} <= names,
+                        f"扫描范围不对（没找到入口脚本）：{sorted(names)}")
+        bad = {str(p.relative_to(root)): h for p in files
+               if (h := self._hits(p.read_text(encoding="utf-8", errors="replace")))}
+        self.assertEqual(bad, {}, "这些 `$VAR` 紧跟非 ASCII，改成 `${VAR}`：" f"{bad}")
+
+    def test_scanner_catches_known_bad_and_spares_good(self):
+        """量具自检：已知坏样本必须报，`${VAR}` / 注释 / 位置参数必须放过。"""
+        self.assertTrue(self._hits('cmd || fail "找不到 $PYVER（请先装）"'))
+        self.assertTrue(self._hits('echo "$_want·x"'))
+        self.assertFalse(self._hits('cmd || fail "找不到 ${PYVER}（请先装）"'))
+        self.assertFalse(self._hits('  # 例子：$PYVER）会被吞'))
+        self.assertFalse(self._hits('echo "$1）"'))
+
+
+class R28_EveryStreamTagHasADrainBranch(unittest.TestCase):
+    """R28 放进 `streamq` 的每个 tag，`main.drain()` 都必须有同名分支。
+
+    `drain()` 是唯一的 tag 分发点。漏加分支 = 那类消息**静默丢弃**；2026-09-30 起末尾的
+    兜底 `else` 会 echo 一行告警，但数据照丢。原来只靠 CLAUDE.md 的一句叮嘱。
+    判据：全仓根模块里 `streamq.put(...)` / `put_nowait(...)` 的**字面量**首元素
+    ⊆ `drain()` 里 `item[0] == "<tag>"` 的集合。
+    """
+
+    @staticmethod
+    def _put_tags(tree) -> set:
+        import ast
+        tags = set()
+        for n in ast.walk(tree):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr in ("put", "put_nowait") and n.args):
+                continue
+            owner = n.func.value
+            name = owner.id if isinstance(owner, ast.Name) else \
+                owner.attr if isinstance(owner, ast.Attribute) else ""
+            a0 = n.args[0]
+            if name == "streamq" and isinstance(a0, ast.Tuple) and a0.elts \
+                    and isinstance(a0.elts[0], ast.Constant) and isinstance(a0.elts[0].value, str):
+                tags.add(a0.elts[0].value)
+        return tags
+
+    @staticmethod
+    def _drain_tags(tree) -> set:
+        import ast
+        tags = set()
+        for fn in ast.walk(tree):
+            if isinstance(fn, ast.FunctionDef) and fn.name == "drain":
+                for c in ast.walk(fn):
+                    if isinstance(c, ast.Compare) and isinstance(c.left, ast.Subscript) \
+                            and len(c.ops) == 1 and isinstance(c.ops[0], ast.Eq) \
+                            and isinstance(c.comparators[0], ast.Constant):
+                        tags.add(c.comparators[0].value)
+        return tags
+
+    def test_put_tags_subset_of_drain_branches(self):
+        import ast
+        root = Path(__file__).resolve().parent.parent
+        put = set()
+        for p in sorted(root.glob("*.py")):
+            put |= self._put_tags(ast.parse(p.read_text(encoding="utf-8")))
+        handled = self._drain_tags(ast.parse((root / "main.py").read_text(encoding="utf-8")))
+        # 自检：两边都必须真的扫到东西（扫描器坏了会两边皆空 → 恒绿）
+        self.assertIn("final", put, f"没扫到 streamq.put：{put}")
+        self.assertIn("final", handled, f"没扫到 drain() 的分支：{handled}")
+        self.assertEqual(put - handled, set(),
+                         f"这些 tag 有人放、drain() 没分支（会被丢）：{sorted(put - handled)}")
+
+    def test_scanner_catches_missing_branch(self):
+        import ast
+        src = ("def run():\n"
+               "    streamq.put(('final', 1))\n"
+               "    self.streamq.put_nowait(('newtag', 2))\n"
+               "    def drain():\n"
+               "        if item[0] == 'final': pass\n")
+        t = ast.parse(src)
+        self.assertEqual(self._put_tags(t) - self._drain_tags(t), {"newtag"})
+
+
+class R29_NoSecretsInRepo(unittest.TestCase):
+    """R29 仓库里（已跟踪 + 未忽略的新文件）不许出现 API key。
+
+    2026-10-10/11 聊天里贴过 7 把 key，实验脚本也进了仓库，而仓库是**公开**的。
+    两道：① 已知前缀的形状（`sk-` / `gsk_` / AWS / 私钥块）；② **本机真 key 文件的值**
+    原样出现（Cloudflare / DeepInfra / Mistral 的 key 没有固定前缀，只能这样查）。
+    ⚠️ ② 读真 `~/.classlive/*-token`（只读、只比对、**不打印值**）—— 用 `pwd` 取真家目录，
+       因为 `scripts/check.py` 会把 `HOME` 换成临时目录。
+    """
+
+    SHAPES = (r"\bsk-[A-Za-z0-9]{24,}", r"\bgsk_[A-Za-z0-9]{24,}", r"\bAKIA[0-9A-Z]{16}\b",
+              r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")
+
+    @staticmethod
+    def _repo_files():
+        import subprocess
+        root = Path(__file__).resolve().parent.parent
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others",
+                              "--exclude-standard"], capture_output=True, text=True).stdout
+        return root, [root / f for f in out.split("\0") if f]
+
+    @staticmethod
+    def _known_secrets() -> dict:
+        import os
+        import pwd
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        cands = list((home / ".classlive").glob("*-token")) + list((home / ".classlive").glob("*-key")) \
+            + [Path(__file__).resolve().parent.parent / ".deepseek_key"]
+        out = {}
+        for p in cands:
+            try:
+                v = p.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if len(v) >= 16:
+                out[p.name] = v
+        return out
+
+    def test_no_key_shapes_or_known_values(self):
+        import re
+        pats = [re.compile(p) for p in self.SHAPES]
+        known = self._known_secrets()
+        root, files = self._repo_files()
+        self.assertGreater(len(files), 50, "git ls-files 没列出东西 —— 扫描器坏了")
+        bad = []
+        for f in files:
+            try:
+                if f.stat().st_size > 5_000_000:
+                    continue
+                t = f.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            rel = str(f.relative_to(root))
+            bad += [f"{rel}: 形状 {p.pattern[:12]}…" for p in pats if p.search(t)]
+            bad += [f"{rel}: 本机 key 文件 {name} 的值" for name, v in known.items() if v in t]
+        self.assertEqual(bad, [], "仓库里有疑似 key（值不打印）：" f"{bad}")
+
+    def test_scanner_catches_known_bad(self):
+        import re
+        fake = "API_KEY = 'sk-" + "a1B2c3D4" * 4 + "'"
+        self.assertTrue(any(re.search(p, fake) for p in self.SHAPES))
+        self.assertFalse(any(re.search(p, "看 `sk-` 前缀的说明，task-123") for p in self.SHAPES))
+
+
+class R30_EnvFlagsAreRegistered(unittest.TestCase):
+    """R30 代码里读的每个 `CLASSLIVE_*` / `CL_*` 开关，都要在 HANDBOOK §6.1 那张表里有一行。
+
+    2026-10-11 数到 13 个开关、没有一处统一登记；3 个是「默认开、出事再关」的发布开关，
+    不登记就不会有人记得删旧路径。表是唯一登记处，这条只钉「代码 ⊆ 表」。
+    """
+
+    def test_code_flags_subset_of_handbook(self):
+        import re
+        root = Path(__file__).resolve().parent.parent
+        pat = re.compile(r"\b(CLASSLIVE_[A-Z_]*[A-Z]|CL_[A-Z_]*[A-Z])\b")
+        srcs = sorted(root.glob("*.py")) + [root / n for n in ("cl", "cl-x", "make-app.sh", "install.sh")]
+        used = set()
+        for p in srcs:
+            if p.exists():
+                used |= set(pat.findall(p.read_text(encoding="utf-8")))
+        used -= {"CL_LOCKDIR"}                      # make-app.sh 内部传参用的 `_CL_LOCKDIR`，不是开关
+        hb = (root / "docs/HANDBOOK.md").read_text(encoding="utf-8")
+        table = hb[hb.index("### 6.1 环境变量开关"):]
+        table = table[:table.index("\n## ") if "\n## " in table else None]
+        listed = set(pat.findall(table))
+        listed |= {f"CLASSLIVE_UPLOAD{s}" for s in ("_ENDPOINT", "_TOKEN") if "`CLASSLIVE_UPLOAD_ENDPOINT` / `_TOKEN`" in table}
+        self.assertIn("CLASSLIVE_VAD_VALLEY", used, "扫描器没扫到已知开关")
+        self.assertEqual(used - listed, set(),
+                         f"这些开关代码在读、HANDBOOK §6.1 没登记：{sorted(used - listed)}")
 
 
 if __name__ == "__main__":

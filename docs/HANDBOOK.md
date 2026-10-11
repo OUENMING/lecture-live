@@ -263,6 +263,29 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 ## 7. 更新与发布机制
 
 - **`.app` 就是安装目录**（`make-app.sh`）；`cl update` = 拉代码 + 补依赖 + 重建 `.app`。
+### 6.1 环境变量开关（唯一登记处）
+
+代码里每读一个 `CLASSLIVE_*`，这张表就要有一行（`test_audit_regressions` R30 钉着）。
+**发布开关是短命的**：默认翻到开、过了一版没出事，就删掉旧路径和开关本身 —— 「删旧路径」那一列就是为这个记的。
+
+| 开关 | 默认 | 管什么 | 类型 / 删旧路径 |
+|---|---|---|---|
+| `CLASSLIVE_DRAFT_TRIGGER` | `novel` | 草稿送翻判据（`legacy` / `clause` 可退回）—— `draft_policy.py` | 发布开关：3.8.11 后一版没出事就删 `legacy` / `clause` |
+| `CLASSLIVE_DRAFT_CONTEXT` | `1` | 草稿翻译带领域 / 术语 / 上一句 —— `cloud_translator.translate_draft` | 发布开关：同上 |
+| `CLASSLIVE_VAD_VALLEY` | `1` | 12 s 硬切时往回找能量低谷 —— `vad.Segmenter` | 发布开关：同上 |
+| `CLASSLIVE_DRAFT_HOLDBACK` | 空（关） | 草稿显示层前缀冻结，数字 = 灰尾词数 —— `draft_stable.py` | 实验开关：R3 换 Nemotron 后重新评估去留 |
+| `CLASSLIVE_LIVE_SUMMARY` | `1` | 实时总结（章节合成 / 纲要落盘 / 发 streamq） | 运维开关，长期 |
+| `CLASSLIVE_LIVE_LOG` | 平时关、测试模式开 | 现场采集 `<会话>.live.jsonl` —— `livemetrics.py` | 运维开关，长期 |
+| `CLASSLIVE_UPLOAD` | `1` | 测试模式课后上传；测试 / 探针一律设 `0` | 运维开关，长期 |
+| `CLASSLIVE_UPLOAD_ENDPOINT` / `_TOKEN` | 内置 | 上传端点与 write-only 令牌（测试指到本机假服务器） | 测试接缝，长期 |
+| `CLASSLIVE_NO_AUTO_UPDATE` | 空 | 关后台自动更新（排查用；日志在 `~/Library/Logs/ClassLive/update.log`） | 运维开关，长期 |
+| `CLASSLIVE_NO_UPDATE_CHECK` | 空 | 连更新检查也不做 | 运维开关，长期 |
+| `CLASSLIVE_DEBUG` | 空 | 面板 / 悬浮窗的调试日志 | 运维开关，长期 |
+| `CLASSLIVE_FROM_APP` | `.app` 启动时为 `1` | 标记「从 `.app` 起的、没有终端」→ `notice` 据此弹框而不是只打印 | 内部标记，不是给人设的 |
+| `CLASSLIVE_PYVER` | `3.12` | `make-app.sh` 建运行环境用的 Python 版本 | 构建参数，长期 |
+| `CLASSLIVE_LOCK_DIR` | `~/Library/Logs/ClassLive` | `make-app.sh` 查单实例锁的位置（只为验收隔离） | 测试接缝，长期 |
+| `CL_NO_PANEL` | 空 | `cl` 零参数时跳过课程面板、回老行为 | 运维开关，长期 |
+
 - **依赖戳记 `~/.classlive/reqs-installed`**：三条装依赖的路都要写它
   （`cl update` / 卡片 deps 步 / `make-app.sh`）——少一条，那台机器永远看到假的「补依赖」。
   判据唯一定义点：`update.pending_steps()`。

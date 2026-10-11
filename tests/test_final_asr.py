@@ -199,7 +199,21 @@ class TestCloudPath(Base):
         self.assertEqual((srv.n, r.text, r.source), (4, "back", "qwen"))
         f.transcribe(audio(3))
         self.assertEqual(srv.n, 5)                           # 已恢复
-        self.assertEqual(self.echoes, ["☁ 云端转写暂不可用, 改用本地", "☁ 云端转写恢复"])
+        self.assertEqual(self.echoes, ["⚠ 云端转写暂不可用, 改用本机识别; 60s 后自动重试",
+                                       "☁ 云端转写已恢复"])
+
+    def test_04c_breaker_goes_to_notify(self):
+        # 双击 .app 的人没有终端: 熔断开 / 恢复要走 notify(main 接到菜单栏图标), 不走 echo
+        srv = self.serve(status=503, body={})
+        clk, said = Clock(), []
+        f = self.make(clock=clk, notify=lambda m, w: said.append(w))
+        for _ in range(3):
+            f.transcribe(audio(3))
+        clk.t += 61
+        srv.status, srv.body = 200, {"text": "back", "provider": "qwen"}
+        f.transcribe(audio(3))
+        self.assertEqual(said, [True, False])
+        self.assertEqual(self.echoes, [])
 
     def test_04b_failed_probe_reopens_silently(self):
         srv = self.serve(status=503, body={})

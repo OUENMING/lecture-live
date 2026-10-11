@@ -2953,18 +2953,20 @@ class Overlay:
             self._mi_through.setTitle_(
                 "关闭鼠标穿透" if self._through else "开启鼠标穿透")
 
-    def notice(self, msg: str, warn: bool = False):
+    def notice(self, msg: str, warn: bool = False, still: str = ""):
         """引擎状态通知(云端降级/恢复), 由 main 经 streamq 转到主线程调用。
 
         字幕区不打断 —— 课上看的是内容; 状态走菜单栏图标(🎧→⚠️)加 tooltip,
-        终端里留一份文字记录。"""
-        self._engine_warn = warn
+        终端里留一份文字记录。`still` = 仍在生效的告警(翻译 / 转写各一路, 换行分隔):
+        一路恢复、另一路还挂着时图标留 ⚠️, tooltip 换成还挂着的那几条。"""
+        active = bool(still) or warn
+        self._engine_warn = active
         status = getattr(self, "_status", None)
         if status is not None:
             try:
                 btn = status.button()
-                btn.setTitle_("⚠️" if warn else "🎧")
-                btn.setToolTip_(msg if warn else "")
+                btn.setTitle_("⚠️" if active else "🎧")
+                btn.setToolTip_((still or msg) if active else "")
             except Exception:                 # noqa: BLE001
                 pass
         print(("⚠ " if warn else "✅ ") + msg, flush=True)

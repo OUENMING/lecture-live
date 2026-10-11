@@ -9,7 +9,7 @@
 - 总截止时间(R3): httpx 的超时是**按阶段**的, 最坏 connect+write+read 约 14 s, 卡不住总时长。
   这里用线程池 + `future.result(timeout=剩余)` 卡**总时长**: 平时 6 s, 收尾阶段(`is_stopping()`)
   2 s —— 收尾冲刷有 15 s 上限, 云端拖慢不能把最后几段拖没。
-- 熔断: 连续 3 次失败 → 开 60 s(期间直接本地)→ 半开放 1 段试探。状态变化只 echo 一行。
+- 熔断: 连续 3 次失败 → 开 60 s(期间直接本地)→ 半开放 1 段试探。状态变化只说一次(`notify`, 默认 echo)。
 - 云端空串(R5): 段长 ≥2 s 时补跑一次草稿模型, 有字就用它 —— 防 Groq no_speech 规则 /
   千问 NO_WORDS 把有声段误判成静音而**静默丢句**。
 - 退化检测: 云端或本地返回 `is_degenerate` 的文本一律当失败, 换下一个来源。
@@ -211,8 +211,9 @@ class FinalResult:
 
 
 class _Breaker:
-    def __init__(self, clock):
+    def __init__(self, clock, say: Callable[[str, bool], None]):
         self._clock = clock
+        self._say = say            # (msg, warn) —— 状态变化只说一次
         self._lock = threading.Lock()
         self.fails = 0
         self.open_until: float | None = None
@@ -235,7 +236,7 @@ class _Breaker:
             self.fails, self.open_until, self._probing = 0, None, False
             announce, self._announced = was_open and self._announced, False
         if announce:
-            echo("☁ 云端转写恢复")
+            self._say("云端转写已恢复", False)
 
     def fail(self) -> None:
         with self._lock:
@@ -247,7 +248,7 @@ class _Breaker:
             else:
                 announce = False
         if announce:
-            echo("☁ 云端转写暂不可用, 改用本地")
+            self._say(f"云端转写暂不可用, 改用本机识别; {BREAKER_OPEN_S:.0f}s 后自动重试", True)
 
 
 class FinalASR:
@@ -259,14 +260,17 @@ class FinalASR:
     def __init__(self, local, draft, allow_cloud: Callable[[], bool], *,
                  post=None, encode=None, clock=time.monotonic,
                  is_stopping: Callable[[], bool] | None = None,
-                 deadlines: tuple[float, float] = (NORMAL_DEADLINE_S, STOP_DEADLINE_S)):
+                 deadlines: tuple[float, float] = (NORMAL_DEADLINE_S, STOP_DEADLINE_S),
+                 notify: Callable[[str, bool], None] | None = None):
         self._local = local if local is not None else draft
         self._local_is_draft = local is None or local is draft
         self._draft = draft
         self._allow = allow_cloud
         self._post = post or _http_post
         self._encode = encode or _encode_opus
-        self._breaker = _Breaker(clock)
+        # `notify(msg, warn)`: 熔断开 / 恢复各说一次。main 接到菜单栏图标(双击 .app 的人没有终端);
+        # 不给就只打一行(测试 / 脚本)。
+        self._breaker = _Breaker(clock, notify or (lambda msg, warn: echo(("⚠ " if warn else "☁ ") + msg)))
         self._is_stopping = is_stopping or (lambda: False)
         self._deadlines = deadlines
         # 2 个工作线程: 一个请求挂到截止后还在后台跑时, 下一段不必排在它后面。

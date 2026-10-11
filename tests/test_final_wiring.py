@@ -176,6 +176,15 @@ class TestWiringShape(unittest.TestCase):
     def test_final_worker_uses_final_transcribe(self):
         self.assertIn("final.transcribe(buf)", SRC)
 
+    def test_breaker_notice_reaches_ui_with_still_active(self):
+        # 定稿转写的熔断走 notify(src="转写") → streamq ("notice", (msg, warn, still)) → ui.notice
+        call = SRC[SRC.index("final_asr.load_final("):SRC.index("final_asr.load_final(") + 500]
+        self.assertIn('src="转写"', call)
+        self.assertIn("msg, warn, still = item[1]", SRC)
+        puts = re.findall(r'streamq\.put\(\("notice", \(([^)]*)\)\)\)', SRC)
+        self.assertTrue(puts and all(p.count(",") == 2 for p in puts), puts)   # 全是三元组
+        self.assertIn("still", inspect.signature(main_mod.TerminalUI.notice).parameters)
+
 
 def tearDownModule():
     shutil.rmtree(_TMP_HOME, ignore_errors=True)

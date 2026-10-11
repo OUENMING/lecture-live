@@ -544,7 +544,7 @@ class TerminalUI:
     def answer_done(self, question: str, text: str):
         self._answer = ""
 
-    def notice(self, msg: str, warn: bool = False):
+    def notice(self, msg: str, warn: bool = False, still: str = ""):
         echo(("⚠ " if warn else "✅ ") + msg)
 
     def pump(self):
@@ -1307,7 +1307,8 @@ def run(args) -> None:
     _why_off = _cloud_asr_off_reason()
     final = final_asr.load_final(args.final_model_dir, asr, allow_cloud=_cloud_asr_ok,
                                  preload_local=_why_off is not None,  # R4: 云端开着就不加载 Whisper
-                                 is_stopping=stopping.is_set)         # 收尾冲刷时云端截止更短
+                                 is_stopping=stopping.is_set,         # 收尾冲刷时云端截止更短
+                                 notify=lambda m, w: notify(m, w, src="转写"))
     echo("☁ 定稿: 云端(Groq → 千问 → 本地 Parakeet)" if _why_off is None
          else f"💻 定稿: 本地({_why_off})")
     # ⚠️ 库路径在这里**收口**（`resolve_vault` 是唯一定义点）：`--vault` → `$OBSIDIAN_VAULT`
@@ -1447,9 +1448,18 @@ def run(args) -> None:
     hintq: "queue.Queue[list[str]]" = queue.Queue()     # ❓ 待点拨的最近几句(只留最新一份, 见 hint_worker)
     last_draft = {"en": ""}                             # 屏上最新的英文草稿(drain 记; ❓ 点拨要带上最新半句)
 
-    def notify(msg: str, warn: bool = False) -> None:
-        """引擎状态广播 -> streamq -> 主线程 drain() -> UI(悬浮窗要求主线程)。"""
-        streamq.put(("notice", (msg, warn)))
+    _engine_warns: dict[str, str] = {}                   # 来源 -> 当前告警(翻译 / 转写各一路)
+
+    def notify(msg: str, warn: bool = False, src: str = "翻译") -> None:
+        """引擎状态广播 -> streamq -> 主线程 drain() -> UI(悬浮窗要求主线程)。
+
+        ⚠️ 菜单栏只有**一个**图标、两路引擎(翻译 / 定稿转写)各自降级恢复:
+        一路恢复时另一路还挂着, 图标得留着 ⚠️ —— 所以按来源记账, 把「还剩哪些告警」一起发。"""
+        if warn:
+            _engine_warns[src] = msg
+        else:
+            _engine_warns.pop(src, None)
+        streamq.put(("notice", (msg, warn, "\n".join(_engine_warns.values()))))
 
     translator = EngineRouter(local_tr, cloud_tr, args.engine, notify=notify)
     translator.warmup()
@@ -2100,8 +2110,8 @@ def run(args) -> None:
                 if item[1]:
                     ui.terms(item[1])
             elif item[0] == "notice":
-                msg, warn = item[1]
-                ui.notice(msg, warn)
+                msg, warn, still = item[1]
+                ui.notice(msg, warn, still)
             elif item[0] == "answer":               # ("answer", delta) 讲解流式增量
                 # ⚠️ 用 getattr 守卫: 悬浮窗的渲染是 Phase 3, Overlay 现在**没有**
                 # answer_delta。drain() 没有 try/except, 直接调会 AttributeError

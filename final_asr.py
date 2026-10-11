@@ -53,8 +53,11 @@ STOP_DEADLINE_S = 2.0        # 收尾冲刷时(R3)
 BREAKER_FAILS = 3            # 连续失败几次开闸
 BREAKER_OPEN_S = 60.0
 EMPTY_RETRY_MIN_S = 2.0      # R5: 云端回空串且段长 ≥ 这个值才补跑草稿模型
-#: Opus 编码额外参数(C0 量具定码率后填; 空 = soundfile 默认)。
-OPUS_KW: dict = {}
+#: Opus 编码额外参数。
+# ⭐ 码率实测（RESEARCH §15，OCW 322 段，Groq whisper-large-v3）：soundfile 默认参数 WER 11.0% / 漏 1.0%
+#    （两次跑逐字相同 → 不是噪声），`compression_level=0.88` → 10.2% / 0.4%，约 42 KB/段，与 ffmpeg 24k
+#    （10.1% / 0.4%）打平。再往大（0.8，65 KB）准确度不再涨，千问却慢一截（p50 2.7 → 4.4 s）。
+OPUS_KW: dict = {"compression_level": 0.88}
 
 ENV_SWITCH = "CLASSLIVE_CLOUD_ASR"
 

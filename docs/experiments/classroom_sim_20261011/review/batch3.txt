@@ -1,0 +1,29 @@
+Review complete: 3 finding(s) across 6 selected item(s).
+
+─── scripts/stream_metrics.py:124-126 ───
+[bug · medium] 参考归一化后为空时 `n = 0`，`(S + D + I) / n` 与 `lost / n` 都会抛 `ZeroDivisionError`。同模块的 `wer()`
+明确约定了「没有分母就不报数」（`... if r else None`，且 `tests/test_stream_metrics.py::test_empty_ref_has_no_wer`
+就在测这条）。这份口径现在被 `ocw_eval.py` 与 `classroom_sim_20261011/run_eval.py`
+共用，一旦某条参考稿是空的（语料生成/人工字幕漏填），调用方拿到的是崩溃而不是可判读的 None。建议与 `wer()` 对齐，并同步让两个调用方处理 None（它们现在都按 `:.1%` 格式化）。
+
+      n = len(r)
++     if not n:                       # 与 wer() 一致：没有分母就不报数
++         return dict(n=0, wer=None, S=None, D=None, I=None,
++                     lost_runs=0, lost_words=0, lost_pct=None, examples=[])
+      return dict(n=n, wer=(S + D + I) / n, S=S / n, D=D / n, I=I / n,
+                  lost_runs=len(runs), lost_words=lost, lost_pct=lost / n, examples=runs[:6])
+
+
+─── scripts/stream_metrics.py:99-99 ───
+[test · low] 口径从实验脚本搬进共享模块后仍没有单测：`tests/test_stream_metrics.py` 覆盖了 `normalize` / `wer` / `lcp_len`
+/ 回改累计等每个纯函数，唯独这个新函数没有。而它现在是两个实验共用的「尺子」，且 docstring 声称数字与旧实现逐位相同——建议补一组手算夹具（含 `replace` 里 `b <=
+a*0.3` 的边界、`minrun` 上下各差一词）把这份不变量钉住。
+
+
+
+─── capture.py:37-38 ───
+[documentation · low] 新增 docstring 与实现不一致：docstring 声称 “`start`/`dur` 走**输入定位**（`-ss`/`-t` 放在 `-i`
+前）”，但代码里只有 `-ss` 放在 `-i` 前，`-t` 实际放在了 `-i` 之后（即输出时长限制）。两者对提取结果基本等价，但文档描述会让后来维护者误以为 `-t`
+也是输入定位、从而对定位/性能语义产生错误预期。建议二选一：要么把 `-t` 也移到 `-i` 之前（真正的输入定位），要么修正 docstring 明确 `-t` 为输出时长限制。
+
+

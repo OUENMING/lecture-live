@@ -46,6 +46,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 磨砂面板配方（overlay 与 whatsnew 的唯一真源）/ ObjC 类名归属 | `panel.py`、`objc_own.py`（先读文件头） |
 | `.app` 构建 / 装进 `/Applications` | `make-app.sh`、`install.sh`（先读注释） |
 | ⭐ 流式字幕量具（回改率 / 延迟 / WER）+ 现场采集 + 课堂报告 —— 改草稿 / ASR / 音源前读 | `docs/HANDOFF-20261009-stream-eval.md`、`scripts/stream_eval.py`、`livemetrics.py`、`scripts/class_report.py` |
+| ⭐ **模拟课堂语料**（阶梯教室 / 小班 · 人群噪声 + 远场 + 短时高噪事件；24 份带真值）—— 调 VAD / ASR / 增益 / 降噪前先拿它量 | `docs/experiments/classroom_sim_20261011/README.md`、`scripts/eval_corpus/{fetch,make}_classroom_sim.py`、`scripts/eval_corpus/acoustics.py` |
 | 草稿引擎（Nemotron 流式优先 / Parakeet 滑窗兜底；选择、喂流、熔断）；R3 计划与 P0 实测 | `draft_engine.py`、`tests/test_draft_engine.py`；`docs/PLAN-streaming-asr.md` |
 | 分支上课入口 `./cl-x`（现场采集 + `--freeze` / `--trigger`）；worktree 补运行态软链 | `cl-x`、`scripts/link-runtime.sh` |
 | 回归测试 R1–R30（清单在文件头） | `tests/test_audit_regressions.py` |

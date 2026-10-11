@@ -1,0 +1,79 @@
+Review complete: 8 finding(s) across 2 selected item(s).
+
+─── scripts/eval_corpus/acoustics.py:16-16 ───
+[maintainability · low] `import os` 在本文件中没有任何引用点（已确认无 `os.` 调用），属未使用的死导入，建议删除以免噪声。
+
+
+
+─── scripts/eval_corpus/acoustics.py:24-24 ───
+[maintainability · low] `load_file` 在本文件中从未被引用，其他脚本也是直接从 `capture` 导入 `load_file`（无
+`acoustics.load_file` 的用法），因此它既非本地使用也非再导出，属死导入。它还会让读者误以为本模块自行解码——但实际解码只发生在 `save_wav` 之外的调用方。建议只导入
+`SR`，并把注释里的「解码与采样率」改为只讲采样率。
+
+- from capture import SR, load_file  # noqa: E402  ⭐ 解码与采样率都走生产那一份，不另起一套
++ from capture import SR  # noqa: E402  ⭐ 采样率走生产那一份，不另起一套
+
+
+─── scripts/eval_corpus/acoustics.py:109-109 ───
+[documentation · low] 注释与实现不符：文档串称直达声能量取「主峰起 `direct_ms` 毫秒内」，但代码窗口是 `[peak - int(0.001*sr), peak +
+w]`，即从主峰**前 1 ms** 开始，窗口总长为 `direct_ms + 1 ms`。按注释复算会得到不同的 DRR，建议把注释对齐到实际窗口（或去掉这 1 ms 的提前量）。
+
+-     DRR = 直达声能量（主峰起 `direct_ms` 毫秒内）/ 其余能量。
++     DRR = 直达声能量（主峰前 1 ms 至主峰后 `direct_ms` 毫秒内）/ 其余能量。
+
+
+─── scripts/eval_corpus/fetch_classroom_sim.py:181-182 ───
+[bug · critical] 键名错配导致 `do_sources` 必然崩溃：`SOURCES` 里声明的键是 `"video"`/`"srt"`/`"out"`，并没有
+`"mp4"`；而这里却用 `s[k]`（`k` ∈ `("mp4", "srt")`）去取值，列表推导式在求值 `hall` 的第一项时即抛 `KeyError: 'mp4'`。`main` 默认把
+`do_sources` 放进并发 steps，因此整条建库流程（不指定 `--only` 时）100% 失败。另外即便改成取 `video`，`f"{s['out']}.{k}"` 也会拼出
+`.video` 后缀而非 `.mp4`。建议把字段名与扩展名显式配对。
+
+-     jobs = [(f"{IA}/{s['item']}/{urllib.parse.quote(s[k])}", d / f"{s['out']}.{k}")
+-             for s in SOURCES.values() for k in ("mp4", "srt")]
++     jobs = [(f"{IA}/{s['item']}/{urllib.parse.quote(s[field])}", d / f"{s['out']}.{ext}")
++             for s in SOURCES.values() for field, ext in (("video", "mp4"), ("srt", "srt"))]
+
+
+─── scripts/eval_corpus/fetch_classroom_sim.py:236-237 ───
+[bug · medium] `except` 捕获的异常类型与实际抛出的不符，导致预期的「逐条报错并继续」永远不会生效：`_download` 失败时抛
+`RuntimeError`，`_decode_to_wav` 走 `capture.load_file`，其 ffmpeg 失败/超时也抛 `RuntimeError`（见
+capture.py），二者都不是 `subprocess.CalledProcessError`。因此任意一条音效下载或解码失败都会穿过 `ex.map` 直接中断整个 `do_sfx`，`f" 
+✗ {name}: {e}"` 这条分支实际上是死代码。若确实想逐条容错，应捕获实际会被抛出的异常。
+
+-         except subprocess.CalledProcessError as e:
++         except (RuntimeError, OSError, subprocess.CalledProcessError) as e:
+              return f"  ✗ {name}: {e}"
+
+
+─── scripts/eval_corpus/fetch_classroom_sim.py:258-258 ───
+[bug · low] `--check` 的缺件统计不完整：`do_rir` 会额外产出 `sfx/tone/tone_rvb2014_*.wav`（`RVB_NOISE`），且该产物正是
+`make_classroom_sim.py` 中 `hall.tones` 要用的素材；但它既不在 `SFX` 字典里，也不是 sources 的 mp4/srt。因此当这些 wav
+缺失时，`--check` 仍会打印「缺：（无）」，与本脚本「先跑 --check 看现状」的用途不一致。建议把 RIR 派生产物也纳入缺件统计。
+
+      miss = [n for n, (_, k) in SFX.items() if not (base / "sfx" / k / f"{n}.wav").exists()]
++     miss += [f"tone_rvb2014_{i}" for i in range(1, len(RVB_NOISE) + 1)
++              if not (base / "sfx" / "tone" / f"tone_rvb2014_{i}.wav").exists()]
+
+
+─── scripts/eval_corpus/fetch_classroom_sim.py:163-164 ───
+[bug · medium] 分段下载失败后会把**坏的/截断的 zip 留在原地**，导致脚本不可重跑：这里在 `dst` 已经落盘之后才做大小校验，校验不过只抛错、不清理；而 `do_rir`
+的守卫是 `if not z.exists()` —— 下次重跑看到文件已存在就**不再重新下载**，于是又拿这个坏包去
+`unzip`（`check=True`）失败，永远卡在同一个错误上，必须人工删文件才能恢复，与 `do_rir` 里「重建时重下」的说法相悖（拼接写盘途中被
+Ctrl-C/磁盘满中断也会留下同样的半截 `dst`）。建议校验失败时先删掉 `dst` 再抛错，或先写到 `.part`、校验通过后再 `os.replace`。
+
+-     if dst.stat().st_size != size:
+-         raise RuntimeError(f"拼接后大小不对：{dst.stat().st_size} ≠ {size}")
++     got = dst.stat().st_size
++     if got != size:
++         dst.unlink(missing_ok=True)
++         raise RuntimeError(f"拼接后大小不对：{got} ≠ {size}")
+
+
+─── scripts/eval_corpus/fetch_classroom_sim.py:220-220 ───
+[documentation · low] 注释里的条目数与代码不一致：`SFX` 实际只有 **37** 条（bed 12 + tone 2 + burst 23），这里和 `main()`
+里的「BBC 那 39 条约 2 分钟」都写成了 39 条。请把两处一并改回 37（若 39 是想把 `do_rir` 产出的 2 条 `tone_rvb2014_*.wav`
+也算进去，那它与「BBC」这个限定词也不符）。
+
+-     并发下（archive.org 单连接只给 ~100 KB/s，串行 39 条要一个多小时）。"""
++     并发下（archive.org 单连接只给 ~100 KB/s，串行 37 条要一个多小时）。"""
+

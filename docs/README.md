@@ -66,7 +66,7 @@
 | `DESIGN.md` | 深度工程笔记：每条性能数字、每个坑的原始记录。**「实测」数字的可信出处** |
 | `HANDBOOK.md` | ⭐ 从零上手的全景手册 |
 | `archive/` | 9 份某一天的快照，2026-09-24 → 09-30 |
-| `experiments/` | 20 个可复跑脚本 + `experiments/RESULTS-live-summary.md` |
+| `experiments/` | 20 个可复跑脚本 + `experiments/RESULTS-live-summary.md`；子目录 `experiments/classroom_sim_20261011/`＝**模拟课堂语料**（噪声/远场，怎么造 + 全部结果） |
 
 ## archive/ 是什么
 

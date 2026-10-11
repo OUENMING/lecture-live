@@ -147,5 +147,69 @@ class Percentile(unittest.TestCase):
         self.assertIsNone(M.percentile([], 50))
 
 
+class SegmentScore(unittest.TestCase):
+    """WER + 漏段 的口径（2026-10-11 从某个实验脚本提到 `stream_metrics`，两个实验共用）。
+
+    ⚠️ 这里的期望值全部**手算**：`normalize` 只做小写/去标点/数字转词，所以
+    "the model fits well" 就是 4 个词，分母一眼可数。
+    """
+
+    def test_perfect(self):
+        r = M.segment_score("the model fits well", "The model fits well.")
+        self.assertEqual(r["n"], 4)
+        self.assertEqual((r["wer"], r["lost_runs"], r["lost_words"]), (0.0, 0, 0))
+
+    def test_one_sub(self):
+        r = M.segment_score("the model fits well", "the modal fits well")
+        self.assertEqual((r["S"], r["D"], r["I"]), (0.25, 0.0, 0.0))
+        self.assertEqual(r["wer"], 0.25)
+
+    def test_insertion_only(self):
+        r = M.segment_score("alpha bravo charlie", "alpha bravo charlie delta")
+        self.assertEqual((r["I"], r["wer"]), (1 / 3, 1 / 3))
+        self.assertEqual(r["lost_words"], 0)
+
+    def test_lost_run(self):
+        # 参考 10 词、假设只有前 5 词 → 一处漏段（≥5 词、且没被别的词顶上）、5 词
+        r = M.segment_score("alpha bravo charlie delta echo foxtrot golf hotel india juliet",
+                            "alpha bravo charlie delta echo")
+        self.assertEqual((r["lost_runs"], r["lost_words"]), (1, 5))
+        self.assertEqual((r["lost_pct"], r["wer"]), (0.5, 0.5))
+        self.assertEqual(r["examples"], ["foxtrot golf hotel india juliet"])
+
+    def test_whole_reference_missing(self):
+        # 参考 6 词（≥minrun）整段没出现 → 一处漏段、6 词全丢
+        r = M.segment_score("alpha bravo charlie delta echo foxtrot", "")
+        self.assertEqual((r["D"], r["wer"]), (1.0, 1.0))
+        self.assertEqual((r["lost_runs"], r["lost_words"]), (1, 6))
+
+    def test_short_reference_fully_missing_is_not_a_lost_run(self):
+        # 只有 3 词的参考即使整段没出现，也**不算**漏段（< minrun）—— 判据是"整段丢"，
+        # 不是"有词没对上"；手算期望值写错一次才发现这条边界，留着当钉子
+        r = M.segment_score("alpha bravo charlie", "")
+        self.assertEqual((r["wer"], r["lost_runs"], r["lost_words"]), (1.0, 0, 0))
+
+    def test_minrun_boundary(self):
+        # 掉 4 个词不算漏段（minrun=5），掉 5 个才算 —— 只差一个词，判据必须卡在这儿
+        ref = "one two three four five six seven eight nine"
+        four = M.segment_score(ref, "one two three four five")
+        self.assertEqual((four["lost_runs"], four["D"]), (0, 4 / 9))
+        five = M.segment_score(ref, "one two three four")
+        self.assertEqual((five["lost_runs"], five["lost_words"]), (1, 5))
+
+    def test_replaced_run_is_not_lost_if_enough_words_land(self):
+        # 参考 6 词整块被 3 个词顶掉（3 > 6×0.3）→ 不算"漏"，只算替换
+        r = M.segment_score("alpha bravo charlie delta echo foxtrot", "whiskey tango uniform")
+        self.assertEqual(r["lost_runs"], 0)
+        self.assertEqual((r["S"], r["D"]), (0.5, 0.5))
+
+    def test_empty_reference_has_no_wer(self):
+        # 参考稿空 → 没有分母：返回 None，**不能**抛 ZeroDivisionError（与 wer() 同规矩）
+        r = M.segment_score("", "anything at all")
+        self.assertIsNone(r["wer"])
+        self.assertIsNone(r["lost_pct"])
+        self.assertEqual(r["n"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

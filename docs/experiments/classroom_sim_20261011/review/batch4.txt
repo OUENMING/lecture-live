@@ -1,0 +1,14 @@
+Review partially complete: 2 finding(s); 5 of 6 selected item(s) failed.
+
+─── scripts/stream_eval.py:55-56 ───
+[maintainability · low] 定稿装配收口到 `load_final_engine` 之后，`main()` 里 `from asr import load_asr,
+load_final_asr` 的 `load_final_asr` 已经没有任何引用了（原来的 `asr_f = load_final_asr(...)`
+那行被删掉，改由这里装配）。它现在是一处未使用导入，建议从 `main()` 的 import 行里去掉 `load_final_asr`，避免与这里函数内的同名导入重复、也免得 lint 报警。
+
+
+
+─── scripts/stream_eval.py:197-198 ───
+[documentation · low] 新增 `--final cloud` 与 `--draft` 后，文件头的用法说明（第 6 行 `[--final
+whisper|parakeet]`）没同步：既缺 `cloud`，也没写 `--draft`。注释与代码不一致会误导读者（尤其本轮重点就是让大家别再拿旧引擎的口径读数字），建议把这一行补全。
+
+

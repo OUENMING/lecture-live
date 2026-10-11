@@ -22,17 +22,28 @@ HIST_BINS = 81      # [-80, 0]，含两端
 
 
 # ---------- 音频解码(ffmpeg, 任意格式 -> 16kHz mono f32) ----------
-def load_file(path: str) -> np.ndarray:
-    """把任意音频文件解码成 16kHz 单声道 float32 [-1,1]。用 ffmpeg。"""
+def load_file(path: str, *, start: float = 0.0, dur: float = 0.0,
+              timeout: float = 300.0) -> np.ndarray:
+    """把任意音频文件解码成 16kHz 单声道 float32 [-1,1]。用 ffmpeg。
+
+    ⭐ **全仓唯一的解码入口**（评测工具也走这里，免得各写一份 ffmpeg 命令行）。
+    `start` 走**输入定位**（`-ss` 放在 `-i` 前），`dur` 走**输出时长**（`-t` 放在 `-i` 后）——
+    两者配合起来，取一条 40 分钟视频里的 5 分钟就不必把整条 H.264 解完
+    （实测 9.5 s → 1.0 s，峰值内存也少一大截）。⚠️ 说清楚是因为这俩语义不同：
+    只有 `-ss` 是"跳到那儿再开始"，`-t` 是"解够这么久就停"。
+    """
+    cmd = ["ffmpeg", "-nostdin", "-v", "error"]
+    if start:
+        cmd += ["-ss", f"{float(start):.3f}"]
+    cmd += ["-i", str(path)]
+    if dur:
+        cmd += ["-t", f"{float(dur):.3f}"]
+    cmd += ["-f", "f32le", "-acodec", "pcm_f32le", "-ac", "1", "-ar", str(SR), "-"]
     try:
-        p = subprocess.run(
-            ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path),
-             "-f", "f32le", "-acodec", "pcm_f32le", "-ac", "1", "-ar", str(SR), "-"],
-            capture_output=True, timeout=300,
-        )
+        p = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         # 损坏/超大/含异常流的文件会让 ffmpeg 挂住不退出 —— 而调用方假定这层不阻塞
-        raise RuntimeError(f"ffmpeg 解码超时(300s): {path}") from e
+        raise RuntimeError(f"ffmpeg 解码超时({timeout:g}s): {path}") from e
     if p.returncode != 0:
         err = p.stderr.decode("utf-8", "ignore").strip()
         raise RuntimeError(f"ffmpeg 解码失败({p.returncode}): {path}"

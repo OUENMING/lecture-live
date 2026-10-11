@@ -1,0 +1,44 @@
+Review complete: 4 finding(s) across 1 selected item(s).
+
+─── scripts/eval_corpus/make_classroom_sim.py:396-396 ───
+[bug · high] `bed_only_snr_db` 的口径不对：`bed_rms_db` 是 `build_noise` 里**缩放前**的底噪电平（恒等于 `BED_RMS_DB =
+-30`），而输出文件里的噪声已被 `nz = noise * sqrt(ref_pow*10**(-target/10)/n_pow)` 整体缩放到目标 SNR。直接相减得到的是「-30 dBFS
+的音源 vs 语音功率」，既不是输出里的底噪-语音比，也**与档位无关**——对某个场景的 12 份会算出完全一样的值（已落盘的
+`docs/experiments/classroom_sim_20261011/results/per_file_hall.json` 里 12 条确实都是 `-10.69`）。这与
+docstring「事件会把整条噪声的 RMS 抬起来，所以要单独报底噪」的意图矛盾（底噪单独 SNR 应随档位变化）。建议把 nz 的整体缩放也算进去，例如用 `snr_added +
+10log10(n_pow / bed_pow)`（`n_pow` 与 `bed_rms_db` 同属缩放前域）。
+
+-                     "bed_only_snr_db": round(bed_rms_db - 10.0 * np.log10(ref_pow), 2),
++                     "bed_only_snr_db": (None if snr_added is None else round(
++                         snr_added + 10.0 * np.log10(n_pow / (10.0 ** (bed_rms_db / 10.0))), 2)),
+
+
+─── scripts/eval_corpus/make_classroom_sim.py:328-328 ───
+[bug · medium] 长度校验的容差与后续用法不一致：这里允许 `len(speech)` 低至 `0.95*CLIP_S*SR`，但下面 `nz` 的长度固定为
+`int(dur_s*SR)`，`y = sp + nz`（以及 `sp`/`mask` 的对齐）都要求两者**严格等长**。一旦 `load_file` 返回介于 `[0.95n, n)`
+之间（或略多于 `n`，如 `-ss`/`-t` 取整误差），就会抛出难以定位的 broadcast ValueError。建议校验后用 `np.pad`/切片把 `speech` 对齐到精确的
+`int(CLIP_S*SR)`。
+
+-         if len(speech) < CLIP_S * SR * 0.95:
++         n_samp = int(CLIP_S * SR)
++         if len(speech) < n_samp * 0.95:
+
+
+─── scripts/eval_corpus/make_classroom_sim.py:16-16 ───
+[documentation · low] 注释给出的「实际扫出」区间与实测不符：已落盘的
+manifest（`docs/experiments/classroom_sim_20261011/results/per_file_hall.json`）与实验 README §2.2 记的是
+**+20.4 … −3.4 dB**，而不是这里的 −10 dB。原因是座位链的回声增益把自由场衰减抵掉了大半——实测 `snr_added_db`（标称 20 dB 档）为 front 23.93
+/ mid 21.43 / back 19.99 dB，即前排到后排只差 ~4 dB（`att_db` 却是 0/−7.22/−12.55），`snr_total_db` 的实测区间同样是 20.36
+… −0.06 dB。既然是「实际扫出」，建议按实测值写，免得后面拿这条注释去解释档位覆盖面。
+
+- 所以实际扫出的是 +20…−10 dB 上下（每份文件都**实测**并写进 manifest，别拿标称值当实测值）。
++ #     所以实际扫出的是 +20.4 … −3.4 dB（实测值见 manifest/README：座位链的回声增益抵掉了大半
++ #     自由场衰减，前排到后排的 SNR 只差 ~4 dB，报数时别按 −20log10(d) 外推）。
+
+
+─── scripts/eval_corpus/make_classroom_sim.py:359-359 ───
+[maintainability · low] 死变量：循环体里只用 `pos_name`（`rirs[pos_name]`），`pos`（RIR 文件名）从未被读取，建议直接遍历键。
+
+-         for pos_name, pos in sc["rir"].items():
++         for pos_name in sc["rir"]:
+

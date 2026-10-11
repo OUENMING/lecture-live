@@ -13,6 +13,7 @@
     `rewritten_beyond_k` 量的就是吸收后仍会被用户看见的回改。
 """
 from __future__ import annotations
+import difflib
 import math
 import re
 
@@ -93,6 +94,42 @@ def edit_ops(ref: list[str], hyp: list[str], free_hyp_prefix: bool = False) -> t
         prev = cur
     _, s, d, i = prev[m]
     return s, d, i
+
+
+def segment_score(ref_text: str, hyp_text: str, minrun: int = 5) -> dict:
+    """WER + 「漏段」（参考里连续 ≥`minrun` 词整段没出现在假设里）。
+
+    与 `wer()` 的分工：`wer()` 是逐词编辑距离（Levenshtein），这里是 `difflib` 的
+    块级 opcode —— 多出来的那个 `lost_*` 才答得了「整句整句地丢」这种失败模式
+    （噪声大到 VAD 抓不住语音时就是这样，见 `docs/experiments/classroom_sim_20261011/`）。
+    ⚠️ 两个 `wer` 数**不等**（块级 opcode 与逐词 DP 在"整块替换"上算法不同），
+    so 报数时必须说清用的是哪个。这里是 `docs/experiments/cloud_asr_20261010/ocw_eval.py`
+    与 `classroom_sim_20261011/run_eval.py` **共用**的那一份，口径唯一。
+    """
+    r, h = normalize(ref_text), normalize(hyp_text)
+    sm = difflib.SequenceMatcher(None, r, h, autojunk=False)
+    S = D = I = 0
+    runs: list[str] = []
+    lost = 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        a, b = i2 - i1, j2 - j1
+        if tag == "replace":
+            S += min(a, b); D += max(0, a - b); I += max(0, b - a)
+        elif tag == "delete":
+            D += a
+        elif tag == "insert":
+            I += b
+        if tag in ("delete", "replace") and a >= minrun and b <= a * 0.3:
+            runs.append(" ".join(r[i1:i2])); lost += a
+    n = len(r)
+    if not n:
+        # 与 `wer()` 同一条规矩：**没有分母就不报数**（返回 None，不返回 0，
+        # 也不让调用方拿到 ZeroDivisionError）。参考稿空掉是会发生的：
+        # 语料生成漏了字幕、或人工字幕整段被过滤掉。
+        return dict(n=0, wer=None, S=None, D=None, I=None,
+                    lost_runs=0, lost_words=0, lost_pct=None, examples=[])
+    return dict(n=n, wer=(S + D + I) / n, S=S / n, D=D / n, I=I / n,
+                lost_runs=len(runs), lost_words=lost, lost_pct=lost / n, examples=runs[:6])
 
 
 def wer(ref_text: str, hyp_text: str) -> dict:

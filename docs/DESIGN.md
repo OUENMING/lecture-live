@@ -54,6 +54,35 @@
 > - **Qwen3-1.7B → 默认**(最快、格式稳)
 > 已试 `set_cache_limit`/`set_memory_limit`/`max_kv_size` 均无法突破 4B。
 
+### 为什么本地定稿不跑苹果神经引擎（ANE）—— 2026-10-11 复核
+
+被问过两次，记录在这儿，免得再查一遍。
+
+**① 历史决定（2026-10-04，为省电调研那轮）**：当时候选三个，全部放弃 ——
+- **WhisperKit**（Argmax，Core ML/**ANE**，`large-v3-v20240930_626MB`）：**Swift 包**，且要 **macOS 14+**
+  （本项目要支持 macOS 13）→ 从 Python 侧接入等于自带一套 Swift 桥。
+- **mlx-whisper**：依赖 **torch** → 不引。
+- **whisper-turbo-mlx**：**钉死 numpy / huggingface_hub 版本** → 与现有依赖冲突。
+
+**② 今天（2026-10-11）在本机实测**：`sherpa_onnx.OfflineRecognizer.from_whisper(...)` **本来就有
+`provider` 参数**（默认 `'cpu'`），所以"切到 CoreML"是一行的事 —— 于是直接试了：
+
+| provider | 加载 | 7 s 音频解码 | RTF | 文本 |
+|---|---|---|---|---|
+| `cpu`（现在） | 1.44 s | 1.90 s | **0.271** | `combination is to take X as one of those and two of these.` |
+| `coreml` | 6.61 s | 8.48 s | **1.211** | 同上（只差大小写） |
+
+**能跑，但慢 4.5 倍**（加载还慢 4.6 倍）。原因：CoreML EP 拿到的是一份 **int8 ONNX**，
+那不是 Core ML/ANE 想吃的形状（ANE 要 fp16 + Core ML 原生格式，WhisperKit 就是专门为它编译的），
+于是算子被拆散、大半回落到 GPU/CPU。**结论：在现有这份 ONNX 权重上"上 ANE"是负优化。**
+
+**③ 真想上 ANE 的正确路径**是 WhisperKit 那条（Core ML 原生格式；Argmax 的 ICML 2025 报告
+ANE 上 large-v3-turbo 2.2% WER + 实时流式）。今天它比 2026-10-04 好接入了 —— 有
+`brew install whisperkit-cli`、**本地 HTTP 服务（OpenAI 兼容，localhost:50060）**、Python 客户端，
+不必自己写 Swift。代价仍是：**多一个 Homebrew 二进制 + 一个常驻服务进程**，
+与"朋友 git clone 就能跑、不装 Homebrew"的约束冲突；而且 **3.9.0 起定稿主路径已经是云端**，
+本地只是断网兜底 —— ANE 的收益只在"断网 / 关掉云端"那部分时间上兑现。**要不要付这个成本，待 Owen 拍板。**
+
 ## 安装
 
 ```bash

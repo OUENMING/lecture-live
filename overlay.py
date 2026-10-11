@@ -1838,12 +1838,17 @@ class Overlay:
         #    加这个按钮之前只切隐藏的那个；加了之后切到一个**看得见**的，那是退化。
         pairs = []
         for b in self._bar:
-            # ⚠️ 胶囊先记下旧宽度再 sizeToFit（sizeToFit 会立刻改 frame，过渡就没有起点了）
+            # ⚠️ sizeToFit 只拿来**量**文字宽，量完立刻把 frame 还原：它会当场改写 frame
+            #    （裸文字宽、矮一截），不还原的话 `_place_bar` 的过渡就从这个缩水的 frame 起跑，
+            #    切档时胶囊先闪窄再长开。
+            old = b.frame()
             if b is self._btn_trans:
-                _chip_old = b.frame()
+                _chip_old = old
             b.sizeToFit()
+            fit_w = b.frame().size.width
+            b.setFrame_(old)
             extra = MODE_CHIP_PAD if b is self._btn_trans else 0.0
-            pairs.append((b, max(b.frame().size.width + 10.0 + extra, 28.0)))
+            pairs.append((b, max(fit_w + 10.0 + extra, 28.0)))
         need = sum(w + gap for _, w in pairs)
         row = pairs
         if self._width - pad - need < pad:

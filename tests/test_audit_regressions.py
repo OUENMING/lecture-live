@@ -666,6 +666,37 @@ class R6_OverlayConstructs(unittest.TestCase):
         finally:
             o.close()
 
+    def test_mode_chip_transition_starts_from_old_frame(self):
+        """点胶囊切档的过渡要从**旧 frame** 起跑。`_layout` 用 `sizeToFit()` 量字宽，而它会
+        当场改写 frame（裸字宽、16 高）—— 不还原，动画就从缩水的那个 frame 开始（2026-10-12）。"""
+        try:
+            import overlay
+            from overlay import Overlay
+        except Exception as e:                       # noqa: BLE001
+            self.skipTest(f"AppKit 不可用, 跳过: {type(e).__name__}: {e}")
+        o = Overlay()
+        seen = []
+        real_place = o._place_bar
+
+        def spy(frames, chip_old):
+            if o._chip_anim:
+                f = o._btn_trans.frame()
+                seen.append(((chip_old.size.width, chip_old.size.height),
+                             (f.size.width, f.size.height)))
+            return real_place(frames, chip_old)
+        rm = overlay._reduce_motion
+        try:
+            overlay._reduce_motion = lambda: False
+            o._place_bar = spy
+            for _ in range(3):
+                o._cycle_translate()
+            self.assertEqual(len(seen), 3, "点了三下胶囊，过渡分支一次都没走到")
+            for old, start in seen:
+                self.assertEqual(start, old, "过渡起点不是切档前的胶囊 frame")
+        finally:
+            overlay._reduce_motion = rm
+            o.close()
+
     def test_rule_changes_colour_on_focus(self):
         """细线聚焦变亮、失焦复位(白 α0.18 <-> α0.45)。**不改色相** ——
         暖黄已被术语行占用, 聚焦只是把细线提到草稿那一档。"""

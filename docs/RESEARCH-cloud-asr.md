@@ -462,3 +462,35 @@ UTC 13:16 那一轮（每种 4 段）：北京 p50 **7.00 s**（网关 5.93）�
 - 社区低延迟做法 = **流式 + 客户端强制定稿**（Deepgram `Finalize` / Speechmatics `ForceEndOfUtterance` / Soniox `finalize`）：Pipecat stt-benchmark 段末到定稿中位 0.25–0.37 s；HTTP 整段上传的 Groq 在 Pipecat 源码里记的 P99 1.54 s。
 - 候选（待实测）：Deepgram Nova-3 EU（$200 不过期；我们切片实测 12.1% 存疑）、Speechmatics（$100、实时音频不存）、AssemblyAI EU（$50；免费期不能退出训练）。
 
+
+### 15.3 千问北京 vs 新加坡：连续采样（2026-10-11 13:16–14:43 UTC，每 15 分钟 4 段，从都柏林发）
+
+| | 6 轮的总 p50 | 网关 p50 | 模型 p50 |
+|---|---|---|---|
+| 北京 `dashscope.aliyuncs.com` | 2.79–7.00 s | 2.0–5.9 s | 0.48–0.58 s |
+| 新加坡 `dashscope-intl.aliyuncs.com` | 1.16–1.98 s | 0.28–0.53 s | 0.59–0.71 s |
+
+北京慢在网关排队且随时段漂；新加坡 24 段最大 2.13 s。结论不变：Worker 走新加坡（`5ae90ee`）。
+
+## 16. 三家流式 / 同步供应商评测（2026-10-11，OCW 322 段，同一切段同一打分）
+
+流式 = PCM16 按 1 倍实时推整节课，在每个生产段 `t1` 发该家「强制定稿」；延迟 = 强制定稿发出 → 该段定稿到达。
+逐段 = 现架构（每段一次 HTTP）。WER / 漏段已用 `ocw_eval.py` 对原始 hyp 复算过；延迟取各脚本日志。
+
+| 方案 | WER | 漏段 | 延迟 p50 / p95 / max | 硬伤 |
+|---|---|---|---|---|
+| Groq whisper-large-v3 逐段（现首选，基线） | 10.2% | 0.4% | 0.42 / 0.60 s | — |
+| **Speechmatics 流式 enhanced**（`eu.rt`，`max_delay 0.7`） | **10.0%** | **0.1%** | **0.11 / 0.13 / 0.23 s** | 免费档实时并发 **2 路**（握手 `Info` 实测）；数据留存 / 训练开关文档未写（未核实） |
+| Speechmatics 流式 standard | 11.8% | 0.1% | 0.09 / 0.10 / 0.21 s | 不如 enhanced 准 |
+| Speechmatics 批量 melia-1 | 9.9% | 0.1% | 1.20 / 1.37 / 12.7 s | 异步作业（提交→轮询），每段 ≥1.2 s |
+| AssemblyAI U3.5 Pro 流式 balanced（EU） | 9.3% | 1.0% | 0.18 / **6.05** / 12.9 s | `ForceEndpoint` 对段尾 1.5 s 内才开口的词无效（约 10% 段），等下一次定稿 |
+| AssemblyAI Sync（U3.5 Pro，EU，WAV） | 10.2% | **1.6%** | 0.34 / 0.51 / 0.64 s | 1.2–1.5 s 短段返回空；不收 Opus；免费号不能关训练（EU 端点按文档不进训练，未核实） |
+| AssemblyAI Universal Streaming English | 13.4% | 0.6% | — / 4.19 / 12.1 s | 准确率差、切碎 |
+| Deepgram Nova-3 逐段（EU，Opus，`smart_format`，`mip_opt_out`） | 12.9% | 0.2% | 0.17 / 0.42 / 2.98 s | 准确率比 Groq 差 2.7 点；WAV / 关 `smart_format` 都一样 |
+| Deepgram Nova-3 流式（EU，`Finalize`） | 13.1% | 1.0% | 0.09 / 0.16 / 0.54 s | 同上，准确率不够 |
+
+结论：
+- **逐段形态里没有能替 Groq 的**：AssemblyAI Sync 漏段 4×，Deepgram 错词率高，Speechmatics 批量太慢。
+- **流式 + 客户端强制定稿确实把延迟压到 ~0.1 s**（社区做法成立）；三家里只有 Speechmatics enhanced 准确率也过线。
+  但它要求整节课常开一条 WebSocket（架构与 R2 逐段 HTTP 不同），且免费档全局只有 2 路并发 → 只适合当以后的升级方向，不进 R2。
+- 脚本：`docs/experiments/cloud_asr_20261010/vendor_*.py`；原始返回不入库。

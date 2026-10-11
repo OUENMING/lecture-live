@@ -14,6 +14,30 @@ sherpa-onnx**，零新依赖）后，同一节课前 240 s 实测回改率 **0.5
 **第一阶段只换草稿层**；定稿（Whisper）、断句（Silero + `Segmenter`）、翻译、UI 一概不动；
 任何一步失败都退回今天的 Parakeet 草稿，**课照常上**。
 
+## 0.1 2026-10-11 更新（R2 收尾后、开工 P1 前）
+
+**P0 模型对比**（`docs/experiments/r3_p0_models.py`，OCW 322 段，M1 Pro 2 线程 int8；产物在会话 scratchpad，未入库）：
+
+| 模型 | OCW WER / 漏段 | 回改率（≤10 s 草稿，1 s 节拍） | 每次更新 p50/p95 | 内存增量 | 样本 |
+|---|---|---|---|---|---|
+| ⭐ Nemotron EN 560 ms | **14.4% / 0.9%**（复算核对过） | **0.69%** | 145 / 150 ms | +1073 MB | **全 322 段** |
+| Nemotron EN 1120 ms | 10.3% / 1.7%（同 20 段 560 ms 也是 10.3%） | 0.94% | 90 / 93 ms | ≈ 同上 | 前 20 段 |
+| Nemotron 3.5 多语种 560 ms（`language=en`） | 11.6% / 1.7% | 1.54% | 142 / 146 ms | +1175 MB | 前 20 段 |
+| Parakeet 现状（10 s 滑窗） | 13.1%（全课文档值 14.3% / 2.6%） | **22.3%** | 169 / 310 ms | +1030 MB | 前 20 段 |
+
+- **定 560 ms**：1120 ms 在同 20 段 WER 相同，达不到「低 ≥1 个百分点」的换档条件；它省算力，但每次出词多等一个 chunk。
+  ⚠️ 1120 ms / 3.5 / Parakeet 的全课数没跑完（电池 46% → 38% 时按规矩停了），插电后补：`scratchpad/r3p0/runall.sh` 后三行。
+- **Nemotron 3.5 不换**：英文三项都更差、内存多约 150 MB；App 里的 sherpa-onnx 1.13.8 能跑它，留作多语种课的选项。
+- **Moonshine v2**：sherpa-onnx 只有离线实现，没有流式 → 不考虑。
+- ⚠️ **段尾要补静音**：逐段 `input_finished` 前不补尾时 1120 ms 会吞掉段尾近 1 s 的词（20 段 WER 16.2%），补 2.0 s 后 560 / 1120 都是 10.3%。
+  草稿层本身不受影响（草稿是段内中间结果），但 **P2 拿流式结果当断网定稿兜底时必须补尾**。
+
+**外部审查（2026-10-11）里并入本计划的点**（逐条核过，详见当次对话的核实结论）：
+- P1 顺手：`ParakeetASR` 用到时才加载权重（启动仍校验四个文件，fail-fast 不变）——**先量** Parakeet 实际常驻内存再定（「~700 MB」未测）。
+- P2：「标点 + 能量低谷」双锚切段（Nemotron 有 `.timestamps`，§9 已核）；断网时用流式草稿的全文当定稿兜底（记得补尾）；
+  R3 真课过闸后再评估退役 Parakeet。
+- 不做：把 1120 ms 当「白送的质量提升」（官方卡平均 WER 7.07 → 6.93，只差 0.14 个百分点）；RMS 静音门（OCW 322 段 0 段会被挡）。
+
 ## 1. 调研结论：选哪个模型
 
 | 候选 | 形态 | 能不能直接用 | 结论 |
@@ -99,9 +123,9 @@ partial_worker:  buf, tag = latest.take
 | 1 | `draft_engine.py`（**新**） | — | §4.1 全文 |
 | 2 | `models.py` | `MODELS: tuple[Model, ...] = (PARAKEET, VAD, WHISPER, QWEN)` | 加 `NEMOTRON` 一条（§4.2） |
 | 3 | `fetch_model.py` | `def fetch_whisper(` · `KEYS = (` · `def fetch(key` · `PINS = {` | 泛化 tar 下载 + 加 `nemotron` 分支与 sha（§4.3） |
-| 4 | `update.py` | `missing = [m for m in doctor.MODELS if not doctor.model_present(m.path)]`（:934） | **只列 `m.required`**（§4.4 —— 不改的话每个用户的更新卡片都会多一条假警告） |
+| 4 | `update.py` | — | ✅ **已做**（`362b25b`，2026-10-11，`tests/test_update.py` B14） |
 | 5 | `main.py` | `class _Latest:`（:531） | `put(buf, tag=None)` + `taken_tag`（§4.5a） |
-| 6 | `main.py` | `asr = load_asr(args.model_dir)`（:1125） | 紧随其后建 `draft`（§4.5b） |
+| 6 | `main.py` | `asr = load_asr(args.model_dir)`（2026-10-11 在 :1221） | 紧随其后建 `draft`（§4.5b） |
 | 7 | `main.py` | `on_partial=lambda buf: latest.put(buf),`（:1672） | 带上段号（§4.5c） |
 | 8 | `main.py` | `t = asr.transcribe(buf[-PARTIAL_MAX_S * SR:])`（:1451，在 `def partial_worker` 里） | 换成 `draft.transcribe`；`drafts` 元组加 `engine`（§4.5d） |
 | 9 | `main.py` | `def _pair(item)`（:1875）· `drain()` 里 `live.draft(` · `live.close(`（:2359） | 元组 7 项；`engine` 传给现场采集；收尾 summary 记引擎（§4.5e） |
@@ -208,7 +232,7 @@ MODELS = (PARAKEET, VAD, WHISPER, QWEN, NEMOTRON)
 - `KEYS` 加 `"nemotron"`；`fetch()` 加分支：`return fetch_whisper(path.parent, models.NEMOTRON_URL, pin=PINS["nemotron"], say=say)`。
 - 文件头用法行 `<vad | whisper | parakeet | llm>` 补上 `nemotron`（`main()` 打印的是它）。
 
-### 4.4 `update.py`（顺手修一个现成的错）
+### 4.4 `update.py`（顺手修一个现成的错）—— ✅ 已做（`362b25b`）
 
 `:934` 的 `missing` 现在包含**可选**模型 → 卡片会写「下载模型（1 个）… 缺模型的话课上会直接起不来」，
 而 `run_step` 那边（`:1047` `if not m.required: continue`）**根本不下可选模型**。今天 Qwen 缺失时就已经这样；
@@ -226,7 +250,8 @@ def put(self, buf, tag=None) -> None:
     self._ev.set()
 # take() 里与 taken_t 同一把锁：self.taken_tag = self._tag
 ```
-**b.** 紧跟 `asr_final = load_final_asr(...)` 那个 `try` 块**之后**（不要放进去 —— 它失败不该 `return`）：
+**b.** 紧跟 `asr = load_asr(args.model_dir)` 那个 `try` 块**之后**（不要放进去 —— 它失败不该 `return`）。
+⚠️ 2026-10-11：R2 已删掉 `asr_final` / `load_final_asr`，定稿改由 `final = final_asr.load_final(args.final_model_dir, asr, …)` 装配（在 `asr` 之后约 90 行）——`draft` 要在它**之前**建好，R2 的本地兜底和 R5 空串复核用的是 `asr`（Parakeet），P1 不改这条：
 ```python
 draft = draft_engine.load_draft_engine(asr, window_samples=PARTIAL_MAX_S * SR)
 echo(f"✍️ 草稿引擎：{draft.name}" + (f"（{draft.reason}）" if draft.reason else ""))

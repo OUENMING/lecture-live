@@ -16,7 +16,7 @@ import os
 ENDPOINT = "https://asr.bldcam.page/v1/transcribe"
 
 #: **公开**令牌。⚠️ 不是密钥（见文件头）。部署时由主会话替换为 `secrets.token_hex(16)`。
-TOKEN = "REPLACE_AT_DEPLOY_0000000000000000"
+TOKEN = "cl_pub_67edc45b6ba8c20cf96e54dfb27ecc39"
 
 
 def endpoint() -> str:

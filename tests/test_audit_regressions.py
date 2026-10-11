@@ -2253,5 +2253,69 @@ class R18_RepoModulesLiveAtRepoRoot(unittest.TestCase):
             f"{ {k: sorted(v) for k, v in bad.items()} }")
 
 
+class R25_DraftDanglingAndCarrySplit(unittest.TestCase):
+    """R1 方案 B/E：草稿送翻前削悬挂词；carry 只看最后一句（纯函数）。"""
+
+    def test_strip_dangling(self):
+        sd = main_mod.strip_dangling
+        self.assertEqual(sd("a b c of the"), "a b c")
+        self.assertEqual(sd("a b c."), "a b c.")
+        self.assertEqual(sd("of the"), "of the")
+        self.assertEqual(sd("See what it can be. And"), "See what it can be.")
+
+    def test_split_carry_only_looks_at_last_sentence(self):
+        sc = main_mod.split_carry
+        self.assertEqual(sc("First done. Then we go to the"),
+                         ("First done.", "Then we go to the"))
+        long_done = " ".join(["word"] * 29) + "."
+        ready, tail = sc(long_done + " and then the")
+        self.assertEqual(tail, "and then the")
+        self.assertEqual(ready.split(), long_done.split())      # 前面立刻出，一个词不少
+        # 以实词结尾的半句：不扩大范围
+        self.assertEqual(sc("First done. Then we go home"), ("First done. Then we go home", ""))
+        self.assertEqual(sc(""), ("", ""))
+
+
+class R26_DraftTranslationThread(unittest.TestCase):
+    """R1 方案 C/5b/5c：草稿译文独立线程；Overlay.finalize 可保留草稿槽；carry 补发带自己的段号。"""
+
+    @staticmethod
+    def _worker_src(name: str) -> str:
+        import inspect
+        import re
+        src = inspect.getsource(main_mod.run)
+        m = re.search(rf"^( *)def {name}\(.*?(?=^\1def |^\1# ---- |\Z)", src, re.S | re.M)
+        assert m, f"{name} 没找到"
+        return m.group(0)
+
+    def test_final_worker_no_longer_translates_drafts(self):
+        self.assertNotIn("translate_draft", self._worker_src("final_worker"),
+                         "草稿译文又被挪回 final_worker 的空闲分支了（定稿优先会挤掉它）")
+        # 草稿译文线程已抽成 draft_translate.DraftTranslator；run() 里只剩接线
+        import inspect
+        import draft_translate
+        self.assertIn("DraftTranslator(", inspect.getsource(main_mod.run))
+        self.assertIn("translate_draft", inspect.getsource(main_mod.run))
+        self.assertTrue(callable(draft_translate.DraftTranslator.run))
+
+    def test_force_emit_carry_passes_its_own_seg(self):
+        self.assertIn('carry["seg"]', self._worker_src("_force_emit_carry"),
+                      "carry 补发没带自己的段号 → fin_seg 会被推到正在讲的下一段")
+
+    def test_overlay_finalize_clear_draft_flag(self):
+        try:
+            from overlay import Overlay
+            o = Overlay()
+        except Exception as e:                       # noqa: BLE001
+            self.skipTest(f"AppKit 不可用: {type(e).__name__}: {e}")
+        o.add_draft("next segment draft")
+        o.draft_zh("下一段草稿")
+        o.finalize("old en", "旧译文", clear_draft=False)
+        self.assertEqual(o._draft, "next segment draft")
+        self.assertEqual(o._draft_zh_val, "下一段草稿")
+        o.finalize("old2", "旧2")                    # 默认 True：照旧清
+        self.assertEqual((o._draft, o._draft_zh_val), ("", ""))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

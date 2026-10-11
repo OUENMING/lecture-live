@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from capture import load_source, SR
 from vad import Segmenter
 import draft_policy
+from draft_translate import DraftTranslator, DraftView
 import livemetrics
 from asr import load_asr, load_final_asr, is_degenerate
 from translator import load_translator
@@ -78,6 +79,18 @@ def is_incomplete(text: str) -> bool:
     return last in DANGLING_TAILS
 
 
+def strip_dangling(text: str, max_strip: int = 2) -> str:
+    """草稿送翻前削掉结尾 1–2 个悬挂词（"... the limit of" → "... the limit"）。
+    每削一个词都重新过 `is_incomplete`（口径一致，有句末标点就停）；削完不足 3 个词时不削。
+    只用于**草稿**，定稿不动。"""
+    words = (text or "").strip().split()
+    for _ in range(max_strip):
+        if len(words) <= 3 or not is_incomplete(" ".join(words)):
+            break
+        words.pop()
+    return " ".join(words)
+
+
 def all_settled(finalq, streamq, drafts, busy: bool, carry_text: str) -> bool:
     """收尾判据(停止/播完后的冲刷等待): 所有已收进来的语音都已变成落盘结果。
 
@@ -129,6 +142,18 @@ def split_sentences(text: str, max_words: int = 25) -> list[str]:
             final.append(" ".join(chunk))
             idx += max_words
     return final or [text]
+
+
+def split_carry(text: str, max_words: int = 25) -> tuple[str, str]:
+    """(立刻上屏的部分, 要挂起等下一段的半句)。只看**最后一句**：
+    它没有句末标点、以悬挂词结尾（`is_incomplete`）、且 < max_words 词，才挂起。"""
+    sents = split_sentences(text)
+    if not sents:
+        return "", ""
+    last = sents[-1]
+    if is_incomplete(last) and len(last.split()) < max_words:
+        return " ".join(sents[:-1]), last
+    return text, ""
 
 
 def now() -> str:
@@ -418,10 +443,15 @@ class EngineRouter:
                 self._fallback(e)
         return self._local.fix_stream(en, context, on_en)
 
-    def translate_draft(self, en, on_zh=None) -> str:
+    @property
+    def uses_cloud(self) -> bool:
+        """只读: 当前是否走云端(草稿译文线程据此决定要不要给定稿让路)。"""
+        return self._use_cloud
+
+    def translate_draft(self, en, on_zh=None, context=None) -> str:
         if self._use_cloud:
             try:
-                return self._cloud.translate_draft(en, on_zh)
+                return self._cloud.translate_draft(en, on_zh, context=context)   # 本地版不收 context
             except Exception as e:                # noqa: BLE001
                 self._fallback(e)
         return self._local.translate_draft(en, on_zh)
@@ -472,7 +502,8 @@ class TerminalUI:
         echo(f"[{now()}] ▸ {en}")
 
     def draft_zh(self, zh: str):
-        echo(f"[{now()}]   ↳ {zh}")
+        if zh:                                   # 空串 = "清掉上一段的中文草稿", 终端没有可清的
+            echo(f"[{now()}]   ↳ {zh}")
 
     def terms(self, hits):
         echo(f"[{now()}]   {format_gloss(hits)}")
@@ -483,7 +514,7 @@ class TerminalUI:
     def stream_en(self, delta: str):
         self._en += delta
 
-    def finalize(self, en: str, zh: str):
+    def finalize(self, en: str, zh: str, *, clear_draft: bool = True):   # clear_draft 终端无草稿槽, 忽略
         echo(f"[{now()}] ✅ {en}\n         🌐 {zh}")
         self._zh = self._en = ""
 
@@ -1307,11 +1338,12 @@ def run(args) -> None:
     #    `drafts` 只有这里一个产出方、`drain()` 一个消费方，改形状是局部的；
     #    `drain()` 侧的 `_pair()` 仍兼容裸字符串与二元组（替身/老测试）。
     drafts: "queue.Queue[tuple]" = queue.Queue()             # (原文, 上屏, buf_s, 耗时, seg) -> 主线程
-    drafts_zh: "queue.Queue[str]" = queue.Queue()       # 草稿译文 -> 主线程
+    drafts_zh: "queue.Queue" = queue.Queue()            # 草稿译文 (seq, seg, zh) -> 主线程
     streamq: "queue.Queue[tuple]" = queue.Queue()       # ("zh"/"en"/"final"/"terms"/"notice"/"answer"/"answer_done"/"summary") -> 主线程
     # ⚠️ 加新 tag **必须**在 `drain()` 加同分支 —— 它是唯一的分发点，漏改即静默丢弃。
     #    2026-09-30 起 `drain()` 末尾有一条**兜底告警**（未识别的 tag 会 echo 一行）。
-    draftq: "queue.Queue" = queue.Queue(maxsize=1)      # 待译草稿(只保留最新)
+    draft_view = DraftView()                            # 草稿译文的过期判据(只在主线程 drain() 里用)
+    draft_stats = draft_view.stats                      # 丢弃/让路/出错计数(收尾打印)
     properq: "queue.Queue" = queue.Queue()              # 待查专有名词
     answerq: "queue.Queue[str]" = queue.Queue()         # 待讲解的问题(Phase 2)
 
@@ -1432,18 +1464,21 @@ def run(args) -> None:
             from draft_stable import DraftStabilizer
             stab = DraftStabilizer(int(_hb))
         stab_gen = 0
-        draft_policy_name = os.environ.get("CLASSLIVE_DRAFT_TRIGGER", "legacy").strip() or "legacy"
-        if draft_policy_name not in ("legacy", "clause"):
-            draft_policy_name = "legacy"
+        draft_policy_name = os.environ.get("CLASSLIVE_DRAFT_TRIGGER", "novel").strip() or "novel"
+        if draft_policy_name not in ("legacy", "clause", "novel"):
+            draft_policy_name = "novel"
+        draft_seq = 0                         # 送翻序号(drain() 丢弃比已显示的更旧的译文)
+        last_sent = ""                        # 上次送翻的草稿原文（未剥悬挂词；给 novel 数新词）
         prev_text = ""                        # 上一次的草稿原文（`draft_policy` 自己派生 append_only）
         while running.is_set():
             buf = latest.take(0.5)
             if buf is None or len(buf) == 0:
                 continue
             _t_put = latest.taken_t                  # 这份缓冲被交出来的时刻（量 `lag_s` 用）
-            # 定稿是关键路径(决定你多久看到中文), 且它要抢同一把 ASR 锁。
+            # 定稿是关键路径(决定你多久看到中文)。定稿走 Whisper 时两边是两把不同的
+            # ASR 锁, 不互抢; 只有 Parakeet 兜底(定稿退化回草稿模型)时才共用一把。
             # 有定稿在排队时让草稿这一轮退开: 草稿迟到 1s 无感, 定稿迟到直接
-            # 拖慢首字。定稿线程本来就把草稿译文排在定稿之后(见 final_worker)。
+            # 拖慢首字。草稿译文另有独立线程(DraftTranslator), 不再排在定稿之后。
             if not finalq.empty():
                 continue
             try:
@@ -1468,9 +1503,11 @@ def run(args) -> None:
                 # 新句子开始 -> 重置草稿节流。**必须重置**: last_len 是**上一句**
                 # 收尾时的词数, 新句若更短(如 20 词 vs 30 词), "新增 ≥6 词"永远
                 # 不成立 -> 整句拿不到即时中文("首字中文 ~3s"特性静默失效)。
-                if final_gen["n"] != last_gen:
-                    last_gen = final_gen["n"]
-                    last_tr, last_len = 0.0, 0
+                # ⚠️ 比较 `seg_gen`（草稿所属的音频段），不是 `final_gen`：后者要等上一段
+                #    定稿上屏才变（晚 2–4s；进 carry 时根本不变），会在新段讲到一半时清零节流。
+                if seg_gen["n"] != last_gen:
+                    last_gen = seg_gen["n"]
+                    last_tr, last_len, last_sent = 0.0, 0, ""
                 # 草稿译文: 距上次 ≥2.5s 且新增 ≥6 词才送(避免刷爆 LLM)
                 now = time.monotonic()
                 # 判据在 draft_policy.py（legacy = 原来的「≥2.5s 且新增 ≥6 词」，逐字等价，测试钉着）。
@@ -1482,17 +1519,15 @@ def run(args) -> None:
                 _nw = len(t.split())              # 切一次就够（这行原来切了两遍）
                 _ok = trans["mode"] == "both" and draft_policy.should_translate(
                     draft_policy_name, now=now, last_tr=last_tr, n_words=_nw,
-                    last_len=last_len, text=t, prev_text=prev_text)
+                    last_len=last_len, text=t, prev_text=prev_text,
+                    sent_text=last_sent)
                 prev_text = t
                 if _ok:
-                    last_tr, last_len = now, _nw
-                    try:
-                        draftq.put_nowait(t)
-                    except queue.Full:               # 只留最新
-                        try:
-                            draftq.get_nowait(); draftq.put_nowait(t)
-                        except queue.Empty:
-                            pass
+                    last_tr, last_len, last_sent = now, _nw, t
+                    # (seq, seg, text): seg 与 drafts 元组里那个段号同源 → drain() 据此丢过期译文
+                    draft_seq += 1
+                    draft_tr.submit(draft_seq, seg_gen["n"],
+                                    strip_dangling(t))   # 送翻前削掉结尾悬挂词（上屏/记录仍用原文）
             except Exception as e:                       # noqa: BLE001
                 echo(f"⚠ 草稿转写失败: {e}")
 
@@ -1501,7 +1536,7 @@ def run(args) -> None:
     # 绝不让"等句子闭合"把翻译无限期阻塞(否则会出现 20s+ 才吐中文)。
     CARRY_MAX_S = 5.0
     CARRY_MAX_WORDS = 25
-    carry = {"text": "", "since": 0.0}
+    carry = {"text": "", "since": 0.0, "seg": 0}
 
     def _emit(text: str, seg: int | None = None) -> None:
         # ⭐ `seg` = 这段文本属于哪一段缓冲（`livemetrics` 的分组键；一段 VAD → N 句定稿，
@@ -1570,7 +1605,7 @@ def run(args) -> None:
         busy["on"] = True
         carry["text"], carry["since"] = "", 0.0
         try:
-            _emit(t.rstrip() + " …")
+            _emit(t.rstrip() + " …", carry["seg"])      # 带上挂起时存的段号, 不然 _emit 会取"正在讲的下一段"
         except Exception:                               # noqa: BLE001
             pass
         finally:
@@ -1587,19 +1622,7 @@ def run(args) -> None:
             if buf is _QUIT:
                 break
             if buf is EMPTY:
-                # 2) 其次: 草稿译文(尽力而为, 过期即丢)
-                try:
-                    dtext = draftq.get_nowait()
-                except queue.Empty:
-                    dtext = None
-                if dtext and trans["mode"] == "both":
-                    try:
-                        translator.translate_draft(
-                            dtext, lambda d: drafts_zh.put(d))
-                    except Exception:                   # noqa: BLE001
-                        pass
-                    continue
-                # 3) 空转: 检查 carry 是否挂起过久
+                # 2) 空转: 检查 carry 是否挂起过久
                 time.sleep(0.2)
                 if carry["text"] and time.monotonic() - carry["since"] >= CARRY_MAX_S:
                     _force_emit_carry()
@@ -1645,11 +1668,16 @@ def run(args) -> None:
                 if carry["text"]:                           # 与上句半截拼接
                     text = f"{carry['text']} {text}".strip()
                     carry["text"], carry["since"] = "", 0.0
-                # 未说完 且 未超上限 -> 继续等; 否则强制送出
-                if is_incomplete(text) and len(text.split()) < CARRY_MAX_WORDS:
-                    carry["text"] = text
-                    if not carry["since"]:
-                        carry["since"] = time.monotonic()
+                # 只看最后一句：它未说完且未超上限 -> 挂起等下一段；前面说完的立刻出
+                ready, tail = split_carry(text, CARRY_MAX_WORDS)
+                if tail:
+                    busy["on"] = True                 # ⚠️ 先置 busy，再动 carry（all_settled 的四项不能同时为空）
+                    carry["text"], carry["since"], carry["seg"] = tail, time.monotonic(), _fseg
+                    try:
+                        if ready:
+                            _emit(ready, _fseg)
+                    finally:
+                        busy["on"] = False
                     continue
                 # ⚠️ 顺序同 _force_emit_carry: busy 先置位、再清 carry, 否则这两条
                 # 字节码之间四项同时为空 -> 冲刷循环可能提前 break 丢掉这句。
@@ -1667,6 +1695,17 @@ def run(args) -> None:
                 echo(f"⚠ 定稿失败: {e}")
                 busy["on"] = False
         _force_emit_carry()                          # 收尾: 残余半句也翻掉
+
+    # ---- 草稿译文线程 ----
+    # 原来挂在 final_worker 的空闲分支(finalq 空才轮到), 定稿一忙就被挤掉(回放应触发 570 次,
+    # 真课只出 417 条)。独立成线程后与定稿并行; 过期译文在 drain() 里丢(见 DraftView)。
+    # 本地引擎(MLX 全局锁)时别和定稿抢: 定稿在排队/在跑就让开。
+    draft_tr = DraftTranslator(
+        translate=lambda text, on_zh, ctx: translator.translate_draft(text, on_zh, context=ctx),
+        output=lambda s, g, d: drafts_zh.put((s, g, d)),
+        mode_ok=lambda: trans["mode"] == "both",
+        should_yield=lambda: not translator.uses_cloud and (not finalq.empty() or busy["on"]),
+        context=lambda: finals[-1:], stats=draft_stats)
 
     seg = Segmenter(
         on_partial=lambda buf: latest.put(buf),
@@ -1774,7 +1813,8 @@ def run(args) -> None:
     t2 = threading.Thread(target=final_worker, daemon=True)
     t3 = threading.Thread(target=proper_worker, daemon=True)
     t4 = threading.Thread(target=answer_worker, daemon=True, name="answer-qa")
-    t1.start(); t2.start(); t4.start()            # 问答不需要 key 就能起步
+    t5 = threading.Thread(target=draft_tr.run, args=(running,), daemon=True, name="draft-tr")
+    t1.start(); t2.start(); t4.start(); t5.start()   # 问答不需要 key 就能起步
     if api_key_val:                               # (没 key 时它只回一句说明)
         t3.start()
 
@@ -1892,6 +1932,8 @@ def run(args) -> None:
                 _raw, _shown, _buf_s, _cpt, _seg, _t_put = _pair(drafts.get_nowait())
             except queue.Empty:
                 break
+            if draft_view.on_draft(_seg):            # 新一段的第一份英文草稿: 清掉上一段残留的中文草稿
+                ui.draft_zh("")
             if live is not None:
                 # 吞异常，不会打死主循环。`lag_s` 在**这里**算：drain 就是上屏那一刻
                 live.draft(_raw, _shown, seg=_seg, buf_s=_buf_s, compute_s=_cpt,
@@ -1899,9 +1941,15 @@ def run(args) -> None:
             ui.add_draft(_shown)
         while True:
             try:
-                _zh = drafts_zh.get_nowait()
+                _it = drafts_zh.get_nowait()
             except queue.Empty:
                 break
+            try:                                     # drain() 没有 try/except: 形状不对就丢, 绝不抛
+                _dseq, _dseg, _zh = int(_it[0]), int(_it[1]), str(_it[2])
+            except Exception:                        # noqa: BLE001
+                continue
+            if not draft_view.accept(_dseq, _dseg):  # 这段已定稿上屏 / 更新的译文已显示过
+                continue
             if live is not None:
                 live.draft_zh(_zh)
             ui.draft_zh(_zh)
@@ -1950,7 +1998,9 @@ def run(args) -> None:
                     #    加第 5 项是**加法**（下标 1–3 一个没动），老形状照样能读。
                     live.final(item[1] or item[3], item[2], item[3],
                                seg=int(item[4]) if len(item) > 4 else 0)
-                ui.finalize(item[1] or item[3], item[2])   # 翻译失败时至少显示转录
+                # 先更新 fin_seg 再算 clear_draft: 屏上已是更新一段的草稿时, 旧段定稿不碰草稿槽
+                ui.finalize(item[1] or item[3], item[2],   # 翻译失败时至少显示转录
+                            clear_draft=draft_view.on_final(item[4] if len(item) > 4 else None))
                 writer.append(item[1], item[2], raw=item[3])
                 # ⭐ 采集面 ③：`item[1]` 是**矫正后**的英文、`item[3]` 是**原始 ASR**
                 #    —— 只有**这里**同时拿得到这一对（`note_segment` 那边没有）。
@@ -2067,6 +2117,8 @@ def run(args) -> None:
                      f"（这些句子不会进会话记录/笔记）")
         finally:
             running.clear()
+            if any(draft_stats.values()):             # 草稿译文: 丢了几条/让路几次/出错几次(全零不打印)
+                echo(f"📝 draft_stats: {draft_stats}")
             # ⚠️ 音频阶段到此为止（审查 F7）—— 之后更新卡片才允许弹模态重活问询。
             if callable(_set_live_ui):
                 _set_live_ui(False)

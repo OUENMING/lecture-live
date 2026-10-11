@@ -159,6 +159,38 @@ class PeakNormalizer:
         return chunk * g
 
 
+class SilenceWatch:
+    """收音**持续几乎无声**（原始峰值 < −80 dBFS）→ 报一次；有声了 → 再报一次恢复。
+
+    为什么：麦克风被静音 / 权限中途被收 / 输入设备换成了没信号的那个（BlackHole 没接上）时，
+    采到的是数字静音 —— 不报错、不崩溃，字幕只是一直空着（LecSync 有同款「RMS<0.001 持续 10 s」告警）。
+    −80 dBFS 是「几乎无声」（同 `HIST_DB_MIN`）：真实房间的底噪远高于它，所以麦克风几乎不会误报；
+    系统声在网课暂停时**本来就是**数字静音 → 调用方给它更长的 `hold_s`。
+
+    纯状态机，时间取自块长（不读时钟）：`feed(原始峰值, 样本数)` → `"silent"` / `"back"` / `None`。
+    """
+
+    FLOOR = 10 ** (HIST_DB_MIN / 20)
+
+    def __init__(self, hold_s: float):
+        self.hold_s = hold_s
+        self._run = 0.0
+        self.alerted = False
+
+    def feed(self, peak: float, n_samples: int) -> str | None:
+        if peak < self.FLOOR:
+            self._run += n_samples / SR
+            if not self.alerted and self._run >= self.hold_s:
+                self.alerted = True
+                return "silent"
+            return None
+        self._run = 0.0
+        if self.alerted:
+            self.alerted = False
+            return "back"
+        return None
+
+
 class _NormalizedSource:
     """给任意音源套一层 PeakNormalizer, 对下游保持同样的 poll()/close() 接口。"""
 

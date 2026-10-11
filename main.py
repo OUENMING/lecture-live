@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse, collections, os, queue, re, sys, threading, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from capture import load_source, SR
+from capture import load_source, SR, SilenceWatch
 from vad import Segmenter
 import draft_policy
 from draft_translate import DraftTranslator, DraftView
@@ -2238,16 +2238,26 @@ def run(args) -> None:
     try:
         _dev = {"wall": time.time(), "next": 0.0}
         # 逐块记录（现场采集开着才有）：原始峰值 / 实际增益 / 当场 VAD。见 livemetrics「逐块记录」
-        _last_block = getattr(src, "last_block", None) if live is not None else None
+        _last_block = getattr(src, "last_block", None)
+        # 收音持续数字静音 → 菜单栏 ⚠️（麦克风被静音 / 设备不对时字幕只是一直空着，没有别的症状）。
+        # 文件回放不看；系统声在网课暂停时本来就静音，等得久一些。
+        _silence = (SilenceWatch(60.0 if args.source == "system" else 15.0)
+                    if args.source != "file" and callable(_last_block) else None)
         while running.is_set() and not stopping.is_set():
             chunk = src.poll()
             if chunk is not None and len(chunk):
                 seg.accept(chunk)
                 if tester is not None:
                     tester.note_chunk(chunk)
-                if _last_block is not None:
+                if callable(_last_block):
                     _p, _g = _last_block()
-                    live.block(_p, _g, seg.last_ratio, len(chunk))
+                    if live is not None:
+                        live.block(_p, _g, seg.last_ratio, len(chunk))
+                    _sv = _silence.feed(_p, len(chunk)) if _silence is not None else None
+                    if _sv == "silent":
+                        notify(_SILENT_MSG.get(args.source, _SILENT_MSG["mic"]), True, src="收音")
+                    elif _sv == "back":
+                        notify("收音恢复了", False, src="收音")
             drain()
             if src.is_done():
                 break
@@ -2644,6 +2654,13 @@ def run(args) -> None:
             if callable(_close_ui):
                 _close_ui()
             _auto_update_on_exit()
+
+
+#: `SilenceWatch` 报警的文案（按音源）。⚠️ 只说现象 + 最可能的两个原因，不替用户动系统设置。
+_SILENT_MSG = {
+    "mic": "15 秒收不到任何声音：麦克风被静音了，或者输入设备不对？",
+    "system": "系统声 60 秒没有任何声音：网课暂停了？没暂停就检查声音输出有没有接到 ClassLive",
+}
 
 
 def check_clock_and_device(src, source_name: str, notify, state: dict, on_wake=None) -> None:

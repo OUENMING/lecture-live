@@ -3,7 +3,7 @@
 # 部署（主会话在 Owen 点头后做）：
 #   cd server/asr-worker
 #   wrangler secret put GROQ_KEY          # < ~/.classlive/groq-token，管道灌入不回显
-#   wrangler secret put QWEN_CN_KEY       # < ~/.classlive/qwen-cn-token
+#   wrangler secret put QWEN_KEY          # 百炼国际站（新加坡）key；< ~/.classlive/ 下对应 token 文件，管道灌入不回显
 #   wrangler secret put CLIENT_TOKEN      # 新生成，值与客户端 asr_endpoint.py 一致（公开令牌）
 #   wrangler deploy
 #

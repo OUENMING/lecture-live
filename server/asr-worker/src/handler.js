@@ -17,7 +17,9 @@ const T = { groq: 2500, qwen: 3500, hedge: 1200, total: 5000 };   // ms
 const SECONDS_DEFAULT = 12, SECONDS_MAX = 60;   // X-Audio-Seconds 缺失 / 非法时按 12 s 段计
 
 const GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
-const QWEN_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
+// 新加坡（国际站）而非北京：上课时段北京网关 2.8–5.9 s，新加坡同模型网关 0.34 s、总 p50 1.5 s（RESEARCH §15.2）。
+// 三个模型在国际站同样能调通、请求体不变、错误码同一份（官方 error-code 页）。
+const QWEN_URL = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
 
 const NO_SPEECH = 0.6;        // 全段高于它 -> 静音，Groq 会幻觉 "Thank you."
 const DEGENERATE_CR = 2.4;    // 压缩比高于它 -> 重复退化
@@ -132,7 +134,7 @@ async function tryQwen({ env, audio, sig, deadline, tried, report }, models) {
     try {
       r = await timedFetch(QWEN_URL, {
         method: "POST",
-        headers: { authorization: `Bearer ${env.QWEN_CN_KEY}`, "content-type": "application/json", "x-dashscope-sse": "disable" },
+        headers: { authorization: `Bearer ${env.QWEN_KEY}`, "content-type": "application/json", "x-dashscope-sse": "disable" },
         body: JSON.stringify(qwenBody(model, b64)),
       }, T.qwen, sig, deadline);
     } catch {
@@ -169,7 +171,7 @@ async function transcribe(env, ctx, audio, seconds, t0) {
   try {
     const run = { env, audio, sig: budget.signal, deadline, tried, report };
     const plan = await getPlan(env, seconds);
-    const models = env.QWEN_CN_KEY ? plan.qwen : [];
+    const models = env.QWEN_KEY ? plan.qwen : [];
     const groqP = plan.groq && env.GROQ_KEY
       ? tryGroq(run)
       : Promise.reject(new Skip());

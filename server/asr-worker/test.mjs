@@ -30,7 +30,7 @@ const groqOk = (text = " hello groq ", segments = [{ no_speech_prob: 0.01, compr
 const qwenOk = (text = "hello qwen") => J(200, { output: { choices: [{ message: { content: [{ text }] } }] } });
 
 function harness({ groq = () => groqOk(), qwen = () => qwenOk(), groqMs = 0, qwenMs = 0, planMs = 0 } = {}) {
-  const calls = { groq: [], qwen: [] };
+  const calls = { groq: [], qwen: [], qwenUrls: [] };
   const reports = [];
   const plans = [];
   const limitKeys = { ip: [], install: [] };
@@ -46,15 +46,16 @@ function harness({ groq = () => groqOk(), qwen = () => qwenOk(), groqMs = 0, qwe
       calls.groq.push({ form: init.body, signal: init.signal, headers: init.headers });
       return later(groqMs, () => groq(calls.groq.length), init.signal);
     }
-    if (u.startsWith("https://dashscope.aliyuncs.com/")) {
+    if (u.startsWith("https://dashscope-intl.aliyuncs.com/")) {
       const body = JSON.parse(init.body);
+      calls.qwenUrls.push(u);
       calls.qwen.push({ model: body.model, body, signal: init.signal, headers: init.headers });
       return later(qwenMs, () => qwen(body.model, calls.qwen.length), init.signal);
     }
     throw new Error("unexpected upstream " + u);
   };
   const env = {
-    CLIENT_TOKEN: TOKEN, GROQ_KEY: "gk", QWEN_CN_KEY: "qk",
+    CLIENT_TOKEN: TOKEN, GROQ_KEY: "gk", QWEN_KEY: "qk",
     PER_INSTALL: { limit: async ({ key }) => { limitKeys.install.push(key); return { success: true }; } },
     PER_IP: { limit: async ({ key }) => { limitKeys.ip.push(key); return { success: true }; } },
     QUOTA: {
@@ -183,6 +184,7 @@ test("6c 千问请求体：两种模型各按实测格式", () => withHarness({ 
   assert.equal(b1.input.messages[0].content[0].type, "input_audio");
   assert.deepEqual(b1.parameters, { format: "opus", sample_rate: "16000", language_hints: ["en"] });
   assert.equal(h.calls.qwen[0].headers["x-dashscope-sse"], "disable");
+  assert.equal(h.calls.qwenUrls[0], "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation");
   assert.equal(h.calls.qwen[0].headers.authorization, "Bearer qk");
 }));
 

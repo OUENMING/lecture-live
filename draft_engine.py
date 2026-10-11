@@ -138,8 +138,25 @@ def _ram_bytes() -> int | None:
         return None
 
 
+def _mode(env: Mapping[str, str]) -> str:
+    return (env.get(ENV) or "auto").strip().lower()
+
+
+def want_model(env: Mapping[str, str] = os.environ,
+               ram_bytes: Callable[[], int | None] | None = None) -> bool:
+    """这台机器装了 Nemotron 会不会用上？给更新卡片问「要不要提议下载」。
+
+    与 `load_draft_engine` 走**同一个** `choose`（假设模型已在）—— 内存不够 / 手动指定 parakeet
+    的机器装了也用不上，就别让它下 464 MB。**永不抛**（出错当「不要」）。
+    """
+    try:
+        return choose(_mode(env), True, (ram_bytes or _ram_bytes)())[0] == "nemotron"
+    except Exception:                            # noqa: BLE001
+        return False
+
+
 def load_draft_engine(parakeet, *, window_samples: int, env: Mapping[str, str] = os.environ,
-                      ram_bytes: Callable[[], int | None] = None,
+                      ram_bytes: Callable[[], int | None] | None = None,
                       make_drafter: Callable[[str], Any] = NemotronDrafter) -> DraftEngine:
     """**永不抛**。任何一步失败 → Parakeet 引擎，`reason` 写清楚。
 
@@ -147,7 +164,7 @@ def load_draft_engine(parakeet, *, window_samples: int, env: Mapping[str, str] =
     """
     try:
         import doctor
-        mode = (env.get(ENV) or "auto").strip().lower()
+        mode = _mode(env)
         model_dir = env.get(ENV_MODEL_DIR) or models.path_of("nemotron")
         ram = (ram_bytes or _ram_bytes)()
         name, why = choose(mode, bool(model_dir) and doctor.model_present(model_dir), ram)

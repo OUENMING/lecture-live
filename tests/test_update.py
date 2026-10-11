@@ -1079,6 +1079,36 @@ with _mock.patch.object(_doctor, "model_present", lambda p: False):
           "models" in [s["key"] for s in update.pending_steps()],
           str([s["key"] for s in update.pending_steps()]))
 
+# ============== B15 ⭐ 流式草稿模型：缺了且用得上 -> 卡片列一条 soft 步骤 ==============
+# 作者 2026-10-11 拍板：Nemotron 可选但更新卡片主动提（不提的话 .app 用户永远拿不到 R3）。
+# 内存不够 / 手动 parakeet 的机器装了也用不上 -> 不提。下不成不算更新失败（soft）。
+print("\n--- B15 流式草稿模型进更新卡片 ---")
+import os                                                                   # noqa: E402
+import draft_engine as _de                                                  # noqa: E402
+import models as _models                                                    # noqa: E402
+_NEM = _models.NEMOTRON.path
+_keys = lambda: [s["key"] for s in update.pending_steps()]                 # noqa: E731
+_GB = 2**30
+with _mock.patch.object(_doctor, "model_present", lambda p: p != _NEM), \
+        _mock.patch.object(_de, "_ram_bytes", lambda: 16 * _GB), \
+        _mock.patch.dict(os.environ, {}, clear=False):
+    os.environ.pop(_de.ENV, None)
+    _st = [s for s in update.pending_steps() if s["key"] == update.DRAFT_MODEL]
+    check("⭐⭐ 缺 Nemotron、16 GB、auto -> 列「下载流式草稿模型」且 soft", len(_st) == 1 and _st[0].get("soft") is True,
+          str(_keys()))
+    check("⭐ 只缺可选的 -> 「下载模型」（必装那条）仍不列", "models" not in _keys(), str(_keys()))
+    with _mock.patch.object(_de, "_ram_bytes", lambda: 8 * _GB):
+        check("⭐ 8 GB 机器（auto 会选 Parakeet）-> 不提", update.DRAFT_MODEL not in _keys(), str(_keys()))
+    with _mock.patch.dict(os.environ, {_de.ENV: "parakeet"}):
+        check("⭐ 手动指定 parakeet -> 不提", update.DRAFT_MODEL not in _keys(), str(_keys()))
+with _mock.patch.object(_doctor, "model_present", lambda p: True), \
+        _mock.patch.object(_de, "_ram_bytes", lambda: 16 * _GB):
+    check("⚠️ 对照：Nemotron 已在 -> 不提", update.DRAFT_MODEL not in _keys(), str(_keys()))
+_calls = []
+with _mock.patch.object(update, "download_model", lambda m, say=None: _calls.append(m.key) or {"ok": False, "error": "x"}):
+    _r = update.run_step(update.DRAFT_MODEL)
+check("⭐ run_step(draft_model) 只下 Nemotron、失败原样回报", _calls == ["nemotron"] and _r["ok"] is False, f"{_calls} {_r}")
+
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}")

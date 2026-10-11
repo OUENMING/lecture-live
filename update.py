@@ -38,6 +38,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 # 网络操作的上限。fetch 在慢网下可能很久，但**不能无限等** —— 卡片是后台线程，
 # 卡住会让人以为按钮坏了。超时当"没查到"处理，不算失败。
 TIMEOUT = 45
+DRAFT_MODEL = "draft_model"   # 更新步骤 key：可选的流式草稿模型（`pending_steps` ②b）
 
 
 def _git(*args: str, timeout: int = TIMEOUT) -> tuple[int, str, str]:
@@ -943,6 +944,20 @@ def pending_steps() -> list[dict]:
                 "detail": total,
                 "why": "缺模型的话课上会直接起不来（不是降质，是跑不了）。",
             })
+        # ②b 流式草稿模型：**可选，但卡片主动提**（作者 2026-10-11 拍板 —— 不提的话用 .app 的人
+        #    永远拿不到 R3：草稿回改 5.7% → 0.6%）。和 Qwen3 不同：它**列在卡片上、由用户点「现在做」**，
+        #    不是静默下；内存不够 / 手动指定 parakeet 的机器装了也用不上，不提（`draft_engine.want_model`）。
+        #    `soft`：下不成**不算更新失败**（草稿照旧用 Parakeet），后面的步骤照跑。
+        import draft_engine
+        import models
+        if not doctor.model_present(models.NEMOTRON.path) and draft_engine.want_model():
+            steps.append({
+                "key": DRAFT_MODEL,
+                "label": "下载流式草稿模型",
+                "detail": models.NEMOTRON.size,
+                "why": "装上后中文草稿基本不再改来改去（实测回改 5.7% → 0.6%）；下不成也照常上课。",
+                "soft": True,
+            })
     except Exception as e:                                # noqa: BLE001
         # ⚠️ **别静默**（2026-09-28 审查指出）：`import doctor` 失败 / 探测出错时，
         #    「下载模型」这一步会**从卡片上整条消失** —— 用户看到的是"没有要下的东西"，
@@ -1056,6 +1071,13 @@ def run_step(key: str, on_line=None) -> dict:
                     return r
             say("模型齐了")
             return {"ok": True, "error": ""}
+
+        if key == DRAFT_MODEL:
+            import models
+            r = download_model(models.NEMOTRON, say=say)
+            if r["ok"]:
+                say("流式草稿模型装好了（下次上课生效）")
+            return r
 
         if key == "app":
             # 重建整个 .app。make-app.sh 自己会装依赖、写戳记，并把旧的那份

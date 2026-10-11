@@ -1992,7 +1992,7 @@ class Overlay:
             else:
                 # 弹不出来就**别装作问过了** —— 直说那句话该在哪儿敲。
                 tail = "  要现在做，在终端跑：cl update"
-                if any(s["key"] == "models" for s in steps):
+                if any(s["key"] in ("models", update.DRAFT_MODEL) for s in steps):
                     # ⚠️ 「下载模型」**不归 `cl update` 管**（铁律：绝不自动下模型）——
                     #    不给这句的话，用户跑完 cl update 发现模型没下、卡片还是同一句
                     #    → **死循环换了个壳**（2026-10-01 独立审核指出）。
@@ -2048,6 +2048,10 @@ class Overlay:
                     res = update.run_step(s["key"],
                                           on_line=lambda t: ui(set_status, t, 0.6))
                     if not res["ok"]:
+                        if s.get("soft"):
+                            # 可选的那步（流式草稿模型）下不成不拦后面的步骤，也不算更新失败
+                            ui(set_status, f"⚠️ {res['error']}（不影响上课）", 1.0)
+                            continue
                         ui(set_status, f"⚠️ {res['error']}", 1.0)
                         ui(set_title, "重启后重试")
                         return
@@ -2072,7 +2076,8 @@ class Overlay:
                         #    `deferred_app` 的说明）。所以别再说「再点一次这个按钮」。
                         ui(set_status, f"还有 {len(left)} 件事没做：重建 .app —— "
                                        f"先退出 ClassLive，再到终端跑 cl update", 1.0)
-                    elif left[0]["key"] == "models":
+                    elif left[0]["key"] == "models" or (
+                            left[0]["key"] == update.DRAFT_MODEL and not can_ask):
                         ui(set_status, f"还有 {len(left)} 件事没做：{left[0]['label']}"
                                        f"（{left[0]['detail']}）—— 不会自动下，"
                                        f"按 `cl doctor` 打出的命令装", 1.0)

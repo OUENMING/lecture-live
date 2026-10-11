@@ -11,7 +11,9 @@
 | 3.8.11（R1） | 代码全部完成、全部测试绿，**已在本机分 8 个提交（`47d67c6`…，未推送）**；CHANGELOG 条目已写（草稿） |
 | 发版决定 | Owen 2026-10-11（更新）：**R3 做完之后再发** —— 3.8.10 / 3.8.11 / 3.8.12 / R2 / R3 合成一版发，发前合并更新日志给 Owen 看 |
 | 下一件 | G ✅ → R2 ✅（Worker 已部署）→ **R3 P1 ✅（2026-10-11 晚；本机 `main` 已快进到 `2fb8c42`，未推送）** → R3 真课闸门（`PLAN-streaming-asr.md` §6.4，Owen 已装模型）→ 后续优化 → 一人一码 |
-| 分支 `stream-asr` | 比本机 `main` 多 `7058c56`（收音静音看门狗，菜单栏文案待 Owen 看过再并） |
+| 分支 `stream-asr` | 2026-10-11 深夜已与本机 `main` 对齐（`b187e79`，比 origin 多 29 个提交，**未推送**）：静音看门狗、流式草稿 UI、Worker 链序（已部署）、更新卡片提议 Nemotron、顶栏胶囊 + 单色 ❓、面板「关闭」仍开录的修复、隐私文案改正、3.9.0 更新日志草稿 |
+| 发版前最后一道 | 周一真课闸门（`PLAN-streaming-asr.md` §6.4）→ Owen 过目 CHANGELOG → VERSION 3.9.0 → push / tag / release。云端开的端到端已跑：12 段全走 Groq，客户端 p50 0.69 s，rc 0、无 Traceback、dropped 0 |
+| 3.9.1（课后） | 开课前弹更新卡片 + 下课退出时安装（Owen 已同意方案）；句子级提前送翻；Parakeet 懒加载；删 `draft_stable`；增益底噪闸门 |
 
 查当前真实状态：`git status --porcelain`、`git log --oneline -15`、`git rev-list --count origin/main..HEAD`。
 

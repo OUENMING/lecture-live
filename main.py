@@ -1252,12 +1252,28 @@ def run(args) -> None:
         except Exception:                                     # noqa: BLE001
             return []
 
+    # ❓ 课后讲解卡（计划 §G2）—— 同 `_keypoints_for`：收尾那一步才跑、fail-soft、
+    #    纯转录档 / 没 key 一个请求都不发（writer 那边另外挡了 `cancel`）。
+    def _lost_explain_for(blocks):
+        if args.save_notes == "no" or trans.get("mode") == "raw" or not api_key_val:
+            return []
+        try:
+            import polish
+            from translator import course_term_list, course_title
+            return polish.explain_lost(
+                blocks, api_key_val, args.polish_model or args.cloud_model,
+                course_term_list(args.glossary, args.course),
+                course_title(args.glossary, args.course))
+        except Exception:                                     # noqa: BLE001
+            return []
+
     writer = ObsidianWriter(vault, args.course, mode=args.save_notes,
                             api_key=api_key_val, model=args.cloud_model,
                             glossary_path=args.glossary,
                             polish=args.polish != "off",
                             polish_model=args.polish_model or None,
-                            keypoints_fn=_keypoints_for)
+                            keypoints_fn=_keypoints_for,
+                            lost_explain_fn=_lost_explain_for)
     notes = TermNotes()                                 # 术语通俗解析(查表)
 
     # 测试模式: 采一份完整报告 + 留音频。**任何采集失败都不能影响上课** ——

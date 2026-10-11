@@ -85,6 +85,76 @@ def _chat(key: str, model: str, system: str, user: str,
     return obj if isinstance(obj, dict) else {}
 
 
+EXPLAIN_BATCH = 20          # 每次请求讲多少块(每块几句, 比精修的单句重)
+EXPLAIN_MAX_TOKENS = 4000
+
+EXPLAIN_SYS = """你是帮助二语听者补课的讲解助手。输入是一节英文课里学生按了「没听懂」的若干段, 每段形如:
+[编号]
+EN: 老师讲的几句英文(可能有语音识别错误, 多句用 / 隔开)
+ZH: 对应的中文译文
+
+逐段输出三样东西:
+- explain: 中文, 不超过 120 字, 讲清这段在说什么、为什么这么说。可以用通用学科知识把概念讲明白, 但不许编造这节课没说过的具体数字、例子或结论。
+- q: 一句自测问题, 不超过 40 字。
+- a: 这个问题的答案, 不超过 80 字。
+- 三项都是单行, 不含换行、markdown 或引号; 每个输入编号恰好对应一项, 编号原样返回。
+
+输出严格 JSON: {"items": [{"i": 编号, "explain": "…", "q": "…", "a": "…"}, ...]}
+只输出 JSON。"""
+
+
+def _one_line(v) -> str:
+    """模型给的字段 -> 单行字符串；类型不对(数字/列表/None)当空。"""
+    return " ".join(v.split()) if isinstance(v, str) else ""
+
+
+def explain_lost(blocks: list[list[dict]], api_key: str, model: str,
+                 course_terms: list[str] | None = None, domain: str = "",
+                 timeout: float = 60.0, chat=None) -> list[dict]:
+    """❓ 标记的课后讲解。`blocks` = 每块若干 `{"en","zh"}`；返回与 `blocks` **等长**的
+    `[{"explain","q","a"}, ...]`（缺字段 -> `""`，全是单行）。
+
+    ⚠️ **要么全对齐要么 `[]`**：任何异常 / JSON 不对 / 条数或序号对不上，整体返回 `[]`
+       —— 半份讲解按下标错位贴到别的块上，比没有更糟。绝不外抛：
+       这是 `close()` 里"额外一层"，不许拖垮笔记。
+    ⚠️ 序号用**全局**下标（跨批次也不重号），所以能校验回来的 `i` 恰好是本批那几个。
+    `chat` 默认 `_chat`；测试注入替身，**不联网**。
+    """
+    if not api_key or not blocks:
+        return []
+    chat = chat or _chat
+    terms = "\n".join(course_terms or []) or "(无)"
+    out: list[dict] = []
+    try:
+        for start in range(0, len(blocks), EXPLAIN_BATCH):
+            chunk = blocks[start:start + EXPLAIN_BATCH]
+            rows = []
+            for k, blk in enumerate(chunk):
+                en = " / ".join(_one_line(x.get("en")) for x in blk if x.get("en"))
+                zh = " / ".join(_one_line(x.get("zh")) for x in blk if x.get("zh"))
+                rows.append(f"[{start + k}]\nEN: {en}\nZH: {zh}")
+            user = (f"{domain_block(domain)}"
+                    f"Course terms:\n{terms}\n\n"
+                    f"Marked passages:\n" + "\n".join(rows))
+            obj = chat(api_key, model, EXPLAIN_SYS, user, EXPLAIN_MAX_TOKENS, timeout)
+            items = obj.get("items")
+            if not isinstance(items, list):
+                return []
+            got: dict[int, dict] = {}
+            for it in items:
+                if (isinstance(it, dict) and isinstance(it.get("i"), int)
+                        and start <= it["i"] < start + len(chunk)):
+                    got[it["i"]] = {"explain": _one_line(it.get("explain")),
+                                    "q": _one_line(it.get("q")),
+                                    "a": _one_line(it.get("a"))}
+            if len(got) != len(chunk):
+                return []
+            out.extend(got[start + k] for k in range(len(chunk)))
+    except Exception:                                     # noqa: BLE001
+        return []
+    return out if len(out) == len(blocks) else []
+
+
 def polish_entries(entries: list[dict], api_key: str, model: str,
                    course_terms: list[str] | None = None, domain: str = "",
                    batch: int = POLISH_BATCH, timeout: float = 180.0,

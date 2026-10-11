@@ -456,7 +456,7 @@ class ObsidianWriter:
                  api_key: str | None = None, model: str = "deepseek-flash",
                  glossary_path: str | None = None, polish: bool = True,
                  polish_model: str | None = None, keypoints=None,
-                 keypoints_fn=None):
+                 keypoints_fn=None, lost_explain_fn=None):
         self.mode = mode
         # ⚠️⚠️ **`enabled` 只管一件事：要不要记录**（`sessions/` 那层底稿）。
         #    **「写不写 Obsidian 笔记」是另一件事** —— 由 `self._vault is not None` 判
@@ -487,6 +487,9 @@ class ObsidianWriter:
         #: ⚠️ 句子**到收尾才齐**，所以生产那条走**回调**（`close()` 里现算），
         #:    不是构造时传值。传值那条留给判据。
         self._keypoints_fn = keypoints_fn
+        #: ❓ 课后讲解：`fn(blocks) -> [{"explain","q","a"}, …]`（与 blocks 等长，否则不用）。
+        #: ⚠️ 同 keypoints：块要到收尾才齐，所以走回调。`None` = 不讲，笔记逐字不变。
+        self._lost_explain_fn = lost_explain_fn
         self._n = 0
         self.session_path: Path | None = None
         self.vault_path: Path | None = None
@@ -898,10 +901,14 @@ class ObsidianWriter:
             got["atoms"] = []
         return got
 
-    def _lost_items(self, entries: list[dict]) -> list[str]:
+    def _lost_items(self, entries: list[dict], explain: bool = True) -> list[str]:
         """旁路事件 -> 笔记里的块（**一块一个标记**，块内已含它的那几句）。
 
         范围反查全在 `resolve_lost_range`（纯函数）；这里只做 I/O 与拼字。
+
+        `explain`：有 `lost_explain_fn` 时给每块再追加「💡 讲解」与一张 `::` 闪卡
+        （**会联网**，所以 `close()` 在用户取消时传 False）。fn 失败 / 返回条数对不上
+        块数 -> **一字不加**，输出与没有这一层时逐字相同。
         """
         marks = self._lost_marks()
         if not marks or not entries:
@@ -912,6 +919,7 @@ class ObsidianWriter:
             return []
         secs = monotone_secs([entries[i]["ts"] for i in idx])
         out: list[str] = []
+        spans: list[tuple[int, int]] = []        # 每块对应 entries[i0:i1+1]
         for t, n_at_press in marks:
             # ⚠️ `i_max` **必须传**：它把范围封在"按下那一刻已经存在的句子"之内。
             #    不传的话，按下时一句都没有（`n = 0`）会把**第一句**当答案返回，
@@ -927,6 +935,28 @@ class ObsidianWriter:
             for e in entries[i0:i1 + 1]:
                 lines.append(f"  - `{e['ts']}` {e['zh'] or e['en'] or e['asr']}")
             out.append("\n".join(lines))
+            spans.append((i0, i1))
+        if not (explain and self._lost_explain_fn and out):
+            return out
+        print("🤔 正在给 ❓ 标记写讲解…", flush=True)
+        try:
+            cards = self._lost_explain_fn(
+                [[{"en": e["en"], "zh": e["zh"]} for e in entries[i0:i1 + 1]]
+                 for i0, i1 in spans])
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ ❓ 讲解失败({str(e)[:60]}); 笔记照常生成")
+            return out
+        if not isinstance(cards, list) or len(cards) != len(out):
+            return out                  # 对不上就整体不用, 绝不错位
+        for k, c in enumerate(cards):
+            if not isinstance(c, dict):
+                continue
+            ex, q, a = c.get("explain"), c.get("q"), c.get("a")
+            if ex:
+                out[k] += f"\n  - 💡 讲解：{ex}"
+            if q and a:
+                # `::` 在问题里会伪造卡片边界, 同 `_qa_items`
+                out[k] += f"\n  - {q.replace('::', ': :')}::{a}"
         return out
 
     # ---- 我课上问过什么(Phase 4) ----
@@ -1296,7 +1326,9 @@ class ObsidianWriter:
         # ❓ 同一条纪律：它是额外一层，**逐句转录才是不能丢的那件事**。
         lost_items: list[str] = []
         try:
-            lost_items = self._lost_items(entries)
+            # 讲解会联网: 用户取消(跳过精修)时不发请求, 其余与 keypoints 同一条纪律
+            lost_items = self._lost_items(
+                entries, explain=not (cancel is not None and cancel.is_set()))
         except Exception as e:                            # noqa: BLE001
             print(f"⚠ ❓ 反查失败({str(e)[:60]}); 笔记照常生成")
         # 🎯 同上。⚠️ 这一层是**唯一会联网的**（一节课实测约 6 秒 / 20 次请求），

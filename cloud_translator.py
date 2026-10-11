@@ -218,6 +218,13 @@ def _lines_or_none(lines: list[str]) -> str:
 DEFAULT_CTX_CHUNK = 10
 
 
+#: 分阶段超时（2026-10-11）：只给一个 30 s 时，教室 Wi-Fi 黑洞路由下 `final_worker` 会在**一句**上
+#: 死等到 30 s 才降级本地；连接建不起来 / 流中途 10 s 一个字都不来，就该当场交给 EngineRouter。
+#: ⚠️ `read` 是**两块数据之间**的空闲上限，不是整次请求的总时长 —— 长回答照样能流完。
+CONNECT_TIMEOUT_S = 5.0
+READ_TIMEOUT_S = 10.0
+
+
 class CloudTranslator:
     """DeepSeek 流式翻译。失败由调用方捕获后降级本地。"""
 
@@ -246,7 +253,8 @@ class CloudTranslator:
         #: 实测命中 70–75%、首字 p50 0.78s → 0.65s、输入成本约 −39%，而且带的前文更多（10–19 句）。
         #: 数据与取舍见 docs/experiments/context_ab.md。⚠️ `ctx_chunk>0` 时 `max_context` **不起作用**。
         self._ctx_chunk = max(0, int(ctx_chunk))
-        self._timeout = timeout
+        self._timeout = httpx.Timeout(timeout, connect=min(timeout, CONNECT_TIMEOUT_S),
+                                      read=min(timeout, READ_TIMEOUT_S))
         # 汇总最近一次请求的 usage(含 prompt_cache_hit_tokens / miss)。
         # 开着才给请求加 stream_options, 否则线上请求体一字不变。
         self._collect_usage = collect_usage
@@ -254,7 +262,7 @@ class CloudTranslator:
         # 共享连接池: 一节课上千次请求, 每次重建 TLS 握手白白多 ~100ms 首字延迟。
         # Client 对并发请求线程安全(官方文档保证); 断网时池中陈旧连接会抛错,
         # 由 EngineRouter 降级 -> 探针恢复, 语义与每次新建连接一致。
-        self._client = httpx.Client(timeout=timeout)
+        self._client = httpx.Client(timeout=self._timeout)
 
     def warmup(self) -> None:
         pass                                   # 云端无需预热

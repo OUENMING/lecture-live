@@ -403,29 +403,15 @@ def remote_file(name: str, ref: str = "") -> str:
 # ---- 更新决策用的纯解析（`main.py` 也从这里 import，避免两份实现漂移）----
 
 def versions_in(text: str) -> list[str]:
-    """一段 CHANGELOG 文本里所有版本号，**新到旧**（文件里的出现顺序）。"""
-    import re
-    return re.findall(r"^## \[([^\]]+)\]", text or "", re.M)
+    """一段 CHANGELOG 文本里所有版本号，新到旧。解析在 `changelog.versions`。"""
+    import changelog
+    return changelog.versions(text)
 
 
 def update_mode_in(text: str, version: str) -> str:
-    """该版本能否**后台自动应用** —— 只看 `### 更新方式` 那节。
-
-    ⚠️ **默认 `manual`**（默认拒绝）：没声明自己安全的，绝不自动应用。
-
-    ⚠️⚠️ **不能用 semver 判**：本仓库 `3.4.0 → 3.5.0` 是 **minor** 版本号、内容却是
-    **breaking**（两个 ASR 模型改必装、缺了启动即报错）。作者不按 semver 发版，
-    按版本号分级会正好漏掉最危险的那些。
-    """
-    import re
-    sec = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
-                    text or "", re.S | re.M)
-    if not sec:
-        return "manual"
-    m = re.search(r"^###\s*更新方式[^\n]*\n(.*?)(?=^### |\Z)", sec.group(1), re.S | re.M)
-    if not m:
-        return "manual"
-    return "auto" if re.search(r"^\s*auto\s*$", m.group(1), re.M | re.I) else "manual"
+    """该版本能否后台自动应用（默认 manual）。解析与理由在 `changelog.update_mode`。"""
+    import changelog
+    return changelog.update_mode(text, version)
 
 
 def check() -> dict:

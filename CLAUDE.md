@@ -36,6 +36,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 翻译、prompt、DeepSeek 云端、mlx 本地、引擎降级 | `translator.py`、`cloud_translator.py` |
 | 云端翻译的前文窗口（块对齐 / 前缀缓存）—— 动 `cloud_translator._user_content` 前读 | `docs/experiments/context_ab.md` |
 | 草稿译文：过期判据 `DraftView` + 只译最新的线程 `DraftTranslator`（依赖全注入，`step()` 可单测）；触发判据 | `draft_translate.py`、`draft_policy.py` |
+| CHANGELOG 解析（版本号、看点、更新方式；纯函数只吃文本 —— 本地卡片 / 远端分级 / 面板确认框共用） | `changelog.py` |
 | 下载模型（直连 → 镜像 → sha256） | `fetch_model.py`（文件头） |
 | 术语表、课号、术语查表与注入 | `build_notes.py`、`glossary/`（样例 `glossary.example.txt`） |
 | 笔记落盘、`sessions/` 格式、双层笔记、❓ 旁路文件 `sessions/<同名>.lost.jsonl` | `obsidian_writer.py` |

@@ -55,9 +55,13 @@ BREAKER_OPEN_S = 60.0
 EMPTY_RETRY_MIN_S = 2.0      # R5: 云端回空串且段长 ≥ 这个值才补跑草稿模型
 #: Opus 编码额外参数。
 # ⭐ 码率实测（RESEARCH §15，OCW 322 段，Groq whisper-large-v3）：soundfile 默认参数 WER 11.0% / 漏 1.0%
-#    （两次跑逐字相同 → 不是噪声），`compression_level=0.88` → 10.2% / 0.4%，约 42 KB/段，与 ffmpeg 24k
-#    （10.1% / 0.4%）打平。再往大（0.8，65 KB）准确度不再涨，千问却慢一截（p50 2.7 → 4.4 s）。
-OPUS_KW: dict = {"compression_level": 0.88}
+#    （两次跑逐字相同 → 不是噪声），`compression_level=0.88` → 10.2% / 0.4%（42 KB/段），
+#    `0.8` → 10.1% / 0.4%（65 KB/段），与 ffmpeg 24k（10.1% / 0.4%）打平。
+# ⭐ 选 0.8（2026-10-11 晚）：编码是段尾之后**每段都要多等**的时间 —— 0.8 编码 p50 185 ms，
+#    0.88 是 313 ms。体积大一半对请求时间无影响：Groq 两档都是 0.42 s；千问**新加坡** 20 段
+#    交替实测请求 p50 0.77 vs 0.79 s（RESEARCH §15.4）。之前「千问慢一截 2.7 → 4.4 s」是**北京站**的网关排队，
+#    已不走北京。
+OPUS_KW: dict = {"compression_level": 0.8}
 
 ENV_SWITCH = "CLASSLIVE_CLOUD_ASR"
 

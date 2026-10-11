@@ -1,6 +1,7 @@
 """对人工字幕算 WER + 「漏句」（参考里连续 ≥5 词整段没出现）。用仓库自己的 normalize。"""
 import sys, json, difflib
-sys.path.insert(0, "/Users/owen/lecture-live/scripts")
+ROOT = __import__("pathlib").Path(__file__).resolve().parents[3]  # 仓库根（docs/experiments/<本目录>/x.py）
+sys.path.insert(0, str(ROOT / "scripts"))
 from stream_metrics import normalize
 def score(ref_text, hyp_text, minrun=5):
     r, h = normalize(ref_text), normalize(hyp_text)

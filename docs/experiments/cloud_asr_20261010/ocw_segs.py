@@ -1,6 +1,7 @@
 """离线复刻生产切段：PeakNormalizer → vad.Segmenter（与生产同一份代码），记下每段的音频起止。"""
 import sys, json, subprocess, numpy as np
-sys.path.insert(0, "/Users/owen/lecture-live")
+ROOT = __import__("pathlib").Path(__file__).resolve().parents[3]  # 仓库根（docs/experiments/<本目录>/x.py）
+sys.path.insert(0, str(ROOT))
 import capture, vad
 wav, out = sys.argv[1], sys.argv[2]
 y = np.frombuffer(subprocess.run(["ffmpeg","-v","error","-i",wav,"-f","f32le","-ac","1","-ar","16000","-"],capture_output=True,check=True).stdout,"<f4")

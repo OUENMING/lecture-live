@@ -21,7 +21,7 @@
 | `docs/RESEARCH-cloud-asr.md` | ⭐ 全部调研与实测：各家云端 ASR 的错误率/漏句/延迟/价格/额度（§2–§12），外部建议逐条实测（§13），硬切找低谷实验与生产复核（§14） |
 | `docs/PLAN-cloud-final-asr.md` | 已拍板的决定 D1–D6；R1/R2/R3 三版的逐文件改法 |
 | `docs/PLAN-r1-translation-gap.md` | R1 执行细则（A–F、I 已做；G 未做），含审查后的全部修正 |
-| `docs/experiments/cloud_asr_20261010/` | 测评脚本 + 各家转写结果（`results/hyp_*.txt`）。key 从 `~/.classlive/*-token` 读，不在仓库 |
+| `docs/experiments/cloud_asr_20261010/` | 测评脚本 + 各家转写结果（`results/hyp_*.txt`）。key 从 `~/.classlive/*-token` 读，不在仓库。**真值语料在 `~/.classlive/eval/ocw-14.01-lec11/`**（不进仓库，复跑与重建见该目录 `README.md`） |
 | `docs/PLAN-streaming-asr.md` | （旧）R3 草稿换 Nemotron 的计划，仍有效 |
 
 ## 2. R1 已完成的改动（已本地提交，未推送）

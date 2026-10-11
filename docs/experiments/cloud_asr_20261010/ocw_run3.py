@@ -1,6 +1,7 @@
 import sys, json, os, io, wave, base64, time, urllib.request, numpy as np
 from concurrent.futures import ThreadPoolExecutor
-sys.path.insert(0, "/Users/owen/lecture-live")
+ROOT = __import__("pathlib").Path(__file__).resolve().parents[3]  # 仓库根（docs/experiments/<本目录>/x.py）
+sys.path.insert(0, str(ROOT))
 D = sys.argv[1]; which = sys.argv[2]
 z = np.load(D + "/segs.json.norm.npy"); segs = json.load(open(D + "/segs.json"))
 cut = lambda s: z[int(s["t0"]*16000): int(s["t1"]*16000)].astype(np.float32)
@@ -24,7 +25,7 @@ if which == "cf":
     lat = sorted(l for _, l in res if l); print(f"CF 失败 {sum(l is None for _,l in res)} · 延迟 p50 {lat[len(lat)//2]:.2f}s p95 {lat[int(len(lat)*.95)]:.2f}s")
     open(D + "/hyp_cf.txt", "w").write(" ".join(t for t, _ in res))
 elif which == "pk":
-    import asr; P = asr.load_asr("/Users/owen/models/parakeet-tdt-0.6b-v3-int8"); W = asr.load_final_asr("/Users/owen/models/sherpa-onnx-whisper-turbo")
+    import asr; P = asr.load_asr(os.path.expanduser("~/models/parakeet-tdt-0.6b-v3-int8")); W = asr.load_final_asr(os.path.expanduser("~/models/sherpa-onnx-whisper-turbo"))
     tp = []; tw = []; outp = []; outw = []
     for s in segs:
         a = time.time(); outp.append(P.transcribe(cut(s))); tp.append(time.time()-a)

@@ -351,10 +351,11 @@ class TestConfigAndId(Base):
         paths.cloud_asr_config().write_text("{not json")
         self.assertEqual(final_asr.read_config(), {"enabled": True, "acknowledged": ""})
 
-    def test_consent_text_mentions_switch_not_pure_transcribe_guarantee(self):
+    def test_consent_text_names_both_providers_and_no_false_guarantee(self):
+        # 末段「想保证音频不出本机…」Owen 2026-10-11 看图后删掉；关法在面板开关的悬停提示里。
         t = final_asr.consent_text()
-        self.assertIn("CLASSLIVE_CLOUD_ASR=0", t)
-        self.assertIn("云端转写", t)
+        self.assertIn("Groq", t)
+        self.assertIn("阿里云", t)
         self.assertNotIn("纯转录档就不出本机", t)
 
 

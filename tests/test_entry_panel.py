@@ -454,6 +454,7 @@ def main() -> int:
     _add_wiring_section()
     _target_liveness_section()
     _test_mode_section()
+    _cloud_asr_section()
     _vault_section()
     _key_entry_section()
 
@@ -761,6 +762,208 @@ def main() -> int:
     for n in bad:
         print(f"  ❌ {n}")
     return 1 if bad else 0
+
+
+def _cloud_asr_section() -> None:
+    """⑳b 「云端转写」开关：文案 / 坐标同源 / 点了回调真的触发 / 锁定 / 落盘接线。
+
+    ⚠️ 写端全隔离：面板走 tempdir 的 glossary/state_root；`entry_launch` 那段把
+       `HOME` 指到 tempdir（`final_asr.write_config` 走 `paths`），绝不碰真 `~/.classlive/`。
+    """
+    print("\n--- ⑳b 云端转写开关：文案 / 坐标同源 / 点击触发回调 ---")
+    import tempfile
+
+    # ── 纯函数：期望值写字面量（不拿被测函数当期望值）──────────────────
+    check("⭐ 开关文案两态逐字：云端转写：开 / 云端转写：关",
+          E.cloud_asr_title(True) == "云端转写：开" and E.cloud_asr_title(False) == "云端转写：关",
+          f"{E.cloud_asr_title(True)!r} / {E.cloud_asr_title(False)!r}")
+    check("⭐ 只有一颗开关时 y = 垂直居中（= 原来测试模式钮的位置，没开云端的面板一像素不动）",
+          abs(E.switch_y(0, 1) - (E.DROP_H - E.BTN_H) / 2.0) < 1e-9, str(E.switch_y(0, 1)))
+    _top, _bot = E.switch_y(0, 2), E.switch_y(1, 2)
+    check("⭐ 两颗叠放：第 0 颗在上（y 更大）、间距 = SWITCH_GAP、整体在条内且不出界",
+          _top > _bot and abs((_top - _bot) - (E.BTN_H + E.SWITCH_GAP)) < 1e-9
+          and _bot >= 0 and _top + E.BTN_H <= E.DROP_H, f"top={_top} bot={_bot}")
+
+    try:
+        from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
+                            NSButton, NSFont, NSFontAttributeName)
+        from Foundation import NSAttributedString
+        import entry_launch
+    except Exception as e:                                    # noqa: BLE001
+        check("AppKit 可用（这一节要真窗口）", False, f"{type(e).__name__}: {e}")
+        return
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory)
+
+    def _walk(v, out):
+        out.append(v)
+        for c in (v.subviews() or []):
+            _walk(c, out)
+        return out
+
+    def _btns(h, prefix):
+        return [v for v in _walk(h.window.contentView(), [])
+                if isinstance(v, NSButton) and (v.title() or "").startswith(prefix)]
+
+    def _hit(a, b):
+        return (a.origin.x < b.origin.x + b.size.width and b.origin.x < a.origin.x + a.size.width
+                and a.origin.y < b.origin.y + b.size.height
+                and b.origin.y < a.origin.y + a.size.height)
+
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        gl = root / "glossary.txt"
+        gl.write_text("# public table\n", encoding="utf-8")
+
+        def _build(name, **kw):
+            return E.build(glossary=gl, sessions_dir=root / ("s" + name),
+                           state_root=root / ("st" + name), on_start=lambda c: None, **kw)
+
+        calls: list = []
+        h = _build("1", on_test_mode=lambda on: True, test_mode=False,
+                   on_cloud_asr=lambda on: (calls.append(on), True)[1], cloud_asr=True)
+        try:
+            ca, tm = (_btns(h, "云端转写：") if h else []), (_btns(h, "测试模式：") if h else [])
+            check("⭐ 两颗开关都建了；初值 cloud_asr=True 显示「云端转写：开」",
+                  len(ca) == 1 and len(tm) == 1 and ca[0].title() == "云端转写：开",
+                  f"{[b.title() for b in ca]} {[b.title() for b in tm]}")
+            if len(ca) == 1 and len(tm) == 1:
+                ca, tm = ca[0], tm[0]
+                check("⭐⭐ 两颗开关的 frame 不重叠，且 y 与 switch_y 同源",
+                      not _hit(ca.frame(), tm.frame())
+                      and abs(float(tm.frame().origin.y) - E.switch_y(0, 2)) < 1e-6
+                      and abs(float(ca.frame().origin.y) - E.switch_y(1, 2)) < 1e-6,
+                      f"tm={tm.frame()} ca={ca.frame()}")
+                _f = NSFont.systemFontOfSize_(12.0)
+                _w = max(float(NSAttributedString.alloc().initWithString_attributes_(
+                    t, {NSFontAttributeName: _f}).size().width)
+                    for t in (E.cloud_asr_title(True), E.cloud_asr_title(False)))
+                check("⭐ 文案塞得进按钮框", _w <= float(ca.frame().size.width) - 8.0, f"{_w:.1f}")
+                # 行为：点一下回调真的触发、值翻转
+                ca.performClick_(None)
+                check("⭐⭐ 点一下 → 回调收到 False、文案变「关」",
+                      calls == [False] and ca.title() == "云端转写：关",
+                      f"{calls} {ca.title()!r}")
+                ca.performClick_(None)
+                check("⭐ 再点 → 回调收到 True、文案回「开」",
+                      calls == [False, True] and ca.title() == "云端转写：开", f"{calls}")
+                check("⭐ 悬停说明写着音频发给谁、关掉=全本地",
+                      "Groq" in (ca.toolTip() or "") and "全本地" in (ca.toolTip() or ""),
+                      repr(ca.toolTip()))
+                tm.performClick_(None)
+                check("⭐ 点云端开关不影响测试模式钮（两颗互不串）",
+                      tm.title() == "测试模式：开" and calls == [False, True], f"{tm.title()!r}")
+        finally:
+            if h is not None:
+                h.close()
+
+        # 只有云端、没有测试模式 → 居中（原位）
+        h1 = _build("1b", on_cloud_asr=lambda on: True, cloud_asr=False)
+        try:
+            b = _btns(h1, "云端转写：") if h1 else []
+            check("⭐ 只建云端开关时垂直居中",
+                  len(b) == 1 and abs(float(b[0].frame().origin.y) - E.switch_y(0, 1)) < 1e-6,
+                  str([x.frame() for x in b]))
+        finally:
+            if h1 is not None:
+                h1.close()
+
+        # 写失败 → 弹回
+        c2: list = []
+        h2 = _build("2", on_cloud_asr=lambda on: (c2.append(on), False)[1], cloud_asr=False)
+        try:
+            b = _btns(h2, "云端转写：") if h2 else []
+            if len(b) == 1:
+                b[0].performClick_(None)
+                check("⭐⭐ 写盘失败 → 文案弹回「关」（界面不许撒谎）",
+                      b[0].title() == "云端转写：关" and c2 == [True], f"{b[0].title()!r} {c2}")
+            else:
+                check("（前置）有开关", False, str(len(b)))
+        finally:
+            if h2 is not None:
+                h2.close()
+
+        # None = 不建
+        h3 = _build("3")
+        try:
+            check("⭐ `on_cloud_asr=None` → 一颗都不建",
+                  h3 is not None and not _btns(h3, "云端转写："))
+        finally:
+            if h3 is not None:
+                h3.close()
+
+        # 锁定：显示关、点不动、回调不触发
+        c4: list = []
+        h4 = _build("4", on_cloud_asr=lambda on: (c4.append(on), True)[1],
+                    cloud_asr=True, cloud_asr_locked=True)
+        try:
+            b = _btns(h4, "云端转写：") if h4 else []
+            if len(b) == 1:
+                b[0].performClick_(None)
+                check("⭐⭐ 锁定（环境变量强制关）：即使 cloud_asr=True 也显示「关」，点了回调不触发",
+                      b[0].title() == "云端转写：关" and c4 == [] and not b[0].isEnabled()
+                      and "CLASSLIVE_CLOUD_ASR=0" in (b[0].toolTip() or ""),
+                      f"{b[0].title()!r} {c4} enabled={b[0].isEnabled()}")
+            else:
+                check("（前置）有开关", False, str(len(b)))
+        finally:
+            if h4 is not None:
+                h4.close()
+
+        # ── entry_launch 接线：回调真的写 final_asr 配置；初值读得回 ──────
+        import final_asr
+        import PyObjCTools.AppHelper as _AH
+        _orig_open, _orig_stop = E.open_panel, _AH.stopEventLoop
+        _env_saved = {k: os.environ.get(k) for k in (final_asr.ENV_SWITCH,)}
+        _root_saved = final_asr.paths.STATE_ROOT
+        seen: dict = {}
+
+        def _fake_open(**kw):
+            seen.update(init=kw.get("cloud_asr"), locked=kw.get("cloud_asr_locked"),
+                        has=kw.get("on_cloud_asr") is not None)
+            if kw.get("on_cloud_asr"):
+                seen["ret"] = kw["on_cloud_asr"](seen.get("click", False))
+            kw["on_close"]()
+            return object()
+
+        try:
+            # ⚠️ 隔离写端：`STATE_ROOT` 是 import 时算好的常量，改 $HOME 没用（第一版就这样
+            #    把真 ~/.classlive/cloud-asr.json 写了）→ 直接换掉 `paths.STATE_ROOT`。
+            final_asr.paths.STATE_ROOT = root / "state-home"
+            os.environ.pop(final_asr.ENV_SWITCH, None)
+            _AH.stopEventLoop = lambda: None            # 见 ⑳：否则 terminate_ 杀进程
+            E.open_panel = _fake_open
+            seen["click"] = False
+            entry_launch.main()
+            check("⭐⭐ 面板点「关」→ entry_launch 真写了配置（read_config 读回 enabled=False）",
+                  seen.get("ret") is True and final_asr.read_config()["enabled"] is False
+                  and str(final_asr.paths.cloud_asr_config()).startswith(str(root)),
+                  f"{seen} {final_asr.read_config()}")
+            seen.clear(); seen["click"] = True
+            entry_launch.main()
+            check("⭐ 再点「开」→ 读回 True；且下次开面板初值 = 盘上的值",
+                  final_asr.read_config()["enabled"] is True, str(seen))
+            seen.clear(); seen["click"] = False
+            entry_launch.main()
+            seen2 = dict(seen); seen.clear()
+            entry_launch.main()
+            check("⭐ 初值来自 read_config：上次写 False -> 这次面板拿到 False",
+                  seen2.get("init") is True and seen.get("init") is False,
+                  f"{seen2} {seen}")
+            os.environ[final_asr.ENV_SWITCH] = "0"
+            seen.clear(); seen["click"] = True
+            entry_launch.main()
+            check("⭐ CLASSLIVE_CLOUD_ASR=0：面板拿到 locked=True、init=False，回调返回 False 且不写盘",
+                  seen.get("locked") is True and seen.get("init") is False
+                  and seen.get("ret") is False, str(seen))
+        finally:
+            E.open_panel, _AH.stopEventLoop = _orig_open, _orig_stop
+            final_asr.paths.STATE_ROOT = _root_saved
+            for k, v in _env_saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 def _test_mode_section() -> None:

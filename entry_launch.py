@@ -96,6 +96,16 @@ def write_test_mode(on: bool, path=None) -> bool:
         return False
 
 
+def _cloud_state() -> tuple[bool, bool]:
+    """`(开关初值, 是否被环境变量锁死)`。初值 = `final_asr.read_config()["enabled"]`；
+    读不出来 = `(False, False)`（宁可少上云）。"""
+    try:
+        import final_asr
+        return bool(final_asr.read_config()["enabled"]), bool(final_asr.cloud_forced_off())
+    except Exception:                                   # noqa: BLE001
+        return False, False
+
+
 def main() -> int:
     # ⚠️ `done` 这个闩是必需的，不是防御性冗余：**决策可能在 `runEventLoop()`
     #    之前就发生**（那时 `stopEventLoop()` 叫得太早，之后再进循环就**永远出不来**）。
@@ -154,15 +164,28 @@ def main() -> int:
             print(f"测试模式{'已开 —— 这节课会录音频并上传' if on else '已关'}")
         return ok
 
+    def on_cloud_asr(on: bool) -> bool:
+        """「云端转写」开关被点了：当场写 `cloud-asr.json`（面板不写盘）。
+        返回 `False` = 没写进去（含 `CLASSLIVE_CLOUD_ASR=0` 时 `write_config` 什么都不写）→ 面板弹回原状。
+        """
+        import final_asr
+        ok = final_asr.write_config(on)
+        if ok:
+            print(f"云端转写{'已开 —— 定稿音频片段会发给云端识别' if on else '已关 —— 全本地'}")
+        return ok
+
     def _stop() -> None:
         rc["done"] = True                       # ⚠️ 先立闩，再停循环 —— 见上面的说明
         from PyObjCTools import AppHelper
         AppHelper.stopEventLoop()
 
+    cloud_on, cloud_locked = _cloud_state()
     try:
         h = entry_panel.open_panel(on_start=on_start, on_close=on_close,
                                    on_test_mode=on_test_mode,
-                                   test_mode=read_test_mode())
+                                   test_mode=read_test_mode(),
+                                   on_cloud_asr=on_cloud_asr,
+                                   cloud_asr=cloud_on, cloud_asr_locked=cloud_locked)
     except Exception:                           # noqa: BLE001
         traceback.print_exc()
         return UNAVAILABLE

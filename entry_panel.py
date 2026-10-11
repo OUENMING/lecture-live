@@ -208,6 +208,34 @@ def test_mode_title(on: bool) -> str:
     return f"测试模式：{'开' if on else '关'}"
 
 
+def cloud_asr_title(on: bool) -> str:
+    """云端转写开关上那句话。**纯函数**。（文案草稿，待作者过目）
+
+    ⚠️ 照 `test_mode_title`：就两态、**无图标无 emoji**（作者 2026-09-30 的原话「不要 emoji」，
+       所以不用 ☁），两态字数相同 → 文字宽度一样 → 切换时不抖，也塞得进 `TEST_W`。
+    """
+    return f"云端转写：{'开' if on else '关'}"
+
+
+#: 开关的悬停说明（`setToolTip_`）。不占布局：落点条的提示文字只剩 ~30pt 余量（见 `HINT_W`）。
+CLOUD_ASR_TIP = "音频片段会发给 Groq / 阿里云转写，换更准的英文；关掉 = 全本地"
+CLOUD_ASR_TIP_LOCKED = "已被环境变量 CLASSLIVE_CLOUD_ASR=0 强制关闭（本次启动全本地）"
+SWITCH_GAP = 2.0       # 落点条右侧两颗开关上下叠放时的间距
+
+
+def switch_y(slot: int, n: int) -> float:
+    """落点条右侧开关列里第 `slot` 颗（0 = 最上）的 y。`n` = 一共几颗。
+
+    ⚠️ 视图的 frame 与判据共用这一个式子（同 `card_height` 的纪律）：
+       只有 1 颗时与原来「垂直居中」逐点相同，所以没开云端开关的面板一像素不动。
+    """
+    if n <= 1:
+        return (DROP_H - BTN_H) / 2.0
+    total = n * BTN_H + (n - 1) * SWITCH_GAP
+    base = (DROP_H - total) / 2.0
+    return base + (n - 1 - slot) * (BTN_H + SWITCH_GAP)
+
+
 # ── 颜色 ────────────────────────────────────────────────────────────
 # ⚠️ **深色模式的卡片配色没有实测过**（System Settings 跟随系统外观，本机是浅色，
 #    改外观属于「不擅自改系统设置」）。所以下面这几个值是**从实测比例推的**，
@@ -1580,7 +1608,8 @@ def _vault_autodetect(state_root=None) -> tuple:
 
 def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
           on_close=None, prepare_fn=None, suggest_fn=None,
-          trash_fn=None, on_test_mode=None, test_mode=False) -> Handles | None:
+          trash_fn=None, on_test_mode=None, test_mode=False,
+          on_cloud_asr=None, cloud_asr=False, cloud_asr_locked=False) -> Handles | None:
     """建并显示面板。**失败返回 `None`**（调用方不必管 —— 同 `whatsnew.build`）。
 
     `prepare_fn` 是**验收用的注入点**，默认就是真的 `prep.prepare`：
@@ -1592,6 +1621,8 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
     谁去写 `.test-mode` 是调用方的事）—— 传 `None` = **不建那颗开关**
     （上课中从菜单栏打开的那档：课早在录了，开关没有意义）。
     `test_mode` 是它的**当前值**（调用方从盘上读来）。
+    `on_cloud_asr` / `cloud_asr` 是「云端转写」开关的落点与当前值，写法完全照上面那对
+    （`None` = 不建；**面板不写盘**）。`cloud_asr_locked=True`（环境变量强制关）= 显示为关且点不动。
 
     ⚠️ 构造失败**不能**吞掉 `objc_own.ObjcNameCollision`：那是程序缺陷，
        被吞掉会静默变成「面板打不开」，查起来极难（`objc_own.py` 文件头那次事故）。
@@ -1600,7 +1631,9 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
         return _build(on_start=on_start, glossary=glossary, sessions_dir=sessions_dir,
                       state_root=state_root, on_close=on_close, prepare_fn=prepare_fn,
                       suggest_fn=suggest_fn, trash_fn=trash_fn,
-                      on_test_mode=on_test_mode, test_mode=test_mode)
+                      on_test_mode=on_test_mode, test_mode=test_mode,
+                      on_cloud_asr=on_cloud_asr, cloud_asr=cloud_asr,
+                      cloud_asr_locked=cloud_asr_locked)
     except objc_own.ObjcNameCollision:
         raise
     except Exception:                                     # noqa: BLE001
@@ -1612,7 +1645,8 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
 
 def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
            prepare_fn=None, suggest_fn=None, trash_fn=None,
-           on_test_mode=None, test_mode=False) -> Handles:
+           on_test_mode=None, test_mode=False,
+           on_cloud_asr=None, cloud_asr=False, cloud_asr_locked=False) -> Handles:
     from AppKit import (NSButton, NSColor, NSFont, NSScreen, NSSearchField,
                         NSTextField,
                         NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel)
@@ -2310,10 +2344,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # ⚠️ 状态活在**闭包**里，不进模块级的 `S`：`S` 是跨面板共享的，
     #    而开关的初值每次都由调用方从盘上读（`entry_launch.read_test_mode`）。
     tm_on = [bool(test_mode)]
+    # 右侧开关列：测试模式在上、云端转写在下；只有一颗时垂直居中（= 原位）
+    _n_sw = (on_test_mode is not None) + (on_cloud_asr is not None)
+    _sw_x = W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W - 8.0 - TEST_W
     if on_test_mode is not None:
         tm_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W - 8.0 - TEST_W,
-                       (DROP_H - BTN_H) / 2.0, TEST_W, BTN_H))
+            NSMakeRect(_sw_x, switch_y(0, _n_sw), TEST_W, BTN_H))
         tm_btn.setTitle_(test_mode_title(tm_on[0]))
         tm_btn.setBordered_(False)                 # ⚠️ 见 `TEST_W` 那段：状态→无边框
         tm_btn.setFont_(NSFont.systemFontOfSize_(12.0))
@@ -2357,6 +2393,53 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    （`refresh()` 按 `strip_holder["hint"]` 逐个 `setHidden_`）——
         #    那些档下右下角是「取消/确认」，多一颗开关会挤在同一块地方。
         strip_holder["hint"].append(tm_btn)
+
+    # ☁ 云端转写开关（`docs/PLAN-r2-cloud-final-asr.md` §U2）──────────────
+    # 写法同测试模式：无边框状态钮、值活在闭包里、点一下当场调回调、失败弹回原状。
+    # ⚠️ 面板不写盘 —— `entry_launch` 的回调调 `final_asr.write_config`。
+    # ⚠️ `cloud_asr_locked`（`CLASSLIVE_CLOUD_ASR=0`）= 建出来但**显示关、点不动**：
+    #    不建的话用户会找不到它、不知道为什么本次全本地；建成可点的话点了也写不进（R7），界面在撒谎。
+    ca_on = [bool(cloud_asr) and not cloud_asr_locked]
+    if on_cloud_asr is not None:
+        ca_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(_sw_x, switch_y(_n_sw - 1, _n_sw), TEST_W, BTN_H))
+        ca_btn.setTitle_(cloud_asr_title(ca_on[0]))
+        ca_btn.setBordered_(False)
+        ca_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+        try:
+            ca_btn.setContentTintColor_(
+                NSColor.whiteColor().colorWithAlphaComponent_(0.92))
+            ca_btn.setToolTip_(CLOUD_ASR_TIP_LOCKED if cloud_asr_locked else CLOUD_ASR_TIP)
+            if cloud_asr_locked:
+                ca_btn.setEnabled_(False)
+        except Exception:                                  # noqa: BLE001
+            pass
+
+        def toggle_cloud_asr() -> None:
+            """点一下 = 翻一次，当场落盘；写失败弹回原状（同 `toggle_test_mode`）。"""
+            if cloud_asr_locked:
+                return
+            on = not ca_on[0]
+            ok = True
+            try:
+                ok = on_cloud_asr(on) is not False
+            except Exception:                              # noqa: BLE001
+                ok = False
+            if not ok:
+                set_status("⚠ 云端转写的选择没存下来 —— 这次不算数", 2.0)
+                return
+            ca_on[0] = on
+            try:
+                ca_btn.setTitle_(cloud_asr_title(on))
+            except Exception:                              # noqa: BLE001
+                pass
+
+        ca_t = _target(toggle_cloud_asr)
+        ca_btn.setTarget_(ca_t)
+        ca_btn.setAction_("act:")
+        strip_targets.append(ca_t)
+        strip.addSubview_(ca_btn)
+        strip_holder["hint"].append(ca_btn)            # 批量/搜索/新增档下一并藏起来
 
     # ⚠️ **一次性挂上**（见 `strip_targets` 的说明）—— 别在上面每一处各写一遍。
     strip._targets = strip_targets

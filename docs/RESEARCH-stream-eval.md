@@ -158,6 +158,9 @@ ClassLive.app/Contents/MacOS/python scripts/class_report.py sessions/<会话>.li
 随 `drafts` 队列带到 `drain()`。
 ⚠️ **不能**用 `main.final_gen["n"]`：它要到**定稿上屏**时才自增，比段落真正结束晚
 2–4 秒（Whisper + LLM）→ 新段前几份草稿带着上一段的号，`草稿→定稿` 虚高到 **65%**（也实测踩过）。
+⭐ **R3 起（`4de97f3`）草稿的 `seg` 取 `on_partial` put 那一刻的段号**（`_Latest.taken_tag`），不再在 `partial_worker`
+里现读 `seg_gen` —— 段边界附近更准；旧文件不受影响。草稿行多一个 `engine` 字段（`nemotron` / `parakeet`），
+「滑窗草稿不进回改统计」只对 `parakeet` 生效（`stream_eval._slid`；无此字段 = parakeet，旧数字逐位不变）。
 判据：`tests/test_class_report.py::test_segment_grouping_when_seg_is_present` +
 `tests/test_livemetrics.py::Segments`（4 条）。
 

@@ -34,6 +34,7 @@
 | `PLAN-live-summary.md` | AI 实时总结（原子 / 章节 / 纲要） | 改 `live_summary.py` / `chapter.py` 前 |
 | `PLAN-test-mode.md` | 测试模式（采集 → 打包 → 上传） | 改 `testmode.py` / `upload.py` 前 |
 | `PLAN-streaming-asr.md` | 草稿层换真流式 ASR（Nemotron）· 失败回退 · 验收 | 改草稿 / `asr.py` / 加 ASR 模型前 |
+| `PLAN-passkey.md` | 一人一码：通行码经 Worker 代付转写 + DeepSeek · 限额 / 记账 / 扩展功能 · 待拍板项 | 动 Worker 鉴权、DeepSeek 调用点、key 输入前 |
 | `PLAN-entry-panel.md` | P3 第二批 · 课程卡片面板 | 改 `entry_panel.py` 前 |
 | `PLAN-p3-prep.md` | P3 第一批 · 课件 → 候选术语 | 改 `prep.py` / `extract.py` 前 |
 | `PLAN-update-mechanism.md` | 分级更新 / 引导式更新 | 改 `update.py` / `whatsnew.py` 前 |

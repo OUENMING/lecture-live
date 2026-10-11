@@ -1060,6 +1060,25 @@ check("⚠️ 对照：改 `make-app.sh`（结构那一类）-> **必须**还得
 check("⚠️ 对照：改 `tools/make_icon.py` -> 还得重建（图标那半不能再丢一次）",
       _stale(), "图标源码改了却不重建")
 
+# ============== B14 ⭐ 只缺**可选**模型 -> 卡片不列「下载模型」==============
+# 2026-10-11 外部审查抓出：`pending_steps` 没按 `required` 过滤 —— 只缺可选的 Whisper / Qwen 时
+# 卡片写「缺模型的话课上会直接起不来」，而 `run_step("models")` 又跳过可选的、什么都不下 →
+# 卡片永远消不掉。判据只看「models 这一步在不在」，不钉文案。
+print("\n--- B14 可选模型不进更新卡片 ---")
+import doctor as _doctor                                                   # noqa: E402
+_req = [m for m in _doctor.MODELS if m.required]
+_opt = [m for m in _doctor.MODELS if not m.required]
+check("⚠️ 前置：模型清单里必装、可选各至少一条（否则下面两条空转）",
+      bool(_req) and bool(_opt), str([(m.key, m.required) for m in _doctor.MODELS]))
+with _mock.patch.object(_doctor, "model_present", lambda p: any(p == m.path for m in _req)):
+    check("⭐⭐ 必装的都在、可选的全缺 -> **不列**「下载模型」",
+          "models" not in [s["key"] for s in update.pending_steps()],
+          str([s["key"] for s in update.pending_steps()]))
+with _mock.patch.object(_doctor, "model_present", lambda p: False):
+    check("⚠️ 对照：必装的也缺 -> **必须**列「下载模型」",
+          "models" in [s["key"] for s in update.pending_steps()],
+          str([s["key"] for s in update.pending_steps()]))
+
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}")

@@ -931,7 +931,10 @@ def pending_steps() -> list[dict]:
     #    之前这里和 `run_step()` 各抄了一遍（四个审查代理独立都指到了）。
     try:
         import doctor
-        missing = [m for m in doctor.MODELS if not doctor.model_present(m.path)]
+        # 只数**必装**的：可选的（Whisper / Qwen）缺了课照上，`run_step("models")` 也不下它们 ——
+        # 列进来就是一张永远消不掉的卡（2026-10-11，`tests/test_update.py` B14）。
+        missing = [m for m in doctor.MODELS
+                   if m.required and not doctor.model_present(m.path)]
         if missing:
             total = "、".join(f"{m.label.split('(')[0].strip()} {m.size}" for m in missing)
             steps.append({

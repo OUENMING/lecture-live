@@ -42,7 +42,7 @@
 
 ## 1. 这是什么
 
-ClassLive 是一个**跑在作者自己 Mac 上的实时英译中课堂字幕工具**。它在课堂现场采集音频(笔记本麦克风, 或 BlackHole 抓的系统声), 用本地模型实时把语音转成英文、逐句修正 ASR 听错、翻成中文, 以卡片式悬浮窗叠加在 PPT 上; 每句定稿**立刻**追加写入 `sessions/`, 下课后做一次整课精修, 生成一份「英文知识点详解 + 自测 + 术语表 + 逐字转录」的双层 Obsidian 笔记。使用者只有一个人(线下课用麦克风、线上课用系统声), 运行方式是**零参数一条命令 `cl`**; 单节课成本约 0.1 元(只发文本, 音频不出本机), 断网时自动退回本地模型, 保证课上不哑。它是 2026-09 在大学上课期间边用边写出来的工具, 已 MIT 开源并脱敏。
+ClassLive 是一个**跑在作者自己 Mac 上的实时英译中课堂字幕工具**。它在课堂现场采集音频(笔记本麦克风, 或 BlackHole 抓的系统声), 用本地模型实时把语音转成英文、逐句修正 ASR 听错、翻成中文, 以卡片式悬浮窗叠加在 PPT 上; 每句定稿**立刻**追加写入 `sessions/`, 下课后做一次整课精修, 生成一份「英文知识点详解 + 自测 + 术语表 + 逐字转录」的双层 Obsidian 笔记。使用者只有一个人(线下课用麦克风、线上课用系统声), 运行方式是**零参数一条命令 `cl`**; 单节课成本约 0.1 元(翻译只发文本; 定稿转写 3.9.0 起默认把音频经作者的服务器发给 Groq / 阿里云百炼, 可在面板或 `CLASSLIVE_CLOUD_ASR=0` 关掉, 关掉后音频不出本机), 断网时自动退回本地模型, 保证课上不哑。它是 2026-09 在大学上课期间边用边写出来的工具, 已 MIT 开源并脱敏。
 
 ---
 
@@ -290,7 +290,7 @@ cl → main.run()
 
 ### H. 隐私 / 脱敏(现状良好)
 
-`.gitignore` 覆盖 `.deepseek_key` / `.course` / `glossary/` / `term_notes.json` / `term_notes_auto.json` / `term_notes*.bak` / `sessions/`;`git ls-tree HEAD` 确认 HEAD 树里**不含**这些路径。`glossary.example.txt` 用的是占位课号(`YOUR-COURSE-101`), 三次脱敏 commit 已清掉文档与注释里的真实课号。**音频从不落盘**(`capture.py` 只读不写), 只有文本出本机。
+`.gitignore` 覆盖 `.deepseek_key` / `.course` / `glossary/` / `term_notes.json` / `term_notes_auto.json` / `term_notes*.bak` / `sessions/`;`git ls-tree HEAD` 确认 HEAD 树里**不含**这些路径。`glossary.example.txt` 用的是占位课号(`YOUR-COURSE-101`), 三次脱敏 commit 已清掉文档与注释里的真实课号。**音频从不落盘**(`capture.py` 只读不写)。出本机的: 翻译只有文本; 定稿转写默认(可关)发 Opus 压缩的音频段给云端(`final_asr.py`, 3.9.0 起)。
 
 ### I. 默认值分歧
 

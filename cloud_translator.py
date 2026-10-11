@@ -3,7 +3,7 @@
 与本地 Translator 同接口: warmup / fix_and_translate_stream / translate_draft / Result,
 方便 run() 里用 --engine 切换与自动降级。
 
-注意: 只有 **文本** 出本机(音频仍全本地);key 优先取 --api-key, 其次环境变量
+注意: 本模块只有 **文本** 出本机(翻译不碰音频); 音频的去向见 `final_asr.py`(3.9.0 起定稿转写默认走云端, 可关);key 优先取 --api-key, 其次环境变量
 DEEPSEEK_API_KEY, 再次 `~/.classlive/credentials`(见 `paths.credentials`),
 最后才是旧位置的 `<仓库>/.deepseek_key`(仍认, 但启动会告警提示搬家)。
 """

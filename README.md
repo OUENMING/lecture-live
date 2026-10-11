@@ -1,6 +1,6 @@
 # ClassLive · 本地实时课堂双语字幕
 
-> 把英文课实时变成「英文草稿 → 句末定稿 → 中文流式打字机」，全本地、离线、$0。
+> 把英文课实时变成「英文草稿 → 句末定稿 → 中文流式打字机」，本地优先：定稿转写默认走云端、一键可关，关掉后全本地、离线、$0。
 
 [![Version](https://img.shields.io/badge/version-3.8.4-blueviolet?style=flat-square)](#路线图)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
@@ -10,7 +10,7 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](#贡献)
 
 ClassLive 是跑在你自己电脑上的**实时课堂字幕工具**：老师讲英文，屏幕滚出中文双语字幕。
-它复刻商业产品「说完一句、按上下文自动修正」的效果，但**音频不出本机**，课后自动整理成 Obsidian 笔记。
+它复刻商业产品「说完一句、按上下文自动修正」的效果，但**音频默认只发给你开的云端转写（可关；关掉后一个字节都不出本机）**，课后自动整理成 Obsidian 笔记。
 
 ---
 
@@ -20,7 +20,9 @@ ClassLive 是跑在你自己电脑上的**实时课堂字幕工具**：老师讲
 
 留学第一年最难受的不是听不懂单词，而是**跟不上语速**——一句里两三个词没听清，整句就散了，你还在回想上一句，老师已经翻页了。
 
-商业字幕产品（Otter / Wordly / Interprefy）都要**把音频传到云端**，且按分钟计费。ClassLive 相反：**ASR 完全本地跑，云端只在你愿意时收文本**，实测一节两小时的课成本 **0.08–0.19 元**。
+商业字幕产品（Otter / Wordly / Interprefy）都要**把音频传到云端**，且按分钟计费。ClassLive 相反：**草稿与兜底识别完全本地跑；定稿转写默认走云端（可关）、翻译只发文本**，实测一节两小时的课成本 **0.08–0.19 元**。
+
+> 🔒 **隐私（3.9.0 起）**：定稿转写默认把**每段音频**（Opus 压缩，约 40 KB/段）经作者的服务器转发给 Groq（美国；默认不留存，滥用监控最长 30 天）或阿里云百炼（中国；不用于训练，按法规会保存调用记录）。要保证音频不出本机：在启动面板里关掉「云端转写」，或用 `CLASSLIVE_CLOUD_ASR=0` 启动。只切到「纯转录」档**不够**——每节课都从翻译档开始，切换之前的几段已经发出去了。
 
 ### 核心功能
 
@@ -92,7 +94,7 @@ ClassLive 是跑在你自己电脑上的**实时课堂字幕工具**：老师讲
 | 功能名称 | 功能说明 | 技术栈 | 更新时间 | 版本 |
 |---------|---------|--------|----------|------|
 | 实时语音识别 | 流式草稿 + 句末整句重转定稿 | Parakeet-TDT-0.6B-v3 int8 (sherpa-onnx) | 2026-09-09 | v1.0 |
-| 定稿增强模型 | 定稿用 Whisper-turbo（**+44% 有效词数**，8/8 窗口一致），退化自动回退 | Whisper-large-v3-turbo (sherpa-onnx) | 2026-09-24 | v3.4 |
+| 定稿增强模型 | 定稿用 Whisper-turbo（**+44% 有效词数**，8/8 窗口一致），退化自动回退；3.9.0 起默认由云端转写顶替，Whisper 降为**可选**的本地兜底 | Whisper-large-v3-turbo (sherpa-onnx) | 2026-09-24 | v3.4 |
 | 悬浮窗自由缩放 | 原生四角拖拽 + 行高随宽度自适应 | AppKit (Titled + FullSizeContentView) | 2026-09-24 | v3.4 |
 | 三档模式 | 双语 / 只英·校 / 纯转录（后者零模型请求） | 状态机 + 六处调用门控 | 2026-09-24 | v3.4 |
 | 语音活动检测 | 梯级静音阈值断句 + 300ms pre-roll | Silero VAD (ONNX) | 2026-09-09 | v1.0 |
@@ -154,7 +156,7 @@ lecture-live/
 ├── main.py                # CLI 入口；事件驱动主循环 + 三个 worker 线程
 ├── capture.py             # 音源(回调式异步采集 / 文件) + PeakNormalizer 电平归一化
 ├── vad.py                 # Silero VAD + 梯级静音 + pre-roll 分段
-├── asr.py                 # Parakeet 转写(草稿/兜底) + Whisper 定稿(两个模型都必装)
+├── asr.py                 # Parakeet 转写(草稿/兜底) + Whisper 本地定稿(可选)
 ├── translator.py          # 本地流式 ZH/EN + RAG-lite 术语筛选 + 仅英文矫正
 ├── cloud_translator.py    # DeepSeek 云端翻译(同接口, 失败降级本地)
 ├── live_summary.py        # 实时总结：窗口规则 / 章节状态机 / 课务 / 重试与积压
@@ -219,7 +221,7 @@ lecture-live/
 - **macOS 13 (Ventura) 或更高 + Apple Silicon**（M1/M2/M3/M4）—— 本地推理依赖 MLX（Metal），悬浮窗依赖 AppKit
   （macOS 13 上本地翻译兜底用较旧的 mlx-lm 0.29，见 `requirements.txt`；macOS 14+ 用最新版）
 - 先装 [`uv`](https://docs.astral.sh/uv/)：`curl -LsSf https://astral.sh/uv/install.sh | sh`（Python 3.12 由它自动准备，不用另装）
-- 约 **3GB** 磁盘放模型（Parakeet + VAD + Whisper 定稿，**三个都必装**）
+- 约 **2GB** 磁盘放必需模型（Parakeet + VAD 必装；Whisper 本地定稿约 1GB，**可选**——云端转写不可用时才用，没装就用 Parakeet 兜底）
 - 磁盘里跑，不需要 GPU 服务器
 
 ## 安装
@@ -256,7 +258,7 @@ ClassLive.app/Contents/MacOS/python -c "from huggingface_hub import snapshot_dow
 mkdir -p ~/models/vad && curl -fsSL -o ~/models/vad/silero_vad.onnx \
   https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
 
-# 定稿 Whisper 模型（~1GB，**必装** —— 缺了启动时会直接告诉你）
+# 本地定稿 Whisper 模型（~1GB，**可选** —— 云端转写不可用时的更准兜底；不装则兜底用 Parakeet）
 curl -fsSL -o /tmp/wt.tar.bz2 \
   https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-turbo.tar.bz2
 tar xjf /tmp/wt.tar.bz2 -C ~/models/ && rm /tmp/wt.tar.bz2
@@ -466,7 +468,7 @@ cl test --no-bundle          # 不打包，只写报告
 > 采集失败只是少一份数据，不会让课跑不下去。
 
 > 📌 读报告时注意三条（`report.json` 里的 `notes` 也写了）：
-> ① `logprob` 只有用 Parakeet 时才填（Whisper 不暴露），默认走 Whisper 所以通常是 `null`；
+> ① `logprob` 只有用 Parakeet 时才填（Whisper 与云端来源都没有），定稿主要走云端时通常是 `null`；
 > ② `cpu_pct_of_walltime` 在倍速回放里会被放大，跨机器比较请用 `cpu_s_per_audio_s`；
 > ③ `no_end_punct_pct` 在 n<30 段时噪声很大（实测底线 ±18 个百分点），单节课的数字别当结论。
 
@@ -517,8 +519,8 @@ cl test --no-bundle          # 不打包，只写报告
 | **纯转录** | **一个 LLM 请求都不发**，ASR 直出 | 不想联网 / 不想花 API / 最省电最跟手 |
 
 - **「只英·校」不是终点**：这一档**仍会调模型**做英文上下文矫正（ASR 错听照修），落盘写 `**EN**: <矫正后>` + `**ASR**: <原始>` 两行。
-- **「纯转录」才是真离线**：定稿、草稿译文、专有名词查询**全部**跳过模型 —— 零 API、零首字延迟。这也是**唯一**能保证"音频不出机器、文本也不出"的档位。
-- **文本会发给谁**：默认只有 **DeepSeek**（翻译、精修、复习层、实时总结）。若另配了 **Jev key**（「重点句」+「课务」两个功能），整节课的转录会**再**发给 **TypeSafe 官方** 或 **CommandCode**（按你的 key 是哪家的，只发一家）逐批打分 —— 不配这个 key，那两个功能不出现，也就没有第二个收件方。
+- **「纯转录」不发译文请求**：草稿译文、专有名词查询**全部**跳过模型，定稿不再上云 —— 零翻译 API、零首字延迟。⚠️ 但它**不是**"音频不出机器"的保证：每节课都从翻译档开始，切到纯转录之前的几段音频已经发给云端转写了。要保证音频与文本都不出机器：关掉「云端转写」（面板开关或 `CLASSLIVE_CLOUD_ASR=0`）**并**选「纯转录」。
+- **文本会发给谁**：默认只有 **DeepSeek**（翻译、精修、复习层、实时总结）。**音频**则默认发给云端转写（Groq / 阿里云百炼，经作者的服务器；见上面的隐私说明，可关）。若另配了 **Jev key**（「重点句」+「课务」两个功能），整节课的转录会**再**发给 **TypeSafe 官方** 或 **CommandCode**（按你的 key 是哪家的，只发一家）逐批打分 —— 不配这个 key，那两个功能不出现，也就没有第二个收件方。
 - **随时可逆**：切回双语即刻恢复，上下文一直连着，不断链。
 - **矫正结果三重把关**（`_clean_fix`），不满足就回退原始 ASR：① 混入中文（模型跑偏去翻译了）② 空 ③ **明显变长**（在改写而非矫正）。
 
@@ -661,9 +663,9 @@ python build_notes.py --rebuild  # 全量重分类 + 扩写 + 清掉自动回写
 <details>
 <summary><b>必须联网吗？说好的全本地呢？</b></summary>
 
-ASR 与 UI **完全本地**，音频一个字节都不出本机。默认 `--engine auto` 只把**识别出的文本**发给 DeepSeek 换更高质量的中文译文（一节课约 0.1 元）。
+草稿识别与 UI **完全本地**。但 3.9.0 起**定稿转写默认走云端**：每段音频（Opus 压缩）经作者的服务器发给 Groq 或阿里云百炼，换更准的英文（云端不可用时自动回本地，字幕不中断）。在启动面板关掉「云端转写」或用 `CLASSLIVE_CLOUD_ASR=0` 启动，音频就一个字节都不出本机。默认 `--engine auto` 另会把**识别出的文本**发给 DeepSeek 换更高质量的中文译文（一节课约 0.1 元）。
 
-要绝对离线：`cl local`，或不配 key —— 云端失败自动降级到本地 Qwen3-1.7B（降级是暂时的：每 90s 探测，云端恢复自动切回）。代价是译文质量从 ⭐⭐⭐⭐⭐ 掉到 ⭐⭐。
+要绝对离线：`cl local`（本地翻译引擎，定稿转写也一并走本地），或不配 key 并关掉云端转写 —— 云端失败自动降级到本地 Qwen3-1.7B（降级是暂时的：每 90s 探测，云端恢复自动切回）。代价是译文质量从 ⭐⭐⭐⭐⭐ 掉到 ⭐⭐。
 
 </details>
 

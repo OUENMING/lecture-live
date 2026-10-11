@@ -2,7 +2,7 @@
 
 ## 这是什么
 
-ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音频 → 转写 → 逐句修正并翻译 → 悬浮字幕 → 实时落盘、课后渲染双层 Obsidian 笔记。零参数 `cl` 启动；跑在本机，音频不出机器，只发文本。MIT 开源，已脱敏。
+ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音频 → 转写 → 逐句修正并翻译 → 悬浮字幕 → 实时落盘、课后渲染双层 Obsidian 笔记。零参数 `cl` 启动；草稿/兜底识别跑在本机；翻译只发文本；定稿转写默认走云端（Groq / 阿里云，可关：面板开关或 `CLASSLIVE_CLOUD_ASR=0`，3.9.0 起），关掉后音频不出机器。MIT 开源，已脱敏。
 
 ## 文件地图
 
@@ -32,6 +32,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 音频采集、电平归一化、上课中途换设备（`resolve_input_device` 唯一定义点） | `capture.py` |
 | 断句、VAD、静音阈值、硬切找低谷 | `vad.py` |
 | 转写、ASR、Parakeet、听错修正 | `asr.py` |
+| 定稿 ASR 深模块（云端 Groq/千问优先、本地兜底、熔断、总截止；`main.final_worker` 只调 `FinalASR.transcribe`）；开关 / 告知 / 配置 `read_config` | `final_asr.py`、`asr_endpoint.py`、`tests/test_final_asr.py` |
 | 翻译、prompt、DeepSeek 云端、mlx 本地、引擎降级 | `translator.py`、`cloud_translator.py` |
 | 云端翻译的前文窗口（块对齐 / 前缀缓存）—— 动 `cloud_translator._user_content` 前读 | `docs/experiments/context_ab.md` |
 | 草稿译文：过期判据 `DraftView` + 只译最新的线程 `DraftTranslator`（依赖全注入，`step()` 可单测）；触发判据 | `draft_translate.py`、`draft_policy.py` |

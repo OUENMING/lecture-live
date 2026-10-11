@@ -71,6 +71,8 @@ MANUAL_FOR = [
      "docs/experiments/context_ab.py / scripts/draft_ctx_ab.py —— 改 prompt 后的译文并排（花钱，人看）"),
     (["overlay.py", "transcript_view.py"],
      "scripts/probe_scroll.py —— 滚动；它自己会翻转，❌ 先连跑两三次再下结论"),
+    (["overlay.py", "draft_translate.py"],
+     "scripts/probe_stream_draft.py —— 定稿流式时草稿栏 / 英文占位，改前改后各拍一张（给作者看）"),
     (["overlay.py"],
      "scripts/probe_hint.py —— ❓ 点拨在术语格里的样子（拍两张图，给作者看）"),
     (["entry_panel.py", "entry_launch.py", "final_asr.py"],

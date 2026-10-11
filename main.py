@@ -1743,7 +1743,7 @@ def run(args) -> None:
                 try:
                     fixed = translator.fix_stream(
                         sent, finals,
-                        on_en=lambda d: streamq.put(("en", d)))
+                        on_en=lambda d: streamq.put(("en", d, seg)))
                 except Exception as e:              # noqa: BLE001
                     echo(f"⚠ 英文矫正失败({str(e)[:50]}); 保留原始转录")
                     fixed = ""
@@ -1751,11 +1751,14 @@ def run(args) -> None:
                 streamq.put(("final", fixed, "", sent, seg))
                 continue
             # 翻译失败也要保住转录: LLM 挂了不代表这节课没听到东西。
+            # 先把 ASR 原句交给悬浮窗当英文行的占位：模型先吐 ZH 后吐 EN，不占位的话
+            # 中文打字的那段时间里上面那行英文是空的。修正版到 `final` 时整句换上。
+            streamq.put(("en_seed", sent, seg))
             try:
                 res = translator.fix_and_translate_stream(
                     sent, finals,
-                    on_zh=lambda d: streamq.put(("zh", d)),
-                    on_en=lambda d: streamq.put(("en", d)))
+                    on_zh=lambda d: streamq.put(("zh", d, seg)),
+                    on_en=lambda d: streamq.put(("en", d, seg)))
                 en, zh = res.en_fixed, res.zh
                 finals.append(en)
             except Exception as e:                  # noqa: BLE001
@@ -2158,10 +2161,17 @@ def run(args) -> None:
                 item = streamq.get_nowait()
             except queue.Empty:
                 break
-            if item[0] == "zh":
+            if item[0] == "zh":                     # ("zh"/"en", 增量, seg)
+                draft_view.on_stream(item[2] if len(item) > 2 else None)
                 ui.stream_zh(item[1])
             elif item[0] == "en":
+                draft_view.on_stream(item[2] if len(item) > 2 else None)
                 ui.stream_en(item[1])
+            elif item[0] == "en_seed":              # ("en_seed", ASR 原句, seg)
+                draft_view.on_stream(item[2] if len(item) > 2 else None)
+                fn = getattr(ui, "seed_en", None)   # 终端没有这一槽
+                if callable(fn):
+                    fn(item[1])
             elif item[0] == "terms":
                 if item[1]:
                     ui.terms(item[1])
@@ -2234,6 +2244,11 @@ def run(args) -> None:
                 #    **出声**，而不是静默丢弃。`drain()` 是**唯一**的 tag 分发点。
                 #    ⚠️ 只 `echo`，不做任何可能抛的事 —— 这里没有 try/except。
                 echo(f"⚠ drain: 未识别的 streamq tag {item[0]!r}（已丢弃）")
+        # 定稿流式期间草稿栏显不显示：屏上草稿是更新一段的就照常显示（判据在 DraftView）。
+        # 每轮问一次；悬浮窗只在值变了时才重画。终端没有草稿栏 → 没有这个方法。
+        _over = getattr(ui, "draft_over_stream", None)
+        if callable(_over):
+            _over(draft_view.over_stream())
 
     try:
         _dev = {"wall": time.time(), "next": 0.0}

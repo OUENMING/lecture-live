@@ -20,6 +20,7 @@ class DraftView:
         self.fin_seg = -1          # 已定稿上屏的最大段号
         self.seq = -1              # 已显示的最大送翻序号
         self.cur_seg = -1          # 屏上英文草稿所属段号
+        self.stream_seg = None     # 正在流式吐字的那句定稿所属段号(没有在流 = None)
         # 与 DraftTranslator 共享同一个 dict(收尾打印)
         self.stats = {"stale": 0, "yield_local": 0, "errors": 0}
 
@@ -33,11 +34,27 @@ class DraftView:
     def on_final(self, seg) -> bool:
         """先更新 fin_seg 再判: 屏上已是更新一段的草稿时(cur_seg > fin_seg), 旧段定稿不碰草稿槽。
         返回值即 `finalize(clear_draft=)`。seg 缺失/非法时不动 fin_seg, 绝不抛。"""
+        self.stream_seg = None
         try:
             self.fin_seg = max(self.fin_seg, int(seg))
         except Exception:                                  # noqa: BLE001
             pass
         return self.cur_seg <= self.fin_seg
+
+    def on_stream(self, seg) -> None:
+        """某段的定稿开始/继续流式吐字。seg 缺失/非法 → 当作不知道(None), 绝不抛。"""
+        try:
+            self.stream_seg = int(seg)
+        except Exception:                                  # noqa: BLE001
+            self.stream_seg = None
+
+    def over_stream(self) -> bool:
+        """定稿流式期间, 屏上草稿是不是**更新一段**的 -> 该照常显示(不是正在定稿那句的重复)。
+
+        悬浮窗流式时会藏起草稿栏(防「同一句在实时行和草稿栏各出现一次」)。但真课里
+        81% 的段在上一段定稿上屏时, 下一段草稿已经出来了(10-09 那节, p50 已等 4 s) ——
+        一律藏就是每句断档一次。段号不知道时按老行为(藏)。"""
+        return self.stream_seg is not None and self.cur_seg > self.stream_seg
 
     def accept(self, seq: int, seg: int) -> bool:
         """译文能否上屏。False = 过期(这段已定稿 / 屏上已是更新一段的英文草稿 / 更新的译文已显示过), 已计数。"""

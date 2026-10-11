@@ -72,6 +72,20 @@ class ViewAccept(unittest.TestCase):
         self.assertFalse(v.accept(2, 3))            # seg 3 还没定稿，但屏上已是 seg 4
         self.assertTrue(v.accept(3, 4))
 
+    def test_draft_shows_over_stream_only_when_newer(self):
+        """定稿流式期间：草稿是更新一段的 → 显示；是正在定稿那段的 → 藏（防重复）。"""
+        v = D.DraftView()
+        v.on_draft(3)
+        self.assertFalse(v.over_stream())           # 没在流
+        v.on_stream(3)
+        self.assertFalse(v.over_stream())           # 草稿就是正在定稿那段
+        v.on_draft(4)
+        self.assertTrue(v.over_stream())            # 讲到下一段了
+        v.on_final(3)
+        self.assertFalse(v.over_stream())           # 流完了，回到常态
+        v.on_stream(None)
+        self.assertFalse(v.over_stream())           # 段号未知 → 老行为（藏）
+
     def test_stale_by_seq(self):
         v = D.DraftView()
         v.accept(5, 0)

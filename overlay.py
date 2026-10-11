@@ -820,6 +820,8 @@ class Overlay:
         self._cur_zh = ""
         self._cur_en = ""
         self._streaming = False
+        self._cur_en_seed = ""      # 定稿流式时英文行的占位（ASR 原句），见 seed_en
+        self._draft_over = False    # 定稿流式时草稿是更新一段的 → 照常显示，见 draft_over_stream
         self._draft = ""
         self._shadow = _make_shadow()
         self._targets = []        # ⚠️ 必须常驻: NSControl.setTarget_ 是弱引用,
@@ -2195,12 +2197,25 @@ class Overlay:
         self._cur_en += delta
         self._mark_dirty()
 
+    def seed_en(self, text: str):
+        """这句定稿的 ASR 原句：模型先吐 ZH 后吐 EN，中文打字时英文行用它占位，`finalize` 换成修正版。"""
+        self._cur_en_seed = text or ""
+        self._mark_dirty()
+
+    def draft_over_stream(self, flag: bool):
+        """`main` 判的：定稿流式期间屏上草稿是不是更新一段的（是 → 草稿栏不藏）。只在变了时重画。"""
+        flag = bool(flag)
+        if flag != self._draft_over:
+            self._draft_over = flag
+            self._mark_dirty(urgent=True)
+
     def finalize(self, en: str, zh: str, *, clear_draft: bool = True):
         """`clear_draft=False`: 屏上已是**更新一段**的草稿(旧段定稿晚到), 别擦掉它。"""
         if not zh and not en:
             return
         self._history.append((en, zh))
         self._cur_zh, self._cur_en, self._streaming = "", "", False
+        self._cur_en_seed, self._draft_over = "", False
         if clear_draft:
             self._draft = ""
             self._draft_zh_val = ""
@@ -2694,7 +2709,8 @@ class Overlay:
         拿盒子配额(`box_h / ROLL_LINES`)当行高现在**恰好**也对(两者之间没有字符串会
         落进去), 但一改余量或加到第三行就判错 —— 而判错的后果正是"静默吞行"。
         """
-        active = not self._streaming
+        # 定稿流式时藏草稿栏（防同一句出现两次）；但草稿已是更新一段的就照常显示（main 判）
+        active = not self._streaming or self._draft_over
         w = max(1.0, self._width - 2 * PAD)
         en = f"▸ {self._draft}" if (active and self._draft) else ""
         zh = self._draft_zh_val if (active and self._draft_zh_val) else ""
@@ -3217,8 +3233,11 @@ class Overlay:
             self._tv.replace_items(self._history)
             self._tv.scroll_to_bottom()
         else:
+            # 流式中英文行用 ASR 原句占位（修正版的 EN 在 ZH 之后才来，`finalize` 时整句换上）；
+            # ⚠️ 不往 `_cur_en` 里拼 —— `stream_en` 是追加的，拼进去会和修正版粘在一起。
+            _en = (self._cur_en_seed or self._cur_en) if self._streaming else self._cur_en
             self._tv.set_content(
-                self._history, self._cur_en, self._cur_zh,
+                self._history, _en, self._cur_zh,
                 bool(self._streaming or self._cur_zh or self._cur_en))
         # 草稿与 💡 术语解析钉在面板底部, 不参与滚动
         self._render_draft()

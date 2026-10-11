@@ -107,7 +107,7 @@ VAD = Model(
 
 WHISPER = Model(
     "whisper", f"{MODELS_ROOT}/sherpa-onnx-whisper-turbo",
-    "定稿 Whisper 模型(必需)", True,
+    "本地定稿 Whisper（可选，断网时更准）", False,
     # ⚠️ 临时文件、`-f`、解压都在 `fetch_model.py` 里（原来的 `mktemp` 防预置符号链接那条
     #    用的是 `tempfile.mkdtemp`，同样不可预测）。tar 只在临时目录里，解完即删。
     _fetch_cmd("whisper"),

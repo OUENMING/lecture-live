@@ -71,6 +71,8 @@ MANUAL_FOR = [
      "scripts/probe_scroll.py —— 滚动；它自己会翻转，❌ 先连跑两三次再下结论"),
     (["overlay.py"],
      "scripts/probe_hint.py —— ❓ 点拨在术语格里的样子（拍两张图，给作者看）"),
+    (["entry_panel.py", "entry_launch.py", "final_asr.py"],
+     "scripts/probe_cloud_asr_consent.py —— 「云端转写」开关两态 + 首次告知弹窗拍图（给作者看）"),
     (["panel.py", "entry_panel.py"],
      "scripts/probe_drag.py / scripts/probe_entry_panel.py —— 真实拖拽落点，作者手拖一次"),
 ]

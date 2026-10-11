@@ -40,8 +40,10 @@ def case(name: str):
     return deco
 
 
-REQ = [m for m in doctor.MODELS if m.required]        # 三个必下的
-OPT = [m for m in doctor.MODELS if not m.required]    # Qwen3
+REQ = [m for m in doctor.MODELS if m.required]        # 必下的（Whisper 3.9.0 起可选）
+# ⚠️ 按 key 取，不按「第一个可选」：Whisper 改可选后 `[not required][0]` 会变成 Whisper（R11）
+OPT = [m for m in doctor.MODELS if m.key == "llm"]    # Qwen3
+WHISPER = next(m for m in doctor.MODELS if m.key == "whisper")
 
 _ALL_UNKNOWN = {m.path: "unknown" for m in doctor.MODELS}
 _ALL_MISSING = {m.path: "missing" for m in doctor.MODELS}
@@ -173,6 +175,37 @@ def t_qwen_never_in_left():
     for states in (_ALL_MISSING, _ALL_OK):
         txt = repr(ready.items(perm="authorized", states=states, has_key=False))
         assert OPT[0].path not in txt, "就绪条里出现了 Qwen3 的路径"
+
+
+@case("⭐⭐ R11 Whisper 是可选的：不进「还差」、不算必下（新用户不再下 538 MB）")
+def t_whisper_optional():
+    assert WHISPER.required is False, "Whisper 还标着必需"
+    for states in (_ALL_MISSING, _ALL_UNKNOWN):
+        assert WHISPER.path not in [m.path for m in ready.required_left(states)], \
+            "Whisper 被算进必下了"
+    st = dict(_ALL_OK)
+    st[WHISPER.path] = "missing"
+    assert ready.models_item(st)["state"] == ready.OK, \
+        "只缺可选的 Whisper，语音模型一项却不是就绪"
+    assert WHISPER.path not in repr(ready.models_item(_ALL_MISSING)), \
+        "「还差」清单里出现了 Whisper 的路径"
+
+
+@case("⭐⭐ R11 Whisper 可选时，本地翻译引擎状态只看 Qwen（不看 Whisper）")
+def t_local_path_is_qwen():
+    assert ready._local_path() == OPT[0].path, (
+        f"`_local_path()` 指向 {ready._local_path()!r}，不是 Qwen3 —— "
+        f"「第一个可选模型」现在是 Whisper")
+    st = dict(_ALL_OK)
+    st[WHISPER.path] = "missing"                     # Whisper 缺、Qwen 在
+    ok_item = ready.items(perm="authorized", states=st, has_key=False)[2]
+    assert ok_item == ready.engine_item(has_key=False, local_state="ok"), \
+        f"Whisper 缺失把本地引擎状态拖坏了：{ok_item}"
+    st = dict(_ALL_OK)
+    st[OPT[0].path] = "missing"                      # Qwen 缺、Whisper 在
+    bad_item = ready.items(perm="authorized", states=st, has_key=False)[2]
+    assert bad_item == ready.engine_item(has_key=False, local_state="missing"), \
+        f"Qwen 缺失没反映到本地引擎上：{bad_item}"
 
 
 @case("⭐⭐ 没配 key 时只报状态，**不触发任何下载动作**")
@@ -332,14 +365,16 @@ def t_size_text():
     assert ready._mb(640) == "640 MB"
     assert ready._mb(1179) == "1.2 GB"
     total = sum(m.mb for m in REQ)
-    assert 1100 < total < 1250, (
-        f"必下合计 {total:.0f} MB —— 与实测的约 1.18 GB 差太远，"
+    assert 600 < total < 700, (
+        f"必下合计 {total:.0f} MB —— 与实测的约 641 MB（Parakeet + VAD）差太远，"
         f"要么模型换了要么 mb 填错了")
+    total_all = total + WHISPER.mb                  # 3.9.0 前的「必下三件」≈ 1.18 GB
+    assert 1100 < total_all < 1250, f"加上可选的 Whisper 共 {total_all:.0f} MB，与实测约 1.18 GB 差太远"
 
 
 @case("⭐ `Model.size` 是从 `mb` 派生的，不是第二个定义点")
 def t_size_is_derived():
-    m = REQ[2]                                     # Whisper：带 extra 那句
+    m = WHISPER                                    # Whisper：带 extra 那句
     assert f"{m.mb:g}" in m.size, f"size 里该有 mb 那个数：{m.size!r}"
     assert "解开后" in m.size, "extra 那句该跟在后面"
     # ⚠️ 判据要指向**那个位置**：是 `Model` 上的 property，不是一个同名字段

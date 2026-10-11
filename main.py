@@ -21,7 +21,8 @@ from vad import Segmenter
 import draft_policy
 from draft_translate import DraftTranslator, DraftView
 import livemetrics
-from asr import load_asr, load_final_asr, is_degenerate
+from asr import load_asr
+import final_asr
 from translator import load_translator
 from cloud_translator import (DEFAULT_CTX_CHUNK, load_api_key,
                               load_translator as load_cloud_translator,
@@ -1081,6 +1082,55 @@ def spin_until(until, tick, ui_gone, *, max_wait_s: float = SPIN_MAX_S) -> None:
         tick()
 
 
+def cloud_asr_off_reason(*, cfg_enabled: bool, engine: str, mode: str,
+                         source: str, speed: float) -> str | None:
+    """这一刻定稿该不该上云。`None` = 该上; 否则是人话原因(启动时打一行)。
+
+    由 `final_asr.FinalASR` **每段调用一次**(上课中途切到「纯转录」→ 下一段就不上云)。
+    ⚠️ `mode` 来自 `trans["mode"]`: 另一个线程在写、这里单键读 —— CPython 下 dict 单键读写
+       各自原子, 读到旧值最多晚一段生效, 不需要锁。
+    ⚠️ 纯转录档照样不上云, 但**不能**据此向用户保证「纯转录 = 音频不出本机」: 每节课都从
+       `both` 开始(`trans` 初值), 切换之前的几段已经发出去了(R13)。保证只有开关 / 环境变量。
+    """
+    if final_asr.cloud_forced_off():
+        return "CLASSLIVE_CLOUD_ASR=0"
+    if not cfg_enabled:
+        return "云端转写开关已关"
+    if engine == "local":
+        return "--engine local"
+    if mode == "raw":
+        return "纯转录档"
+    if source == "file" and speed > 1:
+        return f"文件倍速回放 x{speed:g}(几秒就会打满云端限额)"
+    return None
+
+
+def resolve_cloud_asr_enabled(*, read=final_asr.read_config, write=final_asr.write_config,
+                              alert=notice.alert, can_alert=notice._can_alert,
+                              say=echo) -> bool:
+    """配置里云端转写开不开; 没告知过就告知。**必须在开始采音之前**调用。
+
+    · `.app`(`can_alert()` 为真): 弹窗, 点过才 `write` —— 选「好的」记开、「只用本地」记关。
+    · 终端: **只打一行提示, 不弹、不写 `acknowledged`**(R14) —— 否则终端启动一次就等于替
+      `.app` 用户同意了; 终端用户想关用 `CLASSLIVE_CLOUD_ASR=0`。
+    · `CLASSLIVE_CLOUD_ASR=0`: `read` 返回「关 + 已告知」, 这里什么都不做(R7)。
+    """
+    cfg = read()
+    if not cfg["enabled"]:
+        return False
+    if cfg["acknowledged"]:
+        return True
+    if not can_alert():
+        say("☁ 定稿转写默认走云端: 音频(Opus 压缩)经作者服务器转发给 Groq(美国)/阿里云百炼(中国)。"
+            "不想上云: CLASSLIVE_CLOUD_ASR=0 启动")
+        return True
+    choice = alert("定稿转写会用云端", final_asr.consent_text(),
+                   buttons=("好的", "只用本地"), fallback="好的")
+    enabled = choice != "只用本地"
+    write(enabled)
+    return enabled
+
+
 def run(args) -> None:
     # ---- 单实例锁 ----
     # ⚠️ 必须是 run() 的**第一件事**：抢在开音频设备、弹更新卡片、加载模型之前 ——
@@ -1167,11 +1217,10 @@ def run(args) -> None:
     #       复用同一句柄会在别处改动解码路径时把验证悄悄架空。
     probe_src = None
 
-    # 两个 ASR 模型都是**必需**的: 草稿/兜底用 Parakeet, 定稿用 Whisper。
-    # 缺任何一个都在这里说清楚然后退出 —— 不在课上静默降质。
+    # 草稿/兜底用 Parakeet, **必需**: 缺了在这里说清楚然后退出, 不在课上静默降质。
+    # 定稿(云端优先, Whisper 只是可选的本地兜底)在 `trans` 定义之后装配, 见下面 `final_asr.load_final`。
     try:
         asr = load_asr(args.model_dir)
-        asr_final = load_final_asr(args.final_model_dir)
     except Exception as e:                       # noqa: BLE001
         notice.alert("模型没装好",
                      f"{e}\n\n装好再跑 —— `cl doctor` 会列出缺哪个、该跑哪条命令。")
@@ -1245,6 +1294,24 @@ def run(args) -> None:
     # 现在 ✕ 只置这个标志(主循环据此退出), running 留到收尾真正结束才清。
     stopping = threading.Event()
     trans = {"mode": "both"}                            # 🌐 三档: both 双语 / en 只英·校 / raw 纯转录
+    # ⭐ 定稿 ASR: 云端优先、本地兜底(`final_asr.py` 文件头)。
+    #    ⚠️ 必须在 `trans` 之后: `_cloud_asr_ok` 读 `trans["mode"]`; 也必须在**开始采音之前**
+    #       (首次告知要先于第一段音频发出)。
+    _cloud_cfg_on = resolve_cloud_asr_enabled()
+
+    def _cloud_asr_off_reason() -> str | None:
+        return cloud_asr_off_reason(cfg_enabled=_cloud_cfg_on, engine=args.engine,
+                                    mode=trans["mode"], source=args.source, speed=args.speed)
+
+    def _cloud_asr_ok() -> bool:
+        return _cloud_asr_off_reason() is None
+
+    _why_off = _cloud_asr_off_reason()
+    final = final_asr.load_final(args.final_model_dir, asr, allow_cloud=_cloud_asr_ok,
+                                 preload_local=_why_off is not None,  # R4: 云端开着就不加载 Whisper
+                                 is_stopping=stopping.is_set)         # 收尾冲刷时云端截止更短
+    echo("☁ 定稿: 云端(Groq → 千问 → 本地 Parakeet)" if _why_off is None
+         else f"💻 定稿: 本地({_why_off})")
     # ⚠️ 库路径在这里**收口**（`resolve_vault` 是唯一定义点）：`--vault` → `$OBSIDIAN_VAULT`
     #    → 上次用过的。**没有兜底目录** —— 拿不到就不写 Obsidian，绝不凭空造一个。
     #    拿到了就**记下来**：双击 `.app` 起的那条路没有 shell 环境变量，不记下次还是找不到。
@@ -1592,6 +1659,12 @@ def run(args) -> None:
         #    carry 兜底那条路没得带，取当前段。
         if seg is None:
             seg = seg_gen["n"]
+        # R25: 收尾等了 15 s 放弃后(`running.clear()`), 还卡在转写里的 `final_worker` 回来会
+        #    对一句**已经被放弃**的话继续调翻译 API。云端定稿最长 6 s 让这个窗口比以前大。
+        #    ⚠️ 正常收尾不受影响: `running` 要到冲刷真正结束才清, `_force_emit_carry()` 也在那之前。
+        #    (`_emit` 本身不碰 writer —— 落盘只走 `drain()`, 而它在放弃后不再被调用。)
+        if not running.is_set():
+            return
         final_gen["n"] += 1                      # 通知草稿线程: 重置节流
         for sent in split_sentences(text):
             if trans["mode"] == "raw":
@@ -1684,33 +1757,19 @@ def run(args) -> None:
             #    把"可能是哨兵"的值当元组拆了。注释当时还写着"走到这里一定是元组"——错的。
             buf, _fseg = buf
             try:
-                # ⚠️ 顺序: **先跑定稿模型**, 退化才回头跑草稿模型。
-                # 反过来写(先 parakeet 再 whisper)会让 parakeet 那 0.36s 白花 ——
-                # 实测它的结果只在 whisper 退化时用得上, 而 64 段里退化 0 次。
-                # 先跑慢的那个, 命中就省下整个快的那趟; 退化时多花的 0.36s 无所谓。
-                _t_asr = time.monotonic()
-                text = asr_final.transcribe(buf)
-                _used, _lp = "whisper", asr_final.last_logprob
-                # ⭐ 2026-10-07：**主模型（Whisper）的原文与判决单独留下来** —— 它本来
-                #    就是免费的（这几行已经算出来了），而少记它的代价是实打实的：
-                #    原来只记"最终用了哪个"，于是"主模型空了几次"与"兜底模型空了几次"
-                #    分不开 → 我拿**兜底模型**离线跑，把它的空当成了"空转写"去查。
-                #    兜底模型的原文只在真回退时有（那时才轮到它跑）。
-                _final_text = text
-                _final_degen = is_degenerate(text)
-                _draft_text = None
-                if not text or _final_degen:
-                    text = asr.transcribe(buf)      # 退化/空 -> 用草稿模型(并兜底)
-                    _used, _lp = "parakeet", asr.last_logprob
-                    _draft_text = text
+                # 云端优先 / 本地兜底 / 退化与空串的补救都在 `final_asr` 里(永不抛)。
+                # ⭐ 测试模式要的「第一个来源的原文 / 判决 / 兜底原文」在 `r.trace` 里 ——
+                #    少记它的代价是实打实的(2026-10-07: 主模型空与兜底模型空分不开)。
+                r = final.transcribe(buf)
+                text = r.text
                 if tester is not None:
-                    tester.note_segment(buf, text, (time.monotonic() - _t_asr) * 1000,
-                                        _used, logprob=_lp,
-                                        fell_back=(_used == "parakeet"),
+                    tester.note_segment(buf, text, r.ms, r.source, logprob=r.logprob,
+                                        fell_back=r.fell_back,
                                         n_sentences=len(split_sentences(text)),
-                                        final_text=_final_text,
-                                        final_degenerate=_final_degen,
-                                        draft_text=_draft_text)
+                                        final_text=r.trace.get("primary_text"),
+                                        final_degenerate=r.trace.get("primary_degenerate", False),
+                                        draft_text=r.trace.get("fallback_text"),
+                                        steps=r.steps, trace=r.trace)
                 if not text:
                     continue
                 if carry["text"]:                           # 与上句半截拼接
@@ -2615,7 +2674,7 @@ def main():
                    help="测试模式下不打包成可发送的单个 zip")
     p.add_argument("--final-model-dir",
                    default=models.path_of("whisper"),
-                   help="定稿专用 ASR 模型目录(必需; 用 `cl doctor` 检查)")
+                   help="本地定稿模型(Whisper)目录(可选; 云端不可用时才用, 没有就用 Parakeet)")
     p.add_argument("--llm", default=models.by_key("llm").src)
     p.add_argument("--glossary", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "glossary.txt"))

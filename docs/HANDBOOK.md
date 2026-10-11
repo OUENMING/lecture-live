@@ -2,7 +2,7 @@
 
 > 一句话：ClassLive 是作者自用的 **macOS 实时英译中课堂字幕工具** ——
 > 采音频 → 转写 → 逐句修正并翻译 → 悬浮字幕 → 实时落盘 → 课后生成双层 Obsidian 笔记。
-> 纯本机运行，**音频不出机器，只发文本**；MIT 开源（`OUENMING/lecture-live`）。
+> 草稿与兜底识别纯本机；翻译只发文本；**定稿转写默认走云端（可关）**——每段音频（Opus 压缩，约 40 KB/段）经作者的服务器转发给 Groq（美国；默认不留存，滥用监控最长 30 天）或阿里云百炼（中国；不用于训练，按法规会保存调用记录）。MIT 开源（`OUENMING/lecture-live`）。
 >
 > **这份文档写给两种读者**：新接手的人、下一个会话的 AI。
 > 读完它你应当能：跑起来、知道边界在哪、知道哪些坑踩过绝对不能重踩、
@@ -70,6 +70,11 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 - **`sessions/<会话>.md` 是三方共享契约**：`obsidian_writer` 写它、`_parse` 读回它、
   `cl last` 用 grep 匹配它。**抬头格式一个字节都不许动**；新数据一律走**旁路文件**
   （`.lost.jsonl` / `.atoms.jsonl` / `.chapters.jsonl`）。
+- **定稿 ASR 在 `final_asr.py`**（3.9.0 起）：`main.final_worker` 只调 `FinalASR.transcribe(buf)`（永不抛），
+  云端（Groq → 千问，经作者的 Worker）优先，失败 / 熔断 / 退化 / 超时（平时 6 s、收尾 2 s）回本地。
+  `main.cloud_asr_off_reason` 是「这一段该不该上云」的唯一判据（配置 / `CLASSLIVE_CLOUD_ASR=0` / `--engine local` /
+  纯转录 / 文件倍速回放）。**Whisper 是可选的本地兜底**：云端开着时不加载（省约 1 GB），兜底用 Parakeet；
+  云端关着且装了 Whisper 才加载它。⚠️ 代价：整节课断网时兜底是 Parakeet 而不是 Whisper。
 - **主线程不阻塞不变量**：`drain()` / AppKit 回调只做立刻返回的事（put / 赋值 / 打印）。
   联网、sleep、模型调用全在 worker 线程。
 - **`.accessory` app + 磨砂面板**（`panel.py` 是配方唯一定义点）。新交互视图
@@ -278,6 +283,9 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_LIVE_LOG` | 平时关、测试模式开 | 现场采集 `<会话>.live.jsonl` —— `livemetrics.py` | 运维开关，长期 |
 | `CLASSLIVE_UPLOAD` | `1` | 测试模式课后上传；测试 / 探针一律设 `0` | 运维开关，长期 |
 | `CLASSLIVE_UPLOAD_ENDPOINT` / `_TOKEN` | 内置 | 上传端点与 write-only 令牌（测试指到本机假服务器） | 测试接缝，长期 |
+| `CLASSLIVE_CLOUD_ASR` | 未设 | `0` = 本进程强制本地定稿：不发请求、不写 `cloud-asr.json` / `install-id`、不弹告知（探针 / 回放脚本默认设 0） | 隐私开关，长期 |
+| `CLASSLIVE_ASR_ENDPOINT` | 内置 | 云端定稿端点（测试指到本机假服务器；断网实测指到不可达地址） | 测试接缝，长期 |
+| `CLASSLIVE_ASR_TOKEN` | 内置 | 云端定稿的公开令牌（测试用） | 测试接缝，长期 |
 | `CLASSLIVE_NO_AUTO_UPDATE` | 空 | 关后台自动更新（排查用；日志在 `~/Library/Logs/ClassLive/update.log`） | 运维开关，长期 |
 | `CLASSLIVE_NO_UPDATE_CHECK` | 空 | 连更新检查也不做 | 运维开关，长期 |
 | `CLASSLIVE_DEBUG` | 空 | 面板 / 悬浮窗的调试日志 | 运维开关，长期 |
@@ -323,7 +331,8 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | 测试模式上传 | Cloudflare Worker + R2（`ingest.bldcam.page` → 桶 `classlive-ingest`）—— **用户零配置**；见 `docs/PLAN-zero-config-upload.md` | 默认关；上传有队列/退避/脱敏 |
 | 音频 | **正常上课从不落盘**；唯一例外 = 测试模式（开课前要跟同学说明） | |
 
-隐私红线：**音频不出机器、只发文本**；测试模式传出去的包含真实课堂内容（可能含同学声音）
+隐私红线（3.9.0 起改口径）：**定稿云端转写默认开、可关**——开着时每段音频（Opus）经作者的 Worker 发给 Groq / 阿里云百炼；要保证音频不出机器只有两个办法：面板关「云端转写」、或 `CLASSLIVE_CLOUD_ASR=0`。**不能**对用户说「用纯转录档就不出本机」（每节课都从翻译档开始，切换前的几段已发出，R13）。首次启动告知：`.app` 弹窗点过才记 `acknowledged`，终端只打一行提示、不记（R14）。
+测试模式传出去的包含真实课堂内容（可能含同学声音）
 ——README 有原文警告，别弱化它。
 
 ---

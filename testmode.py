@@ -9,8 +9,8 @@
    所以**想留音频时留得住**（16kHz int16 单声道, 15 分钟约 28MB）——
    但**默认不留**, 要显式加 `--record-audio`。
    ⚠️ 2026-09-28 翻的默认值。原来是默认录 —— 那意味着一次误启动就静默录下
-   整节课（含其他同学的声音）。音频**只写本机**（`sessions/` 同级),
-   不改变"音频不出机器"这条前提。
+   整节课（含其他同学的声音）。音频**只写本机**（`sessions/` 同级)。
+   （3.9.0 起定稿转写默认会把音频段发给云端 —— 那条路与这里的录音文件无关,见 `final_asr.py`。）
 3. **落盘格式要能被脚本读。** 一个 JSON, 字段名直白, 不要嵌套太深。
 
 采什么
@@ -38,6 +38,8 @@
 from __future__ import annotations
 
 import atexit
+import collections
+import functools
 import json
 import os
 import pathlib
@@ -46,6 +48,7 @@ import subprocess
 
 import models
 import upload as upload_mod
+from asr import is_degenerate as _is_degenerate
 import sys
 import time
 import wave
@@ -96,6 +99,7 @@ def _safe(fn):
     """
     name = getattr(fn, "__name__", "?")
 
+    @functools.wraps(fn)          # 保留签名: 测试按 `inspect.signature` 钉调用方传的关键字(§X1)
     def wrapper(*a, **kw):
         try:
             return fn(*a, **kw)
@@ -148,9 +152,14 @@ def collect_env() -> dict:
     # ⚠️ 目录名从注册表来 —— 这里原来是**抄死的三个字面量**
     #    （`models.py` 的文件头把这一处点名了）。换一个模型目录名就得记得改这里，
     #    而忘了改的症状是「报告里某个模型体积是 None」，不报错。
-    for _m in models.REQUIRED:
+    # R12：必需模型缺了要如实报 None；可选模型（Whisper 现在可选）**在盘上才报**。
+    for _m in models.MODELS:
         d = models.basename_of(_m.key)
+        if not d:                                         # 住在 ~/models 之外的（如 HF cache 里的 Qwen3）
+            continue
         p = pathlib.Path(os.path.expanduser(models.MODELS_ROOT)) / d
+        if not _m.required and not p.exists():
+            continue
         models_sz[d] = (round(sum(f.stat().st_size for f in p.rglob("*")
                                   if f.is_file()) / 1e6, 1) if p.exists() else None)
     try:
@@ -169,7 +178,7 @@ def collect_env() -> dict:
                               if pathlib.Path(__file__).with_name("VERSION").exists() else "?"),
         "git_commit": commit,
         "packages": {n: pkg(n) for n in
-                     ("sherpa-onnx", "numpy", "sounddevice", "mlx-lm", "httpx")},
+                     ("sherpa-onnx", "numpy", "sounddevice", "mlx-lm", "httpx", "soundfile")},
         "models_mb": models_sz,
     }
 
@@ -435,14 +444,22 @@ class TestSession:
         except Exception:                                 # noqa: BLE001
             return ""
 
+    @_safe
     def note_segment(self, audio, text: str, asr_ms: float, model: str,
                      logprob: float | None = None, fell_back: bool = False,
                      n_sentences: int = 0,
                      final_text: str | None = None,
                      final_degenerate: bool = False,
-                     draft_text: str | None = None) -> None:
-        """一段的定稿结果。`final_*` = **主模型**（Whisper）在**兜底之前**的原文与判决；
-        `draft_text` = 真回退时**兜底模型**（Parakeet）的原文；都不是就传 `None`。
+                     draft_text: str | None = None,
+                     steps=(), trace: dict | None = None) -> None:
+        """一段的定稿结果。`final_*` = **第一个被尝试的来源**（云端，或云端关着时的本地主模型）
+        在兜底之前的原文与判决；`draft_text` = 真回退时**兜底模型**（Parakeet）的原文；
+        都不是就传 `None`。`model` = 最终文本的来源（`FinalResult.source`）。
+
+        R9：必须带 `@_safe` —— 它在 `main.final_worker` 的 try 里、排在 `_emit` 前，
+        抛任何异常这一段都会被吞成「定稿失败」而**丢掉**。
+        `steps` = 按发生顺序的每一步（`("cloud:timeout", "local:parakeet")`）；
+        `trace` = `FinalResult.trace`，目前只用 `local_text`（R10）。
 
         ⭐ **`probe` 那一格为什么要加**（2026-10-07）：原来只记"最终用了哪个模型"一格 ——
         而那把**两条信息压成了一个**：「主模型空了几次」与「兜底模型空了几次」分不开。
@@ -451,12 +468,18 @@ class TestSession:
         「空转写 21%，这才是该查的方向」**量的是兜底模型 → 是个幽灵**。
         ⚠️ 这两格**是免费的**：主模型的结果本来就算出来了，兜底模型只在回退时才跑。
         ⚠️ 曾经的错误想法是"每段都多跑一次兜底模型来对照"—— 那要 +0.36s × 250 段。
+
+        ⚠️ **float 快照的条件（R10）**：「最后一个本地主模型的结果空或退化」。
+        不能再用 `fell_back` —— 它现在表示「想上云没上成」，整节课断网时每段都是真，
+        会每段存一份原信号。
         """
         a = np.abs(audio) if len(audio) else np.zeros(1)
         rms = float(np.sqrt(np.mean(np.asarray(audio, dtype=np.float64) ** 2))) \
             if len(audio) else 0.0
+        _local = (trace or {}).get("local_text")
+        _local_bad = _local is not None and (not _local.strip() or _is_degenerate(_local))
         _probe_saved = self._save_probe_float(self._seg_no, audio) \
-            if (self.record_float and fell_back) else ""
+            if (self.record_float and _local_bad) else ""
         self.segments.append({
             "i": self._seg_no,
             "t": round(time.monotonic() - self.t0, 2),
@@ -466,6 +489,7 @@ class TestSession:
             "asr_ms": round(asr_ms, 1),
             "model": model,
             "fell_back": bool(fell_back),
+            "steps": list(steps),
             "logprob": round(logprob, 3) if logprob is not None else None,
             "words": len(text.split()),
             "end_punct": bool(text.rstrip().endswith((".", "!", "?", "…"))) if text else None,
@@ -644,7 +668,14 @@ class TestSession:
                 "final_empty_pct": ppct("final_empty"),
                 "final_degenerate_pct": ppct("final_degenerate"),
                 "no_end_punct_pct": pct(lambda s: s["words"] and not s["end_punct"]),
+                # 语义(定稿上云后): 「想上云但最终没用上云的文本」(网络 / 熔断 / 退化 / 云端空串被补救)。
                 "fell_back_pct": pct(lambda s: s["fell_back"]),
+                # 最终文本来自谁(groq / qwen / local-whisper / local-parakeet / none)
+                "source_pct": {k: round(v / n * 100, 1) for k, v in
+                               collections.Counter(s["model"] for s in segs).items()},
+                # 每一步出现的段数(同一段里同一步只算一次): cloud:timeout / local:parakeet / degenerate …
+                "steps_counts": dict(collections.Counter(
+                    st for s in segs for st in set(s.get("steps") or ()))),
                 "asr_ms_p50": round(float(np.median([s["asr_ms"] for s in segs])), 1) if segs else None,
                 "asr_ms_p95": round(float(np.percentile([s["asr_ms"] for s in segs], 95)), 1) if segs else None,
                 "logprob_mean": round(float(np.mean([s["logprob"] for s in segs
@@ -662,7 +693,7 @@ class TestSession:
             },
             "notes": [
                 "logprob 只有 **Parakeet** 会填 —— Whisper 的 result.ys_log_probs 是空的。"
-                "定稿默认走 Whisper, 所以这个字段通常是 null, 不是采集失败。",
+                "云端来源(groq / qwen)也没有 logprob; 定稿主要走云端时这个字段通常是 null, 不是采集失败。",
                 "cpu_pct_of_walltime 在 --speed>1 的回放里会被放大;"
                 "跨机器/跨速度比请用 cpu_s_per_audio_s。",
                 "no_end_punct_pct 在 n<30 段时噪声很大(实测底线 ±18 个百分点),"

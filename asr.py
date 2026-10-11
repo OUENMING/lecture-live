@@ -60,25 +60,32 @@ class ParakeetASR:
             encoder=enc, decoder=dec, joiner=join, tokens=toks,
             num_threads=num_threads, model_type="nemo_transducer")
         self._lock = threading.Lock()
-        self.last_logprob: float | None = None
 
     def transcribe(self, samples) -> str:
+        return self.transcribe_lp(samples)[0]
+
+    def transcribe_lp(self, samples) -> tuple[str, float | None]:
+        """文本 + 这一次调用对应的平均 logprob, **在锁内一起算出**(R8)。
+
+        为什么要有它: 以前调用方在 `transcribe()` 返回后再读 `last_logprob`,
+        而草稿线程同时在用同一个对象 —— 读到的可能是草稿那一次的值。
+        所以 `last_logprob` 属性已删(全仓只有 `final_worker` 读它), 只留这条返回值。"""
         if len(samples) < 1600:            # 不足 0.1s
-            return ""
+            return "", None
         with self._lock:                    # OfflineRecognizer 非线程安全
             stream = self._rec.create_stream()
             stream.accept_waveform(16000, samples)
             self._rec.decode_stream(stream)
             r = stream.result
-            # 顺手留下置信度供测试模式采集 —— 不改接口(仍返回 str), 只多一个属性。
+            # 置信度随返回值给出, 供测试模式采集(`transcribe()` 仍只返回 str)。
             # 实测真实课堂平均 logprob ≈ −0.4、干净 TTS ≈ −0.013(差 30 倍),
             # 拿它当"这句可能没听准"的信号是可行的。
             # ⚠️ 走 `getattr` 与下面 Whisper 那份**对称**（2026-09-30 全量 OCR 审查发现）：
             #    sherpa 哪天不暴露这个属性，这里抛 AttributeError → 被 `final_worker` 的
             #    `except Exception` 吞成「⚠ 定稿失败」→ **整节课定稿全空**，而 Whisper 侧不会。
             _lp = getattr(r, "ys_log_probs", None)
-            self.last_logprob = float(np.mean(_lp)) if _lp is not None and len(_lp) else None
-            return r.text.strip()
+            lp = float(np.mean(_lp)) if _lp is not None and len(_lp) else None
+            return r.text.strip(), lp
 
 
 def load_asr(model_dir: str):
@@ -164,25 +171,32 @@ class WhisperASR:
             tokens=pick("turbo-tokens.txt", "tokens.txt"),
             language=language, num_threads=num_threads)
         self._lock = threading.Lock()
-        self.last_logprob: float | None = None
 
     def transcribe(self, samples) -> str:
+        return self.transcribe_lp(samples)[0]
+
+    def transcribe_lp(self, samples) -> tuple[str, float | None]:
+        """同 `ParakeetASR.transcribe_lp`: 文本与 logprob 在锁内一起返回。"""
         if len(samples) < 1600:            # 不足 0.1s
-            return ""
+            return "", None
         with self._lock:
             stream = self._rec.create_stream()
             stream.accept_waveform(16000, samples)
             self._rec.decode_stream(stream)
             r = stream.result
-            lp = getattr(r, "ys_log_probs", None)
-            self.last_logprob = float(np.mean(lp)) if lp is not None and len(lp) else None
-            return r.text.strip()
+            ys = getattr(r, "ys_log_probs", None)
+            lp = float(np.mean(ys)) if ys is not None and len(ys) else None
+            return r.text.strip(), lp
 
 
 def load_final_asr(model_dir: str):
-    """定稿路径的 ASR(Whisper-turbo)。**必需模型 —— 缺失直接抛, 不做静默回退。**
+    """本地定稿 ASR(Whisper-turbo)。**缺失直接抛, 本函数不做静默回退。**
 
-    为什么不留回退: 定稿模型是转写质量的主要来源(实测**有效词数 +44%**,
+    3.9.0 起 Whisper 是**可选**模型: 定稿默认走云端, 本地只做兜底。
+    `final_asr.load_final` 负责接住这里的异常并改用 Parakeet(并在启动时说清楚)。
+    其余调用方(`scripts/stream_eval.py --final whisper`)仍把它当必需 —— 缺了就该报错。
+
+    为什么本函数自己不回退: 定稿模型是转写质量的主要来源(实测**有效词数 +44%**,
     8/8 窗口一致)。静默少掉它 = "看着正常但打了折",
     而用户永远不会知道。**启动时说清楚, 比课上悄悄降质好。**
     """
@@ -192,4 +206,4 @@ def load_final_asr(model_dir: str):
         raise RuntimeError(
             f"定稿模型加载失败: {model_dir}\n"
             f"    原因: {e}\n"
-            f"    这是必需模型 —— 跑 `cl doctor` 看怎么装。") from e
+            f"    这是可选模型(云端转写不可用时才用它; 没有就用 Parakeet 兜底) —— 要装跑 `cl doctor` 看怎么装。") from e

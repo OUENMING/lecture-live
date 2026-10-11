@@ -34,3 +34,7 @@ pyobjc-framework-AVFoundation>=12.2
 
 # 模型下载（首次安装用）
 huggingface-hub>=1.30
+
+# 定稿上云前把一段音频压成 Ogg/Opus（千问吃 WAV 慢约 10 倍：11–23 s vs 1.2 s）。
+# wheel 自带 libsndfile，不依赖 ffmpeg；缺它时 final_asr 自动改走本地定稿。
+soundfile>=0.13

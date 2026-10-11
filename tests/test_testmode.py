@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 
@@ -486,8 +487,10 @@ def main() -> int:
     _b = np.zeros(tm.SR, dtype=np.float32)
     _t5.note_segment(_b, "正常一段", 100.0, "whisper",
                      final_text="正常一段", final_degenerate=False)
-    _t5.note_segment(_b, "兜底救回来的", 120.0, "parakeet", fell_back=True,
-                     final_text="", final_degenerate=False, draft_text="兜底救回来的")
+    _t5.note_segment(_b, "兜底救回来的", 120.0, "local-parakeet", fell_back=True,
+                     final_text="", final_degenerate=False, draft_text="兜底救回来的",
+                     steps=("off", "local:whisper", "empty-local", "local:parakeet"),
+                     trace={"local_text": ""})   # R10: 最后一个本地主模型的结果是空的
     _p0 = _t5.segments[0]["probe"]
     _p1 = _t5.segments[1]["probe"]
     check("⭐⭐ 主模型那一侧**单独**记（`final_empty` / `final_degenerate`）",
@@ -505,11 +508,73 @@ def main() -> int:
           f"p0={_p0['float_saved']!r} p1={_p1['float_saved']!r}")
     # ⚠️ 变异敏感：把 `record_float` 那个开关去掉（无条件写），这条红。
     _t6 = tm.TestSession(_d5 / "q.md", record_audio=False, record_float=False)
-    _t6.note_segment(_b, "x", 1.0, "parakeet", fell_back=True, final_text="")
+    _t6.note_segment(_b, "x", 1.0, "parakeet", fell_back=True, final_text="",
+                     trace={"local_text": ""})
     check("⚠️ `record_float=False` 时快照目录**根本不该建**",
           _t6.segments[0]["probe"]["float_saved"] == ""
           and not pathlib.Path(str(_t6.stem) + ".probe").exists(),
           repr(_t6.segments[0]["probe"]["float_saved"]))
+
+
+    # ---- R9 / R10 / R12：定稿上云接线 ----
+    print("--- R9/R10/R12 定稿上云（steps / trace / float 条件 / 体积统计）---")
+    import json
+    _t7a = tm.TestSession(_d5 / "r0.md", record_audio=False, record_float=True)
+    _t7a.note_segment(_b, "x", 1.0, "groq", steps=("cloud:groq",), trace={"local_text": None})
+    check("R9 `note_segment` 收 `steps` 与 `trace`（签名不匹配=整段被吞成「定稿失败」、课上静默丢句）",
+          len(_t7a.segments) == 1 and not _t7a._safe_bad, repr(_t7a._safe_bad))
+    _t7 = tm.TestSession(_d5 / "r.md", record_audio=False, record_float=True)
+    _t7.note_segment(None, "x", 1.0, "groq")        # audio=None 必抛
+    check("R9 `note_segment` 带 `@_safe`：内部抛了不外溢，且记进 collector_errors",
+          _t7._safe_bad.get("note_segment") == 1, repr(_t7._safe_bad))
+    _t8 = tm.TestSession(_d5 / "s.md", record_audio=False, record_float=True)
+    # 1) 云端成功: 本地没跑 → 不存
+    _t8.note_segment(_b, "cloud", 5.0, "groq", steps=("cloud:groq",),
+                     trace={"local_text": None, "primary_text": "cloud"})
+    # 2) 整节课断网: 本地正常出了字 → 不存（旧逻辑 fell_back 会每段都存）
+    _t8.note_segment(_b, "local ok", 5.0, "local-parakeet", fell_back=True,
+                     steps=("cloud:timeout", "local:parakeet"),
+                     trace={"local_text": "local ok"})
+    # 3) 本地主模型退化 → 存
+    _t8.note_segment(_b, "fb", 5.0, "local-parakeet", fell_back=True,
+                     steps=("off", "local:whisper", "degenerate", "local:parakeet"),
+                     trace={"local_text": "... ... ... ... ... ..."})
+    _fs = [s["probe"]["float_saved"] for s in _t8.segments]
+    check("R10 float 只在「最后一个本地主模型空/退化」时存（云端成功/断网回退出了字 都不存）",
+          (not _fs[0]) and (not _fs[1]) and bool(_fs[2]), repr(_fs))
+    check("R9 `steps` 原样落进段记录",
+          _t8.segments[1]["steps"] == ["cloud:timeout", "local:parakeet"],
+          repr(_t8.segments[1].get("steps")))
+    _rep = json.loads(pathlib.Path(_t8.finish(bundle=False)).read_text(encoding="utf-8"))
+    _asr = _rep["asr"]
+    check("报告 `asr.source_pct` 是 {source: 占比}",
+          _asr.get("source_pct") == {"groq": 33.3, "local-parakeet": 66.7}, repr(_asr.get("source_pct")))
+    check("报告 `asr.steps_counts` 逐步计数",
+          _asr.get("steps_counts", {}).get("cloud:timeout") == 1
+          and _asr["steps_counts"].get("local:parakeet") == 2
+          and _asr["steps_counts"].get("degenerate") == 1,
+          repr(_asr.get("steps_counts")))
+    check("报告 notes 不再说「定稿默认走 Whisper, 所以 logprob 通常是 null」那句过期的话",
+          not any("定稿默认走 Whisper" in n for n in _rep["notes"]), repr(_rep["notes"]))
+    # R12: 体积统计看「实际在盘上的」（读端换到临时 HOME）
+    import models as _models
+    _home12 = _d5 / "home12"
+    _wd = _home12 / "models" / _models.basename_of("whisper")
+    _wd.mkdir(parents=True)
+    (_wd / "w.bin").write_bytes(b"x" * 2_000_000)
+    _old_home = os.environ.get("HOME")
+    os.environ["HOME"] = str(_home12)
+    try:
+        _mb = tm.collect_env()["models_mb"]
+    finally:
+        os.environ["HOME"] = _old_home or ""
+    _wk = _models.basename_of("whisper")
+    check("R12 `models_mb` 把盘上的可选 Whisper 也算进去（原来只数 REQUIRED）",
+          _mb.get(_wk, 0) and _mb[_wk] > 0, repr(_mb))
+    check("R12 必需模型不在盘上仍报 None（如实说「没有」）",
+          _mb.get(_models.basename_of("parakeet"), "缺键") is None, repr(_mb))
+    check("R12 collect_env 的包列表含 soundfile",
+          "soundfile" in tm.collect_env()["packages"])
 
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)

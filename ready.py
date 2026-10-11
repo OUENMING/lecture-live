@@ -32,6 +32,7 @@ from __future__ import annotations
 import pathlib
 
 import doctor
+import models
 
 # 四项的 key（面板按它排布，测试按它断言）
 MIC, MODELS, ENGINE = "mic", "models", "engine"
@@ -163,11 +164,12 @@ def items(*, perm: str, states: dict, has_key: bool,
 
 
 def _local_path() -> str:
-    """可选的本地翻译模型那一条的 `path`。**由 `doctor.MODELS` 定义，不在这里写死。**"""
-    for m in doctor.MODELS:
-        if not m.required:
-            return m.path
-    return ""
+    """本地翻译模型（Qwen3）那一条的 `path`。**取自注册表，不在这里写死。**
+
+    ⚠️ 不能写成「第一个 `required=False` 的」—— Whisper 3.9.0 起也是可选的，
+       而且排在 Qwen3 前面，那样「本地引擎」状态会去看 Whisper（R11）。
+    """
+    return models.QWEN.path
 
 
 def _mb(v: float) -> str:

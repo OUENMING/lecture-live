@@ -34,6 +34,11 @@
 · `CLASSLIVE_UPLOAD=0` 已设 —— **不会**把这次试跑传上去。
 · `CLASSLIVE_NO_AUTO_UPDATE=1` 已设 —— 不会触发更新。
 · vault 指到临时目录，不碰真 Obsidian 库；`remember_vault` 被换成空操作，不改 `~/.classlive/vault`。
+· ⭐ R23：`HOME` 换成临时目录（同 `scripts/check.py`）—— `~/.classlive/` 的一切（配置、install-id、
+  凭据、积压的上传队列）都不碰真的；只给模型（`~/models`）、HF 缓存和 `~/UCD` 开**只读软链**。
+  没有 DeepSeek 凭据 → 走本地翻译引擎，探针本身不花钱。
+· ⭐ R23：`CLASSLIVE_CLOUD_ASR=0` —— 定稿强制本地，不发任何网络请求、不写 `cloud-asr.json` /
+  `install-id`（R7）。要验云端那一路用 `CLASSLIVE_ASR_ENDPOINT` 指向本机假服务器，别指真的。
 """
 from __future__ import annotations
 
@@ -66,6 +71,17 @@ def main() -> int:
     # ⚠️ 必须在 import main **之前**设 —— 它在 import 期就会读这些。
     os.environ["CLASSLIVE_UPLOAD"] = "0"
     os.environ["CLASSLIVE_NO_AUTO_UPDATE"] = "1"
+    os.environ["CLASSLIVE_CLOUD_ASR"] = "0"
+    # R23: 隔离 HOME。⚠️ 要在 import main 之前 —— `paths` 等模块在 import 期就展开 `~`。
+    real_home = pathlib.Path.home()
+    fake_home = pathlib.Path(tempfile.mkdtemp(prefix="cl_probe_home_"))
+    for rel in ("models", "UCD", ".cache/huggingface"):      # 只读资源: 软链到真的
+        src = real_home / rel
+        if src.exists():
+            dst = fake_home / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.symlink_to(src)
+    os.environ["HOME"] = str(fake_home)
     import main as main_mod
     # ⚠️⚠️ `main.run()` 会把 `--vault` **记进 `~/.classlive/vault`**（给双击 `.app` 用）。
     #    不拦的话，真配置被改成下面这个临时目录 → 下次双击启动，笔记写进系统临时目录、

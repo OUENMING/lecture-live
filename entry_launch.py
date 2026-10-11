@@ -176,8 +176,19 @@ def main() -> int:
 
     def _stop() -> None:
         rc["done"] = True                       # ⚠️ 先立闩，再停循环 —— 见上面的说明
-        from PyObjCTools import AppHelper
-        AppHelper.stopEventLoop()
+        # ⚠️⚠️ **不能用 `AppHelper.stopEventLoop()`**（2026-10-11 作者实测「点关闭还是开始转录」）：
+        #    在 `runEventLoop` 底下它会走到 `NSApp().terminate_()` → 进程当场 exit(0)，
+        #    `main()` 来不及 `return rc["code"]` → 关闭(1) / 存不下(4) 全变成 0 → `cl` 拿上次的课开录。
+        #    `NSApp.stop_` 只让 `run()` 返回（`runEventLoop` 随之正常退出）；它要处理完**下一个事件**
+        #    才生效，所以补一个空的应用事件把循环推一下。判据：`tests/test_entry_launch_exit.py`（真循环）。
+        from AppKit import NSApp, NSEvent, NSEventTypeApplicationDefined
+        app = NSApp()
+        if app is None:
+            return
+        app.stop_(None)
+        ev = NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
+            NSEventTypeApplicationDefined, (0, 0), 0, 0, 0, None, 0, 0, 0)
+        app.postEvent_atStart_(ev, True)
 
     cloud_on, cloud_locked = _cloud_state()
     try:

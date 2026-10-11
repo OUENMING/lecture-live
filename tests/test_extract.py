@@ -348,9 +348,11 @@ def main() -> int:
         #    有跳过（或一条判据都没跑到）时返回非零 —— 否则换台机器跑出来的
         #    `0/0 通过` 会被当成真绿。这条是本仓库「负结果不许读起来像穷尽」
         #    在测试结算行上的同一形状。
+        if bad:
+            return 1
         if SKIPPED or not RESULTS:
             print("⚠️ 有跳过 / 根本没跑到判据 —— 这次**不足以**当作通过。")
-            return 1
+            return 77   # 非零照旧（不许当绿）；77 让 scripts/check.py 认出是「缺样本跳过」而不是失败
         return 1 if bad else 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

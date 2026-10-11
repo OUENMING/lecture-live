@@ -1,0 +1,22 @@
+[
+ {
+  "file": "entry_panel.py",
+  "rule": "reportCallIssue",
+  "message": "No overloads for \"get\" match the provided arguments"
+ },
+ {
+  "file": "entry_panel.py",
+  "rule": "reportCallIssue",
+  "message": "No overloads for \"get\" match the provided arguments"
+ },
+ {
+  "file": "overlay.py",
+  "rule": "reportCallIssue",
+  "message": "Expected 3 positional arguments"
+ },
+ {
+  "file": "overlay.py",
+  "rule": "reportCallIssue",
+  "message": "Expected 3 positional arguments"
+ }
+]

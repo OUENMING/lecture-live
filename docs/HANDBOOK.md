@@ -242,11 +242,16 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 ## 6. 测试与闸门
 
 - 27+ 个测试文件（`tests/test_*.py`），风格两种：`@case` 断言流 与 `unittest`。
+- ⭐ **一条命令快筛**：`ClassLive.app/Contents/MacOS/python scripts/check.py`（约 10 s；
+  `--all` 加慢测试约 25 s；`--changed` 按改动补跑并列出要人跑的量具）。全部测试文件并行 +
+  HOME 隔离 + 跑前跑后核对 `sessions/`、`~/.classlive/`、`Lectures/`、`git status` 没变 +
+  ruff + pyright 两条规则（已知误报在 `scripts/pyright_baseline.json`）。
+  「碰了什么要跑什么」的唯一定义点是它里面的 `SLOW_FOR` / `MANUAL_FOR`。
 - **默认闸门**：`tests/test_audit_regressions.py`（R1–R24：毫秒级断言 + 架构回归，
   含 **R17** 签名一致性、**R21** symtable 扫「当全局用、模块层没绑定」、
   **R22** VAD 状态漂移（假 VAD，无模型）、**R23** 构建产物不许入库、
   **R24** 收尾等待不许因"窗口已经关了"就白等）。
-- **碰什么就跑什么**（CLAUDE.md 的完成判据一节是权威表）：
+- **碰什么就跑什么**（权威在 `scripts/check.py`；下面只是举例）：
   更新机制→`test_update` · 面板→`test_panel` · 就绪条/key→`test_ready`/`test_keyentry` ·
   开课面板→`test_entry_panel` · 课程→`test_courses` · 笔记→`test_vault`。
 - **探针**（不在运行路径上，作者手验用）：都在 `scripts/` 下 —— `probe_scroll` / `probe_drag` /
@@ -258,11 +263,6 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
   改那个垫片时**连带改正文里所有 `ROOT / "…"` 的资源路径**。
 - **任何"会写盘"的探针先把写端指到临时目录**。
 
----
-
-## 7. 更新与发布机制
-
-- **`.app` 就是安装目录**（`make-app.sh`）；`cl update` = 拉代码 + 补依赖 + 重建 `.app`。
 ### 6.1 环境变量开关（唯一登记处）
 
 代码里每读一个 `CLASSLIVE_*`，这张表就要有一行（`test_audit_regressions` R30 钉着）。
@@ -286,6 +286,11 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_LOCK_DIR` | `~/Library/Logs/ClassLive` | `make-app.sh` 查单实例锁的位置（只为验收隔离） | 测试接缝，长期 |
 | `CL_NO_PANEL` | 空 | `cl` 零参数时跳过课程面板、回老行为 | 运维开关，长期 |
 
+---
+
+## 7. 更新与发布机制
+
+- **`.app` 就是安装目录**（`make-app.sh`）；`cl update` = 拉代码 + 补依赖 + 重建 `.app`。
 - **依赖戳记 `~/.classlive/reqs-installed`**：三条装依赖的路都要写它
   （`cl update` / 卡片 deps 步 / `make-app.sh`）——少一条，那台机器永远看到假的「补依赖」。
   判据唯一定义点：`update.pending_steps()`。
@@ -379,7 +384,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
   `~/.opencodereview/config.json` 的 key 是**明文**（建议轮换）· R2 里有一节 smoke test
   传上去的垃圾节（write-only 令牌删不掉，等 180 天生命周期）。
 
-- **B：全仓再扫一遍体验/严重 bug**（① pyright 剩余信号分类 ② 3.8.2 记账的 6 条 OCR
+- **B：全仓再扫一遍体验/严重 bug**（① pyright 剩余信号分类 —— ✅ 2026-10-11 结清：330 条里 246 条是 PyObjC 无存根噪音；抓过真 bug 的两条规则 `reportUndefinedVariable` 0 条、`reportCallIssue` 4 条（逐条看过，全是误报，进了 `scripts/pyright_baseline.json`），之后由 `scripts/check.py` 只对**新**冒出来的判红 ② 3.8.2 记账的 6 条 OCR
   发现 —— ⭐ 2026-10-01 **已随 3.8.7 结清 4 条**：`cl setkey` key 进 shell 历史
   （改交互式读入）· `update.py` 抢锁异常被吞（改为出声）· `writer._n` 当全局句号
   （写成功后加 + `mode=no` 也计数）· `finish()` 超时 worker 花钱（`_chat_json`

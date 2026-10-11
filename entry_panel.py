@@ -2902,7 +2902,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
            逐份的细节等「开始分类」之后那张映射卡再说。
            ⚠️ 三行 = 20(内边距) + 18 + 16 + 16 = **70pt < 88** ✓
         """
-        from AppKit import NSColor, NSMakeRect, NSView
+        from AppKit import NSColor, NSMakeRect, NSView  # noqa: F811 闭包外层也 import 过；就近 import 是本文件惯例
         h = CARD_PAD * 2 + L1_H + L2_H * 2
         view = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, h))
         view.setWantsLayer_(True)

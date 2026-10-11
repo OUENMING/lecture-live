@@ -239,6 +239,7 @@ test("10 全挂 -> 503 带 tried", () => withHarness({ groq: () => J(500, {}), q
 
 // ---------- T. Groq turbo：独立额度桶的最后一道 ----------
 const TURBO = "whisper-large-v3-turbo";
+const V3 = "whisper-large-v3";
 test("T1 v3 与千问都失败 -> turbo 顶上，provider=groq model=turbo", () => withHarness({
   groq: (n, model) => (model === TURBO ? groqOk(" from turbo ") : J(500, {})), qwen: () => J(502, {}),
 }, async (h) => {
@@ -262,18 +263,60 @@ test("T3 v3 当日额度满 + 千问全耗尽 -> 直接 turbo（不等对冲）"
   assert.ok(Date.now() - t0 < 1000, "不该等 1.2 s 对冲");
   assert.equal(h.calls.qwen.length, 0);
 }));
+const fullDay = (extra = {}) => ({ day: new Date().toISOString().slice(0, 10), groq_day: 1900, ...extra });
+test("T5 v3 当日额度满、千问有额度 -> turbo 当主力，千问零调用、不计千问用量", () => withHarness({
+  groq: (n, model) => (model === TURBO ? groqOk(" t ") : groqOk(" v3 ")),
+}, async (h) => {
+  await h.store.set("state", fullDay());
+  const j = await (await h.call(req())).json();
+  assert.deepEqual([j.provider, j.model, j.text], ["groq", TURBO, "t"]);
+  assert.deepEqual(h.calls.groq.map((c) => c.form.get("model")), [TURBO]);
+  assert.equal(h.calls.qwen.length, 0);
+  assert.equal(h.reports.filter((r) => r.qwen_used).length, 0);
+}));
+test("T6 v3 与 turbo 当日都满 -> 直接千问、Groq 零调用；千问也挂 -> 503，不再单独问 turbo 桶", () => withHarness({
+  qwen: () => J(502, {}),
+}, async (h) => {
+  await h.store.set("state", fullDay({ turbo: { n: 1900 } }));
+  assert.equal((await h.call(req())).status, 503);
+  assert.deepEqual(h.calls.qwen.map((c) => c.model), CHAIN3);
+  assert.equal(h.calls.groq.length, 0);
+  assert.equal(h.plans.filter((p) => p.model === TURBO).length, 0);
+}));
+test("T7 turbo 当主力却 500 -> 千问接住；turbo 不被重试第二次", () => withHarness({
+  groq: (n, model) => (model === TURBO ? J(500, {}) : groqOk()),
+}, async (h) => {
+  await h.store.set("state", fullDay());
+  const j = await (await h.call(req())).json();
+  assert.equal(j.provider, "qwen");
+  assert.deepEqual(h.calls.groq.map((c) => c.form.get("model")), [TURBO]);
+}));
+test("T8 v3 现场 429 -> 这一段走千问；冷却期间下一段主力换 turbo、不再碰千问", () => withHarness({
+  groq: (n, model) => (model === TURBO ? groqOk(" t ") : J(429, {}, { "retry-after": "120" })),
+}, async (h) => {
+  assert.equal((await (await h.call(req())).json()).provider, "qwen");
+  h.calls.qwen.length = 0;
+  const j = await (await h.call(req())).json();
+  assert.equal(j.model, TURBO);
+  assert.equal(h.calls.qwen.length, 0);
+}));
+test("T9 Quota：v3 与 turbo 都没额度 -> groq=null", async () => {
+  const clock = { now: DAY };
+  const { plan } = quotaAt(clock, { day: "2026-10-11", groq_day: 1900, turbo: { n: 1900 } });
+  assert.equal((await plan()).groq, null);
+});
 test("T4 Quota：turbo 桶与 v3 互不占用；turbo 冷却只冷 turbo", async () => {
   const clock = { now: DAY };
   const { plan, report, store } = quotaAt(clock, { day: "2026-10-11", groq_day: 1900 });
   const q = new QuotaCore({ get: async (k) => store.get(k), put: async (k, v) => { store.set(k, structuredClone(v)); } }, () => clock.now);
   const turbo = async () => (await (await q.handle(new Request("https://quota/plan", { method: "POST",
     body: JSON.stringify({ chain: CHAIN3, seconds: 12, model: TURBO }) }))).json()).groq;
-  assert.equal((await plan()).groq, false, "v3 满了");
+  assert.equal((await plan()).groq, TURBO, "v3 满了");
   assert.equal(await turbo(), true, "turbo 是另一个桶");
   await report({ groq_cooldown_s: 120, model: TURBO });
   assert.equal(await turbo(), false);
   store.set("state", { ...store.get("state"), groq_day: 0 });
-  assert.equal((await plan()).groq, true, "turbo 冷却不该连累 v3");
+  assert.equal((await plan()).groq, V3, "turbo 冷却不该连累 v3");
   clock.now = Date.UTC(2026, 9, 12, 0, 0, 1);
   store.set("state", { ...store.get("state"), turbo: { ...store.get("state").turbo, n: 1900, cooldown_until: 0 } });
   assert.equal(await turbo(), true, "跨日清零 turbo 次数");
@@ -301,30 +344,30 @@ function quotaAt(clock, seed) {
 }
 const DAY = Date.UTC(2026, 9, 11, 12, 0, 0);
 
-test("12a Quota：同分钟第 20 次 groq=false，下一分钟恢复", async () => {
+test("12a Quota：同分钟第 20 次 v3 不批 -> 主力换 turbo，下一分钟恢复 v3", async () => {
   const clock = { now: DAY };
   const { plan } = quotaAt(clock);
-  for (let i = 1; i <= 19; i++) assert.equal((await plan()).groq, true, `第 ${i} 次`);
-  assert.equal((await plan()).groq, false);
+  for (let i = 1; i <= 19; i++) assert.equal((await plan()).groq, V3, `第 ${i} 次`);
+  assert.equal((await plan()).groq, TURBO);
   clock.now += 60_000;
-  assert.equal((await plan()).groq, true);
+  assert.equal((await plan()).groq, V3);
 });
-test("12b Quota：第 1901 次 groq=false；跨 UTC 日清零", async () => {
+test("12b Quota：第 1901 次 v3 不批 -> turbo；跨 UTC 日清零", async () => {
   const clock = { now: DAY };
   const day = "2026-10-11";
   const { plan } = quotaAt(clock, { day, groq_day: 1899 });
-  assert.equal((await plan()).groq, true);     // 第 1900 次
-  assert.equal((await plan()).groq, false);    // 第 1901 次
+  assert.equal((await plan()).groq, V3);     // 第 1900 次
+  assert.equal((await plan()).groq, TURBO);    // 第 1901 次
   clock.now = Date.UTC(2026, 9, 12, 0, 0, 1);
-  assert.equal((await plan()).groq, true);
+  assert.equal((await plan()).groq, V3);
 });
 test("12c Quota：cooldown / exhausted 生效，exhausted 跨日不清", async () => {
   const clock = { now: DAY };
   const { plan, report } = quotaAt(clock);
   await report({ groq_cooldown_s: 120 });
-  assert.equal((await plan()).groq, false);
+  assert.equal((await plan()).groq, TURBO);
   clock.now += 121_000;
-  assert.equal((await plan()).groq, true);
+  assert.equal((await plan()).groq, V3);
   await report({ exhausted: CHAIN3[0] });
   clock.now += 86_400_000 * 2;
   assert.deepEqual((await plan()).qwen, CHAIN3.slice(1));
@@ -383,19 +426,19 @@ test("R18a X-Audio-Seconds 解析：缺失/非法 -> 12，夹到 [0,60]", () => 
 test("R18b Quota：Groq 小时音频秒累计到 95%（6840）就不批；不足 10 s 按 10 s 计；换小时恢复", async () => {
   const clock = { now: DAY };
   const { plan } = quotaAt(clock, { day: "2026-10-11", groq_hour: { hour: Math.floor(DAY / 3600000), s: 6820 } });
-  assert.equal((await plan(5)).groq, true);    // 5 s 按 10 -> 6830
-  assert.equal((await plan(5)).groq, true);    // 6840，刚好到线
-  assert.equal((await plan(5)).groq, false);   // 6850 > 6840
+  assert.equal((await plan(5)).groq, V3);    // 5 s 按 10 -> 6830
+  assert.equal((await plan(5)).groq, V3);    // 6840，刚好到线
+  assert.equal((await plan(5)).groq, TURBO);   // 6850 > 6840
   clock.now += 3600_000;
-  assert.equal((await plan(5)).groq, true);
+  assert.equal((await plan(5)).groq, V3);
 });
 test("R18c Quota：Groq 当日音频秒到 95%（27360）就不批；UTC 跨日清零", async () => {
   const clock = { now: DAY };
   const { plan } = quotaAt(clock, { day: "2026-10-11", groq_day_s: 27350 });
-  assert.equal((await plan(10)).groq, true);   // 27360
-  assert.equal((await plan(10)).groq, false);
+  assert.equal((await plan(10)).groq, V3);   // 27360
+  assert.equal((await plan(10)).groq, TURBO);
   clock.now = Date.UTC(2026, 9, 12, 0, 0, 1);
-  assert.equal((await plan(10)).groq, true);
+  assert.equal((await plan(10)).groq, V3);
 });
 
 // ---------- R19 ----------

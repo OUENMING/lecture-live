@@ -14,7 +14,8 @@
 //                    （index.js 里 DO_NAME）才会重置（官方额度是一次性的，不会自己回来）。
 //   turbo            whisper-large-v3-turbo 的**独立**桶 {n, min, hour, s, cooldown_until}，含义同上面 groq_* 那组。
 //                    Groq 按模型分桶（2026-10-11 实测：v3 剩 637 次时 turbo 剩 1999，x-ratelimit-remaining-requests）。
-//                    它是最后一道云端：OCW WER 11.8% / 漏 1.2%，比 v3（10.2%）和千问（9.5%）差、比本地（12.0–14.3%）好。
+//                    v3 没额度时它当主力（排在千问前，见 #plan）；v3 当主力却失败时它是最后一道。
+//                    OCW WER 11.8% / 漏 1.2%，比 v3（10.2%）和千问（9.5%）差、比本地（12.0–14.3%）好。
 
 const GROQ_DAY_MAX = 1900;   // Groq 免费 2000 RPD，留 5% 余量，主动降级不等 429
 const GROQ_MIN_MAX = 19;     // 20 RPM 同理
@@ -25,6 +26,7 @@ const GROQ_MIN_BILLED_S = 10;   // 单次不足 10 s 按 10 s 计
 const QWEN_DAY_MAX = 3000;      // R17：约 9 节课；保护不可再生的免费额度
 const MAX_COOLDOWN_S = 86400;
 export const TURBO = "whisper-large-v3-turbo";
+export const V3 = "whisper-large-v3";
 const BUCKET = () => ({ n: 0, min: { minute: -1, n: 0 }, hour: { hour: -1, s: 0 }, s: 0, cooldown_until: 0 });
 
 const FRESH = () => ({
@@ -83,14 +85,17 @@ export class QuotaCore {
   async #plan(s, { chain, seconds, model }) {
     const now = this.now();
     this.#roll(s, now);
-    if (model === TURBO) {   // 最后一道：只问 turbo 桶（Worker 在 v3 与千问都没拿到结果时才来问）
+    if (model === TURBO) {   // 最后一道：只问 turbo 桶（v3 当主力却没拿到结果时 Worker 才来问）
       const groq = this.#take(s.turbo, now, seconds);
       await this.storage.put("state", s);
       return { groq };
     }
+    // 主力 Groq 模型：v3 有额度用 v3，否则 turbo，都没有 -> null（直接千问）。
+    // ⚠️ turbo 排在千问**前面**：两个 Groq 桶每天刷新，千问是一次性额度（每模型 100 万 token、90 天）——
+    //    v3 用完后若先走千问，每天第 7 节起就在烧不可再生的额度，而 turbo 的一整桶闲着（2026-10-11 Owen 拍板）。
     // v3 沿用老字段名（groq_*），装成同形的桶再写回
     const v3 = { n: s.groq_day, min: s.groq_min, hour: s.groq_hour, s: s.groq_day_s, cooldown_until: s.groq_cooldown_until };
-    const groq = this.#take(v3, now, seconds);
+    const groq = this.#take(v3, now, seconds) ? V3 : this.#take(s.turbo, now, seconds) ? TURBO : null;
     s.groq_day = v3.n; s.groq_min = v3.min; s.groq_hour = v3.hour; s.groq_day_s = v3.s;
     const qwen = now < s.qwen_cooldown_until || s.qwen_day >= QWEN_DAY_MAX
       ? [] : chain.filter((m) => !(m in s.qwen_exhausted));

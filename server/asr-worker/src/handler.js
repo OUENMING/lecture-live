@@ -1,7 +1,8 @@
 // ClassLive 定稿 ASR 代理：POST /v1/transcribe（audio/ogg Opus）-> {text, provider, model, ms, tried}
 //
-// 链：Groq（whisper-large-v3，2.5 s）优先；1.2 s 还没回就对冲启动千问；千问免费额度
-// 三个模型轮换（每个 3.5 s）；两路都没拿到结果且预算还有剩 -> Groq turbo（独立额度桶，最后一道）。
+// 链：Groq 主力（v3 有额度用 v3，没有用 turbo —— 两个独立的每日桶，由 DO /plan 选；2.5 s）；
+// 1.2 s 还没回就对冲启动千问（一次性免费额度，三个模型轮换，每个 3.5 s）；
+// v3 当主力且两路都没拿到结果、预算还有剩 -> turbo 最后一道。
 // 整条链总预算 5 s，客户端 6 s 截止前一定有回包。
 // 日志只记供应商 / 模型 / 状态码 / 毫秒 —— **不记文本、不记音频**。
 // 设计与出处：docs/PLAN-r2-cloud-final-asr.md §W、docs/RESEARCH-cloud-asr.md。
@@ -60,8 +61,7 @@ function toBase64(buf) {
   return btoa(s);
 }
 
-import { TURBO } from "./quota-core.js";
-const V3 = "whisper-large-v3";
+import { TURBO, V3 } from "./quota-core.js";
 
 // ---- Quota DO ----
 async function quota(env, path, payload) {
@@ -76,7 +76,7 @@ async function getPlan(env, seconds) {
   // DO 不可用：开放而不是挂掉（Groq 429 / 千问 403 自己会兜住），只是少了主动降级。
   // ⚠️ 此时 R17 的千问每日 3000 段上限、R18 的 Groq 音频秒上限也一并失效 —— 接受（DO 免费档超限才会走到这）。
   console.log(JSON.stringify({ quota: "unavailable" }));
-  return { groq: true, qwen: CHAIN };
+  return { groq: V3, qwen: CHAIN };
 }
 async function takeTurbo(env, seconds) {
   try {
@@ -185,9 +185,8 @@ async function transcribe(env, ctx, audio, seconds, t0) {
     const run = { env, audio, sig: budget.signal, deadline, tried, report };
     const plan = await getPlan(env, seconds);
     const models = env.QWEN_KEY ? plan.qwen : [];
-    const groqP = plan.groq && env.GROQ_KEY
-      ? tryGroq(run)
-      : Promise.reject(new Skip());
+    const primary = env.GROQ_KEY ? plan.groq : null;   // V3 | TURBO | null
+    const groqP = primary ? tryGroq(run, primary) : Promise.reject(new Skip());
     // 千问何时起跑：Groq 失败的当下，或 Groq 发出 1.2 s 还没回（对冲），取早者。
     const qwenP = models.length
       ? (async () => {
@@ -199,8 +198,9 @@ async function transcribe(env, ctx, audio, seconds, t0) {
       : Promise.reject(new Skip());
     let won = null;
     try { won = await Promise.any([groqP, qwenP]); } catch { /* 全部失败 */ }
-    // 最后一道：v3 与千问都没拿到（额度满 / 冷却 / 都挂了）且预算还够一次 Groq -> turbo。
-    if (!won && env.GROQ_KEY && deadline - Date.now() > 500 && await takeTurbo(env, seconds)) {
+    // 最后一道：主力是 v3、它与千问都没拿到（额度满 / 冷却 / 都挂了）且预算还够一次 Groq -> turbo。
+    // 主力已经是 turbo / null（turbo 桶已问过）就不再问。
+    if (!won && primary === V3 && deadline - Date.now() > 500 && await takeTurbo(env, seconds)) {
       try { won = await tryGroq(run, TURBO); } catch { /* 也没拿到 */ }
     }
     const ms = Date.now() - t0;

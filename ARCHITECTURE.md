@@ -21,7 +21,7 @@
 | **C GPU 驱动崩溃** | `IOGPUFamily` 断言 panic 历史 | ⚠️ **仍成立** —— 历史未消，`translator._configure_mlx` 仍是缓解措施 |
 | **D `_use_cloud` 无锁** | 未声明的不变量 | ✅ **已解决** —— 已加 `_state_lock`，把"判断+翻转"并成一步 |
 | **E 错误吞噬面大** | 大量 `except Exception` | ⚠️ **仍成立，且是刻意的**（上课不能崩）。后来加了 `CLASSLIVE_DEBUG=1` 开关 |
-| **F 测试的形状** | R1/R4 **复刻**实现逻辑 | ⚠️ **仍成立** —— `CLAUDE.md` 的完成判据里也记着这条 |
+| **F 测试的形状** | R1/R4 **复刻**实现逻辑 | ⚠️ **一半成立**（2026-10-11 核对）—— R4 已改调生产 `note_path_for`；R1 的并发用例仍是手抄 `fake_worker` |
 
 ### ⚠️ 正文里的 `file:line` 引用**全部不可信**
 

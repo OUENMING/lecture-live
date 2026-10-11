@@ -40,8 +40,8 @@ class DraftView:
         return self.cur_seg <= self.fin_seg
 
     def accept(self, seq: int, seg: int) -> bool:
-        """译文能否上屏。False = 过期(这段已定稿 / 更新的译文已显示过), 已计数。"""
-        if seg <= self.fin_seg or seq < self.seq:
+        """译文能否上屏。False = 过期(这段已定稿 / 屏上已是更新一段的英文草稿 / 更新的译文已显示过), 已计数。"""
+        if seg <= self.fin_seg or seg < self.cur_seg or seq < self.seq:
             self.stats["stale"] += 1
             return False
         self.seq = seq

@@ -253,5 +253,36 @@ class Load(unittest.TestCase):
         self.assertEqual((eng.name, made), ("parakeet", []))
 
 
+class Wiring(unittest.TestCase):
+    """`main.partial_worker` 是嵌套闭包，跑不到 → 用 AST 钉「段号只有一个来源」。
+
+    缺陷（2026-10-11 抓到）：`drafts` 元组用 put 时刻的段号，送翻却现读 `seg_gen["n"]`。
+    段边界上 worker 晚一拍取到上一段的缓冲时，这段话的译文被标成**下一段** →
+    `DraftView.accept` 放行 → 上一段的中文在下一段的草稿槽里冒出来（e2e 里 2/104 份草稿是这种晚到的）。
+    """
+
+    def _worker(self):
+        import ast
+        tree = ast.parse((HERE / "main.py").read_text(encoding="utf-8"))
+        for n in ast.walk(tree):
+            if isinstance(n, ast.FunctionDef) and n.name == "partial_worker":
+                return n
+        self.fail("main.py 里找不到 partial_worker")
+
+    def test_seg_gen_is_read_once_as_fallback(self):
+        import ast
+        w = self._worker()
+        reads = [n for n in ast.walk(w) if isinstance(n, ast.Subscript)
+                 and isinstance(n.value, ast.Name) and n.value.id == "seg_gen"]
+        self.assertEqual(len(reads), 1, "partial_worker 里只许在 `_seg = … else seg_gen[\"n\"]` 读一次")
+
+    def test_submit_and_drafts_use_the_same_seg(self):
+        import ast
+        w = self._worker()
+        calls = {ast.unparse(n.func): n for n in ast.walk(w) if isinstance(n, ast.Call)}
+        self.assertEqual(ast.unparse(calls["draft_tr.submit"].args[1]), "_seg")
+        self.assertEqual(ast.unparse(calls["drafts.put"].args[0].elts[4]), "_seg")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

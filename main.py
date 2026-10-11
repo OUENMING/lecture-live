@@ -1658,10 +1658,12 @@ def run(args) -> None:
                 # 新句子开始 -> 重置草稿节流。**必须重置**: last_len 是**上一句**
                 # 收尾时的词数, 新句若更短(如 20 词 vs 30 词), "新增 ≥6 词"永远
                 # 不成立 -> 整句拿不到即时中文("首字中文 ~3s"特性静默失效)。
-                # ⚠️ 比较 `seg_gen`（草稿所属的音频段），不是 `final_gen`：后者要等上一段
+                # ⚠️ 比较段号（草稿所属的音频段），不是 `final_gen`：后者要等上一段
                 #    定稿上屏才变（晚 2–4s；进 carry 时根本不变），会在新段讲到一半时清零节流。
-                if seg_gen["n"] != last_gen:
-                    last_gen = seg_gen["n"]
+                # ⚠️ 用 `_seg`（put 时刻），别现读 `seg_gen`：段号在本函数里**只有一个来源**
+                #    （`tests/test_draft_engine.py` Wiring 钉着）。
+                if _seg != last_gen:
+                    last_gen = _seg
                     last_tr, last_len, last_sent = 0.0, 0, ""
                 # 草稿译文: 距上次 ≥2.5s 且新增 ≥6 词才送(避免刷爆 LLM)
                 now = time.monotonic()
@@ -1681,7 +1683,7 @@ def run(args) -> None:
                     last_tr, last_len, last_sent = now, _nw, t
                     # (seq, seg, text): seg 与 drafts 元组里那个段号同源 → drain() 据此丢过期译文
                     draft_seq += 1
-                    draft_tr.submit(draft_seq, seg_gen["n"],
+                    draft_tr.submit(draft_seq, _seg,
                                     strip_dangling(t))   # 送翻前削掉结尾悬挂词（上屏/记录仍用原文）
             except Exception as e:                       # noqa: BLE001
                 echo(f"⚠ 草稿转写失败: {e}")

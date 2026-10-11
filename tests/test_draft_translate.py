@@ -60,6 +60,18 @@ class ViewAccept(unittest.TestCase):
         self.assertTrue(v.accept(1, 5))
         self.assertEqual(v.stats["stale"], 2)
 
+    def test_stale_when_screen_moved_to_a_newer_segment(self):
+        """上一段的译文在**新一段的英文草稿已上屏之后**才回来 → 丢（2026-10-11）。
+
+        `on_draft(新段)` 刚把中文草稿槽清空；这时让旧段译文进来，屏上就是「新段英文 + 旧段中文」，
+        要等新段第一条译文（≥6 词、≥2.5 s）才盖掉。旧段还没定稿也一样（fin_seg 判不出来）。"""
+        v = D.DraftView()
+        v.on_draft(3)
+        self.assertTrue(v.accept(1, 3))
+        v.on_draft(4)                               # 新一段的英文草稿上屏
+        self.assertFalse(v.accept(2, 3))            # seg 3 还没定稿，但屏上已是 seg 4
+        self.assertTrue(v.accept(3, 4))
+
     def test_stale_by_seq(self):
         v = D.DraftView()
         v.accept(5, 0)

@@ -69,6 +69,8 @@ MANUAL_FOR = [
      "docs/experiments/context_ab.py / scripts/draft_ctx_ab.py —— 改 prompt 后的译文并排（花钱，人看）"),
     (["overlay.py", "transcript_view.py"],
      "scripts/probe_scroll.py —— 滚动；它自己会翻转，❌ 先连跑两三次再下结论"),
+    (["overlay.py"],
+     "scripts/probe_hint.py —— ❓ 点拨在术语格里的样子（拍两张图，给作者看）"),
     (["panel.py", "entry_panel.py"],
      "scripts/probe_drag.py / scripts/probe_entry_panel.py —— 真实拖拽落点，作者手拖一次"),
 ]

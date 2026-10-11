@@ -101,6 +101,15 @@ RULES:
   word order and the "EN：" lines, never from markup.
 - Use the course terms exactly as they are written in the course-terms list."""
 
+# ❓ 轻点拨（计划 §G1）: 课中按下「没听懂」后给的**一句话**。不是讲解 —— 讲解有「讲一下」,
+# 这里只求让二语听者立刻接上; 一行显示在术语格里, 所以硬限字数。
+HINT_SYSTEM = (
+    "你在帮一个母语是中文、正在听英文课的学生。下面是老师刚讲的几句（英文，可能有语音识别错误）。"
+    "用一句不超过 35 个汉字的中文说出这段的核心意思，让他马上跟上。"
+    "只依据这几句，不补充外部知识；拿不准就说得保守。"
+    "只输出这一句，不要前缀、引号、换行。")
+HINT_MAX_CHARS = 60
+
 # 讲解的 max_tokens。220(翻译路径各处用的)是**单句**预算, 讲解必须长得多。
 # 1400 的依据(实测, 非估计): 用 sessions/ 里一节真课(326 句真实转录)连问 3 轮,
 # DeepSeek 官方 usage.completion_tokens = 499 / 375 / 786 —— 即一次"讲清楚"的自然
@@ -404,6 +413,26 @@ class CloudTranslator:
             if on_delta:
                 on_delta(delta)                  # 边到边推, 不等整段
         return "".join(buf).strip()
+
+    def hint(self, lines: list[str]) -> str:
+        """❓ 一行点拨: 把最近几句英文提炼成一句中文要点。失败由调用方捕获。
+
+        system 的拼法同 `_answer_system`(领域 + 课程术语), 术语只取前 40 个 ——
+        点拨只有一句话, 用不着全量; user 就是各行原文。"""
+        system = HINT_SYSTEM
+        if self._domain:
+            system += f"\n\n{domain_block(self._domain).strip()}"
+        if self._course_terms:
+            system += ("\n\nCourse terms (use exactly these renderings):\n"
+                       + "\n".join(self._course_terms[:40]))
+        msgs = [{"role": "system", "content": system},
+                {"role": "user", "content": "\n".join(lines)}]
+        text = "".join(self._stream_chat(msgs, max_tokens=80)).strip()
+        first = text.splitlines()[0] if text else ""
+        first = first.strip().strip("\"'“”‘’「」").strip()
+        if len(first) > HINT_MAX_CHARS:
+            first = first[:HINT_MAX_CHARS] + "…"
+        return first
 
     def _answer_system(self) -> str:
         """讲解 system prompt = 常量 + 本课领域/术语。

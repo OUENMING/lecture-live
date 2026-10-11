@@ -484,6 +484,19 @@ class EngineRouter:
                 return f"⚠ 讲解失败({str(e)[:60]})"
         return NO_CLOUD_ANSWER
 
+    def hint(self, lines) -> str:
+        """❓ 一行点拨。本地 / 失败一律返回 `""`(= 调用方改显示「课后笔记里能找到」)。
+
+        ⚠️ 和 `answer` 同一个决定: 本地 1.7B 只会编, 不讲; 云端抛错也**不走 `_fallback`** ——
+        一次点拨失败不能把整节课的翻译降级到本地(`_fallback` 会翻 `_use_cloud`、
+        起 90s 计费探针, 提示语还写死"云端翻译失败", 在这里是误导)。"""
+        if not self._use_cloud:
+            return ""
+        try:
+            return self._cloud.hint(lines)
+        except Exception:                         # noqa: BLE001
+            return ""
+
 
 class TerminalUI:
     # ⚠️ 这个类**不驱动 AppKit** —— `pump()` 是空操作。收尾循环靠它决定
@@ -517,6 +530,10 @@ class TerminalUI:
     def finalize(self, en: str, zh: str, *, clear_draft: bool = True):   # clear_draft 终端无草稿槽, 忽略
         echo(f"[{now()}] ✅ {en}\n         🌐 {zh}")
         self._zh = self._en = ""
+
+    def show_hint(self, text: str, ttl: float):
+        if text:                                 # 终端没有"术语格", 点拨整行打出来; 不需要到期
+            echo(f"[{now()}] {text}")
 
     def answer_delta(self, delta: str):
         # 只累加不上屏: 与 stream_zh 同规矩 —— 完整回答由 drain() 一次性 echo
@@ -1355,13 +1372,15 @@ def run(args) -> None:
     #    `drain()` 侧的 `_pair()` 仍兼容裸字符串与二元组（替身/老测试）。
     drafts: "queue.Queue[tuple]" = queue.Queue()             # (原文, 上屏, buf_s, 耗时, seg) -> 主线程
     drafts_zh: "queue.Queue" = queue.Queue()            # 草稿译文 (seq, seg, zh) -> 主线程
-    streamq: "queue.Queue[tuple]" = queue.Queue()       # ("zh"/"en"/"final"/"terms"/"notice"/"answer"/"answer_done"/"summary") -> 主线程
+    streamq: "queue.Queue[tuple]" = queue.Queue()       # ("zh"/"en"/"final"/"terms"/"notice"/"answer"/"answer_done"/"summary"/"hint") -> 主线程
     # ⚠️ 加新 tag **必须**在 `drain()` 加同分支 —— 它是唯一的分发点，漏改即静默丢弃。
     #    2026-09-30 起 `drain()` 末尾有一条**兜底告警**（未识别的 tag 会 echo 一行）。
     draft_view = DraftView()                            # 草稿译文的过期判据(只在主线程 drain() 里用)
     draft_stats = draft_view.stats                      # 丢弃/让路/出错计数(收尾打印)
     properq: "queue.Queue" = queue.Queue()              # 待查专有名词
     answerq: "queue.Queue[str]" = queue.Queue()         # 待讲解的问题(Phase 2)
+    hintq: "queue.Queue[list[str]]" = queue.Queue()     # ❓ 待点拨的最近几句(只留最新一份, 见 hint_worker)
+    last_draft = {"en": ""}                             # 屏上最新的英文草稿(drain 记; ❓ 点拨要带上最新半句)
 
     def notify(msg: str, warn: bool = False) -> None:
         """引擎状态广播 -> streamq -> 主线程 drain() -> UI(悬浮窗要求主线程)。"""
@@ -1389,6 +1408,19 @@ def run(args) -> None:
         echo(f"[{now()}] 🙋 [讲一下] {ASK_QUESTION}")
         answerq.put(ASK_QUESTION)
 
+    def _on_lost_pressed() -> bool:
+        """悬浮窗 ❓ 的回调(AppKit 主线程): 落盘一个时间戳, 并视情况排队一次点拨。
+
+        ⚠️ 主线程 —— 只做 list 复制 + `queue.put`, 不联网不 sleep(同 `ask_about_this`)。
+        ⚠️ 纯转录 / 「只英·校」档(点拨是中文的) / 本地引擎 → 不排队、返回 False,
+           悬浮窗改显示"课后笔记里能找到"; 纯转录档一个模型请求都不发(DESIGN 契约)。
+        返回 True = 已排队, 悬浮窗显示"正在提炼…"。"""
+        writer.mark_lost()
+        if trans["mode"] != "both" or not translator.uses_cloud:
+            return False
+        hintq.put([t for t in (*finals[-4:], last_draft["en"]) if t])
+        return True
+
     ui = TerminalUI() if args.ui == "terminal" else _load_overlay(
         on_quit=stopping.set,
         # ❓ 要的是**按下那一刻** —— 所以它不设标志位, 直接落盘一个时间戳。
@@ -1396,7 +1428,7 @@ def run(args) -> None:
         #    全是主线程能扛的量; 而且它就是 `writer` 自己的方法, 不像从前那个 ⭐
         #    那样要绕一圈到 `drain()` 里去补标志位。
         #    （⭐ 已于 2026-09-29 并进 ❓ —— 两个按钮记的是同一件事。）
-        on_lost=lambda: writer.mark_lost(),
+        on_lost=_on_lost_pressed,
         on_translate=lambda mode: trans.__setitem__("mode", mode),
         on_submit=submit_question,
         on_ask=ask_about_this,
@@ -1825,12 +1857,40 @@ def run(args) -> None:
             if not stopping.is_set() and gen == qa["gen"]:
                 streamq.put(("answer_done", q, text))
 
+    def hint_worker():
+        """❓ 一行点拨线程。形状照抄 answer_worker: daemon + 只认自己的队列 + 只判 running。
+
+        连按几下只讲一次: 取到一份后把积压的取空、只留最新的(旧的已被新的覆盖)。
+        ⚠️ 不碰 busy / finalq / carry(`all_settled` 的输入); 点拨可丢。
+        ⚠️ 写 `streamq` 前判 `stopping`: streamq 是 `all_settled()` 的输入之一,
+           收尾中还往里写会拖慢收尾(同 answer_worker 的 `_emit`)。"""
+        while running.is_set():
+            try:
+                lines = hintq.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if lines is None:
+                break
+            while True:
+                try:
+                    nxt = hintq.get_nowait()
+                except queue.Empty:
+                    break
+                if nxt is None:
+                    return
+                lines = nxt
+            # `EngineRouter.hint` 自己吞异常(失败/本地 = ""), 这里不重复 try
+            text = translator.hint(lines) if lines else ""
+            if not stopping.is_set():
+                streamq.put(("hint", text))
+
     t1 = threading.Thread(target=partial_worker, daemon=True)
     t2 = threading.Thread(target=final_worker, daemon=True)
     t3 = threading.Thread(target=proper_worker, daemon=True)
     t4 = threading.Thread(target=answer_worker, daemon=True, name="answer-qa")
     t5 = threading.Thread(target=draft_tr.run, args=(running,), daemon=True, name="draft-tr")
-    t1.start(); t2.start(); t4.start(); t5.start()   # 问答不需要 key 就能起步
+    t6 = threading.Thread(target=hint_worker, daemon=True, name="lost-hint")
+    t1.start(); t2.start(); t4.start(); t5.start(); t6.start()   # 问答不需要 key 就能起步
     if api_key_val:                               # (没 key 时它只回一句说明)
         t3.start()
 
@@ -1955,6 +2015,7 @@ def run(args) -> None:
                 live.draft(_raw, _shown, seg=_seg, buf_s=_buf_s, compute_s=_cpt,
                            lag_s=(time.monotonic() - _t_put) if _t_put else None)
             ui.add_draft(_shown)
+            last_draft["en"] = _shown
         while True:
             try:
                 _it = drafts_zh.get_nowait()
@@ -2008,6 +2069,14 @@ def run(args) -> None:
                 fn = getattr(ui, "summary_update", None)
                 if callable(fn):
                     fn(item[1])
+            elif item[0] == "hint":                 # ("hint", 一句话 | "")  ❓ 点拨
+                # 空 = 本地 / 失败 / 没内容 -> 退回"课后笔记里能找到"(别让"正在提炼…"挂到 20s 才消)
+                fn = getattr(ui, "show_hint", None)
+                if callable(fn):
+                    if item[1]:
+                        fn("💡 " + item[1], 15)
+                    else:
+                        fn("❓ 已标记 · 课后笔记里能找到这几句", 6)
             elif item[0] == "final":                # ("final", en, zh, asr_raw[, seg])
                 if live is not None:
                     # ⚠️ `item[4]` 用 `len` 守卫：`("final", …)` 这条 tag 有 3 个产出点，
@@ -2015,8 +2084,11 @@ def run(args) -> None:
                     live.final(item[1] or item[3], item[2], item[3],
                                seg=int(item[4]) if len(item) > 4 else 0)
                 # 先更新 fin_seg 再算 clear_draft: 屏上已是更新一段的草稿时, 旧段定稿不碰草稿槽
+                _clr = draft_view.on_final(item[4] if len(item) > 4 else None)
                 ui.finalize(item[1] or item[3], item[2],   # 翻译失败时至少显示转录
-                            clear_draft=draft_view.on_final(item[4] if len(item) > 4 else None))
+                            clear_draft=_clr)
+                if _clr:
+                    last_draft["en"] = ""           # 草稿已被这句定稿取代 -> ❓ 点拨别再带上它（否则同一句出现两次）
                 writer.append(item[1], item[2], raw=item[3])
                 # ⭐ 采集面 ③：`item[1]` 是**矫正后**的英文、`item[3]` 是**原始 ASR**
                 #    —— 只有**这里**同时拿得到这一对（`note_segment` 那边没有）。

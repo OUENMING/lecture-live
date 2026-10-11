@@ -1030,6 +1030,9 @@ class Overlay:
         ve.addSubview_(self._gloss_lbl)
         self._terms: list = []        # 当前句命中的 (术语, 解析), 不随 finalize 清空
         self._pinned_term = None      # 被点开并钉住的术语 -> 解析永久留在屏上
+        # ❓ 一行点拨（计划 §G1）: (文字, 到期的 monotonic)。占**术语行那一格**,
+        # 到期自动让回术语 —— 不另开一行, 面板高度与布局一点不动。
+        self._hint: tuple[str, float] | None = None
         # 透明点击区盖在术语行上(最后加入 = 在最上层)。
         self._gloss_hit = _make_click_view(self._on_gloss_click)
         ve.addSubview_(self._gloss_hit)
@@ -2146,14 +2149,29 @@ class Overlay:
         self._terms = list(hits or [])
         self._mark_dirty(urgent=True)
 
+    def show_hint(self, text: str, ttl: float) -> None:
+        """❓ 按下后的反馈 / 一行点拨, 占术语行 `ttl` 秒。空串 = 清掉。
+
+        ⚠️ 主线程调用(`_lost` 与 `main.drain()`)。到期由 `pump()` 判, 这里不起定时器。"""
+        self._hint = (text, time.monotonic() + ttl) if text else None
+        self._mark_dirty(urgent=True)
+
     def _on_gloss_click(self):
-        """点术语行: 未钉 -> 钉住当前术语展开解析; 已钉 -> 取消, 退回术语名列表。"""
+        """点术语行: 未钉 -> 钉住当前术语展开解析; 已钉 -> 取消, 退回术语名列表。
+        点拨在显示时, 点一下只是收起它 —— 不去切钉住的术语(那是另一件事)。"""
+        if self._hint is not None:
+            self._hint = None
+            self._release_focus()
+            self._mark_dirty(urgent=True)
+            return
         self._pinned_term = None if self._pinned_term is not None \
             else (self._terms[0] if self._terms else None)
         self._release_focus()        # 点这里也会让面板变 key(见 _release_focus)
         self._mark_dirty(urgent=True)
 
     def _gloss_text(self) -> str:
+        if self._hint is not None:               # 点拨让钉住的术语暂时让位, 到期自动回来
+            return self._hint[0]
         if self._pinned_term is not None:
             t, note = self._pinned_term
             return f"📌 {t}：{note}"
@@ -2794,6 +2812,9 @@ class Overlay:
         # tick 要基于更新后的几何算池, 顺序反了会画一帧旧几何。
         self._sync_panel_size()
         now = time.monotonic()
+        if self._hint is not None and now >= self._hint[1]:
+            self._hint = None                    # 点拨到期 -> 术语行还给术语
+            self._mark_dirty()
         if busy:
             self._last_ev_t = now
         self._tv.tick()          # 跟随状态机 + 闲置回底(含滚动后的池重算)
@@ -2827,7 +2848,12 @@ class Overlay:
         #    （两者互不依赖，而且纲要这边是纯内存操作、不会抛）。
         self._outline["marks"].append(time.strftime("%H:%M:%S"))
         self._note("lost")
-        self._on_lost()
+        # 回调返回真 = 已排队去提炼一句点拨(main 的 `_on_lost_pressed`); 默认回调返回 None。
+        # 按下当场就有反馈 —— 10-09 那节 ❓ 0 次的原因之一就是按了没有任何动静。
+        if self._on_lost():
+            self.show_hint("❓ 已标记 · 正在提炼一句话…", ttl=20)
+        else:
+            self.show_hint("❓ 已标记 · 课后笔记里能找到这几句", ttl=6)
 
     def _ask(self):
         """「讲一下」: 用固定问题开一轮讲解。

@@ -13,6 +13,7 @@
 回调必须快速返回(重活交给调用方 worker 线程)。
 """
 from __future__ import annotations
+import os
 import time
 from collections import deque
 import numpy as np
@@ -147,10 +148,39 @@ def _end_silence_threshold(dur: float) -> float:
     return 0.45            # 长句: 需明显换气才切(绝不设 0.25)
 
 
+def find_valley_cut(buf: np.ndarray, sr: int = SR, look_s: float = 1.5,
+                    frame_s: float = 0.03) -> int:
+    """12s 硬切时在末尾 `look_s` 秒里找能量最低点，返回切点下标（纯函数）。
+
+    30ms 帧 RMS → 3 帧滑动平均 → argmin，切在该帧中点。
+    以下情况返回 `len(buf)`（= 旧行为，恰好切在末尾）：缓冲不足 `look_s`、
+    计算出错、窗口内没有明显低谷（最低点不到最高点的 80%；等幅信号 argmin 恒为 0，会无故回退整个窗口）。"""
+    try:
+        win = int(look_s * sr)
+        if len(buf) < win:
+            return len(buf)
+        F = int(frame_s * sr)
+        start = len(buf) - win
+        n = win // F
+        frames = buf[start:start + n * F].astype(np.float32).reshape(n, F)
+        rms = np.sqrt(np.mean(frames ** 2, axis=1))
+        smooth = np.convolve(rms, np.ones(3) / 3, mode="valid")   # 不补零，免得两端被抹成假低谷
+        lo, hi = float(smooth.min()), float(smooth.max())
+        # 没有明显低谷：全程近乎等幅（纯音的 RMS 逐帧也有 ~1e-3 抖动，所以光靠绝对差不够，再加相对差）
+        if hi - lo < 1e-6 or lo > 0.8 * hi:
+            return len(buf)
+        return start + (int(np.argmin(smooth)) + 1) * F + F // 2   # +1：平滑窗的中心帧
+    except Exception:
+        return len(buf)
+
+
 class Segmenter:
     def __init__(self, on_partial, on_utterance_end, vad_model: str = VAD_MODEL):
         self.on_partial = on_partial
         self.on_utterance_end = on_utterance_end
+        #: 12s 硬切时往回找能量低谷再切（默认开；`CLASSLIVE_VAD_VALLEY=0` = 旧行为）。
+        #: 只在构造时读一次；测试直接改这个属性。
+        self.valley = os.environ.get("CLASSLIVE_VAD_VALLEY", "1") != "0"
         self._vad = _make_vad(vad_model)
         self._last_ratio = 0.0
         self._parts: list[np.ndarray] = []
@@ -179,7 +209,8 @@ class Segmenter:
         #                这是 `dropped` **看不见**的那一类真实丢内容（见 `accept`）。
         self.diag = {"cuts": 0, "hard_cuts": 0, "dropped": 0,
                      "dropped_s": 0.0, "weak_blocks": 0,
-                     "vad_resets": 0, "blind_dropped": 0}
+                     "vad_resets": 0, "blind_dropped": 0,
+                     "valley_back_s": 0.0}
 
     @property
     def dur(self) -> float:
@@ -326,7 +357,21 @@ class Segmenter:
             else:
                 self.diag["cuts"] += 1
             buf = self._buf().copy()
+            rest = buf[:0]
+            if hard_cut and not silence_cut and self.valley:
+                cut = find_valley_cut(buf)
+                self.diag["valley_back_s"] += (len(buf) - cut) / SR   # 只计数
+                buf, rest = buf[:cut].copy(), buf[cut:].copy()
             self._reset()
+            if len(rest) > 0:
+                # 把挪回的那截当作下一段的开头（段中续接）。其余 `_reset` 清掉的状态：
+                # `last_partial` 重置为 now（下一次草稿 1s 后出）、`is_speaking` 无读者、
+                # `_blind_s` 只在未起段时计、pre-roll 在起段时已清空 —— 都保持清掉；
+                # `last_speech_s` `_reset` 本就不动。rest 为空则保持旧行为（免得 flush 误记 dropped）。
+                self._parts = [rest]
+                self._n = len(rest)
+                self.has_speech = True
+                self.silence_run = 0.0
             # ⚠️⚠️ **这个守卫恒为真，是安全网不是判据**（2026-09-29 核实）。
             #    `silence_cut` 的**定义里就含** `dur >= MIN_UTTERANCE_S`（见上面），
             #    而 `hard_cut` 是 `dur >= MAX_UTTERANCE_S(12s)`，

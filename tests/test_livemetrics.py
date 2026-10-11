@@ -351,6 +351,17 @@ class Lag(unittest.TestCase):
         self.assertNotIn("lag_s", d[1])
 
 
+class Engine(unittest.TestCase):
+    def test_engine_written_only_when_given(self):
+        log, p = _mk_log()
+        log.draft("a", buf_s=1.0, engine="nemotron")
+        log.draft("b", buf_s=2.0)
+        log.close()
+        d = [r for r in _lines(p) if r["kind"] == "draft"]
+        self.assertEqual(d[0]["engine"], "nemotron")
+        self.assertNotIn("engine", d[1])
+
+
 
 
 if __name__ == "__main__":

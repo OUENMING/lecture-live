@@ -142,6 +142,33 @@ class BuildUtts(unittest.TestCase):
         self.assertEqual([x["final"] for x in u], ["x"])
 
 
+class EngineAwareSliding(unittest.TestCase):
+    """R3：「滑窗草稿不进回改统计」只对窗口型引擎（parakeet）成立；流式（nemotron）看整段，不滑。"""
+
+    def _ev(self, engine):
+        ev = []
+        for i, txt in enumerate(["a b", "a c d", "a c d e"]):      # 第 2 份把 b 改成 c = 一次回改
+            d = _draft(0, txt, t=float(i), buf_s=8.0 + 2 * i)          # 8 s / 10 s / 12 s
+            if engine:
+                d["engine"] = engine
+            ev.append(d)
+        return ev + [_final(0, "a c d e.", t=9.0)]
+
+    def test_nemotron_long_drafts_are_not_excluded(self):
+        r = CR.SE.evaluate(CR.build_utts(self._ev("nemotron")), None)["draft_rewrite"]
+        self.assertEqual(r["sliding_drafts_excluded"], 0)
+        want = CR.SE.M.rewrite_stats(["a b", "a c d", "a c d e"], k=r["k"])
+        self.assertEqual(r["shown_words"], want["shown"])              # 三份都算
+
+    def test_files_without_engine_keep_the_old_numbers(self):
+        old = CR.SE.evaluate(CR.build_utts(self._ev(None)), None)["draft_rewrite"]
+        pk = CR.SE.evaluate(CR.build_utts(self._ev("parakeet")), None)["draft_rewrite"]
+        self.assertEqual(old, pk)
+        self.assertEqual(old["sliding_drafts_excluded"], 1)            # 12 s 那份被剔
+        want = CR.SE.M.rewrite_stats(["a b", "a c d"], k=old["k"])
+        self.assertEqual(old["shown_words"], want["shown"])
+
+
 class StabilizerIsTheSamePath(unittest.TestCase):
     def test_k0_is_identity(self):
         """⭐ hold-back 0 = 原样上屏。这条挂了说明离线套的 K 与生产不是同一条路。"""

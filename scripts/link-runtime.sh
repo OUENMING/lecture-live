@@ -31,7 +31,7 @@ if [ ! -e "$MAIN/cl" ]; then echo "❌ $MAIN 看着不像 ClassLive 的安装目
 
 #: 要链的名字。**目录**必须软链（上课要往里写）；**小状态文件**也软链，
 #: 这样面板改 `.course` 时两边是同一份。
-NAMES="ClassLive.app sessions glossary glossary.txt .course .test-mode .window .update-seen .deepseek_key term_notes.json assets"
+NAMES="ClassLive.app sessions glossary glossary.txt .course .test-mode .draft-engine .window .update-seen .deepseek_key term_notes.json assets"
 
 made=0; skipped=0; missing=0
 echo "主目录: $MAIN"

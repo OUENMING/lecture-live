@@ -318,5 +318,12 @@ if [ "$SRC" != "file" ] && [ "$(cat "$TMCFG" 2>/dev/null || true)" = "1" ]; then
   TM_TAG=" · 测试模式=开"
 fi
 
+# 草稿引擎（R3）：App 启动没有环境变量，`.draft-engine` 是 App 用户唯一的开关。
+# 内容 auto | parakeet | nemotron；不存在 / 非法 = 不设（main 里默认 auto）。已设环境变量时不覆盖。
+if [ -z "${CLASSLIVE_DRAFT_ENGINE:-}" ]; then
+  _de="$(cat .draft-engine 2>/dev/null || true)"
+  case "$_de" in auto|parakeet|nemotron) export CLASSLIVE_DRAFT_ENGINE="$_de" ;; esac
+fi
+
 echo "▶ ClassLive · 音源=$SRC · 引擎=$ENGINE · 课程=${COURSE:-(未设置, 默认 LECTURE)}${TM_TAG}"
 exec "$PY" main.py --source "$SRC" --ui "$UI" --engine "$ENGINE" ${ARGS[@]+"${ARGS[@]}"}

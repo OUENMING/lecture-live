@@ -22,6 +22,7 @@ import draft_policy
 from draft_translate import DraftTranslator, DraftView
 import livemetrics
 from asr import load_asr
+import draft_engine
 import final_asr
 from translator import load_translator
 from cloud_translator import (DEFAULT_CTX_CHUNK, load_api_key,
@@ -587,13 +588,17 @@ class _Latest:
         #: ⚠️ 只给**唯一的消费者**（`partial_worker`）在 `take()` 之后紧接着读 ——
         #:    它和 `take()` 在同一把锁里一起换，所以不会读到下一份的时刻。
         self.taken_t = 0.0
+        #: 同上，上一次 `take()` 那份的**段号**（`put` 那一刻的 `seg_gen`；R3 流式草稿按它分流）。
+        self.taken_tag = None
+        self._tag = None
         self._ev = threading.Event()
         self._lock = threading.Lock()
 
-    def put(self, buf) -> None:
+    def put(self, buf, tag=None) -> None:
         with self._lock:
             self._buf = buf
             self._t = time.monotonic()
+            self._tag = tag
         self._ev.set()
 
     def take(self, timeout: float):
@@ -602,6 +607,7 @@ class _Latest:
         with self._lock:
             b, self._buf = self._buf, None
             self.taken_t = self._t
+            self.taken_tag = self._tag
             self._ev.clear()
             return b
 
@@ -1223,6 +1229,11 @@ def run(args) -> None:
         notice.alert("模型没装好",
                      f"{e}\n\n装好再跑 —— `cl doctor` 会列出缺哪个、该跑哪条命令。")
         return
+    # 草稿引擎（R3）：流式 Nemotron 优先，缺模型 / 内存不够 / 加载失败 → 照旧 Parakeet 滑窗。
+    # ⚠️ 放在上面那个 try **之外**：它永不抛，失败也不该 `return`。Parakeet 照样要加载 ——
+    #    它是定稿的本地兜底（下面装配定稿时传进去），也是草稿熔断后的退路。
+    draft = draft_engine.load_draft_engine(asr, window_samples=PARTIAL_MAX_S * SR)
+    echo(f"✍️ 草稿引擎：{draft.name}" + (f"（{draft.reason}）" if draft.reason else ""))
     # ⭐⭐ 转录里挖出来的词 → 术语**候选池**（2026-09-29 加）。
     #    ⚠️⚠️ **只进候选池，不进 `course_terms`（那档是每句全量注入）** ——
     #       实测：池子 +25 个转录词，注入结果变了 **63–74%** 的句子，
@@ -1431,13 +1442,14 @@ def run(args) -> None:
                                 default=bool(args.test_mode))
     if live is not None:
         echo(f"🎥 现场采集: {live.path}")
+        live.event("draft_engine", name=draft.name, reason=draft.reason)
 
-    # ⚠️ 元素是 `(原始假设, 上屏文本, 缓冲秒数, 转写耗时, 段号)`，不是裸字符串了（2026-10-09）：
+    # ⚠️ 元素是 `(原始假设, 上屏文本, 缓冲秒数, 转写耗时, 段号, put 时刻, 引擎)`（2026-10-09 起；引擎是 R3 加的）：
     #    前缀冻结要拿"模型原始假设"跟"上屏的那份"做**同场 A/B**，两个都得留；
     #    后三个是现场采集要的（缓冲滑没滑 / 转写多久 / 归哪一段）。
     #    `drafts` 只有这里一个产出方、`drain()` 一个消费方，改形状是局部的；
     #    `drain()` 侧的 `_pair()` 仍兼容裸字符串与二元组（替身/老测试）。
-    drafts: "queue.Queue[tuple]" = queue.Queue()             # (原文, 上屏, buf_s, 耗时, seg) -> 主线程
+    drafts: "queue.Queue[tuple]" = queue.Queue()             # 7 元组（见上）-> 主线程
     drafts_zh: "queue.Queue" = queue.Queue()            # 草稿译文 (seq, seg, zh) -> 主线程
     streamq: "queue.Queue[tuple]" = queue.Queue()       # ("zh"/"en"/"final"/"terms"/"notice"/"answer"/"answer_done"/"summary"/"hint") -> 主线程
     # ⚠️ 加新 tag **必须**在 `drain()` 加同分支 —— 它是唯一的分发点，漏改即静默丢弃。
@@ -1602,11 +1614,16 @@ def run(args) -> None:
         draft_seq = 0                         # 送翻序号(drain() 丢弃比已显示的更旧的译文)
         last_sent = ""                        # 上次送翻的草稿原文（未剥悬挂词；给 novel 数新词）
         prev_text = ""                        # 上一次的草稿原文（`draft_policy` 自己派生 append_only）
+        last_eng = draft.name                 # 引擎变了（熔断）→ 出声一次 + 记一笔
         while running.is_set():
             buf = latest.take(0.5)
             if buf is None or len(buf) == 0:
                 continue
             _t_put = latest.taken_t                  # 这份缓冲被交出来的时刻（量 `lag_s` 用）
+            # put 那一刻的段号 = 这份缓冲真正所属的段。⚠️ 别在这里读 `seg_gen["n"]`：
+            # 到这儿下一段可能已经开始了（「分组键取自晚到信号」那类坑）。
+            _tag = latest.taken_tag
+            _seg = _tag if _tag is not None else seg_gen["n"]
             # 定稿是关键路径(决定你多久看到中文)。定稿走 Whisper 时两边是两把不同的
             # ASR 锁, 不互抢; 只有 Parakeet 兜底(定稿退化回草稿模型)时才共用一把。
             # 有定稿在排队时让草稿这一轮退开: 草稿迟到 1s 无感, 定稿迟到直接
@@ -1615,8 +1632,14 @@ def run(args) -> None:
                 continue
             try:
                 _t_draft = time.monotonic()
-                t = asr.transcribe(buf[-PARTIAL_MAX_S * SR:])
+                t, _eng = draft.transcribe(buf, _seg)      # 永不抛；流式坏了这一份就改走 Parakeet
                 _dt_draft = time.monotonic() - _t_draft
+                if _eng != last_eng:
+                    last_eng = _eng
+                    if draft.fallback_reason:
+                        echo(f"⚠ 流式草稿已停用，本节课改回 Parakeet：{draft.fallback_reason}")
+                        if live is not None:
+                            live.event("draft_engine_fallback", reason=draft.fallback_reason)
                 if not t:
                     continue
                 _shown = t
@@ -1631,7 +1654,7 @@ def run(args) -> None:
                 #     离线量具就是栽在这上面，见 scripts/stream_eval.py 的 `sliding`）；
                 #    `seg` = 本段草稿所属的段号（`seg_gen`，见上面那一段说明）；
                 #    `_t_put` = 缓冲交出的时刻 → `drain()` 用它算上屏延迟 `lag_s`。
-                drafts.put((t, _shown, len(buf) / SR, _dt_draft, seg_gen["n"], _t_put))
+                drafts.put((t, _shown, len(buf) / SR, _dt_draft, _seg, _t_put, _eng))
                 # 新句子开始 -> 重置草稿节流。**必须重置**: last_len 是**上一句**
                 # 收尾时的词数, 新句若更短(如 20 词 vs 30 词), "新增 ≥6 词"永远
                 # 不成立 -> 整句拿不到即时中文("首字中文 ~3s"特性静默失效)。
@@ -1832,7 +1855,7 @@ def run(args) -> None:
         context=lambda: finals[-1:], stats=draft_stats)
 
     seg = Segmenter(
-        on_partial=lambda buf: latest.put(buf),
+        on_partial=lambda buf: latest.put(buf, seg_gen["n"]),
         # ⭐ 段落**真正结束**的那一刻就取段号，随 `finalq` 一路带到定稿 —— 现场采集的分组靠它。
         #    ⚠️ 不这么做就得等定稿上屏才自增，那比段落结束晚 2–4 秒（Whisper + LLM）。
         on_utterance_end=lambda buf: finalq.put((buf, _open_segment())),
@@ -2065,23 +2088,24 @@ def run(args) -> None:
                      name="live-summary").start()
 
     def _pair(item) -> tuple:
-        """`drafts` 队列的元素 → `(raw, shown, buf_s, compute_s, seg, t_put)`。
+        """`drafts` 队列的元素 → `(raw, shown, buf_s, compute_s, seg, t_put, engine)`。
 
-        ⚠️ 产出方只有 `partial_worker` 一处（永远 6 元组），所以**按形状直接拆** ——
+        ⚠️ 产出方只有 `partial_worker` 一处（永远 7 元组），所以**按形状直接拆** ——
            不再逐层猜"是不是裸字符串/二元组"（那种兼容梯子没有调用方，还会把
            `buf_s` 静默猜成 0.0，而 `buf_s` 猜错 = 静默改掉回改率的口径）。
         ⚠️ 但**必须全函数不抛**：它在 `drain()` 里，而 `drain()` 没有 try/except ——
            这里抛一次 = 打死主循环 = 整节课的字幕停摆。形状不对就当空草稿丢掉。
         """
         try:
-            return (item[0], item[1], float(item[2]), float(item[3]), int(item[4]), float(item[5]))
+            return (item[0], item[1], float(item[2]), float(item[3]), int(item[4]), float(item[5]),
+                    str(item[6]))
         except Exception:                                  # noqa: BLE001
-            return ("", "", 0.0, 0.0, 0, 0.0)
+            return ("", "", 0.0, 0.0, 0, 0.0, "")          # ⚠️ 与上一行同形（7 项），否则 drain 拆包就抛
 
     def drain():
         while True:
             try:
-                _raw, _shown, _buf_s, _cpt, _seg, _t_put = _pair(drafts.get_nowait())
+                _raw, _shown, _buf_s, _cpt, _seg, _t_put, _eng = _pair(drafts.get_nowait())
             except queue.Empty:
                 break
             if draft_view.on_draft(_seg):            # 新一段的第一份英文草稿: 清掉上一段残留的中文草稿
@@ -2089,7 +2113,8 @@ def run(args) -> None:
             if live is not None:
                 # 吞异常，不会打死主循环。`lag_s` 在**这里**算：drain 就是上屏那一刻
                 live.draft(_raw, _shown, seg=_seg, buf_s=_buf_s, compute_s=_cpt,
-                           lag_s=(time.monotonic() - _t_put) if _t_put else None)
+                           lag_s=(time.monotonic() - _t_put) if _t_put else None,
+                           engine=_eng or None)
             ui.add_draft(_shown)
             last_draft["en"] = _shown
         while True:
@@ -2578,6 +2603,8 @@ def run(args) -> None:
                     echo_retries=local_tr.echo_retries,   # 本地小模型回显重试次数（只读计数）
                     mode=translator._mode,
                     source=args.source,
+                    draft_engine=draft.name,               # 收尾时生效的（熔断过就是 parakeet）
+                    draft_fallback=draft.fallback_reason,
                 )
                 echo(f"🎥 现场采集已收尾: {live.path}")
 

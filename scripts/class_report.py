@@ -98,6 +98,7 @@ def build_utts(events) -> list[dict]:
                 "raw": rec.get("raw", rec.get("text", "")),
                 "shown": rec.get("text", ""),
                 "buf_s": float(rec.get("buf_s") or 0.0),
+                "engine": rec.get("engine"),            # R3：nemotron 不滑窗（`stream_eval._slid`）
                 "t": t,
             })
         else:

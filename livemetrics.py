@@ -170,7 +170,7 @@ class LiveLog:
 
     def draft(self, raw: str, shown: str | None = None, *, seg: int = 0,
               buf_s: float = 0.0, compute_s: float = 0.0,
-              lag_s: float | None = None) -> None:
+              lag_s: float | None = None, engine: str | None = None) -> None:
         """一次草稿上屏。`raw` = 送进 ASR 的原始假设，`shown` = 实际显示的文本。
 
         ⚠️ `shown` 不给就等于 `raw`（没开冻结时的常态）。
@@ -186,10 +186,15 @@ class LiveLog:
            之间的墙钟秒数 —— 含排队、等 ASR 锁、转写、等主循环 drain。它比 `compute_s`
            （只是转写那一下）更接近"用户等了多久"。实时音源下
            **首字延迟 ≈ 该段第一份草稿的 `buf_s + lag_s`**（`class_report` 那么算）。
+
+        ⭐ `engine` = 出这份草稿的引擎（`nemotron` 流式 / `parakeet` 10 s 滑窗）。
+           量具据它判「窗口滑没滑」：只有 parakeet 会滑（`stream_eval._slid`）。
         """
         try:
             self._n_draft += 1
             extra = {} if lag_s is None else {"lag_s": round(lag_s, 3)}
+            if engine:            # 哪个引擎出的（R3）。不给不写 → 旧文件 / 读端都视为 parakeet
+                extra["engine"] = engine
             self._put("draft", utt=self._utt, seg=seg, n=self._n_draft,
                       text=shown if shown is not None else raw,
                       raw=raw, buf_s=round(buf_s, 3), compute_s=round(compute_s, 3), **extra)

@@ -278,6 +278,8 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_DRAFT_TRIGGER` | `novel` | 草稿送翻判据（`legacy` / `clause` 可退回）—— `draft_policy.py` | 发布开关：3.8.11 后一版没出事就删 `legacy` / `clause` |
 | `CLASSLIVE_DRAFT_CONTEXT` | `1` | 草稿翻译带领域 / 术语 / 上一句 —— `cloud_translator.translate_draft` | 发布开关：同上 |
 | `CLASSLIVE_VAD_VALLEY` | `1` | 12 s 硬切时往回找能量低谷 —— `vad.Segmenter` | 发布开关：同上 |
+| `CLASSLIVE_DRAFT_ENGINE` | `auto` | 草稿引擎：`auto`（Nemotron 模型在且内存 ≥ 12 GB 就用流式）/ `parakeet` / `nemotron`；App 用户写仓库根的 `.draft-engine` 文件（`cl` 读）—— `draft_engine.py` | 发布开关：真课过闸、一版没出事后评估退役 Parakeet 草稿 |
+| `CLASSLIVE_DRAFT_MODEL_DIR` | 注册表路径 | 流式草稿模型目录（测试 / 故障注入指到别处） | 测试接缝，长期 |
 | `CLASSLIVE_DRAFT_HOLDBACK` | 空（关） | 草稿显示层前缀冻结，数字 = 灰尾词数 —— `draft_stable.py` | 实验开关：R3 换 Nemotron 后重新评估去留 |
 | `CLASSLIVE_LIVE_SUMMARY` | `1` | 实时总结（章节合成 / 纲要落盘 / 发 streamq） | 运维开关，长期 |
 | `CLASSLIVE_LIVE_LOG` | 平时关、测试模式开 | 现场采集 `<会话>.live.jsonl` —— `livemetrics.py` | 运维开关，长期 |

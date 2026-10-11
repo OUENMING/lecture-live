@@ -73,6 +73,9 @@ VAD_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
 WHISPER_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
                "asr-models/sherpa-onnx-whisper-turbo.tar.bz2")
 QWEN_SRC = "mlx-community/Qwen3-1.7B-4bit"
+# ⚠️ 换 chunk（560 ms ↔ 1120 ms）改三处：这里的 URL、下面的目录名、`fetch_model.PINS["nemotron"]`。
+NEMOTRON_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+                "sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25.tar.bz2")
 
 # 模型都放在这儿。⚠️ 与 `paths.py` 那族不一样：那是**用户数据**（课件、档案），
 # 这是**模型权重**（可重下、不进 git、也不算用户资产）。所以没有搬进 `~/.classlive/`。
@@ -125,8 +128,17 @@ QWEN = Model(
     _fetch_cmd("llm"),
     938.0, src=QWEN_SRC, at_hf=True)
 
+# 流式草稿（R3，`draft_engine.py`）。**可选**：不在 → 草稿照旧用 Parakeet。
+# ⚠️ 目录名必须**等于 tar 包里的顶层目录名**（`fetch_model.fetch_whisper` 是「整体挪进 models_root」）。
+NEMOTRON = Model(
+    "nemotron",
+    f"{MODELS_ROOT}/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
+    "流式草稿模型 Nemotron(可选，草稿不再回改)", False,
+    _fetch_cmd("nemotron"),
+    464.0, src=NEMOTRON_URL, extra="（解开后约 630 MB）")
+
 # 注册表本体。⚠️ 是 `tuple` 不是 `list` —— **冻结**，不给任何人 append 的机会。
-MODELS: tuple[Model, ...] = (PARAKEET, VAD, WHISPER, QWEN)
+MODELS: tuple[Model, ...] = (PARAKEET, VAD, WHISPER, QWEN, NEMOTRON)
 
 REQUIRED: tuple[Model, ...] = tuple(m for m in MODELS if m.required)
 

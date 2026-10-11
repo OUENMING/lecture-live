@@ -84,6 +84,13 @@ def replay(audio: np.ndarray, asr_draft, asr_final, *, draft_filter=None, progre
     return utts
 
 
+def _slid(d) -> bool:
+    """这份草稿的窗口滑了没有。只有**窗口型**引擎（parakeet：只看最近 10 s）会滑；
+    流式引擎（R3 nemotron）看整段，不滑 —— 照剔会把它的长段草稿整批丢掉，回改率被**低估**。
+    没有 `engine` 字段（R3 之前的文件 / 离线回放）= parakeet，数字逐位不变。"""
+    return (d.get("engine") or "parakeet") == "parakeet" and d["buf_s"] > PARTIAL_MAX_S
+
+
 def evaluate(utts, ref_text: str | None, k: int = M.DEFAULT_K,
              want_disagreement: bool = True) -> dict:
     """⚠️ `want_disagreement=False` 跳过"整课草稿 vs 定稿"那一次编辑距离 ——
@@ -95,10 +102,10 @@ def evaluate(utts, ref_text: str | None, k: int = M.DEFAULT_K,
     # 回改：每句内部的相邻草稿（用"显示出来的"文本，而非 ASR 原始输出）
     # ⚠️ 缓冲超过 PARTIAL_MAX_S 后草稿窗口在滑动（开头的词滚出窗口，不是"改写"），
     #    这些草稿不进回改统计，单独数个数 —— 否则长句会把回改率虚高一大截。
-    sliding = sum(1 for u in utts for d in u["drafts"] if d["buf_s"] > PARTIAL_MAX_S)
+    sliding = sum(1 for u in utts for d in u["drafts"] if _slid(d))
     shown = rew = beyond = 0
     for u in utts:
-        s = M.rewrite_stats([d["shown"] for d in u["drafts"] if d["buf_s"] <= PARTIAL_MAX_S], k=k)
+        s = M.rewrite_stats([d["shown"] for d in u["drafts"] if not _slid(d)], k=k)
         shown += s["shown"]; rew += s["rewritten"]; beyond += s["rewritten_beyond_k"]
     # 草稿 → 定稿的跳动
     fr_edits = fr_len = 0

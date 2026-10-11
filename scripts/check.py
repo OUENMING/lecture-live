@@ -59,6 +59,8 @@ MANUAL_FOR = [
      "scripts/probe_testmode_report.py —— 收尾路径；真跑约 1 分钟，往 sessions/ 写一节测试记录"),
     (["vad.py", "capture.py", "asr.py", "main.py"],
      "scripts/test_pipeline.py <音频> —— 端到端能跑完"),
+    (["draft_engine.py", "main.py"],
+     "docs/PLAN-streaming-asr.md §6.3 —— 三遍 e2e（parakeet / nemotron / 模型目录不存在），草稿接线只有真跑抓得到"),
     (["vad.py", "asr.py", "draft_policy.py", "draft_stable.py", "local_postprocess.py"],
      "scripts/stream_eval.py —— 回改率 / 延迟 / WER，对照 docs/RESEARCH-stream-eval.md 的基线"),
     (["draft_policy.py", "draft_translate.py", "main.py"],

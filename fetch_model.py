@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """下载一个模型：**直连 → 镜像 → 校验**。
 
-    python fetch_model.py <vad | whisper | parakeet | llm>
+    python fetch_model.py <vad | whisper | parakeet | llm | nemotron>
 
 `models.py` 里每个模型的 `cmd` 都指向这里 —— 面板上的「语音模型」、`cl update`、
 `cl doctor` 打出来的命令走**同一条路**。
@@ -49,6 +49,8 @@ PINS = {
     # GitHub release 资产（2026-10-04 下完整文件算的）
     "vad": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
     "whisper": "b11acbbcd660b44a8e0df33724feb5aaa709cf65668f2823d59f656312544f22",
+    # GitHub release API 的 `digest`（2026-10-09 取）；560 ms 版。1120 ms 版是 840c48de…
+    "nemotron": "78e2b79fcf7271553a74402a76b771b09ea40117a39566a79f52235b23db6358",
     # HuggingFace LFS 文件（HF 官方 API 的 lfs.sha256；tokens.txt 非 LFS，取本机已装那份）
     "parakeet": {
         "encoder.int8.onnx": "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247",
@@ -159,9 +161,9 @@ def download_file(sources: list[Source], dest: pathlib.Path, sha: str | None, *,
 
 
 # ---------------------------------------------------------------- 各模型
-def fetch_whisper(models_root: pathlib.Path, url: str, *,
+def fetch_whisper(models_root: pathlib.Path, url: str, *, pin: str = PINS["whisper"],
                   say: Callable[[str], None] = print) -> tuple[bool, str]:
-    """下 tar.bz2 → 校验 → 在临时目录里解开 → **整体**挪进 `models_root/`。
+    """下 tar.bz2（Whisper 与 Nemotron 共用，`pin` 是该包的 sha256） → 校验 → 在临时目录里解开 → **整体**挪进 `models_root/`。
 
     ⚠️ 先解到临时目录再挪：解压中途出错不会在模型目录里留下半截（`doctor.model_present`
        只看「目录非空」，半截目录会被当成已就位）。路径穿越由 `filter="data"` 拦（并只解压一遍）。
@@ -170,7 +172,7 @@ def fetch_whisper(models_root: pathlib.Path, url: str, *,
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="classlive-wt-", dir=str(models_root)))
     try:
         tarball = tmp / "wt.tar.bz2"
-        ok, why = download_file(gh_sources(url), tarball, PINS["whisper"], say=say)
+        ok, why = download_file(gh_sources(url), tarball, pin, say=say)
         if not ok:
             return False, why
         out = tmp / "out"
@@ -258,7 +260,7 @@ def fetch_hf(repo: str, local_dir: pathlib.Path | None, pins: dict[str, str], *,
     return False, "直连和镜像都没下成"
 
 
-KEYS = ("vad", "whisper", "parakeet", "llm")
+KEYS = ("vad", "whisper", "parakeet", "llm", "nemotron")
 
 
 def fetch(key: str, *, say: Callable[[str], None] = print) -> tuple[bool, str]:
@@ -269,6 +271,8 @@ def fetch(key: str, *, say: Callable[[str], None] = print) -> tuple[bool, str]:
         return download_file(gh_sources(models.VAD_URL), path, PINS["vad"], say=say)
     if key == "whisper":
         return fetch_whisper(path.parent, models.WHISPER_URL, say=say)
+    if key == "nemotron":
+        return fetch_whisper(path.parent, models.NEMOTRON_URL, pin=PINS["nemotron"], say=say)
     if key == "parakeet":
         return fetch_hf(models.PARAKEET_SRC, path, PINS["parakeet"],
                         find_dir=lambda: path, purge=path, say=say)
@@ -283,7 +287,7 @@ def fetch(key: str, *, say: Callable[[str], None] = print) -> tuple[bool, str]:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2 or argv[1] not in KEYS:
-        # ⚠️ 前两段一起打：第 1 段只有标题那一行，带 `<vad | whisper | parakeet | llm>`
+        # ⚠️ 前两段一起打：第 1 段只有标题那一行，带 `<vad | whisper | parakeet | llm | nemotron>`
         #    的用法在第 2 段 —— 只打第 1 段等于不告诉用户有哪些 key。
         print("\n\n".join(__doc__.split("\n\n")[:2]))
         return 2

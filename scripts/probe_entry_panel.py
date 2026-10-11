@@ -28,6 +28,7 @@
     PROBE_ZERO=1        零课程那一档（造几个假课件直接走批量那条路）；
                         再加 PROBE_ZERO_ADD=<课号> 就在 3 秒后建这门课
                         ⚠️ 这两个是**在 3 秒后**才动手的 —— 起完先别急着关
+    PROBE_UPDATE=available|unfinished|blocked  就绪条末尾的「更新」那一格（offer/apply 是桩，不联网）
     PROBE_ICSDRAG=1     验 `.ics` 在**悬停判据**上的真值（`acceptable` / `drop_split`）
                         ⚠️ **它验不了"高亮画上去了没有"** —— 那一步靠
                         `tests/test_panel.py` 第 ⑨ 组（真 `_enter`）+ 你手拖一次
@@ -257,6 +258,27 @@ def main() -> int:
         print(f"\nPROBE_TIMETABLE —— 造了「周{_now.weekday() + 1} {_now.hour}:00」的课表"
               f"（ECON10740），面板应把它排第一")
 
+    # `PROBE_UPDATE=available|unfinished|blocked` —— 看就绪条末尾「更新」那一格（2026-10-12）。
+    #    `offer` / `apply` / `defer_to_exit` 全换成桩：**不联网、不 pull、不写 ~/.classlive**。
+    #    「现在更新」的桩 3 秒后报「拉到了新代码」→ 面板走 `on_restart`（这里只打印）。
+    _upd_kind = os.environ.get("PROBE_UPDATE")
+    if _upd_kind:
+        import update as _U
+        _U.offer = lambda: {"kind": _upd_kind, "current": "3.8.9", "latest": "3.9.0",
+                            "summary": "· 定稿转写走云端，英文更准\n· 草稿换成流式，不再回改",
+                            "message": {"unfinished": "补依赖（requirements 变了）",
+                                        "blocked": "你改过这个文件：main.py"}.get(_upd_kind, "")}
+
+        def _fake_apply(on_line=None):
+            for _s in ("拉代码…", "装依赖…"):
+                if on_line:
+                    on_line(_s)
+                time.sleep(1.5)
+            return {"ok": True, "pulled": _upd_kind == "available", "after": "3.9.0",
+                    "user_msg": "已更新到 3.9.0"}
+        _U.apply = _fake_apply
+        _U.defer_to_exit = lambda v: (print(f"（桩）下课后自动装 {v}"), True)[1]
+
     h = entry_panel.open_panel(glossary=ISO / "glossary.txt", state_root=ISO,
                                sessions_dir=sess_iso,
                                # ⚠️ `on_start` 必须给个桩 —— 不给的话卡片上**一个按钮都不画**
@@ -267,7 +289,8 @@ def main() -> int:
                                on_start=lambda c: print(f"（桩）开始上课：{c}"),
                                prepare_fn=stub_prepare,
                                suggest_fn=stub_suggest,
-                               on_close=AppHelper.stopEventLoop)
+                               on_close=AppHelper.stopEventLoop,
+                               on_restart=lambda: print("（桩）on_restart —— 真入口这里会退 5 让 cl 重开"))
     if h is None:
         print("❌ build 返回 None")
         return 1

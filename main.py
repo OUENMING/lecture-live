@@ -1376,13 +1376,6 @@ def run(args) -> None:
         #    回调）—— `Overlay` 那边默认就是空 lambda，**零开销零行为**。
         note=(tester.note_ui if tester is not None else None),
     )
-    # ⭐ 直播闸门（2026-10-01 审查 F7）：把「课还在音频阶段吗」告诉悬浮窗 ——
-    #    更新卡片的重活问询**只在没课的时候弹模态**（模态卡的是主线程，而音频
-    #    `poll()/drain()` 也在主线程：弹着不答的每一秒都在丢音频）。收尾开始置 False。
-    #    TerminalUI 没有 set_live → callable 守卫跳过。
-    _set_live_ui = getattr(ui, "set_live", None)
-    if callable(_set_live_ui):
-        _set_live_ui(True)
     # 终端模式拿不到悬浮窗，退化成字符框（两种模式都要能看到）
     # ⚠️ 判据同上（`drives_appkit`，不是 `args.ui`）：overlay 载入失败会静默回退
     #    终端 UI，那时 `args.ui` 仍是 "overlay" → 字符框不打印、真悬浮窗又不存在
@@ -2178,9 +2171,6 @@ def run(args) -> None:
             running.clear()
             if any(draft_stats.values()):             # 草稿译文: 丢了几条/让路几次/出错几次(全零不打印)
                 echo(f"📝 draft_stats: {draft_stats}")
-            # ⚠️ 音频阶段到此为止（审查 F7）—— 之后更新卡片才允许弹模态重活问询。
-            if callable(_set_live_ui):
-                _set_live_ui(False)
 
             def qa_snapshot():
                 """「我问过什么」交给笔记(Phase 4)。⚠️ 在 qa_lock 下**拷贝一份**:

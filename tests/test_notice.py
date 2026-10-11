@@ -108,17 +108,20 @@ def t_default_fallback():
         assert notice.alert("标题", "正文", buttons=("好", "不好")) == "好"
 
 
-@case("⭐ `overlay` 那个确认框**显式**给了保守的 fallback")
+@case("⭐ 面板上「更新」那两个确认框**显式**给了保守的 fallback")
 def t_confirm_site_has_fallback():
-    # ⚠️ 这条查的是**那个调用点**（不是整个文件里有没有 fallback 这个词）——
-    #    判据得指向它声称的那个位置。
-    src = (HERE / "overlay.py").read_text(encoding="utf-8")
-    i = src.find('buttons=("现在做", "先不做")')
-    assert i >= 0, "没找到那个确认框 —— 它被改过了，这条判据要跟着改"
-    around = src[i:i + 700]
-    assert 'fallback="先不做"' in around, (
-        "那个确认框没给 fallback → 问不到人时返回 '现在做'，"
-        "等于不问就替用户批准要联网跑几分钟的重活")
+    # ⚠️ 查的是**那两个调用点**（不是整个文件里有没有 fallback 这个词）——
+    #    判据得指向它声称的那个位置。原来钉的是悬浮窗卡片上的「现在做 / 先不做」，
+    #    那颗按钮 2026-10-12 删了，更新入口挪到了开课前面板。
+    src = (HERE / "entry_panel.py").read_text(encoding="utf-8")
+    for first in ('buttons=("现在装完", "以后再说")',
+                  'buttons=("现在更新", "下课后自动装", "以后再说")'):
+        i = src.find(first)
+        assert i >= 0, f"没找到 {first} —— 确认框被改过了，这条判据要跟着改"
+        tail = src[i:i + 120]
+        assert 'fallback="以后再说"' in tail, (
+            f"{first} 没给 fallback → 问不到人时返回第一颗，"
+            "等于不问就替用户批准要联网跑几分钟的重活")
 
 
 @case("⭐⭐ `_present`：先激活 app、再把窗口抬到 ModalPanel 层（顺序也钉住）")

@@ -37,6 +37,7 @@ import models
 # 四项的 key（面板按它排布，测试按它断言）
 MIC, MODELS, ENGINE = "mic", "models", "engine"
 VAULT = "vault"
+UPDATE = "update"     # 第五项：只在 `update.offer()` 说有事时才出现（后台查完再补上去）
 
 # ⚠️ 状态只有这几个值，面板与判据都按它分支（**别在别处再发明一个字符串**）
 OK, TODO, WARN, UNKNOWN, BUSY = "ok", "todo", "warn", "unknown", "busy"
@@ -83,8 +84,21 @@ def required_left(states: dict) -> list:
             if m.required and states.get(m.path, "unknown") == "missing"]
 
 
-def models_item(states: dict) -> dict:
-    """第二项。`states` = `{path: state}`，由 `model_states()` 算。"""
+def models_item(states: dict, *, draft_wanted: bool = False) -> dict:
+    """第二项。`states` = `{path: state}`，由 `model_states()` 算。
+
+    `draft_wanted` = 这台机器装了流式草稿模型会不会用上（`draft_engine.want_model()`，
+    调用方算）。必下的都齐了、它又还没装 → 结果带 `offer_draft=True`，点这一项就下它。
+    ⚠️ 它是**可选**的（纪律 3 的同族）：状态照旧 OK，只多一个入口，绝不自动下。
+    """
+    out = _models_item(states)
+    if (draft_wanted and out["state"] == OK
+            and states.get(models.NEMOTRON.path) == "missing"):
+        out["offer_draft"] = True
+    return out
+
+
+def _models_item(states: dict) -> dict:
     left = required_left(states)
     stale = [m for m in doctor.MODELS
              if m.required and states.get(m.path) == "stale"]
@@ -149,15 +163,34 @@ def vault_item(vault: str | None) -> dict:
     return {"key": VAULT, "state": OK, "label": "笔记库", "detail": str(p)}
 
 
+def update_item(offer: dict) -> dict | None:
+    """第五项「更新」。`offer` = `update.offer()` 的返回值；`kind == "none"` → `None`（不画）。
+
+    ⚠️ 它挂在就绪条末尾：条没画出来（`dismissed()` / 算不出来）就不显示 —— 下次退出时的
+       后台更新照常会跑（`update.auto_update`），只是少了「开课前就装」这个入口。
+    """
+    kind = (offer or {}).get("kind", "none")
+    if kind == "available":
+        return {"key": UPDATE, "label": "更新", "state": TODO, "kind": kind,
+                "detail": f"有新版本 {offer.get('latest', '')}".strip()}
+    if kind == "unfinished":
+        return {"key": UPDATE, "label": "更新", "state": TODO, "kind": kind,
+                "detail": f"还没装完：{offer.get('message', '')}"}
+    if kind == "blocked":
+        return {"key": UPDATE, "label": "更新", "state": WARN, "kind": kind,
+                "detail": offer.get("message", "") or "装不上"}
+    return None
+
+
 def items(*, perm: str, states: dict, has_key: bool,
-          vault: str | None = None) -> list[dict]:
+          vault: str | None = None, draft_wanted: bool = False) -> list[dict]:
     """就绪条要画的四项，按显示顺序。
 
     ⚠️ `vault` 是**已解析的库路径**（`obsidian_writer.resolve_vault()` 的产物；
        `None` = 没设）。这里不自己去解析 —— 解析要走环境与磁盘，是调用方的脏活。
     """
     return [mic_item(perm),
-            models_item(states),
+            models_item(states, draft_wanted=draft_wanted),
             engine_item(has_key=has_key,
                         local_state=states.get(_local_path(), "missing")),
             vault_item(vault)]

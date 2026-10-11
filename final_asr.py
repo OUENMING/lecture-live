@@ -363,9 +363,11 @@ class FinalASR:
             self._breaker.fail()
             steps.append("cloud:timeout")
             return None
-        except Exception:                                # noqa: BLE001
+        except Exception as e:                           # noqa: BLE001
             self._breaker.fail()
-            steps.append("cloud:error")
+            # httpx 自己的读超时和上面的总截止几乎同时到（都 = deadline），机器一忙谁先到不一定；
+            # 都是「云端没按时回来」，记成同一类（否则 timeout / error 的统计随负载乱跳）。
+            steps.append("cloud:timeout" if "Timeout" in type(e).__name__ else "cloud:error")
             return None
         if status != 200 or js is None or not isinstance(js.get("text"), str):
             self._breaker.fail()

@@ -25,9 +25,10 @@ from PyObjCTools import AppHelper
 from AppKit import NSApplication
 entry_launch.CFG = __import__("pathlib").Path(os.environ["TMP"]) / ".course"   # 写端隔离
 NSApplication.sharedApplication()
-def fake_open_panel(*, on_start, on_close, **kw):
+def fake_open_panel(*, on_start, on_close, on_restart, **kw):
     action = os.environ["ACTION"]
-    AppHelper.callLater(0.3, (lambda: on_start("ECON10010")) if action == "start" else on_close)
+    fn = {"start": lambda: on_start("ECON10010"), "restart": on_restart}.get(action, on_close)
+    AppHelper.callLater(0.3, fn)
     return object()
 entry_panel.open_panel = fake_open_panel
 rc = entry_launch.main()
@@ -46,7 +47,7 @@ def run(action: str) -> tuple[int, str]:
 
 def main() -> int:
     bad = 0
-    for action, want in (("close", 1), ("start", 0)):
+    for action, want in (("close", 1), ("start", 0), ("restart", 5)):
         code, out = run(action)
         ok = code == want and "RETURNED" in out
         bad += not ok

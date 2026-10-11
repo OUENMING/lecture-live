@@ -1910,15 +1910,6 @@ class Overlay:
         self._release_focus()
         self._show_whatsnew_card()
 
-    def set_live(self, on: bool) -> None:
-        """这堂课还在**音频阶段**吗（收尾一开始 = `False`）。`main` 在起止两处调。
-
-        ⚠️ 用途只有一个（2026-10-01 审查 F7）：更新卡片的重活问询**只在没课的时候
-           弹模态** —— 模态卡住的是主线程，而音频 `poll()/drain()` 也在主线程。
-        ⚠️ `TerminalUI` 没有这个方法 —— `main` 那边用 `getattr` + `callable` 守卫。
-        """
-        self._session_live = bool(on)
-
     def _show_whatsnew_card(self) -> None:
         """更新后弹一张**非模态毛玻璃卡片**（见 whatsnew.py）。
 
@@ -1935,9 +1926,10 @@ class Overlay:
             return
         try:
             import whatsnew
+            # ⚠️ 不再给「立即更新」（2026-10-12）：上课中更新会和录课抢主线程 / 半新半旧，
+            #    更新入口挪到了开课前面板的就绪条上（`entry_panel` 的「更新」那一格）。
             self._whatsnew_card = whatsnew.build(
-                **self._whatsnew, flag_path=whatsnew.skip_flag_path(),
-                on_update=self._whatsnew_update)
+                **self._whatsnew, flag_path=whatsnew.skip_flag_path())
             if self._whatsnew_card is None:
                 return
             # ---- 定位: 交给 `panel.place_beside`（**唯一定义点**）----
@@ -1945,198 +1937,6 @@ class Overlay:
             panel.place_beside(self._panel, self._whatsnew_card["panel"])
         except Exception:                                 # noqa: BLE001
             self._whatsnew_card = None
-
-    def _whatsnew_update(self, set_status, set_title, done) -> None:
-        """「立即更新」按钮的干活处。**后台线程跑网络，UI 回写一律回主线程。**
-
-        ⚠️ 三条硬约束：
-          · AppKit 只能在主线程碰 —— 所以线程里每一次回写都过 `callAfter`；
-          · 这个工具正在上课录课 —— 更新**只换代码**，不重启；
-          · **重活（补依赖 / 下模型）必须先问** —— 点了按钮人就走了，
-            不能静默跑几分钟的网络。
-
-        更新逻辑全部在 `update.py`（与 `cl update` 共用一份，避免漂移）。
-        重活清单也在那儿（`update.pending_steps()`），两边口径不会漂。
-        """
-        import threading
-
-        from PyObjCTools import AppHelper
-
-        # ---- 主线程：先问要不要做重活 ----
-        # ⚠️ 这一段**必须**在起线程之前 —— 模态框只能在主线程弹，
-        #    而这个方法本身就是按钮 action，天然在主线程上。
-        # ⚠️ `pending_steps()` 只查本地（requirements 指纹 + 模型文件在不在），不联网。
-        # ⚠️ 存的是 `steps` 的**子列表**（dict），不是 key 列表 ——
-        #    存 key 的话循环里还得反查 label，多一次查找 + 一个对不上的失败分支。
-        approved: list[dict] = []
-        try:
-            import update
-            steps = update.pending_steps()
-        except Exception as e:                            # noqa: BLE001
-            steps = []
-            if os.environ.get("CLASSLIVE_DEBUG"):
-                print(f"[whatsnew] pending_steps 失败: {e}")
-        # ⚠️⚠️ **「重建 .app」不许在这个进程里做**（2026-10-01 审查 F1）：
-        #    那一步会跑 `make-app.sh`，而它的 ③ 会按命令行路径停掉「正在跑的实例」
-        #    —— 匹配到的正是**这个正在录课/收尾的自己**。SIGTERM 没有 handler：
-        #    不冲刷在途句、不精修、不写笔记（`sessions/` 逐句日志仍在，但那不是笔记）。
-        #    所以把它从 `approved` 里摘出来，只引导到终端那条路
-        #    （`cl update` 发起时，调用方进程树会被 `make-app.sh` 排除；
-        #     真有 main.py 实例在跑时它也会停下来问人，不默默杀）。
-        deferred_app = any(s["key"] == "app" for s in steps)
-        if deferred_app:
-            steps = [s for s in steps if s["key"] != "app"]
-        #: 给用户的说明（面向用户的文案，等作者过目）：为什么这步不在这儿做 + 去哪做。
-        app_tail = ("（「重建 .app」要先退出 ClassLive —— 之后到终端跑：cl update）"
-                    if deferred_app else "")
-        # ⚠️⚠️ **先问「问得到人吗」，再问人**（2026-09-30 加，同 `entry_panel` 删课那条）。
-        #    `notice.alert` 只在 `.app` 里弹得出来（判据 `CLASSLIVE_FROM_APP`，由 app 的
-        #    sitecustomize 设）。终端里它**只打印、然后立刻返回 `fallback`** ——
-        #    不等人回答。而这里 fallback 是「先不做」→ 那句「补依赖」被**默默否决**，
-        #    卡上接着写「再点一次这个按钮」，而再点一次走的是**同一段代码** → 死循环。
-        #    （2026-09-30 实测：朋友的机器就卡在这 —— 他「等了两三分钟」，
-        #      而那两三分钟根本没人开始跑。）
-        # ⚠️ `import` 放在 try **外面** —— `notice` 是本仓模块，import 本身不会因为
-        #    环境而失败；要防的只是 `_can_alert()`。放里面的话 `notice` 就成了
-        #    「可能未绑定」，而**下面 `notice.alert` 离它 4 行远** —— 读的人要回头
-        #    确认那条路径，正是 3.8.3「一开就崩」那种形状。`pyright` 也会报。
-        import notice
-        can_ask = False
-        try:
-            can_ask = bool(notice._can_alert())
-        except Exception:                                 # noqa: BLE001
-            can_ask = False
-        # ⚠️⚠️ **直播中不弹模态**（2026-10-01 审查 F7）：模态 = 主线程 `runModal`，
-        #    而音频 `poll()/drain()` 也在主线程 —— 弹着不答就是一直在丢音频
-        #    （`CallbackSource` 缓冲 20 秒，超了丢最旧）。重活等课后：
-        #    走下面那条「去终端敲」的口（同 can_ask=False 的取向）。
-        if can_ask and getattr(self, "_session_live", False):
-            can_ask = False
-
-        if steps:
-            todo = "\n".join(f"· {s['label']} —— {s['detail']}" for s in steps)
-            if can_ask:
-                _extra = f"\n{app_tail}" if app_tail else ""
-                ans = notice.alert(
-                    "更新之外还有几件事要做",
-                    f"{todo}\n\n{steps[0]['why']}{_extra}\n\n"
-                    f"现在一起做吗？（要联网，可能要几分钟）",
-                    buttons=("现在做", "先不做"),
-                    # ⚠️⚠️ **这是确认框，`buttons[0]` 是「现在做」—— 必须显式给安全的那一个。**
-                    #    不给的话，"问不到人"会被当成用户批准，于是**不问就替他跑
-                    #    几分钟的联网重活**。2026-09-28 查出：`_can_alert()` 方向是反的
-                    #    那阵子，`.app` 恰好走"弹不出来"那一支，是真的会发生的。
-                    fallback="先不做")
-                if ans == "现在做":
-                    approved = list(steps)
-                    set_status("正在更新…", 0.75)
-            else:
-                # 弹不出来就**别装作问过了** —— 直说那句话该在哪儿敲。
-                tail = "  要现在做，在终端跑：cl update"
-                if any(s["key"] in ("models", update.DRAFT_MODEL) for s in steps):
-                    # ⚠️ 「下载模型」**不归 `cl update` 管**（铁律：绝不自动下模型）——
-                    #    不给这句的话，用户跑完 cl update 发现模型没下、卡片还是同一句
-                    #    → **死循环换了个壳**（2026-10-01 独立审核指出）。
-                    tail += ("\n  （「下载模型」不会自动做 —— "
-                             "`cl update` 跑完会打出该装的命令）")
-                if app_tail:
-                    tail += f"\n  {app_tail}"
-                print(f"\n⚠ 更新之外还有几件事要做：\n{todo}\n{tail}", flush=True)
-
-        def ui(fn, *a) -> None:
-            try:
-                AppHelper.callAfter(fn, *a)
-            except Exception:                             # noqa: BLE001
-                pass
-
-        def work() -> None:
-            # ⚠️ 最外层必须是 try/finally：任何**没预料到**的异常（包括 except 分支
-            # 自己再抛，比如曾经在没 import os 时用 os.environ）都会让线程静默死掉、
-            # `done()` 永不执行 —— 按钮就永远卡在「更新中…」。踩过。
-            try:
-                try:
-                    import update
-                    r = update.pull()
-                except Exception as e:                    # noqa: BLE001
-                    if os.environ.get("CLASSLIVE_DEBUG"):
-                        import traceback
-                        traceback.print_exc()
-                    ui(set_status, f"更新出错：{e}", 1.0)
-                    ui(set_title, "更新失败")
-                    return
-                if not r["ok"]:
-                    # ⚠️ 卡片上**优先用 `user_msg`**（面向用户，无 git 术语）。
-                    # `error` 是给命令行/日志的，里面全是「工作区」「stash」「未提交」
-                    # 这种词 —— 用工具的人看到只会以为哪儿坏了。
-                    # 没有 `user_msg` 的失败路径（断网、分叉…）就退回 `error` 首行。
-                    friendly = (r.get("user_msg") or "").strip()
-                    first = (r["error"] or "未知错误").splitlines()[0]
-                    # 前缀只加一次：`friendly` 是完整句子，不加 ⚠️；兜底的 error 首行要加。
-                    ui(set_status, friendly or f"⚠️ {first}", 1.0)
-                    # 「停手」和「失败」的按钮文案必须不一样：前者是**正常的保护**，
-                    # 后者才是出事了。混为一谈会让用户以为工具坏了。
-                    ui(set_title, "这次先不更新" if r.get("blocked") else "更新失败")
-                    return
-                if r["skipped"]:
-                    ui(set_status, f"已经是最新的（{r['after']}）")
-                    ui(set_title, "已是最新")
-                else:
-                    ui(set_status, f"已更新到 {r['after']}")
-
-                # ---- 跑用户批准的重活 ----
-                for i, s in enumerate(approved, 1):
-                    ui(set_status, f"（{i}/{len(approved)}）{s['label']} 中…", 0.6)
-                    res = update.run_step(s["key"],
-                                          on_line=lambda t: ui(set_status, t, 0.6))
-                    if not res["ok"]:
-                        if s.get("soft"):
-                            # 可选的那步（流式草稿模型）下不成不拦后面的步骤，也不算更新失败
-                            ui(set_status, f"⚠️ {res['error']}（不影响上课）", 1.0)
-                            continue
-                        ui(set_status, f"⚠️ {res['error']}", 1.0)
-                        ui(set_title, "重启后重试")
-                        return
-
-                # ---- 收尾 ----
-                left = []
-                try:
-                    left = update.pending_steps()
-                except Exception:                         # noqa: BLE001
-                    pass
-                if left:
-                    # ⚠️⚠️ **「再点一次这个按钮」只在点得动的时候才是真的**（2026-09-30）。
-                    #    终端里那个确认框弹不出来 → 上一步的「先不做」是**默认**、不是
-                    #    用户选的 → 再点一次走**同一段** → 永远是这句 → **死循环**。
-                    #    所以话术跟着 `can_ask` 分叉：点得动就说点它，点不动就说敲哪条。
-                    # ⚠️ 「下载模型」还多一层（2026-10-01 审核指出）：**它不归
-                    #    `cl update` 管**（铁律：绝不自动下模型）→ 对它说「跑 cl update」
-                    #    是句兑现不了的话，得改指 `cl doctor` 打出来的命令。
-                    if left[0]["key"] == "app":
-                        # ⭐⭐ F1（2026-10-01 审查）：这步**永远不在这个进程里做** ——
-                        #    在这儿跑 make-app.sh 会把正在录课的自己杀掉（见上面
-                        #    `deferred_app` 的说明）。所以别再说「再点一次这个按钮」。
-                        ui(set_status, f"还有 {len(left)} 件事没做：重建 .app —— "
-                                       f"先退出 ClassLive，再到终端跑 cl update", 1.0)
-                    elif left[0]["key"] == "models" or (
-                            left[0]["key"] == update.DRAFT_MODEL and not can_ask):
-                        ui(set_status, f"还有 {len(left)} 件事没做：{left[0]['label']}"
-                                       f"（{left[0]['detail']}）—— 不会自动下，"
-                                       f"按 `cl doctor` 打出的命令装", 1.0)
-                    elif can_ask:
-                        ui(set_status, f"还有 {len(left)} 件事没做：{left[0]['label']}"
-                                       f"（{left[0]['detail']}）—— 再点一次这个按钮", 1.0)
-                    else:
-                        ui(set_status, f"还有 {len(left)} 件事没做：{left[0]['label']}"
-                                       f"（{left[0]['detail']}）—— 在终端跑 cl update", 1.0)
-                    ui(set_title, left[0]["label"])
-                elif not (r["skipped"] and not approved):
-                    # 上面 r["skipped"] 那条已经写过"已是最新"了，别覆盖它
-                    ui(set_status, f"都齐了（{r['after']} 或更新）—— 重启后生效", 1.0)
-                    ui(set_title, "重启后生效")
-            finally:
-                ui(done)
-
-        threading.Thread(target=work, daemon=True).start()
 
     def close(self) -> None:
         """撤掉面板与菜单栏图标。**幂等**, 可重复调用(✕ / Ctrl+C / 正常结束都会走)。

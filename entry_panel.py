@@ -144,7 +144,7 @@ _MARK = {"ok": "✓", "todo": "○", "warn": "⚠", "unknown": "—", "busy": "�
 # 每一项的短名字。⚠️ 长名字会把 680pt 的面板撑爆 —— 短名 + 状态词就够，
 #    详情交给点击之后的动作。
 _READY_NAME = {"mic": "麦克风", "models": "语音模型", "engine": "翻译引擎",
-               "vault": "笔记库"}
+               "vault": "笔记库", "update": "更新"}
 
 
 def ready_item_text(it: dict) -> str:
@@ -155,6 +155,8 @@ def ready_item_text(it: dict) -> str:
        两者都不能省（见上面 HIG 那条）。
     """
     mark = _MARK.get(it.get("state", "unknown"), "—")
+    if it.get("key") == "update" and it.get("state") == "todo":
+        mark = "↑"                       # 「有东西可以装」，不是「没做完的待办」
     name = _READY_NAME.get(it.get("key", ""), it.get("key", ""))
     return f"{mark}  {name}  {ready_short(it)}"
 
@@ -175,7 +177,17 @@ def ready_short(it: dict) -> str:
             return f"缺 {it.get('detail', '').split('还差 ')[-1] or ''}".strip() or "缺"
         if st == "warn":
             return "有旧版"
-        return "已就绪"
+        if st == "busy":
+            return "下载中…"
+        return "已就绪 · 可加草稿模型" if it.get("offer_draft") else "已就绪"
+    if it.get("key") == "update":
+        if st == "busy":
+            return "更新中…"
+        if st == "warn":
+            return "装不上"
+        if it.get("kind") == "unfinished":
+            return "没装完"
+        return (it.get("detail", "").split()[-1:] or ["有新版"])[0]
     if it.get("key") == "engine":
         return "云端" if st == "ok" and "云端" in it.get("detail", "") else (
             "本地" if st == "ok" else "没配 key")
@@ -1468,6 +1480,14 @@ def _has_api_key() -> bool:
         return False
 
 
+def _draft_wanted() -> bool:
+    try:
+        import draft_engine
+        return draft_engine.want_model()
+    except Exception:                                      # noqa: BLE001
+        return False
+
+
 def _ready_dismissed(state_root) -> bool:
     try:
         return ready.dismissed(root=state_root)
@@ -1609,7 +1629,8 @@ def _vault_autodetect(state_root=None) -> tuple:
 def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
           on_close=None, prepare_fn=None, suggest_fn=None,
           trash_fn=None, on_test_mode=None, test_mode=False,
-          on_cloud_asr=None, cloud_asr=False, cloud_asr_locked=False) -> Handles | None:
+          on_cloud_asr=None, cloud_asr=False, cloud_asr_locked=False,
+          on_restart=None) -> Handles | None:
     """建并显示面板。**失败返回 `None`**（调用方不必管 —— 同 `whatsnew.build`）。
 
     `prepare_fn` 是**验收用的注入点**，默认就是真的 `prep.prepare`：
@@ -1623,6 +1644,8 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
     `test_mode` 是它的**当前值**（调用方从盘上读来）。
     `on_cloud_asr` / `cloud_asr` 是「云端转写」开关的落点与当前值，写法完全照上面那对
     （`None` = 不建；**面板不写盘**）。`cloud_asr_locked=True`（环境变量强制关）= 显示为关且点不动。
+    `on_restart()`：就绪条上「更新」装好了新代码之后调 —— 本进程里的模块是旧的，
+    调用方该退出并重开（`entry_launch.RESTART`）。`None` = 只提示用户关掉重开。
 
     ⚠️ 构造失败**不能**吞掉 `objc_own.ObjcNameCollision`：那是程序缺陷，
        被吞掉会静默变成「面板打不开」，查起来极难（`objc_own.py` 文件头那次事故）。
@@ -1633,7 +1656,7 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
                       suggest_fn=suggest_fn, trash_fn=trash_fn,
                       on_test_mode=on_test_mode, test_mode=test_mode,
                       on_cloud_asr=on_cloud_asr, cloud_asr=cloud_asr,
-                      cloud_asr_locked=cloud_asr_locked)
+                      cloud_asr_locked=cloud_asr_locked, on_restart=on_restart)
     except objc_own.ObjcNameCollision:
         raise
     except Exception:                                     # noqa: BLE001
@@ -1646,7 +1669,8 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
 def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
            prepare_fn=None, suggest_fn=None, trash_fn=None,
            on_test_mode=None, test_mode=False,
-           on_cloud_asr=None, cloud_asr=False, cloud_asr_locked=False) -> Handles:
+           on_cloud_asr=None, cloud_asr=False, cloud_asr_locked=False,
+           on_restart=None) -> Handles:
     from AppKit import (NSButton, NSColor, NSFont, NSScreen, NSSearchField,
                         NSTextField,
                         NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel)
@@ -1660,6 +1684,16 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         names = courses.list_courses(glossary, state_root=state_root)
         return [courses.readiness(glossary, c, sessions_dir=sessions_dir,
                                   state_root=state_root) for c in names]
+
+    if on_start is not None:
+        _start_now = on_start
+
+        def on_start(course):
+            # ⚠️ 更新进行中（拉代码 / 装依赖）不许开课：录课进程会读到一半新一半旧的文件。
+            if S.get("updating"):
+                _status("正在更新 —— 装完会自动重开面板，再点「开始上课」（约 1–3 分钟）")
+                return
+            _start_now(course)
 
     rs = load()
     # ⭐⭐ **课表预选**（plan §5.4.4）。两条信号，都只说"时段对得上"，不猜内容：
@@ -1738,7 +1772,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 vault_now, vault_auto_msg = _vault_autodetect(state_root)
             ready_items = ready.items(
                 perm=_mic_perm(), states=ready.model_states(root=state_root),
-                has_key=_has_api_key(), vault=vault_now)
+                has_key=_has_api_key(), vault=vault_now,
+                draft_wanted=_draft_wanted())
         except Exception:                                  # noqa: BLE001
             ready_items = []                               # 算不出来不该拦住面板
     rh = READY_H if ready_items else 0.0
@@ -1826,6 +1861,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # interface. When status feedback is available **near the items it describes**,
     # people get important information without having to take action or leave their
     # current context.」—— 这条就是它放在卡片区正上方、而不是弹一个向导的理由。
+    ready_by_key: dict = {it.get("key"): it for it in ready_items}
     ready_buttons: dict = {}          # key -> NSButton（下载完改它那一项的标题）
     ready_targets: list = []          # ⚠️ 必须活到面板结束（`setTarget_` 是弱引用）
 
@@ -1997,6 +2033,101 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 else "（没找到 .obsidian —— 笔记会写进它的 Lectures/）")
         _status(f"笔记库设好了：{got}{hint}")
 
+    def _download_draft() -> None:
+        """下可选的流式草稿模型（Nemotron，464 MB）。**只在用户点了之后**（纪律 3 的同族）。"""
+        if S.get("downloading"):
+            return
+        S["downloading"] = True
+        _retitle("models", ready_item_text({"key": "models", "state": "busy"}))
+        _status("正在下流式草稿模型（464 MB）—— 下完下节课草稿就不再回改")
+
+        def work() -> None:
+            ok = False
+            try:
+                import models as models_mod
+                import update as update_mod
+                r = update_mod.download_model(
+                    models_mod.NEMOTRON, say=lambda s: _later(_status, s))
+                ok = bool(r["ok"])
+                _later(_status, "草稿模型装好了 —— 下节课生效" if ok else r["error"])
+            except Exception as e:                         # noqa: BLE001
+                _later(_status, f"下载失败：{str(e)[:70]}")
+            finally:
+                S["downloading"] = False
+                ready_by_key.setdefault("models", {})["offer_draft"] = not ok
+                _later(_retitle, "models", ready_item_text(
+                    {"key": "models", "state": "ok", "offer_draft": not ok}))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_click() -> None:
+        """点「更新」那一格。⚠️ 主线程回调：弹框（模态、自己转 runloop）+ 起线程，不联网。"""
+        import notice
+        it = ready_by_key.get("update") or {}
+        if S.get("updating"):
+            _status("正在更新，别关面板 —— 装完会自动重开")
+            return
+        kind = it.get("kind")
+        if kind == "blocked":
+            notice.alert("这次更新装不上", it.get("detail", ""), gui=True)
+            return
+        if kind == "unfinished":
+            pick = notice.alert(
+                "上次更新还没装完",
+                f"{it.get('detail', '')}\n\n现在装要 1–3 分钟，期间面板别关。",
+                buttons=("现在装完", "以后再说"), fallback="以后再说", gui=True)
+            if pick == "现在装完":
+                _run_update()
+            return
+        latest = S.get("update_offer", {}).get("latest", "")
+        summary = S.get("update_offer", {}).get("summary", "")
+        pick = notice.alert(
+            f"有新版本 {latest}",
+            (summary + "\n\n" if summary else "")
+            + "现在更新：1–3 分钟，装好面板会自己重开。\n"
+              "下课后自动装：这节课照旧用现在的版本，下课退出时在后台装好。",
+            buttons=("现在更新", "下课后自动装", "以后再说"), fallback="以后再说", gui=True)
+        if pick == "现在更新":
+            _run_update()
+        elif pick == "下课后自动装":
+            import update as update_mod
+            ok = update_mod.defer_to_exit(latest)
+            _status(f"好 —— 下课退出时自动装 {latest}" if ok
+                    else "没记下来（写不进 ~/.classlive）—— 下次打开面板再点一次")
+
+    def _run_update() -> None:
+        S["updating"] = True
+        _retitle("update", ready_item_text({"key": "update", "state": "busy"}))
+        _status("正在更新 —— 别关面板，装好会自己重开")
+
+        def work() -> None:
+            try:
+                import update as update_mod
+                r = update_mod.apply(on_line=lambda s: _later(_status, s))
+            except Exception as e:                         # noqa: BLE001
+                r = {"ok": False, "pulled": False,
+                     "user_msg": f"更新出错：{type(e).__name__}: {str(e)[:60]}"}
+            _later(_update_done, r)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_done(r: dict) -> None:
+        S["updating"] = False
+        if r.get("pulled"):
+            if on_restart is not None:
+                _status("装好了 —— 正在重开面板")
+                on_restart()
+                return
+            _status("装好了 —— 关掉面板再打开就是新版本")
+            _retitle("update", "✓  更新  已装好")
+            return
+        if r.get("ok"):
+            _status(r.get("user_msg") or "已经是最新的了")
+            _retitle("update", "✓  更新  已是最新")
+            return
+        _status(r.get("user_msg") or "更新没成功 —— 现在的版本照常能用")
+        _retitle("update", ready_item_text(ready_by_key.get("update") or {}))
+
     def on_ready_click(key: str) -> None:
         """点就绪条上的某一项 —— 就地修那一项。
 
@@ -2014,7 +2145,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 pass
             _status("麦克风没问题就不用管它；被拒时点这里会打开系统设置")
         elif key == "models":
-            _download_required()
+            if ready_by_key.get("models", {}).get("offer_draft"):
+                _download_draft()
+            else:
+                _download_required()
+        elif key == "update":
+            _on_update_click()
         elif key == "engine":
             # ⚠️ 2026-09-30 起**真的能点了** —— 之前在的那句注释写着
             #    「这一版**只说明，不做**…不假装能点」。现在开一个填 key 的框。
@@ -2043,6 +2179,58 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #     ⚠️ 挂 `S` 上而不是挂视图：这些是标准 `NSView`/`NSButton`（没有 `__dict__`），
         #     挂不上去；`S` 是模块级、且 `do_close` 里有一处统一的断环表。
         S["ready_targets"] = ready_targets
+
+    def _show_update(offer: dict, gen) -> None:
+        """后台查完新版本，回到主线程把「更新」那一格接到就绪条末尾。"""
+        if _stale(gen, "update_gen"):
+            return                                        # 面板已经关了 / 重开了
+        it = ready.update_item(offer)
+        if it is None:
+            return
+        S["update_offer"] = offer
+        ready_by_key["update"] = it
+        text = ready_item_text(it)
+        last = max(ready_buttons.values(), key=lambda b: b.frame().origin.x, default=None)
+        box = last.superview() if last is not None else None
+        if box is None:
+            return
+        from AppKit import NSButton, NSFont
+        x = last.frame().origin.x + last.frame().size.width + READY_ITEM_GAP
+        b = NSButton.alloc().initWithFrame_(NSMakeRect(x, (READY_H - 22.0) / 2.0, 10.0, 22.0))
+        b.setTitle_(text)
+        b.setBordered_(False)
+        b.setFont_(NSFont.boldSystemFontOfSize_(12.0))
+        b.sizeToFit()
+        w = b.frame().size.width + 8.0
+        if x + w > box.frame().size.width - READY_PAD:
+            # 放不下就挤掉最右那一格（笔记库：可选项，点开面板再看也不迟）
+            vb = ready_buttons.pop("vault", None)
+            if vb is not None:
+                x = vb.frame().origin.x
+                vb.removeFromSuperview()
+        b.setFrame_(NSMakeRect(x, (READY_H - 22.0) / 2.0, w, 22.0))
+        t = _target(lambda: on_ready_click("update"))
+        S["ready_targets"] = list(S.get("ready_targets") or []) + [t]
+        b.setTarget_(t)
+        b.setAction_("act:")
+        box.addSubview_(b)
+        ready_buttons["update"] = b
+
+    if on_start is not None and ready_items:
+        # ⚠️ 只在**开课前**的面板上查（上课中从菜单栏打开的那档 `on_start=None` 不查：课在录，不该更新）。
+        # ⚠️ `offer()` 会联网（git fetch，断网时最多等 TIMEOUT 秒）→ 后台线程；查不到 = 不显示。
+        upd_gen = S["update_gen"] = object()
+
+        def _probe_update() -> None:
+            try:
+                import update as update_mod
+                offer = update_mod.offer()
+            except Exception:                              # noqa: BLE001
+                return
+            if offer.get("kind", "none") != "none":
+                _later(_show_update, offer, upd_gen)
+
+        threading.Thread(target=_probe_update, daemon=True).start()
 
     # ── 卡片区（可滚动；今天 5 门课用不到，但第 6 门不该引发断崖）──────
     from AppKit import NSView, NSViewWidthSizable
@@ -3553,6 +3741,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    它们不是状态，是"别让 target 被 GC 掉"的容器。留着就等于每次
             #    开关面板多留两个对象（与上面那几条同一条纪律）。
             S["ready_targets"] = None
+            S["update_gen"] = None           # 后台查更新回来时认得出「面板已经关了」
             S["search_target"] = None
             S.pop("queue", None)
             # ⚠️ 映射表那批选择器也要断 —— 它们自己抓着菜单，而菜单抓着 target。
@@ -3714,7 +3903,14 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #      `do_close`，会去关一个已经不在的窗口。
     #   → 正确答案仓库里早就有：走 `_target()`（**回调挂实例**），
     #     并把 target **留住**（`_targets` 那份约定）。我在这里没照做。
-    btn_tgt = _target(do_close)
+    def _close_clicked() -> None:
+        # ⚠️ 更新进行中不许关：关面板 = 进程退出，拉代码 / 装依赖会被拦腰砍断。
+        if S.get("updating"):
+            _status("正在更新，别关 —— 装好会自己重开（约 1–3 分钟）")
+            return
+        do_close()
+
+    btn_tgt = _target(_close_clicked)
     btn = NSButton.alloc().initWithFrame_(
         NSMakeRect(WIDTH - PAD - 76.0, PAD + 2.0, 76.0, 26.0))
     btn.setTitle_("关闭")

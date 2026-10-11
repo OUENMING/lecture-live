@@ -27,6 +27,7 @@ HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
 import doctor                                                      # noqa: E402
+import models                                                      # noqa: E402
 import ready                                                       # noqa: E402
 
 CASES: list[tuple[str, object]] = []
@@ -358,6 +359,38 @@ def t_models_item_states():
     it = ready.models_item(st)
     assert it["state"] == ready.TODO
     assert "640 MB" in it["detail"], f"该报出体积，得到 {it['detail']!r}"
+
+
+@case("⭐ 草稿模型：只在「必下的齐了 + 机器用得上 + 还没装」时才提议，状态照旧 OK")
+def t_models_item_offer_draft():
+    st = dict(_ALL_OK)
+    st[models.NEMOTRON.path] = "missing"
+    it = ready.models_item(st, draft_wanted=True)
+    assert it["state"] == ready.OK and it.get("offer_draft") is True, it
+    assert not ready.models_item(st, draft_wanted=False).get("offer_draft"), "机器用不上也提议了"
+    st2 = dict(st)
+    st2[models.NEMOTRON.path] = "ok"
+    assert not ready.models_item(st2, draft_wanted=True).get("offer_draft"), "装了还提议"
+    st3 = dict(st)
+    st3[models.NEMOTRON.path] = "unknown"
+    assert not ready.models_item(st3, draft_wanted=True).get("offer_draft"), "unknown 不等于 missing"
+    st4 = dict(st)
+    st4[REQ[0].path] = "missing"
+    it4 = ready.models_item(st4, draft_wanted=True)
+    assert it4["state"] == ready.TODO and not it4.get("offer_draft"), "必下的都缺着还先提可选的"
+
+
+@case("⭐ 更新那一格：none 不画；available / unfinished / blocked 各自的状态")
+def t_update_item():
+    assert ready.update_item({"kind": "none"}) is None
+    assert ready.update_item({}) is None
+    a = ready.update_item({"kind": "available", "latest": "3.9.0"})
+    assert (a["key"], a["state"], a["kind"]) == (ready.UPDATE, ready.TODO, "available"), a
+    assert "3.9.0" in a["detail"], a
+    u = ready.update_item({"kind": "unfinished", "message": "补依赖（x）"})
+    assert (u["state"], u["kind"]) == (ready.TODO, "unfinished") and "补依赖" in u["detail"], u
+    b = ready.update_item({"kind": "blocked", "message": "你改过 a.py"})
+    assert (b["state"], b["detail"]) == (ready.WARN, "你改过 a.py"), b
 
 
 @case("体积说人话：≥1024 MB 换成 GB，且总数与 Model.mb 一致")

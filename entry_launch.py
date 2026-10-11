@@ -34,6 +34,9 @@
         ⚠️ 为什么是「不录」而不是「照旧录」：记到错课上的代价**不可逆**
            （笔记、术语表、课次全都挂错门），而少录一次用户当场就能发现。
 
+    5 = 面板里点了「更新」、新代码已经拉下来 → `cl` **重开自己**（`exec`，读到的是新文件），
+        再进一次面板。本进程里的模块是旧的，所以不能就地接着用。`cl` 用 `CL_RESTARTS` 限次，防死循环。
+
 ⚠️ 1 和 2 必须分开：把「用户取消」也当成故障去录课，等于**违背用户意图**；
    把「面板挂了」当成取消，等于**录不了课**（正是要防的那件事）。
 ⚠️ 4 必须与 2 分开：**「面板能用」和「选的结果存得下来」是两件事** ——
@@ -56,7 +59,7 @@ import traceback
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-PICKED, CANCELLED, UNAVAILABLE, NO_COURSES, UNSAVED = 0, 1, 2, 3, 4
+PICKED, CANCELLED, UNAVAILABLE, NO_COURSES, UNSAVED, RESTART = 0, 1, 2, 3, 4, 5
 CFG = HERE / ".course"
 #: 测试模式的开关（2026-09-30）。**旁路文件**，与 `.course` 同一族
 #: （`paths.py` 文件头那张表里的"旧"档：住在安装目录、代码旁边），
@@ -174,6 +177,11 @@ def main() -> int:
             print(f"云端转写{'已开 —— 定稿音频片段会发给云端识别' if on else '已关 —— 全本地'}")
         return ok
 
+    def on_restart() -> None:
+        """面板里的更新装好了新代码 → 让 `cl` 重开（退出码 `RESTART`）。"""
+        rc["code"] = RESTART
+        _stop()
+
     def _stop() -> None:
         rc["done"] = True                       # ⚠️ 先立闩，再停循环 —— 见上面的说明
         # ⚠️⚠️ **不能用 `AppHelper.stopEventLoop()`**（2026-10-11 作者实测「点关闭还是开始转录」）：
@@ -196,7 +204,8 @@ def main() -> int:
                                    on_test_mode=on_test_mode,
                                    test_mode=read_test_mode(),
                                    on_cloud_asr=on_cloud_asr,
-                                   cloud_asr=cloud_on, cloud_asr_locked=cloud_locked)
+                                   cloud_asr=cloud_on, cloud_asr_locked=cloud_locked,
+                                   on_restart=on_restart)
     except Exception:                           # noqa: BLE001
         traceback.print_exc()
         return UNAVAILABLE

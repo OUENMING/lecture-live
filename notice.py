@@ -109,7 +109,7 @@ def _present(win, *, app=None) -> None:
 
 
 def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
-          url: str | None = None, fallback: str | None = None) -> str:
+          url: str | None = None, fallback: str | None = None, gui: bool = False) -> str:
     """弹一个模态提示框；**没有终端**时才弹。
 
     `url` 给了的话，会在按钮**之外**多一个「打开系统设置」，
@@ -123,8 +123,10 @@ def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
        · ⚠️ **确认框必须显式给 `fallback`** —— 不给就等于「问不到人 = 自动批准」。
          踩过：更新流程那个 `buttons=("现在做", "先不做")` 没给 fallback，
          弹不出来时直接返回「现在做」→ **不问就替用户批准了要联网跑几分钟的重活**。
+
+    `gui=True`：调用方**确知**有人在看图形界面（面板里点出来的确认框）—— 终端里起的面板也要弹。
     """
-    if not _can_alert():
+    if not (gui or _can_alert()):
         # 终端里就跑 —— 打印比弹框好（能复制、能滚回去看、不打断脚本）
         print(f"\n{'─' * 46}\n⚠ {title}\n{message}\n{'─' * 46}", flush=True)
         if url:

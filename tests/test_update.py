@@ -871,84 +871,10 @@ check("⭐⭐ 而且排在**构建成功点之后**（构建失败时旧 .app �
       _i_stamp > 0 and _i_mark > _i_stamp,
       f"stamp@{_i_stamp} mark@{_i_mark}")
 
-# ======================= G. 更新卡片对终端说人话 =======================
-# ⭐ 2026-09-30 加。作者的朋友实测：终端启动 → 点卡片上的「立即更新」→
-#    「出现缺依赖，然后等了两三分钟没反应」。那两三分钟**根本没人开始跑**：
-#    `notice.alert` 只在 `.app` 里弹得出来（判据 `CLASSLIVE_FROM_APP`）——
-#    终端里它**只打印、然后立刻返回 fallback「先不做」**，不等人回答。
-#    于是重活被默默否决，而卡上接着写「再点一次这个按钮」→ 再点一次走**同一段**
-#    → 永远是这句。**死循环。**
-#    → 修法：先问「问得到人吗」，问不到就别装作问过了，直说敲哪条命令。
-print("\nG. 更新卡片对终端说人话\n")
-
-
-def _card_run(*, can_alert: bool, pending: list[str]) -> tuple[list[str], list[str]]:
-    """驱动真的 `_whatsnew_update`，返回 (卡片状态行, 卡片按钮标题)。
-
-    ⚠️ 只借一个最小替身喂 `set_status` / `set_title` / `done` ——
-       `_whatsnew_update` **不用 `self`**（逐行核过），所以不用建真窗口。
-    ⚠️ `update.pull` / `AppHelper.callAfter` 都被接住：不联网、不跑 run loop。
-    ⚠️ `pending_steps` **喂两轮**：先决定要不要问，收尾再问一次还剩什么。
-    """
-    import overlay
-    import notice
-    from PyObjCTools import AppHelper
-
-    lines: list[str] = []
-    titles: list[str] = []
-    seq = list(pending)
-
-    orig = (notice._can_alert, notice.alert, AppHelper.callAfter,
-            update.pull, update.pending_steps)
-    notice._can_alert = lambda: can_alert
-    notice.alert = lambda *a, **k: "先不做"      # 用户没点「现在做」
-    AppHelper.callAfter = lambda fn, *a: fn(*a)  # 立刻回写，不等 run loop
-    update.pull = lambda: {"ok": True, "skipped": False, "blocked": False,
-                           "error": "", "before": "0.0.1", "after": "0.0.2",
-                           "commits": 1, "log": [], "reqs_changed": False,
-                           "models_changed": False, "user_msg": ""}
-    update.pending_steps = lambda: [{"key": k, "label": f"{k} 标签",
-                                     "detail": f"{k} 明细", "why": f"{k} 为什么"}
-                                    for k in (seq if seq else [])]
-    try:
-        import threading
-        done = threading.Event()
-        overlay.Overlay._whatsnew_update(
-            None, lambda t, a=0.75: lines.append(t), titles.append, done.set)
-        done.wait(10)
-    finally:
-        (notice._can_alert, notice.alert, AppHelper.callAfter,
-         update.pull, update.pending_steps) = orig
-    return lines, titles
-
-
-_lines, _titles = _card_run(can_alert=False, pending=["deps"])
-check("⭐⭐ 终端里（弹不出框）收尾**不许**说「再点一次这个按钮」—— 那是死循环",
-      not any("再点一次" in x for x in _lines), str(_lines))
-check("⭐⭐ 而要给出**真能兑现**的那条：在终端跑 cl update",
-      any("cl update" in x for x in _lines), str(_lines))
-_lines2, _ = _card_run(can_alert=True, pending=["deps"])
-check("⚠️ 对照：`.app` 里（弹得出来）照旧说「再点一次这个按钮」",
-      any("再点一次" in x for x in _lines2), str(_lines2))
-
-# ⚠️ 2026-10-01 独立审核指出：「下载模型」**不归 `cl update` 管**
-# （铁律：绝不自动下模型）→ 对它说「跑 cl update」是句兑现不了的话，
-# 跑完发现没下、卡片还是同一句 = 死循环换了个壳。
-import contextlib                                                 # noqa: E402
-import io                                                         # noqa: E402
-_buf_m = io.StringIO()
-with contextlib.redirect_stdout(_buf_m):
-    _lines_m, _ = _card_run(can_alert=False, pending=["models"])
-_out_m = _buf_m.getvalue()
-check("⭐⭐ 终端 + 只有「下载模型」待做 → 打印那句**明说它不会自动做**",
-      "不会自动做" in _out_m, repr(_out_m[-180:]))
-check("⭐⭐ 而且收尾状态行**不再说「跑 cl update」**—— 改指 `cl doctor` 的命令",
-      any("cl doctor" in x for x in _lines_m)
-      and not any("在终端跑 cl update" in x for x in _lines_m),
-      str(_lines_m))
-_lines_d, _ = _card_run(can_alert=False, pending=["deps"])
-check("⚠️ 对照：deps 那档照旧说「在终端跑 cl update」（别把话术改过了头）",
-      any("在终端跑 cl update" in x for x in _lines_d), str(_lines_d))
+# ======================= G. `cl update` 真的会补依赖 =======================
+# （G1 原来驱动的是悬浮窗卡片上的「立即更新」—— 2026-10-12 那颗按钮删了，
+#   更新入口挪到开课前面板，判据见 D 组 `offer` / `apply`。）
+print("\nG. cl update 真的会补依赖\n")
 
 print("--- G2 ⭐⭐ `cl update` 真的能把那句兑现（判据与卡片同源）---")
 # ⚠️ 上面那条话术成立的前提是：`cl update` **真的会去装**。而它原来比的是

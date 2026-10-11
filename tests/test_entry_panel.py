@@ -309,6 +309,16 @@ def main() -> int:
         check("⭐⭐ 而且盘上那份旧 `.course` **一个字没动**",
               _after == "PREVIOUS", f"现在是 {_after!r}")
 
+        # ⭐ ④b 面板里更新装好了 -> 5（`cl` 据此重开自己）；`.course` 不许被动
+        cfg.write_text("KEEPME", encoding="utf-8")
+        rc = _run(lambda **kw: (kw["on_restart"](), object())[1])
+        _keep = cfg.read_text(encoding="utf-8") if cfg.exists() else None
+        check("⭐ ④b 面板里更新装好了 -> 5（RESTART），且 .course 一个字没动",
+              rc == entry_launch.RESTART and _keep == "KEEPME", f"rc={rc} course={_keep!r}")
+        check("⭐ 六个退出码互不相同",
+              len({entry_launch.PICKED, entry_launch.CANCELLED, entry_launch.UNAVAILABLE,
+                   entry_launch.NO_COURSES, entry_launch.UNSAVED, entry_launch.RESTART}) == 6)
+
         # ⭐⭐ ⑤ **零课程 -> 照常开面板**（2026-10-04 加）
         #    全新安装满足「一门课都没有」→ 原来一律返回 3 → 面板永远不出现 →
         #    就绪条上「下载语音模型」/ 建课 / 填 key 新用户都点不到（macOS 13 新用户实测）。
@@ -1311,6 +1321,33 @@ def _test_mode_section() -> None:
         check("⚠️ 前置：那条回放确实跑到了 exec（否则上一条是因为「啥都没跑」而假绿）",
               "main.py" in _out_f, _out_f.strip()[:120])
 
+        # ── ⭐⭐ 退出码 5：`cl` 真的重开自己，而且有上限 ─────────────────────
+        # 假解释器：被叫去跑 entry_launch.py 时记一次数，前 `LIMIT` 次退 5，之后退 1（关面板）。
+        _fake.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = entry_launch.py ]; then\n'
+            '  n=$(cat "$(dirname "$0")/n" 2>/dev/null || echo 0); n=$((n+1))\n'
+            '  echo "$n" > "$(dirname "$0")/n"\n'
+            '  [ "$n" -le "$LIMIT" ] && exit 5; exit 1\n'
+            'fi\n'
+            'echo "FAKEPY $@"\nexit 0\n', encoding="utf-8")
+        _cnt = _fake.parent / "n"
+
+        def _restart_run(limit: int) -> tuple[int, str]:
+            _cnt.unlink(missing_ok=True)
+            env = {k: v for k, v in os.environ.items() if k != "CL_RESTARTS"}
+            pr = _sp.run(["bash", str(sand / "cl")], capture_output=True, text=True,
+                         timeout=30, env={**env, "LIMIT": str(limit)})
+            n = int(_cnt.read_text().strip()) if _cnt.exists() else 0
+            return n, pr.stdout + pr.stderr
+
+        _n, _o = _restart_run(1)
+        check("⭐⭐ 面板退 5 → `cl` 重开一次面板（第二次关掉就不录）",
+              _n == 2 and "重开面板" in _o and "main.py" not in _o, f"n={_n} {_o[-160:]!r}")
+        _n, _o = _restart_run(99)
+        check("⭐⭐ 面板一直退 5 → 最多重开两次就停（不死循环、不录课）",
+              _n == 3 and "不再重开" in _o and "main.py" not in _o, f"n={_n} {_o[-160:]!r}")
+
 
 def _target_liveness_section() -> None:
     """⑭ 面板上**每个能点的控件都必须有活着的 target**（弱引用那条）。
@@ -1435,6 +1472,21 @@ def _vault_section() -> None:
     check("路径没了 → `⚠  笔记库  找不到了`",
           _t({"key": "vault", "state": "warn"}) == "⚠  笔记库  找不到了",
           repr(_t({"key": "vault", "state": "warn"})))
+
+    # ---- 更新那一格 / 草稿模型提议（2026-10-12）----
+    check("有新版 → `↑  更新  3.9.0`（字面量）",
+          _t({"key": "update", "state": "todo", "kind": "available", "detail": "有新版本 3.9.0"})
+          == "↑  更新  3.9.0")
+    check("没装完 → `↑  更新  没装完`",
+          _t({"key": "update", "state": "todo", "kind": "unfinished", "detail": "还没装完：x"})
+          == "↑  更新  没装完")
+    check("装不上 → `⚠  更新  装不上`",
+          _t({"key": "update", "state": "warn", "kind": "blocked", "detail": "你改过 a.py"})
+          == "⚠  更新  装不上")
+    check("更新中 → `◌  更新  更新中…`", _t({"key": "update", "state": "busy"}) == "◌  更新  更新中…")
+    check("草稿模型可加装 → `✓  语音模型  已就绪 · 可加草稿模型`",
+          _t({"key": "models", "state": "ok", "offer_draft": True})
+          == "✓  语音模型  已就绪 · 可加草稿模型")
 
     # ---- 翻译引擎那一格（2026-10-04）：「未配」→「没配 key」，说清楚要做什么 ----
     check("翻译引擎没配 → `—  翻译引擎  没配 key`（字面量）",

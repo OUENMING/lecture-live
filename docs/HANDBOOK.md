@@ -295,6 +295,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_PYVER` | `3.12` | `make-app.sh` 建运行环境用的 Python 版本 | 构建参数，长期 |
 | `CLASSLIVE_LOCK_DIR` | `~/Library/Logs/ClassLive` | `make-app.sh` 查单实例锁的位置（只为验收隔离） | 测试接缝，长期 |
 | `CL_NO_PANEL` | 空 | `cl` 零参数时跳过课程面板、回老行为 | 运维开关，长期 |
+| `CL_RESTARTS` | 空 | `cl` 自己设：面板里更新完重开（退出码 5）的次数，到 2 就不再重开 | 内部计数，别手设 |
 
 ---
 

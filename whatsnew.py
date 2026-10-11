@@ -150,15 +150,14 @@ def _add_log_view(parent, attr, x, y, w, h):
 
 
 def build(version: str, summary: str, date: str = "", log: str = "",
-          flag_path: pathlib.Path | None = None, on_dismiss=None, on_update=None):
+          flag_path: pathlib.Path | None = None, on_dismiss=None):
     """构造并显示卡片。失败返回 None（调用方不必管）。
 
     `log` 非空 -> 中间是**可滚动的完整更新日志**（所有版本，新的在上）；
     为空 -> 退回"摘要几行"的紧凑版。两条路都是非模态、不抢焦点。
 
-    `on_update` 给了才会建「立即更新」按钮。它的签名是
-    `on_update(set_status, set_title, done)` —— 由调用方在**后台线程**里跑，
-    跑完用这三个回调把进度写回卡片（绝不在主线程做网络）。
+    ⚠️ 只说明，不更新：卡片上的「立即更新」2026-10-12 删了（上课中更新会和录课抢主线程），
+       更新入口在开课前面板的就绪条上。
     """
     try:
         from AppKit import (NSButton, NSButtonTypeSwitch, NSColor, NSFont,
@@ -269,36 +268,6 @@ def build(version: str, summary: str, date: str = "", log: str = "",
         btn.setBezelStyle_(1)                             # rounded
         btn.setFont_(NSFont.systemFontOfSize_weight_(13.0, _W))
 
-        # 「立即更新」—— 只在给了 on_update 时才建。点了之后**在后台线程**跑，
-        # 结果用 set_status / set_update_title 回写到卡片上，绝不阻塞主线程。
-        ubtn = None
-        if on_update:
-            ubtn = NSButton.alloc().initWithFrame_(
-                NSMakeRect(WIDTH - PAD - 92.0 - 8.0 - 104.0, fy + 2, 104.0, 28.0))
-            ubtn.setTitle_("立即更新")
-            ubtn.setBezelStyle_(1)
-            ubtn.setFont_(NSFont.systemFontOfSize_weight_(12.5, _W))
-
-            def on_update_clicked(_=None):
-                try:
-                    if ubtn is not None:
-                        ubtn.setEnabled_(False)
-                        ubtn.setTitle_("更新中…")
-                    set_status("正在检查远程…", 0.75)
-                    on_update(set_status, lambda t: ubtn and ubtn.setTitle_(t),
-                              lambda: ubtn and ubtn.setEnabled_(True))
-                except Exception:                         # noqa: BLE001
-                    if os.environ.get("CLASSLIVE_DEBUG"):
-                        import traceback
-                        traceback.print_exc()
-                    # ⚠️ 必须把按钮**放回可点**（2026-10-01 审查 #37）：失败路径上原来
-                    #    只改状态行，按钮永久停在禁用 +「更新中…」—— 用户既看不到真实
-                    #    结果，也无法重试。
-                    if ubtn is not None:
-                        ubtn.setEnabled_(True)
-                        ubtn.setTitle_("立即更新")
-                    set_status("更新按钮出错", 1.0)
-
         _wire = _make_target(toggle)
         _wire2 = _make_target(on_close)
         chk.setTarget_(_wire); chk.setAction_("clicked:")
@@ -306,17 +275,9 @@ def build(version: str, summary: str, date: str = "", log: str = "",
         ve.addSubview_(chk); ve.addSubview_(btn)
         ve.addSubview_(status)
         targets = [_wire, _wire2]
-        if ubtn is not None:
-            _wire3 = _make_target(on_update_clicked)
-            ubtn.setTarget_(_wire3); ubtn.setAction_("clicked:")
-            ve.addSubview_(ubtn)
-            targets.append(_wire3)
 
         p.orderFrontRegardless()      # ⚠️ 不是 makeKeyAndOrderFront —— 绝不抢焦点
         return {"panel": p, "close": on_close, "set_status": set_status,
-                "set_update_title": (lambda t: ubtn and ubtn.setTitle_(t)),
-                "set_update_enabled": (lambda on: ubtn and ubtn.setEnabled_(on)),
-                "has_update_button": ubtn is not None,
                 "_targets": targets}
     except objc_own.ObjcNameCollision:
         # ⚠️⚠️ **这一类不吞。**

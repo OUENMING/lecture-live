@@ -33,7 +33,7 @@
 · 它会往 `sessions/` 写一个**真的测试会话**（`sessions/` 的纪律是只追加，不清）。
 · `CLASSLIVE_UPLOAD=0` 已设 —— **不会**把这次试跑传上去。
 · `CLASSLIVE_NO_AUTO_UPDATE=1` 已设 —— 不会触发更新。
-· vault 指到临时目录，不碰真 Obsidian 库。
+· vault 指到临时目录，不碰真 Obsidian 库；`remember_vault` 被换成空操作，不改 `~/.classlive/vault`。
 """
 from __future__ import annotations
 
@@ -67,6 +67,10 @@ def main() -> int:
     os.environ["CLASSLIVE_UPLOAD"] = "0"
     os.environ["CLASSLIVE_NO_AUTO_UPDATE"] = "1"
     import main as main_mod
+    # ⚠️⚠️ `main.run()` 会把 `--vault` **记进 `~/.classlive/vault`**（给双击 `.app` 用）。
+    #    不拦的话，真配置被改成下面这个临时目录 → 下次双击启动，笔记写进系统临时目录、
+    #    被 macOS 定期清掉（2026-10-11 审计实测抓到：那个文件里就躺着 `cl_probe_tmreport_…`）。
+    main_mod.remember_vault = lambda *a, **k: None
 
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="cl_probe_tmreport_"))
     wav = tmp / "tiny.wav"

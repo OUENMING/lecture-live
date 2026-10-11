@@ -101,5 +101,41 @@ class Clause_end(unittest.TestCase):
         self.assertFalse(P.ends_at_clause("hello"))
 
 
+class Novel(unittest.TestCase):
+    """`novel`：相对**上次送出的文本**数新词，而不是数"比上次多几个词"。"""
+
+    SEG91_SENT = ("so the thing is that when the price goes up by a lot of money "
+                  "then people buy less of it overall")                      # 19 词
+    SEG91_NOW = "price goes up lot money then people buy much less coffee tea sugar fuel"  # 13 词
+
+    def test_seg91_replica_novel_true_legacy_false(self):
+        n_sent = len(self.SEG91_SENT.split())
+        n_now = len(self.SEG91_NOW.split())
+        kw = dict(now=10.0, last_tr=0.0, n_words=n_now, last_len=n_sent,
+                  text=self.SEG91_NOW)
+        self.assertGreaterEqual(P.novel_words(self.SEG91_SENT, self.SEG91_NOW), 4)
+        self.assertTrue(P.should_translate("novel", sent_text=self.SEG91_SENT, **kw))
+        self.assertFalse(P.should_translate("legacy", **kw))
+
+    def test_gap_below_min_is_false(self):
+        self.assertFalse(P.should_translate(
+            "novel", now=2.0, last_tr=0.0, n_words=10, last_len=0,
+            text="a b c d e f g h i j", sent_text=""))
+
+    def test_few_new_words_wait_for_starve_gap(self):
+        kw = dict(n_words=6, last_len=6, text="a b c d e x", sent_text="a b c d e f")
+        self.assertFalse(P.should_translate("novel", now=3.0, last_tr=0.0, **kw))
+        self.assertTrue(P.should_translate("novel", now=5.0, last_tr=0.0, **kw))
+
+    def test_identical_text_never_fires(self):
+        self.assertFalse(P.should_translate(
+            "novel", now=10.0, last_tr=0.0, n_words=4, last_len=4,
+            text="a b c d", sent_text="a b c d"))
+
+    def test_novel_words_is_multiset_difference(self):
+        self.assertEqual(P.novel_words("the price", "the the price"), 1)
+        self.assertEqual(P.novel_words("", "a b"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,21 +1,33 @@
 """草稿译文何时触发：纯函数，主循环和离线回放共用一份判据。
 
-现状（policy "legacy"，生产在用）：距上次 ≥2.5s 且新增 ≥6 词。
+policy "legacy"（2026-10-11 前的生产默认）：距上次 ≥2.5s 且新增 ≥6 词。
 候选（policy "clause"）：在 legacy 条件之上，要求"落在从句边界"才送——
   · 文本以 , . ; : ? ! 结尾（说话人刚停在一个短语边界），或
   · 这一次草稿相对上一次是纯追加（前面的词没被改写 → 这半句比较稳）；
   · 但不能饿死：新增 ≥12 词或距上次 ≥6s 就照送。
 理由（来自 LiveCaptions-Translator / livecaption 的读码）：LLM 翻译半截从句最容易脑补，
 等到从句边界或前缀稳定再送，译文更少翻来覆去。**这一条的收益没有用译文质量量过**
-（离线只能数请求数和边界命中率，见 scripts/draft_policy_sim.py），所以默认仍是 legacy，
+（离线只能数请求数和边界命中率，见 scripts/draft_policy_sim.py），所以不是默认，
 CLASSLIVE_DRAFT_TRIGGER=clause 才切换，要不要切由用户看过效果再定。
+
+默认（policy "novel"，2026-10-11 起）：数"相对**上次送出的文本**有几个新词"（多重集差），
+不再数"比上次多几个词"。距上次 ≥2.5s 且新词 ≥4，或距上次 ≥5s 且新词 ≥1 就送。
+理由：Parakeet 每秒重转最近 10s，词数忽多忽少且有上限，送过一次高点后 legacy 的
+「+6 词」永远凑不够（10-09 真课 seg 91：19 词送翻后 13/17/19/22/20/23，门槛 25 到不了）。
+回放（scripts/draft_gap_replay.py）：讲话中 ≥6s 无新中文 398s → 约 20s。
+同思路见 LiveCaptions-Translator `src/Translator.cs` 的「变化次数 / 空闲时间」触发。
+CLASSLIVE_DRAFT_TRIGGER=legacy 可退回。
 """
 from __future__ import annotations
+
+from collections import Counter
 
 MIN_GAP_S = 2.5
 MIN_NEW_WORDS = 6
 STARVE_WORDS = 12
 STARVE_S = 6.0
+NOVEL_MIN_NEW = 4      # 相对上次送出的文本，至少 4 个新词
+NOVEL_STARVE_S = 5.0   # 或者距上次 ≥5 s 且至少 1 个新词
 _CLAUSE_END = tuple(",.;:?!")
 
 
@@ -41,9 +53,29 @@ def append_only(prev: str, cur: str) -> bool:
     return b[:len(a)] == a
 
 
+def novel_words(sent_text: str, text: str) -> int:
+    """`text` 里有多少词不在上次送出的 `sent_text` 里（多重集差；词身份同 `_tokens`）。"""
+    have = Counter(_tokens(sent_text))
+    n = 0
+    for w in _tokens(text):
+        if have[w] > 0:
+            have[w] -= 1
+        else:
+            n += 1
+    return n
+
+
 def should_translate(policy: str, *, now: float, last_tr: float, n_words: int,
-                     last_len: int, text: str, prev_text: str = "") -> bool:
-    """`prev_text` = 上一次的草稿原文（只给 `clause` 用；它自己派生 `append_only`）。"""
+                     last_len: int, text: str, prev_text: str = "",
+                     sent_text: str = "") -> bool:
+    """`prev_text` = 上一次的草稿原文（只给 `clause` 用；它自己派生 `append_only`）。
+    `sent_text` = 上一次**送翻**的原文（只给 `novel` 用）。"""
+    if policy == "novel":                    # 不走 legacy 的「+6 词」前置检查
+        gap = now - last_tr
+        if gap < MIN_GAP_S:
+            return False
+        new = novel_words(sent_text, text)
+        return new >= NOVEL_MIN_NEW or (gap >= NOVEL_STARVE_S and new >= 1)
     gap_ok = now - last_tr >= MIN_GAP_S
     new = n_words - last_len
     if not (gap_ok and new >= MIN_NEW_WORDS):

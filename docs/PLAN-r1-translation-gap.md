@@ -24,7 +24,7 @@
 | D | 草稿翻译带领域/术语/上一句 | `cloud_translator.py`、`main.EngineRouter` | ~40 | **开**（2026-10-11 Owen 看过对比后定；`CLASSLIVE_DRAFT_CONTEXT=0` 关） |
 | E | carry 只看最后一句 | `main.py` | ~30 | **开** |
 | F | 回放量具 | `scripts/draft_gap_replay.py`（新） | ~120 | — |
-| G | ❓ 课中一句话点拨 + 课后讲解卡（3.8.12，单独一轮） | `overlay.py`、`main.py`、`cloud_translator.py`、`obsidian_writer.py`、`polish.py` | ~200 | 开 |
+| G | ❓ 课中一句话点拨 + 课后讲解卡（3.8.12，单独一轮；§G 已按现行代码重写） | `overlay.py`、`main.py`、`cloud_translator.py`、`obsidian_writer.py`、`polish.py` | ~250 | 开 |
 
 **执行顺序（Owen 2026-10-11 定）**：
 1. **第一步**：A–F（**不动 `vad.py`**，这样回放对比在同一套切段下，数据可比）。全部验收通过。
@@ -224,20 +224,74 @@ if tail:
 
 ---
 
-## G. ❓ 轻点拨（3.8.12，A–F 确认后再做）
+## G. ❓ 轻点拨（3.8.12）—— 2026-10-11 按现行代码重写，可直接执行
 
-**依据**：10-09 那节 `report.json` 的 `blocks.ui` 只有 `outline: 6`、`quit: 1`，❓ 0 次。按下 ❓ 当场没有任何反馈，课后笔记也只是把那几句原字幕再贴一遍；旁边的「讲一下」当场讲透、课后还有卡片。定位改成：**不想切走字幕时按 ❓（一句话点拨），想停下来细看时按「讲一下」**。
+**依据**：10-09 那节 `report.json` 的 `blocks.ui`：`outline: 6`、`quit: 1`，❓ **0 次**。按下 ❓ 当场没有任何反馈，课后笔记只把那几句原字幕再贴一遍；旁边的「讲一下」当场讲透、课后还有卡片。
+**定位**：不想切走字幕时按 ❓（一行点拨，继续听）；想停下来细看时按「讲一下」。
+**同类做法**（2026-10-11 查）：Learnica（实时课堂翻译）「点一行标成 Important / Confused，然后继续听」+ 课后把标记和 AI 笔记放一起复习；Glean（现 Genio）课上打 label、课后复习；Otter 高亮进 takeaways。共同点：**课中只做轻标记、不打断听课，解释放课后**。我们多做一步「一行点拨」，因为本工具的用户是二语听者（理解卡在词汇覆盖率，一句中文要点就能接上）。
+**不做**（这一轮）：自动迷失雷达、点字幕行标记、「我刚走神了，讲了啥」—— 看 ❓ 用量再定。**不加环境开关**（纯转录档本来就零请求；不按就零成本）。
 
-1. **按下即反馈**（`overlay.py`）：`_lost()` 里在 `_on_lost()` 之后调 `self.show_hint("❓ 已标记 · 正在提炼…", ttl=20)`。
-   新方法 `show_hint(text, ttl)`：存 `self._hint = (text, time.monotonic() + ttl)` 并 `_mark_dirty(urgent=True)`；`_gloss_text()` 在 `_pinned_term` 判断**之前**：hint 未过期就返回它。过期后要能自动消失 —— 在 `Overlay.pump()` 里、`self._flush_if_due()` 之前检查 hint 是否过期，过期就清掉并 `_mark_dirty()`。
-2. **课中一句话**（`main.py`）：`on_lost` 回调改成 `lambda: (writer.mark_lost(), hintq.put(_hint_snapshot()))`。`_hint_snapshot()` 在主线程取 `finals[-4:]`（复制）+ 当前草稿英文；**只做 list 复制，不联网**。
-   新线程 `hint_worker`：从 `hintq` 取 → `translator.hint(lines)` → **`if not stopping.is_set():`** `streamq.put(("hint", text))`（`streamq` 是收尾判据 `all_settled()` 的输入之一，照 `answer_worker` 的写法）；失败或本地引擎时放 `("hint", "")`。
-   `drain()` 加 `"hint"` 分支：非空 → `ui.show_hint("💡 " + text, ttl=15)`；空 → `ui.show_hint("❓ 已标记（课后笔记里会有讲解）", ttl=6)`。`TerminalUI` 补一个打印版的 `show_hint`。
-   `CloudTranslator.hint(lines)`：非流式，`max_tokens=80`，系统提示「用不超过 35 个汉字说出刚才这段的核心意思，给正在听课的学生看；只输出这一句」，带 `domain_block`。`EngineRouter.hint` 云端优先，本地返回 `""`（本地 1.7B 讲解只会编，与 `answer` 的既有决定一致）。
-3. **课后讲解卡**（`obsidian_writer.py` + `polish.py`）：`polish.py` 新增 `explain_lost(blocks, api_key, model, course_terms, domain, timeout=60)`：一次请求处理全部 ❓ 块（每块是那几句英/中），返回每块的 `{"explain": "...", "q": "...", "a": "..."}`；任何失败返回 `[]`。
-   `_lost_items` 在每块的原句后面追加 `  - 💡 讲解：…` 和一行闪卡（格式照抄 `_qa_items` 现在用的 `问题::答案` 写法）。只在有 key 时调用；用户点了「跳过精修」（`cancel` 为真）就不再发起 `explain_lost` 请求；闪卡的问题文本做 `.replace("::", ": :")`（与 `_qa_items` 一致，防止伪造卡片边界）；fail-soft 纪律同 `_keypoint_items`。
-4. **测试**：`polish.explain_lost` 的解析用替身 HTTP（坏 JSON / 空返回 / 部分缺字段都返回可用结果或 `[]`）；`_lost_items` 在 `explain` 为空时与现在逐字相同。overlay 部分用 `scripts/probe_test_mode.py` 那种拍图方式出图给 Owen 看。
-5. **不做**（这一轮）：自动迷失雷达、点字幕行标记 —— 等 G 上线后看 ❓ 用量再定。
+### G0. 硬约束（违反任何一条都算没做完）
+
+1. **纯转录档一个模型请求都不发**（`DESIGN.md` 的契约）：课中点拨与课后讲解都要挡在发请求之前。「只英·校」档也不发点拨（它是中文的）。
+2. 主线程回调（`_lost` / `on_lost`）**只做 list 复制 + `queue.put`**，不联网、不 sleep。
+3. 新 tag `"hint"` 必须在 `main.drain()` 加分支（R28 会自动钉住）。
+4. 往 `streamq` 写之前判 `stopping.is_set()`（它是 `all_settled()` 的输入，照 `answer_worker`）。
+5. 本地引擎不讲（1.7B 只会编，与 `EngineRouter.answer` 同一决定）；云端失败**不走 `_fallback`**（同 `answer`：一次点拨失败不能把整节课翻译降到本地）。
+6. 课后讲解住在 `ObsidianWriter.close()` 的护栏区，fail-soft；`cancel`（跳过精修）置位就不发请求；没有讲解时笔记**逐字等于现在**。
+7. 闪卡问题文本 `.replace("::", ": :")`（同 `_qa_items`）。
+
+### G1. 课中：按下即反馈 + 一行点拨
+
+**`overlay.py`**
+- `__init__`：`self._hint = None   # (文字, 到期的 monotonic)`。
+- 新方法 `show_hint(self, text: str, ttl: float) -> None`：空串 → 清掉；否则存 `(text, time.monotonic() + ttl)`；`_mark_dirty(urgent=True)`。
+- `_gloss_text()` 最前面：hint 存在且未到期就返回它（术语行那一格，钉住的术语暂时让位，到期自动回来）。
+- `pump()`：在 `self._tv.tick()` 之前，hint 到期 → `self._hint = None; self._mark_dirty()`。
+- `_on_gloss_click()` 最前面：hint 在显示 → 清掉、`_mark_dirty(urgent=True)`、return（点一下就收起，不去切钉住的术语）。
+- `_lost()`：`queued = self._on_lost()`；然后
+  `self.show_hint("❓ 已标记 · 正在提炼一句话…", ttl=20) if queued else self.show_hint("❓ 已标记 · 课后笔记里能找到这几句", ttl=6)`。
+  （默认的 `_on_lost` 返回 `None` → 走第二句，老调用方不受影响。）
+
+**`cloud_translator.py`**
+- 常量 `HINT_SYSTEM`（中文）：你在帮一个母语是中文、正在听英文课的学生。下面是老师刚讲的几句（英文，可能有语音识别错误）。用**一句不超过 35 个汉字**的中文说出这段的核心意思，让他马上跟上。只依据这几句，不补充外部知识；拿不准就说得保守。只输出这一句，不要前缀、引号、换行。
+- `CloudTranslator.hint(self, lines: list[str]) -> str`：system = `HINT_SYSTEM` + `domain_block(self._domain)` + 课程术语前 40 个（同 `_answer_system` 的拼法）；user = 各行用换行连接；走 `self._stream_chat(msgs, max_tokens=80)` 拼完整段；取第一行、去首尾引号与空白，超过 60 字截断加「…」。
+
+**`main.py`**
+- `EngineRouter.hint(self, lines) -> str`：`not self._use_cloud` → `""`；`try: return self._cloud.hint(lines)` / `except Exception: return ""`（**不调 `_fallback`**，理由同 `answer` 的注释）。
+- `TerminalUI.show_hint(self, text, ttl)`：有字就 `echo` 一行（终端版不需要到期）。
+- `run()` 里：`hintq: "queue.Queue[list[str]]" = queue.Queue()`；`last_draft = {"en": ""}`（`drain()` 里每次 `ui.add_draft(_shown)` 时顺手记 `_shown`）。
+- 新函数 `_on_lost_pressed() -> bool`（主线程）：先 `writer.mark_lost()`；`trans["mode"] != "both"` 或 `not translator.uses_cloud` → `return False`；否则 `hintq.put([t for t in (*finals[-4:], last_draft["en"]) if t])`，`return True`。`_load_overlay(on_lost=_on_lost_pressed, …)`（`writer` 在它之前已建好，确认一下顺序）。
+- 线程 `hint_worker`（`daemon=True, name="lost-hint"`）：`hintq.get(timeout=0.5)`；**把队列里积压的取空、只留最新一份**（连按几下只讲一次）；`text = translator.hint(lines)`；`if not stopping.is_set(): streamq.put(("hint", text))`。`None` 哨兵退出。与 `t4` 一起启动。
+- `drain()` 加分支：`elif item[0] == "hint":` 有字 → `ui.show_hint("💡 " + item[1], ttl=15)`；空 → `ui.show_hint("❓ 已标记 · 课后笔记里能找到这几句", ttl=6)`。`streamq` 那行注释里的 tag 列表补上 `"hint"`。
+
+### G2. 课后：讲解卡
+
+**`polish.py`**
+- 常量 `EXPLAIN_SYS`：输入是一节课里学生按了「没听懂」的若干段（每段几句英文 + 中文译文，带编号）。逐段输出：`explain`（中文 ≤120 字，讲清这段在说什么、为什么；**可以用通用学科知识把概念讲明白，但不许编造这节课没说过的具体数字、例子或结论**）、`q`（一句自测问题 ≤40 字）、`a`（答案 ≤80 字）。严格 JSON：`{"items":[{"i":编号,"explain":"…","q":"…","a":"…"}]}`。
+- `explain_lost(blocks, api_key, model, course_terms=None, domain="", timeout=60.0, chat=None) -> list[dict]`
+  - `blocks`：`list[list[{"en","zh"}]]`；`chat` 默认 `_chat`（测试注入替身）。
+  - 每 20 块一次请求；user 里先放 `domain_block` 与课程术语（同 `polish_entries` 的写法），再放编号的块。
+  - 返回**与 `blocks` 等长**的列表，每项 `{"explain","q","a"}` 都是单行字符串（缺字段 → `""`，去换行）；**任何异常 / JSON 不对 / 条数对不上 → 返回 `[]`**（整体不用，绝不错位）。
+
+**`obsidian_writer.py`**
+- 构造函数加 `lost_explain_fn=None`（与 `keypoints_fn` 同形状，存 `self._lost_explain_fn`）。
+- `_lost_items(self, entries, explain: bool = True)`：先照现在的逻辑算出每块的 `lines` 与对应的 entries 切片；`explain and self._lost_explain_fn and blocks` 时调一次 `fn([[{"en": e["en"], "zh": e["zh"]} …] …])`（自己 try，失败当 `[]`）。返回长度等于块数时，每块末尾追加：
+  `  - 💡 讲解：{explain}`（explain 非空才加）和 `  - {q 去 ::}::{a}`（q、a 都非空才加）。否则**一字不加**。
+  - 调用前 `print("🤔 正在给 ❓ 标记写讲解…", flush=True)`。
+- `close()`：`self._lost_items(entries, explain=not (cancel is not None and cancel.is_set()))`。
+
+**`main.py`**（由 G1 的执行者一起接线）
+- 照 `_keypoints_for` 写 `_lost_explain_for(blocks)`：`args.save_notes == "no"` 或 `trans.get("mode") == "raw"` 或没有 `api_key_val` → `[]`；否则
+  `polish.explain_lost(blocks, api_key_val, args.polish_model or args.cloud_model, course_term_list(args.glossary, args.course), course_title(args.glossary, args.course))`，异常 → `[]`。
+- `ObsidianWriter(…, lost_explain_fn=_lost_explain_for)`。
+
+### G3. 测试（先红后绿，贴两次输出）
+
+- `tests/test_hint.py`（unittest）：`CloudTranslator.hint` 用替身 `_stream_chat`（多行 → 只取第一行、去引号、超长截断）；`EngineRouter.hint` 本地 → `""`、云端抛错 → `""` 且 `_use_cloud` 仍为 True；`Overlay`（构造不了就 skip）：`show_hint` 后 `_gloss_text()` 是 hint、把到期时间改成过去再 `pump()` 后回到术语行、点术语行在 hint 显示时只清 hint 不钉术语、`_lost()` 在 `on_lost` 返回 True/None 时显示两种字。
+- `tests/test_lost_explain.py`（unittest）：`explain_lost` 替身 `chat`：正常 / 坏 JSON / 条数不对 / 缺字段 / 抛异常；21 块分两次请求；`_lost_items` 没有 `lost_explain_fn` 时与现在逐字相同（同一份夹具对拍）、有讲解时追加的两行格式、`q` 含 `::` 被拆开、`explain=False` 不调用 fn。夹具照 `test_audit_regressions` R4 的写法**同时换掉 `SESSIONS`**（写端隔离）。
+- `scripts/probe_hint.py`：建一个 `Overlay`，放两句字幕 + 一个术语，分别 `show_hint` 两种文字，各拍一张图到临时目录（拍法照 `scripts/probe_test_mode.py`：先拍基线验字节数，防显示器睡眠出黑图），打印路径。**推送前给 Owen 看图。**
+- 收尾：`scripts/check.py --changed` 全绿；`probe_testmode_report.py` 由主会话跑（子代理不跑 `main.py`）。
 
 ## H. 离线实验：硬切点往回找能量低谷（已跑，结论见 RESEARCH §14）
 实测（OCW 真值，157 个硬切点）：WER 10.1% → 9.9%（噪声内），删除率 4.0% → 3.6%，「前段末尾无标点」95 → 83、「后段小写开头」118 → 95。收益小但方向一致、改动小。

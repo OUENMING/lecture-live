@@ -220,6 +220,33 @@ class R2_EngineRouter(unittest.TestCase):
         self.assertFalse(r._use_cloud)
         self.assertEqual(len(notices), 1)
 
+    def test_midstream_failure_does_not_concatenate_local_deltas(self):
+        """云端吐了半句中文后断流 → 本地兜底**不再流式上屏**（2026-10-11）。
+
+        原来本地的增量直接接在云端那半句后面（屏上「云端半句本地整句」拼一起），要等
+        `final` 整句替换才恢复。现在：半句冻住，本地结果只走返回值（`final` 那一趟上屏）。
+        没吐过东西就失败 → 本地照常流式（上一条 `test_cloud_exception_falls_back_same_call` 的情形）。"""
+        import main as m
+        class FakeCloud:
+            def probe(self): return False
+            def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
+                on_en("Hel"); on_zh("云端半")
+                raise RuntimeError("stream reset")
+        class FakeLocal:
+            def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
+                if on_en: on_en("hello")
+                if on_zh: on_zh("本地译文")
+                return Result("hello", "本地译文")
+        zh, en = [], []
+        r = m.EngineRouter(FakeLocal(), FakeCloud(), "auto")
+        res = r.fix_and_translate_stream("hello", [], on_zh=zh.append, on_en=en.append)
+        self.assertEqual(res.zh, "本地译文")
+        self.assertEqual((zh, en), (["云端半"], ["Hel"]))
+        r2 = m.EngineRouter(FakeLocal(), None, "local")
+        zh2 = []
+        r2.fix_and_translate_stream("hello", [], on_zh=zh2.append)
+        self.assertEqual(zh2, ["本地译文"])                 # 纯本地照常流式
+
 
 class R3_LocalEchoGuard(unittest.TestCase):
     """本地小模型把英文原样吐成 zh -> 必须置空, 走"只显示英文"路径。"""

@@ -428,21 +428,41 @@ class EngineRouter:
         threading.Thread(target=probe, daemon=True,
                          name="cloud-retry-probe").start()
 
+    @staticmethod
+    def _tap(cb, seen: list):
+        """包一层：记下「云端已经往屏上吐过增量」。"""
+        if cb is None:
+            return None
+
+        def f(d):
+            seen.append(True)
+            cb(d)
+        return f
+
     def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
         if self._use_cloud:
+            seen: list = []
             try:
-                return self._cloud.fix_and_translate_stream(en, context, on_zh, on_en)
+                return self._cloud.fix_and_translate_stream(
+                    en, context, self._tap(on_zh, seen), self._tap(on_en, seen))
             except Exception as e:                # noqa: BLE001
                 self._fallback(e)
+            # ⚠️ 云端断在半句上时屏上已有半句：本地的增量再接上去就是「两份拼一起」。
+            #    这时本地**不流式**，结果只走返回值（`final` 那一趟整句替换）。
+            if seen:
+                return self._local.fix_and_translate_stream(en, context, None, None)
         return self._local.fix_and_translate_stream(en, context, on_zh, on_en)
 
     def fix_stream(self, en, context, on_en=None) -> str:
         """只矫正英文(翻译关闭时)。走同一个模型与同一份上下文, 只是不要中文。"""
         if self._use_cloud:
+            seen: list = []
             try:
-                return self._cloud.fix_stream(en, context, on_en)
+                return self._cloud.fix_stream(en, context, self._tap(on_en, seen))
             except Exception as e:                # noqa: BLE001
                 self._fallback(e)
+            if seen:                              # 同上：半句已上屏，本地不再接
+                return self._local.fix_stream(en, context, None)
         return self._local.fix_stream(en, context, on_en)
 
     @property

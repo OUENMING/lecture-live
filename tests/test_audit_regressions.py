@@ -656,7 +656,10 @@ class R6_OverlayConstructs(unittest.TestCase):
         try:
             titles = [b.title() for b in o._bar]
             self.assertNotIn("⭐", titles, f"⭐ 按钮还在，合并没做干净：{titles}")
-            self.assertIn("❓", titles, f"❓ 是合并后的落点，不许一起删：{titles}")
+            # ❓ 现在是系统符号（title 为空、image 有值），老系统退回 emoji —— 判「还在这一排、看得见」
+            self.assertIn(o._btn_lost, o._bar, f"❓ 是合并后的落点，不许一起删：{titles}")
+            self.assertTrue(o._btn_lost.image() is not None or o._btn_lost.title() == "❓",
+                            "❓ 按钮既没有符号也没有文字")
             tip = o._btn_lost.toolTip() or ""
             self.assertIn("重点", tip, f"❓ 的 tooltip 该同时说两件事：{tip!r}")
             self.assertIn("没听懂", tip, f"❓ 的 tooltip 该同时说两件事：{tip!r}")

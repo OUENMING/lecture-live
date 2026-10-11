@@ -200,9 +200,29 @@ TRANS_MODE_DESC = {
 #        「Avoid redefining the semantic meanings of dynamic system colors」（绿 = 成功 / 黄 = 警告；
 #        黄档还跟底部暖黄的术语行撞色）。
 #   旁边的 ❓ / 讲一下 / 字幕 是**动作**（灰字），它是**状态** —— 胶囊把两类分开，不靠颜色区分档位。
+#   质感靠**边缘一圈细高光 + 几乎透明的底**（macOS 新 Siri 玻璃、输入框下那排 Attach/Search 胶囊都这么做；
+#   2026-10-11 作者看过 ohwow.design 后拍板）。只在用户碰它时动：悬停亮一档、切档时字淡入淡出 + 宽度过渡；
+#   系统开了「减弱动态效果」就全不动。
 MODE_CHIP_TEXT_ALPHA = 0.92
-MODE_CHIP_BG_ALPHA = 0.12
-MODE_CHIP_PAD = 16.0         # 胶囊比普通按钮两侧多出的内边距（合计）
+MODE_CHIP_BG_ALPHA = 0.09
+MODE_CHIP_BG_HOVER_ALPHA = 0.16
+MODE_CHIP_BORDER_ALPHA = 0.15     # 描边宽 = 1 物理像素（Retina 上 0.5pt）
+MODE_CHIP_FONT_PT = 13.0          # 中等字重（HIG 正文默认字号）；同排动作按钮仍是 14pt 常规
+MODE_CHIP_H = 22.0                # 圆角 = 高 / 2 → 整圆胶囊
+MODE_CHIP_PAD = 10.0              # 在普通按钮 +10 之上再加 → 左右合计约 20pt
+MODE_CHIP_ANIM_S = 0.2            # 切档：字淡入淡出 + 宽度过渡
+MODE_CHIP_HOVER_S = 0.12
+#: 档位小图标（SF Symbols）。默认关 —— 作者看了有/无两版对比图再定。
+MODE_CHIP_ICONS = False
+TRANS_MODE_SYMBOL = {"both": "character.bubble", "en": "textformat", "raw": "waveform"}
+
+
+def _reduce_motion() -> bool:
+    try:
+        from AppKit import NSWorkspace
+        return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion())
+    except Exception:                                   # noqa: BLE001
+        return False
 
 # pump() 每轮的让步窗口。**这是滚动跟手度的天花板**:
 # 固定 8ms 让步会让 pump 只有 ~113Hz, 而此时触控板手势正以 120Hz 投递事件 ——
@@ -1073,15 +1093,9 @@ class Overlay:
             "  双语     —— DeepSeek 矫正英文错听 + 出中文\n"
             "  只英·校  —— 只矫正英文, 不出中文\n"
             "  纯转录   —— 完全不调 LLM, ASR 直出(零 API、零延迟、最省电)")
-        try:                                  # 外观只是锦上添花, 拿不到也不影响可用
-            self._btn_trans.setContentTintColor_(
-                NSColor.whiteColor().colorWithAlphaComponent_(MODE_CHIP_TEXT_ALPHA))
-            self._btn_trans.setWantsLayer_(True)
-            self._btn_trans.layer().setCornerRadius_(12.0)          # 按钮高 24 -> 整圆胶囊
-            self._btn_trans.layer().setBackgroundColor_(
-                NSColor.whiteColor().colorWithAlphaComponent_(MODE_CHIP_BG_ALPHA).CGColor())
-        except Exception:                     # noqa: BLE001
-            pass
+        self._chip_anim = False          # 下一次 _layout 是否把胶囊宽度变化做成过渡（只有用户点击才置位）
+        self._style_mode_chip()
+        self._sync_trans_button()
         # ❓「重点 / 没听懂」: 给**这一刻**打一个时间锚, 落到旁路文件
         # `sessions/<同名>.lost.jsonl`, 课后指回前面那几句。
         # ⭐ 2026-09-29 合并: 原来还有一个 ⭐「标记重点」, 和它其实是**同一个动作**
@@ -1097,6 +1111,10 @@ class Overlay:
             "❓", self._lost,
             "重点 / 没听懂(记下这一刻)\n"
             "  两个意思都按它 —— 课后会指回前面那几句")
+        # ❓ 用系统符号（SF Symbols `questionmark`，不带圈 —— 作者定）而不是 emoji：emoji 是**彩色**的（红问号），
+        #    系统改不了它的颜色，整排只有它跳色；模板符号跟着同排文字的单色走（同菜单栏图标那条 HIG）。
+        #    取不到符号（老系统）就留着 emoji。
+        self._symbolize(self._btn_lost, "questionmark", "重点 / 没听懂")
         self._btn_close = self._button("✕", self._quit, "退出")
         # 答案接管期间显示「字幕」的位置:
         # 「讲一下」= 用固定问题开一轮讲解; 「字幕」= 清掉问答线程并回到字幕。
@@ -1820,6 +1838,9 @@ class Overlay:
         #    加这个按钮之前只切隐藏的那个；加了之后切到一个**看得见**的，那是退化。
         pairs = []
         for b in self._bar:
+            # ⚠️ 胶囊先记下旧宽度再 sizeToFit（sizeToFit 会立刻改 frame，过渡就没有起点了）
+            if b is self._btn_trans:
+                _chip_old = b.frame()
             b.sizeToFit()
             extra = MODE_CHIP_PAD if b is self._btn_trans else 0.0
             pairs.append((b, max(b.frame().size.width + 10.0 + extra, 28.0)))
@@ -1828,10 +1849,15 @@ class Overlay:
         if self._width - pad - need < pad:
             row = [(b, w) for b, w in pairs if not b.isHidden()]
         x = self._width - pad
+        frames = []
         for b, w in reversed(row):
             x -= w
-            b.setFrame_(NSMakeRect(x, self._height - 28, w, 24))
+            if b is self._btn_trans:        # 胶囊 22 高、在 24 的行里竖直居中
+                frames.append((b, NSMakeRect(x, self._height - 27, w, MODE_CHIP_H)))
+            else:
+                frames.append((b, NSMakeRect(x, self._height - 28, w, 24)))
             x -= gap
+        self._place_bar(frames, _chip_old)
         # ---- 章节条摆进**最左按钮左边的空档**（计划 §9.8）----
         # ⚠️⚠️ 算术：循环体**最后还减了一个 `gap`**，所以结束时
         #    `x` = 最左按钮的左边缘 **− gap**。→ 左边缘 = `x + gap`，
@@ -2913,9 +2939,110 @@ class Overlay:
             self._close_outline()
         self._clear_answer()
         self._tv.scroll_to_bottom()
+    def _symbolize(self, b, symbol: str, label: str) -> None:
+        try:
+            from AppKit import NSImage, NSImageOnly, NSImageSymbolConfiguration
+            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, label)
+            if img is None:
+                return
+            img = img.imageWithSymbolConfiguration_(
+                NSImageSymbolConfiguration.configurationWithPointSize_weight_(16.0, 0.23))   # medium：细问号比旁边 ✕ 显得轻
+            b.setImage_(img)
+            b.setImagePosition_(NSImageOnly)
+            b.setTitle_("")
+            b.setAccessibilityLabel_(label)
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _style_mode_chip(self):
+        """模式胶囊的静态外观 + 悬停。外观只是锦上添花：任何一步拿不到都不影响按钮可用。"""
+        from AppKit import NSColor, NSFont, NSFontWeightMedium, NSScreen
+        b = self._btn_trans
+        try:
+            b.setFont_(NSFont.systemFontOfSize_weight_(MODE_CHIP_FONT_PT, NSFontWeightMedium))
+            b.setContentTintColor_(NSColor.whiteColor().colorWithAlphaComponent_(MODE_CHIP_TEXT_ALPHA))
+            b.setWantsLayer_(True)
+            layer = b.layer()
+            layer.setCornerRadius_(MODE_CHIP_H / 2.0)
+            scale = NSScreen.mainScreen().backingScaleFactor() if NSScreen.mainScreen() else 2.0
+            layer.setBorderWidth_(1.0 / (scale or 2.0))
+            layer.setBorderColor_(NSColor.whiteColor().colorWithAlphaComponent_(MODE_CHIP_BORDER_ALPHA).CGColor())
+            self._chip_hover(False, animate=False)
+        except Exception:                                 # noqa: BLE001
+            pass
+        try:
+            from AppKit import (NSTrackingActiveAlways, NSTrackingArea, NSTrackingInVisibleRect,
+                                NSTrackingMouseEnteredAndExited)
+            owner = panel.make_hover_owner(lambda inside: self._chip_hover(inside))
+            self._targets.append(owner)                   # 强引用，防 GC
+            area = NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                ((0, 0), (0, 0)),
+                NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect,
+                owner, None)
+            b.addTrackingArea_(area)
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _chip_hover(self, inside: bool, *, animate: bool = True):
+        from AppKit import NSColor
+        try:
+            layer = self._btn_trans.layer()
+            alpha = MODE_CHIP_BG_HOVER_ALPHA if inside else MODE_CHIP_BG_ALPHA
+            if animate and not _reduce_motion():
+                from Quartz import CABasicAnimation, CATransaction
+                anim = CABasicAnimation.animationWithKeyPath_("backgroundColor")
+                anim.setFromValue_(layer.backgroundColor())
+                anim.setDuration_(MODE_CHIP_HOVER_S)
+                layer.addAnimation_forKey_(anim, "chipHover")
+                CATransaction.flush()
+            layer.setBackgroundColor_(NSColor.whiteColor().colorWithAlphaComponent_(alpha).CGColor())
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _place_bar(self, frames, chip_old):
+        """摆顶栏按钮。用户刚点过胶囊（`_chip_anim`）且宽度变了 → 整排一起过渡，否则直接落位。"""
+        animate = self._chip_anim and not _reduce_motion()
+        self._chip_anim = False
+        new = dict((id(b), r) for b, r in frames).get(id(self._btn_trans))
+        if animate and new is not None and abs(new.size.width - chip_old.size.width) > 0.5:
+            try:
+                from AppKit import NSAnimationContext
+                NSAnimationContext.beginGrouping()
+                NSAnimationContext.currentContext().setDuration_(MODE_CHIP_ANIM_S)
+                for b, r in frames:
+                    b.animator().setFrame_(r)
+                NSAnimationContext.endGrouping()
+                return
+            except Exception:                             # noqa: BLE001
+                pass
+        for b, r in frames:
+            b.setFrame_(r)
+
     def _sync_trans_button(self):
         """按钮文字直接写状态(三档同一个胶囊外观, 不靠颜色区分 —— 见 MODE_CHIP_* 的注释)。"""
-        self._btn_trans.setTitle_(TRANS_MODE_TITLE[self._trans_mode])
+        b = self._btn_trans
+        if self._chip_anim and not _reduce_motion():
+            try:                                          # 字淡入淡出（层上的一次性转场）
+                from Quartz import CATransition, kCATransitionFade
+                t = CATransition.animation()
+                t.setType_(kCATransitionFade)
+                t.setDuration_(MODE_CHIP_ANIM_S)
+                b.layer().addAnimation_forKey_(t, "chipTitle")
+            except Exception:                             # noqa: BLE001
+                pass
+        b.setTitle_(TRANS_MODE_TITLE[self._trans_mode])
+        if MODE_CHIP_ICONS:
+            try:
+                from AppKit import NSImage, NSImageLeading, NSImageSymbolConfiguration
+                img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                    TRANS_MODE_SYMBOL[self._trans_mode], None)
+                img = img.imageWithSymbolConfiguration_(
+                    NSImageSymbolConfiguration.configurationWithPointSize_weight_(11.0, 0.0))
+                b.setImage_(img)
+                b.setImagePosition_(NSImageLeading)
+                b.setImageHugsTitle_(True)
+            except Exception:                             # noqa: BLE001
+                pass
 
     def _cycle_translate(self):
         """在三种模式间循环: 双语 → 只英文(矫正) → 纯转录 → 双语。
@@ -2924,6 +3051,7 @@ class Overlay:
         拆成两个布尔会造出一个无意义组合(译开 + AI 关 = 要中文但不调模型, 做不到)。
         想从双语直达纯转录要点两下 —— 那是低频操作, 换来的是永远看得见全部三态。"""
         order = ("both", "en", "raw")
+        self._chip_anim = True               # 只有用户点击才做过渡（程序改档、启动恢复都直接落位）
         self.set_trans_mode(order[(order.index(self._trans_mode) + 1) % len(order)])
 
     def _toggle_translate(self):
@@ -2963,6 +3091,9 @@ class Overlay:
             self._mi_outline.setAction_(
                 None if mode == "raw" else "clicked:")
         self._sync_trans_button()
+        # ⚠️ 换字后胶囊宽度要跟着重算：原来切档不重排，「双语」那份宽度装「纯转录」会少约 4pt
+        #    （裸文字时看不出，有了胶囊底就露馅）。`_layout` 只是几个 sizeToFit，不贵。
+        self._layout()
         self._mark_dirty(urgent=True)
         self._note("trans_mode")
         self._on_translate(mode)

@@ -539,6 +539,30 @@ def make_button_target(cb):
     return t
 
 
+def make_hover_owner(cb):
+    """`NSTrackingArea` 的 owner：鼠标进 / 出时回调 `cb(True/False)`。**返回值由调用方持住**（同上）。
+
+    ⚠️ 用独立 owner 而不是给按钮写子类：按钮仍是普通 `NSButton`，点击、拖窗判据都不变。
+    """
+    import objc_own
+    from AppKit import NSObject
+
+    def entered(self, event):                             # noqa: N802
+        f = getattr(self, "_cb", None)
+        if f:
+            f(True)
+
+    def exited(self, event):                              # noqa: N802
+        f = getattr(self, "_cb", None)
+        if f:
+            f(False)
+
+    t = objc_own.own("HoverOwner", NSObject,
+                     {"mouseEntered_": entered, "mouseExited_": exited}).alloc().init()
+    t._cb = cb
+    return t
+
+
 def place_beside(anchor, card) -> None:
     """把浮卡摆在主面板旁边，**放不下就换一边，四边都放不下才贴可见区左上角**。
 

@@ -213,7 +213,7 @@ class Load(unittest.TestCase):
         def default_make(d):
             made.append(d)
             return de.NemotronDrafter("", rec=FakeRec())
-        eng = de.load_draft_engine(FakeParakeet(), window_samples=WIN, env=env, ram_bytes=ram,
+        eng = de.load_draft_engine(FakeParakeet(), window_samples=WIN, env=env, ram_bytes=lambda: ram,
                                    make_drafter=make or default_make)
         return eng, made
 
@@ -241,7 +241,7 @@ class Load(unittest.TestCase):
 
     def test_real_constructor_on_incomplete_dir_is_parakeet(self):
         eng = de.load_draft_engine(FakeParakeet(), window_samples=WIN,
-                                   env={de.ENV_MODEL_DIR: self.model}, ram_bytes=16 * GB)
+                                   env={de.ENV_MODEL_DIR: self.model}, ram_bytes=lambda: 16 * GB)
         self.assertEqual(eng.name, "parakeet")
         self.assertIn("加载失败", eng.reason)
 

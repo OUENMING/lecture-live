@@ -161,9 +161,9 @@ def download_file(sources: list[Source], dest: pathlib.Path, sha: str | None, *,
 
 
 # ---------------------------------------------------------------- 各模型
-def fetch_whisper(models_root: pathlib.Path, url: str, *, pin: str = PINS["whisper"],
+def fetch_tarball(models_root: pathlib.Path, url: str, *, pin: str = PINS["whisper"],
                   say: Callable[[str], None] = print) -> tuple[bool, str]:
-    """下 tar.bz2（Whisper 与 Nemotron 共用，`pin` 是该包的 sha256） → 校验 → 在临时目录里解开 → **整体**挪进 `models_root/`。
+    """下 tar.bz2（`pin` 是该包的 sha256；Whisper、Nemotron 都走这里） → 校验 → 在临时目录里解开 → **整体**挪进 `models_root/`。
 
     ⚠️ 先解到临时目录再挪：解压中途出错不会在模型目录里留下半截（`doctor.model_present`
        只看「目录非空」，半截目录会被当成已就位）。路径穿越由 `filter="data"` 拦（并只解压一遍）。
@@ -270,9 +270,9 @@ def fetch(key: str, *, say: Callable[[str], None] = print) -> tuple[bool, str]:
     if key == "vad":
         return download_file(gh_sources(models.VAD_URL), path, PINS["vad"], say=say)
     if key == "whisper":
-        return fetch_whisper(path.parent, models.WHISPER_URL, say=say)
+        return fetch_tarball(path.parent, models.WHISPER_URL, say=say)
     if key == "nemotron":
-        return fetch_whisper(path.parent, models.NEMOTRON_URL, pin=PINS["nemotron"], say=say)
+        return fetch_tarball(path.parent, models.NEMOTRON_URL, pin=PINS["nemotron"], say=say)
     if key == "parakeet":
         return fetch_hf(models.PARAKEET_SRC, path, PINS["parakeet"],
                         find_dir=lambda: path, purge=path, say=say)

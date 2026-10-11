@@ -36,8 +36,6 @@ SLOW_S, SLOW_STRIKES = 0.9, 3  # 连续 3 次单次更新 > 0.9 s 熔断（P0 �
 NUM_THREADS = 2
 SR = 16000
 
-_UNSET: Any = object()
-
 
 def choose(mode: str, model_present: bool, ram_bytes: int | None) -> tuple[str, str]:
     """纯函数：`(引擎名, 理由)`。理由空串 = 没什么要说的。
@@ -68,12 +66,11 @@ class NemotronDrafter:
         if rec is None:
             import sherpa_onnx
 
+            from asr import _find_file
+
             def f(name: str) -> str:
-                # 文件名**精确匹配**；不许退到 `*.txt` 猜词表（`asr.ParakeetASR` 那段注释讲过为什么）
-                p = os.path.join(model_dir, name)
-                if not os.path.isfile(p):
-                    raise FileNotFoundError(f"流式模型缺文件：{p}")
-                return p
+                # 只给**精确名**；不许退到 `*.txt` 猜词表（`asr.ParakeetASR` 那段注释讲过为什么）
+                return _find_file(model_dir, [name])
 
             rec = sherpa_onnx.OnlineRecognizer.from_transducer(
                 tokens=f("tokens.txt"), encoder=f("encoder.int8.onnx"),
@@ -142,7 +139,7 @@ def _ram_bytes() -> int | None:
 
 
 def load_draft_engine(parakeet, *, window_samples: int, env: Mapping[str, str] = os.environ,
-                      ram_bytes: int | None = _UNSET,
+                      ram_bytes: Callable[[], int | None] = None,
                       make_drafter: Callable[[str], Any] = NemotronDrafter) -> DraftEngine:
     """**永不抛**。任何一步失败 → Parakeet 引擎，`reason` 写清楚。
 
@@ -152,7 +149,7 @@ def load_draft_engine(parakeet, *, window_samples: int, env: Mapping[str, str] =
         import doctor
         mode = (env.get(ENV) or "auto").strip().lower()
         model_dir = env.get(ENV_MODEL_DIR) or models.path_of("nemotron")
-        ram = _ram_bytes() if ram_bytes is _UNSET else ram_bytes
+        ram = (ram_bytes or _ram_bytes)()
         name, why = choose(mode, bool(model_dir) and doctor.model_present(model_dir), ram)
         if name == "parakeet":
             return DraftEngine(parakeet, window_samples=window_samples, reason=why)

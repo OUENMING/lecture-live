@@ -129,7 +129,7 @@ QWEN = Model(
     938.0, src=QWEN_SRC, at_hf=True)
 
 # 流式草稿（R3，`draft_engine.py`）。**可选**：不在 → 草稿照旧用 Parakeet。
-# ⚠️ 目录名必须**等于 tar 包里的顶层目录名**（`fetch_model.fetch_whisper` 是「整体挪进 models_root」）。
+# ⚠️ 目录名必须**等于 tar 包里的顶层目录名**（`fetch_model.fetch_tarball` 是「整体挪进 models_root」）。
 NEMOTRON = Model(
     "nemotron",
     f"{MODELS_ROOT}/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",

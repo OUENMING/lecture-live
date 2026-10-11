@@ -218,7 +218,7 @@ def t_whisper_extracts_and_cleans():
     try:
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td) / "models"
-            ok, why = F.fetch_whisper(root, srv.url + "/wt.tar.bz2", say=quiet)
+            ok, why = F.fetch_tarball(root, srv.url + "/wt.tar.bz2", say=quiet)
             assert ok, why
             assert (root / "sherpa-onnx-whisper-turbo" / "turbo-tokens.txt").read_bytes() == b"tok"
             left = [p.name for p in root.iterdir()]
@@ -234,7 +234,7 @@ def t_whisper_path_traversal():
     try:
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td) / "models"
-            ok, why = F.fetch_whisper(root, srv.url + "/wt.tar.bz2", say=quiet)
+            ok, why = F.fetch_tarball(root, srv.url + "/wt.tar.bz2", say=quiet)
             assert not ok and "越界" in why, (ok, why)
             assert not (pathlib.Path(td) / "evil.txt").exists(), "越界文件被写出去了"
     finally:
@@ -349,7 +349,7 @@ def t_whisper_truncated_leaves_nothing():
     try:
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td) / "models"
-            ok, why = F.fetch_whisper(root, srv.url + "/wt.tar.bz2", say=quiet)
+            ok, why = F.fetch_tarball(root, srv.url + "/wt.tar.bz2", say=quiet)
             assert not ok, why
             assert list(root.iterdir()) == [], f"不该留下任何东西：{list(root.iterdir())}"
     finally:
@@ -365,7 +365,7 @@ def t_whisper_replaces_stale_dir():
             root = pathlib.Path(td) / "models"
             stale = root / "sherpa-onnx-whisper-turbo"; stale.mkdir(parents=True)
             (stale / "leftover.bin").write_bytes(b"x")
-            ok, why = F.fetch_whisper(root, srv.url + "/wt.tar.bz2", say=quiet)
+            ok, why = F.fetch_tarball(root, srv.url + "/wt.tar.bz2", say=quiet)
             assert ok, why
             assert sorted(p.name for p in stale.iterdir()) == ["turbo-tokens.txt"], "旧的残留应被整体替换"
     finally:
@@ -376,13 +376,13 @@ def t_whisper_replaces_stale_dir():
 def t_fetch_destinations_come_from_registry():
     import models
     seen = {}
-    orig_dl, orig_w = F.download_file, F.fetch_whisper
+    orig_dl, orig_w = F.download_file, F.fetch_tarball
     F.download_file = lambda srcs, dest, sha, **kw: (seen.__setitem__("vad", dest), (True, "x"))[1]
-    F.fetch_whisper = lambda root, url, **kw: (seen.__setitem__("whisper", root), (True, "x"))[1]
+    F.fetch_tarball = lambda root, url, **kw: (seen.__setitem__("whisper", root), (True, "x"))[1]
     try:
         F.fetch("vad", say=quiet); F.fetch("whisper", say=quiet)
     finally:
-        F.download_file, F.fetch_whisper = orig_dl, orig_w
+        F.download_file, F.fetch_tarball = orig_dl, orig_w
     assert str(seen["vad"]) == models.path_of("vad"), seen
     assert str(seen["whisper"]) == str(pathlib.Path(models.path_of("whisper")).parent), seen
 

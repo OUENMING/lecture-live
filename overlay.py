@@ -2951,7 +2951,8 @@ class Overlay:
         print(("⚠ " if warn else "✅ ") + msg, flush=True)
 
     # ---- 收尾卡（2026-09-28）----------------------------------------------
-    # 为什么要有这一组：收尾原来是「关掉窗口 → 在终端里问 → 同步精修 11 分钟」，
+    # 为什么要有这一组：收尾原来是「关掉窗口 → 在终端里问 → 同步精修 11 分钟」
+    # （精修 2026-10-12 起默认不跑；但收尾仍然跑在 worker 上，这组机制照旧需要），
     # 而收尾跑在 AppKit 主线程上 → 界面冻死、退不掉（实测挂过 4 小时 12 分）。
     # 现在窗口全程留着，✕ 就是退出口，问话与进度都在卡上。
     def ask_save(self, n: int, timeout: float = 60.0):
@@ -3021,7 +3022,10 @@ class Overlay:
             ans["v"] = True
         if ans["v"]:
             # 继续用它显示进度：切成「干活中」，不换卡（换卡会闪一下）。
-            card["set_status"]("正在收尾…")
+            # ⚠️ 与 `wrapup_open` / `wrapup_progress` 用**同一句**（2026-10-12）：
+            #    用户点完「存入」之后看到的就是这句话，不该先是「正在收尾…」
+            #    再被下一句盖掉。
+            card["set_status"]("正在生成笔记…")
             card["set_hint"]("")
             card["set_buttons"]([])
         else:
@@ -3033,50 +3037,33 @@ class Overlay:
         """不问「存不存」时也要有张收尾卡（没设笔记库那条路）—— 结论要留在它上面等用户点关闭。"""
         try:
             import wrapup as wrapup_mod
-            _open_wrapup_card(self, wrapup_mod, "正在收尾…")
+            _open_wrapup_card(self, wrapup_mod, "正在生成笔记…")
         except Exception:                                 # noqa: BLE001
             pass
 
     def wrapup_begin(self, cancel) -> None:
-        """进入「干活中」阶段：给卡装一个 [跳过精修] 按钮。
+        """进入「干活中」阶段。**现在什么都不做**（口子留着，调用点不动）。
 
-        ⚠️ `cancel` 是个 `threading.Event`（由 main 建、worker 读）。这里的回调
-           **只置位**，真正停下来发生在 worker 的**批次边界**
-           （见 `polish.polish_entries` 里那段注释）。
-        ⚠️ 卡上这个按钮与终端的 **Ctrl+C 走同一条路** —— 两者都只能靠标志跨线程，
-           因为收尾跑在 worker 上、而 Python 的信号只在主线程跑（PEP 475）。
-        ⚠️ 这是 AppKit 主线程回调：**不许联网、不许 sleep**（见 `_ask` 上方那条）。
+        ⚠️⚠️ 这里原来装一个 **[跳过精修] 按钮**。2026-10-12 精修改成默认不跑
+           （Owen：「精修不再必须，保留相关代码但不执行，只生成笔记」）——
+           卡上就不该再出现一个「跳过一件根本不会发生的事」的按钮。
+        ⚠️ **`cancel` 仍然有用**（所以参数留着）：Ctrl+C 与终端那条路照旧置位它，
+           `writer.close(cancel=…)` 在**批次边界**放弃精修与复习层
+           （见 `obsidian_writer.close` 的 docstring + `polish.polish_entries` 那段）。
+           它必须跨线程，因为收尾跑在 worker 上、而 Python 的信号只在主线程跑（PEP 475）。
         """
-        card = getattr(self, "_wrapup_card", None)
-        if card is None:
-            return
-        try:
-            def skip():
-                try:
-                    cancel.set()
-                except Exception:                         # noqa: BLE001
-                    pass
-                try:
-                    card["set_buttons"]([])
-                    card["set_hint"]("已请求跳过 —— 正在把笔记写出来…")
-                except Exception:                         # noqa: BLE001
-                    pass
-
-            card["set_buttons"]([("跳过精修", skip)])
-        except Exception:                                 # noqa: BLE001
-            pass
 
     def wrapup_progress(self, stage: str, done: int, total: int) -> None:
         """⚠️ 这个**从工作线程被调** —— UI 回写一律回主线程（`CLAUDE.md` 的不变量）。
 
         形状照 `entry_panel._make_batch_card` 那份来：回调在工作线程里，`callAfter` 回主线程。
         """
-        try:
-            from polish import progress_text
-            txt = progress_text(stage, done, total)
-        except Exception:                                 # noqa: BLE001
-            txt = f"{stage} {done}/{total}…"
-        self._wrapup_ui(self._wrapup_show, f"正在收尾…\n{txt}")
+        # ⚠️ **不再写阶段名**（2026-10-12）：精修默认不跑之后，剩下能报的阶段
+        #    （复习层 / 讲解）对用户没有意义 —— 而卡上写「精修 3/19」更是假话。
+        #    这里只维持一句状态词（HIG：状态词 + 转圈，别给假进度条）。
+        #    ⚠️ 终端那条路**照旧逐行打阶段**（`obsidian_writer._prog` → `print`），
+        #       所以"还在动"这个信息没有丢，只是不再挤在收尾卡上。
+        self._wrapup_ui(self._wrapup_show, "正在生成笔记…")
 
     def wrapup_done(self, ok: bool, msg: str) -> None:
         """⚠️ 同样**从工作线程被调**。看板不自动关 —— 由 main 决定去留。"""

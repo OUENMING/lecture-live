@@ -35,7 +35,7 @@
        RAG-lite 术语筛选(核心词常驻 + 动态召回 Top-3 + 课程术语全量 + 领域声明)
        输出 ZH: ... / EN: ...  → 中文逐字打字机 → 英文随后
   → 卡片式悬浮窗(中英垂直贴合) / 终端
-  → ObsidianWriter 逐句落盘 → 课后二次精修(领域+术语整批重矫正/重译) → 双层笔记
+  → ObsidianWriter 逐句落盘 → 〔可选·默认关〕课后二次精修(领域+术语整批重矫正/重译) → 双层笔记
 ```
 
 ## 实测性能(M1 Pro 16GB)
@@ -142,7 +142,7 @@ ClassLive.app/Contents/MacOS/python main.py --source file --path 录音.m4a --sp
 | `--cloud-model` | 云端模型(默认 `deepseek-flash`;可选 `deepseek-v4-pro`) |
 | `--api-key` | DeepSeek key(默认读 `DEEPSEEK_API_KEY` 或 `.deepseek_key` 文件) |
 | `--course` | 课程代码;不设也能写笔记(课名默认 `LECTURE`) |
-| `--polish` | `auto`(默认)/`off`;落笔前二次精修转录(需 key) |
+| `--polish` | `off`(**默认**)/`auto`;落笔前二次精修转录(需 key)。默认直接用直播版、下课就出笔记;`auto` 收尾多跑十几分钟 |
 | `--polish-model` | 精修模型(默认同 `--cloud-model`) |
 | `--vault` | Obsidian 库路径(默认 `~/Obsidian/Vault`,可用 `OBSIDIAN_VAULT` 覆盖) |
 | `--speed` | file 模式回放倍速(测试用) |

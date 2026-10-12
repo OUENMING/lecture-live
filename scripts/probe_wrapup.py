@@ -41,6 +41,9 @@ if phase == "live":
 
     def worker():
         time.sleep(6.0)                     # 先让 ask 超时（4 秒）走完，卡留在屏上
+        # ⚠️ 2026-10-12 起卡上**不再显示阶段名/进度**（精修默认不跑，写「精修 12/60」
+        #    就是假话）。这里照旧**从工作线程**推三次 —— 要验的是「跨线程回写那条路
+        #    通不通」，而不是那句话长什么样；断言也一并改成新文案。
         for i in (12, 24, 36):
             o.wrapup_progress("polish", i, 60)
             time.sleep(0.7)
@@ -74,8 +77,8 @@ if phase == "live":
     fail = []
     if got is not True:
         fail.append(f"ask 该超时返回 True，得到 {got!r}")
-    if not any("12/60" in s for s in seen):
-        fail.append("进度「精修 12/60」没上屏 —— 跨线程那条路没通")
+    if not any("正在生成笔记" in s for s in seen):
+        fail.append("进度文案「正在生成笔记…」没上屏 —— 跨线程那条路没通")
     if not any("已存入" in s for s in seen):
         fail.append("结论「已存入 …」没上屏")
     print("live：" + ("全过 ✅" if not fail else "❌ " + " · ".join(fail)))
@@ -177,10 +180,10 @@ if phase == "ask":
     card["set_buttons"]([("存入", lambda: print("存入")),
                          ("不存", lambda: print("不存"))])
 elif phase == "work":
-    card["set_status"]("正在精修转录（二次矫正 + 重译）…\n精修 120/579")
-    card["set_hint"]("按「跳过精修」直接用直播版转录出笔记")
-    card["set_buttons"]([("跳过精修", lambda: print("跳过")),
-                         ("中止并退出", lambda: print("退出"))])
+    # ⚠️ 2026-10-12 起这张卡就是一句话、没有按钮（[跳过精修] 已删）。
+    card["set_status"]("正在生成笔记…")
+    card["set_hint"]("")
+    card["set_buttons"]([])
 elif phase == "done":
     card["set_status"]("✅ 已存入 Obsidian\n～/Obsidian/MyVault/Lectures/"
                        "2026-09-28_SOC10020.md")

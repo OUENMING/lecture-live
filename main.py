@@ -42,7 +42,8 @@ DEVICE_CHECK_S = 2.0        # 实时音源: 多久重探一次「默认输入设
 SLEEP_GAP_S = 10.0          # 墙钟一次跳这么多 = 系统睡过一觉(见 check_clock_and_device)
 #: 收尾时留给实时总结的上限（秒）——提残余窗口 + 给当前章做一次正式合成。
 #: ⚠️ 它只是**上限**，不是固定等待：正常那一节实测 6–9 秒就走完了。
-#: ⚠️ 定这个数的约束是**收尾不能明显变慢**（那一步本来就在等精修），而不是"够用"。
+#: ⚠️ 定这个数的约束是**收尾不能明显变慢**（复习层 / 写盘还在等它），而不是"够用"。
+#: ⚠️ 2026-10-12：原话是「那一步本来就在等精修」—— 精修已默认不跑，理由换成上面这个。
 #: 比它更长的一律放弃 —— 放弃之后 `ChapterWriter` 已关，迟到的写入是 no-op。
 SUMMARY_FINISH_S = 25
 
@@ -277,7 +278,8 @@ def _wrapup_route(ui, ui_gone: bool, terminal: bool | None = None) -> str:
        双击启动时 `_closed` 一定为真（✕ 是那条路上**唯一**的停止方式），
        而终端不存在 → 上面那条「退回终端」实际是**退回虚空**：
        问话只写进日志、默认存，而**收尾卡一次都不出现** ——
-       11 分钟精修全程屏上空的。这正是 `wrapup.py` 当初要消灭的那种「卡住不动」。
+       11 分钟精修全程屏上空的（那是 **2026-10-12 之前**的事，精修现已默认不跑；
+       但复习层仍跑在收尾里，所以这条仍然成立）。这正是 `wrapup.py` 当初要消灭的那种「卡住不动」。
        → 没有终端时，关过窗也照样走 UI（`ask_save` 那边同步改了
          「已经关过的窗不算放弃」，两处缺一不可）。
 
@@ -329,7 +331,7 @@ def _shared_upload_queue():
 def start_upload(tester) -> dict:
     """把这一节排进上传队列，并**在后台线程里试一次**。返回 `{queued, pending}`。
 
-    ⚠️⚠️ **绝不能阻塞收尾** —— 它跑在收尾那条路上，而那里本来就在等精修。
+    ⚠️⚠️ **绝不能阻塞收尾** —— 它跑在收尾那条路上，那里本来就在等复习层 / 写盘。
        → 排队只写一个小 JSON（落盘，快），真正的传输丢给后台线程。
     ⚠️ **上传失败不影响任何东西** —— 报告、包、音频都已经在盘上了。
        失败的条目留着，`next_at` 到点后由下一次启动再试（退避 1→120 min，14 天过期）。
@@ -607,8 +609,9 @@ class TerminalUI:
         pass
 
     def wrapup_begin(self, cancel):
-        # 终端那条路没有可点的按钮 —— 「跳过精修」在那里就是 Ctrl+C，
+        # 终端那条路没有可点的按钮 —— 收尾要提前结束就是 Ctrl+C，
         # 而 Ctrl+C 由 `run()` 的收尾循环接住并置同一个 `cancel`。
+        # （2026-10-12：悬浮窗上那个 [跳过精修] 按钮也删了，两边现在都没按钮。）
         pass
 
     def wrapup_done(self, ok: bool, msg: str):
@@ -1242,7 +1245,7 @@ def run(args) -> None:
     # ⚠️⚠️ **纯转录档一个模型请求都不发** —— 仓库的硬契约（`DESIGN.md:187`：
     #    「纯转录 | 一个模型请求都不发」）。所以挡在**发请求之前**。
     # ⚠️ 没配 token → 空表（= 功能关着，不是错误）。同 `polish` 的 fail-soft。
-    # ⚠️ 同步跑，一节课实测约 6 秒 —— 收尾可以接受（那一步本来就在等精修）。
+    # ⚠️ 同步跑，一节课实测约 6 秒 —— 收尾可以接受（那一步本来就在等复习层）。
     def _keypoints_for(sents):
         if args.save_notes == "no" or trans.get("mode") == "raw":
             return []
@@ -2267,7 +2270,8 @@ def run(args) -> None:
             # `[官方]` Mac App Programming Guide「Don't Block the Main Thread」逐字:
             #   "never use the main thread to perform long-running or potentially
             #    unbounded tasks, such as tasks that require network access"
-            # 精修实测 11 分钟（579 句 ÷ 30 一批 = 20 批），全在这一条上。
+            # 精修实测 11 分钟（579 句 ÷ 30 一批 = 20 批）—— **那是 2026-10-12 之前**，
+            # 精修现已默认不跑；但复习层 / 提示层照旧跑在这条 worker 上，纪律不变。
             #
             # 现在分两段：
             #   ① 问「存不存」—— **留在主线程**。两条硬约束：worker 里做 `input()`
@@ -2338,8 +2342,10 @@ def run(args) -> None:
 
             _cancel = threading.Event()
             if not give_up:
-                # 卡上装一个 [跳过精修]（终端那条是空操作）。与 Ctrl+C 同一条路。
-                # 没库时不精修（`writer.close()` 早退），不装这个按钮。
+                # ⚠️ 2026-10-12 起**卡上不再有 [跳过精修] 那个按钮**（精修默认不跑，
+                #    按钮没意义了）—— `wrapup_begin` 留着当口子，调用点不动。
+                # ⚠️ 但 `_cancel` **仍然要建、要传下去**：Ctrl+C 靠它，
+                #    `writer.close(cancel=…)` 在批次边界放弃精修与复习层。
                 _ui_begin = None if _no_notes else getattr(ui, "wrapup_begin", None)
                 if callable(_ui_begin):
                     _ui_begin(_cancel)
@@ -2388,7 +2394,7 @@ def run(args) -> None:
                             echo("\n⏹ 强制退出 —— 笔记没写完，逐句日志仍在 sessions/")
                             raise
                         _cancel.set()
-                        echo("\n⏹ 已请求跳过精修，正在把笔记写出来…"
+                        echo("\n⏹ 已请求跳过剩下的收尾步骤，正在把笔记写出来…"
                              "（再按一次 Ctrl+C 强制退出，笔记不会写）")
                 if "err" in _box:
                     # ⚠️⚠️ **这里原来是一句 `raise _box["err"]` —— 2026-09-30 全量 OCR

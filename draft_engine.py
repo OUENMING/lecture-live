@@ -6,6 +6,7 @@
     eng = load_draft_engine(parakeet_asr, window_samples=PARTIAL_MAX_S * SR)   # 永不抛
     text, used = eng.transcribe(buf, tag)     # used ∈ {"nemotron", "parakeet"}；永不抛
     tail = eng.finish(buf, tag)               # 段尾：本段完整假设；没有 → ""；永不抛
+    ends = eng.sentence_ends(tag)             # 本段已封口的句末时刻（秒，相对段首）；没有 → ()；永不抛
     eng.name / eng.reason / eng.fallback_reason                               # 只读
 
 - `buf` 是**本段从段首累积的**样本（`Segmenter._buf()`），`tag` 是 put 那一刻的段号。
@@ -14,6 +15,8 @@
 
 ⚠️ 线程：**只能在一个线程里用**（partial_worker）。sherpa 的 OnlineStream 非线程安全；
    本类不加锁 —— 加了也挡不住第二个线程造成的「流状态错乱」，所以干脆规定单线程。
+   唯一例外是 `sentence_ends`：它只读草稿线程**整个替换**的一个元组（不碰 sherpa），
+   给 `vad.Segmenter` 在音频线程里读（3.9.4 句末切段）。
 ⚠️ 熔断后**本节课不再试**（不来回抖）：退回 Parakeet，直到进程结束。
 ⚠️ 段中间**不补静音、不调 `input_finished`**：那会结束这条流，后面再喂的样本全丢。
    段**尾**才补（`finish`，3.9.4）：这条流本来就要扔了，补一截静音让前瞻里那几个词解出来。
@@ -37,6 +40,19 @@ SLOW_S, SLOW_STRIKES = 0.9, 3  # 连续 3 次单次更新 > 0.9 s 熔断（P0 �
 NUM_THREADS = 2
 TAIL_PAD_S = 0.8               # 段尾补的静音（见 `NemotronDrafter.finish`）
 SR = 16000
+END_PUNCT = (".", "?", "!")
+
+
+def sealed_ends(tokens, timestamps) -> tuple:
+    """纯函数：**已封口**的句末标点时刻 —— 句末标点后面又开了一个新词（token 以空格开头）。
+
+    ⚠️ 只认封口的：段尾那个还没下文的句号随时可能被改掉（流式假设会回改最后几个 token）。
+    ⚠️ 时间戳是**模型发出该 token 的时刻**，比音频里那个停顿**晚**（10-12 真课 69 个句号：
+       停顿中心中位在时间戳前 0.50 s）—— 用的人自己往前找，见 `vad.find_sentence_cut`。
+    """
+    toks, ts = list(tokens), list(timestamps)
+    return tuple(float(ts[i]) for i in range(min(len(toks), len(ts)) - 1)
+                 if toks[i].strip() in END_PUNCT and toks[i + 1].startswith(" "))
 
 
 def choose(mode: str, model_present: bool, ram_bytes: int | None) -> tuple[str, str]:
@@ -86,6 +102,8 @@ class NemotronDrafter:
         self._tag: object = object()
         self._fed = 0
         self._finished: object = object()     # 最近 `finish` 过的段号
+        #: `(段号, 封口句末时刻…)` —— 草稿线程**整个替换**，音频线程只读（见模块头「线程」）
+        self.ends: tuple = (None, ())
 
     def update(self, buf, tag) -> str:
         """喂到 `buf` 末尾，返回本段当前假设。已经 `finish` 过的段 → `""`（晚到的旧缓冲，丢掉）。"""
@@ -99,6 +117,11 @@ class NemotronDrafter:
             self._fed = len(buf)
         while self._rec.is_ready(self._stream):
             self._rec.decode_stream(self._stream)
+        try:
+            r = self._rec.get_result_all(self._stream)
+            self.ends = (tag, sealed_ends(r.tokens, r.timestamps))
+        except Exception:                     # noqa: BLE001 —— 拿不到时间戳只是不给提示，草稿照出
+            self.ends = (tag, ())
         return self._rec.get_result(self._stream).strip()
 
     def finish(self, buf, tag) -> str:
@@ -112,7 +135,10 @@ class NemotronDrafter:
            再来 `update` 会因为 `_stream` 被清空而新开一条流（不会往死流里喂）。
         """
         if self._stream is None or tag != self._tag or len(buf) < self._fed:
-            return ""                     # 这一段一份草稿都没跑过 → 不额外花一整段的解码
+            # 没跑过草稿 → 不额外花一整段的解码。硬切挪回了一截（模型已经听过切点后面）→ 不补尾，
+            # 那会把下一段的词也带进来；也**不截到句号**（3.9.4 试过）：草稿槽只有一格，截掉的那几个词
+            # 要等下一段第一份草稿（实测 ~2 s）才回来 —— 屏上会先消失再出现，不如原样挂着等下一段接上。
+            return ""
         if len(buf) > self._fed:
             self._stream.accept_waveform(SR, buf[self._fed:])
         import numpy as np
@@ -166,6 +192,14 @@ class DraftEngine:
         except Exception as e:               # noqa: BLE001
             self._trip(f"出错：{e!r}")
             return ""
+
+    def sentence_ends(self, tag) -> tuple:
+        """本段（`tag`）最近一次草稿里已封口的句末时刻。Parakeet / 熔断后 / 不是这一段 → `()`。**永不抛**。"""
+        try:
+            got_tag, ends = self._streaming.ends if self._streaming is not None else (None, ())
+            return ends if got_tag == tag else ()
+        except Exception:                     # noqa: BLE001
+            return ()
 
     def _trip(self, why: str) -> None:
         self._streaming = None

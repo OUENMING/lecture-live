@@ -186,9 +186,18 @@ class DraftTranslator:
         self._translate(rest, lambda d: self._output(seq, seg, zh + d), [lk["last"]])
 
     def _once(self, en: str, context) -> str:
-        """译一条、只要最终那份中文（`translate` 的约定是走回调；云端只回调一次，本地也是）。"""
+        """译一条、只要最终那份中文（`translate` 的约定是走回调；云端只回调一次，本地也是）。
+
+        ⚠️ **自己接住异常、返回空**：封口句和尾巴是并发的两次，一次抛了不许把另一次已经译好的连坐丢掉
+           （云端抖一下 → `EngineRouter` 降级到本地 → 朋友机器没装本地模型 → `_ensure` 抛 RuntimeError）。
+           封口句空 = 这一轮不锁（下面整段重译那条路照旧会抛、由 `step` 计数）；尾巴空 = 只上锁住的那截。
+        """
         got: list = []
-        self._translate(en, lambda d: got.__setitem__(slice(None), [d]), context)
+        try:
+            self._translate(en, lambda d: got.__setitem__(slice(None), [d]), context)
+        except Exception:                                  # noqa: BLE001
+            self.stats["errors"] += 1
+            return ""
         return got[0] if got else ""
 
     def run(self, running) -> None:

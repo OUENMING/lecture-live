@@ -236,9 +236,12 @@ class SealedLock(unittest.TestCase):
     def setUp(self):
         self.calls, self.out = [], []
         self.bad = set()
+        self.boom = set()
 
         def tr(en, on_zh, ctx):
             self.calls.append((en, list(ctx)))
+            if en in self.boom:
+                raise RuntimeError("本地模型没装（可选）")
             if en not in self.bad:
                 on_zh(f"<{en}>")
         self.t = D.DraftTranslator(
@@ -265,6 +268,21 @@ class SealedLock(unittest.TestCase):
         calls, out = self.go(2, 0, "A b c. D e f")           # 只译尾巴，前半句中文原样
         self.assertEqual(calls, [("D e f", ["A b c."])])
         self.assertEqual(out, (2, 0, "<A b c.><D e f>"))
+
+    def test_tail_that_raises_does_not_drop_the_sealed_sentence(self):
+        self.boom.add("D e")
+        _, out = self.go(1, 0, "A b c. D e")
+        self.assertEqual(out, (1, 0, "<A b c.>"), "尾巴抛了：封口句已经译好，照样上屏并锁住")
+        self.boom.clear()
+        calls, out = self.go(2, 0, "A b c. D e f")
+        self.assertEqual(calls, [("D e f", ["A b c."])], "锁还在 → 只译尾巴")
+        self.assertEqual(out, (2, 0, "<A b c.><D e f>"))
+
+    def test_sealed_that_raises_falls_back_without_locking(self):
+        self.boom.add("A b c.")
+        _, out = self.go(1, 0, "A b c. D e")
+        self.assertEqual(out, (1, 0, "<A b c. D e>"), "封口句抛了 → 不锁，这一轮整段译")
+        self.assertEqual(self.t._lock["en"], "")
 
     def test_second_seal_only_translates_the_new_sentence(self):
         self.go(1, 0, "A b c. D e")

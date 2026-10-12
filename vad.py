@@ -9,6 +9,8 @@
    (以 `_end_silence_threshold()` 为准。这里曾写 0.6/0.30/0.25 —— 是调参前的
     旧值, 与实现不符, 会误导照着注释改代码的人。)
 3. **Pre-roll 300ms**: 静音→说话跳变时把前 300ms 补进语音头部, 消除清辅音吃字。
+4. **撞 12s 上限时先找句末**（3.9.4）：草稿模型给出本段已封口的句号时刻，就切在最后一个
+   句号前的真停顿上（`find_sentence_cut`）；找不到再退回最后 1.5s 的能量低谷。
 
 回调必须快速返回(重活交给调用方 worker 线程)。
 """
@@ -174,10 +176,57 @@ def find_valley_cut(buf: np.ndarray, sr: int = SR, look_s: float = 1.5,
         return len(buf)
 
 
+#: 句末切点的约束（`find_sentence_cut`）。来源：10-12 SOC10020 整节课回放（`docs/HANDOFF-20261012-3.9.4.md`）。
+RESUME_PARTIAL_MIN = SR // 2   # 硬切挪回 ≥ 0.5 s 才立刻出一份草稿（更短的等正常节拍就好）
+SENT_MIN_HEAD_S = 2.5     # 句号离段首至少这么远（太短的头段一份请求只换几个词）
+SENT_MIN_TAIL_S = 0.6     # 句号离段尾至少这么远（太近 = 下一句还没开口，等于没挪）
+SENT_LOOK_BEFORE_S = 1.0  # 停顿在时间戳**之前**找：停顿中心中位在时间戳前 0.50 s（p10 −0.89）
+SENT_LOOK_AFTER_S = 0.1
+SENT_QUIET = 0.35         # 窗口最低帧 < 全段帧 RMS 中位 × 这个 才算真停顿；否则这个句号不切
+
+
+def find_sentence_cut(buf: np.ndarray, ends, sr: int = SR, frame_s: float = 0.03) -> int | None:
+    """纯函数：在**最后一个**够格的句号前的真停顿里找切点，返回下标；一个都不够格 → `None`。
+
+    `ends` = 已封口句末的时刻（秒，相对 `buf` 起点；`draft_engine.sealed_ends`）。从后往前试：
+    句号要在 `[SENT_MIN_HEAD_S, dur − SENT_MIN_TAIL_S]` 里，窗口 `[t − 1.0, t + 0.1]` 内
+    30ms 帧 RMS 的最低点要够安静。⚠️ 窗口往**前**开：时间戳比音频晚，往后开会切进下一句的头一个词
+    （回放实测：往后开的那版删词 +101，往前开 +26）。
+    """
+    try:
+        F = int(frame_s * sr)
+        dur = len(buf) / sr
+        if not ends or len(buf) < 3 * F:
+            return None
+        whole = np.sqrt(np.mean(buf[: len(buf) // F * F].astype(np.float32).reshape(-1, F) ** 2, axis=1))
+        med = float(np.median(whole))
+        for t in sorted(ends, reverse=True):
+            if not (SENT_MIN_HEAD_S <= t <= dur - SENT_MIN_TAIL_S):
+                continue
+            a = int(max(0.0, t - SENT_LOOK_BEFORE_S) * sr)
+            b = int(min(dur, t + SENT_LOOK_AFTER_S) * sr)
+            n = (b - a) // F
+            if n < 3:
+                continue
+            rms = np.sqrt(np.mean(buf[a:a + n * F].astype(np.float32).reshape(n, F) ** 2, axis=1))
+            k = int(np.argmin(rms))
+            if rms[k] < SENT_QUIET * med:
+                return a + k * F + F // 2
+        return None
+    except Exception:
+        return None
+
+
 class Segmenter:
-    def __init__(self, on_partial, on_utterance_end, vad_model: str = VAD_MODEL):
+    def __init__(self, on_partial, on_utterance_end, vad_model: str = VAD_MODEL,
+                 sentence_ends=None):
         self.on_partial = on_partial
         self.on_utterance_end = on_utterance_end
+        #: 撞 12s 上限时问「本段已封口的句末在哪」（`() -> 秒的序列`，3.9.4）。**必须立刻返回、不许抛**
+        #: —— 它在音频线程里调（`main` 接的是 `DraftEngine.sentence_ends`，只读一个元组）。
+        #: `None` 或 `CLASSLIVE_SEG_SENTENCE=0` → 旧行为（只找能量低谷）。
+        self.sentence_ends = (sentence_ends
+                              if os.environ.get("CLASSLIVE_SEG_SENTENCE", "1") != "0" else None)
         #: 12s 硬切时往回找能量低谷再切（默认开；`CLASSLIVE_VAD_VALLEY=0` = 旧行为）。
         #: 只在构造时读一次；测试直接改这个属性。
         self.valley = os.environ.get("CLASSLIVE_VAD_VALLEY", "1") != "0"
@@ -210,7 +259,7 @@ class Segmenter:
         self.diag = {"cuts": 0, "hard_cuts": 0, "dropped": 0,
                      "dropped_s": 0.0, "weak_blocks": 0,
                      "vad_resets": 0, "blind_dropped": 0,
-                     "valley_back_s": 0.0}
+                     "valley_back_s": 0.0, "sentence_cuts": 0}
 
     @property
     def dur(self) -> float:
@@ -264,7 +313,8 @@ class Segmenter:
             return ""
         bits = [f"断句 {d['cuts']} 次"]
         if d["hard_cuts"]:
-            bits.append(f"12s 硬切 {d['hard_cuts']} 次(段内没有够长的静音, 只能撞上限切)")
+            bits.append(f"12s 硬切 {d['hard_cuts']} 次(段内没有够长的静音, 只能撞上限切)"
+                        + (f", 其中 {d['sentence_cuts']} 次挪到了句末" if d.get("sentence_cuts") else ""))
         if d["dropped"]:
             bits.append(f"收尾丢弃 {d['dropped']} 段/{d['dropped_s']:.1f}s"
                         f"(有语音但不足 {MIN_UTTERANCE_S}s)")
@@ -358,7 +408,17 @@ class Segmenter:
                 self.diag["cuts"] += 1
             buf = self._buf().copy()
             rest = buf[:0]
-            if hard_cut and not silence_cut and self.valley:
+            cut = None
+            if hard_cut and not silence_cut and self.sentence_ends is not None:
+                try:
+                    cut = find_sentence_cut(buf, self.sentence_ends())
+                except Exception:
+                    cut = None
+                if cut is not None:
+                    self.diag["sentence_cuts"] += 1      # 硬切里有多少挪到了句末（仍计入 hard_cuts）
+                    self.diag["valley_back_s"] += (len(buf) - cut) / SR
+                    buf, rest = buf[:cut].copy(), buf[cut:].copy()
+            if cut is None and hard_cut and not silence_cut and self.valley:
                 cut = find_valley_cut(buf)
                 self.diag["valley_back_s"] += (len(buf) - cut) / SR   # 只计数
                 buf, rest = buf[:cut].copy(), buf[cut:].copy()
@@ -382,6 +442,12 @@ class Segmenter:
             #       真开始丢的时候看不出来 —— 要查就先看这里。
             if len(buf) / SR >= MIN_UTTERANCE_S:
                 self.on_utterance_end(buf)
+            if len(rest) >= RESUME_PARTIAL_MIN:
+                # 挪回的那截已经是下一段的话（切在句末时常有 3–6 s）：**马上**给新段出一份草稿，
+                # 别再等满 1 s。⚠️ 排在 `on_utterance_end` 之后：调用方据此先推进段号，
+                # 这份缓冲才会记到新段名下。
+                self.last_partial = now
+                self.on_partial(self._buf())
         elif sp and now - self.last_partial >= PARTIAL_INTERVAL_S:
             self.last_partial = now
             self.on_partial(self._buf())

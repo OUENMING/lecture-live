@@ -301,6 +301,44 @@ class Load(unittest.TestCase):
         self.assertEqual((eng.name, made), ("parakeet", []))
 
 
+class SentenceEnds(unittest.TestCase):
+    """3.9.4 句末切段的提示：草稿线程放下 `(段号, 封口句末…)`，音频线程按段号取。"""
+
+    def test_only_sealed_end_punct_counts(self):
+        toks = [" so", " it", ".", " Next", " point", "3", ".", "5", " is", "?"]
+        ts = [0.1, 0.4, 1.0, 1.2, 1.5, 2.0, 2.1, 2.2, 2.6, 3.0]
+        # "." 后跟 " Next" → 封口；"3.5" 里的 "." 后面不是空格开头 → 不算；段尾的 "?" 没下文 → 不算
+        self.assertEqual(de.sealed_ends(toks, ts), (1.0,))
+        self.assertEqual(de.sealed_ends([], []), ())
+        self.assertEqual(de.sealed_ends([".", " A"], [0.5]), ())   # 时间戳缺一截 → 不越界
+
+    def _rec(self, toks, ts):
+        class R:
+            tokens, timestamps = toks, ts
+
+        class Rec(FakeRec):
+            def get_result_all(self, s):
+                return R()
+        return Rec()
+
+    def test_update_publishes_ends_for_its_tag(self):
+        rec = self._rec([" a", ".", " B"], [0.5, 3.1, 3.3])
+        eng = de.DraftEngine(FakeParakeet(), de.NemotronDrafter("", rec=rec), window_samples=WIN)
+        eng.transcribe(buf(1600), 7)
+        self.assertEqual(eng.sentence_ends(7), (3.1,))
+        self.assertEqual(eng.sentence_ends(8), (), "别把上一段的句号当成这一段的（时刻是相对各自段首的）")
+
+    def test_no_timestamps_or_parakeet_is_empty_not_raise(self):
+        eng = de.DraftEngine(FakeParakeet(), de.NemotronDrafter("", rec=FakeRec()), window_samples=WIN)
+        eng.transcribe(buf(1600), 0)                 # FakeRec 没有 get_result_all → 草稿照出、提示为空
+        self.assertEqual(eng.sentence_ends(0), ())
+        self.assertEqual(de.DraftEngine(FakeParakeet(), window_samples=WIN).sentence_ends(0), ())
+
+    def test_main_asks_with_the_current_segment(self):
+        src = (HERE / "main.py").read_text(encoding="utf-8")
+        self.assertIn('sentence_ends=lambda: draft.sentence_ends(seg_gen["n"])', src)
+
+
 class Wiring(unittest.TestCase):
     """`main.partial_worker` 是嵌套闭包，跑不到 → 用 AST 钉「段号只有一个来源」。
 
@@ -335,6 +373,12 @@ class Wiring(unittest.TestCase):
         self.assertEqual(sorted(puts), ["_eseg", "_seg"])
         src = ast.unparse(w)
         self.assertIn("_eseg = _end[1]", src, "段尾那条的段号必须取自 put_end 带来的那个，别现读")
+
+    def test_tail_identical_to_last_draft_is_not_sent_again(self):
+        import ast
+        src = ast.unparse(self._worker())
+        self.assertIn("if t and (not (_end[1] == last_gen and t == prev_text)):", src,
+                      "段尾收尾和这一段上一份草稿一字不差时，不许再上屏一遍、再送翻一次")
 
 
 

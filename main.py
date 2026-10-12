@@ -1550,8 +1550,11 @@ def run(args) -> None:
                 #    段尾那一刻 finalq 里正好躺着这一段，让开就等于永远不收。
                 _t_end = time.monotonic()
                 t = draft.finish(*_end)
-                if t:
+                # 收尾解出来的和这一段上一份草稿**一字不差**（尾词早就解全了，10-12 回放约 2/15 段）
+                # → 屏上不用再放一遍，也不用再花一次草稿翻译。
+                if t and not (_end[1] == last_gen and t == prev_text):
                     _eseg = _end[1]
+                    prev_text = t
                     drafts.put((t, stab.update(t) if stab is not None else t, len(_end[0]) / SR,
                                 time.monotonic() - _t_end, _eseg, _t_end, draft.name))
                     if trans["mode"] == "both":
@@ -1568,7 +1571,10 @@ def run(args) -> None:
             # ASR 锁, 不互抢; 只有 Parakeet 兜底(定稿退化回草稿模型)时才共用一把。
             # 有定稿在排队时让草稿这一轮退开: 草稿迟到 1s 无感, 定稿迟到直接
             # 拖慢首字。草稿译文另有独立线程(DraftTranslator), 不再排在定稿之后。
-            if not finalq.empty():
+            # ⚠️ 3.9.4 起**只有草稿也是 Parakeet 时才让**：Nemotron 草稿和定稿不共用模型，让开只会把
+            #    段尾那一刻 `Segmenter` 给新段的那份缓冲（硬切挪回的 3–6 s）白白丢掉 —— 实测新段第一份
+            #    草稿因此晚到 ~2 s（让开 → 等下一拍 1 s → 再从头解一整截）。
+            if draft.name == "parakeet" and not finalq.empty():
                 continue
             try:
                 _t_draft = time.monotonic()
@@ -1809,6 +1815,9 @@ def run(args) -> None:
         # ⭐ 段落**真正结束**的那一刻就取段号，随 `finalq` 一路带到定稿 —— 现场采集的分组靠它。
         #    ⚠️ 不这么做就得等定稿上屏才自增，那比段落结束晚 2–4 秒（Whisper + LLM）。
         on_utterance_end=_utterance_end,
+        # ⭐ 撞 12s 上限时切在本段最后一个句号前的停顿上（3.9.4，`vad.find_sentence_cut`）。
+        #    只读草稿线程最近一次放下的元组，音频线程里调也不阻塞；段号不对（草稿还没跟上新段）→ ()。
+        sentence_ends=lambda: draft.sentence_ends(seg_gen["n"]),
     )
 
     # ---- 专有名词查询线程(网络请求, 异步且缓存, 不影响主链路) ----

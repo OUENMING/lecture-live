@@ -13,7 +13,7 @@
 | 下一件 | G ✅ → R2 ✅（Worker 已部署）→ **R3 P1 ✅（2026-10-11 晚；本机 `main` 已快进到 `2fb8c42`，未推送）** → R3 真课闸门（`PLAN-streaming-asr.md` §6.4，Owen 已装模型）→ 后续优化 → 一人一码 |
 | 分支 `stream-asr` | 2026-10-12 凌晨：本机 `main` 已快进到 `stream-asr`（`59f65b8`，比 origin 多 40 个提交，**未推送**）。在 10-11 那批之上加了：开课面板「更新」入口（现在更新 → `cl` 退出码 5 重启自己；下课后自动装；课中「立即更新」已删）、面板瘦身 P1、3.8.10–3.9.0 标 `### 更新方式 auto`（用 `v3.8.9:update.py` 自己的解析器核过：3.8.9 退出时会自动拉）。截图 Owen 已过目 |
 | 发版前最后一道 | 周一真课闸门（`PLAN-streaming-asr.md` §6.4）→ Owen 过目 CHANGELOG → VERSION 3.9.0（现在还是 3.8.12）→ push / tag / release。云端开的端到端已跑：12 段全走 Groq，客户端 p50 0.69 s，rc 0、无 Traceback、dropped 0 |
-| 3.9.1（课后，分支 `next-391`） | 已做：Parakeet 懒加载、`llm_client` 收口、一人一码（**Worker 已从 next-391 部署**，版本 `48dbe443`；还差 Owen 放 `DEEPSEEK_KEY` / `ADMIN_TOKEN` 两个 secret，见 `PLAN-passkey.md` 状态行）。等真课数据：句子级提前送翻、增益底噪闸门、R3 P2 标点断句（要 Owen 点头）。未做：删 `draft_stable`、P3 重建守护脚本、Process Tap 真机 |
+| 3.9.2（分支 `next-391`；3.9.1 已发：更新格修复 + 云端转写开关进菜单） | 已做：Parakeet 懒加载、`llm_client` 收口、一人一码（Worker 已部署 `48dbe443`、两个 secret 已放、端到端实测过）、没设笔记库时不再问「存入 Obsidian 吗」（结论卡留住等点关闭）。等真课数据：句子级提前送翻、增益底噪闸门、R3 P2 标点断句（要 Owen 点头）。未做：删 `draft_stable`、P3 重建守护脚本、Process Tap 真机 |
 
 查当前真实状态：`git status --porcelain`、`git log --oneline -15`、`git rev-list --count origin/main..HEAD`。
 
@@ -79,7 +79,7 @@ D1 用户零操作（key 全放 Owen 的 Worker）· D2 定稿链 Groq → 千�
 （§0 那张表是现状；这里只列顺序。）
 
 1. 周一真课闸门（`PLAN-streaming-asr.md` §6.4）→ Owen 过目 3.9.0 CHANGELOG → VERSION 3.9.0 → push / tag / release，各步等他点头。
-2. 3.9.1 在 `next-391`：已做的见 §0；还差一人一码的填码告知文案（`PLAN-passkey.md` §4，文案给 Owen 看）。
+2. 3.9.2 在 `next-391`：已做的见 §0；填码弹窗 Owen 定了不做（`PLAN-passkey.md` §4）。发版前 CHANGELOG 给 Owen 看。
 3. 等真课数据再动：句子级提前送翻（下面第 4 条）、增益底噪闸门、R3 P2 标点断句（要 Owen 点头）。
 4. R3：P1 已落地（见 `PLAN-streaming-asr.md` §0.1）。「句子级提前送翻」已离线量过（OCW 322 段，Nemotron 草稿）：
    关上的句子（句末标点后还有词）与 Nemotron 自己的段定稿**逐词 100% 一致**，覆盖约 40% 的定稿词，比段结束早 p50 4.0 s；

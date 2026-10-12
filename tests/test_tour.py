@@ -18,19 +18,45 @@ class Content(unittest.TestCase):
         # Chameleon：3 步 72% → 4 步 45% → 7 步 16%；前 1% 没有超过 5 步的
         self.assertTrue(3 <= len(tour.PAGES) <= 5, len(tour.PAGES))
         for sym, title, lines in tour.PAGES:
-            self.assertTrue(1 <= len(lines) <= 3, title)
+            if tour.is_stats(lines):
+                self.assertTrue(1 <= len(lines) <= 6, title)
+            else:
+                self.assertTrue(1 <= len(lines) <= 3, title)
 
     def test_every_line_fits_on_one_line(self):
         from AppKit import NSFont, NSString
         font = NSFont.systemFontOfSize_weight_(13.0, tour._W)
         room = tour.WIDTH - 2 * tour.PAD
         for _, title, lines in tour.PAGES:
+            if tour.is_stats(lines):
+                continue
             for ln in lines:
                 w = NSString.stringWithString_(ln).sizeWithAttributes_({"NSFont": font}).width
                 self.assertLess(w, room, f"「{ln}」{w:.0f}pt 放不下（{room:.0f}pt）")
 
+    def test_stats_fit_their_tiles(self):
+        from AppKit import NSFont, NSString
+        tile_w = (tour.WIDTH - 2 * tour.PAD - (tour.TILE_COLS - 1) * tour.TILE_GAP) / tour.TILE_COLS
+        for (big, lab, sub) in tour.STATS:
+            for txt, font in ((big, NSFont.systemFontOfSize_weight_(24.0, tour._SEMI)),
+                              (lab, NSFont.systemFontOfSize_weight_(12.0, tour._W)),
+                              (sub, NSFont.systemFontOfSize_weight_(10.5, tour._W))):
+                w = NSString.stringWithString_(txt).sizeWithAttributes_({"NSFont": font}).width
+                self.assertLess(w, tile_w - 8, f"「{txt}」{w:.0f}pt 放不下格子（{tile_w:.0f}pt）")
+        w = NSString.stringWithString_(tour.STATS_NOTE).sizeWithAttributes_(
+            {"NSFont": NSFont.systemFontOfSize_weight_(10.5, tour._W)}).width
+        self.assertLess(w, tour.WIDTH - 2 * tour.PAD)
+
+    def test_stats_percent_matches_before_after(self):
+        # 百分比必须能从「旧 → 新」那一栏算回来（防止只改了一边）
+        import re
+        for big, lab, sub in tour.STATS:
+            a, b = [float(x) for x in re.findall(r"[\d.]+", sub)[-2:]]
+            self.assertAlmostEqual(round((a - b) / a * 100), int(big.rstrip("%")), delta=1, msg=f"{lab}: {sub}")
+
     def test_no_colour_emoji_and_no_removed_buttons(self):
-        txt = "".join(t + "".join(ls) for _, t, ls in tour.PAGES)
+        txt = "".join(t + "".join("".join(x) if not isinstance(x, str) else x for x in ls)
+                      for _, t, ls in tour.PAGES)
         for bad in ("⭐", "❓", "💡", "🎯"):   # ⭐ 按钮 2026-09-29 已合并进问号；彩色 emoji 改不了色
             self.assertNotIn(bad, txt)
 
@@ -46,8 +72,9 @@ class Content(unittest.TestCase):
         self.assertGreater(on - off, 0.5, "当前页要一眼分得出")
 
     def test_short_pages_are_centred(self):
-        self.assertEqual(tour.body_offset(3, 3), 0)
-        self.assertEqual(tour.body_offset(2, 3), tour.LINE_H / 2)
+        self.assertEqual(tour.body_offset(66, 66), 0)
+        self.assertEqual(tour.body_offset(44, 66), 11)
+        self.assertEqual(tour.body_offset(45, 66), float(round(21 / 2)), "整数坐标")
 
     def test_button_hierarchy(self):
         # 主 > 次 > 弱：「跳过」不能和「下一步」一样重（2026-10-12 评审）

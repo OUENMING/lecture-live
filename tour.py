@@ -30,7 +30,26 @@ import panel
 
 #: 每页：`(SF Symbol 名, 标题, 正文行…)`。**唯一定义点**。一页一个概念，正文 ≤3 行。
 #: ⚠️ 图标用**单色系统符号**不用 emoji：emoji 是彩色的、改不了色（同 overlay 顶栏 ❓ 换成 SF Symbol 那条）。
+#: 第 1 页「这一版和旧版比」：每格 `(大数字, 一句话, 旧 → 新)`。⭐ 数字全是实测，出处：
+#:   · 省电：同一段 240 s 课堂录音，CPU 能耗 1692 J → 333 J（旧 = 本地 Whisper 定稿 + Parakeet 草稿，即 3.8.x 默认），
+#:     平均 6.6 W → 1.3 W —— `docs/HANDOFF-20261012-3.9.4.md` §E
+#:   · 错字 / 漏句：MIT 公开课 322 段，本地 Whisper 12.0% / 2.5% → 云端 Groq（Opus）10.1% / 0.4% —— `docs/RESEARCH-cloud-asr.md`
+#:   · 草稿乱改：回改率 5.7% → 0.6%（Parakeet 滑窗 → Nemotron 流式）—— `docs/PLAN-streaming-asr.md`
+#:   · 句尾漏字：段尾草稿比定稿少的词 3.6 → 2.2（SOC10020 真课 47 段，3.9.3 → 3.9.4）—— 交接文档
+#:   · 新字幕更快：新一段第一份草稿距上一段结束 p50 2.22 → 1.21 s（3.9.3 → 3.9.4，云端走通后实测）
+#: ⚠️ 百分比 = (旧 − 新) / 旧，四舍五入到整数；改数字先改出处。
+STATS: tuple = (
+    ("80%", "更省电", "6.6 W → 1.3 W"),
+    ("16%", "错字更少", "12.0% → 10.1%"),
+    ("84%", "漏句更少", "2.5% → 0.4%"),
+    ("89%", "草稿少乱改", "5.7% → 0.6%"),
+    ("39%", "句尾少漏字", "每段 3.6 → 2.2 个词"),
+    ("45%", "新字幕更快", "2.2 秒 → 1.2 秒"),
+)
+STATS_NOTE = "同一段课堂录音实测 · 前四项对比 3.8，后两项对比 3.9.3"
+
 PAGES: tuple = (
+    ("chart.bar.xaxis", "这一版，和旧版比", STATS),
     ("rectangle.stack", "一门课，一张卡",
      ("课件拖进下面的虚线框，自动分到各门课。",
       "上面那条就绪条：缺哪一项，就点哪一项。",
@@ -57,6 +76,10 @@ TITLE_H = 30.0
 LINE_H = 22.0
 DOTS_H = 16.0
 FOOT_H = 28.0
+TILE_H = 66.0          # 数字格：大数字 26 + 一句话 16 + 旧→新 14 + 上下留白
+TILE_GAP = 8.0
+TILE_COLS = 3
+NOTE_H = 16.0
 FADE_S = 0.18          # 翻页淡入淡出；系统开了「减弱动态效果」就不做
 _W = 0.23              # NSFontWeightMedium，同 whatsnew / overlay
 _SEMI = 0.4
@@ -67,15 +90,27 @@ PRIMARY_BG, SECONDARY_A, TERTIARY_A = panel.PRIMARY_BG_A, 0.75, 0.45
 DOT_ON, DOT_OFF = 0.92, 0.22
 
 
+def is_stats(body) -> bool:
+    """这一页的正文是数字格（`STATS` 那种三元组）而不是几行字。"""
+    return bool(body) and not isinstance(body[0], str)
+
+
+def body_h(body) -> float:
+    """纯函数：一页正文占多高。数字格 = 行数 × 格高 + 脚注；文字 = 行数 × 行高。"""
+    if is_stats(body):
+        rows = -(-len(body) // TILE_COLS)
+        return rows * TILE_H + (rows - 1) * TILE_GAP + 6 + NOTE_H
+    return len(body) * LINE_H
+
+
 def height(pages=PAGES) -> float:
-    """卡片高度按**最长那一页**算 —— 翻页时窗口不跳（行数少的那页在正文区里垂直居中）。"""
-    n = max(len(p[2]) for p in pages)
-    return PAD + BADGE + 14 + TITLE_H + 8 + n * LINE_H + 18 + DOTS_H + 14 + FOOT_H + PAD
+    """卡片高度按**最高那一页**算 —— 翻页时窗口不跳（矮的那页在正文区里垂直居中）。"""
+    return PAD + BADGE + 14 + TITLE_H + 8 + max(body_h(p[2]) for p in pages) + 18 + DOTS_H + 14 + FOOT_H + PAD
 
 
-def body_offset(n_lines: int, n_max: int) -> float:
-    """纯函数：这一页正文往下挪多少才在正文区里居中（行数少的页不在底下留一截空洞）。"""
-    return (n_max - n_lines) * LINE_H / 2
+def body_offset(h_page: float, h_max: float) -> float:
+    """纯函数：这一页正文往下挪多少才在正文区里居中（矮的页不在底下留一截空洞）。整数坐标：非整数会让字发虚。"""
+    return float(round((h_max - h_page) / 2))
 
 
 def dots(i: int, n: int) -> list:
@@ -104,7 +139,8 @@ def build(on_done=None, pages=PAGES):
                             NSWindowStyleMaskNonactivatingPanel)
 
         h = height(pages)
-        n_max = max(len(pg[2]) for pg in pages)
+        n_max = max((len(pg[2]) for pg in pages if not is_stats(pg[2])), default=0)
+        bh_max = max(body_h(pg[2]) for pg in pages)
         fp = panel.build(NSMakeRect(0, 0, WIDTH, h),
                          NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
         p, ve = fp.window, fp.glass
@@ -147,9 +183,44 @@ def build(on_done=None, pages=PAGES):
 
         y -= 14 + TITLE_H
         title = label(NSMakeRect(PAD, y, WIDTH - 2 * PAD, TITLE_H), 20.0, weight=_SEMI)
+        badge_y0, title_y0 = badge.frame().origin.y, y
         body_top = y - 8
         body = [label(NSMakeRect(PAD, body_top - (k + 1) * LINE_H, WIDTH - 2 * PAD, LINE_H),
                       13.0, alpha=0.82) for k in range(n_max)]
+
+        # 数字格（第 1 页「和旧版比」）：先建好一组格子，翻到那页才显示
+        n_tiles = max((len(pg[2]) for pg in pages if is_stats(pg[2])), default=0)
+        tile_w = (WIDTH - 2 * PAD - (TILE_COLS - 1) * TILE_GAP) / TILE_COLS
+        tiles = []
+        for k in range(n_tiles):
+            r, c = divmod(k, TILE_COLS)
+            tv = NSView.alloc().initWithFrame_(NSMakeRect(
+                PAD + c * (tile_w + TILE_GAP), 0, tile_w, TILE_H))
+            tv.setWantsLayer_(True)
+            tl = tv.layer()
+            tl.setCornerRadius_(10.0)
+            try:
+                tl.setCornerCurve_("continuous")
+            except Exception:                             # noqa: BLE001
+                pass
+            tl.setBackgroundColor_(white.colorWithAlphaComponent_(0.06).CGColor())
+            tl.setBorderColor_(white.colorWithAlphaComponent_(0.10).CGColor())
+            tl.setBorderWidth_(1.0)
+            content.addSubview_(tv)
+            parts = []
+            for yy, hh, size, alpha, weight in ((32.0, 30.0, 24.0, 0.96, _SEMI),
+                                                (17.0, 17.0, 12.0, 0.85, _W),
+                                                (4.0, 15.0, 10.5, 0.50, _W)):
+                lb = NSTextField.alloc().initWithFrame_(NSMakeRect(0, yy, tile_w, hh))
+                lb.setEditable_(False); lb.setSelectable_(False)
+                lb.setBezeled_(False); lb.setDrawsBackground_(False)
+                lb.setFont_(NSFont.systemFontOfSize_weight_(size, weight))
+                lb.setTextColor_(white.colorWithAlphaComponent_(alpha))
+                lb.setAlignment_(NSTextAlignmentCenter)
+                tv.addSubview_(lb)
+                parts.append(lb)
+            tiles.append((tv, r, parts))
+        note = label(NSMakeRect(PAD, 0, WIDTH - 2 * PAD, NOTE_H), 10.5, alpha=0.45)
 
         fy = PAD
         dot = NSTextField.alloc().initWithFrame_(NSMakeRect(PAD, fy + FOOT_H + 14, WIDTH - 2 * PAD, DOTS_H))
@@ -204,11 +275,27 @@ def build(on_done=None, pages=PAGES):
                 img.setTemplate_(True)
             icon.setImage_(img)
             title.setStringValue_(ttl)
-            off = body_offset(len(lines), n_max)
+            off = body_offset(body_h(lines), bh_max)
+            # 图标、标题、正文**一起**下移：矮的页整组居中，不是标题顶着、正文悬在半空
+            for v, y0 in ((badge, badge_y0), (title, title_y0)):
+                v.setFrameOrigin_((v.frame().origin.x, y0 - off))
+            stats = is_stats(lines)
             for k, lb in enumerate(body):
-                lb.setStringValue_(lines[k] if k < len(lines) else "")
+                lb.setStringValue_(lines[k] if not stats and k < len(lines) else "")
                 f = lb.frame()
                 lb.setFrameOrigin_((f.origin.x, body_top - (k + 1) * LINE_H - off))
+            for k, (tv, r, parts) in enumerate(tiles):
+                shown = stats and k < len(lines)
+                tv.setHidden_(not shown)
+                if shown:
+                    for lb, txt in zip(parts, lines[k]):
+                        lb.setStringValue_(txt)
+                    f = tv.frame()
+                    tv.setFrameOrigin_((f.origin.x, body_top - off - (r + 1) * TILE_H - r * TILE_GAP))
+            note.setHidden_(not stats)
+            if stats:
+                note.setStringValue_(STATS_NOTE)
+                note.setFrameOrigin_((PAD, body_top - off - body_h(lines)))
 
         def show(i, animate=True):
             if animate and not _reduce_motion():

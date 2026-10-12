@@ -1063,16 +1063,27 @@ def run(args) -> None:
 
     # 草稿/兜底用 Parakeet, **必需**: 缺了在这里说清楚然后退出, 不在课上静默降质。
     # 定稿(云端优先, Whisper 只是可选的本地兜底)在 `trans` 定义之后装配, 见下面 `final_asr.load_final`。
+    # ⚠️ 先只核对文件（`lazy=True`）：草稿走 Nemotron 时 Parakeet 只是兜底，用到才加载（省 ~1.1 GB）。
     try:
-        asr = load_asr(args.model_dir)
+        asr = load_asr(args.model_dir, lazy=True)
     except Exception as e:                       # noqa: BLE001
         notice.alert("模型没装好",
                      f"{e}\n\n装好再跑 —— `cl doctor` 会列出缺哪个、该跑哪条命令。")
         return
     # 草稿引擎（R3）：流式 Nemotron 优先，缺模型 / 内存不够 / 加载失败 → 照旧 Parakeet 滑窗。
-    # ⚠️ 放在上面那个 try **之外**：它永不抛，失败也不该 `return`。Parakeet 照样要加载 ——
-    #    它是定稿的本地兜底（下面装配定稿时传进去），也是草稿熔断后的退路。
+    # ⚠️ 放在上面那个 try **之外**：它永不抛，失败也不该 `return`。Parakeet 仍是
+    #    定稿的本地兜底（下面装配定稿时传进去），也是草稿熔断后的退路 —— 只是晚点加载。
     draft = draft_engine.load_draft_engine(asr, window_samples=PARTIAL_MAX_S * SR)
+    if draft.name == "parakeet":
+        # 草稿每秒都要它 → 现在就加载；文件坏在这里说清楚，别拖到课上。
+        try:
+            asr.get()
+        except Exception as e:                   # noqa: BLE001
+            notice.alert("模型没装好",
+                         f"{e}\n\n装好再跑 —— `cl doctor` 会列出缺哪个、该跑哪条命令。")
+            return
+    else:
+        echo("💤 Parakeet 用到再加载（草稿走 Nemotron；云端失败时第一次兜底多等约 1 秒）")
     echo(f"✍️ 草稿引擎：{draft.name}" + (f"（{draft.reason}）" if draft.reason else ""))
     # ⭐⭐ 转录里挖出来的词 → 术语**候选池**（2026-09-29 加）。
     #    ⚠️⚠️ **只进候选池，不进 `course_terms`（那档是每句全量注入）** ——

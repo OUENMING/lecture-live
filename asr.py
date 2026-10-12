@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 import glob, os, re, threading
+from typing import Any, Callable
 
 import numpy as np
 
@@ -36,26 +37,32 @@ def _find_file(dirname: str, patterns) -> str:
         f"模型目录 {dirname} 里找不到 {' 或 '.join(patterns)}")
 
 
+def _parakeet_files(model_dir: str) -> tuple[str, str, str, str]:
+    """`(encoder, decoder, joiner, tokens)` —— 只解析路径、不加载（缺 / 混放在这里就报）。"""
+    enc = _find_file(model_dir, ["encoder.int8.onnx", "encoder.onnx"])
+    dec = _find_file(model_dir, ["decoder.int8.onnx", "decoder.onnx"])
+    join = _find_file(model_dir, ["joiner.int8.onnx", "joiner.onnx"])
+    # 三个文件各自独立解析, 所以"encoder 是 int8、decoder 是 fp32"这种混用不会
+    # 报错 —— 而结果是"看起来正常但全错"(与 _find_file 里那条通配歧义同一个坑,
+    # 只是跨文件)。官方发布的模型三件套精度一致, 不一致只可能是目录里混放了版本。
+    if len({".int8.onnx" in p for p in (enc, dec, join)}) > 1:
+        raise FileNotFoundError(
+            f"模型目录 {model_dir} 里 int8 与非 int8 混用: "
+            f"{[os.path.basename(p) for p in (enc, dec, join)]}")
+    # ⚠️⚠️ **tokens 只认精确名，不许退到 `*.txt`**（2026-09-29 修）。
+    #    `_find_file` 自己的 docstring 就写着「猜错会**静默用错词表**
+    #    （README.txt 也是 .txt）」—— 而这里原来传的是 `["tokens.txt", "*.txt"]`，
+    #    正好是它警告的那种猜法：`tokens.txt` 缺失时，若目录里只有一个别的
+    #    `.txt`，会把它**当词表**返回，识别结果是「看起来正常但全错」。
+    #    ⚠️ 它不是"多个才报错"能挡住的 —— 命中**一个**时那条歧义闸门根本不触发。
+    toks = _find_file(model_dir, ["tokens.txt"])
+    return enc, dec, join, toks
+
+
 class ParakeetASR:
     def __init__(self, model_dir: str, num_threads: int = 4):
         import sherpa_onnx
-        enc = _find_file(model_dir, ["encoder.int8.onnx", "encoder.onnx"])
-        dec = _find_file(model_dir, ["decoder.int8.onnx", "decoder.onnx"])
-        join = _find_file(model_dir, ["joiner.int8.onnx", "joiner.onnx"])
-        # 三个文件各自独立解析, 所以"encoder 是 int8、decoder 是 fp32"这种混用不会
-        # 报错 —— 而结果是"看起来正常但全错"(与 _find_file 里那条通配歧义同一个坑,
-        # 只是跨文件)。官方发布的模型三件套精度一致, 不一致只可能是目录里混放了版本。
-        if len({".int8.onnx" in p for p in (enc, dec, join)}) > 1:
-            raise FileNotFoundError(
-                f"模型目录 {model_dir} 里 int8 与非 int8 混用: "
-                f"{[os.path.basename(p) for p in (enc, dec, join)]}")
-        # ⚠️⚠️ **tokens 只认精确名，不许退到 `*.txt`**（2026-09-29 修）。
-        #    `_find_file` 自己的 docstring 就写着「猜错会**静默用错词表**
-        #    （README.txt 也是 .txt）」—— 而这里原来传的是 `["tokens.txt", "*.txt"]`，
-        #    正好是它警告的那种猜法：`tokens.txt` 缺失时，若目录里只有一个别的
-        #    `.txt`，会把它**当词表**返回，识别结果是「看起来正常但全错」。
-        #    ⚠️ 它不是"多个才报错"能挡住的 —— 命中**一个**时那条歧义闸门根本不触发。
-        toks = _find_file(model_dir, ["tokens.txt"])
+        enc, dec, join, toks = _parakeet_files(model_dir)
         self._rec = sherpa_onnx.OfflineRecognizer.from_transducer(
             encoder=enc, decoder=dec, joiner=join, tokens=toks,
             num_threads=num_threads, model_type="nemo_transducer")
@@ -88,8 +95,42 @@ class ParakeetASR:
             return r.text.strip(), lp
 
 
-def load_asr(model_dir: str):
-    """加载草稿/兜底 ASR(Parakeet)。
+class LazyASR:
+    """首次 `transcribe` 才真加载的 Parakeet（与 `ParakeetASR` 同接口）。
+
+    为什么：草稿走 Nemotron、定稿走云端时，Parakeet 只是**兜底**（云端失败 / 熔断 / R5 复核 /
+    草稿熔断），常态一次都不用，却占约 1.1 GB 内存（本机实测 RSS +1053 / +1112 MB，加载 ~1.0 s）。
+    代价：第一次兜底多等约 1 s。路径缺失 / 混放在**构造时**就报（`_parakeet_files`），
+    不拖到课上；真加载失败（文件坏）在第一次兜底时抛 —— 调用方（`FinalASR` / `DraftEngine`）
+    本来就接着异常。
+    """
+
+    def __init__(self, model_dir: str, loader: Callable[[str], Any] | None = None):
+        _parakeet_files(model_dir)
+        self._dir = model_dir
+        self._loader = loader or ParakeetASR
+        self._obj = None
+        self._lock = threading.Lock()
+
+    @property
+    def loaded(self) -> bool:
+        return self._obj is not None
+
+    def get(self):
+        with self._lock:                    # 两个线程同时首用（草稿 + 定稿）只加载一份
+            if self._obj is None:
+                self._obj = self._loader(self._dir)
+            return self._obj
+
+    def transcribe(self, samples) -> str:
+        return self.get().transcribe(samples)
+
+    def transcribe_lp(self, samples) -> tuple[str, float | None]:
+        return self.get().transcribe_lp(samples)
+
+
+def load_asr(model_dir: str, *, lazy: bool = False):
+    """加载草稿/兜底 ASR(Parakeet)。`lazy=True` → `LazyASR`（只核对文件，用到才加载）。
 
     ⚠️ **别给这个模型挂热词偏置**(`hotwords_file`) —— 本机实测(2026-09-24)是三条死路:
       ① 用默认 `greedy_search` 挂热词 → 直接 ValueError(它要求 modified_beam_search)
@@ -99,7 +140,7 @@ def load_asr(model_dir: str):
          而热词权重没有可用区间 —— 2.0 完全不触发, 8.0 输出崩坏, 20.0 直接背诵热词表。
     详见 `docs/experiments/hotwords_ab.py`。
     """
-    return ParakeetASR(model_dir)
+    return LazyASR(model_dir) if lazy else ParakeetASR(model_dir)
 
 
 # ---- 定稿用: Whisper(large-v3-turbo) ----

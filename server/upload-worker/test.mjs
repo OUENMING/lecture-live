@@ -85,6 +85,9 @@ const mkStream = (chunkKb = 1024, maxChunks = 64) => new ReadableStream({
     c.enqueue(new Uint8Array(chunkKb * 1024));
   },
 }, { highWaterMark: 0 });
+// ⚠️ 这里**故意**不扩展上面的 `req()`：那几条判据要数"handler 到底读了几块"，
+//    需要一个能被计数的 `body` 流 + 一个原始的 `headers.get`（大小写敏感地喂
+//    `Content-Length`）—— `new Request(...)` 会规范化头部、也不给读计数。
 const stub = (headers, body) => {
   // ⚠️ 大小写不敏感 —— 源码里读的是 `Authorization` / `Content-Length`，
   //    而这里给的键是小写（第一版没归一化，三条判据全被 401 挡住了）。

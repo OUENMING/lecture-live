@@ -21,8 +21,6 @@
 """
 from __future__ import annotations
 
-import bisect
-
 import collections
 import contextlib
 import datetime
@@ -496,18 +494,18 @@ def _restore_lines(path, entries) -> int:
     # ⚠️⚠️ **下标要换算，不能拿原行号直接用。** `idx` 是**原文件**的绝对行号
     #    （`_remove_terms` 里 `enumerate(old.splitlines(keepends=True))` 数出来的），
     #    而 `lines` 是**删后**的幸存行 —— 两者之间差着「原文件里被删、且行号比它小」
-    #    的那些行。降序处理保证那些行**还没插回来**，所以差值里的每一项都还没回到
-    #    `lines` 里 → 直接拿 `idx` 当 `lines` 的下标会**多算**。
+    #    的那些行。降序处理保证那些行**还没插回来** → 它们的条数就是 `left`
+    #    （= 还没轮到处理的条数）→ 直接拿 `idx` 当 `lines` 的下标会**多算** `left`。
     #    实测（2026-10-12 全仓审查核实，`A,B,C,D` 删 B、C）：
     #    旧的 `min(idx, len(lines))` 还原成 `A,B,D,C` —— 与 docstring 承诺的
     #    「除被删行外逐字节不变、且顺序不变」直接冲突。上面那组老夹具之所以一直绿，
     #    是因为它较大的那个行号恰好被 `min` 夹到末尾，正好等于正确位置。
-    _idxs = sorted(e[0] for e in clean)
+    left = len(clean)
     done = 0
     for idx, text in sorted(clean, key=lambda e: e[0], reverse=True):
-        # 换算：减去**所有**行号更小的待插行（降序处理 → 它们都还没插回来）。
+        left -= 1                       # 降序 → 所有还没轮到的行号都比此刻的 idx 小
         # ⚠️ 仍然夹到末尾、而不是跳过 —— 见 docstring 里那条实测。
-        pos = min(idx - bisect.bisect_left(_idxs, idx), len(lines))
+        pos = min(idx - left, len(lines))
         if text.endswith(("\n", "\r")) or pos == len(lines):
             # ⚠️ **末行本来就没有行尾时不许补一个** —— 补了就多一字节，
             #    「逐字节还原」不成立（实测：`# X\nkeep\nplain` 删了再撤

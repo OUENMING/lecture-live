@@ -517,6 +517,11 @@ class LiveSummarizer:
         #: ⚠️ 必须在循环**之前**取：循环里 `self._pend` 会一直缩短。
         newest_c = self._pend[-1][1][-1][1]
         while self._pend:
+            if self._closed:
+                # ⚠️ 收尾超时那条路：主线程已经 `close()`，而这个循环**每个窗口调一次
+                #    模型**（最多 20 个）—— 写出来的章节记录却没人收（`ChapterWriter`
+                #    关了就 no-op）。一次都别再调（2026-10-12 全仓审查指出）。
+                return
             item = self._pend[0]
             buf = item[1]
             obj = self._call_atoms(buf)

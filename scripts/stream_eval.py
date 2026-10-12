@@ -226,10 +226,8 @@ def _sent_request(asr_final) -> bool:
       · 熔断开 / 关掉云端 / 编码失败 → `steps` 只有 `breaker` / `off` / `encode`，
         **一次网络都没发**，照睡就是纯空等（实测白等 7–8 分钟）。
     """
-    for st in getattr(asr_final, "last_steps", ()) or ():
-        if str(st).startswith("cloud:"):
-            return True
-    return False
+    return any(str(st).startswith("cloud:")
+               for st in getattr(asr_final, "last_steps", ()) or ())
 
 
 def _is_cloud_source(src) -> bool:

@@ -121,6 +121,15 @@ def snapshot() -> dict:
     git = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain"],
                          capture_output=True, text=True)
     snap["git"] = {ln: 0 for ln in git.stdout.splitlines()}
+    # ⚠️ 仓库根这几份是**个人数据且被 `.gitignore` 挡着** —— `git status` 看不见它们，
+    #    于是"测试把真 `term_notes.json` 覆盖了"这类事故（2026-09-24 那次 41KB → 4.8KB）
+    #    在这条写端判据里**完全静默**。收进来（只记字节数，几十字节的成本）。
+    for _rel in ("term_notes.json", "term_notes.json.bak", "auto.json", "glossary.txt"):
+        _f = ROOT / _rel
+        if _f.exists():
+            snap[f"根目录/{_rel}"] = {_rel: _f.stat().st_size}
+    if (ROOT / "glossary").is_dir():
+        snap["glossary/"] = _tree(ROOT / "glossary", 1)
     return snap
 
 

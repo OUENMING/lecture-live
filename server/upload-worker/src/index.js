@@ -13,7 +13,7 @@
 const MAX_BYTES = 32 * 1024 * 1024;                 // 单段 Opus 约 1–2 MB；一节课合计约 9 MB
 const NAME_OK = /^\/v1\/objects\/([0-9a-f]{16})\/(report\.json|transcript\.md|meta\.json|audio\.\d{3}\.(opus|wav))$/;
 
-/** 边读边计数，一超 `cap` 就 `cancel()` 掉剩余流并返回 `null`（超限）。
+/** 边读边计数，一超 `cap` 就 `cancel()` 掉剩余流并返回 `null`（超限）；正常路径返回 `Blob`。
  *  ⚠️ 别换成 `new Response(body).arrayBuffer()` / `request.arrayBuffer()` —— 那两条都是
  *     **先把整条流读完**，上限就成了事后检查（内存 DoS 的入口，见 `fetch` 里那段）。 */
 async function readCapped(body, cap) {
@@ -34,13 +34,9 @@ async function readCapped(body, cap) {
     }
     chunks.push(value);
   }
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.byteLength;
-  }
-  return out;
+  // ⚠️ 直接给 `Blob`（R2 的 `put` 收 Blob / ArrayBuffer / 流），别自己再拼一个大
+  //    `Uint8Array` —— 那会多一次整份拷贝（峰值 2× 上限）。
+  return new Blob(chunks);
 }
 
 export default {
@@ -75,7 +71,7 @@ export default {
     //    → 两层：① Content-Length 先快速拒绝（它可能撒谎，所以只是快速路径）；
     //      ② 真读的时候**边读边计数**，一超上限立刻停手、不再往下读。
     const declared = Number(request.headers.get("Content-Length") || 0);
-    if (Number.isFinite(declared) && declared > MAX_BYTES) {
+    if (declared > MAX_BYTES) {                            // NaN 与任何数比都是 false
       return new Response("too large", { status: 413 });
     }
     if (!request.body) {
@@ -85,7 +81,7 @@ export default {
     if (payload === null) {
       return new Response("too large", { status: 413 });
     }
-    if (payload.byteLength === 0) {
+    if (payload.size === 0) {
       return new Response("empty body", { status: 400 });
     }
 

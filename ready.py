@@ -74,6 +74,11 @@ def required_left(states: dict) -> list:
     ⚠️ **只有 `missing` 算缺。** `unknown`（老用户没戳）与 `stale`（版本对不上）
        都**不算** —— 它们能用，重下是白烧流量（纪律 1、2）。
 
+    ⚠️ `doctor.model_state()` 的词表比本文件用到的多一个 **`incomplete`**（HF 缓存
+       下了一半 = 文件在但**用不了**，2026-10-12 加）。它只可能出现在 `at_hf` 的模型
+       （Qwen3，**可选**）上，所以既不进"还差"清单、也不影响本条判据；
+       而 `engine_item` 按 `local_state != "ok"` 判 → 会照常给出下载入口。
+
     ⚠️⚠️ **查不到的那一项按 `unknown` 算，不许按 `missing` 算**（2026-09-29 修）。
        `states` 可能是**部分字典**（上游 `model_states` 失败 / 调用方漏填），
        而 `missing` 会**直接给出重下入口** —— 对 `qwen3` 那种 1GB 级的东西，

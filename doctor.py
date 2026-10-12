@@ -309,11 +309,12 @@ def main() -> int:
         # ⚠️ 用属性，别位置解包 —— 2026-09-28 给 `Model` 加 `mb`/`src`/`at_hf` 时
         #    这里还写着 `for path, label, required, cmd, size in MODELS`，
         #    于是 `doctor.py` 自己**当场 ValueError 崩掉**。加字段时这类解包是隐形的雷。
-        present = model_present(m.path)
-        st = model_state(m) if present else "missing"
-        incomplete = st == "incomplete"
+        # ⚠️ 别再单独调 `model_present()` —— `model_state()` 的第一句就是它，
+        #    调两遍等于把那次 stat / HF 查询白做一遍（2026-10-12 审查指出）。
+        st = model_state(m)
         # ⚠️ 「下一半」**不算就位** —— 文件在也跑不起来（见 `model_state`）。
-        ok = present and not incomplete
+        ok = st not in ("missing", "incomplete")
+        incomplete = st == "incomplete"
         if not ok and m.required:
             hard_missing += 1
         if ok:

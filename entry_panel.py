@@ -3720,7 +3720,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 _sever(_card)                # ⚠️ 逐条各自 try —— 见 `_sever` 的说明
             win._entry_targets = []          # 断关闭按钮那条
             status_holder["label"] = None    # 断 `set_status` → 标签 → `ve` 那条
-            _GUARD["win"] = None             # ⭐ 断焦点守卫那条（它可能还有一拍在排队）
+            # ⭐ 断焦点守卫那条（可能还有一拍在排队）：清窗口 + 换代号，双保险。
+            _GUARD["win"] = None
+            _GUARD["gen"] = _GUARD.get("gen", 0) + 1
             # ⚠️ 落点条（批量入口）也要断 —— 它的 `_targets` 里那个 target 的
             #    `_fn` 是 `run_batch` → `_later(refresh)` → 闭包持有 `title_lbl`/`doc`
             #    → `ve` → `win`。与卡片那条**同一条环**，只是入口不同。
@@ -4027,13 +4029,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     win.setFrameOrigin_((_vis.origin.x + (_vis.size.width - WIDTH) / 2.0,
                          panel_y(h, _vis.origin.y, _vis.size.height)))
     win.orderFrontRegardless()
-    # ⭐ 焦点守卫的链子**从这里起**（窗口刚上屏）—— 不是在定义处。
-    #    原来紧跟定义就调了一次，那时窗口还没上屏 → `isVisible()` 为 False → 直接 `return`、
-    #    连末尾的 `callLater` 一起跳过 → **这条守卫一次都没跑过**（2026-10-12 核实）。
-    #    ⚠️ 另外：**"建了但没展示"的实例一个定时器都不该起**（`tests/test_panel.py` 第 ⑧ 节
-    #    的实例就是"开→关"，没有 run loop，排队的 `callLater` 永远不会执行）。
-    _GUARD.update(win=win, seen=False, waits=0)
-    _guard_tick(_GUARD)
+    # ⭐ 焦点守卫的链子**从这里起**（窗口刚上屏）—— 不是在定义处（见 `_guard_start`）。
+    _guard_start(win)
     # ⭐ 面板**已经上屏**了 → 现在把搜索框放回"可以被点进焦点"的状态。
     #    过早放行 = 白做（AppKit 会在上屏那一刻把它设成第一响应者）；
     #    这一小段延时是必须的，和窗口建立初始第一响应者是同一个时刻的事。
@@ -4065,14 +4062,18 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 #    `f` **连同它闭进来的东西**一起挂在 run loop 上。窗口闭包 ⇒ 每开一次面板钉住一棵视图树，
 #    而且**没有 run loop 的场景（测试）里那一拍永远不会执行**，泄漏是永久的：
 #    `tests/test_panel.py` 第 ⑧ 节实测 3 轮 vs 9 轮 = [144, 153]（基线 [142, 142]）。
-#    → 一拍只吃 `{"win", "seen", "waits"}` 这样的纯数据；`win` 由 `do_close()` 清成 None
-#      （那就是"取消令牌"：即使还有一拍在排队，它醒来时也只会看到 None 并收手）。
+#    → 一拍只吃 `{"win", "gen", "waits"}` 这样的纯数据。
 
-#: 守卫的续期状态（唯一一份）。`win` = 当前面板窗口；关了就是 None。
-_GUARD: dict = {"win": None, "seen": False, "waits": 0}
+#: 守卫的续期状态（**唯一一份，只放纯数据**）。
+#:   · `win`  —— 当前面板窗口；`do_close()` 置 None = **取消令牌**（那一拍醒来直接收手）。
+#:   · `gen`  —— 面板代数。每次起链 +1，链子只认自己那一代：
+#:     ⚠️ 没有它，上一代那条排队的 `callLater` 醒来会看见**新**窗口还可见 → 继续续期
+#:     → 每开关一次面板就多一条永不退出的 2 Hz 链子（2026-10-12 审查指出）。
+#:   · `waits` —— "窗口还不可见"已经等了几拍（`_GUARD_MAX_WAITS` 封顶）。
+_GUARD: dict = {"win": None, "gen": 0, "waits": 0}
 
-#: 「还没上屏」最多等几拍（0.5 s/拍）。⚠️ 兜底用：万一窗口既没上屏、`do_close` 也没跑到
-#: （构建成功但被丢弃之类），守卫也不会变成**无界轮询**。10 拍 = 5 s，远大于上屏所需。
+#: 「还没上屏」最多等几拍（0.5 s/拍）。⚠️ 兜底用：窗口要是始终没上屏（构建成功但被丢弃 /
+#: 被系统藏起来），守卫也不会变成**无界轮询**。10 拍 = 5 s，远大于上屏所需。
 _GUARD_MAX_WAITS = 10
 
 
@@ -4116,49 +4117,50 @@ def _win_release_focus(win) -> None:
         pass
 
 
-def _guard_next(*, visible: bool, seen: bool, waits: int = 0) -> str:
-    """这一拍该做什么：`"enforce"` / `"wait"`（还没上屏，继续等）/ `"stop"`（纯函数，可单测）。
+def _guard_start(win) -> None:
+    """起（或重起）守卫的链子 —— **在窗口上屏之后**调（`build()` 末尾 / `open_panel` 复用那条路）。
 
-    ⚠️ 两个输入都是 `False` 时必须分开对待：链子虽然起在上屏那一刻，但**首拍仍可能撞上
-       "还没上屏"** —— 那是「继续等」；而"上过屏又不可见" = 窗口关掉了，**必须停**，
-       否则定时器跟着进程活到天荒地老。把「还没上屏」当成「已经关掉」正是
-       2026-10-12 核实出来的那个缺陷（守卫一次都不跑）。
-    ⚠️ `waits` 是**等待上限**（`_GUARD_MAX_WAITS`）：窗口要是始终没上屏、`do_close()` 也没
-       跑到（构建成功但被丢弃之类），"继续等"就成了无界轮询 —— 兜底停掉。
+    ⚠️⚠️ 原来"定义完 `_focus_guard` 立刻调一次"，而那时窗口还没上屏：`isVisible()` 为 False
+       → 那一版直接 `return`、**连末尾的 `callLater` 也一起跳过** → **这条守卫一次都没跑过**，
+       docstring 里写的不变量从来没生效（2026-10-12 全仓审查核实）。
+    ⚠️ `gen += 1`：给这一代编号（见 `_GUARD`）—— 上一次那条链子即使还有一拍在排队，
+       醒来也会发现代号对不上而收手。
     """
-    if visible:
-        return "enforce"
-    if seen:
-        return "stop"
-    return "wait" if waits < _GUARD_MAX_WAITS else "stop"
+    _GUARD["gen"] = _GUARD.get("gen", 0) + 1
+    _GUARD.update(win=win, waits=0)
+    _guard_tick(_GUARD, _GUARD["gen"])
 
 
-def _guard_tick(state: dict) -> None:
-    """守卫的一拍。⚠️ **模块级 + 只吃纯数据**（理由见上面那段）；`state` = `_GUARD`。
+def _guard_tick(state: dict, gen: int) -> None:
+    """守卫的一拍。⚠️ **模块级 + 只吃纯数据**（理由见 `_GUARD` 那段）；`state` = `_GUARD`。
 
-    ⚠️ 窗口已经没了（`state["win"] is None`，`do_close()` 置的）→ 直接收手，**不再续期**。
+    `gen` = 调度这一拍时的那一代。**三个收手条件**，缺一不可：
+      · `win is None` —— `do_close()` 已经关掉了（取消令牌）；
+      · `gen` 对不上 —— 面板已经重建 / 被复用，这是上一代的链子；
+      · 窗口一直不可见且等满 `_GUARD_MAX_WAITS` —— 兜底，别变成无界轮询。
+    ⚠️ 正常路径上首拍就是可见的（链子起在 `orderFrontRegardless()` 之后）；`waits` 只在
+       "不可见"时涨、可见时清零，只为"万一"存在。
     """
     from PyObjCTools import AppHelper
     win = state.get("win")
-    if win is None:
+    if win is None or state.get("gen") != gen:
         return
     try:
         visible = bool(win.isVisible())
     except Exception:                                         # noqa: BLE001
         visible = False
-    action = _guard_next(visible=visible, seen=bool(state.get("seen")), waits=state.get("waits", 0))
-    if action == "stop":
-        return
-    if action == "wait":
-        state["waits"] = state.get("waits", 0) + 1
-    else:
-        state["seen"] = True
+    if visible:
+        state["waits"] = 0
         try:
             if win.isKeyWindow() and not _win_is_editing(win):
                 _win_release_focus(win)
         except Exception:                                     # noqa: BLE001
             pass
-    AppHelper.callLater(0.5, _guard_tick, state)
+    else:
+        state["waits"] = state.get("waits", 0) + 1
+        if state["waits"] > _GUARD_MAX_WAITS:
+            return
+    AppHelper.callLater(0.5, _guard_tick, state, gen)
 
 
 def _panel_key(kw) -> tuple:
@@ -4202,6 +4204,7 @@ def open_panel(**kw) -> Handles | None:
     if cur is not None:
         if S.get("panel_key") == _panel_key(kw):
             cur.window.orderFrontRegardless()
+            _guard_start(cur.window)      # ⚠️ 复用不重建面板 —— 守卫得自己重新上链
             return cur
         cur.close()                       # 结构不同 -> 关掉重建（`S["result"]` 在模块级，不丢）
     h = build(**kw)

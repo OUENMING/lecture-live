@@ -150,6 +150,13 @@ class LiveLog:
         """
         self._put("event", event="segment_end", seg=seg)
 
+    def _note_err(self, msg: str) -> None:
+        """记一条失败原因（**只留第一条** —— 否则一整节课的失败会把 `_err` 撑成 MB 级，
+        而它整个要进 summary 那一行；计数另走 `n_write_err`）。三处失败共用这一处。
+        """
+        if not self._err:
+            self._err = msg[:400]
+
     # ---- 公开接口（全部吞异常；主循环调用，绝不抛）----
     def block(self, peak: float, gain: float, vad: float, n: int) -> None:
         """一个音频块：原始峰值 / 实际增益 / 当场 VAD 语音窗占比 / 样本数。主循环每 0.1 s 调一次。"""
@@ -244,6 +251,12 @@ class LiveLog:
                       **{**summary, "dropped": self.dropped})
         except Exception:                                  # noqa: BLE001
             pass
+        if self.n_write_err:
+            # ⚠️ summary 那一行**走的正是失败的那条写盘路径**（同一个 `_write`）——
+            #    磁盘满的时候它自己也写不进去，证据就没了。所以再说一遍到 stdout
+            #    （`.app` 下 stdout 进 `~/Library/Logs/ClassLive/`，那是另一个落点）。
+            print(f"⚠ 现场采集写盘失败 {self.n_write_err} 条 —— 这一节的 .live.jsonl 不完整",
+                  flush=True)
         self.closed = True
         try:
             self._q.put_nowait(_SENTINEL)
@@ -271,14 +284,14 @@ class LiveLog:
             base = name[:-len(".live.jsonl")] if name.endswith(".live.jsonl") else self.path.stem
             p = self.path.with_name(base + ".blocks.npz")
             if p.exists():
-                self._err = (self._err + f"; {p.name} 已存在，没写").lstrip("; ")
+                self._note_err(f"{p.name} 已存在，没写")
                 return None
             with open(p, "xb") as f:
                 np.savez_compressed(f, **{k: np.frombuffer(v, dtype=v.typecode)
                                           for k, v in self._blk.items()})
             return p
         except Exception as e:                             # noqa: BLE001
-            self._err = (self._err + f"; 逐块记录没写成: {e!r}").lstrip("; ")
+            self._note_err(f"逐块记录没写成: {e!r}")
             return None
 
     # ---- 写盘线程 ----
@@ -320,4 +333,4 @@ class LiveLog:
             #    ⚠️ 仍然不抛、不影响上课（文件头的硬前提）—— 只是把话说出来：
             #    计数进 summary，原因进 `err`（截断，别让一条长消息撑爆 summary 行）。
             self.n_write_err += 1
-            self._err = (self._err + f"; 写盘失败 ×{self.n_write_err}: {e!r}"[:400]).lstrip("; ")
+            self._note_err(f"写盘失败: {e!r}")

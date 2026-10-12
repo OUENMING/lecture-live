@@ -34,6 +34,29 @@ MSG_DS_ONLY = "✅ 存了翻译的 —— Jev 那条随时能补（再点这里�
 MSG_NEITHER = "什么都没填 —— 能上课，但只有英文字幕（本地翻译模型可选、默认没装）"
 
 
+#: 「填 API key」那张框的文案 —— 面板（`entry_panel._open_key_entry`）和截图探针
+#: （`scripts/probe_keyentry.py`）都从这里取，截出来的图才代表真实界面。
+DIALOG_TITLE = "填 API key"
+DIALOG_MESSAGE = "只写进这台机器的 ~/.classlive/，不上传。"
+
+
+def dialog_fields(cur_ds: str = "", cur_jv: str = "") -> list[dict]:
+    """两栏：翻译（DeepSeek key **或通行码**）+ Jev（可选）。已存过的回填。"""
+    return [{"key": "deepseek", "label": "DeepSeek key 或通行码", "value": cur_ds,
+             "hint": ("已存过" if cur_ds
+                      else "翻译用：自己的 DeepSeek key（sk-…），或作者给的通行码（cl-…）。"
+                           "不填只有英文字幕。")},
+            {"key": "jev", "label": "Jev key · 可选", "value": cur_jv,
+             "hint": ("已存过" if cur_jv
+                      else "给「重点句」和「课务」用。不填这两个功能就不出现。")}]
+
+
+def key_kind(key: str) -> str:
+    """结论行里怎么称呼它：通行码 `cl-…` / 其余都是 DeepSeek key。"""
+    import llm_client
+    return "通行码" if llm_client.is_passcode(key) else "DeepSeek key"
+
+
 def status_line(has_deepseek: bool, has_jev: bool) -> str:
     """保存之后 `_status` 那一行。**三档的唯一定义点。**"""
     if has_deepseek and has_jev:

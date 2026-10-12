@@ -1529,11 +1529,11 @@ def _vault_section() -> None:
           repr(_t({"key": "engine", "state": "ok", "detail": "云端翻译（推荐）"})))
     # key 对话框的提示不许再说「退回本地模型」：本地模型是可选的、默认没装，
     # 对新用户那句话是假的（没 key + 没本地模型 = 只有英文字幕）
-    import inspect as _insp
-    _src = _insp.getsource(E)
+    # 文案的唯一出处是 `keyentry.dialog_fields`（3.9.2 起，面板与截图探针同源）
+    import keyentry as _KE
+    _hint = _KE.dialog_fields()[0]["hint"]
     check("⭐ key 对话框不再承诺「退回本地模型」（它默认没装）",
-          "不填也能上课 —— 退回本地模型" not in _src
-          and "不填只有英文字幕" in _src)
+          "退回本地模型" not in _hint and "不填只有英文字幕" in _hint, repr(_hint))
 
     try:
         import os

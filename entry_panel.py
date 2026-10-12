@@ -2023,14 +2023,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         cur_jv = keyentry.load_jev(root=state_root)
 
         got = notice.ask_text(
-            "填 API key",
-            "只写进这台机器的 ~/.classlive/，不上传。",
-            [{"key": "deepseek", "label": "DeepSeek key", "value": cur_ds,
-              "hint": ("已存过" if cur_ds
-                       else "翻译用的（platform.deepseek.com 申请）。不填只有英文字幕。")},
-             {"key": "jev", "label": "Jev key · 可选", "value": cur_jv,
-              "hint": ("已存过" if cur_jv
-                       else "给「重点句」和「课务」用。不填这两个功能就不出现。")}],
+            keyentry.DIALOG_TITLE, keyentry.DIALOG_MESSAGE,
+            keyentry.dialog_fields(cur_ds, cur_jv),
             fallback=None)
         if got is None:
             return
@@ -2048,7 +2042,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             keep_ds = keep_jv = ""
             if ds:
                 okd, md = keyentry.validate_deepseek(ds)
-                lines.append(f"{'✅' if okd else '❌'} DeepSeek key "
+                lines.append(f"{'✅' if okd else '❌'} {keyentry.key_kind(ds)} "
                              + (md if okd else f"用不了（{md}）"))
                 keep_ds = ds if okd else ""
             if jv:

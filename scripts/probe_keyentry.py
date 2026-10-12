@@ -28,16 +28,12 @@ sys.path.insert(0, str(ROOT))
 
 import notice                                                        # noqa: E402
 
-#: 探针里那张框的内容 —— ⚠️ **与 `entry_panel._open_key_entry` 里逐字一致**。
-#: 两处一旦分叉，截出来的图就不再代表真实界面了。
-FIELDS = [
-    {"key": "deepseek", "label": "DeepSeek key",
-     "hint": "翻译用的（platform.deepseek.com 申请）。不填只有英文字幕。"},
-    {"key": "jev", "label": "Jev key · 可选",
-     "hint": "给「重点句」和「课务」用。不填这两个功能就不出现。"},
-]
-TITLE = "填 API key"
-MESSAGE = "只写进这台机器的 ~/.classlive/，不上传。"
+import keyentry                                                      # noqa: E402
+
+#: 文案与面板同源（`keyentry.dialog_fields`）—— 截出来的就是真实界面。
+FIELDS = keyentry.dialog_fields()
+TITLE = keyentry.DIALOG_TITLE
+MESSAGE = keyentry.DIALOG_MESSAGE
 BUTTONS = ("保存", "以后再说")
 
 
@@ -82,6 +78,9 @@ def main(argv=None) -> int:
     alert, _boxes = notice.build_text_alert(TITLE, MESSAGE, FIELDS, BUTTONS)
     win = alert.window()
     win.center()
+    # 真实路径走 `notice._present()` 抬到模态层；探针不 runModal，自己抬，否则被全屏窗口盖住。
+    from AppKit import NSModalPanelWindowLevel
+    win.setLevel_(NSModalPanelWindowLevel)
     win.orderFrontRegardless()
     # ⚠️ 必须**跑一会儿 runloop** 让它真的画上去 —— 建完立刻截会拍到空白
     #    （同 `overlay` 那条「不跑 run loop 就不提交」的坑）。

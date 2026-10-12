@@ -13,7 +13,8 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 分支（什么时候读） | 读哪个 |
 |---|---|
 | ⭐⭐ **第一次接手 / 新会话** —— 全景手册（现状、硬规矩、事故与教训、开关登记、公开的账 §10） | `docs/HANDBOOK.md` |
-| ⭐⭐ **当前这条线：定稿上云 + R1 翻译空窗**（现状 / 决定 / 凭据 / 下一步）—— 新会话接这条线先读 | `docs/HANDOFF-20261011-cloud-asr-r1.md` |
+| ⭐⭐⭐ **当前这条线：3.9.3（清空老 Key / 旧 `.deepseek_key` 退休 / 弹窗 / 草稿模型课后自动下）+ 九条审查修复**（现状 / 为什么 / 怎么做 / 还剩什么 / 踩过的坑）—— **新会话先读这份** | `docs/HANDOFF-20261012-3.9.3.md` |
+| 上一条线：定稿上云 + R1 翻译空窗（历史背景，仍有效） | `docs/HANDOFF-20261011-cloud-asr-r1.md` |
 | R1 执行细则（3.8.11 已做；❓ 轻点拨 G 已做、待发版） | `docs/PLAN-r1-translation-gap.md` |
 | 定稿上云 R2 / 草稿流式 R3 的逐文件改法（D1–D6 已拍板）—— 动草稿译文、定稿 ASR、隐私文案前读 | `docs/PLAN-cloud-final-asr.md` |
 | 云端 ASR 选型与全部实测（WER / 漏段 / 延迟 / 价格 / 额度）—— 动定稿 ASR 前读 | `docs/RESEARCH-cloud-asr.md`；真值语料在 `~/.classlive/eval/`，复跑见 `docs/experiments/cloud_asr_20261010/README.md` |

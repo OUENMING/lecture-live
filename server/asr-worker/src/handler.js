@@ -71,6 +71,12 @@ const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const LLM_MODELS = new Set(["deepseek-flash", "deepseek-chat"]);
 const LLM_MAX_TOKENS = 4096;   // 客户端最大的一处是精修 / 讲解 4000
 const LLM_MAX_BYTES = 256 * 1024;
+// Jev（TypeSafe System One）：通行码代付「重点句」「课务」两个打分功能。
+// ⚠️ 模型钉死 —— `live_summary.DEADLINE_MIN_P` 的阈值是按这一版标定的（官方：调过阈值就钉版本）。
+const JEV_URL = "https://api.typesafe.ai/v1/systemone";
+const JEV_MODEL = "jev-1.13.0";
+const JEV_MAX_Q = 20;            // 客户端 `keypoints.CHUNK`；多了是滥用，不是正常调用
+const JEV_MAX_BYTES = 64 * 1024; // 一批 20 句的 state 实测几 KB
 const DENY = {   // 码不能用 -> HTTP 状态；客户端按「云端不可用」走现有降级
   unknown: 403, revoked: 403, expired: 403, devices: 403, quota: 429,
 };
@@ -151,6 +157,25 @@ async function chat(request, env, ctx, code) {
   try { u = JSON.parse(text).usage; } catch { /* 非 JSON 照样回 */ }
   reportUsage(env, ctx, { code, ...usageFields(u) });
   return new Response(text, { status: up.status, headers });
+}
+
+async function jev(request, env, ctx, code) {
+  if (!env.JEV_KEY) return json(503, { error: "jev_not_configured" });
+  if (Number(request.headers.get("content-length")) > JEV_MAX_BYTES) return json(413, { error: "too_large" });
+  const raw = await request.text();
+  if (raw.length > JEV_MAX_BYTES) return json(413, { error: "too_large" });
+  let body;
+  try { body = JSON.parse(raw); } catch { return json(400, { error: "bad_json" }); }
+  const q = body && typeof body.questions === "object" && body.questions ? Object.keys(body.questions).length : 0;
+  if (!body || typeof body.state !== "string" || q < 1 || q > JEV_MAX_Q) return json(400, { error: "bad_request" });
+  const up = await fetch(JEV_URL, {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.JEV_KEY}`, "content-type": "application/json" },
+    body: JSON.stringify({ model: JEV_MODEL, state: body.state, questions: body.questions }),
+  });
+  const text = await up.text();
+  if (up.ok) reportUsage(env, ctx, { code, jev_q: q });   // 上游错误不记用量（同 chat）
+  return new Response(text, { status: up.status, headers: { "content-type": up.headers.get("content-type") || "application/json" } });
 }
 
 // 管理接口：只认 ADMIN_TOKEN（fail-closed：没配就谁都不认）。路径 /v1/admin/x -> DO 的 /admin/x。
@@ -324,7 +349,8 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
     if (request.method !== "POST"
-        || !(path === "/v1/transcribe" || path === "/v1/chat/completions" || path.startsWith("/v1/admin/"))) {
+        || !(path === "/v1/transcribe" || path === "/v1/chat/completions" || path === "/v1/jev"
+             || path.startsWith("/v1/admin/"))) {
       return new Response("not found", { status: 404 });
     }
     if (path.startsWith("/v1/admin/")) return admin(request, env, path);
@@ -339,8 +365,8 @@ export default {
     if (code === null && (!expected || auth !== expected)) {
       return new Response("unauthorized", { status: 401 });
     }
-    if (path === "/v1/chat/completions" && code === null) {
-      return new Response("unauthorized", { status: 401 });   // 公开令牌不代付翻译
+    if ((path === "/v1/chat/completions" || path === "/v1/jev") && code === null) {
+      return new Response("unauthorized", { status: 401 });   // 公开令牌不代付翻译 / 打分
     }
     const install = request.headers.get("x-classlive-install") || "";
     if (!INSTALL_OK.test(install)) return new Response("bad install id", { status: 400 });
@@ -350,6 +376,10 @@ export default {
     if (path === "/v1/chat/completions") {
       const deny = await checkPass(env, code, install, "llm");
       return deny ?? chat(request, env, ctx, code);
+    }
+    if (path === "/v1/jev") {
+      const deny = await checkPass(env, code, install, "jev");
+      return deny ?? jev(request, env, ctx, code);
     }
 
     // 令牌公开、install_id 客户端随便造 -> 按 install 限流挡不住，所以再按 IP 限一道（R17，同上传 Worker）。

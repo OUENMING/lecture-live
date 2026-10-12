@@ -5,7 +5,7 @@
 // 键（DO 的 KV 接口；SQLite 后端的 DO 同样支持，免费档可用）：
 //   code:<码>              {name, created, expires, revoked, max_devices, daily_asr_s, daily_tokens}
 //   dev:<码>               {<install_id>: {first, last}}
-//   use:<YYYY-MM-DD>:<码>  {asr_s, asr_reqs, llm_reqs, tokens_in, tokens_out, cache_hit}
+//   use:<YYYY-MM-DD>:<码>  {asr_s, asr_reqs, llm_reqs, tokens_in, tokens_out, cache_hit, jev_reqs, jev_q}
 // ⚠️ 只记数字：不记文本、音频、IP。日志里也只出现码的「名字段」。
 
 const DAY_MS = 86400000;
@@ -90,12 +90,13 @@ export class PassCore {
     return { ok: true, name: c.name };
   }
 
-  async usage({ code, asr_s, tokens_in, tokens_out, cache_hit }) {
+  async usage({ code, asr_s, tokens_in, tokens_out, cache_hit, jev_q }) {
     if (!CODE_RE.test(code || "")) return;
     const k = `use:${day(this.now())}:${code}`;
     const u = { asr_s: 0, asr_reqs: 0, llm_reqs: 0, tokens_in: 0, tokens_out: 0, cache_hit: 0,
-                ...(await this.storage.get(k)) };
+                jev_reqs: 0, jev_q: 0, ...(await this.storage.get(k)) };
     if (asr_s !== undefined) { u.asr_s += num(asr_s); u.asr_reqs += 1; }
+    if (jev_q !== undefined) { u.jev_reqs += 1; u.jev_q += num(jev_q); }
     if (tokens_in !== undefined || tokens_out !== undefined) {
       u.llm_reqs += 1;
       u.tokens_in += num(tokens_in); u.tokens_out += num(tokens_out); u.cache_hit += num(cache_hit);

@@ -35,7 +35,7 @@ function harness({ deepseek } = {}) {
   const clock = () => now;
   const pass = new PassCore(memStorage(), clock);
   const quota = new QuotaCore(memStorage(), clock);
-  const calls = { deepseek: [], groq: 0 };
+  const calls = { deepseek: [], groq: 0, jev: [] };
   const origFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     const u = String(url);
@@ -46,6 +46,10 @@ function harness({ deepseek } = {}) {
         usage: { prompt_tokens: 100, completion_tokens: 20, prompt_cache_hit_tokens: 64 },
       });
     }
+    if (u.startsWith("https://api.typesafe.ai/")) {
+      calls.jev.push({ headers: init.headers, body: JSON.parse(init.body) });
+      return J(200, { answers: { S1: { noul: 0.7 } } });
+    }
     if (u.startsWith("https://api.groq.com/")) {
       calls.groq += 1;
       return J(200, { text: "hi", segments: [{ no_speech_prob: 0.01, compression_ratio: 1 }] });
@@ -53,7 +57,7 @@ function harness({ deepseek } = {}) {
     throw new Error("unexpected upstream " + u);
   };
   const env = {
-    CLIENT_TOKEN: "tok-public", GROQ_KEY: "gk", DEEPSEEK_KEY: "sk-owen", ADMIN_TOKEN: "adm",
+    CLIENT_TOKEN: "tok-public", GROQ_KEY: "gk", DEEPSEEK_KEY: "sk-owen", ADMIN_TOKEN: "adm", JEV_KEY: "apikey_owen",
     PER_INSTALL: { limit: async () => ({ success: true }) },
     PER_IP: { limit: async () => ({ success: true }) },
     QUOTA: doStub(quota), PASSES: doStub(pass),
@@ -78,8 +82,13 @@ function harness({ deepseek } = {}) {
     headers: { authorization: auth, "x-classlive-install": install, "x-audio-seconds": seconds },
     body: new Uint8Array(100),
   });
+  const jevReq = (auth, body, install = INSTALL) => new Request("https://asr.bldcam.page/v1/jev", {
+    method: "POST",
+    headers: { authorization: auth, "x-classlive-install": install, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
   const restore = () => { globalThis.fetch = origFetch; };
-  return { env, call, settle, adminReq, chatReq, asrReq, calls, pass, restore,
+  return { env, call, settle, adminReq, chatReq, asrReq, jevReq, calls, pass, restore,
            tick: (ms) => { now += ms; } };
 }
 
@@ -269,5 +278,49 @@ test("同名多条时按名字改会被拒，要给码", async () => {
     await h.call(h.adminReq("add", { name: "dup" }));
     const r = await (await h.call(h.adminReq("revoke", { name: "dup" }))).json();
     assert.ok(r.error);
+  } finally { h.restore(); }
+});
+
+const jq = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`S${i + 1}`, { type: "noul", instructions: "x" }]));
+
+test("Jev：通行码转发给 TypeSafe，换成 Owen 的 key、模型钉 jev-1.13.0，按问题数记账", async () => {
+  const h = harness();
+  try {
+    const { code } = await (await h.call(h.adminReq("add", { name: "ying" }))).json();
+    const res = await h.call(h.jevReq(`Bearer ${code}`, { model: "jev-latest", state: "S1. hi", questions: jq(3) }));
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { answers: { S1: { noul: 0.7 } } });
+    await h.settle();
+    assert.equal(h.calls.jev.length, 1);
+    assert.equal(h.calls.jev[0].headers.authorization, "Bearer apikey_owen");
+    assert.equal(h.calls.jev[0].body.model, "jev-1.13.0");          // 客户端说 latest 也不跟
+    const st = await (await h.call(h.adminReq("stats"))).json();
+    assert.deepEqual([st.rows[0].jev_reqs, st.rows[0].jev_q, st.rows[0].llm_reqs], [1, 3, 0]);
+  } finally { h.restore(); }
+});
+
+test("Jev：公开令牌不代付（401）；超过 20 题 / 没有 state → 400 且不打上游", async () => {
+  const h = harness();
+  try {
+    assert.equal((await h.call(h.jevReq("Bearer tok-public", { state: "x", questions: jq(1) }))).status, 401);
+    const { code } = await (await h.call(h.adminReq("add", { name: "ying" }))).json();
+    assert.equal((await h.call(h.jevReq(`Bearer ${code}`, { state: "x", questions: jq(21) }))).status, 400);
+    assert.equal((await h.call(h.jevReq(`Bearer ${code}`, { questions: jq(1) }))).status, 400);
+    assert.equal((await h.call(h.jevReq(`Bearer ${code}`, { state: "x", questions: {} }))).status, 400);
+    assert.equal(h.calls.jev.length, 0);
+  } finally { h.restore(); }
+});
+
+test("Jev：Worker 没配 JEV_KEY → 503（fail-closed，不打上游）；吊销的码 → 403", async () => {
+  const h = harness();
+  try {
+    const { code } = await (await h.call(h.adminReq("add", { name: "ying" }))).json();
+    const k = h.env.JEV_KEY;
+    h.env.JEV_KEY = undefined;
+    assert.equal((await h.call(h.jevReq(`Bearer ${code}`, { state: "x", questions: jq(1) }))).status, 503);
+    h.env.JEV_KEY = k;
+    await h.call(h.adminReq("revoke", { code }));
+    assert.equal((await h.call(h.jevReq(`Bearer ${code}`, { state: "x", questions: jq(1) }))).status, 403);
+    assert.equal(h.calls.jev.length, 0);
   } finally { h.restore(); }
 });

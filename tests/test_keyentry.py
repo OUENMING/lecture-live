@@ -63,6 +63,8 @@ def main() -> int:
     check("两个都填", KE.status_line(True, True) == KE.MSG_BOTH, KE.MSG_BOTH)
     check("只填 DeepSeek", KE.status_line(True, False) == KE.MSG_DS_ONLY, KE.MSG_DS_ONLY)
     check("都没填", KE.status_line(False, False) == KE.MSG_NEITHER, KE.MSG_NEITHER)
+    check("只填通行码 → 不叫他去补 Jev（3.9.4 起通行码代付）",
+          KE.status_line(True, False, True) == KE.MSG_PASSCODE, KE.status_line(True, False, True))
     check("⚠️ 文案里**不许**出现「失败」这类词（都没填是合法选择，不是错误）",
           "失败" not in KE.MSG_NEITHER and "错误" not in KE.MSG_NEITHER)
     # ⚠️ 也不许承诺「本地模型照常翻译」—— 它**可选、默认没装**，对新用户那是句假话。
@@ -84,6 +86,11 @@ def main() -> int:
               oct(cred.stat().st_mode & 0o777))
         check("⭐ 父目录收成 700", oct(cred.parent.stat().st_mode & 0o777) == "0o700",
               oct(cred.parent.stat().st_mode & 0o777))
+    with tempfile.TemporaryDirectory() as d:
+        okk, msg = KE.save(deepseek="cl-ying-0123456789abcdef", root=pathlib.Path(d))
+        check("⭐ 存的是通行码 → 说「Jev 那栏不用填」（不是「随时能补」）", msg == KE.MSG_PASSCODE, msg)
+        okk, msg = KE.save(deepseek="sk-own", root=pathlib.Path(d))
+        check("存的是自己的 DeepSeek key → 照旧提示可以补 Jev", msg == KE.MSG_DS_ONLY, msg)
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
         # ⚠️⚠️ **已存在的、权限宽松的文件也要被收紧** —— 这是那条 `chmod` 唯一不可替代的

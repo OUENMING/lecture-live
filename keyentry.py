@@ -53,6 +53,8 @@ KEY_RESET_MESSAGE = ("转录翻译流程在此版本进行了重构，找菠萝�
 #: 保存后那一行的三档文案 —— **唯一定义点**（面板与 `cl setkey` 共用）。
 MSG_BOTH = "✅ 存好了 —— 写进 ~/.classlive/，权限 600"
 MSG_DS_ONLY = "✅ 存了翻译的 —— Jev 那条随时能补（再点这里）"
+#: 填的是通行码：重点句 / 课务也由作者代付（3.9.4 起），Jev 那栏**不用**补 —— 别再提示他去补。
+MSG_PASSCODE = "✅ 存好了 —— 通行码连「重点句」「课务」也一起管，Jev 那栏不用填"
 # ⚠️ 第 3 档**不能**说「本地模型照常翻译」：本地模型（Qwen3-1.7B）是**可选、默认没装**
 #    的（见本文件上面那张表）。对新用户说这句 = 「界面说的和实际不一样」——
 #    正是 2026-10-04 修 key 对话框提示时要消灭的那类话。
@@ -71,13 +73,15 @@ def dialog_fields(cur_ds: str = "", cur_jv: str = "") -> list[dict]:
              "hint": "已存过" if cur_ds else ASK_AUTHOR},
             {"key": "jev", "label": "Jev key · 可选", "value": cur_jv,
              "hint": ("已存过" if cur_jv
-                      else "给「重点句」和「课务」用。不填这两个功能就不出现。")}]
+                      else "给「重点句」和「课务」用。填的是通行码就不用管这栏。")}]
 
 
-def status_line(has_deepseek: bool, has_jev: bool) -> str:
-    """保存之后 `_status` 那一行。**三档的唯一定义点。**"""
+def status_line(has_deepseek: bool, has_jev: bool, passcode: bool = False) -> str:
+    """保存之后 `_status` 那一行。**各档的唯一定义点。**"""
     if has_deepseek and has_jev:
         return MSG_BOTH
+    if has_deepseek and passcode:
+        return MSG_PASSCODE
     if has_deepseek:
         return MSG_DS_ONLY
     return MSG_NEITHER
@@ -205,7 +209,8 @@ def save(*, deepseek: str = "", jev: str = "", root=None) -> tuple[bool, str]:
             #    `validate_jev()` 单独负责（这里不重复调一次网络）。
             _write_600(paths.jev_key(root=root) if _looks_official(jv)
                        else paths.jev_token(root=root), jv)
-        return True, status_line(bool(ds), bool(jv))
+        import llm_client
+        return True, status_line(bool(ds), bool(jv), llm_client.is_passcode(ds))
     except Exception as e:                                    # noqa: BLE001
         return False, f"没写进去（{type(e).__name__}: {str(e)[:60]}）—— 看看 ~/.classlive/ 能不能写"
 

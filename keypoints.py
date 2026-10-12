@@ -38,6 +38,10 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+#: 下课收尾时同时在飞的批数（见 `score`）。
+WORKERS = 4
 
 #: 一次请求最多几个问题。⚠️ **CommandCode 代理的限制，不是 TypeSafe 的**（见模块头）。
 CHUNK = 20
@@ -151,12 +155,9 @@ def score(sents, *, ask) -> list:
        所以 state 是被重复计费的）。
     """
     sents = list(sents or ())
-    out: list = []
-    n_batches = 0
-    n_failed = 0
-    for lo in range(0, len(sents), CHUNK):
-        part = sents[lo:lo + CHUNK]
-        n_batches += 1
+    parts = [sents[lo:lo + CHUNK] for lo in range(0, len(sents), CHUNK)]
+
+    def one(part):
         # ⚠️⚠️ **单批失败不许连坐**（2026-10-01 实测）：一节 50 分钟的课要打
         #    29 批，原来**任何一批**网络抖一下（超时/429/5xx）就把它抛给
         #    `pick` 那个大 `try` → **整节清零** → 🎯 那节整块静默消失，
@@ -164,12 +165,18 @@ def score(sents, *, ask) -> list:
         #    单批挂了只让这一批记 `None` —— 本函数的语义本来就是
         #    「`None` = 这次没拿到」（见 docstring），其余批次照常。
         try:
-            got = parse_answers(ask(build_state(part),
-                                    build_questions(len(part))), len(part))
+            return parse_answers(ask(build_state(part), build_questions(len(part))), len(part)), False
         except Exception:                                     # noqa: BLE001
-            got = [None] * len(part)
-            n_failed += 1
-        out.extend(got)
+            return [None] * len(part), True
+
+    # ⭐ 批与批互不依赖 → 并发（3.9.4）。实测官方一批 20 题 0.24–0.43 s（2026-10-12），
+    #    一节 548 句约 20–28 批：串行就是下课后干等 6–12 s。`map` 保序，结果逐批原位拼回。
+    #    ⚠️ 只开 `WORKERS` 路：TypeSafe 的并发上限没查到，开太多撞 429 反而整批变 `None`。
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        res = list(ex.map(one, parts))
+    out: list = [p for got, _ in res for p in got]
+    n_batches = len(parts)
+    n_failed = sum(1 for _, bad in res if bad)
     # ⚠️⚠️ **失败必须出声**（2026-10-01 审查 F5）：「单批不连坐」之后又留下一个
     #    静默面 —— key 过期 / 401 / 全局限流时**全部**批次记 `None` → `top_k`
     #    排除 `None` → 空表 → 🎯 整节消失，终端和笔记里一句话都没有，
@@ -199,21 +206,42 @@ _PROVIDER: dict | None = None
 def _provider(*, root=None) -> dict:
     """现在的供应商 —— `{"name", "endpoint", "model", "token"}`。
 
-    ⭐ 优先级：**有官方 key 就走官方**（能钉版本号）→ 否则 CommandCode
+    ⭐ 优先级见 `resolve`：官方 key → CommandCode → 通行码（作者的 Worker）
        → 都没有则 `token` 为空（= 功能关着，同本模块一贯的 fail-soft）。
     ⚠️ 解析一次就缓存：跑一节 50 分钟的课要调十几次，而 key 文件不会中途变。
     """
     global _PROVIDER
     if _PROVIDER is None:
-        off = _read_key("jev_key", root=root)
-        cc = token(root=root)
-        if off:
-            _PROVIDER = {"name": "typesafe", "endpoint": OFFICIAL_ENDPOINT,
-                         "model": OFFICIAL_MODEL, "token": off}
-        else:
-            _PROVIDER = {"name": "commandcode", "endpoint": ENDPOINT,
-                         "model": MODEL, "token": cc}
+        _PROVIDER = resolve(_read_key("jev_key", root=root), token(root=root), _translate_key())
     return _PROVIDER
+
+
+def resolve(official: str, cc: str, translate_key: str | None) -> dict:
+    """三把钥匙 → 用哪家。**纯函数。** 官方 key → CommandCode → 通行码（作者的 Worker 代付）。
+
+    ⭐ 通行码那条（3.9.4）：朋友手里只有 `cl-` 码，Jev 由作者的 Worker（`/v1/jev`）拿作者的
+       官方 key 代打 —— 模型在 Worker 那边**钉死** `OFFICIAL_MODEL`，这里写同一个值只为对账。
+    ⚠️ 顺序是"自己配的优先"：作者本机有官方 key，就绝不绕作者自己的服务器走一圈。
+    """
+    if official:
+        return {"name": "typesafe", "endpoint": OFFICIAL_ENDPOINT,
+                "model": OFFICIAL_MODEL, "token": official}
+    if cc:
+        return {"name": "commandcode", "endpoint": ENDPOINT, "model": MODEL, "token": cc}
+    import llm_client
+    if llm_client.is_passcode(translate_key):
+        return {"name": "classlive", "endpoint": llm_client.base_for(translate_key) + "/jev",
+                "model": OFFICIAL_MODEL, "token": translate_key}
+    return {"name": "commandcode", "endpoint": ENDPOINT, "model": MODEL, "token": ""}
+
+
+def _translate_key() -> str:
+    """翻译那栏填的东西（DeepSeek key 或通行码）。读不出返回空串，不抛。"""
+    try:
+        import cloud_translator
+        return cloud_translator.load_api_key() or ""
+    except Exception:                                     # noqa: BLE001
+        return ""
 
 
 def provider_token() -> str:
@@ -250,11 +278,10 @@ def ask_commandcode(state: str, questions: dict, *, token: str, timeout: float =
     md = model or _provider()["model"]
     body = json.dumps({"model": md, "state": state,
                        "questions": questions}).encode("utf-8")
-    req = urllib.request.Request(
-        ep, data=body,
-        headers={"Authorization": "Bearer " + token,
-                 "Content-Type": "application/json",
-                 "User-Agent": UA})
+    hdr = {"Authorization": "Bearer " + token, "Content-Type": "application/json", "User-Agent": UA}
+    import llm_client
+    hdr = {**llm_client.headers(token), **hdr}   # 通行码时多一个安装号（Worker 按它数设备）；别的 key 不带
+    req = urllib.request.Request(ep, data=body, headers=hdr)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())

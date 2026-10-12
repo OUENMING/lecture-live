@@ -92,11 +92,12 @@ def main(argv=None) -> int:
         out = _post("stats", {"day": ns.day} if ns.day else {})
         print(f"{out['day']} 用量（只有数字，没有文本 / 音频）")
         # 钱按 DeepSeek 当期价目表自己乘（价位会变，这里不写死）：输入分「缓存命中 / 未命中」两档计价。
-        print(f"{'名字':<10} {'转写分钟':>8} {'段数':>6} {'翻译次数':>8} {'输入tok':>9} {'命中':>6} {'输出tok':>8}")
+        print(f"{'名字':<10} {'转写分钟':>8} {'段数':>6} {'翻译次数':>8} {'输入tok':>9} {'命中':>6} {'输出tok':>8} {'Jev次数':>7} {'Jev题数':>7}")
         for u in out["rows"]:
             rate = f"{u['cache_hit'] / u['tokens_in']:.0%}" if u["tokens_in"] else "—"
             print(f"{u['name']:<10} {u['asr_s'] / 60:>8.1f} {u['asr_reqs']:>6} {u['llm_reqs']:>8} "
-                  f"{u['tokens_in']:>9} {rate:>6} {u['tokens_out']:>8}")
+                  f"{u['tokens_in']:>9} {rate:>6} {u['tokens_out']:>8} "
+                  f"{u.get('jev_reqs', 0):>7} {u.get('jev_q', 0):>7}")   # 3.9.4 之前的老记录没有这两列
     elif ns.cmd in ("revoke", "unrevoke"):
         out = _post(ns.cmd, _who(ns.who))
         print(f"✅ {out['name']}：{'已吊销' if out['revoked'] else '已恢复'}")

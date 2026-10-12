@@ -323,6 +323,89 @@ def t_score_prints_on_failure():
         f"部分失败的话术不对（拿到：{out!r}）")
 
 
+# ---------------------------------------------------------------- 通行码代付（3.9.4）
+@case("⭐⭐ `resolve`：官方 key → CommandCode → 通行码 → 都没有（自己配的优先）")
+def t_resolve_priority():
+    import asr_endpoint
+    host = asr_endpoint.endpoint().rsplit("/", 1)[0]
+    code = "cl-ying-0123456789abcdef"
+    r = kp.resolve("apikey_x", "cc_y", code)
+    assert (r["name"], r["token"]) == ("typesafe", "apikey_x"), f"有官方 key 该走官方：{r}"
+    r = kp.resolve("", "cc_y", code)
+    assert (r["name"], r["token"]) == ("commandcode", "cc_y"), f"有 CommandCode 该走它：{r}"
+    r = kp.resolve("", "", code)
+    assert r["name"] == "classlive" and r["token"] == code, f"只有通行码该走作者的 Worker：{r}"
+    assert r["endpoint"] == host + "/jev", f"通行码那条地址不对：{r['endpoint']!r}"
+    assert r["model"] == kp.OFFICIAL_MODEL, "模型要与 Worker 钉的那版对账"
+    r = kp.resolve("", "", "sk-deepseek-own")
+    assert r["token"] == "", f"自己的 DeepSeek key 不含 Jev —— 该是关着：{r}"
+    assert kp.resolve("", "", None)["token"] == "", "什么都没有 → 关着"
+
+
+@case("⭐⭐ 通行码请求带安装号；官方 / CommandCode **不带**（安装号不给第三方）")
+def t_install_header_only_for_passcode():
+    import urllib.request
+
+    import final_asr
+    seen: list = []
+
+    class _R:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"answers": {}}'
+
+    def fake_open(req, timeout=None):
+        seen.append({k.lower(): v for k, v in req.header_items()})
+        return _R()
+    orig_open, orig_iid = urllib.request.urlopen, final_asr.install_id
+    urllib.request.urlopen = fake_open
+    final_asr.install_id = lambda **kw: "f" * 32
+    try:
+        kp.ask_commandcode("s", {"S1": {}}, token="cl-ying-0123456789abcdef",
+                           endpoint="https://w/v1/jev", model="m")
+        kp.ask_commandcode("s", {"S1": {}}, token="apikey_x",
+                           endpoint="https://t/v1/systemone", model="m")
+    finally:
+        urllib.request.urlopen, final_asr.install_id = orig_open, orig_iid
+    assert seen[0].get("x-classlive-install") == "f" * 32, f"通行码请求没带安装号：{seen[0]}"
+    assert seen[0].get("authorization") == "Bearer cl-ying-0123456789abcdef"
+    assert "user-agent" in seen[0], "UA 不能被安装号那组头盖掉（CommandCode 缺 UA 就 403）"
+    assert "x-classlive-install" not in seen[1], f"官方那条不该带安装号：{seen[1]}"
+
+
+@case("⭐ `score` 批与批并发（下课不干等），结果仍按句子原位拼回")
+def t_score_concurrent_keeps_order():
+    import re
+    import threading
+    import time
+    live = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def slow(state, questions):
+        with lock:
+            live["now"] += 1
+            live["peak"] = max(live["peak"], live["now"])
+        time.sleep(0.15)
+        with lock:
+            live["now"] -= 1
+        # 每句的分数 = 它在 state 里的句号 → 拼错位一眼可见
+        nums = [int(m) for m in re.findall(r"line (\d+)\.", state)]
+        return {"answers": {f"S{i + 1}": {"noul": n / 1000} for i, n in enumerate(nums)}}
+
+    sents = [f"line {i}." for i in range(kp.CHUNK * 6)]
+    t0 = time.perf_counter()
+    got = kp.score(sents, ask=slow)
+    dt = time.perf_counter() - t0
+    assert got == [i / 1000 for i in range(len(sents))], "并发之后分数没按原位拼回"
+    assert live["peak"] > 1, "6 批是串行跑的（峰值并发 1）"
+    assert dt < 6 * 0.15 * 0.75, f"6 批 × 0.15 s 用了 {dt:.2f} s —— 没并发起来"
+
+
 def main_() -> int:
     print("=" * 60)
     fail: list[str] = []

@@ -5,6 +5,8 @@
 #   wrangler secret put GROQ_KEY          # < ~/.classlive/groq-token，管道灌入不回显
 #   wrangler secret put QWEN_KEY          # 百炼国际站（新加坡）key；< ~/.classlive/ 下对应 token 文件，管道灌入不回显
 #   wrangler secret put CLIENT_TOKEN      # 新生成，值与客户端 asr_endpoint.py 一致（公开令牌）
+#   wrangler secret put DEEPSEEK_KEY      # 一人一码：通行码用户的翻译走 Owen 的 DeepSeek key
+#   wrangler secret put ADMIN_TOKEN       # 一人一码：/v1/admin/* 只认它（scripts/cl_admin.py 读 ~/.classlive/asr-admin-token）
 #   wrangler deploy
 #
 # ⚠️ 与上传 Worker 分开：那个是「只写、PUT-only」的安全立场，转写放进去会改性质。
@@ -28,6 +30,15 @@ class_name = "Quota"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Quota"]
+
+# 一人一码（docs/PLAN-passkey.md）：通行码表 / 设备 / 用量。单实例，同样只能 SQLite 后端。
+[[durable_objects.bindings]]
+name = "PASSES"
+class_name = "Passes"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Passes"]
 
 # 按安装限流：30 次 / 60 s（每个 Cloudflare 节点各自计数）。
 # ⚠️ Rate Limiting binding 需要 wrangler >= 4.36.0；period 只能是 10 或 60；

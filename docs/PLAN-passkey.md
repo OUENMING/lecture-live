@@ -1,7 +1,13 @@
 # 计划：一人一码（通行码代付 ASR + DeepSeek）
 
 > 2026-10-11 起草 · Owen 已同意方向（「同意设置一人一码 key 的方式，并且可以扩展一些功能」）
-> 状态：**设计稿，未动代码**。§6 已拍板；排在 R3 之后实施（发版在 R3 与后续优化之后）。
+> 状态（2026-10-12）：**§5 第 1–4 步代码已写、在 `next-391` 分支，未部署**。第 0 步（量钱）与 §4 告知文案、
+> 扩展功能 1–3 未做。部署前 Owen 要：`wrangler secret put DEEPSEEK_KEY` / `ADMIN_TOKEN`、把 ADMIN_TOKEN 存进
+> `~/.classlive/asr-admin-token`（600）、点头 `wrangler deploy`（会建新 DO `Passes`，migration v2）。
+>
+> 与本稿的偏差：码表 / 设备 / 用量用 DO 的 KV 接口存（`code:` / `dev:` / `use:<日>:` 三种键），不是 SQL 表 ——
+> 同一个 SQLite 后端，Node 里能直接测；`list({prefix})` 够管理命令用。翻译请求**不过**转写那两道限流
+> （码是个人的、可吊销可限额，而一节课的翻译每分钟会超 30 次）。
 
 ## 0. 一句话
 

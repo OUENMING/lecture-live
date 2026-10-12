@@ -62,6 +62,106 @@ function toBase64(buf) {
 }
 
 import { TURBO, V3 } from "./quota-core.js";
+import { CODE_RE } from "./passes-core.js";
+
+// ---- 一人一码（docs/PLAN-passkey.md）----
+const PASSES_NAME = "passes-v1";
+const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
+// 只放行客户端真用的模型（`main.py --cloud-model` / `keyentry` 的默认值），别让码变成任意模型的代付。
+const LLM_MODELS = new Set(["deepseek-flash", "deepseek-chat"]);
+const LLM_MAX_TOKENS = 4096;   // 客户端最大的一处是精修 / 讲解 4000
+const LLM_MAX_BYTES = 256 * 1024;
+const DENY = {   // 码不能用 -> HTTP 状态；客户端按「云端不可用」走现有降级
+  unknown: 403, revoked: 403, expired: 403, devices: 403, quota: 429,
+};
+
+async function passes(env, path, payload) {
+  const stub = env.PASSES.get(env.PASSES.idFromName(PASSES_NAME));
+  return stub.fetch(`https://passes${path}`, { method: "POST", body: JSON.stringify(payload) });
+}
+
+// 码能不能用 -> null（能）或拒绝的 Response。DO 不可用 -> 503（不放行：码模式下钱是 Owen 付的）。
+async function checkPass(env, code, install, kind) {
+  let r;
+  try { r = await (await passes(env, "/check", { code, install, kind })).json(); } catch { r = null; }
+  if (!r) return json(503, { error: "passes_unavailable" });
+  if (r.ok) return null;
+  console.log(JSON.stringify({ pass: r.name ?? "?", denied: r.reason, kind }));
+  return json(DENY[r.reason] ?? 403, { error: r.reason === "quota" ? "quota_exceeded" : r.reason });
+}
+
+function reportUsage(env, ctx, payload) {
+  const p = passes(env, "/usage", payload).catch(() => {});
+  ctx?.waitUntil?.(p);
+}
+
+// 从 SSE 流里捞最后那块的 usage（`stream_options.include_usage` 时 DeepSeek 在末尾单独发一块）。
+async function usageFromStream(stream) {
+  const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = "", usage = null;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += value;
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line.startsWith("data:")) continue;
+      try { const o = JSON.parse(line.slice(5)); if (o.usage) usage = o.usage; } catch { /* [DONE] 等 */ }
+    }
+  }
+  return usage;
+}
+
+const usageFields = (u) => ({
+  tokens_in: u?.prompt_tokens ?? 0, tokens_out: u?.completion_tokens ?? 0,
+  cache_hit: u?.prompt_cache_hit_tokens ?? 0,
+});
+
+async function chat(request, env, ctx, code) {
+  if (!env.DEEPSEEK_KEY) return json(503, { error: "llm_not_configured" });
+  if (Number(request.headers.get("content-length")) > LLM_MAX_BYTES) return json(413, { error: "too_large" });
+  const raw = await request.text();
+  if (raw.length > LLM_MAX_BYTES) return json(413, { error: "too_large" });
+  let body;
+  try { body = JSON.parse(raw); } catch { return json(400, { error: "bad_json" }); }
+  if (!body || !LLM_MODELS.has(body.model)) return json(400, { error: "model_not_allowed" });
+  body.max_tokens = Math.min(Number(body.max_tokens) || LLM_MAX_TOKENS, LLM_MAX_TOKENS);
+  if (body.stream) body.stream_options = { ...(body.stream_options || {}), include_usage: true };
+  const up = await fetch(DEEPSEEK_URL, {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.DEEPSEEK_KEY}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const headers = { "content-type": up.headers.get("content-type") || "application/json" };
+  if (!up.ok || !up.body) {
+    return new Response(up.body, { status: up.status, headers });   // 上游错误原样回（不记用量）
+  }
+  if (body.stream) {
+    const [toClient, toMeter] = up.body.tee();
+    const p = usageFromStream(toMeter)
+      .then((u) => passes(env, "/usage", { code, ...usageFields(u) }))
+      .catch(() => {});
+    ctx?.waitUntil?.(p);
+    return new Response(toClient, { status: up.status, headers });
+  }
+  const text = await up.text();
+  let u = null;
+  try { u = JSON.parse(text).usage; } catch { /* 非 JSON 照样回 */ }
+  reportUsage(env, ctx, { code, ...usageFields(u) });
+  return new Response(text, { status: up.status, headers });
+}
+
+// 管理接口：只认 ADMIN_TOKEN（fail-closed：没配就谁都不认）。路径 /v1/admin/x -> DO 的 /admin/x。
+async function admin(request, env, path) {
+  const expected = env.ADMIN_TOKEN ? `Bearer ${env.ADMIN_TOKEN}` : null;
+  if (!expected || (request.headers.get("authorization") || "") !== expected) {
+    return new Response("unauthorized", { status: 401 });
+  }
+  const res = await passes(env, path.slice(3), await request.json().catch(() => ({})));
+  return new Response(res.body, { status: res.status, headers: { "content-type": "application/json" } });
+}
 
 // ---- Quota DO ----
 async function quota(env, path, payload) {
@@ -222,16 +322,35 @@ export default {
   async fetch(request, env, ctx) {
     const t0 = Date.now();
     const url = new URL(request.url);
-    if (request.method !== "POST" || url.pathname !== "/v1/transcribe") {
+    const path = url.pathname;
+    if (request.method !== "POST"
+        || !(path === "/v1/transcribe" || path === "/v1/chat/completions" || path.startsWith("/v1/admin/"))) {
       return new Response("not found", { status: 404 });
     }
+    if (path.startsWith("/v1/admin/")) return admin(request, env, path);
+    // 认证：公开令牌（只能转写）或通行码 `cl-<名字>-<随机>`（转写 + 翻译，记到人名下）。
     // ⚠️ fail-closed：secret 没配时 "Bearer undefined" 不能放行（同上传 Worker）。
+    const auth = request.headers.get("authorization") || "";
+    const code = auth.startsWith("Bearer cl-") ? auth.slice(7) : null;
+    if (code !== null && (!CODE_RE.test(code) || !env.PASSES)) {
+      return json(403, { error: "unknown" });
+    }
     const expected = env.CLIENT_TOKEN ? `Bearer ${env.CLIENT_TOKEN}` : null;
-    if (!expected || (request.headers.get("authorization") || "") !== expected) {
+    if (code === null && (!expected || auth !== expected)) {
       return new Response("unauthorized", { status: 401 });
+    }
+    if (path === "/v1/chat/completions" && code === null) {
+      return new Response("unauthorized", { status: 401 });   // 公开令牌不代付翻译
     }
     const install = request.headers.get("x-classlive-install") || "";
     if (!INSTALL_OK.test(install)) return new Response("bad install id", { status: 400 });
+
+    // 翻译：只有通行码能走到这；不过下面那两道限流 —— 码是个人的、能吊销、能限额，
+    // 而一节课的翻译请求（定稿 + 草稿译文）每分钟会超过转写那套 30 / 60 的限。
+    if (path === "/v1/chat/completions") {
+      const deny = await checkPass(env, code, install, "llm");
+      return deny ?? chat(request, env, ctx, code);
+    }
 
     // 令牌公开、install_id 客户端随便造 -> 按 install 限流挡不住，所以再按 IP 限一道（R17，同上传 Worker）。
     const ip = request.headers.get("cf-connecting-ip") || "0.0.0.0";
@@ -249,6 +368,12 @@ export default {
 
     const raw = parseFloat(request.headers.get("x-audio-seconds"));
     const seconds = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), SECONDS_MAX) : SECONDS_DEFAULT;
-    return transcribe(env, ctx, audio, seconds, t0);
+    if (code !== null) {
+      const deny = await checkPass(env, code, install, "asr");
+      if (deny) return deny;
+    }
+    const res = await transcribe(env, ctx, audio, seconds, t0);
+    if (code !== null && res.status === 200) reportUsage(env, ctx, { code, asr_s: seconds });
+    return res;
   },
 };

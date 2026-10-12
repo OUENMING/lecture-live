@@ -157,6 +157,16 @@ class TestCloudPath(Base):
         self.assertEqual(self.draft.calls, 0)
         self.assertEqual(srv.n, 1)
 
+    def test_01b_passcode_is_the_bearer(self):
+        """一人一码：填的是通行码就拿它当转写令牌（Worker 记到人名下）；原生 sk- key 绝不发出去。"""
+        import asr_endpoint
+        os.environ.pop("CLASSLIVE_ASR_TOKEN", None)
+        srv = self.serve()
+        self.make(passcode="cl-ying-0123456789abcdef").transcribe(audio(3))
+        self.make(passcode="sk-secret").transcribe(audio(3))
+        auths = [r["headers"].get("Authorization") for r in srv.reqs]
+        self.assertEqual(auths, ["Bearer cl-ying-0123456789abcdef", f"Bearer {asr_endpoint.TOKEN}"])
+
     def test_02_hang_hits_total_deadline(self):
         self.serve(sleep=7.0)
         f = self.make()

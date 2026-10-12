@@ -17,6 +17,28 @@ import json
 BASE = "https://api.deepseek.com/v1"
 
 
+def is_passcode(key: str | None) -> bool:
+    """一人一码的通行码 `cl-<名字>-<随机>`（`docs/PLAN-passkey.md`）；原生 `sk-…` key 不是。"""
+    return bool(key) and key.startswith("cl-")
+
+
+def base_for(key: str | None) -> str:
+    """通行码 → Owen 的 Worker（与定稿转写同一个域名，`asr_endpoint`）；其余 → DeepSeek 直连。"""
+    if is_passcode(key):
+        import asr_endpoint
+        return asr_endpoint.endpoint().rsplit("/", 1)[0]
+    return BASE
+
+
+def headers(key: str) -> dict:
+    """请求头。通行码还要带安装号（Worker 按它数设备）—— 直连 DeepSeek 时**不带**（别把安装号发给第三方）。"""
+    h = {"Authorization": f"Bearer {key}"}
+    if is_passcode(key):
+        import final_asr
+        h["X-ClassLive-Install"] = final_asr.install_id()
+    return h
+
+
 def chat_json(key: str, model: str, system: str, user: str, *, max_tokens: int,
               temperature: float = 0.2, timeout: float = 180.0):
     """非流式、`response_format=json_object`、关掉思考模式；返回模型给的 JSON（**原样**，可能不是 dict）。
@@ -30,8 +52,7 @@ def chat_json(key: str, model: str, system: str, user: str, *, max_tokens: int,
                "response_format": {"type": "json_object"},
                "messages": [{"role": "system", "content": system},
                             {"role": "user", "content": user}]}
-    r = httpx.post(f"{BASE}/chat/completions",
-                   headers={"Authorization": f"Bearer {key}"},
+    r = httpx.post(f"{base_for(key)}/chat/completions", headers=headers(key),
                    json=payload, timeout=timeout)
     r.raise_for_status()
     return json.loads(r.json()["choices"][0]["message"]["content"])

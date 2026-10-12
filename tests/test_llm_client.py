@@ -85,6 +85,55 @@ class T(unittest.TestCase):
         with self.assertRaises(json.JSONDecodeError):
             llm_client.chat_json("k", "m", "s", "u", max_tokens=1)
 
+    def test_passcode_goes_to_worker_with_install_id(self):
+        import final_asr
+        orig = final_asr.install_id
+        final_asr.install_id = lambda **kw: "ab" * 16
+        try:
+            build_notes._chat_json("cl-ying-0123456789abcdef", "m", "s", "u", 1)
+        finally:
+            final_asr.install_id = orig
+        c = self.rec.calls[0]
+        self.assertEqual(c["url"], "https://asr.bldcam.page/v1/chat/completions")
+        self.assertEqual(c["headers"], {"Authorization": "Bearer cl-ying-0123456789abcdef",
+                                        "X-ClassLive-Install": "ab" * 16})
+
+    def test_native_key_never_sends_install_id(self):
+        self.assertEqual(llm_client.headers("sk-abc"), {"Authorization": "Bearer sk-abc"})
+        self.assertEqual(llm_client.base_for("sk-abc"), llm_client.BASE)
+        self.assertEqual(llm_client.base_for(None), llm_client.BASE)
+
+    def test_cloud_translator_routes_by_key(self):
+        import cloud_translator as ct
+        self.assertEqual(ct.CloudTranslator("sk-a", "m")._base, "https://api.deepseek.com/v1")
+        import final_asr
+        orig = final_asr.install_id
+        final_asr.install_id = lambda **kw: "cd" * 16
+        try:
+            t = ct.CloudTranslator("cl-a-0123456789abcdef", "m")
+        finally:
+            final_asr.install_id = orig
+        self.assertEqual(t._base, "https://asr.bldcam.page/v1")
+        self.assertEqual(t._headers()["X-ClassLive-Install"], "cd" * 16)
+        self.assertEqual(ct.CloudTranslator("cl-a-0123456789abcdef", "m", base_url="http://x/v1")._base,
+                         "http://x/v1", "调用方指定的地址不许被改道")
+
+    def test_asr_token_precedence(self):
+        import os
+
+        import asr_endpoint as ae
+        old = os.environ.pop("CLASSLIVE_ASR_TOKEN", None)
+        try:
+            self.assertEqual(ae.token(), ae.TOKEN)
+            self.assertEqual(ae.token("sk-x"), ae.TOKEN, "原生 key 不许当转写令牌发出去")
+            self.assertEqual(ae.token("cl-a-0123456789abcdef"), "cl-a-0123456789abcdef")
+            os.environ["CLASSLIVE_ASR_TOKEN"] = "t"
+            self.assertEqual(ae.token("cl-a-0123456789abcdef"), "t")
+        finally:
+            os.environ.pop("CLASSLIVE_ASR_TOKEN", None)
+            if old is not None:
+                os.environ["CLASSLIVE_ASR_TOKEN"] = old
+
     def test_single_source_of_truth_for_the_address(self):
         hits = [p.name for p in HERE.glob("*.py")
                 if p.name != "llm_client.py" and "api.deepseek.com" in p.read_text(encoding="utf-8")]

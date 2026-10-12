@@ -24,6 +24,11 @@ def endpoint() -> str:
     return os.environ.get("CLASSLIVE_ASR_ENDPOINT", ENDPOINT)
 
 
-def token() -> str:
-    """令牌。允许 `CLASSLIVE_ASR_TOKEN` 覆盖（判据用；生产取常量）。"""
-    return os.environ.get("CLASSLIVE_ASR_TOKEN", TOKEN)
+def token(passcode: str | None = None) -> str:
+    """令牌。`CLASSLIVE_ASR_TOKEN` 覆盖（判据用）> 用户填的通行码 `cl-…`（一人一码：转写记到他名下）> 公开常量。"""
+    env = os.environ.get("CLASSLIVE_ASR_TOKEN")
+    if env:
+        return env
+    if passcode and passcode.startswith("cl-"):
+        return passcode
+    return TOKEN

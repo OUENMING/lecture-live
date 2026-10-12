@@ -237,7 +237,9 @@ class CloudTranslator:
         import httpx
         self._key = api_key
         self._model = model
-        self._base = base_url.rstrip("/")
+        # 一人一码：通行码 `cl-…` 走 Owen 的 Worker（只在调用方没指定地址时改道）。
+        self._base = (llm_client.base_for(api_key) if base_url == DEFAULT_BASE else base_url).rstrip("/")
+        self._auth = llm_client.headers(api_key)
         self._terms = glossary_terms or []
         self._core = core or []
         self._course_terms = course_terms or []
@@ -276,8 +278,7 @@ class CloudTranslator:
 
     # ---- 工具 ----
     def _headers(self):
-        return {"Authorization": f"Bearer {self._key}",
-                "Content-Type": "application/json"}
+        return {**self._auth, "Content-Type": "application/json"}
 
     def _stream_chat(self, messages: list[dict], max_tokens: int):
         """生成增量文本。必须显式关掉思考模式:

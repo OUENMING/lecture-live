@@ -1170,6 +1170,7 @@ def run(args) -> None:
     final = final_asr.load_final(args.final_model_dir, asr, allow_cloud=_cloud_asr_ok,
                                  preload_local=_why_off is not None,  # R4: 云端开着就不加载 Whisper
                                  is_stopping=stopping.is_set,         # 收尾冲刷时云端截止更短
+                                 passcode=api_key_val,                # 通行码 `cl-…` 才会用上（一人一码）
                                  # `notify` 在下面才定义; 熔断只会在开课后说话, 那时早已定义好
                                  notify=lambda m, w: notify(m, w, src="转写"))
     echo("☁ 定稿: 云端(Groq → 千问 → 本地 Parakeet)" if _why_off is None

@@ -273,8 +273,11 @@ class FinalASR:
                  post=None, encode=None, clock=time.monotonic,
                  is_stopping: Callable[[], bool] | None = None,
                  deadlines: tuple[float, float] = (NORMAL_DEADLINE_S, STOP_DEADLINE_S),
-                 notify: Callable[[str, bool], None] | None = None):
+                 notify: Callable[[str, bool], None] | None = None,
+                 passcode: str | None = None):
         self._local = local if local is not None else draft
+        # 一人一码：用户填的是通行码 `cl-…` 就拿它当令牌（`asr_endpoint.token`），不是就用公开令牌。
+        self._passcode = passcode
         self._local_is_draft = local is None or local is draft
         self._draft = draft
         self._allow = allow_cloud
@@ -351,7 +354,7 @@ class FinalASR:
     def _cloud(self, body: bytes, seconds: float, deadline: float, steps):
         """成功返回 (text, provider); 任何失败记 steps + 熔断并返回 None。"""
         t_end = time.monotonic() + deadline
-        headers = {"Authorization": f"Bearer {asr_endpoint.token()}",
+        headers = {"Authorization": f"Bearer {asr_endpoint.token(self._passcode)}",
                    "X-ClassLive-Install": install_id(),
                    "X-Audio-Seconds": f"{seconds:.1f}",
                    "Content-Type": "audio/ogg"}

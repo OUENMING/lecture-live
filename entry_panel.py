@@ -203,6 +203,21 @@ def ready_short(it: dict) -> str:
     }.get(st, "—")
 
 
+def update_outcome(r: dict, can_restart: bool) -> tuple[str, str | None, bool]:
+    """面板「更新」跑完后怎么收：`(状态行, 那一格的新标题 | None = 回到原样可重试, 要不要重开)`。**纯函数**。
+
+    `r` 是 `update.apply()` 的返回值。⚠️ `ok` 但带 `user_msg` = 代码没问题、收尾（补依赖 / 模型）没成 ——
+    那一格不能写「已是最新」，要留着让人再点（2026-10-12 外部审查：状态行和按钮自相矛盾）。
+    """
+    if r.get("pulled"):
+        if can_restart:
+            return "装好了 —— 正在重开面板", None, True
+        return "装好了 —— 关掉面板再打开就是新版本", "✓  更新  已装好", False
+    if r.get("ok") and not r.get("user_msg"):
+        return "已经是最新的了", "✓  更新  已是最新", False
+    return r.get("user_msg") or "更新没成功 —— 现在的版本照常能用", None, False
+
+
 def ready_line_text(items: list) -> str:
     """整条就绪条上所有项拼成一行（`·` 分隔）。给状态行/终端用。"""
     return "　·　".join(ready_item_text(i) for i in items)
@@ -2127,20 +2142,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
     def _update_done(r: dict) -> None:
         S["updating"] = False
-        if r.get("pulled"):
-            if on_restart is not None:
-                _status("装好了 —— 正在重开面板")
-                on_restart()
-                return
-            _status("装好了 —— 关掉面板再打开就是新版本")
-            _retitle("update", "✓  更新  已装好")
+        msg, title, restart = update_outcome(r, on_restart is not None)
+        _status(msg)
+        if restart and on_restart is not None:
+            on_restart()
             return
-        if r.get("ok"):
-            _status(r.get("user_msg") or "已经是最新的了")
-            _retitle("update", "✓  更新  已是最新")
-            return
-        _status(r.get("user_msg") or "更新没成功 —— 现在的版本照常能用")
-        _retitle("update", ready_item_text(ready_by_key.get("update") or {}))
+        _retitle("update", title or ready_item_text(ready_by_key.get("update") or {}))
 
     def on_ready_click(key: str) -> None:
         """点就绪条上的某一项 —— 就地修那一项。

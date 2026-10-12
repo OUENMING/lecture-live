@@ -1498,6 +1498,17 @@ def _vault_section() -> None:
           _t({"key": "update", "state": "warn", "kind": "blocked", "detail": "你改过 a.py"})
           == "⚠  更新  装不上")
     check("更新中 → `◌  更新  更新中…`", _t({"key": "update", "state": "busy"}) == "◌  更新  更新中…")
+    _uo = E.update_outcome
+    check("⭐ 只差收尾、收尾没成 → 状态行说原因、那一格回原样可重试（不写「已是最新」）",
+          _uo({"ok": True, "pulled": False, "user_msg": "新版本已装好，但网断了 —— 下次打开会再试一次。"}, True)
+          == ("新版本已装好，但网断了 —— 下次打开会再试一次。", None, False))
+    check("真是最新 → `✓  更新  已是最新`",
+          _uo({"ok": True, "pulled": False, "user_msg": ""}, True) == ("已经是最新的了", "✓  更新  已是最新", False))
+    check("换了代码 + 能重开 → 重开", _uo({"ok": True, "pulled": True}, True)[2] is True)
+    check("换了代码、不能重开 → `✓  更新  已装好`",
+          _uo({"ok": True, "pulled": True}, False) == ("装好了 —— 关掉面板再打开就是新版本", "✓  更新  已装好", False))
+    check("没成 → 原因 + 回原样", _uo({"ok": False, "user_msg": "另一个更新正在进行"}, True)
+          == ("另一个更新正在进行", None, False))
     check("草稿模型可加装 → `✓  语音模型  已就绪 · 可加草稿模型`",
           _t({"key": "models", "state": "ok", "offer_draft": True})
           == "✓  语音模型  已就绪 · 可加草稿模型")

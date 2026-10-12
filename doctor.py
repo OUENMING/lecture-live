@@ -113,7 +113,10 @@ def hf_cached(repo_id: str, *, must: tuple = ("config.json",),
 
 
 def model_state(model, *, root=None) -> str:
-    """`"missing"` / `"ok"` / ⚠️ `"unknown"` / ⚠️ `"stale"` —— **不是 `bool`**。
+    """`"missing"` / `"ok"` / ⚠️ `"unknown"` / ⚠️ `"stale"` / ⚠️ `"incomplete"` —— **不是 `bool`**。
+
+    ⚠️ `"incomplete"` = **确定**缺件（HF 缓存下了一半）。它**不是** `ok`，也**不是**
+       `missing`：文件在，但跑不起来；`cl doctor` 那一行要说实话，而且**照样不自动下**。
 
     ⚠️⚠️ **`unknown` 绝不等于 `missing`。** 老用户 / 手动装的模型**没有戳**
        （`~/.classlive/models.json` 是 2026-09-28 才有的东西），它们**能用** ——
@@ -125,13 +128,24 @@ def model_state(model, *, root=None) -> str:
 
     ⚠️ HF cache 那条要**两个判据配合**：`model_present()` 答「有没有」，
        `hf_cached()` 答「完不完整」。只有前者会**把下了一半的报成 ✅**
-       （HF 中途留下 `blobs/*.incomplete`，大小 > 0）。第二个答不出来 → `unknown`。
+       （HF 中途留下 `blobs/*.incomplete`，大小 > 0）。
+       → 三个答案映射成三个状态：`True` 往下走、`False` → `incomplete`、
+         `None`（没装 huggingface_hub）→ `unknown`。
     """
     if not model_present(model.path):
         return "missing"
-    if model.at_hf and hf_cached(model.src) is not True:
-        # ⚠️ 可能是「下了一半」，也可能是「问不出来」——**两种都不自动下**。
-        return "unknown"
+    if model.at_hf:
+        # ⚠️⚠️ **`False`（确定缺件）与 `None`（问不出来）绝不能折叠成一个 `unknown`**
+        #    （2026-10-12 全仓审查核实）：折叠之后，一个 HF 缓存**下了一半**的模型
+        #    会一路显示成「就位 / 齐了」——`cl doctor` 打 ✅、就绪条说「齐了」，
+        #    而它其实**跑不起来**（`mlx_lm.load()` 到用的时候才炸）。
+        #    `try_to_load_from_cache` 是**离线**的，答不出来只有一种原因：没装
+        #    `huggingface_hub` —— 那才是真的"问不出来"。
+        cached = hf_cached(model.src)
+        if cached is False:
+            return "incomplete"        # 文件在、缓存缺件（下了一半 / 少权重）
+        if cached is None:
+            return "unknown"           # 没装 huggingface_hub，问不出来
     stamp = _stamp_for(model.path, root=root)
     if stamp is None:
         return "unknown"                                   # 没戳：老用户 / 手动装的
@@ -295,16 +309,26 @@ def main() -> int:
         # ⚠️ 用属性，别位置解包 —— 2026-09-28 给 `Model` 加 `mb`/`src`/`at_hf` 时
         #    这里还写着 `for path, label, required, cmd, size in MODELS`，
         #    于是 `doctor.py` 自己**当场 ValueError 崩掉**。加字段时这类解包是隐形的雷。
-        ok = model_present(m.path)
+        present = model_present(m.path)
+        st = model_state(m) if present else "missing"
+        incomplete = st == "incomplete"
+        # ⚠️ 「下一半」**不算就位** —— 文件在也跑不起来（见 `model_state`）。
+        ok = present and not incomplete
         if not ok and m.required:
             hard_missing += 1
-        print(f"{_mark(ok) if ok else ('❌' if m.required else '⚪')} {m.label:<30}"
-              f"{'就位' if ok else ('空目录/空文件' if os.path.exists(os.path.expanduser(m.path)) else '缺失')}")
+        if ok:
+            word = "就位"
+        elif incomplete:
+            word = "缓存不完整（下了一半）"
+        else:
+            word = ("空目录/空文件" if os.path.exists(os.path.expanduser(m.path)) else "缺失")
+        print(f"{_mark(ok) if ok else ('❌' if m.required else '⚪')} {m.label:<30}{word}")
+        if incomplete:
+            print("   ⚠️ 文件在、但 HF 缓存缺件 —— **现在用不了**（不会自动下）")
         if ok:
             # ⭐ 新增：`就位` 不等于「是我们要的那版」（2026-09-28 起）。
             #    ⚠️ 只在**能说点什么**的时候多打一行 —— 问不出来（老用户没戳）
             #       不该在这里刷屏，那是正常状态。
-            st = model_state(m)
             if st == "stale":
                 print("   ⚠️ 版本对不上（戳在 ~/.classlive/models.json）—— 能用，要不要换由你定")
         if not ok:

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """extract.py 的判据。
 
-跑法: ClassLive.app/Contents/MacOS/python tests/test_extract.py   (或 pytest tests/)
+跑法: ClassLive.app/Contents/MacOS/python tests/test_extract.py
+      ⚠️ **没有 `pytest` 入口**：本文件只有 `main()`，pytest 一条都收集不到
+         （= 静默恒绿）；唯一的批量入口是 `scripts/check.py`，它按文件逐个跑。
 
 语料是作者本机的真实课件（`~/UCD`）。**找不到就跳过那一条并说明，不假装通过。**
 本测试**只读**：合成 PPTX 写在 `tempfile.mkdtemp()` 里，绝不碰仓库里的任何文件。

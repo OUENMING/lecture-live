@@ -13,6 +13,36 @@
 const MAX_BYTES = 32 * 1024 * 1024;                 // 单段 Opus 约 1–2 MB；一节课合计约 9 MB
 const NAME_OK = /^\/v1\/objects\/([0-9a-f]{16})\/(report\.json|transcript\.md|meta\.json|audio\.\d{3}\.(opus|wav))$/;
 
+/** 边读边计数，一超 `cap` 就 `cancel()` 掉剩余流并返回 `null`（超限）。
+ *  ⚠️ 别换成 `new Response(body).arrayBuffer()` / `request.arrayBuffer()` —— 那两条都是
+ *     **先把整条流读完**，上限就成了事后检查（内存 DoS 的入口，见 `fetch` 里那段）。 */
+async function readCapped(body, cap) {
+  const reader = body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > cap) {
+      try {
+        await reader.cancel();
+      } catch {
+        // 取消失败不影响判定：我们已经决定拒绝，剩下的字节不再进内存。
+      }
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.byteLength;
+  }
+  return out;
+}
+
 export default {
   async fetch(request, env) {
     if (request.method !== "PUT") {
@@ -37,15 +67,26 @@ export default {
       return new Response("rate limited", { status: 429 });
     }
 
-    // ⚠️ 体积闸门**按实际字节数**卡，不看 Content-Length —— token 公开，攻击者
-    //    可以声明一个小的 Content-Length 却流一大坨。读进来核（单个对象 ≤ 32MB，
-    //    正常音频分段 ≤ 约 19MB，缓冲开销可接受）。
-    const payload = await request.arrayBuffer();
-    if (payload.byteLength === 0) {
+    // ⚠️⚠️ 体积闸门**按实际字节数**卡，不看 Content-Length —— token 公开，攻击者
+    //    可以声明一个小的 Content-Length 却流一大坨。
+    //    ⚠️ 但也**不能先 `await request.arrayBuffer()` 再比大小**（2026-10-12 全仓审查核实）：
+    //    那等于"先把最多 100MB 的 body 整个读进 Worker 内存，再判断它该不该被拒"，
+    //    注释里「缓冲开销可接受」的前提在攻击者手里不成立（内存 DoS）。
+    //    → 两层：① Content-Length 先快速拒绝（它可能撒谎，所以只是快速路径）；
+    //      ② 真读的时候**边读边计数**，一超上限立刻停手、不再往下读。
+    const declared = Number(request.headers.get("Content-Length") || 0);
+    if (Number.isFinite(declared) && declared > MAX_BYTES) {
+      return new Response("too large", { status: 413 });
+    }
+    if (!request.body) {
       return new Response("empty body", { status: 400 });
     }
-    if (payload.byteLength > MAX_BYTES) {
+    const payload = await readCapped(request.body, MAX_BYTES);
+    if (payload === null) {
       return new Response("too large", { status: 413 });
+    }
+    if (payload.byteLength === 0) {
+      return new Response("empty body", { status: 400 });
     }
 
     try {

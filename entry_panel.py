@@ -1812,7 +1812,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         i = S.get("guess_i", 0) + 1
         S["guess_i"] = i if i < len(g) else -1
         if S["guess_i"] < 0:
-            set_status("好，那我不猜了 —— 你自己挑", 2.0)
+            set_status("好，那我不猜了 —— 你自己挑")
         # ⚠️⚠️ **必须 `_later`**（2026-09-29 修）—— 这是卡上「不是这门？」按钮的
         #    action，同步 `refresh()` 会把 sender 所在那张卡整块拆掉，而
         #    `NSCell` 的跟踪循环**还在栈上** → 主线程被占住、**所有按钮都没反应**。
@@ -2031,9 +2031,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         ds = (got.get("deepseek") or "").strip()
         jv = (got.get("jev") or "").strip()
         if not ds and not jv:
-            _status(keyentry.status_line(False, False), 2.0)
+            _status(keyentry.status_line(False, False))
             return
-        _status("正在验证…", 0)
+        _status("正在验证…")
 
         def work() -> None:
             # ⚠️ **验不过的不落盘** —— 存一把不能用的 key 只会让用户以为配好了，
@@ -2207,11 +2207,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         except Exception:                                  # noqa: BLE001
             ok = False
         if not ok:
-            _status("⚠ 云端转写的选择没存下来 —— 这次不算数", 2.0)
+            _status("⚠ 云端转写的选择没存下来 —— 这次不算数")
             return
         ca_on[0] = on
         _set_models(cloud_off=not on)
-        _status("云端转写已开 —— 定稿英文更准" if on else "云端转写已关 —— 这台机器上全本地", 2.0)
+        _status("云端转写已开 —— 定稿英文更准" if on else "云端转写已关 —— 这台机器上全本地")
 
     def _models_menu() -> None:
         """点「语音模型」那一格：弹菜单（模型 / 云端转写）。⚠️ 主线程；菜单项 target 是弱引用 → 挂 `S`。"""
@@ -2285,7 +2285,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    直接调会写进上一个面板或写进空气。排到 run loop 起来之后再落。
             try:
                 from PyObjCTools import AppHelper
-                AppHelper.callAfter(_status, vault_auto_msg, 2.0)
+                AppHelper.callAfter(_status, vault_auto_msg)
             except Exception:                              # noqa: BLE001
                 pass
         # ⚠️⚠️ **`make_ready_strip` 返回的 target 列表必须活到面板结束**
@@ -2461,7 +2461,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    （正常路径走不到 —— 那两种模式里 ＋ 按钮本身是藏着的。）
             # ⭐ **例外：零课程那一档**（`need_course`）—— 那时这一行正是主线动作，
             #    文件已经拖进来了，用户要建课才能往下走。
-            set_status("先确认或取消手上这一批，再新增课程", 1.0)
+            set_status("先确认或取消手上这一批，再新增课程")
             return
         S["add"] = True
         try:
@@ -2522,7 +2522,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             # ⭐ 零课程批量模式：建完课**立刻免费分一遍**（按文件名，0 次 API），
             #    然后**留在输入行里**让用户接着建下一门 —— 别把他踢出去。
             set_status(f"建好了：{r['course']} —— 名字里带它的课件已经归好，"
-                       f"继续建下一门，或点「开始分类」", 1.0)
+                       f"继续建下一门，或点「开始分类」")
             _recode_pending()
             return
         close_add()                       # ⚠️ 它自己会 `_later(refresh)`
@@ -2681,7 +2681,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             except Exception:                              # noqa: BLE001
                 ok = False
             if not ok:
-                set_status("⚠ 测试模式没存下来（.test-mode 写不了）—— 这次不算数", 2.0)
+                set_status("⚠ 测试模式没存下来（.test-mode 写不了）—— 这次不算数")
                 return
             tm_on[0] = on
             try:
@@ -2727,74 +2727,32 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
     status_holder: dict = {"label": None}
 
-    def set_status(text, alpha=1.0):
+    def set_status(text):
+        """把状态行写成 `text`，并把它点亮成纯白。
+
+        ⚠️⚠️ **这里刻意只有一个参数。** 原来有个 `alpha=1.0`，而调用点从 2026-09-29
+           （`610dddf`）起一直按「显示秒数 / `0` = 不自动消失」的语义往那儿传
+           —— 本函数**从来没有过计时逻辑**，于是那三处 `, 0)` 把文字设成了**全透明**：
+           状态行一片空白（「正在验证…」和课表推测的理由用户根本看不见）。
+           2026-10-12 全仓审查核实、逐点改掉。
+           → **语义只留一种：状态文字一律可见。** 真要做「几秒后消失」，
+             得先把那个计时器写出来，别再用一个不肯定的位置参数去暗示它。
+        """
         lb = status_holder.get("label")
         if lb is None:
             return
         try:
             lb.setStringValue_(text)
-            lb.setTextColor_(NSColor.whiteColor().colorWithAlphaComponent_(alpha))
+            lb.setTextColor_(NSColor.whiteColor())
         except Exception:                                 # noqa: BLE001
             pass
 
     # ── 键盘焦点：**只允许在真的编辑时持有**（不变量，抄 overlay）────────
-    def _is_editing() -> bool:
-        """面板现在是 key，是不是因为在输入框里编辑？
-
-        ⚠️ 判据与 `overlay._is_editing` **同源但更强**：那边只问自己那一个 `_input`，
-           这里问「**任何** field editor」—— 本面板会有**两个**文本框（搜索 + 新增课程），
-           盯单个控件会漏掉另一个。
-
-        ⚠️⚠️ **出错时返回 `True`，不是 `False`** —— 2026-09-28 修正。
-           这里原来返回 `False`，而它自己的注释写着「判据抄 `overlay._is_editing`」——
-           **判据抄了，倒向抄反了**，理由没跟着过来。overlay 那段逐字写着：
-             「返回 False 会让不变量在没有可靠依据的情况下**主动抢走焦点** ——
-               正在打字时被抢是最坏的失败模式。检测不出来就当作在打字, 保守。」
-           → 两份拷贝各自漂、而且漂在**最不该漂的那一位**上，这正是本仓库
-             「一条纪律两处定义」的同族事故。
-        """
-        try:
-            fr = win.firstResponder()
-            return bool(fr) and fr is not win and bool(fr.isFieldEditor())
-        except Exception:                                     # noqa: BLE001
-            return True                                       # 判不出来 = 当他在打字
-
+    # ⚠️ 判据本体在模块级 `_win_is_editing` / `_win_release_focus`（见文件末尾那段：守卫的
+    #    每一拍必须是**模块级函数**，否则 `callLater` 会把它连同闭包一起挂在 run loop 上
+    #    → 每开一次面板钉住一棵视图树）。这里只留一个薄包装给本函数体里的调用点用。
     def _release_focus() -> None:
-        """把键盘还出去。
-
-        ⚠️ 两个调用**分开 try** —— 合在一起时前一个抛错会连后一个都不做
-           （`overlay._release_focus` 的注释逐字记过这条）。
-        """
-        try:
-            win.makeFirstResponder_(None)
-        except Exception:                                     # noqa: BLE001
-            pass
-        try:
-            win.resignKeyWindow()
-        except Exception:                                     # noqa: BLE001
-            pass
-
-    def _focus_guard() -> None:
-        """⭐ 不变量：**只有真的在编辑时，面板才允许是 key**。
-
-        ⚠️ 为什么是**不变量**而不是逐点补：点面板任何非控件区域（卡片空白、落点条、
-           标题行）都会让它变 key 并赖着，于是用户在别的 app 里按的键被吃掉。
-           逐点补只能覆盖已知的那几处（`overlay` 的独立验证实测过四条路径都中招）。
-        ⚠️ `overlay` 靠每帧 `pump()` 跑这条；本面板**没有 pump 循环**，所以用
-           0.5 秒定时器。代价是"最多赖 0.5 秒"，换来的好处是不必给这个面板再造一个 pump。
-        ⚠️ 窗口一关就**不再续期** —— 否则定时器会跟着进程活到天荒地老。
-        """
-        try:
-            if not win.isVisible():
-                return
-            if win.isKeyWindow() and not _is_editing():
-                _release_focus()
-        except Exception:                                     # noqa: BLE001
-            pass
-        from PyObjCTools import AppHelper
-        AppHelper.callLater(0.5, _focus_guard)
-
-    _focus_guard()
+        _win_release_focus(win)
 
     # ── 全库搜索（`find.search`，plan §2.3）──────────────────────────
     def run_search(q: str):
@@ -2802,7 +2760,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         q = (q or "").strip()
         if not q:
             S["search"] = None
-            set_status("已清除搜索", 1.0)
+            set_status("已清除搜索")
             _later(refresh)
             return
         # ⚠️ 捕获**这一代**的对象（2026-10-01 质量审查：四处代际守卫收敛成 `_stale`）
@@ -2913,7 +2871,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if not s or s.get("busy"):
             return
         courses.set_attribution(sessions_dir, stem, s["course"])
-        set_status(f"已把 {stem[-14:]} 判给 {s['course']}", 2.0)
+        set_status(f"已把 {stem[-14:]} 判给 {s['course']}")
         open_sessions(s["course"])            # 重开一次，两组列表都刷新
 
     def close_sessions():
@@ -2999,7 +2957,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _skip = len([r for r in (s.get("rows") or []) if r["state"] != "new"])
         set_status(f"新建了 {len(made)} 门课" +
                    (f"，跳过 {_skip} 门" if _skip else "") +
-                   (f"，⚠ {len(failed)} 门没建成" if failed else ""), 3.0)
+                   (f"，⚠ {len(failed)} 门没建成" if failed else ""))
         # ⚠️⚠️ **必须 `_later`**（2026-09-29 修）—— 这是导入确认卡上「新建这些课」
         #    那个 `NSButton` 的 action，同步 `refresh()` 会把 sender 所在的导入卡
         #    （连同 sender 自己）在 `NSCell` 的跟踪循环**还在栈上**时拆掉。
@@ -3016,13 +2974,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if s is None:
             return
         if s.get("err"):
-            set_status(f"搜索失败：{s['err']}", 1.0)
+            set_status(f"搜索失败：{s['err']}")
         else:
             # ⚠️ 截断了就说出来 —— 别让一个被截断的结果读起来像"就这些"
             #    （`minutes` 的 retrieval.rs 逐字：截断会「let a negative result
             #    appear exhaustive when it is not」）。
             more = (f" · 只显示前 {len(s['hits'])} 条" if s.get("truncated") else "")
-            set_status(f"「{s['q']}」命中 {s['total']} 处{more}", 1.0)
+            set_status(f"「{s['q']}」命中 {s['total']} 处{more}")
         cur = S.get("panel")
         if cur is not None:
             cur.refresh()
@@ -3051,17 +3009,16 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if _ics:
             run_import(_ics)
             if _rest:
-                set_status(f"课表先导入了 —— 剩下这 {len(_rest)} 份课件请再拖一次",
-                           3.0)
+                set_status(f"课表先导入了 —— 剩下这 {len(_rest)} 份课件请再拖一次")
             return True
         if S.get("batch") is not None:
-            set_status("已经在核对这一批了 —— 先确认或取消", 1.0)
+            set_status("已经在核对这一批了 —— 先确认或取消")
             return False
         from extract import expand as _expand
         files, dropped = _expand(_rest)
         if not files:
             set_status("这些都不收（只认课件 PDF / PPTX / DOCX、课表 .ics；"
-                       "文件夹取里面一层）", 1.0)
+                       "文件夹取里面一层）")
             return False
         names = courses.list_courses(glossary, state_root=state_root)
         S["batch"] = {"verdicts": [], "busy": True, "total": len(files),
@@ -3072,8 +3029,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             S["batch"]["pending"] = [str(p) for p in files]
             S["batch"]["matched"] = {}
             title_lbl.setStringValue_(f"准备归档 {len(files)} 份课件")
-            set_status(f"还没有课 —— 先建课号，我再开始分（这 {len(files)} 份先放这儿）",
-                       1.0)
+            set_status(f"还没有课 —— 先建课号，我再开始分（这 {len(files)} 份先放这儿）")
             # ⚠️ 让底部那条变成**输入行**：这一档下它才是主线动作。
             open_add()
             return True
@@ -3210,7 +3166,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             return
         names = courses.list_courses(glossary, state_root=state_root)
         if not names:
-            set_status("还没有课 —— 先在上面建一个课号，我再开始分", 1.0)
+            set_status("还没有课 —— 先在上面建一个课号，我再开始分")
             return
         matched = b.get("matched") or {}
         left = [p for p in (b.get("pending") or []) if p not in matched]
@@ -3225,7 +3181,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _later(refresh)
         if not left:
             set_status(f"这 {len(b['verdicts'])} 份全都按文件名认出来了 —— "
-                       f"核对后点确认（一次都没花钱）", 1.0)
+                       f"核对后点确认（一次都没花钱）")
             _batch_ready()
             return
         set_status(f"开始认剩下的 {len(left)} 份…")
@@ -3280,7 +3236,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if b is None:
             return
         if b.get("error"):
-            set_status(f"扫描失败：{b['error']}", 1.0)
+            set_status(f"扫描失败：{b['error']}")
         else:
             hit = len([v for v in b["verdicts"] if v.course])
             tail = f"（另有 {b['dropped']} 份格式不收，没进表）" if b.get("dropped") else ""
@@ -3297,14 +3253,14 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 #    只说"认它最不准"等于让用户去猜 —— 而三种原因的修法完全不同。
                 items = [f"{c}（{why}）" for c, why in list(weak.items())[:2]]
                 line += "　⚠️ 这几门认不准：" + "、".join(items)
-            set_status(line, 1.0)
+            set_status(line)
         cur = S.get("panel")
         if cur is not None:
             cur.refresh()
 
     def _cancel_batch():
         S["batch"] = None
-        set_status("已取消 —— 什么都没动", 1.0)
+        set_status("已取消 —— 什么都没动")
         _later(refresh)
 
     def _confirm_batch():
@@ -3345,7 +3301,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                   f"这次归档照常，但少了一条可度量的数据", flush=True)
         S["batch"] = None
         if not by_course:
-            set_status("一份都没归课 —— 什么都没动", 1.0)
+            set_status("一份都没归课 —— 什么都没动")
             _later(refresh)
             return
         for _p, _popup in rows:
@@ -3355,7 +3311,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 pass
         S["queue"] = sorted(by_course.items())                # 顺序稳定（按课号）
         n_course, n_file = len(S["queue"]), sum(len(v) for v in by_course.values())
-        set_status(f"开始跑 {n_course} 门课 / {n_file} 份课件…", 1.0)
+        set_status(f"开始跑 {n_course} 门课 / {n_file} 份课件…")
         _later(refresh)
         # ⚠️⚠️ **先判 `busy` 再 `pop`。** `run_prep` 开头那句 `if S.get("busy"): return False`
         #    在**批量分类期间完全可达**（`S["busy"]` 是 prep 的串行器，
@@ -3366,7 +3322,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    ⚠️ 早退时**不要**把队列丢掉 —— 正在跑的那门的 `_done` 会接着从
         #    `S["queue"]` 排空（它是在清完 `busy` **之后**才踢下一门的）。
         if S.get("busy"):
-            set_status(f"另一门课还在跑 —— 这 {n_course} 门排在队列里等它，别关面板", 1.0)
+            set_status(f"另一门课还在跑 —— 这 {n_course} 门排在队列里等它，别关面板")
             return
         _kick_queue()
 
@@ -3436,7 +3392,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, 120.0)))
                 return
             if _i.get("err"):
-                set_status(f"读课表失败：{_i['err']}", 1.0)
+                set_status(f"读课表失败：{_i['err']}")
             card, _imp_t = _make_import_card(
                 _i.get("rows") or [], width=WIDTH - 2 * PAD,
                 warn=_i.get("warn") or [], on_confirm=confirm_import,
@@ -3456,7 +3412,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, 120.0)))
                 return
             if q.get("err"):
-                set_status(f"读上课记录失败：{q['err']}", 1.0)
+                set_status(f"读上课记录失败：{q['err']}")
             _rows = q.get("rows") or []
             card, _sess_t = _make_sessions_card(
                 _rows, width=WIDTH - 2 * PAD, title=f"这门课 {len(_rows)} 节",
@@ -3542,9 +3498,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _hint = _gs[_gi].course if 0 <= _gi < len(_gs) else None
         if _hint:
             rows.sort(key=lambda r: (r.course != _hint,))
-            set_status(f"课表推测：{_hint} —— {_gs[_gi].why}", 0)   # 0 = 不自动消失
+            set_status(f"课表推测：{_hint} —— {_gs[_gi].why}")
         elif _gs:
-            set_status("你自己挑一门 —— 我不猜了", 0)
+            set_status("你自己挑一门 —— 我不猜了")
         if not rows:
             # ⭐ 零课程的空状态（2026-09-28）—— 原来这里是**一片空白**。
             from AppKit import NSColor, NSMakeRect, NSView
@@ -3608,7 +3564,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
            从来没被跑到过。** → 隔离跑器会把「生产路径」整个绕过。
         """
         if not files:
-            set_status("没读到文件路径 —— 看日志", 1.0)
+            set_status("没读到文件路径 —— 看日志")
             return False
         # ⭐ **拖进来的是课表（`.ics`）→ 走去导入那条路**，不当课件处理。
         #    ⚠️ 放在 `S["busy"]` 检查**之前**：导入自己也有一条独立的忙状态，
@@ -3629,11 +3585,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #     那是刚做完、还没被实机用过的东西，不值得为这个罕见场景动它。
             #     ⚠️ 真实使用里两者**时间上不重合**：课表开学导入一次，课件每周拖。
             if _rest:
-                set_status(f"课表先导入了 —— 剩下这 {len(_rest)} 份课件请再拖一次",
-                           3.0)
+                set_status(f"课表先导入了 —— 剩下这 {len(_rest)} 份课件请再拖一次")
             return True
         if S.get("busy"):
-            set_status("另一门课还在跑 —— 等它完", 1.0)
+            set_status("另一门课还在跑 —— 等它完")
             return False
         S["busy"] = True
 
@@ -3659,7 +3614,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         except Exception as e:                            # noqa: BLE001
             S["busy"] = False
             set_status(f"{course}：路径算不出来（{type(e).__name__}: {e}）"
-                       f" —— 这次没跑，再拖一次", 1.0)
+                       f" —— 这次没跑，再拖一次")
             return False
 
         set_status(f"{course}：抽文本 0/{len(keep)}…")
@@ -3765,6 +3720,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 _sever(_card)                # ⚠️ 逐条各自 try —— 见 `_sever` 的说明
             win._entry_targets = []          # 断关闭按钮那条
             status_holder["label"] = None    # 断 `set_status` → 标签 → `ve` 那条
+            _GUARD["win"] = None             # ⭐ 断焦点守卫那条（它可能还有一拍在排队）
             # ⚠️ 落点条（批量入口）也要断 —— 它的 `_targets` 里那个 target 的
             #    `_fn` 是 `run_batch` → `_later(refresh)` → 闭包持有 `title_lbl`/`doc`
             #    → `ve` → `win`。与卡片那条**同一条环**，只是入口不同。
@@ -3908,7 +3864,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    但那是"点下去、跑一圈、再报错"；早拒把话说在前面 ——
         #    用户不会先看到那一行从屏幕上消失、再看到一行失败。
         if S.get("busy"):
-            set_status("正在跑准备 —— 等它完再删", 1.0)
+            set_status("正在跑准备 —— 等它完再删")
             return
         import prep as prep_mod
         try:
@@ -3917,10 +3873,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         except prep_mod.GlossaryError as e:
             # ⚠️ 术语表自身的问题（**含「正被另一个写入器占用」**）——
             #    `LOCKED_MSG` 本来就是人话，别再往上叠一层类型名。
-            set_status(f"删不掉：{e}", 1.0)
+            set_status(f"删不掉：{e}")
             return
         except Exception as e:                            # noqa: BLE001
-            set_status(f"删不掉：{type(e).__name__}: {e}", 1.0)
+            set_status(f"删不掉：{type(e).__name__}: {e}")
             return
         if not res.removed:
             set_status(f"「{term}」不在表里 —— 可能已经被删过了")
@@ -3946,13 +3902,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             n = prep_mod.restore_lines(glossary_of(course), u["entries"],
                                        lock_path=lock_of(course))
         except prep_mod.GlossaryError as e:
-            set_status(f"撤销失败：{e}", 1.0)
+            set_status(f"撤销失败：{e}")
             return
         except Exception as e:                            # noqa: BLE001
-            set_status(f"撤销失败：{type(e).__name__}: {e}", 1.0)
+            set_status(f"撤销失败：{type(e).__name__}: {e}")
             return
         if not n:
-            set_status("撤销没写进去 —— 看日志", 1.0)
+            set_status("撤销没写进去 —— 看日志")
             return
         entry["removed"].discard(u["text"])
         entry["undo"] = None
@@ -4019,13 +3975,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    → 删掉的课**半路又冒出来，内容还是残缺的**。
         #    （2026-09-28 OCR 审计发现；`S["busy"]` 是 prep 的串行器，跑一门十几分钟。）
         if S.get("busy"):
-            set_status("正在跑准备 —— 等它完再删课", 1.0)
+            set_status("正在跑准备 —— 等它完再删课")
             return
         if ask:
             import notice
             if not notice._can_alert():
-                set_status("删课要在 ClassLive.app 里确认 —— 终端里弹不出框，这次没删",
-                           1.0)
+                set_status("删课要在 ClassLive.app 里确认 —— 终端里弹不出框，这次没删")
                 return
             f = courses.facts(glossary, course, sessions_dir=sessions_dir,
                               state_root=state_root)
@@ -4050,7 +4005,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 what = notice.alert(f"删除「{course}」？", msg,
                                     buttons=("删除", "取消"), fallback="取消")
             if what == "取消":
-                set_status(f"{course}：没删，什么都没动", 1.0)
+                set_status(f"{course}：没删，什么都没动")
                 return
             keep_materials = (what == "只删课号")
         # ⚠️ 兜底（2026-10-01 审查 #27）：这条路的生产入口是右键菜单（AppKit action），
@@ -4061,9 +4016,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                                  state_root=state_root, keep_materials=keep_materials,
                                  trash_fn=trash_fn)
         except Exception as e:                                # noqa: BLE001
-            set_status(f"{course}：删除没做成（{type(e).__name__}: {str(e)[:60]}）", 1.0)
+            set_status(f"{course}：删除没做成（{type(e).__name__}: {str(e)[:60]}）")
             return
-        set_status(delete_msg(course, res), 1.0)
+        set_status(delete_msg(course, res))
         _later(refresh)
 
     refresh()
@@ -4072,6 +4027,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     win.setFrameOrigin_((_vis.origin.x + (_vis.size.width - WIDTH) / 2.0,
                          panel_y(h, _vis.origin.y, _vis.size.height)))
     win.orderFrontRegardless()
+    # ⭐ 焦点守卫的链子**从这里起**（窗口刚上屏）—— 不是在定义处。
+    #    原来紧跟定义就调了一次，那时窗口还没上屏 → `isVisible()` 为 False → 直接 `return`、
+    #    连末尾的 `callLater` 一起跳过 → **这条守卫一次都没跑过**（2026-10-12 核实）。
+    #    ⚠️ 另外：**"建了但没展示"的实例一个定时器都不该起**（`tests/test_panel.py` 第 ⑧ 节
+    #    的实例就是"开→关"，没有 run loop，排队的 `callLater` 永远不会执行）。
+    _GUARD.update(win=win, seen=False, waits=0)
+    _guard_tick(_GUARD)
     # ⭐ 面板**已经上屏**了 → 现在把搜索框放回"可以被点进焦点"的状态。
     #    过早放行 = 白做（AppKit 会在上屏那一刻把它设成第一响应者）；
     #    这一小段延时是必须的，和窗口建立初始第一响应者是同一个时刻的事。
@@ -4096,6 +4058,107 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         delete_course=lambda c, keep=False: delete_course(c, keep, ask=False),
         start_classify=_start_classify,
     )
+
+
+# ── 键盘焦点守卫（模块级）────────────────────────────────────────────────
+# ⚠️⚠️ **为什么必须是模块级、而且 state 里只放纯数据**：`AppHelper.callLater(f, …)` 会把
+#    `f` **连同它闭进来的东西**一起挂在 run loop 上。窗口闭包 ⇒ 每开一次面板钉住一棵视图树，
+#    而且**没有 run loop 的场景（测试）里那一拍永远不会执行**，泄漏是永久的：
+#    `tests/test_panel.py` 第 ⑧ 节实测 3 轮 vs 9 轮 = [144, 153]（基线 [142, 142]）。
+#    → 一拍只吃 `{"win", "seen", "waits"}` 这样的纯数据；`win` 由 `do_close()` 清成 None
+#      （那就是"取消令牌"：即使还有一拍在排队，它醒来时也只会看到 None 并收手）。
+
+#: 守卫的续期状态（唯一一份）。`win` = 当前面板窗口；关了就是 None。
+_GUARD: dict = {"win": None, "seen": False, "waits": 0}
+
+#: 「还没上屏」最多等几拍（0.5 s/拍）。⚠️ 兜底用：万一窗口既没上屏、`do_close` 也没跑到
+#: （构建成功但被丢弃之类），守卫也不会变成**无界轮询**。10 拍 = 5 s，远大于上屏所需。
+_GUARD_MAX_WAITS = 10
+
+
+def _win_is_editing(win) -> bool:
+    """这个窗口是 key，是不是因为在输入框里编辑？
+
+    ⚠️ 判据与 `overlay._is_editing` **同源但更强**：那边只问自己那一个 `_input`，
+       这里问「**任何** field editor」—— 本面板会有**两个**文本框（搜索 + 新增课程），
+       盯单个控件会漏掉另一个。
+
+    ⚠️⚠️ **出错时返回 `True`，不是 `False`** —— 2026-09-28 修正。
+       这里原来返回 `False`，而它自己的注释写着「判据抄 `overlay._is_editing`」——
+       **判据抄了，倒向抄反了**，理由没跟着过来。overlay 那段逐字写着：
+         「返回 False 会让不变量在没有可靠依据的情况下**主动抢走焦点** ——
+           正在打字时被抢是最坏的失败模式。检测不出来就当作在打字, 保守。」
+       → 两份拷贝各自漂、而且漂在**最不该漂的那一位**上，这正是本仓库
+         「一条纪律两处定义」的同族事故。
+
+    ⚠️ 参数是窗口（不是闭包）—— 见本段开头那条：守卫的每一拍必须是模块级函数。
+    """
+    try:
+        fr = win.firstResponder()
+        return bool(fr) and fr is not win and bool(fr.isFieldEditor())
+    except Exception:                                         # noqa: BLE001
+        return True                                           # 判不出来 = 当他在打字
+
+
+def _win_release_focus(win) -> None:
+    """把键盘还出去。
+
+    ⚠️ 两个调用**分开 try** —— 合在一起时前一个抛错会连后一个都不做
+       （`overlay._release_focus` 的注释逐字记过这条）。
+    """
+    try:
+        win.makeFirstResponder_(None)
+    except Exception:                                         # noqa: BLE001
+        pass
+    try:
+        win.resignKeyWindow()
+    except Exception:                                         # noqa: BLE001
+        pass
+
+
+def _guard_next(*, visible: bool, seen: bool, waits: int = 0) -> str:
+    """这一拍该做什么：`"enforce"` / `"wait"`（还没上屏，继续等）/ `"stop"`（纯函数，可单测）。
+
+    ⚠️ 两个输入都是 `False` 时必须分开对待：链子虽然起在上屏那一刻，但**首拍仍可能撞上
+       "还没上屏"** —— 那是「继续等」；而"上过屏又不可见" = 窗口关掉了，**必须停**，
+       否则定时器跟着进程活到天荒地老。把「还没上屏」当成「已经关掉」正是
+       2026-10-12 核实出来的那个缺陷（守卫一次都不跑）。
+    ⚠️ `waits` 是**等待上限**（`_GUARD_MAX_WAITS`）：窗口要是始终没上屏、`do_close()` 也没
+       跑到（构建成功但被丢弃之类），"继续等"就成了无界轮询 —— 兜底停掉。
+    """
+    if visible:
+        return "enforce"
+    if seen:
+        return "stop"
+    return "wait" if waits < _GUARD_MAX_WAITS else "stop"
+
+
+def _guard_tick(state: dict) -> None:
+    """守卫的一拍。⚠️ **模块级 + 只吃纯数据**（理由见上面那段）；`state` = `_GUARD`。
+
+    ⚠️ 窗口已经没了（`state["win"] is None`，`do_close()` 置的）→ 直接收手，**不再续期**。
+    """
+    from PyObjCTools import AppHelper
+    win = state.get("win")
+    if win is None:
+        return
+    try:
+        visible = bool(win.isVisible())
+    except Exception:                                         # noqa: BLE001
+        visible = False
+    action = _guard_next(visible=visible, seen=bool(state.get("seen")), waits=state.get("waits", 0))
+    if action == "stop":
+        return
+    if action == "wait":
+        state["waits"] = state.get("waits", 0) + 1
+    else:
+        state["seen"] = True
+        try:
+            if win.isKeyWindow() and not _win_is_editing(win):
+                _win_release_focus(win)
+        except Exception:                                     # noqa: BLE001
+            pass
+    AppHelper.callLater(0.5, _guard_tick, state)
 
 
 def _panel_key(kw) -> tuple:
@@ -4147,7 +4210,7 @@ def open_panel(**kw) -> Handles | None:
     return h
 
 
-def _status(text, alpha=1.0) -> None:
+def _status(text) -> None:
     """把状态写进**当前**打开的那个面板 —— **不是**发起这次跑的那个。
 
     ⚠️ 跑 prep 中途关窗再开：旧的 `_done` 闭包捕获的是**旧面板**的 `set_status`/`refresh`
@@ -4157,7 +4220,7 @@ def _status(text, alpha=1.0) -> None:
     """
     h = S.get("panel")
     if h is not None:
-        h.set_status(text, alpha)
+        h.set_status(text)
 
 
 def close_panel() -> None:

@@ -78,6 +78,10 @@ auto
 - ⬇️ **流式草稿模型（464 MB）改成下课之后自己下**：不再等你去面板上点。**上课途中绝不下**（它会和云端定稿的音频上传抢同一条教室 Wi-Fi）；你关掉程序也不影响 —— 它在独立进程里继续下完。已经装过、或这台机器内存不够用不上的，直接跳过
 - ⚡ **下课之后笔记**立刻**生成，不再等十几分钟** —— 精修改成默认不跑（`--polish auto` 还能一键开回来）。以前默认会把整节课**逐批**（每批 30 句）发给模型，收尾因此跑十几分钟；这十几分钟里你既看不到笔记，**合盖或中途退出还会让笔记整个不生成**
 - 🐞 修了几个「静默出问题」的老毛病：云端定稿的熔断器**一旦某个角落卡住就再也不上云**、回放量具跑完几分钟才崩、收尾超时其实永远不到点
+- 🐞 面板底部那句提示以前是**全透明**的 —— 「正在验证…」和课表推测的理由你根本看不见。现在看得见
+- 🐞 撤销「删掉的术语」时，如果删的是**挨着的两行**，会插错位置（术语表的顺序是要逐行喂给模型的，不是随便排的）—— 现在逐字节回到原样
+- ⌨️ 面板不再**赖着键盘**：以前点一下面板空白处，焦点就留在面板上，你在别的窗口按的键会被它吃掉
+- 🔒 测试上传服务补了一道内存闸门：超大的上传在**读完之前**就被拒掉（上传令牌是公开的，这条只能挡在服务端）
 
 ### 升级须知（3.9.2 → 3.9.3）
 没有新模型、没有新依赖，也**不用重建 .app**。
@@ -103,6 +107,19 @@ auto
 - **`docs/experiments/run_isolated.py`** 原来对未校验的 `sys.argv[4]` 直接递归删除；加白名单（`ClassLive-测试残留` 目录下 / 系统临时目录）。
 - **`scripts/link-runtime.sh`** 自检失败仍 `exit 0` → 现在返回 1。
 - **Worker `passes-core.js`**：设备登记原来排在额度校验之前 —— 被额度拒掉的请求也会占设备名额、刷新 `last_seen`。改成额度先判。
+
+### Fixed（第二轮全仓 OCR，45 批 / 620 条，逐条回原码核实后修的）
+- ⭐⭐ **`prep._restore_lines` 的插回位置算错** —— `positions` 是**原文件**行号，却直接当**删后**列表的下标用。删掉相邻两行再撤销会把顺序插乱（`A,B,C,D` → `A,B,D,C`）。改成「原行号 − 比它小的待插行数」（`bisect`）。旧夹具恰好让较大行号被 `min(…, len(lines))` 夹到末尾 = 正确位置，所以一直没暴露。
+- ⭐⭐ **`entry_panel.set_status` 的第二参数被调用点当成「显示秒数」传** —— 它其实是 `alpha`，而函数里从来没有计时器；三处 `, 0)` 把「正在验证…」和课表推测的理由设成了**全透明**（`AppHelper.callAfter(_status, 文案, 2.0)` 同病）。语义收成一种：状态文字一律可见（参数删掉），`test_entry_panel` ⑲c 扫源码钉住（含当值传出去那种写法）。
+- ⭐⭐ **焦点守卫一次都没跑过** —— `_focus_guard()` 的首拍早于 `orderFrontRegardless()` → `isVisible()` 为假 → 直接 `return`（连末尾的 `callLater` 一起跳过），「只有真在编辑才允许 key」那条不变量从来没生效。起链点搬到上屏处；守卫改成**模块级一拍 + 纯数据 state**（闭包会把窗口挂在 run loop 上：`test_panel` ⑧ 实测 `[144, 153]` → `[142, 142]`）；`do_close` 清 `win` 当取消令牌，等待分支加 10 拍上限。
+- ⭐ **`scripts/stream_eval.py` 云端那两条判据都算错** —— `cloud_segments` 把 `--final whisper`（**默认档**）整节课算成云端（`local-whisper` 且 `fell_back=False`）；节流判据按 `last_source` 判「发没发请求」→ 429/超时回落那类**欠**节流。改成按来源判 + 用生产自己记的 `steps`。
+- ⭐ **`doctor.model_state` 把「确定缺件」折成了「问不出来」** —— `hf_cached() is False` 与 `None` 都走 `unknown`，于是下一半的 HF 缓存（`model_present` 为真）在 `cl doctor` 里仍打 ✅「就位」。新增 `incomplete` 态并印出重下命令（仍然不自动下）。
+- ⭐ **`livemetrics._write` 写盘失败静默吞** —— 磁盘满 / 句柄失效时整节课的数据一条不落地丢光，而 `close()` 写的 summary 里 `err` 仍是空串。改成计数 + 记原因（summary 里多一个 `write_err`）。
+- ⭐ **`live_summary` 收尾超时后还在白调模型** —— 主线程已 `close()`，被放弃的 work 线程仍会跑完 `_finish_locked`（每一步一次模型调用），而写出来的章节记录**没人收**（`ChapterWriter` 关了就 no-op）。加 `_closed` 判据，一步都不再走。
+- ⭐ **`system_tap.start()` 中途的 Python 级异常会留下系统里的 tap / 聚合设备** —— 清理只写在 `if err != 0` 那几个分支里，PyObjC / ctypes / block 转换抛出来就直接向上抛。整段包 try：异常先 `stop()` 再原样抛。
+- **`cl-x` 取值当场校验**：`--freeze` / `--trigger` 收到非法值原来照传（`main.py` 静默回落 = 屏幕/日志与实况对不上），`--freeze --trigger clause` 还会把下一个开关当取值吞掉（`clause` 变普通参数 → argparse 报错）。现在当场报错并退 2。
+- **上传 Worker 的体积闸门**：`await request.arrayBuffer()` 是「先读完再判」—— token 公开，chunked / 谎报长度的大流会先把整个 body 读进 Worker 内存（平台上限 100 MB）。改成 Content-Length 快速拒绝 + 边读边计数、超限即 `cancel()`。
+- **五条判据自身的坑**（护栏失效是静默的，所以单独列）：`test_ready` 的变异用例**漏了 `@case`**（从没跑过）且断言恒真；`test_popup_schedule` 的 L 段用了比当前版本更新的 `seen` → 命中降级分支、`not in ""` 恒真；`test_entry_panel` ⑨ 直跑会**动真用户状态目录**并起 464 MB 下载；`test_final_wiring` 导入期改的 `HOME` / env / `STATE_ROOT` 不还原；`test_prep` / `test_extract` 的 docstring 谎称可 `pytest`（其实一条都收集不到）。
 
 ## [3.9.2] - 2026-10-12
 

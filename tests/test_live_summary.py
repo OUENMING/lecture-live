@@ -493,6 +493,20 @@ def main() -> int:
                   dt < 2.5, f"{dt:.2f}s")
             check("⭐ 超时也**照样关文件**", s._closed is True)
 
+        # ⚠️⚠️ 超时之后**迟到的收尾半步要立刻收手**（2026-10-12 全仓审查核实）。
+        #    走到这儿的状态就是「`close()` 已经跑过」：文件关了、记录没人收
+        #    （`ChapterWriter.append` 关了就 no-op）—— 而原来这条线程还会继续
+        #    `_drain_queue` / `_flush_window` / `_finalize_current`，每一步都调一次
+        #    模型 → **纯白花钱**，写出来的东西静默丢掉。
+        with tempfile.TemporaryDirectory() as d:
+            s2, _, calls2 = make(d, ["A"])
+            s2.feed((1, "10:00:00", "a", "甲"))
+            s2.step(0.0)
+            s2.close()                                # = 超时那条路的终态
+            s2._finish_locked(None)                   # 迟到的线程回来接着走
+            check("⭐⭐ 已经 `close()` -> 迟到的收尾不再调模型（记录没人收，白花钱）",
+                  not calls2, f"calls={calls2}")
+
         print("\n--- ⑫ `feed()` 永不抛 / 关闭后忽略 ---")
         with tempfile.TemporaryDirectory() as d:
             s, _, _ = make(d, ["A"])

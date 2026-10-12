@@ -104,6 +104,7 @@ class LiveLog:
         self._t0 = time.monotonic()
         self._q: "queue.Queue" = queue.Queue(maxsize=QUEUE_MAX)
         self.dropped = 0                                   # 队列满丢掉的条数
+        self.n_write_err = 0                               # 真去写却失败了的条数（下一条同）
         self.closed = False                                # 不再收新记录
         self._stopping = False                             # `close()` 已进来（幂等）
         self._f = None
@@ -239,7 +240,8 @@ class LiveLog:
             # ⚠️ 自己的三个计数**在这里自己填** —— 不必逼调用方把它们递回来
             #    （那会造出三个只服务这一行的 property）。
             self._put("summary", final=True, drafts=self._n_draft, utterances=self._utt,
-                      err=self._err, **{**summary, "dropped": self.dropped})
+                      err=self._err, write_err=self.n_write_err,
+                      **{**summary, "dropped": self.dropped})
         except Exception:                                  # noqa: BLE001
             pass
         self.closed = True
@@ -310,5 +312,12 @@ class LiveLog:
         try:
             self._f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             self._f.flush()                                # 崩了也不丢（一行一刷，几十微秒）
-        except Exception:                                  # noqa: BLE001
-            pass
+        except Exception as e:                             # noqa: BLE001
+            # ⚠️⚠️ **失败要记账，不能静默吞**（2026-10-12 全仓审查核实）。
+            #    磁盘满 / 句柄失效 / 序列化失败的时候，整节课的数据会从这里
+            #    **一条不落地丢光**，而 `close()` 写出的 summary 里 `err` 仍是空串、
+            #    计数照旧 ⇒ 读数据的人**分不出**「采到了」和「一条都没落盘」。
+            #    ⚠️ 仍然不抛、不影响上课（文件头的硬前提）—— 只是把话说出来：
+            #    计数进 summary，原因进 `err`（截断，别让一条长消息撑爆 summary 行）。
+            self.n_write_err += 1
+            self._err = (self._err + f"; 写盘失败 ×{self.n_write_err}: {e!r}"[:400]).lstrip("; ")

@@ -21,6 +21,7 @@ import queue
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -110,6 +111,42 @@ class Writes(unittest.TestCase):
         self.assertEqual(recs[5]["dropped"], 0)
         # 行号连续且从 1 开始（每行唯一）
         self.assertEqual([r["i"] for r in recs], list(range(1, len(recs) + 1)))
+
+    def test_write_failure_is_recorded_in_summary(self):
+        """⭐⭐ 写盘失败**要留下证据**（2026-10-12 全仓审查核实）。
+
+        原来 `_write()` 的 `except Exception: pass` 把失败全吞了：磁盘满 / 句柄失效时
+        整节课的数据一条不落地丢光，而 `close()` 写出的 summary 里 `err` 仍是空串、
+        `dropped` 仍是 0 —— **读数据的人分不出「采到了」和「一条都没落盘」**。
+        判据：让真写盘失败一次，然后（恢复句柄）收尾，要求 summary 说实话。
+        """
+        log, p = _mk_log()
+
+        class _Dead:
+            def write(self, *_a):
+                raise OSError(28, "No space left on device")
+
+            def flush(self):
+                pass
+
+        for _ in range(500):                               # 先等头一行 `meta` 真的落盘
+            if p.exists() and p.stat().st_size:
+                break
+            time.sleep(0.005)
+        real = log._f
+        log._f = _Dead()                                   # 只让**写**失败，文件照样在
+        log.draft("hello")
+        for _ in range(500):                               # 写盘在后台线程，等它真写一次
+            if log.n_write_err:
+                break
+            time.sleep(0.005)
+        log._f = real                                      # 恢复：收尾那一行写得进去
+        log.close()
+
+        summ = _lines(p)[-1]
+        self.assertEqual(summ["kind"], "summary")
+        self.assertEqual(summ["write_err"], 1, summ)
+        self.assertIn("写盘失败", summ["err"], summ)
 
     def test_raw_and_shown_are_both_kept(self):
         """⭐ 同场 A/B 的**全部依据**：冻结改了上屏文本，但原始假设必须原样留着。"""

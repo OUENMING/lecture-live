@@ -150,20 +150,73 @@ def t_stamp_read_honours_root():
         # 反面：**默认路径**不该看见它（否则"隔离"是假的）
         assert doctor._stamp_for("/x/model") is None, \
             "默认路径也读到了隔离根里的戳 —— 那 root 根本没起作用"
+@case("⭐⭐ 变异验证：把 `required_left` 换回「非 ok 就算缺」→ 第 1、2 组必须红")
 def t_unknown_mutation():
+    """给**那两条判据本身**的判据：它们还有没有区分能力（做法照 `test_corpus.py` 的变异段）。
+
+    ⚠️⚠️ 2026-10-12 全仓审查核实，这条原来**同时**坏在两处：
+      ① **漏了 `@case` 装饰器** → 从没被登记进 `CASES`，`main_()` 一次都没跑过（死代码）；
+      ② 就算跑起来也是自证式的 —— 打了桩却直接调本地闭包 `mutant(...)`，
+         断言 `len(got) == len(REQ)` 对任何实现都恒真（打桩压根没被用到）。
+      → 现在：打桩之后**跑真判据**，要求它**红**；抓不住 = 上面两条失去区分能力 = 本判据红。
+    """
     orig = ready.required_left
 
     def mutant(states):
         # 变异：只要不是 ok 就算缺（这是最容易写出的那一版）
         return [m for m in doctor.MODELS
                 if m.required and states.get(m.path, "missing") != "ok"]
+
     ready.required_left = mutant
     try:
-        got = mutant(_ALL_UNKNOWN)
+        caught = []
+        for fn in (t_unknown_is_not_missing, t_partial_dict_is_unknown):
+            try:
+                fn()
+            except AssertionError:
+                caught.append(fn.__name__)
     finally:
         ready.required_left = orig
-    assert len(got) == len(REQ), (
-        f"变异没被抓住（得到 {len(got)} 件）—— 上面那条判据没有区分能力")
+    assert len(caught) == 2, (
+        f"变异只被 {caught or '一条都没'} 抓住 —— 这两条判据（`unknown` ≠ `missing`）"
+        f"失去区分能力了：它们本该在「非 ok 就算缺」这一版下变红")
+    # 反面：还原之后必须重新变绿（别把变异体的状态漏回去）
+    assert ready.required_left(_ALL_UNKNOWN) == [], "变异没还原干净"
+
+
+@case("⭐⭐ HF 缓存「下一半」= incomplete，不许折叠成 unknown（更不许显示成就位）")
+def t_hf_incomplete_is_not_unknown():
+    """⚠️ 2026-10-12 全仓审查核实：`hf_cached()` 的 `False`（**确定**缺件）与 `None`
+    （没装 `huggingface_hub`，问不出来）原来被 `is not True` 折成同一个 `unknown`。
+    而 `unknown` 在就绪条 / `cl doctor` 里的意思是「能用，只是核实不了」——
+    于是**下一半**的模型一路显示成 ✅ / 齐了，用户到真用的时候（`mlx_lm.load()`）才炸。
+
+    ⚠️ 判据形状：**三个返回值一起测、断言互不相同** —— 只测一个的话，
+    把它折回 `is not True` 照样绿（那就是假测试）。
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        w = pathlib.Path(d) / "model"
+        w.mkdir()
+        (w / "config.json").write_text("{}", encoding="utf-8")
+        m = doctor.MODELS[0]._replace(path=str(w), src="x/y", at_hf=True)
+        root = pathlib.Path(d) / "root"
+        orig = doctor.hf_cached
+
+        def _with(answer):
+            doctor.hf_cached = lambda *a, **k: answer
+            try:
+                return doctor.model_state(m, root=root)
+            finally:
+                doctor.hf_cached = orig
+
+        got_inc, got_unk, got_ok = _with(False), _with(None), _with(True)
+    assert got_inc == "incomplete", f"下一半 -> {got_inc!r}（该是 incomplete）"
+    assert got_unk == "unknown", f"问不出来 -> {got_unk!r}（该是 unknown）"
+    assert got_inc != got_unk, (
+        "「确定缺件」与「问不出来」又被折成同一个状态了 —— 那正是本轮修掉的缺陷")
+    # 缓存齐了、只是没戳（老用户 / 手动装）—— 仍然不许报缺
+    assert got_ok == "unknown", f"缓存齐但没戳 -> {got_ok!r}（不该报缺）"
 
 
 @case("⭐⭐ Qwen3 绝不出现在「还差」里（它是可选的）")

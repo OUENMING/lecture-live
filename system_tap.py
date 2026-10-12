@@ -266,6 +266,21 @@ class ProcessTapBackend:
             raise TapError(why)
         import CoreAudio as CA
         self._ca = CA
+        # ⚠️⚠️ **从这里起整段包起来**（2026-10-12 全仓审查核实）。
+        #    原来清一色只在 `if err != 0` 那几个分支里各写一次 `self.stop()`，
+        #    而中间任何一处**Python 级**异常（PyObjC 桥接、`ctypes` 加载、
+        #    block 转换、`UUIDString()`…）会**直接向上抛** —— 那时进程 tap 与私有
+        #    聚合设备**可能已经建好了**，于是它们**残留在系统里**（正是 `stop()`
+        #    注释里想避免的那种残留）。→ 收口到一处：异常一律先清理再原样抛。
+        try:
+            self._start_locked(on_audio)
+        except BaseException:                              # noqa: BLE001
+            self.stop()                                    # 幂等：能清什么清什么
+            raise
+
+    def _start_locked(self, on_audio) -> None:
+        """真装配。⚠️ 只由 `start()` 调 —— 清理收在它那一处 try 里。"""
+        CA = self._ca
         desc = CA.CATapDescription.alloc().initMonoGlobalTapButExcludeProcesses_([])
         desc.setName_("ClassLive system audio")
         desc.setPrivate_(True)
@@ -284,7 +299,6 @@ class ProcessTapBackend:
         }
         err, self._agg_id = CA.AudioHardwareCreateAggregateDevice(agg, None)
         if err != 0:
-            self.stop()
             raise TapError(f"AudioHardwareCreateAggregateDevice 失败 OSStatus={err}")
         # 采样率：聚合设备的名义采样率（拿不到就按 48000，并在 on_audio 里原样上报）
         e2, rate = _ca_get(self._agg_id, "nsrt", "glob", ctypes.c_double)
@@ -297,12 +311,10 @@ class ProcessTapBackend:
 
         err, self._proc_id = CA.AudioDeviceCreateIOProcIDWithBlock(None, self._agg_id, None, _block)
         if err != 0:
-            self.stop()
             raise TapError(f"AudioDeviceCreateIOProcIDWithBlock 失败 OSStatus={err}")
         self._block_ref = _block                                   # 防止被回收
         err = CA.AudioDeviceStart(self._agg_id, self._proc_id)
         if err != 0:
-            self.stop()
             raise TapError(f"AudioDeviceStart 失败 OSStatus={err}")
         self._started = True
 

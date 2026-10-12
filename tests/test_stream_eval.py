@@ -101,6 +101,48 @@ def main() -> int:
     check("⭐ `parakeet` 分支保持直通（不额外包）",
           SE.load_final_engine("parakeet", "/x", draft_asr=sentinel) is sentinel)
 
+    # ── ⭐ 云端那两条判据（2026-10-12 全仓审查核实，两条都是实测过的错数）──
+    # ⚠️ 「这段的文本是谁给的」与「这段发没发过请求」是**两个问题**，
+    #    都得从生产记的字段读（`final_source` / `steps`），不能拿字符串前缀猜。
+    class _Stub:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    for _src, _want in (("groq", True), ("qwen", True), ("cloud", True),
+                        ("local-whisper", False), ("local-parakeet", False),
+                        ("none", False), (None, False), ("", False)):
+        _r = SE._is_cloud_source(_src)
+        check(f"⭐ cloud 来自判据：{_src!r} -> {_want}", _r is _want, repr(_r))
+
+    # ⚠️ 默认那条路（`--final whisper` → `allow_cloud=False`）每段都是
+    #    `local-whisper` 且 `fell_back=False`。旧判据（有 source 且没 fell_back）
+    #    会把**整节课**算成云端 —— 报告里的"云端占比"正好反了。
+    _whisper_utts = [{"dur": 10.0, "start_t": 0.0, "end_t": 10.0, "final": "hi",
+                      "final_compute_s": 1.0, "drafts": [],
+                      "final_source": "local-whisper", "final_fell_back": False}]
+    _ev = SE.evaluate(_whisper_utts, None)
+    check("⭐⭐ `--final whisper`（默认）不许被算成云端",
+          _ev["cloud_segments"] == 0 and _ev["cloud_audio_s"] == 0.0,
+          f"{_ev['cloud_segments']} 段 / {_ev['cloud_audio_s']} s")
+    _cloud_utts = [dict(_whisper_utts[0], final_source="groq"),
+                   dict(_whisper_utts[0], final_source="local-parakeet",
+                        final_fell_back=True)]
+    _ev2 = SE.evaluate(_cloud_utts, None)
+    check("⭐ 真走云端的算 1 段；回落本地的不算",
+          _ev2["cloud_segments"] == 1 and _ev2["cloud_audio_s"] == 10.0, str(_ev2["cloud_segments"]))
+
+    # ⚠️ 节流判据：**真发了请求但回落到本地**那类必须算（旧判据按 `last_source` 判 → 漏掉，
+    #    于是限流时欠节流、把 429 放大成级联熔断）。
+    _paced = [("cloud:timeout", "local:parakeet"), ("cloud:http-429", "local:whisper"),
+              ("cloud:groq",), ("cloud:qwen", "local:parakeet")]
+    for _steps in _paced:
+        check(f"⭐ 发过请求（{_steps[0]}）-> 照节流", SE._sent_request(_Stub(last_steps=_steps)) is True)
+    for _steps in (("off", "local:whisper"), ("breaker", "local:parakeet"),
+                   ("encode", "local:whisper"), ("local:whisper",)):
+        check(f"⭐ 一次网络都没发（{_steps[0]}）-> 不空等", SE._sent_request(_Stub(last_steps=_steps)) is False)
+    check("⭐ 没有 `last_steps`（parakeet 直通）-> 不当成发过",
+          SE._sent_request(_Stub()) is False)
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

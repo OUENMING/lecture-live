@@ -202,5 +202,97 @@ class Available(unittest.TestCase):
         self.assertIsInstance(why, str)
 
 
+class ProcessTapCleanup(unittest.TestCase):
+    """⚠️⚠️ `start()` 中途**任何 Python 级异常**都不许把系统里的 tap / 聚合设备留下。
+
+    2026-10-12 全仓审查核实：原来清理只写在 `if err != 0` 那几个分支里，
+    中间的 Python 级异常（PyObjC 桥接 / ctypes / block 转换）会直接向上抛，
+    而那时**进程 tap 与私有聚合设备已经建好了** —— 残留在系统里，
+    正是 `stop()` 注释想避免的那种残留。
+    ⚠️ 判据形状：让**最后一步**抛（`AudioDeviceCreateIOProcIDWithBlock`），
+    断言两个已建好的对象都收到了 Destroy（改回「只在 err 分支清理」-> 红）。
+    """
+
+    def test_python_level_failure_still_cleans_up(self):
+        import types
+
+        built, destroyed = [], []
+
+        class _Desc:
+            def setName_(self, v):
+                pass
+
+            def setPrivate_(self, v):
+                pass
+
+            def setMuteBehavior_(self, v):
+                pass
+
+            def UUID(self):
+                return types.SimpleNamespace(UUIDString=lambda: "tap-uuid")
+
+        class _CA:
+            CATapDescription = type("CATapDescription", (), {
+                "alloc": staticmethod(lambda: types.SimpleNamespace(
+                    initMonoGlobalTapButExcludeProcesses_=lambda _a: _Desc()))})
+            kAudioAggregateDeviceNameKey = "name"
+            kAudioAggregateDeviceUIDKey = "uid"
+            kAudioAggregateDeviceIsPrivateKey = "private"
+            kAudioAggregateDeviceTapAutoStartKey = "autostart"
+            kAudioAggregateDeviceTapListKey = "taplist"
+            kAudioSubTapUIDKey = "subuid"
+            kAudioSubTapDriftCompensationKey = "drift"
+            CATapUnmuted = 0
+
+            @staticmethod
+            def AudioHardwareCreateProcessTap(desc, _):
+                built.append(("tap", 12345))
+                return 0, 12345
+
+            @staticmethod
+            def AudioHardwareCreateAggregateDevice(agg, _):
+                built.append(("agg", 678))
+                return 0, 678
+
+            @staticmethod
+            def AudioDeviceCreateIOProcIDWithBlock(*_a):
+                raise RuntimeError("PyObjC 桥接炸了")        # ← 中途的 Python 级异常
+
+            @staticmethod
+            def AudioHardwareDestroyAggregateDevice(i):
+                destroyed.append(("agg", i))
+
+            @staticmethod
+            def AudioHardwareDestroyProcessTap(i):
+                destroyed.append(("tap", i))
+
+            @staticmethod
+            def AudioDeviceDestroyIOProcID(*a):
+                destroyed.append(("proc",))
+
+            @staticmethod
+            def AudioDeviceStop(*a):
+                pass
+
+        orig_avail = T.available
+        had = "CoreAudio" in sys.modules
+        orig_mod = sys.modules.get("CoreAudio")
+        T.available = lambda: (True, "")
+        sys.modules["CoreAudio"] = _CA
+        try:
+            b = T.ProcessTapBackend()
+            with self.assertRaises(RuntimeError):
+                b.start(lambda *_a: None)
+        finally:
+            T.available = orig_avail
+            if had:
+                sys.modules["CoreAudio"] = orig_mod
+            else:
+                del sys.modules["CoreAudio"]
+        self.assertEqual(built, [("tap", 12345), ("agg", 678)], built)
+        self.assertIn(("agg", 678), destroyed, destroyed)
+        self.assertIn(("tap", 12345), destroyed, destroyed)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,10 +28,29 @@ PASS=()
 #    `*) break` —— 于是 `./cl-x test --freeze 2` 会把 `--freeze 2` **原样透传给
 #    `cl test`**，`main.py` 的 argparse 报 unrecognized arguments（文件头那个示例
 #    就演示了一条跑不通的命令）。现在开关可以从任意位置给，剩下的按原序透传。
+# ⚠️⚠️ 取值**在这里就校验**（2026-10-12 全仓审查核实）：`main.py` 对非法值是**静默回落**
+#    （`CLASSLIVE_DRAFT_HOLDBACK` 非数字 = 冻结关；`CLASSLIVE_DRAFT_TRIGGER` 认不出来 = novel），
+#    而下面那行横幅打的是**传进来的原值** —— 于是屏幕/日志说"冻结=abc、触发=xyz"，
+#    实况却是"没冻结、走 novel"，事后对不上账。
+#    顺手挡住「把下一个开关当取值吞掉」：`--freeze --trigger clause` 会让 `$2` 变成
+#    `--trigger`（原来 `${2:?}` 只查非空，挡不住），`shift 2` 连同它一起吃掉 → `clause`
+#    当普通参数透传给 `main.py` → argparse 报 unrecognized arguments。
+die() { echo "⛔ $*" >&2; exit 2; }
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --freeze)  export CLASSLIVE_DRAFT_HOLDBACK="${2:?--freeze 要给词数}"; FREEZE="$2"; shift 2 ;;
-    --trigger) export CLASSLIVE_DRAFT_TRIGGER="${2:?--trigger 要给 legacy|clause}"; TRIGGER="$2"; shift 2 ;;
+    --freeze)
+      case "${2:-}" in
+        ""|-*)  die "--freeze 要给词数（例：./cl-x --freeze 1）—— 收到：${2:-<空>}" ;;
+        *[!0-9]*) die "--freeze 只接受数字（灰尾词数）—— 收到：$2" ;;
+      esac
+      export CLASSLIVE_DRAFT_HOLDBACK="$2"; FREEZE="$2"; shift 2 ;;
+    --trigger)
+      case "${2:-}" in
+        legacy|clause) : ;;
+        *) die "--trigger 只接受 legacy|clause（main.py 认不出来会静默走 novel）—— 收到：${2:-<空>}" ;;
+      esac
+      export CLASSLIVE_DRAFT_TRIGGER="$2"; TRIGGER="$2"; shift 2 ;;
     --no-log)  CLASSLIVE_LIVE_LOG=0; export CLASSLIVE_LIVE_LOG; shift ;;
     *) PASS+=("$1"); shift ;;
   esac

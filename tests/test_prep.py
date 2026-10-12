@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """prep 的判据：追加写入器 + 复核 + 装配。
 
-跑法: ClassLive.app/Contents/MacOS/python tests/test_prep.py   (或 pytest tests/)
+跑法: ClassLive.app/Contents/MacOS/python tests/test_prep.py
+      ⚠️ **没有 `pytest` 入口**：本文件只有 `main()`，pytest 一条都收集不到
+         （= 静默恒绿）；唯一的批量入口是 `scripts/check.py`，它按文件逐个跑。
 
 ⚠️ **测试必须隔离写端**（本仓库硬规矩，历史事故把真实的 `term_notes.json` 从 41KB
 写成 4.8KB）。这里全程在 `tempfile.mkdtemp()` 里造样本，
@@ -187,6 +189,16 @@ def main() -> int:
         nsd = ('xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
                'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"')
         _saved = (build_notes.NOTES_FILE, build_notes.AUTO_FILE)
+        # ⚠️⚠️ **写端隔离要自己验一遍**（2026-10-12 全仓审查提出，核实后是**兜底**判据）：
+        #    本段注入了 `build_fn=lambda c: None`，所以**现在**不会走到
+        #    `build_notes.build()` 那条真写路径；而 `prep.py:1233` 是**调用时**
+        #    `from build_notes import NOTES_FILE, …`，所以下面这行赋值对读端确实生效。
+        #    → 但注入一旦被删掉 / 默认路径被走到，这两行赋值就是唯一的护栏，而它
+        #      只对「调用时 import」成立。所以留下一条**逐字节复核**做兜底：
+        #      仓库里那份 `term_notes.json` 不进 git、本机没有快照，被覆盖就是永久损失
+        #      （本文件开头那起 41KB → 4.8KB 的事故，当时靠同目录 `.bak` 才救回来）。
+        _REAL_NOTES = pathlib.Path(__file__).resolve().parent.parent / "term_notes.json"
+        _real_before = _REAL_NOTES.read_bytes() if _REAL_NOTES.exists() else None
         build_notes.NOTES_FILE = tmp / "term_notes.json"
         build_notes.AUTO_FILE = tmp / "auto.json"
         try:
@@ -477,6 +489,27 @@ def main() -> int:
         check("往返幂等：再删一次还是同样两条",
               prep.remove_terms(rt, ["elasticity", "monopoly power"]).removed
               == ["elasticity", "monopoly power"])
+
+        # ⚠️⚠️ **两行挨在一起（或被删行在另一条下面）时，插回的位置要换算。**
+        #    `positions` 是**原文件**的行号，而 `lines` 是**删后**的幸存行；
+        #    直接拿原行号当下标会**多算** → 多行撤销时顺序错乱。
+        #    上一组夹具恰好让较大的行号被 `min(…, len(lines))` 夹到末尾 = 正确位置，
+        #    所以一直绿着没暴露（2026-10-12 全仓审查核实、实测复现）。
+        adj = tmp / "adjacent.txt"
+        ADJ = "A\nB\nC\nD\n"
+        adj.write_text(ADJ, encoding="utf-8")
+        d_adj = prep.remove_terms(adj, ["B", "C"])
+        prep.restore_lines(adj, list(zip(d_adj.positions, d_adj.originals)))
+        check("⭐⭐ 删掉**相邻**两行再撤销 -> 仍然逐字节还原（旧实现会得到 A,B,D,C）",
+              adj.read_text(encoding="utf-8") == ADJ, repr(adj.read_text(encoding="utf-8")))
+
+        adj2 = tmp / "sandwich.txt"
+        ADJ2 = "A\nB\nC\nD\nE\n"
+        adj2.write_text(ADJ2, encoding="utf-8")
+        d_adj2 = prep.remove_terms(adj2, ["B", "C", "E"])
+        prep.restore_lines(adj2, list(zip(d_adj2.positions, d_adj2.originals)))
+        check("⭐⭐ 删三条（含一条夹在中间）-> 逐字节还原",
+              adj2.read_text(encoding="utf-8") == ADJ2, repr(adj2.read_text(encoding="utf-8")))
         # ⚠️ `entries` 现在是**整行**（含行尾）—— 见 `restore_lines` 的契约。
         #    原来这里传的是裸词条名，靠实现「缺行尾就补一个」兜着；
         #    而那个兜底会毁掉「末行本来没有行尾」的逐字节还原，已经去掉了。
@@ -701,6 +734,13 @@ def main() -> int:
                 print(f"  ❌ {n}")
         return 1 if bad else 0
     finally:
+        # ⚠️ 写端复核（见上面 `_REAL_NOTES` 那段）：仓库里那份 `term_notes.json`
+        #    **必须逐字节没动** —— 它不进 git、本机没有快照，被覆盖就是永久损失。
+        _real_after = _REAL_NOTES.read_bytes() if _REAL_NOTES.exists() else None
+        check("⭐⭐ 兜底：跑完仓库里那份 `term_notes.json` **逐字节没动**（写端隔离）",
+              _real_after == _real_before,
+              f"{len(_real_before) if _real_before is not None else '无'} -> "
+              f"{len(_real_after) if _real_after is not None else '无'} 字节")
         shutil.rmtree(tmp, ignore_errors=True)
 
 

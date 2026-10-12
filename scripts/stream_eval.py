@@ -106,18 +106,20 @@ def _text_only(fin):
        `" ".join(u["final"] …)` 就 `TypeError: expected str instance, FinalResult found`。
     ⚠️ 而 `--final` 的**默认值就是 `whisper`**（`real_class_slices.sh` 也不覆盖）
        → **默认那条路必崩**，且回放跑完好几分钟才在收尾处炸，量具白跑。
-    ⚠️ `last_source` / `last_fell_back` 是事后要回答"这段发出去没"用的，
+    ⚠️ `last_source` / `last_fell_back` / `last_steps` 是事后要回答"这段发出去没"用的，
        用生产现成的字段，别拿 `source` 字符串去猜。
     """
 
     class _TextOnly:
         last_source: str | None = None
         last_fell_back: bool = False
+        last_steps: tuple = ()
 
         def transcribe(self, buf):
             r = fin.transcribe(buf)
             self.last_source = r.source
             self.last_fell_back = r.fell_back
+            self.last_steps = r.steps
             return r.text
 
     return _TextOnly()
@@ -177,13 +179,15 @@ def replay(audio: np.ndarray, drafter, asr_final, *, draft_filter=None, progress
                      "final_fell_back": getattr(asr_final, "last_fell_back", None)})
         cur["drafts"] = []
         # 节流：只对**真的发了请求**的段计节奏。
-        # ⚠️ 两个坑：① 拿"段间隔"当节拍会白等 —— 段间隔 = 编码 + 往返 + pace，实测比
+        # ⚠️ 三个坑：① 拿"段间隔"当节拍会白等 —— 段间隔 = 编码 + 往返 + pace，实测比
         #    `--pace-rpm 18` 少发 ~15% 的请求、全量跑白等 7–8 分钟；② 熔断 / 关掉云端 /
-        #    编码失败这几条路**一次网络都不发**，照睡就是纯空等。判据用 `last_source`
-        #    （`none` 或以 `local` 开头 = 没发）。
+        #    编码失败这几条路**一次网络都不发**，照睡就是纯空等；③ 反过来，
+        #    **真发了请求但云端没成**（429 / 超时 → 回落本地）那类必须**照节流**
+        #    —— 按"最后是谁给的文本"（`last_source`）判会漏掉它们，而那正是最需要
+        #    减速的时刻（2026-10-12 全仓审查核实）。
+        #    → 判据用生产自己记的 `steps`：里面有没有 `cloud:` 那一步，就是"发没发"。
         if pace_s:
-            src = getattr(asr_final, "last_source", None)
-            if src and src != "none" and not str(src).startswith("local"):
+            if _sent_request(asr_final):
                 wait = pace_s - (t_req - cur["last_req"])
                 if wait > 0:
                     time.sleep(wait)
@@ -211,6 +215,31 @@ def _slid(d) -> bool:
     流式引擎（R3 nemotron）看整段，不滑 —— 照剔会把它的长段草稿整批丢掉，回改率被**低估**。
     没有 `engine` 字段（R3 之前的文件 / 离线回放）= parakeet，数字逐位不变。"""
     return (d.get("engine") or "parakeet") == "parakeet" and d["buf_s"] > PARTIAL_MAX_S
+
+
+def _sent_request(asr_final) -> bool:
+    """这一段**真的把请求发出去了**吗（节流只认这个）。
+
+    判据是生产自己记的 `steps` 里有没有 `cloud:` 那一步 —— 那是"发过请求"的唯一证据：
+      · 429 / 超时 / 云端空串回落本地 → `steps` 里有 `cloud:timeout` / `cloud:http-429` …
+        **必须照节流**（限流那一刻尤其要减速），可 `last_source` 这时是 `local-*`；
+      · 熔断开 / 关掉云端 / 编码失败 → `steps` 只有 `breaker` / `off` / `encode`，
+        **一次网络都没发**，照睡就是纯空等（实测白等 7–8 分钟）。
+    """
+    for st in getattr(asr_final, "last_steps", ()) or ():
+        if str(st).startswith("cloud:"):
+            return True
+    return False
+
+
+def _is_cloud_source(src) -> bool:
+    """这段定稿的**文本**是不是云端给的（`groq` / `qwen` / `cloud`；本地是 `local-*`）。
+
+    ⚠️ 与「发没发过请求」是**两个问题** —— 后者看 `steps`（见 `replay.on_end` 的节流）。
+       这里问的是"最后这段话是谁给的"，所以按来源判，而不是按 `fell_back`。
+    """
+    s = str(src or "")
+    return bool(s) and s != "none" and not s.startswith("local")
 
 
 def evaluate(utts, ref_text: str | None, k: int = M.DEFAULT_K,
@@ -253,11 +282,13 @@ def evaluate(utts, ref_text: str | None, k: int = M.DEFAULT_K,
         "utterances": len(utts), "drafts": n_draft,
         # 定稿各条路的段数（`{"groq": 58, "local-parakeet": 2}`）；本地单测回放时为空
         "final_sources": srcs,
-        # ⭐ 真发上云的段数与秒数：判据用生产自己的 `fell_back`（想上云但没用上），
-        #    不是拿 source 字符串前缀去猜。`*_s` 只统计没兜底的那些段。
-        "cloud_segments": sum(1 for u in utts if u.get("final_source") and not u.get("final_fell_back")),
+        # ⭐ **云端给的**段数与秒数：按来源判（见 `_is_cloud_source`）。
+        #    ⚠️ 别写成「有 source 且没 fell_back」——`--final whisper`（**默认值**）走
+        #    `allow_cloud=False`，每段都是 `local-whisper` 且 `fell_back=False`，
+        #    那样一节课会被算成"云端 100%"（2026-10-12 全仓审查核实）。
+        "cloud_segments": sum(1 for u in utts if _is_cloud_source(u.get("final_source"))),
         "cloud_audio_s": round(sum(u["dur"] for u in utts
-                                   if u.get("final_source") and not u.get("final_fell_back")), 1),
+                                   if _is_cloud_source(u.get("final_source"))), 1),
         "audio_s": round(sum(u["dur"] for u in utts), 1),
         "draft_rewrite": {"k": k, "sliding_drafts_excluded": sliding, "shown_words": shown, "rewritten": rew,
                           "rate": rew / shown if shown else None,

@@ -71,6 +71,48 @@ chk("R2 写失败 -> 502",
   await status(req(P("report.json"), { bytes: new Uint8Array(5) }),
                { ...env, BUCKET: { put: async () => { throw new Error("quota"); } } }), 502);
 
+// ⚠️⚠️ 体积闸门**不该先读再判**（2026-10-12 全仓审查核实）：token 是公开的，
+//    一个 chunked / 谎报 Content-Length 的大流会先把整个 body 读进 Worker 内存
+//    （平台上限 100MB）才轮到那个"太大了"的判断 —— 注释里「缓冲开销可接受」的
+//    前提在攻击者手里不成立。下面两条钉住的正是"**还没读就该拒**"。
+let reads = 0;
+// ⚠️ `highWaterMark: 0` —— 否则 ReadableStream 构造后**自己会预热读一次**，
+//    于是"一个字节都没读"这条判据量到的是流的行为、不是 handler 的行为（第一版就这么假红了）。
+const mkStream = (chunkKb = 1024, maxChunks = 64) => new ReadableStream({
+  pull(c) {
+    if (reads >= maxChunks) return c.close();
+    reads++;
+    c.enqueue(new Uint8Array(chunkKb * 1024));
+  },
+}, { highWaterMark: 0 });
+const stub = (headers, body) => {
+  // ⚠️ 大小写不敏感 —— 源码里读的是 `Authorization` / `Content-Length`，
+  //    而这里给的键是小写（第一版没归一化，三条判据全被 401 挡住了）。
+  const h = {};
+  for (const [k, v] of Object.entries(headers)) h[k.toLowerCase()] = v;
+  return {
+    method: "PUT",
+    url: `https://ingest.bldcam.page${P("report.json")}`,
+    headers: { get: (k) => h[String(k).toLowerCase()] ?? null },
+    body,
+  };
+};
+
+reads = 0;
+chk("⭐ 声明 Content-Length 超限 -> 413",
+  await status(stub({ authorization: "Bearer tok-abc", "content-length": String(64 * 1024 * 1024) },
+                    mkStream())), 413);
+chk("⭐⭐ 而且**一个字节都没读**（声明就够拒绝了）", reads, 0);
+
+reads = 0;
+chk("⭐⭐ chunked 无声明、超限 -> 413",
+  await status(stub({ authorization: "Bearer tok-abc" }, mkStream())), 413);
+chk(`⭐⭐ 而且是**边读边卡**（读了 ${reads} 块就停，不是把 64 块读完）`, reads <= 35, true);
+
+reads = 0;
+chk("⭐ 正常大小（1MB）照常放行",
+  await status(stub({ authorization: "Bearer tok-abc" }, mkStream(1024, 1))), 200);
+
 const bad = cases.filter(c => !c[1]);
 for (const [n, ok, d] of cases) console.log(`  ${ok ? "✅" : "❌"} ${n}  ${d}`);
 console.log(`\n${cases.length - bad.length}/${cases.length} 通过`);

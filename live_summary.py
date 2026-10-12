@@ -419,6 +419,14 @@ class LiveSummarizer:
         """收尾里**动共享状态**的那几步。⚠️ 调用方必须**已经持有 `_step_lock`**。"""
         if cancel is not None and cancel.is_set():
             return
+        if self._closed:
+            # ⚠️⚠️ **`close()` 已经跑过 = 这半步白跑**（2026-10-12 全仓审查核实）。
+            #    走得通的路径只有一条：`finish()` 在 `timeout_s` 内没等到 work 线程
+            #    → 主线程 `close()` 关文件 → 而被放弃的 work 线程**还在**这里接着走。
+            #    它每一步都要调一次模型，写出来的章节记录却**静默丢掉**
+            #    （`ChapterWriter.append` 关了就 no-op）—— 纯白花钱。
+            #    （关文件本身是安全的：`ChapterWriter.close/append` 同锁，见它那段。）
+            return
         now = self._clock()
         # ⚠️⚠️ **先排空 `_q`**（2026-09-30 `ocr` 抓到）。
         #    `running.clear()` 常常落在 worker 正阻塞的那次模型调用**中间** ——
@@ -428,6 +436,9 @@ class LiveSummarizer:
         self._drain_queue(now)
         self._flush_window(now)                   # 残余窗口（改进 ②）
         self._process_pending(now, force=True)
+        # ⚠️ 上面两步都可能跑很久（各调一次模型），中途主线程可能已经放弃并关了文件。
+        if self._closed:
+            return
         if cancel is None or not cancel.is_set():
             self._finalize_current(now)
 

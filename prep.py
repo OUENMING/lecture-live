@@ -21,6 +21,8 @@
 """
 from __future__ import annotations
 
+import bisect
+
 import collections
 import contextlib
 import datetime
@@ -450,7 +452,10 @@ def restore_lines(path, entries, *, lock_path=None) -> int:
     → 所以 `remove_terms` 必须把 `positions` 带出来，这个函数才有东西可用。
     （这条是补调研挖出来的，`docs/PLAN-entry-panel.md` §3.6 第 4 条硬要求。）
 
-    行号按**降序**插（从后往前），这样每次插入不会让还没处理的行号失效。
+    行号按**降序**插（从后往前），这样每次插入不会让还没处理的行号失效；
+    ⚠️ 但「降序」只解决了一半 —— 插入位置必须按**删后**的列表换算
+       （`原行号 − 比它小的待插行数`），因为 `positions` 是**原文件**的行号。
+       直接用原行号当删后列表的下标会**多算**（2026-10-12 核实：删相邻两行会顺序错乱）。
 
     ⚠️ **越界行号夹到末尾，不丢行。** 别写成「越界就跳过」——
     实测踩过：删掉**最后一行**时，它的原行号恰好等于还原后的 `len(lines)`，
@@ -488,10 +493,21 @@ def _restore_lines(path, entries) -> int:
              #    原文只校验了行号，于是 docstring 承诺的「跳过坏条目，不炸」
              #    在「行文本是 None/数字」时不成立（OCR 指出）。
              and isinstance(e[1], str)]
+    # ⚠️⚠️ **下标要换算，不能拿原行号直接用。** `idx` 是**原文件**的绝对行号
+    #    （`_remove_terms` 里 `enumerate(old.splitlines(keepends=True))` 数出来的），
+    #    而 `lines` 是**删后**的幸存行 —— 两者之间差着「原文件里被删、且行号比它小」
+    #    的那些行。降序处理保证那些行**还没插回来**，所以差值里的每一项都还没回到
+    #    `lines` 里 → 直接拿 `idx` 当 `lines` 的下标会**多算**。
+    #    实测（2026-10-12 全仓审查核实，`A,B,C,D` 删 B、C）：
+    #    旧的 `min(idx, len(lines))` 还原成 `A,B,D,C` —— 与 docstring 承诺的
+    #    「除被删行外逐字节不变、且顺序不变」直接冲突。上面那组老夹具之所以一直绿，
+    #    是因为它较大的那个行号恰好被 `min` 夹到末尾，正好等于正确位置。
+    _idxs = sorted(e[0] for e in clean)
     done = 0
     for idx, text in sorted(clean, key=lambda e: e[0], reverse=True):
-        # ⚠️ 夹住而不是跳过 —— 见 docstring 里那条实测。
-        pos = min(idx, len(lines))
+        # 换算：减去**所有**行号更小的待插行（降序处理 → 它们都还没插回来）。
+        # ⚠️ 仍然夹到末尾、而不是跳过 —— 见 docstring 里那条实测。
+        pos = min(idx - bisect.bisect_left(_idxs, idx), len(lines))
         if text.endswith(("\n", "\r")) or pos == len(lines):
             # ⚠️ **末行本来就没有行尾时不许补一个** —— 补了就多一字节，
             #    「逐字节还原」不成立（实测：`# X\nkeep\nplain` 删了再撤

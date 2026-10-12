@@ -276,6 +276,26 @@ def main() -> int:
     cfg = entry_launch.CFG
     saved = cfg.read_bytes() if cfg.exists() else None
     _orig_open = _EP.open_panel
+    # ⚠️⚠️ 3.9.3 起 `entry_launch.main()` 还多了两处**真副作用**，这一组必须一起关掉
+    #    （2026-10-12 全仓审查核实）：
+    #      ① `keyentry.clear_legacy_key()` —— `root=None` 时按 `paths.STATE_ROOT` 动
+    #         **真**用户状态目录里的 `credentials`（把非 `cl-` 的值挪走、写 `key-cleared`
+    #         标记），标记一旦被测试提前写掉，用户下一次启动的一次性搬家/提示就被跳过了；
+    #      ② `update.spawn_draft_model_download()` —— ②/⑤ 那几条路返回 `CANCELLED`，
+    #         会**真的**起一个脱离会话的子进程去下 464 MB 草稿模型（测试跑完它还在下）。
+    #    `scripts/check.py` 给子进程设了 `HOME` 与 `CLASSLIVE_NO_AUTO_UPDATE`，闸门下看不出
+    #    差别；但本文件开头叫人**直接跑** —— 那条路一个闸门都没有。
+    import keyentry as _KE
+    _orig_clear = _KE.clear_legacy_key
+    _cleared: list = []
+
+    def _fake_clear(**_kw):
+        _cleared.append(1)                     # 记一笔：证明这一组真的走到了那一步
+        return {"done": True, "moved": [], "first": False}
+
+    _KE.clear_legacy_key = _fake_clear
+    _no_upd_before = os.environ.get("CLASSLIVE_NO_AUTO_UPDATE")
+    os.environ["CLASSLIVE_NO_AUTO_UPDATE"] = "1"
     try:
         def _run(fake):
             _EP.open_panel = fake
@@ -383,11 +403,18 @@ def main() -> int:
                    entry_launch.UNAVAILABLE, entry_launch.NO_COURSES,
                    entry_launch.UNSAVED}) == 5)
     finally:
+        _KE.clear_legacy_key = _orig_clear
+        if _no_upd_before is None:
+            os.environ.pop("CLASSLIVE_NO_AUTO_UPDATE", None)
+        else:
+            os.environ["CLASSLIVE_NO_AUTO_UPDATE"] = _no_upd_before
         _EP.open_panel = _orig_open
         if saved is not None:
             cfg.write_bytes(saved)
         elif cfg.exists():
             cfg.unlink()
+    check("⚠️ 这一组确实走到了搬家那一步（已换成桩，否则它会动真状态目录）",
+          len(_cleared) >= 1, f"{len(_cleared)} 次")
     check("⚠️ 跑完 .course 逐字还原（隔离真的成立）",
           (cfg.read_bytes() if cfg.exists() else None) == saved)
 
@@ -780,6 +807,108 @@ def main() -> int:
           not _missing, f"不存在的: {_missing}")
     check("⚠️ 而且确实扫到了东西（空集会让上一条恒真）",
           len(_used) >= 3, f"只扫到 {sorted(_used)}")
+
+    print("\n--- ⑲c 状态行只有一个参数 + 焦点守卫的续期判据（2026-10-12 核实）---")
+    # ⚠️ 判据形状是**扫源码**，不是跑函数：缺陷那一半（`colorWithAlphaComponent_(0)`）
+    #    在 AppKit 里完全合法，出问题的是「调用点往那个位置传了什么」。
+    #    历史：`set_status(text, alpha=1.0)` 被从 2026-09-29（`610dddf`）起当成
+    #    「显示秒数 / 0 = 不自动消失」传（`2.0` / `3.0` / `0`），而函数里从没有过
+    #    计时器 → 三处 `, 0)` 把状态文字设成**全透明**：「正在验证…」和课表推测的
+    #    理由用户根本看不见。语义现在只留一种（一律可见），这条钉住别再传第二个。
+    import re as _re
+    _src = (HERE / "entry_panel.py").read_text(encoding="utf-8")
+
+    def _args_at(src: str, open_i: int) -> str:
+        depth, j = 0, open_i
+        while j < len(src):
+            c = src[j]
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+                if depth == 0:
+                    return src[open_i + 1:j]
+            elif c in "\"'":
+                j += 1
+                while j < len(src) and src[j] != c:
+                    j += 2 if src[j] == "\\" else 1
+            j += 1
+        return ""
+
+    def _split_top(a: str) -> list[str]:
+        parts, depth, cur = [], 0, ""
+        for c in a:
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+            if c == "," and depth == 0:
+                parts.append(cur)
+                cur = ""
+            else:
+                cur += c
+        parts.append(cur)
+        return [p for p in parts if p.strip()]
+
+    def _status_args(outer: str) -> str:
+        p = _split_top(outer)
+        return ", ".join(x.strip() for x in p[1:])[:36]
+
+    def _n_args(a: str) -> int:
+        depth, n, seen = 0, 0, False
+        for c in a:
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+            if c == "," and depth == 0:
+                n += 1
+            seen = seen or not c.isspace()
+        return n + 1 if seen else 0
+
+    _bad_args = []
+    for _m in _re.finditer(r"\b(_status|set_status)\(", _src):
+        _a = _args_at(_src, _m.end() - 1)
+        if _n_args(_a) > 1:
+            _ln = _src[:_m.start()].count("\n") + 1
+            _bad_args.append(f"第 {_ln} 行 {_m.group(1)}({_a.strip()[:36]})")
+    check("⭐⭐ 状态行不再接受第二个参数（就是被误当成秒数的那个 alpha）",
+          not _bad_args, "；".join(_bad_args[:3]))
+    check("⚠️ 而且确实扫到了调用点（一条都没扫到会让上一条恒真）",
+          len(_re.findall(r"\b_status\(", _src)) >= 10,
+          f"只有 {len(_re.findall(r'\b_status\(', _src))} 处")
+
+    # ⚠️ **`_status` 还被当值传出去**（`AppHelper.callAfter(_status, 文案, 2.0)` /
+    #    `_later(_status, s)`）—— 那些地方同样是在给它加第二个实参，而上面那个
+    #    正则按「`_status(`」找**一处都扫不到**（本轮就是它漏过去的：一个 `, 2.0)`
+    #    藏在 `callAfter` 的实参表里）。
+    _bad_pass = []
+    for _m in _re.finditer(r"(?:callAfter|callLater|_later)\(", _src):
+        _outer = _args_at(_src, _m.end() - 1)
+        _parts = _split_top(_outer)
+        if _parts and _parts[0].strip() == "_status" and len(_parts) > 2:
+            _ln = _src[:_m.start()].count("\n") + 1
+            _bad_pass.append(f"第 {_ln} 行 → {_status_args(_outer)}")
+    check("⭐⭐ 当值传给 callAfter/_later 时也不许多给实参",
+          not _bad_pass, "；".join(_bad_pass[:3]))
+    _n_pass = sum(1 for _m in _re.finditer(r"(?:callAfter|callLater|_later)\(", _src)
+                  if (_split_top(_args_at(_src, _m.end() - 1)) or [""])[0].strip() == "_status")
+    check("⚠️ 而且这一类确实扫到了（≥ 5 处）", _n_pass >= 5, f"{_n_pass} 处")
+
+    # ⭐ 焦点守卫的续期判据：**两个 False 必须分开**。首拍永远早于
+    #    `orderFrontRegardless()`（那时窗口还不可见），把它当成「已经关掉」=
+    #    这条守卫一次都不跑 —— 正是本轮核实的缺陷。真关了则必须停，否则定时器
+    #    跟着进程活到天荒地老。
+    check("⭐ 守卫首拍：窗口还没上屏 → 继续排（不是停）",
+          E._guard_next(visible=False, seen=False) == "wait")
+    check("⭐ 守卫：上过屏又不可见（关掉了）→ 停",
+          E._guard_next(visible=False, seen=True) == "stop")
+    check("⭐ 守卫：看得见 → 该查就查",
+          E._guard_next(visible=True, seen=False) == "enforce")
+    check("⚠️ 兜底：窗口一直没上屏也不许无界轮询（等满上限就停）",
+          E._guard_next(visible=False, seen=False, waits=E._GUARD_MAX_WAITS) == "stop")
+    check("⚠️ 而没到上限时仍然是「等」（别把兜底写成永不等待）",
+          E._guard_next(visible=False, seen=False, waits=0) == "wait")
 
     bad = [n for n, ok, _ in RESULTS if not ok]
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

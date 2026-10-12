@@ -144,14 +144,19 @@ print(f"        summary = {s!r}")
 print(f"        期望：含 3.6.1 / 3.6.2 / 3.6.3 / 3.6.4")
 
 # L seen 不在 CHANGELOG 里 -> 只报当前版，不能退化成"全部"
-d = world("3.6.5", seen="9.9.9")
+# ⚠️⚠️ 原来这条夹具写的是 `seen="9.9.9"` —— 那是**比 cur 新**的版本号，命中 `_whatsnew_payload`
+#    的「③ 降级」分支直接返回 None → `s` 恒为空串 → 两条 `not in ""` **恒真**：
+#    payload 根本没弹也会判绿，既测不到本条声称的东西，还给出虚假信心（2026-10-12 全仓审查核实）。
+#    → 换成「**比 cur 旧、但不在库里**」的版本号（0.0.1），并显式要求 payload 非 None。
+#    （「降级 -> 不弹」是 F 段的事，不该混在这一条里。）
+d = world("3.6.5", seen="0.0.1")
 m = load_main_isolated(d)
 r = m._whatsnew_payload()
 s = (r["summary"] if r else "")
-ok_l = ("3.6.0" not in s) and ("3.6.1" not in s)
+ok_l = (r is not None) and ("3.6.0" not in s) and ("3.6.1" not in s)
 RESULTS.append(("L seen 不在库里时只报当前版", ok_l))
-print(f"\n  {'✅' if ok_l else '❌'} L seen 不在库里（seen=9.9.9）")
-print(f"        summary = {s!r}")
+print(f"\n  {'✅' if ok_l else '❌'} L seen 不在库里（seen=0.0.1）")
+print(f"        summary = {s!r}" + ("" if r else "   ⚠️ payload 是 None —— 这一条就白测了"))
 
 # M 全新 clone 的用户必须**迟早**能弹出来（首次不弹，但 seen 要种下去）
 d = world("3.6.5")

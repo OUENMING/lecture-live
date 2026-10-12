@@ -28,16 +28,28 @@ import unittest
 HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
+# ⚠️ 导入期改的全局**都要记下原值、在 `tearDownModule` 里还回去**
+#    （2026-10-12 全仓审查核实）：不还的话，**同一进程里**后加载的测试模块会看到
+#    指向已删除临时目录的 `HOME`、被清掉的环境变量、被改写的 `paths.STATE_ROOT`
+#    —— 结果随加载顺序漂（`pytest tests/` 正是这个形状；`scripts/check.py` 是
+#    每个文件一个子进程，所以那边看不出来）。
+# ⚠️ `paths` **先 import**（这时 HOME 还是真的）—— 这样 `_STATE_BEFORE` 才是**真的原值**。
+#    反过来先换 HOME 再 import，`STATE_ROOT` 本身就按临时 HOME 算出来了，
+#    "还原"回去的还是个临时路径（第一版就这么写的，验的时候当场露馅）。
+import paths                                                          # noqa: E402
+
+_STATE_BEFORE = paths.STATE_ROOT
 _TMP_HOME = tempfile.mkdtemp(prefix="final-wiring-test-")
+_HOME_BEFORE = os.environ.get("HOME")
+_CA_BEFORE = os.environ.get("CLASSLIVE_CLOUD_ASR")        # 注意：可能是"本来就没设"
 os.environ["HOME"] = _TMP_HOME
 os.environ.pop("CLASSLIVE_CLOUD_ASR", None)
 
 import final_asr                                                      # noqa: E402
 import main as main_mod                                               # noqa: E402
-import paths                                                          # noqa: E402
 import testmode                                                       # noqa: E402
 
-paths.STATE_ROOT = pathlib.Path(_TMP_HOME) / "state"
+paths.STATE_ROOT = pathlib.Path(_TMP_HOME) / ".classlive"
 
 SRC = (HERE / "main.py").read_text(encoding="utf-8")
 BASE = dict(cfg_enabled=True, engine="auto", mode="both", source="mic", speed=1.0)
@@ -187,6 +199,17 @@ class TestWiringShape(unittest.TestCase):
 
 
 def tearDownModule():
+    # ⚠️ 还回去（见文件头那段）：`HOME` / `CLASSLIVE_CLOUD_ASR` / `paths.STATE_ROOT`。
+    #    「本来就没设」和「设成了空」是两回事，所以用 `None` 当哨兵逐个判。
+    if _HOME_BEFORE is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = _HOME_BEFORE
+    if _CA_BEFORE is None:
+        os.environ.pop("CLASSLIVE_CLOUD_ASR", None)
+    else:
+        os.environ["CLASSLIVE_CLOUD_ASR"] = _CA_BEFORE
+    paths.STATE_ROOT = _STATE_BEFORE
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 

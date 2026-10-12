@@ -138,6 +138,25 @@ def main() -> int:
     check("⭐ 只发一个 `_chat_json`（不多写第二处 httpx）",
           _body.count("_chat_json(") == 1, str(_body.count("_chat_json(")))
 
+    print("\n--- ③d 一人一码：Worker 的拒绝原因要说成人话（不联网，桩掉 `_chat_json`）---")
+    import httpx
+    import build_notes
+    from unittest import mock
+
+    def _deny(status, body):
+        def f(*_a, **_k):
+            r = httpx.Response(status, json=body, request=httpx.Request("POST", "https://w/v1/chat/completions"))
+            r.raise_for_status()
+        return f
+    for err, status in (("expired", 403), ("revoked", 403), ("devices", 403), ("quota_exceeded", 429)):
+        with mock.patch.object(build_notes, "_chat_json", _deny(status, {"error": err})):
+            got = KE.validate_deepseek("cl-x-0123456789abcdef")
+        check(f"⭐ {status} {err} -> 「{KE.PASSCODE_REASONS[err]}」", got == (False, KE.PASSCODE_REASONS[err]), str(got))
+    with mock.patch.object(build_notes, "_chat_json", _deny(401, {"error": {"message": "Authentication Fails"}})):
+        got = KE.validate_deepseek("sk-bad")
+    check("DeepSeek 自己的 401（error 是对象）-> 照旧「401 —— 检查是不是复制全了」",
+          got == (False, "401 —— 检查是不是复制全了"), str(got))
+
     print("\n--- ④ 那张框的几何（纯函数）---")
     check("0 栏 -> 只有内边距", notice.text_alert_height(0) == notice.TEXT_ALERT_PAD * 2,
           str(notice.text_alert_height(0)))

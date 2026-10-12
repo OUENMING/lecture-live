@@ -86,12 +86,34 @@ def validate_deepseek(key: str, *, model: str = "deepseek-flash") -> tuple[bool,
                          0.0, timeout=15.0)
         return (True, "可用") if got is not None else (False, "没回内容")
     except Exception as e:                                    # noqa: BLE001
+        why = _passcode_reason(e)
+        if why:
+            return False, why
         s = str(e)
         if "401" in s or "403" in s or "Authentication" in s:
             return False, "401 —— 检查是不是复制全了"
         if "402" in s or "insufficient" in s.lower():
             return False, "配额/余额不够"
         return False, f"{type(e).__name__}: {s[:60]}"
+
+
+#: 一人一码：Worker 拒绝时响应体里的 `error`（`server/asr-worker/src/handler.js`）→ 给人看的话。
+#: 不认得的原因 / 不是通行码 → 走下面通用的 401 / 配额判断。
+PASSCODE_REASONS = {
+    "unknown": "通行码不对 —— 检查是不是复制全了",
+    "revoked": "通行码已停用 —— 问给你码的人",
+    "expired": "通行码过期了 —— 问给你码的人续期",
+    "devices": "这个码能用的设备数满了 —— 问给你码的人",
+    "quota_exceeded": "今天的额度用完了，明天自动恢复",
+}
+
+
+def _passcode_reason(e: Exception) -> str:
+    """HTTP 错误的响应体若是 Worker 的 `{"error": "<原因>"}`，返回对应的人话；否则空串。永不抛。"""
+    try:
+        return PASSCODE_REASONS.get(e.response.json().get("error", ""), "")   # type: ignore[attr-defined]
+    except Exception:                                         # noqa: BLE001
+        return ""
 
 
 def validate_jev(key: str) -> tuple[bool, str]:

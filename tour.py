@@ -63,7 +63,7 @@ _SEMI = 0.4
 
 #: 三档按钮：主（下一步 / 开始用）实心白底黑字 > 次（上一步）白字 0.75 > 弱（跳过）白字 0.45。
 #: 三颗都用系统圆角壳的话，「跳过」这个逃生口和主操作抢同样的分量（2026-10-12 评审，核实属实）。
-PRIMARY_BG, SECONDARY_A, TERTIARY_A = 0.92, 0.75, 0.45
+PRIMARY_BG, SECONDARY_A, TERTIARY_A = panel.PRIMARY_BG_A, 0.75, 0.45
 DOT_ON, DOT_OFF = 0.92, 0.22
 
 
@@ -181,8 +181,7 @@ def build(on_done=None, pages=PAGES):
                        NSForegroundColorAttributeName: col,
                        NSParagraphStyleAttributeName: para}))
             if primary:
-                b.layer().setCornerRadius_(FOOT_H / 2)
-                b.layer().setBackgroundColor_(white.colorWithAlphaComponent_(PRIMARY_BG).CGColor())
+                panel.style_primary(b, text)
             if key:
                 b.setKeyEquivalent_(key)
             ve.addSubview_(b)

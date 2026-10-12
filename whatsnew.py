@@ -265,8 +265,7 @@ def build(version: str, summary: str, date: str = "", log: str = "",
         btn = NSButton.alloc().initWithFrame_(
             NSMakeRect(WIDTH - PAD - 92.0, fy + 2, 92.0, 28.0))
         btn.setTitle_("知道了")
-        btn.setBezelStyle_(1)                             # rounded
-        btn.setFont_(NSFont.systemFontOfSize_weight_(13.0, _W))
+        panel.style_primary(btn, "知道了")                # 卡上唯一的动作 = 主按钮（与功能介绍卡同一套）
 
         _wire = _make_target(toggle)
         _wire2 = _make_target(on_close)

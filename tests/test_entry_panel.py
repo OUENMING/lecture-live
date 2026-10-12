@@ -1231,35 +1231,53 @@ def _test_mode_section() -> None:
             check("找得到落点条", strip is not None)
             if strip is None:
                 return
-            sw = [b for b in strip.subviews()
-                  if isinstance(b, NSButton) and (b.title() or "") == OFF]
-            check("⭐ 落点条上有测试模式开关，初值 =「测试模式：关」（`test_mode=False`）",
+            sw = [b for b in _toggles(h) if (b.title() or "") == OFF]
+            check("⭐ 面板上有且只有一颗测试模式开关，初值 =「测试模式：关」（`test_mode=False`）",
                   len(sw) == 1, f"命中 {len(sw)} 颗")
             if len(sw) != 1:
                 return
             sw = sw[0]
+            box = sw.superview()
+            vault = [b for b in box.subviews() if isinstance(b, NSButton) and "笔记库" in (b.title() or "")]
+            sf = sw.frame()
+            # ⚠️ 两档都会真的发生（就绪条项的长短看这台机器的状态）：
+            #    放得下 → 紧跟「笔记库」；放不下（新用户：「语音模型 缺 2 件…」）→ 退回落点条。
+            #    **哪一档都不许出界**。
+            if box is strip:
+                check("⭐ 退回落点条那一档：就绪条确实放不下（不是无故退回）",
+                      not vault, "落点条里不该有笔记库按钮")
+            else:
+                check("⭐⭐ 开关在就绪条上，和「笔记库」同一条（Owen 10-12：放到笔记库旁边）",
+                      len(vault) == 1, f"同一父视图里的笔记库按钮 {len(vault)} 个")
+                if len(vault) != 1:
+                    return
+                vf = vault[0].frame()
+                gap = float(sf.origin.x) - float(vf.origin.x + vf.size.width)
+                check("⭐ 紧跟在「笔记库」右边（间距 = 条上项与项的间距）",
+                      abs(gap - E.READY_ITEM_GAP) < 0.6, f"间距 {gap:.1f}")
+            check("⭐⭐ 没出所在那条的右边界（新用户的长状态曾把它挤出 66pt）",
+                  float(sf.origin.x + sf.size.width) <= float(box.frame().size.width) + 0.01,
+                  f"右沿 {float(sf.origin.x + sf.size.width):.1f} / 条宽 {float(box.frame().size.width):.1f}")
+            check("⭐ 两态文字都放得下",
+                  max(_text_w(ON, sw.font()), _text_w(OFF, sw.font())) <= float(sf.size.width) - 4.0,
+                  f"框 {float(sf.size.width):.1f}")
+            check("⭐ 放不放得下的判据：边界两侧",
+                  E.test_mode_fits_ready(100.0, 640.0, 640.0 - E.READY_PAD - 100.0 - E.READY_ITEM_GAP)
+                  and not E.test_mode_fits_ready(100.0, 640.0, 640.0 - E.READY_PAD - 100.0 - E.READY_ITEM_GAP + 1))
 
             # ── ⭐⭐ 宽度扫描（照 `tests/test_panel.py` 那条）──────────────
-            # ⚠️ 这条量的是**真几何**（两个 frame 会不会真重叠），不是照算式再算一遍 ——
-            #    照着算式算的话，算式自己写错时两边一起错，判据照样绿。
+            # ⚠️ 这条量的是**真几何**（两个 frame 会不会真重叠），不是照算式再算一遍。
             hit = []
-            for v in strip.subviews():
+            for v in box.subviews():
                 if v is sw or v.isHidden():
                     continue
                 if _rects_hit(sw.frame(), v.frame()):
-                    # ⚠️ `v.frame()` **不能直接迭代**（拿到的是 CGPoint/CGSize 那两个
-                    #    结构，不是 4 个数字）—— 第一版这么写，在"真撞上"的那次
-                    #    **先抛 TypeError、连汇总行都出不来**（detail 是急切求值的，
-                    #    本仓记过这条；绿的时候看不出来）。
                     _f = v.frame()
                     hit.append((type(v).__name__,
                                 (v.title() if isinstance(v, NSButton)
-                                 else (v.stringValue() or ""))[:20],
-                                [round(float(_f.origin.x), 1), round(float(_f.origin.y), 1),
-                                 round(float(_f.size.width), 1),
-                                 round(float(_f.size.height), 1)]))
-            check("⭐⭐ 开关**不压到条上任何可见控件**（加它之后提示文字要缩掉一截）",
-                  not hit, str(hit))
+                                 else "")[:20],
+                                [round(float(_f.origin.x), 1), round(float(_f.size.width), 1)]))
+            check("⭐⭐ 开关**不压到就绪条上任何可见控件**", not hit, str(hit))
 
             # ⭐⭐ 提示文字塞得下 —— **反向的那一半**（上面那条只管"别压到别人"）
             # ⚠️ 这条守的是 `HINT_W` 那个式子的余量：文字超框 → `panel.make_label`
@@ -1350,7 +1368,7 @@ def _test_mode_section() -> None:
         _woff = _text_w(E.test_mode_title(False), _font)
         check("⚠️ 两态**实测文字宽完全相同**（切换时文字不抖）",
               abs(_won - _woff) < 1e-9, f"开={_won:.1f} 关={_woff:.1f}")
-        check("⭐ 而且塞得进按钮框（`TEST_W` 要留得下它）",
+        check("⭐ 而且塞得进退回老位置时的按钮框（`TEST_W` 要留得下它）",
               max(_won, _woff) <= E.TEST_W - 8.0,
               f"文字 {max(_won, _woff):.1f} / 框 {E.TEST_W}")
 

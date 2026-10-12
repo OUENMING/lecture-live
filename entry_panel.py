@@ -110,6 +110,8 @@ ADD_HINT = "回车建课 · Esc 取消"
 ADD_W = 116.0          # 「＋ 新增课程」按钮宽
 PICK_W = 104.0         # 「选择文件…」按钮宽
 # ── 测试模式开关（2026-09-30，`docs/PLAN-test-mode.md` §13.3）──────────
+# ⭐ 2026-10-12 Owen：挪到就绪条上、紧跟「笔记库」（它也是一项全局设置，落点条只管「拖课件」这一件事）。
+#    就绪条没建出来（`ready.items` 抛了）时才退回落点条右侧的老位置 —— 开关不许因此消失。
 # ⚠️ 它**无边框**（`setBordered_(False)`），和右边那两颗**长得不一样是故意的**：
 #    面板里表达「持久状态」的控件一律无边框（顶栏 🌐/❓/字幕、就绪条、卡片上可点的），
 #    有边框的那几颗留给**动作**（「选择文件…」「＋ 新增课程」「新建/取消」）。
@@ -126,7 +128,20 @@ ADD_REPLY_Y = ADD_ROW_Y - 3.0 - 17.0     # 反馈那一行（`plan_add` 的 `tex
 #    这个式子给出 274.0。再多塞一颗按钮，提示会**折行 + 第二行被静默吃掉**
 #    （`panel.make_label` 的默认换行行为，没有省略号）。
 #    → 判据在 `tests/test_entry_panel.py` 那一节，**加控件前先看它**。
-HINT_W = WIDTH - 2 * PAD - (CARD_PAD + PICK_W + 8.0 + ADD_W + 8.0 + TEST_W + 16.0)
+HINT_W = WIDTH - 2 * PAD - (CARD_PAD + PICK_W + 8.0 + ADD_W + 16.0)
+#: 退回老位置（开关在落点条上）时的提示宽 —— 右边多让一颗开关。
+HINT_W_TIGHT = HINT_W - (TEST_W + 8.0)
+#: 就绪条上「状态项」与「测试模式」之间那道细竖线（状态 ≠ 设置，分开看）
+READY_RULE_H = 14.0
+
+
+def test_mode_fits_ready(right_edge: float, box_w: float, toggle_w: float) -> bool:
+    """纯函数：测试模式开关接在就绪条最后一项（右沿 `right_edge`）后面放不放得下。
+
+    ⚠️ 新用户那一档放不下（「语音模型 缺 2 件，约 640.61 MB」这类长状态，10-13 实测右沿超 66pt）——
+       放不下就退回落点条的老位置，**不许**挤出条外被裁掉。
+    """
+    return right_edge + READY_ITEM_GAP + toggle_w <= box_w - READY_PAD
 
 # ── 就绪条（2026-09-28）──────────────────────────────────────────────
 # 插在标题行与卡片区之间。**高度算在 `build()` 那条从下往上的推法里**，
@@ -2324,8 +2339,16 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             # 放不下就挤掉最右那一格（笔记库：可选项，点开面板再看也不迟）
             vb = ready_buttons.pop("vault", None)
             if vb is not None:
-                x = vb.frame().origin.x
+                # 它后面的（测试模式开关、竖线）整体左移一格，「更新」接在最后
+                dx = vb.frame().size.width + READY_ITEM_GAP
+                vx = vb.frame().origin.x
                 vb.removeFromSuperview()
+                for v in box.subviews():
+                    f = v.frame()
+                    if f.origin.x > vx:
+                        v.setFrameOrigin_((f.origin.x - dx, f.origin.y))
+                x = max((v.frame().origin.x + v.frame().size.width for v in box.subviews()),
+                        default=READY_PAD) + READY_ITEM_GAP
         b.setFrame_(NSMakeRect(x, (READY_H - 22.0) / 2.0, w, 22.0))
         t = _target(lambda: on_ready_click("update"))
         S["ready_targets"] = list(S.get("ready_targets") or []) + [t]
@@ -2415,13 +2438,27 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     _strip_bg(CARD_FILL_A)
     ve.addSubview_(strip)
 
+    # 测试模式开关在就绪条上 → 提示用满宽；就绪条没建出来 / 放不下、开关退回这里 → 让出一颗的位置
+    _tm_w = 0.0
+    if on_test_mode is not None:
+        _probe_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 10.0, 22.0))
+        _probe_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+        _probe_btn.setBordered_(False)
+        _probe_btn.setTitle_(test_mode_title(False))       # 两态同宽（判据钉着）
+        _probe_btn.sizeToFit()
+        _tm_w = _probe_btn.frame().size.width + 8.0
+    _tm_ready = bool(on_test_mode is not None and ready_items and ready_buttons and test_mode_fits_ready(
+        max(v.frame().origin.x + v.frame().size.width for v in ready_buttons.values()),
+        WIDTH - 2 * PAD, _tm_w))
+    _tm_in_strip = on_test_mode is not None and not _tm_ready
+    _hint_w = HINT_W_TIGHT if _tm_in_strip else HINT_W
     # ⚠️ 两行（2026-10-12 从三行并来）：「认不出的会让你核对」挪给了拖进来之后的批量确认卡 ——
     #    那张卡本来就会让你核对，在这里预告一遍是多占一行。
     strip_holder["hint"] = [
         panel.make_label("把课件全拖到这里 · 自动分到各课",
-                         NSMakeRect(CARD_PAD, DROP_H - 30.0, HINT_W, 22.0), 15.0),
+                         NSMakeRect(CARD_PAD, DROP_H - 30.0, _hint_w, 22.0), 15.0),
         panel.make_label("PDF / PPTX / DOCX · 课表 .ics · 文件夹也行",
-                         NSMakeRect(CARD_PAD, DROP_H - 48.0, HINT_W, 16.0),
+                         NSMakeRect(CARD_PAD, DROP_H - 48.0, _hint_w, 16.0),
                          11.0, alpha=DIM),
     ]
     for _v in strip_holder["hint"]:
@@ -2649,12 +2686,26 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # ⚠️ 状态活在**闭包**里，不进模块级的 `S`：`S` 是跨面板共享的，
     #    而开关的初值每次都由调用方从盘上读（`entry_launch.read_test_mode`）。
     tm_on = [bool(test_mode)]
-    # 右侧开关列：只剩测试模式一颗（云端转写 10-12 起收进「语音模型」菜单），垂直居中
-    _n_sw = int(on_test_mode is not None)
-    _sw_x = W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W - 8.0 - TEST_W
     if on_test_mode is not None:
-        tm_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(_sw_x, switch_y(0, _n_sw), TEST_W, BTN_H))
+        from AppKit import NSView as _NSView
+        _vb = ready_buttons.get("vault") if _tm_ready else None
+        _rbox = next(iter(ready_buttons.values())).superview() if _tm_ready else None
+        if _rbox is not None:
+            # 就绪条：最右一项后面 → 细竖线 → 开关（高度、字号、颜色都跟条上的项一样）
+            _last = _vb or max(ready_buttons.values(), key=lambda v: v.frame().origin.x)
+            _x = _last.frame().origin.x + _last.frame().size.width + READY_ITEM_GAP / 2.0
+            rule = _NSView.alloc().initWithFrame_(
+                NSMakeRect(_x, (READY_H - READY_RULE_H) / 2.0, HAIRLINE, READY_RULE_H))
+            rule.setWantsLayer_(True)
+            rule.layer().setBackgroundColor_(
+                NSColor.whiteColor().colorWithAlphaComponent_(CARD_LINE_A).CGColor())
+            _rbox.addSubview_(rule)
+            tm_btn = NSButton.alloc().initWithFrame_(
+                NSMakeRect(_x + READY_ITEM_GAP / 2.0, (READY_H - 22.0) / 2.0, TEST_W, 22.0))
+        else:
+            tm_btn = NSButton.alloc().initWithFrame_(
+                NSMakeRect(W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W - 8.0 - TEST_W,
+                           switch_y(0, 1), TEST_W, BTN_H))
         tm_btn.setTitle_(test_mode_title(tm_on[0]))
         tm_btn.setBordered_(False)                 # ⚠️ 见 `TEST_W` 那段：状态→无边框
         tm_btn.setFont_(NSFont.systemFontOfSize_(12.0))
@@ -2664,6 +2715,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 NSColor.whiteColor().colorWithAlphaComponent_(0.92))
         except Exception:                                  # noqa: BLE001
             pass
+        if _rbox is not None:
+            tm_btn.sizeToFit()                     # 两态同宽（判据钉着）→ 切换不抖
+            _f = tm_btn.frame()
+            tm_btn.setFrame_(NSMakeRect(_f.origin.x, (READY_H - 22.0) / 2.0, _f.size.width + 8.0, 22.0))
 
         def toggle_test_mode() -> None:
             """点一下 = 翻一次，**当场落盘**。
@@ -2693,11 +2748,15 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         tm_btn.setTarget_(tm_t)                    # ⚠️ 弱引用 —— 靠 `strip_targets` 留它
         tm_btn.setAction_("act:")
         strip_targets.append(tm_t)
-        strip.addSubview_(tm_btn)
-        # ⚠️ 也进 `hint` 那组：**批量/搜索/新增那几档会把它藏起来**
-        #    （`refresh()` 按 `strip_holder["hint"]` 逐个 `setHidden_`）——
-        #    那些档下右下角是「取消/确认」，多一颗开关会挤在同一块地方。
-        strip_holder["hint"].append(tm_btn)
+        if _rbox is not None:
+            _rbox.addSubview_(tm_btn)
+            ready_buttons["test_mode"] = tm_btn    # 「更新」那格接在它后面（`_show_update`）
+        else:
+            strip.addSubview_(tm_btn)
+            # ⚠️ 也进 `hint` 那组：**批量/搜索/新增那几档会把它藏起来**
+            #    （`refresh()` 按 `strip_holder["hint"]` 逐个 `setHidden_`）——
+            #    那些档下右下角是「取消/确认」，多一颗开关会挤在同一块地方。
+            strip_holder["hint"].append(tm_btn)
 
     # ⚠️ **一次性挂上**（见 `strip_targets` 的说明）—— 别在上面每一处各写一遍。
     strip._targets = strip_targets

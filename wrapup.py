@@ -238,6 +238,9 @@ def build(*, title: str = "收尾", on_close=None):
                 #    与旁边的说明文字分不出来，作者一眼看不出能点）。
                 b.setBezelStyle_(1)
                 b.setFont_(NSFont.systemFontOfSize_(BTN_FONT_SZ))
+                if i == 0 and n > 1:
+                    # 第一颗是主操作（「存入」）：实心胶囊，与功能介绍卡同一套分量（`panel.style_primary`）
+                    panel.style_primary(b, text, size=BTN_FONT_SZ)
                 t = panel.make_button_target(cb)
                 targets.append(t)
                 b.setTarget_(t)

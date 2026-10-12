@@ -539,6 +539,34 @@ def make_button_target(cb):
     return t
 
 
+#: 主按钮（一张卡上最想让人点的那一颗）：实心白底、深色字、胶囊形。
+#: 其余按钮保持系统圆角壳（次要）或无边框淡字（逃生口）—— 三档分量，一眼看得出先点哪个。
+#: 2026-10-12 设计评审：同一张卡上几颗按钮一样重，「跳过 / 不存」和主操作抢注意力。
+PRIMARY_BG_A, PRIMARY_FG_A = 0.92, 0.85
+
+
+def style_primary(btn, text: str, *, size: float = 13.0) -> None:
+    """把一颗 `NSButton` 画成主按钮。高度取按钮当前 frame（圆角 = 高度一半）。
+
+    ⚠️ 只改外观：target / action / keyEquivalent 由调用方照旧设。
+    ⚠️ 用 `attributedTitle` 定字色 —— 无边框按钮的 `contentTintColor` 管不到文字。
+    """
+    from AppKit import (NSAttributedString, NSColor, NSFont, NSFontAttributeName,
+                        NSForegroundColorAttributeName, NSMutableParagraphStyle,
+                        NSParagraphStyleAttributeName, NSTextAlignmentCenter)
+    btn.setBordered_(False)
+    btn.setWantsLayer_(True)
+    para = NSMutableParagraphStyle.alloc().init()
+    para.setAlignment_(NSTextAlignmentCenter)
+    btn.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+        text, {NSFontAttributeName: NSFont.systemFontOfSize_weight_(size, 0.4),
+               NSForegroundColorAttributeName: NSColor.blackColor().colorWithAlphaComponent_(PRIMARY_FG_A),
+               NSParagraphStyleAttributeName: para}))
+    lay = btn.layer()
+    lay.setCornerRadius_(btn.frame().size.height / 2.0)
+    lay.setBackgroundColor_(NSColor.whiteColor().colorWithAlphaComponent_(PRIMARY_BG_A).CGColor())
+
+
 def make_hover_owner(cb):
     """`NSTrackingArea` 的 owner：鼠标进 / 出时回调 `cb(True/False)`。**返回值由调用方持住**（同上）。
 

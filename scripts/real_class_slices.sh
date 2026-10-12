@@ -37,6 +37,7 @@ SLICES="
 2026-10-07_120759_SOC10020.003.wav:480:240
 2026-09-24_203440_ECON10770.wav:60:240
 "
+fails=0
 for spec in $SLICES; do
   f="${spec%%:*}"; rest="${spec#*:}"; st="${rest%%:*}"; du="${rest#*:}"
   src="$HERE/sessions/$f"
@@ -45,9 +46,23 @@ for spec in $SLICES; do
   echo "▶ ${tag}（$du 秒）"
   "$PY" "$EVAL" "$src" --start "$st" --dur "$du" \
       --json "$OUT/$tag.json" --jsonl "$OUT/$tag.jsonl" > "$OUT/$tag.log" 2>&1 \
-    || echo "  ⚠ 失败（见 $OUT/$tag.log）"
+    || { echo "  ⚠ 失败（见 $OUT/$tag.log）"; fails=$((fails + 1)); }
 done
 echo
 echo "=== 汇总 ==="
-"$PY" "$HERE/scripts/class_report.py" "$OUT"/*.jsonl
+# ⚠️⚠️ 空 glob 与失败计数（2026-10-12 全仓审查核实）：原来 `"$OUT"/*.jsonl` 在**一片都没
+#    生成**时会把字面量 `*.jsonl` 当路径交给 class_report.py（报错或误报），而且失败只
+#    `echo` 一句、不影响退出码 —— "全都失败了"会被自动化读成成功。
+shopt -s nullglob
+slices=("$OUT"/*.jsonl)
+shopt -u nullglob
+if [ ${#slices[@]} -eq 0 ]; then
+  echo "⚠ 一片都没生成 —— 不汇总（先看上面每片的 .log）"
+  exit 1
+fi
+"$PY" "$HERE/scripts/class_report.py" "${slices[@]}"
 echo "（每片的明细在 $OUT/*.json）"
+if [ "$fails" -gt 0 ]; then
+  echo "⚠ $fails 片失败（上面有 ⚠ 那些）—— 汇总只覆盖成功的那几片"
+  exit 1
+fi

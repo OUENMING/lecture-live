@@ -125,7 +125,12 @@ def main(argv=None) -> int:
         #    AppKit 静默吃掉（没有省略号），那种图看不出问题，这里先量。
         for b in _find():
             print(f"   开关文案 {b.title()!r}  frame={b.frame()}", flush=True)
-        if n1 and (n1 == base or n2 == base):
+        # ⚠️ 先各自判空再比字节（2026-10-12 全仓审查核实）：`_shot` 用 `check=False`，
+        #    screencapture 失败时**不报错、返回 0** —— 原来 `if n1 and (…)` 会把
+        #    "n1 是 0 字节（拍摄失败）"整条短路掉，什么都不说，脚本照样 exit 0。
+        if not n1 or not n2:
+            print(f"⚠️ 有截图是 0 字节（screencapture 失败 / 没生成文件）：n1={n1} n2={n2}")
+        elif n1 == base or n2 == base:
             print("⚠️ 实拍和基线**字节数相同** —— 很可能拍的是黑图（显示器在睡？）")
     finally:
         h.close()

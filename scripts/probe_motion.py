@@ -200,9 +200,27 @@ def main() -> int:
             #     `probe_scroll.py` 量的是**在屏**的, 所以那条能报 0.02ms。
             o._panel.setFrameOrigin_((-4000.0, 0.0))     # 先挪到屏外再显示, 不闪他
             o._panel.orderFrontRegardless()
+            # ⚠️⚠️ **这条腿是离屏的，名字里必须说清**（2026-10-12 全仓审查核实）：
+            #    docstring 自己写着「离屏的窗口 AppKit 可能跳过真正的合成，拿离屏数字当
+            #    基线会给出虚假的余量」—— 而这里为了不闪作者，把面板挪到 (-4000,0) 才
+            #    `orderFrontRegardless()`，`isVisible`/`isOnActiveSpace` 照样可能报 True。
+            #    → 不改行为（挪回屏内会闪），但**判据要能自证**：直接量"窗口矩形与屏幕
+            #      可视区有没有相交"，把那一位打出来；标签也如实写「离屏」。
+            try:
+                from AppKit import NSScreen
+                _f = o._panel.frame()
+                _vf = NSScreen.mainScreen().visibleFrame()
+                on_screen = not (_f.origin.x + _f.size.width <= _vf.origin.x
+                                 or _f.origin.x >= _vf.origin.x + _vf.size.width
+                                 or _f.origin.y + _f.size.height <= _vf.origin.y
+                                 or _f.origin.y >= _vf.origin.y + _vf.size.height)
+            except Exception:                                 # noqa: BLE001
+                on_screen = None
             print(f"    (面板可见性 isVisible={bool(o._panel.isVisible())} "
-                  f"onScreen={bool(o._panel.isOnActiveSpace())})")
-            results["⑤b 同上但面板**已显示**"] = measure(o, N, tick_frame)
+                  f"onScreen={bool(o._panel.isOnActiveSpace())} "
+                  f"**与屏幕可视区相交={on_screen}** —— 不相交 = 这条腿是离屏的，"
+                  f"合成可能被跳过，别拿它当在屏基线)")
+            results["⑤b 同上但面板**已显示**（离屏 —— 见上面那行）"] = measure(o, N, tick_frame)
             o._panel.orderOut_(None)
 
             # ④ 答案流式: 高频推送(已知最贵的一条路)

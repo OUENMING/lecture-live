@@ -41,10 +41,17 @@ if p.suffix == ".sh" or p.name in ("cl", "cl-x"):
                     "改成 `${VAR}`：\n" + "\n".join(hits))
 elif p.suffix == ".py":
     uvx = shutil.which("uvx") or os.path.expanduser("~/.local/bin/uvx")
-    if os.path.exists(uvx):
-        r = subprocess.run([uvx, RUFF, "check", "--no-cache", "--force-exclude", str(p)],
-                           cwd=ROOT, capture_output=True, text=True, timeout=60)
-        if r.returncode not in (0, 2) and r.stdout.strip():
+    # ⚠️ `os.path.exists` 对目录 / 没有执行位的文件也返回 True，而真正执行时才会抛
+    #    （`IsADirectoryError` / `PermissionError`）；`timeout=60` 超时抛 `TimeoutExpired`。
+    #    2026-10-12 全仓审查核实：这些异常原来**没人接** → hook 以退出码 1 + traceback 结束，
+    #    与本文件「要么静默 exit 0、要么 exit 2 回传问题」的约定相反，反而给工具链刷错误。
+    if os.path.exists(uvx) and os.access(uvx, os.X_OK):
+        try:
+            r = subprocess.run([uvx, RUFF, "check", "--no-cache", "--force-exclude", str(p)],
+                               cwd=ROOT, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            r = None                                   # 跑不起来 = 当作"没有 uvx"，静默放行
+        if r is not None and r.returncode not in (0, 2) and r.stdout.strip():
             problems = "ruff 报了问题：\n" + r.stdout.strip()[:3000]
 
 if problems:

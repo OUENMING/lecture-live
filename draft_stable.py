@@ -61,6 +61,14 @@ class DraftStabilizer:
     def update(self, text: str) -> str:
         toks = text.split()
         n_norm = [_norm(t) for t in toks]
+        if not any(n_norm):
+            # ⚠️⚠️ **没有有效词的假设 = 什么都不改**（2026-10-12 全仓审查核实）。
+            #    空串 / 纯标点会让 `n_norm` 全是空串（或整个为空）→ 下面 `l == 0`
+            #    且 `same == 0` → 命中「新假设和冻结区大面积对不上」那条 → `reset()`：
+            #    **已显示的整句被抹掉、冻结计数归零**。而流式里这会发生（这一帧只解出
+            #    标点、或这批样本一个词都没有）→ 屏幕上无端闪回一次空白。
+            #    → 沿用上一次显示（真正的"下一句"会有词，走下面那条重置）。
+            return " ".join(self._shown)
         if not self._prev:
             self._shown, self._fz, self.committed = list(toks), [], 0
             self._prev = n_norm

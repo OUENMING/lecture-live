@@ -28,6 +28,13 @@ LOG = sys.argv[1] if len(sys.argv) > 1 else _DEFAULT_LOG
 #    （2026-09-29 全量 OCR 抓到）。用法那行写的是「任意日志路径」，所以
 #    `python3 cl-bg.py bg.log` 是**可复现的崩溃**，而且崩在任何 fork 之前。
 #    空串就跳过 —— 当前目录本来就存在，没什么要建的。
+# ⚠️⚠️ **相对路径要在 `daemonize()` 之前定死**（2026-10-12 全仓审查核实）：
+#    `makedirs` 跟的是**调用方的 cwd**，而下面 `os.open(LOG)` 发生在
+#    `daemonize()` 里 `os.chdir(HERE)` **之后** → 两处基准不同。
+#    例：`python3 cl-bg.py logs/bg.log` → 目录建在调用方那边，文件却去 `<仓库>/logs` 找
+#    → `FileNotFoundError`；更糟的是它发生在两次 fork 之后，父进程早就 `os._exit(0)` 了，
+#    调用方会**以为启动成功**。→ 先绝对化，创建与打开用同一个基准。
+LOG = os.path.abspath(LOG)
 _LOG_DIR = os.path.dirname(LOG)
 if _LOG_DIR:
     os.makedirs(_LOG_DIR, exist_ok=True)

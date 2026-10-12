@@ -225,6 +225,13 @@ def main() -> int:
     slow = {n for n, pats in SLOW_FOR.items() if a.all or _hit(changed, pats)}
     tests = [t for t in tests if t.name not in SLOW_FOR or t.name in slow]
 
+    # ⚠️⚠️ **`--update-pyright-baseline` 会故意重写一个 tracked 文件**
+    #    （`scripts/pyright_baseline.json`），而下面的写端快照含 `git status --porcelain`
+    #    → 放在快照之后就是"对自己报写端泄漏"，**永远 exit 1**（2026-10-12 全仓审查核实）。
+    #    → 先把基线写掉（它是这一轮的**输入**，不是这一轮漏出来的写端），再快照。
+    if a.update_pyright_baseline:
+        _st, _msg = run_pyright(True)
+        print(f"（--update-pyright-baseline：{_msg}）")
     before = snapshot()
     t0 = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="cl_check_home_") as home, \
@@ -235,7 +242,7 @@ def main() -> int:
             (pathlib.Path(home) / "UCD").symlink_to(ucd)
         futs =[ex.submit(run_test, t, pathlib.Path(home)) for t in tests]
         static = None if a.no_static else ex.submit(
-            lambda: (run_ruff(), run_pyright(a.update_pyright_baseline)))
+            lambda: (run_ruff(), run_pyright(False)))
         results = [f.result() for f in futs]
         ruff, pyright = static.result() if static else (("skip", "--no-static"),) * 2
     leaked = snapshot_diff(before, snapshot())

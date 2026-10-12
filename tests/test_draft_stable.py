@@ -46,6 +46,26 @@ class Basic(unittest.TestCase):
                 self.assertLessEqual(d.committed, len(out))
                 self.assertEqual(out[d.committed:], latest[d.committed:])
 
+    def test_empty_or_punctuation_only_keeps_previous(self):
+        """⚠️ 空假设 / 纯标点**不许**把冻结前缀整段抹掉（2026-10-12 全仓审查核实）。
+
+        那时 `n_norm` 里没有有效词 → `l == 0` 且 `same == 0` → 命中
+        「新假设和冻结区大面积对不上」那条 → `reset()`：**已显示的整句被抹掉、冻结计数归零**
+        （旧实现这两条断言会红）。而流式里这会发生（这一帧只解出标点/这批样本没词）——
+        屏幕上就无端闪一次空白。→ 没有有效词 = 什么都不改，沿用上一次显示。
+        """
+        d = D(holdback=1)
+        d.update("one two three four")
+        d.update("one two three four five")               # 冻结 3
+        self.assertEqual(d.committed, 3)
+        self.assertEqual(d.update(""), "one two three four five")
+        self.assertEqual(d.committed, 3)
+        self.assertEqual(d.update("... ..."), "one two three four five")
+        self.assertEqual(d.committed, 3)
+        # 反面：**有词**的下一句照旧触发重置（别把上面那条修成"永不重置"）
+        self.assertEqual(d.update("so let me give you"), "so let me give you")
+        self.assertEqual(d.committed, 0)
+
     def test_output_never_longer_than_latest(self):
         d = D(holdback=1)
         d.update("a b c d e f")

@@ -2042,7 +2042,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             keep_ds = keep_jv = ""
             if ds:
                 okd, md = keyentry.validate_deepseek(ds)
-                lines.append(f"{'✅' if okd else '❌'} {keyentry.key_kind(ds)} "
+                lines.append(f"{'✅' if okd else '❌'} Key "
                              + (md if okd else f"用不了（{md}）"))
                 keep_ds = ds if okd else ""
             if jv:

@@ -157,13 +157,10 @@ def main() -> int:
     check("DeepSeek 自己的 401（error 是对象）-> 照旧「401 —— 检查是不是复制全了」",
           got == (False, "401 —— 检查是不是复制全了"), str(got))
 
-    # 3.9.2：朋友拿到的是通行码 —— 框上要认得它，结论行也要叫对名字
+    # 3.9.2：DeepSeek key 和通行码填同一栏，标签就叫「Key」（Owen 2026-10-12 定，不写别的）
     _f = KE.dialog_fields()
-    check("⭐ 填 key 框的翻译栏提到通行码（cl-…）",
-          "通行码" in _f[0]["label"] and "cl-" in _f[0]["hint"], repr(_f[0]))
-    check("⭐ 结论行：cl- 叫「通行码」，sk- 叫「DeepSeek key」",
-          (KE.key_kind("cl-a-0123"), KE.key_kind("sk-x")) == ("通行码", "DeepSeek key"))
-    check("已存过 → 回填并提示「已存过」", KE.dialog_fields("sk-1", "")[0]["hint"] == "已存过")
+    check("⭐ 翻译那一栏标签是「Key」", _f[0]["label"] == "Key", repr(_f[0]))
+    check("已存过 → 提示「已存过」", KE.dialog_fields("sk-1", "")[0]["hint"] == "已存过")
 
     print("\n--- ④ 那张框的几何（纯函数）---")
     check("0 栏 -> 只有内边距", notice.text_alert_height(0) == notice.TEXT_ALERT_PAD * 2,

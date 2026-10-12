@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""对话模型（DeepSeek）的唯一出口：地址 + 「一问一答、要 JSON」那种调用。
+
+为什么收在这里（`docs/PLAN-passkey.md` §2 第 1 步）：原来 `build_notes` / `polish` /
+`obsidian_writer` ×2 各自手写同一段 `httpx.post("https://api.deepseek.com/…")`，
+流式翻译（`cloud_translator`）又另有一份地址。之后「一人一码」要按 key 换地址（`sk-` 直连、
+`cl-` 走 Owen 的 Worker），只能改一处才不会漏。
+
+这一步**行为逐字不变**：同样的请求体、同样的超时、同样的异常（HTTP 错误 / JSON 解析错误照原样抛，
+各调用方原来怎么接就怎么接）。
+"""
+from __future__ import annotations
+
+import json
+
+#: DeepSeek 的 OpenAI 兼容地址（流式翻译 `cloud_translator.DEFAULT_BASE` 也用它）。
+BASE = "https://api.deepseek.com/v1"
+
+
+def chat_json(key: str, model: str, system: str, user: str, *, max_tokens: int,
+              temperature: float = 0.2, timeout: float = 180.0):
+    """非流式、`response_format=json_object`、关掉思考模式；返回模型给的 JSON（**原样**，可能不是 dict）。
+
+    ⚠️ 失败一律抛（`httpx.HTTPError` / `KeyError` / `json.JSONDecodeError`…）—— 吞不吞、吞成什么，
+       是调用方的事（它们各自的约定不同：`None` / `{}` / 往上抛给收尾锁）。
+    """
+    import httpx
+    payload = {"model": model, "stream": False, "max_tokens": max_tokens,
+               "temperature": temperature, "thinking": {"type": "disabled"},
+               "response_format": {"type": "json_object"},
+               "messages": [{"role": "system", "content": system},
+                            {"role": "user", "content": user}]}
+    r = httpx.post(f"{BASE}/chat/completions",
+                   headers={"Authorization": f"Bearer {key}"},
+                   json=payload, timeout=timeout)
+    r.raise_for_status()
+    return json.loads(r.json()["choices"][0]["message"]["content"])

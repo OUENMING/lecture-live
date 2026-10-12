@@ -33,7 +33,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 断句、VAD、静音阈值、硬切找低谷 | `vad.py` |
 | 转写、ASR、Parakeet、听错修正 | `asr.py` |
 | 定稿 ASR 深模块（云端 Groq/千问优先、本地兜底、熔断、总截止；`main.final_worker` 只调 `FinalASR.transcribe`）；开关 / 告知 / 配置 `read_config` | `final_asr.py`、`asr_endpoint.py`、`tests/test_final_asr.py` |
-| 翻译、prompt、DeepSeek 云端、mlx 本地、引擎降级 | `translator.py`、`cloud_translator.py` |
+| 翻译、prompt、DeepSeek 云端、mlx 本地、引擎降级；对话模型地址与非流式 JSON 调用的唯一出口 | `translator.py`、`cloud_translator.py`、`llm_client.py` |
 | 云端翻译的前文窗口（块对齐 / 前缀缓存）—— 动 `cloud_translator._user_content` 前读 | `docs/experiments/context_ab.md` |
 | 草稿译文：过期判据 `DraftView` + 只译最新的线程 `DraftTranslator`（依赖全注入，`step()` 可单测）；触发判据 | `draft_translate.py`、`draft_policy.py` |
 | CHANGELOG 解析（版本号、看点、更新方式；纯函数只吃文本 —— 本地卡片 / 远端分级 / 面板确认框共用） | `changelog.py` |

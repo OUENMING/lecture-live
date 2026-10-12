@@ -577,18 +577,10 @@ class ObsidianWriter:
     def _call_review(self, transcript: str) -> dict:
         """对一段转录调一次 LLM, 返回规范化后的复习层 dict。失败 -> {}。"""
         try:
-            import httpx
-            payload = {"model": self._model, "stream": False,
-                       "max_tokens": REVIEW_MAX_TOKENS,
-                       "temperature": 0.3, "thinking": {"type": "disabled"},
-                       "response_format": {"type": "json_object"},
-                       "messages": [{"role": "system", "content": REVIEW_SYS},
-                                    {"role": "user", "content": transcript}]}
-            r = httpx.post("https://api.deepseek.com/v1/chat/completions",
-                           headers={"Authorization": f"Bearer {self._key}"},
-                           json=payload, timeout=180)
-            r.raise_for_status()
-            obj = json.loads(r.json()["choices"][0]["message"]["content"])
+            import llm_client
+            obj = llm_client.chat_json(self._key, self._model, REVIEW_SYS, transcript,
+                                       max_tokens=REVIEW_MAX_TOKENS, temperature=0.3,
+                                       timeout=180)
         except Exception:                                 # noqa: BLE001
             return {}
         return _clean_review(obj)
@@ -598,17 +590,10 @@ class ObsidianWriter:
         if not headings:
             return {}
         try:
-            import httpx
-            payload = {"model": self._model, "stream": False, "max_tokens": 500,
-                       "temperature": 0.2, "thinking": {"type": "disabled"},
-                       "response_format": {"type": "json_object"},
-                       "messages": [{"role": "system", "content": OVERVIEW_SYS},
-                                    {"role": "user", "content": "\n".join(headings)}]}
-            r = httpx.post("https://api.deepseek.com/v1/chat/completions",
-                           headers={"Authorization": f"Bearer {self._key}"},
-                           json=payload, timeout=60)
-            r.raise_for_status()
-            obj = json.loads(r.json()["choices"][0]["message"]["content"])
+            import llm_client
+            obj = llm_client.chat_json(self._key, self._model, OVERVIEW_SYS,
+                                       "\n".join(headings), max_tokens=500,
+                                       temperature=0.2, timeout=60)
         except Exception:                                 # noqa: BLE001
             return {}
         if not isinstance(obj, dict):

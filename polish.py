@@ -71,17 +71,9 @@ EN 是直播时**已经改过**的版本(可能仍有漏改的听错词); ASR �
 
 def _chat(key: str, model: str, system: str, user: str,
           max_tokens: int, timeout: float) -> dict:
-    import httpx
-    payload = {"model": model, "stream": False, "max_tokens": max_tokens,
-               "temperature": 0.2, "thinking": {"type": "disabled"},
-               "response_format": {"type": "json_object"},
-               "messages": [{"role": "system", "content": system},
-                            {"role": "user", "content": user}]}
-    r = httpx.post("https://api.deepseek.com/v1/chat/completions",
-                   headers={"Authorization": f"Bearer {key}"},
-                   json=payload, timeout=timeout)
-    r.raise_for_status()
-    obj = json.loads(r.json()["choices"][0]["message"]["content"])
+    import llm_client
+    obj = llm_client.chat_json(key, model, system, user, max_tokens=max_tokens,
+                               temperature=0.2, timeout=timeout)
     return obj if isinstance(obj, dict) else {}
 
 

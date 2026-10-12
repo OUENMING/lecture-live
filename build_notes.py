@@ -228,17 +228,9 @@ def _chat_json(key: str, model: str, system: str, user: str,
     （它攥着收尾的 `_step_lock`）、`keyentry.validate_deepseek` 传 15
     （面板上有个框在等人）。⚠️ 180 不是个安全的默认值：拿锁的那条路最长能卡 3 分钟。
     """
-    import httpx
-    payload = {"model": model, "stream": False, "max_tokens": max_tokens,
-               "temperature": temperature, "thinking": {"type": "disabled"},
-               "response_format": {"type": "json_object"},
-               "messages": [{"role": "system", "content": system},
-                            {"role": "user", "content": user}]}
-    r = httpx.post("https://api.deepseek.com/v1/chat/completions",
-                   headers={"Authorization": f"Bearer {key}"},
-                   json=payload, timeout=timeout)
-    r.raise_for_status()
-    obj = json.loads(r.json()["choices"][0]["message"]["content"])
+    import llm_client
+    obj = llm_client.chat_json(key, model, system, user, max_tokens=max_tokens,
+                               temperature=temperature, timeout=timeout)
     return obj if isinstance(obj, dict) else None
 
 

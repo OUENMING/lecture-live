@@ -10,6 +10,7 @@ DEEPSEEK_API_KEY, 再次 `~/.classlive/credentials`(见 `paths.credentials`),
 from __future__ import annotations
 import json, os, pathlib
 
+import llm_client
 from translator import Result, _StreamParser, _clean_fix, domain_block, select_term_parts
 
 # 云端用**英文** system prompt: 实测比中文指令首字快约 15%(0.51s vs 0.60s),
@@ -154,7 +155,7 @@ def answer_user_content(question: str, transcript: list[str], follow_up: bool,
 
 
 KEY_FILE = pathlib.Path(__file__).with_name(".deepseek_key")
-DEFAULT_BASE = "https://api.deepseek.com/v1"
+DEFAULT_BASE = llm_client.BASE
 
 # 模型偶尔把"术语表/标签"回显成译文(小模型 + 长术语块时的已知幻觉)
 _ECHO_MARKERS = ("课程术语", "术语表", "术语解析", "以下翻译", "翻译如下", "校正及翻译")

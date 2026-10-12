@@ -639,6 +639,7 @@ class _Latest:
         #: 同上，上一次 `take()` 那份的**段号**（`put` 那一刻的 `seg_gen`；R3 流式草稿按它分流）。
         self.taken_tag = None
         self._tag = None
+        self._end = None
         self._ev = threading.Event()
         self._lock = threading.Lock()
 
@@ -658,6 +659,18 @@ class _Latest:
             self.taken_tag = self._tag
             self._ev.clear()
             return b
+
+    def put_end(self, buf, tag) -> None:
+        """段落结束：整段缓冲 + 段号。**不被后来的 `put` 顶掉**（单独一格），并叫醒 `take()`。"""
+        with self._lock:
+            self._end = (buf, tag)
+        self._ev.set()
+
+    def take_end(self):
+        """取走待收尾的那一段 `(buf, tag)`；没有 → `None`。与 `take()` 同一个消费者。"""
+        with self._lock:
+            e, self._end = self._end, None
+            return e
 
 
 def _changelog_text() -> str:
@@ -1530,6 +1543,20 @@ def run(args) -> None:
         last_eng = draft.name                 # 引擎变了（熔断）→ 出声一次 + 记一笔
         while running.is_set():
             buf = latest.take(0.5)
+            _end = latest.take_end()
+            if _end is not None:
+                # ⭐ 段尾收一次（3.9.4，`draft_engine.NemotronDrafter.finish`）：前瞻里那截解出来，
+                #    草稿不再"少最后几个词等定稿来补"。**排在下面「定稿在排队就让开」之前**——
+                #    段尾那一刻 finalq 里正好躺着这一段，让开就等于永远不收。
+                _t_end = time.monotonic()
+                t = draft.finish(*_end)
+                if t:
+                    _eseg = _end[1]
+                    drafts.put((t, stab.update(t) if stab is not None else t, len(_end[0]) / SR,
+                                time.monotonic() - _t_end, _eseg, _t_end, draft.name))
+                    if trans["mode"] == "both":
+                        draft_seq += 1
+                        draft_tr.submit(draft_seq, _eseg, strip_dangling(t))
             if buf is None or len(buf) == 0:
                 continue
             _t_put = latest.taken_t                  # 这份缓冲被交出来的时刻（量 `lag_s` 用）
@@ -1772,11 +1799,16 @@ def run(args) -> None:
         should_yield=lambda: not translator.uses_cloud and (not finalq.empty() or busy["on"]),
         context=lambda: finals[-1:], stats=draft_stats)
 
+    def _utterance_end(buf):
+        k = _open_segment()
+        finalq.put((buf, k))
+        latest.put_end(buf, k)          # 草稿线程据此给这一段收尾（见 partial_worker）
+
     seg = Segmenter(
         on_partial=lambda buf: latest.put(buf, seg_gen["n"]),
         # ⭐ 段落**真正结束**的那一刻就取段号，随 `finalq` 一路带到定稿 —— 现场采集的分组靠它。
         #    ⚠️ 不这么做就得等定稿上屏才自增，那比段落结束晚 2–4 秒（Whisper + LLM）。
-        on_utterance_end=lambda buf: finalq.put((buf, _open_segment())),
+        on_utterance_end=_utterance_end,
     )
 
     # ---- 专有名词查询线程(网络请求, 异步且缓存, 不影响主链路) ----
@@ -2026,6 +2058,8 @@ def run(args) -> None:
                 _raw, _shown, _buf_s, _cpt, _seg, _t_put, _eng = _pair(drafts.get_nowait())
             except queue.Empty:
                 break
+            if draft_view.stale_en(_seg):            # 晚到的旧段草稿（段尾收尾那份）：不许盖回去
+                continue
             if draft_view.on_draft(_seg):            # 新一段的第一份英文草稿: 清掉上一段残留的中文草稿
                 ui.draft_zh("")
             if live is not None:

@@ -37,12 +37,18 @@ class FakeStream:
     def __init__(self):
         self.fed: list[np.ndarray] = []
         self.pending = 0
+        self.finished = False
 
     def accept_waveform(self, sr, samples):
         if sr != 16000:
             raise ValueError(sr)
+        if self.finished:
+            raise RuntimeError("往已经 input_finished 的流里喂")
         self.fed.append(np.asarray(samples).copy())
         self.pending += 1
+
+    def input_finished(self):
+        self.finished = True
 
 
 class FakeRec:
@@ -151,6 +157,48 @@ class Drafter(unittest.TestCase):
         d = tempfile.mkdtemp(dir=_TMP_HOME)
         with self.assertRaises(Exception):
             de.NemotronDrafter(d)
+
+
+class Finish(unittest.TestCase):
+    """段尾收一次（3.9.4）：剩余样本 + 0.8 s 静音 + input_finished → 本段完整假设。"""
+
+    def test_feeds_rest_then_pad_then_finishes(self):
+        rec = FakeRec()
+        d = de.NemotronDrafter("", rec=rec)
+        d.update(buf(16000), 3)
+        out = d.finish(buf(20000), 3)
+        s = rec.streams[0]
+        self.assertTrue(s.finished)
+        np.testing.assert_array_equal(np.concatenate(s.fed[:2]), buf(20000))    # 剩下那截一个不少
+        self.assertEqual(len(s.fed[2]), int(de.TAIL_PAD_S * 16000))
+        self.assertFalse(np.any(s.fed[2]))                                      # 补的是静音
+        self.assertEqual(out, f"n{20000 + int(de.TAIL_PAD_S * 16000)}")
+
+    def test_no_draft_this_segment_costs_nothing(self):
+        rec = FakeRec()
+        d = de.NemotronDrafter("", rec=rec)
+        d.update(buf(16000), 1)
+        self.assertEqual(d.finish(buf(30000), 2), "")         # 段 2 一份草稿都没跑过
+        self.assertEqual(len(rec.streams), 1)
+
+    def test_late_buffer_of_finished_segment_is_dropped(self):
+        rec = FakeRec()
+        d = de.NemotronDrafter("", rec=rec)
+        d.update(buf(16000), 4)
+        d.finish(buf(16000), 4)
+        self.assertEqual(d.update(buf(16000), 4), "")         # 晚到的旧缓冲：不重解整段
+        self.assertEqual(len(rec.streams), 1)
+        self.assertEqual(d.update(buf(8000), 5), "n8000")     # 下一段照常
+        self.assertEqual(len(rec.streams), 2)
+
+    def test_engine_parakeet_or_error_returns_empty(self):
+        pk = FakeParakeet()
+        self.assertEqual(de.DraftEngine(pk, window_samples=WIN).finish(buf(100), 0), "")
+        rec = FakeRec(fail_on=2)
+        eng = de.DraftEngine(pk, de.NemotronDrafter("", rec=rec), window_samples=WIN)
+        eng.transcribe(buf(16000), 0)
+        self.assertEqual(eng.finish(buf(16000), 0), "")       # get_result 抛 → 不抛、熔断
+        self.assertEqual(eng.name, "parakeet")
 
 
 class Engine(unittest.TestCase):
@@ -279,10 +327,46 @@ class Wiring(unittest.TestCase):
     def test_submit_and_drafts_use_the_same_seg(self):
         import ast
         w = self._worker()
-        calls = {ast.unparse(n.func): n for n in ast.walk(w) if isinstance(n, ast.Call)}
-        self.assertEqual(ast.unparse(calls["draft_tr.submit"].args[1]), "_seg")
-        self.assertEqual(ast.unparse(calls["drafts.put"].args[0].elts[4]), "_seg")
+        calls = [n for n in ast.walk(w) if isinstance(n, ast.Call)]
+        subs = [ast.unparse(n.args[1]) for n in calls if ast.unparse(n.func) == "draft_tr.submit"]
+        puts = [ast.unparse(n.args[0].elts[4]) for n in calls if ast.unparse(n.func) == "drafts.put"]
+        # 两条路：逐秒草稿用 put 时刻的 `_seg`；段尾收尾（3.9.4）用随 `put_end` 一起来的 `_eseg`。
+        self.assertEqual(sorted(subs), ["_eseg", "_seg"])
+        self.assertEqual(sorted(puts), ["_eseg", "_seg"])
+        src = ast.unparse(w)
+        self.assertIn("_eseg = _end[1]", src, "段尾那条的段号必须取自 put_end 带来的那个，别现读")
 
+
+
+class LatestEnd(unittest.TestCase):
+    """`main._Latest.put_end`：段尾那份**不被后来的逐秒缓冲顶掉**，并叫醒等着的 `take()`。"""
+
+    def test_end_survives_later_put_and_wakes_take(self):
+        import threading
+        import time
+
+        import main
+        lt = main._Latest()
+        got = {}
+
+        def consumer():
+            t0 = time.monotonic()
+            got["buf"] = lt.take(2.0)
+            got["dt"] = time.monotonic() - t0
+            got["end"] = lt.take_end()
+        th = threading.Thread(target=consumer)
+        th.start()
+        time.sleep(0.05)
+        lt.put_end("SEG3", 3)
+        th.join(3)
+        self.assertLess(got["dt"], 1.0, "put_end 没叫醒 take()（要等满超时才收尾）")
+        self.assertIsNone(got["buf"])
+        self.assertEqual(got["end"], ("SEG3", 3))
+        lt.put_end("SEG4", 4)
+        lt.put("partial-of-5", 5)                   # 下一段的逐秒缓冲紧跟着到
+        self.assertEqual(lt.take(0.1), "partial-of-5")
+        self.assertEqual(lt.take_end(), ("SEG4", 4), "段尾那份被逐秒缓冲顶掉了")
+        self.assertIsNone(lt.take_end())
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

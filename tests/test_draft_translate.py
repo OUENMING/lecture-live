@@ -44,6 +44,18 @@ class ViewClear(unittest.TestCase):
         self.assertEqual(v.fin_seg, 5)
 
 
+class ViewStaleEn(unittest.TestCase):
+    def test_older_segment_or_finalized_is_stale(self):
+        v = D.DraftView()
+        v.on_draft(3)
+        self.assertFalse(v.stale_en(3))
+        self.assertFalse(v.stale_en(4))             # 新一段照常
+        self.assertTrue(v.stale_en(2))              # 屏上已是第 3 段
+        v.on_final(3)
+        self.assertTrue(v.stale_en(3))              # 第 3 段定稿已上屏，收尾草稿晚到
+        self.assertFalse(D.DraftView().stale_en(0)) # 开课第一份
+
+
 class ViewAccept(unittest.TestCase):
     def test_accepts_and_records_seq(self):
         v = D.DraftView()
@@ -212,6 +224,80 @@ class TranslatorStep(unittest.TestCase):
         t._q.put_nowait("bare string")
         self.assertTrue(t.step(0))
         self.assertEqual(f.calls, [])
+
+
+class SealedLock(unittest.TestCase):
+    """⭐ 封口句的中文译一次就锁住（3.9.4）。
+
+    数据（2026-10-12 SOC10020 真课）：英文封口前缀在后续草稿里保留 1302/1302，
+    而中文首句在下一版译文里被改写 59/99 —— 闪的只是整段重译带出来的措辞。
+    """
+
+    def setUp(self):
+        self.calls, self.out = [], []
+        self.bad = set()
+
+        def tr(en, on_zh, ctx):
+            self.calls.append((en, list(ctx)))
+            if en not in self.bad:
+                on_zh(f"<{en}>")
+        self.t = D.DraftTranslator(
+            translate=tr, output=lambda s, g, z: self.out.append((s, g, z)),
+            mode_ok=lambda: True, should_yield=lambda: False,
+            context=lambda: ["prev final"], stats={"stale": 0, "yield_local": 0, "errors": 0})
+
+    def go(self, seq, seg, text):
+        self.calls.clear()
+        self.t.submit(seq, seg, text)
+        self.t.step(0)
+        return sorted(self.calls), self.out[-1]
+
+    def test_sealed_prefix(self):
+        self.assertEqual(D.sealed_prefix("A b. C d? E"), "A b. C d?")
+        self.assertEqual(D.sealed_prefix("A b."), "")          # 句号后面还没词 = 没封口
+        self.assertEqual(D.sealed_prefix("no punct here"), "")
+        self.assertEqual(D.sealed_prefix(""), "")
+
+    def test_first_seal_translates_sentence_and_tail_then_locks(self):
+        calls, out = self.go(1, 0, "A b c. D e")
+        self.assertEqual(calls, [("A b c.", ["prev final"]), ("D e", ["A b c."])])
+        self.assertEqual(out, (1, 0, "<A b c.><D e>"))
+        calls, out = self.go(2, 0, "A b c. D e f")           # 只译尾巴，前半句中文原样
+        self.assertEqual(calls, [("D e f", ["A b c."])])
+        self.assertEqual(out, (2, 0, "<A b c.><D e f>"))
+
+    def test_second_seal_only_translates_the_new_sentence(self):
+        self.go(1, 0, "A b c. D e")
+        calls, out = self.go(2, 0, "A b c. D e f. G")
+        self.assertEqual(calls, [("D e f.", ["A b c."]), ("G", ["D e f."])])
+        self.assertEqual(out, (2, 0, "<A b c.><D e f.><G>"))
+
+    def test_draft_no_longer_starts_with_lock_falls_back_to_whole(self):
+        self.go(1, 0, "A b c. D e")
+        calls, out = self.go(2, 0, "e f g h")                 # 滑窗丢了段首，也没有封口句
+        self.assertEqual(calls, [("e f g h", ["prev final"])])
+        self.assertEqual(out, (2, 0, "<e f g h>"))
+
+    def test_new_segment_resets_lock(self):
+        self.go(1, 0, "A b c. D e")
+        calls, _ = self.go(2, 1, "D e f")
+        self.assertEqual(calls, [("D e f", ["prev final"])])
+
+    def test_failed_seal_translation_does_not_lock(self):
+        self.bad.add("A b c.")
+        calls, out = self.go(1, 0, "A b c. D e")
+        self.assertIn(("A b c. D e", ["prev final"]), calls)  # 退回整段译
+        self.assertEqual(out, (1, 0, "<A b c. D e>"))
+        self.bad.clear()
+        calls, _ = self.go(2, 0, "A b c. D e f")              # 下一轮再试着锁
+        self.assertIn(("A b c.", ["prev final"]), calls)
+
+    def test_nothing_new_after_lock_shows_locked_only(self):
+        self.go(1, 0, "A b c. D e")
+        self.go(2, 0, "A b c. D e. F")
+        calls, out = self.go(3, 0, "A b c. D e. ")
+        self.assertEqual(calls, [])
+        self.assertEqual(out, (3, 0, "<A b c.><D e.>"))
 
 
 class TranslatorRun(unittest.TestCase):

@@ -5,6 +5,7 @@
 
     eng = load_draft_engine(parakeet_asr, window_samples=PARTIAL_MAX_S * SR)   # 永不抛
     text, used = eng.transcribe(buf, tag)     # used ∈ {"nemotron", "parakeet"}；永不抛
+    tail = eng.finish(buf, tag)               # 段尾：本段完整假设；没有 → ""；永不抛
     eng.name / eng.reason / eng.fallback_reason                               # 只读
 
 - `buf` 是**本段从段首累积的**样本（`Segmenter._buf()`），`tag` 是 put 那一刻的段号。
@@ -15,7 +16,7 @@
    本类不加锁 —— 加了也挡不住第二个线程造成的「流状态错乱」，所以干脆规定单线程。
 ⚠️ 熔断后**本节课不再试**（不来回抖）：退回 Parakeet，直到进程结束。
 ⚠️ 段中间**不补静音、不调 `input_finished`**：那会结束这条流，后面再喂的样本全丢。
-   补尾只在「拿流式结果当整段定稿」时需要（P2 断网兜底，`docs/PLAN-streaming-asr.md` §0.1）。
+   段**尾**才补（`finish`，3.9.4）：这条流本来就要扔了，补一截静音让前瞻里那几个词解出来。
 
 为什么单独成模块：`partial_worker` 是 `main.run()` 里的嵌套闭包，默认闸门够不到；
 选择、喂流、熔断、回退全放这里，用假识别器做毫秒级判据（`tests/test_draft_engine.py`）。
@@ -34,6 +35,7 @@ MODES = ("auto", "parakeet", "nemotron")
 MIN_RAM_BYTES = 12 * 2**30    # auto 的内存门：模型常驻实测 +1073 MB（P0，OCW 全课）
 SLOW_S, SLOW_STRIKES = 0.9, 3  # 连续 3 次单次更新 > 0.9 s 熔断（P0 实测 p95 0.15 s）
 NUM_THREADS = 2
+TAIL_PAD_S = 0.8               # 段尾补的静音（见 `NemotronDrafter.finish`）
 SR = 16000
 
 
@@ -83,9 +85,12 @@ class NemotronDrafter:
         self._stream = None
         self._tag: object = object()
         self._fed = 0
+        self._finished: object = object()     # 最近 `finish` 过的段号
 
     def update(self, buf, tag) -> str:
-        """喂到 `buf` 末尾，返回本段当前假设。"""
+        """喂到 `buf` 末尾，返回本段当前假设。已经 `finish` 过的段 → `""`（晚到的旧缓冲，丢掉）。"""
+        if tag == self._finished:
+            return ""
         if self._stream is None or tag != self._tag or len(buf) < self._fed:
             self._stream = self._rec.create_stream()
             self._tag, self._fed = tag, 0
@@ -95,6 +100,29 @@ class NemotronDrafter:
         while self._rec.is_ready(self._stream):
             self._rec.decode_stream(self._stream)
         return self._rec.get_result(self._stream).strip()
+
+    def finish(self, buf, tag) -> str:
+        """段落结束：喂完剩下的样本 + 补 `TAIL_PAD_S` 静音 + `input_finished` → 本段**完整**假设。
+
+        ⭐ 为什么（2026-10-12 SOC10020 真课回放，47 段对上 Groq 定稿）：不收尾时最后一条草稿
+           比定稿平均少 3.6 个词（WER 26.6%）——模型的 560 ms 前瞻里那截从没被解码；
+           收尾后少 2.2 个词（WER 20.3%），代价 p50 211 ms / p95 369 ms（草稿线程上）。
+           补 0.5 / 0.8 / 1.2 s 差别在 0.3 个百分点内 → 取 0.8。
+        ⚠️ 只在段尾调：`input_finished` 之后这条流**不能再喂**（模块头那条）；之后同一 `tag`
+           再来 `update` 会因为 `_stream` 被清空而新开一条流（不会往死流里喂）。
+        """
+        if self._stream is None or tag != self._tag or len(buf) < self._fed:
+            return ""                     # 这一段一份草稿都没跑过 → 不额外花一整段的解码
+        if len(buf) > self._fed:
+            self._stream.accept_waveform(SR, buf[self._fed:])
+        import numpy as np
+        self._stream.accept_waveform(SR, np.zeros(int(TAIL_PAD_S * SR), dtype=np.float32))
+        self._stream.input_finished()
+        while self._rec.is_ready(self._stream):
+            self._rec.decode_stream(self._stream)
+        text = self._rec.get_result(self._stream).strip()
+        self._stream, self._finished = None, tag
+        return text
 
 
 class DraftEngine:
@@ -125,6 +153,19 @@ class DraftEngine:
             except Exception as e:               # noqa: BLE001
                 self._trip(f"出错：{e!r}")        # 落到下面的 Parakeet，**这一份不丢**
         return self._parakeet.transcribe(buf[-self._window:]), "parakeet"
+
+    def finish(self, buf, tag) -> str:
+        """段尾收一次（见 `NemotronDrafter.finish`）。Parakeet / 熔断后 / 出错 → `""`（= 不补，旧行为）。**永不抛。**
+
+        ⚠️ 不计入「太慢」熔断：这一下本来就要多解 0.8 s 静音，与逐秒草稿不是一个量级。
+        """
+        if self._streaming is None:
+            return ""
+        try:
+            return self._streaming.finish(buf, tag)
+        except Exception as e:               # noqa: BLE001
+            self._trip(f"出错：{e!r}")
+            return ""
 
     def _trip(self, why: str) -> None:
         self._streaming = None

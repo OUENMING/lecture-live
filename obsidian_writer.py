@@ -53,7 +53,11 @@ def resolve_vault(cli: str | None = None, *, env=None, root=None) -> str | None:
         t = p.read_text(encoding="utf-8").strip()
     except OSError:
         return None
-    return os.path.expanduser(t) if t else None
+    t = os.path.expanduser(t) if t else ""
+    # ⚠️ 记下来的一定是绝对路径（面板选文件夹 / `remember_vault` 收的都是）。
+    #    不是绝对路径 = 文件被手改坏了：照用会按**当前目录**（安装目录）解析，
+    #    笔记写进一个谁也找不到的地方 —— 与上面那条「没有兜底目录」同一个道理，宁可不写。
+    return t if os.path.isabs(t) else None
 
 
 def remember_vault(vault: str, *, root=None) -> None:
@@ -64,7 +68,9 @@ def remember_vault(vault: str, *, root=None) -> None:
     p = paths.vault_config(root=root)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(vault.strip() + "\n", encoding="utf-8")
+        # 存绝对路径：`--vault 相对路径` 下次从别的目录起就指错地方（`resolve_vault` 也只认绝对的）。
+        v = os.path.expanduser(vault.strip())
+        p.write_text((os.path.abspath(v) if v else "") + "\n", encoding="utf-8")
     except OSError:
         pass
 
@@ -500,6 +506,15 @@ class ObsidianWriter:
                 f"{self._date}_{time.strftime('%H%M%S')}_{self._course}.md")
             self.session_path.write_text(
                 f"# {self._course} · {self._date} · 实时会话日志\n\n", encoding="utf-8")
+
+    @property
+    def writes_notes(self) -> bool:
+        """这节课收尾会不会写 Obsidian 笔记（记录开着 **且** 有库）。
+
+        ⚠️ `main` 拿它决定「问不问存不存」和「结论卡要不要等用户点关闭」——
+           没库时问「存入 Obsidian 吗？」是在问一件做不到的事。
+        """
+        return self.enabled and self._vault is not None
 
     # ---- 运行中: 每句立刻落盘(flush) ----
     def append(self, en: str, zh: str, flagged: bool = False, raw: str = "") -> None:
@@ -1194,8 +1209,12 @@ class ObsidianWriter:
         #    ⚠️ 将来的「打包成 MD/PDF」接的正是这一档：`_render_note()` 是**纯函数**
         #       （不碰 vault），导出直接复用它换落点即可。
         if self._vault is None:
-            return (f"📄 已记录 {self._n} 句 → {self.session_path}\n"
-                    f"   （没设 Obsidian 库，这次不生成笔记 —— 逐句底稿在上面那个文件里）")
+            # ⚠️ 这句会留在收尾卡上**等用户点关闭**（`main` 看 `writes_notes`）——
+            #    2026-10-12 朋友实测：原来先问「存入 Obsidian 吗？」、点了「存」再在一张
+            #    3 秒就关的卡上说没存成，她以为存好了，好几节课都没笔记。所以要写清「下次怎么办」。
+            return (f"📄 这节课记了 {self._n} 句，但还没设笔记库，所以没生成 Obsidian 笔记。\n"
+                    f"下次开课前在面板上点「笔记库」选好 Obsidian 库，之后每节课都会存进去。\n"
+                    f"这节课的逐句记录在安装目录的 sessions/{self.session_path.name}")
         if self._n == 0:
             # ⚠️ 原来是 `self._n == 0` 直接 return —— 但"有提问、零句转录"(麦克风故障,
             # 或开课十几秒就问了一句然后退出)会把**问答静默丢掉**, 而问题正是这个

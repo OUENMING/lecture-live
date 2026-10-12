@@ -232,6 +232,26 @@ def _terminal_usable(stream=None) -> bool:
         return False
 
 
+def _wrapup_plan(enabled: bool, writes_notes: bool, mode: str) -> str:
+    """收尾开头那一步：`"notice"` 不问、直接说没生成笔记 / `"ask"` 问存不存 / `"auto"` 不问照存。
+
+    ⚠️ 有记录却没笔记库 → `"notice"`，**不问**「存入 Obsidian 吗？」：那是在问一件做不到的事。
+       2026-10-12 朋友实测：她点了「存」，结论「没设库」在一张 3 秒就关的卡上，她以为存好了，
+       好几节课都没进 Obsidian。
+    """
+    if enabled and not writes_notes:
+        return "notice"
+    return "ask" if mode == "ask" else "auto"
+
+
+def _wrapup_hold(ok: bool, plan: str, msg: str) -> bool:
+    """收尾结论要不要**留在卡上等用户点关闭**（否则 3 秒自动退）。
+
+    失败要留（作者 2026-09-28 定的口径）；没生成笔记那句也要留 —— 它写着「下次怎么办」，3 秒没人读得完。
+    """
+    return (not ok) or (plan == "notice" and bool(msg))
+
+
 def _wrapup_route(ui, ui_gone: bool, terminal: bool | None = None) -> str:
     """收尾那句「存不存」走哪条路：`"ui"` 还是 `"terminal"`。
 
@@ -580,6 +600,9 @@ class TerminalUI:
         return _ask_save_notes(n)
 
     def wrapup_progress(self, stage, done, total):
+        pass
+
+    def wrapup_open(self):
         pass
 
     def wrapup_begin(self, cancel):
@@ -2242,7 +2265,17 @@ def run(args) -> None:
                 spin_until(until, _tick, _ui_gone)
 
             save, give_up, _box = True, False, {}
-            if writer.mode == "ask":
+            # ⚠️ 没设笔记库就**不问**「存入 Obsidian 吗？」—— 那是在问一件做不到的事
+            #    （2026-10-12 朋友实测：点了「存」，结论卡 3 秒就关，她以为存好了，
+            #    好几节课都没笔记）。改成直接开卡，结论留着等她点关闭（见下面 `_hold`）。
+            _plan = _wrapup_plan(writer.enabled, writer.writes_notes, writer.mode)
+            _no_notes = _plan == "notice"
+            if _no_notes:
+                if _wrapup_route(ui, _ui_gone()) == "ui":
+                    _open = getattr(ui, "wrapup_open", None)
+                    if callable(_open):
+                        _open()
+            elif _plan == "ask":
                 if _wrapup_route(ui, _ui_gone()) == "terminal":
                     # 窗口已经关了（✕ = 正常停止）或这个 UI 没有卡 —— 走终端那条，
                     # 它对超时 / EOF 一律**默认存**。理由见 `_wrapup_route` 的 docstring。
@@ -2264,7 +2297,8 @@ def run(args) -> None:
             _cancel = threading.Event()
             if not give_up:
                 # 卡上装一个 [跳过精修]（终端那条是空操作）。与 Ctrl+C 同一条路。
-                _ui_begin = getattr(ui, "wrapup_begin", None)
+                # 没库时不精修（`writer.close()` 早退），不装这个按钮。
+                _ui_begin = None if _no_notes else getattr(ui, "wrapup_begin", None)
                 if callable(_ui_begin):
                     _ui_begin(_cancel)
                 _done = threading.Event()
@@ -2357,12 +2391,15 @@ def run(args) -> None:
             _done_ui = getattr(ui, "wrapup_done", None)
             if _done_ui is not None:
                 _done_ui(_ok, msg or ("收尾失败" if not _ok else "收尾结束"))
-            if _ok:
+            # 没生成笔记那句（「下次在面板上点笔记库」）和失败一样要留住 —— 3 秒没人读得完。
+            _hold = _wrapup_hold(_ok, _plan, msg)
+            if not _hold:
                 # 让「已写入 …」在屏上留 3 秒 —— 一闪而过等于没说。
                 _t3 = time.monotonic() + 3.0
                 _spin(lambda: time.monotonic() >= _t3)
             else:
                 # ⚠️ **失败不自动退**（作者 2026-09-28 定的口径）：留到他看见为止。
+                #    没库那句同理（2026-10-12）。
                 #    出口有两个：卡上的「关闭」，或直接关窗口。
                 _ack = getattr(ui, "wrapup_acknowledged", None)
                 if _ack is not None:

@@ -771,6 +771,23 @@ def _make_click_view(on_click):
     return v
 
 
+
+def _open_wrapup_card(ov, wrapup_mod, status: str):
+    """建收尾卡、放到悬浮窗旁边；建不起来返回 `None`（收尾照走，只是没卡）。
+
+    模块级而不是方法：`tests/test_wrapup.py` 拿最小替身当 `self` 直接驱动 `Overlay.ask_save`。
+    """
+    card = wrapup_mod.build(title="收尾")
+    if card is None:
+        return None
+    ov._wrapup_card = card
+    card["set_status"](status)
+    try:
+        panel.place_beside(ov._panel, card["panel"])
+    except Exception:                                     # noqa: BLE001
+        pass
+    return card
+
 class Overlay:
     def __init__(self, on_quit=None, on_translate=None, on_submit=None,
                  on_ask=None, on_new_topic=None, on_lost=None, whatsnew=None,
@@ -2976,17 +2993,11 @@ class Overlay:
             # 卡起不来不该让收尾停 —— 退回「默认存」，与终端超时同一条路。
             return True
         ans: dict = {"v": None}
-        card = wrapup_mod.build(title="收尾")
+        card = _open_wrapup_card(self, wrapup_mod, f"本次共记录 {n} 句双语。\n存入 Obsidian 吗？")
         if card is None:
             return True
-        self._wrapup_card = card
-        card["set_status"](f"本次共记录 {n} 句双语。\n存入 Obsidian 吗？")
         card["set_buttons"]([("存入", lambda: ans.__setitem__("v", True)),
                              ("不存", lambda: ans.__setitem__("v", False))])
-        try:
-            panel.place_beside(self._panel, card["panel"])
-        except Exception:                                 # noqa: BLE001
-            pass
 
         deadline = time.monotonic() + timeout
         # ⚠️⚠️ **进来之前就关着的窗不算数**（2026-09-30 修）。判据是「这次问话期间
@@ -3017,6 +3028,14 @@ class Overlay:
             card["close"]()
             self._wrapup_card = None
         return bool(ans["v"])
+
+    def wrapup_open(self) -> None:
+        """不问「存不存」时也要有张收尾卡（没设笔记库那条路）—— 结论要留在它上面等用户点关闭。"""
+        try:
+            import wrapup as wrapup_mod
+            _open_wrapup_card(self, wrapup_mod, "正在收尾…")
+        except Exception:                                 # noqa: BLE001
+            pass
 
     def wrapup_begin(self, cancel) -> None:
         """进入「干活中」阶段：给卡装一个 [跳过精修] 按钮。
@@ -3105,7 +3124,9 @@ class Overlay:
             self._wrapup_acked = True
             return
         try:
-            card["set_status"](("✅ " if ok else "⚠ ") + (msg or "收尾结束"))
+            # 自带图标的那句（📄 没设笔记库）不再叠一个 ✅ —— 它不是「成功」。
+            mark = "" if msg.startswith("📄") else ("✅ " if ok else "⚠ ")
+            card["set_status"](mark + (msg or "收尾结束"))
             card["set_hint"]("")
             # ⚠️ 留一个「关闭」按钮而不是自动消失：**失败时不能一闪而过**。
             #    作者 2026-09-28 选的是「成功自动退，失败留住」—— 去留由 main 决定，

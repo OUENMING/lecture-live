@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """收尾卡的渲染探针（不在运行路径上，**改这张卡的观感前先跑它**）。
 
-    ClassLive.app/Contents/MacOS/python scripts/probe_wrapup.py ask|work|done|wide
+    ClassLive.app/Contents/MacOS/python scripts/probe_wrapup.py ask|work|done|wide|live|afterclose|novault
 
 ⚠️ **必须用 `AppHelper.runEventLoop()`**，不是 `runConsoleEventLoop` ——
    后者只跑 `NSRunLoop.runMode_beforeDate_`，从不排空 NSApp 事件队列，
@@ -119,6 +119,45 @@ if phase == "afterclose":
     if card is None:
         fail.append("卡没建起来")
     print("afterclose：" + ("全过 ✅" if not fail else "❌ " + " · ".join(fail)))
+    sys.exit(1 if fail else 0)
+
+if phase == "novault":
+    # ⭐ 没设笔记库那条收尾（2026-10-12）：不问存不存，结论留在卡上等点「关闭」。
+    #    用**真 Overlay** + **真 writer 的那句话**（会话写到临时目录，不碰 `sessions/`）。
+    import tempfile
+    import time
+
+    import obsidian_writer as ow
+    from overlay import Overlay
+
+    ow.SESSIONS = pathlib.Path(tempfile.mkdtemp(prefix="probe-novault-"))
+    w = ow.ObsidianWriter(None, "ECON10770", mode="ask")
+    w._n = 412
+    msg = w.close()
+
+    o = Overlay()
+    o.show()
+    time.sleep(1.0)
+    o.pump()
+    o.close()                                       # ← 等价于点 ✕
+    o.wrapup_open()
+    o.wrapup_done(True, msg)
+    print("novault：卡该出现了 —— 现在拍图（12 秒内）", flush=True)
+    end = time.monotonic() + 12.0
+    seen = ""
+    while time.monotonic() < end:
+        o.pump()
+        time.sleep(0.02)
+        card = getattr(o, "_wrapup_card", None)
+        if card is not None:
+            seen = card["_status_lbl"].stringValue()
+    fail = []
+    if "笔记库" not in seen:
+        fail.append(f"卡上没那句：{seen!r}")
+    if o.wrapup_acknowledged():
+        fail.append("没点关闭就算看过了 —— 卡会 3 秒自动走")
+    print(f"novault：卡上 = {seen!r}")
+    print("novault：" + ("全过 ✅" if not fail else "❌ " + " · ".join(fail)))
     sys.exit(1 if fail else 0)
 
 # 一个假的主面板当锚点（真面板是横长条，这里照那个比例）

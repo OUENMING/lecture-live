@@ -142,7 +142,7 @@ def t_sessions_still_written_without_vault():
             assert "hello world" in txt, "落盘的内容里没有那一句"
             # 收尾不许写笔记（没地方写），但**不许抛**，而且要说实话
             msg = w.close()
-            assert "已记录" in msg and "没设 Obsidian 库" in msg, \
+            assert "记了 1 句" in msg and "还没设笔记库" in msg and pathlib.Path(w.session_path).name in msg, \
                 f"收尾那句话没说实话：{msg!r}"
             assert w.vault_path is None, "没有库却设了 vault_path"
         finally:

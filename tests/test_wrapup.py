@@ -699,6 +699,48 @@ def t_measure_text_h_agree():
             assert a == b, f"{text[:18]!r} @宽度{w}: overlay={a!r} wrapup={b!r}"
 
 
+@case("⭐⭐ 没设笔记库：不问「存入 Obsidian 吗」、结论留住等点关闭、卡上写「笔记库」")
+def t_no_vault_does_not_ask():
+    """2026-10-12 朋友实测：没库时照样问「存入 Obsidian 吗？」，她点「存」，结论
+    「没设库」在一张 3 秒就关的卡上 —— 她以为存好了，好几节课都没进 Obsidian。"""
+    w = ow.ObsidianWriter(None, "TESTX", mode="ask")
+    assert w.enabled and not w.writes_notes, "有记录、没库 → writes_notes 必须是 False"
+    plan = main._wrapup_plan(w.enabled, w.writes_notes, w.mode)
+    assert plan == "notice", f"没库还在问存不存：plan={plan!r}"
+    w._n = 5
+    asked = []
+    msg = w.close(ask=lambda n: asked.append(n) or True)
+    assert not asked, "没库时 close() 不该再问"
+    assert "笔记库" in msg and w.session_path.name in msg, f"结论没说下次怎么办 / 记录在哪：{msg!r}"
+    assert main._wrapup_hold(True, plan, msg), "没生成笔记那句必须留住，不能 3 秒自动关"
+    # 对照：有库照旧问、成功照旧 3 秒退；失败照旧留
+    with tempfile.TemporaryDirectory() as d:
+        w2 = ow.ObsidianWriter(d, "TESTX", mode="ask")
+        assert w2.writes_notes
+        assert main._wrapup_plan(w2.enabled, w2.writes_notes, w2.mode) == "ask"
+        assert not main._wrapup_hold(True, "ask", "📝 已存入 …")
+        assert main._wrapup_hold(False, "ask", "")
+        assert main._wrapup_plan(True, True, "yes") == "auto"
+    # `--save-notes no`：连记录都没有，不是「没库」那条
+    w3 = ow.ObsidianWriter(None, "TESTX", mode="no")
+    assert main._wrapup_plan(w3.enabled, w3.writes_notes, w3.mode) == "auto"
+    assert not main._wrapup_hold(True, "auto", "")
+
+
+@case("记下的库路径不是绝对路径 → 当没设（不按安装目录解析）；remember 存绝对路径")
+def t_vault_file_must_be_absolute():
+    with tempfile.TemporaryDirectory() as root:
+        cfg = ow.paths.vault_config(root=root)
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text("Users/someone/Documents/Obsidian Vault\n", encoding="utf-8")
+        assert ow.resolve_vault(None, env={}, root=root) is None, "相对路径被照用了"
+        cfg.write_text("/Users/someone/Vault\n", encoding="utf-8")
+        assert ow.resolve_vault(None, env={}, root=root) == "/Users/someone/Vault"
+        ow.remember_vault("rel/vault", root=root)
+        got = cfg.read_text(encoding="utf-8").strip()
+        assert os.path.isabs(got) and got.endswith("rel/vault"), f"存成了 {got!r}"
+
+
 def main_() -> int:
     print("=" * 60)
     for name, fn in CASES:

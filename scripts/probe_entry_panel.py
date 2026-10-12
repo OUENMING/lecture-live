@@ -274,8 +274,9 @@ def main() -> int:
                 if on_line:
                     on_line(_s)
                 time.sleep(1.5)
+            # 与真 `update.apply` 同一份契约：成功时 `user_msg` 为空（非空 = 收尾没成）
             return {"ok": True, "pulled": _upd_kind == "available", "after": "3.9.0",
-                    "user_msg": "已更新到 3.9.0"}
+                    "user_msg": ""}
         _U.apply = _fake_apply
         _U.defer_to_exit = lambda v: (print(f"（桩）下课后自动装 {v}"), True)[1]
 

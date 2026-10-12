@@ -1502,13 +1502,22 @@ def _vault_section() -> None:
     check("⭐ 只差收尾、收尾没成 → 状态行说原因、那一格回原样可重试（不写「已是最新」）",
           _uo({"ok": True, "pulled": False, "user_msg": "新版本已装好，但网断了 —— 下次打开会再试一次。"}, True)
           == ("新版本已装好，但网断了 —— 下次打开会再试一次。", None, False))
-    check("真是最新 → `✓  更新  已是最新`",
-          _uo({"ok": True, "pulled": False, "user_msg": ""}, True) == ("已经是最新的了", "✓  更新  已是最新", False))
+    _m, _it, _rs = _uo({"ok": True, "pulled": False, "user_msg": ""}, True)
+    check("真是最新 → `✓  更新  已是最新`", _m == "已经是最新的了" and not _rs and _t(_it) == "✓  更新  已是最新",
+          f"{_m!r} {_it}")
+    check("⭐⭐ 装完之后再点那一格 → 不再弹「上次更新还没装完」（Owen 10-12 实测：又弹装依赖）",
+          E.update_click_plan(_it, False) == "done", E.update_click_plan(_it, False))
     check("换了代码 + 能重开 → 重开", _uo({"ok": True, "pulled": True}, True)[2] is True)
-    check("换了代码、不能重开 → `✓  更新  已装好`",
-          _uo({"ok": True, "pulled": True}, False) == ("装好了 —— 关掉面板再打开就是新版本", "✓  更新  已装好", False))
+    _m, _it, _rs = _uo({"ok": True, "pulled": True}, False)
+    check("换了代码、不能重开 → `✓  更新  已装好`，再点也不弹",
+          _m == "装好了 —— 关掉面板再打开就是新版本" and _t(_it) == "✓  更新  已装好"
+          and E.update_click_plan(_it, False) == "done", f"{_m!r} {_it}")
     check("没成 → 原因 + 回原样", _uo({"ok": False, "user_msg": "另一个更新正在进行"}, True)
           == ("另一个更新正在进行", None, False))
+    check("点击计划：更新中 → busy；没装完 / 装不上 / 有新版各走各的",
+          [E.update_click_plan({"kind": k}, u) for k, u in
+           (("available", True), ("unfinished", False), ("blocked", False), ("available", False))]
+          == ["busy", "unfinished", "blocked", "available"])
     check("草稿模型可加装 → `✓  语音模型  已就绪 · 可加草稿模型`",
           _t({"key": "models", "state": "ok", "offer_draft": True})
           == "✓  语音模型  已就绪 · 可加草稿模型")

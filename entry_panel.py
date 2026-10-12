@@ -190,6 +190,8 @@ def ready_short(it: dict) -> str:
             return "装不上"
         if it.get("kind") == "unfinished":
             return "没装完"
+        if it.get("kind") == "done":
+            return it.get("detail") or "已是最新"
         return (it.get("detail", "").split()[-1:] or ["有新版"])[0]
     if it.get("key") == "engine":
         return "云端" if st == "ok" and "云端" in it.get("detail", "") else (
@@ -203,19 +205,31 @@ def ready_short(it: dict) -> str:
     }.get(st, "—")
 
 
-def update_outcome(r: dict, can_restart: bool) -> tuple[str, str | None, bool]:
-    """面板「更新」跑完后怎么收：`(状态行, 那一格的新标题 | None = 回到原样可重试, 要不要重开)`。**纯函数**。
+def update_outcome(r: dict, can_restart: bool) -> tuple[str, dict | None, bool]:
+    """面板「更新」跑完后怎么收：`(状态行, 那一格的新状态 | None = 回到原样可重试, 要不要重开)`。**纯函数**。
 
     `r` 是 `update.apply()` 的返回值。⚠️ `ok` 但带 `user_msg` = 代码没问题、收尾（补依赖 / 模型）没成 ——
     那一格不能写「已是最新」，要留着让人再点（2026-10-12 外部审查：状态行和按钮自相矛盾）。
+    ⚠️ 做完了就**换掉那一格的状态**（`kind="done"`），不只换标题：只换标题时再点一下，
+       点击走的还是面板打开时那份「没装完」，又弹一遍「装依赖」（2026-10-12 Owen 实测）。
     """
+    def done(word: str) -> dict:
+        return {"key": "update", "state": "ok", "kind": "done", "detail": word}
     if r.get("pulled"):
         if can_restart:
             return "装好了 —— 正在重开面板", None, True
-        return "装好了 —— 关掉面板再打开就是新版本", "✓  更新  已装好", False
+        return "装好了 —— 关掉面板再打开就是新版本", done("已装好"), False
     if r.get("ok") and not r.get("user_msg"):
-        return "已经是最新的了", "✓  更新  已是最新", False
+        return "已经是最新的了", done("已是最新"), False
     return r.get("user_msg") or "更新没成功 —— 现在的版本照常能用", None, False
+
+
+def update_click_plan(it: dict, updating: bool) -> str:
+    """点「更新」那一格该做什么：`busy` / `done` / `blocked` / `unfinished` / `available`。**纯函数**。"""
+    if updating:
+        return "busy"
+    k = it.get("kind")
+    return k if k in ("done", "blocked", "unfinished") else "available"
 
 
 def ready_line_text(items: list) -> str:
@@ -2093,10 +2107,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         """点「更新」那一格。⚠️ 主线程回调：弹框（模态、自己转 runloop）+ 起线程，不联网。"""
         import notice
         it = ready_by_key.get("update") or {}
-        if S.get("updating"):
+        kind = update_click_plan(it, bool(S.get("updating")))
+        if kind == "busy":
             _status("正在更新，别关面板 —— 装完会自动重开")
             return
-        kind = it.get("kind")
+        if kind == "done":
+            _status("已经是最新的了")
+            return
         if kind == "blocked":
             notice.alert("这次更新装不上", it.get("detail", ""), gui=True)
             return
@@ -2142,12 +2159,14 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
     def _update_done(r: dict) -> None:
         S["updating"] = False
-        msg, title, restart = update_outcome(r, on_restart is not None)
+        msg, item, restart = update_outcome(r, on_restart is not None)
         _status(msg)
         if restart and on_restart is not None:
             on_restart()
             return
-        _retitle("update", title or ready_item_text(ready_by_key.get("update") or {}))
+        if item is not None:
+            ready_by_key["update"] = item
+        _retitle("update", ready_item_text(ready_by_key.get("update") or {}))
 
     def on_ready_click(key: str) -> None:
         """点就绪条上的某一项 —— 就地修那一项。

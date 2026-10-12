@@ -11,9 +11,9 @@
 | 3.8.11（R1） | 代码全部完成、全部测试绿，**已在本机分 8 个提交（`47d67c6`…，未推送）**；CHANGELOG 条目已写（草稿） |
 | 发版决定 | Owen 2026-10-11（更新）：**R3 做完之后再发** —— 3.8.10 / 3.8.11 / 3.8.12 / R2 / R3 合成一版发，发前合并更新日志给 Owen 看 |
 | 下一件 | G ✅ → R2 ✅（Worker 已部署）→ **R3 P1 ✅（2026-10-11 晚；本机 `main` 已快进到 `2fb8c42`，未推送）** → R3 真课闸门（`PLAN-streaming-asr.md` §6.4，Owen 已装模型）→ 后续优化 → 一人一码 |
-| 分支 `stream-asr` | 2026-10-11 深夜已与本机 `main` 对齐（`b187e79`，比 origin 多 29 个提交，**未推送**）：静音看门狗、流式草稿 UI、Worker 链序（已部署）、更新卡片提议 Nemotron、顶栏胶囊 + 单色 ❓、面板「关闭」仍开录的修复、隐私文案改正、3.9.0 更新日志草稿 |
-| 发版前最后一道 | 周一真课闸门（`PLAN-streaming-asr.md` §6.4）→ Owen 过目 CHANGELOG → VERSION 3.9.0 → push / tag / release。云端开的端到端已跑：12 段全走 Groq，客户端 p50 0.69 s，rc 0、无 Traceback、dropped 0 |
-| 3.9.1（课后） | 开课前弹更新卡片 + 下课退出时安装（Owen 已同意方案）；句子级提前送翻；Parakeet 懒加载；删 `draft_stable`；增益底噪闸门 |
+| 分支 `stream-asr` | 2026-10-12 凌晨：本机 `main` 已快进到 `stream-asr`（`59f65b8`，比 origin 多 40 个提交，**未推送**）。在 10-11 那批之上加了：开课面板「更新」入口（现在更新 → `cl` 退出码 5 重启自己；下课后自动装；课中「立即更新」已删）、面板瘦身 P1、3.8.10–3.9.0 标 `### 更新方式 auto`（用 `v3.8.9:update.py` 自己的解析器核过：3.8.9 退出时会自动拉）。截图 Owen 已过目 |
+| 发版前最后一道 | 周一真课闸门（`PLAN-streaming-asr.md` §6.4）→ Owen 过目 CHANGELOG → VERSION 3.9.0（现在还是 3.8.12）→ push / tag / release。云端开的端到端已跑：12 段全走 Groq，客户端 p50 0.69 s，rc 0、无 Traceback、dropped 0 |
+| 3.9.1（课后，分支 `next-391`） | 已做：Parakeet 懒加载、`llm_client` 收口、一人一码（**Worker 已从 next-391 部署**，版本 `48dbe443`；还差 Owen 放 `DEEPSEEK_KEY` / `ADMIN_TOKEN` 两个 secret，见 `PLAN-passkey.md` 状态行）。等真课数据：句子级提前送翻、增益底噪闸门、R3 P2 标点断句（要 Owen 点头）。未做：删 `draft_stable`、P3 重建守护脚本、Process Tap 真机 |
 
 查当前真实状态：`git status --porcelain`、`git log --oneline -15`、`git rev-list --count origin/main..HEAD`。
 

@@ -223,7 +223,39 @@ class TestCloudPath(Base):
         srv.status, srv.body = 200, {"text": "back", "provider": "qwen"}
         f.transcribe(audio(3))
         self.assertEqual(said, [True, False])
-        self.assertEqual(self.echoes, [])
+        self.assertEqual(self.echoes, [], "走 notify 就不该再 echo")
+
+    def test_04d_probe_released_when_encode_fails(self):
+        """⭐⭐ 半开探测的「名额」必须还回来 —— 否则云端定稿**永久静默失效**。
+
+        ⚠️ 根因（2026-10-12 全仓审查，核实过）：`_Breaker.allow()` 放行探测时置
+           `_probing = True`，而复位它的**只有** `ok()` / `fail()` —— 两个都在 `_cloud()` 里。
+           可 `_run()` 在 `allow()` 之后还有一条**根本不发请求就返回**的路
+           （`_encode()` 返 None → 走本地），那条路两个都不调 → `_probing` 卡在 True →
+           `allow()` 此后**永远**返 False → 云端定稿再也上不去，界面上只表现为
+           "今天识别质量差了点"。**一旦撞上不可自愈。**
+           触发条件：熔断开过一次 + 恰好那次编码失败（缺 soundfile / 编码异常）。
+        """
+        srv = self.serve(status=503, body={})
+        clk = Clock()
+        f = self.make(clock=clk)
+        for _ in range(3):
+            f.transcribe(audio(3))                      # 3 次失败 -> 熔断开
+        self.assertEqual(srv.n, 3)
+        clk.t += 61                                     # 过开闸期
+
+        from unittest import mock
+        with mock.patch.object(f, "_encode", lambda _s: None):
+            r = f.transcribe(audio(3))                  # 探测到手，但**不发请求**
+        self.assertEqual(r.steps, ("encode", "local:parakeet"))
+        self.assertEqual(srv.n, 3, "这条路上本来就不该发请求")
+
+        clk.t += 61
+        srv.status, srv.body = 200, {"text": "back", "provider": "qwen"}
+        r = f.transcribe(audio(3))
+        # 改坏：把 `transcribe()` 里那个 `finally: release_probe()` 删掉 -> 这条红。
+        self.assertEqual((r.text, r.source, srv.n), ("back", "qwen", 4),
+                         "⚠️ 探测名额被吞了 —— 云端从此永久失效")
 
     def test_04b_failed_probe_reopens_silently(self):
         srv = self.serve(status=503, body={})

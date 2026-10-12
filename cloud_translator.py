@@ -4,8 +4,10 @@
 方便 run() 里用 --engine 切换与自动降级。
 
 注意: 本模块只有 **文本** 出本机(翻译不碰音频); 音频的去向见 `final_asr.py`(3.9.0 起定稿转写默认走云端, 可关);key 优先取 --api-key, 其次环境变量
-DEEPSEEK_API_KEY, 再次 `~/.classlive/credentials`(见 `paths.credentials`),
-最后才是旧位置的 `<仓库>/.deepseek_key`(仍认, 但启动会告警提示搬家)。
+再次 `~/.classlive/credentials`(见 `paths.credentials`)。
+
+⚠️ **3.9.3 起不再读旧位置 `<仓库>/.deepseek_key`**（文件本身一个字节都没动）——
+   通行码上线后要让大家换到作者的码，而这一路会**顶上来**，让搬家看起来像没发生。
 """
 from __future__ import annotations
 import json, os, pathlib
@@ -172,13 +174,14 @@ def _looks_like_echo(zh: str, en: str) -> bool:
 
 
 def load_api_key(explicit: str | None = None) -> str | None:
-    """key 来源顺序: `--api-key` → `$DEEPSEEK_API_KEY` → `~/.classlive/credentials`
-    → 旧的 `<仓库>/.deepseek_key`（**仍认**，但打一行带确切命令的搬家提示）。
+    """key 来源顺序: `--api-key` → `$DEEPSEEK_API_KEY` → `~/.classlive/credentials`。
 
-    ⚠️ 为什么要搬出仓库: 旧位置住在**安装目录**里，而那个目录会被 `cl update` 的
-    `git pull` 更新 —— 用户数据不该住在会被更新覆盖的地方（`paths.py` 文件头那两套
-    约定就是这个理由）。`.gitignore` 挡的是"被推上 GitHub"，挡不住"被更新洗掉"。
-    ⚠️ **不自动搬**用户的密钥 —— 只提示，命令由他自己跑（`secrets-via-interactive-login`）。
+    ⚠️ 为什么 `credentials` 不在安装目录里: 那个目录会被 `cl update` 的 `git pull` 更新 ——
+    用户数据不该住在会被更新覆盖的地方（`paths.py` 文件头那两套约定就是这个理由）。
+    `.gitignore` 挡的是"被推上 GitHub"，挡不住"被更新洗掉"。
+    ⚠️ **不自动搬**用户的密钥 —— 3.9.3 之前是只提示、命令由他自己跑
+    （`secrets-via-interactive-login`）；3.9.3 起那条提示连同那条读取路径一起退休了
+    （见函数体末那几条注释）。
     """
     if explicit:
         return explicit.strip()
@@ -198,16 +201,13 @@ def load_api_key(explicit: str | None = None) -> str | None:
         except OSError:
             pass
         return c.read_text(encoding="utf-8").strip()
-    if KEY_FILE.exists():
-        if c is not None:
-            # ⚠️ 理由改真（2026-09-30 全量 OCR 审查发现旧理由**不成立**）：
-            #    `.deepseek_key` 在 `.gitignore` 里 → `git pull` 从不碰被忽略的文件，
-            #    更不会覆盖它（真要撞车时 git 是**拒绝**）。真正该搬的理由是
-            #    「用户数据不该住在会被更新/重建动到的安装目录里」。
-            print(f"⚠ 正在用旧位置的 key（{KEY_FILE}）—— 它在**安装目录**里， "
-                  f"建议搬去 ~/.classlive/：")
-            print(f"     mkdir -p {c.parent} && mv {KEY_FILE} {c} && chmod 600 {c}")
-        return KEY_FILE.read_text(encoding="utf-8").strip()
+    # ⭐ 3.9.3：**不再读**旧位置（原来的 `if KEY_FILE.exists(): … return …`）。
+    #    理由：通行码上线后要让所有人换到作者的码，而这一路排在 `credentials` 后面、
+    #    会**顶上来** —— 只挪 `~/.classlive/credentials` 的话，从没搬过家的老用户
+    #    看起来像"什么都没发生"（`keyentry.clear_legacy_key` 的 docstring 有完整论证）。
+    #    ⚠️ **那个文件一个字节都没动** —— 想在终端里接着用它，
+    #       `cp .deepseek_key ~/.classlive/credentials` 就回到原来的行为。
+    #    ⚠️ `KEY_FILE` 常量留着：它是**那个旧位置的唯一定义点**，注释和迁移说明要引用它。
     return None
 
 

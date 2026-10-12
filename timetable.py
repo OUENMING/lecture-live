@@ -72,7 +72,11 @@ _SECTION = re.compile(
 #:    时它一个都猜不出来（`10740` 匹配不上 → 整个正则退化成不匹配），而且**不报错**。
 _CODE_RE = r"[A-Z]{2,6}[-\s]?\d{2,6}[A-Z]?"
 _CODE_SLOT = re.compile(rf"^\s*({_CODE_RE})\s*[:：\-–—]\s*(.+)$")
-_CODE_TAIL = re.compile(rf"^(.+?)\s*[\-–—(]\s*({_CODE_RE})\s*[\)]?\s*$")
+#: ⚠️ **第 1 组必须是课号**，与上面那三条正则一致 —— `suggest_code` 对所有正则
+#:    统一取 `group(1)`。原来这里把**标题**括成了第 1 组（`^(.+?)…({_CODE_RE})…$`），
+#:    于是 `Microeconomics - ECON10740` 猜出来的课号是 `Microeconomics`
+#:    （2026-10-12 全仓审查指出并已复现）。标题**不捕获**就行，它是丢弃的。
+_CODE_TAIL = re.compile(rf"^.+?\s*[\-–—(]\s*({_CODE_RE})\s*[\)]?\s*$")
 #: 整串就是课号（USC Banner 的 `CSCI-104L`、SUTD 那种只有课名的反例会被排除）
 _CODE_ONLY = re.compile(rf"^\s*({_CODE_RE})\s*$")
 #: ⭐ **UC Davis 形态**：`ECS 170 001 Introduction to AI` —— 课号打头、**没有分隔符**，

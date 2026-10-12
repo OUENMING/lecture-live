@@ -313,6 +313,31 @@ def main() -> int:
               and (rsess / f"{stem}.recovered.json").exists(),
               str([p.name for p in rsess.iterdir()]))
 
+        # ── ⭐ 台账 `_save_ledger` 必须在锁里（2026-10-12 全仓审查）──────────────
+        # ⚠️ 它是「读当前 → 合并 → 写回」的复合更新，两个并发 `enqueue` 在锁外跑就会互相覆盖；
+        #    而台账丢一条 = 远端那一节课**删不掉**（`key` 是哈希、不可逆）。
+        #    ⚠️ 判据钉 `_lock.locked()` 是**有意的**：这里要钉的就是「互斥」这件事本身，
+        #       而靠两线程撞时序去复现覆盖，是一个必然会 flaky 的判据。
+        _rq = pathlib.Path(tmp) / "ledgerlock"
+        _q = upload.UploadQueue(lambda *a: True, root=_rq)
+        _f = _rq / "a.json"
+        _rq.mkdir(parents=True, exist_ok=True)
+        _f.write_text("{}", encoding="utf-8")
+        _seen: list = []
+        _orig_led = _q._save_ledger
+
+        def _spy_led(stem, key):
+            _seen.append(_q._lock.locked())
+            return _orig_led(stem, key)
+
+        _q._save_ledger = _spy_led
+        _n_enq = _q.enqueue([_f], "2026-10-12_ECON10740")
+        check("⭐⭐ `enqueue` 是**持锁**调 `_save_ledger` 的",
+              _seen == [True] and _n_enq == 1, f"持锁={_seen} 入队={_n_enq}")
+        _led = json.loads(upload.paths.upload_ledger(root=_rq).read_text(encoding="utf-8"))
+        check("⭐ 台账真写进去了（读回来是那一节）",
+              "2026-10-12_ECON10740" in _led, str(list(_led)[:3]))
+
         bad = [n for n, ok, _ in RESULTS if not ok]
         print("\n" + "=" * 60)
         print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

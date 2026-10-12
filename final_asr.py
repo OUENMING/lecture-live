@@ -262,6 +262,23 @@ class _Breaker:
         if announce:
             self._say(f"云端转写暂不可用, 改用本机识别; {BREAKER_OPEN_S:.0f}s 后自动重试", True)
 
+    def release_probe(self) -> None:
+        """把半开探测的**名额还回来**。幂等 —— 没探测时是 no-op。
+
+        ⚠️⚠️ 为什么必须有它（2026-10-12 全仓审查，核实过）：
+           `allow()` 放行探测时会置 `_probing = True`，而复位它的**只有** `ok()` / `fail()`。
+           可 `_run()` 在 `allow()` 之后还有**根本不发请求就返回**的路 ——
+           `_encode()` 返回 None（缺 soundfile / 编码失败）就走本地；
+           那条路既没发请求、也没复位 → `_probing` 卡在 True →
+           `allow()` 此后**永远**返 False → **云端定稿永久静默失效、退回本地**，
+           界面上只表现为"今天识别质量差了点"。一旦撞上不可自愈。
+           （触发条件：熔断开过一次 + 恰好那次编码失败。）
+        ⚠️ 放在 `transcribe()` 的 `finally` 里而不是 `_run()` 里 —— `_run` 有**多处**
+           early return 和抛异常的路径，`finally` 一处盖全（探测的租期 = 一次 `_run`）。
+        """
+        with self._lock:
+            self._probing = False
+
 
 class FinalASR:
     """`local` 可为 None(= 没有 Whisper, 本地就用 `draft`)。`allow_cloud()` 每段问一次。
@@ -303,6 +320,10 @@ class FinalASR:
         except Exception as e:                           # noqa: BLE001  永不抛
             steps.append(f"error:{type(e).__name__}")
             text, source, lp = "", "none", None
+        finally:
+            # ⭐ 幂等：正常收尾时 ok()/fail() 早就复位了，这里只兜「没发请求就返回」和抛异常
+            #    那两条路（见 `release_probe` 的 docstring）。
+            self._breaker.release_probe()
         fell_back = wanted and source.startswith("local")
         return FinalResult(text, source, lp, (time.perf_counter() - t0) * 1000,
                            fell_back, tuple(steps), trace)

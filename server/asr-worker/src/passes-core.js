@@ -64,6 +64,19 @@ export class PassCore {
     const now = this.now();
     if (c.revoked) return { ok: false, reason: "revoked", name: c.name };
     if (now >= c.expires) return { ok: false, reason: "expired", name: c.name };
+    // ⚠️⚠️ **额度先判、设备后记**（2026-10-12 全仓审查，核实过）：顺序反过来的话，
+    //    被额度拒掉的请求**照样**会登记一台新设备、并刷新它的 `last` ——
+    //      · 管理端的 `last_seen` 被拒请求污染（看起来"刚用过"，其实一次都没成）；
+    //      · 设备名额被一次注定失败的请求消耗掉（用户在额度恢复后白白少一台额度）。
+    //    判完再记才自洽：只有**真的放行**的请求才配登记设备。
+    const u = (await this.storage.get(`use:${day(now)}:${code}`)) || {};
+    if (kind === "asr" && c.daily_asr_s !== null && num(u.asr_s) >= c.daily_asr_s) {
+      return { ok: false, reason: "quota", name: c.name };
+    }
+    if (kind === "llm" && c.daily_tokens !== null
+        && num(u.tokens_in) + num(u.tokens_out) >= c.daily_tokens) {
+      return { ok: false, reason: "quota", name: c.name };
+    }
     if (INSTALL_RE.test(install || "")) {
       const devs = (await this.storage.get(`dev:${code}`)) || {};
       if (!devs[install]) {
@@ -73,14 +86,6 @@ export class PassCore {
         devs[install].last = now;
       }
       await this.storage.put(`dev:${code}`, devs);
-    }
-    const u = (await this.storage.get(`use:${day(now)}:${code}`)) || {};
-    if (kind === "asr" && c.daily_asr_s !== null && num(u.asr_s) >= c.daily_asr_s) {
-      return { ok: false, reason: "quota", name: c.name };
-    }
-    if (kind === "llm" && c.daily_tokens !== null
-        && num(u.tokens_in) + num(u.tokens_out) >= c.daily_tokens) {
-      return { ok: false, reason: "quota", name: c.name };
     }
     return { ok: true, name: c.name };
   }

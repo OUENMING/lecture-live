@@ -29,10 +29,44 @@ import os
 import pathlib
 import shutil
 import sys
+import tempfile
 import time
 
-repo, audio, speed, outdir = (pathlib.Path(sys.argv[1]), sys.argv[2],
-                              sys.argv[3], pathlib.Path(sys.argv[4]))
+def _safe_outdir(raw: str) -> pathlib.Path | None:
+    """把 `--outdir` 收敛成一个**允许被清空**的目录；不合格返回 `None`（调用方退出）。
+
+    ⚠️⚠️ 为什么要有它（2026-10-12 全仓审查，核实过）：原来这里是
+       `if outdir.exists(): shutil.rmtree(outdir)`，而 `outdir` 直接来自 `sys.argv[4]`，
+       **一个校验都没有**。一个「隔离测试」脚本却具备 `rmtree($HOME)` / `rmtree(仓库根)` /
+       `rmtree(/)` 的能力，手滑一次就是**不可逆**的数据销毁。
+    ⚠️ 判据是**白名单**（必须住在一个叫 `ClassLive-测试残留` 的目录下，或在系统临时目录里），
+       不是黑名单 —— 黑名单永远会漏一条，白名单漏了只是"用不了"，方向是安全的。
+    """
+    p = pathlib.Path(raw)
+    if not raw.strip() or not p.is_absolute():
+        return None
+    try:
+        p = p.resolve()
+    except OSError:
+        return None
+    if p.parent == p or p == pathlib.Path.home():         # `/`、`$HOME` 本身
+        return None
+    if any(parent.name == "ClassLive-测试残留" for parent in (p, *p.parents)):
+        return p
+    if str(p).startswith(("/tmp/", "/private/tmp/", tempfile.gettempdir() + "/")):
+        return p
+    return None
+
+
+repo, audio, speed = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+_outdir = _safe_outdir(sys.argv[4])
+if _outdir is None:
+    sys.exit(f"❌ 拒绝清空这个目录：{sys.argv[4]!r}\n"
+             f"   本脚本会把它**递归删掉**，所以只接受两条路径：\n"
+             f"   ① 名字叫 `ClassLive-测试残留` 的目录**里面**"
+             f"（例：~/ClassLive-测试残留/2026-10-12）\n"
+             f"   ② 系统临时目录里（$TMPDIR · /tmp · /private/tmp）")
+outdir = _outdir
 extra = sys.argv[5:]
 
 if outdir.exists():

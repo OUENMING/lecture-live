@@ -60,5 +60,11 @@ ok=1
 [ -x "$HERE/ClassLive.app/Contents/MacOS/python" ] || { echo "❌ ClassLive.app 里的 python 不可执行"; ok=0; }
 [ -w "$HERE/sessions" ] && [ -d "$HERE/sessions" ] || { echo "❌ sessions/ 不可写（课堂记录会写不进去）"; ok=0; }
 if [ -r "$HERE/.course" ]; then echo "ℹ️ 当前课程 = $(cat "$HERE/.course")"; else echo "ℹ️ 还没设课程（会记到 LECTURE 名下）"; fi
-[ "$ok" = 1 ] && echo "✅ 运行态就绪：现在可以直接跑 $HERE/cl"
-exit 0
+# ⚠️ 自检失败必须**反映到退出码**（2026-10-12 全仓审查）：原来无论 `ok` 是几都 `exit 0`，
+#    调用方（人或自动化）从退出码看不出"运行态没就绪"，会带着坏环境继续上课
+#    （python 不可执行 = 起不来；sessions/ 不可写 = 整节课的课堂记录写不进去）。
+if [ "$ok" = 1 ]; then
+  echo "✅ 运行态就绪：现在可以直接跑 $HERE/cl"
+  exit 0
+fi
+exit 1

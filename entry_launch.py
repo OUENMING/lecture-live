@@ -52,6 +52,7 @@
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 import traceback
@@ -198,6 +199,27 @@ def main() -> int:
             NSEventTypeApplicationDefined, (0, 0), 0, 0, 0, None, 0, 0, 0)
         app.postEvent_atStart_(ev, True)
 
+    # ⚠️ 3.9.3 的一次性搬家（把老的翻译 key 挪到旁边）**必须赶在建面板之前** ——
+    #    就绪条「翻译引擎」那一格读的是 `keyentry.has_any()`。放到后面的话，
+    #    面板会一口咬定"配好了"，而一开课翻译其实是断的（界面撒谎是本仓最忌的那类）。
+    try:
+        import keyentry as _ke
+    except Exception:                           # noqa: BLE001
+        _ke = None                              # 搬不动不该拦上课；`main.run()` 那条路还会再试一次
+    _got = _ke.clear_legacy_key() if _ke is not None else {}   # 它自己永不抛
+    # ⭐ 真的挪走了东西才弹这一张（Owen 2026-10-12 定文案）。
+    #    `first and moved` = **这台机器上确实有一把 key 被撤了** —— 那正是唯一该打扰用户的情形。
+    #    ⚠️ 三条"不该弹"全靠这一个判据挡住：新用户（`moved` 空）、已经配好通行码的（`moved` 空）、
+    #       以及第二次启动（`first` 为 False）。**别放宽成"看版本号"** —— 那会把本来就没 key 的
+    #       人、以及已经拿到码的人一起拦一下，而他们什么都没失去。
+    #    ⚠️ 时机：就在**建面板之前**，此刻没有课在录、没有音频在采、没有模型在加载 ——
+    #       模态框挡不住任何正在进行的活。`cl` 那条路在终端里已经被 `main.run` 打了一行字。
+    #    ⚠️ `notice.alert` 自己判「有没有人看得见」（`_can_alert` → 只有双击 .app 那侧
+    #       `CLASSLIVE_FROM_APP=1` 才弹）；终端 / 管道 / 判据里它只 print，**不会挂住**。
+    if _ke is not None and _got.get("first") and _got.get("moved"):
+        import notice
+        notice.alert(_ke.KEY_RESET_TITLE, _ke.KEY_RESET_MESSAGE)
+
     cloud_on, cloud_locked = _cloud_state()
     try:
         h = entry_panel.open_panel(on_start=on_start, on_close=on_close,
@@ -217,6 +239,18 @@ def main() -> int:
     from PyObjCTools import AppHelper
     if not rc["done"]:                          # ⚠️ 已经定了就别再进循环（会出不来）
         AppHelper.runEventLoop()
+
+    # ⭐ 关掉面板、**没开课** = 空闲 —— 这时才把那个可选的流式草稿模型放后台下。
+    #    ⚠️ 只认 `CANCELLED`：选了课（`PICKED`）之后是 `main` 那条路管，
+    #       **上课途中绝不下** —— 464 MB 会和云端定稿的音频上传抢同一条教室 Wi-Fi。
+    #    ⚠️ 闸门与自动更新共用（见 `main._draft_model_on_exit` 的说明）；子进程
+    #       `start_new_session=True`，用户这就走人也照样下完。
+    if rc["code"] == CANCELLED and not os.environ.get("CLASSLIVE_NO_AUTO_UPDATE"):
+        try:
+            import update as _u
+            _u.spawn_draft_model_download()
+        except Exception:                       # noqa: BLE001
+            pass
     return rc["code"]
 
 

@@ -28,6 +28,7 @@ HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
 import atom                                                          # noqa: E402
+import chapter                                                       # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -408,6 +409,68 @@ def main() -> int:
 
         # ⚠️ `bad` 必须**就在结算这一处**算 —— `test_entry_panel.py` 栽过一次：
         #    它算在中间，加在它后面的判据**只打印、不进统计、失败也不影响退出码**。
+        # ── ⭐ close() 与**迟到**的 append() 的竞态（2026-10-12 全仓审查）──────────
+        # ⚠️ 根因：`append` 是 check-then-act —— 判过 `_closed` 之后、真去 `_handle()` 之前，
+        #    收尾线程可能已经 `close()` 完（`_h = None`），于是文件被**重新打开**又写进一条，
+        #    而且那个句柄再也没人关。类 docstring 明确欢迎迟到线程回来，所以这条路是真的。
+        import threading as _th
+        import time as _time
+        sess_r = pathlib.Path(tmp) / "race.md"
+        sess_r.write_text("", encoding="utf-8")
+        w = atom.AtomWriter(str(sess_r))
+        gate = _th.Event()
+        _orig_h = w._handle
+
+        def _slow_handle():
+            gate.set()                       # 「我已经过了 `_closed` 那道判」—— 把 close 放进来
+            _time.sleep(0.25)
+            return _orig_h()
+
+        w._handle = _slow_handle
+        closer = _th.Thread(target=lambda: (gate.wait(3), w.close()))
+        closer.start()
+        n_race = w.append([atom.Atom(1, "14:08:06", 1.5, [0, 2], "要点", "迟到的")])
+        closer.join(5)
+        # 改坏：把 `append`/`close` 那两把锁去掉 -> `_h` 是被**重新打开**的句柄，这条红。
+        check("⭐⭐ 关完之后 `_h` 必须是 None（不许被迟到的那次写重新打开）",
+              w._h is None, repr(w._h))
+        check("⭐⭐ 「关了就再也不开」：之后再 append 一律 0",
+              w.append([atom.Atom(2, "t", 0.0, [1], "要点", "更晚的")]) == 0)
+        # ⚠️ 读的是 `w.path` **不是** `sess_r` —— `AtomWriter.__init__` 会把
+        #    `<会话>.md` 换成 `<会话>` + `ATOM_TAIL`，读原名会永远 0 行（第一版就是这么写的，
+        #    被这条判据当场抓住）。
+        _lines = w.path.read_text(encoding="utf-8").splitlines()
+        check("⭐ 那次在途的写本身没丢（锁是互斥，不是丢弃）",
+              n_race == 1 and len(_lines) == 1, f"n={n_race} 行数={len(_lines)} path={w.path.name}")
+
+        # ── ⭐ `ChapterWriter` 同一副竞态（同一条根因，必须同样钉住）───────────
+        import threading as _th2
+        import time as _t2
+        sess_c = pathlib.Path(tmp) / "chapter-race.md"
+        sess_c.write_text("", encoding="utf-8")
+        cw = chapter.ChapterWriter(str(sess_c))
+        gate2 = _th2.Event()
+        _orig_h2 = cw._handle
+
+        def _slow_handle2():
+            gate2.set()
+            _t2.sleep(0.25)
+            return _orig_h2()
+
+        cw._handle = _slow_handle2
+        closer2 = _th2.Thread(target=lambda: (gate2.wait(3), cw.close()))
+        closer2.start()
+        n2 = cw.append([{"kind": "chapter", "title": "迟到的"}])
+        closer2.join(5)
+        # 改坏：去掉 `ChapterWriter` 那两把锁 -> `_h` 被重新打开，这条红。
+        check("⭐⭐ ChapterWriter：关完之后 `_h` 必须是 None（与 AtomWriter 同一条）",
+              cw._h is None, repr(cw._h))
+        check("⭐⭐ ChapterWriter：之后再 append 一律 0",
+              cw.append([{"kind": "chapter", "title": "更晚的"}]) == 0)
+        _lines_c = sess_c.read_text(encoding="utf-8").splitlines()
+        check("⭐ ChapterWriter：那次在途的写没丢",
+              n2 == 1 and len(_lines_c) == 1, f"n={n2} 行数={len(_lines_c)}")
+
         bad = [n for n, ok, _ in RESULTS if not ok]
         print("\n" + "=" * 60)
         print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

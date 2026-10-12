@@ -3,7 +3,7 @@
 ## 为什么要有这个文件
 
 仓库里既有的小状态文件全是「各自用 `with_name` 算自己的路径」：
-`.course`（`cl` 的 `CFG`）· `.window`（`overlay`）· `.deepseek_key`（`cloud_translator`）·
+`.course`（`cl` 的 `CFG`）· `.window`（`overlay`）· `.deepseek_key`（3.9.3 起没人读了）·
 `.update-seen` / `.update-skip`（`main` / `whatsnew`）· `term_notes*.json`（`build_notes`）·
 `glossary/`（`translator`）· `sessions/`（`obsidian_writer`）。
 
@@ -187,6 +187,18 @@ def ready_state(*, root=None) -> pathlib.Path:
     而「我已经把这个提示关掉了」是**用户的决定**，清掉会把它重新弹回来。
     """
     return _root(root) / "ready-dismissed"
+
+
+def key_cleared_flag(*, root=None) -> pathlib.Path:
+    """「老 key 已经挪到旁边了」的标记（`key-cleared`，内容是**做这件事的版本号**）。
+
+    ⚠️ **必须住 `~/.classlive/`，不能住安装目录**（`.update-seen` 那一族住那儿）：
+       安装目录会被 `git pull` 重写，而标记一丢，那次搬家会**再跑一遍** ——
+       那时用户早就填好新的通行码了。同 `ready_state` 那条「用户的决定不能住会被清掉的地方」。
+    ⚠️ 存版本号而不是 `1`：将来若再来一次同样的搬家，改 `keyentry.CLEAR_VERSION` 即可
+       复用同一份文件（形状照 `whatsnew.skip_flag_path`）。
+    """
+    return _root(root) / "key-cleared"
 
 
 def models_stamp(*, root=None) -> pathlib.Path:

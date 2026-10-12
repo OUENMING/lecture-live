@@ -239,6 +239,29 @@ test("通行码模式下 DO 不可用 -> 503（不放行：钱是 Owen 付的）
   } finally { h.restore(); }
 });
 
+test("⭐ 被额度拒掉的请求**不登记设备**、也不刷新 last_seen", async () => {
+  // ⚠️ 根因（2026-10-12 全仓审查）：`check()` 原来把设备登记排在额度校验**之前** ——
+  //    被额度拒掉的请求照样占一个设备名额、并刷新 `last`。
+  //    改坏：把额度那两段挪回 `INSTALL_RE` 那一段之后 -> 这条红。
+  const h = harness();
+  try {
+    const { code } = await (await h.call(h.adminReq("add", { name: "dq", max_devices: 2 }))).json();
+    await h.call(h.adminReq("limit", { code, daily_asr_s: 0 }));     // 一上来就超额度
+    const over = await h.call(h.asrReq(`Bearer ${code}`, INSTALL, "12"));
+    assert.equal(over.status, 429);
+    assert.equal((await over.json()).error, "quota_exceeded");
+    const { codes } = await (await h.call(h.adminReq("list"))).json();
+    const row = codes.find((c) => c.code === code);
+    assert.equal(row.devices, 0, "⚠️ 被额度拒掉的请求占用了设备名额");
+    assert.equal(row.last_seen, 0, "⚠️ 被额度拒掉的请求刷新了 last_seen");
+    // 对照：额度放开之后，同一个请求**照常**登记设备（别把登记整个弄没了）
+    await h.call(h.adminReq("limit", { code, daily_asr_s: null }));
+    assert.equal((await h.call(h.asrReq(`Bearer ${code}`, INSTALL, "12"))).status, 200);
+    const { codes: after } = await (await h.call(h.adminReq("list"))).json();
+    assert.equal(after.find((c) => c.code === code).devices, 1);
+  } finally { h.restore(); }
+});
+
 test("同名多条时按名字改会被拒，要给码", async () => {
   const h = harness();
   try {

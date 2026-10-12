@@ -87,21 +87,40 @@ def load_final_engine(which: str, model_dir: str, draft_asr):
                                    lambda: bool(final_asr.read_config()["enabled"]),
                                    preload_local=False)
 
-        class _CloudFinal:
-            last_source: str | None = None
-            last_fell_back: bool = False
-
-            def transcribe(self, buf):
-                r = fin.transcribe(buf)
-                self.last_source = r.source          # 事后要能回答"这段发出去没"
-                self.last_fell_back = r.fell_back    # 生产现成的判据，别拿 source 字符串去猜
-                return r.text
-        return _CloudFinal()
+        return _text_only(fin)
     if which == "whisper":
         # 走生产那层装配：Whisper 缺失 / 加载失败会**退回 Parakeet 并说一句**（自己写会漏掉这个容错）
         import final_asr
-        return final_asr.load_final(model_dir, draft_asr, lambda: False, preload_local=True)
+        fin = final_asr.load_final(model_dir, draft_asr, lambda: False, preload_local=True)
+        return _text_only(fin)
     return draft_asr
+
+
+def _text_only(fin):
+    """把 `final_asr` 那层收成「`transcribe(buf) -> str`」—— `replay` 只吃文本。
+
+    ⚠️⚠️ **两个分支都必须过这一层**（2026-10-12 全仓审查，已复现）：
+       原来只有 `cloud` 分支包了，`whisper` 分支**直接返 `FinalASR`** ——
+       而 `FinalASR.transcribe()` 返的是 `FinalResult`（`final_asr.py:295`），不是 str。
+       `replay.on_end` 拿它当定稿文本存进 `u["final"]`，收尾 `evaluate()` 里
+       `" ".join(u["final"] …)` 就 `TypeError: expected str instance, FinalResult found`。
+    ⚠️ 而 `--final` 的**默认值就是 `whisper`**（`real_class_slices.sh` 也不覆盖）
+       → **默认那条路必崩**，且回放跑完好几分钟才在收尾处炸，量具白跑。
+    ⚠️ `last_source` / `last_fell_back` 是事后要回答"这段发出去没"用的，
+       用生产现成的字段，别拿 `source` 字符串去猜。
+    """
+
+    class _TextOnly:
+        last_source: str | None = None
+        last_fell_back: bool = False
+
+        def transcribe(self, buf):
+            r = fin.transcribe(buf)
+            self.last_source = r.source
+            self.last_fell_back = r.fell_back
+            return r.text
+
+    return _TextOnly()
 
 
 def replay(audio: np.ndarray, drafter, asr_final, *, draft_filter=None, progress=None,

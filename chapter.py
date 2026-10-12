@@ -40,6 +40,7 @@ import dataclasses
 import json
 import pathlib
 import re
+import threading
 
 import atom
 
@@ -313,6 +314,8 @@ class ChapterWriter:
         self._h = None
         self._n = 0
         self._closed = False
+        #: ⚠️ 只保护「`_closed` + `_h`」这一对状态。见 `append()` / `close()` 的说明。
+        self._lock = threading.Lock()
 
     @property
     def path(self):
@@ -338,8 +341,21 @@ class ChapterWriter:
             recs.append(r.as_json() if isinstance(r, Chapter) else r)
         if not recs:
             return 0
-        if self._closed:
-            return 0                                     # ⭐ 静默丢弃（见 docstring）
+        # ⚠️⚠️ **判 + 写必须在同一把锁里**（2026-10-12 全仓审查，核实过）：
+        #    原来是 check-then-act —— `append()` 判完 `_closed` 之后、真去 `_handle()` 之前，
+        #    收尾线程完全可能已经跑完 `close()`（置 `_closed`、关掉旧句柄、`_h = None`），
+        #    于是 `_handle()` **把文件重新打开**又写进一条 —— 既违反本模块自己写明的
+        #    「关了就再也不开」，又漏一个**没人关**的句柄。
+        #    ⚠️ 这条路是真的：类 docstring 明确欢迎「被 `finish()` 放弃的迟到线程」回来。
+        #    ⚠️ `_handle()` 里那条「刻意不判 `_closed`」的注释仍然成立（那是对的，
+        #       判一次就够）—— 缺的从来不是第二次判，是**原子性**。
+        with self._lock:
+            if self._closed:
+                return 0                                 # ⭐ 静默丢弃（见 docstring）
+            return self._append_locked(recs)
+
+    def _append_locked(self, recs) -> int:
+        """真的写。⚠️ 调用方**必须**已经持有 `self._lock`（与 `close()` 互斥）。"""
         try:
             # ⚠️ `_handle()` 必须在 `try` **里面** —— 它是唯一做 I/O 的地方。
             #    `atom.py` 那条注释（2026-09-29）逐字适用：放在外面的话，
@@ -357,14 +373,20 @@ class ChapterWriter:
             return 0
 
     def close(self) -> None:
-        """幂等。文件**不删**。⭐ 关了就再也不开（`_closed` 是单向的）。"""
-        self._closed = True
-        if self._h is not None:
-            try:
-                self._h.close()
-            except Exception:                             # noqa: BLE001
-                pass
-            self._h = None
+        """幂等。文件**不删**。⭐ 关了就再也不开（`_closed` 是单向的）。
+
+        ⚠️ **持同一把锁** —— 与 `append()` 互斥。两件事一起才成立：
+           ① 在途的那次写不会撞上被关掉的句柄；
+           ② 「关了就再也不开」不再是个只在单线程下成立的承诺。
+        """
+        with self._lock:
+            self._closed = True
+            if self._h is not None:
+                try:
+                    self._h.close()
+                except Exception:                         # noqa: BLE001
+                    pass
+                self._h = None
 
     @property
     def count(self) -> int:

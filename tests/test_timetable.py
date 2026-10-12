@@ -373,6 +373,21 @@ def t_active_at_single_definition():
         f"suggest 与 active_on 分叉了 —— 同一时刻 suggest 给了 {g}"
 
 
+@case("suggest_code: `Title - CODE` 要猜出课号，不是课名")
+def _c_suggest_code_tail():
+    # ⚠️ 根因（2026-10-12 全仓审查，已复现）：`_CODE_TAIL` 把**标题**括成了第 1 组，
+    #    而 `suggest_code` 对四条正则统一取 `group(1)` —— 于是这一形态返回的是标题。
+    #    改坏：把那条例外的 `^.+?…` 改回 `^(.+?)…` -> 这两条红。
+    assert T.suggest_code("Microeconomics - ECON10740") == "ECON10740", \
+        T.suggest_code("Microeconomics - ECON10740")
+    assert T.suggest_code("Exploring Economics (ECON10740)") == "ECON10740", \
+        T.suggest_code("Exploring Economics (ECON10740)")
+    # 另外三种形态别被带坏（都是 docstring 里点名的真样本）
+    assert T.suggest_code("ECON10740: Microeconomics") == "ECON10740"
+    assert T.suggest_code("ECS 170 001 Introduction to AI") == "ECS 170 001"
+    assert T.suggest_code("CSCI-104L") == "CSCI-104L"
+
+
 def main_() -> int:
 
     print("=" * 60)

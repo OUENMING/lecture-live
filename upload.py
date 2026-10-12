@@ -134,8 +134,12 @@ class UploadQueue:
             tmp.write_text(json.dumps({"_v": 1, "items": self._items},
                                       ensure_ascii=False), encoding="utf-8")
             tmp.replace(self._path)
-        except Exception:                                     # noqa: BLE001
-            pass                                              # 存不下就少一份数据，别抛
+        except Exception as e:                                # noqa: BLE001
+            # ⚠️ **不许静默**（2026-10-12 全仓审查）：调用方拿到的是「排进去几个」这个
+            #    **成功计数**，而写盘失败一声不响 → 重启后条目凭空消失、谁都不知道。
+            #    仍然不抛（落盘失败不该带崩收尾），但必须留下一行。
+            print(f"⚠ 上传队列没写进盘（{type(e).__name__}: {str(e)[:60]}）"
+                  f" —— 这次入队的条目重启后会丢")
 
     def _save_ledger(self, stem: str, key: str) -> None:
         """台账：`会话名 -> 前缀`。⚠️ **没有它就删不掉远端那一节课**（哈希不可逆）。"""
@@ -148,8 +152,10 @@ class UploadQueue:
             tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
                            encoding="utf-8")
             tmp.replace(self._ledger)
-        except Exception:                                     # noqa: BLE001
-            pass
+        except Exception as e:                                # noqa: BLE001
+            # ⚠️ 台账比队列更要紧：**没有它就删不掉远端那一节课**。静默 = 以后没人能补救。
+            print(f"⚠ 上传台账没写进盘（{type(e).__name__}: {str(e)[:60]}）"
+                  f" —— 这节上传后**删不掉**远端那份")
 
     # ------------------------------------------------------------ 入队
     def enqueue(self, files, stem: str) -> int:
@@ -167,7 +173,11 @@ class UploadQueue:
             self._items.append({"stem": str(stem), "key": key, "files": paths_ok,
                                 "tries": 0, "next_at": 0.0, "created": self._now()})
             self._save()
-        self._save_ledger(stem, key)
+            # ⚠️ **台账也必须在锁里**（2026-10-12 全仓审查）：`_save_ledger` 是
+            #    「读当前 → 合并 → 写回」的复合更新，两个并发 `enqueue` 在锁外跑就会互相覆盖。
+            #    而台账丢一条 = 远端那一节课**删不掉**（`key` 是哈希、不可逆）。
+            #    （锁里只做本地小文件 I/O —— 上面那条「锁里绝不做 I/O」针对的是**网络**。）
+            self._save_ledger(stem, key)
         return len(paths_ok)
 
     # ------------------------------------------------------------ 出队

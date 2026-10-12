@@ -108,6 +108,22 @@ def _present(win, *, app=None) -> None:
     win.orderFrontRegardless()
 
 
+def build_alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
+                url: str | None = None):
+    """建一张 `NSAlert`（**不显示**）。返回 `(alert, url_btn)`。
+
+    ⚠️ 抽出来只有一个理由：**截图探针要拍到真界面**（同 `build_text_alert` 那条纪律）——
+       `alert()` 自己会 `runModal()`（阻塞），探针不能走它。
+    """
+    from AppKit import NSAlert
+    a = NSAlert.alloc().init()
+    a.setMessageText_(title)
+    a.setInformativeText_(message)
+    for b in buttons:
+        a.addButtonWithTitle_(b)
+    return a, (a.addButtonWithTitle_("打开系统设置") if url else None)
+
+
 def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
           url: str | None = None, fallback: str | None = None, gui: bool = False) -> str:
     """弹一个模态提示框；**没有终端**时才弹。
@@ -134,7 +150,7 @@ def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
         return fallback if fallback is not None else buttons[0]
 
     try:
-        from AppKit import NSAlert, NSApplication, NSApplicationActivationPolicyAccessory
+        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
         app = NSApplication.sharedApplication()
         # ⚠️ 必须**先**设成 Accessory 再弹 —— 否则 Dock 里冒出一个 Python 图标
         #    （当年 NSAlert 被弃用的两个实测根因之一，见模块 docstring）
@@ -142,14 +158,7 @@ def alert(title: str, message: str, buttons: tuple[str, ...] = ("知道了",),
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
         try:
-            a = NSAlert.alloc().init()
-            a.setMessageText_(title)
-            a.setInformativeText_(message)
-            for b in buttons:
-                a.addButtonWithTitle_(b)
-            _url_btn = None
-            if url:
-                _url_btn = a.addButtonWithTitle_("打开系统设置")
+            a, _url_btn = build_alert(title, message, buttons, url)
 
             _present(a.window())
             idx = a.runModal() - 1000                      # NSAlertFirstButtonReturn = 1000

@@ -32,6 +32,7 @@ from obsidian_writer import ObsidianWriter, resolve_vault, remember_vault
 from build_notes import (TermNotes, format_gloss, detect_proper_nouns, lookup_term)
 from testmode import TestSession
 import changelog
+import keyentry
 import instance_lock
 import models
 import notice
@@ -721,6 +722,26 @@ def _auto_update_on_exit() -> None:
         pass                                              # 绝不因为自动更新影响退出
 
 
+def _draft_model_on_exit() -> None:
+    """**下课之后**在独立进程里下那个可选的流式草稿模型（464 MB）。父进程立刻返回。
+
+    ⚠️ 为什么是"下课之后"而不是"上课途中"（Owen 2026-10-12 定）：464 MB 会和云端定稿的
+       音频上传抢同一条教室 Wi-Fi —— 正好压在最不该压的时刻。所以只在收尾的最末起，
+       而且 `start_new_session=True`：用户下一句就退出程序，它照样在后台下完。
+    ⚠️ 与自动更新**共用** `CLASSLIVE_NO_AUTO_UPDATE` 那道闸 —— 两者都是「退出时自己在后台
+       去做的大活」，判据里必须一起关掉（否则跑一次测试就真去下 464 MB）。
+       复用而不是新开一个开关，也是为了让 `docs/HANDBOOK.md` §6.1 的登记表不增项。
+    ⚠️ 「该不该下」不在这里判 —— 子进程里的 `run_step(DRAFT_MODEL)` 自己会判（幂等）。
+    """
+    if os.environ.get("CLASSLIVE_NO_AUTO_UPDATE"):
+        return
+    try:
+        import update as _u
+        _u.spawn_draft_model_download()
+    except Exception:                                     # noqa: BLE001
+        pass                                              # 绝不因为这件事影响退出
+
+
 def _whatsnew_body(seen: str, cur: str, max_lines: int = 7) -> str:
     """该给用户看的内容 —— **`(seen, cur]` 这个区间**。规则（跨版本合并、上界是 cur）见 `changelog.between`。"""
     return changelog.between(_changelog_text(), seen, cur, max_lines)
@@ -1026,6 +1047,15 @@ def run(args) -> None:
             echo("   同时跑两个会抢同一个麦克风、叠两个悬浮窗、翻译费用也翻倍。")
             echo("   要停掉那一个：点它悬浮窗右上角的 ✕，或在它的终端按 Ctrl+C。")
             return
+
+    # ---- 3.9.3 的一次性搬家：把老的翻译 key 挪到旁边 ----
+    # ⚠️ 必须在**任何一处读 key 之前**（`setkey` / `load_translator` / 就绪条都算）。
+    # ⚠️ 幂等：版本标记挡着第二次；而且它**从不碰 `cl-` 通行码**，
+    #    所以和 `entry_launch` 那条路重复调用无害。
+    _moved = keyentry.clear_legacy_key()["moved"]
+    if _moved:
+        echo("🔑 翻译的 Key 换新了 —— 旧的已经挪到旁边（" + "、".join(_moved) + "）")
+        echo("   找作者拿一个新 Key，在开课面板上点「翻译引擎」填进去。")
 
     # ---- 麦克风权限：三条路径都要说人话 ----
     # ⚠️ 为什么必须做：Apple 原文 —— 被拒时**录音里只有静音**（不是报错、不是崩溃）。
@@ -1342,7 +1372,19 @@ def run(args) -> None:
         """引擎状态广播 -> streamq -> 主线程 drain() -> UI(悬浮窗要求主线程)。
 
         ⚠️ 菜单栏只有**一个**图标、两路引擎(翻译 / 定稿转写)各自降级恢复:
-        一路恢复时另一路还挂着, 图标得留着 ⚠️ —— 所以按来源记账, 把「还剩哪些告警」一起发。"""
+        一路恢复时另一路还挂着, 图标得留着 ⚠️ —— 所以按来源记账, 把「还剩哪些告警」一起发。
+
+        ⚠️⚠️ **这里不加锁是核实过的，不是漏了**（2026-10-12 全仓审查提了这条，实测不成立）：
+           它确实由两路引擎**各自线程**调用，但 `"\n".join(_engine_warns.values())`
+           对 dict 视图的迭代是**一整段不放开 GIL 的 C 循环**（`str.join` 先走
+           `PySequence_Fast` → 对非 list/tuple 的 iterable 再 `PySequence_List`），
+           别的 Python 线程切不进去 —— 那个 `RuntimeError: dictionary changed size
+           during iteration` 在这个形状下**打不到**。
+           实测：64 键 · 8 线程 · 400 轮 · `sys.setswitchinterval(1e-6)`，跑三遍
+           **0 次报错**（加不加上锁都一样）。所以**不要为它加锁**。
+        ⚠️ 但反过来 —— **别把这个表达式改成 Python 层的
+           `for k, v in _engine_warns.items()`**：那样迭代就落到字节码上了，
+           上面这条结论立刻作废，那时才真的需要锁。"""
         if not src:                                      # 一次性提示(休眠唤醒 / 换设备): 不记账
             pass
         elif warn:
@@ -2529,6 +2571,8 @@ def run(args) -> None:
             if callable(_close_ui):
                 _close_ui()
             _auto_update_on_exit()
+            # ⭐ 下课了 —— 这才把那个可选的草稿模型放后台下（上课途中绝不下，见它的 docstring）
+            _draft_model_on_exit()
 
 
 #: `SilenceWatch` 按音源的（等多久, 报什么）。⚠️ 只说现象 + 最可能的两个原因，不替用户动系统设置。

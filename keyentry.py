@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""填 API key —— **校验 + 落盘的两条纯逻辑**。UI 在 `notice.ask_text`，这里不碰 AppKit。
+"""填 API key —— **校验 + 落盘 + 3.9.3 那次一次性搬家**。UI 在 `notice.ask_text`，这里不碰 AppKit。
 
 ## 为什么单独一个模块
 
@@ -15,6 +15,12 @@
 
 ⚠️ 两份**刻意分开**：不同厂商、不同账、可以各自单独撤销。
 
+## ⭐ 3.9.3：这一栏从「自己的 key」换成「作者的通行码」
+
+作者 2026-10-12 定：「所有用户更新完这一个版本，Key 那一栏清空，然后提示说找作者拿 Key。」
+理由：通行码上线后，散出去的原生 `sk-` key **收不回来**（那把只能整个换掉），也**按不了人计量**。
+实现 = `clear_legacy_key()`（只挪不删，见它的 docstring）+ `ASK_AUTHOR` 那句提示。
+
 ## ⭐ 校验是「真调一次」，不是「看格式像不像」
 
 一次调用几百 token、约几十毫秒 —— 比正则判断可信得多，而且**能分辨"key 对不对"
@@ -24,6 +30,25 @@ from __future__ import annotations
 
 import os
 import pathlib
+
+#: 3.9.3 那次一次性搬家的**版本口径** —— 标记文件里存的就是它（`paths.key_cleared_flag`）。
+#: 将来若再来一次同样的搬家，改这里即可复用同一份标记文件。
+CLEAR_VERSION = "3.9.3"
+
+#: Key 那一栏**空着**时的提示 —— **唯一定义点**（面板与 `scripts/probe_keyentry.py` 共用）。
+#: ⚠️ 与上面 MSG_* 三档是**两件事**：那三档说的是"存成没存成"，这一句说的是"去哪拿"。
+#: Owen 2026-10-12 定：清空之后提示「找作者拿 Key」。
+#: ⚠️ 后半句「不填只有英文字幕」**不能省** —— `tests/test_entry_panel.py` 钉着它，
+#:    它是有来历的：上一版这里写的是「不填会退回本地模型」，而本地模型**可选、默认没装**
+#:    —— 对没 key 的新用户那是句假话（2026-10-04 修的）。丢了后半句 = 用户不知道不填会怎样。
+ASK_AUTHOR = "翻译用的。key 放这就好；不填只有英文字幕。"
+
+#: ⭐ 首次更新后**弹一次**的那张框（Owen 2026-10-12 定：他给的原话 + 一句"填哪儿"）。
+#: ⚠️ 只在**真的挪走了东西**的那一次弹（见 `clear_legacy_key` 的 `first`）——
+#:    没有 key 的新用户、已经配好通行码的用户都**不该**被这张框拦一下。
+KEY_RESET_TITLE = "翻译的 Key 换新了"
+KEY_RESET_MESSAGE = ("转录翻译流程在此版本进行了重构，找菠萝丁拿 key。\n"
+                     "拿到后在开课面板上点「翻译引擎」，填进「Key」那一栏。")
 
 #: 保存后那一行的三档文案 —— **唯一定义点**（面板与 `cl setkey` 共用）。
 MSG_BOTH = "✅ 存好了 —— 写进 ~/.classlive/，权限 600"
@@ -43,7 +68,7 @@ DIALOG_MESSAGE = "只写进这台机器的 ~/.classlive/，不上传。"
 def dialog_fields(cur_ds: str = "", cur_jv: str = "") -> list[dict]:
     """两栏：翻译用的 key（DeepSeek key 或通行码都填这里）+ Jev（可选）。已存过的回填。"""
     return [{"key": "deepseek", "label": "Key", "value": cur_ds,
-             "hint": "已存过" if cur_ds else "翻译用的。不填只有英文字幕。"},
+             "hint": "已存过" if cur_ds else ASK_AUTHOR},
             {"key": "jev", "label": "Jev key · 可选", "value": cur_jv,
              "hint": ("已存过" if cur_jv
                       else "给「重点句」和「课务」用。不填这两个功能就不出现。")}]
@@ -241,6 +266,81 @@ def load_jev(*, root=None) -> str:
     except Exception:                                         # noqa: BLE001
         pass
     return ""
+
+
+# ---------------------------------------------------------------- 3.9.3 的一次性搬家
+def _read_key(p: pathlib.Path) -> str:
+    """读一个 key 文件。**读不出来一律当空的** —— 断链、没权限、不是 UTF-8、是个目录。"""
+    try:
+        return p.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _next_backup(p: pathlib.Path, version: str) -> pathlib.Path:
+    """`credentials` → `credentials.bak-3.9.3`；已被占就往后编号。**绝不覆盖已有的备份。**"""
+    for i in range(1, 1000):
+        dst = p.with_name(p.name + f".bak-{version}" + (f"-{i}" if i > 1 else ""))
+        if not dst.exists() and not dst.is_symlink():
+            return dst
+    raise OSError(f"{p.name}: 备份名用完了（.bak-{version} 到 -999 全被占）")
+
+
+def clear_legacy_key(*, root=None, version: str = CLEAR_VERSION) -> dict:
+    """3.9.3 一次性：把用户自己填的翻译 key **挪到旁边**，腾出「Key」这一栏改用通行码。
+
+    返回 `{"done": 标记写成了没有, "moved": [落点…], "first": 这次是不是**头一回**做}`。
+    **永不抛。**
+
+    ⚠️ `first` 存在的唯一理由是给调用方判「要不要弹那张一次性提示框」：
+       `first and moved` 恰好是「**这台机器上真的有一把 key 被挪走了**」——
+       那正是唯一该打扰用户的情形。它天然只发生一次（版本标记挡着第二次），
+       而且用户把备份恢复回去之后也**不会**再弹（那时 `first` 是 False）。
+
+    ## 为什么要做
+
+    通行码上线后，作者**收不回**已经散出去的原生 `sk-` key（那把只能去 DeepSeek 后台
+    整个换掉），也**按不了人**计量。把这一栏清空 + 提示「找作者拿 Key」，
+    是客户端这边唯一能把大家换过来的手段。
+
+    ## 三条纪律
+
+    ① **只挪不删** —— 落点是同目录的 `credentials.bak-3.9.3`。`os.rename` 同盘**原子**，
+       权限（600）原样带过去。用户想要回自己那把 key，改个名就是原来那个文件。
+    ② **绝不碰通行码** —— 值以 `cl-` 开头的**跳过**。这是**安全网**：即使标记丢了、
+       这次搬家又跑一遍（换机器整理备份、用户手滑删了 `~/.classlive/`），
+       已经配好的通行码也**不会被误伤**。
+    ③ **标记最后才写** —— 中途失败就下次启动重试，**不谎报"做过了"**。
+
+    ## 旧位置（`<安装目录>/.deepseek_key`）为什么**不在这里处理**
+
+    它的那份 key 会**顶上来**（`load_api_key` 链上它排在 `credentials` 后面），
+    所以"只挪新位置"对从没搬过家的老用户等于什么都没发生。
+    但**解法不是去挪那个文件**（它在安装目录里，而且判据一跑就会动到开发机上的真文件）——
+    是 3.9.3 起 `load_api_key` **干脆不再读它**。文件一个字节都没动。
+    ⚠️ `--api-key` / `$DEEPSEEK_API_KEY` 那两路**照旧认**：它们不在文件里，
+       也不是这个程序放的（见 `secrets-via-interactive-login`）。
+    """
+    out = {"done": False, "moved": [], "first": False}
+    try:
+        import paths
+        flag = paths.key_cleared_flag(root=root)
+        if _read_key(flag) == version:
+            return {"done": True, "moved": [], "first": False}   # 做过了
+
+        moved: list[str] = []
+        p = paths.credentials(root=root)
+        val = _read_key(p)
+        if val and not val.startswith("cl-"):
+            # 空文件没什么好挪；`cl-` 通行码是**目标状态**，绝不碰（纪律②）。
+            dst = _next_backup(p, version)
+            os.rename(p, dst)           # 同目录 = 同盘 = 原子
+            moved.append(str(dst))
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.write_text(version + "\n", encoding="utf-8")   # 纪律③：标记最后才写
+        return {"done": True, "moved": moved, "first": True}
+    except Exception:                                     # noqa: BLE001
+        return out
 
 
 if __name__ == "__main__":                                    # `cl setkey` 的兜底入口

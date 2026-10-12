@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import pathlib
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -833,6 +835,30 @@ def spawn_auto_update() -> bool:
         return False
 
 
+def spawn_draft_model_download() -> bool:
+    """在**独立的后台进程**里下那个可选的流式草稿模型（464 MB）。父进程立刻返回。
+
+    ⚠️ 时机（Owen 2026-10-12 定，按我的建议）：**只在下课之后 / 关掉面板之后**开，
+       **绝不在上课途中** —— 464 MB 会和云端定稿的音频上传抢同一条教室 Wi-Fi，
+       而那正好压在最不该压的时刻。两个调用点就是这两处（`main._draft_model_on_exit`
+       与 `entry_launch` 关面板那条）。
+    ⚠️ `start_new_session=True`：用户下一句就退出程序，它照样下完 ——
+       与 `spawn_auto_update` 同一条纪律（实测：父进程 `os._exit` / SIGKILL /
+       SIGHUP 打整个进程组，三种死法它都活到了最后）。
+    ⚠️ **「该不该下」由子进程里的 `run_step(DRAFT_MODEL)` 自己判**（幂等）——
+       本函数不重复那份判断，否则「这台机器要不要它」就有了两份实现。
+    """
+    try:
+        subprocess.Popen(
+            [sys.executable, str(HERE / "update.py"), "--run-step", DRAFT_MODEL],
+            cwd=HERE, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        return True
+    except Exception:                                     # noqa: BLE001
+        return False
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 引导式更新：更新之后还有哪些"重活"没做
 #
@@ -1084,7 +1110,19 @@ def run_step(key: str, on_line=None) -> dict:
             return {"ok": True, "error": ""}
 
         if key == DRAFT_MODEL:
+            import doctor
+            import draft_engine
             import models
+            # ⭐ **幂等 + 自己判该不该下**（2026-10-12）：这一步现在也会被
+            #   「下课后 / 关掉面板后」那条后台路无条件叫起来
+            #   （`spawn_draft_model_download`），所以判断只有落在这里**一份**，
+            #   别让两个调用方各写一遍（同 `app` 那一步「先问一次戳记」的取法）。
+            if doctor.model_present(models.NEMOTRON.path):
+                say("流式草稿模型已经装过了，跳过")
+                return {"ok": True, "error": ""}
+            if not draft_engine.want_model():
+                say("这台机器用不上流式草稿模型（内存不够，或手动指定了 parakeet），跳过")
+                return {"ok": True, "error": ""}
             r = download_model(models.NEMOTRON, say=say)
             if r["ok"]:
                 say("流式草稿模型装好了（下次上课生效）")
@@ -1176,7 +1214,39 @@ def _finish_in_child(*, models: bool, on_line=None, timeout: float | None = None
     last = ""
     deadline = time.monotonic() + (timeout or (4 * 3600 if models else 1200))
     assert p.stdout is not None
-    for line in p.stdout:
+    # ⚠️⚠️ **不能写 `for line in p.stdout`**（2026-10-12 全仓审查，核实过）：
+    #    那是**阻塞**读 —— `deadline` 只在**读到一行之后**才被检查。子进程一行都不吐地
+    #    挂住时（网络卡死、或卡在某个不打印的步骤），循环**永久**阻塞调用方
+    #    （面板上那是个后台线程 → 按钮一直转；退出时是另一个更新进程 → 僵尸留着），
+    #    而 `deadline` 和下面的 `p.kill()` **永远轮不到执行** —— 超时形同虚设。
+    #    改成「泵线程 + 带超时的队列」：没数据也能到点。
+    q: "queue.Queue[str | None]" = queue.Queue()
+
+    def _pump() -> None:
+        try:
+            for line in p.stdout:                         # noqa: B023  子进程收尾自然结束
+                q.put(line)
+        except Exception:                                 # noqa: BLE001
+            pass
+        q.put(None)                                       # 哨兵：流结束
+
+    def _timed_out() -> dict:
+        p.kill()
+        try:
+            p.wait(timeout=5)                             # 收尸，别留僵尸
+        except Exception:                                 # noqa: BLE001
+            pass
+        return {"ok": False, "error": "收尾超时了（网络太慢？）"}
+
+    threading.Thread(target=_pump, daemon=True, name="finish-stdout").start()
+    while True:
+        remaining = deadline - time.monotonic()
+        try:
+            line = q.get(timeout=remaining if remaining > 0 else 0)
+        except queue.Empty:
+            return _timed_out()                           # ⭐ 一行都没来也能到点
+        if line is None:
+            break
         line = line.rstrip()
         if not line:
             continue
@@ -1186,9 +1256,8 @@ def _finish_in_child(*, models: bool, on_line=None, timeout: float | None = None
                 on_line(line.strip())
             except Exception:                             # noqa: BLE001
                 pass
-        if time.monotonic() > deadline:
-            p.kill()
-            return {"ok": False, "error": "收尾超时了（网络太慢？）"}
+        if time.monotonic() > deadline:                   # 原来那条判据，语义不变
+            return _timed_out()
     rc = p.wait()
     if rc == 0:
         return {"ok": True, "error": ""}

@@ -42,6 +42,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import pathlib
+import threading
 import time
 
 ATOM_TAIL = ".atoms.jsonl"
@@ -336,6 +337,8 @@ class AtomWriter:
         self._h = None
         self._n = 0
         self._closed = False
+        #: ⚠️ 只保护「`_closed` + `_h`」这一对状态。与 `chapter.ChapterWriter` 同一副修法。
+        self._lock = threading.Lock()
 
     @property
     def path(self):
@@ -352,8 +355,17 @@ class AtomWriter:
             return 0
         # ⭐ **关了之后的 no-op 不是失败**，所以它**不出声** —— 迟到的线程回来
         #    是预期内的（见类 docstring），不该刷屏。与 `chapter.ChapterWriter` 同一条。
-        if self._closed:
-            return 0
+        # ⚠️⚠️ **判 + 写必须在同一把锁里**（2026-10-12 全仓审查，同 `ChapterWriter`）：
+        #    原来是 check-then-act —— 判过 `_closed` 之后、真去 `_handle()` 之前，
+        #    收尾线程可能已经 `close()` 完（`_h = None`），于是文件被**重新打开**又写进一条，
+        #    而且那个句柄再也没人关。类 docstring 明确欢迎迟到线程回来，所以这条路是真的。
+        with self._lock:
+            if self._closed:
+                return 0
+            return self._append_locked(atoms)
+
+    def _append_locked(self, atoms) -> int:
+        """真的写。⚠️ 调用方**必须**已经持有 `self._lock`（与 `close()` 互斥）。"""
         try:
             # ⚠️⚠️ **`_handle()` 必须在 `try` 里面**（2026-09-29 修）—— 它是本方法
             #    唯一做 I/O 的地方（`path.open("a", ...)`）。原来在 `try` **外面**，
@@ -375,14 +387,18 @@ class AtomWriter:
             return 0
 
     def close(self) -> None:
-        """幂等。文件**不删**（它是这份笔记的证据）。⭐ 关了就再也不开（`_closed` 单向）。"""
-        self._closed = True
-        if self._h is not None:
-            try:
-                self._h.close()
-            except Exception:                             # noqa: BLE001
-                pass
-            self._h = None
+        """幂等。文件**不删**（它是这份笔记的证据）。⭐ 关了就再也不开（`_closed` 单向）。
+
+        ⚠️ **持同一把锁** —— 与 `append()` 互斥（理由见 `append` 里那段）。
+        """
+        with self._lock:
+            self._closed = True
+            if self._h is not None:
+                try:
+                    self._h.close()
+                except Exception:                         # noqa: BLE001
+                    pass
+                self._h = None
 
     @property
     def count(self) -> int:

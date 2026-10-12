@@ -652,7 +652,7 @@ python build_notes.py --rebuild  # 全量重分类 + 扩写 + 清掉自动回写
 | 草稿译文 / 💡 术语行 | ❌ | 只在屏幕上显示 |
 | 课堂纲要 / 原子要点 | ✅ | 旁路文件 `sessions/<同名>.chapters.jsonl` / `.atoms.jsonl`，**不动会话文件格式** |
 | ❓「没听懂」标记 | ✅ | 旁路文件 `sessions/<同名>.lost.jsonl`（同上，绝不改会话抬头） |
-| API key | ✅ | 配置，非课堂内容。**推荐放 `~/.classlive/credentials`**（不住在安装目录，`cl update` 动不到它）；旧位置的 `.deepseek_key` 仍认，且**已在 `.gitignore` 中** |
+| API key | ✅ | 配置，非课堂内容。**放 `~/.classlive/credentials`**（不住在安装目录，`cl update` 动不到它）。⚠️ **3.9.3 起不再读**旧位置的 `.deepseek_key`（文件没动，但它不再生效）|
 
 > **为什么实时落盘**：一次事故 —— 45 分钟、544 句的课堂记录，在"是否保存"提示处误按 **Ctrl+C**，旧版当成"不要保存"直接丢弃，永久丢失。现在每句定稿立即写文件，`kill -9` 只丢最后一句；Ctrl+C 与 EOF 一律默认保存；答"否"也不丢（会话文件仍在，`cl last` 可查）。
 

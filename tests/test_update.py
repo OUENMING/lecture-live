@@ -1157,6 +1157,127 @@ with _mock.patch.object(update, "pending_steps", lambda: _all_steps), \
 check("D15 失败 -> 返回 1、最后一行 FINISH fail 带原因",
       _rc == 1 and _lines[-1].startswith("FINISH fail") and "网断了" in _lines[-1], str(_lines[-1:]))
 
+# ============ ⭐ 收尾子进程「一行都不吐」时，超时也必须到点 ============
+# ⚠️ 根因（2026-10-12 全仓审查，核实过）：原来是 `for line in p.stdout` —— **阻塞**读，
+#    `deadline` 只在**读到一行之后**才被检查。子进程一行都不吐地挂住时（网络卡死 /
+#    卡在某个不打印的步骤），循环**永久**阻塞调用方（面板那个后台线程 / 退出时的更新进程），
+#    `deadline` 和 `p.kill()` **永远轮不到执行** —— 超时形同虚设。
+import os as _os
+import threading as _th
+from unittest import mock as _mock
+
+_r_fd, _w_fd = _os.pipe()          # 只读端：永远没有数据、也永不关闭 = 最坏情况
+
+
+class _SilentPopen:
+    def __init__(self, *a, **kw):
+        self.stdout = _os.fdopen(_r_fd, "r", encoding="utf-8")
+        self.killed = False
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return -9
+
+
+_got: dict = {}
+
+
+def _run_quiet():
+    # ⚠️ `_finish_in_child` 的 cmd 写死在函数里，所以只能换 `Popen` 本体 ——
+    #    量到的仍是**真函数**里那段读循环。
+    with _mock.patch.object(update.subprocess, "Popen", _SilentPopen):
+        _got.update(update._finish_in_child(models=False, timeout=1))
+
+
+_t = _th.Thread(target=_run_quiet, daemon=True)
+_t.start()
+_t.join(8)
+# ⚠️ 用线程 + join 超时**故意**的：改坏时它是**永久阻塞**而不是抛异常 ——
+#    直接调会把整个测试文件挂死（那样连一行 ❌ 都看不到）。这里把它变成一条红。
+check("⭐⭐ 子进程一行都不吐 -> 到点返回（不是永久阻塞；改坏则这条超时变红）",
+      not _t.is_alive() and _got.get("ok") is False and "超时" in str(_got.get("error", "")),
+      f"线程还活着={_t.is_alive()} got={_got}")
+check("⭐ 超时那条路会 kill 子进程（不留僵尸）",
+      isinstance(_got.get("error"), str) and "超时" in _got.get("error", ""), str(_got))
+
+# ============ ⭐ 下课/空闲才下草稿模型（Owen 2026-10-12）============
+# ⚠️ 时机是这条的**全部要点**：464 MB 会和云端定稿的音频上传抢同一条教室 Wi-Fi，
+#    所以只在下课之后 / 关掉面板之后开，而且 `start_new_session=True`
+#    —— 用户下一句就退出程序，它得像自动更新那样在后台下完。
+_spawned: list = []
+
+
+class _FakePopen:
+    def __init__(self, cmd, **kw):
+        _spawned.append((cmd, kw))
+
+
+with _mock.patch.object(update.subprocess, "Popen", _FakePopen):
+    _ok_spawn = update.spawn_draft_model_download()
+
+check("⭐ `spawn_draft_model_download()` 起来了",
+      _ok_spawn and len(_spawned) == 1, f"ok={_ok_spawn} n={len(_spawned)}")
+_cmd, _kw = _spawned[0]
+# 改坏：把 `start_new_session=True` 去掉 -> 这条红（用户一退出程序它就被带走了）。
+check("⭐⭐ `start_new_session=True` —— 退出程序后照样在后台下完（与自动更新同一条纪律）",
+      _kw.get("start_new_session") is True, str(sorted(_kw)))
+check("⭐ 三个 fd 都不挂在父进程上（父进程走了它也不会写坏管道）",
+      _kw.get("stdin") == update.subprocess.DEVNULL
+      and _kw.get("stdout") == update.subprocess.DEVNULL
+      and _kw.get("stderr") == update.subprocess.DEVNULL,
+      f"stdin={_kw.get('stdin')} stdout={_kw.get('stdout')}")
+check("⭐ 起的是这一步（「该不该下」留给子进程的 `run_step`，这里不重复判）",
+      list(_cmd[-2:]) == ["--run-step", update.DRAFT_MODEL], str(_cmd[-2:]))
+
+# ⭐ `run_step(DRAFT_MODEL)` 必须**幂等** —— 它现在会被上面那条路无条件叫起来。
+import doctor as _doctor
+import draft_engine as _draft_engine
+
+
+def _step(present: bool, want: bool) -> dict:
+    got: dict = {}
+
+    def _fake_dl(_m, say=None):
+        got["dl"] = True
+        return {"ok": True, "error": ""}
+
+    with _mock.patch.object(_doctor, "model_present", lambda _p: present), \
+         _mock.patch.object(_draft_engine, "want_model", lambda *a, **k: want), \
+         _mock.patch.object(update, "download_model", _fake_dl):
+        got["r"] = update.run_step(update.DRAFT_MODEL, on_line=lambda _s: None)
+    return got
+
+
+_g = _step(present=True, want=True)
+# 改坏：把那句 `if doctor.model_present(...)` 去掉 -> 这条红（每次下课都重下 464 MB）。
+check("⭐⭐ 已经装过 -> 跳过，不重下",
+      "dl" not in _g and _g["r"]["ok"], str(_g))
+_g = _step(present=False, want=False)
+# 改坏：把那句 `if not draft_engine.want_model()` 去掉 -> 这条红
+#（内存不够 / 手动指定 parakeet 的机器会被下 464 MB 用不上的东西）。
+check("⭐⭐ 这台机器用不上（内存不够 / 手动 parakeet）-> 跳过",
+      "dl" not in _g and _g["r"]["ok"], str(_g))
+_g = _step(present=False, want=True)
+check("⭐ 该下的时候**真的下**（别把下载整个弄没了）", _g.get("dl") is True, str(_g))
+
+# ⭐ 接线：两个调用点 + 那道闸
+# ⚠️ 这里**不能**用 `update.HERE` —— 本文件把沙盒的 `update.HERE` 重指到了假 clone 上，
+#    读出来是沙盒里那份。仓库根从**本文件自己的位置**算。
+_REPO = pathlib.Path(__file__).resolve().parent.parent
+_src_main = (_REPO / "main.py").read_text(encoding="utf-8")
+_src_el = (_REPO / "entry_launch.py").read_text(encoding="utf-8")
+# ⚠️ 判的是**先后**，不是"两行紧挨着" —— 中间本来就有注释（第一版钉死换行相邻，假红）。
+check("⭐ `main` 在**下课之后**那条路调它（排在 `_auto_update_on_exit()` 之后）",
+      _src_main.index("_auto_update_on_exit()\n") < _src_main.index("            _draft_model_on_exit()"))
+# 改坏：把 `rc["code"] == CANCELLED` 放宽成"关面板就下" -> 上课途中也会下 464 MB。
+check("⭐⭐ `entry_launch` 只在**关掉面板没开课**（CANCELLED）时下 —— 上课那条路绝不下",
+      'rc["code"] == CANCELLED' in _src_el and "spawn_draft_model_download()" in _src_el)
+check("⭐⭐ 两处都挂 `CLASSLIVE_NO_AUTO_UPDATE` 那道闸（否则跑一次判据就真去下 464 MB）",
+      _src_main.count("CLASSLIVE_NO_AUTO_UPDATE") >= 2
+      and "CLASSLIVE_NO_AUTO_UPDATE" in _src_el)
+
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}")

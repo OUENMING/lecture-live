@@ -65,6 +65,43 @@
 （`_whatsnew_body` 从最新往下数到「你上次看过的版本」为止），多版本时每行前面标版本号。
 所以**每个版本的看点都要能独立看懂**，不要写"同上""见上一条"。
 
+## [3.9.3] - 2026-10-12
+
+### 更新方式
+
+auto
+
+### 更新看点
+- ⚠️ **「Key」那一栏被清空了 —— 找菠萝丁拿一个新的填回去**。旧的自己注册的 DeepSeek key 已经撤下来（**没删**，挪到了 `~/.classlive/credentials.bak-3.9.3`）。不填就只有英文字幕，没有中文翻译
+- ⚠️ 安装目录里那个旧 `.deepseek_key` **不再生效**（文件还在原处，一个字节没动）。要接着用它：`cp .deepseek_key ~/.classlive/credentials`
+- 🔑 **更新后第一次开面板会弹一张说明**（只有**这次真被撤掉 key**的机器才弹）：「转录翻译流程在此版本进行了重构，找菠萝丁拿 key。」—— 点「知道了」就进面板
+- ⬇️ **流式草稿模型（464 MB）改成下课之后自己下**：不再等你去面板上点。**上课途中绝不下**（它会和云端定稿的音频上传抢同一条教室 Wi-Fi）；你关掉程序也不影响 —— 它在独立进程里继续下完。已经装过、或这台机器内存不够用不上的，直接跳过
+- 🐞 修了几个「静默出问题」的老毛病：云端定稿的熔断器**一旦某个角落卡住就再也不上云**、回放量具跑完几分钟才崩、收尾超时其实永远不到点
+
+### 升级须知（3.9.2 → 3.9.3）
+没有新模型、没有新依赖，也**不用重建 .app**。
+⚠️ 升级之后中文翻译会**停**，直到你在开课面板上点「翻译引擎」，把菠萝丁给你的 key 填进去。
+
+### Changed
+- `keyentry.clear_legacy_key()`：一次性把 `~/.classlive/credentials` 里**不是 `cl-` 通行码**的值挪到同目录的 `credentials.bak-3.9.3`（`os.rename`，权限原样带过去）。只挪不删；版本标记住 `~/.classlive/key-cleared`（**不能住安装目录** —— 那里会被 `git pull` 洗掉，标记一丢搬家会重跑）。
+- `cloud_translator.load_api_key`：不再读旧位置 `<安装目录>/.deepseek_key`（它排在 `credentials` 后面，会**顶上来**，让这次搬家对老用户看起来像什么都没发生）。`--api-key` 与 `$DEEPSEEK_API_KEY` 那两路照旧认。
+- 填 key 框「Key」一栏空着时的提示改成「key 放这就好」（`keyentry.ASK_AUTHOR`，唯一定义点；"去哪拿"由那张一次性弹窗负责，不在这里说第二遍）。
+- 接线两处：`main.run()`（`cl` / 开始上课）与 `entry_launch`（开面板，且必须**在建面板之前** —— 就绪条要读到搬家后的状态，否则会一口咬定"配好了"）。
+- `entry_launch`：`first and moved` 才弹那一张一次性说明（`notice.alert`；`CLASSLIVE_FROM_APP` 没设时只打印，所以终端/判据里不会挂住）；文案在 `keyentry.KEY_RESET_*`。
+- `notice.build_alert()` 抽出来（`alert()` 与截图探针同源，探针才能拍到真界面）。
+- `update.spawn_draft_model_download()` + `run_step(DRAFT_MODEL)` 的幂等判：草稿模型改由**下课之后 / 关掉面板之后**在独立进程里自己下（`start_new_session=True`，退出程序也照样下完）；「这台机器要不要它」只有 `run_step` 里一份实现。与自动更新**共用** `CLASSLIVE_NO_AUTO_UPDATE` 那道闸（判据里必须一起关掉，否则跑一次测试就真下 464 MB）。
+
+### Fixed（2026-10-12 全仓 OCR 审查，逐条回原码核实后修的）
+- ⭐⭐ **`final_asr` 熔断器的半开探测名额会永久泄漏** —— `allow()` 放行探测后若 `_encode()` 返 None 就直接返回，`ok()`/`fail()` 都没调 → `_probing` 卡住 → **云端定稿永久静默失效**。加 `release_probe()`，在 `transcribe()` 的 `finally` 里还名额。
+- ⭐⭐ **`scripts/stream_eval.py` 的 `whisper` 分支返回类型错**（而 `--final` 默认就是它）—— 返回 `FinalASR` 而不是 str，收尾 `" ".join(u["final"] …)` 会 `TypeError`；抽 `_text_only()` 让两个分支共用同一层适配。
+- ⭐ **`atom.py` / `chapter.py` 的 `append()` 是 check-then-act** —— 判过 `_closed` 之后能被 `close()` 插进来，于是文件被重新打开又写一条、句柄没人关。两处各加一把锁（判与写原子）。
+- ⭐ **`update._finish_in_child` 的超时形同虚设** —— `for line in p.stdout` 是阻塞读，子进程不吐字就永久挂住。改成泵线程 + 带超时的队列。
+- ⭐ **`upload._save_ledger` 在锁外做读-改-写** —— 并发入队会互相覆盖，而台账丢一条 = 远端那节课删不掉；`_save` / `_save_ledger` 的写盘失败也不再静默。
+- ⭐ **`timetable.suggest_code` 对 `Title - CODE` 返回的是课名** —— `_CODE_TAIL` 把标题括成了第 1 组。
+- **`docs/experiments/run_isolated.py`** 原来对未校验的 `sys.argv[4]` 直接递归删除；加白名单（`ClassLive-测试残留` 目录下 / 系统临时目录）。
+- **`scripts/link-runtime.sh`** 自检失败仍 `exit 0` → 现在返回 1。
+- **Worker `passes-core.js`**：设备登记原来排在额度校验之前 —— 被额度拒掉的请求也会占设备名额、刷新 `last_seen`。改成额度先判。
+
 ## [3.9.2] - 2026-10-12
 
 ### 更新方式

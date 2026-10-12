@@ -5,7 +5,8 @@
 #   wrangler secret put GROQ_KEY          # < ~/.classlive/groq-token，管道灌入不回显
 #   wrangler secret put QWEN_KEY          # 百炼国际站（新加坡）key；< ~/.classlive/ 下对应 token 文件，管道灌入不回显
 #   wrangler secret put CLIENT_TOKEN      # 新生成，值与客户端 asr_endpoint.py 一致（公开令牌）
-#   wrangler secret put DEEPSEEK_KEY      # 一人一码：通行码用户的翻译走 Owen 的 DeepSeek key
+#   wrangler secret put DEEPSEEK_KEY      # < ~/.classlive/credentials（一人一码：通行码用户的翻译走它；
+#                                         #   管道灌入不回显。⚠️ 不写这个写法就会被问「怎么没让我输 key」——2026-10-12）
 #   wrangler secret put ADMIN_TOKEN       # 一人一码：/v1/admin/* 只认它（scripts/cl_admin.py 读 ~/.classlive/asr-admin-token）
 #   wrangler deploy
 #

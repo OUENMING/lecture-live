@@ -75,10 +75,10 @@ assets/icon/ClassLive.icns
 assets/icon/ClassLive.iconset/
 assets/icon/ClassLive-1024.png
 
-# ── 上传 Worker（Cloudflare）本地状态 / 依赖 ────────────
-# wrangler 的本地开发状态（miniflare 模拟桶等）与 node_modules：每台机器自己生成，不入库
-server/upload-worker/.wrangler/
-server/upload-worker/node_modules/
+# ── Worker（Cloudflare：上传 / 转写）本地状态 / 依赖 ────────────
+# wrangler 的本地开发状态（miniflare 模拟桶、deploy 缓存）与 node_modules：每台机器自己生成，不入库
+server/*/.wrangler/
+server/*/node_modules/
 # 在仓库根跑 wrangler 时也会生成一份（含 wrangler-account.json = 账号 ID/名），同样不入库
 /.wrangler/
 

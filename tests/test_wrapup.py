@@ -762,6 +762,51 @@ def main_() -> int:
     return 1 if CASES_FAIL else 0
 
 
+# ---------------------------------------------------------------- 精修默认关（2026-10-12）
+
+@case("⭐⭐ `--polish` 的**默认值**是 off —— 精修不再必须，默认只生成笔记")
+def t_polish_default_is_off():
+    """⚠️ 判据走的是 `main.main()` **真解析一遍**（把 `run` 换掉），
+    不是去源码里 grep 一句 `default="off"` —— 后者换个写法（或挪个位置）就假绿。"""
+    from unittest import mock
+    got: dict = {}
+    with mock.patch.object(main, "run", lambda a: got.update(vars(a))), \
+         mock.patch.object(sys, "argv", ["main.py"]):
+        main.main()
+    # 改坏：把 `--polish` 的 default 改回 "auto" -> 这条红。
+    assert got.get("polish") == "off", f"默认变成了 {got.get('polish')!r}"
+
+
+@case("⭐ `--polish auto` 仍然能开回来（代码与开关都留着）")
+def t_polish_can_still_be_turned_on():
+    from unittest import mock
+    got: dict = {}
+    with mock.patch.object(main, "run", lambda a: got.update(vars(a))), \
+         mock.patch.object(sys, "argv", ["main.py", "--polish", "auto"]):
+        main.main()
+    assert got.get("polish") == "auto", got.get("polish")
+
+
+@case("⭐⭐ 「没精修」不再在正文报警 —— 事实进抬头 `polish:`，正文只留异常")
+def t_polish_off_has_no_body_warning():
+    # 改坏：把 `_POLISH_NOTE["off"]` 改回那句 ⚠ -> 第一条红。
+    assert ow._POLISH_NOTE["off"] == "", ow._POLISH_NOTE["off"]
+    # ⚠️ 反过来：真正的异常三档**必须**还在（别顺手把它们一起清了）。
+    for st in ("failed", "partial", "interrupted"):
+        assert ow._POLISH_NOTE[st].strip(), f"{st} 那档被清空了"
+    # 行为面：渲染一遍真笔记 —— off 那版正文里不该出现「未精修」，failed 那版必须有
+    with tempfile.TemporaryDirectory() as d:
+        w = _writer(d)
+        e = [{"ts": "10:00:00", "en": "hello", "asr": "hello", "zh": "你好", "star": False}]
+        off_txt = w._render_note(e, {}, polish_state="off")
+        fail_txt = w._render_note(e, {}, polish_state="failed")
+        assert "未精修" not in off_txt, off_txt[:300]
+        assert "精修未生效" in fail_txt, fail_txt[:300]
+        # ⭐ 事实没丢：抬头照旧记着这节精修成什么样
+        assert "polish: off" in off_txt
+        assert "polish: failed" in fail_txt
+
+
 CASES_FAIL: list[str] = []
 
 if __name__ == "__main__":

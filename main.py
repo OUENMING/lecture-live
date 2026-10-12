@@ -2704,8 +2704,13 @@ def main():
     p.add_argument("--course", help="课程代码(如 ECON10101); 不设也能写笔记(课名默认 LECTURE)")
     p.add_argument("--save-notes", choices=["ask", "yes", "no"], default="ask",
                    help="笔记保存策略: ask(默认,结束时问)/ yes(直接存)/ no(不存)")
-    p.add_argument("--polish", choices=["auto", "off"], default="auto",
-                   help="落笔前二次精修转录(需 API key; 默认 auto); off 直接用直播版")
+    # ⚠️⚠️ **默认 `off`**（Owen 2026-10-12 拍板：「精修不再必须，保留相关代码但不执行，只生成笔记」）。
+    #    理由：`auto` 会把整节课**逐批串行**发给模型（548 句 / `POLISH_BATCH=30` = 19 批），
+    #    收尾因此要跑十几分钟 —— 用户在这十几分钟里看不到笔记，而合盖/退出会让它整个不生成。
+    #    代码与开关**都留着**：`--polish auto` 一个字就能开回来。
+    p.add_argument("--polish", choices=["auto", "off"], default="off",
+                   help="落笔前二次精修转录(需 API key; 默认 off = 直接用直播版, 笔记立刻生成); "
+                        "auto 会逐批发给模型, 收尾要多跑十几分钟")
     p.add_argument("--polish-model", help="精修用的模型(默认同 --cloud-model)")
     p.add_argument("--vault", help="Obsidian 库路径(默认取 $OBSIDIAN_VAULT 或上次用过的; 都没有就不写 Obsidian)")
     args = p.parse_args()

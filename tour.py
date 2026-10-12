@@ -50,95 +50,178 @@ PAGES: tuple = (
 
 WIDTH = 460.0
 PAD = 24.0
-ICON_H = 56.0
+BADGE = 56.0           # 图标底座（圆角方块）边长
+BADGE_R = 14.0         # 底座圆角 —— 同心：卡片 16pt 圆角里套 14pt
+SYMBOL_PT = 26.0
 TITLE_H = 30.0
 LINE_H = 22.0
-DOTS_H = 24.0
+DOTS_H = 16.0
 FOOT_H = 28.0
+FADE_S = 0.18          # 翻页淡入淡出；系统开了「减弱动态效果」就不做
 _W = 0.23              # NSFontWeightMedium，同 whatsnew / overlay
 _SEMI = 0.4
 
+#: 三档按钮：主（下一步 / 开始用）实心白底黑字 > 次（上一步）白字 0.75 > 弱（跳过）白字 0.45。
+#: 三颗都用系统圆角壳的话，「跳过」这个逃生口和主操作抢同样的分量（2026-10-12 评审，核实属实）。
+PRIMARY_BG, SECONDARY_A, TERTIARY_A = 0.92, 0.75, 0.45
+DOT_ON, DOT_OFF = 0.92, 0.22
+
 
 def height(pages=PAGES) -> float:
-    """卡片高度按**最长那一页**算 —— 翻页时窗口不跳。"""
+    """卡片高度按**最长那一页**算 —— 翻页时窗口不跳（行数少的那页在正文区里垂直居中）。"""
     n = max(len(p[2]) for p in pages)
-    return PAD + ICON_H + 12 + TITLE_H + 10 + n * LINE_H + 16 + DOTS_H + 8 + FOOT_H + PAD
+    return PAD + BADGE + 14 + TITLE_H + 8 + n * LINE_H + 18 + DOTS_H + 14 + FOOT_H + PAD
 
 
-def dots(i: int, n: int) -> str:
-    """纯函数：进度点 `● ○ ○ ○`。"""
-    return " ".join("●" if k == i else "○" for k in range(n))
+def body_offset(n_lines: int, n_max: int) -> float:
+    """纯函数：这一页正文往下挪多少才在正文区里居中（行数少的页不在底下留一截空洞）。"""
+    return (n_max - n_lines) * LINE_H / 2
+
+
+def dots(i: int, n: int) -> list:
+    """纯函数：每个点的不透明度。**同一个实心圆、只换透明度**（原生 PageControl 的做法；
+    `●` 和 `○` 在 SF 里直径与重心不齐，○ 的线还细，混排显散）。"""
+    return [DOT_ON if k == i else DOT_OFF for k in range(n)]
+
+
+def _reduce_motion() -> bool:
+    try:
+        from AppKit import NSWorkspace
+        return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion())
+    except Exception:                                     # noqa: BLE001
+        return True
 
 
 def build(on_done=None, pages=PAGES):
     """构造并显示第 1 页。失败返回 None。`on_done(finished: bool)`：看完 = True，跳过 = False。"""
     try:
-        from AppKit import (NSButton, NSColor, NSFont, NSMakeRect, NSTextAlignmentCenter,
-                            NSTextField, NSWindowStyleMaskBorderless,
+        from AppKit import (NSAttributedString, NSButton, NSColor, NSFont,
+                            NSFontAttributeName, NSForegroundColorAttributeName,
+                            NSImage, NSImageSymbolConfiguration, NSImageView, NSMakeRect,
+                            NSMutableAttributedString, NSMutableParagraphStyle,
+                            NSParagraphStyleAttributeName, NSTextAlignmentCenter, NSTextField,
+                            NSView, NSWindowStyleMaskBorderless,
                             NSWindowStyleMaskNonactivatingPanel)
 
         h = height(pages)
+        n_max = max(len(pg[2]) for pg in pages)
         fp = panel.build(NSMakeRect(0, 0, WIDTH, h),
                          NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
         p, ve = fp.window, fp.glass
         p.setHasShadow_(True)
+        white = NSColor.whiteColor()
 
-        def label(rect, size, *, alpha=1.0, weight=_W, center=False):
+        # 翻页时换的东西都在这一层里，整层淡入淡出（按钮和进度点不动）
+        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, h))
+        content.setWantsLayer_(True)
+        ve.addSubview_(content)
+
+        def label(rect, size, *, alpha=1.0, weight=_W):
             lb = NSTextField.alloc().initWithFrame_(rect)
             lb.setEditable_(False); lb.setSelectable_(False)
             lb.setBezeled_(False); lb.setDrawsBackground_(False)
             lb.setFont_(NSFont.systemFontOfSize_weight_(size, weight))
-            lb.setTextColor_(NSColor.whiteColor().colorWithAlphaComponent_(alpha))
-            if center:
-                lb.setAlignment_(NSTextAlignmentCenter)
-            ve.addSubview_(lb)
+            lb.setTextColor_(white.colorWithAlphaComponent_(alpha))
+            lb.setAlignment_(NSTextAlignmentCenter)
+            content.addSubview_(lb)
             return lb
 
-        from AppKit import NSImage, NSImageSymbolConfiguration, NSImageView
-        y = h - PAD - ICON_H
-        icon = NSImageView.alloc().initWithFrame_(NSMakeRect((WIDTH - ICON_H) / 2, y, ICON_H, ICON_H))
-        icon.setSymbolConfiguration_(NSImageSymbolConfiguration.configurationWithPointSize_weight_(38.0, 0.0))
-        icon.setContentTintColor_(NSColor.whiteColor().colorWithAlphaComponent_(0.92))
-        ve.addSubview_(icon)
-        y -= 12 + TITLE_H
-        title = label(NSMakeRect(PAD, y, WIDTH - 2 * PAD, TITLE_H), 20.0, weight=_SEMI, center=True)
-        y -= 10
-        n_lines = max(len(pg[2]) for pg in pages)
-        body = []
-        for _ in range(n_lines):
-            y -= LINE_H
-            body.append(label(NSMakeRect(PAD, y, WIDTH - 2 * PAD, LINE_H), 13.0, alpha=0.88, center=True))
+        y = h - PAD - BADGE
+        badge = NSView.alloc().initWithFrame_(NSMakeRect((WIDTH - BADGE) / 2, y, BADGE, BADGE))
+        badge.setWantsLayer_(True)
+        lay = badge.layer()
+        lay.setCornerRadius_(BADGE_R)
+        try:
+            lay.setCornerCurve_("continuous")             # 连续曲率圆角（squircle），macOS 11+
+        except Exception:                                 # noqa: BLE001
+            pass
+        lay.setBackgroundColor_(white.colorWithAlphaComponent_(0.07).CGColor())
+        lay.setBorderColor_(white.colorWithAlphaComponent_(0.12).CGColor())
+        lay.setBorderWidth_(1.0)
+        content.addSubview_(badge)
+        icon = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, BADGE, BADGE))
+        icon.setSymbolConfiguration_(
+            NSImageSymbolConfiguration.configurationWithPointSize_weight_(SYMBOL_PT, 0.0))
+        icon.setContentTintColor_(white.colorWithAlphaComponent_(0.92))
+        badge.addSubview_(icon)
+
+        y -= 14 + TITLE_H
+        title = label(NSMakeRect(PAD, y, WIDTH - 2 * PAD, TITLE_H), 20.0, weight=_SEMI)
+        body_top = y - 8
+        body = [label(NSMakeRect(PAD, body_top - (k + 1) * LINE_H, WIDTH - 2 * PAD, LINE_H),
+                      13.0, alpha=0.82) for k in range(n_max)]
 
         fy = PAD
-        dot = label(NSMakeRect(PAD, fy + FOOT_H + 8, WIDTH - 2 * PAD, DOTS_H), 11.0, alpha=0.6, center=True)
+        dot = NSTextField.alloc().initWithFrame_(NSMakeRect(PAD, fy + FOOT_H + 14, WIDTH - 2 * PAD, DOTS_H))
+        dot.setEditable_(False); dot.setSelectable_(False)
+        dot.setBezeled_(False); dot.setDrawsBackground_(False)
+        ve.addSubview_(dot)
+        para = NSMutableParagraphStyle.alloc().init()
+        para.setAlignment_(NSTextAlignmentCenter)
+        dot_font = NSFont.systemFontOfSize_(7.0)
 
-        def button(text, x, w, key=""):
-            b = NSButton.alloc().initWithFrame_(NSMakeRect(x, fy, w, 28.0))
-            b.setTitle_(text)
-            b.setBezelStyle_(1)
-            b.setFont_(NSFont.systemFontOfSize_weight_(13.0, _W))
+        def set_dots(i):
+            s_ = NSMutableAttributedString.alloc().init()
+            for k, a in enumerate(dots(i, len(pages))):
+                s_.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
+                    ("   " if k else "") + "●",
+                    {NSFontAttributeName: dot_font,
+                     NSForegroundColorAttributeName: white.colorWithAlphaComponent_(a),
+                     NSParagraphStyleAttributeName: para}))
+            dot.setAttributedStringValue_(s_)
+
+        def button(text, x, w, *, alpha, primary=False, key=""):
+            b = NSButton.alloc().initWithFrame_(NSMakeRect(x, fy, w, FOOT_H))
+            b.setBordered_(False)
+            b.setWantsLayer_(True)
+            col = (NSColor.blackColor().colorWithAlphaComponent_(0.85) if primary
+                   else white.colorWithAlphaComponent_(alpha))
+            b.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+                text, {NSFontAttributeName: NSFont.systemFontOfSize_weight_(13.0, _SEMI if primary else _W),
+                       NSForegroundColorAttributeName: col,
+                       NSParagraphStyleAttributeName: para}))
+            if primary:
+                b.layer().setCornerRadius_(FOOT_H / 2)
+                b.layer().setBackgroundColor_(white.colorWithAlphaComponent_(PRIMARY_BG).CGColor())
             if key:
                 b.setKeyEquivalent_(key)
             ve.addSubview_(b)
             return b
 
-        skip = button("跳过", PAD, 72.0, "\x1b")
-        back = button("上一步", WIDTH - PAD - 92.0 - 8.0 - 80.0, 80.0)
-        nxt = button("下一步", WIDTH - PAD - 92.0, 92.0, "\r")
+        skip = button("跳过", PAD - 8, 56.0, alpha=TERTIARY_A, key="\x1b")
+        nxt = button("下一步", WIDTH - PAD - 96.0, 96.0, alpha=1.0, primary=True, key="\r")
+        back = button("上一步", WIDTH - PAD - 96.0 - 8.0 - 64.0, 64.0, alpha=SECONDARY_A)
         state = {"i": 0, "closed": False}
 
-        def show(i):
+        def retitle(b, text):
+            a = NSMutableAttributedString.alloc().initWithAttributedString_(b.attributedTitle())
+            a.replaceCharactersInRange_withString_((0, a.length()), text)
+            b.setAttributedTitle_(a)
+
+        def fill(i):
             sym, ttl, lines = pages[i]
             img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(sym, ttl)
             if img is not None:
                 img.setTemplate_(True)
             icon.setImage_(img)
             title.setStringValue_(ttl)
+            off = body_offset(len(lines), n_max)
             for k, lb in enumerate(body):
                 lb.setStringValue_(lines[k] if k < len(lines) else "")
-            dot.setStringValue_(dots(i, len(pages)))
+                f = lb.frame()
+                lb.setFrameOrigin_((f.origin.x, body_top - (k + 1) * LINE_H - off))
+
+        def show(i, animate=True):
+            if animate and not _reduce_motion():
+                from Quartz import CATransition
+                t = CATransition.animation()
+                t.setType_("fade")
+                t.setDuration_(FADE_S)
+                content.layer().addAnimation_forKey_(t, "page")
+            fill(i)
+            set_dots(i)
             last = i == len(pages) - 1
-            nxt.setTitle_("开始用" if last else "下一步")
+            retitle(nxt, "开始用" if last else "下一步")
             back.setHidden_(i == 0)
             skip.setHidden_(last)     # 最后一页「开始用」就是关，再留个「跳过」是两个按钮干一件事
             state["i"] = i
@@ -173,7 +256,7 @@ def build(on_done=None, pages=PAGES):
             b.setTarget_(t); b.setAction_("clicked:")
             targets.append(t)
 
-        show(0)
+        show(0, animate=False)
         p.center()
         p.orderFrontRegardless()      # ⚠️ 不是 makeKeyAndOrderFront —— 绝不抢焦点
         return {"panel": p, "next": go_next, "back": go_back, "close": close,

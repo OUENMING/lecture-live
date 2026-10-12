@@ -40,8 +40,19 @@ class Content(unittest.TestCase):
             self.assertIsNotNone(NSImage.imageWithSystemSymbolName_accessibilityDescription_(sym, title), sym)
 
     def test_dots(self):
-        self.assertEqual(tour.dots(0, 4), "● ○ ○ ○")
-        self.assertEqual(tour.dots(3, 4), "○ ○ ○ ●")
+        on, off = tour.DOT_ON, tour.DOT_OFF
+        self.assertEqual(tour.dots(0, 4), [on, off, off, off])
+        self.assertEqual(tour.dots(3, 4), [off, off, off, on])
+        self.assertGreater(on - off, 0.5, "当前页要一眼分得出")
+
+    def test_short_pages_are_centred(self):
+        self.assertEqual(tour.body_offset(3, 3), 0)
+        self.assertEqual(tour.body_offset(2, 3), tour.LINE_H / 2)
+
+    def test_button_hierarchy(self):
+        # 主 > 次 > 弱：「跳过」不能和「下一步」一样重（2026-10-12 评审）
+        self.assertGreater(tour.PRIMARY_BG, tour.SECONDARY_A)
+        self.assertGreater(tour.SECONDARY_A, tour.TERTIARY_A)
 
 
 class Behaviour(unittest.TestCase):

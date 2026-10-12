@@ -54,7 +54,7 @@ KEY_RESET_MESSAGE = ("转录翻译流程在此版本进行了重构，找菠萝�
 MSG_BOTH = "✅ 存好了 —— 写进 ~/.classlive/，权限 600"
 MSG_DS_ONLY = "✅ 存了翻译的 —— Jev 那条随时能补（再点这里）"
 #: 填的是通行码：重点句 / 课务也由作者代付（3.9.4 起），Jev 那栏**不用**补 —— 别再提示他去补。
-MSG_PASSCODE = "✅ 存好了 —— 通行码连「重点句」「课务」也一起管，Jev 那栏不用填"
+MSG_PASSCODE = "✅ 存好了 —— 菠萝丁给的 key 连「重点句」「课务」也一起管，Jev 那栏不用填"
 # ⚠️ 第 3 档**不能**说「本地模型照常翻译」：本地模型（Qwen3-1.7B）是**可选、默认没装**
 #    的（见本文件上面那张表）。对新用户说这句 = 「界面说的和实际不一样」——
 #    正是 2026-10-04 修 key 对话框提示时要消灭的那类话。
@@ -73,7 +73,7 @@ def dialog_fields(cur_ds: str = "", cur_jv: str = "") -> list[dict]:
              "hint": "已存过" if cur_ds else ASK_AUTHOR},
             {"key": "jev", "label": "Jev key · 可选", "value": cur_jv,
              "hint": ("已存过" if cur_jv
-                      else "给「重点句」和「课务」用。填的是通行码就不用管这栏。")}]
+                      else "给「重点句」和「课务」用。填了菠萝丁给的 key 就不用管这栏。")}]
 
 
 def status_line(has_deepseek: bool, has_jev: bool, passcode: bool = False) -> str:

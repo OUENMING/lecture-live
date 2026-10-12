@@ -623,12 +623,8 @@ def main() -> int:
                 for v in card.subviews()
                 if float(v.frame().origin.y + v.frame().size.height) > ch + 0.01]
         check(f"{tag}：没有子视图超出卡片高度（{ch:.0f}）", not over, str(over[:4]))
-        # ⚠️ 必须和 `_make_card` 传**同一个 `has_actions`** —— 它这轮传的是
-        #    `on_start=None`（不画按钮），高度就少了 `CARD_GAP_V + BTN_H` 那一块。
-        #    2026-09-28 之前「选择文件…」永远在，所以这个参数不存在。
-        check(f"{tag}：高度与 card_height(has_actions=False) 一致",
-              abs(ch - EP.card_height(ent, has_actions=False)) < 0.01,
-              f"{ch} vs {EP.card_height(ent, has_actions=False)}")
+        check(f"{tag}：高度与 card_height(entry) 一致",
+              abs(ch - EP.card_height(ent)) < 0.01, f"{ch} vs {EP.card_height(ent)}")
         # ⚠️⚠️ **上面两条都抓不到「`card_height` 与行循环脱钩」**：
         #    · 「高度一致」是**同义反复** —— 卡片的 frame 本来就是 `card_height(entry)` 设的；
         #    · 「没有子视图超出高度」只看**顶端** —— 而 `card_height` **少算**时所有行
@@ -641,14 +637,29 @@ def main() -> int:
         check(f"{tag}：没有子视图掉出卡片底部（最低 y={_low:.1f}）", _low >= -0.01,
               f"最低 y={_low:.1f} —— 高度少算了？")
 
-    # ⭐ **按钮画不画，卡片高度要跟着变** —— 2026-09-28 删掉卡片上的「选择文件…」
-    #    之后才暴露出来的：`card_height` 原来**不管按钮画不画都留 `BTN_H`**，
-    #    而以前「选择文件…」永远在，所以看不出来；删掉之后 `on_start is None`
-    #    （上课中从菜单栏打开的面板）那一档的卡片下半截就是**空白**。
-    check("card_height：画按钮比不画正好多 CARD_GAP_V + BTN_H",
-          abs((EP.card_height() - EP.card_height(has_actions=False))
-              - (EP.CARD_GAP_V + EP.BTN_H)) < 0.01,
-          f"{EP.card_height()} vs {EP.card_height(has_actions=False)}")
+    # ⭐ **按钮并进标题行**（2026-10-12，面板瘦身 P1-a）：画不画按钮卡片一样高，
+    #    但按钮**不许压到文字**、也不许掉出卡片。预选卡（三颗按钮最宽）+ 长课名是最坏情形。
+    from AppKit import NSButton as _NB
+    from AppKit import NSIntersectsRect as _hit
+    for _hint in (False, True):
+        _cd = EP._make_card(_r("ECON10740", "Exploring Economics and Other Very Long Titles"),
+                           on_start=lambda c: None, on_drop_files=lambda c, p: False,
+                           width=640.0, hinted=_hint, on_not_this=lambda: None,
+                           on_sessions=lambda c: None)
+        _bs = [v for v in _cd.subviews() if isinstance(v, _NB)]
+        _ls = [v for v in _cd.subviews() if not isinstance(v, _NB)]
+        _ch = float(_cd.frame().size.height)
+        check(f"按钮行（预选={_hint}）：卡片高度不因按钮变（= card_height()）",
+              abs(_ch - EP.card_height()) < 0.01, f"{_ch} vs {EP.card_height()}")
+        check(f"按钮行（预选={_hint}）：按钮数对（预选 3 / 普通 2）",
+              len(_bs) == (3 if _hint else 2), str(len(_bs)))
+        check(f"按钮行（预选={_hint}）：按钮不压文字",
+              not [1 for b in _bs for l in _ls if _hit(b.frame(), l.frame())])
+        check(f"按钮行（预选={_hint}）：按钮整颗在卡片里",
+              all(float(b.frame().origin.y) >= -0.01
+                  and float(b.frame().origin.y + b.frame().size.height) <= _ch + 0.01
+                  and float(b.frame().origin.x + b.frame().size.width) <= 640.0 + 0.01
+                  for b in _bs))
 
     # ⭐⭐ **阅读顺序**：把文字标签按 y 从高到低排，必须与期望的阅读顺序一致。
     #     2026-09-26 真出过这个 bug —— 结果块从卡片底部往上长，于是

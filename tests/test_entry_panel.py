@@ -119,6 +119,20 @@ def main() -> int:
     check("⭐ 面板不再认识那个死键 `notes`（它本就不在 prep 的表里）",
           E.progress_text("notes", 0, 0) == "notes…")
 
+    print("\n--- ⑤b 整块面板不超过可视区 92%（P1-c）---")
+    _oh = 230.0
+    _worst = [(vh, n) for vh in (600.0, 700.0, 871.0, 1200.0) for n in (0, 1, 5, 7, 30)
+              if E.fit_body(E.body_height(n, vh), _oh, vh, E.CARD_H) + _oh > vh * 0.92 + 0.01
+              and E.fit_body(E.body_height(n, vh), _oh, vh, E.CARD_H) > E.CARD_H + 0.01]
+    check("⭐ 各屏高 × 各课数：卡片区封顶后整块 ≤ 可视区 92%（只有一张卡也放不下时才例外）",
+          not _worst, str(_worst))
+    check("⭐ 再小也至少留一张卡", E.fit_body(500.0, 900.0, 600.0, E.CARD_H) == E.CARD_H)
+    check("装得下时不动卡片区", E.fit_body(300.0, _oh, 1200.0, E.CARD_H) == 300.0)
+    check("面板 y：可视区底边以上，顶边离可视区顶 PANEL_TOP_GAP",
+          E.panel_y(500.0, 80.0, 900.0) == 80.0 + 900.0 - 500.0 - E.PANEL_TOP_GAP)
+    check("面板 y：放不下时贴可视区底边（不钻进 Dock）", E.panel_y(880.0, 80.0, 900.0) == 80.0)
+    check("零课程提示卡装得下三行字", E.empty_card_height() >= E.CARD_PAD * 2 + E.L1_H + 2 * E.L2_H)
+
     print("\n--- ⑤ body 高度：装得下就长，装不下才滚 ---")
     natural5 = 5 * (E.CARD_H + E.CARD_GAP) - E.CARD_GAP
     check("5 门课 / 982 屏 -> 恰好装下（不留半张卡）",
@@ -729,12 +743,12 @@ def main() -> int:
         return E._make_card(_r0, on_start=lambda c: None,
                             on_drop_files=lambda *a: None, width=600.0, **kw)
 
+    from AppKit import NSButton as _NSBtn
     _btns = [v for v in _mk_act(hinted=True, on_not_this=lambda: None).subviews()
-             if float(v.frame().origin.y) < E.CARD_PAD + E.BTN_H - 0.01]
+             if isinstance(v, _NSBtn)]
     check("有按钮行时：预选那张卡上「开始上课」与「不是这门？」都在",
           len(_btns) == 2, f"按钮行里拿到 {len(_btns)} 个")
-    _btns2 = [v for v in _mk_act().subviews()
-              if float(v.frame().origin.y) < E.CARD_PAD + E.BTN_H - 0.01]
+    _btns2 = [v for v in _mk_act().subviews() if isinstance(v, _NSBtn)]
     check("有按钮行时：**没预选**的卡只有一个按钮（不许到处挂「不是这门？」）",
           len(_btns2) == 1, f"拿到 {len(_btns2)} 个")
 
@@ -1131,7 +1145,7 @@ def _test_mode_section() -> None:
             check("⭐⭐ 条上每条提示文字**实测宽度 ≤ 它的框宽**（超了就被静默吃掉）",
                   not over, str(over))
             check("⚠️ 而且真的量到了那几行（量到 0 行会让上一条恒真）",
-                  measured >= 3, f"量到 {measured} 行")
+                  measured >= 2, f"量到 {measured} 行")
 
             # ── ⭐ 点击：**钉行为，不钉 flag** ─────────────────────────────
             # 📌 本仓 `ClickView` 就是 `mouseDownCanMoveWindow=True` 而完全正常 ——

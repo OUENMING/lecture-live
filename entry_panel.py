@@ -50,7 +50,7 @@ import timetable as T
 PAD = 20.0             # 面板内边距（实测：System Settings 20pt）
 CARD_PAD = 10.0        # 卡片内边距（实测 10pt）
 CARD_GAP = 10.5        # 卡片间距（实测 10.5pt）
-CARD_H = 88.0          # 按内容累加，非抄来的
+CARD_H = 56.0          # 按内容累加，非抄来的（2026-10-12 按钮并进标题行：88 → 56）
 CARD_RADIUS = 5.0      # 卡片圆角（实测 5pt）
 HAIRLINE = 0.5         # 描边（实测 0.5pt；scale 2 上正好 1 设备像素）
 TITLE_H = 34.0
@@ -61,10 +61,14 @@ WIDTH = 680.0
 #    看上去像坏了。规则改成「先按内容长，超了就滚」，一个公式管两种情形，
 #    不用做「≤N 静态 / >N 才滚」两套路径。
 BODY_SCREEN_FRACTION = 0.60
+# 整个面板最多占**可视区**（去掉菜单栏 / Dock）的这么多 —— 卡片区之外还有约 230pt 固定开销，
+# 只限卡片区的话小屏上整块面板会顶出屏幕（`docs/PLAN-panel-slim-update.md` P1-c）。
+PANEL_SCREEN_FRACTION = 0.92
+PANEL_TOP_GAP = 116.0  # 面板顶边离可视区顶边（原来按整屏量 140 = 菜单栏 24 + 116）
 
 # 卡片里的三个高度
 L1_H, L2_H, BTN_H = 18.0, 16.0, 24.0
-CARD_GAP_V = 8.0       # 卡片内：按钮块 ↔ 文字块（`card_height` 的算式里有它）
+CARD_GAP_V = 8.0       # 卡片内：文字块 ↔ 结果列表 / 导入卡的按钮行
 # 结果列表（plan §3.6）：跑完在**卡片里**展开，不是一个弹窗
 RESULT_LEAD = 26.0     # 「本次加了 N 个」那一行
 RESULT_ROW = 22.0      # 一个词一行
@@ -73,9 +77,9 @@ RESULT_ROW = 22.0      # 一个词一行
 # 面板底部那条**常驻**落点条。⚠️ 常驻是刻意的：HIG › Drag and drop 逐字
 # 「As much as possible, support drag and drop throughout your app」，而且
 # 面板高度是按卡片数长出来的 —— **没有"空白处"可以拖**（§7.12 开头那条）。
-DROP_H = 96.0          # ⚠️ 2026-09-28 从 44 抬到 96（≈ 一张卡那么高）。作者：
-                       #    「那个统一的入口我感觉太小了」—— 它才是「把课件全丢进来」
-                       #    的主入口，44pt 的页脚条读起来像说明文字，不像可操作的东西。
+DROP_H = 56.0          # ⚠️ 2026-09-28 从 44 抬到 96（作者：「那个统一的入口我感觉太小了」
+                       #    —— 44pt 的页脚条读起来像说明文字，不像可操作的东西）；
+                       #    2026-10-12 面板瘦身压回 56（= 一张卡那么高，提示 3 行并成 2 行）。
 DROP_GAP = 8.0
 BATCH_ROW = 24.0       # 映射表一行
 BATCH_HEAD = 18.0      # 组标题（「已认出归属」/「认不出来的」）
@@ -111,16 +115,15 @@ PICK_W = 104.0         # 「选择文件…」按钮宽
 #    有边框的那几颗留给**动作**（「选择文件…」「＋ 新增课程」「新建/取消」）。
 #    作者 2026-09-30 在「按钮 vs 勾选框」那轮拍的也是这条（§3.2）。
 TEST_W = 104.0         # 开关宽（**实测文字 71.7pt** @12pt，两态同宽，余量足够点）
-# ⚠️ 这几个 y 与 `DROP_H` 是同一组常数推出的（顶部 25 / 行距 6 / 底部 24），
+# ⚠️ 这几个 y 由 `DROP_H` 推出（顶部留 5 / 输入行 24 / 行距 3 / 反馈行 17 / 底部 7），
 #    和 `card_height` 那条纪律一样：改 `DROP_H` 就要一起改这里，别各写一遍。
-ADD_ROW_Y = 47.0       # 输入框 + 「新建/取消」那一行
-ADD_REPLY_Y = 24.0     # 反馈那一行（`plan_add` 的 `text` 画在这儿）
+ADD_ROW_Y = DROP_H - 5.0 - 24.0          # 输入框 + 「新建/取消」那一行（= 27）
+ADD_REPLY_Y = ADD_ROW_Y - 3.0 - 17.0     # 反馈那一行（`plan_add` 的 `text` 画在这儿，= 7）
 # 落点条里提示文字的宽度：右边要给**三颗**控件让位
 # （测试模式开关 +「＋ 新增课程」+「选择文件…」）。
 # ⚠️ 算式与右边那三颗的位置是同一件事 —— 改任何一颗的宽度都得改它。
-# ⚠️⚠️ **它现在只剩 29.7pt 余量了**：最宽的那条提示
-#    「自动认出哪份属于哪门课 —— 认不出的会让你核对」实测 **244.3pt**（11pt），
-#    而这个式子给出 274.0。再多塞一颗按钮，提示会**折行 + 第二行被静默吃掉**
+# ⚠️⚠️ **余量不多**：标题「把课件全拖到这里 · 自动分到各课」实测 **220.6pt**（15pt），
+#    这个式子给出 274.0。再多塞一颗按钮，提示会**折行 + 第二行被静默吃掉**
 #    （`panel.make_label` 的默认换行行为，没有省略号）。
 #    → 判据在 `tests/test_entry_panel.py` 那一节，**加控件前先看它**。
 HINT_W = WIDTH - 2 * PAD - (CARD_PAD + PICK_W + 8.0 + ADD_W + 8.0 + TEST_W + 16.0)
@@ -403,6 +406,22 @@ def body_height(n: int, screen_h: float, *, card_h: float = CARD_H) -> float:
     return min(natural, cap)
 
 
+def fit_body(body_h: float, overhead: float, visible_h: float, card_h: float) -> float:
+    """卡片区再按**整块面板**封一次顶：`overhead + 卡片区 ≤ 可视区 × 0.92`，但至少留一张卡。"""
+    return max(card_h, min(body_h, visible_h * PANEL_SCREEN_FRACTION - overhead))
+
+
+def panel_y(h: float, vis_y: float, vis_h: float) -> float:
+    """面板左下角的 y（AppKit 左下原点）：顶边离可视区顶 `PANEL_TOP_GAP`，放不下就贴着可视区底边。"""
+    return vis_y + max(0.0, vis_h - h - PANEL_TOP_GAP)
+
+
+def empty_card_height() -> float:
+    """零课程那张提示卡的高度：一行标题 + 其余各一行（与 `refresh` 里的排版同一组常数）。"""
+    n = len(empty_state_lines())
+    return CARD_PAD + L1_H + (n - 1) * L2_H + CARD_PAD
+
+
 def empty_state_lines() -> list:
     """零课程时那张卡上要说的话。**纯函数**（判据盖这里，不用起窗口）。
 
@@ -530,7 +549,7 @@ def delete_msg(course: str, res) -> str:
     return f"{course}：{head}" + "".join(f" · {x}" for x in (mid, tail) if x)
 
 
-def card_height(entry=None, *, has_actions: bool = True) -> float:
+def card_height(entry=None) -> float:
     """卡片高度 —— **按内容累加推导，不是抄一个数**。
 
     ⚠️ 它必须和 `_make_card` 里那些 `y` 用**同一组常数**推出来。抄一个固定高度的话，
@@ -541,17 +560,14 @@ def card_height(entry=None, *, has_actions: bool = True) -> float:
        等于正确值。真正的锁在 `tests/test_panel.py`：**把卡片建出来，断言没有子视图
        超出 `card_height(entry)`** —— 那条不管你常数怎么改都成立。
 
-    无结果时的算式（= `CARD_H` 那个 88）：
-        上内边距 10 + 两行标题（18 + 16+2） + 块间距 8 + 按钮 24 + 下内边距 10
+    无结果时的算式（= `CARD_H` 那个 56）：
+        上内边距 10 + 两行标题（18 + 16+2） + 下内边距 10
+    ⚠️ 按钮（开始上课 / 不是这门？/ 课次）**不占高度**：2026-10-12 起它们右对齐、
+       垂直居中在那两行文字旁边（`docs/PLAN-panel-slim-update.md` P1-a）。
     """
     h = (CARD_PAD                                     # 上
          + L1_H + L2_H + 2.0                          # 课号+课名 / 准备度
          + CARD_PAD)                                  # 下
-    if has_actions:
-        # ⚠️ **只有真的会画按钮时才留这块高度。** `on_start is None` = 上课中从菜单栏
-        #    打开的面板，那时不画「开始上课」—— 而 2026-09-28 之前「选择文件…」是
-        #    **永远在**的，所以这个空档看不出来；删掉它之后卡片下半截就空了一截。
-        h += CARD_GAP_V + BTN_H
     if entry is not None:
         # ⚠️⚠️ **这里的项数必须与 `_make_card` 里那几圈行循环逐项对应** ——
         #     两处是同一件事的两个定义点，没有机制保证同步，只有
@@ -1193,9 +1209,8 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     view = panel.make_drop_target(_enter, _drop, _exit)
     holder["view"] = view
     # ⚠️ 高度用 `card_height(entry)`，**不是 `CARD_H`** —— 有结果列表的卡会更高。
-    # ⚠️ 还要把「画不画按钮」告诉它 —— 否则不画按钮的那些卡下半截是空的。
-    _acts = on_start is not None
-    view.setFrame_(NSMakeRect(0.0, 0.0, width, card_height(entry, has_actions=_acts)))
+    ch = card_height(entry)
+    view.setFrame_(NSMakeRect(0.0, 0.0, width, ch))
     view._course = r.course
     view._tag = r.course
     view._targets = []
@@ -1208,18 +1223,51 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     _bg(CARD_FILL_A)
 
     inner_w = width - 2 * CARD_PAD
+
+    # ── 按钮：右对齐，垂直居中在标题那两行旁边（不占自己的一行）──────────
+    # ⚠️ 「开始上课」**只在调用方能兑现时才建**。
+    #    `on_start is None` = 这个面板是**上课中**从菜单栏打开的，那时再「开始一节课」
+    #    没有意义、而且有害（会去写 `.course` 并试着再起一份录音）。
+    #    同 `prep.prepare` 的 `chat=None` / `build_fn=None`：**能兑现才给，不给就不画**。
+    acts: list = []                                   # (标题, 宽, 动作)，从左到右
+    if on_start is not None:
+        # ⭐ **预选的那张卡，按钮标题自己说清楚**（作者 2026-09-29 的 ③）。
+        #    `[一手]` Microsoft HAX G11 逐字：「**Make clear why the system did what it
+        #    did**」—— 不说清楚的话，"为什么这张排第一"对用户就是猜的，
+        #    而认错课的代价是**整节课术语表全错**。
+        acts.append(("开始上课 · 就是这门" if hinted else "开始上课",
+                     148.0 if hinted else 92.0, lambda: on_start(r.course)))
+        # ⭐ **纠错入口**（HAX G8「Support efficient dismissal」/ G9「efficient correction」）。
+        #    只有被预选的那张卡有它 —— 其余四张本来就不需要纠错。
+        #    ⚠️ 必须和「开始上课」同进同出（上课中的面板一个按钮都不画）。
+        if hinted and on_not_this is not None:
+            acts.append(("不是这门？", 84.0, on_not_this))
+        # ⭐ 「课次」= 这门课的上课记录（+ 没归课的那些，可以就地判给本课）。
+        # ⚠️ 做成**按钮**而不是"双击卡片"：双击要自己接管 `mouseDown_` 并判 `clickCount`，
+        #    而这块面板是磨砂的 —— `mouseDownCanMoveWindow` 那个雷本仓库咬过两次。
+        if on_sessions is not None:
+            acts.append(("课次", 68.0, lambda: on_sessions(r.course)))
+    # ⚠️ 原来这里还有一个「选择文件…」（单课加课件）。2026-09-28 删掉 ——
+    #    作者说「卡片看着太繁杂」。能力没丢：拖到卡上 = 加到那门课；不想拖 → 底部统一入口。
+    acts_w = sum(w for _t, w, _a in acts) + 8.0 * max(len(acts) - 1, 0)
+    text_w = inner_w - (acts_w + 12.0 if acts else 0.0)
+
     # ⚠️⚠️ **从上往下排。** 卡片是**非翻转**坐标（y 向上），所以「往下」= y **递减**。
     #    第一版让结果块从卡片底部往上长 —— 于是**列表是倒的**（最后加的排最上面），
     #    而且**头部跑到了列表下面**（2026-09-26 跑第一遍看出来的）。
     #    → 凡是「按阅读顺序排」的内容块，一律从顶部往下算，别从底部往上堆。
-    y = card_height(entry, has_actions=_acts) - CARD_PAD
+    y = ch - CARD_PAD
     y -= L1_H
+    # ⚠️ 两行都 `truncate=True`：按钮占走右边之后，长课名不截就会折行、第二行被静默吃掉。
     view.addSubview_(panel.make_label(
-        card_title(r), NSMakeRect(CARD_PAD, y, inner_w, L1_H), 13.0, bold=True))
+        card_title(r), NSMakeRect(CARD_PAD, y, text_w, L1_H), 13.0, bold=True,
+        truncate=True))
     y -= (L2_H + 2.0)
     view.addSubview_(panel.make_label(
-        readiness_line(r), NSMakeRect(CARD_PAD, y, inner_w, L2_H), 11.0, alpha=DIM))
+        readiness_line(r), NSMakeRect(CARD_PAD, y, text_w, L2_H), 11.0, alpha=DIM,
+        truncate=True))
 
+    # 按钮的竖直中心 = 文字块（标题 + 准备度）的中心。⚠️ 与上面两行同一组常数推出。
     def mk(title, x, action, y=CARD_PAD, w=92.0, h=BTN_H):
         b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
         b.setTitle_(title)
@@ -1231,49 +1279,11 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
         view._targets.append(t)
         return b
 
-    # 按钮**锚在卡片底部** —— 它们不是阅读顺序的一部分，是固定动作区。
-    # ⚠️ 「开始上课」**只在调用方能兑现时才建**。
-    #    `on_start is None` = 这个面板是**上课中**从菜单栏打开的，那时再「开始一节课」
-    #    没有意义、而且有害（会去写 `.course` 并试着再起一份录音）。
-    #    同 `prep.prepare` 的 `chat=None` / `build_fn=None`：**能兑现才给，不给就不画**。
-    x = CARD_PAD
-    if on_start is not None:
-        # ⭐ **预选的那张卡，按钮标题自己说清楚**（作者 2026-09-29 的 ③）。
-        #    `[一手]` Microsoft HAX G11 逐字：「**Make clear why the system did what it
-        #    did**」—— 不说清楚的话，"为什么这张排第一"对用户就是猜的，
-        #    而认错课的代价是**整节课术语表全错**。
-        #    ⚠️ 理由塞进**按钮标题**而不是新加一行：加行会动 `card_height` 的算式，
-        #       而那个算式与 `refresh` 的排版循环是**成对**的（本文件反复记过这条）。
-        _label = "开始上课 · 就是这门" if hinted else "开始上课"
-        view.addSubview_(mk(_label, x, lambda: on_start(r.course),
-                            w=(148.0 if hinted else 92.0)))
-        x += (148.0 if hinted else 92.0) + 8.0
-    # ⭐ **纠错入口**（HAX G8「Support efficient dismissal」/ G9「efficient correction」）。
-    #    只有被预选的那张卡有它 —— 其余四张本来就不需要纠错。
-    # ⚠️⚠️ **必须和上面那道 `on_start is not None` 同进同出。** 按钮行的高度
-    #    （`card_height` 的 `CARD_GAP_V + BTN_H`）**只在 `on_start is not None` 时才留**，
-    #    而 `on_start is None`（上课中从菜单栏打开的面板，或验收跑器）时这一行**没有高度**。
-    #    第一版漏了这道守卫 → 按钮照画在 `y=CARD_PAD` → **压在那条就绪行上**
-    #    （实测截图抓到的；判据只查"有没有掉出卡片底部"，查不出"两行叠在一起"）。
-    if on_start is not None and hinted and on_not_this is not None:
-        view.addSubview_(mk("不是这门？", x, on_not_this, w=84.0))
-        x += 84.0 + 8.0
-    # ⭐ 「课次」= 这门课的上课记录（+ 没归课的那些，可以就地判给本课）。
-    # ⚠️ 做成**按钮**而不是"双击卡片"：双击要自己接管 `mouseDown_` 并判 `clickCount`，
-    #    而这块面板是磨砂的 —— `mouseDownCanMoveWindow` 那个雷本仓库咬过两次。
-    #    按钮是这个面板既有的做法，零风险。（与设计稿的"双击课号"有偏差，已报备。）
-    if on_sessions is not None and on_start is not None:
-        view.addSubview_(mk("课次", x, lambda: on_sessions(r.course), w=68.0))
-        x += 68.0 + 8.0
-    # ⚠️ 原来这里还有一个「选择文件…」（单课加课件）。2026-09-28 删掉 ——
-    #    作者说「卡片看着太繁杂」，而它确实是卡里唯一的边框元素、占 27% 的高度，
-    #    五门课就是五个。
-    #    **能力没丢**：
-    #      · 拖到某张卡上 = 加到那门课（卡片本来就是落点，零视觉重量）；
-    #      · 不想拖 → 用底部那个统一入口，选完文件在批量卡上**手动指定课号**
-    #        （`BATCH_CHIP_W` 那个下拉，`["未分类"] + 各课号`）。
-    #    ⚠️ 但**「开始上课」留着** —— 它是这个面板的主线动作
-    #       （双击 → 选课 → 写 `.course` → 开录），删了主线就断了。
+    btn_y = ch - CARD_PAD - (L1_H + L2_H + 2.0) / 2.0 - BTN_H / 2.0
+    x = width - CARD_PAD - acts_w
+    for title, w, action in acts:
+        view.addSubview_(mk(title, x, action, y=btn_y, w=w))
+        x += w + 8.0
 
     # ── 结果列表（plan §3.6）────────────────────────────────────────
     # ⚠️ **就在卡片里，不是一个弹窗** —— 这是相对「一个文件夹」的真优势，
@@ -1755,8 +1765,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    这里漏了。机制见 `_later` 的 docstring。
         _later(refresh)
 
-    body_h = body_height(len(rs), NSScreen.mainScreen().frame().size.height,
-                         card_h=card_height(has_actions=(on_start is not None)))
+    # ⚠️ 用 `visibleFrame`（去掉菜单栏 / Dock），不是 `frame` —— 后者会让面板钻到 Dock 底下。
+    _vis = NSScreen.mainScreen().visibleFrame()
+    _card_h = card_height() if rs else empty_card_height()
+    body_h = body_height(len(rs), _vis.size.height, card_h=_card_h)
     # ── 就绪条（2026-09-28）──────────────────────────────────────────
     # ⚠️ 算它要问权限、stat 四个模型目录 —— 都在本地、没网络。实测 ~85ms
     #    （其中 Qwen3 那条走 HF cache 的 `try_to_load_from_cache`，占大头）。
@@ -1783,6 +1795,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    `h` 与视图的 y **用的是同一组常数**，不是各写一遍（`card_height` 那条纪律）。
     drop_y = PAD + FOOT_H + DROP_GAP
     sc_y = drop_y + DROP_H + DROP_GAP
+    body_h = fit_body(body_h, sc_y + 8.0 + rh + rg + TITLE_H + PAD,
+                      _vis.size.height, _card_h)
     ready_y = sc_y + body_h + 8.0                          # 就绪条的底边
     h = ready_y + rh + rg + TITLE_H + PAD
 
@@ -2297,14 +2311,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     _strip_bg(CARD_FILL_A)
     ve.addSubview_(strip)
 
+    # ⚠️ 两行（2026-10-12 从三行并来）：「认不出的会让你核对」挪给了拖进来之后的批量确认卡 ——
+    #    那张卡本来就会让你核对，在这里预告一遍是多占一行。
     strip_holder["hint"] = [
-        panel.make_label("把课件全拖到这里",
-                         NSMakeRect(CARD_PAD, DROP_H - 40.0, HINT_W, 22.0), 15.0),
+        panel.make_label("把课件全拖到这里 · 自动分到各课",
+                         NSMakeRect(CARD_PAD, DROP_H - 30.0, HINT_W, 22.0), 15.0),
         panel.make_label("PDF / PPTX / DOCX · 课表 .ics · 文件夹也行",
-                         NSMakeRect(CARD_PAD, DROP_H - 60.0, HINT_W, 16.0),
-                         11.0, alpha=DIM),
-        panel.make_label("自动认出哪份属于哪门课 —— 认不出的会让你核对",
-                         NSMakeRect(CARD_PAD, DROP_H - 78.0, HINT_W, 16.0),
+                         NSMakeRect(CARD_PAD, DROP_H - 48.0, HINT_W, 16.0),
                          11.0, alpha=DIM),
     ]
     for _v in strip_holder["hint"]:
@@ -3478,8 +3491,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if not rows:
             # ⭐ 零课程的空状态（2026-09-28）—— 原来这里是**一片空白**。
             from AppKit import NSColor, NSMakeRect, NSView
+            _eh = empty_card_height()
             card = NSView.alloc().initWithFrame_(
-                NSMakeRect(0.0, 0.0, WIDTH - 2 * PAD, CARD_H))
+                NSMakeRect(0.0, 0.0, WIDTH - 2 * PAD, _eh))
             card.setWantsLayer_(True)
             card.layer().setCornerRadius_(CARD_RADIUS)
             # ⚠️ 虚线感的弱描边：它是**提示**不是内容，别长得和课程卡一样实
@@ -3488,7 +3502,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                                          .colorWithAlphaComponent_(CARD_LINE_A * 0.7).CGColor())
             card.layer().setBackgroundColor_(NSColor.whiteColor()
                                              .colorWithAlphaComponent_(CARD_FILL_A * 0.5).CGColor())
-            _ly = CARD_H - CARD_PAD
+            _ly = _eh - CARD_PAD
             for _i, _txt in enumerate(empty_state_lines()):
                 _ly -= (L1_H if _i == 0 else L2_H)
                 card.addSubview_(panel.make_label(
@@ -3497,7 +3511,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                     13.0 if _i == 0 else 12.0, bold=(_i == 0),
                     alpha=1.0 if _i == 0 else DIM))
             doc.addSubview_(card)
-            doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, CARD_H)))
+            doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, _eh)))
             return
         for r in rows:
             entry = S["result"].get(r.course)
@@ -3515,7 +3529,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                               on_delete_course=delete_course)
             card.setFrameOrigin_((0.0, y))
             doc.addSubview_(card)
-            y += card_height(entry, has_actions=(on_start is not None)) + CARD_GAP
+            y += card_height(entry) + CARD_GAP
         doc.setFrameSize_((WIDTH - 2 * PAD, max(y, body_h)))
         # ⚠️ 滚**必须在重画之后**：上面那圈把旧卡片全 `removeFromSuperview` 了，
         #    所以只能拿**新**卡片的 `_undo_lbl`。意图是**一次性**的（`pop` 掉）。
@@ -3997,9 +4011,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     refresh()
 
     # 位置：屏幕中上（AppKit 左下原点）
-    scr = NSScreen.mainScreen().frame()
-    win.setFrameOrigin_(((scr.size.width - WIDTH) / 2.0,
-                         max(60.0, scr.size.height - h - 140.0)))
+    win.setFrameOrigin_((_vis.origin.x + (_vis.size.width - WIDTH) / 2.0,
+                         panel_y(h, _vis.origin.y, _vis.size.height)))
     win.orderFrontRegardless()
     # ⭐ 面板**已经上屏**了 → 现在把搜索框放回"可以被点进焦点"的状态。
     #    过早放行 = 白做（AppKit 会在上屏那一刻把它设成第一响应者）；

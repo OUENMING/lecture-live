@@ -789,29 +789,44 @@ def main() -> int:
 
 
 def _cloud_asr_section() -> None:
-    """⑳b 「云端转写」开关：文案 / 坐标同源 / 点了回调真的触发 / 锁定 / 落盘接线。
+    """⑳b 「云端转写」：10-12 起不是落点条上的开关，而是「语音模型」那一格菜单里的勾选项。
+    钉：菜单项（纯函数）/ 那一格的状态词 / 点菜单项真的触发回调并改那一格 / 写失败不翻 / 锁定 / 落盘接线。
 
-    ⚠️ 写端全隔离：面板走 tempdir 的 glossary/state_root；`entry_launch` 那段把
-       `HOME` 指到 tempdir（`final_asr.write_config` 走 `paths`），绝不碰真 `~/.classlive/`。
+    ⚠️ 写端全隔离：面板走 tempdir 的 glossary/state_root；`entry_launch` 那段换掉 `paths.STATE_ROOT`，
+       绝不碰真 `~/.classlive/`。⚠️ 菜单里「下载…」那一项**不点**（会真下模型）。
     """
-    print("\n--- ⑳b 云端转写开关：文案 / 坐标同源 / 点击触发回调 ---")
+    print("\n--- ⑳b 云端转写：「语音模型」菜单里的勾选项 ---")
     import tempfile
 
-    # ── 纯函数：期望值写字面量（不拿被测函数当期望值）──────────────────
-    check("⭐ 开关文案两态逐字：云端转写：开 / 云端转写：关",
-          E.cloud_asr_title(True) == "云端转写：开" and E.cloud_asr_title(False) == "云端转写：关",
-          f"{E.cloud_asr_title(True)!r} / {E.cloud_asr_title(False)!r}")
-    check("⭐ 只有一颗开关时 y = 垂直居中（= 原来测试模式钮的位置，没开云端的面板一像素不动）",
+    # ── 纯函数：期望值写字面量 ─────────────────────────────────────
+    _mm = E.models_menu
+    _ok = {"key": "models", "state": "ok"}
+    check("⭐ 都齐了：「模型都已就绪」（灰）· 分隔线 · 「云端转写 · 英文更准」✓",
+          [(i.get("key"), i.get("title"), i.get("enabled"), i.get("checked"))
+           for i in _mm(_ok, cloud_on=True, locked=False)]
+          == [("info", "模型都已就绪", False, False), (None, None, None, None),
+              ("cloud", "云端转写 · 英文更准", True, True)],
+          str(_mm(_ok, cloud_on=True, locked=False)))
+    check("⭐ 缺模型 → 第一项「下载缺的模型」可点",
+          _mm({"key": "models", "state": "todo"}, cloud_on=True, locked=False)[0]
+          == {"key": "required", "title": "下载缺的模型", "enabled": True, "checked": False})
+    check("⭐ 可加草稿模型 → 「下载流式草稿模型（464 MB）」",
+          _mm({**_ok, "offer_draft": True}, cloud_on=True, locked=False, draft_mb="464 MB")[0]["title"]
+          == "下载流式草稿模型（464 MB）")
+    check("正在下载 → 下载项不可点",
+          _mm({"key": "models", "state": "todo"}, cloud_on=True, locked=False, downloading=True)[0]["enabled"]
+          is False)
+    _lk = _mm(_ok, cloud_on=True, locked=True)[2]
+    check("⭐⭐ 环境变量锁定 → 未勾、不可点、标题点名 CLASSLIVE_CLOUD_ASR=0",
+          _lk["checked"] is False and _lk["enabled"] is False and "CLASSLIVE_CLOUD_ASR=0" in _lk["title"], str(_lk))
+    check("⭐ 关了云端 → 那一格写「已就绪 · 全本地」（不再有常驻开关，状态要看得见）",
+          E.ready_item_text({**_ok, "cloud_off": True}) == "✓  语音模型  已就绪 · 全本地",
+          E.ready_item_text({**_ok, "cloud_off": True}))
+    check("只有一颗开关（测试模式）时 y = 垂直居中",
           abs(E.switch_y(0, 1) - (E.DROP_H - E.BTN_H) / 2.0) < 1e-9, str(E.switch_y(0, 1)))
-    _top, _bot = E.switch_y(0, 2), E.switch_y(1, 2)
-    check("⭐ 两颗叠放：第 0 颗在上（y 更大）、间距 = SWITCH_GAP、整体在条内且不出界",
-          _top > _bot and abs((_top - _bot) - (E.BTN_H + E.SWITCH_GAP)) < 1e-9
-          and _bot >= 0 and _top + E.BTN_H <= E.DROP_H, f"top={_top} bot={_bot}")
 
     try:
-        from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
-                            NSButton, NSFont, NSFontAttributeName)
-        from Foundation import NSAttributedString
+        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSButton
         import entry_launch
     except Exception as e:                                    # noqa: BLE001
         check("AppKit 可用（这一节要真窗口）", False, f"{type(e).__name__}: {e}")
@@ -825,115 +840,96 @@ def _cloud_asr_section() -> None:
             _walk(c, out)
         return out
 
-    def _btns(h, prefix):
+    def _btns(h, needle):
         return [v for v in _walk(h.window.contentView(), [])
-                if isinstance(v, NSButton) and (v.title() or "").startswith(prefix)]
+                if isinstance(v, NSButton) and needle in (v.title() or "")]
 
-    def _hit(a, b):
-        return (a.origin.x < b.origin.x + b.size.width and b.origin.x < a.origin.x + a.size.width
-                and a.origin.y < b.origin.y + b.size.height
-                and b.origin.y < a.origin.y + a.size.height)
+    menus: list = []
+    _orig_popup = E.popup_menu
+    E.popup_menu = lambda menu, view: menus.append(menu)
+
+    def _open_menu(h):
+        menus.clear()
+        mb = _btns(h, "语音模型")
+        if len(mb) != 1:
+            return None, None
+        mb[0].performClick_(None)
+        if not menus:
+            return mb[0], None
+        items = [menus[-1].itemAtIndex_(i) for i in range(menus[-1].numberOfItems())]
+        return mb[0], next((i for i in items if "云端转写" in (i.title() or "")), None)
+
+    def _act(item):
+        item.target().act_(item)
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            gl = root / "glossary.txt"
+            gl.write_text("# public table\n", encoding="utf-8")
+
+            def _build(name, **kw):
+                return E.build(glossary=gl, sessions_dir=root / ("s" + name),
+                               state_root=root / ("st" + name), on_start=lambda c: None, **kw)
+
+            calls: list = []
+            h = _build("1", on_test_mode=lambda on: True, test_mode=False,
+                       on_cloud_asr=lambda on: (calls.append(on), True)[1], cloud_asr=True)
+            try:
+                check("⭐⭐ 落点条上**没有**「云端转写」那颗开关了；测试模式还在",
+                      h is not None and not _btns(h, "云端转写") and len(_btns(h, "测试模式：")) == 1)
+                mb, ci = _open_menu(h)
+                check("⭐⭐ 点「语音模型」→ 弹菜单，里面有「云端转写」且是勾着的",
+                      ci is not None and ci.state() == 1 and ci.isEnabled(),
+                      f"{mb and mb.title()!r} {ci and (ci.title(), ci.state())}")
+                if ci is not None:
+                    check("⭐ 菜单项的 target 活着（弱引用坑：没挂住 = 点了没反应）", ci.target() is not None)
+                    _act(ci)
+                    check("⭐⭐ 点一下 → 回调收到 False、那一格变「已就绪 · 全本地」或仍报缺模型（但带 cloud_off）",
+                          calls == [False] and ("全本地" in mb.title() or "缺" in mb.title()), f"{calls} {mb.title()!r}")
+                    _, ci2 = _open_menu(h)
+                    check("⭐ 再开菜单 → 未勾；点 → 回调收到 True、「全本地」消失",
+                          ci2 is not None and ci2.state() == 0
+                          and (_act(ci2) or True) and calls == [False, True] and "全本地" not in mb.title(),
+                          f"{calls} {mb.title()!r}")
+            finally:
+                if h is not None:
+                    h.close()
+
+            c2: list = []
+            h2 = _build("2", on_cloud_asr=lambda on: (c2.append(on), False)[1], cloud_asr=False)
+            try:
+                mb, ci = _open_menu(h2) if h2 else (None, None)
+                if ci is not None:
+                    _act(ci)
+                    _, ci_after = _open_menu(h2)
+                    check("⭐⭐ 写盘失败 → 不翻（再开菜单仍未勾、那一格仍写全本地）",
+                          c2 == [True] and ci_after is not None and ci_after.state() == 0, f"{c2}")
+                else:
+                    check("（前置）菜单里有云端转写", False)
+            finally:
+                if h2 is not None:
+                    h2.close()
+
+            c4: list = []
+            h4 = _build("4", on_cloud_asr=lambda on: (c4.append(on), True)[1],
+                        cloud_asr=True, cloud_asr_locked=True)
+            try:
+                _, ci = _open_menu(h4) if h4 else (None, None)
+                check("⭐⭐ 锁定：菜单项未勾、不可点、标题点名环境变量",
+                      ci is not None and ci.state() == 0 and not ci.isEnabled()
+                      and "CLASSLIVE_CLOUD_ASR=0" in (ci.title() or ""), str(ci and ci.title()))
+                if ci is not None:
+                    _act(ci)
+                    check("锁定时即使硬触发 action，回调也不调", c4 == [], str(c4))
+            finally:
+                if h4 is not None:
+                    h4.close()
+    finally:
+        E.popup_menu = _orig_popup
 
     with tempfile.TemporaryDirectory() as td:
         root = pathlib.Path(td)
-        gl = root / "glossary.txt"
-        gl.write_text("# public table\n", encoding="utf-8")
-
-        def _build(name, **kw):
-            return E.build(glossary=gl, sessions_dir=root / ("s" + name),
-                           state_root=root / ("st" + name), on_start=lambda c: None, **kw)
-
-        calls: list = []
-        h = _build("1", on_test_mode=lambda on: True, test_mode=False,
-                   on_cloud_asr=lambda on: (calls.append(on), True)[1], cloud_asr=True)
-        try:
-            ca, tm = (_btns(h, "云端转写：") if h else []), (_btns(h, "测试模式：") if h else [])
-            check("⭐ 两颗开关都建了；初值 cloud_asr=True 显示「云端转写：开」",
-                  len(ca) == 1 and len(tm) == 1 and ca[0].title() == "云端转写：开",
-                  f"{[b.title() for b in ca]} {[b.title() for b in tm]}")
-            if len(ca) == 1 and len(tm) == 1:
-                ca, tm = ca[0], tm[0]
-                check("⭐⭐ 两颗开关的 frame 不重叠，且 y 与 switch_y 同源",
-                      not _hit(ca.frame(), tm.frame())
-                      and abs(float(tm.frame().origin.y) - E.switch_y(0, 2)) < 1e-6
-                      and abs(float(ca.frame().origin.y) - E.switch_y(1, 2)) < 1e-6,
-                      f"tm={tm.frame()} ca={ca.frame()}")
-                _f = NSFont.systemFontOfSize_(12.0)
-                _w = max(float(NSAttributedString.alloc().initWithString_attributes_(
-                    t, {NSFontAttributeName: _f}).size().width)
-                    for t in (E.cloud_asr_title(True), E.cloud_asr_title(False)))
-                check("⭐ 文案塞得进按钮框", _w <= float(ca.frame().size.width) - 8.0, f"{_w:.1f}")
-                # 行为：点一下回调真的触发、值翻转
-                ca.performClick_(None)
-                check("⭐⭐ 点一下 → 回调收到 False、文案变「关」",
-                      calls == [False] and ca.title() == "云端转写：关",
-                      f"{calls} {ca.title()!r}")
-                ca.performClick_(None)
-                check("⭐ 再点 → 回调收到 True、文案回「开」",
-                      calls == [False, True] and ca.title() == "云端转写：开", f"{calls}")
-                check("⭐ 悬停说明写着音频发给谁、关掉=全本地",
-                      "Groq" in (ca.toolTip() or "") and "全本地" in (ca.toolTip() or ""),
-                      repr(ca.toolTip()))
-                tm.performClick_(None)
-                check("⭐ 点云端开关不影响测试模式钮（两颗互不串）",
-                      tm.title() == "测试模式：开" and calls == [False, True], f"{tm.title()!r}")
-        finally:
-            if h is not None:
-                h.close()
-
-        # 只有云端、没有测试模式 → 居中（原位）
-        h1 = _build("1b", on_cloud_asr=lambda on: True, cloud_asr=False)
-        try:
-            b = _btns(h1, "云端转写：") if h1 else []
-            check("⭐ 只建云端开关时垂直居中",
-                  len(b) == 1 and abs(float(b[0].frame().origin.y) - E.switch_y(0, 1)) < 1e-6,
-                  str([x.frame() for x in b]))
-        finally:
-            if h1 is not None:
-                h1.close()
-
-        # 写失败 → 弹回
-        c2: list = []
-        h2 = _build("2", on_cloud_asr=lambda on: (c2.append(on), False)[1], cloud_asr=False)
-        try:
-            b = _btns(h2, "云端转写：") if h2 else []
-            if len(b) == 1:
-                b[0].performClick_(None)
-                check("⭐⭐ 写盘失败 → 文案弹回「关」（界面不许撒谎）",
-                      b[0].title() == "云端转写：关" and c2 == [True], f"{b[0].title()!r} {c2}")
-            else:
-                check("（前置）有开关", False, str(len(b)))
-        finally:
-            if h2 is not None:
-                h2.close()
-
-        # None = 不建
-        h3 = _build("3")
-        try:
-            check("⭐ `on_cloud_asr=None` → 一颗都不建",
-                  h3 is not None and not _btns(h3, "云端转写："))
-        finally:
-            if h3 is not None:
-                h3.close()
-
-        # 锁定：显示关、点不动、回调不触发
-        c4: list = []
-        h4 = _build("4", on_cloud_asr=lambda on: (c4.append(on), True)[1],
-                    cloud_asr=True, cloud_asr_locked=True)
-        try:
-            b = _btns(h4, "云端转写：") if h4 else []
-            if len(b) == 1:
-                b[0].performClick_(None)
-                check("⭐⭐ 锁定（环境变量强制关）：即使 cloud_asr=True 也显示「关」，点了回调不触发",
-                      b[0].title() == "云端转写：关" and c4 == [] and not b[0].isEnabled()
-                      and "CLASSLIVE_CLOUD_ASR=0" in (b[0].toolTip() or ""),
-                      f"{b[0].title()!r} {c4} enabled={b[0].isEnabled()}")
-            else:
-                check("（前置）有开关", False, str(len(b)))
-        finally:
-            if h4 is not None:
-                h4.close()
-
         # ── entry_launch 接线：回调真的写 final_asr 配置；初值读得回 ──────
         import final_asr
         import PyObjCTools.AppHelper as _AH

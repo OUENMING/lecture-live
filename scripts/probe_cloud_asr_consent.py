@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""渲染「云端转写」开关（面板上开 / 关两态）与首次告知弹窗，并截图。
+"""渲染「云端转写」两态（「语音模型」那一格：已就绪 / 已就绪 · 全本地）与首次告知弹窗，并截图。
 
     ClassLive.app/Contents/MacOS/python scripts/probe_cloud_asr_consent.py [输出目录]
 
@@ -113,18 +113,30 @@ def main(argv=None) -> int:
     try:
         h.window.orderFrontRegardless()
         _pump()
-        sw = _find("云端转写：")
-        if len(sw) != 1:
-            print(f"⚠ 找到 {len(sw)} 颗云端开关")
+        # 10-12 起「云端转写」在「语音模型」那一格的菜单里：换掉弹菜单那一步，直接点菜单项
+        #（菜单本身的样子要真屏拍，见 tests/test_entry_panel.py ⑳b 的说明）。
+        cell = [b for b in _find("") if "语音模型" in (b.title() or "")]
+        if len(cell) != 1:
+            print(f"⚠ 找到 {len(cell)} 个「语音模型」格")
             return 1
         sizes.append(_shot(out / "01-面板-开.png", region=_region_of(h.window)))
         print(f"实拍（开）{sizes[-1]} 字节 -> {out / '01-面板-开.png'}", flush=True)
-        sw[0].performClick_(None)
+        menus = []
+        _orig_popup, E.popup_menu = E.popup_menu, lambda m, v: menus.append(m)
+        try:
+            cell[0].performClick_(None)
+        finally:
+            E.popup_menu = _orig_popup
+        item = next((menus[-1].itemAtIndex_(i) for i in range(menus[-1].numberOfItems())
+                     if "云端转写" in (menus[-1].itemAtIndex_(i).title() or "")), None) if menus else None
+        if item is None:
+            print("⚠ 菜单里没有「云端转写」")
+            return 1
+        item.target().act_(item)
         _pump(0.3)
         sizes.append(_shot(out / "02-面板-关.png", region=_region_of(h.window)))
-        print(f"实拍（关）{sizes[-1]} 字节 -> {out / '02-面板-关.png'}   回调={calls}", flush=True)
-        for b in _find("云端转写：") + _find("测试模式："):
-            print(f"   开关 {b.title()!r}  frame={b.frame()}", flush=True)
+        print(f"实拍（关）{sizes[-1]} 字节 -> {out / '02-面板-关.png'}   回调={calls}"
+              f"   那一格={cell[0].title()!r}", flush=True)
     finally:
         h.close()
 

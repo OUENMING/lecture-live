@@ -168,7 +168,7 @@ def main() -> int:
         return ok
 
     def on_cloud_asr(on: bool) -> bool:
-        """「云端转写」开关被点了：当场写 `cloud-asr.json`（面板不写盘）。
+        """「云端转写」被点了（「语音模型」菜单里的勾选项）：当场写 `cloud-asr.json`（面板不写盘）。
         返回 `False` = 没写进去（含 `CLASSLIVE_CLOUD_ASR=0` 时 `write_config` 什么都不写）→ 面板弹回原状。
         """
         import final_asr

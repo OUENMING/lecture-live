@@ -182,6 +182,8 @@ def ready_short(it: dict) -> str:
             return "有旧版"
         if st == "busy":
             return "下载中…"
+        if it.get("cloud_off"):
+            return "已就绪 · 全本地"         # 关了云端转写要看得见（它不再是常驻开关）
         return "已就绪 · 可加草稿模型" if it.get("offer_draft") else "已就绪"
     if it.get("key") == "update":
         if st == "busy":
@@ -252,18 +254,42 @@ def test_mode_title(on: bool) -> str:
     return f"测试模式：{'开' if on else '关'}"
 
 
-def cloud_asr_title(on: bool) -> str:
-    """云端转写开关上那句话。**纯函数**。（文案草稿，待作者过目）
+#: 「云端转写」不再是落点条上的常驻开关（2026-10-12 Owen：默认就是开，不必摆一颗关的按钮），
+#: 收进「语音模型」那一格的菜单里 —— 要关的人点一下就找得到，不关的人看不见它。
+CLOUD_ASR_TIP = "音频片段会发给 Groq / 阿里云转写，换更准的英文；取消勾选 = 全本地"
 
-    ⚠️ 照 `test_mode_title`：就两态、**无图标无 emoji**（作者 2026-09-30 的原话「不要 emoji」，
-       所以不用 ☁），两态字数相同 → 文字宽度一样 → 切换时不抖，也塞得进 `TEST_W`。
+
+def models_menu(it: dict, *, cloud_on: bool, locked: bool, downloading: bool = False,
+                draft_mb: str = "") -> list[dict]:
+    """点「语音模型」那一格弹出的菜单。**纯函数**。
+
+    每项 `{key, title, checked, enabled}`；`key=None` = 分隔线。模型那一项在上（这一格本来就是管模型的，
+    缺模型时点它就是为了下），「云端转写」勾选项在下。
+    ⚠️ `locked`（`CLASSLIVE_CLOUD_ASR=0`）= 显示未勾、点不动，标题说清是谁关的 —— 不显示的话
+       用户找不到它、不知道为什么这次全本地（原开关的同一条，R7）。
     """
-    return f"云端转写：{'开' if on else '关'}"
+    if it.get("state") == "todo":
+        first = {"key": "required", "title": "下载缺的模型", "enabled": not downloading}
+    elif it.get("offer_draft"):
+        first = {"key": "draft", "title": f"下载流式草稿模型（{draft_mb}）" if draft_mb
+                 else "下载流式草稿模型", "enabled": not downloading}
+    elif it.get("state") == "busy" or downloading:
+        first = {"key": "info", "title": "正在下载…", "enabled": False}
+    else:
+        first = {"key": "info", "title": "模型都已就绪", "enabled": False}
+    cloud = {"key": "cloud", "enabled": not locked, "checked": bool(cloud_on) and not locked,
+             "title": ("云端转写（已被 CLASSLIVE_CLOUD_ASR=0 关闭）" if locked
+                       else "云端转写 · 英文更准")}
+    return [{"checked": False, **first}, {"key": None}, cloud]
 
 
-#: 开关的悬停说明（`setToolTip_`）。不占布局：落点条的提示文字只剩 ~30pt 余量（见 `HINT_W`）。
-CLOUD_ASR_TIP = "音频片段会发给 Groq / 阿里云转写，换更准的英文；关掉 = 全本地"
-CLOUD_ASR_TIP_LOCKED = "已被环境变量 CLASSLIVE_CLOUD_ASR=0 强制关闭（本次启动全本地）"
+def popup_menu(menu, view) -> None:
+    """在 `view` 正下方弹出 `menu`（同步：选完才返回）。判据把它换掉，拿到菜单直接点项。"""
+    from AppKit import NSMakePoint
+    y = view.frame().size.height + 4.0 if view.isFlipped() else -4.0
+    menu.popUpMenuPositioningItem_atLocation_inView_(None, NSMakePoint(0.0, y), view)
+
+
 SWITCH_GAP = 2.0       # 落点条右侧两颗开关上下叠放时的间距
 
 
@@ -1681,8 +1707,9 @@ def build(*, on_start=None, glossary=None, sessions_dir=None, state_root=None,
     谁去写 `.test-mode` 是调用方的事）—— 传 `None` = **不建那颗开关**
     （上课中从菜单栏打开的那档：课早在录了，开关没有意义）。
     `test_mode` 是它的**当前值**（调用方从盘上读来）。
-    `on_cloud_asr` / `cloud_asr` 是「云端转写」开关的落点与当前值，写法完全照上面那对
-    （`None` = 不建；**面板不写盘**）。`cloud_asr_locked=True`（环境变量强制关）= 显示为关且点不动。
+    `on_cloud_asr` / `cloud_asr` 是「云端转写」的落点与当前值 —— 它在「语音模型」那一格的菜单里（勾选项）
+    （`None` = 那一格照旧点了就下模型、没有菜单；**面板不写盘**）。`cloud_asr_locked=True`（环境变量强制关）
+    = 显示未勾且点不动。
     `on_restart()`：就绪条上「更新」装好了新代码之后调 —— 本进程里的模块是旧的，
     调用方该退出并重开（`entry_launch.RESTART`）。`None` = 只提示用户关掉重开。
 
@@ -1905,6 +1932,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # people get important information without having to take action or leave their
     # current context.」—— 这条就是它放在卡片区正上方、而不是弹一个向导的理由。
     ready_by_key: dict = {it.get("key"): it for it in ready_items}
+    # 云端转写的当前值（菜单在「语音模型」那一格里；`cloud_asr_locked` = 环境变量强制关）
+    ca_on = [bool(cloud_asr) and not cloud_asr_locked]
+    if on_cloud_asr is not None and "models" in ready_by_key:
+        ready_by_key["models"]["cloud_off"] = not ca_on[0]
     ready_buttons: dict = {}          # key -> NSButton（下载完改它那一项的标题）
     ready_targets: list = []          # ⚠️ 必须活到面板结束（`setTarget_` 是弱引用）
 
@@ -1916,6 +1947,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         b.sizeToFit()
         b.setFrame_(NSMakeRect(b.frame().origin.x, (READY_H - 22.0) / 2.0,
                                b.frame().size.width + 8.0, 22.0))
+
+    def _set_models(**changes) -> None:
+        """改「语音模型」那一格的状态并重画标题（主线程）。⚠️ 改的是 `ready_by_key` 那份 ——
+        只换标题不换状态，下次点开的菜单还按旧状态出项（同「更新」那格 10-12 的坑）。"""
+        it = ready_by_key.setdefault("models", {"key": "models"})
+        it.update(changes)
+        _retitle("models", ready_item_text(it))
 
     def _download_required() -> None:
         """把那三件必下的补齐。**在后台线程跑**，主线程只回写文字。
@@ -1938,8 +1976,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 left = [m for m in doctor.MODELS
                         if m.required and not doctor.model_present(m.path)]
                 if not left:
-                    _later(_retitle, "models", ready_item_text(
-                        {"key": "models", "state": "ok", "detail": "已就绪"}))
+                    _later(lambda: _set_models(state="ok", detail="已就绪"))
                     _later(_status, "语音模型已经齐了")
                     return
                 for m in left:
@@ -1950,8 +1987,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                     if not r["ok"]:
                         _later(_status, r["error"])
                         return
-                _later(_retitle, "models", ready_item_text(
-                    {"key": "models", "state": "ok", "detail": "已就绪"}))
+                _later(lambda: _set_models(state="ok", detail="已就绪"))
                 _later(_status, "语音模型齐了 —— 启动！")
             except Exception as e:                         # noqa: BLE001
                 _later(_status, f"下载失败：{str(e)[:70]}")
@@ -2081,7 +2117,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if S.get("downloading"):
             return
         S["downloading"] = True
-        _retitle("models", ready_item_text({"key": "models", "state": "busy"}))
+        _prev_state = (ready_by_key.get("models") or {}).get("state", "ok")
+        _set_models(state="busy")
         _status("正在下流式草稿模型（464 MB）—— 下完下节课草稿就不再回改")
 
         def work() -> None:
@@ -2097,9 +2134,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 _later(_status, f"下载失败：{str(e)[:70]}")
             finally:
                 S["downloading"] = False
-                ready_by_key.setdefault("models", {})["offer_draft"] = not ok
-                _later(_retitle, "models", ready_item_text(
-                    {"key": "models", "state": "ok", "offer_draft": not ok}))
+                _later(lambda: _set_models(state=_prev_state, offer_draft=not ok))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -2168,6 +2203,53 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             ready_by_key["update"] = item
         _retitle("update", ready_item_text(ready_by_key.get("update") or {}))
 
+    def _toggle_cloud_asr() -> None:
+        """菜单里点了「云端转写」：翻一次、当场落盘（`entry_launch` 写 `cloud-asr.json`）；写失败不翻。"""
+        if cloud_asr_locked or on_cloud_asr is None:
+            return
+        on = not ca_on[0]
+        try:
+            ok = on_cloud_asr(on) is not False
+        except Exception:                                  # noqa: BLE001
+            ok = False
+        if not ok:
+            _status("⚠ 云端转写的选择没存下来 —— 这次不算数", 2.0)
+            return
+        ca_on[0] = on
+        _set_models(cloud_off=not on)
+        _status("云端转写已开 —— 定稿英文更准" if on else "云端转写已关 —— 这台机器上全本地", 2.0)
+
+    def _models_menu() -> None:
+        """点「语音模型」那一格：弹菜单（模型 / 云端转写）。⚠️ 主线程；菜单项 target 是弱引用 → 挂 `S`。"""
+        from AppKit import NSMenu, NSMenuItem
+        import models as models_mod
+        b = ready_buttons.get("models")
+        if b is None:
+            return
+        acts = {"required": _download_required, "draft": _download_draft, "cloud": _toggle_cloud_asr}
+        menu = NSMenu.alloc().init()
+        menu.setAutoenablesItems_(False)
+        keep = []
+        for spec in models_menu(ready_by_key.get("models") or {}, cloud_on=ca_on[0],
+                                locked=cloud_asr_locked, downloading=bool(S.get("downloading")),
+                                draft_mb=ready._mb(models_mod.NEMOTRON.mb)):
+            if spec["key"] is None:
+                menu.addItem_(NSMenuItem.separatorItem())
+                continue
+            mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(spec["title"], "act:", "")
+            mi.setEnabled_(spec["enabled"])
+            mi.setState_(1 if spec.get("checked") else 0)
+            if spec["key"] == "cloud":
+                mi.setToolTip_(CLOUD_ASR_TIP)
+            fn = acts.get(spec["key"])
+            if fn is not None:
+                tg = _target(fn)
+                mi.setTarget_(tg)
+                keep.append(tg)
+            menu.addItem_(mi)
+        S["models_menu_targets"] = keep
+        popup_menu(menu, b)
+
     def on_ready_click(key: str) -> None:
         """点就绪条上的某一项 —— 就地修那一项。
 
@@ -2185,7 +2267,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 pass
             _status("麦克风没问题就不用管它；被拒时点这里会打开系统设置")
         elif key == "models":
-            if ready_by_key.get("models", {}).get("offer_draft"):
+            if on_cloud_asr is not None:
+                _models_menu()
+            elif ready_by_key.get("models", {}).get("offer_draft"):
                 _download_draft()
             else:
                 _download_required()
@@ -2571,8 +2655,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # ⚠️ 状态活在**闭包**里，不进模块级的 `S`：`S` 是跨面板共享的，
     #    而开关的初值每次都由调用方从盘上读（`entry_launch.read_test_mode`）。
     tm_on = [bool(test_mode)]
-    # 右侧开关列：测试模式在上、云端转写在下；只有一颗时垂直居中（= 原位）
-    _n_sw = (on_test_mode is not None) + (on_cloud_asr is not None)
+    # 右侧开关列：只剩测试模式一颗（云端转写 10-12 起收进「语音模型」菜单），垂直居中
+    _n_sw = int(on_test_mode is not None)
     _sw_x = W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W - 8.0 - TEST_W
     if on_test_mode is not None:
         tm_btn = NSButton.alloc().initWithFrame_(
@@ -2620,53 +2704,6 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    （`refresh()` 按 `strip_holder["hint"]` 逐个 `setHidden_`）——
         #    那些档下右下角是「取消/确认」，多一颗开关会挤在同一块地方。
         strip_holder["hint"].append(tm_btn)
-
-    # ☁ 云端转写开关（`docs/PLAN-r2-cloud-final-asr.md` §U2）──────────────
-    # 写法同测试模式：无边框状态钮、值活在闭包里、点一下当场调回调、失败弹回原状。
-    # ⚠️ 面板不写盘 —— `entry_launch` 的回调调 `final_asr.write_config`。
-    # ⚠️ `cloud_asr_locked`（`CLASSLIVE_CLOUD_ASR=0`）= 建出来但**显示关、点不动**：
-    #    不建的话用户会找不到它、不知道为什么本次全本地；建成可点的话点了也写不进（R7），界面在撒谎。
-    ca_on = [bool(cloud_asr) and not cloud_asr_locked]
-    if on_cloud_asr is not None:
-        ca_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(_sw_x, switch_y(_n_sw - 1, _n_sw), TEST_W, BTN_H))
-        ca_btn.setTitle_(cloud_asr_title(ca_on[0]))
-        ca_btn.setBordered_(False)
-        ca_btn.setFont_(NSFont.systemFontOfSize_(12.0))
-        try:
-            ca_btn.setContentTintColor_(
-                NSColor.whiteColor().colorWithAlphaComponent_(0.92))
-            ca_btn.setToolTip_(CLOUD_ASR_TIP_LOCKED if cloud_asr_locked else CLOUD_ASR_TIP)
-            if cloud_asr_locked:
-                ca_btn.setEnabled_(False)
-        except Exception:                                  # noqa: BLE001
-            pass
-
-        def toggle_cloud_asr() -> None:
-            """点一下 = 翻一次，当场落盘；写失败弹回原状（同 `toggle_test_mode`）。"""
-            if cloud_asr_locked:
-                return
-            on = not ca_on[0]
-            ok = True
-            try:
-                ok = on_cloud_asr(on) is not False
-            except Exception:                              # noqa: BLE001
-                ok = False
-            if not ok:
-                set_status("⚠ 云端转写的选择没存下来 —— 这次不算数", 2.0)
-                return
-            ca_on[0] = on
-            try:
-                ca_btn.setTitle_(cloud_asr_title(on))
-            except Exception:                              # noqa: BLE001
-                pass
-
-        ca_t = _target(toggle_cloud_asr)
-        ca_btn.setTarget_(ca_t)
-        ca_btn.setAction_("act:")
-        strip_targets.append(ca_t)
-        strip.addSubview_(ca_btn)
-        strip_holder["hint"].append(ca_btn)            # 批量/搜索/新增档下一并藏起来
 
     # ⚠️ **一次性挂上**（见 `strip_targets` 的说明）—— 别在上面每一处各写一遍。
     strip._targets = strip_targets
@@ -3781,6 +3818,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    它们不是状态，是"别让 target 被 GC 掉"的容器。留着就等于每次
             #    开关面板多留两个对象（与上面那几条同一条纪律）。
             S["ready_targets"] = None
+            S["models_menu_targets"] = None
             S["update_gen"] = None           # 后台查更新回来时认得出「面板已经关了」
             S["search_target"] = None
             S.pop("queue", None)

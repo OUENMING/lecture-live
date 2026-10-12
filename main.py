@@ -885,7 +885,7 @@ def _maybe_notice_update() -> dict | None:
         if os.path.exists(stamp) and open(stamp, encoding="utf-8").read().strip() == cur:
             return payload                          # 这个版本已经提示过了
         echo(f"↑ 有新版本（本地 {cur}，远程领先 {behind} 个提交）"
-             f"—— 升级: cl update（变更清单见 CHANGELOG.md）")
+             f"—— 下次开课前在面板上点「更新」（终端：cl update）")
         with open(stamp, "w", encoding="utf-8") as f:
             f.write(cur)
         return payload

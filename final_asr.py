@@ -167,7 +167,7 @@ def _encode_opus(samples) -> bytes | None:
     except ImportError:
         if not _warned_no_sf:
             _warned_no_sf = True
-            echo("⚠ 缺 soundfile, 定稿走本地; `cl update` 会补")
+            echo("⚠ 缺 soundfile, 定稿走本地; 下次开课前在面板上点「更新」会补")
         return None
     try:
         buf = io.BytesIO()

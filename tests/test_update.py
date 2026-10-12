@@ -1122,6 +1122,22 @@ with _mock.patch.object(update, "_finish_in_child", _fake_fin):
     check("⭐ D12 只同意到 0.0.2 -> 更新的 manual 0.0.3 不自动装",
           (_cloneE / "VERSION").read_text().strip() == "0.0.2")
 
+# 两节课间隔不到 1 小时：第 1 节退出时那次检查刚戳过 last_check（manual 跳过），
+# 第 2 节课前点了「下课后自动装」—— 第 2 节退出时不能被限频挡掉（2026-10-12 外部审查）。
+_tmpF, _seedF, _cloneF = new_world()
+release(_seedF, "0.0.2", "manual")
+with _mock.patch.object(update, "_finish_in_child", _fake_fin):
+    (update.STATE_DIR / update.EXIT_CONSENT).unlink(missing_ok=True)
+    _stamp(); update.auto_update()
+    check("D16a 前提：第 1 节退出时 manual 没装、last_check 刚戳过",
+          (_cloneF / "VERSION").read_text().strip() == "0.0.1" and (update.STATE_DIR / "last_check").exists())
+    update.defer_to_exit("0.0.2")
+    _r = update.auto_update()
+    check("⭐⭐ D16 用户点过「下课后自动装」-> 一小时内的第二次退出也照装（不受限频）",
+          (_cloneF / "VERSION").read_text().strip() == "0.0.2", str(_r))
+    _r = update.auto_update()
+    check("D16b 同意兑现后限频照旧生效", _r.get("reason", "").startswith("限频"), str(_r))
+
 # ---- finish()：只做必做的，`.app` 重建与可选模型绝不在这里 ----
 _ran = []
 _all_steps = [{"key": k, "label": k, "detail": "", "why": ""} for k in ("deps", "models", "draft_model", "app")]

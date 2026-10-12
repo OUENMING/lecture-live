@@ -710,8 +710,11 @@ def auto_update() -> dict:
 
     try:
         # ---- 限频 ----
+        # 用户在面板上点过「下课后自动装」就不限频：两节课间隔不到一小时时，第一节退出那次检查
+        # 刚戳过 last_check，第二节退出要兑现的那次同意会被静默挡掉（2026-10-12 外部审查）。
         stamp = STATE_DIR / "last_check"
-        if stamp.exists() and (time.time() - stamp.stat().st_mtime) < RATE_LIMIT_S:
+        if (not _consented_version() and stamp.exists()
+                and (time.time() - stamp.stat().st_mtime) < RATE_LIMIT_S):
             return {**out, "skipped": True, "reason": "限频（一小时一次）"}
         # ---- 并发保护（陈旧锁自过期）：与面板「现在更新」共用同一把锁 ----
         _lk = _acquire_lock()

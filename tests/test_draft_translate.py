@@ -1,4 +1,4 @@
-import os, sys, unittest
+import os, queue, sys, unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import draft_translate as D
@@ -118,6 +118,50 @@ class Fakes:
             translate=self.translate, output=lambda s, g, z: self.out.append((s, g, z)),
             mode_ok=lambda: self.mode, should_yield=lambda: self.yielding,
             context=lambda: self.ctx, stats=self.stats)
+
+
+class SubmitKeepsNewest(unittest.TestCase):
+    """⭐⭐ `submit()` 顶掉旧项时，**新项必须真的入队**（2026-10-12 全仓审查，核实过）。
+
+    ⚠️ 根因：原来「清旧」和「入新」合在一个 `try` 里 —— `put_nowait` 抛 `Full` 之后，
+       消费者线程（`step()` 的 `get(timeout=0.3)`）完全可能刚好把旧项取走，
+       于是 `get_nowait()` 抛 `Empty` → 被 `except (queue.Empty, queue.Full)` 吞掉 →
+       **新项根本没入队**，而队列此刻是空的、完全放得下。
+       结果与「只留最新」的意图**正好相反** —— 丢的偏偏是最新那条。
+    """
+
+    @staticmethod
+    def _bare():
+        return D.DraftTranslator(
+            translate=lambda *a, **k: "", output=lambda s, g, z: None,
+            mode_ok=lambda: True, should_yield=lambda: False,
+            context=lambda: "", stats={})
+
+    def test_new_item_lands_when_consumer_drains_mid_swap(self):
+        t = self._bare()
+        landed: list = []
+
+        class Q:
+            """精确复现那次交错：第 1 次 put 说满、get 说空（消费者刚把旧项取走）、
+            第 2 次 put 必须被接受。"""
+
+            def __init__(self):
+                self.puts = 0
+
+            def put_nowait(self, item):
+                self.puts += 1
+                if self.puts == 1:
+                    raise queue.Full
+                landed.append(item)
+
+            def get_nowait(self):
+                raise queue.Empty
+
+        t._q = Q()
+        t.submit(7, 3, "最新的那句")
+        # 改坏：把「清旧 / 入新」合回一个 try -> landed 为空 -> 这条红。
+        self.assertEqual(landed, [(7, 3, "最新的那句")],
+                         "⚠️ 新草稿被吞了 —— 与「只留最新」的意图正好相反")
 
 
 class TranslatorStep(unittest.TestCase):

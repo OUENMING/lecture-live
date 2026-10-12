@@ -39,7 +39,14 @@ sys.exit(rc)
 
 def run(action: str) -> tuple[int, str]:
     with tempfile.TemporaryDirectory() as tmp:
-        env = {**os.environ, "ROOT": ROOT, "TMP": tmp, "ACTION": action}
+        # ⚠️⚠️ **写端要整套隔离**（`CLAUDE.md` 那条硬规矩：读端写端都要换）：
+        #   · `HOME` —— `paths.STATE_ROOT` 是**在 import 时**从它算出来的常量。不换的话
+        #     `entry_launch.main()` 里那句 `keyentry.clear_legacy_key()` 会去动**真的**
+        #     `~/.classlive/credentials`（把用户自己的 key 挪到 .bak）。**原来只换了 `CFG`。**
+        #   · `CLASSLIVE_NO_AUTO_UPDATE` —— 关掉「关掉面板就在后台下 464 MB 草稿模型」
+        #     那条路：本用例的 `action="close"` 正好落在 `CANCELLED` 上，会真的触发。
+        env = {**os.environ, "ROOT": ROOT, "TMP": tmp, "ACTION": action,
+               "HOME": tmp, "CLASSLIVE_NO_AUTO_UPDATE": "1"}
         p = subprocess.run([sys.executable, "-c", CHILD], env=env, capture_output=True,
                            text=True, timeout=30)
         return p.returncode, p.stdout

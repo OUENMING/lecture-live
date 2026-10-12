@@ -27,11 +27,23 @@ def block(msg: str) -> None:
     sys.exit(2)
 
 
-# 1. 推送 / tag / release（`git tag -l` 之类只读的放行）
-if re.search(r"\bgit\s+push\b|\bgit\s+tag\s+(-a\s+)?v?\d|\bgh\s+release\s+create\b", cmd) \
-        and "CLASSLIVE_OWEN_OK=1" not in cmd and "--dry-run" not in cmd:
+# 1. 推送 / 打 tag / release（`git tag -l` 之类只读的放行）
+PUSH = re.compile(r"\bgit\s+push\b|\bgit\s+tag\s+(-a\s+)?v?\d|\bgh\s+release\s+create\b")
+
+# ⚠️⚠️ **按「段」判，不按「整串」判**（2026-10-12 全仓审查指出，我实测确认可绕）：
+#    原来只看「整条命令文本里出现过 `CLASSLIVE_OWEN_OK=1` / `--dry-run`」—— 实测三条都能绕：
+#      · `git push --dry-run origin main && git push origin main` → 后半段**真的推**；
+#      · `git push origin main # CLASSLIVE_OWEN_OK=1`（写在注释里）→ 整条放行；
+#      · `echo CLASSLIVE_OWEN_OK=1; git push origin main` → 同样放行。
+#    放行令牌必须**贴着它要放行的那一段**（段首赋值形式），`--dry-run` 也只看本段。
+for _seg in re.split(r"&&|\|\||[;|\n]", cmd):
+    if not PUSH.search(_seg):
+        continue
+    if re.match(r"\s*(export\s+)?CLASSLIVE_OWEN_OK=1\s", _seg) or "--dry-run" in _seg:
+        continue
     block("⛔ 推送 / 打 tag / 发 release 要作者先点头（更新日志也要先给他看）。"
-          "他明确同意后，在命令前加 CLASSLIVE_OWEN_OK=1 再跑。")
+          "他明确同意后，**在那条命令自己的前面**加 CLASSLIVE_OWEN_OK=1 再跑"
+          "（整条命令里别处出现过不算数）。")
 
 # 2. 子代理跑 main.py / cl（只认「当命令执行」：`python… main.py`，或行首 / ; & | 之后的 `cl`、`./cl`）
 RUNS_APP = re.compile(r"python[\w.]*\s+(\S*/)?main\.py\b|(^|[;&|(]\s*)(\S*/)?cl(-x)?(\s|$)")

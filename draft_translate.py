@@ -87,10 +87,20 @@ class DraftTranslator:
         try:
             self._q.put_nowait(item)
         except queue.Full:                                 # 只留最新
+            # ⚠️⚠️ **「清旧」和「入新」必须各自容错，不能合一个 try**（2026-10-12 全仓审查，
+            #    核实过是真的、而且是活的）：`put_nowait` 抛 `Full` 之后，消费者线程
+            #    （`step()` 那个 `get(timeout=0.3)`）**完全可能刚好把旧项取走**，
+            #    于是 `get_nowait()` 抛 `Empty` → 被那个 `except` 一起吞掉 →
+            #    **新项根本没入队** —— 而队列此刻其实是空的、完全放得下。
+            #    结果与「只留最新」的意图**正好相反**：丢的偏偏是最新那条。
             try:
-                self._q.get_nowait(); self._q.put_nowait(item)
-            except (queue.Empty, queue.Full):
-                pass
+                self._q.get_nowait()
+            except queue.Empty:
+                pass                                       # 消费者刚取走 = 队列已空，放得下
+            try:
+                self._q.put_nowait(item)
+            except queue.Full:
+                pass                                       # 单生产者，理论到不了这儿
 
     def step(self, timeout: float = 0.3) -> bool:
         """最多处理一条; 取到了(不论是否真的翻了)返回 True。绝不抛。"""

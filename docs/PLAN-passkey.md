@@ -26,7 +26,7 @@ DeepSeek 的钱由 Owen 付；Owen 能按人限额、吊销、看用量。原生
 | 客户端已有持久 `install-id`，每次定稿请求带 `X-ClassLive-Install` | `final_asr.install_id`、`paths.py` |
 | Worker 等上游的时间不计 CPU（免费档 10 ms） | developers.cloudflare.com/workers/platform/limits（「Waiting on network requests … does not count toward CPU time」） |
 | DeepSeek 流式加 `stream_options.include_usage` 时最后一块带 usage（含 `prompt_cache_hit_tokens`） | api-docs.deepseek.com；`CloudTranslator(collect_usage=True)` 已实现读取 |
-| **一节课 DeepSeek 花多少钱：未测** | sessions 报告里没有 token 字段 → §5 第 0 步先量 |
+| **一节课 DeepSeek 约 60 万 token、$0.08（闲时）/ $0.16（高峰）** | 2026-10-12 实测，只含实时翻译（定稿 + 草稿），见 §5 第 0 步 |
 
 ## 2. 结构（先收口，再接网关）
 
@@ -62,7 +62,15 @@ DeepSeek 的钱由 Owen 付；Owen 能按人限额、吊销、看用量。原生
 
 ## 5. 实施顺序（每步可单独提交、单独验）
 
-0. **先量钱**：用 `collect_usage=True` 跑一节课回放，记 token 入 / 出 / 缓存命中 → 定默认 `daily_tokens`。
+0. ✅ **先量钱**（2026-10-12 做完）：10-09 那节 ECON10770（48 分钟）回放，课中段各抽 120 条，`deepseek-flash`、
+   `--context 5`、`ctx_chunk` 10、草稿带上下文，`collect_usage=True`：
+   - 定稿翻译每次：命中 272 / 未命中 366 / 输出 30 token；草稿翻译每次：命中 ≈1 / 未命中 220 / 输出 20（**草稿几乎不命中缓存**）。
+   - 次数：定稿 633；草稿按现行策略 `draft_gap_replay.py` 的 `novel` 行 721 次。
+   - 合计 ≈ 命中 17 万 + 未命中 39 万 + 输出 3.4 万 ≈ **60 万 token / 节**。按 2026-10-12 官方价（flash 闲时：命中 $0.003、
+     未命中 $0.15、输出 $0.60 每百万；UTC 周一至五 01–04、06–10 点是高峰、价 ×2）≈ **$0.08 / 节，高峰 $0.16**。
+     未命中那 39 万占了 ¾ 的钱，草稿占其中四成。
+   - **没算**：整课精修、实时总结、❓ 一句话、讲解 / 追问（都是一节课几次到几十次）。真数等 3.9.1 后看 `cl_admin.py stats`。
+   - 默认仍是**不限额**（Owen 已定）；要设的话，`daily_tokens` 200 万 ≈ 一天三节课。
 1. `llm_client.py` 收口（无行为变化；现有测试全绿 + 新测试：5 处都走它）。
 2. Worker：码表 + `/v1/chat/completions` 透传 + 记账 + admin 接口（`test.mjs` 覆盖：验码、吊销、超额、设备上限、usage 记账、只放行白名单模型）。
 3. 客户端路由 + 定稿用码 + 429/403 降级与提示。

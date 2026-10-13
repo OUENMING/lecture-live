@@ -89,7 +89,7 @@ def _view_classes():
 class TranscriptView:
     def __init__(self, parent, make_label, font_zh, font_en, font_en_big,
                  width, pad, en_h, gap, zh_h, row_h, max_scroll_h,
-                 on_follow_change=None, *, measure):
+                 on_follow_change=None, *, measure, wrap_zh=None):
         ScrollCls, DocCls = _view_classes()
         self._parent = parent
         self._make_label = make_label
@@ -104,6 +104,13 @@ class TranscriptView:
         #    注入才能既拿到同一把尺、又不引入依赖。
         #    用途只有一个: 把"文本超出档位行数"这个**静默裁切**变成可观测(见 _set_text)。
         self._measure = measure
+        # 中文折行(`wrap_zh(text, label_w, final) -> 插好换行的文本`), 见 linebreak.py。
+        # 注入而不是在这里 import: 它要量字宽, 尺子(字体)归 overlay 管。None = 交给 AppKit 逐字折。
+        self._wrap_zh = wrap_zh
+        self._wrap_cache: dict = {}
+        self._wrap_mode = font_zh[2]          # 中文那格的折行方式(按词折), 英文两行时借用
+        self._line_h: dict = {}               # 字体 -> 一行高(实测, 懒量)
+        self._en2_cache: dict = {}
         # 观测计数器: 超出档位行数的次数。⚠️ 设它是为了**不再静默** ——
         # 档位行数来自一个闭样本(p100 of 4797 句, 见 overlay.py 的行数分档注释),
         # 一旦真实文本比样本更长, 原来会**无声无息**被裁掉(既不报错也不给省略号)。
@@ -125,6 +132,7 @@ class TranscriptView:
         # 时钟与「减弱动态效果」都可注入: 位移是时间的纯函数, 探针可以确定性地断言每一帧。
         self._clock = time.monotonic
         self._reduce_motion = motion.reduce_motion
+        self._animate_ok = lambda: True   # 宿主说「有人逐帧推 tick 吗」; 没有就直接落位(见 Overlay)
         self._painted_count = 0     # 上一次 _paint 时的行数(含实时行) -> 判「多了几行」
         self._count_reset = False   # 整体换内容(replace_items)那一轮不算「多了几行」
         self._roll_t0 = None        # 动画起跑时刻; None = 没在动
@@ -174,11 +182,18 @@ class TranscriptView:
     def _add_slot(self) -> None:
         zh = self._make_label(18.0, self._font_zh[1], self._lines, self._font_zh[2])
         en = self._make_label(11.0, self._font_en[1], 1, self._font_en[2])
+        # 英文小字可能借中文那格的空行排成两行(见 _en_two_lines)。行尾省略号靠这个开关:
+        # TruncatingTail 会**强制单行**, 所以换成「按词折 + 最后一行截断」。
+        try:
+            en.setLineBreakMode_(self._wrap_mode)
+            en.cell().setTruncatesLastVisibleLine_(True)
+        except Exception:                                   # noqa: BLE001
+            pass
         zh.setHidden_(True); en.setHidden_(True)
         self._doc.addSubview_(zh)
         self._doc.addSubview_(en)
         self._slots.append({"zh": zh, "en": en, "level": None, "hidden": True,
-                            "en_top": None})
+                            "en_top": None, "en2": False})
         self._cache.append({})
 
     def _ensure_pool(self, view_h: float) -> None:
@@ -462,9 +477,61 @@ class TranscriptView:
             # 而大字位的两个字体对象是同一个(18pt Medium), 所以这里恒返回 False。
             return en, zh, False
         if zh:
-            return zh, en, True
+            return self._shape_zh(zh, final=r < len(self._items)), en, True
         # 翻译关闭/失败时 zh 为空: 把英文提到大字行, 否则大字行空白
         return en, "", False
+
+    def _lh(self, font) -> float:
+        h = self._line_h.get(id(font))
+        if h is None:
+            h = self._line_h[id(font)] = float(self._measure("中Hg", 1e4, font)) or 1.0
+        return h
+
+    def _en_line_h(self) -> float:
+        return self._lh(self._font_en[0])
+
+    def _en_two_lines(self, big: str, sub: str, is_zh: bool) -> bool:
+        """这一行的英文要不要排两行。
+
+        英文小字原来**强制单行**、装不下就截成「…」: 3 节真课 1459 句里, 默认宽度
+        有 118 句(8%)被截, 窄窗(408)有 387 句(27%)。行高是固定档位、不能为它加高,
+        但**中文多数只用一行**(默认宽度 90%), 那一格里空着一行 —— 英文借它就行。
+        条件: 英文一行装不下、且中文比档位少用至少一行。中文也占满档位时照旧截断。
+        """
+        if not (EN_LINE_ON_TOP and is_zh and sub) or self._doc_w < 40.0:
+            return False
+        key = (sub, big, self._doc_w, self._lines)
+        hit = self._en2_cache.get(key)
+        if hit is not None:
+            return hit
+        w = self._doc_w - 4.0
+        en_n = round(self._measure(sub, w, self._font_en[0]) / self._en_line_h())
+        if "\n" in big:
+            zh_n = big.count("\n") + 1
+        else:
+            zh_n = round(self._measure(big, w, self._font_zh[0]) / self._lh(self._font_zh[0]))
+        out = en_n >= 2 and zh_n <= self._lines - 1
+        if len(self._en2_cache) > 400:
+            self._en2_cache.clear()
+        self._en2_cache[key] = out
+        return out
+
+    def _shape_zh(self, zh: str, *, final: bool) -> str:
+        """中文按词组折行(定稿再避开孤尾)。**按 (文本, 宽度, 是否定稿) 记忆化** ——
+        `_paint` 每帧都会对可见行走到这里, 而折一句要量十几次字宽。"""
+        if self._wrap_zh is None or self._doc_w < 40.0:
+            return zh
+        key = (zh, self._doc_w, final)
+        out = self._wrap_cache.get(key)
+        if out is None:
+            try:
+                out = self._wrap_zh(zh, self._doc_w, final)
+            except Exception:                       # noqa: BLE001  折行是锦上添花, 坏了就交还 AppKit
+                out = zh
+            if len(self._wrap_cache) > 400:
+                self._wrap_cache.clear()
+            self._wrap_cache[key] = out
+        return out
 
     def _count(self) -> int:
         return len(self._items) + (1 if self._live_visible else 0)
@@ -532,6 +599,8 @@ class TranscriptView:
         s["level"] = level
         s["en_top"] = EN_LINE_ON_TOP and is_zh
         s["w"] = doc_w
+        s["en2"] = self._en_two_lines(big, sub, is_zh)
+        s["en"].setMaximumNumberOfLines_(2 if s["en2"] else 1)
         self._geom(j)
         self._set_text(j, "zh", big, self._font_zh[0] if is_zh else self._font_en_big[0])
         self._set_text(j, "en", sub, self._font_en[0])
@@ -544,7 +613,10 @@ class TranscriptView:
         每一帧(_step_roll)都走这里, 所以动画期间不会有第二个人把 frame 改回去
         (`PLAN-roll-motion.md` §5.1「谁拥有 frame」)。"""
         s = self._slots[j]
-        level, w = s["level"], s.get("w", self._width)
+        # 宽度取文档**当前**宽度, 不取摆放时记下的: 上滚每帧都会重写 frame,
+        # 用旧值会把拖宽过的面板里的行缩回去。
+        level = s["level"]
+        w = self._doc_w if self._doc_w > 0 else s.get("w", self._width)
         y = level * self._row_h - self._roll_off
         if s["en_top"]:                              # 英文小字在上, 中文大字在下
             s["en"].setFrame_(((0.0, y + self._zh_h + self._gap), (w, self._en_h)))
@@ -552,6 +624,12 @@ class TranscriptView:
         else:                                        # 大字在上
             s["en"].setFrame_(((0.0, y), (w, self._en_h)))
             s["zh"].setFrame_(((0.0, y + self._en_h + self._gap), (w, self._zh_h)))
+        if s["en_top"] and s.get("en2"):
+            # 英文借中文那格的一行: 英文框往下长一行, 中文框顶边跟着降 —— 行距不变
+            # (所有行等高是回收池的命门), 中文只是从这一格的空行里让出位置。
+            x = self._en_line_h()
+            s["en"].setFrame_(((0.0, y + self._zh_h + self._gap - x), (w, self._en_h + x)))
+            s["zh"].setFrame_(((0.0, y), (w, self._zh_h - x)))
         a = self._roll_alpha if level < self._roll_fade_n else 1.0
         if s.get("alpha", 1.0) != a:
             s["zh"].setAlphaValue_(a); s["en"].setAlphaValue_(a)
@@ -565,6 +643,9 @@ class TranscriptView:
     # 位移的是整块, 不是各自补间(两行各动各的就是「字在打架」, 方案 §2)。
     # 减弱动态效果: 不位移, 最新那几行淡入(Apple HIG 的原话是「用淡入代替 x/y/z 轴的过渡」)。
     def _start_roll(self, n: int) -> None:
+        if not self._animate_ok():
+            self._end_roll()                # 没人推帧: 不起跑, 直接是终态
+            return
         now = self._clock()
         if self._reduce_motion():
             self._end_roll()
@@ -643,7 +724,8 @@ class TranscriptView:
             self._expected_origin = clip.bounds().origin.y
         self._pending_appends = 0
 
-        if abs(self._doc_h - doc_h) > 0.5 or abs(self._doc_w - doc_w) > 0.5:
+        width_changed = abs(self._doc_w - doc_w) > 0.5
+        if abs(self._doc_h - doc_h) > 0.5 or width_changed:
             self._doc_h, self._doc_w = doc_h, doc_w
             self._doc.setFrame_(((0.0, 0.0), (doc_w, doc_h)))
 
@@ -675,12 +757,19 @@ class TranscriptView:
 
         # 文案刷新: _place 已写过新放入的槽位, 这里只需刷保留槽位 ——
         # 已定稿的行文本不变(缓存跳过), 真正会写的是流式中的实时行。
+        if width_changed:
+            # 面板拖宽 / 拖窄: 留在原槽位的行也要跟着换宽度 —— _place 只摆**新进来**的,
+            # 不重摆的话老行停在旧宽度上(拖宽了还按窄的折行)直到滚出视口。
+            for j in keep.values():
+                self._geom(j)
         for lv, j in keep.items():
             big, sub, is_zh = self._row_texts(count - 1 - lv)
             # 竖排顺序会随内容变(实时行从"还没译文"变成"有译文")。变了必须重摆:
             # _place 只在槽位**新进入**时调用, 光刷文本会把 frame 留在旧顺序上,
             # 同屏于是出现"有的英文在上、有的在下"。
-            if self._slots[j].get("en_top") != (EN_LINE_ON_TOP and is_zh):
+            if (self._slots[j].get("en_top") != (EN_LINE_ON_TOP and is_zh)
+                    or self._slots[j].get("en2") != self._en_two_lines(big, sub, is_zh)):
+                # 英文一行 / 两行也随内容变(流式中文长到占满档位时英文要让回一行)
                 self._layout(j, lv, doc_w, big, sub, is_zh)
                 continue
             self._set_text(j, "zh", big,

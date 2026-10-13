@@ -475,8 +475,14 @@ def main() -> int:
                 _hit = [b.title() for b in ov._bar
                         if not b.isHidden() and b.frame().origin.x < _bx]
                 check(f"⭐⭐ 宽 {_w:.1f} 时章节条**不压到任何可见按钮**", not _hit, str(_hit))
-                check(f"⭐ 宽 {_w:.1f} 时章节条从左边距起", _lb.frame().origin.x == overlay.PAD,
+                # 2026-10-13 起最左是「在听」小点, 章节条紧跟它(边距 + 点径 + 间隙)
+                check(f"⭐ 宽 {_w:.1f} 时章节条紧跟「在听」小点",
+                      _lb.frame().origin.x == overlay.PAD + overlay.EAR_D + overlay.EAR_GAP,
                       str(_lb.frame().origin.x))
+                _ef = ov._ear.frame()
+                check(f"⭐ 宽 {_w:.1f} 时「在听」小点在左边距、不与章节条重叠",
+                      _ef.origin.x == overlay.PAD and _ef.origin.x + _ef.size.width < _lb.frame().origin.x,
+                      str(_ef))
                 # 改坏：把 `math.floor(avail)` 换成 `avail` -> **在 455.5 那一档**红。
                 check(f"⭐⭐ 宽 {_w:.1f} 时章节条宽度是**整数**（`floor` 生效；不取整文字会发虚）",
                       float(_lb.frame().size.width).is_integer(),

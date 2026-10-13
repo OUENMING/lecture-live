@@ -195,8 +195,16 @@ def build(on_done=None, pages=PAGES):
         lay.setBorderWidth_(1.0)
         content.addSubview_(badge)
         icon = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, BADGE, BADGE))
-        icon.setSymbolConfiguration_(
-            NSImageSymbolConfiguration.configurationWithPointSize_weight_(SYMBOL_PT, 0.0))
+        _cfg = NSImageSymbolConfiguration.configurationWithPointSize_weight_(SYMBOL_PT, 0.0)
+        try:
+            # 分层渲染(macOS 12+): 符号的次要部件自动淡一档, 单色白图标有了前后层次。
+            # 老系统没有这个 API → 留在单色。
+            _cfg = _cfg.configurationByApplyingConfiguration_(
+                NSImageSymbolConfiguration.configurationWithHierarchicalColor_(
+                    white.colorWithAlphaComponent_(0.92)))
+        except Exception:                                 # noqa: BLE001
+            pass
+        icon.setSymbolConfiguration_(_cfg)
         icon.setContentTintColor_(white.colorWithAlphaComponent_(0.92))
         badge.addSubview_(icon)
 

@@ -1364,6 +1364,7 @@ class R14b_FinalRollsIn(unittest.TestCase):
         o._clock = clock
         o._tv._clock = clock
         o._tv._reduce_motion = lambda: False
+        o._tv._animate_ok = lambda: True             # 假装主循环在 pump(真机由 Overlay.pump 记时)
         for i in range(4):                           # 先铺几行历史, 然后让入场动画走完
             o.finalize(f"line {i}", f"第{i}行")
         self.now[0] += 1.0
@@ -1475,6 +1476,57 @@ class R14b_FinalRollsIn(unittest.TestCase):
         self.assertEqual(o._draft_zh.stringValue(), "")
         self.assertEqual(o._draft_lbl.stringValue(), "")
         self.assertEqual(o._draft_zh.alphaValue(), 1.0, "淡完要还原透明度, 否则下一条草稿是隐形的")
+
+    def test_no_pump_no_animation(self):
+        """收尾冲刷循环只 drain() 不 pump(): 那时起跑的上滚会停在「新行藏在底边下」,
+        末句看不见。没人推帧时必须直接落到终态, 草稿也直接清掉。"""
+        o = self._overlay()
+        o._tv._animate_ok = lambda: False
+        o.add_draft("last words")
+        o.finalize("Last words.", "最后一句。")
+        self.assertFalse(o._tv.rolling, "没人 pump 还起跑 → 末句会卡在视口外")
+        for lv, d in self._visible_offsets(o._tv):
+            self.assertEqual(d, 0.0)
+        self.assertIsNone(o._draft_fade_t0)
+        self.assertEqual(o._draft_lbl.stringValue(), "")
+
+    def test_liveness_follows_real_pump(self):
+        """判据本身: Overlay 的「有人 pump 吗」由 pump() 记时, 不是写死的。"""
+        try:
+            from overlay import Overlay
+        except Exception as e:                       # noqa: BLE001
+            self.skipTest(f"AppKit 不可用, 跳过: {type(e).__name__}: {e}")
+        o = Overlay()
+        self.addCleanup(o.close)
+        now = [50.0]
+        o._clock = lambda: now[0]
+        self.assertFalse(o._tv._animate_ok(), "从没 pump 过就不该算活着")
+        o.pump()
+        self.assertTrue(o._tv._animate_ok())
+        now[0] += 1.0
+        self.assertFalse(o._tv._animate_ok(), "停 pump 1 s 了还算活着")
+
+    def test_rows_follow_panel_width(self):
+        """拖宽面板后, 已在屏上的行也要换成新宽度(上滚每帧会重写 frame, 不能用摆放时的旧宽度)。"""
+        o = self._overlay()
+        tv = o._tv
+        old_w = tv._doc_w
+        clip = tv._scroll.contentView()
+        tv._scroll.setFrame_(((tv._pad, tv._scroll.frame().origin.y),
+                              (old_w + 80.0, tv._scroll.frame().size.height)))
+        tv.mark_dirty(urgent=True)
+        new_w = clip.bounds().size.width
+        self.assertGreater(new_w, old_w + 40)
+        for s in tv._slots:
+            if s["level"] is not None and not s["hidden"]:
+                self.assertAlmostEqual(s["zh"].frame().size.width, new_w, places=1,
+                                       msg="老行停在旧宽度上")
+        o.finalize("x", "新")                         # 上滚的每一帧也不许把宽度改回去
+        self.now[0] += 0.1
+        tv.tick()
+        for s in tv._slots:
+            if s["level"] is not None and not s["hidden"]:
+                self.assertAlmostEqual(s["zh"].frame().size.width, new_w, places=1)
 
     def test_new_draft_cancels_fade(self):
         o = self._overlay()

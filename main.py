@@ -2186,6 +2186,8 @@ def run(args) -> None:
         if callable(_over):
             _over(draft_view.over_stream())
 
+    _hear = getattr(ui, "hearing", None)      # 顶栏「在听」小点; 定义在 try 外 —— finally 要用
+    _hear = _hear if callable(_hear) else None
     try:
         _dev = {"wall": time.time(), "next": 0.0}
         # 逐块记录（现场采集开着才有）：原始峰值 / 实际增益 / 当场 VAD。见 livemetrics「逐块记录」
@@ -2199,6 +2201,8 @@ def run(args) -> None:
             chunk = src.poll()
             if chunk is not None and len(chunk):
                 seg.accept(chunk)
+                if _hear is not None:
+                    _hear(seg.is_speaking)        # 顶栏「在听」小点; 只在变了时才动
                 if tester is not None:
                     tester.note_chunk(chunk)
                 if callable(_last_block):
@@ -2237,6 +2241,11 @@ def run(args) -> None:
         # ⚠️ 判据**不能**用 running: running 要到下面内层 finally 才清, 收尾
         # 期间它一直是 set, 守卫等于没写。
         stopping.set()
+        if _hear is not None:            # 停了就别再亮着「在听」(收尾那 15 s 窗口还在)
+            try:
+                _hear(False)
+            except Exception:                       # noqa: BLE001
+                pass
         # ⚠️⚠️ **不再先撤悬浮窗**（2026-09-28 把这个决定反过来）。
         #    原来关它的理由是「后面要等冲刷 + 阻塞问是否存笔记，窗口留着不动 =
         #    点了 ✕ 也卡死」。那个理由**只在收尾阻塞主线程时才成立** —— 现在收尾

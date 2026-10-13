@@ -286,6 +286,23 @@ def _measure_text_h(text: str, width: float, font) -> float:
         NSMakeSize(width, 1e7), NSStringDrawingUsesLineFragmentOrigin).size.height
 
 
+def _text_width(text: str, font) -> float:
+    """单行排版宽度(px), AppKit 实测。"""
+    from AppKit import NSAttributedString, NSFontAttributeName
+    return NSAttributedString.alloc().initWithString_attributes_(
+        text, {NSFontAttributeName: font}).size().width
+
+
+def _wrap_zh(text: str, label_w: float, font, final: bool) -> str:
+    """转录区中文按词组折行(`linebreak.wrap`)。宽度口径与 NSTextField 对齐:
+    单元格左右各留 2px → 实排可用 `label_w - 4`; 我们再留 2px 余量取 `label_w - 6`,
+    宁可少放半个字也不能让 AppKit 再折一次(多出的那行会被档位静默裁掉)。"""
+    import linebreak
+    natural = max(1, int(round(_measure_text_h(text, label_w - 4, font) / LINE_H)))
+    return linebreak.wrap(text, lambda s: _text_width(s, font), label_w - 6,
+                          natural_lines=natural, final=final)
+
+
 def rollup_lines(text, height, line_h, prev_base_len=None):
     """草稿文本 -> 至多两行的显示串(行间插 "\\n"), 外加底行长度供下帧滞回。
 
@@ -429,6 +446,10 @@ OUTLINE_DIVIDER = "— 上次看到这里 —"
 #: ⚠️ 用白色而**不是**暖黄 —— 暖黄已被术语行占着（`_gloss_lbl`），HUD 章说「use color sparingly」。
 CHAPTER_FONT_SIZE = 12.0
 CHAPTER_TEXT_ALPHA = 0.65
+EAR_D = 6.0                       # 「在听」小点直径(pt)
+EAR_GAP = 6.0                     # 小点与章节条之间
+EAR_ON_ALPHA = 0.85               # 听到人声
+EAR_QUIET_ALPHA = 0.22            # 安静(仍看得见: 「它在, 只是现在没人说话」)
 #: 章节条**至少**要有这么宽才显示（计划 §9.8 的三个条件之一）。
 #: ⚠️ 低于它时标签和点击区**一起隐藏** —— 半个标题比没有标题更让人分心，
 #:    而且点击区太小会变成"点不中"的挫败源。
@@ -989,7 +1010,8 @@ class Overlay:
             ve, self._label, f_zh, f_en, f_big,
             self._width, PAD, ROW_EN_H, ROW_GAP, ROW_ZH_H, ROW_H,
             max_scroll_h=self._expanded_h,
-            measure=_measure_text_h)
+            measure=_measure_text_h,
+            wrap_zh=lambda t, w, final, _f=f_zh[0]: _wrap_zh(t, w, _f, final))
         self._tv.set_collapsed(True)      # 初始收回态: 滚轮必须从一开始就被吞掉
         # 载入的宽度可能是窄窗(上次拖过) -> 立刻按它定行尺寸, 否则会先用 2 行的
         # 默认尺寸画一帧, 再跳成 4/5 行。默认宽度下这个调用是空操作。
@@ -1011,6 +1033,12 @@ class Overlay:
         self._draft_zh_base_len = None
         ve.addSubview_(self._draft_zh)
         self._clock = time.monotonic      # 动效的时钟(可注入: 测试按帧断言)
+        # ⚠️ 动画**只在有人逐帧推它时**才起跑。收尾冲刷循环(main.py 文件播完 / ✕ 之后
+        #    那 15 s)只调 drain()、不调 pump() —— 那时起跑的上滚会停在「新行藏在底边下」
+        #    那一帧, 末句看不见, 直到收尾卡开始 pump 才跳到终点。判据: 最近 0.25 s 内
+        #    pump 过。冲刷循环里直接落到终态。
+        self._last_pump_t = -1e9
+        self._tv._animate_ok = lambda: self._clock() - self._last_pump_t < 0.25
         self._draft_fade_t0 = None        # 草稿让位的淡出起点, 见 _render_draft
         self._draft_shown = False         # 上一帧草稿栏有没有字
 
@@ -1075,6 +1103,21 @@ class Overlay:
         # 透明点击区盖在术语行上(最后加入 = 在最上层)。
         self._gloss_hit = _make_click_view(self._on_gloss_click)
         ve.addSubview_(self._gloss_hit)
+
+        # ---- 「在听」小点 ----
+        # 顶栏最左一颗 6pt 圆点: 听到人声(VAD 判有声)时亮、安静时暗。为的是开课头几秒 ——
+        # 首个中文要 ~2.4 s 才出来, 那之前面板是空的, 看不出它到底在不在收音。
+        # 只有两态、只在**变了**时动一次(motion.STATE_S 淡变), 不做随音量起伏的波形:
+        # 那要逐帧重画, 而 3.9.4 刚量过比 3.9.3 多耗电 21%。
+        from AppKit import NSView as _NSView
+        self._ear = _NSView.alloc().initWithFrame_(NSMakeRect(0, 0, EAR_D, EAR_D))
+        self._ear.setWantsLayer_(True)
+        self._ear.layer().setCornerRadius_(EAR_D / 2)
+        self._ear.layer().setBackgroundColor_(NSColor.whiteColor().CGColor())
+        self._ear.layer().setOpacity_(EAR_QUIET_ALPHA)
+        self._ear.setToolTip_("亮 = 正在收到人声")
+        ve.addSubview_(self._ear)
+        self._hearing = False
 
         # ---- 章节条（计划 §9.8）----
         # 摆在收起态/展开态**顶栏的最左侧**，位置在 `_layout` 里算（要用到按钮摆完后的 `x`）。
@@ -1906,6 +1949,11 @@ class Overlay:
         avail = left - pad
         _ctext = self._chapter_bar_text()
         # 三个条件**全**满足才显示；否则标签和点击区**一起**隐藏（计划 §9.8）。
+        # 「在听」小点占顶栏最左, 章节条往右让出 EAR_D + EAR_GAP
+        _ear_y = float(math.floor(self._height - 28 + (24 - EAR_D) / 2))
+        self._ear.setFrame_(NSMakeRect(pad, _ear_y, EAR_D, EAR_D))
+        _cx = pad + EAR_D + EAR_GAP
+        avail -= EAR_D + EAR_GAP
         _cshow = bool(_ctext) and avail >= CHAPTER_MIN_W and self._trans_mode != "raw"
         if self._chapter_lbl is not None:
             self._chapter_lbl.setHidden_(not _cshow)
@@ -1927,8 +1975,8 @@ class Overlay:
                                   + self._chapter_lbl.font().leading()))
             # floor 而非 round: 奇数余量时往下取那半点 —— 量过, round 仍比按钮高 1pt。
             _ly = float(math.floor(self._height - 28 + (24 - _lh) / 2))
-            self._chapter_lbl.setFrame_(NSMakeRect(pad, _ly, _cw, _lh))
-            self._chapter_hit.setFrame_(((pad, self._height - 28), (_cw, 24)))
+            self._chapter_lbl.setFrame_(NSMakeRect(_cx, _ly, _cw, _lh))
+            self._chapter_hit.setFrame_(((_cx, self._height - 28), (_cw, 24)))
         self._drag_layer.setFrame_(((0.0, 0.0), (self._width, self._height)))
         self._ve.setFrame_(self._panel.contentView().bounds())
         self._scrim.setFrame_(self._ve.bounds())
@@ -2089,6 +2137,25 @@ class Overlay:
         """这句定稿的 ASR 原句：模型先吐 ZH 后吐 EN，中文打字时英文行用它占位，`finalize` 换成修正版。"""
         self._cur_en_seed = text or ""
         self._mark_dirty()
+
+    def hearing(self, flag: bool) -> None:
+        """VAD 此刻判有人声吗(主循环每块音频调一次)。只在**变了**时动小点。"""
+        flag = bool(flag)
+        if flag == self._hearing:
+            return
+        self._hearing = flag
+        lay = self._ear.layer()
+        to = EAR_ON_ALPHA if flag else EAR_QUIET_ALPHA
+        try:
+            from Quartz import CABasicAnimation
+            anim = CABasicAnimation.animationWithKeyPath_("opacity")
+            anim.setFromValue_(lay.opacity())
+            anim.setDuration_(motion.STATE_S)
+            anim.setTimingFunction_(motion.ca_timing())
+            lay.addAnimation_forKey_(anim, "ear")
+        except Exception:                                 # noqa: BLE001
+            pass
+        lay.setOpacity_(to)
 
     def draft_over_stream(self, flag: bool):
         """`main` 判的：定稿流式期间屏上草稿是不是更新一段的（是 → 草稿栏不藏）。只在变了时重画。"""
@@ -2609,7 +2676,7 @@ class Overlay:
         #    finalize 清空, 两行会在淡出途中换个断法跳一下。新草稿来了就立刻收回、照常画。
         if en or zh:
             self._draft_end_fade()
-        elif self._draft_shown and self._draft_fade_t0 is None:
+        elif self._draft_shown and self._draft_fade_t0 is None and self._tv._animate_ok():
             self._draft_fade_t0 = self._clock()
         if self._draft_fade_t0 is not None:
             e = motion.ease_out(motion.progress(
@@ -2714,6 +2781,17 @@ class Overlay:
         """
         if not _HAS_APPKIT:
             return
+        # ⚠️ 每轮包一个 autorelease pool(2026-10-13 实测): 主循环是手写的, 没有
+        #    `NSApp.run()` 替它每轮开关池 —— 每帧 setFrame/setAlpha/量字宽产生的临时
+        #    对象**永远不释放**。1500 句「草稿→定稿」(动画开): 不包 +49.9 MB,
+        #    只包 pump +13.9 MB, 整轮都包 +5.8 MB(≈ history 本身; 动画关 +7.8)。
+        #    视图数始终不变 = 不是视图泄漏, 是池没排空。剩下那 8 MB 来自 pump 之外
+        #    (drain 里的 finalize 等), 量级小, 没去动 main.py 的主循环。
+        import objc
+        with objc.autorelease_pool():
+            self._pump_once()
+
+    def _pump_once(self):
         from AppKit import (NSApplication, NSEventMaskAny, NSDefaultRunLoopMode,
                             NSRunLoop, NSDate)
         app = NSApplication.sharedApplication()
@@ -2745,6 +2823,7 @@ class Overlay:
             self._mark_dirty()
         if busy:
             self._last_ev_t = now
+        self._last_pump_t = self._clock()
         self._tv.tick()          # 跟随状态机 + 闲置回底(含滚动后的池重算) + 新行上滚的逐帧推进
         if self._draft_fade_t0 is not None:
             self._render_draft()     # 草稿让位淡出的逐帧推进(只改透明度, 见 _render_draft)

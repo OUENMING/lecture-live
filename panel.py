@@ -539,10 +539,33 @@ def make_button_target(cb):
     return t
 
 
-#: 主按钮（一张卡上最想让人点的那一颗）：实心白底、深色字、胶囊形。
-#: 其余按钮保持系统圆角壳（次要）或无边框淡字（逃生口）—— 三档分量，一眼看得出先点哪个。
-#: 2026-10-12 设计评审：同一张卡上几颗按钮一样重，「跳过 / 不存」和主操作抢注意力。
+#: 按钮三档分量，一眼看得出先点哪个（2026-10-12 设计评审；10-13 次要档也换成胶囊）：
+#:   主按钮   实心白底、深色字 —— 一张卡上最想让人点的那**一**颗
+#:   次要按钮 极淡的白底 + 发丝边、白字 —— 与主按钮同形同高，只是轻（不再用系统圆角壳：
+#:            系统壳 20pt 高、6pt 圆角，跟 26pt 胶囊并排时两种形状打架）
+#:   逃生口   无边框淡字（跳过 / 不存）
 PRIMARY_BG_A, PRIMARY_FG_A = 0.92, 0.85
+SECONDARY_BG_A, SECONDARY_LINE_A, SECONDARY_FG_A = 0.10, 0.16, 0.88
+
+
+def _style_capsule(btn, text: str, *, size: float, weight: float, fg, bg, line=None) -> None:
+    from AppKit import (NSAttributedString, NSFont, NSFontAttributeName,
+                        NSForegroundColorAttributeName, NSMutableParagraphStyle,
+                        NSParagraphStyleAttributeName, NSTextAlignmentCenter)
+    btn.setBordered_(False)
+    btn.setWantsLayer_(True)
+    para = NSMutableParagraphStyle.alloc().init()
+    para.setAlignment_(NSTextAlignmentCenter)
+    btn.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+        text, {NSFontAttributeName: NSFont.systemFontOfSize_weight_(size, weight),
+               NSForegroundColorAttributeName: fg,
+               NSParagraphStyleAttributeName: para}))
+    lay = btn.layer()
+    lay.setCornerRadius_(btn.frame().size.height / 2.0)
+    lay.setBackgroundColor_(bg.CGColor())
+    if line is not None:
+        lay.setBorderWidth_(0.5)                          # 发丝线：scale 2 上正好 1 设备像素
+        lay.setBorderColor_(line.CGColor())
 
 
 def style_primary(btn, text: str, *, size: float = 13.0) -> None:
@@ -551,20 +574,20 @@ def style_primary(btn, text: str, *, size: float = 13.0) -> None:
     ⚠️ 只改外观：target / action / keyEquivalent 由调用方照旧设。
     ⚠️ 用 `attributedTitle` 定字色 —— 无边框按钮的 `contentTintColor` 管不到文字。
     """
-    from AppKit import (NSAttributedString, NSColor, NSFont, NSFontAttributeName,
-                        NSForegroundColorAttributeName, NSMutableParagraphStyle,
-                        NSParagraphStyleAttributeName, NSTextAlignmentCenter)
-    btn.setBordered_(False)
-    btn.setWantsLayer_(True)
-    para = NSMutableParagraphStyle.alloc().init()
-    para.setAlignment_(NSTextAlignmentCenter)
-    btn.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
-        text, {NSFontAttributeName: NSFont.systemFontOfSize_weight_(size, 0.4),
-               NSForegroundColorAttributeName: NSColor.blackColor().colorWithAlphaComponent_(PRIMARY_FG_A),
-               NSParagraphStyleAttributeName: para}))
-    lay = btn.layer()
-    lay.setCornerRadius_(btn.frame().size.height / 2.0)
-    lay.setBackgroundColor_(NSColor.whiteColor().colorWithAlphaComponent_(PRIMARY_BG_A).CGColor())
+    from AppKit import NSColor
+    _style_capsule(btn, text, size=size, weight=0.4,
+                   fg=NSColor.blackColor().colorWithAlphaComponent_(PRIMARY_FG_A),
+                   bg=NSColor.whiteColor().colorWithAlphaComponent_(PRIMARY_BG_A))
+
+
+def style_secondary(btn, text: str, *, size: float = 13.0) -> None:
+    """次要按钮：与 `style_primary` 同形（胶囊、同高），极淡底 + 发丝边。规矩同上。"""
+    from AppKit import NSColor
+    w = NSColor.whiteColor()
+    _style_capsule(btn, text, size=size, weight=0.0,
+                   fg=w.colorWithAlphaComponent_(SECONDARY_FG_A),
+                   bg=w.colorWithAlphaComponent_(SECONDARY_BG_A),
+                   line=w.colorWithAlphaComponent_(SECONDARY_LINE_A))
 
 
 def make_hover_owner(cb):

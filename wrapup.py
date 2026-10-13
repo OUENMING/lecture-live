@@ -67,6 +67,15 @@ def measure_text_h(text: str, width: float, font) -> float:
         NSMakeSize(width, 1e7), NSStringDrawingUsesLineFragmentOrigin).size.height
 
 
+def btn_x(i: int, bw: float) -> float:
+    """第 `i` 颗按钮（`set_buttons` 给的顺序）的左边 x。**右对齐，第一颗（主操作）在最右**。
+
+    macOS / iOS 的惯例：主操作在右下，取消类在它左边（2026-10-13 设计评审：原来从左往右排，
+    主按钮落在左下角，和标题、正文的阅读终点不在一边）。
+    """
+    return WIDTH - PAD - (i + 1) * bw - i * BTN_GAP
+
+
 def btn_geom(count: int) -> float:
     """`count` 个按钮时**每个多宽** —— 按钮几何的**唯一定义点**。
 
@@ -195,8 +204,7 @@ def build(*, title: str = "收尾", on_close=None):
             #    两处各写一份的话，改一处会被另一处覆盖（2026-09-29 实测踩到）。
             _bw = btn_geom(len(live))
             for i, b in enumerate(live):              # 按钮永远贴着底
-                b.setFrame_(NSMakeRect(PAD + i * (_bw + BTN_GAP), PAD,
-                                       _bw, BTN_H))
+                b.setFrame_(NSMakeRect(btn_x(i, _bw), PAD, _bw, BTN_H))
 
         def set_status(text, alpha=0.92):
             try:
@@ -231,16 +239,16 @@ def build(*, title: str = "收尾", on_close=None):
             bw = btn_geom(n)
             for i, (text, cb) in enumerate(specs):
                 b = NSButton.alloc().initWithFrame_(
-                    NSMakeRect(PAD + i * (bw + BTN_GAP), PAD, bw, BTN_H))
-                b.setTitle_(text)
-                # ⚠️ `setBezelStyle_(1)` = rounded，与 `entry_panel.mk` 同一档 ——
-                #    收尾卡上的按钮必须**看起来像按钮**（第一版用无边框，渲染出来
-                #    与旁边的说明文字分不出来，作者一眼看不出能点）。
-                b.setBezelStyle_(1)
-                b.setFont_(NSFont.systemFontOfSize_(BTN_FONT_SZ))
-                if i == 0 and n > 1:
-                    # 第一颗是主操作（「存入」）：实心胶囊，与功能介绍卡同一套分量（`panel.style_primary`）
+                    NSMakeRect(btn_x(i, bw), PAD, bw, BTN_H))
+                # ⚠️ 按钮必须**看起来像按钮**（第一版用无边框淡字，渲染出来与旁边的说明文字
+                #    分不出来，作者一眼看不出能点）→ 两档都是胶囊：
+                #    第一颗 = 主操作（「存入」/ 只有一颗时的「关闭」）实心；其余次要（淡底 + 发丝边）。
+                #    2026-10-13 设计评审：原来次要的是系统圆角壳（20pt 高、6pt 圆角），
+                #    和 26pt 胶囊并排时两种形状打架；只有一颗时连主按钮样式都没有。
+                if i == 0:
                     panel.style_primary(b, text, size=BTN_FONT_SZ)
+                else:
+                    panel.style_secondary(b, text, size=BTN_FONT_SZ)
                 t = panel.make_button_target(cb)
                 targets.append(t)
                 b.setTarget_(t)

@@ -38,7 +38,6 @@ import re
 import threading
 import typing
 
-import corpus
 import courses
 import objc_own
 import panel
@@ -92,9 +91,6 @@ SEARCH_LIMIT = 80      # 一次最多显示多少条（`find` 会报 `truncated`
 READ_BEFORE = 2        # 点开一条命中时，往前给几句
 READ_AFTER = 6         # 往后给几句 —— 一屏读得下，且够看出上下文
 READ_LINE_H = 15.0     # 展开块每行的高度（与 `search_card_height` 成对）
-SESS_ROW = 22.0        # 课次列表一行
-SESS_HEAD = 20.0       # 一组的标题行（「这门课的上课记录」/「没归课的」）
-SESS_SEP = 10.0        # 两组之间的分隔（`sessions_card_height` 的算式里有它）
 IMPORT_ROW = 22.0      # 导入确认卡一行一门课
 IMPORT_HEAD = 20.0     # 导入确认卡的标题行
 
@@ -376,9 +372,6 @@ class Handles(typing.NamedTuple):
     # 同理：新增课程也走不到（没有真键盘）—— 「敲入 X 然后回车」的程序化版本。
     # ⚠️ 它**与手输同一条路**（`submit_add`），判断仍在 `courses.plan_add`。
     add_course: typing.Callable[[str], None]
-    # 同理：课次列表那条路也走不到验收跑器里（要点卡上那个「课次」按钮）。
-    # ⚠️ 它**只读** `sessions/`；「判给本课」写的是旁路文件 `courses.set_attribution`。
-    show_sessions: typing.Callable[[str], None]
     # 同理：导入课表那条路也走不到跑器里（要真拖一个 `.ics`）。
     # ⚠️ 它**只解析、不落盘** —— 建课要人点「新建这些课」。
     import_timetable: typing.Callable[[list], None]
@@ -632,7 +625,7 @@ def card_height(entry=None) -> float:
 
     无结果时的算式（= `CARD_H` 那个 56）：
         上内边距 10 + 两行标题（18 + 16+2） + 下内边距 10
-    ⚠️ 按钮（开始上课 / 不是这门？/ 课次）**不占高度**：2026-10-12 起它们右对齐、
+    ⚠️ 按钮（开始上课 / 不是这门？）**不占高度**：2026-10-12 起它们右对齐、
        垂直居中在那两行文字旁边（`docs/PLAN-panel-slim-update.md` P1-a）。
     """
     h = (CARD_PAD                                     # 上
@@ -825,112 +818,6 @@ def _make_search_card(hits, *, width, open_idx=None, open_text=None,
                     alpha=0.70, truncate=True))
     return view, (targets or [])
 
-def sessions_card_height(n_rows: int, n_orphans: int = 0) -> float:
-    """课次列表卡的高度 —— **与 `_make_sessions_card` 的排版循环逐项对应**。
-
-    ⚠️ 同 `search_card_height` / `card_height` 那条纪律：别抄固定值，别让两边漂。
-       `n_orphans > 0` 时多一组标题 + 分隔（**空组不画，也不留高**）。
-    """
-    h = CARD_PAD + SESS_HEAD + max(n_rows, 1) * SESS_ROW
-    if n_orphans:
-        h += SESS_SEP + SESS_HEAD + n_orphans * SESS_ROW
-    return h + CARD_PAD
-
-
-def session_row(p, sents: int) -> dict:
-    """`sessions/2026-09-24_202216_LECTURE.md` → 课次表的一行。**纯函数**。
-
-    ⚠️ 文件名形状的**唯一来源是 `courses._session_course`** —— 这里只做显示用的
-       切分（日期 / HH:MM），**不做归属判断**。归属走 `courses.session_files`。
-    """
-    parts = p.stem.split("_", 2)
-    date = parts[0] if parts else p.stem
-    raw = parts[1] if len(parts) > 1 else ""
-    hhmm = f"{raw[:2]}:{raw[2:4]}" if len(raw) >= 4 else ""
-    return {"stem": p.stem, "name": p.stem, "date": date, "hhmm": hhmm,
-            "sents": sents, "state": "ok" if sents >= corpus.MIN_WORDS else "thin"}
-
-
-def session_row_text(date: str, hhmm: str, sents: int, state: str) -> str:
-    """一行课次的人话。**纯函数** —— 判据指得到它。
-
-    `state` 只有两档：`ok`（够格）/ `thin`（空壳，录了一半或测试残留）。
-    ⚠️ **空壳要说出来** —— 它们在 `sessions/` 里跟真课长得一模一样，
-       而 `corpus` 那道 `MIN_WORDS` 闸是**静默**把它们排除的。
-    """
-    tag = "" if state == "ok" else "   ⚠️ 空壳（录了一半？）"
-    return f"{date}  {hhmm}   ·   {sents} 句{tag}"
-
-
-def _make_sessions_card(rows, *, width, title, on_back, on_adopt=None,
-                        orphans=(), targets=None):
-    """一门课的**课次列表** + 「没归课的上课记录」那一组。返回 `(视图, targets)`。
-
-    ⚠️ 排版一律从顶部往下（y 递减）—— 同 `_make_card` / `_make_search_card`。
-    ⚠️ 回来的 target 必须由调用方持有（`setTarget_` 是**弱引用**）。
-    ⚠️ **只读**：这一屏不改任何文件。「判给本课」写的是**旁路文件**
-       （`courses.set_attribution`），会话 `.md` 一个字节都不动。
-    """
-    from AppKit import NSButton, NSColor, NSFont, NSView, NSMakeRect
-
-    h = sessions_card_height(len(rows), len(orphans))
-    inner_w = width - 2 * CARD_PAD
-    view = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, h))
-    view.setWantsLayer_(True)
-    view.layer().setCornerRadius_(CARD_RADIUS)
-    view.layer().setBorderWidth_(HAIRLINE)
-    white = NSColor.whiteColor()
-    view.layer().setBorderColor_(white.colorWithAlphaComponent_(CARD_LINE_A).CGColor())
-    view.layer().setBackgroundColor_(white.colorWithAlphaComponent_(CARD_FILL_A).CGColor())
-    targets = targets if targets is not None else []
-
-    def _btn(text, x, y, w, action, size=11.0):
-        b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, BTN_H))
-        b.setTitle_(text)
-        b.setBezelStyle_(1)
-        b.setFont_(NSFont.systemFontOfSize_(size))
-        t = _target(action)
-        b.setTarget_(t)                                  # ⚠️ 弱引用 —— 靠 targets 留
-        b.setAction_("act:")
-        targets.append(t)
-        view.addSubview_(b)
-        return b
-
-    y = h - CARD_PAD
-    y -= SESS_HEAD
-    view.addSubview_(panel.make_label(title, NSMakeRect(CARD_PAD, y, inner_w - 96.0,
-                                                        SESS_HEAD - 4.0), 12.0,
-                                      truncate=True))
-    _btn("返回", width - CARD_PAD - 88.0, y - 2.0, 88.0, on_back)
-    for r in rows or [None]:
-        y -= SESS_ROW
-        if r is None:
-            view.addSubview_(panel.make_label(
-                "这门课还没有上课记录", NSMakeRect(CARD_PAD, y + 4.0, inner_w, 16.0),
-                11.0, alpha=DIM))
-            continue
-        view.addSubview_(panel.make_label(
-            session_row_text(r["date"], r["hhmm"], r["sents"], r["state"]),
-            NSMakeRect(CARD_PAD, y + 4.0, inner_w, 16.0), 11.0,
-            alpha=(1.0 if r["state"] == "ok" else DIM), truncate=True))
-    if orphans:
-        y -= SESS_SEP
-        y -= SESS_HEAD
-        view.addSubview_(panel.make_label(
-            f"没归课的上课记录（{len(orphans)} 节）—— 判给这门课？",
-            NSMakeRect(CARD_PAD, y, inner_w, SESS_HEAD - 4.0), 12.0, truncate=True))
-        for o in orphans:
-            y -= SESS_ROW
-            view.addSubview_(panel.make_label(
-                f"{o['name']}   ·   {o['sents']} 句",
-                NSMakeRect(CARD_PAD, y + 4.0, inner_w - 100.0, 16.0), 11.0,
-                alpha=DIM, truncate=True))
-            if on_adopt is not None:
-                _btn("判给本课", width - CARD_PAD - 88.0, y + 1.0, 88.0,
-                     (lambda s=o["stem"]: on_adopt(s)))
-    return view, targets
-
-
 def timetable_files(files) -> list:
     """从拖进来的一堆文件里挑出**课表**。**纯函数** —— 判据指得到它。
 
@@ -1030,11 +917,9 @@ def _make_import_card(rows, *, width, warn, on_confirm, on_cancel, targets=None)
     view.layer().setBackgroundColor_(white.colorWithAlphaComponent_(CARD_FILL_A).CGColor())
     targets = targets if targets is not None else []
 
-    def _btn(text, x, y, w, action):
+    def _btn(text, x, y, w, action, primary=False):
         b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, BTN_H))
-        b.setTitle_(text)
-        b.setBezelStyle_(1)
-        b.setFont_(NSFont.systemFontOfSize_(12.0))
+        (panel.style_primary if primary else panel.style_secondary)(b, text, size=12.0)
         t = _target(action)
         b.setTarget_(t)                                  # ⚠️ 弱引用 —— 靠 targets 留
         b.setAction_("act:")
@@ -1062,8 +947,9 @@ def _make_import_card(rows, *, width, warn, on_confirm, on_cancel, targets=None)
             r["when"], NSMakeRect(CARD_PAD + 208.0, y + 4.0, inner_w - 208.0, 16.0),
             11.0, alpha=DIM, truncate=True))
     y = CARD_PAD
-    _btn("新建这些课", width - CARD_PAD - 200.0, y, 100.0, on_confirm)
-    _btn("取消", width - CARD_PAD - 92.0, y, 92.0, on_cancel)
+    # 主按钮在最右（macOS 惯例；2026-10-13 与收尾卡、课程卡统一）
+    _btn("取消", width - CARD_PAD - 200.0, y, 92.0, on_cancel)
+    _btn("新建这些课", width - CARD_PAD - 100.0, y, 100.0, on_confirm, primary=True)
     if warn:
         view.addSubview_(panel.make_label(
             "；".join(warn)[:120], NSMakeRect(CARD_PAD, y + 4.0, inner_w - 216.0, 16.0),
@@ -1242,7 +1128,7 @@ def _scroll_undo_into_view(doc, course) -> bool:
 
 def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
                entry=None, on_delete=None, on_undo=None, on_delete_course=None,
-               on_sessions=None, hinted=False, on_not_this=None):
+               hinted=False, on_not_this=None):
     """一张卡 = 一个落点 + 两行内容（+ 跑过之后的结果列表）。"""
     from AppKit import NSButton, NSColor, NSFont, NSMakeRect
 
@@ -1311,12 +1197,8 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
         #    只有被预选的那张卡有它 —— 其余四张本来就不需要纠错。
         #    ⚠️ 必须和「开始上课」同进同出（上课中的面板一个按钮都不画）。
         if hinted and on_not_this is not None:
-            acts.append(("不是这门？", 84.0, on_not_this))
-        # ⭐ 「课次」= 这门课的上课记录（+ 没归课的那些，可以就地判给本课）。
-        # ⚠️ 做成**按钮**而不是"双击卡片"：双击要自己接管 `mouseDown_` 并判 `clickCount`，
-        #    而这块面板是磨砂的 —— `mouseDownCanMoveWindow` 那个雷本仓库咬过两次。
-        if on_sessions is not None:
-            acts.append(("课次", 68.0, lambda: on_sessions(r.course)))
+            # 主按钮放最右（macOS 惯例，与收尾卡同一条；2026-10-13）
+            acts.insert(0, ("不是这门？", 84.0, on_not_this))
     # ⚠️ 原来这里还有一个「选择文件…」（单课加课件）。2026-09-28 删掉 ——
     #    作者说「卡片看着太繁杂」。能力没丢：拖到卡上 = 加到那门课；不想拖 → 底部统一入口。
     acts_w = sum(w for _t, w, _a in acts) + 8.0 * max(len(acts) - 1, 0)
@@ -1340,9 +1222,13 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     # 按钮的竖直中心 = 文字块（标题 + 准备度）的中心。⚠️ 与上面两行同一组常数推出。
     def mk(title, x, action, y=CARD_PAD, w=92.0, h=BTN_H):
         b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
-        b.setTitle_(title)
-        b.setBezelStyle_(1)                             # rounded
-        b.setFont_(NSFont.systemFontOfSize_(12.0))
+        # ⭐ 一屏只有**一颗**主按钮：被预选那张卡的「开始上课 · 就是这门」（2026-10-13 设计评审：
+        #    原来五张卡十几颗按钮一样重，眼睛找不到起点）。其余一律次要胶囊 —— 与收尾卡 /
+        #    功能介绍卡同一套（`panel.style_primary` / `style_secondary`）。
+        if hinted and title.startswith("开始上课"):
+            panel.style_primary(b, title, size=12.0)
+        else:
+            panel.style_secondary(b, title, size=12.0)
         t = _target(action)
         b.setTarget_(t)                                 # ⚠️ 弱引用 —— 靠 _targets 留住
         b.setAction_("act:")
@@ -1774,6 +1660,14 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             if S.get("updating"):
                 _status("正在更新 —— 装完会自动重开面板，再点「开始上课」（约 1–3 分钟）")
                 return
+            # ⭐ 后台安装（`update.spawn_quiet_apply`）还在拉 → **记下这门课，装完自动开**。
+            #    ⚠️ 不能直接开：录课是新进程（`cl` 起 `main.py`），会读到拉了一半的工作区。
+            #    不让用户再点一次：一般几秒就完，用户点了「开始上课」就该开始。
+            _q = S.get("quiet_update")
+            if _q is not None and _q.poll() is None:
+                S["start_after_update"] = course
+                _status("新版本还在后台装（通常几秒）—— 装完自动开始上课")
+                return
             _start_now(course)
 
     rs = load()
@@ -1831,8 +1725,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         # ⚠️⚠️ **必须 `_later`**（2026-09-29 修）—— 这是卡上「不是这门？」按钮的
         #    action，同步 `refresh()` 会把 sender 所在那张卡整块拆掉，而
         #    `NSCell` 的跟踪循环**还在栈上** → 主线程被占住、**所有按钮都没反应**。
-        #    同批新增的其它 action（`toggle_hit` / `close_sessions` / `cancel_import`
-        #    / `adopt_session` / `confirm_import`）都规规矩矩用 `_later(refresh)`，
+        #    同批新增的其它 action（`toggle_hit` / `cancel_import`
+        #    / `confirm_import`）都规规矩矩用 `_later(refresh)`，
         #    这里漏了。机制见 `_later` 的 docstring。
         _later(refresh)
 
@@ -2313,6 +2207,19 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #     挂不上去；`S` 是模块级、且 `do_close` 里有一处统一的断环表。
         S["ready_targets"] = ready_targets
 
+    def _quiet_done(rc: int, offer: dict, gen) -> None:
+        """后台安装跑完了（主线程）。成了：状态行说一声；没成：退回「更新」那一格让用户点。"""
+        S["quiet_update"] = None
+        pending = S.pop("start_after_update", None)
+        if _stale(gen, "update_gen"):
+            return                                        # 面板已经关了 / 重开了
+        if rc == 0:
+            _status(f"已在后台更新到 {offer.get('latest', '')} —— 开始上课就是新版本")
+        else:
+            _show_update(offer, gen)
+        if pending is not None and on_start is not None:
+            on_start(pending)                             # 用户等着的那一下（成没成都开）
+
     def _show_update(offer: dict, gen) -> None:
         """后台查完新版本，回到主线程把「更新」那一格接到就绪条末尾。"""
         if _stale(gen, "update_gen"):
@@ -2368,6 +2275,15 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 offer = update_mod.offer()
             except Exception:                              # noqa: BLE001
                 return
+            if offer.get("kind") == "available" and offer.get("quiet"):
+                # ⭐ 每版都是 auto、依赖和模型清单都没动 → 不打扰，后台直接装（2026-10-13）。
+                #    独立进程：面板关了 / 开课了它照样跑完（见 `spawn_quiet_apply`）。
+                p = update_mod.spawn_quiet_apply()
+                if p is not None:
+                    S["quiet_update"] = p
+                    rc = p.wait()
+                    _later(_quiet_done, rc, offer, upd_gen)
+                    return
             if offer.get("kind", "none") != "none":
                 _later(_show_update, offer, upd_gen)
 
@@ -2593,10 +2509,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         CARD_PAD, ADD_REPLY_Y, W_IN - 2 * CARD_PAD, 17.0), 11.0, alpha=DIM)
 
     _add_cancel = NSButton.alloc().initWithFrame_(
-        NSMakeRect(W_IN - CARD_PAD - 100.0, ADD_ROW_Y, 100.0, BTN_H))
-    _add_cancel.setTitle_("取消")
-    _add_cancel.setBezelStyle_(1)
-    _add_cancel.setFont_(NSFont.systemFontOfSize_(12.0))
+        NSMakeRect(W_IN - CARD_PAD - 208.0, ADD_ROW_Y, 100.0, BTN_H))
+    panel.style_secondary(_add_cancel, "取消", size=12.0)
     _add_cancel_t = _target(close_add)
     _add_cancel.setTarget_(_add_cancel_t)                 # ⚠️ 弱引用 —— 靠这里留
     _add_cancel.setAction_("act:")
@@ -2621,10 +2535,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     strip_targets.append(_add_cancel_t)
 
     _add_ok = NSButton.alloc().initWithFrame_(
-        NSMakeRect(W_IN - CARD_PAD - 208.0, ADD_ROW_Y, 100.0, BTN_H))
-    _add_ok.setTitle_("新建")
-    _add_ok.setBezelStyle_(1)
-    _add_ok.setFont_(NSFont.systemFontOfSize_(12.0))
+        NSMakeRect(W_IN - CARD_PAD - 100.0, ADD_ROW_Y, 100.0, BTN_H))
+    panel.style_primary(_add_ok, "新建", size=12.0)
     _add_ok_t = _target(lambda: submit_add())
     _add_ok.setTarget_(_add_ok_t)                         # ⚠️ 弱引用 —— 靠这里留
     _add_ok.setAction_("act:")
@@ -2649,9 +2561,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
     _pick_btn = NSButton.alloc().initWithFrame_(
         NSMakeRect(W_IN - CARD_PAD - PICK_W, (DROP_H - BTN_H) / 2.0, PICK_W, BTN_H))
-    _pick_btn.setTitle_("选择文件…")
-    _pick_btn.setBezelStyle_(1)
-    _pick_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+    panel.style_secondary(_pick_btn, "选择文件…", size=12.0)
     _pick_t = _target(_pick_batch_files)
     _pick_btn.setTarget_(_pick_t)                         # ⚠️ 弱引用 —— 靠这里留
     _pick_btn.setAction_("act:")
@@ -2667,9 +2577,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     _add_btn = NSButton.alloc().initWithFrame_(
         NSMakeRect(W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W, (DROP_H - BTN_H) / 2.0,
                    ADD_W, BTN_H))
-    _add_btn.setTitle_(ADD_TITLE)
-    _add_btn.setBezelStyle_(1)
-    _add_btn.setFont_(NSFont.systemFontOfSize_(12.0))
+    panel.style_secondary(_add_btn, ADD_TITLE, size=12.0)
     _add_t = _target(open_add)
     _add_btn.setTarget_(_add_t)                           # ⚠️ 弱引用 —— 靠这里留
     _add_btn.setAction_("act:")
@@ -2768,14 +2676,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         """
         out = []
         for title, fn, x, w, primary in (
-                ("取消", _cancel_batch, W_IN - CARD_PAD - 100.0, 100.0, False),
-                ("确认", _confirm_batch, W_IN - CARD_PAD - 100.0 - 8.0 - 100.0,
-                 100.0, True)):
+                # 主按钮在最右（macOS 惯例；2026-10-13 全面板统一）
+                ("取消", _cancel_batch, W_IN - CARD_PAD - 100.0 - 8.0 - 100.0, 100.0, False),
+                ("确认", _confirm_batch, W_IN - CARD_PAD - 100.0, 100.0, True)):
             b = NSButton.alloc().initWithFrame_(
                 NSMakeRect(x, (DROP_H - BTN_H) / 2.0, w, BTN_H))
-            b.setTitle_(title)
-            b.setBezelStyle_(1)
-            b.setFont_(NSFont.systemFontOfSize_(12.0))
+            (panel.style_primary if primary else panel.style_secondary)(b, title, size=12.0)
             t = _target(fn)
             b.setTarget_(t)
             b.setAction_("act:")
@@ -2825,17 +2731,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         # ⚠️ 捕获**这一代**的对象（2026-10-01 质量审查：四处代际守卫收敛成 `_stale`）
         gen = S["search"] = {"q": q, "hits": [], "total": 0, "truncated": False,
                              "busy": True, "err": "", "open": None, "open_text": None}
-        # ⚠️⚠️ **三个模式必须真互斥**（2026-09-29 修）。它们各从自己的入口进、
-        #    不共用一个状态位，而 `refresh` 里是按 `ics → 课次 → 搜索` 的顺序
-        #    挨个 `return` 的 —— 所以只设 `S["search"]` 是**不够**的：
-        #    在课次卡或导入卡上敲回车，`refresh` 会先撞上前面那两支并 `return`，
-        #    状态行报「命中 N 处」而屏上**毫无变化**。
-        #    （原来那句注释写着"真同时开了，这里是 search 优先" —— 新增
-        #     `ics`/`课次` 两支之后它就**不成立了**，这正是本条要修的。）
-        #    ⚠️ 选「进来就清掉另外两个」而不是「把搜索那支提到最前」：后者要搬代码块，
-        #       而且会让屏上优先级与实际入口脱节；清掉之后三个状态是**真的**互斥，
-        #       与文件里那条设计声明一致。代价只是回到课次卡要多点一下。
-        S["sessions"] = None
+        # ⚠️⚠️ **两个模式必须真互斥**（2026-09-29 修）。它们各从自己的入口进、
+        #    不共用一个状态位，而 `refresh` 里是按 `ics → 搜索` 的顺序挨个 `return` 的
+        #    —— 所以只设 `S["search"]` 是**不够**的：在导入卡上敲回车，`refresh` 会先撞上
+        #    前面那支并 `return`，状态行报「命中 N 处」而屏上**毫无变化**。
+        #    ⚠️ 选「进来就清掉另一个」而不是「把搜索那支提到最前」：后者要搬代码块，
+        #       而且会让屏上优先级与实际入口脱节。
+        #    （原来还有第三个「课次」模式，2026-10-13 随功能一起删了。）
         S["ics"] = None
         set_status(f"搜「{q}」…")
         _later(refresh)
@@ -2884,59 +2786,6 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         s["open"] = i
         _later(refresh)
 
-    # ── 课次列表（卡上那个「课次」按钮进的）────────────────────────────
-    def open_sessions(course: str):
-        """一门课的**上课记录** + 「没归课的那些」。⚠️ 要读盘 → 工作线程。"""
-        gen = S["sessions"] = {"course": course, "rows": [], "orphans": [],
-                               "busy": True, "err": ""}
-        _later(refresh)
-
-        def work():
-            import corpus as corpus_mod
-            try:
-                known = courses.list_courses(glossary, state_root=state_root)
-                rows = [session_row(p, _sess_words(p))
-                        for p in sorted(courses.session_files(sessions_dir, course),
-                                        reverse=True)]
-                orph = [session_row(p, _sess_words(p))
-                        for p in courses.orphan_files(sessions_dir, known)]
-                got = {"rows": rows, "orphans": orph}
-            except Exception as e:                            # noqa: BLE001
-                got = {"rows": [], "orphans": [],
-                       "err": f"{type(e).__name__}: {e}"}
-            if _stale(gen, "sessions"):                       # 期间又开了别的课
-                return
-            gen.update(got)
-            gen["busy"] = False
-            from PyObjCTools import AppHelper
-            AppHelper.callAfter(refresh)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _sess_words(p) -> int:
-        try:
-            return corpus.session_words(
-                p.read_text(encoding="utf-8", errors="ignore"))
-        except OSError:
-            return 0
-
-    def adopt_session(stem: str):
-        """把一节没归课的记录判给当前这门课。
-
-        ⚠️ 写的是**旁路文件**（`courses.set_attribution`），会话 `.md` 一个字节不动
-           —— 抬头是三方共享契约（`obsidian_writer` 写 / `_parse` 读回 / `cl last` grep）。
-        """
-        s = S.get("sessions")
-        if not s or s.get("busy"):
-            return
-        courses.set_attribution(sessions_dir, stem, s["course"])
-        set_status(f"已把 {stem[-14:]} 判给 {s['course']}")
-        open_sessions(s["course"])            # 重开一次，两组列表都刷新
-
-    def close_sessions():
-        S["sessions"] = None
-        _later(refresh)
-
     # ── 课表导入（把 `.ics` 拖进来）──────────────────────────────────
     def run_import(files: list):
         """⭐ **先解析给你看清楚，确认了才建课** —— 这一步一个字节都不落盘。
@@ -2945,7 +2794,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
            导入**都没有撤销功能**（调研核过）→ 猜错了只能自己收拾。
         ⚠️ 解析在工作线程里（读文件 + 可能上兆的字节）。
         """
-        # ⭐ 代际守卫（2026-10-01 审查 #13，同 `open_sessions` 那条）：把**这一代**的
+        # ⭐ 代际守卫（2026-10-01 审查 #13，同 `run_search` 那条）：把**这一代**的
         #    状态对象抓在手里 —— 取消/重拖会把它整个换掉，旧线程回来时**认对象**，
         #    不许 `S.get("ics")` 抓到新一代再覆盖（那会用旧批结果盖新批，
         #    确认后可能建错课）。
@@ -3390,9 +3239,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # 搜索模式下那一块的动作区（**位置与批量那对完全重合** —— 换着显示，不同时出现）。
     _clr = NSButton.alloc().initWithFrame_(
         NSMakeRect(W_IN - CARD_PAD - 100.0, (DROP_H - BTN_H) / 2.0, 100.0, BTN_H))
-    _clr.setTitle_("清除")
-    _clr.setBezelStyle_(1)
-    _clr.setFont_(NSFont.systemFontOfSize_(12.0))
+    panel.style_secondary(_clr, "清除", size=12.0)
     _clr_t = _target(lambda: run_search(""))
     _clr.setTarget_(_clr_t)                                   # ⚠️ 弱引用 —— 靠这里留
     _clr.setAction_("act:")
@@ -3416,10 +3263,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         b = S.get("batch")
         s = S.get("search")
         a = S.get("add")
-        q = S.get("sessions")
         for _v in strip_holder["hint"]:
             _v.setHidden_(b is not None or s is not None or a is not None
-                          or q is not None or S.get("ics") is not None)
+                          or S.get("ics") is not None)
         _need = bool(b is not None and b.get("need_course"))
         for _btn, _t in strip_holder["actions"]:
             # ⚠️ 零课程那一档**不显示**取消/确认 —— 那一行被输入行占了，
@@ -3457,27 +3303,6 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 warn=_i.get("warn") or [], on_confirm=confirm_import,
                 on_cancel=cancel_import, targets=[])
             strip_holder["import_rows"] = _imp_t
-            card.setFrameOrigin_((0.0, 0.0))
-            doc.addSubview_(card)
-            doc.setFrameSize_((WIDTH - 2 * PAD,
-                               max(body_h, card.frame().size.height)))
-            return
-
-        if q is not None:
-            # ── 课次模式：一门课的上课记录 + 「没归课的那些」──────────────
-            # ⚠️ 与搜索/批量**互斥**（各从自己的入口进，不共用一个状态位）。
-            title_lbl.setStringValue_(f"{q.get('course', '')} · 上课记录")
-            if q.get("busy"):
-                doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, 120.0)))
-                return
-            if q.get("err"):
-                set_status(f"读上课记录失败：{q['err']}")
-            _rows = q.get("rows") or []
-            card, _sess_t = _make_sessions_card(
-                _rows, width=WIDTH - 2 * PAD, title=f"这门课 {len(_rows)} 节",
-                on_back=close_sessions, on_adopt=adopt_session,
-                orphans=q.get("orphans") or [], targets=[])
-            strip_holder["sess_rows"] = _sess_t
             card.setFrameOrigin_((0.0, 0.0))
             doc.addSubview_(card)
             doc.setFrameSize_((WIDTH - 2 * PAD,
@@ -3589,7 +3414,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             entry = S["result"].get(r.course)
             card = _make_card(r, on_start=on_start,
                               on_drop_files=run_prep, width=WIDTH - 2 * PAD,
-                              entry=entry, on_sessions=open_sessions,
+                              entry=entry,
                               hinted=(r.course == _hint),
                               on_not_this=next_guess,
                               # ⚠️ **课号要在这里绑好。** `_make_card` 只传词
@@ -3799,8 +3624,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    `submit_add`/`close_add` 的闭包，而闭包持有 `add_field`/`strip`/`win`。
             #    与上面三条是**同一条环**（漏一条就漏一整个面板，且随开关轮数增长）。
             strip_holder["add_widgets"] = []
-            # ⚠️ **三个 `*_rows` 也要断**（2026-09-29 补）—— 它们是后加的
-            #    三张卡的 target 容器（搜索命中 / 课次 / 导入确认），只被写、没被读，
+            # ⚠️ **`*_rows` 也要断**（2026-09-29 补）—— 它们是后加的
+            #    几张卡的 target 容器（搜索命中 / 导入确认），只被写、没被读，
             #    作用就是留住弱引用的 target。
             #    漏掉的话：`holder → target → act 闭包 → refresh → doc/win` 是一条环，
             #    `gc` 收不回 —— 与上面 `["actions"]` 那条**同一形状**
@@ -3808,7 +3633,6 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #     **随轮数增长**）。⚠️ 这几张卡是裸 `NSView`，`_sever` 对它们只会
             #    `AttributeError` 后跳过 —— 所以只能靠这里断。
             strip_holder["search_rows"] = []
-            strip_holder["sess_rows"] = []
             strip_holder["import_rows"] = []
             # ⚠️ 新增模式是**模块级**的，跨面板存活 —— 不清的话，关掉面板再打开
             #    会直接落进「输入行开着」的状态（同 `S["batch"]`/`S["search"]` 那条）。
@@ -3819,7 +3643,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    （`S["result"]` 是**故意**跨面板的，别把这条规矩套到它头上。）
             S["batch"] = None
             S["search"] = None
-            S["sessions"] = None
+            # ⚠️ 「装完自动开始上课」只属于**这一个**面板：关了再开不许冒出一次没人点的开课。
+            S.pop("start_after_update", None)
             # ⚠️ 导入那条也是**模块级**的，同上面三条 —— 2026-09-29 补。
             #    原来漏了它：`.ics` 拖进来、看到确认卡之后**直接关面板** →
             #    `S["ics"]` 残留 → 下次开面板 `refresh` 里 `_i = S.get("ics")` 非空
@@ -4002,8 +3827,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     btn_tgt = _target(_close_clicked)
     btn = NSButton.alloc().initWithFrame_(
         NSMakeRect(WIDTH - PAD - 76.0, PAD + 2.0, 76.0, 26.0))
-    btn.setTitle_("关闭")
-    btn.setBezelStyle_(1)
+    panel.style_secondary(btn, "关闭", size=12.0)
     btn.setTarget_(btn_tgt)                             # ⚠️ 弱引用 —— 靠下面那行留住
     btn.setAction_("act:")
     ve.addSubview_(btn)
@@ -4101,6 +3925,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    那个删课 lambda 落进 `show_sessions` → **调 `h.show_sessions('ECON10740')`
     #    实际执行的是删课**，而且一个错都不报（`NamedTuple` 位置构造对类型不做检查）。
     #    关键字构造让顺序不再有意义，整类 bug 消失。
+    #    （`show_sessions` 本身 2026-10-13 随「课次」功能一起删了，这条规矩照旧。）
     return Handles(
         window=win,
         close=do_close,
@@ -4109,7 +3934,6 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         start_batch=run_batch,
         search=run_search,
         add_course=add_course,
-        show_sessions=open_sessions,
         import_timetable=run_import,
         delete_course=lambda c, keep=False: delete_course(c, keep, ask=False),
         start_classify=_start_classify,

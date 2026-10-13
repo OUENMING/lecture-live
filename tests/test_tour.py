@@ -66,15 +66,18 @@ class Content(unittest.TestCase):
             self.assertIsNotNone(NSImage.imageWithSystemSymbolName_accessibilityDescription_(sym, title), sym)
 
     def test_dots(self):
-        on, off = tour.DOT_ON, tour.DOT_OFF
-        self.assertEqual(tour.dots(0, 4), [on, off, off, off])
-        self.assertEqual(tour.dots(3, 4), [off, off, off, on])
-        self.assertGreater(on - off, 0.5, "当前页要一眼分得出")
-
-    def test_short_pages_are_centred(self):
-        self.assertEqual(tour.body_offset(66, 66), 0)
-        self.assertEqual(tour.body_offset(44, 66), 11)
-        self.assertEqual(tour.body_offset(45, 66), float(round(21 / 2)), "整数坐标")
+        # 当前页是胶囊，其余是圆点；整排居中、间距一致（2026-10-13 胶囊进度点）
+        for i in (0, 2, 4):
+            d = tour.dots(i, 5)
+            self.assertEqual([w for _, w, _ in d],
+                             [tour.DOT_PILL if k == i else tour.DOT for k in range(5)])
+            self.assertEqual([a for _, _, a in d],
+                             [tour.DOT_ON if k == i else tour.DOT_OFF for k in range(5)])
+            left, right = d[0][0], d[-1][0] + d[-1][1]
+            self.assertLessEqual(abs(left - (tour.WIDTH - right)), 1.0, "整排要居中")
+            for (x0, w0, _), (x1, _, _) in zip(d, d[1:]):
+                self.assertEqual(x1 - x0 - w0, tour.DOT_GAP)
+        self.assertGreater(tour.DOT_ON - tour.DOT_OFF, 0.5, "当前页要一眼分得出")
 
     def test_button_hierarchy(self):
         # 主 > 次 > 弱：「跳过」不能和「下一步」一样重（2026-10-12 评审）
@@ -106,6 +109,21 @@ class Behaviour(unittest.TestCase):
         self.assertEqual(self.done, [True], "最后一页再下一步 = 看完")
         c["close"]()
         self.assertEqual(self.done, [True], "关两次只回调一次")
+
+    def test_header_does_not_move_between_pages(self):
+        # ⭐ 图标和标题翻页不动（2026-10-13：原来矮的页整组下移居中，标题上下跳最多 48pt）
+        c = self.card
+        pos = []
+        for _ in range(len(tour.PAGES)):
+            pos.append((c["_title"].frame().origin.y, c["_badge"].frame().origin.y))
+            c["next"]() if c["page"]() < len(tour.PAGES) - 1 else None
+        self.assertEqual(len(set(pos)), 1, pos)
+
+    def test_current_dot_is_the_pill(self):
+        c = self.card
+        c["next"]()
+        ws = [dv.frame().size.width for dv in c["_dots"]]
+        self.assertEqual(ws.index(max(ws)), 1, ws)
 
     def test_skip_reports_not_finished(self):
         self.card["close"]()

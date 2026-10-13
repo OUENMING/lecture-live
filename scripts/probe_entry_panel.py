@@ -23,7 +23,6 @@
     PROBE_BATCH=1       一上来就跑批量归档（13 份假课件）
     PROBE_SEARCH=<词>    直接全库搜（只读）
     PROBE_ADD=<课号>     走新增课程那条路；**留空**（`PROBE_ADD=`）= 只打开那一行
-    PROBE_SESSIONS=<课号>  直接开那门课的课次列表（读**替身** `sessions/`，见下）
     PROBE_ABORT=1       隔离地看「没跑完 + 逐文件失败」两行长什么样
     PROBE_ZERO=1        零课程那一档（造几个假课件直接走批量那条路）；
                         再加 PROBE_ZERO_ADD=<课号> 就在 3 秒后建这门课
@@ -217,9 +216,8 @@ def main() -> int:
     #    而 Ctrl+C 在这个进程里不一定送达）。
     #    `on_close` 是 `entry_panel` 现成的口子（`_build` 的形参，`do_close` 末尾断环之后才调）。
     from PyObjCTools import AppHelper
-    # ⚠️⚠️ **课次列表也读 `sessions/` —— 跑器必须隔离它。**
-    #    不隔离的话「判给本课」会往**真的 `sessions/`** 里写一个 `.attribution.json`
-    #    （不是删数据，但"隔离跑器"这条性质就破了）。这里造**同名但内容是我们自己写的**
+    # ⚠️⚠️ **面板读 `sessions/`（上次上课日期、判课语料）—— 跑器必须隔离它。**
+    #    （原来「课次」列表能往里写 `.attribution.json`；2026-10-13 那个功能删了，隔离照旧。）这里造**同名但内容是我们自己写的**
     #    替身：名字取真的（列表渲染得像），字数是特意配好的 —— 一半够格、一半是空壳，
     #    好让两档状态都看得到。
     sess_iso = ISO / "sessions"
@@ -363,12 +361,6 @@ def main() -> int:
             b"END:VCALENDAR\r\n")
         print(f"\nPROBE_ICS —— 导入 {_p.name}（只解析，不落盘）")
         AppHelper.callAfter(h.import_timetable, [str(_p)])
-
-    # `PROBE_SESSIONS=<课号>` —— 直接打开那门课的课次列表（读的是**替身目录**）。
-    if os.environ.get("PROBE_SESSIONS"):
-        _c = os.environ["PROBE_SESSIONS"]
-        print(f"\nPROBE_SESSIONS={_c!r} —— 直接开课次列表")
-        AppHelper.callAfter(h.show_sessions, _c)
 
     # `PROBE_ZERO=1` —— 零课程那一档。造几个假课件直接走批量那条路；
     #   再加 `PROBE_ZERO_ADD=<课号>` 就在 3 秒后建这门课 ——

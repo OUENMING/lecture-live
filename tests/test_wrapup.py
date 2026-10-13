@@ -510,6 +510,13 @@ def t_buttons_never_overflow():
             assert right <= wrapup.WIDTH - wrapup.PAD + 0.01, (
                 f"{n} 个按钮时最右边界 {right:.1f} 超出卡片"
                 f"（上限 {wrapup.WIDTH - wrapup.PAD:.1f}）—— 会被静默裁掉")
+            left = min(float(b.frame().origin.x) for b in btns)
+            assert left >= wrapup.PAD - 0.01, f"{n} 个按钮时最左边界 {left:.1f} 出了左边距"
+            # ⭐ 右对齐、第一颗（主操作）在最右（2026-10-13）—— 改回从左往右排这条就红
+            assert abs(right - (wrapup.WIDTH - wrapup.PAD)) < 0.01, f"没贴右边：{right:.1f}"
+            first = [b for b in btns if b.title() == "按0"]
+            assert first and abs(float(first[0].frame().origin.x + first[0].frame().size.width)
+                                 - right) < 0.01, "第一颗（主操作）不在最右"
     finally:
         card["close"]()
 

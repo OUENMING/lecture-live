@@ -42,7 +42,8 @@ PAD = 20.0
 TITLE_H = 30.0
 LINE_H = 21.0
 LOG_H = 360.0          # 可滚动日志区的高度（有 log 时用它，没 log 时按摘要行数算）
-FOOT_H = 68.0          # 底部两行：状态行 + (勾选框｜立即更新｜知道了)
+FOOT_H = 44.0          # 底部一行（28pt 按钮 + 与日志区之间 14pt 的呼吸）：勾选框｜知道了（状态行 2026-10-13 删了，见 build 里的说明）
+LOG_INSET = 10.0       # 日志区的浅底比文字多出来的那圈（底子圆角 = 这个值）
 
 _W = 0.23              # NSFontWeightMedium，同 overlay.WEIGHT
 _STRONG = 0.55         # NSFontWeightSemibold，日志里的小标题用
@@ -202,17 +203,29 @@ def build(version: str, summary: str, date: str = "", log: str = "",
         ve.addSubview_(label(_title, y, 17.0, bold=True))
 
         if log:
-            _add_log_view(ve, _log_attr(log), PAD, FOOT_H + PAD,
-                          WIDTH - 2 * PAD, LOG_H)
+            # ⭐ 日志区垫一块浅底（2026-10-13 设计评审）：原来文字直接浮在磨砂上，
+            #    看不出哪块能滚、滚到哪里为止。底子 = 卡片里「一个区域」的通用画法
+            #    （极淡白底 + 发丝边，与开课面板的卡片同一套分量）。
+            from AppKit import NSView
+            well = NSView.alloc().initWithFrame_(
+                NSMakeRect(PAD, FOOT_H + PAD, WIDTH - 2 * PAD, LOG_H))
+            well.setWantsLayer_(True)
+            _w = NSColor.whiteColor()
+            well.layer().setCornerRadius_(LOG_INSET)
+            well.layer().setBackgroundColor_(_w.colorWithAlphaComponent_(0.05).CGColor())
+            well.layer().setBorderWidth_(0.5)
+            well.layer().setBorderColor_(_w.colorWithAlphaComponent_(0.10).CGColor())
+            ve.addSubview_(well)
+            _add_log_view(ve, _log_attr(log), PAD + 1.0, FOOT_H + PAD + 1.0,
+                          WIDTH - 2 * PAD - 2.0, LOG_H - 2.0)
         else:
             for ln in summary_lines:
                 y -= LINE_H
                 ve.addSubview_(label(ln, y, 12.5, alpha=0.92))
 
-        # ---- 底部：状态行 + 勾选框 + 按钮 ----
-        # ⚠️ 为什么要单独一行状态：卡片原本只在 `VERSION` 变了时弹（= 已经拉完了），
-        # 那一刻没什么可拉的 —— 「立即更新」按钮会显得没意义。加一行常驻状态
-        # （当前版本 / 是否落后 / 更新结果），按钮才有上下文。
+        # ---- 底部：勾选框 + 按钮 ----
+        # ⚠️ 原来这里还有一行常驻状态（「当前 X」）—— 那是给「立即更新」按钮当上下文的；
+        #    2026-10-12 那颗按钮挪去了开课面板，这行就只剩复述标题里的版本号。2026-10-13 删掉。
         fy = PAD
         state_holder = {"skip": False}
 
@@ -238,18 +251,6 @@ def build(version: str, summary: str, date: str = "", log: str = "",
                 except Exception:                         # noqa: BLE001
                     pass
 
-        # 状态行（常驻）。内容由调用方通过 set_status 改；默认显示当前版本。
-        # ⚠️ y 取 fy+34 而不是贴 footer 顶 —— 贴顶会让它顶到日志区最后一行（实测差 3px）。
-        status = label(f"当前 {version}", fy + 34.0, 11.5, alpha=0.75)
-
-        def set_status(text: str, alpha: float = 0.75) -> None:
-            try:
-                status.setStringValue_(text)
-                status.setTextColor_(
-                    NSColor.whiteColor().colorWithAlphaComponent_(alpha))
-            except Exception:                             # noqa: BLE001
-                pass
-
         chk = NSButton.alloc().initWithFrame_(NSMakeRect(PAD, fy + 4, 190.0, 22.0))
         chk.setButtonType_(NSButtonTypeSwitch)
         chk.setTitle_("本版本不再提示")
@@ -272,12 +273,10 @@ def build(version: str, summary: str, date: str = "", log: str = "",
         chk.setTarget_(_wire); chk.setAction_("clicked:")
         btn.setTarget_(_wire2); btn.setAction_("clicked:")
         ve.addSubview_(chk); ve.addSubview_(btn)
-        ve.addSubview_(status)
         targets = [_wire, _wire2]
 
         p.orderFrontRegardless()      # ⚠️ 不是 makeKeyAndOrderFront —— 绝不抢焦点
-        return {"panel": p, "close": on_close, "set_status": set_status,
-                "_targets": targets}
+        return {"panel": p, "close": on_close, "_targets": targets}
     except objc_own.ObjcNameCollision:
         # ⚠️⚠️ **这一类不吞。**
         # fail-soft 的道理是「卡片只是说明，不能因为它让课起不来」—— 那适用于

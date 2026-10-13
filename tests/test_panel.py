@@ -638,21 +638,20 @@ def main() -> int:
               f"最低 y={_low:.1f} —— 高度少算了？")
 
     # ⭐ **按钮并进标题行**（2026-10-12，面板瘦身 P1-a）：画不画按钮卡片一样高，
-    #    但按钮**不许压到文字**、也不许掉出卡片。预选卡（三颗按钮最宽）+ 长课名是最坏情形。
+    #    但按钮**不许压到文字**、也不许掉出卡片。预选卡（两颗按钮最宽）+ 长课名是最坏情形。
     from AppKit import NSButton as _NB
     from AppKit import NSIntersectsRect as _hit
     for _hint in (False, True):
         _cd = EP._make_card(_r("ECON10740", "Exploring Economics and Other Very Long Titles"),
                            on_start=lambda c: None, on_drop_files=lambda c, p: False,
-                           width=640.0, hinted=_hint, on_not_this=lambda: None,
-                           on_sessions=lambda c: None)
+                           width=640.0, hinted=_hint, on_not_this=lambda: None)
         _bs = [v for v in _cd.subviews() if isinstance(v, _NB)]
         _ls = [v for v in _cd.subviews() if not isinstance(v, _NB)]
         _ch = float(_cd.frame().size.height)
         check(f"按钮行（预选={_hint}）：卡片高度不因按钮变（= card_height()）",
               abs(_ch - EP.card_height()) < 0.01, f"{_ch} vs {EP.card_height()}")
-        check(f"按钮行（预选={_hint}）：按钮数对（预选 3 / 普通 2）",
-              len(_bs) == (3 if _hint else 2), str(len(_bs)))
+        check(f"按钮行（预选={_hint}）：按钮数对（预选 2 / 普通 1）",
+              len(_bs) == (2 if _hint else 1), str(len(_bs)))
         check(f"按钮行（预选={_hint}）：按钮不压文字",
               not [1 for b in _bs for l in _ls if _hit(b.frame(), l.frame())])
         check(f"按钮行（预选={_hint}）：按钮整颗在卡片里",

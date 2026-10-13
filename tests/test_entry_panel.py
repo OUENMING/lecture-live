@@ -587,7 +587,7 @@ def main() -> int:
         check(f"展开 {k} 行时交回来的 target 是活的（不是 None）",
               all(t is not None for t in _tg))
 
-    print("\n--- ⑯ 课次列表（卡上「课次」按钮进的）---")
+    print("\n--- ⑯ Handles 字段 ---")
     # ⭐ `Handles` 是**位置构造**踩过坑的地方：2026-09-29 插 `show_sessions` 时参数
     #    错了一格 —— `open_sessions` 落进 `delete_course`、删课 lambda 落进
     #    `show_sessions` → **调 show_sessions 实际在删课**，一个错都不报。
@@ -595,53 +595,9 @@ def main() -> int:
     check("Handles 的字段名与顺序（改构造方式后仍要一致）",
           E.Handles._fields == ("window", "close", "refresh", "set_status",
                                 "start_batch", "search", "add_course",
-                                "show_sessions", "import_timetable",
+                                "import_timetable",
                                 "delete_course", "start_classify"),
           f"实际 {E.Handles._fields}")
-
-    import pathlib as _pl
-    from tempfile import TemporaryDirectory as _TD
-    with _TD() as _d:
-        _p = _pl.Path(_d) / "2026-09-24_202216_LECTURE.md"
-        _r = E.session_row(_p, 44)
-        check("session_row 从文件名取日期与时间",
-              (_r["date"], _r["hhmm"], _r["stem"]) ==
-              ("2026-09-24", "20:22", "2026-09-24_202216_LECTURE"), _r)
-        check("⭐ 字数够 → ok（判据用的是 corpus.MIN_WORDS，不是抄来的数）",
-              _r["state"] == "ok"
-              and E.session_row(_p, E.corpus.MIN_WORDS - 1)["state"] == "thin",
-              f"MIN_WORDS={E.corpus.MIN_WORDS}")
-    # ⚠️ 空壳必须**说出来** —— 它们在 sessions/ 里跟真课长得一模一样，
-    #    而 corpus 那道闸是**静默**排除它们的。
-    check("空壳在行里明说", "空壳" in E.session_row_text("2026-09-26", "05:15", 2, "thin"))
-    check("够格的**不许**被标成空壳",
-          "空壳" not in E.session_row_text("2026-09-22", "15:02", 44, "ok"))
-
-    # ⭐⭐ 高度与排版同源：**空组不留高，有组才留**（同 search_card_height 那条纪律）
-    #     变异验证：把 `sessions_card_height` 的 `if n_orphans:` 去掉 → 第一条红。
-    _base = E.sessions_card_height(6)
-    check("高度：没有孤儿组时**一点都不多留**",
-          abs(E.sessions_card_height(6, 0) - _base) < 0.01)
-    check("高度：有 k 个孤儿就正好多 SEP + HEAD + k*ROW",
-          abs((E.sessions_card_height(6, 3) - _base)
-              - (E.SESS_SEP + E.SESS_HEAD + 3 * E.SESS_ROW)) < 0.01)
-
-    # ⭐⭐ 真的画一遍：**没有子视图掉出卡片底部**（高度算少的唯一症状，且**不报错**）
-    from find import Hit as _H  # noqa: F401   （只为确认这个模块能 import）
-    _rows = [E.session_row(_pl.Path(f"2026-09-{d:02d}_150000_ECON10740.md"), 44)
-             for d in (8, 15, 22)]
-    _orph = [E.session_row(_pl.Path("2026-09-24_202216_LECTURE.md"), 44)]
-    for _n in (0, 1):
-        _card, _tg = E._make_sessions_card(
-            _rows, width=600.0, title="这门课 3 节", on_back=lambda: None,
-            on_adopt=(lambda s: None) if _n else None,
-            orphans=(_orph if _n else []), targets=[])
-        _low = min(float(v.frame().origin.y) for v in _card.subviews())
-        check(f"课次卡（孤儿组 {'有' if _n else '无'}）没有子视图掉出底部",
-              _low >= -0.01, f"最低 y={_low:.1f}")
-        # ⚠️ 弱引用：没有孤儿时只有「返回」一个 target
-        check(f"课次卡（孤儿组 {'有' if _n else '无'}）targets 交回来了",
-              len(_tg) == (2 if _n else 1), f"拿到 {len(_tg)} 个")
 
     print("\n--- ⑰ 导入课表（拖 `.ics` 进来）---")
     check("挑课表：只认 .ics / .ical，且大小写不敏感",

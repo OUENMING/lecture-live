@@ -79,18 +79,21 @@ SYMBOL_PT = 26.0
 TITLE_H = 30.0
 LINE_H = 22.0
 DOTS_H = 16.0
+DOT, DOT_PILL, DOT_GAP = 6.0, 18.0, 6.0   # 进度点：当前页拉成胶囊（翻页时从圆点「长」过去）
 FOOT_H = 28.0
-TILE_H = 66.0          # 数字格：大数字 26 + 一句话 16 + 旧→新 14 + 上下留白
+TILE_H = 76.0          # 数字格：大数字 30 + 一句话 17 + 旧→新 14，上下各留约 8（原 66 时末行离底只剩 4pt）
 TILE_GAP = 8.0
 TILE_COLS = 3
 NOTE_H = 16.0
+NOTE_GAP = 12.0        # 脚注离格子的距离（原 6：脚注贴着格子像是最后一格的一部分）
 FADE_S = 0.18          # 翻页淡入淡出；系统开了「减弱动态效果」就不做
 _W = 0.23              # NSFontWeightMedium，同 whatsnew / overlay
 _SEMI = 0.4
 
-#: 三档按钮：主（下一步 / 开始用）实心白底黑字 > 次（上一步）白字 0.75 > 弱（跳过）白字 0.45。
-#: 三颗都用系统圆角壳的话，「跳过」这个逃生口和主操作抢同样的分量（2026-10-12 评审，核实属实）。
-PRIMARY_BG, SECONDARY_A, TERTIARY_A = panel.PRIMARY_BG_A, 0.75, 0.45
+#: 三档按钮：主（下一步 / 开始用）实心胶囊 > 次（上一步）淡底胶囊（`panel.style_secondary`）> 弱（跳过）白字 0.45。
+#: 三颗都用系统圆角壳的话，「跳过」这个逃生口和主操作抢同样的分量（2026-10-12 评审，核实属实）；
+#: 「上一步」原来是裸字，看不出能点（10-13 评审）。
+PRIMARY_BG, SECONDARY_A, TERTIARY_A = panel.PRIMARY_BG_A, panel.SECONDARY_FG_A, 0.45
 DOT_ON, DOT_OFF = 0.92, 0.22
 
 
@@ -103,24 +106,28 @@ def body_h(body) -> float:
     """纯函数：一页正文占多高。数字格 = 行数 × 格高 + 脚注；文字 = 行数 × 行高。"""
     if is_stats(body):
         rows = -(-len(body) // TILE_COLS)
-        return rows * TILE_H + (rows - 1) * TILE_GAP + 6 + NOTE_H
+        return rows * TILE_H + (rows - 1) * TILE_GAP + NOTE_GAP + NOTE_H
     return len(body) * LINE_H
 
 
 def height(pages=PAGES) -> float:
-    """卡片高度按**最高那一页**算 —— 翻页时窗口不跳（矮的那页在正文区里垂直居中）。"""
+    """卡片高度按**最高那一页**算 —— 翻页时窗口不跳（矮的那页正文顶对齐，下面留白）。"""
     return PAD + BADGE + 14 + TITLE_H + 8 + max(body_h(p[2]) for p in pages) + 18 + DOTS_H + 14 + FOOT_H + PAD
 
 
-def body_offset(h_page: float, h_max: float) -> float:
-    """纯函数：这一页正文往下挪多少才在正文区里居中（矮的页不在底下留一截空洞）。整数坐标：非整数会让字发虚。"""
-    return float(round((h_max - h_page) / 2))
-
-
 def dots(i: int, n: int) -> list:
-    """纯函数：每个点的不透明度。**同一个实心圆、只换透明度**（原生 PageControl 的做法；
-    `●` 和 `○` 在 SF 里直径与重心不齐，○ 的线还细，混排显散）。"""
-    return [DOT_ON if k == i else DOT_OFF for k in range(n)]
+    """纯函数：每个点的 `(x, 宽, 不透明度)`，整排在卡片里水平居中。
+
+    当前页是一颗胶囊（`DOT_PILL` 宽），其余是圆点 —— 翻页时胶囊从这一颗「长」到下一颗
+    （2026-10-13 评审：只换透明度的一排圆点太弱，看不出在第几页）。整数坐标：非整数会让边发虚。
+    """
+    ws = [DOT_PILL if k == i else DOT for k in range(n)]
+    x = float(round((WIDTH - sum(ws) - DOT_GAP * (n - 1)) / 2))
+    out = []
+    for k, w in enumerate(ws):
+        out.append((x, w, DOT_ON if k == i else DOT_OFF))
+        x += w + DOT_GAP
+    return out
 
 
 def _reduce_motion() -> bool:
@@ -144,7 +151,6 @@ def build(on_done=None, pages=PAGES):
 
         h = height(pages)
         n_max = max((len(pg[2]) for pg in pages if not is_stats(pg[2])), default=0)
-        bh_max = max(body_h(pg[2]) for pg in pages)
         fp = panel.build(NSMakeRect(0, 0, WIDTH, h),
                          NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
         p, ve = fp.window, fp.glass
@@ -187,7 +193,6 @@ def build(on_done=None, pages=PAGES):
 
         y -= 14 + TITLE_H
         title = label(NSMakeRect(PAD, y, WIDTH - 2 * PAD, TITLE_H), 20.0, weight=_SEMI)
-        badge_y0, title_y0 = badge.frame().origin.y, y
         body_top = y - 8
         body = [label(NSMakeRect(PAD, body_top - (k + 1) * LINE_H, WIDTH - 2 * PAD, LINE_H),
                       13.0, alpha=0.82) for k in range(n_max)]
@@ -212,9 +217,10 @@ def build(on_done=None, pages=PAGES):
             tl.setBorderWidth_(1.0)
             content.addSubview_(tv)
             parts = []
-            for yy, hh, size, alpha, weight in ((32.0, 30.0, 24.0, 0.96, _SEMI),
-                                                (17.0, 17.0, 12.0, 0.85, _W),
-                                                (4.0, 15.0, 10.5, 0.50, _W)):
+            # 自上而下：大数字 / 这是什么 / 旧 → 新。末行用常规字重 —— 它是佐证，不该和标签一样重。
+            for yy, hh, size, alpha, weight in ((38.0, 30.0, 24.0, 0.96, _SEMI),
+                                                (22.0, 17.0, 12.0, 0.85, _W),
+                                                (8.0, 14.0, 10.5, 0.50, 0.0)):
                 lb = NSTextField.alloc().initWithFrame_(NSMakeRect(0, yy, tile_w, hh))
                 lb.setEditable_(False); lb.setSelectable_(False)
                 lb.setBezeled_(False); lb.setDrawsBackground_(False)
@@ -227,25 +233,29 @@ def build(on_done=None, pages=PAGES):
         note = label(NSMakeRect(PAD, 0, WIDTH - 2 * PAD, NOTE_H), 10.5, alpha=0.45)
 
         fy = PAD
-        dot = NSTextField.alloc().initWithFrame_(NSMakeRect(PAD, fy + FOOT_H + 14, WIDTH - 2 * PAD, DOTS_H))
-        dot.setEditable_(False); dot.setSelectable_(False)
-        dot.setBezeled_(False); dot.setDrawsBackground_(False)
-        ve.addSubview_(dot)
         para = NSMutableParagraphStyle.alloc().init()
         para.setAlignment_(NSTextAlignmentCenter)
-        dot_font = NSFont.systemFontOfSize_(7.0)
+        dot_y = fy + FOOT_H + 14 + (DOTS_H - DOT) / 2
+        dot_views = []
+        for _k in range(len(pages)):
+            dv = NSView.alloc().initWithFrame_(NSMakeRect(0, dot_y, DOT, DOT))
+            dv.setWantsLayer_(True)
+            dv.layer().setCornerRadius_(DOT / 2)
+            dv.layer().setBackgroundColor_(white.CGColor())
+            ve.addSubview_(dv)
+            dot_views.append(dv)
 
-        def set_dots(i):
-            s_ = NSMutableAttributedString.alloc().init()
-            for k, a in enumerate(dots(i, len(pages))):
-                s_.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
-                    ("   " if k else "") + "●",
-                    {NSFontAttributeName: dot_font,
-                     NSForegroundColorAttributeName: white.colorWithAlphaComponent_(a),
-                     NSParagraphStyleAttributeName: para}))
-            dot.setAttributedStringValue_(s_)
+        def set_dots(i, animate=False):
+            from AppKit import NSAnimationContext
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.currentContext().setDuration_(FADE_S if animate else 0.0)
+            for dv, (x, w, a) in zip(dot_views, dots(i, len(pages))):
+                tgt = dv.animator() if animate else dv
+                tgt.setFrame_(NSMakeRect(x, dot_y, w, DOT))
+                tgt.setAlphaValue_(a)
+            NSAnimationContext.endGrouping()
 
-        def button(text, x, w, *, alpha, primary=False, key=""):
+        def button(text, x, w, *, alpha, primary=False, secondary=False, key=""):
             b = NSButton.alloc().initWithFrame_(NSMakeRect(x, fy, w, FOOT_H))
             b.setBordered_(False)
             b.setWantsLayer_(True)
@@ -257,6 +267,8 @@ def build(on_done=None, pages=PAGES):
                        NSParagraphStyleAttributeName: para}))
             if primary:
                 panel.style_primary(b, text)
+            elif secondary:
+                panel.style_secondary(b, text)
             if key:
                 b.setKeyEquivalent_(key)
             ve.addSubview_(b)
@@ -264,7 +276,7 @@ def build(on_done=None, pages=PAGES):
 
         skip = button("跳过", PAD - 8, 56.0, alpha=TERTIARY_A, key="\x1b")
         nxt = button("下一步", WIDTH - PAD - 96.0, 96.0, alpha=1.0, primary=True, key="\r")
-        back = button("上一步", WIDTH - PAD - 96.0 - 8.0 - 64.0, 64.0, alpha=SECONDARY_A)
+        back = button("上一步", WIDTH - PAD - 96.0 - 8.0 - 76.0, 76.0, alpha=SECONDARY_A, secondary=True)
         state = {"i": 0, "closed": False}
 
         def retitle(b, text):
@@ -279,10 +291,9 @@ def build(on_done=None, pages=PAGES):
                 img.setTemplate_(True)
             icon.setImage_(img)
             title.setStringValue_(ttl)
-            off = body_offset(body_h(lines), bh_max)
-            # 图标、标题、正文**一起**下移：矮的页整组居中，不是标题顶着、正文悬在半空
-            for v, y0 in ((badge, badge_y0), (title, title_y0)):
-                v.setFrameOrigin_((v.frame().origin.x, y0 - off))
+            # ⚠️ 图标、标题**钉死不动**，正文顶对齐（iOS「What's New」的做法；2026-10-13 评审）。
+            #    原来矮的页整组往下居中 → 翻页时标题上下跳最多 48pt，眼睛每页都要重新找标题。
+            off = 0.0
             stats = is_stats(lines)
             for k, lb in enumerate(body):
                 lb.setStringValue_(lines[k] if not stats and k < len(lines) else "")
@@ -309,7 +320,7 @@ def build(on_done=None, pages=PAGES):
                 t.setDuration_(FADE_S)
                 content.layer().addAnimation_forKey_(t, "page")
             fill(i)
-            set_dots(i)
+            set_dots(i, animate=animate and not _reduce_motion())
             last = i == len(pages) - 1
             retitle(nxt, "开始用" if last else "下一步")
             back.setHidden_(i == 0)
@@ -350,7 +361,8 @@ def build(on_done=None, pages=PAGES):
         p.center()
         p.orderFrontRegardless()      # ⚠️ 不是 makeKeyAndOrderFront —— 绝不抢焦点
         return {"panel": p, "next": go_next, "back": go_back, "close": close,
-                "page": lambda: state["i"], "_targets": targets}
+                "page": lambda: state["i"], "_targets": targets,
+                "_title": title, "_badge": badge, "_dots": dot_views}
     except objc_own.ObjcNameCollision:
         raise                         # 程序缺陷，不吞（同 whatsnew.build 那条）
     except Exception:                                     # noqa: BLE001

@@ -58,3 +58,24 @@ namespace_id = "2002"
   [ratelimits.simple]
   limit = 60
   period = 60
+
+# 日志 / 追踪（2026-10-13 Owen 在控制台打开，这里同步；不写的话下次 wrangler deploy 会关回去）。
+# console.log 只记通行码名字 / 拒绝原因 / 走的引擎 / 毫秒数，不记转写文本。
+[observability]
+enabled = false
+head_sampling_rate = 1
+redact_query_string = false
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1
+persist = true
+
+[observability.issues]
+enabled = true

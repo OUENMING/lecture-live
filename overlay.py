@@ -1840,8 +1840,24 @@ class Overlay:
         #    frame, 屏上有 1 行草稿时**拖动缩放面板**就会每一步把它撑回整盒高 →
         #    文字停在**顶行**, 与「贴底、1→2 行时旧行向上搬」的 roll-up 语义相反,
         #    而且会一直错到下一次草稿更新(~1s)。(2026-09-27 OCR 抓出。)
-        self._draft_box_y_en = y + gh + 4
-        self._draft_box_y_zh = y + gh + 4 + DRAFT_H + 4
+        #
+        # ⭐ 竖排顺序**与定稿一致**: 双语时英文在上、中文在下(`transcript_view.EN_LINE_ON_TOP`,
+        #    三条同行评审研究: 唯一能改变 L2 行注意分配的是「哪一行在上面」)。
+        #    原来草稿是中文在上 —— 定稿那一下上下顺序整个翻过来, 读的位置跟着跳。
+        #    ⚠️ 只英 / 原文两档没有中文草稿: 英文留在**下面那格**(紧贴术语行),
+        #    否则它下面空着一格 35pt。按档位定、不按「此刻有没有中文」定 ——
+        #    后者会让英文在每句中文草稿到来时上跳一次。
+        base = y + gh + 4
+        import transcript_view as _tvmod     # 运行时读: 想回退顺序只改那一个常量
+        if self._trans_mode == "both" and not _tvmod.EN_LINE_ON_TOP:
+            self._draft_box_y_en = base
+            self._draft_box_y_zh = base + DRAFT_H + 4
+        elif self._trans_mode == "both":
+            self._draft_box_y_zh = base
+            self._draft_box_y_en = base + DRAFT_ZH_H + 4
+        else:
+            self._draft_box_y_en = base
+            self._draft_box_y_zh = base + DRAFT_H + 4
         self._render_draft()
         self._scroll_y = BOTTOM_PAD + self._pinned
         self._tv.set_frame(self._scroll_y, self._scroll_h)           # 转录区
@@ -1902,7 +1918,16 @@ class Overlay:
             #    ⚠️ 取整之后标签与点击区**用同一个数**（同框），别各算各的。
             _cw = float(math.floor(avail))
             self._chapter_lbl.setStringValue_(_ctext)
-            self._chapter_lbl.setFrame_(NSMakeRect(pad, self._height - 28, _cw, 24))
+            # ⚠️ 标签**不能**和按钮一样给 24 高的框: NSTextField 把文字**贴顶**画,
+            #    NSButton 把标题**竖直居中** —— 同一个 24 高的行里, 12pt 的章节字
+            #    会比右边按钮字高出 5pt(2026-10-13 拍图量墨迹中心: 35.25 vs 40.25pt)。
+            #    框高取这个字号的一行高、在行里居中, 两边就落在同一条中线上。
+            _lh = float(math.ceil(self._chapter_lbl.font().ascender()
+                                  - self._chapter_lbl.font().descender()
+                                  + self._chapter_lbl.font().leading()))
+            # floor 而非 round: 奇数余量时往下取那半点 —— 量过, round 仍比按钮高 1pt。
+            _ly = float(math.floor(self._height - 28 + (24 - _lh) / 2))
+            self._chapter_lbl.setFrame_(NSMakeRect(pad, _ly, _cw, _lh))
             self._chapter_hit.setFrame_(((pad, self._height - 28), (_cw, 24)))
         self._drag_layer.setFrame_(((0.0, 0.0), (self._width, self._height)))
         self._ve.setFrame_(self._panel.contentView().bounds())

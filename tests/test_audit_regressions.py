@@ -1487,6 +1487,29 @@ class R14b_FinalRollsIn(unittest.TestCase):
         self.assertIn("second", o._draft_lbl.stringValue())
 
 
+class R14c_DraftOrderMatchesFinal(unittest.TestCase):
+    """草稿的上下顺序必须与定稿一致(2026-10-13): 双语时英文在上、中文在下。
+
+    原来草稿是中文在上、定稿是英文在上 —— 定稿那一下上下整个翻过来。
+    只英 / 原文两档没有中文草稿, 英文贴底(下面不留一格空)。"""
+
+    def test_order_per_mode(self):
+        try:
+            from overlay import Overlay
+            from transcript_view import EN_LINE_ON_TOP
+        except Exception as e:                       # noqa: BLE001
+            self.skipTest(f"AppKit 不可用, 跳过: {type(e).__name__}: {e}")
+        o = Overlay()
+        self.addCleanup(o.close)
+        o.set_trans_mode("both")
+        # 不翻转坐标: y 大 = 在上
+        self.assertEqual(o._draft_box_y_en > o._draft_box_y_zh, EN_LINE_ON_TOP,
+                         "双语草稿的上下顺序与定稿行(EN_LINE_ON_TOP)不一致")
+        o.set_trans_mode("en")
+        self.assertLess(o._draft_box_y_en, o._draft_box_y_zh,
+                        "只英档没有中文草稿, 英文该在下面那格(贴着术语行)")
+
+
 class R15_LostRange(unittest.TestCase):
     """❓「没听懂」的课后时间反查(2026-09-28)。
 

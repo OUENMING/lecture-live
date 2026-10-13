@@ -24,6 +24,7 @@ import pathlib
 import time
 import typing
 
+import motion
 import panel
 import objc_own
 
@@ -210,19 +211,16 @@ MODE_CHIP_BORDER_ALPHA = 0.15     # 描边宽 = 1 物理像素（Retina 上 0.5p
 MODE_CHIP_FONT_PT = 13.0          # 中等字重（HIG 正文默认字号）；同排动作按钮仍是 14pt 常规
 MODE_CHIP_H = 22.0                # 圆角 = 高 / 2 → 整圆胶囊
 MODE_CHIP_PAD = 10.0              # 在普通按钮 +10 之上再加 → 左右合计约 20pt
-MODE_CHIP_ANIM_S = 0.2            # 切档：字淡入淡出 + 宽度过渡
-MODE_CHIP_HOVER_S = 0.12
+MODE_CHIP_ANIM_S = motion.STATE_S   # 切档：字淡入淡出 + 宽度过渡（时长统一在 motion.py）
+MODE_CHIP_HOVER_S = motion.FEEDBACK_S
 #: 档位小图标（SF Symbols）。默认关 —— 作者看了有/无两版对比图再定。
 MODE_CHIP_ICONS = False
 TRANS_MODE_SYMBOL = {"both": "character.bubble", "en": "textformat", "raw": "waveform"}
 
 
 def _reduce_motion() -> bool:
-    try:
-        from AppKit import NSWorkspace
-        return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion())
-    except Exception:                                   # noqa: BLE001
-        return False
+    # 留这个模块级名字是给测试打桩用的（`overlay._reduce_motion = lambda: False`）；读法在 motion.py。
+    return motion.reduce_motion()
 
 # pump() 每轮的让步窗口。**这是滚动跟手度的天花板**:
 # 固定 8ms 让步会让 pump 只有 ~113Hz, 而此时触控板手势正以 120Hz 投递事件 ——
@@ -655,8 +653,8 @@ def _atoms_in(c, outline) -> list:
 # 时长: **三方独立收敛** —— 我们 §11 的 macOS 惯例 0.20-0.35s · 现成动效体系的 standard
 # 档 280-350ms · CFR §15.119 的上限 ≤0.433s。另: 系统默认 `NSAnimationContext.duration`
 # 实测是 0.25s(一手量的)。取 0.28s, 落在三者之内且离法典上限留 0.15s 余量。
-ROLL_DURATION_S = 0.28
-ROLL_EASE_POW = 3.0               # ease-out-cubic 的指数; 见 roll_ease 的 docstring
+ROLL_DURATION_S = motion.MOVE_S   # 0.28 —— 定义点已收进 motion.py(全应用一套时长)
+ROLL_EASE_POW = motion.EASE_POW   # ease-out-cubic 的指数; 见 roll_ease 的 docstring
 
 
 def roll_ease(t: float) -> float:
@@ -670,8 +668,7 @@ def roll_ease(t: float) -> float:
 
     `t` 在 [0,1] 外**夹取** —— 调用方不必自己防(动效的开始/结束帧天然会越界一点点)。
     """
-    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else float(t))
-    return 1.0 - (1.0 - t) ** ROLL_EASE_POW
+    return motion.ease_out(t)
 
 
 def roll_offset(t: float, line_h: float) -> float:
@@ -1013,6 +1010,9 @@ class Overlay:
         self._draft_zh_val = ""
         self._draft_zh_base_len = None
         ve.addSubview_(self._draft_zh)
+        self._clock = time.monotonic      # 动效的时钟(可注入: 测试按帧断言)
+        self._draft_fade_t0 = None        # 草稿让位的淡出起点, 见 _render_draft
+        self._draft_shown = False         # 上一帧草稿栏有没有字
 
         # ---- 单行输入框(Phase 1: 只把文字交给回调, 问答引擎是 Phase 2) ----
         # 钉在面板最底部(见 _layout 的自下而上游标)。不用 _label(): 那个强制
@@ -2577,12 +2577,36 @@ class Overlay:
         w = max(1.0, self._width - 2 * PAD)
         en = f"▸ {self._draft}" if (active and self._draft) else ""
         zh = self._draft_zh_val if (active and self._draft_zh_val) else ""
+        # ⭐ **让位淡出**: 草稿从「有字」变「空」只有一个原因 —— 这句的定稿 / 译文开始上屏了
+        #    (那一帧转录区正把新行从草稿的位置往上推, 见 TranscriptView._start_roll)。
+        #    原来是一帧之内消失; 现在留着原字, 按 motion.EXIT_S 淡掉(离场比入场快)。
+        #    ⚠️ 淡出期间**不碰文字和 frame**(只改 alphaValue): 一重排, 断点滞回已被
+        #    finalize 清空, 两行会在淡出途中换个断法跳一下。新草稿来了就立刻收回、照常画。
+        if en or zh:
+            self._draft_end_fade()
+        elif self._draft_shown and self._draft_fade_t0 is None:
+            self._draft_fade_t0 = self._clock()
+        if self._draft_fade_t0 is not None:
+            e = motion.ease_out(motion.progress(
+                self._draft_fade_t0, self._clock(), motion.EXIT_S))
+            if e < 1.0:
+                a = 1.0 - e
+                self._draft_lbl.setAlphaValue_(a); self._draft_zh.setAlphaValue_(a)
+                return
+            self._draft_end_fade()
+        self._draft_shown = bool(en or zh)
         self._draft_base_len = self._roll_into(
             "draft", self._draft_lbl, en, DRAFT_H, self._draft_box_y_en, w,
             self._draft_base_len)
         self._draft_zh_base_len = self._roll_into(
             "draft_zh", self._draft_zh, zh, DRAFT_ZH_H, self._draft_box_y_zh, w,
             self._draft_zh_base_len)
+
+    def _draft_end_fade(self) -> None:
+        if self._draft_fade_t0 is None:
+            return
+        self._draft_fade_t0 = None
+        self._draft_lbl.setAlphaValue_(1.0); self._draft_zh.setAlphaValue_(1.0)
 
     def _roll_into(self, key, lbl, text, box_h, box_y, w, prev_base_len):
         """把一个草稿槽位按 2 行 roll-up 写进去; 返回新的底行长度(空则 None)。
@@ -2696,7 +2720,9 @@ class Overlay:
             self._mark_dirty()
         if busy:
             self._last_ev_t = now
-        self._tv.tick()          # 跟随状态机 + 闲置回底(含滚动后的池重算)
+        self._tv.tick()          # 跟随状态机 + 闲置回底(含滚动后的池重算) + 新行上滚的逐帧推进
+        if self._draft_fade_t0 is not None:
+            self._render_draft()     # 草稿让位淡出的逐帧推进(只改透明度, 见 _render_draft)
         self._flush_if_due()
         rl = NSRunLoop.currentRunLoop()
         if now - self._last_ev_t < PUMP_ACTIVE_S:
@@ -2815,6 +2841,7 @@ class Overlay:
                 anim = CABasicAnimation.animationWithKeyPath_("backgroundColor")
                 anim.setFromValue_(layer.backgroundColor())
                 anim.setDuration_(MODE_CHIP_HOVER_S)
+                anim.setTimingFunction_(motion.ca_timing())
                 layer.addAnimation_forKey_(anim, "chipHover")
                 CATransaction.flush()
             layer.setBackgroundColor_(NSColor.whiteColor().colorWithAlphaComponent_(alpha).CGColor())
@@ -2831,6 +2858,7 @@ class Overlay:
                 from AppKit import NSAnimationContext
                 NSAnimationContext.beginGrouping()
                 NSAnimationContext.currentContext().setDuration_(MODE_CHIP_ANIM_S)
+                NSAnimationContext.currentContext().setTimingFunction_(motion.ca_timing())
                 for b, r in frames:
                     b.animator().setFrame_(r)
                 NSAnimationContext.endGrouping()
@@ -2849,6 +2877,7 @@ class Overlay:
                 t = CATransition.animation()
                 t.setType_(kCATransitionFade)
                 t.setDuration_(MODE_CHIP_ANIM_S)
+                t.setTimingFunction_(motion.ca_timing())
                 b.layer().addAnimation_forKey_(t, "chipTitle")
             except Exception:                             # noqa: BLE001
                 pass

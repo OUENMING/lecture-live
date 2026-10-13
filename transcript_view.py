@@ -31,6 +31,7 @@ from __future__ import annotations
 import math
 import time
 
+import motion
 import objc_own
 
 IDLE_S = 6.0          # 闲置多久才自动回底(仅在离开底部后又有新句定稿时)
@@ -120,6 +121,17 @@ class TranscriptView:
         self._new_since_leave = False
         self._pending_appends = 0
         self._hold = False          # 答案接管期间: 不自动回底(见 set_scroll_hold)
+        # ---- 新行入列的上滚(见 _start_roll) ----
+        # 时钟与「减弱动态效果」都可注入: 位移是时间的纯函数, 探针可以确定性地断言每一帧。
+        self._clock = time.monotonic
+        self._reduce_motion = motion.reduce_motion
+        self._painted_count = 0     # 上一次 _paint 时的行数(含实时行) -> 判「多了几行」
+        self._count_reset = False   # 整体换内容(replace_items)那一轮不算「多了几行」
+        self._roll_t0 = None        # 动画起跑时刻; None = 没在动
+        self._roll_from = 0.0       # 起跑时内容往下偏多少 px(终点恒为 0)
+        self._roll_off = 0.0        # 当前帧的偏移, _geom 摆每个槽位时减掉它
+        self._roll_fade_n = 0       # 减弱动态效果: 最新的这几行淡入, 不位移
+        self._roll_alpha = 1.0
         self._verbatim = False      # 行 = (大字, 小字) 原样, 不做中英对调(见 set_rows_verbatim)
 
         self._dirty = False
@@ -209,6 +221,8 @@ class TranscriptView:
         elif bulk:
             self._pending_appends = 0
             self._new_since_leave = False
+            self._count_reset = True
+            self._end_roll()
         self._items = items
         self._live = live
         self._live_visible = live_visible
@@ -270,6 +284,7 @@ class TranscriptView:
         row_h = self._en_h + self._gap + float(zh_h)      # ← 唯一来源, 见 docstring
         if abs(float(row_h) - self._row_h) < 0.5:
             return
+        self._end_roll()                  # 行高一变, 进行中的位移就没有意义了 —— 直接落位
         self._zh_h = float(zh_h)
         self._row_h = float(row_h)
         self._lines = int(lines)          # 见 __init__: 供 _ensure_pool 新增的槽位用
@@ -399,12 +414,17 @@ class TranscriptView:
         """跟随状态机。轮询 clip origin 与期望值比较 —— 不用通知:
         ①不用持有 ObjC 观察者(弱引用 GC 陷阱); ②没有重入(bounds 通知会在
         我们自己 scrollToPoint_ 期间触发, 正是把程序滚动误判成用户滚动的环);
-        ③惯性自然处理: 每个 tick 都在动就持续刷新计时, 停下后计时才开始。"""
+        ③惯性自然处理: 每个 tick 都在动就持续刷新计时, 停下后计时才开始。
+
+        新行入列的上滚也在这里逐帧推进(pump 每轮都调 tick)。"""
+        if self._roll_t0 is not None:
+            self._step_roll()
         clip = self._scroll.contentView()
         cur = clip.bounds().origin.y
         if abs(cur - self._expected_origin) > MOVE_EPS:
             self._last_user_t = time.monotonic()
             if self._follow and cur > BOTTOM_EPS:
+                self._end_roll()          # 用户一滚就交还给他, 不和他抢
                 self._follow = False
                 self._new_since_leave = False
                 self._on_follow_change(False)
@@ -509,22 +529,85 @@ class TranscriptView:
 
         竖排顺序**逐行判定** —— 同屏会混着双语行和答案行, 判据见 EN_LINE_ON_TOP。"""
         s = self._slots[j]
-        y = level * self._row_h
-        w = doc_w
-        en_top = EN_LINE_ON_TOP and is_zh
-        if en_top:                                   # 英文小字在上, 中文大字在下
-            s["en"].setFrame_(((0.0, y + self._zh_h + self._gap), (w, self._en_h)))
-            s["zh"].setFrame_(((0.0, y), (w, self._zh_h)))
-        else:                                        # 大字在上
-            s["en"].setFrame_(((0.0, y), (w, self._en_h)))
-            s["zh"].setFrame_(((0.0, y + self._en_h + self._gap), (w, self._zh_h)))
+        s["level"] = level
+        s["en_top"] = EN_LINE_ON_TOP and is_zh
+        s["w"] = doc_w
+        self._geom(j)
         self._set_text(j, "zh", big, self._font_zh[0] if is_zh else self._font_en_big[0])
         self._set_text(j, "en", sub, self._font_en[0])
         if s["hidden"]:
             s["zh"].setHidden_(False); s["en"].setHidden_(False)
             s["hidden"] = False
-        s["level"] = level
-        s["en_top"] = en_top
+
+    def _geom(self, j: int) -> None:
+        """槽位 j 的 frame 与透明度。**槽位几何的唯一写者** —— 摆放(_layout)和上滚的
+        每一帧(_step_roll)都走这里, 所以动画期间不会有第二个人把 frame 改回去
+        (`PLAN-roll-motion.md` §5.1「谁拥有 frame」)。"""
+        s = self._slots[j]
+        level, w = s["level"], s.get("w", self._width)
+        y = level * self._row_h - self._roll_off
+        if s["en_top"]:                              # 英文小字在上, 中文大字在下
+            s["en"].setFrame_(((0.0, y + self._zh_h + self._gap), (w, self._en_h)))
+            s["zh"].setFrame_(((0.0, y), (w, self._zh_h)))
+        else:                                        # 大字在上
+            s["en"].setFrame_(((0.0, y), (w, self._en_h)))
+            s["zh"].setFrame_(((0.0, y + self._en_h + self._gap), (w, self._zh_h)))
+        a = self._roll_alpha if level < self._roll_fade_n else 1.0
+        if s.get("alpha", 1.0) != a:
+            s["zh"].setAlphaValue_(a); s["en"].setAlphaValue_(a)
+            s["alpha"] = a
+
+    # ---- 新行入列: 整块上滚一个行高 ----
+    # 「定稿替换草稿」那一下: 实时行出现(或一句定稿进来)时, 老行原地上跳一个行高、
+    # 新行凭空出现在最底下 —— 而草稿就在转录区正下方, 读起来是「草稿没了, 上面换了一句」。
+    # 改成: 内容先**往下偏一个行高**(新行藏在视口底边之下, 也就是草稿的位置), 再按
+    # motion.MOVE_S 的 ease-out 滑回原位 —— 新行**从草稿那里升上来**, 老行一起被推上去。
+    # 位移的是整块, 不是各自补间(两行各动各的就是「字在打架」, 方案 §2)。
+    # 减弱动态效果: 不位移, 最新那几行淡入(Apple HIG 的原话是「用淡入代替 x/y/z 轴的过渡」)。
+    def _start_roll(self, n: int) -> None:
+        now = self._clock()
+        if self._reduce_motion():
+            self._end_roll()
+            self._roll_fade_n, self._roll_alpha = n, 0.0
+        else:
+            # 动画中又来一行: 从**当前位置**接着走(老内容又被顶高一行, 所以起点加一个行高),
+            # 不重置也不跳 —— 方案 §5.2 的选项 ①。
+            # 封顶两个行高: 槽位池只比视口多备了 2 行(K = ceil(视口/行高)+2), 偏得更多
+            # 顶上就会露出没有槽位的空白。一次来 3 句以上本来就罕见。
+            self._roll_from = min(self._roll_off + n * self._row_h, 2.0 * self._row_h)
+            self._roll_off = self._roll_from
+        self._roll_t0 = now
+        self._regeom()          # 留在原槽位的行也要按新偏移重摆(_paint 只摆新进来的)
+
+    def _step_roll(self) -> None:
+        e = motion.ease_out(motion.progress(self._roll_t0, self._clock(), motion.MOVE_S))
+        if e >= 1.0:
+            self._end_roll()
+            return
+        if self._roll_fade_n:
+            self._roll_alpha = e
+        else:
+            self._roll_off = self._roll_from * (1.0 - e)
+        self._regeom()
+
+    def _end_roll(self) -> None:
+        """直接落到终态(位移 0、全不透明)。动画自然结束、被打断、换内容都走这里 ——
+        「终态精确」是硬判据: 停在半路会让字幕挡在错误的位置(方案 §3.2 ③)。"""
+        was = self._roll_t0 is not None
+        self._roll_t0 = None
+        self._roll_from = self._roll_off = 0.0
+        self._roll_fade_n, self._roll_alpha = 0, 1.0
+        if was:
+            self._regeom()
+
+    def _regeom(self) -> None:
+        for j, s in enumerate(self._slots):
+            if s["level"] is not None:
+                self._geom(j)
+
+    @property
+    def rolling(self) -> bool:
+        return self._roll_t0 is not None
 
     def _hide(self, j: int) -> None:
         s = self._slots[j]
@@ -536,6 +619,9 @@ class TranscriptView:
             s["hidden"] = True
         s["level"] = None
         s["en_top"] = None
+        if s.get("alpha", 1.0) != 1.0:             # 槽位会被改派给别的行, 别把半透明带过去
+            s["zh"].setAlphaValue_(1.0); s["en"].setAlphaValue_(1.0)
+            s["alpha"] = 1.0
 
     def _paint(self) -> None:
         clip = self._scroll.contentView()
@@ -544,6 +630,8 @@ class TranscriptView:
         self._ensure_pool(view_h)               # 视口可能因换屏变大, 池要跟上
         count = self._count()
         doc_h = max(count * self._row_h, view_h)
+        grew = 0 if self._count_reset else count - self._painted_count
+        self._painted_count, self._count_reset = count, False
 
         # 浏览保护: 未跟随时新追加的行会把老内容整体上移 k*row_h,
         # 把视口同步上移同样距离, 视线不动。必须回写 _expected_origin,
@@ -564,6 +652,8 @@ class TranscriptView:
             if clip.bounds().origin.y != 0.0:
                 clip.scrollToPoint_((0.0, 0.0))
             self._expected_origin = clip.bounds().origin.y
+            if grew > 0:
+                self._start_roll(grew)
 
         L0 = max(0, int(clip.bounds().origin.y // self._row_h))
         hi = min(L0 + len(self._slots) - 1, count - 1)

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 
+import motion
 import objc_own
 import panel
 
@@ -98,7 +99,7 @@ TILE_GAP = 8.0
 TILE_COLS = 3
 NOTE_H = 16.0
 NOTE_GAP = 12.0        # 脚注离格子的距离（原 6：脚注贴着格子像是最后一格的一部分）
-FADE_S = 0.18          # 翻页淡入淡出；系统开了「减弱动态效果」就不做
+FADE_S = motion.STATE_S   # 翻页淡入淡出（0.18→0.20，与面板其余换状态同档）；系统开了「减弱动态效果」就不做
 _W = 0.23              # NSFontWeightMedium，同 whatsnew / overlay
 _SEMI = 0.4
 
@@ -143,11 +144,7 @@ def dots(i: int, n: int) -> list:
 
 
 def _reduce_motion() -> bool:
-    try:
-        from AppKit import NSWorkspace
-        return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion())
-    except Exception:                                     # noqa: BLE001
-        return True
+    return motion.reduce_motion()          # 读法统一在 motion.py
 
 
 def build(on_done=None, pages=PAGES):
@@ -261,6 +258,7 @@ def build(on_done=None, pages=PAGES):
             from AppKit import NSAnimationContext
             NSAnimationContext.beginGrouping()
             NSAnimationContext.currentContext().setDuration_(FADE_S if animate else 0.0)
+            NSAnimationContext.currentContext().setTimingFunction_(motion.ca_timing())
             for dv, (x, w, a) in zip(dot_views, dots(i, len(pages))):
                 tgt = dv.animator() if animate else dv
                 tgt.setFrame_(NSMakeRect(x, dot_y, w, DOT))
@@ -330,6 +328,7 @@ def build(on_done=None, pages=PAGES):
                 t = CATransition.animation()
                 t.setType_("fade")
                 t.setDuration_(FADE_S)
+                t.setTimingFunction_(motion.ca_timing())
                 content.layer().addAnimation_forKey_(t, "page")
             fill(i)
             set_dots(i, animate=animate and not _reduce_motion())

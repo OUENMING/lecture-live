@@ -1341,6 +1341,152 @@ class R14_RollEase(unittest.TestCase):
         self.assertLessEqual(ROLL_DURATION_S, 0.433)
 
 
+class R14b_FinalRollsIn(unittest.TestCase):
+    """定稿替换草稿的那一下(2026-10-13): 新行**从草稿的位置升上来**, 草稿让位淡出。
+
+    原来是同一帧里「草稿消失 + 老行原地上跳一个行高 + 新行凭空出现」。现在转录区
+    整块先往下偏一个行高、按 `motion.MOVE_S` 滑回 0; 草稿按 `motion.EXIT_S` 淡掉。
+    四条判据沿用 `docs/PLAN-roll-motion.md` §3.2: ① 时长在法典上限内(R14 已钉)
+    ② **整块**位移(所有可见行同一个偏移) ③ **终态精确**(恰好 0、全不透明)
+    ④ 帧时间 —— 离线量不了(§5.4), 要在屏上量。时钟注入, 每一帧确定性断言。
+    """
+
+    def _overlay(self):
+        try:
+            import overlay
+            from overlay import Overlay
+        except Exception as e:                       # noqa: BLE001
+            self.skipTest(f"AppKit 不可用, 跳过: {type(e).__name__}: {e}")
+        o = Overlay()
+        self.addCleanup(o.close)
+        self.now = [100.0]
+        clock = lambda: self.now[0]                  # noqa: E731
+        o._clock = clock
+        o._tv._clock = clock
+        o._tv._reduce_motion = lambda: False
+        for i in range(4):                           # 先铺几行历史, 然后让入场动画走完
+            o.finalize(f"line {i}", f"第{i}行")
+        self.now[0] += 1.0
+        o._tv.tick()
+        self.assertFalse(o._tv.rolling)
+        self.overlay = overlay
+        return o
+
+    def _visible_offsets(self, tv):
+        """每个可见槽位的 (level, 实际 y - 静止 y)。整块位移 ⇔ 所有偏移相等。"""
+        out = []
+        for s in tv._slots:
+            if s["level"] is None or s["hidden"]:
+                continue
+            f = s["zh"].frame() if s["en_top"] else s["en"].frame()
+            out.append((s["level"], f.origin.y - s["level"] * tv._row_h))
+        return out
+
+    def test_block_moves_one_row_and_lands_exactly(self):
+        o = self._overlay()
+        tv = o._tv
+        o.stream_zh("新的一句")                      # 实时行出现 = 行数 +1
+        o._mark_dirty(urgent=True)                   # 流式增量走 16ms 合并闸门; 真机由下一轮 pump 冲刷
+        self.assertTrue(tv.rolling, "新行出现了却没起跑")
+        offs = self._visible_offsets(tv)
+        self.assertTrue(offs)
+        for lv, d in offs:
+            self.assertAlmostEqual(d, -tv._row_h, places=3,
+                                   msg=f"第 {lv} 层起点不是「往下偏一个行高」")
+        mid = []
+        for k in range(1, 5):
+            self.now[0] += self.overlay.motion.MOVE_S / 5
+            tv.tick()
+            ds = {round(d, 4) for _, d in self._visible_offsets(tv)}
+            self.assertEqual(len(ds), 1, f"可见行各动各的(不是整块): {ds}")
+            mid.append(ds.pop())
+        self.assertEqual(mid, sorted(mid), "位移应当单调回到 0, 不许来回")
+        self.assertLess(mid[0], 0.0)
+        # ease-out-cubic: t=0.2 时进度 1-0.8³ = 0.488 → 剩下 51.2% 行高
+        self.assertAlmostEqual(mid[0], -tv._row_h * 0.8 ** 3, places=2,
+                               msg="前 1/5 时间应已走完近一半(起步快、软着陆)")
+        self.now[0] += self.overlay.motion.MOVE_S
+        tv.tick()
+        self.assertFalse(tv.rolling)
+        for lv, d in self._visible_offsets(tv):
+            self.assertEqual(d, 0.0, f"第 {lv} 层终态没有精确落位")
+
+    def test_finalize_after_stream_does_not_roll_twice(self):
+        """实时行 → 定稿是**同一行**换身份, 行数不变, 不该再滚一次。"""
+        o = self._overlay()
+        o.stream_zh("新的一句")
+        o._mark_dirty(urgent=True)
+        self.now[0] += 1.0
+        o._tv.tick()
+        o.finalize("A new line.", "新的一句。")
+        self.assertFalse(o._tv.rolling, "实时行转成定稿又滚了一次")
+
+    def test_second_line_mid_roll_continues_from_current_position(self):
+        o = self._overlay()
+        tv = o._tv
+        o.finalize("a", "甲")
+        self.now[0] += self.overlay.motion.MOVE_S / 2
+        tv.tick()
+        before = tv._roll_off
+        o.finalize("b", "乙")
+        self.assertAlmostEqual(tv._roll_off, min(before + tv._row_h, 2 * tv._row_h), places=3,
+                               msg="动画中又来一句: 应从当前位置再加一行接着走, 不是重置或跳到终点")
+
+    def test_user_scroll_and_replace_end_exactly(self):
+        o = self._overlay()
+        tv = o._tv
+        o.finalize("a", "甲")
+        self.assertTrue(tv.rolling)
+        tv.replace_items([("x", "乙")])              # 换整套内容(答案接管那条路)
+        self.assertFalse(tv.rolling)
+        self.assertEqual(tv._roll_off, 0.0)
+        for s in tv._slots:
+            self.assertEqual(s.get("alpha", 1.0), 1.0)
+
+    def test_reduce_motion_fades_instead_of_moving(self):
+        o = self._overlay()
+        tv = o._tv
+        tv._reduce_motion = lambda: True
+        o.finalize("a", "甲")
+        self.assertEqual(tv._roll_off, 0.0, "减弱动态效果: 不许位移")
+        newest = [s for s in tv._slots if s["level"] == 0][0]
+        self.assertEqual(newest["zh"].alphaValue(), 0.0, "最新一行应从透明淡入")
+        others = [s for s in tv._slots if s["level"] not in (None, 0)]
+        self.assertTrue(all(s["zh"].alphaValue() == 1.0 for s in others))
+        self.now[0] += self.overlay.motion.MOVE_S + 0.01
+        tv.tick()
+        self.assertEqual(newest["zh"].alphaValue(), 1.0)
+        self.assertFalse(tv.rolling)
+
+    def test_draft_fades_out_then_clears(self):
+        o = self._overlay()
+        o.add_draft("so the marginal cost")
+        o.draft_zh("所以边际成本")
+        self.assertEqual(o._draft_zh.stringValue(), "所以边际成本")
+        o.stream_zh("所以")                           # 定稿开始上屏 → 草稿让位
+        o._mark_dirty(urgent=True)
+        self.assertEqual(o._draft_zh.stringValue(), "所以边际成本", "淡出期间原字要留着")
+        self.now[0] += self.overlay.motion.EXIT_S / 2
+        o.pump()
+        a = o._draft_zh.alphaValue()
+        self.assertTrue(0.0 < a < 1.0, f"淡出走到一半, 透明度应在 0 和 1 之间: {a}")
+        self.now[0] += self.overlay.motion.EXIT_S
+        o.pump()
+        self.assertEqual(o._draft_zh.stringValue(), "")
+        self.assertEqual(o._draft_lbl.stringValue(), "")
+        self.assertEqual(o._draft_zh.alphaValue(), 1.0, "淡完要还原透明度, 否则下一条草稿是隐形的")
+
+    def test_new_draft_cancels_fade(self):
+        o = self._overlay()
+        o.add_draft("first")
+        o.finalize("First.", "第一。")
+        self.assertIsNotNone(o._draft_fade_t0)
+        o.add_draft("second")
+        self.assertIsNone(o._draft_fade_t0)
+        self.assertEqual(o._draft_lbl.alphaValue(), 1.0)
+        self.assertIn("second", o._draft_lbl.stringValue())
+
+
 class R15_LostRange(unittest.TestCase):
     """❓「没听懂」的课后时间反查(2026-09-28)。
 

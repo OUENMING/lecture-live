@@ -43,7 +43,10 @@ def versions(text: str) -> list[str]:
 def update_mode(text: str, version: str) -> str:
     """该版本能否**后台自动应用** —— 只看 `### 更新方式` 那节。
 
-    ⚠️ **默认 `manual`**（默认拒绝）：没声明自己安全的，绝不自动应用。
+    ⭐ **默认 `auto`**（2026-10-13 Owen 拍板，原来默认 `manual`）：不写那一节 = 可以后台装；
+       **只有显式写了 `manual` 才拦**（要用户自己点）。原因：作者每版都要记得写 `auto`，
+       忘一次朋友那台就停在旧版本 —— 默认拒绝在这里拦下的多是「忘了写」，不是「真危险」。
+    ⚠️ 找不到这个版本的段落（读坏了 / 版本号不在里面）仍按 `manual` —— 判不了就别动。
 
     ⚠️⚠️ **不能用 semver 判**：本仓库 `3.4.0 → 3.5.0` 是 **minor** 版本号、内容却是
     **breaking**（两个 ASR 模型改必装、缺了启动即报错）。作者不按 semver 发版，
@@ -55,8 +58,8 @@ def update_mode(text: str, version: str) -> str:
         return "manual"
     m = re.search(r"^###\s*更新方式[^\n]*\n(.*?)(?=^### |\Z)", sec.group(1), re.S | re.M)
     if not m:
-        return "manual"
-    return "auto" if re.search(r"^\s*auto\s*$", m.group(1), re.M | re.I) else "manual"
+        return "auto"
+    return "manual" if re.search(r"^\s*manual\s*$", m.group(1), re.M | re.I) else "auto"
 
 
 def summary(body: str, max_lines: int = 6) -> str:

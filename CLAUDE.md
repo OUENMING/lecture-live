@@ -63,7 +63,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   声称完成前→`verification-before-completion` · 动接口→`codebase-design` · 写给 agent 看的文档→`writing-for-agents`。
   `settings.json` 的 `skillOverrides` 标 `"off"` 的 skill 静默不可用。
   方案里说不清、没实测、靠印象的点（阈值、API 行为、别人的现成做法）先查实。任务够大（几个文件 / 改行为）才需要；一行 typo 不用。
-- **发版**：默认 `manual`，更新日志先给作者确认 —— 细则在 `.claude/rules/release.md`。
+- **发版**：更新方式默认 `auto`（2026-10-13 起），更新日志先给作者确认 —— 细则在 `.claude/rules/release.md`。
 - **EN 为基准防倒退**：整课精修同时收到直播定稿的 EN 与 ASR 原文，EN 是基准；中文只能由 EN 修正，不能反过来改写 EN。
 - **云端 prompt 里稳定内容在前、逐句变化的在后**（DeepSeek 前缀缓存只认从头逐字相同）。`ctx_chunk=0` 的老布局被
   `tests/test_translator.py` 逐字冻结，改它要连测试一起说明理由。

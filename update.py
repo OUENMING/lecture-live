@@ -611,8 +611,10 @@ def pull() -> dict:
 # ---- 退出时的自动更新 ------------------------------------------------------
 
 STATE_DIR = pathlib.Path.home() / "Library" / "Logs" / "ClassLive"
-RATE_LIMIT_S = 3600     # 一小时最多查一次。atomic 的做法：每机器每小时最多一次
-#                         release lookup；别每次启动都打 GitHub。
+RATE_LIMIT_S = 300      # 五分钟最多查一次（2026-10-13 从一小时改短，Owen 同意）。
+#                         原来照 atomic「每机器每小时一次 release lookup」；但这里只是一次
+#                         `git fetch`，而一小时会挡掉「下课关面板 → 马上又开」那一次 ——
+#                         更新就这样一拖再拖。五分钟仍挡得住「连开连关」的抖动。
 LOCK_STALE_S = 900      # 锁超过 15 分钟当**陈旧**、自过期 —— 崩溃的更新器不能永久堵住以后
 
 
@@ -717,7 +719,7 @@ def auto_update() -> dict:
         stamp = STATE_DIR / "last_check"
         if (not _consented_version() and stamp.exists()
                 and (time.time() - stamp.stat().st_mtime) < RATE_LIMIT_S):
-            return {**out, "skipped": True, "reason": "限频（一小时一次）"}
+            return {**out, "skipped": True, "reason": "限频（五分钟一次）"}
         # ---- 并发保护（陈旧锁自过期）：与面板「现在更新」共用同一把锁 ----
         _lk = _acquire_lock()
         if _lk == "busy":
@@ -747,6 +749,17 @@ def auto_update() -> dict:
         if not st["ok"]:
             _log(f"检查失败：{st['error']}")
             return {**out, "error": st["error"]}
+        if st["dirty"]:
+            # ⭐ 能证明是**构建产物 / 权限位 / 行尾**的「脏」先恢复（先备份）—— 与面板
+            #    「现在更新」（`apply`）同一条路（2026-10-13）。原来退出时的更新器碰到它们
+            #    就静默停手，而面板那条路会修：同一台机器两条更新路结论不同。
+            #    ⚠️ 有一个 `content`（用户改过的）就**整个不动**（`repair_generated` 自己守着）。
+            _dirt = classify_dirt()
+            if _dirt and all(d["kind"] != "content" for d in _dirt):
+                _rep = repair_generated(apply=True)
+                _log("退出更新前先恢复构建产物：" + ("好了" if _rep["ok"] and _rep["applied"]
+                                                    else f"没成 —— {_rep.get('error', '')[:120]}"))
+                st["dirty"] = bool(_dirty_report())
         if st["dirty"]:
             # ⚠️ **日志必须点名**（2026-10-07）：原来只写"有本地改动"，于是朋友那台
             #    卡了两周、日志里一条线索都没有，最后靠他手动 `git status` 截图才找到。
@@ -1294,7 +1307,8 @@ def offer() -> dict:
     ⚠️ 不写任何文件。开发分支（作者自己的 worktree）一律 `none` —— 别在开发机上天天提示。
     """
     import changelog
-    out = {"kind": "none", "current": _version(), "latest": "", "summary": "", "message": ""}
+    out = {"kind": "none", "current": _version(), "latest": "", "summary": "", "message": "",
+           "quiet": False}
     if os.environ.get("CLASSLIVE_NO_UPDATE_CHECK"):
         return out
     try:
@@ -1323,19 +1337,68 @@ def offer() -> dict:
                 {"ok": False, "blocked": True, "error": "dirty", "dirty_files": stuck}))
             return out
         out["kind"] = "available"
+        out["quiet"] = _quiet_ok(out["current"], remote_log)
         return out
     except Exception as e:                                # noqa: BLE001
         _log(f"offer 异常：{type(e).__name__}: {e}")
         return {**out, "kind": "none"}
 
 
-def apply(on_line=None) -> dict:
+def _quiet_ok(current: str, remote_log: str) -> bool:
+    """有新版本时，能不能**面板开着就在后台装**（`kind == "available"` 之后才问）。
+
+    三条全满足才行：
+      ① (current, latest] 每一版的 `更新方式` 都是 auto（与退出时 `auto_update` 同一个判据）；
+      ② `requirements.txt` 远端与本地一字不差 —— 依赖要装 1–3 分钟，留给下课退出；
+      ③ `models.py` 在 HEAD..上游 之间没动 —— 可能多一个必下模型（`_models_changed` 的保守代理）。
+    ⚠️ 判不了（读不到远端、版本不在历史里）一律 `False` —— 退回「更新」那一格让用户点。
+    """
+    vers = versions_in(remote_log)
+    if current not in vers:
+        return False
+    todo = vers[:vers.index(current)]
+    if not todo or any(update_mode_in(remote_log, v) != "auto" for v in todo):
+        return False
+    ref = upstream_ref()
+    if not ref or _models_changed("HEAD", ref):
+        return False
+    rc, reqs, _ = _git("show", f"{ref}:requirements.txt")
+    if rc != 0:
+        return False
+    # ⚠️ `_git` 的输出是 strip 过的 → 两边都 strip 再比（首尾空白不影响装什么）
+    try:
+        local = (HERE / "requirements.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return reqs.strip() == local
+
+
+def spawn_quiet_apply():
+    """面板开着、`offer()["quiet"]` 为真 → 在**独立进程**里把新代码拉下来。返回 `Popen` 或 `None`。
+
+    ⚠️ 为什么是独立进程而不是面板里的线程：用户随时会关面板（或点「开始上课」让面板退出），
+       线程会跟着进程死在 `git pull` 半路、锁也没放。`start_new_session=True` 的子进程照样跑完。
+    ⚠️ 面板拿着 `Popen` 只为一件事：「开始上课」要**等它跑完**（`main.py` 是新进程，要读新代码，
+       不能读到拉了一半的工作区）。
+    """
+    try:
+        return subprocess.Popen(
+            [sys.executable, str(HERE / "update.py"), "--quiet-apply"],
+            cwd=HERE, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
+def apply(on_line=None, *, models: bool = True) -> dict:
     """面板上点了「现在更新」（或「把没装完的装完」）。⚠️ 会联网、可能要几分钟 —— **后台线程里调**。
 
     顺序：抢锁 → 恢复能证明是产物/权限/行尾的「脏」（先备份）→ `pull()` → 新代码子进程收尾。
     返回 `{ok, pulled, after, user_msg}`；`pulled=True` = 代码换了，调用方该**重开自己**
     （本进程里的模块是旧的）。收尾失败不算更新失败：代码已经是新的，缺依赖时各处会自己降级，
     下次打开面板 `offer()` 会报 `unfinished` 再给一次机会。
+    `models=False`：收尾只补依赖、不下模型（面板开着时的后台安装用 —— 1 GB 不该在开课前下）。
     """
     def say(s: str) -> None:
         if on_line:
@@ -1360,7 +1423,7 @@ def apply(on_line=None) -> dict:
             return {**out, "user_msg": r.get("user_msg") or _friendly(r)}
         out.update(ok=True, pulled=not r.get("skipped"), after=r.get("after", out["after"]))
         _log(f"面板更新 {r.get('before')} → {out['after']} 提交={r.get('commits')}")
-        fin = _finish_in_child(models=True, on_line=say)
+        fin = _finish_in_child(models=models, on_line=say)
         if not fin["ok"]:
             _log(f"面板更新收尾没成：{fin['error'][:160]}")
             out["user_msg"] = f"新版本已装好，但{fin['error']} —— 下次打开会再试一次。"
@@ -1434,6 +1497,12 @@ def _cli() -> int:
     if "--auto" in sys.argv:
         auto_update()
         return 0
+
+    if "--quiet-apply" in sys.argv:
+        # 面板开着时的后台安装（`spawn_quiet_apply`）：结果只进日志，退出码给面板看
+        _r = apply(models=False)
+        _log(f"面板后台安装：ok={_r['ok']} → {_r.get('after')} {_r.get('user_msg', '')[:120]}")
+        return 0 if _r["ok"] else 1
 
     if "--finish" in sys.argv:
         # 拉完代码后的收尾（`apply` / `auto_update` 用**新代码**的子进程叫它）

@@ -11,7 +11,7 @@
   ⑤ requirements.txt 变化能被检出        ⑥ check() 不动工作区
 
 **B. auto_update() 的分级与降级**（退出时自动更新的全部判断）
-  ① auto -> 拉   ② 没写 -> 默认拒绝   ③ 显式 manual -> 拒绝
+  ① auto -> 拉   ② 没写 -> 默认自动（2026-10-13 起）   ③ 显式 manual -> 拒绝
   ④ 跨多版本全 auto -> 拉   ⑤ 跨多版本夹一个 manual -> 拒绝
   ⑥ 限频   ⑦ 并发锁   ⑧ 没 upstream   ⑨ 工作区脏   ⑩ 不是 git 仓库
 
@@ -194,7 +194,9 @@ def auto_case(name, releases, expect_pull, dirty=False):
 
 
 auto_case("B1 remote 标 auto -> 拉", [("0.0.2", "auto")], True)
-auto_case("B2 没写「更新方式」-> 默认拒绝", [("0.0.2", None)], False)
+# 2026-10-13 Owen 拍板：默认 auto，只有显式 manual 才拦（`changelog.update_mode`）。
+auto_case("⭐ B2 没写「更新方式」-> 默认自动拉", [("0.0.2", None)], True)
+auto_case("B2b 跨版本：一个没写 + 一个 manual -> 拒绝", [("0.0.2", None), ("0.0.3", "manual")], False)
 auto_case("B3 显式 manual -> 拒绝", [("0.0.2", "manual")], False)
 auto_case("B4 跨 3 个版本全 auto -> 拉",
           [("0.0.2", "auto"), ("0.0.3", "auto"), ("0.0.4", "auto")], True)
@@ -1031,7 +1033,10 @@ with _mock.patch.object(_doctor, "model_present", lambda p: True), \
         _mock.patch.object(_de, "_ram_bytes", lambda: 16 * _GB):
     check("⚠️ 对照：Nemotron 已在 -> 不提", update.DRAFT_MODEL not in _keys(), str(_keys()))
 _calls = []
-with _mock.patch.object(update, "download_model", lambda m, say=None: _calls.append(m.key) or {"ok": False, "error": "x"}):
+# ⚠️ 要把「没装 + 用得上」钉住：不钉的话装过 Nemotron 的机器上 run_step 直接跳过、这条假红（2026-10-13 撞到）。
+with _mock.patch.object(update, "download_model", lambda m, say=None: _calls.append(m.key) or {"ok": False, "error": "x"}), \
+        _mock.patch.object(_doctor, "model_present", lambda p: False), \
+        _mock.patch.object(_de, "_ram_bytes", lambda: 16 * _GB):
     _r = update.run_step(update.DRAFT_MODEL)
 check("⭐ run_step(draft_model) 只下 Nemotron、失败原样回报", _calls == ["nemotron"] and _r["ok"] is False, f"{_calls} {_r}")
 
@@ -1277,6 +1282,81 @@ check("⭐⭐ `entry_launch` 只在**关掉面板没开课**（CANCELLED）时�
 check("⭐⭐ 两处都挂 `CLASSLIVE_NO_AUTO_UPDATE` 那道闸（否则跑一次判据就真去下 464 MB）",
       _src_main.count("CLASSLIVE_NO_AUTO_UPDATE") >= 2
       and "CLASSLIVE_NO_AUTO_UPDATE" in _src_el)
+
+# ======================= E. 面板开着时的后台安装 / 退出前先修产物（2026-10-13） =======================
+print("\nE. 后台安装与自修\n")
+
+_tmpQ, _seedQ, _cloneQ = new_world()
+release(_seedQ, "0.0.2")                                   # 没写更新方式 = auto
+with _noop_steps:
+    _o = update.offer()
+check("⭐⭐ E1 全 auto、依赖和模型清单没动 -> quiet（面板开着就后台装）",
+      _o["kind"] == "available" and _o["quiet"] is True, str(_o))
+release(_seedQ, "0.0.3", "manual")
+with _noop_steps:
+    _o = update.offer()
+# 改坏：把 `_quiet_ok` 里那句 update_mode 判断去掉 -> 这条红（manual 版被悄悄装上）。
+check("⭐⭐ E2 夹一个 manual -> 不 quiet（照旧出「更新」那一格）",
+      _o["kind"] == "available" and _o["quiet"] is False, str(_o))
+
+_tmpQ, _seedQ, _cloneQ = new_world()
+release(_seedQ, "0.0.2", reqs="numpy>=2.0\nhttpx>=0.28\n")
+with _noop_steps:
+    _o = update.offer()
+# 改坏：把依赖那条比较去掉 -> 这条红（开课前装 1–3 分钟依赖）。
+check("⭐⭐ E3 依赖清单变了 -> 不 quiet", _o["kind"] == "available" and _o["quiet"] is False, str(_o))
+
+_tmpQ, _seedQ, _cloneQ = new_world()
+(_seedQ / "models.py").write_text("MODELS = []\n", encoding="utf-8")
+release(_seedQ, "0.0.2")
+with _noop_steps:
+    _o = update.offer()
+# 改坏：把 `_models_changed` 那条去掉 -> 这条红（可能多一个必下模型，开课才发现缺）。
+check("⭐⭐ E4 模型清单动了 -> 不 quiet", _o["kind"] == "available" and _o["quiet"] is False, str(_o))
+
+_tmpQ, _seedQ, _cloneQ = new_world()
+release(_seedQ, "0.0.2")
+_fin_calls.clear()
+with _mock.patch.object(update, "_finish_in_child", _fake_fin):
+    _a = update.apply(models=False)
+check("⭐ E5 后台安装只补依赖、不下模型（apply(models=False)）",
+      _a["ok"] and _fin_calls and _fin_calls[0].get("models") is False
+      and (_cloneQ / "VERSION").read_text().strip() == "0.0.2", f"{_a} {_fin_calls}")
+
+# 退出时的更新器碰到「只是构建产物脏了」-> 先恢复（先备份）再拉，与面板「现在更新」同一条路
+_tmpR, _seedR, _cloneR = new_world()
+(_seedR / ".gitignore").write_text("out/\n", encoding="utf-8")
+(_seedR / "out").mkdir()
+(_seedR / "out" / "gen.png").write_bytes(b"v1")
+sh("git", "add", "-A", cwd=_seedR)
+sh("git", "add", "-f", "out/gen.png", cwd=_seedR)
+sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "gen", cwd=_seedR)
+sh("git", "push", cwd=_seedR)
+sh("git", "pull", "-q", cwd=_cloneR)
+release(_seedR, "0.0.2", "auto")
+(_cloneR / "out" / "gen.png").write_bytes(b"v2")          # 产物被本机重写
+with _mock.patch.object(update, "_finish_in_child", _fake_fin):
+    (update.STATE_DIR / "last_check").unlink(missing_ok=True)
+    _r = update.auto_update()
+# 改坏：把 auto_update 里那段 repair 去掉 -> 这条红（停在「工作区脏」）。
+check("⭐⭐ E6 只有构建产物脏 -> 退出更新器先恢复再拉",
+      (_cloneR / "VERSION").read_text().strip() == "0.0.2", str(_r))
+check("E6b 恢复前先备份了", any((update.STATE_DIR / "dirty-backup").rglob("gen.png")))
+(_cloneR / "requirements.txt").write_text("numpy>=2.0\n# 我改的\n", encoding="utf-8")
+(_cloneR / "out" / "gen.png").write_bytes(b"v3")
+release(_seedR, "0.0.3", "auto")
+with _mock.patch.object(update, "_finish_in_child", _fake_fin):
+    (update.STATE_DIR / "last_check").unlink(missing_ok=True)
+    update.auto_update()
+check("⭐⭐ E7 有一个用户改过的文件 -> 整个不动（产物也不恢复、不拉）",
+      (_cloneR / "VERSION").read_text().strip() == "0.0.2"
+      and (_cloneR / "out" / "gen.png").read_bytes() == b"v3")
+
+check("E8 限频五分钟（原来一小时会挡掉「关面板马上又开」那次）", update.RATE_LIMIT_S == 300)
+# 改坏：把 entry_launch 里那句 spawn_auto_update() 删掉 -> 这条红（只开面板的人永远轮不到更新）。
+check("⭐ E9 关掉面板没开课 -> 也起退出时的自动更新",
+      "_u.spawn_auto_update()" in _src_el
+      and _src_el.index('rc["code"] == CANCELLED') < _src_el.index("_u.spawn_auto_update()"))
 
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]

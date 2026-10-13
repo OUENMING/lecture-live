@@ -240,7 +240,9 @@ def main() -> int:
     if not rc["done"]:                          # ⚠️ 已经定了就别再进循环（会出不来）
         AppHelper.runEventLoop()
 
-    # ⭐ 关掉面板、**没开课** = 空闲 —— 这时才把那个可选的流式草稿模型放后台下。
+    # ⭐ 关掉面板、**没开课** = 空闲 —— 这时把自动更新和那个可选的流式草稿模型放后台。
+    #    自动更新原来只挂在下课退出（`main._auto_update_on_exit`）：只开面板看一眼就关的人
+    #    永远轮不到它（2026-10-13 加，Owen 同意）。限频 / 锁 / 分级都在 `auto_update` 里。
     #    ⚠️ 只认 `CANCELLED`：选了课（`PICKED`）之后是 `main` 那条路管，
     #       **上课途中绝不下** —— 464 MB 会和云端定稿的音频上传抢同一条教室 Wi-Fi。
     #    ⚠️ 闸门与自动更新共用（见 `main._draft_model_on_exit` 的说明）；子进程
@@ -248,6 +250,7 @@ def main() -> int:
     if rc["code"] == CANCELLED and not os.environ.get("CLASSLIVE_NO_AUTO_UPDATE"):
         try:
             import update as _u
+            _u.spawn_auto_update()
             _u.spawn_draft_model_download()
         except Exception:                       # noqa: BLE001
             pass

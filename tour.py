@@ -48,6 +48,18 @@ STATS: tuple = (
 )
 STATS_NOTE = "同一段课堂录音实测 · 前四项对比 3.8，后两项对比 3.9.3"
 
+#: 这套介绍**内容**对应的版本。双击 .app 打开面板时，没看过这一版的介绍就弹一次
+#: （新用户：没有标记；升级：标记比它旧）。⚠️ 改了 PAGES / STATS（尤其第 1 页「和旧版比」）
+#: 就把它抬到那一版 —— 内容没变的小版本不重复弹，免得每次升级都看一遍过期的数字。
+TOUR_VERSION = "3.9.4"
+
+
+def should_show(seen: str) -> bool:
+    """纯函数：标记里记着 `seen`（看过的介绍版本，可能是空串）时，要不要弹。"""
+    import changelog
+    seen = (seen or "").strip()
+    return not seen or changelog.ver_key(seen) < changelog.ver_key(TOUR_VERSION)
+
 PAGES: tuple = (
     ("chart.bar.xaxis", "这一版，和旧版比", STATS),
     ("rectangle.stack", "一门课，一张卡",

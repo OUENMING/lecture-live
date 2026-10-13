@@ -236,6 +236,14 @@ def main() -> int:
         print("⚠ 面板起不来 —— 退回直接录课")
         return UNAVAILABLE
 
+    # ⭐ 功能介绍：新用户第一次、升级到带新介绍的版本后，**双击 .app 一打开就弹一次**
+    #    （Owen 2026-10-13：不是下课后）。只认 `.app`（`CLASSLIVE_FROM_APP`）—— 终端 `cl` 和判据不弹。
+    if os.environ.get("CLASSLIVE_FROM_APP"):
+        try:
+            entry_panel.maybe_show_tour()
+        except Exception:                       # noqa: BLE001
+            traceback.print_exc()               # 介绍卡坏了不该拦上课
+
     from PyObjCTools import AppHelper
     if not rc["done"]:                          # ⚠️ 已经定了就别再进循环（会出不来）
         AppHelper.runEventLoop()

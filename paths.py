@@ -201,6 +201,14 @@ def key_cleared_flag(*, root=None) -> pathlib.Path:
     return _root(root) / "key-cleared"
 
 
+def tour_seen(*, root=None) -> pathlib.Path:
+    """功能介绍卡看过哪一版（`tour-seen`，内容是 `tour.TOUR_VERSION`）。
+
+    ⚠️ 住 `~/.classlive/` 的理由同 `key_cleared_flag`：安装目录会被 `git pull` 重写，标记一丢就每次都弹。
+    """
+    return _root(root) / "tour-seen"
+
+
 def models_stamp(*, root=None) -> pathlib.Path:
     """各模型**装的是哪个版本**（`models.json`）—— `{路径: {"src":…, "rev":…, "at":…}}`。
 

@@ -85,6 +85,38 @@ class Content(unittest.TestCase):
         self.assertGreater(tour.SECONDARY_A, tour.TERTIARY_A)
 
 
+class Trigger(unittest.TestCase):
+    """弹不弹：新用户 / 升级到带新介绍的版本弹一次；看过这一版、或标记更新（降级）不弹。"""
+
+    def test_should_show(self):
+        v = tour.TOUR_VERSION
+        self.assertTrue(tour.should_show(""), "新用户（没有标记）要弹")
+        self.assertTrue(tour.should_show("3.9.3"), "看过更旧的介绍 = 升级，要弹")
+        self.assertFalse(tour.should_show(v), "看过这一版不再弹")
+        self.assertFalse(tour.should_show(v + "\n"), "标记带换行也认")
+        self.assertFalse(tour.should_show("99.0.0"), "标记比介绍新（降级回来）不弹")
+
+    def test_maybe_show_marks_once(self):
+        # ⚠️ 写端隔离：标记写进临时目录，不碰真的 ~/.classlive/
+        import tempfile
+        import pathlib
+        import entry_panel as EP
+        import paths
+        from AppKit import NSApplication
+        NSApplication.sharedApplication()
+        root = pathlib.Path(tempfile.mkdtemp())
+        try:
+            self.assertTrue(EP.maybe_show_tour(root=root), "第一次要弹")
+            self.assertEqual(paths.tour_seen(root=root).read_text(), tour.TOUR_VERSION,
+                             "一弹出来就记下（用户可能直接开课、不等看完）")
+            # 改坏：把 maybe_show_tour 里的 should_show 判断去掉 -> 这条红（每次打开都弹）
+            self.assertFalse(EP.maybe_show_tour(root=root), "第二次不弹")
+        finally:
+            c = EP.S.get("tour")
+            if c:
+                c["close"]()
+
+
 class Behaviour(unittest.TestCase):
     def setUp(self):
         from AppKit import NSApplication

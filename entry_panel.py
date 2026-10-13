@@ -51,6 +51,7 @@ CARD_PAD = 10.0        # 卡片内边距（实测 10pt）
 CARD_GAP = 10.5        # 卡片间距（实测 10.5pt）
 CARD_H = 56.0          # 按内容累加，非抄来的（2026-10-12 按钮并进标题行：88 → 56）
 CARD_RADIUS = 5.0      # 卡片圆角（实测 5pt）
+TOUR_BTN_W = 72.0      # 底栏「功能介绍」（无边框淡字）
 HAIRLINE = 0.5         # 描边（实测 0.5pt；scale 2 上正好 1 设备像素）
 TITLE_H = 34.0
 FOOT_H = 46.0
@@ -3805,8 +3806,20 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
     status_holder["label"] = panel.make_label(
         "拖课件到某张卡上 = 加到那门课　·　拖到下面那个虚线框 = 自动分到各课",
-        NSMakeRect(PAD, PAD + 6.0, WIDTH - 2 * PAD - 100.0, 18.0), 11.0, alpha=DIM)
+        NSMakeRect(PAD, PAD + 6.0, WIDTH - 2 * PAD - 100.0 - TOUR_BTN_W - 8.0, 18.0), 11.0, alpha=DIM)
     ve.addSubview_(status_holder["label"])
+
+    # 「功能介绍」：随时重看那张介绍卡（Owen 2026-10-13 要的入口）。逃生口那一档的分量 ——
+    # 无边框淡字，不跟「关闭」抢；放在「关闭」左边，底栏只此两颗。
+    tour_tgt = _target(lambda: show_tour(root=state_root))
+    tour_btn = NSButton.alloc().initWithFrame_(
+        NSMakeRect(WIDTH - PAD - 76.0 - 8.0 - TOUR_BTN_W, PAD + 2.0, TOUR_BTN_W, 26.0))
+    tour_btn.setBordered_(False)
+    tour_btn.setTitle_("功能介绍")
+    tour_btn.setAttributedTitle_(panel.tinted_title("功能介绍", 12.0, DIM))
+    tour_btn.setTarget_(tour_tgt)
+    tour_btn.setAction_("act:")
+    ve.addSubview_(tour_btn)
 
     # ⚠️⚠️ **关闭按钮曾两次踩同一个坑**（2026-09-26 作者实测「关闭无反应」）：
     #   1. 第一版是 `objc_own.own("EntryClose", …, {"close_": lambda …: do_close()})`
@@ -3831,7 +3844,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     btn.setTarget_(btn_tgt)                             # ⚠️ 弱引用 —— 靠下面那行留住
     btn.setAction_("act:")
     ve.addSubview_(btn)
-    win._entry_targets = [btn_tgt]                      # ← 留住它，否则被 GC
+    win._entry_targets = [btn_tgt, tour_tgt]            # ← 留住它们，否则被 GC
 
     # ── 删除课程（2026-09-28）────────────────────────────────────────
     def delete_course(course: str, keep_materials: bool = False,
@@ -4094,6 +4107,47 @@ def open_panel(**kw) -> Handles | None:
     S["panel"] = h
     S["panel_key"] = _panel_key(kw)
     return h
+
+
+def show_tour(*, root=None) -> bool:
+    """弹功能介绍卡（面板上「功能介绍」那颗按钮、`maybe_show_tour` 共用）。返回弹没弹出来。
+
+    ⚠️ 一弹出来就记「看过这一版」—— 不等看完：用户可能直接点「开始上课」，进程随之退出，
+       等 `on_done` 的话下次又弹（「弹一次」就成了「弹到看完为止」）。
+    ⚠️ 卡片对象挂在 `S` 上：不留引用，窗口和按钮的 target 会被回收（同 `ready_targets`）。
+    """
+    import tour
+    old = S.get("tour")
+    if old is not None:
+        try:
+            old["close"]()
+        except Exception:                                 # noqa: BLE001
+            pass
+    card = tour.build(on_done=lambda _f: S.pop("tour", None))
+    if card is None:
+        return False
+    S["tour"] = card
+    try:
+        f = paths.tour_seen(root=root)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(tour.TOUR_VERSION, encoding="utf-8")
+    except OSError:
+        pass                                              # 记不下 = 下次再弹一次，不拦上课
+    return True
+
+
+def maybe_show_tour(*, root=None) -> bool:
+    """双击 .app 打开开课面板时：没看过这一版介绍（新用户 / 升级）就弹一次。
+
+    ⚠️ 只在双击那条路调（`entry_launch` 判 `CLASSLIVE_FROM_APP`）；终端 `cl` 和判据里不弹。
+    ⚠️ 是在**开课前**弹，不是下课后 —— Owen 2026-10-13 定。
+    """
+    import tour
+    try:
+        seen = paths.tour_seen(root=root).read_text(encoding="utf-8")
+    except OSError:
+        seen = ""
+    return tour.should_show(seen) and show_tour(root=root)
 
 
 def _status(text) -> None:

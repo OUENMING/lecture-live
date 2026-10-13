@@ -568,6 +568,19 @@ def _style_capsule(btn, text: str, *, size: float, weight: float, fg, bg, line=N
         lay.setBorderColor_(line.CGColor())
 
 
+def tinted_title(text: str, size: float, alpha: float):
+    """无边框按钮的标题：白字、给定不透明度、居中（逃生口那一档用）。"""
+    from AppKit import (NSAttributedString, NSColor, NSFont, NSFontAttributeName,
+                        NSForegroundColorAttributeName, NSMutableParagraphStyle,
+                        NSParagraphStyleAttributeName, NSTextAlignmentCenter)
+    para = NSMutableParagraphStyle.alloc().init()
+    para.setAlignment_(NSTextAlignmentCenter)
+    return NSAttributedString.alloc().initWithString_attributes_(
+        text, {NSFontAttributeName: NSFont.systemFontOfSize_(size),
+               NSForegroundColorAttributeName: NSColor.whiteColor().colorWithAlphaComponent_(alpha),
+               NSParagraphStyleAttributeName: para})
+
+
 def style_primary(btn, text: str, *, size: float = 13.0) -> None:
     """把一颗 `NSButton` 画成主按钮。高度取按钮当前 frame（圆角 = 高度一半）。
 

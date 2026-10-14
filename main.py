@@ -171,7 +171,8 @@ def echo(msg: str) -> None:
 
 # 终端提示等多久算「人不在」。⚠️ **这个数是拍的，没有测量背书** ——
 # 真正该测的是「作者离开键盘多久」，无从测。改这里**不影响 UI 那条路**（那条走卡片倒计时）。
-ASK_TIMEOUT_S = 60.0
+# 2026-10-14 作者：60 → 20 秒（下课就走的人不该多等 40 秒才开始写笔记；超时 = 存，不丢东西）。
+ASK_TIMEOUT_S = 20.0
 
 
 def _input_timed(prompt: str, timeout: float) -> str | None:

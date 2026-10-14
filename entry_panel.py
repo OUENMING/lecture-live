@@ -2352,7 +2352,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         import whatsnew
         _queue_card("draft", lambda: whatsnew.build(
             "流式草稿模型还没装", "这一版起它是必装的",
-            body=f"装上后课上的中文草稿基本不再改来改去（实测回改 5.7% → 0.6%）。下载{size}，最好连着 Wi-Fi 下。",
+            body=(f"装上后课上的中文草稿基本不再改来改去（实测回改 5.7% → 0.6%），"
+                  f"也更省电：草稿识别每秒要算的时间约 0.36 秒 → 0.15 秒。下载{size}，最好连着 Wi-Fi 下。"),
             note="现在不方便也没关系：关掉 ClassLive 后会在后台自动下好，下节课生效。",
             buttons=[("稍后", _card_done(lambda: _status("好 —— 关掉 ClassLive 后在后台下草稿模型")),
                       "secondary"),

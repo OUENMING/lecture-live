@@ -176,7 +176,7 @@ if card is None:
 
 if phase == "ask":
     card["set_status"]("本次共记录 579 句双语。\n存入 Obsidian 吗？")
-    card["set_hint"]("60 秒后自动存入 · 关窗 = 放弃这份笔记")
+    card["set_hint"]("20 秒后自动存入 · 关窗 = 放弃这份笔记")
     card["set_buttons"]([("存入", lambda: print("存入")),
                          ("不存", lambda: print("不存"))])
 elif phase == "work":

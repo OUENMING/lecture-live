@@ -223,7 +223,7 @@ def main() -> int:
         # ⚠️⚠️ 安全网那一档 —— 一个**全新的 root**（= 标记还从没写过：新装的机器、
         #     或者用户从备份里恢复了 `~/.classlive/`）里已经躺着一枚通行码。
         root = pathlib.Path(d)
-        code = "cl-test1-0e3add39fc89ca9d"
+        code = "cl-fake-0000000000000000"   # ⚠️ 别放真码（R29；2026-10-14 这里曾是真的 test1 码）
         (root / "credentials").write_text(code + "\n", encoding="utf-8")
         KE.clear_legacy_key(root=root)
         # 改坏：去掉 `val.startswith("cl-")` 那个跳过 -> 这条红。

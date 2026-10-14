@@ -173,6 +173,23 @@ def _looks_like_echo(zh: str, en: str) -> bool:
     return len(en.split()) >= 10 and len(z) < 6
 
 
+def load_test_key() -> str:
+    """实验 / 探针 / A/B 用的 key：`~/.classlive/test-key`（test1 通行码）。
+
+    ⚠️ **不回落**到 `load_api_key()` —— 回落就又记到作者自己的码上了（2026-10-14 那次）。
+       没有这个文件就直接退出，让人去建。真用户路径（上课 / `rebuild_note`）别用它。
+    """
+    from paths import test_key
+    p = test_key()
+    try:
+        k = p.read_text(encoding="utf-8").strip()
+    except OSError:
+        k = ""
+    if not k:
+        raise SystemExit(f"缺测试 key：{p}（放 test1 通行码，chmod 600）—— 实验不许用作者自己的码")
+    return k
+
+
 def load_api_key(explicit: str | None = None) -> str | None:
     """key 来源顺序: `--api-key` → `$DEEPSEEK_API_KEY` → `~/.classlive/credentials`。
 

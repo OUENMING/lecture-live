@@ -80,6 +80,8 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 - **`IOGPUFamily` 内核崩溃史**（2026-09-10，GPU 驱动断言）：`translator._configure_mlx` 是缓解措施，动 mlx / 本地模型时留意。
 - **用户数据**：`sessions/` 只追加（曾误删一节真课，不可恢复；`*_TEST.md` 也留着）。测试必须**同时**隔离读端和写端，
   包括 `~/.classlive/`（探针曾把 `~/.classlive/vault` 改成临时目录）。子代理不跑 `main.py` / `cl`（hook 拦着）。
+- **实验 / A/B / 探针要花 key 的，一律 `cloud_translator.load_test_key()`**（`~/.classlive/test-key` = test1 通行码，不回落）。
+  `load_api_key()` 是作者自己的码，只给真上课和 `rebuild_note` 用 —— 2026-10-14 一次实验在 owen 名下记了 1755 次请求，那天没上课。
 - **个人数据不入库**：`.gitignore` 覆盖 `sessions/`、`glossary/`、`.course`、`.test-mode`、`.deepseek_key`、`term_notes*.json`；
   仓库公开，key 不许进库（R29 钉着）。改 `.gitignore` 前先想清楚。
 

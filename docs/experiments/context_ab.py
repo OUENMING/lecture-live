@@ -20,7 +20,7 @@ from obsidian_writer import ObsidianWriter                           # noqa: E40
 SESSION, COURSE, START, N, OUT = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 txt = pathlib.Path(SESSION).read_text(encoding="utf-8")
 ents = [{"en": e["en"], "asr": e["asr"]} for e in ObsidianWriter._parse(txt)]
-key = ct.load_api_key(None)
+key = ct.load_test_key()
 if not key:                       # ⚠️ 不用 `assert`：`python -O` 会把它剥掉，
     sys.exit("没有 DeepSeek key")  #    那样 `None` 会被传进 load_translator 更深处才炸
 out = {}

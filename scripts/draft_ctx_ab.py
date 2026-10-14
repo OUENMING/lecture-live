@@ -57,7 +57,7 @@ def main() -> int:
     ap.add_argument("--out", default=DEFAULT_OUT)
     a = ap.parse_args()
 
-    key = CT.load_api_key(None)
+    key = CT.load_test_key()
     if not key:
         print("没有 API key"); return 1
     tr = CT.load_translator(key, a.model, os.path.join(HERE, "..", "glossary.txt"), 5,

@@ -2,7 +2,7 @@
 
 用法（在仓库根）:
   ClassLive.app/Contents/MacOS/python docs/experiments/fragment_merge_20261014/run.py OUT.json A.live.jsonl B.live.jsonl …
-产物（OUT.json）含课堂原文，**别放进仓库**。会联网（DeepSeek，走 `load_api_key()` 那把 key）。
+产物（OUT.json）含课堂原文，**别放进仓库**。会联网（DeepSeek，走 `load_test_key()`，即 test1 通行码）。
 
 - 碎句 = 定稿没有句末 `.?!`（或是 carry 超时的 `…`），且下一条定稿属于下一段。
 - L 的「后文」= 碎句定稿上屏那一刻、下一段**已经在屏上的草稿**（`.live.jsonl` 的 draft 事件，t ≤ 定稿 t）——
@@ -87,7 +87,7 @@ if __name__ == "__main__":
     ps = []
     for f in files:
         a = pairs(f); random.Random(7).shuffle(a); ps += a[:N_PER_FILE]
-    t = CT.CloudTranslator(CT.load_api_key(), "deepseek-flash")
+    t = CT.CloudTranslator(CT.load_test_key(), "deepseek-flash")
     res, lock = [], threading.Lock()
     with cf.ThreadPoolExecutor(6) as ex:
         for fut in cf.as_completed([ex.submit(one, t, p) for p in ps]):

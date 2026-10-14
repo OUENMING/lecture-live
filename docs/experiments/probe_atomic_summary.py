@@ -171,8 +171,8 @@ def main() -> int:
     if a.selftest:
         return 0
 
-    from cloud_translator import load_api_key
-    key = load_api_key()
+    from cloud_translator import load_test_key
+    key = load_test_key()
     if not key:
         print("❌ 没有 API key —— 探针跑不了"
               "(它要真调模型, 而「真调得动」正是这条探针要验的一部分)")

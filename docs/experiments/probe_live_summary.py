@@ -288,8 +288,8 @@ def run_one(session: pathlib.Path, outdir: pathlib.Path, args) -> dict:
         chat = dry_chat(counter, lambda: holder["now"], fw)
     else:
         sys.path.insert(0, str(ROOT))
-        from cloud_translator import load_api_key
-        key = load_api_key()
+        from cloud_translator import load_test_key
+        key = load_test_key()
         if not key:
             print("⚠ 没有 DeepSeek key —— 用 --dry 可以只验流程")
             return {}

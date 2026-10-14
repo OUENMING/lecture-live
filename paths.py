@@ -143,6 +143,16 @@ def credentials(*, root=None) -> pathlib.Path:
     return _root(root) / "credentials"
 
 
+def test_key(*, root=None) -> pathlib.Path:
+    """**实验 / 探针 / 测试专用**的通行码（`test1` 那个，权限 600）。
+
+    ⚠️ 2026-10-14：碎句合并实验走了 `load_api_key()` → 用的是作者自己的码，管理面板上
+       「owen 今天用了 1755 次」，而作者那天根本没上课。实验、A/B、探针一律读这里
+       （`cloud_translator.load_test_key`），用量记在 test1 名下，和真上课的账分开。
+    """
+    return _root(root) / "test-key"
+
+
 def voice_dir(*, root=None) -> pathlib.Path:
     """声纹材料目录（`~/.classlive/voice/`）—— 录下来的课音频 + 档案 + 状态机。
 

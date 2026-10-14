@@ -151,8 +151,8 @@ def main() -> int:
     # ⚠️ 直接 import，**不要** `hasattr` 兜底 —— 这个探针的前提就是复用
     # `obsidian_writer` 的内部符号。某个符号不存在时应当**响亮报错**，
     # 而不是悄悄换成一个别的模型（那正好是本文件注释一直在骂的失败模式）。
-    from cloud_translator import load_api_key
-    key = load_api_key()
+    from cloud_translator import load_test_key
+    key = load_test_key()
     if not key:
         sys.exit("❌ 没有 API key（.deepseek_key / DEEPSEEK_API_KEY）—— 探针跑不了")
 

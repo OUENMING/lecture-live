@@ -20,7 +20,7 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from cloud_translator import CloudTranslator, SYSTEM_PROMPT_CLOUD, load_api_key  # noqa: E402
+from cloud_translator import CloudTranslator, SYSTEM_PROMPT_CLOUD, load_test_key  # noqa: E402
 from translator import load_terms, core_terms, course_term_list, course_title    # noqa: E402
 from translator import domain_block, select_terms                                # noqa: E402
 
@@ -93,7 +93,7 @@ def main():
         sys.exit(f"这个会话文件里没解析出 ASR 行(找的是 '> **ASR**: …'): {sess.name}")
     print(f"回放 {len(utts)} 句, 课程={course!r}, 文件={sess.name}")
 
-    key = load_api_key()
+    key = load_test_key()
     if not key:
         sys.exit("没有 API key")
 

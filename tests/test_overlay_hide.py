@@ -149,6 +149,26 @@ class BarHover(unittest.TestCase):
             spin(0.5)
         self.assertEqual([b.isHidden() for b in self.ov._bar], before)
 
+    def test_再打开一次_真AppleEvent_藏着穿透着都叫回来(self):
+        """菜单栏图标被挤没（刘海屏）时的找回路：给自己 pid 发真的 `aevt`/`rapp`，走真的 pump 收。"""
+        import instance_lock
+        p = self.ov._panel
+        self.ov._set_hidden(True)
+        self.ov._toggle_through()
+        end = time.monotonic() + 0.6
+        while time.monotonic() < end:
+            self.ov.pump()
+        self.assertFalse(p.isVisible())
+        self.assertTrue(instance_lock.poke(os.getpid()))
+        end = time.monotonic() + 1.0
+        while time.monotonic() < end and not p.isVisible():
+            self.ov.pump()
+        spin(0.4)
+        self.assertTrue(p.isVisible())
+        self.assertFalse(self.ov._through, "叫回来还穿透着 = 看得见点不动")
+        self.assertFalse(p.ignoresMouseEvents())
+        self.assertIn("reopen", self.notes)
+
     def test_云端恢复时菜单栏图标旁不挂emoji(self):
         btn = self.ov._status.button()
         self.ov.notice("降级", warn=True)

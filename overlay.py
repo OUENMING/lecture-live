@@ -1260,7 +1260,7 @@ class Overlay:
         # 「–」隐藏：窗口收进菜单栏，转写、录音、落盘都照常（同 Apple「实时字幕」的菜单栏用法）。
         #   系统那种最小化做不了：本 app 是 `.accessory`（没有 Dock 图标），最小化的窗口无处可去。
         self._btn_hide = self._button(
-            "–", self._hide_window, "隐藏字幕（录音照常）\n  菜单栏菠萝图标 →「显示字幕」找回")
+            "–", self._hide_window, "隐藏字幕（录音照常）\n  找回：菜单栏菠萝图标 →「显示字幕」，或再打开一次 ClassLive")
         # ✕ 与 – 并排时必须同一套画法：字符 ✕ 跟着字体走，粗细对不上 SF Symbol 的 minus
         self._symbolize(self._btn_hide, "minus", "隐藏字幕", size=13.0)
         self._symbolize(self._btn_close, "xmark", "退出", size=13.0)
@@ -1288,6 +1288,7 @@ class Overlay:
         self._sync_trans_button()
         self._install_bar_hover()
         self._install_status_item()               # 菜单栏: 鼠标穿透开关 + 退出
+        self._install_reopen()
 
         self._layout()
         self._move_to_corner()
@@ -3167,6 +3168,43 @@ class Overlay:
 
     def _toggle_hidden(self):
         self._set_hidden(not self._hidden)
+
+    def _install_reopen(self) -> None:
+        """再打开一次 ClassLive（双击 .app / 启动台 / 聚焦 / 终端再敲 `cl`）= 把字幕叫回来。
+
+        ⚠️ 为什么要有（2026-10-14 作者问）：「–」把字幕藏进菜单栏，可菜单栏图标**会被挤没** ——
+           刘海屏上图标一多，放不下的直接藏在刘海后面，系统不给任何入口；穿透模式同理（只能从菜单栏关）。
+           LaunchServices 对已在跑的 bundle 不起第二个进程，而是给它发「重新打开」（`aevt`/`rapp`）；
+           `cl` 那条路被单实例锁拦下时也补发一个（`instance_lock.poke`）。收到就：显示 + 提到最前 + 关穿透。
+        ⚠️ 本 app 没有 NSApp delegate，所以不走 `applicationShouldHandleReopen:`，直接向
+           `NSAppleEventManager` 注册这一个事件；注册失败不影响上课（只是少一条找回路）。
+        """
+        try:
+            from AppKit import NSAppleEventManager, NSObject
+
+            # ⚠️ 回调挂在**实例**上（`_cb`），不写进类的命名空间：`objc_own.own` 同一个 key 只定义一次类，
+            #    闭包写进类里 = 永远调第一个 Overlay 的 `_reopen`（判据连跑两个 Overlay 时抓到的）。
+            def handle(this, event, reply):                   # noqa: ARG001
+                f = getattr(this, "_cb", None)
+                if f:
+                    f()
+            h = objc_own.own("ReopenHandler", NSObject,
+                             {"handleReopen_withReplyEvent_": handle}).alloc().init()
+            h._cb = self._reopen
+            self._targets.append(h)                           # 强引用：事件管理器不替我们留着它
+            NSAppleEventManager.sharedAppleEventManager() \
+                .setEventHandler_andSelector_forEventClass_andEventID_(
+                    h, "handleReopen:withReplyEvent:", 0x61657674, 0x72617070)   # 'aevt' / 'rapp'
+        except Exception as e:                                # noqa: BLE001
+            print(f"⚠ 「再打开 = 叫回字幕」没装上：{e}", flush=True)
+
+    def _reopen(self) -> None:
+        if self._closed:
+            return
+        self._note("reopen")
+        if getattr(self, "_through", False):
+            self._toggle_through()                            # 穿透着的话叫回来也点不动 → 一并关掉
+        self._set_hidden(False)
 
     def _install_bar_hover(self) -> None:
         """顶栏按钮跟着鼠标进出淡入淡出。**只动 alpha，不动 `isHidden`** —— 「字幕」那颗按钮的

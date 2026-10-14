@@ -160,3 +160,22 @@ def describe_holder(pid: int | None) -> str:
     if not pid:
         return "已经有一个 ClassLive 在跑"
     return f"已经有一个 ClassLive 在跑（进程 {pid}）"
+
+
+def poke(pid) -> bool:
+    """给正在跑的那个实例发「重新打开」（`aevt`/`rapp`）—— 它收到就把字幕叫回来
+    （`overlay._install_reopen`）。用在终端再敲 `cl`、被本锁拦下的那条路；`.app` 那条路
+    LaunchServices 自己会发。**只发不等**（`kAENoReply`）；发不出去回 `False`，不影响拦截本身。
+    """
+    if not pid:
+        return False
+    try:
+        from Foundation import NSAppleEventDescriptor
+        target = NSAppleEventDescriptor.descriptorWithProcessIdentifier_(int(pid))
+        ev = NSAppleEventDescriptor.appleEventWithEventClass_eventID_targetDescriptor_returnID_transactionID_(
+            0x61657674, 0x72617070, target, -1, 0)                     # 'aevt' / 'rapp'
+        _, err = ev.sendEventWithOptions_timeout_error_(0x1, 2.0, None)  # kAENoReply
+        return err is None
+    except Exception:                                                   # noqa: BLE001
+        return False
+

@@ -158,7 +158,10 @@ tr.detail>td{background:var(--recessed);padding:16px 16px 18px 18px;white-space:
 .empty b{display:block;color:var(--ink);font-weight:600;margin-bottom:4px;font-size:14px}
 .skel{background:var(--recessed);border-radius:4px;height:12px;animation:blink 1.4s ease-in-out infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.45}}
-.prog{position:fixed;top:0;left:0;height:2px;width:0;background:var(--accent);z-index:30;transition:width .25s ease}
+/* 顶栏那根进度条走 transform 不走 width：动 width 是布局属性，每帧都要重排（这页每分钟刷一次，
+   刷新时正好在动）。scaleX 只走合成，肉眼一模一样。 */
+.prog{position:fixed;top:0;left:0;height:2px;width:100%;background:var(--accent);z-index:30;
+  transform:scaleX(0);transform-origin:left;transition:transform .25s ease}
 @media (prefers-reduced-motion:reduce){
   *{transition:none!important;animation:none!important}
   .prog{display:none}
@@ -178,10 +181,61 @@ details.prices>summary .note{font-size:11px;color:var(--ink3);font-weight:400}
 details.prices[open]>summary{margin-bottom:12px}
 .toggle{background:transparent;box-shadow:none;color:var(--ink3);font-size:12px;padding:6px 0}
 .toggle:hover{background:transparent;color:var(--ink)}
+
+/* ---- 2026-10-14 晚：数据呈现改版（设计口径一个字没动 —— 还是那套 token / 字号 / 圆角 / 阴影）----
+   `details.sub` 是「长表折起来」的第二档：`details.prices` 是整块标题，这个是卡片里的小节。 */
+details.sub{margin-top:14px}
+details.sub>summary{cursor:pointer;list-style:none;font-size:11px;color:var(--ink3);display:flex;gap:6px;
+  align-items:baseline;padding:3px 0}
+details.sub>summary::-webkit-details-marker{display:none}
+details.sub>summary::before{content:"›";display:inline-block;width:9px;transition:transform .12s ease}
+details.sub[open]>summary::before{transform:rotate(90deg)}
+details.sub[open]>summary{color:var(--ink2);margin-bottom:6px}
+details.sub>summary:hover{color:var(--ink)}
+/* 「服务」卡底下那串折叠：排成一张清单（一行一节、细线分隔），不是一串各自漂着的小字 */
+#svc details.sub{margin:0;box-shadow:0 -1px 0 0 var(--line2)}
+#svc details.sub:first-of-type{margin-top:18px}
+#svc details.sub>summary{padding:9px 0;margin:0}
+#svc details.sub[open]{padding-bottom:12px}
+
+/* 日历条：一行一个人、一格一天。颜色只有一种色相（--d1），深浅 = 当天的量。 */
+.cal{display:grid;gap:3px 10px;align-items:center}
+.cal .nm{font-size:11px;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cal .cells{display:grid;gap:2px}
+.cal .cells i{display:block;height:12px;border-radius:2px;background:var(--recessed)}
+.cal .tot{font-size:11px;color:var(--ink2);text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.cal .axis{display:flex;justify-content:space-between;font-size:11px;color:var(--ink3)}
+/* 部署时间轴：段宽按时长分（flex-grow 由 JS 写死），段间 2px 留白，太短的段也有 2px 最小宽度。
+   圆角 2px 跟日历格子同一档（微型标识，不是容器）。 */
+.depbar{display:flex;gap:2px;height:22px;margin-bottom:4px}
+.depbar i{flex-grow:0;flex-shrink:1;flex-basis:0;min-width:2px;border-radius:2px;background:var(--recessed);
+  color:var(--ink3);font-size:11px;font-style:normal;line-height:22px;text-align:center;overflow:hidden;
+  white-space:nowrap;font-family:var(--mono);font-variant-numeric:tabular-nums;cursor:default}
+.depbar i.live{background:var(--fill);color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.depax{display:flex;justify-content:space-between;font-size:11px;color:var(--ink3)}
+
+/* KPI 卡的环比：贴标题右端，不跟大数字抢位置；用中性色 —— 用量涨了不是「好」，跌了也不是「坏」。 */
+.kpi .k{display:flex;gap:8px;align-items:baseline}
+.kpi .k .d{margin-left:auto;font-size:11px;color:var(--ink3);font-variant-numeric:tabular-nums}
+
+/* 抽屉顶上的四个「大数」：比 KPI 小一档（22px / -0.6px），层级上属于这一条码、不属于整页。 */
+.hero{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
+.hero div{font-size:11px;color:var(--ink3)}
+.hero b{display:block;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:22px;font-weight:600;
+  letter-spacing:-.6px;line-height:1.2;margin-top:2px;color:var(--ink)}
+/* 那行小字是「大数的注解」。中间必须有分隔符：`1h49m` 直接接 `6,564 秒` 会读成 `1h49m6`（实测 22px→12px
+   只靠 2px 间距分不开两个数字）。用面板其它地方同一个中点分隔。 */
+.hero.s5{grid-template-columns:repeat(5,minmax(0,1fr));margin-bottom:20px}
+.hero .sub{display:block;margin-top:1px}
+.hero b.bad{color:var(--bad)} .hero b.warn{color:var(--warn)}
+.hint.warn{color:var(--warn)}
+.hero b small{font-size:12px;font-weight:500;letter-spacing:0;color:var(--ink2);margin-left:5px}
+
 @media (max-width:1000px){
   .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
   .charts{grid-template-columns:minmax(0,1fr)}
   .dsplit{grid-template-columns:minmax(0,1fr)}
+  .hero,.hero.s5{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 </style>
 </head>
@@ -210,6 +264,15 @@ details.prices[open]>summary{margin-bottom:12px}
 
   <section class="block">
     <div class="kpis" id="kpis"></div>
+    <!-- 环比没有可比时（上一个同样长的区间一条记录都没有）在这里说一次，不往四个格子里各塞一句一样的 -->
+    <div class="hint" id="kpnote"></div>
+  </section>
+
+  <section class="block">
+    <div class="hd"><h2>用户</h2><span class="note" id="unote"></span><span class="spacer"></span>
+      <button class="primary" id="addbtn">发新码</button></div>
+    <div id="addform" hidden></div>
+    <div id="users"></div>
   </section>
 
   <section class="block">
@@ -228,7 +291,7 @@ details.prices[open]>summary{margin-bottom:12px}
         <div id="daily"></div>
       </div>
       <div class="card">
-        <div class="ch"><h3>每人用量</h3><span class="spacer"></span><span class="note" id="pernote"></span></div>
+        <div class="ch"><h3>谁在什么时候用</h3><span class="spacer"></span><span class="note" id="pernote"></span></div>
         <div id="peruser"></div>
       </div>
     </div>
@@ -236,27 +299,14 @@ details.prices[open]>summary{margin-bottom:12px}
 
   <section class="block">
     <div class="hd"><h2>系统额度</h2><span class="note" id="qnote"></span><span class="spacer"></span>
-      <span class="note">到 95% 自动降级，不等对方回 429</span></div>
+      <span class="note">到 95% 自动降级</span></div>
     <div class="card" id="quota"></div>
   </section>
 
   <section class="block">
-    <div class="hd"><h2>Cloudflare</h2><span class="note" id="cfnote"></span><span class="spacer"></span>
-      <span class="note">本机用只读 token 直接问 Cloudflare，不经 Worker</span></div>
-    <div class="card" id="cf"></div>
-  </section>
-
-  <section class="block">
-    <div class="hd"><h2>服务健康</h2><span class="note" id="hnote"></span><span class="spacer"></span>
-      <span class="note">延迟 · 上游 · 部署 · 节点 · 站点 · 日志 · 逐请求事件</span></div>
-    <div class="card" id="health"></div>
-  </section>
-
-  <section class="block">
-    <div class="hd"><h2>用户</h2><span class="note" id="unote"></span><span class="spacer"></span>
-      <button class="primary" id="addbtn">发新码</button></div>
-    <div id="addform" hidden></div>
-    <div id="users"></div>
+    <div class="hd"><h2>服务</h2><span class="note">近 24 h · 本机用只读 token 直接问 Cloudflare</span><span class="spacer"></span>
+      <span class="note" id="sage"></span></div>
+    <div class="card" id="svc"></div>
   </section>
 
   <section class="block">
@@ -279,28 +329,72 @@ function cluiCost(u, p){
 }
 /* >>>CLUI-COST-END<<< */
 
+/* >>>CLUI-DEP-START<<< */
+/* 部署时间轴的**算术**（画的部分在外面）。判据从这两个哨兵之间抠出源码喂 node 跑
+   （tests/test_cl_admin_ui.py）。要纯函数：不读 state、不碰 DOM、不依赖别的函数。
+   `vs` = cf_health 的 `versions`；`t0`/`t1` = 窗口两端（毫秒）。
+   段起点优先用 `deployed_at`（`wrangler deploy` 的权威时刻）；读不到就退回 `first`
+   （窗口里第一次有请求的分钟）并把 `known` 置 false —— 调用方据此在界面上如实标出来，
+   **不许**拿第二次的当第一次的报。返回按时间排好的段：
+   `s`/`e` 已钳进窗口、`dur` = `e - s`、`at` 真实部署时刻（不知道 = null）、
+   `live` = 最后一个（到窗口末尾还活着的那一版；按定义有且只有一个）。
+
+   ⚠️ **必须自己按时间重排**：上游 `versions` 是按 `first`（第一次有请求的分钟）排的，
+   那顺序可能跟部署顺序**不一样** —— 低流量的版本可能上线几小时后才来第一个请求。
+   照搬上游顺序会把段画到错的位置，而且接缝是断的。
+   ⚠️ 不变量：`s <= e`、首段 `s >= t0`、末段 `e == t1`、段与段首尾相接。
+   所以这里不钳 `dur`（钳了就是判据够不着的死代码）。 */
+function cluiDepSegs(vs, t0, t1){
+  var rows = [];
+  (vs || []).forEach(function(v){
+    var at = v.deployed_at ? Date.parse(v.deployed_at) : NaN;
+    if(!isNaN(at) && at >= t1) return;                       // 窗口末尾及之后才上的版本不画（真的会漏进来）
+    var fb = Date.parse(v.first);
+    rows.push({id: v.id, requests: v.requests || 0,
+               at: isNaN(at) ? null : at, known: !isNaN(at),
+               s: Math.max(t0, isNaN(at) ? (isNaN(fb) ? t0 : fb) : at)});
+  });
+  rows.sort(function(a, b){ return a.s - b.s; });            // 稳的：同起点的保持原顺序
+  rows.forEach(function(r, k){
+    r.i = k + 1;
+    r.e = k + 1 < rows.length ? Math.min(t1, rows[k + 1].s) : t1;
+    r.dur = r.e - r.s;
+    r.live = k === rows.length - 1;
+  });
+  return rows;
+}
+/* >>>CLUI-DEP-END<<< */
+
 (function(){
 "use strict";
 var GATE = {"X-ClassLive-Admin":"1"};
 var NS = "http://www.w3.org/2000/svg";
 var HINT = "续期是「从现在起再加 N 天」。限额留空 = 不限，改动立刻生效。转写秒按每次请求至少 10 秒计。";
 var METRICS = {
-  asr:  {label:"转写分钟", unit:"分", color:"var(--d1)", pick:function(u){ return u.asr_s/60; }},
-  llm:  {label:"翻译次数", unit:"次", color:"var(--d2)", pick:function(u){ return u.llm_reqs; }},
-  tin:  {label:"输入 token", unit:"tok", color:"var(--d3)", pick:function(u){ return u.tokens_in; }},
-  tout: {label:"输出 token", unit:"tok", color:"var(--d4)", pick:function(u){ return u.tokens_out; }}
+  asr:  {label:"转写分钟", unit:"分", color:"var(--d1)", pick:function(u){ return u.asr_s/60; },
+         total:function(v){ return fmtDur(v*60); }, cell:function(v){ return num(v, v < 10 ? 1 : 0) + " 分"; }},
+  llm:  {label:"翻译次数", unit:"次", color:"var(--d2)", pick:function(u){ return u.llm_reqs; },
+         total:function(v){ return num(v); }, cell:function(v){ return num(v) + " 次"; }},
+  tin:  {label:"输入 token", unit:"tok", color:"var(--d3)", pick:function(u){ return u.tokens_in; },
+         total:function(v){ return shortNum(v); }, cell:function(v){ return num(v) + " token"; }},
+  tout: {label:"输出 token", unit:"tok", color:"var(--d4)", pick:function(u){ return u.tokens_out; },
+         total:function(v){ return shortNum(v); }, cell:function(v){ return num(v) + " token"; }}
 };
+// 模型桶（`passes-core.js` 的 modelBucket）→ 名字与颜色。⭐ 颜色跟着**模型**走、不跟名次走 ——
+// 换个人、换个区间，whisper-turbo 永远是同一个颜色（dataviz 的反模式：颜色随排名轮换）。
+var MODEL_NAME = {v3:"whisper-large-v3", turbo:"whisper-turbo", qwen:"千问", other:"其它"};
+var MODEL_COLOR = {v3:"var(--d1)", turbo:"var(--d2)", qwen:"var(--d3)", other:"var(--d4)"};
+var MODEL_ORDER = ["v3", "turbo", "qwen", "other"];
 var state = {
   days: 7, theme: "auto", metric: "asr",
-  codes: [], days_data: [], quota: null, limit: null,
+  codes: [], days_data: [], prev_data: [], quota: null, limit: null,
   expanded: null, showRevoked: false, busy: false, loaded: false, err: null,
-  minCache: {}, minDay: {}, winCache: {},
+  minCache: {}, minDay: {}, winCache: {}, folds: {},
   prices: JSON.parse(localStorage.getItem("clui-prices") || "null") || {cache:0.003, miss:0.15, out:0.60}
 };
 var $ = function(s){ return document.querySelector(s); };
 function el(t, cls, txt){ var e = document.createElement(t); if(cls) e.className = cls; if(txt != null) e.textContent = txt; return e; }
 function num(n, d){ if(n == null || isNaN(n)) return "无"; return Number(n).toLocaleString("en-US",{minimumFractionDigits:d||0,maximumFractionDigits:d||0}); }
-function mins(sec){ return sec == null ? "无" : (sec/60).toFixed(sec/60 >= 100 ? 0 : 1); }
 function hm(ms){ var t = new Date(ms); return String(t.getHours()).padStart(2,"0") + ":" + String(t.getMinutes()).padStart(2,"0"); }
 function ago(ms){      /* 本机时区，**永远精确到分钟**：「今天 13:17 / 昨天 22:05 / 10-12 09:06」 */
   if(!ms) return "无";
@@ -353,8 +447,8 @@ function api(name, body){
 var progT = null;
 function progress(on){
   var p = $("#prog");
-  if(on){ p.style.width = "38%"; clearTimeout(progT); progT = setTimeout(function(){ p.style.width = "72%"; }, 220); }
-  else { p.style.width = "100%"; setTimeout(function(){ p.style.width = "0"; }, 200); }
+  if(on){ p.style.transform = "scaleX(.38)"; clearTimeout(progT); progT = setTimeout(function(){ p.style.transform = "scaleX(.72)"; }, 220); }
+  else { p.style.transform = "scaleX(1)"; setTimeout(function(){ p.style.transform = "scaleX(0)"; }, 200); }
 }
 
 /* ---------- SVG 小工具 ---------- */
@@ -613,6 +707,64 @@ function spansOf(idx, gap){
   return out;
 }
 
+/* ---------- 呈现用的小件（2026-10-14 晚加）---------- */
+function fmtDur(sec){            /* 秒 → 「3h54m」/「54m」。比「233.9 分」好读，也比只给小时精确 */
+  if(!sec) return "0m";
+  var m = Math.round(sec / 60), h = Math.floor(m / 60);
+  return h ? h + "h" + String(m % 60).padStart(2, "0") + "m" : m + "m";
+}
+function stackMini(parts, w){    /* 表格里的构成条：6px 高，够小不抢行；明细在 title 里 */
+  var total = parts.reduce(function(a, p){ return a + p.v; }, 0);
+  var t = el("span");
+  t.style.cssText = "display:inline-flex;height:6px;width:" + w + "px;border-radius:3px;overflow:hidden;" +
+                    "background:var(--recessed);vertical-align:-1px";
+  parts.filter(function(p){ return p.v > 0; }).forEach(function(p){
+    var s = el("i");
+    s.style.cssText = "display:block;height:100%;background:" + p.color + ";width:" + (total ? p.v / total * 100 : 0) + "%";
+    t.appendChild(s);
+  });
+  return t;
+}
+function fold(summary, nodes, key){   /* 卡片里的小节折起来（整块的用 details.prices，同一个语言） */
+  var d = el("details", "sub");
+  // 带 key 的记住开合：每分钟自动刷新、或某个来源晚到一步重画整块时，点开的那节不该自己合上。
+  if(key){ d.open = !!state.folds[key]; d.addEventListener("toggle", function(){ state.folds[key] = d.open; }); }
+  d.appendChild(el("summary", null, summary));
+  nodes.forEach(function(n){ if(n) d.appendChild(n); });
+  return d;
+}
+/* 日历条：一行一个人、一格一天。颜色只有一种色相（--d1），深浅 = 当天的量。
+   rows = [{name, vals, total}]，vals 与 labels 一一对应、天数升序；m = METRICS 的那一项。 */
+function calStrip(rows, labels, m){
+  var g = el("div", "cal");
+  g.style.gridTemplateColumns = "104px minmax(0,1fr) 68px";
+  var cols = "grid-template-columns:repeat(" + labels.length + ",minmax(0,1fr))";
+  var max = 0;
+  rows.forEach(function(r){ r.vals.forEach(function(v){ if(v > max) max = v; }); });
+  function shade(v){             /* 5 档。0 不画（留 --recessed 的空格），免得「有一点」和「没有」看起来一样 */
+    if(!v) return 0;
+    var a = max ? v / max : 0;
+    return a <= .08 ? .18 : a <= .25 ? .36 : a <= .5 ? .56 : a <= .78 ? .78 : 1;
+  }
+  rows.forEach(function(r){
+    g.appendChild(el("span", "nm", r.name));
+    var c = el("div", "cells"); c.style.cssText = cols;
+    r.vals.forEach(function(v, i){
+      var cell = el("i"), s = shade(v);
+      if(s){ cell.style.background = "var(--d1)"; cell.style.opacity = String(s); }
+      cell.title = r.name + " · " + labels[i] + "：" + (v ? m.cell(v) : "没有用量");
+      c.appendChild(cell);
+    });
+    g.appendChild(c);
+    g.appendChild(el("span", "tot", r.total ? m.total(r.total) : "—"));
+  });
+  var ax = el("div", "axis");
+  ax.appendChild(el("span", null, labels[0]));
+  ax.appendChild(el("span", null, labels[labels.length - 1] === utcToday() ? "今天" : labels[labels.length - 1]));
+  g.appendChild(el("span", null)); g.appendChild(ax); g.appendChild(el("span", null));
+  return g;
+}
+
 /* ---------- 主题 ---------- */
 function applyTheme(){
   var t = state.theme;
@@ -623,9 +775,17 @@ function applyTheme(){
 }
 
 /* ---------- 渲染：KPI ---------- */
-function kpiCard(k, v, unit, sub, sparkVals, color){
+function deltaOf(cur, prev, days){       /* 环比。中性色 —— 用量涨了不代表「好」，不用状态色 */
+  if(!prev) return cur ? "前 " + days + " 天没有" : "前 " + days + " 天也没有";
+  var p = (cur - prev) / prev * 100, a = Math.abs(p);
+  return (p >= 0 ? "↑ " : "↓ ") + (a >= 999 ? ">999" : a.toFixed(a < 10 ? 1 : 0)) + "% · 前 " + days + " 天";
+}
+function kpiCard(k, v, unit, sub, sparkVals, color, delta){
   var c = el("div","kpi");
-  c.appendChild(el("div","k", k));
+  var head = el("div","k");
+  head.appendChild(el("span", null, k));
+  if(delta) head.appendChild(el("span","d", delta));
+  c.appendChild(head);
   var val = el("div","v num"); val.textContent = v;
   if(unit){ var u = el("small", null, unit); val.appendChild(u); }
   c.appendChild(val);
@@ -641,28 +801,49 @@ function renderKpis(){
   var t = sumRows(all, null);
   var n = state.days_data.length;
   var daily = state.days_data.map(function(d){ return sumRows(d.rows, null); });
+  // 环比：`load()` 一次要 2× 天数的 stats，前一半留在 state.prev_data。
+  var prev = sumRows(state.prev_data.reduce(function(a,d){ return a.concat(d.rows); }, []), null);
+  var dN = state.prev_data.length;
+  // 上一个区间**一条记录都没有**时，四个格子会各印一句「前 N 天没有」—— 同一句话四遍不是信息。
+  // 这种情况只在下面说一次；有数据时每格各报自己的环比。
+  var prevEmpty = dN > 0 && !state.prev_data.some(function(d){
+    return (d.rows || []).some(function(r){ return r.asr_reqs || r.llm_reqs || r.jev_reqs; }); });
+  var kpnote = $("#kpnote");
+  kpnote.textContent = prevEmpty
+    ? "前 " + dN + " 天（" + state.prev_data[0].day + " – " + state.prev_data[dN - 1].day + "）一条记录都没有，环比没有可比。"
+    : (!dN ? "这一档拿不到上一个同样长的区间（后端最多给 366 天），所以没有环比。" : "");
+  if(kpnote.textContent) kpnote.style.marginTop = "10px";
+  var wd = dN && !prevEmpty;      /* 有可比区间才在格子里印环比 */
   var codes = state.codes;
   var live = codes.filter(function(c){ return !c.revoked && (!c.expires || c.expires > Date.now()); });
-  box.appendChild(kpiCard("区间转写", mins(t.asr_s), "分",
-    num(t.asr_reqs) + " 段 · " + n + " 天", daily.map(function(x){ return x.asr_s/60; }), "var(--d1)"));
+  box.appendChild(kpiCard("区间转写", fmtDur(t.asr_s), "",
+    num(t.asr_reqs) + " 段 · " + n + " 天", daily.map(function(x){ return x.asr_s/60; }), "var(--d1)",
+    wd ? deltaOf(t.asr_s, prev.asr_s, dN) : ""));
   box.appendChild(kpiCard("区间翻译", num(t.llm_reqs), "次",
     "输入 " + shortNum(t.tokens_in) + " · 输出 " + shortNum(t.tokens_out) + " token",
-    daily.map(function(x){ return x.llm_reqs; }), "var(--d2)"));
+    daily.map(function(x){ return x.llm_reqs; }), "var(--d2)",
+    wd ? deltaOf(t.llm_reqs, prev.llm_reqs, dN) : ""));
   // ⚠️ 价目表是**闲时价**；DeepSeek 高峰（UTC 周一至五 01–04、06–10 点）×2。Worker 只按 UTC 日记总数、
   //    不分时段，所以这里只能给区间：下限 = 全在闲时，上限 = 全在高峰。
-  var cost = cluiCost(t, state.prices);
+  var cost = cluiCost(t, state.prices), prevCost = cluiCost(prev, state.prices);
   box.appendChild(kpiCard("花费估算", "$" + cost.toFixed(3), "起",
     "全在高峰最多 $" + (cost * 2).toFixed(3) + (t.tokens_in ? " · 缓存命中 " + Math.round(t.cache_hit/t.tokens_in*100) + "%" : ""),
-    daily.map(function(x){ return cluiCost(x, state.prices); }), "var(--d3)"));
+    daily.map(function(x){ return cluiCost(x, state.prices); }), "var(--d3)",
+    wd ? deltaOf(cost, prevCost, dN) : ""));
   // 走势 = **每天有用量的码的个数**（原来画的是「这天有没有记录」的 0/1，读不出东西）
-  var perDay = state.days_data.map(function(d){
-    var seen = {}; d.rows.forEach(function(r){ if(r.asr_reqs || r.llm_reqs || r.jev_reqs) seen[r.code] = 1; });
-    return Object.keys(seen).length;
-  });
+  function actives(days){
+    return days.map(function(d){
+      var seen = {}; (d.rows || []).forEach(function(r){ if(r.asr_reqs || r.llm_reqs || r.jev_reqs) seen[r.code] = 1; });
+      return Object.keys(seen).length;
+    });
+  }
+  var perDay = actives(state.days_data);
   var todayN = perDay.length ? perDay[perDay.length - 1] : 0;
+  // 这一格的大数是「今天」，所以环比也取上一个区间的**最后一天**（同日位置），不拿整段跟一天比。
+  var prevDay = actives(state.prev_data).slice(-1)[0] || 0;
   box.appendChild(kpiCard("在用的码", String(todayN), "今天",
     "有效 " + live.length + " / 共 " + codes.length + " · 设备 " + codes.reduce(function(a,c){ return a + c.devices; }, 0) + " 台",
-    perDay, "var(--d4)"));
+    perDay, "var(--d4)", wd ? deltaOf(todayN, prevDay, dN) : ""));
 }
 
 /* ---------- 渲染：每日折线 ---------- */
@@ -674,17 +855,25 @@ function renderDaily(){
   box.appendChild(colChart(items, m, utcToday()));
 }
 
-/* ---------- 渲染：每人横条 ---------- */
-function renderPerUser(){
+/* ---------- 渲染：每人 × 逐日（日历条）----------
+   2026-10-14 换掉原来的「每人一根总条」：那根条的数字跟下面用户表同一列一个字都不差（重复），
+   而且看不出「哪天在用」。日历条同一块地方给出节奏，跟任何表都不重复。 */
+function renderPerDay(){
   var box = $("#peruser"); box.innerHTML = "";
   var m = METRICS[state.metric];
-  var items = state.codes.map(function(c){ return {name: c.name, v: m.pick(sumRows(allRows(), c.code))}; })
-    .filter(function(x){ return x.v > 0; })
-    .sort(function(a,b){ return b.v - a.v; });
-  $("#pernote").textContent = m.label;
-  // 一个指标 = 一种颜色。原来按名次轮换四色 —— 颜色跟着名次走、换个区间同一个人就换色（dataviz 的反模式）。
-  box.appendChild(hBars(items.slice(0, 10).map(function(x){ return Object.assign(x, {color: m.color}); }), {unit: m.unit}));
-  if(items.length > 10) box.appendChild(el("div","hint","另有 " + (items.length - 10) + " 个更小的没画。"));
+  var days = state.days_data;
+  if(!days.length){ box.appendChild(el("div","hint","这段时间没有记录。")); return; }
+  var view = days.slice(-31), labels = view.map(function(d){ return d.day; });
+  var items = state.codes.map(function(c){
+    var vals = view.map(function(d){ return m.pick(sumRows(d.rows, c.code)); });
+    return {name: c.name, vals: vals, total: vals.reduce(function(a, b){ return a + b; }, 0)};
+  }).filter(function(x){ return x.total > 0; }).sort(function(a, b){ return b.total - a.total; });
+  $("#pernote").textContent = m.label + " · 越深越多";
+  if(!items.length){ box.appendChild(el("div","hint","这段时间没有人用过。")); return; }
+  box.appendChild(calStrip(items.slice(0, 10), labels, m));
+  box.appendChild(el("div","hint", "一格一天 · 悬停看数" +
+    (items.length > 10 ? " · 另有 " + (items.length - 10) + " 个更小的没画" : "") +
+    (state.days > view.length ? " · 只画最后 " + view.length + " 天" : "")));
 }
 
 /* ---------- 渲染：额度 ----------
@@ -721,7 +910,10 @@ function renderQuota(){
   [["Groq v3", q.v3, "主力"], ["Groq turbo", q.turbo, "v3 用完时顶上"]].forEach(function(g){
     var b = g[1], cool = b.cooldown_until > q.now, gr = b.groq;
     var sub = cool ? "冷却中（撞过 429）" : g[2];
-    if(gr) sub += " · Groq " + since(q.now - gr.reported_at) + "报的数";
+    // ⚠️ 这句原先写「Groq 1 小时前报的数」—— 2026-10-14 作者读到这句以为「用量一个小时没更新了」。
+    //    歧义在于「报」：读起来像面板没刷新，其实说的是 Groq 最后一次回包的时刻。标上钟点并写明之后是推算，
+    //    这样「底数是 21:17 的、数字是每分钟重算的」两件事都说得清。
+    if(gr) sub += " · Groq " + hm(gr.reported_at) + " 回报";
     box.appendChild(qrow(g[0], gr ? [
       qcell("次数（24 h 滚动）", gr.req_lim - gr.req_left, gr.req_lim),
       qcell("今日音频秒", b.used_s, q.caps.s_day),
@@ -734,10 +926,11 @@ function renderQuota(){
   });
   box.appendChild(qrow("千问", [qcell("今日段数", q.qwen.used, q.qwen.max)],
     q.qwen.exhausted.length ? "已耗尽 " + q.qwen.exhausted.join("、") : "一次性免费额度"));
-  box.appendChild(el("p","hint",
-    "Groq 的次数与小时音频秒是连续回补的（每 43.2 秒回 1 次、每 0.5 秒回 1 秒音频），不是到 UTC 零点才清零。" +
-    "标「滚动」的两格是 Groq 自己回包报的剩余、推算到此刻，Worker 拿它判，剩 5% 就主动降级；" +
-    "Groq 还没报过时退回 UTC 日 / 整点计数。「今日音频秒」Groq 不报，仍是 Worker 按 UTC 日记的计费秒（每次至少 10 秒）。"));
+  var qh = el("p","hint","标「滚动」的格子是 Groq 报的剩余往回补到此刻，所以每分钟都在动；悬停看口径。");
+  qh.title = "Groq 的次数与小时音频秒是连续回补的（每 43.2 秒回 1 次、每 0.5 秒回 1 秒音频），不是到 UTC 零点才清零。" +
+    "底数是 Groq 最后一次回包报的剩余（名字下面那个钟点 = 底数有多新，不是面板多久没刷新）。Worker 拿它判，剩 5% 就主动降级；" +
+    "Groq 还没报过时退回 UTC 日 / 整点计数。「今日音频秒」Groq 不报，仍是 Worker 按 UTC 日记的计费秒（每次至少 10 秒）。";
+  box.appendChild(qh);
 }
 
 /* ---------- 渲染：Cloudflare（`/api/cf`，cl_admin_ui.cf_summary）---------- */
@@ -757,97 +950,6 @@ function mb(b){ return b >= 1e9 ? (b/1e9).toFixed(2) + " GB" : Math.round(b/1e6)
 // Workers Analytics 的 status 维度 → 人话（没列的原样显示）。clientDisconnected 是客户端先断了，不算 Worker 出错。
 var CF_STATUS = {clientDisconnected:"客户端断开", scriptThrewException:"抛异常", exceededResources:"超资源",
   exceededCpu:"超 CPU", internalError:"内部错误", responseStreamDisconnected:"回包中断"};
-function renderCf(){
-  var box = $("#cf"); box.innerHTML = "";
-  var cf = state.cf;
-  if(!cf){ box.appendChild(el("div","empty","Cloudflare 的数暂时读不到。")); return; }
-  if(cf.error){ box.appendChild(el("div","empty", cf.error)); return; }
-  $("#cfnote").textContent = "近 24 h · 曲线是近 7 天（UTC 日）· Cloudflare 自己的统计约晚 1–3 分钟";
-  var days = lastDays(7);
-  Object.keys(cf.scripts).sort().forEach(function(name){
-    var sc = cf.scripts[name];
-    var bad = sc.requests ? sc.errors / sc.requests : 0;
-    var other = Object.keys(sc.status).filter(function(k){ return k !== "success"; })
-      .map(function(k){ return (CF_STATUS[k] || k) + " " + sc.status[k]; }).join(" · ");
-    var errCell = scell("错误率", (bad*100).toFixed(bad && bad < 0.001 ? 2 : 1) + "%");
-    if(bad > 0.01){ errCell.querySelector("b").style.color = "var(--bad)"; }
-    box.appendChild(qrow(name.replace("classlive-", "Worker "), [
-      scell("请求（24 h）", num(sc.requests), days.map(function(d){ return (cf.week[d] || {})[name] || 0; })),
-      errCell,
-      scell("CPU p50 / p99", sc.cpu_p50_ms + " / " + sc.cpu_p99_ms + " ms")
-    ], other || "全部成功"));
-  });
-  var r2 = state.r2;
-  if(r2 && !r2.error){
-    var others = r2.sessions.filter(function(g){ return !g.mine; });
-    box.appendChild(qrow("R2 " + r2.bucket.replace("classlive-", ""), [
-      qcell("体积 / 免费档 10 GB", Math.round(r2.bytes/1e6), 10000, "MB"),
-      scell("对象数", num(r2.objects)),
-      scell("会话 · 别人的", r2.sessions.length + " 节 · " + others.length + " 节")
-    ], "实时列桶（精确到对象）"));
-    var tw = el("div"); tw.style.cssText = "padding:4px 0 10px";
-    tw.appendChild(el("div","dtitle","上传的课（本机时刻 · 别人的全列，自己的列最近 5 节）"));
-    var t = el("table"); var hr = el("tr");
-    [["上传完",""],["是谁",""],["文件",""],["音频段","r"],["体积","r"]].forEach(function(x){ hr.appendChild(el("th", x[1], x[0])); });
-    var th = el("thead"); th.appendChild(hr); t.appendChild(th);
-    var tb = el("tbody"); t.appendChild(tb);
-    var nMine = 0;
-    r2.sessions.forEach(function(g){
-      if(g.mine && ++nMine > 5) return;
-      var tr = el("tr");
-      tr.appendChild(el("td","mono", ago(Date.parse(g.last))));
-      var who = el("td");
-      if(g.mine) who.appendChild(document.createTextNode(g.name));
-      else { who.appendChild(el("span","tag","别人")); who.appendChild(el("span","mono dim", " " + g.id)); }
-      tr.appendChild(who);
-      var lack = [];
-      if(g.files.indexOf("transcript.md") < 0) lack.push("缺转录");
-      tr.appendChild(el("td","dim", g.files.join("、") + (lack.length ? "（" + lack.join("、") + "：还在传或传了一半）" : "")));
-      tr.appendChild(el("td","r mono", String(g.audio)));
-      tr.appendChild(el("td","r mono", g.bytes >= 1e6 ? (g.bytes/1e6).toFixed(1) + " MB" : Math.round(g.bytes/1e3) + " KB"));
-      tb.appendChild(tr);
-    });
-    tw.appendChild(t);
-    tw.appendChild(el("div","hint","「别人」= 本机 sessions/ 和上传账本里都没有这个会话名。文件名就是桶里的原样；内容在 Cloudflare 后台看。"));
-    box.appendChild(tw);
-  } else {
-    Object.keys(cf.r2).sort().forEach(function(name){
-      var by = cf.r2[name], ds = Object.keys(by).sort(), last = by[ds[ds.length-1]], first = by[ds[0]];
-      box.appendChild(qrow("R2 " + name.replace("classlive-", ""), [
-        qcell("体积 / 免费档 10 GB", Math.round(last.bytes/1e6), 10000, "MB"),
-        scell("对象数", num(last.objects), ds.map(function(d){ return by[d].objects; })),
-        scell("7 天增量", "+" + mb(Math.max(0, last.bytes - first.bytes)))
-      ], "Analytics 快照（慢 10–30 分钟）" + (r2 && r2.error ? " · 实时列桶失败：" + r2.error : "")));
-    });
-  }
-  var mk = Object.keys(cf.minutes || {}).sort();
-  if(mk.length){
-    var t0 = Math.floor(Date.parse(cf.since) / 60000) * 60000;
-    var lanes = mk.map(function(name, i){
-      var pts = {}, src = cf.minutes[name];
-      Object.keys(src).forEach(function(iso){ var k = Math.round((Date.parse(iso) - t0) / 60000); if(k >= 0 && k < 1440) pts[k] = src[iso][0]; });
-      return {name: name.replace("classlive-", "Worker "), color: i ? "var(--d2)" : "var(--d1)", pts: pts};
-    });
-    var errs = {};
-    mk.forEach(function(name){ var src = cf.minutes[name];
-      Object.keys(src).forEach(function(iso){ if(src[iso][1]){ var k = Math.round((Date.parse(iso) - t0) / 60000); errs[k] = (errs[k] || 0) + src[iso][1]; } }); });
-    var mw = el("div"); mw.style.cssText = "padding:12px 0 4px";
-    mw.appendChild(el("div","dtitle","近 24 h 每分钟请求（本机时刻 · 悬停看读数）"));
-    mw.appendChild(minuteChart(lanes, t0, 1440, {laneH: 34, label: "Cloudflare 近 24 小时逐分钟请求",
-      dateOf: function(ms){ var d = new Date(ms); return (d.getMonth()+1) + "-" + d.getDate(); },
-      extra: function(i){ return errs[i] ? ["出错  " + errs[i]] : []; }, marks: deployMarks(t0, 1440)}));
-    box.appendChild(mw);
-  }
-  var dk = Object.keys(cf.dos).sort();
-  if(dk.length){
-    box.appendChild(qrow("Durable Objects", [
-      scell("今日请求", num(cf.dos[dk[dk.length-1]] || 0), days.map(function(d){ return cf.dos[d] || 0; })),
-      scell("7 天合计", num(dk.reduce(function(a, d){ return a + cf.dos[d]; }, 0))),
-      scell("", "")
-    ], "通行码与额度的账本"));
-  }
-}
-
 /* ---------- 服务健康（2026-10-14：延迟 / 上游 / 部署 / 节点 / 站点 / 日志 / 逐请求事件）---------- */
 function ms(v){ return v == null ? "无" : v >= 1000 ? (v/1000).toFixed(v >= 10000 ? 0 : 2) + " s" : Math.round(v) + " ms"; }
 function mkTable(cols, rows){            /* cols = [[表头, "r"?], …]；rows = [[格子（字符串或节点）, …], …] */
@@ -867,12 +969,20 @@ function mkTable(cols, rows){            /* cols = [[表头, "r"?], …]；rows 
   return t;
 }
 function sub2(title){ var d = el("div","dtitle", title); d.style.marginTop = "16px"; return d; }
-/* 窗口里新出现的部署版本 → 逐分钟图上的标记（窗口起点前就在的不标：不知道是哪天部署的） */
+/* 图上的橙虚线：有权威部署时刻就用它；读不到就退回「第一次有请求的分钟」—— 跟下面那根部署条同一个口径，
+   同一个版本在两张图上指的是同一个时刻。
+   ⚠️ 但两张图的横轴**不等长也不等宽**：这张图左边留 44px 给纵轴刻度、右边 8px，固定铺满 t0 起算的
+   24 个整点；部署条一分不留、铺到「现在」，最多再长 59 分钟。所以虚线落不到段缝上 ——
+   偏右量 = `44 − 19.7·f` px（`f` = 这版部署时刻在 24 h 里的位置），解析范围 24.5（窗口右端）～44px（左端）；
+   本轮条宽 1200px、8 条线实测 24.5～39.0px。**不是画错了，是留白和轴长不同**，改之前先读这句。
+   唯一有意不画的是「窗口起点就已经在岗」的那一版：它的线会贴着左边缘、什么也说明不了。
+   落在窗口外（i < 0 或 ≥ n）的自然被滤掉。 */
+function depAt(v){ return v.deployed_at ? Date.parse(v.deployed_at) : (v.before ? NaN : Date.parse(v.first)); }
 function deployMarks(t0, n){
   var h = state.health;
   if(!h || !h.versions) return [];
-  return h.versions.filter(function(v){ return !v.before; }).map(function(v){
-    return {i: Math.round((Date.parse(v.first) - t0) / 60000), label: v.id};
+  return h.versions.map(function(v){
+    return {i: Math.round((depAt(v) - t0) / 60000), label: v.id};
   }).filter(function(m){ return m.i >= 0 && m.i < n; });
 }
 /* 每小时一根：浅色 = p95，实色 = p50（同一根柱子里，单位毫秒）。请求 < 20 的小时画淡 —— 样本太少，分位数不稳。 */
@@ -926,102 +1036,223 @@ function latChart(rows, t0){
   if(window.ResizeObserver) new ResizeObserver(function(){ requestAnimationFrame(draw); }).observe(wrap);
   return wrap;
 }
-function renderHealth(){
-  var box = $("#health"); box.innerHTML = "";
-  var h = state.health;
-  if(!h){ box.appendChild(el("div","empty","读不到。")); return; }
-  if(h.error){ box.appendChild(el("div","empty", h.error)); return; }
-  $("#hnote").textContent = "近 24 h · ASR Worker";
-  var t0 = Math.floor(Date.parse(h.since) / 3600000) * 3600000;
-  /* ① 延迟 */
-  box.appendChild(el("div","dtitle","每小时耗时（本机时刻）· 实色 p50、浅色 p95 · 橙虚线 = 部署 · 悬停看读数"));
-  box.appendChild(latChart(h.lat, t0));
-  box.appendChild(el("div","hint","墙钟 = Worker 从收到请求到回完包（含等 Groq / DeepSeek）；转写和翻译混在一起，各自的耗时看下面「日志」和「逐请求事件」。" +
-    "不含用户到 Cloudflare 那一段网络。"));
-  /* ② 部署 */
-  var vs = h.versions || [];
-  if(vs.length){
-    box.appendChild(sub2("部署版本（窗口里第一次 / 最后一次有请求的分钟）"));
-    box.appendChild(mkTable([["版本",""],["第一次",""],["最后一次",""],["请求","r"]], vs.map(function(v){
-      return [v.id, v.before ? "窗口起点前就在" : ago(Date.parse(v.first)), ago(Date.parse(v.last)), num(v.requests)];
-    })));
+/* 部署时间轴：一条横条按「这一版当了多久的班」切开，一段 = 一次 `wrangler deploy`。
+   左端跟上面那张每小时耗时图共用同一个 t0（整点），右端铺到「现在」—— 比那张图最多长 59 分钟（它只铺 24 个整点）。
+   所以两图的橙虚线**落不到段缝上**（实测偏右 24～44px；算式和两个成因写在 depAt 上面那条注释里，别在这儿重算）。
+   **轴的右端必须是「现在」**：否则刚部署的那一版会
+   落在这根轴之外、整段消失，条上还会把上一版错标成「现在还是它」。
+   宽度按当班时长分配（flex-grow），段间 2px 留白；太短的段保留 2px 最小宽度，不然会整个消失。
+   返回 {node, rows}：rows 已经按时间排好、带 `i`（第几版）/ `dur`（窗口内当班毫秒）/ `live`，表格直接用它。 */
+function deployStrip(vs, t0, t1){
+  var span = Math.max(1, t1 - t0), rows = cluiDepSegs(vs, t0, t1);
+  var bar = el("div","depbar");
+  rows.forEach(function(r){
+    /* 段内只放得下就放：够宽（≥12% = 3 小时）直接写版本号，窄了退成序号（和表格的 # 对得上），
+       再窄就空着 —— 悬停有全部信息，段上塞满字反而看不清形状。 */
+    var f = r.dur / span, seg = el("i", null, f >= .12 ? r.id : (f >= .015 ? String(r.i) : ""));
+    if(r.live) seg.className = "live";
+    seg.style.flexGrow = String(Math.max(1, Math.round(r.dur / 1000)));
+    seg.title = "第 " + r.i + " 版 · " + r.id +
+      "\n部署：" + (r.known ? ago(r.at) + (r.at < t0 ? "（在窗口起点之前）" : "") : "不知道，按第一次有请求的分钟摆") +
+      "\n当班：" + fmtDur(r.dur / 1000) + (r.live ? " · 现在还是它" : "") +
+      "\n窗口内请求 " + num(r.requests);
+    bar.appendChild(seg);
+  });
+  var wrap = el("div","dep");
+  wrap.appendChild(bar);
+  var ax = el("div","depax");
+  ax.appendChild(el("span", null, hm(t0)));
+  ax.appendChild(el("span", null, hm(t0 + span / 2)));
+  ax.appendChild(el("span", null, hm(t1)));
+  wrap.appendChild(ax);
+  return {node: wrap, rows: rows};
+}
+/* ---------- 渲染：服务（2026-10-15：原来的「Cloudflare」和「服务健康」两块并成一块）----------
+   顶上一行五个数 + 每小时耗时图 + 部署条 —— 打开就看得到的只有这些；其余每样一个折叠小节，
+   摘要行里带着那一节最要紧的一个数，不点开也知道要不要点开。
+   五个来源（cf / r2 / health / logs / ae）各回各的：谁先到就先画谁，没到的格子写「…」。 */
+function svcStat(k, v, sub, cls){
+  var d = el("div", null, k), b = el("b", cls || null, v);
+  d.appendChild(b);
+  if(sub) d.appendChild(el("span", "sub", sub));
+  return d;
+}
+function pending(x){ return x === undefined; }
+function renderService(){
+  var box = $("#svc"); box.innerHTML = "";
+  var cf = state.cf, r2 = state.r2, h = state.health, lg = state.logs, ae = state.ae;
+  var ages = [cf, r2, h, lg, ae].filter(function(x){ return x && x.cache_age != null; }).map(function(x){ return x.cache_age; });
+  $("#sage").textContent = ages.length ? "Cloudflare 的数 · " + (Math.max.apply(null, ages) < 60 ? "刚取" : Math.round(Math.max.apply(null, ages) / 60) + " 分钟前取") : "";
+  $("#sage").title = "自动刷新先给缓存（≤ 1 分钟旧的直接用，再旧的先给旧的、后台重取）；点「刷新」当场重取。";
+  var hOk = h && !h.error, o = hOk ? h.overall : null;
+
+  /* ① 一行五个数 */
+  var row = el("div", "hero s5");
+  var asr = cf && !cf.error ? (cf.scripts || {})["classlive-asr"] : null;
+  var nReq = o ? o.requests : asr ? asr.requests : null, nErr = o ? o.errors : asr ? asr.errors : null;
+  row.appendChild(svcStat("请求 · 24 h", nReq == null ? "…" : num(nReq), "转写 Worker"));
+  var er = nReq ? nErr / nReq : 0;
+  row.appendChild(svcStat("错误率", nReq == null ? "…" : (er * 100).toFixed(er && er < .001 ? 2 : 1) + "%",
+    nErr ? num(nErr) + " 次" : "", er > .01 ? "bad" : null));
+  row.appendChild(svcStat("耗时 p50 · p95", o ? ms(o.wall_p50) : "…", o ? "p95 " + ms(o.wall_p95) : ""));
+  var ups = hOk ? (h.upstream || []).filter(function(r){ return r.host; }) : [];
+  var upTot = ups.reduce(function(a, r){ return a + r.total; }, 0);
+  var upBad = ups.reduce(function(a, r){ return a + r.c429 + r.c4xx + r.c5xx; }, 0);
+  var u429 = ups.reduce(function(a, r){ return a + r.c429; }, 0), u5 = ups.reduce(function(a, r){ return a + r.c5xx; }, 0);
+  row.appendChild(svcStat("上游失败", hOk ? num(upBad) : "…", hOk ? "共 " + num(upTot) + (upBad ? " · 429 " + u429 + " · 5xx " + u5 : "") : "",
+    upTot && upBad / upTot > .02 ? "warn" : null));
+  var r2b = r2 && !r2.error ? r2.bytes : null;
+  if(r2b == null && cf && !cf.error){
+    var by = (cf.r2 || {})["classlive-ingest"]; if(by){ var ds = Object.keys(by).sort(); r2b = by[ds[ds.length - 1]].bytes; }
   }
-  /* ③ 上游 */
-  box.appendChild(sub2("上游（Worker 发出去的子请求）"));
-  box.appendChild(mkTable([["上游",""],["总数","r"],["成功","r"],["429","r"],["其他 4xx","r"],["5xx","r"],["没回完","r"]],
-    (h.upstream || []).map(function(r){
-      function c(v, cls){ var b = el("span", v ? cls : "mut", num(v)); return b; }
-      return [r.name, num(r.total), num(r.ok), c(r.c429, "warn"), c(r.c4xx, "warn"), c(r.c5xx, "bad"), c(r.unfinished, "warn")];
-    })));
-  box.appendChild(el("div","hint","「没回完」= 超时 / 被对冲掐掉（千问先回时 Groq 那路被取消）。Durable Object 是 Worker 问自己的额度 / 通行码账本，不出 Cloudflare。"));
-  /* ④ 节点 */
-  var cs = (h.colos || []).slice(0, 12);
-  if(cs.length){
-    box.appendChild(sub2("请求落在哪个 Cloudflare 节点（前 12）"));
-    box.appendChild(mkTable([["节点",""],["请求","r"],["墙钟 p50","r"]], cs.map(function(r){ return [r.colo, num(r.requests), ms(r.wall_p50)]; })));
-    box.appendChild(el("div","hint","⚠️ 节点 ≠ 用户在哪。2026-10-14 实查：美国那位用户的 IP 都在美国，请求却在同一小时里落到东京 / 伦敦 / 巴黎 / 波士顿等 9 个节点 —— " +
-      "路由（VPN、运营商、免费档调度）决定节点，看人在哪要看下面站点表的「国家」或逐请求事件。远的节点到 Groq 也远：东京那段墙钟 p50 1.3 s，都柏林 1.0 s。"));
-  }
-  /* ⑥ 站点 */
-  var z = h.zone;
-  box.appendChild(sub2("bldcam.page 整站（按主机名；Worker 自己的子请求不列）"));
-  if(!z){ box.appendChild(el("div","hint", h.zone_error || "读不到站点数。")); }
+  row.appendChild(svcStat("上传桶", r2b == null ? "…" : mb(r2b), r2b == null ? "" : Math.round(r2b / 1e8) + "% · 免费档 10 GB"));
+  box.appendChild(row);
+
+  /* ② 每小时耗时 + 部署条 */
+  if(pending(h)) box.appendChild(el("div", "hint", "正在问 Cloudflare…"));
+  else if(!hOk) box.appendChild(el("div", "empty", (h && h.error) || "读不到。"));
   else{
-    var hosts = z.hosts.filter(function(x){ return /(^|\.)bldcam\.page$/.test(x.host); });
-    box.appendChild(mkTable([["主机",""],["请求","r"],["2xx","r"],["3xx","r"],["4xx","r"],["5xx","r"],["国家（前 5）",""]], hosts.map(function(x){
-      return [x.host, num(x.total), num(x.s2), num(x.s3), num(x.s4), el("span", x.s5 ? "bad" : "mut", num(x.s5)),
-        x.countries.map(function(c){ return c[0] + " " + c[1]; }).join(" · ")];
-    })));
-    if(z.bad_paths.length){
-      box.appendChild(sub2("出错最多的路径（4xx / 5xx · 多半是扫描器）"));
-      box.appendChild(mkTable([["主机",""],["路径",""],["状态","r"],["次数","r"]], z.bad_paths.map(function(b){
-        return [b.host, b.path, b.status, num(b.n)]; })));
+    var t0 = Math.floor(Date.parse(h.since) / 3600000) * 3600000;
+    var cap = el("div", "dtitle", "每小时耗时 · 实色 p50 · 浅色 p95 · 虚线 = 部署");
+    cap.title = "墙钟 = Worker 从收到请求到回完包（含等 Groq / DeepSeek），转写和翻译混在一起；不含用户到 Cloudflare 那段网络。";
+    box.appendChild(cap);
+    box.appendChild(latChart(h.lat, t0));
+    var vs = h.versions || [], strip = vs.length ? deployStrip(vs, t0, Date.parse(h.until)) : null;
+    if(strip){ strip.node.style.marginTop = "12px"; box.appendChild(strip.node); }
+    if(h.deploys_error){ var dw = el("div", "hint warn", h.deploys_error); box.appendChild(dw); }
+  }
+
+  /* ③ 折叠小节 */
+  // 逐分钟 · 各 Worker
+  if(cf && !cf.error){
+    var days = lastDays(7), names = Object.keys(cf.scripts || {}).sort(), peak = 0;
+    var mk = Object.keys(cf.minutes || {}).sort(), parts = [];
+    names.forEach(function(name){
+      var sc = cf.scripts[name], bad = sc.requests ? sc.errors / sc.requests : 0;
+      var other = Object.keys(sc.status).filter(function(k){ return k !== "success"; })
+        .map(function(k){ return (CF_STATUS[k] || k) + " " + sc.status[k]; }).join(" · ");
+      var errCell = scell("错误率", (bad*100).toFixed(bad && bad < 0.001 ? 2 : 1) + "%");
+      if(bad > 0.01) errCell.querySelector("b").style.color = "var(--bad)";
+      parts.push(qrow(name.replace("classlive-", "Worker "), [
+        scell("请求（24 h）", num(sc.requests), days.map(function(d){ return (cf.week[d] || {})[name] || 0; })),
+        errCell,
+        scell("近 7 天", num(days.reduce(function(a, d){ return a + ((cf.week[d] || {})[name] || 0); }, 0)))
+      ], other || "全部成功"));
+    });
+    if(mk.length){
+      var m0 = Math.floor(Date.parse(cf.since) / 60000) * 60000, errs = {};
+      var lanes = mk.map(function(name, i){
+        var pts = {}, src = cf.minutes[name];
+        Object.keys(src).forEach(function(iso){ var k = Math.round((Date.parse(iso) - m0) / 60000);
+          if(k >= 0 && k < 1440){ pts[k] = src[iso][0]; if(src[iso][0] > peak) peak = src[iso][0];
+            if(src[iso][1]) errs[k] = (errs[k] || 0) + src[iso][1]; } });
+        return {name: name.replace("classlive-", "Worker "), color: i ? "var(--d2)" : "var(--d1)", pts: pts};
+      });
+      var mw = el("div"); mw.style.paddingTop = "10px";
+      mw.appendChild(minuteChart(lanes, m0, 1440, {laneH: 34, label: "近 24 小时逐分钟请求",
+        dateOf: function(t){ var d = new Date(t); return (d.getMonth()+1) + "-" + d.getDate(); },
+        extra: function(i){ return errs[i] ? ["出错  " + errs[i]] : []; }, marks: deployMarks(m0, 1440)}));
+      parts.push(mw);
     }
-    box.appendChild(el("div","hint","国家是 Cloudflare 按访客 IP 判的；面板不查、不显示 IP。"));
+    box.appendChild(fold("逐分钟 · " + names.length + " 个 Worker · 峰值 " + num(peak) + " 次/分", parts, "min"));
+  } else if(cf) box.appendChild(fold("逐分钟 · 读不到", [el("div", "hint", cf.error)], "min"));
+
+  if(hOk && strip){
+    var live = strip.rows.filter(function(r){ return r.live; })[0];
+    box.appendChild(fold("部署 · 24 h 内 " + strip.rows.length + " 版" + (live && live.known ? " · 当前这版 " + ago(live.at) + " 上线" : ""), [
+      mkTable([["#","r"],["版本",""],["部署于",""],["当班","r"],["请求","r"]], strip.rows.map(function(r){
+        return [num(r.i), r.id, r.known ? ago(r.at) : "不知道", fmtDur(r.dur / 1000), num(r.requests)]; })),
+      el("div", "hint", "一段 = 一次 wrangler deploy（Cloudflare 的版本号，不是 git 提交号）；「当班」只算窗口里的那段。")
+    ], "dep"));
   }
-  /* ⑦ 日志 */
-  box.appendChild(sub2("日志 · 各转写引擎耗时（Worker 里从进门到拿到结果）"));
-  var lg = state.logs;
-  if(!lg || lg.error){ box.appendChild(el("div","hint", (lg && lg.error) || "读不到 Workers Logs。")); }
-  else{
-    box.appendChild(mkTable([["模型",""],["段数","r"],["中位","r"],["p90","r"],["最慢","r"]], lg.models.map(function(r){
-      return [r.model, num(r.count), ms(r.median), ms(r.p90), ms(r.max)]; })));
-    box.appendChild(sub2("日志 · 最近的拒绝 / 全挂 / 额度账本不可用"));
-    if(!lg.events.length) box.appendChild(el("div","hint","近 24 h 一条都没有。"));
-    else box.appendChild(mkTable([["时刻",""],["事件",""],["码",""],["细节",""]], lg.events.map(function(e){
-      var what = e.denied ? "拒绝 · " + e.denied : e.result === "all_failed" ? "全挂" : e.quota ? "额度 DO 不可用" : "?";
-      var cls = e.result === "all_failed" ? "bad" : "warn";
-      return [ago(e.t), el("span", cls, what), e.pass || "", e.kind ? e.kind : (e.tried ? (e.tried.join(" → ") + " · " + ms(e.ms)) : "")];
-    })));
+
+  if(hOk){
+    box.appendChild(fold("上游 · " + (upTot ? (100 - upBad / upTot * 100).toFixed(1) + "% 成功" : "没有子请求") +
+      (upBad ? " · 失败 " + num(upBad) : ""), [
+      mkTable([["上游",""],["总数","r"],["成功","r"],["429","r"],["其他 4xx","r"],["5xx","r"],["没回完","r"]],
+        (h.upstream || []).map(function(r){
+          function c(v, cls){ return el("span", v ? cls : "mut", num(v)); }
+          return [r.name, num(r.total), num(r.ok), c(r.c429, "warn"), c(r.c4xx, "warn"), c(r.c5xx, "bad"), c(r.unfinished, "warn")];
+        })),
+      el("div", "hint", "「没回完」= 超时或被对冲掐掉（另一路先回了），不算失败。")
+    ], "up"));
   }
-  /* ⑧ 逐请求事件 */
-  box.appendChild(sub2("逐请求事件（Analytics Engine · 每人 × 路径）"));
-  var ae = state.ae;
-  if(!ae || ae.error){ box.appendChild(el("div","hint", (ae && ae.error) || "读不到。")); }
-  else if(!ae.by_code.length){ box.appendChild(el("div","hint","近 24 h 还没有事件（部署之后才开始记）。")); }
-  else{
+
+  if(lg && !lg.error){
+    var top = lg.models[0], nEv = lg.events.length;
+    var evParts = [mkTable([["模型",""],["段数","r"],["中位","r"],["p90","r"],["最慢","r"]], lg.models.map(function(r){
+      return [r.model, num(r.count), ms(r.median), ms(r.p90), ms(r.max)]; }))];
+    evParts.push(sub2("最近的拒绝 / 全挂 / 额度账本不可用"));
+    evParts.push(!nEv ? el("div", "hint", "近 24 h 一条都没有。") :
+      mkTable([["时刻",""],["事件",""],["码",""],["细节",""]], lg.events.map(function(e){
+        var what = e.denied ? "拒绝 · " + e.denied : e.result === "all_failed" ? "全挂" : e.quota ? "额度 DO 不可用" : "?";
+        return [ago(e.t), el("span", e.result === "all_failed" ? "bad" : "warn", what), e.pass || "",
+          e.kind ? e.kind : (e.tried ? (e.tried.join(" → ") + " · " + ms(e.ms)) : "")];
+      })));
+    box.appendChild(fold("转写引擎" + (top ? " · " + top.model + " 中位 " + ms(top.median) : "") +
+      " · 异常事件 " + nEv + " 条", evParts, "eng"));
+  } else if(lg) box.appendChild(fold("转写引擎 · 读不到", [el("div", "hint", lg.error)], "eng"));
+
+  if(hOk){
+    var geoParts = [], z = h.zone, cs = (h.colos || []).slice(0, 12);
+    if(z) geoParts.push(mkTable([["入口",""],["请求","r"],["2xx","r"],["3xx","r"],["4xx","r"],["5xx","r"],["国家（前 5）",""]], z.hosts.map(function(x){
+      return [x.host, num(x.total), num(x.s2), num(x.s3), num(x.s4), el("span", x.s5 ? "bad" : "mut", num(x.s5)),
+        x.countries.map(function(c){ return c[0] + " " + c[1]; }).join(" · ")]; })));
+    else geoParts.push(el("div", "hint", h.zone_error || "读不到站点数。"));
+    if(cs.length){
+      geoParts.push(sub2("落在哪个 Cloudflare 节点（前 " + cs.length + "）"));
+      geoParts.push(mkTable([["节点",""],["请求","r"],["墙钟 p50","r"]], cs.map(function(r){ return [r.colo, num(r.requests), ms(r.wall_p50)]; })));
+    }
+    var gh = el("div", "hint", "国家按访客 IP 判，面板不查、不显示 IP。节点 ≠ 人在哪：路由（VPN、运营商、免费档调度）决定节点。");
+    gh.title = "2026-10-14 实查：美国那位用户的 IP 都在美国，请求却在同一小时里落到东京 / 伦敦 / 巴黎等 9 个节点；远的节点到 Groq 也远（东京墙钟 p50 1.3 s，都柏林 1.0 s）。";
+    geoParts.push(gh);
+    var countries = {};
+    (z ? z.hosts : []).forEach(function(x){ x.countries.forEach(function(c){ countries[c[0]] = 1; }); });
+    box.appendChild(fold("入口与地区 · " + (z ? Object.keys(countries).length + " 个国家 · " : "") + (h.colos || []).length + " 个节点" +
+      (cs.length ? "（最多 " + cs[0].colo + "）" : ""), geoParts, "geo"));
+  }
+
+  if(ae && !ae.error && ae.by_code.length){
     var P = {"/v1/transcribe":"转写", "/v1/chat/completions":"翻译", "/v1/jev":"Jev", "other":"其他"};
-    box.appendChild(mkTable([["码",""],["路径",""],["请求","r"],["p50","r"],["p95","r"],["出错","r"],["音频 (分)","r"],["token","r"],["最后",""]],
+    var aeParts = [mkTable([["码",""],["路径",""],["请求","r"],["p50","r"],["p95","r"],["出错","r"],["音频 (分)","r"],["token","r"],["最后",""]],
       ae.by_code.map(function(r){
         return [r.name, P[r.path] || r.path, num(+r.n), ms(+r.p50), ms(+r.p95), el("span", +r.errors ? "bad" : "mut", num(+r.errors)),
           num(+r.audio_s / 60, 1), num(+r.tokens), ago(Date.parse(String(r.last).replace(" ", "T") + "Z"))];
-      })));
+      }))];
     var geo = {};
     ae.geo.forEach(function(r){ var g = geo[r.name] = geo[r.name] || {n:0, c:{}, o:{}, v:{}};
       g.n += +r.n; g.c[r.country || "?"] = (g.c[r.country || "?"] || 0) + (+r.n); g.o[r.colo || "?"] = (g.o[r.colo || "?"] || 0) + (+r.n);
       if(r.ver) g.v[r.ver] = (g.v[r.ver] || 0) + (+r.n); });
-    function top(o){ return Object.keys(o).sort(function(a, b){ return o[b] - o[a]; }).slice(0, 5).map(function(k){ return k + " " + o[k]; }).join(" · "); }
-    box.appendChild(sub2("每人在哪 · 走哪个节点 · 客户端版本"));
-    box.appendChild(mkTable([["码",""],["请求","r"],["国家",""],["节点",""],["版本",""]], Object.keys(geo).map(function(k){
-      var g = geo[k]; return [k, num(g.n), top(g.c), top(g.o), top(g.v) || "（没报）"]; })));
+    function topk(o){ return Object.keys(o).sort(function(a, b){ return o[b] - o[a]; }).slice(0, 5).map(function(k){ return k + " " + o[k]; }).join(" · "); }
+    aeParts.push(sub2("每人在哪 · 走哪个节点 · 客户端版本"));
+    aeParts.push(mkTable([["码",""],["请求","r"],["国家",""],["节点",""],["版本",""]], Object.keys(geo).map(function(k){
+      var g = geo[k]; return [k, num(g.n), topk(g.c), topk(g.o), topk(g.v) || "（没报）"]; })));
     if(ae.bad.length){
-      box.appendChild(sub2("最近的失败请求（≥ 400）"));
-      box.appendChild(mkTable([["时刻",""],["码",""],["路径",""],["状态","r"],["耗时","r"],["上游",""]], ae.bad.map(function(r){
+      aeParts.push(sub2("最近的失败请求（≥ 400）"));
+      aeParts.push(mkTable([["时刻",""],["码",""],["路径",""],["状态","r"],["耗时","r"],["上游",""]], ae.bad.map(function(r){
         return [ago(Date.parse(String(r.t).replace(" ", "T") + "Z")), r.name, P[r.path] || r.path, el("span","bad", String(r.status)), ms(+r.ms), r.up];
       })));
     }
-  }
-  box.appendChild(el("div","hint","逐请求事件只记码的名字和数字（路径、模型、上游状态、毫秒、音频秒、token、版本、国家两字母、节点）；不记文本、音频、IP、完整码。保留 3 个月。"));
+    box.appendChild(fold("逐请求事件 · " + Object.keys(geo).length + " 人" + (ae.bad.length ? " · 失败 " + ae.bad.length + " 条" : ""), aeParts, "ae"));
+  } else if(ae) box.appendChild(fold("逐请求事件 · " + (ae.error ? "读不到" : "近 24 h 还没有"),
+    [el("div", "hint", ae.error || "部署之后才开始记。")], "ae"));
+
+  if(r2 && !r2.error){
+    var others = r2.sessions.filter(function(g){ return !g.mine; }), nMine = 0;
+    var t = mkTable([["上传完",""],["是谁",""],["文件",""],["音频段","r"],["体积","r"]], r2.sessions.filter(function(g){
+      return !g.mine || ++nMine <= 5; }).map(function(g){
+      var who = el("span");
+      if(g.mine) who.textContent = g.name;
+      else { who.appendChild(el("span","tag","别人")); who.appendChild(el("span","mono dim", " " + g.id)); }
+      var half = g.files.indexOf("transcript.md") < 0;
+      return [ago(Date.parse(g.last)), who, el("span", "dim", g.files.join("、") + (half ? "（缺转录：还在传或传了一半）" : "")),
+        String(g.audio), g.bytes >= 1e6 ? (g.bytes/1e6).toFixed(1) + " MB" : Math.round(g.bytes/1e3) + " KB"];
+    }));
+    box.appendChild(fold("上传的课 · " + r2.sessions.length + " 节 · 别人的 " + others.length + " 节 · " + num(r2.objects) + " 个对象",
+      [t, el("div", "hint", "「别人」= 本机 sessions/ 和上传账本里都没有这个会话名。自己的只列最近 5 节。")], "r2"));
+  } else if(r2) box.appendChild(fold("上传的课 · 读不到", [el("div", "hint", r2.error)], "r2"));
+
+  box.appendChild(el("div", "hint", "只记数字：码的名字、路径、状态、毫秒、音频秒、token、版本、国家、节点。不记文本、音频、IP、完整码。"));
 }
 
 /* ---------- 渲染：用户表 ---------- */
@@ -1046,8 +1277,10 @@ function renderUsers(){
 
   var t = el("table");
   var hr = el("tr");
-  [["名字",""],["状态",""],["设备","r"],["到期",""],["最后在线",""],["每日转写","sp"],["转写 (分)","r"],
-   ["段","r"],["翻译","r"],["花费 (闲时价)","r"]].forEach(function(c){ hr.appendChild(el("th", c[1], c[0])); });
+  // 列序 = 看简历的顺序：是谁 → 还活着吗 → 干了什么（模型 / 时长 / 段数 / 翻译 / 花销）→ 设备与到期。
+  // 「每日转写」那根迷你曲线删了：正上方日历条已经把「哪天在用」画得更清楚，同一件事不占两处。
+  [["名字",""],["状态",""],["用了什么模型",""],["录了多久","r"],["段","r"],["翻译","r"],["花费 (闲时价)","r"],
+   ["设备","r"],["到期",""],["最后在线",""]].forEach(function(c){ hr.appendChild(el("th", c[1], c[0])); });
   var thead = el("thead"); thead.appendChild(hr); t.appendChild(thead);
   var tb = el("tbody"); t.appendChild(tb);
 
@@ -1077,15 +1310,32 @@ function renderUsers(){
     chip.appendChild(el("i")); chip.appendChild(document.createTextNode(st[1]));
     td1.appendChild(chip);                                  /* ⚠️ 忘了这一行 = 整列状态是空的 */
     tr.appendChild(td1);
-    tr.appendChild(el("td","r mono", c.devices + "/" + c.max_devices));
-    tr.appendChild(el("td","mono dim", ymd(c.expires)));
-    tr.appendChild(el("td","dim", ago(c.last_seen)));
-    var tdS = el("td","sp"); tdS.appendChild(sparkline(ser.map(function(x){ return x.v; }), {h:20, color:"var(--d1)"}));
-    tr.appendChild(tdS);
-    tr.appendChild(el("td","r mono", mins(agg.asr_s)));
+    // 用了什么模型：一条细构成条 + 占最多的那个的名字与占比。`models` 是 2026-10-14 才加的字段，
+    // 之前的记录读出来是 {}（后端会补成空对象）—— 那种情况写「没记」，不写「没用过」，是两回事。
+    var tdM = el("td");
+    var mk = MODEL_ORDER.filter(function(k){ return agg.models[k]; });
+    if(mk.length){
+      var msum = mk.reduce(function(a, k){ return a + agg.models[k]; }, 0);
+      var topB = mk.slice().sort(function(a, b){ return agg.models[b] - agg.models[a]; })[0];
+      var wr = el("span");
+      wr.style.cssText = "display:inline-flex;align-items:center;gap:8px";
+      wr.appendChild(stackMini(mk.map(function(k){ return {v: agg.models[k], color: MODEL_COLOR[k]}; }), 48));
+      wr.appendChild(el("span","faint", MODEL_NAME[topB] + " " + Math.round(agg.models[topB]/msum*100) + "%"));
+      wr.title = mk.map(function(k){ return MODEL_NAME[k] + " " + agg.models[k] + " 段"; }).join("\n");
+      tdM.appendChild(wr);
+    } else {
+      var nod = el("span","faint","—");
+      nod.title = "这段区间里没有模型记录（这个字段 10-14 才加）；不是没用过。";
+      tdM.appendChild(nod);
+    }
+    tr.appendChild(tdM);
+    tr.appendChild(el("td","r mono", fmtDur(agg.asr_s)));
     tr.appendChild(el("td","r mono", num(agg.asr_reqs)));
     tr.appendChild(el("td","r mono", num(agg.llm_reqs)));
     tr.appendChild(el("td","r mono", "$" + cluiCost(agg, state.prices).toFixed(3)));
+    tr.appendChild(el("td","r mono", c.devices + "/" + c.max_devices));
+    tr.appendChild(el("td","mono dim", ymd(c.expires)));
+    tr.appendChild(el("td","dim", ago(c.last_seen)));
     function toggle(){ state.expanded = state.expanded === c.code ? null : c.code; renderUsers(); }
     tr.addEventListener("click", toggle);
     tr.addEventListener("keydown", function(e){ if(e.key === "Enter" || e.key === " "){ e.preventDefault(); toggle(); } });
@@ -1103,14 +1353,30 @@ function renderUsers(){
 function detailRow(c, agg, ser){
   var tr = el("tr","detail"); var td = el("td"); td.colSpan = 10;
 
+  // 顶上这四个是「这个人干了多少」—— 从下面那格 kv 里提上来单列一行。kv 里剩下的是算账用的
+  // （token 怎么分、缓存命中多少），两种东西混在一片小字里，谁也一眼分不出该看哪个。
+  var hero = el("div","hero");
+  function big(k, v, small){
+    var d = el("div");
+    d.appendChild(document.createTextNode(k));
+    var b = el("b", null, v);
+    if(small) b.appendChild(el("small", null, small));
+    d.appendChild(b); hero.appendChild(d);
+  }
+  big("录了多久", fmtDur(agg.asr_s), "· " + num(agg.asr_s, 0) + " 秒");
+  big("转写段数", num(agg.asr_reqs));
+  big("翻译次数", num(agg.llm_reqs));
+  big("花费", "$" + cluiCost(agg, state.prices).toFixed(3), "· 闲时价");
+  td.appendChild(hero);
+
   var kv = el("div","dtop");
   function put(k, v){ var d = el("div"); d.appendChild(document.createTextNode(k)); d.appendChild(el("b", null, String(v))); kv.appendChild(d); }
   var hitRate = agg.tokens_in ? Math.round(agg.cache_hit/agg.tokens_in*100) + "%" : "无";
   put("输入 token", num(agg.tokens_in)); put("缓存命中", num(agg.cache_hit) + " (" + hitRate + ")");
-  put("输出 token", num(agg.tokens_out)); put("真实音频秒", num(agg.asr_s, 0));
+  put("输出 token", num(agg.tokens_out));
+  // 设备 / 到期 / 最后在线 三项删了：抽屉就展开在这一行下面，同样的字在正上方一行里已经有了。
+  // 「真实音频秒」也删了（2026-10-15）：跟上面「录了多久」后面那个秒数是同一个数。
   put("Jev", agg.jev_reqs + " 次 / " + agg.jev_q + " 题");
-  put("设备", c.devices + " / " + c.max_devices);
-  put("到期", ymd(c.expires)); put("最后在线", ago(c.last_seen));
   td.appendChild(kv);
 
   var minBox = el("div"); minBox.style.marginBottom = "18px";
@@ -1130,17 +1396,27 @@ function detailRow(c, agg, ser){
     {name:"输入 · 未命中", v: missTok, color:"var(--d3)"},
     {name:"输出", v: agg.tokens_out, color:"var(--d2)"}
   ]));
-  left.appendChild(el("div","dtitle","花费 " + "$" + cluiCost(agg, state.prices).toFixed(4) +
-    "（命中 " + num(hit) + " · 未命中 " + num(missTok) + " · 输出 " + num(agg.tokens_out) + "）")).style.marginTop = "16px";
+  // 「这笔钱怎么来的（命中 … · 未命中 … · 输出 …）」那行删了（2026-10-15）：三个数和构成条的图例一字不差。
   split.appendChild(left);
 
   var right = el("div");
+  // 跟用户表那一列用同一套名字和颜色：whisper-large-v3 在哪都是那个色，不随名次换色。
   right.appendChild(el("div","dtitle","模型分布（段）"));
-  var models = Object.keys(agg.models).map(function(k){ return {name:k, v:agg.models[k]}; }).sort(function(a,b){ return b.v - a.v; });
-  right.appendChild(hBars(models, {empty:"这段记录里没有这个字段。模型是 2026-10-14 起才记的，之前的老记录补不回来。"}));
-  right.appendChild(el("div","dtitle","客户端版本（次）")).style.marginTop = "14px";
+  var mparts = MODEL_ORDER.filter(function(k){ return agg.models[k]; }).map(function(k){
+    return {name: MODEL_NAME[k], v: agg.models[k], color: MODEL_COLOR[k]}; });
+  if(mparts.length){
+    right.appendChild(stackBar(mparts));
+    // 这一条必须写：`models` 只有 10-14 之后记到的段，而上面的「转写段数」是全部 ——
+    // 两个数不一样（2026-10-14 现查：bldus666666 是 244 对 717），不说明就像算错了。
+    var msum2 = mparts.reduce(function(a, p){ return a + p.v; }, 0), miss2 = agg.asr_reqs - msum2;
+    if(miss2 > 0) right.appendChild(el("div","hint","这里只算记到模型的 " + num(msum2) + " 段；" +
+      "另有 " + num(miss2) + " 段是 2026-10-14 之前转的，那时还不记模型。"));
+  } else right.appendChild(el("div","hint","这段记录里没有这个字段。模型是 2026-10-14 起才记的，之前的老记录补不回来。"));
   var vers = Object.keys(agg.vers).map(function(k){ return {name:(k === "+" ? "其它" : k), v:agg.vers[k]}; }).sort(function(a,b){ return b.v - a.v; });
-  right.appendChild(hBars(vers, {empty:"这段记录里没有这个字段。客户端版本要客户端发头才有，老版本不发。"}));
+  if(vers.length){                 /* 老客户端不发版本头 —— 没有就整节不画，不留一句「没有」占一行 */
+    right.appendChild(el("div","dtitle","客户端版本（次）")).style.marginTop = "14px";
+    right.appendChild(hBars(vers, {}));
+  }
   split.appendChild(right);
   td.appendChild(split);
 
@@ -1419,26 +1695,24 @@ function renderAddForm(){
 }
 
 /* ---------- 加载 ---------- */
-function load(){
+function load(fresh){
   progress(true);
   state.loading = true;
-  return Promise.all([
+  // 先取快的三个（本机账本，0.1–0.2 s）画 KPI / 用户 / 用量 / 额度；慢的五个（直接问 Cloudflare）各自回来各自画进「服务」，
+  // 谁也不等谁 —— 原来一个 Promise.all 等最慢的 Workers Logs（9 s）才出第一个字。
+  // 慢的那几个服务端有缓存；`fresh` = 手动点「刷新」，那一次当场重取。
+  var core = Promise.all([
     api("list", {}),
-    api("stats", {days: state.days}),
-    api("quota", {}).catch(function(){ return null; }),
-    api("r2", {}).catch(function(e){ return {error: e.message}; }),
-    api("cf", {}).catch(function(e){ return {error: "面板服务没回 Cloudflare 的数（" + e.message +
-      "）。多半是面板服务比这个页面旧：在终端按 Ctrl+C 停掉 cl_admin_ui.py 再开一次。"}; }),
-    api("health", {}).catch(function(e){ return {error: "面板服务没回（" + e.message + "）；比页面旧的话重开 cl_admin_ui.py。"}; }),
-    api("logs", {}).catch(function(e){ return {error: e.message}; }),
-    api("ae", {}).catch(function(e){ return {error: e.message}; })
+    // 取两个窗口：后一半是当前区间，前一半是「上一个同样长的区间」，用来算 KPI 的环比。
+    // 后端 `days` 上限 366，所以 366 天这一档拿不到环比（那时 prev_data 是空的，前端如实写「没有可比」）。
+    api("stats", {days: state.days * 2}),
+    api("quota", {}).catch(function(){ return null; })
   ]).then(function(r){
-    state.health = r[5]; state.logs = r[6]; state.ae = r[7];
     state.codes = r[0].codes || [];
-    state.days_data = r[1].days || [];
+    var allDays = r[1].days || [];
+    state.days_data = allDays.slice(-state.days);
+    state.prev_data = allDays.slice(0, Math.max(0, allDays.length - state.days));
     state.quota = r[2];
-    state.cf = r[4];
-    state.r2 = r[3];
     var now = new Date();
     $("#fresh").textContent = "更新于 " + hm(now.getTime()) + ":" + String(now.getSeconds()).padStart(2,"0");
     state.loaded = true;
@@ -1447,9 +1721,14 @@ function load(){
     if(qOpen && !state.openedOnce){ state.openedOnce = true;
       var hitc = state.codes.filter(function(c){ return c.name === qOpen; })[0]; if(hitc) state.expanded = hitc.code; }
     $("#err").innerHTML = "";
-    renderKpis(); renderDaily(); renderPerUser(); renderQuota(); renderCf(); renderHealth(); renderUsers();
-  }).catch(function(e){ showErr(e.message); })
-    .then(function(){ progress(false); state.loading = false; });
+    renderKpis(); renderDaily(); renderPerDay(); renderQuota(); renderUsers();
+  }).catch(function(e){ showErr(e.message); });
+  var slow = ["cf", "r2", "health", "logs", "ae"].map(function(k){
+    return api(k, fresh ? {fresh: true} : {})
+      .catch(function(e){ return {error: "面板服务没回（" + e.message + "）；比页面旧的话重开 cl_admin_ui.py。"}; })
+      .then(function(v){ state[k] = v; renderService(); });
+  });
+  return Promise.all([core].concat(slow)).then(function(){ progress(false); state.loading = false; });
 }
 
 /* ---------- 事件 ---------- */
@@ -1463,13 +1742,13 @@ $("#metric").addEventListener("click", function(e){
   var b = e.target.closest("button"); if(!b) return;
   state.metric = b.dataset.m;
   [].forEach.call(this.children, function(x){ x.setAttribute("aria-pressed", String(x === b)); });
-  renderDaily(); renderPerUser();
+  renderDaily(); renderPerDay();
 });
 $("#theme").addEventListener("click", function(e){
   var b = e.target.closest("button"); if(!b) return;
   state.theme = b.dataset.theme; applyTheme();
 });
-$("#refresh").addEventListener("click", function(){ load(); });
+$("#refresh").addEventListener("click", function(){ load(true); });
 // 自动刷新：60 秒一次。⚠️ 标签页在后台（浏览器会节流定时器、数也没人看）、正在填表 / 发码、上一轮没回来时都跳过 ——
 //   重画会把输入框里打了一半的字冲掉。
 setInterval(function(){

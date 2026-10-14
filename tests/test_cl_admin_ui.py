@@ -15,13 +15,17 @@
  7. 第 1–6 条的**每一个**响应体里都不含令牌
  8. 花费算式 `cluiCost`：从 HTML 里抠**真的那段源码**喂给 node 跑（不是手抄一份），
     含「缓存命中数 > 输入数」的钳位，和一个真实样本（owen 2026-10-13）与手算对拍
- 9. 页面**零外链**（没有 `http(s)://` 的 src/href/@import）—— 断网也得能用
+ 9. 部署时间轴的切段算术 `cluiDepSegs`：同样抠真源码喂 node。钉住「段首尾相接」「只有一个 live」
+    「部署时刻压过首次请求」「读不到就标不知道」—— 界面那层的错法（段之间裂一条缝、
+    两段同时说是现在的版本、拿第一次请求冒充部署时刻）图上看不出来，只能在这儿钉
+10. 页面**零外链**（没有 `http(s)://` 的 src/href/@import）—— 断网也得能用
 
 ⚠️ 本机 `http.server` 当 Worker，**不联网**；HOME 指向临时目录，读端写端都隔离，不碰真 `~/.classlive/`。
-⚠️ 第 8 条要 `node`（装了就有：`/opt/homebrew/bin/node`）。跑不了会**大声跳过**，不静默。
+⚠️ 第 8、9 条要 `node`（装了就有：`/opt/homebrew/bin/node`）。跑不了会**大声跳过**，不静默。
 """
 from __future__ import annotations
 
+import datetime
 import http.server
 import inspect
 import json
@@ -345,6 +349,130 @@ class CostCase(unittest.TestCase):
         self.assertIn("p.out", _cost_src())
 
 
+# ---------------- 9：部署时间轴的切段算术（跑的是 HTML 里那段真源码） ----------------
+D_START = "/* >>>CLUI-DEP-START<<<"
+D_END = "/* >>>CLUI-DEP-END<<<"
+_H = 3600000
+
+
+def _dep_src() -> str:
+    i = HTML.find(D_START)
+    j = HTML.find(D_END, i + 1)
+    if i < 0 or j < 0:
+        raise AssertionError("HTML 里找不到 CLUI-DEP 哨兵（判据会变成空的）")
+    src = HTML[i:j]
+    src = src[src.index("\n"):]
+    if "function cluiDepSegs" not in src or len(src) > 1400:
+        raise AssertionError(f"抠出来的不是那段函数（{len(src)} 字节）")
+    return src
+
+
+def _dep(vs, t0, t1):
+    """把段算出来跑一遍真源码。返回 list[dict]。"""
+    js = (_dep_src()
+          + f"\nconst R = cluiDepSegs({json.dumps(vs)}, {t0}, {t1});"
+          + "\nprocess.stdout.write(JSON.stringify(R));")
+    p = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=60)
+    if p.returncode:
+        raise AssertionError(f"node 报错：{p.stderr[:400]}")
+    return json.loads(p.stdout)
+
+
+T0 = 1_760_000_000_000          # 窗口起点（ms）。真跑时 t0 会被向下取整到整点，这里就是个干净常数。
+T1 = T0 + 24 * _H
+
+
+def _iso(h, m=0):
+    """窗口起点起算 `h` 小时 `m` 分 → ISO。负数是窗口之前。用同一个 T0 推，判据里就能直接算数。"""
+    return datetime.datetime.fromtimestamp((T0 + (h * 60 + m) * 60000) / 1000,
+                                           datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _v(vid, at=None, first=None, n=1, before=False):
+    """造一条 `cf_health` 的 version。`at` / `first` 都是 ISO；`at=None` = 部署时刻读不到。"""
+    return {"id": vid, "first": first or _iso(0), "last": _iso(23), "requests": n,
+            "before": before, "deployed_at": at or ""}
+
+
+class DepStripCase(unittest.TestCase):
+    """段必须**首尾相接**、**钳在窗口里**、**只有一个 live** —— 这三条破了，图就会说谎。"""
+
+    @unittest.skipUnless(shutil.which("node"), "没有 node —— 算术住在 HTML 里，Python 测不到")
+    def test_段首尾相接且盖满(self):
+        # 故意打乱喂进去（而且 cccccccc 的 first 最早）—— 上游 `versions` 是按 first 排的，
+        # 照搬那个顺序就会画错。函数必须自己按部署时刻重排。
+        r = _dep([_v("bbbbbbbb", _iso(11, 41)),
+                  _v("cccccccc", _iso(12, 21), first=_iso(0)),
+                  _v("aaaaaaaa", _iso(-2), before=True)], T0, T1)     # 窗口前部署 → 从头铺
+        self.assertEqual([(x["i"], x["id"]) for x in r],
+                         [(1, "aaaaaaaa"), (2, "bbbbbbbb"), (3, "cccccccc")],
+                         "顺序按部署时刻，序号从 1 起")
+        self.assertEqual(r[0]["s"], T0, "窗口前部署的第一段必须从窗口起点铺起")
+        self.assertEqual([r[0]["e"], r[1]["e"], r[2]["e"]], [r[1]["s"], r[2]["s"], T1], "接缝对得上")
+        self.assertEqual(sum(x["dur"] for x in r), T1 - r[0]["s"], "段长之和 = 覆盖到的跨度（不许有缝）")
+        self.assertEqual([x["live"] for x in r], [False, False, True], "有且只有最后一段是 live")
+
+    @unittest.skipUnless(shutil.which("node"), "没有 node —— 算术住在 HTML 里，Python 测不到")
+    def test_部署时刻压过首次请求(self):
+        """两个来源差 6 小时 19 分：段起点必须跟 `deployed_at`（11:41），不是 `first`（18:00）。"""
+        r = _dep([_v("aaaaaaaa", at=_iso(11, 41), first=_iso(18))], T0, T1)
+        self.assertTrue(r[0]["known"])
+        self.assertEqual(r[0]["s"], T0 + (11 * 60 + 41) * 60000)
+
+    @unittest.skipUnless(shutil.which("node"), "没有 node —— 算术住在 HTML 里，Python 测不到")
+    def test_读不到部署时刻_退回请求且标成不知道(self):
+        r = _dep([_v("aaaaaaaa", None, first=_iso(1), before=True),
+                  _v("bbbbbbbb", _iso(12))], T0, T1)
+        self.assertEqual(r[0]["at"], None)
+        self.assertFalse(r[0]["known"], "读不到就不许说知道 —— 界面上要如实标")
+        self.assertEqual(r[0]["s"], T0 + _H, "退回按 first（第一次有请求的分钟）摆")
+        self.assertTrue(r[1]["known"])
+        self.assertEqual(sum(x["dur"] for x in r), T1 - r[0]["s"])
+
+    @unittest.skipUnless(shutil.which("node"), "没有 node —— 算术住在 HTML 里，Python 测不到")
+    def test_窗口末尾及之后才上的版本不画(self):
+        """`_iso(25)` 在窗口外，`_iso(24)` 正好压在窗口末尾 —— 两个都不画：
+        零宽度的段没有信息，还会把「最后一段 = live」抢走。"""
+        r = _dep([_v("aaaaaaaa", _iso(12)), _v("bbbbbbbb", _iso(24)), _v("cccccccc", _iso(25))], T0, T1)
+        self.assertEqual([x["id"] for x in r], ["aaaaaaaa"], "窗口末尾及之后的版本都不许进来")
+        self.assertTrue(r[0]["live"])
+        self.assertEqual(r[0]["dur"], T1 - r[0]["s"], "它得顶到窗口末尾")
+
+    @unittest.skipUnless(shutil.which("node"), "没有 node —— 算术住在 HTML 里，Python 测不到")
+    def test_都没得读时也首尾相接(self):
+        """`deploys_error` 的整段兜底：全部退回 first，仍然只许有一个 live、不许有缝。"""
+        r = _dep([_v("aaaaaaaa", None, first=_iso(1), before=True),
+                  _v("bbbbbbbb", None, first=_iso(12)),
+                  _v("cccccccc", None, first=_iso(20))], T0, T1)
+        self.assertEqual([x["known"] for x in r], [False] * 3)
+        self.assertEqual([x["at"] for x in r], [None] * 3)
+        self.assertEqual([x["live"] for x in r], [False, False, True])
+        self.assertEqual([x["e"] for x in r], [r[1]["s"], r[2]["s"], T1])
+
+    @unittest.skipUnless(shutil.which("node"), "没有 node —— 算术住在 HTML 里，Python 测不到")
+    def test_最后一段才算_live(self):
+        """读不到部署时刻时后两版的段起点都落在窗口最后一分钟 —— 两段的尾都是 `t1`，
+        但「现在的版本」只能有一个（按 `e >= t1` 判就会同时亮两格）。"""
+        r = _dep([_v("aaaaaaaa", None, first=_iso(1)),
+                  _v("bbbbbbbb", None, first=_iso(24)),
+                  _v("cccccccc", None, first=_iso(24))], T0, T1)
+        self.assertEqual([x["s"] for x in r[1:]], [T1, T1], "前提没搭起来：后两段没压在窗口末尾")
+        self.assertEqual([x["e"] for x in r[1:]], [T1, T1])
+        self.assertEqual([x["live"] for x in r], [False, False, True], "不许两段同时说自己是现在的版本")
+
+    @unittest.skipUnless(shutil.which("node"), "没有 node —— 算术住在 HTML 里，Python 测不到")
+    def test_空输入不炸(self):
+        self.assertEqual(_dep([], T0, T1), [])
+
+    def test_判据抠的是真源码(self):
+        """哨兵抠歪 → 上面几条全是空的。这里钉住它确实拿到了那个函数体。"""
+        src = _dep_src()
+        self.assertIn("Math.max(t0,", src)
+        self.assertIn("isNaN(at)", src)
+        self.assertNotIn("el(", src, "哨兵里不许混进碰 DOM 的东西")
+        self.assertNotIn("state.", src, "哨兵里不许读全局 state")
+
+
 
 class CloudflareSummary(unittest.TestCase):
     """`/api/cf`：本机拉 Cloudflare 数 —— 只回 classlive-* 的数字，token 不进响应。不联网（post 注入）。"""
@@ -469,8 +597,19 @@ class Health(unittest.TestCase):
                      {"sum": {"requests": 9}, "quantiles": {"wallTimeP50": 2000}, "dimensions": {"coloCode": "DUB"}}]}],
         "zones": [{
             "host": [{"count": 5, "dimensions": {"clientRequestHTTPHost": "asr.bldcam.page", "edgeResponseStatus": 200, "clientCountryName": "US"}},
-                     {"count": 2, "dimensions": {"clientRequestHTTPHost": "asr.bldcam.page", "edgeResponseStatus": 503, "clientCountryName": "IE"}}],
-            "path": [{"count": 3, "dimensions": {"clientRequestHTTPHost": "bldcam.page", "clientRequestPath": "/wp-login.php", "edgeResponseStatus": 404}}]}]}}}
+                     {"count": 2, "dimensions": {"clientRequestHTTPHost": "asr.bldcam.page", "edgeResponseStatus": 503, "clientCountryName": "IE"}},
+                     {"count": 874, "dimensions": {"clientRequestHTTPHost": "bldcam.page", "edgeResponseStatus": 200, "clientCountryName": "CN"}},
+                     {"count": 527, "dimensions": {"clientRequestHTTPHost": "cdn.bldcam.page", "edgeResponseStatus": 200, "clientCountryName": "CN"}}]}]}}}
+
+    #: `GET /workers/scripts/<script>/deployments` 的真形状：`result` 是**字典**（不是列表），
+    #: 版本号挂在 `versions[].version_id`。里面的 `author_email` 是别人（作者本人）的邮箱 —— 不许进响应。
+    #: ⚠️ `created_on` 真的带微秒（从线上抓的样例就是 `.863119Z`）。判据必须用带微秒的，
+    #: 不然钉不住「掐到秒」那一步 —— 页面那边 `Date.parse` 遇到超 3 位小数会静默变 NaN。
+    DEP = {"result": {"deployments": [
+        {"created_on": "2026-10-13T20:30:00.863119Z", "author_email": "SECRET@example.com",
+         "versions": [{"version_id": "aaaaaaaa-1", "percentage": 100}]},
+        {"created_on": "2026-10-14T20:31:00.019101Z", "author_email": "SECRET@example.com",
+         "versions": [{"version_id": "bbbbbbbb-2", "percentage": 100}]}]}}
 
     def test_单位换算_部署首末_上游归类_站点汇总_token不进响应(self):
         import datetime as dt
@@ -479,11 +618,17 @@ class Health(unittest.TestCase):
         def post(url, headers, body):
             seen.append((headers["Authorization"], body["variables"]))
             return self.GQL
-        get = lambda url, headers: {"result": [{"id": "zone42"}]}            # noqa: E731
+        def get(url, headers):                                               # 同一个 get 要伺候两个端点
+            return self.DEP if "/deployments" in url else {"result": [{"id": "zone42"}]}
         now = dt.datetime(2026, 10, 14, 21, 0, tzinfo=dt.timezone.utc)
         with tempfile.TemporaryDirectory() as d, _cf_home(d):
             r = U.cf_health(post=post, get=get, now=now)
         self.assertEqual(seen[0][1]["z"], "zone42")
+        # 部署时刻来自 deployments API，是按**完整**版本号（`aaaaaaaa-1`）对上的，
+        # 而对外只给前 8 位 —— 对上号才算真读到了，对不上就会静默退回空串。
+        self.assertEqual(r["deploys_error"], "")
+        self.assertEqual([v["deployed_at"] for v in r["versions"]],
+                         ["2026-10-13T20:30:00Z", "2026-10-14T20:31:00Z"])
         self.assertEqual((r["lat"][0]["wall_p50"], r["lat"][0]["wall_p95"], r["lat"][0]["dur_p50"]), (1132, 1631, 900))
         a, b = r["versions"]
         self.assertEqual((a["id"], a["first"], a["last"], a["requests"], a["before"]),
@@ -495,9 +640,13 @@ class Health(unittest.TestCase):
         self.assertEqual((do["name"], do["c5xx"]), ("Durable Object", 4))
         self.assertEqual([c["colo"] for c in r["colos"]], ["DUB", "NRT"])
         self.assertEqual(r["colos"][1]["wall_p50"], 1000)
+        # 同一个 zone 上还挂着摄影站（bldcam.page）和图床（cdn）：它们不是这个项目的数，不许进表。
+        # 判据钉住整张表而不只是「有没有过滤」——漏一个主机名就是白干。
+        self.assertEqual([x["host"] for x in r["zone"]["hosts"]], ["asr.bldcam.page"],
+                         "只有 CLASSLIVE_HOSTS 里的主机名能进站点表")
         h = r["zone"]["hosts"][0]
         self.assertEqual((h["total"], h["s2"], h["s5"], h["countries"]), (7, 5, 2, [("US", 5), ("IE", 2)]))
-        self.assertEqual(r["zone"]["bad_paths"][0]["path"], "/wp-login.php")
+        self.assertNotIn("bad_paths", r["zone"], "扫描器探针那张表已删，字段也不许留在响应里")
         out = json.dumps(r)
         self.assertNotIn("SECRET", out)
         self.assertNotIn("clientIP", U._HEALTH_Q, "站点查询不许查 IP")
@@ -507,11 +656,45 @@ class Health(unittest.TestCase):
         bad = json.loads(json.dumps(self.GQL))
         bad["data"]["viewer"]["zones"] = []
         bad["errors"] = [{"message": "zone not authorized", "path": ["viewer", "zones", "0"]}]
+        def get(url, headers):
+            return self.DEP if "/deployments" in url else {"result": []}
         with tempfile.TemporaryDirectory() as d, _cf_home(d):
-            r = U.cf_health(post=lambda *a: bad, get=lambda *a: {"result": []})
+            r = U.cf_health(post=lambda *a: bad, get=get)
         self.assertIsNone(r["zone"])
         self.assertTrue(r["zone_error"])
         self.assertEqual(len(r["lat"]), 1)
+        # 站点读不到不许连累部署时刻：两条读的是不同的端点，各挂各的。
+        self.assertEqual(r["deploys_error"], "")
+        self.assertEqual(r["versions"][1]["deployed_at"], "2026-10-14T20:31:00Z")
+
+    def test_读不到部署时刻_如实标出来不编(self):
+        """token 没有 Workers Scripts: Read 时，`deployed_at` 必须空着 + `deploys_error` 有话说，
+        而不是拿「第一次有请求的分钟」冒充部署时刻（低流量版本能差几小时）。"""
+        import datetime as dt
+        import cl_admin_ui as U
+        def get(url, headers):
+            return {"result": []} if "/deployments" in url else {"result": [{"id": "zone42"}]}
+        now = dt.datetime(2026, 10, 14, 21, 0, tzinfo=dt.timezone.utc)
+        with tempfile.TemporaryDirectory() as d, _cf_home(d):
+            r = U.cf_health(post=lambda *a: self.GQL, get=get, now=now)
+        self.assertTrue(r["deploys_error"])
+        self.assertEqual([v["deployed_at"] for v in r["versions"]], ["", ""])
+        a, b = r["versions"]                                            # 其余字段照旧，退回按请求推断
+        self.assertEqual((a["id"], a["first"], a["before"]), ("aaaaaaaa", "2026-10-13T21:00:00Z", True))
+        self.assertEqual((b["id"], b["last"], b["before"]), ("bbbbbbbb", "2026-10-14T20:31:00Z", False))
+
+    def test_读部署链炸了也不连累别的(self):
+        """deployments 端点抛异常（网络 / 502）走的是同一条兜底：`None` → 空串 + 错误文案。"""
+        import cl_admin_ui as U
+        def get(url, headers):
+            if "/deployments" in url:
+                raise RuntimeError("502")
+            return {"result": [{"id": "zone42"}]}
+        with tempfile.TemporaryDirectory() as d, _cf_home(d):
+            r = U.cf_health(post=lambda *a: self.GQL, get=get)
+        self.assertTrue(r["deploys_error"])
+        self.assertEqual(r["versions"][0]["deployed_at"], "")
+        self.assertEqual(len(r["lat"]), 1, "延迟数据照常出")
 
     def test_日志_只取我们自己写的字段(self):
         import cl_admin_ui as U
@@ -553,6 +736,124 @@ class Health(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, _cf_home(d):
             r = U.cf_window("2026-10-14T17:00:00Z", "2026-10-14T17:48:00Z", post=lambda *a: fake)
         self.assertEqual(r, {"requests": 1224, "errors": 0, "wall_p50": 1132, "wall_p95": 1631, "colos": [["NRT", 331]]})
+
+
+class HealthOverall(unittest.TestCase):
+    """`overall` = 整个窗口一个 p50/p95（`all:` 那条别名），不是各小时的分位数再平均。"""
+
+    def test_有all就给整体数_没有就None(self):
+        import cl_admin_ui as U
+        g = json.loads(json.dumps(Health.GQL))
+        g["data"]["viewer"]["accounts"][0]["all"] = [{"sum": {"requests": 7127, "errors": 3},
+                                                      "quantiles": {"wallTimeP50": 1151000, "wallTimeP95": 1736000}}]
+        get = lambda url, headers: Health.DEP if "/deployments" in url else {"result": [{"id": "zone42"}]}  # noqa: E731
+        with tempfile.TemporaryDirectory() as d, _cf_home(d):
+            r = U.cf_health(post=lambda *a: g, get=get)
+            r0 = U.cf_health(post=lambda *a: Health.GQL, get=get)
+        self.assertEqual(r["overall"], {"requests": 7127, "errors": 3, "wall_p50": 1151, "wall_p95": 1736})
+        self.assertIsNone(r0["overall"])
+        self.assertIn("all:workersInvocationsAdaptive(limit:1", U._HEALTH_Q)
+
+
+class LogsParallel(unittest.TestCase):
+    def test_四条查询同时发(self):
+        """串着发是 4 × 单条；一起发 ≈ 最慢那条。判据数「同时在飞的最多几条」，不靠墙钟（机器忙时墙钟会抖）。"""
+        import cl_admin_ui as U
+        lock, live, peak = threading.Lock(), [0], [0]
+        gate = threading.Barrier(4, timeout=5)                          # 四条都进来了才放行 —— 串行的话这里会超时
+        def post(url, headers, body):
+            with lock:
+                live[0] += 1
+                peak[0] = max(peak[0], live[0])
+            try:
+                gate.wait()
+            finally:
+                with lock:
+                    live[0] -= 1
+            if body["view"] == "calculations":
+                return {"success": True, "result": {"calculations": []}}
+            return {"success": True, "result": {"events": {"events": []}}}
+        with tempfile.TemporaryDirectory() as d, _cf_home(d):
+            r = U.worker_logs(post=post, now_ms=1792012000000)
+        self.assertEqual(peak[0], 4)
+        self.assertEqual(r, {"models": [], "events": []})
+
+
+class SlowCache(unittest.TestCase):
+    """`cached()`：新的直接给、旧的先给再后台重取、太旧同步等、`fresh` 当场重取、出错不进缓存。"""
+
+    def setUp(self):
+        import cl_admin_ui as U
+        self.U = U
+        self.p = mock.patch.dict(U._CACHE, clear=True)
+        self.p.start()
+        self.addCleanup(self.p.stop)
+        self.now = [1000.0]
+        self.calls = []
+
+    def clock(self):
+        return self.now[0]
+
+    def fn(self):
+        self.calls.append(self.now[0])
+        return {"v": len(self.calls)}
+
+    def get(self, fresh=False, fn=None):
+        return self.U.cached("t", fn or self.fn, fresh, clock=self.clock)
+
+    def test_新的直接给_不再问(self):
+        self.assertEqual(self.get(), {"v": 1, "cache_age": 0})
+        self.now[0] += 30
+        self.assertEqual(self.get(), {"v": 1, "cache_age": 30})
+        self.assertEqual(len(self.calls), 1)
+
+    def test_旧的先给_后台重取一次(self):
+        self.get()
+        self.now[0] += self.U.FRESH_S + 5
+        r = self.get()
+        self.assertEqual(r["v"], 1, "先给旧的，不等")
+        for t in [t for t in threading.enumerate() if "_compute" in t.name]:
+            t.join(timeout=5)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.get()["v"], 2)
+
+    def test_太旧就同步等(self):
+        self.get()
+        self.now[0] += self.U.STALE_S + 1
+        self.assertEqual(self.get(), {"v": 2, "cache_age": 0})
+
+    def test_fresh当场重取(self):
+        self.get()
+        self.now[0] += 1
+        self.assertEqual(self.get(fresh=True), {"v": 2, "cache_age": 0})
+
+    def test_出错不进缓存(self):
+        self.assertEqual(self.get(fn=lambda: {"error": "x"})["error"], "x")
+        self.assertEqual(self.get()["v"], 1, "上一次是错的，这次要真去取")
+
+    def test_抛异常变成一条错误(self):
+        def boom():
+            raise RuntimeError("网断了")
+        self.assertIn("RuntimeError", self.get(fn=boom)["error"])
+
+    def test_接口把fresh传进去(self):
+        seen = []
+        def fake(fresh=False):
+            seen.append(fresh)
+            return {"ok": 1}
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self.U.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        import httpx
+        url = f"http://127.0.0.1:{srv.server_address[1]}/api/logs"
+        h = {self.U.GATE_HEADER: "1"}
+        with mock.patch.object(self.U, "cached", side_effect=lambda n, f, fr: {"fresh": fr, "name": n}):
+            a = httpx.post(url, content=b"{}", headers=h, timeout=5).json()
+            b = httpx.post(url, content=b'{"fresh":true}', headers=h, timeout=5).json()
+            c = httpx.post(url, content=b"not json", headers=h, timeout=5).json()
+        self.assertEqual((a, b, c), ({"fresh": False, "name": "logs"}, {"fresh": True, "name": "logs"},
+                                     {"fresh": False, "name": "logs"}))
 
 
 if __name__ == "__main__":

@@ -23,7 +23,10 @@ import json
 import pathlib
 import re
 import sys
+import threading
+import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
@@ -227,11 +230,17 @@ def _post_json(url, headers, body):
 
 ASR_SCRIPT = "classlive-asr"
 ZONE = "bldcam.page"
+#: 这个 zone 上**只有这两个主机名是 ClassLive 的**。同一个 zone 还挂着摄影站（bldcam.page / www）、
+#: 图床（cdn）、数据站（data）—— 它们的请求跟这个工具无关，混进同一张表只会把要看的两行冲散。
+#: 2026-10-14 实测 24 h：ClassLive 6981+263 对 摄影站 874+52+527+2。要加新的 ClassLive 入口改这里。
+CLASSLIVE_HOSTS = ("asr.bldcam.page", "ingest.bldcam.page")
 #: 子请求的主机名 → 人话。空主机名 = Durable Object（Worker 调自己的 DO，不出 Cloudflare）。
 UPSTREAMS = {"api.groq.com": "Groq", "api.deepseek.com": "DeepSeek", "dashscope-intl.aliyuncs.com": "千问（国际）",
              "api.typesafe.ai": "TypeSafe Jev", "": "Durable Object"}
 _HEALTH_Q = """query($a:String!,$z:String!,$s:Time!,$u:Time!,$sc:String!){viewer{
  accounts(filter:{accountTag:$a}){
+  all:workersInvocationsAdaptive(limit:1,filter:{datetime_geq:$s,datetime_leq:$u,scriptName:$sc}){
+   sum{requests errors} quantiles{wallTimeP50 wallTimeP95}}
   lat:workersInvocationsAdaptive(limit:100,filter:{datetime_geq:$s,datetime_leq:$u,scriptName:$sc}){
    sum{requests errors} quantiles{wallTimeP50 wallTimeP95 requestDurationP50 requestDurationP95} dimensions{datetimeHour}}
   ver:workersInvocationsAdaptive(limit:10000,filter:{datetime_geq:$s,datetime_leq:$u,scriptName:$sc}){
@@ -242,29 +251,80 @@ _HEALTH_Q = """query($a:String!,$z:String!,$s:Time!,$u:Time!,$sc:String!){viewer
    sum{requests} quantiles{wallTimeP50} dimensions{coloCode}}}
  zones(filter:{zoneTag:$z}){
   host:httpRequestsAdaptiveGroups(limit:2000,filter:{datetime_geq:$s,datetime_leq:$u}){
-   count dimensions{clientRequestHTTPHost edgeResponseStatus clientCountryName}}
-  path:httpRequestsAdaptiveGroups(limit:15,orderBy:[count_DESC],filter:{datetime_geq:$s,datetime_leq:$u,edgeResponseStatus_geq:400}){
-   count dimensions{clientRequestHTTPHost clientRequestPath edgeResponseStatus}}}}}"""
+   count dimensions{clientRequestHTTPHost edgeResponseStatus clientCountryName}}}}}"""
+
+
+_ZONE_ID: dict = {}                                                  # token → zone ID；zone ID 不会变，问一次就够
 
 
 def _zone_id(tok, get=None):
-    """bldcam.page 的 zone ID（同一个只读 token 能列 zone）。拿不到回空串 —— 面板只是少了站点那张表。"""
+    """bldcam.page 的 zone ID（同一个只读 token 能列 zone）。拿不到回空串 —— 面板只是少了站点那张表。
+    拿到的记在进程里（只记成功的；测试注入 `get` 时不读不写这份缓存）。"""
+    if get is None and _ZONE_ID.get(tok):
+        return _ZONE_ID[tok]
+    cache = get is None
     if get is None:
         def get(url, headers):
             import httpx
             return httpx.get(url, headers=headers, timeout=20).json()
     try:
         j = get(f"https://api.cloudflare.com/client/v4/zones?name={ZONE}", {"Authorization": f"Bearer {tok}"})
-        return str((j.get("result") or [{}])[0].get("id") or "")
+        zid = str((j.get("result") or [{}])[0].get("id") or "")
+        if cache and zid:
+            _ZONE_ID[tok] = zid
+        return zid
     except Exception:                                                 # noqa: BLE001
         return ""
+
+
+#: 部署链（`wrangler deploy` 的历史）。只读 token 恰好也有 Workers Scripts: Read。
+DEPLOY_API = "https://api.cloudflare.com/client/v4/accounts/{acct}/workers/scripts/{script}/deployments"
+
+
+def _deploys(tok, acct, get=None):
+    """Worker 版本号 → 部署时刻（ISO 字符串）。`wrangler deploy` 一次就产生一个版本号 ——
+    这是「那一版什么时候被换上」的**权威**答案。GraphQL 只给「第一次有请求的分钟」，
+    低流量的版本可能几小时才来第一个请求，用那个推断会把部署时刻说得晚得多。
+
+    读得到回 `{完整版本号: ISO}`；**回 `None` = 读不到**（token 没有 Workers Scripts: Read、
+    或形状不认识）。调用方据此把 `deploys_error` 填上，退回按请求推断并如实标出来。
+    只取 `created_on` 与 `version_id` —— 响应里还有 `author_email`，不进这个映射。
+
+    ⚠️ `created_on` 带**微秒**（`2026-10-13T03:21:49.863119Z`）。ISO 的 Date Time String Format
+    只认 3 位小数，多出来的位数属于「实现自定义」——V8 收（实测 node v22 解析成同一个毫秒数），
+    但别的引擎没有保证。页面那边是 `Date.parse` 吃它，**解析失败会静默变成 NaN**（整根时间轴
+    一起退化成「不知道」）。所以这里掐到秒再给出去，不赌解析器宽容。
+    """
+    if get is None:
+        def get(url, headers):
+            import httpx
+            return httpx.get(url, headers=headers, timeout=20).json()
+    try:
+        j = get(DEPLOY_API.format(acct=acct, script=ASR_SCRIPT), {"Authorization": f"Bearer {tok}"})
+    except Exception:                                                 # noqa: BLE001
+        return None
+    res = j.get("result")
+    if not isinstance(res, dict):
+        return None
+    out = {}
+    for d in res.get("deployments") or []:
+        at = str(d.get("created_on") or "")
+        if len(at) > 20 and at[19] in ".+":                           # 掐到秒（见上面那条 ⚠️）
+            at = at[:19] + "Z"
+        for v in d.get("versions") or []:
+            vid = str(v.get("version_id") or "")
+            if vid and at and vid not in out:
+                out[vid] = at
+    return out
 
 
 def cf_health(post=None, get=None, now=None, window=None) -> dict:
     """近 24 h（或 `window=(起, 止)` 的 ISO 区间）的服务健康 —— 全是 Cloudflare 自己的数，本机直接问：
 
+      overall   整个窗口的请求 / 错误 / wallTime p50·p95（毫秒）；读不到为 None
       lat       ASR Worker 每小时的 wallTime / requestDuration p50·p95（**毫秒**；GraphQL 给的是微秒）
-      versions  每个部署版本在窗口里**第一次 / 最后一次**出现的分钟（= 部署标记；窗口起点之前就在的标 `before`）
+      versions  每个部署版本在窗口里**第一次 / 最后一次**出现的分钟（= 部署标记；窗口起点之前就在的标 `before`），
+                外加 `deployed_at` = 权威部署时刻（读不到时空串，见 `deploys_error`）
       upstream  子请求按上游 × 状态码（Groq / DeepSeek / 千问 / Jev / DO）
       colos     请求落在哪个 Cloudflare 节点 + 那里的 wallTime p50。⚠️ 节点 ≠ 用户所在地（见 HTML 的说明）
       zone      bldcam.page 整个站点按主机名 × 状态码 × 国家；外加 4xx/5xx 最多的路径。**不查 IP**。
@@ -280,10 +340,13 @@ def cf_health(post=None, get=None, now=None, window=None) -> dict:
     s, u = window or ((now - dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ"))
     zid = _zone_id(tok, get)
     v = {"a": acct, "z": zid or "none", "s": s, "u": u, "sc": ASR_SCRIPT}
-    try:
-        j = (post or _post_json)(CF_GQL, {"Authorization": f"Bearer {tok}"}, {"query": _HEALTH_Q, "variables": v})
-    except Exception as e:                                            # noqa: BLE001
-        return {"error": f"连不上 Cloudflare：{type(e).__name__}"}
+    with ThreadPoolExecutor(2) as ex:                                 # 部署链和 GraphQL 互不依赖：一起问，省一个来回
+        dep_f = ex.submit(_deploys, tok, acct, get)
+        try:
+            j = (post or _post_json)(CF_GQL, {"Authorization": f"Bearer {tok}"}, {"query": _HEALTH_Q, "variables": v})
+        except Exception as e:                                        # noqa: BLE001
+            return {"error": f"连不上 Cloudflare：{type(e).__name__}"}
+        dep = dep_f.result()
     errs = [x for x in (j.get("errors") or []) if "zones" not in (x.get("path") or [])]
     if errs or not j.get("data"):
         return {"error": "Cloudflare 拒了：" + "；".join(str(x.get("message", ""))[:120] for x in (j.get("errors") or [])[:2])}
@@ -305,7 +368,12 @@ def cf_health(post=None, get=None, now=None, window=None) -> dict:
         x["first"] = min(x["first"], d["datetimeMinute"])
         x["last"] = max(x["last"], d["datetimeMinute"])
         x["requests"] += int(r["sum"]["requests"])
+    w = (a.get("all") or [None])[0]                                   # 整个窗口一个数（各小时的分位数不能再取平均）
+    overall = {"requests": int(w["sum"]["requests"]), "errors": int(w["sum"]["errors"]),
+               "wall_p50": us(w["quantiles"]["wallTimeP50"]), "wall_p95": us(w["quantiles"]["wallTimeP95"])} if w else None
     start_min = s[:16] + ":00Z"
+    for full, x in vers.items():                                      # `vers` 的键就是完整版本号（对外只给前 8 位）
+        x["deployed_at"] = (dep or {}).get(full, "")
     versions = sorted(vers.values(), key=lambda x: x["first"])
     for x in versions:
         x["before"] = x["first"] <= start_min                         # 窗口起点就在 = 不知道哪天部署的
@@ -340,6 +408,8 @@ def cf_health(post=None, get=None, now=None, window=None) -> dict:
         hosts: dict = {}
         for r in zz.get("host") or []:
             d = r["dimensions"]
+            if d["clientRequestHTTPHost"] not in CLASSLIVE_HOSTS:      # 摄影站 / 图床 / 数据站：不是这个项目的东西
+                continue
             h = hosts.setdefault(d["clientRequestHTTPHost"], {"host": d["clientRequestHTTPHost"], "total": 0,
                                                               "s2": 0, "s3": 0, "s4": 0, "s5": 0, "countries": {}})
             n = int(r["count"])
@@ -349,12 +419,14 @@ def cf_health(post=None, get=None, now=None, window=None) -> dict:
             h["countries"][c] = h["countries"].get(c, 0) + n
         for h in hosts.values():
             h["countries"] = sorted(h["countries"].items(), key=lambda kv: -kv[1])[:5]
-        zone = {"hosts": sorted(hosts.values(), key=lambda h: -h["total"]),
-                "bad_paths": [{"host": r["dimensions"]["clientRequestHTTPHost"], "path": r["dimensions"]["clientRequestPath"][:120],
-                               "status": r["dimensions"]["edgeResponseStatus"], "n": int(r["count"])} for r in zz.get("path") or []]}
-    return {"since": s, "until": u, "lat": lat, "versions": versions,
+        # 4xx/5xx 的**路径**那张表删了：2026-10-14 实测 15 行全是扫描器探针（/.env.stage、/phpinfo.php~、
+        # /backup.tbz2…），一条都要不动；真出错在「上游」表和 4xx/5xx 那两列里已经看得见。
+        zone = {"hosts": sorted(hosts.values(), key=lambda h: -h["total"])}
+    return {"since": s, "until": u, "overall": overall, "lat": lat, "versions": versions,
             "upstream": sorted(up.values(), key=lambda r: -r["total"]), "colos": colos, "zone": zone,
-            "zone_error": "" if zone else "读不到 bldcam.page 的站点数（token 没有 Zone Analytics 权限，或 zone 没找到）"}
+            "zone_error": "" if zone else "读不到 bldcam.page 的站点数（token 没有 Zone Analytics 权限，或 zone 没找到）",
+            "deploys_error": "" if dep is not None else
+            "⚠️ 读不到部署时刻（token 没有 Workers Scripts: Read），「部署于」是从第一次有请求的分钟推的，会偏晚"}
 
 
 _WIN_Q = """query($a:String!,$s:Time!,$u:Time!,$sc:String!){viewer{accounts(filter:{accountTag:$a}){
@@ -413,12 +485,21 @@ def worker_logs(post=None, now_ms=None) -> dict:
             raise RuntimeError("；".join(str(x.get("message", ""))[:120] for x in (j.get("errors") or [])[:2]) or "telemetry 拒了")
         return j.get("result") or {}
 
+    flts = ({"key": "denied", "operation": "exists", "type": "string"},
+            {"key": "result", "operation": "eq", "type": "string", "value": "all_failed"},
+            {"key": "quota", "operation": "exists", "type": "string"})
     try:
-        calc = q({"view": "calculations", "parameters": {
-            "datasets": ["cloudflare-workers"],
-            "filters": [svc, {"key": "provider", "operation": "exists", "type": "string"}],
-            "calculations": [{"operator": op, "key": "ms", "keyType": "number"} for op in ("median", "p90", "max")],
-            "groupBys": [{"type": "string", "value": "model"}]}})
+        # 四条查询互不依赖，一条约 2 s —— 串着问要 9 s，一起问 ≈ 最慢那条
+        with ThreadPoolExecutor(4) as ex:
+            calc_f = ex.submit(q, {"view": "calculations", "parameters": {
+                "datasets": ["cloudflare-workers"],
+                "filters": [svc, {"key": "provider", "operation": "exists", "type": "string"}],
+                "calculations": [{"operator": op, "key": "ms", "keyType": "number"} for op in ("median", "p90", "max")],
+                "groupBys": [{"type": "string", "value": "model"}]}})
+            ev_fs = [ex.submit(q, {"view": "events", "limit": 30, "parameters": {
+                "datasets": ["cloudflare-workers"], "filters": [svc, flt]}}) for flt in flts]
+            calc = calc_f.result()
+            evs = [f.result() for f in ev_fs]
         out: dict = {}
         for c in calc.get("calculations") or []:
             op = str(c.get("calculation", "")).split("(")[0]
@@ -427,10 +508,7 @@ def worker_logs(post=None, now_ms=None) -> dict:
                 r[op] = round(float(ag.get("value") or 0))
                 r["count"] = int(ag.get("count") or 0)
         events = []
-        for flt in ({"key": "denied", "operation": "exists", "type": "string"},
-                    {"key": "result", "operation": "eq", "type": "string", "value": "all_failed"},
-                    {"key": "quota", "operation": "exists", "type": "string"}):
-            ev = q({"view": "events", "limit": 30, "parameters": {"datasets": ["cloudflare-workers"], "filters": [svc, flt]}})
+        for ev in evs:
             for e in (ev.get("events") or {}).get("events") or []:
                 src = e.get("source") if isinstance(e.get("source"), dict) else {}
                 keep = {k: src[k] for k in ("pass", "denied", "kind", "result", "ms", "tried", "quota") if k in src}
@@ -493,6 +571,50 @@ def ae_events(post=None) -> dict:
     return out
 
 
+#: 慢的几个（直接问 Cloudflare，一个 0.5–2 s）走「先给旧的、后台再取」：页面每分钟自动刷一次，
+#: 不该每次都等 Cloudflare；手动点「刷新」带 `{"fresh": true}`，那一次同步重取。出错的结果不进缓存。
+SLOW = {"cf": cf_summary, "r2": r2_ingest, "health": cf_health, "logs": worker_logs, "ae": ae_events}
+FRESH_S = 55                                                          # 这么新：直接给
+STALE_S = 15 * 60                                                     # 这么旧以内：先给旧的，后台重取；再旧就同步等
+_CACHE: dict = {}                                                     # name → (取到的 monotonic 时刻, 结果)
+_BUSY: set = set()                                                    # 正在后台重取的 name（同一个只起一个线程）
+_LOCK = threading.Lock()
+
+
+def _compute(name, fn, clock=time.monotonic):
+    try:
+        v = fn()
+    except Exception as e:                                            # noqa: BLE001  后台线程里的异常没人接，变成一条错误
+        v = {"error": f"{name} 出错：{type(e).__name__}"}
+    with _LOCK:
+        _BUSY.discard(name)
+        if isinstance(v, dict) and not v.get("error"):
+            _CACHE[name] = (clock(), v)
+    return v
+
+
+def cached(name, fn, fresh=False, clock=time.monotonic) -> dict:
+    """返回 `fn()` 的结果，外加 `cache_age`（秒）。见 `SLOW` 上面那段。"""
+    with _LOCK:
+        hit = None if fresh else _CACHE.get(name)
+        age = clock() - hit[0] if hit else None
+        bg = hit is not None and FRESH_S <= age < STALE_S and name not in _BUSY
+        if bg:
+            _BUSY.add(name)
+    if hit and age < STALE_S:
+        if bg:
+            threading.Thread(target=_compute, args=(name, fn, clock), daemon=True).start()
+        return {**hit[1], "cache_age": round(age)}
+    v = _compute(name, fn, clock)
+    return {**v, "cache_age": 0} if isinstance(v, dict) else v
+
+
+def prewarm() -> None:
+    """服务一起来就在后台把慢的几个各取一遍 —— 第一次打开页面不用等。"""
+    for name, fn in SLOW.items():
+        threading.Thread(target=cached, args=(name, fn, True), daemon=True).start()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ClassLiveAdminUI"
 
@@ -537,16 +659,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get(GATE_HEADER) != "1":
             return self._json(403, {"error": "缺少 %s 头（本机页面对任意网站的第一道闸）" % GATE_HEADER})
         name = path[len("/api/"):]
-        if name == "cf":                                              # 本机直接问 Cloudflare，不经 Worker
-            return self._json(200, cf_summary())
-        if name == "r2":                                              # 上传桶实时清单（同上，本机直接问）
-            return self._json(200, r2_ingest())
-        if name == "health":                                          # 延迟 / 上游 / 部署 / 节点 / 站点（本机直接问）
-            return self._json(200, cf_health())
-        if name == "logs":                                            # Workers Logs 里我们自己写的事件
-            return self._json(200, worker_logs())
-        if name == "ae":                                              # Analytics Engine 逐请求事件
-            return self._json(200, ae_events())
+        # cf：Cloudflare 用量 · r2：上传桶清单 · health：延迟/上游/部署/节点/站点 · logs：Workers Logs 里我们写的事件 ·
+        # ae：Analytics Engine 逐请求事件。都是本机直接问 Cloudflare，不经 Worker。
+        if name in SLOW:
+            raw = self.rfile.read(int(self.headers.get("content-length") or 0))
+            try:
+                fresh = bool(json.loads(raw or b"{}").get("fresh"))
+            except (ValueError, AttributeError):
+                fresh = False
+            return self._json(200, cached(name, SLOW[name], fresh))
         if name == "cfwin":                                           # 某一段时间的 Worker 延迟（抽屉里每个时段一行）
             raw = self.rfile.read(int(self.headers.get("content-length") or 0))
             try:
@@ -581,6 +702,7 @@ def main(argv=None) -> int:
         sys.exit(f"缺模板 {PAGE}（和本脚本放同一个目录）")
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)         # ⚠️ 只 bind 环回
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    prewarm()
     print(f"通行码管理面板：{url}\n  令牌只在服务端读（{cl_admin.paths.asr_admin_token()}），不进浏览器。Ctrl-C 停。")
     if a.open:
         import subprocess

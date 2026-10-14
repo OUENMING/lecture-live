@@ -811,6 +811,64 @@ def _open_wrapup_card(ov, wrapup_mod, status: str):
         pass
     return card
 
+def _pineapple_icon(pt: float = 16.0, scale: int = 2):
+    """菜单栏的菠萝图标：**模板图**（只有黑与透明，系统负责明暗 / 选中态上色，见
+    `_install_status_item` 的 HIG 引文）。SF Symbols 里没有菠萝，所以用 `NSBezierPath` 现画：
+    描边果身 + 两组斜线菱格 + 三片尖叶。线宽 1.15 / 0.8pt 是在 2x 位图上逐像素看过定的
+    （再粗菱格糊成一团、再细 1x 屏上断线）。画不出来回 `None`，由调用方退回 SF 耳机。
+    ⚠️ 坐标按 18pt 画布写、整体缩到 `pt`（默认 16 = SF `headphones` 在菜单栏的尺寸，实测 16×16）。
+    """
+    try:
+        from AppKit import (NSBezierPath, NSBitmapImageRep, NSColor, NSDeviceRGBColorSpace,
+                            NSGraphicsContext, NSImage)
+        from Foundation import NSMakePoint, NSMakeRect, NSMakeSize
+        px = int(pt * scale)
+        rep = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+            None, px, px, 8, 4, True, False, NSDeviceRGBColorSpace, 0, 0)
+        rep.setSize_(NSMakeSize(pt, pt))
+        ctx = NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep)
+        NSGraphicsContext.saveGraphicsState()
+        try:
+            NSGraphicsContext.setCurrentContext_(ctx)
+            from AppKit import NSAffineTransform
+            t = NSAffineTransform.transform()
+            t.scaleBy_(pt / 18.0)
+            t.concat()
+            NSColor.blackColor().set()
+            rect = NSMakeRect(4.6, 1.1, 8.8, 10.4)               # 果身（y 向上）
+            body = NSBezierPath.bezierPathWithOvalInRect_(rect)
+            body.setLineWidth_(1.15)
+            body.stroke()
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath.bezierPathWithOvalInRect_(rect).addClip()
+            grid = NSBezierPath.bezierPath()
+            grid.setLineWidth_(0.8)
+            cx, cy = 9.0, 6.3
+            for k in (-3.8, 0.0, 3.8):
+                grid.moveToPoint_(NSMakePoint(cx + k - 7, cy - 7)); grid.lineToPoint_(NSMakePoint(cx + k + 7, cy + 7))
+                grid.moveToPoint_(NSMakePoint(cx + k - 7, cy + 7)); grid.lineToPoint_(NSMakePoint(cx + k + 7, cy - 7))
+            grid.stroke()
+            NSGraphicsContext.restoreGraphicsState()
+            for bl, br, tip, c1, c2 in (((7.9, 12.3), (10.1, 12.3), (9.0, 17.6), (7.9, 15.0), (10.1, 15.0)),
+                                        ((7.2, 12.0), (8.9, 12.6), (4.6, 16.2), (5.6, 13.6), (6.9, 14.6)),
+                                        ((9.1, 12.6), (10.8, 12.0), (13.4, 16.2), (11.1, 14.6), (12.4, 13.6))):
+                leaf = NSBezierPath.bezierPath()
+                leaf.moveToPoint_(NSMakePoint(*bl))
+                leaf.curveToPoint_controlPoint1_controlPoint2_(NSMakePoint(*tip), NSMakePoint(*c1), NSMakePoint(*c1))
+                leaf.curveToPoint_controlPoint1_controlPoint2_(NSMakePoint(*br), NSMakePoint(*c2), NSMakePoint(*c2))
+                leaf.closePath()
+                leaf.fill()
+        finally:
+            NSGraphicsContext.restoreGraphicsState()
+        img = NSImage.alloc().initWithSize_(NSMakeSize(pt, pt))
+        img.addRepresentation_(rep)
+        img.setTemplate_(True)
+        img.setAccessibilityDescription_("ClassLive")
+        return img
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
 class Overlay:
     def __init__(self, on_quit=None, on_translate=None, on_submit=None,
                  on_ask=None, on_new_topic=None, on_lost=None, note=None):
@@ -1283,7 +1341,8 @@ class Overlay:
             self._status = NSStatusBar.systemStatusBar().statusItemWithLength_(
                 NSVariableStatusItemLength)
             btn = self._status.button()
-            icon = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            # 🍍 菠萝（2026-10-14 作者要的）：SF Symbols 没有菠萝 → 自己画一张模板图；画不出来退回耳机。
+            icon = _pineapple_icon() or NSImage.imageWithSystemSymbolName_accessibilityDescription_(
                 "headphones", "ClassLive")
             if icon is not None:
                 # ⚠️ `setTemplate_(True)` 是**必须的** —— 不设的话系统不会替它上色，

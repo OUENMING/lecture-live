@@ -2028,6 +2028,10 @@ class Overlay:
         except Exception:                                 # noqa: BLE001
             self._whatsnew_card = None
 
+    def overflow_stats(self) -> dict:
+        """只读转发 `TranscriptView.overflow_stats()`（收尾时 `main` 交给测试报告）。"""
+        return self._tv.overflow_stats()
+
     def close(self) -> None:
         """撤掉面板与菜单栏图标。**幂等**, 可重复调用(✕ / Ctrl+C / 正常结束都会走)。
 

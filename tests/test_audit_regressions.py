@@ -1270,6 +1270,11 @@ class R13_RowPitchAndOverflowSignal(unittest.TestCase):
                     ov.pump()
             self.assertGreater(ov._tv._overflow_n, n0,
                                "超长的译文必须留下痕迹 —— 原来它是**静默**裁掉的")
+            # ⭐ C4：次数要能导出去，而且带分母（两句都量过 → seen ≥ 2，超限 ≥ 1）
+            st = ov.overflow_stats()
+            self.assertEqual(st["overflow"], ov._tv._overflow_n)
+            self.assertGreaterEqual(st["seen"], 2)
+            self.assertLess(st["overflow"], st["seen"], "短的那句不该算进超限")
             self.assertIn("超出档位行数", buf.getvalue(),
                           "除了记数, 首次还该打一行 —— 否则日志里根本看不到")
         finally:

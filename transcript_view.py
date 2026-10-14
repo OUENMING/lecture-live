@@ -115,6 +115,7 @@ class TranscriptView:
         # 档位行数来自一个闭样本(p100 of 4797 句, 见 overlay.py 的行数分档注释),
         # 一旦真实文本比样本更长, 原来会**无声无息**被裁掉(既不报错也不给省略号)。
         self._overflow_n = 0
+        self._zh_seen_n = 0                   # 分母: 量过的译文次数(同口径, 见 `_note_overflow`)
         self._overflow_warned = False
         self._on_follow_change = on_follow_change or (lambda follow: None)
 
@@ -273,6 +274,14 @@ class TranscriptView:
             self._new_since_leave = False
             self._expected_origin = self._scroll.contentView().bounds().origin.y
             self._on_follow_change(False)
+
+    def overflow_stats(self) -> dict:
+        """译文超限的**次数与分母**（进测试报告 `blocks.ui.zh_overflow`）。
+
+        ⚠️ 单位是「译文行**文本变了**的那一次」, 不是句子 —— 同一句草稿译文改几次就量几次。
+           拿它判「F 值不值得做」时比的是 `overflow / seen`, 别拿 `overflow` 去除句数。
+        """
+        return {"overflow": self._overflow_n, "seen": self._zh_seen_n, "lines": self._lines}
 
     def text_width(self) -> float:
         """文档视图当前宽度 —— **折行实测**用的宽度(不是面板宽度猜出来的值:
@@ -575,6 +584,7 @@ class TranscriptView:
             need = self._measure(text, w, lbl.font())
         except Exception:               # noqa: BLE001
             return                      # 量不了就算了 —— 这是观测, 不该影响功能
+        self._zh_seen_n += 1
         if need <= self._zh_h + 0.5:
             return
         self._overflow_n += 1

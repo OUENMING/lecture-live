@@ -2550,6 +2550,14 @@ def run(args) -> None:
                 #    `metrics.json`（能对上的字段名逐字一致）；对不上的那几项
                 #    它**刻意不返回**，别在这里补 —— 见 `LiveSummarizer.stats()`。
                 tester.note_block("live", summ.stats())
+                # ⭐ 译文超出档位行数的次数/分母 —— 原来只在 `transcript_view` 里自增、
+                #    哪儿都不导出，「F 只有 ≈1%」只能拿离线回放外推（2026-10-14 C4）。
+                _ovs = getattr(ui, "overflow_stats", None)
+                if callable(_ovs):
+                    try:
+                        tester.note_ui_value("zh_overflow", _ovs())
+                    except Exception:                     # noqa: BLE001
+                        pass
                 # ⚠️⚠️ `finish()` 里是 ffmpeg 转码 + 打包（注释估 ~21 秒/50 分钟）
                 #    —— 原来直接在**主线程**跑，转码期间窗口不 pump
                 #    （2026-10-01 审查 F21）。丢进线程 + `_spin` 等它 ——

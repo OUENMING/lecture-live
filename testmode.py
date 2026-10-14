@@ -588,6 +588,11 @@ class TestSession:
         self._ui[name] = self._ui.get(name, 0) + 1
 
     @_safe
+    def note_ui_value(self, name: str, value) -> None:
+        """往 UI 使用度里放一个**快照值**（不是计数）—— 例：收尾时的译文超限统计。"""
+        self._ui[name] = value
+
+    @_safe
     def note_block(self, name: str, data) -> None:
         """收下一块**「整块」**的数据（不是流式事件）—— 收尾时原样进 `report.json`。
 

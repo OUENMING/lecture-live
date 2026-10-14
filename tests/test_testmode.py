@@ -582,7 +582,12 @@ def main() -> int:
     check("R9 `steps` 原样落进段记录",
           _t8.segments[1]["steps"] == ["cloud:timeout", "local:parakeet"],
           repr(_t8.segments[1].get("steps")))
+    _t8.note_ui("outline")
+    _t8.note_ui_value("zh_overflow", {"overflow": 2, "seen": 40, "lines": 3})
     _rep = json.loads(pathlib.Path(_t8.finish(bundle=False)).read_text(encoding="utf-8"))
+    check("⭐ C4 译文超限统计进了 `blocks.ui.zh_overflow`，且不挤掉计数",
+          _rep["blocks"]["ui"].get("zh_overflow") == {"overflow": 2, "seen": 40, "lines": 3}
+          and _rep["blocks"]["ui"].get("outline") == 1, repr(_rep["blocks"].get("ui")))
     _asr = _rep["asr"]
     check("报告 `asr.source_pct` 是 {source: 占比}",
           _asr.get("source_pct") == {"groq": 33.3, "local-parakeet": 66.7}, repr(_asr.get("source_pct")))

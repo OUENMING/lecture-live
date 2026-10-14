@@ -54,6 +54,7 @@ CARD_RADIUS = 5.0      # 卡片圆角（实测 5pt）
 TOUR_BTN_W = 72.0      # 底栏「功能介绍」（无边框淡字）
 HAIRLINE = 0.5         # 描边（实测 0.5pt；scale 2 上正好 1 设备像素）
 TITLE_H = 34.0
+PANEL_TITLE = "烤菠萝"      # 面板标题（2026-10-14 作者改名；菜单栏那项仍叫「开课前的准备…」，说的是它干什么）
 FOOT_H = 46.0
 WIDTH = 680.0
 # 卡片区高度：**长到装下为止，但最多占屏幕 60%**。
@@ -1816,7 +1817,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     title_lbl = panel.make_label(
         # ⚠️ 竖直位置是**量出来的**：原来 `+6 / 高 28` 让字的中线比搜索框高 8.25pt（拍图量墨迹，
         #    2026-10-14）。现在与搜索框同一条中线（同法复量 ≤0.5pt）。
-        "开课前的准备", NSMakeRect(PAD, h - PAD - TITLE_H + 1.75,
+        PANEL_TITLE, NSMakeRect(PAD, h - PAD - TITLE_H + 1.75,
                                  WIDTH - 2 * PAD - SEARCH_W - 10.0, 24.0),
         15.0, bold=True)
     ve.addSubview_(title_lbl)
@@ -3539,7 +3540,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             return
 
         # ── 正常模式：课程卡片 ────────────────────────────────────────
-        title_lbl.setStringValue_("开课前的准备")
+        title_lbl.setStringValue_(PANEL_TITLE)
         y = 0.0
         rows = load()
         # ⭐ 课表预选：把猜的那门**排到第一**，并把理由挂到状态行。

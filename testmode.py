@@ -68,6 +68,24 @@ AUDIO_SEG_S = 600
 #: ⚠️ **那些全是朗读或远场数据，没有一条是教室噪声录音** → 这是**外推**，不是实测背书。
 #: → 24k 起步、**不要低于 16**。
 AUDIO_OPUS_BITRATE = "24k"
+#: soundfile 兜底的 Opus 档位。0.88 是 `RESEARCH-cloud-asr.md` §15 量过的那一档
+#: （Groq WER 10.2% / 漏 0.4%，与 ffmpeg 24k 的 10.1% / 0.4% 打平）—— 这些录音要拿去做评测，音质不能再省。
+AUDIO_SF_LEVEL = 0.88
+
+
+def _sf_opus(wav: pathlib.Path, opus: pathlib.Path) -> str | None:
+    """不靠 ffmpeg 把一段 wav 编成 Ogg/Opus。成功返回 None，失败返回一句原因（不抛）。
+    分块读写：600 s 一段整读是 38 MB 的 float32，没必要。"""
+    try:
+        import soundfile as sf
+        with sf.SoundFile(str(wav)) as fi, sf.SoundFile(
+                str(opus), "w", samplerate=SR, channels=1, format="OGG", subtype="OPUS",
+                compression_level=AUDIO_SF_LEVEL) as fo:
+            for blk in fi.blocks(blocksize=SR * 10, dtype="float32"):
+                fo.write(blk)
+        return None
+    except Exception as e:                               # noqa: BLE001
+        return f"{type(e).__name__}: {str(e)[:100]}"
 
 #: `TestSession.note_block()` 认的名字（见那个方法的 docstring）。
 #: ⚠️ **多一格就在这儿加一行** —— 名字打错**不会**静默建键，会进 `events` 报一声。
@@ -340,10 +358,15 @@ class TestSession:
         ⚠️ PATH：照 `capture.load_file` 的形状调（`ffmpeg` 是外部二进制；
            `.app` 双击那条路靠 `cl` 补的 PATH，不是这里补）。
         ⚠️ 3 分钟超时：正常一条分段约 20 秒，卡住说明 ffmpeg 出问题了。
+        ⭐ ffmpeg 不在 / 失败 → **soundfile 兜底**（`_sf_opus`，2026-10-14 起）。
+           之前这一步失败就原样传 wav：一位没装 ffmpeg 的测试者 7 节课传了 610.8 MB wav，
+           同批走 opus 约 58 MB（10.5×）。soundfile + libsndfile 本来就打在 `.app` 里（定稿上云在用）。
+           ffmpeg 仍然排第一：同一段 600 s 实测 ffmpeg 4.3 s / 1.74 MB，soundfile 15.8 s / 2.59 MB。
         """
-        out = []
+        out, fallback = [], []
         for wav in list(self._wav_paths):
             opus = wav.with_suffix(".opus")
+            why = ""
             try:
                 pr = subprocess.run(
                     ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(wav),
@@ -353,17 +376,27 @@ class TestSession:
                 if pr.returncode == 0 and opus.exists() and opus.stat().st_size > 0:
                     out.append(opus)
                     wav.unlink(missing_ok=True)          # ⚠️ 转成了才删
-                else:
-                    self.events.append({
-                        "t": round(time.monotonic() - self.t0, 2),
-                        "kind": "transcode_failed",
-                        "detail": f"{wav.name}: rc={pr.returncode} "
-                                  f"{pr.stderr.decode('utf-8', 'ignore')[:100]}"})
+                    continue
+                why = f"rc={pr.returncode} {pr.stderr.decode('utf-8', 'ignore')[:100]}"
             except Exception as e:                       # noqa: BLE001
+                why = f"{type(e).__name__}: {str(e)[:100]}"
+            fallback.append((wav, opus, why))
+        if fallback:
+            # 慢的那条（~38× 实时）：分段之间互不相干，并行编（cffi 调 C 时放 GIL）。
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(4, len(fallback))) as ex:
+                errs = list(ex.map(lambda f: _sf_opus(f[0], f[1]), fallback))
+            for (wav, opus, why), err in zip(fallback, errs):
+                ok = err is None and opus.exists() and opus.stat().st_size > 0
                 self.events.append({
                     "t": round(time.monotonic() - self.t0, 2),
-                    "kind": "transcode_failed",
-                    "detail": f"{wav.name}: {type(e).__name__}: {str(e)[:100]}"})
+                    "kind": "transcode_soundfile" if ok else "transcode_failed",
+                    "detail": f"{wav.name}: ffmpeg {why}" + ("" if ok else f" · soundfile {err}")})
+                if ok:
+                    out.append(opus)
+                    wav.unlink(missing_ok=True)          # ⚠️ 转成了才删
+                else:
+                    opus.unlink(missing_ok=True)         # 半截的 opus 别留着冒充成品
         return out
 
     def _rotate_wav(self) -> None:

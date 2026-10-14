@@ -435,9 +435,45 @@ def main() -> int:
     finally:
         shutil.rmtree(_d2, ignore_errors=True)
 
-    print("\n--- T15 ⭐⚠️ 转码失败：**保留 wav**，别丢音频 ---")
+    print("\n--- T15a ⭐⭐ 没有 ffmpeg：soundfile 兜底编出 opus，wav 删掉 ---")
+    _d5 = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_sf_"))
+    _old_ff = tm.subprocess.run
+    try:
+        _t5 = tm.TestSession(_d5 / "w.md", record_audio=True)
+        _n5 = 30
+        for _ in range(_n5):
+            _t5.note_chunk((np.random.rand(tm.SR // 10).astype(np.float32) - 0.5) * 0.4)
+        _t5._close_wav()
+        _w5 = list(_t5._wav_paths)
+
+        def _noff(*a, **k):
+            raise FileNotFoundError("ffmpeg 假装没装")
+        tm.subprocess.run = _noff
+        _ops5 = _t5._to_opus()
+        check("⭐⭐ ffmpeg 不在 -> soundfile 编出 opus、**wav 删掉**",
+              bool(_ops5) and all(p.suffix == ".opus" and p.stat().st_size > 0 for p in _ops5)
+              and not any(p.exists() for p in _w5),
+              f"opus={[p.name for p in _ops5]} 残留={[p.name for p in _w5 if p.exists()]}")
+        check("⭐ 走了兜底要**记进 events**（报告里看得出这台没装 ffmpeg）",
+              any(e["kind"] == "transcode_soundfile" for e in _t5.events)
+              and not any(e["kind"] == "transcode_failed" for e in _t5.events),
+              str([e["kind"] for e in _t5.events]))
+        if _ops5:
+            import soundfile as _sf
+            _info = _sf.info(str(_ops5[0]))
+            check("⭐ 编出来的是 16 kHz 单声道 Opus、时长对得上",
+                  _info.samplerate == tm.SR and _info.channels == 1 and _info.subtype == "OPUS"
+                  and abs(_info.duration - _n5 * 0.1) < 0.1,
+                  f"{_info.samplerate} Hz · {_info.channels} ch · {_info.subtype} · {_info.duration:.2f}s")
+    finally:
+        tm.subprocess.run = _old_ff
+        shutil.rmtree(_d5, ignore_errors=True)
+
+    print("\n--- T15 ⭐⚠️ 转码失败（ffmpeg 和 soundfile 都不行）：**保留 wav**，别丢音频 ---")
     _d3 = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_fail_"))
     _old_ff = tm.subprocess.run
+    _old_sf = tm._sf_opus
+    tm._sf_opus = lambda w, o: "RuntimeError: soundfile 假装坏了"
     try:
         _t3 = tm.TestSession(_d3 / "z.md", record_audio=True)
         for _ in range(20):
@@ -464,6 +500,7 @@ def main() -> int:
               f"上传清单={[p.name for p in _up3]}")
     finally:
         tm.subprocess.run = _old_ff
+        tm._sf_opus = _old_sf
         shutil.rmtree(_d3, ignore_errors=True)
 
     print("\n--- T16 ⭐ 默认值：测试模式下默认录，正常 cl 一个字不录 ---")

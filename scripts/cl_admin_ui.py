@@ -36,6 +36,11 @@ ALLOWED = {"add", "list", "stats", "revoke", "unrevoke", "renew", "limit", "quot
 #: 没有这一条，任意网站都能用 `<form>` / `fetch` 打 http://127.0.0.1:8770/api/revoke 把你的码吊销掉。
 GATE_HEADER = "X-ClassLive-Admin"
 
+#: 第二道闸：**Host 头必须是环回**。挡的是 DNS rebinding —— 恶意网站把自己的域名临时解析到
+#: 127.0.0.1，页面就成了**同源**，自定义头不再触发预检，上面那道闸就形同虚设。
+#: 浏览器发的 Host 是**那个域名**（改不了），所以只认 127.0.0.1 / localhost。
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
+
 PAGE = pathlib.Path(__file__).with_name("cl_admin_ui.html")
 
 
@@ -58,7 +63,13 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code: int, obj) -> None:
         self._send(code, json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
+    def _host_ok(self) -> bool:
+        port = self.server.server_address[1]
+        return (self.headers.get("Host") or "") in {f"{h}:{port}" for h in LOOPBACK_HOSTS}
+
     def do_GET(self):                                                 # noqa: N802
+        if not self._host_ok():
+            return self._json(403, {"error": "Host 不是本机环回（防 DNS rebinding）"})
         path = urllib.parse.urlparse(self.path).path
         if path in ("/", "/index.html"):
             try:
@@ -69,6 +80,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):                                                # noqa: N802
+        if not self._host_ok():
+            return self._json(403, {"error": "Host 不是本机环回（防 DNS rebinding）"})
         path = urllib.parse.urlparse(self.path).path
         if not path.startswith("/api/"):
             return self._json(404, {"error": "not found"})

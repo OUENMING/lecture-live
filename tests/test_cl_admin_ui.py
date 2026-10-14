@@ -164,6 +164,21 @@ class PanelCase(unittest.TestCase):
         self.assertEqual(r.status_code, 403)
         self.assertEqual(self.worker.reqs, [])
 
+    def test_Host不是环回就403且不转发(self):
+        """DNS rebinding：攻击者域名解析到 127.0.0.1 后页面同源、闸门头照发 —— 只有 Host 头露馅。"""
+        import httpx
+        port = self.srv.server_address[1]
+        for host in ("evil.example", f"evil.example:{port}", f"127.0.0.1.evil.example:{port}", "127.0.0.1"):
+            r = httpx.post(self.base + "/api/list", content=b"{}",
+                           headers={cl_admin_ui.GATE_HEADER: "1", "Host": host}, timeout=10)
+            self.assertEqual(r.status_code, 403, host)
+            self.assertEqual(httpx.get(self.base + "/", headers={"Host": host}, timeout=10).status_code, 403, host)
+        self.assertEqual(self.worker.reqs, [], "rebinding 的请求漏到 Worker 了")
+        for host in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            r = httpx.post(self.base + "/api/list", content=b"{}",
+                           headers={cl_admin_ui.GATE_HEADER: "1", "Host": host}, timeout=10)
+            self.assertEqual(r.status_code, 200, host)
+
     # ---------------- 3 ----------------
     def test_白名单外的名字不转发(self):
         # ⚠️ 不在名单里的：`/api/list?x=1` 会 200（查询串按设计丢掉），所以它不在这里

@@ -13,6 +13,9 @@
      · 容器边界一律 box-shadow 而不是 border（不动盒模型）。
      · 大数字用等宽 + tabular-nums + 负字距。
      · 圆角只有两档：6px（控件）/ 12px（卡片）。
+     · 数据色：浅色 Carbon 60 步、深色 Carbon 50/60 步。2026-10-14 跑过 dataviz 的
+       validate_palette.js：深色原来那组 40/30 步**全部超出亮度带**（L>0.67，在深底上发白），换成现在这组后六项全过。
+       浅色 #ff832b 对白底只有 2.46:1 —— 它只出现在带数字标注的地方（有文字兜底）。
    ⚠️ 零外链：断网也要能用，所以不引字体、不引图表库。
    --------------------------------------------------------------- */
 :root{
@@ -36,8 +39,8 @@
   --line:rgba(255,255,255,.11); --line2:rgba(255,255,255,.06);
   --accent:#3291ff; --focus:#78a9ff;
   --ok:#42be65; --warn:#ffb784; --bad:#ff8389;
-  --d1:#78a9ff; --d2:#3ddbd9; --d3:#be95ff; --d4:#ffb784;
-  --fill:rgba(120,169,255,.13);
+  --d1:#4589ff; --d2:#009d9a; --d3:#a56eff; --d4:#eb6200;
+  --fill:rgba(69,137,255,.16);
   --lift:0 0 0 1px rgba(255,255,255,.11), 0 2px 2px rgba(0,0,0,.3);
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){
@@ -46,8 +49,8 @@
   --line:rgba(255,255,255,.11); --line2:rgba(255,255,255,.06);
   --accent:#3291ff; --focus:#78a9ff;
   --ok:#42be65; --warn:#ffb784; --bad:#ff8389;
-  --d1:#78a9ff; --d2:#3ddbd9; --d3:#be95ff; --d4:#ffb784;
-  --fill:rgba(120,169,255,.13);
+  --d1:#4589ff; --d2:#009d9a; --d3:#a56eff; --d4:#eb6200;
+  --fill:rgba(69,137,255,.16);
   --lift:0 0 0 1px rgba(255,255,255,.11), 0 2px 2px rgba(0,0,0,.3);
 }}
 *{box-sizing:border-box}
@@ -101,6 +104,7 @@ main{max-width:1280px;margin:0 auto;padding:24px}
 .card .ch{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}
 .card .ch h3{margin:0;font-size:12px;font-weight:600;color:var(--ink2)}
 .card .ch .spacer{flex:1}
+.card .ch .note{font-size:11px;color:var(--ink3)}
 .chartwrap{width:100%;position:relative}
 .chartwrap svg{display:block;overflow:visible}
 .tip{position:absolute;pointer-events:none;background:var(--ink);color:var(--bg);font-size:11px;
@@ -108,22 +112,17 @@ main{max-width:1280px;margin:0 auto;padding:24px}
   opacity:0;transition:opacity .1s ease;z-index:5;transform:translate(-50%,-100%)}
 .tip.on{opacity:1}
 
-/* ---- 额度 meter ---- */
-.meter{display:grid;grid-template-columns:88px minmax(0,1fr) 168px;gap:14px;align-items:center;
-  padding:11px 0;box-shadow:0 1px 0 0 var(--line2)}
-.meter:last-child{box-shadow:none}
-.meter .name{font-weight:500}
+/* ---- 额度条 ---- */
 .mtrack{height:6px;background:var(--recessed);border-radius:3px;overflow:hidden;display:flex}
-.mtrack i{display:block;height:100%}
-.mmeta{font-size:11px;color:var(--ink3);text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
-.mmeta b{font-weight:500;color:var(--ink2)}
+.mtrack i{display:block;height:100%;border-radius:3px}
 
 /* ---- 表 ---- */
 table{width:100%;border-collapse:collapse}
 th,td{text-align:left;padding:7px 10px 7px 0;white-space:nowrap;box-shadow:0 1px 0 0 var(--line2)}
 th{font-size:11px;font-weight:500;color:var(--ink3);box-shadow:0 1px 0 0 var(--line)}
 td.r,th.r{text-align:right}
-th.sp,td.sp{width:100%;padding-right:0}
+th.sp,td.sp{width:100%;min-width:90px;padding-right:18px}
+td.sp .chartwrap{max-width:220px}
 tr.body{cursor:pointer}
 tr.body:hover td{background:var(--recessed)}
 tr.body[aria-expanded=true] td{background:var(--recessed)}
@@ -164,6 +163,20 @@ tr.detail>td{background:var(--recessed);padding:16px 16px 18px 18px;white-space:
   .prog{display:none}
 }
 .foot{color:var(--ink3);font-size:11px;padding:0 0 40px}
+.qgrid{display:grid;grid-template-columns:88px repeat(3,minmax(0,1fr));gap:6px 18px;align-items:center;
+  padding:11px 0;box-shadow:0 1px 0 0 var(--line2)}
+.qgrid:last-of-type{box-shadow:none}
+.qgrid .name{font-weight:500}
+.qcell .t{display:flex;justify-content:space-between;font-size:11px;color:var(--ink3);margin-bottom:4px}
+.qcell .t b{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:500;color:var(--ink2)}
+.legend{display:flex;gap:14px;font-size:11px;color:var(--ink3);margin-top:6px}
+.legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+details.prices>summary{cursor:pointer;font-size:13px;font-weight:600;list-style:none;display:flex;gap:10px;align-items:baseline}
+details.prices>summary::-webkit-details-marker{display:none}
+details.prices>summary .note{font-size:11px;color:var(--ink3);font-weight:400}
+details.prices[open]>summary{margin-bottom:12px}
+.toggle{background:transparent;box-shadow:none;color:var(--ink3);font-size:12px;padding:6px 0}
+.toggle:hover{background:transparent;color:var(--ink)}
 @media (max-width:1000px){
   .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
   .charts{grid-template-columns:minmax(0,1fr)}
@@ -201,7 +214,7 @@ tr.detail>td{background:var(--recessed);padding:16px 16px 18px 18px;white-space:
     <div class="charts">
       <div class="card">
         <div class="ch">
-          <h3>每日用量</h3>
+          <h3>每日用量</h3><span class="note">按 UTC 日 · 浅色柱 = 今天还没过完</span>
           <span class="spacer"></span>
           <div class="seg" id="metric" role="group" aria-label="指标">
             <button data-m="asr" aria-pressed="true">转写分钟</button>
@@ -221,7 +234,7 @@ tr.detail>td{background:var(--recessed);padding:16px 16px 18px 18px;white-space:
 
   <section class="block">
     <div class="hd"><h2>系统额度</h2><span class="note" id="qnote"></span><span class="spacer"></span>
-      <span class="note">用完自动降级，不等对方回 429</span></div>
+      <span class="note">到 95% 自动降级，不等对方回 429</span></div>
     <div class="card" id="quota"></div>
   </section>
 
@@ -233,8 +246,10 @@ tr.detail>td{background:var(--recessed);padding:16px 16px 18px 18px;white-space:
   </section>
 
   <section class="block">
-    <div class="hd"><h2>花费估算</h2><span class="note">本机乘出来的，不是账</span></div>
-    <div class="card" id="prices"></div>
+    <details class="prices">
+      <summary>价目表 <span class="note">花费是本机按这张表乘出来的，不是账 · 点开改价</span></summary>
+      <div class="card" id="prices"></div>
+    </details>
   </section>
 
   <p class="foot">数据来自 asr.bldcam.page（Worker 的 /v1/admin/*）。面板只记数字：看不到任何课堂文本与音频。</p>
@@ -264,7 +279,7 @@ var METRICS = {
 var state = {
   days: 7, theme: "auto", metric: "asr",
   codes: [], days_data: [], quota: null, limit: null,
-  expanded: null, busy: false, loaded: false, err: null,
+  expanded: null, showRevoked: false, busy: false, loaded: false, err: null,
   prices: JSON.parse(localStorage.getItem("clui-prices") || "null") || {cache:0.003, miss:0.15, out:0.60}
 };
 var $ = function(s){ return document.querySelector(s); };
@@ -278,6 +293,7 @@ function ago(ms){
   if(d === 1) return "昨天";
   return d + " 天前";
 }
+function utcToday(){ return new Date().toISOString().slice(0,10); }   /* Worker 的「日」是 UTC 日 */
 function ymd(ms){ return ms ? new Date(ms).toISOString().slice(0,10) : "无"; }
 function limStr(v){ return v == null ? "" : String(v); }
 function limNum(v){ var t = String(v).trim(); if(t === "") return null; var n = Number(t); return (isFinite(n) && n >= 0) ? n : undefined; }
@@ -365,7 +381,7 @@ function sparkline(vals, opt){
     var last = vals.length - 1, iw = w - pad*2, ih = h - pad*2;
     var max = Math.max.apply(null, vals) || 1;
     var area = d + " L" + (pad + iw) + " " + (h - pad) + " L" + pad + " " + (h - pad) + " Z";
-    s.appendChild(sv("path", {d:area, fill:(opt.fill || "var(--fill)"), stroke:"none"}));
+    s.appendChild(sv("path", {d:area, fill:(opt.color || "var(--d1)"), "fill-opacity":.12, stroke:"none"}));
     s.appendChild(sv("path", {d:d, fill:"none", stroke:(opt.color || "var(--d1)"), "stroke-width":1.5,
       "stroke-linejoin":"round", "stroke-linecap":"round",
       "vector-effect": fluid ? "non-scaling-stroke" : "none"}));
@@ -378,8 +394,10 @@ function sparkline(vals, opt){
   return wrap;
 }
 
-/* ---------- 图 2：折线（每日用量），带轴、网格、hover 读数 ---------- */
-function lineChart(items, meta){
+/* ---------- 图 2：每日柱（每日用量），带轴、网格、hover 读数 ----------
+   为什么是柱不是折线：每天是一个**离散的总量**，不是连续量；而且「今天」只过了一部分 ——
+   折线会把今天画成一次「下跌」。柱可以把今天单独画成浅色（进行中），1 天的区间也画得出来。 */
+function colChart(items, meta, today){
   var wrap = el("div","chartwrap");
   var tip = el("div","tip"); wrap.appendChild(tip);
   var lastW = 0, busy = false;
@@ -389,7 +407,7 @@ function lineChart(items, meta){
     if(Math.abs(w - lastW) < 3 && wrap.querySelector("svg")) return;
     lastW = w;
     var old = wrap.querySelector("svg"); if(old) wrap.removeChild(old);
-    var H = 208, padL = 46, padR = 14, padT = 14, padB = 28;
+    var H = 208, padL = 46, padR = 8, padT = 14, padB = 28;
     var iw = w - padL - padR, ih = H - padT - padB;
     var vals = items.map(function(x){ return x.v; });
     var max = niceMax(Math.max.apply(null, vals.concat([0])));
@@ -401,39 +419,29 @@ function lineChart(items, meta){
         "shape-rendering":"crispEdges"}));
       s.appendChild(svText(padL - 8, y + 3.5, shortNum(max * t/4), {anchor:"end"}));
     }
-    var step = items.length > 1 ? iw/(items.length - 1) : 0;
-    var pts = items.map(function(x, i){
-      var px = padL + i*step, py = padT + ih - (max ? (x.v/max)*ih : 0);
-      return [Math.round(px*10)/10, Math.round(py*10)/10];
-    });
-    if(pts.length > 1){
-      var d = pts.map(function(p, i){ return (i ? "L" : "M") + p[0] + " " + p[1]; }).join(" ");
-      s.appendChild(sv("path", {d: d + " L" + pts[pts.length-1][0] + " " + (padT+ih) + " L" + pts[0][0] + " " + (padT+ih) + " Z",
-        fill:"var(--fill)", stroke:"none"}));
-      s.appendChild(sv("path", {d:d, fill:"none", stroke:meta.color, "stroke-width":2,
-        "stroke-linejoin":"round", "stroke-linecap":"round"}));
-    }
+    var slot = iw / items.length, bw = Math.max(2, Math.min(28, slot - 2));   // 柱间至少 2px 底色缝
     var every = Math.max(1, Math.ceil(items.length / Math.max(2, Math.floor(iw / 58))));
     items.forEach(function(x, i){
-      if(i % every && i !== items.length - 1) return;
-      s.appendChild(svText(pts[i][0], H - 9, x.day.slice(5), {}));
-    });
-    var marks = [];
-    items.forEach(function(x, i){
-      var px = pts[i] ? pts[i][0] : padL;
-      var c = sv("circle", {cx:px, cy:pts[i] ? pts[i][1] : 0, r:3, fill:meta.color, stroke:"var(--surface)",
-        "stroke-width":1.5, opacity:0});
-      s.appendChild(c); marks.push(c);
-      var band = sv("rect", {x: px - step/2, y: padT, width: Math.max(step, 6), height: ih, fill:"transparent"});
+      var cx = padL + slot * (i + .5), h = max ? (x.v / max) * ih : 0, y0 = padT + ih;
+      var live = x.day === today;
+      if(h > 0){
+        var r = Math.min(4, bw / 2, h);                 // 只圆顶端，底端贴着基线
+        var d = "M" + (cx - bw/2) + " " + y0 + " V" + (y0 - h + r) +
+                " Q" + (cx - bw/2) + " " + (y0 - h) + " " + (cx - bw/2 + r) + " " + (y0 - h) +
+                " H" + (cx + bw/2 - r) + " Q" + (cx + bw/2) + " " + (y0 - h) + " " + (cx + bw/2) + " " + (y0 - h + r) +
+                " V" + y0 + " Z";
+        s.appendChild(sv("path", {d:d, fill:meta.color, opacity: live ? .45 : 1}));
+      }
+      if(!(i % every) || i === items.length - 1)
+        s.appendChild(svText(cx, H - 9, live ? "今天" : x.day.slice(5), {}));
+      var band = sv("rect", {x: cx - slot/2, y: padT, width: slot, height: ih, fill:"transparent"});
       band.addEventListener("mouseenter", function(){
-        marks.forEach(function(m){ m.setAttribute("opacity", 0); });
-        c.setAttribute("opacity", 1);
-        tip.textContent = x.day + "  " + num(x.v, x.v >= 100 ? 0 : 1) + " " + meta.unit;
-        tip.style.left = Math.max(30, Math.min(w - 30, px)) + "px";
-        tip.style.top = (pts[i][1] - 8) + "px";
+        tip.textContent = x.day + (live ? "（进行中）" : "") + "  " + num(x.v, x.v >= 100 ? 0 : 1) + " " + meta.unit;
+        tip.style.left = Math.max(40, Math.min(w - 40, cx)) + "px";
+        tip.style.top = (y0 - h - 8) + "px";
         tip.classList.add("on");
       });
-      band.addEventListener("mouseleave", function(){ c.setAttribute("opacity", 0); tip.classList.remove("on"); });
+      band.addEventListener("mouseleave", function(){ tip.classList.remove("on"); });
       s.appendChild(band);
     });
     wrap.appendChild(s);
@@ -497,39 +505,13 @@ function stackBar(parts){
   return box;
 }
 
-/* ---------- 图 5：额度 meter ---------- */
-function meterRow(name, used, cap, extra, parts){
-  var row = el("div","meter");
-  row.appendChild(el("div","name", name));
-  var mid = el("div");
-  var pct = cap ? Math.min(100, used/cap*100) : 0;
-  var track = el("div","mtrack");
-  (parts || [{v:used, color:"var(--d1)"}]).forEach(function(p){
-    var i = el("i"); i.style.background = p.color;
-    i.style.width = cap ? Math.min(100, p.v/cap*100) + "%" : "0%";
-    track.appendChild(i);
-  });
-  if(cap && used > cap){ track.lastChild.style.background = "var(--bad)"; }
-  mid.appendChild(track);
-  var sub = el("div"); sub.style.cssText = "font-size:11px;color:var(--ink3);margin-top:5px;font-family:var(--mono)";
-  sub.textContent = extra || "";
-  mid.appendChild(sub);
-  row.appendChild(mid);
-  var m = el("div","mmeta");
-  m.appendChild(el("b", null, num(used, used % 1 ? 1 : 0)));
-  m.appendChild(document.createTextNode(" / " + num(cap)));
-  if(cap) m.appendChild(document.createTextNode("  " + Math.round(pct) + "%"));
-  row.appendChild(m);
-  return row;
-}
-
 /* ---------- 主题 ---------- */
 function applyTheme(){
   var t = state.theme;
   if(t === "auto") document.documentElement.removeAttribute("data-theme");
   else document.documentElement.setAttribute("data-theme", t);
   [].forEach.call($("#theme").children, function(b){ b.setAttribute("aria-pressed", String(b.dataset.theme === t)); });
-  localStorage.setItem("clui-theme", t);
+  if(!qTheme) localStorage.setItem("clui-theme", t);
 }
 
 /* ---------- 渲染：KPI ---------- */
@@ -558,14 +540,21 @@ function renderKpis(){
   box.appendChild(kpiCard("区间翻译", num(t.llm_reqs), "次",
     "输入 " + shortNum(t.tokens_in) + " · 输出 " + shortNum(t.tokens_out) + " token",
     daily.map(function(x){ return x.llm_reqs; }), "var(--d2)"));
+  // ⚠️ 价目表是**闲时价**；DeepSeek 高峰（UTC 周一至五 01–04、06–10 点）×2。Worker 只按 UTC 日记总数、
+  //    不分时段，所以这里只能给区间：下限 = 全在闲时，上限 = 全在高峰。
   var cost = cluiCost(t, state.prices);
-  box.appendChild(kpiCard("花费估算", "$" + cost.toFixed(3), "",
-    (t.tokens_in ? "缓存命中 " + Math.round(t.cache_hit/t.tokens_in*100) + "%" : "按页底价目表"),
+  box.appendChild(kpiCard("花费估算", "$" + cost.toFixed(3), "起",
+    "全在高峰最多 $" + (cost * 2).toFixed(3) + (t.tokens_in ? " · 缓存命中 " + Math.round(t.cache_hit/t.tokens_in*100) + "%" : ""),
     daily.map(function(x){ return cluiCost(x, state.prices); }), "var(--d3)"));
-  var active = daily.filter(function(x){ return x.asr_reqs || x.llm_reqs; }).length;
-  box.appendChild(kpiCard("有效通行码", String(live.length), "/ " + codes.length,
-    active ? ("有记录的设备 " + codes.reduce(function(a,c){ return a + c.devices; }, 0) + " 台") : "还没有记录",
-    daily.map(function(x){ return x.asr_reqs + x.llm_reqs ? 1 : 0; }), "var(--d4)"));
+  // 走势 = **每天有用量的码的个数**（原来画的是「这天有没有记录」的 0/1，读不出东西）
+  var perDay = state.days_data.map(function(d){
+    var seen = {}; d.rows.forEach(function(r){ if(r.asr_reqs || r.llm_reqs || r.jev_reqs) seen[r.code] = 1; });
+    return Object.keys(seen).length;
+  });
+  var todayN = perDay.length ? perDay[perDay.length - 1] : 0;
+  box.appendChild(kpiCard("在用的码", String(todayN), "今天",
+    "有效 " + live.length + " / 共 " + codes.length + " · 设备 " + codes.reduce(function(a,c){ return a + c.devices; }, 0) + " 台",
+    perDay, "var(--d4)"));
 }
 
 /* ---------- 渲染：每日折线 ---------- */
@@ -574,7 +563,7 @@ function renderDaily(){
   if(!state.days_data.length){ box.appendChild(el("div","hint","这段时间没有记录。")); return; }
   var m = METRICS[state.metric];
   var items = series(null, m.pick);
-  box.appendChild(lineChart(items, m));
+  box.appendChild(colChart(items, m, utcToday()));
 }
 
 /* ---------- 渲染：每人横条 ---------- */
@@ -585,24 +574,55 @@ function renderPerUser(){
     .filter(function(x){ return x.v > 0; })
     .sort(function(a,b){ return b.v - a.v; });
   $("#pernote").textContent = m.label;
-  box.appendChild(hBars(items.slice(0, 10), {unit: m.unit}));
+  // 一个指标 = 一种颜色。原来按名次轮换四色 —— 颜色跟着名次走、换个区间同一个人就换色（dataviz 的反模式）。
+  box.appendChild(hBars(items.slice(0, 10).map(function(x){ return Object.assign(x, {color: m.color}); }), {unit: m.unit}));
   if(items.length > 10) box.appendChild(el("div","hint","另有 " + (items.length - 10) + " 个更小的没画。"));
 }
 
-/* ---------- 渲染：额度 ---------- */
+/* ---------- 渲染：额度 ----------
+   ⚠️ 口径（2026-10-14 实测 Groq 响应头）：Groq 的限额是**连续回补**的令牌桶，不是到点清零 ——
+      用掉 1 次，`x-ratelimit-reset-requests` 报 43.2 s（= 86400 / 2000）；用掉 3 次报 2m9.6s；
+      音频秒每 0.5 s 回 1 秒（= 3600 / 7200）。而 Worker 是按 **UTC 自然日 / 整点**记的（quota-core.js），
+      所以这里的数字是 Worker 自己的保守账：不是 Groq 那边真剩多少。 */
+function qcell(label, used, cap, unit){
+  var c = el("div","qcell");
+  var t = el("div","t"); t.appendChild(el("span", null, label));
+  var v = el("b", null, num(used, 0) + " / " + num(cap, 0) + (unit ? " " + unit : ""));
+  t.appendChild(v); c.appendChild(t);
+  var track = el("div","mtrack"), i = el("i");
+  var pct = cap ? Math.min(100, used / cap * 100) : 0;
+  i.style.width = pct + "%";
+  i.style.background = pct >= 95 ? "var(--bad)" : pct >= 80 ? "var(--warn)" : "var(--d1)";
+  track.appendChild(i); c.appendChild(track);
+  return c;
+}
+function qrow(name, cells, sub){
+  var r = el("div","qgrid");
+  var n = el("div","name", name);
+  if(sub){ var sm = el("div","hint", sub); sm.style.marginTop = "2px"; n.appendChild(sm); }
+  r.appendChild(n);
+  cells.forEach(function(c){ r.appendChild(c); });
+  return r;
+}
 function renderQuota(){
   var box = $("#quota"); box.innerHTML = "";
   var q = state.quota;
   if(!q){ box.appendChild(el("div","empty","额度暂时读不到。")); return; }
-  $("#qnote").textContent = "UTC " + q.day + " · 每日上限 " + num(q.caps.reqs_day) + " 次，到了就主动降级";
-  box.appendChild(meterRow("Groq v3", q.v3.used_reqs, q.caps.reqs_day,
-    "音频 " + num(q.v3.used_s) + " / " + num(q.caps.s_day) + " 秒 · 本分钟 " + q.v3.min_reqs + "/" + q.caps.reqs_min +
-    " · 本小时 " + num(q.v3.hour_s) + " 秒" + (q.v3.cooldown_until > q.now ? " · 冷却中" : "")));
-  box.appendChild(meterRow("Groq turbo", q.turbo.used_reqs, q.caps.reqs_day,
-    "音频 " + num(q.turbo.used_s) + " / " + num(q.caps.s_day) + " 秒 · v3 用完时当主力，排在千问前"));
-  box.appendChild(meterRow("千问", q.qwen.used, q.qwen.max, "今日 " + num(q.qwen.used) + " 段 · " +
-    (q.qwen.exhausted.length ? "已耗尽 " + q.qwen.exhausted.join("、") : "不可再生的免费额度")));
-  box.appendChild(el("p","hint","「音频秒」是计费秒：每次请求至少按 10 秒记，所以它比用户表里的真实音频秒大一些。"));
+  $("#qnote").textContent = "Worker 的账 · UTC " + q.day;
+  [["Groq v3", q.v3, "主力"], ["Groq turbo", q.turbo, "v3 用完时顶上"]].forEach(function(g){
+    var b = g[1], cool = b.cooldown_until > q.now;
+    box.appendChild(qrow(g[0], [
+      qcell("今日次数", b.used_reqs, q.caps.reqs_day),
+      qcell("今日音频秒", b.used_s, q.caps.s_day),
+      qcell("本小时音频秒", b.hour_s, q.caps.s_hour)
+    ], cool ? "冷却中（撞过 429）" : g[2]));
+  });
+  box.appendChild(qrow("千问", [qcell("今日段数", q.qwen.used, q.qwen.max)],
+    q.qwen.exhausted.length ? "已耗尽 " + q.qwen.exhausted.join("、") : "一次性免费额度"));
+  box.appendChild(el("p","hint",
+    "Groq 实际是连续回补（每 43.2 秒回 1 次、每 0.5 秒回 1 秒音频），不是到 UTC 零点才清零；" +
+    "Worker 按自然日 / 整点记、到 95% 就主动降级，所以它比 Groq 保守。" +
+    "音频秒是计费秒（每次至少按 10 秒记），比用户表里的真实音频秒大一些。最先撞线的通常是「本小时」那一格：两个人同时上课就接近 7200。"));
 }
 
 /* ---------- 渲染：用户表 ---------- */
@@ -613,8 +633,11 @@ function statusOf(c){
 }
 function renderUsers(){
   var box = $("#users"); box.innerHTML = "";
-  var codes = state.codes.slice().sort(function(a,b){ return (b.last_seen||0) - (a.last_seen||0); });
-  $("#unote").textContent = state.days + " 天 · " + codes.length + " 个码";
+  var all = state.codes.slice().sort(function(a,b){ return (b.last_seen||0) - (a.last_seen||0); });
+  // 吊销的码默认收起：它们全是 0，占了一半行数，却把要看的那几行挤散（2026-10-14 九个码里五个是吊销的）。
+  var dead = all.filter(function(c){ return c.revoked; });
+  var codes = state.showRevoked ? all : all.filter(function(c){ return !c.revoked || c.code === state.expanded; });
+  $("#unote").textContent = state.days + " 天 · " + (all.length - dead.length) + " 个在册" + (dead.length ? " · " + dead.length + " 个已吊销" : "");
   if(!codes.length){
     var em = el("div","empty");
     em.appendChild(el("b", null, "还没有任何通行码"));
@@ -624,8 +647,8 @@ function renderUsers(){
 
   var t = el("table");
   var hr = el("tr");
-  [["名字",""],["状态",""],["设备","r"],["到期",""],["最后在线",""],["趋势",""],["转写 (分)","r"],
-   ["段","r"],["翻译","r"],["花费 (US$)","r"],["","sp"]].forEach(function(c){ hr.appendChild(el("th", c[1], c[0])); });
+  [["名字",""],["状态",""],["设备","r"],["到期",""],["最后在线",""],["每日转写","sp"],["转写 (分)","r"],
+   ["段","r"],["翻译","r"],["花费 (闲时价)","r"]].forEach(function(c){ hr.appendChild(el("th", c[1], c[0])); });
   var thead = el("thead"); thead.appendChild(hr); t.appendChild(thead);
   var tb = el("tbody"); t.appendChild(tb);
 
@@ -645,13 +668,12 @@ function renderUsers(){
     tr.appendChild(el("td","r mono", c.devices + "/" + c.max_devices));
     tr.appendChild(el("td","mono dim", ymd(c.expires)));
     tr.appendChild(el("td","dim", ago(c.last_seen)));
-    var tdS = el("td"); tdS.appendChild(sparkline(ser.map(function(x){ return x.v; }), {w:70, h:20, color:"var(--d1)"}));
+    var tdS = el("td","sp"); tdS.appendChild(sparkline(ser.map(function(x){ return x.v; }), {h:20, color:"var(--d1)"}));
     tr.appendChild(tdS);
     tr.appendChild(el("td","r mono", mins(agg.asr_s)));
     tr.appendChild(el("td","r mono", num(agg.asr_reqs)));
     tr.appendChild(el("td","r mono", num(agg.llm_reqs)));
     tr.appendChild(el("td","r mono", "$" + cluiCost(agg, state.prices).toFixed(3)));
-    tr.appendChild(el("td","sp"));
     function toggle(){ state.expanded = state.expanded === c.code ? null : c.code; renderUsers(); }
     tr.addEventListener("click", toggle);
     tr.addEventListener("keydown", function(e){ if(e.key === "Enter" || e.key === " "){ e.preventDefault(); toggle(); } });
@@ -659,10 +681,15 @@ function renderUsers(){
     if(state.expanded === c.code) tb.appendChild(detailRow(c, agg, ser));
   });
   box.appendChild(t);
+  if(dead.length){
+    var tg = btn(state.showRevoked ? "收起已吊销的 " + dead.length + " 个" : "显示已吊销的 " + dead.length + " 个", "toggle",
+      function(){ state.showRevoked = !state.showRevoked; renderUsers(); });
+    box.appendChild(tg);
+  }
 }
 
 function detailRow(c, agg, ser){
-  var tr = el("tr","detail"); var td = el("td"); td.colSpan = 11;
+  var tr = el("tr","detail"); var td = el("td"); td.colSpan = 10;
 
   var kv = el("div","dtop");
   function put(k, v){ var d = el("div"); d.appendChild(document.createTextNode(k)); d.appendChild(el("b", null, String(v))); kv.appendChild(d); }
@@ -789,7 +816,7 @@ function renderPrices(){
     tb.appendChild(tr);
   });
   t.appendChild(tb); box.appendChild(t);
-  box.appendChild(el("p","hint","默认值是 2026-10-12 记的 deepseek-flash 闲时价（docs/PLAN-passkey.md §5 第 0 步）。" +
+  box.appendChild(el("p","hint","默认值是 deepseek-flash 闲时价（2026-10-14 回源 api-docs.deepseek.com 核过，与 docs/PLAN-passkey.md §5 一致）。" +
     "价目会变，所以这里不写死：改了立刻重算。UTC 周一至五 01 到 04、06 到 10 点是高峰，价乘 2。" +
     "只统计翻译的 token，不含整课精修 / 实时总结 / 讲解追问。"));
 }
@@ -867,7 +894,9 @@ $("#addbtn").addEventListener("click", function(){
   var box = $("#addform"); box.hidden = !box.hidden; renderAddForm();
 });
 
-state.theme = localStorage.getItem("clui-theme") || "auto";
+// `?theme=dark|light` 只为截图核对用（无头浏览器不好改 localStorage）；不写回存储。
+var qTheme = new URLSearchParams(location.search).get("theme");
+state.theme = (qTheme === "dark" || qTheme === "light") ? qTheme : (localStorage.getItem("clui-theme") || "auto");
 applyTheme();
 renderPrices();
 (function skeleton(){

@@ -101,6 +101,10 @@ function reportUsage(env, ctx, payload) {
   ctx?.waitUntil?.(p);
 }
 
+// 客户端版本（3.9.4.1 起发）。⚠️ 这个头**由客户端控制**：这里先砍长度，
+// 形状合法性由 passes-core.usage() 自己判 —— 存储不变量归那个模块管。
+const clientVer = (request) => (request.headers.get("x-classlive-version") || "").slice(0, 16);
+
 // 从 SSE 流里捞最后那块的 usage（`stream_options.include_usage` 时 DeepSeek 在末尾单独发一块）。
 async function usageFromStream(stream) {
   const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
@@ -147,7 +151,7 @@ async function chat(request, env, ctx, code) {
   if (body.stream) {
     const [toClient, toMeter] = up.body.tee();
     const p = usageFromStream(toMeter)
-      .then((u) => passes(env, "/usage", { code, ...usageFields(u) }))
+      .then((u) => passes(env, "/usage", { code, ver: clientVer(request), ...usageFields(u) }))
       .catch(() => {});
     ctx?.waitUntil?.(p);
     return new Response(toClient, { status: up.status, headers });
@@ -155,7 +159,7 @@ async function chat(request, env, ctx, code) {
   const text = await up.text();
   let u = null;
   try { u = JSON.parse(text).usage; } catch { /* 非 JSON 照样回 */ }
-  reportUsage(env, ctx, { code, ...usageFields(u) });
+  reportUsage(env, ctx, { code, ver: clientVer(request), ...usageFields(u) });
   return new Response(text, { status: up.status, headers });
 }
 
@@ -174,7 +178,7 @@ async function jev(request, env, ctx, code) {
     body: JSON.stringify({ model: JEV_MODEL, state: body.state, questions: body.questions }),
   });
   const text = await up.text();
-  if (up.ok) reportUsage(env, ctx, { code, jev_q: q });   // 上游错误不记用量（同 chat）
+  if (up.ok) reportUsage(env, ctx, { code, jev_q: q, ver: clientVer(request) });   // 上游错误不记用量（同 chat）
   return new Response(text, { status: up.status, headers: { "content-type": up.headers.get("content-type") || "application/json" } });
 }
 
@@ -184,7 +188,11 @@ async function admin(request, env, path) {
   if (!expected || (request.headers.get("authorization") || "") !== expected) {
     return new Response("unauthorized", { status: 401 });
   }
-  const res = await passes(env, path.slice(3), await request.json().catch(() => ({})));
+  const body = await request.json().catch(() => ({}));
+  // 额度快照住在另一个 DO 上（Passes 那边没有这些计数），所以这一条单独分流。
+  const res = path === "/v1/admin/quota"
+    ? await quota(env, "/admin/state", body)
+    : await passes(env, path.slice(3), body);
   return new Response(res.body, { status: res.status, headers: { "content-type": "application/json" } });
 }
 
@@ -331,11 +339,11 @@ async function transcribe(env, ctx, audio, seconds, t0) {
     const ms = Date.now() - t0;
     if (!won) {
       console.log(JSON.stringify({ result: "all_failed", ms, tried }));
-      return json(503, { error: "all_failed", tried: [...tried] });
+      return { res: json(503, { error: "all_failed", tried: [...tried] }), model: null };
     }
     const provider = won.model.startsWith("whisper") ? "groq" : "qwen";
     console.log(JSON.stringify({ provider, model: won.model, ms, tried }));
-    return json(200, { text: won.text, provider, model: won.model, ms, tried: [...tried] });
+    return { res: json(200, { text: won.text, provider, model: won.model, ms, tried: [...tried] }), model: won.model };
   } finally {
     clearTimeout(budgetTimer);
     clearTimeout(hedgeTimer);
@@ -402,8 +410,10 @@ export default {
       const deny = await checkPass(env, code, install, "asr");
       if (deny) return deny;
     }
-    const res = await transcribe(env, ctx, audio, seconds, t0);
-    if (code !== null && res.status === 200) reportUsage(env, ctx, { code, asr_s: seconds });
+    const { res, model } = await transcribe(env, ctx, audio, seconds, t0);
+    if (code !== null && res.status === 200) {
+      reportUsage(env, ctx, { code, asr_s: seconds, model, ver: clientVer(request) });
+    }
     return res;
   },
 };

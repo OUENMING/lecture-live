@@ -53,7 +53,36 @@ export class QuotaCore {
     state.turbo = { ...BUCKET(), ...state.turbo };
     if (path === "/plan") return json(await this.#plan(state, body));
     if (path === "/report") { await this.#report(state, body); return json({ ok: true }); }
+    if (path === "/admin/state") { this.#roll(state, this.now()); return json(this.#state(state)); }
     return json({ error: "not found" }, 404);
+  }
+
+  // 只读快照，给 handler.js 的 `/v1/admin/quota`（管理面板的系统额度卡）用。
+  // ⚠️ **鉴权不在这里** —— 只有 handler.js 的 admin()（认 ADMIN_TOKEN）会转发进来，DO 自己谁都信。
+  //    所以这条路由只能经 `/v1/admin/*` 到达，别在别处暴露。刻意只回计数与上限，**不含任何 key**。
+  // 不落盘：`#roll` 只作用在 handle() 已经拷出来的那份 state 上 —— 这是展示口径，不是记账。
+  #state(s) {
+    const now = this.now();
+    const hour = Math.floor(now / 3600000);
+    const minute = Math.floor(now / 60000);
+    // 分钟/小时桶是「上一格的数」，跨格了就当 0 显示（同 #take 的比法）。
+    const norm = (b) => ({
+      used_reqs: b.n, used_s: b.s,
+      min_reqs: b.min.minute === minute ? b.min.n : 0,
+      hour_s: b.hour.hour === hour ? b.hour.s : 0,
+      cooldown_until: b.cooldown_until,
+    });
+    const v3 = { n: s.groq_day, min: s.groq_min, hour: s.groq_hour,
+                 s: s.groq_day_s, cooldown_until: s.groq_cooldown_until };
+    return {
+      day: s.day, now,
+      caps: { reqs_day: GROQ_DAY_MAX, reqs_min: GROQ_MIN_MAX,
+              s_hour: GROQ_HOUR_S_MAX, s_day: GROQ_DAY_S_MAX, qwen_day: QWEN_DAY_MAX },
+      v3: norm(v3),
+      turbo: norm(s.turbo),
+      qwen: { used: s.qwen_day, max: QWEN_DAY_MAX,
+              exhausted: Object.keys(s.qwen_exhausted || {}), cooldown_until: s.qwen_cooldown_until },
+    };
   }
 
   // 跨 UTC 日清零「当日」计数（exhausted 不清）。

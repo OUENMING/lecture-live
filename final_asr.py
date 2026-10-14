@@ -377,6 +377,7 @@ class FinalASR:
         t_end = time.monotonic() + deadline
         headers = {"Authorization": f"Bearer {asr_endpoint.token(self._passcode)}",
                    "X-ClassLive-Install": install_id(),
+                   "X-ClassLive-Version": asr_endpoint.version_header(),
                    "X-Audio-Seconds": f"{seconds:.1f}",
                    "Content-Type": "audio/ogg"}
         fut = self._pool.submit(self._post, body, headers, deadline)

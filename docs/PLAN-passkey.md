@@ -6,6 +6,13 @@
 > 假码 403。两个 secret Owen 已放（同日）；端到端实测（smoke 码，测完已吊销）：按码翻译 / 草稿 / 转写都通、`stats` 记上了、
 > 第 2 台设备 403 `devices`、吊销后 403 `revoked`。客户端按码改道随 3.9.2 发；第 0 步已量（下文），§4 填码弹窗 **Owen 2026-10-12 定：不做**；扩展功能 1–3 未做。
 >
+> **界面（2026-10-14 加）**：本机网页面板 `scripts/cl_admin_ui.py`（bind `127.0.0.1`，默认 8770）
+> + 模板 `scripts/cl_admin_ui.html`。令牌只在 Python 侧读、只在服务端加进请求头，**不进浏览器**；
+> 页面零外链（断网可用）。看得到：系统额度（Groq v3 / turbo / 千问）、每日用量折线（可切指标）、
+> 每人用量排行、KPI 四格、按人展开的 token 构成 / 模型分布 / 版本分布 / 续期 / 吊销 / 限额。
+> 判据在 `tests/test_cl_admin_ui.py`（转发层 + 闸门 + 花费算式；**界面本身没有自动判据**，靠拍图看）。
+> Worker 侧为它加了两样：`/v1/admin/quota`（只读）与 `stats` 的跨天区间 + 每条的 `models` / `vers`。
+>
 > 与本稿的偏差：码表 / 设备 / 用量用 DO 的 KV 接口存（`code:` / `dev:` / `use:<日>:` 三种键），不是 SQL 表 ——
 > 同一个 SQLite 后端，Node 里能直接测；`list({prefix})` 够管理命令用。翻译请求**不过**转写那两道限流
 > （码是个人的、可吊销可限额，而一节课的翻译每分钟会超 30 次）。
@@ -39,14 +46,18 @@ DeepSeek 的钱由 Owen 付；Owen 能按人限额、吊销、看用量。原生
    - `POST /v1/chat/completions`：验码 → 查当日额度 → 换成 `DEEPSEEK_KEY` 转发 → `new Response(upstream.body)` 流式透传；
      只放行 `deepseek-chat`（或白名单内模型）、`max_tokens` 封顶；流末尾读 usage 记账。
    - 通行码表放进现有 Durable Object 的 SQLite：`code, name, created, expires, revoked, max_devices, daily_asr_s, daily_tokens, flags`；
-     设备表 `code, install_id, first_seen, last_seen`；用量表按天 `code, day, asr_s, asr_reqs, groq/qwen 计数, tokens_in, tokens_out, cache_hit`。
-   - 管理接口 `/v1/admin/*` 只认 `ADMIN_TOKEN`（wrangler secret），Owen 本机跑 `scripts/cl_admin.py add|list|revoke|stats|limit`。
+     设备表 `code, install_id, first_seen, last_seen`；用量表按天 `code, day, asr_s, asr_reqs, groq/qwen 计数, tokens_in, tokens_out, cache_hit`，
+     另有 `models`（各 ASR 模型各跑了多少段，**服务端自己挑的名字**）与 `vers`（客户端自报版本号，形状 `^[0-9][0-9A-Za-z.-]{0,15}$`、**最多 8 个键**，多了并进 `+`）—— 2026-10-14 加。
+   - 管理接口 `/v1/admin/*` 只认 `ADMIN_TOKEN`（wrangler secret），Owen 本机跑 `scripts/cl_admin.py add|list|revoke|stats|limit|delete|quota`。
+   - ⚠️ **`/v1/admin/delete`**（2026-10-14 加）：**唯一不可逆**的管理操作。三道闸 —— 只认**完整码**（不认名字，
+     名字会歧义）、必须 `yes:true`、并且**连 `dev:` 与 `use:` 键一起删**（只删 `code:` 会留下 name 为 `?`
+     的孤儿行）。CLI 侧还要 `--yes`；面板侧要先把那条吊销、再把码完整贴一遍。用途：清掉测试留下的空码。
 5. **超额 / 吊销**：Worker 回 `429 quota_exceeded` / `403 revoked`；客户端当作「云端不可用」走现有降级（定稿 → 本地；翻译 → 本地或只保留转录），
    菜单栏图标给一句人话（走 `notify(src="翻译"|"转写")`，已有）。
 
 ## 3. 可扩展的功能（Owen 说「可以扩展」—— 按价值排序，先做前 3 个）
 
-1. **按人看用量**：`cl_admin.py stats` 一张表（人、设备数、今日课时 / 段数 / token / 缓存命中 / 估算花费、最后在线、版本）。只记数字，不记文本与音频。
+1. **按人看用量**：`cl_admin.py stats` 一张表（人、设备数、今日课时 / 段数 / token / 缓存命中 / 估算花费、最后在线、版本）。只记数字与客户端的**版本号**，不记文本与音频。
 2. **远程提示**：Worker 响应头 `X-ClassLive-Notice`（如「新版 3.10 已发布」「某旧版有 bug，请更新」）→ 客户端在菜单栏 / 下次开面板时显示一次。不用挨个微信催。
 3. **最低版本闸**：码表或全局配置写 `min_version`，低于它的客户端拿到 `426` + 提示更新（只拦云端，本地照用）。
 4. 面板里显示「今日已用 / 额度」一行（从响应头 `X-ClassLive-Quota` 读，不加请求）。
@@ -58,6 +69,8 @@ DeepSeek 的钱由 Owen 付；Owen 能按人限额、吊销、看用量。原生
 
 - 通行码模式下**课堂文字会经过 Owen 的 Worker**（转发给 DeepSeek）。~~填码时弹一次说明~~ —— Owen 2026-10-12 定：**不做弹窗**。
 - 用量统计**明示**，不做「静默收集」：填码时的说明里写清记了哪些数字。
+  （现有口径：转写秒 / 段数 / 翻译次数 / 输入输出 token / 缓存命中 / Jev 次数与题数 / 各 ASR 模型的段数 /
+  客户端自报的版本号。**都是计数，不含任何课堂内容**；版本号是唯一一个客户端自报的字符串，已限长限个数。）
 - Worker 日志不记文本、音频、完整码（只记码的名字段）。
 
 ## 5. 实施顺序（每步可单独提交、单独验）

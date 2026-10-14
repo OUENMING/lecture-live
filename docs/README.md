@@ -58,6 +58,7 @@
 | `RESEARCH-p3-seams.md` | P3 的代码接缝钉到 `file:line` | ⚠️ **行号会漂**，按符号名查 |
 | `RESEARCH-p3-extract.md` | 课件抽文本选型 | 同上 |
 | `RESEARCH-p3-community.md` | 社区与同类产品怎么做「开课前的准备」 | 同上 |
+| `RESEARCH-asr-worker-placement.md` | asr-worker 该不该开 Cloudflare Placement / DO 能不能短缓存（含实测数字与口径）| 同上（⚠️ **行号会漂**） |
 
 ### 长期
 

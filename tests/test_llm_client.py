@@ -95,8 +95,10 @@ class T(unittest.TestCase):
             final_asr.install_id = orig
         c = self.rec.calls[0]
         self.assertEqual(c["url"], "https://asr.bldcam.page/v1/chat/completions")
+        ver = (HERE / "VERSION").read_text(encoding="utf-8").strip()   # 独立读，不用被测函数当期望值
         self.assertEqual(c["headers"], {"Authorization": "Bearer cl-ying-0123456789abcdef",
-                                        "X-ClassLive-Install": "ab" * 16})
+                                        "X-ClassLive-Install": "ab" * 16,
+                                        "X-ClassLive-Version": ver})
 
     def test_native_key_never_sends_install_id(self):
         self.assertEqual(llm_client.headers("sk-abc"), {"Authorization": "Bearer sk-abc"})

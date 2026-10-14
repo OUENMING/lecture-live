@@ -79,6 +79,13 @@ MANUAL_FOR = [
      "scripts/probe_cloud_asr_consent.py —— 「语音模型」那一格 + 首次告知弹窗拍图（云端转写菜单项见 test_entry_panel ⑳b）（给作者看）"),
     (["panel.py", "entry_panel.py"],
      "scripts/probe_drag.py / scripts/probe_entry_panel.py —— 真实拖拽落点，作者手拖一次"),
+    (["server/asr-worker/*"],
+     "cd server/asr-worker && node test-passes.mjs && node test.mjs —— Worker 的账（记账 / admin 接口 / DO 路由）。"
+     "⚠️ check.py 不跑 node，这里是**唯一**会被提醒的地方；动 Worker 却忘了跑 = 线上改动零判据"),
+    (["scripts/cl_admin_ui.html", "scripts/cl_admin_ui.py"],
+     "面板的**界面**没有自动判据（tests/test_cl_admin_ui.py 只钉转发层与 cluiCost 算式）。"
+     "要人看的：起 scripts/cl_admin_ui.py，深浅两主题各拍一张给作者。"
+     "⚠️ 算式那条判据要 `node`；没装会**跳过**（不静默，但也不会红）"),
 ]
 
 

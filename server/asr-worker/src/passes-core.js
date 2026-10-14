@@ -5,8 +5,12 @@
 // 键（DO 的 KV 接口；SQLite 后端的 DO 同样支持，免费档可用）：
 //   code:<码>              {name, created, expires, revoked, max_devices, daily_asr_s, daily_tokens}
 //   dev:<码>               {<install_id>: {first, last}}
-//   use:<YYYY-MM-DD>:<码>  {asr_s, asr_reqs, llm_reqs, tokens_in, tokens_out, cache_hit, jev_reqs, jev_q}
-// ⚠️ 只记数字：不记文本、音频、IP。日志里也只出现码的「名字段」。
+//   use:<YYYY-MM-DD>:<码>  {asr_s, asr_reqs, llm_reqs, tokens_in, tokens_out, cache_hit, jev_reqs, jev_q,
+//                           models:{v3|turbo|qwen|other: 段数}, vers:{<客户端版本>: 次数}}
+//                          ⚠️ models / vers 是 2026-10-14 加的。**老记录没有这两键**，读的时候按空对象兜。
+// ⚠️ `/admin/delete` 把上面三种键一起删掉；它只认完整码 + `yes:true`（见 #remove）。
+// ⚠️ 只记数字 + **客户端自报的版本号**（`vers`，形状受限、个数封顶，见 VER_RE / VER_MAX_KEYS）：
+//    不记文本、音频、IP。日志里也只出现码的「名字段」。
 
 const DAY_MS = 86400000;
 export const DEFAULT_DAYS = 120;
@@ -21,6 +25,28 @@ const json = (obj, status = 200) =>
 const day = (now) => new Date(now).toISOString().slice(0, 10);
 const num = (v) => (Number.isFinite(v) && v >= 0 ? v : 0);
 const limitOrNull = (v) => (v === null || v === undefined ? null : Number.isFinite(v) && v >= 0 ? v : undefined);
+
+// 模型名 -> 统计用的桶。名字由 Worker 自己挑（不是客户端给的），兜底 other 让新模型上线不炸。
+const modelBucket = (m) => {
+  const s = String(m);
+  if (s.includes("turbo")) return "turbo";
+  if (s.startsWith("whisper")) return "v3";
+  if (s.startsWith("qwen")) return "qwen";
+  return "other";
+};
+// 版本头是**客户端可控**的 —— 形状不合就不记（存储不变量归这个模块管）。
+const VER_RE = /^[0-9][0-9A-Za-z.-]{0,15}$/;
+// ⚠️ `Date.parse` 对 "2026-1"（非补零）也给 NaN，而 `new Date(NaN).toISOString()` **抛 RangeError**
+//    -> DO 里逃出去就是 500。凡是从外面传进来的日期，一律先过 isDay()。
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const isDay = (v) => typeof v === "string" && DAY_RE.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`));
+const addDays = (d, n) =>
+  new Date(Date.parse(`${d}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
+
+// vers 的键**由客户端决定**（handler.js 只砍到 16 字符）。只限长度不限个数 = 一个持码的人
+// 每请求加一个新键，把 use:<日>:<码> 这一格撑大；那个 put 一旦失败，reportUsage 的
+// catch 会把它吞掉 -> 当天的 asr_s / tokens 全部静默停更。所以这里限最多 VER_MAX_KEYS 个键。
+const VER_MAX_KEYS = 8;
 
 function randomHex(bytes) {
   const b = new Uint8Array(bytes);
@@ -50,6 +76,7 @@ export class PassCore {
         c.expires = Math.max(c.expires, now) + num(body.days || DEFAULT_DAYS) * DAY_MS;
       }));
       case "/admin/limit": return json(await this.#limit(body));
+      case "/admin/delete": return json(await this.#remove(body));
       case "/admin/stats": return json(await this.stats(body));
       default: return json({ error: "not found" }, 404);
     }
@@ -90,16 +117,25 @@ export class PassCore {
     return { ok: true, name: c.name };
   }
 
-  async usage({ code, asr_s, tokens_in, tokens_out, cache_hit, jev_q }) {
+  async usage({ code, asr_s, tokens_in, tokens_out, cache_hit, jev_q, model, ver }) {
     if (!CODE_RE.test(code || "")) return;
     const k = `use:${day(this.now())}:${code}`;
     const u = { asr_s: 0, asr_reqs: 0, llm_reqs: 0, tokens_in: 0, tokens_out: 0, cache_hit: 0,
-                jev_reqs: 0, jev_q: 0, ...(await this.storage.get(k)) };
-    if (asr_s !== undefined) { u.asr_s += num(asr_s); u.asr_reqs += 1; }
+                jev_reqs: 0, jev_q: 0, models: {}, vers: {},
+                ...(await this.storage.get(k)) };
+    if (asr_s !== undefined) {
+      u.asr_s += num(asr_s); u.asr_reqs += 1;
+      if (model) { const b = modelBucket(model); u.models[b] = num(u.models[b]) + 1; }
+    }
     if (jev_q !== undefined) { u.jev_reqs += 1; u.jev_q += num(jev_q); }
     if (tokens_in !== undefined || tokens_out !== undefined) {
       u.llm_reqs += 1;
       u.tokens_in += num(tokens_in); u.tokens_out += num(tokens_out); u.cache_hit += num(cache_hit);
+    }
+    if (VER_RE.test(ver || "")) {
+      if (ver in u.vers) u.vers[ver] = num(u.vers[ver]) + 1;
+      else if (Object.keys(u.vers).length < VER_MAX_KEYS) u.vers[ver] = 1;
+      else u.vers["+"] = num(u.vers["+"]) + 1;          // 满了就并进「+」（VER_RE 不收 "+"，撞不了）
     }
     await this.storage.put(k, u);
   }
@@ -129,15 +165,40 @@ export class PassCore {
     return { codes: out };
   }
 
-  async stats({ day: d }) {
-    const want = d || day(this.now());
-    const rows = [];
-    for (const [k, u] of await this.storage.list({ prefix: `use:${want}:` })) {
-      const code = k.slice(`use:${want}:`.length);
-      const c = await this.storage.get(`code:${code}`);
-      rows.push({ name: c?.name ?? "?", code, ...u });
+  // 用量查询。请求侧收三种写法（`{day}` 单日 / `{days:N}` 最近 N 天 / `{from,to}` 闭区间），
+  // 但**返回形状只有一个**：{days: [{day, rows}], from, to} —— 单日就是长度 1 的数组。
+  // ⚠️ 2026-10-14 起统一（原来单日回 `{day, rows}`）；两个调用方（cl_admin.py / test-passes.mjs）同步改过。
+  async stats({ day: d, days, from, to }) {
+    const today = day(this.now());
+    const bad = [d, from, to].find((v) => v !== undefined && v !== null && !isDay(v));
+    if (bad !== undefined) return { error: "bad_day", got: String(bad), expect: "YYYY-MM-DD" };
+    let to0 = to || today;
+    let from0;
+    if (d) { from0 = d; to0 = d; }                      // 显式单日优先
+    else if (from) from0 = from;
+    else {
+      const n = Math.min(Math.max(Number.isInteger(days) ? days : 7, 1), 366);
+      from0 = addDays(to0, 1 - n);
     }
-    return { day: want, rows };
+    if (from0 > to0) return { error: "bad_range", from: from0, to: to0 };
+    // `days` 上面夹过，但 `from` / `to` 是调用方随便给的 —— 这里才是真正的封顶（否则要 1990 年
+    // 就是一万多条）。2026-10-14 全仓审查抓到：原来那句封顶根本没写进去。
+    const floor = addDays(to0, -365);
+    if (from0 < floor) from0 = floor;
+    const byDay = new Map();
+    for (const [k, u] of await this.storage.list({ prefix: "use:" })) {
+      const rest = k.slice(4);                          // <YYYY-MM-DD>:<码>
+      const dd = rest.slice(0, 10);
+      if (dd < from0 || dd > to0) continue;
+      const code = rest.slice(11);
+      const c = await this.storage.get(`code:${code}`);
+      if (!byDay.has(dd)) byDay.set(dd, []);
+      byDay.get(dd).push({ name: c?.name ?? "?", code, ...u });
+    }
+    // **区间里每一天都出现**（没记录的给空数组）—— 面板画趋势时不用自己补零。
+    const out = [];
+    for (let cur = from0; cur <= to0; cur = addDays(cur, 1)) out.push({ day: cur, rows: byDay.get(cur) || [] });
+    return { days: out, from: from0, to: to0 };
   }
 
   // 按码或名字找到唯一一条再改；名字对应多条（同名重发过）时要求给码。
@@ -160,6 +221,27 @@ export class PassCore {
     fn(f.c, this.now());
     await this.storage.put(`code:${f.code}`, f.c);
     return { code: f.code, ...f.c };
+  }
+
+  // 删码。⚠️ 三条闸，因为**这一步不可逆**（DO 没有回收站）：
+  //   ① 必须给**完整码**（名字会歧义：同名可以有多条，删错了没法查）；
+  //   ② 必须显式 `yes:true`（隔开「手滑点到」与「真想删」）；
+  //   ③ 连设备与用量一起删 —— 只删 code: 的话，stats 里会留下 name 为 "?" 的孤儿行。
+  async #remove({ code, yes }) {
+    if (!CODE_RE.test(code || "")) return { error: "delete 只认完整码（code），不认名字" };
+    if (yes !== true) return { error: "delete 要带 yes:true 才动手（不可逆）" };
+    const c = await this.storage.get(`code:${code}`);
+    if (!c) return { error: "unknown code" };
+    const keys = [`code:${code}`, `dev:${code}`];
+    let days = 0;
+    for (const [k] of await this.storage.list({ prefix: "use:" })) {
+      // 冒号是分隔符。⚠️ 实测过：这里换成 `k.includes(code)` 在**当前**的键形状下是等价的
+      //   （码必是 `cl-名字-16hex`，名字不含 `-`，所以任何别的键都不可能把另一个码当子串包住）——
+      //   写 endsWith 是把意图钉死，不是因为已知反例。键形状一变（比如名字允许 `-`）这条就要重看。
+      if (k.endsWith(`:${code}`)) { keys.push(k); days += 1; }
+    }
+    await this.storage.delete(keys);
+    return { ok: true, code, name: c.name, removed: keys.length, usage_days: days };
   }
 
   async #limit(body) {

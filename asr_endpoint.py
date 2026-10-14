@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 
 #: Worker 的转写端点。客户端 POST `audio/ogg` 到这里。
 ENDPOINT = "https://asr.bldcam.page/v1/transcribe"
@@ -22,6 +23,22 @@ TOKEN = "cl_pub_67edc45b6ba8c20cf96e54dfb27ecc39"
 def endpoint() -> str:
     """端点。允许 `CLASSLIVE_ASR_ENDPOINT` 覆盖（判据 / 联调 / 断网实测用）。"""
     return os.environ.get("CLASSLIVE_ASR_ENDPOINT", ENDPOINT)
+
+
+@lru_cache(maxsize=1)
+def version_header() -> str:
+    """`X-ClassLive-Version` 的值：客户端版本号。
+
+    单一来源是仓库根的 `VERSION`（经 `update.version()`）—— **别在这里再读一遍那个文件**。
+    Worker 把它记进 `use:<日>:<码>` 的 `vers` 字段。
+    ⚠️ 口径：这统计的是「**上报的**客户端里各版本各发了多少请求」—— **老客户端不发这个头，
+    所以看不见它们**（想数「谁还在老版本」得另找办法，比如在 Worker 上记「没带这个头」的次数）。
+
+    缓存一次：跑起来之后版本就不该再变了（用户中途更新，这个进程里的**仍是老代码** ——
+    报老版本号才是实话）。
+    """
+    import update
+    return update.version()
 
 
 def token(passcode: str | None = None) -> str:

@@ -13,6 +13,9 @@ const INSTALL = "0123456789abcdef0123456789abcdef";
 const INSTALL2 = "fedcba9876543210fedcba9876543210";
 const INSTALL3 = "00000000000000000000000000000003";
 const DAY = 86400000;
+// harness 的假时钟起点。`stats` 要查「当天」时用 TODAY，两者同源，不会各自漂。
+const T0 = Date.UTC(2026, 9, 12, 9);
+const TODAY = "2026-10-12";
 
 function memStorage() {
   const m = new Map();
@@ -20,6 +23,9 @@ function memStorage() {
     m,
     get: async (k) => structuredClone(m.get(k)),
     put: async (k, v) => { m.set(k, structuredClone(v)); },
+    // 真 DO 的 storage.delete 收单个键或键数组。替身**必须一起补** ——
+    // 少了它，用 delete 的路由会在这里炸成 TypeError，看起来像产品 bug（2026-10-14 撞过一次）。
+    delete: async (keys) => { for (const k of [].concat(keys)) m.delete(k); },
     list: async ({ prefix }) => new Map([...m].filter(([k]) => k.startsWith(prefix)).sort()),
   };
 }
@@ -31,7 +37,7 @@ const doStub = (core) => ({
 });
 
 function harness({ deepseek } = {}) {
-  let now = Date.UTC(2026, 9, 12, 9);
+  let now = T0;
   const clock = () => now;
   const pass = new PassCore(memStorage(), clock);
   const quota = new QuotaCore(memStorage(), clock);
@@ -72,9 +78,10 @@ function harness({ deepseek } = {}) {
   const adminReq = (path, body) => new Request(`https://asr.bldcam.page/v1/admin/${path}`, {
     method: "POST", headers: { authorization: "Bearer adm" }, body: JSON.stringify(body ?? {}),
   });
-  const chatReq = (code, body, install = INSTALL) => new Request("https://asr.bldcam.page/v1/chat/completions", {
+  const chatReq = (code, body, install = INSTALL, ver = null) => new Request("https://asr.bldcam.page/v1/chat/completions", {
     method: "POST",
-    headers: { authorization: `Bearer ${code}`, "x-classlive-install": install, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${code}`, "x-classlive-install": install, "content-type": "application/json",
+               ...(ver ? { "x-classlive-version": ver } : {}) },
     body: JSON.stringify(body),
   });
   const asrReq = (auth, install = INSTALL, seconds = "12") => new Request("https://asr.bldcam.page/v1/transcribe", {
@@ -82,9 +89,10 @@ function harness({ deepseek } = {}) {
     headers: { authorization: auth, "x-classlive-install": install, "x-audio-seconds": seconds },
     body: new Uint8Array(100),
   });
-  const jevReq = (auth, body, install = INSTALL) => new Request("https://asr.bldcam.page/v1/jev", {
+  const jevReq = (auth, body, install = INSTALL, ver = null) => new Request("https://asr.bldcam.page/v1/jev", {
     method: "POST",
-    headers: { authorization: auth, "x-classlive-install": install, "content-type": "application/json" },
+    headers: { authorization: auth, "x-classlive-install": install, "content-type": "application/json",
+               ...(ver ? { "x-classlive-version": ver } : {}) },
     body: JSON.stringify(body),
   });
   const restore = () => { globalThis.fetch = origFetch; };
@@ -130,9 +138,9 @@ test("翻译：通行码转发给 DeepSeek，换成 Owen 的 key，用量记到�
     await h.settle();
     assert.equal(h.calls.deepseek.length, 1);
     assert.equal(h.calls.deepseek[0].headers.authorization, "Bearer sk-owen");
-    const st = await (await h.call(h.adminReq("stats"))).json();
-    assert.equal(st.rows.length, 1);
-    assert.deepEqual([st.rows[0].name, st.rows[0].llm_reqs, st.rows[0].tokens_in, st.rows[0].tokens_out, st.rows[0].cache_hit],
+    const st = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    assert.equal(st.days[0].rows.length, 1);
+    assert.deepEqual([st.days[0].rows[0].name, st.days[0].rows[0].llm_reqs, st.days[0].rows[0].tokens_in, st.days[0].rows[0].tokens_out, st.days[0].rows[0].cache_hit],
                      ["ying", 1, 100, 20, 64]);
   } finally { h.restore(); }
 });
@@ -164,8 +172,8 @@ test("流式：客户端拿到原样的流；末尾 usage 被捞出来记账（�
     assert.equal(await res.text(), sse);
     await h.settle();
     assert.deepEqual(h.calls.deepseek[0].body.stream_options, { include_usage: true });
-    const st = await (await h.call(h.adminReq("stats"))).json();
-    assert.deepEqual([st.rows[0].tokens_in, st.rows[0].tokens_out, st.rows[0].cache_hit], [7, 2, 5]);
+    const st = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    assert.deepEqual([st.days[0].rows[0].tokens_in, st.days[0].rows[0].tokens_out, st.days[0].rows[0].cache_hit], [7, 2, 5]);
   } finally { h.restore(); }
 });
 
@@ -227,13 +235,13 @@ test("转写：公开令牌照旧能用、不记到任何人；通行码转写�
   try {
     assert.equal((await h.call(h.asrReq("Bearer tok-public"))).status, 200);
     await h.settle();
-    let st = await (await h.call(h.adminReq("stats"))).json();
-    assert.equal(st.rows.length, 0);
+    let st = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    assert.equal(st.days[0].rows.length, 0);
     const { code } = await (await h.call(h.adminReq("add", { name: "t" }))).json();
     assert.equal((await h.call(h.asrReq(`Bearer ${code}`, INSTALL, "8.5"))).status, 200);
     await h.settle();
-    st = await (await h.call(h.adminReq("stats"))).json();
-    assert.deepEqual([st.rows[0].name, st.rows[0].asr_s, st.rows[0].asr_reqs], ["t", 8.5, 1]);
+    st = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    assert.deepEqual([st.days[0].rows[0].name, st.days[0].rows[0].asr_s, st.days[0].rows[0].asr_reqs], ["t", 8.5, 1]);
     assert.equal((await h.call(h.asrReq("Bearer cl-x-zz"))).status, 403, "格式不对的码不许落到公开令牌那条");
   } finally { h.restore(); }
 });
@@ -294,8 +302,8 @@ test("Jev：通行码转发给 TypeSafe，换成 Owen 的 key、模型钉 jev-1.
     assert.equal(h.calls.jev.length, 1);
     assert.equal(h.calls.jev[0].headers.authorization, "Bearer apikey_owen");
     assert.equal(h.calls.jev[0].body.model, "jev-1.13.0");          // 客户端说 latest 也不跟
-    const st = await (await h.call(h.adminReq("stats"))).json();
-    assert.deepEqual([st.rows[0].jev_reqs, st.rows[0].jev_q, st.rows[0].llm_reqs], [1, 3, 0]);
+    const st = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    assert.deepEqual([st.days[0].rows[0].jev_reqs, st.days[0].rows[0].jev_q, st.days[0].rows[0].llm_reqs], [1, 3, 0]);
   } finally { h.restore(); }
 });
 
@@ -322,5 +330,216 @@ test("Jev：Worker 没配 JEV_KEY → 503（fail-closed，不打上游）；吊�
     await h.call(h.adminReq("revoke", { code }));
     assert.equal((await h.call(h.jevReq(`Bearer ${code}`, { state: "x", questions: jq(1) }))).status, 403);
     assert.equal(h.calls.jev.length, 0);
+  } finally { h.restore(); }
+});
+
+// ---- 2026-10-14：记账补 model/ver、stats 跨天、/v1/admin/quota ----
+
+test("记账：模型归桶（v3/turbo/qwen/other），版本按形状收，不合的不记", async () => {
+  const h = harness();
+  try {
+    const { code } = await h.pass.add({ name: "t" });
+    await h.pass.usage({ code, asr_s: 12, model: "whisper-large-v3" });
+    await h.pass.usage({ code, asr_s: 12, model: "whisper-large-v3-turbo" });
+    await h.pass.usage({ code, asr_s: 12, model: "qwen3-asr-flash" });
+    await h.pass.usage({ code, asr_s: 12, model: "some-future-model" });   // 新模型上线不许炸
+    await h.pass.usage({ code, ver: "3.9.4.1", tokens_in: 5, tokens_out: 1 });
+    await h.pass.usage({ code, ver: "3.9.4.1", tokens_in: 5, tokens_out: 1 });
+    await h.pass.usage({ code, ver: "带中文/斜杠", tokens_in: 5, tokens_out: 1 });  // 形状不合
+    const st = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    const r = st.days[0].rows[0];
+    assert.deepEqual(r.models, { v3: 1, turbo: 1, qwen: 1, other: 1 });
+    assert.deepEqual(r.vers, { "3.9.4.1": 2 });
+  } finally { h.restore(); }
+});
+
+test("模型与版本从真请求走到记账里（跑一遍 handler，不只是 core）", async () => {
+  const h = harness();
+  try {
+    const { code } = await h.pass.add({ name: "t" });
+    const req = new Request("https://asr.bldcam.page/v1/transcribe", {
+      method: "POST",
+      headers: { authorization: `Bearer ${code}`, "x-classlive-install": INSTALL,
+                 "x-audio-seconds": "12", "x-classlive-version": "3.9.4.1" },
+      body: new Uint8Array(100),
+    });
+    await h.call(req);
+    await h.settle();
+    const st = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    const r = st.days[0].rows[0];
+    assert.deepEqual([r.models, r.vers], [{ v3: 1 }, { "3.9.4.1": 1 }]);
+  } finally { h.restore(); }
+});
+
+test("老记录没有 models / vers 键：读得出来，再记一笔也只是补上新键", async () => {
+  const h = harness();
+  try {
+    const { code } = await h.pass.add({ name: "old" });
+    // 手工摆一条 2026-10-14 之前的形状
+    h.pass.storage.m.set(`use:${TODAY}:${code}`, {
+      asr_s: 30, asr_reqs: 2, llm_reqs: 0, tokens_in: 0, tokens_out: 0, cache_hit: 0,
+      jev_reqs: 0, jev_q: 0,
+    });
+    const st = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    assert.equal(st.days[0].rows[0].asr_s, 30);
+    assert.equal(st.days[0].rows[0].models, undefined);   // 老记录就是没这一键，面板得自己兜
+    await h.pass.usage({ code, asr_s: 12, model: "whisper-large-v3" });
+    const st2 = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    const r = st2.days[0].rows[0];
+    assert.deepEqual([r.asr_s, r.asr_reqs, r.models], [42, 3, { v3: 1 }]);   // 老字段不丢
+  } finally { h.restore(); }
+});
+
+test("stats 跨天：区间里每一天都出现（没记录的给空数组），from/to 回显", async () => {
+  const h = harness();
+  try {
+    const { code } = await h.pass.add({ name: "t" });
+    await h.pass.usage({ code, asr_s: 12 });
+    h.tick(DAY);                                          // 10-12 -> 10-13
+    await h.pass.usage({ code, asr_s: 30 });
+    const st = await (await h.call(h.adminReq("stats", { days: 3 }))).json();
+    assert.deepEqual([st.from, st.to], ["2026-10-11", "2026-10-13"]);
+    assert.deepEqual(st.days.map((x) => x.day), ["2026-10-11", "2026-10-12", "2026-10-13"]);
+    assert.deepEqual(st.days.map((x) => x.rows.length), [0, 1, 1]);
+    assert.deepEqual([st.days[1].rows[0].asr_s, st.days[2].rows[0].asr_s], [12, 30]);
+    const st2 = await (await h.call(h.adminReq("stats", { from: "2026-10-13", to: "2026-10-13" }))).json();
+    assert.deepEqual(st2.days.map((x) => x.rows[0].asr_s), [30]);
+  } finally { h.restore(); }
+});
+
+test("额度快照：/v1/admin/quota 走 Quota DO，只回计数与上限", async () => {
+  const h = harness();
+  try {
+    assert.equal((await h.call(new Request("https://asr.bldcam.page/v1/admin/quota", {
+      method: "POST", headers: { authorization: "Bearer wrong" }, body: "{}",
+    }))).status, 401);                                   // 新暴露面也得先过鉴权
+    const asr = await h.call(h.asrReq("Bearer tok-public", INSTALL, "50"));
+    assert.equal(asr.status, 200, "先确认这一笔真的走通了（否则下面全是假绿）");
+    await h.settle();
+    const q = await (await h.call(h.adminReq("quota"))).json();
+    assert.deepEqual(Object.keys(q).sort(), ["caps", "day", "now", "qwen", "turbo", "v3"]);
+    assert.deepEqual([q.caps.reqs_day, q.caps.qwen_day], [1900, 3000]);
+    assert.deepEqual([q.v3.used_reqs, q.v3.used_s], [1, 50]);
+    assert.deepEqual([q.turbo.used_reqs, q.qwen.used, q.qwen.exhausted], [0, 0, []]);
+  } finally { h.restore(); }
+});
+
+// ---- 2026-10-14 全仓审查的回归判据 ----
+
+test("版本头在 chat / 流式 / JEV 三条路径上都记账（漏一条就不算做完）", async () => {
+  const sse = ['data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_cache_hit_tokens":0}}',
+               "data: [DONE]", ""].join("\n\n");
+  const h = harness({ deepseek: () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }) });
+  try {
+    const { code } = await h.pass.add({ name: "t" });
+    await h.call(h.chatReq(code, body({ stream: true }), INSTALL, "3.9.4.1"));   // 流式
+    await h.settle();
+    const st = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    assert.deepEqual(st.days[0].rows[0].vers, { "3.9.4.1": 1 }, "流式那条没记版本");
+    await h.call(h.jevReq(`Bearer ${code}`, { state: "s", questions: { S1: { q: "x" } } }, INSTALL, "3.9.5"));
+    await h.settle();
+    const st2 = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    assert.deepEqual(st2.days[0].rows[0].vers, { "3.9.4.1": 1, "3.9.5": 1 }, "JEV 那条没记版本");
+  } finally { h.restore(); }
+});
+
+test("公开令牌的转写不记版本（没有码就没人可记）", async () => {
+  const h = harness();
+  try {
+    const req = new Request("https://asr.bldcam.page/v1/transcribe", {
+      method: "POST",
+      headers: { authorization: "Bearer tok-public", "x-classlive-install": INSTALL,
+                 "x-audio-seconds": "12", "x-classlive-version": "3.9.4.1" },
+      body: new Uint8Array(100),
+    });
+    assert.equal((await h.call(req)).status, 200);
+    await h.settle();
+    const st = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    assert.equal(st.days[0].rows.length, 0, "公开令牌不该产生任何按人记账");
+  } finally { h.restore(); }
+});
+
+test("stats 的日期参数非法 -> 明确报错，不是 500", async () => {
+  const h = harness();
+  try {
+    for (const bad of [{ day: "10-13" }, { day: "2026-1-1" }, { day: "garbage" }, { to: "2026/10/13" }]) {
+      const r = await h.call(h.adminReq("stats", bad));
+      assert.equal(r.status, 200, `DO 里抛出去就是 500：${JSON.stringify(bad)}`);
+      assert.equal((await r.json()).error, "bad_day", `${JSON.stringify(bad)} 没被挡住`);
+    }
+  } finally { h.restore(); }
+});
+
+test("stats 的区间封顶：from 给 1990 年也只回 366 天；from > to 明确报错", async () => {
+  const h = harness();
+  try {
+    const st = await (await h.call(h.adminReq("stats", { from: "1990-01-01" }))).json();
+    assert.equal(st.days.length, 366, "没封顶（会一次吐上万条）");
+    assert.equal(st.to, "2026-10-12");
+    assert.equal(st.from, "2025-10-12");
+    const inv = await (await h.call(h.adminReq("stats", { from: "2026-10-20", to: "2026-10-14" }))).json();
+    assert.equal(inv.error, "bad_range", "倒过来的区间要明确报错，不能回一个空数组让调用方自己去猜");
+  } finally { h.restore(); }
+});
+
+test("vers 的键数封顶：客户端连发 12 个版本，只留 8 个真键 + 一个「+」", async () => {
+  const h = harness();
+  try {
+    const { code } = await h.pass.add({ name: "t" });
+    for (let i = 1; i <= 12; i++) await h.pass.usage({ code, ver: `100000${i}` });
+    const st = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    const v = st.days[0].rows[0].vers;
+    assert.equal(Object.keys(v).length, 9, "键数没封顶（每请求一个新键会把这一格撑到写不进去）");
+    assert.equal(v["+"], 4);
+    assert.equal(v["1000001"], 1);
+    assert.equal(v["1000012"], undefined);
+  } finally { h.restore(); }
+});
+
+// ---- /admin/delete：不可逆，所以闸要厚 ----
+test("delete：只给名字 / 不给 yes / yes 不是 true，三下都不动手", async () => {
+  const h = harness();
+  try {
+    const { code } = await h.pass.add({ name: "junk" });
+    const byName = await (await h.call(h.adminReq("delete", { name: "junk", yes: true }))).json();
+    assert.match(byName.error, /完整码/);
+    const noYes = await (await h.call(h.adminReq("delete", { code }))).json();
+    assert.match(noYes.error, /yes/);
+    const strYes = await (await h.call(h.adminReq("delete", { code, yes: "true" }))).json();
+    assert.match(strYes.error, /yes/, "字符串 \"true\" 不算数，必须是布尔");
+    const unknown = await (await h.call(h.adminReq("delete", { code: "cl-nowhere-0123456789abcdef", yes: true }))).json();
+    assert.match(unknown.error, /unknown code/);
+    const list = await (await h.call(h.adminReq("list", {}))).json();
+    assert.equal(list.codes.length, 1, "上面四下都不该删掉东西");
+  } finally { h.restore(); }
+});
+
+test("delete：码 + 设备 + 当天用量一起删，另一条一个键不碰", async () => {
+  const h = harness();
+  try {
+    const a = await h.pass.add({ name: "junk" });
+    const b = await h.pass.add({ name: "keep" });
+    for (const [code, install] of [[a.code, INSTALL], [b.code, INSTALL2]]) {
+      await h.call(h.asrReq(`Bearer ${code}`, install, "12"));
+      await h.call(h.chatReq(code, body(), install));
+    }
+    await h.settle();
+    const before = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    assert.equal(before.days[0].rows.length, 2, "先确认两条都记上账了，否则下面全是假绿");
+    const keepBefore = before.days[0].rows.find((r) => r.name === "keep");
+
+    const del = await (await h.call(h.adminReq("delete", { code: a.code, yes: true }))).json();
+    assert.deepEqual([del.ok, del.name, del.usage_days], [true, "junk", 1]);
+
+    const list = await (await h.call(h.adminReq("list", {}))).json();
+    assert.deepEqual(list.codes.map((c) => c.name), ["keep"]);
+    assert.deepEqual([...h.pass.storage.m.keys()].filter((k) => k.includes(a.code)), [],
+                     "码 / 设备 / 用量三种键都该没了");
+    assert.deepEqual([...h.pass.storage.m.keys()].filter((k) => k.includes(b.code)).sort(),
+                     [`code:${b.code}`, `dev:${b.code}`, `use:${TODAY}:${b.code}`].sort(),
+                     "另一条的键少一个都不行");
+    const after = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    assert.deepEqual(after.days[0].rows.map((r) => r.name), ["keep"], "stats 里不留 name 为 ? 的孤儿行");
+    assert.deepEqual(after.days[0].rows[0], keepBefore, "另一条的数一个都不能变");
   } finally { h.restore(); }
 });

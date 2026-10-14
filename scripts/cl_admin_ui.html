@@ -1,0 +1,887 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>通行码管理</title>
+<style>
+/* ---------------------------------------------------------------
+   设计口径（2026-10-14，参考 Geist/Vercel 的克制外壳 + IBM Carbon
+   的数据色阶）：
+     · 外壳全灰阶。颜色**只**出现在数据与状态上，且状态只用 10px 的点。
+     · 4px 底数；字号只有 11/12/13/15/28；字重只有 400/500/600（不用 700）。
+     · 容器边界一律 box-shadow 而不是 border（不动盒模型）。
+     · 大数字用等宽 + tabular-nums + 负字距。
+     · 圆角只有两档：6px（控件）/ 12px（卡片）。
+   ⚠️ 零外链：断网也要能用，所以不引字体、不引图表库。
+   --------------------------------------------------------------- */
+:root{
+  --bg:#fafafa; --surface:#fff; --recessed:#f2f2f2;
+  --ink:#171717; --ink2:#4d4d4d; --ink3:#8f8f8f;
+  --line:rgba(0,0,0,.09); --line2:rgba(0,0,0,.055);
+  --accent:#0072f5; --focus:#005fcc;
+  --ok:#198038; --warn:#b25000; --bad:#d92d20;
+  --d1:#0f62fe; --d2:#009d9a; --d3:#8a3ffc; --d4:#ff832b;
+  --fill:rgba(15,98,254,.10);
+  --ring:0 0 0 1px var(--line);
+  --ring2:0 0 0 1px var(--line2);
+  --lift:0 0 0 1px rgba(0,0,0,.09), 0 2px 2px rgba(0,0,0,.03);
+  --r:6px; --rc:12px;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue","PingFang SC","Hiragino Sans GB",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+:root[data-theme=dark]{
+  --bg:#0a0a0a; --surface:#131313; --recessed:#1c1c1c;
+  --ink:#ededed; --ink2:#a1a1a1; --ink3:#6e6e6e;
+  --line:rgba(255,255,255,.11); --line2:rgba(255,255,255,.06);
+  --accent:#3291ff; --focus:#78a9ff;
+  --ok:#42be65; --warn:#ffb784; --bad:#ff8389;
+  --d1:#78a9ff; --d2:#3ddbd9; --d3:#be95ff; --d4:#ffb784;
+  --fill:rgba(120,169,255,.13);
+  --lift:0 0 0 1px rgba(255,255,255,.11), 0 2px 2px rgba(0,0,0,.3);
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#0a0a0a; --surface:#131313; --recessed:#1c1c1c;
+  --ink:#ededed; --ink2:#a1a1a1; --ink3:#6e6e6e;
+  --line:rgba(255,255,255,.11); --line2:rgba(255,255,255,.06);
+  --accent:#3291ff; --focus:#78a9ff;
+  --ok:#42be65; --warn:#ffb784; --bad:#ff8389;
+  --d1:#78a9ff; --d2:#3ddbd9; --d3:#be95ff; --d4:#ffb784;
+  --fill:rgba(120,169,255,.13);
+  --lift:0 0 0 1px rgba(255,255,255,.11), 0 2px 2px rgba(0,0,0,.3);
+}}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:13px/1.5 var(--sans);-webkit-font-smoothing:antialiased}
+.num,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer;background:var(--surface);border:0;border-radius:var(--r);padding:5px 11px;
+  box-shadow:var(--ring);transition:background-color .12s ease,color .12s ease,box-shadow .12s ease}
+button:hover{background:var(--recessed)}
+button:active{box-shadow:var(--ring2)}
+button.primary{background:var(--ink);color:var(--bg);font-weight:500}
+button.primary:hover{background:var(--ink2)}
+button.danger{color:var(--bad)}
+button.danger:hover{background:var(--bad);color:#fff;box-shadow:none}
+button:focus-visible,input:focus-visible,tr.body:focus-visible{outline:0;
+  box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--focus)}
+button[disabled]{opacity:.4;cursor:not-allowed}
+input{background:var(--surface);border:0;border-radius:var(--r);padding:6px 9px;width:100%;box-shadow:var(--ring)}
+input:focus{outline:0;box-shadow:var(--ring),0 0 0 3px var(--fill)}
+label{display:block;font-size:11px;color:var(--ink3);margin-bottom:4px}
+
+.bar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;height:56px;padding:0 24px;
+  background:var(--bg);box-shadow:0 1px 0 0 var(--line)}
+.brand{font-weight:600;letter-spacing:-.01em}
+.spacer{flex:1}
+.seg{display:flex;background:var(--recessed);border-radius:var(--r);padding:2px;gap:2px}
+.seg button{background:transparent;box-shadow:none;padding:4px 11px;font-size:12px;color:var(--ink2);border-radius:4px}
+.seg button[aria-pressed=true]{background:var(--surface);color:var(--ink);font-weight:500;box-shadow:var(--ring2)}
+
+main{max-width:1280px;margin:0 auto;padding:24px}
+.block{margin-bottom:32px}
+.hd{display:flex;align-items:baseline;gap:10px;margin-bottom:12px}
+.hd h2{margin:0;font-size:13px;font-weight:600}
+.hd .note{font-size:11px;color:var(--ink3)}
+.hd .spacer{flex:1}
+
+/* ---- KPI 卡：Geist 的 14/28/12 三行式，padding 16 ---- */
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.kpi{background:var(--surface);border-radius:var(--rc);padding:16px;box-shadow:var(--ring2)}
+.kpi .k{font-size:12px;color:var(--ink2)}
+.kpi .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:28px;font-weight:600;
+  letter-spacing:-1.1px;line-height:1.15;margin:6px 0 2px}
+.kpi .v small{font-size:14px;font-weight:500;letter-spacing:0;color:var(--ink2);margin-left:3px}
+.kpi .s{font-size:11px;color:var(--ink3);min-height:16px}
+.kpi .sp{margin-top:10px;height:28px}
+
+/* ---- 两张图并排 ---- */
+.charts{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:12px}
+.card{background:var(--surface);border-radius:var(--rc);padding:16px;box-shadow:var(--ring2)}
+.card .ch{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}
+.card .ch h3{margin:0;font-size:12px;font-weight:600;color:var(--ink2)}
+.card .ch .spacer{flex:1}
+.chartwrap{width:100%;position:relative}
+.chartwrap svg{display:block;overflow:visible}
+.tip{position:absolute;pointer-events:none;background:var(--ink);color:var(--bg);font-size:11px;
+  font-family:var(--mono);font-variant-numeric:tabular-nums;padding:3px 7px;border-radius:4px;white-space:nowrap;
+  opacity:0;transition:opacity .1s ease;z-index:5;transform:translate(-50%,-100%)}
+.tip.on{opacity:1}
+
+/* ---- 额度 meter ---- */
+.meter{display:grid;grid-template-columns:88px minmax(0,1fr) 168px;gap:14px;align-items:center;
+  padding:11px 0;box-shadow:0 1px 0 0 var(--line2)}
+.meter:last-child{box-shadow:none}
+.meter .name{font-weight:500}
+.mtrack{height:6px;background:var(--recessed);border-radius:3px;overflow:hidden;display:flex}
+.mtrack i{display:block;height:100%}
+.mmeta{font-size:11px;color:var(--ink3);text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.mmeta b{font-weight:500;color:var(--ink2)}
+
+/* ---- 表 ---- */
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:7px 10px 7px 0;white-space:nowrap;box-shadow:0 1px 0 0 var(--line2)}
+th{font-size:11px;font-weight:500;color:var(--ink3);box-shadow:0 1px 0 0 var(--line)}
+td.r,th.r{text-align:right}
+th.sp,td.sp{width:100%;padding-right:0}
+tr.body{cursor:pointer}
+tr.body:hover td{background:var(--recessed)}
+tr.body[aria-expanded=true] td{background:var(--recessed)}
+.chev{display:inline-block;width:9px;color:var(--ink3);transition:transform .12s ease}
+tr[aria-expanded=true] .chev{transform:rotate(90deg)}
+.mono{font-size:12px;font-variant-numeric:tabular-nums}
+.dim{color:var(--ink2)}
+.faint{color:var(--ink3)}
+.dotm{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+.dotm i{width:7px;height:7px;border-radius:50%;background:currentColor;flex:0 0 auto}
+.ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)} .mut{color:var(--ink3)}
+
+/* ---- 展开行 ---- */
+tr.detail>td{background:var(--recessed);padding:16px 16px 18px 18px;white-space:normal;box-shadow:none}
+.dtop{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 20px;margin-bottom:16px}
+.dtop div{font-size:11px;color:var(--ink3)}
+.dtop b{display:block;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:14px;font-weight:500;color:var(--ink)}
+.dsplit{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;margin-bottom:16px}
+.dtitle{font-size:11px;color:var(--ink3);margin-bottom:7px}
+.acts{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start}
+.acts .fld{width:118px}
+.acts .fld button{width:100%}
+.hint{font-size:11px;color:var(--ink3);margin-top:9px}
+.code{font-family:var(--mono);font-size:13px;font-weight:500;user-select:all;cursor:text}
+
+/* ---- 状态覆盖 ---- */
+.banner{background:var(--surface);border-radius:var(--r);padding:10px 12px;margin-bottom:16px;
+  box-shadow:var(--ring2),inset 3px 0 0 0 var(--bad);display:flex;gap:10px;align-items:flex-start}
+.banner b{color:var(--bad);font-weight:600}
+.banner button{margin-left:auto;box-shadow:none;background:transparent;color:var(--ink3);padding:0 4px}
+.empty{color:var(--ink2);padding:28px 0;font-size:13px}
+.empty b{display:block;color:var(--ink);font-weight:600;margin-bottom:4px;font-size:14px}
+.skel{background:var(--recessed);border-radius:4px;height:12px;animation:blink 1.4s ease-in-out infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.45}}
+.prog{position:fixed;top:0;left:0;height:2px;width:0;background:var(--accent);z-index:30;transition:width .25s ease}
+@media (prefers-reduced-motion:reduce){
+  *{transition:none!important;animation:none!important}
+  .prog{display:none}
+}
+.foot{color:var(--ink3);font-size:11px;padding:0 0 40px}
+@media (max-width:1000px){
+  .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .charts{grid-template-columns:minmax(0,1fr)}
+  .dsplit{grid-template-columns:minmax(0,1fr)}
+}
+</style>
+</head>
+<body>
+<div class="prog" id="prog"></div>
+
+<header class="bar">
+  <span class="brand">通行码管理</span>
+  <div class="seg" id="range" role="group" aria-label="时间区间">
+    <button data-days="1">今天</button>
+    <button data-days="7" aria-pressed="true">7 天</button>
+    <button data-days="30">30 天</button>
+  </div>
+  <span class="spacer"></span>
+  <div class="seg" id="theme" role="group" aria-label="主题">
+    <button data-theme="auto" aria-pressed="true">自动</button>
+    <button data-theme="light">浅</button>
+    <button data-theme="dark">深</button>
+  </div>
+  <button id="refresh">刷新</button>
+</header>
+
+<main>
+  <div id="err"></div>
+
+  <section class="block">
+    <div class="kpis" id="kpis"></div>
+  </section>
+
+  <section class="block">
+    <div class="charts">
+      <div class="card">
+        <div class="ch">
+          <h3>每日用量</h3>
+          <span class="spacer"></span>
+          <div class="seg" id="metric" role="group" aria-label="指标">
+            <button data-m="asr" aria-pressed="true">转写分钟</button>
+            <button data-m="llm">翻译次数</button>
+            <button data-m="tin">输入 token</button>
+            <button data-m="tout">输出 token</button>
+          </div>
+        </div>
+        <div id="daily"></div>
+      </div>
+      <div class="card">
+        <div class="ch"><h3>每人用量</h3><span class="spacer"></span><span class="note" id="pernote"></span></div>
+        <div id="peruser"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="hd"><h2>系统额度</h2><span class="note" id="qnote"></span><span class="spacer"></span>
+      <span class="note">用完自动降级，不等对方回 429</span></div>
+    <div class="card" id="quota"></div>
+  </section>
+
+  <section class="block">
+    <div class="hd"><h2>用户</h2><span class="note" id="unote"></span><span class="spacer"></span>
+      <button class="primary" id="addbtn">发新码</button></div>
+    <div id="addform" hidden></div>
+    <div id="users"></div>
+  </section>
+
+  <section class="block">
+    <div class="hd"><h2>花费估算</h2><span class="note">本机乘出来的，不是账</span></div>
+    <div class="card" id="prices"></div>
+  </section>
+
+  <p class="foot">数据来自 asr.bldcam.page（Worker 的 /v1/admin/*）。面板只记数字：看不到任何课堂文本与音频。</p>
+</main>
+
+<script>
+/* >>>CLUI-COST-START<<< */
+/* 判据从这两个哨兵之间抠出源码，喂给 node 跑（tests/test_cl_admin_ui.py）。
+   改这里不用改测试。但要保持它是纯函数：不读 state、不碰 DOM，价目表整个从参数进来。 */
+function cluiCost(u, p){
+  var hit = Math.min(u.cache_hit || 0, u.tokens_in || 0), miss = Math.max(0, (u.tokens_in || 0) - hit);
+  return (hit * p.cache + miss * p.miss + (u.tokens_out || 0) * p.out) / 1e6;
+}
+/* >>>CLUI-COST-END<<< */
+
+(function(){
+"use strict";
+var GATE = {"X-ClassLive-Admin":"1"};
+var NS = "http://www.w3.org/2000/svg";
+var HINT = "续期是「从现在起再加 N 天」。限额留空 = 不限，改动立刻生效。转写秒按每次请求至少 10 秒计。";
+var METRICS = {
+  asr:  {label:"转写分钟", unit:"分", color:"var(--d1)", pick:function(u){ return u.asr_s/60; }},
+  llm:  {label:"翻译次数", unit:"次", color:"var(--d2)", pick:function(u){ return u.llm_reqs; }},
+  tin:  {label:"输入 token", unit:"tok", color:"var(--d3)", pick:function(u){ return u.tokens_in; }},
+  tout: {label:"输出 token", unit:"tok", color:"var(--d4)", pick:function(u){ return u.tokens_out; }}
+};
+var state = {
+  days: 7, theme: "auto", metric: "asr",
+  codes: [], days_data: [], quota: null, limit: null,
+  expanded: null, busy: false, loaded: false, err: null,
+  prices: JSON.parse(localStorage.getItem("clui-prices") || "null") || {cache:0.003, miss:0.15, out:0.60}
+};
+var $ = function(s){ return document.querySelector(s); };
+function el(t, cls, txt){ var e = document.createElement(t); if(cls) e.className = cls; if(txt != null) e.textContent = txt; return e; }
+function num(n, d){ if(n == null || isNaN(n)) return "无"; return Number(n).toLocaleString("en-US",{minimumFractionDigits:d||0,maximumFractionDigits:d||0}); }
+function mins(sec){ return sec == null ? "无" : (sec/60).toFixed(sec/60 >= 100 ? 0 : 1); }
+function ago(ms){
+  if(!ms) return "无";
+  var d = Math.floor((Date.now() - ms) / 86400000);
+  if(d <= 0) return "今天";
+  if(d === 1) return "昨天";
+  return d + " 天前";
+}
+function ymd(ms){ return ms ? new Date(ms).toISOString().slice(0,10) : "无"; }
+function limStr(v){ return v == null ? "" : String(v); }
+function limNum(v){ var t = String(v).trim(); if(t === "") return null; var n = Number(t); return (isFinite(n) && n >= 0) ? n : undefined; }
+function showHint(node, msg){ node.textContent = msg; node.style.color = "var(--bad)";
+  setTimeout(function(){ node.textContent = HINT; node.style.color = ""; }, 3000); }
+
+/* ---------- 聚合 ---------- */
+var KEYS = ["asr_s","asr_reqs","llm_reqs","tokens_in","tokens_out","cache_hit","jev_reqs","jev_q"];
+function sumRows(rows, code){
+  var t = {models:{}, vers:{}};
+  KEYS.forEach(function(k){ t[k] = 0; });
+  (rows || []).forEach(function(r){
+    if(code && r.code !== code) return;
+    KEYS.forEach(function(k){ t[k] += (r[k] || 0); });
+    var m = r.models || {}, v = r.vers || {};
+    Object.keys(m).forEach(function(k){ t.models[k] = (t.models[k]||0) + m[k]; });
+    Object.keys(v).forEach(function(k){ t.vers[k] = (t.vers[k]||0) + v[k]; });
+  });
+  return t;
+}
+function allRows(){ return state.days_data.reduce(function(a,d){ return a.concat(d.rows); }, []); }
+function series(code, pick){
+  return state.days_data.map(function(d){ return {day:d.day, v: pick(sumRows(d.rows, code))}; });
+}
+
+/* ---------- 客户端 ---------- */
+function api(name, body){
+  return fetch("/api/" + name, {method:"POST",
+    headers: Object.assign({"content-type":"application/json"}, GATE),
+    body: JSON.stringify(body || {})})
+    .then(function(r){ return r.json().then(function(j){ if(!r.ok) throw new Error(j.error || ("HTTP " + r.status)); return j; }); });
+}
+var progT = null;
+function progress(on){
+  var p = $("#prog");
+  if(on){ p.style.width = "38%"; clearTimeout(progT); progT = setTimeout(function(){ p.style.width = "72%"; }, 220); }
+  else { p.style.width = "100%"; setTimeout(function(){ p.style.width = "0"; }, 200); }
+}
+
+/* ---------- SVG 小工具 ---------- */
+function sv(tag, attrs){
+  var e = document.createElementNS(NS, tag);
+  Object.keys(attrs || {}).forEach(function(k){ e.setAttribute(k, attrs[k]); });
+  return e;
+}
+function svText(x, y, s, opt){
+  var t = sv("text", {x:x, y:y, fill:(opt && opt.fill) || "var(--ink3)",
+    "font-size":(opt && opt.size) || 10.5, "font-family":"var(--mono)",
+    "text-anchor":(opt && opt.anchor) || "middle"});
+  t.textContent = s;
+  return t;
+}
+function niceMax(v){
+  if(!(v > 0)) return 1;
+  var e = Math.pow(10, Math.floor(Math.log10(v))), m = v / e;
+  var step = m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10;
+  return step * e;
+}
+function shortNum(v){
+  if(v >= 1e6) return (v/1e6).toFixed(v >= 1e7 ? 0 : 1) + "M";
+  if(v >= 1e3) return (v/1e3).toFixed(v >= 1e4 ? 0 : 1) + "k";
+  return String(Math.round(v * 10) / 10);
+}
+
+/* ---------- 图 1：迷你走势（KPI 卡 / 表里那一列） ---------- */
+function sparkPath(vals, w, h, pad){
+  var max = Math.max.apply(null, vals.concat([0])) || 1, n = vals.length;
+  if(n < 2) return "";
+  var iw = w - pad*2, ih = h - pad*2, step = iw / (n - 1);
+  return vals.map(function(v, i){
+    var x = pad + i*step, y = pad + ih - (v/max)*ih;
+    return (i ? "L" : "M") + (Math.round(x*10)/10) + " " + (Math.round(y*10)/10);
+  }).join(" ");
+}
+function sparkline(vals, opt){
+  opt = opt || {};
+  var h = opt.h || 26, pad = 2, fluid = !opt.w, w = fluid ? 300 : opt.w;
+  var wrap = el("div","chartwrap"); wrap.style.height = h + "px";
+  var attrs = {height:h, "aria-hidden":"true"};
+  if(fluid){ attrs.viewBox = "0 0 " + w + " " + h; attrs.preserveAspectRatio = "none"; attrs.style = "width:100%;display:block"; }
+  else { attrs.width = w; }
+  var s = sv("svg", attrs);
+  var d = sparkPath(vals, w, h, pad);
+  if(d){
+    var last = vals.length - 1, iw = w - pad*2, ih = h - pad*2;
+    var max = Math.max.apply(null, vals) || 1;
+    var area = d + " L" + (pad + iw) + " " + (h - pad) + " L" + pad + " " + (h - pad) + " Z";
+    s.appendChild(sv("path", {d:area, fill:(opt.fill || "var(--fill)"), stroke:"none"}));
+    s.appendChild(sv("path", {d:d, fill:"none", stroke:(opt.color || "var(--d1)"), "stroke-width":1.5,
+      "stroke-linejoin":"round", "stroke-linecap":"round",
+      "vector-effect": fluid ? "non-scaling-stroke" : "none"}));
+    if(!fluid){                                   /* 非等比缩放下圆会变成细条，所以自适应时不画端点 */
+      var ly = pad + ih - (vals[last]/max)*ih;
+      s.appendChild(sv("circle", {cx:(pad + iw), cy:Math.round(ly*10)/10, r:2, fill:(opt.color || "var(--d1)")}));
+    }
+  }
+  wrap.appendChild(s);
+  return wrap;
+}
+
+/* ---------- 图 2：折线（每日用量），带轴、网格、hover 读数 ---------- */
+function lineChart(items, meta){
+  var wrap = el("div","chartwrap");
+  var tip = el("div","tip"); wrap.appendChild(tip);
+  var lastW = 0, busy = false;
+  function draw(){
+    var w = Math.round(wrap.clientWidth || 640);
+    if(w < 80) return;
+    if(Math.abs(w - lastW) < 3 && wrap.querySelector("svg")) return;
+    lastW = w;
+    var old = wrap.querySelector("svg"); if(old) wrap.removeChild(old);
+    var H = 208, padL = 46, padR = 14, padT = 14, padB = 28;
+    var iw = w - padL - padR, ih = H - padT - padB;
+    var vals = items.map(function(x){ return x.v; });
+    var max = niceMax(Math.max.apply(null, vals.concat([0])));
+    var s = sv("svg", {width:w, height:H, role:"img",
+      "aria-label": meta.label + "：" + items.map(function(x){ return x.day.slice(5) + " " + shortNum(x.v); }).join("，")});
+    for(var t = 0; t <= 4; t++){
+      var y = padT + ih - (ih * t/4);
+      s.appendChild(sv("line", {x1:padL, y1:y, x2:w - padR, y2:y, stroke:"var(--line2)", "stroke-width":1,
+        "shape-rendering":"crispEdges"}));
+      s.appendChild(svText(padL - 8, y + 3.5, shortNum(max * t/4), {anchor:"end"}));
+    }
+    var step = items.length > 1 ? iw/(items.length - 1) : 0;
+    var pts = items.map(function(x, i){
+      var px = padL + i*step, py = padT + ih - (max ? (x.v/max)*ih : 0);
+      return [Math.round(px*10)/10, Math.round(py*10)/10];
+    });
+    if(pts.length > 1){
+      var d = pts.map(function(p, i){ return (i ? "L" : "M") + p[0] + " " + p[1]; }).join(" ");
+      s.appendChild(sv("path", {d: d + " L" + pts[pts.length-1][0] + " " + (padT+ih) + " L" + pts[0][0] + " " + (padT+ih) + " Z",
+        fill:"var(--fill)", stroke:"none"}));
+      s.appendChild(sv("path", {d:d, fill:"none", stroke:meta.color, "stroke-width":2,
+        "stroke-linejoin":"round", "stroke-linecap":"round"}));
+    }
+    var every = Math.max(1, Math.ceil(items.length / Math.max(2, Math.floor(iw / 58))));
+    items.forEach(function(x, i){
+      if(i % every && i !== items.length - 1) return;
+      s.appendChild(svText(pts[i][0], H - 9, x.day.slice(5), {}));
+    });
+    var marks = [];
+    items.forEach(function(x, i){
+      var px = pts[i] ? pts[i][0] : padL;
+      var c = sv("circle", {cx:px, cy:pts[i] ? pts[i][1] : 0, r:3, fill:meta.color, stroke:"var(--surface)",
+        "stroke-width":1.5, opacity:0});
+      s.appendChild(c); marks.push(c);
+      var band = sv("rect", {x: px - step/2, y: padT, width: Math.max(step, 6), height: ih, fill:"transparent"});
+      band.addEventListener("mouseenter", function(){
+        marks.forEach(function(m){ m.setAttribute("opacity", 0); });
+        c.setAttribute("opacity", 1);
+        tip.textContent = x.day + "  " + num(x.v, x.v >= 100 ? 0 : 1) + " " + meta.unit;
+        tip.style.left = Math.max(30, Math.min(w - 30, px)) + "px";
+        tip.style.top = (pts[i][1] - 8) + "px";
+        tip.classList.add("on");
+      });
+      band.addEventListener("mouseleave", function(){ c.setAttribute("opacity", 0); tip.classList.remove("on"); });
+      s.appendChild(band);
+    });
+    wrap.appendChild(s);
+  }
+  requestAnimationFrame(draw);
+  if(window.ResizeObserver){
+    new ResizeObserver(function(){ if(!busy){ busy = true; requestAnimationFrame(function(){ busy = false; draw(); }); } }).observe(wrap);
+  }
+  return wrap;
+}
+
+/* ---------- 图 3：横条排行（每人用量 / 模型 / 版本） ---------- */
+function hBars(items, opt){
+  opt = opt || {};
+  var box = el("div");
+  var max = Math.max.apply(null, items.map(function(x){ return x.v; }).concat([0])) || 1;
+  items.forEach(function(x, i){
+    var row = el("div"); row.style.cssText = "margin-bottom:9px";
+    var top = el("div"); top.style.cssText = "display:flex;gap:8px;align-items:baseline;font-size:11px";
+    var nm = el("span", null, x.name); nm.style.cssText = "color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+    var vl = el("span","mono"); vl.style.cssText = "margin-left:auto;color:var(--ink3)";
+    vl.textContent = num(x.v, x.v >= 100 ? 0 : 1) + (opt.unit ? " " + opt.unit : "");
+    top.appendChild(nm); top.appendChild(vl); row.appendChild(top);
+    var track = el("div"); track.style.cssText = "height:6px;background:var(--recessed);border-radius:3px;margin-top:4px;overflow:hidden";
+    var fill = el("div"); fill.style.cssText = "height:100%;border-radius:3px";
+    fill.style.width = Math.max(1, (x.v/max)*100) + "%";
+    fill.style.background = x.color || ("var(--d" + ((i % 4) + 1) + ")");
+    track.appendChild(fill); row.appendChild(track);
+    box.appendChild(row);
+  });
+  if(!items.length) box.appendChild(el("div","hint", opt.empty || "这段时间没有记录。"));
+  return box;
+}
+
+/* ---------- 图 4：构成条（token 三段） ---------- */
+function stackBar(parts){
+  var total = parts.reduce(function(a, p){ return a + p.v; }, 0);
+  var box = el("div");
+  var track = el("div");
+  track.style.cssText = "height:10px;background:var(--recessed);border-radius:5px;overflow:hidden;display:flex";
+  parts.forEach(function(p){
+    var seg = el("div");
+    seg.style.cssText = "height:100%;background:" + p.color;
+    seg.style.width = total ? (p.v/total*100) + "%" : "0%";
+    seg.title = p.name + "：" + num(p.v) + "（" + (total ? Math.round(p.v/total*100) : 0) + "%）";
+    track.appendChild(seg);
+  });
+  box.appendChild(track);
+  var legend = el("div");
+  legend.style.cssText = "display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--ink2)";
+  parts.forEach(function(p){
+    var it = el("span"); it.style.cssText = "display:inline-flex;align-items:center;gap:6px";
+    var sw = el("i"); sw.style.cssText = "width:8px;height:8px;border-radius:2px;background:" + p.color;
+    it.appendChild(sw);
+    it.appendChild(document.createTextNode(p.name + " "));
+    var b = el("span","mono", num(p.v) + (total ? " · " + Math.round(p.v/total*100) + "%" : ""));
+    b.style.color = "var(--ink3)";
+    it.appendChild(b); legend.appendChild(it);
+  });
+  box.appendChild(legend);
+  return box;
+}
+
+/* ---------- 图 5：额度 meter ---------- */
+function meterRow(name, used, cap, extra, parts){
+  var row = el("div","meter");
+  row.appendChild(el("div","name", name));
+  var mid = el("div");
+  var pct = cap ? Math.min(100, used/cap*100) : 0;
+  var track = el("div","mtrack");
+  (parts || [{v:used, color:"var(--d1)"}]).forEach(function(p){
+    var i = el("i"); i.style.background = p.color;
+    i.style.width = cap ? Math.min(100, p.v/cap*100) + "%" : "0%";
+    track.appendChild(i);
+  });
+  if(cap && used > cap){ track.lastChild.style.background = "var(--bad)"; }
+  mid.appendChild(track);
+  var sub = el("div"); sub.style.cssText = "font-size:11px;color:var(--ink3);margin-top:5px;font-family:var(--mono)";
+  sub.textContent = extra || "";
+  mid.appendChild(sub);
+  row.appendChild(mid);
+  var m = el("div","mmeta");
+  m.appendChild(el("b", null, num(used, used % 1 ? 1 : 0)));
+  m.appendChild(document.createTextNode(" / " + num(cap)));
+  if(cap) m.appendChild(document.createTextNode("  " + Math.round(pct) + "%"));
+  row.appendChild(m);
+  return row;
+}
+
+/* ---------- 主题 ---------- */
+function applyTheme(){
+  var t = state.theme;
+  if(t === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", t);
+  [].forEach.call($("#theme").children, function(b){ b.setAttribute("aria-pressed", String(b.dataset.theme === t)); });
+  localStorage.setItem("clui-theme", t);
+}
+
+/* ---------- 渲染：KPI ---------- */
+function kpiCard(k, v, unit, sub, sparkVals, color){
+  var c = el("div","kpi");
+  c.appendChild(el("div","k", k));
+  var val = el("div","v num"); val.textContent = v;
+  if(unit){ var u = el("small", null, unit); val.appendChild(u); }
+  c.appendChild(val);
+  c.appendChild(el("div","s", sub));
+  var sp = el("div","sp");
+  sp.appendChild(sparkline(sparkVals, {h:26, color:color}));
+  c.appendChild(sp);
+  return c;
+}
+function renderKpis(){
+  var box = $("#kpis"); box.innerHTML = "";
+  var all = allRows();
+  var t = sumRows(all, null);
+  var n = state.days_data.length;
+  var daily = state.days_data.map(function(d){ return sumRows(d.rows, null); });
+  var codes = state.codes;
+  var live = codes.filter(function(c){ return !c.revoked && (!c.expires || c.expires > Date.now()); });
+  box.appendChild(kpiCard("区间转写", mins(t.asr_s), "分",
+    num(t.asr_reqs) + " 段 · " + n + " 天", daily.map(function(x){ return x.asr_s/60; }), "var(--d1)"));
+  box.appendChild(kpiCard("区间翻译", num(t.llm_reqs), "次",
+    "输入 " + shortNum(t.tokens_in) + " · 输出 " + shortNum(t.tokens_out) + " token",
+    daily.map(function(x){ return x.llm_reqs; }), "var(--d2)"));
+  var cost = cluiCost(t, state.prices);
+  box.appendChild(kpiCard("花费估算", "$" + cost.toFixed(3), "",
+    (t.tokens_in ? "缓存命中 " + Math.round(t.cache_hit/t.tokens_in*100) + "%" : "按页底价目表"),
+    daily.map(function(x){ return cluiCost(x, state.prices); }), "var(--d3)"));
+  var active = daily.filter(function(x){ return x.asr_reqs || x.llm_reqs; }).length;
+  box.appendChild(kpiCard("有效通行码", String(live.length), "/ " + codes.length,
+    active ? ("有记录的设备 " + codes.reduce(function(a,c){ return a + c.devices; }, 0) + " 台") : "还没有记录",
+    daily.map(function(x){ return x.asr_reqs + x.llm_reqs ? 1 : 0; }), "var(--d4)"));
+}
+
+/* ---------- 渲染：每日折线 ---------- */
+function renderDaily(){
+  var box = $("#daily"); box.innerHTML = "";
+  if(!state.days_data.length){ box.appendChild(el("div","hint","这段时间没有记录。")); return; }
+  var m = METRICS[state.metric];
+  var items = series(null, m.pick);
+  box.appendChild(lineChart(items, m));
+}
+
+/* ---------- 渲染：每人横条 ---------- */
+function renderPerUser(){
+  var box = $("#peruser"); box.innerHTML = "";
+  var m = METRICS[state.metric];
+  var items = state.codes.map(function(c){ return {name: c.name, v: m.pick(sumRows(allRows(), c.code))}; })
+    .filter(function(x){ return x.v > 0; })
+    .sort(function(a,b){ return b.v - a.v; });
+  $("#pernote").textContent = m.label;
+  box.appendChild(hBars(items.slice(0, 10), {unit: m.unit}));
+  if(items.length > 10) box.appendChild(el("div","hint","另有 " + (items.length - 10) + " 个更小的没画。"));
+}
+
+/* ---------- 渲染：额度 ---------- */
+function renderQuota(){
+  var box = $("#quota"); box.innerHTML = "";
+  var q = state.quota;
+  if(!q){ box.appendChild(el("div","empty","额度暂时读不到。")); return; }
+  $("#qnote").textContent = "UTC " + q.day + " · 每日上限 " + num(q.caps.reqs_day) + " 次，到了就主动降级";
+  box.appendChild(meterRow("Groq v3", q.v3.used_reqs, q.caps.reqs_day,
+    "音频 " + num(q.v3.used_s) + " / " + num(q.caps.s_day) + " 秒 · 本分钟 " + q.v3.min_reqs + "/" + q.caps.reqs_min +
+    " · 本小时 " + num(q.v3.hour_s) + " 秒" + (q.v3.cooldown_until > q.now ? " · 冷却中" : "")));
+  box.appendChild(meterRow("Groq turbo", q.turbo.used_reqs, q.caps.reqs_day,
+    "音频 " + num(q.turbo.used_s) + " / " + num(q.caps.s_day) + " 秒 · v3 用完时当主力，排在千问前"));
+  box.appendChild(meterRow("千问", q.qwen.used, q.qwen.max, "今日 " + num(q.qwen.used) + " 段 · " +
+    (q.qwen.exhausted.length ? "已耗尽 " + q.qwen.exhausted.join("、") : "不可再生的免费额度")));
+  box.appendChild(el("p","hint","「音频秒」是计费秒：每次请求至少按 10 秒记，所以它比用户表里的真实音频秒大一些。"));
+}
+
+/* ---------- 渲染：用户表 ---------- */
+function statusOf(c){
+  if(c.revoked) return ["bad", "吊销"];
+  if(c.expires && c.expires < Date.now()) return ["warn", "过期"];
+  return ["ok", "有效"];
+}
+function renderUsers(){
+  var box = $("#users"); box.innerHTML = "";
+  var codes = state.codes.slice().sort(function(a,b){ return (b.last_seen||0) - (a.last_seen||0); });
+  $("#unote").textContent = state.days + " 天 · " + codes.length + " 个码";
+  if(!codes.length){
+    var em = el("div","empty");
+    em.appendChild(el("b", null, "还没有任何通行码"));
+    em.appendChild(document.createTextNode("点右上角「发新码」。"));
+    box.appendChild(em); return;
+  }
+
+  var t = el("table");
+  var hr = el("tr");
+  [["名字",""],["状态",""],["设备","r"],["到期",""],["最后在线",""],["趋势",""],["转写 (分)","r"],
+   ["段","r"],["翻译","r"],["花费 (US$)","r"],["","sp"]].forEach(function(c){ hr.appendChild(el("th", c[1], c[0])); });
+  var thead = el("thead"); thead.appendChild(hr); t.appendChild(thead);
+  var tb = el("tbody"); t.appendChild(tb);
+
+  codes.forEach(function(c){
+    var agg = sumRows(allRows(), c.code);
+    var ser = series(c.code, function(u){ return u.asr_s/60; });
+    var st = statusOf(c);
+    var tr = el("tr","body");
+    tr.tabIndex = 0;
+    tr.setAttribute("aria-expanded", String(state.expanded === c.code));
+    var td0 = el("td"); td0.appendChild(el("span","chev","›")); td0.appendChild(document.createTextNode(" " + c.name));
+    tr.appendChild(td0);
+    var td1 = el("td"); var chip = el("span","dotm " + st[0]);
+    chip.appendChild(el("i")); chip.appendChild(document.createTextNode(st[1]));
+    td1.appendChild(chip);                                  /* ⚠️ 忘了这一行 = 整列状态是空的 */
+    tr.appendChild(td1);
+    tr.appendChild(el("td","r mono", c.devices + "/" + c.max_devices));
+    tr.appendChild(el("td","mono dim", ymd(c.expires)));
+    tr.appendChild(el("td","dim", ago(c.last_seen)));
+    var tdS = el("td"); tdS.appendChild(sparkline(ser.map(function(x){ return x.v; }), {w:70, h:20, color:"var(--d1)"}));
+    tr.appendChild(tdS);
+    tr.appendChild(el("td","r mono", mins(agg.asr_s)));
+    tr.appendChild(el("td","r mono", num(agg.asr_reqs)));
+    tr.appendChild(el("td","r mono", num(agg.llm_reqs)));
+    tr.appendChild(el("td","r mono", "$" + cluiCost(agg, state.prices).toFixed(3)));
+    tr.appendChild(el("td","sp"));
+    function toggle(){ state.expanded = state.expanded === c.code ? null : c.code; renderUsers(); }
+    tr.addEventListener("click", toggle);
+    tr.addEventListener("keydown", function(e){ if(e.key === "Enter" || e.key === " "){ e.preventDefault(); toggle(); } });
+    tb.appendChild(tr);
+    if(state.expanded === c.code) tb.appendChild(detailRow(c, agg, ser));
+  });
+  box.appendChild(t);
+}
+
+function detailRow(c, agg, ser){
+  var tr = el("tr","detail"); var td = el("td"); td.colSpan = 11;
+
+  var kv = el("div","dtop");
+  function put(k, v){ var d = el("div"); d.appendChild(document.createTextNode(k)); d.appendChild(el("b", null, String(v))); kv.appendChild(d); }
+  var hitRate = agg.tokens_in ? Math.round(agg.cache_hit/agg.tokens_in*100) + "%" : "无";
+  put("输入 token", num(agg.tokens_in)); put("缓存命中", num(agg.cache_hit) + " (" + hitRate + ")");
+  put("输出 token", num(agg.tokens_out)); put("真实音频秒", num(agg.asr_s, 0));
+  put("Jev", agg.jev_reqs + " 次 / " + agg.jev_q + " 题");
+  put("设备", c.devices + " / " + c.max_devices);
+  put("到期", ymd(c.expires)); put("最后在线", ago(c.last_seen));
+  td.appendChild(kv);
+
+  var split = el("div","dsplit");
+  var left = el("div");
+  left.appendChild(el("div","dtitle","token 构成（按钱说话：未命中那一段最贵）"));
+  var hit = Math.min(agg.cache_hit, agg.tokens_in), missTok = Math.max(0, agg.tokens_in - hit);
+  left.appendChild(stackBar([
+    {name:"输入 · 缓存命中", v: hit, color:"var(--d1)"},
+    {name:"输入 · 未命中", v: missTok, color:"var(--d3)"},
+    {name:"输出", v: agg.tokens_out, color:"var(--d2)"}
+  ]));
+  left.appendChild(el("div","dtitle","花费 " + "$" + cluiCost(agg, state.prices).toFixed(4) +
+    "（命中 " + num(hit) + " · 未命中 " + num(missTok) + " · 输出 " + num(agg.tokens_out) + "）")).style.marginTop = "16px";
+  split.appendChild(left);
+
+  var right = el("div");
+  right.appendChild(el("div","dtitle","模型分布（段）"));
+  var models = Object.keys(agg.models).map(function(k){ return {name:k, v:agg.models[k]}; }).sort(function(a,b){ return b.v - a.v; });
+  right.appendChild(hBars(models, {empty:"这段记录里没有这个字段。模型是 2026-10-14 起才记的，之前的老记录补不回来。"}));
+  right.appendChild(el("div","dtitle","客户端版本（次）")).style.marginTop = "14px";
+  var vers = Object.keys(agg.vers).map(function(k){ return {name:(k === "+" ? "其它" : k), v:agg.vers[k]}; }).sort(function(a,b){ return b.v - a.v; });
+  right.appendChild(hBars(vers, {empty:"这段记录里没有这个字段。客户端版本要客户端发头才有，老版本不发。"}));
+  split.appendChild(right);
+  td.appendChild(split);
+
+  var code = el("div"); code.style.marginBottom = "14px";
+  code.appendChild(el("label", null, "通行码（要重发时点一下全选）"));
+  code.appendChild(el("span","code", c.code));
+  td.appendChild(code);
+
+  var hint = el("div","hint", HINT);
+  var acts = el("div","acts");
+  acts.appendChild(fldbtn("状态", c.revoked ? "恢复" : "吊销", function(){
+    if(!c.revoked && !confirm("确认吊销「" + c.name + "」？他那边立刻用不了云端，本地照旧。")) return;
+    act(c, c.revoked ? "unrevoke" : "revoke", {});
+  }, c.revoked ? "" : "danger"));
+  acts.appendChild(fld("续期 (天)", "120", function(v){ act(c, "renew", {days: parseInt(v,10) || 120}); }, "120"));
+  acts.appendChild(fld("每日 token", limStr(c.daily_tokens), function(v){
+    var n = limNum(v); if(n === undefined) return showHint(hint, "填一个非负数，或者留空表示不限。");
+    act(c, "limit", {daily_tokens: n}); }, "不限"));
+  acts.appendChild(fld("每日转写秒", limStr(c.daily_asr_s), function(v){
+    var n = limNum(v); if(n === undefined) return showHint(hint, "填一个非负数，或者留空表示不限。");
+    act(c, "limit", {daily_asr_s: n}); }, "不限"));
+  // 唯一不可逆的操作。两道闸：必须先吊销，且要把码**完整贴一遍**（贴错就不动手）。
+  acts.appendChild(fldbtn("不可逆", "删除", function(){
+    if(!c.revoked) return showHint(hint, "先把这一条吊销，再删。删是不可逆的。");
+    var typed = prompt("删除不可逆：码、设备、全部用量一起没了，补不回来。\n把这一串完整贴进来确认：" + c.code);
+    if(typed === null) return;
+    if(typed.trim() !== c.code) return showHint(hint, "贴进来的码对不上，没删。");
+    state.expanded = null;
+    act(c, "delete", {yes: true});
+  }, "danger"));
+  td.appendChild(acts); td.appendChild(hint);
+
+  tr.appendChild(td);
+  return tr;
+}
+function btn(label, cls, fn, danger){
+  var b = el("button", (cls ? cls + " " : "") + (danger || ""), label);
+  b.addEventListener("click", function(e){ e.stopPropagation(); fn(); });
+  return b;
+}
+function fld(label, val, fn, ph){
+  var w = el("div","fld"); w.appendChild(el("label", null, label));
+  var i = el("input"); i.value = val; i.placeholder = ph || "";
+  i.addEventListener("click", function(e){ e.stopPropagation(); });
+  w.appendChild(i);
+  w.appendChild(btn("改", "", function(){ fn(i.value); }));
+  return w;
+}
+function fldbtn(label, text, fn, danger){
+  var w = el("div","fld"); w.appendChild(el("label", null, label));
+  var b = btn(text, "", fn, danger); b.style.width = "100%"; w.appendChild(b);
+  return w;
+}
+function act(c, name, body){
+  if(state.busy) return;
+  state.busy = true; progress(true);
+  api(name, Object.assign({code: c.code}, body))
+    .then(function(){ return load(); })
+    .catch(function(e){ showErr(e.message); })
+    .then(function(){ state.busy = false; progress(false); });
+}
+function showErr(msg){
+  var box = $("#err"); box.innerHTML = "";
+  var b = el("div","banner");
+  var s = el("div");
+  s.appendChild(el("b", null, "没做成："));
+  s.appendChild(document.createTextNode(String(msg)));
+  b.appendChild(s);
+  b.appendChild(btn("×", "", function(){ box.innerHTML = ""; }));
+  box.appendChild(b);
+  window.scrollTo(0, 0);
+}
+
+/* ---------- 渲染：价目表 ---------- */
+function renderPrices(){
+  var box = $("#prices"); box.innerHTML = "";
+  var t = el("table","autow"); t.style.width = "auto";
+  var tb = el("tbody");
+  [["cache","输入 token · 缓存命中"],["miss","输入 token · 未命中"],["out","输出 token"]].forEach(function(row){
+    var tr = el("tr");
+    var td0 = el("td"); td0.appendChild(el("label", null, row[1])); tr.appendChild(td0);
+    var td1 = el("td","r"); var inp = el("input","mono");
+    inp.style.cssText = "width:104px;text-align:right";
+    inp.value = String(state.prices[row[0]]); inp.type = "number"; inp.step = "0.001"; inp.min = "0";
+    inp.addEventListener("change", function(){
+      var n = Number(inp.value);
+      state.prices[row[0]] = isFinite(n) && n >= 0 ? n : 0;
+      localStorage.setItem("clui-prices", JSON.stringify(state.prices));
+      renderKpis(); renderUsers();
+    });
+    td1.appendChild(inp); tr.appendChild(td1);
+    tr.appendChild(el("td","faint","US$ 每百万 token"));
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb); box.appendChild(t);
+  box.appendChild(el("p","hint","默认值是 2026-10-12 记的 deepseek-flash 闲时价（docs/PLAN-passkey.md §5 第 0 步）。" +
+    "价目会变，所以这里不写死：改了立刻重算。UTC 周一至五 01 到 04、06 到 10 点是高峰，价乘 2。" +
+    "只统计翻译的 token，不含整课精修 / 实时总结 / 讲解追问。"));
+}
+
+/* ---------- 发新码 ---------- */
+function renderAddForm(){
+  var box = $("#addform"); box.innerHTML = "";
+  if(box.hidden) return;
+  var wrap = el("div");
+  wrap.style.cssText = "display:flex;gap:12px;align-items:flex-end;padding:12px 16px;background:var(--surface);" +
+                       "border-radius:var(--r);box-shadow:var(--ring2);margin-bottom:12px;flex-wrap:wrap";
+  var n = el("div"); n.style.width = "190px"; n.appendChild(el("label", null, "名字（1 到 16 位小写字母或数字）"));
+  var ni = el("input"); ni.placeholder = "例如 liming"; n.appendChild(ni);
+  var d = el("div"); d.style.width = "100px"; d.appendChild(el("label", null, "有效天数"));
+  var di = el("input"); di.value = "120"; d.appendChild(di);
+  var dev = el("div"); dev.style.width = "100px"; dev.appendChild(el("label", null, "最多设备"));
+  var dvi = el("input"); dvi.value = "2"; dev.appendChild(dvi);
+  var go = btn("生成", "primary", function(){});
+  var out = el("div","hint");
+  go.addEventListener("click", function(){
+    go.disabled = true;
+    api("add", {name: ni.value.trim().toLowerCase(), days: parseInt(di.value,10) || 120, max_devices: parseInt(dvi.value,10) || 2})
+      .then(function(r){
+        out.innerHTML = ""; out.style.color = "";
+        out.appendChild(document.createTextNode("生成好了，把这一串发给他（粘进「翻译引擎 → 填 key」）："));
+        var code = el("b","mono"); code.style.cssText = "display:block;font-size:14px;margin:5px 0"; code.textContent = r.code;
+        out.appendChild(code);
+        out.appendChild(document.createTextNode("到期 " + ymd(r.expires) + " · 最多 " + r.max_devices + " 台设备"));
+        ni.value = ""; return load();
+      })
+      .catch(function(e){ out.style.color = "var(--bad)"; out.textContent = "没做成：" + e.message; })
+      .then(function(){ go.disabled = false; });
+  });
+  [n, d, dev, go].forEach(function(x){ wrap.appendChild(x); });
+  box.appendChild(wrap); box.appendChild(out);
+}
+
+/* ---------- 加载 ---------- */
+function load(){
+  progress(true);
+  return Promise.all([
+    api("list", {}),
+    api("stats", {days: state.days}),
+    api("quota", {}).catch(function(){ return null; })
+  ]).then(function(r){
+    state.codes = r[0].codes || [];
+    state.days_data = r[1].days || [];
+    state.quota = r[2];
+    state.loaded = true;
+    $("#err").innerHTML = "";
+    renderKpis(); renderDaily(); renderPerUser(); renderQuota(); renderUsers();
+  }).catch(function(e){ showErr(e.message); })
+    .then(function(){ progress(false); });
+}
+
+/* ---------- 事件 ---------- */
+$("#range").addEventListener("click", function(e){
+  var b = e.target.closest("button"); if(!b) return;
+  state.days = parseInt(b.dataset.days, 10);
+  [].forEach.call(this.children, function(x){ x.setAttribute("aria-pressed", String(x === b)); });
+  load();
+});
+$("#metric").addEventListener("click", function(e){
+  var b = e.target.closest("button"); if(!b) return;
+  state.metric = b.dataset.m;
+  [].forEach.call(this.children, function(x){ x.setAttribute("aria-pressed", String(x === b)); });
+  renderDaily(); renderPerUser();
+});
+$("#theme").addEventListener("click", function(e){
+  var b = e.target.closest("button"); if(!b) return;
+  state.theme = b.dataset.theme; applyTheme();
+});
+$("#refresh").addEventListener("click", function(){ load(); });
+$("#addbtn").addEventListener("click", function(){
+  var box = $("#addform"); box.hidden = !box.hidden; renderAddForm();
+});
+
+state.theme = localStorage.getItem("clui-theme") || "auto";
+applyTheme();
+renderPrices();
+(function skeleton(){
+  var box = $("#kpis");
+  for(var i = 0; i < 4; i++){
+    var c = el("div","kpi");
+    var a = el("div","skel"); a.style.width = "52%"; c.appendChild(a);
+    var b = el("div","skel"); b.style.cssText = "width:70%;height:24px;margin:10px 0 8px"; c.appendChild(b);
+    var d = el("div","skel"); d.style.width = "40%"; c.appendChild(d);
+    box.appendChild(c);
+  }
+})();
+load();
+})();
+</script>
+</body>
+</html>

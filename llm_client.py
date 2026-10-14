@@ -31,11 +31,14 @@ def base_for(key: str | None) -> str:
 
 
 def headers(key: str) -> dict:
-    """请求头。通行码还要带安装号（Worker 按它数设备）—— 直连 DeepSeek 时**不带**（别把安装号发给第三方）。"""
+    """请求头。通行码另外带安装号与客户端版本（Worker 按前者数设备、按后者统计版本分布）——
+    直连 DeepSeek 时**都不带**（别把安装号发给第三方）。"""
     h = {"Authorization": f"Bearer {key}"}
     if is_passcode(key):
+        import asr_endpoint
         import final_asr
         h["X-ClassLive-Install"] = final_asr.install_id()
+        h["X-ClassLive-Version"] = asr_endpoint.version_header()
     return h
 
 

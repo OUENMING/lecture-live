@@ -310,6 +310,7 @@ class TestCloudPath(Base):
         self.assertEqual(h["authorization"], f"Bearer {final_asr.asr_endpoint.token()}")
         self.assertRegex(h["x-classlive-install"], r"^[0-9a-f]{32}$")
         self.assertEqual(h["x-audio-seconds"], "3.0")
+        self.assertRegex(h["x-classlive-version"], r"^\d+(\.\d+)+$", "版本头必须带，且是版本号形状")
         self.assertEqual(h["content-type"], "audio/ogg")
         self.assertTrue(q["body"].startswith(b"OggS"))
 

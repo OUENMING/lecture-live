@@ -55,7 +55,7 @@ def _git(*args: str, timeout: int = TIMEOUT) -> tuple[int, str, str]:
         return -1, "", str(e)
 
 
-def _version() -> str:
+def version() -> str:
     f = HERE / "VERSION"
     return f.read_text(encoding="utf-8").strip() if f.exists() else "?"
 
@@ -430,7 +430,7 @@ def check() -> dict:
     """
     bs = branch_state()
     out = {"ok": False, "error": "", "dirty": False, "behind": 0,
-           "current": _version(), "ahead": 0, "detached": bs["detached"],
+           "current": version(), "ahead": 0, "detached": bs["detached"],
            "branch": bs["branch"], "upstream": bs["upstream"],
            "default": bs["default"], "on_default": bs["on_default"]}
     if not is_repo():
@@ -509,7 +509,7 @@ def pull() -> dict:
     `skipped=True` 表示"本来就没啥可更新"（不是失败）。
     """
     out = {"ok": False, "error": "", "skipped": False, "blocked": False,
-           "before": _version(), "after": _version(), "commits": 0, "log": [],
+           "before": version(), "after": version(), "commits": 0, "log": [],
            "reqs_changed": False, "models_changed": False, "user_msg": ""}
     if not is_repo():
         out["error"] = "这不是 git 仓库，没法更新。"
@@ -595,7 +595,7 @@ def pull() -> dict:
         return {**out, "user_msg": _friendly(out)}
 
     head_after = _git("rev-parse", "--short", "HEAD")[1]
-    out["after"] = _version()
+    out["after"] = version()
     out["commits"] = behind
     out["reqs_changed"] = (_reqs_hash() != reqs_before)
     # ⚠️ **与 `reqs_changed` 对称**：自动更新只拉代码、不下模型（`run_step("models")`
@@ -1307,7 +1307,7 @@ def offer() -> dict:
     ⚠️ 不写任何文件。开发分支（作者自己的 worktree）一律 `none` —— 别在开发机上天天提示。
     """
     import changelog
-    out = {"kind": "none", "current": _version(), "latest": "", "summary": "", "message": "",
+    out = {"kind": "none", "current": version(), "latest": "", "summary": "", "message": "",
            "quiet": False}
     if os.environ.get("CLASSLIVE_NO_UPDATE_CHECK"):
         return out
@@ -1407,7 +1407,7 @@ def apply(on_line=None, *, models: bool = True) -> dict:
             except Exception:                             # noqa: BLE001
                 pass
 
-    out = {"ok": False, "pulled": False, "after": _version(), "user_msg": ""}
+    out = {"ok": False, "pulled": False, "after": version(), "user_msg": ""}
     lk = _acquire_lock()
     if lk == "busy":
         return {**out, "user_msg": "另一个更新正在进行（可能是下课后的自动安装），过一两分钟再点。"}

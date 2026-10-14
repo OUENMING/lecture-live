@@ -302,6 +302,17 @@ def cloud_asr_config(*, root=None) -> pathlib.Path:
     return _root(root) / "cloud-asr.json"
 
 
+def asr_admin_token(*, root=None) -> pathlib.Path:
+    """一人一码的**管理令牌** —— `~/.classlive/asr-admin-token`（纯文本一行，权限 600）。
+
+    ⚠️ 与 Worker 的 `ADMIN_TOKEN` secret 同值。它只有一把钥匙的权限：**管通行码**，
+       既不能转写也不能翻译（那两件事走 `CLIENT_TOKEN` / 通行码本身）。
+    ⚠️ **只读它的两处**（`scripts/cl_admin.py` / `scripts/cl_admin_ui.py`）**都不打印它**；
+       页面那条路更是只留在 Python 侧，绝不进浏览器。
+    """
+    return _root(root) / "asr-admin-token"
+
+
 def install_id(*, root=None) -> pathlib.Path:
     """随机 32 位 hex，云端定稿 Worker 按它限流 —— `~/.classlive/install-id`（权限 600）。
 

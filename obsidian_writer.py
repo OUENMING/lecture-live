@@ -1308,6 +1308,27 @@ class ObsidianWriter:
             except Exception as e:                        # noqa: BLE001
                 polish_state = "failed"
                 print(f"⚠ 精修失败({str(e)[:60]}); 用直播版转录生成笔记")
+        # ✂️ 碎句合并：字幕切成两三行的同一句话并回一行、整句重译（实测见 `note_merge.py` 文件头）。
+        #    ⚠️ 同 polish：只改笔记里的 entries，`sessions/` 不动；额外一层，失败不许带走底座。
+        #    放在复习层**之前**：复习层 / 🎯 重点句读到的也是整句。
+        if self._key and entries and not (cancel is not None and cancel.is_set()):
+            try:
+                import note_merge
+                from translator import course_title
+                if note_merge.enabled():
+                    mstats: dict = {}
+                    entries = note_merge.merge_entries(
+                        entries, self._key, self._model,
+                        domain=course_title(self._glossary_path, self._course),
+                        stats=mstats, cancel=cancel)
+                    if mstats.get("merged"):
+                        print(f"✂️ 碎句合并：{mstats['merged']} 句由几行并回一行"
+                              + (f"（{mstats['runs'] - mstats['merged']} 句没并成，照旧分行）"
+                                 if mstats["runs"] > mstats["merged"] else ""), flush=True)
+            except KeyboardInterrupt:
+                print("⚠ 碎句合并被中断；照旧分行", flush=True)
+            except Exception as e:                        # noqa: BLE001
+                print(f"⚠ 碎句合并失败({str(e)[:60]}); 照旧分行", flush=True)
         if self._key:
             print("🤖 正在生成复习层(知识点详解 + 自测)…", flush=True)
         # ⚠️ 同 `polish` 那条：`_review` 也要跑好几轮 LLM（按 REVIEW_CHUNK 分块，

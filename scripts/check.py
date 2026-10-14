@@ -11,7 +11,7 @@
 它做四件事：
 1. `tests/test_*.py` 每个文件一个子进程并行跑，看退出码（两种测试风格都兼容）。
    退出码 77 = 「跳过：缺本机样本」，单独列出，**不算通过也不算失败**。
-2. 写端隔离：子进程的 `HOME` 指到临时目录、`CLASSLIVE_UPLOAD=0`、`CLASSLIVE_NO_AUTO_UPDATE=1`。
+2. 写端隔离：子进程的 `HOME` 指到临时目录、`CLASSLIVE_UPLOAD=0`、`CLASSLIVE_NO_AUTO_UPDATE=1`、`CLASSLIVE_NOTE_MERGE=0`（收尾不联网）。
 3. 写端核对：跑前跑后给 `sessions/`、真 `~/.classlive/`、Obsidian 的 `Lectures/`、`git status`
    拍快照，有任何变化判红 —— 「测试必须隔离写端」从叮嘱变成判据。
    ⚠️ 正在上课（`cl` 在写 `sessions/`）时跑会误报，看清是哪个文件再说。
@@ -154,8 +154,11 @@ def snapshot_diff(a: dict, b: dict) -> list[str]:
 # ---------- 测试 ----------
 
 def run_test(path: pathlib.Path, home: pathlib.Path) -> tuple:
+    # `CLASSLIVE_NOTE_MERGE=0`：收尾的碎句合并会联网（每句一请求），带假 key 的收尾用例不该真发出去；
+    #  测它的 `tests/test_note_merge.py` 自己注入 chat 替身、不看这个开关。
     env = dict(os.environ, HOME=str(home), CLASSLIVE_UPLOAD="0",
-               CLASSLIVE_NO_AUTO_UPDATE="1", PYTHONDONTWRITEBYTECODE="1")
+               CLASSLIVE_NO_AUTO_UPDATE="1", CLASSLIVE_NOTE_MERGE="0",
+               PYTHONDONTWRITEBYTECODE="1")
     t = time.monotonic()
     try:
         p = subprocess.run([str(PY), str(path)], cwd=ROOT, env=env,

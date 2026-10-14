@@ -282,6 +282,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_DRAFT_ENGINE` | `auto` | 草稿引擎：`auto`（Nemotron 模型在且内存 ≥ 12 GB 就用流式）/ `parakeet` / `nemotron`；App 用户写仓库根的 `.draft-engine` 文件（`cl` 读）—— `draft_engine.py` | 发布开关：真课过闸、一版没出事后评估退役 Parakeet 草稿 |
 | `CLASSLIVE_DRAFT_MODEL_DIR` | 注册表路径 | 流式草稿模型目录（测试 / 故障注入指到别处） | 测试接缝，长期 |
 | `CLASSLIVE_DRAFT_HOLDBACK` | 空（关） | 草稿显示层前缀冻结，数字 = 灰尾词数 —— `draft_stable.py` | 实验开关：R3 换 Nemotron 后重新评估去留 |
+| `CLASSLIVE_NOTE_MERGE` | `1` | 课后笔记里把切成两三行的同一句话并回一行、整句重译（只改笔记，`sessions/` 不动）—— `note_merge.py` | 发布开关（3.9.5）：`0` = 照旧逐行 |
 | `CLASSLIVE_LIVE_SUMMARY` | `1` | 实时总结（章节合成 / 纲要落盘 / 发 streamq） | 运维开关，长期 |
 | `CLASSLIVE_LIVE_LOG` | 平时关、测试模式开 | 现场采集 `<会话>.live.jsonl` —— `livemetrics.py` | 运维开关，长期 |
 | `CLASSLIVE_UPLOAD` | `1` | 测试模式课后上传；测试 / 探针一律设 `0` | 运维开关，长期 |

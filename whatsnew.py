@@ -1,365 +1,218 @@
 #!/usr/bin/env python3
-"""「ClassLive 已更新到 X」的**非模态毛玻璃卡片**。
+"""开课面板上的**非模态毛玻璃小卡**：「有新版本」/「已更新到 X」/「草稿模型还没装」共用一个画法。
 
-为什么不用 NSAlert —— 查过 Apple HIG，原话三条都踩中：
+2026-10-14 作者定的样子（照 cc-switch 的「近期更新」）：每个版本一个小标题，每条看点前一个标签
+（新增 / 改进 / 修复），简短；有新版本时卡底就是「立即更新」。原来上课悬浮窗旁边那张
+「已更新到 X」的长日志卡（可滚动的整份 CHANGELOG +「本版本不再提示」）**取消**，
+它的事并到这里：开课前看一眼，比课上浮在字幕旁边合适。
 
+为什么不用 NSAlert —— Apple HIG 原话：
     "Use alerts sparingly… they **interrupt the current task**"
     "**Avoid using an alert merely to provide information.**"
-    "Don't alert merely to convey information, **on load**…"
-
-「更新后说明改了什么」正是**纯信息**、而且发生在**on load**。两头都不该用 alert。
-（业界也没有一家用系统 alert 做 What's New：Raycast/Obsidian 走网页 changelog，
-VS Code 走应用内页面。）
-
-而且本项目还有一条比 HIG 更硬的约束：**这是上课录课用的工具**。
-一个 on-load 的模态框在别的 app 里只是烦，在这里是**直接卡住主任务**。
-所以这里做成**非模态**：它和 ClassLive 面板一起浮出来，你不理它也照样开始转录。
-
-顺带解决两个"看起来廉价"的实测根因（都在 `_show_whats_new` 的 NSAlert 那条路上）：
-  ① NSAlert 默认用 `NSApplicationIcon`，未打包脚本回落到**宿主解释器的图标**
-     → 弹出来是 Python 火箭；
-  ② 那时 app 的 activation policy 还是 `Regular`（实测）→ Dock 里会冒出 Python 图标。
-自绘卡片两个问题都不存在。
-
-⚠️ 与上课绝不冲突的三条：
-  · **非模态** —— 不 runModal、不阻塞主循环；窗口关了只是少一张卡
+「说明改了什么」是纯信息、发生在 on load，两头都不该用 alert；这又是上课用的工具，
+模态框会直接卡住主任务。所以：
+  · **非模态** —— 不 runModal；不理它照样能开课（开课时面板会把它收掉）
   · **不抢焦点** —— orderFrontRegardless()，从不 activate（`NonactivatingPanel`）
-  · 任何构造失败都静默 —— 它只是说明，不能因为它让课起不来
+  · 构造失败静默返回 None —— 它只是说明，不能因为它让课起不来（撞 ObjC 类名例外，见 `build`）
 """
 from __future__ import annotations
 
 import os
 import pathlib
-import re
 
 import panel
 import objc_own
 
-# 复用 panel.py 那套配方（材质、圆角、发灰补偿都实测过），**不另起一套** ——
-# 以前这里抄了一份，连 SCRIM_ALPHA 都各写一遍。
-WIDTH = 620.0
+WIDTH = 460.0
 PAD = 20.0
-TITLE_H = 30.0
-LINE_H = 21.0
-LOG_H = 360.0          # 可滚动日志区的高度（有 log 时用它，没 log 时按摘要行数算）
-FOOT_H = 44.0          # 底部一行（28pt 按钮 + 与日志区之间 14pt 的呼吸）：勾选框｜知道了（状态行 2026-10-13 删了，见 build 里的说明）
-LOG_INSET = 10.0       # 日志区的浅底比文字多出来的那圈（底子圆角 = 这个值）
-
+BODY_MAX_H = 300.0     # 列表区最高这么多，再长就在里面滚（一下跳好几版时）
 _W = 0.23              # NSFontWeightMedium，同 overlay.WEIGHT
-_STRONG = 0.55         # NSFontWeightSemibold，日志里的小标题用
+_SEMI = 0.4
+
+#: 标签 → (R, G, B)。暗色毛玻璃上用系统色的暗色模式值（亮、不刺眼）；底 = 同色 18% 透明。
+TAG_RGB = {"新增": (0.19, 0.82, 0.35),     # systemGreen (dark)
+           "改进": (0.04, 0.52, 1.00),     # systemBlue (dark)
+           "修复": (1.00, 0.62, 0.04)}     # systemOrange (dark)
+ITEM_SIZE = 12.5
+CHIP_SIZE = 10.5
+CHIP_H = 17.0
+CHIP_W = 34.0          # 两个汉字 + 两侧各 6pt；三种标签同宽，文字左边对齐成一条线
+ITEM_GAP = 7.0
+VER_GAP = 14.0
 
 
-def _log_attr(text: str):
-    """把 CHANGELOG 的 Markdown 文本转成带样式的 NSAttributedString。
+def updated_from(seen: str, cur: str, vers: list[str]) -> str:
+    """该不该弹「已更新到 cur」：该 → 返回起点版本（报 `(起点, cur]`）；不该 → 空串。纯函数。
 
-    只认四档（一级标题 / 版本标题 / 小节标题 / 正文与列表）—— 不为一个更新卡片
-    引一套完整 Markdown 解析器。`**` / 反引号直接去掉：卡片是纯文本观感，
-    留着会显示成字面的星号（踩过）。
+    · 没有 `seen`（全新安装）、`seen` 不在 CHANGELOG 里（手改过 / 老格式）→ 不弹
+    · `cur` 不比 `seen` 新（同版、降级）→ 不弹 —— 比大小不是比不等（降级不该弹）
+    每个版本只弹一次：调用方弹完就把 `.update-seen` 写成 `cur`。
     """
-    from AppKit import (NSAttributedString, NSMutableAttributedString, NSColor,
-                        NSFont, NSMutableParagraphStyle, NSFontAttributeName,
-                        NSForegroundColorAttributeName, NSParagraphStyleAttributeName)
-
-    def para(before: float) -> NSMutableParagraphStyle:
-        st = NSMutableParagraphStyle.alloc().init()
-        st.setParagraphSpacingBefore_(before)
-        return st
-
-    # ⚠️ 必须用 **Mutable** —— 不可变的 NSAttributedString 没有 append 方法，
-    # 调 `attributedStringByAppendingAttributedString_` 会 AttributeError（踩过）。
-    out = NSMutableAttributedString.alloc().init()
-    for raw in (text or "").splitlines():
-        s = raw.rstrip()
-        # ⚠️ 代码围栏整行丢掉。不丢的话，下面那句 `.replace("`", "")` 会把
-        #    ```bash 剥成光秃秃一个 "bash" 印在卡片上（收尾的 ``` 则变成空行）——
-        #    实测 3.6.5 的卡片就是这样，升级须知里多出一行孤零零的 "bash"。
-        #    引用块里的围栏（`> ```bash`）同样要丢 —— 只判开头会漏掉它。
-        _probe = s.lstrip()
-        if _probe.startswith("> "):
-            _probe = _probe[2:].lstrip()
-        if _probe.startswith("```"):
-            continue
-        if s.startswith("## ["):
-            size, w, alpha, before, body = 14.0, 0.45, 1.0, 16.0, s[3:]
-        elif s.startswith("### "):
-            size, w, alpha, before, body = 12.5, _STRONG, 0.98, 12.0, s[4:]
-        elif s.startswith("# "):
-            size, w, alpha, before, body = 15.0, 0.45, 1.0, 2.0, s[2:]
-        elif s.startswith("> "):
-            size, w, alpha, before, body = 12.0, 0.0, 0.72, 0.0, "      " + s[2:]
-        elif s.startswith(("- ", "* ")):
-            size, w, alpha, before, body = 12.0, 0.0, 0.88, 0.0, "   •  " + s[2:]
-        else:
-            size, w, alpha, before, body = 12.0, 0.0, 0.78, 0.0, s
-        body = body.replace("**", "").replace("`", "")
-        body = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", body)   # 链接只留文字
-        one = NSAttributedString.alloc().initWithString_attributes_(
-            body + "\n",
-            {NSFontAttributeName: NSFont.systemFontOfSize_weight_(size, w),
-             NSForegroundColorAttributeName: NSColor.whiteColor().colorWithAlphaComponent_(alpha),
-             NSParagraphStyleAttributeName: para(before)})
-        out.appendAttributedString_(one)
-    return out
+    import changelog
+    if not seen or seen not in vers or cur not in vers:
+        return ""
+    return seen if changelog.ver_key(cur) > changelog.ver_key(seen) else ""
 
 
-def _add_log_view(parent, attr, x, y, w, h):
-    """在卡片里放一个**可滚动**的日志区。滚动条按需出现（overlay 风格）。
+def _rgb(tag: str, a: float = 1.0):
+    from AppKit import NSColor
+    r, g, b = TAG_RGB.get(tag, (1.0, 1.0, 1.0))
+    return NSColor.colorWithSRGBRed_green_blue_alpha_(r, g, b, a)
 
-    ⚠️ 四件套缺一不可，否则滚不动或不换行：
-      `setVerticallyResizable_` + `setMaxSize_`（文本长了要长高）
-      `textContainer().setWidthTracksTextView_`（宽度跟着视图走才会自动折行）
+
+def _label(text: str, size: float, *, alpha=1.0, weight=_W, color=None, wrap=False):
+    from AppKit import (NSColor, NSFont, NSLineBreakByTruncatingTail,
+                        NSLineBreakByWordWrapping, NSMakeRect, NSTextField)
+    lb = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10))
+    lb.setEditable_(False); lb.setSelectable_(False)
+    lb.setBezeled_(False); lb.setDrawsBackground_(False)
+    lb.setFont_(NSFont.systemFontOfSize_weight_(size, weight))
+    lb.setTextColor_(color or NSColor.whiteColor().colorWithAlphaComponent_(alpha))
+    lb.setStringValue_(text)
+    if wrap:
+        lb.cell().setWraps_(True)
+        lb.cell().setLineBreakMode_(NSLineBreakByWordWrapping)
+        lb.setMaximumNumberOfLines_(0)
+    else:
+        lb.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
+    return lb
+
+
+def _fit_h(lb, w: float) -> float:
+    from AppKit import NSMakeRect
+    return float(lb.cell().cellSizeForBounds_(NSMakeRect(0, 0, w, 1e5)).height)
+
+
+def _chip(tag: str):
+    """标签小胶囊：同色淡底 + 同色字，圆角 4（比按钮的胶囊收敛，读作「标注」而不是「可点」）。
+
+    ⚠️ 底子与字分两层：NSTextField 的字贴着自己的顶画，直接给它上底色字会偏上（拍图量过）——
+       底子是一块 layer 视图，字 `sizeToFit` 后在里面竖直居中。
     """
-    from AppKit import (NSMakeRect, NSScrollView, NSTextView, NSViewWidthSizable,
-                        NSScrollerStyleOverlay)
-    sc = NSScrollView.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
-    sc.setDrawsBackground_(False)
-    sc.setBorderType_(0)                                  # NSNoBorder
-    sc.setHasVerticalScroller_(True)
-    sc.setAutohidesScrollers_(True)
-    sc.setScrollerStyle_(NSScrollerStyleOverlay)
-    sc.setHorizontalScrollElasticity_(0)
-
-    tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
-    tv.setEditable_(False)
-    tv.setSelectable_(True)                               # 允许选中复制
-    tv.setDrawsBackground_(False)
-    tv.setRichText_(True)
-    tv.setTextContainerInset_((10.0, 6.0))
-    tv.setVerticallyResizable_(True)
-    tv.setHorizontallyResizable_(False)
-    tv.setAutoresizingMask_(NSViewWidthSizable)
-    tv.setMinSize_((0.0, h))
-    tv.setMaxSize_((w, 1e7))
-    tv.textContainer().setWidthTracksTextView_(True)
-    tv.textContainer().setContainerSize_((w, 1e7))
-    # ⚠️ NSTextView **没有** `setAttributedString_` —— 要走 textStorage（踩过）。
-    tv.textStorage().setAttributedString_(attr)
-    # ⚠️ 量高度这两个坑都踩过：
-    #   · `sizeToFit()` 在容器宽度定稿前算 -> 算**高**（滚到底有几百像素空白）；
-    #   · 直接量 `usedRect` 在视图还很矮时 -> 懒排版只排了可视部分 -> 算**矮**
-    #     （结果滚不到底，末尾内容永远看不到）。
-    # 正确做法：先把视图撑到很大迫使全量排版，再量，最后设成实测值。
-    lm = tv.layoutManager()
-    tc = tv.textContainer()
-    tv.setFrame_(NSMakeRect(0, 0, w, 1e6))
-    lm.ensureLayoutForTextContainer_(tc)
-    used = lm.usedRectForTextContainer_(tc).size.height
-    tv.setFrame_(NSMakeRect(0, 0, w, max(used + 16.0, h)))
-    sc.setDocumentView_(tv)
-    parent.addSubview_(sc)
-    return sc
+    from AppKit import NSMakeRect, NSView
+    box = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, CHIP_W, CHIP_H))
+    box.setWantsLayer_(True)
+    box.layer().setCornerRadius_(4.0)
+    box.layer().setBackgroundColor_(_rgb(tag, 0.18).CGColor())
+    lb = _label(tag, CHIP_SIZE, weight=_SEMI, color=_rgb(tag))
+    lb.sizeToFit()
+    f = lb.frame().size
+    lb.setFrame_(NSMakeRect((CHIP_W - f.width) / 2.0, (CHIP_H - f.height) / 2.0, f.width, f.height))
+    box.addSubview_(lb)
+    return box
 
 
-def build(version: str, summary: str, date: str = "", log: str = "",
-          flag_path: pathlib.Path | None = None, on_dismiss=None):
+def _rows(groups: list[dict], w: float) -> tuple[list, float]:
+    """列表区的子视图与总高。坐标**自顶向下**（放进翻转的文档视图）。"""
+    from AppKit import NSMakeRect
+    views, y = [], 0.0
+    for gi, g in enumerate(groups):
+        if gi:
+            y += VER_GAP
+        v = _label(g["version"], 13.0, weight=_SEMI)
+        v.sizeToFit()
+        vw = v.frame().size.width + 2.0
+        v.setFrame_(NSMakeRect(0, y, vw, 18.0))
+        views.append(v)
+        if g.get("date"):
+            d = _label(g["date"], 11.0, alpha=0.5)
+            d.setFrame_(NSMakeRect(vw + 6.0, y + 2.0, 120.0, 15.0))
+            views.append(d)
+        y += 18.0 + 6.0
+        for tag, text in g["items"]:
+            tx = CHIP_W + 8.0 if tag else 12.0
+            lb = _label(text, ITEM_SIZE, alpha=0.9, wrap=True)
+            h = _fit_h(lb, w - tx)
+            lb.setFrame_(NSMakeRect(tx, y, w - tx, h))
+            if tag:
+                c = _chip(tag)
+                c.setFrame_(NSMakeRect(0, y, CHIP_W, CHIP_H))
+                views.append(c)
+            else:
+                dot = _label("·", ITEM_SIZE, alpha=0.5)
+                dot.setFrame_(NSMakeRect(2.0, y, 10.0, h))
+                views.append(dot)
+            views.append(lb)
+            y += h + ITEM_GAP
+    return views, max(0.0, y - ITEM_GAP)
+
+
+def _doc_class():
+    from AppKit import NSView
+    return objc_own.own("WhatsnewDoc", NSView, {"isFlipped": lambda self: True})
+
+
+def build(title: str, subtitle: str = "", groups: list[dict] | None = None, *,
+          body: str = "", note: str = "", buttons: list[tuple] = (), over=None):
     """构造并显示卡片。失败返回 None（调用方不必管）。
 
-    `log` 非空 -> 中间是**可滚动的完整更新日志**（所有版本，新的在上）；
-    为空 -> 退回"摘要几行"的紧凑版。两条路都是非模态、不抢焦点。
-
-    ⚠️ 只说明，不更新：卡片上的「立即更新」2026-10-12 删了（上课中更新会和录课抢主线程），
-       更新入口在开课前面板的就绪条上。
+    `groups`：`changelog.groups()` 的产物（版本小标题 + 带标签的条目）；`body`：没有列表时的一段话。
+    `buttons`：`[(标题, 回调, "primary"|"secondary"), …]`，从左到右摆、整体靠右；点哪颗都先关卡再回调。
+    `over`：叠在哪个窗口上方居中（开课面板）；`None` 放屏幕中上。
+    返回 `{"panel", "close", "_targets"}`（`_targets` 由调用方持住 —— target 是弱引用）。
     """
     try:
-        from AppKit import (NSButton, NSButtonTypeSwitch, NSColor, NSFont,
-                            NSMakeRect, NSLineBreakByWordWrapping, NSTextField,
-                            NSTextAlignmentLeft, NSWindowStyleMaskBorderless,
+        from AppKit import (NSButton, NSMakeRect, NSWindowStyleMaskBorderless,
                             NSWindowStyleMaskNonactivatingPanel)
+        inner = WIDTH - 2 * PAD
+        views, list_h = _rows(groups or [], inner) if groups else ([], 0.0)
+        body_lb = _label(body, ITEM_SIZE, alpha=0.9, wrap=True) if body else None
+        note_lb = _label(note, 11.0, alpha=0.6, wrap=True) if note else None
+        body_h = _fit_h(body_lb, inner) if body_lb else 0.0
+        note_h = _fit_h(note_lb, inner) if note_lb else 0.0
+        well_h = min(list_h, BODY_MAX_H) + (2 * 12.0 if views else 0.0)
 
-        # ⚠️ 摘要是从 CHANGELOG.md 里抠出来的 **Markdown**, 而这里只画纯文本 ——
-        # 不处理就会出现字面的 `**上面**`(实测踩过)。
-        summary_lines = [x.replace("**", "").replace("`", "")
-                         for x in (summary or "").splitlines() if x.strip()]
-        if not log and not summary_lines:
-            summary_lines = ["完整说明见仓库里的 CHANGELOG.md"]
-        body_h = LOG_H if log else len(summary_lines) * LINE_H + 10
-        h = PAD + TITLE_H + body_h + 12 + FOOT_H + PAD
-
-        # ---- 窗口 + 磨砂 chrome 全在 panel.py（**唯一定义点**），这里没有第二份配方 ----
+        h = (PAD + 24.0 + (18.0 if subtitle else 0.0) + 14.0
+             + (well_h + 12.0 if views else 0.0)
+             + (body_h + 12.0 if body_lb else 0.0)
+             + (note_h + 14.0 if note_lb else 0.0)
+             + (28.0 if buttons else 0.0) + PAD)
         fp = panel.build(NSMakeRect(0, 0, WIDTH, h),
                          NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
         p, ve = fp.window, fp.glass
-        # ⚠️ 这行**不是**配方的一部分：overlay（Titled）默认就有阴影，而 borderless
-        #    面板默认没有 —— 所以留在调用点，不进 panel.py。
-        p.setHasShadow_(True)
+        p.setHasShadow_(True)        # borderless 默认没阴影（Titled 的 overlay 才有）—— 不进配方
 
-        def label(text, y, size, alpha=1.0, bold=False, wrap=False):
-            lb = NSTextField.alloc().initWithFrame_(
-                NSMakeRect(PAD, y, WIDTH - 2 * PAD, LINE_H))
-            lb.setEditable_(False); lb.setSelectable_(False)
-            lb.setBezeled_(False); lb.setDrawsBackground_(False)
-            lb.setFont_(NSFont.systemFontOfSize_weight_(size, _W if not bold else 0.4))
-            lb.setTextColor_(NSColor.whiteColor().colorWithAlphaComponent_(alpha))
-            lb.setStringValue_(text)
-            lb.setAlignment_(NSTextAlignmentLeft)
-            lb.setLineBreakMode_(NSLineBreakByWordWrapping)
-            if wrap:
-                lb.setMaximumNumberOfLines_(0)
-            return lb
+        y = h - PAD - 24.0           # 窗口坐标不翻转：从顶往下减
+        t = _label(title, 17.0, weight=_SEMI)
+        t.setFrame_(NSMakeRect(PAD, y, inner, 24.0))
+        ve.addSubview_(t)
+        if subtitle:
+            y -= 18.0
+            s = _label(subtitle, 11.0, alpha=0.6)
+            s.setFrame_(NSMakeRect(PAD, y, inner, 16.0))
+            ve.addSubview_(s)
+        y -= 14.0
 
-        # 从顶部往下摆（这版窗口坐标是**不翻转**的，y=0 在底部，所以从 h 往下减）
-        y = h - PAD - TITLE_H
-        _title = f"ClassLive 已更新到 {version}" + (f" · {date}" if date else "")
-        ve.addSubview_(label(_title, y, 17.0, bold=True))
-
-        if log:
-            # ⭐ 日志区垫一块浅底（2026-10-13 设计评审）：原来文字直接浮在磨砂上，
-            #    看不出哪块能滚、滚到哪里为止。底子 = 卡片里「一个区域」的通用画法
-            #    （极淡白底 + 发丝边，与开课面板的卡片同一套分量）。
-            from AppKit import NSView
-            well = NSView.alloc().initWithFrame_(
-                NSMakeRect(PAD, FOOT_H + PAD, WIDTH - 2 * PAD, LOG_H))
+        if views:
+            # 列表垫一块浅底（极淡白底 + 发丝边，与开课面板的课程卡同一套分量）：看得出哪块能滚
+            from AppKit import NSColor, NSView
+            y -= well_h
+            well = NSView.alloc().initWithFrame_(NSMakeRect(PAD - 8.0, y, inner + 16.0, well_h))
             well.setWantsLayer_(True)
             _w = NSColor.whiteColor()
-            well.layer().setCornerRadius_(LOG_INSET)
+            well.layer().setCornerRadius_(10.0)
             well.layer().setBackgroundColor_(_w.colorWithAlphaComponent_(0.05).CGColor())
             well.layer().setBorderWidth_(0.5)
             well.layer().setBorderColor_(_w.colorWithAlphaComponent_(0.10).CGColor())
             ve.addSubview_(well)
-            _add_log_view(ve, _log_attr(log), PAD + 1.0, FOOT_H + PAD + 1.0,
-                          WIDTH - 2 * PAD - 2.0, LOG_H - 2.0)
-        else:
-            for ln in summary_lines:
-                y -= LINE_H
-                ve.addSubview_(label(ln, y, 12.5, alpha=0.92))
-
-        # ---- 底部：勾选框 + 按钮 ----
-        # ⚠️ 原来这里还有一行常驻状态（「当前 X」）—— 那是给「立即更新」按钮当上下文的；
-        #    2026-10-12 那颗按钮挪去了开课面板，这行就只剩复述标题里的版本号。2026-10-13 删掉。
-        fy = PAD
-        state_holder = {"skip": False}
-
-        def on_close(_=None):
-            try:
-                if state_holder["skip"] and flag_path:
-                    # ⚠️ 写**版本号**而不是 "1"：跳过只对**这个版本**生效，
-                    # 出了新版本要重新弹（作者 2026-09-25 定的节奏）。
-                    # 写 "1" 会让它变成**永久关闭**，而且没有恢复入口 ——
-                    # VS Code 就是栽在这上面（issue #109912：误点后只能删掉整个
-                    # workspace 或全局状态，维护者 closed as out-of-scope，
-                    # 社区被迫去教改 state.vscdb 数据库）。
-                    flag_path.write_text(version, encoding="utf-8")
-            except Exception:                             # noqa: BLE001
-                pass
-            try:
-                p.orderOut_(None)
-            except Exception:                             # noqa: BLE001
-                pass
-            if on_dismiss:
-                try:
-                    on_dismiss()
-                except Exception:                         # noqa: BLE001
-                    pass
-
-        chk = NSButton.alloc().initWithFrame_(NSMakeRect(PAD, fy + 4, 190.0, 22.0))
-        chk.setButtonType_(NSButtonTypeSwitch)
-        chk.setTitle_("本版本不再提示")
-        chk.setFont_(NSFont.systemFontOfSize_(12.0))
-        try:
-            chk.setContentTintColor_(NSColor.whiteColor().colorWithAlphaComponent_(0.85))
-        except Exception:                                 # noqa: BLE001
-            pass
-
-        def toggle(_=None):
-            state_holder["skip"] = bool(chk.state())
-
-        btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(WIDTH - PAD - 92.0, fy + 2, 92.0, 28.0))
-        btn.setTitle_("知道了")
-        panel.style_primary(btn, "知道了")                # 卡上唯一的动作 = 主按钮（与功能介绍卡同一套）
-
-        _wire = _make_target(toggle)
-        _wire2 = _make_target(on_close)
-        chk.setTarget_(_wire); chk.setAction_("clicked:")
-        btn.setTarget_(_wire2); btn.setAction_("clicked:")
-        ve.addSubview_(chk); ve.addSubview_(btn)
-        targets = [_wire, _wire2]
-
-        p.orderFrontRegardless()      # ⚠️ 不是 makeKeyAndOrderFront —— 绝不抢焦点
-        return {"panel": p, "close": on_close, "_targets": targets}
-    except objc_own.ObjcNameCollision:
-        # ⚠️⚠️ **这一类不吞。**
-        # fail-soft 的道理是「卡片只是说明，不能因为它让课起不来」—— 那适用于
-        # AppKit 的偶发问题。但「有人撞了 ObjC 类名」是**程序缺陷**，不是偶发：
-        # 吞掉它，症状就精确回到 2026-09-26 那次「更新卡片静默变 None、而独立测试全绿」。
-        # 所以让它炸出来 —— 上课起不来的代价，小于一个静默失效的更新提示。
-        raise
-    except Exception:                                     # noqa: BLE001
-        # fail-soft 是本模块的**既定设计**（见文件头：它只是说明，不能因为它让课起不来）。
-        # 但它已经**两次**把真 bug 藏起来（ObjC 类名撞车、不可变的 NSAttributedString），
-        # 排查成本很高 —— 所以留一个显式开关，`CLASSLIVE_DEBUG=1` 就能看到真实异常。
-        if os.environ.get("CLASSLIVE_DEBUG"):
-            import traceback
-            traceback.print_exc()
-        return None
-
-
-#: 更新提示卡最多列几条看点（作者 2026-10-14：「写三四条最主要的功能」）。
-OFFER_POINTS = 4
-
-
-def offer_points(summary: str, n: int = OFFER_POINTS) -> tuple[list[str], int]:
-    """`changelog.between(...)` 的输出 → (卡上列的前 n 条, 没列出来的条数)。纯函数。
-
-    只有一个版本时去掉行首的「3.9.5 · 」（标题里已经写了版本号）；跨版本时保留，好分清是哪版的。
-    `**` / 反引号去掉（卡片画纯文本，留着会显示字面星号）。
-    """
-    rows = [x.replace("**", "").replace("`", "").strip().lstrip("·-•* ").strip()
-            for x in (summary or "").splitlines() if x.strip()]
-    rows = [r for r in rows if r]
-    vers = {r.split(" · ", 1)[0] for r in rows if " · " in r}
-    if len(vers) == 1 and all(" · " in r for r in rows):
-        rows = [r.split(" · ", 1)[1] for r in rows]
-    return rows[:n], max(0, len(rows) - n)
-
-
-def build_offer(current: str, latest: str, summary: str, *, on_now, on_later, over=None):
-    """「有新版本」提示卡：看点 3–4 条 +「下课后自动装」/「现在更新」。失败返回 None。
-
-    ⭐ 开课面板一打开、查到新版本就弹（作者 2026-10-14）。**非模态**、不抢焦点（同 `build`
-       那张卡的理由：这是上课用的工具，模态框会卡住主任务）。不理它也行 —— 下课退出时的
-       自动更新照旧在（`update.auto_update`）。
-    `on_now()` / `on_later()` 由开课面板接（起更新 / 记「下课后装」）；卡片自己只负责关掉。
-    `over`：叠在哪个窗口上方居中（开课面板）；`None` 就放屏幕中上。
-    """
-    try:
-        from AppKit import (NSButton, NSColor, NSFont, NSMakeRect, NSTextField,
-                            NSLineBreakByTruncatingTail, NSWindowStyleMaskBorderless,
-                            NSWindowStyleMaskNonactivatingPanel)
-        pts, more = offer_points(summary)
-        if not pts:
-            pts = ["完整说明见仓库里的 CHANGELOG.md"]
-        w = 520.0
-        lines = pts + (["……更多改动装好后在「已更新」卡片里看"] if more else [])
-        h = PAD + 26.0 + 20.0 + 12.0 + len(lines) * LINE_H + 12.0 + 18.0 + 14.0 + 28.0 + PAD
-        fp = panel.build(NSMakeRect(0, 0, w, h),
-                         NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
-        p, ve = fp.window, fp.glass
-        p.setHasShadow_(True)
-
-        def label(text, y, size, alpha=1.0, weight=_W, lh=LINE_H):
-            lb = NSTextField.alloc().initWithFrame_(NSMakeRect(PAD, y, w - 2 * PAD, lh))
-            lb.setEditable_(False); lb.setSelectable_(False)
-            lb.setBezeled_(False); lb.setDrawsBackground_(False)
-            lb.setFont_(NSFont.systemFontOfSize_weight_(size, weight))
-            lb.setTextColor_(NSColor.whiteColor().colorWithAlphaComponent_(alpha))
-            lb.setStringValue_(text)
-            lb.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)   # 一条一行，长了省略号
-            ve.addSubview_(lb)
-            return lb
-
-        y = h - PAD - 26.0
-        label(f"有新版本 {latest}", y, 17.0, weight=0.4, lh=26.0)
-        y -= 20.0
-        label(f"你现在是 {current}", y, 11.0, alpha=0.62, lh=18.0)
-        y -= 12.0
-        for i, ln in enumerate(lines):
-            y -= LINE_H
-            label(("·  " + ln) if i < len(pts) else ln, y, 12.5 if i < len(pts) else 11.0,
-                  alpha=0.92 if i < len(pts) else 0.62)
-        y -= 12.0 + 18.0
-        label("不急的话点「下课后自动装」：这节课照旧，下课关掉后在后台装好。", y, 11.0,
-              alpha=0.62, lh=18.0)
+            vis_h = well_h - 24.0
+            doc = _doc_class().alloc().initWithFrame_(NSMakeRect(0, 0, inner, list_h))
+            for v in views:
+                doc.addSubview_(v)
+            sc = panel.make_scroll_view(NSMakeRect(PAD, y + 12.0, inner, vis_h),
+                                        has_vertical=list_h > vis_h)
+            sc.setDocumentView_(doc)
+            ve.addSubview_(sc)
+            y -= 12.0
+        if body_lb:
+            y -= body_h
+            body_lb.setFrame_(NSMakeRect(PAD, y, inner, body_h))
+            ve.addSubview_(body_lb)
+            y -= 12.0
+        if note_lb:
+            y -= note_h
+            note_lb.setFrame_(NSMakeRect(PAD, y, inner, note_h))
+            ve.addSubview_(note_lb)
 
         done = {"v": False}
 
@@ -383,54 +236,39 @@ def build_offer(current: str, latest: str, summary: str, *, on_now, on_later, ov
                         traceback.print_exc()
             return go
 
-        b_now = NSButton.alloc().initWithFrame_(NSMakeRect(w - PAD - 104.0, PAD, 104.0, 28.0))
-        panel.style_primary(b_now, "现在更新")
-        b_later = NSButton.alloc().initWithFrame_(NSMakeRect(w - PAD - 104.0 - 10.0 - 120.0, PAD,
-                                                             120.0, 28.0))
-        panel.style_secondary(b_later, "下课后自动装")
-        t_now, t_later = _make_target(_pick(on_now)), _make_target(_pick(on_later))
-        b_now.setTarget_(t_now); b_now.setAction_("clicked:")
-        b_later.setTarget_(t_later); b_later.setAction_("clicked:")
-        ve.addSubview_(b_later); ve.addSubview_(b_now)
+        targets, x = [], WIDTH - PAD
+        for text, fn, kind in reversed(list(buttons)):
+            bw = max(80.0, 26.0 + 13.5 * len(text))
+            x -= bw
+            b = NSButton.alloc().initWithFrame_(NSMakeRect(x, PAD, bw, 28.0))
+            (panel.style_primary if kind == "primary" else panel.style_secondary)(b, text)
+            tg = panel.make_button_target(_pick(fn))
+            b.setTarget_(tg); b.setAction_("clicked:")
+            ve.addSubview_(b)
+            targets.append(tg)
+            x -= 10.0
 
         if over is not None:
             try:
                 f = over.frame()
-                p.setFrameOrigin_((f.origin.x + (f.size.width - w) / 2.0,
+                p.setFrameOrigin_((f.origin.x + (f.size.width - WIDTH) / 2.0,
                                    f.origin.y + f.size.height - h - 120.0))
             except Exception:                             # noqa: BLE001
                 pass
-        p.orderFrontRegardless()      # ⚠️ 不抢焦点（同 `build`）
-        return {"panel": p, "close": _close, "_targets": [t_now, t_later]}
+        p.orderFrontRegardless()      # ⚠️ 不是 makeKeyAndOrderFront —— 绝不抢焦点
+        return {"panel": p, "close": _close, "_targets": targets, "height": h}
     except objc_own.ObjcNameCollision:
-        raise                         # 程序缺陷，不吞（同 `build`）
+        # ⚠️⚠️ **这一类不吞**：撞 ObjC 类名是程序缺陷，不是偶发 —— 吞掉就回到 2026-09-26
+        #    「卡片静默变 None、独立测试全绿」那次事故。上课起不来的代价小于静默失效。
+        raise
     except Exception:                                     # noqa: BLE001
+        # fail-soft 曾两次藏住真 bug（类名撞车、不可变的 NSAttributedString）→ 留个开关看真异常
         if os.environ.get("CLASSLIVE_DEBUG"):
             import traceback
             traceback.print_exc()
         return None
 
 
-def _make_target(cb):
-    """包一个 ObjC target 对象。**定义点已经搬到 `panel.make_button_target`。**
-
-    ⚠️ 原来这里与 `overlay._make_button_target` 是两份逐字节相同的拷贝，共用
-       `objc_own` 的同一个 key —— 也就是**改其中任意一份的闭包体，三处行为会一起变，
-       但只有先被调用的那一份实现生效**，另两份成了摆设。2026-09-28 OCR 审计指出，
-       现在只剩 `panel` 那一份真实现。
-    ⚠️ 必须由调用方持引用，否则被 GC（`setTarget_` 是弱引用）。
-    """
-    return panel.make_button_target(cb)
-
-
 def seen_flag_path() -> pathlib.Path:
+    """`.update-seen`：上次「已更新到 X」报到哪一版（内容是版本号）。"""
     return pathlib.Path(__file__).with_name(".update-seen")
-
-
-def skip_flag_path() -> pathlib.Path:
-    """勾了「本版本不再提示」就写这个文件，**内容是版本号**。
-
-    ⚠️ 存版本号而不是 `1`：跳过只对**该版本**生效，新版本会重新弹。
-    判定在 `main._whatsnew_payload`（它取 `max(.update-seen, .update-skip)`）。
-    """
-    return pathlib.Path(__file__).with_name(".update-skip")

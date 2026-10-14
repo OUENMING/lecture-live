@@ -1649,9 +1649,9 @@ def _vault_section() -> None:
           [E.update_click_plan({"kind": k}, u) for k, u in
            (("available", True), ("unfinished", False), ("blocked", False), ("available", False))]
           == ["busy", "unfinished", "blocked", "available"])
-    check("草稿模型可加装 → `✓  语音模型  已就绪 · 可加草稿模型`",
+    check("草稿模型没装 → `✓  语音模型  已就绪 · 缺草稿模型`",
           _t({"key": "models", "state": "ok", "offer_draft": True})
-          == "✓  语音模型  已就绪 · 可加草稿模型")
+          == "✓  语音模型  已就绪 · 缺草稿模型")
 
     # ---- 翻译引擎那一格（2026-10-04）：「未配」→「没配 key」，说清楚要做什么 ----
     check("翻译引擎没配 → `—  翻译引擎  没配 key`（字面量）",

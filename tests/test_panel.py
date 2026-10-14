@@ -313,7 +313,7 @@ def main() -> int:
     #    这里只断言**两个模块都带着自己的对象工厂**——事故现场是 ObjC 类名撞车。
     check("两个模块都导进来了、且各自的对象工厂在",
           callable(getattr(overlay, "Overlay", None))
-          and callable(getattr(whatsnew, "skip_flag_path", None)),
+          and callable(getattr(whatsnew, "build", None)),
           f"overlay.Overlay={getattr(overlay, 'Overlay', None)}")
     with restore_window_file():
         ov = overlay.Overlay()
@@ -512,7 +512,10 @@ def main() -> int:
     _dbg_prev = os.environ.get("CLASSLIVE_DEBUG")
     os.environ["CLASSLIVE_DEBUG"] = "1"
     try:
-        card = whatsnew.build("0.0.0", "测试摘要", date="2026-09-26")
+        card = whatsnew.build("有新版本 0.0.0", "你现在是 0.0.-1",
+                              [{"version": "0.0.0", "date": "2026-09-26",
+                                "items": [("新增", "测试摘要"), ("", "没标签的")]}],
+                              buttons=[("知道了", lambda: None, "primary")])
     finally:
         if _dbg_prev is None:
             os.environ.pop("CLASSLIVE_DEBUG", None)
@@ -549,7 +552,7 @@ def main() -> int:
 
     panel.build = _boom
     try:
-        whatsnew.build("0.0.0", "撞名测试", date="2026-09-26")
+        whatsnew.build("撞名测试", body="撞名测试")
         check("撞名不会被 whatsnew 的 fail-soft 吞成 None", False, "被吞了 —— 事故会复现")
     except objc_own.ObjcNameCollision:
         check("撞名不会被 whatsnew 的 fail-soft 吞成 None", True)

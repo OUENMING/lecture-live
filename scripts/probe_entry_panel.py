@@ -27,7 +27,9 @@
     PROBE_ZERO=1        零课程那一档（造几个假课件直接走批量那条路）；
                         再加 PROBE_ZERO_ADD=<课号> 就在 3 秒后建这门课
                         ⚠️ 这两个是**在 3 秒后**才动手的 —— 起完先别急着关
-    PROBE_UPDATE=available|unfinished|blocked  就绪条末尾的「更新」那一格（offer/apply 是桩，不联网）
+    PROBE_UPDATE=available|unfinished|blocked  就绪条末尾的「更新」那一格 +「有新版本」卡（offer/apply 是桩，不联网）
+    PROBE_UPDATED=<版本> 假装上次看过这一版 →「已更新到 X」卡（`.update-seen` 指进隔离根）
+    PROBE_DRAFT=1       假装流式草稿模型没装 →「还没装」卡（下载是桩）
     PROBE_ICSDRAG=1     验 `.ics` 在**悬停判据**上的真值（`acceptable` / `drop_split`）
                         ⚠️ **它验不了"高亮画上去了没有"** —— 那一步靠
                         `tests/test_panel.py` 第 ⑨ 组（真 `_enter`）+ 你手拖一次
@@ -259,10 +261,29 @@ def main() -> int:
     # `PROBE_UPDATE=available|unfinished|blocked` —— 看就绪条末尾「更新」那一格（2026-10-12）。
     #    `offer` / `apply` / `defer_to_exit` 全换成桩：**不联网、不 pull、不写 ~/.classlive**。
     #    「现在更新」的桩 3 秒后报「拉到了新代码」→ 面板走 `on_restart`（这里只打印）。
+    # ⚠️ `.update-seen` 一律指进隔离根（「已更新到 X」那张卡弹之前会写它）：
+    #    `PROBE_UPDATED=<版本>` = 假装上次看过这一版 → 弹「已更新」卡；不给 = 文件不存在（全新安装，不弹）。
+    import whatsnew as _WN
+    _seen = ISO / ".update-seen"
+    if os.environ.get("PROBE_UPDATED"):
+        _seen.write_text(os.environ["PROBE_UPDATED"], encoding="utf-8")
+    _WN.seen_flag_path = lambda: _seen
+    # `PROBE_DRAFT=1` —— 假装流式草稿模型没装、这台机器用得上 → 弹「还没装」卡（下载是桩，不联网）
+    if os.environ.get("PROBE_DRAFT"):
+        import doctor as _D
+        import models as _M
+        _real_present = _D.model_present
+        _D.model_present = lambda p: False if p == _M.NEMOTRON.path else _real_present(p)
+        entry_panel._draft_wanted = lambda: True
+        import update as _U0
+        _U0.download_model = lambda m, say=None: (print(f"（桩）下载 {getattr(m, 'path', m)}"), {"ok": True, "error": ""})[1]
     _upd_kind = os.environ.get("PROBE_UPDATE")
     if _upd_kind:
+        import changelog as _CL
         import update as _U
-        _U.offer = lambda: {"kind": _upd_kind, "current": "3.8.9", "latest": "3.9.0",
+        _log = (pathlib.Path(entry_panel.__file__).with_name("CHANGELOG.md")).read_text(encoding="utf-8")
+        _U.offer = lambda: {"kind": _upd_kind, "current": "3.9.4", "latest": "3.9.5",
+                            "groups": _CL.groups(_log, "3.9.4", "3.9.5"),
                             "summary": "· 定稿转写走云端，英文更准\n· 草稿换成流式，不再回改",
                             "message": {"unfinished": "补依赖（requirements 变了）",
                                         "blocked": "你改过这个文件：main.py"}.get(_upd_kind, "")}
@@ -273,7 +294,7 @@ def main() -> int:
                     on_line(_s)
                 time.sleep(1.5)
             # 与真 `update.apply` 同一份契约：成功时 `user_msg` 为空（非空 = 收尾没成）
-            return {"ok": True, "pulled": _upd_kind == "available", "after": "3.9.0",
+            return {"ok": True, "pulled": _upd_kind == "available", "after": "3.9.5",
                     "user_msg": ""}
         _U.apply = _fake_apply
         _U.defer_to_exit = lambda v: (print(f"（桩）下课后自动装 {v}"), True)[1]

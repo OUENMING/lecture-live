@@ -235,3 +235,46 @@ def ver_key(v: str) -> tuple:
                 break
         parts.append(int(num) if num else 0)
     return tuple(parts)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 更新卡片上的「近期更新」列表（2026-10-14 作者给的样子：每版一个标题，每条前一个标签）
+# ══════════════════════════════════════════════════════════════════════
+
+#: 看点行首可带的标签。卡片按它上色；不带的（3.9.4.1 及更早）照旧显示，只是没有标签。
+TAGS = ("新增", "改进", "修复")
+
+
+def split_tag(line: str) -> tuple[str, str]:
+    """`"[新增] 某某"` → `("新增", "某某")`；没有标签 → `("", 原文)`。纯函数。
+
+    认半角 `[ ]` 和全角 `【 】`（手写时两种都会出现）；标签不在 `TAGS` 里就不认，原样返回 ——
+    `[3.9.4]` 这种别的方括号不能被当成标签吃掉。
+    """
+    s = (line or "").strip()
+    m = re.match(r"^[\[【]\s*([^\]】]{1,4})\s*[\]】]\s*(.*)$", s)
+    if m and m.group(1) in TAGS and m.group(2).strip():
+        return m.group(1), m.group(2).strip()
+    return "", s
+
+
+def groups(text: str, lo: str, hi: str, max_items: int = 10,
+           max_versions: int = 4) -> list[dict]:
+    """`(lo, hi]` 区间里每个版本一组：`[{"version", "date", "items": [(tag, text), …]}]`，新的在前。
+
+    条目来自 `summary()`（「更新看点」小节，没有就退回抓 `### Added` 等）。区间规则同 `between`：
+    上界是 `hi`，比它新的不报；`lo` 不在库里 → 只报 `hi` 这一版。`hi` 不在库里 → 空。
+    `max_versions`：一下跳了很多版时只列最近几版（卡片不是完整日志）。
+    """
+    vers = versions(text)
+    if hi not in vers:
+        return []
+    i = vers.index(hi)
+    j = vers.index(lo) if lo in vers else i + 1
+    out = []
+    for v in vers[i:j][:max_versions]:
+        items = [split_tag(x) for x in summary(section(text, v), max_items).splitlines()
+                 if x.strip()]
+        if items:
+            out.append({"version": v, "date": date(text, v), "items": items})
+    return out

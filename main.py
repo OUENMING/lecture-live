@@ -796,7 +796,8 @@ def _whatsnew_payload() -> dict | None:
     """该不该弹「本次更新」卡片；该的话返回 payload dict，否则 None。
 
     ⚠️ **只判断、不弹** —— 弹的动作交给 UI 层：
-      · 悬浮窗模式 → `overlay.show()` 里用**非模态毛玻璃卡片**（见 whatsnew.py）；
+      · 悬浮窗模式 → **不弹**：2026-10-14 起「已更新到 X」改在开课面板上弹（`entry_panel` + whatsnew.py，
+        每版一次），课上悬浮窗旁边那张长日志卡取消了；
       · 终端模式   → 印一个字符框。
     为什么不在这里弹：① 这里是 `run()` 第一行，那时 app 的 activation policy 还是
     `Regular`（实测），NSAlert 会带 Python 的图标 + 在 Dock 里冒出来；② 模态框会
@@ -921,7 +922,7 @@ def _print_whatsnew_box(version: str, date: str, summary: str,
 
 def _show_whats_new(version: str, date: str, summary: str,
                     log: str = "") -> None:
-    """[已弃用] 原来的 NSAlert 弹框。保留仅为兼容，新路径走 whatsnew.py 的非模态卡片。"""
+    """[已弃用] 原来的 NSAlert 弹框。保留仅为兼容，现在只印终端字符框。"""
     _print_whatsnew_box(version, date, summary, log)
 
 
@@ -1484,7 +1485,6 @@ def run(args) -> None:
         # late binding: start_new_topic 定义在下面的问答状态块里, 这里只是把回调
         # 装上(按钮到点名前一定已经定义好了)。
         on_new_topic=lambda: start_new_topic(),
-        whatsnew=whatsnew,
         # ⭐ 采集面 ⑦：UI 使用度。⚠️ `tester` 是 `None` 时传 `None`（不是传个假
         #    回调）—— `Overlay` 那边默认就是空 lambda，**零开销零行为**。
         note=(tester.note_ui if tester is not None else None),
@@ -2728,8 +2728,7 @@ def check_clock_and_device(src, source_name: str, notify, state: dict, on_wake=N
 
 
 def _load_overlay(on_quit=None, on_translate=None, on_submit=None,
-                  on_ask=None, on_new_topic=None, on_lost=None, whatsnew=None,
-                  note=None):
+                  on_ask=None, on_new_topic=None, on_lost=None, note=None):
     """建悬浮窗。**失败回退终端 UI**（`drives_appkit` 为假 = 回退了）。
 
     ⚠️⚠️ **这一层的形参必须与调用点**逐字**对齐**（2026-09-30 事故）：
@@ -2745,8 +2744,7 @@ def _load_overlay(on_quit=None, on_translate=None, on_submit=None,
         from overlay import Overlay
         o = Overlay(on_quit=on_quit, on_translate=on_translate,
                     on_submit=on_submit, on_ask=on_ask,
-                    on_new_topic=on_new_topic, on_lost=on_lost, whatsnew=whatsnew,
-                    note=note)
+                    on_new_topic=on_new_topic, on_lost=on_lost, note=note)
         o.show()
         return o
     except Exception as e:       # noqa: BLE001

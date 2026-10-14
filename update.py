@@ -1301,14 +1301,15 @@ def offer() -> dict:
 
     返回 `{"kind", "current", "latest", "summary", "message"}`，`kind` 四选一：
       `none`        没事 / 查不到 / 开发分支 —— **不显示**（断网时与以前一模一样）
-      `available`   有新版本，`summary` 是 (current, latest] 的看点（读**远端**那份 CHANGELOG）
+      `available`   有新版本，`summary` 是 (current, latest] 的看点（读**远端**那份 CHANGELOG）；
+                    `groups` 是同一区间按版本分组、带标签的版本（「有新版本」卡用，`changelog.groups`）
       `unfinished`  代码已是新的，但依赖 / 必下模型还没补（比如退出时的后台更新只拉了代码）
       `blocked`     有新版本但装不上（用户改过文件 / 本地提交过），`message` 说清楚为什么
     ⚠️ 不写任何文件。开发分支（作者自己的 worktree）一律 `none` —— 别在开发机上天天提示。
     """
     import changelog
     out = {"kind": "none", "current": version(), "latest": "", "summary": "", "message": "",
-           "quiet": False}
+           "quiet": False, "groups": []}
     if os.environ.get("CLASSLIVE_NO_UPDATE_CHECK"):
         return out
     try:
@@ -1327,6 +1328,7 @@ def offer() -> dict:
         remote_log = remote_file("CHANGELOG.md")
         out["latest"] = remote_file("VERSION").strip() or "?"
         out["summary"] = changelog.between(remote_log, out["current"], out["latest"])
+        out["groups"] = changelog.groups(remote_log, out["current"], out["latest"])
         if st["ahead"] > 0:
             out.update(kind="blocked", message=_friendly(
                 {"ok": False, "error": "分叉"}))

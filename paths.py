@@ -196,7 +196,7 @@ def key_cleared_flag(*, root=None) -> pathlib.Path:
        安装目录会被 `git pull` 重写，而标记一丢，那次搬家会**再跑一遍** ——
        那时用户早就填好新的通行码了。同 `ready_state` 那条「用户的决定不能住会被清掉的地方」。
     ⚠️ 存版本号而不是 `1`：将来若再来一次同样的搬家，改 `keyentry.CLEAR_VERSION` 即可
-       复用同一份文件（形状照 `whatsnew.skip_flag_path`）。
+       复用同一份文件（形状照 `whatsnew.seen_flag_path`）。
     """
     return _root(root) / "key-cleared"
 

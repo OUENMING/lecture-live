@@ -94,7 +94,9 @@ def models_item(states: dict, *, draft_wanted: bool = False) -> dict:
 
     `draft_wanted` = 这台机器装了流式草稿模型会不会用上（`draft_engine.want_model()`，
     调用方算）。必下的都齐了、它又还没装 → 结果带 `offer_draft=True`，点这一项就下它。
-    ⚠️ 它是**可选**的（纪律 3 的同族）：状态照旧 OK，只多一个入口，绝不自动下。
+    ⚠️ 2026-10-14 起它算**必装**（作者），但**不拦开课**：状态照旧 OK（缺它只是草稿退回 Parakeet），
+       面板另弹一张「还没装」小卡；**开课前不自动下**（464 MB 会和上课抢 Wi-Fi），关掉面板 /
+       下课退出后由 `update.spawn_draft_model_download` 在后台静默下。
     """
     out = _models_item(states)
     if (draft_wanted and out["state"] == OK

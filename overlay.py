@@ -813,8 +813,7 @@ def _open_wrapup_card(ov, wrapup_mod, status: str):
 
 class Overlay:
     def __init__(self, on_quit=None, on_translate=None, on_submit=None,
-                 on_ask=None, on_new_topic=None, on_lost=None, whatsnew=None,
-                 note=None):
+                 on_ask=None, on_new_topic=None, on_lost=None, note=None):
         # ⚠️ 窗口 chrome / 材质 / scrim 那几样已经搬进 panel.py 了，这里的名字要
         #    跟着删干净 —— 留着会让「材质在哪配的」这个问题仍然答成 overlay.py，
         #    等于配方原料还散在两个文件里。
@@ -849,9 +848,6 @@ class Overlay:
         # 我们自己调 setFrame（展开 / 答案接管）时置真 —— 让 _sync_panel_size
         # 别把我们自己的改动当成用户拖了窗口。见该函数的说明。
         self._programmatic_resize = False
-        # 「本次更新」卡片的内容 (version, date, 摘要) 或 None；由 show() 弹（见 whatsnew.py）
-        self._whatsnew = whatsnew
-        self._whatsnew_card = None      # 持有卡片对象，否则 ObjC 侧被 GC
         self._on_quit = on_quit or (lambda: None)
         self._on_lost = on_lost or (lambda: None)
         self._on_translate = on_translate or (lambda on: None)
@@ -2006,35 +2002,6 @@ class Overlay:
         # 一次都不会触发。踩过: 三轮验证全绿, 因为都用手动 makeFirstResponder_ 驱动,
         # 没复现"启动即编辑态"这个真实状态。清掉之后, 只有用户真的点了输入框才进编辑态。
         self._release_focus()
-        self._show_whatsnew_card()
-
-    def _show_whatsnew_card(self) -> None:
-        """更新后弹一张**非模态毛玻璃卡片**（见 whatsnew.py）。
-
-        ⚠️ 三条刻意的选择：
-          · **非模态** —— 不 runModal。这是上课录课用的工具，一个 on-load 的模态框
-            会**直接卡住主任务**（Apple HIG 也明说别用 alert 传达纯信息、别在 on-load 打扰）。
-            它只是浮在旁边，你不理它也照样开始转录；
-          · **在这里弹而不是 main.run() 开头** —— 那时 app 的 activation policy 还是
-            `Regular`（实测），NSAlert 会带**宿主解释器（Python）的图标**并在 Dock 里冒出来。
-            走到这里时 `setActivationPolicy_(Accessory)` 已经执行过（本方法上面几行）；
-          · **失败静默** —— 它只是说明，不能因为它让课起不来。
-        """
-        if not self._whatsnew:
-            return
-        try:
-            import whatsnew
-            # ⚠️ 不再给「立即更新」（2026-10-12）：上课中更新会和录课抢主线程 / 半新半旧，
-            #    更新入口挪到了开课前面板的就绪条上（`entry_panel` 的「更新」那一格）。
-            self._whatsnew_card = whatsnew.build(
-                **self._whatsnew, flag_path=whatsnew.skip_flag_path())
-            if self._whatsnew_card is None:
-                return
-            # ---- 定位: 交给 `panel.place_beside`（**唯一定义点**）----
-            # 2026-09-28 从这里提炼出去的：收尾卡要用同一套摆法，两份实现必然漂。
-            panel.place_beside(self._panel, self._whatsnew_card["panel"])
-        except Exception:                                 # noqa: BLE001
-            self._whatsnew_card = None
 
     def overflow_stats(self) -> dict:
         """只读转发 `TranscriptView.overflow_stats()`（收尾时 `main` 交给测试报告）。"""

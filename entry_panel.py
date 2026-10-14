@@ -196,7 +196,7 @@ def ready_short(it: dict) -> str:
             return "下载中…"
         if it.get("cloud_off"):
             return "已就绪 · 全本地"         # 关了云端转写要看得见（它不再是常驻开关）
-        return "已就绪 · 可加草稿模型" if it.get("offer_draft") else "已就绪"
+        return "已就绪 · 缺草稿模型" if it.get("offer_draft") else "已就绪"
     if it.get("key") == "update":
         if st == "busy":
             return "更新中…"
@@ -2241,7 +2241,14 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #     挂不上去；`S` 是模块级、且 `do_close` 里有一处统一的断环表。
         S["ready_targets"] = ready_targets
 
+    # ── 开课面板上的小卡（「已更新到 X」/「有新版本」/「草稿模型还没装」）──────────
+    #    ⭐ 2026-10-14 作者定：三张卡同一个画法（`whatsnew.build`），**一次只出一张**，排队；
+    #       关掉一张再出下一张。开课 / 关面板时整队收掉（`_close_offer`）。
     def _close_offer() -> None:
+        S.pop("card_queue", None)
+        S.pop("card_trash", None)
+        S.pop("offer_kind", None)
+        S.pop("offer_make", None)
         c = S.pop("offer_card", None)
         if c:
             try:
@@ -2249,34 +2256,138 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             except Exception:                              # noqa: BLE001
                 pass
 
-    def _offer_card(offer: dict, gen) -> None:
-        """查到新版本 → 弹「有新版本」卡（看点 3–4 条 +「下课后自动装」/「现在更新」）。主线程。
+    def _pump_cards() -> None:
+        if S.get("offer_card"):
+            return
+        q = S.get("card_queue") or []
+        while q:
+            kind, make = q.pop(0)
+            c = make()
+            if c:
+                S["offer_card"], S["offer_kind"], S["offer_make"] = c, kind, make
+                return
 
-        ⭐ 2026-10-14 取代「每版都是 auto 就面板开着悄悄装」（`spawn_quiet_apply`）：作者要的是
-           打开就看得到、自己选。不理它也行 —— 下课退出时照旧自动装（`update.auto_update`）。
-        ⚠️ 这一版已经点过「下课后自动装」→ 不再弹（就绪条上「更新」那一格还在，想装随时点）。
+    def _card_done(fn):
+        """卡上按钮的回调：先让出「当前卡」的位置，再干正事，下一轮 runloop 出队里的下一张。"""
+        def go() -> None:
+            # ⚠️ 卡不能当场放掉：这正在它自己按钮的跟踪循环里（同 `_later` 那条）→ 先挪进回收篮，
+            #    关面板 / 开课时（`_close_offer`）一起放
+            S.setdefault("card_trash", []).append(S.pop("offer_card", None))
+            S.pop("offer_kind", None)
+            S.pop("offer_make", None)
+            fn()
+            _later(_pump_cards)
+        return go
+
+    def _queue_card(kind: str, make, *, preempt: tuple = ()) -> None:
+        """排一张卡。`make()` 返回 `whatsnew.build` 的产物（失败 None = 跳过）。
+        `preempt`：当前显示的是这几种就先收掉它、排到这张后面（「有新版本」比「已更新」要紧）。"""
+        q = S.setdefault("card_queue", [])
+        if S.get("offer_kind") == kind or any(k == kind for k, _ in q):
+            return
+        if S.get("offer_kind") in preempt:
+            c = S.pop("offer_card", None)
+            pk, pm = S.pop("offer_kind", None), S.pop("offer_make", None)
+            if c:
+                try:
+                    c["close"]()
+                except Exception:                          # noqa: BLE001
+                    pass
+            q.insert(0, (kind, make))
+            if pm is not None:
+                q.insert(1, (pk, pm))
+        else:
+            q.append((kind, make))
+        _pump_cards()
+
+    def _updated_card() -> None:
+        """升级后第一次打开面板：「已更新到 X」+ 这几版的看点（每版一次）。主线程。
+
+        ⭐ 取代课上悬浮窗旁边那张长日志卡（2026-10-14 作者：「取消原来的更新日志」）。
+        判据 `whatsnew.updated_from`（全新安装 / 降级 / 同版都不弹）；弹之前就把 `.update-seen`
+        写成当前版本 —— 每版只弹一次，不管点没点「知道了」。
         """
-        if _stale(gen, "update_gen") or S.get("offer_card"):
+        import changelog
+        import whatsnew
+        root = pathlib.Path(__file__).resolve().parent
+        try:
+            cur = (root / "VERSION").read_text(encoding="utf-8").strip()
+            text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        except OSError:
+            return
+        fp = whatsnew.seen_flag_path()
+        try:
+            seen = fp.read_text(encoding="utf-8").strip() if fp.exists() else ""
+        except OSError:
+            seen = ""
+        start = whatsnew.updated_from(seen, cur, changelog.versions(text))
+        if seen != cur and (start or not seen):
+            try:
+                fp.write_text(cur, encoding="utf-8")        # 全新安装：种下，下次升级才有起点
+            except OSError:
+                pass
+        gs = changelog.groups(text, start, cur) if start else []
+        if not gs:
+            return
+        _queue_card("updated", lambda: whatsnew.build(
+            f"已更新到 {cur}", f"从 {start} 升上来 · 这几版改了什么", gs,
+            buttons=[("知道了", _card_done(lambda: None), "primary")], over=win))
+
+    def _draft_card() -> None:
+        """流式草稿模型没装 → 提醒一次（2026-10-14 起它是必装的）。主线程。
+
+        可以先关掉：下课退出 / 不开课关面板时后台会静默下好（`update.spawn_draft_model_download`，
+        这条路 3.9.3 起就在）。⚠️ 用不上它的机器（内存不够 / 指定了 parakeet）不提醒。
+        """
+        if S.get("downloading"):
+            return
+        try:
+            import doctor
+            import models as models_mod
+            if doctor.model_present(models_mod.NEMOTRON.path) or not _draft_wanted():
+                return
+            size = models_mod.NEMOTRON.size
+        except Exception:                                  # noqa: BLE001
+            return
+        import whatsnew
+        _queue_card("draft", lambda: whatsnew.build(
+            "流式草稿模型还没装", "这一版起它是必装的",
+            body=f"装上后课上的中文草稿基本不再改来改去（实测回改 5.7% → 0.6%）。下载{size}，最好连着 Wi-Fi 下。",
+            note="现在不方便也没关系：关掉 ClassLive 后会在后台自动下好，下节课生效。",
+            buttons=[("稍后", _card_done(lambda: _status("好 —— 关掉 ClassLive 后在后台下草稿模型")),
+                      "secondary"),
+                     ("现在下载", _card_done(_download_draft), "primary")],
+            over=win))
+
+    def _offer_card(offer: dict, gen) -> None:
+        """查到新版本 → 「有新版本」卡：分版本、带标签的看点 +「稍后」/「立即更新」。主线程。
+
+        ⭐ 2026-10-14 作者：**不管怎么选，退出之后都自动装**。所以卡一出来就记下同意
+           （`defer_to_exit`）—— 这也盖住了 `manual` 版本：用户已经在卡上看过这几版的说明了。
+           「稍后」只是关卡；直接开课也一样（卡跟着收掉）。
+        ⚠️ 每次打开面板、只要还有新版本就弹（作者：这版是必要的更新）；装上了自然不再弹。
+        """
+        if _stale(gen, "update_gen"):
             return
         import update as update_mod
-        latest = offer.get("latest", "")
-        if latest and update_mod._consented_version() == latest:
-            return
-
-        def later() -> None:
-            S.pop("offer_card", None)
-            ok = update_mod.defer_to_exit(latest)
-            _status(f"好 —— 下课关掉后自动装 {latest}" if ok
-                    else "没记下来（写不进 ~/.classlive）—— 想装时点就绪条上的「更新」")
+        import whatsnew
+        latest, cur = offer.get("latest", ""), offer.get("current", "")
+        if latest:
+            update_mod.defer_to_exit(latest)
+        gs = offer.get("groups") or []
 
         def now() -> None:
-            S.pop("offer_card", None)
+            S.pop("card_queue", None)                      # 更新完面板会重开，排着的卡不用出了
             _run_update()
 
-        import whatsnew
-        S["offer_card"] = whatsnew.build_offer(
-            offer.get("current", ""), latest, offer.get("summary", ""),
-            on_now=now, on_later=later, over=win)
+        _queue_card("available", lambda: whatsnew.build(
+            f"有新版本 {latest}", f"你现在是 {cur}", gs,
+            body="" if gs else "完整说明见仓库里的 CHANGELOG.md",
+            note="点「稍后」或直接开课都行：下课关掉 ClassLive 后会在后台自动装好。",
+            buttons=[("稍后", _card_done(lambda: _status(f"好 —— 下课关掉后自动装 {latest}")),
+                      "secondary"),
+                     ("立即更新", _card_done(now), "primary")],
+            over=win), preempt=("updated", "draft"))
 
     def _show_update(offer: dict, gen) -> None:
         """后台查完新版本，回到主线程把「更新」那一格接到就绪条末尾。"""
@@ -2321,6 +2432,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         b.setAction_("act:")
         box.addSubview_(b)
         ready_buttons["update"] = b
+
+    if on_start is not None:
+        # 「已更新到 X」/「草稿模型还没装」：本地就能判断，面板一出来就排上（下一轮 runloop，面板先上屏）
+        card_gen = S["card_gen"] = object()
+        _later(lambda: None if _stale(card_gen, "card_gen") else _updated_card())
+        _later(lambda: None if _stale(card_gen, "card_gen") else _draft_card())
 
     if on_start is not None and ready_items:
         # ⚠️ 只在**开课前**的面板上查（上课中从菜单栏打开的那档 `on_start=None` 不查：课在录，不该更新）。
@@ -3713,6 +3830,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             S["ready_targets"] = None
             S["models_menu_targets"] = None
             S["update_gen"] = None           # 后台查更新回来时认得出「面板已经关了」
+            S["card_gen"] = None             # 排在下一轮 runloop 的小卡同理
             S["search_target"] = None
             S.pop("queue", None)
             # ⚠️ 映射表那批选择器也要断 —— 它们自己抓着菜单，而菜单抓着 target。

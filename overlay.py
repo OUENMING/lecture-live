@@ -455,6 +455,12 @@ EAR_QUIET_ALPHA = 0.22            # 安静(仍看得见: 「它在, 只是现在
 #: 其中 5.0–5.6 次是「暗不到 1 秒又亮」—— 就是作者说的「一下亮一下不亮」。
 #: 再保持 0.45 / 0.8 / 1.2 s → 每分钟切 4.5–5.9 / 2.9–4.3 / 2.3–3.1 次；取 0.8（短暗降到 0.6–1.2 次/分）。
 EAR_HOLD_S = 0.8
+
+# 顶栏按钮「鼠标不在就淡出」（2026-10-14 作者拍板，`docs/PLAN-396.md` §2）：
+#   上两小时课，❓ / 讲一下 / 双语 / – / ✕ 一直在视线里；鼠标进悬浮窗才出来。
+#   ⚠️ 「在听」小点、章节条、字幕**不跟着藏**（它们是内容 / 状态，不是控件）。
+BAR_GRACE_S = 3.0      # 刚开课先亮着这么久，让人知道按钮在哪
+BAR_LEAVE_S = 0.4      # 鼠标出去后再等这么久才淡出（擦边划过不闪）
 #: 章节条**至少**要有这么宽才显示（计划 §9.8 的三个条件之一）。
 #: ⚠️ 低于它时标签和点击区**一起隐藏** —— 半个标题比没有标题更让人分心，
 #:    而且点击区太小会变成"点不中"的挫败源。
@@ -814,7 +820,7 @@ def _open_wrapup_card(ov, wrapup_mod, status: str):
 def _pineapple_icon(pt: float = 16.0, scale: int = 2):
     """菜单栏的菠萝图标：**模板图**（只有黑与透明，系统负责明暗 / 选中态上色，见
     `_install_status_item` 的 HIG 引文）。SF Symbols 里没有菠萝，所以用 `NSBezierPath` 现画：
-    描边果身 + 两组斜线菱格 + 三片尖叶。线宽 1.15 / 0.8pt 是在 2x 位图上逐像素看过定的
+    描边果身 + 两组斜线菱格 + 五片细长叶。线宽 1.15 / 0.8pt 是在 2x 位图上逐像素看过定的
     （再粗菱格糊成一团、再细 1x 屏上断线）。画不出来回 `None`，由调用方退回 SF 耳机。
     ⚠️ 坐标按 18pt 画布写、整体缩到 `pt`（默认 16 = SF `headphones` 在菜单栏的尺寸，实测 16×16）。
     """
@@ -849,13 +855,24 @@ def _pineapple_icon(pt: float = 16.0, scale: int = 2):
                 grid.moveToPoint_(NSMakePoint(cx + k - 7, cy + 7)); grid.lineToPoint_(NSMakePoint(cx + k + 7, cy - 7))
             grid.stroke()
             NSGraphicsContext.restoreGraphicsState()
-            for bl, br, tip, c1, c2 in (((7.9, 12.3), (10.1, 12.3), (9.0, 17.6), (7.9, 15.0), (10.1, 15.0)),
-                                        ((7.2, 12.0), (8.9, 12.6), (4.6, 16.2), (5.6, 13.6), (6.9, 14.6)),
-                                        ((9.1, 12.6), (10.8, 12.0), (13.4, 16.2), (11.1, 14.6), (12.4, 13.6))):
+            # 叶冠：五片细长叶从果身顶端扇形散开（中间最长，±27° 次之，±58° 最短）。
+            #    ⚠️ 2026-10-14 第二版（作者：「优化一下叶冠」）：头一版三片宽叶像王冠 / 火苗；
+            #       试过宽叶五片（根部糊成一坨）、三片细叶，五片细叶在 16pt 上最像菠萝（对比图拍过）。
+            for (bx, by), ang, length, width in (((9.0, 11.6), 0, 6.3, 1.05),
+                                                 ((8.7, 11.5), -27, 5.6, 1.0), ((9.3, 11.5), 27, 5.6, 1.0),
+                                                 ((8.4, 11.3), -58, 4.4, 0.95), ((9.6, 11.3), 58, 4.4, 0.95)):
+                a = math.radians(ang)
+                ux, uy = math.sin(a), math.cos(a)        # 叶轴（0° = 正上）
+                nx, ny = uy, -ux                         # 法向
+                tip = NSMakePoint(bx + ux * length, by + uy * length)
+                m = 0.42 * length                        # 最宽处离叶根的距离
+                c1 = NSMakePoint(bx + ux * m + nx * width, by + uy * m + ny * width)
+                c2 = NSMakePoint(bx + ux * m - nx * width, by + uy * m - ny * width)
                 leaf = NSBezierPath.bezierPath()
-                leaf.moveToPoint_(NSMakePoint(*bl))
-                leaf.curveToPoint_controlPoint1_controlPoint2_(NSMakePoint(*tip), NSMakePoint(*c1), NSMakePoint(*c1))
-                leaf.curveToPoint_controlPoint1_controlPoint2_(NSMakePoint(*br), NSMakePoint(*c2), NSMakePoint(*c2))
+                leaf.moveToPoint_(NSMakePoint(bx + nx * width * 0.35, by + ny * width * 0.35))
+                leaf.curveToPoint_controlPoint1_controlPoint2_(tip, c1, c1)
+                leaf.curveToPoint_controlPoint1_controlPoint2_(
+                    NSMakePoint(bx - nx * width * 0.35, by - ny * width * 0.35), c2, c2)
                 leaf.closePath()
                 leaf.fill()
         finally:
@@ -1243,7 +1260,7 @@ class Overlay:
         # 「–」隐藏：窗口收进菜单栏，转写、录音、落盘都照常（同 Apple「实时字幕」的菜单栏用法）。
         #   系统那种最小化做不了：本 app 是 `.accessory`（没有 Dock 图标），最小化的窗口无处可去。
         self._btn_hide = self._button(
-            "–", self._hide_window, "隐藏字幕（录音照常）\n  菜单栏耳机图标 →「显示字幕」找回")
+            "–", self._hide_window, "隐藏字幕（录音照常）\n  菜单栏菠萝图标 →「显示字幕」找回")
         # ✕ 与 – 并排时必须同一套画法：字符 ✕ 跟着字体走，粗细对不上 SF Symbol 的 minus
         self._symbolize(self._btn_hide, "minus", "隐藏字幕", size=13.0)
         self._symbolize(self._btn_close, "xmark", "退出", size=13.0)
@@ -1269,6 +1286,7 @@ class Overlay:
         self._bar = [self._btn_lost, self._btn_ask, self._btn_topic,
                      self._btn_trans, self._btn_hide, self._btn_close]
         self._sync_trans_button()
+        self._install_bar_hover()
         self._install_status_item()               # 菜单栏: 鼠标穿透开关 + 退出
 
         self._layout()
@@ -2900,6 +2918,7 @@ class Overlay:
         if self._panel.isKeyWindow() and not self._is_editing():
             self._release_focus()
         self._sync_focus_look()      # 细线/光标跟着真实编辑状态走(委托回调不可靠)
+        self._bar_tick(time.monotonic())
         # 用户拖过窗口边缘 -> 把宽度/转录区高度收进来并重排。放在 tick 之前:
         # tick 要基于更新后的几何算池, 顺序反了会画一帧旧几何。
         self._sync_panel_size()
@@ -3149,6 +3168,71 @@ class Overlay:
     def _toggle_hidden(self):
         self._set_hidden(not self._hidden)
 
+    def _install_bar_hover(self) -> None:
+        """顶栏按钮跟着鼠标进出淡入淡出。**只动 alpha，不动 `isHidden`** —— 「字幕」那颗按钮的
+        显隐归答案接管管（`_layout` 也靠 `isHidden` 判放不放得下），两套别搅在一起。"""
+        self._bar_inside = False
+        self._bar_shown = True
+        self._bar_hide_at = time.monotonic() + BAR_GRACE_S
+        try:
+            from AppKit import (NSTrackingActiveAlways, NSTrackingArea, NSTrackingInVisibleRect,
+                                NSTrackingMouseEnteredAndExited)
+            owner = panel.make_hover_owner(self._bar_hover)
+            self._targets.append(owner)                   # 强引用，防 GC
+            area = NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                ((0, 0), (0, 0)),
+                NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect,
+                owner, None)
+            self._panel.contentView().addTrackingArea_(area)
+        except Exception:                                 # noqa: BLE001
+            self._bar_hide_at = None                      # 装不上就一直亮着（宁可打扰，不能找不到 ✕）
+
+    def _bar_hover(self, inside: bool) -> None:
+        self._bar_inside = bool(inside)
+        if inside:
+            self._bar_hide_at = None
+            self._set_bar_shown(True)
+        elif self._bar_hide_at is None:
+            self._bar_hide_at = time.monotonic() + BAR_LEAVE_S
+
+    def _bar_tick(self, now: float) -> None:
+        """pump 里每帧调：到点且鼠标真不在窗内才淡出（进出事件丢了也不会藏在鼠标底下）。"""
+        at = getattr(self, "_bar_hide_at", None)
+        if at is None or now < at:
+            return
+        self._bar_hide_at = None
+        if self._bar_inside or self._mouse_in_panel():
+            return
+        self._set_bar_shown(False)
+
+    def _mouse_in_panel(self) -> bool:
+        try:
+            from AppKit import NSEvent, NSPointInRect
+            return bool(NSPointInRect(NSEvent.mouseLocation(), self._panel.frame()))
+        except Exception:                                 # noqa: BLE001
+            return True                                   # 判不了就当在里面 = 不藏
+
+    def _set_bar_shown(self, shown: bool) -> None:
+        if shown == getattr(self, "_bar_shown", True):
+            return
+        self._bar_shown = shown
+        alpha = 1.0 if shown else 0.0
+        if motion.reduce_motion():
+            for b in self._bar:
+                b.setAlphaValue_(alpha)
+            return
+        try:
+            from AppKit import NSAnimationContext
+
+            def _fade(ctx):
+                ctx.setDuration_(motion.STATE_S if shown else motion.EXIT_S)
+                for b in self._bar:
+                    b.animator().setAlphaValue_(alpha)
+            NSAnimationContext.runAnimationGroup_completionHandler_(_fade, None)
+        except Exception:                                 # noqa: BLE001
+            for b in self._bar:
+                b.setAlphaValue_(alpha)
+
     def _set_hidden(self, hidden: bool) -> None:
         """字幕窗收进菜单栏 / 拿回来。**只动窗口**：录音、转写、落盘全不受影响（pump 照跑，只是画在看不见的窗上）。
 
@@ -3236,7 +3320,10 @@ class Overlay:
         if status is not None:
             try:
                 btn = status.button()
-                btn.setTitle_("⚠️" if active else "🎧")
+                # ⚠️ 有图标时 title 只放告警（恢复 = 清空）；原来恢复时写回「🎧」，
+                #    图标旁边就多挂一个耳机 emoji（菠萝图标上线时发现）。没图标才用字当图标。
+                base = "" if btn.image() is not None else "🎧"
+                btn.setTitle_("⚠️" if active else base)
                 btn.setToolTip_((still or msg) if active else "")
             except Exception:                 # noqa: BLE001
                 pass

@@ -100,5 +100,61 @@ class HideShow(unittest.TestCase):
         self.assertLess(bc.origin.x - (bh.origin.x + bh.size.width), 12.0)
 
 
+
+class BarHover(unittest.TestCase):
+    """顶栏按钮跟着鼠标进出淡入淡出（`_bar_hover` / `_bar_tick`）。判 alpha 结果，不数调用。"""
+    setUpClass = HideShow.__dict__["setUpClass"]
+    tearDownClass = HideShow.__dict__["tearDownClass"]
+    setUp = HideShow.setUp
+    tearDown = HideShow.tearDown
+
+    def _alphas(self):
+        return [round(b.alphaValue(), 2) for b in self.ov._bar]
+
+    def test_开课先亮_宽限到点且鼠标不在窗内_淡出_在听小点不动(self):
+        self.assertEqual(set(self._alphas()), {1.0})
+        ear = self.ov._ear.layer().opacity()
+        with mock.patch.object(self.ov, "_mouse_in_panel", return_value=False):
+            self.ov._bar_tick(time.monotonic() + 3.1)
+            spin(0.5)
+        self.assertEqual(set(self._alphas()), {0.0})
+        self.assertFalse(self.ov._ear.isHidden())
+        self.assertEqual(self.ov._ear.layer().opacity(), ear)
+
+    def test_鼠标进来立刻亮_出去等一会再暗(self):
+        with mock.patch.object(self.ov, "_mouse_in_panel", return_value=False):
+            self.ov._bar_tick(time.monotonic() + 3.1)
+            spin(0.5)
+            self.ov._bar_hover(True)
+            spin(0.4)
+            self.assertEqual(set(self._alphas()), {1.0})
+            self.ov._bar_hover(False)
+            self.ov._bar_tick(time.monotonic())             # 还没到 BAR_LEAVE_S
+            spin(0.3)
+            self.assertEqual(set(self._alphas()), {1.0}, "擦边划过不许闪")
+            self.ov._bar_tick(time.monotonic() + 0.5)
+            spin(0.5)
+        self.assertEqual(set(self._alphas()), {0.0})
+
+    def test_到点但鼠标其实在窗内_不藏(self):
+        with mock.patch.object(self.ov, "_mouse_in_panel", return_value=True):
+            self.ov._bar_tick(time.monotonic() + 3.1)
+            spin(0.5)
+        self.assertEqual(set(self._alphas()), {1.0})
+
+    def test_淡出不碰isHidden_字幕按钮的显隐照旧归答案接管(self):
+        before = [b.isHidden() for b in self.ov._bar]
+        with mock.patch.object(self.ov, "_mouse_in_panel", return_value=False):
+            self.ov._bar_tick(time.monotonic() + 3.1)
+            spin(0.5)
+        self.assertEqual([b.isHidden() for b in self.ov._bar], before)
+
+    def test_云端恢复时菜单栏图标旁不挂emoji(self):
+        btn = self.ov._status.button()
+        self.ov.notice("降级", warn=True)
+        self.assertEqual(btn.title(), "⚠️")
+        self.ov.notice("恢复了", warn=False)
+        self.assertEqual(btn.title(), "" if btn.image() is not None else "🎧")
+
 if __name__ == "__main__":
     unittest.main()

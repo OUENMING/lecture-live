@@ -53,7 +53,7 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 # ⚠️⚠️ **也不含 `VERSION`**（2026-10-04 改，原来在）。理由：`VERSION` **每版都变**，
 #    而它唯一的落点是 Info.plist 的 `CFBundleShortVersionString` —— 那个键
 #    **全仓没有一个代码读者**（`install.sh` / `make-app.sh --check` 读的都是
-#    `CFBundleIdentifier`；代码读的是仓库根那份 `VERSION`，见 `update.version()`），
+#    `CFBundleIdentifier`；代码读的是仓库根那份 `VERSION`，见 `update._version()`），
 #    只有 Finder「显示简介」看得到。算进指纹 = **每发一版，所有用户白重建 1–3 分钟**，
 #    而重建正是那条「可能打断正在录的课」的危险路径（3.8.7 才修过）。
 #    → Info.plist 里**照旧写当期 `VERSION`**（真重建时落一个正确值），只是它**不再触发**重建。

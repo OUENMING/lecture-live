@@ -324,6 +324,41 @@ class Pooling(unittest.TestCase):
         CR.render(r)                                   # 不抛就算过
 
 
+class PoolingKeepsEverything(unittest.TestCase):
+    """⭐⭐ 2026-10-14：两份各 65 / 31 条候选，汇总却打「0 条」—— `pool_sweeps` 整块丢了
+    候选 / 警示 / 生产延迟 / summary，`--json` 还当正常结果写出去。走真 `build_report`。"""
+
+    def _file(self, tail_utts):
+        ev = LiveLatency()._ev()                          # 两段生产延迟
+        for u in range(tail_utts):                        # 每句定稿比草稿多 4 个词 = 一条候选
+            ev += [{**_draft(100 + u, "the price goes up"), "seg": 100 + u},
+                   {**_final(100 + u, "the price goes up and demand falls fast"), "seg": 100 + u}]
+        ev.append({"kind": "summary", "t": 20.0, "n": tail_utts})
+        return _write(ev)
+
+    def test_pooled_report_carries_all_four(self):
+        a, b = self._file(2), self._file(1)
+        one = [CR.build_report(p, ks=(None,), keep_samples=True) for p in (a, b)]
+        self.assertEqual([len(r["hallucination_candidates"]) for r in one], [2, 1])
+        r = CR.pool_sweeps(one)
+        self.assertEqual(len(r["hallucination_candidates"]), 3)
+        self.assertEqual({c["source"] for c in r["hallucination_candidates"]}, {"x.jsonl"})
+        # 警示逐份带来源（这两份都没有 raw≠text 的草稿 → 各一条）
+        self.assertEqual(len([w for w in r["warnings"] if "raw" in w]), 2, r["warnings"])
+        # 延迟：样本拼起来再算分位数，n 是两份之和（不是钉死的 n:0）
+        self.assertEqual(r["live_latency"]["final_delay_s"]["n"], 4)
+        self.assertEqual(r["live_latency"]["draft_lag_s"]["n"], 6)
+        self.assertEqual([x["n"] for x in r["summaries"]], [2, 1])
+        txt = CR.render(r)
+        self.assertIn("腰斩臆造候选: 3 条", txt)
+        self.assertIn("段结束→定稿上屏", txt)
+
+    def test_samples_stay_out_of_single_file_json(self):
+        r = CR.build_report(self._file(1), ks=(None,))
+        self.assertNotIn("_latency_samples", r)
+        self.assertEqual(r["live_latency"]["final_delay_s"]["n"], 2)
+
+
 class WholeClassWerIsOptIn(unittest.TestCase):
     """⭐ `draft_vs_final_disagreement` 是**整课词表的 O(n²) DP**，默认不许白算。
 

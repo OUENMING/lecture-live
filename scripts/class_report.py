@@ -175,6 +175,11 @@ def sweep(utts, ref_text, ks, want_disagreement: bool = False) -> dict:
 
 # ---------------------------------------------------------------- 生产延迟（只有现场那份有）
 def live_latency(events) -> dict | None:
+    s = _latency_samples(events)
+    return None if s is None else {k: M.summarize_latency(v) for k, v in s.items()}
+
+
+def _latency_samples(events) -> dict | None:
     """现场 `.live.jsonl` 的**墙钟**延迟。离线回放那份没有这两种字段 → `None`。
 
     - `final_delay_s`：一段音频**结束**（`segment_end` 事件，挂在 `Segmenter.on_utterance_end`）
@@ -200,10 +205,11 @@ def live_latency(events) -> dict | None:
             first_draft.setdefault(e.get("seg"), float(e.get("buf_s") or 0.0) + float(e["lag_s"]))
     if not seg_end and not lags:
         return None
+    # ⚠️ 返回**原始样本** —— 多节汇总要把样本拼起来再算分位数（分位数不能相加/平均）。
     return {
-        "final_delay_s": M.summarize_latency([first_final[s] - seg_end[s] for s in first_final]),
-        "draft_lag_s": M.summarize_latency(lags),
-        "first_visible_s": M.summarize_latency(list(first_draft.values())),
+        "final_delay_s": [first_final[s] - seg_end[s] for s in first_final],
+        "draft_lag_s": lags,
+        "first_visible_s": list(first_draft.values()),
     }
 
 
@@ -237,7 +243,25 @@ def pool_sweeps(res_list) -> dict:
                                         "rate": M.rate(f_edits, f_words)},
                      # 汇总那份**没有**延迟/WER（每节的 `audio_t` 与参考稿都不在身上）
                      "latency_first_visible_s": {"n": 0}, "latency_final_compute_s": {"n": 0}}
-    return {"meta": meta, "sweep": out, "pooled": True, "warnings": []}
+    # ⚠️⚠️ 下面四项 2026-10-14 前**整块丢掉**：两份各 65 / 31 条候选，汇总打「0 条」，
+    #    `--json` 还把这份 0 当正常结果写出去（下游读它不报错）。现在逐份带来源拼起来。
+    srcs = meta["sources"]
+    res: dict = {"meta": meta, "sweep": out, "pooled": True,
+                 "hallucination_candidates": [dict(c, source=s) for r, s in zip(res_list, srcs)
+                                              for c in r.get("hallucination_candidates") or []],
+                 "warnings": [f"[{s}] {w}" for r, s in zip(res_list, srcs)
+                              for w in r.get("warnings") or []]}
+    sums = [dict(r["summary"], source=s) for r, s in zip(res_list, srcs) if r.get("summary")]
+    if sums:
+        res["summaries"] = sums
+    samples = [r["_latency_samples"] for r in res_list if r.get("_latency_samples")]
+    if samples:
+        res["live_latency"] = {k: M.summarize_latency([x for s in samples for x in s[k]])
+                               for k in samples[0]}
+    elif any(r.get("live_latency") for r in res_list):
+        res["warnings"].append("各份有生产延迟、但没带原始样本 → 汇总里不出延迟"
+                               "（用 build_report(..., keep_samples=True) 建）")
+    return res
 
 
 # ---------------------------------------------------------------- 腰斩臆造候选
@@ -350,7 +374,8 @@ def render(res: dict) -> str:
     lines.append(f"腰斩臆造候选: {len(hc)} 条（**要人耳听**，机械判据会误报）")
     for c in hc[:12]:
         flag = " ⭐下一句重复" if c["next_head_repeats"] else ""
-        lines.append(f"  #{c['utt']} 尾 {c['tail_words']} 词无草稿支持: "
+        where = f"{c['source']} " if "source" in c else ""
+        lines.append(f"  {where}#{c['utt']} 尾 {c['tail_words']} 词无草稿支持: "
                      f"{c['unsupported_tail']!r}{flag}")
     if len(hc) > 12:
         lines.append(f"  …另有 {len(hc) - 12} 条见 --json")
@@ -361,7 +386,9 @@ def render(res: dict) -> str:
 
 
 # ---------------------------------------------------------------- CLI
-def build_report(path, *, ref=None, ks=DEFAULT_KS, want_disagreement=False) -> dict:
+def build_report(path, *, ref=None, ks=DEFAULT_KS, want_disagreement=False,
+                 keep_samples=False) -> dict:
+    """单份报告。`keep_samples=True` 时多带一份延迟原始样本给 `pool_sweeps` 拼。"""
     events = load_events(path)
     utts = build_utts(events)
     ref_text = open(ref, encoding="utf-8").read() if ref else None
@@ -391,9 +418,11 @@ def build_report(path, *, ref=None, ks=DEFAULT_KS, want_disagreement=False) -> d
     summ = [e for e in events if e.get("kind") == "summary"]
     if summ:
         res["summary"] = summ[-1]
-    lat = live_latency(events)
-    if lat is not None:
-        res["live_latency"] = lat
+    samples = _latency_samples(events)
+    if samples is not None:
+        res["live_latency"] = {k: M.summarize_latency(v) for k, v in samples.items()}
+        if keep_samples:
+            res["_latency_samples"] = samples
     return res
 
 
@@ -414,7 +443,10 @@ def main():
     #    不开的话"上完课第一件事就是跑一遍报告"这条路上省掉 1 遍平方 DP。
     want_dis = bool(a.json) or bool(a.ref)
     if len(a.events) > 1:
-        res = pool_sweeps([build_report(p, ks=ks, want_disagreement=want_dis) for p in a.events])
+        if a.ref:
+            ap.error("--ref 只对单文件有意义（参考稿对不上多节课）")
+        res = pool_sweeps([build_report(p, ks=ks, want_disagreement=want_dis, keep_samples=True)
+                           for p in a.events])
     else:
         res = build_report(a.events[0], ref=a.ref, ks=ks, want_disagreement=want_dis)
     print(render(res))

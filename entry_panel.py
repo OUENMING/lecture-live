@@ -2330,8 +2330,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if not gs:
             return
         _queue_card("updated", lambda: whatsnew.build(
-            f"已更新到 {cur}", f"从 {start} 升上来 · 这几版改了什么", gs,
-            buttons=[("知道了", _card_done(lambda: None), "primary")], over=win))
+            f"已更新到 {cur}", f"自 {start} 以来的更新", gs, icon="sparkles",
+            buttons=[("完整更新日志", _card_done(lambda: whatsnew._open(whatsnew.release_url())),
+                      "secondary"),
+                     ("知道了", _card_done(lambda: None), "primary")], over=win))
 
     def _draft_card() -> None:
         """流式草稿模型没装 → 提醒一次（2026-10-14 起它是必装的）。主线程。
@@ -2382,7 +2384,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             _run_update()
 
         _queue_card("available", lambda: whatsnew.build(
-            f"有新版本 {latest}", f"你现在是 {cur}", gs,
+            f"有新版本 {latest}", f"自 {cur} 以来的更新", gs, icon="sparkles",
             body="" if gs else "完整说明见仓库里的 CHANGELOG.md",
             note="点「稍后」或直接开课都行：下课关掉 ClassLive 后会在后台自动装好。",
             buttons=[("稍后", _card_done(lambda: _status(f"好 —— 下课关掉后自动装 {latest}")),

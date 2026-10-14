@@ -211,7 +211,8 @@ class PanelCase(unittest.TestCase):
 
     def test_白名单是全的(self):
         # 页面真的会打这几个名字；少一个就是点了没反应
-        for name in ("add", "list", "stats", "revoke", "unrevoke", "renew", "limit", "quota", "delete"):
+        for name in ("add", "list", "stats", "revoke", "unrevoke", "renew", "limit", "quota", "delete",
+                     "minutes", "devices"):
             self.assertIn(name, cl_admin_ui.ALLOWED)
 
     # ---------------- 4 ----------------
@@ -358,7 +359,9 @@ class CloudflareSummary(unittest.TestCase):
         "week": [{"sum": {"requests": 50, "errors": 0}, "dimensions": {"scriptName": "classlive-asr", "date": "2026-10-14"}}],
         "r2": [{"max": {"objectCount": 5, "payloadSize": 1000}, "dimensions": {"bucketName": "classlive-ingest", "date": "2026-10-14"}},
                {"max": {"objectCount": 7, "payloadSize": 9}, "dimensions": {"bucketName": "photosave", "date": "2026-10-14"}}],
-        "dos": [{"sum": {"requests": 42}, "dimensions": {"date": "2026-10-14"}}]}]}}}
+        "dos": [{"sum": {"requests": 42}, "dimensions": {"date": "2026-10-14"}}],
+        "mins": [{"sum": {"requests": 46, "errors": 1}, "dimensions": {"scriptName": "classlive-asr", "datetimeMinute": "2026-10-14T17:42:00Z"}},
+                 {"sum": {"requests": 3, "errors": 0}, "dimensions": {"scriptName": "other-site", "datetimeMinute": "2026-10-14T17:42:00Z"}}]}]}}}
 
     def _home(self, d, token="cfat_SECRET-TOKEN"):
         root = pathlib.Path(d) / ".classlive"
@@ -387,6 +390,7 @@ class CloudflareSummary(unittest.TestCase):
         self.assertEqual(asr["status"], {"success": 100, "clientDisconnected": 3})
         self.assertEqual(r["r2"], {"classlive-ingest": {"2026-10-14": {"objects": 5, "bytes": 1000}}})
         self.assertEqual(r["dos"], {"2026-10-14": 42})
+        self.assertEqual(r["minutes"], {"classlive-asr": {"2026-10-14T17:42:00Z": [46, 1]}})
 
     def test_没有token_回人话_不调网络(self):
         import cl_admin_ui as U
@@ -401,6 +405,43 @@ class CloudflareSummary(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, self._home(d):
             r = U.cf_summary(post=lambda *a: {"errors": [{"message": "not authorized"}]})
         self.assertIn("not authorized", r["error"])
+
+class R2Ingest(unittest.TestCase):
+    """上传桶实时清单：分页拼齐、按会话分组、本机的课标 mine、token 不进响应。读写都在临时目录。"""
+
+    def test_分页_分组_认出本机的课_别人的单列(self):
+        import hashlib
+        import cl_admin_ui as U
+        h = lambda n: hashlib.sha256(n.encode()).hexdigest()[:16]          # noqa: E731
+        mine, other = h("2026-10-14_100000_ECON1"), "0123456789abcdef"
+        pages = [
+            {"success": True, "result": [
+                {"key": f"classlive-test/{mine}/report.json", "size": 10, "last_modified": "2026-10-14T10:00:00Z"},
+                {"key": f"classlive-test/{other}/audio.001.wav", "size": 1000, "last_modified": "2026-10-14T20:00:00Z"}],
+             "result_info": {"is_truncated": True, "cursor": "c1"}},
+            {"success": True, "result": [
+                {"key": f"classlive-test/{other}/report.json", "size": 5, "last_modified": "2026-10-14T20:01:00Z"}],
+             "result_info": {"is_truncated": False}}]
+        seen = []
+        def get(url, headers):
+            seen.append((url, headers.get("Authorization")))
+            return pages[len(seen) - 1]
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d) / ".classlive"; root.mkdir()
+            (root / "cf-analytics-token").write_text("cfat_SECRET\n", encoding="utf-8")
+            (root / "cf-account-id").write_text("acct\n", encoding="utf-8")
+            sd = pathlib.Path(d) / "sessions"; sd.mkdir()
+            (sd / "2026-10-14_100000_ECON1.md").write_text("x", encoding="utf-8")
+            with mock.patch.object(pathlib.Path, "home", return_value=pathlib.Path(d)):
+                r = U.r2_ingest(get=get, sessions_dir=sd)
+        self.assertIn("cursor=c1", seen[1][0])
+        self.assertEqual((r["objects"], r["bytes"], r["others"]), (3, 1015, 1))
+        top = r["sessions"][0]
+        self.assertEqual((top["id"], top["mine"], top["audio"], top["files"], top["last"]),
+                         (other, False, 1, ["report.json"], "2026-10-14T20:01:00Z"))
+        self.assertEqual((r["sessions"][1]["mine"], r["sessions"][1]["name"]), (True, "2026-10-14_100000_ECON1"))
+        self.assertNotIn("SECRET", json.dumps(r))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

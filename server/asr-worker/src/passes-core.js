@@ -8,6 +8,10 @@
 //   use:<YYYY-MM-DD>:<码>  {asr_s, asr_reqs, llm_reqs, tokens_in, tokens_out, cache_hit, jev_reqs, jev_q,
 //                           models:{v3|turbo|qwen|other: 段数}, vers:{<客户端版本>: 次数}}
 //                          ⚠️ models / vers 是 2026-10-14 加的。**老记录没有这两键**，读的时候按空对象兜。
+//                          mins:{<UTC 当日第几分钟 0–1439>: [转写段, 转写秒, 翻译次, token 进+出, Jev 次]}
+//                          ⚠️ mins 是 2026-10-14 晚加的（作者：「面板能不能精确到分钟」）。键是当天分钟号，
+//                             **天然封顶 1440 个**（最坏约 45 KB，DO 单值上限 128 KiB）；`stats` 不回它（太大），
+//                             要看走 `/admin/minutes`。老记录没有这键。
 // ⚠️ `/admin/delete` 把上面三种键一起删掉；它只认完整码 + `yes:true`（见 #remove）。
 // ⚠️ 只记数字 + **客户端自报的版本号**（`vers`，形状受限、个数封顶，见 VER_RE / VER_MAX_KEYS）：
 //    不记文本、音频、IP。日志里也只出现码的「名字段」。
@@ -78,6 +82,8 @@ export class PassCore {
       case "/admin/limit": return json(await this.#limit(body));
       case "/admin/delete": return json(await this.#remove(body));
       case "/admin/stats": return json(await this.stats(body));
+      case "/admin/minutes": return json(await this.minutes(body));
+      case "/admin/devices": return json(await this.devices(body));
       default: return json({ error: "not found" }, 404);
     }
   }
@@ -131,6 +137,17 @@ export class PassCore {
     if (tokens_in !== undefined || tokens_out !== undefined) {
       u.llm_reqs += 1;
       u.tokens_in += num(tokens_in); u.tokens_out += num(tokens_out); u.cache_hit += num(cache_hit);
+    }
+    // 逐分钟（UTC 当日第几分钟）。只记这次请求真带来的数：没有转写也没有翻译 / Jev 的空记账不占格。
+    const isAsr = asr_s !== undefined, isLlm = tokens_in !== undefined || tokens_out !== undefined;
+    if (isAsr || isLlm || jev_q !== undefined) {
+      const m = String(Math.floor((this.now() % DAY_MS) / 60000));
+      u.mins = u.mins && typeof u.mins === "object" ? u.mins : {};
+      const c = Array.isArray(u.mins[m]) ? u.mins[m] : [0, 0, 0, 0, 0];
+      if (isAsr) { c[0] += 1; c[1] = Math.round((c[1] + num(asr_s)) * 10) / 10; }
+      if (isLlm) { c[2] += 1; c[3] += num(tokens_in) + num(tokens_out); }
+      if (jev_q !== undefined) c[4] = num(c[4]) + 1;
+      u.mins[m] = c;
     }
     if (VER_RE.test(ver || "")) {
       if (ver in u.vers) u.vers[ver] = num(u.vers[ver]) + 1;
@@ -193,12 +210,30 @@ export class PassCore {
       const code = rest.slice(11);
       const c = await this.storage.get(`code:${code}`);
       if (!byDay.has(dd)) byDay.set(dd, []);
-      byDay.get(dd).push({ name: c?.name ?? "?", code, ...u });
+      const { mins, ...rest2 } = u;                     // 逐分钟太大，不随 stats 回（走 /admin/minutes）
+      byDay.get(dd).push({ name: c?.name ?? "?", code, ...rest2, active_min: mins ? Object.keys(mins).length : null });
     }
     // **区间里每一天都出现**（没记录的给空数组）—— 面板画趋势时不用自己补零。
     const out = [];
     for (let cur = from0; cur <= to0; cur = addDays(cur, 1)) out.push({ day: cur, rows: byDay.get(cur) || [] });
     return { days: out, from: from0, to: to0 };
+  }
+
+  // 某码某天的逐分钟。只认完整码 + 合法日期；没有记录回空对象（不是错）。
+  async minutes({ code, day: d }) {
+    if (!CODE_RE.test(code || "")) return { error: "minutes 只认完整码" };
+    const dd = d === undefined ? day(this.now()) : d;
+    if (!isDay(dd)) return { error: "bad_day", got: String(dd), expect: "YYYY-MM-DD" };
+    const u = (await this.storage.get(`use:${dd}:${code}`)) || {};
+    return { code, day: dd, mins: u.mins || {} };
+  }
+
+  // 某码的设备：**只回 install_id 前 6 位**（够区分两台，不把完整 id 交出去）+ 首次 / 最近（毫秒）。
+  async devices({ code }) {
+    if (!CODE_RE.test(code || "")) return { error: "devices 只认完整码" };
+    const devs = (await this.storage.get(`dev:${code}`)) || {};
+    return { code, devices: Object.entries(devs).map(([id, d]) => ({ id: id.slice(0, 6), first: d.first, last: d.last }))
+      .sort((a, b) => b.last - a.last) };
   }
 
   // 按码或名字找到唯一一条再改；名字对应多条（同名重发过）时要求给码。

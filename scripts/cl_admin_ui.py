@@ -30,7 +30,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import cl_admin                                                      # noqa: E402
 
 #: 只放行这几个名字 —— 别把 `/api/<任意>` 直接拼进 Worker 的 URL。
-ALLOWED = {"add", "list", "stats", "revoke", "unrevoke", "renew", "limit", "quota", "delete"}
+ALLOWED = {"add", "list", "stats", "revoke", "unrevoke", "renew", "limit", "quota", "delete", "minutes", "devices"}
 
 #: 自定义头：逼浏览器先发预检。我们**不回** CORS 头，所以预检必失败、真请求不会发出去。
 #: 没有这一条，任意网站都能用 `<form>` / `fetch` 打 http://127.0.0.1:8770/api/revoke 把你的码吊销掉。
@@ -51,6 +51,8 @@ CF_GQL = "https://api.cloudflare.com/client/v4/graphql"
 _CF_Q = """query($a:String!,$s:Time!,$u:Time!,$ds:Date!,$du:Date!){viewer{accounts(filter:{accountTag:$a}){
  day:workersInvocationsAdaptive(limit:100,filter:{datetime_geq:$s,datetime_leq:$u}){
   sum{requests errors} quantiles{cpuTimeP50 cpuTimeP99} dimensions{scriptName status}}
+ mins:workersInvocationsAdaptive(limit:10000,filter:{datetime_geq:$s,datetime_leq:$u}){
+  sum{requests errors} dimensions{scriptName datetimeMinute}}
  week:workersInvocationsAdaptive(limit:500,filter:{date_geq:$ds,date_leq:$du}){
   sum{requests errors} dimensions{scriptName date}}
  r2:r2StorageAdaptiveGroups(limit:100,filter:{date_geq:$ds,date_leq:$du}){
@@ -118,7 +120,91 @@ def cf_summary(post=None, now=None) -> dict:
             r2.setdefault(d["bucketName"], {})[d["date"]] = {
                 "objects": int(r["max"]["objectCount"]), "bytes": int(r["max"]["payloadSize"])}
     dos = {r["dimensions"]["date"]: int(r["sum"]["requests"]) for r in a.get("dos") or []}
-    return {"since": v["s"], "until": v["u"], "scripts": scripts, "week": week, "r2": r2, "dos": dos}
+    # 近 24 h 逐分钟：{脚本: {"2026-10-14T17:42:00Z": [请求, 错误]}}，只有有请求的分钟（≤1440×脚本数）
+    minutes: dict = {}
+    for r in a.get("mins") or []:
+        d = r.get("dimensions", {})
+        if ok(d.get("scriptName")) and d.get("datetimeMinute"):
+            minutes.setdefault(d["scriptName"], {})[d["datetimeMinute"]] = [
+                int(r["sum"]["requests"]), int(r["sum"]["errors"])]
+    return {"since": v["s"], "until": v["u"], "scripts": scripts, "week": week, "r2": r2, "dos": dos,
+            "minutes": minutes}
+
+
+#: 上传桶（测试模式的课）。对象键 = `classlive-test/<sha256(会话名)[:16]>/<文件>`（`upload.session_key`）。
+R2_BUCKET = "classlive-ingest"
+#: 作者自己、但本机 `sessions/` 和上传账本里都没有的会话（隔离跑的探针，产物不落 sessions/）。不加就被算成「别人的」。
+R2_KNOWN_MINE = {"2026-10-10_002058_TESTISO"}
+
+
+def r2_ingest(get=None, sessions_dir=None, ledger=None) -> dict:
+    """上传桶的**实时**清单（逐对象列，不是 Analytics —— `r2StorageAdaptiveGroups` 是每 10–30 分钟的快照，
+    2026-10-14 实测比真列表少 7 个对象 / 58 MB）。按会话前缀分组，并标出**哪些不是本机的课**：
+    本机 `sessions/` 里的会话名、上传账本里的会话名逐个算 `session_key`，对不上的就是别人的。
+
+    只回数字、前缀、文件名（`report.json` / `audio.003.wav` 这种）和本机自己的会话名；token 从不进响应。
+    """
+    import hashlib
+    home = pathlib.Path.home() / ".classlive"
+    try:
+        tok = (home / "cf-analytics-token").read_text(encoding="utf-8").strip()
+        acct = (home / "cf-account-id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return {"error": "没配 Cloudflare token（~/.classlive/cf-analytics-token）"}
+    if get is None:
+        def get(url, headers):
+            import httpx
+            return httpx.get(url, headers=headers, timeout=20).json()
+    objs, cursor = [], None
+    for _ in range(50):                                               # 50 页 × 1000 封顶
+        url = (f"https://api.cloudflare.com/client/v4/accounts/{acct}/r2/buckets/{R2_BUCKET}/objects?per_page=1000"
+               + (f"&cursor={urllib.parse.quote(cursor)}" if cursor else ""))
+        try:
+            j = get(url, {"Authorization": f"Bearer {tok}"})
+        except Exception as e:                                        # noqa: BLE001
+            return {"error": f"列不了上传桶：{type(e).__name__}"}
+        if not j.get("success", True) or j.get("errors"):
+            return {"error": "Cloudflare 拒了列桶：" + "；".join(str(x.get("message", ""))[:120] for x in (j.get("errors") or [])[:2])}
+        objs += j.get("result") or []
+        info = j.get("result_info") or {}
+        cursor = info.get("cursor")
+        if not info.get("is_truncated") or not cursor:
+            break
+    names: set = set(R2_KNOWN_MINE)
+    sd = pathlib.Path(sessions_dir) if sessions_dir else pathlib.Path(__file__).resolve().parent.parent / "sessions"
+    try:
+        names |= {f.name.split(".")[0] for f in sd.iterdir()}
+    except OSError:
+        pass
+    try:
+        lg = json.loads(pathlib.Path(ledger or (home / "upload-ledger.json")).read_text(encoding="utf-8"))
+        if isinstance(lg, dict):
+            names |= set(map(str, lg))
+    except (OSError, ValueError):
+        pass
+    mine = {hashlib.sha256(n.encode("utf-8")).hexdigest()[:16]: n for n in names}
+    groups: dict = {}
+    for o in objs:
+        parts = str(o.get("key", "")).split("/")
+        if len(parts) < 3:
+            continue
+        g = groups.setdefault(parts[1], {"id": parts[1], "objects": 0, "bytes": 0, "last": "", "audio": 0, "files": []})
+        g["objects"] += 1
+        g["bytes"] += int(o.get("size") or 0)
+        g["last"] = max(g["last"], str(o.get("last_modified") or ""))
+        if parts[-1].startswith("audio."):
+            g["audio"] += 1
+        else:
+            g["files"].append(parts[-1])
+    out = []
+    for g in groups.values():
+        g["mine"] = g["id"] in mine
+        g["name"] = mine.get(g["id"], "")
+        g["files"].sort()
+        out.append(g)
+    out.sort(key=lambda g: g["last"], reverse=True)
+    return {"bucket": R2_BUCKET, "objects": len(objs), "bytes": sum(int(o.get("size") or 0) for o in objs),
+            "sessions": out, "others": sum(1 for g in out if not g["mine"])}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -167,6 +253,8 @@ class Handler(BaseHTTPRequestHandler):
         name = path[len("/api/"):]
         if name == "cf":                                              # 本机直接问 Cloudflare，不经 Worker
             return self._json(200, cf_summary())
+        if name == "r2":                                              # 上传桶实时清单（同上，本机直接问）
+            return self._json(200, r2_ingest())
         if name not in ALLOWED:
             return self._json(404, {"error": f"不认这个操作：{name}"})
         raw = self.rfile.read(int(self.headers.get("content-length") or 0))

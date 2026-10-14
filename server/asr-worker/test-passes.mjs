@@ -543,3 +543,40 @@ test("delete：码 + 设备 + 当天用量一起删，另一条一个键不碰",
     assert.deepEqual(after.days[0].rows[0], keepBefore, "另一条的数一个都不能变");
   } finally { h.restore(); }
 });
+
+// ---- 2026-10-14 晚：逐分钟（作者：「面板能不能精确到分钟」）+ 设备列表 ----
+
+test("逐分钟：按 UTC 当日分钟号分格，各格各记各的；stats 不带 mins 只带活跃分钟数", async () => {
+  const h = harness();
+  try {
+    const { code } = await h.pass.add({ name: "t" });
+    await h.pass.usage({ code, asr_s: 12.34, model: "whisper-large-v3" });      // 09:00 → 540
+    await h.pass.usage({ code, tokens_in: 100, tokens_out: 20, cache_hit: 64 });
+    h.tick(61_000);                                                             // 09:01 → 541
+    await h.pass.usage({ code, asr_s: 10 });
+    await h.pass.usage({ code, jev_q: 3 });
+    await h.pass.usage({ code });                                               // 空记账不占格
+    const mm = await (await h.call(h.adminReq("minutes", { code, day: TODAY }))).json();
+    assert.deepEqual(mm.mins, { 540: [1, 12.3, 1, 120, 0], 541: [1, 10, 0, 0, 1] });
+    const st = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    const r = st.days[0].rows[0];
+    assert.equal(r.mins, undefined, "stats 不许带逐分钟（太大）");
+    assert.equal(r.active_min, 2);
+  } finally { h.restore(); }
+});
+
+test("逐分钟 / 设备：只认完整码；日期非法明确报错；设备只回 id 前 6 位", async () => {
+  const h = harness();
+  try {
+    const { code } = await h.pass.add({ name: "t" });
+    await h.pass.check({ code, install: INSTALL, kind: "asr" });
+    for (const body of [{ name: "t" }, { code: "cl-t-xyz" }]) {
+      const r = await (await h.call(h.adminReq("minutes", body))).json();
+      assert.ok(r.error, JSON.stringify(body));
+    }
+    const bad = await (await h.call(h.adminReq("minutes", { code, day: "2026-1" }))).json();
+    assert.equal(bad.error, "bad_day");
+    const dv = await (await h.call(h.adminReq("devices", { code }))).json();
+    assert.deepEqual(dv.devices, [{ id: INSTALL.slice(0, 6), first: T0, last: T0 }]);
+  } finally { h.restore(); }
+});

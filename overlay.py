@@ -869,6 +869,10 @@ class Overlay:
         self._last_flush = 0.0
         self._last_ev_t = 0.0        # 上次派发事件的时间(决定让步时长, 见 pump)
         self._closed = False         # close() 幂等标志(✕ / Ctrl+C / 正常结束)
+        # ⭐ 隐藏 / 置顶（2026-10-14 作者：「最小化隐藏、不抢最前排」）。都只管**这次运行**，不落盘 ——
+        #    下节课打开照旧是看得见、在最前（上课时忘了自己藏过字幕比多点一下更糟）。
+        self._hidden = False
+        self._on_top = True
         # ⚠️ 收尾循环靠这个决定「pump 还是 sleep」（见 `main._spin`）——
         #    不能拿 `args.ui == "overlay"` 当判据：`_load_overlay` 失败时会静默回退
         #    `TerminalUI()`，那时 args 还写着 overlay → 每轮调空 pump、一次 sleep 都没有。
@@ -1178,6 +1182,13 @@ class Overlay:
         #    取不到符号（老系统）就留着 emoji。
         self._symbolize(self._btn_lost, "questionmark", "重点 / 没听懂")
         self._btn_close = self._button("✕", self._quit, "退出")
+        # 「–」隐藏：窗口收进菜单栏，转写、录音、落盘都照常（同 Apple「实时字幕」的菜单栏用法）。
+        #   系统那种最小化做不了：本 app 是 `.accessory`（没有 Dock 图标），最小化的窗口无处可去。
+        self._btn_hide = self._button(
+            "–", self._hide_window, "隐藏字幕（录音照常）\n  菜单栏耳机图标 →「显示字幕」找回")
+        # ✕ 与 – 并排时必须同一套画法：字符 ✕ 跟着字体走，粗细对不上 SF Symbol 的 minus
+        self._symbolize(self._btn_hide, "minus", "隐藏字幕", size=13.0)
+        self._symbolize(self._btn_close, "xmark", "退出", size=13.0)
         # 答案接管期间显示「字幕」的位置:
         # 「讲一下」= 用固定问题开一轮讲解; 「字幕」= 清掉问答线程并回到字幕。
         self._btn_ask = self._button(
@@ -1198,7 +1209,7 @@ class Overlay:
         #    ⚠️ 顺带的好处：`❓` 成了最左那个按钮，**章节条多出约 90px 可用宽度**
         #    （原来那份宽度被一个不可点的隐藏按钮吃掉 —— 见下面 `_layout` 的注释）。
         self._bar = [self._btn_lost, self._btn_ask, self._btn_topic,
-                     self._btn_trans, self._btn_close]
+                     self._btn_trans, self._btn_hide, self._btn_close]
         self._sync_trans_button()
         self._install_status_item()               # 菜单栏: 鼠标穿透开关 + 退出
 
@@ -1285,6 +1296,23 @@ class Overlay:
                 # **宁可图标不适配，也不能没有图标** —— 穿透模式下这是唯一的入口。
                 btn.setTitle_("🎧")
             menu = NSMenu.alloc().init()
+
+            # ⭐ 隐藏 / 置顶排最上：字幕藏起来之后，这里是唯一找回它的地方（同穿透那条）。
+            self._mi_hide = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "隐藏字幕", None, "")
+            t5 = _make_button_target(self._toggle_hidden)
+            self._targets.append(t5)
+            self._mi_hide.setTarget_(t5); self._mi_hide.setAction_("clicked:")
+            menu.addItem_(self._mi_hide)
+            self._mi_top = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "保持在最前", None, "")
+            t6 = _make_button_target(self._toggle_on_top)
+            self._targets.append(t6)
+            self._mi_top.setTarget_(t6); self._mi_top.setAction_("clicked:")
+            self._mi_top.setState_(1)
+            self._mi_top.setToolTip_("关掉后别的窗口可以盖住字幕；想找回它点「显示字幕」")
+            menu.addItem_(self._mi_top)
+            menu.addItem_(NSMenuItem.separatorItem())
 
             self._mi_through = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "开启鼠标穿透", None, "")
@@ -2890,14 +2918,14 @@ class Overlay:
             self._close_outline()
         self._clear_answer()
         self._tv.scroll_to_bottom()
-    def _symbolize(self, b, symbol: str, label: str) -> None:
+    def _symbolize(self, b, symbol: str, label: str, size: float = 16.0) -> None:
         try:
             from AppKit import NSImage, NSImageOnly, NSImageSymbolConfiguration
             img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, label)
             if img is None:
                 return
             img = img.imageWithSymbolConfiguration_(
-                NSImageSymbolConfiguration.configurationWithPointSize_weight_(16.0, 0.23))   # medium：细问号比旁边 ✕ 显得轻
+                NSImageSymbolConfiguration.configurationWithPointSize_weight_(size, 0.23))   # medium：细问号比旁边 ✕ 显得轻
             b.setImage_(img)
             b.setImagePosition_(NSImageOnly)
             b.setTitle_("")
@@ -3055,6 +3083,79 @@ class Overlay:
     def set_translating(self, on: bool) -> None:
         """向后兼容旧调用点: 开=双语, 关=只英文(矫正)。"""
         self.set_trans_mode("both" if on else "en")
+
+    def _hide_window(self):
+        self._set_hidden(True)
+
+    def _toggle_hidden(self):
+        self._set_hidden(not self._hidden)
+
+    def _set_hidden(self, hidden: bool) -> None:
+        """字幕窗收进菜单栏 / 拿回来。**只动窗口**：录音、转写、落盘全不受影响（pump 照跑，只是画在看不见的窗上）。
+
+        藏：0.16 s 淡出再 `orderOut`（`motion.EXIT_S`）；显：从透明 `orderFrontRegardless` 淡入
+        （`motion.STATE_S`，不抢焦点，同 `show()`）。「减弱动态效果」下不做淡变。
+        「显示字幕」同时会把窗口提到最前 —— 关了「保持在最前」、被别的窗口盖住时也靠它找回。
+        """
+        if self._closed:
+            return
+        p = self._panel
+        self._hidden = bool(hidden)
+        self._note("hide" if hidden else "show")
+        mi = getattr(self, "_mi_hide", None)
+        if mi is not None:
+            mi.setTitle_("显示字幕" if hidden else "隐藏字幕")
+        status = getattr(self, "_status", None)
+        if status is not None and not getattr(self, "_engine_warn", False):
+            try:
+                status.button().setToolTip_("ClassLive 正在转写 · 字幕已隐藏" if hidden else "")
+            except Exception:                 # noqa: BLE001
+                pass
+        quick = motion.reduce_motion()
+        try:
+            from AppKit import NSAnimationContext
+        except Exception:                     # noqa: BLE001
+            NSAnimationContext = None
+        if hidden:
+            if quick or NSAnimationContext is None:
+                p.orderOut_(None)
+                return
+
+            def _fade(ctx):
+                ctx.setDuration_(motion.EXIT_S)
+                p.animator().setAlphaValue_(0.0)
+
+            def _done():
+                # ⚠️ 淡出途中又点了「显示」→ 这次的收尾不许把它藏掉
+                if self._hidden:
+                    p.orderOut_(None)
+                p.setAlphaValue_(1.0)
+            NSAnimationContext.runAnimationGroup_completionHandler_(_fade, _done)
+            return
+        if quick or NSAnimationContext is None:
+            p.setAlphaValue_(1.0)
+            p.orderFrontRegardless()
+        else:
+            if not p.isVisible():
+                p.setAlphaValue_(0.0)
+            p.orderFrontRegardless()
+
+            def _fade_in(ctx):
+                ctx.setDuration_(motion.STATE_S)
+                p.animator().setAlphaValue_(1.0)
+            NSAnimationContext.runAnimationGroup_completionHandler_(_fade_in, None)
+        self._hide_traffic_lights()           # 红绿灯每次 orderFront 后会回来（同 `show()`）
+        self._release_focus()
+
+    def _toggle_on_top(self):
+        """「保持在最前」：开 = 浮动层（默认，全屏 PPT 上也看得见）；关 = 普通窗口，别的窗口能盖住它。"""
+        from AppKit import NSFloatingWindowLevel, NSNormalWindowLevel
+        self._on_top = not self._on_top
+        self._panel.setLevel_(NSFloatingWindowLevel if self._on_top else NSNormalWindowLevel)
+        self._note("on_top" if self._on_top else "not_on_top")
+        mi = getattr(self, "_mi_top", None)
+        if mi is not None:
+            mi.setState_(1 if self._on_top else 0)
 
     def _toggle_through(self):
         """切换鼠标穿透(仅从菜单栏调用; 面板按钮在穿透后会失效)。"""

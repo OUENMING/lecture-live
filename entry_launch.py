@@ -55,6 +55,7 @@ from __future__ import annotations
 import os
 import pathlib
 import sys
+import time
 import traceback
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -143,6 +144,13 @@ def main() -> int:
         try:
             CFG.write_text(course, encoding="utf-8")
             print(f"✅ 课程已设为 {course}")
+            try:
+                # ⏱ 点按时刻，给 `main.startup_timing` 算「点开始 → 字幕出现」（main 读完就删）
+                import instance_lock as _il
+                _il.STATE_DIR.mkdir(parents=True, exist_ok=True)
+                (_il.STATE_DIR / "start-click").write_text(f"{time.time():.3f}", encoding="utf-8")
+            except Exception:                   # noqa: BLE001
+                pass
             rc["code"] = PICKED
         except OSError as e:
             # ⚠️ 用**专属**退出码 `UNSAVED`，不是 `UNAVAILABLE`（2026-09-29 修）。

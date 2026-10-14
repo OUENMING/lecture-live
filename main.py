@@ -13,7 +13,7 @@
   => 音频循环永不阻塞; 所有 UI 调用都在主线程(悬浮窗要求)
 """
 from __future__ import annotations
-import argparse, collections, os, queue, re, shlex, sys, threading, time
+import argparse, collections, os, pathlib, queue, re, shlex, sys, threading, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from capture import load_source, SR, SilenceWatch
@@ -1057,6 +1057,10 @@ def resolve_cloud_asr_enabled(*, read=final_asr.read_config, write=final_asr.wri
 
 
 def run(args) -> None:
+    # ⏱ 起步计时（2026-10-14 作者：「点开始上课之后字幕卡片弹出的速度」）—— 先量再改。
+    #    各段用 `_tp` 记单调时钟；点按时刻取 `.course` 的 mtime（面板点「开始上课」那一刻写的）。
+    _tp = {"run": time.monotonic()}
+    _t_wall0 = time.time()
     # ---- 单实例锁 ----
     # ⚠️ 必须是 run() 的**第一件事**：抢在开音频设备、弹更新卡片、加载模型之前 ——
     #    否则第二个实例已经抢走了麦克风、已经烧了 API 调用，再说"你重复了"就晚了。
@@ -1069,6 +1073,8 @@ def run(args) -> None:
     _state0, _holder0 = instance_lock.probe()
     if _state0 == "held":
         echo(f"⚠ {instance_lock.describe_holder(_holder0)}。")
+        if instance_lock.poke(_holder0):
+            echo("   已经把它的字幕叫到前面来了（藏着 / 穿透着也一样）。")
         echo("   同时跑两个会抢同一个麦克风、叠两个悬浮窗、翻译费用也翻倍。")
         echo("   要停掉那一个：点它悬浮窗右上角的 ✕，或在它的终端按 Ctrl+C。")
         return
@@ -1150,6 +1156,7 @@ def run(args) -> None:
     #    ⚠️ 「ffmpeg 解码两遍」留着 —— 试开的意义就是**先验证再承诺**，
     #       复用同一句柄会在别处改动解码路径时把验证悄悄架空。
     probe_src = None
+    _tp["audio"] = time.monotonic()
 
     # 草稿/兜底用 Parakeet, **必需**: 缺了在这里说清楚然后退出, 不在课上静默降质。
     # 定稿(云端优先, Whisper 只是可选的本地兜底)在 `trans` 定义之后装配, 见下面 `final_asr.load_final`。
@@ -1174,6 +1181,7 @@ def run(args) -> None:
             return
     else:
         echo("💤 Parakeet 用到再加载（草稿走 Nemotron；云端失败时第一次兜底多等约 1 秒）")
+    _tp["draft"] = time.monotonic()
     echo(f"✍️ 草稿引擎：{draft.name}" + (f"（{draft.reason}）" if draft.reason else ""))
     # ⭐⭐ 转录里挖出来的词 → 术语**候选池**（2026-09-29 加）。
     #    ⚠️⚠️ **只进候选池，不进 `course_terms`（那档是每句全量注入）** ——
@@ -1234,6 +1242,7 @@ def run(args) -> None:
     else:
         echo(f"💻 引擎: local ({args.llm})")
 
+    _tp["translator"] = time.monotonic()
     running = threading.Event()
     running.set()
     # ✕ / 菜单栏「退出」请求停机。**必须与 running 分开 —— 这是个真 bug 的修法**:
@@ -1490,6 +1499,13 @@ def run(args) -> None:
         #    回调）—— `Overlay` 那边默认就是空 lambda，**零开销零行为**。
         note=(tester.note_ui if tester is not None else None),
     )
+    _tp["overlay"] = time.monotonic()
+    try:
+        _st = startup_timing(_tp, _t_wall0, _click_wall())
+        echo("⏱ " + _st["line"])
+        live.event("startup", **_st["fields"])
+    except Exception:                              # noqa: BLE001
+        pass
     # 终端模式拿不到悬浮窗，退化成字符框（两种模式都要能看到）
     # ⚠️ 判据同上（`drives_appkit`，不是 `args.ui`）：overlay 载入失败会静默回退
     #    终端 UI，那时 `args.ui` 仍是 "overlay" → 字符框不打印、真悬浮窗又不存在
@@ -2726,6 +2742,53 @@ def check_clock_and_device(src, source_name: str, notify, state: dict, on_wake=N
             notify(f"[输入设备变了 {_t.strftime('%H:%M:%S')}] 换成「{name}」", warn=True)
     except Exception as e:                                # noqa: BLE001
         notify(f"⚠ 换输入设备失败({str(e)[:60]}); 仍在录上一个设备", warn=True)
+
+
+def _click_wall() -> float | None:
+    """面板点「开始上课」那一刻的墙钟（`entry_launch.on_start` 写进 `start-click`）。**读完就删** ——
+    只认这一次点按，`cl` 从终端起、或者下一次没走面板时不会捡到旧值。拿不到就 `None`。
+
+    ⚠️ 不用 `.course` 的 mtime：`cl course X`、探针都会写它（头一版就这么量出过「进程起来 27 s」的假数）。
+    """
+    p = instance_lock.STATE_DIR / "start-click"
+    try:
+        t = float(p.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        p.unlink()
+    except OSError:
+        pass
+    return t
+
+
+def startup_timing(tp: dict, wall0: float, click_wall: float | None) -> dict:
+    """起步各段耗时 → 一行人话 + 事件字段。**纯函数**。
+
+    `tp` 是单调时钟打点（run → audio → draft → translator → overlay，缺的段跳过）；
+    `click_wall` 是点按的墙钟时刻（`_click_wall` 读面板留的戳），只认 2 分钟内的（面板点了却没起来、隔很久才起的不算）。
+    """
+    order = [("audio", "开麦试探"), ("draft", "草稿模型"), ("translator", "翻译与术语"),
+             ("overlay", "定稿 / 落盘 / 悬浮窗")]
+    parts, fields, prev = [], {}, tp["run"]
+    for k, label in order:
+        if k in tp:
+            d = tp[k] - prev
+            fields[f"{k}_s"] = round(d, 3)
+            parts.append(f"{label} {d:.1f}")
+            prev = tp[k]
+    total = prev - tp["run"]
+    fields["run_s"] = round(total, 3)
+    pre = None
+    if click_wall is not None and 0.0 <= wall0 - click_wall <= 120.0:
+        pre = wall0 - click_wall
+        fields["click_to_run_s"] = round(pre, 3)
+    if pre is not None:
+        line = f"点「开始上课」→ 字幕出现 {pre + total:.1f} s（进程起来 {pre:.1f} · " + " · ".join(parts) + "）"
+        fields["click_to_overlay_s"] = round(pre + total, 3)
+    else:
+        line = f"起步 → 字幕出现 {total:.1f} s（" + " · ".join(parts) + "）"
+    return {"line": line, "fields": fields}
 
 
 def _load_overlay(on_quit=None, on_translate=None, on_submit=None,

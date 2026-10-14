@@ -447,14 +447,14 @@ def suggest(entries, when, *, history=None, limit=3) -> list:
         hit = [s for s in (slots or ()) if s.active_at(when)]
         if hit:
             found[str(code)] = Guess(
-                str(code), f"课表上这个点就是这门（{hit[0].hh:02d}:{hit[0].mm:02d}）", 1.0)
+                str(code), f"课表上 {hit[0].hh:02d}:{hit[0].mm:02d} 是这门", 1.0)
     for code, slots in (history or {}).items():
         n = list(slots or ()).count((when.weekday(), when.hour))
         if not n:
             continue
         prev = found.get(str(code))
         why = ((prev.why + f"；过去也有 {n} 次") if prev
-               else f"过去有 {n} 次是这个时候上的")
+               else f"过去 {n} 次都是这个时候上")
         found[str(code)] = Guess(str(code), why, (prev.score if prev else 0.0) + 0.5)
     return sorted(found.values(), key=lambda g: (-g.score, g.course))[:limit]
 

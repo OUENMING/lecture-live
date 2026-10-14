@@ -282,7 +282,7 @@ def main() -> int:
                                sessions_dir=sess_iso,
                                # ⚠️ `on_start` 必须给个桩 —— 不给的话卡片上**一个按钮都不画**
                                #    （`_acts = on_start is not None`），于是「开始上课」/「课次」/
-                               #    「不是这门？」这条按钮行在跑器里**整个看不到**，
+                               #    选中那张卡的「开始上课」在跑器里**整个看不到**，
                                #    而它正是出过 bug 的那一行（按钮叠在就绪行上）。
                                #    桩只打印，**不写 `.course`、不起录音**。
                                on_start=lambda c: print(f"（桩）开始上课：{c}"),

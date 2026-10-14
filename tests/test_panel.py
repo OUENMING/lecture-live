@@ -650,14 +650,14 @@ def main() -> int:
     for _hint in (False, True):
         _cd = EP._make_card(_r("ECON10740", "Exploring Economics and Other Very Long Titles"),
                            on_start=lambda c: None, on_drop_files=lambda c, p: False,
-                           width=640.0, hinted=_hint, on_not_this=lambda: None)
+                           width=640.0, hinted=_hint, on_select=lambda c: None)
         _bs = [v for v in _cd.subviews() if isinstance(v, _NB)]
         _ls = [v for v in _cd.subviews() if not isinstance(v, _NB)]
         _ch = float(_cd.frame().size.height)
         check(f"按钮行（预选={_hint}）：卡片高度不因按钮变（= card_height()）",
               abs(_ch - EP.card_height()) < 0.01, f"{_ch} vs {EP.card_height()}")
-        check(f"按钮行（预选={_hint}）：按钮数对（预选 2 / 普通 1）",
-              len(_bs) == (2 if _hint else 1), str(len(_bs)))
+        check(f"按钮行（选中={_hint}）：按钮数对（选中 1 / 其余 0，2026-10-14 起整卡可点）",
+              len(_bs) == (1 if _hint else 0), str(len(_bs)))
         check(f"按钮行（预选={_hint}）：按钮不压文字",
               not [1 for b in _bs for l in _ls if _hit(b.frame(), l.frame())])
         check(f"按钮行（预选={_hint}）：按钮整颗在卡片里",

@@ -329,6 +329,7 @@ CARD_FILL_A = 0.045    # 卡片填充：比面板底色略亮（"内容浮起来
 #    所以取了 0.10（白）—— **这是推的，不是测的**，深色模式那组值本轮没量。
 CARD_LINE_A = 0.10
 HILITE_A = 0.16        # 拖拽悬停
+SEL_LINE_A = 0.32      # 选中那张卡的描边（普通卡 `CARD_LINE_A`）
 DIM = 0.62             # 次要文字（白字降 alpha）
 
 
@@ -422,10 +423,44 @@ def card_title(r: courses.Readiness) -> str:
     # ⚠️⚠️ 而那个边界**只认 ASCII 字母数字**（2026-09-28 审查指出）：
     #    中文也是 `isalnum()`，于是 `ECON10740经济学原理` 会被判成
     #    「课号是更长课号的前缀」→ 课号拼了两遍。紧跟中文正是"课号 + 课名"的常态写法。
+    # 显示用：包着中文的半角括号换全角 —— `Sociology(社会学导论)` → `Sociology（社会学导论）`
+    #    （全角括号自带字面空白，不用再补空格；术语表原文不动）
+    t = _CJK_PARENS.sub(lambda m: f"（{m[1].strip()}）", t)
     rest = t[len(r.course):] if t.startswith(r.course) else None
     if rest is not None and (not rest or not (rest[0].isascii() and rest[0].isalnum())):
         return t
     return f"{r.course}   {t}"
+
+
+_CJK_PARENS = re.compile(r"\s*\(([^()]*[\u3400-\u9fff][^()]*)\)")
+
+
+def _style_title(label, course: str) -> None:
+    """卡片标题：课号降一档（次要色、常规字重），课名保持粗白 —— 两样原来同色同重挤在一行。
+
+    只改外观：`stringValue()` 还是 `card_title(r)` 原文（阅读顺序判据靠它）。失败就保持原样。
+    """
+    try:
+        from AppKit import (NSColor, NSFont, NSFontAttributeName,
+                            NSForegroundColorAttributeName, NSLineBreakByTruncatingTail,
+                            NSMutableAttributedString, NSMutableParagraphStyle,
+                            NSParagraphStyleAttributeName)
+        text = label.stringValue()
+        if not text.startswith(course) or len(text) == len(course):
+            return
+        para = NSMutableParagraphStyle.alloc().init()
+        para.setLineBreakMode_(NSLineBreakByTruncatingTail)
+        s = NSMutableAttributedString.alloc().initWithString_attributes_(text, {
+            NSFontAttributeName: NSFont.boldSystemFontOfSize_(13.0),
+            NSForegroundColorAttributeName: NSColor.whiteColor(),
+            NSParagraphStyleAttributeName: para})
+        s.addAttributes_range_({
+            NSFontAttributeName: NSFont.systemFontOfSize_(13.0),
+            NSForegroundColorAttributeName: NSColor.whiteColor().colorWithAlphaComponent_(DIM)},
+            (0, len(course)))
+        label.setAttributedStringValue_(s)
+    except Exception:                                     # noqa: BLE001
+        pass
 
 
 def _short_date(d: str | None) -> str:
@@ -1129,8 +1164,13 @@ def _scroll_undo_into_view(doc, course) -> bool:
 
 def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
                entry=None, on_delete=None, on_undo=None, on_delete_course=None,
-               hinted=False, on_not_this=None):
-    """一张卡 = 一个落点 + 两行内容（+ 跑过之后的结果列表）。"""
+               hinted=False, why=None, on_select=None):
+    """一张卡 = 一个落点 + 两行内容（+ 跑过之后的结果列表）。
+
+    `hinted` = **选中的那张**（课表猜的，或用户点过的）：只有它画「开始上课」。
+    `why` = 课表为什么猜它 —— 画在**这张卡**的第二行（原来在底栏，离卡太远，2026-10-14）。
+    `on_select(course)` = 点没选中的卡 → 选中它（整张卡就是点击目标，卡上不再各挂一颗按钮）。
+    """
     from AppKit import NSButton, NSColor, NSFont, NSMakeRect
 
     holder: dict = {}
@@ -1178,6 +1218,10 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     view.layer().setBorderColor_(
         NSColor.whiteColor().colorWithAlphaComponent_(CARD_LINE_A).CGColor())
     _bg(CARD_FILL_A)
+    if hinted and on_start is not None:
+        # 选中态不只靠那颗按钮认：描边亮一档（零色相，`PLAN-entry-panel §0.5.1`）
+        view.layer().setBorderColor_(
+            NSColor.whiteColor().colorWithAlphaComponent_(SEL_LINE_A).CGColor())
 
     inner_w = width - 2 * CARD_PAD
 
@@ -1192,14 +1236,15 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
         #    `[一手]` Microsoft HAX G11 逐字：「**Make clear why the system did what it
         #    did**」—— 不说清楚的话，"为什么这张排第一"对用户就是猜的，
         #    而认错课的代价是**整节课术语表全错**。
-        acts.append(("开始上课 · 就是这门" if hinted else "开始上课",
-                     148.0 if hinted else 92.0, lambda: on_start(r.course)))
-        # ⭐ **纠错入口**（HAX G8「Support efficient dismissal」/ G9「efficient correction」）。
-        #    只有被预选的那张卡有它 —— 其余四张本来就不需要纠错。
-        #    ⚠️ 必须和「开始上课」同进同出（上课中的面板一个按钮都不画）。
-        if hinted and on_not_this is not None:
-            # 主按钮放最右（macOS 惯例，与收尾卡同一条；2026-10-13）
-            acts.insert(0, ("不是这门？", 84.0, on_not_this))
+        # ⭐ 2026-10-14 改成「选中 → 开始」：原来**每张卡**一颗「开始上课」（7 颗一模一样的胶囊），
+        #    外加预选卡上的「不是这门？」+「开始上课 · 就是这门」。现在一屏只有**一颗**，挂在
+        #    选中的那张上；纠错（HAX G9「efficient correction」）= 直接点别的卡，一下就换过去。
+        #    理由从按钮文案挪到卡片第二行（HAX G11「make clear why」—— 离它说的那张卡最近）。
+        #    ⚠️ 开课是重操作（立刻开录），所以「点卡片」只选中、**不**开课。
+        if hinted:
+            acts.append(("开始上课", 92.0, lambda: on_start(r.course)))
+        elif on_select is not None:
+            view._on_click = lambda: on_select(r.course)
     # ⚠️ 原来这里还有一个「选择文件…」（单课加课件）。2026-09-28 删掉 ——
     #    作者说「卡片看着太繁杂」。能力没丢：拖到卡上 = 加到那门课；不想拖 → 底部统一入口。
     acts_w = sum(w for _t, w, _a in acts) + 8.0 * max(len(acts) - 1, 0)
@@ -1212,18 +1257,21 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     y = ch - CARD_PAD
     y -= L1_H
     # ⚠️ 两行都 `truncate=True`：按钮占走右边之后，长课名不截就会折行、第二行被静默吃掉。
-    view.addSubview_(panel.make_label(
+    _t = panel.make_label(
         card_title(r), NSMakeRect(CARD_PAD, y, text_w, L1_H), 13.0, bold=True,
-        truncate=True))
+        truncate=True)
+    _style_title(_t, r.course)
+    view.addSubview_(_t)
     y -= (L2_H + 2.0)
     view.addSubview_(panel.make_label(
-        readiness_line(r), NSMakeRect(CARD_PAD, y, text_w, L2_H), 11.0, alpha=DIM,
+        (f"{why} · " if (hinted and why) else "") + readiness_line(r),
+        NSMakeRect(CARD_PAD, y, text_w, L2_H), 11.0, alpha=DIM,
         truncate=True))
 
     # 按钮的竖直中心 = 文字块（标题 + 准备度）的中心。⚠️ 与上面两行同一组常数推出。
     def mk(title, x, action, y=CARD_PAD, w=92.0, h=BTN_H):
         b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
-        # ⭐ 一屏只有**一颗**主按钮：被预选那张卡的「开始上课 · 就是这门」（2026-10-13 设计评审：
+        # ⭐ 一屏只有**一颗**主按钮：选中那张卡的「开始上课」（2026-10-13 设计评审：
         #    原来五张卡十几颗按钮一样重，眼睛找不到起点）。其余一律次要胶囊 —— 与收尾卡 /
         #    功能介绍卡同一套（`panel.style_primary` / `style_secondary`）。
         if hinted and title.startswith("开始上课"):
@@ -1711,24 +1759,14 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     S["guesses"] = _guesses()
     S["guess_i"] = 0
 
-    def next_guess():
-        """「不是这门？」→ 换下一条猜测；没有了就**不猜了**（`guess_i = -1`）。
+    def pick(course):
+        """点一张没选中的卡 → 选中它（2026-10-14 取代「不是这门？」：纠错 = 直接点对的那张）。
 
-        ⚠️ 不弹确认框：`[一手]` NN/g 逐字「Do not use confirmation dialogs for routine
-           actions… if you cry wolf too many times, people will stop paying attention」。
-        ⚠️ 也不写任何持久状态 —— 下一次开面板重新按课表/历史算，这是**每节课**的事。
+        ⚠️ 不写任何持久状态 —— 下一次开面板重新按课表/历史算，这是**每节课**的事。
+        ⚠️⚠️ **必须 `_later`**：这是卡片 `mouseDown_` 里调的，同步 `refresh()` 会把正在
+           处理事件的那张卡整块拆掉（同「不是这门？」2026-09-29 那次，机制见 `_later`）。
         """
-        g = S.get("guesses") or []
-        i = S.get("guess_i", 0) + 1
-        S["guess_i"] = i if i < len(g) else -1
-        if S["guess_i"] < 0:
-            set_status("好，那我不猜了 —— 你自己挑")
-        # ⚠️⚠️ **必须 `_later`**（2026-09-29 修）—— 这是卡上「不是这门？」按钮的
-        #    action，同步 `refresh()` 会把 sender 所在那张卡整块拆掉，而
-        #    `NSCell` 的跟踪循环**还在栈上** → 主线程被占住、**所有按钮都没反应**。
-        #    同批新增的其它 action（`toggle_hit` / `cancel_import`
-        #    / `confirm_import`）都规规矩矩用 `_later(refresh)`，
-        #    这里漏了。机制见 `_later` 的 docstring。
+        S["picked"] = course
         _later(refresh)
 
     # ⚠️ 用 `visibleFrame`（去掉菜单栏 / Dock），不是 `frame` —— 后者会让面板钻到 Dock 底下。
@@ -1786,8 +1824,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # 标题在批量模式下会换字 —— 存进 holder，别让 `refresh()` 摸不到它。
     # ⚠️ 2026-09-28 起标题右边多了个搜索框，所以标题**只占左边那段**。
     title_lbl = panel.make_label(
-        "开课前的准备", NSMakeRect(PAD, h - PAD - TITLE_H + 6.0,
-                                 WIDTH - 2 * PAD - SEARCH_W - 10.0, TITLE_H - 6.0),
+        # ⚠️ 竖直位置是**量出来的**：原来 `+6 / 高 28` 让字的中线比搜索框高 8.25pt（拍图量墨迹，
+        #    2026-10-14）。现在与搜索框同一条中线（同法复量 ≤0.5pt）。
+        "开课前的准备", NSMakeRect(PAD, h - PAD - TITLE_H + 1.75,
+                                 WIDTH - 2 * PAD - SEARCH_W - 10.0, 24.0),
         15.0, bold=True)
     ve.addSubview_(title_lbl)
 
@@ -2372,8 +2412,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # ⚠️ 两行（2026-10-12 从三行并来）：「认不出的会让你核对」挪给了拖进来之后的批量确认卡 ——
     #    那张卡本来就会让你核对，在这里预告一遍是多占一行。
     strip_holder["hint"] = [
+        # 13pt（原 15）：落点条是次要入口，字不该比课名还大（2026-10-14 评审）
         panel.make_label("把课件全拖到这里 · 自动分到各课",
-                         NSMakeRect(CARD_PAD, DROP_H - 30.0, _hint_w, 22.0), 15.0),
+                         NSMakeRect(CARD_PAD, DROP_H - 28.0, _hint_w, 18.0), 13.0),
         panel.make_label("PDF / PPTX / DOCX · 课表 .ics · 文件夹也行",
                          NSMakeRect(CARD_PAD, DROP_H - 48.0, _hint_w, 16.0),
                          11.0, alpha=DIM),
@@ -3383,9 +3424,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _hint = _gs[_gi].course if 0 <= _gi < len(_gs) else None
         if _hint:
             rows.sort(key=lambda r: (r.course != _hint,))
-            set_status(f"课表推测：{_hint} —— {_gs[_gi].why}")
-        elif _gs:
-            set_status("你自己挑一门 —— 我不猜了")
+        # 选中的那张：用户点过的优先，否则课表猜的。⚠️ 点选**不重排** —— 卡片在手底下跳走更糟。
+        _sel = S.get("picked") or _hint
+        _why = _gs[_gi].why if (_hint and _sel == _hint) else None
+        if on_start is not None and rows and not _sel:
+            # ⚠️ 只在「没有选中」时说话：有选中时理由已经在卡上，别盖掉状态行里别的消息
+            set_status("点一门课选中它，再按「开始上课」")
         if not rows:
             # ⭐ 零课程的空状态（2026-09-28）—— 原来这里是**一片空白**。
             from AppKit import NSColor, NSMakeRect, NSView
@@ -3416,8 +3460,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             card = _make_card(r, on_start=on_start,
                               on_drop_files=run_prep, width=WIDTH - 2 * PAD,
                               entry=entry,
-                              hinted=(r.course == _hint),
-                              on_not_this=next_guess,
+                              hinted=(r.course == _sel),
+                              why=_why,
+                              on_select=pick,
                               # ⚠️ **课号要在这里绑好。** `_make_card` 只传词
                               #    （它不知道也不该知道课号之外的上下文）——
                               #    第一版直接传 `do_delete`（两个参数），调用点只给一个，
@@ -3806,7 +3851,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
     status_holder["label"] = panel.make_label(
         "拖课件到某张卡上 = 加到那门课　·　拖到下面那个虚线框 = 自动分到各课",
-        NSMakeRect(PAD, PAD + 6.0, WIDTH - 2 * PAD - 100.0 - TOUR_BTN_W - 8.0, 18.0), 11.0, alpha=DIM)
+        # 原来 `PAD + 6` 比右边按钮里的字高 2pt（拍图量墨迹，2026-10-14）
+        NSMakeRect(PAD, PAD + 4.0, WIDTH - 2 * PAD - 100.0 - TOUR_BTN_W - 8.0, 18.0), 11.0, alpha=DIM)
     ve.addSubview_(status_holder["label"])
 
     # 「功能介绍」：随时重看那张介绍卡（Owen 2026-10-13 要的入口）。逃生口那一档的分量 ——

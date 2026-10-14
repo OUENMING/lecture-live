@@ -387,6 +387,7 @@ def make_drop_target(on_enter, on_drop, on_exit=None, *, types=None):
     ⚠️ **落点成功时不会收到 `draggingExited_`** —— 悬停高亮要在 `on_drop` 里也撤一次，
        不能只靠 `on_exit`。（HIG 逐字要求「people drag the content away 时撤掉」。）
     """
+    import objc
     from AppKit import (NSDragOperationCopy, NSDragOperationNone, NSView,
                         NSPasteboardTypeFileURL)
 
@@ -458,7 +459,19 @@ def make_drop_target(on_enter, on_drop, on_exit=None, *, types=None):
             return False
         return True if got is None else bool(got)
 
+    def mouse_down(self, event):
+        """点一下 = `self._on_click()`（卡片「选中这门」，2026-10-14）；没挂回调就照常往上传。
+
+        ⚠️ 卡上的按钮（「开始上课」/「删」/「撤销」）自己吃掉点击，到不了这里 —— 只有
+           空白处和文字标签（不可选的 `NSTextField` 把事件往上交）才会进来。
+        """
+        if getattr(self, "_on_click", None) is None:
+            objc.super(type(self), self).mouseDown_(event)
+            return
+        _call(self, "_on_click")
+
     cls = objc_own.own("DropTarget", NSView, {
+        "mouseDown_": mouse_down,
         "draggingEntered_": dragging_entered,
         "draggingUpdated_": dragging_updated,
         "draggingExited_": dragging_exited,

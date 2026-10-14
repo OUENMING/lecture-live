@@ -72,6 +72,12 @@ def main() -> int:
           E.card_title(R(title="ECON10740经济学原理")) == "ECON10740经济学原理",
           E.card_title(R(title="ECON10740经济学原理")))
     check("标题空 -> 只显示课号", E.card_title(R(title="")) == "ECON10740")
+    check("包中文的半角括号换全角（显示用）",
+          E.card_title(R(course="SOC10020", title="SOC10020 Introduction to Sociology(社会学导论)"))
+          == "SOC10020 Introduction to Sociology（社会学导论）",
+          E.card_title(R(course="SOC10020", title="SOC10020 Introduction to Sociology(社会学导论)")))
+    check("纯英文括号不动", E.card_title(R(title="ECON10740 Economics (Part 2)"))
+          == "ECON10740 Economics (Part 2)")
 
     print("\n--- ② ⭐「未知」与「零」必须显示成两样 ---")
     zero = E.readiness_line(R(terms=0, materials=0))
@@ -716,25 +722,43 @@ def main() -> int:
         return sorted((type(v).__name__, round(float(v.frame().origin.x), 1),
                        round(float(v.frame().origin.y), 1)) for v in c.subviews())
 
-    check("⭐ on_start=None 时，「预选」一个像素都不许加（否则叠在就绪行上）",
-          _sig(_mk(hinted=True, on_not_this=lambda: None)) == _sig(_mk()),
-          f"预选版 {len(_mk(hinted=True, on_not_this=lambda: None).subviews())} 个子视图，"
-          f"普通版 {len(_mk().subviews())} 个")
+    check("⭐ on_start=None 时，「选中」一个按钮都不许加（否则叠在就绪行上）",
+          _sig(_mk(hinted=True, why="课表上 15:00 是这门")) == _sig(_mk()),
+          f"选中版 {len(_mk(hinted=True).subviews())} 个子视图，普通版 {len(_mk().subviews())} 个")
 
-    # 反方向：**有按钮行时**，「开始上课」与「不是这门？」两个都必须在
+    # 反方向：**有按钮行时**，选中那张有且只有一颗「开始上课」
     # （否则上面那条会因为"什么都不画"而假绿）
     def _mk_act(**kw):
         return E._make_card(_r0, on_start=lambda c: None,
                             on_drop_files=lambda *a: None, width=600.0, **kw)
 
     from AppKit import NSButton as _NSBtn
-    _btns = [v for v in _mk_act(hinted=True, on_not_this=lambda: None).subviews()
-             if isinstance(v, _NSBtn)]
-    check("有按钮行时：预选那张卡上「开始上课」与「不是这门？」都在",
-          len(_btns) == 2, f"按钮行里拿到 {len(_btns)} 个")
-    _btns2 = [v for v in _mk_act().subviews() if isinstance(v, _NSBtn)]
-    check("有按钮行时：**没预选**的卡只有一个按钮（不许到处挂「不是这门？」）",
-          len(_btns2) == 1, f"拿到 {len(_btns2)} 个")
+
+    def _titles(c):
+        return [v.title() for v in c.subviews() if isinstance(v, _NSBtn)]
+    check("有按钮行时：选中那张卡只有一颗「开始上课」（2026-10-14 删了「不是这门？」）",
+          _titles(_mk_act(hinted=True, on_select=lambda c: None)) == ["开始上课"],
+          str(_titles(_mk_act(hinted=True, on_select=lambda c: None))))
+    check("有按钮行时：**没选中**的卡一颗按钮都没有（不再每张卡挂一颗）",
+          _titles(_mk_act(on_select=lambda c: None)) == [],
+          str(_titles(_mk_act(on_select=lambda c: None))))
+    # ⭐ 行为判据（`.claude/rules/appkit-ui.md`：别钉 flag，钉「回调真的触发」）
+    _got: list = []
+    _c = _mk_act(on_select=_got.append)
+    _c.mouseDown_(None)
+    check("⭐ 点没选中的卡 → on_select(课号) 真的被调到", _got == ["ECON10740"], str(_got))
+    _got2: list = []
+    _mk_act(hinted=True, on_select=_got2.append)   # 选中那张不挂点击（它有按钮）
+    check("选中那张不挂「点卡选中」", getattr(_mk_act(hinted=True, on_select=_got2.append),
+                                       "_on_click", None) is None)
+    _w = "课表上 15:00 是这门"
+    _sub = [v.stringValue() for v in _mk_act(hinted=True, why=_w).subviews()
+            if hasattr(v, "stringValue") and not isinstance(v, _NSBtn)]
+    check("⭐ 理由画在**选中那张卡**的第二行（原来在底栏，离卡太远）",
+          any(t.startswith(_w + " · ") for t in _sub), str(_sub))
+    _sub2 = [v.stringValue() for v in _mk_act(why=_w).subviews()
+             if hasattr(v, "stringValue") and not isinstance(v, _NSBtn)]
+    check("没选中的卡不带理由", not any(_w in t for t in _sub2), str(_sub2))
 
     print("\n" + "=" * 60)
     # ⚠️⚠️ `bad` **必须在这里算** —— 它是最后一句，所有判据都跑完了。

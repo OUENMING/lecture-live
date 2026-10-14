@@ -228,18 +228,15 @@ def build(title: str, subtitle: str = "", groups: list[dict] | None = None, *,
         inner = WIDTH - 2 * PAD
         targets: list = []
         views, list_h = _rows(groups or [], inner, targets) if groups else ([], 0.0)
-        if list_h > BODY_MAX_H:
-            # 要滚 → 右边让出滚动条那一条（overlay 滚动条出现时会压在「详情」上，拍图看到过）
-            targets.clear()
-            views, list_h = _rows(groups or [], inner - 12.0, targets)
         body_lb = _label(body, ITEM_SIZE, alpha=0.9, wrap=True) if body else None
         note_lb = _label(note, 11.0, alpha=0.6, wrap=True) if note else None
         body_h = _fit_h(body_lb, inner) if body_lb else 0.0
         note_h = _fit_h(note_lb, inner) if note_lb else 0.0
-        well_h = min(list_h, BODY_MAX_H) + (2 * 12.0 if views else 0.0)
+        scrolls = list_h > BODY_MAX_H
+        well_h = min(list_h, BODY_MAX_H)
 
         h = (PAD + 24.0 + (18.0 if subtitle else 0.0) + 14.0
-             + (well_h + 12.0 if views else 0.0)
+             + (well_h + 16.0 if views else 0.0)
              + (body_h + 12.0 if body_lb else 0.0)
              + (note_h + 14.0 if note_lb else 0.0)
              + (28.0 if buttons else 0.0) + PAD)
@@ -275,29 +272,41 @@ def build(title: str, subtitle: str = "", groups: list[dict] | None = None, *,
         y -= 14.0
 
         if views:
-            # 列表垫一块浅底（极淡白底 + 发丝边，与开课面板的课程卡同一套分量）：看得出哪块能滚
-            from AppKit import NSColor, NSView
+            # ⭐ 列表**直接放在毛玻璃上**，不垫底（2026-10-14 复核：cc-switch 的列表区没有底色；Apple
+            #    《Adopting Liquid Glass》也要求审掉 sheet / popover 里自加的背景视图）。原来那块白 5% 底 +
+            #    发丝边是 10-13 给「整份日志可滚」加的提示；现在每版最多 4 条、多半不用滚，它只剩「盒中盒」。
+            #    要滚时改用底边**渐隐**提示「下面还有」（同系统的 scroll edge effect），文档底部多垫一截，
+            #    滚到底时最后一行能完全露出来、不被渐隐吃掉。
+            fade = 22.0 if scrolls else 0.0
             y -= well_h
-            well = NSView.alloc().initWithFrame_(NSMakeRect(PAD - 8.0, y, inner + 16.0, well_h))
-            well.setWantsLayer_(True)
-            _w = NSColor.whiteColor()
-            well.layer().setCornerRadius_(10.0)
-            well.layer().setBackgroundColor_(_w.colorWithAlphaComponent_(0.05).CGColor())
-            well.layer().setBorderWidth_(0.5)
-            well.layer().setBorderColor_(_w.colorWithAlphaComponent_(0.10).CGColor())
-            ve.addSubview_(well)
-            vis_h = well_h - 24.0
-            doc = _doc_class().alloc().initWithFrame_(NSMakeRect(0, 0, inner, list_h))
+            doc = _doc_class().alloc().initWithFrame_(NSMakeRect(0, 0, inner, list_h + fade))
             for v in views:
                 doc.addSubview_(v)
-            sc = panel.make_scroll_view(NSMakeRect(PAD, y + 12.0, inner, vis_h),
-                                        has_vertical=list_h > vis_h)
+            # 要滚时滚动区往右伸进 12pt 边距：overlay 滚动条落在文字栏外面，不压「详情」（拍图看到过）
+            sc = panel.make_scroll_view(NSMakeRect(PAD, y, inner + (12.0 if scrolls else 0.0), well_h),
+                                        has_vertical=scrolls)
             sc.setDocumentView_(doc)
             ve.addSubview_(sc)
             # ⚠️ 要滚时一出来停在**底部**（拍图看到：最新那一版整个在上面看不见）→ 显式滚回顶
             sc.contentView().scrollToPoint_((0.0, 0.0))
             sc.reflectScrolledClipView_(sc.contentView())
-            y -= 12.0
+            if scrolls:
+                try:
+                    from Quartz import CAGradientLayer
+                    from AppKit import NSColor
+                    sc.setWantsLayer_(True)
+                    m = CAGradientLayer.layer()
+                    m.setFrame_(((0.0, 0.0), (inner + 12.0, well_h)))
+                    m.setColors_([NSColor.clearColor().CGColor(), NSColor.blackColor().CGColor()])
+                    m.setLocations_([0.0, fade / well_h])
+                    # ⚠️ 滚动视图的图层是**翻转**的（y=0 在顶，拍图验过：按「y 朝上」写，渐隐跑到了顶上）
+                    #    → 从 y=1（底边）往上画
+                    m.setStartPoint_((0.5, 1.0))
+                    m.setEndPoint_((0.5, 0.0))
+                    sc.layer().setMask_(m)
+                except Exception:                         # noqa: BLE001
+                    pass
+            y -= 16.0
         if body_lb:
             y -= body_h
             body_lb.setFrame_(NSMakeRect(PAD, y, inner, body_h))

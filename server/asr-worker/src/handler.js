@@ -220,6 +220,15 @@ async function takeTurbo(env, seconds) {
 }
 
 // ---- Groq ----
+// Groq 每次回包带的剩余额度（2026-10-14 实测头名）；缺任何一个就当没有。
+function groqHdr(h) {
+  const g = (k) => h?.get?.(`x-ratelimit-${k}`);
+  const v = [g("remaining-requests"), g("remaining-audio-seconds"), g("limit-requests"), g("limit-audio-seconds")];
+  if (v.some((x) => x == null || x === "")) return null;
+  const [req, aud, req_lim, aud_lim] = v.map(Number);
+  return [req, aud, req_lim, aud_lim].every(Number.isFinite) ? { req, aud, req_lim, aud_lim } : null;
+}
+
 // run = {env, audio, sig, deadline, tried, report}：一次请求内各供应商共用的上下文。
 async function tryGroq({ env, audio, sig, deadline, tried, report }, model = V3) {
   const tag = model === V3 ? "groq" : "turbo";
@@ -238,9 +247,11 @@ async function tryGroq({ env, audio, sig, deadline, tried, report }, model = V3)
     throw new Skip();
   }
   tried.push(`${tag}:${r.status}`);
+  const hdr = groqHdr(r.headers);   // 200 与 429 都带；有就报给 DO（见 quota-core.js 的 hdr）
+  if (hdr && r.status !== 429) report(model === V3 ? { groq_hdr: hdr } : { groq_hdr: hdr, model });
   if (r.status === 429) {
     const cd = parseInt(r.headers.get("retry-after"), 10) || 60;
-    report(model === V3 ? { groq_cooldown_s: cd } : { groq_cooldown_s: cd, model });
+    report({ groq_cooldown_s: cd, ...(hdr ? { groq_hdr: hdr } : {}), ...(model === V3 ? {} : { model }) });
     throw new Skip();
   }
   const b = r.body;

@@ -155,6 +155,11 @@ def main(argv=None) -> int:
             b = q[key]
             print(f"  {label:<11} 今日 {b['used_reqs']:>5}/{c['reqs_day']} 次 · {b['used_s']:>7.0f}/{c['s_day']:.0f} 秒 "
                   f"· 本分钟 {b['min_reqs']}/{c['reqs_min']} · 本小时 {b['hour_s']:.0f} 秒")
+            g = b.get("groq")           # Groq 回包报的剩余（推算到此刻；Worker 拿它判，见 quota-core.js）
+            if g:
+                ago = max(0, (q["now"] - g["reported_at"]) / 60000)
+                print(f"  {'':<11} Groq 报：剩 {g['req_left']}/{g['req_lim']} 次（24 h 滚动）· "
+                      f"剩 {g['aud_left']}/{g['aud_lim']} 秒（1 h 滚动）· {ago:.0f} 分钟前报的")
         qw = q["qwen"]
         tail = f" · 已耗尽 {', '.join(qw['exhausted'])}" if qw["exhausted"] else ""
         print(f"  {'千问':<11} 今日 {qw['used']:>5}/{qw['max']} 段{tail}")

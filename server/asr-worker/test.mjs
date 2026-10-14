@@ -495,3 +495,89 @@ test("R20 Content-Length 超 512 KB -> 413，且根本没去读 body", () => wit
   assert.equal((await h.call(fake)).status, 413);
   assert.equal(read, false);
 }));
+
+// =====================  §H Groq 报的剩余额度（2026-10-14）  =====================
+// 实测：两个桶连续回补（RPD 每 43.2 s 回 1 次，ASH 每 0.5 s 回 1 秒），不是到点清零。
+const GH = (req, aud, req_lim = 2000, aud_lim = 7200) => ({
+  "x-ratelimit-remaining-requests": String(req), "x-ratelimit-remaining-audio-seconds": String(aud),
+  "x-ratelimit-limit-requests": String(req_lim), "x-ratelimit-limit-audio-seconds": String(aud_lim),
+});
+const groqOkH = (h, text = " hi ") => J(200, { text, segments: [{ no_speech_prob: 0.01, compression_ratio: 1.1 }] }, h);
+
+test("H1 Groq 200 带剩余头 -> DO 记下（v3 记在 groq_hdr），管理面板读得到推算值", () => withHarness({
+  groq: () => groqOkH(GH(1500, 6000)),
+}, async (h) => {
+  await h.call(req({ seconds: "12" }));
+  const st = h.store.get("state");
+  assert.deepEqual({ ...st.groq_hdr, at: 0 }, { req: 1500, aud: 6000, req_lim: 2000, aud_lim: 7200, at: 0 });
+  assert.equal(st.turbo.hdr, null, "v3 的数不许记到 turbo 上");
+  const q = await (await h.core.handle(new Request("https://quota/admin/state", { method: "POST", body: "{}" }))).json();
+  assert.equal(q.v3.groq.req_lim, 2000);
+  assert.ok(q.v3.groq.req_left >= 1500 && q.v3.groq.req_left <= 1501, JSON.stringify(q.v3.groq));
+  assert.equal(q.turbo.groq, null);
+}));
+test("H2 头缺一个 -> 不报（宁可退回老算法也不信半截数）", () => withHarness({
+  groq: () => groqOkH({ "x-ratelimit-remaining-requests": "5" }),
+}, async (h) => {
+  await h.call(req());
+  assert.equal(h.reports.filter((r) => r.groq_hdr).length, 0);
+  assert.equal(h.store.get("state").groq_hdr ?? null, null);
+}));
+test("H3 有 Groq 的数就信它：本地 UTC 日计数已到 1900，Groq 说还剩 1500 -> 照批 v3", async () => {
+  const clock = { now: DAY };
+  const { plan } = quotaAt(clock, { day: "2026-10-11", groq_day: 1900,
+    groq_hdr: { req: 1500, aud: 6000, req_lim: 2000, aud_lim: 7200, at: DAY } });
+  assert.equal((await plan()).groq, V3);
+});
+test("H4 Groq 剩余低于 5% 就不批；按 43.2 s / 次回补，回够了再批", async () => {
+  const clock = { now: DAY };
+  const { plan, store } = quotaAt(clock, { day: "2026-10-11",
+    groq_hdr: { req: 99, aud: 7000, req_lim: 2000, aud_lim: 7200, at: DAY } });
+  assert.equal((await plan()).groq, TURBO, "99 - 1 < 100");
+  clock.now += 2 * 43_200;                    // 回 2 次 -> 101
+  assert.equal((await plan()).groq, V3, "101 - 1 = 100，刚好到线");
+  assert.ok(Math.abs(store.get("state").groq_hdr.req - 100) < 1e-6, "批准后本地先扣 1");
+  assert.equal((await plan()).groq, TURBO, "本地扣过，下一段又不够了");
+});
+test("H5 音频秒按真实秒扣（不按 10 s 起步），按 2 秒/秒回补", async () => {
+  const clock = { now: DAY };
+  const { plan, store } = quotaAt(clock, { day: "2026-10-11",
+    groq_hdr: { req: 1500, aud: 400, req_lim: 2000, aud_lim: 7200, at: DAY } });
+  assert.equal((await plan(50)).groq, TURBO, "400 - 50 < 360");
+  clock.now += 10_000;                       // +20 秒
+  assert.equal((await plan(50)).groq, V3, "420 - 50 = 370");
+  assert.ok(Math.abs(store.get("state").groq_hdr.aud - 370) < 1e-6);
+  assert.equal((await plan(5)).groq, V3, "5 s 的段只扣 5 秒：370 - 5 = 365");
+  const c = quotaAt(clock, { day: "2026-10-11",
+    groq_hdr: { req: 1500, aud: 366, req_lim: 2000, aud_lim: 7200, at: clock.now } });
+  assert.equal((await c.plan(5)).groq, V3, "366 - 5 = 361 ≥ 360（按 10 s 计费秒就会 356 被拒）");
+});
+test("H6 Groq 不报的两条照旧本地管：RPM 19 与当日音频秒", async () => {
+  const clock = { now: DAY };
+  const hdr = { req: 1900, aud: 7000, req_lim: 2000, aud_lim: 7200, at: DAY };
+  const { plan } = quotaAt(clock, { day: "2026-10-11", groq_hdr: hdr });
+  for (let i = 1; i <= 19; i++) assert.equal((await plan(1)).groq, V3, `第 ${i} 次`);
+  assert.equal((await plan(1)).groq, TURBO, "同分钟第 20 次");
+  const b = quotaAt(clock, { day: "2026-10-11", groq_day_s: 27355, groq_hdr: hdr });
+  assert.equal((await b.plan(10)).groq, TURBO, "当日音频秒 27355 + 10 > 27360");
+});
+test("H7 429 也带头 -> 冷却照设、数也记下；turbo 的头记到 turbo 桶", () => withHarness({
+  groq: (n, model) => (model === TURBO ? groqOkH(GH(1990, 7100), " t ") : J(429, {}, { "retry-after": "30", ...GH(0, 5000) })),
+}, async (h) => {
+  await h.call(req());                      // v3 429 -> 千问
+  const st = h.store.get("state");
+  assert.ok(st.groq_cooldown_until > Date.now());
+  assert.equal(st.groq_hdr.req, 0);
+  await h.store.set("state", { ...st, qwen_exhausted: Object.fromEntries(CHAIN3.map((m) => [m, "x"])) });
+  const j = await (await h.call(req())).json();
+  assert.equal(j.model, TURBO);
+  assert.equal(h.store.get("state").turbo.hdr.req, 1990);
+  assert.equal(h.store.get("state").groq_hdr.req, 0, "turbo 的数不许盖到 v3 上");
+}));
+test("H8 推算封顶上限：很久没报 -> 回满但不超过 limit", () => {
+  const e = QuotaCore.estimate({ req: 10, aud: 10, req_lim: 2000, aud_lim: 7200, at: 0 }, 10 * 86_400_000);
+  assert.deepEqual(e, { req: 2000, aud: 7200 });
+  assert.equal(QuotaCore.estimate(null, 1), null);
+  assert.equal(QuotaCore.parseHdr({ req: 1, aud: 1, req_lim: 0, aud_lim: 7200 }), null, "上限 0 不收");
+  assert.equal(QuotaCore.parseHdr({ req: -1, aud: 1, req_lim: 2000, aud_lim: 7200 }), null);
+});

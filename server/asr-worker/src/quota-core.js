@@ -27,12 +27,20 @@ const QWEN_DAY_MAX = 3000;      // R17：约 9 节课；保护不可再生的免
 const MAX_COOLDOWN_S = 86400;
 export const TURBO = "whisper-large-v3-turbo";
 export const V3 = "whisper-large-v3";
-const BUCKET = () => ({ n: 0, min: { minute: -1, n: 0 }, hour: { hour: -1, s: 0 }, s: 0, cooldown_until: 0 });
+// ⭐ Groq 自己报的剩余（2026-10-14 起）：每次 Groq 回包都带 `x-ratelimit-remaining-requests`（RPD 桶）与
+//    `x-ratelimit-remaining-audio-seconds`（ASH 桶）。实测这两个是**连续回补**的令牌桶，不是到点清零：
+//    用 1 次 reset-requests 报 43.2 s（= 86400/2000），用 3 次报 2m9.6s；音频秒每 0.5 s 回 1 秒（= 3600/7200）；
+//    1 s 的请求只扣 1 秒（限流按真实秒，**不按**计费的 10 s 起步）。
+//    hdr = {req, aud, req_lim, aud_lim, at}：上一次 Groq 报的数 + 那一刻的时间；到现在的回补按上面的速率推算。
+//    有 hdr 就用它判 RPD 与 ASH（原来的 UTC 日 / 整点计数照记，只给面板看）；没有（刚部署、从没成功调过）才退回老算法。
+//    ⚠️ 两条 Groq 不报的照旧本地记：RPM（20/分钟，`min`）与 ASD（28.8K/天，`s`）。
+const HDR_MARGIN = 0.05;     // 推算剩余低于上限的 5% 就不批（并发中的请求 Groq 还没扣，留余量）
+const BUCKET = () => ({ n: 0, min: { minute: -1, n: 0 }, hour: { hour: -1, s: 0 }, s: 0, cooldown_until: 0, hdr: null });
 
 const FRESH = () => ({
   day: "", groq_day: 0, groq_min: { minute: -1, n: 0 },
   groq_hour: { hour: -1, s: 0 }, groq_day_s: 0, qwen_day: 0,
-  groq_cooldown_until: 0, qwen_exhausted: {}, qwen_cooldown_until: 0, turbo: BUCKET(),
+  groq_cooldown_until: 0, groq_hdr: null, qwen_exhausted: {}, qwen_cooldown_until: 0, turbo: BUCKET(),
 });
 
 const json = (obj, status = 200) =>
@@ -66,14 +74,20 @@ export class QuotaCore {
     const hour = Math.floor(now / 3600000);
     const minute = Math.floor(now / 60000);
     // 分钟/小时桶是「上一格的数」，跨格了就当 0 显示（同 #take 的比法）。
-    const norm = (b) => ({
-      used_reqs: b.n, used_s: b.s,
-      min_reqs: b.min.minute === minute ? b.min.n : 0,
-      hour_s: b.hour.hour === hour ? b.hour.s : 0,
-      cooldown_until: b.cooldown_until,
-    });
+    const norm = (b) => {
+      const est = QuotaCore.estimate(b.hdr, now);
+      return {
+        used_reqs: b.n, used_s: b.s,
+        min_reqs: b.min.minute === minute ? b.min.n : 0,
+        hour_s: b.hour.hour === hour ? b.hour.s : 0,
+        cooldown_until: b.cooldown_until,
+        // Groq 报的剩余推算到现在（没报过 = null）；`reported_at` 是最后一次回包的时间。
+        groq: est && { req_left: Math.floor(est.req), req_lim: b.hdr.req_lim,
+                       aud_left: Math.floor(est.aud), aud_lim: b.hdr.aud_lim, reported_at: b.hdr.at },
+      };
+    };
     const v3 = { n: s.groq_day, min: s.groq_min, hour: s.groq_hour,
-                 s: s.groq_day_s, cooldown_until: s.groq_cooldown_until };
+                 s: s.groq_day_s, cooldown_until: s.groq_cooldown_until, hdr: s.groq_hdr };
     return {
       day: s.day, now,
       caps: { reqs_day: GROQ_DAY_MAX, reqs_min: GROQ_MIN_MAX,
@@ -94,19 +108,36 @@ export class QuotaCore {
     }
   }
 
-  // 一个 Groq 模型桶：四条上限都在 95% 以内才批，批准即计数。b = {n, min, hour, s, cooldown_until}（原地改）。
+  // Groq 报过的剩余推算到 `now`：按各自的回补速率加回来，封顶上限。没报过 -> null。
+  static estimate(hdr, now) {
+    if (!hdr || !Number.isFinite(hdr.at)) return null;
+    const dt = Math.max(0, now - hdr.at) / 1000;
+    return {
+      req: Math.min(hdr.req_lim, hdr.req + dt * hdr.req_lim / 86400),
+      aud: Math.min(hdr.aud_lim, hdr.aud + dt * hdr.aud_lim / 3600),
+    };
+  }
+
+  // 一个 Groq 模型桶：几条上限都在 95% 以内才批，批准即计数。b = {n, min, hour, s, cooldown_until, hdr}（原地改）。
   #take(b, now, seconds) {
     const minute = Math.floor(now / 60000);
     const hour = Math.floor(now / 3600000);
     const nMin = b.min.minute === minute ? b.min.n : 0;
     const hourS = b.hour.hour === hour ? b.hour.s : 0;
-    const billed = Math.max(GROQ_MIN_BILLED_S, Number.isFinite(seconds) ? seconds : 12);
-    const ok = now >= b.cooldown_until
-      && b.n < GROQ_DAY_MAX && nMin < GROQ_MIN_MAX
-      && hourS + billed <= GROQ_HOUR_S_MAX && b.s + billed <= GROQ_DAY_S_MAX;
+    const real = Number.isFinite(seconds) ? seconds : 12;
+    const billed = Math.max(GROQ_MIN_BILLED_S, real);
+    const est = QuotaCore.estimate(b.hdr, now);
+    // RPD 与 ASH：有 Groq 报的数就信它（令牌桶），否则退回 UTC 日 / 整点计数。
+    const groqSide = est
+      ? est.req - 1 >= b.hdr.req_lim * HDR_MARGIN && est.aud - real >= b.hdr.aud_lim * HDR_MARGIN
+      : b.n < GROQ_DAY_MAX && hourS + billed <= GROQ_HOUR_S_MAX;
+    const ok = now >= b.cooldown_until && groqSide
+      && nMin < GROQ_MIN_MAX && b.s + billed <= GROQ_DAY_S_MAX;
     if (ok) {
       b.n += 1; b.min = { minute, n: nMin + 1 };
       b.hour = { hour, s: hourS + billed }; b.s += billed;
+      // 先在本地扣掉，下一次 Groq 回包再用它报的真数覆盖（并发的几段之间不会都看到同一个旧余额）。
+      if (est) b.hdr = { ...b.hdr, req: est.req - 1, aud: est.aud - real, at: now };
     }
     return ok;
   }
@@ -123,13 +154,22 @@ export class QuotaCore {
     // ⚠️ turbo 排在千问**前面**：两个 Groq 桶每天刷新，千问是一次性额度（每模型 100 万 token、90 天）——
     //    v3 用完后若先走千问，每天第 7 节起就在烧不可再生的额度，而 turbo 的一整桶闲着（2026-10-11 Owen 拍板）。
     // v3 沿用老字段名（groq_*），装成同形的桶再写回
-    const v3 = { n: s.groq_day, min: s.groq_min, hour: s.groq_hour, s: s.groq_day_s, cooldown_until: s.groq_cooldown_until };
+    const v3 = { n: s.groq_day, min: s.groq_min, hour: s.groq_hour, s: s.groq_day_s,
+                 cooldown_until: s.groq_cooldown_until, hdr: s.groq_hdr };
     const groq = this.#take(v3, now, seconds) ? V3 : this.#take(s.turbo, now, seconds) ? TURBO : null;
-    s.groq_day = v3.n; s.groq_min = v3.min; s.groq_hour = v3.hour; s.groq_day_s = v3.s;
+    s.groq_day = v3.n; s.groq_min = v3.min; s.groq_hour = v3.hour; s.groq_day_s = v3.s; s.groq_hdr = v3.hdr;
     const qwen = now < s.qwen_cooldown_until || s.qwen_day >= QWEN_DAY_MAX
       ? [] : chain.filter((m) => !(m in s.qwen_exhausted));
     await this.storage.put("state", s);
     return { groq, qwen };
+  }
+
+  // Worker 转来的 Groq 剩余：四个数都得是有限非负、上限 > 0，否则整条丢掉（宁可退回老算法也不信半截数）。
+  static parseHdr(g) {
+    if (!g || typeof g !== "object") return null;
+    const v = ["req", "aud", "req_lim", "aud_lim"].map((k) => Number(g[k]));
+    if (!v.every((x) => Number.isFinite(x) && x >= 0) || !(v[2] > 0 && v[3] > 0)) return null;
+    return { req: Math.min(v[0], v[2]), aud: Math.min(v[1], v[3]), req_lim: v[2], aud_lim: v[3] };
   }
 
   async #report(s, r) {
@@ -141,6 +181,9 @@ export class QuotaCore {
     if (g && r.model === TURBO) s.turbo.cooldown_until = now + g * 1000;
     else if (g) s.groq_cooldown_until = now + g * 1000;
     if (q) s.qwen_cooldown_until = now + q * 1000;
+    const h = QuotaCore.parseHdr(r.groq_hdr);
+    if (h && r.model === TURBO) s.turbo.hdr = { ...h, at: now };
+    else if (h) s.groq_hdr = { ...h, at: now };
     if (typeof r.exhausted === "string" && !(r.exhausted in s.qwen_exhausted)) {
       s.qwen_exhausted[r.exhausted] = new Date(now).toISOString();
     }

@@ -293,6 +293,13 @@ function ago(ms){
   if(d === 1) return "昨天";
   return d + " 天前";
 }
+function since(dt){   /* 一段时长 -> 「刚刚 / N 分钟前 / N 小时前 / N 天前」 */
+  var m = Math.floor(Math.max(0, dt) / 60000);
+  if(m < 1) return "刚刚";
+  if(m < 60) return m + " 分钟前";
+  if(m < 1440) return Math.floor(m / 60) + " 小时前";
+  return Math.floor(m / 1440) + " 天前";
+}
 function utcToday(){ return new Date().toISOString().slice(0,10); }   /* Worker 的「日」是 UTC 日 */
 function ymd(ms){ return ms ? new Date(ms).toISOString().slice(0,10) : "无"; }
 function limStr(v){ return v == null ? "" : String(v); }
@@ -582,8 +589,9 @@ function renderPerUser(){
 /* ---------- 渲染：额度 ----------
    ⚠️ 口径（2026-10-14 实测 Groq 响应头）：Groq 的限额是**连续回补**的令牌桶，不是到点清零 ——
       用掉 1 次，`x-ratelimit-reset-requests` 报 43.2 s（= 86400 / 2000）；用掉 3 次报 2m9.6s；
-      音频秒每 0.5 s 回 1 秒（= 3600 / 7200）。而 Worker 是按 **UTC 自然日 / 整点**记的（quota-core.js），
-      所以这里的数字是 Worker 自己的保守账：不是 Groq 那边真剩多少。 */
+      音频秒每 0.5 s 回 1 秒（= 3600 / 7200）。
+   ⭐ 2026-10-14 起 Worker 记下 Groq 每次回包报的剩余（`b.groq`，推算到此刻），并**拿它判**次数与小时音频秒；
+      没报过（刚部署、还没调过）才退回 UTC 日 / 整点那套计数。所以这两格优先显示 Groq 报的「已用 = 上限 − 剩余」。 */
 function qcell(label, used, cap, unit){
   var c = el("div","qcell");
   var t = el("div","t"); t.appendChild(el("span", null, label));
@@ -610,19 +618,25 @@ function renderQuota(){
   if(!q){ box.appendChild(el("div","empty","额度暂时读不到。")); return; }
   $("#qnote").textContent = "Worker 的账 · UTC " + q.day;
   [["Groq v3", q.v3, "主力"], ["Groq turbo", q.turbo, "v3 用完时顶上"]].forEach(function(g){
-    var b = g[1], cool = b.cooldown_until > q.now;
-    box.appendChild(qrow(g[0], [
+    var b = g[1], cool = b.cooldown_until > q.now, gr = b.groq;
+    var sub = cool ? "冷却中（撞过 429）" : g[2];
+    if(gr) sub += " · Groq " + since(q.now - gr.reported_at) + "报的数";
+    box.appendChild(qrow(g[0], gr ? [
+      qcell("次数（24 h 滚动）", gr.req_lim - gr.req_left, gr.req_lim),
+      qcell("今日音频秒", b.used_s, q.caps.s_day),
+      qcell("音频秒（1 h 滚动）", gr.aud_lim - gr.aud_left, gr.aud_lim)
+    ] : [
       qcell("今日次数", b.used_reqs, q.caps.reqs_day),
       qcell("今日音频秒", b.used_s, q.caps.s_day),
       qcell("本小时音频秒", b.hour_s, q.caps.s_hour)
-    ], cool ? "冷却中（撞过 429）" : g[2]));
+    ], sub));
   });
   box.appendChild(qrow("千问", [qcell("今日段数", q.qwen.used, q.qwen.max)],
     q.qwen.exhausted.length ? "已耗尽 " + q.qwen.exhausted.join("、") : "一次性免费额度"));
   box.appendChild(el("p","hint",
-    "Groq 实际是连续回补（每 43.2 秒回 1 次、每 0.5 秒回 1 秒音频），不是到 UTC 零点才清零；" +
-    "Worker 按自然日 / 整点记、到 95% 就主动降级，所以它比 Groq 保守。" +
-    "音频秒是计费秒（每次至少按 10 秒记），比用户表里的真实音频秒大一些。最先撞线的通常是「本小时」那一格：两个人同时上课就接近 7200。"));
+    "Groq 的次数与小时音频秒是连续回补的（每 43.2 秒回 1 次、每 0.5 秒回 1 秒音频），不是到 UTC 零点才清零。" +
+    "标「滚动」的两格是 Groq 自己回包报的剩余、推算到此刻，Worker 拿它判，剩 5% 就主动降级；" +
+    "Groq 还没报过时退回 UTC 日 / 整点计数。「今日音频秒」Groq 不报，仍是 Worker 按 UTC 日记的计费秒（每次至少 10 秒）。"));
 }
 
 /* ---------- 渲染：用户表 ---------- */

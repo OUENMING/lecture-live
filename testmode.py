@@ -33,7 +33,7 @@
       那次针对的是**正常上课那条路**，它**一个字没动**。
    ⚠️ 翻了之后的代价要记住：**`cl test` 一开就录**，所以披露（跟同学说一声）
       必须在**开课之前**做，不是课后补。
-   音频格式见 `AUDIO_SEG_S` / `AUDIO_OPUS_BITRATE`（分段 Opus 24k，约 9MB/50 分钟）。
+   音频格式见 `AUDIO_SEG_S` / `AUDIO_OPUS_BITRATE`（分段 Opus 24k，约 9–13MB/50 分钟；后者是没 ffmpeg 时的 soundfile 兜底）。
 """
 from __future__ import annotations
 
@@ -206,7 +206,7 @@ def make_bundle(stem: pathlib.Path, report_path: str | os.PathLike,
     """把一次测试打包成**一个文件**, 方便发给作者。
 
     ⚠️ **包里含隐私内容**: 课堂音频 + 完整逐字转录 —— 可能有其他同学的声音。
-    所以包里放一份 README 说明里面是什么, 且由使用者自己决定发不发。
+    所以包里放一份 README 说明里面是什么、以及它会被自动上传（`CLASSLIVE_UPLOAD=0` 关）。
     """
     import zipfile
 
@@ -220,12 +220,12 @@ def make_bundle(stem: pathlib.Path, report_path: str | os.PathLike,
   env.json       环境快照（系统 / Python / 依赖版本 / 模型大小 / git 提交）
   report.json    指标报告（逐段的 ASR 耗时、电平、置信度、词数…）
   session.md     逐字转录（中英对照）
-  audio.wav      课堂音频（若打包时含音频）
+  audio/         课堂音频，每 10 分钟一段 Opus（若含音频；转码失败时是 wav）
 
 ⚠️ 隐私提醒
 ------------
-`sessions.md` 与 `audio.wav` 是**这节课的真实内容**，可能包含其他同学的声音
-或个人信息。发出去之前请自己确认可以分享。
+`session.md` 与 `audio/` 是**这节课的真实内容**，可能包含其他同学的声音
+或个人信息。测试模式收尾会自动上传给作者；不想传就设 CLASSLIVE_UPLOAD=0。
 
 这份数据用来做什么
 ------------------

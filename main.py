@@ -1339,7 +1339,8 @@ def run(args) -> None:
         # ⚠️ 提醒**放在启动时**：收尾才说就晚了，那时整节课已经录完。
         #    （2026-09-30 起测试模式下默认录 —— 见上面 `_rec` 那段。）
         if tester.record_audio:
-            echo("   ⚠️ 会录制**课堂音频**(分段 Opus, 约 9MB/50 分钟), 收尾打成一个 zip。")
+            # 9–13MB：同一段 600 s 实测 ffmpeg 1.74 MB / soundfile 兜底 2.59 MB（×5 = 50 分钟）。
+            echo("   ⚠️ 会录制**课堂音频**(分段 Opus, 约 9–13MB/50 分钟), 收尾打成一个 zip。")
             # ⚠️⚠️ **必须说"自动"**（2026-10-07）：原句是「发出去前请自己确认」——
             #    读起来像"你要手动发"，而 `start_upload`(收尾那段) 是**自动排队 + 后台就传**。
             #    披露与事实不一致，等于没披露。想关掉：`CLASSLIVE_UPLOAD=0`。
@@ -2592,7 +2593,11 @@ def run(args) -> None:
                         echo("   ⚠️ 内含**课堂音频** + 逐字转录(可能有其他同学的声音)")
                     else:
                         echo("   ℹ️ 只含指标与转录文本, **不含音频**（要留: --record-audio）。")
-                    # ⚠️ 转码失败时音频还是 wav 分段 —— 报告与屏上都看得见。
+                    # ⚠️ 转码全失败时音频还是 wav 分段（约 10 倍大）—— 屏上要说出来，
+                    #    别只写进报告（2026-10-14：别人的机器 3 节课全是 wav、屏上一句没提）。
+                    if any(e.get("kind") == "transcode_failed" for e in tester.events):
+                        echo("   ⚠ 音频没转成 Opus，按原始 wav 上传（约大 10 倍）"
+                             " —— 详情看 report.json 的 events")
                     echo("   收尾会自动上传给作者（关掉: CLASSLIVE_UPLOAD=0）。")
                 elif not args.no_bundle:
                     # ⚠️ 只说数据包（2026-10-07 OCR 指出）：报告的实情由上面那条单独说，
@@ -2728,7 +2733,7 @@ def main():
     #      改了就没法关掉它了（`store_true` 没有反向）。所以用 `default=None` +
     #      一对互斥旗标，真正的默认在下面按「是不是测试模式」判。
     p.add_argument("--record-audio", action="store_true", default=None,
-                   help="留下课堂音频（**测试模式下这是默认**；约 9MB/50 分钟, "
+                   help="留下课堂音频（**测试模式下这是默认**；约 9–13MB/50 分钟, "
                         "内含其他同学的声音）")
     p.add_argument("--no-record-audio", dest="record_audio", action="store_false",
                    help="这一节不留音频（覆盖测试模式的默认）")

@@ -613,6 +613,26 @@ def main() -> int:
     check("R12 collect_env 的包列表含 soundfile",
           "soundfile" in tm.collect_env()["packages"])
 
+    print("\n--- B3 数据包里的 README.txt 要和包里真放的东西对得上 ---")
+    import zipfile
+    _d6 = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_bundle_"))
+    try:
+        _rp = _d6 / "x.report.json"
+        _rp.write_text("{}", encoding="utf-8")
+        _au = _d6 / "x.001.opus"
+        _au.write_bytes(b"OggS")
+        _bp = tm.make_bundle(_d6 / "x", _rp, None, [_au])
+        with zipfile.ZipFile(_bp) as _z:
+            _names = _z.namelist()
+            _txt = _z.read("README.txt").decode("utf-8")
+        check("README.txt 说的音频位置（audio/）包里真有，且不再写不存在的 audio.wav / sessions.md",
+              "audio/x.001.opus" in _names and "audio/" in _txt
+              and "audio.wav" not in _txt and "sessions.md" not in _txt, str(_names))
+        check("⭐ README.txt 说明**会自动上传**并给出关法（不再是「自己确认再发」）",
+              "自动上传" in _txt and "CLASSLIVE_UPLOAD=0" in _txt and "发出去之前" not in _txt)
+    finally:
+        shutil.rmtree(_d6, ignore_errors=True)
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

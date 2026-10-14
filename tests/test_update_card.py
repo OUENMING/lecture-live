@@ -65,6 +65,18 @@ class Groups(unittest.TestCase):
         self.assertEqual(len(C.groups(LOG, "3.9.4", "3.9.6")), 3)
 
 
+class Rows(unittest.TestCase):
+    def test_带标签的最后一行_整颗标签都在列表高度之内_且与字同中线(self):
+        """3.9.5 发版后拍图：标签 17pt 比一行字高，行高只按字算 → 最后一颗标签被切掉 2pt。"""
+        g = [{"version": "9.9.9", "date": "", "items": [("改进", "一行字")]}]
+        views, h = W._rows(g, 400.0, [])
+        bottoms = [v.frame().origin.y + v.frame().size.height for v in views]
+        self.assertLessEqual(max(bottoms), h + 1e-6, (bottoms, h))
+        chip, text = views[-2], views[-1]
+        mid = lambda v: v.frame().origin.y + v.frame().size.height / 2.0
+        self.assertLess(abs(mid(chip) - (text.frame().origin.y + W._line_h() / 2.0)), 0.6)
+
+
 class UpdatedFrom(unittest.TestCase):
     V = C.versions(LOG)
 

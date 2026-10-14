@@ -180,11 +180,16 @@ def _rows(groups: list[dict], w: float, targets: list) -> tuple[list, float]:
             tx = CHIP_W + 8.0 if tag else 12.0
             lb = _label(text, ITEM_SIZE, alpha=0.9, wrap=True)
             h = _fit_h(lb, w - tx)
-            lb.setFrame_(NSMakeRect(tx, y, w - tx, h))
+            # ⚠️ 标签（17pt）比一行字（12.5pt 实测 15pt）高：原来两者顶边对齐、行高只按字算 →
+            #    标签比字低 2pt，最后一行的标签还被列表底边切掉一截（3.9.5 发版后拍图才看到）。
+            #    现在标签和**第一行字**同一条中线，行高取两者大的那个。
+            off = max(0.0, (CHIP_H - _line_h()) / 2.0) if tag else 0.0
+            lb.setFrame_(NSMakeRect(tx, y + off, w - tx, h))
             if tag:
                 c = _chip(tag)
                 c.setFrame_(NSMakeRect(0, y, CHIP_W, CHIP_H))
                 views.append(c)
+                h = max(h + off, CHIP_H)
             else:
                 dot = _label("·", ITEM_SIZE, alpha=0.5)
                 dot.setFrame_(NSMakeRect(2.0, y, 10.0, h))
@@ -203,6 +208,11 @@ def _rows(groups: list[dict], w: float, targets: list) -> tuple[list, float]:
         views.append(m)
         y += 15.0 + ITEM_GAP
     return views, max(0.0, y - ITEM_GAP)
+
+
+def _line_h() -> float:
+    """一行条目字的实测高度（`_fit_h` 同一把尺子）。"""
+    return _fit_h(_label("字", ITEM_SIZE, alpha=0.9, wrap=True), 200.0)
 
 
 def _doc_class():

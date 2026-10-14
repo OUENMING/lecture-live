@@ -144,9 +144,10 @@ def test_mode_fits_ready(right_edge: float, box_w: float, toggle_w: float) -> bo
 # 插在标题行与卡片区之间。**高度算在 `build()` 那条从下往上的推法里**，
 # 与视图的 y 用同一组常数（`card_height` 那条纪律）。
 READY_H = 40.0
-READY_GAP = 10.0       # 就绪条 ↔ 标题
+READY_GAP = 0.0        # 就绪条 ↔ 标题（无底框后条内上下各 9pt 已够；原 10）
 READY_ITEM_GAP = 16.0  # 项与项之间
 READY_PAD = 12.0       # 条内左右留白
+READY_X0 = -5.0        # 第一项的 x：无底框后让「✓」与标题左缘对齐（实测定）
 
 # ⚠️⚠️ **状态一律「形状 + 文字」，不许只靠颜色** ——
 #    `[一手]` HIG › Accessibility（2025-03-07）逐字：「**Offer visual indicators,
@@ -1528,18 +1529,14 @@ def make_ready_strip(parent, y: float, w: float, items: list, *, on_click):
     """
     from AppKit import NSButton, NSColor, NSFont, NSMakeRect, NSView
 
+    # ⚠️ **不画底框**（2026-10-14）：它是标题下面的一行状态，不是第五张卡 —— 带框时和课程卡
+    #    同一档填充 / 描边，读起来像「也能选中」。同 4a89aad 更新卡去掉内嵌底框（Apple「Adopting
+    #    Liquid Glass」：少做自定义底色）。容器视图留着：测试模式开关和细竖线挂在它上面。
     box = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, w, READY_H))
-    box.setWantsLayer_(True)
-    box.layer().setCornerRadius_(CARD_RADIUS)          # ⚠️ 与卡片同一档，别硬编码别的数
-    box.layer().setBorderWidth_(HAIRLINE)
-    box.layer().setBorderColor_(
-        NSColor.whiteColor().colorWithAlphaComponent_(CARD_LINE_A).CGColor())
-    box.layer().setBackgroundColor_(
-        NSColor.whiteColor().colorWithAlphaComponent_(CARD_FILL_A).CGColor())
 
     targets: list = []
     buttons: dict = {}                                 # key -> NSButton（下载完改它的标题）
-    x = READY_PAD
+    x = READY_X0
     btn_h = 22.0
     for it in items:
         b = NSButton.alloc().initWithFrame_(

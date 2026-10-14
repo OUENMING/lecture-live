@@ -13,7 +13,7 @@
   => 音频循环永不阻塞; 所有 UI 调用都在主线程(悬浮窗要求)
 """
 from __future__ import annotations
-import argparse, collections, os, queue, re, sys, threading, time
+import argparse, collections, os, queue, re, shlex, sys, threading, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from capture import load_source, SR, SilenceWatch
@@ -244,6 +244,25 @@ def _wrapup_plan(enabled: bool, writes_notes: bool, mode: str) -> str:
     if enabled and not writes_notes:
         return "notice"
     return "ask" if mode == "ask" else "auto"
+
+
+def _gave_up_hint(session_path, course: str | None, n: int) -> tuple[str, str]:
+    """用户点了「不存」之后那两句：`(卡上的短句, 终端里带补救命令的长句)`。
+
+    ⚠️ 2026-10-13 真事：一节课分两段录，前一段点了「不存」→ 那 45 分钟**永远没有复习层**，
+       屏上一句没提，补救的路只有知道 `scripts/rebuild_note.py`。逐句记录其实还在 `sessions/`。
+    零句 / 没有会话文件 → 两句都空（没东西可补，别多嘴）。
+    """
+    if not session_path or n <= 0:
+        return "", ""
+    name = os.path.basename(str(session_path))
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "rebuild_note.py")
+    card = f"没存笔记 · {n} 句逐句记录留在 sessions/{name}"
+    term = (f"ℹ️ 按你选的「不存」没生成笔记；{n} 句逐句记录还在 {session_path}\n"
+            f"   想补回来（调一次翻译模型）：\n"
+            f"   {' '.join(shlex.quote(str(x)) for x in (sys.executable, script, session_path))}"
+            f" {shlex.quote(course) if course else '<课号>'}")
+    return card, term
 
 
 def _wrapup_hold(ok: bool, plan: str, msg: str) -> bool:
@@ -2475,6 +2494,12 @@ def run(args) -> None:
                     summ.close()
                 except BaseException as e:                # noqa: BLE001
                     echo(f"⚠ 实时总结关闭失败：{type(e).__name__}: {str(e)[:80]}")
+                # ⭐ 说一声这段去哪了、怎么补（`_gave_up_hint` 的 docstring）。
+                _card, _term = _gave_up_hint(getattr(writer, "session_path", None),
+                                             args.course, writer.count)
+                if _term:
+                    echo(_term)
+                    _box["msg"] = _card
 
             msg = _box.get("msg", "")
             if msg:

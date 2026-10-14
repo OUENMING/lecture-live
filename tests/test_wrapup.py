@@ -814,6 +814,23 @@ def t_polish_off_has_no_body_warning():
         assert "polish: failed" in fail_txt
 
 
+@case("⭐ 点了「不存」要说逐句记录在哪、怎么补；零句不多嘴")
+def t_gave_up_hint():
+    card, term = main._gave_up_hint("/x/sessions/2026-10-13_150815_ECON10740.md", "ECON10740", 520)
+    assert "520" in card and "2026-10-13_150815_ECON10740.md" in card, card
+    # 判据指向那条命令本身：脚本路径真实存在、参数是会话文件 + 课号
+    import shlex
+    cmd = shlex.split(term.splitlines()[-1])
+    assert cmd[0] == sys.executable and os.path.exists(cmd[1]) and cmd[1].endswith("rebuild_note.py"), cmd
+    assert cmd[2:] == ["/x/sessions/2026-10-13_150815_ECON10740.md", "ECON10740"], cmd
+    # 路径带空格（.app 放在「应用程序 副本」之类的地方）也要能直接复制粘贴
+    sp = main._gave_up_hint("/x/my sessions/a.md", "C", 1)[1].splitlines()[-1]
+    assert shlex.split(sp)[2] == "/x/my sessions/a.md", sp
+    assert main._gave_up_hint("/x/a.md", "C", 0) == ("", "")
+    assert main._gave_up_hint(None, "C", 5) == ("", "")
+    assert main._gave_up_hint("/x/a.md", None, 3)[1].endswith("<课号>")
+
+
 CASES_FAIL: list[str] = []
 
 if __name__ == "__main__":

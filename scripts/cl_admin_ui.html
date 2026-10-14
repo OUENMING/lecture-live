@@ -100,6 +100,7 @@ main{max-width:1280px;margin:0 auto;padding:24px}
 
 /* ---- 两张图并排 ---- */
 .charts{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:12px}
+.tag{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;font-size:10.5px;line-height:16px;color:var(--ink3);box-shadow:var(--ring2);vertical-align:1px}
 .card{background:var(--surface);border-radius:var(--rc);padding:16px;box-shadow:var(--ring2)}
 .card .ch{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}
 .card .ch h3{margin:0;font-size:12px;font-weight:600;color:var(--ink2)}
@@ -239,6 +240,12 @@ details.prices[open]>summary{margin-bottom:12px}
   </section>
 
   <section class="block">
+    <div class="hd"><h2>Cloudflare</h2><span class="note" id="cfnote"></span><span class="spacer"></span>
+      <span class="note">本机用只读 token 直接问 Cloudflare，不经 Worker</span></div>
+    <div class="card" id="cf"></div>
+  </section>
+
+  <section class="block">
     <div class="hd"><h2>用户</h2><span class="note" id="unote"></span><span class="spacer"></span>
       <button class="primary" id="addbtn">发新码</button></div>
     <div id="addform" hidden></div>
@@ -289,7 +296,10 @@ function mins(sec){ return sec == null ? "无" : (sec/60).toFixed(sec/60 >= 100 
 function ago(ms){
   if(!ms) return "无";
   var d = Math.floor((Date.now() - ms) / 86400000);
-  if(d <= 0) return "今天";
+  if(d <= 0){
+    var t = new Date(ms);                       /* 本机时区的时刻：「今天」一眼看不出是不是上课时间 */
+    return "今天 " + String(t.getHours()).padStart(2,"0") + ":" + String(t.getMinutes()).padStart(2,"0");
+  }
   if(d === 1) return "昨天";
   return d + " 天前";
 }
@@ -639,6 +649,61 @@ function renderQuota(){
     "Groq 还没报过时退回 UTC 日 / 整点计数。「今日音频秒」Groq 不报，仍是 Worker 按 UTC 日记的计费秒（每次至少 10 秒）。"));
 }
 
+/* ---------- 渲染：Cloudflare（`/api/cf`，cl_admin_ui.cf_summary）---------- */
+function scell(label, value, spark){
+  var c = el("div","qcell");
+  var t = el("div","t"); t.appendChild(el("span", null, label)); t.appendChild(el("b", null, value));
+  c.appendChild(t);
+  if(spark && spark.length > 1) c.appendChild(sparkline(spark, {h:18, color:"var(--d1)"}));
+  return c;
+}
+function lastDays(n){
+  var out = [], d = new Date();
+  for(var i = n - 1; i >= 0; i--){ out.push(new Date(d.getTime() - i*86400000).toISOString().slice(0,10)); }
+  return out;
+}
+function mb(b){ return b >= 1e9 ? (b/1e9).toFixed(2) + " GB" : Math.round(b/1e6) + " MB"; }
+// Workers Analytics 的 status 维度 → 人话（没列的原样显示）。clientDisconnected 是客户端先断了，不算 Worker 出错。
+var CF_STATUS = {clientDisconnected:"客户端断开", scriptThrewException:"抛异常", exceededResources:"超资源",
+  exceededCpu:"超 CPU", internalError:"内部错误", responseStreamDisconnected:"回包中断"};
+function renderCf(){
+  var box = $("#cf"); box.innerHTML = "";
+  var cf = state.cf;
+  if(!cf){ box.appendChild(el("div","empty","Cloudflare 的数暂时读不到。")); return; }
+  if(cf.error){ box.appendChild(el("div","empty", cf.error)); return; }
+  $("#cfnote").textContent = "近 24 h · 曲线是近 7 天（UTC 日）";
+  var days = lastDays(7);
+  Object.keys(cf.scripts).sort().forEach(function(name){
+    var sc = cf.scripts[name];
+    var bad = sc.requests ? sc.errors / sc.requests : 0;
+    var other = Object.keys(sc.status).filter(function(k){ return k !== "success"; })
+      .map(function(k){ return (CF_STATUS[k] || k) + " " + sc.status[k]; }).join(" · ");
+    var errCell = scell("错误率", (bad*100).toFixed(bad && bad < 0.001 ? 2 : 1) + "%");
+    if(bad > 0.01){ errCell.querySelector("b").style.color = "var(--bad)"; }
+    box.appendChild(qrow(name.replace("classlive-", "Worker "), [
+      scell("请求（24 h）", num(sc.requests), days.map(function(d){ return (cf.week[d] || {})[name] || 0; })),
+      errCell,
+      scell("CPU p50 / p99", sc.cpu_p50_ms + " / " + sc.cpu_p99_ms + " ms")
+    ], other || "全部成功"));
+  });
+  Object.keys(cf.r2).sort().forEach(function(name){
+    var by = cf.r2[name], ds = Object.keys(by).sort(), last = by[ds[ds.length-1]], first = by[ds[0]];
+    box.appendChild(qrow("R2 " + name.replace("classlive-", ""), [
+      qcell("体积 / 免费档 10 GB", Math.round(last.bytes/1e6), 10000, "MB"),
+      scell("对象数", num(last.objects), ds.map(function(d){ return by[d].objects; })),
+      scell("7 天增量", "+" + mb(Math.max(0, last.bytes - first.bytes)))
+    ], "测试模式上传的课"));
+  });
+  var dk = Object.keys(cf.dos).sort();
+  if(dk.length){
+    box.appendChild(qrow("Durable Objects", [
+      scell("今日请求", num(cf.dos[dk[dk.length-1]] || 0), days.map(function(d){ return cf.dos[d] || 0; })),
+      scell("7 天合计", num(dk.reduce(function(a, d){ return a + cf.dos[d]; }, 0))),
+      scell("", "")
+    ], "通行码与额度的账本"));
+  }
+}
+
 /* ---------- 渲染：用户表 ---------- */
 function statusOf(c){
   if(c.revoked) return ["bad", "吊销"];
@@ -674,6 +739,19 @@ function renderUsers(){
     tr.tabIndex = 0;
     tr.setAttribute("aria-expanded", String(state.expanded === c.code));
     var td0 = el("td"); td0.appendChild(el("span","chev","›")); td0.appendChild(document.createTextNode(" " + c.name));
+    // 「测试」：名字 test 开头的码（实验 / 探针专用，`load_test_key`）。
+    if(/^test/.test(c.name)) td0.appendChild(el("span","tag","测试"));
+    // 「只有翻译」：有翻译、没转写 → 多半不是上课（2026-10-14：实验走了 owen 的码，那天没课）。
+    //   ⚠️ 关了云端转写的人上课也会是 0 → 只提示，不下结论。
+    var odd = state.days_data.filter(function(d){
+      var u = (d.rows || []).filter(function(r){ return r.code === c.code; })[0];
+      return u && u.llm_reqs > 0 && !u.asr_reqs;
+    }).map(function(d){ return d.day === utcToday() ? "今天" : d.day.slice(5); });
+    if(odd.length){
+      var tg2 = el("span","tag", odd.length === 1 ? odd[0] + "只有翻译" : odd.length + " 天只有翻译");
+      tg2.title = odd.join("、") + "：有翻译、没有云端转写 —— 多半是实验 / 测试；关了云端转写的人上课也会这样";
+      td0.appendChild(tg2);
+    }
     tr.appendChild(td0);
     var td1 = el("td"); var chip = el("span","dotm " + st[0]);
     chip.appendChild(el("i")); chip.appendChild(document.createTextNode(st[1]));
@@ -874,14 +952,16 @@ function load(){
   return Promise.all([
     api("list", {}),
     api("stats", {days: state.days}),
-    api("quota", {}).catch(function(){ return null; })
+    api("quota", {}).catch(function(){ return null; }),
+    api("cf", {}).catch(function(){ return null; })
   ]).then(function(r){
     state.codes = r[0].codes || [];
     state.days_data = r[1].days || [];
     state.quota = r[2];
+    state.cf = r[3];
     state.loaded = true;
     $("#err").innerHTML = "";
-    renderKpis(); renderDaily(); renderPerUser(); renderQuota(); renderUsers();
+    renderKpis(); renderDaily(); renderPerUser(); renderQuota(); renderCf(); renderUsers();
   }).catch(function(e){ showErr(e.message); })
     .then(function(){ progress(false); });
 }

@@ -34,6 +34,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
@@ -342,6 +343,64 @@ class CostCase(unittest.TestCase):
         self.assertIn("p.miss", _cost_src())
         self.assertIn("p.out", _cost_src())
 
+
+
+class CloudflareSummary(unittest.TestCase):
+    """`/api/cf`：本机拉 Cloudflare 数 —— 只回 classlive-* 的数字，token 不进响应。不联网（post 注入）。"""
+
+    FAKE = {"data": {"viewer": {"accounts": [{
+        "day": [{"sum": {"requests": 100, "errors": 2}, "quantiles": {"cpuTimeP50": 5000, "cpuTimeP99": 15000},
+                 "dimensions": {"scriptName": "classlive-asr", "status": "success"}},
+                {"sum": {"requests": 3, "errors": 0}, "quantiles": {"cpuTimeP50": 1, "cpuTimeP99": 1},
+                 "dimensions": {"scriptName": "classlive-asr", "status": "clientDisconnected"}},
+                {"sum": {"requests": 9, "errors": 9}, "quantiles": {"cpuTimeP50": 1, "cpuTimeP99": 1},
+                 "dimensions": {"scriptName": "other-site", "status": "success"}}],
+        "week": [{"sum": {"requests": 50, "errors": 0}, "dimensions": {"scriptName": "classlive-asr", "date": "2026-10-14"}}],
+        "r2": [{"max": {"objectCount": 5, "payloadSize": 1000}, "dimensions": {"bucketName": "classlive-ingest", "date": "2026-10-14"}},
+               {"max": {"objectCount": 7, "payloadSize": 9}, "dimensions": {"bucketName": "photosave", "date": "2026-10-14"}}],
+        "dos": [{"sum": {"requests": 42}, "dimensions": {"date": "2026-10-14"}}]}]}}}
+
+    def _home(self, d, token="cfat_SECRET-TOKEN"):
+        root = pathlib.Path(d) / ".classlive"
+        root.mkdir()
+        if token is not None:
+            (root / "cf-analytics-token").write_text(token + "\n", encoding="utf-8")
+        (root / "cf-account-id").write_text("acct123\n", encoding="utf-8")
+        return mock.patch.object(pathlib.Path, "home", return_value=pathlib.Path(d))
+
+    def test_只回classlive开头的_别的项目不出现_token不进响应(self):
+        import cl_admin_ui as U
+        seen = {}
+        def post(url, headers, body):
+            seen.update(url=url, auth=headers.get("Authorization"), acct=body["variables"]["a"])
+            return self.FAKE
+        with tempfile.TemporaryDirectory() as d, self._home(d):
+            r = U.cf_summary(post=post)
+        out = json.dumps(r)
+        self.assertEqual(seen["auth"], "Bearer cfat_SECRET-TOKEN")
+        self.assertEqual(seen["acct"], "acct123")
+        self.assertNotIn("SECRET", out)
+        self.assertNotIn("photosave", out)
+        self.assertNotIn("other-site", out)
+        asr = r["scripts"]["classlive-asr"]
+        self.assertEqual((asr["requests"], asr["errors"], asr["cpu_p50_ms"], asr["cpu_p99_ms"]), (103, 2, 5.0, 15.0))
+        self.assertEqual(asr["status"], {"success": 100, "clientDisconnected": 3})
+        self.assertEqual(r["r2"], {"classlive-ingest": {"2026-10-14": {"objects": 5, "bytes": 1000}}})
+        self.assertEqual(r["dos"], {"2026-10-14": 42})
+
+    def test_没有token_回人话_不调网络(self):
+        import cl_admin_ui as U
+        called = []
+        with tempfile.TemporaryDirectory() as d, self._home(d, token=None):
+            r = U.cf_summary(post=lambda *a: called.append(a))
+        self.assertIn("cf-analytics-token", r["error"])
+        self.assertEqual(called, [])
+
+    def test_Cloudflare报错_回人话(self):
+        import cl_admin_ui as U
+        with tempfile.TemporaryDirectory() as d, self._home(d):
+            r = U.cf_summary(post=lambda *a: {"errors": [{"message": "not authorized"}]})
+        self.assertIn("not authorized", r["error"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

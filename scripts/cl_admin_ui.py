@@ -43,6 +43,83 @@ LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
 
 PAGE = pathlib.Path(__file__).with_name("cl_admin_ui.html")
 
+#: Cloudflare 自己的数（`/api/cf`）：**本机**用只读 Analytics token 打 GraphQL，不经 Worker。
+#: token 读 `~/.classlive/cf-analytics-token`（600），账号读 `~/.classlive/cf-account-id`；**从不进响应**。
+#: 只回这几个名字开头的脚本 / 桶 —— 同一个账号里还有别的项目（photosave 桶），不该出现在这张面板上。
+CF_PREFIX = "classlive-"
+CF_GQL = "https://api.cloudflare.com/client/v4/graphql"
+_CF_Q = """query($a:String!,$s:Time!,$u:Time!,$ds:Date!,$du:Date!){viewer{accounts(filter:{accountTag:$a}){
+ day:workersInvocationsAdaptive(limit:100,filter:{datetime_geq:$s,datetime_leq:$u}){
+  sum{requests errors} quantiles{cpuTimeP50 cpuTimeP99} dimensions{scriptName status}}
+ week:workersInvocationsAdaptive(limit:500,filter:{date_geq:$ds,date_leq:$du}){
+  sum{requests errors} dimensions{scriptName date}}
+ r2:r2StorageAdaptiveGroups(limit:100,filter:{date_geq:$ds,date_leq:$du}){
+  max{objectCount payloadSize} dimensions{bucketName date}}
+ dos:durableObjectsInvocationsAdaptiveGroups(limit:20,filter:{date_geq:$ds,date_leq:$du}){
+  sum{requests} dimensions{date}}}}}"""
+
+
+def cf_summary(post=None, now=None) -> dict:
+    """近 24 h 的 Worker 健康 + 近 7 天的请求 / R2 / DO。**只回数字和 classlive-* 的名字**。
+
+    `post(url, headers, body) -> dict` 测试注入；默认 httpx。拿不到 token 回 `{"error": ...}`（面板照常，只是这张卡说明原因）。
+    """
+    import datetime as dt
+    home = pathlib.Path.home() / ".classlive"
+    try:
+        tok = (home / "cf-analytics-token").read_text(encoding="utf-8").strip()
+        acct = (home / "cf-account-id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return {"error": "没配 Cloudflare 只读 token（~/.classlive/cf-analytics-token，权限 Account Analytics: Read）"}
+    if not tok or not acct:
+        return {"error": "Cloudflare token / 账号 ID 是空的"}
+    now = now or dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    v = {"a": acct, "s": (now - dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+         "u": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+         "ds": str((now - dt.timedelta(days=6)).date()), "du": str(now.date())}
+    if post is None:
+        def post(url, headers, body):
+            import httpx
+            return httpx.post(url, headers=headers, json=body, timeout=20).json()
+    try:
+        j = post(CF_GQL, {"Authorization": f"Bearer {tok}"}, {"query": _CF_Q, "variables": v})
+    except Exception as e:                                            # noqa: BLE001
+        return {"error": f"连不上 Cloudflare：{type(e).__name__}"}
+    if j.get("errors"):
+        return {"error": "Cloudflare 拒了：" + "；".join(str(x.get("message", ""))[:120] for x in j["errors"][:2])}
+    try:
+        a = j["data"]["viewer"]["accounts"][0]
+    except (KeyError, IndexError, TypeError):
+        return {"error": "Cloudflare 回的数据形状不认识"}
+    ok = lambda name: str(name or "").startswith(CF_PREFIX)          # noqa: E731
+    scripts: dict = {}
+    for r in a.get("day") or []:
+        d = r.get("dimensions", {})
+        if not ok(d.get("scriptName")):
+            continue
+        sc = scripts.setdefault(d["scriptName"], {"requests": 0, "errors": 0, "status": {}, "cpu_p50_ms": 0.0, "cpu_p99_ms": 0.0})
+        n = int(r["sum"]["requests"])
+        sc["requests"] += n
+        sc["errors"] += int(r["sum"]["errors"])
+        sc["status"][d.get("status") or "?"] = sc["status"].get(d.get("status") or "?", 0) + n
+        if d.get("status") == "success":                              # CPU 只看成功的那一组（微秒 → 毫秒）
+            sc["cpu_p50_ms"] = round(r["quantiles"]["cpuTimeP50"] / 1000.0, 2)
+            sc["cpu_p99_ms"] = round(r["quantiles"]["cpuTimeP99"] / 1000.0, 2)
+    week: dict = {}
+    for r in a.get("week") or []:
+        d = r.get("dimensions", {})
+        if ok(d.get("scriptName")):
+            row = week.setdefault(d["date"], {})
+            row[d["scriptName"]] = row.get(d["scriptName"], 0) + int(r["sum"]["requests"])
+    r2: dict = {}
+    for r in a.get("r2") or []:
+        d = r.get("dimensions", {})
+        if ok(d.get("bucketName")):
+            r2.setdefault(d["bucketName"], {})[d["date"]] = {
+                "objects": int(r["max"]["objectCount"]), "bytes": int(r["max"]["payloadSize"])}
+    dos = {r["dimensions"]["date"]: int(r["sum"]["requests"]) for r in a.get("dos") or []}
+    return {"since": v["s"], "until": v["u"], "scripts": scripts, "week": week, "r2": r2, "dos": dos}
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "ClassLiveAdminUI"
@@ -88,6 +165,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get(GATE_HEADER) != "1":
             return self._json(403, {"error": "缺少 %s 头（本机页面对任意网站的第一道闸）" % GATE_HEADER})
         name = path[len("/api/"):]
+        if name == "cf":                                              # 本机直接问 Cloudflare，不经 Worker
+            return self._json(200, cf_summary())
         if name not in ALLOWED:
             return self._json(404, {"error": f"不认这个操作：{name}"})
         raw = self.rfile.read(int(self.headers.get("content-length") or 0))

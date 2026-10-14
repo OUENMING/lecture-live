@@ -1709,14 +1709,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             if S.get("updating"):
                 _status("正在更新 —— 装完会自动重开面板，再点「开始上课」（约 1–3 分钟）")
                 return
-            # ⭐ 后台安装（`update.spawn_quiet_apply`）还在拉 → **记下这门课，装完自动开**。
-            #    ⚠️ 不能直接开：录课是新进程（`cl` 起 `main.py`），会读到拉了一半的工作区。
-            #    不让用户再点一次：一般几秒就完，用户点了「开始上课」就该开始。
-            _q = S.get("quiet_update")
-            if _q is not None and _q.poll() is None:
-                S["start_after_update"] = course
-                _status("新版本还在后台装（通常几秒）—— 装完自动开始上课")
-                return
+            _close_offer()                 # 「有新版本」卡跟着开课一起收掉（不理它 = 下课后自动装）
             _start_now(course)
 
     rs = load()
@@ -2248,18 +2241,42 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #     挂不上去；`S` 是模块级、且 `do_close` 里有一处统一的断环表。
         S["ready_targets"] = ready_targets
 
-    def _quiet_done(rc: int, offer: dict, gen) -> None:
-        """后台安装跑完了（主线程）。成了：状态行说一声；没成：退回「更新」那一格让用户点。"""
-        S["quiet_update"] = None
-        pending = S.pop("start_after_update", None)
-        if _stale(gen, "update_gen"):
-            return                                        # 面板已经关了 / 重开了
-        if rc == 0:
-            _status(f"已在后台更新到 {offer.get('latest', '')} —— 开始上课就是新版本")
-        else:
-            _show_update(offer, gen)
-        if pending is not None and on_start is not None:
-            on_start(pending)                             # 用户等着的那一下（成没成都开）
+    def _close_offer() -> None:
+        c = S.pop("offer_card", None)
+        if c:
+            try:
+                c["close"]()
+            except Exception:                              # noqa: BLE001
+                pass
+
+    def _offer_card(offer: dict, gen) -> None:
+        """查到新版本 → 弹「有新版本」卡（看点 3–4 条 +「下课后自动装」/「现在更新」）。主线程。
+
+        ⭐ 2026-10-14 取代「每版都是 auto 就面板开着悄悄装」（`spawn_quiet_apply`）：作者要的是
+           打开就看得到、自己选。不理它也行 —— 下课退出时照旧自动装（`update.auto_update`）。
+        ⚠️ 这一版已经点过「下课后自动装」→ 不再弹（就绪条上「更新」那一格还在，想装随时点）。
+        """
+        if _stale(gen, "update_gen") or S.get("offer_card"):
+            return
+        import update as update_mod
+        latest = offer.get("latest", "")
+        if latest and update_mod._consented_version() == latest:
+            return
+
+        def later() -> None:
+            S.pop("offer_card", None)
+            ok = update_mod.defer_to_exit(latest)
+            _status(f"好 —— 下课关掉后自动装 {latest}" if ok
+                    else "没记下来（写不进 ~/.classlive）—— 想装时点就绪条上的「更新」")
+
+        def now() -> None:
+            S.pop("offer_card", None)
+            _run_update()
+
+        import whatsnew
+        S["offer_card"] = whatsnew.build_offer(
+            offer.get("current", ""), latest, offer.get("summary", ""),
+            on_now=now, on_later=later, over=win)
 
     def _show_update(offer: dict, gen) -> None:
         """后台查完新版本，回到主线程把「更新」那一格接到就绪条末尾。"""
@@ -2316,17 +2333,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 offer = update_mod.offer()
             except Exception:                              # noqa: BLE001
                 return
-            if offer.get("kind") == "available" and offer.get("quiet"):
-                # ⭐ 每版都是 auto、依赖和模型清单都没动 → 不打扰，后台直接装（2026-10-13）。
-                #    独立进程：面板关了 / 开课了它照样跑完（见 `spawn_quiet_apply`）。
-                p = update_mod.spawn_quiet_apply()
-                if p is not None:
-                    S["quiet_update"] = p
-                    rc = p.wait()
-                    _later(_quiet_done, rc, offer, upd_gen)
-                    return
             if offer.get("kind", "none") != "none":
-                _later(_show_update, offer, upd_gen)
+                _later(_show_update, offer, upd_gen)      # 就绪条末尾那一格（先接上：卡片的「现在更新」要用它）
+            if offer.get("kind") == "available":
+                _later(_offer_card, offer, upd_gen)
 
         threading.Thread(target=_probe_update, daemon=True).start()
 
@@ -3637,6 +3647,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             win.orderOut_(None)
         except Exception:                                 # noqa: BLE001
             pass
+        _close_offer()                   # 「有新版本」卡跟着面板走（它的按钮闭包也持着本面板）
         # ⚠️⚠️ **必须断环，否则每开/关一次漏掉一整个面板。**
         #     实测（审查代理量的，连跑两遍一致）：开/关 3 轮之后
         #     `{'Panel': 3, 'DropTarget': 15, 'EntryBtn': 18, 'EntryDoc': 3}`，

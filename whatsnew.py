@@ -294,6 +294,123 @@ def build(version: str, summary: str, date: str = "", log: str = "",
         return None
 
 
+#: 更新提示卡最多列几条看点（作者 2026-10-14：「写三四条最主要的功能」）。
+OFFER_POINTS = 4
+
+
+def offer_points(summary: str, n: int = OFFER_POINTS) -> tuple[list[str], int]:
+    """`changelog.between(...)` 的输出 → (卡上列的前 n 条, 没列出来的条数)。纯函数。
+
+    只有一个版本时去掉行首的「3.9.5 · 」（标题里已经写了版本号）；跨版本时保留，好分清是哪版的。
+    `**` / 反引号去掉（卡片画纯文本，留着会显示字面星号）。
+    """
+    rows = [x.replace("**", "").replace("`", "").strip().lstrip("·-•* ").strip()
+            for x in (summary or "").splitlines() if x.strip()]
+    rows = [r for r in rows if r]
+    vers = {r.split(" · ", 1)[0] for r in rows if " · " in r}
+    if len(vers) == 1 and all(" · " in r for r in rows):
+        rows = [r.split(" · ", 1)[1] for r in rows]
+    return rows[:n], max(0, len(rows) - n)
+
+
+def build_offer(current: str, latest: str, summary: str, *, on_now, on_later, over=None):
+    """「有新版本」提示卡：看点 3–4 条 +「下课后自动装」/「现在更新」。失败返回 None。
+
+    ⭐ 开课面板一打开、查到新版本就弹（作者 2026-10-14）。**非模态**、不抢焦点（同 `build`
+       那张卡的理由：这是上课用的工具，模态框会卡住主任务）。不理它也行 —— 下课退出时的
+       自动更新照旧在（`update.auto_update`）。
+    `on_now()` / `on_later()` 由开课面板接（起更新 / 记「下课后装」）；卡片自己只负责关掉。
+    `over`：叠在哪个窗口上方居中（开课面板）；`None` 就放屏幕中上。
+    """
+    try:
+        from AppKit import (NSButton, NSColor, NSFont, NSMakeRect, NSTextField,
+                            NSLineBreakByTruncatingTail, NSWindowStyleMaskBorderless,
+                            NSWindowStyleMaskNonactivatingPanel)
+        pts, more = offer_points(summary)
+        if not pts:
+            pts = ["完整说明见仓库里的 CHANGELOG.md"]
+        w = 520.0
+        lines = pts + (["……更多改动装好后在「已更新」卡片里看"] if more else [])
+        h = PAD + 26.0 + 20.0 + 12.0 + len(lines) * LINE_H + 12.0 + 18.0 + 14.0 + 28.0 + PAD
+        fp = panel.build(NSMakeRect(0, 0, w, h),
+                         NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
+        p, ve = fp.window, fp.glass
+        p.setHasShadow_(True)
+
+        def label(text, y, size, alpha=1.0, weight=_W, lh=LINE_H):
+            lb = NSTextField.alloc().initWithFrame_(NSMakeRect(PAD, y, w - 2 * PAD, lh))
+            lb.setEditable_(False); lb.setSelectable_(False)
+            lb.setBezeled_(False); lb.setDrawsBackground_(False)
+            lb.setFont_(NSFont.systemFontOfSize_weight_(size, weight))
+            lb.setTextColor_(NSColor.whiteColor().colorWithAlphaComponent_(alpha))
+            lb.setStringValue_(text)
+            lb.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)   # 一条一行，长了省略号
+            ve.addSubview_(lb)
+            return lb
+
+        y = h - PAD - 26.0
+        label(f"有新版本 {latest}", y, 17.0, weight=0.4, lh=26.0)
+        y -= 20.0
+        label(f"你现在是 {current}", y, 11.0, alpha=0.62, lh=18.0)
+        y -= 12.0
+        for i, ln in enumerate(lines):
+            y -= LINE_H
+            label(("·  " + ln) if i < len(pts) else ln, y, 12.5 if i < len(pts) else 11.0,
+                  alpha=0.92 if i < len(pts) else 0.62)
+        y -= 12.0 + 18.0
+        label("不急的话点「下课后自动装」：这节课照旧，下课关掉后在后台装好。", y, 11.0,
+              alpha=0.62, lh=18.0)
+
+        done = {"v": False}
+
+        def _close():
+            try:
+                p.orderOut_(None)
+            except Exception:                             # noqa: BLE001
+                pass
+
+        def _pick(fn):
+            def go(_=None):
+                if done["v"]:
+                    return
+                done["v"] = True
+                _close()
+                try:
+                    fn()
+                except Exception:                         # noqa: BLE001
+                    if os.environ.get("CLASSLIVE_DEBUG"):
+                        import traceback
+                        traceback.print_exc()
+            return go
+
+        b_now = NSButton.alloc().initWithFrame_(NSMakeRect(w - PAD - 104.0, PAD, 104.0, 28.0))
+        panel.style_primary(b_now, "现在更新")
+        b_later = NSButton.alloc().initWithFrame_(NSMakeRect(w - PAD - 104.0 - 10.0 - 120.0, PAD,
+                                                             120.0, 28.0))
+        panel.style_secondary(b_later, "下课后自动装")
+        t_now, t_later = _make_target(_pick(on_now)), _make_target(_pick(on_later))
+        b_now.setTarget_(t_now); b_now.setAction_("clicked:")
+        b_later.setTarget_(t_later); b_later.setAction_("clicked:")
+        ve.addSubview_(b_later); ve.addSubview_(b_now)
+
+        if over is not None:
+            try:
+                f = over.frame()
+                p.setFrameOrigin_((f.origin.x + (f.size.width - w) / 2.0,
+                                   f.origin.y + f.size.height - h - 120.0))
+            except Exception:                             # noqa: BLE001
+                pass
+        p.orderFrontRegardless()      # ⚠️ 不抢焦点（同 `build`）
+        return {"panel": p, "close": _close, "_targets": [t_now, t_later]}
+    except objc_own.ObjcNameCollision:
+        raise                         # 程序缺陷，不吞（同 `build`）
+    except Exception:                                     # noqa: BLE001
+        if os.environ.get("CLASSLIVE_DEBUG"):
+            import traceback
+            traceback.print_exc()
+        return None
+
+
 def _make_target(cb):
     """包一个 ObjC target 对象。**定义点已经搬到 `panel.make_button_target`。**
 

@@ -59,8 +59,18 @@ namespace_id = "2002"
   limit = 60
   period = 60
 
+# 逐请求事件：handler.js 的 track() 每个非管理请求写一条（码名 + 数字，不写文本 / 音频 / IP / 完整码）。
+# 保留 3 个月；免费档每天 10 万条写入、1 万次查询（2026-10-14 官方 pricing / limits 页）。
+# 面板 scripts/cl_admin_ui.py 用只读 analytics token 打 SQL API 读。
+[[analytics_engine_datasets]]
+binding = "AE"
+dataset = "classlive_events"
+
 # 日志 / 追踪（2026-10-13 Owen 在控制台打开，这里同步；不写的话下次 wrangler deploy 会关回去）。
 # console.log 只记通行码名字 / 拒绝原因 / 走的引擎 / 毫秒数，不记转写文本。
+# ⚠️ invocation_logs 关掉（2026-10-14）：开着时 Cloudflare 给**每个请求**存一条元数据，实查含
+#    cf-connecting-ip / x-real-ip、经纬度、邮编、城市、全部请求头（authorization 被打码成 ********）——
+#    超出 PLAN-passkey §4「只记数字」。console.log 那几行自己的事件只带方法 / 路径，不受影响。
 [observability]
 enabled = false
 head_sampling_rate = 1
@@ -69,7 +79,7 @@ redact_query_string = false
 [observability.logs]
 enabled = true
 head_sampling_rate = 1
-invocation_logs = true
+invocation_logs = false
 persist = true
 
 [observability.traces]

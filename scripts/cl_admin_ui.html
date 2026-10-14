@@ -247,6 +247,12 @@ details.prices[open]>summary{margin-bottom:12px}
   </section>
 
   <section class="block">
+    <div class="hd"><h2>服务健康</h2><span class="note" id="hnote"></span><span class="spacer"></span>
+      <span class="note">延迟 · 上游 · 部署 · 节点 · 站点 · 日志 · 逐请求事件</span></div>
+    <div class="card" id="health"></div>
+  </section>
+
+  <section class="block">
     <div class="hd"><h2>用户</h2><span class="note" id="unote"></span><span class="spacer"></span>
       <button class="primary" id="addbtn">发新码</button></div>
     <div id="addform" hidden></div>
@@ -288,7 +294,7 @@ var state = {
   days: 7, theme: "auto", metric: "asr",
   codes: [], days_data: [], quota: null, limit: null,
   expanded: null, showRevoked: false, busy: false, loaded: false, err: null,
-  minCache: {}, minDay: {},
+  minCache: {}, minDay: {}, winCache: {},
   prices: JSON.parse(localStorage.getItem("clui-prices") || "null") || {cache:0.003, miss:0.15, out:0.60}
 };
 var $ = function(s){ return document.querySelector(s); };
@@ -562,6 +568,13 @@ function minuteChart(lanes, t0, n, opt){
       s.appendChild(sv("line", {x1:x, y1:0, x2:x, y2:yA - gap, stroke:"var(--line2)", "stroke-width":1, "shape-rendering":"crispEdges"}));
       s.appendChild(svText(x, yA + 12, hm(tm), {}));
     }
+    var lastLab = -1e9;
+    (opt.marks || []).forEach(function(m){                     /* 部署标记：虚线 + 顶上一个短标签（挤在一起的只画线，读数在悬停里） */
+      if(m.i < 0 || m.i >= n) return;
+      var x = padL + m.i * step;
+      s.appendChild(sv("line", {x1:x, y1:0, x2:x, y2:yA - gap, stroke:"var(--d4)", "stroke-width":1, "stroke-dasharray":"3 3"}));
+      if(x - lastLab > 56 && x + 50 < w){ s.appendChild(svText(x + 3, 9, m.label, {anchor:"start", fill:"var(--ink3)", size:9.5})); lastLab = x; }
+    });
     var cross = sv("line", {x1:0, y1:0, x2:0, y2:yA - gap, stroke:"var(--ink2)", "stroke-width":1, opacity:0});
     s.appendChild(cross);
     var hit = sv("rect", {x:padL, y:0, width:iw, height:yA, fill:"transparent"});
@@ -573,6 +586,7 @@ function minuteChart(lanes, t0, n, opt){
       var lines = [hm(t0 + i * 60000) + (opt.dateOf ? "  " + opt.dateOf(t0 + i * 60000) : "")];
       lanes.forEach(function(L){ var v = L.pts[i] || 0; lines.push(L.name + "  " + (L.fmt ? L.fmt(v) : num(v))); });
       if(opt.extra) lines = lines.concat(opt.extra(i));
+      (opt.marks || []).forEach(function(m){ if(m.i === i) lines.push("部署 " + m.label); });
       tip.textContent = lines.join("\n");
       tip.style.left = Math.max(70, Math.min(w - 70, x)) + "px";
       tip.style.top = "-6px";
@@ -821,7 +835,7 @@ function renderCf(){
     mw.appendChild(el("div","dtitle","近 24 h 每分钟请求（本机时刻 · 悬停看读数）"));
     mw.appendChild(minuteChart(lanes, t0, 1440, {laneH: 34, label: "Cloudflare 近 24 小时逐分钟请求",
       dateOf: function(ms){ var d = new Date(ms); return (d.getMonth()+1) + "-" + d.getDate(); },
-      extra: function(i){ return errs[i] ? ["出错  " + errs[i]] : []; }}));
+      extra: function(i){ return errs[i] ? ["出错  " + errs[i]] : []; }, marks: deployMarks(t0, 1440)}));
     box.appendChild(mw);
   }
   var dk = Object.keys(cf.dos).sort();
@@ -832,6 +846,182 @@ function renderCf(){
       scell("", "")
     ], "通行码与额度的账本"));
   }
+}
+
+/* ---------- 服务健康（2026-10-14：延迟 / 上游 / 部署 / 节点 / 站点 / 日志 / 逐请求事件）---------- */
+function ms(v){ return v == null ? "无" : v >= 1000 ? (v/1000).toFixed(v >= 10000 ? 0 : 2) + " s" : Math.round(v) + " ms"; }
+function mkTable(cols, rows){            /* cols = [[表头, "r"?], …]；rows = [[格子（字符串或节点）, …], …] */
+  var t = el("table"), hr = el("tr");
+  cols.forEach(function(c){ hr.appendChild(el("th", c[1] || "", c[0])); });
+  var th = el("thead"); th.appendChild(hr); t.appendChild(th);
+  var tb = el("tbody"); t.appendChild(tb);
+  rows.forEach(function(r){
+    var tr = el("tr");
+    r.forEach(function(v, i){
+      var td = el("td", (cols[i][1] ? cols[i][1] + " mono" : ""));
+      if(v && v.nodeType) td.appendChild(v); else td.textContent = v == null ? "" : String(v);
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+  return t;
+}
+function sub2(title){ var d = el("div","dtitle", title); d.style.marginTop = "16px"; return d; }
+/* 窗口里新出现的部署版本 → 逐分钟图上的标记（窗口起点前就在的不标：不知道是哪天部署的） */
+function deployMarks(t0, n){
+  var h = state.health;
+  if(!h || !h.versions) return [];
+  return h.versions.filter(function(v){ return !v.before; }).map(function(v){
+    return {i: Math.round((Date.parse(v.first) - t0) / 60000), label: v.id};
+  }).filter(function(m){ return m.i >= 0 && m.i < n; });
+}
+/* 每小时一根：浅色 = p95，实色 = p50（同一根柱子里，单位毫秒）。请求 < 20 的小时画淡 —— 样本太少，分位数不稳。 */
+function latChart(rows, t0){
+  var wrap = el("div","chartwrap");
+  var tip = el("div","tip"); tip.style.whiteSpace = "pre"; tip.style.textAlign = "left"; wrap.appendChild(tip);
+  var lastW = 0;
+  function draw(){
+    var w = Math.round(wrap.clientWidth || 640);
+    if(w < 80 || (Math.abs(w - lastW) < 3 && wrap.querySelector("svg"))) return;
+    lastW = w;
+    var old = wrap.querySelector("svg"); if(old) wrap.removeChild(old);
+    var padL = 44, padR = 8, H = 150, axisH = 20, ih = H - axisH - 8, iw = w - padL - padR, n = 24, step = iw / n;
+    var byH = {};
+    rows.forEach(function(r){ var k = Math.round((Date.parse(r.hour) - t0) / 3600000); if(k >= 0 && k < n) byH[k] = r; });
+    var max = niceMax(Math.max.apply(null, rows.filter(function(r){ return r.requests >= 20; }).map(function(r){ return r.wall_p95; }).concat([1000])));
+    var s = sv("svg", {width:w, height:H, role:"img", "aria-label":"每小时 Worker 耗时 p50 / p95"});
+    for(var g = 0; g <= 4; g++){
+      var y = 8 + ih - ih * g / 4;
+      s.appendChild(sv("line", {x1:padL, y1:y, x2:w - padR, y2:y, stroke:"var(--line2)", "stroke-width":1, "shape-rendering":"crispEdges"}));
+      s.appendChild(svText(padL - 6, y + 3, ms(max * g / 4), {anchor:"end", size:9.5}));
+    }
+    var bw = Math.max(2, step - 4);
+    Object.keys(byH).forEach(function(k){
+      var r = byH[k], x = padL + (+k) * step + (step - bw) / 2, faint = r.requests < 20 ? .35 : 1;
+      var h95 = Math.min(ih, r.wall_p95 / max * ih), h50 = Math.min(ih, r.wall_p50 / max * ih);
+      s.appendChild(sv("rect", {x:x, y:8 + ih - h95, width:bw, height:Math.max(1, h95), fill:"var(--d1)", "fill-opacity":.22 * faint, rx:2}));
+      s.appendChild(sv("rect", {x:x, y:8 + ih - h50, width:bw, height:Math.max(1, h50), fill:"var(--d1)", "fill-opacity":faint, rx:2}));
+    });
+    deployMarks(t0, n * 60).forEach(function(m){
+      var x = padL + m.i / 60 * step;
+      s.appendChild(sv("line", {x1:x, y1:8, x2:x, y2:8 + ih, stroke:"var(--d4)", "stroke-width":1, "stroke-dasharray":"3 3"}));
+    });
+    for(var i = 0; i < n; i += 3){ s.appendChild(svText(padL + (i + .5) * step, H - 6, hm(t0 + i * 3600000), {})); }
+    var hit = sv("rect", {x:padL, y:0, width:iw, height:H, fill:"transparent"});
+    hit.addEventListener("mousemove", function(e){
+      var rc = s.getBoundingClientRect(), i = Math.floor((e.clientX - rc.left - padL) / step), r = byH[i];
+      if(!r){ tip.classList.remove("on"); return; }
+      tip.textContent = hm(t0 + i * 3600000) + "–" + hm(t0 + (i + 1) * 3600000) + "  请求 " + num(r.requests) +
+        (r.requests < 20 ? "（太少，分位数不稳）" : "") +
+        "\n墙钟 p50 " + ms(r.wall_p50) + " · p95 " + ms(r.wall_p95) +
+        "\n请求时长 p50 " + ms(r.dur_p50) + " · p95 " + ms(r.dur_p95) + (r.errors ? "\n出错 " + r.errors : "");
+      tip.style.left = Math.max(90, Math.min(w - 90, padL + (i + .5) * step)) + "px"; tip.style.top = "-6px";
+      tip.classList.add("on");
+    });
+    hit.addEventListener("mouseleave", function(){ tip.classList.remove("on"); });
+    s.appendChild(hit);
+    wrap.appendChild(s);
+  }
+  requestAnimationFrame(draw);
+  if(window.ResizeObserver) new ResizeObserver(function(){ requestAnimationFrame(draw); }).observe(wrap);
+  return wrap;
+}
+function renderHealth(){
+  var box = $("#health"); box.innerHTML = "";
+  var h = state.health;
+  if(!h){ box.appendChild(el("div","empty","读不到。")); return; }
+  if(h.error){ box.appendChild(el("div","empty", h.error)); return; }
+  $("#hnote").textContent = "近 24 h · ASR Worker";
+  var t0 = Math.floor(Date.parse(h.since) / 3600000) * 3600000;
+  /* ① 延迟 */
+  box.appendChild(el("div","dtitle","每小时耗时（本机时刻）· 实色 p50、浅色 p95 · 橙虚线 = 部署 · 悬停看读数"));
+  box.appendChild(latChart(h.lat, t0));
+  box.appendChild(el("div","hint","墙钟 = Worker 从收到请求到回完包（含等 Groq / DeepSeek）；转写和翻译混在一起，各自的耗时看下面「日志」和「逐请求事件」。" +
+    "不含用户到 Cloudflare 那一段网络。"));
+  /* ② 部署 */
+  var vs = h.versions || [];
+  if(vs.length){
+    box.appendChild(sub2("部署版本（窗口里第一次 / 最后一次有请求的分钟）"));
+    box.appendChild(mkTable([["版本",""],["第一次",""],["最后一次",""],["请求","r"]], vs.map(function(v){
+      return [v.id, v.before ? "窗口起点前就在" : ago(Date.parse(v.first)), ago(Date.parse(v.last)), num(v.requests)];
+    })));
+  }
+  /* ③ 上游 */
+  box.appendChild(sub2("上游（Worker 发出去的子请求）"));
+  box.appendChild(mkTable([["上游",""],["总数","r"],["成功","r"],["429","r"],["其他 4xx","r"],["5xx","r"],["没回完","r"]],
+    (h.upstream || []).map(function(r){
+      function c(v, cls){ var b = el("span", v ? cls : "mut", num(v)); return b; }
+      return [r.name, num(r.total), num(r.ok), c(r.c429, "warn"), c(r.c4xx, "warn"), c(r.c5xx, "bad"), c(r.unfinished, "warn")];
+    })));
+  box.appendChild(el("div","hint","「没回完」= 超时 / 被对冲掐掉（千问先回时 Groq 那路被取消）。Durable Object 是 Worker 问自己的额度 / 通行码账本，不出 Cloudflare。"));
+  /* ④ 节点 */
+  var cs = (h.colos || []).slice(0, 12);
+  if(cs.length){
+    box.appendChild(sub2("请求落在哪个 Cloudflare 节点（前 12）"));
+    box.appendChild(mkTable([["节点",""],["请求","r"],["墙钟 p50","r"]], cs.map(function(r){ return [r.colo, num(r.requests), ms(r.wall_p50)]; })));
+    box.appendChild(el("div","hint","⚠️ 节点 ≠ 用户在哪。2026-10-14 实查：美国那位用户的 IP 都在美国，请求却在同一小时里落到东京 / 伦敦 / 巴黎 / 波士顿等 9 个节点 —— " +
+      "路由（VPN、运营商、免费档调度）决定节点，看人在哪要看下面站点表的「国家」或逐请求事件。远的节点到 Groq 也远：东京那段墙钟 p50 1.3 s，都柏林 1.0 s。"));
+  }
+  /* ⑥ 站点 */
+  var z = h.zone;
+  box.appendChild(sub2("bldcam.page 整站（按主机名；Worker 自己的子请求不列）"));
+  if(!z){ box.appendChild(el("div","hint", h.zone_error || "读不到站点数。")); }
+  else{
+    var hosts = z.hosts.filter(function(x){ return /(^|\.)bldcam\.page$/.test(x.host); });
+    box.appendChild(mkTable([["主机",""],["请求","r"],["2xx","r"],["3xx","r"],["4xx","r"],["5xx","r"],["国家（前 5）",""]], hosts.map(function(x){
+      return [x.host, num(x.total), num(x.s2), num(x.s3), num(x.s4), el("span", x.s5 ? "bad" : "mut", num(x.s5)),
+        x.countries.map(function(c){ return c[0] + " " + c[1]; }).join(" · ")];
+    })));
+    if(z.bad_paths.length){
+      box.appendChild(sub2("出错最多的路径（4xx / 5xx · 多半是扫描器）"));
+      box.appendChild(mkTable([["主机",""],["路径",""],["状态","r"],["次数","r"]], z.bad_paths.map(function(b){
+        return [b.host, b.path, b.status, num(b.n)]; })));
+    }
+    box.appendChild(el("div","hint","国家是 Cloudflare 按访客 IP 判的；面板不查、不显示 IP。"));
+  }
+  /* ⑦ 日志 */
+  box.appendChild(sub2("日志 · 各转写引擎耗时（Worker 里从进门到拿到结果）"));
+  var lg = state.logs;
+  if(!lg || lg.error){ box.appendChild(el("div","hint", (lg && lg.error) || "读不到 Workers Logs。")); }
+  else{
+    box.appendChild(mkTable([["模型",""],["段数","r"],["中位","r"],["p90","r"],["最慢","r"]], lg.models.map(function(r){
+      return [r.model, num(r.count), ms(r.median), ms(r.p90), ms(r.max)]; })));
+    box.appendChild(sub2("日志 · 最近的拒绝 / 全挂 / 额度账本不可用"));
+    if(!lg.events.length) box.appendChild(el("div","hint","近 24 h 一条都没有。"));
+    else box.appendChild(mkTable([["时刻",""],["事件",""],["码",""],["细节",""]], lg.events.map(function(e){
+      var what = e.denied ? "拒绝 · " + e.denied : e.result === "all_failed" ? "全挂" : e.quota ? "额度 DO 不可用" : "?";
+      var cls = e.result === "all_failed" ? "bad" : "warn";
+      return [ago(e.t), el("span", cls, what), e.pass || "", e.kind ? e.kind : (e.tried ? (e.tried.join(" → ") + " · " + ms(e.ms)) : "")];
+    })));
+  }
+  /* ⑧ 逐请求事件 */
+  box.appendChild(sub2("逐请求事件（Analytics Engine · 每人 × 路径）"));
+  var ae = state.ae;
+  if(!ae || ae.error){ box.appendChild(el("div","hint", (ae && ae.error) || "读不到。")); }
+  else if(!ae.by_code.length){ box.appendChild(el("div","hint","近 24 h 还没有事件（部署之后才开始记）。")); }
+  else{
+    var P = {"/v1/transcribe":"转写", "/v1/chat/completions":"翻译", "/v1/jev":"Jev", "other":"其他"};
+    box.appendChild(mkTable([["码",""],["路径",""],["请求","r"],["p50","r"],["p95","r"],["出错","r"],["音频 (分)","r"],["token","r"],["最后",""]],
+      ae.by_code.map(function(r){
+        return [r.name, P[r.path] || r.path, num(+r.n), ms(+r.p50), ms(+r.p95), el("span", +r.errors ? "bad" : "mut", num(+r.errors)),
+          num(+r.audio_s / 60, 1), num(+r.tokens), ago(Date.parse(String(r.last).replace(" ", "T") + "Z"))];
+      })));
+    var geo = {};
+    ae.geo.forEach(function(r){ var g = geo[r.name] = geo[r.name] || {n:0, c:{}, o:{}, v:{}};
+      g.n += +r.n; g.c[r.country || "?"] = (g.c[r.country || "?"] || 0) + (+r.n); g.o[r.colo || "?"] = (g.o[r.colo || "?"] || 0) + (+r.n);
+      if(r.ver) g.v[r.ver] = (g.v[r.ver] || 0) + (+r.n); });
+    function top(o){ return Object.keys(o).sort(function(a, b){ return o[b] - o[a]; }).slice(0, 5).map(function(k){ return k + " " + o[k]; }).join(" · "); }
+    box.appendChild(sub2("每人在哪 · 走哪个节点 · 客户端版本"));
+    box.appendChild(mkTable([["码",""],["请求","r"],["国家",""],["节点",""],["版本",""]], Object.keys(geo).map(function(k){
+      var g = geo[k]; return [k, num(g.n), top(g.c), top(g.o), top(g.v) || "（没报）"]; })));
+    if(ae.bad.length){
+      box.appendChild(sub2("最近的失败请求（≥ 400）"));
+      box.appendChild(mkTable([["时刻",""],["码",""],["路径",""],["状态","r"],["耗时","r"],["上游",""]], ae.bad.map(function(r){
+        return [ago(Date.parse(String(r.t).replace(" ", "T") + "Z")), r.name, P[r.path] || r.path, el("span","bad", String(r.status)), ms(+r.ms), r.up];
+      })));
+    }
+  }
+  box.appendChild(el("div","hint","逐请求事件只记码的名字和数字（路径、模型、上游状态、毫秒、音频秒、token、版本、国家两字母、节点）；不记文本、音频、IP、完整码。保留 3 个月。"));
 }
 
 /* ---------- 渲染：用户表 ---------- */
@@ -1034,7 +1224,7 @@ function renderMinutes(c, box){
       extra: function(i){ var v = mins[i + lo]; return v ? ["转写秒  " + num(v[1], 1)].concat(v[4] ? ["Jev  " + v[4]] : []) : []; }}));
     var t = el("table"); t.style.marginTop = "10px";
     var hr = el("tr");
-    [["时段（本机）",""],["时长","r"],["有活动","r"],["转写 (分)","r"],["段","r"],["翻译","r"],["token","r"],["Jev","r"]]
+    [["时段（本机）",""],["时长","r"],["有活动","r"],["转写 (分)","r"],["段","r"],["翻译","r"],["token","r"],["Jev","r"],["Worker p50 / p95（全站）","r"],["节点",""]]
       .forEach(function(x){ hr.appendChild(el("th", x[1], x[0])); });
     var th = el("thead"); th.appendChild(hr); t.appendChild(th);
     var tb = el("tbody"); t.appendChild(tb);
@@ -1050,10 +1240,23 @@ function renderMinutes(c, box){
       tr.appendChild(el("td","r mono", num(a.llm)));
       tr.appendChild(el("td","r mono", num(a.tok)));
       tr.appendChild(el("td","r mono", num(a.jev)));
+      var lat = el("td","r mono","…"), node = el("td","dim","");
+      tr.appendChild(lat); tr.appendChild(node);
       tb.appendChild(tr);
+      var iso = function(i){ return new Date(t0 + i * 60000).toISOString().slice(0, 19) + "Z"; };
+      var wk = k + "|" + sp[0] + "-" + sp[1];
+      var fill = function(w){
+        state.winCache[wk] = w;
+        if(w.error){ lat.textContent = "读不到"; return; }
+        lat.textContent = w.requests ? ms(w.wall_p50) + " / " + ms(w.wall_p95) : "无";
+        node.textContent = (w.colos || []).map(function(c){ return c[0] + " " + c[1]; }).join(" · ");
+      };
+      if(state.winCache[wk]) fill(state.winCache[wk]);
+      else api("cfwin", {s: iso(sp[0]), u: iso(sp[1] + 1)}).then(fill).catch(function(e){ fill({error: e.message}); });
     });
     body.appendChild(t);
-    body.appendChild(el("div","hint","时段 = 相邻两次用量隔不到 10 分钟就算同一段。「有活动」是这段里真有请求的分钟数。"));
+    body.appendChild(el("div","hint","时段 = 相邻两次用量隔不到 10 分钟就算同一段。「有活动」是这段里真有请求的分钟数。" +
+      "「Worker p50 / p95」和「节点」是 Cloudflare 在那段时间的**全站**数（所有人混在一起），单人的看「服务健康 → 逐请求事件」。"));
   }
   if(state.minCache[k] && pick !== utcToday()) return paint(state.minCache[k]);
   body.appendChild(el("div","hint","读取中…"));
@@ -1225,8 +1428,12 @@ function load(){
     api("quota", {}).catch(function(){ return null; }),
     api("r2", {}).catch(function(e){ return {error: e.message}; }),
     api("cf", {}).catch(function(e){ return {error: "面板服务没回 Cloudflare 的数（" + e.message +
-      "）。多半是面板服务比这个页面旧：在终端按 Ctrl+C 停掉 cl_admin_ui.py 再开一次。"}; })
+      "）。多半是面板服务比这个页面旧：在终端按 Ctrl+C 停掉 cl_admin_ui.py 再开一次。"}; }),
+    api("health", {}).catch(function(e){ return {error: "面板服务没回（" + e.message + "）；比页面旧的话重开 cl_admin_ui.py。"}; }),
+    api("logs", {}).catch(function(e){ return {error: e.message}; }),
+    api("ae", {}).catch(function(e){ return {error: e.message}; })
   ]).then(function(r){
+    state.health = r[5]; state.logs = r[6]; state.ae = r[7];
     state.codes = r[0].codes || [];
     state.days_data = r[1].days || [];
     state.quota = r[2];
@@ -1240,7 +1447,7 @@ function load(){
     if(qOpen && !state.openedOnce){ state.openedOnce = true;
       var hitc = state.codes.filter(function(c){ return c.name === qOpen; })[0]; if(hitc) state.expanded = hitc.code; }
     $("#err").innerHTML = "";
-    renderKpis(); renderDaily(); renderPerUser(); renderQuota(); renderCf(); renderUsers();
+    renderKpis(); renderDaily(); renderPerUser(); renderQuota(); renderCf(); renderHealth(); renderUsers();
   }).catch(function(e){ showErr(e.message); })
     .then(function(){ progress(false); state.loading = false; });
 }

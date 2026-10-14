@@ -105,6 +105,30 @@ function reportUsage(env, ctx, payload) {
 // 形状合法性由 passes-core.usage() 自己判 —— 存储不变量归那个模块管。
 const clientVer = (request) => (request.headers.get("x-classlive-version") || "").slice(0, 16);
 
+// ---- 逐请求事件（Analytics Engine，绑定名 AE；docs/PLAN-passkey.md §4「只记数字」）----
+// 每个非管理请求写一条，**写在请求结束时**（流式翻译等 usage 到了再写）。只放：
+//   index  = 码的名字段（`cl-<名字>-…` 的 <名字>；公开令牌 "public"；没认证 "-"）—— **不写完整码**
+//   blobs  = [路径, 码名, 模型, 上游尝试（"groq:200,qwen3-asr-flash:timeout"）, 客户端版本, 国家两字母, 节点三字母]
+//   doubles= [状态码, 毫秒, 音频秒, 输入 token, 输出 token, 缓存命中 token, Jev 题数]
+// ⚠️ 不写文本、音频、IP、完整码。列的顺序是 SQL 的 blob1… / double1…，改了要连 scripts/cl_admin_ui.py 一起改。
+const AE_PATHS = new Set(["/v1/transcribe", "/v1/chat/completions", "/v1/jev"]);
+function newEvent(request, path) {
+  return {
+    path: AE_PATHS.has(path) ? path : "other", name: "-", model: "", up: "", ver: clientVer(request),
+    country: String(request.cf?.country || "").slice(0, 2), colo: String(request.cf?.colo || "").slice(0, 4),
+    status: 0, ms: 0, audio_s: 0, tokens_in: 0, tokens_out: 0, cache_hit: 0, jev_q: 0, pending: null,
+  };
+}
+function track(env, ev) {
+  try {
+    env.AE?.writeDataPoint({
+      indexes: [ev.name],
+      blobs: [ev.path, ev.name, ev.model, ev.up.slice(0, 200), ev.ver, ev.country, ev.colo],
+      doubles: [ev.status, ev.ms, ev.audio_s, ev.tokens_in, ev.tokens_out, ev.cache_hit, ev.jev_q],
+    });
+  } catch { /* 记账失败不影响请求 */ }
+}
+
 // 从 SSE 流里捞最后那块的 usage（`stream_options.include_usage` 时 DeepSeek 在末尾单独发一块）。
 async function usageFromStream(stream) {
   const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
@@ -129,7 +153,7 @@ const usageFields = (u) => ({
   cache_hit: u?.prompt_cache_hit_tokens ?? 0,
 });
 
-async function chat(request, env, ctx, code) {
+async function chat(request, env, ctx, code, ev) {
   if (!env.DEEPSEEK_KEY) return json(503, { error: "llm_not_configured" });
   if (Number(request.headers.get("content-length")) > LLM_MAX_BYTES) return json(413, { error: "too_large" });
   const raw = await request.text();
@@ -137,6 +161,7 @@ async function chat(request, env, ctx, code) {
   let body;
   try { body = JSON.parse(raw); } catch { return json(400, { error: "bad_json" }); }
   if (!body || !LLM_MODELS.has(body.model)) return json(400, { error: "model_not_allowed" });
+  ev.model = body.model;
   body.max_tokens = Math.min(Number(body.max_tokens) || LLM_MAX_TOKENS, LLM_MAX_TOKENS);
   if (body.stream) body.stream_options = { ...(body.stream_options || {}), include_usage: true };
   const up = await fetch(DEEPSEEK_URL, {
@@ -144,6 +169,7 @@ async function chat(request, env, ctx, code) {
     headers: { authorization: `Bearer ${env.DEEPSEEK_KEY}`, "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+  ev.up = `deepseek:${up.status}`;
   const headers = { "content-type": up.headers.get("content-type") || "application/json" };
   if (!up.ok || !up.body) {
     return new Response(up.body, { status: up.status, headers });   // 上游错误原样回（不记用量）
@@ -151,19 +177,21 @@ async function chat(request, env, ctx, code) {
   if (body.stream) {
     const [toClient, toMeter] = up.body.tee();
     const p = usageFromStream(toMeter)
-      .then((u) => passes(env, "/usage", { code, ver: clientVer(request), ...usageFields(u) }))
+      .then((u) => { Object.assign(ev, usageFields(u)); return passes(env, "/usage", { code, ver: clientVer(request), ...usageFields(u) }); })
       .catch(() => {});
     ctx?.waitUntil?.(p);
+    ev.pending = p;   // 事件等 usage 到了再写（见 fetch 末尾）
     return new Response(toClient, { status: up.status, headers });
   }
   const text = await up.text();
   let u = null;
   try { u = JSON.parse(text).usage; } catch { /* 非 JSON 照样回 */ }
+  Object.assign(ev, usageFields(u));
   reportUsage(env, ctx, { code, ver: clientVer(request), ...usageFields(u) });
   return new Response(text, { status: up.status, headers });
 }
 
-async function jev(request, env, ctx, code) {
+async function jev(request, env, ctx, code, ev) {
   if (!env.JEV_KEY) return json(503, { error: "jev_not_configured" });
   if (Number(request.headers.get("content-length")) > JEV_MAX_BYTES) return json(413, { error: "too_large" });
   const raw = await request.text();
@@ -178,6 +206,9 @@ async function jev(request, env, ctx, code) {
     body: JSON.stringify({ model: JEV_MODEL, state: body.state, questions: body.questions }),
   });
   const text = await up.text();
+  ev.model = JEV_MODEL;
+  ev.up = `jev:${up.status}`;
+  ev.jev_q = q;
   if (up.ok) reportUsage(env, ctx, { code, jev_q: q, ver: clientVer(request) });   // 上游错误不记用量（同 chat）
   return new Response(text, { status: up.status, headers: { "content-type": up.headers.get("content-type") || "application/json" } });
 }
@@ -350,11 +381,11 @@ async function transcribe(env, ctx, audio, seconds, t0) {
     const ms = Date.now() - t0;
     if (!won) {
       console.log(JSON.stringify({ result: "all_failed", ms, tried }));
-      return { res: json(503, { error: "all_failed", tried: [...tried] }), model: null };
+      return { res: json(503, { error: "all_failed", tried: [...tried] }), model: null, tried };
     }
     const provider = won.model.startsWith("whisper") ? "groq" : "qwen";
     console.log(JSON.stringify({ provider, model: won.model, ms, tried }));
-    return { res: json(200, { text: won.text, provider, model: won.model, ms, tried: [...tried] }), model: won.model };
+    return { res: json(200, { text: won.text, provider, model: won.model, ms, tried: [...tried] }), model: won.model, tried };
   } finally {
     clearTimeout(budgetTimer);
     clearTimeout(hedgeTimer);
@@ -365,66 +396,78 @@ async function transcribe(env, ctx, audio, seconds, t0) {
 export default {
   async fetch(request, env, ctx) {
     const t0 = Date.now();
-    const url = new URL(request.url);
-    const path = url.pathname;
-    if (request.method !== "POST"
-        || !(path === "/v1/transcribe" || path === "/v1/chat/completions" || path === "/v1/jev"
-             || path.startsWith("/v1/admin/"))) {
-      return new Response("not found", { status: 404 });
-    }
-    if (path.startsWith("/v1/admin/")) return admin(request, env, path);
-    // 认证：公开令牌（只能转写）或通行码 `cl-<名字>-<随机>`（转写 + 翻译，记到人名下）。
-    // ⚠️ fail-closed：secret 没配时 "Bearer undefined" 不能放行（同上传 Worker）。
-    const auth = request.headers.get("authorization") || "";
-    const code = auth.startsWith("Bearer cl-") ? auth.slice(7) : null;
-    if (code !== null && (!CODE_RE.test(code) || !env.PASSES)) {
-      return json(403, { error: "unknown" });
-    }
-    const expected = env.CLIENT_TOKEN ? `Bearer ${env.CLIENT_TOKEN}` : null;
-    if (code === null && (!expected || auth !== expected)) {
-      return new Response("unauthorized", { status: 401 });
-    }
-    if ((path === "/v1/chat/completions" || path === "/v1/jev") && code === null) {
-      return new Response("unauthorized", { status: 401 });   // 公开令牌不代付翻译 / 打分
-    }
-    const install = request.headers.get("x-classlive-install") || "";
-    if (!INSTALL_OK.test(install)) return new Response("bad install id", { status: 400 });
-
-    // 翻译：只有通行码能走到这；不过下面那两道限流 —— 码是个人的、能吊销、能限额，
-    // 而一节课的翻译请求（定稿 + 草稿译文）每分钟会超过转写那套 30 / 60 的限。
-    if (path === "/v1/chat/completions") {
-      const deny = await checkPass(env, code, install, "llm");
-      return deny ?? chat(request, env, ctx, code);
-    }
-    if (path === "/v1/jev") {
-      const deny = await checkPass(env, code, install, "jev");
-      return deny ?? jev(request, env, ctx, code);
-    }
-
-    // 令牌公开、install_id 客户端随便造 -> 按 install 限流挡不住，所以再按 IP 限一道（R17，同上传 Worker）。
-    const ip = request.headers.get("cf-connecting-ip") || "0.0.0.0";
-    if (!(await env.PER_IP.limit({ key: ip })).success) {
-      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-    }
-    const { success } = await env.PER_INSTALL.limit({ key: install });
-    if (!success) return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-
-    // R20：先看 Content-Length，超了不读；但它可以谎报，所以读完仍按**实际字节数**再判一次。
-    if (Number(request.headers.get("content-length")) > MAX_BYTES) return new Response("too large", { status: 413 });
-    const audio = await request.arrayBuffer();
-    if (audio.byteLength === 0) return new Response("empty body", { status: 400 });
-    if (audio.byteLength > MAX_BYTES) return new Response("too large", { status: 413 });
-
-    const raw = parseFloat(request.headers.get("x-audio-seconds"));
-    const seconds = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), SECONDS_MAX) : SECONDS_DEFAULT;
-    if (code !== null) {
-      const deny = await checkPass(env, code, install, "asr");
-      if (deny) return deny;
-    }
-    const { res, model } = await transcribe(env, ctx, audio, seconds, t0);
-    if (code !== null && res.status === 200) {
-      reportUsage(env, ctx, { code, asr_s: seconds, model, ver: clientVer(request) });
-    }
+    const path = new URL(request.url).pathname;
+    if (request.method === "POST" && path.startsWith("/v1/admin/")) return admin(request, env, path);   // 管理调用不进事件
+    const ev = newEvent(request, path);
+    const res = await route(request, env, ctx, ev, path, t0);
+    ev.status = res.status;
+    ev.ms = Date.now() - t0;   // 流式翻译：到响应头为止（首包），不是整段流
+    if (ev.pending) ctx?.waitUntil?.(ev.pending.then(() => track(env, ev)));
+    else track(env, ev);
     return res;
   },
 };
+
+async function route(request, env, ctx, ev, path, t0) {
+  if (request.method !== "POST"
+      || !(path === "/v1/transcribe" || path === "/v1/chat/completions" || path === "/v1/jev")) {
+    return new Response("not found", { status: 404 });
+  }
+  // 认证：公开令牌（只能转写）或通行码 `cl-<名字>-<随机>`（转写 + 翻译，记到人名下）。
+  // ⚠️ fail-closed：secret 没配时 "Bearer undefined" 不能放行（同上传 Worker）。
+  const auth = request.headers.get("authorization") || "";
+  const code = auth.startsWith("Bearer cl-") ? auth.slice(7) : null;
+  if (code !== null && (!CODE_RE.test(code) || !env.PASSES)) {
+    return json(403, { error: "unknown" });
+  }
+  const expected = env.CLIENT_TOKEN ? `Bearer ${env.CLIENT_TOKEN}` : null;
+  if (code === null && (!expected || auth !== expected)) {
+    return new Response("unauthorized", { status: 401 });
+  }
+  ev.name = code === null ? "public" : code.split("-")[1];   // 码已过 CODE_RE：中间段就是名字
+  if ((path === "/v1/chat/completions" || path === "/v1/jev") && code === null) {
+    return new Response("unauthorized", { status: 401 });   // 公开令牌不代付翻译 / 打分
+  }
+  const install = request.headers.get("x-classlive-install") || "";
+  if (!INSTALL_OK.test(install)) return new Response("bad install id", { status: 400 });
+
+  // 翻译：只有通行码能走到这；不过下面那两道限流 —— 码是个人的、能吊销、能限额，
+  // 而一节课的翻译请求（定稿 + 草稿译文）每分钟会超过转写那套 30 / 60 的限。
+  if (path === "/v1/chat/completions") {
+    const deny = await checkPass(env, code, install, "llm");
+    return deny ?? chat(request, env, ctx, code, ev);
+  }
+  if (path === "/v1/jev") {
+    const deny = await checkPass(env, code, install, "jev");
+    return deny ?? jev(request, env, ctx, code, ev);
+  }
+
+  // 令牌公开、install_id 客户端随便造 -> 按 install 限流挡不住，所以再按 IP 限一道（R17，同上传 Worker）。
+  const ip = request.headers.get("cf-connecting-ip") || "0.0.0.0";
+  if (!(await env.PER_IP.limit({ key: ip })).success) {
+    return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+  }
+  const { success } = await env.PER_INSTALL.limit({ key: install });
+  if (!success) return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+
+  // R20：先看 Content-Length，超了不读；但它可以谎报，所以读完仍按**实际字节数**再判一次。
+  if (Number(request.headers.get("content-length")) > MAX_BYTES) return new Response("too large", { status: 413 });
+  const audio = await request.arrayBuffer();
+  if (audio.byteLength === 0) return new Response("empty body", { status: 400 });
+  if (audio.byteLength > MAX_BYTES) return new Response("too large", { status: 413 });
+
+  const raw = parseFloat(request.headers.get("x-audio-seconds"));
+  const seconds = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), SECONDS_MAX) : SECONDS_DEFAULT;
+  if (code !== null) {
+    const deny = await checkPass(env, code, install, "asr");
+    if (deny) return deny;
+  }
+  ev.audio_s = seconds;
+  const { res, model, tried } = await transcribe(env, ctx, audio, seconds, t0);
+  ev.model = model ?? "";
+  ev.up = tried.join(",");
+  if (code !== null && res.status === 200) {
+    reportUsage(env, ctx, { code, asr_s: seconds, model, ver: clientVer(request) });
+  }
+  return res;
+}

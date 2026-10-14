@@ -41,7 +41,7 @@ function harness({ deepseek } = {}) {
   const clock = () => now;
   const pass = new PassCore(memStorage(), clock);
   const quota = new QuotaCore(memStorage(), clock);
-  const calls = { deepseek: [], groq: 0, jev: [] };
+  const calls = { deepseek: [], groq: 0, jev: [], ae: [] };
   const origFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     const u = String(url);
@@ -67,6 +67,7 @@ function harness({ deepseek } = {}) {
     PER_INSTALL: { limit: async () => ({ success: true }) },
     PER_IP: { limit: async () => ({ success: true }) },
     QUOTA: doStub(quota), PASSES: doStub(pass),
+    AE: { writeDataPoint: (dp) => { calls.ae.push(structuredClone(dp)); } },
   };
   const pending = [];
   const ctx = { waitUntil: (p) => pending.push(p) };
@@ -578,5 +579,49 @@ test("逐分钟 / 设备：只认完整码；日期非法明确报错；设备�
     assert.equal(bad.error, "bad_day");
     const dv = await (await h.call(h.adminReq("devices", { code }))).json();
     assert.deepEqual(dv.devices, [{ id: INSTALL.slice(0, 6), first: T0, last: T0 }]);
+  } finally { h.restore(); }
+});
+
+test("事件（Analytics Engine）：每个非管理请求一条，只有码名和数字；流式等 usage 到了再写", async () => {
+  const h = harness({
+    deepseek: (b) => (b.stream
+      ? new Response('data: {"choices":[]}\n\ndata: {"usage":{"prompt_tokens":7,"completion_tokens":3,"prompt_cache_hit_tokens":5}}\n\ndata: [DONE]\n\n',
+          { status: 200, headers: { "content-type": "text/event-stream" } })
+      : J(200, { choices: [{ message: { content: "秘密译文" } }], usage: { prompt_tokens: 100, completion_tokens: 20, prompt_cache_hit_tokens: 64 } })),
+  });
+  try {
+    const { code } = await h.pass.add({ name: "amy" });
+    await h.call(h.adminReq("list", {}));
+    assert.equal(h.calls.ae.length, 0, "管理调用不进事件");
+    await h.call(h.chatReq(code, body({ messages: [{ role: "user", content: "secret lecture text" }] }), INSTALL, "3.9.6"));
+    await h.call(h.asrReq(`Bearer ${code}`, INSTALL, "9.5"));
+    await h.call(h.asrReq("Bearer tok-public"));
+    await h.call(h.asrReq("Bearer nope"));
+    const r = await h.call(h.chatReq(code, body({ stream: true })));
+    await r.text();
+    const before = h.calls.ae.length;
+    await h.settle();
+    assert.equal(before, 4, "流式那条要等 usage，不能先写");
+    const [chat, asr, pub, bad, stream] = h.calls.ae;
+    assert.deepEqual(chat.indexes, ["amy"]);
+    assert.deepEqual(chat.blobs.slice(0, 5), ["/v1/chat/completions", "amy", "deepseek-flash", "deepseek:200", "3.9.6"]);
+    assert.deepEqual([chat.doubles[0], ...chat.doubles.slice(2)], [200, 0, 100, 20, 64, 0]);
+    assert.deepEqual([asr.blobs[0], asr.blobs[2], asr.blobs[3], asr.doubles[0], asr.doubles[2]],
+      ["/v1/transcribe", "whisper-large-v3", "groq:200", 200, 9.5]);
+    assert.deepEqual([pub.indexes[0], bad.indexes[0], bad.doubles[0]], ["public", "-", 401]);
+    assert.deepEqual(stream.doubles.slice(3, 6), [7, 3, 5]);
+    const all = JSON.stringify(h.calls.ae);
+    for (const s of [code, "secret lecture text", "秘密译文", "\"hi\"", INSTALL]) assert.ok(!all.includes(s), `事件里出现了 ${s}`);
+  } finally { h.restore(); }
+});
+
+test("事件：AE 绑定没配 / 写入抛错 -> 请求照常", async () => {
+  const h = harness();
+  try {
+    const { code } = await h.pass.add({ name: "t" });
+    h.env.AE = { writeDataPoint: () => { throw new Error("ae down"); } };
+    assert.equal((await h.call(h.chatReq(code, body()))).status, 200);
+    delete h.env.AE;
+    assert.equal((await h.call(h.chatReq(code, body()))).status, 200);
   } finally { h.restore(); }
 });

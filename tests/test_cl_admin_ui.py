@@ -443,5 +443,117 @@ class R2Ingest(unittest.TestCase):
         self.assertNotIn("SECRET", json.dumps(r))
 
 
+def _cf_home(d, token="cfat_SECRET-TOKEN"):
+    root = pathlib.Path(d) / ".classlive"
+    root.mkdir()
+    (root / "cf-analytics-token").write_text(token + "\n", encoding="utf-8")
+    (root / "cf-account-id").write_text("acct123\n", encoding="utf-8")
+    return mock.patch.object(pathlib.Path, "home", return_value=pathlib.Path(d))
+
+
+class Health(unittest.TestCase):
+    """`/api/health` `/api/logs` `/api/ae` `/api/cfwin`：形状、单位换算、归类、token 不进响应。不联网（全注入）。"""
+
+    GQL = {"data": {"viewer": {
+        "accounts": [{
+            "lat": [{"sum": {"requests": 900, "errors": 1}, "dimensions": {"datetimeHour": "2026-10-14T17:00:00Z"},
+                     "quantiles": {"wallTimeP50": 1132000, "wallTimeP95": 1631000, "requestDurationP50": 900000, "requestDurationP95": 1500000}}],
+            "ver": [{"sum": {"requests": 5}, "dimensions": {"scriptVersion": "aaaaaaaa-1", "datetimeMinute": "2026-10-13T21:00:00Z"}},
+                    {"sum": {"requests": 7}, "dimensions": {"scriptVersion": "aaaaaaaa-1", "datetimeMinute": "2026-10-14T09:00:00Z"}},
+                    {"sum": {"requests": 3}, "dimensions": {"scriptVersion": "bbbbbbbb-2", "datetimeMinute": "2026-10-14T20:31:00Z"}}],
+            "sub": [{"sum": {"subrequests": 10}, "dimensions": {"hostname": "api.groq.com", "httpResponseStatus": 200, "requestOutcome": "completed"}},
+                    {"sum": {"subrequests": 2}, "dimensions": {"hostname": "api.groq.com", "httpResponseStatus": 429, "requestOutcome": "completed"}},
+                    {"sum": {"subrequests": 1}, "dimensions": {"hostname": "api.groq.com", "httpResponseStatus": 0, "requestOutcome": "canceled"}},
+                    {"sum": {"subrequests": 4}, "dimensions": {"hostname": "", "httpResponseStatus": 503, "requestOutcome": "completed"}}],
+            "colo": [{"sum": {"requests": 3}, "quantiles": {"wallTimeP50": 1000000}, "dimensions": {"coloCode": "NRT"}},
+                     {"sum": {"requests": 9}, "quantiles": {"wallTimeP50": 2000}, "dimensions": {"coloCode": "DUB"}}]}],
+        "zones": [{
+            "host": [{"count": 5, "dimensions": {"clientRequestHTTPHost": "asr.bldcam.page", "edgeResponseStatus": 200, "clientCountryName": "US"}},
+                     {"count": 2, "dimensions": {"clientRequestHTTPHost": "asr.bldcam.page", "edgeResponseStatus": 503, "clientCountryName": "IE"}}],
+            "path": [{"count": 3, "dimensions": {"clientRequestHTTPHost": "bldcam.page", "clientRequestPath": "/wp-login.php", "edgeResponseStatus": 404}}]}]}}}
+
+    def test_单位换算_部署首末_上游归类_站点汇总_token不进响应(self):
+        import datetime as dt
+        import cl_admin_ui as U
+        seen = []
+        def post(url, headers, body):
+            seen.append((headers["Authorization"], body["variables"]))
+            return self.GQL
+        get = lambda url, headers: {"result": [{"id": "zone42"}]}            # noqa: E731
+        now = dt.datetime(2026, 10, 14, 21, 0, tzinfo=dt.timezone.utc)
+        with tempfile.TemporaryDirectory() as d, _cf_home(d):
+            r = U.cf_health(post=post, get=get, now=now)
+        self.assertEqual(seen[0][1]["z"], "zone42")
+        self.assertEqual((r["lat"][0]["wall_p50"], r["lat"][0]["wall_p95"], r["lat"][0]["dur_p50"]), (1132, 1631, 900))
+        a, b = r["versions"]
+        self.assertEqual((a["id"], a["first"], a["last"], a["requests"], a["before"]),
+                         ("aaaaaaaa", "2026-10-13T21:00:00Z", "2026-10-14T09:00:00Z", 12, True))
+        self.assertEqual((b["id"], b["before"]), ("bbbbbbbb", False))
+        g = next(x for x in r["upstream"] if x["host"] == "api.groq.com")
+        self.assertEqual((g["name"], g["total"], g["ok"], g["c429"], g["unfinished"]), ("Groq", 13, 10, 2, 1))
+        do = next(x for x in r["upstream"] if x["host"] == "")
+        self.assertEqual((do["name"], do["c5xx"]), ("Durable Object", 4))
+        self.assertEqual([c["colo"] for c in r["colos"]], ["DUB", "NRT"])
+        self.assertEqual(r["colos"][1]["wall_p50"], 1000)
+        h = r["zone"]["hosts"][0]
+        self.assertEqual((h["total"], h["s2"], h["s5"], h["countries"]), (7, 5, 2, [("US", 5), ("IE", 2)]))
+        self.assertEqual(r["zone"]["bad_paths"][0]["path"], "/wp-login.php")
+        out = json.dumps(r)
+        self.assertNotIn("SECRET", out)
+        self.assertNotIn("clientIP", U._HEALTH_Q, "站点查询不许查 IP")
+
+    def test_zone读不到_其余照常(self):
+        import cl_admin_ui as U
+        bad = json.loads(json.dumps(self.GQL))
+        bad["data"]["viewer"]["zones"] = []
+        bad["errors"] = [{"message": "zone not authorized", "path": ["viewer", "zones", "0"]}]
+        with tempfile.TemporaryDirectory() as d, _cf_home(d):
+            r = U.cf_health(post=lambda *a: bad, get=lambda *a: {"result": []})
+        self.assertIsNone(r["zone"])
+        self.assertTrue(r["zone_error"])
+        self.assertEqual(len(r["lat"]), 1)
+
+    def test_日志_只取我们自己写的字段(self):
+        import cl_admin_ui as U
+        def post(url, headers, body):
+            if body["view"] == "calculations":
+                return {"success": True, "result": {"calculations": [
+                    {"calculation": "median(ms)", "aggregates": [{"groupKey": "whisper-large-v3", "value": 654.4, "count": 731}]},
+                    {"calculation": "p90(ms)", "aggregates": [{"groupKey": "whisper-large-v3", "value": 912, "count": 731}]},
+                    {"calculation": "max(ms)", "aggregates": [{"groupKey": "whisper-large-v3", "value": 3520, "count": 731}]}]}}
+            flt = body["parameters"]["filters"][1]["key"]
+            ev = [{"timestamp": 1792011946784, "source": {"pass": "t", "denied": "devices", "kind": "llm"},
+                   "$workers": {"event": {"request": {"headers": {"cf-connecting-ip": "203.0.113.9"}}}}}] if flt == "denied" else []
+            return {"success": True, "result": {"events": {"events": ev}}}
+        with tempfile.TemporaryDirectory() as d, _cf_home(d):
+            r = U.worker_logs(post=post, now_ms=1792012000000)
+        self.assertEqual(r["models"], [{"model": "whisper-large-v3", "count": 731, "median": 654, "p90": 912, "max": 3520}])
+        self.assertEqual(r["events"], [{"pass": "t", "denied": "devices", "kind": "llm", "t": 1792011946784}])
+        self.assertNotIn("203.0.113.9", json.dumps(r))
+
+    def test_事件_没开AE回pending_开了回三张表(self):
+        import cl_admin_ui as U
+        with tempfile.TemporaryDirectory() as d, _cf_home(d):
+            r = U.ae_events(post=lambda *a: (403, {"errors": [{"message": "Authorization error"}]}))
+            self.assertTrue(r["pending"])
+            sqls = []
+            def post(url, headers, sql):
+                sqls.append(sql)
+                return 200, {"data": [{"name": "amy", "n": "3"}]}
+            r = U.ae_events(post=post)
+        self.assertEqual(set(r), {"by_code", "geo", "bad"})
+        self.assertTrue(all("classlive_events" in q for q in sqls))
+        self.assertNotIn("SECRET", json.dumps(r))
+
+    def test_时段延迟_全站口径_毫秒(self):
+        import cl_admin_ui as U
+        fake = {"data": {"viewer": {"accounts": [{
+            "w": [{"sum": {"requests": 1224, "errors": 0}, "quantiles": {"wallTimeP50": 1132000, "wallTimeP95": 1631000}}],
+            "c": [{"sum": {"requests": 331}, "dimensions": {"coloCode": "NRT"}}]}]}}}
+        with tempfile.TemporaryDirectory() as d, _cf_home(d):
+            r = U.cf_window("2026-10-14T17:00:00Z", "2026-10-14T17:48:00Z", post=lambda *a: fake)
+        self.assertEqual(r, {"requests": 1224, "errors": 0, "wall_p50": 1132, "wall_p95": 1631, "colos": [["NRT", 331]]})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

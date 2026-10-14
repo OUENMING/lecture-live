@@ -450,6 +450,11 @@ EAR_D = 6.0                       # 「在听」小点直径(pt)
 EAR_GAP = 6.0                     # 小点与章节条之间
 EAR_ON_ALPHA = 0.85               # 听到人声
 EAR_QUIET_ALPHA = 0.22            # 安静(仍看得见: 「它在, 只是现在没人说话」)
+#: VAD 翻回「没人声」之后小点**再亮这么久**才开始灭（VAD 自己已有 0.35 s hangover）。
+#: 2026-10-14 离线量（两段 10 分钟真课音频喂 `vad.Segmenter`）：现状每分钟切 13.5–13.7 次、
+#: 其中 5.0–5.6 次是「暗不到 1 秒又亮」—— 就是作者说的「一下亮一下不亮」。
+#: 再保持 0.45 / 0.8 / 1.2 s → 每分钟切 4.5–5.9 / 2.9–4.3 / 2.3–3.1 次；取 0.8（短暗降到 0.6–1.2 次/分）。
+EAR_HOLD_S = 0.8
 #: 章节条**至少**要有这么宽才显示（计划 §9.8 的三个条件之一）。
 #: ⚠️ 低于它时标签和点击区**一起隐藏** —— 半个标题比没有标题更让人分心，
 #:    而且点击区太小会变成"点不中"的挫败源。
@@ -1117,7 +1122,8 @@ class Overlay:
         self._ear.layer().setOpacity_(EAR_QUIET_ALPHA)
         self._ear.setToolTip_("亮 = 正在收到人声")
         ve.addSubview_(self._ear)
-        self._hearing = False
+        self._hearing = False          # 小点现在**显示**的状态（不是 VAD 的原始值）
+        self._heard_at = -1e9          # 最后一次 VAD 判有人声的时刻（`self._clock`）
 
         # ---- 章节条（计划 §9.8）----
         # 摆在收起态/展开态**顶栏的最左侧**，位置在 `_layout` 里算（要用到按钮摆完后的 `x`）。
@@ -1965,6 +1971,8 @@ class Overlay:
             #    **半像素**上 → 文字发虚（`RESEARCH-macos-aesthetic.md §7` 的指纹表）。
             #    ⚠️ 取整之后标签与点击区**用同一个数**（同框），别各算各的。
             _cw = float(math.floor(avail))
+            if self._chapter_lbl.stringValue() != _ctext:
+                motion.fade_swap(self._chapter_lbl)      # 新章节换标题：淡换，不跳（2026-10-14）
             self._chapter_lbl.setStringValue_(_ctext)
             # ⚠️ 标签**不能**和按钮一样给 24 高的框: NSTextField 把文字**贴顶**画,
             #    NSButton 把标题**竖直居中** —— 同一个 24 高的行里, 12pt 的章节字
@@ -2143,19 +2151,34 @@ class Overlay:
         self._mark_dirty()
 
     def hearing(self, flag: bool) -> None:
-        """VAD 此刻判有人声吗(主循环每块音频调一次)。只在**变了**时动小点。"""
-        flag = bool(flag)
-        if flag == self._hearing:
+        """VAD 此刻判有人声吗(主循环每块音频调一次)。**快亮慢灭 + 保持**，只在显示状态变了时动一次。
+
+        有人声 → 立刻亮（`motion.ATTACK_S` 淡入）；没人声 → 距最后一次人声超过 `EAR_HOLD_S`
+        才灭（`motion.RELEASE_S` 慢慢退）。不做呼吸 / 随音量起伏：那是整节课不停的动画
+        （WWDC13/712「消除持续动画」；3.9.4 量过逐帧重画多耗电 21%）。
+        """
+        now = self._clock()
+        if flag:
+            self._heard_at = now
+            want = True
+        else:
+            want = self._hearing and (now - self._heard_at) <= EAR_HOLD_S
+        if want == self._hearing:
             return
-        self._hearing = flag
+        self._hearing = want
         lay = self._ear.layer()
-        to = EAR_ON_ALPHA if flag else EAR_QUIET_ALPHA
+        to = EAR_ON_ALPHA if want else EAR_QUIET_ALPHA
         try:
             from Quartz import CABasicAnimation
             anim = CABasicAnimation.animationWithKeyPath_("opacity")
-            anim.setFromValue_(lay.opacity())
-            anim.setDuration_(motion.STATE_S)
-            anim.setTimingFunction_(motion.ca_timing())
+            # ⚠️ 起点取**正在显示**的值（presentationLayer）：灭到一半又亮时从半亮接着走，不跳
+            pres = lay.presentationLayer()
+            anim.setFromValue_(pres.opacity() if pres is not None else lay.opacity())
+            # 「减弱动态效果」：状态含义要留（Apple Reduced Motion 评估标准）→ 缩成短溶解，不删
+            rm = motion.reduce_motion()
+            anim.setDuration_(min(0.1, motion.ATTACK_S) if rm
+                              else (motion.ATTACK_S if want else motion.RELEASE_S))
+            anim.setTimingFunction_(motion.ca_timing() if want else motion.ca_timing_inout())
             lay.addAnimation_forKey_(anim, "ear")
         except Exception:                                 # noqa: BLE001
             pass
@@ -2341,7 +2364,10 @@ class Overlay:
            所以要写清**功能名 + 动作**，光写「实时总结」看不出它可点。
         """
         chs = list((self._outline.get("chapters") or {}).values())
-        dot = " ●  " if self._outline_new else ""
+        # ⚠️ 2026-10-14 不再画「有新章节」的 ● —— 它和左边「在听」小点长得一样，两颗点同时亮
+        #    分不清谁是谁（作者实测）。新章节靠章节条自己的标题换掉来提示；`_outline_new`
+        #    这个状态仍照旧维护（R 测试钉着它的判据），只是不上屏。
+        dot = ""
         if chs:
             c = max(chs, key=lambda x: (x.get("t0") or ""))
             return f"{dot}▸ {c.get('title') or '（无标题）'} · since {c.get('t0') or ''}"
@@ -2643,7 +2669,7 @@ class Overlay:
             rows.append((tail, ""))
         return rows
 
-    def _set_cached(self, key: str, lbl, text: str):
+    def _set_cached(self, key: str, lbl, text: str, *, fade: bool = False):
         """标签文本按 key 缓存, 相同就跳过写入。
 
         ⚠️ _render 每 16ms 就可能跑一次(答案流式期间每帧都会走到这), 而
@@ -2651,6 +2677,8 @@ class Overlay:
         的槽位缓存同一个理由。"""
         if self._label_cache.get(key) == text:
             return
+        if fade and key in self._label_cache:           # 首次写入不淡（那是开场，不是「换」）
+            motion.fade_swap(lbl)
         self._label_cache[key] = text
         lbl.setStringValue_(text)
 
@@ -3332,5 +3360,6 @@ class Overlay:
                 bool(self._streaming or self._cur_zh or self._cur_en))
         # 草稿与 💡 术语解析钉在面板底部, 不参与滚动
         self._render_draft()
-        self._set_cached("gloss", self._gloss_lbl, self._gloss_text())
+        # 术语行 / ❓ 点拨换内容时淡换（2026-10-14 动效一轮：原来一下跳过去）
+        self._set_cached("gloss", self._gloss_lbl, self._gloss_text(), fade=True)
         # 不再每次渲染都 orderFrontRegardless(会高频打扰窗口服务)

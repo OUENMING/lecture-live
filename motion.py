@@ -24,6 +24,10 @@ FEEDBACK_S = 0.12
 STATE_S = 0.20
 MOVE_S = 0.28
 EXIT_S = 0.16
+#: 指示灯（「在听」小点）的亮 / 灭：**快亮慢灭**，照电平表的弹道（ITU-R BS.2103 引 Bauer：
+#: 上升 0.1 s、下降 0.5 s 最好）。灭用 ease-in-out（像余辉慢慢退），亮用 ease-out。2026-10-14。
+ATTACK_S = 0.12
+RELEASE_S = 0.50
 
 EASE_POW = 3.0                      # ease-out-cubic 的指数
 CA_CONTROL_POINTS = (0.33, 1.0, 0.68, 1.0)   # 同一条曲线的贝塞尔形式, 给 CA 用
@@ -51,6 +55,15 @@ def ca_timing():
         return None
 
 
+def ca_timing_inout():
+    """CA 的 ease-in-out（指示灯慢灭用）。拿不到 Quartz 就返回 None。"""
+    try:
+        from Quartz import CAMediaTimingFunction, kCAMediaTimingFunctionEaseInEaseOut
+        return CAMediaTimingFunction.functionWithName_(kCAMediaTimingFunctionEaseInEaseOut)
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
 def reduce_motion() -> bool:
     """系统「减弱动态效果」开着吗。**每次现读**(设置会在运行中变, 面板永不成为 key,
     没有「激活时重读」的时机)。读不到当「没开」—— 读不到通常是没有 AppKit, 那也不会有动画。"""
@@ -59,3 +72,25 @@ def reduce_motion() -> bool:
         return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion())
     except Exception:                                   # noqa: BLE001
         return False
+
+
+def fade_swap(view, duration: float = STATE_S) -> None:
+    """接下来这一次「换内容」用淡入淡出（层上的一次性 `CATransition`），不是一下跳过去。
+
+    在**改内容之前**调。没有层 / 拿不到 Quartz / 「减弱动态效果」开着 → 什么都不做（= 直接换）。
+    一次性的：只在真的换了时花一次合成，不留常驻动画。
+    """
+    if reduce_motion():
+        return
+    try:
+        lay = view.layer()
+        if lay is None:
+            return
+        from Quartz import CATransition, kCATransitionFade
+        t = CATransition.animation()
+        t.setType_(kCATransitionFade)
+        t.setDuration_(duration)
+        t.setTimingFunction_(ca_timing())
+        lay.addAnimation_forKey_(t, "fadeSwap")
+    except Exception:                                   # noqa: BLE001
+        pass

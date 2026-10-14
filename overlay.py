@@ -3286,7 +3286,9 @@ class Overlay:
         if self._bar_inside or self._mouse_in_panel():
             return
         # ⚠️ 正在输入框里打字、或框里还有没交的字 → 不藏（输入框也跟着淡出，藏了等于把正在写的问题抹掉）
+        #    再约一次：打完字（交了 / Esc）鼠标早已不在窗里，不会再有「移出」事件来触发淡出
         if self._is_editing() or (self._input.stringValue() or "").strip():
+            self._bar_hide_at = now + BAR_LEAVE_S
             return
         self._set_bar_shown(False)
 

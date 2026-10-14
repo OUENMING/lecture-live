@@ -130,6 +130,11 @@ class BarHover(unittest.TestCase):
             spin(0.5)
         self.assertEqual(self._input_alphas(), {1.0})
         self.assertEqual(set(self._alphas()), {1.0})
+        self.ov._input.setStringValue_("")                # 交了 / 清掉 → 下一轮到点照常淡出（不用等鼠标再进出一次）
+        with mock.patch.object(self.ov, "_mouse_in_panel", return_value=False):
+            self.ov._bar_tick(time.monotonic() + 10.0)    # 越过「再约一次」的那个到点
+            spin(0.5)
+        self.assertEqual(self._input_alphas(), {0.0})
 
     def test_开课先亮_宽限到点且鼠标不在窗内_淡出_在听小点不动(self):
         self.assertEqual(set(self._alphas()), {1.0})

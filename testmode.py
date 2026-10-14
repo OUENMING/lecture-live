@@ -577,7 +577,7 @@ class TestSession:
         """⭐ **UI 使用度**（采集面 ⑦）：某个交互被用了几次。
 
         名字由 `overlay` 那边给（`submit` / `ask` / `new_topic` / `lost` /
-        `outline` / `trans_mode` / `quit` / `hide` / `show` / `on_top` / `not_on_top` / `reopen`）。
+        `outline` / `trans_mode` / `quit` / `hide` / `show` / `on_top` / `not_on_top` / `reopen` / `edge_tab`）。
 
         ⚠️ **只自增一个计数，不 append 事件** —— 它跑在 AppKit **主线程回调**里，
            而按钮可以连点几十下。「每次一个事件」会把 `events` 撑爆、

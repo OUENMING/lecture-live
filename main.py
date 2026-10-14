@@ -1058,9 +1058,12 @@ def resolve_cloud_asr_enabled(*, read=final_asr.read_config, write=final_asr.wri
 
 def run(args) -> None:
     # ⏱ 起步计时（2026-10-14 作者：「点开始上课之后字幕卡片弹出的速度」）—— 先量再改。
-    #    各段用 `_tp` 记单调时钟；点按时刻取 `.course` 的 mtime（面板点「开始上课」那一刻写的）。
+    #    各段用 `_tp` 记单调时钟；点按时刻读面板留的一次性戳（`_click_wall`）。
+    #    ⚠️ 戳在**这里**就读掉（不是等悬浮窗起来再读）：下面被单实例锁拦下、模型缺失等提前 return 的路
+    #       也要把它消耗掉，不然下一次从终端起会捡到这次的点按。
     _tp = {"run": time.monotonic()}
     _t_wall0 = time.time()
+    _t_click = _click_wall()
     # ---- 单实例锁 ----
     # ⚠️ 必须是 run() 的**第一件事**：抢在开音频设备、弹更新卡片、加载模型之前 ——
     #    否则第二个实例已经抢走了麦克风、已经烧了 API 调用，再说"你重复了"就晚了。
@@ -1501,7 +1504,7 @@ def run(args) -> None:
     )
     _tp["overlay"] = time.monotonic()
     try:
-        _st = startup_timing(_tp, _t_wall0, _click_wall())
+        _st = startup_timing(_tp, _t_wall0, _t_click)
         echo("⏱ " + _st["line"])
         live.event("startup", **_st["fields"])
     except Exception:                              # noqa: BLE001

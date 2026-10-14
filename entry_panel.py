@@ -175,7 +175,20 @@ def ready_item_text(it: dict) -> str:
     if it.get("key") == "update" and it.get("state") == "todo":
         mark = "↑"                       # 「有东西可以装」，不是「没做完的待办」
     name = _READY_NAME.get(it.get("key", ""), it.get("key", ""))
-    return f"{mark}  {name}  {ready_short(it)}"
+    short = ready_short(it)
+    # ⭐ **正常时只写名字**（2026-10-14 作者：一排「已允许 / 已就绪 / 已设」像诊断日志）：
+    #    「✓」已经说了「没问题」，再跟一个状态词是重复。⚠️ 不正常时状态词**照留** ——
+    #    `○ / ⚠ / —` 加一个词才说得清哪里不对、点了会干嘛（上面 HIG 那条：不只靠形状）。
+    #    「更新」那格不省：它的「已是最新 / 已装好」是点完之后的回话。
+    if it.get("state") == "ok" and it.get("key") != "update":
+        if it.get("key") == "engine":
+            name, short = f"{short}翻译", ""                 # 「翻译引擎  云端」→「云端翻译」
+        elif it.get("key") == "models":
+            # 「✓ … 缺草稿模型」读着自相矛盾（拍图看过）→ 那一种照留「已就绪 · 缺草稿模型」
+            short = {"已就绪": "", "已就绪 · 全本地": "全本地"}.get(short, short)
+        else:
+            short = ""
+    return f"{mark}  {name}  {short}" if short else f"{mark}  {name}"
 
 
 def ready_short(it: dict) -> str:

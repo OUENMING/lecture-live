@@ -937,7 +937,7 @@ def _cloud_asr_section() -> None:
     check("⭐⭐ 环境变量锁定 → 未勾、不可点、标题点名 CLASSLIVE_CLOUD_ASR=0",
           _lk["checked"] is False and _lk["enabled"] is False and "CLASSLIVE_CLOUD_ASR=0" in _lk["title"], str(_lk))
     check("⭐ 关了云端 → 那一格写「已就绪 · 全本地」（不再有常驻开关，状态要看得见）",
-          E.ready_item_text({**_ok, "cloud_off": True}) == "✓  语音模型  已就绪 · 全本地",
+          E.ready_item_text({**_ok, "cloud_off": True}) == "✓  语音模型  全本地",
           E.ready_item_text({**_ok, "cloud_off": True}))
     check("只有一颗开关（测试模式）时 y = 垂直居中",
           abs(E.switch_y(0, 1) - (E.DROP_H - E.BTN_H) / 2.0) < 1e-9, str(E.switch_y(0, 1)))
@@ -1611,8 +1611,8 @@ def _vault_section() -> None:
     check("未设 → `—  笔记库  未设`（字面量）",
           _t({"key": "vault", "state": "unknown"}) == "—  笔记库  未设",
           repr(_t({"key": "vault", "state": "unknown"})))
-    check("已设 → `✓  笔记库  已设`",
-          _t({"key": "vault", "state": "ok"}) == "✓  笔记库  已设",
+    check("已设 → `✓  笔记库`",
+          _t({"key": "vault", "state": "ok"}) == "✓  笔记库",
           repr(_t({"key": "vault", "state": "ok"})))
     check("路径没了 → `⚠  笔记库  找不到了`",
           _t({"key": "vault", "state": "warn"}) == "⚠  笔记库  找不到了",
@@ -1658,10 +1658,17 @@ def _vault_section() -> None:
           _t({"key": "engine", "state": "unknown", "detail": "点一下填 key（推荐）· 或下本地模型"})
           == "—  翻译引擎  没配 key",
           repr(_t({"key": "engine", "state": "unknown", "detail": "x"})))
-    check("配了云端 → `✓  翻译引擎  云端`（没被上一条误伤）",
+    check("配了云端 → `✓  云端翻译`（没被上一条误伤）",
           _t({"key": "engine", "state": "ok", "detail": "云端翻译（推荐）"})
-          == "✓  翻译引擎  云端",
+          == "✓  云端翻译",
           repr(_t({"key": "engine", "state": "ok", "detail": "云端翻译（推荐）"})))
+    # ⭐ 正常时只写名字、不正常时状态词照留（2026-10-14 瘦身）
+    _slim = [_t({"key": "mic", "state": "ok"}), _t({"key": "mic", "state": "warn"}),
+             _t({"key": "models", "state": "ok"}), _t({"key": "engine", "state": "ok", "detail": "本地模型"}),
+             _t({"key": "update", "state": "ok", "kind": "done", "detail": "已是最新"})]
+    check("瘦身：麦克风 / 被拒 / 语音模型 / 本地翻译 / 更新回话（字面量）",
+          _slim == ["✓  麦克风", "⚠  麦克风  被拒", "✓  语音模型", "✓  本地翻译", "✓  更新  已是最新"],
+          repr(_slim))
     # key 对话框的提示不许再说「退回本地模型」：本地模型是可选的、默认没装，
     # 对新用户那句话是假的（没 key + 没本地模型 = 只有英文字幕）
     # 文案的唯一出处是 `keyentry.dialog_fields`（3.9.2 起，面板与截图探针同源）
@@ -1739,7 +1746,7 @@ def _vault_section() -> None:
                           repr((st / "vault").read_text(encoding="utf-8")
                                if (st / "vault").exists() else None))
                     check("⭐ 而且那一格**就地**变成「已设」（不用重开面板）",
-                          (btn.title() or "") == "✓  笔记库  已设", repr(btn.title()))
+                          (btn.title() or "") == "✓  笔记库", repr(btn.title()))
             finally:
                 try:
                     h.close()
@@ -1790,7 +1797,7 @@ def _vault_section() -> None:
                       (stA / "vault").exists()
                       and str(_decoy) not in (stA / "vault").read_text(encoding="utf-8"))
                 check("⭐ 而且那一格直接就是「已设」",
-                      bA is not None and (bA.title() or "") == "✓  笔记库  已设",
+                      bA is not None and (bA.title() or "") == "✓  笔记库",
                       repr(bA.title() if bA is not None else None))
             finally:
                 os.environ["HOME"] = str(_fake_home)
@@ -1898,7 +1905,8 @@ def _key_entry_section() -> None:
 
     def _engine_btn(h):
         for v in _walk(h.window.contentView(), []):
-            if isinstance(v, NSButton) and "翻译引擎" in (v.title() or ""):
+            # 正常时那格叫「云端翻译 / 本地翻译」，没配时叫「翻译引擎」（2026-10-14 瘦身）
+            if isinstance(v, NSButton) and "翻译" in (v.title() or ""):
                 return v
         return None
 

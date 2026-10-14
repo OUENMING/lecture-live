@@ -111,6 +111,26 @@ class BarHover(unittest.TestCase):
     def _alphas(self):
         return [round(b.alphaValue(), 2) for b in self.ov._bar]
 
+    def _input_alphas(self):
+        return {round(self.ov._input.alphaValue(), 2), round(self.ov._input_rule.alphaValue(), 2)}
+
+    def test_底下输入框跟着顶栏一起淡出淡入(self):
+        with mock.patch.object(self.ov, "_mouse_in_panel", return_value=False):
+            self.ov._bar_tick(time.monotonic() + 3.1)
+            spin(0.5)
+            self.assertEqual(self._input_alphas(), {0.0})
+            self.ov._bar_hover(True)
+            spin(0.4)
+        self.assertEqual(self._input_alphas(), {1.0})
+
+    def test_框里有没交的字_到点也不藏(self):
+        self.ov._input.setStringValue_("what is elasticity")
+        with mock.patch.object(self.ov, "_mouse_in_panel", return_value=False):
+            self.ov._bar_tick(time.monotonic() + 3.1)
+            spin(0.5)
+        self.assertEqual(self._input_alphas(), {1.0})
+        self.assertEqual(set(self._alphas()), {1.0})
+
     def test_开课先亮_宽限到点且鼠标不在窗内_淡出_在听小点不动(self):
         self.assertEqual(set(self._alphas()), {1.0})
         ear = self.ov._ear.layer().opacity()
@@ -169,12 +189,65 @@ class BarHover(unittest.TestCase):
         self.assertFalse(p.ignoresMouseEvents())
         self.assertIn("reopen", self.notes)
 
+    def test_藏起来_屏幕边上有把手_点它叫回来_把手消失(self):
+        """菜单栏挤满时的找回路：「–」后屏幕边上留一个小把手。点的是**命中测试找到的那个视图**（不是直接调回调）。"""
+        import overlay
+        p = self.ov._panel
+        self.ov._btn_hide.performClick_(None)
+        spin(0.6)
+        tab = self.ov._tab
+        self.assertTrue(tab.isVisible(), "藏起来后屏幕边上应有把手")
+        v = p.screen().visibleFrame() if p.screen() else None
+        f = tab.frame()
+        if v is not None:
+            on_edge = (abs(f.origin.x - (v.origin.x - overlay.TAB_TUCK)) < 0.5
+                       or abs(f.origin.x + f.size.width - (v.origin.x + v.size.width + overlay.TAB_TUCK)) < 0.5)
+            self.assertTrue(on_edge, f"把手不贴边：{f}")
+        hit = tab.contentView().hitTest_((f.size.width / 2, f.size.height / 2))
+        self.assertIsNotNone(hit)
+        hit.mouseDown_(None)
+        spin(0.6)
+        self.assertTrue(p.isVisible())
+        self.assertFalse(tab.isVisible(), "字幕回来了把手还挂着")
+        self.assertIn("edge_tab", self.notes)
+
+    def test_从菜单叫回或关掉_把手都撤(self):
+        self.ov._set_hidden(True)
+        spin(0.4)
+        self.assertTrue(self.ov._tab.isVisible())
+        self.ov._toggle_hidden()
+        spin(0.4)
+        self.assertFalse(self.ov._tab.isVisible())
+        self.ov._set_hidden(True)
+        spin(0.4)
+        self.ov.close()
+        self.assertFalse(self.ov._tab.isVisible(), "关掉 ClassLive 后屏幕边上还留着把手")
+
     def test_云端恢复时菜单栏图标旁不挂emoji(self):
         btn = self.ov._status.button()
         self.ov.notice("降级", warn=True)
         self.assertEqual(btn.title(), "⚠️")
         self.ov.notice("恢复了", warn=False)
         self.assertEqual(btn.title(), "" if btn.image() is not None else "🎧")
+
+class EdgeTabFrame(unittest.TestCase):
+    VIS = ((0.0, 0.0), (1440.0, 870.0))
+
+    def test_贴离得近的那条边_竖直对齐字幕窗中线(self):
+        import overlay
+        (x, y), (w, h), side = overlay.edge_tab_frame(((100.0, 300.0), (600.0, 200.0)), self.VIS)
+        self.assertEqual((side, x), ("left", -overlay.TAB_TUCK))
+        self.assertEqual(y + h / 2, 400.0)
+        (x, y), (w, h), side = overlay.edge_tab_frame(((900.0, 300.0), (500.0, 200.0)), self.VIS)
+        self.assertEqual((side, x + w), ("right", 1440.0 + overlay.TAB_TUCK))
+
+    def test_字幕窗贴着顶或底_把手夹回可见区(self):
+        import overlay
+        (_, y), (_, h), _ = overlay.edge_tab_frame(((100.0, 850.0), (600.0, 200.0)), self.VIS)
+        self.assertLessEqual(y + h, 870.0)
+        (_, y), _, _ = overlay.edge_tab_frame(((100.0, -150.0), (600.0, 100.0)), self.VIS)
+        self.assertGreaterEqual(y, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

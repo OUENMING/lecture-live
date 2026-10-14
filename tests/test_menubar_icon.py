@@ -25,11 +25,13 @@ class PineappleIcon(unittest.TestCase):
         self.assertEqual((self.img.size().width, self.img.size().height), (16.0, 16.0))
         self.assertEqual(self.img.representations()[0].pixelsWide(), 32)
 
-    def test_有叶冠_有果身描边_菱格中间是空的(self):
+    def test_有叶冠_有果身外圈_菱格正中是孔_叶冠连着果身(self):
         k = 16.0 / 18.0                                    # 画的时候按 18pt 坐标、整体缩到 16
         self.assertGreater(_alpha(self.img, 9.0 * k, 16.0 * k), 0.5, "中间那片叶子尖")
-        self.assertGreater(_alpha(self.img, 4.6 * k, 6.3 * k), 0.5, "果身左边描边")
-        self.assertLess(_alpha(self.img, 9.0 * k, 8.2 * k), 0.5, "菱格中间应是透明的（不是实心一坨）")
+        self.assertGreater(_alpha(self.img, 5.4 * k, 5.25 * k), 0.5, "果身左边外圈")
+        self.assertLess(_alpha(self.img, 9.0 * k, 5.25 * k), 0.5, "果身正中应是一颗菱形孔（不是交叉点、不是实心）")
+        self.assertGreater(_alpha(self.img, 9.0 * k, 7.4 * k), 0.5, "孔上方是格条")
+        self.assertGreater(_alpha(self.img, 9.0 * k, 10.3 * k), 0.5, "叶冠连着果身（作者：不要有空格）")
         self.assertLess(_alpha(self.img, 1.0, 1.0), 0.05, "角落透明")
 
 

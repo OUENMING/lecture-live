@@ -461,6 +461,26 @@ EAR_HOLD_S = 0.8
 #   ⚠️ 「在听」小点、章节条、字幕**不跟着藏**（它们是内容 / 状态，不是控件）。
 BAR_GRACE_S = 3.0      # 刚开课先亮着这么久，让人知道按钮在哪
 BAR_LEAVE_S = 0.4      # 鼠标出去后再等这么久才淡出（擦边划过不闪）
+# 「–」藏起字幕后贴在屏幕边上的小把手（点一下叫回来）。比菜单栏图标好找：刘海挤不掉它。
+TAB_W = 22.0
+TAB_H = 56.0
+TAB_TUCK = 8.0         # 往屏幕外藏进去的宽度 → 贴边那侧的圆角看不见，像从边上长出来
+TAB_IDLE_ALPHA = 0.55  # 平时半透明，别在 PPT 边上抢眼；鼠标进去 1.0
+
+
+def edge_tab_frame(win, vis) -> tuple[tuple[float, float], tuple[float, float], str]:
+    """把手放哪：贴**离字幕窗中心更近**的左 / 右屏幕边，竖直方向对齐字幕窗中线（夹在可见区内）。
+
+    `win` / `vis` 都是 `((x, y), (w, h))`（AppKit 坐标，y 向上；`vis` = 屏幕 `visibleFrame`，
+    已扣掉菜单栏和程序坞）。回 `(origin, size, "left" | "right")`。纯函数，判据直接喂数。
+    """
+    (wx, wy), (ww, wh) = win
+    (vx, vy), (vw, vh) = vis
+    side = "left" if wx + ww / 2 < vx + vw / 2 else "right"
+    x = vx - TAB_TUCK if side == "left" else vx + vw - TAB_W + TAB_TUCK
+    y = wy + wh / 2 - TAB_H / 2
+    y = max(vy + 8.0, min(y, vy + vh - TAB_H - 8.0))
+    return (x, y), (TAB_W, TAB_H), side
 #: 章节条**至少**要有这么宽才显示（计划 §9.8 的三个条件之一）。
 #: ⚠️ 低于它时标签和点击区**一起隐藏** —— 半个标题比没有标题更让人分心，
 #:    而且点击区太小会变成"点不中"的挫败源。
@@ -820,8 +840,8 @@ def _open_wrapup_card(ov, wrapup_mod, status: str):
 def _pineapple_icon(pt: float = 16.0, scale: int = 2):
     """菜单栏的菠萝图标：**模板图**（只有黑与透明，系统负责明暗 / 选中态上色，见
     `_install_status_item` 的 HIG 引文）。SF Symbols 里没有菠萝，所以用 `NSBezierPath` 现画：
-    描边果身 + 两组斜线菱格 + 五片细长叶。线宽 1.15 / 0.8pt 是在 2x 位图上逐像素看过定的
-    （再粗菱格糊成一团、再细 1x 屏上断线）。画不出来回 `None`，由调用方退回 SF 耳机。
+    实心外圈的圆角果身 + 镂空菱格 + 五片宽叶（照作者 10-14 给的参考图）。尺寸在 2x 位图上逐像素看过
+    （格距 3.1、条宽 0.8：再密 16pt 上孔糊掉）。画不出来回 `None`，由调用方退回 SF 耳机。
     ⚠️ 坐标按 18pt 画布写、整体缩到 `pt`（默认 16 = SF `headphones` 在菜单栏的尺寸，实测 16×16）。
     """
     try:
@@ -840,41 +860,64 @@ def _pineapple_icon(pt: float = 16.0, scale: int = 2):
             t = NSAffineTransform.transform()
             t.scaleBy_(pt / 18.0)
             t.concat()
+            from AppKit import NSCompositingOperationClear, NSCompositingOperationCopy
             NSColor.blackColor().set()
-            rect = NSMakeRect(4.6, 1.1, 8.8, 10.4)               # 果身（y 向上）
-            body = NSBezierPath.bezierPathWithOvalInRect_(rect)
-            body.setLineWidth_(1.15)
-            body.stroke()
+
+            def cut(path, w):                    # 在已画的墨上挖一圈透明（叶与叶、格与格之间的缝）
+                ctx.setCompositingOperation_(NSCompositingOperationClear)
+                path.setLineWidth_(w)
+                path.stroke()
+                ctx.setCompositingOperation_(NSCompositingOperationCopy)
+
+            x, y, w, h, r, ring = 4.9, 0.5, 8.2, 9.5, 3.7, 1.0     # 果身
+
+            def leaf(base, tip, wid, bend=0.0, cut_w=0.0):
+                bx, by = base
+                dx, dy = tip[0] - bx, tip[1] - by
+                ln = math.hypot(dx, dy)
+                nx, ny = -dy / ln, dx / ln               # 法向
+                mx, my = bx + dx * 0.45 + nx * bend, by + dy * 0.45 + ny * bend   # 鼓起处（bend = 往外弯）
+                leaf_p = NSBezierPath.bezierPath()
+                leaf_p.moveToPoint_(NSMakePoint(bx + nx * 0.2, by + ny * 0.2))
+                c = NSMakePoint(mx + nx * wid, my + ny * wid)
+                leaf_p.curveToPoint_controlPoint1_controlPoint2_(NSMakePoint(*tip), c, c)
+                c = NSMakePoint(mx - nx * wid, my - ny * wid)
+                leaf_p.curveToPoint_controlPoint1_controlPoint2_(NSMakePoint(bx - nx * 0.2, by - ny * 0.2), c, c)
+                leaf_p.closePath()
+                if cut_w:
+                    cut(leaf_p, cut_w)
+                leaf_p.fill()
+
+            # 叶冠：五片宽叶，从后往前画；前面的叶先挖一圈缝再填，16pt 上才分得开片。
+            #    ⚠️ 2026-10-14 第三版（作者给了参考图：实心外圈 + 镂空菱格 + 中叶直立、外侧两片外弯成钩）。
+            #       前两版是「描边椭圆 + 细线菱格 + 细长叶」，16pt 上菱格糊、叶冠像一撮草。
+            #    ⚠️ 叶冠**连着**果身（作者：「不要有空格」）：叶根扎进外圈里，所以**先画叶冠、后画果身** ——
+            #       前叶挖的那圈缝会啃掉外圈顶上一截，果身后画才把它补回来。
+            top = y + h - 0.5                            # 叶根落在外圈（厚 1.0）里
+            leaf((8.6, top), (5.4, 16.2), 1.3, bend=-0.4)
+            leaf((9.4, top), (12.6, 16.2), 1.3, bend=0.4)
+            leaf((8.4, top), (3.3, 13.3), 1.05, bend=-1.2, cut_w=1.0)
+            leaf((9.6, top), (14.7, 13.3), 1.05, bend=1.2, cut_w=1.0)
+            leaf((9.0, top), (9.0, 17.8), 1.55, cut_w=1.1)
+
+            # 果身：实心圆角矩形 → 挖空里面留 1pt 外圈 → 里面画两组斜条，剩下的就是菱形孔
+            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSMakeRect(x, y, w, h), r, r).fill()
+            inner = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSMakeRect(x + ring, y + ring, w - 2 * ring, h - 2 * ring), r - ring, r - ring)
+            ctx.setCompositingOperation_(NSCompositingOperationClear)
+            inner.fill()
+            ctx.setCompositingOperation_(NSCompositingOperationCopy)
             NSGraphicsContext.saveGraphicsState()
-            NSBezierPath.bezierPathWithOvalInRect_(rect).addClip()
+            inner.addClip()
             grid = NSBezierPath.bezierPath()
             grid.setLineWidth_(0.8)
-            cx, cy = 9.0, 6.3
-            for k in (-3.8, 0.0, 3.8):
-                grid.moveToPoint_(NSMakePoint(cx + k - 7, cy - 7)); grid.lineToPoint_(NSMakePoint(cx + k + 7, cy + 7))
-                grid.moveToPoint_(NSMakePoint(cx + k - 7, cy + 7)); grid.lineToPoint_(NSMakePoint(cx + k + 7, cy - 7))
+            cx, cy, s = x + w / 2, y + h / 2, 3.1 * math.sqrt(2)
+            for i in range(-4, 5):
+                o = (i + 0.5) * s                # 偏半格：正中是一颗孔，不是交叉点
+                grid.moveToPoint_(NSMakePoint(cx + o - 12, cy - 12)); grid.lineToPoint_(NSMakePoint(cx + o + 12, cy + 12))
+                grid.moveToPoint_(NSMakePoint(cx + o - 12, cy + 12)); grid.lineToPoint_(NSMakePoint(cx + o + 12, cy - 12))
             grid.stroke()
             NSGraphicsContext.restoreGraphicsState()
-            # 叶冠：五片细长叶从果身顶端扇形散开（中间最长，±27° 次之，±58° 最短）。
-            #    ⚠️ 2026-10-14 第二版（作者：「优化一下叶冠」）：头一版三片宽叶像王冠 / 火苗；
-            #       试过宽叶五片（根部糊成一坨）、三片细叶，五片细叶在 16pt 上最像菠萝（对比图拍过）。
-            for (bx, by), ang, length, width in (((9.0, 11.6), 0, 6.3, 1.05),
-                                                 ((8.7, 11.5), -27, 5.6, 1.0), ((9.3, 11.5), 27, 5.6, 1.0),
-                                                 ((8.4, 11.3), -58, 4.4, 0.95), ((9.6, 11.3), 58, 4.4, 0.95)):
-                a = math.radians(ang)
-                ux, uy = math.sin(a), math.cos(a)        # 叶轴（0° = 正上）
-                nx, ny = uy, -ux                         # 法向
-                tip = NSMakePoint(bx + ux * length, by + uy * length)
-                m = 0.42 * length                        # 最宽处离叶根的距离
-                c1 = NSMakePoint(bx + ux * m + nx * width, by + uy * m + ny * width)
-                c2 = NSMakePoint(bx + ux * m - nx * width, by + uy * m - ny * width)
-                leaf = NSBezierPath.bezierPath()
-                leaf.moveToPoint_(NSMakePoint(bx + nx * width * 0.35, by + ny * width * 0.35))
-                leaf.curveToPoint_controlPoint1_controlPoint2_(tip, c1, c1)
-                leaf.curveToPoint_controlPoint1_controlPoint2_(
-                    NSMakePoint(bx - nx * width * 0.35, by - ny * width * 0.35), c2, c2)
-                leaf.closePath()
-                leaf.fill()
         finally:
             NSGraphicsContext.restoreGraphicsState()
         img = NSImage.alloc().initWithSize_(NSMakeSize(pt, pt))
@@ -1260,7 +1303,7 @@ class Overlay:
         # 「–」隐藏：窗口收进菜单栏，转写、录音、落盘都照常（同 Apple「实时字幕」的菜单栏用法）。
         #   系统那种最小化做不了：本 app 是 `.accessory`（没有 Dock 图标），最小化的窗口无处可去。
         self._btn_hide = self._button(
-            "–", self._hide_window, "隐藏字幕（录音照常）\n  找回：菜单栏菠萝图标 →「显示字幕」，或再打开一次 ClassLive")
+            "–", self._hide_window, "隐藏字幕（录音照常）\n  找回：点屏幕边上的小菠萝，或菜单栏菠萝 →「显示字幕」")
         # ✕ 与 – 并排时必须同一套画法：字符 ✕ 跟着字体走，粗细对不上 SF Symbol 的 minus
         self._symbolize(self._btn_hide, "minus", "隐藏字幕", size=13.0)
         self._symbolize(self._btn_close, "xmark", "退出", size=13.0)
@@ -2137,6 +2180,7 @@ class Overlay:
             self._panel.orderOut_(None)
         except Exception:                     # noqa: BLE001
             pass
+        self._edge_tab_hide()
         status = getattr(self, "_status", None)
         if status is not None:
             try:
@@ -3241,6 +3285,9 @@ class Overlay:
         self._bar_hide_at = None
         if self._bar_inside or self._mouse_in_panel():
             return
+        # ⚠️ 正在输入框里打字、或框里还有没交的字 → 不藏（输入框也跟着淡出，藏了等于把正在写的问题抹掉）
+        if self._is_editing() or (self._input.stringValue() or "").strip():
+            return
         self._set_bar_shown(False)
 
     def _mouse_in_panel(self) -> bool:
@@ -3250,13 +3297,19 @@ class Overlay:
         except Exception:                                 # noqa: BLE001
             return True                                   # 判不了就当在里面 = 不藏
 
+    def _bar_views(self) -> list:
+        """跟着鼠标淡入淡出的那些：顶栏按钮 + 底下「提问或追问…」输入框和它的细线（2026-10-14 作者加的）。"""
+        return list(self._bar) + [v for v in (getattr(self, "_input", None), getattr(self, "_input_rule", None))
+                                  if v is not None]
+
     def _set_bar_shown(self, shown: bool) -> None:
         if shown == getattr(self, "_bar_shown", True):
             return
         self._bar_shown = shown
         alpha = 1.0 if shown else 0.0
+        views = self._bar_views()
         if motion.reduce_motion():
-            for b in self._bar:
+            for b in views:
                 b.setAlphaValue_(alpha)
             return
         try:
@@ -3264,11 +3317,11 @@ class Overlay:
 
             def _fade(ctx):
                 ctx.setDuration_(motion.STATE_S if shown else motion.EXIT_S)
-                for b in self._bar:
+                for b in views:
                     b.animator().setAlphaValue_(alpha)
             NSAnimationContext.runAnimationGroup_completionHandler_(_fade, None)
         except Exception:                                 # noqa: BLE001
-            for b in self._bar:
+            for b in views:
                 b.setAlphaValue_(alpha)
 
     def _set_hidden(self, hidden: bool) -> None:
@@ -3283,6 +3336,10 @@ class Overlay:
         p = self._panel
         self._hidden = bool(hidden)
         self._note("hide" if hidden else "show")
+        if hidden:
+            self._edge_tab_show()
+        else:
+            self._edge_tab_hide()
         mi = getattr(self, "_mi_hide", None)
         if mi is not None:
             mi.setTitle_("显示字幕" if hidden else "隐藏字幕")
@@ -3327,6 +3384,85 @@ class Overlay:
             NSAnimationContext.runAnimationGroup_completionHandler_(_fade_in, None)
         self._hide_traffic_lights()           # 红绿灯每次 orderFront 后会回来（同 `show()`）
         self._release_focus()
+
+    def _edge_tab_show(self) -> None:
+        """藏起字幕时，在屏幕边上留一个小把手（2026-10-14 作者：「再点一次 App 太麻烦，能不能吸在屏幕边上」）。
+
+        点它 = 「显示字幕」。窗口是懒建、复用的；坐标每次按字幕窗当前位置重算（`edge_tab_frame`）。
+        ⚠️ 失败只打印：把手是「多一条找回路」，菜单栏和再打开 app 两条照旧在。
+        """
+        try:
+            from AppKit import (NSFloatingWindowLevel, NSImageView, NSMakeRect, NSScreen,
+                                NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel, NSColor)
+            tab = getattr(self, "_tab", None)
+            if tab is None:
+                fp = panel.build(NSMakeRect(0, 0, TAB_W, TAB_H),
+                                 NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
+                fp.glass.layer().setCornerRadius_(TAB_W / 2 - 1)
+                fp.window.setMovableByWindowBackground_(False)
+                fp.window.setLevel_(NSFloatingWindowLevel)       # 字幕关了「保持在最前」也不许被盖住
+                try:
+                    fp.window.setCollectionBehavior_(self._panel.collectionBehavior())   # 全屏 PPT 上也跟着
+                except Exception:                                # noqa: BLE001
+                    pass
+                icon = _pineapple_icon(pt=17.0)
+                if icon is not None:
+                    iv = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, TAB_W, TAB_H))
+                    iv.setImage_(icon)
+                    iv.setImageScaling_(2)                # NSImageScaleNone：露出来那截只有 14pt 宽，默认会把图缩小
+                    iv.setContentTintColor_(NSColor.whiteColor())
+                    fp.glass.addSubview_(iv)
+                    tab_icon = iv
+                else:
+                    tab_icon = None
+                click = _make_click_view(self._edge_tab_click)
+                click.setFrame_(NSMakeRect(0, 0, TAB_W, TAB_H))
+                click.setToolTip_("点一下叫回字幕")
+                fp.glass.addSubview_(click)
+                owner = panel.make_hover_owner(self._edge_tab_hover)
+                from AppKit import (NSTrackingActiveAlways, NSTrackingArea, NSTrackingInVisibleRect,
+                                    NSTrackingMouseEnteredAndExited)
+                area = NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                    NSMakeRect(0, 0, TAB_W, TAB_H),
+                    NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect,
+                    owner, None)
+                click.addTrackingArea_(area)
+                self._targets.extend([fp, owner, click])        # 强引用，防 GC
+                self._tab = tab = fp.window
+                self._tab_icon = tab_icon
+            f = self._panel.frame()
+            scr = self._panel.screen() or NSScreen.mainScreen()
+            v = scr.visibleFrame()
+            (x, y), (w, h), side = edge_tab_frame(
+                ((f.origin.x, f.origin.y), (f.size.width, f.size.height)),
+                ((v.origin.x, v.origin.y), (v.size.width, v.size.height)))
+            tab.setFrame_display_(NSMakeRect(x, y, w, h), True)
+            iv = getattr(self, "_tab_icon", None)
+            if iv is not None:                                   # 图标放在露出来的那一截正中
+                vis_x = TAB_TUCK if side == "left" else 0.0
+                iv.setFrame_(NSMakeRect(vis_x, 0, TAB_W - TAB_TUCK, TAB_H))
+            self._tab_side = side
+            tab.setAlphaValue_(TAB_IDLE_ALPHA)
+            tab.orderFrontRegardless()
+        except Exception as e:                                   # noqa: BLE001
+            print(f"⚠ 屏幕边的找回把手没摆上：{e}", flush=True)
+
+    def _edge_tab_hide(self) -> None:
+        tab = getattr(self, "_tab", None)
+        if tab is not None:
+            try:
+                tab.orderOut_(None)
+            except Exception:                                    # noqa: BLE001
+                pass
+
+    def _edge_tab_click(self) -> None:
+        self._note("edge_tab")
+        self._set_hidden(False)
+
+    def _edge_tab_hover(self, inside: bool) -> None:
+        tab = getattr(self, "_tab", None)
+        if tab is not None:
+            tab.setAlphaValue_(1.0 if inside else TAB_IDLE_ALPHA)
 
     def _toggle_on_top(self):
         """「保持在最前」：开 = 浮动层（默认，全屏 PPT 上也看得见）；关 = 普通窗口，别的窗口能盖住它。"""

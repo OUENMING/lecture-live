@@ -229,6 +229,15 @@ details.sub>summary:hover{color:var(--ink)}
 .hero .sub{display:block;margin-top:1px}
 .hero b.bad{color:var(--bad)} .hero b.warn{color:var(--warn)}
 .hint.warn{color:var(--warn)}
+/* 「要注意」：一行一件事。左边 7px 状态点（只有点带颜色，外壳仍是灰阶），标题一句、下面一行该做什么。 */
+.alerts{padding:4px 16px}
+.alert{display:grid;grid-template-columns:14px minmax(0,1fr) auto;gap:2px 10px;align-items:baseline;padding:11px 0;
+  box-shadow:0 1px 0 0 var(--line2)}
+.alert:last-child{box-shadow:none}
+.alert>i{width:7px;height:7px;border-radius:50%;background:currentColor;align-self:center}
+.alert b{font-weight:500;color:var(--ink)}
+.alert .do{grid-column:2;font-size:12px;color:var(--ink2)}
+.alert .when{font-size:11px;color:var(--ink3);font-family:var(--mono);font-variant-numeric:tabular-nums}
 .hero b small{font-size:12px;font-weight:500;letter-spacing:0;color:var(--ink2);margin-left:5px}
 
 @media (max-width:1000px){
@@ -261,6 +270,12 @@ details.sub>summary:hover{color:var(--ink)}
 
 <main>
   <div id="err"></div>
+
+  <!-- 「要注意」：把散在下面各处的异常翻成人话，一条一句「出了什么事 + 该做什么」。没有就一行「一切正常」。 -->
+  <section class="block">
+    <div class="hd"><h2>要注意</h2><span class="note" id="anote"></span></div>
+    <div class="card alerts" id="alerts"></div>
+  </section>
 
   <section class="block">
     <div class="kpis" id="kpis"></div>
@@ -304,7 +319,7 @@ details.sub>summary:hover{color:var(--ink)}
   </section>
 
   <section class="block">
-    <div class="hd"><h2>服务</h2><span class="note">近 24 h · 本机用只读 token 直接问 Cloudflare</span><span class="spacer"></span>
+    <div class="hd"><h2>云端服务</h2><span class="note">近 24 小时</span><span class="spacer"></span>
       <span class="note" id="sage"></span></div>
     <div class="card" id="svc"></div>
   </section>
@@ -1090,22 +1105,22 @@ function renderService(){
   var row = el("div", "hero s5");
   var asr = cf && !cf.error ? (cf.scripts || {})["classlive-asr"] : null;
   var nReq = o ? o.requests : asr ? asr.requests : null, nErr = o ? o.errors : asr ? asr.errors : null;
-  row.appendChild(svcStat("请求 · 24 h", nReq == null ? "…" : num(nReq), "转写 Worker"));
+  row.appendChild(svcStat("24 小时请求", nReq == null ? "…" : num(nReq), "转写云端"));
   var er = nReq ? nErr / nReq : 0;
   row.appendChild(svcStat("错误率", nReq == null ? "…" : (er * 100).toFixed(er && er < .001 ? 2 : 1) + "%",
     nErr ? num(nErr) + " 次" : "", er > .01 ? "bad" : null));
-  row.appendChild(svcStat("耗时 p50 · p95", o ? ms(o.wall_p50) : "…", o ? "p95 " + ms(o.wall_p95) : ""));
+  row.appendChild(svcStat("一般耗时", o ? ms(o.wall_p50) : "…", o ? "慢的时候 " + ms(o.wall_p95) : ""));
   var ups = hOk ? (h.upstream || []).filter(function(r){ return r.host; }) : [];
   var upTot = ups.reduce(function(a, r){ return a + r.total; }, 0);
   var upBad = ups.reduce(function(a, r){ return a + r.c429 + r.c4xx + r.c5xx; }, 0);
   var u429 = ups.reduce(function(a, r){ return a + r.c429; }, 0), u5 = ups.reduce(function(a, r){ return a + r.c5xx; }, 0);
-  row.appendChild(svcStat("上游失败", hOk ? num(upBad) : "…", hOk ? "共 " + num(upTot) + (upBad ? " · 429 " + u429 + " · 5xx " + u5 : "") : "",
+  row.appendChild(svcStat("服务商报错", hOk ? num(upBad) : "…", hOk ? "共 " + num(upTot) + (upBad ? " · 429 " + u429 + " · 5xx " + u5 : "") : "",
     upTot && upBad / upTot > .02 ? "warn" : null));
   var r2b = r2 && !r2.error ? r2.bytes : null;
   if(r2b == null && cf && !cf.error){
     var by = (cf.r2 || {})["classlive-ingest"]; if(by){ var ds = Object.keys(by).sort(); r2b = by[ds[ds.length - 1]].bytes; }
   }
-  row.appendChild(svcStat("上传桶", r2b == null ? "…" : mb(r2b), r2b == null ? "" : Math.round(r2b / 1e8) + "% · 免费档 10 GB"));
+  row.appendChild(svcStat("上传空间", r2b == null ? "…" : mb(r2b), r2b == null ? "" : Math.round(r2b / 1e8) + "% · 免费档 10 GB"));
   box.appendChild(row);
 
   /* ② 每小时耗时 + 部署条 */
@@ -1113,7 +1128,7 @@ function renderService(){
   else if(!hOk) box.appendChild(el("div", "empty", (h && h.error) || "读不到。"));
   else{
     var t0 = Math.floor(Date.parse(h.since) / 3600000) * 3600000;
-    var cap = el("div", "dtitle", "每小时耗时 · 实色 p50 · 浅色 p95 · 虚线 = 部署");
+    var cap = el("div", "dtitle", "每小时耗时 · 深色 = 一般 · 浅色 = 慢的时候 · 橙虚线 = 更新了云端");
     cap.title = "墙钟 = Worker 从收到请求到回完包（含等 Groq / DeepSeek），转写和翻译混在一起；不含用户到 Cloudflare 那段网络。";
     box.appendChild(cap);
     box.appendChild(latChart(h.lat, t0));
@@ -1154,12 +1169,12 @@ function renderService(){
         extra: function(i){ return errs[i] ? ["出错  " + errs[i]] : []; }, marks: deployMarks(m0, 1440)}));
       parts.push(mw);
     }
-    box.appendChild(fold("逐分钟 · " + names.length + " 个 Worker · 峰值 " + num(peak) + " 次/分", parts, "min"));
-  } else if(cf) box.appendChild(fold("逐分钟 · 读不到", [el("div", "hint", cf.error)], "min"));
+    box.appendChild(fold("每分钟请求量 · 最忙 " + num(peak) + " 次/分", parts, "min"));
+  } else if(cf) box.appendChild(fold("每分钟请求量 · 读不到", [el("div", "hint", cf.error)], "min"));
 
   if(hOk && strip){
     var live = strip.rows.filter(function(r){ return r.live; })[0];
-    box.appendChild(fold("部署 · 24 h 内 " + strip.rows.length + " 版" + (live && live.known ? " · 当前这版 " + ago(live.at) + " 上线" : ""), [
+    box.appendChild(fold("云端更新记录 · 24 小时内 " + strip.rows.length + " 版" + (live && live.known ? " · 当前这版 " + ago(live.at) + " 上线" : ""), [
       mkTable([["#","r"],["版本",""],["部署于",""],["当班","r"],["请求","r"]], strip.rows.map(function(r){
         return [num(r.i), r.id, r.known ? ago(r.at) : "不知道", fmtDur(r.dur / 1000), num(r.requests)]; })),
       el("div", "hint", "一段 = 一次 wrangler deploy（Cloudflare 的版本号，不是 git 提交号）；「当班」只算窗口里的那段。")
@@ -1167,7 +1182,7 @@ function renderService(){
   }
 
   if(hOk){
-    box.appendChild(fold("上游 · " + (upTot ? (100 - upBad / upTot * 100).toFixed(1) + "% 成功" : "没有子请求") +
+    box.appendChild(fold("服务商（Groq / 千问 / DeepSeek） · " + (upTot ? (100 - upBad / upTot * 100).toFixed(1) + "% 成功" : "没有子请求") +
       (upBad ? " · 失败 " + num(upBad) : ""), [
       mkTable([["上游",""],["总数","r"],["成功","r"],["429","r"],["其他 4xx","r"],["5xx","r"],["没回完","r"]],
         (h.upstream || []).map(function(r){
@@ -1189,9 +1204,9 @@ function renderService(){
         return [ago(e.t), el("span", e.result === "all_failed" ? "bad" : "warn", what), e.pass || "",
           e.kind ? e.kind : (e.tried ? (e.tried.join(" → ") + " · " + ms(e.ms)) : "")];
       })));
-    box.appendChild(fold("转写引擎" + (top ? " · " + top.model + " 中位 " + ms(top.median) : "") +
+    box.appendChild(fold("转写速度" + (top ? " · " + top.model + " 一般 " + ms(top.median) : "") +
       " · 异常事件 " + nEv + " 条", evParts, "eng"));
-  } else if(lg) box.appendChild(fold("转写引擎 · 读不到", [el("div", "hint", lg.error)], "eng"));
+  } else if(lg) box.appendChild(fold("转写速度 · 读不到", [el("div", "hint", lg.error)], "eng"));
 
   if(hOk){
     var geoParts = [], z = h.zone, cs = (h.colos || []).slice(0, 12);
@@ -1208,7 +1223,7 @@ function renderService(){
     geoParts.push(gh);
     var countries = {};
     (z ? z.hosts : []).forEach(function(x){ x.countries.forEach(function(c){ countries[c[0]] = 1; }); });
-    box.appendChild(fold("入口与地区 · " + (z ? Object.keys(countries).length + " 个国家 · " : "") + (h.colos || []).length + " 个节点" +
+    box.appendChild(fold("用户在哪 · " + (z ? Object.keys(countries).length + " 个国家 · " : "") + (h.colos || []).length + " 个节点" +
       (cs.length ? "（最多 " + cs[0].colo + "）" : ""), geoParts, "geo"));
   }
 
@@ -1233,8 +1248,8 @@ function renderService(){
         return [ago(Date.parse(String(r.t).replace(" ", "T") + "Z")), r.name, P[r.path] || r.path, el("span","bad", String(r.status)), ms(+r.ms), r.up];
       })));
     }
-    box.appendChild(fold("逐请求事件 · " + Object.keys(geo).length + " 人" + (ae.bad.length ? " · 失败 " + ae.bad.length + " 条" : ""), aeParts, "ae"));
-  } else if(ae) box.appendChild(fold("逐请求事件 · " + (ae.error ? "读不到" : "近 24 h 还没有"),
+    box.appendChild(fold("每个人的请求明细 · " + Object.keys(geo).length + " 人" + (ae.bad.length ? " · 失败 " + ae.bad.length + " 条" : ""), aeParts, "ae"));
+  } else if(ae) box.appendChild(fold("每个人的请求明细 · " + (ae.error ? "读不到" : "近 24 h 还没有"),
     [el("div", "hint", ae.error || "部署之后才开始记。")], "ae"));
 
   if(r2 && !r2.error){
@@ -1253,6 +1268,77 @@ function renderService(){
   } else if(r2) box.appendChild(fold("上传的课 · 读不到", [el("div", "hint", r2.error)], "r2"));
 
   box.appendChild(el("div", "hint", "只记数字：码的名字、路径、状态、毫秒、音频秒、token、版本、国家、节点。不记文本、音频、IP、完整码。"));
+}
+
+
+/* ---------- 渲染：要注意（2026-10-15）----------
+   判据全来自已经取到的数（AE 上游串 / 额度 / 上传桶 / 服务健康），这里只翻译成人话。
+   每条 = [级别, 一句话出了什么事, 该做什么, 时间]。级别只有 bad / warn / ok 三种。 */
+var COUNTRY = {CN:"中国", HK:"香港", US:"美国", IE:"爱尔兰", GB:"英国", JP:"日本", SG:"新加坡", DE:"德国", FR:"法国",
+  NL:"荷兰", CA:"加拿大", AU:"澳大利亚", KR:"韩国", TW:"台湾", MO:"澳门", PL:"波兰", "?":"未知"};
+function aeTime(t){ return Date.parse(String(t).replace(" ", "T") + "Z"); }
+function renderAlerts(){
+  var box = $("#alerts"); box.innerHTML = "";
+  var out = [], ae = state.ae, q = state.quota, r2 = state.r2, h = state.health;
+  var ups = ae && !ae.error ? (ae.up || []) : [];
+  function grp(test){                      /* 符合条件的行：总次数、涉及谁、最早 / 最晚 */
+    var rows = ups.filter(test), names = {};
+    rows.forEach(function(r){ names[r.name] = 1; });
+    return {n: rows.reduce(function(a, r){ return a + (+r.n); }, 0), who: Object.keys(names).filter(function(x){ return x !== "-"; }),
+            first: Math.min.apply(null, rows.map(function(r){ return aeTime(r.first); })),
+            last: Math.max.apply(null, rows.map(function(r){ return aeTime(r.last); }))};
+  }
+  var ds402 = grp(function(r){ return /deepseek:402/.test(r.up); });
+  if(ds402.n) out.push(["bad", "DeepSeek 拒了 " + num(ds402.n) + " 次（402 = 余额不足）",
+    "账户只剩赠送额度，充值部分是负数。去 DeepSeek 后台充值；不充的话之后的翻译和笔记可能接着失败。", ago(ds402.first) + " 起"]);
+  var ds429 = grp(function(r){ return /deepseek:429/.test(r.up); });
+  if(ds429.n) out.push(["warn", "DeepSeek 限流 " + num(ds429.n) + " 次", "偶发不用管；持续出现说明并发太高。", ago(ds429.last)]);
+  var g403 = grp(function(r){ return /groq:403/.test(r.up); });
+  if(g403.n) out.push(["warn", (g403.who.join("、") || "有人") + " 的转写用不了 Groq（" + num(g403.n) + " 次被拒），全走了千问",
+    "Groq 不接受香港节点来的请求，中国用户都会这样。千问是一次性免费额度，用完不回来。", ago(g403.last)]);
+  var dead = grp(function(r){ return r.path === "/v1/transcribe" && +r.status >= 500; });
+  if(dead.n) out.push(["bad", "转写全挂 " + num(dead.n) + " 次（Groq 和千问都没拿到）", "看下面「云端服务 → 转写速度」里的异常事件。", ago(dead.last)]);
+  if(q && q.qwen){
+    if(q.qwen.exhausted && q.qwen.exhausted.length) out.push(["bad", "千问额度已用完：" + q.qwen.exhausted.join("、"),
+      "这些模型不会再被调用；中国用户的转写会退回本机识别。", ""]);
+    else if(q.qwen.max && q.qwen.used / q.qwen.max >= .5) out.push(["warn", "千问今天已用 " + num(q.qwen.used) + " / " + num(q.qwen.max) + " 段",
+      "到上限当天就不再用千问。", ""]);
+  }
+  if(r2 && !r2.error){
+    var half = r2.sessions.filter(function(g){ return !g.mine && g.files.indexOf("transcript.md") < 0 &&
+      Date.now() - Date.parse(g.last) < 2 * 86400000; });
+    if(half.length) out.push(["warn", half.length + " 节别人的课只传了一半（没有转录）",
+      "多半是传到一半退出了 App；他下次打开会接着传。明细在「云端服务 → 上传的课」。", ago(Date.parse(half[0].last))]);
+  }
+  if(h && !h.error && h.overall && h.overall.requests){
+    var er = h.overall.errors / h.overall.requests;
+    if(er > .01) out.push(["warn", "云端出错率 " + (er * 100).toFixed(1) + "%（24 小时）", "看「云端服务」里的每小时图找是哪一段。", ""]);
+  }
+  var loading = ae === undefined || r2 === undefined || h === undefined;
+  $("#anote").textContent = loading ? "正在检查…" : "近 24 小时";
+  if(!out.length){
+    if(loading){ var w = el("div", "hint", "正在问 Cloudflare…"); w.style.margin = "12px 0"; box.appendChild(w); return; }
+    out.push(["ok", "一切正常", "近 24 小时没有报错、额度够用、上传都完整。", ""]);
+  }
+  var rank = {bad: 0, warn: 1, ok: 2};
+  out.sort(function(a, b){ return rank[a[0]] - rank[b[0]]; }).forEach(function(a){
+    var row = el("div", "alert " + a[0]);
+    row.appendChild(el("i"));
+    row.appendChild(el("b", null, a[1]));
+    row.appendChild(el("span", "when", a[3]));
+    row.appendChild(el("span", "do", a[2]));
+    box.appendChild(row);
+  });
+}
+/* 每个人近 24 小时在哪、转写一般多久（AE；没有就空着）。 */
+function whereOf(name){
+  var ae = state.ae; if(!ae || ae.error) return null;
+  var c = {}, n = 0;
+  (ae.geo || []).forEach(function(r){ if(r.name === name){ c[r.country || "?"] = (c[r.country || "?"] || 0) + (+r.n); n += +r.n; } });
+  if(!n) return null;
+  var top = Object.keys(c).sort(function(a, b){ return c[b] - c[a]; })[0];
+  var t = (ae.by_code || []).filter(function(r){ return r.name === name && r.path === "/v1/transcribe"; })[0];
+  return {where: COUNTRY[top] || top, p50: t ? +t.p50 : null};
 }
 
 /* ---------- 渲染：用户表 ---------- */
@@ -1279,7 +1365,7 @@ function renderUsers(){
   var hr = el("tr");
   // 列序 = 看简历的顺序：是谁 → 还活着吗 → 干了什么（模型 / 时长 / 段数 / 翻译 / 花销）→ 设备与到期。
   // 「每日转写」那根迷你曲线删了：正上方日历条已经把「哪天在用」画得更清楚，同一件事不占两处。
-  [["名字",""],["状态",""],["用了什么模型",""],["录了多久","r"],["段","r"],["翻译","r"],["花费 (闲时价)","r"],
+  [["名字",""],["状态",""],["在哪",""],["转写延迟","r"],["用了什么模型",""],["录了多久","r"],["段","r"],["翻译","r"],["花费 (闲时价)","r"],
    ["设备","r"],["到期",""],["最后在线",""]].forEach(function(c){ hr.appendChild(el("th", c[1], c[0])); });
   var thead = el("thead"); thead.appendChild(hr); t.appendChild(thead);
   var tb = el("tbody"); t.appendChild(tb);
@@ -1310,6 +1396,12 @@ function renderUsers(){
     chip.appendChild(el("i")); chip.appendChild(document.createTextNode(st[1]));
     td1.appendChild(chip);                                  /* ⚠️ 忘了这一行 = 整列状态是空的 */
     tr.appendChild(td1);
+    // 在哪 / 转写延迟：近 24 小时（AE）。延迟 = 云端处理一段的一般耗时，不含他到 Cloudflare 那段网络。
+    var wh = whereOf(c.name);
+    tr.appendChild(el("td","dim", wh ? wh.where : ""));
+    var tdL = el("td","r mono", wh && wh.p50 ? ms(wh.p50) : "");
+    if(wh && wh.p50) tdL.title = "近 24 小时云端转写一段的一般耗时（中位数），不含他到 Cloudflare 那段网络";
+    tr.appendChild(tdL);
     // 用了什么模型：一条细构成条 + 占最多的那个的名字与占比。`models` 是 2026-10-14 才加的字段，
     // 之前的记录读出来是 {}（后端会补成空对象）—— 那种情况写「没记」，不写「没用过」，是两回事。
     var tdM = el("td");
@@ -1351,7 +1443,7 @@ function renderUsers(){
 }
 
 function detailRow(c, agg, ser){
-  var tr = el("tr","detail"); var td = el("td"); td.colSpan = 10;
+  var tr = el("tr","detail"); var td = el("td"); td.colSpan = 12;
 
   // 顶上这四个是「这个人干了多少」—— 从下面那格 kv 里提上来单列一行。kv 里剩下的是算账用的
   // （token 怎么分、缓存命中多少），两种东西混在一片小字里，谁也一眼分不出该看哪个。
@@ -1721,12 +1813,13 @@ function load(fresh){
     if(qOpen && !state.openedOnce){ state.openedOnce = true;
       var hitc = state.codes.filter(function(c){ return c.name === qOpen; })[0]; if(hitc) state.expanded = hitc.code; }
     $("#err").innerHTML = "";
-    renderKpis(); renderDaily(); renderPerDay(); renderQuota(); renderUsers();
+    renderKpis(); renderDaily(); renderPerDay(); renderQuota(); renderUsers(); renderAlerts();
   }).catch(function(e){ showErr(e.message); });
   var slow = ["cf", "r2", "health", "logs", "ae"].map(function(k){
     return api(k, fresh ? {fresh: true} : {})
       .catch(function(e){ return {error: "面板服务没回（" + e.message + "）；比页面旧的话重开 cl_admin_ui.py。"}; })
-      .then(function(v){ state[k] = v; renderService(); });
+      .then(function(v){ state[k] = v; renderService(); renderAlerts();
+        if(k === "ae" && state.loaded) renderUsers(); });
   });
   return Promise.all([core].concat(slow)).then(function(){ progress(false); state.loading = false; });
 }

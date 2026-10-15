@@ -724,7 +724,7 @@ class Health(unittest.TestCase):
                 sqls.append(sql)
                 return 200, {"data": [{"name": "amy", "n": "3"}]}
             r = U.ae_events(post=post)
-        self.assertEqual(set(r), {"by_code", "geo", "bad"})
+        self.assertEqual(set(r), {"by_code", "geo", "bad", "up"})
         self.assertTrue(all("classlive_events" in q for q in sqls))
         self.assertNotIn("SECRET", json.dumps(r))
 

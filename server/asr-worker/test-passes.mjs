@@ -625,3 +625,31 @@ test("事件：AE 绑定没配 / 写入抛错 -> 请求照常", async () => {
     assert.equal((await h.call(h.chatReq(code, body()))).status, 200);
   } finally { h.restore(); }
 });
+
+test("转写：查码（Passes DO）与选路（Quota DO）同时在途 —— 远端 DO 只等一个来回", async () => {
+  const h = harness();
+  try {
+    const { code } = await (await h.call(h.adminReq("add", { name: "cn" }))).json();
+    // 两个 DO 各慢 50 ms，并记下「同时在途」的峰值。串着问峰值是 1。
+    let live = 0, peak = 0;
+    const slow = (stub) => ({ idFromName: stub.idFromName, get: (id) => {
+      const s = stub.get(id);
+      return { fetch: async (u, init) => {
+        const path = new URL(u).pathname;
+        const hot = path === "/check" || path === "/plan";
+        if (hot) { live += 1; peak = Math.max(peak, live); await new Promise((r) => setTimeout(r, 50)); live -= 1; }
+        return s.fetch(u, init);
+      } };
+    } });
+    h.env.PASSES = slow(h.env.PASSES);
+    h.env.QUOTA = slow(h.env.QUOTA);
+    assert.equal((await h.call(h.asrReq(`Bearer ${code}`))).status, 200);
+    await h.settle();
+    assert.equal(peak, 2);
+    // 被拒的码照样拒、不碰上游
+    await h.call(h.adminReq("revoke", { code }));
+    const g0 = h.calls.groq;
+    assert.equal((await h.call(h.asrReq(`Bearer ${code}`))).status, 403);
+    assert.equal(h.calls.groq, g0);
+  } finally { h.restore(); }
+});

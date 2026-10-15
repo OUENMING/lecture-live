@@ -346,7 +346,7 @@ async function tryQwen({ env, audio, sig, deadline, tried, report }, models) {
   throw new Skip();
 }
 
-async function transcribe(env, ctx, audio, seconds, t0) {
+async function transcribe(env, ctx, audio, seconds, t0, planP = null) {
   const deadline = t0 + T.total;
   const tried = [];
   const budget = new AbortController();
@@ -358,7 +358,7 @@ async function transcribe(env, ctx, audio, seconds, t0) {
   };
   try {
     const run = { env, audio, sig: budget.signal, deadline, tried, report };
-    const plan = await getPlan(env, seconds);
+    const plan = await (planP ?? getPlan(env, seconds));
     const models = env.QWEN_KEY ? plan.qwen : [];
     const primary = env.GROQ_KEY ? plan.groq : null;   // V3 | TURBO | null
     const groqP = primary ? tryGroq(run, primary) : Promise.reject(new Skip());
@@ -458,12 +458,16 @@ async function route(request, env, ctx, ev, path, t0) {
 
   const raw = parseFloat(request.headers.get("x-audio-seconds"));
   const seconds = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), SECONDS_MAX) : SECONDS_DEFAULT;
+  // 查码（Passes DO）与选路（Quota DO）一起问：两个 DO 都在欧洲，从香港节点串着问是两个来回。
+  // 2026-10-15 实测中国用户（HKG）70 条 trace：查码 p50 210 ms、选路 213 ms，占 Worker 耗时的 38%。
+  // 代价：被拒的码也会在 Quota 里占一次 Groq 额度（getPlan 会预扣）—— 拒绝很少见，接受。
+  const planP = getPlan(env, seconds);   // 永不 reject（DO 不可用时自己退回开放）
   if (code !== null) {
     const deny = await checkPass(env, code, install, "asr");
     if (deny) return deny;
   }
   ev.audio_s = seconds;
-  const { res, model, tried } = await transcribe(env, ctx, audio, seconds, t0);
+  const { res, model, tried } = await transcribe(env, ctx, audio, seconds, t0, planP);
   ev.model = model ?? "";
   ev.up = tried.join(",");
   if (code !== null && res.status === 200) {

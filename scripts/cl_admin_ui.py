@@ -535,6 +535,12 @@ _AE_GEO = f"""SELECT blob2 AS name, blob6 AS country, blob7 AS colo, blob5 AS ve
 _AE_BAD = f"""SELECT timestamp AS t, blob2 AS name, blob1 AS path, blob3 AS model, blob4 AS up, double1 AS status, double2 AS ms
  FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '1' DAY AND double1 >= 400 ORDER BY t DESC LIMIT 30 FORMAT JSON"""
 
+# 每人 × 路径 × 上游尝试串 × 状态：「要注意」那一栏靠它判 —— DeepSeek 402（余额不足）、Groq 403（香港节点被拒）……
+# 只有 ≥400 的请求进不了的（Groq 403 后千问接住，最终是 200），所以按上游串分组，不按最终状态。
+_AE_UP = f"""SELECT blob2 AS name, blob1 AS path, blob4 AS up, double1 AS status, SUM(_sample_interval) AS n,
+ MIN(timestamp) AS first, MAX(timestamp) AS last
+ FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '1' DAY GROUP BY name, path, up, status ORDER BY n DESC LIMIT 200 FORMAT JSON"""
+
 
 def ae_events(post=None) -> dict:
     """逐请求事件的近 24 h 汇总：每个码 × 路径的请求数 / p50·p95 毫秒 / 出错数 / 音频秒 / token；
@@ -553,9 +559,12 @@ def ae_events(post=None) -> dict:
                 return r.status_code, {"error": r.text[:200]}
     url = AE_SQL.format(acct=acct)
     out = {}
-    for key, sql in (("by_code", _AE_BY_CODE), ("geo", _AE_GEO), ("bad", _AE_BAD)):
+    qs = (("by_code", _AE_BY_CODE), ("geo", _AE_GEO), ("bad", _AE_BAD), ("up", _AE_UP))
+    with ThreadPoolExecutor(len(qs)) as ex:                           # 四条互不依赖，一起问
+        futs = [ex.submit(post, url, {"Authorization": f"Bearer {tok}"}, sql) for _, sql in qs]
+    for (key, _), f in zip(qs, futs):
         try:
-            code, j = post(url, {"Authorization": f"Bearer {tok}"}, sql)
+            code, j = f.result()
         except Exception as e:                                        # noqa: BLE001
             return {"error": f"连不上 Analytics Engine：{type(e).__name__}"}
         if code != 200:

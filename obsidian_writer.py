@@ -81,6 +81,7 @@ _FIELDS = (("en", "EN"), ("zh", "ZH"), ("asr", "ASR"))
 
 REVIEW_CHUNK = 70           # 复习层每次请求喂多少句; 长课分块, 避免超长 JSON 被截断
 REVIEW_MAX_TOKENS = 3000    # 单块输出上限
+REVIEW_WORKERS = 5          # 各块同时发（2026-10-15：4–5 块串行是下课→笔记最大的一段，约 25–35 s）
 
 # 「我问过什么」(Phase 4) 在复习自测区里每条占**一行** `问题::答案` —— Spaced
 # Repetition 插件按 `::` 切卡片, 所以不能有多行。讲解的自然长度实测 375–786
@@ -646,17 +647,25 @@ class ObsidianWriter:
         sections: list[dict] = []
         plain: list[str] = []                 # 未加时间前缀的小标题(供总览使用)
         qa: list[dict] = []
+        # 各块互不依赖：一起发，再**按块序**收（meta 取第 0 块、小标题前缀按块序，跟串行时一样）。
+        from concurrent.futures import ThreadPoolExecutor
+        ex = ThreadPoolExecutor(min(REVIEW_WORKERS, len(chunks)))
+        futs = [ex.submit(self._call_review, "\n".join(c)) for c in chunks]
+        ex.shutdown(wait=False)
         for ci, chunk in enumerate(chunks):
             # ⚠️ `review` 这个 stage 名定义在 `polish.STAGE_NAME` 里却**从来没有发出过**
             #    （2026-09-28 OCR 审计发现）—— 复习层按 `REVIEW_CHUNK` 分块、579 句
             #    不止一轮 LLM，而收尾卡上这一段**一点进度都看不到**，正是把收尾搬进
-            #    worker + 做卡片的主要动机所在。这里补上。
+            #    worker + 做卡片的主要动机所在。这里补上。并发后：报的是「在等第几块」。
             if on_progress is not None:
                 try:
                     on_progress("review", ci, len(chunks))
                 except Exception:                         # noqa: BLE001
                     pass
-            r = self._call_review("\n".join(chunk))
+            try:
+                r = futs[ci].result()
+            except Exception:                             # noqa: BLE001  _call_review 自己不抛，兜底
+                r = {}
             if not r:
                 continue
             if ci == 0:

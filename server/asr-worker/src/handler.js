@@ -121,6 +121,26 @@ async function checkPass(env, code, install, kind) {
   return json(DENY[r.reason] ?? 403, { error: r.reason === "quota" ? "quota_exceeded" : r.reason });
 }
 
+// 查码闸：没放行过的码先查后调（deny 非空就直接回）；租期内放行过的不等，`late` 是还在路上的查码结果，
+// 调用方回包前必须 await 它（见文件头「短租」）。租约键带 kind：翻译 / 转写 / 打分的额度是分开判的。
+async function passGate(env, code, install, kind) {
+  const key = `${code}|${install}|${kind}`;
+  const checkP = checkPass(env, code, install, kind).then((deny) => {
+    if (deny) lease.pass.delete(key); else lease.pass.set(key, Date.now());
+    return deny;
+  });
+  if (fresh(lease.pass.get(key))) return { deny: null, late: checkP };
+  return { deny: await checkP, late: null };
+}
+// 晚到的拒绝：上游已经花了，但结果不给（流也掐掉）。用量由各自的 `ok` 闸挡住不记。
+async function settleGate(gate, res) {
+  if (!gate.late) return res;
+  const deny = await gate.late;
+  if (!deny) return res;
+  try { await res.body?.cancel(); } catch { /* 已读完 / 已关 */ }
+  return deny;
+}
+
 function reportUsage(env, ctx, payload) {
   const p = passes(env, "/usage", payload).catch(() => {});
   ctx?.waitUntil?.(p);
@@ -134,14 +154,16 @@ const clientVer = (request) => (request.headers.get("x-classlive-version") || ""
 // 每个非管理请求写一条，**写在请求结束时**（流式翻译等 usage 到了再写）。只放：
 //   index  = 码的名字段（`cl-<名字>-…` 的 <名字>；公开令牌 "public"；没认证 "-"）—— **不写完整码**
 //   blobs  = [路径, 码名, 模型, 上游尝试（"groq:200,qwen3-asr-flash:timeout"）, 客户端版本, 国家两字母, 节点三字母]
-//   doubles= [状态码, 毫秒, 音频秒, 输入 token, 输出 token, 缓存命中 token, Jev 题数]
+//   doubles= [状态码, 毫秒, 音频秒, 输入 token, 输出 token, 缓存命中 token, Jev 题数,
+//             转写词数, 首字毫秒, 整段完成毫秒, 请求的 max_tokens]（后四列 2026-10-15 加：速度面板用；首字 / 完成只对翻译有）
 // ⚠️ 不写文本、音频、IP、完整码。列的顺序是 SQL 的 blob1… / double1…，改了要连 scripts/cl_admin_ui.py 一起改。
 const AE_PATHS = new Set(["/v1/transcribe", "/v1/chat/completions", "/v1/jev"]);
-function newEvent(request, path) {
+function newEvent(request, path, t0 = Date.now()) {
   return {
     path: AE_PATHS.has(path) ? path : "other", name: "-", model: "", up: "", ver: clientVer(request),
     country: String(request.cf?.country || "").slice(0, 2), colo: String(request.cf?.colo || "").slice(0, 4),
     status: 0, ms: 0, audio_s: 0, tokens_in: 0, tokens_out: 0, cache_hit: 0, jev_q: 0, pending: null,
+    words: 0, first_ms: 0, done_ms: 0, max_tok: 0, t0,
   };
 }
 function track(env, ev) {
@@ -149,13 +171,15 @@ function track(env, ev) {
     env.AE?.writeDataPoint({
       indexes: [ev.name],
       blobs: [ev.path, ev.name, ev.model, ev.up.slice(0, 200), ev.ver, ev.country, ev.colo],
-      doubles: [ev.status, ev.ms, ev.audio_s, ev.tokens_in, ev.tokens_out, ev.cache_hit, ev.jev_q],
+      doubles: [ev.status, ev.ms, ev.audio_s, ev.tokens_in, ev.tokens_out, ev.cache_hit, ev.jev_q,
+                ev.words, ev.first_ms, ev.done_ms, ev.max_tok],
     });
   } catch { /* 记账失败不影响请求 */ }
 }
 
 // 从 SSE 流里捞最后那块的 usage（`stream_options.include_usage` 时 DeepSeek 在末尾单独发一块）。
-async function usageFromStream(stream) {
+// onFirst：第一块带正文的 delta 到达时调一次（翻译首字）。
+async function usageFromStream(stream, onFirst = () => {}) {
   const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
   let buf = "", usage = null;
   for (;;) {
@@ -167,7 +191,11 @@ async function usageFromStream(stream) {
       const line = buf.slice(0, i).trim();
       buf = buf.slice(i + 1);
       if (!line.startsWith("data:")) continue;
-      try { const o = JSON.parse(line.slice(5)); if (o.usage) usage = o.usage; } catch { /* [DONE] 等 */ }
+      try {
+        const o = JSON.parse(line.slice(5));
+        if (o.usage) usage = o.usage;
+        if (onFirst && o.choices?.[0]?.delta?.content) { onFirst(); onFirst = null; }
+      } catch { /* [DONE] 等 */ }
     }
   }
   return usage;
@@ -178,7 +206,7 @@ const usageFields = (u) => ({
   cache_hit: u?.prompt_cache_hit_tokens ?? 0,
 });
 
-async function chat(request, env, ctx, code, ev) {
+async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
   if (!env.DEEPSEEK_KEY) return json(503, { error: "llm_not_configured" });
   if (Number(request.headers.get("content-length")) > LLM_MAX_BYTES) return json(413, { error: "too_large" });
   const raw = await request.text();
@@ -188,6 +216,7 @@ async function chat(request, env, ctx, code, ev) {
   if (!body || !LLM_MODELS.has(body.model)) return json(400, { error: "model_not_allowed" });
   ev.model = body.model;
   body.max_tokens = Math.min(Number(body.max_tokens) || LLM_MAX_TOKENS, LLM_MAX_TOKENS);
+  ev.max_tok = body.max_tokens;   // 面板据此分「实时翻译」（几十）和「课后笔记 / 精修」（上千）
   if (body.stream) body.stream_options = { ...(body.stream_options || {}), include_usage: true };
   const up = await fetch(DEEPSEEK_URL, {
     method: "POST",
@@ -201,22 +230,27 @@ async function chat(request, env, ctx, code, ev) {
   }
   if (body.stream) {
     const [toClient, toMeter] = up.body.tee();
-    const p = usageFromStream(toMeter)
-      .then((u) => { Object.assign(ev, usageFields(u)); return passes(env, "/usage", { code, ver: clientVer(request), ...usageFields(u) }); })
+    const p = usageFromStream(toMeter, () => { ev.first_ms = Date.now() - ev.t0; })
+      .then(async (u) => {
+        Object.assign(ev, usageFields(u));
+        ev.done_ms = Date.now() - ev.t0;
+        if (await ok) return passes(env, "/usage", { code, ver: clientVer(request), ...usageFields(u) });
+      })
       .catch(() => {});
     ctx?.waitUntil?.(p);
     ev.pending = p;   // 事件等 usage 到了再写（见 fetch 末尾）
     return new Response(toClient, { status: up.status, headers });
   }
   const text = await up.text();
+  ev.first_ms = ev.done_ms = Date.now() - ev.t0;   // 非流式：整段一起到
   let u = null;
   try { u = JSON.parse(text).usage; } catch { /* 非 JSON 照样回 */ }
   Object.assign(ev, usageFields(u));
-  reportUsage(env, ctx, { code, ver: clientVer(request), ...usageFields(u) });
+  ctx?.waitUntil?.(ok.then((y) => { if (y) reportUsage(env, ctx, { code, ver: clientVer(request), ...usageFields(u) }); }));
   return new Response(text, { status: up.status, headers });
 }
 
-async function jev(request, env, ctx, code, ev) {
+async function jev(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
   if (!env.JEV_KEY) return json(503, { error: "jev_not_configured" });
   if (Number(request.headers.get("content-length")) > JEV_MAX_BYTES) return json(413, { error: "too_large" });
   const raw = await request.text();
@@ -234,7 +268,7 @@ async function jev(request, env, ctx, code, ev) {
   ev.model = JEV_MODEL;
   ev.up = `jev:${up.status}`;
   ev.jev_q = q;
-  if (up.ok) reportUsage(env, ctx, { code, jev_q: q, ver: clientVer(request) });   // 上游错误不记用量（同 chat）
+  if (up.ok) ctx?.waitUntil?.(ok.then((y) => { if (y) reportUsage(env, ctx, { code, jev_q: q, ver: clientVer(request) }); }));   // 上游错误不记用量（同 chat）
   return new Response(text, { status: up.status, headers: { "content-type": up.headers.get("content-type") || "application/json" } });
 }
 
@@ -421,7 +455,8 @@ async function transcribe(env, ctx, audio, seconds, t0, planP = null, country = 
     }
     const provider = won.model.startsWith("whisper") ? "groq" : "qwen";
     console.log(JSON.stringify({ provider, model: won.model, ms, tried }));
-    return { res: json(200, { text: won.text, provider, model: won.model, ms, tried: [...tried] }), model: won.model, tried };
+    const words = won.text ? won.text.split(/\s+/).filter(Boolean).length : 0;   // 只记个数，不记文本
+    return { res: json(200, { text: won.text, provider, model: won.model, ms, tried: [...tried] }), model: won.model, tried, words };
   } finally {
     clearTimeout(budgetTimer);
     clearTimeout(hedgeTimer);
@@ -434,7 +469,7 @@ export default {
     const t0 = Date.now();
     const path = new URL(request.url).pathname;
     if (request.method === "POST" && path.startsWith("/v1/admin/")) return admin(request, env, path);   // 管理调用不进事件
-    const ev = newEvent(request, path);
+    const ev = newEvent(request, path, t0);
     const res = await route(request, env, ctx, ev, path, t0);
     ev.status = res.status;
     ev.ms = Date.now() - t0;   // 流式翻译：到响应头为止（首包），不是整段流
@@ -469,13 +504,14 @@ async function route(request, env, ctx, ev, path, t0) {
 
   // 翻译：只有通行码能走到这；不过下面那两道限流 —— 码是个人的、能吊销、能限额，
   // 而一节课的翻译请求（定稿 + 草稿译文）每分钟会超过转写那套 30 / 60 的限。
-  if (path === "/v1/chat/completions") {
-    const deny = await checkPass(env, code, install, "llm");
-    return deny ?? chat(request, env, ctx, code, ev);
-  }
-  if (path === "/v1/jev") {
-    const deny = await checkPass(env, code, install, "jev");
-    return deny ?? jev(request, env, ctx, code, ev);
+  // 翻译首字：中国用户落 HKG，查码那一趟 DO 约 210 ms，原来全压在首字前面（10-15：CN p50 395 ms vs IE 343 ms）。
+  if (path === "/v1/chat/completions" || path === "/v1/jev") {
+    const kind = path === "/v1/jev" ? "jev" : "llm";
+    const gate = await passGate(env, code, install, kind);
+    if (gate.deny) return gate.deny;
+    const ok = gate.late ? gate.late.then((d) => !d) : Promise.resolve(true);
+    const res = kind === "llm" ? await chat(request, env, ctx, code, ev, ok) : await jev(request, env, ctx, code, ev, ok);
+    return settleGate(gate, res);
   }
 
   // 令牌公开、install_id 客户端随便造 -> 按 install 限流挡不住，所以再按 IP 限一道（R17，同上传 Worker）。
@@ -499,21 +535,17 @@ async function route(request, env, ctx, ev, path, t0) {
   // 代价：被拒的码也会在 Quota 里占一次 Groq 额度（getPlan 会预扣）—— 拒绝很少见，接受。
   // 两者在租期内还能连这一个来回也不等（见文件头「短租」）。
   const planP = planFor(env, ctx, seconds, ev.country);   // 永不 reject（DO 不可用时自己退回开放）
-  let lateDeny = null;
+  let gate = { deny: null, late: null };
   if (code !== null) {
-    const key = `${code}|${install}`;
-    const checkP = checkPass(env, code, install, "asr").then((deny) => {
-      if (deny) lease.pass.delete(key); else lease.pass.set(key, Date.now());
-      return deny;
-    });
-    if (fresh(lease.pass.get(key))) lateDeny = checkP;
-    else { const deny = await checkP; if (deny) return deny; }
+    gate = await passGate(env, code, install, "asr");
+    if (gate.deny) return gate.deny;
   }
   ev.audio_s = seconds;
-  const { res, model, tried } = await transcribe(env, ctx, audio, seconds, t0, planP, ev.country);
+  const { res, model, tried, words = 0 } = await transcribe(env, ctx, audio, seconds, t0, planP, ev.country);
+  ev.words = words;
   ev.model = model ?? "";
   ev.up = tried.join(",");
-  if (lateDeny) { const deny = await lateDeny; if (deny) return deny; }   // 上游已花掉，但结果不给、不记用量
+  if (gate.late && await gate.late) return settleGate(gate, res);   // 上游已花掉，但结果不给、不记用量
   if (code !== null && res.status === 200) {
     reportUsage(env, ctx, { code, asr_s: seconds, model, ver: clientVer(request) });
   }

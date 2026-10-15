@@ -542,6 +542,21 @@ _AE_UP = f"""SELECT blob2 AS name, blob1 AS path, blob4 AS up, double1 AS status
  FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '1' DAY GROUP BY name, path, up, status ORDER BY n DESC LIMIT 200 FORMAT JSON"""
 
 
+# 速度：7 天 × 每人 × 每天 × 类别（只要 200）。类别靠请求的 max_tokens 分（double11，2026-10-15 起才有）：
+#   asr = 转写；live = 实时翻译（≤ 600）；note = 课后笔记 / 精修（> 600）；old = 加列之前的翻译（分不出来）。
+# 首字 double9 / 完成 double10 只有翻译有；词数 double8 只有转写有。都是数字，不含文本。
+_AE_SPEED = f"""SELECT toStartOfDay(timestamp) AS day, blob2 AS name,
+ IF(blob1 = '/v1/transcribe', 'asr', IF(double11 > 600, 'note', IF(double11 > 0, 'live', 'old'))) AS kind,
+ SUM(_sample_interval) AS n, quantileExactWeighted(0.5)(double2, _sample_interval) AS p50,
+ quantileExactWeighted(0.95)(double2, _sample_interval) AS p95,
+ quantileExactWeighted(0.5)(double9, _sample_interval) AS first50, quantileExactWeighted(0.5)(double10, _sample_interval) AS done50,
+ quantileExactWeighted(0.95)(double10, _sample_interval) AS done95,
+ SUM(double8 * _sample_interval) AS words, SUM(double3 * _sample_interval) AS audio_s, SUM(double5 * _sample_interval) AS tout
+ FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '7' DAY AND double1 = 200
+ AND blob1 IN ('/v1/transcribe', '/v1/chat/completions')
+ GROUP BY day, name, kind ORDER BY day DESC, name LIMIT 300 FORMAT JSON"""
+
+
 def ae_events(post=None) -> dict:
     """逐请求事件的近 24 h 汇总：每个码 × 路径的请求数 / p50·p95 毫秒 / 出错数 / 音频秒 / token；
     码 × 国家 × 节点 × 客户端版本；最近 30 条 ≥400 的请求。数据集还不存在（没开 Analytics Engine / 还没部署）→ 回 `pending`。"""
@@ -559,8 +574,8 @@ def ae_events(post=None) -> dict:
                 return r.status_code, {"error": r.text[:200]}
     url = AE_SQL.format(acct=acct)
     out = {}
-    qs = (("by_code", _AE_BY_CODE), ("geo", _AE_GEO), ("bad", _AE_BAD), ("up", _AE_UP))
-    with ThreadPoolExecutor(len(qs)) as ex:                           # 四条互不依赖，一起问
+    qs = (("by_code", _AE_BY_CODE), ("geo", _AE_GEO), ("bad", _AE_BAD), ("up", _AE_UP), ("speed", _AE_SPEED))
+    with ThreadPoolExecutor(len(qs)) as ex:                           # 几条互不依赖，一起问
         futs = [ex.submit(post, url, {"Authorization": f"Bearer {tok}"}, sql) for _, sql in qs]
     for (key, _), f in zip(qs, futs):
         try:

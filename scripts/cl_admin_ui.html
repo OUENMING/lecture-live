@@ -1249,7 +1249,30 @@ function renderService(){
       })));
     }
     box.appendChild(fold("每个人的请求明细 · " + Object.keys(geo).length + " 人" + (ae.bad.length ? " · 失败 " + ae.bad.length + " 条" : ""), aeParts, "ae"));
-  } else if(ae) box.appendChild(fold("每个人的请求明细 · " + (ae.error ? "读不到" : "近 24 h 还没有"),
+  }
+  // 速度（2026-10-15）：每人每天一行，云端那一段的耗时（不含他到 Cloudflare 的网络）。词数 / 首字 / 笔记那几列是 10-15 加的，之前的天是空的。
+  if(ae && !ae.error && (ae.speed || []).length){
+    var sp = {};
+    ae.speed.forEach(function(r){
+      var k = String(r.day).slice(0, 10) + "|" + r.name;
+      (sp[k] = sp[k] || {day: String(r.day).slice(5, 10), name: r.name})[r.kind] = r;
+    });
+    var dash = function(v){ return v ? v : el("span", "mut", "—"); };
+    var rows = Object.keys(sp).sort().reverse().map(function(k){
+      var d = sp[k], a = d.asr, l = d.live, n = d.note, o = d.old;
+      var wpm = a && +a.words && +a.audio_s ? Math.round(+a.words / (+a.audio_s / 60)) : 0;
+      return [d.day, d.name,
+        dash(a ? ms(+a.p50) + " / " + ms(+a.p95) : ""),
+        dash(wpm ? wpm + " 词" : ""),
+        dash(l && +l.first50 ? ms(+l.first50) : (o ? el("span", "mut", ms(+o.p50) + "*") : "")),
+        dash(n ? ms(+n.done50) + " / " + ms(+n.done95) + " · " + num(+n.n) + " 次" : "")];
+    });
+    var spNote = el("div", "hint", "云端处理的耗时，不含用户到 Cloudflare 那段网络。「一般 / 慢的时候」= 中位数 / 95 分位。" +
+      "每分钟词数 = 转出来的英文词 ÷ 音频分钟。带 * 的是加列之前的数（到响应头为止，不是首字）。");
+    box.appendChild(fold("速度 · 每人每天", [mkTable([["日期",""],["码",""],["转写（一般 / 慢）","r"],["每分钟词数","r"],
+      ["翻译首字","r"],["课后笔记（一般 / 慢）","r"]], rows), spNote], "speed"));
+  }
+  if(!(ae && !ae.error && ae.by_code.length) && ae) box.appendChild(fold("每个人的请求明细 · " + (ae.error ? "读不到" : "近 24 h 还没有"),
     [el("div", "hint", ae.error || "部署之后才开始记。")], "ae"));
 
   if(r2 && !r2.error){

@@ -611,7 +611,13 @@ test("事件（Analytics Engine）：每个非管理请求一条，只有码名�
     const [chat, asr, pub, bad, stream] = h.calls.ae;
     assert.deepEqual(chat.indexes, ["amy"]);
     assert.deepEqual(chat.blobs.slice(0, 5), ["/v1/chat/completions", "amy", "deepseek-flash", "deepseek:200", "3.9.6"]);
-    assert.deepEqual([chat.doubles[0], ...chat.doubles.slice(2)], [200, 0, 100, 20, 64, 0]);
+    assert.deepEqual([chat.doubles[0], ...chat.doubles.slice(2, 7)], [200, 0, 100, 20, 64, 0]);
+    // 速度列（10-15）：词数 / 首字 / 完成 / max_tokens。非流式首字 = 完成；转写记词数（假 Groq 回 "hi" = 1 词）。
+    assert.equal(chat.doubles.length, 11);
+    assert.equal(chat.doubles[10], 50);
+    assert.equal(chat.doubles[8], chat.doubles[9]);
+    assert.equal(asr.doubles[7], 1);
+    assert.ok(stream.doubles[8] <= stream.doubles[9], "流式：首字不晚于完成");
     assert.deepEqual([asr.blobs[0], asr.blobs[2], asr.blobs[3], asr.doubles[0], asr.doubles[2]],
       ["/v1/transcribe", "whisper-large-v3", "groq:200", 200, 9.5]);
     assert.deepEqual([pub.indexes[0], bad.indexes[0], bad.doubles[0]], ["public", "-", 401]);
@@ -748,4 +754,54 @@ test("国家被 Groq 拦（403）-> 报给 DO、作废选路租约；同国下�
     await h.settle();
     assert.equal(h.calls.groq, 2, "GB 不受影响");
   } finally { h.restore(); }
+});
+
+test("短租·翻译：放行过的码第二句不等查码就发 DeepSeek", async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"你"}}]}',
+    'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2,"prompt_cache_hit_tokens":5}}',
+    "data: [DONE]", "",
+  ].join("\n\n");
+  const log = [];
+  const h = harness({ deepseek: (b) => {
+    log.push("deepseek");
+    return b.stream ? new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } })
+      : J(200, { choices: [{ message: { content: "{}" } }], usage: { prompt_tokens: 10, completion_tokens: 2 } });
+  } });
+  try {
+    const { code } = await (await h.call(h.adminReq("add", { name: "cn" }))).json();
+    slowDOs(h, log);
+    _leaseForTests(60_000);
+    assert.equal((await h.call(h.chatReq(code, body()))).status, 200);
+    await h.settle();
+    assert.deepEqual(log, ["/check-done", "deepseek"], "第一句：先查码");
+    log.length = 0;
+    assert.equal((await h.call(h.chatReq(code, body()))).status, 200);
+    await h.settle();
+    assert.deepEqual(log, ["deepseek", "/check-done"], "第二句：DeepSeek 先于查码起跑");
+  } finally { h.restore(); }
+});
+
+test("短租·翻译：租期内被吊销的那一句 —— DeepSeek 花掉一次，但回 403、不记用量；流式也一样", async () => {
+  for (const stream of [false, true]) {
+    const sse = 'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2}}\n\ndata: [DONE]\n\n';
+    const h = harness({ deepseek: (b) => b.stream
+      ? new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } })
+      : J(200, { choices: [{ message: { content: "{}" } }], usage: { prompt_tokens: 10, completion_tokens: 2 } }) });
+    try {
+      const { code } = await (await h.call(h.adminReq("add", { name: "cn" }))).json();
+      _leaseForTests(60_000);
+      const first = await h.call(h.chatReq(code, body({ stream })));
+      await first.text();
+      await h.settle();
+      await h.call(h.adminReq("revoke", { code }));
+      const before = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+      const res = await h.call(h.chatReq(code, body({ stream })));
+      assert.equal(res.status, 403, `stream=${stream}`);
+      assert.equal(h.calls.deepseek.length, 2, "上游已经起跑（代价，最多一次）");
+      await h.settle();
+      const after = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+      assert.deepEqual(after, before, `stream=${stream}：不记用量`);
+    } finally { h.restore(); }
+  }
 });

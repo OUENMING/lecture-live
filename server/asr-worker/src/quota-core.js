@@ -12,6 +12,9 @@
 //   groq_cooldown_until / qwen_cooldown_until   毫秒时间戳
 //   qwen_exhausted   {模型名: 记录时间}；⚠️ **永不自动清** —— 换模型名或改 DO 名
 //                    （index.js 里 DO_NAME）才会重置（官方额度是一次性的，不会自己回来）。
+//   groq_blocked     {国家码: 解禁毫秒}：Groq 按**访客国家**拦（Cloudflare 把原访客国家带到子请求），
+//                    某些国家一律 403。2026-10-15 实测：CN 访客 739/739 全 groq:403，而同一个 HKG 机房换 GB 访客是 200
+//                    —— 所以被判的是国家不是机房。/plan 带该 country 就跳过 Groq 直接千问，6 h 后自动过期复探。
 //   turbo            whisper-large-v3-turbo 的**独立**桶 {n, min, hour, s, cooldown_until}，含义同上面 groq_* 那组。
 //                    Groq 按模型分桶（2026-10-11 实测：v3 剩 637 次时 turbo 剩 1999，x-ratelimit-remaining-requests）。
 //                    v3 没额度时它当主力（排在千问前，见 #plan）；v3 当主力却失败时它是最后一道。
@@ -35,12 +38,15 @@ export const V3 = "whisper-large-v3";
 //    有 hdr 就用它判 RPD 与 ASH（原来的 UTC 日 / 整点计数照记，只给面板看）；没有（刚部署、从没成功调过）才退回老算法。
 //    ⚠️ 两条 Groq 不报的照旧本地记：RPM（20/分钟，`min`）与 ASD（28.8K/天，`s`）。
 const HDR_MARGIN = 0.05;     // 推算剩余低于上限的 5% 就不批（并发中的请求 Groq 还没扣，留余量）
+const GROQ_BLOCK_MS = 6 * 3600 * 1000;   // 国家封禁时长：被墙就躲 6 h，到点自动复探
+const COUNTRY_RE = /^[A-Z]{2}$/;         // 访客国家码：两位大写（request.cf.country，如 CN / GB）
 const BUCKET = () => ({ n: 0, min: { minute: -1, n: 0 }, hour: { hour: -1, s: 0 }, s: 0, cooldown_until: 0, hdr: null });
 
 const FRESH = () => ({
   day: "", groq_day: 0, groq_min: { minute: -1, n: 0 },
   groq_hour: { hour: -1, s: 0 }, groq_day_s: 0, qwen_day: 0,
   groq_cooldown_until: 0, groq_hdr: null, qwen_exhausted: {}, qwen_cooldown_until: 0, turbo: BUCKET(),
+  groq_blocked: {},
 });
 
 const json = (obj, status = 200) =>
@@ -59,6 +65,7 @@ export class QuotaCore {
     // 读-改-写之间没有别的 await：DO 的 input gate 保证原子（官方 SQLite storage API 页）。
     const state = { ...FRESH(), ...(await this.storage.get("state")) };
     state.turbo = { ...BUCKET(), ...state.turbo };
+    state.groq_blocked = { ...(state.groq_blocked || {}) };   // 老 state 没这个键也照读
     if (path === "/plan") return json(await this.#plan(state, body));
     if (path === "/report") { await this.#report(state, body); return json({ ok: true }); }
     if (path === "/admin/state") { this.#roll(state, this.now()); return json(this.#state(state)); }
@@ -96,7 +103,19 @@ export class QuotaCore {
       turbo: norm(s.turbo),
       qwen: { used: s.qwen_day, max: QWEN_DAY_MAX,
               exhausted: Object.keys(s.qwen_exhausted || {}), cooldown_until: s.qwen_cooldown_until },
+      // 只列未过期的封禁国家，给面板看（过期的不算，别让人以为还封着）。
+      groq_blocked: Object.fromEntries(Object.entries(s.groq_blocked || {}).filter(([, t]) => t > now)),
     };
+  }
+
+  // 清掉已过期的国家封禁；每次要写 state 前都过一遍，别让废键长在 state 里。
+  #prune(s, now) {
+    for (const cc of Object.keys(s.groq_blocked)) if (!(s.groq_blocked[cc] > now)) delete s.groq_blocked[cc];
+  }
+
+  // 该国此刻是否被封（未过期才算；没有 country / 未知国家 = 没封）。
+  #blocked(s, country, now) {
+    return COUNTRY_RE.test(country || "") && s.groq_blocked[country] > now;
   }
 
   // 跨 UTC 日清零「当日」计数（exhausted 不清）。
@@ -142,11 +161,13 @@ export class QuotaCore {
     return ok;
   }
 
-  async #plan(s, { chain, seconds, model }) {
+  async #plan(s, { chain, seconds, model, country }) {
     const now = this.now();
     this.#roll(s, now);
+    this.#prune(s, now);
+    const blocked = this.#blocked(s, country, now);   // 被封的国家不占 Groq 额度，直接千问
     if (model === TURBO) {   // 最后一道：只问 turbo 桶（v3 当主力却没拿到结果时 Worker 才来问）
-      const groq = this.#take(s.turbo, now, seconds);
+      const groq = blocked ? false : this.#take(s.turbo, now, seconds);
       await this.storage.put("state", s);
       return { groq };
     }
@@ -156,7 +177,8 @@ export class QuotaCore {
     // v3 沿用老字段名（groq_*），装成同形的桶再写回
     const v3 = { n: s.groq_day, min: s.groq_min, hour: s.groq_hour, s: s.groq_day_s,
                  cooldown_until: s.groq_cooldown_until, hdr: s.groq_hdr };
-    const groq = this.#take(v3, now, seconds) ? V3 : this.#take(s.turbo, now, seconds) ? TURBO : null;
+    const groq = blocked ? null
+      : this.#take(v3, now, seconds) ? V3 : this.#take(s.turbo, now, seconds) ? TURBO : null;
     s.groq_day = v3.n; s.groq_min = v3.min; s.groq_hour = v3.hour; s.groq_day_s = v3.s; s.groq_hdr = v3.hdr;
     const qwen = now < s.qwen_cooldown_until || s.qwen_day >= QWEN_DAY_MAX
       ? [] : chain.filter((m) => !(m in s.qwen_exhausted));
@@ -175,6 +197,7 @@ export class QuotaCore {
   async #report(s, r) {
     const now = this.now();
     this.#roll(s, now);
+    this.#prune(s, now);
     if (r.qwen_used) s.qwen_day += 1;
     const secs = (v) => (Number.isFinite(v) && v > 0 ? Math.min(v, MAX_COOLDOWN_S) : null);
     const g = secs(r.groq_cooldown_s), q = secs(r.qwen_cooldown_s);
@@ -186,6 +209,10 @@ export class QuotaCore {
     else if (h) s.groq_hdr = { ...h, at: now };
     if (typeof r.exhausted === "string" && !(r.exhausted in s.qwen_exhausted)) {
       s.qwen_exhausted[r.exhausted] = new Date(now).toISOString();
+    }
+    // 该国访客打 Groq 全 403：封 6 h，/plan 直接跳过 Groq。只认两位大写国家码，别的（含机房码）一律忽略。
+    if (typeof r.groq_blocked === "string" && COUNTRY_RE.test(r.groq_blocked)) {
+      s.groq_blocked[r.groq_blocked] = now + GROQ_BLOCK_MS;
     }
     await this.storage.put("state", s);
   }

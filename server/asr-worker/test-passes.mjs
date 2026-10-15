@@ -5,7 +5,7 @@
 // ⚠️ 不验证 Cloudflare 平台真实行为（DO 分布式语义、tee 在边缘节点上的背压、真 DeepSeek 流格式）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import worker from "./src/handler.js";
+import worker, { _leaseForTests } from "./src/handler.js";
 import { PassCore, CODE_RE } from "./src/passes-core.js";
 import { QuotaCore } from "./src/quota-core.js";
 
@@ -36,7 +36,8 @@ const doStub = (core) => ({
   get: () => ({ fetch: async (u, init) => core.handle(new Request(u, init)) }),
 });
 
-function harness({ deepseek } = {}) {
+function harness({ deepseek, groq } = {}) {
+  _leaseForTests(0);   // 短租默认关：别的用例要「每次都问 DO」；租约自己的用例再打开
   let now = T0;
   const clock = () => now;
   const pass = new PassCore(memStorage(), clock);
@@ -58,6 +59,7 @@ function harness({ deepseek } = {}) {
     }
     if (u.startsWith("https://api.groq.com/")) {
       calls.groq += 1;
+      if (groq) return groq();
       return J(200, { text: "hi", segments: [{ no_speech_prob: 0.01, compression_ratio: 1 }] });
     }
     throw new Error("unexpected upstream " + u);
@@ -85,11 +87,15 @@ function harness({ deepseek } = {}) {
                ...(ver ? { "x-classlive-version": ver } : {}) },
     body: JSON.stringify(body),
   });
-  const asrReq = (auth, install = INSTALL, seconds = "12") => new Request("https://asr.bldcam.page/v1/transcribe", {
-    method: "POST",
-    headers: { authorization: auth, "x-classlive-install": install, "x-audio-seconds": seconds },
-    body: new Uint8Array(100),
-  });
+  const asrReq = (auth, install = INSTALL, seconds = "12", country = null) => {
+    const r = new Request("https://asr.bldcam.page/v1/transcribe", {
+      method: "POST",
+      headers: { authorization: auth, "x-classlive-install": install, "x-audio-seconds": seconds },
+      body: new Uint8Array(100),
+    });
+    if (country) Object.defineProperty(r, "cf", { value: { country, colo: "HKG" } });   // 边缘才有 request.cf
+    return r;
+  };
   const jevReq = (auth, body, install = INSTALL, ver = null) => new Request("https://asr.bldcam.page/v1/jev", {
     method: "POST",
     headers: { authorization: auth, "x-classlive-install": install, "content-type": "application/json",
@@ -418,7 +424,7 @@ test("额度快照：/v1/admin/quota 走 Quota DO，只回计数与上限", asyn
     assert.equal(asr.status, 200, "先确认这一笔真的走通了（否则下面全是假绿）");
     await h.settle();
     const q = await (await h.call(h.adminReq("quota"))).json();
-    assert.deepEqual(Object.keys(q).sort(), ["caps", "day", "now", "qwen", "turbo", "v3"]);
+    assert.deepEqual(Object.keys(q).sort(), ["caps", "day", "groq_blocked", "now", "qwen", "turbo", "v3"]);
     assert.deepEqual([q.caps.reqs_day, q.caps.qwen_day], [1900, 3000]);
     assert.deepEqual([q.v3.used_reqs, q.v3.used_s], [1, 50]);
     assert.deepEqual([q.turbo.used_reqs, q.qwen.used, q.qwen.exhausted], [0, 0, []]);
@@ -651,5 +657,95 @@ test("转写：查码（Passes DO）与选路（Quota DO）同时在途 —— �
     const g0 = h.calls.groq;
     assert.equal((await h.call(h.asrReq(`Bearer ${code}`))).status, 403);
     assert.equal(h.calls.groq, g0);
+  } finally { h.restore(); }
+});
+
+// ---- 短租（handler.js 文件头「本 isolate 的短租」）----
+// 两个 DO 各慢 50 ms，记下事件顺序：上游 Groq 何时起跑、/check 与 /plan 何时回来。
+function slowDOs(h, log) {
+  const slow = (stub) => ({ idFromName: stub.idFromName, get: (id) => {
+    const s = stub.get(id);
+    return { fetch: async (u, init) => {
+      const path = new URL(u).pathname;
+      if (path === "/check" || path === "/plan") {
+        await new Promise((r) => setTimeout(r, 50));
+        const res = await s.fetch(u, init);
+        log.push(`${path}-done`);
+        return res;
+      }
+      return s.fetch(u, init);
+    } };
+  } });
+  h.env.PASSES = slow(h.env.PASSES);
+  h.env.QUOTA = slow(h.env.QUOTA);
+}
+
+test("短租：60 s 内第二段不等两个 DO 就起上游，/plan 照样每段问一次（额度照扣）", async () => {
+  const log = [];
+  const h = harness({ groq: () => { log.push("groq-start"); return J(200, { text: "hi", segments: [{ no_speech_prob: 0.01, compression_ratio: 1 }] }); } });
+  try {
+    const { code } = await (await h.call(h.adminReq("add", { name: "cn" }))).json();
+    slowDOs(h, log);
+    _leaseForTests(60_000);
+    assert.equal((await h.call(h.asrReq(`Bearer ${code}`))).status, 200);
+    await h.settle();
+    assert.equal(log.indexOf("groq-start"), 2, "第一段：两个 DO 都回来才起上游");
+    log.length = 0;
+    assert.equal((await h.call(h.asrReq(`Bearer ${code}`))).status, 200);
+    await h.settle();
+    assert.equal(log[0], "groq-start", "第二段：上游先于两个 DO 起跑");
+    assert.deepEqual(log.slice(1).sort(), ["/check-done", "/plan-done"], "两个 DO 照样各问一次");
+    const q = await (await h.call(h.adminReq("quota"))).json();
+    assert.equal(q.v3.used_reqs, 2, "每段都预扣了 Groq 额度");
+  } finally { h.restore(); }
+});
+
+test("短租：放行过的码被吊销 -> 这一段上游已花但回 403、不记用量；下一段先查后调、上游零调用", async () => {
+  const h = harness();
+  try {
+    const { code } = await (await h.call(h.adminReq("add", { name: "cn" }))).json();
+    _leaseForTests(60_000);
+    assert.equal((await h.call(h.asrReq(`Bearer ${code}`))).status, 200);
+    await h.settle();
+    await h.call(h.adminReq("revoke", { code }));
+    const before = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    const g0 = h.calls.groq;
+    assert.equal((await h.call(h.asrReq(`Bearer ${code}`))).status, 403);
+    assert.equal(h.calls.groq, g0 + 1, "租期内：上游已经起跑（代价，最多一次）");
+    await h.settle();
+    const after = await (await h.call(h.adminReq("stats", { day: TODAY }))).json();
+    assert.deepEqual(after, before, "被拒的那段不记用量");
+    assert.equal((await h.call(h.asrReq(`Bearer ${code}`))).status, 403);
+    assert.equal(h.calls.groq, g0 + 1, "拒过一次就出租约：下一段先查码，上游不动");
+  } finally { h.restore(); }
+});
+
+test("短租：从没放行过的码不享受租约 —— 随机码刷不动上游", async () => {
+  const h = harness();
+  try {
+    _leaseForTests(60_000);
+    const { code } = await (await h.call(h.adminReq("add", { name: "cn" }))).json();
+    await h.call(h.adminReq("revoke", { code }));
+    for (let i = 0; i < 3; i++) assert.equal((await h.call(h.asrReq(`Bearer ${code}`))).status, 403);
+    assert.equal(h.calls.groq, 0);
+  } finally { h.restore(); }
+});
+
+test("国家被 Groq 拦（403）-> 报给 DO、作废选路租约；同国下一段直接跳过 Groq，别国照常", async () => {
+  const h = harness({ groq: () => J(403, { error: { message: "Forbidden" } }) });
+  try {
+    const { code } = await (await h.call(h.adminReq("add", { name: "cn" }))).json();
+    _leaseForTests(60_000);
+    await h.call(h.asrReq(`Bearer ${code}`, INSTALL, "12", "CN"));   // 没配千问 -> 503，这里只看 Groq
+    await h.settle();
+    assert.equal(h.calls.groq, 1);
+    const q = await (await h.call(h.adminReq("quota"))).json();
+    assert.deepEqual(Object.keys(q.groq_blocked), ["CN"]);
+    await h.call(h.asrReq(`Bearer ${code}`, INSTALL, "12", "CN"));
+    await h.settle();
+    assert.equal(h.calls.groq, 1, "CN 第二段：不再试 Groq（租约已作废，新 plan 说 groq=null）");
+    await h.call(h.asrReq(`Bearer ${code}`, INSTALL, "12", "GB"));
+    await h.settle();
+    assert.equal(h.calls.groq, 2, "GB 不受影响");
   } finally { h.restore(); }
 });

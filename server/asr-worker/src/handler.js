@@ -28,7 +28,32 @@ const DEGENERATE_CR = 2.4;    // 压缩比高于它 -> 重复退化
 const FREE_TIER_ONLY = "AllocationQuota.FreeTierOnly";   // 唯一算「额度用完」的 code（官方 error-code 页）
 const NO_WORDS = "ASR_RESPONSE_HAVE_NO_WORDS";
 
-class Skip extends Error {}   // 这条路没拿到可用结果，交给另一条
+class Skip extends Error {}
+
+// ---- 本 isolate 的短租（2026-10-15）----
+// 两个 DO 都在欧洲：中国用户落 HKG，问一次约 210 ms（70 条 trace 的 p50）。查码与选路已经并行，
+// 但上游仍要等两者里慢的那个。这里让「本 isolate 60 s 内问过」的请求不等：
+//   选路：拿上次的 plan 直接起跑，同时照常发 /plan（照常预扣额度、刷新租约）—— 记账不变，决定最多旧 60 s。
+//         任何会改选路的 report（冷却 / 额度用完 / 国家被拦）当场作废；作废之后才回来的旧 /plan 不写回（gen）。
+//   查码：本 isolate 60 s 内放行过的（码, 设备）不等查码就起上游，但**回包前**仍等查码结果，被拒照拒、不记用量。
+//         代价：刚吊销的码最多再花掉一次上游调用。没放行过的码照旧先查后调 —— 随机码刷不动上游。
+// isolate 回收就全丢，最坏退回原来的「并行两个来回」。
+const lease = { plan: new Map(), pass: new Map(), ms: 60_000, gen: 0 };
+// 测试用：清空并设租期（0 = 关掉，退回逐次问 DO）。
+export function _leaseForTests(ms) { lease.plan.clear(); lease.pass.clear(); lease.ms = ms; lease.gen += 1; }
+const fresh = (at) => at !== undefined && Date.now() - at < lease.ms;
+
+function planFor(env, ctx, seconds, country) {
+  const gen = lease.gen;
+  const asked = getPlan(env, seconds, country).then((p) => {
+    if (!p.fallback && gen === lease.gen) lease.plan.set(country, { plan: p, at: Date.now() });
+    return p;
+  });
+  const hit = lease.plan.get(country);
+  if (hit && fresh(hit.at)) { ctx?.waitUntil?.(asked); return Promise.resolve(hit.plan); }
+  return asked;
+}
+   // 这条路没拿到可用结果，交给另一条
 
 const json = (status, obj, headers = {}) =>
   new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json", ...headers } });
@@ -232,15 +257,15 @@ async function quota(env, path, payload) {
   const stub = env.QUOTA.get(env.QUOTA.idFromName(DO_NAME));
   return stub.fetch(`https://quota${path}`, { method: "POST", body: JSON.stringify(payload) });
 }
-async function getPlan(env, seconds) {
+async function getPlan(env, seconds, country = "") {
   try {
-    const res = await quota(env, "/plan", { chain: CHAIN, seconds });
+    const res = await quota(env, "/plan", { chain: CHAIN, seconds, country });
     if (res.ok) return await res.json();
   } catch { /* 落到下面 */ }
   // DO 不可用：开放而不是挂掉（Groq 429 / 千问 403 自己会兜住），只是少了主动降级。
   // ⚠️ 此时 R17 的千问每日 3000 段上限、R18 的 Groq 音频秒上限也一并失效 —— 接受（DO 免费档超限才会走到这）。
   console.log(JSON.stringify({ quota: "unavailable" }));
-  return { groq: V3, qwen: CHAIN };
+  return { groq: V3, qwen: CHAIN, fallback: true };   // fallback：不进租约
 }
 async function takeTurbo(env, seconds) {
   try {
@@ -261,7 +286,8 @@ function groqHdr(h) {
 }
 
 // run = {env, audio, sig, deadline, tried, report}：一次请求内各供应商共用的上下文。
-async function tryGroq({ env, audio, sig, deadline, tried, report }, model = V3) {
+async function tryGroq(run, model = V3) {
+  const { env, audio, sig, deadline, tried, report, country } = run;
   const tag = model === V3 ? "groq" : "turbo";
   const form = new FormData();
   form.append("file", new Blob([audio], { type: "audio/ogg" }), "audio.ogg");
@@ -278,6 +304,14 @@ async function tryGroq({ env, audio, sig, deadline, tried, report }, model = V3)
     throw new Skip();
   }
   tried.push(`${tag}:${r.status}`);
+  // Groq 按**访客国家**拦（Cloudflare 把原访客国家带进子请求）：2026-10-15 CN 访客 739/739 groq:403；
+  // 探针 Worker 放在 HKG / SIN 跑、访客 GB 时都是 200 —— 跟机房无关，换 placement 也绕不开。
+  // 报给 DO：这个国家 6 h 内不再试 Groq、不预扣 Groq 额度（quota-core 的 groq_blocked）。
+  if (r.status === 403) {
+    run.blocked = true;
+    console.log(JSON.stringify({ groq403: country, msg: String(r.body?.error?.message ?? "").slice(0, 120) }));
+    if (country) report({ groq_blocked: country });
+  }
   const hdr = groqHdr(r.headers);   // 200 与 429 都带；有就报给 DO（见 quota-core.js 的 hdr）
   if (hdr && r.status !== 429) report(model === V3 ? { groq_hdr: hdr } : { groq_hdr: hdr, model });
   if (r.status === 429) {
@@ -346,19 +380,20 @@ async function tryQwen({ env, audio, sig, deadline, tried, report }, models) {
   throw new Skip();
 }
 
-async function transcribe(env, ctx, audio, seconds, t0, planP = null) {
+async function transcribe(env, ctx, audio, seconds, t0, planP = null, country = "") {
   const deadline = t0 + T.total;
   const tried = [];
   const budget = new AbortController();
   const budgetTimer = setTimeout(() => budget.abort(), Math.max(0, deadline - Date.now()));
   let hedgeTimer;
   const report = (r) => {
+    if (r.groq_cooldown_s || r.qwen_cooldown_s || r.exhausted || r.groq_blocked) { lease.plan.clear(); lease.gen += 1; }
     const p = quota(env, "/report", r).catch(() => {});
     ctx?.waitUntil?.(p);
   };
   try {
-    const run = { env, audio, sig: budget.signal, deadline, tried, report };
-    const plan = await (planP ?? getPlan(env, seconds));
+    const run = { env, audio, sig: budget.signal, deadline, tried, report, country };
+    const plan = await (planP ?? getPlan(env, seconds, country));
     const models = env.QWEN_KEY ? plan.qwen : [];
     const primary = env.GROQ_KEY ? plan.groq : null;   // V3 | TURBO | null
     const groqP = primary ? tryGroq(run, primary) : Promise.reject(new Skip());
@@ -375,7 +410,8 @@ async function transcribe(env, ctx, audio, seconds, t0, planP = null) {
     try { won = await Promise.any([groqP, qwenP]); } catch { /* 全部失败 */ }
     // 最后一道：主力是 v3、它与千问都没拿到（额度满 / 冷却 / 都挂了）且预算还够一次 Groq -> turbo。
     // 主力已经是 turbo / null（turbo 桶已问过）就不再问。
-    if (!won && primary === V3 && deadline - Date.now() > 500 && await takeTurbo(env, seconds)) {
+    // Groq 刚因国家回 403 -> turbo 同样会 403，不问。
+    if (!won && primary === V3 && !run.blocked && deadline - Date.now() > 500 && await takeTurbo(env, seconds)) {
       try { won = await tryGroq(run, TURBO); } catch { /* 也没拿到 */ }
     }
     const ms = Date.now() - t0;
@@ -461,15 +497,23 @@ async function route(request, env, ctx, ev, path, t0) {
   // 查码（Passes DO）与选路（Quota DO）一起问：两个 DO 都在欧洲，从香港节点串着问是两个来回。
   // 2026-10-15 实测中国用户（HKG）70 条 trace：查码 p50 210 ms、选路 213 ms，占 Worker 耗时的 38%。
   // 代价：被拒的码也会在 Quota 里占一次 Groq 额度（getPlan 会预扣）—— 拒绝很少见，接受。
-  const planP = getPlan(env, seconds);   // 永不 reject（DO 不可用时自己退回开放）
+  // 两者在租期内还能连这一个来回也不等（见文件头「短租」）。
+  const planP = planFor(env, ctx, seconds, ev.country);   // 永不 reject（DO 不可用时自己退回开放）
+  let lateDeny = null;
   if (code !== null) {
-    const deny = await checkPass(env, code, install, "asr");
-    if (deny) return deny;
+    const key = `${code}|${install}`;
+    const checkP = checkPass(env, code, install, "asr").then((deny) => {
+      if (deny) lease.pass.delete(key); else lease.pass.set(key, Date.now());
+      return deny;
+    });
+    if (fresh(lease.pass.get(key))) lateDeny = checkP;
+    else { const deny = await checkP; if (deny) return deny; }
   }
   ev.audio_s = seconds;
-  const { res, model, tried } = await transcribe(env, ctx, audio, seconds, t0, planP);
+  const { res, model, tried } = await transcribe(env, ctx, audio, seconds, t0, planP, ev.country);
   ev.model = model ?? "";
   ev.up = tried.join(",");
+  if (lateDeny) { const deny = await lateDeny; if (deny) return deny; }   // 上游已花掉，但结果不给、不记用量
   if (code !== null && res.status === 200) {
     reportUsage(env, ctx, { code, asr_s: seconds, model, ver: clientVer(request) });
   }

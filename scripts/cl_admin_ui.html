@@ -1295,7 +1295,7 @@ function renderAlerts(){
   if(ds429.n) out.push(["warn", "DeepSeek 限流 " + num(ds429.n) + " 次", "偶发不用管；持续出现说明并发太高。", ago(ds429.last)]);
   var g403 = grp(function(r){ return /groq:403/.test(r.up); });
   if(g403.n) out.push(["warn", (g403.who.join("、") || "有人") + " 的转写用不了 Groq（" + num(g403.n) + " 次被拒），全走了千问",
-    "Groq 不接受香港节点来的请求，中国用户都会这样。千问是一次性免费额度，用完不回来。", ago(g403.last)]);
+    "Groq 按访客国家拦，不服务中国大陆，换机房也绕不开。新版云端会自动对这个国家跳过 Groq；千问是一次性免费额度，用完不回来。", ago(g403.last)]);
   var dead = grp(function(r){ return r.path === "/v1/transcribe" && +r.status >= 500; });
   if(dead.n) out.push(["bad", "转写全挂 " + num(dead.n) + " 次（Groq 和千问都没拿到）", "看下面「云端服务 → 转写速度」里的异常事件。", ago(dead.last)]);
   if(q && q.qwen){

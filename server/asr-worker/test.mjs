@@ -6,7 +6,7 @@
 //    那些只能部署后手验。这里钉的是 Worker 自己的逻辑。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import worker from "./src/handler.js";
+import worker, { _leaseForTests } from "./src/handler.js";
 import { QuotaCore } from "./src/quota-core.js";
 
 const TOKEN = "tok-public";
@@ -30,6 +30,7 @@ const groqOk = (text = " hello groq ", segments = [{ no_speech_prob: 0.01, compr
 const qwenOk = (text = "hello qwen") => J(200, { output: { choices: [{ message: { content: [{ text }] } }] } });
 
 function harness({ groq = () => groqOk(), qwen = () => qwenOk(), groqMs = 0, qwenMs = 0, planMs = 0 } = {}) {
+  _leaseForTests(0);   // 短租默认关（租约的用例在 test-passes.mjs）
   const calls = { groq: [], qwen: [], qwenUrls: [] };
   const reports = [];
   const plans = [];
@@ -338,9 +339,10 @@ test("11 上游都挂 10 s -> 5.3 s 内 503", async () => {
 function quotaAt(clock, seed) {
   const store = new Map(seed ? [["state", seed]] : []);
   const q = new QuotaCore({ get: async (k) => store.get(k), put: async (k, v) => { store.set(k, structuredClone(v)); } }, () => clock.now);
-  const plan = async (seconds = 12) => (await q.handle(new Request("https://quota/plan", { method: "POST", body: JSON.stringify({ chain: CHAIN3, seconds }) }))).json();
+  const plan = async (seconds = 12, extra = {}) => (await q.handle(new Request("https://quota/plan", { method: "POST", body: JSON.stringify({ chain: CHAIN3, seconds, ...extra }) }))).json();
   const report = (b) => q.handle(new Request("https://quota/report", { method: "POST", body: JSON.stringify(b) }));
-  return { plan, report, store };
+  const adminState = async () => (await q.handle(new Request("https://quota/admin/state", { method: "POST", body: "{}" }))).json();
+  return { plan, report, adminState, store };
 }
 const DAY = Date.UTC(2026, 9, 11, 12, 0, 0);
 
@@ -375,6 +377,71 @@ test("12c Quota：cooldown / exhausted 生效，exhausted 跨日不清", async (
   assert.deepEqual((await plan()).qwen, []);
   clock.now += 3_601_000;
   assert.deepEqual((await plan()).qwen, CHAIN3.slice(1));
+});
+
+// ---------- 12d 国家封禁：Groq 按**访客国家**拦（CN 2026-10-15 739/739 groq:403；同 HKG 机房 GB 访客 200）----------
+test("12d Quota：被封国家 -> groq=null 且 v3/turbo 计数都不动；别的国家 / 不带 country 照旧", async () => {
+  const clock = { now: DAY };
+  const { plan, report, store } = quotaAt(clock);
+  await report({ groq_blocked: "CN" });
+  const before = structuredClone(store.get("state"));
+  assert.deepEqual(await plan(12, { country: "CN" }), { groq: null, qwen: CHAIN3 }, "被封就直接千问");
+  const after = store.get("state");
+  assert.equal(after.groq_day, before.groq_day, "v3 计数没动");
+  assert.equal(after.groq_min.n, before.groq_min.n, "v3 分钟桶没动");
+  assert.equal(after.groq_day_s, before.groq_day_s, "v3 音频秒没动");
+  assert.equal(after.turbo.n, before.turbo.n, "turbo 计数没动");
+  assert.equal(after.turbo.s, before.turbo.s, "turbo 音频秒没动");
+  assert.deepEqual(after.groq_blocked, before.groq_blocked);
+  assert.equal((await plan(12, { country: "GB" })).groq, V3, "别的国家照旧用 v3");
+  assert.equal((await plan()).groq, V3, "不带 country 与原来完全一致");
+});
+test("12e Quota：封禁 6 h 后过期，Groq 重新试；差 1 ms 还封着", async () => {
+  const clock = { now: DAY };
+  const { plan, report } = quotaAt(clock);
+  await report({ groq_blocked: "CN" });
+  assert.equal((await plan(12, { country: "CN" })).groq, null);
+  clock.now = DAY + 6 * 3600 * 1000 - 1;
+  assert.equal((await plan(12, { country: "CN" })).groq, null, "还差 1 ms，仍然跳过 Groq");
+  clock.now = DAY + 6 * 3600 * 1000;
+  assert.equal((await plan(12, { country: "CN" })).groq, V3, "到点复探");
+});
+test("12f Quota：非法 groq_blocked 一律忽略（含机房码 HKG）", async () => {
+  const clock = { now: DAY };
+  const { plan, report, store } = quotaAt(clock);
+  for (const bad of ["cn", "C", "CHN", "C1", " c", "CN ", "HKG", 42, null, ["CN"], { country: "CN" }]) {
+    await report({ groq_blocked: bad });
+    assert.deepEqual(store.get("state").groq_blocked, {}, `不该收 ${JSON.stringify(bad)}`);
+  }
+  assert.equal((await plan(12, { country: "CN" })).groq, V3, "没被封就照旧");
+});
+test("12g Quota：turbo 路径对被封国家回 groq=false 且不占 turbo 额度", async () => {
+  const clock = { now: DAY };
+  const { plan, report, store } = quotaAt(clock);
+  await report({ groq_blocked: "CN" });
+  assert.deepEqual(await plan(12, { model: TURBO, country: "CN" }), { groq: false });
+  assert.equal(store.get("state").turbo.n, 0, "turbo 没占");
+  clock.now = DAY + 6 * 3600 * 1000;
+  assert.deepEqual(await plan(12, { model: TURBO, country: "CN" }), { groq: true }, "过期后照占");
+  assert.equal(store.get("state").turbo.n, 1);
+});
+test("12h Quota：/admin/state 只列未过期的封禁国家（空则 {}）", async () => {
+  const clock = { now: DAY };
+  const { report, adminState } = quotaAt(clock);
+  assert.deepEqual((await adminState()).groq_blocked, {}, "没封禁时是空对象，键恒在");
+  await report({ groq_blocked: "CN" });
+  await report({ groq_blocked: "IN" });
+  assert.deepEqual((await adminState()).groq_blocked, { CN: DAY + 21_600_000, IN: DAY + 21_600_000 });
+  clock.now = DAY + 21_600_000;   // 正好 6 h：过期，不该再列
+  assert.deepEqual((await adminState()).groq_blocked, {});
+});
+test("12i Quota：老 state 没有 groq_blocked 键 -> 照读照写", async () => {
+  const clock = { now: DAY };
+  const { plan, report, adminState, store } = quotaAt(clock, { day: "2026-10-11", groq_day: 5 });
+  assert.deepEqual((await adminState()).groq_blocked, {});
+  assert.equal((await plan(12, { country: "CN" })).groq, V3);
+  await report({ groq_blocked: "CN" });
+  assert.deepEqual(Object.keys(store.get("state").groq_blocked), ["CN"]);
 });
 
 // =====================  §R 审查后修订（R17–R20）  =====================

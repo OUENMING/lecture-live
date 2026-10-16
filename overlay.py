@@ -27,6 +27,7 @@ import typing
 import motion
 import panel
 import objc_own
+import text_diff
 
 try:
     from AppKit import NSRunLoop, NSDate
@@ -34,7 +35,9 @@ try:
 except Exception:          # noqa: BLE001
     _HAS_APPKIT = False
 
-from transcript_view import TranscriptView   # 模块级无 AppKit 依赖, 可安全直接导入
+# 模块级无 AppKit 依赖, 可安全直接导入。`LineLog` 给每行一个**身份号** —— 跨段半句合并
+# 靠它把「尾句那一行 + 下一段首行」按身份定位（行号会漂, 见 `transcript_view.LineLog`）。
+from transcript_view import LineLog, TranscriptView
 
 # ---- 几何规范 ----
 # 标定依据: 18pt Medium 的中文两行实测 42.0px, 故 47px 留 5px 余量。
@@ -213,6 +216,10 @@ MODE_CHIP_H = 22.0                # 圆角 = 高 / 2 → 整圆胶囊
 MODE_CHIP_PAD = 10.0              # 在普通按钮 +10 之上再加 → 左右合计约 20pt
 MODE_CHIP_ANIM_S = motion.STATE_S   # 切档：字淡入淡出 + 宽度过渡（时长统一在 motion.py）
 MODE_CHIP_HOVER_S = motion.FEEDBACK_S
+#: 切档时**整排 frame 过渡比文字淡换晚**这么多秒。来源: 字体/动效报告 §5 A7。
+#: 理由: 同起同止 = 「字在动的同时框也在动」, 两个变化叠在一起读;
+#: 错开一档是"一次只有一个东西在动"（design-taste-frontend §5 Motion MUST BE MOTIVATED）。
+CHIP_FRAME_DELAY_S = 0.04
 #: 档位小图标（SF Symbols）。默认关 —— 作者看了有/无两版对比图再定。
 MODE_CHIP_ICONS = False
 TRANS_MODE_SYMBOL = {"both": "character.bubble", "en": "textformat", "raw": "waveform"}
@@ -236,8 +243,67 @@ def _reduce_motion() -> bool:
 #    解 = `runUntilDate_(NSDate.distantPast())`: 立刻返回但**仍跑完一轮** run loop。
 #    实测 0.003ms, 比睡 0.0001s(0.128ms)快 40×, 且截图内容正确 -> 零尾延迟。
 #    (旧值 0.0002 的让步尾部实测能到 8ms 量级, 会把个别帧顶过 8.3ms 而掉帧。)
-PUMP_IDLE_S = 0.008              # 空闲让步(省 CPU, 此时无事可做)
+PUMP_IDLE_S = 0.008              # 热档让步的**兜底值**（≈ 120 Hz 周期）。⚠️ 正常路径不再用它 ——
+                                 # 见 `_hot_wait_s()`：热档跟随窗口所在屏幕的刷新率；只有
+                                 # 拿不到屏幕 / 刷新率坏值时才退回这个数（宁可多刷，不可少刷）。
 PUMP_ACTIVE_S = 0.15             # 距上次事件在此窗口内 = 手势进行中 -> 热轮询
+
+# ⭐ 3.9.7 省电（2026-10-16，同一段 240 s 真课回放，电池供电，A/B/A/B）:
+#   现状（空闲也让 8 ms）：整机 7.56/7.10 W，中断唤醒 32387/32312 次，主线程 CPU 14.1/15.5 s。
+#   只把空闲档改成 0.05 s：5.77/5.79 W、唤醒 9470/9488、主线程 9.7/9.9 s —— **省到了**，
+#   但 0.05 会把「上滚」那种**逐帧推进**的动效拖到 ~20 fps，观感不能接受。
+#   → 分两档：「有东西在动」（见 `_motion_active()` 的清单）沿用**热档**
+#     —— 一帧都不许慢（热档时长后来改成跟随屏幕刷新率，见下面那段）；「什么都没在动」才拉长到 `PUMP_IDLE_LONG_S`。
+#   ⚠️ 新数据进来**不能等满**这段时间 —— 见 `wake()`（跨线程投一个 AppDefined 事件，
+#      `_wait_interruptible()` 里的 `nextEventMatchingMask_untilDate_` 会立刻返回）。
+PUMP_IDLE_LONG_S = 0.1           # 空闲（没有任何逐帧推进的东西在跑）的让步
+PUMP_HIDDEN_S = 0.25             # 窗口不可见（收起 / 完全被遮挡 / 屏幕睡眠）的让步；仍靠 wake() 收数据
+# ⭐ 3.9.7 追加（2026-10-16，作者）：热档让步**跟随窗口所在屏幕的刷新率**，别再写死 8 ms。
+#   上面那行 `PUMP_IDLE_S = 0.008` 是 120 Hz 周期（8.33 ms）的近似。作者发现有人用
+#   60 Hz 的 MacBook Air：8 ms 让步让 pump 跑 ~125 Hz —— 比面板快一倍，白烧 CPU，
+#   一个像素都不多画；反过来在 120 Hz 屏上退到 16.7 ms 就每帧都晚半拍。
+#   → 热档让步 = `1 / screen.maximumFramesPerSecond()`（120 Hz → 8.33 ms，60 Hz → 16.7 ms），
+#     由 `_hot_wait_s()` 取、按**屏幕对象身份**备忘（见那里的 docstring）。
+#   ⚠️ 只改**让步间隔**：动效时长 / 曲线一个字节没动（`probe_motion.py` 改前改后逐条一致）。
+#: 让步档位（`_pump_tier()` 返回；`_pump_wait_s()` 与 `_yield_to_runloop()` 共用**同一份**判据）。
+WAIT_GESTURE, WAIT_HOT, WAIT_IDLE, WAIT_HIDDEN = "gesture", "hot", "idle", "hidden"
+#: `self._hot_screen` 的初值 —— `None` 是**合法缓存值**（拿不到屏幕），所以不能用它当"没算过"。
+_HOT_UNSET = object()
+#: `wake()` 投的 AppDefined 事件的 subtype —— 用来把「唤醒令牌」与真实事件分开
+#: （真实事件照旧算「用户刚动过」，令牌不算，否则每来一帧数据都会把热档续 0.15 s）。
+WAKE_SUBTYPE = 0x3970
+#: `occlusionState` 的**更新延迟**：刚 `orderFrontRegardless` 之后要跑一轮 run loop 才
+#: 反映真实可见性（实测：立刻读到的是旧的 8192）。这段时间内不据它降级。
+_OCCLUSION_SETTLE_S = 0.5
+
+
+def _is_wake_event(ev) -> bool:
+    """这是 `wake()` 投的唤醒令牌吗（不是用户事件）。"""
+    try:
+        from AppKit import NSEventTypeApplicationDefined
+        return (ev is not None and ev.type() == NSEventTypeApplicationDefined
+                and int(ev.subtype()) == WAKE_SUBTYPE)
+    except Exception:                                 # noqa: BLE001
+        return False
+
+
+def _screen_hot_wait(screen) -> float:
+    """屏幕的刷新周期（秒）。拿不到屏幕 / 值 ≤0 / 异常 → `PUMP_IDLE_S`。
+
+    ⭐ 3.9.7 追加：热档让步按屏幕刷新率走（见 `PUMP_IDLE_S` 下面那段）。
+    ⚠️ **坏值一律退回热档兜底**（`PUMP_IDLE_S`）：宁可多刷一点，绝不因判不出来而少刷
+       （少刷 = 动效被拖慢，正是这次要防的另一头）。
+    """
+    if screen is None:
+        return PUMP_IDLE_S
+    try:
+        hz = float(screen.maximumFramesPerSecond())
+    except Exception:                                 # noqa: BLE001
+        return PUMP_IDLE_S
+    if not (hz > 0.0) or hz == float("inf"):          # 0 / 负 / NaN(比较恒假) / inf 都是坏值
+        return PUMP_IDLE_S
+    return 1.0 / hz
+
 
 # 白底可读性: 实测纯白底透过 HUDWindow 材质后亮度仍有 0.363(因材质最多把白
 # 压掉约 64%), 白字对它只有 2.54:1 —— 这才是"白底看不清"的真因。
@@ -261,13 +327,70 @@ PUMP_ACTIVE_S = 0.15             # 距上次事件在此窗口内 = 手势进行
 #    要读它：`panel.SCRIM_ALPHA`。（下面注释里提到的 SCRIM_ALPHA 也是指那一个。）
 
 
+# ---- 字体工厂（字幕/面板里 `NSFont.systemFontOfSize_weight_` 的**唯一出口**）----
+# ⭐ 来源: 字体/动效报告 §5 方案 A1 / A2。
+#
+# **A1 等宽数字（tnum）**：现状的 SF Pro 数字是**比例宽度**——本轮实测 @18pt,
+#   `MC = 12.5` 与 `MC = 18.7` 的行宽差 **0.70pt**、`MC = 111.1` 差 **2.64pt**。
+#   实时字幕里数字每 1–2 秒刷一次, 整行会轻微**横向"呼吸"**。挂上
+#   `kNumberSpacingType(6) = kMonospacedNumbersSelector(0)` 后 spread = **0.000**。
+#   ⚠️ 它只改数字的**横向推进宽度**, 不动字面、不动行高 —— 所以 `LINE_H` /
+#   `ROW_ZH_H` / `LINE_TIERS` 全部继续成立（报告 §6.1 明写了这个例外）。
+#
+# **A2 只做收拢**：把散落的同类构造（`_answer_font` / f_zh / f_en / f_big /
+#   输入框 / `_label` / 模式胶囊）收进同一个工厂, **不换字体家族**。
+#
+# ⚠️ 量字体必须用代码里真正用的构造器（`systemFontOfSize_weight_`）——
+#   `fontWithName_(".AppleSystemUIFont", …)` 会静默解析到别的字体（报告 §2.4 的坑）。
+#
+# **C3 标点挤压（`palt`）**：中文标点默认**全角**，`palt`（比例宽度）把标点与
+#   汉字之间那份空白收紧 —— 报告 §3.5 实测同一批真句子省 **1.5% / 2.7% / 2.4%**，
+#   W3C `clreq`「Compression Rules for Punctuation Marks」就是这么规定的
+#   （<https://github.com/w3c/clreq>）；同族里 `halt`(半宽) 在系统 CJK 回退上
+#   **实测 0 变化**，所以只用 `palt`。
+#   常量取自 SDK `CoreText.framework/Headers/SFNTLayoutTypes.h`（本机核过）:
+#   `kTextSpacingType = 22`、`kProportionalTextSelector = 0` —— pyobjc 的两个模块
+#   （AppKit / CoreText）都**不导出**这两个名字，所以只能写字面量 + 这条出处。
+#   ⚠️ 只改**横向推进宽度**、不动字面也不动行高 —— 与 A1 的 `tnum` 两条正交，
+#   `LINE_H` / `ROW_ZH_H` / `LINE_TIERS` 全部继续成立（判据钉着行高不变）。
+#: `_ui_font` 挂上去的 OpenType feature 表: `(type, selector)` 两项 ——
+#: ① 等宽数字(A1) ② 中文标点挤压(C3)。常量值的一手出处就是上面两段注释里的
+#: `SFNTLayoutTypes.h`（`kNumberSpacingType=6` / `kMonospacedNumbersSelector=0`、
+#: `kTextSpacingType=22` / `kProportionalTextSelector=0`）。
+#: ⚠️ 单列成常量是为了**判据能只换一项**（`tests/test_text_stability.py` 的 C3 那节
+#: 把 22 那一项摘掉当"改前"用）—— 自己另建一份字体构造函数量出来的数**不可信**:
+#: CoreText 对同一 (字号, 字重) 的字体有缓存, 先摸过一把**没挂 feature** 的同尺寸字体,
+#: 之后 `fontWithDescriptor_size_` 出来的那份量到的就是**没挂 feature** 的宽度
+#: （2026-10-16 实测, 连续两次复现；本函数这条路径不受影响）。
+UI_FONT_FEATURES = ((6, 0), (22, 0))
+
+
+def _ui_font(size: float, weight: float = WEIGHT):
+    """系统字体（SF Pro / 汉字回退苹方）+ **显式等宽数字 + 中文标点挤压**。拿不到就原样回落。"""
+    from AppKit import (NSFont, NSFontFeatureSettingsAttribute as _FEAT,
+                        NSFontFeatureTypeIdentifierKey as _TYPE,
+                        NSFontFeatureSelectorIdentifierKey as _SEL)
+    f = NSFont.systemFontOfSize_weight_(float(size), float(weight))
+    try:
+        desc = f.fontDescriptor().fontDescriptorByAddingAttributes_({
+            _FEAT: [{_TYPE: t, _SEL: s} for t, s in UI_FONT_FEATURES]})
+        return NSFont.fontWithDescriptor_size_(desc, f.pointSize())
+    except Exception:                           # noqa: BLE001 加不上就退回落(数字照旧, 只是会呼吸)
+        return f
+
+
 def _make_shadow():
     from AppKit import NSShadow, NSColor
     sh = NSShadow.alloc().init()
     # 紧凑高不透明描边: 在任意底色(纯白 PPT / 彩图)上把字从背景里切出来。
     # 旧值 blur 3.0 / α0.85 太糊, 浅底上反而脏。
-    sh.setShadowColor_(NSColor.blackColor().colorWithAlphaComponent_(0.80))
-    sh.setShadowBlurRadius_(1.5)
+    # 2026-10-16(A3, 报告 §5): 模糊 1.5 → **0.0**、α 0.80 → **0.85**, offset 不变。
+    # 理由: 字幕可读性**由描边承担**(见上面 SCRIM 那段实测: 白底只有 2.33:1),
+    # 而模糊阴影的边缘是软的 —— 无模糊 + 更高不透明度是 Netflix/BBC/ITV 那一档
+    # 字幕的配方(ITV 逐字 "white text on a solid black background for optimum
+    # legibility"), 也是本文件 247 行早就写下的结论。
+    sh.setShadowColor_(NSColor.blackColor().colorWithAlphaComponent_(0.85))
+    sh.setShadowBlurRadius_(0.0)
     sh.setShadowOffset_((0.0, -1.0))
     return sh
 
@@ -981,12 +1104,35 @@ class Overlay:
         self._note = note or (lambda _name: None)
         # 全量历史(不再 deque(maxlen=3) —— 展开态要能翻到更早的句子)。
         # 一节课 544 句约 <200KB, 无需上限。
-        self._history: list = []
+        # ⚠️ `_history` 就是 `_log.rows` **本身**（同一个 list 对象）—— 跨段半句合并经
+        #    `_log` 原地改它（追加 / 按身份替换），所以这里**不许再给它赋新 list**。
+        self._log = LineLog()
+        self._history: list = self._log.rows
         self._dirty = False
         self._urgent = False
         self._last_flush = 0.0
         self._last_ev_t = 0.0        # 上次派发事件的时间(决定让步时长, 见 pump)
+        #: 热档让步 = 屏幕刷新周期（见 `_hot_wait_s`）。按**屏幕对象身份**备忘：
+        #: 同一块屏的 `maximumFramesPerSecond` 是常量，换屏必然换对象 → 身份一变就重算。
+        self._hot_screen = _HOT_UNSET
+        self._hot_wait = PUMP_IDLE_S
         self._closed = False         # close() 幂等标志(✕ / Ctrl+C / 正常结束)
+        # ---- 可见性（3.9.7 省电）：窗口在不在屏幕上、屏幕睡没睡 --------------------
+        # 不可见时只保留「派发事件」一条活路（找回路/菜单栏还要能用），
+        # 渲染、tick、housekeeping 全停，让步拉到 `PUMP_HIDDEN_S`。
+        # ⚠️ 不可见**不停**采音 / VAD / 定稿 / 翻译 / 落盘 —— 只停「画」与「草稿识别」。
+        self._visible = True         # 由 `_refresh_visibility()` 现算（pump 每轮调）
+        self._presented = False      # 窗口**真的给过屏幕**吗（`show()` / `_set_hidden(False)`）——
+                                     # 没给过就不拿 occlusionState 判（它那时恒为「不可见」）
+        #: 最近一次 `orderFrontRegardless` 的时刻。`occlusionState` 要跑一轮 run loop 才更新，
+        #: 刚显示时会读到**旧值**（「不可见」）—— 在那之后的一小段里不据此降级，
+        #: 否则「刚显示」会被误判成「被盖住」，恢复被推迟一轮。
+        self._presented_t = 0.0
+        self._screens_sleeping = False   # NSWorkspace screensDidSleep/Wake 通知写它
+        self._hidden_t0 = None       # 进入「不可见」的时刻（None = 可见）
+        self._hidden_total_s = 0.0   # 累计不可见秒数（测试模式 ui 块 `hidden_s`）
+        self._no_animate = False     # 恢复可见那一帧：强制 `_animate_ok()` 为假 → 一帧画完整屏、不起跑动画
+        self._vis_obs = []           # 可见性通知的 observer（强引用，防 GC）
         # ⭐ 隐藏 / 置顶（2026-10-14 作者：「最小化隐藏、不抢最前排」）。都只管**这次运行**，不落盘 ——
         #    下节课打开照旧是看得见、在最前（上课时忘了自己藏过字幕比多点一下更糟）。
         self._hidden = False
@@ -1106,7 +1252,7 @@ class Overlay:
         self._NSFont, self._NSTF = NSFont, NSTextField
         # 答案折行的实测字体: 必须与转录区大字位用的是**同一个** 18pt Medium,
         # 否则量出来的行高与标签实际排版对不上, 折行判据就是假的。
-        self._answer_font = NSFont.systemFontOfSize_weight_(18.0, WEIGHT)
+        self._answer_font = _ui_font(18.0)
         # 存成实例属性而不靠局部作用域: 后面 _set_rule_focus / _on_input_focus
         # 是**方法**, 那里没有 __init__ 的局部名 —— 早先直接写 NSColor 会 NameError,
         # 且被 except 吞掉, 症状是"细线永远不上色"这种完全静默的失败。
@@ -1123,11 +1269,11 @@ class Overlay:
         self._scroll_h = self._collapsed_scroll_h
         self._pinned = PINNED_H
         self._expanded_h = self._expanded_scroll_h()
-        f_zh = (NSFont.systemFontOfSize_weight_(18.0, WEIGHT),
+        f_zh = (_ui_font(18.0),
                 NSColor.whiteColor(), NSLineBreakByWordWrapping)
-        f_en = (NSFont.systemFontOfSize_weight_(11.0, WEIGHT),
+        f_en = (_ui_font(11.0),
                 NSColor.whiteColor().colorWithAlphaComponent_(0.80), self._trunc)
-        f_big = (NSFont.systemFontOfSize_weight_(18.0, WEIGHT),
+        f_big = (_ui_font(18.0),
                  NSColor.whiteColor(), NSLineBreakByWordWrapping)
         self._tv = TranscriptView(
             ve, self._label, f_zh, f_en, f_big,
@@ -1161,9 +1307,16 @@ class Overlay:
         #    那一帧, 末句看不见, 直到收尾卡开始 pump 才跳到终点。判据: 最近 0.25 s 内
         #    pump 过。冲刷循环里直接落到终态。
         self._last_pump_t = -1e9
-        self._tv._animate_ok = lambda: self._clock() - self._last_pump_t < 0.25
+        # ⚠️ `not self._no_animate`: 窗口重新可见那一帧由 `_on_became_visible()` 置真，
+        #    让所有「起跑」判据退回**终态**那一支（跳过积压的动画），见它。
+        self._tv._animate_ok = lambda: (not self._no_animate
+                                        and self._clock() - self._last_pump_t < 0.25)
         self._draft_fade_t0 = None        # 草稿让位的淡出起点, 见 _render_draft
         self._draft_shown = False         # 上一帧草稿栏有没有字
+        #: ⭐ **改字淡换**（报告 §5 方案 C1）: 草稿这一槽正在淡入的那一段。
+        #:    形状 `key -> (整串, runs, 起跑时刻)` —— 只对**前面已显示的词被改**起跑;
+        #:    末尾追加 / 换行变了 / 减弱动态效果 → 一个字节都不进这里(见 `_set_draft_text`)。
+        self._draft_rev: dict = {}
 
         # ---- 单行输入框(Phase 1: 只把文字交给回调, 问答引擎是 Phase 2) ----
         # 钉在面板最底部(见 _layout 的自下而上游标)。不用 _label(): 那个强制
@@ -1184,7 +1337,7 @@ class Overlay:
         self._input.setBordered_(False)
         self._input.setDrawsBackground_(False)
         self._input.setFocusRingType_(NSFocusRingTypeNone)  # 去掉 AppKit 默认蓝环
-        self._input.setFont_(NSFont.systemFontOfSize_weight_(14.0, WEIGHT))
+        self._input.setFont_(_ui_font(14.0))
         self._input.setTextColor_(NSColor.whiteColor())
         self._input.setMaximumNumberOfLines_(1)
         self._input.setLineBreakMode_(self._trunc)      # Tail 模式强制单行(见顶部注释)
@@ -1278,6 +1431,7 @@ class Overlay:
             "  只英·校  —— 只矫正英文, 不出中文\n"
             "  纯转录   —— 完全不调 LLM, ASR 直出(零 API、零延迟、最省电)")
         self._chip_anim = False          # 下一次 _layout 是否把胶囊宽度变化做成过渡（只有用户点击才置位）
+        self._chip_frame_gen = 0         # A7: 延迟 frame 过渡的代数号 —— 旧的批次到点后自动作废
         self._style_mode_chip()
         self._sync_trans_button()
         # ❓「重点 / 没听懂」: 给**这一刻**打一个时间锚, 落到旁路文件
@@ -1344,7 +1498,7 @@ class Overlay:
         # 系统字体(AppleSystemUIFont)已自动把拉丁/数字解析到 SF Pro、汉字到苹方,
         # 并自带中英间距(实测 +2.25px)。显式点名 PingFang SC 反而是降级。
         # 真正的杠杆是字重: Medium 比 Regular 在汉字上多 10.9% 墨量(宽度不变)。
-        lbl.setFont_(self._NSFont.systemFontOfSize_weight_(size, WEIGHT))
+        lbl.setFont_(_ui_font(size))       # A1/A2: 唯一出口(见 `_ui_font` 的注释)
         lbl.setTextColor_(color)
         lbl.setStringValue_("")
         lbl.setAlignment_(self._align)
@@ -2144,6 +2298,8 @@ class Overlay:
         #    那份看到 mainMenu 非空就返回。已删除 —— 别再长出第二份，
         #    ⌘C/V/⌘A 走 `panel.py` 那一条（`panel.build()` 里装）。
         self._panel.orderFrontRegardless()
+        self._presented = True        # 从这一刻起 occlusionState 才有意义（见 _compute_visible）
+        self._presented_t = time.monotonic()
         self._hide_traffic_lights()   # 红绿灯会自己回来(社区实证), 每次显示都再藏一遍
         # ⚠️ 必须显式清掉 first responder。实测: orderFrontRegardless 之后 AppKit 会
         # **自动**把输入框的 field editor 装成 first responder —— 于是 `_is_editing()`
@@ -2151,6 +2307,158 @@ class Overlay:
         # 一次都不会触发。踩过: 三轮验证全绿, 因为都用手动 makeFirstResponder_ 驱动,
         # 没复现"启动即编辑态"这个真实状态。清掉之后, 只有用户真的点了输入框才进编辑态。
         self._release_focus()
+        self._wire_visibility()
+
+    # ---- 可见性（3.9.7 省电）----------------------------------------------------
+    def _wire_visibility(self) -> None:
+        """订阅「窗口可见性」的变化 —— 被**完全遮挡** / 屏幕睡眠。
+
+        ⚠️ `NSWindowDidChangeOcclusionStateNotification` 走默认通知中心 + window 作 object；
+           `NSWorkspaceScreensDidSleepNotification` / `…Wake` 必须挂在
+           `NSWorkspace.notificationCenter()` 上（用默认中心会**静默收不到** ——
+           与 `PLAN-roll-motion.md` §0.1 记的那条同源）。
+        ⚠️ 通知**只是提前**：真正的判据在 `_refresh_visibility()`（pump 每轮现读
+           `occlusionState`）—— 通知丢了、平台不同、测试里根本没装窗口，都还能工作。
+        ⚠️ observer 存进 `self._vis_obs` **强引用**，否则被 GC 后静默失效。
+        """
+        try:
+            from AppKit import (NSNotificationCenter, NSNotificationQueue,
+                                NSWindowDidChangeOcclusionStateNotification,
+                                NSWorkspace, NSWorkspaceScreensDidSleepNotification,
+                                NSWorkspaceScreensDidWakeNotification)
+        except Exception:                                 # noqa: BLE001
+            return
+        try:
+            nc = NSNotificationCenter.defaultCenter()
+            self._vis_obs.append(nc.addObserverForName_object_queue_usingBlock_(
+                NSWindowDidChangeOcclusionStateNotification, self._panel, None,
+                lambda _n: self._refresh_visibility()))
+        except Exception:                                 # noqa: BLE001
+            pass
+        try:
+            ws_nc = NSWorkspace.sharedWorkspace().notificationCenter()
+            self._vis_obs.append(ws_nc.addObserverForName_object_queue_usingBlock_(
+                NSWorkspaceScreensDidSleepNotification, None, None,
+                lambda _n: self._set_screens_sleeping(True)))
+            self._vis_obs.append(ws_nc.addObserverForName_object_queue_usingBlock_(
+                NSWorkspaceScreensDidWakeNotification, None, None,
+                lambda _n: self._set_screens_sleeping(False)))
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _set_screens_sleeping(self, sleeping: bool) -> None:
+        self._screens_sleeping = bool(sleeping)
+        if not self._screens_sleeping:
+            self._presented_t = time.monotonic()      # 屏幕刚醒：occlusionState 同样是旧值
+        self._refresh_visibility()
+
+    def _compute_visible(self) -> bool:
+        """此刻窗口算不算「看得见」。收起 / 屏幕睡 / 被完全遮挡 → 否。
+
+        ⚠️ 只认 `occlusionState` 的 **Visible 位**：部分遮挡仍是 True（Apple 的语义），
+           「完全被盖住」才是 False —— 那正是没有理由继续画的时刻。
+        ⚠️ **窗口还没上过屏**（`show()` 之前 / 测试里直接构造）时不拿 occlusion 判：
+           一个没 orderFront 过的 NSWindow 的 `occlusionState` 恒为「不可见」，
+           拿它当判据会把「还没显示」误判成「用户把它藏了」→ 一帧都不画。
+        ⚠️ 刚 `orderFrontRegardless` / 屏幕刚醒时 `occlusionState` 是**旧值**（要跑一轮
+           run loop 才更新）→ `_presented_t` 之后那一小段里不据此降级。
+        ⚠️ 判不出来时**当作看得见**（宁可多画，不许把字幕冻住）。
+        """
+        if self._closed or self._hidden or self._screens_sleeping:
+            return False
+        if not self._presented:
+            return True
+        try:
+            from AppKit import NSWindowOcclusionStateVisible
+            if self._panel.occlusionState() & NSWindowOcclusionStateVisible:
+                return True
+        except Exception:                                 # noqa: BLE001
+            return True
+        return (time.monotonic() - self._presented_t) < _OCCLUSION_SETTLE_S
+
+    def _refresh_visibility(self) -> None:
+        """现算可见性；变化时记时并处理「恢复」。pump 每轮调（通知只是提前）。"""
+        vis = self._compute_visible()
+        if vis == self._visible:
+            return
+        self._visible = vis
+        if vis:
+            self._on_became_visible()
+        else:
+            self._hidden_t0 = time.monotonic()
+            self._on_became_hidden()
+
+    def _on_became_hidden(self) -> None:
+        """刚变成看不见：不做什么 —— 渲染/tick 在 `_pump_once` 里按 `self._visible` 跳过。
+
+        ⚠️ **不停**采音 / VAD / 定稿 / 翻译 / 落盘；停的只是「画」。
+        """
+
+    def _on_became_visible(self) -> None:
+        """刚变回看得见：累积不可见时长 + **一帧画完整屏**（跳过所有积压动画，直接落位）。"""
+        if self._hidden_t0 is not None:
+            self._hidden_total_s += max(0.0, time.monotonic() - self._hidden_t0)
+            self._hidden_t0 = None
+        self._land_everything()
+
+    @property
+    def hidden_seconds(self) -> float:
+        """累计不可见秒数（含**当前还没结束**的那一段）—— 收尾进测试模式 ui 块 `hidden_s`。"""
+        t = self._hidden_total_s
+        if self._hidden_t0 is not None:
+            t += max(0.0, time.monotonic() - self._hidden_t0)
+        return t
+
+    @property
+    def visible(self) -> bool:
+        """窗口此刻看得见吗（`pump` 每轮现算）。
+
+        ⚠️ 给**后台线程**读的：`main.partial_worker` 据此停草稿识别、草稿译文线程据此
+           不发请求。它是一个普通 bool 的读，不加锁（GIL 下够用；只判"要不要做"）。
+        """
+        return bool(self._visible)
+
+    def _land_everything(self) -> None:
+        """把所有**逐帧推进**的东西直接推到终态，然后按当前 `_history` 立刻画一帧。
+
+        隐藏期间 `drain()` 照常收数据、`_history` 照常长 —— 只是没画。恢复时
+        「积压的那几秒动画」没有意义（用户没看见），所以跳过它、直接落位：
+        旧写法会让最后一帧的上滚/淡出从头跑 0.28 s，屏上先演一段「历史回顾」。
+        `self._no_animate` 保证这一帧里任何「起跑」判据都退回终态那一支。
+        """
+        self._no_animate = True
+        try:
+            self._tv._end_roll()          # 上滚 / 半句合并位移
+            self._draft_end_fade()        # 草稿让位淡出
+            self._draft_rev_normalize()   # 草稿改字淡换（属性串要收回普通串）
+            self._draft_shown = False     # 别把「隐藏前那份草稿」当成本帧刚变空 → 又起跑一次淡出
+            self._mark_dirty(urgent=True)  # 立刻 _render() 一帧（`_flush_if_due` 里 urgent 无条件 flush）
+        finally:
+            self._no_animate = False
+
+    def wake(self) -> None:
+        """叫醒主循环的等待（`pump` 里那次让步）。**跨线程安全**。
+
+        Apple 文档（`NSApplication.postEvent(_:atStart:)`）逐字：
+        `This method can also be called in subthreads. Events posted in subthreads
+        bubble up in the main thread event queue.` —— 所以后台线程可以调它。
+
+        ⚠️ **不能**用 `CFRunLoopWakeUp`：实测它**打断不了**本次这个等待写法
+        （0.5 s 的 `nextEventMatchingMask_untilDate_` / `runUntilDate_` 都照样睡满），
+        只有「投一个事件」能让 `nextEventMatchingMask_untilDate_` 立刻返回
+        （实测 0.5 s → **0.054 s**）。判据：`tests/test_pump_idle.py`。
+        """
+        try:
+            from AppKit import NSApp, NSEvent, NSEventTypeApplicationDefined
+            app = NSApp()
+            if app is None:
+                return
+            app.postEvent_atStart_(
+                NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
+                    NSEventTypeApplicationDefined, (0, 0), 0, 0, 0, None,
+                    WAKE_SUBTYPE, 0, 0), True)
+        except Exception:                                 # noqa: BLE001
+            pass
 
     def overflow_stats(self) -> dict:
         """只读转发 `TranscriptView.overflow_stats()`（收尾时 `main` 交给测试报告）。"""
@@ -2308,11 +2616,15 @@ class Overlay:
             self._draft_over = flag
             self._mark_dirty(urgent=True)
 
-    def finalize(self, en: str, zh: str, *, clear_draft: bool = True):
-        """`clear_draft=False`: 屏上已是**更新一段**的草稿(旧段定稿晚到), 别擦掉它。"""
+    def finalize(self, en: str, zh: str, *, clear_draft: bool = True) -> int | None:
+        """`clear_draft=False`: 屏上已是**更新一段**的草稿(旧段定稿晚到), 别擦掉它。
+
+        返回这一行的**身份号**（给跨段半句合并定位用；`fragment_merge` 的 `tail_tok` /
+        `next_tok` 就是它）。没上屏（两个都空）→ `None`。
+        """
         if not zh and not en:
-            return
-        self._history.append((en, zh))
+            return None
+        tok = self._log.append(en, zh)
         self._cur_zh, self._cur_en, self._streaming = "", "", False
         self._cur_en_seed, self._draft_over = "", False
         if clear_draft:
@@ -2320,6 +2632,27 @@ class Overlay:
             self._draft_zh_val = ""
             self._draft_base_len = self._draft_zh_base_len = None    # 断点滞回一起清
         self._mark_dirty(urgent=True)
+        return tok
+
+    def replace_merge(self, tail_tok: int, next_tok: int, en: str, zh: str) -> bool:
+        """跨段半句合并的落点：把尾句那一行换成合并译文、**并吞掉**下一段首句那一行。
+
+        一次 `replace_pair` 原子改两行（按**身份**定位 —— 从触发到重翻回来之间屏上
+        可能又插了别的行）。返回是否真的改了；失败（行已被别的路径改过）→ `False`，
+        屏上原样、不报错。
+        ⚠️ 只在**内存 `_history`** 上改：`.md` 不动（三方契约），旁路由 `writer.mark_merge` 记。
+        ⚠️ 答疑 / 纲要接管期间也**照改 `_history`**：接管只换渲染源、从不碰 `_history`
+        （`_clear_answer` 的"字幕不会丢"就是靠这一条），所以改的是**历史缓冲**本身，
+        退出接管时自然显示合并后的那一行。手动回看（未跟随）同理 —— 同长度变短不触发上滚。
+        ⭐ 少一行 + 尾句文字被换**两件事都要过渡**（`_paint` 里 `grew<0` 那支原来什么都不做：
+        上面的行瞬移下来一行、尾句文字直接换 —— 已显示文字被改 = 分心, CHI 2023 N=123）。
+        落点由 `TranscriptView._paint` 自己按行数对账, 这里只把"删了第几行"递过去。
+        """
+        if not self._log.replace_pair(tail_tok, next_tok, en, zh):
+            return False
+        self._tv.note_merge(self._log.last_deleted)
+        self._mark_dirty(urgent=True)
+        return True
 
     # ---- 答案接管(Phase 3) ----
     # 一条线程两个入口(「讲一下」按钮 / 输入框追问), 共用一块渲染区: 答案活跃时
@@ -2576,7 +2909,8 @@ class Overlay:
     def _clear_answer(self):
         """退出接管: 清答案缓冲 + 还原面板状态 + 字幕重现(「字幕」按钮走这里)。
 
-        **字幕不会丢** —— 这是接管方案的核心安全性质: _history 只由 finalize() 追加,
+        **字幕不会丢** —— 这是接管方案的核心安全性质: _history 只由 finalize() 追加
+        （外加跨段半句合并 `replace_merge` 按身份原地改两行，也走同一个 list），
         _render 从不碰它, 所以接管期间到达的句子一直在后台累积, 这里只是把渲染源
         换回它, 停下期间的字幕会一次性全部出现。"""
         if not self._answer_on and self._tv_mode == "cap":
@@ -2800,6 +3134,106 @@ class Overlay:
         lbl.setStringValue_(text)
 
     # ---- 草稿的 2 行 roll-up ----
+    def _set_draft_text(self, key, lbl, text: str, *, cjk: bool) -> None:
+        """草稿槽位的文本写入。**改了前面已显示的词**时, 只让变化的那一段淡入。
+
+        ⭐ C1/S2(报告 §5 · CHI EA 2023 的 Liu 等, **N=123**): 已显示的文字被改与
+        疲劳/分心正相关; 只对**变化的 token**做平滑过渡, 未变的词一个都不动。
+        退出条件(逐条都硬):
+          · 末尾**纯追加** → 维持现状直接写(那是"长出来", 不是"被改");
+          · 换行位置变了(`text_diff.same_breaks`) → 直接换(换行一动, 未变的词会整块
+            搬到别的行上 —— 那正是同一篇点名的另一种分心);
+          · `reduce_motion()` / 没人推帧(`_tv._animate_ok`) → 直接换。
+        计数(「纯追加」/「改了前面的词」)进 `testmode` 现有的 block 机制 ——
+        `self._note` 就是 `TestSession.note_ui`, 落进 `blocks.ui`, **不新开文件**。
+        """
+        if self._label_cache.get(key) == text:
+            return
+        old = self._label_cache.get(key) or ""
+        self._label_cache[key] = text
+        if old and text and old != text:
+            appended = text.startswith(old)
+            self._note("draft_append" if appended else "draft_rewrite")
+            if not appended:
+                runs = text_diff.diff_runs(old, text, cjk=cjk)
+                if (runs and any(ch for _, ch in runs)
+                        and self._draft_fade_ok()
+                        and text_diff.same_breaks(old, text, runs)):
+                    self._draft_rev[key] = (text, runs, self._clock())
+                    self._draft_rev_paint(key, lbl)      # 立刻画出 α 起跑那一帧
+                    return
+        self._draft_rev.pop(key, None)
+        # ⚠️ 无条件走普通串: 上一轮若停在属性串上, 这里一次 `setStringValue_` 就收回来
+        #    (`setAttributedStringValue_` 会顶掉标签自己的字色/描边, 过渡态不能留)。
+        lbl.setStringValue_(text)
+
+    def _draft_fade_ok(self) -> bool:
+        """这一次改字能不能做过渡: 有人逐帧推 tick(否则会停在半路) + 没开减弱动态效果。"""
+        return self._tv._animate_ok() and not _reduce_motion()
+
+    def _draft_rev_paint(self, key, lbl) -> None:
+        """把「变化的那一段」按当前进度画出来; 走到头就换回普通串(过渡态只活 `STATE_S`)。
+
+        ⚠️ `scripts/probe_motion.py` 的**腿③**会因为这个淡换看起来变差(帧数大幅超 8.3ms)
+        —— 那是**紧循环里的时钟 artifact**: 那一腿用真时钟、每轮只花 ~0.02ms, 于是
+        `STATE_S`(0.2s)要上万轮才走完, 淡换期间**每轮都重画**。真机上它只活 12 帧。
+        本实现的每帧成本(实测, 本机): 构建属性串 0.025ms / 构建+写标签 0.029ms(最大 0.46);
+        中文 diff 每次改字 **一次** 0.17ms。对照: 上滚那一支每帧 `_regeom` 0.073ms。
+        """
+        spec = self._draft_rev.get(key)
+        if spec is None:
+            return
+        text, runs, t0 = spec
+        a = motion.ease_out(motion.progress(t0, self._clock(), motion.STATE_S))
+        if a >= 1.0:
+            self._draft_rev.pop(key, None)
+            lbl.setStringValue_(text)
+            return
+        lbl.setAttributedStringValue_(self._draft_rev_string(lbl, runs, a))
+
+    def _draft_rev_normalize(self) -> None:
+        """把还在淡换中的标签写回**普通串**（丢掉属性串）。
+
+        ⚠️ 必须做: 属性串是**过渡态**, 留着它两个后果 —— ① 字色/描边不再是标签自己的;
+        ② 更坏的是"文本没变"时 `_set_draft_text` 会**缓存命中直接返回**, 那一格就永久
+        停在半透明的颜色上(见 `_render_draft` 让位淡出那一支)。
+        """
+        for key, lbl in (("draft", self._draft_lbl), ("draft_zh", self._draft_zh)):
+            if key in self._draft_rev:
+                self._draft_rev.pop(key, None)
+                lbl.setStringValue_(lbl.stringValue())
+
+    @staticmethod
+    def _draft_rev_string(lbl, runs, a: float):
+        """未变的 run 原样、变化的那几段用 α 的前景色 —— 一次属性串拼好。
+
+        ⚠️ 为什么不是"叠一层覆盖 label"(报告 §5 给的另一个选项): 未变化的字必须
+        **一个像素都不动**, 而这一条是**同一份排版**里只换字色 —— 位置在构造上就
+        不可能漂。覆盖层要自己量前缀宽度、还要处理"变化段跨行", 那是第二套排版,
+        两套排版迟早对不上(本仓库 `_layout`/`_roll_into` 都写着"量的尺与画的笔别漂开")。
+        ⚠️ 代价: 过渡期间每帧重写**这一个**标签(至多 `STATE_S`=0.2s, 约 12 帧);
+        草稿行最多 2 行(约 40 字)。而"每帧量宽度"那条路才是 `_roll_into` 注释里
+        算过的 12% 帧预算那一档(每秒 ~120ms)。所以选便宜的这条。
+        """
+        from AppKit import (NSAttributedString, NSFontAttributeName,
+                            NSForegroundColorAttributeName, NSShadowAttributeName,
+                            NSColor, NSMutableAttributedString)
+        base = lbl.textColor() or NSColor.whiteColor()
+        plain = {NSFontAttributeName: lbl.font(), NSForegroundColorAttributeName: base}
+        sh = lbl.shadow()
+        if sh is not None:
+            plain[NSShadowAttributeName] = sh          # 描边要跟着, 否则过渡期间字会"变糊"
+        faded = dict(plain)
+        faded[NSForegroundColorAttributeName] = base.colorWithAlphaComponent_(
+            base.alphaComponent() * a)
+        out = NSMutableAttributedString.alloc().init()
+        for t, ch in runs:
+            if t:
+                out.appendAttributedString_(
+                    NSAttributedString.alloc().initWithString_attributes_(
+                        t, faded if ch else plain))
+        return out
+
     def _render_draft(self) -> None:
         """草稿两槽按 `rollup_lines` 折成至多 2 行写进标签。
 
@@ -2832,6 +3266,9 @@ class Overlay:
                 self._draft_fade_t0, self._clock(), motion.EXIT_S))
             if e < 1.0:
                 a = 1.0 - e
+                # 让位期间不叠"改字淡换"(两套 alpha 会打架); 属性串**必须收回来** ——
+                # 留着它两个后果见 `_draft_rev_normalize`。
+                self._draft_rev_normalize()
                 self._draft_lbl.setAlphaValue_(a); self._draft_zh.setAlphaValue_(a)
                 return
             self._draft_end_fade()
@@ -2841,7 +3278,12 @@ class Overlay:
             self._draft_base_len)
         self._draft_zh_base_len = self._roll_into(
             "draft_zh", self._draft_zh, zh, DRAFT_ZH_H, self._draft_box_y_zh, w,
-            self._draft_zh_base_len)
+            self._draft_zh_base_len, cjk=True)
+        # ⭐ 改字淡换的逐帧推进(只改那几段的前景色)。驱动与"让位淡出"同一条:
+        #    `_pump_once` 看到 `_draft_fade_t0` 或 `_draft_rev` 非空就调本函数。
+        for key, lbl in (("draft", self._draft_lbl), ("draft_zh", self._draft_zh)):
+            if key in self._draft_rev:
+                self._draft_rev_paint(key, lbl)
 
     def _draft_end_fade(self) -> None:
         if self._draft_fade_t0 is None:
@@ -2849,8 +3291,11 @@ class Overlay:
         self._draft_fade_t0 = None
         self._draft_lbl.setAlphaValue_(1.0); self._draft_zh.setAlphaValue_(1.0)
 
-    def _roll_into(self, key, lbl, text, box_h, box_y, w, prev_base_len):
+    def _roll_into(self, key, lbl, text, box_h, box_y, w, prev_base_len, *,
+                   cjk: bool = False):
         """把一个草稿槽位按 2 行 roll-up 写进去; 返回新的底行长度(空则 None)。
+
+        `cjk` 只影响**改字淡换**的分词(中文走 BudouX, 见 `text_diff`)。
 
         ⚠️ **贴底对齐**, 不是贴顶。CFR §15.119 的 roll-up 里 base row 在**底部**:
         新字从底行进、旧行被顶到上一行去。所以一行草稿要占**下面那一行**, 盒子
@@ -2861,7 +3306,7 @@ class Overlay:
         from AppKit import NSMakeRect        # 本文件一贯在方法内局部导入 AppKit
         if not text:
             self._draft_cache.pop(key, None)
-            self._set_cached(key, lbl, "")
+            self._set_draft_text(key, lbl, "", cjk=cjk)
             lbl.setFrame_(NSMakeRect(PAD, box_y, w, box_h))
             return None
         # ⭐ **记忆化**。真正的开销窗口不是草稿(≤1/s), 而是**答案流式期间**: `answer_delta`
@@ -2886,7 +3331,7 @@ class Overlay:
         # 不必 `min(box_h, ...)` —— `used ≤ ROLL_LINES` 由 `rollup_lines` 按 ROLL_LINES
         # 封顶保证; 写个 min 反而会把"盒子与上限不一致"这种错**盖住**。
         lbl.setFrame_(NSMakeRect(PAD, box_y, w, used * (box_h / ROLL_LINES)))
-        self._set_cached(key, lbl, display)
+        self._set_draft_text(key, lbl, display, cjk=cjk)
         return base_len
 
     # ---- 渲染合并 ----
@@ -2901,6 +3346,10 @@ class Overlay:
 
     def _flush_if_due(self):
         if not self._dirty:
+            return
+        if not self._visible:
+            # 窗口看不见 -> 只记账、不画（`_dirty`/`_urgent` 留着，恢复那一帧无条件 flush，
+            # 见 `_land_everything()`）。隐藏期间 `drain()` 照常收数据、`_history` 照常长。
             return
         if not self._urgent:
             now = time.monotonic()
@@ -2925,8 +3374,12 @@ class Overlay:
         旧顺序是 ①→③→②, 等于"先空转 8ms 再写标签", 画面要等下一轮才更新,
         白白多一帧(8ms)延迟。
 
-        让步时长靠"距上次事件多久"决定, 不靠"本轮是否有事件"(见常量说明):
-        手势期间只跑 run loop 不睡(零延迟), 停手 150ms 后回到 8ms 省 CPU。
+        ⭐ 3.9.7 让步分三档（见常量说明的实测数字），由 `_pump_tier()` / `_pump_wait_s()` 决定：
+          手势中（距上次事件 < `PUMP_ACTIVE_S`）→ 零延迟（`runUntilDate_(distantPast)`）；
+          **有东西在动**（`_motion_active()`）→ 屏幕刷新周期 `_hot_wait_s()`（120 Hz → 8.33 ms，
+          与改动前 8 ms 同为「一屏一帧」）；
+          什么都没在动 → `PUMP_IDLE_LONG_S`；窗口不可见 → `PUMP_HIDDEN_S`。
+          后两档走 `_wait_interruptible()` —— 新数据靠 `wake()` 立刻打断，不等满。
         """
         if not _HAS_APPKIT:
             return
@@ -2940,19 +3393,166 @@ class Overlay:
         with objc.autorelease_pool():
             self._pump_once()
 
-    def _pump_once(self):
-        from AppKit import (NSApplication, NSEventMaskAny, NSDefaultRunLoopMode,
-                            NSRunLoop, NSDate)
-        app = NSApplication.sharedApplication()
-        mode = NSDefaultRunLoopMode
+    def _motion_active(self) -> bool:
+        """窗口可见时, 此刻有**逐帧推进**的东西在跑吗。
+
+        有 → 让步保持热档 —— 屏幕刷新周期 `_hot_wait_s()`（120 Hz 上 = 8.33 ms，与 3.9.7
+        之前写死的 8 ms 同为「一屏一帧」→ 动效顺滑度零变化）；
+        没有 → `PUMP_IDLE_LONG_S`。⭐ 清单（**漏一个 = 那个动画被拖慢**）：
+          ① 转录区上滚 / 半句合并位移 —— `_tv._roll_t0 is not None`（`_step_roll` 每帧推）
+          ② 草稿「让位」淡出 —— `_draft_fade_t0 is not None`（`_render_draft` 每帧推）
+          ③ 草稿「改字」淡换 —— `_draft_rev` 非空（`_draft_rev_paint` 每帧推）
+          ④ 主窗有待 flush 的渲染 —— `_dirty` / `_urgent`（草稿上屏、流式增量、
+             答案流式打字、定稿入列、术语、❓ 点拨…都经 `_mark_dirty` 落到这里；
+             合并闸门 `FLUSH_DT` 只有 16 ms，不列它 = 流式文字掉到 10 fps）
+          ⑤ 转录区自己有待 flush 的渲染 —— `_tv._dirty` / `_tv._urgent`
+          ⑥ 顶栏到点要淡出 —— `_bar_hide_at is not None`（`_bar_tick` 的 TTL；
+             不列它会把淡出的**起点**量化到 0.1 s）
+
+        ⚠️ Core Animation 隐式动画（`motion.fade_property` / `fade_swap` / `CATransition` /
+           `NSAnimationContext`）由渲染服务器跑，**不需要**热档 —— 但它们起跑那一帧要
+           及时 commit：两档让步都仍「跑一轮 run loop」，提交照旧发生。
+        ⚠️ `_hint` 到期 / `_chip_frames_later` 的 NSTimer 由**运行中的 run loop** 到点处理，
+           长让步对它们的量化 ≤ `PUMP_IDLE_LONG_S`（0.1 s）；hint 是纯 TTL，
+           chip 过渡由用户点击驱动（那一轮本来就在热档）。
+        """
+        return bool(
+            self._tv._roll_t0 is not None
+            or self._draft_fade_t0 is not None
+            or self._draft_rev
+            or self._dirty or self._urgent
+            or self._tv._dirty or self._tv._urgent
+            or getattr(self, "_bar_hide_at", None) is not None
+        )
+
+    def _hot_wait_s(self) -> float:
+        """热档（有东西在动）的让步 = 窗口所在屏幕的刷新周期；坏值 → `PUMP_IDLE_S`。
+
+        ⭐ 为什么按屏幕刷新率：`PUMP_IDLE_S` 曾是写死的 8 ms。60 Hz 的 MacBook Air 上，
+           8 ms 让步让 pump 跑 ~125 Hz —— 比面板快一倍，白烧 CPU 却一个像素都不多画；
+           120 Hz 屏上退到 16.7 ms 又会每帧都晚半拍（掉帧）。
+        ⚠️ **现读**而非订阅 `NSWindowDidChangeScreenNotification`：`panel.screen()` 是一次
+           便宜的 msgSend，且**不可能漏**（通知会漏、还要管注册/注销与初始状态）。
+           派生出的周期按**屏幕对象身份**备忘 —— 同一块屏的刷新率是常量，换屏必然换对象，
+           身份一变就重算，所以既便宜又不会用错屏的周期。
+        """
+        try:
+            screen = self._panel.screen()
+        except Exception:                                 # noqa: BLE001
+            screen = None
+        if screen is not self._hot_screen:
+            self._hot_screen = screen
+            self._hot_wait = _screen_hot_wait(screen)
+        return self._hot_wait
+
+    def _pump_tier(self, now: float) -> str:
+        """本轮走哪一档（`WAIT_*`）—— `_pump_wait_s()` 与 `_yield_to_runloop()` 的**同一份**判据。
+
+        ⚠️ 判据只许有一份：热档让步现在是**屏幕刷新周期**（8.33 / 16.7 ms），拿它跟
+           `PUMP_IDLE_S`（0.008）比大小会判错（60 Hz 的 0.0167 > 0.008）→ 热档被当成
+           长档、走可打断等待，120 / 60 Hz 行为分叉。
+        """
+        if not self._visible:
+            return WAIT_HIDDEN
+        if now - self._last_ev_t < PUMP_ACTIVE_S:
+            return WAIT_GESTURE
+        if self._motion_active():
+            return WAIT_HOT
+        return WAIT_IDLE
+
+    def _tier_wait_s(self, tier: str) -> float:
+        """档位 → 让步秒数。0 = 手势热档（只跑一轮 run loop、不睡）。"""
+        if tier == WAIT_GESTURE:
+            return 0.0
+        if tier == WAIT_HOT:
+            return self._hot_wait_s()
+        if tier == WAIT_HIDDEN:
+            return PUMP_HIDDEN_S
+        return PUMP_IDLE_LONG_S
+
+    def _pump_wait_s(self, now: float) -> float:
+        """本轮让步时长（秒）。0 = 手势热档（只跑一轮 run loop、不睡）。"""
+        return self._tier_wait_s(self._pump_tier(now))
+
+    def _wait_interruptible(self, app, mode, seconds: float, mask=None) -> None:
+        """空闲 / 不可见档的让步：**可被 `wake()` 立刻打断**。
+
+        ⚠️ 为什么不是 `runUntilDate_`：实测它**打不断** —— `CFRunLoopWakeUp`、
+           `CFRunLoopPerformBlock`+WakeUp、往 NSApp 投事件，三种都照样把 0.5 s 睡满
+           （`runUntilDate_` 处理完源还会回去睡到那个日期）。只有
+           `nextEventMatchingMask_untilDate_` 收到事件时**立刻返回**（实测 0.5 s → 0.054 s）。
+        `mask` 缺省 `NSEventMaskAny`：真实事件（鼠标 / 键盘 / 滚轮 / 找回路）也走这条 ——
+        比原来「睡满再处理」**更早**派发；派发过的真实事件照旧把热档续上 0.15 s，
+        所以手势手感与改动前一致。唤醒令牌不算用户事件（见 `_is_wake_event`）。
+        ⚠️ `mask` 参数只为**判据**能把唤醒令牌单独隔离出来（环境里总有零星系统事件，
+           不隔离的话「没 wake 也会早退」，那条判据就恒真、抓不住东西）。
+        """
+        from AppKit import NSEventMaskAny, NSDate
+        try:
+            ev = app.nextEventMatchingMask_untilDate_inMode_dequeue_(
+                NSEventMaskAny if mask is None else mask,
+                NSDate.dateWithTimeIntervalSinceNow_(seconds), mode, True)
+        except Exception:                                 # noqa: BLE001
+            return
+        if ev is None or _is_wake_event(ev):
+            return
+        try:
+            app.sendEvent_(ev)
+            self._last_ev_t = time.monotonic()            # 真实事件 = 用户刚动过 → 下一轮热档
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _yield_to_runloop(self, app, mode, now: float) -> None:
+        """让步（见 `pump` 的三档）。⚠️ 手势档与热档用 `runUntilDate_` —— 与改动前
+        **逐字同一条路**（热档只是把时长换成屏幕周期）；只有空闲/不可见两条长档换成
+        可打断的 `_wait_interruptible`。"""
+        from AppKit import NSRunLoop, NSDate
+        tier = self._pump_tier(now)
+        rl = NSRunLoop.currentRunLoop()
+        if tier == WAIT_GESTURE:
+            # 手势中: 立刻返回, 但**仍跑完一轮 run loop** —— 不能真跳过,
+            # 否则 CA 不提交、画面冻住(见常量说明的实测)。
+            rl.runUntilDate_(NSDate.distantPast())
+        elif tier == WAIT_HOT:
+            rl.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(self._tier_wait_s(tier)))
+        else:
+            self._wait_interruptible(app, mode, self._tier_wait_s(tier))
+
+    def _drain_events(self, app, mode) -> bool:
+        """排空 NSApplication 事件队列并派发。返回**有没有真实事件**（`busy`）。
+
+        ⚠️ `wake()` 投的**唤醒令牌**要丢掉、且**不算**「用户刚动过」—— 否则每来一帧数据
+           都会把热档续 0.15 s，省电就白省了（见常量说明）。
+        ⚠️ 必须显式排空并 `sendEvent_`，否则真实鼠标点击会一直积压在 NSApp 队列里、
+           永远到不了窗口/按钮（实测：只跑 `NSRunLoop.runUntilDate_` 时事件仍在队列中）。
+        """
+        from AppKit import NSEventMaskAny
         busy = False
         while True:
             ev = app.nextEventMatchingMask_untilDate_inMode_dequeue_(
                 NSEventMaskAny, None, mode, True)
             if ev is None:
                 break
+            if _is_wake_event(ev):
+                continue                  # 唤醒令牌不是用户事件
             app.sendEvent_(ev)
             busy = True
+        return busy
+
+    def _pump_once(self):
+        from AppKit import NSApplication, NSDefaultRunLoopMode
+        app = NSApplication.sharedApplication()
+        mode = NSDefaultRunLoopMode
+        busy = self._drain_events(app, mode)
+        # 可见性**现算**（通知只是提前）。放在派发之后：菜单栏 / 「再打开一次」那条
+        # 找回路正是在派发里把窗口叫回来的，这一轮就能按新状态画。
+        self._refresh_visibility()
+        if not self._visible:
+            # 不可见：不 tick、不 flush、不 housekeeping；只保留**事件派发**
+            # （找回路 / 菜单栏 / 点 ✕ 还要能用）与这一档让步。
+            # ⚠️ 采音 / VAD / 定稿 / 翻译 / 落盘都在别的线程，不受这里影响。
+            self._yield_to_runloop(app, mode, time.monotonic())
+            return
         # 键盘不自留 —— 用**不变量**兜住所有路径, 而不是逐个交互点打补丁。
         # override canBecomeKeyWindow=True 之后, 点面板的**任何**非控件区域
         # (转录区 / 草稿行 / 顶栏空白 / 缝隙)都会让面板变成 key window 并赖在那里,
@@ -2975,16 +3575,11 @@ class Overlay:
             self._last_ev_t = now
         self._last_pump_t = self._clock()
         self._tv.tick()          # 跟随状态机 + 闲置回底(含滚动后的池重算) + 新行上滚的逐帧推进
-        if self._draft_fade_t0 is not None:
-            self._render_draft()     # 草稿让位淡出的逐帧推进(只改透明度, 见 _render_draft)
+        if self._draft_fade_t0 is not None or self._draft_rev:
+            # 草稿让位的淡出 / 改字淡换的逐帧推进(都只改透明度, 见 _render_draft)
+            self._render_draft()
         self._flush_if_due()
-        rl = NSRunLoop.currentRunLoop()
-        if now - self._last_ev_t < PUMP_ACTIVE_S:
-            # 手势中: 立刻返回, 但**仍跑完一轮 run loop** —— 不能真跳过,
-            # 否则 CA 不提交、画面冻住(见常量说明的实测)。
-            rl.runUntilDate_(NSDate.distantPast())
-        else:
-            rl.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(PUMP_IDLE_S))
+        self._yield_to_runloop(app, mode, now)
 
     # 收尾路径(main.py 文件播完后的冲刷循环)只调 drain()、不调 pump(),
     # 所以 mutator 自己会 _flush_if_due(); 那里每轮 sleep(0.02) > FLUSH_DT,
@@ -3058,10 +3653,10 @@ class Overlay:
 
     def _style_mode_chip(self):
         """模式胶囊的静态外观 + 悬停。外观只是锦上添花：任何一步拿不到都不影响按钮可用。"""
-        from AppKit import NSColor, NSFont, NSFontWeightMedium, NSScreen
+        from AppKit import NSColor, NSScreen
         b = self._btn_trans
         try:
-            b.setFont_(NSFont.systemFontOfSize_weight_(MODE_CHIP_FONT_PT, NSFontWeightMedium))
+            b.setFont_(_ui_font(MODE_CHIP_FONT_PT))   # A2: 与字幕同一个字体出口
             b.setContentTintColor_(NSColor.whiteColor().colorWithAlphaComponent_(MODE_CHIP_TEXT_ALPHA))
             b.setWantsLayer_(True)
             layer = b.layer()
@@ -3103,22 +3698,52 @@ class Overlay:
             pass
 
     def _place_bar(self, frames, chip_old):
-        """摆顶栏按钮。用户刚点过胶囊（`_chip_anim`）且宽度变了 → 整排一起过渡，否则直接落位。"""
+        """摆顶栏按钮。用户刚点过胶囊（`_chip_anim`）且宽度变了 → 整排一起过渡，否则直接落位。
+
+        ⭐ A7（报告 §5）: 过渡时**整排 frame 动画比文字淡换晚 `CHIP_FRAME_DELAY_S`** ——
+        文字先淡换（`_sync_trans_button` 的 `CATransition`，t≈0），整排再挪到位。
+        这样"字在动的同时框也在动"的双重心智负担被拆开。
+        """
         animate = self._chip_anim and not _reduce_motion()
         self._chip_anim = False
+        self._chip_frame_gen += 1         # 让上一批还没跑的延迟动画作废
+        gen = self._chip_frame_gen
         new = dict((id(b), r) for b, r in frames).get(id(self._btn_trans))
         if animate and new is not None and abs(new.size.width - chip_old.size.width) > 0.5:
-            try:
-                from AppKit import NSAnimationContext
-                NSAnimationContext.beginGrouping()
-                NSAnimationContext.currentContext().setDuration_(MODE_CHIP_ANIM_S)
-                NSAnimationContext.currentContext().setTimingFunction_(motion.ca_timing())
-                for b, r in frames:
-                    b.animator().setFrame_(r)
-                NSAnimationContext.endGrouping()
-                return
-            except Exception:                             # noqa: BLE001
-                pass
+            frames = [(b, r) for b, r in frames]        # 延迟回调要留住这批 frame
+            if not self._chip_frames_later(frames, gen):
+                self._chip_frames_now(frames, gen)      # 排不进 run loop 就同步做
+            return
+        for b, r in frames:
+            b.setFrame_(r)
+
+    def _chip_frames_later(self, frames, gen) -> bool:
+        """把整排 frame 过渡排到 `CHIP_FRAME_DELAY_S` 之后。排不进去返回 False。"""
+        if CHIP_FRAME_DELAY_S <= 0.0:
+            return False
+        try:
+            from AppKit import NSTimer
+            NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+                CHIP_FRAME_DELAY_S, False, lambda _t: self._chip_frames_now(frames, gen))
+            return True
+        except Exception:                               # noqa: BLE001 排不进去就同步做, 观感退一档
+            return False
+
+    def _chip_frames_now(self, frames, gen) -> None:
+        """整排一起过渡（同一个 `NSAnimationContext` 分组）。延后到点上的那一批走这里。"""
+        if gen != self._chip_frame_gen:
+            return                                      # 40ms 内又切了一次档 → 这批已过时
+        try:
+            from AppKit import NSAnimationContext
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.currentContext().setDuration_(MODE_CHIP_ANIM_S)
+            NSAnimationContext.currentContext().setTimingFunction_(motion.ca_timing())
+            for b, r in frames:
+                b.animator().setFrame_(r)
+            NSAnimationContext.endGrouping()
+            return
+        except Exception:                               # noqa: BLE001
+            pass
         for b, r in frames:
             b.setFrame_(r)
 
@@ -3337,6 +3962,9 @@ class Overlay:
             return
         p = self._panel
         self._hidden = bool(hidden)
+        # 立刻按新状态现算可见性：藏 → 马上进「不可见」档（不画、不 tick）；
+        # 显 → `orderFrontRegardless` 之后那一次（本函数末尾）会走 `_land_everything()`。
+        self._refresh_visibility()
         self._note("hide" if hidden else "show")
         if hidden:
             self._edge_tab_show()
@@ -3386,6 +4014,9 @@ class Overlay:
             NSAnimationContext.runAnimationGroup_completionHandler_(_fade_in, None)
         self._hide_traffic_lights()           # 红绿灯每次 orderFront 后会回来（同 `show()`）
         self._release_focus()
+        self._presented = True                # 显 → 窗口真的在屏上了
+        self._presented_t = time.monotonic()  # occlusionState 要跑一轮 run loop 才更新（见 _compute_visible）
+        self._refresh_visibility()            # 显 → 到这里窗口真的在屏上了 → 落位并画一帧
 
     def _edge_tab_show(self) -> None:
         """藏起字幕时，在屏幕边上留一个小把手（2026-10-14 作者：「再点一次 App 太麻烦，能不能吸在屏幕边上」）。

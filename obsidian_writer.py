@@ -14,6 +14,11 @@
 ⚠️ 双层不是"摘要 + 原文": 复习层只是**入口**, 下面那份转录是**逐字保留、未做任何删改**
 的 —— 复习要的是"不遗漏", 摘要会把细节吃掉, 所以转录永远完整地在文件里。
 
+⭐ 3.9.7 第 5b 项: **同一路径写两回**。基础层(转写 + 译文, 含精修 / 碎句合并 / 补译)
+先**原子落盘**一份; 复习层回来后再**原子重写**为完整版。复习层失败 / 被取消 → 留下的
+那份加一行"复习层这次没生成"的说明(怎么用 `scripts/rebuild_note.py` 补)。理由与
+原子性的要求见 `_atomic_write` 的 docstring。
+
 复习层以**英文为主、中文为辅**: 知识点用英文陈述并展开细节, 中文只做点睛, 关键词给中英对照。
 没设课程代码也能写(课程名默认 LECTURE)。
 
@@ -113,6 +118,10 @@ _ASKED = "Question: "       # 格式契约见 cloud_translator.answer_user_conte
 # ⚠️ 这两个数**不引 Thiede 2003 当依据** —— 那是「读完文章延迟写关键词再判断
 #    学没学会」，与「回退 20 秒标一段」是两回事。窗口就是参数，用真实按下时间校准。
 LOST_TAIL = ".lost.jsonl"
+#: 跨段半句合并的**旁路**文件（3.9.7 第 4 项）——`sessions/<同名>.merges.jsonl`。
+#: 与 `.lost.jsonl` **同一条纪律**（懒开 / 只追加 / flush / 幂等关闭 / 失败静默）：
+#: 屏上那一行被合并替换过，`.md` 却一个字不动（三方契约），凭据就落在这里。
+MERGE_TAIL = ".merges.jsonl"
 LOST_LOOKBACK_S = 15.0      # 作者原话「回退十几秒」
 LOST_MIN_SENT = 3           # 15s 窗口 p05=2；慢速段落会短到 2，兜到 3
 LOST_MAX_SENT = 8           # p95=7；封顶才读得动
@@ -241,6 +250,16 @@ OVERVIEW_SYS = """你在为一节英文课堂的笔记写抬头。输入是这�
  "overview_en": "一句话英文概括本课讲了什么(不超过 40 词)",
  "overview_zh": "同一句话的中文(不超过 60 字)"}
 不要引入标题之外的信息。不要输出 JSON 以外的任何内容。"""
+
+
+def _bf_mark(e: dict) -> str:
+    """🩹 课后补译出来的中文在笔记里的**唯一标记处**（空串 = 直播版，逐字不变）。
+
+    ⚠️ 标记是**给读者的真话**：这一句的中文不是课上的直播译文，是课后补的
+    （`backfill.py`）—— 分不出来就意味着把补译当成了直播译文在读。
+    刻意做得很轻（行尾 ` ·补`），它不该跟 `⚠` 那类**异常**标记抢注意力。
+    """
+    return " ·补" if e.get("bf") else ""
 
 
 def _flat(v: str) -> str:
@@ -469,7 +488,7 @@ class ObsidianWriter:
                  api_key: str | None = None, model: str = "deepseek-flash",
                  glossary_path: str | None = None, polish: bool = True,
                  polish_model: str | None = None, keypoints=None,
-                 keypoints_fn=None, lost_explain_fn=None):
+                 keypoints_fn=None, lost_explain_fn=None, backfill_fn=None):
         self.mode = mode
         # ⚠️⚠️ **`enabled` 只管一件事：要不要记录**（`sessions/` 那层底稿）。
         #    **「写不写 Obsidian 笔记」是另一件事** —— 由 `self._vault is not None` 判
@@ -503,10 +522,16 @@ class ObsidianWriter:
         #: ❓ 课后讲解：`fn(blocks) -> [{"explain","q","a"}, …]`（与 blocks 等长，否则不用）。
         #: ⚠️ 同 keypoints：块要到收尾才齐，所以走回调。`None` = 不讲，笔记逐字不变。
         self._lost_explain_fn = lost_explain_fn
+        #: 🩹 漏译句课后补译（3.9.7 第 2 项）：`fn(entries) -> (新 entries, {"need","done"})`。
+        #: ⚠️ `None` = 不补（本模块的默认）：**档位与 key 的判据在 `main`**
+        #:    （纯转录档一个请求都不发、只英·校档不要中文）—— 这里只负责在渲染笔记
+        #:    **之前**放它跑一遍、并把拿回来的 entries 交给渲染。见 `backfill.py` 文件头。
+        self._backfill_fn = backfill_fn
         self._n = 0
         self.session_path: Path | None = None
         self.vault_path: Path | None = None
         self._lost_h = None                 # ❓ 旁路文件句柄(懒开, 见 mark_lost)
+        self._merge_h = None                # 跨段合并旁路句柄(懒开, 见 mark_merge)
         if self.enabled:
             SESSIONS.mkdir(exist_ok=True)
             self.session_path = SESSIONS / (
@@ -524,11 +549,15 @@ class ObsidianWriter:
         return self.enabled and self._vault is not None
 
     # ---- 运行中: 每句立刻落盘(flush) ----
-    def append(self, en: str, zh: str, flagged: bool = False, raw: str = "") -> None:
+    def append(self, en: str, zh: str, flagged: bool = False, raw: str = "") -> str:
         """`en` 是 LLM 修正后的英文, `raw` 是**原始 ASR 转录**。
 
         两个都记: 修正版好读, 原始版是"模型实际听到什么"的凭据 ——
         LLM 偶尔会过度修正(把正确的词改错), 没有原始转录就无从复核。
+
+        返回这条 callout 抬头的时间戳 `HH:MM:SS`（跨段半句合并要把两条原条目的时间戳
+        写进 `.merges.jsonl`）；没落盘（未启用 / 没会话文件）→ `""`。
+        ⚠️ 返回值是**加法**：老调用方不看它，行为一个字没变。
         """
         if not self.enabled or not self.session_path:
             # ⚠️ 不落盘也要**计数**（2026-10-01 审查 F22）：句号是"第几句定稿"，
@@ -536,7 +565,7 @@ class ObsidianWriter:
             #    时原来恒 0，所有区间都成了 0。落盘那条路在下面**写成功后**才加
             #    （F17：写失败不许把句号推过文件一格）。
             self._n += 1
-            return
+            return ""
         ts = time.strftime("%H:%M:%S")          # 定稿那一刻
         mark = " ⭐ Exam Focus" if flagged else ""
         lines = [f"> [!abstract] {ts}{mark}"]
@@ -551,6 +580,7 @@ class ObsidianWriter:
         # ⚠️ `_n` 在**写成功之后**才加（2026-10-01 审查 F17）：原来先加后写，
         #    写失败时 `_n` 比文件多一格 → 之后所有 `src`/全局句号整体错位 1。
         self._n += 1
+        return ts
 
     @property
     def count(self) -> int:
@@ -773,6 +803,66 @@ class ObsidianWriter:
                 pass
             self._lost_h = None
 
+    # ---- 跨段半句合并：旁路文件 `sessions/<同名>.merges.jsonl`（3.9.7 第 4 项）----
+    def _merge_path(self) -> Path | None:
+        """`sessions/<同名>.merges.jsonl`。⚠️ **旁路文件，绝不改会话抬头** ——
+        理由与 `_lost_path` 逐字相同（抬头正则 `_TS` 行尾锚定，`.md` 是三方契约）。"""
+        if not self.session_path:
+            return None
+        return Path(str(self.session_path.with_suffix("")) + MERGE_TAIL)
+
+    def _merge_handle(self):
+        """懒开常驻句柄。**关过之后不再开**（`_merge_closed`）—— 与 `_lost_handle` 同一条纪律。"""
+        if getattr(self, "_merge_closed", False):
+            return None
+        if self._merge_h is None:
+            p = self._merge_path()
+            if p is None:
+                return None
+            self._merge_h = p.open("a", encoding="utf-8")
+        return self._merge_h
+
+    def mark_merge(self, tail_ts: str, next_ts: str, en: str, zh: str, *,
+                   gap_s: float | None = None, trigger: str = "") -> bool:
+        """把一次**跨段合并**追加到旁路文件。返回是否写成。
+
+        字段：两条原条目的时间戳（`a` / `b`，即 `.md` 里那两个 callout 的 `> [!abstract]`
+        抬头）、合并后的 EN / ZH、`gap_s`、触发口径。**只追加、flush、不做 fsync**
+        （与 `mark_lost` 同规矩）；失败静默（多一行少一行不该影响上课）。
+        ⚠️ 屏上替换与这里**互不依赖**：写失败不代表屏上没替换。
+        """
+        p = self._merge_path()
+        if p is None:
+            return False
+        try:
+            h = self._merge_handle()
+            if h is None:
+                return False
+            h.write(json.dumps({"epoch": round(time.time(), 3),
+                                "t": time.strftime("%H:%M:%S"),
+                                "kind": "merge",
+                                "a": tail_ts or "", "b": next_ts or "",
+                                "en": en or "", "zh": zh or "",
+                                "gap_s": None if gap_s is None else round(float(gap_s), 3),
+                                "trigger": trigger or ""},
+                               ensure_ascii=False) + "\n")
+            h.flush()
+            return True
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ 合并记录失败({str(e)[:60]}); 课堂不受影响")
+            return False
+
+    def close_merges(self) -> None:
+        """幂等。文件**不删** —— 同 `close_lost`。关过之后 `mark_merge` 不再开新句柄。"""
+        self._merge_closed = True
+        h = getattr(self, "_merge_h", None)
+        if h is not None:
+            try:
+                h.close()
+            except Exception:                             # noqa: BLE001
+                pass
+            self._merge_h = None
+
     # ---- 原子层：旁路文件 `sessions/<同名>.atoms.jsonl`（plan §1）----
     def _atom_writer(self):
         """懒建 `atom.AtomWriter`。⚠️ **复用那个类，不在这里重写路径拼法** ——
@@ -867,17 +957,17 @@ class ObsidianWriter:
     def _keypoint_items(self, entries: list[dict]) -> list:
         """🎯 Jev 的重点句 → `[(概率, 句子, [原始行下标]), …]`。
 
-        ⚠️⚠️ **这是唯一一处会联网的取数**（`keypoints.pick` → CommandCode），
-           所以它**住在 `close()` 的护栏区里**，和 qa / lost 并列 —— 而不是在
-           `_render_note` 里面。理由（2026-09-29 挪的）：
+        ⚠️⚠️ **这是一处会联网的取数**（`keypoints.pick` → CommandCode；🩹 补译那一层
+           也联网），所以它**住在 `close()` 的护栏区里**，和 qa / lost 并列 ——
+           而不是在 `_render_note` 里面。理由（2026-09-29 挪的）：
            · `_render_note` 是**纯函数**（判据靠它、不碰 AppKit / 网络），
              让它发请求是一条**没人知道的隐式契约**；
-           · `close()` 里那段「五层护栏」的注释要能一眼数出是**五层**。
+           · `close()` 里那段「八层护栏」的注释要能一眼数出是**八层**。
 
         ⚠️ 传给 `keypoints_fn` 的是**句子**，不是 entries —— 读法唯一的定义点
            在本文件 `_parse`，判据/生产都不该自己再抄一份"哪些算句子"。
 
-        ⚠️ **本函数自己兜错**（不是只靠 `close()` 那层）：它是唯一会联网的地方，
+        ⚠️ **本函数自己兜错**（不是只靠 `close()` 那层）：它是要联网的那一处，
            而另外三层取数也各自兜了 —— `_review`（docstring 逐字「失败是**正常
            路径**…绝不抛」）· `_lost_items`（内部接住并打「旁路文件读不出」）·
            `polish_entries`（无 key / 失败原样返回）。⚠️ `_qa_items` 例外：它是**纯
@@ -948,7 +1038,8 @@ class ObsidianWriter:
             lines = [f"- 按于 `{_hms_str(t)}` · 这几句（`{entries[i0]['ts']}`–"
                      f"`{entries[i1]['ts']}`，共 {i1 - i0 + 1} 句）"]
             for e in entries[i0:i1 + 1]:
-                lines.append(f"  - `{e['ts']}` {e['zh'] or e['en'] or e['asr']}")
+                lines.append(f"  - `{e['ts']}` "
+                             f"{e['zh'] or e['en'] or e['asr']}{_bf_mark(e)}")
             out.append("\n".join(lines))
             spans.append((i0, i1))
         if not (explain and self._lost_explain_fn and out):
@@ -1028,7 +1119,8 @@ class ObsidianWriter:
                      polish_state: str = "ok",
                      lost_items: list[str] | None = None,
                      keypoint_items: list | None = None,
-                     chapter_items: dict | None = None) -> str:
+                     chapter_items: dict | None = None,
+                     review_missing: bool = False) -> str:
         ts0 = entries[0]["ts"] if entries else "—"
         ts1 = entries[-1]["ts"] if entries else "—"
         stars = [e for e in entries if e["star"]]
@@ -1068,7 +1160,8 @@ class ObsidianWriter:
                 L.append(f"> **中** — {oz}")
             L += [">", "> <sub>🤖 自动生成 · 依据本课转录</sub>"]
         else:
-            L += ["> *（未自动生成 —— 未配 API key 或调用失败）*"]
+            L += ["> *（未自动生成 —— 收尾时跳过或失败）*" if review_missing
+                  else "> *（未自动生成 —— 未配 API key 或调用失败）*"]
         L += [""]
 
         # 📑 课堂纲要（计划 §10.2）—— **紧跟在概览之后、知识点之前**。
@@ -1100,7 +1193,15 @@ class ObsidianWriter:
                         L.append(f"  · 🔑 {pairs}")
                     L.append("")
         else:
-            L += ["*（未自动生成 —— 未配 API key 或调用失败；可课后自行补）*", ""]
+            # ⭐ 3.9.7 第 5b 项：复习层**本可以生成却没生成**时，这行要说清怎么补
+            #    （笔记这时是「基础版 + 其余已跑完的层」—— 逐句转录一条不少）。
+            #    ⚠️ 与「没配 key / 调用失败」分开说：那是环境，这是**这次收尾没跑到**。
+            if review_missing:
+                L += ["*（复习层这次没生成 —— 收尾时被跳过或失败。逐句转录一条没少；"
+                      "要补：`ClassLive.app/Contents/MacOS/python "
+                      "scripts/rebuild_note.py <会话文件> <课号>`）*", ""]
+            else:
+                L += ["*（未自动生成 —— 未配 API key 或调用失败；可课后自行补）*", ""]
 
         # 复习自测: 英文问答, 中文要点附后; 保持 `问题::答案` 便于 Spaced Repetition
         L += ["## ❓ Review 复习自测", ""]
@@ -1150,7 +1251,7 @@ class ObsidianWriter:
         if stars:
             L += ["## ⭐ 我标记的重点", ""]
             for e in stars:
-                L += [f"- `{e['ts']}` {e['zh'] or e['en'] or e['asr']}"]
+                L += [f"- `{e['ts']}` {e['zh'] or e['en'] or e['asr']}{_bf_mark(e)}"]
                 if e["en"] and e["zh"]:
                     L += [f"  - EN: {e['en']}"]
             L += [""]
@@ -1180,11 +1281,28 @@ class ObsidianWriter:
             if e["en"]:
                 L.append(f"> > **EN**: {e['en']}")
             if e["zh"]:
-                L.append(f"> > **ZH**: {e['zh']}")
+                L.append(f"> > **ZH**: {e['zh']}{_bf_mark(e)}")
             if e["asr"]:
                 L.append(f"> > **ASR**: {e['asr']}")
             L.append("> ")
         return "\n".join(L) + "\n"
+
+    def _atomic_write(self, path: Path, text: str) -> None:
+        """原子落盘：同目录写临时文件 → `os.replace` 换过去。
+
+        ⚠️ 为什么必须原子（3.9.7 第 5b 项）：**同一个路径会被写两次**
+        （基础版 → 复习层回来后的完整版），而 Obsidian 很可能正开着这份笔记。
+        直接 `write_text` 会在「截断」和「写完」之间留一个**空文件 / 半截文件**的
+        窗口 —— 用户正好切过去看到的就是那个。`os.replace` 是同文件系统内的原子
+        rename，读者要么看到旧的、要么看到新的。
+        ⚠️ 临时文件放在**同一目录**（不是系统临时目录）：跨文件系统的 `os.replace`
+           会退化成 copy+unlink，就不是原子的了。
+        ⚠️ 失败（磁盘满 / 只读目录）**照旧往外抛** —— 调用点那层护栏会把它变成
+           「收尾失败」，与原来 `write_text` 抛出去的形状一致（不许把失败吞成"存好了"）。
+        """
+        tmp = path.parent / (path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
 
     # ---- 结束: 询问是否进 Obsidian ----
     def close(self, ask=None, qa=None, on_progress=None, cancel=None) -> str:
@@ -1215,6 +1333,7 @@ class ObsidianWriter:
         #    2026-09-28 由作者那句"不用保存笔记"提醒才发现 —— 那正是会走到早退的路径。
         self.close_lost()
         self.close_atom()      # ⚠️ 同一条教训：**都在早退之前**（下面有四条早退）
+        self.close_merges()    # 同上：跨段半句合并的旁路句柄也在早退之前关
         if not self.enabled or not self.session_path:
             return ""
         # ⚠️ **没有库 = 只跳过「笔记」那一半** —— `sessions/` 已经在了（每句定稿
@@ -1338,6 +1457,35 @@ class ObsidianWriter:
                 print("⚠ 碎句合并被中断；照旧分行", flush=True)
             except Exception as e:                        # noqa: BLE001
                 print(f"⚠ 碎句合并失败({str(e)[:60]}); 照旧分行", flush=True)
+        # 🩹 漏译句补译（3.9.7 第 2 项）：把**只有 ASR** 的句子在渲染笔记之前补上中英。
+        #    ⚠️ 同 polish / note_merge：只改笔记里的 entries，`sessions/` 一个字不动；
+        #       它也是「额外一层」，没网 / 到点 / 失败都只是少几句中文，笔记照写。
+        #    ⚠️ 位置在**碎句合并之后**：并句要的是整句，补译只认"还没中文"的那几条 ——
+        #       先并后补，两条路不会互相覆盖（已精修过的课这里 `need` 恒为 0）。
+        #    ⚠️ **在复习层之前**：复习层喂模型的正是 `en or asr`，补出来的英文它也吃得到
+        #       （两步串行，总时长与顺序无关，见 `_review` 那段的分块说明）。
+        if self._backfill_fn is not None and entries \
+                and not (cancel is not None and cancel.is_set()):
+            try:
+                entries, bstats = self._backfill_fn(entries)
+                if bstats.get("need"):
+                    print(f"🩹 漏译句补译：{bstats.get('done', 0)}/{bstats['need']} 句",
+                          flush=True)
+            except Exception as e:                        # noqa: BLE001
+                print(f"⚠ 漏译句补译失败({str(e)[:60]}); 笔记照旧")
+        # ⭐⭐ 3.9.7 第 5b 项：**基础版先原子落盘**（转写 + 译文这一层，含精修 /
+        #    碎句合并 / 补译；不需要再调模型）。
+        #    ⚠️⚠️ 为什么：复习层（`REVIEW_WORKERS=5` 并发那一段）实测要几十秒，
+        #       而它没回来之前 `Lectures/` 下**一个文件都没有** —— 用户这时关窗 /
+        #       崩溃 / 强杀，这节课**一份笔记都没有**（`sessions/` 里有逐句日志，
+        #       但知道 `scripts/rebuild_note.py` 能补的人不多）。
+        #       现在盘上任何时刻都有一份**可读的**笔记；复习层回来后再**原子重写**
+        #       同一路径为完整版（`_atomic_write`，Obsidian 开着也只看到旧版或新版）。
+        #    ⚠️ 只动 `Lectures/`，`sessions/` 的**三方契约**格式一个字节不碰。
+        #    ⚠️ 路径在这里算**一次**（见结尾那段：`note_path_for` 遇到同名会另存一份）。
+        self.vault_path = note_path_for(self._vault, self._date, self._course)
+        self._atomic_write(self.vault_path,
+                           self._render_note(entries, {}, [], polish_state, [], [], {}))
         if self._key:
             print("🤖 正在生成复习层(知识点详解 + 自测)…", flush=True)
         # ⚠️ 同 `polish` 那条：`_review` 也要跑好几轮 LLM（按 REVIEW_CHUNK 分块，
@@ -1351,11 +1499,24 @@ class ObsidianWriter:
             except KeyboardInterrupt:
                 review = {}
                 print("⚠ 复习层被中断；笔记照常生成（只有逐句转录）", flush=True)
+            except Exception as e:                        # noqa: BLE001
+                # ⚠️ `_review` 自己写着"绝不抛"，但**收尾最后这一层**再兜一次是同一条
+                #    既有纪律（额外一层不许带走底座）—— polish 那层就是这么写的。
+                #    3.9.7 第 5b 项起，兜住它 = 盘上那份基础版会补一行「复习层这次没生成」。
+                review = {}
+                print(f"⚠ 复习层失败({str(e)[:60]}); 笔记照常生成（只有逐句转录）")
+        # ⭐ 复习层**本可以生成却没生成** → 完整版里留一行说明（怎么补回来）。
+        #    ⚠️ 判据是「有 key」：没 key 时那行本来就在说"未配 API key"，不必改口。
+        #    ⚠️ 这一版会**原子重写**基础版：内容只会更多（qa / ❓ / 重点句那一层是在
+        #       复习层**之后**才算的）—— 不是把基础版留在盘上不管。
+        review_missing = bool(self._key) and not (review.get("sections") or [])
+
         # 问答行自带 try/except: 渲染问答抛出去就再也没有那份转录笔记了。隔离是硬要求:
         # 笔记的底座是逐句转录, 它是不能丢的那件事; 问答只是额外一层。
-        # ⚠️ 2026-09-28 起这条纪律**五层都补齐了**（polish / review / qa / lost / keypoints）；
+        # ⚠️ 2026-09-28 起这条纪律**逐层补齐了**（polish / 碎句合并 / 🩹 补译 / review /
+        #    qa / lost / keypoints / 📑 纲要 —— **八层**）；
         #    原来只有后两层有护栏，而前两层才是跑得最久的。
-        #    ⚠️ 五层**住在这里**，不许藏进 `_render_note` —— 那个函数是纯的，
+        #    ⚠️ 八层**住在这里**，不许藏进 `_render_note` —— 那个函数是纯的，
         #       让它发请求是一条没人知道的隐式契约（keypoints 2026-09-29 挪出来的原因）。
         qa_items: list[str] = []
         if qa:
@@ -1371,9 +1532,9 @@ class ObsidianWriter:
                 entries, explain=not (cancel is not None and cancel.is_set()))
         except Exception as e:                            # noqa: BLE001
             print(f"⚠ ❓ 反查失败({str(e)[:60]}); 笔记照常生成")
-        # 🎯 同上。⚠️ 这一层是**唯一会联网的**（一节课实测约 6 秒 / 20 次请求），
+        # 🎯 同上。⚠️ 这一层会联网（一节课实测约 6 秒 / 20 次请求；🩹 补译那层也会），
         #    所以它更不能把笔记带下水。`_keypoint_items` 自己也会兜一层，这里再兜
-        #    一次是因为上面两层都这么写 —— 五层并排读起来才是同一条纪律。
+        #    一次是因为上面两层都这么写 —— 八层并排读起来才是同一条纪律。
         keypoint_items: list = []
         try:
             keypoint_items = self._keypoint_items(entries)
@@ -1387,11 +1548,14 @@ class ObsidianWriter:
         except Exception as e:                            # noqa: BLE001
             print(f"⚠ 📑 课堂纲要失败({str(e)[:60]}); 笔记照常生成")
         note = self._render_note(entries, review, qa_items, polish_state, lost_items,
-                                 keypoint_items, chapter_items)
+                                 keypoint_items, chapter_items, review_missing)
 
-        self.vault_path = note_path_for(self._vault, self._date, self._course)
-        self.vault_path.write_text(note, encoding="utf-8")
+        # ⚠️⚠️ **路径不再重算**：基础版那一步已经把它定下来了，而
+        #    `note_path_for` 遇到同名会**另存一份带时间戳的** —— 再算一次就变成
+        #    「同一节课两份笔记」，而且用户看到的还是缺复习层那份的兄弟文件。
+        self._atomic_write(self.vault_path, note)
         layer = ("知识点详解+自测+术语表+重点" if review.get("sections")
+                 else "术语表+重点(复习层这次没生成)" if review_missing
                  else "术语表+重点(未生成详解)")
         return (f"📝 已存入 Obsidian({self._n} 句, 复习层: {layer}) → {self.vault_path}\n"
                 f"   原始逐句日志: {self.session_path}")

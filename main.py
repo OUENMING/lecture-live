@@ -21,6 +21,8 @@ from vad import Segmenter
 import draft_policy
 from draft_translate import DraftTranslator, DraftView
 import livemetrics
+import tr_latency
+import fragment_merge
 from asr import load_asr
 import draft_engine
 import final_asr
@@ -30,12 +32,13 @@ from cloud_translator import (DEFAULT_CTX_CHUNK, load_api_key,
                               answer_user_content)
 from obsidian_writer import ObsidianWriter, resolve_vault, remember_vault
 from build_notes import (TermNotes, format_gloss, detect_proper_nouns, lookup_term)
-from testmode import TestSession
+from testmode import TestSession, system_info
 import changelog
 import keyentry
 import instance_lock
 import models
 import notice
+import power
 
 PARTIAL_MAX_S = 10          # 草稿只转写最近 N 秒, 限制单次耗时
 DEVICE_CHECK_S = 2.0        # 实时音源: 多久重探一次「默认输入设备还是不是那个」
@@ -402,17 +405,37 @@ class EngineRouter:
 
     降级**不是永久的**: 一堂 2h 的课 Wi-Fi 抖一次就全程困在本地小模型上
     (实测一次瞬时 Errno 60 就触发过, 且本地回退质量明显更差)。
-    降级后每 RETRY_PROBE_S 秒用 1-token 探针试云端, 通了自动切回。
-    状态变化通过 notify(msg, warn) 广播(经 streamq 转主线程, 可进 UI)。"""
+    降级后探针从 `RETRY_PROBE_MIN_S` 秒起、每失败一次**翻倍**(封顶 `RETRY_PROBE_S`)
+    用 1-token 探针试云端, 通了自动切回。
+    状态变化通过 notify(msg, warn) 广播(经 streamq 转主线程, 可进 UI);
+    `note(kind, detail)` 是测试模式的事件出口(`testmode.TestSession.note_event`)。
+
+    ⭐⭐ **2026-10-15: 降级不再由「任何一次云端异常」触发**。本地模型是**可选**的
+    (大多数用户没装), 而原来一次异常就翻 `_use_cloud` → 之后每句只抛 RuntimeError
+    → 调用方「只有 ASR」直到探针回来。实测: 中国用户 8 节课 16 个洞, 每个 77–89 秒。
+    现在(见 `_sentence_failed`): 本地不可用时**同一句先重试一次**, 仍失败才按**句**计;
+    **连续** `FAIL_TRIP` 句失败才降级。本地可用时行为不变(它本来就有真兜底)。"""
 
     RETRY_PROBE_S = 90.0
+    #: 降级后探针的**起点**(秒); 每失败一次翻倍, 封顶 `RETRY_PROBE_S`。
+    RETRY_PROBE_MIN_S = 5.0
+    #: **按句**计的连续失败阈值 —— 本地不可用时连败这么多句才降级。
+    FAIL_TRIP = 3
 
-    def __init__(self, local, cloud, mode: str, notify=None):
+    def __init__(self, local, cloud, mode: str, notify=None, note=None):
         self._local = local
         self._cloud = cloud
         self._mode = mode
         self._notify = notify or (lambda msg, warn=False: None)
+        #: 🧪 测试模式的事件出口。⚠️ 默认空 lambda —— 与 `notify` 同规矩: 测试模式关时
+        #   **什么都不做**(`main.run` 那边 `tester` 为 None 就传 None, 零开销零行为)。
+        self._note = note or (lambda kind, detail="": None)
         self._use_cloud = bool(cloud) and mode in ("auto", "cloud")
+        #: 云端**连续失败了几句**(不是几次调用 —— 同句的重试不另计, 见 `_sentence_failed`)
+        self._fail_streak = 0
+        #: 探针的 sleep。⚠️ 做成实例属性只为**可注入**(测试不许白等 5–90 秒);
+        #:   生产恒等于 `time.sleep`, 行为一个字没变。
+        self._sleep = time.sleep
         self._probe_lock = threading.Lock()   # 防降级→恢复→再降级重复起探针线程
         # 降级是一条**状态迁移**, 不是一次赋值。Phase 2 起有第二条并发路径会进来
         # (问答 worker 与常驻翻译 worker 同时在跑), 两个线程可能同时读到 True,
@@ -427,27 +450,91 @@ class EngineRouter:
             pass                                  # 云端无需预热
         # auto: 不预热本地, 省内存/启动时间; 真降级时再懒加载
 
+    def _local_usable(self) -> bool:
+        """本地引擎**现在**能不能用（只看在不在 / 闩没闩，不加载）。
+
+        ⚠️ 桩没有这个方法（AttributeError）/ 判据自己坏了 → 都按「可用」算 ——
+           `_fallback` 的广播一直就是这个规矩（2026-10-01 审查 F2），这里保持一致。
+        """
+        try:
+            return bool(self._local.local_ready())
+        except Exception:                         # noqa: BLE001
+            return True
+
+    @staticmethod
+    def _why(e: Exception) -> str:
+        """事件的 detail 口径（`testmode.note_event` 还会再截到 200）。"""
+        return f"{type(e).__name__}: {str(e)[:120]}"
+
+    def _event(self, kind: str, detail: str = "") -> None:
+        """往测试报告记一条事件。⚠️ 自己吞异常 —— 「记录绝不许影响上课」（testmode 纪律）。
+
+        ⚠️ 走的是**直连回调**（`testmode.TestSession.note_event` 只往内存里的 `events`
+           列表 append），**不进 `streamq`** —— 那要新增一个 tag 并在 `drain()` 加分支
+           （R28 钉着），而这条数据本来就不需要主线程、不需要 UI。
+        """
+        try:
+            self._note(kind, detail)
+        except Exception:                         # noqa: BLE001
+            pass
+
+    def _sentence_failed(self, e: Exception) -> None:
+        """重试那次的失败 —— 记一条事件 + 按**句**计一次连续失败。
+
+        （首试那次由调用点自己记，见 `fix_and_translate_stream` —— 「含重试那次」的
+        意思是**两次都要留下痕迹**。）连败 `FAIL_TRIP` 句才降级；本地可用时**不走
+        这里**（那条路行为不变）。
+        """
+        self._event("translate_fail", self._why(e))
+        self._count_failure(e)
+
+    def _count_failure(self, e: Exception) -> None:
+        """按**句**计一次连续失败（不记事件）；够 `FAIL_TRIP` 句才降级。"""
+        with self._state_lock:
+            self._fail_streak += 1
+            trip = self._fail_streak >= self.FAIL_TRIP
+        if trip:
+            self._fallback(e)                     # 由它翻 `_use_cloud` + 广播 + 起探针
+
+    def _cloud_ok(self) -> None:
+        """云端这一句成功了 —— 连续失败清零（「任何一次成功清零」）。"""
+        with self._state_lock:
+            self._fail_streak = 0
+
+    def _retry_cloud(self, call):
+        """本地不可用 + 屏上还没吐过增量时，**同一句重试一次**云端。
+
+        成功 → 返回结果并清零；再失败 → 记一次「这一句失败了」，够 `FAIL_TRIP` 句时
+        `_sentence_failed` 会把它降级，最后**把异常抛回调用方**（它照旧走「只有 ASR」）。
+        ⚠️ 这里**只重试一次** —— 再退就是无边界重试，会把定稿线程钉在网络上。
+        """
+        try:
+            res = call()
+        except Exception as e:                    # noqa: BLE001
+            self._sentence_failed(e)
+            raise
+        self._cloud_ok()
+        return res
+
     def _fallback(self, e: Exception) -> None:
         with self._state_lock:                    # 见 __init__: 迁移只能发生一次
             if not self._use_cloud:
                 return
             self._use_cloud = False
+            self._fail_streak = 0                 # 降级后不再走云端, 计数从恢复起重数
+        self._event("translate_fallback", self._why(e))
         # ⭐⭐ **广播要说实话**（2026-10-01 审查 F2）：本地模型是**可选**的，大多数人
         #    没装 —— 没装还说「已降级本地引擎」，用户会以为有兜底，实际每句都失败。
         #    `local_ready()` 只看在不在、不加载（桩/测试没有这个方法就按可用算）。
-        try:
-            local_ok = bool(self._local.local_ready())
-        except Exception:                         # noqa: BLE001
-            # 桩没有这个方法（AttributeError）/ 判据自己坏了 → 都按「可用」算
-            local_ok = True
+        local_ok = self._local_usable()
         if local_ok:
             self._notify(
                 f"云端翻译失败({str(e)[:60]}); 已降级本地引擎, "
-                f"每 {self.RETRY_PROBE_S:.0f}s 自动重试", warn=True)
+                f"{self.RETRY_PROBE_MIN_S:.0f}s 后自动重试", warn=True)
         else:
             self._notify(
                 f"云端翻译失败({str(e)[:60]}); 本地模型不可用（没装，或加载失败）"
-                f"—— 只保留转录（跑 cl doctor 看看）。每 {self.RETRY_PROBE_S:.0f}s 自动重试云端",
+                f"—— 只保留转录（跑 cl doctor 看看）。{self.RETRY_PROBE_MIN_S:.0f}s 后自动重试云端",
                 warn=True)
         self._start_probe()
 
@@ -456,17 +543,27 @@ class EngineRouter:
             return
         if not self._probe_lock.acquire(blocking=False):
             return                                # 已有探针在跑
+
         def probe():
             try:
+                # ⭐ 2026-10-15: 起点 `RETRY_PROBE_MIN_S`(5s)，每失败一次**翻倍**，
+                #    封顶 `RETRY_PROBE_S`(90s) —— 瞬时抖动几秒就回来，真断网也不会
+                #    每 5 秒白打一次计费 ping（原先是死板的 90s 一次，恢复最慢 90s）。
+                # ⚠️ 起点取 `min(起点, 封顶)`：老用法是往 `RETRY_PROBE_S` 塞一个小周期
+                #    （测试注入"短周期"），那样"封顶 < 起点"，从封顶起步才对。
+                delay = min(self.RETRY_PROBE_MIN_S, self.RETRY_PROBE_S)
                 while True:
-                    time.sleep(self.RETRY_PROBE_S)
+                    self._sleep(delay)
                     if self._use_cloud:           # 别处已恢复(理论不可达, 保险)
                         return
                     if self._cloud.probe():
                         with self._state_lock:
                             self._use_cloud = True
+                            self._fail_streak = 0
+                        self._event("translate_recovered", "探针成功, 已切回云端")
                         self._notify("云端翻译已恢复", warn=False)
                         return
+                    delay = min(delay * 2.0, self.RETRY_PROBE_S)
             finally:
                 self._probe_lock.release()
         threading.Thread(target=probe, daemon=True,
@@ -483,14 +580,32 @@ class EngineRouter:
             cb(d)
         return f
 
+    def _cloud_stream(self, en, context, on_zh, on_en, seen):
+        """一次云端定稿翻译；增量经 `_tap` 记进 `seen`（「屏上已经吐过东西」）。"""
+        return self._cloud.fix_and_translate_stream(
+            en, context, self._tap(on_zh, seen), self._tap(on_en, seen))
+
     def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
         if self._use_cloud:
             seen: list = []
             try:
-                return self._cloud.fix_and_translate_stream(
-                    en, context, self._tap(on_zh, seen), self._tap(on_en, seen))
+                res = self._cloud_stream(en, context, on_zh, on_en, seen)
             except Exception as e:                # noqa: BLE001
+                self._event("translate_fail", self._why(e))
+                if not self._local_usable():
+                    # ⭐⭐ 本地没装（大多数用户）时, **一次瞬时失败不许把这一句吃掉**：
+                    #    屏上还没吐过增量 → 同一句立刻重试一次云端（见 `_retry_cloud`）。
+                    if not seen:
+                        return self._retry_cloud(
+                            lambda: self._cloud_stream(en, context, on_zh, on_en, seen))
+                    # 已吐过半句：不重试（屏上会重复），这句照旧失败，但只计一次 ——
+                    # 降级也要连败 `FAIL_TRIP` 句（降到没装的本地 = 整段只剩 ASR）。
+                    self._count_failure(e)
+                    raise
                 self._fallback(e)
+            else:
+                self._cloud_ok()
+                return res
             # ⚠️ 云端断在半句上时屏上已有半句：本地的增量再接上去就是「两份拼一起」。
             #    这时本地**不流式**，结果只走返回值（`final` 那一趟整句替换）。
             if seen:
@@ -502,9 +617,19 @@ class EngineRouter:
         if self._use_cloud:
             seen: list = []
             try:
-                return self._cloud.fix_stream(en, context, self._tap(on_en, seen))
+                res = self._cloud.fix_stream(en, context, self._tap(on_en, seen))
             except Exception as e:                # noqa: BLE001
+                self._event("translate_fail", self._why(e))
+                if not self._local_usable():       # 同 `fix_and_translate_stream` 那段
+                    if not seen:
+                        return self._retry_cloud(
+                            lambda: self._cloud.fix_stream(en, context, self._tap(on_en, seen)))
+                    self._count_failure(e)
+                    raise
                 self._fallback(e)
+            else:
+                self._cloud_ok()
+                return res
             if seen:                              # 同上：半句已上屏，本地不再接
                 return self._local.fix_stream(en, context, None)
         return self._local.fix_stream(en, context, on_en)
@@ -515,11 +640,20 @@ class EngineRouter:
         return self._use_cloud
 
     def translate_draft(self, en, on_zh=None, context=None) -> str:
+        """草稿译文（高频）。⚠️ 云端失败**一律不走 `_fallback`**（2026-10-15）。
+
+        草稿每几秒一条，一次失败就翻 `_use_cloud` 会把**定稿**那条路也一起降级 ——
+        而草稿失败完全说明不了定稿链路有问题（同 `answer` / `hint` 的那个决定）。
+        本地可用就退本地；本地不可用（大多数用户）返回 `""`：调用方
+        `draft_translate.DraftTranslator` 把 `translate` 当「往回调里吐增量」的接口，
+        返回值只有 `_once` 用、而它自己就把空当「这轮没译出来」（不落屏、不计数）。
+        """
         if self._use_cloud:
             try:
                 return self._cloud.translate_draft(en, on_zh, context=context)   # 本地版不收 context
-            except Exception as e:                # noqa: BLE001
-                self._fallback(e)
+            except Exception:                     # noqa: BLE001
+                if not self._local_usable():
+                    return ""
         return self._local.translate_draft(en, on_zh)
 
     def answer(self, question, transcript, history, on_delta=None,
@@ -549,6 +683,22 @@ class EngineRouter:
                 # 真问题并降级 —— 各管各的。
                 return f"⚠ 讲解失败({str(e)[:60]})"
         return NO_CLOUD_ANSWER
+
+    def merge_translate(self, en, context, on_zh=None, on_en=None):
+        """跨段半句合并的重翻（3.9.7 第 4 项）。只走云端；本地 / 失败一律返回 `None`
+        （`fragment_merge.translate_merge` 把它当「没合成」，屏上原样）。
+
+        ⚠️ 和 `hint` 同一个决定：**不走 `_fallback`、不进连败计数、不重试**。合并是锦上添花，
+        它失败一次就把整节课的定稿翻译降级 / 起计费探针，是拿主路给支路陪葬。
+        ⚠️ 也**不退本地**：本地 mlx 模型此刻正被定稿线程用着，两个线程并发推理会互相卡住。
+        回调一律不给（合并结果是原子替换，不流式）。
+        """
+        if not self._use_cloud:
+            return None
+        try:
+            return self._cloud.fix_and_translate_stream(en, context, None, None)
+        except Exception:                         # noqa: BLE001
+            return None
 
     def hint(self, lines) -> str:
         """❓ 一行点拨。本地 / 失败一律返回 `""`(= 调用方改显示「课后笔记里能找到」)。
@@ -646,6 +796,47 @@ class TerminalUI:
         pass
 
 
+class _WakeQueue(queue.Queue):
+    """`put` 之后**自动叫醒主循环**的 Queue（3.9.7 省电）。
+
+    主循环的让步在「什么都没在动」时是 0.1 s、窗口不可见时 0.25 s（见 `overlay` 的三档），
+    新数据必须**立刻**把它打断 —— 否则字幕要等满那一档才上屏。waker 由 `main.run()`
+    在 UI 建好之后装上（`overlay.wake()` 是**跨线程安全**的：Apple 文档
+    `NSApplication.postEvent(_:atStart:)` 说它可在子线程调）；**没装上 = 与 `queue.Queue`
+    逐字相同** —— check.py 的替身与老测试都直接把它当 Queue 用，功能一个字不变。
+
+    ⚠️ 只覆盖 `put` / `put_nowait`（这两个是全仓实际用到的写入口）：
+       `all_settled()` 读 `empty()`、`drain()` 读 `get_nowait()`，都不受影响。
+    """
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._waker = None
+
+    def set_waker(self, fn) -> None:
+        """装/换唤醒回调（`None` = 退回普通 Queue 行为）。"""
+        self._waker = fn
+
+    def _wake(self) -> None:
+        w = self._waker
+        if w is None:
+            return
+        try:
+            w()
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    def put(self, item, block=True, timeout=None) -> None:
+        super().put(item, block, timeout)
+        self._wake()
+
+    def put_nowait(self, item) -> None:
+        # ⚠️ **不再自己 `_wake()`**：`queue.Queue.put_nowait()` 内部就是
+        #    `self.put(item, block=False)` —— 已经走过本类那个 `put`。
+        #    多叫一次 = 每次 `put_nowait` 投两个唤醒令牌（判据钉着"一次一条"）。
+        super().put_nowait(item)
+
+
 class _Latest:
     """latest-wins 槽位: 草稿只保留最新一份, 旧的自然丢弃。"""
 
@@ -662,6 +853,7 @@ class _Latest:
         self._end = None
         self._ev = threading.Event()
         self._lock = threading.Lock()
+        self._closed = False        # 停机标志: `stop()` 叫醒之后 `take()` 一律返回 None
 
     def put(self, buf, tag=None) -> None:
         with self._lock:
@@ -670,7 +862,12 @@ class _Latest:
             self._tag = tag
         self._ev.set()
 
-    def take(self, timeout: float):
+    def take(self, timeout: float = None):
+        """等一份缓冲。`timeout=None` = 一直等（`stop()` 会叫醒它）。
+
+        ⚠️ 返回 `None` 有**两个**原因：超时（不传 timeout 时没有）与 `stop()` ——
+           所以消费者必须看 `stopped`，别把停机当成"暂时没缓冲"。
+        """
         if not self._ev.wait(timeout):
             return None
         with self._lock:
@@ -691,6 +888,16 @@ class _Latest:
         with self._lock:
             e, self._end = self._end, None
             return e
+
+    def stop(self) -> None:
+        """停机：叫醒阻塞在 `take()` 上的消费者，并让它知道这是**停机**（见 `stopped`）。"""
+        with self._lock:
+            self._closed = True
+        self._ev.set()
+
+    @property
+    def stopped(self) -> bool:
+        return self._closed
 
 
 def _changelog_text() -> str:
@@ -1173,7 +1380,16 @@ def run(args) -> None:
     # 草稿引擎（R3）：流式 Nemotron 优先，缺模型 / 内存不够 / 加载失败 → 照旧 Parakeet 滑窗。
     # ⚠️ 放在上面那个 try **之外**：它永不抛，失败也不该 `return`。Parakeet 仍是
     #    定稿的本地兜底（下面装配定稿时传进去），也是草稿熔断后的退路 —— 只是晚点加载。
-    draft = draft_engine.load_draft_engine(asr, window_samples=PARTIAL_MAX_S * SR)
+    # ⭐⭐ 3.9.7 第 5c 项：**流式模型在后台线程建**（约 1.28 s 原来卡在这里，悬浮窗 /
+    #    采音 / 定稿都得等它）。就绪前的草稿一律跳过（`partial_worker` 那边 `not t →
+    #    continue`），**定稿不受任何影响**（它不走草稿引擎）。加载失败 → 既有兜底
+    #    （Parakeet），`partial_worker` 会照「流式草稿已停用」那条路出声一次。
+    def _draft_ready(ok: bool) -> None:
+        """⏱「草稿模型就绪」的时刻。⚠️ **从加载线程被调** —— 只许记一个时刻。"""
+        _tp.setdefault("draft_ready", time.monotonic())
+
+    draft = draft_engine.load_draft_engine_async(
+        asr, window_samples=PARTIAL_MAX_S * SR, on_ready=_draft_ready)
     if draft.name == "parakeet":
         # 草稿每秒都要它 → 现在就加载；文件坏在这里说清楚，别拖到课上。
         try:
@@ -1182,10 +1398,13 @@ def run(args) -> None:
             notice.alert("模型没装好",
                          f"{e}\n\n装好再跑 —— `cl doctor` 会列出缺哪个、该跑哪条命令。")
             return
+        # Parakeet 没有被后台加载那一段 —— 它的就绪时刻就是刚才这一下。
+        _tp.setdefault("draft_ready", time.monotonic())
     else:
         echo("💤 Parakeet 用到再加载（草稿走 Nemotron；云端失败时第一次兜底多等约 1 秒）")
     _tp["draft"] = time.monotonic()
     echo(f"✍️ 草稿引擎：{draft.name}" + (f"（{draft.reason}）" if draft.reason else ""))
+
     # ⭐⭐ 转录里挖出来的词 → 术语**候选池**（2026-09-29 加）。
     #    ⚠️⚠️ **只进候选池，不进 `course_terms`（那档是每句全量注入）** ——
     #       实测：池子 +25 个转录词，注入结果变了 **63–74%** 的句子，
@@ -1316,13 +1535,41 @@ def run(args) -> None:
         except Exception:                                     # noqa: BLE001
             return []
 
+    # 🩹 漏译句补译（3.9.7 第 2 项）—— 同 `_keypoints_for` / `_lost_explain_for`：
+    #    收尾那一步才跑、fail-soft，且**两条都由这里挡在发请求之前**：
+    #      · `cloud_tr is None` = 这节课本来就不走云端（没 key，或用户选了本地引擎）
+    #        —— 为补几句中文把文本发出去是**改他的选择**，不许；
+    #      · 只有**双语档**才补：纯转录档是「一个模型请求都不发」的硬契约
+    #        （`DESIGN.md`），只英·校档的用户明确不要中文。
+    #    ⚠️ 档位取的是**收尾那一刻**的档（课中可以切）。从双语切走再切回来的课，
+    #       中间那几段的漏译句拿不到补译 —— 宁可少补，不许把别的档的句子翻出来。
+    def _backfill_for(entries):
+        new, st = entries, {"need": 0, "done": 0}
+        # ⚠️ 课中**切过**档（只英 / 纯转录）就整节不补：那段的「只有 ASR」是用户要的，
+        #    补译会破「纯转录零请求」的承诺；只看收尾那一刻的档位分不出来。
+        if (args.save_notes != "no" and trans.get("mode") == "both"
+                and not trans.get("ever_off") and cloud_tr is not None):
+            try:
+                import backfill
+                from translator import course_term_list, course_title
+                new, st = backfill.backfill_entries(
+                    entries, api_key_val, args.polish_model or args.cloud_model,
+                    course_terms=course_term_list(args.glossary, args.course),
+                    domain=course_title(args.glossary, args.course))
+            except Exception:                                 # noqa: BLE001
+                new, st = entries, {"need": 0, "done": 0}
+        if tester is not None:              # 没跑（档位不对 / 没库）也记 0/0 —— 不是"没采到"
+            tester.note_block("backfill", st)
+        return new, st
+
     writer = ObsidianWriter(vault, args.course, mode=args.save_notes,
                             api_key=api_key_val, model=args.cloud_model,
                             glossary_path=args.glossary,
                             polish=args.polish != "off",
                             polish_model=args.polish_model or None,
                             keypoints_fn=_keypoints_for,
-                            lost_explain_fn=_lost_explain_for)
+                            lost_explain_fn=_lost_explain_for,
+                            backfill_fn=_backfill_for)
     notes = TermNotes()                                 # 术语通俗解析(查表)
 
     # 测试模式: 采一份完整报告 + 留音频。**任何采集失败都不能影响上课** ——
@@ -1369,6 +1616,8 @@ def run(args) -> None:
                              record_audio=_rec,
                              record_float=_rf)
         echo(f"🧪 测试模式: 报告将写到 {tester.stem}.report.json")
+        # ⭐ 3.9.7：机器画像（内存 / 芯片 / 草稿引擎）—— 答「有没有低内存用户」靠它。
+        tester.note_block("system", system_info(draft.name, draft.reason))
         # ⚠️ 提醒**放在启动时**：收尾才说就晚了，那时整节课已经录完。
         #    （2026-09-30 起测试模式下默认录 —— 见上面 `_rec` 那段。）
         if tester.record_audio:
@@ -1404,9 +1653,9 @@ def run(args) -> None:
     #    后三个是现场采集要的（缓冲滑没滑 / 转写多久 / 归哪一段）。
     #    `drafts` 只有这里一个产出方、`drain()` 一个消费方，改形状是局部的；
     #    `drain()` 侧的 `_pair()` 仍兼容裸字符串与二元组（替身/老测试）。
-    drafts: "queue.Queue[tuple]" = queue.Queue()             # 7 元组（见上）-> 主线程
-    drafts_zh: "queue.Queue" = queue.Queue()            # 草稿译文 (seq, seg, zh) -> 主线程
-    streamq: "queue.Queue[tuple]" = queue.Queue()       # ("zh"/"en"/"final"/"terms"/"notice"/"answer"/"answer_done"/"summary"/"hint") -> 主线程
+    drafts: "queue.Queue[tuple]" = _WakeQueue()        # 7 元组（见上）-> 主线程
+    drafts_zh: "queue.Queue" = _WakeQueue()         # 草稿译文 (seq, seg, zh) -> 主线程
+    streamq: "queue.Queue[tuple]" = _WakeQueue()    # ("zh"/"en"/"final"/"terms"/"notice"/"answer"/"answer_done"/"summary"/"hint"/"replace") -> 主线程
     # ⚠️ 加新 tag **必须**在 `drain()` 加同分支 —— 它是唯一的分发点，漏改即静默丢弃。
     #    2026-09-30 起 `drain()` 末尾有一条**兜底告警**（未识别的 tag 会 echo 一行）。
     draft_view = DraftView()                            # 草稿译文的过期判据(只在主线程 drain() 里用)
@@ -1443,7 +1692,13 @@ def run(args) -> None:
             _engine_warns.pop(src, None)
         streamq.put(("notice", (msg, warn, "\n".join(_engine_warns.values()))))
 
-    translator = EngineRouter(local_tr, cloud_tr, args.engine, notify=notify)
+    translator = EngineRouter(local_tr, cloud_tr, args.engine, notify=notify,
+                              # 🧪 测试模式：翻译失败 / 降级 / 恢复进 `report.json` 的 events。
+                              #    ⚠️ `tester` 为 None（测试模式关）时传 None —— EngineRouter
+                              #    默认就是空 lambda，**零开销零行为**（与 Overlay 的 `note` 同规矩）。
+                              #    ⚠️ 直连回调、不进 streamq：那条路要新增 tag + `drain()` 加分支
+                              #    （R28 钉着），而这条数据本来就不需要主线程、不需要 UI。
+                              note=(tester.note_event if tester is not None else None))
     translator.warmup()
 
     def _reset_net() -> None:
@@ -1492,7 +1747,7 @@ def run(args) -> None:
         #    那样要绕一圈到 `drain()` 里去补标志位。
         #    （⭐ 已于 2026-09-29 并进 ❓ —— 两个按钮记的是同一件事。）
         on_lost=_on_lost_pressed,
-        on_translate=lambda mode: trans.__setitem__("mode", mode),
+        on_translate=lambda mode: trans.update(mode=mode, ever_off=trans.get("ever_off") or mode != "both"),
         on_submit=submit_question,
         on_ask=ask_about_this,
         # late binding: start_new_topic 定义在下面的问答状态块里, 这里只是把回调
@@ -1502,6 +1757,15 @@ def run(args) -> None:
         #    回调）—— `Overlay` 那边默认就是空 lambda，**零开销零行为**。
         note=(tester.note_ui if tester is not None else None),
     )
+    # ⭐ 3.9.7 省电：新数据到达要**立刻**叫醒主循环（它在空闲档让步 0.1 s、不可见档 0.25 s）。
+    #    终端 UI 的 `wake()` 是空实现 —— 装了也只是一次空调用，零行为、零开销。
+    _wake = getattr(ui, "wake", None)
+    if callable(_wake):
+        for _q in (streamq, drafts, drafts_zh):
+            try:
+                _q.set_waker(_wake)
+            except Exception:                             # noqa: BLE001
+                pass
     _tp["overlay"] = time.monotonic()
     try:
         _st = startup_timing(_tp, _t_wall0, _t_click)
@@ -1548,11 +1812,24 @@ def run(args) -> None:
     #    **不能**挂到定稿上屏 —— 那条路要先跑 Whisper + LLM，晚 2–4 秒，
     #    新段前几份草稿会带着上一段的号（实测把 `草稿→定稿` 从 10.7% 顶到 65%）。
     seg_gen = {"n": 0}
+    #: ⭐ 第 3 项：`seg -> 那一段音频结束的时刻`（`time.monotonic()`）。`seg_to_zh_ms`
+    #: 的起点 —— 用户真正等的时间从那**一段讲完**算起（定稿 ASR + 断句 + 排队都在里面）。
+    #: ⚠️ 在 `_open_segment()` 里写（音频线程）、在 `_emit()` 里读（定稿线程）：每段的
+    #:    键只写一次，之后只读 —— GIL 下够用，且它是纯数字、没有顺序语义。
+    seg_ended_at: dict[int, float] = {}
+    #: ⭐ 第 4 项（跨段半句合并）：`seg -> 那一段的音频时长（秒）`。段的时间轴只有
+    #: 「结束时刻 + 时长」两个量，音频间隔 gap = (结束_j − 时长_j) − 结束_i
+    #: （与 design.md §3 / `prosody/p1.py:202` 同式）。在 `_utterance_end` 写、`drain` 读。
+    seg_dur: dict[int, float] = {}
+    #: ⭐ 第 4 项：`seg -> 这一段 ASR 原文有没有句末标点`（口径与 `testmode.note_segment`
+    #: 的 `end_punct` **逐字相同**）。定稿线程写、`drain` 读（GIL 够用：每段只写一次）。
+    seg_end_punct: dict[int, bool] = {}
 
     def _open_segment() -> int:
         """音频结束那一刻调：返回刚结束那一段的编号，并把"当前段"推进到下一段。"""
         k = seg_gen["n"]
         seg_gen["n"] = k + 1
+        seg_ended_at[k] = time.monotonic()
         if live is not None:
             live.segment_end(k)
         return k
@@ -1560,6 +1837,21 @@ def run(args) -> None:
     # ---- 草稿线程 ----
     # 每定稿一句 +1; 草稿线程据此重置节流(见 partial_worker 里的说明)。
     final_gen = {"n": 0}
+    #: ⭐ 3.9.7 省电：窗口**不可见**期间跳过的草稿份数（收尾进测试模式 ui 块
+    #: `draft_skipped_hidden` / `draft_zh_skipped_hidden`）。`zh` 那一格由草稿译文
+    #: 线程的 `paused` 回调自增（同一条纪律：只说数字，不动文本）。
+    draft_skipped = {"n": 0, "zh": 0}
+
+    def _ui_invisible() -> bool:
+        """窗口此刻不可见吗（收起 / 完全被遮挡 / 屏幕睡眠）。
+
+        ⚠️ 只读 UI 对象一个 bool（`pump` 每轮现算）。终端 UI / 替身没有 `visible`
+           → `getattr` 默认 `True` → **恒不可见为假**（不曾存在悬浮窗，就没有"不可见"）。
+        """
+        try:
+            return not bool(getattr(ui, "visible", True))
+        except Exception:                                    # noqa: BLE001
+            return False
 
     def partial_worker():
         last_tr = 0.0
@@ -1581,9 +1873,33 @@ def run(args) -> None:
         last_sent = ""                        # 上次送翻的草稿原文（未剥悬挂词；给 novel 数新词）
         prev_text = ""                        # 上一次的草稿原文（`draft_policy` 自己派生 append_only）
         last_eng = draft.name                 # 引擎变了（熔断）→ 出声一次 + 记一笔
-        while running.is_set():
-            buf = latest.take(0.5)
+        _draft_hidden = False                 # 上一轮是不是「因为窗口不可见」跳过的
+        _skip_seg = None                      # 恢复后要跳过的那一段（它的草稿流已被 reset）
+        while running.is_set() and not latest.stopped:
+            buf = latest.take()               # ⚠️ 阻塞等（3.9.7 省电）—— 停机靠 `latest.stop()`
+            if latest.stopped:
+                break
             _end = latest.take_end()
+            if _ui_invisible():
+                # ⭐ 3.9.7 省电：窗口不可见 → **停草稿识别**（Nemotron / Parakeet 推理）。
+                #    定稿转写 / 翻译 / 落盘**一条都不许少**（它们不走这条路）。
+                #    ⚠️ 恢复后从**下一个段**重开 —— 见下面 `_skip_seg` 那一段。
+                if (buf is not None and len(buf)) or _end is not None:
+                    draft_skipped["n"] += 1
+                _draft_hidden = True
+                continue
+            if _draft_hidden:
+                # 刚恢复可见：先把进行中那一段的流状态丢掉（`DraftEngine.reset`），
+                # 再从**下一个段**重新开始出草稿 —— 别把隐藏期间积压的那半段缓冲接着喂。
+                _draft_hidden = False
+                try:
+                    draft.reset()
+                except Exception:                            # noqa: BLE001
+                    pass
+                # ⚠️ 这里**不**读 `seg_gen["n"]`（`tests/test_draft_engine.py` 的
+                #    「段号只有一个来源」钉着）；段号只从这份缓冲自己的 tag 拿。
+                _tt = latest.taken_tag
+                _skip_seg = _tt if (buf is not None and len(buf) and _tt is not None) else None
             if _end is not None:
                 # ⭐ 段尾收一次（3.9.4，`draft_engine.NemotronDrafter.finish`）：前瞻里那截解出来，
                 #    草稿不再"少最后几个词等定稿来补"。**排在下面「定稿在排队就让开」之前**——
@@ -1607,6 +1923,12 @@ def run(args) -> None:
             # 到这儿下一段可能已经开始了（「分组键取自晚到信号」那类坑）。
             _tag = latest.taken_tag
             _seg = _tag if _tag is not None else seg_gen["n"]
+            # ⭐ 3.9.7：恢复可见后**跳过进行中的那一段**，从下一个段重新开始出草稿
+            #    （那一段的流状态已被 `draft.reset()` 丢掉；接着喂 = 喂半截）。
+            if _skip_seg is not None:
+                if _seg == _skip_seg:
+                    continue
+                _skip_seg = None                 # 新段到了 → 恢复正常
             # 定稿是关键路径(决定你多久看到中文)。定稿走 Whisper 时两边是两把不同的
             # ASR 锁, 不互抢; 只有 Parakeet 兜底(定稿退化回草稿模型)时才共用一把。
             # 有定稿在排队时让草稿这一轮退开: 草稿迟到 1s 无感, 定稿迟到直接
@@ -1723,10 +2045,14 @@ def run(args) -> None:
             # 先把 ASR 原句交给悬浮窗当英文行的占位：模型先吐 ZH 后吐 EN，不占位的话
             # 中文打字的那段时间里上面那行英文是空的。修正版到 `final` 时整句换上。
             streamq.put(("en_seed", sent, seg))
+            # ⭐ 译文延迟（3.9.7 第 3 项）：只记数字与引擎名，不记文本（见 `tr_latency`）。
+            #    ⚠️ 计时器**在翻译调用之前**建（构造即开始计时）。
+            _lt = tr_latency.TrTimer()
+            _cloud0 = translator.uses_cloud
             try:
                 res = translator.fix_and_translate_stream(
                     sent, finals,
-                    on_zh=lambda d: streamq.put(("zh", d, seg)),
+                    on_zh=_lt.tap(lambda d: streamq.put(("zh", d, seg))),
                     on_en=lambda d: streamq.put(("en", d, seg)))
                 en, zh = res.en_fixed, res.zh
                 finals.append(en)
@@ -1735,7 +2061,16 @@ def run(args) -> None:
                 en, zh = "", ""                     # 无修正版/译文, 内容全在转录里
                 finals.append(sent)                 # 上下文仍接得上
             # 第 4 项是**原始 ASR 转录**(未修正), 落盘时要一并记下
-            streamq.put(("final", en, zh, sent, seg))
+            # ⭐ 第 5 项 = 译文延迟 4 元组 `(zh_first_ms, zh_done_ms, seg_to_zh_ms, tr_model)`
+            #    （`drain()` 转发给 `live.final` 与 `tester.note_translate`）。
+            #    ⚠️ **只有这一条产出点给**：纯转录 / 只英·校两条路没送过翻译，报一个
+            #       引擎名会让人以为它们翻出来了（`drain()` 用 `len` 守卫，老形状照样能读）。
+            #    ⚠️ 引擎名看「送进去**前后**云端都开着」—— `_fallback` 会把 `_use_cloud`
+            #       翻掉，只在返回后读一次会把"降级到本地"误报成云端。
+            streamq.put(("final", en, zh, sent, seg,
+                         _lt.done(seg_t0=seg_ended_at.get(seg),
+                                  model=args.cloud_model if (_cloud0 and translator.uses_cloud)
+                                  else "local")))
             # 术语/专有名词: 命中术语表就把 (术语, 解析) 交给 UI —— 由 UI 决定
             # 什么时候展开(悬浮窗默认只列术语名, 点击才显示解析)。
             hits = notes.match(sent)
@@ -1777,11 +2112,20 @@ def run(args) -> None:
             if buf is _QUIT:
                 break
             if buf is EMPTY:
-                # 2) 空转: 检查 carry 是否挂起过久
-                time.sleep(0.2)
-                if carry["text"] and time.monotonic() - carry["since"] >= CARRY_MAX_S:
-                    _force_emit_carry()
-                continue
+                # 2) 空转: **阻塞等**下一份定稿（3.9.7 省电 —— 原来是 `sleep(0.2)` 硬轮询，
+                #    空闲时 5 次/秒空醒）。carry 挂着时按它的**剩余期限**醒来（不改变
+                #    段尾挂起的时序：原来最坏也要等 0.2 s 才发现到期，这里更准）。
+                _wait = CARRY_MAX_S - (time.monotonic() - carry["since"]) if carry["text"] else 1.0
+                try:
+                    buf = finalq.get(timeout=max(0.0, _wait))
+                except queue.Empty:
+                    buf = EMPTY
+                if buf is _QUIT:
+                    break
+                if buf is EMPTY:
+                    if carry["text"] and time.monotonic() - carry["since"] >= CARRY_MAX_S:
+                        _force_emit_carry()
+                    continue
             # ⚠️⚠️ **拆包必须在两个哨兵之后**（2026-10-09 端到端跑抓回来的真 bug）：
             #    曾经把它提到 `if buf is EMPTY:` 前面 —— 而"空转"那条路**每轮都会走**
             #    （`finalq` 空时 `buf = EMPTY`），于是 `buf, _fseg = EMPTY` 抛
@@ -1796,6 +2140,9 @@ def run(args) -> None:
                 #    少记它的代价是实打实的(2026-10-07: 主模型空与兜底模型空分不开)。
                 r = final.transcribe(buf)
                 text = r.text
+                # ⭐ 第 4 项：这一段 ASR 原文有没有句末标点（跨段合并的 ASR 口径）。
+                #    口径与 `testmode.note_segment` 的 `end_punct` **逐字相同**（含 `…`）。
+                seg_end_punct[_fseg] = fragment_merge.asr_end_punct(text)
                 if tester is not None:
                     tester.note_segment(buf, text, r.ms, r.source, logprob=r.logprob,
                                         fell_back=r.fell_back,
@@ -1841,15 +2188,27 @@ def run(args) -> None:
     # 原来挂在 final_worker 的空闲分支(finalq 空才轮到), 定稿一忙就被挤掉(回放应触发 570 次,
     # 真课只出 417 条)。独立成线程后与定稿并行; 过期译文在 drain() 里丢(见 DraftView)。
     # 本地引擎(MLX 全局锁)时别和定稿抢: 定稿在排队/在跑就让开。
+    def _draft_tr_paused() -> bool:
+        """窗口不可见时草稿译文也不送（见 `DraftTranslator.paused`）。⚠️ 只在这个线程调。"""
+        if _ui_invisible():
+            draft_skipped["zh"] += 1
+            return True
+        return False
+
     draft_tr = DraftTranslator(
         translate=lambda text, on_zh, ctx: translator.translate_draft(text, on_zh, context=ctx),
         output=lambda s, g, d: drafts_zh.put((s, g, d)),
         mode_ok=lambda: trans["mode"] == "both",
         should_yield=lambda: not translator.uses_cloud and (not finalq.empty() or busy["on"]),
-        context=lambda: finals[-1:], stats=draft_stats)
+        context=lambda: finals[-1:], stats=draft_stats,
+        # ⭐ 3.9.7 省电：窗口不可见时**不发翻译请求**（草稿是给眼睛看的，看不见就别花这份钱/电）。
+        #    定稿翻译**不在这里** —— 它照常，一条都不少。
+        paused=_draft_tr_paused)
 
     def _utterance_end(buf):
         k = _open_segment()
+        # ⭐ 第 4 项：本段音频时长（跨段间隔 gap 的一半输入，见 `_merge_gap`）。
+        seg_dur[k] = len(buf) / SR
         finalq.put((buf, k))
         latest.put_end(buf, k)          # 草稿线程据此给这一段收尾（见 partial_worker）
 
@@ -1867,7 +2226,7 @@ def run(args) -> None:
     def proper_worker():
         while running.is_set():
             try:
-                term = properq.get(timeout=0.5)
+                term = properq.get()        # 阻塞等（3.9.7 省电）；停机靠收尾投的 `None` 哨兵
             except queue.Empty:
                 continue
             if term is None:
@@ -1896,7 +2255,7 @@ def run(args) -> None:
     def answer_worker():
         while running.is_set():
             try:
-                q = answerq.get(timeout=0.5)
+                q = answerq.get()           # 阻塞等（3.9.7 省电）；停机靠收尾投的 `None` 哨兵
             except queue.Empty:
                 continue
             if q is None:
@@ -1967,7 +2326,7 @@ def run(args) -> None:
            收尾中还往里写会拖慢收尾(同 answer_worker 的 `_emit`)。"""
         while running.is_set():
             try:
-                lines = hintq.get(timeout=0.5)
+                lines = hintq.get()         # 阻塞等（3.9.7 省电）；停机靠收尾投的 `None` 哨兵
             except queue.Empty:
                 continue
             if lines is None:
@@ -1985,13 +2344,73 @@ def run(args) -> None:
             if not stopping.is_set():
                 streamq.put(("hint", text))
 
+    # ---- 跨段半句合并（3.9.7 第 4 项，`fragment_merge` 文件头）----
+    # 半句照常先上屏（零额外等待）；下一段首句定稿回来后，用**同一个**修正翻译调用把
+    # 「尾句 + 首句」合起来重翻，再原子替换屏上那一行、吞掉首句那一行。**独立 worker**，
+    # 不阻塞定稿线程的后续句子；在飞期间收尾要等它（有 15s 上限）。
+    mergeq: "queue.Queue[dict]" = queue.Queue()
+    merge_stats = {"triggered": 0, "replaced": 0}
+    _merge_lock = threading.Lock()
+    _merge_inflight = [0]            # 已入队未落地（含正在重翻）的合并数 —— 收尾判据用它
+
+    def _merge_inc() -> None:
+        with _merge_lock:
+            _merge_inflight[0] += 1
+
+    def _merge_dec() -> None:
+        with _merge_lock:
+            _merge_inflight[0] -= 1
+
+    def merge_pending() -> bool:
+        """还有合并没落地吗（入队了或正在重翻）—— 收尾时算「忙」。"""
+        with _merge_lock:
+            return _merge_inflight[0] > 0
+
+    def _merge_gap(i: int, j: int) -> float | None:
+        """段 i→j 的音频间隔（秒）：(结束_j − 时长_j) − 结束_i。同 design.md §3。
+
+        ⚠️ 用**墙钟**近似音频秒（实时音源下二者同步）。拿不到（段号漂了 / 回放倍速）→
+        `None`，`should_merge` 一律不触发（宁可不合，不许合错）。
+        """
+        a, b, d = seg_ended_at.get(i), seg_ended_at.get(j), seg_dur.get(j)
+        if a is None or b is None or d is None:
+            return None
+        return (b - d) - a
+
+    #: 悬浮窗才有"一行"可替换 —— 终端 UI 没有 `replace_merge`，追踪器为 `None`、整条路不启动。
+    #: 档位判据（只在**双语**档触发）在 `drain()` 里**逐行现判**：三档课中可切（同实时总结）。
+    merge_tracker = (fragment_merge.MergeTracker(_merge_gap)
+                     if callable(getattr(ui, "replace_merge", None)) else None)
+
+    def merge_worker():
+        """重翻「尾句 + 首句」→ `("replace", job, en, zh)`。失败/超时 → 空串，屏上原样。
+
+        ⚠️ 整段包 `try`：worker 一死，`_merge_inflight` 就永远 >0 → 收尾白等满 15 s。
+        """
+        while running.is_set():
+            try:
+                job = mergeq.get()          # 阻塞等（3.9.7 省电）；停机靠收尾投的 `None` 哨兵
+            except queue.Empty:
+                continue
+            if job is None:                 # 收尾哨兵：先把它叫醒的那批 job 都做完了
+                break
+            try:
+                en, zh = fragment_merge.translate_merge(
+                    job, translator.merge_translate)     # 只走云端、不碰熔断（见该方法）
+                streamq.put(("replace", job, en, zh))
+            except Exception:                         # noqa: BLE001  丢了这一次也不能打死 worker
+                pass
+            finally:
+                _merge_dec()
+
     t1 = threading.Thread(target=partial_worker, daemon=True)
     t2 = threading.Thread(target=final_worker, daemon=True)
     t3 = threading.Thread(target=proper_worker, daemon=True)
     t4 = threading.Thread(target=answer_worker, daemon=True, name="answer-qa")
     t5 = threading.Thread(target=draft_tr.run, args=(running,), daemon=True, name="draft-tr")
     t6 = threading.Thread(target=hint_worker, daemon=True, name="lost-hint")
-    t1.start(); t2.start(); t4.start(); t5.start(); t6.start()   # 问答不需要 key 就能起步
+    t7 = threading.Thread(target=merge_worker, daemon=True, name="frag-merge")
+    t1.start(); t2.start(); t4.start(); t5.start(); t6.start(); t7.start()   # 问答不需要 key 就能起步
     if api_key_val:                               # (没 key 时它只回一句说明)
         t3.start()
 
@@ -2013,6 +2432,16 @@ def run(args) -> None:
             pass
         return
 
+    # ⭐ 3.9.7 省电：实时采音的**新块到达**也要立刻叫醒主循环（它可能正睡在 0.1/0.25 s 的让步里）。
+    #    `CallbackSource` 在声卡回调线程调（`wake()` 跨线程安全）；文件回放由主循环自己 poll，
+    #    不需要这条。拿不到 waker 的源（替身 / 老对象）→ 什么都不做。
+    if callable(_wake):
+        _sw = getattr(src, "set_waker", None)
+        if callable(_sw):
+            try:
+                _sw(_wake)
+            except Exception:                    # noqa: BLE001
+                pass
     # ══════════════════════════════════════════════════════════════════
     # 实时总结 worker（`live_summary.LiveSummarizer`）—— 原子层 + 章节纲要
     # 把一节课切成可单独引用的小块（原子），再把同主题连续的原子合成**章节**，
@@ -2189,25 +2618,53 @@ def run(args) -> None:
                         fn("💡 " + item[1], 15)
                     else:
                         fn("❓ 已标记 · 课后笔记里能找到这几句", 6)
-            elif item[0] == "final":                # ("final", en, zh, asr_raw[, seg])
+            elif item[0] == "final":                # ("final", en, zh, asr_raw[, seg[, lat]])
+                # ⚠️ `item[4]` / `item[5]` 都用 `len` 守卫：`("final", …)` 这条 tag
+                #    有 3 个产出点，加字段是**加法**（下标 1–3 一个没动），老形状照样能读。
+                #    `item[5]` = 译文延迟 4 元组 `(zh_first_ms, zh_done_ms, seg_to_zh_ms,
+                #    tr_model)`（`tr_latency.TrTimer.done()` 的产物）——
+                #    ⚠️ **只有双语档那个产出点给**（见 `_emit`），其余两个是 `None`。
+                _lat = item[5] if len(item) > 5 else None
                 if live is not None:
-                    # ⚠️ `item[4]` 用 `len` 守卫：`("final", …)` 这条 tag 有 3 个产出点，
-                    #    加第 5 项是**加法**（下标 1–3 一个没动），老形状照样能读。
                     live.final(item[1] or item[3], item[2], item[3],
-                               seg=int(item[4]) if len(item) > 4 else 0)
+                               seg=int(item[4]) if len(item) > 4 else 0, lat=_lat)
                 # 先更新 fin_seg 再算 clear_draft: 屏上已是更新一段的草稿时, 旧段定稿不碰草稿槽
                 _clr = draft_view.on_final(item[4] if len(item) > 4 else None)
-                ui.finalize(item[1] or item[3], item[2],   # 翻译失败时至少显示转录
-                            clear_draft=_clr)
+                _seg_n = int(item[4]) if len(item) > 4 else 0
+                # ⭐ 返回值 = 这一行的**身份号**（悬浮窗铸；终端返回 None）—— 跨段半句合并
+                #    靠它定位"尾句那一行"，不靠行号（见 fragment_merge / transcript_view.LineLog）。
+                _tok = ui.finalize(item[1] or item[3], item[2],   # 翻译失败时至少显示转录
+                                   clear_draft=_clr)
                 if _clr:
                     last_draft["en"] = ""           # 草稿已被这句定稿取代 -> ❓ 点拨别再带上它（否则同一句出现两次）
-                writer.append(item[1], item[2], raw=item[3])
+                _ts = writer.append(item[1], item[2], raw=item[3])
+                # ⭐ 跨段半句合并（第 4 项，design.md §4）：把这一行喂给记账器；它在本行恰是
+                #    某段**首行**且上一段尾句是碎句、gap 又够近时回一份 job。
+                #    ⚠️ 走**独立 worker**（不阻塞下面几句）；结果走新 tag `replace`。
+                if (merge_tracker is not None and _tok is not None
+                        and trans["mode"] == "both"):
+                    try:
+                        _job = merge_tracker.on_line(
+                            _seg_n, _tok, item[1] or item[3], item[2], _ts,
+                            seg_end_punct.get(_seg_n, True))
+                    except Exception:               # noqa: BLE001  记账坏了只是少合一次, 绝不打死主循环
+                        _job = None
+                    if _job is not None:
+                        # 触发那一刻的前文窗口快照：**不改 `finals`**（改了会让之后所有请求的
+                        # 块对齐下标前移、前缀缓存全废，见 design.md §1.d）。
+                        _job["ctx"] = list(finals)
+                        merge_stats["triggered"] += 1
+                        _merge_inc()                # 先记「忙」再入队：收尾闸门不会漏看它
+                        mergeq.put(_job)
                 # ⭐ 采集面 ③：`item[1]` 是**矫正后**的英文、`item[3]` 是**原始 ASR**
                 #    —— 只有**这里**同时拿得到这一对（`note_segment` 那边没有）。
                 #    ⚠️ `note_correction` 自己是 `_safe` 包的，**不可能抛**，
                 #       所以放在 `drain()` 里是安全的（这里没有 try/except）。
                 if tester is not None:
                     tester.note_correction(item[1], item[3])
+                # ⭐ 译文延迟（第 3 项）同样只在这里落地 —— 就在它那句 `final` 旁边。
+                if tester is not None and _lat is not None:
+                    tester.note_translate(*_lat)
                 # 🆕 实时总结：把这一句转给 worker。⚠️ **非阻塞** ——
                 #    `drain()` 在主循环里，这里是「不阻塞不变量」管着的地方。
                 #    ⚠️ 档位判在**这里**，不是启动时 —— 三档课中可切（见 worker 那段）。
@@ -2218,6 +2675,27 @@ def run(args) -> None:
                                    item[1] or item[3], item[2]))
                     except Exception:               # noqa: BLE001
                         pass
+            elif item[0] == "replace":              # ("replace", job, en, zh) 跨段半句合并
+                # ⚠️⚠️ **绝不复用 `("final", …)`**（design.md §1.e）：那条会重复写 `.md`（违约）、
+                #    喂实时总结、计 `livemetrics.final`（污染 seg 分组与回放统计）。
+                #    这里只做三件事：原子替换屏上两行、记一条 livemetrics 数字、追加旁路凭据。
+                #    ⚠️ 失败（重翻失败 / 行已被别的路径改过）→ 什么都不做，**屏上保持原样**。
+                _job, _en, _zh = item[1], item[2], item[3]
+                _fn = getattr(ui, "replace_merge", None)
+                _ok = False
+                if (_en or _zh) and callable(_fn):
+                    try:
+                        _ok = bool(_fn(_job["tail_tok"], _job["next_tok"], _en, _zh))
+                    except Exception:               # noqa: BLE001  drain 无 try/except, 这里自己兜住
+                        _ok = False
+                if _ok:
+                    merge_stats["replaced"] += 1
+                    if live is not None:
+                        live.replace(_job.get("i", 0), _job.get("j", 0))
+                    # 旁路凭据（照 `.lost.jsonl` 那套纪律）。⚠️ 它失败**不代表**屏上没替换。
+                    writer.mark_merge(_job.get("tail_ts", ""), _job.get("next_ts", ""),
+                                      _en, _zh, gap_s=_job.get("gap_s"),
+                                      trigger=_job.get("trigger", ""))
             else:
                 # ⚠️ **兜底告警**：往 `streamq` 里加了新 tag 却忘了在 `drain` 加分支时
                 #    **出声**，而不是静默丢弃。`drain()` 是**唯一**的 tag 分发点。
@@ -2327,10 +2805,10 @@ def run(args) -> None:
             while time.monotonic() < deadline:
                 drain()
                 if all_settled(finalq, streamq, drafts,
-                               busy["on"], carry["text"]):
+                               busy["on"] or merge_pending(), carry["text"]):
                     time.sleep(0.25)
                     if all_settled(finalq, streamq, drafts,
-                                   busy["on"], carry["text"]):
+                                   busy["on"] or merge_pending(), carry["text"]):
                         _settled = True
                         break
                 time.sleep(0.02)
@@ -2344,6 +2822,25 @@ def run(args) -> None:
                      f"（这些句子不会进会话记录/笔记）")
         finally:
             running.clear()
+            # ⭐ 3.9.7 省电：把还**阻塞在队列上**的后台线程叫醒收摊。
+            #    ⚠️ 只在 `running.clear()` **之后**投 —— 不早投就不会改变收尾时序
+            #       （`all_settled` 那 15 s 窗口里这些 worker 照常干活、照常入队）。
+            #    `properq`/`answerq`/`hintq` 的循环体本来就认 `None` 哨兵；
+            #    `mergeq` 的哨兵排在已入队的 job **之后**，先做完再退（`_merge_inflight`
+            #    不会因为早退而永远 >0 → 不会把 `all_settled` 拖到 15 s）。
+            for _q in (properq, answerq, hintq, mergeq):
+                try:
+                    _q.put_nowait(None)
+                except Exception:                        # noqa: BLE001
+                    pass
+            try:
+                latest.stop()                            # 叫醒 `partial_worker` 的 `take()`
+            except Exception:                            # noqa: BLE001
+                pass
+            try:
+                draft_tr.stop()                          # 叫醒草稿译文线程的 `step()`
+            except Exception:                            # noqa: BLE001
+                pass
             if any(draft_stats.values()):             # 草稿译文: 丢了几条/让路几次/出错几次(全零不打印)
                 echo(f"📝 draft_stats: {draft_stats}")
 
@@ -2573,6 +3070,13 @@ def run(args) -> None:
                 #    `metrics.json`（能对上的字段名逐字一致）；对不上的那几项
                 #    它**刻意不返回**，别在这里补 —— 见 `LiveSummarizer.stats()`。
                 tester.note_block("live", summ.stats())
+                # ⭐ 第 4 项：跨段半句合并的计数。`failed` = 触发了却没换成
+                #    （重翻失败 / 超时 / 行已被别的路径改过）—— 从两个计数器算出来，
+                #    不另立一个可能不同步的真源。
+                tester.note_block("merge", {
+                    "triggered": merge_stats["triggered"],
+                    "replaced": merge_stats["replaced"],
+                    "failed": max(0, merge_stats["triggered"] - merge_stats["replaced"])})
                 # ⭐ 译文超出档位行数的次数/分母 —— 原来只在 `transcript_view` 里自增、
                 #    哪儿都不导出，「F 只有 ≈1%」只能拿离线回放外推（2026-10-14 C4）。
                 _ovs = getattr(ui, "overflow_stats", None)
@@ -2581,6 +3085,15 @@ def run(args) -> None:
                         tester.note_ui_value("zh_overflow", _ovs())
                     except Exception:                     # noqa: BLE001
                         pass
+                # ⭐ 3.9.7 省电：窗口不可见的**总时长** + 因不可见跳过的草稿份数
+                #    （识别 / 草稿译文各一格）。都落在 `blocks.ui` 里 —— 没有它们，
+                #    「省了多少」「是不是整节课都不可见」在报告里看不出来。
+                try:
+                    tester.note_ui_value("hidden_s", round(float(getattr(ui, "hidden_seconds", 0.0)), 1))
+                    tester.note_ui_value("draft_skipped_hidden", draft_skipped["n"])
+                    tester.note_ui_value("draft_zh_skipped_hidden", draft_skipped["zh"])
+                except Exception:                         # noqa: BLE001
+                    pass
                 # ⚠️⚠️ `finish()` 里是 ffmpeg 转码 + 打包（注释估 ~21 秒/50 分钟）
                 #    —— 原来直接在**主线程**跑，转码期间窗口不 pump
                 #    （2026-10-01 审查 F21）。丢进线程 + `_spin` 等它 ——
@@ -2782,6 +3295,14 @@ def startup_timing(tp: dict, wall0: float, click_wall: float | None) -> dict:
             prev = tp[k]
     total = prev - tp["run"]
     fields["run_s"] = round(total, 3)
+    # ⭐ 3.9.7 第 5c 项：草稿模型改**后台**加载 → 单列一项「就绪时刻」。
+    #    ⚠️ 用**从 run 起算的绝对偏移**，不是上面那种相邻差值：就绪发生在**另一个
+    #    线程**上，可能落在 translator / overlay **之后** —— 插进那条链会把
+    #    后面几段算成负数（链的前提是各段按时间递增）。
+    if "draft_ready" in tp:
+        _dr = tp["draft_ready"] - tp["run"]
+        fields["draft_ready_s"] = round(_dr, 3)
+        parts.append(f"草稿模型就绪 +{_dr:.1f}")
     pre = None
     if click_wall is not None and 0.0 <= wall0 - click_wall <= 120.0:
         pre = wall0 - click_wall
@@ -2878,7 +3399,16 @@ def main():
     p.add_argument("--polish-model", help="精修用的模型(默认同 --cloud-model)")
     p.add_argument("--vault", help="Obsidian 库路径(默认取 $OBSIDIAN_VAULT 或上次用过的; 都没有就不写 Obsidian)")
     args = p.parse_args()
-    run(args)
+    # ⭐⭐ 3.9.7 第 5a 项：**录课 + 收尾全程不许空闲睡眠**（`power.py` 文件头讲了为什么）。
+    #    ⚠️ 持有范围是**整个 `main()`**（≈ 点「开始上课」到收尾结束），不是只有收尾那一段：
+    #       · 30 个真课的现场记录里，缺音频的那一段正是**课上**（10-14 那位美国用户
+    #         中间 44 分钟没声音 = 系统 idle sleep 把音频子系统停了），只罩收尾挡不住它；
+    #       · `main()` 起的这个进程**就是**录课进程 —— 它一活，用户就是在上课，
+    #         没有"进程活着但不上课"的窗口（面板是另一个短进程，`entry_launch.py`）。
+    #    想收窄成"只罩收尾"：把 `with` 挪进 `run()` 的 `finally`（代价：那 400 行整体
+    #    缩进 4 格）。**不改系统设置**、**合盖照样会睡** —— 见 `power.py`。
+    with power.keep_system_awake():
+        run(args)
 
 
 if __name__ == "__main__":

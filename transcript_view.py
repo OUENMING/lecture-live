@@ -39,6 +39,60 @@ BOTTOM_EPS = 3.0      # origin.y <= 此值即视为在底部(橡皮筋的负值�
 MOVE_EPS = 1.5        # 与期望 origin 相差超过此值 -> 判定为用户/惯性滚动
 FLUSH_DT = 0.016      # 渲染合并闸门 = 一帧
 
+# ---- 新行淡入（A5）与译文超限截断（#7）----
+#: 上滚时**真正的新行**额外淡入的时长 = `motion.MOVE_S` 的前 55%。
+#: 来源: 字体/动效报告 §5 方案 A5（Google 2023 的设计动作逐字: "smooth scrolling and
+#: fading of newly added tokens"）。位移仍走完整 `MOVE_S`, 淡入**先到 1** ——
+#: 「位移还没落位, 新行已经就位」。⚠️ 复用既有的 `_roll_alpha` 机制（`_geom` 里按
+#: `level < _roll_fade_n` 施加）, 不是第二套动画。
+NEW_LINE_FADE_S = motion.MOVE_S * 0.55
+
+#: **半句合并**（跨段尾句合并少一行）那一帧: 被吞掉那一行原地淡出 / 尾句新文字交叉
+#: 淡入用的时长。取 `motion.STATE_S` —— 「原地换内容」那一档（`motion.py` 的分档说明:
+#: 150–300ms 的 STATE 档），**不是** `NEW_LINE_FADE_S`: 新行是"入场"（先就位），
+#: 而这里是**一次交叉淡换**（一出一进要对齐成一个 dissolve，两边必须同一个时长）。
+MERGE_FADE_S = motion.STATE_S
+
+#: 译文超出档位行数时补的省略号（单字符, 与 `linebreak` / `_wrap_zh` 无关）。
+ELLIPSIS = "…"
+
+
+def roll_fade_alpha(t0: float, now: float, duration: float = NEW_LINE_FADE_S) -> float:
+    """新行淡入的 alpha(0→1), 时长 `duration`(默认 `NEW_LINE_FADE_S`)、ease-out。
+    **纯函数**(A5 的判据)。合并过渡传 `MERGE_FADE_S` —— 两者走同一条曲线与同一个时钟。"""
+    return motion.ease_out(motion.progress(t0, now, duration))
+
+
+def truncate_to_height(text: str, measure, max_h: float, *,
+                       suffix: str = ELLIPSIS, eps: float = 0.5) -> str:
+    """把 `text` 截到 `measure(结果) <= max_h + eps`, **从尾部**截断并补 `suffix`。
+
+    ⭐ 第 7 项（报告 §5 的 F · 译文溢出）: AppKit 的 `maximumNumberOfLines_` 超限时
+    **既不留省略号也不报错**（`overlay.py` 文件头实测过这个坑）, 所以"要换行又要省略号"
+    只能自己截。`measure(s) -> px` 由调用方注入（生产环境 = AppKit 实测的 `_measure_text_h`）,
+    于是本函数是**纯函数**, 测试里可以用假尺子钉住它。
+
+    三条不变量:
+    1. 放得下就**原样返回**（含 `""`）—— 短串一个字节都不动。
+    2. 结果**恒以 `suffix` 结尾**（除非连 `suffix` 自己都放不下, 那时只返回 `suffix`）。
+    3. **不改输入**: 返回新字符串, `text` 对象原样（显示层专用; `sessions/` / `livemetrics` /
+       `writer` 拿到的永远是原文）。
+    """
+    if measure(text) <= max_h + eps:
+        return text
+    if measure(suffix) > max_h + eps:
+        return suffix
+    # 高度对**前缀长度**单调不减 -> 二分找"最长的、加省略号后仍放得下"的前缀。
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if measure(text[:mid] + suffix) <= max_h + eps:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + suffix
+
+
 # ---- 双语行的竖排顺序 ----
 # True = 英文小字在上、中文大字在下(当前)   False = 反过来(2026-09-24 之前)
 #
@@ -84,6 +138,63 @@ def _view_classes():
         objc_own.own("TranscriptScroll", NSScrollView, {"scrollWheel_": scroll_wheel}),
         objc_own.own("TranscriptDoc", NSView, {"mouseDown_": doc_mouse_down}),
     )
+
+
+class LineLog:
+    """已定稿字幕行的**身份账本**：行内容 `rows` + 每行一个自增**身份号** `ids`。
+
+    为什么要身份号（跨段半句合并，见 `fragment_merge`）：流程是「尾句先上屏 →
+    下一段首句上屏 → 重翻回来后替换尾句那一行、并吞掉首句那一行」。从触发到落地
+    之间屏上可能又插进了别的行（同段的后几句 / 答案接管换渲染源），**行号会漂**；
+    身份号不会 —— `replace_pair` 按 id 定位，插多少行都对。
+
+    ⚠️ 纯逻辑、**不碰 AppKit**：判据可以直接构造它（`tests/test_merge_replace.py`）。
+    ⚠️ `rows` 与 `ids` **永远等长且同序**，且 `replace_pair` **原地改**（保持 list 身份
+    —— `Overlay._history` 就是 `rows` 本身，外部引用不许失效）。
+    """
+
+    def __init__(self) -> None:
+        self.rows: list[tuple[str, str]] = []
+        self.ids: list[int] = []
+        self._seq = 0
+        #: 上一次 `replace_pair` **删掉**的那一行在**调用前**的索引（失败 = `None`）。
+        #: ⭐ 给半句合并的过渡用：被吞掉那一行的**层号**只能由这个索引 + 当时的行数算
+        #: 出来（`Overlay._render` 拿不到索引，它只看得见 `rows` 的内容）。
+        self.last_deleted: int | None = None
+
+    def append(self, en: str, zh: str) -> int:
+        """追加一行 → 返回它的身份号。"""
+        self._seq += 1
+        self.rows.append((en, zh))
+        self.ids.append(self._seq)
+        return self._seq
+
+    def replace_pair(self, tail_id, next_id, en: str, zh: str) -> bool:
+        """把 `tail_id` 那一行换成 `(en, zh)`、**并删掉** `next_id` 那一行（一次原子改两行）。
+
+        返回是否真的改了。定位不到 / 两个 id 相同 / `next` 在 `tail` 之前 → 返回 `False`
+        （**一个字节都不动** —— 重翻回来时行可能已被别的路径改过，宁可不动）。
+        ⚠️ 行数**减一**：`_set_items` 只在**变多**时记「新句到」并起滚，所以替换不会
+        触发上滚动画（与 Reduce Motion 无关 —— 结构上就没动画）。
+        ⚠️ 成功时顺带把**删除位置**记进 `last_deleted`（给 `transcript_view` 的
+        半句合并过渡定位"被吞掉那一行"用；返回 `bool` 不变 —— 索引 0 是假值，
+        改返回值会把 `tests/test_merge_replace.py` 的 `assertTrue/assertFalse` 弄假）。
+        """
+        self.last_deleted = None
+        if tail_id is None or next_id is None or tail_id == next_id:
+            return False
+        try:
+            i = self.ids.index(tail_id)
+            j = self.ids.index(next_id)
+        except ValueError:
+            return False
+        if j < i:
+            return False
+        self.rows[i] = (en, zh)
+        del self.rows[j]
+        del self.ids[j]
+        self.last_deleted = j
+        return True
 
 
 class TranscriptView:
@@ -135,12 +246,20 @@ class TranscriptView:
         self._reduce_motion = motion.reduce_motion
         self._animate_ok = lambda: True   # 宿主说「有人逐帧推 tick 吗」; 没有就直接落位(见 Overlay)
         self._painted_count = 0     # 上一次 _paint 时的行数(含实时行) -> 判「多了几行」
+        self._painted_items = 0     # 上一次 _paint 时的**历史行**数 -> 判「上一条新行」是谁(A5)
+        self._painted_live = 0      # 上一次 _paint 时实时行在不在(1/0) -> 同上, 也用于幽灵的层号
         self._count_reset = False   # 整体换内容(replace_items)那一轮不算「多了几行」
         self._roll_t0 = None        # 动画起跑时刻; None = 没在动
-        self._roll_from = 0.0       # 起跑时内容往下偏多少 px(终点恒为 0)
+        self._roll_from = 0.0       # 起跑时内容往下偏多少 px(终点恒为 0; **负数 = 往上偏**)
         self._roll_off = 0.0        # 当前帧的偏移, _geom 摆每个槽位时减掉它
-        self._roll_fade_n = 0       # 减弱动态效果: 最新的这几行淡入, 不位移
+        self._roll_off_lo = 0       # 偏移**从第几层起**施加(半句合并时最底那行要留在原地)
+        self._roll_fade_lo = 0      # 淡入名单的**起始层**(A5: 见 _start_roll 的 n/lo)
+        self._roll_fade_n = 0       # 减弱动态效果: 这几行淡入, 不位移
+        self._roll_fade_s = NEW_LINE_FADE_S   # 淡入时长(半句合并换成 MERGE_FADE_S)
         self._roll_alpha = 1.0
+        self._ghost_j = None        # 半句合并: 「被吞掉那一行」占着的槽位(原地淡出)
+        self._merge_pending = 0     # 跨段半句合并待落地几次(见 note_merge / _paint)
+        self._merge_deleted = None  # 被吞掉那一行在**合并前**的行号(LineLog.last_deleted)
         self._verbatim = False      # 行 = (大字, 小字) 原样, 不做中英对调(见 set_rows_verbatim)
 
         self._dirty = False
@@ -194,7 +313,7 @@ class TranscriptView:
         self._doc.addSubview_(zh)
         self._doc.addSubview_(en)
         self._slots.append({"zh": zh, "en": en, "level": None, "hidden": True,
-                            "en_top": None, "en2": False})
+                            "en_top": None, "en2": False, "ghost": False})
         self._cache.append({})
 
     def _ensure_pool(self, view_h: float) -> None:
@@ -553,16 +672,34 @@ class TranscriptView:
         key_f = which + "_font"
         if c.get(which) == text and c.get(key_f) is font:
             return
-        c[which] = text
-        c[key_f] = font
         if font is not None and lbl.font() != font:
             lbl.setFont_(font)
-        lbl.setStringValue_(text)
         # ⚠️ 只在**译文行**上查超限 —— 答案接管期间(`_verbatim`, 与 `_hold` 同时置位)
         #    这一列装的是**中文讲解**, 是另一种内容, 由 `_answer_view_rows` 自己保证
         #    每行放得下; 拿译文的档位去量它只会误报(实测: R8 那个超长词用例就报了一次)。
+        display = text
         if which == "zh" and text and not self._verbatim:
+            # ⭐ 第 7 项(报告 §5 的 F): 先按**原文**记账(统计口径不变, R13 钉着),
+            #    再把显示截到档位行数内 + 「…」。**只截显示** —— `_items` / `_live` 里
+            #    的对象一个字节都不动, 所以 `sessions/*.md` / `livemetrics` / `writer`
+            #    拿到的永远是原文。定稿行与草稿行(实时行, `final=False`)同一条路。
             self._note_overflow(lbl, text)
+            display = self._fit_zh(lbl, text)
+        # 缓存存的是**原文**: 同一段译文重复回来仍然跳过重排(判据与改前逐字一致)。
+        c[which] = text
+        c[key_f] = font
+        lbl.setStringValue_(display)
+
+    def _fit_zh(self, lbl, text: str) -> str:
+        """把要显示的译文截到**当前档位行数**里(超出则尾部「…」)。量不出来就原样返回。"""
+        w = float(lbl.frame().size.width)
+        if w < 20.0:
+            return text                      # 还没摆过(宽度没定): 量了没意义
+        try:
+            return truncate_to_height(
+                text, lambda s: self._measure(s, w, lbl.font()), self._zh_h)
+        except Exception:                    # noqa: BLE001 截断是显示层兜底, 坏了就交还 AppKit
+            return text
 
     def _note_overflow(self, lbl, text: str) -> None:
         """把「文本超出档位行数」从**静默裁切**变成**可观测**。
@@ -570,7 +707,9 @@ class TranscriptView:
         ⚠️ 为什么要它: 档位行数(2/3/4/5)**来自一个闭样本** —— `overlay.py` 里对
         4797 句真实中文定稿按宽度取 p100。样本之外的更长文本会被 AppKit 在
         `maximumNumberOfLines` 处**无声**吃掉(不留省略号, 见 `overlay.py` 文件头实测)。
-        这条**不改变渲染**, 只保证发生时有痕迹: 记数 + 首次打一行。
+        2026-10-16 起**不再是静默裁切**: 同一个 `_set_text` 里紧接着调 `_fit_zh` 把显示
+        截到档位行数内 + 「…」(第 7 项)。这条本身仍然只做**观测**: 记数 + 首次打一行
+        —— 它量的是**原文**的高度, 所以统计口径与改前逐字一致(报告 §5 的 F)。
 
         判据用**盒子自己的高度**: 盒子就是 `_lines` 行 + 一点余量, 所以量出来的高度
         一旦超过 `self._zh_h` 就是装不下 —— 不必知道行高是多少。
@@ -591,8 +730,8 @@ class TranscriptView:
         if not self._overflow_warned:
             self._overflow_warned = True
             print(f"⚠ transcript_view: 有译文超出档位行数({self._lines} 行 / 盒高 "
-                  f"{self._zh_h:.0f}px, 实测需 {need:.0f}px) —— 超出部分会被**静默裁掉"
-                  f"且不留省略号**。若某门课的译文普遍更长, 请调大 "
+                  f"{self._zh_h:.0f}px, 实测需 {need:.0f}px) —— 显示已从尾部截断 + "
+                  f"「{ELLIPSIS}」(原文不动)。若某门课的译文普遍更长, 请调大 "
                   f"overlay.LINE_TIERS / MAX_LINES 的档位。", flush=True)
 
     def _place(self, j: int, level: int, count: int, doc_w: float) -> None:
@@ -627,7 +766,10 @@ class TranscriptView:
         # 用旧值会把拖宽过的面板里的行缩回去。
         level = s["level"]
         w = self._doc_w if self._doc_w > 0 else s.get("w", self._width)
-        y = level * self._row_h - self._roll_off
+        # ⭐ 半句合并: 被吞掉那一行**原地**淡出(幽灵不跟着位移走), 而它**下面**的层
+        #    (未跟随时最底那行、跟随时的实时行)也不动 —— 少的那一行在它上面。
+        off = 0.0 if (s.get("ghost") or level < self._roll_off_lo) else self._roll_off
+        y = level * self._row_h - off
         if s["en_top"]:                              # 英文小字在上, 中文大字在下
             s["en"].setFrame_(((0.0, y + self._zh_h + self._gap), (w, self._en_h)))
             s["zh"].setFrame_(((0.0, y), (w, self._zh_h)))
@@ -640,7 +782,12 @@ class TranscriptView:
             x = self._en_line_h()
             s["en"].setFrame_(((0.0, y + self._zh_h + self._gap - x), (w, self._en_h + x)))
             s["zh"].setFrame_(((0.0, y), (w, self._zh_h - x)))
-        a = self._roll_alpha if level < self._roll_fade_n else 1.0
+        if s.get("ghost"):
+            # 幽灵: α 1→0（与尾句新文字 0→1 同一个时长、同一个起跑时刻 = 一次交叉淡换）。
+            a = 1.0 - roll_fade_alpha(self._roll_t0 or 0.0, self._clock(), MERGE_FADE_S)
+        else:
+            a = self._roll_alpha if self._roll_fade_lo <= level < (
+                self._roll_fade_lo + self._roll_fade_n) else 1.0
         if s.get("alpha", 1.0) != a:
             s["zh"].setAlphaValue_(a); s["en"].setAlphaValue_(a)
             s["alpha"] = a
@@ -652,34 +799,102 @@ class TranscriptView:
     # motion.MOVE_S 的 ease-out 滑回原位 —— 新行**从草稿那里升上来**, 老行一起被推上去。
     # 位移的是整块, 不是各自补间(两行各动各的就是「字在打架」, 方案 §2)。
     # 减弱动态效果: 不位移, 最新那几行淡入(Apple HIG 的原话是「用淡入代替 x/y/z 轴的过渡」)。
-    def _start_roll(self, n: int) -> None:
+    def _start_roll(self, n: int, lo: int = 0, shift: int | None = None) -> None:
+        """起跑。`n` = **新到的那几行**在淡入名单里的条数, `lo` = 名单的起始层,
+        `shift` = 老内容被顶高了几格(默认 = `n`)。
+
+        ⚠️ `lo` 不是装饰: 实时行**一直占着最底那一层**(`_count` 把它算在行数里),
+        所以"这次新到了几行"和"最底那几行"**不是同一段** —— 见 `_paint` 里怎么算
+        `lo`/`n`(A5 的已知问题: 一次进来 ≥2 行时, 上一条已经显示过的行会被重新
+        计入淡入、闪一下)。`shift` 与 `n` 分开也是同一个理由: 位移量是"行数差",
+        名单长度是"这次真的新了几行"。
+        """
         if not self._animate_ok():
             self._end_roll()                # 没人推帧: 不起跑, 直接是终态
             return
+        self._end_ghost()                   # 上滚与合并是两套位移, 幽灵只属于合并那一次
+        self._roll_off_lo = 0
         now = self._clock()
         if self._reduce_motion():
             self._end_roll()
-            self._roll_fade_n, self._roll_alpha = n, 0.0
+            self._roll_fade_lo, self._roll_fade_n, self._roll_alpha = lo, n, 0.0
         else:
             # 动画中又来一行: 从**当前位置**接着走(老内容又被顶高一行, 所以起点加一个行高),
             # 不重置也不跳 —— 方案 §5.2 的选项 ①。
             # 封顶两个行高: 槽位池只比视口多备了 2 行(K = ceil(视口/行高)+2), 偏得更多
             # 顶上就会露出没有槽位的空白。一次来 3 句以上本来就罕见。
-            self._roll_from = min(self._roll_off + n * self._row_h, 2.0 * self._row_h)
+            k = n if shift is None else shift
+            self._roll_from = min(self._roll_off + k * self._row_h, 2.0 * self._row_h)
             self._roll_off = self._roll_from
+            # ⭐ A5(报告 §5): 位移走完整 MOVE_S, 但**新到的那几行**额外从 α0 淡入,
+            #    时长只有 `NEW_LINE_FADE_S`(= MOVE_S*0.55) —— 位移还在走, 它已经就位。
+            #    ⚠️ 与 Reduce Motion 那支**共用** `_roll_fade_*` / `_roll_alpha`
+            #    (同一个 `_geom` 施加点), 不开第二套机制。
+            self._roll_fade_lo, self._roll_fade_n, self._roll_alpha = lo, n, 0.0
         self._roll_t0 = now
         self._regeom()          # 留在原槽位的行也要按新偏移重摆(_paint 只摆新进来的)
+
+    # ---- 跨段半句合并: 「少一行」的那一下 ----
+    def note_merge(self, deleted: int | None) -> None:
+        """`_history` 刚被 `LineLog.replace_pair` 少了一行、尾句那一行的文字也换了。
+
+        `deleted` = 被吞掉那一行在**调用前**的行号(`LineLog.last_deleted`)。
+        真正的判定在 `_paint`(要等行数对账), 这里只记一笔 —— 组合成"少一行但没多行"
+        才做过渡, 否则老实落位(见 `_paint` 里那段)。
+        """
+        self._merge_pending += 1
+        self._merge_deleted = deleted
+
+    def _start_merge_roll(self, off_lo: int, *, slide: bool = True) -> None:
+        """半句合并的位移: **把上滚反过来** —— 内容先**高**一个行高, 再滑下来。
+
+        ⚠️ 复用同一个时钟(`_roll_t0`)与同一条曲线(`motion.ease_out`), 不另起一套计时;
+        淡入名单只有**一行**(合并后的尾句), 时长换成 `MERGE_FADE_S`(原地换内容那一档)。
+        ⚠️ 偏移从 `off_lo` 层起施加: `off_lo` 以下的层(实时行)**没动**, 不该跟着偏。
+        `slide=False`(手动回看)/ 减弱动态效果: 不位移, 只保留那一次淡换。
+        """
+        now = self._clock()
+        self._end_ghost()                       # 上一次的幽灵别赖着不走
+        self._roll_off_lo = int(off_lo)
+        if self._reduce_motion() or not slide:
+            self._roll_from = self._roll_off = 0.0
+        else:
+            self._roll_from = self._roll_off = -self._row_h
+        self._roll_fade_lo = int(off_lo)
+        self._roll_fade_n, self._roll_alpha = 1, 0.0
+        self._roll_fade_s = MERGE_FADE_S
+        self._roll_t0 = now
+
+    def _make_ghost(self, glev: int) -> bool:
+        """把被吞掉那一行占着的那一格标成**幽灵**: 原地淡出, 不参与位移与摆放。
+
+        返回是否真的找到了那一格。⚠️ 一个字的文本都不重写 —— 那格正显示着那一行,
+        「原地淡出」就该是**它自己**淡掉(复制一份新文本反而多一次重排)。
+        """
+        for j, s in enumerate(self._slots):
+            if s["level"] == glev and not s.get("ghost"):
+                s["ghost"] = True
+                self._ghost_j = j
+                # 幽灵独占一格 -> 先把池扩一格, 否则可见行会差一行(见 _ensure_pool)
+                self._ensure_pool(self._scroll.contentView().bounds().size.height
+                                  + self._row_h)
+                self._geom(j)
+                return True
+        return False
 
     def _step_roll(self) -> None:
         e = motion.ease_out(motion.progress(self._roll_t0, self._clock(), motion.MOVE_S))
         if e >= 1.0:
             self._end_roll()
             return
+        # 位移: `_roll_from` 在 Reduce Motion / 落位后恒为 0, 所以这一步对那一支是空操作。
+        # 半句合并那一支的 `_roll_from` 是**负数** —— 同一行代码, 方向相反。
+        self._roll_off = self._roll_from * (1.0 - e)
         if self._roll_fade_n:
-            self._roll_alpha = e
-        else:
-            self._roll_off = self._roll_from * (1.0 - e)
-        self._regeom()
+            # ⭐ A5 / 合并: 淡入只走 `_roll_fade_s`, 先于位移到 1, 之后保持不透明。
+            self._roll_alpha = roll_fade_alpha(self._roll_t0, self._clock(),
+                                               self._roll_fade_s)
+        self._regeom()          # 幽灵的淡出也在这里逐帧推进(_geom 按 `_roll_t0` 算)
 
     def _end_roll(self) -> None:
         """直接落到终态(位移 0、全不透明)。动画自然结束、被打断、换内容都走这里 ——
@@ -687,9 +902,18 @@ class TranscriptView:
         was = self._roll_t0 is not None
         self._roll_t0 = None
         self._roll_from = self._roll_off = 0.0
-        self._roll_fade_n, self._roll_alpha = 0, 1.0
+        self._roll_off_lo = 0
+        self._roll_fade_lo, self._roll_fade_n, self._roll_alpha = 0, 0, 1.0
+        self._roll_fade_s = NEW_LINE_FADE_S
+        self._end_ghost()
         if was:
             self._regeom()
+
+    def _end_ghost(self) -> None:
+        """收起「被吞掉那一行」的幽灵(幂等) —— 它只在合并那一次动画里存在。"""
+        j, self._ghost_j = self._ghost_j, None
+        if j is not None:
+            self._hide(j)
 
     def _regeom(self) -> None:
         for j, s in enumerate(self._slots):
@@ -710,6 +934,8 @@ class TranscriptView:
             s["hidden"] = True
         s["level"] = None
         s["en_top"] = None
+        # ⚠️ 幽灵标记必须清掉: 槽位会被改派给别的行, 带着它下一行就永远不参与位移了
+        s["ghost"] = False
         if s.get("alpha", 1.0) != 1.0:             # 槽位会被改派给别的行, 别把半透明带过去
             s["zh"].setAlphaValue_(1.0); s["en"].setAlphaValue_(1.0)
             s["alpha"] = 1.0
@@ -721,8 +947,33 @@ class TranscriptView:
         self._ensure_pool(view_h)               # 视口可能因换屏变大, 池要跟上
         count = self._count()
         doc_h = max(count * self._row_h, view_h)
-        grew = 0 if self._count_reset else count - self._painted_count
+        reset = self._count_reset
+        grew = 0 if reset else count - self._painted_count
+        # ⚠️ 行数差(`grew`)与"这次新到的是哪几行"**不是一回事**: 实时行一直占着
+        #    最底那一层(`_count` 把它算在行数里), 所以一次进来 ≥2 行时最底那两行
+        #    里可能有一行是**上一条已经显示过的**(A5 的已知问题)。判据只能靠
+        #    「历史行数变了几行 + 实时行在不在」两个数, 见下面 lo/n 那段。
+        items_before, live_before = self._painted_items, self._painted_live
+        items_now, live_now = len(self._items), (1 if self._live_visible else 0)
         self._painted_count, self._count_reset = count, False
+        self._painted_items, self._painted_live = items_now, live_now
+
+        # ⭐ 跨段半句合并(`Overlay.replace_merge` → `LineLog.replace_pair`):
+        #    少一行**并且**尾句那一行的文字被换成合并译文 —— 两件事都要过渡, 不然
+        #    上面的行瞬移下来一行、尾句的文字直接换(已显示文字被改 = 分心, CHI 2023)。
+        #    判定: 这一笔待落地 + 净少一行 + 删的是**最底那一行历史行**(删中间的话它
+        #    下面的行不该跟着动, 而位移是整块的 -> 老实落位)+ 实时行没在这次改换态。
+        dj = getattr(self, "_merge_deleted", None)
+        merge = False
+        if self._merge_pending:
+            self._merge_pending = 0
+            merge = bool(
+                grew == -1 and not reset and dj is not None
+                and 0 <= dj < items_before and dj == items_before - 1
+                and live_now == live_before and self._animate_ok()
+                # ⚠️ 答疑 / 纲要接管期间(`_verbatim`)屏上是**另一种内容**, 行数变少
+                #    与"合并"无关(接管换渲染源)。那时只改 `_history`, 不做过渡。
+                and not self._verbatim)
 
         # 浏览保护: 未跟随时新追加的行会把老内容整体上移 k*row_h,
         # 把视口同步上移同样距离, 视线不动。必须回写 _expected_origin,
@@ -733,6 +984,13 @@ class TranscriptView:
             clip.scrollToPoint_((0.0, oy + k * self._row_h))
             self._expected_origin = clip.bounds().origin.y
         self._pending_appends = 0
+        if grew < 0 and not self._follow:
+            # 反向的浏览保护: 少一行时**上面的行整体下移**一格, 视口跟着下移同样的
+            # 距离, 视线不动(mirror 上面那一条)。手动回看时那一行本来就在视口外,
+            # 所以这一支**不做位移动画**(只有内容淡换, 见 _start_merge_roll)。
+            oy = clip.bounds().origin.y
+            clip.scrollToPoint_((0.0, max(0.0, oy + grew * self._row_h)))
+            self._expected_origin = clip.bounds().origin.y
 
         width_changed = abs(self._doc_w - doc_w) > 0.5
         if abs(self._doc_h - doc_h) > 0.5 or width_changed:
@@ -745,16 +1003,37 @@ class TranscriptView:
                 clip.scrollToPoint_((0.0, 0.0))
             self._expected_origin = clip.bounds().origin.y
             if grew > 0:
-                self._start_roll(grew)
+                # ⭐ A5 的修正: 淡入名单是"这次**新到**的那几行", 而实时行一直占着
+                #    最底那一层 -> 名单从 `live_now` 起, 条数 = 这次新到的历史行数;
+                #    实时行**这次才出现**时它自己也是最底那一行新的, 名单从 0 起。
+                #    ⚠️ 位移量仍然是 `grew`(老内容被顶高的格数), 与名单长度无关。
+                d_items = items_now - items_before
+                if live_now and not live_before:
+                    lo, n = 0, d_items + 1
+                else:
+                    lo, n = live_now, d_items
+                self._start_roll(n, lo, grew)
+        if merge:
+            # 半句合并: 位移 + 淡换(未跟随时**只**淡换 —— 视线不许动)。
+            self._start_merge_roll(live_now, slide=self._follow)
+            # 幽灵 = 被吞掉那一行的**那一格本身**: 原地淡出, 一个字的文本都不重写。
+            self._make_ghost(live_before)
+            # 留在原槽位、只是被顶下去一格的行走这里重摆(`_paint` 只摆**新进来**的);
+            # 文本还没换(在下面那段刷新里), 但都在这一轮 `_paint` 内完成、同一帧上屏。
+            self._regeom()
 
         L0 = max(0, int(clip.bounds().origin.y // self._row_h))
         hi = min(L0 + len(self._slots) - 1, count - 1)
 
         # 保留仍在覆盖区间内的槽位; 其余的腾出来给新进入的 level。
+        # ⚠️ 幽灵**不参与**这一套: 它自己管自己(原地淡出), 既不能被当成某一层保留,
+        #    也不能被 `_hide` 掉(那会让它提前消失)。
         keep = {}
         free = []
         for j, s in enumerate(self._slots):
             lv = s["level"]
+            if s.get("ghost"):
+                continue
             if lv is not None and L0 <= lv <= hi and lv not in keep:
                 keep[lv] = j
             else:

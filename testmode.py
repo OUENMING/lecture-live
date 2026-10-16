@@ -18,7 +18,8 @@
 *音频*  : 逐块累计峰值/RMS/波峰因数 → 电平分布、动态范围
 *分段*  : 每段的时长、电平、波峰因数、VAD 判定、文本、ASR 耗时/
           用了哪个模型/是否回退/平均 logprob/词数/有无句末标点
-*流水线*: 首字中文延迟、定稿延迟、翻译失败、云端降级、退化回退次数
+*流水线*: 首字中文延迟（草稿 `lag_s` / 定稿 `translation_latency`）、定稿延迟、翻译失败、
+          云端降级、退化回退次数
 *资源*  : CPU 秒(整段 + 折算实时占比)、峰值内存
 *收尾*  : VAD 诊断原文(report())、会话文件路径
 
@@ -96,7 +97,72 @@ BLOCKS = frozenset({
     "live",     # `live_summary.LiveSummarizer.stats()` —— 窗口/章/Jev/积压
     "terms",    # 术语注入条数（core / always / scored）
     "ui",       # UI 使用度（纲要开了几次、点了哪些按钮）
+    "backfill",  # 🩹 漏译句课后补译的计数 `{need, done}`（`backfill.backfill_entries`）
+    "merge",    # 跨段半句合并的计数 `{triggered, replaced, failed}`（3.9.7 第 4 项）
+    "system",   # 机器画像 `{ram_gb, chip, macos, arch, draft_engine, draft_reason}`（`system_info`）
 })
+
+
+def system_info(draft_name: str = "", draft_reason: str = "") -> dict:
+    """机器画像（3.9.7）：内存 / 芯片 / 系统版本 + 实际用的草稿引擎与理由。**永不抛**。
+
+    为什么要：草稿引擎按内存分档（`draft_engine.MIN_RAM_BYTES` = 12 GB），低内存机退回
+    每秒重解整窗的 Parakeet —— 那是本地最耗电的一档。没有这块就答不了「用户里有没有
+    低内存 Mac、值不值得为它优化」（2026-10-16：7 节用户报告里一条都查不到）。
+    只有硬件型号与版本号，没有序列号 / 主机名 / 用户名。
+    """
+    import platform
+    import subprocess
+    out = {"draft_engine": draft_name or "", "draft_reason": draft_reason or ""}
+    try:
+        out["ram_gb"] = round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30, 1)
+    except Exception:                                    # noqa: BLE001
+        out["ram_gb"] = None
+    try:
+        out["chip"] = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                                     capture_output=True, text=True, timeout=2).stdout.strip()
+    except Exception:                                    # noqa: BLE001
+        out["chip"] = ""
+    try:
+        out["macos"] = platform.mac_ver()[0]
+        out["arch"] = platform.machine()
+    except Exception:                                    # noqa: BLE001
+        out["macos"] = out["arch"] = ""
+    return out
+
+
+def pcts(vals) -> dict | None:
+    """一串数 → `{"p50": …, "p90": …}`；**一个数都没有 → `None`**。纯函数。
+
+    ⚠️ 空的时候给 `None` 不给 `0`（同 `asr.final_empty_pct` 的规矩）：`0` 会被读成
+       「延迟为零毫秒」，那是另一个意思。
+    """
+    if not vals:
+        return None
+    a = np.asarray(list(vals), dtype=float)
+    return {"p50": round(float(np.percentile(a, 50)), 1),
+            "p90": round(float(np.percentile(a, 90)), 1)}
+
+
+def latency_summary(rows) -> dict:
+    """逐句译文延迟 → `translation_latency` 汇总。纯函数（判据直接调它）。
+
+    `rows` = `[{"zh_first_ms", "zh_done_ms", "seg_to_zh_ms", "model"}, …]`
+    （`note_translate` 收的），一条一句定稿。
+
+    ⚠️ `n` = **真的等到过中文首字**的句数：断网 / 空译文那些不进 `n`、也不进
+       `by_model` —— 报一个引擎名会让人以为它们翻出来了。
+    ⚠️ `zh_done_ms` 只落在 `.live.jsonl` 的逐句行里，这里不汇总（第 3 项要的就是
+       `zh_first_ms` / `seg_to_zh_ms` 两条：前者量翻译，后者是**用户真正等的时间**）。
+    """
+    first = [r.get("zh_first_ms") for r in rows if r.get("zh_first_ms") is not None]
+    seg = [r.get("seg_to_zh_ms") for r in rows if r.get("seg_to_zh_ms") is not None]
+    by_model = collections.Counter(r.get("model") or "" for r in rows)
+    by_model.pop("", None)
+    return {"n": len(first),
+            "zh_first_ms": pcts(first),
+            "seg_to_zh_ms": pcts(seg),
+            "by_model": dict(by_model.most_common())}
 
 
 #: 静默采集最多为**每个方法**记几条异常 —— 热路径上失败会一秒刷几十次，
@@ -330,6 +396,10 @@ class TestSession:
         self._ui: dict = {}             # UI 使用度（`note_ui` 的累加器）
         self._corr = {"pairs": 0, "changed": 0, "identical": 0, "no_fix": 0,
                       "words_raw": 0, "words_fixed": 0}
+        #: ⭐ 逐句译文延迟（`note_translate` 收的）。⚠️ 存**原始数**而不是计数器：
+        #:    p50 / p90 没法用累加算出来（同 `_block_peaks` 那条理由）。
+        #:    一节几百句 × 4 个数字，几十 KB —— 收尾在 `finish()` 里汇成一行汇总。
+        self._tr: list[dict] = []
         self._seg_no = 0
         self._cpu0 = self._cpu()
         self._rss_peak = 0
@@ -573,11 +643,28 @@ class TestSession:
             c["changed"] += 1
 
     @_safe
+    def note_translate(self, zh_first_ms=None, zh_done_ms=None, seg_to_zh_ms=None,
+                       model: str = "") -> None:
+        """⭐ 一句定稿的**译文延迟**（3.9.7 第 3 项）—— 只记数字与引擎名，不记文本。
+
+        口径见 `tr_latency` 的文件头：`zh_first_ms` / `zh_done_ms` 从"英文送进翻译"
+        算起，`seg_to_zh_ms` 从那**一段音频结束**算起（后者才是用户真正等的时间），
+        `model` = 实际出译文的引擎（云端模型名 / `local`；没出中文 = 空串）。
+
+        ⚠️ 是**一句一条**的原始数（不是计数器）：收尾在 `finish()` 里汇成
+           `translation_latency` 的 p50 / p90。这里只在内存里 append，**不落盘**。
+        """
+        self._tr.append({"zh_first_ms": zh_first_ms, "zh_done_ms": zh_done_ms,
+                         "seg_to_zh_ms": seg_to_zh_ms, "model": model})
+
+    @_safe
     def note_ui(self, name: str) -> None:
         """⭐ **UI 使用度**（采集面 ⑦）：某个交互被用了几次。
 
         名字由 `overlay` 那边给（`submit` / `ask` / `new_topic` / `lost` /
-        `outline` / `trans_mode` / `quit` / `hide` / `show` / `on_top` / `not_on_top` / `reopen` / `edge_tab`）。
+        `outline` / `trans_mode` / `quit` / `hide` / `show` / `on_top` / `not_on_top` / `reopen` / `edge_tab`，
+        以及 3.9.7 文字稳定包那两个：`draft_append` / `draft_rewrite` ——
+        草稿更新里「纯追加」与「改了前面已显示的词」各多少次，用来量逐词淡换的收益）。
 
         ⚠️ **只自增一个计数，不 append 事件** —— 它跑在 AppKit **主线程回调**里，
            而按钮可以连点几十下。「每次一个事件」会把 `events` 撑爆、
@@ -729,6 +816,9 @@ class TestSession:
                 # ⚠️ 分母是「**真的比过了**的对数」（扣掉 `no_fix`）——
                 #    矫正失败那些根本没得比，算进分母会把"改了多少"稀释掉。
             },
+            # ⭐ 译文延迟（3.9.7 第 3 项，逐句数见 `note_translate`）。
+            #    ⚠️ 放这儿（与 `correction` 并列）—— 两格都是**逐句聚合**。
+            "translation_latency": latency_summary(self._tr),
             "notes": [
                 "logprob 只有 **Parakeet** 会填 —— Whisper 的 result.ys_log_probs 是空的。"
                 "云端来源(groq / qwen)也没有 logprob; 定稿主要走云端时这个字段通常是 null, 不是采集失败。",
@@ -736,6 +826,9 @@ class TestSession:
                 "跨机器/跨速度比请用 cpu_s_per_audio_s。",
                 "no_end_punct_pct 在 n<30 段时噪声很大(实测底线 ±18 个百分点),"
                 "单节课的数字不要当结论。",
+                "translation_latency.n 只数**真的等到过中文首字**的句子: 断网 / 空译文"
+                "那些不进 n 也不进 by_model; seg_to_zh_ms 从该段音频结束(VAD 切段)"
+                "算起, 含定稿 ASR + 排队 —— zh_first_ms 只量翻译那一段。",
             ],
             "vad_report": vad_report,
             # ⭐ 七格采集面里那些「整块快照」（`note_block` 收的）。

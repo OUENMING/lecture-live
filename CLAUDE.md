@@ -26,6 +26,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 主循环、后台线程、队列、UI 路由与落盘分发（`drain()` 是 streamq 唯一分发点） | `main.py` |
 | 零参数入口（双击 `.app` → 面板 → 「开始上课」；退出码 0–4 是它与 `cl` 的契约；`CL_NO_PANEL=1` 退回老行为） | `entry_launch.py` |
 | 单实例锁（为什么 flock 不用 pidfile） | `instance_lock.py` |
+| 上课 / 收尾期间**不许空闲睡眠**（进程级 `NSProcessInfo` 活动断言；**挡不住合盖**） | `power.py` |
 | 开课前的准备（课件 → 候选术语 → 该课术语表；`glossary/<课号>.txt` **只追加**） | `prep.py`、`extract.py`（先读文件头） |
 | 课程清单 / 片段解析 / 准备度（`glossary/` ∪ `~/.classlive/courses/`；`cl course` 模糊匹配只此一处） | `courses.py` |
 | 课件归哪门课（命令行**只看不动**；`--sessions <目录>` 测的时候指向别处） | `classify.py` |
@@ -42,10 +43,12 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 下载模型（直连 → 镜像 → sha256） | `fetch_model.py`（文件头） |
 | 术语表、课号、术语查表与注入 | `build_notes.py`、`glossary/`（样例 `glossary.example.txt`） |
 | 笔记落盘、`sessions/` 格式、双层笔记、❓ 旁路文件 `sessions/<同名>.lost.jsonl` | `obsidian_writer.py` |
+| 课后补译漏译句（云端失败留下的「只有 ASR」条目，收尾时补进课后笔记、不改 `sessions/`）/ 课后碎句合并 | `backfill.py`、`note_merge.py` |
+| 翻译延迟记录（中文首字 / 段尾到首字 / 模型，进 `live.jsonl` 与测试报告） | `tr_latency.py` |
 | 实时总结（`main.py` 只接线，逻辑全在这里） | `live_summary.py`（先读文件头）、`chapter.py` |
 | 测试模式的上传（`send` 是唯一传输洞；判据用本地目录 / 本机 HTTP 服务器，不碰真服务器） | `upload.py`（先读文件头）+ `docs/PLAN-zero-config-upload.md` |
 | 整课二级精修 | `polish.py` |
-| 悬浮窗、字幕显示、滚动、槽位池化 | `overlay.py`、`transcript_view.py` |
+| 悬浮窗、字幕显示、滚动、槽位池化（字体唯一出口 `overlay._ui_font`＝显式等宽数字 tnum + 中文标点挤压 palt；译文超出档位行数 → 尾部截断 +「…」，只截显示） | `overlay.py`、`transcript_view.py`、`text_diff.py`（草稿"改字"的 token 对齐，纯函数） |
 | 磨砂面板配方（overlay 与 whatsnew 的唯一真源）/ ObjC 类名归属 | `panel.py`、`objc_own.py`（先读文件头） |
 | `.app` 构建 / 装进 `/Applications` | `make-app.sh`、`install.sh`（先读注释） |
 | ⭐ 流式字幕量具（回改率 / 延迟 / WER）+ 现场采集 + 课堂报告 —— 改草稿 / ASR / 音源前读 | `docs/HANDOFF-20261009-stream-eval.md`、`scripts/stream_eval.py`、`livemetrics.py`、`scripts/class_report.py` |

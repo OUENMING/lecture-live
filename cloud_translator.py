@@ -241,6 +241,16 @@ DEFAULT_CTX_CHUNK = 10
 #: ⚠️ `read` 是**两块数据之间**的空闲上限，不是整次请求的总时长 —— 长回答照样能流完。
 CONNECT_TIMEOUT_S = 5.0
 READ_TIMEOUT_S = 10.0
+#: 空闲连接保活（2026-10-16 B3）：httpx 默认 `keepalive_expiry=5 s`，而作者两节课里 74% 的
+#: 相邻段间隔 >5 s（中位 8.9 s）—— 几乎每句都重新 TCP+TLS 握手（2 个往返；中国用户首包
+#: 395 ms 的大头）。都柏林实测：间隔 7 s 时默认 38 ms → 60 s 保活 14 ms（中位，各 5 次）。
+#: 睡眠后的半开连接另有 `reset_connections` 管。
+KEEPALIVE_S = 60.0
+
+
+def _pool_limits():
+    import httpx
+    return httpx.Limits(keepalive_expiry=KEEPALIVE_S)
 
 
 class CloudTranslator:
@@ -282,7 +292,7 @@ class CloudTranslator:
         # 共享连接池: 一节课上千次请求, 每次重建 TLS 握手白白多 ~100ms 首字延迟。
         # Client 对并发请求线程安全(官方文档保证); 断网时池中陈旧连接会抛错,
         # 由 EngineRouter 降级 -> 探针恢复, 语义与每次新建连接一致。
-        self._client = httpx.Client(timeout=self._timeout)
+        self._client = httpx.Client(timeout=self._timeout, limits=_pool_limits())
 
     def warmup(self) -> None:
         pass                                   # 云端无需预热
@@ -291,7 +301,7 @@ class CloudTranslator:
         """换一个新连接池(系统休眠唤醒后调): 睡前的连接可能半开, 醒来第一句会挂到读超时。
         旧池不关 —— 可能有请求正在用它; 没人引用后由 GC 收。"""
         import httpx
-        self._client = httpx.Client(timeout=self._timeout)
+        self._client = httpx.Client(timeout=self._timeout, limits=_pool_limits())
 
     # ---- 工具 ----
     def _headers(self):

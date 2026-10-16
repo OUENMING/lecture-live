@@ -39,6 +39,7 @@ import threading
 import typing
 
 import courses
+import motion
 import objc_own
 import panel
 import paths
@@ -51,6 +52,13 @@ CARD_PAD = 10.0        # 卡片内边距（实测 10pt）
 CARD_GAP = 10.5        # 卡片间距（实测 10.5pt）
 CARD_H = 56.0          # 按内容累加，非抄来的（2026-10-12 按钮并进标题行：88 → 56）
 CARD_RADIUS = 5.0      # 卡片圆角（实测 5pt）
+# ── 课卡列表的一次性入场（A6）────────────────────────────────────────
+# ⭐ 来源: 字体/动效报告 §5 方案 A6 / §4 第 9 行 —— 开课面板原先是**全 app 动效真空
+#    最大的一块**（`NSAnimationContext` / `animator()` / `setDuration_` 命中 0）。
+#    入场: 每张卡从**下方 6px** 升到位、α0→1, 时长 `motion.STATE_S`, 相邻卡错位
+#    `motion.ENTER_STAGGER_S`(35ms)。**一次性、不循环**; `motion.reduce_motion()`
+#    为真时整条跳过、直接落位（HIG「Make motion optional」）。
+CARD_ENTER_DY = 6.0
 TOUR_BTN_W = 72.0      # 底栏「功能介绍」（无边框淡字）
 HAIRLINE = 0.5         # 描边（实测 0.5pt；scale 2 上正好 1 设备像素）
 TITLE_H = 34.0
@@ -1177,6 +1185,67 @@ def _scroll_undo_into_view(doc, course) -> bool:
     return False
 
 
+def entrance_timeline(n: int) -> list[tuple[float, float]]:
+    """课卡错位入场的 `(延迟秒, 起跑位移px)` 表。**纯函数**（A6 的判据, 不碰 AppKit）。
+
+    ⚠️ 位移的**正负**由施加者按宿主视图的翻转方向决定（见 `_stagger_in`）——
+       这里只给"每张卡错开多少、离终位多远", 与坐标轴无关。
+    """
+    return [(i * motion.ENTER_STAGGER_S, CARD_ENTER_DY) for i in range(max(0, int(n)))]
+
+
+def _stagger_in(views) -> None:
+    """课卡列表一次性错位入场（A6, 报告 §5）。
+
+    每张卡: `+CARD_ENTER_DY` px → 0、α 0 → 1, 时长 `motion.STATE_S`,
+    相邻错位 `motion.ENTER_STAGGER_S`。⚠️ **一次性, 不循环**; 系统开了
+    「减弱动态效果」→ 直接落位（只保证 α1, 不加任何动画）。
+
+    实现用**显式 CAAnimation + `beginTime`** 而不是 `NSAnimationContext` ——
+    后者没有 delay 参数, 而"错位"正是这一步的全部内容。
+    `fillMode = backwards` 让每张卡在轮到自己之前就停在起点（否则它先以终态
+    闪一下再动）。
+    """
+    views = [v for v in views if v is not None]
+    if not views:
+        return
+    if motion.reduce_motion():
+        for v in views:
+            try:
+                v.setAlphaValue_(1.0)                 # 直接落位: 不位移、不淡入
+            except Exception:                         # noqa: BLE001
+                pass
+        return
+    try:
+        from Quartz import CABasicAnimation, CACurrentMediaTime, kCAFillModeBackwards
+    except Exception:                                 # noqa: BLE001 拿不到 CA 就直接落位
+        return
+    t0 = CACurrentMediaTime()
+    for i, v in enumerate(views):
+        try:
+            v.setWantsLayer_(True)
+            lay = v.layer()
+            if lay is None:
+                continue
+            # 起点在**下方** 6px。层的 y 轴方向跟着宿主视图的翻转走(AppKit 会把
+            # layer.geometryFlipped 与 view.isFlipped 对齐) —— 直接读宿主, 不猜。
+            host = v.superview()
+            dy = CARD_ENTER_DY if (host is not None and host.isFlipped()) else -CARD_ENTER_DY
+            begin = t0 + i * motion.ENTER_STAGGER_S
+            for key, frm, to in (("opacity", 0.0, 1.0),
+                                 ("transform.translation.y", float(dy), 0.0)):
+                a = CABasicAnimation.animationWithKeyPath_(key)
+                a.setFromValue_(frm)
+                a.setToValue_(to)
+                a.setDuration_(motion.STATE_S)
+                a.setBeginTime_(begin)
+                a.setFillMode_(kCAFillModeBackwards)   # 轮到自己之前停在起点
+                a.setTimingFunction_(motion.ca_timing())
+                lay.addAnimation_forKey_(a, "enter_" + key)
+        except Exception:                              # noqa: BLE001 入场是锦上添花, 坏了不影响功能
+            continue
+
+
 def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
                entry=None, on_delete=None, on_undo=None, on_delete_course=None,
                hinted=False, why=None, on_select=None):
@@ -1190,11 +1259,24 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
 
     holder: dict = {}
 
-    def _bg(alpha):
+    def _bg(alpha, *, animate=False):
+        """卡片的填充不透明度。**悬停/离开**那两次走 `motion.FEEDBACK_S` 的过渡。
+
+        ⭐ C2（报告 §5）: 原来是**瞬变** —— 与顶栏胶囊的悬停（`overlay._chip_hover`，
+        同一个 `motion.FEEDBACK_S`）不一致，而两者是同一个面板上的同一类反馈。
+        ⚠️ 构造时那一次（`_bg(CARD_FILL_A)`）**不许动**: 层上还没有值，
+        `fade_property` 会从**模型值**起跑，那一次起跑没有意义、还多一次合成。
+        """
         v = holder.get("view")
-        if v is not None:
+        if v is None:
+            return
+        try:
+            if animate:
+                motion.fade_property(v.layer(), "backgroundColor", motion.FEEDBACK_S)
             v.layer().setBackgroundColor_(
                 NSColor.whiteColor().colorWithAlphaComponent_(alpha).CGColor())
+        except Exception:                              # noqa: BLE001 悬停是锦上添花
+            pass
 
     # ⚠️ 高亮在 `on_enter` / `on_exit` / `on_drop` **三处**都要管：
     #    落点成功时**不会**再收到 `draggingExited:`，只在 exit 里撤会留下一张
@@ -1208,14 +1290,14 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
         #    ⚠️ 拒的时候**也要不高亮**：HIG 逐字要求"收不了时给显式反馈（`circle.slash`）、
         #       **别给高亮**" —— 只改返回值会留下"高亮着但收不了"。
         ok = acceptable(panel.file_paths(pb) or [])
-        _bg(HILITE_A if ok else CARD_FILL_A)
+        _bg(HILITE_A if ok else CARD_FILL_A, animate=True)
         return ok
 
     def _exit():
-        _bg(CARD_FILL_A)
+        _bg(CARD_FILL_A, animate=True)
 
     def _drop(paths):
-        _bg(CARD_FILL_A)
+        _bg(CARD_FILL_A, animate=True)
         return on_drop_files(r.course, paths)
 
     view = panel.make_drop_target(_enter, _drop, _exit)
@@ -2500,14 +2582,19 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     batch_rows: list = []
     W_IN = WIDTH - 2 * PAD
 
-    def _strip_bg(alpha):
+    def _strip_bg(alpha, *, animate=False):
+        """落点条的填充不透明度。与课卡的 `_bg` **同一档、同一实现** —— 两者是
+        同一个面板上的同一类反馈（"拖到这里能收"），节奏不一致读起来就是"各动各的"。"""
         v = strip_holder.get("view")
-        if v is not None:
-            try:
-                v.layer().setBackgroundColor_(
-                    NSColor.whiteColor().colorWithAlphaComponent_(alpha).CGColor())
-            except Exception:                                 # noqa: BLE001
-                pass
+        if v is None:
+            return
+        try:
+            if animate:
+                motion.fade_property(v.layer(), "backgroundColor", motion.FEEDBACK_S)
+            v.layer().setBackgroundColor_(
+                NSColor.whiteColor().colorWithAlphaComponent_(alpha).CGColor())
+        except Exception:                                 # noqa: BLE001
+            pass
 
     def _drop_enter(pb):
         # ⚠️ 判据是 `acceptable()` —— 与卡片那条**共用同一个定义点**
@@ -2515,14 +2602,14 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    原来只看 `bool(file_paths(pb))` → 文件夹、`.txt` 全高亮说"能收"，
         #    松手才在 prep 里判 unsupported（`REVIEW §9.2 #5`）。
         ok = acceptable(panel.file_paths(pb) or [])
-        _strip_bg(HILITE_A if ok else CARD_FILL_A)
+        _strip_bg(HILITE_A if ok else CARD_FILL_A, animate=True)
         return ok
 
     def _drop_exit():
-        _strip_bg(CARD_FILL_A)
+        _strip_bg(CARD_FILL_A, animate=True)
 
     def _drop_batch(paths):
-        _strip_bg(CARD_FILL_A)
+        _strip_bg(CARD_FILL_A, animate=True)
         return run_batch(paths)
 
     strip = panel.make_drop_target(_drop_enter, _drop_batch, _drop_exit)
@@ -3596,6 +3683,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             doc.addSubview_(card)
             doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, _eh)))
             return
+        _cards: list = []
         for r in rows:
             entry = S["result"].get(r.course)
             card = _make_card(r, on_start=on_start,
@@ -3613,8 +3701,15 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                               on_delete_course=delete_course)
             card.setFrameOrigin_((0.0, y))
             doc.addSubview_(card)
+            _cards.append(card)
             y += card_height(entry) + CARD_GAP
         doc.setFrameSize_((WIDTH - 2 * PAD, max(y, body_h)))
+        # ⭐ A6: 课卡列表**一次性**错位入场。旗子挂在 `doc` 上（它随每次 build
+        #    新建），所以「面板出现时做一次」；之后每次 `refresh()`（跑完 prep /
+        #    删词 / 撤销）直接落位, 不重放。
+        if not getattr(doc, "_enter_done", False):
+            doc._enter_done = True
+            _stagger_in(_cards)
         # ⚠️ 滚**必须在重画之后**：上面那圈把旧卡片全 `removeFromSuperview` 了，
         #    所以只能拿**新**卡片的 `_undo_lbl`。意图是**一次性**的（`pop` 掉）。
         _want = S.pop("_undo_scroll", None)

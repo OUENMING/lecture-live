@@ -20,7 +20,7 @@
     log = livemetrics.open_for(session_path)        # 关着的时候返回 None
     log.draft(raw, shown, buf_s=b, compute_s=c)     # 一次草稿上屏
     log.draft_zh(zh)                                # 一段草稿译文增量
-    log.final(en, zh, raw)                          # 一句定稿
+    log.final(en, zh, raw, lat=…)                   # 一句定稿（`lat` = 译文延迟 4 元组）
     log.event("tap_probe", ok=True)                 # 任何别的观测
     log.block(peak, gain, vad, n)                   # 每个音频块一次（不进 JSONL，见下）
     log.close(echo_retries=3)                       # 冲刷 + 写一行 summary（+ `.blocks.npz`）
@@ -95,7 +95,7 @@ class LiveLog:
     """现场采集器。构造它就会开文件 + 起写盘线程。
 
     输出的每一行：`{"i": <行号>, "t": <秒>, "kind": ..., ...}`。
-    `kind` 只有四种：`draft` / `draft_zh` / `final` / `event`，外加收尾那行 `summary`
+    `kind` 只有五种：`draft` / `draft_zh` / `final` / `event` / `replace`，外加收尾那行 `summary`
     （`close()` 写，多带一个 `dropped` 说明丢了多少行）。
     """
 
@@ -216,11 +216,23 @@ class LiveLog:
         except Exception:                                  # noqa: BLE001
             pass
 
-    def final(self, en: str, zh: str = "", raw: str = "", *, seg: int = 0) -> None:
-        """一句定稿上屏 —— 同时把句号推进（`utt` 只是"第几句"，**分组看 `seg`**）。"""
+    def final(self, en: str, zh: str = "", raw: str = "", *, seg: int = 0,
+              lat: tuple | None = None) -> None:
+        """一句定稿上屏 —— 同时把句号推进（`utt` 只是"第几句"，**分组看 `seg`**）。
+
+        ⭐ `lat` = 这一句的**译文延迟** 4 元组 `(zh_first_ms, zh_done_ms, seg_to_zh_ms,
+        tr_model)`（`tr_latency.TrTimer.done()` 的产物，见那个文件头）。
+        ⚠️ **不给就不写那四个键** —— 同 `draft(engine=…)` 的规矩：老文件 / 老读端
+           零感知（`("final", …)` 那条 tag 只有**双语档**那个产出点会给，纯转录与
+           只英·校两条路没送过翻译，报引擎名会让人以为它们翻出来了）。
+        """
         try:
+            extra = ({}
+                     if lat is None else
+                     {"zh_first_ms": lat[0], "zh_done_ms": lat[1],
+                      "seg_to_zh_ms": lat[2], "tr_model": lat[3]})
             self._put("final", utt=self._utt, seg=seg, text=en or "", zh=zh or "",
-                      raw=raw or "", n_draft=self._n_draft)
+                      raw=raw or "", n_draft=self._n_draft, **extra)
             self._utt += 1
         except Exception:                                  # noqa: BLE001
             pass
@@ -229,6 +241,18 @@ class LiveLog:
         """任何别的观测（音源、探针结果、引擎切换……）。字段名自己定，别覆盖 `i/t/kind`。"""
         try:
             self._put("event", event=kind, **fields)
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    def replace(self, i: int = 0, j: int = 0) -> None:
+        """一次**跨段半句合并**把屏上尾句那行换掉了。
+
+        ⚠️ **只记数字和段号**（`i`/`j` = 被并的两段）—— 合并文本本身在
+        `sessions/<名>.merges.jsonl` 与会话里各有一份，再往这里写就是第三份真源，
+        回放统计（回改率 / 延迟）读到它会被污染（同 `("final", …)` 不许复用的理由）。
+        """
+        try:
+            self._put("replace", i=int(i), j=int(j))
         except Exception:                                  # noqa: BLE001
             pass
 
@@ -297,8 +321,10 @@ class LiveLog:
     # ---- 写盘线程 ----
     def _run(self) -> None:
         while True:
+            # 3.9.7 省电：**阻塞等**（原来 `get(timeout=0.5)` 是 2 次/秒空醒）。
+            # 收尾 `close()` 无条件投 `_SENTINEL`，所以这里阻塞到哨兵才退出。
             try:
-                rec = self._q.get(timeout=0.5)
+                rec = self._q.get()
             except queue.Empty:
                 continue
             if rec is _SENTINEL:

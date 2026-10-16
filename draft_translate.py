@@ -17,6 +17,9 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 _SEALED = re.compile(r"[.?!](?=\s+\S)")
+#: 停机哨兵（3.9.7 省电）：`stop()` 把它放进队列，`step()` 看到就收摊 ——
+#: 让 worker 从「每 0.3 s 空醒一次」变成**阻塞等**。
+_STOP = object()
 
 
 def sealed_prefix(text: str) -> str:
@@ -99,16 +102,20 @@ class DraftTranslator:
     mode_ok()                        翻译模式是否开着
     should_yield()                   本地引擎且定稿在排队/在跑 -> 让开(不和定稿抢 MLX 锁)
     context()                        前文(翻译时现取)
+    paused()                         窗口不可见 -> 不发请求(3.9.7 省电); 默认恒 False
     stats                            与 DraftView.stats 同一个 dict
     """
 
-    def __init__(self, *, translate, output, mode_ok, should_yield, context, stats) -> None:
+    def __init__(self, *, translate, output, mode_ok, should_yield, context, stats,
+                 paused=None) -> None:
         self._translate, self._output = translate, output
         self._mode_ok, self._should_yield, self._context = mode_ok, should_yield, context
+        self._paused = paused or (lambda: False)
         self.stats = stats
         self._q: queue.Queue = queue.Queue(maxsize=1)
         self._lock = {"seg": None, "en": "", "zh": "", "last": ""}   # 本段已封口的英文 / 锁住的中文 / 最后一句
         self._pool = ThreadPoolExecutor(max_workers=1)    # 新封口那句与尾巴并发时，封口句走这条
+        self._stopped = False
 
     def submit(self, seq: int, seg: int, text: str) -> None:
         item = (seq, seg, text)
@@ -131,16 +138,27 @@ class DraftTranslator:
                 pass                                       # 单生产者，理论到不了这儿
 
     def step(self, timeout: float = 0.3) -> bool:
-        """最多处理一条; 取到了(不论是否真的翻了)返回 True。绝不抛。"""
+        """最多处理一条; 取到了(不论是否真的翻了)返回 True。绝不抛。
+
+        ⚠️ `timeout=None` = 一直等（3.9.7 省电：`run()` 用这个，停机靠 `stop()` 的哨兵）。
+        """
         try:
             item = self._q.get(timeout=timeout)
         except queue.Empty:
             return False
+        if item is _STOP:                                  # 停机哨兵
+            self._stopped = True
+            return True
         try:
             seq, seg, text = item
         except Exception:                                  # noqa: BLE001
             return True
         if not text or not self._mode_ok():
+            return True
+        if self._paused():
+            # ⭐ 3.9.7 省电：窗口不可见 -> 草稿不用看，**一个请求都不发**。
+            #    ⚠️ 丢的是这一条（`submit` 只留最新），恢复后从下一段重开；
+            #       段号锁 `self._lock` 会因 `text` 接不上而自己作废（见 `_step_locked`）。
             return True
         if self._should_yield():
             self.stats["yield_local"] += 1
@@ -201,5 +219,19 @@ class DraftTranslator:
         return got[0] if got else ""
 
     def run(self, running) -> None:
-        while running.is_set():
-            self.step(0.3)
+        # ⚠️ `step(None)` **阻塞等**（3.9.7 省电：原来 `step(0.3)` 是 3.3 次/秒空醒）。
+        #    收尾由 `stop()` 的哨兵叫醒（`main` 在 `running.clear()` 之后投）。
+        while running.is_set() and not self._stopped:
+            self.step(None)
+
+    def stop(self) -> None:
+        """停机：让阻塞在 `step(None)` 上的线程立刻收摊（3.9.7）。**永不抛。**"""
+        self._stopped = True
+        try:
+            self._q.get_nowait()          # 腾一格（待译的那条已经不要了）
+        except Exception:                 # noqa: BLE001
+            pass
+        try:
+            self._q.put_nowait(_STOP)
+        except Exception:                 # noqa: BLE001
+            pass

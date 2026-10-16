@@ -236,6 +236,12 @@ class _NormalizedSource:
         """刚 `poll()` 出来那一块的 `(原始峰值, 实际增益)`（只读，见 `PeakNormalizer.last_peak`）。"""
         return self._norm.last_peak, self._norm.last_gain
 
+    def set_waker(self, fn) -> None:
+        """透传「新块到达就叫我」给内层实时源（3.9.7 省电，见 `CallbackSource.set_waker`）。"""
+        f = getattr(self._inner, "set_waker", None)
+        if callable(f):
+            f(fn)
+
     def switch_device(self, device_idx: int, device_name: str = "") -> bool:
         """透传到内层。文件源没有这个方法 → `False`（那不是错误，是"没得换"）。"""
         fn = getattr(self._inner, "switch_device", None)
@@ -251,7 +257,18 @@ class CallbackSource:
         self._device_idx = int(device_idx)
         self._device_name = device_name
         self._stream = None
+        self._waker = None
         self._open()
+
+    def set_waker(self, fn) -> None:
+        """新块到达时叫一声（3.9.7 省电）。
+
+        ⭐ 主循环在「什么都没在动」时让步 0.1 s、窗口不可见时 0.25 s（见 `overlay`），
+        新音频不能等满那一档 —— 否则 VAD / 切段 / 定稿都平白晚 0.1–0.25 s。
+        ⚠️ 它由**声卡回调线程**调，回调**必须立刻返回**：waker 自己吞异常、
+           `overlay.wake()` 只投一个事件（Apple 文档说 `postEvent:atStart:` 可在子线程调）。
+        """
+        self._waker = fn
 
     def _open(self) -> None:
         import sounddevice as sd
@@ -333,6 +350,15 @@ class CallbackSource:
                 self._q.put_nowait(blk)
             except (queue.Empty, queue.Full):
                 pass
+        # ⭐ 3.9.7 省电：叫醒主循环（它可能正睡在 0.1/0.25 s 的让步里）。
+        #    ⚠️ **回调必须立刻返回** —— waker 只投一个事件，且**吞掉自己的异常**
+        #    （回调里抛 = 声卡线程出事；这里丢了也不影响音频本身）。
+        w = self._waker
+        if w is not None:
+            try:
+                w()
+            except Exception:                     # noqa: BLE001
+                pass
 
     def poll(self):
         try:
@@ -369,6 +395,9 @@ class FileSource:
 
     def is_done(self) -> bool:
         return self._idx >= len(self._samples)
+
+    def set_waker(self, fn) -> None:
+        """文件回放由主循环自己 `poll()`，不需要唤醒 —— 空操作（保持接口一致）。"""
 
     def close(self):
         pass

@@ -29,6 +29,28 @@ class StartupTiming(unittest.TestCase):
         r = main.startup_timing({"run": 0.0, "draft": 1.0, "overlay": 1.5}, 5.0, None)
         self.assertEqual(r["fields"], {"draft_s": 1.0, "overlay_s": 0.5, "run_s": 1.5})
 
+    def test_草稿模型就绪单列一项_用绝对偏移(self):
+        """3.9.7 第 5c 项：草稿模型后台加载 → 就绪时刻**不插进那条链**。
+
+        ⚠️ 就绪在**另一个线程**上，可能晚于 translator / overlay —— 当成相邻差值
+        会把后面几段算成负数。
+        """
+        tp = dict(self.TP, draft_ready=13.9)      # 晚于 overlay(12.4)
+        r = main.startup_timing(tp, 1000.0, None)
+        self.assertEqual(r["fields"]["draft_ready_s"], 3.9, "就绪时刻该是从 run 起算的绝对偏移")
+        # 原有那几项一个都没动
+        self.assertEqual((r["fields"]["audio_s"], r["fields"]["draft_s"],
+                          r["fields"]["translator_s"], r["fields"]["overlay_s"]),
+                         (0.3, 1.4, 0.2, 0.5))
+        self.assertEqual(r["fields"]["run_s"], 2.4)
+        self.assertIn("草稿模型就绪 +3.9", r["line"])
+
+    def test_没有就绪打点_不多写字段(self):
+        r = main.startup_timing(self.TP, 1000.0, None)
+        self.assertNotIn("draft_ready_s", r["fields"])
+        self.assertNotIn("就绪", r["line"])
+
+
 
 class ClickStamp(unittest.TestCase):
     """面板留的点按戳：读到就删 —— 第二次起（从终端起 `cl`）不许捡到旧的。读写都在临时目录。"""

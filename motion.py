@@ -10,7 +10,9 @@
   · STATE_S    0.20 —— 原地换状态(切档文字淡换、翻页、草稿淡出)。150–300ms 档。
   · MOVE_S     0.28 —— 有位移的(上滚、定稿入列)。macOS 惯例 0.20–0.35、CFR §15.119
     上限 0.433s, 取 0.28 离上限留 0.15s 余量。
-  · EXIT_S     0.16 —— 离场比入场快(草稿在定稿顶上来时让位)。
+  · EXIT_S     0.14 —— 离场比入场快(草稿在定稿顶上来时让位)。
+    2026-10-16 由 0.16 收到 0.14(字体/动效报告 §5 A4): 仍在「离场档」内, 且与
+    MOVE_S 0.28 拉开**恰好 1:2** —— 「让位」的语义比 0.16 更强。
 
 曲线: **ease-out-cubic** `1-(1-t)³` —— 起步快、软着陆, 字幕要的就是「尽快就位, 然后静止」。
 自己驱动 f(t) 的地方用 `ease_out`; 交给 Core Animation 的地方用 `ca_timing()`,
@@ -23,7 +25,11 @@ from __future__ import annotations
 FEEDBACK_S = 0.12
 STATE_S = 0.20
 MOVE_S = 0.28
-EXIT_S = 0.16
+EXIT_S = 0.14
+#: 开课面板课卡列表**一次性错位入场**时, 相邻两张卡的起跑间隔(秒)。
+#: 来源: 字体/动效报告 §5 A6(那一段是全 app 动效真空最大的一块 —— 0 条动效)。
+#: 一次性、不循环; `reduce_motion()` 为真时整条跳过、直接落位。
+ENTER_STAGGER_S = 0.035
 #: 指示灯（「在听」小点）的亮 / 灭：**快亮慢灭**，照电平表的弹道（ITU-R BS.2103 引 Bauer：
 #: 上升 0.1 s、下降 0.5 s 最好）。灭用 ease-in-out（像余辉慢慢退），亮用 ease-out。2026-10-14。
 ATTACK_S = 0.12
@@ -92,5 +98,31 @@ def fade_swap(view, duration: float = STATE_S) -> None:
         t.setDuration_(duration)
         t.setTimingFunction_(ca_timing())
         lay.addAnimation_forKey_(t, "fadeSwap")
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def fade_property(layer, key: str, duration: float = STATE_S) -> None:
+    """层的某个属性做**一次性过渡**：从**当前值**起跑，到随后写进去的那个值。
+
+    ⚠️ 必须在**改值之前**调 —— 先挂动画、再写新值，这正是 Core Animation 的隐式
+    动画契约（顶栏胶囊的悬停从 2026-10-14 起就是这么用的，本函数是把那一套收成一处）。
+    ⚠️ 起点取 `layer.<key>()`（**模型值**）而不是 `presentationLayer()`：悬停这种
+    一次性反馈不会在 `FEEDBACK_S`(0.12s) 里被反复打断，取模型值就够；要「从正在
+    显示的位置接着走」的持续态（指示灯那种）自己取 presentationLayer，别用这里。
+    ⚠️ `overlay._chip_hover` 自己那三行**刻意不动** —— 它已经跑在生产里、用的是同一个
+    `FEEDBACK_S`，改它只有风险没有收益；新调用方（开课面板的课卡 / 落点条）用本函数。
+    「减弱动态效果」开着 / 没层 / 拿不到 Quartz → **什么都不做**（= 直接改值）。
+    """
+    if reduce_motion() or layer is None:
+        return
+    try:
+        from Quartz import CABasicAnimation, CATransaction
+        anim = CABasicAnimation.animationWithKeyPath_(key)
+        anim.setFromValue_(getattr(layer, key)())
+        anim.setDuration_(duration)
+        anim.setTimingFunction_(ca_timing())
+        layer.addAnimation_forKey_(anim, "fade_" + key)
+        CATransaction.flush()      # 立刻提交: 本函数返回后调用方马上写新值
     except Exception:                                   # noqa: BLE001
         pass

@@ -13,6 +13,9 @@
 
 本探针是**确定性**的: 不依赖输入设备, 四条腿跑同样的循环, 同一台机器上可复跑对比。
 
+⚠️ 3.9.7 起 pump 的让步时长是**策略变量**（空闲 0.1s / 不可见 0.25s）——
+   本探针**每轮把让步钉在热档**（见 `measure`），量的始终是「这一帧要干多少活」。
+
 ## 五条腿
 
   ① 空转                    —— 没东西变(下界)
@@ -96,10 +99,18 @@ def measure(o, n: int, tick=None, warmup: int = 30):
     ⚠️ **两个分开记**: `add_draft` 之类是 `_mark_dirty(urgent=True)`, 它**当场**就 render
     (在 tick 里), 所以只看 pump 会把成本归错地方。哪些成本落在哪一段, 是量出来的, 不是猜的。
 
+    ⭐ **每轮先把让步钉在热档**（`o._last_ev_t = now`）。3.9.7 起让步时长是**策略变量**
+    （手势 0 / 有东西在动 8ms / 空闲 0.1s / 不可见 0.25s）—— 不钉住的话量到的是
+    **省电策略**而不是**这一帧要干多少活**，而且腿与腿的 pump 节奏不同、同一条腿两次跑
+    也会漂。热档 = 手势 / 动画期间真正走的那条路（`runUntilDate_(distantPast)`：零延迟、
+    但仍跑完一轮 run loop 让 AppKit 提交），也正是本探针**历史上那些基线数字的口径**
+    （它们全是 ~0.019ms）。
+
     `tick(i)` 在每轮 pump **之前**调 —— 腿与腿的差别全在它身上。"""
     for i in range(warmup):                     # 预热: 首帧的字体加载/首排不进统计
         if tick:
             tick(-1)
+        o._last_ev_t = time.monotonic()
         o.pump()
     tick_ms, pump_ms = [], []
     for i in range(n):
@@ -107,6 +118,7 @@ def measure(o, n: int, tick=None, warmup: int = 30):
             t0 = time.perf_counter()
             tick(i)
             tick_ms.append((time.perf_counter() - t0) * 1e3)
+        o._last_ev_t = time.monotonic()         # 钉在热档（见 docstring）
         t1 = time.perf_counter()
         o.pump()
         pump_ms.append((time.perf_counter() - t1) * 1e3)

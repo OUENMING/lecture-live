@@ -178,6 +178,8 @@ def _encode_opus(samples) -> bytes | None:
         return None
 
 
+#: 空闲连接保活 —— 理由与实测见 `cloud_translator.KEEPALIVE_S`（httpx 默认 5 s，段间隔中位 8.9 s）。
+KEEPALIVE_S = 60.0
 _client = None
 _client_lock = threading.Lock()
 
@@ -188,7 +190,7 @@ def _http_post(body: bytes, headers: dict, timeout: float) -> tuple[int, dict | 
     import httpx
     with _client_lock:
         if _client is None:
-            _client = httpx.Client()
+            _client = httpx.Client(limits=httpx.Limits(keepalive_expiry=KEEPALIVE_S))
         c = _client
     r = c.post(asr_endpoint.endpoint(), content=body, headers=headers,
                timeout=httpx.Timeout(timeout, connect=min(2.0, timeout)))

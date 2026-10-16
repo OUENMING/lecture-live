@@ -69,6 +69,9 @@
      漏了 = 数据静默丢, 运行时兜底只打一行告警)
   R29 仓库(公开)里不许出现 API key: 已知前缀形状 + 本机真 key 文件的值原样出现(2026-10-11)
   R30 代码读的每个 `CLASSLIVE_*` / `CL_*` 开关都要在 HANDBOOK §6.1 登记(2026-10-11)
+  R31 翻译熔断改成「**按句**计 + 本地不可用时同句重试一次」(2026-10-15): 本地模型没装时
+      一次云端瞬时失败曾让之后每句只剩 ASR(实测 8 节课 16 个洞, 每个 77–89s);
+      草稿译文失败也不再连坐定稿翻译
 """
 from __future__ import annotations
 import json
@@ -246,6 +249,334 @@ class R2_EngineRouter(unittest.TestCase):
         zh2 = []
         r2.fix_and_translate_stream("hello", [], on_zh=zh2.append)
         self.assertEqual(zh2, ["本地译文"])                 # 纯本地照常流式
+
+
+class R31_TranslateCircuitBreaker(unittest.TestCase):
+    """⭐⭐ 2026-10-15: 本地没装翻译模型时, **一次**云端失败不再让整整 90 秒只剩英文转写。
+
+    病因: `_fallback` 在**任何一次**云端异常上翻 `_use_cloud`, 而本地模型是**可选**的
+    (大多数用户没装) → 之后每句只抛 RuntimeError → 调用方「只有 ASR」, 直到 90s 探针回来。
+    实测: 中国用户 8 节课 16 个洞, 每个 77–89 秒。
+
+    改法: ① 本地不可用、且**还没往屏上吐过增量**时, 同一句立刻重试一次云端;
+          ② 降级判据改成「**连续** `FAIL_TRIP` 句失败」(按句计, 重试不另计; 任何一次成功清零);
+          ③ 草稿译文(`translate_draft`)失败**一律不碰** `_use_cloud`(不连坐定稿翻译);
+          ④ 探针间隔 `RETRY_PROBE_MIN_S` 起翻倍, 封顶 `RETRY_PROBE_S`。
+    全部用桩, 不加载模型、不联网。
+    """
+
+    class _NoLocal:
+        """本地**明确不可用**的替身。方法都抛 —— 与真 `Translator` 上了闩锁后一模一样。"""
+
+        def local_ready(self):
+            return False
+
+        def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
+            raise RuntimeError("本地模型没装（可选）；跑 `cl doctor` 看怎么装")
+
+        def fix_stream(self, en, context, on_en=None):
+            raise RuntimeError("本地模型没装（可选）")
+
+        def translate_draft(self, en, on_zh=None):
+            raise RuntimeError("本地模型没装（可选）")
+
+    class _Local:
+        """本地可用的替身（只实现会被调到的方法）。"""
+
+        def __init__(self, zh="本地译文"):
+            self.zh, self.calls = zh, 0
+
+        def local_ready(self):
+            return True
+
+        def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
+            self.calls += 1
+            if on_en:
+                on_en(en)
+            if on_zh:
+                on_zh(self.zh)
+            return Result(en, self.zh)
+
+        def fix_stream(self, en, context, on_en=None):
+            self.calls += 1
+            if on_en:
+                on_en(en)
+            return en
+
+        def translate_draft(self, en, on_zh=None):
+            self.calls += 1
+            if on_zh:
+                on_zh(self.zh)
+            return self.zh
+
+    class _Cloud:
+        """云端替身。三个入口各自可插行为: 插的函数返回异常实例 = 抛, 否则 = 返回值。"""
+
+        def __init__(self, stream=None, draft=None, fix=None, probe=False):
+            self._stream, self._draft, self._fix, self._probe = stream, draft, fix, probe
+            self.calls = self.draft_calls = self.fix_calls = self.probe_calls = 0
+
+        def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
+            self.calls += 1
+            out = (self._stream(self.calls, en, on_zh, on_en) if self._stream is not None
+                   else Result(en, "云端译文"))
+            if isinstance(out, BaseException):
+                raise out
+            if on_en:
+                on_en(en)
+            if on_zh:
+                on_zh("云端译文")
+            return out
+
+        def fix_stream(self, en, context, on_en=None):
+            self.fix_calls += 1
+            out = self._fix(self.fix_calls, en) if self._fix is not None else en
+            if isinstance(out, BaseException):
+                raise out
+            if on_en:
+                on_en(out)
+            return out
+
+        def translate_draft(self, en, on_zh=None, context=None):
+            self.draft_calls += 1
+            out = (self._draft(self.draft_calls, en) if self._draft is not None
+                   else "云端草稿译文")
+            if isinstance(out, BaseException):
+                raise out
+            if on_zh:
+                on_zh(out)
+            return out
+
+        def probe(self):
+            self.probe_calls += 1
+            return self._probe
+
+    def _mk(self, stream=None, *, draft=None, fix=None, local=None,
+            notify=None, note=None):
+        """默认: **本地不可用** + 云端成功。`note` 只在不为 None 时传(兼容旧签名)。"""
+        c = self._Cloud(stream, draft, fix)
+        kw = {} if note is None else {"note": note}
+        r = main_mod.EngineRouter(local if local is not None else self._NoLocal(), c,
+                                  "auto",
+                                  notify=notify or (lambda msg, warn=False: None), **kw)
+        return r, c
+
+    # ---- A1: 本地不可用 + 没吐过增量 → 同句重试一次 ----
+
+    def test_T1_local_missing_retries_once_same_sentence(self):
+        """本地不可用、云端第一次抛第二次成功 → 同一句拿到云端结果, `_use_cloud` 仍 True。"""
+        def stream(n, en, on_zh, on_en):
+            return RuntimeError("503 Service Unavailable") if n == 1 else Result(en, "云端译文")
+
+        r, c = self._mk(stream)
+        res = r.fix_and_translate_stream("hello", [])
+        self.assertEqual(res.zh, "云端译文")
+        self.assertEqual(c.calls, 2, "本地没装时同一句要重试一次")
+        self.assertTrue(r._use_cloud, "本地没装时一次瞬时失败不许降级")
+
+    def test_T1b_fix_stream_also_retries_once(self):
+        """A1 也管 `fix_stream`（「只英·校」档走的就是它）。"""
+        def fix(n, en):
+            return RuntimeError("boom") if n == 1 else f"[{en}]"
+
+        r, c = self._mk(fix=fix)
+        self.assertEqual(r.fix_stream("hello", []), "[hello]")
+        self.assertEqual(c.fix_calls, 2)
+        self.assertTrue(r._use_cloud)
+
+    # ---- A2: 单句失败但不降级; 成功清零 ----
+
+    def test_T2_one_bad_sentence_does_not_circuit_break(self):
+        """第 1 句两次都抛、第 2 句成功 → 第 1 句抛出, 第 2 句拿云端, 全程不降级。"""
+        def stream(n, en, on_zh, on_en):
+            return RuntimeError("boom") if en == "bad" else Result(en, "云端译文")
+
+        r, c = self._mk(stream)
+        with self.assertRaises(RuntimeError):
+            r.fix_and_translate_stream("bad", [])
+        self.assertTrue(r._use_cloud, "一句失败就降级了（本地还没装, 等于整节只剩 ASR）")
+        self.assertEqual(r.fix_and_translate_stream("good", []).zh, "云端译文")
+        self.assertTrue(r._use_cloud)
+        self.assertEqual(c.calls, 3, "bad 两次(首试+重试) + good 一次")
+
+    def test_T2b_any_success_clears_the_streak(self):
+        """连续失败计数**任何一次成功清零**: 两次失败+成功+两次失败 ≠ 降级。"""
+        def stream(n, en, on_zh, on_en):
+            return RuntimeError("boom") if en.startswith("bad") else Result(en, "云端译文")
+
+        r, c = self._mk(stream)
+        for en in ("bad1", "bad2"):
+            with self.assertRaises(RuntimeError):
+                r.fix_and_translate_stream(en, [])
+        self.assertEqual(r.fix_and_translate_stream("ok", []).zh, "云端译文")
+        for en in ("bad3", "bad4"):
+            with self.assertRaises(RuntimeError):
+                r.fix_and_translate_stream(en, [])
+        self.assertTrue(r._use_cloud, "成功过一次就该清零")
+
+    # ---- A3: 连续 FAIL_TRIP 句才降级 ----
+
+    def test_T3_three_consecutive_bad_sentences_trip_the_breaker(self):
+        """连续 3 句失败 → `_use_cloud` 变 False, 且**只发 1 条**降级通知。"""
+        notices = []
+
+        def stream(n, en, on_zh, on_en):
+            return RuntimeError("URLError: <urlopen error [Errno 60] Operation timed out>")
+
+        r, c = self._mk(stream, notify=lambda msg, warn=False: notices.append((msg, warn)))
+        for i in (1, 2):
+            with self.assertRaises(RuntimeError):
+                r.fix_and_translate_stream(f"s{i}", [])
+            self.assertTrue(r._use_cloud, f"本地没装时第 {i} 句失败就降级了")
+            self.assertEqual(notices, [], "没降级就不该弹通知（避免刷屏）")
+        with self.assertRaises(RuntimeError):
+            r.fix_and_translate_stream("s3", [])
+        self.assertFalse(r._use_cloud, "连败 3 句应降级")
+        self.assertEqual(len(notices), 1, f"降级只该通知一次: {notices}")
+        self.assertTrue(notices[0][1])
+
+    # ---- A3/B: 探针间隔 5s 起翻倍、封顶 90s ----
+
+    def test_T4_probe_backoff_doubles_from_min_to_cap(self):
+        """`RETRY_PROBE_MIN_S` 起翻倍: 前两次探针失败第三次成功 → 恢复, 间隔翻倍。"""
+        sleeps, notes = [], []
+        r, c = self._mk(note=lambda kind, detail="": notes.append(kind))
+        seq = [False, False, True]
+        c.probe = lambda: seq.pop(0) if seq else True
+        r.RETRY_PROBE_MIN_S = 0.02
+        r._sleep = sleeps.append                  # 不真睡; 记下每次的 sleep 参数
+        r._fallback(RuntimeError("x"))
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not r._use_cloud:
+            time.sleep(0.01)
+        self.assertTrue(r._use_cloud, "探针第三次成功后应自动切回云端")
+        self.assertEqual(len(sleeps), 3, f"该探 3 次(两次失败+一次成功): {sleeps}")
+        self.assertAlmostEqual(sleeps[0], 0.02, msg=f"起点应是 RETRY_PROBE_MIN_S: {sleeps}")
+        self.assertAlmostEqual(sleeps[1], sleeps[0] * 2, msg=f"没翻倍: {sleeps}")
+        self.assertAlmostEqual(sleeps[2], sleeps[1] * 2, msg=f"没翻倍: {sleeps}")
+        self.assertIn("translate_recovered", notes, "恢复也要记一条事件")
+
+    def test_T4b_probe_interval_is_capped(self):
+        """翻倍增长封顶在 `RETRY_PROBE_S` —— 不会 5→10→…→∞。"""
+        sleeps = []
+        r, c = self._mk()
+        seq = [False, False, True]
+        c.probe = lambda: seq.pop(0) if seq else True
+        r.RETRY_PROBE_MIN_S = 0.02
+        r.RETRY_PROBE_S = 0.03                    # 封顶低于起点 → 从封顶起步
+        r._sleep = sleeps.append
+        r._fallback(RuntimeError("x"))
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not r._use_cloud:
+            time.sleep(0.01)
+        self.assertTrue(r._use_cloud)
+        self.assertEqual(len(sleeps), 3, f"{sleeps}")
+        self.assertAlmostEqual(max(sleeps), 0.03, msg=f"间隔没被封顶: {sleeps}")
+        self.assertAlmostEqual(sleeps[2], sleeps[1], msg=f"第二次之后该一直等于封顶: {sleeps}")
+
+    # ---- C: 草稿译文不连坐定稿 ----
+
+    def test_T5_draft_failure_never_touches_use_cloud(self):
+        """`translate_draft` 云端抛错 → 不降级; 本地不可用返回 `""`; 本地可用退本地。"""
+        def draft(n, en):
+            return RuntimeError("draft boom")
+
+        r, c = self._mk(draft=draft)
+        self.assertEqual(r.translate_draft("hi"), "", "本地不可用时草稿译文只能是空串")
+        self.assertTrue(r._use_cloud, "草稿译文失败不许改 _use_cloud")
+
+        loc = self._Local("本地草稿译文")
+        r2, _ = self._mk(draft=draft, local=loc)
+        self.assertEqual(r2.translate_draft("hi"), "本地草稿译文")
+        self.assertTrue(r2._use_cloud)
+        self.assertEqual(loc.calls, 1)
+
+    # ---- D: 事件进测试报告 ----
+
+    def test_T6_failure_events_reach_the_test_report(self):
+        """定稿路径的云端失败(含重试那次)与降级都进 `report.json` 的 `events`。"""
+        import testmode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # 最小真实 tester: 不录音 → 不碰 HOME、不写任何文件（只往内存里的 events 追加）
+            ts = testmode.TestSession(Path(tmp) / "2026-10-15_10-00-00_TEST.md",
+                                      record_audio=False, record_float=False)
+
+            def stream(n, en, on_zh, on_en):
+                return RuntimeError("URLError: [Errno 60] Operation timed out")
+
+            r, c = self._mk(stream, note=ts.note_event)
+            for i in range(3):
+                with self.assertRaises(RuntimeError):
+                    r.fix_and_translate_stream(f"s{i}", [])
+            kinds = [e["kind"] for e in ts.events]
+            self.assertEqual(kinds.count("translate_fail"), 6,
+                             f"三句 × (首试 + 重试) 都该记: {ts.events}")
+            self.assertEqual(kinds.count("translate_fallback"), 1, f"{ts.events}")
+            fail = [e for e in ts.events if e["kind"] == "translate_fail"][0]
+            self.assertIn("RuntimeError", fail["detail"])
+            self.assertIn("Operation timed out", fail["detail"])
+
+    # ---- T7: 已经吐过增量 → 不许重试 ----
+
+    def test_T7_midstream_failure_does_not_retry(self):
+        """云端已吐过增量再失败 → **不重试**（重试会把同一句中文吐第二遍）, 行为同现在。
+
+        ⚠️ 本地不可用这条也一样: 半句已在屏上, 只能让调用方整句替换。
+        """
+        zh, en = [], []
+
+        def stream(n, e, on_zh, on_en):
+            on_en("Hel")
+            on_zh("云端半")
+            return RuntimeError("stream reset")
+
+        r, c = self._mk(stream)
+        with self.assertRaises(RuntimeError):
+            r.fix_and_translate_stream("hello", [], on_zh=zh.append, on_en=en.append)
+        self.assertEqual(c.calls, 1, "吐过增量就不许重试")
+        self.assertEqual((zh, en), (["云端半"], ["Hel"]))
+        # 本地没装时这一句照旧失败, 但只计一次 —— 不许一句就降级（降级 = 整段只剩 ASR）
+        self.assertTrue(r._use_cloud, "断在半句上也不许一句就降级")
+        self.assertEqual(r._fail_streak, 1)
+
+    def test_T7b_midstream_failure_with_local_available_still_falls_back(self):
+        """本地可用时行为不变（B）: 云端断在半句上 → 降级, 本地结果只走返回值。"""
+        def stream(n, en, on_zh, on_en):
+            on_en("Hel")
+            on_zh("云端半")
+            return RuntimeError("stream reset")
+
+        loc = self._Local("本地译文")
+        r, c = self._mk(stream, local=loc)
+        zh, en = [], []
+        res = r.fix_and_translate_stream("hello", [], on_zh=zh.append, on_en=en.append)
+        self.assertEqual(res.zh, "本地译文")
+        self.assertFalse(r._use_cloud)
+        self.assertEqual(c.calls, 1)
+        self.assertEqual((zh, en), (["云端半"], ["Hel"]), "本地不许再接在云端半句后面")
+
+    # ---- 3.9.7 第 4 项：跨段半句合并的重翻不许连坐定稿翻译 ----
+
+    def test_T8_merge_failure_never_trips_or_falls_back(self):
+        """合并重翻连败 FAIL_TRIP+1 次 → 不降级、不计连败、不重试、不碰本地。"""
+        loc = self._Local()
+        r, c = self._mk(lambda n, en, z, e: RuntimeError("boom"), local=loc)
+        for _ in range(r.FAIL_TRIP + 1):
+            self.assertIsNone(r.merge_translate("a b", []))
+        self.assertTrue(r._use_cloud, "合并失败把整节课的定稿翻译降级了")
+        self.assertEqual(r._fail_streak, 0)
+        self.assertEqual(c.calls, r.FAIL_TRIP + 1, "合并失败不许重试")
+        self.assertEqual(loc.calls, 0, "合并不许退本地（本地正被定稿线程用着）")
+
+    def test_T8b_merge_skipped_when_degraded_and_success_does_not_clear_streak(self):
+        r, c = self._mk()
+        r._fail_streak = 2
+        self.assertEqual(r.merge_translate("a b", []).zh, "云端译文")
+        self.assertEqual(r._fail_streak, 2, "合并成功不能替定稿那条路清零")
+        r._use_cloud = False
+        self.assertIsNone(r.merge_translate("a b", []))
+        self.assertEqual(c.calls, 1)
 
 
 class R3_LocalEchoGuard(unittest.TestCase):

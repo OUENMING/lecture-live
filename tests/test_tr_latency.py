@@ -148,22 +148,53 @@ class Report(unittest.TestCase):
         self.assertEqual(s["seg_to_zh_ms"], {"p50": 1500.0, "p90": 1900.0})
         self.assertEqual(s["by_model"], {"deepseek-chat": 1, "local": 1})
 
+    def test_by_idle_按距上次请求多久分桶(self):
+        """⭐ 3.9.8 ⑥：`by_idle` 按 `idle_before_ms` 把 `zh_first_ms` 分 `<7s` / `>=7s`。
+
+        ⚠️ 变异验证：把 `_idle_bucket` 里 `< IDLE_SPLIT_MS` 写成 `<=` → 边界那条红；
+           把「`None` 不进任何桶」那半句删掉（当成 lt7s）→ 下面第 3 条红。
+        """
+        rows = [{"zh_first_ms": 100.0, "model": "local", "idle_before_ms": 1000.0},
+                {"zh_first_ms": 200.0, "model": "local", "idle_before_ms": 8000.0},
+                {"zh_first_ms": 300.0, "model": "local", "idle_before_ms": None},   # 第一次
+                {"zh_first_ms": None, "model": "", "idle_before_ms": 500.0},        # 没中文
+                {"zh_first_ms": 400.0, "model": "local", "idle_before_ms": 7000.0}]  # 正好边界
+        s = tm.latency_summary(rows)
+        # ⚠️ 边界那条**排在最前**：把 `<` 写成 `<=` 时，红的正好是它（下面 lt7s 那条
+        #    会跟着红——但那是同一个错法的第二个症状，不是两次不同的回归）。
+        self.assertEqual(s["by_idle"]["ge7s"], {"p50": 300.0, "p90": 380.0},
+                         "7000 ms 正好该进 ge7s（边界是 <）")
+        self.assertEqual(s["by_idle"]["lt7s"], {"p50": 100.0, "p90": 100.0},
+                         "`idle_before_ms=None` 那句被算进 lt7s 了")
+        self.assertEqual(s["n"], 4)
+
+    def test_by_idle_两条桶都空时给None不给0(self):
+        s = tm.latency_summary([{"zh_first_ms": 100.0, "model": "local",
+                                 "idle_before_ms": None}])
+        self.assertIsNone(s["by_idle"]["lt7s"])
+        self.assertIsNone(s["by_idle"]["ge7s"])
+
     def test_一句都没有时全为空(self):
         s = tm.latency_summary([])
         self.assertEqual(s, {"n": 0, "zh_first_ms": None, "seg_to_zh_ms": None,
+                             "by_idle": {"lt7s": None, "ge7s": None},
                              "by_model": {}})
 
     def test_note_translate_进收尾报告(self):
         d = pathlib.Path(tempfile.mkdtemp())
         t = tm.TestSession(d / "x.md")
-        t.note_translate(120.0, 200.0, 1500.0, "deepseek-chat")
-        t.note_translate(80.0, 90.0, 900.0, "local")
+        t.note_translate(120.0, 200.0, 1500.0, "deepseek-chat", idle_before_ms=1000.0)
+        t.note_translate(80.0, 90.0, 900.0, "local", idle_before_ms=9000.0)
         t.note_translate(None, 70.0, None, "")          # 没出中文那句
         rep = json.loads(pathlib.Path(t.finish(bundle=False)).read_text(encoding="utf-8"))
         lat = rep["translation_latency"]
         self.assertEqual(lat["n"], 2)
         self.assertEqual(lat["zh_first_ms"], {"p50": 100.0, "p90": 116.0})
         self.assertEqual(lat["by_model"], {"deepseek-chat": 1, "local": 1})
+        # ⭐ 3.9.8 ⑥：`idle_before_ms` 随 `note_translate` 落进行里、进 by_idle。
+        self.assertEqual(lat["by_idle"],
+                         {"lt7s": {"p50": 120.0, "p90": 120.0},
+                          "ge7s": {"p50": 80.0, "p90": 80.0}}, str(lat["by_idle"]))
 
 
 if __name__ == "__main__":

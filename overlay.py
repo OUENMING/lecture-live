@@ -267,6 +267,9 @@ PUMP_HIDDEN_S = 0.25             # 窗口不可见（收起 / 完全被遮挡 / 
 #   ⚠️ 只改**让步间隔**：动效时长 / 曲线一个字节没动（`probe_motion.py` 改前改后逐条一致）。
 #: 让步档位（`_pump_tier()` 返回；`_pump_wait_s()` 与 `_yield_to_runloop()` 共用**同一份**判据）。
 WAIT_GESTURE, WAIT_HOT, WAIT_IDLE, WAIT_HIDDEN = "gesture", "hot", "idle", "hidden"
+#: ⭐ 3.9.8 ⑤：字幕视图采样（可见行数 / 档位行数 / 面板宽）的最小间隔 —— 1 Hz。
+#: 它是统计量不是动画，每帧量等于白烧 CPU；采集器侧再按时间加权成"各档累计秒数"。
+VIEW_SAMPLE_S = 1.0
 #: `self._hot_screen` 的初值 —— `None` 是**合法缓存值**（拿不到屏幕），所以不能用它当"没算过"。
 _HOT_UNSET = object()
 #: `wake()` 投的 AppDefined 事件的 subtype —— 用来把「唤醒令牌」与真实事件分开
@@ -1054,7 +1057,8 @@ def _pineapple_icon(pt: float = 16.0, scale: int = 2):
 
 class Overlay:
     def __init__(self, on_quit=None, on_translate=None, on_submit=None,
-                 on_ask=None, on_new_topic=None, on_lost=None, note=None):
+                 on_ask=None, on_new_topic=None, on_lost=None, note=None,
+                 on_vis=None, on_wait=None, on_view=None, on_power_event=None):
         # ⚠️ 窗口 chrome / 材质 / scrim 那几样已经搬进 panel.py 了，这里的名字要
         #    跟着删干净 —— 留着会让「材质在哪配的」这个问题仍然答成 overlay.py，
         #    等于配方原料还散在两个文件里。
@@ -1102,6 +1106,21 @@ class Overlay:
         #:    ⚠️ 它跑在 AppKit 主线程回调里 → **调用方必须 O(1) 不阻塞**
         #:       （`note_ui` 就是一次 dict 自增）。
         self._note = note or (lambda _name: None)
+        # ⭐ 3.9.8 采集钩子（①②④⑤）—— 与 `note` 同一套纪律：**全部默认 `None`**，
+        #    即"不装采集器就一个字节都不动"。为什么是 `None` 而不是空 lambda：
+        #    ①②④ 都在 **pump 每轮** 的路径上（每秒几十次），`is not None` 比一次
+        #    空函数调用更便宜，而且"没装"这个状态在源码里一眼看得见。
+        #    ⚠️ **overlay 绝不 import testmode** —— 回调由 `main` 注入（同 `note`）。
+        #: ① 可见性变化：`fn(visible: bool)`（能耗分桶 / ⑤ 视图计时收口）。
+        self._on_vis = on_vis
+        #: ① pump 一档的实际等待：`fn(tier: str, seconds: float)`。
+        self._on_wait = on_wait
+        #: ⑤ 视图采样（每秒最多一次）：`fn(rows, lines, panel_w)`。
+        self._on_view = on_view
+        #: ④ 系统 / 屏幕睡眠唤醒：`fn(name: str)`（进测试报告的 `events`）。
+        self._on_power_event = on_power_event
+        #: ⑤ 上次视图采样的时刻（`_sample_view` 用它限流到 1 Hz）。
+        self._view_t_last = 0.0
         # 全量历史(不再 deque(maxlen=3) —— 展开态要能翻到更早的句子)。
         # 一节课 544 句约 <200KB, 无需上限。
         # ⚠️ `_history` 就是 `_log.rows` **本身**（同一个 list 对象）—— 跨段半句合并经
@@ -2325,7 +2344,9 @@ class Overlay:
             from AppKit import (NSNotificationCenter, NSNotificationQueue,
                                 NSWindowDidChangeOcclusionStateNotification,
                                 NSWorkspace, NSWorkspaceScreensDidSleepNotification,
-                                NSWorkspaceScreensDidWakeNotification)
+                                NSWorkspaceScreensDidWakeNotification,
+                                NSWorkspaceWillSleepNotification,
+                                NSWorkspaceDidWakeNotification)
         except Exception:                                 # noqa: BLE001
             return
         try:
@@ -2339,10 +2360,32 @@ class Overlay:
             ws_nc = NSWorkspace.sharedWorkspace().notificationCenter()
             self._vis_obs.append(ws_nc.addObserverForName_object_queue_usingBlock_(
                 NSWorkspaceScreensDidSleepNotification, None, None,
-                lambda _n: self._set_screens_sleeping(True)))
+                lambda _n: self._screens_event(True, "screen_sleep")))
             self._vis_obs.append(ws_nc.addObserverForName_object_queue_usingBlock_(
                 NSWorkspaceScreensDidWakeNotification, None, None,
-                lambda _n: self._set_screens_sleeping(False)))
+                lambda _n: self._screens_event(False, "screen_wake")))
+            # ⭐ 3.9.8 ④：**整个系统**睡眠 / 唤醒也记一笔 —— 它是"中间几十分钟没声音"
+            #    最像的成因，而屏幕那条通知在合盖时**不一定**发。跟着 `events` 落进报告。
+            self._vis_obs.append(ws_nc.addObserverForName_object_queue_usingBlock_(
+                NSWorkspaceWillSleepNotification, None, None,
+                lambda _n: self._power_event("system_sleep")))
+            self._vis_obs.append(ws_nc.addObserverForName_object_queue_usingBlock_(
+                NSWorkspaceDidWakeNotification, None, None,
+                lambda _n: self._power_event("system_wake")))
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _screens_event(self, sleeping: bool, name: str) -> None:
+        """屏幕睡眠 / 唤醒：先更新可见性（既有行为），再给采集器报一声（3.9.8 ④）。"""
+        self._set_screens_sleeping(sleeping)
+        self._power_event(name)
+
+    def _power_event(self, name: str) -> None:
+        """⭐ 3.9.8 ④ 睡眠 / 唤醒 → 采集器（`main` 注入的 `note_event`）。**绝不抛**。"""
+        if self._on_power_event is None:
+            return
+        try:
+            self._on_power_event(name)
         except Exception:                                 # noqa: BLE001
             pass
 
@@ -2382,6 +2425,12 @@ class Overlay:
         if vis == self._visible:
             return
         self._visible = vis
+        # ⭐ 3.9.8 ①：可见性**刚变**才回调一次（不是每轮）—— 能耗分桶就挂在这里。
+        if self._on_vis is not None:
+            try:
+                self._on_vis(vis)
+            except Exception:                         # noqa: BLE001  采集坏了不许影响渲染
+                pass
         if vis:
             self._on_became_visible()
         else:
@@ -3505,9 +3554,14 @@ class Overlay:
     def _yield_to_runloop(self, app, mode, now: float) -> None:
         """让步（见 `pump` 的三档）。⚠️ 手势档与热档用 `runUntilDate_` —— 与改动前
         **逐字同一条路**（热档只是把时长换成屏幕周期）；只有空闲/不可见两条长档换成
-        可打断的 `_wait_interruptible`。"""
+        可打断的 `_wait_interruptible`。
+
+        ⭐ 3.9.8 ①：这一轮**实际**等了多久（不分档）累加给采集器 —— 答的是「pump 各档
+        各占多少秒」。⚠️ `_t0` 只在装了钩子时才取（不装 = 一次 `is not None`）。
+        """
         from AppKit import NSRunLoop, NSDate
         tier = self._pump_tier(now)
+        _t0 = time.monotonic() if self._on_wait is not None else 0.0
         rl = NSRunLoop.currentRunLoop()
         if tier == WAIT_GESTURE:
             # 手势中: 立刻返回, 但**仍跑完一轮 run loop** —— 不能真跳过,
@@ -3517,6 +3571,11 @@ class Overlay:
             rl.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(self._tier_wait_s(tier)))
         else:
             self._wait_interruptible(app, mode, self._tier_wait_s(tier))
+        if self._on_wait is not None:
+            try:
+                self._on_wait(tier, time.monotonic() - _t0)
+            except Exception:                         # noqa: BLE001
+                pass
 
     def _drain_events(self, app, mode) -> bool:
         """排空 NSApplication 事件队列并派发。返回**有没有真实事件**（`busy`）。
@@ -3579,7 +3638,40 @@ class Overlay:
             # 草稿让位的淡出 / 改字淡换的逐帧推进(都只改透明度, 见 _render_draft)
             self._render_draft()
         self._flush_if_due()
+        self._sample_view(now)
         self._yield_to_runloop(app, mode, now)
+
+    def _sample_view(self, now: float) -> None:
+        """⭐ 3.9.8 ⑤：把「字幕区此刻能看到几行 / 中文几行档 / 面板多宽」报给采集器。
+
+        ⚠️ **每秒最多一次**（`VIEW_SAMPLE_S`）—— 这是**统计量**，不是逐帧动画：
+           每帧量它等于白烧 CPU。`_on_view` 不装时**立刻返回**（一次 attribute 读）。
+        ⚠️ 视口行数 = `转录区高 / 整行高` 取整（`row_h` 含英文行 + 间距 + 中文行）。
+        """
+        if self._on_view is None or now - self._view_t_last < VIEW_SAMPLE_S:
+            return
+        self._view_t_last = now
+        try:
+            rows = int(self._scroll_h / self._row_h) if self._row_h > 0 else 0
+            self._on_view(rows, _lines_for_width(self._width), float(self._width))
+        except Exception:                             # noqa: BLE001  采样坏了不许影响渲染
+            pass
+
+    @property
+    def screen_hz(self) -> float | None:
+        """窗口所在屏幕的刷新率（Hz）；拿不到 → `None`。只读，给测试报告 `blocks.energy` 用。
+
+        ⚠️ 与 `_hot_wait_s` 读的是**同一个** `maximumFramesPerSecond()`（热档让步就按它算）；
+           这里不查缓存，因为只在收尾调一次。
+        """
+        try:
+            screen = self._panel.screen()
+            hz = float(screen.maximumFramesPerSecond()) if screen is not None else 0.0
+        except Exception:                                 # noqa: BLE001
+            return None
+        if not (hz > 0.0) or hz == float("inf"):
+            return None
+        return hz
 
     # 收尾路径(main.py 文件播完后的冲刷循环)只调 drain()、不调 pump(),
     # 所以 mutator 自己会 _flush_if_due(); 那里每轮 sleep(0.02) > FLUSH_DT,

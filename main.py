@@ -807,15 +807,35 @@ class _WakeQueue(queue.Queue):
 
     ⚠️ 只覆盖 `put` / `put_nowait`（这两个是全仓实际用到的写入口）：
        `all_settled()` 读 `empty()`、`drain()` 读 `get_nowait()`，都不受影响。
+
+    ⭐ 3.9.8 ②（唤醒延迟）：另有一格**只在装了 stats 回调时才活**的记账 —— 每条 item 从
+    `put` 到被 `get_nowait()` 取出的停留时间（毫秒）。答的是「空闲档 0.1 s / 隐藏档
+    0.25 s 有没有把字幕上屏拖慢」。
+    ⚠️ **item 的形状一个字没改**（R28 / `drain()` 分发不许动）：时间戳放在**与队列同序的
+       一个平行 deque** 里，`put` / `get_nowait` 在**同一把锁**里成对进出，顺序因此恒等。
+    ⚠️ 没装 stats = `_put_t is None`：**连 deque 都不建**、每轮只多一次 `is None` 判断。
     """
 
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
         self._waker = None
+        #: ⭐ 3.9.8 ②：`None` = 没装唤醒延迟统计（= 逐字相同的旧行为）。
+        self._stats = None
+        self._put_t = None
+        self._t_lock = None
 
     def set_waker(self, fn) -> None:
         """装/换唤醒回调（`None` = 退回普通 Queue 行为）。"""
         self._waker = fn
+
+    def set_stats(self, fn) -> None:
+        """装/卸唤醒延迟回调 `fn(dwell_ms)`；`None` = 退回**逐字相同**的旧行为。
+
+        ⚠️ 装了才建时间戳 deque 与那把锁；卸了就把它们丢掉（`_put_t = None`）。
+        """
+        self._stats = fn
+        self._put_t = collections.deque() if fn is not None else None
+        self._t_lock = threading.Lock() if fn is not None else None
 
     def _wake(self) -> None:
         w = self._waker
@@ -827,7 +847,15 @@ class _WakeQueue(queue.Queue):
             pass
 
     def put(self, item, block=True, timeout=None) -> None:
-        super().put(item, block, timeout)
+        if self._put_t is None:                            # 没装 stats：与旧实现逐字相同
+            super().put(item, block, timeout)
+            self._wake()
+            return
+        # ⚠️ 时间戳与 item 必须**成对、同序**：放在同一把锁里；且时间戳在 `_wake()`
+        #    之前入账 —— 否则主线程被叫醒后可能先取到 item、再弹到一个空 deque。
+        with self._t_lock:
+            super().put(item, block, timeout)
+            self._put_t.append(time.monotonic())
         self._wake()
 
     def put_nowait(self, item) -> None:
@@ -835,6 +863,24 @@ class _WakeQueue(queue.Queue):
         #    `self.put(item, block=False)` —— 已经走过本类那个 `put`。
         #    多叫一次 = 每次 `put_nowait` 投两个唤醒令牌（判据钉着"一次一条"）。
         super().put_nowait(item)
+
+    def get_nowait(self):
+        """取一条并（装了 stats 时）记一次停留时间。**取不到照抛 `queue.Empty`。**
+
+        ⚠️ 消费端只有这一处（`drain()`）—— 它没有 try/except，所以这里除了
+           `queue.Empty` **一个异常都不许外抛**：统计自己失败只该少一个数。
+        """
+        if self._put_t is None:
+            return super().get_nowait()
+        with self._t_lock:
+            item = super().get_nowait()
+            t = self._put_t.popleft()
+        if self._stats is not None:
+            try:
+                self._stats(round((time.monotonic() - t) * 1000.0, 1))
+            except Exception:                              # noqa: BLE001
+                pass
+        return item
 
 
 class _Latest:
@@ -1560,6 +1606,14 @@ def run(args) -> None:
                 new, st = entries, {"need": 0, "done": 0}
         if tester is not None:              # 没跑（档位不对 / 没库）也记 0/0 —— 不是"没采到"
             tester.note_block("backfill", st)
+            # ⭐ 3.9.8 ③：把**真补出来的那几句**的原文也记下来（`backfill_entries` 只把补过的
+            #    那几条换成新 dict，`is` 比得出来；入参一个没改）。
+            try:
+                tester.note_backfill_items(
+                    [{"en": n.get("en") or "", "zh": n.get("zh") or ""}
+                     for o, n in zip(entries, new) if n is not o])
+            except Exception:                                 # noqa: BLE001
+                pass
         return new, st
 
     writer = ObsidianWriter(vault, args.course, mode=args.save_notes,
@@ -1756,6 +1810,15 @@ def run(args) -> None:
         # ⭐ 采集面 ⑦：UI 使用度。⚠️ `tester` 是 `None` 时传 `None`（不是传个假
         #    回调）—— `Overlay` 那边默认就是空 lambda，**零开销零行为**。
         note=(tester.note_ui if tester is not None else None),
+        # ⭐ 3.9.8 ①④⑤：四个采集钩子。全部**默认 `None`**（`Overlay` 用 `is not None`
+        #    守门）—— 不开测试模式 = 一个字节都不动、一次调用都没有。
+        #    ① 可见性变化 → 能耗分桶（`on_vis`）+ pump 实际等待时长（`on_wait`）
+        #    ④ 系统 / 屏幕睡眠唤醒 → `events`
+        #    ⑤ 视图采样（1 Hz）→ 可见行数 / 档位行数 / 面板宽
+        on_vis=(tester.on_vis if tester is not None else None),
+        on_wait=(tester.add_wait if tester is not None else None),
+        on_view=(tester.note_view if tester is not None else None),
+        on_power_event=(tester.note_event if tester is not None else None),
     )
     # ⭐ 3.9.7 省电：新数据到达要**立刻**叫醒主循环（它在空闲档让步 0.1 s、不可见档 0.25 s）。
     #    终端 UI 的 `wake()` 是空实现 —— 装了也只是一次空调用，零行为、零开销。
@@ -1766,6 +1829,14 @@ def run(args) -> None:
                 _q.set_waker(_wake)
             except Exception:                             # noqa: BLE001
                 pass
+    # ⭐ 3.9.8 ②：`streamq` 每条 item 从 put 到 drain 的停留时间（唤醒延迟）。
+    #    ⚠️ 只在测试模式装（`tester` 为 None 时**连 deque 都不建**，行为与开销逐字相同）。
+    #    `set_stats` 只装在 `streamq` 上 —— `drafts`/`drafts_zh` 的停留时间不是这一格问的。
+    if tester is not None:
+        try:
+            streamq.set_stats(tester.note_streamq_dwell)
+        except Exception:                                 # noqa: BLE001
+            pass
     _tp["overlay"] = time.monotonic()
     try:
         _st = startup_timing(_tp, _t_wall0, _t_click)
@@ -2005,6 +2076,12 @@ def run(args) -> None:
     CARRY_MAX_S = 3.0
     CARRY_MAX_WORDS = 25
     carry = {"text": "", "since": 0.0, "seg": 0}
+    #: ⭐ 3.9.8 ⑥：定稿翻译的「距上一次结束多久」（`idle_before_ms`）FIFO —— 与带 `lat`
+    #:    的 `("final", …)` **一一对应**。`_emit` 在定稿线程 append、`drain()` 在主线程
+    #:    取；append 排在 `streamq.put` **之前**，单产单消，顺序恒等。
+    #:    `_tr_last["end"]` = 上一次定稿翻译调用**结束**的时刻（第一次 `None`）。
+    _tr_idle: "collections.deque" = collections.deque()
+    _tr_last = {"end": None}
 
     def _emit(text: str, seg: int | None = None) -> None:
         # ⭐ `seg` = 这段文本属于哪一段缓冲（`livemetrics` 的分组键；一段 VAD → N 句定稿，
@@ -2048,6 +2125,14 @@ def run(args) -> None:
             # ⭐ 译文延迟（3.9.7 第 3 项）：只记数字与引擎名，不记文本（见 `tr_latency`）。
             #    ⚠️ 计时器**在翻译调用之前**建（构造即开始计时）。
             _lt = tr_latency.TrTimer()
+            # ⭐ 3.9.8 ⑥：这一次翻译**开始时**距上一次翻译**结束**多久（第一次 = None）。
+            #    答的是「60 s 长连接保活在真课上有没有省下首字延迟」(by_idle 分桶)。
+            #    ⚠️ 整段在 `tester is not None` 里 —— 测试模式关时**一次都不算**。
+            _idle_ms = None
+            if tester is not None:
+                _prev_end = _tr_last["end"]
+                _idle_ms = (None if _prev_end is None
+                            else round(max(0.0, time.monotonic() - _prev_end) * 1000.0, 1))
             _cloud0 = translator.uses_cloud
             try:
                 res = translator.fix_and_translate_stream(
@@ -2067,6 +2152,12 @@ def run(args) -> None:
             #       引擎名会让人以为它们翻出来了（`drain()` 用 `len` 守卫，老形状照样能读）。
             #    ⚠️ 引擎名看「送进去**前后**云端都开着」—— `_fallback` 会把 `_use_cloud`
             #       翻掉，只在返回后读一次会把"降级到本地"误报成云端。
+            #    ⭐ 3.9.8 ⑥：`_tr_last["end"]` 在这儿落（= 这次调用的结束时刻），`_tr_idle`
+            #       与这条 `("final", …)` 一一对应（`drain()` 侧成对取走）。
+            #       ⚠️ 测试模式关时**一次都不做**（连一次 `time.monotonic()` 都不花）。
+            if tester is not None:
+                _tr_last["end"] = time.monotonic()
+                _tr_idle.append(_idle_ms)
             streamq.put(("final", en, zh, sent, seg,
                          _lt.done(seg_t0=seg_ended_at.get(seg),
                                   model=args.cloud_model if (_cloud0 and translator.uses_cloud)
@@ -2663,8 +2754,12 @@ def run(args) -> None:
                 if tester is not None:
                     tester.note_correction(item[1], item[3])
                 # ⭐ 译文延迟（第 3 项）同样只在这里落地 —— 就在它那句 `final` 旁边。
+                #    ⭐ 3.9.8 ⑥：`idle_before_ms` 从 `_tr_idle` 取（与带 `lat` 的 final 一一
+                #    对应；空 deque 兜一圈给 None —— 采集少一个数，绝不许打死 drain）。
                 if tester is not None and _lat is not None:
-                    tester.note_translate(*_lat)
+                    tester.note_translate(
+                        *_lat,
+                        idle_before_ms=(_tr_idle.popleft() if _tr_idle else None))
                 # 🆕 实时总结：把这一句转给 worker。⚠️ **非阻塞** ——
                 #    `drain()` 在主循环里，这里是「不阻塞不变量」管着的地方。
                 #    ⚠️ 档位判在**这里**，不是启动时 —— 三档课中可切（见 worker 那段）。
@@ -2696,6 +2791,11 @@ def run(args) -> None:
                     writer.mark_merge(_job.get("tail_ts", ""), _job.get("next_ts", ""),
                                       _en, _zh, gap_s=_job.get("gap_s"),
                                       trigger=_job.get("trigger", ""))
+                # ⭐ 3.9.8 ③：这一次合并的**原文**（尾句 / 首句 / 合并结果 / 换没换成功）。
+                #    ⚠️ 落在 `_ok` 之后 —— 重翻失败那条也记（`merged_*` 为空、replaced=False），
+                #       那正是「翻得好不好」要看的另一半。`note_merge_item` 自己是 `_safe`。
+                if tester is not None:
+                    tester.note_merge_item(_job, _en, _zh, _ok)
             else:
                 # ⚠️ **兜底告警**：往 `streamq` 里加了新 tag 却忘了在 `drain` 加分支时
                 #    **出声**，而不是静默丢弃。`drain()` 是**唯一**的 tag 分发点。
@@ -3077,6 +3177,18 @@ def run(args) -> None:
                     "triggered": merge_stats["triggered"],
                     "replaced": merge_stats["replaced"],
                     "failed": max(0, merge_stats["triggered"] - merge_stats["replaced"])})
+                # ⭐ 3.9.8 ①：能耗 / 唤醒 / 供电（开课时 `TestSession.__init__` 已取第一次
+                #    快照，这里取第二次并关掉最后一个分桶）。屏幕刷新率从悬浮窗现读 ——
+                #    热档让步就是按它算的，报告里没有它就看不懂"泵每轮等了多久"。
+                _hz = None
+                try:
+                    _hz = getattr(ui, "screen_hz", None)
+                except Exception:                         # noqa: BLE001
+                    _hz = None
+                tester.note_block("energy", tester.energy_block(_hz))
+                # ⭐ 3.9.8 ④：收音断档（墙钟 vs 实际音频秒）。⚠️ 用 time.time ——
+                #    monotonic 在系统睡眠时不走，而"睡过去了、中间没声音"正是它要抓的。
+                tester.note_block("capture", tester.capture_block())
                 # ⭐ 译文超出档位行数的次数/分母 —— 原来只在 `transcript_view` 里自增、
                 #    哪儿都不导出，「F 只有 ≈1%」只能拿离线回放外推（2026-10-14 C4）。
                 _ovs = getattr(ui, "overflow_stats", None)
@@ -3316,7 +3428,8 @@ def startup_timing(tp: dict, wall0: float, click_wall: float | None) -> dict:
 
 
 def _load_overlay(on_quit=None, on_translate=None, on_submit=None,
-                  on_ask=None, on_new_topic=None, on_lost=None, note=None):
+                  on_ask=None, on_new_topic=None, on_lost=None, note=None,
+                  on_vis=None, on_wait=None, on_view=None, on_power_event=None):
     """建悬浮窗。**失败回退终端 UI**（`drives_appkit` 为假 = 回退了）。
 
     ⚠️⚠️ **这一层的形参必须与调用点**逐字**对齐**（2026-09-30 事故）：
@@ -3332,7 +3445,9 @@ def _load_overlay(on_quit=None, on_translate=None, on_submit=None,
         from overlay import Overlay
         o = Overlay(on_quit=on_quit, on_translate=on_translate,
                     on_submit=on_submit, on_ask=on_ask,
-                    on_new_topic=on_new_topic, on_lost=on_lost, note=note)
+                    on_new_topic=on_new_topic, on_lost=on_lost, note=note,
+                    on_vis=on_vis, on_wait=on_wait, on_view=on_view,
+                    on_power_event=on_power_event)
         o.show()
         return o
     except Exception as e:       # noqa: BLE001

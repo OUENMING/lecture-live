@@ -21,6 +21,10 @@
 *流水线*: 首字中文延迟（草稿 `lag_s` / 定稿 `translation_latency`）、定稿延迟、翻译失败、
           云端降级、退化回退次数
 *资源*  : CPU 秒(整段 + 折算实时占比)、峰值内存
+*能耗*  : 可见/不可见两档的能耗(J)/唤醒次数/CPU 秒/墙钟 + pump 各档时长（3.9.8 ①，`energy.py`）
+*唤醒*  : `streamq` 每条 item 从 put 到 drain 的停留时间 p50/p90/p99/max（3.9.8 ②）
+*补采*  : 跨段合并 / 课后补译的**原文**（3.9.8 ③）；收音断档与系统睡眠（3.9.8 ④）；
+          字幕可见行数 / 档位行数 / 面板宽（3.9.8 ⑤）
 *收尾*  : VAD 诊断原文(report())、会话文件路径
 
 用法
@@ -73,6 +77,22 @@ AUDIO_OPUS_BITRATE = "24k"
 #: （Groq WER 10.2% / 漏 0.4%，与 ffmpeg 24k 的 10.1% / 0.4% 打平）—— 这些录音要拿去做评测，音质不能再省。
 AUDIO_SF_LEVEL = 0.88
 
+# ---- 3.9.8 新增采集（六组）的常量 ----
+#: ② 唤醒延迟：`streamq` 逐条停留时间的上限。一节课几千条 × 一个 float，几十 KB；
+#: 封顶只为防「某条路把同一句重复投一万次」时内存失控。
+DWELL_MAX = 50000
+#: ③ merge / backfill 原文的条数上限（一节课触发次数远低于此；封顶防异常膨胀）。
+TEXT_ITEMS_MAX = 300
+#: ④ 相邻两块音频的墙钟间隔超过它就记一次**断档**。
+CAPTURE_GAP_S = 1.0
+#: ④ 断档列表的条数上限（总数与总时长不受它限制，始终如实累加）。
+CAPTURE_GAPS_MAX = 50
+#: ⑥ `by_idle` 的分界（毫秒）：`< 7 s` = 上一句刚翻完没多久（长连接多半还热着）；
+#: `>= 7 s` = 已经隔了 macOS / httpx 默认 keepalive 之外的一段时间（连接可能已重开）。
+IDLE_SPLIT_MS = 7000.0
+#: ⑤ 面板宽度 p50 用的样本上限（每秒最多一个，一节课 ≤ ~3600 个）。
+VIEW_W_MAX = 20000
+
 
 def _sf_opus(wav: pathlib.Path, opus: pathlib.Path) -> str | None:
     """不靠 ffmpeg 把一段 wav 编成 Ogg/Opus。成功返回 None，失败返回一句原因（不抛）。
@@ -98,8 +118,10 @@ BLOCKS = frozenset({
     "terms",    # 术语注入条数（core / always / scored）
     "ui",       # UI 使用度（纲要开了几次、点了哪些按钮）
     "backfill",  # 🩹 漏译句课后补译的计数 `{need, done}`（`backfill.backfill_entries`）
-    "merge",    # 跨段半句合并的计数 `{triggered, replaced, failed}`（3.9.7 第 4 项）
+    "merge",    # 跨段半句合并的计数 `{triggered, replaced, failed}` + `items`（3.9.7 第 4 项 / 3.9.8 ③）
     "system",   # 机器画像 `{ram_gb, chip, macos, arch, draft_engine, draft_reason}`（`system_info`）
+    "energy",   # ⭐ 3.9.8 ①：可见/隐藏分桶的能耗/唤醒/CPU + pump 各档时长（`energy.EnergyProbe`）
+    "capture",  # ⭐ 3.9.8 ④：收音断档（墙钟 vs 音频秒）+ 断档列表（`note_chunk` 累计）
 })
 
 
@@ -147,22 +169,54 @@ def pcts(vals) -> dict | None:
 def latency_summary(rows) -> dict:
     """逐句译文延迟 → `translation_latency` 汇总。纯函数（判据直接调它）。
 
-    `rows` = `[{"zh_first_ms", "zh_done_ms", "seg_to_zh_ms", "model"}, …]`
+    `rows` = `[{"zh_first_ms", "zh_done_ms", "seg_to_zh_ms", "model", "idle_before_ms"}, …]`
     （`note_translate` 收的），一条一句定稿。
 
     ⚠️ `n` = **真的等到过中文首字**的句数：断网 / 空译文那些不进 `n`、也不进
        `by_model` —— 报一个引擎名会让人以为它们翻出来了。
     ⚠️ `zh_done_ms` 只落在 `.live.jsonl` 的逐句行里，这里不汇总（第 3 项要的就是
        `zh_first_ms` / `seg_to_zh_ms` 两条：前者量翻译，后者是**用户真正等的时间**）。
+    ⭐ 3.9.8 ⑥：`by_idle` 按「距上一次定稿翻译**结束**多久」把 `zh_first_ms` 分两桶
+       （`< IDLE_SPLIT_MS` / `>=`）—— 答的是「60 s 长连接保活在真课上有没有省下首字延迟」。
+       ⚠️ `idle_before_ms` 为 `None`（第一次调用 / 拿不到）的句子**不进任何一桶**：
+          把它们塞进 `lt7s` 会把"首次冷启动"混进"刚翻过又翻"那一档。
     """
     first = [r.get("zh_first_ms") for r in rows if r.get("zh_first_ms") is not None]
     seg = [r.get("seg_to_zh_ms") for r in rows if r.get("seg_to_zh_ms") is not None]
     by_model = collections.Counter(r.get("model") or "" for r in rows)
     by_model.pop("", None)
+
+    def _idle_bucket(r):
+        v = r.get("idle_before_ms")
+        if v is None:
+            return None
+        return float(v) < IDLE_SPLIT_MS
+
+    lt = [r["zh_first_ms"] for r in rows
+          if r.get("zh_first_ms") is not None and _idle_bucket(r) is True]
+    ge = [r["zh_first_ms"] for r in rows
+          if r.get("zh_first_ms") is not None and _idle_bucket(r) is False]
     return {"n": len(first),
             "zh_first_ms": pcts(first),
             "seg_to_zh_ms": pcts(seg),
+            "by_idle": {"lt7s": pcts(lt), "ge7s": pcts(ge)},
             "by_model": dict(by_model.most_common())}
+
+
+def dwell_summary(vals) -> dict | None:
+    """`streamq` 每条 item 的停留时间（毫秒）→ `{n, p50, p90, p99, max}`。纯函数。
+
+    回答 3.9.8 ② 那个问题：空闲档 0.1 s / 隐藏档 0.25 s 有没有把字幕上屏拖慢？
+    ⚠️ 一个数都没有 → `None` 不给 `0`（同 `pcts` 的规矩）。
+    """
+    if not vals:
+        return None
+    a = np.asarray(list(vals), dtype=float)
+    return {"n": int(a.size),
+            "p50": round(float(np.percentile(a, 50)), 1),
+            "p90": round(float(np.percentile(a, 90)), 1),
+            "p99": round(float(np.percentile(a, 99)), 1),
+            "max": round(float(a.max()), 1)}
 
 
 #: 静默采集最多为**每个方法**记几条异常 —— 热路径上失败会一秒刷几十次，
@@ -321,8 +375,11 @@ class TestSession:
     """一次测试课的采集器。所有 note_* 方法都保证不抛。"""
 
     def __init__(self, session_path: pathlib.Path | None, record_audio: bool = False,
-                 record_float: bool = False):
+                 record_float: bool = False, wall_clock=time.time):
         self.t0 = time.monotonic()
+        #: ④ 墙钟（`time.time`，**不是 monotonic**：macOS 的 monotonic 在系统睡眠时
+        #:    不走，而这一格要抓的正是"睡过去了、中间没声音"）。可注入（判据伪造断档）。
+        self._wall = wall_clock
         self.session_path = session_path
         self.stem = session_path.with_suffix("") if session_path else None
         self.record_audio = bool(record_audio) and self.stem is not None
@@ -403,6 +460,33 @@ class TestSession:
         self._seg_no = 0
         self._cpu0 = self._cpu()
         self._rss_peak = 0
+
+        # ---- ⭐ 3.9.8 新增采集的累加器（全部只在内存里长，收尾一次成型）----
+        #: ② `streamq` 每条 item 的停留时间（ms）。p50/p90/p99 没法用累加算，所以存原始数。
+        self._sq_ms: list[float] = []
+        #: ③ 跨段合并 / 课后补译的**原文**（会话 .md 里本来就有同级的东西，隐私口径不变）。
+        self._merge_items: list[dict] = []
+        self._backfill_items: list[dict] = []
+        #: ④ 收音断档（墙钟口径，见 `note_chunk`）。
+        self._cap_first_wall: float | None = None
+        self._cap_last_wall: float | None = None
+        self._cap_gaps: list[dict] = []
+        self._cap_gap_n = 0
+        self._cap_gap_total = 0.0
+        #: ⑤ 字幕视图按时间加权：各档可见行数 / 中文档位行数各累计了多少秒 + 面板宽样本。
+        self._view_rows_s: dict[int, float] = {}
+        self._view_lines_s: dict[int, float] = {}
+        self._view_w: list[float] = []
+        self._view_n = 0
+        self._view_cur: tuple[int, int, float] | None = None
+        self._view_t0: float | None = None
+        #: ① 能耗分桶（`energy.EnergyProbe`）。建不起来 = `None`，报告里如实说"没采到"。
+        self.energy = None
+        try:
+            import energy as _energy
+            self.energy = _energy.EnergyProbe()
+        except Exception:                                 # noqa: BLE001
+            self.energy = None
 
     def upload_files(self) -> list:
         """这节课该传哪些文件（阶段 3 的上传用）。⚠️ 只列**真的存在**的。
@@ -520,6 +604,9 @@ class TestSession:
     @_safe
     def note_chunk(self, chunk) -> None:
         a = np.abs(chunk)
+        # ⭐ 3.9.8 ④：收音断档（墙钟）。⚠️ 用 `time.time` —— monotonic 在系统睡眠时不走，
+        #    而"睡过去了、中间几十分钟没声音"正是这一格要抓的形态。
+        self._capture_tick(self._wall())
         self._n_samples += len(chunk)
         self._sum_sq += float(np.sum(chunk.astype(np.float64) ** 2))
         self._peak = max(self._peak, float(a.max()) if len(a) else 0.0)
@@ -644,18 +731,171 @@ class TestSession:
 
     @_safe
     def note_translate(self, zh_first_ms=None, zh_done_ms=None, seg_to_zh_ms=None,
-                       model: str = "") -> None:
+                       model: str = "", idle_before_ms=None) -> None:
         """⭐ 一句定稿的**译文延迟**（3.9.7 第 3 项）—— 只记数字与引擎名，不记文本。
 
         口径见 `tr_latency` 的文件头：`zh_first_ms` / `zh_done_ms` 从"英文送进翻译"
         算起，`seg_to_zh_ms` 从那**一段音频结束**算起（后者才是用户真正等的时间），
         `model` = 实际出译文的引擎（云端模型名 / `local`；没出中文 = 空串）。
+        ⭐ 3.9.8 ⑥：`idle_before_ms` = 这次定稿翻译**开始时**距上一次翻译**结束**多久
+           （第一次 = `None`）。它决定 `translation_latency.by_idle` 分桶 ——
+           ⚠️ **不落 `.live.jsonl`**（那是 `tr_latency` 的 4 元组，形状一个字没动）。
 
         ⚠️ 是**一句一条**的原始数（不是计数器）：收尾在 `finish()` 里汇成
            `translation_latency` 的 p50 / p90。这里只在内存里 append，**不落盘**。
         """
         self._tr.append({"zh_first_ms": zh_first_ms, "zh_done_ms": zh_done_ms,
-                         "seg_to_zh_ms": seg_to_zh_ms, "model": model})
+                         "seg_to_zh_ms": seg_to_zh_ms, "model": model,
+                         "idle_before_ms": idle_before_ms})
+
+    @_safe
+    def note_streamq_dwell(self, ms: float) -> None:
+        """⭐ 3.9.8 ②：`streamq` 一条 item 从 `put` 到被 `drain()` 取出的停留时间（毫秒）。
+
+        ⚠️ 由 `_WakeQueue` 在自己**装了 stats 回调**时才调（没装 = 连时间戳都不记）。
+        ⚠️ 只 append 原始数（p50/p90/p99 算不出来），像 `note_translate` 一样在内存里长。
+        """
+        if len(self._sq_ms) < DWELL_MAX:
+            self._sq_ms.append(float(ms))
+
+    @_safe
+    def note_view(self, rows: int, lines: int, width: float) -> None:
+        """⭐ 3.9.8 ⑤：字幕视图的一次采样（视口可见行数 / 中文档位行数 / 面板宽）。
+
+        ⚠️ `overlay` 在 pump 里**每秒最多采一次**（它自己限流）；这里按**时间加权**
+           把「上一次采样到这一次」的秒数记进上一份样本，所以累计秒数 ≈ 该档位在屏上的时长。
+        """
+        now = time.monotonic()
+        self._view_close(now)
+        self._view_cur = (int(rows), int(lines), float(width))
+        self._view_t0 = now
+        self._view_n += 1
+        if len(self._view_w) < VIEW_W_MAX:
+            self._view_w.append(float(width))
+
+    @_safe
+    def note_merge_item(self, job: dict, en: str, zh: str, replaced: bool) -> None:
+        """⭐ 3.9.8 ③：一次跨段半句合并的**原文**（触发的那一刻 + 重翻结果）。
+
+        `job` = `fragment_merge.MergeTracker.on_line` 的产物（含 `tail_en/tail_zh/
+        next_en/next_zh/gap_s/trigger`）；`en`/`zh` = 重翻后的合并文本（失败 = 空串）；
+        `replaced` = 屏上那两行**真的**被换掉了（`False` = 重翻失败 / 行已被别的路径改过）。
+        ⚠️ 上限 `TEXT_ITEMS_MAX` 条（一节课触发次数远低于此；封顶防异常膨胀）。
+        """
+        if len(self._merge_items) >= TEXT_ITEMS_MAX:
+            return
+        self._merge_items.append({
+            "t": round(time.monotonic() - self.t0, 2),
+            "gap_s": None if job.get("gap_s") is None else round(float(job["gap_s"]), 3),
+            "trigger": str(job.get("trigger") or ""),
+            "tail_en": str(job.get("tail_en") or ""),
+            "tail_zh": str(job.get("tail_zh") or ""),
+            "next_en": str(job.get("next_en") or ""),
+            "next_zh": str(job.get("next_zh") or ""),
+            "merged_en": str(en or ""),
+            "merged_zh": str(zh or ""),
+            "replaced": bool(replaced),
+        })
+
+    @_safe
+    def note_backfill_items(self, items) -> None:
+        """⭐ 3.9.8 ③：课后补译**真补出来**的条目 `[{en, zh}, …]`（上限 `TEXT_ITEMS_MAX`）。
+
+        ⚠️ 传进来的只该是 `backfill_entries` **换掉的那些**（`is not` 旧对象）——
+           "补了哪几句、补成什么样"是这一格的全部意义，别把整节课的 entries 塞进来。
+        """
+        for it in (items or []):
+            if len(self._backfill_items) >= TEXT_ITEMS_MAX:
+                return
+            self._backfill_items.append({"en": str((it or {}).get("en") or ""),
+                                         "zh": str((it or {}).get("zh") or "")})
+
+    # ---- ⭐ 3.9.8 ①④⑤：overlay 注入的钩子（都在 AppKit 主线程上，必须 O(1)）----
+    @_safe
+    def on_vis(self, visible: bool) -> None:
+        """⭐ ① 窗口可见性刚变了（`overlay._refresh_visibility` 注入）。**绝不抛**。
+
+        ⚠️ 同时收口 ⑤ 的视图计时：不可见期间**不该**算进任何"行数档位"的时长里。
+        """
+        if self.energy is not None:
+            self.energy.on_vis(visible)
+        self._view_close(time.monotonic())
+
+    @_safe
+    def add_wait(self, tier: str, seconds: float) -> None:
+        """⭐ ① pump 一档的**实际**等待时长（`overlay._yield_to_runloop` 注入）。"""
+        if self.energy is not None:
+            self.energy.add_wait(tier, seconds)
+
+    def _capture_tick(self, w: float) -> None:
+        """④ 一块音频到达：记第一块时刻、算与上一块的墙钟间隔。纯记账（被 `note_chunk` 包着）。"""
+        if self._cap_first_wall is None:
+            self._cap_first_wall = w
+        elif self._cap_last_wall is not None and (w - self._cap_last_wall) > CAPTURE_GAP_S:
+            gap = w - self._cap_last_wall
+            self._cap_gap_n += 1
+            self._cap_gap_total += gap
+            if len(self._cap_gaps) < CAPTURE_GAPS_MAX:
+                self._cap_gaps.append({"t_wall_offset_s": round(w - self._cap_first_wall, 3),
+                                       "gap_s": round(gap, 3)})
+        self._cap_last_wall = w
+
+    def _view_close(self, now: float | None = None) -> None:
+        """⑤ 把「上一次采样 → 现在」的秒数记进上一次那份样本（时间加权）。**绝不抛**。"""
+        cur = self._view_cur
+        if cur is None:
+            return
+        if now is None:
+            now = time.monotonic()
+        dt = now - (self._view_t0 if self._view_t0 is not None else now)
+        rows, lines, _w = cur
+        if dt > 0:
+            self._view_rows_s[rows] = self._view_rows_s.get(rows, 0.0) + dt
+            self._view_lines_s[lines] = self._view_lines_s.get(lines, 0.0) + dt
+        self._view_cur = None
+        self._view_t0 = None
+
+    def _view_block(self) -> dict:
+        """⑤ 视图块（进 `blocks.ui.view`）。宽度 p50 用 `np.median`。"""
+        out = {"samples": self._view_n,
+               "rows_s": {str(k): round(v, 1) for k, v in sorted(self._view_rows_s.items())},
+               "lines_s": {str(k): round(v, 1) for k, v in sorted(self._view_lines_s.items())},
+               "width_p50": (round(float(np.median(np.asarray(self._view_w, dtype=float))), 1)
+                             if self._view_w else None)}
+        return out
+
+    def energy_block(self, screen_hz: float | None = None) -> dict:
+        """① 能耗块（收尾调一次）。**永不抛** —— 采不到只给 `{available: false, reason}`。"""
+        if self.energy is None:
+            return {"available": False, "reason": "rusage 探测建不起来"}
+        try:
+            return self.energy.block(screen_hz)
+        except Exception as e:                            # noqa: BLE001
+            return {"available": False, "reason": f"{type(e).__name__}: {str(e)[:80]}"}
+
+    def capture_block(self) -> dict:
+        """④ 收音断档块（收尾调一次）。**永不抛**。"""
+        try:
+            first = self._cap_first_wall
+            if first is None:
+                return {"available": False, "reason": "一块音频都没收到"}
+            now = self._wall()
+            wall = max(0.0, now - first)
+            audio_s = self._n_samples / SR
+            return {
+                "available": True,
+                "wall_s": round(wall, 1),
+                "audio_s": round(audio_s, 1),
+                #: 墙钟比实际音频长了多少 —— > ~0.2 s/块 就是"中间没在听"。
+                "deficit_s": round(wall - audio_s, 1),
+                "gaps": {"n": self._cap_gap_n, "total_s": round(self._cap_gap_total, 1),
+                         "items": list(self._cap_gaps)},
+                "first_block_epoch": round(first, 3),
+                "last_block_epoch": (None if self._cap_last_wall is None
+                                     else round(self._cap_last_wall, 3)),
+            }
+        except Exception as e:                            # noqa: BLE001
+            return {"available": False, "reason": f"{type(e).__name__}: {str(e)[:80]}"}
 
     @_safe
     def note_ui(self, name: str) -> None:
@@ -757,6 +997,19 @@ class TestSession:
         #    收尾这里补进 `_extra`，让七格在报告里**形状一致**（都在 `blocks` 下）。
         #    ⚠️ 用 `setdefault` 是防"调用方也显式 note_block 过一次 ui"（那样以它为准）。
         self._extra.setdefault("ui", dict(self._ui))
+        # ⭐ 3.9.8：新采的那些格落在**已有的块**里（形状与既有的 `zh_overflow` / `hidden_s`
+        #    一致），不另建顶层键 —— `block_names` 那套"该有哪几块"的清单因此不用动形状。
+        self._view_close()
+        _ui = self._extra.get("ui")
+        if isinstance(_ui, dict):
+            _ui.setdefault("streamq_dwell_ms", dwell_summary(self._sq_ms))
+            _ui.setdefault("view", self._view_block())
+        _mg = self._extra.setdefault("merge", {})
+        if isinstance(_mg, dict):
+            _mg.setdefault("items", list(self._merge_items))
+        _bf = self._extra.setdefault("backfill", {})
+        if isinstance(_bf, dict):
+            _bf.setdefault("items", list(self._backfill_items))
         report = {
             "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
             "session_file": str(self.session_path) if self.session_path else None,
@@ -829,6 +1082,14 @@ class TestSession:
                 "translation_latency.n 只数**真的等到过中文首字**的句子: 断网 / 空译文"
                 "那些不进 n 也不进 by_model; seg_to_zh_ms 从该段音频结束(VAD 切段)"
                 "算起, 含定稿 ASR + 排队 —— zh_first_ms 只量翻译那一段。",
+                "blocks.energy: 分桶的**时间**用 monotonic, 报告的墙钟用 time.time;"
+                "billed_energy 那三个计数器是**只读**系统调用, 实测有些机器在一段忙循环里"
+                "根本不涨(0) —— 0 是「这一档没记到能量」, 不是「没耗电」。cpu_s 可拿"
+                "resource.getrusage 对拍。",
+                "blocks.capture.deficit_s = 墙钟 - 实际音频秒; 文件回放(--speed≠1) 或"
+                "断档两者都会把它推大, 断档明细看 gaps.items。系统/屏幕睡眠进 events。",
+                "blocks.ui.streamq_dwell_ms = streamq 每条 item 从 put 到 drain 的停留"
+                "时间(唤醒延迟); 空闲档 0.1 s / 隐藏档 0.25 s 若把字幕拖慢, 这里会看到 p90/p99 变大。",
             ],
             "vad_report": vad_report,
             # ⭐ 七格采集面里那些「整块快照」（`note_block` 收的）。

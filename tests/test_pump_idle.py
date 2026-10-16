@@ -664,6 +664,34 @@ class Wiring(unittest.TestCase):
         self.assertIn("note_ui_value('draft_skipped_hidden'", src)
         self.assertIn("note_ui_value('draft_zh_skipped_hidden'", src)
 
+    # ---- ⭐ 3.9.8 新采的接线（闭包跑不到，钉住「改法」）----
+    def test_streamq装上唤醒延迟统计_只在测试模式(self):
+        """⚠️ 变异验证：把 `streamq.set_stats(...)` 那三行删掉 → 红（`②` 永远采不到）。"""
+        src = _run_src()
+        self.assertIn("streamq.set_stats(tester.note_streamq_dwell)", src)
+
+    def test_overlay四个采集钩子都接了(self):
+        """⚠️ 变异验证：少接一个（比如漏 `on_view`）→ 对应那条红（那格永远空）。"""
+        run = _run_src()
+        for kw in ("on_vis=tester.on_vis", "on_wait=tester.add_wait",
+                   "on_view=tester.note_view", "on_power_event=tester.note_event"):
+            self.assertIn(kw, run, f"`_load_overlay(...)` 没接 {kw}")
+
+    def test_收尾写了energy与capture块(self):
+        run = _run_src()
+        self.assertIn("note_block('energy'", run)
+        self.assertIn("note_block('capture'", run)
+
+    def test_合并与补译的原文接了(self):
+        self.assertIn("tester.note_merge_item",
+                      ast.unparse(_func("drain")), "drain 的 replace 分支没记合并原文")
+        self.assertIn("tester.note_backfill_items",
+                      ast.unparse(_func("_backfill_for")), "补译原文没记")
+
+    def test_定稿翻译的idle_before_ms接了(self):
+        self.assertIn("_tr_idle.append(_idle_ms)", ast.unparse(_func("_emit")))
+        self.assertIn("idle_before_ms=", ast.unparse(_func("drain")))
+
 
 class ReportBlockNames(unittest.TestCase):
     def test_ui块里那几格能写进去(self):

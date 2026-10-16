@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import pathlib
 import sys
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
@@ -637,6 +638,171 @@ def main() -> int:
               "自动上传" in _txt and "CLASSLIVE_UPLOAD=0" in _txt and "发出去之前" not in _txt)
     finally:
         shutil.rmtree(_d6, ignore_errors=True)
+
+    print("\n--- T17 ⭐⭐ ③ 跨段合并原文：成功一次 + 失败一次，两条都在 ---")
+    # ⚠️ 变异验证：把 `note_merge_item` 里 `if len(...) >= TEXT_ITEMS_MAX: return` 那行
+    #    删掉（不封顶）→ 下面「超上限截断」那条红；把 `replaced` 写成恒 True →
+    #    「失败那条 replaced=False」红。
+    _d7 = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_mg_"))
+    try:
+        _t17 = tm.TestSession(_d7 / "m.md")
+        _ok_job = {"i": 3, "j": 4, "gap_s": 0.812, "trigger": "both",
+                   "tail_en": "The gradient is", "tail_zh": "梯度是",
+                   "next_en": "positive here.", "next_zh": "这里为正。"}
+        _bad_job = {"i": 9, "j": 10, "gap_s": 1.24, "trigger": "asr",
+                    "tail_en": "It follows that", "tail_zh": "由此推出",
+                    "next_en": "", "next_zh": ""}
+        _t17.note_merge_item(_ok_job, "The gradient is positive here.",
+                             "梯度这里为正。", True)
+        _t17.note_merge_item(_bad_job, "", "", False)     # 重翻失败那条
+        _rep17 = json.loads(pathlib.Path(_t17.finish(bundle=False)).read_text(encoding="utf-8"))
+        _it = _rep17["blocks"]["merge"]["items"]
+        check("⭐⭐ 一次成功 + 一次失败 → items 两条、`replaced` 一真一假",
+              len(_it) == 2 and _it[0]["replaced"] is True
+              and _it[1]["replaced"] is False, str([x["replaced"] for x in _it]))
+        check("⭐ 重翻失败那条 `merged_*` 是空串（不是缺键、不是 null）",
+              _it[1]["merged_en"] == "" and _it[1]["merged_zh"] == "",
+              f"{_it[1]['merged_en']!r} / {_it[1]['merged_zh']!r}")
+        check("⭐ 尾句 / 首句**两边的原文都留了**（只留合并结果就问不出「翻得好不好」）",
+              _it[0]["tail_en"] == "The gradient is" and _it[0]["next_zh"] == "这里为正。"
+              and _it[0]["trigger"] == "both" and abs(_it[0]["gap_s"] - 0.812) < 1e-6,
+              str({k: _it[0][k] for k in ("tail_en", "next_zh", "trigger", "gap_s")}))
+        for _ in range(305):                              # 超上限
+            _t17.note_merge_item(_ok_job, "x", "y", True)
+        check(f"⭐⭐ 超上限截断到 {tm.TEXT_ITEMS_MAX} 条",
+              len(_t17._merge_items) == tm.TEXT_ITEMS_MAX,
+              f"{len(_t17._merge_items)} 条")
+    finally:
+        shutil.rmtree(_d7, ignore_errors=True)
+
+    print("\n--- T18 ⭐ ③ 课后补译原文：只记真补出来的那几句 ---")
+    _d8 = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_bf_"))
+    try:
+        _t18 = tm.TestSession(_d8 / "b.md")
+        _t18.note_block("backfill", {"need": 3, "done": 2})
+        _t18.note_backfill_items([{"en": "The gradient is positive.",
+                                   "zh": "梯度为正。"},
+                                  {"en": "", "zh": "只有中文那句。"}])
+        _rep18 = json.loads(pathlib.Path(_t18.finish(bundle=False)).read_text(encoding="utf-8"))
+        _bf = _rep18["blocks"]["backfill"]
+        check("⭐⭐ 计数（need/done）与 items 同时在里面（不是二选一）",
+              _bf["need"] == 3 and _bf["done"] == 2 and len(_bf["items"]) == 2, str(_bf))
+        check("⭐ 每条是 `{en, zh}`（空 en 也如实留着 —— 那是「没补出英文」的真话）",
+              _bf["items"][1] == {"en": "", "zh": "只有中文那句。"}, str(_bf["items"]))
+        check("⭐ 没补过 → items 是空表（不是缺键）",
+              tm.TestSession(_d8 / "b2.md").finish(bundle=False) and
+              json.loads(pathlib.Path(str(_d8 / "b2")).with_suffix(".report.json")
+                         .read_text(encoding="utf-8"))["blocks"]["backfill"]["items"] == [])
+    finally:
+        shutil.rmtree(_d8, ignore_errors=True)
+
+    print("\n--- T19 ⭐⭐ ④ 收音断档：伪造墙钟制造 3 s 空洞 ---")
+    # ⚠️ 变异验证：把 `note_chunk` 里那行 `self._capture_tick(self._wall())` 删掉 →
+    #    gaps 恒 0 → 第一条红；把 `time.time` 换成 `time.monotonic`（睡眠不走）→
+    #    真机上这条抓不出断档（判据注入的正是墙钟）。
+    _d9 = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_cap_"))
+    try:
+        _clk = [100.0]
+        _t19 = tm.TestSession(_d9 / "c.md", wall_clock=lambda: _clk[0])
+        _blk = np.zeros(1, dtype=np.float32)
+        _t19.note_chunk(_blk)                       # 第一块 @100.0
+        _clk[0] = 103.0
+        _t19.note_chunk(_blk)                       # +3.0 s → 一次断档
+        _cb = _t19.capture_block()
+        _g = _cb.get("gaps") or {}
+        _gi = _g.get("items") or []
+        check("⭐⭐ 一个 3 s 断档 → 恰好 1 条断档、明细 1 条（`gaps` 键必须在）",
+              _g.get("n") == 1 and len(_gi) == 1, str(_cb))
+        check("⭐⭐ `gap_s`≈3、`t_wall_offset_s`≈3",
+              bool(_gi) and abs(_gi[0]["gap_s"] - 3.0) < 0.01
+              and abs(_gi[0]["t_wall_offset_s"] - 3.0) < 0.01, str(_gi))
+        check("⭐⭐ `deficit_s` ≈ 3（墙钟比实际音频长了 3 s）",
+              abs(_cb["deficit_s"] - 3.0) < 0.05, f"deficit={_cb['deficit_s']}")
+        check("⭐ 总时长 = 明细之和（超过 50 条只截明细，总数照样涨）",
+              abs(_g.get("total_s", -1) - 3.0) < 0.01, str(_g.get("total_s")))
+        check("⭐ 块里有 `available` / `wall_s` / `audio_s`",
+              _cb["available"] is True and _cb["wall_s"] == 3.0 and _cb["audio_s"] == 0.0,
+              str(_cb))
+        # 断档明细上限：60 次 1.5 s 空洞 → n=60，明细只留 50 条
+        _clk[0] = 104.0
+        for _ in range(60):
+            _clk[0] += 1.5
+            _t19.note_chunk(_blk)
+        _cb2 = _t19.capture_block()
+        _g2 = _cb2.get("gaps") or {}
+        check(f"⭐⭐ 明细封顶 {tm.CAPTURE_GAPS_MAX} 条，但**总数与总时长不封顶**",
+              _g2.get("n") == 61 and len(_g2.get("items") or []) == tm.CAPTURE_GAPS_MAX
+              and _g2.get("total_s", 0) > 90.0,
+              f"n={_g2.get('n')} items={len(_g2.get('items') or [])} "
+              f"total={_g2.get('total_s')}")
+        check("⭐ 一块音频都没收到 → `available: false`（不是一堆零）",
+              tm.TestSession(_d9 / "c2.md").capture_block()["available"] is False)
+    finally:
+        shutil.rmtree(_d9, ignore_errors=True)
+
+    print("\n--- T20 ⭐ ⑤ 字幕视图：按时间加权 + 面板宽 p50 ---")
+    _d10 = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_view_"))
+    try:
+        _t20 = tm.TestSession(_d10 / "v.md")
+        _t20.note_view(4, 3, 720.0)
+        time.sleep(0.06)
+        _t20.note_view(5, 2, 800.0)
+        time.sleep(0.15)
+        _t20.on_vis(False)                          # 不可见 → 收口（不记进任何档位）
+        time.sleep(0.15)
+        _rep20 = json.loads(pathlib.Path(_t20.finish(bundle=False)).read_text(encoding="utf-8"))
+        _v = _rep20["blocks"]["ui"]["view"]
+        check("⭐⭐ 各档行数都记了秒数（4 行档 ≈ 0.06 s）",
+              "4" in _v["rows_s"] and "5" in _v["rows_s"]
+              and _v["rows_s"]["4"] >= 0.05, str(_v["rows_s"]))
+        check("⭐ 档位行数（中文 2/3 行）也各有一格",
+              "3" in _v["lines_s"] and "2" in _v["lines_s"], str(_v["lines_s"]))
+        check("⭐⭐ 面板宽 p50 = median(720, 800) = 760（两次采样都在）",
+              _v["width_p50"] == 760.0 and _v["samples"] == 2, str(_v))
+        check("⭐⭐ 不可见那一段**没有**算进任何档位（收口之后不再累加）",
+              _v["rows_s"]["5"] < 0.22, str(_v["rows_s"]))
+    finally:
+        shutil.rmtree(_d10, ignore_errors=True)
+
+    print("\n--- T21 ⭐⭐ ⑦ 一份完整 finish 的报告：新字段全在、json 不炸、无 bad_block ---")
+    _d11 = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_full_"))
+    try:
+        _t21 = tm.TestSession(_d11 / "full.md", wall_clock=time.time)
+        _t21.note_chunk(np.zeros(tm.SR // 10, dtype=np.float32))
+        _t21.note_translate(120.0, 200.0, 1500.0, "local", idle_before_ms=3000.0)
+        _t21.note_streamq_dwell(18.0)
+        _t21.note_view(4, 3, 720.0)
+        _t21.note_ui("outline")
+        _t21.note_merge_item({"gap_s": 0.5, "trigger": "both", "tail_en": "a",
+                              "tail_zh": "甲", "next_en": "b", "next_zh": "乙"},
+                             "a b", "甲乙", True)
+        _t21.note_backfill_items([{"en": "x", "zh": "X"}])
+        _t21.note_block("merge", {"triggered": 1, "replaced": 1, "failed": 0})
+        _t21.note_block("backfill", {"need": 1, "done": 1})
+        _t21.note_block("energy", _t21.energy_block(120.0))
+        _t21.note_block("capture", _t21.capture_block())
+        _rep21 = json.loads(pathlib.Path(_t21.finish(bundle=False)).read_text(encoding="utf-8"))
+        check("⭐⭐ 六个新格全在：energy / capture / merge.items / backfill.items / "
+              "ui.view / ui.streamq_dwell_ms / translation_latency.by_idle",
+              all([
+                  "energy" in _rep21["blocks"], "capture" in _rep21["blocks"],
+                  "items" in _rep21["blocks"]["merge"],
+                  "items" in _rep21["blocks"]["backfill"],
+                  "view" in _rep21["blocks"]["ui"],
+                  "streamq_dwell_ms" in _rep21["blocks"]["ui"],
+                  "by_idle" in _rep21["translation_latency"]]),
+              str(sorted(_rep21["blocks"])))
+        check("⭐⭐ `blocks` 里**没有** `bad_block`（名字都登记过）",
+              not [e for e in _rep21["events"] if e["kind"] == "bad_block"],
+              str([e for e in _rep21["events"] if e["kind"] == "bad_block"]))
+        check("⭐ `collector_errors` 为空（这次采集一条异常都没有）",
+              _rep21["collector_errors"] == {}, str(_rep21["collector_errors"]))
+        check("⭐⭐ 整份报告 `json.dumps` 不炸（含 numpy 数）",
+              bool(json.dumps(_rep21, ensure_ascii=False)), "ok")
+        check("⭐ `block_names` 里有 energy / capture（该有哪几块的清单）",
+              {"energy", "capture"} <= set(_rep21["block_names"]), str(_rep21["block_names"]))
+    finally:
+        shutil.rmtree(_d11, ignore_errors=True)
 
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)

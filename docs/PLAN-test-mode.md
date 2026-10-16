@@ -611,3 +611,90 @@ HINT_W = WIDTH - 2*PAD - (CARD_PAD + PICK_W + 8.0 + ADD_W + 16.0)
 `entry_launch` 真落盘 + 下次读得回 · **沙盒里真跑 `cl`** 看 `main.py` 拿到的参数
 （开关=1 带旗标 / 0 不带 / 无文件不带 / `file` 回放不带）。
 
+---
+
+## 14. ⭐ 3.9.8 新增采集（六组）
+
+背景：3.9.7 落了一批省电改动（pump 分四档、窗口不可见停渲染、`_WakeQueue` 立刻叫醒、
+定稿 60 s 长连接、跨段半句合并、课后补译、`--record-float`），但**真机上量不出来** ——
+报告里只有「不可见多少秒」+ 几个计数，答不了下面的问题。这一轮补的六格全进
+`report.json`（服务器只收 `report.json` / `.md` / 录音三个名字，`NAME_OK` 一个字没动）。
+
+| # | 问题（原文） | 采在哪 | 判据文件 |
+|---|---|---|---|
+| **①** | 3.9.7 的省电在真机上到底多少？只在隐藏时省吗？ | `blocks.energy`（新块，`energy.py`） | `tests/test_energy.py` |
+| **②** | 空闲档 0.1 s / 隐藏档 0.25 s 有没有把字幕上屏拖慢？ | `blocks.ui.streamq_dwell_ms` | `tests/test_energy.py` |
+| **③** | 跨段合并、课后补译翻得好不好？ | `blocks.merge.items` / `blocks.backfill.items` | `tests/test_testmode.py` T17/T18 |
+| **④** | 加了防空闲睡眠，还会不会「中间几十分钟没声音」？ | `blocks.capture` + `events` 睡眠唤醒 | `tests/test_testmode.py` T19 |
+| **⑤** | 字幕一屏能看几行、每行停多久，够不够读完？ | `blocks.ui.view` | `tests/test_testmode.py` T20 |
+| **⑥** | 60 s 长连接保活在真课上有没有省下首字延迟？ | `translation_latency.by_idle` | `tests/test_tr_latency.py` |
+
+### 14.1 形状（一份，带假数值）
+
+```json
+"blocks": {
+  "energy": {
+    "available": true, "power_plugged_start": true, "power_plugged_end": false,
+    "screen_hz": 120.0, "wall_s": 3600.0, "cpu_s": 41.2,
+    "billed_energy_j": 96.4, "interrupt_wkups": 32387, "pkg_idle_wkups": 0,
+    "rusage_start": {"energy_nj": 120000, "interrupt_wkups": 1000, "pkg_idle_wkups": 0,
+                     "user_s": 12.0, "system_s": 4.0, "cpu_s": 16.0},
+    "rusage_end":   {"energy_nj": 96500000, "interrupt_wkups": 33387, "pkg_idle_wkups": 0,
+                     "user_s": 44.0, "system_s": 13.2, "cpu_s": 57.2},
+    "visible": {"energy_j": 80.0, "wkups": 31000, "cpu_s": 36.0, "wall_s": 1200.0, "mean_w": 0.067},
+    "hidden":  {"energy_j": 16.4, "wkups": 1387, "cpu_s": 5.2, "wall_s": 2400.0, "mean_w": 0.007},
+    "pump_s": {"gesture": 12.0, "hot": 300.0, "idle": 3150.0, "hidden": 138.0}
+  },
+  "capture": {
+    "available": true, "wall_s": 3610.0, "audio_s": 3540.0, "deficit_s": 70.0,
+    "gaps": {"n": 2, "total_s": 12.4, "items": [{"t_wall_offset_s": 1830.0, "gap_s": 9.1}]},
+    "first_block_epoch": 1792153000.0, "last_block_epoch": 1792156610.0
+  },
+  "merge": {"triggered": 12, "replaced": 10, "failed": 2,
+            "items": [{"t": 1830.12, "gap_s": 0.81, "trigger": "both",
+                       "tail_en": "The gradient is", "tail_zh": "梯度是",
+                       "next_en": "positive here.", "next_zh": "这里为正。",
+                       "merged_en": "The gradient is positive here.",
+                       "merged_zh": "梯度这里为正。", "replaced": true}]},
+  "backfill": {"need": 4, "done": 3,
+               "items": [{"en": "The gradient is positive.", "zh": "梯度为正。"}]},
+  "ui": {"outline": 2,
+         "streamq_dwell_ms": {"n": 4211, "p50": 21.0, "p90": 96.0, "p99": 180.0, "max": 240.1},
+         "view": {"samples": 1180, "rows_s": {"3": 200.0, "4": 980.0},
+                  "lines_s": {"2": 300.0, "3": 880.0}, "width_p50": 720.0}}
+},
+"translation_latency": {"n": 210, "by_idle": {"lt7s": {"p50": 210.0, "p90": 480.0},
+                                              "ge7s": {"p50": 260.0, "p90": 610.0}}}
+```
+
+### 14.2 三个「诚实前提」（别拿它们编结论）
+
+1. ⚠️⚠️ **`ri_billed_energy` 在真机上可能一动不动**。实测（2026-10-16，本机）0.8 s 忙循环：
+   `ri_user_time` 涨 0.79 s、`ri_billed_energy` **一个都不涨**（`interrupt_wkups` / `pkg_idle_wkups`
+   同样恒 0）。所以判据只要求各计数器**单调不减**，CPU 秒另拿 `resource.getrusage` **对拍**
+   钉住「字段偏移 + mach→秒」没错位 —— 拿"能量必须涨"当判据会在这种机器上假红。
+2. ⚠️ **`deficit_s` ≠ 一定是断档**：`--speed≠1` 的文件回放、合成语料都会把它推大。
+   判据看的是 `gaps.items`（相邻两块音频的**墙钟**间隔 > 1.0 s），不是那个差值本身。
+3. ⚠️ `by_idle` 里的 `zh_first_ms` 是**同一批句子的两种分层**，不是 A/B 实验：长连接那
+   `lt7s` 桶天然含「刚翻过、上下文也热」的句子，`ge7s` 桶含「隔了很久、可能冷连接」的句子。
+   真要归因得看 `docs/experiments/` 里的对照，别拿一节课的两个桶当因果。
+
+### 14.3 四条实现纪律（照仓库既有的）
+
+1. ⚠️ **overlay 绝不 import testmode**：①④⑤ 全部走 `main` 注入的回调
+   （`on_vis` / `on_wait` / `on_view` / `on_power_event`），与 `note` 同一套 —— 默认 `None`，
+   `tester is None` 时**一次调用都没有**（`is not None` 守门，不是空 lambda）。
+2. ⚠️ **不改 `streamq` 的 tag 与 item 形状**（R28）：② 的时间戳放在**与队列同序的平行 deque**
+   里，`put` / `get_nowait` 在**同一把锁**里成对进出；没装 stats = 连 deque 都不建。
+3. ⚠️ **不改 `tr_latency` 的 4 元组**（`.live.jsonl` 逐行格式冻着）：⑥ 的 `idle_before_ms`
+   走 `main` 里一条 FIFO（`_tr_idle`），落进 `testmode` 的行里，只在 `report.json` 出现。
+4. ⚠️ **不许新开文件进上传清单**：服务器只认 `report.json` / `.md` / 录音，所以六格
+   **一律写进 `report.json`**（新块要在 `testmode.BLOCKS` 登记；③⑤ 落进已有的
+   `merge` / `backfill` / `ui` 块）。`blocks` 里出现 `bad_block` = 有名字没登记。
+
+### 14.4 判据（全部做了变异验证）
+
+`tests/test_energy.py` 38 条（① ②）+ `tests/test_testmode.py` T17–T21（③④⑤⑦）+
+`tests/test_tr_latency.py` 3 条（⑥）+ `tests/test_pump_idle.py` Wiring 6 条（接线）。
+每条「改坏什么 → 红在哪」写在测试的注释里；`./ClassLive.app/Contents/MacOS/python scripts/check.py --changed` 全绿。
+

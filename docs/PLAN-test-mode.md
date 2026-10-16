@@ -69,7 +69,7 @@
 | 理由 | 出处 |
 |---|---|
 | ⚠️ **HIG 自己说系统控件与 HUD 不搭** —— 逐字：「use a HUD only ... **When you don't need to include controls** — with the exception of the disclosure triangle, **most system-provided controls don't match a HUD's appearance**」 | 本仓 `docs/RESEARCH-macos-aesthetic.md §0` **引的是一手 HIG**。而**勾选框正是** system-provided control |
-| **面板上所有元素都是无边框的** —— 顶栏 🌐/❓/字幕/双语/✕、卡片上每个可点的、就绪条，**清一色无边框 `NSButton`**。勾选框自带 bezel + 焦点环 + 系统蓝 | `make_ready_strip` / `entry_panel._make_card` 的既有做法 |
+| **面板上所有元素都是无边框的** —— 顶栏 🌐/❓/字幕/双语/✕、卡片上每个可点的、就绪那一格，**清一色无边框 `NSButton`**。勾选框自带 bezel + 焦点环 + 系统蓝 | `entry_panel._make_card` 的既有做法（当时的 `make_ready_strip` 已随 `PLAN-396` §1 删掉） |
 | **全仓零先例** —— `setState_` 只出现过一次，是 `NSVisualEffectStateActive`（材质），与控件无关 | 现查 |
 | ⚠️ **会多一条 HIG 偏离** —— 美学文档 §0 已经在数「我们违反了 HIG Panels 几条」并逐条写明理由。再加一条要有更好的理由，而这里没有 | 同上 |
 

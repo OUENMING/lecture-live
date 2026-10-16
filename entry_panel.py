@@ -137,26 +137,79 @@ ADD_REPLY_Y = ADD_ROW_Y - 3.0 - 17.0     # 反馈那一行（`plan_add` 的 `tex
 HINT_W = WIDTH - 2 * PAD - (CARD_PAD + PICK_W + 8.0 + ADD_W + 16.0)
 #: 退回老位置（开关在落点条上）时的提示宽 —— 右边多让一颗开关。
 HINT_W_TIGHT = HINT_W - (TEST_W + 8.0)
-#: 就绪条上「状态项」与「测试模式」之间那道细竖线（状态 ≠ 设置，分开看）
-READY_RULE_H = 14.0
+# ── 就绪胶囊（2026-10-16，`docs/PLAN-396.md` §1）──────────────────
+# ⭐ 原来**单占一行**的那条就绪条（`READY_H` = 40pt）并进标题行 —— 面板直接矮一行。
+#    标题 2026-10-14 改名「烤菠萝」之后那行左轻右重（43pt vs 搜索框 218pt），
+#    这颗胶囊正好补上搜索框左边的空当。
+CHIP_H = 22.0          # 胶囊高（与搜索框同一行）
+CHIP_PAD = 10.0        # 胶囊内左右留白
+CHIP_GAP = 10.0        # 标题 ↔ 胶囊
+CHIP_MIN_W = 56.0      # 再怎么裁也不许比它窄（再窄就只剩「… ▾」了）
+#: 「点开有菜单」的尾巴。⚠️ 它是**形状**不是 emoji（同 `_MARK` 那条 HIG）。
+CHIP_TAIL = "  ▾"
 
 
-def test_mode_fits_ready(right_edge: float, box_w: float, toggle_w: float) -> bool:
-    """纯函数：测试模式开关接在就绪条最后一项（右沿 `right_edge`）后面放不放得下。
+def ready_item_bad(it: dict) -> bool:
+    """这一项算不算「要处理」。**纯函数**。
 
-    ⚠️ 新用户那一档放不下（「语音模型 缺 2 件，约 640.61 MB」这类长状态，10-13 实测右沿超 66pt）——
-       放不下就退回落点条的老位置，**不许**挤出条外被裁掉。
+    ⚠️ **不许只看 `state`**：`models` 齐了但缺草稿模型时 `state` 是 `ok`，
+       而那时点击**是有动作的**（再下 464 MB）—— 胶囊写「已就绪」就是撒谎。
+    ⚠️ `unknown` 也算（麦克风查不到 / 笔记库未设 / 翻译引擎没配 key）：它们是**入口**，
+       不进这一档用户就没地方点（`_CHIP_VERB` 那个动词说清了点它会干嘛）。
     """
-    return right_edge + READY_ITEM_GAP + toggle_w <= box_w - READY_PAD
+    return it.get("state") != "ok" or bool(it.get("offer_draft"))
 
-# ── 就绪条（2026-09-28）──────────────────────────────────────────────
-# 插在标题行与卡片区之间。**高度算在 `build()` 那条从下往上的推法里**，
-# 与视图的 y 用同一组常数（`card_height` 那条纪律）。
-READY_H = 40.0
-READY_GAP = 0.0        # 就绪条 ↔ 标题（无底框后条内上下各 9pt 已够；原 10）
-READY_ITEM_GAP = 16.0  # 项与项之间
-READY_PAD = 12.0       # 条内左右留白
-READY_X0 = -5.0        # 第一项的 x：无底框后让「✓」与标题左缘对齐（实测定）
+
+#: 只有一项不正常时，胶囊在它后面补的那个动词 = 点了会干嘛。
+#: ⚠️ 没动词的（比如「更新」）就只写状态，别硬编一个动词出来。
+_CHIP_VERB = {"mic": "去设置", "models": "下载", "engine": "填 key", "vault": "选文件夹"}
+
+
+def ready_chip(items: list) -> tuple:
+    """标题行那颗胶囊此刻写什么。**纯函数** → `(文字, 形态, 那一项的 key)`。
+
+    形态三档（`PLAN-396` §1）：
+      `ok`   全都正常 → 「✓  已就绪」（点开 = 菜单）
+      `one`  **只有一项**要处理 → 直接写那一项 +「· 点了会干嘛」（点一下就修，**不开菜单**）
+      `many` 两项及以上 → 「N 项要处理」（点开 = 菜单，菜单里逐项）
+    ⚠️ **不用颜色表达状态** —— 三档全靠文字与 `CHIP_TAIL` 那个 ▾ 区分
+       （同 `ready_item_text` 上方那条 HIG：形状 + 文字，不只靠颜色）。
+    """
+    bad = [it for it in items if ready_item_bad(it)]
+    if not bad:
+        return ("✓  已就绪", "ok", "")
+    if len(bad) == 1:
+        it = bad[0]
+        text = ready_item_text(it)
+        verb = _CHIP_VERB.get(it.get("key", ""), "")
+        # ⚠️ 「下载中…」不许再挂一个「· 下载」—— 那是在教用户去点一个正在跑的东西。
+        if verb and it.get("state") != "busy":
+            text = f"{text}  ·  {verb}"
+        return (text, "one", it.get("key", ""))
+    return (f"{len(bad)} 项要处理", "many", "")
+
+
+def chip_fit(text: str, tail: str, max_w: float, measure) -> str:
+    """把胶囊文字裁进 `max_w`：超了就逐字去尾加「…」。**纯函数**。
+
+    `measure(s) -> 宽度`（判据拿个假 measure 就能盖，不用起窗口）。
+    ⚠️⚠️ `tail`（「  ▾」）**永远保留** —— 它是「点开有东西」的**唯一**提示，
+       裁掉它就得到一个看着不能点的胶囊。这就是「窄面板下也放得下」的实现：
+       挤的是文字，不是那颗 ▾，更**不是**旁边的搜索框。
+    """
+    if measure(text + tail) <= max_w:
+        return text + tail
+    head = text
+    while head and measure(head + "…" + tail) > max_w:
+        head = head[:-1]
+    return head + "…" + tail
+
+
+def text_width(s: str, font) -> float:
+    """一段字在 `font` 下量出来多宽（胶囊排版用）。"""
+    from AppKit import NSAttributedString, NSFontAttributeName
+    return float(NSAttributedString.alloc().initWithString_attributes_(
+        s, {NSFontAttributeName: font}).size().width)
 
 # ⚠️⚠️ **状态一律「形状 + 文字」，不许只靠颜色** ——
 #    `[一手]` HIG › Accessibility（2025-03-07）逐字：「**Offer visual indicators,
@@ -290,18 +343,28 @@ def test_mode_title(on: bool) -> str:
 
 
 #: 「云端转写」不再是落点条上的常驻开关（2026-10-12 Owen：默认就是开，不必摆一颗关的按钮），
-#: 收进「语音模型」那一格的菜单里 —— 要关的人点一下就找得到，不关的人看不见它。
+#: 2026-10-16 起它是**标题行胶囊菜单**顶层那颗勾选项（`PLAN-396` §1）—— 要关的人点一下就找得到。
+CLOUD_ASR_TITLE = "云端转写 · 英文更准"
 CLOUD_ASR_TIP = "音频片段会发给 Groq / 阿里云转写，换更准的英文；取消勾选 = 全本地"
 
 
-def models_menu(it: dict, *, cloud_on: bool, locked: bool, downloading: bool = False,
-                draft_mb: str = "") -> list[dict]:
-    """点「语音模型」那一格弹出的菜单。**纯函数**。
+def cloud_item(*, cloud_on: bool, locked: bool) -> dict:
+    """胶囊菜单顶层那颗「云端转写」勾选项。**纯函数**。
 
-    每项 `{key, title, checked, enabled}`；`key=None` = 分隔线。模型那一项在上（这一格本来就是管模型的，
-    缺模型时点它就是为了下），「云端转写」勾选项在下。
-    ⚠️ `locked`（`CLASSLIVE_CLOUD_ASR=0`）= 显示未勾、点不动，标题说清是谁关的 —— 不显示的话
-       用户找不到它、不知道为什么这次全本地（原开关的同一条，R7）。
+    ⚠️ `locked`（`CLASSLIVE_CLOUD_ASR=0`）= 显示未勾、点不动、**标题说清是谁关的** ——
+       不显示的话用户找不到它、也不知道为什么这次全本地（原开关的同一条，R7）。
+    """
+    return {"key": "cloud", "enabled": not locked,
+            "checked": bool(cloud_on) and not locked,
+            "title": ("云端转写（已被 CLASSLIVE_CLOUD_ASR=0 关闭）" if locked
+                      else CLOUD_ASR_TITLE)}
+
+
+def models_menu(it: dict, *, downloading: bool = False, draft_mb: str = "") -> list[dict]:
+    """「语音模型」那一行的**子菜单**（胶囊菜单里点开它）。**纯函数**。
+
+    每项 `{key, title, checked, enabled}`。⚠️ **「云端转写」不在这里了**（2026-10-16）——
+       它挪到胶囊菜单的顶层、和「测试模式」并排（`cloud_item`）。
     """
     if it.get("state") == "todo":
         first = {"key": "required", "title": "下载缺的模型", "enabled": not downloading}
@@ -312,10 +375,7 @@ def models_menu(it: dict, *, cloud_on: bool, locked: bool, downloading: bool = F
         first = {"key": "info", "title": "正在下载…", "enabled": False}
     else:
         first = {"key": "info", "title": "模型都已就绪", "enabled": False}
-    cloud = {"key": "cloud", "enabled": not locked, "checked": bool(cloud_on) and not locked,
-             "title": ("云端转写（已被 CLASSLIVE_CLOUD_ASR=0 关闭）" if locked
-                       else "云端转写 · 英文更准")}
-    return [{"checked": False, **first}, {"key": None}, cloud]
+    return [{"checked": False, **first}]
 
 
 def popup_menu(menu, view) -> None:
@@ -814,7 +874,7 @@ def _make_search_card(hits, *, width, open_idx=None, open_text=None,
 
     ⚠️ 排版一律**从顶部往下**（y 递减，卡片是非翻转坐标）—— 同 `_make_card`。
     ⚠️ `on_open` 给定时，命中那行的**正文变成按钮**（点它就地展开 / 收起原文）。
-       ⚠️ 无边框 `NSButton` 是本仓库既有的可点做法（`make_ready_strip` 同款），
+       ⚠️ 无边框 `NSButton` 是本仓库既有的可点做法（`_make_card` 同款），
           它自己接管点击 —— **不必碰 `mouseDownCanMoveWindow` 那个雷**。
        ⚠️ 回来的 target 必须由调用方持有（`setTarget_` 是**弱引用**）。
     """
@@ -1607,63 +1667,6 @@ def _ready_dismissed(state_root) -> bool:
         return False
 
 
-def make_ready_strip(parent, y: float, w: float, items: list, *, on_click):
-    """顶部就绪条 —— 「这台机器能不能上课」的三项。
-
-    ⚠️ **每一项自己就是一个按钮**（无边框 `NSButton`），点了就地修那一项。
-       不做「图标 + 分开的小按钮」：那会让一行里出现两种可点目标，而
-       `[一手]` HIG › Feedback 那条要的是「状态就在它所描述的东西旁边」——
-       一项一句话、点它就有动作，最直白。
-
-    ⚠️ **宽度按实测文字定**（`sizeToFit()`），不写死 —— 三项的中文长短差很多，
-       写死就会有一项被截断（`NSTextField` 超限**不报错也不省略号**）。
-
-    ⚠️ 返回的 target 列表**必须由调用方持有** —— `setTarget_` 是弱引用，
-       被 GC 掉就是「点了没反应，也不报错」。
-
-    ⚠️ 只画**状态**，不画假进度条：见 `ready_short` 里那条 HIG 引用。
-    """
-    from AppKit import NSButton, NSColor, NSFont, NSMakeRect, NSView
-
-    # ⚠️ **不画底框**（2026-10-14）：它是标题下面的一行状态，不是第五张卡 —— 带框时和课程卡
-    #    同一档填充 / 描边，读起来像「也能选中」。同 4a89aad 更新卡去掉内嵌底框（Apple「Adopting
-    #    Liquid Glass」：少做自定义底色）。容器视图留着：测试模式开关和细竖线挂在它上面。
-    box = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, w, READY_H))
-
-    targets: list = []
-    buttons: dict = {}                                 # key -> NSButton（下载完改它的标题）
-    x = READY_X0
-    btn_h = 22.0
-    for it in items:
-        b = NSButton.alloc().initWithFrame_(
-            NSMakeRect(x, (READY_H - btn_h) / 2.0, 10.0, btn_h))
-        b.setTitle_(ready_item_text(it))
-        b.setBordered_(False)
-        b.setFont_(NSFont.systemFontOfSize_(12.0))
-        try:
-            # ⚠️ **不是靠颜色区分状态** —— 颜色只是让"已就绪"那项稍微亮一点，
-            #    真正的区分在 `ready_item_text` 那个形状标记和状态词上（HIG a11y）。
-            b.setContentTintColor_(NSColor.whiteColor().colorWithAlphaComponent_(
-                0.92 if it.get("state") == "ok" else 0.80))
-        except Exception:                                  # noqa: BLE001
-            pass
-        t = _target(lambda k=it.get("key"): on_click(k))
-        targets.append(t)
-        b.setTarget_(t)
-        b.setAction_("act:")
-        b.sizeToFit()                                      # 宽度按实测文字
-        b.setFrame_(NSMakeRect(x, (READY_H - btn_h) / 2.0,
-                               b.frame().size.width + 8.0, btn_h))
-        box.addSubview_(b)
-        buttons[it.get("key")] = b
-        x += b.frame().size.width + READY_ITEM_GAP
-
-    parent.addSubview_(box)
-    # ⚠️ 按钮也返回 —— 下载完要**就地改那一个的标题**，而不是整块重建
-    #    （重建会连带把滚动位置和焦点都抖一下）。
-    return targets, buttons
-
-
 def pick_folder(*, start: str | None = None, message: str = "") -> str | None:
     """弹系统「选文件夹」框 → 选中的路径；取消 / 弹不出来 → `None`。
 
@@ -1864,7 +1867,6 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    （其中 Qwen3 那条走 HF cache 的 `try_to_load_from_cache`，占大头）。
     #    面板打开不是一个热路径，先同步算；真变慢了再说（见 `ready.model_states`）。
     ready_items = []
-    ready_targets: list = []
     vault_auto_msg = ""
     if not _ready_dismissed(state_root):
         try:
@@ -1878,17 +1880,16 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 draft_wanted=_draft_wanted())
         except Exception:                                  # noqa: BLE001
             ready_items = []                               # 算不出来不该拦住面板
-    rh = READY_H if ready_items else 0.0
-    rg = READY_GAP if ready_items else 0.0
 
-    # ⚠️ 高度**从下往上推**：页脚 → 落点条 → 滚动区 → 就绪条 → 标题。改任何一条边距时，
+    # ⚠️ 高度**从下往上推**：页脚 → 落点条 → 滚动区 → 标题。改任何一条边距时，
     #    `h` 与视图的 y **用的是同一组常数**，不是各写一遍（`card_height` 那条纪律）。
+    # ⭐ 2026-10-16（`PLAN-396` §1）：就绪那一格并进标题行，这里**不再有它就绪条那一行**的
+    #    高度（原来 `READY_H` = 40pt）。就绪项没算出来时也走这条 —— 与改前逐点相同。
     drop_y = PAD + FOOT_H + DROP_GAP
     sc_y = drop_y + DROP_H + DROP_GAP
-    body_h = fit_body(body_h, sc_y + 8.0 + rh + rg + TITLE_H + PAD,
+    body_h = fit_body(body_h, sc_y + 8.0 + TITLE_H + PAD,
                       _vis.size.height, _card_h)
-    ready_y = sc_y + body_h + 8.0                          # 就绪条的底边
-    h = ready_y + rh + rg + TITLE_H + PAD
+    h = sc_y + body_h + 8.0 + TITLE_H + PAD
 
     mask = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
     fp = panel.build(NSMakeRect(0.0, 0.0, WIDTH, h), mask)
@@ -1962,34 +1963,88 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     search_field.setSendsWholeSearchString_(True)   # 回车才发，别边打边搜
     ve.addSubview_(search_field)
 
-    # ── 就绪条（2026-09-28）──────────────────────────────────────────
+    # ── 就绪胶囊（2026-09-28 起是就绪条；2026-10-16 并进标题行）──────────
     # `[一手]` HIG › Feedback 逐字：「Consider integrating status feedback into your
     # interface. When status feedback is available **near the items it describes**,
     # people get important information without having to take action or leave their
-    # current context.」—— 这条就是它放在卡片区正上方、而不是弹一个向导的理由。
+    # current context.」—— 这条就是它贴着标题行、而不是弹一个向导的理由。
+    # ⭐ 形态见 `ready_chip`：全正常 =「✓ 已就绪 ▾」；只有一项 → 直接写那一项（点一下就修）；
+    #    两项及以上 →「N 项要处理 ▾」。
     ready_by_key: dict = {it.get("key"): it for it in ready_items}
-    # 云端转写的当前值（菜单在「语音模型」那一格里；`cloud_asr_locked` = 环境变量强制关）
+    # 云端转写的当前值（勾选项在胶囊菜单里；`cloud_asr_locked` = 环境变量强制关）
     ca_on = [bool(cloud_asr) and not cloud_asr_locked]
     if on_cloud_asr is not None and "models" in ready_by_key:
         ready_by_key["models"]["cloud_off"] = not ca_on[0]
-    ready_buttons: dict = {}          # key -> NSButton（下载完改它那一项的标题）
-    ready_targets: list = []          # ⚠️ 必须活到面板结束（`setTarget_` 是弱引用）
+    # ⚠️ 胶囊的把手。`btn` = `None` 表示这一档没有胶囊（就绪项没算出来）
+    #    —— 那时「测试模式」退回落点条（见那一段）。
+    chip: dict = {"btn": None, "kind": "ok", "key": "", "max_w": 0.0, "targets": []}
 
-    def _retitle(key: str, text: str) -> None:
-        b = ready_buttons.get(key)
-        if b is None:
+    # ── 测试模式开关（2026-09-30；2026-10-16 起 = 胶囊菜单里的勾选项）──────
+    # ⭐ 定义搬到这儿（原来在落点条那一段）：胶囊菜单要用它，而菜单可能在面板建好
+    #    之后**任何时候**被点开 —— 状态活在闭包里，进退两条路共用同一份。
+    # ⚠️ 状态**不进模块级的 `S`**：`S` 是跨面板共享的，而开关的初值每次都由调用方
+    #    从盘上读（`entry_launch.read_test_mode`）。
+    tm_on = [bool(test_mode)]
+    tm_holder: dict = {"btn": None}      # 退回落点条时的那颗按钮（就绪项没算出来那一档）
+
+    def toggle_test_mode() -> None:
+        """翻一次测试模式，**当场落盘**。
+
+        ⚠️ **失败要弹回原状** —— 盘上没写成就显示「开」，用户会以为在采集，
+           其实什么都没记。同 `.course` 那次事故的形状（2026-09-29，
+           `entry_launch` 的 `UNSAVED`）：**界面说的和盘上写的是两件事**。
+        ⚠️ 回调**同步调**：它只写一个几字节的文本文件，不碰视图树 ——
+           `_later` 那条纪律管的是「别在 action 里拆自己所在的视图」，这里不适用。
+        """
+        on = not tm_on[0]
+        ok = True
+        try:
+            ok = on_test_mode(on) is not False
+        except Exception:                                  # noqa: BLE001
+            ok = False
+        if not ok:
+            set_status("⚠ 测试模式没存下来（.test-mode 写不了）—— 这次不算数")
             return
-        b.setTitle_(text)
-        b.sizeToFit()
-        b.setFrame_(NSMakeRect(b.frame().origin.x, (READY_H - 22.0) / 2.0,
-                               b.frame().size.width + 8.0, 22.0))
+        tm_on[0] = on
+        b = tm_holder.get("btn")
+        if b is not None:
+            try:
+                b.setTitle_(test_mode_title(on))
+            except Exception:                              # noqa: BLE001
+                pass
+
+    def _refresh_chip() -> None:
+        """按 `ready_by_key` 现在这份重画胶囊。**每次状态变了就调它**（纯函数在 `ready_chip`）。
+
+        ⚠️ 状态只认 `ready_by_key` 这一份 —— 只改标题不改状态的话，下次点开菜单还按旧状态出项
+           （「更新」那格 2026-10-12 踩过的坑，同族）。
+        """
+        btn = chip.get("btn")
+        if btn is None:
+            return
+        text, kind, key = ready_chip(list(ready_by_key.values()))
+        chip["kind"], chip["key"] = kind, key
+        tail = "" if kind == "one" else CHIP_TAIL
+        # ⚠️ 裁字的上限要**先扣掉胶囊自己的左右留白** —— 否则量出来正好占满的标题，
+        #    加上留白之后比框宽 20pt，`NSCell` 会再裁一次，把尾巴那颗 ▾ 也吃掉。
+        title = chip_fit(text, tail, chip["max_w"] - 2 * CHIP_PAD,
+                         lambda s: text_width(s, btn.font()))
+        btn.setTitle_(title)
+        f = btn.frame()
+        w = min(text_width(title, btn.font()) + 2 * CHIP_PAD, chip["max_w"])
+        btn.setFrame_(NSMakeRect(f.origin.x, f.origin.y,
+                                 max(w, CHIP_MIN_W), CHIP_H))
+
+    def _set_item(key: str, it: dict) -> None:
+        """换掉某一项的状态并重画胶囊（主线程）。**改的是 `ready_by_key` 那份**。"""
+        ready_by_key[key] = it
+        _refresh_chip()
 
     def _set_models(**changes) -> None:
-        """改「语音模型」那一格的状态并重画标题（主线程）。⚠️ 改的是 `ready_by_key` 那份 ——
-        只换标题不换状态，下次点开的菜单还按旧状态出项（同「更新」那格 10-12 的坑）。"""
+        """改「语音模型」那一格的状态并重画胶囊（主线程）。"""
         it = ready_by_key.setdefault("models", {"key": "models"})
         it.update(changes)
-        _retitle("models", ready_item_text(it))
+        _refresh_chip()
 
     def _download_required() -> None:
         """把那三件必下的补齐。**在后台线程跑**，主线程只回写文字。
@@ -2092,9 +2147,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             lines.append(msg if okk else f"❌ {msg}")
             _later(_status, " · ".join(lines))
             if okk and keep_ds:
-                # 就绪条就地变「云端翻译」—— 不用重开面板
-                _later(_retitle, "engine", ready_item_text(
-                    {"key": "engine", "state": "ok", "detail": "云端翻译（推荐）"}))
+                # 胶囊就地变「云端翻译」—— 不用重开面板
+                _later(_set_item, "engine", {"key": "engine", "state": "ok",
+                                             "detail": "云端翻译（推荐）"})
         threading.Thread(target=work, daemon=True).start()
 
     def _open_vault_picker() -> None:
@@ -2137,7 +2192,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if not ok:
             _status("没记住（写盘失败）—— 这次先不生效，回头再试")
             return
-        _retitle("vault", ready_item_text(ready.vault_item(got)))
+        _set_item("vault", ready.vault_item(got))
         hint = ("" if (pathlib.Path(got) / ".obsidian").is_dir()
                 else "（没找到 .obsidian —— 笔记会写进它的 Lectures/）")
         _status(f"笔记库设好了：{got}{hint}")
@@ -2208,7 +2263,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
     def _run_update() -> None:
         S["updating"] = True
-        _retitle("update", ready_item_text({"key": "update", "state": "busy"}))
+        _set_item("update", {"key": "update", "state": "busy"})
         _status("正在更新 —— 别关面板，装好会自己重开")
 
         def work() -> None:
@@ -2231,7 +2286,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             return
         if item is not None:
             ready_by_key["update"] = item
-        _retitle("update", ready_item_text(ready_by_key.get("update") or {}))
+        _refresh_chip()
 
     def _toggle_cloud_asr() -> None:
         """菜单里点了「云端转写」：翻一次、当场落盘（`entry_launch` 写 `cloud-asr.json`）；写失败不翻。"""
@@ -2249,39 +2304,101 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _set_models(cloud_off=not on)
         _status("云端转写已开 —— 定稿英文更准" if on else "云端转写已关 —— 这台机器上全本地")
 
-    def _models_menu() -> None:
-        """点「语音模型」那一格：弹菜单（模型 / 云端转写）。⚠️ 主线程；菜单项 target 是弱引用 → 挂 `S`。"""
+    def _models_submenu(keep: list):
+        """「语音模型」那一行的子菜单 —— 模型的事（下载缺的 / 下载草稿）。
+
+        ⚠️ **「云端转写」不在这里**：它是胶囊菜单的**顶层勾选项**（`PLAN-396` §1），
+           和「测试模式」并排 —— 两个开关放一处，找起来只有一条路。
+        ⚠️ 没有可点项（都齐了 / 正在下）时**不给子菜单** —— 那一行自己就是状态。
+        """
         from AppKit import NSMenu, NSMenuItem
         import models as models_mod
-        b = ready_buttons.get("models")
-        if b is None:
-            return
-        acts = {"required": _download_required, "draft": _download_draft, "cloud": _toggle_cloud_asr}
-        menu = NSMenu.alloc().init()
-        menu.setAutoenablesItems_(False)
-        keep = []
-        for spec in models_menu(ready_by_key.get("models") or {}, cloud_on=ca_on[0],
-                                locked=cloud_asr_locked, downloading=bool(S.get("downloading")),
-                                draft_mb=ready._mb(models_mod.NEMOTRON.mb)):
-            if spec["key"] is None:
-                menu.addItem_(NSMenuItem.separatorItem())
-                continue
+        acts = {"required": _download_required, "draft": _download_draft}
+        specs = [s for s in models_menu(ready_by_key.get("models") or {},
+                                        downloading=bool(S.get("downloading")),
+                                        draft_mb=ready._mb(models_mod.NEMOTRON.mb))
+                 if s.get("key") in acts]
+        if not specs:
+            return None
+        sub = NSMenu.alloc().init()
+        sub.setAutoenablesItems_(False)
+        for spec in specs:
             mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(spec["title"], "act:", "")
             mi.setEnabled_(spec["enabled"])
-            mi.setState_(1 if spec.get("checked") else 0)
-            if spec["key"] == "cloud":
-                mi.setToolTip_(CLOUD_ASR_TIP)
             fn = acts.get(spec["key"])
             if fn is not None:
                 tg = _target(fn)
                 mi.setTarget_(tg)
                 keep.append(tg)
+            sub.addItem_(mi)
+        return sub
+
+    def _chip_menu() -> None:
+        """点胶囊：弹**原生 `NSMenu`** —— 每一项一行 + 分隔线 + 两个勾选项。**主线程**。
+
+        点哪一项就做它现在做的事（`on_ready_click` 原样复用 —— 那四条路一个都没重写）。
+        ⚠️ 菜单项的 target 是**弱引用**：不挂住就是「点了没反应，也不报错」→ 挂到 `S` 上。
+        """
+        from AppKit import NSMenu, NSMenuItem
+        b = chip.get("btn")
+        if b is None:
+            return
+        menu = NSMenu.alloc().init()
+        menu.setAutoenablesItems_(False)
+        keep: list = []
+        for it in list(ready_by_key.values()):
+            key = it.get("key", "")
+            mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                ready_item_text(it), "act:", "")
+            sub = _models_submenu(keep) if key == "models" else None
+            if sub is not None:
+                mi.setSubmenu_(sub)
+            elif key == "models":
+                mi.setEnabled_(False)          # 都齐了 / 正在下：这一行只是状态
+            else:
+                tg = _target(lambda k=key: on_ready_click(k))
+                mi.setTarget_(tg)
+                mi.setAction_("act:")
+                keep.append(tg)
             menu.addItem_(mi)
-        S["models_menu_targets"] = keep
+        menu.addItem_(NSMenuItem.separatorItem())
+        # ⭐ 两个勾选项（行为与改前那两颗开关**完全相同**：写失败都不翻、锁定时点不动）
+        if on_cloud_asr is not None:
+            spec = cloud_item(cloud_on=ca_on[0], locked=cloud_asr_locked)
+            ci = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                spec["title"], "act:", "")
+            ci.setState_(1 if spec["checked"] else 0)
+            ci.setEnabled_(spec["enabled"])
+            ci.setToolTip_(CLOUD_ASR_TIP)
+            tg = _target(_toggle_cloud_asr)
+            ci.setTarget_(tg)
+            keep.append(tg)
+            menu.addItem_(ci)
+        if on_test_mode is not None:
+            ti = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                test_mode_title(tm_on[0]), "act:", "")
+            ti.setState_(1 if tm_on[0] else 0)
+            tg = _target(toggle_test_mode)
+            ti.setTarget_(tg)
+            keep.append(tg)
+            menu.addItem_(ti)
+        S["chip_menu_targets"] = keep      # ⚠️ 弱引用：得活到菜单关掉之后
         popup_menu(menu, b)
 
+    def on_chip_click() -> None:
+        """点标题行那颗胶囊。**主线程**。
+
+        ⚠️ 形态**当场重算**（不是读建面板时那一份）—— 下载中途状态变了，
+           胶囊可能已经从「一项」变成「已就绪」，两条路的动作不一样。
+        """
+        _text, kind, key = ready_chip(list(ready_by_key.values()))
+        if kind == "one":
+            on_ready_click(key)            # 只有一项 → 点一下就修，**不弹菜单**
+        else:
+            _chip_menu()
+
     def on_ready_click(key: str) -> None:
-        """点就绪条上的某一项 —— 就地修那一项。
+        """修某一项 —— 胶囊自己（「只有一项」那一档）和菜单里的那一行都走这里。
 
         ⚠️ 这是 AppKit 主线程回调（按钮 action）：**只许置标志 / 起线程 / 打印**，
            不许在这儿联网、sleep、下载 —— 同 `overlay._ask` 上方那条纪律。
@@ -2297,8 +2414,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 pass
             _status("麦克风没问题就不用管它；被拒时点这里会打开系统设置")
         elif key == "models":
-            if on_cloud_asr is not None:
-                _models_menu()
+            # ⚠️ 2026-10-16：胶囊「只有一项」那一档点它就是**修它**（不是先弹菜单）——
+            #    菜单里模型那几项现在挂在胶囊菜单的「语音模型」子菜单上。
+            if ready_by_key.get("models", {}).get("state") == "todo":
+                _download_required()
             elif ready_by_key.get("models", {}).get("offer_draft"):
                 _download_draft()
             else:
@@ -2313,8 +2432,53 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             _open_vault_picker()
 
     if ready_items:
-        ready_targets, ready_buttons = make_ready_strip(
-            ve, ready_y, WIDTH - 2 * PAD, ready_items, on_click=on_ready_click)
+        # ── 标题行：就绪胶囊（`PLAN-396` §1）──────────────────────────
+        # ⚠️ x 由**实测的标题宽**推出来（标题旁边，不是固定坐标）—— 标题改字也不会压到它。
+        _probe_lbl = panel.make_label(PANEL_TITLE, NSMakeRect(0.0, 0.0, 10.0, 24.0),
+                                      15.0, bold=True)
+        _probe_lbl.sizeToFit()
+        chip_x = PAD + float(_probe_lbl.frame().size.width) + CHIP_GAP
+        # ⚠️ 右沿必须停在搜索框左边再留 10pt —— 胶囊再长也不许挤到搜索框上去
+        #    （`chip_fit` 就按这个上限裁）。
+        chip["max_w"] = max(CHIP_MIN_W,
+                            (PAD + WIDTH - 2 * PAD - SEARCH_W - 10.0) - chip_x)
+        _btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(chip_x, h - PAD - TITLE_H + 2.75, CHIP_MIN_W, CHIP_H))
+        _btn.setBordered_(False)
+        # ⚠️ **中性的胶囊**：一层很淡的白底 + 细描边。不画绿点/红点 ——
+        #    状态由文字与 ▾ 说（`ready_item_text` 上方那条 HIG）。
+        _btn.setWantsLayer_(True)
+        _btn.layer().setCornerRadius_(CHIP_H / 2.0)
+        _btn.layer().setBackgroundColor_(
+            NSColor.whiteColor().colorWithAlphaComponent_(CARD_FILL_A).CGColor())
+        _btn.layer().setBorderWidth_(HAIRLINE)
+        _btn.layer().setBorderColor_(
+            NSColor.whiteColor().colorWithAlphaComponent_(CARD_LINE_A).CGColor())
+        _btn.setFont_(NSFont.systemFontOfSize_(12.0))
+        try:
+            _btn.setContentTintColor_(NSColor.whiteColor().colorWithAlphaComponent_(0.92))
+            _btn.setAlignment_(1)                       # 居中
+            # ⚠️ 裁字正路是 `chip_fit`（判据盖得住）；这条只是 AppKit 侧的最后一道保险。
+            _btn.cell().setLineBreakMode_(4)            # NSLineBreakByTruncatingTail
+            _btn.cell().setTruncatesLastVisibleLine_(True)
+        except Exception:                               # noqa: BLE001
+            pass
+        chip["btn"] = _btn
+        _chip_t = _target(on_chip_click)
+        _btn.setTarget_(_chip_t)
+        _btn.setAction_("act:")
+        # ⚠️⚠️ target 必须**活到面板结束**：`setTarget_` 是弱引用，
+        #     挂在局部变量上 → `_build` 一返回就被回收 → **点了没反应，也不报错**
+        #     （2026-09-28 实测过同形的坑）。
+        # ⚠️⚠️ **别把 target 存进 `chip` 那个 dict**（`chip["targets"] = [...]`）：
+        #     那会造出一个 `target → _fn → 闭包 → chip → target` 的环，而环里有一个
+        #     PyObjC 实例 —— `gc` 穿不过它，于是**每次开面板漏一颗 target**
+        #     （2026-10-16 本机实测：`tests/test_panel.py` ⑧ 3 轮 4 颗 / 9 轮 13 颗）。
+        #     只挂 `S`（`do_close` 里有一个统一的断环表）就没有这个环。
+        S["chip_targets"] = [_chip_t]
+        ve.addSubview_(_btn)
+        _refresh_chip()
+
         if vault_auto_msg:
             # ⚠️ 走 `callAfter` 排队：这一行还在 `build()` 里跑，而 `S["panel"]`
             #    要到 build 返回前才挂上（`_status` 查的是"当前面板"）——
@@ -2324,15 +2488,6 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 AppHelper.callAfter(_status, vault_auto_msg)
             except Exception:                              # noqa: BLE001
                 pass
-        # ⚠️⚠️ **`make_ready_strip` 返回的 target 列表必须活到面板结束**
-        #     （它的 docstring 逐字写着这条）。原来只接到一个**局部变量**上 ——
-        #     `_build` 一返回那个列表就随栈帧没了 → 弱引用被回收 →
-        #     **整条就绪条点了没反应，也不报错**。
-        #     2026-09-28 本机实测：不挂容器时条上按钮 `target()` 就是 `None`，
-        #     而同屏的落点条按钮**全都正常**（它们的 `_targets` 挂在自己的视图上）。
-        #     ⚠️ 挂 `S` 上而不是挂视图：这些是标准 `NSView`/`NSButton`（没有 `__dict__`），
-        #     挂不上去；`S` 是模块级、且 `do_close` 里有一处统一的断环表。
-        S["ready_targets"] = ready_targets
 
     # ── 开课面板上的小卡（「已更新到 X」/「有新版本」/「草稿模型还没装」）──────────
     #    ⭐ 2026-10-14 作者定：三张卡同一个画法（`whatsnew.build`），**一次只出一张**，排队；
@@ -2486,48 +2641,24 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             over=win), preempt=("updated", "draft"))
 
     def _show_update(offer: dict, gen) -> None:
-        """后台查完新版本，回到主线程把「更新」那一格接到就绪条末尾。"""
+        """后台查完新版本，回到主线程把「更新」接进胶囊（它自己会写进那一行 / 菜单里）。
+
+        ⭐ 2026-10-16（`PLAN-396` §3 那格）：改前是**往就绪条末尾接一颗按钮**，
+           现在是**接进 `ready_by_key`** → 胶囊当场重画。选「接进来」而不是「另立一颗常驻的」，
+           理由写在报告里：① 入口不丢（只有它有动作时胶囊自己会写出它 ——
+           「↑ 更新 3.9.0」/「⚠ 更新 装不上」，两项以上时进「N 项要处理」）；
+           ② 标题行保持「标题 + 一颗胶囊 + 搜索框」，不再有第二个控件跟搜索框抢宽度。
+        """
         if _stale(gen, "update_gen"):
             return                                        # 面板已经关了 / 重开了
         it = ready.update_item(offer)
         if it is None:
             return
         S["update_offer"] = offer
-        ready_by_key["update"] = it
-        text = ready_item_text(it)
-        last = max(ready_buttons.values(), key=lambda b: b.frame().origin.x, default=None)
-        box = last.superview() if last is not None else None
-        if box is None:
+        if chip.get("btn") is None:                       # 这一档没有胶囊（就绪项没算出来）
             return
-        from AppKit import NSButton, NSFont
-        x = last.frame().origin.x + last.frame().size.width + READY_ITEM_GAP
-        b = NSButton.alloc().initWithFrame_(NSMakeRect(x, (READY_H - 22.0) / 2.0, 10.0, 22.0))
-        b.setTitle_(text)
-        b.setBordered_(False)
-        b.setFont_(NSFont.boldSystemFontOfSize_(12.0))
-        b.sizeToFit()
-        w = b.frame().size.width + 8.0
-        if x + w > box.frame().size.width - READY_PAD:
-            # 放不下就挤掉最右那一格（笔记库：可选项，点开面板再看也不迟）
-            vb = ready_buttons.pop("vault", None)
-            if vb is not None:
-                # 它后面的（测试模式开关、竖线）整体左移一格，「更新」接在最后
-                dx = vb.frame().size.width + READY_ITEM_GAP
-                vx = vb.frame().origin.x
-                vb.removeFromSuperview()
-                for v in box.subviews():
-                    f = v.frame()
-                    if f.origin.x > vx:
-                        v.setFrameOrigin_((f.origin.x - dx, f.origin.y))
-                x = max((v.frame().origin.x + v.frame().size.width for v in box.subviews()),
-                        default=READY_PAD) + READY_ITEM_GAP
-        b.setFrame_(NSMakeRect(x, (READY_H - 22.0) / 2.0, w, 22.0))
-        t = _target(lambda: on_ready_click("update"))
-        S["ready_targets"] = list(S.get("ready_targets") or []) + [t]
-        b.setTarget_(t)
-        b.setAction_("act:")
-        box.addSubview_(b)
-        ready_buttons["update"] = b
+        ready_by_key["update"] = it
+        _refresh_chip()
 
     if on_start is not None:
         # 「已更新到 X」/「草稿模型还没装」：本地就能判断，面板一出来就排上（下一轮 runloop，面板先上屏）
@@ -2623,19 +2754,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     _strip_bg(CARD_FILL_A)
     ve.addSubview_(strip)
 
-    # 测试模式开关在就绪条上 → 提示用满宽；就绪条没建出来 / 放不下、开关退回这里 → 让出一颗的位置
-    _tm_w = 0.0
-    if on_test_mode is not None:
-        _probe_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 10.0, 22.0))
-        _probe_btn.setFont_(NSFont.systemFontOfSize_(12.0))
-        _probe_btn.setBordered_(False)
-        _probe_btn.setTitle_(test_mode_title(False))       # 两态同宽（判据钉着）
-        _probe_btn.sizeToFit()
-        _tm_w = _probe_btn.frame().size.width + 8.0
-    _tm_ready = bool(on_test_mode is not None and ready_items and ready_buttons and test_mode_fits_ready(
-        max(v.frame().origin.x + v.frame().size.width for v in ready_buttons.values()),
-        WIDTH - 2 * PAD, _tm_w))
-    _tm_in_strip = on_test_mode is not None and not _tm_ready
+    # 测试模式开关在胶囊菜单里 → 提示用满宽；就绪那一格没建出来、开关退回这里 → 让出一颗的位置。
+    # ⚠️ 2026-10-16：判据不再是「放不放得下」（`test_mode_fits_ready` 已删 —— 那个宽度竞争
+    #    随就绪条一起没了），而是「**有没有那颗胶囊**」。胶囊在 → 开关进菜单；不在 → 退这儿。
+    _tm_in_strip = on_test_mode is not None and not ready_items
     _hint_w = HINT_W_TIGHT if _tm_in_strip else HINT_W
     # ⚠️ 两行（2026-10-12 从三行并来）：「认不出的会让你核对」挪给了拖进来之后的批量确认卡 ——
     #    那张卡本来就会让你核对，在这里预告一遍是多占一行。
@@ -2855,86 +2977,38 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     strip.addSubview_(_add_btn)
     strip_holder["hint"].append(_add_btn)
 
-    # ⭐ 测试模式开关（2026-09-30，`docs/PLAN-test-mode.md` §13.3）──────────
-    # 📌 **放这儿不放卡片上**：作者 2026-09-28 删过卡片上的「选择文件…」，
-    #    原话「**卡片看着太繁杂**」—— 5 张卡各挂一个开关就是同样的噪音。
-    #    而这是个**全局**状态（这节课录不录、传不传），底部那条正是全局控件的位置。
+    # ⭐ 测试模式开关的**退路**（2026-10-16 起正路是胶囊菜单里的勾选项）──────────
+    # ⚠️ 走到这儿只有一个原因：**就绪那一格没建出来**（`ready.items` 抛了 / 用户
+    #    先前把就绪那一条关掉了 `ready.dismissed()`）→ 那时没有胶囊，开关不能跟着消失。
+    #    📌 原来的判据是「接在就绪条最后一项后面放不放得下」（`test_mode_fits_ready`，
+    #    2026-10-16 随就绪条一起删）—— 那条宽度竞争已经不存在了。
     # ⚠️ `on_test_mode is None` = 这个面板不是"开课前"那条路起的（上课中从菜单栏开的）
     #    —— 那时**这节课早在录了**，开关没有意义 → **不建**（同 `on_start` 那条纪律）。
-    # ⚠️ 状态活在**闭包**里，不进模块级的 `S`：`S` 是跨面板共享的，
-    #    而开关的初值每次都由调用方从盘上读（`entry_launch.read_test_mode`）。
-    tm_on = [bool(test_mode)]
-    if on_test_mode is not None:
-        from AppKit import NSView as _NSView
-        _vb = ready_buttons.get("vault") if _tm_ready else None
-        _rbox = next(iter(ready_buttons.values())).superview() if _tm_ready else None
-        if _rbox is not None:
-            # 就绪条：最右一项后面 → 细竖线 → 开关（高度、字号、颜色都跟条上的项一样）
-            _last = _vb or max(ready_buttons.values(), key=lambda v: v.frame().origin.x)
-            _x = _last.frame().origin.x + _last.frame().size.width + READY_ITEM_GAP / 2.0
-            rule = _NSView.alloc().initWithFrame_(
-                NSMakeRect(_x, (READY_H - READY_RULE_H) / 2.0, HAIRLINE, READY_RULE_H))
-            rule.setWantsLayer_(True)
-            rule.layer().setBackgroundColor_(
-                NSColor.whiteColor().colorWithAlphaComponent_(CARD_LINE_A).CGColor())
-            _rbox.addSubview_(rule)
-            tm_btn = NSButton.alloc().initWithFrame_(
-                NSMakeRect(_x + READY_ITEM_GAP / 2.0, (READY_H - 22.0) / 2.0, TEST_W, 22.0))
-        else:
-            tm_btn = NSButton.alloc().initWithFrame_(
-                NSMakeRect(W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W - 8.0 - TEST_W,
-                           switch_y(0, 1), TEST_W, BTN_H))
-        tm_btn.setTitle_(test_mode_title(tm_on[0]))
-        tm_btn.setBordered_(False)                 # ⚠️ 见 `TEST_W` 那段：状态→无边框
+    # ⚠️ 放这儿不放卡片上：作者 2026-09-28 删过卡片上的「选择文件…」（原话「卡片看着太繁杂」），
+    #    而这是个**全局**状态（这节课录不录、传不传），底部那条正是全局控件的位置。
+    if _tm_in_strip:
+        tm_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W - 8.0 - TEST_W,
+                       switch_y(0, 1), TEST_W, BTN_H))
+        tm_btn.setTitle_(test_mode_title(tm_on[0]))    # 两态同宽（判据钉着）
+        tm_btn.setBordered_(False)                     # ⚠️ 见 `TEST_W` 那段：状态→无边框
         tm_btn.setFont_(NSFont.systemFontOfSize_(12.0))
         try:
             # ⚠️ 只是深色玻璃上的可读性，**两态同一个值** —— 不许拿颜色表达状态。
             tm_btn.setContentTintColor_(
                 NSColor.whiteColor().colorWithAlphaComponent_(0.92))
-        except Exception:                                  # noqa: BLE001
+        except Exception:                              # noqa: BLE001
             pass
-        if _rbox is not None:
-            tm_btn.sizeToFit()                     # 两态同宽（判据钉着）→ 切换不抖
-            _f = tm_btn.frame()
-            tm_btn.setFrame_(NSMakeRect(_f.origin.x, (READY_H - 22.0) / 2.0, _f.size.width + 8.0, 22.0))
-
-        def toggle_test_mode() -> None:
-            """点一下 = 翻一次，**当场落盘**。
-
-            ⚠️ **失败要弹回原状** —— 盘上没写成就显示「开」，用户会以为在采集，
-               其实什么都没记。同 `.course` 那次事故的形状（2026-09-29，
-               `entry_launch` 的 `UNSAVED`）：**界面说的和盘上写的是两件事**。
-            ⚠️ 回调**同步调**：它只写一个几字节的文本文件，不碰视图树 ——
-               `_later` 那条纪律管的是「别在 action 里拆自己所在的视图」，这里不适用。
-            """
-            on = not tm_on[0]
-            ok = True
-            try:
-                ok = on_test_mode(on) is not False
-            except Exception:                              # noqa: BLE001
-                ok = False
-            if not ok:
-                set_status("⚠ 测试模式没存下来（.test-mode 写不了）—— 这次不算数")
-                return
-            tm_on[0] = on
-            try:
-                tm_btn.setTitle_(test_mode_title(on))
-            except Exception:                              # noqa: BLE001
-                pass
-
+        tm_holder["btn"] = tm_btn                      # ⚠️ 开关回调靠它改标题
         tm_t = _target(toggle_test_mode)
-        tm_btn.setTarget_(tm_t)                    # ⚠️ 弱引用 —— 靠 `strip_targets` 留它
+        tm_btn.setTarget_(tm_t)                        # ⚠️ 弱引用 —— 靠 `strip_targets` 留它
         tm_btn.setAction_("act:")
         strip_targets.append(tm_t)
-        if _rbox is not None:
-            _rbox.addSubview_(tm_btn)
-            ready_buttons["test_mode"] = tm_btn    # 「更新」那格接在它后面（`_show_update`）
-        else:
-            strip.addSubview_(tm_btn)
-            # ⚠️ 也进 `hint` 那组：**批量/搜索/新增那几档会把它藏起来**
-            #    （`refresh()` 按 `strip_holder["hint"]` 逐个 `setHidden_`）——
-            #    那些档下右下角是「取消/确认」，多一颗开关会挤在同一块地方。
-            strip_holder["hint"].append(tm_btn)
+        strip.addSubview_(tm_btn)
+        # ⚠️ 也进 `hint` 那组：**批量/搜索/新增那几档会把它藏起来**
+        #    （`refresh()` 按 `strip_holder["hint"]` 逐个 `setHidden_`）——
+        #    那些档下右下角是「取消/确认」，多一颗开关会挤在同一块地方。
+        strip_holder["hint"].append(tm_btn)
 
     # ⚠️ **一次性挂上**（见 `strip_targets` 的说明）—— 别在上面每一处各写一遍。
     strip._targets = strip_targets
@@ -3933,11 +4007,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    `S["ics"]` 残留 → 下次开面板 `refresh` 里 `_i = S.get("ics")` 非空
             #    → **又弹出一张陈旧的导入确认卡**（行数据还是上一轮的）。
             S["ics"] = None
-            # ⚠️ 面板里那两个**弱引用 target 的锚点**（就绪条 / 搜索框）也要断 ——
+            # ⚠️ 面板里那几个**弱引用 target 的锚点**（就绪胶囊 / 搜索框）也要断 ——
             #    它们不是状态，是"别让 target 被 GC 掉"的容器。留着就等于每次
             #    开关面板多留两个对象（与上面那几条同一条纪律）。
-            S["ready_targets"] = None
-            S["models_menu_targets"] = None
+            S["chip_targets"] = None
+            S["chip_menu_targets"] = None
             S["update_gen"] = None           # 后台查更新回来时认得出「面板已经关了」
             S["card_gen"] = None             # 排在下一轮 runloop 的小卡同理
             S["search_target"] = None

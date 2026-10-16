@@ -510,6 +510,7 @@ def main() -> int:
 
     _add_wiring_section()
     _target_liveness_section()
+    _chip_section()
     _test_mode_section()
     _cloud_asr_section()
     _vault_section()
@@ -905,37 +906,417 @@ def _guard_section() -> None:
         _AH.callLater = _orig
 
 
+def _chip_helpers():
+    """这一节和 ⑳ / ⑳b 共用的小工具（都在真窗口里找控件，不按下标猜）。"""
+    from AppKit import NSButton, NSSearchField
+
+    def walk(v, out=None):
+        out = [] if out is None else out
+        out.append(v)
+        for c in (v.subviews() or []):
+            walk(c, out)
+        return out
+
+    def chip_of(h):
+        """标题行那颗胶囊 = 面板上唯一一颗 y > 60 的 `NSButton`（搜索框不是 `NSButton`）。"""
+        got = [v for v in walk(h.window.contentView(), [])
+               if isinstance(v, NSButton) and not isinstance(v, NSSearchField)
+               and float(v.frame().origin.y) > 60.0]
+        return got[0] if len(got) == 1 else None
+
+    def items_of(menu):
+        return [menu.itemAtIndex_(i) for i in range(menu.numberOfItems())]
+
+    def titles(menu):
+        return [(i.title() or "") for i in items_of(menu)]
+
+    return walk, chip_of, items_of, titles
+
+
+class _ReadyAccess:
+    """就绪某一项在**当前**的落点 —— 2026-10-16 起它有两个（`PLAN-396` §1）：
+
+      ① **只有一项**不正常 → 那一项直接写在**标题行的胶囊**上，点胶囊就是修它；
+      ② **两项及以上** → 在**胶囊菜单**里各占一行，点那一行就是修它。
+    ⚠️ 两条路最终都调 `on_ready_click(key)` —— 判据只关心「点了之后发生了什么」，
+       所以这里把两条路封成一个口子（`label` / `click`），各节不用各写一遍。
+    """
+
+    def __init__(self, menus: list):
+        self._w, self._chip_of, self._items_of, _t = _chip_helpers()
+        self.menus = menus                       # ⚠️ 调用方已经把 `E.popup_menu` 换成桩了
+
+    def open_menu(self, h):
+        """点胶囊 → 菜单（`E.popup_menu` 是桩，不会真弹）。
+
+        ⚠️⚠️ **只有带 `CHIP_TAIL`（「▾」）的胶囊才有菜单** —— 「一项不正常」那一档
+           点下去是**直接修那一项**（比如「语音模型 缺 2 件 · 下载」会**真的开始下载**）。
+           没带尾巴时这里**绝不点它**，返回 None（`label`/`click` 跟着变保守）。
+        """
+        chip = self._chip_of(h)
+        if chip is None or not (chip.title() or "").endswith(E.CHIP_TAIL):
+            return None
+        self.menus.clear()
+        chip.performClick_(None)
+        return self.menus[-1] if self.menus else None
+
+    def row(self, h, needle):
+        """菜单里标题含 `needle` 的那一行。"""
+        menu = self.open_menu(h)
+        if menu is None:
+            return None
+        return next((i for i in self._items_of(menu)
+                     if needle in (i.title() or "")), None)
+
+    def label(self, h, needle):
+        """那一格的**当前文字**（`ready_item_text` 那句，去掉「 · 动词」尾巴）。找不到 → None。"""
+        chip = self._chip_of(h)
+        if chip is not None and needle in (chip.title() or ""):
+            return (chip.title() or "").split("  ·  ")[0]
+        r = self.row(h, needle)
+        return (r.title() or "").split("  ·  ")[0] if r is not None else None
+
+    def click(self, h, needle) -> bool:
+        """点那一格。⚠️ 只有「一项不正常」那一档才直接点胶囊 —— 那时胶囊上写的正是它；
+        其它情况一律**只在菜单里点那一行**（见 `open_menu` 那条：不带 ▾ 的胶囊绝不点）。"""
+        chip = self._chip_of(h)
+        if chip is not None and needle in (chip.title() or ""):
+            chip.performClick_(None)
+            return True
+        r = self.row(h, needle)
+        if r is None:
+            return False
+        r.target().act_(r)
+        return True
+
+    def act(self, item):
+        item.target().act_(item)
+
+
+def _chip_section() -> None:
+    """㉓ 就绪胶囊（`PLAN-396` §1）：文字三档 + **行为**（点了弹不弹菜单 / 修不修那一项）。
+
+    ⚠️ 为什么要建窗口：这一节钉的是**接线**（弹没弹、调没调到），而接线的坏法一律不出声
+       —— 纯函数那边全绿，症状统一是「点了没反应」。
+    ⚠️ `popup_menu` 换成**桩**：真 `NSMenu` 会开一个同步的跟踪循环，测试会挂在那儿。
+    ⚠️ 写端全隔离在 tempdir（`glossary=` / `state_root=`），`HOME` 也挪开
+       （「笔记库」那条路会去读真 Obsidian 注册表）。
+    """
+    print("\n--- ㉓ 就绪胶囊：文字三档 / 点了弹不弹菜单 / 面板矮了 40pt ---")
+
+    # ── 纯函数：哪一项算「要处理」──────────────────────────────────
+    _bad = E.ready_item_bad
+    check("全正常 → 不用管", not _bad({"key": "mic", "state": "ok"}))
+    check("todo / warn / unknown / busy 都要管",
+          [_bad({"key": "mic", "state": s}) for s in ("todo", "warn", "unknown", "busy")]
+          == [True, True, True, True])
+    # ⭐⚠️ 这一条是这条判据存在的理由：`state` 是 ok、但它**有事要做**
+    check("⭐⭐ 齐了但缺草稿模型（`state=ok` + `offer_draft`）也算「要处理」",
+          _bad({"key": "models", "state": "ok", "offer_draft": True}) is True)
+
+    # ── 纯函数：三档文字（期望值**写字面量**）──────────────────────
+    _OK = [{"key": "mic", "state": "ok"}, {"key": "models", "state": "ok"},
+           {"key": "engine", "state": "ok", "detail": "云端翻译（推荐）"},
+           {"key": "vault", "state": "ok", "detail": "/tmp/V"}]
+    check("⭐ 全正常 → 「✓  已就绪」+ 形态 ok（点开是菜单）",
+          E.ready_chip(_OK) == ("✓  已就绪", "ok", ""), str(E.ready_chip(_OK)))
+    check("⭐ 只有麦克风被拒 → 直接写那一项 + 点了会干嘛（形态 one）",
+          E.ready_chip([{**_OK[0], "state": "warn"}, *_OK[1:]])
+          == ("⚠  麦克风  被拒  ·  去设置", "one", "mic"),
+          str(E.ready_chip([{**_OK[0], "state": "warn"}, *_OK[1:]])))
+    check("⭐ 只有笔记库未设 → 「—  笔记库  未设  ·  选文件夹」",
+          E.ready_chip([*_OK[:3], {"key": "vault", "state": "unknown"}])
+          == ("—  笔记库  未设  ·  选文件夹", "one", "vault"),
+          str(E.ready_chip([*_OK[:3], {"key": "vault", "state": "unknown"}])))
+    # ⚠️ 「下载中…」不许再挂一个「· 下载」—— 那是在教用户点一个**正在跑**的东西
+    check("⭐ 正在下载 → 只写状态，不补动词",
+          E.ready_chip([_OK[0], {**_OK[1], "state": "busy"}, *_OK[2:]])
+          == ("◌  语音模型  下载中…", "one", "models"),
+          str(E.ready_chip([_OK[0], {**_OK[1], "state": "busy"}, *_OK[2:]])))
+    check("⭐ 两项要处理 → 「2 项要处理」+ 形态 many（点开是菜单）",
+          E.ready_chip([{**_OK[0], "state": "warn"}, *_OK[1:3],
+                        {"key": "vault", "state": "unknown"}])
+          == ("2 项要处理", "many", ""),
+          str(E.ready_chip([{**_OK[0], "state": "warn"}, *_OK[1:3],
+                            {"key": "vault", "state": "unknown"}])))
+    # ⭐ 反方向：不同的坏项**不许**给出同一句话（否则上面几条会因为「永远返回同一句」而假绿）
+    check("⚠️ 而不同的坏项给的是不同的话（不是恒定的）",
+          len({E.ready_chip([{**_OK[0], "state": "warn"}, *_OK[1:]])[0],
+               E.ready_chip([*_OK[:3], {"key": "vault", "state": "unknown"}])[0],
+               E.ready_chip(_OK)[0]}) == 3)
+
+    # ── 纯函数：截断（窄面板下也放得下）──────────────────────────
+    # ⚠️ 假 measure（一个字 10pt）→ 不用起窗口就能把边界钉死。
+    _m = lambda s: len(s) * 10.0                                   # noqa: E731
+    _fit = E.chip_fit
+    check("放得下 → 原样 + 尾巴（尾巴是「点开有东西」的唯一提示）",
+          _fit("abc", " ‣", 100.0, _m) == "abc ‣", _fit("abc", " ‣", 100.0, _m))
+    _long = _fit("abcdefghij", " ‣", 60.0, _m)
+    check("⭐ 太长了 → 裁到上限以内，且**尾巴留着**",
+          _m(_long) <= 60.0 and _long.endswith(" ‣") and "…" in _long, repr(_long))
+    check("⭐ 而且是「留下的刚好最多」那一档（再留一个字就超）",
+          _m(_long[:-2] + _long[-2:]) <= 60.0 and "…" in _long,
+          repr(_long))
+    check("⚠️ 上限极小时也**不返回空**（至少还有尾巴）",
+          _fit("abcdefghij", " ‣", 25.0, _m).endswith(" ‣"),
+          repr(_fit("abcdefghij", " ‣", 25.0, _m)))
+
+    try:
+        import tempfile
+
+        from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
+                            NSButton, NSSearchField)
+    except Exception as e:                                        # noqa: BLE001
+        check("AppKit 可用（这一节要真窗口）", False, f"{type(e).__name__}: {e}")
+        return
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory)
+
+    import ready as ready_mod
+
+    _walk, _chip_of, _items_of, _menu_titles = _chip_helpers()
+
+    def _act(item):
+        item.target().act_(item)
+
+    _saved_home = os.environ.get("HOME")
+    menus: list = []
+    _orig_popup = E.popup_menu
+    E.popup_menu = lambda menu, view: menus.append(menu)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            fake_home = root / "home"
+            fake_home.mkdir()
+            os.environ["HOME"] = str(fake_home)      # ⚠️ 「笔记库」那条路会读真注册表
+            os.environ.pop("OBSIDIAN_VAULT", None)
+            gl = root / "glossary.txt"
+            gl.write_text("# public table\n", encoding="utf-8")
+
+            def _build(name, items, **kw):
+                _orig = ready_mod.items
+                ready_mod.items = lambda **k: [dict(i) for i in items]
+                kw.setdefault("on_test_mode", lambda on: True)
+                kw.setdefault("on_cloud_asr", lambda on: True)
+                if "cloud_asr" not in kw and kw.get("on_cloud_asr") is not None:
+                    kw["cloud_asr"] = True
+                try:
+                    return E.build(glossary=gl, sessions_dir=root / ("s" + name),
+                                   state_root=root / ("st" + name),
+                                   on_start=lambda c: None, **kw)
+                finally:
+                    ready_mod.items = _orig
+
+            # ── ① 全正常：胶囊写「已就绪」，点开 = 菜单（用桩，不真弹）──
+            h = _build("1", _OK)
+            try:
+                check("面板建起来了（㉓ 要真窗口）", h is not None)
+                chip = _chip_of(h) if h is not None else None
+                check("⭐ 标题行有且只有一颗胶囊", chip is not None)
+                if chip is not None:
+                    check("⭐⭐ 全正常 → 胶囊文字**逐字**是「✓  已就绪  ▾」（字面量）",
+                          (chip.title() or "") == "✓  已就绪  ▾", repr(chip.title()))
+                    menus.clear()
+                    chip.performClick_(None)
+                    check("⭐⭐ 点一下 → **弹菜单**（桩收到一次 popup）", len(menus) == 1,
+                          f"命中 {len(menus)} 次")
+                    if menus:
+                        _t = _menu_titles(menus[-1])
+                        check("⭐ 菜单里四项各一行（点了做它现在的事）+ 分隔线 + 两个勾选项",
+                              _t == ["✓  麦克风", "✓  语音模型", "✓  云端翻译",
+                                     "✓  笔记库", "", "云端转写 · 英文更准",
+                                     "测试模式：关"], str(_t))
+                        check("⭐ 那几行的 target 都活着（弱引用坑：没挂住 = 点了没反应）"
+                              "（「语音模型」那一行是灰的状态行、没有 target，是**故意**的）",
+                              all(i.target() is not None for i in _items_of(menus[-1])
+                                  if i.isEnabled() and i.title()),
+                              str([(i.title(), i.target() is not None)
+                                   for i in _items_of(menus[-1]) if i.title()]))
+                    check("⭐ 胶囊的 target 也活着（`S['chip_targets']` 挂住了）",
+                          chip.target() is not None)
+                    # ⚠️ 几何：胶囊右沿**不许越过搜索框**（窄面板下也不许）
+                    _sf = [v for v in _walk(h.window.contentView(), [])
+                           if isinstance(v, NSSearchField)]
+                    _cf = chip.frame()
+                    check("⭐⭐ 胶囊右沿停在搜索框左边（不挤坏搜索框）",
+                          len(_sf) == 1
+                          and float(_cf.origin.x + _cf.size.width)
+                          <= float(_sf[0].frame().origin.x) - 10.0 + 0.6,
+                          f"胶囊右沿 {float(_cf.origin.x + _cf.size.width):.1f} / "
+                          f"搜索框左沿 {float(_sf[0].frame().origin.x):.1f}"
+                          if _sf else "没找到搜索框")
+            finally:
+                if h is not None:
+                    h.close()
+
+            # ── ② 只有一项不正常：点一下就修，**不弹菜单** ────────────
+            # 用「笔记库未设」那一档（点了走 `pick_folder`，是个**能观察到的副作用**）。
+            _picked: list = []
+            _orig_pick = E.pick_folder
+            E.pick_folder = lambda **kw: (_picked.append(kw), None)[1]
+            h2 = _build("2", [*_OK[:3], {"key": "vault", "state": "unknown"}])
+            try:
+                chip2 = _chip_of(h2) if h2 is not None else None
+                check("⭐ 一项不正常 → 胶囊直接写那一项（字面量）",
+                      chip2 is not None
+                      and (chip2.title() or "") == "—  笔记库  未设  ·  选文件夹",
+                      repr(chip2.title()) if chip2 is not None else "没有胶囊")
+                if chip2 is not None:
+                    menus.clear()
+                    chip2.performClick_(None)
+                    check("⭐⭐ 点一下 → **直接修那一项**（`on_ready_click('vault')` → 选文件夹）",
+                          len(_picked) == 1, f"pick_folder 命中 {len(_picked)} 次")
+                    check("⭐ 而且**没弹菜单**（一项的那一档不开菜单）",
+                          not menus, f"弹了 {len(menus)} 次")
+            finally:
+                if h2 is not None:
+                    h2.close()
+                E.pick_folder = _orig_pick
+
+            # ── ③ 两项不正常 → 「2 项要处理」→ 菜单 ────────────────────
+            h3 = _build("3", [{**_OK[0], "state": "warn"}, *_OK[1:3],
+                              {"key": "vault", "state": "unknown"}])
+            try:
+                chip3 = _chip_of(h3) if h3 is not None else None
+                check("⭐⭐ 两项不正常 → 胶囊写「2 项要处理  ▾」（含「2 项」）",
+                      chip3 is not None and "2 项" in (chip3.title() or "")
+                      and (chip3.title() or "").endswith(E.CHIP_TAIL),
+                      repr(chip3.title()) if chip3 is not None else "没有胶囊")
+                if chip3 is not None:
+                    menus.clear()
+                    chip3.performClick_(None)
+                    check("⭐ 点一下 → 弹菜单（这一档不开单一动作）", len(menus) == 1)
+                    if menus:
+                        check("⭐ 菜单里那两项**照旧各一行**（不是被合并掉）",
+                              "笔记库" in " ".join(_menu_titles(menus[-1])), "")
+            finally:
+                if h3 is not None:
+                    h3.close()
+
+            # ── ④ 菜单里两个勾选项：状态与回调一致 ──────────────────────
+            _tm_calls: list = []
+            h4 = _build("4", _OK, on_test_mode=lambda on: (_tm_calls.append(on), True)[1],
+                        test_mode=False)
+            try:
+                chip4 = _chip_of(h4) if h4 is not None else None
+                menus.clear()
+                if chip4 is not None:
+                    chip4.performClick_(None)
+                items4 = _items_of(menus[-1]) if menus else []
+                _cloud = next((i for i in items4 if "云端转写" in (i.title() or "")), None)
+                _tm = next((i for i in items4 if "测试模式" in (i.title() or "")), None)
+                check("⭐⭐ 两个勾选项都在菜单里，且状态与开关初值一致"
+                      "（云端转写=开→勾上；测试模式=False→未勾、标题写「关」）",
+                      _cloud is not None and _cloud.state() == 1
+                      and _tm is not None and _tm.state() == 0
+                      and (_tm.title() or "") == "测试模式：关",
+                      f"云端={_cloud and _cloud.state()} "
+                      f"测试={_tm and (_tm.title(), _tm.state())}")
+                if _tm is not None and chip4 is not None:
+                    _act(_tm)
+                    check("⭐⭐ 点菜单里那颗 → 回调真的收到 True（勾选项不是画着好看的）",
+                          _tm_calls == [True], str(_tm_calls))
+                    menus.clear()
+                    chip4.performClick_(None)
+                    _tm2 = next((i for i in _items_of(menus[-1]) if "测试模式" in (i.title() or "")),
+                                None)
+                    check("⭐ 再开菜单 → 勾上了、标题变「测试模式：开」",
+                          _tm2 is not None and _tm2.state() == 1
+                          and (_tm2.title() or "") == "测试模式：开",
+                          repr(_tm2 and (_tm2.title(), _tm2.state())))
+            finally:
+                if h4 is not None:
+                    h4.close()
+
+            # ── ⑤ 面板高度：就绪项在不在**都不许**多出那一行（原来 +40pt）──
+            h5a = _build("5a", _OK)
+            h5b = _build("5b", [])
+            try:
+                _ha = float(h5a.window.frame().size.height) if h5a else 0.0
+                _hb = float(h5b.window.frame().size.height) if h5b else 0.0
+                check("⭐⭐ 有就绪项 / 没有就绪项 → 面板**一样高**（就绪那一行已经并进标题行）",
+                      _ha > 0 and abs(_ha - _hb) < 0.01, f"{_ha} vs {_hb}")
+                check("⭐ 而且没有就绪项时**没有胶囊**（不是画一颗空的）",
+                      h5b is not None and _chip_of(h5b) is None)
+                check("⭐ 没有就绪项时，测试模式退回落点条那颗按钮（不许跟着胶囊一起消失）",
+                      h5b is not None
+                      and len([v for v in _walk(h5b.window.contentView(), [])
+                               if isinstance(v, NSButton)
+                               and (v.title() or "").startswith("测试模式：")]) == 1)
+                check("⚠️ 而 `READY_H` 这个常数**已经不在了**（没留一条没人用的就绪行高度）",
+                      not hasattr(E, "READY_H"))
+
+                # ── ⑥ 文字再长也裁在胶囊里，不挤搜索框 ─────────────────
+                _long_detail = "还差 3 件，约 " + "1" * 60 + " MB"
+                h6 = _build("6", [{**_OK[0]}, {"key": "models", "state": "todo",
+                                               "detail": _long_detail}, *_OK[2:]])
+                try:
+                    chip6 = _chip_of(h6) if h6 is not None else None
+                    _sf6 = [v for v in _walk(h6.window.contentView(), [])
+                            if isinstance(v, NSSearchField)] if h6 is not None else []
+                    check("⭐⭐ 超长状态 → 胶囊里出现「…」且右沿仍在搜索框左边（裁的是文字）",
+                          chip6 is not None and "…" in (chip6.title() or ""),
+                          repr(chip6.title()) if chip6 is not None else "没有胶囊")
+                    if chip6 is not None and _sf6:
+                        _f, _s = chip6.frame(), _sf6[0].frame()
+                        check("⭐⭐ 而且右沿仍然停在搜索框左边",
+                              float(_f.origin.x + _f.size.width)
+                              <= float(_s.origin.x) - 10.0 + 0.6,
+                              f"胶囊右沿 {float(_f.origin.x + _f.size.width):.1f} / "
+                              f"搜索框左沿 {float(_s.origin.x):.1f}")
+                finally:
+                    if h6 is not None:
+                        h6.close()
+            finally:
+                for _h in (h5a, h5b):
+                    if _h is not None:
+                        _h.close()
+    finally:
+        E.popup_menu = _orig_popup
+        if _saved_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = _saved_home
+
+
 def _cloud_asr_section() -> None:
-    """⑳b 「云端转写」：10-12 起不是落点条上的开关，而是「语音模型」那一格菜单里的勾选项。
-    钉：菜单项（纯函数）/ 那一格的状态词 / 点菜单项真的触发回调并改那一格 / 写失败不翻 / 锁定 / 落盘接线。
+    """⑳b 「云端转写」：**胶囊菜单顶层那颗勾选项**（`PLAN-396` §1；10-12 前是落点条上的开关，
+    10-12 后是「语音模型」菜单里的勾选项，10-16 起挪到顶层跟「测试模式」并排）。
+    钉：纯函数（子菜单 + 顶层勾选项）/ 那一行的状态词 / 点勾选项真的触发回调 / 写失败不翻 / 锁定 / 落盘接线。
 
     ⚠️ 写端全隔离：面板走 tempdir 的 glossary/state_root；`entry_launch` 那段换掉 `paths.STATE_ROOT`，
-       绝不碰真 `~/.classlive/`。⚠️ 菜单里「下载…」那一项**不点**（会真下模型）。
+       绝不碰真 `~/.classlive/`。⚠️ 子菜单里「下载…」那一项**不点**（会真下模型）。
     """
-    print("\n--- ⑳b 云端转写：「语音模型」菜单里的勾选项 ---")
+    print("\n--- ⑳b 云端转写：胶囊菜单顶层的勾选项 ---")
     import tempfile
 
     # ── 纯函数：期望值写字面量 ─────────────────────────────────────
     _mm = E.models_menu
     _ok = {"key": "models", "state": "ok"}
-    check("⭐ 都齐了：「模型都已就绪」（灰）· 分隔线 · 「云端转写 · 英文更准」✓",
+    check("⭐ 「语音模型」子菜单：都齐了 → 只剩一行灰的「模型都已就绪」",
           [(i.get("key"), i.get("title"), i.get("enabled"), i.get("checked"))
-           for i in _mm(_ok, cloud_on=True, locked=False)]
-          == [("info", "模型都已就绪", False, False), (None, None, None, None),
-              ("cloud", "云端转写 · 英文更准", True, True)],
-          str(_mm(_ok, cloud_on=True, locked=False)))
+           for i in _mm(_ok)] == [("info", "模型都已就绪", False, False)],
+          str(_mm(_ok)))
     check("⭐ 缺模型 → 第一项「下载缺的模型」可点",
-          _mm({"key": "models", "state": "todo"}, cloud_on=True, locked=False)[0]
+          _mm({"key": "models", "state": "todo"})[0]
           == {"key": "required", "title": "下载缺的模型", "enabled": True, "checked": False})
     check("⭐ 可加草稿模型 → 「下载流式草稿模型（464 MB）」",
-          _mm({**_ok, "offer_draft": True}, cloud_on=True, locked=False, draft_mb="464 MB")[0]["title"]
+          _mm({**_ok, "offer_draft": True}, draft_mb="464 MB")[0]["title"]
           == "下载流式草稿模型（464 MB）")
     check("正在下载 → 下载项不可点",
-          _mm({"key": "models", "state": "todo"}, cloud_on=True, locked=False, downloading=True)[0]["enabled"]
-          is False)
-    _lk = _mm(_ok, cloud_on=True, locked=True)[2]
+          _mm({"key": "models", "state": "todo"}, downloading=True)[0]["enabled"] is False)
+    # ⭐ 反方向：云端转写**不许**再出现在模型子菜单里（两处会打架）
+    check("⭐⭐ 「云端转写」**不在**模型子菜单里（挪去顶层跟「测试模式」并排了）",
+          not any("云端转写" in (i.get("title") or "") for i in _mm(_ok)), str(_mm(_ok)))
+    _ci = E.cloud_item(cloud_on=True, locked=False)
+    check("⭐ 顶层勾选项（开着）：标题逐字 + 勾上 + 可点",
+          (_ci["title"], _ci["checked"], _ci["enabled"])
+          == ("云端转写 · 英文更准", True, True), str(_ci))
+    check("⭐ 关着 → 未勾", E.cloud_item(cloud_on=False, locked=False)["checked"] is False)
+    _lk = E.cloud_item(cloud_on=True, locked=True)
     check("⭐⭐ 环境变量锁定 → 未勾、不可点、标题点名 CLASSLIVE_CLOUD_ASR=0",
-          _lk["checked"] is False and _lk["enabled"] is False and "CLASSLIVE_CLOUD_ASR=0" in _lk["title"], str(_lk))
+          _lk["checked"] is False and _lk["enabled"] is False
+          and "CLASSLIVE_CLOUD_ASR=0" in _lk["title"], str(_lk))
     check("⭐ 关了云端 → 那一格写「已就绪 · 全本地」（不再有常驻开关，状态要看得见）",
           E.ready_item_text({**_ok, "cloud_off": True}) == "✓  语音模型  全本地",
           E.ready_item_text({**_ok, "cloud_off": True}))
@@ -945,6 +1326,7 @@ def _cloud_asr_section() -> None:
     try:
         from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSButton
         import entry_launch
+        import ready as ready_mod
     except Exception as e:                                    # noqa: BLE001
         check("AppKit 可用（这一节要真窗口）", False, f"{type(e).__name__}: {e}")
         return
@@ -961,23 +1343,30 @@ def _cloud_asr_section() -> None:
         return [v for v in _walk(h.window.contentView(), [])
                 if isinstance(v, NSButton) and needle in (v.title() or "")]
 
+    _w2, _chip_of, _items_of, _titles2 = _chip_helpers()
+
     menus: list = []
     _orig_popup = E.popup_menu
     E.popup_menu = lambda menu, view: menus.append(menu)
 
     def _open_menu(h):
+        """点胶囊 → 顶端那份菜单（就绪每一项各一行 + 两个勾选项）。"""
         menus.clear()
-        mb = _btns(h, "语音模型")
-        if len(mb) != 1:
+        chip = _chip_of(h)
+        if chip is None:
             return None, None
-        mb[0].performClick_(None)
-        if not menus:
-            return mb[0], None
-        items = [menus[-1].itemAtIndex_(i) for i in range(menus[-1].numberOfItems())]
-        return mb[0], next((i for i in items if "云端转写" in (i.title() or "")), None)
+        chip.performClick_(None)
+        return chip, (menus[-1] if menus else None)
+
+    def _row(menu, needle):
+        return next((i for i in _items_of(menu) if needle in (i.title() or "")), None)
 
     def _act(item):
         item.target().act_(item)
+
+    _OK4 = [{"key": "mic", "state": "ok"}, {"key": "models", "state": "ok"},
+            {"key": "engine", "state": "ok", "detail": "云端翻译（推荐）"},
+            {"key": "vault", "state": "ok", "detail": "/tmp/V"}]
 
     try:
         with tempfile.TemporaryDirectory() as td:
@@ -985,42 +1374,96 @@ def _cloud_asr_section() -> None:
             gl = root / "glossary.txt"
             gl.write_text("# public table\n", encoding="utf-8")
 
-            def _build(name, **kw):
-                return E.build(glossary=gl, sessions_dir=root / ("s" + name),
-                               state_root=root / ("st" + name), on_start=lambda c: None, **kw)
+            def _build(name, items=None, **kw):
+                # ⚠️ 就绪那四项用内存里的桩（否则"菜单里有没有这一行"会看机器的脸色）
+                _o = ready_mod.items
+                if items is not None:
+                    ready_mod.items = lambda **k: [dict(i) for i in items]
+                try:
+                    return E.build(glossary=gl, sessions_dir=root / ("s" + name),
+                                   state_root=root / ("st" + name),
+                                   on_start=lambda c: None, **kw)
+                finally:
+                    ready_mod.items = _o
 
             calls: list = []
-            h = _build("1", on_test_mode=lambda on: True, test_mode=False,
+            h = _build("1", _OK4, on_test_mode=lambda on: True, test_mode=False,
                        on_cloud_asr=lambda on: (calls.append(on), True)[1], cloud_asr=True)
             try:
-                check("⭐⭐ 落点条上**没有**「云端转写」那颗开关了；测试模式还在",
-                      h is not None and not _btns(h, "云端转写") and len(_btns(h, "测试模式：")) == 1)
-                mb, ci = _open_menu(h)
-                check("⭐⭐ 点「语音模型」→ 弹菜单，里面有「云端转写」且是勾着的",
+                check("⭐⭐ 面板上没有「云端转写」那颗常驻开关，也没有「测试模式」按钮"
+                      "（两颗都进了胶囊菜单）",
+                      h is not None and not _btns(h, "云端转写")
+                      and not _btns(h, "测试模式："))
+                chip, menu = _open_menu(h) if h is not None else (None, None)
+                ci = _row(menu, "云端转写") if menu is not None else None
+                check("⭐⭐ 点胶囊 → 弹菜单，顶层有「云端转写」且是勾着的",
                       ci is not None and ci.state() == 1 and ci.isEnabled(),
-                      f"{mb and mb.title()!r} {ci and (ci.title(), ci.state())}")
+                      f"{_titles2(menu) if menu is not None else None}")
                 if ci is not None:
-                    check("⭐ 菜单项的 target 活着（弱引用坑：没挂住 = 点了没反应）", ci.target() is not None)
+                    check("⭐ 菜单项的 target 活着（弱引用坑：没挂住 = 点了没反应）",
+                          ci.target() is not None)
                     _act(ci)
-                    check("⭐⭐ 点一下 → 回调收到 False、那一格变「已就绪 · 全本地」或仍报缺模型（但带 cloud_off）",
-                          calls == [False] and ("全本地" in mb.title() or "缺" in mb.title()), f"{calls} {mb.title()!r}")
-                    _, ci2 = _open_menu(h)
-                    check("⭐ 再开菜单 → 未勾；点 → 回调收到 True、「全本地」消失",
+                    check("⭐⭐ 点一下 → 回调收到 False", calls == [False], str(calls))
+                    _, menu2 = _open_menu(h)
+                    ci2 = _row(menu2, "云端转写") if menu2 is not None else None
+                    _mr2 = _row(menu2, "语音模型") if menu2 is not None else None
+                    check("⭐⭐ 再开菜单 → 未勾，且「语音模型」那一行写着「全本地」",
                           ci2 is not None and ci2.state() == 0
-                          and (_act(ci2) or True) and calls == [False, True] and "全本地" not in mb.title(),
-                          f"{calls} {mb.title()!r}")
+                          and _mr2 is not None and "全本地" in (_mr2.title() or ""),
+                          f"{ci2 and ci2.state()} {_mr2 and _mr2.title()!r}")
+                    if ci2 is not None:
+                        _act(ci2)
+                        _, menu3 = _open_menu(h)
+                        _mr3 = _row(menu3, "语音模型") if menu3 is not None else None
+                        check("⭐ 再点 → 回调收到 True、「全本地」消失",
+                              calls == [False, True]
+                              and _mr3 is not None and "全本地" not in (_mr3.title() or ""),
+                              f"{calls} {_mr3 and _mr3.title()!r}")
+                _mr = _row(menu, "语音模型") if menu is not None else None
+                check("⭐ 模型都齐了时，「语音模型」那一行是**灰的状态行**（不给空子菜单）",
+                      _mr is not None and _mr.submenu() is None and not _mr.isEnabled(),
+                      f"submenu={_mr and _mr.submenu()} enabled={_mr and _mr.isEnabled()}")
             finally:
                 if h is not None:
                     h.close()
 
-            c2: list = []
-            h2 = _build("2", on_cloud_asr=lambda on: (c2.append(on), False)[1], cloud_asr=False)
+            # ── ⭐ 缺模型那一档：「语音模型」行给子菜单，里面能点「下载缺的模型」 ──
+            #    ⚠️ **不点它**（会真下模型）—— 只钉「有这一项、可点、target 活着」。
+            #    ⚠️ 而且这一档**必须有第二项也不正常**：只有模型一件事时胶囊走「一项」那条路，
+            #       点一下**直接开下载**（那一档下面单独钉，这里绝不能点到）。
+            h3 = _build("3", [{**_OK4[0], "state": "warn"},
+                              {"key": "models", "state": "todo",
+                               "detail": "还差 2 件，约 640.61 MB",
+                               "left": ["a", "b"], "mb": 640.61}, *_OK4[2:]],
+                        on_cloud_asr=lambda on: True, cloud_asr=True)
             try:
-                mb, ci = _open_menu(h2) if h2 else (None, None)
+                chip3, menu = _open_menu(h3) if h3 is not None else (None, None)
+                check("（前置）两项不正常 → 胶囊走「多项」那条路（点开菜单，不是直接下载）",
+                      chip3 is not None and "2 项" in (chip3.title() or ""),
+                      repr(chip3 and chip3.title()))
+                _mr = _row(menu, "语音模型") if menu is not None else None
+                _sub = _mr.submenu() if _mr is not None else None
+                _dl = next((i for i in _items_of(_sub)
+                            if "下载缺的模型" in (i.title() or "")), None) if _sub else None
+                check("⭐⭐ 缺模型 → 「语音模型」行有子菜单，里面「下载缺的模型」可点、target 活着",
+                      _dl is not None and _dl.isEnabled() and _dl.target() is not None,
+                      f"{_titles2(_sub) if _sub is not None else None}")
+            finally:
+                if h3 is not None:
+                    h3.close()
+
+            c2: list = []
+            h2 = _build("2", _OK4, on_cloud_asr=lambda on: (c2.append(on), False)[1],
+                        cloud_asr=False)
+            try:
+                _, menu = _open_menu(h2) if h2 else (None, None)
+                ci = _row(menu, "云端转写") if menu is not None else None
                 if ci is not None:
+                    check("（前置）初值=False → 未勾", ci.state() == 0)
                     _act(ci)
-                    _, ci_after = _open_menu(h2)
-                    check("⭐⭐ 写盘失败 → 不翻（再开菜单仍未勾、那一格仍写全本地）",
+                    _, menu_after = _open_menu(h2)
+                    ci_after = _row(menu_after, "云端转写") if menu_after is not None else None
+                    check("⭐⭐ 写盘失败 → 不翻（再开菜单仍未勾）",
                           c2 == [True] and ci_after is not None and ci_after.state() == 0, f"{c2}")
                 else:
                     check("（前置）菜单里有云端转写", False)
@@ -1029,10 +1472,11 @@ def _cloud_asr_section() -> None:
                     h2.close()
 
             c4: list = []
-            h4 = _build("4", on_cloud_asr=lambda on: (c4.append(on), True)[1],
+            h4 = _build("4", _OK4, on_cloud_asr=lambda on: (c4.append(on), True)[1],
                         cloud_asr=True, cloud_asr_locked=True)
             try:
-                _, ci = _open_menu(h4) if h4 else (None, None)
+                _, menu = _open_menu(h4) if h4 else (None, None)
+                ci = _row(menu, "云端转写") if menu is not None else None
                 check("⭐⭐ 锁定：菜单项未勾、不可点、标题点名环境变量",
                       ci is not None and ci.state() == 0 and not ci.isEnabled()
                       and "CLASSLIVE_CLOUD_ASR=0" in (ci.title() or ""), str(ci and ci.title()))
@@ -1104,13 +1548,20 @@ def _cloud_asr_section() -> None:
 
 
 def _test_mode_section() -> None:
-    """⑳ 测试模式开关：**宽度 / 文案 / 点击真的触发回调 / 那个开关文件**。
+    """⑳ 测试模式开关：**两态文案 / 胶囊菜单里那颗勾选项 / 退回落点条那一档 / 那个开关文件**。
 
     ⚠️ 为什么要建窗口：这一节钉的全是**接线**（开关在不在、点了调没调到、
-       标题变没变、失败弹没弹回去），而接线的坏法**一律不出声** ——
+       标题变没变、失败翻没翻回去），而接线的坏法**一律不出声** ——
        纯函数判据全绿，症状统一是「点了没反应」或**界面说的和盘上的不是一回事**。
 
+    ⭐ 2026-10-16（`PLAN-396` §1）：它**不再是面板上一颗常驻按钮** —— 就绪那一格在时
+       它是**标题行胶囊菜单里的勾选项**；那一格没建出来（`ready.items` 抛了 /
+       用户先前把就绪那一条关掉了）才退回落点条。两条路都在下面钉住。
+
     ⚠️ 只建窗口、**不跑事件循环** —— `performClick_` 是同步的（`sendAction:to:`）。
+    ⚠️ 就绪那四项用**内存里的桩**（不碰磁盘 / 真权限状态），否则这一节的形状
+       会跟着跑它的那台机器变（原来就是这样：放得下 / 放不下两条路各命中一半）。
+    ⚠️ `popup_menu` 换成**桩**：真 `NSMenu` 会开一个同步的跟踪循环，测试会挂在那儿。
 
     ⚠️ 写端全部隔离在 tempdir：面板走 `glossary=` / `state_root=`，
        开关文件走 `read_test_mode(path=…)` / `write_test_mode(…, path=…)`。
@@ -1119,7 +1570,7 @@ def _test_mode_section() -> None:
     ⚠️ 最后一组**真跑 `cl`**（沙盒 + 假解释器），不算越界：`cl` 那半是 shell，
        没有别的判据盖得到，而它正是「开关按了到底生效没有」的**最后一厘米**。
     """
-    print("\n--- ⑳ 测试模式开关：宽度 / 文案 / 点击真的触发回调 ---")
+    print("\n--- ⑳ 测试模式开关：文案 / 胶囊菜单里的勾选项 / 退回落点条 ---")
     import shutil as _sh
     import subprocess as _sp
     import tempfile
@@ -1131,6 +1582,7 @@ def _test_mode_section() -> None:
                             NSButton, NSTextField, NSFontAttributeName)
         from Foundation import NSAttributedString
         import entry_launch
+        import ready as ready_mod
     except Exception as e:                                    # noqa: BLE001
         check("AppKit 可用（这一节要真窗口）", False, f"{type(e).__name__}: {e}")
         return
@@ -1143,14 +1595,6 @@ def _test_mode_section() -> None:
         for c in (v.subviews() or []):
             _walk(c, out)
         return out
-
-    def _rects_hit(a, b) -> bool:
-        """两个 frame 有没有**真的重叠**（不相邻才算）。"""
-        ax, ay, aw, ah = (float(a.origin.x), float(a.origin.y),
-                          float(a.size.width), float(a.size.height))
-        bx, by, bw, bh = (float(b.origin.x), float(b.origin.y),
-                          float(b.size.width), float(b.size.height))
-        return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
 
     def _text_w(s, font) -> float:
         """按**真实的那个字体**量文字宽度（不是按字数估）。"""
@@ -1190,165 +1634,161 @@ def _test_mode_section() -> None:
                            on_start=lambda c: None, **kw)
 
         calls: list = []
-        h = _build("1", on_test_mode=lambda on: (calls.append(on), True)[1],
-                   test_mode=False)
-        check("面板建起来了（⑳ 这一节要真窗口）", h is not None)
-        if h is None:
-            return
-        try:
-            # ⚠️⚠️ **期望值写字面量，不写 `E.test_mode_title(True)`。**
-            #    第一版就是拿那个函数当期望值 —— **变异验证当场抓出来**：
-            #    把函数改成「永远返回关」之后，**两边一起变**，判据照样绿。
-            #    这就是本仓记过的假绿形态「判据钉住的正是缺陷本身」。
-            #    文案是**作者拍板的那个东西**（`PLAN-test-mode.md` §3.5），
-            #    所以要逐字钉住；函数只是它的一处实现。
-            ON, OFF = "测试模式：开", "测试模式：关"
-            check("⭐ 开关文案与作者拍板的两态**逐字一致**（函数与字面量对得上）",
-                  E.test_mode_title(True) == ON and E.test_mode_title(False) == OFF,
-                  f"{E.test_mode_title(True)!r} / {E.test_mode_title(False)!r}")
+        _w2, _chip_of, _items_of, _t2 = _chip_helpers()
 
-            strip = _strip_of(h)
-            check("找得到落点条", strip is not None)
-            if strip is None:
-                return
-            sw = [b for b in _toggles(h) if (b.title() or "") == OFF]
-            check("⭐ 面板上有且只有一颗测试模式开关，初值 =「测试模式：关」（`test_mode=False`）",
-                  len(sw) == 1, f"命中 {len(sw)} 颗")
-            if len(sw) != 1:
-                return
-            sw = sw[0]
-            box = sw.superview()
-            vault = [b for b in box.subviews() if isinstance(b, NSButton) and "笔记库" in (b.title() or "")]
-            sf = sw.frame()
-            # ⚠️ 两档都会真的发生（就绪条项的长短看这台机器的状态）：
-            #    放得下 → 紧跟「笔记库」；放不下（新用户：「语音模型 缺 2 件…」）→ 退回落点条。
-            #    **哪一档都不许出界**。
-            if box is strip:
-                check("⭐ 退回落点条那一档：就绪条确实放不下（不是无故退回）",
-                      not vault, "落点条里不该有笔记库按钮")
-            else:
-                check("⭐⭐ 开关在就绪条上，和「笔记库」同一条（Owen 10-12：放到笔记库旁边）",
-                      len(vault) == 1, f"同一父视图里的笔记库按钮 {len(vault)} 个")
-                if len(vault) != 1:
-                    return
-                vf = vault[0].frame()
-                gap = float(sf.origin.x) - float(vf.origin.x + vf.size.width)
-                check("⭐ 紧跟在「笔记库」右边（间距 = 条上项与项的间距）",
-                      abs(gap - E.READY_ITEM_GAP) < 0.6, f"间距 {gap:.1f}")
-            check("⭐⭐ 没出所在那条的右边界（新用户的长状态曾把它挤出 66pt）",
-                  float(sf.origin.x + sf.size.width) <= float(box.frame().size.width) + 0.01,
-                  f"右沿 {float(sf.origin.x + sf.size.width):.1f} / 条宽 {float(box.frame().size.width):.1f}")
-            check("⭐ 两态文字都放得下",
-                  max(_text_w(ON, sw.font()), _text_w(OFF, sw.font())) <= float(sf.size.width) - 4.0,
-                  f"框 {float(sf.size.width):.1f}")
-            check("⭐ 放不放得下的判据：边界两侧",
-                  E.test_mode_fits_ready(100.0, 640.0, 640.0 - E.READY_PAD - 100.0 - E.READY_ITEM_GAP)
-                  and not E.test_mode_fits_ready(100.0, 640.0, 640.0 - E.READY_PAD - 100.0 - E.READY_ITEM_GAP + 1))
+        # ⚠️⚠️ **期望值写字面量，不写 `E.test_mode_title(True)`。**
+        #    第一版就是拿那个函数当期望值 —— **变异验证当场抓出来**：
+        #    把函数改成「永远返回关」之后，**两边一起变**，判据照样绿。
+        #    这就是本仓记过的假绿形态「判据钉住的正是缺陷本身」。
+        #    文案是**作者拍板的那个东西**（`PLAN-test-mode.md` §3.5），
+        #    所以要逐字钉住；函数只是它的一处实现。
+        ON, OFF = "测试模式：开", "测试模式：关"
+        check("⭐ 开关文案与作者拍板的两态**逐字一致**（函数与字面量对得上）",
+              E.test_mode_title(True) == ON and E.test_mode_title(False) == OFF,
+              f"{E.test_mode_title(True)!r} / {E.test_mode_title(False)!r}")
+        _OK4 = [{"key": "mic", "state": "ok"}, {"key": "models", "state": "ok"},
+                {"key": "engine", "state": "ok", "detail": "云端翻译（推荐）"},
+                {"key": "vault", "state": "ok", "detail": str(root / "V")}]
+        _menus: list = []
+        _orig_popup = E.popup_menu
+        E.popup_menu = lambda menu, view: _menus.append(menu)
 
-            # ── ⭐⭐ 宽度扫描（照 `tests/test_panel.py` 那条）──────────────
-            # ⚠️ 这条量的是**真几何**（两个 frame 会不会真重叠），不是照算式再算一遍。
-            hit = []
-            for v in box.subviews():
-                if v is sw or v.isHidden():
-                    continue
-                if _rects_hit(sw.frame(), v.frame()):
-                    _f = v.frame()
-                    hit.append((type(v).__name__,
-                                (v.title() if isinstance(v, NSButton)
-                                 else "")[:20],
-                                [round(float(_f.origin.x), 1), round(float(_f.size.width), 1)]))
-            check("⭐⭐ 开关**不压到就绪条上任何可见控件**", not hit, str(hit))
-
-            # ⭐⭐ 提示文字塞得下 —— **反向的那一半**（上面那条只管"别压到别人"）
-            # ⚠️ 这条守的是 `HINT_W` 那个式子的余量：文字超框 → `panel.make_label`
-            #    默认就是换行 + **第二行被静默吃掉**（没有省略号，看着像句子就到这儿）。
-            over, measured = [], 0
-            for v in strip.subviews():
-                if v.isHidden() or not isinstance(v, NSTextField):
-                    continue
-                t = v.stringValue() or ""
-                if not t:
-                    continue
-                measured += 1
-                w = _text_w(t, v.font())
-                if w > float(v.frame().size.width) + 0.01:
-                    over.append((t, round(w, 1), round(float(v.frame().size.width), 1)))
-            check("⭐⭐ 条上每条提示文字**实测宽度 ≤ 它的框宽**（超了就被静默吃掉）",
-                  not over, str(over))
-            check("⚠️ 而且真的量到了那几行（量到 0 行会让上一条恒真）",
-                  measured >= 2, f"量到 {measured} 行")
-
-            # ── ⭐ 点击：**钉行为，不钉 flag** ─────────────────────────────
-            # 📌 本仓 `ClickView` 就是 `mouseDownCanMoveWindow=True` 而完全正常 ——
-            #    所以判据只看「点了之后发生了什么」。
-            sw.performClick_(None)
-            check("⭐ 点一下 → 文案变「测试模式：开」（**字面量**，不是再问一次函数）",
-                  (sw.title() or "") == ON, repr(sw.title()))
-            check("⭐⭐ 而且**回调真的被调到了**（收到 True）", calls == [True], str(calls))
-            sw.performClick_(None)
-            check("⭐ 再点一下 → 回「测试模式：关」，回调收到 False",
-                  (sw.title() or "") == OFF and calls == [True, False],
-                  f"{sw.title()!r} {calls}")
-        finally:
+        def _mk(name, items, **kw):
+            """建一块面板，就绪那四项**由我们说了算**（内存里的桩，不碰磁盘/真权限）。"""
+            _o = ready_mod.items
+            ready_mod.items = lambda **k: [dict(i) for i in items]
             try:
-                h.close()
-            except Exception:                                 # noqa: BLE001
-                pass
+                return _build(name, **kw)
+            finally:
+                ready_mod.items = _o
 
-        # ── ⭐⭐ 落盘失败 → **弹回原状**（界面不许撒谎）────────────────────
-        # ⚠️ 照 `.course` 那次事故（2026-09-29 的 `UNSAVED`）：写不下去时不改状态。
-        #    这里更坏 —— 显示「开」而盘上是「关」= 用户以为在采集，其实什么都没记。
-        calls2: list = []
-        h2 = _build("2", on_test_mode=lambda on: (calls2.append(on), False)[1],
+        def _tm_item(h):
+            """胶囊菜单里那颗「测试模式」勾选项（先开菜单）。"""
+            chip = _chip_of(h)
+            if chip is None:
+                return None
+            _menus.clear()
+            chip.performClick_(None)
+            if not _menus:
+                return None
+            return next((i for i in _items_of(_menus[-1])
+                         if "测试模式" in (i.title() or "")), None)
+
+        try:
+            # ── ⭐ 正路（就绪那一格在）：开关 = 胶囊菜单里的勾选项 ────────
+            h = _mk("1", _OK4, on_test_mode=lambda on: (calls.append(on), True)[1],
                     test_mode=False)
-        try:
-            sw2 = _toggles(h2) if h2 is not None else []
-            check("（前置）第二块面板上也有开关", len(sw2) == 1, f"命中 {len(sw2)} 颗")
-            if len(sw2) == 1:
-                sw2[0].performClick_(None)
-                check("⭐⭐ 写盘失败 → 文案**弹回「关」**（不许显示成开着）",
-                      (sw2[0].title() or "") == "测试模式：关",
-                      f"{sw2[0].title()!r}，回调={calls2}")
-        finally:
+            check("面板建起来了（⑳ 这一节要真窗口）", h is not None)
+            if h is not None:
+                try:
+                    check("⭐ 面板上**不再有**那颗常驻开关（2026-10-16 挪进胶囊菜单）",
+                          not _toggles(h),
+                          f"还命中 {[b.title() for b in _toggles(h)]}")
+                    ti = _tm_item(h)
+                    check("⭐ 菜单里那颗勾选项：**未勾**、标题逐字「测试模式：关」",
+                          ti is not None and ti.state() == 0 and (ti.title() or "") == OFF,
+                          f"{ti and (ti.title(), ti.state())}")
+                    if ti is not None:
+                        check("⭐ 它的 target 活着（弱引用坑：没挂住 = 点了没反应）",
+                              ti.target() is not None)
+                        ti.target().act_(ti)
+                        check("⭐⭐ 点一下 → 回调真的收到 True", calls == [True], str(calls))
+                        ti2 = _tm_item(h)
+                        check("⭐ 再开菜单 → 勾上了、标题变「测试模式：开」",
+                              ti2 is not None and ti2.state() == 1
+                              and (ti2.title() or "") == ON,
+                              repr(ti2 and (ti2.title(), ti2.state())))
+                finally:
+                    h.close()
+
+            # ── ⭐⭐ 落盘失败 → **弹回原状**（界面不许撒谎）────────────────
+            # ⚠️ 照 `.course` 那次事故（2026-09-29 的 `UNSAVED`）：写不下去时不改状态。
+            #    这里更坏 —— 显示「开」而盘上是「关」= 用户以为在采集，其实什么都没记。
+            calls2: list = []
+            h2 = _mk("2", _OK4, on_test_mode=lambda on: (calls2.append(on), False)[1],
+                     test_mode=False)
             try:
+                ti = _tm_item(h2)
+                check("（前置）第二块面板的菜单里也有那颗勾选项", ti is not None)
+                if ti is not None:
+                    ti.target().act_(ti)
+                    ti2 = _tm_item(h2)
+                    check("⭐⭐ 写盘失败 → **不翻**（再开菜单仍未勾、标题仍是「关」）",
+                          calls2 == [True] and ti2 is not None and ti2.state() == 0
+                          and (ti2.title() or "") == OFF,
+                          f"{calls2} {ti2 and (ti2.title(), ti2.state())}")
+            finally:
                 h2.close()
-            except Exception:                                 # noqa: BLE001
-                pass
 
-        # ── ⚠️ 结构：没有落点（`on_test_mode=None`）时**一颗都不建** ──────
-        # ⚠️ 这一档 = 上课中从菜单栏打开的面板（那时这节课早在录了），
-        #    开关在那儿没有意义 —— 建了反而像"还能改"。
-        h3 = _build("3")
-        try:
-            check("⭐ `on_test_mode=None` → 开关一颗都不建（上课中开的面板）",
-                  h3 is not None and not _toggles(h3),
-                  f"命中 {len(_toggles(h3)) if h3 is not None else '—'} 颗")
-        finally:
+            # ── ⚠️ 退路：就绪那一格没建出来 → 落点条上那颗按钮（原样子）────
+            # 这一档 = `ready.items` 抛了 / 用户先前把就绪那一条关掉了（`dismissed()`）。
+            c3: list = []
+            h3 = _mk("3", [], on_test_mode=lambda on: (c3.append(on), True)[1],
+                     test_mode=False)
             try:
+                sw3 = _toggles(h3)
+                check("⭐⭐ 就绪那一格没建出来 → 开关**退回落点条**（不许跟着一起消失）",
+                      len(sw3) == 1, f"命中 {len(sw3)} 颗")
+                if len(sw3) == 1:
+                    strip3 = _strip_of(h3)
+                    check("⭐ 而且它就挂在落点条上",
+                          strip3 is not None and sw3[0].superview() is strip3)
+                    sw3[0].performClick_(None)
+                    check("⭐ 点一下 → 文案变「测试模式：开」、回调收到 True",
+                          (sw3[0].title() or "") == ON and c3 == [True],
+                          f"{sw3[0].title()!r} {c3}")
+                # ── ⭐⭐ 提示文字塞得下 ───────────────────────────────────
+                # ⚠️ 这一档（开关退回落点条）是**最紧**的一档：`HINT_W_TIGHT` 要比
+                #    `HINT_W` 多让一颗开关的位置。文字超框 → `panel.make_label`
+                #    默认就是换行 + **第二行被静默吃掉**（没有省略号，看着像句子就到这儿）。
+                strip3 = _strip_of(h3)
+                over, measured = [], 0
+                for v in (strip3.subviews() if strip3 is not None else []):
+                    if v.isHidden() or not isinstance(v, NSTextField):
+                        continue
+                    t = v.stringValue() or ""
+                    if not t:
+                        continue
+                    measured += 1
+                    w = _text_w(t, v.font())
+                    if w > float(v.frame().size.width) + 0.01:
+                        over.append((t, round(w, 1), round(float(v.frame().size.width), 1)))
+                check("⭐⭐ 条上每条提示文字**实测宽度 ≤ 它的框宽**（超了就被静默吃掉）",
+                      not over, str(over))
+                check("⚠️ 而且真的量到了那几行（量到 0 行会让上一条恒真）",
+                      measured >= 2, f"量到 {measured} 行")
+            finally:
                 h3.close()
-            except Exception:                                 # noqa: BLE001
-                pass
-        # 反方向：初值 True 时要显示「开」（否则上面那条会因为"永远不建"而假绿）
-        h4 = _build("4", on_test_mode=lambda on: True, test_mode=True)
-        try:
-            sw4 = _toggles(h4) if h4 is not None else []
-            check("⭐ `test_mode=True` → 初值显示「测试模式：开」",
-                  len(sw4) == 1 and (sw4[0].title() or "") == "测试模式：开",
-                  f"命中 {len(sw4)} 颗：{[b.title() for b in sw4]}")
-        finally:
-            try:
-                h4.close()
-            except Exception:                                 # noqa: BLE001
-                pass
 
-        # ── ⚠️ 两态的文字宽必须**一模一样**（切换时按钮不许抖）────────────
+            # ⚠️ 结构：没有落点（`on_test_mode=None`）时**一颗都不建**
+            #    这一档 = 上课中从菜单栏打开的面板（那时这节课早在录了），开关没有意义。
+            h4 = _mk("4", _OK4)
+            try:
+                check("⭐ `on_test_mode=None` → 面板上没有开关，菜单里也没有那一项",
+                      h4 is not None and not _toggles(h4) and _tm_item(h4) is None,
+                      f"命中 {len(_toggles(h4)) if h4 is not None else '—'} 颗")
+            finally:
+                h4.close()
+            # 反方向：初值 True 时要显示「开」（否则上面那条会因为"永远不建"而假绿）
+            h5 = _mk("5", _OK4, on_test_mode=lambda on: True, test_mode=True)
+            try:
+                ti = _tm_item(h5)
+                check("⭐ `test_mode=True` → 菜单里那颗是勾着、标题写「开」",
+                      ti is not None and ti.state() == 1 and (ti.title() or "") == ON,
+                      repr(ti and (ti.title(), ti.state())))
+            finally:
+                h5.close()
+        finally:
+            E.popup_menu = _orig_popup
+
+        # ── ⚠️ 两态的文字宽必须**一模一样**（切换时文字不许抖）────────────
         from AppKit import NSFont as _NSFont
         _font = _NSFont.systemFontOfSize_(12.0)
         _won = _text_w(E.test_mode_title(True), _font)
         _woff = _text_w(E.test_mode_title(False), _font)
         check("⚠️ 两态**实测文字宽完全相同**（切换时文字不抖）",
               abs(_won - _woff) < 1e-9, f"开={_won:.1f} 关={_woff:.1f}")
-        check("⭐ 而且塞得进退回老位置时的按钮框（`TEST_W` 要留得下它）",
+        check("⭐ 而且塞得进退回落点条时那颗按钮的框（`TEST_W` 要留得下它）",
               max(_won, _woff) <= E.TEST_W - 8.0,
               f"文字 {max(_won, _woff):.1f} / 框 {E.TEST_W}")
 
@@ -1564,11 +2004,12 @@ def _target_liveness_section() -> None:
                         dead.append(str(v.title())[:20])
             check(f"⭐ {len(views)} 个视图里，可点控件的 target **全活着**（一个都不许是 None）",
                   not dead, f"死掉的：{dead}")
-            check("⭐ 就绪条**真的画出来了**（不然上一条是空对空）",
+            check("⭐ 就绪胶囊**真的画出来了**（不然上一条是空对空）",
                   any(isinstance(v, NSButton) and "perm" in str(v.title())
                       for v in views),
                   # ⚠️ 标题是按 `key` + `state` 渲染的（`ready_item_text`），
                   #    **不含**桩里那个 `text` —— 第一版按 `text` 找，基线就红了一条。
+                  # ⚠️ 2026-10-16 起它长这样：**只有这一项不正常** → 胶囊直接写那一项。
                   f"按钮标题们：{[str(v.title()) for v in views if isinstance(v, NSButton)]}")
         finally:
             try:
@@ -1683,6 +2124,7 @@ def _vault_section() -> None:
 
         from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
                             NSButton)
+        import ready as ready_mod
     except Exception as e:                                    # noqa: BLE001
         check("AppKit 可用（这一节要真窗口）", False, f"{type(e).__name__}: {e}")
         return
@@ -1695,20 +2137,20 @@ def _vault_section() -> None:
             _walk(c, out)
         return out
 
-    def _vault_btn(h):
-        for v in _walk(h.window.contentView(), []):
-            if isinstance(v, NSButton) and "笔记库" in (v.title() or ""):
-                return v
-        return None
-
-    orig_pick = E.pick_folder
-    # ⚠️ `$OBSIDIAN_VAULT` **必须挪开**：本机 shell 里它指着真库 → 面板一开就是
+    orig_pick = E.pick_folder    # ⚠️ `$OBSIDIAN_VAULT` **必须挪开**：本机 shell 里它指着真库 → 面板一开就是
     #    「已设」→「点了之后变已设」那条判据**恒真**（2026-10-01 变异验证抓到的）。
     #    挪开之后才是朋友那台机器的入场状态（未设 → 点了才变）。
     _saved_env = os.environ.pop("OBSIDIAN_VAULT", None)
     # ⚠️ 8-F 起**家目录也要挪**：自动探测会读**真的** Obsidian 注册表（本机就有
     #    SecondBrain）→ 把"未设入场"的前提搅掉，还会往沙盒里写进真库路径。
     _saved_home = os.environ.get("HOME")
+    # ⚠️ 2026-10-16：就绪那一格不再是常驻按钮 —— 「笔记库」这一格的落点要么是
+    #    **胶囊**（只有它一项不正常），要么是**胶囊菜单里那一行**（两项以上）。
+    #    `_ReadyAccess` 把两条路封成一个口子；菜单用桩（真 `NSMenu` 会挂住测试）。
+    _menus: list = []
+    _orig_popup = E.popup_menu
+    E.popup_menu = lambda menu, view: _menus.append(menu)
+    _acc = _ReadyAccess(_menus)
     try:
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
@@ -1719,8 +2161,27 @@ def _vault_section() -> None:
             gl.write_text("# public table\n", encoding="utf-8")
 
             def _build(name, st):
-                return E.build(glossary=gl, sessions_dir=root / name,
-                               state_root=st, on_start=lambda c: None)
+                # ⚠️ 2026-10-16（`PLAN-396` §1）：就绪项的落点有**两个** ——
+                #    只有它一项不正常时写在**胶囊**上（点它 = 直接修），两项以上时在**菜单**里。
+                #    这里把「麦克风」「语音模型」两项**钉成「要处理」**，于是永远是「两项以上」
+                #    那一档：「笔记库」那一行稳定地在菜单里 —— 判据才能跨状态读到它的字
+                #    （否则修好之后胶囊会改去说**另一件**事，判据就读不到它了），
+                #    而且判据点胶囊时**永远不会**点到「语音模型 · 下载」那条真下载的路。
+                _o = ready_mod.items
+
+                def _items(**kw):
+                    out = _o(**kw)
+                    return [{**i, "state": "warn"} if i.get("key") == "mic"
+                            else ({**i, "state": "todo", "detail": "还差 1 件"}
+                                  if i.get("key") == "models" else i)
+                            for i in out]
+
+                ready_mod.items = _items
+                try:
+                    return E.build(glossary=gl, sessions_dir=root / name,
+                                   state_root=st, on_start=lambda c: None)
+                finally:
+                    ready_mod.items = _o
 
             # ── 点击：真的存进 `<state_root>/vault`，并且**就地**改字 ──────
             st = root / "st1"
@@ -1731,12 +2192,13 @@ def _vault_section() -> None:
             E.pick_folder = lambda **kw: (calls.append(kw), str(picked))[1]
             h = _build("s1", st)
             try:
-                btn = _vault_btn(h) if h is not None else None
-                check("（前置）面板上找得到「笔记库」那一格", btn is not None, "")
-                if btn is not None:
+                _lbl0 = _acc.label(h, "笔记库") if h is not None else None
+                check("（前置）面板上找得到「笔记库」这一格（胶囊 / 胶囊菜单里那一行）",
+                      _lbl0 is not None, repr(_lbl0))
+                if _lbl0 is not None:
                     check("（前置）这一格**一开始是「未设」**—— 环境变量挪开了才测得出「变」",
-                          (btn.title() or "") == "—  笔记库  未设", repr(btn.title()))
-                    btn.performClick_(None)
+                          _lbl0 == "—  笔记库  未设", repr(_lbl0))
+                    check("⭐ 点得动（两条落点都通）", _acc.click(h, "笔记库"))
                     check("⭐ 点了真的弹了选文件夹（一次，且带着智能起点）",
                           len(calls) == 1 and bool(calls[0].get("start")), str(calls))
                     check("⭐⭐ 选完**真的写进了 `<state_root>/vault`**（写端隔离）",
@@ -1746,7 +2208,8 @@ def _vault_section() -> None:
                           repr((st / "vault").read_text(encoding="utf-8")
                                if (st / "vault").exists() else None))
                     check("⭐ 而且那一格**就地**变成「已设」（不用重开面板）",
-                          (btn.title() or "") == "✓  笔记库", repr(btn.title()))
+                          _acc.label(h, "笔记库") == "✓  笔记库",
+                          repr(_acc.label(h, "笔记库")))
             finally:
                 try:
                     h.close()
@@ -1758,14 +2221,13 @@ def _vault_section() -> None:
             E.pick_folder = lambda **kw: None
             h2 = _build("s2", st2)
             try:
-                b2 = _vault_btn(h2) if h2 is not None else None
-                before = (b2.title() or "") if b2 is not None else None
-                if b2 is not None:
-                    b2.performClick_(None)
+                before = _acc.label(h2, "笔记库") if h2 is not None else None
+                if before is not None:
+                    _acc.click(h2, "笔记库")
                     check("⭐ 取消选目录 → 标题不动、盘上什么都不写",
-                          (b2.title() or "") == before
+                          _acc.label(h2, "笔记库") == before
                           and not (st2 / "vault").exists(),
-                          f"{b2.title()!r} {(st2 / 'vault').exists()}")
+                          f"{before!r} {(st2 / 'vault').exists()}")
             finally:
                 try:
                     h2.close()
@@ -1787,7 +2249,7 @@ def _vault_section() -> None:
             stA = root / "stA"
             hA = _build("A", stA)
             try:
-                bA = _vault_btn(hA) if hA is not None else None
+                _lblA = _acc.label(hA, "笔记库") if hA is not None else None
                 check("⭐⭐ 8-F：只有 1 个库 → **自动设上**（写进 `<state_root>/vault`）",
                       (stA / "vault").exists()
                       and (stA / "vault").read_text(encoding="utf-8").strip() == str(vA),
@@ -1797,8 +2259,7 @@ def _vault_section() -> None:
                       (stA / "vault").exists()
                       and str(_decoy) not in (stA / "vault").read_text(encoding="utf-8"))
                 check("⭐ 而且那一格直接就是「已设」",
-                      bA is not None and (bA.title() or "") == "✓  笔记库",
-                      repr(bA.title() if bA is not None else None))
+                      _lblA == "✓  笔记库", repr(_lblA))
             finally:
                 os.environ["HOME"] = str(_fake_home)
                 try:
@@ -1818,17 +2279,15 @@ def _vault_section() -> None:
             stB = root / "stB"
             hB = _build("B", stB)
             try:
-                bB = _vault_btn(hB) if hB is not None else None
+                _lblB = _acc.label(hB, "笔记库") if hB is not None else None
                 check("⭐⭐ 8-F：多个候选 → **绝不猜**（格子仍未设、一个字节不写）",
-                      bB is not None
-                      and (bB.title() or "") == "—  笔记库  未设"
+                      _lblB == "—  笔记库  未设"
                       and not (stB / "vault").exists(),
-                      f"{bB.title() if bB is not None else None!r} "
-                      f"vault_written={(stB / 'vault').exists()}")
+                      f"{_lblB!r} vault_written={(stB / 'vault').exists()}")
                 calls4: list = []
                 E.pick_folder = lambda **kw: (calls4.append(kw), None)[1]
-                if bB is not None:
-                    bB.performClick_(None)
+                if _lblB is not None:
+                    _acc.click(hB, "笔记库")
                     check("⭐ 点开时预指向候选之一，且框里明说找到 2 个",
                           len(calls4) == 1
                           and calls4[0].get("start") in (str(v1), str(v2))
@@ -1849,12 +2308,12 @@ def _vault_section() -> None:
             _OW.remember_vault = lambda *a, **k: None          # 静默失败
             h3 = _build("s3", st3)
             try:
-                b3 = _vault_btn(h3) if h3 is not None else None
-                before3 = (b3.title() or "") if b3 is not None else None
-                if b3 is not None:
-                    b3.performClick_(None)
+                before3 = _acc.label(h3, "笔记库") if h3 is not None else None
+                if before3 is not None:
+                    _acc.click(h3, "笔记库")
                     check("⭐⭐ 写盘失败 → 标题**不许**变成「已设」",
-                          (b3.title() or "") == before3, repr(b3.title()))
+                          _acc.label(h3, "笔记库") == before3,
+                          repr(_acc.label(h3, "笔记库")))
             finally:
                 _OW.remember_vault = orig_remember
                 try:
@@ -1875,6 +2334,7 @@ def _vault_section() -> None:
         else:
             os.environ["OBSIDIAN_VAULT"] = _saved_env
         E.pick_folder = orig_pick
+        E.popup_menu = _orig_popup
 
 
 def _key_entry_section() -> None:
@@ -1903,13 +2363,6 @@ def _key_entry_section() -> None:
             _walk(c, out)
         return out
 
-    def _engine_btn(h):
-        for v in _walk(h.window.contentView(), []):
-            # 正常时那格叫「云端翻译 / 本地翻译」，没配时叫「翻译引擎」（2026-10-14 瘦身）
-            if isinstance(v, NSButton) and "翻译" in (v.title() or ""):
-                return v
-        return None
-
     import cloud_translator
     import keyentry
     import notice
@@ -1919,18 +2372,42 @@ def _key_entry_section() -> None:
         caps.append(fields), None)[1]
     cloud_translator.load_api_key = lambda _=None: "sk-SECRET-DS"
     keyentry.load_jev = lambda **kw: "apikey-jev-SECRET"
+    # ⚠️ 2026-10-16：这一格的落点要么是**胶囊**（只有它一项不正常），要么是
+    #    **胶囊菜单里那一行**（两项以上）—— `_ReadyAccess` 把两条路封成一个口子。
+    _menus: list = []
+    _orig_popup = E.popup_menu
+    E.popup_menu = lambda menu, view: _menus.append(menu)
+    _acc = _ReadyAccess(_menus)
+    _rmod = None
     try:
-        with tempfile.TemporaryDirectory() as td:
+        import ready as _rmod                              # ⚠️ 见下面 `_items` 的说明
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as td:
             root = pathlib.Path(td)
             gl = root / "glossary.txt"
             gl.write_text("# public table\n", encoding="utf-8")
+            # ⚠️ 2026-10-16：就绪项的落点有**两个** —— 只有它一项不正常时写在**胶囊**上
+            #    （点它 = 直接修，比如「语音模型 · 下载」会真的开始下载）；两项以上时在**菜单**里。
+            #    这里把麦克风 / 语音模型**钉成「要处理」**，保证永远是「两项以上」那一档：
+            #    「翻译引擎」那一行稳定地在菜单里，而且判据点胶囊时**永远碰不到**模型那条真下载的路。
+            _orig_items = _rmod.items
+
+            def _items(**kw):
+                return [{**i, "state": "warn"} if i.get("key") == "mic"
+                        else ({**i, "state": "todo", "detail": "还差 1 件"}
+                              if i.get("key") == "models" else i)
+                        for i in _orig_items(**kw)]
+
+            _rmod.items = _items
             h = E.build(glossary=gl, sessions_dir=root / "s", state_root=root / "st",
                         on_start=lambda c: None)
             try:
-                btn = _engine_btn(h) if h is not None else None
-                check("（前置）面板上找得到「翻译引擎」那一格", btn is not None, "")
-                if btn is not None:
-                    btn.performClick_(None)
+                # 正常时那格叫「云端翻译 / 本地翻译」，没配时叫「翻译引擎」（2026-10-14 瘦身）
+                _lbl = _acc.label(h, "翻译") if h is not None else None
+                check("（前置）面板上找得到「翻译引擎」这一格（胶囊 / 胶囊菜单里那一行）",
+                      _lbl is not None, repr(_lbl))
+                if _lbl is not None:
+                    _acc.click(h, "翻译")
                     ok = (len(caps) == 1 and isinstance(caps[0], list)
                           and len(caps[0]) == 2)
                     check("⭐ 点一下真的开了填 key 框（`ask_text` 被调到）",
@@ -1951,6 +2428,9 @@ def _key_entry_section() -> None:
                     pass
     finally:
         (notice.ask_text, cloud_translator.load_api_key, keyentry.load_jev) = orig
+        E.popup_menu = _orig_popup
+        if _rmod is not None:
+            _rmod.items = _orig_items
 
 
 def _add_wiring_section() -> None:

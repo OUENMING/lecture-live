@@ -27,7 +27,7 @@
     PROBE_ZERO=1        零课程那一档（造几个假课件直接走批量那条路）；
                         再加 PROBE_ZERO_ADD=<课号> 就在 3 秒后建这门课
                         ⚠️ 这两个是**在 3 秒后**才动手的 —— 起完先别急着关
-    PROBE_UPDATE=available|unfinished|blocked  就绪条末尾的「更新」那一格 +「有新版本」卡（offer/apply 是桩，不联网）
+    PROBE_UPDATE=available|unfinished|blocked  就绪那一格接上「更新」（标题行胶囊 / 胶囊菜单里）+「有新版本」卡（offer/apply 是桩，不联网）
     PROBE_UPDATED=<版本> 假装上次看过这一版 →「已更新到 X」卡（`.update-seen` 指进隔离根）
     PROBE_DRAFT=1       假装流式草稿模型没装 →「还没装」卡（下载是桩）
     PROBE_ICSDRAG=1     验 `.ics` 在**悬停判据**上的真值（`acceptable` / `drop_split`）
@@ -258,7 +258,8 @@ def main() -> int:
         print(f"\nPROBE_TIMETABLE —— 造了「周{_now.weekday() + 1} {_now.hour}:00」的课表"
               f"（ECON10740），面板应把它排第一")
 
-    # `PROBE_UPDATE=available|unfinished|blocked` —— 看就绪条末尾「更新」那一格（2026-10-12）。
+    # `PROBE_UPDATE=available|unfinished|blocked` —— 看就绪那一格接上「更新」
+    #    （2026-10-16 起：只有它一件事时写在**标题行胶囊**上，两项以上时在**胶囊菜单**里；见 `PLAN-396` §1）。
     #    `offer` / `apply` / `defer_to_exit` 全换成桩：**不联网、不 pull、不写 ~/.classlive**。
     #    「现在更新」的桩 3 秒后报「拉到了新代码」→ 面板走 `on_restart`（这里只打印）。
     # ⚠️ `.update-seen` 一律指进隔离根（「已更新到 X」那张卡弹之前会写它）：

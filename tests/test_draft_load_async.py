@@ -232,6 +232,25 @@ class PicksParakeet(_Base):
         self.assertEqual(eng.transcribe(buf(1600), 1), (FakeDrafter.TEXT, "nemotron"))
 
 
+class ThreadWontStart(_Base):
+    """⭐ 2026-10-16 OCR：契约是「永不抛」——起不了后台线程也得立刻退回 Parakeet。"""
+
+    def test_线程起不来也不抛_退回Parakeet(self):
+        def bad_thread(*a, **k):
+            raise RuntimeError("can't start new thread")
+        pk = FakeParakeet()
+        eng = de.load_draft_engine_async(pk, window_samples=WIN, env=self.env,
+                                         ram_bytes=lambda: 16 * GB,
+                                         make_drafter=Gate().make(result=FakeDrafter()),
+                                         thread_factory=bad_thread,
+                                         on_ready=self.ready_calls.append)
+        self.assertEqual(eng.name, "parakeet")
+        self.assertIn("加载线程没起来", eng.fallback_reason)
+        self.assertEqual(self.ready_calls, [False])
+        eng.transcribe(buf(1600), 1)
+        self.assertTrue(pk.seen, "退回之后没用 Parakeet 出草稿")
+
+
 class Wiring(unittest.TestCase):
     def test_main走异步那条(self):
         src = (HERE / "main.py").read_text(encoding="utf-8")

@@ -431,8 +431,16 @@ def load_draft_engine_async(parakeet, *, window_samples: int,
             _notify(on_ready, True)
         return drafter
 
+    try:
+        pending = _Pending(_build, thread_factory=thread_factory)
+    except Exception as e:                       # noqa: BLE001 —— 起不了线程也不许把开课带下水
+        if on_ready is not None:
+            _notify(on_ready, False)
+        eng = DraftEngine(parakeet, window_samples=window_samples, reason=why)
+        eng.fallback_reason = f"出错：加载线程没起来（{e!r}）"
+        return eng
     return DraftEngine(parakeet, window_samples=window_samples, reason=why,
-                       pending=_Pending(_build, thread_factory=thread_factory))
+                       pending=pending)
 
 
 

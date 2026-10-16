@@ -401,5 +401,21 @@ class Engine(unittest.TestCase):
 
 
 
+class ReplaceEnvelope(unittest.TestCase):
+    """⭐ 2026-10-16 OCR：`replace` 的段号曾叫 `i`，把信封里的行号盖掉了。"""
+
+    def test_replace_不盖行号(self):
+        log, p = _mk_log()
+        log.event("a")
+        log.replace(7, 8)
+        log.event("b")
+        log.close()
+        recs = [r for r in _lines(p) if r.get("kind") == "replace" or r.get("event") in ("a", "b")]
+        self.assertEqual([r["i"] for r in recs], sorted(r["i"] for r in recs))
+        self.assertEqual(len({r["i"] for r in recs}), 3, "行号重复/回退")
+        rep = [r for r in recs if r["kind"] == "replace"][0]
+        self.assertEqual((rep["seg_i"], rep["seg_j"]), (7, 8))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

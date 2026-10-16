@@ -97,6 +97,20 @@ class BaseLayerFirst(unittest.TestCase):
         self.assertIn("第一句。", base)
         self.assertNotIn("English point", base, "基础版里不该已经有复习层")
 
+    def test_基础版不说假话(self):
+        """⭐ 2026-10-16 OCR：基础版曾把 ❓ 传空（→「课上没按 ❓」）、把有 key 说成「未配 API key」。"""
+        h = _Harness(lambda *a, **k: REVIEW)
+        orig = h._stub
+
+        def stub(w):
+            w._lost_items = lambda entries, explain=True: ["❓LOSTBLOCK"]
+            return orig(w)
+        h._stub = stub
+        w, msg, text, notes, before, after, seen = h.run()
+        base = seen["text"]
+        self.assertIn("❓LOSTBLOCK", base, "基础版把课上按过的 ❓ 丢了")
+        self.assertNotIn("未配 API key", base, "有 key 却写「未配 API key」")
+
     def test_最终是完整版_只有一个文件(self):
         h = _Harness(lambda *a, **k: REVIEW)
         w, msg, text, notes, before, after, seen = h.run()

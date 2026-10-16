@@ -1484,8 +1484,22 @@ class ObsidianWriter:
         #    ⚠️ 只动 `Lectures/`，`sessions/` 的**三方契约**格式一个字节不碰。
         #    ⚠️ 路径在这里算**一次**（见结尾那段：`note_path_for` 遇到同名会另存一份）。
         self.vault_path = note_path_for(self._vault, self._date, self._course)
+        # ⚠️ 基础版也带上**本地就能算**的两层（❓ 标记不讲解、📑 纲要）：传空会被渲染成
+        #    「课上没按 ❓」——那是假话。`review_missing` 同理：有 key 时说「这次没生成」，
+        #    不说「未配 API key」（2026-10-16 OCR 审查）。
+        base_lost: list[str] = []
+        base_chapters: dict = {}
+        try:
+            base_lost = self._lost_items(entries, explain=False)
+        except Exception:                                 # noqa: BLE001
+            pass
+        try:
+            base_chapters = self._chapter_items()
+        except Exception:                                 # noqa: BLE001
+            pass
         self._atomic_write(self.vault_path,
-                           self._render_note(entries, {}, [], polish_state, [], [], {}))
+                           self._render_note(entries, {}, [], polish_state, base_lost, [],
+                                             base_chapters, bool(self._key)))
         if self._key:
             print("🤖 正在生成复习层(知识点详解 + 自测)…", flush=True)
         # ⚠️ 同 `polish` 那条：`_review` 也要跑好几轮 LLM（按 REVIEW_CHUNK 分块，

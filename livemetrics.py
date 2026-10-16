@@ -244,15 +244,16 @@ class LiveLog:
         except Exception:                                  # noqa: BLE001
             pass
 
-    def replace(self, i: int = 0, j: int = 0) -> None:
+    def replace(self, seg_i: int = 0, seg_j: int = 0) -> None:
         """一次**跨段半句合并**把屏上尾句那行换掉了。
 
-        ⚠️ **只记数字和段号**（`i`/`j` = 被并的两段）—— 合并文本本身在
+        ⚠️ **只记数字和段号**（`seg_i`/`seg_j` = 被并的两段；⚠️ 不能叫 `i`——
+           信封里的 `i` 是行号，`**fields` 在后会把它盖掉）—— 合并文本本身在
         `sessions/<名>.merges.jsonl` 与会话里各有一份，再往这里写就是第三份真源，
         回放统计（回改率 / 延迟）读到它会被污染（同 `("final", …)` 不许复用的理由）。
         """
         try:
-            self._put("replace", i=int(i), j=int(j))
+            self._put("replace", seg_i=int(seg_i), seg_j=int(seg_j))
         except Exception:                                  # noqa: BLE001
             pass
 
@@ -323,10 +324,7 @@ class LiveLog:
         while True:
             # 3.9.7 省电：**阻塞等**（原来 `get(timeout=0.5)` 是 2 次/秒空醒）。
             # 收尾 `close()` 无条件投 `_SENTINEL`，所以这里阻塞到哨兵才退出。
-            try:
-                rec = self._q.get()
-            except queue.Empty:
-                continue
+            rec = self._q.get()
             if rec is _SENTINEL:
                 break
             self._write(rec)

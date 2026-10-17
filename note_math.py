@@ -511,9 +511,34 @@ def check_review(review: dict, *, transcript: str = "") -> list:
     return uniq
 
 
+#: 除法口播：`5.3 除以 3 得到 2.89`（`÷`、`/` 都算）。
+#: ⚠️ 第六轮补：产物 I 的 §1 里那句错除法（`5.3÷3=2.89`）三道核**一句没拦** ——
+#:    原来只有极值/代入/二阶导/符号这几档，没有除法。而它正是 living 摘要里
+#:    `2.89` 的来处（纲要那条的账本就指望它）。
+_DIV = re.compile(r"(?P<a>-?\d+(?:\.\d+)?)\s*(?:除以|÷|/)\s*(?P<b>-?\d+(?:\.\d+)?)\s*"
+                  r"(?:得到|得|等于|是|为|约等于|≈|=|＝)\s*(?P<c>-?\d+(?:\.\d+)?)")
+
+
 def _rows_for_text(t: str, fdefs: dict) -> list:
-    """一条文本里的极值/代入/二阶导断言 → 核对行。"""
+    """一条文本里的极值/代入/二阶导/除法断言 → 核对行。"""
     rows: list = []
+    for m in _DIV.finditer(t):
+        try:
+            a, b, c = float(m.group("a")), float(m.group("b")), float(m.group("c"))
+        except ValueError:
+            continue
+        if not b:
+            continue
+        want = a / b
+        # 容差按断言写的小数位算（`约等于 3.3` 不许判成"错"）
+        dec = len(m.group("c").split(".")[1]) if "." in m.group("c") else 0
+        if abs(round(want, dec) - c) <= 1e-9:
+            rows.append({"claim": t, "status": "ok", "recomputed": f"{a:g}/{b:g} ≈ {_fmt(want)}",
+                         "how": f"{a:g}÷{b:g} = {c:g}（一致）"})
+        else:
+            rows.append({"claim": t, "status": "mismatch",
+                         "recomputed": f"{a:g}/{b:g} ≈ {_fmt(want)}",
+                         "how": f"{a:g}÷{b:g}={_fmt(want)}，不是{c:g}"})
     # ⚠️ 二阶导断言走**独立一档**：它的形状很紧（`f''(c)=v`），不受噪声句守卫影响 ——
     #    实测未核对行里一半是「f''(-1)=-6<0，故为极大值」这种，机械核完全能做。
     # ⚠️ 优先用**句子自己写的** `f''(x)=12x-6`（同一个单元里可能有两个不同的 `f`：

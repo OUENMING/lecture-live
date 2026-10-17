@@ -75,6 +75,22 @@ class TestOutlineNumbers(unittest.TestCase):
         self.assertIn("已更正", zh)              # 标记里会留旧数（「2.89 → 1.767」），这是账，不是错
         self.assertIn("依据正文三道核", fixes[0]["what"])
 
+    def test_正文除法一被拦_纲要的_2_89_就能改对(self):
+        """端到端（作者点名的 fixture ②）：正文 `check_review` 把「5.3除以3得到2.89」
+        判成 mismatch → 账本把 `2.89 → 1.767` 传到纲要 → 改成 1.767 并标「已更正」。"""
+        import note_math as nm
+        body = {"sections": [{"heading": "1", "prose": [
+            "平均成本 $AC(Q)=Q^2-12Q+60$。",
+            "这里用到了5.3除以3得到2.89的计算。"]}]}
+        body["checks"] = nm.check_review(body)
+        self.assertTrue([r for r in body["checks"] if r["status"] == "mismatch"],
+                        body["checks"])
+        out, fixes, warns = no.check(_items(LIVE_289), review=body)
+        zh = _zhs(out)[0]
+        self.assertIn("数量为 1.767", zh)
+        self.assertIn("已更正", zh)
+        self.assertEqual(warns, [])
+
     # ── ② 纲要自己就能算的三档 ─────────────────────────────────────────
     def test_纲里的除法自己算(self):
         body = {"sections": BODY["sections"]}          # 没有账本：只靠纲要这一句

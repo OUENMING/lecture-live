@@ -292,6 +292,19 @@ class TestSecondDerivative(unittest.TestCase):
         rows = nm.check_review(rev)
         self.assertTrue([r for r in rows if r["status"] == "mismatch"], rows)
 
+    def test_正文的除法也要核(self):
+        """⭐ 第六轮（产物 I 的 §1）：正文写着「这里用到了5.3除以3得到2.89的计算」——
+        三道核**一句没拦**（原来没有除法这一档），而 living 摘要里 2.89 的账本
+        就指望它。判据：算错 → mismatch（进修正记录）、算对 → ok（不许误报）。"""
+        rev = {"sections": [{"prose": ["这里用到了5.3除以3得到2.89的计算。"]}]}
+        rows = [r for r in nm.check_review(rev) if "5.3" in r["claim"]]
+        self.assertEqual([r["status"] for r in rows], ["mismatch"], rows)
+        self.assertIn("1.767", rows[0]["recomputed"])
+        self.assertIn("不是2.89", rows[0]["how"])
+        ok = nm.check_review({"sections": [{"prose": ["60 除以 5 等于 12。",
+                                                      "10 除以 3 约等于 3.3。"]}]})
+        self.assertEqual([r["status"] for r in ok], ["ok", "ok"], ok)
+
     def test_拐点那句_f_两撇为零不许判方向(self):
         """⭐ 第五轮自查（产物 H 的假 ⚠）：`f''(0)=0 且两侧凹凸性改变` 是**拐点的定义**，
         `凹凸` 是名词不是方向断言 —— 当时被判成"说凹 → 该为极大"（假 ⚠）。"""

@@ -97,6 +97,25 @@ import { KEY_TTL_S, STT_RT_MODEL, collectUsage, maxSessionS, mintTempKey, pickRe
 // ---- 一人一码（docs/PLAN-passkey.md）----
 const PASSES_NAME = "passes-v1";
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
+
+// ---- 翻译上游：OpenRouter 快速通道（2026-10-17 实测）----
+// 同一模型直连 DeepSeek 官方，都柏林首字 p50 0.97 s；经 OpenRouter 落到 InferenceNet / Crusoe / Together
+// 只要 0.40–0.46 s。只把「实时翻译 / 草稿」（stream + max_tokens ≤ 400）送过去：课后精修一次几千 token，
+// 快这几百毫秒没意义，还多一个可能挂的中间商。
+// 中国用户离 DeepSeek 近（HKG），绕美国反而慢，所以 FAST_LLM_SKIP 默认 CN,HK,MO。
+// 快速上游不配合（抛错 / 响应头超时 / 非 2xx）就静默用**原 body** 走 DeepSeek；已经开始往客户端流的不再退。
+// key 错 / 额度用完（401/402/403）在本 isolate 冷却 10 分钟，免得每句都白试一次。
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+const FAST_LLM_MODEL_DEFAULT = "deepseek/deepseek-v4.1-flash";
+const FAST_LLM_ORDER_DEFAULT = "inference-net/fp8,crusoe/fp8,together";
+const FAST_LLM_SKIP_DEFAULT = "CN,HK,MO";
+const FAST_LLM_MAX_TOKENS = 400;             // 实时翻译 / 草稿；精修 4000 不绕道
+const FAST_LLM_HEADER_MS = 2500;             // 只等响应头，不等整段
+const FAST_LLM_COOLDOWN_MS = 10 * 60_000;
+const FAST_LLM_COOLDOWN_STATUS = new Set([401, 402, 403]);
+let fastLlmDownUntil = 0;                    // 本 isolate 内存：跟 lease 一样，回收就丢
+// 测试用：清掉冷却。
+export function _resetFastLlm() { fastLlmDownUntil = 0; }
 // 只放行客户端真用的模型（`main.py --cloud-model` / `keyentry` 的默认值），别让码变成任意模型的代付。
 const LLM_MODELS = new Set(["deepseek-flash", "deepseek-chat"]);
 const LLM_MAX_TOKENS = 4096;   // 客户端最大的一处是精修 / 讲解 4000
@@ -208,8 +227,50 @@ async function usageFromStream(stream, onFirst = () => {}) {
 
 const usageFields = (u) => ({
   tokens_in: u?.prompt_tokens ?? 0, tokens_out: u?.completion_tokens ?? 0,
-  cache_hit: u?.prompt_cache_hit_tokens ?? 0,
+  // DeepSeek 用 prompt_cache_hit_tokens；OpenRouter 用 prompt_tokens_details.cached_tokens。
+  cache_hit: u?.prompt_cache_hit_tokens ?? u?.prompt_tokens_details?.cached_tokens ?? 0,
 });
+
+// 快速通道只服务「实时翻译 / 草稿」：非流式 / 精修 / 中国时区都不绕美国。
+function useFastLlm(env, body, country) {
+  if (!env.OPENROUTER_KEY) return false;
+  if (body.stream !== true || body.max_tokens > FAST_LLM_MAX_TOKENS) return false;
+  if (Date.now() < fastLlmDownUntil) return false;
+  const skip = String(env.FAST_LLM_SKIP ?? FAST_LLM_SKIP_DEFAULT)
+    .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+  return !skip.includes(String(country || "").toUpperCase());
+}
+
+// 在副本上改：退回 DeepSeek 时还要用原 body（thinking / model 都是 DeepSeek 的原样）。
+function fastLlmBody(env, body) {
+  const out = { ...body };
+  out.model = env.FAST_LLM_MODEL || FAST_LLM_MODEL_DEFAULT;   // LLM_MODELS 只有 deepseek-flash / chat，都映到这一个
+  delete out.thinking;
+  out.reasoning = { enabled: false };
+  out.provider = {
+    order: String(env.FAST_LLM_ORDER || FAST_LLM_ORDER_DEFAULT)
+      .split(",").map((s) => s.trim()).filter(Boolean),
+    allow_fallbacks: true,
+  };
+  return out;
+}
+
+// 只等响应头：FAST_LLM_HEADER_MS 内没到就 abort。头部一到就清计时器，后面的流不受影响。
+async function fetchFastLlm(env, body) {
+  const ms = Number(env.FAST_LLM_HEADER_MS) || FAST_LLM_HEADER_MS;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    return await fetch(OPENROUTER_URL, {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.OPENROUTER_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify(fastLlmBody(env, body)),
+      signal: ac.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
   if (!env.DEEPSEEK_KEY) return json(503, { error: "llm_not_configured" });
@@ -223,12 +284,30 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
   body.max_tokens = Math.min(Number(body.max_tokens) || LLM_MAX_TOKENS, LLM_MAX_TOKENS);
   ev.max_tok = body.max_tokens;   // 面板据此分「实时翻译」（几十）和「课后笔记 / 精修」（上千）
   if (body.stream) body.stream_options = { ...(body.stream_options || {}), include_usage: true };
-  const up = await fetch(DEEPSEEK_URL, {
-    method: "POST",
-    headers: { authorization: `Bearer ${env.DEEPSEEK_KEY}`, "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  ev.up = `deepseek:${up.status}`;
+  let up = null, fast = "";
+  if (useFastLlm(env, body, ev.country)) {
+    try {
+      const r = await fetchFastLlm(env, body);
+      fast = `openrouter:${r.status}`;
+      if (r.ok && r.body) up = r;
+      else {
+        if (FAST_LLM_COOLDOWN_STATUS.has(r.status)) fastLlmDownUntil = Date.now() + FAST_LLM_COOLDOWN_MS;
+        try { await r.body?.cancel(); } catch { /* 错误响应体不要了 */ }
+      }
+    } catch (e) {
+      fast = `openrouter:${e?.name === "AbortError" ? "timeout" : "err"}`;
+    }
+  }
+  if (!up) {
+    up = await fetch(DEEPSEEK_URL, {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.DEEPSEEK_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify(body),   // 原 body：退回必须与不配 OPENROUTER_KEY 时逐字一致
+    });
+    ev.up = fast ? `${fast}>deepseek:${up.status}` : `deepseek:${up.status}`;
+  } else {
+    ev.up = fast;   // openrouter:<status>
+  }
   const headers = { "content-type": up.headers.get("content-type") || "application/json" };
   if (!up.ok || !up.body) {
     return new Response(up.body, { status: up.status, headers });   // 上游错误原样回（不记用量）

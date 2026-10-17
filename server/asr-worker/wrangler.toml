@@ -10,8 +10,10 @@
 #   wrangler secret put ADMIN_TOKEN       # 一人一码：/v1/admin/* 只认它（scripts/cl_admin.py 读 ~/.classlive/asr-admin-token）
 #   wrangler secret put SONIOX_KEY        # 实时转写的临时 key 由它签发（美国区项目）。⚠️ 这把主 key 的权限要有
 #                                         #   **Temporary API keys** + Speech-to-Text；临时 key 才下发，主 key 不出 Worker。
-#   wrangler secret put SONIOX_KEY_JP     # 可选：日本区项目的 key（CN/HK/MO/TW/JP/KR 访客走 api.jp.*）。
-#                                         #   不配 = 全走美国区，代码不需要改。
+#   wrangler secret put SONIOX_KEY_JP     # 可选：日本区项目的 key（CN/HK/MO/TW/JP/KR 访客 + 亚洲/大洋洲访客走 api.jp.*）。
+#                                         #   不配 = 这些访客全走美国区。
+#   wrangler secret put SONIOX_KEY_EU     # 可选：欧盟区项目的 key（欧洲/非洲访客走 api.eu.*）。不配 = 走美国区。
+#                                         #   两个可选 key 都不配，代码不需要改 —— 全走美国（fail-safe）。
 #   wrangler deploy
 #
 # 实时转写的会话上限默认 3 h。要改就加一段 [vars]（可选，不写就用默认）：

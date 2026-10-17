@@ -8,7 +8,10 @@
 // 设计与出处：docs/PLAN-r2-cloud-final-asr.md §W、docs/RESEARCH-cloud-asr.md。
 //
 // 2026-10-17 另加两条独立的路（都不碰音频）：
-//   POST /v1/soniox/key   实时转写：只发一把 Soniox 临时 key（查码 kind="rt"），客户端自己连 WebSocket
+//   POST /v1/soniox/key   实时转写：只发一把 Soniox 临时 key（查码 kind="rt"），客户端自己连 WebSocket。
+//                         可选 body `{region:"us|jp|eu", purpose:"probe"}`：region 只在配了那个区的 key 时才听
+//                         （没配 = 忽略回默认）；purpose=probe 发 15 s 会话上限的探测 key（事件里带 :probe，
+//                         便于把探测与真上课的花费分开看）。
 //   scheduled()           Cron（每小时）：把 Soniox 用量日志的音频秒按码名回收进 Passes 的 rt_s
 
 // ⚠️ **CHAIN 只在这里定义一处**；DO 从 /plan 请求里收，避免两处列表漂移。
@@ -92,7 +95,8 @@ function toBase64(buf) {
 
 import { TURBO, V3 } from "./quota-core.js";
 import { CODE_RE } from "./passes-core.js";
-import { KEY_TTL_S, STT_RT_MODEL, collectUsage, maxSessionS, mintTempKey, pickRegion, wsUrl } from "./soniox-core.js";
+import { KEY_TTL_S, PROBE_MAX_SESSION_S, REGION_NAMES, STT_RT_MODEL, configuredRegions, collectUsage,
+         maxSessionS, mintTempKey, pickRegion, regionKey, wsUrl } from "./soniox-core.js";
 
 // ---- 一人一码（docs/PLAN-passkey.md）----
 const PASSES_NAME = "passes-v1";
@@ -360,20 +364,27 @@ async function jev(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
 // 认证与转写同路：只认通行码（公开令牌在 route 里就被 401 掉了）；查码走 passGate（kind="rt"，
 // 额度按已回收的 rt_s 判）；晚到的拒绝照 settleGate 的语义 —— key 已经发出来了但**不给**，上游最多白花一把。
 // 上游不配合（非 2xx / 超时 / 回包没 key）一律 502，客户端按「云端不可用」降级。出处见 soniox-core.js 文件头。
-async function sonioxKey(env, code, install, ev) {
+async function sonioxKey(env, code, install, ev, request) {
   const gate = await passGate(env, code, install, "rt");
   if (gate.deny) return gate.deny;
   if (!env.SONIOX_KEY) return json(503, { error: "soniox_not_configured" });   // fail-closed：没配就谁都不给
-  const region = pickRegion(ev.country, env);
-  const max_session_s = maxSessionS(env);
+  // 可选参数（客户端探测 / 联调用；老客户端不发 body，逐字退回改前行为）：
+  //   region  只在**那个区配了 key** 时才生效（没配 / 拼错 -> 忽略回默认 —— 与 pickRegion 同一条 fail-safe）；
+  //   purpose=probe -> 15 s 会话上限的探测 key；事件里带 `:probe`，便于把探测与真上课的花费分开看。
+  const body = await request.json().catch(() => ({}));
+  const b = body && typeof body === "object" ? body : {};
+  const probe = b.purpose === "probe";
+  const want = typeof b.region === "string" ? b.region.trim().toLowerCase() : "";
+  const explicit = REGION_NAMES.includes(want) && regionKey(env, want) ? want : "";
+  const region = explicit || pickRegion(ev.country, env);
+  const max_session_s = probe ? PROBE_MAX_SESSION_S : maxSessionS(env);
   ev.model = STT_RT_MODEL;
   const mint = await mintTempKey({
-    region, name: code.split("-")[1], maxSessionS: max_session_s,
-    apiKey: region === "jp" ? env.SONIOX_KEY_JP : env.SONIOX_KEY,
+    region, name: code.split("-")[1], maxSessionS: max_session_s, apiKey: regionKey(env, region),
   });
-  ev.up = `soniox-${region}:${mint.status || "timeout"}`;   // ⚠️ 只记状态码，**key 本身绝不进日志 / 事件**
+  ev.up = `soniox-${region}:${mint.status || "timeout"}${probe ? ":probe" : ""}`;   // ⚠️ 只记状态码，**key 本身绝不进日志 / 事件**
   // 上游挂了要留一行（不然 502 风暴在日志里看不见）；仍然只记状态码。
-  if (!mint.api_key) console.log(JSON.stringify({ soniox: "mint_failed", region, status: mint.status || "timeout" }));
+  if (!mint.api_key) console.log(JSON.stringify({ soniox: "mint_failed", region, probe, status: mint.status || "timeout" }));
   const res = mint.api_key
     ? json(200, { api_key: mint.api_key, ws_url: wsUrl(region), region,
                   expires_in_seconds: KEY_TTL_S, max_session_s })
@@ -386,9 +397,9 @@ async function sonioxKey(env, code, install, ev) {
 // client_reference_id = 码名。这里按名字把音频秒补进 Passes 的 rt_s（键与 usage() 同一格）。
 // ⚠️ 去重与游标都在 Passes 里（passes-core 的 /admin/rt/*）：一个 DO 调用里完成「去重 + 找码 + 落账 + 推游标」，
 //    所以同一条日志不会记两次、也不会记一半；窗口起点由 DO 按 OVERLAP 回退，重叠段靠 uuid 去重。
-// ⚠️ 日本区没配 key 就整个跳过（现在就是这样）。两个区各拉各的，互不影响。
+// ⚠️ 每个配置了 key 的区各拉各的（`configuredRegions`，加区不改这里）；没配 key 的区整个跳过。
 async function reclaimUsage(env, region, nowMs) {
-  const apiKey = region === "jp" ? env.SONIOX_KEY_JP : env.SONIOX_KEY;
+  const apiKey = regionKey(env, region);
   if (!apiKey) return;
   const cur = await passes(env, "/admin/rt/cursor", { region }).then((r) => r.json()).catch(() => null);
   if (!cur || cur.error) {
@@ -614,12 +625,12 @@ export default {
     return res;
   },
 
-  // Cron（wrangler.toml 的 [triggers]）：两个区各拉各的用量日志，回收进 Passes。
+  // Cron（wrangler.toml 的 [triggers]）：每个配置了 key 的区各拉各的用量日志，回收进 Passes。
   // 用 event.scheduledTime 当窗口末尾 —— 定时的语义就是「拉到这一刻」，顺带给测试一个确定的时钟。
   // 一个区挂了不影响另一个；这里自己吞掉异常并**记一行**（cron 没有重试，抛出去也只是多一条 invocation 报错）。
   async scheduled(event, env) {
     const nowMs = Number(event?.scheduledTime) || Date.now();
-    await Promise.all(["us", "jp"].map((region) =>
+    await Promise.all(configuredRegions(env).map((region) =>
       reclaimUsage(env, region, nowMs).catch((e) =>
         console.log(JSON.stringify({ soniox: "reclaim_threw", region, msg: String(e).slice(0, 120) })))));
   },
@@ -669,8 +680,9 @@ async function route(request, env, ctx, ev, path, t0) {
   const { success } = await env.PER_INSTALL.limit({ key: install });
   if (!success) return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
 
-  // 实时转写：只发一把临时 key（客户端拿了自己连 Soniox），所以这里没有音频 body 要读。
-  if (path === "/v1/soniox/key") return sonioxKey(env, code, install, ev);
+  // 实时转写：只发一把临时 key（客户端拿了自己连 Soniox），所以这里没有音频 body 要读
+  // （`sonioxKey` 自己读那个可选的 `{region, purpose}` —— 别的路一个字节都不读）。
+  if (path === "/v1/soniox/key") return sonioxKey(env, code, install, ev, request);
 
   // R20：先看 Content-Length，超了不读；但它可以谎报，所以读完仍按**实际字节数**再判一次。
   if (Number(request.headers.get("content-length")) > MAX_BYTES) return new Response("too large", { status: 413 });

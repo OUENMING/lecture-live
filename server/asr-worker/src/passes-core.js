@@ -24,6 +24,10 @@
 // 音频不经 Worker）。Worker 看不到音频流，所以 rt_s **不是**请求时记的，而是 Cron 每小时从 Soniox 的
 // 用量日志回收（按 client_reference_id = 码名）补进 use:<日>:<码>，见 handler.js 的 scheduled 与下面的
 // /admin/rt/* 两条路由。两条路由只给 Worker 自己（和 ADMIN_TOKEN 面板）用，不给客户端。
+//
+// ⚠️「哪些区合法」的唯一定义点在 `soniox-core.REGIONS`（这里 import REGION_NAMES，**别再抄一份 us/jp**）。
+
+import { REGION_NAMES } from "./soniox-core.js";
 
 const DAY_MS = 86400000;
 export const DEFAULT_DAYS = 120;
@@ -324,9 +328,9 @@ export class PassCore {
   // ---- 实时转写的用量回收（见文件头）----
 
   // 游标：`soniox:<区>` = {since_ms, last_ms, seen:{uuid: end_ms}}。
-  // 只认 us / jp 两个区，别的直接报错 —— 别在 storage 里长野键。
+  // 只认 `REGION_NAMES`（soniox-core 的地区表）里的区，别的直接报错 —— 别在 storage 里长野键。
   async #rtState(region) {
-    if (region !== "us" && region !== "jp") return null;
+    if (!REGION_NAMES.includes(region)) return null;
     const raw = (await this.storage.get(`soniox:${region}`)) || {};
     const st = { since_ms: num(raw.since_ms), last_ms: num(raw.last_ms), seen: raw.seen };
     if (!st.seen || typeof st.seen !== "object" || Array.isArray(st.seen)) st.seen = {};

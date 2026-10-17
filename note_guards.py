@@ -42,6 +42,27 @@ _SPEC = re.compile(rf"(?:我|我们)[^。；;\n]{{0,20}}(?:{_HEDGE}|{_GUESS})"
                    rf"|（\s*(?:假设|假定)"
                    rf"|（\s*(?:{_HEDGE})\s*）")
 
+#: ⭐ 第六轮（作者 2026-10-17）：**自言自语** —— 模型的思考过程漏进了答案。
+#: 作者点名的原话（ECON10770 变式 2 的答案，整段都是）：
+#:     「…所以（打扫，不打扫）是纳什均衡吗？检查列：给定行打扫，列不打扫得4…
+#:      这不对，因为行在列不打扫时无差异。但通常我们要求严格偏好？」
+#: 那些句子不是讲解，是它在跟自己讨论；留在答案里读者会以为那是结论。
+#: ⚠️ 判据刻意窄：只认**元话语**（检查/重新想/这不对/等等），不认"？"本身 ——
+#:    正文里问句是正常的（「为什么会这样？」），宽一层就开始删真内容。
+_SELF_TALK = re.compile(r"需要(?:仔细|重新)?(?:检查|核对)|重新检查|重新想|重新算|"
+                        r"让我(?:想|想想|算|检查)|我想想|先看看|"
+                        r"检查[:：](?=\s*(?:若|如果|给定|假设))|"
+                        r"这不对[，,]?因为|(?<=[。；;？?])这不对|"
+                        r"(?:等等|嗯)[，,]")
+
+#: 自问自答的**第二档**：以问号收尾的句子 + 解答里冒出来的「检查：」。
+#: ⚠️ 只在**解答字段**里生效（`_solution_like`）—— 讲解与自测**题面**里的问句是正常的
+#:    （「什么是公共物品？」「为什么会这样？因为…」），解答里问句则几乎一定是独白。
+#:    实测那一段（ECON10770 变式 2 的步骤）是「…也是弱纳什均衡？所以（打扫，不打扫）
+#:    也是纳什均衡？…检查：你打扫得0…」整段边问边答 —— 只按元话语删两句等于没删。
+_SELF_Q = re.compile(r"^.{6,}[？?]$")
+_SOLUTION_META = re.compile(r"检查[:：]")
+
 #: 这句话是在讲"出处不可靠"—— 用它决定要不要补那句固定格式。
 #: ⚠️ `我可能听错了公式` 这种（第一人称 + 听错/漏掉）也算：它点的是**出处的可靠性**，
 #:    不是某个数值的大小。
@@ -54,6 +75,72 @@ FIXED_LINE = "⚠ 课上只给了片段：原题不在本课材料里，相关�
 _QUOTE = re.compile(r"[“\"]([^”\"]{8,300})[”\"]")
 _ELLIPSIS = re.compile(r"…|\.\.\.|\s—\s|--")
 _ENOUGH_EN = re.compile(r"[A-Za-z]{2,}")
+
+#: 遍历时**不打扫**的顶层键。`cover` 是机器数据（来自 `.atoms.jsonl` 的实时要点），
+#: 不是模型的散文；覆盖度那张表就是按它印的。
+_SKIP_TOP = ("cover",)
+
+
+def paths_of(obj, prefix: tuple = ()) -> list:
+    """**所有字符串**的路径（`("sections", 0, "variants", 1, "a")` 这种）。
+
+    ⭐ 第六轮第 3 条：一个遍历解决"清理只覆盖 `prose`、变式/答案漏掉"那类事故 ——
+       猜过程/自言自语在哪一类字段里都长一个样，而清理代码是**按字段**抄了五六份。
+    """
+    out: list = []
+    if isinstance(obj, str):
+        return [prefix]
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out += paths_of(v, prefix + (k,))
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            out += paths_of(v, prefix + (i,))
+    return out
+
+
+def _get(obj, path: tuple):
+    for k in path:
+        obj = obj[k]
+    return obj
+
+
+def _set(obj, path: tuple, val) -> None:
+    for k in path[:-1]:
+        obj = obj[k]
+    obj[path[-1]] = val
+
+
+def _solution_like(path: tuple) -> bool:
+    """**解答字段**（答案 / 步骤正文）—— "边问边答"在这里几乎一定是独白。
+
+    ⚠️ 与 `_prose_like` 是一对：讲解/题面里问句是教学手法（要留），解答里问句是
+       模型的思考过程（要删）。同一条文字落在哪一类字段里，判法不同。
+    ⚠️ **题面（`q`/`prompt`）与「为什么」（`why`）不算解答**：自测的题干就是问句
+       （实测：`qa.0.q`「什么是公共物品？」—— 按解答清理会把整份自测的题干删空）。
+    """
+    if not path:
+        return False
+    last = path[-1]
+    if last in ("a", "answer"):
+        return True
+    if last in ("q", "prompt", "why", "claim"):
+        return False
+    return "steps" in path
+
+
+def _prose_like(path: tuple) -> bool:
+    """这一段是"讲解/题面"（可以补那句固定格式）还是"答案/步骤"（只能删）。
+
+    ⚠️ 补句只对**讲出处**的那类字段成立（`prose` / `prereq` / 题面 `q`/`prompt`）：
+       往答案或步骤里塞「⚠ 课上只给了片段」会把读者指错（那一段讲的是推导）。
+    """
+    if not path:
+        return False
+    last = path[-1]
+    if isinstance(last, int):
+        return len(path) >= 2 and path[-2] in ("prose", "pitfalls")
+    return last in ("prose", "prereq", "q", "prompt")
 
 
 def _norm(s: str) -> str:
@@ -70,20 +157,39 @@ def _sentences(text: str) -> list:
 
 
 def scrub(review: dict) -> tuple:
-    """删掉猜测句 →（清理后的 review, 删掉的原句, 提醒）。
+    """删掉猜测句/自言自语 →（清理后的 review, 删掉的原句, 提醒）。**全字段**。
 
     ⚠️ 只删、不重写：重写要懂上下文，删掉是最诚实的动作（事实仍在正文别处或 `checks` 里）。
+    ⭐ 第六轮第 3 条：遍历**每一处字符串**（`note_guards.paths_of`），不再按字段抄 ——
+       实测漏掉的正是 `variants[].a`（作者亲自标出来那一段自言自语）。
+    ⚠️ 清空之后**宁缺**：变式/补全题/自测的答案被清空 → 整题不出（读者会以为那就是答案）。
     """
     out = copy.deepcopy(review)
     removed: list = []
     warns: list = []
+    # 清理**前**的答案（用来判"清空"）：原地改对象，id 不变，所以能对上号。
+    before: dict = {}
+    for s in (out.get("sections") or []):
+        if not isinstance(s, dict):
+            continue
+        for v in (s.get("variants") or []) + [s.get("faded")]:
+            if isinstance(v, dict):
+                before[id(v)] = _one(v.get("a")) if "a" in v else _one(v.get("answer"))
+    for q in (out.get("qa") or []):
+        if isinstance(q, dict):
+            before[id(q)] = _one(q.get("a")) + "\x00" + _one(q.get("q"))
 
-    def clean(v: str) -> str:
-        if not isinstance(v, str) or not v:
-            return v
+    def clean(v: str, prose_like: bool, solution: bool) -> str:
         kept, dropped, frag = [], [], False
-        for s in _sentences(v):
-            if _SPEC.search(s):
+        parts = _sentences(v)
+        # ⚠️ 问句那一档要**成串**才动手：解答里单独一个反问是正常的写法
+        #    （「为什么会这样？因为价格等于边际成本…」），而成串的问句（实测那一段有 6 句）
+        #    是模型在跟自己讨论。一条规则两个方向都要站得住。
+        doubts = sum(1 for x in parts if _SELF_Q.search(x))
+        for s in parts:
+            if (_SPEC.search(s) or _SELF_TALK.search(s)
+                    or (solution and _SOLUTION_META.search(s))
+                    or (solution and doubts >= 2 and _SELF_Q.search(s))):
                 dropped.append(s.strip())
                 frag = frag or bool(_FRAGMENT.search(s))
                 continue
@@ -92,38 +198,97 @@ def scrub(review: dict) -> tuple:
             return v
         removed.extend(dropped)
         body = "".join(kept).strip()
-        if frag and FIXED_LINE not in body:
+        if frag and prose_like and FIXED_LINE not in body:
             # ⚠️ 用空格接在末尾，不换行：`prose` 的每个元素就是**一段**（渲染层按段写），
             #    内嵌 `\n` 会破坏"每个字段是单行字符串"那条数据纪律。
             body = (body + " " + FIXED_LINE).strip()
         return body
 
-    def clean_list(xs):
-        return [clean(x) if isinstance(x, str) else x for x in (xs or [])]
+    for path in paths_of(out):
+        if path and path[0] in _SKIP_TOP:
+            continue
+        v = _get(out, path)
+        if not isinstance(v, str) or not v:
+            continue
+        new = clean(v, _prose_like(path), _solution_like(path))
+        if new != v:
+            _set(out, path, new)
 
+    # ── 清空之后：列表里的空串一律剪掉（`review_plan` / `prose` / `blanks` …）─────
+    _prune_empty(out)
+
+    # ── 宁缺：**答案被清空**的题整道不出（作者第六轮第 3 条）────────────────
+    # ⚠️ 只说"清空"这一种。**不许**顺手加"删了太短就扔"这类判据：数学答案本来就短
+    #    （`$q=3$`），长度判据会开始扔真题（判据实测：变式答案 `6` 被扔掉）。
+    gone = 0
     for s in (out.get("sections") or []):
-        s["prose"] = [x for x in clean_list(s.get("prose")) if str(x).strip()]
-        s["pitfalls"] = [x for x in clean_list(s.get("pitfalls")) if str(x).strip()]
-        for key in ("example", "faded"):
-            blk = s.get(key) or {}
-            for f in ("prompt", "answer", "q", "a"):
-                if isinstance(blk.get(f), str):
-                    blk[f] = clean(blk[f])
-            for st in (blk.get("steps") or []):
-                if isinstance(st, dict):
-                    for f in ("text", "why"):
-                        st[f] = clean(st.get(f, ""))
+        if not isinstance(s, dict):
+            continue
+        keep = []
         for v in (s.get("variants") or []):
-            for f in ("q", "a"):
-                if isinstance(v.get(f), str):
-                    v[f] = clean(v[f])
-            for st in (v.get("steps") or []):
-                if isinstance(st, dict):
-                    for f in ("text", "why"):
-                        st[f] = clean(st.get(f, ""))
+            if not isinstance(v, dict):
+                continue
+            if not _one(v.get("a")) and before.get(id(v)):
+                gone += 1
+                continue                       # 答案被清空了 → 这道变式不出
+            v["steps"] = [x for x in (v.get("steps") or []) if _alive(x)]
+            keep.append(v)
+        s["variants"] = keep
+        for key in ("example", "faded"):
+            blk = s.get(key)
+            if not isinstance(blk, dict):
+                continue
+            if key == "faded" and not _one(blk.get("a")) and before.get(id(blk)):
+                s[key] = {}
+                gone += 1
+                continue
+            blk["steps"] = [x for x in (blk.get("steps") or []) if _alive(x)]
+        s["prose"] = [x for x in (s.get("prose") or []) if _one(x)]
+        s["pitfalls"] = [x for x in (s.get("pitfalls") or []) if _one(x)]
+    qa = []
+    for q in (out.get("qa") or []):
+        if not isinstance(q, dict):
+            continue
+        if (not _one(q.get("q")) or not _one(q.get("a"))) and before.get(id(q)):
+            gone += 1
+            continue
+        qa.append(q)
+    if out.get("qa"):
+        out["qa"] = qa
     if removed:
-        warns.append(f"正文删掉 {len(removed)} 处猜测句（不许第一人称/猜过程）")
+        warns.append(f"正文删掉 {len(removed)} 处猜测句/自言自语"
+                     "（不许第一人称、不许猜过程、不许自己跟自己讨论）")
+    if gone:
+        warns.append(f"{gone} 道题的答案被清空 → 整题不出（宁缺）")
     return out, removed, warns
+
+
+def _one(v) -> str:
+    """单行化（`_one_line` 的本地版，与 `note_v2._one_line` 同一口径）。"""
+    return " ".join(str(v or "").split())
+
+
+def _prune_empty(obj) -> None:
+    """列表里的空串剪掉（原地）。`review_plan` / `blanks` / `prose` 这些都可能被清空。"""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            _prune_empty(v)
+        return
+    if not isinstance(obj, list):
+        return
+    keep = [x for x in obj if not (isinstance(x, str) and not x.strip())]
+    obj[:] = keep
+    for x in obj:
+        _prune_empty(x)
+
+
+def _alive(x) -> bool:
+    """一条 step 清理后还活着吗（**字符串**与 `{"text","why"}` 两种形状都认）。"""
+    if isinstance(x, str):
+        return bool(_one(x))
+    if isinstance(x, dict):
+        return bool(_one(x.get("text")) or _one(x.get("why")))
+    return False
 
 
 # ---------------------------------------------------------------- 停产价格口径
@@ -154,8 +319,8 @@ def ensure_caliber(review: dict) -> tuple:
     return out, added, ([f"{len(added)} 节缺 AVC 口径对照，已按固定句式补上"] if added else [])
 
 
-# ---------------------------------------------------------------- 引号核
 def _sources(materials, transcript: str) -> str:
+    """比对用的语料：课件索引的全文 + 转录（归一化后）。"""
     blob = str(getattr(materials, "_blob", "") or "")
     return _norm(blob + "\n" + str(transcript or ""))
 
@@ -178,6 +343,10 @@ def quote_check(review: dict, *, materials=None, transcript: str = "") -> tuple:
 
     判据：整段**逐字**在材料/转录里 → 留；用省略号拼的，两段必须在原文里相邻；
     否则**去掉引号**（`（转述）`）—— 拼接的引用会让读者以为材料里就是这么写的。
+
+    ⚠️ 与 `scrub` 同一个遍历（全字段）：`checks` 那一栏也要过一遍 —— 模型会在
+       核定表的「断言」列里引用"材料原话"（实测：A 那份的表格里就留着一句拼接引用，
+       正文里已经去掉了）。
     """
     out = copy.deepcopy(review)
     src = _sources(materials, transcript)
@@ -203,35 +372,12 @@ def quote_check(review: dict, *, materials=None, transcript: str = "") -> tuple:
 
         return _QUOTE.sub(one, v)
 
-    def fix_list(xs):
-        return [fix(x) if isinstance(x, str) else x for x in (xs or [])]
-
-    # ⚠️ `checks` 也要过一遍：模型会在核定表的「断言」列里引用"材料原话"
-    #    （实测：A 那份的表格里就留着一句拼接引用，正文里已经去掉了）。
-    for c in (out.get("checks") or []):
-        if isinstance(c, dict):
-            for f in ("claim", "how"):
-                if isinstance(c.get(f), str):
-                    c[f] = fix(c[f])
-    for s in (out.get("sections") or []):
-        s["prose"] = fix_list(s.get("prose"))
-        for key in ("example", "faded"):
-            blk = s.get(key) or {}
-            for f in ("prompt", "answer", "q", "a"):
-                if isinstance(blk.get(f), str):
-                    blk[f] = fix(blk[f])
-            for st in (blk.get("steps") or []):
-                if isinstance(st, dict):
-                    for f in ("text", "why"):
-                        st[f] = fix(st.get(f, ""))
-        for v in (s.get("variants") or []):
-            for f in ("q", "a"):
-                if isinstance(v.get(f), str):
-                    v[f] = fix(v[f])
-            for st in (v.get("steps") or []):
-                if isinstance(st, dict):
-                    for f in ("text", "why"):
-                        st[f] = fix(st.get(f, ""))
+    for path in paths_of(out):
+        if path and path[0] in _SKIP_TOP:
+            continue
+        v = _get(out, path)
+        if isinstance(v, str) and v:
+            _set(out, path, fix(v))
     if stripped:
         warns.append(f"{len(stripped)} 处引用在材料/转录里找不到逐字原文（已去掉引号改转述）")
     return out, stripped, warns

@@ -87,8 +87,11 @@ _SELFTALK = [
     re.compile(r"(?:可能|也许)[^。；;\n]{0,8}(?:是|为|想|为了|故意)"),
     re.compile(r"（\s*(?:假设|假定)"),
     # ③ 自言自语/自我纠错的独白（模型的思考过程漏进了答案）
-    re.compile(r"需要仔细检查|重新检查|再检查|检查：|这不对|不对[，,。]|等等[，,]|"
-               r"嗯[，,]|先看看|让我想|我想想|重新想|其实不对|也不对|"
+    # ⚠️ 刻意比产品（`note_guards._SELF_TALK`）宽一档：量具要能抓到清理漏掉的那些。
+    #    但**不**收裸的「不对，」—— 自测答案是"不对。讲者说…"这种正经写法，
+    #    把它算成独白会让这一列失去意义（实测：10740 的 qa 就是这么被误计的）。
+    re.compile(r"需要仔细检查|重新检查|再检查|检查[：:]|这不对|(?<=[？?])不对|"
+               r"等等[，,]|嗯[，,]|先看看|让我想|我想想|重新想|其实不对|也不对|"
                r"但这(?:不对|样)|前面(?:说|写)的|换一种说法"),
 ]
 
@@ -176,10 +179,17 @@ def walk_strings(obj, path: str = ""):
             yield from walk_strings(v, f"{path}/{i}")
 
 
+#: 扫自言自语时**跳过**的顶层键：`cover` 是机器数据（`.atoms.jsonl` 里实时记下的
+#: 要点原文），不是模型写的散文 —— 把讲师的实时摘要算成"模型自言自语"，这一列就废了。
+_SKIP_TOP = ("cover",)
+
+
 def selftalk_hits(obj) -> list:
     """全字段扫自言自语 → `[{"path", "snippet", "pattern"}]`。"""
     out: list = []
     for path, s in walk_strings(obj):
+        if path and path.split("/")[0] in _SKIP_TOP:
+            continue
         for i, rx in enumerate(_SELFTALK):
             m = rx.search(s)
             if m:
@@ -201,13 +211,34 @@ def tex_leaks(text: str) -> list:
     return out
 
 
+#: 扫自言自语时**不算数**的小节：纲要来自实时摘要、§9 是机器表 —— 都不是模型的散文。
+_MACHINE_SECTIONS = ("## 📑 课堂纲要", "## 覆盖度与校验清单")
+
+
+def md_prose(md: str) -> str:
+    """md 里**模型写的那部分**（去掉附录 B、课堂纲要、§9 机器表）。
+
+    ⚠️ 三处都是**机器数据**：逐句转录（学生自己的记录）、纲要（实时摘要 + 分章）、
+       §9（覆盖度表 + 核定表）。把它们算进"模型自言自语"，这一列就废了
+       （实测：10740 的「可能为那些受到负面影响的群体提供补偿」是正经讲解句子，
+       但它在纲里、不在 review 里）。
+    """
+    body = md_body(md)
+    for sec in _MACHINE_SECTIONS:
+        body = body.split(sec)[0]
+    return body
+
+
 def md_body(md: str) -> str:
-    """md 正文（**去掉附录 B 的逐句转录**）。
+    """md 正文（**去掉附录 B 的逐句转录**，以及 §9 那两张机器表）。
 
     ⚠️ 不做这一步，量具会把 300 多句英文转录算成"正文"—— `note_render.chinese_ratio`
        踩过同一个坑（同一份笔记的中文占比从 71% 掉到 34%）。
+    ⚠️ §9 的「覆盖度与校验清单」也要去掉：那一节印的是**实时要点原文**与机械核算的
+       断言（机器数据），不是模型的散文（同 `_SKIP_TOP` 的理由）。
     """
-    return re.split(r"\n## [^\n]*完整逐句转录", str(md or ""))[0]
+    body = re.split(r"\n## [^\n]*完整逐句转录", str(md or ""))[0]
+    return re.split(r"\n## 覆盖度与校验清单", body)[0]
 
 
 def hms(s) -> "int | None":
@@ -554,7 +585,7 @@ def score(key: str, d: pathlib.Path, *, one: dict, data, entries: list, elapsed:
         pass
     aud = correction_audit(checks)
     sel = selftalk_hits(review)
-    sel_md = selftalk_hits({"md": body})
+    sel_md = selftalk_hits({"md": md_prose(md)})
     terms = term_audit(getattr(data, "glossary_added", None) or [],
                        transcript=transcript, materials_blob=blob)
     warn_lines = [ln.strip() for ln in body.splitlines() if "⚠" in ln]

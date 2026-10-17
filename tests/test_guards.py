@@ -67,6 +67,120 @@ class Speculation(unittest.TestCase):
         self.assertEqual(ex["variants"][0]["a"], "6", "干净的内容被误删")
 
 
+class SelfTalk(unittest.TestCase):
+    """⭐ 第六轮第 3 条：**自言自语**（模型的思考过程漏进答案）+ 清理覆盖全字段。
+
+    用例是 ECON10770（10-09 厨房清洁博弈）产物里变式 2 答案的原话节选 ——
+    不是 10-15 那节课的句子（作者要求新判据不许再只用一节课的语料）。
+    """
+    #: 产物原文（节选）：整段是模型在跟自己讨论，读者会以为那是答案。
+    TALK = ("所以（打扫，不打扫）也是纳什均衡？检查：若行打扫、列不打扫，行得0，列得4；"
+            "行偏离到不打扫得0，无利可图。这不对，因为行在列不打扫时无差异。"
+            "但通常我们要求严格偏好？")
+
+    def test_变式答案里的自言自语被删(self):
+        rev = {"sections": [{"variants": [
+            {"q": "变式的题面",
+             "a": "纳什均衡仍是（不打扫，不打扫），每人得0。" + self.TALK}]}]}
+        out, removed, warns = ng.scrub(rev)
+        self.assertTrue(removed, "没删掉自言自语")
+        self.assertTrue(warns)
+        a = out["sections"][0]["variants"][0]["a"]
+        self.assertNotIn("检查：", a)
+        self.assertNotIn("这不对", a)
+        self.assertIn("纳什均衡仍是（不打扫，不打扫），每人得0。", a, "干净的那一句被连带删了")
+
+    def test_整段都是独白的答案_宁可不出(self):
+        """宁缺：答案是**整段**自言自语 → 这道变式不出（留半道比没有更坏）。"""
+        rev = {"sections": [{"variants": [{"q": "变式题面", "a": self.TALK}]}]}
+        out, removed, warns = ng.scrub(rev)
+        self.assertTrue(removed)
+        self.assertEqual(out["sections"][0]["variants"], [], "整段独白的答案不该留下")
+        self.assertTrue(any("整题不出" in w for w in warns), warns)
+
+    def test_自测题干是问句_不许当独白删(self):
+        """⚠️ 判据实测过的坑：自测的题干本来就以「？」收尾 —— 按解答清理会把题干删空。"""
+        rev = {"qa": [{"q": "什么是公共物品？为什么市场会供给不足？",
+                       "a": "既无竞争性也无排他性。搭便车让人不肯出钱。"}]}
+        out, removed, _w = ng.scrub(rev)
+        self.assertEqual(removed, [])
+        self.assertEqual(out["qa"][0]["q"], "什么是公共物品？为什么市场会供给不足？")
+
+    def test_哪些字段算解答(self):
+        """`_solution_like` 的分类表（判据直接钉它，省得靠用例间接表达）。"""
+        yes = [("sections", 0, "variants", 0, "a"), ("sections", 0, "example", "answer"),
+               ("sections", 0, "faded", "a"), ("sections", 0, "variants", 0, "steps", 1, "text"),
+               ("qa", 0, "a")]
+        no = [("sections", 0, "variants", 0, "q"), ("sections", 0, "example", "prompt"),
+              ("sections", 0, "variants", 0, "steps", 1, "why"), ("qa", 0, "q"),
+              ("sections", 0, "prose", 1), ("checks", 0, "claim")]
+        for p in yes:
+            self.assertTrue(ng._solution_like(p), p)
+        for p in no:
+            self.assertFalse(ng._solution_like(p), p)
+
+    def test_解答里的问句才算独白(self):
+        """同一条文字：落在讲解里留着，落在解答里删掉。"""
+        out, removed, _w = ng.scrub(
+            {"sections": [{"prose": ["为什么会这样？因为价格等于边际成本。"],
+                           "variants": [{"q": "题面", "a": "为什么会这样？因为价格等于边际成本时没人能改变结果。"}]}]})
+        self.assertEqual(out["sections"][0]["prose"], ["为什么会这样？因为价格等于边际成本。"])
+        self.assertIn("为什么会这样？", out["sections"][0]["variants"][0]["a"])
+
+    def test_答案被清空就整道变式不出(self):
+        """宁缺：答案是**整段**自言自语 → 这道变式不出（留半道比没有更坏）。"""
+        rev = {"sections": [{"variants": [{"q": "题面", "a": self.TALK.split("。")[1] + "。"},
+                                          {"q": "题的题面", "a": "$q=3$"}]}]}
+        out, removed, warns = ng.scrub(rev)
+        vs = out["sections"][0]["variants"]
+        self.assertEqual([v["q"] for v in vs], ["题的题面"], vs)
+        self.assertEqual(vs[0]["a"], "$q=3$")
+        self.assertTrue(any("整题不出" in w for w in warns), warns)
+
+    def test_短答案不许被扔(self):
+        """⚠️ 判据实测过的坑：加"答案太短就不出"会扔掉真题（`$q=3$` 这种）。"""
+        rev = {"sections": [{"variants": [{"q": "题面", "a": "6"}]}]}
+        out, _r, _w = ng.scrub(rev)
+        self.assertEqual(len(out["sections"][0]["variants"]), 1)
+        self.assertEqual(out["sections"][0]["variants"][0]["a"], "6")
+
+    def test_全字段都过一遍(self):
+        """自测 / 核对表 / 术语 / 复习安排里的话也要清（原来只清 prose）。"""
+        rev = {"sections": [{"heading": "h", "prose": ["正常讲解。"],
+                             "terms": [{"en": "public good", "zh": "我可能记错的中文。"}]}],
+               "qa": [{"q": "自测题？", "a": "我估计错了。"}],
+               "checks": [{"claim": "4-3=1", "how": "这不对，因为说不通", "status": "unchecked"}],
+               "review_plan": ["重新检查一遍全局均衡。"],
+               "corrections": [{"where": "x", "spoken": "s", "fixed": "我漏掉了 3。"}]}
+        out, removed, _w = ng.scrub(rev)
+        self.assertGreaterEqual(len(removed), 4, removed)
+        self.assertEqual(out["qa"], [], "自测的答案空了 → 整条不出")
+        self.assertNotIn("这不对", out["checks"][0]["how"])
+        self.assertEqual(out["review_plan"], [])
+        self.assertEqual(out["corrections"][0]["fixed"], "")
+        self.assertEqual(out["sections"][0]["terms"][0]["zh"], "")
+        self.assertEqual(out["sections"][0]["prose"], ["正常讲解。"])
+
+    def test_正经问句不误伤(self):
+        for s in ("为什么会这样？因为价格等于边际成本时没人能改变结果。",
+                  "等等，这里要先看不变量是什么。",  # 反面：这句**是**独白 → 见下一条
+                  ):
+            if s.startswith("等等"):
+                continue
+            out, removed, _w = ng.scrub({"sections": [{"prose": [s]}]})
+            self.assertEqual(removed, [], f"误删：{s}")
+
+    def test_等等这类口头语只删独白句(self):
+        out, removed, _w = ng.scrub({"sections": [{"prose": ["等等，给我一分钟。"]}]})
+        self.assertEqual(len(removed), 1, removed)
+        self.assertEqual(out["sections"][0]["prose"], [])
+
+    def test_遍历带路径(self):
+        got = ng.paths_of({"sections": [{"variants": [{"a": "x"}]}], "qa": ["y"]})
+        self.assertIn(("sections", 0, "variants", 0, "a"), got)
+        self.assertIn(("qa", 0), got)
+
+
 class Quotes(unittest.TestCase):
     # 真材料里的两段之间隔着一段推导（实测：Dec-2025 官方解答 Exercise 7(ii)）——
     # 距离就是判据的一部分，所以这里照抄"隔着推导"的形状。

@@ -156,6 +156,16 @@ class GateFlags(unittest.TestCase):
         self.assertIsNone(g.take_notice())           # 第二次 -> None（只发一次）
         self.assertIsNone(g.take_notice())
 
+    def test_fell_back_只在退回之后为真(self):
+        s = FakeStream(alive=False)                  # 建连中：没活但也没退回
+        g = StreamGate(s)
+        self.assertFalse(g.fell_back)
+        s.die("network")
+        self.assertFalse(g.fell_back, "还没 take_notice 就算退回了")
+        g.take_notice()
+        self.assertTrue(g.fell_back)
+        self.assertFalse(StreamGate(None).fell_back, "没建流不算退回")
+
     def test_正常收尾不算退回不发通知(self):
         """`stop()` 之后 `reason()` 是空串（`stream_asr._finish`）—— 不许报假警。"""
         s = FakeStream(alive=True)
@@ -306,6 +316,14 @@ class MainWiring(unittest.TestCase):
         window = MAIN_SRC[i:i + 1400]
         self.assertEqual(window.count("all_settled("), 2, "收尾冲刷的两处判据都得在")
         self.assertEqual(window.count("sealedq.empty()"), 2, "两处都要把 Soniox 的 sealedq 算进去")
+
+    def test_退回后关掉短尾巴并行(self):
+        """退回本地后 `set_tail_merge(False)`：本地按 VAD 出句，开着会把本地短句并掉。"""
+        src = ast.unparse(_func("run"))
+        i = src.index("gate.take_notice()")
+        window = src[i:i + 600]
+        self.assertIn("gate.fell_back", window)
+        self.assertIn("set_tail_merge(False)", window)
 
     def test_退回走现有_notice_tag_不新增_tag(self):
         def _tags(node) -> set:

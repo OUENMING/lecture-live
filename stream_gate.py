@@ -168,6 +168,11 @@ class StreamGate:
 
     # ---- 退回
 
+    @property
+    def fell_back(self) -> bool:
+        """这节课已经退回本地（`take_notice` 之后恒真；退回是单向的，不会再回 Soniox）。"""
+        return self._freed
+
     def take_notice(self) -> str | None:
         """退回文案：**整节课只返回一次**（第一次看到 `reason()` 非空时）。"""
         if self._stream is None or self._noticed:

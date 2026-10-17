@@ -1891,7 +1891,8 @@ def run(args) -> None:
             stream = None
     gate = stream_gate.StreamGate(stream, sr=SR)
     # Soniox 逐句封口会把 "Okay?" 单独封成一句 -> 屏上并进上一行（`caption_flow.is_tail`）
-    if gate.on and callable(getattr(ui, "set_tail_merge", None)):
+    _tail = {"on": gate.on and callable(getattr(ui, "set_tail_merge", None))}
+    if _tail["on"]:
         ui.set_tail_merge(True)
 
     # ---- 问答线程状态(Phase 2) ----
@@ -2986,6 +2987,10 @@ def run(args) -> None:
             _rt = gate.take_notice()
             if _rt:
                 streamq.put(("notice", (_rt, False, "")))
+            #    退回后屏上也回到本地的样子：本地按 VAD 段出句，短尾巴并行会把本地短句并掉。
+            if _tail["on"] and gate.fell_back:
+                _tail["on"] = False
+                ui.set_tail_merge(False)
             drain()
             if src.is_done():
                 break

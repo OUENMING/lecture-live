@@ -147,7 +147,10 @@ _D2_DEF = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9]{0,5})''\s*\(\s*(?P<var>[A-Za
 #: 「在 x=-1 处，f''(-1)=-6<0」「f''(1)=6>0，故为极小值点」「AC''(q)=450/q^3」
 _D2 = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9]{0,5})''\s*\(\s*(?P<arg>[^)]{1,12})\)\s*"
                  r"[=＝]\s*(?P<v>-?\d+(?:\.\d+)?)(?![\d./])")
-_DIR_WORD = re.compile(r"极大|最大|极小|最小|凹|凸|convex|concave", re.I)
+#: ⚠️ `凹凸`/`凸凹` 是**名词**（凹凸性 / concavity），不是方向断言 —— 第五轮实测：
+#:    「拐点在 x=0 处，因为 f''(0)=0 且两侧**凹凸**性改变」被读成"说凹 → 该为极大"，
+#:    报出一条 `false ⚠ 应为 0`。判据：`凹`/`凸` 后面紧跟另一个凸凹字时不算方向词。
+_DIR_WORD = re.compile(r"极大|最大|极小|最小|凹(?!凸)|凸(?!凹)|convex|concave", re.I)
 #: 「极小」这一侧的词：f'' 该为正。凸（convex）与极小同侧 —— 实测句子里常写「函数凸，故为极小值」。
 _DIR_MIN = {"极小", "最小", "凸"}
 
@@ -475,15 +478,21 @@ def _rows_for_text(t: str, fdefs: dict) -> list:
         tail = t[m.end():m.end() + 20]
         word = _DIR_WORD.search(tail) or _DIR_WORD.search(t[max(0, m.start() - 12):m.start()])
         ok_dir = True
+        # ⚠️ `f''` 本身就是 0 时**没有方向可言**（驻点/拐点/鞍点）：再拿「凹/极大」去判
+        #    必然假报（判据：`f''(0)=0 且两侧凹凸性改变` 是拐点的**定义**）。
+        if abs(want) <= max(1e-2, 1e-3 * abs(v)):
+            word = None
         if word:
             says_min = word.group(0).lower() in _DIR_MIN
             ok_dir = (says_min and want > 0) or (not says_min and want < 0)
         if ok_val and ok_dir:
+            note2 = ("；二阶导≈0，不判极大极小（拐点）" if word is None and abs(want) <= 1e-2 else "")
             rows.append({"claim": t, "status": "ok", "recomputed": f"{name}''({x})≈{_fmt(want)}",
-                         "how": f"数值二阶导：{name}''({x})≈{_fmt(want)}（与断言一致）"})
+                         "how": f"数值二阶导：{name}''({x})≈{_fmt(want)}（与断言一致）{note2}"})
         else:
             why = (f"数值二阶导 {name}''({x})≈{_fmt(want)}，断言写的是 {_fmt(v)}"
-                   if not ok_val else f"二阶导为正/负与「{word.group(0)}」矛盾")
+                   if not ok_val else (f"二阶导为正/负与「{word.group(0)}」矛盾" if word
+                                       else "二阶导≈0：这一点没有极大/极小而言（拐点）"))
             rows.append({"claim": t, "status": "mismatch",
                          "recomputed": f"{name}''({x})≈{_fmt(want)}", "how": why})
     # ⚠️ 代入那一档**自己切小句**（逗号/比较符都切），所以**先于**整句的密句守卫跑，而且

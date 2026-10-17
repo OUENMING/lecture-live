@@ -292,6 +292,26 @@ class TestSecondDerivative(unittest.TestCase):
         rows = nm.check_review(rev)
         self.assertTrue([r for r in rows if r["status"] == "mismatch"], rows)
 
+    def test_拐点那句_f_两撇为零不许判方向(self):
+        """⭐ 第五轮自查（产物 H 的假 ⚠）：`f''(0)=0 且两侧凹凸性改变` 是**拐点的定义**，
+        `凹凸` 是名词不是方向断言 —— 当时被判成"说凹 → 该为极大"（假 ⚠）。"""
+        rev = {"sections": [{"example": {"title": "📖 卷", "prompt": "f(x)=x^3-3x",
+                                         "steps": [{"text": "拐点在 $x=0$ 处，因为 $f''(0)=0$ 且两侧凹凸性改变。"}],
+                                         "answer": "拐点 x=0"}}]}
+        rows = [r for r in nm.check_review(rev) if "凹凸" in r["claim"]]
+        self.assertTrue(rows, "拐点那句没有核对行")
+        self.assertEqual([r["status"] for r in rows], ["ok"], rows)
+        self.assertIn("不判极大极小", rows[0]["how"], rows)
+
+    def test_凹凸性在旁边也不影响真方向词(self):
+        """⚠️ `凹凸` 是名词：同句里有 `凹凸性在 x=0 变号` 时，方向词要认**后面那个**「极小」，
+        不许把「凹凸」的凹当成"说凹 → 该为极大"。"""
+        rev = {"sections": [{"prose": ["f(x)=x^3-3x。",
+                                       "在 x=1 处，f''(1)=6>0，凹凸性在 x=0 变号，故该点为极小值点。"]}]}
+        rows = [r for r in nm.check_review(rev) if "凹凸性" in r["claim"]]
+        self.assertTrue(rows, rows)
+        self.assertEqual([r["status"] for r in rows], ["ok"], rows)
+
     def test_函数形的二阶导不许当点值核(self):
         """`AC''(q)=450/q³`：`=450` 是系数的开头，不是某个点上的值 —— 曾把它读成 `AC''(450)`。"""
         rev = {"sections": [{"prose": ["AC(Q)=Q^2-12Q+60，AC''(q)=450/q^{3}>0，故为极小值。"]}]}

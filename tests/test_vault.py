@@ -232,12 +232,17 @@ def t_paths_owns_it():
     assert paths.vault_config(root=r).exists()
 
 
-@case("📑 课堂纲要那一节（§10.2）：空跳过 / 临时章不算 / 排法① / 退回原子要点")
+@case("📑 课堂纲要那一节（§10.2）：空跳过 / 临时章不算 / 中文为主 + 术语就地括注")
 def _case_outline_section():
     """📑 课堂纲要那一节（计划 §10.2）。**纯函数**，不碰文件、不联网。
 
-    ⚠️ 钉住四条：空 -> **整节跳过**（不是空标题）· 临时章**不许出现** ·
-    排法①（中文当正文）· 没有合成句的章**退回原子要点**。
+    ⚠️⚠️ 版式在 2026-10-17 第四轮**反了一次**，这里记录清楚（免得下一个人又改回去）：
+       · 2026-09-30（旧判据）：作者说「AI 总结只有中文，英文完全没有了」→ 定了
+         「中文大字 + 英文降小字」两行；
+       · 2026-10-17（本轮作者原话）：**「不要一行中文一行英文 + 词串」** →
+         一行中文、术语**首次**出现就地写「中文（English）」。
+       ⚠️ 英文**没有丢**：术语的英文在括注里、完整英文转录在附录 B、术语表在「本课术语」。
+         这条是判据，「英文在别处」不算数 —— 下面每一条都指向**那一行本身**。
     """
     import obsidian_writer as OW
     assert OW._render_outline_section({}) == [], "空输入该返回空表（整节跳过）"
@@ -250,7 +255,7 @@ def _case_outline_section():
         "chapters": [
             {"id": 0, "status": "final", "title": "From GDP to GNI", "title_zh": "从GDP到GNI",
              "t0": "15:05:27", "t1": "15:16:35", "lo": 1, "hi": 9,
-             "sentences": [{"en": "EN sentence.", "zh": "中文译文。",
+             "sentences": [{"en": "The income method is used here.", "zh": "这里用收入法。",
                             "terms": [["income method", "收入法"]],
                             "src": [2], "flag": "board"}]},
             {"id": 1, "status": "final", "title": "Prices", "title_zh": "价格",
@@ -258,24 +263,26 @@ def _case_outline_section():
         "atoms": [{"text": "Prices are key.", "zh": "价格是关键。", "src": [12]}]})
     txt = "\n".join(sec)
     assert "待确认" in txt and "已改期" in txt, "课务那条的两个标记都该在"
-    # ⚠️⚠️ **必须钉「那一行本身」** —— 第一版只查 `"EN sentence." in txt`，
-    #    而**英文在小字那行也还在** → 把大字换成英文（排法① 失效）**判据照样绿**
-    #    （变异验证抓到的）。判据要指向**那个位置**，不是"整个文本里有没有"。
-    assert "- **中文译文。**" in txt, "排法①：合成句的**大字**必须是中文"
-    assert "- **EN sentence.**" not in txt, "排法①：英文**不许**当大字（它该降小字）"
-    assert "EN sentence." in txt, "⚠️ 但英文原句**不许丢**（它该在小字那行）"
-    assert "### 从GDP到GNI（" in txt, "章标题也是排法①（中文当标题，英文进小字）"
-    assert "收入法" in txt, "术语对照要带上"
-    assert "价格是关键。" in txt, "没有合成句的章要退回**中文**原子要点"
-    # ⭐⭐ 原子的小字里要有**英文原句** —— 同一个坑（2026-09-30 作者实测反馈：
-    #    「AI 总结现在只有中文，英文完全没有了」）。笔记这边**更彻底**：
-    #    原来连小字行都没有，整条原子只剩一行中文。
-    #    改坏：把 `_pair_md` 返回的第二行去掉 -> 这条红。
-    assert "  · Prices are key." in txt, "原子要点也要英文降小字（不许只剩中文）"
+    # ① 一行中文；术语就地「中文（English）」（首次出现才括注）
+    assert "- **这里用收入法（income method）。**" in txt, f"术语该就地括注：{sec}"
+    # ② 英文原句不许再单列一行（那是被作者点名去掉的版式）
+    assert "The income method is used here." not in txt, "英文整句不该单独出现"
+    # ③ 不许再出现「· 英文 · 英 中 · 英 中」那种词串行
+    for ln in sec:
+        if ln.lstrip().startswith("#") or not ln.strip():
+            continue                     # 标题行（`### Deadlines · 课务`）不在此列
+        assert not ln.lstrip().startswith("  · "), f"还有词串行：{ln!r}"
+        assert " · " not in ln, f"还有「·」串：{ln!r}"
+    # ④ 依赖板书 / 讨论的标记挂在行尾
+    assert "—— ⚠ 依赖板书或图，转录不完整" in txt, "flag 该挂行尾"
+    assert "### 从GDP到GNI（" in txt, "章标题照旧"
+    assert "- **价格是关键。**" in txt, "没有合成句的章要退回**中文**原子要点"
+    assert "Prices are key." not in txt, "原子要点也不再单列英文（术语括注仍在）"
     assert "临时" not in txt, "临时章不该出现"
     # 改坏：把 `_render_outline_section` 里的 `if not ds and not chs: return []` 删掉
     #       -> 第一条断言红。
-    # 改坏：把大字的 `zh or en` 换成 `en` -> 「排法①」那条红。
+    # 改坏：把 `_inline_terms` 的 `out.replace(...)` 换成 `continue`（不括注）
+    #       -> 「术语该就地括注」那条红。
 
 
 @case("📑 纲要那一节的**文件级**接线（§10.2 / §11.2）：真读 `.chapters.jsonl` + 落在概览与知识点之间")

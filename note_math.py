@@ -97,9 +97,13 @@ def pretty_tex(text: str) -> str:
     """
     s = str(text or "")
     s = re.sub(r"\^\{([^{}]{1,12})\}", lambda m: _script(m.group(1), _SUPERS), s)
-    # ⚠️ 只吃**带符号的数字**（`^{-1}` / `^2`）：`[0-9+-]` 会把后面二元运算符一起上标 ——
-    #    实测 `3x^2-3` 被写成了 `3x²⁻³`（第三轮截图）。
-    s = re.sub(r"\^\s*(-?[0-9]{1,3})", lambda m: _script(m.group(1), _SUPERS), s)
+    # ⚠️⚠️ 上标只吃**紧跟 `^` 的那一个 token**：花括号组，或一段纯数字（1–4 位）。
+    #    历史两次翻车（都是"读出来是错的数学"，作者第四轮再次点名）：
+    #      · `[0-9+-]{1,3}` → `Q^3-12Q^2+60Q` 被写成 `Q³⁻¹2Q²⁺⁶0Q`（把 `-12`/`+60` 也上标了）；
+    #      · 带符号版 `-?[0-9]{1,3}` 仍会把 `x^2-3` 之外的 `x^-1` 当指数（`-1` 未必是符号）。
+    #    现在：**数字串（不带符号）或 `{…}`**；其余一律留在基线 ——
+    #    KaTeX 没加载时宁可露出 `x^-1` 这样的 TeX 源码，也不许显示错的数学。
+    s = re.sub(r"\^\s*(\{[^{}]{1,12}\}|[0-9]{1,4})", lambda m: _script(m.group(1).strip("{}"), _SUPERS), s)
     s = re.sub(r"_\{([^{}]{1,12})\}", lambda m: _script(m.group(1), _SUBS), s)
     s = re.sub(r"_(\d{1,3})", lambda m: _script(m.group(1), _SUBS), s)
     s = s.replace(r"\times", "×").replace(r"\cdot", "·").replace(r"\div", "÷")
@@ -116,9 +120,13 @@ def pretty_tex(text: str) -> str:
 # ---------------------------------------------------------------- 二、数值复算
 #: ⚠️ 表达式**不许跨过并列连词**：实测题面「给定 AC(Q)=Q^2-12Q+60 和 MC(Q)=3Q^2-24Q+60，…」
 #:    曾把第二个定义一起吞进 AC 的表达式里（`AC` 于是指向 MC 的式子，报出 `AC(4)=12` 的假修正）。
+#: ⚠️ 表达式**不许跨过**：并列连词（`和/与/、`）、`$`、汉字、中文标点。
+#:    第四轮实测：`求函数 $f(x) = x^{3} - 12x$ 的驻点…` 曾把 `x^{3} - 12x$ 的驻点`
+#:    整段当表达式 → 编译失败 → 这一单元"没有 f" → 回落到**另一单元**的 f（§2 变式的
+#:    `驻点 x=±2` 被拿 `x³−3x` 去核，报出两条假 ⚠）。
 _FUNC_DEF = re.compile(
     r"(?P<name>[A-Za-z][A-Za-z0-9]{0,5})\s*\(\s*(?P<var>[A-Za-z])\s*\)\s*[=＝]\s*"
-    r"(?P<expr>[^，,。；;、\n和与]+)")
+    r"(?P<expr>[^，,。；;、\n和与$\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+)")
 #: 数字（带不带小数、正负号）。
 #: ⚠️ 后面紧跟 `√`/字母/`/`/数字/小数点的不算（`q=10√6` 里的 `10` 不是那个点，
 #:    实测：人眼里是 10√6≈24.5，机械读成 10 → 报出 `AC'(10)≈−2.5≠0` 的假修正）。
@@ -390,7 +398,7 @@ def _kind(word: str) -> str:
     return "最小" if word in ("最小", "极小") else "最大"
 
 
-def check_review(review: dict) -> list:
+def check_review(review: dict, *, transcript: str = "") -> list:
     """笔记 JSON → 机械核对行（`{claim, how, status, recomputed}`）。
 
     status：`ok` / `mismatch`（**正文不改**，进"修正说明"）/ `unchecked`（判不了）。
@@ -421,7 +429,7 @@ def check_review(review: dict) -> list:
     #    空的 claim 也在这里丢掉（实测第三份产物上有两行全空）。
     seen: set = set()
     uniq: list = []
-    for r in rows + _source_rows(review):
+    for r in rows + _source_rows(review, transcript):
         key = (_norm_claim(r.get("claim")), str(r.get("recomputed") or ""),
                str(r.get("status") or ""))
         if not key[0] or key in seen:
@@ -617,9 +625,15 @@ def _SUBST_rows(t: str, fdefs: dict, rows: list) -> list:
     return rows
 
 
-def _source_rows(review: dict) -> list:
-    """例题来源：题面自称"假设" / 给了函数，而标题没有 📖 出处 —— "自编例题"的形状。"""
+def _source_rows(review: dict, transcript: str = "") -> list:
+    """例题来源：题面自称"假设" / 给了函数，而标题没有 📖 出处 —— "自编例题"的形状。
+
+    ⚠️ 第四轮：`🎙` 的例题**可以**从转录自证 —— 题面里的数字如果在转录里出现过
+       （课上确实给了这些数），就不再挂"自编例题是硬禁区"的 ⚠，改记一条 ✅；
+       找不到才保持未核对（作者第 2 条：找不到出处就写「课上只给了片段」，不许装）。
+    """
     rows: list = []
+    t_numbers = set(re.findall(r"\d+(?:\.\d+)?", str(transcript or "")))
     for s in (review.get("sections") or []):
         ex = s.get("example") or {}
         title, prompt = str(ex.get("title") or ""), str(ex.get("prompt") or "")
@@ -631,12 +645,21 @@ def _source_rows(review: dict) -> list:
             continue
         confession = ("假设" in prompt) or ("假定" in prompt)
         defined = bool(_FUNC_DEF.search(prompt))
-        if confession or defined:
-            rows.append({"claim": f"例题：{title or prompt[:40]}", "status": "unchecked",
-                         "recomputed": "",
-                         "how": "例题标题没有 📖 出处，题面却给了函数"
-                                + ("/自称「假设」" if confession else "")
-                                + " —— 自编例题是硬禁区（课上只给片段就写片段+未核对）"})
+        if not (confession or defined):
+            continue
+        # 🎙 自证：题面里的数字在转录里出现过 → 这是**课上真的给过**的题面
+        p_numbers = set(re.findall(r"\d+(?:\.\d+)?", prompt))
+        if (not confession and "🎙" in title and p_numbers
+                and p_numbers <= t_numbers and t_numbers):
+            rows.append({"claim": f"例题：{title or prompt[:40]}", "status": "ok", "recomputed": "",
+                         "how": f"题面里的数字（{'、'.join(sorted(p_numbers))}）在转录里都出现过"
+                                " —— 🎙 例子成立"})
+            continue
+        rows.append({"claim": f"例题：{title or prompt[:40]}", "status": "unchecked",
+                     "recomputed": "",
+                     "how": "例题标题没有 📖 出处，题面却给了函数"
+                            + ("/自称「假设」" if confession else "")
+                            + " —— 课上的例子要能在转录里对上数字；对不上就按「课上只给了片段」写"})
     return rows
 
 

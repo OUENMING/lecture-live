@@ -59,6 +59,11 @@ REVIEW_SYS = """你是课堂笔记写作者。给一名靠中文听英文课的�
 先把这段里教授讲的**每一个知识点**列进 `lecture_points`（一个不漏，带时间戳）；
 再为**每一个**知识点写一节 `sections`。宁可小节多、不要合并知识点。
 
+⚠️ 若用户消息里有【本课章节骨架】：**它就是这段课的知识点清单，粒度不许改** ——
+   每个章都要有**至少一节** `sections`（节标题用章的标题起头），
+   "要点"里列的每一条都要被某一节讲到、并原样（可整理成句）进 `lecture_points`。
+   实时要点是课堂上一句句记下来的：**合并两条 = 丢内容**，宁可两小节。
+
 ## 二、每一节怎么写（由浅入深，像学长给学弟讲，不要教科书腔）
 `prose` 是**连贯的中文段落**（2–5 段），按这个顺序讲透：
 ① 它是什么（大白话）→ ② 为什么需要它 / 在经济学或社会学里解决什么问题 →
@@ -147,6 +152,15 @@ REVIEW_SYS = """你是课堂笔记写作者。给一名靠中文听英文课的�
  "terms": [{"en": "本课出现的学科术语", "zh": "中文"}],
  "review_plan": ["课后可以先做的 2–3 件事（中文，带分钟数）"]}
 只输出 JSON。"""
+
+ALIGN_SYS_SK = """你在给一节英文课的**复盘笔记**做覆盖度核对。输入是：
+① 这节课的**知识点清单**（来自课堂实时分章 + 实时要点，每条前面有编号 `[n]`）；
+② 这份笔记的小节标题清单。
+请输出严格 JSON：
+{"covered": [{"i": <编号（整数，原样抄）>, "section": "覆盖它的小节标题，或 '缺失'"}],
+ "materials_used": ["笔记里引用到的课件文件名"],
+ "notes": "一句总评（≤60 字）"}
+⚠️ 每一条都要给一行，编号一条不许漏、不许造新编号。只做对照，不改写知识点。只输出 JSON。"""
 
 ALIGN_SYS = """你在给一节英文课的**复盘笔记**做覆盖度核对与课件对齐。输入是：
 ① 教授这节课讲过的知识点清单（来自分块转录，按时间排序，已带时间戳）；
@@ -403,7 +417,8 @@ def _user_content(lines: list, *, domain: str = "", materials_block: str = "",
 
 def review(entries: list, *, chat, domain: str = "", materials=None,
            on_progress=None, workers: int = REVIEW_WORKERS,
-           max_tokens: int = REVIEW_MAX_TOKENS, extra: str = "") -> dict:
+           max_tokens: int = REVIEW_MAX_TOKENS, extra: str = "",
+           skeleton: list | None = None) -> dict:
     """分块调 LLM → 合并。`chat(system, user, max_tokens) -> dict`。
 
     ⚠️ 并发发、**按块序收**（同旧版 `_review` 的取舍：串行那 4–5 块是下课→笔记
@@ -418,15 +433,32 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
     from materials import snippets_block
 
     def one(chunk: list) -> dict:
-        try:
-            hits = materials.search("\n".join(chunk)) if materials is not None else []
-            user = _user_content(chunk, domain=domain,
-                                 materials_block=snippets_block(hits),
-                                 extra=extra)
-            obj = chat(REVIEW_SYS.replace("__PLOTS__", _plots_menu()), user, max_tokens)
-        except Exception:                                     # noqa: BLE001
-            return {}
-        return _clean(obj)
+        """一块 → 一次调用；**失败要退一步**。
+
+        ⚠️ 第四轮实测（run F）：带上章节骨架后，17/20 条要点的那几块输出超过
+           `max_tokens`（6000）→ JSON 被截断 → `chat_json` 抛 → 这里吞成 `{}` →
+           **4/5 块静默消失**，笔记只剩最后一块（2 节）。现在两条腿：
+           ① 先按原样（带骨架）重试一次；② 还失败就去掉骨架、放大 token 再来一次
+           （宁可按老版式写全，也不许整块丢）。失败块数会报给调用方。
+        """
+        import note_cover
+        sk_block = note_cover.block_for(skeleton, chunk) if skeleton else ""
+        hits = materials.search("\n".join(chunk)) if materials is not None else []
+        m_block = snippets_block(hits)
+        tries = [(extra + sk_block, max_tokens),
+                 (extra + sk_block, int(max_tokens * 1.5)),
+                 (extra, int(max_tokens * 1.5))]
+        for ex2, mt in tries:
+            try:
+                user = _user_content(chunk, domain=domain, materials_block=m_block, extra=ex2)
+                got = _clean(chat(REVIEW_SYS.replace("__PLOTS__", _plots_menu()), user, mt))
+                if got:
+                    return got
+            except Exception:                                 # noqa: BLE001
+                continue
+        return {}
+
+    failed: list = []
 
     ex = ThreadPoolExecutor(min(workers, len(chunks)))
     futs = [ex.submit(one, c) for c in chunks]
@@ -439,13 +471,20 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
             except Exception:                                 # noqa: BLE001
                 pass
         try:
-            blocks.append(fut.result())
+            b = fut.result()
         except Exception:                                     # noqa: BLE001
-            blocks.append({})
+            b = {}
+        if not b:
+            failed.append(ci)
+        blocks.append(b)
     got = merge_blocks(blocks)
     if got.get("title_zh"):
         meta["title_zh"] = got.pop("title_zh")
     got.update(meta)
+    # ⚠️ 失败块**记账**（不静默）：调用方/验收日志要看得见"这半节课没生成"。
+    #    ⚠️ 只有真的生成了内容才挂这个键 —— 全失败时必须还是 `{}`（调用方据此早退）。
+    if got:
+        got["chunk_stats"] = {"n": len(chunks), "failed": sorted(failed)}
     return got
 
 
@@ -459,26 +498,53 @@ def _fmt_plot_menu() -> str:
 
 # ---------------------------------------------------------------- 覆盖度对齐
 def align(review_data: dict, *, chat, materials=None,
-          max_tokens: int = ALIGN_MAX_TOKENS) -> dict:
-    """覆盖度 + 课件对齐（1 次调用）。输入只有"知识点清单 + 小节标题"（便宜）。"""
-    pts = review_data.get("lecture_points") or []
+          max_tokens: int = ALIGN_MAX_TOKENS, skeleton: list | None = None) -> dict:
+    """覆盖度 + 课件对齐（1 次调用）。输入只有"知识点清单 + 小节标题"（便宜）。
+
+    ⚠️ 带 `skeleton` 时清单**不是**模型自己列的那份，而是章节骨架里的要点，按
+       **编号**对齐（`[3]` 这种）—— 让模型"抄一遍长句"再匹配，错一个词就丢一条
+       （第四轮：知识点清单的粒度与条数都不许由它决定）。
+    """
+    sk_points = None
+    if skeleton:
+        import note_cover
+        sk_points = note_cover.flat_points(skeleton)
+    pts = ([{"ts": p["ts"], "point": p["point"], "gi": p["gi"]} for p in sk_points]
+           if sk_points else (review_data.get("lecture_points") or []))
     secs = [s.get("heading", "") for s in (review_data.get("sections") or [])]
     if not pts or not secs:
         return {}
-    lines = "\n".join(f"[{p.get('ts', '')}] {p.get('point', '')}" for p in pts)
+    if sk_points:
+        lines = "\n".join(f"[{p['gi']}] ({p['ts']}) {p['point']}" for p in sk_points)
+    else:
+        lines = "\n".join(f"[{p.get('ts', '')}] {p.get('point', '')}" for p in pts)
     user = (f"Professor's knowledge points (in order):\n{lines}\n\n"
             f"Note section headings:\n" + "\n".join(f"- {s}" for s in secs))
+    sys_prompt = ALIGN_SYS_SK if sk_points else ALIGN_SYS
     try:
-        obj = chat(ALIGN_SYS, user, max_tokens)
+        obj = chat(sys_prompt, user, max_tokens)
     except Exception:                                         # noqa: BLE001
         return {}
     if not isinstance(obj, dict):
         return {}
     out: dict = {}
     covered = []
+    by_gi = {p["gi"]: p for p in (sk_points or [])}
     for x in (obj.get("covered") or []):
-        if isinstance(x, dict):
-            p, s = _one_line(x.get("point")), _one_line(x.get("section"))
+        if not isinstance(x, dict):
+            continue
+        s = _one_line(x.get("section"))
+        if by_gi:
+            try:
+                gi = int(x.get("i"))
+            except (TypeError, ValueError):
+                continue
+            p = by_gi.get(gi)
+            if p:
+                covered.append({"point": p["point"], "section": s, "i": gi,
+                                "ts": p.get("ts", "")})
+        else:
+            p = _one_line(x.get("point"))
             if p:
                 covered.append({"point": p, "section": s})
     if covered:
@@ -581,7 +647,7 @@ def numeric_claims(review_data: dict, *, limit: int = 24) -> list:
 
 
 def verify_numbers(review_data: dict, *, chat, materials=None,
-                   max_tokens: int = VERIFY_MAX_TOKENS) -> list:
+                   transcript: str = "", max_tokens: int = VERIFY_MAX_TOKENS) -> list:
     """数字/公式第三道核（1 次调用）→ 规范化后的 `checks` 列表（不是 dict）。
 
     ⚠️ `mismatch` **不改正文**：它进「修正说明」清单由渲染层显示 ——
@@ -589,7 +655,7 @@ def verify_numbers(review_data: dict, *, chat, materials=None,
     """
     # ⭐ 机械核**先跑**（2026-10-17 验收：模型对着自己编的函数"重算"当然自洽 ——
     #    自编 `TC=60q+500` + 凑出来的驻点 2.89 就这样溜过了三道核）。
-    det = note_math.check_review(review_data)
+    det = note_math.check_review(review_data, transcript=transcript)
     claims = numeric_claims(review_data)
     if not claims:
         return note_math.merge_checks(det, _clean_checks(review_data.get("checks")))

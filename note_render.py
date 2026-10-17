@@ -230,6 +230,7 @@ def render(d: NoteData) -> str:
     ts1 = entries[-1]["ts"] if entries else "—"
     stars = [e for e in entries if e.get("star")]
     sections = review.get("sections") or []
+    heads = [_one(s.get("heading")) for s in sections]      # 节标题（§9 的章节覆盖表要回指节号）
     qa = review.get("qa") or []
     title = _one(review.get("title_zh")) or _one(review.get("title"))
     L: list = ["---",
@@ -241,14 +242,24 @@ def render(d: NoteData) -> str:
                "---", "",
                f"# {d.course} · {d.date}" + (f" · {title}" if title else ""), ""]
 
-    checks = list(review.get("checks") or []) + list(d.corrections_extra or [])
+    # ⚠️ `corrections_extra` **不进这张表**：它是 `{kind, where, spoken, fixed, basis}` 形状
+    #    （第四轮实测：当成核对行渲染 → 三行空单元格，还把"待确认"的计数抬高了 3）。
+    #    它们的去处是附录 A 的「修正记录」。
+    checks = list(review.get("checks") or [])
     corr = list(review.get("corrections") or [])
     n_ok = sum(1 for c in checks if c.get("status") == "ok")
     n_bad = sum(1 for c in checks if c.get("status") == "mismatch")
     n_un = sum(1 for c in checks if c.get("status") == "unchecked")
     cov = review.get("covered") or []
     pts = review.get("lecture_points") or []
-    if pts:
+    cv = review.get("cover") or {}
+    if cv.get("rows"):
+        # ⭐ 第四轮：清单来自「章节 + 实时要点」，粒度不由模型定 —— 报的是**确定的那两个数**。
+        cov_line = (f"覆盖度：章节 {cv['n_ok']}/{cv['n_chapters']} 都有讲解 · "
+                    f"实时要点 {cv['n_covered']}/{cv['n_points']} 条落进笔记")
+        if cv["n_points"] > cv["n_covered"]:
+            cov_line += f"（缺 {cv['n_points'] - cv['n_covered']} 条，见 §9）"
+    elif pts:
         n_cov = sum(1 for c in cov if _one(c.get("section")) and
                     _one(c.get("section")) not in ("缺失", "missing", "-", "无"))
         cov_line = f"覆盖度：教授知识点 {len(pts)} 个 → 笔记覆盖 {n_cov} 个"
@@ -340,7 +351,26 @@ def render(d: NoteData) -> str:
 
     # ── §9 覆盖度与校验清单 ───────────────────────────────────────────
     L += ["## 覆盖度与校验清单", ""]
-    if pts and cov:
+    if cv.get("rows"):
+        L += ["**章节覆盖**（章节 + 实时要点 = 知识点清单；粒度由课堂实时分章定，"
+              "不由模型定）：", "",
+              "| 章节（时间段） | 实时要点 | 覆盖 | 落到的小节 |", "|---|---|---|---|"]
+        for r in cv["rows"]:
+            n_ok = sum(1 for p in r["points"] if p["ok"])
+            n = len(r["points"])
+            mark = "✅" if r["ok"] else "⚠ **这一章没落到**"
+            secs = "、".join(f"§{i}" for i in
+                            [heads.index(h) + 1 for h in r["sections"] if h in heads]) or "—"
+            L += [f"| 章 {r['i']}「{r['title']}」 `{r['t0']}–{r['t1']}` "
+                  f"| {n_ok}/{n} 条 | {mark} | {secs} |"]
+        L += [""]
+        miss_pts = [p for r in cv["rows"] for p in r["points"] if not p["ok"]]
+        if miss_pts:
+            L += ["**还没落到的要点（要补）：**", ""]
+            for p in miss_pts:
+                L += [f"- `{p['ts']}` {p['point']}"]
+            L += [""]
+    elif pts and cov:
         L += ["| 教授讲的（🎙） | 笔记覆盖 |", "|---|---|"]
         by_point = {_one(c.get("point")).lower(): _one(c.get("section")) for c in cov}
         for p in pts:

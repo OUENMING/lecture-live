@@ -102,9 +102,33 @@ class TestCheckReview(unittest.TestCase):
         self.assertTrue(any(r["recomputed"].startswith("AC'(2.89)") for r in bad), bad)
 
     def test_反例里的自编例题被点名(self):
+        """⚠️ 措辞第四轮改过（转录没对上数字就是"未核对"，不再一律喊"硬禁区"）——
+        判据钉的是**点名这件事**，不是那句话。"""
         rows = nm.check_review(self._bad())
-        flagged = [r for r in rows if r["status"] == "unchecked" and "硬禁区" in r["how"]]
+        flagged = [r for r in rows if r["status"] == "unchecked"
+                   and r["claim"].startswith("例题：") and "课上只给了片段" in r["how"]]
         self.assertTrue(flagged, f"「（假设）」没被点名：{rows}")
+
+    def test_转录能对上数字的课上例子就放行(self):
+        """⭐ 第四轮：🎙 例子里的数字在转录里出现过 → 这是**课上真给过**的题面，记 ✅。"""
+        rev = {"sections": [{"heading": "2. 三次函数", "example": {
+            "title": "🎙 13:18 最优化练习",
+            "prompt": "求函数 $f(x)=x^{3}-12x$ 的驻点，并判断其性质。",
+            "steps": [{"text": "f'(x)=3x^{2}-12"}], "answer": "驻点 x=2 和 x=-2"}}]}
+        rows = nm.check_review(rev, transcript="So the derivative is 3x squared minus 12, "
+                                              "and we get x equals 2 and minus 2.")
+        src = [r for r in rows if r["claim"].startswith("例题：")]
+        self.assertTrue(src, rows)
+        self.assertEqual(src[0]["status"], "ok", src)
+
+    def test_转录对不上数字就保持未核对(self):
+        rev = {"sections": [{"heading": "2. 三次函数", "example": {
+            "title": "🎙 13:18 某题",
+            "prompt": "求函数 $f(x)=x^{3}-45x$ 的驻点。", "answer": "x=±3.87"}}]}
+        rows = nm.check_review(rev, transcript="That is all for today, see you next week.")
+        src = [r for r in rows if r["claim"].startswith("例题：")]
+        self.assertTrue(src, rows)
+        self.assertEqual(src[0]["status"], "unchecked", src)
 
     def test_正确样例报_ok(self):
         good = {"sections": [{
@@ -273,6 +297,34 @@ class TestSecondDerivative(unittest.TestCase):
         rev = {"sections": [{"prose": ["AC(Q)=Q^2-12Q+60，AC''(q)=450/q^{3}>0，故为极小值。"]}]}
         rows = nm.check_review(rev)
         self.assertFalse([r for r in rows if "AC''" in str(r.get("recomputed") or "")], rows)
+
+
+class TestScopeAcrossUnits(unittest.TestCase):
+    """⚠️ 第四轮在产物 G 上抓到的两条假 ⚠：变式的题面写成 `$f(x) = x^{3} - 12x$ 的驻点…`，
+    表达式把 `$ 的驻点` 一起吞了 → 编译失败 → 这一单元"没有 f" → 回落去吃**另一单元**的
+    `f(x)=x³−3x`，于是把对的 `驻点 x=2（极小值）` 报成"f'(2)≈9≠0"。"""
+
+    def _rev(self):
+        return {"sections": [{"heading": "[13:18] 三次函数",
+                              "example": {"title": "📖 卷", "prompt": "给定 $f(x) = x^{3} - 3x$，求驻点。",
+                                          "steps": [{"text": "令 f'(x)=0 得 x=1 和 x=-1。"}],
+                                          "answer": "驻点 x=1（极小值）和 x=-1（极大值）。"},
+                              "variants": [{"q": "求函数 $f(x) = x^{3} - 12x$ 的驻点，并判断其性质。",
+                                            "steps": [{"text": "f'(x) = 3x^{2} - 12，驻点为 x=2 和 x=-2。"}],
+                                            "a": "驻点 x=2（极小值），x=-2（极大值）。"}]}]}
+
+    def test_题面里的_dollar_与汉字不进表达式(self):
+        fns = nm.functions(["求函数 $f(x) = x^{3} - 12x$ 的驻点，并判断其性质。"])
+        self.assertIn("f", fns, "变式的函数定义没解出来")
+        self.assertEqual(fns["f"][1].strip(), "x^{3} - 12x", fns["f"][1])
+        self.assertAlmostEqual(fns["f"][2](2.0), -16.0, places=6)   # x³−12x 在 2 处
+        self.assertAlmostEqual(nm._d1(fns["f"][2], 2.0), 0.0, places=3)   # 2 是驻点
+
+    def test_变式的驻点不许拿例题的_f_去核(self):
+        rows = nm.check_review(self._rev())
+        bad = [r for r in rows if r["status"] == "mismatch"]
+        self.assertEqual(bad, [], f"拿另一单元的 f 核了变式：{bad}")
+        self.assertTrue([r for r in rows if r["status"] == "ok"], rows)
 
 
 class TestDedupeAndFilter(unittest.TestCase):

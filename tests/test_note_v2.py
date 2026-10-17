@@ -125,6 +125,38 @@ class ReviewCall(unittest.TestCase):
         self.assertIn("Course: ECON10790 Maths", seen["user"])
         self.assertIn("cost_curves", seen["system"], "图菜单没进 prompt")
 
+    def test_块失败要退一步_不许静默丢(self):
+        """⭐ 第四轮 run F 的实测：带章节骨架后 4/5 块输出被截断 → 静默丢半节课。
+
+        判据：① 第一次炸了要重试；② 重试还炸就**去掉骨架**再来一次（宁可按老版式写全）；
+        ③ 真失败时记账（`chunk_stats`），全失败时仍然返回 `{}`。
+        """
+        calls = []
+
+        def chat(system, user, max_tokens):
+            calls.append((("骨架" in user), max_tokens))
+            if "骨架" in user and len(calls) < 3:      # 前两次（带骨架）都炸
+                raise ValueError("truncated JSON")
+            return {"sections": [{"heading": "1. 甲", "ts": "13:20", "prose": ["p"]}]}
+
+        got = nv.review(entries(3), chat=chat, skeleton=[{"i": 1, "title": "T",
+                                                          "t0": "13:16:28", "t1": "13:26:35",
+                                                          "points": [{"ts": "13:17", "zh": "要点甲"}]}])
+        self.assertTrue(got.get("sections"), "兜底那一次该把内容写回来")
+        self.assertEqual([x[0] for x in calls], [True, True, False],
+                         "顺序该是：带骨架 → 带骨架加量 → 去掉骨架")
+        self.assertEqual(got.get("chunk_stats", {}).get("failed"), [])
+
+    def test_全失败时返回空_不装成功(self):
+        def chat(system, user, max_tokens):
+            raise RuntimeError("boom")
+
+        self.assertEqual(nv.review(entries(3), chat=chat), {})
+        got = nv.review(entries(3), chat=chat,
+                        skeleton=[{"i": 1, "title": "T", "t0": "13:16:28", "t1": "13:26:35",
+                                   "points": []}])
+        self.assertEqual(got.get("sections"), None, "全失败不许有半份内容")
+
     def test_进度回调按块报(self):
         seen = []
         nv.review(entries(nv.REVIEW_CHUNK * 2), chat=lambda s, u, m: {},
@@ -396,6 +428,65 @@ class HtmlComponents(unittest.TestCase):
         self.assertIn("<input type=\"range\"", h)
         self.assertIn('polyline class="c0" points="', h)
 
+    def test_图有图例_刻度_人话滑杆(self):
+        """⭐ 第四轮四条一起钉：① 每条曲线有色块图例（哪条是 AC 哪条是 MC）；
+        ② 纵轴至少 3 个刻度；③ 滑杆是人话标签 + 拖动说明；④ 图题与卡片标题重复就不画。"""
+        h = self._page()
+        # ① 图例：两个色块 + 两条曲线名
+        self.assertIn("AC 平均成本", h)
+        self.assertIn("MC 边际成本", h)
+        # ⚠️ 图例的**色块**：`<line ... stroke-width:2.5>`（曲线本身是 2.2，在 CSS 里）
+        self.assertRegex(h, r'<line[^>]*stroke:var\(--c[0-9]\);stroke-width:2\.5',
+                         "图例没有颜色对应（只有一行文字）")
+        # ② 纵轴 5 个 + 横轴 5 个 = 10 个刻度
+        self.assertGreaterEqual(h.count('class="tick"'), 10, "刻度太少（纵轴至少 3 个）")
+        # ③ 滑杆：**标签那一处**是人话（只有 aria-label 换掉是挡不住学生的）
+        m = re.search(r"<label>([^<]*)<b[^>]*>", h)
+        self.assertTrue(m, "滑杆没有 label")
+        self.assertIn("平均成本 AC 的一次项系数 b", m.group(1))
+        self.assertIn("拖动看", h)
+        # ④ 图题 == 卡片标题 -> 不重复
+        self.assertTrue(nh.dup_caption("平均成本与边际成本曲线", "[13:29] 平均成本（Average Cost）"))
+        self.assertFalse(nh.dup_caption("供需均衡", "[13:29] 平均成本"))
+
+    def test_三道核表里不许有空单元格(self):
+        """⚠️ 第四轮：`corrections_extra`（另一种形状）被当成核对行渲染 → 三行空单元格，
+        还把"待确认"的计数抬高了 3。"""
+        d = nr.NoteData(date="2026-10-15", course="ECON10790", entries=entries(2),
+                        review=REVIEW, html_name="x.html",
+                        corrections_extra=[{"kind": "check", "where": "三道核",
+                                            "spoken": "x", "fixed": "y", "basis": "z"}])
+        md = nr.render(d)
+        block = md[md.index("数字 / 公式三道核"):]
+        block = block[:block.index("\n## ") if "\n## " in block else len(block)]
+        for line in block.splitlines():
+            if line.startswith("| ") and "---" not in line and "断言" not in line:
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                self.assertTrue(cells[0] and cells[1], f"表里有空单元格：{line!r}")
+        self.assertNotIn("corrections_extra", md)
+        self.assertIn("修正记录", md, "那三条还得有去处（附录 A）")
+
+    def test_核对清单在_HTML_里有个可点的锚点(self):
+        """⚠️ 页头那行写着「（点开看）」，可 HTML 里原来根本没有 `#checks`（死链）。"""
+        d = nr.NoteData(date="2026-10-15", course="ECON10790", entries=entries(2),
+                        review=REVIEW, html_name="x.html")
+        h = nh.note_page(d)
+        self.assertIn('href="#checks"', h)
+        self.assertIn('id="checks"', h)
+        detail = h[h.index('id="checks"'):]
+        self.assertIn("数字 / 公式三道核", detail)
+        # 章节覆盖也在这里（有 cover 时）
+        d2 = nr.NoteData(date="2026-10-15", course="ECON10790", entries=entries(2),
+                         review=dict(REVIEW, cover={"rows": [{"i": 1, "title": "T",
+                             "t0": "13:16:28", "t1": "13:26:35", "sections": [],
+                             "points": [{"gi": 1, "ts": "13:17", "point": "停产价格", "ok": False}],
+                             "ok": False, "why": ""}], "n_chapters": 1, "n_ok": 0,
+                             "n_points": 1, "n_covered": 0, "missing": []}),
+                         html_name="x.html")
+        h2 = nh.note_page(d2)
+        self.assertIn("章节覆盖", h2)
+        self.assertIn("还没落到的要点", h2)
+
     def test_页头只留给学生的一行_内部记录在页尾(self):
         """⚠️ 作者第三轮：页头给学生看的是「数字核对：N 处已核 · M 处待你确认」，
         生成器的活日志（改了哪条公式 / 删了几句猜测）挪到页尾折叠里。"""
@@ -438,6 +529,13 @@ class HtmlComponents(unittest.TestCase):
         # 转换函数本身（页面里所有 `.tex` 的内容都走它）
         import note_math
         self.assertEqual(note_math.pretty_tex("x^{3}-3x"), "x³-3x")
+        # ⚠️⚠️ 第四轮（作者原话：「把指数吃错」）：`Q³⁻¹2Q²⁺⁶0Q` / `Q²⁻¹2Q+60` ——
+        #    上标只许吃**紧跟 `^` 的那一个 token**（纯数字或 `{…}`），其余留在基线。
+        self.assertEqual(note_math.pretty_tex("TC(Q)=Q^3-12Q^2+60Q"), "TC(Q)=Q³-12Q²+60Q")
+        self.assertEqual(note_math.pretty_tex("AC(Q)=Q^2-12Q+60"), "AC(Q)=Q²-12Q+60")
+        # 拿不准的（`^-1` 没花括号）宁可原样露 TeX 源码，也不许写成错的数学
+        self.assertEqual(note_math.pretty_tex("x^-1"), "x^-1")
+        self.assertEqual(note_math.pretty_tex("x^{-1}"), "x⁻¹")
         self.assertEqual(note_math.pretty_tex("q_{1} + 3q_{2}"), "q₁ + 3q₂")
         self.assertEqual(note_math.pretty_tex("f(x)=x^{3}-3x"), "f(x)=x³-3x")
         # ⚠️ `3x^2-3` 曾被上标正则写成 `3x²⁻³`（把后面的减号当成了指数的符号）

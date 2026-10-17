@@ -459,29 +459,57 @@ def _render_outline_section(items: dict) -> list:
     if ds:
         out += ["### Deadlines · 课务", ""]
         for d in ds:
-            out.append(f"- **{d.get('quote', '')}**")
-            out.append(f"  · {d.get('t', '')} · 来源 {d.get('source', '')}"
-                       f" · **待确认**" + ("  · **已改期**" if d.get("changed") else ""))
+            # ⚠️ 第四轮：课务这条原来也是「· 时间 · 来源 · 状态」的词串行 —— 同一个版式
+            #    毛病（中文为主 = 一行读得完）。英文引语是**课上的原话**，照旧保留。
+            bits = [x for x in (str(d.get("t") or "").strip(),
+                                f"来源 {d.get('source', '')}".strip(),
+                                "**待确认**",
+                                "**已改期**" if d.get("changed") else "") if x]
+            out.append(f"- **{d.get('quote', '')}** —— " + "，".join(bits) if bits
+                       else f"- **{d.get('quote', '')}**")
         out.append("")
     if _n_drop:
         # ⚠️ 记账（不静默）：读者要能分辨"这课真没有课务"与"课务被过滤了"。
         out += [f"*（另有 {_n_drop} 条课务线索疑似误报，未收录）*", ""]
-    def _pair_md(x, en_key: str, flag: str = "") -> list:
-        """⭐ **排法① 在笔记里的唯一定义点**：Markdown 两行（中文大字 + 英文降小字）。
+    #: 已括注过的术语 —— 「**首次**出现写‘中文（English）’」靠它跨条目去重。
+    _seen_terms: set = set()
 
-        ⚠️⚠️ 合成句与原子要点**必须都走这一条**。2026-09-30 作者实测反馈
-           「AI 总结现在**只有中文，英文完全没有了**」—— 面板那边的原因一样
-           （原子那一处只挂术语）。**笔记这边更彻底**：它连小字行都没有，
-           整条原子只剩一行中文。同一个坑，两处各写一份就各漏一次。
+    def _inline_terms(zh: str, terms) -> str:
+        """把术语**就地**写成「中文（English）」（每个术语只在首次出现时括注）。
+
+        ⚠️ 作者 2026-10-17 第四轮：「课堂纲要」还是「一行中文 + 一行英文整句 + 词串」，
+           明确不要那种版式 —— 中文为主，术语（英文）就地括注。
+        """
+        out = zh
+        for t in (terms or ()):
+            if not (isinstance(t, (list, tuple)) and len(t) >= 2):
+                continue
+            en, zt = str(t[0] or "").strip(), str(t[1] or "").strip()
+            if not en or not zt or (en, zt) in _seen_terms:
+                continue
+            if zt in out:
+                out = out.replace(zt, f"{zt}（{en}）", 1)
+                _seen_terms.add((en, zt))
+        return out
+
+    def _pair_md(x, en_key: str, flag: str = "") -> list:
+        """⭐ **排法① 在笔记里的唯一定义点**：**一行中文**，术语就地「中文（English）」。
+
+        ⚠️ 第四轮改版（作者原话：「不要一行中文一行英文 + 词串」）：
+           旧版是「中文大字 + 小字行（英文整句 · 英 中 · 英 中）」两行。现在：
+           - 中文当正文（`zh`；没有中文时才用英文原句 —— 一个字不丢）；
+           - 术语在**首次**出现的条目里就地括注英文（`_inline_terms`）；
+           - 英文整句不再单列（完整转录在附录 B，术语表在「本课术语」一节 ——
+             英文没有消失，只是不再和中文并排重复一遍）；
+           - `flag`（依赖板书 / 课堂讨论 / 已改期）改挂在该条**行尾**。
         ⚠️ `en_key`：合成句是 `en`、原子是 `text` —— 两个数据类键名不同而已。
-        ⚠️ 笔记**没有档位**（它是课后产物，生成时 `trans_mode` 早已不重要）→
-           这里恒为**双语**，不做 `en` 档退化（那是面板专有的行为）。
         """
         en = (x.get(en_key) or "").strip()
         zh = (x.get("zh") or "").strip()
-        terms = " · ".join(f"{a} {b}" for a, b in (x.get("terms") or []))
-        sub = " · ".join(p for p in ((en if zh else ""), terms, flag) if p)
-        return [f"- **{zh or en}**"] + ([f"  · {sub}"] if sub else [])
+        line = _inline_terms(zh, x.get("terms")) if zh else en
+        if not line:
+            return []
+        return [f"- **{line}**" + (f" —— {flag}" if flag else "")]
 
     for c in chs:
         out += [f"### {c.get('title_zh') or c.get('title') or '（无标题）'}"
@@ -1024,20 +1052,46 @@ class ObsidianWriter:
         if block:
             print(f"   📒 更正账本：{len(t_fix)} 处教授自我更正 + {len(fml)} 条官方公式",
                   flush=True)
+        # ⭐ 确定性覆盖度（作者第四轮）：**章节 + 实时要点 = 知识点清单的唯一口径**。
+        #    没有章节（旧会话 / 开关关着）时骨架为空 → 退回「模型自己列知识点」的老路。
+        import note_cover
+        maybe = self._chapter_items()
+        sk = note_cover.skeleton(maybe.get("chapters"), maybe.get("atoms"))
+        if sk:
+            print(f"   🧭 章节骨架：{len(sk)} 章 · "
+                  f"{sum(len(c['points']) for c in sk)} 条实时要点（粒度由它定，不由模型定）",
+                  flush=True)
         review = note_v2.review(entries, chat=self._chat, domain=domain,
                                materials=self._materials, on_progress=on_progress,
-                               extra=block)
+                               extra=block, skeleton=sk)
         if not review:
             return {}
-        if self._materials is not None and len(self._materials):
+        st = review.get("chunk_stats") or {}
+        if st.get("failed"):
+            print(f"   ⚠ 生成复习层：{len(st['failed'])}/{st.get('n', '?')} 块失败"
+                  f"（已按兜底重试过；这些课段的讲解**缺失**）", flush=True)
+        if sk or (self._materials is not None and len(self._materials)):
             try:
                 review.update(note_v2.align(review, chat=self._chat,
-                                            materials=self._materials))
+                                            materials=self._materials, skeleton=sk))
             except Exception as e:                            # noqa: BLE001
                 print(f"⚠ 覆盖度核对失败({str(e)[:60]}); 笔记照常生成")
+        if sk:
+            # 生成后机械核一遍：每一章至少有一个要点落到某一节，缺了在 §9 标 ⚠。
+            review["cover"] = note_cover.report(sk, review.get("sections") or [],
+                                                review.get("covered") or [])
+            cv = review["cover"]
+            line = (f"🧭 覆盖度：章节 {cv['n_ok']}/{cv['n_chapters']} 都有讲解 · "
+                    f"实时要点 {cv['n_covered']}/{cv['n_points']} 条落到节里")
+            if cv["n_covered"] < cv["n_points"]:
+                line += f"（缺 {cv['n_points'] - cv['n_covered']} 条，见 §9）"
+            print("   " + line, flush=True)
         try:
-            checks = note_v2.verify_numbers(review, chat=self._chat,
-                                            materials=self._materials)
+            checks = note_v2.verify_numbers(
+                review, chat=self._chat, materials=self._materials,
+                # ⚠️ Jun「🎙 例子要能在转录里对上数字」那条判据要用它（第四轮）
+                transcript="\n".join(
+                    str(e.get("en") or e.get("asr") or "") for e in entries))
             if checks:
                 review["checks"] = checks
                 self._corr_extra = note_v2.corrections_from_mismatch(checks)

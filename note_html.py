@@ -40,14 +40,22 @@ PLOT_SPECS = {
     "cost_curves": {"x": (0.2, 14.0), "xlabel": "产量 q", "ylabel": "成本",
                     "params": {"a": 1.0, "b": -12.0, "c": 60.0},
                     "slider": ("b", [-24.0, -18.0, -12.0, -8.0, 0.0]),
+                    "slider_label": "平均成本 AC 的一次项系数 b",
+                    "slider_hint": "拖动看：b 越负，AC 的最低点越靠右、最低值越低，"
+                                   "MC 与 AC 的交点跟着一起走。",
                     "legend": ["AC 平均成本", "MC 边际成本"]},
     "function_cubic": {"x": (-4.0, 4.0), "xlabel": "x", "ylabel": "f(x)",
                        "params": {"a": 1.0, "b": 0.0, "c": -3.0, "d": 0.0},
                        "slider": ("c", [-9.0, -6.0, -3.0, 0.0, 3.0]),
+                       "slider_label": "一次项系数 c（f′(x)=3x²+c）",
+                       "slider_hint": "拖动看：c 越负，两个驻点离得越远；c 到 0 时并成一个，"
+                                      "c 为正时 f′(x)=0 无解（没有驻点）。",
                        "legend": ["f(x)", "驻点"]},
     "supply_demand": {"x": (0.0, 100.0), "xlabel": "数量 Q", "ylabel": "价格 p",
                       "params": {"d0": 100.0, "d1": 2.0, "s0": 10.0, "s1": 1.0},
                       "slider": ("d1", [0.5, 1.0, 2.0, 3.0, 4.0]),
+                      "slider_label": "需求斜率 d₁（Qd=d₀−d₁·p）",
+                      "slider_hint": "拖动看：需求越陡（d₁ 越大），均衡价格越低、均衡数量越少。",
                       "legend": ["需求 D", "供给 S", "均衡点"]},
 }
 
@@ -167,7 +175,9 @@ def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p",
     x0, x1 = spec["x"]
     ys = [y for _i, pts in series for _x, y in pts]
     y0, y1 = _nice_bounds(ys)
-    pad_l, pad_r, pad_t, pad_b = 44, 12, 16, 34
+    # ⚠️ 左边距 44→56：y 轴刻度是 5 个（第四轮加的），纵轴标题改成**竖排**贴在左缘，
+    #    44 的时候「成本」会和顶端刻度（336 这种）叠在一起（自查截图抓到的）。
+    pad_l, pad_r, pad_t, pad_b = 56, 12, 16, 34
     iw, ih = w - pad_l - pad_r, h - pad_t - pad_b
 
     def sx(x):
@@ -192,7 +202,7 @@ def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p",
 
     colors = ("var(--c1)", "var(--c2)", "var(--c3)")
     parts = [f'<svg class="plot" viewBox="0 0 {w} {h}" role="img" '
-             f'aria-label="{html.escape(spec["legend"][0] if spec["legend"] else kind)}">',
+             f'aria-label="{html.escape("、".join(spec["legend"]) or kind)}">',
              f'<g class="grid">']
     # 网格 + 轴标签（4 等分，够读就行）
     for i in range(5):
@@ -208,13 +218,22 @@ def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p",
                  f'y2="{pad_t + ih}"/>')
     parts.append(f'<text class="lbl" x="{pad_l + iw / 2:.0f}" y="{h - 6}">'
                  f'{html.escape(spec["xlabel"])}</text>')
-    parts.append(f'<text class="lbl" x="6" y="{pad_t + 10}" >'
-                 f'{html.escape(spec["ylabel"])}</text>')
-    # 刻度值（x 轴两端 + y 轴上下）
-    parts.append(f'<text class="tick" x="{pad_l}" y="{pad_t + ih + 14}">{x0:g}</text>')
-    parts.append(f'<text class="tick" x="{pad_l + iw - 18}" y="{pad_t + ih + 14}">{x1:g}</text>')
-    parts.append(f'<text class="tick" x="6" y="{pad_t + 10 + 12}">{y1:.3g}</text>')
-    parts.append(f'<text class="tick" x="6" y="{pad_t + ih}">{y0:.3g}</text>')
+    # 纵轴标题**竖排**贴左缘（横着放会和顶端刻度撞车）
+    cy = pad_t + ih / 2
+    parts.append(f'<text class="lbl" x="13" y="{cy:.0f}" text-anchor="middle" '
+                 f'transform="rotate(-90 13 {cy:.0f})">{html.escape(spec["ylabel"])}</text>')
+    # 刻度值：x 轴 5 个（两端 + 3 个内点）、y 轴 5 个 —— 老版只有两端，
+    # 作者第四轮点名「纵轴至少 3 个」；读图时要能对着格线读数。
+    def _tk(v) -> str:
+        return f"{v:.3g}"
+    for i in range(5):
+        xt, yv = x0 + (x1 - x0) * i / 4, y0 + (y1 - y0) * i / 4
+        gx = pad_l + iw * i / 4
+        anchor = "start" if i == 0 else ("end" if i == 4 else "middle")
+        parts.append(f'<text class="tick" x="{gx:.1f}" y="{pad_t + ih + 14}" '
+                     f'text-anchor="{anchor}">{_tk(xt)}</text>')
+        parts.append(f'<text class="tick" x="{pad_l - 4}" y="{pad_t + ih * (1 - i / 4) + 4:.1f}" '
+                     f'text-anchor="end">{_tk(yv)}</text>')
     for idx, pts in series:
         segs = path(pts)
         if idx == 2:                    # 关键点：一个实心圆
@@ -226,8 +245,26 @@ def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p",
         for k, seg in enumerate(segs):
             parts.append(f'<polyline class="c{idx}" points="{seg}" '
                          f'style="stroke:{colors[idx % 3]}"/>')
-    legend = " · ".join(spec["legend"])
-    parts.append(f'<text class="lbl" x="{pad_l}" y="{pad_t - 4}">{html.escape(legend)}</text>')
+    # 图例：**每条曲线一个色块 + 名字**（旧版只有一行文字 —— 读者不知道哪条是哪条）。
+    # ⚠️ 只画真正有曲线的那些 series（`idx` 用图例下标取名字；交点那种点系列跳过）。
+    leg = []
+    drawn = sorted({idx for idx, _pts in series})
+    lx = float(pad_l)
+    for idx in drawn:
+        if idx >= len(spec["legend"]) or idx == 2:
+            continue                  # `idx == 2` 是**交点/均衡点**（一个实心圆），画在下面
+        name = spec["legend"][idx]
+        parts.append(f'<line x1="{lx:.1f}" y1="{pad_t - 10}" x2="{lx + 16:.1f}" '
+                     f'y2="{pad_t - 10}" style="stroke:{colors[idx % 3]};stroke-width:2.5"/>')
+        parts.append(f'<text class="lbl" x="{lx + 20:.1f}" y="{pad_t - 6}">'
+                     f'{html.escape(name)}</text>')
+        est = sum(13 if ord(ch) > 0x2000 else 7 for ch in name)     # 估宽：够用就行
+        lx += 20 + est + 16
+        leg.append(name)
+    if drawn and max(drawn) >= 2 and len(spec["legend"]) > 2:
+        parts.append(f'<circle class="dot" cx="{lx + 4:.1f}" cy="{pad_t - 10}" r="4"/>')
+        parts.append(f'<text class="lbl" x="{lx + 12:.1f}" y="{pad_t - 6}">'
+                     f'{html.escape(spec["legend"][2])}</text>')
     parts.append("</svg>")
 
     # 可拖动参数：把每个取值的**整条曲线**预先算好塞进 data——
@@ -244,12 +281,35 @@ def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p",
     parts.append(f'<div class="slider" data-plot="{pid}" '
                  f'data-opts="{html.escape(json.dumps(opts, separators=(",", ":")), quote=True)}" '
                  f'data-vals="{html.escape(json.dumps(list(vals)), quote=True)}">'
-                 f'<label>{html.escape(pk)} = <b class="v">{base.get(pk, vals[0]):g}</b></label>'
+                 f'<label>{html.escape(spec.get("slider_label") or pk)} = '
+                 f'<b class="v">{base.get(pk, vals[0]):g}</b></label>'
                  f'<input type="range" min="0" max="{len(vals) - 1}" step="1" '
-                 f'value="{_nearest(vals, base.get(pk, vals[0]))}" aria-label="拖动参数 {pk}">'
-                 f"</div>")
+                 f'value="{_nearest(vals, base.get(pk, vals[0]))}" '
+                 f'aria-label="{html.escape(spec.get("slider_label") or pk)}">'
+                 + (f'<p class="hint">{html.escape(spec["slider_hint"])}</p>'
+                    if spec.get("slider_hint") else "")
+                 + "</div>")
     cap = (f'<figcaption><strong>{caption}</strong></figcaption>' if caption else "")
     return '<figure class="fig">' + "".join(parts) + cap + "</figure>"
+
+
+def _norm_title(s) -> str:
+    """标题归一：去 `[13:29]` 前缀、去括号里的英文、去标点空白（只用来判重）。"""
+    s = re.sub(r"^\[?\d{1,2}:\d{2}\]?\s*", "", str(s or ""))
+    s = re.sub(r"（[^）]*）|\([^)]*\)", "", s)
+    return re.sub(r"[\s·:：，,。.、「」【】\-—_/]", "", s)
+
+
+def dup_caption(caption, heading) -> bool:
+    """图题与卡片标题重复？（一方含另一方就算 —— 读者刚看过标题，再读一遍是噪声）
+
+    ⚠️ 第四轮：`平均成本与边际成本曲线` 挂在「平均成本」卡片下面。图里已经有图例，
+       重复的那半句没有信息量。
+    """
+    a, b = _norm_title(caption), _norm_title(heading)
+    if not a or not b:
+        return False
+    return a in b or b in a
 
 
 def _nearest(vals: list, v) -> int:
@@ -357,7 +417,8 @@ svg.plot .axis{stroke:var(--muted);stroke-width:1}
 svg.plot polyline{fill:none;stroke-width:2.2;stroke-linecap:round}
 svg.plot .dot{fill:var(--c3)}
 svg.plot .lbl,svg.plot .tick{fill:var(--muted);font-size:11px;font-family:inherit}
-.slider{display:flex;align-items:center;gap:10px;padding:2px 8px 6px}
+.slider{display:flex;align-items:center;gap:10px;padding:2px 8px 6px;flex-wrap:wrap}
+.slider p.hint{flex-basis:100%;margin:0 0 2px 2px;color:var(--muted);font-size:13px}
 .slider input{flex:1;accent-color:var(--accent)}
 nav.toc{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 18px}
 nav.toc ol{margin:6px 0;padding-left:22px}
@@ -572,8 +633,8 @@ def note_page(d) -> str:
             continue
         seen_figs.add(sig)
         pid += 1
-        head_svg = svg(pl["kind"], pl.get("params") or {}, pid=f"plot{pid}",
-                       caption=inline(pl.get("title") or ""))
+        cap = "" if dup_caption(pl.get("title"), s.get("heading")) else inline(pl.get("title") or "")
+        head_svg = svg(pl["kind"], pl.get("params") or {}, pid=f"plot{pid}", caption=cap)
         if head_svg:
             plots_by_idx[i] = head_svg
     secs = [_section_html(s, i, fig=plots_by_idx.get(i - 1))
@@ -591,6 +652,41 @@ def note_page(d) -> str:
         extra += ("<h2>复习排程</h2><p>"
                   + " · ".join(html.escape(x) for x in d.review_dates)
                   + "（合上笔记，先自己写一遍）</p>")
+    # ⭐ 核对清单（`id="checks"`）：页头那行「数字核对：N 处已核…（点开看）」指向这里 ——
+    #    第四轮自查发现 HTML 里根本没有这个锚点（点开看 = 死链）。
+    #    覆盖度也放这儿：章节 + 实时要点是**确定性**清单，读者要能看到缺了哪条。
+    cv = review.get("cover") or {}
+    if cv.get("rows") or checks:
+        body = ""
+        if cv.get("rows"):
+            body += ("<h3>章节覆盖</h3><p class=\"muted\">章节与实时要点来自课堂实时分章"
+                     "（粒度不由模型定）。</p>"
+                     "<table><tr><th>章节（时间段）</th><th>实时要点</th><th>覆盖</th></tr>")
+            for r in cv["rows"]:
+                n_ok = sum(1 for x in r["points"] if x["ok"])
+                mark = ("✅" if r["ok"] else "⚠ 这一章没落到")
+                body += (f"<tr><td>章 {r['i']}「{html.escape(str(r['title']))}」 "
+                         f"<code>{html.escape(str(r['t0']))}–{html.escape(str(r['t1']))}</code></td>"
+                         f"<td>{n_ok}/{len(r['points'])} 条</td><td>{mark}</td></tr>")
+            body += "</table>"
+            miss = [x for r in cv["rows"] for x in r["points"] if not x["ok"]]
+            if miss:
+                body += ("<h4>还没落到的要点（要补）</h4><ul>"
+                         + "".join(f"<li><code>{html.escape(str(x['ts']))}</code> "
+                                   f"{inline(x['point'])}</li>" for x in miss) + "</ul>")
+        if checks:
+            body += ("<h3>数字 / 公式三道核</h3><table>"
+                     "<tr><th>断言</th><th>怎么核的</th><th>结果</th></tr>")
+            for c in checks:
+                st = {"ok": "✅ 一致", "mismatch": "⚠ 已修正",
+                      "unchecked": "⬜ 未核对"}.get(str(c.get("status")), "⬜ 未核对")
+                rec = c.get("recomputed")
+                body += (f"<tr><td>{inline(c.get('claim'))}</td><td>{inline(c.get('how'))}</td>"
+                         f"<td>{st}" + (f"（应为 {inline(rec)}）" if c.get('status') == 'mismatch'
+                                       and rec else "") + "</td></tr>")
+            body += "</table>"
+        extra += (f'<details id="checks" class="internal">'
+                  f"<summary>核对清单（覆盖度 · 数字三道核）</summary>{body}</details>")
     title = f"{d.course} · {d.date}" + (f" · {review.get('title_zh')}"
                                         if review.get("title_zh") else "")
     warns_html = ""

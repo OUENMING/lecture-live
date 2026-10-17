@@ -14,7 +14,7 @@
 4. **`polish.STAGE_NAME` 是 stage 显示名的唯一定义点**，未知名显示原名而不是空白。
 
 ⚠️ 语料全是合成的（`tempfile`），不碰 `sessions/` 一个字节，也不发任何网络请求
-   （`polish._chat` 与 `_review` 都被替身接管）。
+   （`polish._chat` 与 `_review_v2` 都被替身接管）。
 ⚠️ 每条断言先问「把实现改坏它会不会红」—— 第 3 条**自带变异验证**：
    把 `termios.tcflush` 换成空操作，那条必须变。
 """
@@ -168,14 +168,14 @@ def _writer(d: str, **kw):
        本文件测的是**中断护栏**，不是 `append()`，所以直接置数。
     """
     w = ow.ObsidianWriter(d, "TESTX", mode="yes", **kw)
-    # ⚠️⚠️ **`_review` 必须在这里就接管**（2026-09-28 审查指出）：不接管的话
-    #    `close()` 会走到 `obsidian_writer._call_review`，那里是**真的
-    #    `httpx.post("https://api.deepseek.com/v1/chat/completions", timeout=180)`**。
-    #    本文件头写着「不发任何网络请求（`polish._chat` 与 `_review` 都被替身接管）」——
+    # ⚠️⚠️ **复习层必须在这里就接管**（2026-09-28 审查指出）：不接管的话
+    #    `close()` 会走到真的 `llm_client.chat_json(...)`（`note_v2` 那三条调用）。
+    #    本文件头写着「不发任何网络请求（`polish._chat` 与复习层都被替身接管）」——
     #    而实际上只有 `t_review_interrupt` 那一支装了，另外两支**一直在真发请求**
     #    （假 key 会 401 快速失败，所以从没人发现）。
+    #    ⚠️ 2026-10-17 v2：方法名从 `_review` 换成 `_review_v2`（v1 那套已删）。
     #    ⚠️ 需要测复习层中断的那一支会在用例里**再覆盖一次**（那是它的被测对象）。
-    w._review = lambda *a, **k: {}
+    w._review_v2 = lambda *a, **k: {}
     sp = pathlib.Path(d) / "s.md"
     sp.write_text(SESSION, encoding="utf-8")
     w.session_path = sp
@@ -207,7 +207,7 @@ def t_review_interrupt():
 
         def boom(entries, on_progress=None):       # 签名要跟实现走（多了 on_progress）
             raise KeyboardInterrupt
-        w._review = boom
+        w._review_v2 = boom
         w.close()
         assert w.vault_path and pathlib.Path(w.vault_path).exists(), (
             "复习层被打断后笔记没写出来")

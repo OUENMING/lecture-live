@@ -1,0 +1,557 @@
+"""自包含 HTML 笔记（2026-10-17 作者追加要求 B）：同目录同名 `.html`。
+
+## 组件（作者点名的六项，逐条对到实现）
+
+| # | 要求 | 实现在哪 |
+|---|---|---|
+| 1 | 例题**分步展开**（点一下出下一步，每步附「为什么」） | 每步一个 `<details>`（**不用 JS 也能用**）+ 顶部「全部展开」按钮 |
+| 2 | 自测**先答再揭晓** | 题干在上、答案在 `<details>` 里，**原生折叠** |
+| 3 | 公式渲染（KaTeX；离线退回 TeX 源码，**不能白屏**） | `.tex` 元素里先放 TeX 源码，KaTeX 加载成功才替换；失败保持源码可见 |
+| 4 | 适合画图的知识点**自动出图** + 可拖动参数 | `PLOT_SPECS` 三个固定图形（成本曲线 / 三次函数 / 供需），**参数曲线在 Python 里预采样**，JS 只做切换 |
+| 5 | 知识点地图 / 目录 + 阅读进度 | 左侧目录（点击跳转）+ 顶部进度条 |
+| 6 | 克制的过渡动画、亮/暗主题 | 折叠/滚动入场（IntersectionObserver）；`prefers-reduced-motion` 下全关；亮色为默认、`prefers-color-scheme` 跟随、右上角手动切换 |
+
+## 调研结论（`scratchpad/notes/research/d-format.md`，2026-10-17）带来的四处改动
+
+1. **阅读进度条在调研里查不到学习收益证据** —— 保留（作者要求）但**只当导航**，
+   文案里不承诺任何学习效果；
+2. **默认浅色**（NN/g：浅色模式视觉表现更好）+ 跟随系统 + 手动切换（不是暗色优先）；
+3. **CDN 允许失败**：唯一的远端资源是 KaTeX（作者明确允许），失败时公式退回源码；
+4. **打印样式**兜底（`@media print`），因为「打印成 PDF 带去上课」是真实用法。
+
+## 纪律
+
+- **纯渲染**：不联网、不读文件。数据全是 `review` dict + 几个字符串。
+- **不用 JS 也能读**：正文全部服务端渲染进 HTML；JS 只做展开/切换/进度。
+- **不引入新的 Python 依赖**：图形是 SVG（手写坐标系），没有 numpy/matplotlib。
+"""
+from __future__ import annotations
+import html
+import json
+import math
+import re
+
+KATEX_CSS = "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"
+KATEX_JS = "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"
+
+#: 三个固定图形的规范（模型只给 `kind` + `params`，画法在这里写死）。
+#: `x` = 横轴范围；`slider` = 允许拖动的参数（拖动会重画）。单位/标签都是中文。
+PLOT_SPECS = {
+    "cost_curves": {"x": (0.2, 14.0), "xlabel": "产量 q", "ylabel": "成本",
+                    "params": {"a": 1.0, "b": -12.0, "c": 60.0},
+                    "slider": ("b", [-24.0, -18.0, -12.0, -8.0, 0.0]),
+                    "legend": ["AC 平均成本", "MC 边际成本"]},
+    "function_cubic": {"x": (-4.0, 4.0), "xlabel": "x", "ylabel": "f(x)",
+                       "params": {"a": 1.0, "b": 0.0, "c": -3.0, "d": 0.0},
+                       "slider": ("c", [-9.0, -6.0, -3.0, 0.0, 3.0]),
+                       "legend": ["f(x)", "驻点"]},
+    "supply_demand": {"x": (0.0, 100.0), "xlabel": "数量 Q", "ylabel": "价格 p",
+                      "params": {"d0": 100.0, "d1": 2.0, "s0": 10.0, "s1": 1.0},
+                      "slider": ("d1", [0.5, 1.0, 2.0, 3.0, 4.0]),
+                      "legend": ["需求 D", "供给 S", "均衡点"]},
+}
+
+_N = 72            # 每条曲线的采样点数（预采样进 HTML，别太大）
+
+
+# ---------------------------------------------------------------- 曲线数学（纯函数）
+def curves(kind: str, params: dict) -> list:
+    """`kind` + `params` -> `[(series_index, [(x, y), …])]`。**画法的唯一定义点**。
+
+    三个 kind 的解析式（写在这里而不是 prompt 里 —— 模型只给参数，公式由代码保证）：
+      · `cost_curves`   TC = aq³+bq²+cq → AC = aq²+bq+c、MC = 3aq²+2bq+c
+      · `function_cubic` f(x) = ax³+bx²+cx+d
+      · `supply_demand` Qd = d0−d1·p、Qs = s0+s1·p（横轴 Q、纵轴 p）
+    """
+    spec = PLOT_SPECS.get(kind)
+    if not spec:
+        return []
+    p = dict(spec["params"])
+    for k, v in (params or {}).items():
+        if k in p:
+            try:
+                p[k] = float(v)
+            except (TypeError, ValueError):
+                pass
+    x0, x1 = spec["x"]
+    out: list = []
+
+    def f(*vals):
+        """把某条曲线的函数值算出来（越界 -> None，画的时候断开）。"""
+        ys = []
+        for i in range(_N):
+            x = x0 + (x1 - x0) * i / (_N - 1)
+            try:
+                y = vals[0](x)
+            except Exception:                                  # noqa: BLE001
+                y = None
+            if y is None or not math.isfinite(y) or abs(y) > 1e9:
+                ys.append(None)
+            else:
+                ys.append(y)
+        return ys
+
+    if kind == "cost_curves":
+        a, b, c = p["a"], p["b"], p["c"]
+        xs = [x0 + (x1 - x0) * i / (_N - 1) for i in range(_N)]
+        out.append((0, list(zip(xs, f(lambda x: a * x * x + b * x + c)))))
+        out.append((1, list(zip(xs, f(lambda x: 3 * a * x * x + 2 * b * x + c)))))
+        out.append((2, _min_ac_marker(a, b, c)))
+    elif kind == "function_cubic":
+        a, b, c, d = p["a"], p["b"], p["c"], p["d"]
+        xs = [x0 + (x1 - x0) * i / (_N - 1) for i in range(_N)]
+        out.append((0, list(zip(xs, f(lambda x: a * x ** 3 + b * x * x + c * x + d)))))
+        out.append((1, _stationary(a, b, c, d)))
+    elif kind == "supply_demand":
+        d0, d1, s0, s1 = p["d0"], p["d1"], p["s0"], p["s1"]
+        xs = [x0 + (x1 - x0) * i / (_N - 1) for i in range(_N)]
+        out.append((0, [(x, (d0 - x) / d1 if d1 else None) for x in xs]))
+        out.append((1, [(x, (x - s0) / s1 if s1 else None) for x in xs]))
+        q = (d0 - s0) / (d1 + s1) if (d1 + s1) else None
+        pt = [(q, (d0 - q) / d1)] if q and q >= 0 else []
+        out.append((2, pt))
+    return out
+
+
+def _min_ac_marker(a: float, b: float, c: float) -> list:
+    """`min AC` 那个点：AC=MC ⇔ 2aq²+bq=0 ⇔ q = −b/(2a)（q>0 的那个）。"""
+    if a == 0:
+        return []
+    q = -b / (2 * a)
+    if q <= 0:
+        return []
+    return [(q, a * q * q + b * q + c)]
+
+
+def _stationary(a: float, b: float, c: float, d: float) -> list:
+    """三次函数的驻点：f'(x)=3ax²+2bx+c=0。判别式 <0 就没有实驻点。"""
+    if a == 0:
+        return []
+    disc = 4 * b * b - 12 * a * c
+    if disc < 0:
+        return []
+    sq = math.sqrt(disc)
+    pts = []
+    for x in ((-2 * b + sq) / (6 * a), (-2 * b - sq) / (6 * a)):
+        pts.append((x, a * x ** 3 + b * x * x + c * x + d))
+    return pts
+
+
+# ---------------------------------------------------------------- SVG（服务端预采样）
+def _nice_bounds(all_ys: list) -> tuple:
+    vals = [y for y in all_ys if y is not None]
+    if not vals:
+        return -1.0, 1.0
+    lo, hi = min(vals), max(vals)
+    if lo == hi:
+        lo, hi = lo - 1, hi + 1
+    pad = (hi - lo) * 0.08
+    return lo - pad, hi + pad
+
+
+def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p") -> str:
+    """一张图（**含可拖动参数的预采样路径** —— JS 只换 `points`，不再算数学）。"""
+    spec = PLOT_SPECS.get(kind)
+    if not spec:
+        return ""
+    series = curves(kind, params)
+    if not series:
+        return ""
+    x0, x1 = spec["x"]
+    ys = [y for _i, pts in series for _x, y in pts]
+    y0, y1 = _nice_bounds(ys)
+    pad_l, pad_r, pad_t, pad_b = 44, 12, 16, 34
+    iw, ih = w - pad_l - pad_r, h - pad_t - pad_b
+
+    def sx(x):
+        return pad_l + (x - x0) / (x1 - x0) * iw
+
+    def sy(y):
+        return pad_t + (1 - (y - y0) / (y1 - y0)) * ih
+
+    def path(pts):
+        seg, out, pen = [], [], False
+        for x, y in pts:
+            if y is None:
+                if pen:
+                    out.append(" ".join(seg))
+                    seg, pen = [], False
+                continue
+            seg.append(f"{sx(x):.1f},{sy(y):.1f}")
+            pen = True
+        if seg:
+            out.append(" ".join(seg))
+        return out
+
+    colors = ("var(--c1)", "var(--c2)", "var(--c3)")
+    parts = [f'<svg class="plot" viewBox="0 0 {w} {h}" role="img" '
+             f'aria-label="{html.escape(spec["legend"][0] if spec["legend"] else kind)}">',
+             f'<g class="grid">']
+    # 网格 + 轴标签（4 等分，够读就行）
+    for i in range(5):
+        gx = pad_l + iw * i / 4
+        gy = pad_t + ih * i / 4
+        parts.append(f'<line x1="{gx:.1f}" y1="{pad_t}" x2="{gx:.1f}" y2="{pad_t + ih}"/>')
+        parts.append(f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{pad_l + iw}" y2="{gy:.1f}"/>')
+    parts.append("</g>")
+    # 坐标轴
+    parts.append(f'<line class="axis" x1="{pad_l}" y1="{pad_t + ih}" '
+                 f'x2="{pad_l + iw}" y2="{pad_t + ih}"/>')
+    parts.append(f'<line class="axis" x1="{pad_l}" y1="{pad_t}" x2="{pad_l}" '
+                 f'y2="{pad_t + ih}"/>')
+    parts.append(f'<text class="lbl" x="{pad_l + iw / 2:.0f}" y="{h - 6}">'
+                 f'{html.escape(spec["xlabel"])}</text>')
+    parts.append(f'<text class="lbl" x="6" y="{pad_t + 10}" >'
+                 f'{html.escape(spec["ylabel"])}</text>')
+    # 刻度值（x 轴两端 + y 轴上下）
+    parts.append(f'<text class="tick" x="{pad_l}" y="{pad_t + ih + 14}">{x0:g}</text>')
+    parts.append(f'<text class="tick" x="{pad_l + iw - 18}" y="{pad_t + ih + 14}">{x1:g}</text>')
+    parts.append(f'<text class="tick" x="6" y="{pad_t + 10 + 12}">{y1:.3g}</text>')
+    parts.append(f'<text class="tick" x="6" y="{pad_t + ih}">{y0:.3g}</text>')
+    for idx, pts in series:
+        segs = path(pts)
+        if idx == 2:                    # 关键点：一个实心圆
+            for x, y in pts:
+                if y is None:
+                    continue
+                parts.append(f'<circle class="dot" cx="{sx(x):.1f}" cy="{sy(y):.1f}" r="4"/>')
+            continue
+        for k, seg in enumerate(segs):
+            parts.append(f'<polyline class="c{idx}" points="{seg}" '
+                         f'style="stroke:{colors[idx % 3]}"/>')
+    legend = " · ".join(spec["legend"])
+    parts.append(f'<text class="lbl" x="{pad_l}" y="{pad_t - 4}">{html.escape(legend)}</text>')
+    parts.append("</svg>")
+
+    # 可拖动参数：把每个取值的**整条曲线**预先算好塞进 data——
+    # ⚠️ 这是刻意的：JS 里再抄一份解析式 = 两份数学、迟早漂移（`panel.py` 的教训）。
+    sliders = []
+    pk, vals = spec["slider"]
+    base = dict(spec["params"])
+    base.update({k: v for k, v in (params or {}).items() if k in base})
+    opts = []
+    for v in vals:
+        pr = dict(base, **{pk: v})
+        opts.append([[f"{x:.2f},{y:.2f}" if y is not None else "" for x, y in pts]
+                     for _i, pts in curves(kind, pr)])
+    parts.append(f'<div class="slider" data-plot="{pid}" '
+                 f'data-opts="{html.escape(json.dumps(opts, separators=(",", ":")), quote=True)}" '
+                 f'data-vals="{html.escape(json.dumps(list(vals)), quote=True)}">'
+                 f'<label>{html.escape(pk)} = <b class="v">{base.get(pk, vals[0]):g}</b></label>'
+                 f'<input type="range" min="0" max="{len(vals) - 1}" step="1" '
+                 f'value="{_nearest(vals, base.get(pk, vals[0]))}" aria-label="拖动参数 {pk}">'
+                 f"</div>")
+    return '<figure class="fig">' + "".join(parts) + "</figure>"
+
+
+def _nearest(vals: list, v) -> int:
+    try:
+        return min(range(len(vals)), key=lambda i: abs(float(vals[i]) - float(v)))
+    except (TypeError, ValueError):
+        return 0
+
+
+# ---------------------------------------------------------------- 行内 Markdown
+_TEX_BLOCK = re.compile(r"\$\$(.+?)\$\$", re.S)
+_TEX_INLINE = re.compile(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)")
+
+
+def inline(text: str) -> str:
+    """一段文本 → HTML。**先转义再放行三种标记**（`**粗**`、`` `代码` ``、`$公式$`）。
+
+    ⚠️ 公式**两种形态都留着**：`.tex` 元素里是 TeX 源码（离线可见），
+       KaTeX 加载成功时被 JS 替换成排版结果 —— 这就是「不能白屏」那条要求。
+    """
+    s = html.escape(str(text or ""))
+    s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+
+    def _fmt(m):
+        # ⚠️ 这里**不再 escape**：`s` 已经整段 escape 过了，再 escape 一次会把
+        #    `'` 变成字面量 `&#x27;`（实测：TeX 里的撇号 `f'(x)` 会写坏）。
+        #    浏览器读 `getAttribute('data-tex')` 时会自己把实体解回原字符。
+        tex = m.group(1)
+        return f'<span class="tex" data-display="1" data-tex="{tex}">{tex}</span>'
+
+    s = _TEX_BLOCK.sub(_fmt, s)
+
+    def _fmt_inline(m):
+        tex = m.group(1)          # 同上：已 escape 过，别再来一次
+        return f'<span class="tex" data-tex="{tex}">{tex}</span>'
+
+    s = _TEX_INLINE.sub(_fmt_inline, s)
+    return s
+
+
+# ---------------------------------------------------------------- 页面
+_CSS = """
+:root{--bg:#fbfaf7;--fg:#1f2328;--muted:#5c6672;--card:#fff;--line:#e5e2dc;
+ --code:#f2f0eb;--c1:#c2410c;--c2:#1d4ed8;--c3:#0f766e;--accent:#8a5a00}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#15171a;--fg:#e6e3dd;
+ --muted:#9aa4b0;--card:#1c1f23;--line:#2b3037;--code:#22262c;--c1:#fb923c;--c2:#7dd3fc;
+ --c3:#5eead4;--accent:#e0b155}}
+:root[data-theme=dark]{--bg:#15171a;--fg:#e6e3dd;--muted:#9aa4b0;--card:#1c1f23;
+ --line:#2b3037;--code:#22262c;--c1:#fb923c;--c2:#7dd3fc;--c3:#5eead4;--accent:#e0b155}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.75 -apple-system,
+ "PingFang SC","Noto Sans SC",system-ui,sans-serif}
+#prog{position:fixed;top:0;left:0;height:3px;width:0;background:var(--accent);z-index:9;
+ transition:width .1s linear}
+@media (prefers-reduced-motion:reduce){#prog{transition:none}
+ *{animation:none!important;transition:none!important}}
+#topbar{position:fixed;top:0;right:0;padding:6px 10px;z-index:8;font-size:13px}
+#topbar button{cursor:pointer;background:var(--card);color:var(--fg);border:1px solid var(--line);
+ border-radius:6px;padding:3px 9px}
+.wrap{max-width:1020px;margin:0 auto;padding:28px 20px 80px}
+h1{font-size:26px;line-height:1.3;margin:6px 0 10px}
+.meta{color:var(--muted);font-size:14px;border-left:3px solid var(--line);padding-left:10px}
+.meta div{margin:2px 0}
+h2{font-size:20px;margin:36px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+h3{font-size:18px;margin:26px 0 8px}
+h4{font-size:16px;margin:18px 0 6px;color:var(--accent)}
+section.card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+ padding:14px 18px;margin:14px 0}
+.reveal{opacity:0;transform:translateY(6px);transition:opacity .28s ease,transform .28s ease}
+.reveal.in{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){.reveal{opacity:1!important;transform:none!important}}
+details{border:1px dashed var(--line);border-radius:8px;padding:6px 10px;margin:8px 0;
+ background:var(--code)}
+details summary{cursor:pointer;font-weight:600;color:var(--accent)}
+details[open] summary{margin-bottom:6px}
+details.step{background:transparent;border-style:solid;border-color:var(--line)}
+formula,.tex{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);
+ padding:1px 4px;border-radius:4px;font-size:15px}
+.tex.done{background:none;padding:0;font-family:inherit}
+.plots{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+figure.fig{margin:0;background:var(--card);border:1px solid var(--line);border-radius:12px;
+ padding:8px}
+svg.plot{width:100%;height:auto;display:block}
+svg.plot .grid line{stroke:var(--line);stroke-width:.6;opacity:.7}
+svg.plot .axis{stroke:var(--muted);stroke-width:1}
+svg.plot polyline{fill:none;stroke-width:2.2;stroke-linecap:round}
+svg.plot .dot{fill:var(--c3)}
+svg.plot .lbl,svg.plot .tick{fill:var(--muted);font-size:11px;font-family:inherit}
+.slider{display:flex;align-items:center;gap:10px;padding:2px 8px 6px}
+.slider input{flex:1;accent-color:var(--accent)}
+nav.toc{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 18px}
+nav.toc ol{margin:6px 0;padding-left:22px}
+nav.toc a{color:var(--fg);text-decoration:none;border-bottom:1px dotted var(--line)}
+nav.toc a:hover{color:var(--accent)}
+table{border-collapse:collapse;width:100%;font-size:15px}
+th,td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
+th{background:var(--code)}
+code{background:var(--code);padding:1px 4px;border-radius:4px}
+.q{border-left:3px solid var(--c2);padding-left:10px;margin:14px 0}
+.q .a{margin-top:6px}
+footer{color:var(--muted);font-size:13px;margin-top:40px}
+@media print{#prog,#topbar,.slider{display:none}section.card{break-inside:avoid}
+ body{background:#fff}}
+"""
+
+_JS = """
+(function(){
+ var d=document;
+ function tex(){
+  if(!window.katex) return false;
+  d.querySelectorAll('.tex').forEach(function(el){
+   var src=el.getAttribute('data-tex')||el.textContent;
+   try{
+    var disp=el.getAttribute('data-display')==='1';
+    el.innerHTML=katex.renderToString(src,{displayMode:disp,throwOnError:false});
+    el.classList.add('done');
+   }catch(e){}
+  });
+  return true;
+ }
+ if(!tex()){ // 离线 / CDN 挂了：公式保持 TeX 源码可见（不白屏），5 秒后再试一次
+  var t=setTimeout(function(){ if(!tex()) console.warn('KaTeX 不可用：公式显示为 TeX 源码'); },5000);
+  window.addEventListener('load',function(){tex();clearTimeout(t);});
+ }
+ d.querySelectorAll('.slider').forEach(function(w){
+  var svg=d.querySelector('[data-plot="'+w.getAttribute('data-plot')+'"]');
+  var input=w.querySelector('input'), out=w.querySelector('.v');
+  var opts=JSON.parse(w.getAttribute('data-opts')||'[]');
+  var vals=JSON.parse(w.getAttribute('data-vals')||'[]');
+  input.addEventListener('input',function(){
+   var i=+input.value, o=opts[i]; if(!o||!svg) return;
+   out.textContent=vals[i];
+   svg.querySelectorAll('polyline').forEach(function(pl,k){
+    var pts=(o[k]||[]);
+    var groups=[],seg=[];pts.forEach(function(s){ if(s) seg.push(s); else if(seg.length){groups.push(seg.join(' '));seg=[];} });
+    if(seg.length) groups.push(seg.join(' '));
+    pl.setAttribute('points',groups[0]||'');
+    var extra=pl.parentNode.querySelectorAll('polyline.userline');extra.forEach(function(e){e.remove()});
+    for(var g=1;g<groups.length;g++){
+     var c=pl.cloneNode();c.setAttribute('points',groups[g]);c.classList.add('userline');
+     pl.parentNode.insertBefore(c,pl.nextSibling);
+    }
+   });
+  });
+ });
+ var bar=d.getElementById('prog');
+ function onScroll(){
+  var h=d.documentElement, max=(h.scrollHeight-h.clientHeight)||1;
+  bar.style.width=(Math.min(1,h.scrollTop/max)*100).toFixed(2)+'%';
+ }
+ d.addEventListener('scroll',onScroll,{passive:true});onScroll();
+ var reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+ if('IntersectionObserver' in window && !reduce){
+  var io=new IntersectionObserver(function(es){es.forEach(function(e){
+   if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}});},
+   {rootMargin:'0px 0px -8% 0px'});
+  d.querySelectorAll('.reveal').forEach(function(el){io.observe(el)});
+ } else { d.querySelectorAll('.reveal').forEach(function(el){el.classList.add('in')}); }
+ var btn=d.getElementById('expand');var all=false;
+ if(btn) btn.addEventListener('click',function(){
+  all=!all;
+  d.querySelectorAll('details.step').forEach(function(x){x.open=all});
+  btn.textContent=all?'收起全部步骤':'展开全部步骤';
+ });
+ var tbtn=d.getElementById('theme');
+ if(tbtn) tbtn.addEventListener('click',function(){
+  var cur=d.documentElement.getAttribute('data-theme');
+  var next=(cur==='dark')?'light':(cur==='light'?'dark':'dark');
+  d.documentElement.setAttribute('data-theme',next);
+  tbtn.textContent=(next==='dark')?'☀︎ 亮色':'☾ 暗色';
+ });
+})();
+"""
+
+
+def _section_html(sec: dict, idx: int, *, reveal: bool = True) -> str:
+    cls = "reveal" if reveal else ""
+    o = [f'<section class="card {cls}" id="kp{idx}">',
+         f'<h3>{idx}. {inline(sec.get("heading"))}'
+         + (f' <code>🎙 {html.escape(str(sec.get("ts")))}</code>' if sec.get("ts") else "")
+         + "</h3>"]
+    if sec.get("prereq_link"):
+        o.append(f'<p>🔗 {inline(sec["prereq_link"])}</p>')
+    for para in (sec.get("prose") or []):
+        o.append(f"<p>{inline(para)}</p>")
+    if sec.get("prereq"):
+        o.append(f"<details><summary>📚 前置补课（教授没讲、但要懂）</summary>"
+                 f"<p>{inline(sec['prereq'])}</p></details>")
+    ex = sec.get("example") or {}
+    if ex.get("prompt") or ex.get("steps"):
+        o.append(f'<h4>例题 · {inline(ex.get("title") or "教授的例题")}</h4>')
+        if ex.get("prompt"):
+            o.append(f'<p><strong>题目</strong>：{inline(ex["prompt"])}</p>')
+        for i, st in enumerate(ex.get("steps") or [], 1):
+            t, w = inline(st.get("text")), inline(st.get("why"))
+            o.append(f'<details class="step"><summary>第 {i} 步</summary>'
+                     f"<p>{t}</p>" + (f"<p><em>为什么：{w}</em></p>" if w else "")
+                     + "</details>")
+        if ex.get("answer"):
+            o.append(f'<details><summary>答案</summary><p>{inline(ex["answer"])}</p></details>')
+    for j, v in enumerate(sec.get("variants") or [], 1):
+        body = "".join(f"<p>{inline(s.get('text'))}"
+                       + (f"<br><em>为什么：{inline(s.get('why'))}</em>" if s.get("why") else "")
+                       + "</p>" for s in (v.get("steps") or []))
+        o.append(f'<h4>变式 {j}（先自己写）</h4><p>{inline(v.get("q"))}</p>'
+                 f'<details><summary>答案</summary>{body}'
+                 + (f"<p>{inline(v.get('a'))}</p>" if v.get("a") else "") + "</details>")
+    fd = sec.get("faded") or {}
+    if fd.get("q"):
+        blanks = "".join(f'<p>⬜ {inline(b)}</p>' for b in (fd.get("blanks") or []))
+        o.append(f'<h4>补全题（把关键步骤填上）</h4><p>{inline(fd["q"])}</p>{blanks}'
+                 + (f'<details><summary>答案</summary><p>{inline(fd["a"])}</p></details>'
+                    if fd.get("a") else ""))
+    if sec.get("pitfalls"):
+        o.append("<h4>常见误区</h4><ul>"
+                 + "".join(f"<li>{inline(p)}</li>" for p in sec["pitfalls"]) + "</ul>")
+    if sec.get("terms"):
+        o.append("<p>🔑 " + " · ".join(inline(t.get("en")) for t in sec["terms"]) + "</p>")
+    if sec.get("sources"):
+        o.append("<p>📎 来源：" + " · ".join(inline(s) for s in sec["sources"]) + "</p>")
+    o.append("</section>")
+    return "".join(o)
+
+
+def page(title: str, head: list, toc_items: list, sections_html: list, qa: list,
+         plots: list, extra_html: str = "", footer: str = "") -> str:
+    """整页 HTML。参数全是**已渲染好的片段** —— 这个函数只负责骨架。
+
+    `toc_items` 与 `sections_html` **分开传**：目录要的是标题（知识点），
+    正文是 HTML —— 合成一个参数就会逼调用方去解析自己刚生成的 HTML（实测踩过）。
+    """
+    toc = "".join(
+        f'<li><a href="#kp{i}">{inline(t)}</a></li>'
+        for i, t in enumerate(toc_items, 1))
+    qa_html = ""
+    for i, q in enumerate(qa, 1):
+        qa_html += (f'<div class="q"><p><strong>{i}. {inline(q.get("q"))}</strong></p>'
+                    f'<details><summary>先自己想 · 再揭晓</summary>'
+                    f'<div class="a">{inline(q.get("a"))}</div></details></div>')
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{html.escape(title)}</title>
+<link rel="stylesheet" href="{KATEX_CSS}" onerror="window.__katex_css_failed=1">
+<style>{_CSS}</style>
+<script defer src="{KATEX_JS}" onerror="window.__katex_failed=1"></script>
+</head><body>
+<div id="prog" aria-hidden="true"></div>
+<div id="topbar"><button id="theme" type="button">☾ 暗色</button></div>
+<div class="wrap">
+<h1>{html.escape(title)}</h1>
+<div class="meta">{''.join(head)}</div>
+<nav class="toc"><strong>知识点地图</strong><ol>{toc}</ol></nav>
+<p><button id="expand" type="button">展开全部步骤</button></p>
+{''.join(sections_html)}
+{('<h2>图</h2><div class="plots">' + ''.join(plots) + "</div>") if plots else ''}
+<h2>自测（先答再揭晓）</h2>{qa_html or '<p>（本节没生成自测）</p>'}
+{extra_html}
+<footer>{footer}<p>🎙 课上一手 · 📖 课件材料 · 📚 标准理论；冲突时 📖 &gt; 📚 &gt; 🎙。
+本页由 ClassLive 生成，公式在无法加载 KaTeX 时回退为 TeX 源码。</p></footer>
+</div>
+<script>{_JS}</script>
+</body></html>
+"""
+
+
+def note_page(d) -> str:
+    """`note_render.NoteData` -> 自包含 HTML。**纯渲染**（失败由调用方兜底）。"""
+    review = d.review or {}
+    sections = review.get("sections") or []
+    head = [f"<div>🕐 {html.escape(str(d.entries[0]['ts'] if d.entries else '—'))} – "
+            f"{html.escape(str(d.entries[-1]['ts'] if d.entries else '—'))} · "
+            f"🗣 {len(d.entries)} 句</div>"]
+    if d.materials_line:
+        head.append(f"<div>{inline(d.materials_line)}</div>")
+    checks = review.get("checks") or []
+    if checks:
+        n_ok = sum(1 for c in checks if c.get("status") == "ok")
+        n_bad = sum(1 for c in checks if c.get("status") == "mismatch")
+        n_un = sum(1 for c in checks if c.get("status") == "unchecked")
+        head.append(f"<div>数字三道核：{n_ok} ✓ · {n_bad} ⚠ · {n_un} 未核对</div>")
+    for w in (d.warns or []):
+        head.append(f"<div>⚠ {inline(w)}</div>")
+    plots = []
+    pid = 0
+    for s in sections:
+        pl = s.get("plot") or {}
+        if pl.get("kind"):
+            pid += 1
+            head_svg = svg(pl["kind"], pl.get("params") or {}, pid=f"plot{pid}")
+            if head_svg:
+                plots.append(f'<figcaption><strong>{inline(pl.get("title") or "")}</strong>'
+                             f"</figcaption>{head_svg}")
+    secs = [_section_html(s, i) for i, s in enumerate(sections, 1)]
+    toc_items = [s.get("heading", "") for s in sections]
+    extra = ""
+    if d.term_rows:
+        extra += "<h2>本课术语</h2><ul>" + "".join(
+            f"<li>{inline(str(r).lstrip('- '))}</li>" for r in d.term_rows) + "</ul>"
+    if d.glossary_added:
+        extra += ("<h2>本课新加入术语库</h2><p>"
+                  + " · ".join(f"<code>{html.escape(str(t))}</code>" for t in d.glossary_added)
+                  + "</p>")
+    if d.review_dates:
+        extra += ("<h2>复习排程</h2><p>"
+                  + " · ".join(html.escape(x) for x in d.review_dates)
+                  + "（合上笔记，先自己写一遍）</p>")
+    title = f"{d.course} · {d.date}" + (f" · {review.get('title_zh')}"
+                                        if review.get("title_zh") else "")
+    return page(title, head, toc_items, secs, review.get("qa") or [], plots, extra,
+                footer=f"<p>Markdown 版：<code>{html.escape(str(d.html_name or ''))}</code>"
+                       "（同目录）</p>")

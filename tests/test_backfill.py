@@ -162,7 +162,7 @@ class CloseWiring(unittest.TestCase):
                 kw["backfill_fn"] = _bf if fn is True else fn
             w = ow.ObsidianWriter(d, "TESTX", mode="yes", api_key="k",
                                   polish=False, **kw)
-            w._review = lambda *a, **k: {}
+            w._review_v2 = lambda *a, **k: {}   # ⚠️ v2 起方法名换了（不接管会真发请求）
             w._keypoint_items = lambda *a, **k: []
             sp = pathlib.Path(d) / "s.md"
             sp.write_text(_session(ONLY_ASR), encoding="utf-8")

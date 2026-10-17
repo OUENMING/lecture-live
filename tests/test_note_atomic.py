@@ -5,7 +5,7 @@
 
 ## 钉住了什么
 
-1. ⭐⭐ **基础版先落盘**：复习层（`REVIEW_WORKERS=5` 并发那一段）**还没返回**时，
+1. ⭐⭐ **基础版先落盘**：复习层（`note_v2.REVIEW_WORKERS=5` 并发那一段）**还没返回**时，
    `Lectures/` 下就已经有一份可读的笔记（转写 + 译文）。
    —— 这一条防的是"复习层那几十秒里关窗 / 崩溃 → 这节课一份笔记都没有"。
 2. ⭐ **复习层回来后原子重写同一路径**为完整版：**只有一个 .md 文件**
@@ -14,8 +14,10 @@
    「复习层这次没生成 + 怎么用 `rebuild_note.py` 补」。
 4. **写端隔离**：`sessions/` 的会话文件**字节不变**（三方契约）；vault 是临时目录。
 5. **原子**：写完不留 `.tmp`（`os.replace` 换过去）。
+6. 🧩🃏 2026-10-17 起同目录还会多**两个旁车文件**（`.html` 交互版 / `.anki.csv`）——
+   §2 那条"只有一份笔记"的判据因此**只数 `.md`**（旁车是有意为之，不是路径算两遍）。
 
-⚠️ 复习层是**桩**（`w._review`），不联网；`CLASSLIVE_NOTE_MERGE=0` 按住碎句合并；
+⚠️ 复习层是**桩**（`w._review_v2`），不联网；`CLASSLIVE_NOTE_MERGE=0` 按住碎句合并；
    写端（`ow.SESSIONS` 与 vault）与读端都在 `tempfile` 里。
 """
 from __future__ import annotations
@@ -39,9 +41,14 @@ SESSION = ("# TESTX · 2026-10-16 · 实时会话日志\n\n"
            "> [!abstract] 10:00:12\n"
            "> **EN**: second one.\n> **ZH**: 第二句。\n> **ASR**: second one.\n\n")
 
-REVIEW = {"title": "The Title", "overview_en": "an overview", "overview_zh": "一个概览",
-          "sections": [{"heading": "Key Point", "points": [
-              {"en": "English point", "detail": "", "zh": "中文点睛", "terms": []}]}]}
+#: v2 的复习层形状（2026-10-17）：小节是**中文连贯讲解**（`prose`），
+#: 另有 term/checks/qa —— 桩给最小可用集，够渲染出可断言的那几行。
+REVIEW = {"title_zh": "本课主题",
+          "sections": [{"heading": "知识点一", "ts": "10:00",
+                        "prose": ["English point 在这里被讲成一个中文段落。"],
+                        "terms": [{"en": "Key Point", "zh": "关键点"}]}],
+          "qa": [{"q": "自测题？", "a": "答案。", "kind": "concept"}],
+          "terms": [{"en": "Key Point", "zh": "关键点"}]}
 
 
 class _Harness:
@@ -60,20 +67,28 @@ class _Harness:
             w = ow.ObsidianWriter(str(vault), "TESTX", mode="yes",
                                   api_key=self.key, polish=False)
             w._keypoint_items = lambda *a, **k: []
-            w._review = self._stub(w)
+            w._review_v2 = self._stub(w)
             sp = vault / "s.md"
             sp.write_text(SESSION, encoding="utf-8")
             w.session_path, w._n = sp, 2
             before = sp.read_bytes()
             msg = w.close()
-            notes = sorted(p.name for p in (vault / "Lectures").glob("*") if p.is_file())
+            # ⚠️ 只数 `.md`：`.html` / `.anki.csv` 是 2026-10-17 起的**有意旁车**，
+            #    把它们算进"笔记文件数"会让 §2 那条判据（路径只算一次）假红。
+            notes = sorted(p.name for p in (vault / "Lectures").glob("*.md")
+                           if p.is_file())
+            # ⚠️ 旁车文件必须在 **`with tempfile` 里面**数：出了这个块目录就没了
+            #    （实测：在用例里 glob -> 永远空，看着像"没写出来"）。
+            self.seen_during_review["siblings"] = sorted(
+                p.name for p in (vault / "Lectures").glob("*")
+                if p.suffix in (".html", ".anki.csv"))
             after = sp.read_bytes()
             text = (pathlib.Path(w.vault_path).read_text(encoding="utf-8")
                     if w.vault_path and pathlib.Path(w.vault_path).exists() else "")
             return w, msg, text, notes, before, after, self.seen_during_review
 
     def _stub(self, w):
-        def _review(entries, on_progress=None):
+        def _review(entries, on_progress=None):   # 方法名换了，形状没换
             # ⭐ 关键取样点：复习层**正在跑**（还没返回）时，盘上有什么？
             p = pathlib.Path(w.vault_path) if w.vault_path else None
             self.seen_during_review["exists"] = bool(p and p.exists())
@@ -118,8 +133,14 @@ class BaseLayerFirst(unittest.TestCase):
                          "写了不止一个 .md —— 路径算了两遍？")
         self.assertNotIn(".tmp", " ".join(notes), "临时文件没被换走")
         self.assertIn("English point", text, "复习层没并进最终版")
-        self.assertIn("an overview", text)
-        self.assertIn("复习层: 知识点详解", msg)
+        self.assertIn("本课主题", text)
+        self.assertIn("复习层: 讲解+例题+自测+校验清单", msg)
+        # 🧩🃏 旁车文件（2026-10-17）：同目录同名，且 Markdown 里要写出它们的名字 ——
+        #    写了名字却没写文件（或反过来）都是"假话"。
+        sib = seen["siblings"]
+        self.assertTrue(sib, "交互版 HTML / Anki CSV 一个都没写出来")
+        for name in sib:
+            self.assertIn(name, text, f"笔记里没提旁车文件 {name}")
 
     def test_复习层抛异常_基础版留着且有说明行(self):
         def boom(*a, **k):
@@ -153,7 +174,7 @@ class BaseLayerFirst(unittest.TestCase):
             w = ow.ObsidianWriter(str(vault), "TESTX", mode="yes", api_key="k", polish=False)
             w._keypoint_items = lambda *a, **k: []
             called = []
-            w._review = lambda *a, **k: called.append(1) or REVIEW
+            w._review_v2 = lambda *a, **k: called.append(1) or REVIEW
             sp = vault / "s.md"
             sp.write_text(SESSION, encoding="utf-8")
             w.session_path, w._n = sp, 2

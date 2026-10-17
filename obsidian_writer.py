@@ -535,6 +535,17 @@ class ObsidianWriter:
         #: `None` = 没有课件：术语语境核对退到"只看本课术语表"，且笔记头部写明
         #: 「本课未做课件核对」（2026-10-17 step 2 的退化档）。
         self._materials = None
+        #: 💡 本课新加入术语库的词（`note_glossary.append` 的 `added`）。
+        self._gloss_added: list = []
+        #: 🗓 间隔复习日期（`note_v2.review_dates`）。
+        self._review_dates: list = []
+        #: 🔁 Anki CSV / 交互 HTML 的**文件名**（渲染时写进笔记的说明那几行）。
+        self._anki_name = ""
+        self._html_name = ""
+        #: ⚠ 头部警告（构图方塞；渲染层照单全收）。
+        self._note_warns: list = []
+        #: 🥉 三道核判成 `mismatch` 的条目 -> 修正说明（`note_v2.corrections_from_mismatch`）。
+        self._corr_extra: list = []
         self._polish = polish               # 落笔前二次精修(见 polish.py)
         self._polish_model = polish_model or model
         #: 🎯 Jev 的重点句：`[(概率, 句子, [原始行下标]), …]`。
@@ -698,111 +709,6 @@ class ObsidianWriter:
         self._course_terms_cache = got
         return got
 
-
-    def _call_review(self, transcript: str) -> dict:
-        """对一段转录调一次 LLM, 返回规范化后的复习层 dict。失败 -> {}。"""
-        try:
-            import llm_client
-            obj = llm_client.chat_json(self._key, self._model, REVIEW_SYS, transcript,
-                                       max_tokens=REVIEW_MAX_TOKENS, temperature=0.3,
-                                       timeout=180)
-        except Exception:                                 # noqa: BLE001
-            return {}
-        return _clean_review(obj)
-
-    def _overview(self, headings: list[str]) -> dict:
-        """多块时用各块小标题再写一次**全课**总览。失败 -> {}（保留局部概览）。"""
-        if not headings:
-            return {}
-        try:
-            import llm_client
-            obj = llm_client.chat_json(self._key, self._model, OVERVIEW_SYS,
-                                       "\n".join(headings), max_tokens=500,
-                                       temperature=0.2, timeout=60)
-        except Exception:                                 # noqa: BLE001
-            return {}
-        if not isinstance(obj, dict):
-            return {}
-        out = {}
-        for k in ("title", "overview_en", "overview_zh"):
-            v = _one_line(obj.get(k))
-            if v:
-                out[k] = v
-        return out
-
-    def _review(self, entries: list[dict], on_progress=None) -> dict:
-        """LLM 生成复习层(英文知识点详解 + 概览 + 自测)。无 key / 失败 -> {}。
-
-        长课**分块**生成再合并: 一堂 40 分钟的课有数百句, 一次性输出会撑爆
-        max_tokens 被截断, 截断的 JSON 解析失败 -> 整份复习层丢失。分块既避开
-        截断, 也让每段都被讲细。失败是**正常路径**(断网、没配 key 都要能落盘), 绝不抛。
-        """
-        if not self._key or not entries:
-            return {}
-        lines = [f"[{e['ts']}] {e['en'] or e['asr']}"
-                 for e in entries if (e["en"] or e["asr"])]
-        if not lines:
-            return {}
-        chunks = [lines[i:i + REVIEW_CHUNK]
-                  for i in range(0, len(lines), REVIEW_CHUNK)]
-        multi = len(chunks) > 1
-        meta: dict = {}
-        sections: list[dict] = []
-        plain: list[str] = []                 # 未加时间前缀的小标题(供总览使用)
-        qa: list[dict] = []
-        # 各块互不依赖：一起发，再**按块序**收（meta 取第 0 块、小标题前缀按块序，跟串行时一样）。
-        from concurrent.futures import ThreadPoolExecutor
-        ex = ThreadPoolExecutor(min(REVIEW_WORKERS, len(chunks)))
-        futs = [ex.submit(self._call_review, "\n".join(c)) for c in chunks]
-        ex.shutdown(wait=False)
-        for ci, chunk in enumerate(chunks):
-            # ⚠️ `review` 这个 stage 名定义在 `polish.STAGE_NAME` 里却**从来没有发出过**
-            #    （2026-09-28 OCR 审计发现）—— 复习层按 `REVIEW_CHUNK` 分块、579 句
-            #    不止一轮 LLM，而收尾卡上这一段**一点进度都看不到**，正是把收尾搬进
-            #    worker + 做卡片的主要动机所在。这里补上。并发后：报的是「在等第几块」。
-            if on_progress is not None:
-                try:
-                    on_progress("review", ci, len(chunks))
-                except Exception:                         # noqa: BLE001
-                    pass
-            try:
-                r = futs[ci].result()
-            except Exception:                             # noqa: BLE001  _call_review 自己不抛，兜底
-                r = {}
-            if not r:
-                continue
-            if ci == 0:
-                for k in ("title", "overview_en", "overview_zh"):
-                    if r.get(k):
-                        meta[k] = r[k]
-            prefix = f"[{chunk[0][1:6]}] " if multi else ""   # [HH:MM]
-            for sec in (r.get("sections") or []):
-                plain.append(sec["heading"])
-                if prefix:
-                    sec = {"heading": prefix + sec["heading"],
-                           "points": sec["points"]}
-                sections.append(sec)
-            qa.extend(r.get("qa") or [])
-        # 多块时, 上面 meta 里的概览只描述第一段 —— 用小标题重写一份全课的。
-        # ⚠️ 用 update 而非整体替换: _overview 只返回它真正生成出来的字段, 模型漏一个
-        # (比如只回了 title) 时整体替换会把第一段已算好的概览整段抹掉。
-        if multi and sections:
-            full = self._overview(plain)
-            if full:
-                meta.update(full)
-        seen, dedup = set(), []
-        for x in qa:
-            k = x["q"].strip().lower()
-            if k in seen:
-                continue
-            seen.add(k)
-            dedup.append(x)
-        out = dict(meta)
-        if sections:
-            out["sections"] = sections
-        if dedup:
-            out["qa"] = dedup[:8]
-        return out
 
     # ---- ❓「没听懂」：旁路文件 + 课后反查 ----
     def _lost_path(self) -> Path | None:
@@ -1057,6 +963,113 @@ class ObsidianWriter:
         except Exception:                                     # noqa: BLE001
             return []                                         # ⚠️ 收尾这一步绝不抛
 
+    # ---- 复习层 v2（2026-10-17）----
+    def _chat(self, system: str, user: str, max_tokens: int) -> dict:
+        """`note_v2` 那三条调用的**唯一出口**（`chat(system, user, max_tokens) -> dict`）。
+
+        ⚠️ 收在这里的理由：判据要能整体换掉它（零网络），而三个步骤各接一次
+           `llm_client` 就是三处重复的 try/异常口径。
+        """
+        import llm_client
+        obj = llm_client.chat_json(self._key, self._model, system, user,
+                                   max_tokens=max_tokens, temperature=0.3, timeout=300)
+        return obj if isinstance(obj, dict) else {}
+
+    def _review_v2(self, entries: list[dict], on_progress=None) -> dict:
+        """v2 复习层：课件索引 → 分块 review → 覆盖度对齐 → 数字三道核 → 术语库。
+
+        三步的**顺序不能换**（每一步都吃前一步的产物）：
+          ① `review` 带课件片段逐块写讲解（并发、按块序合并）
+          ② `align` 拿"教授知识点清单 × 笔记小节"做覆盖度（便宜：只喂标题）
+          ③ `verify_numbers` 重算数字断言（**错了写进修正说明，不改正文**）
+          ④ 术语库追加（作者硬要求；**失败不影响笔记**）
+          ⑤ Anki CSV（纯本地）
+
+        ⚠️ 每一步都 fail-soft：少了哪一步都只少那一层，**绝不抛给 `close()`**。
+        """
+        import note_v2
+        self._materials = self._build_materials()
+        try:
+            from translator import course_title
+            domain = course_title(self._glossary_path, self._course)
+        except Exception:                                     # noqa: BLE001
+            domain = ""
+        review = note_v2.review(entries, chat=self._chat, domain=domain,
+                               materials=self._materials, on_progress=on_progress)
+        if not review:
+            return {}
+        if self._materials is not None and len(self._materials):
+            try:
+                review.update(note_v2.align(review, chat=self._chat,
+                                            materials=self._materials))
+            except Exception as e:                            # noqa: BLE001
+                print(f"⚠ 覆盖度核对失败({str(e)[:60]}); 笔记照常生成")
+        try:
+            checks = note_v2.verify_numbers(review, chat=self._chat,
+                                            materials=self._materials)
+            if checks:
+                review["checks"] = checks
+                self._corr_extra = note_v2.corrections_from_mismatch(checks)
+                bad = [c for c in checks if c.get("status") == "mismatch"]
+                un = [c for c in checks if c.get("status") == "unchecked"]
+                print(f"🥉 数字三道核：{len(checks)} 项（{len(bad)} 项修正、"
+                      f"{len(un)} 项未核对）", flush=True)
+        except Exception as e:                                # noqa: BLE001
+            print(f"⚠ 数字核对失败({str(e)[:60]}); 笔记照常生成")
+        # 💡 术语库：作者硬要求（从笔记抽词 → `prep.append_terms` 只追加 + 墓碑）。
+        try:
+            import note_glossary
+            keep, rejected = note_glossary.candidates(review, entries,
+                                                      materials=self._materials)
+            outcome = note_glossary.append(keep, course=self._course,
+                                           glossary_txt=self._glossary_path)
+            self._gloss_added = list(outcome.added)
+            print(outcome.line(), flush=True)
+            if rejected:
+                print(f"   （{len(rejected)} 条没进库："
+                      f"{'、'.join(t for t, _ in rejected[:6])}…）", flush=True)
+        except Exception as e:                                # noqa: BLE001
+            print(f"⚠ 术语库更新失败({str(e)[:60]}); 笔记照常生成")
+        return review
+
+    def _build_materials(self):
+        """本课课件索引。**失败 = 空索引**（不是异常）—— 复习层据此走退化档。"""
+        try:
+            import materials
+            mats = materials.Materials.for_course(self._vault, self._course)
+            print(f"   {mats.describe()}", flush=True)
+            return mats
+        except Exception as e:                                # noqa: BLE001
+            print(f"⚠ 课件索引失败({str(e)[:60]}); 本课笔记不做课件核对")
+            return None
+
+    def _write_sidecars(self, data) -> None:
+        """同目录的**交互 HTML** 与 **Anki CSV**（2026-10-17 追加要求 B / step 3）。
+
+        ⚠️ 两者都是"额外一层"：任何一个失败都只是少一个文件，**笔记照写**
+           （同 `close()` 那八层的纪律）。失败时把 `data.html_name` 清空 ——
+           它会被写进 Markdown 的「复习排程」，**不能指着一个不存在的文件**。
+        """
+        stem = self.vault_path.with_suffix("")
+        try:
+            import note_html
+            self._atomic_write(stem.with_suffix(".html"), note_html.note_page(data))
+            print(f"🧩 交互版 HTML：{data.html_name}", flush=True)
+        except Exception as e:                                # noqa: BLE001
+            data.html_name = self._html_name = ""
+            print(f"⚠ 交互版 HTML 没写出来({str(e)[:60]}); Markdown 版照常")
+        try:
+            import note_v2
+            rows = note_v2.anki_rows(data.review, course=self._course, date=self._date)
+            if rows:
+                self._atomic_write(stem.with_suffix(".anki.csv"), note_v2.to_csv(rows))
+                print(f"🃏 Anki 卡 {len(rows)} 张：{data.anki_name}", flush=True)
+            else:
+                data.anki_name = self._anki_name = ""
+        except Exception as e:                                # noqa: BLE001
+            data.anki_name = self._anki_name = ""
+            print(f"⚠ Anki CSV 没写出来({str(e)[:60]}); 笔记照常")
+
     def _chapter_items(self) -> dict:
         """课堂纲要 -> `{"windows","chapters","deadlines","atoms"}`（笔记那一节用）。
 
@@ -1187,6 +1200,7 @@ class ObsidianWriter:
         return out
 
     # ---- 组装双层笔记 ----
+    # ---- 组装双层笔记 ----
     def _render_note(self, entries: list[dict], review: dict,
                      qa_items: list[str] | None = None,
                      polish_state: str = "ok",
@@ -1194,178 +1208,82 @@ class ObsidianWriter:
                      keypoint_items: list | None = None,
                      chapter_items: dict | None = None,
                      review_missing: bool = False) -> str:
-        ts0 = entries[0]["ts"] if entries else "—"
-        ts1 = entries[-1]["ts"] if entries else "—"
-        stars = [e for e in entries if e["star"]]
-        gloss = self._glossary(entries)
-        sections = review.get("sections") or []
-        qa = review.get("qa") or []
-        title = review.get("title")
-        L: list[str] = []
-        L += ["---",
-              f"date: {self._date}",
-              f"course: {self._course}",
-              "tags: [lecture, live-transcript, review]",
-              "type: lecture-notes",
-              f"polish: {polish_state}",
-              "---", "",
-              f"# {self._course} · 课堂笔记 {self._date}", "",
-              "> [!info] 本课信息", ]
-        if title:
-            L.append(f"> 📖 **{title}**")
-        # ⚠️ 汇总行**不再数 ⭐**（2026-09-29）：⭐ 按钮已并进 ❓，新会话里 ⭐ 恒为 0，
-        #    「⭐ 0 处重点」是在告诉用户一个**已经不存在**的动作。
-        #    历史会话（`rebuild_note.py` 重建）里那两处 ⭐ 由下面那一节照旧渲染。
-        L += [f"> 🕐 {ts0} – {ts1} · 🗣 {len(entries)} 句 · "
-              f"💡 {len(gloss)} 个术语 · ❓ {len(lost_items or [])} 处标记"]
-        _warn = _POLISH_NOTE.get(polish_state)
-        if _warn:
-            L.append(f"> {_warn}")
-        L.append("")
+        """**位置参数一个没变**（旧判据仍钉着这条签名），版式交给 `note_render.render`。
 
-        # 概览: 英文为主, 中文辅助
-        L += ["## 🎯 Overview 概览", ""]
-        oe, oz = review.get("overview_en"), review.get("overview_zh")
-        if oe or oz:
-            if oe:
-                L.append(f"> **EN** — {oe}")
-            if oz:
-                L.append(f"> **中** — {oz}")
-            L += [">", "> <sub>🤖 自动生成 · 依据本课转录</sub>"]
-        else:
-            L += ["> *（未自动生成 —— 收尾时跳过或失败）*" if review_missing
-                  else "> *（未自动生成 —— 未配 API key 或调用失败）*"]
-        L += [""]
+        ⚠️ 2026-10-17（v2）：版面**整个换了** —— 中文连贯讲解、覆盖度/校验清单、
+        自测折叠；英文只留在术语原形、引用原文与附录 B 的逐句转录里。旧版那三层
+        （`en` / `detail_en` / `zh`）的渲染代码随之删掉，**不是**在旧函数里加分支：
+        两套版式同时活着，迟早有人改了一处、另一处静默变旧（本仓库反复踩的那一类）。
 
-        # 📑 课堂纲要（计划 §10.2）—— **紧跟在概览之后、知识点之前**。
-        #    位置的理由：纲要是「这节课的**结构**」，与概览同类；
-        #    插在术语表和复习自测之前，读者才**先看骨架再看细节**。
-        #    ⚠️ 整节包 `try`：**附加层不许拖垮主体**（同 `close()` 那几层护栏的纪律）。
+        ⚠️ 壳留在原地的理由与 `_chapter_items` 同类：`tests/` 里四条现有判据
+        （❓ 块 / ⭐ 节 / 🎯 节 / polish 三档）**指向的就是这个函数**，
+        它们是"版式重写时不许弄丢的层"，签名一变它们就全静默失效。
+        """
+        import note_render
+        return note_render.render(self._note_data(
+            entries, review or {}, qa_items or [], polish_state, lost_items or [],
+            keypoint_items or [], chapter_items or {}, review_missing))
+
+    def _note_data(self, entries: list[dict], review: dict, qa_items: list,
+                   polish_state: str, lost_items: list, keypoint_items: list,
+                   chapter_items: dict, review_missing: bool):
+        """把 writer 的运行时状态 -> `note_render.NoteData`（**纯数据组装**）。"""
+        import note_render
+        sel = self._term_selection(entries)          # 💡 命中 + 过滤 + 记账
+        self._gloss_sel = sel
+        extra = self._review_term_hits(review, entries)
+        mats = self._materials
+        warns: list = list(self._note_warns)
+        if mats is not None and len(mats) == 0:
+            warns.append("本课**未做课件核对** —— 没找到这门课的课件材料"
+                         "（`Study/<课号>/materials/` 或 `~/.classlive/courses/<课号>/materials/`），"
+                         "笔记里的「为什么」只能靠 📚 标准理论。")
+        return note_render.NoteData(
+            date=self._date, course=self._course, entries=entries, review=review,
+            qa_items=qa_items, lost_items=lost_items, keypoint_items=keypoint_items,
+            chapter_items=chapter_items, polish_state=polish_state,
+            review_missing=review_missing,
+            materials_line=(mats.describe() if mats is not None else ""),
+            glossary_added=list(self._gloss_added),
+            term_footer=sel.footer(),
+            term_rows=note_terms.render_table(sel, extra=extra),
+            review_dates=list(self._review_dates),
+            anki_name=self._anki_name, html_name=self._html_name,
+            corrections_extra=list(self._corr_extra), warns=warns)
+
+    def _review_term_hits(self, review: dict, entries: list) -> list:
+        """复习层讲到的术语 -> 术语表行（带**首次出现时间戳**）。
+
+        ⚠️ 时间戳是**搜出来的**（`compile_term` 在转录里找第一句命中的），
+           不是让模型编一个 —— 出处那一列必须能回源（审计 §2b 结论 4）。
+        """
+        out = []
         try:
-            if chapter_items:
-                _sec = _render_outline_section(chapter_items)
-                if _sec:
-                    L += _sec
-        except Exception as e:                                # noqa: BLE001
-            print(f"⚠ 📑 纲要那一节没渲染出来({str(e)[:60]}); 笔记其余部分照写")
-
-        # 知识点详解: 英文陈述 + 英文细节 + 中文点睛 + 关键词中英对照
-        L += ["## 📚 Key Concepts 知识点详解", ""]
-        if sections:
-            for i, sec in enumerate(sections, 1):
-                L += [f"### {i}. {sec['heading']}", ""]
-                for p in sec["points"]:
-                    L.append(f"- **{p['en']}**")
-                    if p["detail"]:
-                        L.append(f"  {p['detail']}")
-                    if p["zh"]:
-                        L.append(f"  · 中：{p['zh']}")
-                    if p["terms"]:
-                        pairs = " · ".join(
-                            f"`{t}` {z}" if z else f"`{t}`" for t, z in p["terms"])
-                        L.append(f"  · 🔑 {pairs}")
-                    L.append("")
-        else:
-            # ⭐ 3.9.7 第 5b 项：复习层**本可以生成却没生成**时，这行要说清怎么补
-            #    （笔记这时是「基础版 + 其余已跑完的层」—— 逐句转录一条不少）。
-            #    ⚠️ 与「没配 key / 调用失败」分开说：那是环境，这是**这次收尾没跑到**。
-            if review_missing:
-                L += ["*（复习层这次没生成 —— 收尾时被跳过或失败。逐句转录一条没少；"
-                      "要补：`ClassLive.app/Contents/MacOS/python "
-                      "scripts/rebuild_note.py <会话文件> <课号>`）*", ""]
-            else:
-                L += ["*（未自动生成 —— 未配 API key 或调用失败；可课后自行补）*", ""]
-
-        # 复习自测: 英文问答, 中文要点附后; 保持 `问题::答案` 便于 Spaced Repetition
-        L += ["## ❓ Review 复习自测", ""]
-        # 自己问过的问题排在**最前**: 卡住过的地方才是复习的第一顺位, 也免得被自动
-        # 生成的那 8 条挤到看不见。注意这里是**插进已有区块**, 不是另开一节 ——
-        # 同一份内容写两遍(可读区一遍 + `::` 一遍)只会变噪音。
-        if qa_items:
-            L += [QA_MARKER, *qa_items, ""]
-        if qa:
-            L += ["> [!tip] 🤖 自动生成 · 请核对后再用于复习",
-                  "> <sub>写成 `问题::答案`；装了 Spaced Repetition 插件就能当卡片复习</sub>", ""]
-            for x in qa:
-                tail = f"　（中：{x['zh']}）" if x["zh"] else ""
-                # 题干里的 `::` 必须拆开 —— Spaced Repetition 按第一个 `::` 切,
-                # 否则「什么是 a::b」会被切成 front="什么是 a"。与用户提问路径
-                # (_qa_items) 同一处理, 那边早就消毒了, 这边漏了。
-                q_text = x["q"].replace("::", ": :")
-                L.append(f"- {q_text}::{x['a']}{tail}")
-        else:
-            L += ["> [!tip] 用 `问题::答案` 写自测题（装了 Spaced Repetition 插件就能当卡片复习）", "",
-                  "- "]
-        L += [""]
-
-        L += ["## 💡 Terminology 本课术语表", ""]
-        if gloss:
-            L += [f"- **{t}** — {d}　`{ts}`" for t, d, ts in gloss]
-        else:
-            L += ["*（本课没有命中术语表）*"]
-        # ⚠️ 被过滤掉的条目**记账**（`note_terms.Selection.footer`）——
-        #    读者要能分辨"本课真的只有这些术语"与"术语表被挡掉了一半"。
-        #    没有过滤时 `footer()` 返回空串，常态不占版面。
-        if self._gloss_sel is not None:
-            _foot = self._gloss_sel.footer()
-            if _foot:
-                L.append(_foot)
-        L += [""]
-
-        # ❓ 按钮 2026-09-29 起**兼**表「重点」和「没听懂」（⭐ 按钮已并进来），
-        # 所以抬头也照实说。⚠️ 抬头刻意用 `🤔` 而不是 `❓` —— 这份笔记里已经有一个
-        #    `## ❓ Review 复习自测`，两个同名抬头会让 grep 分不清。按钮仍是 ❓
-        #    （按钮上只有一个字符的位置），靠 tooltip 把两者连起来。
-        L += ["## 🤔 我标的地方（重点 / 没听懂）", ""]
-        if lost_items:
-            for blk in lost_items:
-                L += blk.splitlines()
-        else:
-            L += ["*（课上没按 ❓；觉得哪句重要、或哪里没跟上，都按它）*"]
-        L += [""]
-
-        # ⭐ 那一节**只在真有 ⭐ 时渲染**（2026-09-29）：按钮已经没了，
-        # 空的时候再写一句「课上没按 ⭐」是**假话** —— 它描述的是一个用户
-        # 按不到的动作。历史会话里的 ⭐ 照旧渲染（`stars` 来自会话抬头的
-        # `⭐ Exam Focus`，`rebuild_note.py` 重建时同样走这条路）。
-        if stars:
-            L += ["## ⭐ 我标记的重点", ""]
-            for e in stars:
-                L += [f"- `{e['ts']}` {e['zh'] or e['en'] or e['asr']}{_bf_mark(e)}"]
-                if e["en"] and e["zh"]:
-                    L += [f"  - EN: {e['en']}"]
-            L += [""]
-
-        # ── 🎯 Jev 的重点句（2026-09-29）──────────────────────────────────
-        # ⚠️ **取数在 `close()` 那边**（`_keypoint_items`），这里只排版 ——
-        #    本函数是纯的，判据靠它，所以它**不发请求**。
-        # ⚠️ **默认没有**（没配 token / raw 档 / 调用失败 → 空），那时**整节不出现**
-        #    —— 不写一句"（没有）"，那会让读者以为读过而没结果。
-        if keypoint_items:
-            L += ["## 🎯 这节课最值得记的几句", "",
-                  "*（按 Jev 给「值不值得抄进复习纸」的概率排的序。⚠️ **它是排序信号，"
-                  "不是考试预测** —— 实测同一句换个问法能从 0.77 掉到 0.61，"
-                  "所以**看顺序，别卡分数**。）*", ""]
-            for p, text, ix in keypoint_items:
-                tag = f"L{ix[0] + 1}" if len(ix) == 1 else f"L{ix[0] + 1}–{ix[-1] + 1}"
-                L += [f"- `{p:.2f}` `{tag}` {text}"]
-            L += [""]
-
-        # 完整转录: 折叠 callout 包全套逐句块。**逐字保留**, 是这份笔记的底座。
-
-
-        L += [f"## 📜 完整逐句转录（点击展开 · {len(entries)} 句）", "",
-              "> [!note]- 逐句双语 + 原始 ASR（未做任何删改）", "> "]
-        for e in entries:
-            L.append(f"> > [!abstract] {e['ts']}" + (" ⭐" if e["star"] else ""))
-            if e["en"]:
-                L.append(f"> > **EN**: {e['en']}")
-            if e["zh"]:
-                L.append(f"> > **ZH**: {e['zh']}{_bf_mark(e)}")
-            if e["asr"]:
-                L.append(f"> > **ASR**: {e['asr']}")
-            L.append("> ")
-        return "\n".join(L) + "\n"
+            from build_notes import compile_term
+        except Exception:                                       # noqa: BLE001
+            compile_term = None
+        terms = list(review.get("terms") or [])
+        for s in (review.get("sections") or []):
+            terms += list(s.get("terms") or [])
+        seen: set = set()
+        for t in terms:
+            en, zh = _one_line(t.get("en")), _one_line(t.get("zh"))
+            if not en or en.lower() in seen:
+                continue
+            seen.add(en.lower())
+            ts = ""
+            if compile_term is not None:
+                try:
+                    rx = compile_term(en)
+                    for e in entries:
+                        if rx.search(e.get("en") or e.get("asr") or ""):
+                            ts = e.get("ts", "")
+                            break
+                except Exception:                               # noqa: BLE001
+                    ts = ""
+            out.append(note_terms.Hit(term=en, gloss=zh or "（本课术语）", ts=ts,
+                                      source=note_terms.SRC_LECTURE))
+        return out
 
     def _atomic_write(self, path: Path, text: str) -> None:
         """原子落盘：同目录写临时文件 → `os.replace` 换过去。
@@ -1581,20 +1499,20 @@ class ObsidianWriter:
                            self._render_note(entries, {}, [], polish_state, base_lost, [],
                                              base_chapters, bool(self._key)))
         if self._key:
-            print("🤖 正在生成复习层(知识点详解 + 自测)…", flush=True)
-        # ⚠️ 同 `polish` 那条：`_review` 也要跑好几轮 LLM（按 REVIEW_CHUNK 分块，
-        #    579 句不止一轮），中断它同样**不许**带走底座。
+            print("🤖 正在生成复习层(讲解 + 例题 + 自测)…", flush=True)
+        # ⚠️ 同 `polish` 那条：复习层要跑好几轮 LLM（按 `note_v2.REVIEW_CHUNK` 分块），
+        #    中断它同样**不许**带走底座。
         if cancel is not None and cancel.is_set():
             review = {}
             print("⚠ 已跳过复习层（用户取消）；笔记照常生成", flush=True)
         else:
             try:
-                review = self._review(entries, on_progress=_prog)
+                review = self._review_v2(entries, on_progress=_prog)
             except KeyboardInterrupt:
                 review = {}
                 print("⚠ 复习层被中断；笔记照常生成（只有逐句转录）", flush=True)
             except Exception as e:                        # noqa: BLE001
-                # ⚠️ `_review` 自己写着"绝不抛"，但**收尾最后这一层**再兜一次是同一条
+                # ⚠️ `_review_v2` 自己写着"绝不抛"，但**收尾最后这一层**再兜一次是同一条
                 #    既有纪律（额外一层不许带走底座）—— polish 那层就是这么写的。
                 #    3.9.7 第 5b 项起，兜住它 = 盘上那份基础版会补一行「复习层这次没生成」。
                 review = {}
@@ -1641,15 +1559,30 @@ class ObsidianWriter:
             chapter_items = self._chapter_items()
         except Exception as e:                            # noqa: BLE001
             print(f"⚠ 📑 课堂纲要失败({str(e)[:60]}); 笔记照常生成")
-        note = self._render_note(entries, review, qa_items, polish_state, lost_items,
-                                 keypoint_items, chapter_items, review_missing)
+        # 🗓 复习排程（间隔复习日期 —— 写进笔记，**不做推送**）。
+        import note_v2
+        import note_render
+        self._review_dates = note_v2.review_dates(self._date)
+        # 🧩🃏 同目录的两个旁车文件。**先写旁车、再组数据**：Markdown 的「复习排程」
+        #    那一节要写出它们的名字，而名字只有在**写成功**之后才算数
+        #    （失败就清空 —— 否则笔记会指着一个不存在的文件，那是假话）。
+        stem = self.vault_path.with_suffix("")
+        self._html_name = stem.name + ".html"
+        self._anki_name = stem.name + ".anki.csv"
+        data = self._note_data(entries, review, qa_items, polish_state, lost_items,
+                               keypoint_items, chapter_items, review_missing)
+        self._write_sidecars(data)
+        note = note_render.render(data)
 
         # ⚠️⚠️ **路径不再重算**：基础版那一步已经把它定下来了，而
         #    `note_path_for` 遇到同名会**另存一份带时间戳的** —— 再算一次就变成
         #    「同一节课两份笔记」，而且用户看到的还是缺复习层那份的兄弟文件。
         self._atomic_write(self.vault_path, note)
-        layer = ("知识点详解+自测+术语表+重点" if review.get("sections")
-                 else "术语表+重点(复习层这次没生成)" if review_missing
-                 else "术语表+重点(未生成详解)")
-        return (f"📝 已存入 Obsidian({self._n} 句, 复习层: {layer}) → {self.vault_path}\n"
+        layer = ("讲解+例题+自测+校验清单" if review.get("sections")
+                 else "术语表+标记(复习层这次没生成)" if review_missing
+                 else "术语表+标记(未生成讲解)")
+        extra = "".join(x for x in (
+            "，另存了交互版 HTML" if self._html_name else "",
+            "，Anki CSV 已导出" if self._anki_name else "") if x)
+        return (f"📝 已存入 Obsidian({self._n} 句, 复习层: {layer}{extra}) → {self.vault_path}\n"
                 f"   原始逐句日志: {self.session_path}")

@@ -1,1 +1,2 @@
-{ "name": "classlive-asr", "private": true, "type": "module" }
+{ "name": "classlive-asr", "private": true, "type": "module",
+  "scripts": { "test": "node --test test.mjs test-passes.mjs test-soniox.mjs" } }

@@ -8,7 +8,15 @@
 #   wrangler secret put DEEPSEEK_KEY      # < ~/.classlive/credentials（一人一码：通行码用户的翻译走它；
 #                                         #   管道灌入不回显。⚠️ 不写这个写法就会被问「怎么没让我输 key」——2026-10-12）
 #   wrangler secret put ADMIN_TOKEN       # 一人一码：/v1/admin/* 只认它（scripts/cl_admin.py 读 ~/.classlive/asr-admin-token）
+#   wrangler secret put SONIOX_KEY        # 实时转写的临时 key 由它签发（美国区项目）。⚠️ 这把主 key 的权限要有
+#                                         #   **Temporary API keys** + Speech-to-Text；临时 key 才下发，主 key 不出 Worker。
+#   wrangler secret put SONIOX_KEY_JP     # 可选：日本区项目的 key（CN/HK/MO/TW/JP/KR 访客走 api.jp.*）。
+#                                         #   不配 = 全走美国区，代码不需要改。
 #   wrangler deploy
+#
+# 实时转写的会话上限默认 3 h。要改就加一段 [vars]（可选，不写就用默认）：
+#   [vars]
+#   SONIOX_MAX_SESSION_S = "10800"        # 秒；官方上限 18000
 #
 # ⚠️ 与上传 Worker 分开：那个是「只写、PUT-only」的安全立场，转写放进去会改性质。
 # ⚠️ 设计见 ../../docs/PLAN-r2-cloud-final-asr.md §W。
@@ -58,6 +66,12 @@ namespace_id = "2002"
   [ratelimits.simple]
   limit = 60
   period = 60
+
+# 用量回收：实时转写的音频不进 Worker（客户端拿临时 key 直连 Soniox），所以每小时拉一次 Soniox 的
+# 用量日志，把音频秒按码名补进 Passes 的 rt_s（见 handler.js 的 scheduled / passes-core 的 /admin/rt/*）。
+# ⚠️ 免费档的 Cron 就是定时调这个 Worker 的 scheduled()，不额外收费；:17 起跑，避开整点。
+[triggers]
+crons = ["17 * * * *"]
 
 # 逐请求事件：handler.js 的 track() 每个非管理请求写一条（码名 + 数字，不写文本 / 音频 / IP / 完整码）。
 # 保留 3 个月；免费档每天 10 万条写入、1 万次查询（2026-10-14 官方 pricing / limits 页）。

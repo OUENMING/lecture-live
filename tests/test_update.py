@@ -762,6 +762,40 @@ check("⭐⭐ `cl update` 里**真的**出现了 `update.py --run-step app`"
 check("⚠️ 前置：那一次确实走到了收尾（否则上一条可能只是空转）",
       "FAKEPY doctor.py" in _out, _out.strip()[-200:])
 
+print("--- D2b ⭐⭐ 重建失败 -> `cl update` 的退出码必须非 0（HANDBOOK §10）---")
+# ⚠️ HANDBOOK §10 记的另一笔账：`cl update` 里「重建 .app」那一步失败时，
+#    那句 `|| echo "⚠ …"` 把非零吞掉了，而函数最后一句话是 `echo` → 退出码恒 0。
+#    症状：脚本化调用（CI / 别的脚本）读不出「代码更新了、图标/启动器没生效」。
+#    判据在沙盒里**真跑 `cl`**（假解释器），绝不碰真的 ClassLive.app。
+_sand3 = ROOT / "sandbox_appfail"
+(_sand3 / "ClassLive.app" / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
+(_sand3 / "home").mkdir(parents=True, exist_ok=True)
+_sh.copy2(pathlib.Path(update.__file__).resolve().parent / "cl", _sand3 / "cl")
+_fake3 = _sand3 / "ClassLive.app" / "Contents" / "MacOS" / "python"
+
+
+def _cl_appfail_run(script: str):
+    _fake3.write_text(script, encoding="utf-8")
+    _fake3.chmod(0o755)
+    return _sp.run(["bash", str(_sand3 / "cl"), "update"], capture_output=True,
+                   text=True, timeout=60,
+                   env={"PATH": "/usr/bin:/bin", "HOME": str(_sand3 / "home")})
+
+
+_r_fail = _cl_appfail_run('#!/bin/sh\n'
+                          'echo "FAKEPY $@"\n'
+                          'case "$*" in *"--run-step app"*) exit 1 ;; esac\n'
+                          'exit 0\n')
+_fail_out = _r_fail.stdout + _r_fail.stderr
+check("⭐⭐ 重建失败 -> `cl update` 非零退出（原来被 `|| echo` 吞成 0）",
+      _r_fail.returncode != 0, f"rc={_r_fail.returncode}")
+check("⭐ 而且原因照说、doctor 照跑（收尾不许因为失败被跳过）",
+      "没重建成功" in _fail_out and "FAKEPY doctor.py" in _fail_out,
+      _fail_out.strip()[-200:])
+_r_ok3 = _cl_appfail_run('#!/bin/sh\necho "FAKEPY $@"\nexit 0\n')
+check("⚠️ 对照：重建成功 -> 退出码 0（别把「一切正常」也报成失败）",
+      _r_ok3.returncode == 0, f"rc={_r_ok3.returncode}")
+
 # ======================= E. 工作区里的「东西」挡不挡更新 =======================
 # ⭐ 2026-09-30 加。作者的原话：「有没有办法让朋友那边工作区有东西也能正常更新？」
 #    实测四种情形（见 `update._dirty_report()` 那张表）：**未跟踪文件挡不住 `git pull`** ——

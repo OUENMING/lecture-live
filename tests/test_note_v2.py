@@ -183,6 +183,17 @@ class VerifyNumbers(unittest.TestCase):
                                 chat=lambda s, u, m: {"items": [{"i": 0, "status": "unchecked"}]})
         self.assertEqual(got[0]["status"], "unchecked")
 
+    def test_checks_里的_dict_断言被收拾成字符串(self):
+        """⚠️ 2026-10-17 验收实测：模型把整个 dict 塞进 `claim`（那是 `steps` 的 schema），
+        不收拾的话笔记的核定表里会出现 `{'text': 'f(1)=…', 'why': ''}` 这种字面量。"""
+        rev = {"sections": [SECTION],
+               "checks": [{"claim": {"text": "f(1)=1-6+9+1=5", "why": ""},
+                           "status": "ok"}]}
+        got = nv.verify_numbers(rev, chat=lambda s, u, m: {})
+        claims = [c["claim"] for c in got]
+        self.assertTrue(any("f(1)=1-6+9+1=5" in c for c in claims), claims)
+        self.assertFalse(any("{'text'" in c or '{"text"' in c for c in claims), claims)
+
     def test_模型自己写的_checks_不丢(self):
         got = nv.verify_numbers(REVIEW, chat=lambda s, u, m: {})
         self.assertTrue(any(c["claim"] == "MC(4)=12" for c in got))
@@ -384,6 +395,20 @@ class HtmlComponents(unittest.TestCase):
         self.assertIn("data-opts", h)
         self.assertIn("<input type=\"range\"", h)
         self.assertIn('polyline class="c0" points="', h)
+
+    def test_每张图的标题都在自己的_figure_里(self):
+        """⚠️ 2026-10-17 自查抓到的版式 bug：标题原来是 figure 的**兄弟节点**，
+        而 `.plots` 是 grid → 标题被排成单独一格，三张图散成一团（截图里看得很清楚）。"""
+        h = self._page()
+        plots = re.search(r'<div class="plots">(.*?)</div>\s*</section>', h, re.S)
+        # 上面那条匹配不一定命中（结构可能变），所以判据落在"页面里"这一层：
+        seg = plots.group(1) if plots else h
+        self.assertNotIn("</figure><figcaption>", seg,
+                         "又出现了裸 figcaption（会被 grid 排成独立一格）")
+        figs = re.findall(r'<figure class="fig">(.*?)</figure>', seg, re.S)
+        self.assertTrue(figs, "没找到任何图")
+        for f in figs:
+            self.assertEqual(f.count("<figcaption"), 1, "一张图应当只有一个标题")
 
     def test_没有别的外链(self):
         """⚠️ 作者只允许"允许失败的 CDN" —— 除 KaTeX 外不许再有远端资源。"""

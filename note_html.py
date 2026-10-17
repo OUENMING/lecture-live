@@ -149,8 +149,15 @@ def _nice_bounds(all_ys: list) -> tuple:
     return lo - pad, hi + pad
 
 
-def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p") -> str:
-    """一张图（**含可拖动参数的预采样路径** —— JS 只换 `points`，不再算数学）。"""
+def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p",
+        caption: str = "") -> str:
+    """一张图（**含可拖动参数的预采样路径** —— JS 只换 `points`，不再算数学）。
+
+    `caption` 是图的标题，**放在 `<figure>` 里面**（2026-10-17 自查抓到的版式 bug：
+    标题原来是拼在 figure 后面的兄弟节点，而 `.plots` 是 grid —— 于是标题被当成
+    独立的一格排到图旁边去，三张图散成一团。判据：`tests/test_note_v2.py` 里
+    「每张图都有自己的 figcaption」那两条）。
+    """
     spec = PLOT_SPECS.get(kind)
     if not spec:
         return ""
@@ -241,7 +248,8 @@ def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p") 
                  f'<input type="range" min="0" max="{len(vals) - 1}" step="1" '
                  f'value="{_nearest(vals, base.get(pk, vals[0]))}" aria-label="拖动参数 {pk}">'
                  f"</div>")
-    return '<figure class="fig">' + "".join(parts) + "</figure>"
+    cap = (f'<figcaption><strong>{caption}</strong></figcaption>' if caption else "")
+    return '<figure class="fig">' + "".join(parts) + cap + "</figure>"
 
 
 def _nearest(vals: list, v) -> int:
@@ -262,7 +270,10 @@ def inline(text: str) -> str:
     ⚠️ 公式**两种形态都留着**：`.tex` 元素里是 TeX 源码（离线可见），
        KaTeX 加载成功时被 JS 替换成排版结果 —— 这就是「不能白屏」那条要求。
     """
-    s = html.escape(str(text or ""))
+    # ⚠️ 先补 LaTeX 再转义（`q^3` → `$q^{3}$`）：KaTeX 只认 `$…$`，
+    #    残留的纯文本式子会让整页公式变成"没渲染的源码"（2026-10-17 验收实测过）。
+    import note_math
+    s = html.escape(note_math.auto_tex(text))
     s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
 
@@ -532,10 +543,10 @@ def note_page(d) -> str:
         pl = s.get("plot") or {}
         if pl.get("kind"):
             pid += 1
-            head_svg = svg(pl["kind"], pl.get("params") or {}, pid=f"plot{pid}")
+            head_svg = svg(pl["kind"], pl.get("params") or {}, pid=f"plot{pid}",
+                           caption=inline(pl.get("title") or ""))
             if head_svg:
-                plots.append(f'<figcaption><strong>{inline(pl.get("title") or "")}</strong>'
-                             f"</figcaption>{head_svg}")
+                plots.append(head_svg)
     secs = [_section_html(s, i) for i, s in enumerate(sections, 1)]
     toc_items = [s.get("heading", "") for s in sections]
     extra = ""

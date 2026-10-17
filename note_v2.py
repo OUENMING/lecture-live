@@ -28,6 +28,7 @@
 from __future__ import annotations
 import dataclasses
 import json
+import note_math
 import re
 
 REVIEW_CHUNK = 70           # 每块喂多少句（同旧版：块太大 JSON 会被截断）
@@ -74,7 +75,28 @@ REVIEW_SYS = """你是课堂笔记写作者。给一名靠中文听英文课的�
 - `faded`：把例题的关键步骤挖空的**补全题**（答案分开写）。
 - `pitfalls`：学生最容易错的地方。
 
-## 三、正确性（比你写得漂亮重要）
+## 三、数学与例题的硬规矩（2026-10-17 验收抓到过反例，逐条遵守）
+- **公式一律 LaTeX**：行内 `$…$`、独立 `$$…$$`。多项式/导数/分式都必须写，例如
+  `$q^{3}-12q^{2}+60q$`、`$AC'(q)=2q-12$`。**不许**写 `q^3-3q^2+12q` 这种纯文本。
+- **例题的题面只能来自两个地方**：🎙 教授课上**完整写出来**的式子，或 📖 课件/试卷原文
+  （`example.title` 写明「📖 文件名 + 题号」或「🎙 HH:MM」）。
+  ⚠️ 教授课上一道一道过的**试卷题**（如 "this was last year, question one"）两个来源都要标：
+  `example.title` 写「📖 2025-12 期末卷 Exercise 5（🎙 13:29）」。只标 🎙 会让读者以为
+  函数是转录里听来的（上课常常只念了片段）—— 判据会把这种例子挂进「未核对」。
+  ⚠️ 题面里出现的**每个参数**都要能从出处推出来；答案里的数字都要能由题面算出。
+  **严禁**为了把例题写"完整"而自己设参数、编一个函数、或在题面里写「假设」。
+  课上只给了片段（如「the average cost at 2.89」「60 times this plus 500 divided by
+  this point」）→ 就**只写片段**，并明确说「原题不在本课材料里 / 只听到片段」，
+  在 `checks` 里标 `unchecked`。**不要反推函数。**
+- 凡「在 q*=… 处取最小/最大」「代入得 v」的结论：写出是**哪个函数**、并把导数检验
+  写出来（`AC'=0` 且 `AC''>0`）。没有函数就不许下极值结论。
+- **停产价格（shutting down price）的口径**：本课官方材料（📖 2025-12 期末卷 Exercise 7
+  官方解答）按「**平均成本 AC 的最低点**」定义（原话 "the minimum of the average cost…
+  the lowest acceptable price"）。标准教科书口径是**平均可变成本 AVC 的最低点**，而 AC
+  最低点叫**盈亏平衡价（break-even price）**。写到这一节时：按本课 📖 口径讲，并**加一句**
+  与标准口径的对照（标 📚）。
+
+## 三之二、正确性（比你写得漂亮重要）
 - 每条事实标来源：🎙 课上（转录里确实讲过）/ 📖 课件（附给你的片段里确实有）/
   📚 标准理论（教科书级共识）。
 - **转录没讲的事实只能来自 📖 片段或标 📚**；📚 用来讲通"为什么"，
@@ -471,6 +493,45 @@ def align(review_data: dict, *, chat, materials=None,
 _NUM = re.compile(r"\d+(?:\.\d+)?")
 
 
+def _claim_text(v) -> str:
+    """`checks` 里的一条断言 → 单行字符串。
+
+    ⚠️ 2026-10-17 验收实测：模型偶尔把**整个 dict** 塞进 `claim`（`{"text": "…",
+       "why": ""}` 的形状，那是 `steps` 的 schema）—— 不收拾它，笔记的核定表里
+       就会出现 `{'text': 'f(1)=…', 'why': ''}` 这种字面量（读者以为笔记坏了）。
+    """
+    if isinstance(v, dict):
+        for k in ("claim", "text", "q", "step", "statement"):
+            if v.get(k):
+                return _one_line(str(v[k]))
+        return ""
+    return _one_line(str(v or ""))
+
+
+def _clean_checks(rows) -> list:
+    """模型自己写的 `checks` → 规范化（`claim` 一定是字符串、`status` 一定有）。
+
+    ⚠️ 每一条**早退路径**（没有断言 / 调用炸了 / 返回不是 JSON）都从 `checks` 直接
+       返回给渲染层 —— 所以收拾必须放在这一处，四条路一起走（只在末尾收拾的话，
+       早退那条路照样把 dict 字面量写进笔记）。
+    """
+    out = []
+    for c in (rows or ()):
+        if not isinstance(c, dict):
+            continue
+        txt = _claim_text(c.get("claim"))
+        if not txt:
+            continue
+        row = dict(c)
+        row["claim"] = txt
+        if not isinstance(row.get("recomputed"), str):
+            row["recomputed"] = ""
+        st = str(row.get("status") or "").strip().lower()
+        row["status"] = st if st in ("ok", "mismatch", "unchecked") else "unchecked"
+        out.append(row)
+    return out
+
+
 def numeric_claims(review_data: dict, *, limit: int = 24) -> list:
     """从笔记里**挑出值得核的数字断言**（纯函数，判据靠它）。
 
@@ -500,7 +561,9 @@ def numeric_claims(review_data: dict, *, limit: int = 24) -> list:
                 return out
     # 已有 checks 的也带上（模型自己写的断言最值得复核）
     for c in (review_data.get("checks") or []):
-        out.append({"where": "checks", "text": c.get("claim", "")})
+        txt = _claim_text((c or {}).get("claim"))
+        if txt:
+            out.append({"where": "checks", "text": txt})
         if len(out) >= limit:
             break
     return out
@@ -513,9 +576,12 @@ def verify_numbers(review_data: dict, *, chat, materials=None,
     ⚠️ `mismatch` **不改正文**：它进「修正说明」清单由渲染层显示 ——
        静默改数字是这份笔记最不能做的事（读者用它对答案）。
     """
+    # ⭐ 机械核**先跑**（2026-10-17 验收：模型对着自己编的函数"重算"当然自洽 ——
+    #    自编 `TC=60q+500` + 凑出来的驻点 2.89 就这样溜过了三道核）。
+    det = note_math.check_review(review_data)
     claims = numeric_claims(review_data)
     if not claims:
-        return list(review_data.get("checks") or [])
+        return note_math.merge_checks(det, _clean_checks(review_data.get("checks")))
     rows = []
     evidence = []
     for i, c in enumerate(claims):
@@ -529,10 +595,10 @@ def verify_numbers(review_data: dict, *, chat, materials=None,
     try:
         obj = chat(VERIFY_SYS, user, max_tokens)
     except Exception:                                         # noqa: BLE001
-        return list(review_data.get("checks") or [])
+        return note_math.merge_checks(det, _clean_checks(review_data.get("checks")))
     items = obj.get("items") if isinstance(obj, dict) else None
     if not isinstance(items, list):
-        return list(review_data.get("checks") or [])
+        return note_math.merge_checks(det, _clean_checks(review_data.get("checks")))
     got: dict = {}
     for it in items:
         if not isinstance(it, dict) or not isinstance(it.get("i"), int):
@@ -548,10 +614,11 @@ def verify_numbers(review_data: dict, *, chat, materials=None,
     out = [got[i] for i in sorted(got)]
     # 模型自己写的 checks 也留着（它们带着别的依据）；同 claim 以核过的为准。
     seen = {c["claim"].strip().lower() for c in out}
-    for c in (review_data.get("checks") or []):
-        if c.get("claim", "").strip().lower() not in seen:
-            out.append(dict(c, recomputed=""))
-    return out
+    for row in _clean_checks(review_data.get("checks")):
+        if row["claim"].lower() not in seen:
+            row["recomputed"] = ""
+            out.append(row)
+    return note_math.merge_checks(det, out)
 
 
 def corrections_from_mismatch(checks: list) -> list:

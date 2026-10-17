@@ -63,7 +63,27 @@ CORRECTION_PREFIX = "修正说明："
 
 
 def _one(v) -> str:
-    return " ".join(str(v).split()) if v else ""
+    """单行化 + 渲染层兜底：`q^3-3q^2+12q` → `$q^{3}-3q^{2}+12q$`。
+
+    ⚠️ 这一层是**兜底**，不是替模型写公式：prompt 仍然要求它自己写 `$…$`
+       （2026-10-17 验收实测：整篇 HTML 里 `$` 个数是 **0** —— 正文写着
+       `q^3-3q^2+12q` 这种纯文本，KaTeX 没有作用对象）。
+       幂等：已经写好的 `$…$` 原样不动（`note_math.auto_tex` 的判据）。
+    """
+    import note_math
+    return note_math.auto_tex(" ".join(str(v).split())) if v else ""
+
+
+def _tex(v) -> str:
+    """文本 → 补上 LaTeX 的文本（`q^3-3q^2+12q` → `$q^{3}-3q^{2}+12q$`）。
+
+    ⚠️ 这是**渲染层兜底**，不是替模型写公式：prompt 仍然要求它自己写 `$…$`
+       （2026-10-17 验收实测：整篇 HTML 里 `$` 个数是 **0**，KaTeX 没有任何作用对象）。
+       转换是幂等的 —— 已经写好的 `$…$` 原样不动（`note_math.auto_tex` 有判据）。
+    """
+    import note_math
+    return note_math.auto_tex(v)
+
 
 
 def _fold(title: str, body: list, *, open_: bool = False) -> list:

@@ -55,7 +55,8 @@ export const wsUrl = (region) => REGIONS[region].ws;
 //   ③ 都没有 -> us。
 // ⚠️ 显式 `region=`（客户端探测后带的）**不在这里** —— 那是 `/v1/soniox/key` 的请求参数，由 handler 先判
 //    「那个区配没配 key」再落到本函数（没配就忽略回默认）。
-// 现在只配了美国 key，所以前三层里 ① ② 的 jp/eu 都落空 -> 全走美国；加了 SONIOX_KEY_JP / SONIOX_KEY_EU 自动切。
+// 现在只配了美国 key：①② 里走 jp/eu 的分支都过不了「配了 key」这一关 -> 全走美国；加了
+// SONIOX_KEY_JP / SONIOX_KEY_EU 自动切（这条 fail-safe 是刻意的：配置缺了绝不能让选路炸掉）。
 export function pickRegion(country, env, continent = "") {
   const cc = String(country || "").toUpperCase();
   if (env?.SONIOX_KEY_JP && JP_COUNTRIES.has(cc)) return "jp";

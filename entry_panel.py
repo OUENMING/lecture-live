@@ -98,6 +98,9 @@ BATCH_SEP = 15.0       # 两组之间的分隔
 BATCH_CHIP_W = 138.0   # 右侧课号选择器
 BATCH_UNDECIDED = "未分类"
 SEARCH_W = 220.0       # 标题行右侧搜索框的宽
+#: 搜索框那圈**替代聚焦指示**的圆角（作者 2026-10-17：白色细框，圆角与控件一致）。
+#: 2 倍屏上量着改的：`NSSearchField` 的 bezel 圆角 ≈ 6pt（框高 `TITLE_H-10` = 24）。
+SEARCH_FOCUS_RADIUS = 6.0
 SEARCH_ROW = 22.0      # 一条搜索结果一行
 SEARCH_LIMIT = 80      # 一次最多显示多少条（`find` 会报 `truncated`）
 READ_BEFORE = 2        # 点开一条命中时，往前给几句
@@ -129,6 +132,9 @@ TEST_W = 104.0         # 开关宽（**实测文字 71.7pt** @12pt，两态同�
 #    和 `card_height` 那条纪律一样：改 `DROP_H` 就要一起改这里，别各写一遍。
 ADD_ROW_Y = DROP_H - 5.0 - 24.0          # 输入框 + 「新建/取消」那一行（= 27）
 ADD_REPLY_Y = ADD_ROW_Y - 3.0 - 17.0     # 反馈那一行（`plan_add` 的 `text` 画在这儿，= 7）
+#: 「＋新建课程」那个输入框的聚焦指示圆角（同 `SEARCH_FOCUS_RADIUS` 的理由，
+#: 框高 `BTN_H`；`NSTextField` 的 bezel 圆角同为 ≈ 6pt）。
+ADD_FOCUS_RADIUS = 6.0
 # 落点条里提示文字的宽度：右边要给**三颗**控件让位
 # （测试模式开关 +「＋ 新增课程」+「选择文件…」）。
 # ⚠️ 算式与右边那三颗的位置是同一件事 —— 改任何一颗的宽度都得改它。
@@ -470,6 +476,11 @@ class Handles(typing.NamedTuple):
     # 而它是**唯一**能验「免费按文件名认出来的那几份，不许被模型结果覆盖」那条判据的入口
     # （2026-09-28 OCR 审计发现过一个正好相反的静默丢失）。
     start_classify: typing.Callable[[], None]
+    #: 面板里那两个输入框 —— 交给焦点守卫**每 0.5 秒兜底同步**一次它们的聚焦指示。
+    #: 即时响应由 `panel.focus_field` 的事件钩子管（`becomeFirstResponder` /
+    #: `textDidEndEditing_`）；这一拍管钩子没来的漏网（面板失 key、程序化
+    #: `makeFirstResponder_(None)`、框被藏起来等）。
+    focus_fields: tuple
 
 
 S = {                              # 同进程只允许一个面板（菜单栏/双击两条入口可能都来）
@@ -2120,12 +2131,23 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    解法照 `overlay` 那条**不变量**（它逐字写着「用不变量兜住所有路径,
     #    而不是逐个交互点打补丁」）：**只有真的在编辑时才允许是 key**。
     #    ⚠️ `overlay` 靠每帧 `pump()` 跑它，本面板没有 pump → 用轮询定时器。
-    search_field = NSSearchField.alloc().initWithFrame_(
+    # ⭐⭐ 聚焦环（那个蓝圈）**在这一行关掉了** —— 用 `panel.focus_field`：
+    #    它一个入口做齐两半：① `NSFocusRingTypeNone`（**用常量**，见 `panel.no_focus_ring`
+    #    为什么写数字会翻车）；② 补上替代指示 —— 一圈白细框（白 α0.18 → 聚焦 0.55），
+    #    聚焦/失焦由控件自己的 `becomeFirstResponder` / `textDidEndEditing_` 驱动
+    #    （为什么是这两条而不是 resign、也不是委托回调，见 `panel._focus_hooks`）。
+    #    ⚠️ 2026-09-29 那次以「去环不补替代 = W3C F78」为由放弃 —— 现在**补上了替代**，
+    #       那条理由不再成立；作者 2026-10-17 拍板去掉系统蓝环。
+    # ⚠️ `refusesFirstResponder` 那对**保留**：它治的本就不止环，还有「面板一弹出来
+    #    就抢 key」——那是本段的主题（guard 那条不变量）。环交给 `panel` 了。
+    search_field, _search_focus = panel.focus_field(
+        NSSearchField,
         NSMakeRect(PAD + WIDTH - 2 * PAD - SEARCH_W, h - PAD - TITLE_H + 4.0,
-                   SEARCH_W, TITLE_H - 10.0))
+                   SEARCH_W, TITLE_H - 10.0),
+        radius=SEARCH_FOCUS_RADIUS, key="EntrySearch")
     search_field.setPlaceholderString_("搜索转录 / 笔记…")
     search_field.setFont_(NSFont.systemFontOfSize_(12.0))
-    # ⭐⭐ **开局拒绝当第一响应者**，等面板真的上屏之后再放行 —— 这就是治那圈蓝环的那一步。
+    # ⭐ **开局拒绝当第一响应者**，等面板真的上屏之后再放行 —— 这是「弹出不抢 key」那一步。
     #    机制（本机实测，2026-09-29）：**聚焦环是按「控件是不是第一响应者」画的，
     #    和窗口 key 不 key 无关** —— 把窗口弄成不 key（`becomesKeyOnlyIfNeeded`）后
     #    `isKeyWindow=False` 了，`firstResponder` 仍是这个框的 field editor，环照画。
@@ -2139,12 +2161,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #     ② ⚠️ **搜索图标压到占位文字上** —— `NSSearchFieldCell` 给放大镜留的内边距
     #        是挂在 bezel 那套布局里的，关掉 bezel 就一起没了。
     #
-    # ⭐ **那个蓝环的正解不在这里，在窗口那边** —— 见 `win.setBecomesKeyOnlyIfNeeded_(True)`
-    #    那一段：让面板弹出时**不成为 key**，环就不出现；用户真点搜索框时才出现。
-    # ⚠️ 而**改环的颜色/自己画**这条路是死的：Apple 没有设色的 API（`NSFocusRingType`
+    # ⭐ **那个蓝环的正解 = 关掉 + 补替代**（作者 2026-10-17 拍板，`panel.focus_field` 做齐）。
+    # ⚠️ 但**改环的颜色**这条路仍然是死的：Apple 没有设色的 API（`NSFocusRingType`
     #    只有三个枚举、无颜色参数），它**就是用户的系统强调色**（HIG 逐字
-    #    「the system applies their chosen color… **replacing your accent color**」），
-    #    而关掉默认指示不补替代 = **W3C F78**（违反 1.4.11 + 2.4.7）。
+    #    「the system applies their chosen color… **replacing your accent color**」）——
+    #    所以只能关，不能改色；而关掉之后**必须**有替代指示（W3C F78 那条）→ 白细框。
+    #    ⚠️ 窗口那边「弹出不抢 key」的 `setBecomesKeyOnlyIfNeeded_` 照旧留着 —— 理由
+    #       也照旧（见上），它俩现在是**两件事**，别再混起来。
     # ⚠️⚠️ **`_target(…)` 的返回值必须留住。** 写成一行 `setTarget_(_target(…))` 的话，
     #     那个临时对象**语句一结束就被回收** → `target()` 变成 `None` →
     #     **回车静默无反应**，而 AppKit 不报任何错。`_target()` 的 docstring 讲的就是
@@ -3084,9 +3107,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # ⚠️ 三个 `def` 必须**在**建控件之前 —— `_target(close_add)` 是**提前求值**的，
     #    放到后面会 `UnboundLocalError`（它们是 `_build` 的局部名）。
     #    lambda 那几处倒是可以后置（调用时才查名），但别只对一半，读起来会以为有玄机。
-    add_field = NSTextField.alloc().initWithFrame_(
+    add_field, _add_focus = panel.focus_field(
+        NSTextField,
         NSMakeRect(CARD_PAD, ADD_ROW_Y, W_IN - CARD_PAD - 208.0 - 8.0 - CARD_PAD,
-                   BTN_H))
+                   BTN_H),
+        radius=ADD_FOCUS_RADIUS, key="EntryAdd")
     add_field.setPlaceholderString_(ADD_PLACEHOLDER)
     add_field.setFont_(NSFont.systemFontOfSize_(13.0))
     _add_submit_t = _target(submit_add)
@@ -4542,7 +4567,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     if on_start is not None:
         _install_key_monitor()
     # ⭐ 焦点守卫的链子**从这里起**（窗口刚上屏）—— 不是在定义处（见 `_guard_start`）。
-    _guard_start(win)
+    #    ⚠️ 把两个输入框一起交给它：这一拍管「钩子没来」的漏网（见 Handles）。
+    _guard_start(win, focus_fields=(search_field, add_field))
     # ⭐ 面板**已经上屏**了 → 现在把搜索框放回"可以被点进焦点"的状态。
     #    过早放行 = 白做（AppKit 会在上屏那一刻把它设成第一响应者）；
     #    这一小段延时是必须的，和窗口建立初始第一响应者是同一个时刻的事。
@@ -4566,6 +4592,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         import_timetable=run_import,
         delete_course=lambda c, keep=False: delete_course(c, keep, ask=False),
         start_classify=_start_classify,
+        focus_fields=(search_field, add_field),
     )
 
 
@@ -4629,7 +4656,25 @@ def _win_release_focus(win) -> None:
         pass
 
 
-def _guard_start(win) -> None:
+def _sync_focus_border(field) -> None:
+    """把一个输入框的聚焦指示同步到它当前的编辑状态。守卫每拍调（兜底），
+    `panel.focus_field` 的事件钩子管即时那一下 —— 两条路调的是**同一个句柄**，都幂等。
+
+    ⚠️ 收的是**控件**（句柄从 `field._focus_border` 取 —— 那是 `focus_field` 挂的）。
+    ⚠️ 只读状态、**不夺焦点**（守卫那条不变量：检测不出来时什么都不做，绝不把焦点抢走）。
+    """
+    try:
+        h = getattr(field, "_focus_border", None)
+        if h is None:
+            return
+        editing = field.currentEditor() is not None
+        if h.is_focused() != editing:
+            h.set_focus(editing)
+    except Exception:                                         # noqa: BLE001
+        pass
+
+
+def _guard_start(win, focus_fields=()) -> None:
     """起（或重起）守卫的链子 —— **在窗口上屏之后**调（`build()` 末尾 / `open_panel` 复用那条路）。
 
     ⚠️⚠️ 原来"定义完 `_focus_guard` 立刻调一次"，而那时窗口还没上屏：`isVisible()` 为 False
@@ -4639,7 +4684,7 @@ def _guard_start(win) -> None:
        醒来也会发现代号对不上而收手。
     """
     _GUARD["gen"] = _GUARD.get("gen", 0) + 1
-    _GUARD.update(win=win, waits=0)
+    _GUARD.update(win=win, waits=0, focus=tuple(focus_fields))
     _guard_tick(_GUARD, _GUARD["gen"])
 
 
@@ -4668,6 +4713,10 @@ def _guard_tick(state: dict, gen: int) -> None:
                 _win_release_focus(win)
         except Exception:                                     # noqa: BLE001
             pass
+        # ⭐ 聚焦指示的**兜底同步**（作者 2026-10-17 的白细框）：钩子那一刻没来的路径
+        #    （面板失 key、程序化挪焦点、框被藏起来）在这里最多 0.5s 内自愈。
+        for _f in state.get("focus", ()):
+            _sync_focus_border(_f)
     else:
         state["waits"] = state.get("waits", 0) + 1
         if state["waits"] > _GUARD_MAX_WAITS:
@@ -4716,7 +4765,8 @@ def open_panel(**kw) -> Handles | None:
     if cur is not None:
         if S.get("panel_key") == _panel_key(kw):
             cur.window.orderFrontRegardless()
-            _guard_start(cur.window)      # ⚠️ 复用不重建面板 —— 守卫得自己重新上链
+            # ⚠️ 复用不重建面板 —— 守卫得自己重新上链（句柄跟着把手走）
+            _guard_start(cur.window, focus_fields=getattr(cur, "focus_fields", ()))
             return cur
         cur.close()                       # 结构不同 -> 关掉重建（`S["result"]` 在模块级，不丢）
     h = build(**kw)

@@ -489,6 +489,214 @@ def make_drop_target(on_enter, on_drop, on_exit=None, *, types=None):
     return v
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 输入框的聚焦指示：关掉系统蓝环 + 补一圈白细框（作者 2026-10-17 拍板）
+# ══════════════════════════════════════════════════════════════════════════════
+# 背景（`entry_panel.py` 2100-2150 那段踩坑记的原文）：那个蓝环是**系统聚焦环**，
+# 颜色**不可设**（`NSFocusRingType` 只有三个枚举、无颜色参数，它取用户的系统强调色）。
+# 苹果的 HIG 允许「**用背景/边框表示聚焦**时关掉系统环」，而**不补替代**就是
+# W3C F78（违反 1.4.11 非文本对比 / 2.4.7 聚焦可见）—— 所以「关环」和「补白细框」
+# 是**一件事的两半**，本模块把两半放在同一个入口里（`focus_border` / `focus_field`）。
+#: 那圈白细框（1 **物理像素**）的两档白 α：静止 ↔ 聚焦。
+#: ⭐ **全 app 一套**：⌨ 提问输入行的细线、卡片输入框的外壳、课程面板的搜索框与
+#:    「＋新建」输入框都读这两档 —— 别再各写一份数。
+FOCUS_RING_IDLE = 0.18
+FOCUS_RING_ON = 0.55
+
+
+def hairline() -> float:
+    """1 **物理像素**折成的点数（Retina 0.5pt / 非 Retina 1pt）—— 发丝边的宽度。
+
+    ⚠️ 描边用 `1.0` 会在 2x 屏上画成 2 物理像素（一条糊边）；量过才写这个函数。
+    """
+    try:
+        from AppKit import NSScreen
+        scr = NSScreen.mainScreen()
+        scale = float(scr.backingScaleFactor()) if scr is not None else 2.0
+    except Exception:                                        # noqa: BLE001
+        scale = 2.0
+    return 1.0 / max(1.0, scale)
+
+
+def no_focus_ring(field) -> bool:
+    """关掉这个控件的**系统聚焦环**。回 `True` = 设上了（fail-soft 不抛）。
+
+    ⚠️⚠️ **必须用常量 `NSFocusRingTypeNone`，别写数字**：`NSFocusRingType` 里
+      `Default = 0`、`None = 1`（本机 PyObjC 实测）—— `setFocusRingType_(0)` 是
+      「我要系统默认」，蓝环照画。2026-10-17 在卡片输入框上抓到的就是这个形状：
+      **注释写着「去掉 AppKit 默认蓝环」、值写的是 0**，于是环一直在。
+    ⚠️ 只关环**不算完**：调用方得补替代指示（见 `focus_border`）—— 理由见本段文件头。
+    """
+    try:
+        from AppKit import NSFocusRingTypeNone
+        field.setFocusRingType_(NSFocusRingTypeNone)
+        return True
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
+class FocusBorder:
+    """**替代的聚焦指示**：一圈白色发丝边（`layer` 的 border，1 物理像素）。
+
+    α 两档：`FOCUS_RING_IDLE`（静止）↔ `FOCUS_RING_ON`（聚焦）。
+    句柄给调用方两件东西：
+      · `set_focus(bool)` —— **谁来驱动都行**（事件路 / 每帧轮询路，见 `focus_field`）；
+      · `alpha()` —— **从图层读回**当前描边 α，判据直接断言它（别去记"我们想设的值"）。
+
+    ⚠️⚠️ **句柄只拿控件那个图层（`layer`），不拿控件本身。** `focus_field` 会把句柄
+      挂在控件自己的 `__dict__` 里（`fld._focus_border = handle`）—— 那条链如果同时
+      反向指回控件，就是一个 `控件 → 句柄 → 控件` 的环，而 **PyObjC 对象参与的环
+      收集不掉**：2026-10-17 实测 3 个 `panel.focus_field(NSTextField, …)` 实例**一个
+      都收不回**（`test_panel.py`「开/关 N 轮存活对象一样多」那条当场红：9 轮多出 9 个框）。
+      ⚠️ 试过用**弱引用**绕开，**不行**：PyObjC 实例根本不给建弱引用
+      （`TypeError: cannot create weak reference to '_ClassLive…' object`，本机实测）——
+      所以只能**单向**：图层不反向持有视图（`CALayer.delegate` 本来就是弱引用），
+      控件活着时图层跟着活，控件走了整条链一起走。
+    """
+
+    def __init__(self, view, *, radius: float):
+        self.radius = float(radius)
+        self._on = False
+        self._painted = False
+        self.layer = None
+        try:
+            view.setWantsLayer_(True)
+            lay = view.layer()
+            lay.setBorderWidth_(hairline())
+            lay.setCornerRadius_(self.radius)
+            self.layer = lay
+            self._ok = lay is not None
+        except Exception:                                    # noqa: BLE001
+            self._ok = False
+        self.set_focus(False)
+
+    def ok(self) -> bool:
+        """装上了没有（没装上时 `alpha()` 回 -1）。"""
+        return bool(self._ok)
+
+    def is_focused(self) -> bool:
+        return self._on
+
+    def set_focus(self, on: bool) -> None:
+        """切那一圈边的 α。**幂等**（值没变直接返回）—— 每帧轮询那条路会一直调它。"""
+        on = bool(on)
+        if on == self._on and self._painted:
+            return
+        try:
+            from AppKit import NSColor
+            alpha = FOCUS_RING_ON if on else FOCUS_RING_IDLE
+            self.layer.setBorderColor_(
+                NSColor.whiteColor().colorWithAlphaComponent_(alpha).CGColor())
+            # ⚠️ 描边色设上了才认这次切换（`_painted` 在副作用之后写 —— 与
+            #    `overlay._sync_focus_look` 同一个理由：失败要留下重试的机会）。
+            self._painted = True
+        except Exception:                                    # noqa: BLE001
+            pass
+        self._on = on
+
+    def alpha(self) -> float:
+        """**从图层读回**的描边 α；读不到回 `-1.0`（判据要的是真值，不是我们想设的值）。"""
+        try:
+            from AppKit import NSColor
+            if self.layer is None:
+                return -1.0
+            c = self.layer.borderColor()
+            if c is None:
+                return -1.0
+            return float(NSColor.colorWithCGColor_(c).alphaComponent())
+        except Exception:                                    # noqa: BLE001
+            return -1.0
+
+
+def focus_border(field, *, radius: float, host=None) -> FocusBorder | None:
+    """给一个**已经建好**的输入框装替代聚焦指示（**并顺手关掉系统环**）。
+
+    返回句柄（`set_focus` / `alpha`）；装不上回 `None`（界面照常能用，只是少了这圈边）。
+    `host` = 画那圈边的视图（默认就是输入框自己）。卡片那两格传的是**外壳** ——
+    边画在外壳上、字段内缩在里，是那边一直以来的样子（见 `overlay._card_field_box`）。
+
+    ⚠️ 本函数**不装聚焦检测**（谁聚焦谁失焦）—— 要么用 `focus_field()` 造控件
+       （事件路），要么由调用方的每帧/每拍轮询来调 `set_focus`（轮询路）。
+    """
+    no_focus_ring(field)
+    try:
+        return FocusBorder(host if host is not None else field, radius=radius)
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def focus_field(base, rect, *, radius: float, host=None, key: str = "FocusField"):
+    """造一个**自带聚焦响应**的输入框：`base` 的子类 + `focus_border` 那圈边。
+
+    返回 `(控件, 句柄)` —— 句柄可能是 `None`（那圈边没装上也照样把控件给你）。
+
+    ⚠️ **为什么要子类**（而不是委托回调）：`NSTextField` 的**委托**
+      `controlTextDidBeginEditing_` / `controlTextDidEndEditing_` 在本 app 的启动
+      路径下**实测从不触发**（见 `overlay._make_input_delegate` 的注释）。
+      改用**控件自己的方法**：`becomeFirstResponder` 亮 + `textDidEndEditing_` 灭 ——
+      为什么是这两条、为什么不是 `resignFirstResponder`，见 `_focus_hooks` 的注释。
+    ⚠️ **普通 `NSTextField` 实例上挂不了 Python 属性**（`AttributeError`，本机实测），
+      所以句柄只能存在**本函数造的那个子类实例**上（子类实例挂得上）——
+      这也是"非得有个工厂"的原因，不是图省事。
+    ⚠️ **类名交给 `objc_own`**（全项目唯一的 ObjC 类注册点）：`key` 换个 base 会抛
+      `ObjcNameCollision` —— 搜索框（`NSSearchField`）与普通框要**用不同的 key**。
+    """
+    import objc
+    fld = None
+    try:
+        cls = objc_own.own(key, base, _focus_hooks(key))
+        fld = cls.alloc().initWithFrame_(rect)
+    except Exception:                                        # noqa: BLE001
+        fld = None
+    if fld is None:                                          # 子类这条路断了 → 退普通控件
+        try:
+            fld = base.alloc().initWithFrame_(rect)
+        except Exception:                                    # noqa: BLE001
+            return None, None
+    handle = focus_border(fld, radius=radius, host=host if host is not None else fld)
+    try:
+        fld._focus_border = handle
+    except Exception:                                        # noqa: BLE001
+        pass
+    return fld, handle
+
+
+def _focus_hooks(key: str) -> dict:
+    """`focus_field` 那个子类的方法表：**聚焦 → 亮，编辑结束 → 暗**。
+
+    ⚠️⚠️ **不是 `becomeFirstResponder` / `resignFirstResponder` 这一对**
+      （第一版就是这么写的，2026-10-17 在真窗口上量出来是错的）：`NSTextField`
+      拿到第一响应者之后会**立刻把 field editor（NSTextView）换上去**，于是字段
+      自己紧接着就被 `resignFirstResponder` —— 日志逐字是 `become, resign`
+      **成对出现**，而此刻正文**正在编辑**（`currentEditor()` 非空）。照那一对做，
+      圈边会在点进去的瞬间亮一下又灭。
+    实测有效的两条（同一次实验的四种路径都量过：点另一个框 / Esc / 点空白 / 回车提交）：
+      · 亮 = `becomeFirstResponder` —— 点进去必到，且**必须调基类实现**：
+        它负责开始编辑（不调 = 框点进去打不了字）；
+      · 灭 = `textDidEndEditing_` —— **编辑真的结束**才来（`resignFirstResponder`
+        在 field editor 接管那一步就会来，判不了）。
+    ⚠️ 委托那对（`controlTextDidBeginEditing_` / `controlTextDidEndEditing_`）在本 app
+      的启动路径下**从不触发**，别换回去（`overlay._make_input_delegate` 的注释记着同一条）。
+    ⚠️ `objc.super` 的第一参要用 `objc_own.cls_of(key)`，**别用 `type(self)`**
+      （类被子类化时会从子类开始找，行为不一样 —— `objc_own.cls_of` 的 docstring 逐字记过）。
+    """
+    import objc
+
+    def _become(self):
+        h = getattr(self, "_focus_border", None)
+        if h is not None:
+            h.set_focus(True)
+        return objc.super(objc_own.cls_of(key), self).becomeFirstResponder()
+
+    def _end(self, note):
+        h = getattr(self, "_focus_border", None)
+        if h is not None:
+            h.set_focus(False)
+        return objc.super(objc_own.cls_of(key), self).textDidEndEditing_(note)
+
+    return {"becomeFirstResponder": _become, "textDidEndEditing_": _end}
+
+
 def make_label(text, rect, size, *, alpha=1.0, bold=False,
                color=None, selectable=False, truncate=False):
     """面板里的一行文字。**默认不可选、无 bezel、无底色** —— 这三样是每条都要设的。

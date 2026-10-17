@@ -739,8 +739,10 @@ CARD_META_ALPHA = 0.56           # 元信息 / 副标题
 
 #: 输入框：外壳高 = 按钮高（同一行才齐），左右内边距 8pt，日期框按内容定宽。
 FIELD_FILL = 0.035
-FIELD_BORDER = 0.10
-FIELD_BORDER_FOCUS = 0.30
+#: 外壳描边那两档 α —— **不在这里另起数字**：就是 panel 那套聚焦指示的两档
+#: （静止 / 聚焦），见 `panel.FOCUS_RING_IDLE` / `panel.FOCUS_RING_ON`。
+FIELD_BORDER = panel.FOCUS_RING_IDLE
+FIELD_BORDER_FOCUS = panel.FOCUS_RING_ON
 FIELD_RADIUS = 8.0
 #: 输入框左右内边距。⭐ 作者 2026-10-17：要**跟上面类型胶囊的文字左缘对齐**。
 #: ⚠️ 为什么是 8 而不是胶囊的 10：两条渲染路径的**墨迹**起点不一样 ——
@@ -1284,8 +1286,7 @@ class Overlay:
                             NSWindowStyleMaskClosable, NSWindowStyleMaskFullSizeContentView,
                             NSWindowTitleHidden,
                             NSTextAlignmentLeft, NSFont, NSLineBreakByWordWrapping,
-                            NSLineBreakByTruncatingTail, NSView,
-                            NSFocusRingTypeNone)
+                            NSLineBreakByTruncatingTail, NSView)
 
         self._width = WIDTH
         self._height = HEIGHT
@@ -1591,7 +1592,11 @@ class Overlay:
         self._input.setBezeled_(False)
         self._input.setBordered_(False)
         self._input.setDrawsBackground_(False)
-        self._input.setFocusRingType_(NSFocusRingTypeNone)  # 去掉 AppKit 默认蓝环
+        # ⚠️ 系统聚焦环（用户的强调色蓝环）在这条输入行上是**没有替代品**时的**禁**项：
+        #    Apple HIG 允许"用背景/边框表示聚焦"时关掉它。本行的替代就是它**自己那条
+        #    细线**（`_input_rule`：白 α0.18 → 聚焦 0.45）—— 同一种语言，所以关得。
+        #    关环的写法（常量、别写数字）统一在 `panel.no_focus_ring` 一处。
+        panel.no_focus_ring(self._input)
         self._input.setFont_(_ui_font(14.0))
         self._input.setTextColor_(NSColor.whiteColor())
         self._input.setMaximumNumberOfLines_(1)
@@ -1763,6 +1768,10 @@ class Overlay:
         #: 开卡前字幕区的滚动位置 + 跟随状态（`(origin_y, at_bottom)`；关卡还原）。
         self._card_sub_scroll = None
         self._card_fields: list = []           # 卡片里可编辑的输入框（`_is_editing` 要看）
+        #: 输入框 → 它的聚焦指示句柄（`panel.FocusBorder`）—— 每帧 `_sync_focus_look`
+        #: 按**每个框自己**的编辑状态调 `set_focus`（不这么存的话普通 `NSTextField`
+        #: 实例上挂不住属性，见 `panel.focus_field` 的 docstring）。
+        self._card_focus: dict = {}
         self._card_blocks: list = []           # 本次卡片建出来的子视图（关的时候撤掉）
         self._card_pending: list = []          # 待摆的块（`_card_relayout` 消费）
         self._card_title = ""
@@ -2091,21 +2100,34 @@ class Overlay:
         self._focus_look_on = on
 
     def _card_fields_focus_look(self, on: bool) -> None:
-        """卡片输入框的聚焦态：正在编辑的那一格，发丝边提亮一档（`FIELD_BORDER_FOCUS`）。
+        """卡片输入框的聚焦态：**正在编辑的那一格**，白细框提亮一档（`FIELD_BORDER_FOCUS`）。
 
+        ⚠️ 原来是「`on` 为真就把**所有**外壳提亮」—— 作者 2026-10-17 要去掉蓝环时
+           顺手核对，发现那和 docstring 说的「正在编辑的那一格」对不上：⌨ 输入行
+           在打字时两张卡的外壳也一起亮。现在**逐框读它自己的编辑状态**
+           （`currentEditor()` 非空 = 这一格在编辑），`on` 只当"整块区域在编辑"的总闸。
         ⚠️ 与主输入框同一套机制（每帧比对状态 —— 委托回调实测从不触发，见上面）。
+           `panel.focus_field` 的事件钩子也会切同一个句柄，两条路都调它、都幂等。
         """
         if not getattr(self, "_card_fields", None):
             return
-        for _key, _fld, box in self._card_fields:
+        handles = getattr(self, "_card_focus", None) or {}
+        for _key, fld, _box in self._card_fields:
+            h = handles.get(fld)
+            if h is None:
+                continue
+            editing = False
+            if on:
+                try:
+                    editing = fld.currentEditor() is not None
+                except Exception:                         # noqa: BLE001
+                    editing = False
             try:
-                box.layer().setBorderColor_(
-                    self._NSColor.whiteColor().colorWithAlphaComponent_(
-                        FIELD_BORDER_FOCUS if on else FIELD_BORDER).CGColor())
+                h.set_focus(editing)
             except Exception:                             # noqa: BLE001
                 pass
-            if on:
-                self._set_editor_inset(_fld)
+            if editing:
+                self._set_editor_inset(fld)
 
     def _set_editor_inset(self, fld) -> None:
         """编辑中把**字段编辑器**的正文压到与静止态同一高度。
@@ -4037,6 +4059,7 @@ class Overlay:
         self._card_kind = kind
         self._card_clear_blocks()
         self._card_fields = []
+        self._card_focus = {}
         self._card_scroll_top = True          # 新卡：内容从**顶部**看起
         self._card_sub_scroll = self._tv_scroll_state()   # 存下字幕区的滚动位置
         self._card_view.setHidden_(False)
@@ -4049,6 +4072,7 @@ class Overlay:
         self._duty_wrapup_done = True
         self._card_clear_blocks()
         self._card_fields = []
+        self._card_focus = {}
         if self._card_view is not None:
             self._card_view.setHidden_(True)
         self._layout()                        # 转录区恢复**全高**（`_card_sub_h` 见没卡）
@@ -4283,15 +4307,29 @@ class Overlay:
 
         ⚠️ `NSTextField` 自己没有 padding 这一项 —— 用「外壳画底、字段内缩 8pt」实现，
            判据直接量 `字段.frame().x - 外壳.frame().x == FIELD_PAD_X`。
-        返回 `(box, fld)`；聚焦态提亮的是**外壳**的描边（见 `_card_fields_focus_look`）。
+        返回 `(box, fld)`；**聚焦指示画在外壳上**（`panel.focus_border(host=box)`）：
+        静止 / 聚焦两档 α 就是 `FIELD_BORDER` / `FIELD_BORDER_FOCUS`（= panel 那套）。
+        ⚠️ 环的那一半也在同一个入口里关掉了（`panel.FOCUS_RING_*` 那段文件头讲了
+           「关环 + 补替代」为什么是一件事的两半）—— 这里原来写的是
+           `setFocusRingType_(0)`，**0 是 Default 不是 None**，蓝环一直在。
         """
         from AppKit import NSView, NSTextField, NSMakeRect
         box = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 10.0, CARD_BTN_H))
         box.setWantsLayer_(True)
         self._card_pill(box, h=CARD_BTN_H, fill=FIELD_FILL, border=FIELD_BORDER,
                         radius=FIELD_RADIUS)
-        fld = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(FIELD_PAD_X, 0.0, 10.0, CARD_BTN_H))
+        # ⚠️ 用 `panel.focus_field` **不是为了那几条事件钩子**（下面每帧的
+        #    `_card_fields_focus_look` 才是权威）—— 是因为它一个入口就把「关环 +
+        #    白细框」两半都做齐了，别再手写一遍那两条（曾经漏掉一半的那次见 docstring）。
+        fld, handle = panel.focus_field(
+            NSTextField, NSMakeRect(FIELD_PAD_X, 0.0, 10.0, CARD_BTN_H),
+            radius=FIELD_RADIUS, host=box, key="CardField")
+        if fld is None:
+            fld = NSTextField.alloc().initWithFrame_(
+                NSMakeRect(FIELD_PAD_X, 0.0, 10.0, CARD_BTN_H))
+        if not hasattr(self, "_card_focus"):
+            self._card_focus = {}
+        self._card_focus[fld] = handle          # 句柄给每帧的聚焦同步读（见下）
         try:
             # ⚠️ 先把 cell 换掉、**再**设其余属性：这些 setter 都转发到 cell 上，
             #    顺序反了会把刚设好的打在旧 cell 上（贴顶那个毛病就回来了）。
@@ -4301,10 +4339,12 @@ class Overlay:
         fld.setEditable_(True); fld.setSelectable_(True)
         fld.setBezeled_(False); fld.setBordered_(False)
         fld.setDrawsBackground_(False)
-        try:
-            fld.setFocusRingType_(0)                      # 去掉 AppKit 默认蓝环（同 ⌨ 输入行）
-        except Exception:                                 # noqa: BLE001
-            pass
+        # ⚠️⚠️ **环的类型挂在 cell 上** —— 上面那句 `setCell_()` 会把刚设好的
+        #    `NSFocusRingTypeNone` 一起换掉（新 cell 的默认是 `Default`＝蓝环照画）。
+        #    所以这一步必须放在**换 cell 之后**（2026-10-17 是本文件那条
+        #    「窗口里所有输入框都没有系统环」的判据抓出来的：两格外壳都对、
+        #    环类型却是 0）。
+        panel.no_focus_ring(fld)
         fld.setFont_(_ui_font(12.5))
         fld.setTextColor_(self._NSColor.whiteColor())
         fld.setMaximumNumberOfLines_(1)

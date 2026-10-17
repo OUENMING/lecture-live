@@ -396,6 +396,20 @@ class HtmlComponents(unittest.TestCase):
         self.assertIn("<input type=\"range\"", h)
         self.assertIn('polyline class="c0" points="', h)
 
+    def test_没_JS_也看得见正文(self):
+        """⚠️ 入场动画不许把正文藏起来 —— 模块纪律写着"不用 JS 也能读"。
+
+        实测两处疼：① 截图工具滚过 `#kp1` 后，上面几张卡片的 IntersectionObserver
+        还没触发 → `opacity:0` → 半屏空白；② 用户禁用 JS / 打印时同理。
+        做法：藏内容的那条规则挂在 `html.js` 下（`<head>` 里一行内联脚本加这个类），
+        没有 JS 就没有 `.js`，`.reveal` 默认可见。
+        """
+        h = self._page()
+        self.assertIn('document.documentElement.className="js"', h)
+        self.assertIn(".reveal{opacity:1;transform:none}", h, "默认可见那条没了")
+        self.assertIn("html.js .reveal{opacity:0", h)
+        self.assertIn("html.js .reveal{opacity:1!important", h, "打印/降低动效的兜底没了")
+
     def test_每张图的标题都在自己的_figure_里(self):
         """⚠️ 2026-10-17 自查抓到的版式 bug：标题原来是 figure 的**兄弟节点**，
         而 `.plots` 是 grid → 标题被排成单独一格，三张图散成一团（截图里看得很清楚）。"""

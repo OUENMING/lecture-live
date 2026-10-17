@@ -273,6 +273,28 @@ class TestPickFunction(unittest.TestCase):
         self.assertTrue([r for r in rows if r["status"] == "mismatch"], rows)
 
 
+class TestNumberExtraction(unittest.TestCase):
+    """⚠️ 第三次生成的产物上抓到的两类假修正（都出自变式题）。"""
+
+    def test_根号里的点不许只读一半(self):
+        """`在 q=10√6 处取最小` —— 只读 `10` 就会报 `AC'(10)≈0.36≠0` 的假修正。"""
+        rev = {"sections": [{"variants": [{"q": "设 AC(q)=q+64/q，求最小平均成本。",
+                                          "steps": ["在 q=10√6 处取最小。"],
+                                          "a": "q=10√6"}]}]}
+        rows = nm.check_review(rev)
+        self.assertFalse([r for r in rows if r["status"] == "mismatch"], rows)
+
+    def test_极值那个值是值不是点(self):
+        """`最小平均成本为 16` —— 16 是**值**，不是驻点（实测报过 `AC'(16)≈0.75`）。"""
+        rev = {"sections": [{"variants": [{"q": "设 AC(q)=q+64/q，求最小平均成本。",
+                                          "steps": ["AC(q)=q+64/q。",
+                                                    "最小平均成本为 16。"],
+                                          "a": "16"}]}]}
+        rows = nm.check_review(rev)
+        self.assertFalse([r for r in rows if r["status"] == "mismatch"], rows)
+        self.assertEqual(rows, [], "这句话本来就不该出核对行（没有点）")
+
+
 class TestMerge(unittest.TestCase):
     def test_机械核优先(self):
         det = [{"claim": "AC(2.89)=233.01", "status": "mismatch", "how": "机械", "recomputed": "x"}]

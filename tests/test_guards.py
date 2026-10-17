@@ -102,6 +102,20 @@ class Quotes(unittest.TestCase):
         out, stripped, _w = self._run("教授用了「山峰」来比喻凸函数。")
         self.assertEqual(stripped, [])
 
+    def test_核定表里的引用也要核(self):
+        """A 那份的核定表「断言」列里就留着一句拼接引用（正文里已经去掉了）。"""
+        rev = {"sections": [{"prose": ["材料把停产价格定义为 AC 的最低点。"]}],
+               "checks": [{"claim": "“the minimum of the average cost… the lowest acceptable price”",
+                           "how": "材料原文", "status": "ok"}]}
+        out, stripped, _w = self._run_review(rev)
+        self.assertTrue(stripped)
+        self.assertIn("（转述）", out["checks"][0]["claim"])
+        self.assertNotIn("“", out["checks"][0]["claim"])
+
+    def _run_review(self, rev):
+        mat = type("M", (), {"_blob": self.BLOB})()
+        return ng.quote_check(rev, materials=mat)
+
     def test_转录也算出处(self):
         out, stripped, _w = self._run("他说“goes down the mountain”。",
                                       transcript="if it goes down the mountain, the average cost is falling")

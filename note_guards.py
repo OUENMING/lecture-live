@@ -206,6 +206,13 @@ def quote_check(review: dict, *, materials=None, transcript: str = "") -> tuple:
     def fix_list(xs):
         return [fix(x) if isinstance(x, str) else x for x in (xs or [])]
 
+    # ⚠️ `checks` 也要过一遍：模型会在核定表的「断言」列里引用"材料原话"
+    #    （实测：A 那份的表格里就留着一句拼接引用，正文里已经去掉了）。
+    for c in (out.get("checks") or []):
+        if isinstance(c, dict):
+            for f in ("claim", "how"):
+                if isinstance(c.get(f), str):
+                    c[f] = fix(c[f])
     for s in (out.get("sections") or []):
         s["prose"] = fix_list(s.get("prose"))
         for key in ("example", "faded"):

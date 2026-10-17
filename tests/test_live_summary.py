@@ -313,6 +313,14 @@ def main() -> int:
                   str([(c["id"], c["status"]) for c in cs]))
             check("⭐⭐ 临时版与正式版**同一个 `id`**",
                   len({c["id"] for c in cs}) == 1, str({c["id"] for c in cs}))
+            n_interim = sum(c["status"] == "interim" for c in chapters(emits))
+            # 下课后 app 没退: 没有新句子, 时钟继续走 —— 不许再拿同一份内容合成（美国用户 10-16 实测）
+            # ⚠️ 停在 MAX_CHAPTER_S 以下（再往后是强制切章, 另一条判据）
+            s._interim_at -= L.INTERIM_AFTER_S             # 等价于又过了一个间隔（醒着的时间）
+            s.step(s._cur["t_open"] + L.INTERIM_AFTER_S + 100.0)
+            check("⭐⭐ 没有新句子 → 不重复临时合成",
+                  sum(c["status"] == "interim" for c in chapters(emits)) == n_interim,
+                  str([(c["id"], c["status"]) for c in chapters(emits)]))
             s.finish(timeout_s=5.0)
             cs = chapters(emits)
             check("⭐ `finish()` 出了 `final`", any(c["status"] == "final" for c in cs),

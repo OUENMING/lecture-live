@@ -266,6 +266,7 @@ class LiveSummarizer:
         self._cid = 0
         self._prior: list = []        # 已经定稿的章标题（给下一章的 prompt）
         self._interim_at = 0.0        # 上次临时合成的时刻
+        self._interim_n = -1          # 上次临时合成时这一章有几句（没新句就别再合）
 
         # ---- 杂项 ----
         self._window_n = 0
@@ -709,6 +710,13 @@ class LiveSummarizer:
         if now - self._interim_at < INTERIM_AFTER_S:
             return
         self._interim_at = now
+        # ⚠️ 没有新句子就不再合成（2026-10-17 美国用户实测）: 下课后 app 没退出,
+        #    同一章、同一份 859 token 的输入每 8 分钟（醒着的时间）合成一次, 7 小时里
+        #    白发 15 次 —— 结果和上一次一模一样。面板上看着像「一分钟的在线」。
+        n = len(self._cur["sents"])
+        if n == self._interim_n:
+            return
+        self._interim_n = n
         self._synthesize("interim")
 
     def _finalize_current(self, now: float) -> None:

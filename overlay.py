@@ -630,6 +630,35 @@ CHAPTER_MIN_W = 90.0
 #: 角落小卡：压在**最上面那条旧字幕**上（旧行正在滚走，覆盖代价最小；绝不压正在变的两行）。
 CHIP_H = 22.0
 CHIP_GAP = 4.0                    # 与转录区顶边的距离
+#: ⭐ 小卡的两个亮度档（作者 2026-10-17：「新条目到达时亮起，约 8 秒没人理就自动降到
+#: 低亮度（不消失，仍可点），再来新条目重新亮起；全部处理完淡出」）。
+#: ⚠️ 低亮度**不是消失**：小卡是「一些事儿」唯一的常驻入口，暗到看不清等于把人关在外面 ——
+#:    0.55 是磨砂上小字的最低可读档（调研 §⑥ 那张实测 α 表，见 ui-research.md）。
+CHIP_ALPHA_HOT = 0.92
+CHIP_ALPHA_DIM = 0.55
+
+
+def chip_alpha(now: float, hot_until: float) -> float:
+    """小卡此刻该多亮（**纯函数** = 这条策略的唯一定义点）。
+
+    亮过 `hot_until` → 低亮度档；否则亮档。**永远 > 0**：降到低亮度不等于收起。
+    """
+    return CHIP_ALPHA_HOT if now < hot_until else CHIP_ALPHA_DIM
+
+
+def chip_pending_ids(items) -> set:
+    """待处理条目的 id 集合（纯函数）—— 与小卡上那行字无关，只数**没处理的**。"""
+    return {str(x.get("id") or "") for x in (items or ())
+            if isinstance(x, dict) and x.get("action") == "pending"} - {""}
+
+
+def chip_new_pending(prev, items) -> bool:
+    """有没有**新**的待处理条目（纯函数）：小卡据此重新亮起（`_chip_lit`）。
+
+    ⚠️ 判据是 **id 集合的差**，不是那行字变了没有 —— 两条标题一模一样的课务
+       （`+1` 的计数又没跨过 `limit`）不该让第二件事悄悄暗着。
+    """
+    return bool(chip_pending_ids(items) - set(prev or ()))
 #: 卡片（接管转录区的那块）的内边距与排版。
 CARD_PAD = 14.0
 CARD_TITLE_SZ = 13.0
@@ -1602,14 +1631,20 @@ class Overlay:
         self._recap_touched = False            # 用户手动收起来过（不再自动弹）
         #: 角落小卡：标签 + 透明点击区（造法同 `_chapter_lbl` / `_gloss_hit`）
         self._chip_lbl = self._label(
-            CARD_META_SZ, NSColor.whiteColor().colorWithAlphaComponent_(0.88),
+            CARD_META_SZ, NSColor.whiteColor().colorWithAlphaComponent_(CHIP_ALPHA_HOT),
             1, self._trunc)
         self._chip_hit = _make_click_view(self._chip_click)
         ve.addSubview_(self._chip_lbl)
         ve.addSubview_(self._chip_hit)
-        self._chip_lbl.setHidden_(True)
+        self._chip_lbl.setHidden_(False)     # 可见性由 `_chip_apply` 管（0 档淡完才 setHidden_）
+        self._chip_lbl.setAlphaValue_(0.0)
         self._chip_hit.setHidden_(True)
         self._chip_text = ""
+        #: 小卡的两个亮度档的状态：此刻该显示吗 / 已经落到哪一档 / 亮到几时。
+        self._chip_show = False
+        self._chip_alpha = 0.0
+        self._chip_hot_until = 0.0
+        self._chip_pend = set()              # 上次见到的那批待处理 id（认"新条目"）
 
         self._layout()
         self._move_to_corner()
@@ -2434,8 +2469,12 @@ class Overlay:
             except Exception:                             # noqa: BLE001
                 cw = 0.0
         show_chip = bool(self._chip_text) and cw > 40.0 and not self._card_kind
-        self._chip_lbl.setHidden_(not show_chip)
+        if show_chip and not self._chip_show:
+            self._chip_lit()                 # 新条目 → 亮起 + 续 8 秒（淡入）
+        self._chip_show = show_chip
         self._chip_hit.setHidden_(not show_chip)
+        if not show_chip:
+            self._chip_apply(0.0)            # 收起 = 淡出（alpha 到 0，不 setHidden_）
         if show_chip:
             _cx = self._width - PAD - cw
             _cy = self._scroll_y + self._scroll_h - CHIP_H - CHIP_GAP
@@ -2622,6 +2661,9 @@ class Overlay:
             self._draft_end_fade()        # 草稿让位淡出
             self._draft_rev_normalize()   # 草稿改字淡换（属性串要收回普通串）
             self._draft_shown = False     # 别把「隐藏前那份草稿」当成本帧刚变空 → 又起跑一次淡出
+            # 小卡：隐藏期间它可能已经过点 —— 直接落到此刻该在的那一档（别补播淡变）。
+            self._chip_apply(chip_alpha(self._clock(), self._chip_hot_until)
+                             if self._chip_show else 0.0)
             self._mark_dirty(urgent=True)  # 立刻 _render() 一帧（`_flush_if_due` 里 urgent 无条件 flush）
         finally:
             self._no_animate = False
@@ -3012,6 +3054,10 @@ class Overlay:
         ⚠️ 主线程，O(条数)：只是**重画一行字 + 一次 `_layout`**（卡片开着时可能重摆一次卡）。
         """
         self._duty_items = list(items or [])
+        # ⭐ 有新条目 → 小卡重新亮起（`motion.CHIP_HOT_S` 秒后降到低亮度，见 `_chip_tick`）。
+        if chip_new_pending(self._chip_pend, self._duty_items):
+            self._chip_lit()
+        self._chip_pend = chip_pending_ids(self._duty_items)
         txt = ""
         try:
             import duty as _duty
@@ -3044,6 +3090,55 @@ class Overlay:
         pend = self._duty_pending()
         if pend:
             self._duty_open(pend[-1].get("id") or "")
+
+    # ---- 角落小卡：亮 / 暗两档（策略见 `motion.CHIP_HOT_S` 与 `chip_alpha`）----
+    def _chip_lit(self) -> None:
+        """小卡**亮起**并续 `motion.CHIP_HOT_S` 秒：新条目到达、或它从收起转回显示时调。"""
+        self._chip_hot_until = self._clock() + motion.CHIP_HOT_S
+        self._chip_apply(CHIP_ALPHA_HOT)
+
+    def _chip_apply(self, alpha: float) -> None:
+        """把整块小卡（字 + 点击区）推到某一档亮度。到点了是**降到暗档**，不是收起。
+
+        ⚠️ 走 Core Animation（同 `_set_bar_shown`）：起跑那一帧提交，之后由渲染服务器跑。
+           窗口重新可见那一帧（`_no_animate`）、或「减弱动态效果」下，直接落位不做淡变。
+        ⚠️ 落到 0 档要**真的收起来**（`setHidden_`）：留着"透明但在"的视图会占住右上角那
+           一小块鼠标（拖窗口 / 滚轮在那儿失灵）。收起只发生**淡出跑完之后**，
+           所以看得见的那 0.2 s 里它还在 —— 淡出跑完前又有新条目的话会被再点亮、不收。
+        """
+        alpha = float(alpha)
+        if abs(alpha - float(self._chip_alpha)) < 0.01:
+            return
+        self._chip_alpha = alpha
+        gone = alpha <= 0.01
+        if getattr(self, "_no_animate", False) or motion.reduce_motion():
+            self._chip_lbl.setAlphaValue_(alpha)
+            self._chip_lbl.setHidden_(gone)
+            return
+        self._chip_lbl.setHidden_(False)                  # 要淡就先把字放出来
+        try:
+            from AppKit import NSAnimationContext
+
+            def _done():
+                if self._chip_alpha <= 0.01:              # 淡出跑完了才收；中途亮起就不收
+                    self._chip_lbl.setHidden_(True)
+
+            def _fade(ctx):
+                ctx.setDuration_(motion.STATE_S)
+                self._chip_lbl.animator().setAlphaValue_(alpha)
+            NSAnimationContext.runAnimationGroup_completionHandler_(_fade, _done)
+        except Exception:                                 # noqa: BLE001
+            self._chip_lbl.setAlphaValue_(alpha)
+            self._chip_lbl.setHidden_(gone)
+
+    def _chip_tick(self, now: float) -> None:
+        """pump 每帧：亮档到点 → 降到低亮度（**不消失、仍可点**）。
+
+        ⚠️ 只有正在显示时才动它；收起态（`_chip_show=False`）由 `_layout` 管成 0。
+           `_chip_apply` 自己抵挡重复调用 —— 到点之后每帧都是一次 float 比较。
+        """
+        if self._chip_show:
+            self._chip_apply(chip_alpha(now, self._chip_hot_until))
 
     def _duty_get(self, rid: str):
         for x in self._duty_items:
@@ -4515,6 +4610,8 @@ class Overlay:
         ⚠️ `_hint` 到期 / `_chip_frames_later` 的 NSTimer 由**运行中的 run loop** 到点处理，
            长让步对它们的量化 ≤ `PUMP_IDLE_LONG_S`（0.1 s）；hint 是纯 TTL，
            chip 过渡由用户点击驱动（那一轮本来就在热档）。
+        ⚠️ 角落小卡的「亮 → 暗」换档（`_chip_tick`）同样按 ≤0.1 s 量化 —— 它是**纯 TTL**
+           且换的是亮度不是位置，晚 0.1 s 没人看得出来；起跑那帧照常 commit。
         """
         return bool(
             self._tv.animating                    # 上滚 / D 的中文提亮 / D 的新字淡入
@@ -4679,6 +4776,8 @@ class Overlay:
             self._card_redo = False
             self._card_refill()
         self._bar_tick(time.monotonic())
+        # 角落小卡：亮档到点 → 降到低亮度（不消失）。纯状态转换，没到点就是一次比较。
+        self._chip_tick(self._clock())
         # 用户拖过窗口边缘 -> 把宽度/转录区高度收进来并重排。放在 tick 之前:
         # tick 要基于更新后的几何算池, 顺序反了会画一帧旧几何。
         self._sync_panel_size()

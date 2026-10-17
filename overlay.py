@@ -734,7 +734,16 @@ FIELD_FILL = 0.035
 FIELD_BORDER = 0.10
 FIELD_BORDER_FOCUS = 0.30
 FIELD_RADIUS = 8.0
-FIELD_PAD_X = 8.0                # 作者：输入框左右内边距 8pt
+#: 输入框左右内边距。⭐ 作者 2026-10-17：要**跟上面类型胶囊的文字左缘对齐**。
+#: ⚠️ 为什么是 8 而不是胶囊的 10：两条渲染路径的**墨迹**起点不一样 ——
+#:    胶囊（NSButton，居中段落）居中算的是**墨迹**，文字左缘落在 frame.x + 10.45；
+#:    输入框（NSTextFieldCell）从**字框**起点画，墨迹还要再进去约 2.5pt。
+#:    于是 8 + 2.5 ≈ 10.45 才是屏幕上同一条竖线（实测，判据在
+#:    `tests/test_duty_card_ui.py::test_输入框文字垂直居中且左缘与胶囊对齐` 里量墨迹）。
+FIELD_PAD_X = 8.0
+#: 编辑态那行字的微调：字段编辑器（NSTextView）的行盒与 cell 的 drawing rect 差约这么多
+#: （实测：不补 → 打字时文字比静止态高 1.25pt；补上后中线差 0.25pt）。**量出来的，不是猜的**。
+FIELD_EDITOR_NUDGE = 1.25
 CARD_DATE_W = 132.0              # 日期框：按内容定宽（ISO 日期 + 内边距），不拉满整行
 #: 分区标题前的小图标（SF Symbols，**单色**、跟文字同一色阶）。
 CARD_SYMBOL_PT = 11.0
@@ -1043,6 +1052,44 @@ def _xy(p) -> tuple:
         return float(p.x), float(p.y)
     except AttributeError:
         return float(p[0]), float(p[1])
+
+
+def _make_center_cell():
+    """一个把单行文字**垂直居中**画的 `NSTextFieldCell`（作者 2026-10-17 点名的那类修法）。
+
+    ⚠️ 为什么必须有它：`NSTextFieldCell` 默认把文字**贴着 frame 顶**画。框高 28、字 12.5 时
+       实测墨水中心在 7.25（框中心 14）—— 就是作者看到的「文字贴顶、下面空一大截」。
+       重写 `drawingRectForBounds_` 把**行盒**摆到中线；`titleRectForBounds_` 跟着走，
+       判据才能直接量「文字 rect 中心 == 框中心」。
+    ⚠️ 类名由 `objc_own` 管（全项目 ObjC 子类只此一处定义），别在这里写死类名。
+    """
+    from AppKit import NSTextFieldCell, NSMakeRect
+
+    def _line_h(cell) -> float:
+        f = cell.font()
+        return float(f.ascender()) - float(f.descender())
+
+    def drawing_rect(self, rect):                       # noqa: N802
+        r = NSTextFieldCell.drawingRectForBounds_(self, rect)
+        try:
+            line = _line_h(self)
+            if line > 0.0:
+                y = rect.origin.y + (rect.size.height - line) / 2.0
+                # ⚠️ 左右也用**整宽**：cell 默认还留了约 2.5pt 的横向内边距，
+                #    留着的话"输入框文字左缘 == 胶囊文字左缘"会差出这 2.5pt
+                #    （作者 2026-10-17 量的就是这条竖线）。外边距由外壳的 `FIELD_PAD_X` 给。
+                return NSMakeRect(rect.origin.x, y, rect.size.width, line)
+        except Exception:                               # noqa: BLE001
+            pass
+        return r
+
+    def title_rect(self, rect):                         # noqa: N802
+        return drawing_rect(self, rect)
+
+    return objc_own.own("CardFieldCell", NSTextFieldCell, {
+        "drawingRectForBounds_": drawing_rect,
+        "titleRectForBounds_": title_rect,
+    })
 
 
 def _make_input_delegate(on_submit, on_cancel):
@@ -2026,6 +2073,29 @@ class Overlay:
                         FIELD_BORDER_FOCUS if on else FIELD_BORDER).CGColor())
             except Exception:                             # noqa: BLE001
                 pass
+            if on:
+                self._set_editor_inset(_fld)
+
+    def _set_editor_inset(self, fld) -> None:
+        """编辑中把**字段编辑器**的正文压到与静止态同一高度。
+
+        ⚠️ 手工量过：静止时文字在框内 8.5..20（居中 cell 的功劳）；一进编辑态，
+           字段编辑器（NSTextView）铺满整框、正文贴顶（1.5..12.5）—— 点进输入框
+           文字会**跳一下**。把它的 `textContainerInset` 上边距设成 (框高-行高)/2 就齐了。
+        """
+        try:
+            ed = fld.currentEditor()
+            if ed is None:
+                return
+            f = fld.font()
+            line = float(f.ascender()) - float(f.descender())
+            top = max(0.0, (float(fld.frame().size.height) - line) / 2.0
+                      + FIELD_EDITOR_NUDGE)
+            # ⚠️ `NSSize` 的语义是 (width=水平, height=垂直) —— 写成 (top, 0) 会去改**左右**
+            #    边距（实测返回 width=top、height=0），垂直纹丝不动。
+            ed.setTextContainerInset_((0.0, top))
+        except Exception:                                 # noqa: BLE001
+            pass
 
     def _release_focus(self):
         """主动把 key window 交还出去。
@@ -3444,8 +3514,10 @@ class Overlay:
         #    一屏放不下时被裁的只会是内容，出口永远点得到。
         # ⭐ 层级自己声明（作者 2026-10-17）：「全部忽略」是**批量放弃**，永远不是 primary
         #    （它原来是一块白色实心，被点名「突兀」）；「完成」是安静的次按钮。
+        # ⭐ 作者 2026-10-17：页脚放**右下角**、与每行「忽略」同一条右缘（原来在左下，
+        #    被 ghost 按钮的内边距顶进去 ~14pt，看起来像缩进错位）。
         specs = [("全部忽略", "all", "plain")] if pend else [("完成", "done", "secondary")]
-        self._card_actions(specs, lambda a: self._wrapup_act(a))
+        self._card_actions(specs, lambda a: self._wrapup_act(a), align="right")
         self._card_done()
 
     def _wrapup_act(self, action: str, rid: str = "") -> None:
@@ -3645,8 +3717,9 @@ class Overlay:
     def _card_chips(self, labels, chosen: str, on_pick) -> None:
         self._card_add("chips", chips=list(labels), chosen=str(chosen), on_pick=on_pick)
 
-    def _card_actions(self, specs, on_act) -> None:
-        self._card_add("buttons", buttons=list(specs), on_act=on_act)
+    def _card_actions(self, specs, on_act, *, align: str = "left") -> None:
+        """按钮行。`align="right"` = 这一排**贴右**（收尾卡的页脚用它，与行内按钮同一条右缘）。"""
+        self._card_add("buttons", buttons=list(specs), on_act=on_act, align=align)
 
     def _card_duty_row(self, item) -> None:
         """一整行的收尾条目（视图由 `_card_place_duty_row` **一次**造好并缓存）。"""
@@ -3834,12 +3907,14 @@ class Overlay:
                   key: str = "", value: str = "", side: str = "",
                   chips=None, chosen: str = "", on_pick=None,
                   buttons=None, on_act=None, duty_row=None, meta: str = "",
-                  symbol: str = "", attr=None, name: str = "", expl: str = "") -> None:
+                  align: str = "left", symbol: str = "", attr=None,
+                  name: str = "", expl: str = "") -> None:
         blk = {"kind": kind, "text": str(text or ""), "size": size, "alpha": alpha,
                "strong": strong, "wrap": wrap, "key": key, "value": value,
                "side": str(side or ""), "chips": chips, "chosen": chosen,
                "on_pick": on_pick, "buttons": buttons, "on_act": on_act,
-               "duty_row": duty_row, "meta": str(meta or ""), "view": None,
+               "duty_row": duty_row, "meta": str(meta or ""), "align": str(align),
+               "view": None,
                "extra": None, "rows": [], "symbol": str(symbol or ""),
                "attr": attr, "name": str(name or ""), "expl": str(expl or ""),
                "icon": False, "h": 0.0, "h_w": 0.0, "box": None, "fld": None,
@@ -4031,6 +4106,12 @@ class Overlay:
                         radius=FIELD_RADIUS)
         fld = NSTextField.alloc().initWithFrame_(
             NSMakeRect(FIELD_PAD_X, 0.0, 10.0, CARD_BTN_H))
+        try:
+            # ⚠️ 先把 cell 换掉、**再**设其余属性：这些 setter 都转发到 cell 上，
+            #    顺序反了会把刚设好的打在旧 cell 上（贴顶那个毛病就回来了）。
+            fld.setCell_(_make_center_cell().alloc().init())
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ 输入框居中 cell 装不上({str(e)[:40]})；退回默认（文字会贴顶）")
         fld.setEditable_(True); fld.setSelectable_(True)
         fld.setBezeled_(False); fld.setBordered_(False)
         fld.setDrawsBackground_(False)
@@ -4084,6 +4165,26 @@ class Overlay:
         """
         self._card_relayout()
         self._mark_dirty(urgent=True)
+
+    @staticmethod
+    def _text_baseline_off(view, height: float) -> float:
+        """单行文本框里**基线**相对 frame 底边的偏移（AppKit 的 drawing rect + 字体 ascent）。
+
+        ⚠️ 不能按 `ascender` 硬算：输入框换了居中 cell 之后行盒被摆到中线，基线跟着下移
+           （实测 6.64 + 11.9 = 18.5，而不是 11.9）——「推算」那行要跟框内文字对齐，
+           就得按**同一个口径**量。
+        """
+        try:
+            from AppKit import NSMakeRect
+            r = view.cell().drawingRectForBounds_(
+                NSMakeRect(0.0, 0.0, max(20.0, float(view.frame().size.width)),
+                           float(height)))
+            return float(r.origin.y) + float(view.font().ascender())
+        except Exception:                                 # noqa: BLE001
+            try:
+                return float(view.font().ascender())
+            except Exception:                             # noqa: BLE001
+                return float(height) / 2.0
 
     def _card_icon_w(self, blk) -> float:
         """块前面那个小图标占的横向（图标 + 间距）；没有图标 → 0。
@@ -4233,10 +4334,20 @@ class Overlay:
                 if blk["side"] and blk["extra"] is not None:
                     side = blk["extra"]
                     sh = _card_line_h(side.font())
+                    # ⭐ 与框内文字**同一基线**（作者 2026-10-17：原来低了约 4pt）——
+                    #    两边的基线都按 `_text_baseline_off` 量，不靠"frame 居中"碰运气。
+                    fld_y = float(blk["fld"].frame().origin.y)
+                    # ⚠️ 两个口径各让一半：**基线**对齐是"读起来同一行"（作者点名的判据），
+                    #    **中线**对齐是"看起来居中"（字号差了 2pt，两个不可能同时为零）。
+                    #    各偏 ~0.5pt，两个判据都稳在 ≤1pt 以内。
+                    # ⚠️ `fld.frame()` 是**相对外壳**的（外框内 y=0），要加回外框在卡里的 y
+                    sy_base = (y + fld_y + self._text_baseline_off(blk["fld"], h)
+                               - self._text_baseline_off(side, sh))
+                    sy_center = (y + h / 2.0 - sh / 2.0)
+                    sy = (sy_base + sy_center) / 2.0
                     side.setHidden_(False)
                     side.setStringValue_(blk["side"])
-                    side.setFrame_(((x + fw + 8.0,
-                                    y + (h - sh) / 2.0),
+                    side.setFrame_(((x + fw + 8.0, sy),
                                    (max(40.0, x + w - (x + fw + 8.0)), sh)))
                 elif blk["extra"] is not None:
                     blk["extra"].setHidden_(True)
@@ -4309,18 +4420,31 @@ class Overlay:
                     label, role,
                     lambda c=code, b=blk: (b["on_act"](c) if b["on_act"] else None))
                 blk["extra"].append([btn, str(label), str(code), str(role)])
-        bx = x
         row_rects = blk.setdefault("rows", [])
         del row_rects[:]
+        right = str(blk.get("align") or "left") == "right"
+        # ⭐ 贴右时从右缘往左摆（第一颗仍是最左边那颗）—— 与行内按钮同一条右缘。
+        placed = []
+        bx = x + w if right else x
         for btn, label, _code, _role in blk["extra"]:
             bw = self._card_button_w(btn, label)
-            if bx + bw > x + w:
-                btn.setHidden_(True)
-                continue
+            if right:
+                bx -= bw
+                if bx < x:
+                    btn.setHidden_(True)
+                    continue
+                placed.append((btn, bx, bw))
+                bx -= CARD_BTN_GAP
+            else:
+                if bx + bw > x + w:
+                    btn.setHidden_(True)
+                    continue
+                placed.append((btn, bx, bw))
+                bx += bw + CARD_BTN_GAP
+        for btn, px, bw in placed:
             btn.setHidden_(False)
-            btn.setFrame_(((bx, y), (bw, CARD_BTN_H)))
-            row_rects.append((bx, y, bw, CARD_BTN_H))
-            bx += bw + CARD_BTN_GAP
+            btn.setFrame_(((px, y), (bw, CARD_BTN_H)))
+            row_rects.append((px, y, bw, CARD_BTN_H))
         return y - 2.0
 
     def _card_place_duty_row(self, blk, x, y, w, bottom: float = CARD_PAD) -> float:

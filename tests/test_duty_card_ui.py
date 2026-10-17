@@ -43,6 +43,33 @@ def _fill_alpha(view) -> float:
         return 0.0
 
 
+def _ink_box(view, thr: int = 120):
+    """视图里**亮墨**的行 / 列范围（像素 → 视图坐标）。返回 `(x0, x1, y0, y1, 缩放)`。
+
+    ⚠️ 只对**没有底色**的视图直接可用（输入框 / 普通标签）：판 上的底与描边也是"亮的"，
+       有底的胶囊要先走 `_ink_span()` 相减。
+    """
+    rep = view.bitmapImageRepForCachingDisplayInRect_(view.bounds())
+    if rep is None:
+        return None
+    view.cacheDisplayInRect_toBitmapImageRep_(view.bounds(), rep)
+    buf, w, h = bytes(rep.bitmapData()), rep.pixelsWide(), rep.pixelsHigh()
+    spp, bpr = rep.samplesPerPixel(), rep.bytesPerRow()
+    cols, rows = [], []
+    for x in range(2, w - 2):
+        if any(buf[y * bpr + x * spp] > thr or buf[y * bpr + x * spp + 1] > thr
+               or buf[y * bpr + x * spp + 2] > thr for y in range(h)):
+            cols.append(x)
+    for y in range(h):
+        if any(buf[y * bpr + x * spp] > thr or buf[y * bpr + x * spp + 1] > thr
+               or buf[y * bpr + x * spp + 2] > thr for x in range(2, w - 2)):
+            rows.append(y)
+    if not cols or not rows:
+        return None
+    scale = w / float(view.bounds().size.width) if view.bounds().size.width else 1.0
+    return (min(cols) / scale, max(cols) / scale, min(rows) / scale, max(rows) / scale, scale)
+
+
 def _render_pixels(view):
     """把一个视图渲染成位图 → `(bytes, w, h, samplesPerPixel, bytesPerRow)`（失败 None）。"""
     try:
@@ -385,6 +412,7 @@ class 几何(unittest.TestCase):
         self.assertEqual(overlay.CARD_BTN_H, 28.0)
         self.assertGreaterEqual(overlay.CARD_BTN_PAD_X, 10.0)
         self.assertEqual(overlay.CARD_BTN_GAP, 8.0)
+        # 输入框左内边距 8（与胶囊文字左缘同一条竖线靠**墨迹**判据钉，见 `几何` 那一类）
         self.assertEqual(overlay.FIELD_PAD_X, 8.0)
         self.assertTrue(120.0 <= overlay.CARD_DATE_W <= 140.0,
                         f"日期框宽该在 120–140：{overlay.CARD_DATE_W}")
@@ -463,6 +491,136 @@ class 几何(unittest.TestCase):
             title = [b for b in fields if b["key"] == "title"][0]
             self.assertGreater(title["box"].frame().size.width,
                                overlay.CARD_DATE_W + 40.0, "标题框该是满行")
+        finally:
+            o.close()
+
+    def test_输入框文字垂直居中且左缘与胶囊对齐(self):
+        """⭐ 作者 2026-10-17 报的三处之一：输入框文字贴顶、左缘与 chip 不一列。
+
+        判据三条：① 文字 rect 中心 vs **框**中心 ≤1pt；② 像素级墨迹中心也 ≤1pt；
+        ③ 输入框文字的**左缘**与类型胶囊的文字左缘同一条竖线（都 = 左边距 + `CARD_BTN_PAD_X`）。
+        """
+        o = self._overlay()
+        try:
+            self._case(o, "duty")
+            fields = _blocks(o, "field")
+            self.assertTrue(fields, "编辑卡里没有输入框")
+            chips = _blocks(o, "chips")[0]
+            chip_btn, chip_name = chips["extra"][0][0], chips["extra"][0][1]
+            chip_role = ("chip-on" if chip_name == chips["chosen"] else "chip-off")
+            chip_px = _ink_span(chip_btn,
+                                lambda v=chip_btn, r=chip_role: o._card_btn_style(v, r))
+            for blk in fields:
+                box, fld = blk["box"], blk["fld"]
+                box_mid = box.frame().size.height / 2.0
+                tr = fld.cell().titleRectForBounds_(fld.bounds())
+                mid = fld.frame().origin.y + tr.origin.y + tr.size.height / 2.0
+                c = (f"{blk['key']}：文字 rect 中线 {mid:.2f} vs 框中线 {box_mid:.2f}")
+                self.assertLessEqual(abs(mid - box_mid), 1.0, f"文字 rect 没在框中线：{c}")
+                ink = _ink_box(fld)
+                if ink is not None:
+                    imid = (ink[2] + ink[3]) / 2.0
+                    self.assertLessEqual(abs(imid - box_mid), 1.0,
+                                         f"墨迹不在框中线：{c} ink={(ink[2], ink[3])}")
+                if chip_px is not None:
+                    chip_left = chip_px[0] / chip_px[3]
+                    chip_left_card = chip_btn.frame().origin.x + chip_left
+                    if ink is not None:
+                        fld_left_card = box.frame().origin.x + fld.frame().origin.x + ink[0]
+                        self.assertLessEqual(
+                            abs(fld_left_card - chip_left_card), 1.0,
+                            f"{blk['key']}：文字左缘 {fld_left_card:.2f} 与胶囊文字左缘 "
+                            f"{chip_left_card:.2f} 不在一条竖线")
+            # ⚠️ 两条渲染路径的墨迹起点差约 2.5pt（见 `FIELD_PAD_X` 的注释），
+            #    所以这里比的**不是**两个常数相等，而是上面量出来的那条竖线。
+            self.assertEqual(overlay.FIELD_PAD_X, 8.0)
+        finally:
+            o.close()
+
+    def test_推算那行与框内文字同基线(self):
+        """⭐ 三处之二：「10-16（周五）· 推算」原来比框内文字低约 4pt。
+
+        判据：与框内文字 ① 中线差 ≤1pt、② 基线差 ≤1pt（基线按 cell 的 drawing rect +
+        字体 ascent 算，两边**同一口径**）。
+        """
+        o = self._overlay()
+        try:
+            self._case(o, "duty")
+            date = [b for b in _blocks(o, "field") if b["key"] == "date"]
+            self.assertTrue(date, "日期框不在")
+            blk = date[0]
+            self.assertTrue(blk["side"], "日期框没有右侧说明")
+            box, fld, side = blk["box"], blk["fld"], blk["extra"]
+            box_y = box.frame().origin.y
+            f_ink, s_ink = _ink_box(fld), _ink_box(side)
+            self.assertIsNotNone(f_ink, "没量到框内文字")
+            self.assertIsNotNone(s_ink, "没量到右侧说明")
+            f_mid = box_y + (f_ink[2] + f_ink[3]) / 2.0
+            s_mid = side.frame().origin.y + (s_ink[2] + s_ink[3]) / 2.0
+            self.assertLessEqual(abs(s_mid - f_mid), 1.0,
+                                 f"中线差 {s_mid - f_mid:+.2f}（框内 {f_mid:.2f} / 说明 {s_mid:.2f}）")
+            f_base = (box_y + fld.frame().origin.y
+                      + fld.cell().drawingRectForBounds_(fld.bounds()).origin.y
+                      + fld.font().ascender())
+            s_base = (side.frame().origin.y
+                      + side.cell().drawingRectForBounds_(side.bounds()).origin.y
+                      + side.font().ascender())
+            self.assertLessEqual(abs(s_base - f_base), 1.0,
+                                 f"基线差 {s_base - f_base:+.2f}")
+        finally:
+            o.close()
+
+    def test_收尾页脚与行内按钮右对齐(self):
+        """⭐ 三处之三：「全部忽略」原来在左下、被内边距顶进去（像缩进错位）。
+
+        作者选了右下角：它的**右缘**要与每行「忽略」的右缘同一条竖线（≤1pt）。
+        """
+        o = self._overlay()
+        try:
+            self.assertTrue(o.duty_wrapup_show([_item("d1"), _item("d2")]))
+            rows = _blocks(o, "duty_row")
+            foot = _blocks(o, "buttons")[-1]
+            fbtn = foot["extra"][0][0]
+            self.assertEqual(str(foot["extra"][0][1]), "全部忽略")
+            self.assertEqual(str(foot.get("align") or "left"), "right", "页脚没声明贴右")
+            rights = [b.frame().origin.x + b.frame().size.width
+                      for blk in rows if blk["extra"]
+                      for k, b in blk["extra"]["buttons"].items() if k == "ignore"]
+            self.assertTrue(rights, "收尾行里没有「忽略」")
+            f_right = fbtn.frame().origin.x + fbtn.frame().size.width
+            self.assertLessEqual(abs(f_right - max(rights)), 1.0,
+                                 f"页脚右缘 {f_right:.2f} vs 行内右缘 {max(rights):.2f}")
+        finally:
+            o.close()
+
+    def test_输入框编辑态文字也在中线(self):
+        """点进输入框时文字**不许跳**：编辑器那行字的中线与静止态一致（≤1pt）。"""
+        o = self._overlay()
+        try:
+            o.show()
+            self._case(o, "duty")
+            blk = [b for b in _blocks(o, "field") if b["key"] == "title"][0]
+            box, fld = blk["box"], blk["fld"]
+            still = _ink_box(fld)
+            o._panel.makeFirstResponder_(fld)
+            for _ in range(3):
+                o.pump()
+            ed = fld.currentEditor()
+            if ed is None:
+                self.skipTest("这台机器上输入框拿不到字段编辑器，跳过编辑态判据")
+            ed.insertText_("测试")
+            for _ in range(3):
+                o.pump()
+            ink = _ink_box(ed)
+            self.assertIsNotNone(ink, "编辑态量不到文字")
+            box_mid = box.frame().size.height / 2.0
+            mid = (ink[2] + ink[3]) / 2.0
+            self.assertLessEqual(abs(mid - box_mid), 1.0,
+                                 f"编辑态文字不在框中线：{mid:.2f} vs {box_mid:.2f}")
+            if still is not None:
+                self.assertLessEqual(
+                    abs(mid - (still[2] + still[3]) / 2.0), 1.5,
+                    "编辑态与静止态的文字高度差太多（点进去会跳一下）")
         finally:
             o.close()
 

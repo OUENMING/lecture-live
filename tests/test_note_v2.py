@@ -285,6 +285,14 @@ class RenderShape(unittest.TestCase):
         e[0]["en"] = "the origional en sentence"
         self.assertIn("the origional en sentence", nr.render(self._data(entries=e)))
 
+    def test_新加入术语库_N_条写进笔记(self):
+        """作者要求的「有感知」：笔记里要有一节列出这节课往术语库里加了什么。"""
+        d = self._data(glossary_added=["marginal cost", "shutdown price"])
+        out = nr.render(d)
+        self.assertIn("**本课新加入术语库 2 条**", out)
+        self.assertIn("`marginal cost`", out)
+        self.assertIn("`shutdown price`", out)
+
     def test_复习排程与旁车文件名(self):
         d = self._data(anki_name="x.anki.csv", html_name="x.html")
         out = nr.render(d)

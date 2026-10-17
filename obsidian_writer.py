@@ -531,6 +531,9 @@ class ObsidianWriter:
         #: 💡 本课术语表的**过滤结果**（`note_terms.Selection`）—— 由 `_glossary()`
         #: 在渲染时填，页脚那行 `已从术语表过滤 N 条…` 读它。`None` = 还没算过。
         self._gloss_sel = None
+        #: 运行时查词表的**记忆化槽**（`_term_index()`）：`None` = 还没建，
+        #: `False` = 建过但失败了（别每次都重试并刷警告）。
+        self._term_notes = None
         #: 📖 本课**课件索引**（`materials.Materials`）—— 由 `close()` 建好后塞进来。
         #: `None` = 没有课件：术语语境核对退到"只看本课术语表"，且笔记头部写明
         #: 「本课未做课件核对」（2026-10-17 step 2 的退化档）。
@@ -661,11 +664,9 @@ class ObsidianWriter:
 
     def _term_selection(self, entries: list[dict]) -> note_terms.Selection:
         """`_glossary` 的实质。**纯本地**（术语表读盘 + 记忆化, 不发请求）。"""
-        try:
-            from build_notes import TermNotes
-        except Exception:                                     # noqa: BLE001
+        notes = self._term_index()
+        if notes is None:
             return note_terms.Selection(hits=[], dropped=[])
-        notes = TermNotes()
 
         def match(sentence: str):
             for term, detail in notes.match(sentence):
@@ -678,6 +679,21 @@ class ObsidianWriter:
 
         return note_terms.select(entries, match=match, type_of=type_of,
                                  verify=self._term_verified)
+
+    def _term_index(self):
+        """运行时查词表（`build_notes.TermNotes`）。构造一次、记忆化。
+
+        ⚠️ 一次渲染里要被问几十次（每条术语都要 type / 来源），每问一次就读两个
+           JSON 是浪费；而且 `TermNotes.__init__` 会**打印**警告（读不出时），
+           重复构造会把同一句警告刷好几遍。
+        """
+        if getattr(self, "_term_notes", None) is None:
+            try:
+                from build_notes import TermNotes
+                self._term_notes = TermNotes()
+            except Exception:                                 # noqa: BLE001
+                self._term_notes = False
+        return self._term_notes or None
 
     def _term_verified(self, term: str) -> bool:
         """自动缓存里的词能不能证明"本课真的用过它"。
@@ -1019,8 +1035,13 @@ class ObsidianWriter:
         # 💡 术语库：作者硬要求（从笔记抽词 → `prep.append_terms` 只追加 + 墓碑）。
         try:
             import note_glossary
-            keep, rejected = note_glossary.candidates(review, entries,
-                                                      materials=self._materials)
+            notes = self._term_index()
+            keep, rejected = note_glossary.candidates(
+                review, entries, materials=self._materials,
+                # 人名挡在这里（`Masha` 这种词常常**真的**出现在课上，
+                # 光靠"没出现过"挡不住）—— 类型来自运行时查词缓存，不另造判据。
+                type_of=(lambda t: str(notes.entry_of(t)[1].get("type") or "")
+                         if notes is not None else ""))
             outcome = note_glossary.append(keep, course=self._course,
                                            glossary_txt=self._glossary_path)
             self._gloss_added = list(outcome.added)
@@ -1584,5 +1605,10 @@ class ObsidianWriter:
         extra = "".join(x for x in (
             "，另存了交互版 HTML" if self._html_name else "",
             "，Anki CSV 已导出" if self._anki_name else "") if x)
-        return (f"📝 已存入 Obsidian({self._n} 句, 复习层: {layer}{extra}) → {self.vault_path}\n"
+        # 💡 术语库那一句走**现成通道**（收尾卡 / 终端返回串）—— 不新建 UI
+        #    （作者要求「有感知」：这节课往术语表里加了什么，得有人告诉他）。
+        gloss_line = (f"\n   💡 新加入术语库 {len(self._gloss_added)} 条："
+                      f"{' · '.join(self._gloss_added)}" if self._gloss_added else "")
+        return (f"📝 已存入 Obsidian({self._n} 句, 复习层: {layer}{extra}) → {self.vault_path}"
+                f"{gloss_line}\n"
                 f"   原始逐句日志: {self.session_path}")

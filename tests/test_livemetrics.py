@@ -440,5 +440,21 @@ class SummaryStreamBlock(unittest.TestCase):
         self.assertNotIn("stream", _lines(p)[-1])
 
 
+class TermZhN(unittest.TestCase):
+    """⭐ #4 B2：`final(term_zh_n=…)` —— 给了就落盘、不给就不写（同 `lat` 的规矩）。"""
+
+    def test_term_zh_n_written_when_given(self):
+        log, p = _mk_log()
+        log.final("hello", "你好", "hello", term_zh_n=3)
+        log.close()
+        self.assertEqual(_lines(p)[-2]["term_zh_n"], 3)
+
+    def test_term_zh_n_absent_by_default(self):
+        log, p = _mk_log()
+        log.final("hello", "你好", "hello")
+        log.close()
+        self.assertNotIn("term_zh_n", _lines(p)[-2])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

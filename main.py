@@ -27,7 +27,7 @@ import fragment_merge
 from asr import load_asr
 import draft_engine
 import final_asr
-from translator import load_translator
+from translator import load_translator, select_term_zh, term_zh_map
 from cloud_translator import (DEFAULT_CTX_CHUNK, load_api_key,
                               load_translator as load_cloud_translator,
                               answer_user_content)
@@ -1541,8 +1541,19 @@ def run(args) -> None:
         except Exception as _e:                       # noqa: BLE001
             print(f"⚠ 转录词表拿不到（只影响术语召回）：{type(_e).__name__}: {_e}")
 
+    # ⭐ #4 B2（2026-10-17 作者拍板）：译名表 = `term_notes.json` 的 **basic 档** ∩ 本课术语表
+    #    （数据源与闸的全文说明见 `translator.term_zh_map`）。命中的「英文 — 中文」由
+    #    同一个纯函数（`translator.select_term_zh`）注入每句 prompt 的**变化段**：
+    #    云端定稿（两种布局）/ 云端草稿 / 本地定稿 / 本地草稿四处。不注入全表（A/B 结论）。
+    #    ⚠️ **fail-soft**：拿不到就空表（= 不注入，行为与开关关掉一致）；绝不影响开课。
+    #    ⚠️ 两个引擎喂**同一份**表 —— 降级到本地后译名不丢（同 `extra_terms` 那条纪律）。
+    term_zh = term_zh_map(args.glossary, args.course)
+    if term_zh:
+        echo(f"🔤 译名表：{len(term_zh)} 条（命中才注入；CLASSLIVE_TERM_ZH=0 可关）")
+
     local_tr = load_translator(args.llm, args.glossary, args.context,
-                               course=args.course, extra_terms=extra_terms)
+                               course=args.course, extra_terms=extra_terms,
+                               term_zh=term_zh)
     cloud_tr = None
     api_key_val = load_api_key(args.api_key)
     if args.engine in ("auto", "cloud"):
@@ -1551,7 +1562,8 @@ def run(args) -> None:
                                              args.glossary, args.context,
                                              course=args.course,
                                              extra_terms=extra_terms,
-                                             ctx_chunk=args.cloud_context)
+                                             ctx_chunk=args.cloud_context,
+                                             term_zh=term_zh)
             echo(f"☁ 引擎: {args.engine} (云端 {args.cloud_model})")
         else:
             echo("⚠ 未找到 DeepSeek API key(--api-key / DEEPSEEK_API_KEY / "
@@ -2251,6 +2263,10 @@ def run(args) -> None:
                 _idle_ms = (None if _prev_end is None
                             else round(max(0.0, time.monotonic() - _prev_end) * 1000.0, 1))
             _cloud0 = translator.uses_cloud
+            # ⭐ #4 B2：这一句**实际注入**的译名条数（量具用，`drain()` 转发进 .live.jsonl）。
+            #    与引擎注入共用同一个纯函数 + 同一份表（`select_term_zh` 内置开关）——
+            #    注入与记账不可能各算各的。翻译失败（异常）→ 0：模型什么都没看到。
+            _zh_n = 0
             try:
                 res = translator.fix_and_translate_stream(
                     sent, finals,
@@ -2258,6 +2274,7 @@ def run(args) -> None:
                     on_en=lambda d: streamq.put(("en", d, seg)))
                 en, zh = res.en_fixed, res.zh
                 finals.append(en)
+                _zh_n = len(select_term_zh(sent, term_zh))
             except Exception as e:                  # noqa: BLE001
                 echo(f"⚠ 翻译失败({str(e)[:50]}); 仅保留转录")
                 en, zh = "", ""                     # 无修正版/译文, 内容全在转录里
@@ -2272,13 +2289,16 @@ def run(args) -> None:
             #    ⭐ 3.9.8 ⑥：`_tr_last["end"]` 在这儿落（= 这次调用的结束时刻），`_tr_idle`
             #       与这条 `("final", …)` 一一对应（`drain()` 侧成对取走）。
             #       ⚠️ 测试模式关时**一次都不做**（连一次 `time.monotonic()` 都不花）。
+            #    ⭐ #4 B2：第 6 项 = 这句注入的译名条数（`term_zh_n`，同样只在双语档给；
+            #       `drain()` 转发给 `live.final`，老形状 len 守卫）。
             if tester is not None:
                 _tr_last["end"] = time.monotonic()
                 _tr_idle.append(_idle_ms)
             streamq.put(("final", en, zh, sent, seg,
                          _lt.done(seg_t0=seg_ended_at.get(seg),
                                   model=args.cloud_model if (_cloud0 and translator.uses_cloud)
-                                  else "local")))
+                                  else "local"),
+                         _zh_n))
             # 术语/专有名词: 命中术语表就把 (术语, 解析) 交给 UI —— 由 UI 决定
             # 什么时候展开(悬浮窗默认只列术语名, 点击才显示解析)。
             hits = notes.match(sent)
@@ -2936,16 +2956,19 @@ def run(args) -> None:
                         fn("💡 " + item[1], 15)
                     else:
                         fn("❓ 已标记 · 课后笔记里能找到这几句", 6)
-            elif item[0] == "final":                # ("final", en, zh, asr_raw[, seg[, lat]])
-                # ⚠️ `item[4]` / `item[5]` 都用 `len` 守卫：`("final", …)` 这条 tag
+            elif item[0] == "final":                # ("final", en, zh, asr_raw[, seg[, lat[, term_zh_n]]])
+                # ⚠️ `item[4]` / `item[5]` / `item[6]` 都用 `len` 守卫：`("final", …)` 这条 tag
                 #    有 3 个产出点，加字段是**加法**（下标 1–3 一个没动），老形状照样能读。
                 #    `item[5]` = 译文延迟 4 元组 `(zh_first_ms, zh_done_ms, seg_to_zh_ms,
                 #    tr_model)`（`tr_latency.TrTimer.done()` 的产物）——
                 #    ⚠️ **只有双语档那个产出点给**（见 `_emit`），其余两个是 `None`。
+                #    ⭐ #4 B2：`item[6]` = 这句注入的译名条数（`term_zh_n`）—— 同样只有双语档给。
                 _lat = item[5] if len(item) > 5 else None
+                _tzn = item[6] if len(item) > 6 else None
                 if live is not None:
                     live.final(item[1] or item[3], item[2], item[3],
-                               seg=int(item[4]) if len(item) > 4 else 0, lat=_lat)
+                               seg=int(item[4]) if len(item) > 4 else 0, lat=_lat,
+                               term_zh_n=_tzn)
                 # 先更新 fin_seg 再算 clear_draft: 屏上已是更新一段的草稿时, 旧段定稿不碰草稿槽
                 _clr = draft_view.on_final(item[4] if len(item) > 4 else None)
                 _seg_n = int(item[4]) if len(item) > 4 else 0

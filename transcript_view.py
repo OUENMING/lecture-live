@@ -93,6 +93,89 @@ def truncate_to_height(text: str, measure, max_h: float, *,
     return text[:lo].rstrip() + suffix
 
 
+def truncate_head_to_height(text: str, measure, max_h: float, *,
+                            prefix: str = ELLIPSIS, eps: float = 0.5) -> str:
+    """`truncate_to_height` 的镜像: **从开头**截、前面补 `prefix`, 留住**最新**的那几个词。
+
+    给 D 布局的**当前行英文**用: 草稿英文随老师说话一直往后长, 读者要看的是**刚说的**,
+    所以截掉的是开头(实时字幕的通行做法, 原型里叫「尾部显示」)。三条不变量与
+    `truncate_to_height` 逐条对应(放得下原样 / 结果恒以 `prefix` 开头 / 不改输入)。
+    尽量从词边界切: 切点往后最多挪 14 个字符找空格。"""
+    if measure(text) <= max_h + eps:
+        return text
+    if measure(prefix) > max_h + eps:
+        return prefix
+    # 高度对**后缀长度**单调不减 -> 二分找"最长的、加前缀后仍放得下"的后缀。
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if measure(prefix + text[len(text) - mid:]) <= max_h + eps:
+            lo = mid
+        else:
+            hi = mid - 1
+    cut = len(text) - lo
+    sp = text.find(" ", cut)
+    if 0 <= sp - cut < 14 and sp + 1 < len(text):
+        cut = sp + 1
+    return prefix + text[cut:].lstrip()
+
+
+# ---- D 布局（原地卡片流）----
+# 2026-10-17 作者在原型 v7 定稿（artifact 5atKbvKuKib8uBLTGwhR8x）。三件事:
+#   ① 草稿并进最底那一行（由 `caption_flow.caption_rows` 决定喂什么, 本模块只管画）;
+#   ② 新行**原地显影**（淡入 + 模糊→清晰, 零位移）, 老行照旧上推 —— 参考 Claude 桌面端
+#      `_grapheme-reveal`（opacity 0→1 + blur→0, 不位移）。新行晚 `D_ENTER_DELAY_S` 起跑,
+#      等被顶上去的那一行先让开（原型实测不等会叠 20–57px）。
+#   （原型还有一块垫在最底那一行后面的固定底板; 10-17 真窗口 A/B 后作者定: 不要。）
+#: 按**视觉层号**（层号减去还没走完的位移）给整行降亮度: 当前 1.0 → 上一句 0.72 → 更早 0.56。
+#: 数值取自原型的颜色表（中文 .98 / .68 / .55 的相对比例）。只在跟随态生效 —— 往回翻时全亮。
+D_DIM = (1.0, 0.72, 0.56)
+#: 当前行是**草稿**时中文再暗一档（原型 plainZh .72 / 定稿 .98）; 升级为定稿时按 STATE_S 提亮。
+D_DRAFT_ZH_DIM = 0.74
+D_ENTER_DELAY_S = 0.08
+D_ENTER_S = motion.MOVE_S - D_ENTER_DELAY_S          # 与位移同时走完
+D_BLUR_PX = 4.0
+#: 实时行**新出现的字**从这个透明度淡到 1（原型 v7 的 `dIns`: .2 → 1, 260ms）——
+#: 流式中文每次只来两三个字, 直接冒出来就是「跳字」; 淡进来读着是连续的。
+D_TYPE_FROM = 0.2
+D_TYPE_S = 0.26
+
+
+def carry_births(prev: str, births: list, display: str, now: float, *,
+                 min_run: int = 2) -> list:
+    """上一版每个字的出现时刻 → 新版每个字的出现时刻（新字记 `now`, 旧字原样带过去）。
+
+    按**字**对齐、忽略换行: 中文折行点会随句子变长挪动（`_shape_zh`）, 英文开头截断
+    每来一个词就挪一次 —— 字没变、只是位置变了, 不能当新字再淡一遍（Owen 10-17:
+    「没改词, 后半句还是刷新一下」）。对齐用 `SequenceMatcher`, 短于 `min_run` 的
+    巧合匹配（整句换掉时偶然相同的「的」）不算, 免得一句新话里零星几个字不淡。
+    """
+    import difflib
+    pc = [(c, b) for c, b in zip(prev, births) if c != "\n"]
+    keep = [i for i, c in enumerate(display) if c != "\n"]
+    dc = "".join(display[i] for i in keep)
+    out = [0.0] * len(display)
+    for i in keep:
+        out[i] = now
+    sm = difflib.SequenceMatcher(None, "".join(c for c, _ in pc), dc, autojunk=False)
+    for a, b, n in sm.get_matching_blocks():
+        if n >= min_run or (n and a == 0 and b == 0):
+            for k in range(n):
+                out[keep[b + k]] = pc[a + k][1]
+    return out
+
+
+def d_dim(x: float) -> float:
+    """视觉层号 → 亮度倍数（分段线性, 位移途中连续变化 —— 不跳亮度）。纯函数。"""
+    if x <= 0.0:
+        return D_DIM[0]
+    if x < 1.0:
+        return D_DIM[0] + (D_DIM[1] - D_DIM[0]) * x
+    if x < 2.0:
+        return D_DIM[1] + (D_DIM[2] - D_DIM[1]) * (x - 1.0)
+    return D_DIM[2]
+
+
 # ---- 双语行的竖排顺序 ----
 # True = 英文小字在上、中文大字在下(当前)   False = 反过来(2026-09-24 之前)
 #
@@ -261,6 +344,15 @@ class TranscriptView:
         self._merge_pending = 0     # 跨段半句合并待落地几次(见 note_merge / _paint)
         self._merge_deleted = None  # 被吞掉那一行在**合并前**的行号(LineLog.last_deleted)
         self._verbatim = False      # 行 = (大字, 小字) 原样, 不做中英对调(见 set_rows_verbatim)
+        # ---- D 布局（见模块头「D 布局」）----
+        self._d = False             # set_d_style 打开
+        self._zh_expected = True    # 宿主: 这一档有中文吗（只英 / 原文档 = False）
+        self._live_kind = "final"   # 实时行是草稿还是定稿（"draft" / "final"）
+        self._d_enter = False       # 这一次上滚是 D 的「原地显影」
+        self._lzd = 1.0             # 实时行中文的亮度倍数（草稿 0.74 / 定稿 1.0）, 带过渡
+        #: 实时行新字淡入: (槽位, "zh"/"en") -> (显示文本, 每个字的出现时刻)。空 = 没在淡。
+        self._type: dict = {}
+        self._lzd_from, self._lzd_to, self._lzd_t0 = 1.0, 1.0, None
 
         self._dirty = False
         self._urgent = False
@@ -323,7 +415,8 @@ class TranscriptView:
             self._add_slot()
 
     # ---- 对外: 数据 ----
-    def set_content(self, items, en: str, zh: str, live_visible: bool) -> None:
+    def set_content(self, items, en: str, zh: str, live_visible: bool,
+                    live_kind: str = "final") -> None:
         """**原子**写入历史 + 实时行, 只画一次。
 
         ⚠️ 必须原子。拆成 set_items() + set_live() 两次调用时, 两次绘制之间会出现
@@ -332,8 +425,52 @@ class TranscriptView:
           ② 实时行既在历史末尾又在实时位 -> 最新一句**重复**(finalize 时必现)
         这正是"定稿瞬间屏上多一行、最新句画两遍"的成因。
         """
+        self._set_live_kind(live_kind if live_visible else "final")
         self._set_items(list(items), (en, zh) if live_visible else None,
                         bool(live_visible), bulk=False)
+
+    # ---- 对外: D 布局 ----
+    def set_d_style(self, on: bool) -> None:
+        """打开 / 关掉 D 布局的画法（按层降亮 + 原地显影 + 新字淡入）。
+        数据怎么喂不归这里管（`caption_flow.caption_rows`）; 接管（答疑 / 纲要）期间
+        宿主照样开着它 —— D 的画法只在 `not _verbatim` 时生效。"""
+        on = bool(on)
+        if on == self._d:
+            return
+        self._d = on
+        self._end_roll()
+        for j, s in enumerate(self._slots):
+            if s["level"] is not None:
+                self._geom(j)
+        self.mark_dirty(urgent=True)
+
+    def set_zh_expected(self, on: bool) -> None:
+        """宿主告诉视图「这一档会有中文」（双语档 True; 只英 / 原文档 False）。"""
+        on = bool(on)
+        if on != self._zh_expected:
+            self._zh_expected = on
+            self.mark_dirty(urgent=True)
+
+    def _set_live_kind(self, kind: str) -> None:
+        kind = "draft" if kind == "draft" else "final"
+        if kind == self._live_kind:
+            return
+        self._live_kind = kind
+        to = D_DRAFT_ZH_DIM if kind == "draft" else 1.0
+        if self._reduce_motion() or not self._animate_ok():
+            self._lzd = self._lzd_from = self._lzd_to = to
+            self._lzd_t0 = None
+        else:
+            self._lzd_from, self._lzd_to, self._lzd_t0 = self._lzd, to, self._clock()
+
+    def _step_lzd(self) -> None:
+        e = motion.ease_out(motion.progress(self._lzd_t0, self._clock(), motion.STATE_S))
+        self._lzd = self._lzd_from + (self._lzd_to - self._lzd_from) * e
+        if e >= 1.0:
+            self._lzd_t0 = None
+        for j, s in enumerate(self._slots):
+            if s["level"] == 0:
+                self._geom(j)
 
     def replace_items(self, items) -> None:
         """**整体替换**内容(答案接管 / 退出接管), 不做追加记账。
@@ -562,6 +699,10 @@ class TranscriptView:
         新行入列的上滚也在这里逐帧推进(pump 每轮都调 tick)。"""
         if self._roll_t0 is not None:
             self._step_roll()
+        if self._lzd_t0 is not None:
+            self._step_lzd()
+        if self._type:
+            self._step_type()
         clip = self._scroll.contentView()
         cur = clip.bounds().origin.y
         if abs(cur - self._expected_origin) > MOVE_EPS:
@@ -606,6 +747,10 @@ class TranscriptView:
             return en, zh, False
         if zh:
             return self._shape_zh(zh, final=r < len(self._items)), en, True
+        if self._d and self._zh_expected and r >= len(self._items):
+            # D: 实时行的译文还没到 —— 英文留在上面的小字位、中文那格空着等（原型的「预留」）,
+            #    不把英文提成大字: 否则译文一到, 这一行的上下顺序和字号整个翻一次。
+            return "", en, True
         # 翻译关闭/失败时 zh 为空: 把英文提到大字行, 否则大字行空白
         return en, "", False
 
@@ -670,7 +815,12 @@ class TranscriptView:
         c = self._cache[slot_j]
         lbl = self._slots[slot_j][which]
         key_f = which + "_font"
-        if c.get(which) == text and c.get(key_f) is font:
+        # D: 当前行英文**从开头截**（见 `truncate_head_to_height`）; 同一串文本在实时行 /
+        #    历史行显示不同, 所以「是不是实时行」也进缓存键。
+        head = bool(which == "en" and text and self._d and not self._verbatim
+                    and self._live_visible and self._slots[slot_j]["level"] == 0)
+        if c.get(which) == text and c.get(key_f) is font and c.get("en_head") == (
+                head if which == "en" else c.get("en_head")):
             return
         if font is not None and lbl.font() != font:
             lbl.setFont_(font)
@@ -685,9 +835,19 @@ class TranscriptView:
             #    拿到的永远是原文。定稿行与草稿行(实时行, `final=False`)同一条路。
             self._note_overflow(lbl, text)
             display = self._fit_zh(lbl, text)
+        elif head:
+            display = self._fit_en_head(lbl, text)
         # 缓存存的是**原文**: 同一段译文重复回来仍然跳过重排(判据与改前逐字一致)。
         c[which] = text
         c[key_f] = font
+        if which == "en":
+            c["en_head"] = head
+        live = bool(self._d and not self._verbatim and self._live_visible
+                    and self._slots[slot_j]["level"] == 0)
+        if live and not self._reduce_motion() and self._animate_ok():
+            self._type_start(slot_j, which, lbl, display)
+            return
+        self._type.pop((slot_j, which), None)
         lbl.setStringValue_(display)
 
     def _fit_zh(self, lbl, text: str) -> str:
@@ -700,6 +860,111 @@ class TranscriptView:
                 text, lambda s: self._measure(s, w, lbl.font()), self._zh_h)
         except Exception:                    # noqa: BLE001 截断是显示层兜底, 坏了就交还 AppKit
             return text
+
+    # ---- D: 实时行新字淡入（原型 dIns）----
+    def _type_start(self, slot_j: int, which: str, lbl, display: str) -> None:
+        """记下每个字的出现时刻（对齐规则见 `carry_births`）。"""
+        old = self._type.get((slot_j, which))
+        prev = old[0] if old else lbl.stringValue()
+        births = old[1] if old else [0.0] * len(prev)
+        nb = carry_births(prev, births, display, self._clock(),
+                          min_run=2 if which == "zh" else 3)
+        self._type[(slot_j, which)] = (display, nb)
+        self._type_paint(slot_j, which)
+
+    def _type_paint(self, slot_j: int, which: str) -> None:
+        spec = self._type.get((slot_j, which))
+        if spec is None:
+            return
+        display, births = spec
+        lbl = self._slots[slot_j][which]
+        now = self._clock()
+        alphas = []
+        live = False
+        for b in births:
+            e = motion.ease_out(motion.progress(b, now, D_TYPE_S)) if b else 1.0
+            if e < 1.0:
+                live = True
+            # 量化到 1/12 档: 相邻同档的字拼成一段, 属性串只有几段
+            alphas.append(round((D_TYPE_FROM + (1.0 - D_TYPE_FROM) * e) * 12) / 12)
+        if not live:
+            self._type.pop((slot_j, which), None)
+            lbl.setStringValue_(display)
+            return
+        try:
+            from AppKit import (NSAttributedString, NSFontAttributeName,
+                                NSForegroundColorAttributeName, NSShadowAttributeName,
+                                NSColor, NSMutableAttributedString, NSParagraphStyleAttributeName,
+                                NSMutableParagraphStyle)
+            base = lbl.textColor() or NSColor.whiteColor()
+            attrs0 = {NSFontAttributeName: lbl.font()}
+            sh = lbl.shadow()
+            if sh is not None:
+                attrs0[NSShadowAttributeName] = sh   # 描边跟着, 否则淡入期间字会发糊
+            ps = NSMutableParagraphStyle.alloc().init()
+            ps.setLineBreakMode_(lbl.lineBreakMode())
+            ps.setAlignment_(lbl.alignment())
+            attrs0[NSParagraphStyleAttributeName] = ps
+            out = NSMutableAttributedString.alloc().init()
+            i = 0
+            n = len(display)
+            while i < n:
+                j = i
+                while j < n and alphas[j] == alphas[i]:
+                    j += 1
+                at = dict(attrs0)
+                at[NSForegroundColorAttributeName] = base.colorWithAlphaComponent_(
+                    base.alphaComponent() * alphas[i])
+                out.appendAttributedString_(
+                    NSAttributedString.alloc().initWithString_attributes_(display[i:j], at))
+                i = j
+            lbl.setAttributedStringValue_(out)
+        except Exception:                        # noqa: BLE001 淡入是锦上添花
+            self._type.pop((slot_j, which), None)
+            lbl.setStringValue_(display)
+
+    def _step_type(self) -> None:
+        for key in list(self._type):
+            self._type_paint(*key)
+
+    @property
+    def animating(self) -> bool:
+        """有没有逐帧推进的东西（宿主据此保持热档让步: 上滚 / 中文提亮 / 新字淡入）。"""
+        return bool(self._roll_t0 is not None or self._lzd_t0 is not None or self._type)
+
+    def _fit_en_head(self, lbl, text: str) -> str:
+        """实时行英文: 放不下就从开头截 +「…」（留住刚说的词）。量不出来就原样返回。"""
+        w = float(lbl.frame().size.width)
+        h = float(lbl.frame().size.height)
+        if w < 20.0 or h < 4.0:
+            return text
+        try:
+            return truncate_head_to_height(text, lambda t: self._measure(t, w, lbl.font()), h)
+        except Exception:                    # noqa: BLE001 显示层兜底
+            return text
+
+    # ---- D: 显影模糊 ----
+    def _set_blur(self, s, r: float) -> None:
+        """新行显影的模糊（半径 r px; 0 = 摘掉滤镜）。坏了就只剩淡入, 不影响功能。"""
+        s["blur"] = r
+        for key in ("zh", "en"):
+            lbl = s[key]
+            try:
+                if r <= 0.05:
+                    if lbl.layer() is not None and lbl.layer().filters():
+                        lbl.layer().setFilters_(None)
+                    continue
+                if not lbl.wantsLayer():
+                    lbl.setWantsLayer_(True)
+                lbl.setLayerUsesCoreImageFilters_(True)
+                from Quartz import CIFilter
+                f = CIFilter.filterWithName_("CIGaussianBlur")
+                f.setDefaults()
+                f.setValue_forKey_(r, "inputRadius")
+                lbl.layer().setFilters_([f])
+            except Exception:                # noqa: BLE001
+                s["blur"] = 0.0
+                return
 
     def _note_overflow(self, lbl, text: str) -> None:
         """把「文本超出档位行数」从**静默裁切**变成**可观测**。
@@ -782,15 +1047,32 @@ class TranscriptView:
             x = self._en_line_h()
             s["en"].setFrame_(((0.0, y + self._zh_h + self._gap - x), (w, self._en_h + x)))
             s["zh"].setFrame_(((0.0, y), (w, self._zh_h - x)))
+        entering = False
         if s.get("ghost"):
             # 幽灵: α 1→0（与尾句新文字 0→1 同一个时长、同一个起跑时刻 = 一次交叉淡换）。
             a = 1.0 - roll_fade_alpha(self._roll_t0 or 0.0, self._clock(), MERGE_FADE_S)
         else:
-            a = self._roll_alpha if self._roll_fade_lo <= level < (
-                self._roll_fade_lo + self._roll_fade_n) else 1.0
-        if s.get("alpha", 1.0) != a:
-            s["zh"].setAlphaValue_(a); s["en"].setAlphaValue_(a)
-            s["alpha"] = a
+            entering = self._roll_fade_lo <= level < (self._roll_fade_lo + self._roll_fade_n)
+            a = self._roll_alpha if entering else 1.0
+        a_en = a_zh = a
+        blur = 0.0
+        if self._d and not self._verbatim:
+            # 亮度跟着**视觉**位置走: 被顶上去的行一边上移一边变暗, 不在某一帧突然暗一档。
+            vis = level - (off / self._row_h if self._row_h > 0 else 0.0)
+            dim = d_dim(vis) if self._follow else 1.0
+            a_en = a_zh = a * dim
+            if level == 0 and self._live_visible:
+                a_zh *= self._lzd
+            if entering and self._d_enter and not self._reduce_motion():
+                blur = D_BLUR_PX * (1.0 - a)
+        # `alpha` = 入场 / 淡换的那个 α（判据读它）; D 的按层降亮叠在上面, 实际写进标签的
+        # 一对值另记在 `alpha_vis`（老布局里两者相等）。
+        s["alpha"] = a
+        if s.get("alpha_vis", (1.0, 1.0)) != (a_en, a_zh):
+            s["zh"].setAlphaValue_(a_zh); s["en"].setAlphaValue_(a_en)
+            s["alpha_vis"] = (a_en, a_zh)
+        if s.get("blur", 0.0) != blur:
+            self._set_blur(s, blur)
 
     # ---- 新行入列: 整块上滚一个行高 ----
     # 「定稿替换草稿」那一下: 实时行出现(或一句定稿进来)时, 老行原地上跳一个行高、
@@ -890,7 +1172,11 @@ class TranscriptView:
         # 位移: `_roll_from` 在 Reduce Motion / 落位后恒为 0, 所以这一步对那一支是空操作。
         # 半句合并那一支的 `_roll_from` 是**负数** —— 同一行代码, 方向相反。
         self._roll_off = self._roll_from * (1.0 - e)
-        if self._roll_fade_n:
+        if self._roll_fade_n and self._d_enter:
+            # D: 新行晚 D_ENTER_DELAY_S 起跑（等被顶上去的那行先让开）, 与位移同时走完。
+            self._roll_alpha = roll_fade_alpha(self._roll_t0 + D_ENTER_DELAY_S,
+                                               self._clock(), D_ENTER_S)
+        elif self._roll_fade_n:
             # ⭐ A5 / 合并: 淡入只走 `_roll_fade_s`, 先于位移到 1, 之后保持不透明。
             self._roll_alpha = roll_fade_alpha(self._roll_t0, self._clock(),
                                                self._roll_fade_s)
@@ -905,6 +1191,7 @@ class TranscriptView:
         self._roll_off_lo = 0
         self._roll_fade_lo, self._roll_fade_n, self._roll_alpha = 0, 0, 1.0
         self._roll_fade_s = NEW_LINE_FADE_S
+        self._d_enter = False
         self._end_ghost()
         if was:
             self._regeom()
@@ -929,6 +1216,7 @@ class TranscriptView:
         if s["zh"].stringValue():
             s["zh"].setStringValue_(""); s["en"].setStringValue_("")
         self._cache[j]["zh"] = ""; self._cache[j]["en"] = ""
+        self._type.pop((j, "zh"), None); self._type.pop((j, "en"), None)
         if not s["hidden"]:
             s["zh"].setHidden_(True); s["en"].setHidden_(True)
             s["hidden"] = True
@@ -936,9 +1224,12 @@ class TranscriptView:
         s["en_top"] = None
         # ⚠️ 幽灵标记必须清掉: 槽位会被改派给别的行, 带着它下一行就永远不参与位移了
         s["ghost"] = False
-        if s.get("alpha", 1.0) != 1.0:             # 槽位会被改派给别的行, 别把半透明带过去
+        if s.get("alpha_vis", (1.0, 1.0)) != (1.0, 1.0):   # 槽位会被改派给别的行, 别把半透明带过去
             s["zh"].setAlphaValue_(1.0); s["en"].setAlphaValue_(1.0)
-            s["alpha"] = 1.0
+        s["alpha"] = 1.0
+        s["alpha_vis"] = (1.0, 1.0)
+        if s.get("blur", 0.0):
+            self._set_blur(s, 0.0)
 
     def _paint(self) -> None:
         clip = self._scroll.contentView()
@@ -1008,11 +1299,21 @@ class TranscriptView:
                 #    实时行**这次才出现**时它自己也是最底那一行新的, 名单从 0 起。
                 #    ⚠️ 位移量仍然是 `grew`(老内容被顶高的格数), 与名单长度无关。
                 d_items = items_now - items_before
-                if live_now and not live_before:
+                if self._d and not self._verbatim:
+                    # D: 新的永远是**最底那 grew 行**（草稿并进了实时行, 上一段还在流的那行
+                    #    被挪进 items —— 「历史多了一行」此时不代表它是新内容）。
+                    #    新行原地显影、不位移; 只有被顶上去的老行走位移。
+                    self._start_roll(grew, 0, grew)
+                    if self._roll_t0 is not None:
+                        self._d_enter = True
+                        self._roll_off_lo = grew
+                        self._regeom()
+                elif live_now and not live_before:
                     lo, n = 0, d_items + 1
+                    self._start_roll(n, lo, grew)
                 else:
                     lo, n = live_now, d_items
-                self._start_roll(n, lo, grew)
+                    self._start_roll(n, lo, grew)
         if merge:
             # 半句合并: 位移 + 淡换(未跟随时**只**淡换 —— 视线不许动)。
             self._start_merge_roll(live_now, slide=self._follow)

@@ -28,6 +28,7 @@ import motion
 import panel
 import objc_own
 import text_diff
+import caption_flow
 
 try:
     from AppKit import NSRunLoop, NSDate
@@ -51,7 +52,14 @@ from transcript_view import LineLog, TranscriptView
 #    maxLines=1 + WordWrapping: 第二行被裁掉且没有省略号。
 #    故: 多行标签(中文行/提升的英文行/展开态 💡)一律 WordWrapping;
 #    单行标签(英文小字/收回态 💡)才用 TruncatingTail 拿省略号。
-VISIBLE_ROWS = 3                                  # 收回态显示 3 句(2 历史 + 1 当前)
+# ---- D 布局（2026-10-17 作者定版, 原型 artifact 5atKbvKuKib8uBLTGwhR8x v7）----
+# 草稿不再单独放在面板底部, 而是并进转录区最底那一行（`caption_flow.caption_rows` 决定喂什么;
+# 怎么画见 `transcript_view` 的「D 布局」）。`CLASSLIVE_LAYOUT=classic` 退回老布局。
+LAYOUT_D = os.environ.get("CLASSLIVE_LAYOUT", "d").strip().lower() != "classic"
+#: D: 转录区与术语行之间留的缝。
+D_PIN_TAIL = 8.0
+# 收回态显示几句: 老布局 2 历史 + 1 当前（草稿栏另占 71pt）; D 把草稿栏的高度还给转录区 → 4 句, 面板总高几乎不变。
+VISIBLE_ROWS = 4 if LAYOUT_D else 3
 WIDTH = 660.0
 PAD = 16.0
 ROW_EN_H = 18.0                                   # 每行英文小字
@@ -100,6 +108,8 @@ def _pinned(gloss_h: float) -> float:
     💡 会随展开/收回改变行数, 所以它是参数而非常量 —— 面板总高才不会算错。
     输入行必须算进来: _pinned 同时喂 PINNED_H / BASE_H / _apply_mode 的总高重算,
     漏掉任何一处, 面板高度与实际内容就会错位(输入框被裁掉或盖住滚动区)。"""
+    if LAYOUT_D:
+        return INPUT_H + INPUT_GAP + gloss_h + D_PIN_TAIL    # D: 没有草稿栏
     return INPUT_H + INPUT_GAP + gloss_h + 4 + DRAFT_H + DRAFT_ZH_H + 4
 
 
@@ -112,6 +122,7 @@ HEIGHT = BASE_H + VISIBLE_ROWS * ROW_H            # = 391.0
 #    发现它们还写着改行数之前的旧值（98/152/362，那是 1 行草稿时代）。数错了会让人
 #    拿错误的基准去核对布局。**改常量时顺手重算这三个注释**（当场这么算出来的：
 #    26+6+20+4+32+35+4 = 127；12+127+8+34 = 181；181+3×70 = 391）。
+#    ⚠️ 上面三个注释是**老布局**的值；D 布局（默认）是 26+6+20+8 = 60；12+60+8+34 = 114；114+4×70 = 394。
 
 # ---- 用户可缩放 ----
 # 行高**随宽度变**: 窄窗里中文一行装不下, 需要更多行才不吞字。
@@ -1301,6 +1312,7 @@ class Overlay:
             measure=_measure_text_h,
             wrap_zh=lambda t, w, final, _f=f_zh[0]: _wrap_zh(t, w, _f, final))
         self._tv.set_collapsed(True)      # 初始收回态: 滚轮必须从一开始就被吞掉
+        self._tv.set_d_style(LAYOUT_D)
         # 载入的宽度可能是窄窗(上次拖过) -> 立刻按它定行尺寸, 否则会先用 2 行的
         # 默认尺寸画一帧, 再跳成 4/5 行。默认宽度下这个调用是空操作。
         self._apply_row_metrics(self._width)
@@ -3296,6 +3308,12 @@ class Overlay:
         拿盒子配额(`box_h / ROLL_LINES`)当行高现在**恰好**也对(两者之间没有字符串会
         落进去), 但一改余量或加到第三行就判错 —— 而判错的后果正是"静默吞行"。
         """
+        if LAYOUT_D:
+            # D: 没有草稿栏 —— 草稿在转录区最底那一行（_render 喂 caption_flow）。
+            if self._draft_shown or self._draft_lbl.stringValue() or self._draft_zh.stringValue():
+                self._draft_lbl.setStringValue_(""); self._draft_zh.setStringValue_("")
+                self._draft_shown = False
+            return
         # 定稿流式时藏草稿栏（防同一句出现两次）；但草稿已是更新一段的就照常显示（main 判）
         active = not self._streaming or self._draft_over
         w = max(1.0, self._width - 2 * PAD)
@@ -3448,7 +3466,8 @@ class Overlay:
         有 → 让步保持热档 —— 屏幕刷新周期 `_hot_wait_s()`（120 Hz 上 = 8.33 ms，与 3.9.7
         之前写死的 8 ms 同为「一屏一帧」→ 动效顺滑度零变化）；
         没有 → `PUMP_IDLE_LONG_S`。⭐ 清单（**漏一个 = 那个动画被拖慢**）：
-          ① 转录区上滚 / 半句合并位移 —— `_tv._roll_t0 is not None`（`_step_roll` 每帧推）
+          ① 转录区上滚 / 半句合并位移 / D 布局的中文提亮与新字淡入 —— `_tv.animating`
+             （`tick` 每帧推）
           ② 草稿「让位」淡出 —— `_draft_fade_t0 is not None`（`_render_draft` 每帧推）
           ③ 草稿「改字」淡换 —— `_draft_rev` 非空（`_draft_rev_paint` 每帧推）
           ④ 主窗有待 flush 的渲染 —— `_dirty` / `_urgent`（草稿上屏、流式增量、
@@ -3466,7 +3485,7 @@ class Overlay:
            chip 过渡由用户点击驱动（那一轮本来就在热档）。
         """
         return bool(
-            self._tv._roll_t0 is not None
+            self._tv.animating                    # 上滚 / D 的中文提亮 / D 的新字淡入
             or self._draft_fade_t0 is not None
             or self._draft_rev
             or self._dirty or self._urgent
@@ -4467,10 +4486,21 @@ class Overlay:
         else:
             # 流式中英文行用 ASR 原句占位（修正版的 EN 在 ZH 之后才来，`finalize` 时整句换上）；
             # ⚠️ 不往 `_cur_en` 里拼 —— `stream_en` 是追加的，拼进去会和修正版粘在一起。
-            _en = (self._cur_en_seed or self._cur_en) if self._streaming else self._cur_en
-            self._tv.set_content(
-                self._history, _en, self._cur_zh,
-                bool(self._streaming or self._cur_zh or self._cur_en))
+            if LAYOUT_D:
+                # D: 草稿并进最底那一行（四种组合 + 草稿桥, 见 caption_flow 文件头）
+                r = caption_flow.caption_rows(
+                    self._history, cur_en=self._cur_en, cur_zh=self._cur_zh,
+                    seed_en=self._cur_en_seed, streaming=self._streaming,
+                    draft=self._draft, draft_zh=self._draft_zh_val,
+                    draft_over=self._draft_over)
+                self._tv.set_zh_expected(self._trans_mode == "both")
+                self._tv.set_content(r.items, r.live_en, r.live_zh, r.live_visible,
+                                     r.live_kind)
+            else:
+                _en = (self._cur_en_seed or self._cur_en) if self._streaming else self._cur_en
+                self._tv.set_content(
+                    self._history, _en, self._cur_zh,
+                    bool(self._streaming or self._cur_zh or self._cur_en))
         # 草稿与 💡 术语解析钉在面板底部, 不参与滚动
         self._render_draft()
         # 术语行 / ❓ 点拨换内容时淡换（2026-10-14 动效一轮：原来一下跳过去）

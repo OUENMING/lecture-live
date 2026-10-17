@@ -18,6 +18,11 @@
    Reduce Motion 一律**打桩**：真机开着它时，A5 的位移支路整条不跑，判据会假绿。
 """
 from __future__ import annotations
+import os
+# 本文件钉的是**老布局**（底部单独草稿栏 + 新行从草稿处升上来）的行为; D 布局（默认, 2026-10-17）
+# 的判据在 tests/test_caption_flow.py 与 tests/test_d_layout.py。老布局仍是 `CLASSLIVE_LAYOUT=classic`
+# 的退路, 删它之前这些判据照跑。⚠️ 必须在 import overlay / transcript_view 之前设。
+os.environ.setdefault("CLASSLIVE_LAYOUT", "classic")
 
 import math
 import pathlib

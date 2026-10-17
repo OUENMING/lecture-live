@@ -243,6 +243,36 @@ class TestNoFalsePositives(unittest.TestCase):
                          "两条断言只有一条被核了")
 
 
+class TestPickFunction(unittest.TestCase):
+    """⚠️ 两次生成的产物上都出现了同一个假修正：把"平均成本最小"的断言拿去核 MC'。"""
+
+    def test_中文主语优先于句子里顺带提到的函数(self):
+        rev = {"sections": [{"example": {"title": "📖 Exercise 5",
+                                         "prompt": "TC(Q)=Q^3-12Q^2+60Q",
+                                         "steps": [{"text": "AC(Q)=TC(Q)/Q=Q^2-12Q+60"},
+                                                   {"text": "MC(Q)=3Q^2-24Q+60"},
+                                                   # ⚠️ 这句话里**只有** ASCII 的 `MC`，
+                                                   #    主语是中文的「平均成本」—— 映射
+                                                   #    一去掉，判据就会拿 MC' 去核它。
+                                                   {"text": "由 MC 与平均成本相等解出 Q=6；"
+                                                            "在 Q=6 处平均成本最小。"}],
+                                         "answer": "Q=6"}}]}
+        rows = nm.check_review(rev)
+        bad = [r for r in rows if r["status"] == "mismatch"]
+        self.assertFalse(bad, f"又拿 MC 去核 AC 的断言了：{bad}")
+        hit = [r for r in rows if "平均成本最小" in r["claim"]]
+        self.assertTrue(hit, rows)
+        self.assertIn("AC'(", hit[0]["how"], hit[0])
+
+    def test_平均成本真的写错时照样报(self):
+        rev = {"sections": [{"example": {"title": "📖 Exercise 5", "prompt": "TC(Q)=Q^3-12Q^2+60Q",
+                                         "steps": [{"text": "AC(Q)=Q^2-12Q+60"},
+                                                   {"text": "使平均成本最小的产量为 Q=4。"}],
+                                         "answer": "Q=4"}}]}
+        rows = nm.check_review(rev)
+        self.assertTrue([r for r in rows if r["status"] == "mismatch"], rows)
+
+
 class TestMerge(unittest.TestCase):
     def test_机械核优先(self):
         det = [{"claim": "AC(2.89)=233.01", "status": "mismatch", "how": "机械", "recomputed": "x"}]

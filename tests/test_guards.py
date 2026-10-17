@@ -194,6 +194,30 @@ class Reconcile(unittest.TestCase):
         self.assertIsNone(nl.Poly({1: 1, -1: 2}).div_var())
 
 
+class Caliber(unittest.TestCase):
+    """⚠️ 同一节课连跑两次：一次有 AVC 对照、一次没有（作者第 2 轮验收点名要它）。"""
+
+    def test_缺了就按固定句式补上(self):
+        rev = {"sections": [{"heading": "1. 停产价格（Shutting Down Price）", "ts": "13:16",
+                             "prose": ["停产价格是价格临界点。"]}]}
+        out, added, warns = ng.ensure_caliber(rev)
+        body = " ".join(out["sections"][0]["prose"])
+        self.assertIn("AVC", body)
+        self.assertIn("break-even", body)
+        self.assertTrue(added and warns)
+
+    def test_已经写了就不动(self):
+        rev = {"sections": [{"heading": "停产价格", "prose": ["标准理论中停产价格是 AVC 的最低点。"]}]}
+        out, added, _w = ng.ensure_caliber(rev)
+        self.assertEqual(added, [])
+        self.assertEqual(out["sections"][0]["prose"], ["标准理论中停产价格是 AVC 的最低点。"])
+
+    def test_不涉及停产价格的节不补(self):
+        rev = {"sections": [{"heading": "三次函数求导", "prose": ["多项式逐项求导。"]}]}
+        _out, added, _w = ng.ensure_caliber(rev)
+        self.assertEqual(added, [])
+
+
 class Wiring(unittest.TestCase):
     def test_三步都在复习层里接线了(self):
         src = pathlib.Path(__file__).resolve().parent.parent.joinpath("obsidian_writer.py").read_text()
@@ -201,6 +225,7 @@ class Wiring(unittest.TestCase):
         self.assertIn("note_guards.scrub", src)
         self.assertIn("note_guards.quote_check", src)
         self.assertIn("note_ledger.block", src, "账本没喂进 prompt")
+        self.assertIn("note_guards.ensure_caliber", src, "口径对照没接线")
 
     def test_prompt_里有两条纪律(self):
         import note_v2

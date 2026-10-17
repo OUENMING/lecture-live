@@ -1051,6 +1051,7 @@ class ObsidianWriter:
         for fn, label in ((lambda r: note_ledger.reconcile(r),
                            "更正账本核对"),
                           (lambda r: note_guards.scrub(r), "猜测句清理"),
+                          (lambda r: note_guards.ensure_caliber(r), "停产价格口径"),
                           (lambda r: note_guards.quote_check(
                               r, materials=self._materials,
                               transcript="\n".join(

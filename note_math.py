@@ -238,6 +238,13 @@ def _fmt(v: float) -> str:
     return f"{v:.4g}" if abs(v) >= 1e-6 else "0"
 
 
+#: 中文说法 → 函数名。⚠️ 2026-10-17 两次生成的产物上都抓到一个假修正：
+#:   「令 MC=AC 得 q=6，使**平均成本**最小的产量为 q=6」被拿去核 `MC'(6)≠0` ——
+#:   因为句子里同时出现了 MC 与 AC，而断言的主语是"平均成本"。中文的学科词是**更强的信号**。
+_ZH_FUNC = (("平均可变成本", "AVC"), ("平均成本", "AC"), ("边际成本", "MC"),
+            ("总成本", "TC"), ("总收益", "TR"))
+
+
 def _pick(fdefs: dict, text: str):
     """这条断言说的是哪个函数。
 
@@ -245,6 +252,9 @@ def _pick(fdefs: dict, text: str):
        当前的函数表里就返回 `None`（宁可"未核对"，不许拿另一个函数来算）。
        只有**完全没有函数名**时才允许"本单元只定义了一个函数"的推断。
     """
+    for zh, en in _ZH_FUNC:
+        if zh in text and en in fdefs:
+            return en                 # 中文学科词优先（见 `_ZH_FUNC` 的说明）
     hits = [n for n in fdefs
             if re.search(rf"(?<![A-Za-z]){re.escape(n)}(?![A-Za-z])", text)]
     if hits:

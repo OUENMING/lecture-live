@@ -126,6 +126,34 @@ def scrub(review: dict) -> tuple:
     return out, removed, warns
 
 
+# ---------------------------------------------------------------- 停产价格口径
+CALIBER_LINE = ("⚠ 口径对照（📚）：标准教科书把**停产价格**定义为平均可变成本（AVC）的最低点，"
+                "而把 AC 的最低点叫**盈亏平衡价（break-even price）**；本课官方材料（📖）"
+                "按「AC 最低点」定义，考试按本课口径答题。")
+_SHUTDOWN = re.compile(r"停产价格|停业价格|shutting down|shut down")
+_HAS_AVC = re.compile(r"AVC|平均可变成本")
+
+
+def ensure_caliber(review: dict) -> tuple:
+    """涉及停产价格的节**必须**有一句 AVC 口径对照 —— 没有就补上（固定一句）。
+
+    ⚠️ 实测（同一节课连跑两次）：一次生成了对照、一次没有 —— 作者第 2 轮验收
+       点名要这句，所以它不能靠模型的自觉。补的是**理论对照**（📚 教科书口径 vs
+       本课 📖 口径），不是新事实，所以可以机械补。
+    """
+    out = copy.deepcopy(review)
+    added: list = []
+    for s in (out.get("sections") or []):
+        blob = " ".join([str(s.get("heading") or "")] + [str(x) for x in (s.get("prose") or [])]
+                        + [str((s.get("example") or {}).get("prompt") or "")])
+        if not _SHUTDOWN.search(blob) or _HAS_AVC.search(blob):
+            continue
+        s.setdefault("prose", [])
+        s["prose"] = list(s["prose"]) + [CALIBER_LINE]
+        added.append(str(s.get("heading") or ""))
+    return out, added, ([f"{len(added)} 节缺 AVC 口径对照，已按固定句式补上"] if added else [])
+
+
 # ---------------------------------------------------------------- 引号核
 def _sources(materials, transcript: str) -> str:
     blob = str(getattr(materials, "_blob", "") or "")

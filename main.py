@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from capture import load_source, SR, SilenceWatch
 from vad import Segmenter
 import draft_policy
+import stream_gate
 from draft_translate import DraftTranslator, DraftView
 import livemetrics
 import tr_latency
@@ -1859,6 +1860,33 @@ def run(args) -> None:
     _QUIT = object()
     busy = {"on": False}          # 定稿线程正在处理一句(ASR+LLM), 冲刷等待要等它归零
 
+    # ---- Soniox 实时识别（`stream_asr.py`）----
+    # 能连上就用它出草稿 / 定稿；连不上（或压根没建）→ 本地流水线照旧，一个字节都不变。
+    # ⚠️ 判据全在 `stream_gate.start_ok()`（单测钉着）；这里只负责「建 / 不建」。
+    sealedq: "queue.Queue" = queue.Queue()      # `on_sealed` 只往这里入队（Soniox 收线程）
+    _wake_fw = threading.Event()                # 叫醒 `final_worker`：sealedq / finalq 有货
+    stream = None
+    if stream_gate.start_ok(passcode=api_key_val, cloud_ok=_cloud_asr_ok()):
+        try:
+            import stream_asr
+            from translator import course_term_list, course_title
+
+            def _sealed_in(s, _q=sealedq, _ev=_wake_fw):
+                # ⚠️ 这是 Soniox **后台收线程**在调：只许入队 + 叫醒，绝不碰 `_emit`/UI。
+                _q.put(s)
+                _ev.set()
+
+            stream = stream_asr.StreamASR(
+                passcode=api_key_val,
+                terms=course_term_list(args.glossary, args.course),
+                general=course_title(args.glossary, args.course),
+                on_sealed=_sealed_in)
+            echo("🎧 实时识别: Soniox（连不上会自动退回本地）")
+        except Exception as e:                                 # noqa: BLE001
+            echo(f"⚠ 实时识别起不来，本节课走本地：{type(e).__name__}: {e}")
+            stream = None
+    gate = stream_gate.StreamGate(stream, sr=SR)
+
     # ---- 问答线程状态(Phase 2) ----
     # 一节课一条线程: 一个**冻结的转录快照** + 一个只追加的 turns 列表。
     # ⚠️ 转录快照必须是 `list(finals)` 的拷贝: finals 由定稿线程持续 append,
@@ -1900,6 +1928,7 @@ def run(args) -> None:
         """音频结束那一刻调：返回刚结束那一段的编号，并把"当前段"推进到下一段。"""
         k = seg_gen["n"]
         seg_gen["n"] = k + 1
+        gate.mark()                      # Soniox 那边同一刻开新段（段号对齐，见 stream_gate）
         seg_ended_at[k] = time.monotonic()
         if live is not None:
             live.segment_end(k)
@@ -2195,6 +2224,22 @@ def run(args) -> None:
     def final_worker():
         EMPTY = object()
         while running.is_set():
+            # 0) Soniox 封口句：**先于** `finalq` 取（收尾时哨兵投在 `finalq` 里，
+            #    先看哨兵就会 break，`sealedq` 里剩下的句子全丢）。
+            #    ⚠️ `_emit` 只在这个线程里被调 —— 原来那些调用者 + 这一处，单线程纪律。
+            if gate.on:
+                while True:
+                    try:
+                        _s = sealedq.get_nowait()
+                    except queue.Empty:
+                        break
+                    if not _s.text:
+                        continue
+                    busy["on"] = True        # 冲刷等待要看它（`all_settled` 的 busy）
+                    try:
+                        _emit(_s.text, gate.seg_of(_s.end_s))
+                    finally:
+                        busy["on"] = False
             # 1) 定稿优先
             try:
                 buf = finalq.get_nowait()
@@ -2207,6 +2252,15 @@ def run(args) -> None:
                 #    空闲时 5 次/秒空醒）。carry 挂着时按它的**剩余期限**醒来（不改变
                 #    段尾挂起的时序：原来最坏也要等 0.2 s 才发现到期，这里更准）。
                 _wait = CARRY_MAX_S - (time.monotonic() - carry["since"]) if carry["text"] else 1.0
+                if gate.on:
+                    # ⚠️ Soniox 模式下这种阻塞得能被**封口句**叫醒（`on_sealed` 在后台
+                    #    线程里 set）—— 否则一句封好的话要在队列里干等满 1 s 才上屏。
+                    #    生产者（`_sealed_in` / `_utterance_end` / 收尾的 `_QUIT`）都会 set。
+                    _wake_fw.wait(max(0.0, _wait))
+                    _wake_fw.clear()
+                    if carry["text"] and time.monotonic() - carry["since"] >= CARRY_MAX_S:
+                        _force_emit_carry()
+                    continue
                 try:
                     buf = finalq.get(timeout=max(0.0, _wait))
                 except queue.Empty:
@@ -2296,15 +2350,77 @@ def run(args) -> None:
         #    定稿翻译**不在这里** —— 它照常，一条都不少。
         paused=_draft_tr_paused)
 
+    # ---- Soniox 草稿线程（本地那半边由 `partial_worker` 管，它不参与）----
+    # ⚠️ `partial_worker` 阻塞在 `latest.take()`，Soniox 模式下**没有东西进 `latest`**
+    #    （两道闸关着）—— 所以另起一条轻线程按 0.15 s 轮询 `draft_text()`，变了才入队。
+    # 元组形状与本地路径**逐字一致**（7 元组），引擎名 `soniox`；
+    # `buf_s` = 本段已有多少秒音频（`gate.buf_s()`，与本地 `len(buf)/SR` 同口径）。
+    # ⚠️ 窗口不可见时**不放草稿**（与本地同规矩）；不记 `draft_skipped` —— 那个数记的是
+    #    "跳过的识别份数"，轮询次数没有对应关系，记进去只会把指标弄脏。
+    _drafts_done = threading.Event()
+
+    def stream_draft_worker():
+        _policy = os.environ.get("CLASSLIVE_DRAFT_TRIGGER", "novel").strip() or "novel"
+        if _policy not in ("legacy", "clause", "novel"):
+            _policy = "novel"
+        last_t, last_seg = "", None
+        prev_t = ""                      # 上一次的草稿原文（`clause` 档自己派生 append_only）
+        last_tr, last_len, last_sent = 0.0, 0, ""
+        seq = 0
+        while running.is_set() and not _drafts_done.is_set():
+            time.sleep(0.15)
+            if _ui_invisible():
+                continue
+            try:
+                t = gate.draft()         # 没活 / 没货 -> ""
+                if not t:
+                    continue
+                _seg = gate.draft_seg(seg_gen["n"])   # 取当前段；本段已封过句 -> 下一号（见 draft_seg）
+                if _seg != last_seg:     # 新段：上一段的"最后一句"不能拿来去重
+                    last_seg, last_t = _seg, ""
+                if t == last_t:
+                    continue
+                last_t = t
+                _now = time.monotonic()
+                drafts.put((t, t, gate.buf_s(), 0.0, _seg, _now, stream.ENGINE))
+                # 草稿译文照旧（DraftTranslator 独立线程）；节流判据与本地路径同一份
+                # `draft_policy`（只是这条路上没有草稿模型，`compute_s` 恒 0）。
+                if trans["mode"] == "both":
+                    _nw = len(t.split())
+                    _ok = draft_policy.should_translate(
+                        _policy, now=_now, last_tr=last_tr, n_words=_nw,
+                        last_len=last_len, text=t, prev_text=prev_t,
+                        sent_text=last_sent)
+                    prev_t = t
+                    if _ok:
+                        last_tr, last_len, last_sent = _now, _nw, t
+                        seq += 1
+                        draft_tr.submit(seq, _seg, strip_dangling(t))
+            except Exception as e:                             # noqa: BLE001
+                echo(f"⚠ 实时草稿失败: {e}")
+
+    def _on_partial(buf):
+        """`Segmenter` 的每份进行中缓冲。
+
+        ⚠️ Soniox 在出词（`gate.allow_local()` 为假）时**本地草稿整条不跑** —— 不入
+           `latest` 就等于不喂草稿模型（省一次推理，也避免和 Soniox 出两份草稿）。
+        """
+        if gate.allow_local():
+            latest.put(buf, seg_gen["n"])
+
     def _utterance_end(buf):
         k = _open_segment()
         # ⭐ 第 4 项：本段音频时长（跨段间隔 gap 的一半输入，见 `_merge_gap`）。
         seg_dur[k] = len(buf) / SR
-        finalq.put((buf, k))
-        latest.put_end(buf, k)          # 草稿线程据此给这一段收尾（见 partial_worker）
+        # ⚠️ 两道闸：Soniox 活着时本地定稿队列**和**草稿收尾都不入队（本地 ASR 不跑）。
+        #    退回后 `gate.allow_local()` 立刻为真 -> 从**下一段**起本地照常。
+        if gate.allow_local():
+            finalq.put((buf, k))
+            _wake_fw.set()               # Soniox 模式下 `final_worker` 可能在 Event 上等
+            latest.put_end(buf, k)       # 草稿线程据此给这一段收尾（见 partial_worker）
 
     seg = Segmenter(
-        on_partial=lambda buf: latest.put(buf, seg_gen["n"]),
+        on_partial=_on_partial,
         # ⭐ 段落**真正结束**的那一刻就取段号，随 `finalq` 一路带到定稿 —— 现场采集的分组靠它。
         #    ⚠️ 不这么做就得等定稿上屏才自增，那比段落结束晚 2–4 秒（Whisper + LLM）。
         on_utterance_end=_utterance_end,
@@ -2312,6 +2428,12 @@ def run(args) -> None:
         #    只读草稿线程最近一次放下的元组，音频线程里调也不阻塞；段号不对（草稿还没跟上新段）→ ()。
         sentence_ends=lambda: draft.sentence_ends(seg_gen["n"]),
     )
+    # ⭐ 音频开始**之前**给 Soniox 打一次基准段号（本地第 0 段 = 流里的段 1）。
+    #    ⚠️⚠️ 不能省：`seg_for_audio()` 对"第一个 mark 之前的音频"返回**当时的 `_seg`**
+    #    （`seg or self._seg`）—— 而 `_seg` 会随着后面的 mark 一直涨。第一段那句要是
+    #    封口晚于下一次开段，就会按"当时的段数"算出一个偏大的段号（归错段）。
+    #    先打一个采样位置 0 的点，从此每段边界都是"开始采到多少样本"，映射单调。
+    gate.mark()
 
     # ---- 专有名词查询线程(网络请求, 异步且缓存, 不影响主链路) ----
     def proper_worker():
@@ -2501,7 +2623,12 @@ def run(args) -> None:
     t5 = threading.Thread(target=draft_tr.run, args=(running,), daemon=True, name="draft-tr")
     t6 = threading.Thread(target=hint_worker, daemon=True, name="lost-hint")
     t7 = threading.Thread(target=merge_worker, daemon=True, name="frag-merge")
+    # Soniox 草稿轮询：**只在真建了 StreamASR 时**才起（没建 = 与改前逐字一致）。
+    ts = (threading.Thread(target=stream_draft_worker, daemon=True, name="stream-draft")
+          if gate.on else None)
     t1.start(); t2.start(); t4.start(); t5.start(); t6.start(); t7.start()   # 问答不需要 key 就能起步
+    if ts is not None:
+        ts.start()
     if api_key_val:                               # (没 key 时它只回一句说明)
         t3.start()
 
@@ -2821,6 +2948,12 @@ def run(args) -> None:
         while running.is_set() and not stopping.is_set():
             chunk = src.poll()
             if chunk is not None and len(chunk):
+                # ⚠️ 喂音频**排在 `seg.accept()` 之前**：段尾那一刻 `_utterance_end` 会
+                #    `mark_segment()`，它记的是"现在采到多少样本" —— 后喂会让 Soniox 的
+                #    段界少这一块，边界附近那句就会归错段（见 `stream_gate.mark`）。
+                #    还没退回才喂（`can_feed`）；**建连中也喂**（Soniox 就靠这段接上话）。
+                if gate.can_feed():
+                    stream.feed(chunk)       # 非阻塞：有界队列，满了丢最旧
                 seg.accept(chunk)
                 if _hear is not None:
                     _hear(seg.is_speaking)        # 顶栏「在听」小点; 只在变了时才动
@@ -2835,6 +2968,12 @@ def run(args) -> None:
                         notify(_silence_cfg[1], True, src="收音")
                     elif _sv == "back":
                         notify("收音恢复了", False, src="收音")
+            # ⭐ Soniox 退回：**整节课只报一次**（`take_notice` 自己记账），走现有
+            #    `("notice", (文案, warn, 补充))` 通道 —— 不新增 tag（R28）。
+            #    两道闸从那之后自动放开（`allow_local()`），下一段起本地照常。
+            _rt = gate.take_notice()
+            if _rt:
+                streamq.put(("notice", (_rt, False, "")))
             drain()
             if src.is_done():
                 break
@@ -2899,16 +3038,30 @@ def run(args) -> None:
             _diag = seg.report()
             if _diag:
                 echo(_diag)
+            # ⭐ Soniox 收尾：**先**把流里那半句 flush 出来（`on_sealed` 只入队），
+            #    再投哨兵。顺序反过来 = `final_worker` 见到 `_QUIT` 就 break，
+            #    `sealedq` 里剩下的封口句全丢（和 `seg.flush()` 那一处的纪律同源）。
+            #    ⚠️ 排在 `seg.flush()` **之后**：flush 会把最后那半句的音频交给
+            #       `_utterance_end`，此时流还活着 -> 本地那道闸仍关着，尾巴不会做两遍。
+            if gate.on:
+                _drafts_done.set()        # 草稿轮询线程先停（别再往 `drafts` 里放）
+                gate.stop()               # 内部 `stream.stop()`：最多等 finish_wait_s
             finalq.put(_QUIT)
+            _wake_fw.set()
             deadline = time.monotonic() + 15
             _settled = False
+            # ⚠️ `all_settled` 只看 finalq/streamq/drafts/busy/carry 五项 —— Soniox 的
+            #    `sealedq` 是**第五**条队列，漏了它会在还有封口句没上屏时提前收摊
+            #    （`gate.on` 为假时它恒为空，判据与改前逐字一致）。
             while time.monotonic() < deadline:
                 drain()
-                if all_settled(finalq, streamq, drafts,
-                               busy["on"] or merge_pending(), carry["text"]):
+                if (all_settled(finalq, streamq, drafts,
+                                busy["on"] or merge_pending(), carry["text"])
+                        and sealedq.empty()):
                     time.sleep(0.25)
-                    if all_settled(finalq, streamq, drafts,
-                                   busy["on"] or merge_pending(), carry["text"]):
+                    if (all_settled(finalq, streamq, drafts,
+                                    busy["on"] or merge_pending(), carry["text"])
+                            and sealedq.empty()):
                         _settled = True
                         break
                 time.sleep(0.02)

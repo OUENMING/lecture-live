@@ -242,6 +242,22 @@ class RenderShape(unittest.TestCase):
         self.assertGreater(nr.chinese_ratio(out), 0.6,
                            "作者验收表：正文中文占比 ≥60%")
 
+    def test_中文占比的尺子_不把转录算进正文(self):
+        """⭐ 量具自身的判据（2026-10-17 实测踩到）：版式把转录那一段改了名，
+        `chinese_ratio` 的旧锚点失效 → 345 句英文被算进"正文"，71% 掉到 34%。
+
+        ⚠️ 这条**指向那一段抬头**：改名字要连量具一起改（否则验收表在说谎）。
+        """
+        out = nr.render(self._data(entries=[dict(e) for e in entries(6)]))
+        body = nr.chinese_ratio.__wrapped__ if False else None
+        del body
+        self.assertNotIn("完整逐句转录", out.split("## 📜")[0])
+        # 把转录换成纯英文长句：占比**不该受它影响**
+        e2 = [{"ts": f"10:0{i}:00", "en": "english english english english " * 8,
+               "zh": "", "asr": "", "star": False} for i in range(6)]
+        self.assertAlmostEqual(nr.chinese_ratio(out), nr.chinese_ratio(nr.render(self._data(entries=e2))),
+                               places=6)
+
     def test_没有逐句双语对照(self):
         """作者的原话：不要「一行中文一行英文」。转录区除外（那是证据层，且在附录 B）。"""
         body = nr.render(self._data()).split("## 📜 完整逐句转录")[0]
@@ -268,6 +284,25 @@ class RenderShape(unittest.TestCase):
         self.assertIn("数字 / 公式三道核", out)
         self.assertIn("修正记录", out)
         self.assertIn("代入求导", out, "修正记录必须写出依据（否则读者没法回源）")
+
+    def test_速览里的句子在句末收(self):
+        """实测踩到过：`prose[:80]` 把「令 $f'(x)=0$ 解」这种半句留在速览里。"""
+        d = self._data()
+        d.review = {"sections": [dict(SECTION, prose=[
+            "第一节讲的东西先是这个道理，然后还有一个更长的解释，最后落到定义上。"])]}
+        out = nr.render(d)
+        gist = [ln for ln in out.splitlines() if ln.startswith("1. **")][0]
+        self.assertTrue(gist.endswith("。"), gist)
+        self.assertLess(len(gist), 120, gist)
+
+    def test_三道核的_mismatch_措辞不同_它是发现不是口误(self):
+        d = self._data(corrections_extra=[{"kind": "check", "where": "三道核",
+                                           "spoken": "AC(2.89)=233",
+                                           "fixed": "",
+                                           "basis": "AC 单调递减，最低点不在 2.89"}])
+        out = nr.render(d)
+        self.assertIn("⚠ 三道核", out)
+        self.assertNotIn("「AC(2.89)=233」→", out, "三道核的发现被写成了「原话 → 修正」")
 
     def test_头部写清课件核对与覆盖度(self):
         out = nr.render(self._data())

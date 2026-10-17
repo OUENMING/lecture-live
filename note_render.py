@@ -97,6 +97,26 @@ def _steps_md(steps: list, *, reveal: bool) -> list:
     return out
 
 
+def _first_sentence(text: str, *, max_chars: int = 60) -> str:
+    """一段讲解 → 速览里那句"这节讲什么"。**在句末收**，绝不切半句。
+
+    ⚠️ 实测：`text[:80]` 会把「令 $f'(x)=0$ 解」这样半句话留在速览里 ——
+       速览是"五分钟读完"的那一层，半句比没有更费解。
+    """
+    s = _one(text)
+    if not s:
+        return ""
+    for mark in ("。", "；", ". ", "！", "?"):
+        k = s.find(mark)
+        if 0 < k <= max_chars:
+            return s[:k + 1].strip()
+    if len(s) <= max_chars:
+        return s
+    cut = s[:max_chars]
+    k = max(cut.rfind("，"), cut.rfind(","), cut.rfind(" "))
+    return (cut[:k] if k > 10 else cut).strip() + "…"
+
+
 def _bf(e: dict) -> str:
     """🩹 补译标记（` ·补`）—— **唯一定义点在 `obsidian_writer._bf_mark`**。
 
@@ -239,14 +259,16 @@ def render(d: NoteData) -> str:
     if sections:
         L += ["这节讲的东西按下面的顺序串起来：", ""]
         for i, s in enumerate(sections, 1):
-            L += [f"{i}. **{_one(s.get('heading'))}**" +
-                  (f" —— {_one((s.get('prose') or [''])[0])[:80]}" if s.get("prose") else "")]
+            gist = _first_sentence((s.get("prose") or [""])[0])
+            L += [f"{i}. **{_one(s.get('heading'))}**" + (f" —— {gist}" if gist else "")]
         L += [""]
     else:
         L += [_missing_line(d), ""]
     plan = review.get("review_plan") or []
     if plan:
-        L += ["**学完你应该会：**", ""] + [f"- {_one(x)}" for x in plan] + [""]
+        # ⚠️ 上限 5 条：`review_plan` 是**每块**各给 2–3 条再合并的（5 块 = 十几条），
+        #    铺出来就是一屏噪音 —— 这一节是"学完会什么"，不是课后作业清单。
+        L += ["**学完你应该会：**", ""] + [f"- {_one(x)}" for x in plan[:5]] + [""]
 
     # ── 📑 课堂纲要（骨架先于细节）─────────────────────────────────────
     try:
@@ -295,8 +317,10 @@ def render(d: NoteData) -> str:
         for p in pts:
             pt = _one(p.get("point"))
             sec = by_point.get(pt.lower(), "")
-            mark = "✅" if sec and sec not in ("缺失", "missing", "-") else "⚠ **缺失**"
-            L += [f"| {'`' + _one(p.get('ts')) + '` ' if p.get('ts') else ''}{pt} | {mark} {sec} |"]
+            ok = bool(sec) and sec not in ("缺失", "missing", "-")
+            tail = f" {sec}" if ok else ""
+            mark = "✅" if ok else "⚠ **缺失**"
+            L += [f"| {'`' + _one(p.get('ts')) + '` ' if p.get('ts') else ''}{pt} | {mark}{tail} |"]
         L += [""]
     miss = review.get("missing") or []
     if miss:
@@ -387,8 +411,16 @@ def render(d: NoteData) -> str:
     if all_corr:
         L += ["**修正记录**（课上原话 → 修正值 + 依据）：", ""]
         for c in all_corr:
+            fixed = _one(c.get("fixed"))
+            if c.get("kind") == "check":
+                # ⚠️ 三道核发现的**不一致**与"教授口误"不是一回事：前者只是提醒
+                #    （有时重算出来还是同一个值），写成"原话 → 修正值"会让人以为改了正文。
+                L += [f"- **⚠ 三道核**：{_one(c.get('spoken'))}"
+                      + (f" —— 重算：**{fixed}**" if fixed else "")
+                      + (f"（{_one(c.get('basis'))}）" if c.get("basis") else "")]
+                continue
             L += [f"- **{_one(c.get('where')) or '—'}**："
-                  f"「{_one(c.get('spoken'))}」→ **{_one(c.get('fixed'))}**"
+                  f"「{_one(c.get('spoken'))}」→ **{fixed}**"
                   + (f"（依据：{_one(c.get('basis'))}）" if c.get("basis") else "")]
         L += [""]
     if d.materials_line:
@@ -424,7 +456,11 @@ def chinese_ratio(text: str) -> float:
        把它算进"中文占比"等于用一个假指标骗自己。
     """
     body = re.sub(r"```.*?```", "", text or "", flags=re.S)
-    body = re.split(r"## 附录 B", body)[0]
+    # ⚠️ 抓的是**抬头**而不是某一段固定文字：2026-10-17 版式把那段改名成
+    #    `## 📜 完整逐句转录（附录 B · …）`，用旧锚点 `## 附录 B` 会**静默**把
+    #    345 句英文转录算进"正文"，同一份笔记的中文占比从 71% 掉到 34%
+    #    （实测踩到：量具比被测对象先坏）。`tests/test_note_v2.py` 钉着这条。
+    body = re.split(r"\n## [^\n]*完整逐句转录", body)[0]
     cjk = sum(1 for c in body if "\u4e00" <= c <= "\u9fff")
     latin = sum(1 for c in body if c.isascii() and c.isalpha())
     total = cjk + latin

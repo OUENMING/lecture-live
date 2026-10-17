@@ -559,10 +559,11 @@ def corrections_from_mismatch(checks: list) -> list:
     out = []
     for c in checks or []:
         if c.get("status") == "mismatch":
-            out.append({"where": c.get("claim", ""),
+            out.append({"kind": "check",
+                        "where": "三道核",
                         "spoken": c.get("claim", ""),
                         "fixed": c.get("recomputed", ""),
-                        "basis": f"🥉 三道核（{c.get('how', '')}）"})
+                        "basis": c.get("how", "")})
     return out
 
 

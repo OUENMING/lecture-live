@@ -1283,11 +1283,12 @@ class ObsidianWriter:
             from build_notes import compile_term
         except Exception:                                       # noqa: BLE001
             compile_term = None
-        terms = list(review.get("terms") or [])
-        for s in (review.get("sections") or []):
-            terms += list(s.get("terms") or [])
+        tagged: list = [(t, _one_line(s.get("ts")))
+                        for s in (review.get("sections") or [])
+                        for t in (s.get("terms") or [])]
+        tagged += [(t, "") for t in (review.get("terms") or [])]
         seen: set = set()
-        for t in terms:
+        for t, sec_ts in tagged:
             en, zh = _one_line(t.get("en")), _one_line(t.get("zh"))
             if not en or en.lower() in seen:
                 continue
@@ -1302,6 +1303,11 @@ class ObsidianWriter:
                             break
                 except Exception:                               # noqa: BLE001
                     ts = ""
+            # ⚠️ 转录里搜不到（ASR 把词听碎了、或原话用了别的说法）时退到**它所在小节的
+            #    时间戳** —— 出处那一列宁可粗一点（"这一节在 13:23"），也不能空着：
+            #    空的出处 = 读者没法回源（审计 §2b 结论 4 要的正是"双锚点"）。
+            if not ts and sec_ts:
+                ts = sec_ts
             out.append(note_terms.Hit(term=en, gloss=zh or "（本课术语）", ts=ts,
                                       source=note_terms.SRC_LECTURE))
         return out

@@ -382,7 +382,7 @@ def load(obj) -> list:
         它**不在** `except (KeyError, TypeError, ValueError)` 里；
       · `{"X": 5}`（`rows` 不可迭代）→ `for r in rows` 抛 `TypeError`，
         而它在 `try` **之外**（`TypeError` 虽在列表里也救不到这条语句）。
-    ⚠️ 唯一的调用方是 `entry_panel._guesses()`，那里 `T.load(...)` **没有兜底**，
+    ⚠️ 唯一的调用方是 `entry_panel._likely()`，那里 `T.load(...)` **没有兜底**，
        而 `store.load_json` **只校验顶层是 dict、不校验嵌套形状** →
        一份被手改坏的 `timetable.json` 会让**整个面板 build 时抛异常**。
     """

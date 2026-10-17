@@ -596,29 +596,80 @@ def last_course_of(rows) -> str | None:
 #: 而 `charactersIgnoringModifiers` 在 Shift 下仍给 `1`，所以用字符本身判断就够）。
 _KEY_MODS = (1 << 20) | (1 << 18) | (1 << 19)
 
+# ── 「最可能那门」：预选与回车共用的唯一口径（2026-10-18）──────────────
+#: 课表里「马上要开」的窗口（分钟）。现在没在上的课，`SOON_MIN` 分钟内要开的也算
+#: 「就是它」—— 学生走进教室落座那几分钟里按回车，命中的正是下一节。
+SOON_MIN = 20.0
 
-def key_course(char: str, order, last: str | None = None, *,
-               editing: bool = False, modifiers: int = 0) -> str | None:
-    """一个**按键** -> 该选中哪门课；`None` = 不处理（事件照常往下走）。
 
-    ⚠️ 输入框有焦点时一律不处理 —— 在搜索框里打 `1` 必须只是打一个 `1`。
+class Likely(typing.NamedTuple):
+    """「最可能那门」+ 为什么。`why` 画在**选中那张卡**的第二行（`_make_card` 的 `why`）。"""
+    course: str
+    why: str
+
+
+def likely_course(entries, when, *, last_used=None, soon_min=SOON_MIN) -> Likely | None:
+    """`when` 这一刻最可能该上的那门。**纯函数**（课表 / 时刻 / 上次那门全从入参来）。
+
+    排序（作者 2026-10-18 定的口径 —— 取代原来「课表 now + 历史同周同点」那两条信号）：
+      ① 课表里**正开着**的时段：`Slot.minutes` 写了时长就按真实覆盖算
+         （含跨过整点的长课）；没写（0）就退回「同一小时」那条老口径；
+      ② 课表里 **`soon_min` 分钟内**要开的时段（取最近的那个）；
+      ③ 都没有 → `last_used`（最近一次真上过课的那门）；
+      ④ `last_used` 也没有 → `None`（**没有证据就不猜**：回车什么都不做，不挑第一张卡）。
+    ⚠️ 双周课 / 停课日走 `Slot.on_week()` —— 那条规则的唯一定义点在 `timetable.Slot`。
+    ⚠️ 并列时取**更晚开始**的那个（同时段两门时，"刚开的那节"更可能是现在这节），
+       再并列按课号排 —— 同一个输入永远给同一个答案。
+    """
+    covering, soon = [], []
+    for code, slots in entries or ():
+        code = str(code)
+        for s in slots or ():
+            if s.weekday != when.weekday() or not s.on_week(when.date()):
+                continue
+            start = when.replace(hour=s.hh, minute=s.mm, second=0, microsecond=0)
+            if start > when:
+                if (start - when).total_seconds() <= soon_min * 60.0:
+                    soon.append((start, code, s))
+                continue
+            if (when - start).total_seconds() < (s.minutes or 60) * 60.0:
+                covering.append((start, code, s))
+    if covering:
+        _start, _code, _s = max(covering, key=lambda x: (x[0], x[1]))
+        return Likely(_code, f"课表上 {_s.hh:02d}:{_s.mm:02d} 是这门")
+    if soon:
+        _start, _code, _s = min(soon, key=lambda x: (x[0], x[1]))
+        return Likely(_code, f"课表上 {_s.hh:02d}:{_s.mm:02d} 就要上这门")
+    if last_used:
+        return Likely(str(last_used), "上次上的是这门")
+    return None
+
+
+def key_intent(char, order, chosen=None, *, editing=False, modifiers=0) -> tuple[str, str] | None:
+    """一个**按键** -> 该做什么：`("select", 课号)` / `("start", 课号)`；`None` = 不处理。
+
+    ⚠️ 输入框有焦点时一律不处理 —— 在搜索框里打 `1` 必须只是打一个 `1`，
+       在「新增课程」那行里按回车必须只是**建课**（`_on_key` 把 `editing` 传进来，
+       它的判据是「任何 field editor」，不是某一个框）。
     ⚠️ 带 ⌘ / ⌃ / ⌥ 的也不处理：那是系统快捷键，不是选课。
     ⚠️ 数字只认 `1`–`5`（`DIGIT_SLOTS`）—— 面板上看得见的提示也只画五张。
+    ⭐ **回车 = 开始上课**（2026-10-18 作者口径）：用的是 `chosen` —— 点过的那张 /
+       预选的「最可能那门」（`likely_course`）。没有它 → `None`，事件照常往下走
+       （**不猜第一张卡**）。
     """
     if editing or not char or (int(modifiers) & _KEY_MODS):
         return None
     ch = str(char)
     if ch in "12345":
         i = int(ch) - 1
-        return order[i] if i < len(order) and i < DIGIT_SLOTS else None
+        return ("select", order[i]) if i < len(order) and i < DIGIT_SLOTS else None
     if ch in ("\r", "\n"):
-        return last if last in order else None
+        return ("start", chosen) if chosen in (order or ()) else None
     return None
 
 
-def key_course_from_event(event, order, last: str | None = None, *,
-                          editing: bool = False) -> str | None:
-    """真实 `NSEvent` -> 该选中哪门课（判据用假事件对象也能喂）。
+def key_intent_from_event(event, order, chosen=None, *, editing=False) -> tuple[str, str] | None:
+    """真实 `NSEvent` -> 动作（判据用假事件对象也能喂）。
 
     事件形状读不出来 → `None`（不抢键）。
     """
@@ -627,7 +678,7 @@ def key_course_from_event(event, order, last: str | None = None, *,
         mods = int(event.modifierFlags())
     except Exception:                                     # noqa: BLE001
         return None
-    return key_course(char, order, last, editing=editing, modifiers=mods)
+    return key_intent(char, order, chosen, editing=editing, modifiers=mods)
 
 
 def body_height(n: int, screen_h: float, *, card_h: float = CARD_H) -> float:
@@ -1962,44 +2013,28 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             _start_now(course)
 
     rs = load()
-    # ⭐⭐ **课表预选**（plan §5.4.4）。两条信号，都只说"时段对得上"，不猜内容：
-    #    ① 导入过的课表（`.ics` 解析结果，存在 `~/.classlive/timetable.json`）
-    #    ② **历史**：这门课过去常在周几几点上（零权限的兜底）—— 实测留一法 10/10
-    #    ⚠️ **只改顺序、只改按钮标题**，**一个状态都不写**（`courses.set_attribution`
+    # ⭐⭐ **预选「最可能那门」**（plan §5.4.4）。口径**只有一条**，在 `likely_course`：
+    #    课表里正开着 / `SOON_MIN` 分钟内要开 → 否则最近一次真上过课的那门。
+    #    ⚠️ **只改顺序、只改选中态**，**一个状态都不写**（`courses.set_attribution`
     #       那种都不碰）—— 认错课的代价是"那门课每一句翻译都在用错词"（§2.4 B 已定）。
-    def _guesses():
-        """⚠️ 任何读失败 = **不猜**（2026-10-01 审查 #24）：预选是锦上添花的功能，
+    def _likely():
+        """此刻「最可能那门」—— build 时算一次、导入课表时重算一次，不开计时器。
+
+        ⚠️ 任何读失败 = **不猜**（2026-10-01 审查 #24）：预选是锦上添花的功能，
            而这里的读路径按 store 的口径**会抛**（`timetable.json` 坏 / 版本不认识）
            —— 原来裸奔时一个坏文件能让**整个开课面板起不来**（只剩一条 traceback）。
            ⚠️ 修法是接住**并出声**，不是把坏文件当空（后者会让下次写入覆盖真内容）。
-           ⚠️ 「坏归属文件」那半后来走了 `courses._attribution_map_soft`（软读）——
-              这里保留宽兜底是因为它同样罩得住未来的读路径，理由别删。
         """
         import store
-        known = [r.course for r in rs]
         try:
             ent = T.load(store.load_json(paths.timetable(root=state_root), {}))
-            hist = {}
-            for c in known:
-                slots = []
-                for p in courses.session_files(sessions_dir, c):
-                    parts = p.stem.split("_", 2)
-                    if len(parts) == 3 and len(parts[1]) >= 2:
-                        try:
-                            slots.append((datetime.date.fromisoformat(parts[0]).weekday(),
-                                          int(parts[1][:2])))
-                        except ValueError:
-                            continue
-                if slots:
-                    hist[c] = slots
         except (store.StoreError, OSError) as e:
-            print(f"⚠ 课表/归属读不出来（{type(e).__name__}: {str(e)[:70]}）"
+            print(f"⚠ 课表读不出来（{type(e).__name__}: {str(e)[:70]}）"
                   f"—— 这次不做课表预选", flush=True)
-            return []
-        return T.suggest(ent, datetime.datetime.now(), history=hist)
+            return None
+        return likely_course(ent, datetime.datetime.now(), last_used=last_course_of(rs))
 
-    S["guesses"] = _guesses()
-    S["guess_i"] = 0
+    S["likely"] = _likely()
 
     def pick(course):
         """点一张没选中的卡 → 选中它（2026-10-14 取代「不是这门？」：纠错 = 直接点对的那张）。
@@ -2011,34 +2046,52 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         S["picked"] = course
         _later(refresh)
 
-    def _on_key(event):
-        """数字键 `1`–`5` / 回车 -> 选中那门课（**不直接开课**，与点卡片等价）。
+    def _selected_course():
+        """此刻「开始上课」会开的那门：**用户点过的那张 → 否则预选的那张**。
 
-        ⚠️ 输入框有焦点、带 ⌘/⌃/⌥、或面板不是 key window 时**原样放行** ——
-           在搜索框里打 `1` 必须只是打一个 `1`（`_win_is_editing` 的判据是「任何
-           field editor」，不是某一个框）。
+        ⚠️ 与 `refresh()` 里算卡片选中态的那个式子（`_sel`）**同源** ——
+           两处各写一份的话，回车的课和按钮的课会不是同一门（而那种错不出声）。
+        """
+        lk = S.get("likely")
+        return S.get("picked") or (lk.course if lk else None)
+
+    def _on_key(event):
+        """数字键 `1`–`5` → 选中那门；**回车 → 用选中的那门直接开始上课**。
+
+        ⚠️ 输入框有焦点、带 ⌘/⌃/⌥、或面板不在台上时**原样放行** ——
+           在搜索框里打 `1` 必须只是打一个 `1`，在「新增课程」那行里按回车必须只是**建课**
+           （`_win_is_editing` 的判据是「任何 field editor」，不是某一个框）。
+        ⭐ 回车与卡片上那颗「开始上课」**走同一个 `on_start`** ——
+           "直接确认并进入最可能那节"就是这一条（2026-10-18 作者口径）。
         """
         try:
-            if not win.isVisible() or not win.isKeyWindow():
+            if not _win_hot(win):
                 return event
-            course = key_course_from_event(
-                event, S.get("order") or [], S.get("last_course"),
-                editing=_win_is_editing(win))
+            editing = _win_is_editing(win)
+            got = key_intent_from_event(event, S.get("order") or [],
+                                        _selected_course(), editing=editing)
         except Exception as e:                            # noqa: BLE001
             # AppKit 会吞 action 里的异常（HANDBOOK 那条）—— 这里自己出声，
             # 否则症状就是「按数字没反应」而日志里一个字都没有。
             print(f"[entry_panel] 数字键选课出错：{type(e).__name__}: {e}", flush=True)
             return event
-        if course is None:
+        if got is None:
             return event
+        kind, course = got
+        if kind == "start":
+            if on_start is not None:
+                on_start(course)                           # == 卡片按钮那条路
+            return None                                    # 吃掉这个键
         pick(course)
         return None                                        # 吃掉这个键
 
     def _install_key_monitor():
         """挂本地键盘监视。**先摘旧的** —— 面板可能被 build 多次（测试/重新打开）。
 
-        ⚠️ 只监视 `keyDown`，且 `_on_key` 自己按「窗口可见 + 是 key + 不在编辑」
-           三重判据决定放不放行。返回的 monitor 必须留住，`do_close` 里摘掉。
+        ⚠️ 只监视 `keyDown`，且 `_on_key` 自己按「窗口在台上 + 不在编辑」
+           两条判据决定放不放行。返回的 monitor 必须留住，`do_close` 里摘掉。
+        ⚠️ `S["key_handler"]` 是给判据的把手（monitor 对象拿不回 handler）——
+           `do_close` 里要和 monitor 一起清。
         """
         from AppKit import NSEvent, NSEventMaskKeyDown
         old = S.pop("key_monitor", None)
@@ -2050,6 +2103,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         try:
             S["key_monitor"] = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
                 NSEventMaskKeyDown, _on_key)
+            S["key_handler"] = _on_key
         except Exception as e:                            # noqa: BLE001
             print(f"⚠ 数字键选课没挂上（{type(e).__name__}: {e}）—— 鼠标点卡照旧",
                   flush=True)
@@ -3397,8 +3451,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             try:
                 import store
                 store.save_json(paths.timetable(root=state_root), s["slots"])
-                S["guesses"] = _guesses()          # 立刻生效，不用重开面板
-                S["guess_i"] = 0
+                S["likely"] = _likely()             # 立刻生效，不用重开面板
             except Exception as _e:                            # noqa: BLE001
                 print(f"⚠ 课表存不下来（预选会没有数据源）：{_e}")
         # ⚠️ 有几个没建成也要说 —— 别让"新建了 3 门"读起来像"4 门都成了"
@@ -3916,22 +3969,21 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         title_lbl.setStringValue_(PANEL_TITLE)
         y = 0.0
         rows = load()
-        # ⭐ 课表预选：把猜的那门**排到第一**，并把理由挂到状态行。
-        #    ⚠️ **只改顺序** —— 不预选、不自动应用（`[一手]` Apple HIG 是「把最可能的
-        #       放第一」，但它那句「select the first option by default」在这里被否掉了：
+        # ⭐ 预选「最可能那门」：把它**排到第一**、并在卡上标出选中
+        #    （描边亮一档 + 那颗唯一的「开始上课」）。口径只有一条 —— `likely_course`。
+        #    ⚠️ **只改顺序** —— 不自动应用（`[一手]` Apple HIG 是「把最可能的放第一」，
+        #       但它那句「select the first option by default」在这里被否掉了：
         #       认错课 = 整节课术语表全错，而作者拍的是「预选 + 显式纠错入口」）。
-        _gs = S.get("guesses") or []
-        _gi = S.get("guess_i", 0)
-        _hint = _gs[_gi].course if 0 <= _gi < len(_gs) else None
+        _lk = S.get("likely")
+        _hint = _lk.course if _lk else None
         if _hint:
             rows.sort(key=lambda r: (r.course != _hint,))
-        # 数字键的顺序**与屏幕上显示的顺序同源**（就是这一份 rows），
-        # 回车用的「上次那门」也从这里算（最近一次真上过课的那门）。
+        # 数字键的顺序**与屏幕上显示的顺序同源**（就是这一份 rows）。
         S["order"] = [r.course for r in rows]
-        S["last_course"] = last_course_of(rows)
-        # 选中的那张：用户点过的优先，否则课表猜的。⚠️ 点选**不重排** —— 卡片在手底下跳走更糟。
+        # 选中的那张：用户点过的优先，否则预选的那张。⚠️ 点选**不重排** —— 卡片在手底下跳走更糟。
+        # ⚠️ 与 `_selected_course`（回车走的那条）**同一个式子**，别只改一处。
         _sel = S.get("picked") or _hint
-        _why = _gs[_gi].why if (_hint and _sel == _hint) else None
+        _why = _lk.why if (_lk and _sel == _hint) else None
         if on_start is not None and rows and not _sel:
             # ⚠️ 只在「没有选中」时说话：有选中时理由已经在卡上，别盖掉状态行里别的消息
             set_status("点一门课选中它，再按「开始上课」")
@@ -4166,6 +4218,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 NSEvent.removeMonitor_(_mon)
             except Exception:                             # noqa: BLE001
                 pass
+        S.pop("key_handler", None)      # 判据的把手 —— 与监视器同生共死（也是一个闭包引用）
         _close_offer()                   # 「有新版本」卡跟着面板走（它的按钮闭包也持着本面板）
         # ⚠️⚠️ **必须断环，否则每开/关一次漏掉一整个面板。**
         #     实测（审查代理量的，连跑两遍一致）：开/关 3 轮之后
@@ -4537,8 +4590,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     win.setFrameOrigin_((_vis.origin.x + (_vis.size.width - WIDTH) / 2.0,
                          panel_y(h, _vis.origin.y, _vis.size.height)))
     win.orderFrontRegardless()
-    # ⭐ 开课面板：数字键 `1`–`5` 选课（回车 = 上次那门）。只在**有「开始上课」**的
-    #    那一档挂 —— 上课中从菜单栏打开的面板不选课，别抢键。
+    # ⭐ 开课面板：数字键 `1`–`5` 选课；**回车 = 用选中的那门直接开课**（与卡片按钮同一条路，
+    #    2026-10-18 起；以前回车只是选中）。只在有「开始上课」的那一档挂 ——
+    #    上课中从菜单栏打开的面板不选课，别抢键。
     if on_start is not None:
         _install_key_monitor()
     # ⭐ 焦点守卫的链子**从这里起**（窗口刚上屏）—— 不是在定义处（见 `_guard_start`）。
@@ -4587,6 +4641,20 @@ _GUARD: dict = {"win": None, "gen": 0, "waits": 0}
 #: 「还没上屏」最多等几拍（0.5 s/拍）。⚠️ 兜底用：窗口要是始终没上屏（构建成功但被丢弃 /
 #: 被系统藏起来），守卫也不会变成**无界轮询**。10 拍 = 5 s，远大于上屏所需。
 _GUARD_MAX_WAITS = 10
+
+
+def _win_hot(win) -> bool:
+    """这个窗口此刻**在不在台上**（可见 + 是 key）。判不出来 → `False`（保守：不吃键）。
+
+    ⚠️ 单列成模块级函数有两个理由：
+      · 与 `_win_is_editing` 同一条纪律 —— `_on_key` 的判据都得能被单独盯住；
+      · 判据要能**换掉它**来驱动真的 `_on_key`（测试进程里窗口拿不到 key，
+        而"回车有没有接到开始上课"这条只有驱动真处理器才验得动）。
+    """
+    try:
+        return bool(win.isVisible()) and bool(win.isKeyWindow())
+    except Exception:                                         # noqa: BLE001
+        return False
 
 
 def _win_is_editing(win) -> bool:

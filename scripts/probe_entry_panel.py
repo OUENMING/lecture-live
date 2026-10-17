@@ -245,7 +245,7 @@ def main() -> int:
     # `PROBE_TIMETABLE=1` —— **预选**那条路：造一份「时段就是现在」的课表塞进隔离根，
     #    好让面板把某张卡排到第一、并在按钮上说清为什么。
     #    ⚠️ 时段是**按当前时刻算的**（不是写死的）—— 写死的话这个跑器只在某个小时有效。
-    #    ⚠️⚠️ **必须在 `open_panel` 之前写** —— 面板是在 build 那一刻就算好 `S["guesses"]` 的。
+    #    ⚠️⚠️ **必须在 `open_panel` 之前写** —— 面板是在 build 那一刻就算好 `S["likely"]` 的。
     if os.environ.get("PROBE_TIMETABLE"):
         import datetime as _dt
         import json as _json

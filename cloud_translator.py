@@ -354,6 +354,19 @@ class CloudTranslator:
         except Exception:                        # noqa: BLE001
             return False
 
+    def add_terms(self, words) -> list:
+        """同 `translator.Translator.add_terms` —— 两个引擎**接口必须一致**。
+
+        ⚠️ `EngineRouter` 会在两个引擎上都调一次（云端/本地各一份池子）：
+           降级发生时后面那些句子读的是本地那份，只喂云端 = 降级后就退回旧池子。
+        """
+        from translator import merge_terms
+        new = [w for w in merge_terms(words)
+               if w.lower() not in {t.lower() for t in self._terms}]
+        if new:
+            self._terms = merge_terms(self._terms, new)
+        return new
+
     def _terms_block(self, en: str) -> str:
         from translator import select_terms
         return select_terms(en, self._terms, core=self._core,

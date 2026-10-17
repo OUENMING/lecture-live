@@ -80,6 +80,13 @@ def _common_word_signal(term: str) -> str:
     #    缩写的判据是**语境核对**（`verified`），不是词形。
     if _looks_like_acronym(term):
         return ""
+    # ⚠️ **句中大写的单 token = 专有名词**，不走"普通词汇否决"：
+    #    `_syllables("coase") <= 1`（`oa`+`e` 收成 1）会把它判成单音节常识词 ——
+    #    而 `Coase` / `Renshaw` 正是这类课要收的词（实测：`Coase` 被挡下，
+    #    `tests/test_live_terms.py` 的红）。`Interesting` 那种真常识词走的是上面
+    #    的 `_DISCOURSE`/`EVERYDAY`（先判），不会因为这条漏网。
+    if len(words) == 1 and term[:1].isupper() and term.lower() not in COMMON_WORDS:
+        return ""
     low = term.strip().lower()
     if low in _DISCOURSE or low in EVERYDAY:
         return "口语/常识词"

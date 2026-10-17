@@ -285,6 +285,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_LAYOUT` | `d` | 悬浮窗布局：`d` = 草稿并进最底那一行 + 原地显影 + 新字淡入，无底板（2026-10-17 定版）；`classic` = 老布局（底部单独草稿栏）—— `overlay.LAYOUT_D` / `caption_flow.py` / `transcript_view` 的「D 布局」 | 发布开关：D 上线一版没出事就删 `classic` 和草稿栏代码 |
 | `CLASSLIVE_NOTE_MERGE` | `1` | 课后笔记里把切成两三行的同一句话并回一行、整句重译（只改笔记，`sessions/` 不动）—— `note_merge.py` | 发布开关（3.9.5）：`0` = 照旧逐行 |
 | `CLASSLIVE_LIVE_SUMMARY` | `1` | 实时总结（章节合成 / 纲要落盘 / 发 streamq） | 运维开关，长期 |
+| `CLASSLIVE_LIVE_TERMS_MAX` | `40` | **课上候选词池**的上限（链路体检 ⭐2：已定稿文本里反复出现、过门的词进翻译候选池）—— `live_terms.LivePool`；撞上限按「本课出现句数 + 新近度」淘汰最少的/最旧的 | 运维开关，长期（调大 = 池子更全也更占上下文） |
 | `CLASSLIVE_LIVE_LOG` | 平时关、测试模式开 | 现场采集 `<会话>.live.jsonl` —— `livemetrics.py` | 运维开关，长期 |
 | `CLASSLIVE_UPLOAD` | `1` | 测试模式课后上传；测试 / 探针一律设 `0` | 运维开关，长期 |
 | `CLASSLIVE_UPLOAD_ENDPOINT` / `_TOKEN` | 内置 | 上传端点与 write-only 令牌（测试指到本机假服务器） | 测试接缝，长期 |

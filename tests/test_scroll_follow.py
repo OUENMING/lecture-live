@@ -216,6 +216,55 @@ class ScrollFollow(unittest.TestCase):
         self.assertEqual(tv.new_since_leave, 0)
         self.assertTrue(pill.isHidden(), "回底后提示该收起来")
 
+    def test_newline_pill_is_compact_and_text_fits(self):
+        """尺寸**钉住**（比模式胶囊小一档）+ 标题**装得进这个框**（宽高都量）。
+
+        ⚠️ 这几个数是作者 2026-10-17 定的观感（「胶囊做得更紧凑一点，现在有点大」）；
+        改它们必须是有意的 —— 这条用例红 = 有人顺手动了样子。
+        ⚠️ 颜色 / 描边 / 圆角**不**在这里钉：它们与模式胶囊**同源**（`MODE_CHIP_*`），
+        改那一套是全局决定，不该被这个小胶囊拦下。
+        """
+        from AppKit import NSFontAttributeName
+        from Foundation import NSString
+        import overlay as O
+        self.assertEqual(
+            (O.NEWLINE_FONT_PT, O.NEWLINE_H, O.NEWLINE_PAD, O.NEWLINE_MIN_W,
+             O.NEWLINE_INSET_B),
+            (12.0, 19.0, 6.0, 56.0, 4.0))
+        self.assertLess(O.NEWLINE_FONT_PT, O.MODE_CHIP_FONT_PT)
+        self.assertLess(O.NEWLINE_H, O.MODE_CHIP_H)
+        self.assertLess(O.NEWLINE_PAD, O.MODE_CHIP_PAD)
+        self.assertLess(O.NEWLINE_INSET_B, 6.0, "底边距要比原来那一版更收")
+
+        o = self._overlay()
+        pill = o._btn_new
+        self.assertEqual(pill.font().pointSize(), O.NEWLINE_FONT_PT)
+        attrs = {NSFontAttributeName: pill.font()}
+        for n in (1, 2, 12, 128):                   # 位数变多也不许截
+            title = f"↓{O.NEWLINE_ARROW_GAP}{n} 句新的"
+            w = o._newline_pill_width(title)        # 与生产同一条算式
+            text = NSString.stringWithString_(title).sizeWithAttributes_(attrs)
+            tw, th = float(text.width), float(text.height)
+            self.assertGreaterEqual(w, O.NEWLINE_MIN_W)
+            self.assertLessEqual(tw, w - 2.0 * O.NEWLINE_PAD + 1.0,
+                                 f"「{title}」宽过框了（会被截）")
+            self.assertLessEqual(th, O.NEWLINE_H,
+                                 f"「{title}」高过框了（{th:.1f} > {O.NEWLINE_H}）")
+        # 摆上去之后再量一次实物：宽度用上、右边缘与转录区对齐
+        self._user_scrolls_to(o, 500.0)
+        o._tv.tick()
+        o.finalize("one more", "又一句。")
+        self._settle(o)
+        self.assertFalse(pill.isHidden())
+        f = pill.frame()
+        self.assertAlmostEqual(f.size.height, O.NEWLINE_H, delta=0.01)
+        self.assertAlmostEqual(f.origin.y, o._scroll_y + O.NEWLINE_INSET_B, delta=0.01)
+        self.assertAlmostEqual(f.origin.x + f.size.width,
+                               o._width - O.PAD, delta=0.01,
+                               msg="右边缘该与转录区右边缘对齐")
+        text = NSString.stringWithString_(pill.title()).sizeWithAttributes_(attrs)
+        self.assertLessEqual(float(text.width), f.size.width - 2.0 * O.NEWLINE_PAD + 1.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

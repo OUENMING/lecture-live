@@ -291,6 +291,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_UPLOAD_ENDPOINT` / `_TOKEN` | 内置 | 上传端点与 write-only 令牌（测试指到本机假服务器） | 测试接缝，长期 |
 | `CLASSLIVE_CLOUD_ASR` | 未设 | `0` = 本进程强制本地定稿：不发请求、不写 `cloud-asr.json` / `install-id`、不弹告知（探针 / 回放脚本默认设 0） | 隐私开关，长期 |
 | `CLASSLIVE_STREAM_ASR` | `auto` | `off` = 关 Soniox 实时识别（`stream_asr.py`，可用时草稿与定稿都由它出、一句封口就送翻译）；`auto` 时还要**有通行码 + 云端定稿开着 + 翻译档不是 `raw`** 才真启用。不可用/额度尽 → 本节课退回现有本地流水线（走 notice 提示一次） | 发布开关：真课过闸、一版没出事后评估退役旧草稿/定稿路径 |
+| `CLASSLIVE_REGION_PROBE` | 空（auto） | Soniox 多地区路由的探测开关（`region_route.py`）：auto = **每个新版本前 3 节课**开课时后台真测各地区（≤3 s，绝不阻塞），同网络 24 h 结果缓存决定本节领 key 时带不带 `region=`；`0` = 关（不测不改道）；`1` = 强制每节都测。计数/缓存在 `~/.classlive/region-probe.json` | 实验开关：前 3 节的数据评估完再定去留 |
 | `CLASSLIVE_STREAM_ASR_ENDPOINT` | 内置 | Soniox 领 key 端点（判据指到本机假 Worker）；不设时跟随 `CLASSLIVE_ASR_ENDPOINT` 换路径 | 测试接缝，长期 |
 | `CLASSLIVE_ASR_ENDPOINT` | 内置 | 云端定稿端点（测试指到本机假服务器；断网实测指到不可达地址） | 测试接缝，长期 |
 | `CLASSLIVE_ASR_TOKEN` | 内置 | 云端定稿的公开令牌（测试用） | 测试接缝，长期 |

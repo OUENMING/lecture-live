@@ -622,10 +622,28 @@ def t_transport_default_key_client() -> None:
         assert hdr(h, "Authorization") == "Bearer cl-test"
         assert hdr(h, "X-ClassLive-Install")
         assert hdr(h, "X-ClassLive-Version")
+        assert json.loads(wk.requests[0]["body"] or b"{}") == {}, "不给 region 时 body 还是空的（老行为）"
     finally:
         s.stop()
         son.close()
         wk.close()
+
+
+def t_transport_region_goes_to_worker() -> None:
+    """`region=` 透传进领 key 的请求体（多地区改道就靠这一条；空串不带）。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    os.environ["CLASSLIVE_ASR_ENDPOINT"] = wk.url
+    for region, want in (("jp", {"region": "jp"}), (" EU ", {"region": "eu"}), ("", {})):
+        s = StreamASR(passcode="cl-test", keepalive_s=5.0, region=region)
+        try:
+            assert wait_until(s.alive, 6.0), (region, s.reason())
+            assert json.loads(wk.requests[-1]["body"] or b"{}") == want, (region, wk.requests[-1]["body"])
+        finally:
+            s.stop()
+        wk.requests.clear()
+    son.close()
+    wk.close()
 
 
 def t_transport_segments() -> None:
@@ -676,6 +694,7 @@ def main() -> int:
         ("transport: stop() 干净收尾", t_transport_stop_clean),
         ("transport: stop() flush 半句", t_transport_stop_flushes_half_sentence),
         ("transport: 默认领 key 客户端（真头）", t_transport_default_key_client),
+        ("transport: region= 进领 key 请求体", t_transport_region_goes_to_worker),
         ("transport: 段号映射", t_transport_segments),
     ]:
         check(name, fn)

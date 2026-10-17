@@ -438,5 +438,46 @@ class LiveLatency(unittest.TestCase):
         self.assertIn("段结束→定稿上屏", CR.render(res))
 
 
+class RegionProbe(unittest.TestCase):
+    """地区探测那一块：有事件就打印，**没有就什么都不说**（老文件照读）。"""
+
+    def _ev(self, **over):
+        rp = {"kind": "event", "event": "region_probe", "t": 1.0, "version": "3.9.7",
+              "mode": "auto", "run": True, "ordinal": 1, "net": "abc123",
+              "default": "us", "selected": "jp", "switched": True, "reason": "faster",
+              "cached": False, "ms": 900, "timeout": False,
+              "regions": {"us": {"connect_ms": 330.0, "rtt_ms": 180.0, "error": ""},
+                          "jp": {"connect_ms": 220.0, "rtt_ms": 150.0, "error": ""}}}
+        rp.update(over)
+        return [_draft(0, "a"), _final(0, "a"), rp]
+
+    def test_event_is_extracted(self):
+        ev = CR.load_events(_write(self._ev()))
+        rp = CR.region_probe_event(ev)
+        self.assertEqual(rp["selected"], "jp")
+        self.assertNotIn("kind", rp)
+        self.assertNotIn("event", rp)
+
+    def test_render_shows_it(self):
+        res = CR.build_report(_write(self._ev()), ks=(None,))
+        out = CR.render(res)
+        self.assertIn("地区探测", out)
+        self.assertIn("默认 us -> 选中 jp（改道）", out)
+        self.assertIn("us: 建连 330 ms / 往返 180 ms", out)
+
+    def test_old_files_stay_silent(self):
+        res = CR.build_report(_write([_draft(0, "a"), _final(0, "a")]), ks=(None,))
+        self.assertIsNone(res["region_probe"])
+        self.assertNotIn("地区探测", CR.render(res))
+
+    def test_pooled_lists_every_file(self):
+        r1 = CR.build_report(_write(self._ev()), ks=(None,), keep_samples=True)
+        r2 = CR.build_report(_write(self._ev(ordinal=2, switched=False, selected="")),
+                             ks=(None,), keep_samples=True)
+        pooled = CR.pool_sweeps([r1, r2])
+        out = CR.render(pooled)
+        self.assertEqual(out.count("地区探测"), 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

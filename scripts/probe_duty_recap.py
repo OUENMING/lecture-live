@@ -44,10 +44,10 @@ MIN_BASELINE_BYTES = 60_000
 DAY = datetime.date(2026, 10, 12)      # 周一（SOC10020 那节，原型里的真实日期）
 
 DUTY_QUOTES = [
-    ("There is no class on Wednesday this week.", "13:52:56", "model", True),
+    ("There is no class on Wednesday this week.", "这周三没有课。", "13:52:56", "model", True),
     ("Next week everyone must show up because groups will be assigned "
-     "for the group project.", "13:56:12", "model", False),
-    ("The problem set is due Friday.", "14:02:56", "regex", False),
+     "for the group project.", "下周必须到场，要分组做项目。", "13:56:12", "model", False),
+    ("The problem set is due Friday.", "习题集周五截止。", "14:02:56", "regex", False),
 ]
 
 RECAP_A = {
@@ -69,8 +69,8 @@ RECAP_A = {
     "open": ["13:42 那句没听懂：二阶导数的符号怎么定曲线的凹凸"],
     "duties": [{"type": "调课", "title": "本周三停课", "when": "10-14（周三）"},
                {"type": "其他", "title": "分组周必须到场", "when": "10-20（周二）"}],
-    "today": ["① 今天新课件《week6-monopoly.pdf》：Monopoly · Deadweight loss",
-              "② 上节课结尾提到：「these three are very difficult to process」"],
+    # ⚠️ 2026-10-17：这一块**只留课件那条**（作者砍掉了「上节课结尾提到」）。
+    "today": ["今天新课件《week6-monopoly.pdf》：Monopoly · Deadweight loss"],
 }
 
 
@@ -118,13 +118,54 @@ def main() -> int:
         # ⚠️ 每次拍之前把窗抬到最前：面板是 NonactivatingPanel（从不激活 app），
         #    别的窗口盖在它上面时，`screencapture -R` 拍到的就是**别人的窗口** ——
         #    2026-10-17 实测踩过（拍出来的是一张课程面板）。
+        # ⚠️⚠️ 而且**同级抢不过**：作者可能正开着另一份 ClassLive（真课堂），
+        #    它的面板跟我们同级、还会自己抬自己 → 只 `orderFrontRegardless()`，
+        #    区域里会拍进它半张脸。探针里把**我们自己的**窗临时抬到屏保级别
+        #    （拍完还原）—— 绝不去动别人的窗。
+        lvl = None
+        try:
+            from AppKit import NSScreenSaverWindowLevel
+            lvl = o._panel.level()
+            o._panel.setLevel_(NSScreenSaverWindowLevel)
+        except Exception:                    # noqa: BLE001
+            lvl = None
         try:
             o._panel.orderFrontRegardless()
         except Exception:                    # noqa: BLE001
             pass
-        _pump(o, 0.5)
+        _pump(o, 0.6)
+        # ⚠️ **窗稳住 + 拍两次、留第二张**（2026-10-17 实测）：卡片刚打开 / 窗刚挪位时，
+        #    `screencapture -R` 会抓到过渡中的那一帧 —— 拍出过"空卡片"和"半张窗在左边"。
+        #    先拍到窗口 frame 不再变，再留第二张。
+        tmp = out / f"_settle-{name}.png"
+        settled = False
+        for _ in range(3):
+            f0 = o._panel.frame()
+            _shot(tmp, region=_region_of(o._panel))
+            time.sleep(0.15)
+            o.pump()
+            if o._panel.frame() == f0:
+                settled = True
+                break
+        if not settled:
+            print(f"  ⚠ {name}：窗一直在动（4 次都没稳住）", flush=True)
+        time.sleep(0.1)
+        _pump(o, 0.25)
+        try:
+            o._panel.orderFrontRegardless()
+        except Exception:                    # noqa: BLE001
+            pass
         p = out / f"{name}.png"
         n = _shot(p, region=_region_of(o._panel))
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        if lvl is not None:
+            try:
+                o._panel.setLevel_(lvl)
+            except Exception:                # noqa: BLE001
+                pass
         shots.append((name, n))
         trace.append(f"{name}: {n} 字节")
         print(f"  {name}.png {n} 字节", flush=True)
@@ -138,8 +179,10 @@ def main() -> int:
             o.set_session(course="SOC10020", day=DAY)
             _captions(o)
             board = duty.Board(day=DAY)
-            for q, t, src, ch in DUTY_QUOTES:
-                board.offer({"kind": "deadline", "t": t, "quote": q,
+            for q, zh, t, src, ch in DUTY_QUOTES:
+                # ⚠️ `zh` = 管道里**本来就有**的那份中文（正则 = 即时译文；模型 = Atom.zh）
+                #    —— 卡片标题的中文摘要来自它，见 `duty.summary_zh`。
+                board.offer({"kind": "deadline", "t": t, "quote": q, "zh": zh,
                              "src": [abs(hash(q)) % 900 + 10], "source": src,
                              "changed": ch})
             o.duty_update(board.items())

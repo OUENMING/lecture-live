@@ -298,6 +298,29 @@ class 真窗口(unittest.TestCase):
         finally:
             o.close()
 
+    def test_课前回顾里过去的条目不显示(self):
+        """⭐ 作者 2026-10-17：「临近的一些事儿」按**今天**过滤 —— 开课渲染这一层。
+
+        ⚠️ 判据量的是**卡上真的画了什么**（不是某个函数被调过）：`_recap_fill` 哪天
+           忘了把今天（`_session_day`）交给 `recap.card`，这条立刻红。
+        """
+        o = self._overlay()
+        try:
+            data = {"course": "ECON10790", "date": "10-15（周四）",
+                    "points": [{"name": "停业价格", "explain": "价格低于它就停产"}],
+                    "duties": [{"type": "调课", "title": "这条已经过去了",
+                                "when": "10-14（周三）", "date": "2026-10-14"},
+                               {"type": "其他", "title": "这条还在未来",
+                                "when": "10-19（周一）", "date": "2026-10-19"}]}
+            o.recap_show(data, course="ECON10790", day="2026-10-16")
+            texts = [b["text"] for b in _blocks(o, "text")]
+            self.assertFalse([t for t in texts if "已经过去了" in t],
+                             f"过去的条目还在卡上：{texts}")
+            self.assertTrue([t for t in texts if "还在未来" in t],
+                            f"未来的条目不该没：{texts}")
+        finally:
+            o.close()
+
     def test_卡片高度跟内容走(self):
         o = self._overlay()
         try:

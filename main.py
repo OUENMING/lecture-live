@@ -1704,7 +1704,8 @@ def run(args) -> None:
             prev = _recap.load(args.course or "")
             duties = _recap.merge_duties(
                 (prev or {}).get("duties"),
-                _recap.duties_from_items(duty_board.items(), day=_duty_day))
+                _recap.duties_from_items(duty_board.items(), day=_duty_day),
+                day=_duty_day)               # ⭐ 按今天过滤：过去的条目不再传给下一节
 
             def _chat(system, user, max_tokens):
                 import llm_client

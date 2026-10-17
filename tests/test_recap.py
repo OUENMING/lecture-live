@@ -196,6 +196,125 @@ class Duties(unittest.TestCase):
         self.assertEqual(rows[0]["when"], "")
 
 
+class 临近的一些事儿_按今天过滤(unittest.TestCase):
+    """⭐ 作者 2026-10-17：「临近的一些事儿」**按今天过滤**（`recap.upcoming`）。
+
+    防的是：旧条目跟着一节节传下去 —— 拍摄里出过「上一节 10-15，这一条 10-14」。
+    三条规则：① 有日期的只在 `[今天, 今天+14 天]` 之内；② 没日期的留，但最多随课传
+    `DUTIES_CARRY_MAX` 次；③ 不知道今天是哪天 → 日期一条都不过滤。
+    """
+
+    DAY = datetime.date(2026, 10, 16)          # 周五（上一节是 10-15 周四）
+
+    @staticmethod
+    def _row(title, date, **kw):
+        return {"type": "调课", "title": title, "when": date, "date": date, **kw}
+
+    def test_表驱动_边界日(self):
+        rows = [
+            ("昨天", "2026-10-15", False),
+            ("今天", "2026-10-16", True),
+            ("明天", "2026-10-17", True),
+            ("第 14 天整", "2026-10-30", True),
+            ("第 15 天", "2026-10-31", False),
+        ]
+        for label, d, want in rows:
+            with self.subTest(label):
+                got = recap.upcoming([self._row("这件事", d)], day=self.DAY)
+                self.assertEqual(bool(got), want,
+                                 f"{label}（{d}）：该{'显示' if want else '不显示'}")
+
+    def test_表驱动_跨月(self):
+        day = datetime.date(2026, 10, 28)      # 周三
+        rows = [("+14 天（跨月）", "2026-11-11", True), ("+15 天（跨月）", "2026-11-12", False)]
+        for label, d, want in rows:
+            with self.subTest(label):
+                got = recap.upcoming([self._row("这件事", d)], day=day)
+                self.assertEqual(bool(got), want, f"{label}（{d}）")
+
+    def test_表驱动_没日期(self):
+        rows = [("没日期", {}, True),
+                ("没日期·传过 1 次", {"carry": 1}, True),
+                ("没日期·传满 2 次", {"carry": 2}, False),
+                ("没日期·越界 9 次", {"carry": 9}, False),
+                ("日期认不出（老数据）", {"date": "10-14（周三）"}, True)]
+        for label, kw, want in rows:
+            with self.subTest(label):
+                got = recap.upcoming([{"type": "其他", "title": "这件事", **kw}], day=self.DAY)
+                self.assertEqual(bool(got), want, label)
+
+    def test_不知道今天是哪天就不过滤(self):
+        """`day=None`（老调用方 / 判据没传）→ 日期一律放行（宁可多留，不要错杀）。"""
+        rows = [self._row("过去的", "2020-01-01"), self._row("将来的", "2030-01-01")]
+        self.assertEqual(len(recap.upcoming(rows, day=None)), 2)
+
+    def test_坏形状不炸(self):
+        self.assertEqual(recap.upcoming(None, day=self.DAY), [])
+        self.assertEqual(recap.upcoming([None, "x", 3], day=self.DAY), [])
+
+    def test_合并时过去的条目不再传下去(self):
+        prev = [self._row("过去的", "2026-10-14"), self._row("将来的", "2026-10-19")]
+        got = recap.merge_duties(prev, [], day=self.DAY)
+        self.assertEqual([x["title"] for x in got], ["将来的"])
+
+    def test_合并时没日期的算随课传了一次(self):
+        prev = [{"type": "其他", "title": "没日期的"}, self._row("有日期的", "2026-10-19")]
+        got = {x["title"]: x for x in recap.merge_duties(prev, [], day=self.DAY)}
+        self.assertEqual(got["没日期的"]["carry"], 1)
+        self.assertEqual(got["有日期的"]["carry"], 1)
+
+    def test_这节课新产生的不算传过(self):
+        got = recap.merge_duties([], [self._row("新的", "2026-10-19")], day=self.DAY)
+        self.assertEqual(int(got[0].get("carry") or 0), 0, "新条目不该从 carry=1 起")
+
+    def test_没日期的传到第_3_节就丢(self):
+        """⭐ 「最多留 2 节」的完整走一遍：记下 → 第 2 节留 → 第 3 节丢。"""
+        one = [{"type": "其他", "title": "没日期的"}]
+        two = recap.merge_duties(one, [], day=self.DAY)          # 第 2 节
+        self.assertEqual(len(two), 1)
+        three = recap.merge_duties(two, [], day=self.DAY)        # 第 3 节
+        self.assertEqual(three, [], "没日期的条目随课传满 2 次就该丢")
+
+    def test_渲染那层也过滤(self):
+        """⭐ 作者点名的是「**开课渲染时**」—— `card()` 自己也要挡（存下来的可能已旧）。"""
+        data = {"points": [{"name": "停业价格", "explain": "价格低于它就停产"}],
+                "duties": [self._row("过去的", "2026-10-14"),
+                           self._row("将来的", "2026-10-19")]}
+        rows = recap.card(data, day=self.DAY)
+        self.assertEqual([x["title"] for x in rows["duties"]], ["将来的"])
+        self.assertEqual(len(recap.card(data)["duties"]), 2, "不传今天 = 不过滤（老调用方）")
+
+    def test_上限还是三条(self):
+        rows = [self._row(f"第{i}件", "2026-10-19") for i in range(9)]
+        self.assertEqual(len(recap.card({"duties": rows}, day=self.DAY)["duties"]),
+                         recap.DUTIES_MAX)
+
+
+class 解释的说法要严谨(unittest.TestCase):
+    """⭐ 作者 2026-10-17：知识点解释**必须符合理论、不下绝对话**。
+
+    点名的是「极值只可能出现在驻点或边界上」——**不可导点（如 |x| 在 0 处）也是极值**，
+    这句本身就不严谨（原型 §"说话要严谨"那一行，原来还把它当"应说"的写法教给了模型）。
+    """
+
+    ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+    def _src(self, rel: str) -> str:
+        return (self.ROOT / rel).read_text(encoding="utf-8")
+
+    def test_提示词给了严谨写法(self):
+        self.assertIn("可导函数的极值点导数为零", recap._SYS)
+        # 「不说绝对话」这条约束要真的在（反例必须标着"反例"，不能光把错句摆进去）
+        self.assertIn("绝对话", recap._SYS)
+        self.assertIn("宁可少说一句", recap._SYS)
+        self.assertIn("反例", recap._SYS)
+
+    def test_夹具不再出现那个说法(self):
+        src = self._src("scripts/probe_duty_recap.py")
+        self.assertNotIn("极值只可能出现在驻点或边界上", src)
+        self.assertIn("可导函数的极值点导数为零（驻点）", src)
+
+
 class Tail(unittest.TestCase):
     def test_取最后一句英文(self):
         entries = [{"en": "First sentence."}, {"en": "", "asr": "raw fallback"},

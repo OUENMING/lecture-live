@@ -43,6 +43,13 @@ OPEN_MAX = 2
 DUTIES_MAX = 3
 TODAY_MAX = 2
 
+#: ⭐ 「临近的一些事儿」**只看未来这么多天**（作者 2026-10-17）——
+#: 期末考试那种两个月后的条目不进"临近"（它还在卡片 / 提醒事项里，只是不占回顾的行）。
+DUTIES_WINDOW_DAYS = 14
+#: ⭐ **没日期**的条目最多随课传几次（同上）。没日期判不了远近 —— 不给个上限的话
+#: 它会永远留在列表里（`carry` 在 `merge_duties` 里加一，见 `upcoming`）。
+DUTIES_CARRY_MAX = 2
+
 #: 一次调用能喂多少字符（章节 + 重点句）。一节课 310 句的课约 8K，这里只喂骨架。
 FEED_MAX_CHARS = 6000
 
@@ -50,8 +57,10 @@ _SYS = """你是课堂笔记助手。给一节大学课写「课前回顾」用�
 在两分钟内想起上节课讲了什么。纪律（缺一不可）：
 1. 知识点按**讲解顺序**排（输入就是顺序），每点给**一句大白话解释**：
    只讲概念本身，**不带例子、不带数字、不带公式、不带符号**。
-2. 表述要**严谨**：宁可少说一句，也不要说一个会被老师纠正的说法。
-   （反例：「最值只可能在驻点」—— 应说「极值只可能出现在驻点或边界上」。）
+2. 表述要**严谨**：说法必须符合理论，**宁可少说一句，也不要说会被老师纠正的绝对话**
+   （「一定 / 只可能 / 必然」这类词，除非数学上真的无例外）。
+   （反例：「极值只可能出现在驻点或边界上」—— 漏了**不可导点**（如 |x| 在 0 处）；
+     应说「可导函数的极值点导数为零（驻点）」。）
 3. 重点（`stars`）写 2–3 条**结论式**的句子：中文、不带数字、不出现"概率/得分"，
    写成一个学生可以背下来的一句话。
 4. 名字用中文术语；输入里的英文术语照抄进括号可以，别自己翻译出新词。
@@ -147,10 +156,12 @@ def _feed(chapters, keypoints) -> str:
     return "" if not n_ch and not keypoints else "\n".join(lines)[:FEED_MAX_CHARS]
 
 
-def card(data) -> dict:
+def card(data, *, day=None) -> dict:
     """数据 → 界面要的行。**纯函数**（判据靠它）。
 
     ⭐ 「没有就不显示」这条纪律的**唯一定义点**：空的块就是空列表，由 UI 决定不画。
+    ⭐ 2026-10-17（作者）：「临近的一些事儿」在这里**按「今天」过滤**（`upcoming`）——
+       存下来的那份可能已经旧了（老 recap / 上一次合并漏掉的），显示这一层再挡一道。
     """
     d = data if isinstance(data, dict) else {}
     points = []
@@ -164,9 +175,7 @@ def card(data) -> dict:
              if s and _no_digits(s)][:STARS_MAX]
     open_qs = [s for s in (_flat(x) for x in (d.get("open") or [])) if s][:OPEN_MAX]
     duties = []
-    for x in (d.get("duties") or []):
-        if not isinstance(x, dict):
-            continue
+    for x in upcoming(d.get("duties"), day=day):
         title = _flat(x.get("title"))
         if title:
             duties.append({"type": _flat(x.get("type")), "title": title,
@@ -209,13 +218,68 @@ def load(course: str, *, root=None) -> dict:
         return {}
 
 
-def merge_duties(prev, new) -> list:
+def _iso_date(v):
+    """`"2026-10-14"` / `date` → `date`；认不出 → `None`（**当"没日期"处理**，不是丢掉）。"""
+    if isinstance(v, datetime.datetime):
+        return v.date()
+    if isinstance(v, datetime.date):
+        return v
+    s = str(v or "").strip()
+    if not s:
+        return None
+    try:
+        return datetime.date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def upcoming(duties, *, day=None) -> list:
+    """「临近的一些事儿」按**今天**过滤 —— 三条规则（作者 2026-10-17 点名）。
+
+    1. ⭐ **有日期的**：`day <= 日期 <= day + DUTIES_WINDOW_DAYS` 之内才留。
+       `日期 < day` = **已经过去了**（原来会跟着一节节传下去 —— 拍摄里就出过
+       「上节 10-15、这条 10-14」）；超过窗口 = 不"临近"（两个月后的期末之类）。
+    2. ⭐ **没日期的**：**留**（没日期判不了远近），但 `carry`（`merge_duties` 里
+       每随课传一次加一）到 `DUTIES_CARRY_MAX` 就丢 —— 不然它永远留着。
+    3. `day is None`（不知道今天是哪天）→ **日期一条都不过滤**（宁可多留，不要错杀）；
+       `carry` 那条照旧（它不依赖今天）。
+
+    ⚠️ 这是**纯函数**（表驱动判据在 `tests/test_recap.py::临近的一些事儿`）：
+       只认 `date`（ISO 串）与 `carry` 两个字段，其余原样带过。
+    ⚠️ `date` 认不出（老数据可能只有 `when` 那种显示串）→ **当没日期**：留，
+       但受 `carry` 上限管 —— 与"根本没日期"同一条路。
+    """
+    today = _iso_date(day)
+    horizon = (today + datetime.timedelta(days=DUTIES_WINDOW_DAYS)) if today else None
+    out = []
+    for x in (duties or []):
+        if not isinstance(x, dict):
+            continue
+        if today is not None:
+            d = _iso_date(x.get("date"))
+            if d is not None and (d < today or d > horizon):
+                continue
+        if int(x.get("carry") or 0) >= DUTIES_CARRY_MAX:
+            continue
+        out.append(x)
+    return out
+
+
+def merge_duties(prev, new, *, day=None) -> list:
     """上一节存下的「临近的一些事儿」+ 这节课的 → 合并去重（同一件别记两遍）。
 
-    ⚠️ 顺序：**新在前**（越近的越靠前）；同一 (title, date) 只留一条。
+    ⚠️ 顺序：**新在前**（越近的越靠前）；同一 (title, when|date) 只留一条。
+    ⭐ 2026-10-17（作者）：**按「今天」过滤**（`upcoming`）——
+       · 上一节那份里**已经过去**的条目不再往下一节传（从前会节节相传）；
+       · 活下来的那些**没日期的**条目 `carry += 1`（"随课传了几次"，到上限就丢）。
+    ⚠️ 这节课**新产生的**条目 `carry` 从 0 起（缺字段 = 0）。
     """
+    carried = []
+    for x in (prev or []):
+        carried.append({**x, "carry": int(x.get("carry") or 0) + 1}
+                       if isinstance(x, dict) else x)
     out, seen = [], set()
-    for x in list(new or []) + list(prev or []):
+    for x in upcoming(new, day=day) + upcoming(carried, day=day):
         if not isinstance(x, dict):
             continue
         key = (_flat(x.get("title")), _flat(x.get("when")) or _flat(x.get("date")))

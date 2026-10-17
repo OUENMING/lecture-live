@@ -3670,7 +3670,9 @@ class Overlay:
         """把回顾渲染进卡。回 `True` = **真上屏了**（调用方靠它决定记不记「出现」）。"""
         try:
             import recap as _recap
-            rows = _recap.card(self._recap_data or {})
+            # ⭐ 2026-10-17（作者）：duties 按**今天**过滤（`self._session_day` =
+            #    开课时 `main` 给的今天）—— 存下来的那份可能已经旧了。
+            rows = _recap.card(self._recap_data or {}, day=self._session_day)
         except Exception as e:                            # noqa: BLE001
             print(f"⚠ 课前回顾渲染失败({str(e)[:60]}); 不显示")
             self._card_close()

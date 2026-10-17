@@ -9,7 +9,8 @@
   02-card      点开：可编辑卡片（类型 / 标题 / 日期 + 推算依据 / 原话 / 记下·忽略）
   03-failed    记下失败：卡上写明原因（写不进提醒事项那条路）
   04-wrapup    收尾汇总：漏处理的一次性确认
-  05-recap-a   课前回顾 A 态（有上节笔记 + 今天有课件）
+  05-recap-a   课前回顾 A 态（有上节笔记 + 今天有课件）—— ⚠️ 「临近的一些事儿」里
+               那条 **10-14 已经过去 → 不显示**（按今天过滤，作者 2026-10-17）
   06-recap-b   课前回顾 B 态（没传课件 ——「今天可能讲什么」整块不出现）
   07-first     首节课：`recap_show({})` **什么都不弹**（C1）
 
@@ -42,6 +43,10 @@ from probe_motion import isolated_window_file                      # noqa: E402
 MIN_BASELINE_BYTES = 60_000
 
 DAY = datetime.date(2026, 10, 12)      # 周一（SOC10020 那节，原型里的真实日期）
+#: 回顾那几张的「今天」—— 回顾说的是**上一节 10-15（周四）**的课，所以今天是 10-16（周五）。
+#: ⚠️ 与 `DAY` **刻意不同**：`DAY` 是卡片/收尾那几张的上课日（SOC10020 · 周一），
+#:    回顾是另一门课（ECON10790）的下一节 —— 两段故事各自自洽，日期才对得上。
+RECAP_DAY = datetime.date(2026, 10, 16)
 
 DUTY_QUOTES = [
     ("There is no class on Wednesday this week.", "这周三没有课。", "13:52:56", "model", True),
@@ -54,7 +59,7 @@ RECAP_A = {
     "course": "ECON10790", "date": "10-15（周四）",
     "points": [
         {"name": "停业价格", "explain": "价格低到这条线以下，开工反而比关门亏得多，企业就该停产。"},
-        {"name": "驻点与曲线形状", "explain": "导数等于零的点是驻点，极值只可能出现在驻点或边界上；"
+        {"name": "驻点与曲线形状", "explain": "可导函数的极值点导数为零（驻点）；"
                                         "曲线往上弯还是往下弯由二阶导数决定。"},
         {"name": "二阶导数检验", "explain": "在驻点上看二阶导数：往上弯是谷底，往下弯是山顶。"},
         {"name": "平均成本与边际成本", "explain": "平均成本是把总花销摊到每一件上；"
@@ -67,8 +72,18 @@ RECAP_A = {
               "平均成本最低的地方，边际成本正好和它相等。",
               "曲线往上弯是谷、往下弯是峰：方向由二阶导数定。"],
     "open": ["13:42 那句没听懂：二阶导数的符号怎么定曲线的凹凸"],
-    "duties": [{"type": "调课", "title": "本周三停课", "when": "10-14（周三）"},
-               {"type": "其他", "title": "分组周必须到场", "when": "10-20（周二）"}],
+    "duties": [
+        # ⚠️ 这条**不会显示**（10-14 已经过去 —— 今天 `RECAP_DAY` = 10-16）：
+        #    故意留在这儿，截图里看不到它才说明「按今天过滤」真跑起来了
+        #    （判据见 `tests/test_recap.py::临近的一些事儿`）。
+        {"type": "调课", "title": "本周三停课", "when": "10-14（周三）",
+         "date": "2026-10-14"},
+        # ⚠️ 与 04-wrapup 是**同一件事**：日期/写法都按管道算出来的那份对齐
+        #    （`duty_when` 从「Next week」按上课日 10-12 推 = 10-19（周一））。
+        #    原来这里手写成 10-20（周二）、标题缩写成了「分组周必须到场」—— 已对齐。
+        {"type": "其他", "title": "下周必须到场，要分组做项目", "when": "10-19（周一）",
+         "date": "2026-10-19"},
+    ],
     # ⚠️ 2026-10-17：这一块**只留课件那条**（作者砍掉了「上节课结尾提到」）。
     "today": ["今天新课件《week6-monopoly.pdf》：Monopoly · Deadweight loss"],
 }
@@ -240,7 +255,7 @@ def main() -> int:
             o.duty_wrapup_finish()
 
             _fit_panel(o, 780)               # 课前回顾块多：先把面板加高，别让块被裁掉
-            o.recap_show(RECAP_A, course="ECON10790", day=DAY)
+            o.recap_show(RECAP_A, course="ECON10790", day=RECAP_DAY)
             shot(o, "05-recap-a")
             no_slides = {k: v for k, v in RECAP_A.items() if k != "today"}
             o.recap_update({"today": []})
@@ -251,7 +266,7 @@ def main() -> int:
             o.recap_show({})                     # 首节课：什么都不弹（C1）
             shot(o, "07-first")
             # 教授开口 → 自动淡出（再拍一张，证明让位了）
-            o.recap_show(RECAP_A, course="ECON10790", day=DAY)
+            o.recap_show(RECAP_A, course="ECON10790", day=RECAP_DAY)
             _pump(o, 0.3)
             o.add_draft("good afternoon everyone today we start")
             _pump(o, 0.6)

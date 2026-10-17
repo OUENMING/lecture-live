@@ -2014,6 +2014,10 @@ def run(args) -> None:
     # ---- 草稿线程 ----
     # 每定稿一句 +1; 草稿线程据此重置节流(见 partial_worker 里的说明)。
     final_gen = {"n": 0}
+    #: ⭐ 这节课的定稿**用过云端**吗 —— 下课收尾时靠它给那张「旧的本地 Whisper
+    #: 还能清掉」的卡记一节（`whisper_card.note_cloud_class`）。只在本进程里数，
+    #: 不落盘、不影响任何判定；写盘只在收尾那一处。
+    cloud_final = {"used": False}
     #: ⭐ 3.9.7 省电：窗口**不可见**期间跳过的草稿份数（收尾进测试模式 ui 块
     #: `draft_skipped_hidden` / `draft_zh_skipped_hidden`）。`zh` 那一格由草稿译文
     #: 线程的 `paused` 回调自增（同一条纪律：只说数字，不动文本）。
@@ -2374,6 +2378,10 @@ def run(args) -> None:
                 #    少记它的代价是实打实的(2026-10-07: 主模型空与兜底模型空分不开)。
                 r = final.transcribe(buf)
                 text = r.text
+                # ⭐ 「这段定稿来自云端」记一笔（进程内）—— 下课收尾时用它决定要不要给
+                #    `whisper_card` 数一节（那张卡要求「本版本上 ≥3 节云端定稿的课」）。
+                if r.source in final_asr.CLOUD_SOURCES:
+                    cloud_final["used"] = True
                 # ⭐ 第 4 项：这一段 ASR 原文有没有句末标点（跨段合并的 ASR 口径）。
                 #    口径与 `testmode.note_segment` 的 `end_punct` **逐字相同**（含 `…`）。
                 seg_end_punct[_fseg] = fragment_merge.asr_end_punct(text)
@@ -3572,6 +3580,14 @@ def run(args) -> None:
             _auto_update_on_exit()
             # ⭐ 下课了 —— 这才把那个可选的草稿模型放后台下（上课途中绝不下，见它的 docstring）
             _draft_model_on_exit()
+            # ⭐ 这节课的定稿用过云端 → 记一节（那张「旧的本地 Whisper 还能清掉」的卡
+            #    要「本版本上已上完 ≥3 节云端定稿的课」；计数失败不拦任何事）。
+            if cloud_final["used"]:
+                try:
+                    import whisper_card
+                    whisper_card.note_cloud_class()
+                except Exception:                         # noqa: BLE001
+                    pass
 
 
 #: `SilenceWatch` 按音源的（等多久, 报什么）。⚠️ 只说现象 + 最可能的两个原因，不替用户动系统设置。

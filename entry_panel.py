@@ -2888,7 +2888,50 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             buttons=[("稍后", _card_done(lambda: _status(f"好 —— 下课关掉后自动装 {latest}")),
                       "secondary"),
                      ("立即更新", _card_done(now), "primary")],
-            over=win), preempt=("updated", "draft"))
+            over=win), preempt=("updated", "draft", "whisper"))
+
+    def _keep_whisper() -> None:
+        """「保留」—— 记住这个回答，以后不再问（记不上就说出来）。"""
+        import whisper_card as wc
+        if wc.answer("keep", root=state_root):
+            _status("好 —— 本地 Whisper 留着，以后不再问")
+        else:
+            _status("⚠ 这个选择没记住（写不进 ~/.classlive）—— 下次还会问一次")
+
+    def _remove_whisper() -> None:
+        """「移到废纸篓」—— 安全判据全在 `whisper_card.remove`（只认注册表那条路径）。
+
+        ⚠️ 成功才记「删过」；没删成（判据不过 / 废纸篓搬不动）就**别装作问过了** ——
+           下次打开还会问，用户照样能再点一次。
+        """
+        import whisper_card as wc
+        r = wc.remove(wc.whisper_path(), root=state_root)
+        if r["ok"]:
+            _status("已把本地 Whisper 移到废纸篓（Finder 里可还原）"
+                    "—— 想装回来：cl doctor")
+        else:
+            _status(f"⚠ 没删：{r['error']}")
+
+    def _whisper_card() -> None:
+        """旧的本地 Whisper 还在盘上 → 问一次删不删（云端正稿已经接替它）。主线程。
+
+        ⚠️ 四个条件全中才出（`whisper_card.should_offer`）：**没答过** ·
+           本版本上 ≥3 节云端定稿的课 · 目录还在 · 云端转写开着。答过就永不再问。
+        ⚠️ 与其它小卡共用同一条队列（一次只出一张，关掉一张再出下一张）。
+        """
+        try:
+            import whisper_card as wc
+            if not wc.should_offer(root=state_root):
+                return
+            title, body, note = wc.card_texts(wc.size_text_now())
+        except Exception:                                  # noqa: BLE001
+            return
+        import whatsnew
+        _queue_card("whisper", lambda: whatsnew.build(
+            title, "", body=body, note=note,
+            buttons=[("移到废纸篓", _card_done(_remove_whisper), "secondary"),
+                     ("保留", _card_done(_keep_whisper), "primary")],
+            over=win))
 
     def _show_update(offer: dict, gen) -> None:
         """后台查完新版本，回到主线程把「更新」接进胶囊（它自己会写进那一行 / 菜单里）。
@@ -2911,10 +2954,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _refresh_chip()
 
     if on_start is not None:
-        # 「已更新到 X」/「草稿模型还没装」：本地就能判断，面板一出来就排上（下一轮 runloop，面板先上屏）
+        # 「已更新到 X」/「草稿模型还没装」/「旧的本地 Whisper 还能清掉」：
+        # 本地就能判断，面板一出来就排上（下一轮 runloop，面板先上屏）
         card_gen = S["card_gen"] = object()
         _later(lambda: None if _stale(card_gen, "card_gen") else _updated_card())
         _later(lambda: None if _stale(card_gen, "card_gen") else _draft_card())
+        _later(lambda: None if _stale(card_gen, "card_gen") else _whisper_card())
 
     if on_start is not None and ready_items:
         # ⚠️ 只在**开课前**的面板上查（上课中从菜单栏打开的那档 `on_start=None` 不查：课在录，不该更新）。

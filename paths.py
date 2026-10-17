@@ -199,6 +199,16 @@ def ready_state(*, root=None) -> pathlib.Path:
     return _root(root) / "ready-dismissed"
 
 
+def whisper_card(*, root=None) -> pathlib.Path:
+    """「旧的本地 Whisper 还能清掉」那张卡的状态 —— `~/.classlive/whisper-card.json`。
+
+    形状 `{"cloud_classes": int, "answered": "" | "trash" | "keep"}`（读写都在 `whisper_card.py`）。
+    ⚠️ 住 `~/.classlive/` 的理由同 `ready_state`：用户的回答与计数是**要留着的数据**，
+       不能住会被清理工具扫掉的 `Logs/`，也不能住会被 `git pull` 重写的安装目录。
+    """
+    return _root(root) / "whisper-card.json"
+
+
 def key_cleared_flag(*, root=None) -> pathlib.Path:
     """「老 key 已经挪到旁边了」的标记（`key-cleared`，内容是**做这件事的版本号**）。
 

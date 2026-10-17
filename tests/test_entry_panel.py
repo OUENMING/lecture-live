@@ -658,6 +658,7 @@ def main() -> int:
     _digit_hint_section()
     _result_actions_section()
     _enter_section()
+    _whisper_card_section()
     _target_liveness_section()
     _chip_section()
     _test_mode_section()
@@ -2808,6 +2809,80 @@ def _enter_section() -> None:
                 h.close()
             except Exception:                                 # noqa: BLE001
                 pass
+
+
+def _whisper_card_section() -> None:
+    """⑧e 「旧的 Whisper」那张卡的**接线**：该出时真的排出来、按钮接到真回调。
+
+    ⚠️ 四个出卡条件在 `tests/test_whisper_card.py` 里逐条钉着（那是它的家）；
+       这一节只钉「条件为真时，开课面板真的把它排出来、两颗按钮接对了」——
+       排卡这条线坏掉时不出声（卡片静默不出现），纯函数判据全绿也照样发生。
+    """
+    print("\n--- ⑧e Whisper 卡：接线（条件为真 -> 真的排、按钮接对）---")
+    import tempfile
+
+    try:
+        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+    except Exception as e:                                    # noqa: BLE001
+        check("AppKit 可用（这一节要真面板）", False, f"{type(e).__name__}: {e}")
+        return
+    import whatsnew as _WN
+    import whisper_card as _WC
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory)
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        gl = root / "glossary.txt"
+        gl.write_text("# public table\n", encoding="utf-8")
+        (root / "glossary").mkdir()
+        (root / "glossary" / "AA10010.txt").write_text("# AA10010\n", encoding="utf-8")
+        built: list = []
+        _real_later, _real_build = E._later, _WN.build
+        _real_offer, _real_remove = _WC.should_offer, _WC.remove
+        E._later = lambda fn, *a: fn(*a)          # 把排下一轮 runloop 的那几步同步跑掉
+        _WN.build = (lambda title, subtitle="", **kw:
+                     built.append((title, subtitle, kw)) or None)
+        _WC.should_offer = lambda **kw: True      # 条件那半由 test_whisper_card 钉
+        h = None
+        try:
+            h = E.build(glossary=gl, sessions_dir=root / "sessions",
+                        state_root=root / "state", on_start=lambda c: None)
+            check("面板建起来了", h is not None)
+            _wk = [b for b in built if b[0] == _WC.card_texts("")[0]]
+            check("⭐⭐ 条件为真 -> 真的排了一张 Whisper 卡（标题对上）",
+                  len(_wk) == 1, f"built={[b[0] for b in built]}")
+            if _wk:
+                _kw = _wk[0][2]
+                _labels = [t for t, _f, _k in (_kw.get("buttons") or [])]
+                check("⭐⭐ 两颗按钮都在、顺序是 移到废纸篓 / 保留",
+                      _labels == ["移到废纸篓", "保留"], str(_labels))
+                _btns = _kw.get("buttons") or []
+                if len(_btns) == 2:
+                    # 点「保留」-> 真的写进 whisper_card 的状态（隔离在 tempdir）
+                    _btns[1][1]()
+                    check("⭐「保留」-> 真的记下了（`whisper_card.answer`）",
+                          _WC.answered(root=root / "state") == "keep",
+                          repr(_WC.answered(root=root / "state")))
+                    # 点「移到废纸篓」-> 接到 `whisper_card.remove` 且传的是注册表路径
+                    # ⚠️ 换成桩再点 —— **绝不在判据里碰真的 ~/models**
+                    _rm: list = []
+                    _WC.remove = (lambda p, **kw:
+                                  (_rm.append(str(p)),
+                                   {"ok": True, "refused": False, "error": ""})[1])
+                    try:
+                        _btns[0][1]()
+                    finally:
+                        _WC.remove = _real_remove
+                    check("⭐「移到废纸篓」-> 接到 `whisper_card.remove`（注册表路径）",
+                          _rm == [_WC.whisper_path()], str(_rm))
+        finally:
+            E._later, _WN.build = _real_later, _real_build
+            _WC.should_offer, _WC.remove = _real_offer, _real_remove
+            if h is not None:
+                try:
+                    h.close()
+                except Exception:                             # noqa: BLE001
+                    pass
 
 
 def _add_wiring_section() -> None:

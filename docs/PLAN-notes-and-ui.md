@@ -534,3 +534,28 @@ cl materials                         ← 一条命令：转 markdown + 落到约
 | 新依赖代价 | 要 API key + env，而 **cc-switch 每次切 provider 都重建 `settings.json` 把它们抹掉**（已踩两次） |
 
 **翻转条件**：出现**高频重复、答案空间可穷举、且没有确定性替代**的判断时才值。目前没有。
+
+---
+
+## 9. v2 已落地（2026-10-17）—— 上面 §0 的病根是怎么被换掉的
+
+§0 那句诊断（「绝不引入外部知识」逼模型复述）在 2026-10-17 被**整段换掉**。落地后的形状：
+
+| 层 | 住在哪 | 一句话 |
+|---|---|---|
+| 课件索引 | `materials.py` | BM25 top-k 检索 + `verify()` 语境核对；只读 `<vault>/Study/<课号>/materials/` 与 `~/.classlive/courses/<课号>/materials/`，没有就空索引（退化档） |
+| 生成 | `note_v2.py` | 分块 review（带课件片段）+ `align`（覆盖度）+ `verify_numbers`（三道核）；prompt 要的是**中文连贯讲解**、例题每步带「为什么」、变式、补全题、前置补课、🎙📖📚 来源纪律 |
+| 版式 | `note_render.py` | 速览 → 纲要 → 讲解（由浅入深）→ 自测（先答再揭晓）→ 覆盖度/校验清单 → 术语 → 复习排程 → ❓/⭐/🎯 → 附录 A 纪律 + 附录 B **未精修**转录 |
+| 交互版 | `note_html.py` | 同目录同名 `.html`：分步例题、自测揭晓、KaTeX（离线退回 TeX 源码）、可拖参数的图、知识点地图 + 进度条、`prefers-reduced-motion`、亮/暗主题 |
+| 术语库 | `note_glossary.py` | 笔记抽词 → `prep.append_terms`（只追加 + 本课锁）→ 墓碑（删过不复活）；下节课全量注入（判据抓真实请求体） |
+| 增量 | `note_v2.anki_rows` / `review_dates` | Anki CSV（术语/自测/公式）+ 2/7/21 天回看日期（只写日期，不推送） |
+
+**旧的那套**：`obsidian_writer._review` / `_call_review` / `_overview` 已删（分块并发判据搬到
+`tests/test_review_parallel.py` 指向 `note_v2.review`）；`REVIEW_SYS` / `_clean_review` 留着但**只被
+`docs/experiments/review_prompt_ab.py` 用**（那是它的 A/B 基准，实验要能复现）。逐句精修
+（`polish.py`）保持默认关：v2 起**转录不再精修**，原样折叠在附录 B 当证据层。
+
+**验收（2026-10-15 ECON10790，真课件 37 份 / 489 段）**：覆盖度 33 → 30（缺的 5 条带原因列在 §9）、
+数字三道核 35 ✓ / 1 ⚠ / 4 未核对、中文占比 71%（口径 `note_render.chinese_ratio`）、
+术语表 0 人名/0 常识词、MC(4) 20→12 与 AC=MC 等式两处口误都留了「修正说明」。
+产物在 `scratchpad/notes/out/Lectures/`（`.md` / `.html` / `.anki.csv`）。

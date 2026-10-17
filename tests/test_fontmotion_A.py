@@ -93,15 +93,15 @@ def t_a1_tnum() -> None:
 # ══════════════════════════════════════════════════════════════════════
 
 def t_a3_stroke() -> None:
-    print("\n--- A3 无模糊描边 ---")
+    print("\n--- A3 居中光晕（2026-10-17 由无模糊下偏描边改来）---")
     import overlay as O
     sh = O._make_shadow()
-    check("blurRadius = 0.0（边缘不再是软的）", abs(float(sh.shadowBlurRadius()) - 0.0) < 1e-6,
+    check("blurRadius = 1.5", abs(float(sh.shadowBlurRadius()) - 1.5) < 1e-6,
           str(sh.shadowBlurRadius()))
-    check("黑 α = 0.85", abs(float(sh.shadowColor().alphaComponent()) - 0.85) < 0.01,
+    check("黑 α = 0.75", abs(float(sh.shadowColor().alphaComponent()) - 0.75) < 0.01,
           f"{float(sh.shadowColor().alphaComponent()):.3f}")
     dx, dy = sh.shadowOffset()
-    check("offset 不变 = (0, -1)", abs(dx) < 1e-6 and abs(dy + 1.0) < 1e-6, f"({dx}, {dy})")
+    check("offset = (0, 0)（不偏移，亮背景下不出下沿重影）", abs(dx) < 1e-6 and abs(dy) < 1e-6, f"({dx}, {dy})")
 
 
 # ══════════════════════════════════════════════════════════════════════

@@ -403,9 +403,12 @@ def _make_shadow():
     # 而模糊阴影的边缘是软的 —— 无模糊 + 更高不透明度是 Netflix/BBC/ITV 那一档
     # 字幕的配方(ITV 逐字 "white text on a solid black background for optimum
     # legibility"), 也是本文件 247 行早就写下的结论。
-    sh.setShadowColor_(NSColor.blackColor().colorWithAlphaComponent_(0.85))
-    sh.setShadowBlurRadius_(0.0)
-    sh.setShadowOffset_((0.0, -1.0))
+    # 2026-10-17(Owen 并排看过选 C): 改成**不偏移的居中光晕** blur 1.5 / α0.75。
+    # 偏移 (0, -1) 的硬描边只压在字的下沿: 身后是亮窗口时磨砂面板变成中灰,
+    # 那条黑下沿就成了一道重影; 深色背景下面板近黑才看不出。居中光晕四周均匀, 不再有方向。
+    sh.setShadowColor_(NSColor.blackColor().colorWithAlphaComponent_(0.75))
+    sh.setShadowBlurRadius_(1.5)
+    sh.setShadowOffset_((0.0, 0.0))
     return sh
 
 
@@ -561,7 +564,7 @@ OUTLINE_DIVIDER = "— 上次看到这里 —"
 #: 章节条的字号与文字透明度。
 #:
 #: ⚠️⚠️ **单看这个 α 会误判可读性** —— 面板的设计是「**低 scrim + 黑描边**」：
-#:    `_label` 给每个标签挂 `setShadow_(self._shadow)`（`_make_shadow`：黑 α0.80 /
+#:    `_label` 给每个标签挂 `setShadow_(self._shadow)`（`_make_shadow`：居中光晕 黑 α0.75 /
 #:    blur 1.5 / offset (0,−1)），逐字「在任意底色（纯白 PPT / 彩图）上把字从背景里切出来」。
 #:    ⚠️ **这一点本文件 228–252 行早有记录**（2026-09-24 黑底/白底双拍实测：
 #:    scrim α0.38 → 白底之上白字对比度只有 **2.33:1**，而结论是

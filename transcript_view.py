@@ -33,6 +33,7 @@ import time
 
 import motion
 import objc_own
+import edge_fade
 
 IDLE_S = 6.0          # 闲置多久才自动回底(仅在离开底部后又有新句定稿时)
 BOTTOM_EPS = 3.0      # origin.y <= 此值即视为在底部(橡皮筋的负值也算)
@@ -634,6 +635,11 @@ class TranscriptView:
 
     def set_frame(self, y: float, h: float) -> None:
         self._scroll.setFrame_(((self._pad, y), (self._width - 2 * self._pad, h)))
+        # ⭐ 顶边渐隐（作者 2026-10-17）：视口一变就重贴一次遮罩 —— 这里是**唯一**
+        #    知道"字幕区现在多大"的地方。卡片开着时这条边就是**卡片底下那条字幕区的
+        #    顶边**（被裁的那半行落在这条带里，不再看着像坏了）；没卡时它是窗口内容
+        #    区的顶边 —— 同一条边、同一份 7 档（`edge_fade`）。
+        edge_fade.apply(self._scroll, edge="top")
         self.mark_dirty(urgent=True)
 
     def set_collapsed(self, collapsed: bool) -> None:

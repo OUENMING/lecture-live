@@ -201,12 +201,18 @@ class VerifyNumbers(unittest.TestCase):
         self.assertNotIn("先说直觉", texts, "没有数字的段落不该占核对的额度")
 
     def test_重算不一致标_mismatch(self):
+        """讲解里的断言（🎙/📖）**仍然**可以判 mismatch —— 收窄不许收过头。"""
+        rev = {"sections": [SECTION]}
+        claims = nv.numeric_claims(rev)
+        idx = next(i for i, c in enumerate(claims) if c["origin"] == "prose")
+
         def chat(s, u, m):
-            return {"items": [{"i": 0, "status": "mismatch", "recomputed": "12",
+            return {"items": [{"i": idx, "status": "mismatch", "recomputed": "12",
                                "note": "代入 q=4 应为 12"}]}
-        got = nv.verify_numbers({"sections": [SECTION]}, chat=chat)
-        self.assertEqual(got[0]["status"], "mismatch")
-        self.assertEqual(got[0]["recomputed"], "12")
+        got = nv.verify_numbers(rev, chat=chat)
+        row = next(r for r in got if r["claim"] == claims[idx]["text"][:160])
+        self.assertEqual(row["status"], "mismatch")
+        self.assertEqual(row["recomputed"], "12")
         corr = nv.corrections_from_mismatch(got)
         self.assertEqual(corr[0]["fixed"], "12")
 
@@ -656,6 +662,102 @@ class HtmlPlots(unittest.TestCase):
     def test_未知_kind_返回空(self):
         self.assertEqual(nh.svg("随便画的", {}), "")
         self.assertEqual(nh.curves("随便画的", {}), [])
+
+
+#: 第六轮第 1 条的 fixture：**ECON10770 厨房清洁博弈**（不是 10-15 那节课）。
+#: 例题：成本 6 / 分担 3 / 价值 4 → 都打扫每人 4−3=1；
+#: 变式：价值变 5（成本不变）→ 都打扫每人 **5−3=2** —— 实测被三道核按例题的
+#: 4−3=1「修正」过，那正是这一条要根除的假修正。
+GAME = {
+    "sections": [{
+        "heading": "厨房清洁博弈（kitchen cleaning game）", "ts": "12:11",
+        "prose": ["教授说打扫总成本是 6，两个人分担则每人 3，于是搭便车的那个人多占 6-3=3。"],
+        "example": {"title": "🎙 12:12 厨房清洁博弈",
+                    "prompt": "打扫总成本 6，两人分担每人 3，价值 4",
+                    "steps": [{"text": "都打扫时每人得4-3=1", "why": "要减掉自己那份成本"}],
+                    "answer": "纳什均衡是（不打扫，不打扫）"},
+        "variants": [{"q": "如果价值变为5，其他不变（成本 6，两人分担每人 3），均衡是什么？",
+                      "steps": [{"text": "都打扫时每人得5-3=2", "why": "同样要减掉自己那份"}],
+                      "a": "不打扫仍是优势策略"}],
+        "faded": {"q": "补全：价值 4 时行参与者的收益是 ____ 减 3",
+                  "blanks": ["4"], "a": "都打扫时每人 4-3=1"},
+    }],
+    "qa": [{"q": "搭便车是什么？", "a": "享受别人的成果；分摊下来每人 6-3=3 的成本。",
+            "kind": "concept"}],
+}
+
+
+class VerifyNarrowing(unittest.TestCase):
+    """第六轮第 1 条：三道核**只核来自 🎙/📖 的断言**，模型自己出的题最多标未核对。"""
+
+    def _run(self, status_for):
+        """替身 `chat`：按 `status_for(序号, 断言文本)` 给状态。返回（行, 发给模型的 user）。"""
+        seen: dict = {}
+
+        def chat(system, user, max_tokens):
+            seen["user"] = user
+            seen["system"] = system
+            claims = nv.numeric_claims(GAME)
+            return {"items": [{"i": i, "status": status_for(i, c["text"]),
+                               "recomputed": "4-3=1", "note": "价值应为4非5"}
+                              for i, c in enumerate(claims)]}
+        return nv.verify_numbers(GAME, chat=chat), seen
+
+    def test_每条断言带出处与自己那道题的题面(self):
+        by = {c["text"]: c for c in nv.numeric_claims(GAME)}
+        v = by["都打扫时每人得5-3=2"]
+        self.assertEqual(v["origin"], "variant")
+        self.assertIn("价值变为5", v["ctx"], "变式的上下文要是**它自己**的题面")
+        self.assertNotIn("4-3", v["ctx"])
+        self.assertEqual(by["都打扫时每人得4-3=1"]["origin"], "example")
+        self.assertEqual(by["教授说打扫总成本是 6，两个人分担则每人 3，于是搭便车的那个人多占 6-3=3。"]
+                         ["origin"], "prose")
+        self.assertEqual(by["享受别人的成果；分摊下来每人 6-3=3 的成本。"]["origin"], "qa")
+
+    def test_变式不会被例题参数改(self):
+        rows, seen = self._run(lambda _i, _t: "mismatch")
+        var = [r for r in rows if "5-3=2" in r["claim"]]
+        self.assertTrue(var, "变式那一步应当进了核对表")
+        self.assertTrue(all(r["status"] == "unchecked" for r in var),
+                        f"变式不许出现「已修正」：{var}")
+        # 题面也要一并送到模型眼前（它拿不到别的题的参数就串不了）
+        line = [ln for ln in seen["user"].splitlines() if "5-3=2" in ln][0]
+        self.assertIn("变式", line)
+        self.assertIn("价值变为5", line)
+
+    def test_例题解答也不会被改(self):
+        rows, _ = self._run(lambda _i, _t: "mismatch")
+        ex = [r for r in rows if "4-3=1" in r["claim"]]
+        self.assertTrue(ex)
+        self.assertTrue(all(r["status"] == "unchecked" for r in ex), ex)
+
+    def test_自测答案也不会被改(self):
+        rows, _ = self._run(lambda _i, _t: "mismatch")
+        qa = [r for r in rows if "享受别人的成果" in r["claim"]]
+        self.assertTrue(qa)
+        self.assertTrue(all(r["status"] == "unchecked" for r in qa), qa)
+
+    def test_讲解里的断言仍然可以判修正(self):
+        """收窄的方向不能过头：教授口误/ASR 听错的那一类**必须**还能改。"""
+        def status(i, txt):
+            return "mismatch" if "6-3=3" in txt else "ok"
+        rows, _ = self._run(status)
+        prose = [r for r in rows if "教授说打扫总成本是 6" in r["claim"]]
+        self.assertTrue(prose)
+        self.assertTrue(all(r["status"] == "mismatch" for r in prose), prose)
+
+    def test_查不到出处的断言按未核对(self):
+        """兜底方向：查不到出处 ≠ 有资格改正文。"""
+        rows = nv.cap_model_rows([{"claim": "某个别处都没有的断言 7-3=4", "status": "mismatch",
+                                   "how": "", "recomputed": ""}], GAME)
+        self.assertEqual(rows[0]["status"], "unchecked")
+        self.assertIn("找不到", rows[0]["how"])
+
+    def test_模型给自己出的题判通过也不算数(self):
+        rows, _ = self._run(lambda _i, _t: "ok")
+        var = [r for r in rows if "5-3=2" in r["claim"]]
+        self.assertTrue(all(r["status"] == "unchecked" for r in var),
+                        "模型对自己的解答自洽 → 判 ok 等于没核，要降成未核对")
 
 
 if __name__ == "__main__":

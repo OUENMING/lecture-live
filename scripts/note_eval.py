@@ -388,8 +388,7 @@ def child_run(key: str, out: pathlib.Path, mode: str, label: str,
     if override:
         one.update({k: v for k, v in override.items() if v})
     d = _isolate(key, out)
-    if mode == "fresh":
-        _reset_state(d, one["course"])
+    _reset_state(d, one["course"])          # fresh / replay 都从同一个起点开始
     os.environ["HOME"] = str(d / "var")
     os.environ["CLASSLIVE_NOTE_MERGE"] = "0"
     os.environ["CLASSLIVE_NO_AUTO_UPDATE"] = "1"
@@ -573,6 +572,13 @@ def score(key: str, d: pathlib.Path, *, one: dict, data, entries: list, elapsed:
                    "wrong_correction": aud["wrong"],
                    "justified": aud["justified"],
                    "unverifiable": aud["unverifiable"],
+                   # ⭐ 收窄挡下的条数（作者第六轮第 1 条）：模型本想把它们判成
+                   #   「已修正」/「通过」，被口径降成未核对。**基线没有这一栏**
+                   #   （那时代码不降级），所以这列非 0 = 收窄真的在起作用。
+                   "demoted_mismatch": sum(1 for c in checks
+                                           if "只标未核对，不改" in str(c.get("how") or "")),
+                   "demoted_ok": sum(1 for c in checks
+                                     if "自评不算核" in str(c.get("how") or "")),
                    "origins": claim_origins(review, checks),
                    "rows": aud["rows"]},
         "selftalk": {"review": len(sel), "md": len(sel_md),
@@ -684,6 +690,8 @@ COLS = [
     ("已修正", lambda m: m["checks"]["mismatch"], "·"),
     ("其中假修正", lambda m: m["checks"]["wrong_correction"], "↓"),
     ("复核不了", lambda m: m["checks"]["unverifiable"], "·"),
+    ("收窄挡下", lambda m: f'{m["checks"].get("demoted_mismatch", 0)}/'
+                          f'{m["checks"].get("demoted_ok", 0)}', "·"),
     ("未核对", lambda m: m["checks"]["unchecked"], "·"),
     ("自言自语", lambda m: m["selftalk"]["review"] + m["selftalk"]["md"], "↓"),
     ("TeX 露源码", lambda m: m["tex_leaks"]["n"], "↓"),

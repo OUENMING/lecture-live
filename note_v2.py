@@ -176,13 +176,23 @@ ALIGN_SYS = """你在给一节英文课的**复盘笔记**做覆盖度核对与�
 VERIFY_SYS = """你在给课堂笔记做**数字与公式的第三道核**（前两道是写作时的代数自洽与课件对照）。
 输入是一批断言（公式/代入/方程的解），以及可能附上的课件片段。
 
+⚠️ 每条断言前面标着它出自哪一类内容，核的**口径完全不同**：
+  · `讲解（🎙/📖）` —— 课上讲的、课件里的数字断言。**只有这一类**可以判 mismatch。
+  · `例题解` / `变式` / `补全题` / `自测` —— 那是笔记作者自己出的题。
+    每题都附了**它自己那一道题的题面**：只按那一道题的参数核，
+    别的题（例题、别的变式）的参数**与它无关**。
+    ⚠️ 实测反例：变式写「价值 5 → 5−3=2」（对的），核的时候拿例题的
+    「价值 4」去比 → 报成 mismatch，把一套对的解答改错了。
+    这一类**一律不许判 mismatch**：不一致也别改，判 "unchecked"。
+
 对每一条：
 1. 自己把代数**重算一遍**（代入、移项、求导、解方程）；
 2. 如果附了课件片段，对照里面的数字；
 3. 判 status：
    - "ok"：重算结果与断言一致（或与课件一致）；
-   - "mismatch"：重算结果与断言**不一致**（此时 note 里写正确的值）；
-   - "unchecked"：信息不足、算不出来（**不许猜**，标它）。
+   - "mismatch"：重算结果与断言**不一致**（此时 note 里写正确的值）——
+     **只对 `讲解（🎙/📖）` 那一类**；
+   - "unchecked"：信息不足、算不出来，或出自模型自己出的题（**不许猜**，标它）。
 输出严格 JSON：
 {"items": [{"i": 序号, "status": "ok|mismatch|unchecked", "recomputed": "你算出来的值", "note": "依据或为什么不一致（≤60 字）"}]}
 只输出 JSON。"""
@@ -492,10 +502,6 @@ def _plots_menu() -> str:
     return " · ".join(f"`{k}`（{v}）" for k, v in PLOT_KINDS.items())
 
 
-def _fmt_plot_menu() -> str:
-    return _plots_menu()
-
-
 # ---------------------------------------------------------------- 覆盖度对齐
 def align(review_data: dict, *, chat, materials=None,
           max_tokens: int = ALIGN_MAX_TOKENS, skeleton: list | None = None) -> dict:
@@ -615,34 +621,130 @@ def numeric_claims(review_data: dict, *, limit: int = 24) -> list:
     ⚠️ 只挑"带等号/结论感"的那种（`MC(4)=12` / `q = 6` / `AC = 24`），
        普通叙述里的数字（"这节课 26 分钟"）不该占核对的额度 ——
        额度有限（每次调用只核一批），要花在会被扣分的地方。
+
+    ⭐ 第六轮（作者 2026-10-17）：每条断言带 `origin`（出自哪一类内容）与 `ctx`
+       （**它自己那一道题的题面**）。理由是全套假修正的根因 —— 变式与例题的断言
+       混在一批里核，模型拿例题的参数去判变式（"价值应为 4 非 5"）。
     """
     out: list = []
     for s in (review_data.get("sections") or []):
-        texts = list(s.get("prose") or [])
+        head = _one_line(s.get("heading"))
         ex = s.get("example") or {}
-        texts += [ex.get("prompt", ""), ex.get("answer", "")]
-        texts += [st.get("text", "") for st in (ex.get("steps") or [])]
-        for v in (s.get("variants") or []):
-            texts += [v.get("q", ""), v.get("a", "")]
-            # ⚠️ 变式的**步骤**也要核：那里正是移项/求导出错的地方（判据实测抓到过）。
-            texts += [st.get("text", "") for st in (v.get("steps") or [])]
+        if ex.get("prompt") or ex.get("steps") or ex.get("answer"):
+            ctx = f"本节例题「{_one_line(ex.get('title')) or '例题'}」的题面：{_one_line(ex.get('prompt'))[:160]}"
+            texts = ([ex.get("prompt", ""), ex.get("answer", "")]
+                     + [st.get("text", "") for st in (ex.get("steps") or [])])
+            out += _num_items(head, texts, "example", ctx, limit)
+        for j, v in enumerate(s.get("variants") or [], 1):
+            ctx = f"本节变式 {j} 自己的题面：{_one_line(v.get('q'))[:160]}"
+            texts = ([v.get("q", ""), v.get("a", "")]
+                     + [st.get("text", "") for st in (v.get("steps") or [])])
+            out += _num_items(head, texts, "variant", ctx, limit)
         fd = s.get("faded") or {}
-        texts += [fd.get("q", ""), fd.get("a", "")]
-        for t in texts:
-            if not t or not _NUM.search(t):
-                continue
-            if not re.search(r"[=＝]|约等于|等于", t):
-                continue
-            out.append({"where": s.get("heading", ""), "text": t})
-            if len(out) >= limit:
-                return out
+        out += _num_items(head, [fd.get("q", ""), fd.get("a", "")], "faded",
+                          f"本节补全题的题面：{_one_line(fd.get('q'))[:160]}", limit)
+        # 讲解排在每节的最后：额度先给"模型自己出的题"（它们最容易串参数），
+        # 讲解那一档量大且稳（作者的正文纪律已经压过一轮）。
+        out += _num_items(head, list(s.get("prose") or []), "prose", "", limit)
+        if len(out) >= limit:
+            return out[:limit]
+    for q in (review_data.get("qa") or []):
+        out += _num_items("自测", [q.get("a", "")], "qa",
+                          f"自测题：{_one_line(q.get('q'))[:160]}", limit)
+        if len(out) >= limit:
+            return out[:limit]
     # 已有 checks 的也带上（模型自己写的断言最值得复核）
     for c in (review_data.get("checks") or []):
         txt = _claim_text((c or {}).get("claim"))
         if txt:
-            out.append({"where": "checks", "text": txt})
+            out.append({"where": "checks", "text": txt, "origin": "checks", "ctx": ""})
         if len(out) >= limit:
             break
+    return out[:limit]
+
+
+def _num_items(where: str, texts, origin: str, ctx: str, limit: int) -> list:
+    """一批文本 → 值得核的断言（`limit` 是全局额度，这里只做形状判据）。"""
+    out: list = []
+    for t in texts:
+        if len(out) >= limit or not t or not _NUM.search(str(t)):
+            continue
+        if not re.search(r"[=＝]|约等于|等于", str(t)):
+            continue
+        out.append({"where": where, "text": _one_line(str(t)), "origin": origin,
+                    "ctx": ctx})
+    return out
+
+
+#: `origin` → 给模型看的标签（口径不同，见 `VERIFY_SYS`）。
+_ORIGIN_ZH = {"prose": "讲解（🎙/📖）", "example": "例题解", "variant": "变式",
+              "faded": "补全题", "qa": "自测", "checks": "讲解（🎙/📖）"}
+#: 「模型自己出的题」——判据用 `note_math.MODEL_AUTHORED` + 自测。
+_MODEL_ORIGINS = set(note_math.MODEL_AUTHORED) | set(note_math.ALSO_MODEL)
+#: 收窄降级在行尾留下的**可数标记**（评测按它统计"这条本来会变成什么"）：
+#: 没有它就没法在产物上看出"收窄到底挡下了几条假修正"（模型是随机的，不是每次都犯）。
+DEMOTED_MISMATCH = "只标未核对，不改"
+DEMOTED_OK = "自评不算核"
+
+
+def _norm_text(s) -> str:
+    return re.sub(r"\s+", "", str(s or "")).lower()
+
+
+def _claim_origin(review_data: dict, claim: str) -> str:
+    """一条断言（机械核/模型核的行）出自哪一类内容 → `prose`/`example`/…；找不到返回 `""`。
+    ⚠️ `""`（查不到出处）在 `cap_model_rows` 里与"模型自己出的题"**同等对待**：
+       一条查不到出处的断言不该拿到"改正文"的权力 —— 反过来（找不到就算讲解）
+       正好会让"错的修正"这类事故从缝里钻回来。
+    """
+    txt = _claim_text(claim)
+    if not txt:
+        return ""
+    for s in (review_data.get("sections") or []):
+        k = note_math.unit_of_claim(s, txt)
+        if k:
+            return k
+    for q in (review_data.get("qa") or []):
+        t = _norm_text(q.get("a"))
+        if t and (_norm_text(txt) in t or t[:60] in _norm_text(txt)):
+            return "qa"
+    for c in (review_data.get("checks") or []):
+        if _norm_text(txt) == _norm_text(_claim_text(c.get("claim"))):
+            return "checks"
+    return ""
+
+
+def cap_model_rows(rows: list, review_data: dict, *, llm: bool = False) -> list:
+    """**模型自己出的题：不许出现 `mismatch`**（作者第六轮第 1 条）。
+
+    实现的口径：
+      · `example` / `variants` / `faded` / `qa` 里的断言，`mismatch` 一律降成
+        `unchecked`（重算值留在 `how` 里，读者仍看得到"机器算出来是多少"，
+        但**不会**变成一条"已修正"——那正是假修正的来源）；
+      · `llm=True` 时这些内容上的 `ok` 也降成 `unchecked`：让模型给自己出的题
+        判"通过"，等于没核（它对自己的解答当然自洽）；
+      · `讲解（🎙/📖）` 里那些来自转录/课件的断言**原样保留**（那是这份笔记
+        真正要守的东西：教授口误 / ASR 听错 / 实时摘要抄错）。
+    """
+    out = []
+    for r in (rows or []):
+        if not isinstance(r, dict):
+            continue
+        row = dict(r)
+        st = str(row.get("status") or "")
+        if st not in ("mismatch", "ok"):
+            out.append(row)
+            continue
+        origin = _claim_origin(review_data, str(row.get("claim") or ""))
+        why = ("模型自己出的题" if origin in _MODEL_ORIGINS
+               else "找不到这条断言出自哪里" if origin == "" else "")
+        if st == "mismatch" and why:
+            row["status"] = "unchecked"
+            row["how"] = (str(row.get("how") or "") + f"（{why}：只标未核对，不改）").strip()
+        elif st == "ok" and why and llm:
+            row["status"] = "unchecked"
+            row["how"] = (str(row.get("how") or "") + "（模型自己出的题：自评不算核）").strip()
+        out.append(row)
     return out
 
 
@@ -652,17 +754,21 @@ def verify_numbers(review_data: dict, *, chat, materials=None,
 
     ⚠️ `mismatch` **不改正文**：它进「修正说明」清单由渲染层显示 ——
        静默改数字是这份笔记最不能做的事（读者用它对答案）。
+    ⭐ 第六轮：`mismatch` 只留给**讲解里那些来自 🎙 转录 / 📖 课件的断言**；
+       例题解答 / 变式 / 补全题 / 自测是模型自己出的题，最多标未核对。
     """
     # ⭐ 机械核**先跑**（2026-10-17 验收：模型对着自己编的函数"重算"当然自洽 ——
     #    自编 `TC=60q+500` + 凑出来的驻点 2.89 就这样溜过了三道核）。
     det = note_math.check_review(review_data, transcript=transcript)
     claims = numeric_claims(review_data)
     if not claims:
-        return note_math.merge_checks(det, _clean_checks(review_data.get("checks")))
+        return _finish(det, _clean_checks(review_data.get("checks")), review_data)
     rows = []
     evidence = []
     for i, c in enumerate(claims):
-        rows.append(f"[{i}] ({c['where']}) {c['text']}")
+        tag = _ORIGIN_ZH.get(c.get("origin"), "讲解（🎙/📖）")
+        ctx = f"；{c['ctx']}" if c.get("ctx") else ""
+        rows.append(f"[{i}] (节「{c['where']}」· {tag}{ctx}) {c['text']}")
         if materials is not None:
             for hit in materials.search(c["text"], k=1):
                 evidence.append(f"[{i}] {hit.cite()} {hit.text[:300]}")
@@ -672,10 +778,10 @@ def verify_numbers(review_data: dict, *, chat, materials=None,
     try:
         obj = chat(VERIFY_SYS, user, max_tokens)
     except Exception:                                         # noqa: BLE001
-        return note_math.merge_checks(det, _clean_checks(review_data.get("checks")))
+        return _finish(det, _clean_checks(review_data.get("checks")), review_data)
     items = obj.get("items") if isinstance(obj, dict) else None
     if not isinstance(items, list):
-        return note_math.merge_checks(det, _clean_checks(review_data.get("checks")))
+        return _finish(det, _clean_checks(review_data.get("checks")), review_data)
     got: dict = {}
     for it in items:
         if not isinstance(it, dict) or not isinstance(it.get("i"), int):
@@ -695,7 +801,20 @@ def verify_numbers(review_data: dict, *, chat, materials=None,
         if row["claim"].lower() not in seen:
             row["recomputed"] = ""
             out.append(row)
-    return note_math.merge_checks(det, out)
+    return _finish(det, out, review_data)
+
+
+def _finish(det: list, llm_rows: list, review_data: dict) -> list:
+    """机械核与模型核**各自**过一遍收窄，再合并。
+
+    ⚠️ 两边的口径不同，**不能合并后再一起降**：
+       · 机械核是**算出来的**（代入/求导/解方程），它说 `ok` 就是算对了 ——
+         即便那条断言在"模型自己出的题"里，也不该被降成未核对（降了等于白算）；
+       · 模型核是在**评自己的作业**，它说 `ok` 不算核过 → 这一类要降。
+       合并后再降会把机械核那 30 条 `ok` 一起抹掉（实测：10790 的 ✅ 从 61 掉到 17）。
+    """
+    return note_math.merge_checks(cap_model_rows(det, review_data),
+                                  cap_model_rows(llm_rows, review_data, llm=True))
 
 
 def corrections_from_mismatch(checks: list) -> list:

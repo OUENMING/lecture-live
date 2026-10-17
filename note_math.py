@@ -470,6 +470,40 @@ def _kind(word: str) -> str:
     return "最小" if word in ("最小", "极小") else "最大"
 
 
+def units(s: dict) -> list:
+    """`_units` 的**公开别名**（判据与调用方都走它，别各抄一份单元切法）。"""
+    return _units(s)
+
+
+#: 「模型自己出的题」的单元（作者 2026-10-17 第六轮）：这几类内容里的数字断言
+#: **不许**进「修正说明」。理由：错误的真正来源是转录/课件里的数（教授口误、
+#: ASR 听错、实时摘要抄错），不是模型算错；而拿例题的参数去改变式，实测抓到过
+#: 一整套假修正（ECON10770 厨房博弈：变式「价值 5 → 5−3=2」被改回例题的「4−3=1」）。
+MODEL_AUTHORED = ("example", "variants", "faded")
+#: 自测题也是模型自己出的（答案由它自己写），同一条纪律。
+ALSO_MODEL = ("qa",)
+
+
+def unit_of_claim(section: dict, claim: str) -> str:
+    """一条断言出自哪个单元 → `prose` / `example` / `variants` / `faded`（找不到 `""`）。
+
+    ⚠️ 判据是**文本归属**（这条断言的字面出现在哪个单元里），不是"猜"：
+       机械核与模型核的行都只有 `claim` 文本，归属只能从它自己的字面回查。
+       比对用 `_norm_claim`（去空白、小写），`claim` 被截过 160 字的也认（前缀匹配）。
+    """
+    key = _norm_claim(claim)
+    if not key:
+        return ""
+    key = key[:60]
+    for kind, texts in _units(section):
+        for t in texts:
+            n = _norm_claim(t)
+            if n and (key in n or (len(n) > 20 and n[:60] in key)):
+                return kind
+    return ""
+
+
+
 def check_review(review: dict, *, transcript: str = "") -> list:
     """笔记 JSON → 机械核对行（`{claim, how, status, recomputed}`）。
 

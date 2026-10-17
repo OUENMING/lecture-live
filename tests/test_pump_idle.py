@@ -604,10 +604,46 @@ class WakeQueueAndCapture(unittest.TestCase):
         capture._NormalizedSource(inner).set_waker("W")
         self.assertEqual(seen, ["W"])
 
-    def test_文件源set_waker是空操作(self):
+    def test_文件源按绝对时刻表出块_主循环慢也不累积落后(self):
+        """⚠️ 10-17 实测：浮窗空闲档每轮睡 0.1 s，旧写法 `next_due = now + 0.1` 把每轮多出的
+        时间累积成落后 —— 90 s 片段落后 2.6 s 还在涨，demo 声音和字幕越走越不同步。"""
         import capture
         import numpy as np
-        capture.FileSource(samples=np.zeros(10, dtype=np.float32)).set_waker(lambda: None)
+        from unittest import mock
+        clock = {"t": 100.0}
+        with mock.patch.object(capture.time, "monotonic", lambda: clock["t"]):
+            src = capture.FileSource(samples=np.zeros(capture.CHUNK * 50, dtype=np.float32))
+            got = 0
+            for _ in range(30):                       # 主循环每 0.13 s 才来一次（比一块 0.1 s 慢）
+                if src.poll() is not None:
+                    got += 1
+                clock["t"] += 0.13
+            # 3.9 s 墙钟：落后的块下一轮立刻补出（每轮一块，追得上）→ 30 轮出 30 块（旧写法也 30，
+            # 但它的「应出时刻」一直往后推）；判据看**应出时刻**有没有被推走：
+            self.assertLessEqual(src._next_due, 100.0 + 30 * capture.CHUNK / capture.SR + 1e-9)
+
+    def test_文件源每块到期叫醒主循环(self):
+        import capture
+        import numpy as np
+        import threading
+        import time as _t
+        n = {"k": 0}
+        ev = threading.Event()
+
+        def wake():                                   # 替身主循环：被叫醒就取一块
+            n["k"] += 1
+            src.poll()
+            if n["k"] >= 3:
+                ev.set()
+        src = capture.FileSource(samples=np.zeros(capture.CHUNK * 50, dtype=np.float32))
+        src.set_waker(wake)
+        t0 = _t.monotonic()
+        self.assertTrue(ev.wait(2.0))                 # 每到一块的应出时刻叫一次（3 块 ≈ 0.2 s）
+        self.assertLess(_t.monotonic() - t0, 0.6)
+        src.close()
+        k = n["k"]
+        _t.sleep(0.25)
+        self.assertEqual(n["k"], k)                   # close 之后不再叫
 
 
 # ══════════════════════════════════════════════════════════════════════

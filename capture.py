@@ -6,7 +6,7 @@
 实时输入用 sounddevice **回调式异步采集**(声卡线程 -> 队列), poll() 只做 get_nowait。
 """
 from __future__ import annotations
-import queue, subprocess, time
+import queue, subprocess, threading, time
 from pathlib import Path
 import numpy as np
 
@@ -375,7 +375,11 @@ class CallbackSource:
 
 
 class FileSource:
-    """把音频按真实时间喂出(可加速)。path=读文件, samples=已解码的样本数组。"""
+    """把音频按真实时间喂出(可加速)。path=读文件, samples=已解码的样本数组。
+
+    ⚠️ **绝对时刻表**：第 k 块的应出时刻 = 起点 + k × 块长。旧写法 `next_due = now + 块长`
+       把主循环每轮多睡的时间累积成落后（10-17 浮窗实测 90 s 落后 2.6 s 还在涨）。
+    """
 
     def __init__(self, path: str | None = None, speed: float = 1.0,
                  samples: np.ndarray | None = None):
@@ -383,6 +387,7 @@ class FileSource:
         self._idx = 0
         self._speed = max(speed, 0.01)
         self._next_due = time.monotonic()
+        self._closed = threading.Event()
 
     def poll(self):
         now = time.monotonic()
@@ -390,17 +395,35 @@ class FileSource:
             return None
         chunk = self._samples[self._idx:self._idx + CHUNK]
         self._idx += CHUNK
-        self._next_due = now + CHUNK / SR / self._speed
+        self._next_due += CHUNK / SR / self._speed
         return chunk
 
     def is_done(self) -> bool:
         return self._idx >= len(self._samples)
 
     def set_waker(self, fn) -> None:
-        """文件回放由主循环自己 `poll()`，不需要唤醒 —— 空操作（保持接口一致）。"""
+        """每到一块的应出时刻叫一声 —— 与 `CallbackSource` 的声卡回调同节奏。
+
+        ⚠️ 不能靠主循环自己 poll：浮窗空闲档每轮让步 0.1 s（不可见 0.25 s），
+           不叫醒它，回放就比墙钟慢（10-17 demo 声音与字幕越走越不同步）。
+        """
+        def run():
+            while not self._closed.is_set() and not self.is_done():
+                due = self._next_due
+                if self._closed.wait(max(0.0, due - time.monotonic())):
+                    return
+                try:
+                    fn()
+                except Exception:                     # noqa: BLE001
+                    pass
+                # 主循环还没取走这一块：别空转，等它取
+                while (not self._closed.is_set() and self._next_due == due
+                       and not self.is_done()):
+                    self._closed.wait(min(0.02, CHUNK / SR / self._speed))
+        threading.Thread(target=run, name="file-source-waker", daemon=True).start()
 
     def close(self):
-        pass
+        self._closed.set()
 
 
 def load_source(source: str, path: str | None = None, speed: float = 1.0):

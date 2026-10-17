@@ -22,6 +22,7 @@ import draft_policy
 import stream_gate
 from draft_translate import DraftTranslator, DraftView
 import livemetrics
+import feature_usage
 import tr_latency
 import fragment_merge
 from asr import load_asr
@@ -1920,6 +1921,33 @@ def run(args) -> None:
     duty_board = _duty.Board(day=_duty_day,
                              path=_duty.sidecar_path(writer.session_path))
 
+    def _feature(name: str, **data) -> None:
+        """⭐ **功能使用度**（测试模式，作者 2026-10-17）：一条动作送给**两个既有出口**。
+
+            overlay（悬浮窗那边）──┐
+                                    ├─►  这里  ─►  tester.note_event（report.json 的事件流）
+            main（提醒事项回执） ──┘         └─►  live.event（`.live.jsonl`，class_report 读）
+
+        ## 三条纪律
+
+        1. ⚠️ **普通模式什么都不做**：`tester` 为 `None`（没开 `--test-mode`）+ live 日志
+           默认关 → 两个出口都没有 → **空操作**。这里**不新增任何上传、不新增任何写盘**。
+        2. ⚠️⚠️ **不记任何文本内容**：字段白名单在 `feature_usage.clean()`。overlay 那边
+           已经过了一道，这里是**第二道**（也管 `main` 自己报的事件）。
+        3. 自己吞异常（它在 `drain()` 的回执路径上 —— 采集坏了不许影响上课）。
+        """
+        try:
+            item = feature_usage.clean(name, data)
+            if item is None:
+                return
+            kind = feature_usage.PREFIX + item[0]
+            if tester is not None:
+                tester.note_event(kind, data=item[1])
+            if live is not None:
+                live.event(kind, **item[1])
+        except Exception:                                     # noqa: BLE001
+            pass
+
     def _duty_push() -> None:
         """把板子的当前状态推给界面（主线程之外也能调：`streamq` 是线程安全的）。"""
         try:
@@ -2031,6 +2059,12 @@ def run(args) -> None:
         # ⭐ 一些事儿：卡片上的决定（记下 / 忽略 / 撤销 / 改类型）唯一出口。
         #    ⚠️ AppKit 主线程回调 —— 实现见 `_duty_decided`（只落盘 + 起 worker，立刻返回）。
         on_duty=_duty_decided,
+        # ⭐ 功能使用度（测试模式）：卡片出现 / 记下 / 忽略 / 下一条 / 改字段 / 收尾 /
+        #    课前回顾那几条线的**动作**（**绝不带文本内容**）。
+        #    ⚠️ 与 `note`（UI 使用度计数）分工不同：这个带字段（类型 / 来源 / 秒数）。
+        #    ⚠️ 两个出口**都没有**时传 `None`（没开测试模式 + live 日志关着）——
+        #       `Overlay` 那边第一件事就是早退，普通模式**零开销零行为**（同 `on_vis`）。
+        on_feature=(_feature if (tester is not None or live is not None) else None),
         # ⭐ 采集面 ⑦：UI 使用度。⚠️ `tester` 是 `None` 时传 `None`（不是传个假
         #    回调）—— `Overlay` 那边默认就是空 lambda，**零开销零行为**。
         note=(tester.note_ui if tester is not None else None),
@@ -3120,6 +3154,10 @@ def run(args) -> None:
                     fn(item[1])
             elif item[0] == "duty_result":          # ("duty_result", id, ok, 原因)
                 # ⚠️ 回执走 ui 那一侧；不放任「失败静默」是这一条的存在理由。
+                # ⭐ 功能使用度：写成没 + **失败原因归成哪一类**（原文不进报告 ——
+                #    见 `feature_usage.reason_kind`）。
+                _feature("duty.reminder", ok=bool(item[2]),
+                         why=feature_usage.reason_kind(str(item[3])))
                 fn = getattr(ui, "duty_reminder_result", None)
                 if callable(fn):
                     fn(item[1], bool(item[2]), str(item[3]))
@@ -3919,7 +3957,7 @@ def startup_timing(tp: dict, wall0: float, click_wall: float | None) -> dict:
 def _load_overlay(on_quit=None, on_translate=None, on_submit=None,
                   on_ask=None, on_new_topic=None, on_lost=None, note=None,
                   on_vis=None, on_wait=None, on_view=None, on_power_event=None,
-                  on_duty=None):
+                  on_duty=None, on_feature=None):
     """建悬浮窗。**失败回退终端 UI**（`drives_appkit` 为假 = 回退了）。
 
     ⚠️⚠️ **这一层的形参必须与调用点**逐字**对齐**（2026-09-30 事故）：
@@ -3937,7 +3975,8 @@ def _load_overlay(on_quit=None, on_translate=None, on_submit=None,
                     on_submit=on_submit, on_ask=on_ask,
                     on_new_topic=on_new_topic, on_lost=on_lost, note=note,
                     on_vis=on_vis, on_wait=on_wait, on_view=on_view,
-                    on_power_event=on_power_event, on_duty=on_duty)
+                    on_power_event=on_power_event, on_duty=on_duty,
+                    on_feature=on_feature)
         o.show()
         return o
     except Exception as e:       # noqa: BLE001

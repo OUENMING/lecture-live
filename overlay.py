@@ -1265,7 +1265,7 @@ class Overlay:
     def __init__(self, on_quit=None, on_translate=None, on_submit=None,
                  on_ask=None, on_new_topic=None, on_lost=None, note=None,
                  on_vis=None, on_wait=None, on_view=None, on_power_event=None,
-                 on_duty=None):
+                 on_duty=None, on_feature=None):
         # ⚠️ 窗口 chrome / 材质 / scrim 那几样已经搬进 panel.py 了，这里的名字要
         #    跟着删干净 —— 留着会让「材质在哪配的」这个问题仍然答成 overlay.py，
         #    等于配方原料还散在两个文件里。
@@ -1310,6 +1310,14 @@ class Overlay:
         #:    ⚠️ **只在这一个口子上跑** —— 卡片只回决定，写提醒事项 / 落盘 / 撤销全在 `main`。
         #:    它是 AppKit 主线程回调，所以实现必须 O(1) 返回（重活交 worker）。
         self._on_duty = on_duty or (lambda _a, _it: None)
+        #: ⭐ **功能使用度**（作者 2026-10-17）—— `fn(name, data)`：悬浮窗里"用没用
+        #:    某个功能"那条线（卡片出现 / 记下 / 忽略 / 改字段 / 回顾出现 / 收起…）。
+        #:    ⚠️ 与 `_note`（UI 使用度的**计数**）不是一回事：这个带字段（类型 / 来源 /
+        #:      距出现多少秒），汇总进 `report.json` 的 `feature_usage`。
+        #:    ⚠️ **绝不带任何文本内容** —— 白名单在 `feature_usage.clean()`（`_feature` 里过）。
+        #:    ⚠️ 默认 `None`（`main` 不装采集器就传 `None`）：`_feature` 第一件事就是
+        #:      `is None` 早退 —— 普通模式下**零开销、零行为**，与那七个 `on_*` 同规矩。
+        self._on_feature = on_feature
         #: ⭐ **UI 使用度**（测试模式采集面 ⑦）—— 每次交互报一声给采集器。
         #:    ⚠️ 与上面那七个 `on_*` 不是一类：那些**干活**，这个**只记账**。
         #:    形状（一个名字字符串）与 `testmode.TestSession.note_ui` 对齐。
@@ -1756,6 +1764,12 @@ class Overlay:
         self._recap_data = None
         self._recap_on = False
         self._recap_touched = False            # 用户手动收起来过（不再自动弹）
+        #: ⭐ 功能使用度（测试模式）：回顾**上屏**那一刻（monotonic）—— 教授开口自动淡出时
+        #:    报「距出现多少秒」。`None` = 这次没记（老路径 / 已经报过了）。
+        self._recap_t0 = None
+        #: ⭐ 上一次渲染出来的是**哪几块**（`_recap_fill` 里按 rows 填）—— 「出现」那条
+        #:    事件要带它（作者要看"有哪几块"，而块名是封闭词表，不是文本）。
+        self._recap_blocks: list = []
         #: 角落小卡：图标（SF Symbols 单色，见 `_symbol_icon`）+ 标签 + 透明点击区
         #: （标签/点击区的造法同 `_chapter_lbl` / `_gloss_hit`）
         self._chip_icon = self._symbol_icon(self._ve, "pin", CARD_META_SZ, CHIP_ALPHA_HOT)
@@ -3335,6 +3349,31 @@ class Overlay:
                 return x
         return None
 
+    def _feature(self, name: str, **data) -> None:
+        """⭐ **功能使用度**（测试模式）：报一条动作 —— `fn(name, data)`。
+
+        ## 三条纪律（与 `_note` 一样，但更硬）
+
+        1. ⚠️⚠️ **绝不带任何文本内容**（作者 2026-10-17 点名）：标题 / 原话 / 日期值
+           一个字都不进。`feature_usage.clean()` 是那道闸 —— 不在白名单里的字段
+           **在这里就被丢掉**，调用点手滑也漏不出去（判据：`tests/test_feature_usage.py`）。
+        2. 跑在 AppKit 主线程回调里 → **O(1)**、自己吞异常（`note_*` 同一条规矩：
+           采集坏了不许影响用户点按钮）。
+        3. 默认 `None` = 不装采集器 = 一次调用都不发生（`main` 普通模式传 `None`）。
+
+        ⚠️ `feature_usage` 是懒 import（只在真报事件时付一次）：`overlay` 的模块级
+           import 越少越好（它要在窗口起来之前就加载）。
+        """
+        if self._on_feature is None:
+            return
+        try:
+            import feature_usage as _fu
+            item = _fu.clean(name, data)
+            if item is not None:
+                self._on_feature(item[0], item[1])
+        except Exception:                                 # noqa: BLE001
+            pass
+
     def _duty_pending(self) -> list:
         return [x for x in self._duty_items if x.get("action") == "pending"]
 
@@ -3344,6 +3383,10 @@ class Overlay:
         if it is None:
             return
         self._note("duty_card")
+        # ⭐ 功能使用度：卡片出现（**类型 + 来源** —— 作者要知道是正则那条先上屏的
+        #    还是模型那条；两者都不是文本）。⚠️ 空值会被 `feature_usage.clean` 丢掉。
+        self._feature("duty.card", type=str(it.get("type") or ""),
+                      src=str(it.get("source") or ""))
         self._duty_open_id = rid
         self._card_open("duty")
         self._duty_card_fill(it)
@@ -3431,7 +3474,18 @@ class Overlay:
            用户改完标题直接点「记下」是最自然的顺序。
         """
         self._release_focus()
+        if action in ("save", "ignore", "next"):
+            # ⭐ 功能使用度：**改没改**（作者 2026-10-17：只记"改了没"，**不记改成了什么**）。
+            #    ⚠️ 比较完立刻把值丢掉 —— 进事件流的只有两个布尔。
+            #    ⚠️ `next` 也记（改了字段又翻走，是真实发生过的动作）。
+            cur = self._card_read_fields()
+            t_ch = str(cur.get("title") or "") != str(item.get("title") or "")
+            d_ch = (str(cur.get("date") or "") != str(item.get("date") or "")
+                    or str(cur.get("time") or "") != str(item.get("time") or ""))
+            if t_ch or d_ch:
+                self._feature("duty.edit", title=bool(t_ch), date=bool(d_ch))
         if action == "next":
+            self._feature("duty.next")
             pend = self._duty_pending()
             if pend:
                 nxt = pend[0]
@@ -3441,6 +3495,9 @@ class Overlay:
             return
         payload = {**item, **self._card_read_fields()}
         self._note("duty_" + action)
+        # ⭐ 功能使用度：`duty.save` / `duty.ignore`（**没有** `duty.undo` —— 撤销不是
+        #    作者要看的三个动作之一；它另有 `_note("duty_undo")` 那条 UI 计数）。
+        self._feature("duty." + action)
         self._on_duty(action, payload)
         self._card_defer()
 
@@ -3470,6 +3527,9 @@ class Overlay:
         self._duty_wrapup_done = False
         self._card_open("wrapup")
         self._wrapup_card_fill()
+        # ⭐ 功能使用度：收尾汇总**真的出现了**（0 条待确认时上面已经早退 —— 不出现
+        #    就没有这条事件，正好是真话）。
+        self._feature("duty.wrapup", n=len(self._duty_wrapup), pending=len(pend))
         return True
 
     def duty_wrapup(self, items, *, timeout: float = 20.0) -> int:
@@ -3488,6 +3548,11 @@ class Overlay:
                 break
             self.pump()
             time.sleep(0.05)
+        if not self._duty_wrapup_done and not self._closed:
+            # ⭐ 功能使用度：**超时**（20s 没人理）—— 关窗不算超时（那是另一回事）。
+            #    `left` = 还剩几条没确认（0 条的超时不会出现：那样早就不显示这张卡了）。
+            self._feature("duty.wrapup.timeout", left=sum(
+                1 for x in self._duty_wrapup if x.get("action") == "pending"))
         self.duty_wrapup_finish()
         return sum(1 for x in self._duty_wrapup
                    if x.get("action") in ("saved", "ignored"))
@@ -3523,9 +3588,12 @@ class Overlay:
     def _wrapup_act(self, action: str, rid: str = "") -> None:
         self._release_focus()
         if action == "all":
-            for it in list(self._duty_wrapup or []):
-                if it.get("action") == "pending":
-                    self._on_duty("ignore", it)
+            pend = [it for it in list(self._duty_wrapup or [])
+                    if it.get("action") == "pending"]
+            for it in pend:
+                self._on_duty("ignore", it)
+            # ⭐ 功能使用度：一次性放掉了几条（`n` = 真的动过的条数，不是卡上总数）。
+            self._feature("duty.wrapup.all", n=len(pend))
             self._card_defer()
             return
         if action == "done":
@@ -3534,6 +3602,9 @@ class Overlay:
         it = next((x for x in (self._duty_wrapup or []) if x.get("id") == rid), None)
         if it is None:
             return
+        # ⭐ 功能使用度：**收尾里的**逐条动作（与卡片上的 `duty.save/ignore` 分开 ——
+        #    作者要分得清"平时处理的"和"收尾补处理的"）。
+        self._feature("duty.wrapup.save" if action == "save" else "duty.wrapup.ignore")
         self._on_duty("save" if action == "save" else "ignore", it)
         self._card_defer()
 
@@ -3572,31 +3643,41 @@ class Overlay:
         self._btn_recap.setHidden_(False)
         self._recap_on = True
         self._card_open("recap")
-        self._recap_fill()
+        if self._recap_fill():
+            self._recap_announce()
 
     def recap_update(self, data) -> None:
         """📄「今天可能讲什么」晚 1–2 秒补进来（课件抽文本在 worker 上跑）。"""
         if not data:
             return
+        opened = False
         if self._recap_data is None:
             self._recap_data = dict(data)
             self._btn_recap.setHidden_(False)
             if not self._recap_on and not self._recap_touched:
                 self._recap_on = True
                 self._card_open("recap")
+                # ⚠️ 这条也是一次「回顾出现」：开课时没有回顾数据（首节课 / 上一节没记录）
+                #    → `recap_show` 什么都没摆；1–2 秒后这条数据才把卡**真的**弹出来。
+                opened = True
         else:
             self._recap_data.update(dict(data))
         if self._recap_on:
-            self._recap_fill()
+            if self._recap_fill() and opened:
+                self._recap_announce()
 
-    def _recap_fill(self) -> None:
+    def _recap_fill(self) -> bool:
+        """把回顾渲染进卡。回 `True` = **真上屏了**（调用方靠它决定记不记「出现」）。"""
         try:
             import recap as _recap
             rows = _recap.card(self._recap_data or {})
         except Exception as e:                            # noqa: BLE001
             print(f"⚠ 课前回顾渲染失败({str(e)[:60]}); 不显示")
             self._card_close()
-            return
+            return False
+        # ⭐ 功能使用度：这次到底有哪几块（键序 = 报告里那行字的顺序）。
+        self._recap_blocks = [k for k in ("points", "stars", "open", "duties", "today")
+                              if rows.get(k)]
         self._card_reset("课前回顾",
                          f"{rows.get('course') or ''} · 上一节 {rows.get('date') or ''}",
                          action=("收起", self._recap_dismiss))
@@ -3627,27 +3708,49 @@ class Overlay:
             for t in rows["today"][:2]:
                 self._card_text("· " + str(t))
         self._card_done()
+        return True
 
-    def _recap_dismiss(self) -> None:
-        """手动点掉 / 教授开口后自动淡出 → 顶栏留「回顾」可回看。"""
+    def _recap_dismiss(self, reason: str = "manual") -> None:
+        """手动点掉 / 教授开口后自动淡出 → 顶栏留「回顾」可回看。
+
+        ⚠️ `reason`（2026-10-17 加）**只影响测试模式的那条记录**，行为一字不变：
+           `"manual"` = 卡上那颗「收起」；`"auto"` = 教授开口后淡出；
+           `"toggle"` = 顶栏「回顾」按钮收起来的（它算"展开/收起次数"，**不是**
+           "手动收起" —— 作者要看的是两颗不同的东西）。
+        """
+        if reason == "manual":
+            self._feature("recap.dismiss")
         self._recap_touched = True
         self._recap_on = False
         self._card_close()
 
+    def _recap_announce(self) -> None:
+        """回顾**上屏**了 —— 记一条（`recap.shown`）。三条开卡路径共用（出现次数才算对）。"""
+        self._recap_t0 = time.monotonic()
+        self._feature("recap.shown", blocks=list(self._recap_blocks or ()))
+
     def _recap_toggle(self) -> None:
         if self._recap_on:
-            self._recap_dismiss()
+            self._feature("recap.toggle", on=False)
+            self._recap_dismiss("toggle")
         elif self._recap_data is not None:
             self._note("recap_open")
+            self._feature("recap.toggle", on=True)
             self._recap_on = True
             self._card_open("recap")
-            self._recap_fill()
+            if self._recap_fill():
+                self._recap_announce()
 
     def _recap_maybe_hide(self) -> None:
         """教授开口（第一条有效草稿 / 定稿）→ 回顾让位（同 `EXIT_S` 的淡出节奏）。"""
         if not self._recap_on:
             return
         self._note("recap_auto_hide")
+        # ⭐ 功能使用度：**距出现多少秒**（作者问的是"教授讲多久之后回顾才让位"）。
+        #    ⚠️ 动画开始前就算 —— 那 0.2s 的淡出不该算进"出现时长"。
+        self._feature("recap.auto_hide", s=(time.monotonic() - self._recap_t0)
+                      if self._recap_t0 is not None else None)
+        self._recap_t0 = None
         try:
             from AppKit import NSAnimationContext
             if not motion.reduce_motion() and self._card_view is not None:
@@ -3655,12 +3758,12 @@ class Overlay:
                     ctx.setDuration_(motion.EXIT_S)
                     self._card_view.animator().setAlphaValue_(0.0)
                 NSAnimationContext.runAnimationGroup_completionHandler_(
-                    _fade, lambda: self._recap_dismiss())
+                    _fade, lambda: self._recap_dismiss("auto"))
                 self._card_view.setAlphaValue_(1.0)
                 return
         except Exception:                                 # noqa: BLE001
             pass
-        self._recap_dismiss()                             # 「减弱动态效果」/ 起不来 → 直接换
+        self._recap_dismiss("auto")                       # 「减弱动态效果」/ 起不来 → 直接换
 
     # ---- 卡片里的小积木（都只是 `_card_add` 的薄包装）----
     def _card_label(self, text: str, symbol: str = "") -> None:

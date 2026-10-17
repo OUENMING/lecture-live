@@ -59,6 +59,7 @@ import time
 import wave
 
 import numpy as np
+import feature_usage
 
 SR = 16000
 
@@ -124,6 +125,9 @@ BLOCKS = frozenset({
     "capture",  # ⭐ 3.9.8 ④：收音断档（墙钟 vs 音频秒）+ 断档列表（`note_chunk` 累计）
 })
 
+#: `note_event(..., data=…)` 最多几个字段（`_small_data`；功能使用度一条也就 1–2 个）。
+_DATA_MAX_KEYS = 8
+
 
 def system_info(draft_name: str = "", draft_reason: str = "") -> dict:
     """机器画像（3.9.7）：内存 / 芯片 / 系统版本 + 实际用的草稿引擎与理由。**永不抛**。
@@ -150,6 +154,28 @@ def system_info(draft_name: str = "", draft_reason: str = "") -> dict:
         out["arch"] = platform.machine()
     except Exception:                                    # noqa: BLE001
         out["macos"] = out["arch"] = ""
+    return out
+
+
+def _small_data(data) -> dict:
+    """`note_event(..., data=…)` 的**落盘前那道闸**：只留能进报告的小值。
+
+    ⚠️ **它管形状与长度，不是内容白名单**：`feature.*` 事件的字段由
+       `feature_usage.clean()` 卡死（`note_event` 里落盘前还会再拦一次）；
+       这一层管的是"别让一整段正文进 JSON"。
+    ⚠️ 数字 / 布尔 / ≤24 字的串 / ≤8 个短串的列表；其余（嵌套、长文本、对象）丢掉。
+    """
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for k, v in list(data.items())[:_DATA_MAX_KEYS]:
+        if isinstance(v, bool) or isinstance(v, (int, float)):
+            out[str(k)[:24]] = v
+        elif isinstance(v, str):
+            out[str(k)[:24]] = v[:24]
+        elif (isinstance(v, (list, tuple)) and len(v) <= 8
+                and all(isinstance(x, str) for x in v)):
+            out[str(k)[:24]] = [x[:24] for x in v]
     return out
 
 
@@ -339,6 +365,8 @@ def make_bundle(stem: pathlib.Path, report_path: str | os.PathLike,
   README.txt     本说明
   env.json       环境快照（系统 / Python / 依赖版本 / 模型大小 / git 提交）
   report.json    指标报告（逐段的 ASR 耗时、电平、置信度、词数…）
+                 ⚠️ 其中 feature_usage 一栏只记「功能用了几次」（记下 / 忽略 /
+                 收起…这些动作），**不含任何文字内容**（标题 / 原话 / 日期值都不进）。
   session.md     逐字转录（中英对照）
   audio/         课堂音频，每 10 分钟一段 Opus（若含音频；转码失败时是 wav）
 
@@ -698,9 +726,32 @@ class TestSession:
         self._seg_no += 1
 
     @_safe
-    def note_event(self, kind: str, detail: str = "") -> None:
-        self.events.append({"t": round(time.monotonic() - self.t0, 2),
-                            "kind": kind, "detail": detail[:200]})
+    def note_event(self, kind: str, detail: str = "", data=None) -> None:
+        """时间线上的一条事件（`kind` + 一句话的 `detail`）。
+
+        ⭐ `data`（2026-10-17 加）是**给计数用的短字段**（功能使用度那条路）：
+           属性值必须是数字 / 短串 / 短串列表，**不是**给人读的正文 ——
+           它会被 `feature_usage.block()` 汇总进报告的 `feature_usage` 块。
+        ⚠️⚠️ **别把文本内容塞进来**（标题 / 原话 / 日期值）：凡是 `feature.*` 的事件，
+           字段一律过 `feature_usage.clean()` 的白名单（**落盘前最后一道**，
+           见下面的实现）—— 采集的是"用了没用"，不是"写了什么"。
+        """
+        ev = {"t": round(time.monotonic() - self.t0, 2),
+              "kind": kind, "detail": detail[:200]}
+        small = _small_data(data)
+        if small:
+            if str(kind).startswith(feature_usage.PREFIX):
+                # ⚠️⚠️ **功能事件在落盘前再过一次白名单**（`feature_usage.clean`）——
+                #    这样「报告里没有正文」不靠调用点自觉，而是**这份文件**说了算：
+                #    就算上游手滑把标题塞进 `data`，写进 report.json 的也只有
+                #    词表里的那几个字段（认不出的动作名 → 连 `data` 都不存，
+                #    事件本身还在，`block()` 会把它计进 `unknown`）。
+                item = feature_usage.clean(
+                    str(kind)[len(feature_usage.PREFIX):], small)
+                small = item[1] if item is not None else {}
+            if small:
+                ev["data"] = small
+        self.events.append(ev)
 
     @_safe
     def note_correction(self, fixed: str, raw: str) -> None:
@@ -1101,6 +1152,11 @@ class TestSession:
             #    没有它，「采集坏了」和「本来就没数据」在报告里长得一模一样。
             "collector_errors": self._safe_bad,
             "events": self.events,
+            # ⭐ 功能使用度（作者 2026-10-17）：**只记动作与计数，不记任何文本**。
+            #    ⚠️ 从 `events` 里那张 `feature.*` 时间线重新数出来的 —— 不是第二份账
+            #       （口径定义在 `feature_usage.py`，判据在 `tests/test_feature_usage.py`）。
+            #    ⚠️ 老文件里没这些事件 → 全零的块（渲染端不用 if）。
+            "feature_usage": feature_usage.block(self.events),
             "segments": segs,
         }
         out = str(self.stem) + ".report.json"

@@ -427,7 +427,7 @@ def _polish_state(stats: dict | None) -> str:
     return "partial" if stats.get("failed") else "ok"
 
 
-def _render_outline_section(items: dict) -> list:
+def _render_outline_section(items: dict, *, review: dict | None = None) -> list:
     """课堂纲要 -> 笔记里那一节。**纯函数**（不起窗口、不联网、可单测）。
 
     ⚠️ **返回空列表 = 这一节什么都不该写**（既没课务也没正式章）——
@@ -437,11 +437,26 @@ def _render_outline_section(items: dict) -> list:
        「英文合成句 + 括注中文术语」，作者后来两次要求「中文占比再提高」→ 按①实现。
        ⚠️ `en` 一个字没丢：它在小字那行。
     ⚠️ 没有合成句的章**退回它的原子要点**（不写"（空）"）。
+    ⭐ 第五轮（作者 2026-10-17）：`review` 给了就先过一遍 `note_outline.check` ——
+       纲要里的等式/除法/代入算不对不许原样上线（改对就标「已更正」，改不了标 ⚠）。
     """
     ds = list(items.get("deadlines") or ())
     chs = [c for c in (items.get("chapters") or ()) if c.get("status") == "final"]
     if not ds and not chs:
         return []
+    # ── 纲要数字核：**渲染前**改条目（纯函数；失败也不许拖垮纲要本身）─────────
+    _fixes: list = []
+    _warns: list = []
+    if review:
+        try:
+            import note_outline
+            items, _fixes, _warns = note_outline.check(items, review=review)
+        except Exception:                                     # noqa: BLE001
+            _fixes, _warns = [], []
+    # ⚠️ `check()` 返回的是**深拷贝**：上面那份 `chs` 指的还是旧条目 —— 必须重取，
+    #    否则记账行说"1 处已更正"、正文却还是错的那个数（第五轮实测踩过）。
+    ds = list(items.get("deadlines") or ())
+    chs = [c for c in (items.get("chapters") or ()) if c.get("status") == "final"]
     # ⚠️ 2026-10-17 step 1：课务那一段**多一道闸门**（判据在 `chapter.deadline_worthy`，
     #    纯函数）。直播时"宁可多报"（`deadline_hits` 的取舍），但笔记是**留一个学期**
     #    的那份 —— 审计实测那份笔记 5 条课务 0 条是真的，读者会学会整块跳过。
@@ -456,6 +471,14 @@ def _render_outline_section(items: dict) -> list:
         kept, _n_drop = ds, 0                                 # 附加层不许拖垮主体
     ds = kept
     out: list = ["## 📑 课堂纲要", ""]
+    # ⚠️ 记账（不静默）：纲要这一屏先于正文，错了最伤 —— 改了几处、几处待确认都写在脸上。
+    if _fixes or _warns:
+        bits = []
+        if _fixes:
+            bits.append(f"{len(_fixes)} 处已更正")
+        if _warns:
+            bits.append(f"{len(_warns)} 处待确认")
+        out += [f"*纲要数字核：{'、'.join(bits)}（明细在各条行尾）。*", ""]
     if ds:
         out += ["### Deadlines · 课务", ""]
         for d in ds:

@@ -314,7 +314,7 @@ def render(d: NoteData) -> str:
     try:
         import obsidian_writer as _ow
         if d.chapter_items:
-            _sec = _ow._render_outline_section(d.chapter_items)
+            _sec = _ow._render_outline_section(d.chapter_items, review=d.review)
             if _sec:
                 L += _sec
     except Exception:                                          # noqa: BLE001

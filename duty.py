@@ -79,6 +79,19 @@ _RE_FILLER = re.compile(
 
 #: 中文里没有空格断词，所以标题按**字数**截；英文按词截。
 TITLE_MAX = 30
+#: ⭐ **中文摘要**的长度上限（汉字）。作者 2026-10-17：标题要「中文摘要」
+#: （「习题集截止」「本周三停课」「下周必须到场」那种）——12–16 个汉字最像标题。
+SUMMARY_MAX = 16
+#: 中文摘要截断前的从句边界（在这些字符里往回找一个断点）。
+_CLAUSE = "，,；;：:、—–（）()「」“”"
+
+#: 中文摘要开头要剥掉的口水/转述词（老师说的话不是待办本身）。
+_ZH_FILLER = re.compile(
+    r"^(?:那么|所以|然后|接着|现在|于是|哦|嗯|呃|就是|大家|同学们|各位|注意|记得|"
+    r"别忘|不要忘|老师(?:说|讲|提到|强调|提醒)|教授(?:说|讲|提到|强调|提醒)|"
+    r"我(?:觉得|认为|建议)|你(?:们)?(?:要|得|可以)|请)[\s，,：:、]*")
+#: 中文摘要**句尾**的语气词与标点（作者：不许带句号）。
+_ZH_TAIL = re.compile(r"[\s。．\.!！?？~～…，,、；;：:]+$")
 
 
 def classify(quote: str, *, changed: bool = False) -> str:
@@ -98,12 +111,14 @@ def classify(quote: str, *, changed: bool = False) -> str:
     return "其他"
 
 
-def short_title(quote: str, *, limit: int = TITLE_MAX) -> str:
-    """原话 → 卡片上的默认标题（可改）。剥口水词 + 按字数/词截断 + 省略号。"""
-    s = re.sub(r"\s+", " ", str(quote or "")).strip().strip("“”\"' ")
-    s = _RE_FILLER.sub("", s).strip()
-    if not s:
-        return "（没有原话）"
+def clean_title(text: str, *, limit: int = TITLE_MAX) -> str:
+    """标题的**最后一道清洗**：去首尾空白/引号、去句尾标点（**中英文都不带句号**）、
+    限长（中文按字数、英文按词，超了给省略号）。
+
+    ⚠️ 「不带句号」是作者 2026-10-17 点名的规矩 —— 标题是**标签**，不是句子。
+    """
+    s = re.sub(r"\s+", " ", str(text or "")).strip().strip("“”\"'… ")
+    s = _ZH_TAIL.sub("", s)
     if len(s) <= limit:
         return s
     head = s[:limit]
@@ -111,7 +126,58 @@ def short_title(quote: str, *, limit: int = TITLE_MAX) -> str:
         cut = head.rfind(" ")
         if cut >= limit // 2:
             head = head[:cut]
-    return head.rstrip(" ,，。") + "…"
+    else:                                                # 中文：优先在从句边界断
+        cut = max((head.rfind(c) for c in _CLAUSE), default=-1)
+        if cut >= limit // 2:
+            head = head[:cut]
+    return head.rstrip(" ,，。；;、") + "…"
+
+
+def summary_zh(zh: str, *, en: str = "", limit: int = SUMMARY_MAX) -> str:
+    """⭐ 一句话 → 卡片/小卡上的**中文摘要标题**（纯函数，判据靠它）。
+
+    来源优先级（作者 2026-10-17：「优先复用已有的那次模型调用；不额外增加实时调用次数」）：
+      ① `zh` —— **已有的那份中文**：正则路径上它是这句的即时译文，模型路径上它是
+         `Atom.zh`（那次原子调用本来就给的中文）。两条都**不发新请求**。
+      ② 没有 `zh`（纯转录档 / 译文还没到）→ 退回**英文原话**的截短（`clean_title`）。
+
+    ⚠️ 规则只做三件事：剥口水词 → 从句边界截短 → 去句尾标点。**不做**"意译成更短的
+       词"那一步 —— 那需要模型（见 `SUMMARY_MAX` 与文件头那条"不加调用"）。
+    """
+    z = _ZH_TAIL.sub("", re.sub(r"\s+", " ", str(zh or "")).strip())
+    for _ in range(4):                       # 「那么，同学们注意，…」这种要连剥几层
+        nxt = _ZH_FILLER.sub("", z).strip()
+        if nxt == z:
+            break
+        z = nxt
+    if z:
+        return clean_title(z, limit=limit)
+    return clean_title(en, limit=TITLE_MAX) or "（没有原话）"
+
+
+def clean_quote(text: str, *, limit: int = 56) -> str:
+    """「原话」行：**保留标点**（它是引用，不是标题），只折叠空白 + 限长。
+
+    作者 2026-10-17：英文原话只留在「原话」那一行 —— 那一行要**看得出是原话**，
+    所以这里**不剥口水词、不去句号**（与 `clean_title` 是两条路）。
+    """
+    s = re.sub(r"\s+", " ", str(text or "")).strip().strip("“”\" ")
+    if len(s) <= limit:
+        return s
+    head = s[:limit]
+    if re.search(r"[A-Za-z0-9]$", head):                 # 英文：别切在词中间
+        cut = head.rfind(" ")
+        if cut >= limit // 2:
+            head = head[:cut]
+    return head.rstrip() + "…"
+
+
+def short_title(quote: str, *, limit: int = TITLE_MAX) -> str:
+    """原话 → 卡片上的默认标题（可改）。剥口水词 + 按字数/词截断 + 省略号。"""
+    s = _RE_FILLER.sub("", str(quote or "")).strip()
+    if not s:
+        return "（没有原话）"
+    return clean_title(s, limit=limit)
 
 
 def has_time_pointer(quote: str, *, day) -> bool:
@@ -154,11 +220,14 @@ def candidate(payload, *, day) -> dict | None:
     return {
         "t": str(p.get("t") or ""),
         "quote": quote,
+        #: 已有的中文（正则 = 即时译文；模型 = Atom.zh）—— 摘要的来源，见 `summary_zh`。
+        "zh": str(p.get("zh") or ""),
         "src": sorted(set(p.get("src") or ())),
         "source": str(p.get("source") or ""),
         "changed": bool(p.get("changed")),
         "type": classify(quote, changed=bool(p.get("changed"))),
-        "title": short_title(quote),
+        # ⭐ 标题 = **中文摘要**（英文原话只留在 `quote` 那一行）
+        "title": summary_zh(p.get("zh") or "", en=quote),
         "date": when.date.isoformat() if when else "",
         "time": t.strftime("%H:%M") if t else "",
         "inferred": bool(when),                # ⭐ 卡片上标「推算」（PassAI 先例）
@@ -223,7 +292,7 @@ def load(path) -> list[dict]:
                 order.append(rid)
                 out[rid] = {"id": rid, "action": "pending", "reminders": ""}
             out[rid].update({k: rec[k] for k in
-                             ("t", "quote", "src", "source", "changed", "type",
+                             ("t", "quote", "zh", "src", "source", "changed", "type",
                               "title", "date", "time", "inferred", "phrase",
                               "undecided") if k in rec})
         elif rid in out:
@@ -418,9 +487,9 @@ class Board:
                   **cand}
             self._items.append(it)
             rec = {"kind": "item", **{k: it[k] for k in
-                                      ("id", "t", "quote", "src", "source", "changed",
-                                       "type", "title", "date", "time", "inferred",
-                                       "phrase", "undecided")}}
+                                      ("id", "t", "quote", "zh", "src", "source",
+                                       "changed", "type", "title", "date", "time",
+                                       "inferred", "phrase", "undecided")}}
         append(self._path, rec)
         return dict(it)
 

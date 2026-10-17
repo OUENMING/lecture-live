@@ -459,7 +459,9 @@ class LiveSummarizer:
             if not isinstance(it, (tuple, list)) or len(it) < 4:
                 continue
             gid, t, en, _zh = it[0], it[1], it[2], it[3]
-            self._hit_deadline(gid, t, en)
+            # ⭐ `zh` 一路带到 payload：卡片/小卡的**中文摘要**用它（句子刚定稿时
+            #    那份译文已经在手边了，**零额外调用**）。见 `duty.summary_zh`。
+            self._hit_deadline(gid, t, en, _zh)
             if not self._buf:
                 self._t0 = now
             self._buf.append((gid, t, en, _zh))
@@ -627,7 +629,9 @@ class LiveSummarizer:
 
         for a in got:
             if a.kind == KIND_DEADLINE and self._deadline_ok(a.text):
-                self._emit_deadline(a.t, a.text, a.src, "model", False)
+                # ⭐ `a.zh` = **这次原子调用本来就给的中文**（`Atom.zh`，2026-09-30 加的）
+                #    —— 摘要用它，**没有新增调用**。
+                self._emit_deadline(a.t, a.text, a.src, "model", False, zh=a.zh)
 
         self._maybe_force_split(now)                      # ⭐ 太长的章先切开
         self._advance(topic, topic_zh, buf, got, now)
@@ -784,24 +788,32 @@ class LiveSummarizer:
             return False
         return p is not None and p >= DEADLINE_MIN_P
 
-    def _hit_deadline(self, gid: int, t: str, en) -> None:
-        """**正则路径**：句子一定稿就查。不调模型 → 一两秒内上屏（判据 T14）。"""
+    def _hit_deadline(self, gid: int, t: str, en, zh="") -> None:
+        """**正则路径**：句子一定稿就查。不调模型 → 一两秒内上屏（判据 T14）。
+
+        ⚠️ `zh` = 这句的**即时译文**（`feed` 那条路上的第四个元素）—— 只用来做卡片上的
+           中文摘要，**不发任何请求**（「一些事儿」代价里没有模型调用这一项）。
+        """
         hit = ch.deadline_hits(en)
         if hit is None:
             return
-        self._emit_deadline(t, str(en or ""), [gid], "regex", hit["changed"])
+        self._emit_deadline(t, str(en or ""), [gid], "regex", hit["changed"], zh=zh)
 
-    def _emit_deadline(self, t: str, quote: str, src, source: str, changed: bool) -> None:
+    def _emit_deadline(self, t: str, quote: str, src, source: str, changed: bool,
+                       zh: str = "") -> None:
+        """⚠️ `zh` = **已有的**中文（正则路径 = 即时译文；模型路径 = 模型给那句的中文）。
+        两个都是**这次调用本来就有的产物**，不是为「一些事儿」新加的请求。"""
         # ⭐ 采集面 ⑤ —— 按来源分（正则/模型），比在两个调用点各加一处不容易漏。
         if source == "regex":
             self._deadlines_regex += 1
         else:
             self._deadlines_model += 1
-        rec = {"type": ch.DEADLINE, "t": t, "quote": quote,
+        rec = {"type": ch.DEADLINE, "t": t, "quote": quote, "zh": str(zh or ""),
                "src": sorted(set(src or ())), "source": source, "changed": bool(changed)}
         self._write(rec)
         self._emit_p({"kind": "deadline", **{k: rec[k] for k in
-                                             ("t", "quote", "src", "source", "changed")}})
+                                             ("t", "quote", "zh", "src", "source",
+                                              "changed")}})
 
     # ------------------------------------------------------------ 杂项
     def _write(self, rec) -> None:

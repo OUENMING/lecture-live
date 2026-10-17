@@ -58,7 +58,7 @@ class ShortTitle(unittest.TestCase):
         self.assertTrue(t.startswith("there is an assignment"), t)
         self.assertNotIn("first thing", t)
         self.assertEqual(duty.short_title("Ok so the exam is on Friday."),
-                         "the exam is on Friday.")
+                         "the exam is on Friday")
 
     def test_截断在词边界(self):
         t = duty.short_title("the problem set which we discussed in the tutorial is due Friday")
@@ -73,10 +73,66 @@ class ShortTitle(unittest.TestCase):
 
     def test_短句原样(self):
         self.assertEqual(duty.short_title("The problem set is due Friday."),
-                         "The problem set is due Friday.")
+                         "The problem set is due Friday")
 
     def test_空句有兜底(self):
         self.assertEqual(duty.short_title("   "), "（没有原话）")
+
+
+class 中文摘要(unittest.TestCase):
+    """⭐ 作者 2026-10-17：卡片/小卡的标题要**中文摘要**（「本周三停课」那种），
+    英文原话只留在「原话」行。摘要复用**已有的**中文（正则 = 即时译文；模型 = `Atom.zh`），
+    **一次实时调用都不新增** —— 没有中文就退回英文原话的截短。"""
+
+    def test_译文就是摘要(self):
+        self.assertEqual(duty.summary_zh("这周三没有课。"), "这周三没有课")
+        self.assertEqual(duty.summary_zh("习题集周五截止。"), "习题集周五截止")
+
+    def test_剥口水词(self):
+        self.assertEqual(duty.summary_zh("老师说下周三停课。"), "下周三停课")
+        self.assertEqual(duty.summary_zh("同学们注意，周五要交作业。"), "周五要交作业")
+        self.assertEqual(duty.summary_zh("那么，下周必须到场。"), "下周必须到场")
+
+    def test_从句边界截短(self):
+        got = duty.summary_zh("下周的实验报告必须在周二之前交给助教并且抄送给老师并且附上代码和截图")
+        self.assertTrue(got.endswith("…"), got)
+        self.assertLessEqual(len(got), duty.SUMMARY_MAX + 1)
+
+    def test_没有中文退回英文且不带句号(self):
+        self.assertEqual(duty.summary_zh("", en="The problem set is due Friday."),
+                         "The problem set is due Friday")
+        self.assertEqual(duty.summary_zh("   ", en="Hand in your essay tomorrow"),
+                         "Hand in your essay tomorrow")
+
+    def test_全空给占位(self):
+        self.assertEqual(duty.summary_zh("", en=""), "（没有原话）")
+
+    def test_原话行保留标点(self):
+        """「原话」是引用不是标题 —— 句号照留（作者 2026-10-17）。"""
+        self.assertEqual(duty.clean_quote("So, the problem set is due Friday.", limit=60),
+                         "So, the problem set is due Friday.")
+        self.assertTrue(duty.clean_quote("x " * 40, limit=20).endswith("…"))
+
+    def test_标题都不带句号(self):
+        for t in ("The problem set is due Friday.", "这周三没有课。", "这是标题！",
+                  "这是标题？", "这是标题。 "):
+            got = duty.clean_title(t)
+            self.assertNotRegex(got, r"[.。!！?？]\s*$", got)
+
+    def test_candidate用中文摘要当标题(self):
+        it = duty.candidate({"t": "10:00", "quote": "There is no class on Wednesday this week.",
+                             "zh": "这周三没有课。", "src": [1], "source": "regex",
+                             "changed": False}, day=datetime.date(2026, 10, 17))
+        self.assertIsNotNone(it)
+        self.assertEqual(it["title"], "这周三没有课")
+        self.assertEqual(it["quote"], "There is no class on Wednesday this week.")
+
+    def test_candidate没有中文也不炸(self):
+        it = duty.candidate({"t": "10:00", "quote": "The problem set is due Friday.",
+                             "src": [1], "source": "regex", "changed": False},
+                            day=datetime.date(2026, 10, 17))
+        self.assertIsNotNone(it)
+        self.assertEqual(it["title"], "The problem set is due Friday")
 
 
 class TimePointer(unittest.TestCase):

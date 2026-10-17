@@ -219,16 +219,17 @@ class TodayExtra(unittest.TestCase):
             os.utime(p, (ts, ts))
         return p
 
-    def test_今天传了课件就给两行(self):
+    def test_今天传了课件就给一行(self):
+        """⭐ 作者 2026-10-17：这一块**只留课件那条**（砍掉原来的 ②）。"""
         with tempfile.TemporaryDirectory() as d:
             self._write_material(d, "ECON10790", "week6.md",
                                  "# Monopoly\n\n## Deadweight loss\n\n正文很长很长的一段话在这里。")
             data = {"date": "2026-10-15", "tail": "these three are difficult"}
             got = recap.today_extra("ECON10790", data, root=d)
-            self.assertEqual(len(got["today"]), 2)
+            self.assertEqual(len(got["today"]), 1)
             self.assertIn("week6.md", got["today"][0])
             self.assertIn("Monopoly", got["today"][0])
-            self.assertIn("these three", got["today"][1])
+            self.assertNotIn("these three", "".join(got["today"]))
 
     def test_没新课件就整块不出现(self):
         """⭐ 原型 B 态：没传课件 → `today` 那一行不出现（不报错、不提示缺东西）。"""

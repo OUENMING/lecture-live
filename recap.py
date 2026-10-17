@@ -11,8 +11,9 @@
 | **这节课开课** | 直接读（`load` + `card`），不现场调模型 | `main` 开课时 → `streamq` → `overlay.recap_show` |
 
 ⚠️ 唯一的例外是 **📄「今天可能讲什么」**：它的输入是**今天**新传的课件，上节课时
-   还不存在 → 只能开课时算（`today_extra`）。它走**模板**（文件名 + 开头几行标题 +
-   上节课尾那句原话），**不调模型** —— 「不现场调模型」这条对五块一视同仁。
+   还不存在 → 只能开课时算（`today_extra`）。它走**模板**（文件名 + 开头几行标题），
+   **不调模型** —— 「不现场调模型」这条对五块一视同仁。
+   作者 2026-10-17 砍掉了它原来那条 ②「上节课结尾提到……」：这一块只留课件。
 
 ## 一条纪律：没有就不显示
 
@@ -260,9 +261,10 @@ _TITLE_KINDS = ("title", "subtitle")
 
 
 def today_extra(course: str, data, *, root=None, now=None) -> dict:
-    """📄「今天可能讲什么」：**今天新传的课件** + 上节课尾那句原话 → 模板两行。
+    """📄「今天可能讲什么」：**今天新传的课件** → 模板一行。
 
-    没有新课件 → `{}`（那一行整块不出现，原型 B 态：不报错、不提示缺东西）。
+    作者 2026-10-17 砍掉了原来的 ②「上节课结尾提到……」那一行：块里只留课件这一条，
+    没有课件 → `{}`（那一行整块不出现，原型 B 态：不报错、不提示缺东西）。
     ⚠️ 纯模板（`extract` 抽文本 + 文件名），**不调模型** —— 与其余四块同一纪律。
     ⚠️ 它可能慢一点（PDF 抽文本），调用方把它丢在 worker 上、晚 1–2 秒补进来。
     """
@@ -279,12 +281,9 @@ def today_extra(course: str, data, *, root=None, now=None) -> dict:
     lines: list[str] = []
     heads = _slide_heads(path)
     if heads:
-        lines.append(f"① 今天新课件《{name}》：{ ' · '.join(heads) }")
+        lines.append(f"今天新课件《{name}》：{ ' · '.join(heads) }")
     else:
-        lines.append(f"① 今天新传了课件《{name}》")
-    tail = _flat((data or {}).get("tail"))
-    if tail:
-        lines.append(f"② 上节课结尾提到：「{tail}」")
+        lines.append(f"今天新传了课件《{name}》")
     return {"today": lines[:TODAY_MAX]}
 
 

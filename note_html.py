@@ -322,9 +322,15 @@ h3{font-size:18px;margin:26px 0 8px}
 h4{font-size:16px;margin:18px 0 6px;color:var(--accent)}
 section.card{background:var(--card);border:1px solid var(--line);border-radius:12px;
  padding:14px 18px;margin:14px 0}
-.reveal{opacity:0;transform:translateY(6px);transition:opacity .28s ease,transform .28s ease}
-.reveal.in{opacity:1;transform:none}
-@media (prefers-reduced-motion:reduce){.reveal{opacity:1!important;transform:none!important}}
+/* ⚠️ 入场动画只在**有 JS** 时才把内容藏起来（`html.js` 由 <head> 里那行内联脚本加）：
+   没 JS 时正文必须看得见 —— 这是本模块开头那条纪律（"不用 JS 也能读"）的实现，
+   顺带也修掉了"截图/打印时上半屏空白"（实测：headless 截图滚过 #kp1 之后，
+   上面几张卡片的 IntersectionObserver 还没触发 → opacity:0 → 半屏白）。 */
+.reveal{opacity:1;transform:none}
+html.js .reveal{opacity:0;transform:translateY(6px);
+ transition:opacity .28s ease,transform .28s ease}
+html.js .reveal.in{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){html.js .reveal{opacity:1!important;transform:none!important}}
 details{border:1px dashed var(--line);border-radius:8px;padding:6px 10px;margin:8px 0;
  background:var(--code)}
 details summary{cursor:pointer;font-weight:600;color:var(--accent)}
@@ -356,6 +362,7 @@ code{background:var(--code);padding:1px 4px;border-radius:4px}
 .q .a{margin-top:6px}
 footer{color:var(--muted);font-size:13px;margin-top:40px}
 @media print{#prog,#topbar,.slider{display:none}section.card{break-inside:avoid}
+ html.js .reveal{opacity:1!important;transform:none!important}
  body{background:#fff}}
 """
 
@@ -497,6 +504,7 @@ def page(title: str, head: list, toc_items: list, sections_html: list, qa: list,
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)}</title>
+<script>document.documentElement.className="js"</script>
 <link rel="stylesheet" href="{KATEX_CSS}" onerror="window.__katex_css_failed=1">
 <style>{_CSS}</style>
 <script defer src="{KATEX_JS}" onerror="window.__katex_failed=1"></script>

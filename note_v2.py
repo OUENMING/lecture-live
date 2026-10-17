@@ -96,6 +96,15 @@ REVIEW_SYS = """你是课堂笔记写作者。给一名靠中文听英文课的�
   最低点叫**盈亏平衡价（break-even price）**。写到这一节时：按本课 📖 口径讲，并**加一句**
   与标准口径的对照（标 📚）。
 
+## 三之三、正文纪律（作者 2026-10-17 验收点名，逐字遵守）
+- **不许第一人称、不许写猜测过程**。正文只写结论；「我可能听错了」「或者我漏掉了」
+  「可能是简化处理（假设……）」这类句子一律**不许出现**（渲染前的规则会删掉它们）。
+- 不确定的事只有**一种固定写法**（原样照抄这一行，把 `……` 换成事实）：
+  `⚠ 课上只给了片段：原题见 <📖 文件名/题号> / 未核对`
+  例：`⚠ 课上只给了片段：原题见 📖 2025-12 期末卷 Exercise 7 / 未核对`。
+- **引号里的英文必须是材料或转录里的逐字原文**。不许把两处原文用「…」拼成一句
+  （渲染前会核：找不到逐字就**去掉引号**改转述）。引用教材原话时把「📖 文件 + 段」写出来。
+
 ## 三之二、正确性（比你写得漂亮重要）
 - 每条事实标来源：🎙 课上（转录里确实讲过）/ 📖 课件（附给你的片段里确实有）/
   📚 标准理论（教科书级共识）。
@@ -384,16 +393,17 @@ def chunk_lines(lines: list, size: int = REVIEW_CHUNK) -> list:
     return [lines[i:i + size] for i in range(0, len(lines), size)]
 
 
-def _user_content(lines: list, *, domain: str = "", materials_block: str = "") -> str:
+def _user_content(lines: list, *, domain: str = "", materials_block: str = "",
+                  extra: str = "") -> str:
     body = "\n".join(lines)
     head = f"Course: {domain}\n" if domain else ""
-    return (f"{head}{materials_block}"
+    return (f"{head}{materials_block}{extra}"
             f"Transcript (each line starts with its timestamp):\n{body}")
 
 
 def review(entries: list, *, chat, domain: str = "", materials=None,
            on_progress=None, workers: int = REVIEW_WORKERS,
-           max_tokens: int = REVIEW_MAX_TOKENS) -> dict:
+           max_tokens: int = REVIEW_MAX_TOKENS, extra: str = "") -> dict:
     """分块调 LLM → 合并。`chat(system, user, max_tokens) -> dict`。
 
     ⚠️ 并发发、**按块序收**（同旧版 `_review` 的取舍：串行那 4–5 块是下课→笔记
@@ -411,7 +421,8 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
         try:
             hits = materials.search("\n".join(chunk)) if materials is not None else []
             user = _user_content(chunk, domain=domain,
-                                 materials_block=snippets_block(hits))
+                                 materials_block=snippets_block(hits),
+                                 extra=extra)
             obj = chat(REVIEW_SYS.replace("__PLOTS__", _plots_menu()), user, max_tokens)
         except Exception:                                     # noqa: BLE001
             return {}

@@ -1010,8 +1010,23 @@ class ObsidianWriter:
             domain = course_title(self._glossary_path, self._course)
         except Exception:                                     # noqa: BLE001
             domain = ""
+        # ⭐ 更正账本（作者 2026-10-17 第 4 条）：**生成前**把"教授自己更正过的地方 +
+        #    官方公式"抽出来当硬约束；生成后 `reconcile` 再逐条核（MC=TC' 这类关系
+        #    用数值核，不看模型的自觉）。实测：13:40:30 的口误 `−12Q` 与 13:40:41 的
+        #    重述 `−24Q` 都在这份转录里 —— 连跑两次时一次写对、一次写回错的。
+        import note_ledger
+        import note_guards
+        ledger = note_ledger.from_transcript(entries)
+        ledger += note_ledger.from_materials(self._materials)
+        t_fix = [x for x in ledger if x.get("kind")]
+        fml = [x for x in ledger if not x.get("kind")]
+        block = note_ledger.block(t_fix, fml)
+        if block:
+            print(f"   📒 更正账本：{len(t_fix)} 处教授自我更正 + {len(fml)} 条官方公式",
+                  flush=True)
         review = note_v2.review(entries, chat=self._chat, domain=domain,
-                               materials=self._materials, on_progress=on_progress)
+                               materials=self._materials, on_progress=on_progress,
+                               extra=block)
         if not review:
             return {}
         if self._materials is not None and len(self._materials):
@@ -1032,6 +1047,25 @@ class ObsidianWriter:
                       f"{len(un)} 项未核对）", flush=True)
         except Exception as e:                                # noqa: BLE001
             print(f"⚠ 数字核对失败({str(e)[:60]}); 笔记照常生成")
+        # ⭐ 正文纪律（作者第 2、3 条）：删猜测句 / 引号里的英文必须逐字。
+        for fn, label in ((lambda r: note_ledger.reconcile(r),
+                           "更正账本核对"),
+                          (lambda r: note_guards.scrub(r), "猜测句清理"),
+                          (lambda r: note_guards.quote_check(
+                              r, materials=self._materials,
+                              transcript="\n".join(
+                                  str(e.get("en") or e.get("asr") or "") for e in entries)),
+                           "引用逐字核对")):
+            try:
+                got_, extra_items, warns_ = fn(review)
+                review = got_
+                if extra_items and label == "更正账本核对":
+                    self._corr_extra = list(self._corr_extra) + list(extra_items)
+                for w in warns_:
+                    self._note_warns.append(w)
+                    print(f"   ⚠ {label}：{w}", flush=True)
+            except Exception as e:                            # noqa: BLE001
+                print(f"⚠ {label}失败({str(e)[:60]}); 笔记照常生成")
         # 💡 术语库：作者硬要求（从笔记抽词 → `prep.append_terms` 只追加 + 墓碑）。
         try:
             import note_glossary

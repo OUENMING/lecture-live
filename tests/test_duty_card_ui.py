@@ -1,0 +1,486 @@
+#!/usr/bin/env python3
+"""卡片的**视觉规矩**（作者 2026-10-17 那份评审后的拍板）：
+
+- 按钮层级**自己声明**（`primary` / `secondary` / `plain`）—— 不许再按位置猜，
+  「全部忽略」是批量放弃，永远不是 primary；
+- 卡片**不再有深色底块**（只一道发丝边）、高度**跟内容走**（钉在转录区顶边）；
+- emoji 全换 **SF Symbols 单色**小图（课前回顾 / 一些事儿）。
+
+判据分三层（同 `test_duty_chip.py`）：纯函数 → 真 `Overlay` 上量几何 → 源码级钉住字面量。
+"""
+import ast
+import os
+import pathlib
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import overlay  # noqa: E402
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+EMOJI_MIN = 0x1F000
+
+
+def _item(rid="d1", action="pending", **kw):
+    return {"id": rid, "action": action, "type": "调课", "title": "本周三停课",
+            "quote": "There is no class on Wednesday.", "date": "2026-10-14",
+            "t": "13:52:56", **kw}
+
+
+def _blocks(o, kind):
+    return [b for b in o._card_pending if b["kind"] == kind]
+
+
+def _fill_alpha(view) -> float:
+    """层背景色的 alpha（CGColor → NSColor 再读；CGColor 自己没有 alpha()）。"""
+    try:
+        from AppKit import NSColor
+        cg = view.layer().backgroundColor()
+        if cg is None:
+            return 0.0
+        return float(NSColor.colorWithCGColor_(cg).alphaComponent())
+    except Exception:                                     # noqa: BLE001
+        return 0.0
+
+
+def _render_pixels(view):
+    """把一个视图渲染成位图 → `(bytes, w, h, samplesPerPixel, bytesPerRow)`（失败 None）。"""
+    try:
+        rep = view.bitmapImageRepForCachingDisplayInRect_(view.bounds())
+        if rep is None:
+            return None
+        view.cacheDisplayInRect_toBitmapImageRep_(view.bounds(), rep)
+        return (bytes(rep.bitmapData()), rep.pixelsWide(), rep.pixelsHigh(),
+                rep.samplesPerPixel(), rep.bytesPerRow())
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
+def _ink_span(view, restyle) -> tuple | None:
+    """**像素级**量出"文字画在哪"：同一颗胶囊渲染两次（有字 / 无字）相减。
+
+    ⚠️ 为什么要相减：胶囊自己的填充与描边也是"亮的"，直接数亮像素会把整个胶囊量进去
+       （实测：选中胶囊 ink 从 3 到 86 —— 那是整个胶囊的形状）。相减只剩文字的墨。
+    返回 `(x0, x1, 宽, 缩放)`（像素；`x0/x1` 是**列**范围）。
+    """
+    a = _render_pixels(view)
+    if a is None:
+        return None
+    title = str(view.title())
+    view.setTitle_("")
+    try:
+        view.setAttributedTitle_(None)   # ⚠️ 光清 `title` 不够：属性串还挂在 cell 上
+    except Exception:                    # noqa: BLE001
+        pass
+    restyle(view)                      # 空标题也要保留同样的底 / 描边
+    b = _render_pixels(view)
+    view.setTitle_(title)
+    restyle(view)
+    if b is None or a[1:4] != b[1:4]:
+        return None
+    buf_a, w, h, spp, bpr = a
+    buf_b = b[0]
+    cols = []
+    for x in range(3, w - 3):
+        for y in range(h):
+            o = y * bpr + x * spp
+            if (abs(buf_a[o] - buf_b[o]) > 40 or abs(buf_a[o + 1] - buf_b[o + 1]) > 40
+                    or abs(buf_a[o + 2] - buf_b[o + 2]) > 40):
+                cols.append(x)
+                break
+    if not cols:
+        return None
+    scale = w / float(view.bounds().size.width) if view.bounds().size.width else 1.0
+    return (min(cols), max(cols), w, scale)
+
+
+class 按钮层级纯函数(unittest.TestCase):
+    def test_缺省第一颗是主按钮(self):
+        self.assertEqual(overlay.card_button_specs([("记下", "save"), ("忽略", "ignore")]),
+                         [("记下", "save", "primary"), ("忽略", "ignore", "secondary")])
+
+    def test_显式声明优先(self):
+        self.assertEqual(
+            overlay.card_button_specs([("全部忽略", "all", "plain")]),
+            [("全部忽略", "all", "plain")])
+
+    def test_乱写的角色退回次按钮(self):
+        """拼错角色 / 给 None —— 退回**最安静**的档，绝不悄悄变成主按钮。"""
+        for bad in ("primary!", "", None, "prominent"):
+            with self.subTest(role=bad):
+                self.assertEqual(overlay.card_button_specs([("x", "y", bad)])[0][2],
+                                 "secondary")
+
+    def test_空输入(self):
+        self.assertEqual(overlay.card_button_specs(None), [])
+        self.assertEqual(overlay.card_button_specs([]), [])
+
+    def test_三档就是全部(self):
+        self.assertEqual(set(overlay.BTN_ROLES), {"primary", "secondary", "plain"})
+
+
+class 源码级(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.src = (ROOT / "overlay.py").read_text(encoding="utf-8")
+        cls.tree = ast.parse(cls.src)
+
+    @classmethod
+    def _func_src(cls, name: str) -> str:
+        for fn in ast.walk(cls.tree):
+            if isinstance(fn, ast.FunctionDef) and fn.name == name:
+                return ast.get_source_segment(cls.src, fn) or ""
+        return ""
+
+    def test_place_buttons不再按位置猜主按钮(self):
+        """⭐ 作者 2026-10-17：`i == 0` 那种写法**删干净**（每颗按钮自己声明层级）。"""
+        src = self._func_src("_card_place_buttons")
+        self.assertNotIn("i == 0", src, "「第一个 = 主按钮」的硬编码又回来了")
+        self.assertIn("card_button_specs", src)
+        self.assertIn("role", src)
+
+    def test_卡片不再铺深色底块(self):
+        src = self._func_src("_ensure_card_view")
+        self.assertNotIn("setBackgroundColor_", src, "那块深色底又回来了（卡片只留发丝边）")
+        self.assertIn("CARD_HAIRLINE", src)
+
+    def test_课前回顾分区标题不再有emoji(self):
+        src = self._func_src("_recap_fill")
+        self.assertTrue(src, "没找到 `_recap_fill`")
+        bad = sorted({c for c in src if ord(c) >= EMOJI_MIN})
+        self.assertEqual(bad, [], f"课前回顾里还有 emoji：{bad}")
+        for name in ("book", "star", "pin", "doc.text"):
+            self.assertIn(name, src, f"分区标题少了 SF Symbols 名字：{name}")
+
+    def test_高度跟内容走(self):
+        src = self._func_src("_card_relayout")
+        self.assertIn("_card_natural_h", src)
+        self.assertNotIn("setFrame_(((x, y), (w, h)))", "")
+
+
+class 真窗口(unittest.TestCase):
+    def _overlay(self):
+        try:
+            from overlay import Overlay
+        except ModuleNotFoundError as e:
+            self.skipTest(f"AppKit 不可用, 跳过: {e}")
+        try:
+            return Overlay()
+        except Exception as e:                            # noqa: BLE001
+            self.fail(f"Overlay() 构造失败: {type(e).__name__}: {e}")
+
+    @staticmethod
+    def _buttons_of(blk) -> list:
+        """块里那些**可见**的胶囊按钮（`tag` 是纯文字标签，不是按钮）。"""
+        if blk["kind"] in ("buttons", "chips"):
+            return [x[0] for x in (blk["extra"] or [])]
+        if blk["kind"] == "duty_row" and blk["extra"]:
+            return [b for k, b in blk["extra"]["buttons"].items() if k != "tag"]
+        return []
+
+    def _all_buttons(self, o) -> list:
+        out: list = []
+        for blk in o._card_pending:
+            out += [b for b in self._buttons_of(blk) if not b.isHidden()]
+        return out
+
+    def test_编辑卡记下是唯一主按钮(self):
+        o = self._overlay()
+        try:
+            o.duty_update([_item("d1"), _item("d2")])
+            o._duty_open("d1")
+            blk = _blocks(o, "buttons")[-1]
+            roles = [(lab, role) for _b, lab, _c, role in blk["extra"]]
+            prim = [x for x in roles if x[1] == "primary"]
+            self.assertEqual([x[0] for x in prim], ["记下"], f"主按钮不止一颗：{roles}")
+            self.assertEqual(dict(roles).get("忽略"), "plain")
+            self.assertEqual(dict(roles).get("下一条"), "plain")
+            # 撤销态：只剩一颗次按钮（它不再假装是主按钮）
+            o._duty_act("save", o._duty_get("d1"))
+            items = [dict(x) for x in o._duty_items]
+            items[0]["action"] = "saved"
+            o._duty_items = items
+            o._card_refill()
+            blk = _blocks(o, "buttons")[-1]
+            self.assertEqual([(lab, role) for _b, lab, _c, role in blk["extra"]],
+                             [("撤销", "secondary")])
+        finally:
+            o.close()
+
+    def test_收尾卡全部忽略不是主按钮(self):
+        """⭐ 作者点名的判据：「全部忽略」是 plain，绝不是白色实心块。
+
+        顺带钉一条视觉不变量：整个收尾卡里**只有「记下」有底色**（primary 的填充）——
+        「全部忽略」与「忽略」都没有底（原来那两块 0.92 / 0.07 的实心，是作者点名的「色块」）。
+        """
+        o = self._overlay()
+        try:
+            self.assertTrue(o.duty_wrapup_show([_item("d1"), _item("d2", "saved")]))
+            footer = _blocks(o, "buttons")[-1]
+            roles = [(lab, role) for _b, lab, _c, role in footer["extra"]]
+            self.assertEqual(roles, [("全部忽略", "plain")], str(roles))
+            filled = []
+            for b in self._all_buttons(o):
+                if _fill_alpha(b) >= overlay.BTN_STYLE["primary"][0] - 0.02:
+                    filled.append(b.title())
+            self.assertEqual(filled, ["记下"], f"有底色的按钮不止「记下」：{filled}")
+        finally:
+            o.close()
+
+    def test_状态说明带单色符号(self):
+        """⭐ 失败/成功那句说明配的是 SF Symbols（不是 ⚠/✔ emoji）。"""
+        o = self._overlay()
+        try:
+            o.duty_update([_item("d1")])
+            o._duty_open("d1")
+            o._duty_act("save", o._duty_get("d1"))      # 先记下（还没写完）
+            items = [dict(x) for x in o._duty_items]
+            items[0]["action"] = "saved"
+            items[0]["reminders"] = "failed"
+            items[0]["reason"] = "系统没允许"
+            o._duty_items = items
+            o._card_refill()
+            notes = [b for b in _blocks(o, "note") if b.get("symbol")]
+            self.assertTrue(notes, "状态那一句没有配符号名")
+            self.assertEqual(notes[-1]["symbol"], "exclamationmark.triangle")
+            self.assertNotIn("⚠", notes[-1]["text"])
+            self.assertTrue(notes[-1]["icon"], "符号视图没建出来（icon 标记为空）")
+        finally:
+            o.close()
+
+    def test_课前回顾图标是单色符号视图(self):
+        o = self._overlay()
+        try:
+            data = {"course": "ECON10790", "date": "10-15",
+                    "points": [{"name": "供给曲线", "explain": "向上倾斜"}],
+                    "stars": ["最值得记的一句"], "open": ["还没懂的问"],
+                    "duties": [{"type": "调课", "title": "本周三停课", "when": "10-14"}],
+                    "today": ["今天新课件《week6》"]}
+            o.recap_show(data, course="ECON10790", day="2026-10-17")
+            labels = _blocks(o, "label")
+            self.assertTrue(labels)
+            for b in labels:
+                self.assertTrue(b["symbol"], f"分区标题没给符号名：{b['text']}")
+                self.assertFalse([c for c in b["text"] if ord(c) >= EMOJI_MIN],
+                                 f"标题里还有 emoji：{b['text']}")
+            self.assertTrue(any(b["extra"] is not None for b in labels),
+                            "SF Symbols 视图一个都没建出来（图标那一路断了）")
+            pts = _blocks(o, "point")
+            self.assertTrue(pts and pts[0]["attr"] is not None, "知识点不是属性串")
+            self.assertIn("供给曲线", pts[0]["text"])
+        finally:
+            o.close()
+
+    def test_卡片高度跟内容走(self):
+        o = self._overlay()
+        try:
+            o.duty_update([_item("d1")])
+            o._duty_open("d1")
+            f = o._card_view.frame()
+            avail = float(o._scroll_h)
+            self.assertLess(f.size.height, avail - 20.0,
+                            "短卡还占满整块转录区（底下那片空白又回来了）")
+            self.assertAlmostEqual(f.origin.y + f.size.height,
+                                   float(o._scroll_y) + avail, delta=1.5,
+                                   msg="卡片要钉在转录区**顶边**往下长")
+            nat = o._card_natural_h(f.size.width - 2 * overlay.CARD_PAD,
+                                    list(o._card_pending), None)
+            self.assertLessEqual(nat, f.size.height + 1.0, f"内容被挤掉了：{nat} > {f.size.height}")
+        finally:
+            o.close()
+
+
+class 几何(unittest.TestCase):
+    """⭐ 作者 2026-10-17：判据要**量几何**（在真视图上读 frame），不能只量调用。
+    出问题的是排版：文字贴左、胶囊拖长、收尾行按钮两行高、输入框没内边距。
+    """
+
+    def _overlay(self):
+        try:
+            from overlay import Overlay
+        except ModuleNotFoundError as e:
+            self.skipTest(f"AppKit 不可用, 跳过: {e}")
+        try:
+            return Overlay()
+        except Exception as e:                            # noqa: BLE001
+            self.fail(f"Overlay() 构造失败: {type(e).__name__}: {e}")
+
+    def _case(self, o, kind: str):
+        """摆一张卡并把**可见的胶囊按钮**取出来（侧注 / 图标那些 `extra` 不算）。"""
+        if kind == "duty":
+            o.duty_update([_item("d1"), _item("d2")])
+            o._duty_open("d1")
+        else:
+            o.duty_wrapup_show([_item("d1"), _item("d2")])
+        out = []
+        for blk in o._card_pending:
+            ex = blk["extra"]
+            if isinstance(ex, list):
+                for x in ex:
+                    b = x[0]
+                    if not hasattr(b, "title") or b.isHidden():
+                        continue
+                    if len(x) >= 4:                       # 普通按钮：块里存了 role
+                        role = str(x[3])
+                    else:                                     # 类型胶囊：按选中态算
+                        role = ("chip-on" if str(x[1]) == str(blk["chosen"])
+                                else "chip-off")
+                    out.append((b, role))
+        return out
+
+    def test_文字在胶囊里水平垂直居中(self):
+        """⭐ 判据量的是**画出来的像素**（不是调用、也不是 frame 的约定）。
+
+        同一颗胶囊渲染两次（有字 / 无字）相减 → 文字的墨迹列范围；它的中心与胶囊中心
+        偏差 ≤1pt、两侧留白 ≥ `CARD_BTN_PAD_X`。垂直用 AppKit 给的 title 矩形核。
+        """
+        o = self._overlay()
+        try:
+            for kind in ("duty", "wrapup"):
+                o._card_close()
+                btns = self._case(o, kind)
+                self.assertTrue(btns, f"{kind}：没量到按钮")
+                for b, role in btns:
+                    ink = _ink_span(b, lambda v=b, r=role: o._card_btn_style(v, r))
+                    if ink is None:
+                        self.skipTest("这台机器上视图渲染不回位图，跳过像素级判据")
+                    x0, x1, _w, scale = ink
+                    cx = (x0 + x1) / 2.0 / scale
+                    bw = b.bounds().size.width
+                    c = f"{b.title()!r} ink=({x0},{x1}) 中心={cx:.1f} 胶囊中心={bw / 2:.1f}"
+                    self.assertLessEqual(abs(cx - bw / 2.0), 1.0,
+                                         f"文字没水平居中：{c}")
+                    self.assertGreaterEqual(x0 / scale, overlay.CARD_BTN_PAD_X - 0.6,
+                                            f"左边留白不够：{c}")
+                    self.assertGreaterEqual((bw - x1 / scale), overlay.CARD_BTN_PAD_X - 0.6,
+                                            f"右边留白不够：{c}")
+                    # 垂直：AppKit 的 title 矩形要落在胶囊中线上
+                    tr = b.cell().titleRectForBounds_(b.bounds())
+                    self.assertLessEqual(
+                        abs((tr.origin.y + tr.size.height / 2.0) - b.bounds().size.height / 2.0),
+                        1.0, f"文字垂直没居中：{c}")
+                    self._assert_centered_para(b, c)
+        finally:
+            o.close()
+
+    def _assert_centered_para(self, b, c: str) -> None:
+        title = b.attributedTitle()
+        self.assertIsNotNone(title, f"标题不是属性串（对齐无从谈起）：{c}")
+        ps = title.attribute_atIndex_effectiveRange_("NSParagraphStyle", 0, None)
+        if isinstance(ps, tuple):            # PyObjC 把出参 NSRange 也回给我们了
+            ps = ps[0]
+        self.assertIsNotNone(ps, f"属性串没有段落样式（对齐会退回左）：{c}")
+        from AppKit import NSTextAlignmentCenter
+        # ⚠️ 不要写死数字：这套 PyObjC 里 `NSTextAlignmentCenter` = 1（不是教科书里的 2），
+        #    写死会把"对的"判成错的 —— 与常量比，别背数值。
+        self.assertEqual(int(ps.alignment()), int(NSTextAlignmentCenter),
+                         f"段落样式不是居中：{c}")
+
+    def test_常量就是作者定的那组(self):
+        """⭐ 判据不许只跟常量比（常量被改了两边一起动 = 恒真）。
+
+        这里钉的是**作者给的值**：胶囊高 28（macOS regular 控件高，且命中区 ≥28）、
+        左右留白 ≥10、按钮间距 8、输入框内边距 8、日期框 120–140。
+        """
+        self.assertEqual(overlay.CARD_BTN_H, 28.0)
+        self.assertGreaterEqual(overlay.CARD_BTN_PAD_X, 10.0)
+        self.assertEqual(overlay.CARD_BTN_GAP, 8.0)
+        self.assertEqual(overlay.FIELD_PAD_X, 8.0)
+        self.assertTrue(120.0 <= overlay.CARD_DATE_W <= 140.0,
+                        f"日期框宽该在 120–140：{overlay.CARD_DATE_W}")
+
+    def test_按钮高度是常量(self):
+        o = self._overlay()
+        try:
+            for kind in ("duty", "wrapup"):
+                o._card_close()
+                for b, _role in self._case(o, kind):
+                    self.assertAlmostEqual(b.frame().size.height, overlay.CARD_BTN_H,
+                                           delta=0.51,
+                                           msg=f"{kind} 里 {b.title()!r} 高度不对")
+        finally:
+            o.close()
+
+    def test_同一行按钮_midY_相等(self):
+        """同一行（同一个块里）的按钮中线必须齐 —— 不齐就是"一高一低"。"""
+        o = self._overlay()
+        try:
+            for kind in ("duty", "wrapup"):
+                o._card_close()
+                self._case(o, kind)
+                for blk in o._card_pending:
+                    if blk["kind"] not in ("buttons", "chips") or not blk["extra"]:
+                        continue
+                    mids = [b.frame().origin.y + b.frame().size.height / 2.0
+                            for b, *_ in blk["extra"] if not b.isHidden()]
+                    self.assertTrue(mids, f"{kind}：这一行一颗按钮都没有")
+                    self.assertLessEqual(max(mids) - min(mids), 1.0,
+                                         f"{kind}：同一行按钮不齐 {mids}")
+        finally:
+            o.close()
+
+    def test_收尾行按钮对该行垂直居中(self):
+        """每行的「记下 / 忽略」要对**整行**居中（行中线由摆位时写进 `blk["mid"]`）。"""
+        o = self._overlay()
+        try:
+            self._case(o, "wrapup")
+            rows = _blocks(o, "duty_row")
+            self.assertTrue(rows)
+            for blk in rows:
+                if not blk["extra"]:
+                    continue
+                mid = float(blk["mid"])
+                for k, b in blk["extra"]["buttons"].items():
+                    if k == "tag" or b.isHidden():
+                        continue
+                    bm = b.frame().origin.y + b.frame().size.height / 2.0
+                    self.assertLessEqual(abs(bm - mid), 1.0,
+                                         f"{b.title()!r} 没对行居中：{bm} vs {mid}")
+        finally:
+            o.close()
+
+    def test_输入框内边距与日期定宽(self):
+        """输入框：左右内边距 = `FIELD_PAD_X`；高 = 按钮高；日期框按内容定宽。"""
+        o = self._overlay()
+        try:
+            self._case(o, "duty")
+            fields = _blocks(o, "field")
+            self.assertTrue(fields, "编辑卡里没有输入框")
+            for blk in fields:
+                box = blk["box"]
+                fld = blk["fld"]
+                self.assertAlmostEqual(fld.frame().origin.x, overlay.FIELD_PAD_X,
+                                       delta=0.51, msg=f"{blk['key']}：左边距不对")
+                self.assertAlmostEqual(
+                    box.frame().size.width - (fld.frame().origin.x + fld.frame().size.width),
+                    overlay.FIELD_PAD_X, delta=0.51, msg=f"{blk['key']}：右边距不对")
+                self.assertAlmostEqual(box.frame().size.height, overlay.CARD_BTN_H,
+                                       delta=0.51, msg=f"{blk['key']}：高度与按钮不一致")
+            date = [b for b in fields if b["key"] == "date"][0]
+            self.assertAlmostEqual(date["box"].frame().size.width,
+                                   overlay.CARD_DATE_W, delta=0.51,
+                                   msg="日期框该按内容定宽（不拉满整行）")
+            title = [b for b in fields if b["key"] == "title"][0]
+            self.assertGreater(title["box"].frame().size.width,
+                               overlay.CARD_DATE_W + 40.0, "标题框该是满行")
+        finally:
+            o.close()
+
+    def test_选中胶囊用primary的填充(self):
+        o = self._overlay()
+        try:
+            self._case(o, "duty")
+            blk = [b for b in o._card_pending if b["kind"] == "chips"][0]
+            by_name = {n: b for b, n in blk["extra"]}
+            chosen = str(blk["chosen"])
+            on = _fill_alpha(by_name[chosen])
+            off_name = next(n for n in by_name if n != chosen)
+            off = _fill_alpha(by_name[off_name])
+            self.assertAlmostEqual(on, overlay.BTN_STYLE["chip-on"][0], delta=0.02)
+            self.assertGreater(on - off, 0.08, "选中态不能只靠描边（要用 primary 的填充）")
+        finally:
+            o.close()
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

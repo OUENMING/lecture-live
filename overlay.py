@@ -426,6 +426,17 @@ def _measure_text_h(text: str, width: float, font) -> float:
         NSMakeSize(width, 1e7), NSStringDrawingUsesLineFragmentOrigin).size.height
 
 
+def _measure_attr_h(attr, width: float) -> float:
+    """**属性串**按宽度折行后的实测高度（px）。`_measure_text_h` 的属性串版。
+
+    ⚠️ 为什么单开一个：知识点那种「一段话两种字重」用的是 `NSMutableAttributedString`，
+       拿它去问单字体版会按纯文字量（字重不同 → 折行点不同 → 卡片高度会差一行）。
+    """
+    from AppKit import NSMakeSize, NSStringDrawingUsesLineFragmentOrigin
+    return attr.boundingRectWithSize_options_(
+        NSMakeSize(width, 1e7), NSStringDrawingUsesLineFragmentOrigin).size.height
+
+
 def _text_width(text: str, font) -> float:
     """单行排版宽度(px), AppKit 实测。"""
     from AppKit import NSAttributedString, NSFontAttributeName
@@ -665,12 +676,33 @@ CARD_TITLE_SZ = 13.0
 CARD_SUB_SZ = 10.5
 CARD_TEXT_SZ = 12.5
 CARD_META_SZ = 10.5
-CARD_LABEL_SZ = 10.5
-CARD_ROW_H = 24.0                 # 输入行 / 类型 chip 行 / 按钮行
+#: ⭐ 卡片里**所有**按钮 / 胶囊：高度、左右内边距、字号（作者 2026-10-17 定的口径）。
+#: 为什么 28：macOS 的**标准控件高度就是 28**（HIG 的 regular control size），
+#: 而作者还要「命中区 ≥28」—— 可见胶囊 = 命中区 = 28，一处都不用猜。
+CARD_BTN_H = 28.0
+CARD_BTN_PAD_X = 10.0            # 胶囊里的左右留白（作者：≥10pt，判据直接量它）
+CARD_BTN_FONT = 12.5
+#: role → `(填充, 描边, 字色, 字重)` —— **全 app 按钮 / 胶囊的唯一配色表**。
+#: `primary` = 有底的胶囊（记下）；`secondary` = ghost；`plain` = 纯文字；
+#: `chip-on / chip-off` = 类型胶囊的两档（选中态用 **primary 的填充**，不只是描边）。
+BTN_STYLE = {
+    "primary":   (0.19, 0.36, 0.98, 0.23),
+    "secondary": (0.05, 0.13, 0.66, None),
+    "plain":     (0.00, 0.00, 0.55, None),
+    "chip-on":   (0.19, 0.36, 0.98, 0.23),
+    "chip-off":  (0.03, 0.09, 0.62, None),
+}
+#: 字重 Medium（0.23）—— 「主按钮比次按钮明显」靠填充与字重，不靠放大字号。
+BTN_WEIGHT_MED = 0.23
+
+CARD_ROW_H = 24.0                 # 老口径（只剩 `CARD_FOOTER_H` 还引用它，见下）
 CARD_BLOCK_GAP = 6.0
 CARD_LINE_SZ = 17.0               # 卡片正文实测一行高（12.5pt ≈ 15px + 余量）
 #: 卡片底部给按钮留的高度（**永远钉在底部** —— 裁掉出口等于把人关在卡片里）。
-CARD_FOOTER_H = CARD_ROW_H + 4.0
+#: = 胶囊高 + 上下各 4pt（按钮行本身还要 2pt 的块间距）。
+CARD_FOOTER_H = CARD_BTN_H + 8.0
+#: 同一行相邻两颗按钮之间的间距（作者：统一 8pt）。
+CARD_BTN_GAP = 8.0
 #: 收尾汇总一行的行高（标题 + 原话一行小字）。
 CARD_DUTY_ROW_H = 34.0
 #: 卡片最多显示几条（点开逐条看的设计：一屏一条，其余进收尾汇总）。
@@ -679,9 +711,57 @@ CARD_STARS_MAX = 3
 CARD_OPEN_MAX = 2
 CARD_DUTY_MAX = 3
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 卡片视觉 —— **方案 A（零色相极简）**，作者 2026-10-17 拍板（B「跟随系统强调色」不做）。
+#
+# 依据（Apple HIG materials / buttons / color + 三个同类 app 的做法，全文见
+# `scratchpad/recap/ui-research.md`）：
+#   · 层次**只用字的白 alpha 与一道发丝边**表达 —— 不铺深色底块、不用实心大白块。
+#     磨砂上「一屏一块深色」是 thick 材质的语义（压住底图），卡片只是面板里的一区。
+#   · 一屏 1–2 个 primary；主按钮要有**看得见的底**（作者定的 0.18–0.20），
+#     次按钮 ghost（极轻的底 + 一道边），第三档是纯文字。
+#   · 小字（10.5–11pt）alpha **≥ 0.55** —— 磨砂上的可读下限（ui-research §⑥ 那张 α 表）。
+# ══════════════════════════════════════════════════════════════════════════════
+CARD_HAIRLINE = 0.07             # 卡片容器：只有这一道边（不再填深色底）
+CARD_LABEL_ALPHA = 0.70          # 分区标题（作者 2026-10-17：与正文太接近 → 提一档）
+CARD_LABEL_SZ = 12.5             # 分区标题字号（它要**比正文大**才立得住层级）
+CARD_LABEL_WT = 0.30             # 分区标题字重 Semibold（正文 Regular / 知识点名 Medium）
+CARD_LABEL_GAP = 6.0             # 分区标题之上多留一点空 —— 分组靠间距，不靠色块
+CARD_META_ALPHA = 0.56           # 元信息 / 副标题
+
+#: 输入框：外壳高 = 按钮高（同一行才齐），左右内边距 8pt，日期框按内容定宽。
+FIELD_FILL = 0.035
+FIELD_BORDER = 0.10
+FIELD_BORDER_FOCUS = 0.30
+FIELD_RADIUS = 8.0
+FIELD_PAD_X = 8.0                # 作者：输入框左右内边距 8pt
+CARD_DATE_W = 132.0              # 日期框：按内容定宽（ISO 日期 + 内边距），不拉满整行
+#: 分区标题前的小图标（SF Symbols，**单色**、跟文字同一色阶）。
+CARD_SYMBOL_PT = 11.0
+
+#: 按钮的三档层级（HIG：一屏 1–2 个 prominent，其余用**样式**分层）。
+BTN_ROLES = ("primary", "secondary", "plain")
+
+
+def card_button_specs(specs) -> list:
+    """`(label, code[, role])` → 一律三元的 `(label, code, role)`（**纯函数**）。
+
+    缺省（老调用点）：**第一个是 primary、其余 secondary**。
+    ⚠️ 作者 2026-10-17 点名的规矩：层级要**每个按钮自己声明**，别再靠位置猜 ——
+       「全部忽略」这种批量放弃永远不许落到 primary（`_wrapup_card_fill` 显式写 plain）。
+    """
+    out = []
+    for i, spec in enumerate(specs or []):
+        label, code = str(spec[0]), str(spec[1])
+        role = str(spec[2]) if len(spec) > 2 else ("primary" if i == 0 else "secondary")
+        if role not in BTN_ROLES:
+            role = "secondary"
+        out.append((label, code, role))
+    return out
+
 
 #: 卡片里"文字自己就说完了"的块（值直接写进标签）；其余块由各自的 place 函数填。
-_CARD_TEXT_KINDS = frozenset({"label", "note", "text", "quote", "meta"})
+_CARD_TEXT_KINDS = frozenset({"label", "note", "text", "quote", "meta", "point"})
 
 
 def _card_line_h(font) -> float:
@@ -1629,7 +1709,9 @@ class Overlay:
         self._recap_data = None
         self._recap_on = False
         self._recap_touched = False            # 用户手动收起来过（不再自动弹）
-        #: 角落小卡：标签 + 透明点击区（造法同 `_chapter_lbl` / `_gloss_hit`）
+        #: 角落小卡：图标（SF Symbols 单色，见 `_symbol_icon`）+ 标签 + 透明点击区
+        #: （标签/点击区的造法同 `_chapter_lbl` / `_gloss_hit`）
+        self._chip_icon = self._symbol_icon(self._ve, "pin", CARD_META_SZ, CHIP_ALPHA_HOT)
         self._chip_lbl = self._label(
             CARD_META_SZ, NSColor.whiteColor().colorWithAlphaComponent_(CHIP_ALPHA_HOT),
             1, self._trunc)
@@ -1866,7 +1948,7 @@ class Overlay:
             return True
         # ⚠️ 2026-10-17：卡片里也可能有输入框（一些事儿的标题 / 日期）—— 同样算"在打字"，
         #    否则那条「键盘不自留」的不变量会在用户改标题改到一半时把焦点抢走。
-        for _key, fld in getattr(self, "_card_fields", []):
+        for _key, fld, _box in getattr(self, "_card_fields", []):
             try:
                 if fld.currentEditor() is not None:
                     return True
@@ -1927,7 +2009,23 @@ class Overlay:
             self._on_input_focus()
         else:
             self._on_input_blur()
+        self._card_fields_focus_look(on)
         self._focus_look_on = on
+
+    def _card_fields_focus_look(self, on: bool) -> None:
+        """卡片输入框的聚焦态：正在编辑的那一格，发丝边提亮一档（`FIELD_BORDER_FOCUS`）。
+
+        ⚠️ 与主输入框同一套机制（每帧比对状态 —— 委托回调实测从不触发，见上面）。
+        """
+        if not getattr(self, "_card_fields", None):
+            return
+        for _key, _fld, box in self._card_fields:
+            try:
+                box.layer().setBorderColor_(
+                    self._NSColor.whiteColor().colorWithAlphaComponent_(
+                        FIELD_BORDER_FOCUS if on else FIELD_BORDER).CGColor())
+            except Exception:                             # noqa: BLE001
+                pass
 
     def _release_focus(self):
         """主动把 key window 交还出去。
@@ -2460,11 +2558,13 @@ class Overlay:
         # 小卡压在**最上面那条旧字幕**上（原型 §①：旧行正在滚走，覆盖代价最小；
         # 绝不压正在变的那两行）。它在转录区**内部**的右上角，跟着转录区的几何走。
         cw = 0.0
+        icon_w = 0.0
         if self._chip_text:
             try:
                 self._chip_lbl.setStringValue_(self._chip_text)
                 self._chip_lbl.sizeToFit()
-                cw = min(float(self._chip_lbl.frame().size.width) + 18.0,
+                icon_w = (float(CARD_META_SZ) + 2.0 + 5.0) if self._chip_icon is not None else 0.0
+                cw = min(float(self._chip_lbl.frame().size.width) + 18.0 + icon_w,
                          self._width - 2 * PAD)
             except Exception:                             # noqa: BLE001
                 cw = 0.0
@@ -2473,18 +2573,24 @@ class Overlay:
             self._chip_lit()                 # 新条目 → 亮起 + 续 8 秒（淡入）
         self._chip_show = show_chip
         self._chip_hit.setHidden_(not show_chip)
+        if self._chip_icon is not None:
+            self._chip_icon.setHidden_(not show_chip)
         if not show_chip:
             self._chip_apply(0.0)            # 收起 = 淡出（alpha 到 0，不 setHidden_）
         if show_chip:
             _cx = self._width - PAD - cw
             _cy = self._scroll_y + self._scroll_h - CHIP_H - CHIP_GAP
             _ch = max(CHIP_H - 6.0, _card_line_h(self._chip_lbl.font()))
+            if self._chip_icon is not None:
+                _iw = float(CARD_META_SZ) + 2.0
+                self._chip_icon.setFrame_(
+                    ((_cx + 9.0, _cy + (CHIP_H - _iw) / 2.0), (_iw, _iw)))
             self._chip_lbl.setFrame_(
-                NSMakeRect(_cx + 9.0, _cy + (CHIP_H - _ch) / 2.0, cw - 18.0, _ch))
+                NSMakeRect(_cx + 9.0 + icon_w, _cy + (CHIP_H - _ch) / 2.0,
+                           max(10.0, cw - 18.0 - icon_w), _ch))
             self._chip_hit.setFrame_(((_cx, _cy), (cw, CHIP_H)))
         if self._card_view is not None and self._card_kind:
-            self._card_view.setFrame_(NSMakeRect(
-                PAD, self._scroll_y, self._width - 2 * PAD, self._scroll_h))
+            # 卡片的**位置与大小都由 `_card_relayout` 写**（高度随内容，不再是整块转录区）
             self._card_relayout()
 
     def show(self):
@@ -3113,22 +3219,35 @@ class Overlay:
         gone = alpha <= 0.01
         if getattr(self, "_no_animate", False) or motion.reduce_motion():
             self._chip_lbl.setAlphaValue_(alpha)
+            if self._chip_icon is not None:
+                self._chip_icon.setAlphaValue_(alpha)
             self._chip_lbl.setHidden_(gone)
+            if self._chip_icon is not None:
+                self._chip_icon.setHidden_(gone)
             return
         self._chip_lbl.setHidden_(False)                  # 要淡就先把字放出来
+        if self._chip_icon is not None:
+            self._chip_icon.setHidden_(False)
         try:
             from AppKit import NSAnimationContext
 
             def _done():
                 if self._chip_alpha <= 0.01:              # 淡出跑完了才收；中途亮起就不收
                     self._chip_lbl.setHidden_(True)
+                    if self._chip_icon is not None:
+                        self._chip_icon.setHidden_(True)
 
             def _fade(ctx):
                 ctx.setDuration_(motion.STATE_S)
                 self._chip_lbl.animator().setAlphaValue_(alpha)
+                if self._chip_icon is not None:
+                    self._chip_icon.animator().setAlphaValue_(alpha)
             NSAnimationContext.runAnimationGroup_completionHandler_(_fade, _done)
         except Exception:                                 # noqa: BLE001
             self._chip_lbl.setAlphaValue_(alpha)
+            if self._chip_icon is not None:
+                self._chip_icon.setAlphaValue_(alpha)
+                self._chip_icon.setHidden_(gone)
             self._chip_lbl.setHidden_(gone)
 
     def _chip_tick(self, now: float) -> None:
@@ -3196,14 +3315,17 @@ class Overlay:
                              f"来源 {item.get('source') or '—'}",
                              f"第 {src_ids} 句" if src_ids else "") if x))
         # 动作
-        acts = ([("记下", "save"), ("忽略", "ignore")]
-                if item.get("action") == "pending" else [("撤销", "undo")])
+        # ⭐ 层级自己声明（作者 2026-10-17）：`记下` 是唯一 primary（有底的胶囊），
+        #    `忽略` / `下一条` 走 plain（它们原来共用一块 0.07 的灰底 + 0.80 白字，
+        #    一屏三颗都在喊）；`撤销` 是次按钮（它只在已处理的条目上出现，独苗）。
+        acts = ([("记下", "save", "primary"), ("忽略", "ignore", "plain")]
+                if item.get("action") == "pending" else [("撤销", "undo", "secondary")])
         if len(self._duty_pending()) > 1:
-            acts.append(("下一条", "next"))
+            acts.append(("下一条", "next", "plain"))
         self._card_actions(acts, lambda a, r=item: self._duty_act(a, r))
         st = _duty.status_line(item)
         if st:
-            self._card_note(st)
+            self._card_note(st, _duty.status_symbol(item))
         self._card_done()
 
     def _duty_conv_line(self, item) -> str:
@@ -3320,7 +3442,9 @@ class Overlay:
         self._card_note("没确认的不会写进任何地方（笔记里标「未确认」）。")
         # ⚠️ 按钮**放最后一个块** —— `_card_relayout` 把最后那个按钮块钉在卡片底部，
         #    一屏放不下时被裁的只会是内容，出口永远点得到。
-        specs = [("全部忽略", "all")] if pend else [("完成", "done")]
+        # ⭐ 层级自己声明（作者 2026-10-17）：「全部忽略」是**批量放弃**，永远不是 primary
+        #    （它原来是一块白色实心，被点名「突兀」）；「完成」是安静的次按钮。
+        specs = [("全部忽略", "all", "plain")] if pend else [("完成", "done", "secondary")]
         self._card_actions(specs, lambda a: self._wrapup_act(a))
         self._card_done()
 
@@ -3404,29 +3528,30 @@ class Overlay:
         self._card_reset("课前回顾",
                          f"{rows.get('course') or ''} · 上一节 {rows.get('date') or ''}",
                          action=("收起", self._recap_dismiss))
+        # ⚠️ 分区标题的图标一律走 **SF Symbols 单色**（作者 2026-10-17：emoji 全换掉，
+        #    跟文字同一色阶）—— 符号名由这里给，拿不到符号就只剩文字（不空洞）。
         if rows.get("points"):
-            self._card_label("📘 上节的知识点（按讲的顺序）")
+            self._card_label("上节的知识点（按讲的顺序）", "book")
             for i, pt in enumerate(rows["points"][:CARD_POINTS_MAX], 1):
                 # ⚠️ 名字与解释**同一行**（原型 `.rlist li` 的排法）：六个知识点 ×2 行
-                #    在 60% 屏高的卡片里才放得下别的块。名字用「1 」标序号。
-                expl = f"：{pt['explain']}" if pt.get("explain") else ""
-                self._card_text(f"{i} {pt.get('name') or ''}{expl}")
+                #    在 60% 屏高的卡片里才放得下别的块。名字 Medium + 解释常规做层级。
+                self._card_point(i, str(pt.get("name") or ""), str(pt.get("explain") or ""))
         if rows.get("stars"):
-            self._card_label("⭐ 最值得记的重点")
+            self._card_label("最值得记的重点", "star")
             for s in rows["stars"][:CARD_STARS_MAX]:
                 self._card_text("· " + str(s))
         if rows.get("open"):
-            self._card_label("❓ 上节没解决的")
+            self._card_label("上节没解决的", "questionmark.circle")
             for s in rows["open"][:CARD_OPEN_MAX]:
                 self._card_text("· " + str(s))
         if rows.get("duties"):
-            self._card_label("📌 临近的一些事儿")
+            self._card_label("临近的一些事儿", "pin")
             for d in rows["duties"][:CARD_DUTY_MAX]:
                 when = str(d.get("when") or "")
                 self._card_text(f"· {d.get('type') or ''} {d.get('title') or ''}"
                                 + (f"　{when}" if when else ""))
         if rows.get("today"):
-            self._card_label("📄 今天可能讲什么")
+            self._card_label("今天可能讲什么", "doc.text")
             for t in rows["today"][:2]:
                 self._card_text("· " + str(t))
         self._card_done()
@@ -3466,15 +3591,47 @@ class Overlay:
         self._recap_dismiss()                             # 「减弱动态效果」/ 起不来 → 直接换
 
     # ---- 卡片里的小积木（都只是 `_card_add` 的薄包装）----
-    def _card_label(self, text: str) -> None:
-        self._card_add("label", text)
+    def _card_label(self, text: str, symbol: str = "") -> None:
+        """分区标题（可选一个 **SF Symbols** 单色小图标 —— 与文字同一色阶）。
 
-    def _card_note(self, text: str) -> None:
-        self._card_add("note", text)
+        ⚠️ `symbol` 是符号**名**（`book` / `star` / `pin`…），不是 emoji：
+           作者 2026-10-17 拍板「emoji 全换单色 SF Symbols，跟文字同色阶」。
+        """
+        self._card_add("label", text, symbol=symbol)
+
+    def _card_note(self, text: str, symbol: str = "") -> None:
+        """卡片上的一行说明（可配一个 **SF Symbols** 单色小图标 —— 同分区标题那一套）。"""
+        self._card_add("note", text, symbol=symbol)
 
     def _card_text(self, text: str, *, strong: bool = False, alpha: float = 0.0) -> None:
         self._card_add("text", text, strong=strong,
-                       alpha=alpha or (0.88 if strong else 0.75))
+                       alpha=alpha or (0.88 if strong else 0.78))
+
+    def _card_point(self, num: int, name: str, expl: str) -> None:
+        """知识点一行：**名字 Medium + 解释常规、同一行**（作者：字重对比拉出层级）。
+
+        ⚠️ 属性串（一段文字两种字重）—— 字号走 `_ui_font`，颜色只走白 alpha 两档，
+           不另起一套排版语言。`blk["text"]` 留纯文字版（量高 / 调试用）。
+        """
+        plain = f"{num} {name}" + (f"：{expl}" if expl else "")
+        attr = None
+        try:
+            from AppKit import NSMutableAttributedString, NSAttributedString
+            a = NSMutableAttributedString.alloc().init()
+            a.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
+                f"{num} ", {"NSFont": _ui_font(CARD_TEXT_SZ),
+                            "NSColor": self._NSColor.whiteColor().colorWithAlphaComponent_(0.50)}))
+            a.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
+                name, {"NSFont": _ui_font(CARD_TEXT_SZ, BTN_WEIGHT_MED),
+                       "NSColor": self._NSColor.whiteColor().colorWithAlphaComponent_(0.93)}))
+            if expl:
+                a.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
+                    f"：{expl}", {"NSFont": _ui_font(CARD_TEXT_SZ),
+                                  "NSColor": self._NSColor.whiteColor().colorWithAlphaComponent_(0.68)}))
+            attr = a
+        except Exception:                                 # noqa: BLE001
+            attr = None                                   # 造不出属性串 → 退回纯文字
+        self._card_add("point", plain, attr=attr, name=name, expl=expl)
 
     def _card_quote(self, text: str, meta: str) -> None:
         self._card_add("quote", text)
@@ -3490,6 +3647,7 @@ class Overlay:
         self._card_add("buttons", buttons=list(specs), on_act=on_act)
 
     def _card_duty_row(self, item) -> None:
+        """一整行的收尾条目（视图由 `_card_place_duty_row` **一次**造好并缓存）。"""
         self._card_add("duty_row", duty_row=dict(item))
 
     def _card_field_done(self) -> None:
@@ -3503,7 +3661,7 @@ class Overlay:
     def _card_read_fields(self) -> dict:
         """现取卡片里两个输入框的值 → `{"title":…, "date":…, "time":…}`。"""
         out: dict = {}
-        for key, fld in getattr(self, "_card_fields", []):
+        for key, fld, _box in getattr(self, "_card_fields", []):
             try:
                 val = str(fld.stringValue() or "").strip()
             except Exception:                             # noqa: BLE001
@@ -3522,15 +3680,90 @@ class Overlay:
             v = NSView.alloc().initWithFrame_(((0, 0), (0, 0)))
             v.setWantsLayer_(True)
             try:
-                c = self._NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                    0.09, 0.09, 0.11, 0.55)
-                v.layer().setBackgroundColor_(c.CGColor())
-                v.layer().setCornerRadius_(12.0)
+                # ⚠️ 2026-10-17 作者：「底下的色块太丑」—— 那块 (0.09,0.09,0.11,0.55) 的
+                #    深色底**删了**。卡片只是面板里的一区（thin 材质的语义是给交互元素，
+                #    thick 才是"压住底图"），现在只留一道发丝边把这一区框出来。
+                layer = v.layer()
+                layer.setCornerRadius_(12.0)
+                scale = self._backing_scale()
+                layer.setBorderWidth_(1.0 / (scale or 2.0))
+                layer.setBorderColor_(
+                    self._NSColor.whiteColor().colorWithAlphaComponent_(CARD_HAIRLINE).CGColor())
             except Exception:                             # noqa: BLE001
                 pass
             self._ve.addSubview_(v)
             self._card_view = v
         return self._card_view
+
+    @staticmethod
+    def _backing_scale() -> float:
+        """发丝边宽 = 1 **物理**像素（Retina 上 0.5pt）—— 全 app 一套口径。"""
+        try:
+            from AppKit import NSScreen
+            s = NSScreen.mainScreen()
+            return float(s.backingScaleFactor()) if s else 2.0
+        except Exception:                                 # noqa: BLE001
+            return 2.0
+
+    def _card_pill(self, v, *, h: float, fill: float, border: float,
+                   radius: float | None = None) -> None:
+        """给一个标签铺「轻底 + 发丝边」（胶囊 / 输入框 / 按钮的**唯一入口**）。
+
+        ⚠️ 底色走 **layer**（`drawsBackground_` 关掉）：CALayer 的 `cornerRadius` 会裁它
+           自己的背景色，而 NSTextField 自己画的底色不受圆角约束（会露出直角）。
+        """
+        try:
+            v.setDrawsBackground_(False)
+        except Exception:                                 # noqa: BLE001
+            pass
+        try:
+            v.setWantsLayer_(True)
+            layer = v.layer()
+            layer.setCornerRadius_(float(radius if radius is not None else h / 2.0))
+            layer.setBackgroundColor_(
+                self._NSColor.whiteColor().colorWithAlphaComponent_(float(fill)).CGColor()
+                if fill > 0 else None)
+            scale = self._backing_scale()
+            layer.setBorderWidth_(1.0 / (scale or 2.0) if border > 0 else 0.0)
+            if border > 0:
+                layer.setBorderColor_(
+                    self._NSColor.whiteColor().colorWithAlphaComponent_(float(border)).CGColor())
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _symbol_icon(self, parent, name: str, pt: float, alpha: float):
+        """造一个 **SF Symbols 单色**小图（`contentTintColor` 跟着白 alpha 走）。
+
+        作者 2026-10-17：emoji 全换单色 SF Symbols，跟文字同一色阶。
+        拿不到符号（没 AppKit / 系统没这个符号）→ `None`，调用方**退回纯文字**
+        （绝不在屏幕上留一个当啷的空格）。
+        """
+        try:
+            from AppKit import (NSImage, NSImageSymbolConfiguration, NSImageView,
+                                NSImageScaleProportionallyDown)
+            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, name)
+            if img is None:
+                return None
+            img = img.imageWithSymbolConfiguration_(
+                NSImageSymbolConfiguration.configurationWithPointSize_weight_(float(pt), 0.23))
+            if img is None:
+                return None
+            img.setTemplate_(True)                        # 模板图 → 下面那 tint 才生效
+            iv = NSImageView.alloc().initWithFrame_(((0, 0), (pt + 2.0, pt + 2.0)))
+            iv.setImage_(img)
+            try:
+                iv.setImageScaling_(NSImageScaleProportionallyDown)
+            except Exception:                             # noqa: BLE001
+                pass
+            try:
+                iv.setContentTintColor_(
+                    self._NSColor.whiteColor().colorWithAlphaComponent_(float(alpha)))
+            except Exception:                             # noqa: BLE001
+                pass
+            parent.addSubview_(iv)
+            return iv
+        except Exception:                                 # noqa: BLE001
+            return None
 
     def _card_open(self, kind: str) -> None:
         """进卡片态：藏转录区、必要时展开面板、清掉上一张卡的子视图。
@@ -3598,39 +3831,79 @@ class Overlay:
                   alpha: float = 0.78, strong: bool = False, wrap: bool = False,
                   key: str = "", value: str = "", side: str = "",
                   chips=None, chosen: str = "", on_pick=None,
-                  buttons=None, on_act=None, duty_row=None, meta: str = "") -> None:
+                  buttons=None, on_act=None, duty_row=None, meta: str = "",
+                  symbol: str = "", attr=None, name: str = "", expl: str = "") -> None:
         blk = {"kind": kind, "text": str(text or ""), "size": size, "alpha": alpha,
                "strong": strong, "wrap": wrap, "key": key, "value": value,
                "side": str(side or ""), "chips": chips, "chosen": chosen,
                "on_pick": on_pick, "buttons": buttons, "on_act": on_act,
                "duty_row": duty_row, "meta": str(meta or ""), "view": None,
-               "extra": None, "rows": []}
+               "extra": None, "rows": [], "symbol": str(symbol or ""),
+               "attr": attr, "name": str(name or ""), "expl": str(expl or ""),
+               "icon": False, "h": 0.0, "h_w": 0.0, "box": None, "fld": None,
+               "mid": 0.0}
         blk["view"] = self._card_make(blk)    # 视图由各自的 maker 登记进 `_card_blocks`
         if blk["view"] is not None and blk["kind"] in _CARD_TEXT_KINDS:
-            blk["view"].setStringValue_(blk["text"])
+            if attr is not None:
+                blk["view"].setAttributedStringValue_(attr)
+            else:
+                blk["view"].setStringValue_(blk["text"])
         if blk["kind"] == "title":
             blk["view"].setStringValue_(self._card_title)
         elif blk["kind"] == "sub":
             blk["view"].setStringValue_(self._card_sub_text)
         self._card_pending.append(blk)
 
+    def _card_make_field(self, blk):
+        """输入行那块的**装配**：外壳 + 内缩字段 + （日期）右侧那行「推算」说明。"""
+        box, fld = self._card_field_box(str(blk["value"] or ""))
+        d = _make_input_delegate(lambda f=fld: self._card_field_done(),
+                                 lambda f=fld: self._card_field_done())
+        self._targets.append(d)               # ⚠️ setDelegate_ 是弱引用，必须保命
+        fld.setDelegate_(d)
+        self._card_fields.append((blk["key"], fld, box))
+        blk["fld"] = fld
+        if blk["side"]:
+            blk["extra"] = self._card_new_label(CARD_META_SZ, CARD_META_ALPHA)
+        blk["box"] = box
+        return box
+
     def _card_make(self, blk):
         kind = blk["kind"]
         if kind == "title":
             return self._card_new_label(CARD_TITLE_SZ, 0.95, strong=True)
         if kind == "sub":
-            return self._card_new_label(CARD_SUB_SZ, 0.45)
+            return self._card_new_label(CARD_SUB_SZ, CARD_META_ALPHA)
         if kind == "label":
-            return self._card_new_label(CARD_LABEL_SZ, 0.45)
+            lbl = self._card_new_label(CARD_LABEL_SZ, CARD_LABEL_ALPHA,
+                                       weight=CARD_LABEL_WT)
+            if blk.get("symbol"):
+                iv = self._symbol_icon(self._card_view, blk["symbol"],
+                                       CARD_SYMBOL_PT, CARD_LABEL_ALPHA)
+                if iv is not None:
+                    self._card_blocks.append(iv)      # ⚠️ 谁建的谁进清单 —— 关卡片时要收干净
+                    blk["extra"] = iv
+                    blk["icon"] = True
+            return lbl
         if kind == "note":
-            return self._card_new_label(CARD_META_SZ, 0.45, wrap=True)
+            lbl = self._card_new_label(CARD_META_SZ, CARD_META_ALPHA, wrap=True)
+            if blk.get("symbol"):
+                iv = self._symbol_icon(self._card_view, blk["symbol"],
+                                       CARD_META_SZ + 1.0, CARD_META_ALPHA)
+                if iv is not None:
+                    self._card_blocks.append(iv)
+                    blk["extra"] = iv
+                    blk["icon"] = True
+            return lbl
         if kind == "text":
             return self._card_new_label(blk["size"], blk["alpha"], strong=blk["strong"],
                                         wrap=True)
+        if kind == "point":
+            return self._card_new_label(CARD_TEXT_SZ, 0.88, wrap=True)
         if kind == "quote":
-            return self._card_new_label(CARD_TEXT_SZ, 0.75, wrap=True)
+            return self._card_new_label(CARD_TEXT_SZ, 0.78, wrap=True)
         if kind == "meta":
-            return self._card_new_label(CARD_META_SZ, 0.40)
+            return self._card_new_label(CARD_META_SZ, CARD_META_ALPHA)
         if kind == "field":
             return self._card_make_field(blk)
         if kind == "hdr_action":
@@ -3644,26 +3917,121 @@ class Overlay:
             return lbl
         return None                                      # chips / buttons / duty_row
 
-    def _card_new_label(self, size, alpha, *, strong=False, wrap=False):
+    def _card_new_label(self, size, alpha, *, strong=False, wrap=False, weight=None):
         lbl = self._label(size, self._NSColor.whiteColor().colorWithAlphaComponent_(alpha),
                           0 if wrap else 1, self._wrap if wrap else self._trunc)
-        if strong:
+        if strong or weight is not None:
             # ⚠️ 走 `_ui_font`（tnum + palt 的唯一出口）—— 裸 `NSFont.systemFontOfSize_weight_`
             #    会被 `test_fontmotion_A` 判成"又抄了一份没有 tnum 的字体"（A2 收拢）。
-            lbl.setFont_(_ui_font(size, 0.4))
+            lbl.setFont_(_ui_font(size, 0.4 if strong else float(weight)))
         lbl.setTextColor_(self._NSColor.whiteColor().colorWithAlphaComponent_(alpha))
         self._card_view.addSubview_(lbl)
         self._card_blocks.append(lbl)         # ⚠️ 谁建的谁进清单 —— 关卡片时要收干净
         return lbl
 
-    def _card_make_field(self, blk):
-        """一个可编辑输入框（标题 / 日期）。值在动作时**现取**（`_card_read_fields`）。"""
-        from AppKit import NSTextField
-        fld = NSTextField.alloc().initWithFrame_(((0, 0), (10, CARD_ROW_H - 6)))
+    def _card_btn_style(self, b, role: str) -> None:
+        """按 role 刷一颗胶囊的**层**（填充 / 描边 / 字色 / 字重）—— 唯一配色入口。"""
+        fill, border, fg, weight = BTN_STYLE.get(str(role), BTN_STYLE["secondary"])
+        try:
+            b.setFont_(_ui_font(CARD_BTN_FONT, weight) if weight else _ui_font(CARD_BTN_FONT))
+        except Exception:                                 # noqa: BLE001
+            pass
+        try:
+            b.setContentTintColor_(
+                self._NSColor.whiteColor().colorWithAlphaComponent_(float(fg)))
+        except Exception:                                 # noqa: BLE001
+            pass
+        try:
+            title = b.title()
+            if title:
+                from AppKit import (NSMutableAttributedString, NSMutableParagraphStyle,
+                                    NSTextAlignmentCenter)
+                a = NSMutableAttributedString.alloc().initWithString_(str(title))
+                # ⚠️⚠️ 属性串里的**段落样式**决定对齐 —— 不写它，`setAlignment_` 白设，
+                #     文字照样贴左（作者这轮报的头号问题，2026-10-17 实测）。
+                para = NSMutableParagraphStyle.alloc().init()
+                para.setAlignment_(NSTextAlignmentCenter)
+                a.addAttributes_range_({"NSFont": b.font(),
+                                        "NSColor": self._NSColor.whiteColor()
+                                        .colorWithAlphaComponent_(float(fg)),
+                                        "NSParagraphStyle": para},
+                                       (0, a.length()))
+                b.setAttributedTitle_(a)
+        except Exception:                                 # noqa: BLE001
+            pass
+        try:
+            b.setWantsLayer_(True)
+            layer = b.layer()
+            layer.setCornerRadius_(CARD_BTN_H / 2.0)
+            scale = self._backing_scale()
+            layer.setBorderWidth_(1.0 / (scale or 2.0) if border > 0 else 0.0)
+            if border > 0:
+                layer.setBorderColor_(
+                    self._NSColor.whiteColor().colorWithAlphaComponent_(border).CGColor())
+            layer.setBackgroundColor_(
+                self._NSColor.whiteColor().colorWithAlphaComponent_(fill).CGColor()
+                if fill > 0 else None)
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _card_button(self, label: str, role: str, on_click):
+        """卡片里**所有**按钮 / 类型胶囊的唯一工厂（作者 2026-10-17 点名）。
+
+        复用的就是顶栏「双语」那套模式胶囊：**无边框 `NSButton` + 圆角层**
+        （1 物理像素描边、圆角 = 高/2，同 `MODE_CHIP_*` 的做法），文字由 AppKit
+        **水平垂直居中**（`NSTextAlignmentCenter`）—— 全 app 只有这一个函数造按钮，
+        不许任何一处再自己拼「NSTextField + 背景」（那正是这轮几何 bug 的来源）。
+
+        返回造好、接好 target/action、加进卡片的 `NSButton`（宽度由调用方摆）。
+        """
+        from AppKit import (NSButton, NSButtonTypeMomentaryChange, NSMakeRect,
+                            NSTextAlignmentCenter)
+        b = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 10.0, CARD_BTN_H))
+        b.setBordered_(False)
+        try:
+            b.setButtonType_(NSButtonTypeMomentaryChange)
+        except Exception:                                 # noqa: BLE001
+            pass
+        b.setTitle_(str(label))
+        b.setFont_(_ui_font(CARD_BTN_FONT))
+        # ⚠️ 对齐要设到 **cell** 上（`NSButton.setAlignment_` 在这里不落地 —— 实测
+        #    `cell().alignment()` 仍是 1=左对齐，正是作者看到的「文字贴左」）。
+        try:
+            from AppKit import NSTextAlignmentCenter
+            b.cell().setAlignment_(NSTextAlignmentCenter)
+        except Exception:                                 # noqa: BLE001
+            pass
+        b.setAlignment_(NSTextAlignmentCenter)            # ⚠️ 居中是判据（`test_duty_card_ui`）
+        self._card_btn_style(b, role)
+        target = _make_button_target(lambda: (self._release_focus(), on_click()))
+        self._targets.append(target)                      # 强引用，防 GC
+        b.setTarget_(target)
+        b.setAction_("clicked:")
+        self._card_view.addSubview_(b)
+        self._card_blocks.append(b)
+        return b
+
+    def _card_button_w(self, b, label: str) -> float:
+        """一颗胶囊的整宽 = 文字宽 + 左右留白 ×2（判据：留白 ≥ `CARD_BTN_PAD_X`）。"""
+        return _text_width(str(label), b.font()) + 2.0 * CARD_BTN_PAD_X
+
+    def _card_field_box(self, value: str):
+        """一个输入行：**外壳**（28 高的圆角层，就是按钮那一套）+ 内缩 8pt 的输入框。
+
+        ⚠️ `NSTextField` 自己没有 padding 这一项 —— 用「外壳画底、字段内缩 8pt」实现，
+           判据直接量 `字段.frame().x - 外壳.frame().x == FIELD_PAD_X`。
+        返回 `(box, fld)`；聚焦态提亮的是**外壳**的描边（见 `_card_fields_focus_look`）。
+        """
+        from AppKit import NSView, NSTextField, NSMakeRect
+        box = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 10.0, CARD_BTN_H))
+        box.setWantsLayer_(True)
+        self._card_pill(box, h=CARD_BTN_H, fill=FIELD_FILL, border=FIELD_BORDER,
+                        radius=FIELD_RADIUS)
+        fld = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(FIELD_PAD_X, 0.0, 10.0, CARD_BTN_H))
         fld.setEditable_(True); fld.setSelectable_(True)
         fld.setBezeled_(False); fld.setBordered_(False)
-        fld.setDrawsBackground_(True)
-        fld.setBackgroundColor_(self._NSColor.whiteColor().colorWithAlphaComponent_(0.06))
+        fld.setDrawsBackground_(False)
         try:
             fld.setFocusRingType_(0)                      # 去掉 AppKit 默认蓝环（同 ⌨ 输入行）
         except Exception:                                 # noqa: BLE001
@@ -3672,17 +4040,13 @@ class Overlay:
         fld.setTextColor_(self._NSColor.whiteColor())
         fld.setMaximumNumberOfLines_(1)
         fld.setLineBreakMode_(self._trunc)
-        fld.setStringValue_(str(blk["value"] or ""))
-        d = _make_input_delegate(lambda f=fld: self._card_field_done(),
-                                 lambda f=fld: self._card_field_done())
-        self._targets.append(d)               # ⚠️ setDelegate_ 是弱引用，必须保命
-        fld.setDelegate_(d)
-        self._card_view.addSubview_(fld)
-        self._card_blocks.append(fld)
-        self._card_fields.append((blk["key"], fld))
-        if blk["side"]:
-            blk["extra"] = self._card_new_label(CARD_META_SZ, 0.62)
-        return fld
+        fld.setStringValue_(str(value or ""))
+        box.addSubview_(fld)
+        self._card_view.addSubview_(box)
+        self._card_blocks.append(box)
+        self._targets.append(box)                         # 强引用（同其他子视图）
+        return box, fld
+
 
     def _card_defer(self) -> None:
         """把「重画当前卡片」排到**下一帧**（`pump` 里消费）。
@@ -3719,26 +4083,94 @@ class Overlay:
         self._card_relayout()
         self._mark_dirty(urgent=True)
 
-    def _card_relayout(self) -> None:
-        """把已加的块自上而下摆成 frame。**frame 的唯一写者**（`_layout` 每帧叫它）。
+    def _card_icon_w(self, blk) -> float:
+        """块前面那个小图标占的横向（图标 + 间距）；没有图标 → 0。
 
+        ⚠️ 量高与摆位**必须同一个口径**：量字时按整宽算、摆位时缩了 16pt，
+           折行点就不同 → 卡片高度会差一行（底部那行被裁）。
+        """
+        return (float(CARD_SYMBOL_PT) + 2.0 + 5.0) if blk.get("icon") else 0.0
+
+    def _card_block_h(self, blk, w: float) -> float:
+        """一个块要占多高（px）。**按宽度备忘**在块自己身上（`h` / `h_w`）。
+
+        ⚠️ 为什么备忘：`_card_relayout` 每帧都被 `_layout` 叫（上课时转录还在流，每帧都
+           有 flush）—— 折行量字（`_measure_text_h`）不便宜，而卡片开着的时候块是**死的**
+           （只在重画时整批重建）。宽度变了（拖窗口）才重算。
+        """
+        v = blk["view"]
+        if blk["wrap"]:
+            w = max(40.0, w - self._card_icon_w(blk))
+            if blk.get("h_w") != round(w, 1):
+                try:
+                    attr = blk.get("attr")
+                    if attr is not None:
+                        h = float(_measure_attr_h(attr, w))
+                    else:
+                        h = float(_measure_text_h(str(v.stringValue() or ""), w, v.font()))
+                except Exception:                         # noqa: BLE001
+                    h = CARD_LINE_SZ
+                blk["h_w"] = round(w, 1)
+                blk["h"] = max(h, _card_line_h(v.font()))
+            return float(blk["h"])
+        if blk["kind"] == "field":
+            return CARD_BTN_H
+        return _card_line_h(v.font())
+
+    def _card_natural_h(self, w: float, pending, footer) -> float:
+        """整张卡**内容自然高度**（含内边距与页脚）—— 卡片高度跟着内容走（作者 2026-10-17）。
+
+        ⚠️ 和 `_card_relayout` 用**同一个** `_card_block_h`：两处各算一套高度的话，
+           卡片高度与内容会差一两个像素，看起来像"底下永远悬着一条空白"。
+        """
+        h = 2 * CARD_PAD
+        for i, blk in enumerate(pending):
+            kind = blk["kind"]
+            if kind == "hdr_action":
+                continue
+            if kind == "sub" and not self._card_sub_text:
+                continue
+            if kind in ("chips", "buttons"):
+                h += CARD_BTN_H + 2.0
+                continue
+            if kind == "duty_row":
+                h += CARD_DUTY_ROW_H + 1.0
+                continue
+            v = blk["view"]
+            if v is None:
+                continue
+            # ⚠️ 与 `_card_relayout` 同一份规则：分区标题之上多留 `CARD_LABEL_GAP`
+            h += self._card_block_h(blk, w) + 2.0 + (
+                CARD_LABEL_GAP if (kind == "label" and i > 0) else 0.0)
+        h += CARD_FOOTER_H if footer is not None else 0.0
+        return h
+
+    def _card_relayout(self) -> None:
+        """把已加的块自上而下摆成 frame，**并定卡片自己的 frame**（`_layout` 每帧叫它）。
+
+        ⚠️ 卡片位置与大小**只由这里写**（`_layout` 不再设它）：高度 = min(可用, 内容自然高)，
+           钉在转录区**顶边**往下长 —— 短卡不再留一大片空底（作者 2026-10-17 点名）。
         ⚠️ **最后一行按钮钉在卡片底部**（`CARD_FOOTER_H`）：一屏放不下时，被裁掉的只会是
            内容（最下面的那几行），而「记下 / 收起 / 全部忽略」**永远点得到** ——
            把出口裁掉等于把人关在卡片里（实测踩过一次：`收起` 被裁掉）。
         """
         if self._card_view is None:
             return
-        W = float(self._card_view.frame().size.width)
-        H = float(self._card_view.frame().size.height)
+        from AppKit import NSMakeRect
+        avail = max(1.0, float(getattr(self, "_scroll_h", 0.0) or 0.0))
+        W = float(self._width) - 2 * PAD
         x = CARD_PAD
         w = max(60.0, W - 2 * CARD_PAD)
-        y = H - CARD_PAD
         pending = list(self._card_pending)
         footer = None
         if pending and pending[-1]["kind"] == "buttons" and pending[-1]["buttons"]:
             footer = pending.pop()
+        H = min(avail, self._card_natural_h(w, pending, footer))
+        self._card_view.setFrame_(NSMakeRect(
+            PAD, float(self._scroll_y) + avail - H, W, H))
+        y = H - CARD_PAD
         bottom = CARD_PAD + (CARD_FOOTER_H if footer is not None else 0.0)
-        for blk in pending:
+        for i, blk in enumerate(pending):
             kind = blk["kind"]
             if kind == "sub" and not self._card_sub_text:
                 continue
@@ -3750,26 +4182,18 @@ class Overlay:
                 y = self._card_place_buttons(blk, x, y, w, bottom)
                 continue
             if kind == "duty_row":
-                y = self._card_place_duty_row(blk["duty_row"], x, y, w, bottom)
+                y = self._card_place_duty_row(blk, x, y, w, bottom)
                 continue
             if kind == "hdr_action":
                 continue                 # 跟标题同一行，由标题那一块摆（见下面「标题块」）
             if v is None:
                 continue
-            # 文字高度：单行按字体行高、多行按实测折行高（`_measure_text_h`，只在此处调）
-            if blk["wrap"]:
-                try:
-                    h = float(_measure_text_h(str(v.stringValue() or ""), w, v.font()))
-                except Exception:                         # noqa: BLE001
-                    h = CARD_LINE_SZ
-                h = max(h, _card_line_h(v.font()))
-            elif kind == "field":
-                h = CARD_ROW_H - 6.0
-            else:
-                h = _card_line_h(v.font())
+            if kind == "label" and i > 0:
+                y -= CARD_LABEL_GAP      # 分组靠间距（与 `_card_natural_h` 同一条规则）
+            h = self._card_block_h(blk, w)
             y -= h
             if y < bottom:
-                # 放不下就**整块藏掉**（含它的旁注）—— 留着会在旧 frame 上露半行
+                # 放不下就**整块藏掉**（含它的图标 / 旁注）—— 留着会在旧 frame 上露半行
                 try:
                     v.setHidden_(True)
                     if blk["extra"] is not None:
@@ -3795,17 +4219,37 @@ class Overlay:
                 y -= 2.0
                 continue
             if kind == "field":
-                sw = 0.0
+                # ⚠️ 宽度：标题满行；**日期按内容定宽**（`CARD_DATE_W`）——「不知道要填
+                #    多少」的暗示来自一个拉满整行的框（HIG › Text fields：match the size
+                #    of a text field to the quantity of anticipated text）。
+                fw = CARD_DATE_W if blk["key"] == "date" else w
+                fw = min(fw, w)
+                v.setFrame_(((x, y), (fw, h)))
+                # 字段在内缩 `FIELD_PAD_X` 处的整高：外壳画底、字段自己不带底
+                blk["fld"].setFrame_(((FIELD_PAD_X, 0.0),
+                                      (max(20.0, fw - 2.0 * FIELD_PAD_X), h)))
                 if blk["side"] and blk["extra"] is not None:
-                    sw = min(200.0, float(len(blk["side"])) * 7.0 + 14.0)
-                    sh = _card_line_h(blk["extra"].font())
-                    blk["extra"].setHidden_(False)
-                    blk["extra"].setStringValue_(blk["side"])
-                    blk["extra"].setFrame_(
-                        ((x + w - sw + 6.0, y + (h - sh) / 2.0), (sw - 6.0, sh)))
-                v.setFrame_(((x, y), (max(60.0, w - sw), h)))
-                if not blk["side"] and blk["extra"] is not None:
+                    side = blk["extra"]
+                    sh = _card_line_h(side.font())
+                    side.setHidden_(False)
+                    side.setStringValue_(blk["side"])
+                    side.setFrame_(((x + fw + 8.0,
+                                    y + (h - sh) / 2.0),
+                                   (max(40.0, x + w - (x + fw + 8.0)), sh)))
+                elif blk["extra"] is not None:
                     blk["extra"].setHidden_(True)
+                y -= 2.0
+                continue
+            icon = blk.get("extra") if blk.get("icon") else None
+            if icon is not None:
+                # 小图标：与文字同一色阶。单行**垂直居中**；折行的块**贴第一行**
+                # （多行说明的图标居中会飘在中间那行旁边，读起来像少了半个字）。
+                iw = float(CARD_SYMBOL_PT) + 2.0
+                iy = y + h - iw if blk["wrap"] else y + (h - iw) / 2.0
+                icon.setHidden_(False)
+                icon.setFrame_(((x, iy), (iw, iw)))
+                tx = x + iw + 5.0
+                v.setFrame_(((tx, y), (max(60.0, x + w - tx), h)))
             else:
                 v.setFrame_(((x, y), (w, h)))
             y -= 2.0
@@ -3813,132 +4257,134 @@ class Overlay:
             self._card_place_buttons(footer, x, CARD_PAD + CARD_FOOTER_H, w, CARD_PAD)
 
     def _card_place_chips(self, blk, x, y, w, bottom: float = CARD_PAD) -> float:
-        """类型 chip 那一行：`考试 / 作业截止 / 调课 / 其他`（点一下立刻生效）。"""
-        row_h = CARD_ROW_H - 6.0
+        """类型胶囊那一行：`考试 / 作业截止 / 调课 / 其他`。
+
+        ⭐ 与按钮**同一个工厂**（`_card_button`）：选中 = `chip-on`（**primary 的填充** +
+        更亮的描边 + Medium），没选中 = `chip-off`。文字居中与左右留白由工厂保证 ——
+        这里只摆位，一个像素都不自己算。
+        """
+        row_h = CARD_BTN_H
         y -= row_h
         if y < bottom:
             return y
         if blk["extra"] is None:
             blk["extra"] = []
             for name in (blk["chips"] or []):
-                lbl = self._card_new_label(11.5, 0.55)
-                lbl.setStringValue_(str(name))
-                try:
-                    lbl.setDrawsBackground_(True)
-                except Exception:                         # noqa: BLE001
-                    pass
-                hit = _make_click_view(
-                    lambda n=name, b=blk: (self._release_focus(),
-                                           b["on_pick"](n) if b["on_pick"] else None))
-                self._card_view.addSubview_(hit)
-                self._card_blocks.append(hit)
-                blk["extra"].append([lbl, hit, str(name)])
+                btn = self._card_button(
+                    str(name), "chip-off",
+                    lambda n=name, b=blk: (b["on_pick"](n) if b["on_pick"] else None))
+                blk["extra"].append([btn, str(name)])
         cx = x
-        for lbl, hit, name in blk["extra"]:
-            cw = self._card_text_w(lbl, str(name)) + 22.0
-            if cx + cw > x + w:
-                lbl.setHidden_(True)
-                hit.setHidden_(True)
+        for btn, name in blk["extra"]:
+            bw = self._card_button_w(btn, name)
+            if cx + bw > x + w:
+                btn.setHidden_(True)
                 continue
-            on = str(name) == str(blk["chosen"])
-            lbl.setHidden_(False)
-            hit.setHidden_(False)
-            lbl.setFrame_(((cx, y), (cw, row_h)))
-            hit.setFrame_(((cx, y), (cw, row_h)))
-            try:
-                lbl.setBackgroundColor_(self._NSColor.whiteColor().colorWithAlphaComponent_(
-                    0.14 if on else 0.04))
-                lbl.setTextColor_(self._NSColor.whiteColor().colorWithAlphaComponent_(
-                    0.92 if on else 0.55))
-            except Exception:                             # noqa: BLE001
-                pass
-            cx += cw + 6.0
+            btn.setHidden_(False)
+            btn.setFrame_(((cx, y), (bw, row_h)))
+            self._card_btn_style(btn, "chip-on" if name == str(blk["chosen"])
+                                 else "chip-off")
+            cx += bw + CARD_BTN_GAP
         return y - 2.0
 
     def _card_place_buttons(self, blk, x, y, w, bottom: float = CARD_PAD) -> float:
-        """按钮那一行（第一个 = 主按钮，白底深字 —— 同 `wrapup` 的配方）。"""
-        if not blk["buttons"]:
+        """按钮那一行。
+
+        ⭐ 每颗按钮的层级由**它自己声明**（`card_button_specs`）→ 工厂 `_card_button`：
+        `primary` = 有底的胶囊、`secondary` = ghost、`plain` = 纯文字。
+        ⚠️ 这里**不许**再出现「第一个 = 主按钮」那种按位置猜的写法（作者 2026-10-17）。
+        """
+        specs = card_button_specs(blk["buttons"])
+        if not specs:
             return y
-        row_h = CARD_ROW_H
-        y -= row_h
+        y -= CARD_BTN_H
         if y < bottom:
             return y
         if blk["extra"] is None:
             blk["extra"] = []
-            for i, (label, code) in enumerate(blk["buttons"]):
-                lbl = self._card_new_label(12.0, 0.92 if i == 0 else 0.80,
-                                           strong=(i == 0))
-                lbl.setStringValue_(str(label))
-                try:
-                    lbl.setDrawsBackground_(True)
-                except Exception:                         # noqa: BLE001
-                    pass
-                hit = _make_click_view(
-                    lambda c=code, b=blk: (self._release_focus(),
-                                           b["on_act"](c) if b["on_act"] else None))
-                self._card_view.addSubview_(hit)
-                self._card_blocks.append(hit)
-                blk["extra"].append([lbl, hit, str(label), str(code), i == 0])
+            for label, code, role in specs:
+                btn = self._card_button(
+                    label, role,
+                    lambda c=code, b=blk: (b["on_act"](c) if b["on_act"] else None))
+                blk["extra"].append([btn, str(label), str(code), str(role)])
         bx = x
-        for lbl, hit, label, _code, primary in blk["extra"]:
-            bw = self._card_text_w(lbl, label) + 26.0
+        row_rects = blk.setdefault("rows", [])
+        del row_rects[:]
+        for btn, label, _code, _role in blk["extra"]:
+            bw = self._card_button_w(btn, label)
             if bx + bw > x + w:
-                lbl.setHidden_(True)
-                hit.setHidden_(True)
+                btn.setHidden_(True)
                 continue
-            lbl.setHidden_(False)
-            hit.setHidden_(False)
-            lbl.setFrame_(((bx, y + 3.0), (bw, row_h - 6.0)))
-            hit.setFrame_(((bx, y), (bw, row_h)))
-            try:
-                if primary:
-                    lbl.setBackgroundColor_(
-                        self._NSColor.whiteColor().colorWithAlphaComponent_(0.92))
-                    lbl.setTextColor_(
-                        self._NSColor.blackColor().colorWithAlphaComponent_(0.85))
-                else:
-                    lbl.setBackgroundColor_(
-                        self._NSColor.whiteColor().colorWithAlphaComponent_(0.07))
-                    lbl.setTextColor_(
-                        self._NSColor.whiteColor().colorWithAlphaComponent_(0.80))
-            except Exception:                             # noqa: BLE001
-                pass
-            bx += bw + 8.0
+            btn.setHidden_(False)
+            btn.setFrame_(((bx, y), (bw, CARD_BTN_H)))
+            row_rects.append((bx, y, bw, CARD_BTN_H))
+            bx += bw + CARD_BTN_GAP
         return y - 2.0
 
-    def _card_place_duty_row(self, item, x, y, w, bottom: float = CARD_PAD) -> float:
-        """收尾汇总里的一行：类型 · 标题 · 日期（+ 原话小字）+「记下 / 忽略」。"""
+    def _card_place_duty_row(self, blk, x, y, w, bottom: float = CARD_PAD) -> float:
+        """收尾汇总里的一行：类型 · 标题 · 日期（+ 原话小字）+「记下 / 忽略」。
+
+        ⚠️ 视图**只造一次**（缓存在 `blk["extra"]`）—— 本函数每帧都被 `_card_relayout`
+           叫；上一版每帧新建一批标签，几秒就叠出几十层（作者看到的「两行高的方块」
+           就是层叠 + 旧口径的高度一起造出来的）。
+        按钮与**整行**垂直居中（两侧文字是两行，居中是这一行看起来最稳的锚）。
+        """
         import duty as _duty
+        item = blk["duty_row"]
         row_h = CARD_DUTY_ROW_H
         y -= row_h
         if y < bottom:
             return y
-        txt = f"{item.get('type') or '其他'} · {item.get('title') or ''}"
+        if blk["extra"] is None:
+            head = self._card_new_label(CARD_TEXT_SZ, 0.90)
+            quote = self._card_new_label(CARD_META_SZ, CARD_META_ALPHA)
+            btns: dict = {}
+            if item.get("action") == "pending":
+                for label, act, role in card_button_specs(
+                        (("记下", "save", "primary"), ("忽略", "ignore", "plain"))):
+                    btns[act] = self._card_button(
+                        label, role,
+                        lambda a=act, it=item: self._wrapup_act(a, it.get("id") or ""))
+            else:
+                tag = self._card_new_label(11.5, 0.45)
+                tag.setStringValue_("已记" if item.get("action") == "saved" else "已忽略")
+                btns["tag"] = tag
+            blk["extra"] = {"head": head, "quote": quote, "buttons": btns}
+        v = blk["extra"]
         when = _duty.fmt_when(item)
-        head = self._card_new_label(CARD_TEXT_SZ, 0.88 if item.get("action") == "pending"
-                                    else 0.42)
-        head.setStringValue_(txt + (f"　{when}" if when else ""))
-        head.setFrame_(((x, y + row_h - 18.0), (max(60.0, w - 150.0), 16.0)))
-        q = self._card_new_label(CARD_META_SZ, 0.40)
-        q.setStringValue_(f"“{_duty.clean_quote(item.get('quote') or '', limit=56)}”"
-                          + (f" · {item.get('t')}" if item.get("t") else ""))
-        q.setFrame_(((x, y + 1.0), (max(60.0, w - 120.0), 14.0)))
-        if item.get("action") == "pending":
-            for i, (label, act) in enumerate((("记下", "save"), ("忽略", "ignore"))):
-                bl = self._card_new_label(11.5, 0.85 if i == 0 else 0.55)
-                bl.setStringValue_(label)
-                bx = x + w - (132.0 - 60.0 * i)
-                bl.setFrame_(((bx, y + 3.0), (52.0, row_h - 6.0)))
-                hit = _make_click_view(
-                    lambda a=act, it=item: (self._release_focus(),
-                                            self._wrapup_act(a, it.get("id") or "")))
-                hit.setFrame_(((bx - 4.0, y), (60.0, row_h)))
-                self._card_view.addSubview_(hit)
-                self._card_blocks.append(hit)
-        else:
-            tag = self._card_new_label(11.5, 0.42)
-            tag.setStringValue_("已记" if item.get("action") == "saved" else "已忽略")
-            tag.setFrame_(((x + w - 60.0, y + 3.0), (60.0, row_h - 6.0)))
+        v["head"].setStringValue_(
+            f"{item.get('type') or '其他'} · {item.get('title') or ''}"
+            + (f"　{when}" if when else ""))
+        v["quote"].setStringValue_(
+            f"“{_duty.clean_quote(item.get('quote') or '', limit=56)}”"
+            + (f" · {item.get('t')}" if item.get("t") else ""))
+        btns = v["buttons"]
+        order = [k for k in ("save", "ignore") if k in btns] or ["tag"]
+        widths = {}
+        for k in order:
+            widths[k] = (self._card_button_w(btns[k], btns[k].title())
+                         if k != "tag" else 60.0)
+        bx = x + w
+        placed = []
+        for k in reversed(order):             # 从右往左摆（右对齐）
+            bw = widths[k]
+            bx -= bw
+            placed.append((k, bx, bw))
+            bx -= CARD_BTN_GAP
+        btn_left = bx + CARD_BTN_GAP
+        mid_y = y + (row_h - CARD_BTN_H) / 2.0
+        for k, px, bw in placed:
+            b = btns[k]
+            b.setHidden_(False)
+            if k == "tag":
+                th = _card_line_h(b.font())
+                b.setFrame_(((px, y + (row_h - th) / 2.0), (bw, th)))
+            else:
+                b.setFrame_(((px, mid_y), (bw, CARD_BTN_H)))
+        text_w = max(60.0, btn_left - x - 8.0)
+        v["head"].setFrame_(((x, y + row_h - 18.0), (text_w, 16.0)))
+        v["quote"].setFrame_(((x, y + 1.0), (text_w, 14.0)))
+        blk["mid"] = y + row_h / 2.0       # 这一行的**垂直中线**（按钮的 midY 要对上它）
         return y - 1.0
 
     def _card_text_w(self, lbl, text: str) -> float:

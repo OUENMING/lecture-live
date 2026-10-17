@@ -74,6 +74,37 @@ RECAP_A = {
 }
 
 
+def _fit_panel(o, need_h: float) -> None:
+    """把面板加高到装得下卡片内容（**探针专用**）。
+
+    ⚠️ 卡片放不下的块会被**整块藏掉**（设计如此：宁可少显示，也不在旧 frame 上露半行）。
+       截图前不加高，拍出来的「这一块没有」就会是假象（2026-10-17 实测踩过）。
+       真课上内容短、或用户自己拉窗口，不需要这一步。
+    """
+    from AppKit import NSMakeRect
+    f = o._panel.frame()
+    if need_h > f.size.height:
+        o._panel.setFrame_display_(
+            NSMakeRect(f.origin.x, f.origin.y - (need_h - f.size.height),
+                       f.size.width, need_h), True)
+    o.pump()
+
+
+def _clipped_blocks(o) -> list:
+    """被空间裁掉的块（`kind`）—— 探针把它打出来，免得拿一张缺块的图去评审。"""
+    out = []
+    for blk in o._card_pending:
+        v = blk["view"]
+        if v is None or blk["kind"] in ("hdr_action", "sub"):
+            continue
+        try:
+            if v.isHidden():
+                out.append(blk["kind"])
+        except Exception:                                     # noqa: BLE001
+            pass
+    return out
+
+
 def _captions(o) -> None:
     """铺三句字幕（与 D 布局探针同一套公开接口）。"""
     o.finalize("I've gotten the research done over the last few weeks.",
@@ -168,7 +199,9 @@ def main() -> int:
                 pass
         shots.append((name, n))
         trace.append(f"{name}: {n} 字节")
-        print(f"  {name}.png {n} 字节", flush=True)
+        clipped = _clipped_blocks(o)
+        print(f"  {name}.png {n} 字节" + (f" ⚠ 有块被裁掉：{clipped}" if clipped else ""),
+              flush=True)
 
     with isolated_window_file():                 # ⚠️ `.window` 先备份、跑完还原
         o = overlay.Overlay(on_lost=lambda: True,
@@ -206,6 +239,7 @@ def main() -> int:
             shot(o, "04-wrapup")
             o.duty_wrapup_finish()
 
+            _fit_panel(o, 780)               # 课前回顾块多：先把面板加高，别让块被裁掉
             o.recap_show(RECAP_A, course="ECON10790", day=DAY)
             shot(o, "05-recap-a")
             no_slides = {k: v for k, v in RECAP_A.items() if k != "today"}

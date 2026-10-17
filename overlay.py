@@ -3620,7 +3620,9 @@ class Overlay:
             a = NSMutableAttributedString.alloc().init()
             a.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
                 f"{num} ", {"NSFont": _ui_font(CARD_TEXT_SZ),
-                            "NSColor": self._NSColor.whiteColor().colorWithAlphaComponent_(0.50)}))
+                            # ⚠️ 序号也要过可读下限（0.62）：太暗时磨砂会把底下的暖色透上来，
+                            #    白字读起来像"黄的"（2026-10-17 在截图上抓到）。
+                            "NSColor": self._NSColor.whiteColor().colorWithAlphaComponent_(0.62)}))
             a.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
                 name, {"NSFont": _ui_font(CARD_TEXT_SZ, BTN_WEIGHT_MED),
                        "NSColor": self._NSColor.whiteColor().colorWithAlphaComponent_(0.93)}))

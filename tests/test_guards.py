@@ -339,27 +339,78 @@ class Reconcile(unittest.TestCase):
 
 
 class Caliber(unittest.TestCase):
-    """⚠️ 同一节课连跑两次：一次有 AVC 对照、一次没有（作者第 2 轮验收点名要它）。"""
+    """停产价格口径：**只在课件里找得到出处时**才写对照，并带出处（作者第六轮第 5 条）。
 
-    def test_缺了就按固定句式补上(self):
-        rev = {"sections": [{"heading": "1. 停产价格（Shutting Down Price）", "ts": "13:16",
+    ⚠️ 原来是一句写死的话（`CALIBER_LINE`），任何课提到停产价格就插 ——
+       别的课（10740 / SOC10020）提到停产价格时，插进去的是一句**假的本课口径**。
+    """
+
+    MATERIAL = ("the firm will supply a positive quantity so long as the price is above the "
+                "minimum of the average cost. that is the lowest acceptable price for this firm.")
+
+    def _mats(self, blob):
+        class H:
+            def __init__(self, text, cite):
+                self.text, self._c = text, cite
+
+            def cite(self):
+                return f"📖 {self._c}"
+
+        class M:
+            def __init__(self):
+                self._blob = blob
+
+            def search(self, q, k=3):
+                return [H(blob, "2025-12 期末卷 Exercise 7")] if blob else []
+        return M()
+
+    def test_课件里有出处就补对照_并带出处(self):
+        rev = {"sections": [{"heading": "停产价格（Shutting Down Price）", "ts": "13:16",
                              "prose": ["停产价格是价格临界点。"]}]}
-        out, added, warns = ng.ensure_caliber(rev)
+        out, added, warns = ng.ensure_caliber(rev, materials=self._mats(self.MATERIAL))
         body = " ".join(out["sections"][0]["prose"])
         self.assertIn("AVC", body)
         self.assertIn("break-even", body)
+        self.assertIn("2025-12 期末卷 Exercise 7", body, "对照必须带出处")
+        self.assertNotIn("📖 📖", body, "出处标记不该叠两层（cite 自带 📖）")
         self.assertTrue(added and warns)
+
+    def test_没有课件就一个字不写(self):
+        """宁缺：机器没资格替这门课断言"我们的口径和教科书不一样"。"""
+        rev = {"sections": [{"heading": "停产价格", "prose": ["停产价格是价格临界点。"]}]}
+        out, added, _w = ng.ensure_caliber(rev)
+        self.assertEqual(added, [])
+        self.assertEqual(out["sections"][0]["prose"], ["停产价格是价格临界点。"])
+        out2, added2, _w2 = ng.ensure_caliber(rev, materials=self._mats(""))
+        self.assertEqual(added2, [])
+
+    def test_课件本身就是_AVC_口径就不写对照(self):
+        rev = {"sections": [{"heading": "停产价格", "prose": ["停产价格是价格临界点。"]}]}
+        blob = ("shut down if the price falls below the minimum of the average variable cost "
+                "(AVC), that is the lowest acceptable price.")
+        _out, added, _w = ng.ensure_caliber(rev, materials=self._mats(blob))
+        self.assertEqual(added, [], "课件与教科书一致时不该硬说本课口径不同")
 
     def test_已经写了就不动(self):
         rev = {"sections": [{"heading": "停产价格", "prose": ["标准理论中停产价格是 AVC 的最低点。"]}]}
-        out, added, _w = ng.ensure_caliber(rev)
+        out, added, _w = ng.ensure_caliber(rev, materials=self._mats(self.MATERIAL))
         self.assertEqual(added, [])
         self.assertEqual(out["sections"][0]["prose"], ["标准理论中停产价格是 AVC 的最低点。"])
 
     def test_不涉及停产价格的节不补(self):
-        rev = {"sections": [{"heading": "三次函数求导", "prose": ["多项式逐项求导。"]}]}
-        _out, added, _w = ng.ensure_caliber(rev)
+        rev = {"sections": [{"heading": "研究问题", "prose": ["研究问题决定方法论。"]}]}
+        _out, added, _w = ng.ensure_caliber(rev, materials=self._mats(self.MATERIAL))
         self.assertEqual(added, [])
+
+    def test_写死的口径句已经不在了(self):
+        """⚠️ 判据钉着"不许再写回去"：那句课程专属的话不许出现在模块里。"""
+        src = (pathlib.Path(__file__).resolve().parent.parent / "note_guards.py").read_text("utf-8")
+        self.assertNotIn("CALIBER_LINE =", src, "写死的那句常量不许回来")
+        self.assertNotIn("本课按 AC 最低点定义停产价格", src)
+        self.assertIn("_shutdown_source", src, "找出处那条路要在")
+        self.assertIn("materials=self._materials", (pathlib.Path(__file__).resolve().parent.parent
+                                                   / "obsidian_writer.py").read_text("utf-8"),
+                      "写端没把课件传进去 → 对照永远补不上")
 
 
 class MinValue(unittest.TestCase):

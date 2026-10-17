@@ -292,31 +292,69 @@ def _alive(x) -> bool:
 
 
 # ---------------------------------------------------------------- 停产价格口径
-CALIBER_LINE = ("⚠ 口径对照（📚）：标准教科书把**停产价格**定义为平均可变成本（AVC）的最低点，"
-                "而把 AC 的最低点叫**盈亏平衡价（break-even price）**；本课官方材料（📖）"
-                "按「AC 最低点」定义，考试按本课口径答题。")
-_SHUTDOWN = re.compile(r"停产价格|停业价格|shutting down|shut down")
-_HAS_AVC = re.compile(r"AVC|平均可变成本")
+#: 停产价格/CALIBER 相关的**判据**（不是那句写死的话）。
+#: ⚠️ 2026-10-17 第六轮：这里原来是一个写死的 `CALIBER_LINE` 常量（"本课按 AC 最低点
+#:    定义停产价格"），任何课只要提到停产价格就插进去 —— 课程专属知识写进了通用管线：
+#:    ECON10740 / SOC10020 提到停产价格时，插进去的就是一句**假的本课口径**。
+#:    现在只留**找出处**用的形状，对照那句话必须从课件里抄出来、并带上出处。
+_SHUTDOWN = re.compile(r"停产价格|停业价格|shutting down|shut down|shutdown")
+_HAS_AVC = re.compile(r"AVC|平均可变成本|average variable cost")
+#: 课件里那条"定义"长什么样：**停产/最低可接受价格**的说法 + "最低/AC/AVC"这类判据词。
+#: ⚠️ 两半都要（实测那句原文是 "supply a positive quantity so long as the price is above
+#:    the minimum of the average cost … the lowest acceptable price" —— 它未必出现
+#:    `shut down` 这个词，但 "lowest acceptable price" 就是停产价格的官方说法）。
+_DEF_LINE = re.compile(r"lowest acceptable price|minimum acceptable price|"
+                       r"shutting down|shut[- ]?down|supply a positive quantity|"
+                       r"停产价格|最低可接受", re.I)
+_MIN_WORD = re.compile(r"minimum|lowest|average cost|break-even|AVC|"
+                       r"average variable cost|最低", re.I)
 
 
-def ensure_caliber(review: dict) -> tuple:
-    """涉及停产价格的节**必须**有一句 AVC 口径对照 —— 没有就补上（固定一句）。
+def _shutdown_source(materials) -> str:
+    """课件里那条停产价格定义 → `"📖 <文件名>：<原话>"`；找不到返回 `""`。
 
-    ⚠️ 实测（同一节课连跑两次）：一次生成了对照、一次没有 —— 作者第 2 轮验收
-       点名要这句，所以它不能靠模型的自觉。补的是**理论对照**（📚 教科书口径 vs
-       本课 📖 口径），不是新事实，所以可以机械补。
+    ⚠️ 找不到就**不写**（宁缺）：机器没资格替这门课断言"我们的口径和教科书不一样"。
+    """
+    if materials is None:
+        return ""
+    for hit in (materials.search("shutting down price minimum acceptable price average cost",
+                                 k=6) or []):
+        text = " ".join(str(getattr(hit, "text", "") or "").split())
+        if not text or not _DEF_LINE.search(text) or not _MIN_WORD.search(text):
+            continue
+        if _HAS_AVC.search(text):
+            return ""            # 课件里写的就是 AVC 口径 → 与教科书一致，没什么可对照的
+        cite = str(hit.cite() or "").strip()
+        # ⚠️ `cite()` 自己已经带 `📖 文件名 §段`（来源标记的唯一定义点在 materials），
+        #    这里再加一个前缀就会写成「📖 📖 文件名」（实测踩到）。
+        return f"{cite}：{text[:200]}" if cite.startswith("📖") else f"📖 {cite}：{text[:200]}"
+    return ""
+
+
+def ensure_caliber(review: dict, *, materials=None) -> tuple:
+    """涉及停产价格的节：**课件里找得到出处**才补那句对照（并带出处），否则不补。
+
+    判据（作者第六轮第 5 条）：
+      · 只在课件（📖）真的写了"本课停产价格 = AC 最低点"这种与教科书不同的口径时
+        才写对照，并**带上出处**；
+      · 课件里没有 / 读不到课件 / 课件写的本来就是 AVC 口径 → **一个字不写**。
     """
     out = copy.deepcopy(review)
     added: list = []
+    src = _shutdown_source(materials)
+    if not src:
+        return out, added, []
     for s in (out.get("sections") or []):
         blob = " ".join([str(s.get("heading") or "")] + [str(x) for x in (s.get("prose") or [])]
                         + [str((s.get("example") or {}).get("prompt") or "")])
         if not _SHUTDOWN.search(blob) or _HAS_AVC.search(blob):
             continue
         s.setdefault("prose", [])
-        s["prose"] = list(s["prose"]) + [CALIBER_LINE]
+        s["prose"] = list(s["prose"]) + [
+            f"⚠ 口径对照（📚）：标准教科书把**停产价格**定义为平均可变成本（AVC）的最低点，"
+            f"而把 AC 的最低点叫**盈亏平衡价（break-even price）**；本课材料另有口径 —— {src}"]
         added.append(str(s.get("heading") or ""))
-    return out, added, ([f"{len(added)} 节缺 AVC 口径对照，已按固定句式补上"] if added else [])
+    return out, added, ([f"{len(added)} 节缺 AVC 口径对照，已按课件出处补上"] if added else [])
 
 
 def _sources(materials, transcript: str) -> str:

@@ -236,9 +236,25 @@ def md_body(md: str) -> str:
        踩过同一个坑（同一份笔记的中文占比从 71% 掉到 34%）。
     ⚠️ §9 的「覆盖度与校验清单」也要去掉：那一节印的是**实时要点原文**与机械核算的
        断言（机器数据），不是模型的散文（同 `_SKIP_TOP` 的理由）。
+    ⚠️ 2026-10-17 第六轮起 md 是**简版**（散文搬去同目录的 HTML）—— 这个函数对简版
+       基本是恒等变换；扫模型散文要**两个面一起**，见 `html_prose`。
     """
     body = re.split(r"\n## [^\n]*完整逐句转录", str(md or ""))[0]
     return re.split(r"\n## 覆盖度与校验清单", body)[0]
+
+
+def html_prose(html: str) -> str:
+    """HTML 里**模型写的那部分**：讲解/例题/变式/自测 —— 到「本课术语」为止。
+
+    ⚠️ 第六轮起散文住在 HTML 里（md = 简版）—— 这一列只扫 md 的话会**假跌**
+       （不是模型变干净了，是内容换了地方）。判据与 `md_body` 同一条：
+       术语表（curated 词条注释）、复习排程、转录、覆盖度/核对清单都是**资料或机器
+       数据**，不算"模型自言自语" —— 实测踩过：UCD 的词条注释「它可能作为案例…出现」
+       命中「猜教授意图」那条模式，把 curated 资料算进了模型账上。
+    ⚠️ 顺带剥标签（`<b>检查</b>：` 这种会让关键词被标签切开）。
+    """
+    body = re.split(r"<h2>(?:本课术语|📜 完整逐句转录)", str(html or ""))[0]
+    return re.sub(r"<[^>]+>", "", body)
 
 
 def hms(s) -> "int | None":
@@ -586,6 +602,7 @@ def score(key: str, d: pathlib.Path, *, one: dict, data, entries: list, elapsed:
     aud = correction_audit(checks)
     sel = selftalk_hits(review)
     sel_md = selftalk_hits({"md": md_prose(md)})
+    sel_html = selftalk_hits({"html": html_prose(html)})
     terms = term_audit(getattr(data, "glossary_added", None) or [],
                        transcript=transcript, materials_blob=blob)
     warn_lines = [ln.strip() for ln in body.splitlines() if "⚠" in ln]
@@ -622,8 +639,8 @@ def score(key: str, d: pathlib.Path, *, one: dict, data, entries: list, elapsed:
                                      if "自评不算核" in str(c.get("how") or "")),
                    "origins": claim_origins(review, checks),
                    "rows": aud["rows"]},
-        "selftalk": {"review": len(sel), "md": len(sel_md),
-                     "hits": (sel + sel_md)[:20]},
+        "selftalk": {"review": len(sel), "md": len(sel_md), "html": len(sel_html),
+                     "hits": (sel + sel_md + sel_html)[:20]},
         "tex_leaks": {"n": len(leaks), "hits": [x[0] for x in leaks[:10]]},
         "warn": len(warn_lines),
         "warn_lines": warn_lines[:10],
@@ -654,6 +671,17 @@ def _run_child(key: str, out: pathlib.Path, mode: str, label: str,
     return json.loads((out / key / "metrics.json").read_text("utf-8"))
 
 
+def selftalk_total(m: dict) -> int:
+    """自言自语那一列的总数：`review` + 两个渲染面（md 简版 / html 详细版）。
+
+    ⚠️ `.get` 兜底：`runs/baseline.json` 是在**只有 md 那一腿**时跑的 ——
+       旧 run 少一栏不该让报告崩；口径变化按"缺失算 0"（对基线是保守的：
+       它的 html 面若当时也扫，只会更多）。
+    """
+    st = m.get("selftalk") or {}
+    return (st.get("review") or 0) + (st.get("md") or 0) + (st.get("html") or 0)
+
+
 def run(args) -> int:
     out = pathlib.Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -675,7 +703,7 @@ def run(args) -> int:
         print(f"  · {k}  {m['elapsed_s']}s · 覆盖 {m['cover']['prod']['n_covered']}"
               f"/{m['cover']['prod']['n_points']}（独立 {m['cover']['indep']['n_covered']}）"
               f" · 修正 {m['checks']['mismatch']}（假 {m['checks']['wrong_correction']}）"
-              f" · 自言自语 {m['selftalk']['review'] + m['selftalk']['md']}"
+              f" · 自言自语 {selftalk_total(m)}"
               f" · 术语 {m['terms']['added']}（非术语 {m['terms']['non_term']}）"
               f" · [{time.monotonic() - t0:.0f}s]", flush=True)
     label = args.label or args.mode
@@ -734,7 +762,7 @@ COLS = [
     ("收窄挡下", lambda m: f'{m["checks"].get("demoted_mismatch", 0)}/'
                           f'{m["checks"].get("demoted_ok", 0)}', "·"),
     ("未核对", lambda m: m["checks"]["unchecked"], "·"),
-    ("自言自语", lambda m: m["selftalk"]["review"] + m["selftalk"]["md"], "↓"),
+    ("自言自语", selftalk_total, "↓"),
     ("TeX 露源码", lambda m: m["tex_leaks"]["n"], "↓"),
     ("⚠", lambda m: m["warn"], "·"),
     ("术语新增", lambda m: m["terms"]["added"], "·"),
@@ -742,6 +770,9 @@ COLS = [
     ("md KB", lambda m: round(m["render"]["md_bytes"] / 1024), "↓"),
     ("html KB", lambda m: round(m["render"]["html_bytes"] / 1024), "·"),
     ("渲染 ms", lambda m: f"{m['render']['md_ms']:.0f}/{m['render']['html_ms']:.0f}", "↓"),
+    # 断网渲染（`scripts/note_eval_katex.py --fill` 回填；没跑过那一栏是 None）。
+    ("断网渲染", lambda m: {True: "✅", False: "❌", "static": "⏭"}.get(
+        m.get("katex_offline"), "—"), "·"),
     ("in/out token", lambda m: f"{m['llm']['prompt_tokens']}/{m['llm']['completion_tokens']}", "↓"),
 ]
 
@@ -780,7 +811,7 @@ def _totals(sections: dict) -> dict:
         "wrong_correction": s(lambda m: m["checks"]["wrong_correction"]),
         "unverifiable": s(lambda m: m["checks"]["unverifiable"]),
         "unchecked": s(lambda m: m["checks"]["unchecked"]),
-        "selftalk": s(lambda m: m["selftalk"]["review"] + m["selftalk"]["md"]),
+        "selftalk": s(selftalk_total),
         "tex_leaks": s(lambda m: m["tex_leaks"]["n"]),
         "warn": s(lambda m: m["warn"]),
         "terms_added": s(lambda m: m["terms"]["added"]),

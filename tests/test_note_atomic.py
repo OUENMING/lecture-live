@@ -8,6 +8,8 @@
 1. ⭐⭐ **基础版先落盘**：复习层（`note_v2.REVIEW_WORKERS=5` 并发那一段）**还没返回**时，
    `Lectures/` 下就已经有一份可读的笔记（转写 + 译文）。
    —— 这一条防的是"复习层那几十秒里关窗 / 崩溃 → 这节课一份笔记都没有"。
+   ⚠️ 2026-10-17 第六轮起笔记分两层（md 简版 + HTML 详细版，转录在 HTML 里）——
+      **基础版也两份一起写**，所以这里的读取用 `note_text()`（两个文件合一读）。
 2. ⭐ **复习层回来后原子重写同一路径**为完整版：**只有一个 .md 文件**
    （`note_path_for` 遇到同名会另存一份 —— 路径必须只算一次），最终内容含复习层。
 3. ⭐ **复习层抛异常 / 被取消**：基础版留着（逐句转录一条不少），并多一行
@@ -34,6 +36,23 @@ HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
 import obsidian_writer as ow                                          # noqa: E402
+
+
+def note_text(vault_path) -> str:
+    """笔记**两个文件**一起读（md 简版 + 同目录 HTML 详细版）。
+
+    ⚠️ 2026-10-17 第六轮起笔记是两层的：逐句转录搬进了 HTML（md 只是简版）——
+       「这条内容丢没丢」的判据必须把两份都读进来，否则量具会比被测对象先坏
+       （同 `note_render.chinese_ratio` 那条注释里的教训）。
+    """
+    p = pathlib.Path(vault_path)
+    out = []
+    for q in (p, p.with_suffix(".html")):
+        try:
+            out.append(q.read_text(encoding="utf-8"))
+        except OSError:
+            out.append("")
+    return "\n".join(out)
 
 SESSION = ("# TESTX · 2026-10-16 · 实时会话日志\n\n"
            "> [!abstract] 10:00:03\n"
@@ -83,7 +102,7 @@ class _Harness:
                 p.name for p in (vault / "Lectures").glob("*")
                 if p.suffix in (".html", ".anki.csv"))
             after = sp.read_bytes()
-            text = (pathlib.Path(w.vault_path).read_text(encoding="utf-8")
+            text = (note_text(w.vault_path)
                     if w.vault_path and pathlib.Path(w.vault_path).exists() else "")
             return w, msg, text, notes, before, after, self.seen_during_review
 
@@ -92,7 +111,7 @@ class _Harness:
             # ⭐ 关键取样点：复习层**正在跑**（还没返回）时，盘上有什么？
             p = pathlib.Path(w.vault_path) if w.vault_path else None
             self.seen_during_review["exists"] = bool(p and p.exists())
-            self.seen_during_review["text"] = (p.read_text(encoding="utf-8")
+            self.seen_during_review["text"] = (note_text(p)
                                                if self.seen_during_review["exists"] else "")
             time.sleep(0.15)              # 模拟"几十秒"那一段（够主线程/用户切换）
             self.seen_during_review["still_there"] = bool(p and p.exists())
@@ -179,7 +198,7 @@ class BaseLayerFirst(unittest.TestCase):
             sp.write_text(SESSION, encoding="utf-8")
             w.session_path, w._n = sp, 2
             w.close(cancel=cancel)
-            text = pathlib.Path(w.vault_path).read_text(encoding="utf-8")
+            text = note_text(w.vault_path)
         self.assertEqual(called, [], "用户取消了还去调复习层")
         self.assertIn("first one.", text)
         self.assertIn("复习层这次没生成", text)
@@ -192,6 +211,28 @@ class BaseLayerFirst(unittest.TestCase):
         self.assertNotIn("复习层这次没生成", text)
         self.assertIn("未配 API key", text)
         self.assertIn("first one.", text)
+
+
+class CloseMessage(unittest.TestCase):
+    """⭐ 第六轮：md 变简版之后，**讲解/例题/变式/自测/图表/转录只在 HTML 里** ——
+    下课那一行必须给出它的路径（作者原话：「下课提示里给 HTML 的路径」）。"""
+
+    def test_收尾串给出详细版路径(self):
+        h = _Harness(lambda *a, **k: REVIEW)
+        w, msg, text, notes, before, after, seen = h.run()
+        html = pathlib.Path(w.vault_path).with_suffix(".html")
+        self.assertIn(str(html), msg, "收尾串没给详细版路径")
+        # ⚠️ 临时目录出了 `run()` 就没了 —— 文件在不在只能看**跑的时候**拍的那张快照。
+        self.assertIn(html.name, seen["siblings"], "给了路径却没写文件（那是假话）")
+
+    def test_没写出详细版就不给路径(self):
+        """写不出来时**不许编一个路径**（笔记里也要说清楚"详细版这次没生成"）。"""
+        import note_html
+        h = _Harness(lambda *a, **k: REVIEW)
+        with mock.patch.object(note_html, "note_page", side_effect=RuntimeError("x")):
+            w, msg, text, notes, before, after, seen = h.run()
+        self.assertNotIn(".html: ", msg, "详细版没写出来却给了路径")
+        self.assertIn("详细版这次没生成", text)
 
 
 class WriteEnds(unittest.TestCase):

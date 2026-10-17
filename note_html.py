@@ -29,10 +29,43 @@ from __future__ import annotations
 import html
 import json
 import math
+import pathlib
 import re
 
-KATEX_CSS = "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"
-KATEX_JS = "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"
+#: KaTeX 的**仓库内**副本（版本钉死）。⭐ 第六轮：不再走 jsdelivr ——
+#: CDN 一断，公式就退回 TeX 源码（作者要求"断网也能渲染"）。
+#: ⚠️ 为什么不放 `assets/`：那是**指向出战仓库的软链**（`.git/info/exclude` 里也排除）
+#:    —— 放进去既不进这个仓库、又污染另一个仓库（`tests/test_linebreak.py` 记过这事）。
+#:    仓库里放第三方件的位置是 `vendor/`（`vendor/budoux` 是成例）。
+KATEX_VERSION = "0.16.9"
+KATEX_SRC = pathlib.Path(__file__).resolve().parent / "vendor" / "katex" / KATEX_VERSION
+#: 装到笔记旁边的那一层（HTML 与它同一个文件夹 → 用**相对**引用，断网也取得到）。
+KATEX_DIR = f".classlive-assets/katex/{KATEX_VERSION}"
+KATEX_CSS = f"{KATEX_DIR}/katex.min.css"
+KATEX_JS = f"{KATEX_DIR}/katex.min.js"
+
+
+def install_assets(note_html_path) -> bool:
+    """把 KaTeX 副本装到笔记旁边（**幂等**）→ 能不能用。
+
+    ⚠️ `note_page` 是**纯渲染**（不读文件、不写文件）；装资源是 I/O，所以单独一个
+       函数、由写端（`obsidian_writer._write_sidecars`）调。装不上不算错：
+       页面上公式会退回 TeX 源码（那条兜底一直在）。
+    """
+    import shutil
+    try:
+        dst = pathlib.Path(note_html_path).parent / KATEX_DIR
+        if not (dst / "katex.min.js").exists():
+            dst.mkdir(parents=True, exist_ok=True)
+            for f in KATEX_SRC.glob("*"):
+                if f.is_file():
+                    shutil.copy2(f, dst / f.name)
+            (dst / "fonts").mkdir(exist_ok=True)
+            for f in (KATEX_SRC / "fonts").glob("*.woff2"):
+                shutil.copy2(f, dst / "fonts" / f.name)
+        return (dst / "katex.min.css").exists() and (dst / "fonts").is_dir()
+    except Exception:                                          # noqa: BLE001
+        return False
 
 #: 三个固定图形的规范（模型只给 `kind` + `params`，画法在这里写死）。
 #: `x` = 横轴范围；`slider` = 允许拖动的参数（拖动会重画）。单位/标签都是中文。
@@ -348,6 +381,21 @@ def inline(text: str) -> str:
     return "".join(out)
 
 
+def _unquote_md(block) -> str:
+    """md 折叠块（`> [!note]- 标题` / `> 正文`）→ 一行能放进 HTML 的字。
+
+    ⚠️ 只做"去掉 md 记号"，**不改写内容**：`lost_items` 是用户的原始标记，
+       清掉 `>` 与 callout 头就够读（HTML 那边不需要复刻 Obsidian 的折叠语法）。
+    """
+    lines = []
+    for raw in str(block or "").splitlines():
+        t = re.sub(r"^\s*>\s?", "", raw).strip()
+        t = re.sub(r"^\[![a-z]+\]-?\s*", "", t).strip()
+        if t:
+            lines.append(t)
+    return "　".join(lines)
+
+
 def _prose_html(seg: str) -> str:
     """普通文本：转义 + 放行 `**粗**` 与 `` `代码` ``。"""
     seg = html.escape(seg)
@@ -432,6 +480,9 @@ table{border-collapse:collapse;width:100%;font-size:15px}
 th,td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
 th{background:var(--code)}
 code{background:var(--code);padding:1px 4px;border-radius:4px}
+.tr{border-bottom:1px dotted var(--line);padding:3px 0;font-size:14px}
+.tr b,.tr i{color:var(--muted);font-style:normal;font-weight:600;margin-right:4px}
+details.internal{border-style:solid}
 .q{border-left:3px solid var(--c2);padding-left:10px;margin:14px 0}
 .q .a{margin-top:6px}
 footer{color:var(--muted);font-size:13px;margin-top:40px}
@@ -665,11 +716,62 @@ def note_page(d) -> str:
         extra += ("<h2>复习排程</h2><p>"
                   + " · ".join(html.escape(x) for x in d.review_dates)
                   + "（合上笔记，先自己写一遍）</p>")
+    # ── ⭐ 第六轮：md 变成简版之后，**详细版的那几层全在这里** ─────────────
+    # （修正记录 / 我标的地方 / 标星句 / 最值得记的几句 / 逐句转录）
+    all_corr = list((review.get("corrections") or [])) + list(d.corrections_extra or [])
+    if all_corr:
+        extra += ("<h2>修正记录（课上原话 → 修正值 + 依据）</h2>"
+                  "<details><summary>点开看</summary>")
+        for c in all_corr:
+            fixed = inline(c.get("fixed"))
+            if c.get("kind") == "check":
+                extra += (f"<div>· <b>⚠ 三道核</b>：{inline(c.get('spoken'))}"
+                          + (f" —— 重算：<b>{fixed}</b>" if fixed else "")
+                          + (f"（{inline(c.get('basis'))}）" if c.get("basis") else "") + "</div>")
+                continue
+            extra += (f"<div>· <b>{inline(c.get('where')) or '—'}</b>："
+                      f"「{inline(c.get('spoken'))}」→ <b>{fixed}</b>"
+                      + (f"（依据：{inline(c.get('basis'))}）" if c.get("basis") else "")
+                      + "</div>")
+        extra += "</details>"
+    if d.lost_items:
+        extra += ("<h2>我标的地方（重点 / 没听懂）</h2><details><summary>点开看</summary>"
+                  + "".join(f"<div>· {inline(_unquote_md(b))}</div>" for b in d.lost_items)
+                  + "</details>")
+    stars = [e for e in d.entries if e.get("star")]
+    if stars:
+        extra += ("<h2>⭐ 我标记的重点</h2><ul>" + "".join(
+            f"<li><code>{html.escape(str(e.get('ts')))}</code> "
+            f"{inline(e.get('zh') or e.get('en') or e.get('asr'))}</li>" for e in stars)
+            + "</ul>")
+    if d.keypoint_items:
+        extra += ("<h2>🎯 这节课最值得记的几句</h2><ol>" + "".join(
+            f"<li>{inline(text)} <span class=\"muted\">（{p:.2f}）</span></li>"
+            for p, text, _ix in d.keypoint_items) + "</ol>")
+    if d.entries:
+        # 逐句转录（证据层）：md 变成简版之后**它的落点在这里** —— 一句不删、原样。
+        # ⚠️ 中文那一栏要带上 🩹 ` ·补` 标记（课后补译 ≠ 课上直播译文）。
+        #    这是渲染层最容易弄丢的一处 —— `note_render._bf` 是它的包装
+        #    （唯一定义点：`obsidian_writer._bf_mark`），`tests/test_backfill.py` 钉着。
+        import note_render
+        extra += (f"<h2>📜 完整逐句转录（{len(d.entries)} 句）</h2>"
+                  "<details><summary>点开看（未做任何删改）</summary>")
+        for e in d.entries:
+            zh = str(e.get("zh") or "") + note_render._bf(e)
+            extra += (f"<div class=\"tr\"><code>{html.escape(str(e.get('ts')))}</code> "
+                      + (f"<b>EN</b> {inline(e.get('en'))}" if e.get("en") else "")
+                      + (f" <span class=\"muted\">ZH</span> {inline(zh)}"
+                         if zh else "")
+                      + (f" <span class=\"muted\">ASR</span> <i>{inline(e.get('asr'))}</i>"
+                         if e.get("asr") else "")
+                      + "</div>")
+        extra += "</details>"
     # ⭐ 核对清单（`id="checks"`）：页头那行「数字核对：N 处已核…（点开看）」指向这里 ——
     #    第四轮自查发现 HTML 里根本没有这个锚点（点开看 = 死链）。
     #    覆盖度也放这儿：章节 + 实时要点是**确定性**清单，读者要能看到缺了哪条。
     cv = review.get("cover") or {}
-    if cv.get("rows") or checks:
+    pts = review.get("lecture_points") or []
+    if cv.get("rows") or checks or pts:
         body = ""
         if cv.get("rows"):
             body += ("<h3>章节覆盖</h3><p class=\"muted\">章节与实时要点来自课堂实时分章"
@@ -687,6 +789,20 @@ def note_page(d) -> str:
                 body += ("<h4>还没落到的要点（要补）</h4><ul>"
                          + "".join(f"<li><code>{html.escape(str(x['ts']))}</code> "
                                    f"{inline(x['point'])}</li>" for x in miss) + "</ul>")
+        if pts and not cv.get("rows"):
+            # 退化档（没有章节骨架的旧会话）：教授知识点清单是模型自己列的，按文字对齐。
+            cov = {inline(c.get("point")).lower(): c.get("section")
+                   for c in (review.get("covered") or [])}
+            body += ("<h3>覆盖度</h3><p class=\"muted\">教授知识点（按文字对齐；"
+                     "有章节骨架时改成按时间窗算）。</p>"
+                     "<table><tr><th>教授讲的（🎙）</th><th>笔记覆盖</th></tr>")
+            for p in pts:
+                sec = cov.get(inline(p.get("point")).lower(), "")
+                ok = bool(sec) and sec not in ("缺失", "missing", "-")
+                body += (f"<tr><td><code>{html.escape(str(p.get('ts') or ''))}</code> "
+                         f"{inline(p.get('point'))}</td><td>"
+                         + (f"✅ {inline(sec)}" if ok else "⚠ 缺失") + "</td></tr>")
+            body += "</table>"
         if checks:
             body += ("<h3>数字 / 公式三道核</h3><table>"
                      "<tr><th>断言</th><th>怎么核的</th><th>结果</th></tr>")
@@ -707,5 +823,5 @@ def note_page(d) -> str:
         warns_html = ("<details class=\"internal\"><summary>生成核对记录（内部 · 点开看）</summary>"
                       + "".join(f"<div>· {inline(w)}</div>" for w in d.warns) + "</details>")
     return page(title, head, toc_items, secs, review.get("qa") or [], [], extra,
-                footer=f"<p>Markdown 版：<code>{html.escape(str(d.html_name or ''))}</code>"
-                       "（同目录）</p>" + warns_html)
+                footer="<p>这是<b>详细版</b>（简版是 Markdown 那一份，同目录）。</p>"
+                       + warns_html)

@@ -285,7 +285,7 @@ def _case_outline_section():
     #       -> 「术语该就地括注」那条红。
 
 
-@case("📑 纲要那一节的**文件级**接线（§10.2 / §11.2）：真读 `.chapters.jsonl` + 落在概览与知识点之间")
+@case("📑 纲要那一节的**文件级**接线（§10.2 / §11.2）：真读 `.chapters.jsonl` + 落在速览与术语之间")
 def _case_outline_wiring():
     """⭐ 计划 §11.2 阶段 5 逐字要求：「用一份**固定的 `.chapters.jsonl`** 当输入」。
 
@@ -294,7 +294,7 @@ def _case_outline_wiring():
          · `_chapter_items()` 的**真读盘**（`chapter.load` + `atom.load` 那两个旁路文件）
          · 那一节在 `_render_note` 里的**位置**（§10.2：「紧跟在概览之后、知识点之前」）
     ⚠️ 变异验证（做实了）：
-       · 把 `_render_note` 那段 `_sec` 挪到 `## 📚 Key Concepts` **之后** → 位置那条红
+       · 把 `_render_note` 那段 `_sec` 挪到 `## 本课术语` **之后** → 位置那条红
        · 把 `_chapter_items` 里 `chapter.load(...)` 换成常量 → 「真读回来了」那条红
     """
     import atom as _atom
@@ -338,12 +338,14 @@ def _case_outline_wiring():
         out = w._render_note(entries, {}, [], "ok", [], None, items)
         # ⚠️ 2026-10-17 v2 版式：小节名换了（`## 🎯 Overview 概览` → `## 0 · 五分钟速览`、
         #    `## 📚 Key Concepts 知识点详解` → `## 讲解（由浅入深）`），**这条判据的不变量不变**：
-        #    骨架（纲要）必须在**导言之后、讲解之前**。改名时改的是这三个 index 的锚点，
-        #    `i_ov < i_oc < i_kc` 那一条一个字没动。
+        #    骨架（纲要）必须在**导言之后、讲解之前**。
+        # ⚠️ 2026-10-17 第六轮：md 变简版，`## 讲解（由浅入深）` 那一层搬进了同目录的
+        #    详细版 HTML → 第三个锚点换成讲解搬走后紧接着的那一节（术语表）。
+        #    **不变量本身一个字没动**：纲要在导言之后、在细节层之前。
         i_ov = out.index("## 0 · 五分钟速览")
         i_oc = out.index("## 📑 课堂纲要")
-        i_kc = out.index("## 讲解（由浅入深）")
-        assert i_ov < i_oc < i_kc, f"位置错了：概览@{i_ov} 纲要@{i_oc} 知识点@{i_kc}"
+        i_kc = out.index("## 本课术语")
+        assert i_ov < i_oc < i_kc, f"位置错了：速览@{i_ov} 纲要@{i_oc} 术语@{i_kc}"
         assert "### Deadlines · 课务" in out
         assert "### 从GDP到GNI（" in out
         assert "中文一。" in out

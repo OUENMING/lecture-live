@@ -241,8 +241,10 @@ class Wiring(unittest.TestCase):
     def test_两处渲染都用它(self):
         rd = self._src("note_render.py")
         self.assertIn("cv['n_ok']", rd, "md 页头没报章节覆盖")
-        self.assertIn("章节覆盖", rd, "md §9 没有章节覆盖表")
         ht = self._src("note_html.py")
+        # ⚠️ 2026-10-17 第六轮：详细的**章节覆盖表**随着讲解层一起搬进了 md 的
+        #    详细版 HTML（简版 md 只在页头写一行数字）—— 判据跟着搬，不降级成不查。
+        self.assertIn("章节覆盖", ht, "详细版没有章节覆盖表")
         self.assertIn('id="checks"', ht, "HTML 的「点开看」锚点还是死链")
 
 

@@ -148,7 +148,22 @@ class Entries(unittest.TestCase):
 
 
 class CloseWiring(unittest.TestCase):
-    """收尾那一步：笔记里补上中文 + ` ·补`；`sessions/` 一个字节不动。"""
+    """收尾那一步：笔记里补上中文 + ` ·补`；`sessions/` 一个字节不动。
+
+    ⚠️ 2026-10-17 第六轮起逐句转录住在**详细版 HTML** 里（md 是简版）——
+       这组判据读的是两个文件（`_note_text`），"补译这一层丢没丢"照样钉得住。
+    """
+
+    @staticmethod
+    def _note_text(vault_path):
+        p = pathlib.Path(vault_path)
+        out = []
+        for q in (p, p.with_suffix(".html")):
+            try:
+                out.append(q.read_text(encoding="utf-8"))
+            except OSError:
+                out.append("")
+        return "\n".join(out)
 
     def run_close(self, fn=True, chat=None):
         with tempfile.TemporaryDirectory() as d, \
@@ -169,7 +184,7 @@ class CloseWiring(unittest.TestCase):
             w.session_path, w._n = sp, 3
             before = sp.read_bytes()
             w.close()
-            note = pathlib.Path(w.vault_path).read_text(encoding="utf-8")
+            note = self._note_text(w.vault_path)
             return note, before, sp.read_bytes()
 
     def test_笔记里补出中文和标记_会话文件字节不变(self):
@@ -184,7 +199,7 @@ class CloseWiring(unittest.TestCase):
     def test_没网_笔记照常生成_没有标记(self):
         note, before, after = self.run_close(chat=fake_chat(fail=True))
         self.assertIn("the lattice level", note, "笔记没生成 / 连 ASR 都丢了")
-        self.assertIn("## 📜 完整逐句转录", note)
+        self.assertIn("完整逐句转录", note)
         self.assertNotIn(" ·补", note)
         self.assertNotIn("补译0。", note)
         self.assertEqual(after, before)
@@ -201,7 +216,7 @@ class CloseWiring(unittest.TestCase):
         """`None` = 这个功能关着（老调用方 / 判据）—— 笔记里一个字都不该变。"""
         note, before, after = self.run_close(fn=None)
         self.assertNotIn(" ·补", note)
-        self.assertIn("> > **ASR**: the lattice level", note)
+        self.assertIn("<i>the lattice level</i>", note, "原始 ASR 那一栏丢了")
         self.assertEqual(after, before)
 
 

@@ -1195,6 +1195,13 @@ class ObsidianWriter:
         stem = self.vault_path.with_suffix("")
         try:
             import note_html
+            # ⭐ 第六轮：KaTeX 走**仓库内副本**（`vendor/katex/0.16.9`），不再走 CDN ——
+            #    装到笔记旁边（幂等）之后用相对引用，断网也能渲染。
+            data.katex_ok = note_html.install_assets(stem.with_suffix(".html"))
+            if not data.katex_ok:
+                print("⚠ 公式字体没装上（详细版里公式会显示成 TeX 源码）", flush=True)
+                self._note_warns.append("公式字体没装上（KaTeX 副本没复制过去）"
+                                        " —— 详细版里公式显示为 TeX 源码")
             self._atomic_write(stem.with_suffix(".html"), note_html.note_page(data))
             print(f"🧩 交互版 HTML：{data.html_name}", flush=True)
         except Exception as e:                                # noqa: BLE001
@@ -1392,6 +1399,8 @@ class ObsidianWriter:
             review_dates=list(self._review_dates),
             anki_name=self._anki_name, html_name=self._html_name,
             corrections_extra=list(self._corr_extra), warns=warns)
+        # ⚠️ `kaTeX` 那一格由 `_write_sidecars` 在**真装过之后**回填（`note_html` 是纯渲染，
+        #    装资源是 I/O）—— 默认 True = "还不知道"，只有**已知失败**才写那一行警告。
 
     def _review_term_hits(self, review: dict, entries: list) -> list:
         """复习层讲到的术语 -> 术语表行（带**首次出现时间戳**）。
@@ -1643,9 +1652,19 @@ class ObsidianWriter:
             base_chapters = self._chapter_items()
         except Exception:                                 # noqa: BLE001
             pass
-        self._atomic_write(self.vault_path,
-                           self._render_note(entries, {}, [], polish_state, base_lost, [],
-                                             base_chapters, bool(self._key)))
+        # 🧩 基础版**也写详细版 HTML**（2026-10-17 第六轮：md 变简版、转录搬进 HTML）：
+        #    ⚠️ 只写 md 的话，复习层没回来这段时间盘上那份笔记里**转录一个字都没有**
+        #       —— "盘上任何时刻都有一份可读的笔记"就落空了；而且 `html_name` 为空时
+        #       简版顶部会写「**详细版这次没生成**」，而它两分钟后就有 —— 那是假话。
+        #    ⚠️ 这与完整版走**同一条**组装+落盘路径（`_note_data` → `_write_sidecars`
+        #       → `_atomic_write`），不另起一套"基础版渲染"。
+        import note_render
+        base_stem = self.vault_path.with_suffix("")
+        self._html_name = base_stem.name + ".html"
+        base_data = self._note_data(entries, {}, [], polish_state, base_lost, [],
+                                    base_chapters, bool(self._key))
+        self._write_sidecars(base_data)
+        self._atomic_write(self.vault_path, note_render.render(base_data))
         if self._key:
             print("🤖 正在生成复习层(讲解 + 例题 + 自测)…", flush=True)
         # ⚠️ 同 `polish` 那条：复习层要跑好几轮 LLM（按 `note_v2.REVIEW_CHUNK` 分块），
@@ -1732,10 +1751,15 @@ class ObsidianWriter:
         extra = "".join(x for x in (
             "，另存了交互版 HTML" if self._html_name else "",
             "，Anki CSV 已导出" if self._anki_name else "") if x)
+        # ⭐ 第六轮：md 变成**简版**之后，讲解/例题/变式/自测/图表/转录**只在 HTML 里** ——
+        #    下课这一行必须给出它的路径（作者原话："下课提示里给 HTML 的路径"），
+        #    否则按老习惯打开 md 的人会以为笔记少了几层。
+        html_line = (f"\n   详细版 HTML: {self.vault_path.with_suffix('.html')}"
+                     if self._html_name else "")
         # 💡 术语库那一句走**现成通道**（收尾卡 / 终端返回串）—— 不新建 UI
         #    （作者要求「有感知」：这节课往术语表里加了什么，得有人告诉他）。
         gloss_line = (f"\n   💡 新加入术语库 {len(self._gloss_added)} 条："
                       f"{' · '.join(self._gloss_added)}" if self._gloss_added else "")
         return (f"📝 已存入 Obsidian({self._n} 句, 复习层: {layer}{extra}) → {self.vault_path}"
-                f"{gloss_line}\n"
+                f"{html_line}{gloss_line}\n"
                 f"   原始逐句日志: {self.session_path}")

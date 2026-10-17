@@ -1,17 +1,17 @@
-"""笔记**版式**（2026-10-17 v2）：中文连贯讲解为主 + 分层自测 + 覆盖度/校验清单。
+"""笔记**版式**（2026-10-17 v2）：md = **简版**，HTML = **唯一的详细版**。
 
-作者的原话（这一版版式的全部理由）：
-> 不要「一行中文一行英文」的逐句对照……正文全中文讲解；只有重点术语首次出现时写成
-> 「研究问题（research question）」……不要「一条一条 bullet 堆下去」。要系统性、由浅入深：
-> 每个知识点是一段连贯的讲解（直觉 → 定义 → 为什么 → 怎么用 → 例题 → 变式），
-> 像一篇有起承转合的教程……标出「这一节要用到上一节的 X」。
+作者的两句话（这一版版式的全部理由，2026-10-17 第六轮拍板）：
 
-⭐ 所以这一版**不重排英文原句**（旧版 `_render_note` 的 `en/detail/zh` 三层被整个换掉）——
-   英文只留在三个地方：术语原形、定义/考卷原文的引用、底部那份**逐句转录**（证据层）。
+> HTML = 唯一的详细版（讲解/例题/变式/自测/图表全在里面）；下课提示里给 HTML 的路径。
+> md = 简版：只放 五分钟速览 + 课堂纲要 + 术语表 + 一些事儿 + 顶部一行「打开交互版」
+> 链接。目标体积 ≤ 原 md 的 15%。
 
-⚠️ 结构里的两条硬约束（旧版测试钉着同一件事，别在重写时丢了）：
-   1. **骨架在细节之前**：📑 课堂纲要（课务/章节）紧跟速览、在讲解之前；
-   2. **底座在最后**：逐句转录一条不少、原样（**不精修**）折叠在附录 B。
+⭐ 所以两份**同一份数据**（`NoteData`，生产者是 `obsidian_writer.close`）渲染，
+   不为任何一份多调模型；md 版里丢掉的那几层**在 HTML 里一件不少**：
+   讲解 / 例题 / 变式 / 补全题 / 自测 / 图表 / 修正记录 / 我标的地方 / 标星句 /
+   🎯 最值得记的几句 / 逐句转录（证据层）全在 `note_html.note_page` 里。
+   ⚠️ 换渲染层最容易出的事故是"两头都丢"（md 不印了、HTML 也没加）——
+      `tests/test_note_v2.py::FormatSplit` 逐层钉着这件事。
 
 ⚠️ 本模块是**纯渲染**：不联网、不碰 AppKit、不读文件。判据直接喂 `NoteData`。
 """
@@ -45,21 +45,20 @@ class NoteData:
     review_dates: list = dataclasses.field(default_factory=list)
     #: Anki CSV 文件名（写了才有；只写进说明那一行）。
     anki_name: str = ""
-    #: 同目录的 HTML 文件名（自包含交互版）。
+    #: 同目录的 HTML 文件名（**详细版**；简版顶部那行链接指向它）。
     html_name: str = ""
     #: 别处已经算好的修正说明（`note_v2.corrections_from_mismatch`）。
     corrections_extra: list = dataclasses.field(default_factory=list)
-    #: 头部警告（如「本课未做课件核对」）—— 每行一条，进 header callout。
+    #: 头部警告（如「本课未做课件核对」）—— 每行一条，进页尾内部记录。
     warns: list = dataclasses.field(default_factory=list)
+    #: 交互版有没有拿到 KaTeX 副本（`note_html.install_assets`）——
+    #: 只有**已知失败**时才写一行说明（不知道就不说）。
+    katex_ok: bool = True
 
 
 # ⚠️ `_POLISH_NOTE` **不在这里** —— 它的唯一定义点在 `obsidian_writer`（`polish:`
 #    这个字段就是在那里定的，`test_wrapup` 也钉着 `ow._POLISH_NOTE`）。
 #    本模块渲染时去那边取（同 `_render_outline_section` 的做法），不抄第二份。
-
-
-#: 「修正说明」在正文里的锚点：`修正：` 开头的一行（渲染层自己写的）。
-CORRECTION_PREFIX = "修正说明："
 
 
 def _one(v) -> str:
@@ -72,49 +71,6 @@ def _one(v) -> str:
     """
     import note_math
     return note_math.auto_tex(" ".join(str(v).split())) if v else ""
-
-
-def _tex(v) -> str:
-    """文本 → 补上 LaTeX 的文本（`q^3-3q^2+12q` → `$q^{3}-3q^{2}+12q$`）。
-
-    ⚠️ 这是**渲染层兜底**，不是替模型写公式：prompt 仍然要求它自己写 `$…$`
-       （2026-10-17 验收实测：整篇 HTML 里 `$` 个数是 **0**，KaTeX 没有任何作用对象）。
-       转换是幂等的 —— 已经写好的 `$…$` 原样不动（`note_math.auto_tex` 有判据）。
-    """
-    import note_math
-    return note_math.auto_tex(v)
-
-
-
-def _fold(title: str, body: list, *, open_: bool = False) -> list:
-    """折叠 callout —— 笔记里所有"先自己想/点开看"都走这一条（格式唯一定义点）。
-
-    ⚠️ `-` 后缀 = 默认折叠（Obsidian 语法）；展开后是正常内容。
-    """
-    if not body:
-        return []
-    tag = "success" if title.startswith("答案") else "question"
-    mark = "" if open_ else "-"
-    out = [f"> [!{tag}]{mark} {title}", ">"]
-    for line in body:
-        for sub in str(line).splitlines() or [""]:
-            out.append(f"> {sub}".rstrip())
-    return out
-
-
-def _steps_md(steps: list, *, reveal: bool) -> list:
-    """例题的步骤。`reveal=True` 时**每步**单独折叠（HTML 里对应"点一下出下一步"）。"""
-    out: list = []
-    for i, st in enumerate(steps, 1):
-        t, w = _one(st.get("text")), _one(st.get("why"))
-        head = f"**第 {i} 步** {t}" if t else f"**第 {i} 步**"
-        if reveal:
-            out += _fold(f"第 {i} 步", [f"{t}", (f"为什么：{w}" if w else "")])
-            continue
-        out.append(f"{i}. {t}")
-        if w:
-            out.append(f"   - 为什么这一步成立：{w}")
-    return out
 
 
 def _first_sentence(text: str, *, max_chars: int = 60) -> str:
@@ -151,11 +107,11 @@ def _bf(e: dict) -> str:
 
 
 def _polish_line(state: str) -> str:
-    """附录 A 里"这课的转录精修了没有"那一行。**跟着 `polish:` 字段走**。"""
+    """页尾内部记录里"这课的转录精修了没有"那一行。**跟着 `polish:` 字段走**。"""
     if state == "off":
-        return "- **逐句转录不再精修**（2026-10-17 起默认不跑）：原样保留，仅作证据层（附录 B）。"
-    return (f"- 本课**转录做过精修**（`polish: {state}`，`--polish auto`）：附录 B 里是"
-            "精修后的那版，`sessions/` 里的原始记录未动。")
+        return "- **逐句转录不再精修**（2026-10-17 起默认不跑）：原样保留，仅作证据层。"
+    return (f"- 本课**转录做过精修**（`polish: {state}`，`--polish auto`）："
+            "逐句记录里是精修后的那版，`sessions/` 里的原始记录未动。")
 
 
 def _missing_line(d: "NoteData") -> str:
@@ -173,64 +129,26 @@ def _missing_line(d: "NoteData") -> str:
     return "*（未自动生成 —— 未配 API key 或调用失败；可课后自行补）*"
 
 
-def _section_md(sec: dict, idx: int) -> list:
-    """一个知识点 -> Markdown。顺序：衔接 → 讲解 → 前置补课 → 例题 → 变式 → 补全 → 误区。"""
-    L: list = []
-    head = _one(sec.get("heading"))
-    ts = _one(sec.get("ts"))
-    L += [f"### {idx}. {head}" + (f"　`🎙 {ts}`" if ts else ""), ""]
-    link = _one(sec.get("prereq_link"))
-    if link:
-        L += [f"> 🔗 {link}", ""]
-    for para in (sec.get("prose") or []):
-        L += [_one(para), ""]
-    pre = _one(sec.get("prereq"))
-    if pre:
-        L += _fold("📚 前置补课（教授没讲、但要懂）", [pre]) + [""]
-    ex = sec.get("example") or {}
-    if ex.get("prompt") or ex.get("steps"):
-        L += [f"#### 例题 · {_one(ex.get('title')) or '教授的例题'}", ""]
-        if ex.get("prompt"):
-            L += [f"**题目**：{_one(ex['prompt'])}", ""]
-        L += _steps_md(ex.get("steps") or [], reveal=False)
-        L.append("")
-        if ex.get("answer"):
-            L += _fold("答案", [_one(ex["answer"])]) + [""]
-    for j, v in enumerate(sec.get("variants") or [], 1):
-        L += [f"#### 变式 {j}（先自己写，再看）", "", f"**题目**：{_one(v.get('q'))}", ""]
-        body = _steps_md(v.get("steps") or [], reveal=False)
-        if v.get("a"):
-            body += [_one(v["a"])]
-        L += _fold("答案", body) + [""]
-    fd = sec.get("faded") or {}
-    if fd.get("q"):
-        L += [f"#### 补全题（把关键步骤填上）", "", f"**题目**：{_one(fd['q'])}", ""]
-        if fd.get("blanks"):
-            L += ["- 空：⬜ " + "　⬜ ".join(_one(b) for b in fd["blanks"]), ""]
-        if fd.get("a"):
-            L += _fold("答案", [_one(fd["a"])]) + [""]
-    if sec.get("pitfalls"):
-        L += ["#### 常见误区", ""] + [f"- {_one(p)}" for p in sec["pitfalls"]] + [""]
-    terms = sec.get("terms") or []
-    if terms:
-        L += ["> 🔑 " + " · ".join(
-            f"{_one(t['zh'])}（{_one(t['en'])}）" if t.get("zh") else _one(t["en"])
-            for t in terms), ""]
-    srcs = sec.get("sources") or []
-    if srcs:
-        L += [f"> 📎 来源：{' · '.join(_one(s) for s in srcs)}", ""]
-    return L
+def _detail_link(d: "NoteData") -> list:
+    """顶部那行「打开交互版」（**相对路径**指向同名 `.html`）。
+
+    ⚠️ 详细版没生成时（HTML 那一步失败）这一行要**说清楚**，不能指着一个不存在的
+       文件 —— 读者会以为笔记坏了（同 `_write_sidecars` 里清空 `html_name` 的取舍）。
+    """
+    if d.html_name:
+        return [f"> 📄 **详细版**（讲解 / 例题 / 变式 / 自测 / 图表 / 逐句转录）："
+                f"[{d.html_name}]({d.html_name})　（同目录，双击打开；公式离线也能渲染）", ""]
+    return ["> ⚠ 这份是**简版**，而**详细版这次没生成**（讲解/例题/变式/自测/图表都不在"
+            "这份里）。会话记录仍是完整的：`sessions/`。", ""]
 
 
 def render(d: NoteData) -> str:
-    """`NoteData` -> 笔记 Markdown（streams 全在这一处）。"""
+    """`NoteData` -> **简版** Markdown（作者第六轮第 6 条）。"""
     entries = d.entries
     review = d.review or {}
     ts0 = entries[0]["ts"] if entries else "—"
     ts1 = entries[-1]["ts"] if entries else "—"
-    stars = [e for e in entries if e.get("star")]
     sections = review.get("sections") or []
-    heads = [_one(s.get("heading")) for s in sections]      # 节标题（§9 的章节覆盖表要回指节号）
     qa = review.get("qa") or []
     title = _one(review.get("title_zh")) or _one(review.get("title"))
     L: list = ["---",
@@ -242,60 +160,44 @@ def render(d: NoteData) -> str:
                "---", "",
                f"# {d.course} · {d.date}" + (f" · {title}" if title else ""), ""]
 
-    # ⚠️ `corrections_extra` **不进这张表**：它是 `{kind, where, spoken, fixed, basis}` 形状
-    #    （第四轮实测：当成核对行渲染 → 三行空单元格，还把"待确认"的计数抬高了 3）。
-    #    它们的去处是附录 A 的「修正记录」。
+    # ── ① 打开详细版（一行）────────────────────────────────────────────
+    L += _detail_link(d)
+
+    # ── ② 这段课（几行事实；详细版里还有这些 + 全部内容）──────────────────
     checks = list(review.get("checks") or [])
-    corr = list(review.get("corrections") or [])
     n_ok = sum(1 for c in checks if c.get("status") == "ok")
     n_bad = sum(1 for c in checks if c.get("status") == "mismatch")
     n_un = sum(1 for c in checks if c.get("status") == "unchecked")
-    cov = review.get("covered") or []
     pts = review.get("lecture_points") or []
+    cov = review.get("covered") or []
     cv = review.get("cover") or {}
     if cv.get("rows"):
-        # ⭐ 第四轮：清单来自「章节 + 实时要点」，粒度不由模型定 —— 报的是**确定的那两个数**。
         # ⭐ 第六轮：覆盖度**按时间窗算**（要点/小节都有时间戳，不再看模型的对齐回执）。
         cov_line = (f"覆盖度：章节 {cv['n_ok']}/{cv['n_chapters']} 都有讲解 · "
                     f"实时要点 {cv['n_covered']}/{cv['n_points']} 条落进笔记")
         if cv["n_points"] > cv["n_covered"]:
-            cov_line += f"（缺 {cv['n_points'] - cv['n_covered']} 条，见 §9）"
+            cov_line += f"（缺 {cv['n_points'] - cv['n_covered']}，明细见详细版）"
     elif pts:
         n_cov = sum(1 for c in cov if _one(c.get("section")) and
                     _one(c.get("section")) not in ("缺失", "missing", "-", "无"))
         cov_line = f"覆盖度：教授知识点 {len(pts)} 个 → 笔记覆盖 {n_cov} 个"
-        if n_cov < len(pts):
-            cov_line += f"（缺 {len(pts) - n_cov}，见 §9）"
     else:
-        cov_line = "覆盖度：未生成知识点清单（见 §0 的说明）"
-
-    # ── 头部 ───────────────────────────────────────────────────────────
-    L += ["> [!info] 这是什么 / 怎么用", ">"]
-    L += ["> 这节课的**中文讲解笔记**：一个知识点一节，从零基础讲到课上那个程度。",
-          "> 用法：先读 §0 速览；每节读完做那一节的例题/变式；最后用 §自测 闭卷过一遍。",
-          ">"]
+        cov_line = "覆盖度：未生成知识点清单"
+    L += ["> [!info] 这段课", ">"]
     L += [f"> 🕐 {ts0} – {ts1} · 🗣 {len(entries)} 句 · 💡 {len(d.term_rows)} 个术语 · "
           f"❓ {len(d.lost_items)} 处标记"]
     if d.materials_line:
         L += [f"> {d.materials_line}"]
     L += [f"> {cov_line}"]
     if n_ok or n_bad or n_un:
-        # ⚠️ 学生看的是一句话，不是生成器的工作日志（作者 2026-10-17 第三轮：
-        #    「页头给学生看的是内部诊断」）。内部那几条挪到页尾「生成核对记录」。
         L += [f"> ✅ 数字核对：{n_ok + n_bad} 处已核"
-              + (f"（其中 {n_bad} 处按 📖/📚 改过，见附录 A）" if n_bad else "")
-              + f" · {n_un} 处待你确认（清单见 §9）"]
-    try:
-        from obsidian_writer import _POLISH_NOTE
-    except Exception:                                          # noqa: BLE001
-        _POLISH_NOTE = {}
-    _warn = _POLISH_NOTE.get(d.polish_state)
-    if _warn:
-        L += [f"> {_warn}"]
-    L += [">", "> <sub>🎙 课上一手 · 📖 课件材料 · 📚 标准理论；冲突时 📖 > 📚 > 🎙。"
-          "逐句转录**不再精修**，原样折叠在附录 B 作证据层。</sub>", ""]
+              + (f"（其中 {n_bad} 处按 📖/📚 改过）" if n_bad else "")
+              + f" · {n_un} 处待你确认（明细见详细版）"]
+    if d.katex_ok is False:
+        L += ["> ⚠ 这次没装上公式字体（详细版里公式会显示成 TeX 源码）"]
+    L += [""]
 
-    # ── §0 五分钟速览 ─────────────────────────────────────────────────
+    # ── ③ 五分钟速览 ──────────────────────────────────────────────────
     L += ["## 0 · 五分钟速览", ""]
     if sections:
         L += ["这节讲的东西按下面的顺序串起来：", ""]
@@ -311,7 +213,7 @@ def render(d: NoteData) -> str:
         #    铺出来就是一屏噪音 —— 这一节是"学完会什么"，不是课后作业清单。
         L += ["**学完你应该会：**", ""] + [f"- {_one(x)}" for x in plan[:5]] + [""]
 
-    # ── 📑 课堂纲要（骨架先于细节）─────────────────────────────────────
+    # ── ④ 课堂纲要（骨架先于细节）──────────────────────────────────────
     try:
         import obsidian_writer as _ow
         if d.chapter_items:
@@ -321,89 +223,7 @@ def render(d: NoteData) -> str:
     except Exception:                                          # noqa: BLE001
         pass
 
-    # ── 讲解（由浅入深）────────────────────────────────────────────────
-    # ⚠️ 这一节**总是**出现（哪怕没内容）：它是"骨架之后才是细节"那条结构纪律的
-    #    锚点（`tests/test_vault.py` 的位置判据指着它），也是"这次没生成"那句话
-    #    该待的地方 —— 少了它，读者会以为讲解藏在别处。
-    L += ["## 讲解（由浅入深）", ""]
-    if sections:
-        for i, s in enumerate(sections, 1):
-            L += _section_md(s, i)
-    else:
-        L += [_missing_line(d), ""]
-
-    # ── 自测 ──────────────────────────────────────────────────────────
-    L += ["## 自测（先答再揭晓）", ""]
-    if d.qa_items:
-        L += ["> [!question] 🙋 我课上问过的问题 · 先自测这些", *d.qa_items, ""]
-    if qa:
-        L += ["> [!tip] 用法：遮住答案，先在纸上写一遍；展开再对照。"
-              "`问题::答案` 那几行可以直接被 Spaced Repetition 插件当卡片。", ""]
-        for i, x in enumerate(qa, 1):
-            kind = {"calc": "计算", "trap": "易错", "concept": "概念"}.get(
-                _one(x.get("kind")), "")
-            L += [f"**{i}. {_one(x.get('q'))}**" + (f"　`{kind}`" if kind else ""), ""]
-            L += _fold("答案与解析", [_one(x.get("a"))]) + [""]
-            L += [f"- {_one(x.get('q')).replace('::', ': :')}::{_one(x.get('a'))}"]
-        L += [""]
-    else:
-        L += ["> [!tip] 用 `问题::答案` 写自测题（装了 Spaced Repetition 插件就能当卡片复习）",
-              "", "- ", ""]
-
-    # ── §9 覆盖度与校验清单 ───────────────────────────────────────────
-    L += ["## 覆盖度与校验清单", ""]
-    if cv.get("rows"):
-        L += ["**章节覆盖**（章节 + 实时要点 = 知识点清单；粒度由课堂实时分章定，"
-              "不由模型定。**按时间窗算**：这段课时间上有没有对应的小节）：", "",
-              "| 章节（时间段） | 实时要点 | 覆盖 | 落到的小节 |", "|---|---|---|---|"]
-        for r in cv["rows"]:
-            n_ok = sum(1 for p in r["points"] if p["ok"])
-            n = len(r["points"])
-            mark = "✅" if r["ok"] else "⚠ **这一章没落到**"
-            secs = "、".join(f"§{i}" for i in
-                            [heads.index(h) + 1 for h in r["sections"] if h in heads]) or "—"
-            L += [f"| 章 {r['i']}「{r['title']}」 `{r['t0']}–{r['t1']}` "
-                  f"| {n_ok}/{n} 条 | {mark} | {secs} |"]
-        L += [""]
-        miss_pts = [p for r in cv["rows"] for p in r["points"] if not p["ok"]]
-        if miss_pts:
-            L += ["**还没落到的要点（要补）：**", ""]
-            for p in miss_pts:
-                L += [f"- `{p['ts']}` {p['point']}"]
-            L += [""]
-    elif pts and cov:
-        L += ["| 教授讲的（🎙） | 笔记覆盖 |", "|---|---|"]
-        by_point = {_one(c.get("point")).lower(): _one(c.get("section")) for c in cov}
-        for p in pts:
-            pt = _one(p.get("point"))
-            sec = by_point.get(pt.lower(), "")
-            ok = bool(sec) and sec not in ("缺失", "missing", "-")
-            tail = f" {sec}" if ok else ""
-            mark = "✅" if ok else "⚠ **缺失**"
-            L += [f"| {'`' + _one(p.get('ts')) + '` ' if p.get('ts') else ''}{pt} | {mark}{tail} |"]
-        L += [""]
-    miss = review.get("missing") or []
-    if miss:
-        # ⚠️ 这一段是**模型的看法**（`align` 的提示），不是判定：覆盖度的数字在上面那张
-        #    按时间窗算的表里。写清"提示"两个字，读者才不会把两处不一致当成打架。
-        L += ["**模型觉得没讲到的（提示，不是判定；判定看上面那张表）：**", ""]
-        L += [f"- `{_one(m.get('ts'))}` {_one(m.get('point'))}"
-              + (f" —— {_one(m.get('why'))}" if m.get("why") else "") for m in miss]
-        L += [""]
-    if checks:
-        L += ["**数字 / 公式三道核**（ⓐ 代数自洽 → ⓑ 对照课件 → ⓒ 核不了标未核对）：", "",
-              "| 断言 | 怎么核的 | 结果 |", "|---|---|---|"]
-        for c in checks:
-            st = {"ok": "✅ 一致", "mismatch": "⚠ 已修正", "unchecked": "⬜ 未核对"}.get(
-                c.get("status", ""), "⬜ 未核对")
-            rec = _one(c.get("recomputed"))
-            L += [f"| {_one(c.get('claim'))} | {_one(c.get('how'))} | {st}"
-                  + (f"（应为 {rec}）" if c.get("status") == "mismatch" and rec else "") + " |"]
-        L += [""]
-    elif sections:
-        L += ["*（本次没生成数字清单 —— 复习层这一层缺；正文里的数字请自己代入复核）*", ""]
-
-    # ── 术语 ──────────────────────────────────────────────────────────
+    # ── ⑤ 本课术语 ────────────────────────────────────────────────────
     L += ["## 本课术语", ""]
     if d.term_rows:
         L += d.term_rows
@@ -418,76 +238,62 @@ def render(d: NoteData) -> str:
               "见 `glossary/<课号>.txt`。）*"]
     L += [""]
 
-    # ── 复习排程 ──────────────────────────────────────────────────────
+    # ── ⑥ 一些事儿（复习排程 / Anki / 我标的地方 / 标星句 / 🎯）──────────
+    L += ["## 一些事儿", ""]
     if d.review_dates:
-        L += ["## 复习排程（笔记只写日期，不推送）", "",
-              "| 第几次 | 日期 | 做什么 |", "|---|---|---|"]
-        plans = ["重做例题 + §自测 闭卷一遍（约 20 分钟）",
-                 "只看 §0 速览 + §自测 答错的那几条（约 10 分钟）",
-                 "合上笔记，把每个知识点用自己的话讲一遍（约 15 分钟）"]
-        for i, dt in enumerate(d.review_dates):
-            L += [f"| 第 {i + 1} 次 | {dt} | {plans[i] if i < len(plans) else plans[-1]} |"]
-        L += ["", "> ⚠️ **感觉顺利 ≠ 学得牢**：重读一遍觉得「都懂」是最常见的错觉（desirable "
+        L += ["**复习排程**（笔记只写日期，不推送）："
+              + " · ".join(f"第 {i + 1} 次 `{dt}`" for i, dt in enumerate(d.review_dates)), ""]
+        L += ["> ⚠️ **感觉顺利 ≠ 学得牢**：重读一遍觉得「都懂」是最常见的错觉（desirable "
               "difficulty）。真正的检验是**合上笔记能不能写出来**。", ""]
-        extras = []
-        if d.anki_name:
-            extras.append(f"这份笔记的自测与术语已导出为 Anki 卡：`{d.anki_name}`"
-                          "（导入 Anki → File → Import）")
-        if d.html_name:
-            extras.append(f"交互版（例题分步展开 / 自测点击揭晓 / 可拖动参数的图）：`{d.html_name}`")
-        if extras:
-            L += [f"- {'；'.join(extras)}", ""]
-
-    # ── ❓ / ⭐ / 🎯（既有层，原样保留）────────────────────────────────
-    L += ["## 🤔 我标的地方（重点 / 没听懂）", ""]
+    if d.anki_name:
+        L += [f"- 自测与术语已导出为 Anki 卡：`{d.anki_name}`（导入 Anki → File → Import）"]
     if d.lost_items:
+        L += ["", "**我课上标的地方**（重点 / 没听懂）：", ""]
         for blk in d.lost_items:
             L += blk.splitlines()
-    else:
-        L += ["*（课上没标；觉得哪句重要、或哪里没跟上，就标一下）*"]
-    L += [""]
+    stars = [e for e in entries if e.get("star")]
     if stars:
-        L += ["## ⭐ 我标记的重点", ""]
+        L += ["", "**⭐ 我标记的重点**：", ""]
         for e in stars:
             L += [f"- `{e['ts']}` {e['zh'] or e['en'] or e['asr']}"]
-            if e["en"] and e["zh"]:
-                L += [f"  - EN: {e['en']}"]
-        L += [""]
     if d.keypoint_items:
-        L += ["## 🎯 这节课最值得记的几句", "",
-              "*（按 Jev 给「值不值得抄进复习纸」的概率排序。⚠️ **排序信号，不是考试预测** ——"
-              " 实测同一句换个问法能掉 0.16，所以看顺序、别卡分数。）*", ""]
+        L += ["", "**🎯 这节课最值得记的几句**（按 Jev 给「值不值得抄进复习纸」的概率排序；"
+              "⚠️ 排序信号，不是考试预测）：", ""]
         for p, text, ix in d.keypoint_items:
             tag = f"L{ix[0] + 1}" if len(ix) == 1 else f"L{ix[0] + 1}–{ix[-1] + 1}"
             L += [f"- `{p:.2f}` `{tag}` {text}"]
-        L += [""]
+    if qa:
+        L += ["", f"**自测 {len(qa)} 题**（先自己想，答案与解析在详细版里）：", ""]
+        for i, x in enumerate(qa, 1):
+            L += [f"{i}. {_one(x.get('q'))}"]
+    L += [""]
 
-    # ── 附录 A：信息纪律 + 修正记录 + 生成核对记录（内部） ──────────────
-    L += ["---", "", "## 附录 A · 信息纪律与修正记录", "",
-          "- **来源三分**：🎙 课上一手（可回时间戳）/ 📖 官方材料（课件、试卷、更正）/ "
-          "📚 标准理论（教科书级知识，用于讲通「为什么」或裁定口误）。",
+    # ── ⑦ 生成核对记录（内部 · 折叠）───────────────────────────────────
+    # ⚠️ 它留在简版里：这是"笔记被机器动过哪里"的凭据（作者第三轮的要求），
+    #    详细版里那份更全（逐条修正记录），但简版不能一个字不提。
+    L += ["---", "", "## 附录 · 信息纪律与生成核对记录", "",
+          "- **来源三分**：🎙 课上一手 / 📖 官方材料（课件、试卷、更正）/ "
+          "📚 标准理论（用于讲通「为什么」或裁定口误）。",
           "- **冲突裁定序**：📖 官方材料 > 📚 标准理论 > 🎙 转录口误。",
-          "- **数字三道核**：ⓐ 代数自洽 → ⓑ 对照课件 → ⓒ 核不了标「未核对」（清单见 §9）。",
+          "- **数字三道核**：ⓐ 代数自洽 → ⓑ 对照课件 → ⓒ 核不了标「未核对」。",
           # ⚠️ 这行是**事实陈述，不是口号**：2026-10-17 起逐句精修默认关（转录原样当
           #    证据层），但 `--polish auto` 仍能把它开回来 —— 那时还写"不再精修"
           #    就是**假话**（本仓库对"假话"的容忍度是零：读者会拿它当"这条没被改过"的凭据）。
           _polish_line(d.polish_state), ""]
-    all_corr = corr + list(d.corrections_extra or [])
+    all_corr = list(review.get("corrections") or []) + list(d.corrections_extra or [])
+    # ⚠️ 两类要**分开数**（`test_三道核的_mismatch_措辞不同_它是发现不是口误`）：
+    #    · 「修正」= 课上原话 → 修正值（模型给的 `corrections`，是口误/ASR 听错）；
+    #    · 「三道核发现」= 机械/模型重算出的不一致（`kind == "check"`）——
+    #      把它并进"修正 N 处"是**改了笔记的账**：那处原话没错，是笔记核出来的发现。
+    n_fix = sum(1 for c in all_corr if c.get("kind") != "check")
+    n_find = len(all_corr) - n_fix
     if all_corr:
-        L += ["**修正记录**（课上原话 → 修正值 + 依据）：", ""]
-        for c in all_corr:
-            fixed = _one(c.get("fixed"))
-            if c.get("kind") == "check":
-                # ⚠️ 三道核发现的**不一致**与"教授口误"不是一回事：前者只是提醒
-                #    （有时重算出来还是同一个值），写成"原话 → 修正值"会让人以为改了正文。
-                L += [f"- **⚠ 三道核**：{_one(c.get('spoken'))}"
-                      + (f" —— 重算：**{fixed}**" if fixed else "")
-                      + (f"（{_one(c.get('basis'))}）" if c.get("basis") else "")]
-                continue
-            L += [f"- **{_one(c.get('where')) or '—'}**："
-                  f"「{_one(c.get('spoken'))}」→ **{fixed}**"
-                  + (f"（依据：{_one(c.get('basis'))}）" if c.get("basis") else "")]
-        L += [""]
+        bits = []
+        if n_fix:
+            bits.append(f"修正 {n_fix} 处（课上原话 → 修正值 + 依据）")
+        if n_find:
+            bits.append(f"三道核另有发现 {n_find} 处（重算不一致，不是口误）")
+        L += ["- **" + " · ".join(bits) + "**（逐条记录在详细版里）。", ""]
     if d.materials_line:
         L += [f"- **本课课件核对**：{d.materials_line}"]
         if review.get("materials_used"):
@@ -503,21 +309,6 @@ def render(d: NoteData) -> str:
             # HTML 侧走 inline()（KaTeX + Unicode 兜底）。
             L += [f"> - {note_math.auto_tex(_one(str(w)))}"]
         L += [""]
-
-    # ── 附录 B：逐句转录（证据层）─────────────────────────────────────
-    # ⚠️ 抬头**保留**旧的 `## 📜 完整逐句转录` 前半段（附录 B 只是补上编号）：
-    #    它是对外可 grep 的锚（`tests/test_backfill.py` 与作者自己的肌肉记忆都指着它）。
-    L += [f"## 📜 完整逐句转录（附录 B · 点击展开 · {len(entries)} 句）", "",
-          "> [!note]- 逐句双语 + 原始 ASR（**未做任何删改**）", "> "]
-    for e in entries:
-        L.append(f"> > [!abstract] {e['ts']}" + (" ⭐" if e.get("star") else ""))
-        if e["en"]:
-            L.append(f"> > **EN**: {e['en']}")
-        if e["zh"]:
-            L.append(f"> > **ZH**: {e['zh']}{_bf(e)}")
-        if e["asr"]:
-            L.append(f"> > **ASR**: {e['asr']}")
-        L.append("> ")
     return "\n".join(L) + "\n"
 
 
@@ -527,8 +318,9 @@ def chinese_ratio(text: str) -> float:
     ⚠️ 口径：`汉字数 / (汉字数 + 拉丁字母数)` —— 只看"讲的是中文还是英文"，
        标点、markdown 记号、数字、公式都不进分母（旧口径 `非空白字符` 会把
        `- **` 这类排版记号算成"内容"，同一份笔记能差出 20 个百分点）。
-    ⚠️ 只数**正文区**：附录 B 那份逐句转录是英文证据层，**必须**排除 ——
-       把它算进"中文占比"等于用一个假指标骗自己。
+    ⚠️ 只数**正文区**：附录那份逐句转录是英文证据层，**必须**排除 ——
+       把它算进"中文占比"等于用一个假指标骗自己（第六轮起转录搬去了 HTML，
+       这里的分割线仍然留着：详细版/旧产物里那份转录还会从这里路过）。
     """
     body = re.sub(r"```.*?```", "", text or "", flags=re.S)
     # ⚠️ 抓的是**抬头**而不是某一段固定文字：2026-10-17 版式把那段改名成

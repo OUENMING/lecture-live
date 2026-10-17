@@ -193,7 +193,12 @@ class CloseWiring(unittest.TestCase):
                 w.append("second one", "第二句", raw="second one")
                 w.mark_lost()
                 w.close(cancel=cancel)
-                return w.vault_path.read_text(encoding="utf-8")
+                # ⚠️ 笔记两个文件合起来读：逐句转录（含 EN）在详细版 HTML 里，
+                #    ❓ 标记块（含 💡 讲解 / 闪卡行）在 md 里 —— 这组用例两处都要看。
+                p = Path(w.vault_path)
+                md = p.read_text(encoding="utf-8")
+                h = p.with_suffix(".html")
+                return md + "\n" + (h.read_text(encoding="utf-8") if h.exists() else "")
             finally:
                 ow.SESSIONS = old
 

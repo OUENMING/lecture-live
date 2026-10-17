@@ -141,6 +141,18 @@ class Wiring(unittest.TestCase):
                "> [!abstract] 10:00:12\n> **EN**: taxpayers would not like it.\n"
                "> **ZH**: 纳税人不会喜欢。\n> **ASR**: taxpayers would not like it.\n\n")
 
+    @staticmethod
+    def _note_text(vault_path):
+        """笔记两个文件合一读（md 简版 + HTML 详细版，转录在后者）。"""
+        p = pathlib.Path(vault_path)
+        out = []
+        for q in (p, p.with_suffix(".html")):
+            try:
+                out.append(q.read_text(encoding="utf-8"))
+            except OSError:
+                out.append("")
+        return "\n".join(out)
+
     def test_笔记里是并好的那一句_会话文件一字不动(self):
         with tempfile.TemporaryDirectory() as d, _on(), \
                 mock.patch.object(ow, "SESSIONS", pathlib.Path(d) / "sessions"):   # ⚠️ 写端也换
@@ -152,7 +164,7 @@ class Wiring(unittest.TestCase):
             w.session_path, w._n = sp, 2
             with mock.patch.object(NM, "_chat", fake_chat()):
                 w.close()
-            note = pathlib.Path(w.vault_path).read_text(encoding="utf-8")
+            note = self._note_text(w.vault_path)
             self.assertIn("整句[because in the end taxpayers would not like it.]", note)
             self.assertNotIn("因为归根结底", note)
             self.assertEqual(sp.read_text(encoding="utf-8"), self.SESSION)
@@ -168,7 +180,7 @@ class Wiring(unittest.TestCase):
             w.session_path, w._n = sp, 2
             with mock.patch.object(NM, "merge_entries", side_effect=RuntimeError("x")):
                 w.close()
-            self.assertIn("因为归根结底", pathlib.Path(w.vault_path).read_text(encoding="utf-8"))
+            self.assertIn("因为归根结底", self._note_text(w.vault_path))
 
 
 if __name__ == "__main__":

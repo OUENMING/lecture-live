@@ -167,6 +167,34 @@ class TestMdBody(unittest.TestCase):
         self.assertNotIn("EN: hi", ne.md_body(md))
 
 
+class TestHtmlProse(unittest.TestCase):
+    """第六轮：散文搬进 HTML 之后，「渲染面」那一腿必须跟着搬（否则这一列假跌）。"""
+
+    def test_切掉转录与它之后的机器清单(self):
+        html = ("<h2>自测（先答再揭晓）</h2><p>均衡要求双方都没有偏离动机。</p>"
+                "<h2>本课术语</h2><ul><li>规模经济 —— 产量翻倍时单位成本反而下降</li></ul>"
+                "<h2>📜 完整逐句转录（3 句）</h2><div class=\"tr\">EN hi</div>"
+                "<details id=\"checks\"><summary>核对清单</summary>检查：机械表别扫"
+                "</details>")
+        got = ne.html_prose(html)
+        self.assertIn("均衡要求双方都没有偏离动机", got)
+        self.assertNotIn("EN hi", got, "逐句转录是证据层，不算模型散文")
+        self.assertNotIn("检查：", got, "转录之后的覆盖度/核对表是机器数据")
+        self.assertNotIn("规模经济", got, "术语表是 curated 资料（同 `_SKIP_TOP` 那条）")
+
+    def test_剥标签不把关键词切开(self):
+        """`<b>检查</b>：` 被标签切成两半的话，这一列会**漏报**（假干净）。"""
+        html = "<p>需要<b>仔细检查</b>：这条答案里的等式。</p>"
+        self.assertTrue(ne.selftalk_hits({"html": ne.html_prose(html)}),
+                        "标签把「仔细检查」切开了 —— 剥标签的写法有问题")
+
+    def test_总数把三个面都算上(self):
+        m = {"selftalk": {"review": 2, "md": 1, "html": 3}}
+        self.assertEqual(ne.selftalk_total(m), 6)
+        # 旧 run（baseline.json 那会儿还没有 html 那一腿）不许把报告搞崩。
+        self.assertEqual(ne.selftalk_total({"selftalk": {"review": 5, "md": 1}}), 6)
+
+
 class TestWalk(unittest.TestCase):
     def test_字符串全走一遍_路径带下标(self):
         got = dict(ne.walk_strings({"a": ["x", {"b": "y"}], "c": 1}))

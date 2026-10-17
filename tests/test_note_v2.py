@@ -304,13 +304,50 @@ class RenderShape(unittest.TestCase):
             setattr(d, k, v)
         return d
 
-    def test_结构顺序_骨架先于细节_底座在最后(self):
-        out = nr.render(self._data())
+    def test_结构顺序_骨架先于细节(self):
+        """简版里该有的四块按序出现；详细版那一行在**最前面**（它是入口）。"""
+        rev = dict(REVIEW, cover={"rows": [{"i": 1, "title": "章", "t0": "13:16", "t1": "13:20",
+                                            "sections": [], "points": [], "ok": True}],
+                                  "n_ok": 1, "n_chapters": 1, "n_points": 0, "n_covered": 0,
+                                  "missing": []})
+        d = self._data(review=rev, html_name="x.html",
+                       chapter_items={"windows": [], "deadlines": [], "atoms": [],
+                                      "chapters": [{"status": "final", "id": 0,
+                                                    "title_zh": "成本函数", "t0": "13:16:28",
+                                                    "t1": "13:20:00"}]})
+        out = nr.render(d)
         i_quick = out.index("## 0 · 五分钟速览")
-        i_kc = out.index("## 讲解（由浅入深）")
-        i_b = out.index("## 📜 完整逐句转录")
+        i_kc = out.index("## 📑 课堂纲要")
+        i_term = out.index("## 本课术语")
+        i_misc = out.index("## 一些事儿")
+        self.assertLess(out.index("详细版"), i_quick, "入口要在最前面")
         self.assertLess(i_quick, i_kc)
-        self.assertLess(i_kc, i_b, "转录必须在最后（证据层）")
+        self.assertLess(i_kc, i_term)
+        self.assertLess(i_term, i_misc)
+
+    def test_详细版里那几层一件不少(self):
+        """⭐ 作者第六轮第 6 条：md 变简版，**丢掉的那几层必须在 HTML 里**。
+
+        ⚠️ 换渲染层最容易出的事故是"两头都丢"（md 不印了、HTML 也没加）——
+           逐层点名（讲解 / 例题 / 变式 / 补全题 / 自测 / 图表 / 修正记录 /
+           ❓ 标的地方 / ⭐ / 🎯 / 逐句转录）。
+        """
+        sec = dict(REVIEW["sections"][0])
+        sec["plot"] = {"kind": "cost_curves", "title": "AC 与 MC", "params": {}}
+        d = self._data(review=dict(REVIEW, sections=[sec]),
+                       lost_items=["> [!note]- 没听懂\n> 这里为什么能约掉"],
+                       keypoint_items=[(0.9, "要记结论", [0])],
+                       corrections_extra=[{"kind": "check", "where": "三道核",
+                                           "spoken": "x", "fixed": "y", "basis": "z"}])
+        d.entries = [dict(e, star=(i == 0)) for i, e in enumerate(d.entries)]
+        md, h = nr.render(d), nh.note_page(d)
+        for want in ("平均成本的定义就是摊到每一单位",   # 例题步骤的「为什么」
+                     "AC 与 MC",                        # 图
+                     "修正记录", "我标的地方", "没听懂",
+                     "⭐ 我标记的重点", "🎯 这节课最值得记的几句", "要记结论",
+                     "完整逐句转录", "先答再揭晓"):
+            self.assertIn(want, h, f"详细版缺了：{want}")
+        self.assertIn("sentence about cost 0", h, "逐句转录要原样在详细版里（一句不删）")
 
     def test_中文占比达标(self):
         out = nr.render(self._data())
@@ -321,44 +358,45 @@ class RenderShape(unittest.TestCase):
         """⭐ 量具自身的判据（2026-10-17 实测踩到）：版式把转录那一段改了名，
         `chinese_ratio` 的旧锚点失效 → 345 句英文被算进"正文"，71% 掉到 34%。
 
-        ⚠️ 这条**指向那一段抬头**：改名字要连量具一起改（否则验收表在说谎）。
+        ⚠️ 第六轮起转录搬去了 HTML，但这条尺子仍然要认得那个抬头（详细版/旧产物
+           里那份转录还会从这里路过）—— 把转录换成纯英文长句，占比**不该受它影响**。
         """
         out = nr.render(self._data(entries=[dict(e) for e in entries(6)]))
-        body = nr.chinese_ratio.__wrapped__ if False else None
-        del body
-        self.assertNotIn("完整逐句转录", out.split("## 📜")[0])
-        # 把转录换成纯英文长句：占比**不该受它影响**
         e2 = [{"ts": f"10:0{i}:00", "en": "english english english english " * 8,
                "zh": "", "asr": "", "star": False} for i in range(6)]
-        self.assertAlmostEqual(nr.chinese_ratio(out), nr.chinese_ratio(nr.render(self._data(entries=e2))),
+        self.assertAlmostEqual(nr.chinese_ratio(out),
+                               nr.chinese_ratio(nr.render(self._data(entries=e2))),
                                places=6)
 
     def test_没有逐句双语对照(self):
-        """作者的原话：不要「一行中文一行英文」。转录区除外（那是证据层，且在附录 B）。"""
-        body = nr.render(self._data()).split("## 📜 完整逐句转录")[0]
+        """作者的原话：不要「一行中文一行英文」。简版正文里更不该有。"""
+        body = nr.render(self._data())
         self.assertNotIn("**EN**:", body, "正文里混进了逐句英文")
         self.assertNotIn("**ASR**:", body)
+        self.assertNotIn("EN", body.split("## 一些事儿")[0].replace("ENGLISH", ""))
 
-    def test_例题_每步带为什么(self):
-        out = nr.render(self._data())
-        self.assertIn("为什么这一步成立：平均成本的定义就是摊到每一单位", out)
-        self.assertIn("#### 变式 1（先自己写，再看）", out)
-        self.assertIn("#### 补全题（把关键步骤填上）", out)
-        self.assertIn("⬜ $2q-12$", out)
+    def test_例题在详细版里_每步带为什么(self):
+        h = nh.note_page(self._data())
+        self.assertIn("平均成本的定义就是摊到每一单位", h)
+        self.assertIn("变式", h)
+        self.assertTrue("2q-12" in h, "补全题的空也在详细版里")
 
-    def test_自测有先答再揭晓与闪卡行(self):
-        out = nr.render(self._data())
-        self.assertIn("先答再揭晓", out)
-        self.assertIn("> [!success]- 答案与解析", out)
-        self.assertIn("::", out, "`问题::答案` 行丢了 —— Spaced Repetition 就用不了")
+    def test_自测_题干在简版_答案在详细版(self):
+        """⭐ 简版列题干（复习时知道自己要会什么），「先答再揭晓」的答案在详细版。"""
+        md = nr.render(self._data())
+        self.assertIn("自测 1 题", md)
+        self.assertIn("为什么 $MC<AC$ 时 $AC$ 会下降？", md)
+        self.assertNotIn("低于平均的数掺进来会把平均拉低", md, "答案不该在简版里（会剧透）")
+        h = nh.note_page(self._data())
+        self.assertIn("低于平均的数掺进来会把平均拉低", h)
+        self.assertIn("先答再揭晓", h)
 
-    def test_覆盖度与三道核清单(self):
-        out = nr.render(self._data())
-        self.assertIn("| 教授讲的（🎙） | 笔记覆盖 |", out)
-        self.assertIn("边际成本的定义与计算", out)
-        self.assertIn("数字 / 公式三道核", out)
-        self.assertIn("修正记录", out)
-        self.assertIn("代入求导", out, "修正记录必须写出依据（否则读者没法回源）")
+    def test_覆盖度与三道核清单在详细版(self):
+        h = nh.note_page(self._data())
+        self.assertTrue("边际成本的定义与计算" in h, "退化档的覆盖度表（教授知识点）没进详细版")
+        self.assertTrue("数字 / 公式三道核" in h)
+        self.assertTrue("修正记录" in h)
+        self.assertTrue("代入求导" in h, "修正记录必须写出依据（否则读者没法回源）")
 
     def test_速览里的句子在句末收(self):
         """实测踩到过：`prose[:80]` 把「令 $f'(x)=0$ 解」这种半句留在速览里。"""
@@ -375,9 +413,11 @@ class RenderShape(unittest.TestCase):
                                            "spoken": "AC(2.89)=233",
                                            "fixed": "",
                                            "basis": "AC 单调递减，最低点不在 2.89"}])
-        out = nr.render(d)
-        self.assertIn("⚠ 三道核", out)
-        self.assertNotIn("「AC(2.89)=233」→", out, "三道核的发现被写成了「原话 → 修正」")
+        h = nh.note_page(d)
+        self.assertTrue("⚠ 三道核" in h, "三道核的发现没进详细版")
+        self.assertNotIn("「AC(2.89)=233」→", h, "三道核的发现被写成了「原话 → 修正」")
+        md = nr.render(d)
+        self.assertTrue("修正 1 处" in md, "简版要点出有几处修正（明细在详细版）")
 
     def test_头部写清课件核对与覆盖度(self):
         out = nr.render(self._data())
@@ -399,9 +439,13 @@ class RenderShape(unittest.TestCase):
             self.assertIn("转录做过精修", out, st)
 
     def test_转录不精修_原样(self):
+        """转录（证据层）**原样**进详细版：不精修、不删句（md 简版里不再重复它）。"""
         e = entries(1)
         e[0]["en"] = "the origional en sentence"
-        self.assertIn("the origional en sentence", nr.render(self._data(entries=e)))
+        e[0]["asr"] = "the origional a s r"
+        h = nh.note_page(self._data(entries=e))
+        self.assertTrue("the origional en sentence" in h)
+        self.assertTrue("the origional a s r" in h, "原始 ASR 也要留着")
 
     def test_新加入术语库_N_条写进笔记(self):
         """作者要求的「有感知」：笔记里要有一节列出这节课往术语库里加了什么。"""
@@ -491,15 +535,15 @@ class HtmlComponents(unittest.TestCase):
                         review=REVIEW, html_name="x.html",
                         corrections_extra=[{"kind": "check", "where": "三道核",
                                             "spoken": "x", "fixed": "y", "basis": "z"}])
-        md = nr.render(d)
-        block = md[md.index("数字 / 公式三道核"):]
-        block = block[:block.index("\n## ") if "\n## " in block else len(block)]
-        for line in block.splitlines():
-            if line.startswith("| ") and "---" not in line and "断言" not in line:
-                cells = [c.strip() for c in line.strip("|").split("|")]
-                self.assertTrue(cells[0] and cells[1], f"表里有空单元格：{line!r}")
-        self.assertNotIn("corrections_extra", md)
-        self.assertIn("修正记录", md, "那三条还得有去处（附录 A）")
+        h = nh.note_page(d)
+        block = h[h.index("数字 / 公式三道核"):]
+        block = block[:block.index("</table>")]
+        for row in block.split("<tr>")[2:]:
+            cells = [c for c in row.split("<td>")[1:]]
+            for c in cells[:2]:
+                self.assertTrue(c.split("</td>")[0].strip(), f"表里有空单元格：{row[:80]!r}")
+        self.assertNotIn("corrections_extra", h)
+        self.assertTrue("修正记录" in h, "那三条还得有去处（详细版的修正记录）")
 
     def test_驻点画成圆点不是线段(self):
         """⚠️ 第四轮自查：`function_cubic` 的 1 号 series 是**两个点**（驻点），
@@ -546,8 +590,9 @@ class HtmlComponents(unittest.TestCase):
         self.assertIn('class="internal"', h)
         self.assertGreater(h.index('class="internal"'), h.index('id="kp1"'), "内部记录该在页尾")
         md = nr.render(d)
-        self.assertNotIn("不自洽", md.split("## 1.")[0], "md 页头还有内部诊断")
-        self.assertIn("生成核对记录（内部", md)
+        head = md[:md.index("## 附录")]
+        self.assertNotIn("不自洽", head, "md 页头还有内部诊断")
+        self.assertTrue("生成核对记录（内部" in md.split("## 附录")[1], "内部记录该在页尾")
 
     def test_图只有一份且放在它的知识点里(self):
         """⚠️ 作者第三轮：图表区出现 5 张一模一样的 AC/MC 曲线，而且全堆在末尾。"""

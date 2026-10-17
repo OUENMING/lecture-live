@@ -2102,11 +2102,15 @@ class R15_LostRange(unittest.TestCase):
             self.assertNotIn("`10:00:30`", items[0], "不许引用按下之后才落盘的句子")
 
     def test_render_note_carries_the_block_and_the_count(self):
-        """接线: 块要出现, 汇总行数的是**标记**（❓ 兼表重点/没听懂, 2026-09-29）。"""
+        """接线: 块要出现, 汇总行数的是**标记**（❓ 兼表重点/没听懂, 2026-09-29）。
+
+        ⚠️ 2026-10-17 第六轮：md 变简版，❓ 块从 `## 🤔 …` 抬头改成
+           「一些事儿」里的一行加粗小标题（**块本身与"❓ N 处标记"一字未动**）。
+        """
         w = ObsidianWriter(None, "TESTX", mode="no")
         entries = [{"ts": "10:00:00", "en": "a", "zh": "b", "asr": "", "star": False}]
         out = w._render_note(entries, {}, [], "ok", ["- 一块"])
-        self.assertIn("## 🤔 我标的地方（重点 / 没听懂）", out)
+        self.assertIn("**我课上标的地方**（重点 / 没听懂）", out)
         self.assertIn("- 一块", out)
         self.assertIn("❓ 1 处标记", out)
 
@@ -2122,14 +2126,14 @@ class R15_LostRange(unittest.TestCase):
         """
         w = ObsidianWriter(None, "TESTX", mode="no")
         plain = [{"ts": "10:00:00", "en": "a", "zh": "b", "asr": "", "star": False}]
-        self.assertNotIn("## ⭐ 我标记的重点", w._render_note(plain, {}, [], "ok", []),
+        self.assertNotIn("**⭐ 我标记的重点**", w._render_note(plain, {}, [], "ok", []),
                          "没按过 ⭐ 却渲染了 ⭐ 块 —— 空状态那句话是假话")
         self.assertNotIn("处重点", w._render_note(plain, {}, [], "ok", []),
                          "汇总行还在数一个恒为 0 的量")
 
         starred = [dict(plain[0], star=True)]
         out = w._render_note(starred, {}, [], "ok", [])
-        self.assertIn("## ⭐ 我标记的重点", out,
+        self.assertIn("**⭐ 我标记的重点**", out,
                       "历史会话里的 ⭐ 必须照旧渲染（抬头仍写着 Exam Focus）")
 
     def test_render_note_renders_the_keypoint_section(self):
@@ -2147,7 +2151,7 @@ class R15_LostRange(unittest.TestCase):
         entries = [{"ts": "10:00:00", "en": "hello", "zh": "你好", "asr": "",
                     "star": False}]
         out = w._render_note(entries, {}, [], "ok", [], [(0.90, "hello", [0])])
-        self.assertIn("## 🎯 这节课最值得记的几句", out, "有重点句却没渲染那一节")
+        self.assertIn("**🎯 这节课最值得记的几句**", out, "有重点句却没渲染那一节")
         self.assertIn("`0.90`", out, "概率没写进去")
         self.assertIn("hello", out, "句子没写进去")
 

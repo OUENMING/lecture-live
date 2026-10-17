@@ -466,6 +466,16 @@ class HtmlComponents(unittest.TestCase):
         self.assertNotIn("corrections_extra", md)
         self.assertIn("修正记录", md, "那三条还得有去处（附录 A）")
 
+    def test_驻点画成圆点不是线段(self):
+        """⚠️ 第四轮自查：`function_cubic` 的 1 号 series 是**两个点**（驻点），
+        没声明成标记时会被当曲线连成一条直线（ex1 截图里那根 blue 假线）。"""
+        s = nh.svg("function_cubic", {"a": 1, "b": 0, "c": -3, "d": 0}, pid="p1", caption="")
+        self.assertEqual(len(re.findall(r"<polyline", s)), 1, "驻点被连成了曲线")
+        self.assertGreaterEqual(len(re.findall(r'<circle class="dot"', s)), 3,
+                                "两个驻点 + 图例圆点")
+        s2 = nh.svg("cost_curves", {"a": 1, "b": -12, "c": 60}, pid="p2", caption="")
+        self.assertEqual(len(re.findall(r"<polyline", s2)), 2, "AC/MC 两条曲线")
+
     def test_核对清单在_HTML_里有个可点的锚点(self):
         """⚠️ 页头那行写着「（点开看）」，可 HTML 里原来根本没有 `#checks`（死链）。"""
         d = nr.NoteData(date="2026-10-15", course="ECON10790", entries=entries(2),

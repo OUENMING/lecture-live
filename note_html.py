@@ -38,6 +38,7 @@ KATEX_JS = "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"
 #: `x` = 横轴范围；`slider` = 允许拖动的参数（拖动会重画）。单位/标签都是中文。
 PLOT_SPECS = {
     "cost_curves": {"x": (0.2, 14.0), "xlabel": "产量 q", "ylabel": "成本",
+                    "markers": [2],
                     "params": {"a": 1.0, "b": -12.0, "c": 60.0},
                     "slider": ("b", [-24.0, -18.0, -12.0, -8.0, 0.0]),
                     "slider_label": "平均成本 AC 的一次项系数 b",
@@ -45,6 +46,9 @@ PLOT_SPECS = {
                                    "MC 与 AC 的交点跟着一起走。",
                     "legend": ["AC 平均成本", "MC 边际成本"]},
     "function_cubic": {"x": (-4.0, 4.0), "xlabel": "x", "ylabel": "f(x)",
+                       #: ⚠️ 1 号 series 是**两个驻点**（不是一个点）—— 不声明成标记的话
+                       #: 会被当曲线连成一条直线（第四轮自查：截图里 blue 的假线段）。
+                       "markers": [1],
                        "params": {"a": 1.0, "b": 0.0, "c": -3.0, "d": 0.0},
                        "slider": ("c", [-9.0, -6.0, -3.0, 0.0, 3.0]),
                        "slider_label": "一次项系数 c（f′(x)=3x²+c）",
@@ -52,6 +56,7 @@ PLOT_SPECS = {
                                       "c 为正时 f′(x)=0 无解（没有驻点）。",
                        "legend": ["f(x)", "驻点"]},
     "supply_demand": {"x": (0.0, 100.0), "xlabel": "数量 Q", "ylabel": "价格 p",
+                      "markers": [2],
                       "params": {"d0": 100.0, "d1": 2.0, "s0": 10.0, "s1": 1.0},
                       "slider": ("d1", [0.5, 1.0, 2.0, 3.0, 4.0]),
                       "slider_label": "需求斜率 d₁（Qd=d₀−d₁·p）",
@@ -234,15 +239,15 @@ def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p",
                      f'text-anchor="{anchor}">{_tk(xt)}</text>')
         parts.append(f'<text class="tick" x="{pad_l - 4}" y="{pad_t + ih * (1 - i / 4) + 4:.1f}" '
                      f'text-anchor="end">{_tk(yv)}</text>')
+    markers = set(spec.get("markers") or ())
     for idx, pts in series:
-        segs = path(pts)
-        if idx == 2:                    # 关键点：一个实心圆
+        if idx in markers:              # 关键点（交点 / 均衡点 / 驻点）：只画实心圆
             for x, y in pts:
                 if y is None:
                     continue
                 parts.append(f'<circle class="dot" cx="{sx(x):.1f}" cy="{sy(y):.1f}" r="4"/>')
             continue
-        for k, seg in enumerate(segs):
+        for _k, seg in enumerate(path(pts)):
             parts.append(f'<polyline class="c{idx}" points="{seg}" '
                          f'style="stroke:{colors[idx % 3]}"/>')
     # 图例：**每条曲线一个色块 + 名字**（旧版只有一行文字 —— 读者不知道哪条是哪条）。
@@ -251,20 +256,19 @@ def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p",
     drawn = sorted({idx for idx, _pts in series})
     lx = float(pad_l)
     for idx in drawn:
-        if idx >= len(spec["legend"]) or idx == 2:
-            continue                  # `idx == 2` 是**交点/均衡点**（一个实心圆），画在下面
+        if idx >= len(spec["legend"]):
+            continue
         name = spec["legend"][idx]
-        parts.append(f'<line x1="{lx:.1f}" y1="{pad_t - 10}" x2="{lx + 16:.1f}" '
-                     f'y2="{pad_t - 10}" style="stroke:{colors[idx % 3]};stroke-width:2.5"/>')
+        if idx in markers:              # 点标记：画圆点，不画"一条线"（那会读成曲线）
+            parts.append(f'<circle class="dot" cx="{lx + 7:.1f}" cy="{pad_t - 10}" r="4"/>')
+        else:
+            parts.append(f'<line x1="{lx:.1f}" y1="{pad_t - 10}" x2="{lx + 16:.1f}" '
+                         f'y2="{pad_t - 10}" style="stroke:{colors[idx % 3]};stroke-width:2.5"/>')
         parts.append(f'<text class="lbl" x="{lx + 20:.1f}" y="{pad_t - 6}">'
                      f'{html.escape(name)}</text>')
         est = sum(13 if ord(ch) > 0x2000 else 7 for ch in name)     # 估宽：够用就行
         lx += 20 + est + 16
         leg.append(name)
-    if drawn and max(drawn) >= 2 and len(spec["legend"]) > 2:
-        parts.append(f'<circle class="dot" cx="{lx + 4:.1f}" cy="{pad_t - 10}" r="4"/>')
-        parts.append(f'<text class="lbl" x="{lx + 12:.1f}" y="{pad_t - 6}">'
-                     f'{html.escape(spec["legend"][2])}</text>')
     parts.append("</svg>")
 
     # 可拖动参数：把每个取值的**整条曲线**预先算好塞进 data——

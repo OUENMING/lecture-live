@@ -3825,7 +3825,7 @@ class Overlay:
         head.setStringValue_(txt + (f"　{when}" if when else ""))
         head.setFrame_(((x, y + row_h - 18.0), (max(60.0, w - 150.0), 16.0)))
         q = self._card_new_label(CARD_META_SZ, 0.40)
-        q.setStringValue_(f"“{_duty.short_title(item.get('quote') or '', limit=56)}”"
+        q.setStringValue_(f"“{_duty.clean_quote(item.get('quote') or '', limit=56)}”"
                           + (f" · {item.get('t')}" if item.get("t") else ""))
         q.setFrame_(((x, y + 1.0), (max(60.0, w - 120.0), 14.0)))
         if item.get("action") == "pending":

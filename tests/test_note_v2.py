@@ -419,6 +419,9 @@ class HtmlComponents(unittest.TestCase):
         self.assertIn('id="theme"', h)
         self.assertIn("prefers-color-scheme:dark", h)
         self.assertIn(":root[data-theme=dark]", h)
+        # ⚠️ 第五轮自查（top-dark 截图）：系统暗色时页面已经暗了，按钮还写着「暗色」。
+        self.assertIn("if(tbtn){ themeLabel();", h, "载入时没按生效主题摆正按钮标签")
+        self.assertIn("tbtn.textContent=dark?", h)
 
     def test_图有可拖参数与预采样路径(self):
         h = self._page()

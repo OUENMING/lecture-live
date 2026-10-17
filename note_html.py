@@ -500,12 +500,21 @@ _JS = """
   btn.textContent=all?'收起全部步骤':'展开全部步骤';
  });
  var tbtn=d.getElementById('theme');
- if(tbtn) tbtn.addEventListener('click',function(){
+ // ⚠️ 第五轮自查（top-dark 截图）：按钮文字是写死的「暗色」—— 系统是暗色时页面明明已经暗了，
+ //    按钮还写着"暗色"（读起来像"点我变暗"）。载入时按**生效的主题**把标签摆正。
+ function themeLabel(){
+  var set=d.documentElement.getAttribute('data-theme');
+  var dark=(set==='dark')||(!set&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);
+  tbtn.textContent=dark?'☀︎ 亮色':'☾ 暗色';
+ }
+ if(tbtn){ themeLabel();
+  tbtn.addEventListener('click',function(){
   var cur=d.documentElement.getAttribute('data-theme');
   var next=(cur==='dark')?'light':(cur==='light'?'dark':'dark');
   d.documentElement.setAttribute('data-theme',next);
   tbtn.textContent=(next==='dark')?'☀︎ 亮色':'☾ 暗色';
- });
+  });
+ }
 })();
 """
 

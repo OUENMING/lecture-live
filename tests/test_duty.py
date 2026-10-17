@@ -415,6 +415,26 @@ class StatusText(unittest.TestCase):
         self.assertIn("超时", line)
         self.assertIn("备份", line)
 
+    def test_状态行不带emoji(self):
+        """⭐ 2026-10-17：句首那个 ⚠/✔ 挪去 SF Symbols（`status_symbol`），文字里不许再有。"""
+        for it in ({"action": "saved", "reminders": "failed", "reason": "超时"},
+                   {"action": "saved", "reminders": "ok", "date": "2026-10-20"},
+                   {"action": "saved"}, {"action": "ignored"}):
+            line = duty.status_line(it)
+            for ch in line:
+                self.assertLess(ord(ch), 0x1F000, f"这句里还有 emoji：{line!r}")
+            self.assertNotIn("⚠", line)
+            self.assertNotIn("✔", line)
+
+    def test_状态配的符号(self):
+        self.assertEqual(duty.status_symbol({"action": "pending"}), "")
+        self.assertEqual(duty.status_symbol({"action": "ignored"}), "")
+        self.assertEqual(duty.status_symbol({"action": "saved", "reminders": "failed"}),
+                         "exclamationmark.triangle")
+        self.assertEqual(duty.status_symbol({"action": "saved", "reminders": "ok"}),
+                         "checkmark.circle")
+        self.assertEqual(duty.status_symbol({"action": "saved"}), "")
+
     def test_日期写法(self):
         self.assertEqual(duty.fmt_when({"date": "2026-10-20"}), "10-20（周二）")
         self.assertEqual(duty.fmt_when({"date": "2026-10-20", "time": "17:00"}),
@@ -430,10 +450,14 @@ class ChipText(unittest.TestCase):
     def test_一条(self):
         txt = duty.chip_text([{"action": "pending", "type": "调课",
                                "title": "本周三停课", "date": "2026-10-14"}])
-        self.assertIn("📌", txt)
         self.assertIn("调课", txt)
         self.assertIn("10-14（周三）", txt)
         self.assertNotIn("+", txt)
+        # ⭐ 2026-10-17：前缀那个 📌 挪去 `overlay`（SF Symbols 单色小图）——
+        #   这里只回**纯文字**（没 AppKit 的地方也该能直接读）。
+        self.assertNotIn("📌", txt)
+        for ch in txt:
+            self.assertFalse(ord(ch) > 0x1F000, f"这行字里不该再有 emoji：{txt!r}")
 
     def test_多条带加号(self):
         its = [{"action": "pending", "type": "调课", "title": "a", "date": ""},

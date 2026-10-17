@@ -560,7 +560,11 @@ class Board:
 
 
 def status_line(item: dict, *, day=None) -> str:
-    """卡片右下角那句状态（**纯函数**）：`已记入提醒事项 · 10-20（周二）` / 失败原因。"""
+    """卡片上那句状态（**纯函数**）：`已记入提醒事项 · 10-20（周二）` / 失败原因。
+
+    ⚠️ 2026-10-17：句首那个 ⚠ / ✔ 挪出去了（emoji 全换单色 SF Symbols）——
+       这里只回纯文字，配哪个符号由 `status_symbol` 说，画在 `overlay`。
+    """
     a = str(item.get("action") or "pending")
     if a == "pending":
         return ""
@@ -569,10 +573,25 @@ def status_line(item: dict, *, day=None) -> str:
     st = str(item.get("reminders") or "")
     when = fmt_when(item, day=day)
     if st == "failed":
-        return f"⚠ 写不进提醒事项：{item.get('reason') or '未知原因'} · 已备份到 ~/.classlive"
+        return f"写不进提醒事项：{item.get('reason') or '未知原因'} · 已备份到 ~/.classlive"
     if st == "ok":
         return f"已记入提醒事项 · {when or '无日期'}"
     return "已记下（提醒事项还没写完…）"
+
+
+def status_symbol(item: dict) -> str:
+    """状态那句话配的 **SF Symbols** 名字（纯函数）：失败 → 警告三角；写好 → 钩圈。
+
+    作者 2026-10-17：emoji 全换单色 SF Symbols（跟文字同一色阶）。
+    """
+    if str(item.get("action") or "pending") != "saved":
+        return ""
+    st = str(item.get("reminders") or "")
+    if st == "failed":
+        return "exclamationmark.triangle"
+    if st == "ok":
+        return "checkmark.circle"
+    return ""
 
 
 def fmt_when(item: dict, *, day=None) -> str:
@@ -590,15 +609,18 @@ def fmt_when(item: dict, *, day=None) -> str:
 
 
 def chip_text(items: list[dict], *, limit: int = 1) -> str:
-    """角落小卡那行字（**纯函数**）：`📌 调课 · 本周三停课 · 10-14  +1`。
+    """角落小卡那行字（**纯函数**）：`调课 · 本周三停课 · 10-14  +1`。
 
     ⚠️ 一屏最多一条（原型 §①）：`+N` 表示还有几条没处理的，点开逐条看。
+    ⚠️ 2026-10-17：**前缀那个 📌 挪出去了** —— 现在由 `overlay` 用 SF Symbols 单色小图
+       画在文字左边（作者拍板「emoji 全换单色 SF Symbols」）。这里只回纯文字，
+       于是这个函数在任何没有 AppKit 的地方（笔记、日志、判据）都能直接读。
     """
     live = [x for x in items if x.get("action") == "pending"]
     if not live:
         return ""
     latest = live[-1]
-    head = f"📌 {latest.get('type') or '其他'} · {latest.get('title') or ''}"
+    head = f"{latest.get('type') or '其他'} · {latest.get('title') or ''}"
     when = fmt_when(latest)
     if when:
         head += f" · {when}"

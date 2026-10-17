@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import typing
 
+import motion
 import objc_own
 
 # ⚠️ 只为让 PyObjC 认得 `CGColorRef`：不导入 Quartz 时，每次 `NSColor….CGColor()`
@@ -295,15 +296,20 @@ def build(rect, style, *, on_background_click=None, on_resize=None) -> FrostedPa
 def make_scroll_view(rect, *, has_vertical=True):
     """在面板里建一个**观感正确**的 NSScrollView（文档视图由调用方自己塞）。
 
-    ⚠️ **只抽这四行，不是抽整份实现。** 2026-09-26 逐行比对过现存两个滚动区
-    （`whatsnew._add_log_view` 与 `transcript_view`）：真正重合的**只有这四行**，
+    ⚠️ **只抽这几行，不是抽整份实现。** 2026-09-26 逐行比对过现存两个滚动区
+    （`whatsnew._add_log_view` 与 `transcript_view`）：真正重合的**只有这几行**，
     其余都是各自场景的行为（一个是 NSTextView 的文本管道，一个是「所有行等高 →
     O(1) 除法」的槽位池）。把它们一起抽过来是白带的复杂度。
 
-    这四行**有原因，所以值得有唯一定义点**：
+    这几行**有原因，所以值得有唯一定义点**：
       · `drawsBackground_(False)` —— 面板是 vibrancy，HIG 明说别在控件下垫不透明底
       · `borderType_(0)` —— 不要 bezel
-      · overlay 滚动条 + 按需出现 —— 本 app 既有的观感（overlay 与 whatsnew 都这么设）
+      · ⭐ **竖直滚动条 = 我们自己画的那条细的**（见「细滚动条」那一段）——
+        系统那条在 macOS 26 上画出来**固定 7pt 且宽度不可配**，所以这里是
+        「关掉系统的 + 装自己的」（`install_thin_scroller`）
+      · `setScrollerStyle_(Overlay)` 仍要设：样式一变（用户改「显示滚动条」/
+        插鼠标）系统会把**滚动视图**整个换档，`thin` 那边监听通知重设它
+        （报告 §3.2：AppKit 会自己改回来）
 
     ⚠️ **不含 `setVerticalScrollElasticity_`** —— `transcript_view` 那项是**动态**的
     （构造设 0，之后按状态改 Automatic），不是静态约定，硬抄会把一个行为塞进配方。
@@ -313,11 +319,513 @@ def make_scroll_view(rect, *, has_vertical=True):
     sc = NSScrollView.alloc().initWithFrame_(rect)
     sc.setDrawsBackground_(False)
     sc.setBorderType_(0)                                  # NSNoBorder
-    sc.setHasVerticalScroller_(has_vertical)
     sc.setAutohidesScrollers_(True)
     sc.setScrollerStyle_(NSScrollerStyleOverlay)
+    sc.setHasVerticalScroller_(False)                     # ⚠️ 系统那条不要（见文件头）
     sc.setHorizontalScrollElasticity_(0)                  # 0 = None
+    if has_vertical:
+        install_thin_scroller(sc)
     return sc
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 细滚动条（自绘 overlay 滑块）—— 作者 2026-10-18 拍板
+# ══════════════════════════════════════════════════════════════════════════════
+# 为什么自绘、而不是「把系统滚动条调细」：
+# ⚠️⚠️ 系统那条在 macOS 26 上**画出来固定 7pt、宽度不可配**。`NSScroller` 现在
+#    **没有 cell**（`cell() is None`），滑块由图层的**私有子层**画 —— 把
+#    `NSScroller` 子类（含 `isCompatibleWithOverlayScrollers=True` + `drawKnob`）
+#    装上去，`drawKnob` **一次都不会被调用**（连手动 `display()` 都不调，2026-10-18
+#    本机实测）。社区那套老配方（SO 51061738）针对的是 cell/legacy 那一代。
+#    完整调研与读数见 `scratchpad/recap/scroller-research.md`（§2.2 / §5.2）。
+# → 所以：**关掉系统滚动条**（滚轮不受影响），自己画一条 overlay 滑块 + 自己处理
+#    悬停 / 拖动 / 翻页。比系统更细的那批 app 走的也是这条路（同报告 §4）。
+#: 滑块宽度（pt）：静止 / 悬停（拖动同悬停）。
+THIN_W = 3.0
+THIN_W_HOVER = 6.0
+#: 「增大对比度」开着时各加粗一档（跟随系统那条无障碍设置）。
+THIN_W_CONTRAST = 5.0
+THIN_W_CONTRAST_HOVER = 8.0
+#: 白色 α：静止 / 悬停。
+THIN_ALPHA = 0.28
+THIN_ALPHA_HOVER = 0.52
+#: 「增大对比度」时还要**更实**（只加粗不加深 = 只做了半件事）。
+THIN_ALPHA_CONTRAST = 0.45
+THIN_ALPHA_CONTRAST_HOVER = 0.72
+#: 滑块离滚动视图右缘的内缩（pt）—— 系统那条实测内缩 ≈2.5pt，别贴边。
+THIN_INSET = 2.0
+#: **命中带**宽度（pt）：比滑块宽得多，3pt 的滑块也点得中（报告 §4 Height 那条）。
+THIN_STRIP = 16.0
+#: 滑块最短（pt）：内容比视口长很多时别画成一根发丝。
+THIN_MIN_H = 24.0
+#: 不滚、不悬停多久淡出（s）。
+THIN_IDLE_S = 1.2
+
+
+def thin_alpha(*, hovered: bool, contrast: bool = False) -> float:
+    if contrast:
+        return THIN_ALPHA_CONTRAST_HOVER if hovered else THIN_ALPHA_CONTRAST
+    return THIN_ALPHA_HOVER if hovered else THIN_ALPHA
+
+
+def thin_width(*, hovered: bool, contrast: bool = False) -> float:
+    """滑块宽度：悬停更粗；「增大对比度」再各加一档。"""
+    if contrast:
+        return THIN_W_CONTRAST_HOVER if hovered else THIN_W_CONTRAST
+    return THIN_W_HOVER if hovered else THIN_W
+
+
+def thin_thumb_h(*, doc_h: float, clip_h: float, strip_h: float,
+                 min_h: float = THIN_MIN_H) -> float:
+    """滑块高度 = 视口/文档 × 带高，但不短于 `min_h`、不长于带本身。"""
+    doc_h = max(1.0, float(doc_h))
+    clip_h = max(1.0, float(clip_h))
+    return max(min_h, min(float(strip_h), strip_h * clip_h / doc_h))
+
+
+def thin_thumb_y(*, frac: float, strip_h: float, thumb_h: float) -> float:
+    """滑块**底边** y（AppKit 口径：0 = 命中带底）。
+
+    `frac` = 从**文档开头**算的滚动比例（0 = 开头 / 1 = 末尾）。
+    ⚠️ 口径刻意跟翻转无关：`frac` 由 `documentVisibleRect().origin.y` 归一化而来，
+       翻转文档与不翻转文档都是「0 = 开头」，这里只负责把它摆到带子的**顶**。
+    """
+    span = max(0.0, float(strip_h) - float(thumb_h))
+    f = min(1.0, max(0.0, float(frac)))
+    return span * (1.0 - f)
+
+
+def thin_frac_for_y(*, knob_bottom: float, strip_h: float, thumb_h: float) -> float:
+    """拖动的反函数：滑块底边 y → 滚动比例（`thin_thumb_y` 的逆）。"""
+    span = max(1e-6, float(strip_h) - float(thumb_h))
+    return min(1.0, max(0.0, 1.0 - float(knob_bottom) / span))
+
+
+def thin_thumb_rect(*, doc_h: float, clip_h: float, origin_y: float, doc_top: float,
+                    strip_w: float, strip_h: float, width: float,
+                    min_h: float = THIN_MIN_H):
+    """滑块在命中带里的 `(x, y, w, h)`；**内容不比视口长 → `None`**（没得滚就不画）。
+
+    `origin_y` = `documentVisibleRect().origin.y`，`doc_top` = 可滚到头的那个值
+        （= `doc_h - clip_h`，**从开始算的**最大量）。
+    """
+    doc_h = max(1.0, float(doc_h))
+    clip_h = max(1.0, float(clip_h))
+    if doc_h <= clip_h + 0.5:                             # 没得滚
+        return None
+    thumb_h = thin_thumb_h(doc_h=doc_h, clip_h=clip_h, strip_h=strip_h, min_h=min_h)
+    span_doc = max(1e-6, doc_h - clip_h)
+    frac = min(1.0, max(0.0, float(origin_y) / span_doc))
+    y = thin_thumb_y(frac=frac, strip_h=strip_h, thumb_h=thumb_h)
+    x = max(0.0, float(strip_w) - float(width) - THIN_INSET)
+    return (x, y, float(width), thumb_h)
+
+
+class _Thin:
+    """细滚动条的**纯状态机**（不碰 AppKit）：`show / hover / drag` 进来的效果只改这几个数。
+
+    与视图分开是刻意的：判据（几何 + 可见性）能直接量这个对象，
+    不必去猜 AppKit 什么时候重画。
+    """
+
+    def __init__(self, *, doc_h: float = 0.0, clip_h: float = 1.0, origin_y: float = 0.0,
+                 strip_w: float = THIN_STRIP, strip_h: float = 1.0):
+        self.doc_h = float(doc_h)
+        self.clip_h = float(clip_h)
+        self.origin_y = float(origin_y)
+        self.strip_w = float(strip_w)
+        self.strip_h = float(strip_h)
+        self.hovered = False
+        self.dragging = False
+        self.contrast = False
+        self.shown = False                                # 最近有过滚动/悬停/拖动
+
+    def scrollable(self) -> bool:
+        return self.doc_h > self.clip_h + 0.5
+
+    def width(self) -> float:
+        return thin_width(hovered=self.hovered or self.dragging, contrast=self.contrast)
+
+    def alpha(self) -> float:
+        if not self.scrollable():
+            return 0.0
+        if not (self.shown or self.hovered or self.dragging):
+            return 0.0
+        return thin_alpha(hovered=self.hovered or self.dragging, contrast=self.contrast)
+
+    def rect(self):
+        return thin_thumb_rect(
+            doc_h=self.doc_h, clip_h=self.clip_h, origin_y=self.origin_y,
+            doc_top=max(0.0, self.doc_h - self.clip_h), strip_w=self.strip_w,
+            strip_h=self.strip_h, width=self.width())
+
+
+def _thin_hooks() -> dict:
+    """`_ThinView` 的方法表（全在模块级函数里，ObjC 类只能持函数，不能持闭包外的状态）。"""
+
+    def update_tracking_areas(self):
+        from AppKit import (NSTrackingArea, NSTrackingMouseEnteredAndExited,
+                            NSTrackingActiveAlways, NSTrackingInVisibleRect)
+        model = getattr(self, "_model", None)
+        if model is None:
+            return
+        for a in list(self.trackingAreas()):
+            self.removeTrackingArea_(a)
+        opt = NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
+        self.addTrackingArea_(NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+            self.bounds(), opt, self, None))
+
+    def mouse_entered(self, _ev):
+        m = getattr(self, "_model", None)
+        if m is None:
+            return
+        m.hovered = True
+        _thin_show(self)
+        _thin_paint(self)
+
+    def mouse_exited(self, _ev):
+        m = getattr(self, "_model", None)
+        if m is None:
+            return
+        m.hovered = False
+        if not m.dragging:
+            _thin_arm_hide(self, THIN_IDLE_S)
+        _thin_paint(self)
+
+    def hit_test(self, _pt):
+        """藏着的滑块**不吃点击**（细滑块不该在右边偷走一条 16pt 的命中区）。"""
+        m = getattr(self, "_model", None)
+        if m is None:
+            return None
+        if m.hovered or m.dragging or m.alpha() > 0.02:
+            return self
+        return None
+
+    def mouse_down(self, ev):
+        m = getattr(self, "_model", None)
+        sc = self.superview()
+        if m is None or sc is None:
+            return
+        pt = self.convertPoint_fromView_(ev.locationInWindow(), None)
+        rect = m.rect()
+        if rect is not None and rect[1] <= pt.y <= rect[1] + rect[3]:
+            m.dragging = True                             # 抓住滑块
+            self._grab = pt.y - rect[1]
+            self._dragged = False
+        else:                                             # 点轨道 = 翻页（Apple 支持页那两种语义里的「翻一页」）
+            # ⚠️ 指针在滑块**上方**（AppKit y 更大）= 内容更靠文档开头那一侧 → 往回翻
+            _thin_page_to(sc, -1 if (rect is None or pt.y > rect[1] + rect[3]) else 1)
+        _thin_show(self)
+        _thin_paint(self)
+
+    def mouse_dragged(self, ev):
+        m = getattr(self, "_model", None)
+        sc = self.superview()
+        if m is None or sc is None or not m.dragging:
+            return
+        pt = self.convertPoint_fromView_(ev.locationInWindow(), None)
+        self._dragged = True
+        rect = m.rect()
+        thumb_h = rect[3] if rect else THIN_MIN_H
+        knob_bottom = min(max(0.0, pt.y - getattr(self, "_grab", 0.0)), m.strip_h - thumb_h)
+        frac = thin_frac_for_y(knob_bottom=knob_bottom, strip_h=m.strip_h, thumb_h=thumb_h)
+        _thin_scroll_to_fraction(sc, frac)
+        _thin_paint(self)
+
+    def mouse_up(self, _ev):
+        m = getattr(self, "_model", None)
+        if m is None:
+            return
+        m.dragging = False
+        _thin_arm_hide(self, THIN_IDLE_S)
+        _thin_paint(self)
+
+    def liveScroll_(self, _n):
+        """用户在滚（滚轮/触控板）→ 亮起来。**程序化滚动不走这条**（那不该闪）。"""
+        m = getattr(self, "_model", None)
+        if m is None:
+            return
+        m.shown = True
+        _thin_sync(self, repaint=True)
+        _thin_arm_hide(self, THIN_IDLE_S)
+
+    def scroll_wheel(self, ev):
+        """滚轮**交还给滚动视图** —— 细滚动条只负责画，不截流。"""
+        sc = self.superview()
+        if sc is not None:
+            sc.scrollWheel_(ev)
+
+    return {
+        "updateTrackingAreas": update_tracking_areas,
+        "mouseEntered_": mouse_entered,
+        "mouseExited_": mouse_exited,
+        "hitTest_": hit_test,
+        "mouseDown_": mouse_down,
+        "mouseDragged_": mouse_dragged,
+        "mouseUp_": mouse_up,
+        "scrollWheel_": scroll_wheel,
+        "liveScroll_": liveScroll_,
+        "hideTick_": lambda self, _t: _thin_hide(self),
+        "scrollMoved_": lambda self, _n: _thin_scrolled(self),
+        "frameChanged_": lambda self, _n: _thin_sync(self, repaint=True),
+        "contrastChanged_": lambda self, _n: _thin_contrast(self),
+        "styleChanged_": lambda self, _n: _thin_style_back(self),
+    }
+
+
+def _thin_view_cls():
+    from AppKit import NSView
+    return objc_own.own("ThinScroller", NSView, _thin_hooks())
+
+
+# ── 视图侧（模块级函数：ObjC 方法只能是模块级函数，状态在 `self._model` 上）────
+def _thin_apply_geometry(view) -> None:
+    """把模型算出来的 `(rect, width, alpha)` 落到图层上（几何**关动画**，透明度**走动画**）。"""
+    from Quartz import CATransaction
+    m = getattr(view, "_model", None)
+    thumb = getattr(view, "_thumb", None)
+    if m is None or thumb is None:
+        return
+    rect = m.rect()
+    CATransaction.begin()
+    CATransaction.setDisableActions_(True)                # ⚠️ 几何不做隐式动画（判据要的是即时值）
+    if rect is None:
+        thumb.setFrame_(((0.0, 0.0), (0.0, 0.0)))
+    else:
+        thumb.setFrame_(((rect[0], rect[1]), (rect[2], rect[3])))
+        thumb.setCornerRadius_(rect[2] / 2.0)
+    CATransaction.commit()
+
+
+def _thin_paint(view) -> None:
+    """刷一次：几何 + 颜色 + 透明度。"""
+    from Quartz import CATransaction
+    from AppKit import NSColor
+    m = getattr(view, "_model", None)
+    thumb = getattr(view, "_thumb", None)
+    if m is None or thumb is None:
+        return
+    _thin_apply_geometry(view)
+    a = m.alpha()
+    try:
+        # ⚠️⚠️ **颜色本身不带 alpha**，透明度只走 `opacity` 这一个旋钮。
+        #    两个都带 = alpha 被乘两次（2026-10-18 量出来：白 α0.28 画出来只有 0.078，
+        #    位图里最大字节 20 而不是 71 —— 屏上也会明显偏暗）。
+        thumb.setBackgroundColor_(NSColor.whiteColor().CGColor())
+    except Exception:                                     # noqa: BLE001
+        pass
+    CATransaction.begin()
+    CATransaction.setAnimationDuration_(motion.STATE_S)   # 原地换状态那一档
+    thumb.setOpacity_(a)
+    CATransaction.commit()
+
+
+def _thin_sync(view, *, repaint: bool = True) -> None:
+    """从滚动视图读回真值（视口 / 文档 / 位置），再把带子摆到右缘。"""
+    m = getattr(view, "_model", None)
+    sc = view.superview()
+    if m is None or sc is None:
+        return
+    clip = sc.contentView()
+    doc = sc.documentView()
+    sb = sc.bounds().size
+    vs = clip.bounds().size if clip is not None else (0.0, 1.0)
+    m.clip_h = float(vs.height)
+    m.strip_w = min(float(sb.width), THIN_STRIP)
+    m.strip_h = float(sb.height)
+    old_doc = getattr(view, "_doc_seen", None)
+    if doc is not None and doc is not old_doc:            # 文档换了 → 盯上它的尺寸变化
+        try:
+            from AppKit import NSViewFrameDidChangeNotification
+            center = _nc()
+            if old_doc is not None:
+                center.removeObserver_name_object_(view, NSViewFrameDidChangeNotification, old_doc)
+            doc.setPostsFrameChangedNotifications_(True)
+            center.addObserver_selector_name_object_(
+                view, b"frameChanged:", NSViewFrameDidChangeNotification, doc)
+            view._doc_seen = doc
+        except Exception:                                 # noqa: BLE001
+            pass
+    try:
+        vis = sc.documentVisibleRect()
+        m.origin_y = float(vis.origin.y)
+        m.doc_h = float(doc.bounds().size.height) if doc is not None else m.clip_h
+    except Exception:                                     # noqa: BLE001
+        pass
+    # 带子自己贴在滚动视图的右缘（跟随尺寸变化）
+    try:
+        view.setFrame_(((float(sb.width) - m.strip_w, 0.0), (m.strip_w, float(sb.height))))
+    except Exception:                                     # noqa: BLE001
+        pass
+    if repaint:
+        _thin_paint(view)
+
+
+def _thin_scrolled(view) -> None:
+    """视口变了（任何原因）→ 只同步几何，**不亮**（亮不亮由 `liveScroll_` 决定）。
+
+    ⚠️ 分这两条是因为：面板自己会程序化滚动（列表刷新、滚回顶），
+       那不该像"用户滚了一下"那样闪一下滚动条（2026-10-18 实测到的差别）。
+    """
+    _thin_sync(view, repaint=True)
+
+
+def _thin_show(view) -> None:
+    m = getattr(view, "_model", None)
+    if m is None:
+        return
+    m.shown = True
+    _thin_sync(view, repaint=True)
+    _thin_arm_hide(view, THIN_IDLE_S)
+
+
+def _thin_arm_hide(view, delay: float) -> None:
+    """`delay` 秒后淡出（一次性定时器；每次活动都重排）。"""
+    from AppKit import NSTimer
+    t = getattr(view, "_hide_timer", None)
+    if t is not None:
+        try:
+            t.invalidate()
+        except Exception:                                 # noqa: BLE001
+            pass
+    m = getattr(view, "_model", None)
+    if m is None or not (m.shown and not m.hovered and not m.dragging):
+        view._hide_timer = None
+        return
+    view._hide_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+        float(delay), view, b"hideTick:", None, False)
+
+
+def _thin_hide(view) -> None:
+    m = getattr(view, "_model", None)
+    if m is None:
+        return
+    view._hide_timer = None
+    m.shown = False
+    _thin_paint(view)                                     # 定时器本来就在主 run loop，直接刷
+
+
+def _contrast_on() -> bool:
+    """系统「增大对比度」现在开着吗。
+
+    ⚠️ 单独一个函数是**给判据留的口子**：测试替换它就能验「开着时更粗」，
+       不必真去动系统的无障碍设置。
+    """
+    try:
+        from AppKit import NSWorkspace
+        return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldIncreaseContrast())
+    except Exception:                                     # noqa: BLE001
+        return False
+
+
+def _thin_contrast(view) -> None:
+    """「增大对比度」变了 → 跟着变粗/变实。"""
+    m = getattr(view, "_model", None)
+    if m is not None:
+        m.contrast = _contrast_on()
+    _thin_paint(view)
+
+
+def _thin_style_back(view) -> None:
+    """用户改了「显示滚动条」/ 插了鼠标 → **重设 overlay**（报告 §3.2：系统会自己改回去）。"""
+    from AppKit import NSScrollerStyleOverlay
+    sc = view.superview()
+    if sc is None:
+        return
+    try:
+        if sc.scrollerStyle() != NSScrollerStyleOverlay:
+            sc.setScrollerStyle_(NSScrollerStyleOverlay)
+    except Exception:                                     # noqa: BLE001
+        pass
+
+
+def _nc():
+    from AppKit import NSNotificationCenter
+    return NSNotificationCenter.defaultCenter()
+
+
+def _thin_scroll_to_fraction(sc, frac: float) -> None:
+    """把滚动视图滚到「文档的 `frac` 处」。"""
+    clip = sc.contentView()
+    doc = sc.documentView()
+    if clip is None or doc is None:
+        return
+    doc_h = float(doc.bounds().size.height)
+    clip_h = float(clip.bounds().size.height)
+    span = max(0.0, doc_h - clip_h)
+    clip.scrollToPoint_((0.0, min(max(0.0, float(frac) * span), span)))
+    sc.reflectScrolledClipView_(clip)
+
+
+def _thin_page_to(sc, direction: int) -> None:
+    """点轨道 = 翻一页（`direction` > 0 = 往下）。"""
+    clip = sc.contentView()
+    if clip is None:
+        return
+    doc = sc.documentView()
+    doc_h = float(doc.bounds().size.height) if doc is not None else float(clip.bounds().size.height)
+    clip_h = float(clip.bounds().size.height)
+    span = max(0.0, doc_h - clip_h)
+    page = max(24.0, clip_h * 0.9)
+    y = float(clip.bounds().origin.y) + (page if direction > 0 else -page)
+    clip.scrollToPoint_((0.0, min(max(0.0, y), span)))
+    sc.reflectScrolledClipView_(clip)
+
+
+def install_thin_scroller(sc):
+    """给一个 `NSScrollView` 装上细滚动条（`make_scroll_view` 里调；返回那个视图）。
+
+    ⚠️ 系统滚动条要**先关掉**（`setHasVerticalScroller_(False)`）—— 两条一起出现就露馅了。
+    ⚠️ 滚轮不受影响：滚动是滚动视图/剪裁视图管的，跟滚动条在不在没关系
+       （判据：`test_滚轮在细滚动条上照样滚`）。
+    """
+    from AppKit import (NSViewFrameDidChangeNotification, NSViewBoundsDidChangeNotification)
+    try:
+        sc.setHasVerticalScroller_(False)
+        view = _thin_view_cls().alloc().initWithFrame_(((0.0, 0.0), (THIN_STRIP, 10.0)))
+        view.setWantsLayer_(True)
+        view._model = _Thin(strip_w=THIN_STRIP, strip_h=10.0)
+        try:
+            from Quartz import CALayer
+            thumb = CALayer.layer()
+            thumb.setZPosition_(10.0)
+            view.layer().addSublayer_(thumb)
+            view._thumb = thumb
+            view._grab = 0.0
+            view._dragged = False
+            view._doc_seen = None
+            view._hide_timer = None
+            sc.addSubview_(view)
+        except Exception:                                 # noqa: BLE001
+            return None
+        view._model.contrast = _contrast_on()             # 「增大对比度」读一次
+        # 监听：滚动 / 尺寸 / 系统两条通知
+        sc.setPostsFrameChangedNotifications_(True)
+        center = _nc()
+        center.addObserver_selector_name_object_(view, b"frameChanged:",
+                                                 NSViewFrameDidChangeNotification, sc)
+        clip = sc.contentView()
+        if clip is not None:
+            clip.setPostsBoundsChangedNotifications_(True)
+            center.addObserver_selector_name_object_(view, b"scrollMoved:",
+                                                     NSViewBoundsDidChangeNotification, clip)
+        from AppKit import (NSScrollViewWillStartLiveScrollNotification,
+                            NSScrollViewDidLiveScrollNotification,
+                            NSPreferredScrollerStyleDidChangeNotification,
+                            NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification)
+        center.addObserver_selector_name_object_(view, b"liveScroll:",
+                                                 NSScrollViewWillStartLiveScrollNotification, sc)
+        center.addObserver_selector_name_object_(view, b"liveScroll:",
+                                                 NSScrollViewDidLiveScrollNotification, sc)
+        center.addObserver_selector_name_object_(view, b"styleChanged:",
+                                                 NSPreferredScrollerStyleDidChangeNotification, None)
+        center.addObserver_selector_name_object_(
+            view, b"contrastChanged:", NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+            None)
+        _thin_sync(view)
+        return view
+    except Exception:                                     # noqa: BLE001
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════

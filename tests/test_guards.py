@@ -180,6 +180,22 @@ class Reconcile(unittest.TestCase):
         self.assertEqual(out["sections"][0]["example"]["answer"],
                          rev["sections"][0]["example"]["answer"])
 
+    def test_关系句_MC等于AC_不许当定义(self):
+        """⚠️ 第三轮验收抓到的**误报**（产物 C 第 20 行）：教授说的「MC(q)=AC(q)」是
+        "令两者相等"的条件句，不是给 MC 下定义 —— 当时拿它跟 TC 的导数比，报了
+        "MC 与 TC 不自洽（AC(q) → 3q²−24q+60）"，还把正文里这个字面量改掉了。
+
+        ⚠️ 两档守卫是**冗余**的（单关一档也能拦住；同时关掉才复现原始误报）——
+           这是故意的：这类误报会改正文，代价太高。
+        """
+        rev = {"sections": [{"heading": "13:39 平均成本最小化", "prose": [
+            "AC(q)=q^2-12q+60。", "TC(q)=q^3-12q^2+60q。", "令 MC(q)=AC(q)，解得 q=6。"]}]}
+        out, fixes, warns = nl.reconcile(rev)
+        self.assertEqual(fixes, [], "把关系句当定义了")
+        self.assertEqual(warns, [])
+        self.assertEqual(out["sections"][0]["prose"][-1], "令 MC(q)=AC(q)，解得 q=6。",
+                         "正文里教授的原话被改了")
+
     def test_AC_也要与_TC_over_q_自洽(self):
         rev = {"sections": [{"heading": "x", "prose": ["AC(Q)=Q^2-12Q+600。", "TC(Q)=Q^3-12Q^2+60Q。"]}]}
         out, fixes, _w = nl.reconcile(rev)
@@ -232,6 +248,60 @@ class Caliber(unittest.TestCase):
         self.assertEqual(added, [])
 
 
+class MinValue(unittest.TestCase):
+    """⭐ 作者第三轮第 4 条：官方解答里 `AC(6)=24`，三次生成的产物都没写出来。"""
+
+    def test_缺了就按本节_AC_补一句(self):
+        rev = {"sections": [{"heading": "13.39 平均成本最小化",
+                             "prose": ["AC(Q)=Q^2-12Q+60。",
+                                       "令 AC 的导数等于 0 得 Q=6，让平均成本最小的产量为 Q=6。"]}]}
+        out, added, warns = nl.ensure_min_value(rev)
+        self.assertTrue(added)
+        self.assertIn("AC(6)=24", out["sections"][0]["prose"][-1])
+        self.assertTrue(warns)
+
+    def test_已经写了值就不动(self):
+        rev = {"sections": [{"prose": ["AC(Q)=Q^2-12Q+60。", "最小平均成本 AC(6)=24。"]}]}
+        out, added, _w = nl.ensure_min_value(rev)
+        self.assertEqual(added, [])
+        self.assertEqual(len(out["sections"][0]["prose"]), 2)
+
+    def test_别的函数形状也算得对(self):
+        """非多项式的 AC（`q+64/q`）也要算得出值 —— 值来自直接调用，不靠多项式。"""
+        rev = {"sections": [{"heading": "x", "prose": [
+            "AC(q)=q+64/q。", "在 q=8 处取最小。"]}]}
+        out, added, _w = nl.ensure_min_value(rev)
+        self.assertTrue(added)
+        self.assertIn("AC(8)=16", out["sections"][0]["prose"][-1])
+
+    def test_变式的答案不被节里补句(self):
+        """⚠️ 第三轮验收：§8 的例题 AC 与变式的 AC 不是同一条 —— 题型单元的答案自己给结果，
+        在节里再补一句"本节的最小平均成本"会把读者指错。"""
+        rev = {"sections": [{"variants": [{"q": "设 AC(q)=q^2-8q+20，求最小平均成本。",
+                                          "steps": ["在 q=4 处取最小。"], "a": "q=4"}]}]}
+        out, added, _w = nl.ensure_min_value(rev)
+        self.assertEqual(added, [])
+        self.assertNotIn("prose", out["sections"][0])
+
+    def test_捕获的表达式带_dollar_要剥掉(self):
+        """⚠️ 产物 E 里出现过 `$AC(q)=q^2-12q+60$$`（模型按 `$…$` 写定义，结尾 `$` 被捕进表达式）。"""
+        rev = {"sections": [{"prose": ["AC(q)=q^2-12q+60$。",
+                                       "使平均成本最小的产量为 q=6。"]}]}
+        out, added, _w = nl.ensure_min_value(rev)
+        self.assertTrue(added)
+        line = out["sections"][0]["prose"][-1]
+        self.assertNotIn("$$", line, line)
+        self.assertIn("$AC(q)=q^2-12q+60$：", line, line)
+
+    def test_补的句子点名函数(self):
+        rev = {"sections": [{"prose": ["AC(q)=q^2-12q+60。",
+                                       "令 AC 的导数等于 0 得 q=6，使平均成本最小的产量为 q=6。"]}]}
+        out, added, _w = nl.ensure_min_value(rev)
+        self.assertTrue(added)
+        self.assertIn("$AC(q)=q^{2}-12q+60$" if False else "AC(q)=q^2-12q+60",
+                      out["sections"][0]["prose"][-1].replace(" ", ""))
+
+
 class Wiring(unittest.TestCase):
     def test_三步都在复习层里接线了(self):
         src = pathlib.Path(__file__).resolve().parent.parent.joinpath("obsidian_writer.py").read_text()
@@ -240,6 +310,7 @@ class Wiring(unittest.TestCase):
         self.assertIn("note_guards.quote_check", src)
         self.assertIn("note_ledger.block", src, "账本没喂进 prompt")
         self.assertIn("note_guards.ensure_caliber", src, "口径对照没接线")
+        self.assertIn("note_ledger.ensure_min_value", src, "最小平均成本补值没接线")
 
     def test_prompt_里有两条纪律(self):
         import note_v2

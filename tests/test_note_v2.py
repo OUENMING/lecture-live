@@ -396,6 +396,68 @@ class HtmlComponents(unittest.TestCase):
         self.assertIn("<input type=\"range\"", h)
         self.assertIn('polyline class="c0" points="', h)
 
+    def test_页头只留给学生的一行_内部记录在页尾(self):
+        """⚠️ 作者第三轮：页头给学生看的是「数字核对：N 处已核 · M 处待你确认」，
+        生成器的活日志（改了哪条公式 / 删了几句猜测）挪到页尾折叠里。"""
+        d = nr.NoteData(date="2026-10-15", course="ECON10790", entries=entries(2),
+                        review=REVIEW, html_name="x.html",
+                        warns=["MC 与 TC 不自洽（AC(q) → 3q^2-24q+60）"])
+        h = nh.note_page(d)
+        head = h[:h.index('id="kp1"')]
+        self.assertIn("处已核", head)
+        self.assertIn("待你确认", head)
+        self.assertNotIn("不自洽", head, "内部诊断还在页头")
+        self.assertIn('class="internal"', h)
+        self.assertGreater(h.index('class="internal"'), h.index('id="kp1"'), "内部记录该在页尾")
+        md = nr.render(d)
+        self.assertNotIn("不自洽", md.split("## 1.")[0], "md 页头还有内部诊断")
+        self.assertIn("生成核对记录（内部", md)
+
+    def test_图只有一份且放在它的知识点里(self):
+        """⚠️ 作者第三轮：图表区出现 5 张一模一样的 AC/MC 曲线，而且全堆在末尾。"""
+        sec = dict(REVIEW["sections"][0])
+        sec["plot"] = {"kind": "function_cubic", "title": "f(x)=x^{3}-3x 的图像",
+                       "params": {"a": 1, "b": 0, "c": -3, "d": 0}}
+        sec2 = dict(sec, heading="2. 别的知识点")
+        d = nr.NoteData(date="2026-10-15", course="ECON10790", entries=entries(2),
+                        review={"title_zh": "t", "sections": [sec, sec2]}, html_name="x.html")
+        h = nh.note_page(d)
+        self.assertEqual(h.count('<figure class="fig">'), 1, "重复的图没去掉")
+        self.assertLess(h.index('<figure class="fig">'), h.index('id="kp2"'),
+                        "图没放在它自己的知识点里")
+        self.assertNotIn("<h2>图</h2>", h, "末尾那个图表区还在")
+
+    def test_兜底文字不露_Tex_上标(self):
+        """KaTeX 没加载时肉眼看到的就是 `.tex` 的内容 —— 不许露 `^{}`（作者第三轮：截图抓到「f(x)=x^{3}-3x 的图像」）。"""
+        h = self._page()
+        spans = re.findall(r'data-tex="([^"]{1,160})">([^<]{0,160})<', h)
+        self.assertTrue(spans, "页面上一个 `.tex` 兜底都没有")
+        for tex, vis in spans:
+            self.assertNotIn("^", vis, f"兜底文字里还在露 TeX 上标：{vis!r}（源 {tex!r}）")
+            self.assertNotRegex(vis, r"[{}]", f"兜底文字里还有 TeX 花括号：{vis!r}（源 {tex!r}）")
+        # 转换函数本身（页面里所有 `.tex` 的内容都走它）
+        import note_math
+        self.assertEqual(note_math.pretty_tex("x^{3}-3x"), "x³-3x")
+        self.assertEqual(note_math.pretty_tex("q_{1} + 3q_{2}"), "q₁ + 3q₂")
+        self.assertEqual(note_math.pretty_tex("f(x)=x^{3}-3x"), "f(x)=x³-3x")
+        # ⚠️ `3x^2-3` 曾被上标正则写成 `3x²⁻³`（把后面的减号当成了指数的符号）
+        self.assertEqual(note_math.pretty_tex("3x^2-3"), "3x²-3")
+        self.assertEqual(note_math.pretty_tex("x^{-1}"), "x⁻¹")
+        self.assertEqual(note_math.pretty_tex(r"x=\pm 1"), "x=± 1")
+
+    def test_撇号与_pm_的兜底只转义一次(self):
+        """⚠️ 第三轮截图抓到：兜底文字被 escape 两次 —— 页面上显示字面量 `&#x27;`、`&lt;`。
+
+        根因：整段先 escape 再抽 `$…$`，TeX 源码里的撇号在抽取时已经成了实体，
+        兜底又 escape 了一遍。现在公式段拿的是**原样 TeX**，只转义一次。
+        """
+        h = nh.inline("一阶导数 $f'(x)=3x^2-3$，驻点为 $x=\\pm 1$。")
+        self.assertNotIn("&amp;", h, "兜底文字被转了两次")
+        self.assertIn("data-tex=\"f&#x27;(x)=3x^2-3\"", h, "属性里应当是原样 TeX 的**单次**转义")
+        self.assertIn('>f&#x27;(x)=3x²-3<', h, "兜底应当是 f'(x)=3x²-3（渲染后）")
+        self.assertIn(">x=± 1<", h)
+        self.assertNotIn("^{", h, "兜底文字里露了 TeX 上标")
+
     def test_没_JS_也看得见正文(self):
         """⚠️ 入场动画不许把正文藏起来 —— 模块纪律写着"不用 JS 也能读"。
 

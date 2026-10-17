@@ -260,38 +260,47 @@ def _nearest(vals: list, v) -> int:
 
 
 # ---------------------------------------------------------------- 行内 Markdown
-_TEX_BLOCK = re.compile(r"\$\$(.+?)\$\$", re.S)
-_TEX_INLINE = re.compile(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)")
+#: `$$…$$` 或 `$…$`（整块在前，避免 `$$` 被拆成两个 `$`）。
+_SPAN = re.compile(r"\$\$.+?\$\$|\$[^$]+\$", re.S)
 
 
 def inline(text: str) -> str:
-    """一段文本 → HTML。**先转义再放行三种标记**（`**粗**`、`` `代码` ``、`$公式$`）。
+    """一段文本 → HTML。**公式先抽出来**，其余照常转义。
 
-    ⚠️ 公式**两种形态都留着**：`.tex` 元素里是 TeX 源码（离线可见），
-       KaTeX 加载成功时被 JS 替换成排版结果 —— 这就是「不能白屏」那条要求。
+    ⚠️ 顺序不能反（2026-10-17 第三轮实测）：先把整段 `html.escape` 再抽 `$…$`，
+       TeX 源码里的撇号会变成 `&#x27;` —— 属性里还能被浏览器解回来，但**兜底文字**
+       再 escape 一次就成了字面量 `&#x27;`（截图上是 `f&#x27;(x)=3x²-3`）。
+       现在：原样文本 → `auto_tex` → 按 `$…$` 切 → 公式段（原件进 `data-tex`、
+       格式化后的兜底进正文）与普通段（escape + 三种标记）分别处理。
     """
-    # ⚠️ 先补 LaTeX 再转义（`q^3` → `$q^{3}$`）：KaTeX 只认 `$…$`，
-    #    残留的纯文本式子会让整页公式变成"没渲染的源码"（2026-10-17 验收实测过）。
     import note_math
-    s = html.escape(note_math.auto_tex(text))
-    s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
-    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    s = note_math.auto_tex(str(text or ""))
+    out, last = [], 0
+    for m in _SPAN.finditer(s):
+        out.append(_prose_html(s[last:m.start()]))
+        out.append(_tex_span(m.group(0)))
+        last = m.end()
+    out.append(_prose_html(s[last:]))
+    return "".join(out)
 
-    def _fmt(m):
-        # ⚠️ 这里**不再 escape**：`s` 已经整段 escape 过了，再 escape 一次会把
-        #    `'` 变成字面量 `&#x27;`（实测：TeX 里的撇号 `f'(x)` 会写坏）。
-        #    浏览器读 `getAttribute('data-tex')` 时会自己把实体解回原字符。
-        tex = m.group(1)
-        return f'<span class="tex" data-display="1" data-tex="{tex}">{tex}</span>'
 
-    s = _TEX_BLOCK.sub(_fmt, s)
+def _prose_html(seg: str) -> str:
+    """普通文本：转义 + 放行 `**粗**` 与 `` `代码` ``。"""
+    seg = html.escape(seg)
+    seg = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", seg)
+    seg = re.sub(r"`([^`]+)`", r"<code>\1</code>", seg)
+    return seg
 
-    def _fmt_inline(m):
-        tex = m.group(1)          # 同上：已 escape 过，别再来一次
-        return f'<span class="tex" data-tex="{tex}">{tex}</span>'
 
-    s = _TEX_INLINE.sub(_fmt_inline, s)
-    return s
+def _tex_span(raw: str) -> str:
+    """`$…$` / `$$…$$` → `.tex` 元素：`data-tex` 存**原样 TeX**（给 KaTeX），
+    正文里放 Unicode 兜底（KaTeX 没加载/离线截图时肉眼看到的就是它）。"""
+    import note_math
+    block = raw.startswith("$$")
+    inner = raw[2:-2] if block else raw[1:-1]
+    disp = ' data-display="1"' if block else ""
+    return (f'<span class="tex"{disp} data-tex="{html.escape(inner, quote=True)}">'
+            f"{html.escape(note_math.pretty_tex(inner))}</span>")
 
 
 # ---------------------------------------------------------------- 页面
@@ -436,7 +445,7 @@ _JS = """
 """
 
 
-def _section_html(sec: dict, idx: int, *, reveal: bool = True) -> str:
+def _section_html(sec: dict, idx: int, *, reveal: bool = True, fig: str = "") -> str:
     cls = "reveal" if reveal else ""
     o = [f'<section class="card {cls}" id="kp{idx}">',
          f'<h3>{idx}. {inline(sec.get("heading"))}'
@@ -449,6 +458,8 @@ def _section_html(sec: dict, idx: int, *, reveal: bool = True) -> str:
     if sec.get("prereq"):
         o.append(f"<details><summary>📚 前置补课（教授没讲、但要懂）</summary>"
                  f"<p>{inline(sec['prereq'])}</p></details>")
+    if fig:
+        o.append(fig)          # ⭐ 图跟着它的知识点（作者第三轮第 1 条）
     ex = sec.get("example") or {}
     if ex.get("prompt") or ex.get("steps"):
         o.append(f'<h4>例题 · {inline(ex.get("title") or "教授的例题")}</h4>')
@@ -542,20 +553,31 @@ def note_page(d) -> str:
         n_ok = sum(1 for c in checks if c.get("status") == "ok")
         n_bad = sum(1 for c in checks if c.get("status") == "mismatch")
         n_un = sum(1 for c in checks if c.get("status") == "unchecked")
-        head.append(f"<div>数字三道核：{n_ok} ✓ · {n_bad} ⚠ · {n_un} 未核对</div>")
-    for w in (d.warns or []):
-        head.append(f"<div>⚠ {inline(w)}</div>")
-    plots = []
+        # ⚠️ 学生只看到一句话（作者 2026-10-17 第三轮：「页头给学生看的是内部诊断」）：
+        #    生成器的工作记录（哪条公式被改过、删了几句猜测）挪到页尾折叠。
+        head.append(f'<div>✅ 数字核对：{n_ok + n_bad} 处已核'
+                    + (f"（其中 {n_bad} 处按 📖/📚 改过）" if n_bad else "")
+                    + f' · {n_un} 处待你确认（<a href="#checks">点开看</a>）</div>')
+    # ⭐ 图放**它所属的知识点里**（作者第三轮第 1 条：不许全堆在最后一个区），
+    #    同一张图（同 kind + 同参数）只出一张 —— 实测有 5 张一模一样的 AC/MC 曲线。
+    plots_by_idx: dict = {}
+    seen_figs: set = set()
     pid = 0
-    for s in sections:
+    for i, s in enumerate(sections):
         pl = s.get("plot") or {}
-        if pl.get("kind"):
-            pid += 1
-            head_svg = svg(pl["kind"], pl.get("params") or {}, pid=f"plot{pid}",
-                           caption=inline(pl.get("title") or ""))
-            if head_svg:
-                plots.append(head_svg)
-    secs = [_section_html(s, i) for i, s in enumerate(sections, 1)]
+        if not pl.get("kind"):
+            continue
+        sig = (pl["kind"], json.dumps(pl.get("params") or {}, sort_keys=True))
+        if sig in seen_figs:
+            continue
+        seen_figs.add(sig)
+        pid += 1
+        head_svg = svg(pl["kind"], pl.get("params") or {}, pid=f"plot{pid}",
+                       caption=inline(pl.get("title") or ""))
+        if head_svg:
+            plots_by_idx[i] = head_svg
+    secs = [_section_html(s, i, fig=plots_by_idx.get(i - 1))
+            for i, s in enumerate(sections, 1)]
     toc_items = [s.get("heading", "") for s in sections]
     extra = ""
     if d.term_rows:
@@ -571,6 +593,10 @@ def note_page(d) -> str:
                   + "（合上笔记，先自己写一遍）</p>")
     title = f"{d.course} · {d.date}" + (f" · {review.get('title_zh')}"
                                         if review.get("title_zh") else "")
-    return page(title, head, toc_items, secs, review.get("qa") or [], plots, extra,
+    warns_html = ""
+    if d.warns:
+        warns_html = ("<details class=\"internal\"><summary>生成核对记录（内部 · 点开看）</summary>"
+                      + "".join(f"<div>· {inline(w)}</div>" for w in d.warns) + "</details>")
+    return page(title, head, toc_items, secs, review.get("qa") or [], [], extra,
                 footer=f"<p>Markdown 版：<code>{html.escape(str(d.html_name or ''))}</code>"
-                       "（同目录）</p>")
+                       "（同目录）</p>" + warns_html)

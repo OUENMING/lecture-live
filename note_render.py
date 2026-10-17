@@ -268,10 +268,11 @@ def render(d: NoteData) -> str:
         L += [f"> {d.materials_line}"]
     L += [f"> {cov_line}"]
     if n_ok or n_bad or n_un:
-        L += [f"> 数字/公式三道核：{n_ok} 项 ✓ · {n_bad} 项 ⚠ 已修正 · {n_un} 项未核对"
-              f"（清单见 §9）"]
-    for w in (d.warns or []):
-        L += [f"> ⚠ {w}"]
+        # ⚠️ 学生看的是一句话，不是生成器的工作日志（作者 2026-10-17 第三轮：
+        #    「页头给学生看的是内部诊断」）。内部那几条挪到页尾「生成核对记录」。
+        L += [f"> ✅ 数字核对：{n_ok + n_bad} 处已核"
+              + (f"（其中 {n_bad} 处按 📖/📚 改过，见附录 A）" if n_bad else "")
+              + f" · {n_un} 处待你确认（清单见 §9）"]
     try:
         from obsidian_writer import _POLISH_NOTE
     except Exception:                                          # noqa: BLE001
@@ -428,7 +429,7 @@ def render(d: NoteData) -> str:
             L += [f"- `{p:.2f}` `{tag}` {text}"]
         L += [""]
 
-    # ── 附录 A：信息纪律 + 修正记录 ───────────────────────────────────
+    # ── 附录 A：信息纪律 + 修正记录 + 生成核对记录（内部） ──────────────
     L += ["---", "", "## 附录 A · 信息纪律与修正记录", "",
           "- **来源三分**：🎙 课上一手（可回时间戳）/ 📖 官方材料（课件、试卷、更正）/ "
           "📚 标准理论（教科书级知识，用于讲通「为什么」或裁定口误）。",
@@ -458,6 +459,16 @@ def render(d: NoteData) -> str:
         L += [f"- **本课课件核对**：{d.materials_line}"]
         if review.get("materials_used"):
             L += [f"  引用到的材料：{' · '.join(_one(x) for x in review['materials_used'])}"]
+        L += [""]
+    if d.warns:
+        # ⚠️ 生成器的**工作记录**（改了哪条公式、删了几句猜测、口径是不是补的）放页尾折叠：
+        #    学生不需要它，但"笔记被机器动过哪里"必须留痕（作者第三轮的要求）。
+        L += ["> [!note]- 生成核对记录（内部 · 点开看）", "> "]
+        import note_math
+        for w in d.warns:
+            # 短文本也要过同一个渲染（作者第三轮第 2 条）：md 里包成 `$…$`，
+            # HTML 侧走 inline()（KaTeX + Unicode 兜底）。
+            L += [f"> - {note_math.auto_tex(_one(str(w)))}"]
         L += [""]
 
     # ── 附录 B：逐句转录（证据层）─────────────────────────────────────

@@ -243,6 +243,58 @@ class TestNoFalsePositives(unittest.TestCase):
                          "两条断言只有一条被核了")
 
 
+class TestSecondDerivative(unittest.TestCase):
+    """⭐ 作者第三轮第 5 条：未核对行里一半是「f''(-1)=-6<0，故为极大值」这种 —— 机械核完全能做。
+
+    ⚠️ 三个必须同时成立，缺一个就会变成假修正：
+       ⓐ 句子自己写了 `f''(x)=12x-6` 时用它（同一单元里可能有另一个同名的 `f`）；
+       ⓑ 结论词只认**贴着**这条断言的那个（一句话里两条断言，各有各的「极大/极小」）；
+       ⓒ `AC''(q)=450/q³` 是**函数**不是某点的值 → 这一档不核（不许猜）。
+    """
+
+    def test_点的二阶导与方向都对就_ok(self):
+        rev = {"sections": [{"example": {"title": "📖 某卷", "prompt": "f(x)=x^3-3x",
+                                         "steps": [{"text": "在 x=-1 处，f''(-1)=-6<0，函数凹，故为极大值点。"},
+                                                   {"text": "f''(1)=6>0，故为极小值点。"}],
+                                         "answer": "x=1 极小"}}]}
+        rows = [r for r in nm.check_review(rev) if "二阶导" in r["how"] or "f''" in r["recomputed"]]
+        self.assertTrue(rows, "二阶导断言一条都没核")
+        self.assertEqual([r["status"] for r in rows], ["ok"] * len(rows), rows)
+
+    def test_结论方向反了要报(self):
+        rev = {"sections": [{"example": {"title": "📖 某卷", "prompt": "f(x)=x^3-3x",
+                                         "steps": [{"text": "f''(1)=6>0，故为极大值点。"}],
+                                         "answer": "x=1"}}]}
+        rows = nm.check_review(rev)
+        self.assertTrue([r for r in rows if r["status"] == "mismatch"], rows)
+
+    def test_函数形的二阶导不许当点值核(self):
+        """`AC''(q)=450/q³`：`=450` 是系数的开头，不是某个点上的值 —— 曾把它读成 `AC''(450)`。"""
+        rev = {"sections": [{"prose": ["AC(Q)=Q^2-12Q+60，AC''(q)=450/q^{3}>0，故为极小值。"]}]}
+        rows = nm.check_review(rev)
+        self.assertFalse([r for r in rows if "AC''" in str(r.get("recomputed") or "")], rows)
+
+
+class TestDedupeAndFilter(unittest.TestCase):
+    """⭐ 作者第三轮第 5 条的第二半：同一句在 `prose` 与 `answer` 各出现一次 → 两道一模一样的行；
+    空 claim 也曾在产物里占了两行。"""
+
+    def test_同一句两处出现只留一行(self):
+        line = "x=1 处为极小值点。"
+        rev = {"sections": [{"prose": [line], "example": {"title": "📖 某卷",
+                                                          "prompt": "f(x)=x^3-6x^2+9x+1。",
+                                                          "steps": [{"text": line}],
+                                                          "answer": line}}]}
+        rows = nm.check_review(rev)
+        self.assertEqual(len(rows), len({(r["claim"], r["recomputed"], r["status"]) for r in rows}))
+        self.assertEqual(len(rows), 1, rows)
+
+    def test_空_claim_不留行(self):
+        rev = {"sections": [{"prose": ["", "  "], "checks": [{"claim": "", "status": "unchecked"},
+                                                             {"claim": "  ", "status": "ok"}]}]}
+        self.assertEqual(nm.check_review(rev), [])
+
+
 class TestPickFunction(unittest.TestCase):
     """⚠️ 两次生成的产物上都出现了同一个假修正：把"平均成本最小"的断言拿去核 MC'。"""
 
@@ -271,6 +323,111 @@ class TestPickFunction(unittest.TestCase):
                                          "answer": "Q=4"}}]}
         rows = nm.check_review(rev)
         self.assertTrue([r for r in rows if r["status"] == "mismatch"], rows)
+
+
+class TestCrossSentenceNumbers(unittest.TestCase):
+    """⭐ 第三轮离线复跑抓到的**跨句吃数**假修正（同一份文字，旧机械层报 2 行 ⚠、全是假的）。
+
+    修法：先按小句切（逗号/句号/比较符/与和都切），小句内取最后一个 `=` —— 等号右边
+    常是整条算式（`AC(4)=4^2-12*4+60=28`），但**不许跨过下一条断言**。
+    """
+
+    def test_两个断言并列要各核各的(self):
+        rev = {"sections": [{"prose": ["AC(q)=q^2-12q+60。", "TC(q)=q^3-12q^2+60q。",
+                                      "所以 AC(4)=28，MC(4)=12。"]}]}
+        rows = nm.check_review(rev)
+        self.assertEqual([r["status"] for r in rows], ["ok"], rows)
+        self.assertIn("AC(4)=28", rows[0]["how"])
+
+    def test_比较号两侧各是一条(self):
+        rev = {"sections": [{"prose": ["AC(q)=q^2-12q+60。", "MC(q)=3q^2-24q+60。",
+                                      "在 Q=4 时，MC(4)=12 < AC(4)=28，所以增加一单位产量会拉低平均。"]}]}
+        rows = nm.check_review(rev)
+        self.assertEqual([r["status"] for r in rows], ["ok", "ok"], rows)
+        self.assertEqual({r["recomputed"] for r in rows}, {"12", "28"}, rows)
+
+    def test_连等式取最后一个值(self):
+        rev = {"sections": [{"prose": ["AC(q)=q^2-12q+60。",
+                                      "计算 AC(4)=4^2-12*4+60=16-48+60=28。"]}]}
+        rows = nm.check_review(rev)
+        self.assertEqual([r["status"] for r in rows], ["ok"], rows)
+
+    def test_误区句里的故意错值不许当断言(self):
+        """`计算 MC(4) 时忘记乘以系数 3，得到 16-96+60=-20` —— 是一个**错例**，不是断言。"""
+        rev = {"sections": [{"prose": ["MC(q)=3q^2-24q+60。",
+                                      "计算 MC(4) 时忘记乘以系数 3，得到 16-96+60=-20。"]}]}
+        self.assertEqual([r["status"] for r in nm.check_review(rev)], [], nm.check_review(rev))
+
+
+class TestDefinitionParsing(unittest.TestCase):
+    """题面里并列两个定义 / 变式步骤是字典 —— 两个实测过的解析坑。"""
+
+    def test_题面并列两个定义不许吞(self):
+        """`给定 AC(Q)=Q^2-12Q+60 和 MC(Q)=3Q^2-24Q+60，…` 曾把第二个定义吞进 AC 里 →
+        报出 `AC(4)=12` 的假修正（AC 的表达式变成了 MC 的）。"""
+        rev = {"sections": [{"prose": ["给定 AC(Q)=Q^2-12Q+60 和 MC(Q)=3Q^2-24Q+60，求 Q=4 时的两个成本。",
+                                      "AC(4)=28，MC(4)=12。"]}]}
+        rows = nm.check_review(rev)
+        self.assertEqual([r["status"] for r in rows], ["ok", "ok"], rows)
+        self.assertEqual({r["recomputed"] for r in rows}, {"28", "12"}, rows)
+
+    def test_变式步骤是字典时取_text(self):
+        """`{'text': '二阶导数 -3 < 0…', 'why': ''}` 曾被 `str(dict)` 整段贴进核对表。"""
+        rev = {"sections": [{"variants": [{"q": "设 TC(q)=2q^2+q+32，求使平均成本最小的产量。",
+                       "steps": [{"text": "AC(q)=TC(q)/q=2q+1+32/q", "why": "定义"},
+                                 {"text": "AC''(q)=64/q^3>0，故 q = 4 为最小值点。", "why": ""}],
+                       "a": "q=4"}]}]}
+        rows = nm.check_review(rev)
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertNotIn("{'text'", r["claim"], "字典被当成了断言文本")
+        self.assertEqual([r["status"] for r in rows], ["ok"], rows)
+
+
+class TestPointThenConclusion(unittest.TestCase):
+    """结论在点后面：`驻点为 x=1（极小值）和 x=-1（极大值）`。"""
+
+    def test_两个驻点各自核(self):
+        rev = {"sections": [{"example": {"title": "📖 卷", "prompt": "f(x)=x^3-3x",
+                                         "steps": [{"text": "求导"}],
+                                         "answer": "驻点为 x=1（极小值）和 x=-1（极大值）；函数在 x>0 时凸。"}}]}
+        rows = nm.check_review(rev)
+        self.assertEqual([r["status"] for r in rows], ["ok", "ok"], rows)
+        self.assertEqual(sorted(r["recomputed"] for r in rows), ["f(-1)=2", "f(1)=-2"], rows)
+
+    def test_点名了别的函数就不许拿本单元唯一的函数算(self):
+        """`AC''(q)=…` 里的撇号曾被漏掉 → "文本里没点名" → 拿 TC 核 AC 的极值。"""
+        rev = {"sections": [{"variants": [{"q": "设 TC(q)=2q^2+q+32，求使平均成本最小的产量。",
+                       "steps": [{"text": "故 q = 4 为最小值点（AC 的二阶导为正）。"}], "a": "q=4"}]}]}
+        rows = nm.check_review(rev)
+        self.assertFalse([r for r in rows if r["status"] != "unchecked"], rows)
+
+
+class TestSignLogic(unittest.TestCase):
+    """纯符号逻辑：`二阶导数 -3 < 0 …该点为极大值点`（不需要函数）。
+
+    ⚠️ 结论词要跟着**自己那条符号**走；提问句（`判断 x=2 是极大还是极小？`）不核。
+    """
+
+    def test_符号与结论一致报_ok(self):
+        rev = {"sections": [{"prose": ["二阶导数 -3 < 0，因此函数在 x=2 附近是凹的，该点为极大值点。"]}]}
+        rows = nm.check_review(rev)
+        self.assertEqual([r["status"] for r in rows], ["ok"], rows)
+
+    def test_符号与结论反着写报_mismatch(self):
+        rev = {"sections": [{"prose": ["二阶导数为正，因此该点为极大值点。"]}]}
+        rows = nm.check_review(rev)
+        self.assertEqual([r["status"] for r in rows], ["mismatch"], rows)
+
+    def test_一句两条符号各配各的结论(self):
+        rev = {"sections": [{"prose": ["如果二阶导数为负，该点是极大值点；如果二阶导数为正，该点是极小值点。"]}]}
+        rows = nm.check_review(rev)
+        self.assertEqual([r["status"] for r in rows], ["ok", "ok"], rows)
+
+    def test_提问句没有结论不核(self):
+        rev = {"sections": [{"prose": ["已知函数在 x=-1 处二阶导数为负，判断该点是极大还是极小。"]}]}
+        self.assertEqual([r["status"] for r in nm.check_review(rev) if "符号逻辑" in r["how"]], [],
+                         nm.check_review(rev))
 
 
 class TestNumberExtraction(unittest.TestCase):

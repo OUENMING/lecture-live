@@ -236,7 +236,7 @@ def reconcile(review: dict, *, materials=None) -> tuple:
     fixes: list = []
     warns: list = []
     for s in (out.get("sections") or []):
-        for u in note_math._units(s):
+        for _kind, u in note_math._units(s):
             fdefs = note_math.functions(u)
             if "TC" not in fdefs:
                 continue
@@ -249,18 +249,97 @@ def reconcile(review: dict, *, materials=None) -> tuple:
                 if name not in fdefs or target is None:
                     continue
                 got_var, got_expr, got_fn = fdefs[name]
+                # ⚠️ 2026-10-17 第三轮验收抓到的**误报**：笔记里写「MC(Q)=AC(Q)」是在说
+                #    "令边际成本等于平均成本"（求 AC 最小的条件），不是给 MC 下定义 ——
+                #    拿它跟 TC 的导数比，必然"不自洽"，还会把 `AC(Q)` 这个字面量改掉。
+                #    判据：右边**只是另一个已定义函数的调用**时跳过。
+                if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,5}\s*\(\s*[a-zA-Z]\s*\)",
+                                note_math._clean_expr(got_expr)) and \
+                        got_expr.split("(")[0].strip() in fdefs:
+                    continue
+                # 而且只有**多项式形状**的式子才许自动改写（`AC(Q)` 这种短标识符不许动）。
+                if not re.search(r"\d", got_expr):
+                    continue
                 got = _poly_of(got_fn, got_var)
                 if got is None or got.close(target):
                     continue
                 right = target.show(got_var)
                 bad = note_math._clean_expr(got_expr)
                 fixes.append({"where": s.get("heading") or f"{name}({got_var})",
-                              "spoken": f"{name}({got_var})={got_expr}",
+                              "spoken": f"{name}({got_var})={_show(got_expr)}",
                               "fixed": f"{name}({got_var})={right}",
                               "basis": _derived_basis()})
                 _replace_in_unit(s, got_expr, right)
-                warns.append(f"{name} 与 TC 不自洽（{got_expr} → {right}）")
+                warns.append(f"{name} 与 TC 不自洽（{_show(got_expr)} → {right}）")
     return out, fixes, warns
+
+
+def _show(expr: str) -> str:
+    """展示用的表达式：去掉捕获时可能带上的 `$`/标点。
+
+    ⚠️ 实测（第三轮产物 E）：模型按"公式用 `$…$`"的要求写定义，`_FUNC_DEF` 把结尾的
+       `$` 一起捕进来 —— 编译不受影响（`_clean_expr` 会剥），但展示出来就成了
+       `$AC(q)=q^2-12q+60$$`（多一个 `$`，公式配对断了）。
+    """
+    s = str(expr or "").replace("$", "").strip()
+    return s.rstrip("。；;，,、 ")
+
+
+def ensure_min_value(review: dict) -> tuple:
+    """有 AC 与驻点就**把最小值写出来**（作者第三轮第 4 条：官方解答里 `AC(6)=24`）。
+
+    ⚠️ 实测：三次生成的产物**都没有**写这个值（题面问"哪个产量"，官方解答给了值）——
+       它是"例题完整"的一部分，不能靠模型的自觉。值是从**本节的 AC 多项式**代出来的
+       （`Poly` 已有），不是从空气里拿的；材料里有官方值时以官方值为准。
+    """
+    import copy
+    import note_math
+    out = copy.deepcopy(review)
+    added: list = []
+    for s in (out.get("sections") or []):
+        for kind, u in note_math._units(s):
+            if kind in ("variants", "faded"):
+                continue     # 题型单元的答案自己已经有结果，别在节里再补一句"本节的最小值"
+            fdefs = note_math.functions(u)
+            if "AC" not in fdefs:
+                continue
+            var, expr, ac = fdefs["AC"]
+            poly = _poly_of(ac, var)      # 多项式时留一份（用于跟材料里的官方值比）
+            pt = None
+            for txt in u:
+                m = note_math._MINMAX.search(txt)
+                if not m:
+                    continue
+                c = m.group("c") or m.group("c2") or m.group("c3")
+                if c:
+                    pt = float(c)
+                    break
+            if pt is None:
+                continue
+            try:
+                # ⭐ 直接**调用**那个函数（`q+64/q` 这种非多项式也照样算得出值）——
+                #    多项式只是"能不能跟官方值比"的条件，不是能不能补值的条件。
+                val = ac(pt)
+            except Exception:                                     # noqa: BLE001
+                continue
+            if poly is not None:
+                val = out_eval(poly, pt)
+            shown = f"{val:g}"
+            blob = " ".join(u)
+            if f"({pt:g})" in blob and (shown in blob):
+                continue                    # 值已经写在正文里了
+            if f"AC({pt:g})" in blob and re.search(rf"AC\({pt:g}\)\s*[=＝]\s*{re.escape(shown)}", blob):
+                continue
+            # ⚠️ 句子里**带上函数本身**：一节里可能有三四个不同的 AC（讲解、例题、变式各一），
+            #    光说"本节的平均成本函数"会把读者指错（第三轮验收：§8 的例题 AC 与变式的不是同一条）。
+            show_expr = _show([x for x in str(expr).split("=") if x.strip()][-1]) or _show(expr)
+            line = (f"把 ${var}^*={pt:g}$ 代回 $AC({var})={show_expr}$："
+                    f"最小平均成本 $AC({pt:g})={shown}$。")
+            s.setdefault("prose", [])
+            s["prose"] = list(s["prose"]) + [line]
+            added.append(str(s.get("heading") or ""))
+            break                            # 一节只补一次
+    return out, added, ([f"{len(added)} 节缺「最小平均成本」的值，已按本节 AC 补上"] if added else [])
 
 
 def _replace_in_unit(section: dict, wrong: str, right: str) -> None:

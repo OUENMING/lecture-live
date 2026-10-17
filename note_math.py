@@ -77,10 +77,48 @@ def _convert_plain(seg: str) -> str:
     return _RUN.sub(fix, seg)
 
 
+_SUPERS = {"0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3", "4": "\u2074",
+           "5": "\u2075", "6": "\u2076", "7": "\u2077", "8": "\u2078", "9": "\u2079",
+           "-": "\u207b", "+": "\u207a"}
+_SUBS = {"0": "\u2080", "1": "\u2081", "2": "\u2082", "3": "\u2083", "4": "\u2084",
+         "5": "\u2085", "6": "\u2086", "7": "\u2087", "8": "\u2088", "9": "\u2089"}
+
+
+def _script(body: str, table: dict) -> str:
+    return "".join(table.get(c, c) for c in body)
+
+
+def pretty_tex(text: str) -> str:
+    """TeX → 能直接读的 Unicode（`x^{3}` → `x³`、`q_{1}` → `q₁`）。
+
+    ⚠️ 用途只有一个：**KaTeX 没加载时页面上显示的兜底文字**（作者 2026-10-17：
+       「任何短文本都要过同一个渲染……不许露 `^{}`」）。真正的数学仍走 KaTeX
+       （`data-tex` 里是原样 TeX），`$…$` 标记照旧。
+    """
+    s = str(text or "")
+    s = re.sub(r"\^\{([^{}]{1,12})\}", lambda m: _script(m.group(1), _SUPERS), s)
+    # ⚠️ 只吃**带符号的数字**（`^{-1}` / `^2`）：`[0-9+-]` 会把后面二元运算符一起上标 ——
+    #    实测 `3x^2-3` 被写成了 `3x²⁻³`（第三轮截图）。
+    s = re.sub(r"\^\s*(-?[0-9]{1,3})", lambda m: _script(m.group(1), _SUPERS), s)
+    s = re.sub(r"_\{([^{}]{1,12})\}", lambda m: _script(m.group(1), _SUBS), s)
+    s = re.sub(r"_(\d{1,3})", lambda m: _script(m.group(1), _SUBS), s)
+    s = s.replace(r"\times", "×").replace(r"\cdot", "·").replace(r"\div", "÷")
+    s = re.sub(r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}",
+               lambda m: f"({m.group(1)})/({m.group(2)})", s)
+    for a, b in ((r"\left", ""), (r"\right", ""), (r"\Rightarrow", "⇒"),
+                 (r"\times", "×"), (r"\div", "÷"), (r"\pm", "±"), (r"\mp", "∓"),
+                 (r"\leq", "≤"), (r"\le", "≤"), (r"\geq", "≥"), (r"\ge", "≥"),
+                 (r"\neq", "≠"), (r"\infty", "∞"), (r"\to", "→"), (r"\approx", "≈")):
+        s = s.replace(a, b)
+    return s
+
+
 # ---------------------------------------------------------------- 二、数值复算
+#: ⚠️ 表达式**不许跨过并列连词**：实测题面「给定 AC(Q)=Q^2-12Q+60 和 MC(Q)=3Q^2-24Q+60，…」
+#:    曾把第二个定义一起吞进 AC 的表达式里（`AC` 于是指向 MC 的式子，报出 `AC(4)=12` 的假修正）。
 _FUNC_DEF = re.compile(
     r"(?P<name>[A-Za-z][A-Za-z0-9]{0,5})\s*\(\s*(?P<var>[A-Za-z])\s*\)\s*[=＝]\s*"
-    r"(?P<expr>[^，,。；;\n]+)")
+    r"(?P<expr>[^，,。；;、\n和与]+)")
 #: 数字（带不带小数、正负号）。
 #: ⚠️ 后面紧跟 `√`/字母/`/`/数字/小数点的不算（`q=10√6` 里的 `10` 不是那个点，
 #:    实测：人眼里是 10√6≈24.5，机械读成 10 → 报出 `AC'(10)≈−2.5≠0` 的假修正）。
@@ -95,12 +133,28 @@ _MINMAX = re.compile(
     # 「最小平均成本**为 16**」里的 16 是值不是点，会报假修正（实测抓到两例）。
     r"|(?P<kind3>最小|最大|极小|极大)[^。；;]{0,10}?(?:产量|产出|数量)[^。；;]{0,6}?"
     r"(?:约|为|是|=|＝)\s*(?P<c3>" + _NUM + r")")
+#: 句子自己写出的二阶导**函数**：`f''(x)=12x-6`。
+_D2_DEF = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9]{0,5})''\s*\(\s*(?P<var>[A-Za-z])\s*\)"
+                     r"\s*[=＝]\s*(?P<expr>[^，,。；;\n]{1,40})")
+#: 「在 x=-1 处，f''(-1)=-6<0」「f''(1)=6>0，故为极小值点」「AC''(q)=450/q^3」
+_D2 = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9]{0,5})''\s*\(\s*(?P<arg>[^)]{1,12})\)\s*"
+                 r"[=＝]\s*(?P<v>-?\d+(?:\.\d+)?)(?![\d./])")
+_DIR_WORD = re.compile(r"极大|最大|极小|最小|凹|凸|convex|concave", re.I)
+#: 「极小」这一侧的词：f'' 该为正。凸（convex）与极小同侧 —— 实测句子里常写「函数凸，故为极小值」。
+_DIR_MIN = {"极小", "最小", "凸"}
+
 #: 「AC(2.89) = 233.01」
 #: 「AC(2.89)=233.01」「AC(2.89)=(60·2.89+500)/2.89≈233.01」——
 #: ⚠️ 取**这一句里最后一个** `=`/`≈` 后面的数字（等号右边常是整条算式），
 #:    并要求它后面是标点/结尾（`233.01*2` 这种不算一个值）。
 _SUBST = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9]{0,5})\s*\(\s*(?P<c>" + _NUM + r")\s*\)"
-                    r"[^。；;\n]*[=＝≈]\s*(?P<v>" + _NUM + r")\s*(?:[。，,；;）)]|$)")
+                    r"(?P<mid>[^。；;\n]*)[=＝≈]\s*(?P<v>" + _NUM + r")\s*$")
+#: 小句切分：`,` `，` `。` `；` `、` 与比较符两侧各是一条独立断言
+#: （`MC(4)=12 < AC(4)=28` 是两条，不是"MC(4) 等于 28"）。
+_CLAUSE = re.compile(r"[，,。；;、<>≤≥与和]")
+#: 代入那一档的"密句"记号：`<`/`>` 已经切成小句，不再算密（实测 `MC(4)=12 < AC(4)=28`
+#: 两侧各是干净的一条断言，整句跳过反而把它埋了）。
+_NOISY_SUB = re.compile(r"→|f''|f′|∵|∴")
 
 
 def _clean_expr(expr: str) -> str:
@@ -207,6 +261,8 @@ def functions(texts) -> dict:
             name, var, expr = m.group("name"), m.group("var"), m.group("expr").strip()
             if name.lower() in {"and", "or", "if", "the"}:
                 continue
+            if re.search(r"[A-Za-z][A-Za-z0-9]{0,5}\s*\(\s*[A-Za-z]\s*\)\s*[=＝]", expr):
+                continue          # 表达式里还嵌着另一个定义 → 这是解析吞多了，别用（见 _FUNC_DEF 注释）
             raw.append((name, var, expr))
     ns: dict = {}
     defs: dict = {}
@@ -263,8 +319,14 @@ def _pick(fdefs: dict, text: str):
             if re.search(rf"(?<![A-Za-z]){re.escape(n)}(?![A-Za-z])", text)]
     if hits:
         return max(hits, key=len)     # 最长名字优先（`TFC` 比 `TF` 更具体）
-    if len(fdefs) == 1 and not re.search(r"[A-Za-z][A-Za-z0-9]{0,5}\s*\(", text):
-        return next(iter(fdefs))
+    # ⚠️ "点了名"包括**撇号形**（`AC''(q)=64/q³`）与**纯大写缩写**（`AC 的二阶导`）——
+    #    漏判会让"本单元只有一个函数"的兜底拿 TC 去核 AC 的极值（第三轮离线复跑抓到），
+    #    而单字母小写函数（`f(x)`）仍然允许兜底（那是普遍写法，不会串错）。
+    if len(fdefs) == 1:
+        named = re.search(r"[A-Za-z][A-Za-z0-9]{0,5}'{0,3}\s*\(", text)
+        caps = {x for x in re.findall(r"(?<![A-Za-z])[A-Z]{2,6}(?![A-Za-z])", text)}
+        if not named and not (caps - set(fdefs)):
+            return next(iter(fdefs))
     return None
 
 
@@ -274,31 +336,54 @@ def _pick(fdefs: dict, text: str):
 _NOISY = re.compile(r"→|[<>]|f''|f′|∵|∴")
 
 _EXTREMUM = re.compile(r"最小|最大|极小|极大")
+#: 「点在前、结论在后」：`驻点为 x=1（极小值）和 x=-1（极大值）`、`x=-1 处为极大值点`、
+#: `故 q = 4 为最小值点` —— `_MINMAX` 管的是"结论在前/变量命名"，这一档补另一半。
+_PT_EXT = re.compile(r"[qQx]\s*\*?\s*[=＝]\s*(?P<c>" + _NUM + r")\s*(?:处|时|点)?\s*"
+                     r"(?:为|是|即)?\s*[（(]?\s*(?P<kind>极小|极大|最小|最大)(?:值点|值)?")
+#: 「二阶导数为负 → 极大值」这种**纯符号逻辑**句：不需要函数（只是把给定的符号读一遍）。
+_SIGN = re.compile(r"(?:二阶导数|f''|f″)\s*(?:为|是|等于|＝|=)?\s*"
+                   r"(?:(?P<v>-?\d+(?:\.\d+)?)|(?P<w>正|负))")
+_CONC = re.compile(r"(?P<conc>极大|极小)值?点?")
 
 
 def _norm_claim(t: str) -> str:
     return re.sub(r"\s+", "", str(t or "")).lower()
 
 
+def _txt(x) -> str:
+    """核对层只吃字符串：`{text, why}` 这种步骤字典取 `text`。
+
+    ⚠️ 实测（2026-10-17 第三轮）：变式的 `steps` 是字典时 `str(dict)` 会把
+       `{\'text\': \'二阶导数 -3 < 0……\', \'why\': \'\'}` 整段当成断言贴进核对表。
+    """
+    if isinstance(x, dict):
+        return str(x.get("text") or x.get("claim") or "")
+    return str(x or "")
+
+
 def _units(s: dict) -> list:
     """一节的文本按**单元**切分：讲解 / 例题 / 每道变式 / 补全题各是一个单元。
+
+    返回 `[(kind, [texts]), …]`，`kind` ∈ `prose` / `example` / `variants` / `faded`
+    （2026-10-17 加了 kind：`ensure_min_value` 只给讲解/例题补句，题型单元的答案
+      自己已经给了结果，再补一句会打架）。
 
     ⚠️ 单元 = 函数命名空间（2026-10-17 判定实测抓到）：整节共用一个命名空间时，
        "例题里 AVC=… 与变式里 AVC=…"会互相串门 —— 判据会把变式的函数拿去核例题的
        断言，报出一堆**假 mismatch**（实测：`AC'(2.89)≈1.78` 其实是另一道题的 AC'）。
     """
-    out = [[str(x) for x in (s.get("prose") or [])]]
+    out = [("prose", [_txt(x) for x in (s.get("prose") or [])])]
     ex = s.get("example") or {}
     if ex.get("prompt") or ex.get("steps"):
-        out.append([str(ex.get("prompt") or ""), str(ex.get("answer") or "")]
-                   + [str(st.get("text") or "") for st in (ex.get("steps") or [])])
+        out.append(("example", [_txt(ex.get("prompt")), _txt(ex.get("answer"))]
+                    + [_txt(st) for st in (ex.get("steps") or [])]))
     for v in (s.get("variants") or []):
-        out.append([str(v.get("q") or ""), str(v.get("a") or "")]
-                   + [str(x) for x in (v.get("steps") or [])])
+        out.append(("variants", [_txt(v.get("q")), _txt(v.get("a"))]
+                    + [_txt(x) for x in (v.get("steps") or [])]))
     fd = s.get("faded") or {}
     if fd.get("q") or fd.get("a"):
-        out.append([str(fd.get("q") or ""), str(fd.get("a") or "")])
-    return [[x for x in u if x] for u in out]
+        out.append(("faded", [_txt(fd.get("q")), _txt(fd.get("a"))]))
+    return [(k, [x for x in u if x]) for k, u in out]
 
 
 def _kind(word: str) -> str:
@@ -312,7 +397,8 @@ def check_review(review: dict) -> list:
     """
     rows: list = []
     for s in (review.get("sections") or []):
-        units = _units(s)
+        unit_list = _units(s)
+        units = [u for _k, u in unit_list]
         texts = [x for u in units for x in u]
         # 单元自己的定义优先；回落到整节时**同名多定义就算歧义 → 未核对**（不许猜）
         sec_defs = functions(texts)
@@ -331,77 +417,203 @@ def check_review(review: dict) -> list:
             for t in u:
                 fdefs = _scope(t, u_idx)
                 rows += _rows_for_text(t, fdefs)
-    return rows + _source_rows(review)
+    # ⚠️ 同一句断言在 `prose` 与 `answer` 各出现一次 → 会出两行一模一样的核对表；
+    #    空的 claim 也在这里丢掉（实测第三份产物上有两行全空）。
+    seen: set = set()
+    uniq: list = []
+    for r in rows + _source_rows(review):
+        key = (_norm_claim(r.get("claim")), str(r.get("recomputed") or ""),
+               str(r.get("status") or ""))
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        uniq.append(r)
+    return uniq
 
 
 def _rows_for_text(t: str, fdefs: dict) -> list:
-    """一条文本里的极值/代入断言 → 核对行。"""
+    """一条文本里的极值/代入/二阶导断言 → 核对行。"""
     rows: list = []
+    # ⚠️ 二阶导断言走**独立一档**：它的形状很紧（`f''(c)=v`），不受噪声句守卫影响 ——
+    #    实测未核对行里一半是「f''(-1)=-6<0，故为极大值」这种，机械核完全能做。
+    # ⚠️ 优先用**句子自己写的** `f''(x)=12x-6`（同一个单元里可能有两个不同的 `f`：
+    #    实测一份产物里「f(x)=x³−3x²−12x+1」与「f''(x)=12x−6」并存，拿前者的二阶导
+    #    去比后者给出的值 → 报出假的"不一致"）。
+    own = {}
+    for m in _D2_DEF.finditer(t):
+        fn2 = _compile(m.group("expr"), m.group("var"), {})
+        if fn2 is not None:
+            own[m.group("name")] = fn2
+    for m in _D2.finditer(t):
+        name, arg, v = m.group("name"), m.group("arg"), float(m.group("v"))
+        if name not in fdefs and name not in own:
+            continue
+        arg = arg.strip()
+        if not re.fullmatch(r"-?\d+(?:\.\d+)?", arg):
+            continue              # `AC''(q)=…` 是**函数**不是某点上的值 → 这一档核不了
+        x = float(arg)
+        try:
+            if name in own:
+                # 句子自己写的 `f''(x)=12x-6` **就是二阶导函数**：代进去求值。
+                # （再对它做数值二阶导只会得到 0 —— 线性函数的二阶导，实测踩过。）
+                want = own[name](x)
+            else:
+                want = _d2(fdefs[name][2], x)
+        except Exception:                                     # noqa: BLE001
+            continue
+        ok_val = abs(want - v) <= max(1e-2, 1e-3 * abs(v))
+        # ⚠️ 结论词要**贴着这一条断言**找：同一句里可能有两条（`f''(-1)…极大，f''(2)…极小`），
+        #    在整句里 search 会把第一条的"极大"配到第二条上（实测报出假的"方向矛盾"）。
+        tail = t[m.end():m.end() + 20]
+        word = _DIR_WORD.search(tail) or _DIR_WORD.search(t[max(0, m.start() - 12):m.start()])
+        ok_dir = True
+        if word:
+            says_min = word.group(0).lower() in _DIR_MIN
+            ok_dir = (says_min and want > 0) or (not says_min and want < 0)
+        if ok_val and ok_dir:
+            rows.append({"claim": t, "status": "ok", "recomputed": f"{name}''({x})≈{_fmt(want)}",
+                         "how": f"数值二阶导：{name}''({x})≈{_fmt(want)}（与断言一致）"})
+        else:
+            why = (f"数值二阶导 {name}''({x})≈{_fmt(want)}，断言写的是 {_fmt(v)}"
+                   if not ok_val else f"二阶导为正/负与「{word.group(0)}」矛盾")
+            rows.append({"claim": t, "status": "mismatch",
+                         "recomputed": f"{name}''({x})≈{_fmt(want)}", "how": why})
+    # ⚠️ 代入那一档**自己切小句**（逗号/比较符都切），所以**先于**整句的密句守卫跑，而且
+    #    不能"有代入结果就不看极值"：实测 `MC(4)=12 < AC(4)=28` 两侧各是干净的一条
+    #    （第三轮离线复跑），而「令导数为 0 得 q=6 处最小，AC(6)=24」两句都要核。
+    rows += _SUBST_rows(t, fdefs, [])
+    # ⭐ 纯符号逻辑（第三轮离线复跑：**「二阶导数 -3 < 0 …该点为极大值点」这种 6 行）**：
+    #    句子自己给了符号，结论极大/极小只需读一遍符号 —— 不需要函数。
+    sign_rows = _sign_rows(t)
+    rows += sign_rows
+    # ⚠️ 「点在前、结论在后」那一档（`x=1（极小值）`）**也不受整句密句守卫管**：实测
+    #    `驻点为 x=1（极小值）…函数在 x>0 时凸` 里的 `>` 是**行文里的比较号**，
+    #    跟"公式密到挑不出结论"不是一回事 —— 整句跳过把它埋了（第三轮离线复跑）。
+    for m in _PT_EXT.finditer(t):
+        if sign_rows:
+            continue          # 这句的结论已经由符号逻辑那一档核过（避免一句两行、一行还挂着"没有函数"）
+        rows.append(_extremum_row(t, fdefs, m.group("c"), m.group("kind")))
     if _NOISY.search(t):
         # ⚠️ 公式密到分不清哪句话是"结论"时：**不猜** —— 标未核对，让人来看。
         #    实测猜过两次，两次都猜错（挑到 80 / 挑到 18），而假的"已修正"比漏核坏得多。
-        if _EXTREMUM.search(t):
+        if not rows and _EXTREMUM.search(t):
             rows.append({"claim": t, "status": "unchecked", "recomputed": "",
                          "how": "这句话里公式/推导太密，机械核挑不出唯一的那条结论（请人工复查）"})
         return rows
-    for m in _MINMAX.finditer(t):
-        c = m.group("c") or m.group("c2") or m.group("c3")
-        word = m.group("kind") or m.group("kind2") or m.group("kind3")
+    pairs = [(m.group("c") or m.group("c2") or m.group("c3"),
+              m.group("kind") or m.group("kind2") or m.group("kind3"))
+             for m in _MINMAX.finditer(t)]
+    for c, word in pairs:
         if c is None:
             continue
-        kind = _kind(word)
-        name = _pick(fdefs, t)
-        if name is None:
-            rows.append({"claim": t, "status": "unchecked", "recomputed": "",
-                         "how": "没有给出函数，无法复算极值（不许猜）"})
+        rows.append(_extremum_row(t, fdefs, c, word))
+    return rows
+
+
+def _sign_rows(t: str) -> list:
+    """「二阶导数 = -3 < 0，因此该点为极大值点」→ 一条纯逻辑核对行。
+
+    ⚠️ 只在**同一句**里读符号：跨句的符号推理（题面给事实、答句给结论）不做 ——
+       那需要把整节的事实表建起来，风险比收益大（实测留下的未核对行里最长的就是这一类）。
+    """
+    rows: list = []
+    if re.search(r"判断|还是|？|\?", t):
+        return rows              # 提问句没有结论可核（`判断 x=2 是极大还是极小？`）
+    for m in _SIGN.finditer(t):
+        v, w = m.group("v"), m.group("w")
+        if v is not None:
+            sign = 1 if float(v) > 0 else -1
+            shown = f"{v}"
+        elif w is not None:
+            sign = 1 if w == "正" else -1
+            shown = w
+        else:
             continue
-        _var, _expr, f = fdefs[name]
-        x = float(c)
-        try:
-            d1, d2 = _d1(f, x), _d2(f, x)
-        except Exception:                                     # noqa: BLE001
-            rows.append({"claim": t, "status": "unchecked", "recomputed": "",
-                         "how": f"{name} 在 q={c} 附近算不出来（定义域外/数值问题）"})
+        # ⚠️ 结论词要**跟着这条符号走**：一句话里可以有两条互不相干的符号+结论
+        #    （「…二阶导数为负，该点是极大…；…二阶导数为正，该点是极小…」），
+        #    整句取第一个结论会把第二条配错（第三轮离线复跑抓到 3 行假 ⚠）。
+        tail = t[m.end():m.end() + 40]
+        tail = re.split(r"[。；;]", tail)[0]
+        c = _CONC.search(tail)
+        if not c:
             continue
-        tol = 1e-3 * max(1.0, abs(x))
-        if abs(d1) > tol:
-            rows.append({"claim": t, "status": "mismatch",
-                         "recomputed": f"{name}'({c})≈{_fmt(d1)}",
-                         "how": f"数值求导：{name}'({c})≈{_fmt(d1)}≠0，"
-                                f"该点不是驻点，谈不上{word}"})
-            continue
-        bad = (kind == "最小" and d2 < 0) or (kind == "最大" and d2 > 0)
-        if bad:
-            rows.append({"claim": t, "status": "mismatch",
-                         "recomputed": f"{name}''({c})≈{_fmt(d2)}",
-                         "how": f"二阶条件不成立：{name}''({c})≈{_fmt(d2)}，"
-                                f"这是{'最大' if d2 < 0 else '最小'}值"})
-            continue
-        rows.append({"claim": t, "status": "ok",
-                     "recomputed": f"{name}({c})={_fmt(f(x))}",
-                     "how": f"数值求导：{name}'({c})≈{_fmt(d1)}（≈0，驻点成立）、"
-                            f"{name}''({c})≈{_fmt(d2)}（{word}的二阶条件成立）"})
-    if _NOISY.search(t):
-        return rows
-    for m in _SUBST.finditer(t):
-        # ⚠️ 这里**按名字**取（大小写不敏感），不走 `_pick`：`AC(6)=24` 点名了 AC，
-        #    本单元只定义了 TC 时**不许**拿 TC 代为计算（判据实测抓到过 144 这种假数）。
-        _n = m.group("name")
-        name = next((n for n in fdefs if n.lower() == _n.lower()), None)
-        if name is None:
-            continue
-        x, v = float(m.group("c")), float(m.group("v"))
-        try:
-            got = fdefs[name][2](x)
-        except Exception:                                     # noqa: BLE001
-            rows.append({"claim": t, "status": "unchecked", "recomputed": "",
-                         "how": f"{name}({x}) 算不出来"})
-            continue
-        ok = abs(got - v) <= 1e-3 * max(1.0, abs(v))
+        says_min = _kind(c.group("conc")) == "最小"
+        ok = (sign > 0) == says_min
         rows.append({"claim": t, "status": "ok" if ok else "mismatch",
-                     "recomputed": f"{_fmt(got)}",
-                     "how": f"代入复算：{name}({_fmt(x)})={_fmt(got)}"
-                            + ("（与断言一致）" if ok else f"，断言写的是 {_fmt(v)}")})
+                     "recomputed": f"二阶导符号：{'正' if sign > 0 else '负'}",
+                     "how": (f"符号逻辑：二阶导数{shown}"
+                             + ("（正）→ 凸 → 极小值" if sign > 0 else "（负）→ 凹 → 极大值")
+                             + ("" if ok else f"；但句子里写的是「{c.group('conc')}」"))})
+    return rows
+
+
+def _extremum_row(t: str, fdefs: dict, c: str, word: str) -> dict:
+    """「在 q=c 处取最小/最大」的一条核对行。判不了 → `unchecked`（不许猜）。"""
+    kind = _kind(word)
+    name = _pick(fdefs, t)
+    if name is None:
+        why = ("没有给出函数，无法复算极值（不许猜）")
+        if re.search(r"二阶导数|f''|f″|一阶导数", t):
+            why = "只给了导数的符号、没有函数：跨句的符号推理不机械核（请人工看一眼）"
+        return {"claim": t, "status": "unchecked", "recomputed": "", "how": why}
+    _var, _expr, f = fdefs[name]
+    x = float(c)
+    try:
+        d1, d2 = _d1(f, x), _d2(f, x)
+    except Exception:                                         # noqa: BLE001
+        return {"claim": t, "status": "unchecked", "recomputed": "",
+                "how": f"{name} 在 q={c} 附近算不出来（定义域外/数值问题）"}
+    tol = 1e-3 * max(1.0, abs(x))
+    if abs(d1) > tol:
+        return {"claim": t, "status": "mismatch",
+                "recomputed": f"{name}'({c})≈{_fmt(d1)}",
+                "how": f"数值求导：{name}'({c})≈{_fmt(d1)}≠0，"
+                       f"该点不是驻点，谈不上{word}"}
+    bad = (kind == "最小" and d2 < 0) or (kind == "最大" and d2 > 0)
+    if bad:
+        return {"claim": t, "status": "mismatch",
+                "recomputed": f"{name}''({c})≈{_fmt(d2)}",
+                "how": f"二阶条件不成立：{name}''({c})≈{_fmt(d2)}，"
+                       f"这是{'最大' if d2 < 0 else '最小'}值"}
+    return {"claim": t, "status": "ok",
+            "recomputed": f"{name}({c})={_fmt(f(x))}",
+            "how": f"数值求导：{name}'({c})≈{_fmt(d1)}（≈0，驻点成立）、"
+                   f"{name}''({c})≈{_fmt(d2)}（{word}的二阶条件成立）"}
+
+
+def _SUBST_rows(t: str, fdefs: dict, rows: list) -> list:
+    """「NAME(c)=v」代入复算（极值那一档的两条路都会用到）。
+
+    ⚠️ 实测两个跨句吃数的假修正（2026-10-17 第三轮离线复跑抓到）：
+       · `所以 AC(4)=28，MC(4)=12。` → 曾经读成「AC(4)=12」；
+       · `MC(4)=12 < AC(4)=28，所以…` → 曾经读成「MC(4)=28」。
+       判据：先按小句切（逗号/句号/比较符都切），小句内取**最后一个** `=`，
+       并禁止小句里再出现另一个「名字(数字」。
+    """
+    if _NOISY_SUB.search(t):
+        return rows
+    for cl in _CLAUSE.split(t):
+        for m in _SUBST.finditer(cl.strip()):
+            if re.search(r"[A-Za-z][A-Za-z0-9]{0,5}\s*\(\s*-?\d", m.group("mid")):
+                continue          # 小句里还有另一条 `NAME(数字` → 不猜，交给它自己的小句
+            # ⚠️ 这里**按名字**取（大小写不敏感），不走 `_pick`：`AC(6)=24` 点名了 AC，
+            #    本单元只定义了 TC 时**不许**拿 TC 代为计算（判据实测抓到过 144 这种假数）。
+            _n = m.group("name")
+            name = next((n for n in fdefs if n.lower() == _n.lower()), None)
+            if name is None:
+                continue
+            x, v = float(m.group("c")), float(m.group("v"))
+            try:
+                got = fdefs[name][2](x)
+            except Exception:                                 # noqa: BLE001
+                rows.append({"claim": t, "status": "unchecked", "recomputed": "",
+                             "how": f"{name}({x}) 算不出来"})
+                continue
+            ok = abs(got - v) <= 1e-3 * max(1.0, abs(v))
+            rows.append({"claim": t, "status": "ok" if ok else "mismatch",
+                         "recomputed": f"{_fmt(got)}",
+                         "how": f"代入复算：{name}({_fmt(x)})={_fmt(got)}"
+                                + ("（与断言一致）" if ok else f"，断言写的是 {_fmt(v)}")})
     return rows
 
 

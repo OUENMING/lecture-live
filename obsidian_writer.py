@@ -1052,6 +1052,7 @@ class ObsidianWriter:
                            "更正账本核对"),
                           (lambda r: note_guards.scrub(r), "猜测句清理"),
                           (lambda r: note_guards.ensure_caliber(r), "停产价格口径"),
+                          (lambda r: note_ledger.ensure_min_value(r), "最小平均成本补值"),
                           (lambda r: note_guards.quote_check(
                               r, materials=self._materials,
                               transcript="\n".join(

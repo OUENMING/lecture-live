@@ -322,6 +322,12 @@ class 真窗口(unittest.TestCase):
             o.close()
 
     def test_卡片高度跟内容走(self):
+        """⭐ 卡片高度跟着内容走；装不下时**卡片内部滚**（不藏块、不挤内容）。
+
+        ⚠️ 2026-10-17「上卡下字幕」改了口径：卡片有**上限**了（转录区的 60% 与
+           「至少留 2 行字幕」取小），所以"内容全在卡里"这件事由**滚动文档**保证 ——
+           这条判据量的就是它（`_card_doc` 装得下内容）。
+        """
         o = self._overlay()
         try:
             o.duty_update([_item("d1")])
@@ -333,9 +339,255 @@ class 真窗口(unittest.TestCase):
             self.assertAlmostEqual(f.origin.y + f.size.height,
                                    float(o._scroll_y) + avail, delta=1.5,
                                    msg="卡片要钉在转录区**顶边**往下长")
-            nat = o._card_natural_h(f.size.width - 2 * overlay.CARD_PAD,
-                                    list(o._card_pending), None)
-            self.assertLessEqual(nat, f.size.height + 1.0, f"内容被挤掉了：{nat} > {f.size.height}")
+            pend = list(o._card_pending)
+            if pend and pend[-1]["kind"] == "buttons" and pend[-1]["buttons"]:
+                pend.pop()            # 页脚钉在卡片底、不进滚动文档（同 `_card_plan` 的摘法）
+            nat = o._card_natural_h(f.size.width - 2 * overlay.CARD_PAD, pend, None)
+            box_h = max(0.0, nat - 2 * overlay.CARD_PAD)     # 内容盒（= 文档坐标的口径）
+            clip = float(o._card_scroll.contentView().frame().size.height)
+            if box_h <= clip + 1.0:
+                self.assertAlmostEqual(
+                    f.size.height, box_h + 2 * overlay.CARD_PAD + overlay.CARD_FOOTER_H,
+                    delta=2.0, msg="装得下时卡片高度就该等于内容高")
+            else:
+                doc_h = float(o._card_doc.frame().size.height)
+                self.assertGreaterEqual(doc_h + 1.0, box_h,
+                                        f"内容被挤掉了：文档 {doc_h} < 内容盒 {box_h}")
+        finally:
+            o.close()
+
+
+class 上卡下字幕(unittest.TestCase):
+    """⭐ 作者 2026-10-17 拍板（评估了外部意见「卡片下方 160pt 空毛玻璃」）：
+
+    卡片钉在转录区**顶边**、字幕在它**下面**继续滚（原来卡片把整块转录区藏掉 ——
+    课上改卡片就看不见字幕）。三条硬规矩，全都量**真视图的 frame**：
+
+    1. 卡片底 + `CARD_SUB_GAP` = 字幕区顶；
+    2. 字幕区高 ≥ `CARD_SUB_ROWS_MIN` 行；
+    3. **窗口 frame 开关卡片前后完全相等**（卡片不许把窗口撑大／缩小）；
+    4. 卡片高于转录区 `CARD_MAX_FRAC` 时，内容在**卡片内部**滚（页脚按钮不跟着滚）。
+    """
+
+    def _overlay(self):
+        try:
+            from overlay import Overlay
+        except ModuleNotFoundError as e:                      # pragma: no cover
+            self.skipTest(f"AppKit 不可用, 跳过: {e}")
+        try:
+            return Overlay()
+        except Exception as e:                                # noqa: BLE001
+            self.fail(f"Overlay() 构造失败: {type(e).__name__}: {e}")
+
+    @staticmethod
+    def _open(o, kind: str) -> None:
+        """开一张卡（三种：duty / wrapup / recap），并把几行字幕喂进去。"""
+        for i, (en, zh) in enumerate((
+                ("There is no class on Wednesday this week.", "这周三没有课。"),
+                ("The problem set is due on Friday.", "习题集周五截止。"),
+                ("We will start the group project next week.", "下周开始分组项目。"))):
+            o.finalize(en, zh)
+        if kind == "duty":
+            o.duty_update([_item("d1"), _item("d2")])
+            o._duty_open("d1")
+        elif kind == "wrapup":
+            o.duty_wrapup_show([_item("d1"), _item("d2")])
+        else:
+            o.recap_show({"course": "ECON10790", "date": "10-15（周四）",
+                          "points": [{"name": f"知识点{i}", "explain": "一句解释"}
+                                     for i in range(6)],
+                          "stars": ["重点一", "重点二"],
+                          "open": ["还没懂的问"],
+                          "duties": [{"type": "调课", "title": "本周三停课"}],
+                          "today": ["今天新课件"]},
+                         course="ECON10790", day="2026-10-16")
+
+    def test_卡片底加间距等于字幕区顶(self):
+        """三条几何里最硬的一条：`卡片底 + CARD_SUB_GAP == 字幕区顶`。"""
+        o = self._overlay()
+        try:
+            for kind in ("duty", "wrapup", "recap"):
+                o._card_close()
+                self._open(o, kind)
+                card = o._card_view.frame()
+                tv = o._tv._scroll.frame()
+                bottom = card.origin.y
+                top = tv.origin.y + tv.size.height
+                self.assertAlmostEqual(
+                    bottom - overlay.CARD_SUB_GAP, top, delta=0.75,
+                    msg=f"{kind}：卡片底 {bottom:.1f} + 间距 {overlay.CARD_SUB_GAP} "
+                        f"≠ 字幕区顶 {top:.1f}")
+                # 字幕区的**底边**还是原来那条线（字幕从这儿往上长）
+                self.assertAlmostEqual(tv.origin.y, float(o._scroll_y), delta=0.75,
+                                       msg=f"{kind}：字幕区底边跑了")
+        finally:
+            o.close()
+
+    def test_字幕区至少两行(self):
+        o = self._overlay()
+        try:
+            for kind in ("duty", "wrapup", "recap"):
+                o._card_close()
+                self._open(o, kind)
+                h = float(o._tv._scroll.frame().size.height)
+                need = overlay.CARD_SUB_ROWS_MIN * float(o._row_h)
+                self.assertGreaterEqual(h + 0.5, need,
+                                        f"{kind}：字幕区只有 {h:.1f}pt < {need:.1f}pt（2 行）")
+        finally:
+            o.close()
+
+    def test_卡片开着时字幕还在(self):
+        """不给「藏起来再放回来」那种实现留后门：卡片开着时字幕区**必须是可见的**。"""
+        o = self._overlay()
+        try:
+            for kind in ("duty", "wrapup", "recap"):
+                o._card_close()
+                self._open(o, kind)
+                self.assertFalse(bool(o._tv._scroll.isHidden()), f"{kind}：字幕区被藏了")
+                self.assertTrue(o._tv._scroll.frame().size.height > 0.5)
+        finally:
+            o.close()
+
+    def test_窗口frame开关卡片前后完全相等(self):
+        """⭐ 卡片**不许**动窗口（旧版：收起态开卡会自动展开面板）。"""
+        o = self._overlay()
+        try:
+            for kind in ("duty", "wrapup", "recap"):
+                o._card_close()
+                before = o._panel.frame()
+                self._open(o, kind)
+                during = o._panel.frame()
+                self.assertEqual((before.origin.x, before.origin.y,
+                                 before.size.width, before.size.height),
+                                 (during.origin.x, during.origin.y,
+                                  during.size.width, during.size.height),
+                                 f"{kind}：开卡把窗口改了（不许随卡片伸缩）")
+                o._card_close()
+                after = o._panel.frame()
+                self.assertEqual((before.origin.x, before.origin.y,
+                                  before.size.width, before.size.height),
+                                 (after.origin.x, after.origin.y,
+                                  after.size.width, after.size.height),
+                                 f"{kind}：关卡把窗口改了")
+        finally:
+            o.close()
+
+    def test_关卡片字幕区恢复全高_滚动位置与跟随不乱(self):
+        """关卡：字幕区回到**全高**，而且贴在底部（跟随态）—— 阅读位置不许跳。"""
+        o = self._overlay()
+        try:
+            for kind in ("duty", "wrapup", "recap"):
+                o._card_close()
+                for i in range(8):
+                    o.finalize(f"Line number {i} keeps the transcript rolling.", f"第 {i} 行。")
+                self.assertEqual(float(o._tv._scroll.frame().size.height),
+                                 float(o._scroll_h), "开卡前字幕区就不是全高？")
+                self._open(o, kind)
+                o._card_close()
+                self.assertAlmostEqual(float(o._tv._scroll.frame().size.height),
+                                       float(o._scroll_h), delta=0.75,
+                                       msg=f"{kind}：关卡后字幕区没恢复全高")
+                self.assertTrue(o._tv.is_at_bottom(),
+                                f"{kind}：关卡后跟随状态丢了（没贴底）")
+        finally:
+            o.close()
+
+    def test_页脚按钮不在滚动文档里(self):
+        """⭐ 「记下 / 全部忽略」钉在卡片**外框**上：内容一滚它们也点得到。
+
+        （内容块反过来必须挂在滚动文档上 —— 不然"卡片内部滚动"就是假的。）
+        """
+        o = self._overlay()
+        try:
+            for kind in ("duty", "wrapup"):
+                o._card_close()
+                self._open(o, kind)
+                btns = [x[0] for blk in o._card_pending if blk["kind"] == "buttons"
+                        for x in (blk["extra"] or [])]
+                self.assertTrue(btns, f"{kind}：没找到页脚按钮")
+                for b in btns:
+                    self.assertIs(b.superview(), o._card_view,
+                                  f"{kind}：页脚按钮进了滚动文档（一滚就点不到了）")
+                # 内容块必须在**滚动文档**里（一个都不许直接挂外框 —— 那就滚不起来）
+                kids = set(o._card_view.subviews())
+                content = []
+                for blk in o._card_pending:
+                    if blk["kind"] == "buttons":
+                        continue
+                    if blk["view"] is not None:
+                        content.append(blk["view"])
+                    ex = blk["extra"]
+                    if isinstance(ex, dict):          # duty_row：head / quote / 按钮
+                        content += [v for k, v in ex.items() if k != "buttons"]
+                self.assertTrue(content, f"{kind}：没找到内容块")
+                for v in content:
+                    self.assertNotIn(v, kids,
+                                     f"{kind}：内容块挂在外框上（卡片内部滚不起来）")
+        finally:
+            o.close()
+
+    def test_装得下的不滚_装不下的才滚(self):
+        """⭐ 文档高度 = **内容盒**（不含内边距）：装得下 → 一点也不滚；装不下 → 才滚。
+
+        ⚠️ 文档虚高的话，装得下的卡也能滚出 2×`CARD_PAD` 的**空白**（拍图里见过：
+           内容明明不长却停在半中间）—— 这条判据钉的就是那个。
+        """
+        o = self._overlay()
+        try:
+            for kind in ("duty", "wrapup"):
+                o._card_close()
+                self._open(o, kind)
+                h = float(o._card_view.frame().size.height)
+                region = float(o._scroll_h)
+                rows = overlay.CARD_SUB_ROWS_MIN * float(o._row_h)
+                cap = max(overlay.CARD_MIN_H,
+                          min(overlay.CARD_MAX_FRAC * region,
+                              region - rows - overlay.CARD_SUB_GAP))
+                capped = h + 0.5 >= cap
+                doc = float(o._card_doc.frame().size.height)
+                clip = float(o._card_scroll.contentView().frame().size.height)
+                if capped:
+                    self.assertGreater(doc, clip + 1.0, f"{kind}：封顶了却滚不动")
+                else:
+                    self.assertLessEqual(doc, clip + 1.0,
+                                         f"{kind}：装得下却还要滚（文档 {doc} > 视口 {clip}）")
+        finally:
+            o.close()
+
+    def test_高卡片在卡片内部滚动_页脚不跟着滚(self):
+        """回顾卡内容多：卡片封顶（≤ 60% 且留够字幕），内容进滚动文档，**页脚钉住**。"""
+        o = self._overlay()
+        try:
+            o.recap_show({"course": "ECON10790",
+                          "points": [{"name": f"知识点{i}", "explain": "一句解释 " * 3}
+                                     for i in range(6)],
+                          "stars": ["重点一", "重点二", "重点三"],
+                          "open": ["没懂的一", "没懂的二"],
+                          "duties": [{"type": "调课", "title": f"事件{i}"} for i in range(3)],
+                          "today": ["今天新课件"]},
+                         course="ECON10790", day="2026-10-16")
+            region = float(o._scroll_h)
+            card = o._card_view.frame()
+            # ① 封顶：不超过 60%，也不吃掉字幕那两行
+            self.assertLessEqual(card.size.height, overlay.CARD_MAX_FRAC * region + 0.5,
+                                 "卡片超过了转录区的 60%")
+            self.assertGreaterEqual(
+                float(o._tv._scroll.frame().size.height) + 0.5,
+                overlay.CARD_SUB_ROWS_MIN * float(o._row_h),
+                "卡片把字幕挤没了")
+            # ② 内容真的比视口高（= 内部滚动这条路走到了）
+            clip = float(o._card_scroll.contentView().frame().size.height)
+            doc = float(o._card_doc.frame().size.height)
+            self.assertGreater(doc, clip + 1.0,
+                               f"这张卡该滚却没滚：文档 {doc:.1f} ≤ 视口 {clip:.1f}")
+            o._card_relayout()                      # 再摆一次不许把视口/位置弄丢
+            self.assertGreater(float(o._card_doc.frame().size.height), 1.0)
+            # ③ 页脚按钮钉在**外框**上（不是滚动文档里）—— 滚起来也点得到
+            foot = [b for b in o._card_pending if b["kind"] == "buttons"]
+            if foot:
+                for btn, _lab, _code, _role in (foot[-1]["extra"] or []):
+                    self.assertIs(btn.superview(), o._card_view,
+                                  "页脚按钮进了滚动文档（滚出去就点不到了）")
         finally:
             o.close()
 

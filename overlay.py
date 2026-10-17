@@ -711,6 +711,14 @@ CARD_STARS_MAX = 3
 CARD_OPEN_MAX = 2
 CARD_DUTY_MAX = 3
 
+#: ⭐ 「上卡下字幕」（作者 2026-10-17 拍板，评估了外部意见「卡片下方 160pt 空毛玻璃」）：
+#: 卡片钉在转录区**顶边**、字幕在它下面继续滚（原来卡片占了整窗、课上改卡片就看不到字幕）。
+#: 这三个常数是那条规矩的全部数字（几何判据直接量它们，见 `test_duty_card_ui`）。
+CARD_SUB_GAP = 10.0               # 卡片底 → 字幕区顶 的间距
+CARD_SUB_ROWS_MIN = 2             # 卡片下方**至少**留几行字幕（× 当前 `_row_h`）
+CARD_MAX_FRAC = 0.60              # 卡片最高占转录区的比例（超过就**卡片内部滚动**）
+CARD_MIN_H = 96.0                 # 卡片绝对下限（极端小窗时别压成一条线）
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 卡片视觉 —— **方案 A（零色相极简）**，作者 2026-10-17 拍板（B「跟随系统强调色」不做）。
 #
@@ -1745,6 +1753,15 @@ class Overlay:
         #    渲染源整个换掉、字幕在后台照常累积）—— 不引入第二套窗口生命周期。
         self._card_kind = ""                   # "" | "duty" | "wrapup" | "recap"
         self._card_view = None                 # 懒建（没有这些功能的课一个 view 都不建）
+        #: 卡片**内部**那个滚动区（作者 2026-10-17「上卡下字幕」：卡片高了就在卡里滚）。
+        #: 内容块都挂在 `_card_doc` 上；`_card_view` 只当外框（发丝边）+ 钉住页脚按钮。
+        self._card_scroll = None
+        self._card_doc = None
+        #: 下一次 `_card_relayout` 把卡片内部滚回**顶部**（只在开卡时置真；平时不动 ——
+        #: 用户滚到哪就是哪）。
+        self._card_scroll_top = False
+        #: 开卡前字幕区的滚动位置 + 跟随状态（`(origin_y, at_bottom)`；关卡还原）。
+        self._card_sub_scroll = None
         self._card_fields: list = []           # 卡片里可编辑的输入框（`_is_editing` 要看）
         self._card_blocks: list = []           # 本次卡片建出来的子视图（关的时候撤掉）
         self._card_pending: list = []          # 待摆的块（`_card_relayout` 消费）
@@ -2559,7 +2576,11 @@ class Overlay:
             self._draft_box_y_zh = base + DRAFT_H + 4
         self._render_draft()
         self._scroll_y = BOTTOM_PAD + self._pinned
-        self._tv.set_frame(self._scroll_y, self._scroll_h)           # 转录区
+        # ⭐ 「上卡下字幕」（作者 2026-10-17）：没卡时转录区就是整段；**卡片开着时**
+        #    由 `_card_relayout` 摆（它才知道卡片最终多高 —— 两处都写就等于两个写点，
+        #    哪天两份算术分了家，卡片底与字幕顶就会差几个像素）。
+        if not self._card_kind:
+            self._tv.set_frame(self._scroll_y, self._scroll_h)       # 转录区
         # 顶栏: 从右边缘往左摆(列表是左->右顺序, 故 reversed)。sizeToFit 取文字
         # 实际宽度, 加内边距; 图标(⭐/✕)保底 28px 点击区 —— 它们的字形只有 15-24px,
         # 直接按字宽会给一个点不中的小目标。
@@ -3873,7 +3894,35 @@ class Overlay:
                 pass
             self._ve.addSubview_(v)
             self._card_view = v
+            # ⭐ 卡片内容区：一个**内部**滚动视图（作者 2026-10-17「上卡下字幕」——
+            #    卡片高于转录区约 60% 时内容在卡里滚，不再"整块藏掉"）。
+            #    内容块挂 `_card_doc`；页脚按钮挂 `_card_view`（永远点得到，见 `_card_host`）。
+            from AppKit import (NSScrollView, NSView, NSScrollElasticityAutomatic)
+            sc = NSScrollView.alloc().initWithFrame_(((0.0, 0.0), (0.0, 0.0)))
+            sc.setDrawsBackground_(False)              # 卡片只有发丝边，滚动区不许再铺底
+            sc.setHasVerticalScroller_(True)
+            sc.setAutohidesScrollers_(True)            # 不需要时不常驻（同转录区）
+            try:
+                sc.setVerticalScrollElasticity_(NSScrollElasticityAutomatic)
+            except Exception:                          # noqa: BLE001
+                pass
+            doc = NSView.alloc().initWithFrame_(((0.0, 0.0), (0.0, 0.0)))
+            sc.setDocumentView_(doc)
+            sc.setHidden_(False)
+            v.addSubview_(sc)
+            self._card_scroll, self._card_doc = sc, doc
         return self._card_view
+
+    def _card_host(self):
+        """卡片里**内容块**的父视图 —— 卡片内部那个可滚动的文档（作者 2026-10-17）。
+
+        ⚠️ 为什么不再直接用 `_card_view`：卡片高了要在**自己里面**滚（下面留字幕），
+           内容得挂在文档视图上才滚得动。
+        ⚠️ 页脚按钮**刻意**不在这里（`_card_place_buttons(..., host=…)` 指名给外框）：
+           「记下 / 全部忽略」必须永远点得到，不许跟着内容滚出去。
+        """
+        self._ensure_card_view()
+        return self._card_doc if self._card_doc is not None else self._card_view
 
     @staticmethod
     def _backing_scale() -> float:
@@ -3945,22 +3994,51 @@ class Overlay:
         except Exception:                                 # noqa: BLE001
             return None
 
-    def _card_open(self, kind: str) -> None:
-        """进卡片态：藏转录区、必要时展开面板、清掉上一张卡的子视图。
+    def _tv_scroll_state(self):
+        """字幕区此刻的**滚动位置 + 跟随状态**（`(origin_y, at_bottom)`；取不到 → `None`）。
 
-        ⚠️ 尺寸只在**进入**时改一次（同答案接管的纪律：`_apply_mode` 会取 NSScreen、
-           重设全部 subview frame、整窗重绘 —— 每块内容都调一次等于每帧重建面板）。
+        ⚠️ 关卡时要还原的就是这一对（作者 2026-10-17：「滚动位置/跟随状态不乱」）——
+           视口一高一矮，同一个 `origin` 指向的内容会变，所以还原要**在摆回全高之后**做。
+        """
+        try:
+            clip = self._tv._scroll.contentView()
+            return (float(clip.bounds().origin.y), bool(self._tv.is_at_bottom()))
+        except Exception:                                 # noqa: BLE001
+            return None
+
+    def _tv_scroll_restore(self, st) -> None:
+        """把字幕区还原到存下来的那个位置（`_tv_scroll_state` 的对手）。"""
+        if not st:
+            return
+        origin, at_bottom = st
+        try:
+            if at_bottom:
+                self._tv.scroll_to_bottom()               # 位置等价，还顺手把 _follow 摆回
+                return
+            clip = self._tv._scroll.contentView()
+            doc_h = float(self._tv._doc.frame().size.height)
+            clip.scrollToPoint_((0.0, min(max(0.0, origin),
+                                           max(0.0, doc_h - clip.bounds().size.height))))
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _card_open(self, kind: str) -> None:
+        """进卡片态：卡片钉在转录区**顶边**、字幕留在它下面继续滚（「上卡下字幕」）。
+
+        ⚠️ 与旧版的两处不同（都**删掉**了，作者 2026-10-17 拍板）：
+           · 不再 `_tv._scroll.setHidden_(True)` —— 字幕要留在卡片下面（不挡字幕）；
+           · 不再自动 `_apply_mode(False)` —— **窗口不随卡片伸缩**（判据：开关卡片
+             前后 `_panel.frame()` 完全相等）。
+        ⚠️ 尺寸只在**进入**时改一次（旧版那记「同答案接管的纪律」的话仍成立：`_apply_mode`
+           会取 NSScreen、重设全部 subview frame、整窗重绘 —— 每块内容都调一次等于
+           每帧重建面板。这里已经不再调它，但**每帧不重摆**这条纪律照旧）。
         """
         self._ensure_card_view()
         self._card_kind = kind
         self._card_clear_blocks()
         self._card_fields = []
-        if self._collapsed:
-            self._apply_mode(False)
-        try:
-            self._tv._scroll.setHidden_(True)
-        except Exception:                                 # noqa: BLE001
-            pass
+        self._card_scroll_top = True          # 新卡：内容从**顶部**看起
+        self._card_sub_scroll = self._tv_scroll_state()   # 存下字幕区的滚动位置
         self._card_view.setHidden_(False)
         self._layout()
         self._mark_dirty(urgent=True)
@@ -3973,11 +4051,10 @@ class Overlay:
         self._card_fields = []
         if self._card_view is not None:
             self._card_view.setHidden_(True)
-        try:
-            self._tv._scroll.setHidden_(False)
-        except Exception:                                 # noqa: BLE001
-            pass
-        self._layout()
+        self._layout()                        # 转录区恢复**全高**（`_card_sub_h` 见没卡）
+        self._tv_scroll_restore(self._card_sub_scroll)
+        self._card_sub_scroll = None
+        self._card_scroll_top = False
         self._mark_dirty(urgent=True)
         # ⚠️ 关了才刷新小卡：卡片开着时它藏起来了（`_layout` 里那个 `not _card_kind`）
         self.duty_update(self._duty_items)
@@ -4060,7 +4137,7 @@ class Overlay:
             lbl = self._card_new_label(CARD_LABEL_SZ, CARD_LABEL_ALPHA,
                                        weight=CARD_LABEL_WT)
             if blk.get("symbol"):
-                iv = self._symbol_icon(self._card_view, blk["symbol"],
+                iv = self._symbol_icon(self._card_host(), blk["symbol"],
                                        CARD_SYMBOL_PT, CARD_LABEL_ALPHA)
                 if iv is not None:
                     self._card_blocks.append(iv)      # ⚠️ 谁建的谁进清单 —— 关卡片时要收干净
@@ -4070,7 +4147,7 @@ class Overlay:
         if kind == "note":
             lbl = self._card_new_label(CARD_META_SZ, CARD_META_ALPHA, wrap=True)
             if blk.get("symbol"):
-                iv = self._symbol_icon(self._card_view, blk["symbol"],
+                iv = self._symbol_icon(self._card_host(), blk["symbol"],
                                        CARD_META_SZ + 1.0, CARD_META_ALPHA)
                 if iv is not None:
                     self._card_blocks.append(iv)
@@ -4093,7 +4170,7 @@ class Overlay:
             lbl.setStringValue_(blk["text"])
             hit = _make_click_view(lambda b=blk: (self._release_focus(),
                                                    b["on_act"]() if b["on_act"] else None))
-            self._card_view.addSubview_(hit)
+            self._card_host().addSubview_(hit)
             self._card_blocks.append(hit)
             blk["extra"] = hit
             return lbl
@@ -4107,7 +4184,7 @@ class Overlay:
             #    会被 `test_fontmotion_A` 判成"又抄了一份没有 tnum 的字体"（A2 收拢）。
             lbl.setFont_(_ui_font(size, 0.4 if strong else float(weight)))
         lbl.setTextColor_(self._NSColor.whiteColor().colorWithAlphaComponent_(alpha))
-        self._card_view.addSubview_(lbl)
+        self._card_host().addSubview_(lbl)
         self._card_blocks.append(lbl)         # ⚠️ 谁建的谁进清单 —— 关卡片时要收干净
         return lbl
 
@@ -4156,7 +4233,7 @@ class Overlay:
         except Exception:                                 # noqa: BLE001
             pass
 
-    def _card_button(self, label: str, role: str, on_click):
+    def _card_button(self, label: str, role: str, on_click, *, host=None):
         """卡片里**所有**按钮 / 类型胶囊的唯一工厂（作者 2026-10-17 点名）。
 
         复用的就是顶栏「双语」那套模式胶囊：**无边框 `NSButton` + 圆角层**
@@ -4165,6 +4242,10 @@ class Overlay:
         不许任何一处再自己拼「NSTextField + 背景」（那正是这轮几何 bug 的来源）。
 
         返回造好、接好 target/action、加进卡片的 `NSButton`（宽度由调用方摆）。
+
+        ⚠️ `host` = 挂到哪个父视图（默认 `_card_host()` = 卡片内部那个滚动文档）。
+           **页脚那一行必须传 `self._card_view`** —— 它要永远钉在卡片底部点得到，
+           不然内容一滚，「记下 / 全部忽略」就被滚出视野（等于把人关在卡片里）。
         """
         from AppKit import (NSButton, NSButtonTypeMomentaryChange, NSMakeRect,
                             NSTextAlignmentCenter)
@@ -4189,7 +4270,7 @@ class Overlay:
         self._targets.append(target)                      # 强引用，防 GC
         b.setTarget_(target)
         b.setAction_("clicked:")
-        self._card_view.addSubview_(b)
+        (host if host is not None else self._card_host()).addSubview_(b)
         self._card_blocks.append(b)
         return b
 
@@ -4230,7 +4311,7 @@ class Overlay:
         fld.setLineBreakMode_(self._trunc)
         fld.setStringValue_(str(value or ""))
         box.addSubview_(fld)
-        self._card_view.addSubview_(box)
+        self._card_host().addSubview_(box)
         self._card_blocks.append(box)
         self._targets.append(box)                         # 强引用（同其他子视图）
         return box, fld
@@ -4353,31 +4434,107 @@ class Overlay:
         h += CARD_FOOTER_H if footer is not None else 0.0
         return h
 
-    def _card_relayout(self) -> None:
-        """把已加的块自上而下摆成 frame，**并定卡片自己的 frame**（`_layout` 每帧叫它）。
+    def _card_plan(self) -> dict:
+        """卡片 + 字幕区的**唯一一份几何**（作者 2026-10-17「上卡下字幕」）。
 
-        ⚠️ 卡片位置与大小**只由这里写**（`_layout` 不再设它）：高度 = min(可用, 内容自然高)，
-           钉在转录区**顶边**往下长 —— 短卡不再留一大片空底（作者 2026-10-17 点名）。
-        ⚠️ **最后一行按钮钉在卡片底部**（`CARD_FOOTER_H`）：一屏放不下时，被裁掉的只会是
-           内容（最下面的那几行），而「记下 / 收起 / 全部忽略」**永远点得到** ——
-           把出口裁掉等于把人关在卡片里（实测踩过一次：`收起` 被裁掉）。
+        返回 `{}`（没卡）或：
+
+        | 键 | 是什么 |
+        |---|---|
+        | `card` | 卡片外框（面板坐标，钉转录区**顶边**） |
+        | `doc_h` | 卡片**内容文档**高度（高过视口 = 卡片内部可以滚） |
+        | `clip_h` | 内容视口高（= 卡片高 − 上下内边距 − 页脚） |
+        | `shift` | 文档坐标 = 卡片坐标 + `shift`（页脚高；没页脚是 0） |
+        | `pending` / `footer` | 摆块用的两份清单（页脚已从 `pending` 里摘出来） |
+
+        ⚠️ **只有这一处**算「卡片多高、字幕让出多少」—— `_layout`（摆转录区）与
+           `_card_relayout`（摆卡片）都问它。两处各算一套的话，卡片底与字幕顶会差
+           几个像素（那种"底下悬着一条空白"的毛病作者已经点过一次）。
+        ⚠️ 上限两条一起管：**转录区的 `CARD_MAX_FRAC`** 与 **至少留下
+           `CARD_SUB_ROWS_MIN` 行字幕**（连 `CARD_SUB_GAP` 一起算）—— 超过哪条都
+           在卡片**内部**滚，窗口不伸缩。
         """
-        if self._card_view is None:
-            return
+        if self._card_view is None or not self._card_kind:
+            return {}
         from AppKit import NSMakeRect
-        avail = max(1.0, float(getattr(self, "_scroll_h", 0.0) or 0.0))
+        region = max(1.0, float(getattr(self, "_scroll_h", 0.0) or 0.0))
         W = float(self._width) - 2 * PAD
-        x = CARD_PAD
         w = max(60.0, W - 2 * CARD_PAD)
         pending = list(self._card_pending)
         footer = None
         if pending and pending[-1]["kind"] == "buttons" and pending[-1]["buttons"]:
             footer = pending.pop()
-        H = min(avail, self._card_natural_h(w, pending, footer))
-        self._card_view.setFrame_(NSMakeRect(
-            PAD, float(self._scroll_y) + avail - H, W, H))
-        y = H - CARD_PAD
-        bottom = CARD_PAD + (CARD_FOOTER_H if footer is not None else 0.0)
+        natural = self._card_natural_h(w, pending, footer)
+        rows_h = CARD_SUB_ROWS_MIN * max(1.0, float(getattr(self, "_row_h", 0.0) or 1.0))
+        cap = min(CARD_MAX_FRAC * region, region - rows_h - CARD_SUB_GAP)
+        h = min(natural, max(CARD_MIN_H, cap))
+        shift = CARD_FOOTER_H if footer is not None else 0.0
+        clip_h = max(1.0, h - 2 * CARD_PAD - shift)
+        # ⚠️ 文档坐标 = **内容盒**（不含上下内边距 —— 那两条内边距由视口在卡片里的
+        #    位置实现）。这样"装得下"时 `doc_h == clip_h`，**一点滚动量都没有**；
+        #    若把内边距也算进文档，装得下的卡也能多滚 2×CARD_PAD（拍图里看到过
+        #    "内容明明不长却停在半中间"）。
+        content_h = max(0.0, self._card_natural_h(w, pending, None) - 2 * CARD_PAD)
+        doc_h = max(clip_h, content_h)
+        return {"card": NSMakeRect(PAD, float(self._scroll_y) + region - h, W, h),
+                "doc_h": doc_h, "clip_h": clip_h, "shift": shift,
+                "x": CARD_PAD, "w": w, "pending": pending, "footer": footer}
+
+    def _card_sub_h(self) -> float:
+        """字幕区**此刻**该多高：卡片开着就让出「卡片 + 间距」，否则是整段转录区。
+
+        （`_layout` 每帧问它一次；算术在 `_card_plan` 里，只有那一份。）
+        """
+        plan = self._card_plan()
+        if not plan:
+            return max(1.0, float(getattr(self, "_scroll_h", 0.0) or 0.0))
+        return max(0.0, float(self._scroll_h) - plan["card"].size.height - CARD_SUB_GAP)
+
+    def _card_scroll_to_top(self, doc_h: float, clip_h: float) -> None:
+        """卡片内部滚回**顶部**（非翻转坐标系：origin.y = 0 是底部，顶部 = docH − 视口高）。"""
+        try:
+            clip = self._card_scroll.contentView()
+            clip.scrollToPoint_((0.0, max(0.0, float(doc_h) - float(clip_h))))
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _card_relayout(self) -> None:
+        """把已加的块自上而下摆成 frame，**并定卡片自己的 frame**（`_layout` 每帧叫它）。
+
+        ⚠️ 卡片位置与大小**只由 `_card_plan` 写**（`_layout` 那边只摆转录区）：高度 =
+           min(内容自然高, 上限)，钉在转录区**顶边**往下长。
+        ⚠️ 内容挂在卡片**内部**的滚动文档上（`_card_host()`）：高过视口就在卡里滚，
+           不再"整块藏掉"（作者 2026-10-17「上卡下字幕」）。
+        ⚠️ **最后一行按钮钉在卡片底部**（`CARD_FOOTER_H`，挂在 `_card_view` 上而不是
+           文档上）：内容滚它不滚 —— 把出口裁掉等于把人关在卡片里（实测踩过一次）。
+        """
+        plan = self._card_plan()
+        if not plan:
+            return
+        from AppKit import NSMakeRect
+        self._card_view.setFrame_(plan["card"])
+        # ⭐ 字幕区跟着卡片的**实际高度**走（内容一变就重摆 —— 卡片变高，字幕区当场缩，
+        #    不能等到下一帧 `_layout`）。算术只有 `_card_sub_h` 一份。
+        self._tv.set_frame(float(self._scroll_y), self._card_sub_h())
+        if self._card_scroll is not None and self._card_doc is not None:
+            self._card_scroll.setFrame_(
+                NSMakeRect(0.0, CARD_PAD + plan["shift"],
+                           plan["card"].size.width, plan["clip_h"]))
+            self._card_doc.setFrame_(
+                NSMakeRect(0.0, 0.0, plan["card"].size.width, plan["doc_h"]))
+            if self._card_scroll_top and plan["pending"]:
+                # ⚠️ 只在**有内容**时滚这一次并清标记：开卡那一帧 `_layout` 先跑一遍
+                #    （块还没加进来、文档高度≈0），提前清掉的话内容进来时就不滚了 ——
+                #    表现为"卡片一开就停在半中间"（2026-10-17 拍图抓到的）。
+                self._card_scroll_to_top(plan["doc_h"], plan["clip_h"])
+                self._card_scroll_top = False     # 只滚这一次：之后用户滚到哪就是哪
+        x = plan["x"]
+        w = plan["w"]
+        pending = plan["pending"]
+        footer = plan["footer"]
+        H = plan["doc_h"]
+        y = H                                # ⚠️ 文档 = **内容盒**：块的上下内边距由视口
+        bottom = 0.0                         #    在卡片里的位置实现（见 `_card_plan`）
         for i, blk in enumerate(pending):
             kind = blk["kind"]
             if kind == "sub" and not self._card_sub_text:
@@ -4401,7 +4558,9 @@ class Overlay:
             h = self._card_block_h(blk, w)
             y -= h
             if y < bottom:
-                # 放不下就**整块藏掉**（含它的图标 / 旁注）—— 留着会在旧 frame 上露半行
+                # ⚠️ 到这儿的块**不该存在**（文档高度就是内容自然高，摆得下）——
+                #    真到了只可能是高度算术与摆放算术分了家：藏掉它、别在旧 frame
+                #    上露半行。作者 2026-10-17 之后正常路径靠**卡片内部滚动**兜住。
                 try:
                     v.setHidden_(True)
                     if blk["extra"] is not None:
@@ -4472,7 +4631,9 @@ class Overlay:
                 v.setFrame_(((x, y), (w, h)))
             y -= 2.0
         if footer is not None:
-            self._card_place_buttons(footer, x, CARD_PAD + CARD_FOOTER_H, w, CARD_PAD)
+            # ⚠️ `host=self._card_view`：页脚**不**进滚动文档 —— 永远钉在卡片底部。
+            self._card_place_buttons(footer, x, CARD_PAD + CARD_FOOTER_H, w, CARD_PAD,
+                                     host=self._card_view)
 
     def _card_place_chips(self, blk, x, y, w, bottom: float = CARD_PAD) -> float:
         """类型胶囊那一行：`考试 / 作业截止 / 调课 / 其他`。
@@ -4505,7 +4666,8 @@ class Overlay:
             cx += bw + CARD_BTN_GAP
         return y - 2.0
 
-    def _card_place_buttons(self, blk, x, y, w, bottom: float = CARD_PAD) -> float:
+    def _card_place_buttons(self, blk, x, y, w, bottom: float = CARD_PAD, *,
+                            host=None) -> float:
         """按钮那一行。
 
         ⭐ 每颗按钮的层级由**它自己声明**（`card_button_specs`）→ 工厂 `_card_button`：
@@ -4523,7 +4685,8 @@ class Overlay:
             for label, code, role in specs:
                 btn = self._card_button(
                     label, role,
-                    lambda c=code, b=blk: (b["on_act"](c) if b["on_act"] else None))
+                    lambda c=code, b=blk: (b["on_act"](c) if b["on_act"] else None),
+                    host=host)
                 blk["extra"].append([btn, str(label), str(code), str(role)])
         row_rects = blk.setdefault("rows", [])
         del row_rects[:]

@@ -92,32 +92,67 @@ RECAP_A = {
 def _fit_panel(o, need_h: float) -> None:
     """把面板加高到装得下卡片内容（**探针专用**）。
 
-    ⚠️ 卡片放不下的块会被**整块藏掉**（设计如此：宁可少显示，也不在旧 frame 上露半行）。
-       截图前不加高，拍出来的「这一块没有」就会是假象（2026-10-17 实测踩过）。
+    ⚠️ 2026-10-17「上卡下字幕」之后卡片**不再藏块**（高了就在卡片里滚），但卡片仍然
+       有上限（转录区的 60%；下面至少留 2 行字幕）—— 加高面板能让回顾那张卡多露几块。
        真课上内容短、或用户自己拉窗口，不需要这一步。
+    ⚠️ 加高要**夹在屏幕里**（顶边尽量不动、不够就往下让）：把自己推到屏幕外时，
+       系统会把窗挪回来 —— 而截图那一刻拍的还是旧坐标 → 拍到的是**桌面**
+       （2026-10-17 实测踩过一次：05 那张拍出了一屏别人的窗口）。
     """
-    from AppKit import NSMakeRect
+    from AppKit import NSMakeRect, NSScreen
     f = o._panel.frame()
-    if need_h > f.size.height:
-        o._panel.setFrame_display_(
-            NSMakeRect(f.origin.x, f.origin.y - (need_h - f.size.height),
-                       f.size.width, need_h), True)
+    scr = o._panel.screen() or NSScreen.mainScreen()
+    vis = scr.visibleFrame() if scr is not None else None
+    if vis is not None:
+        need_h = min(need_h, vis.size.height - 16.0)      # 屏幕本来就矮：别贪
+    if need_h <= f.size.height:
+        o.pump()
+        return
+    top = f.origin.y + f.size.height
+    oy = top - need_h
+    if vis is not None:
+        oy = max(vis.origin.y + 8.0,
+                 min(oy, vis.origin.y + vis.size.height - need_h - 8.0))
+    o._panel.setFrame_display_(
+        NSMakeRect(f.origin.x, oy, f.size.width, need_h), True)
     o.pump()
 
 
-def _clipped_blocks(o) -> list:
-    """被空间裁掉的块（`kind`）—— 探针把它打出来，免得拿一张缺块的图去评审。"""
-    out = []
-    for blk in o._card_pending:
-        v = blk["view"]
-        if v is None or blk["kind"] in ("hdr_action", "sub"):
-            continue
-        try:
-            if v.isHidden():
-                out.append(blk["kind"])
-        except Exception:                                     # noqa: BLE001
-            pass
-    return out
+def _card_scroll_state(o) -> str:
+    """卡片此刻的状态：`""`（没卡）或 `"滚 内容/视口"`（内容比视口高 = 卡片内部可滚）。
+
+    ⚠️ 2026-10-17「上卡下字幕」之后探针不再报「哪些块被藏掉」—— 块不再被藏，
+       改由**卡片内部滚动**兜住；这里报的是"这一张卡要不要滚"，免得拿一张
+       （按设计）只露一半的图去评审。
+    """
+    if not o._card_kind or o._card_scroll is None:
+        return ""
+    try:
+        doc = float(o._card_doc.frame().size.height)
+        clip = float(o._card_scroll.contentView().frame().size.height)
+    except Exception:                                         # noqa: BLE001
+        return ""
+    return f"卡片内部{'要滚' if doc > clip + 1.0 else '不滚'}（内容 {doc:.0f} / 视口 {clip:.0f}）"
+
+
+#: `_feed` 的游标（每次接着喂下一句 —— 免得同一句在截图里出现两遍）。
+_FEED_I = [0]
+
+
+def _feed(o, n: int = 1) -> None:
+    """再喂 n 行字幕 —— 「下方有字幕在滚」那几张靠它（卡片开着字幕也照常走）。"""
+    for _ in range(n):
+        en, zh = _MORE_LINES[_FEED_I[0] % len(_MORE_LINES)]
+        _FEED_I[0] += 1
+        o.finalize(en, zh)
+
+
+#: 卡片那几张之前补喂的句子（开头 `_captions` 已经喂过两句）。
+_MORE_LINES = [
+    ("The problem set is due on Friday afternoon.", "习题集周五下午截止。"),
+    ("We will start the group project next week.", "下周开始做分组项目。"),
+    ("Please read chapter five before the next class.", "下次上课前请读第五章。"),
+]
 
 
 def _captions(o) -> None:
@@ -214,9 +249,8 @@ def main() -> int:
                 pass
         shots.append((name, n))
         trace.append(f"{name}: {n} 字节")
-        clipped = _clipped_blocks(o)
-        print(f"  {name}.png {n} 字节" + (f" ⚠ 有块被裁掉：{clipped}" if clipped else ""),
-              flush=True)
+        state = _card_scroll_state(o)
+        print(f"  {name}.png {n} 字节" + (f" · {state}" if state else ""), flush=True)
 
     with isolated_window_file():                 # ⚠️ `.window` 先备份、跑完还原
         o = overlay.Overlay(on_lost=lambda: True,
@@ -236,7 +270,11 @@ def main() -> int:
             o.duty_update(board.items())
             shot(o, "01-chip")
 
+            # ⚠️ 卡片那几张把面板加高（= 用户自己把窗拉大）：卡片「上卡下字幕」的**完整样子**
+            #    在默认高的窗里只能看到卡片被 60% 封顶的那一截 —— 评审要看的是布局本身。
+            _fit_panel(o, 780)
             round1 = board.items()
+            _feed(o, 2)                          # ⭐ 卡片开着也要有字幕在下面滚（上卡下字幕）
             o._chip_click()                      # 点小卡 = 打开最新的那条
             shot(o, "02-card")
 
@@ -250,11 +288,14 @@ def main() -> int:
             shot(o, "03-failed")
 
             o._card_close()
+            _feed(o, 1)
             o.duty_wrapup_show(round1)
             shot(o, "04-wrapup")
             o.duty_wrapup_finish()
 
-            _fit_panel(o, 780)               # 课前回顾块多：先把面板加高，别让块被裁掉
+            _fit_panel(o, 780)               # 课前回顾块多：先把面板加高，多露几块
+            _feed(o, 1)                      # ⚠️ 必须在 `recap_show` **之前**喂：教授一开口
+                                             #    回顾就按原规则淡出（喂在后面会把卡片拍没）
             o.recap_show(RECAP_A, course="ECON10790", day=RECAP_DAY)
             shot(o, "05-recap-a")
             no_slides = {k: v for k, v in RECAP_A.items() if k != "today"}

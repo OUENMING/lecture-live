@@ -36,10 +36,16 @@ def _shot(path: pathlib.Path, *, region=None) -> int:
 
 def _region_of(win) -> tuple:
     """`NSWindow` frame（左下原点）→ `screencapture -R`（左上原点）。
-    ⚠️ 别用 `-l <windowNumber>`：probe_keyentry 实测截出来的不是这张窗。"""
+    ⚠️ 别用 `-l <windowNumber>`：probe_keyentry 实测截出来的不是这张窗。
+    ⚠️ 翻转用的屏高必须是**这张窗所在的那块屏**（`win.screen()`）—— 多显示器下
+       `NSScreen.mainScreen()` 可能是另一块（高/原点都不同）→ 坐标系翻转错位，
+       拍出来的是**别人窗口**（2026-10-17 实测：等宽双屏时拍到了一屏网页）。"""
     from AppKit import NSScreen
     f = win.frame()
-    h = NSScreen.mainScreen().frame().size.height
+    scr = getattr(win, "screen", None)
+    scr = scr() if callable(scr) else None
+    scr = scr or NSScreen.mainScreen()
+    h = scr.frame().size.height if scr is not None else 0.0
     pad = 24.0
     return (f.origin.x - pad, h - (f.origin.y + f.size.height) - pad,
             f.size.width + pad * 2, f.size.height + pad * 2)

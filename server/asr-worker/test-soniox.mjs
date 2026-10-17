@@ -530,3 +530,48 @@ test("S19 eu：配上就参与 cron 回收（各用各的 key、各推各的游�
     { method: "POST", body: JSON.stringify({ region: "xx" }) }))).json();
   assert.deepEqual(bad, { error: "bad_region" });
 }));
+
+// ---------- 20. 大洲表（默认选路，表驱动） ----------
+test("S20 大洲：AS/OC->jp、EU/AF->eu（没配则 us）、其余 us；国家表优先；没配的区永不被选", () => withHarness({}, async (h) => {
+  const { code } = await newCode(h, "amy");
+  const envs = {
+    "只有 us": h.env,
+    "+jp": { ...h.env, SONIOX_KEY_JP: "soniox-jp-key" },
+    "+eu": { ...h.env, SONIOX_KEY_EU: "soniox-eu-key" },
+    "+jp+eu": { ...h.env, SONIOX_KEY_JP: "soniox-jp-key", SONIOX_KEY_EU: "soniox-eu-key" },
+  };
+  // 每个大洲 × 四种配置（列序 = envs 的键序）
+  const WANT = {
+    AS: ["us", "jp", "us", "jp"], OC: ["us", "jp", "us", "jp"],
+    EU: ["us", "us", "eu", "eu"], AF: ["us", "us", "eu", "eu"],
+    NA: ["us", "us", "us", "us"], SA: ["us", "us", "us", "us"], AN: ["us", "us", "us", "us"],
+  };
+  const names = Object.keys(envs);
+  for (const [cont, want] of Object.entries(WANT)) {
+    for (let i = 0; i < names.length; i++) {
+      const j = await (await h.call(h.keyReq(`Bearer ${code}`, { continent: cont }), envs[names[i]])).json();
+      assert.equal(j.region, want[i], `${cont} / ${names[i]}`);
+    }
+  }
+  // 国家表**优先于**大洲表：CN/HK/MO/TW/JP/KR 即使大洲标成 EU 也走 jp（jp 配了）
+  for (const cc of ["CN", "HK", "MO", "TW", "JP", "KR"]) {
+    const j = await (await h.call(h.keyReq(`Bearer ${code}`, { country: cc, continent: "EU" }), envs["+jp+eu"])).json();
+    assert.equal(j.region, "jp", cc);
+  }
+  // 没配 jp（fail-safe）：国家表落空 -> 大洲兜底；AS/OC 也是 us
+  assert.equal((await (await h.call(h.keyReq(`Bearer ${code}`, { country: "CN", continent: "AS" }), envs["+eu"])).json()).region,
+    "us", "CN 没 jp key -> us");
+  assert.equal((await (await h.call(h.keyReq(`Bearer ${code}`, { country: "IE", continent: "EU" }), envs["+eu"])).json()).region,
+    "eu", "IE + eu key -> eu");
+  assert.equal((await (await h.call(h.keyReq(`Bearer ${code}`), envs["+jp+eu"])).json()).region,
+    "us", "没有 request.cf -> us");
+  assert.equal((await (await h.call(h.keyReq(`Bearer ${code}`, { continent: "eu" }), envs["+eu"])).json()).region,
+    "eu", "小写也认");
+  // ws / 上游 key 跟着大洲走
+  await h.call(h.keyReq(`Bearer ${code}`, { continent: "EU" }), envs["+eu"]);
+  assert.deepEqual([h.calls.mint.at(-1).url, h.calls.mint.at(-1).auth],
+    ["https://api.eu.soniox.com/v1/auth/temporary-api-key", "Bearer soniox-eu-key"]);
+  await h.call(h.keyReq(`Bearer ${code}`, { continent: "OC" }), envs["+jp"]);
+  assert.deepEqual([h.calls.mint.at(-1).url, h.calls.mint.at(-1).auth],
+    ["https://api.jp.soniox.com/v1/auth/temporary-api-key", "Bearer soniox-jp-key"]);
+}));

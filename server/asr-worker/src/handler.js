@@ -376,7 +376,7 @@ async function sonioxKey(env, code, install, ev, request) {
   const probe = b.purpose === "probe";
   const want = typeof b.region === "string" ? b.region.trim().toLowerCase() : "";
   const explicit = REGION_NAMES.includes(want) && regionKey(env, want) ? want : "";
-  const region = explicit || pickRegion(ev.country, env);
+  const region = explicit || pickRegion(ev.country, env, request.cf?.continent);
   const max_session_s = probe ? PROBE_MAX_SESSION_S : maxSessionS(env);
   ev.model = STT_RT_MODEL;
   const mint = await mintTempKey({

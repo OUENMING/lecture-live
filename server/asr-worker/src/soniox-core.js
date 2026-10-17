@@ -49,12 +49,20 @@ const JP_COUNTRIES = new Set(["CN", "HK", "MO", "TW", "JP", "KR"]);
 export const apiBase = (region) => REGIONS[region].api;
 export const wsUrl = (region) => REGIONS[region].ws;
 
-// 走哪个区：**两个条件都满足**才日本 —— ① 配了日本 key ② 访客国家在上表；否则一律美国。
+// 走哪个区。**三层**判据（选择前都要求那个区配了 key，fail-safe：没配的区永远不选）：
+//   ① 国家表（CN/HK/MO/TW/JP/KR）-> jp；
+//   ② request.cf.continent：AS/OC -> jp；EU/AF -> eu；其余（NA/SA/AN/空）-> us；
+//   ③ 都没有 -> us。
 // ⚠️ 显式 `region=`（客户端探测后带的）**不在这里** —— 那是 `/v1/soniox/key` 的请求参数，由 handler 先判
 //    「那个区配没配 key」再落到本函数（没配就忽略回默认）。
-// 现在只配了美国 key，所以第一个条件 = false，自然全走美国；以后加了 SONIOX_KEY_JP 就自动切。
-export function pickRegion(country, env) {
-  return env?.SONIOX_KEY_JP && JP_COUNTRIES.has(String(country || "").toUpperCase()) ? "jp" : "us";
+// 现在只配了美国 key，所以前三层里 ① ② 的 jp/eu 都落空 -> 全走美国；加了 SONIOX_KEY_JP / SONIOX_KEY_EU 自动切。
+export function pickRegion(country, env, continent = "") {
+  const cc = String(country || "").toUpperCase();
+  if (env?.SONIOX_KEY_JP && JP_COUNTRIES.has(cc)) return "jp";
+  const cont = String(continent || "").toUpperCase();
+  if ((cont === "AS" || cont === "OC") && env?.SONIOX_KEY_JP) return "jp";
+  if ((cont === "EU" || cont === "AF") && env?.SONIOX_KEY_EU) return "eu";
+  return "us";
 }
 
 // 单次会话上限（秒）：env 给了就用，夹进官方允许的 [1, 18000]；没给 / 非法 -> 默认 3 h。

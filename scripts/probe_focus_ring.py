@@ -289,9 +289,13 @@ def main() -> int:
                                    if isinstance(f, NSSearchField)), None)
                 shot(h.window, "03-panel-idle")
                 if search is not None:
-                    raw2 = out / "_raw-03.png"
-                    _shot(raw2, region=_view_region(search, pad=9.0, max_w=ZOOM_W))
-                    _zoom(py, raw2, out / "03-zoom.png")
+                    raw3 = out / "_raw-03.png"
+                    _shot(raw3, region=_view_region(search, pad=9.0, max_w=ZOOM_W))
+                    _zoom(py, raw3, out / "03-zoom.png")
+                    try:
+                        raw3.unlink()
+                    except OSError:
+                        pass
                     h.window.makeFirstResponder_(search)
                     _pump_app(0.6)
                     shot(h.window, "04-panel-editing")

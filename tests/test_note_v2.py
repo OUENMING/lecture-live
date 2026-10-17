@@ -186,10 +186,36 @@ class Align(unittest.TestCase):
         self.assertEqual(nv.align({"sections": []}, chat=chat), {})
         self.assertEqual(calls, [])
 
-    def test_chat_炸了返回空(self):
+    def test_chat_炸了要报出来_不许吞(self):
+        """⚠️ 第六轮第 2 条：吞成 `{}` 会让上层以为"模型说一条都没覆盖" ——
+        三节课全报「0/117 条落到节里」就是这么来的。"""
         def boom(s, u, m):
             raise RuntimeError("x")
-        self.assertEqual(nv.align(REVIEW, chat=boom), {})
+        got = nv.align(REVIEW, chat=boom)
+        self.assertIn("failed", got)
+        self.assertIn("RuntimeError", got["failed"])
+
+    def test_有骨架时不再要逐条回执(self):
+        """⭐ 有骨架时只问两件事（引用了哪些课件、哪几条没讲到）—— 回执小到不会截断。
+
+        ⚠️ 原来那版要模型把上百条要点**逐条抄一遍再配节**，输出超 2000 tokens
+           被截断 → `JSONDecodeError` → `{}` → 覆盖度全 0。
+        """
+        seen: dict = {}
+
+        def chat(s, u, m):
+            seen["user"], seen["sys"] = u, s
+            return {"materials_used": ["final.md"],
+                    "not_covered": [{"i": 1, "why": "没找到"}],
+                    "notes": "还行"}
+        sk = [{"i": 1, "title": "T", "t0": "13:16:28", "t1": "13:26:35",
+               "points": [{"ts": "13:17:46", "zh": "停产价格", "en": "", "terms": [],
+                           "kind": "要点"}]}]
+        got = nv.align(REVIEW, chat=chat, skeleton=sk)
+        self.assertEqual(got["materials_used"], ["final.md"])
+        self.assertEqual(got["missing"][0]["point"], "停产价格")
+        self.assertNotIn('"covered"', seen["sys"], "有骨架时不该再要逐条 covered")
+        self.assertIn("最多 10 条", seen["sys"])
 
 
 class VerifyNumbers(unittest.TestCase):

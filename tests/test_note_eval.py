@@ -124,13 +124,20 @@ class TestCoverage(unittest.TestCase):
         self.assertEqual((got["n_covered"], got["n_points"]), (3, 3), got)
         self.assertEqual((got["n_ok"], got["n_chapters"]), (2, 2))
 
-    def test_第一句在第一节之前也算覆盖(self):
-        got = ne.cover_by_time(self.SK, [{"heading": "一", "ts": "12:02:00"}])
-        self.assertTrue(got["rows"][0]["points"][0]["ok"], got)
+    def test_第一节之前的要点不算覆盖(self):
+        """⭐ 作者抓到的那种缺口：小节从 12:05 才开始，12:01 那一条没有节。"""
+        got = ne.cover_by_time(self.SK, [{"heading": "一", "ts": "12:05:00"}])
+        self.assertFalse(got["rows"][0]["points"][0]["ok"], got["rows"][0])
+        self.assertEqual(got["n_covered"], 2, "12:09 与 12:15 都在 12:05 的半径里")
 
     def test_没有节就是没覆盖(self):
         got = ne.cover_by_time(self.SK, [])
         self.assertEqual(got["n_covered"], 0)
+
+    def test_半径与产品一致(self):
+        """评测那份是同一口径的**第二实现**：常量漂了，两边的数就对不上了。"""
+        import note_cover
+        self.assertEqual(ne.SECTION_SPAN, note_cover.SECTION_SPAN)
 
 
 class TestTerms(unittest.TestCase):

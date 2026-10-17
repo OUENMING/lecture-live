@@ -134,47 +134,62 @@ class BlockFor(unittest.TestCase):
 
 
 class Report(unittest.TestCase):
-    """生成后核对：**每一章至少要有一个知识点落到某一节**。"""
+    """生成后核对：**按时间窗算**（作者第六轮第 2 条，不再看模型的对齐回执）。
+
+    口径：要点的 `ts` 落在某一节的 `[起点, 起点+SECTION_SPAN)` 里 → 这一条有节。
+    fixture 是 10-15 那节课的真实时间戳（要点 13:17:46 / 13:22:10 / 13:29:31 / 13:39:00）。
+    """
 
     def _sk(self):
         return nc.skeleton(CHAPTERS, ATOMS)
 
     def test_作者抓到的那个缺口会被报出来(self):
-        """E 的形态：节从 13:23 才开始，13:16–13:23 的内容没有独立知识点。
+        """E 的形态：小节从 13:23 才开始，13:16–13:23 的内容没有节。
 
-        ⚠️ 章节级"有没有节"是拦不住的（13:23 落在第一章窗口里）——
-           必须**逐条要点**核：停产价格那两条没落到任何一节 → ⚠。
+        ⚠️ 这正是"按时间窗算"要抓的东西：那四条要点（13:17:46 ×3、13:22:10）
+           都落在**第一节开始之前** → 章 1 报 ⚠，并进「还没落到的要点」。
         """
         secs = [{"heading": "1. [13:23] 二阶导数与凹凸性", "ts": "13:23"},
                 {"heading": "2. [13:29] 平均成本", "ts": "13:29"}]
-        # 编号是全局的：章 1 = 1..4、章 2 = 5、章 3 = 6
-        cov = [{"i": 5, "section": "2. [13:29] 平均成本"},      # 章 2 的那一条
-               {"i": 6, "section": "2. [13:29] 平均成本"}]      # 章 3 的那一条
-        rep = nc.report(self._sk(), secs, cov)
+        rep = nc.report(self._sk(), secs)
         rows = {r["i"]: r for r in rep["rows"]}
-        self.assertFalse(rows[1]["ok"], "第一章（停产价格 / Exercise 1）该报 ⚠")
+        self.assertFalse(rows[1]["ok"], "第一章（13:16–13:23）该报 ⚠")
         self.assertEqual(rep["n_chapters"], 3)
         self.assertTrue(rows[2]["ok"] and rows[3]["ok"])
         miss = {m["point"] for m in rep["missing"]}
         self.assertIn("停产价格等于该产量下的平均成本，即 2.89。", miss)
-        self.assertEqual(rep["n_covered"], 2, "只有两条落到了节里")
+        self.assertEqual(rep["n_covered"], 2, "只有 13:29 之后的那两条有节")
 
     def test_全覆盖时全绿(self):
         secs = [{"heading": f"{i}. 节", "ts": t} for i, t in
-                enumerate(("13:18", "13:30", "13:40"), 1)]
-        cov = [{"i": i, "section": f"{c}. 节"}
-               for c, gis in ((1, [1, 2, 3, 4]), (2, [5]), (3, [6])) for i in gis]
-        rep = nc.report(self._sk(), secs, cov)
+                enumerate(("13:16", "13:30", "13:40"), 1)]
+        rep = nc.report(self._sk(), secs)
         self.assertEqual(rep["n_ok"], 3)
         self.assertEqual(rep["n_covered"], rep["n_points"])
         self.assertEqual(rep["missing"], [])
 
-    def test_一章没有任何节也要报(self):
-        rep = nc.report(self._sk(), [{"heading": "1. 甲", "ts": "13:30"}],
-                        [{"i": 5, "section": "1. 甲"}])
+    def test_最后一章没有节也要报(self):
+        """节都在前半节（13:17）→ 13:39 那条要点超出半径（900 秒）→ 章 3 ⚠。"""
+        rep = nc.report(self._sk(), [{"heading": "1. 甲", "ts": "13:17"}])
         rows = {r["i"]: r for r in rep["rows"]}
+        self.assertTrue(rows[1]["ok"])
         self.assertFalse(rows[3]["ok"])
-        self.assertIn("这一章的要点一条都没落到节里", rows[3]["why"])
+        self.assertIn("没落到节里", rows[3]["why"])
+
+    def test_半径边界(self):
+        """`起点 + SECTION_SPAN` 之内算覆盖、之外不算（常量变了这里会红）。"""
+        sk = [{"i": 1, "title": "章", "t0": "13:00:00", "t1": "14:00:00",
+               "points": [{"ts": "13:14:59", "zh": "之内"}, {"ts": "13:15:00", "zh": "之外"}]}]
+        rep = nc.report(sk, [{"heading": "1. 节", "ts": "13:00"}])
+        pts = rep["rows"][0]["points"]
+        self.assertEqual([p["ok"] for p in pts], [True, False], nc.SECTION_SPAN)
+        self.assertEqual(pts[0]["section"], "1. 节")
+
+    def test_没有要点的章看有没有节(self):
+        sk = nc.skeleton([{"status": "final", "title_zh": "空章", "t0": "13:20:00",
+                           "t1": "13:30:00"}], [])
+        self.assertTrue(nc.report(sk, [{"heading": "1. 节", "ts": "13:25"}])["rows"][0]["ok"])
+        self.assertFalse(nc.report(sk, [{"heading": "1. 节", "ts": "13:45"}])["rows"][0]["ok"])
 
     def test_编号是全局的_不是逐章重来(self):
         """⚠️ 自查抓到过：逐章 `flat_points([ch])` → 每章 `gi` 都从 1 开始 → 对齐全错位。"""
@@ -204,6 +219,24 @@ class Wiring(unittest.TestCase):
         self.assertIn("note_cover.skeleton", src, "骨架没建")
         self.assertIn('review["cover"] = note_cover.report(', src, "报告没落进 review")
         self.assertIn("skeleton=sk", src, "骨架没传给 review/align")
+
+    def test_报告不再吃模型的对齐结果(self):
+        """⭐ 第六轮第 2 条：`report` 只吃（骨架, 小节）—— 传进去的 `covered` 一律不看。
+
+        ⚠️ 原来它吃 `review["covered"]`，而那一份回执会被 `max_tokens` 截断 →
+           `{}` → 三节课全报「0/117 条落到节里，缺 117 条」。
+        """
+        import inspect
+        self.assertEqual(list(inspect.signature(nc.report).parameters)[:2],
+                         ["sk", "sections"])
+        src = self._src("obsidian_writer.py")
+        self.assertNotIn("review.get(\"covered\")", src, "写端又把模型的对齐喂给报告了")
+        self.assertIn('got.get("failed")', src, "对齐失败没报出来")
+
+    def test_对齐失败要报_不许吞成空(self):
+        """`align` 内部吞异常 = 上层以为"模型说一条都没覆盖"。"""
+        src = self._src("note_v2.py")
+        self.assertIn('return {"failed":', src)
 
     def test_两处渲染都用它(self):
         rd = self._src("note_render.py")

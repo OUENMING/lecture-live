@@ -673,7 +673,7 @@ def note_page(d) -> str:
         body = ""
         if cv.get("rows"):
             body += ("<h3>章节覆盖</h3><p class=\"muted\">章节与实时要点来自课堂实时分章"
-                     "（粒度不由模型定）。</p>"
+                     "（粒度不由模型定）；覆盖按时间窗算 —— 这段课时间上有没有小节。</p>"
                      "<table><tr><th>章节（时间段）</th><th>实时要点</th><th>覆盖</th></tr>")
             for r in cv["rows"]:
                 n_ok = sum(1 for x in r["points"] if x["ok"])

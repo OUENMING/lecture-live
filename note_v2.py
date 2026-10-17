@@ -153,14 +153,21 @@ REVIEW_SYS = """你是课堂笔记写作者。给一名靠中文听英文课的�
  "review_plan": ["课后可以先做的 2–3 件事（中文，带分钟数）"]}
 只输出 JSON。"""
 
-ALIGN_SYS_SK = """你在给一节英文课的**复盘笔记**做覆盖度核对。输入是：
-① 这节课的**知识点清单**（来自课堂实时分章 + 实时要点，每条前面有编号 `[n]`）；
+#: 有骨架时的对齐（**辅助**，作者第六轮第 2 条）。
+#: ⭐ 它不再负责覆盖度的**数字**：那句"每条要点给一行"的输出要点上百条时会被
+#: `max_tokens` 截断 → `{}` → 三节课全报"0/117 条落到节里"。数字由
+#: `note_cover.report` 按时间窗自己算；这里只留两样**模型看得见而代码看不见**的：
+#: 笔记引用了哪些课件、以及它觉得哪几条没讲到（当提示，最多 10 条）。
+ALIGN_SYS_SK = """你在给一节英文课的**复盘笔记**做**课件核对**。输入是：
+① 这节课的知识点清单（来自课堂实时分章 + 实时要点，每条前面有编号 `[n]`）；
 ② 这份笔记的小节标题清单。
 请输出严格 JSON：
-{"covered": [{"i": <编号（整数，原样抄）>, "section": "覆盖它的小节标题，或 '缺失'"}],
- "materials_used": ["笔记里引用到的课件文件名"],
+{"materials_used": ["笔记里引用到的课件文件名"],
+ "not_covered": [{"i": <编号（整数，原样抄）>, "why": "为什么觉得没讲到（≤20 字）"}],
  "notes": "一句总评（≤60 字）"}
-⚠️ 每一条都要给一行，编号一条不许漏、不许造新编号。只做对照，不改写知识点。只输出 JSON。"""
+⚠️ `not_covered` **最多 10 条**：只写你确实在小节标题里找不到出处的，编号只许原样抄。
+⚠️ 覆盖度的数字由代码按时间窗算、不看你这一栏 —— 这一栏只是给作者的提示。
+⚠️ 只做对照，不改写知识点。只输出 JSON。"""
 
 ALIGN_SYS = """你在给一节英文课的**复盘笔记**做覆盖度核对与课件对齐。输入是：
 ① 教授这节课讲过的知识点清单（来自分块转录，按时间排序，已带时间戳）；
@@ -505,11 +512,17 @@ def _plots_menu() -> str:
 # ---------------------------------------------------------------- 覆盖度对齐
 def align(review_data: dict, *, chat, materials=None,
           max_tokens: int = ALIGN_MAX_TOKENS, skeleton: list | None = None) -> dict:
-    """覆盖度 + 课件对齐（1 次调用）。输入只有"知识点清单 + 小节标题"（便宜）。
+    """课件核对 + 覆盖度提示（1 次调用）。**辅助信息**，不是覆盖度的口径。
 
     ⚠️ 带 `skeleton` 时清单**不是**模型自己列的那份，而是章节骨架里的要点，按
-       **编号**对齐（`[3]` 这种）—— 让模型"抄一遍长句"再匹配，错一个词就丢一条
-       （第四轮：知识点清单的粒度与条数都不许由它决定）。
+       **编号**对齐（`[3]` 这种）—— 让模型"抄一遍长句"再匹配，错一个词就丢一条。
+    ⭐ 第六轮（作者 2026-10-17）：这一层**不再决定覆盖度的数字**（要点上百条时
+       整份回执会被 `max_tokens` 截断，异常又被吞成 `{}` → "0/117 条落到节里"、
+       §9 假报"全缺"）。所以：有骨架时只问两件事（引用了哪些课件、觉得哪几条没讲），
+       回执很小，`ALIGN_MAX_TOKENS=2000` 绰绰有余；**失败必须报出去**
+       （`{"failed": ...}`），不许再吞成空 dict 让上层以为"模型说一条都没覆盖"。
+    ⚠️ 没有骨架的退化档（旧会话 / 开关关着）仍然按文字对齐：那里只有模型自己列的
+       知识点清单，按文字匹配是唯一的口径。
     """
     sk_points = None
     if skeleton:
@@ -529,10 +542,11 @@ def align(review_data: dict, *, chat, materials=None,
     sys_prompt = ALIGN_SYS_SK if sk_points else ALIGN_SYS
     try:
         obj = chat(sys_prompt, user, max_tokens)
-    except Exception:                                         # noqa: BLE001
-        return {}
+    except Exception as e:                                     # noqa: BLE001
+        # ⚠️ 这里**不吞**：上层按 `failed` 报出去（作者第六轮第 2 条）。
+        return {"failed": f"{type(e).__name__}: {str(e)[:80]}"}
     if not isinstance(obj, dict):
-        return {}
+        return {"failed": "模型没回 JSON 对象"}
     out: dict = {}
     covered = []
     by_gi = {p["gi"]: p for p in (sk_points or [])}
@@ -555,14 +569,26 @@ def align(review_data: dict, *, chat, materials=None,
                 covered.append({"point": p, "section": s})
     if covered:
         out["covered"] = covered
-    missing = []
-    for x in (obj.get("missing") or []):
-        if isinstance(x, dict):
-            p = _one_line(x.get("point"))
-            if p:
-                missing.append({"ts": _one_line(x.get("ts")), "point": p,
-                                "why": _one_line(x.get("why"))})
-    out["missing"] = missing
+    # ⭐ 有骨架时：`not_covered` 是**提示**（最多 10 条），进 `missing` 那一栏给人看。
+    hints = []
+    for x in (obj.get("not_covered") or [])[:10]:
+        if not isinstance(x, dict):
+            continue
+        p = by_gi.get(x.get("i")) if isinstance(x.get("i"), int) else None
+        if p:
+            hints.append({"ts": p.get("ts", ""), "point": p["point"],
+                          "why": _one_line(x.get("why"))})
+    if hints:
+        out["missing"] = hints
+    else:
+        missing = []
+        for x in (obj.get("missing") or []):
+            if isinstance(x, dict):
+                p = _one_line(x.get("point"))
+                if p:
+                    missing.append({"ts": _one_line(x.get("ts")), "point": p,
+                                    "why": _one_line(x.get("why"))})
+        out["missing"] = missing
     used = _lines(obj.get("materials_used"))
     if used:
         out["materials_used"] = used

@@ -211,8 +211,16 @@ def md_body(md: str) -> str:
 
 
 def hms(s) -> "int | None":
-    """`"13:16:28"` → 秒；解不出 `None`。**与 `note_cover.hms` 同一条口径**。"""
+    """`"13:16:28"` / `"13:16"` → 秒；解不出 `None`。**与 `note_cover.hms` 同一条口径**。
+
+    ⚠️ 两段式（`13:11`）也要认：小节的时间戳一半是模型写的 `HH:MM`，不认就会
+       把那一节从独立覆盖度里漏掉 —— 而这一栏是**判产品报告有没有说谎**的基准。
+    """
     parts = str(s or "").strip().split(":")
+    if len(parts) == 2:
+        if len(parts[1]) != 2:                  # `13:5` 这种残形状不猜（同 note_cover）
+            return None
+        parts += ["0"]
     if len(parts) != 3:
         return None
     try:
@@ -222,25 +230,27 @@ def hms(s) -> "int | None":
     return h * 3600 + m * 60 + sec if (0 <= h < 24 and 0 <= m < 60 and 0 <= sec < 60) else None
 
 
-def cover_by_time(skeleton: list, sections: list) -> dict:
-    """**独立于产品**的覆盖度真值：按时间窗算（课件的口径，不看模型的 `align`）。
+#: 一节的覆盖半径（秒）。⚠️ **必须与 `note_cover.SECTION_SPAN` 相等**：
+#: 评测这边是"同一份口径的第二个实现"—— 两边不一致本身就是要报的 bug
+#: （`tests/test_note_eval.py::test_半径与产品一致` 钉着）。
+SECTION_SPAN = 900
 
-    规则（写死在这里的理由：它是"这份笔记到底讲没讲到"的**唯一确定性答案**）：
-      · 每节有一个起点 `ts`；一条要点属于"起点 ≤ 它、且最晚的那一节"；
-      · 章：有任一小节起点落在 `[t0, t1]` 内 → 这一章有讲解。
+
+def cover_by_time(skeleton: list, sections: list) -> dict:
+    """**独立于产品**的覆盖度真值：按时间窗算（不看模型的 `align`，也不看产品的报告）。
+
+    规则（与产品同一份口径，第二份实现）：
+      · 一条要点 `ok` ⟺ 有时间戳、且落在某一节的 `[起点, 起点 + SECTION_SPAN)` 里；
+      · 章：有要点看要点；没有要点看有没有节落在 `[t0, t1]`。
     """
     secs = sorted(t for t in (hms(s.get("ts")) for s in (sections or [])
                               if isinstance(s, dict)) if t is not None)
 
     def covered(t) -> bool:
-        """一节的覆盖区 = **上一节起点到本节起点**；第一节往前兜到开头（它讲开头的部分）。
-
-        ⚠️ 这条就是"按时间窗直接算"：不问模型"这条要点被哪节讲了"，只问
-           "这时候讲到哪一节了"。两边都不可能含糊。
-        """
+        """`t` 落在哪一节的半径里（不问模型"这条要点被哪节讲了"，只问"这段时间有没有节"）。"""
         if not secs or t is None:
             return False
-        return t < secs[0] or any(x <= t for x in secs)
+        return any(x <= t < x + SECTION_SPAN for x in secs)
 
     rows: list = []
     n_pts = n_ok = 0

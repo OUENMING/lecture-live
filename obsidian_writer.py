@@ -1094,15 +1094,22 @@ class ObsidianWriter:
             print(f"   ⚠ 生成复习层：{len(st['failed'])}/{st.get('n', '?')} 块失败"
                   f"（已按兜底重试过；这些课段的讲解**缺失**）", flush=True)
         if sk or (self._materials is not None and len(self._materials)):
-            try:
-                review.update(note_v2.align(review, chat=self._chat,
-                                            materials=self._materials, skeleton=sk))
-            except Exception as e:                            # noqa: BLE001
-                print(f"⚠ 覆盖度核对失败({str(e)[:60]}); 笔记照常生成")
+            # ⭐ 第六轮第 2 条：这一层是**辅助**（引用了哪些课件 + 没讲到的提示），
+            #    覆盖度的数字由 `note_cover.report` 按时间窗算 —— 模型的整份回执
+            #    曾经被 `max_tokens` 截断、异常又被吞成 `{}`，三节课全报"0/117"。
+            #    ⚠️ 现在**失败要说出来**（`align` 返回 `{"failed": ...}`）。
+            got = note_v2.align(review, chat=self._chat,
+                                materials=self._materials, skeleton=sk)
+            if got.get("failed"):
+                msg = (f"覆盖度/课件核对没做成（{got['failed']}）—— 覆盖度仍按时间窗"
+                       f"自己算，但「笔记引用了哪些课件」这一栏这次是空的")
+                print(f"   ⚠ {msg}", flush=True)
+                self._note_warns.append(msg)
+                got = {k: v for k, v in got.items() if k != "failed"}
+            review.update(got)
         if sk:
-            # 生成后机械核一遍：每一章至少有一个要点落到某一节，缺了在 §9 标 ⚠。
-            review["cover"] = note_cover.report(sk, review.get("sections") or [],
-                                                review.get("covered") or [])
+            # 生成后机械核一遍（**确定性**）：要点按时间窗算有没有节，缺了在 §9 标 ⚠。
+            review["cover"] = note_cover.report(sk, review.get("sections") or [])
             cv = review["cover"]
             line = (f"🧭 覆盖度：章节 {cv['n_ok']}/{cv['n_chapters']} 都有讲解 · "
                     f"实时要点 {cv['n_covered']}/{cv['n_points']} 条落到节里")

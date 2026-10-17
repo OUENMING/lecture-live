@@ -255,6 +255,7 @@ def render(d: NoteData) -> str:
     cv = review.get("cover") or {}
     if cv.get("rows"):
         # ⭐ 第四轮：清单来自「章节 + 实时要点」，粒度不由模型定 —— 报的是**确定的那两个数**。
+        # ⭐ 第六轮：覆盖度**按时间窗算**（要点/小节都有时间戳，不再看模型的对齐回执）。
         cov_line = (f"覆盖度：章节 {cv['n_ok']}/{cv['n_chapters']} 都有讲解 · "
                     f"实时要点 {cv['n_covered']}/{cv['n_points']} 条落进笔记")
         if cv["n_points"] > cv["n_covered"]:
@@ -353,7 +354,7 @@ def render(d: NoteData) -> str:
     L += ["## 覆盖度与校验清单", ""]
     if cv.get("rows"):
         L += ["**章节覆盖**（章节 + 实时要点 = 知识点清单；粒度由课堂实时分章定，"
-              "不由模型定）：", "",
+              "不由模型定。**按时间窗算**：这段课时间上有没有对应的小节）：", "",
               "| 章节（时间段） | 实时要点 | 覆盖 | 落到的小节 |", "|---|---|---|---|"]
         for r in cv["rows"]:
             n_ok = sum(1 for p in r["points"] if p["ok"])
@@ -383,7 +384,9 @@ def render(d: NoteData) -> str:
         L += [""]
     miss = review.get("missing") or []
     if miss:
-        L += ["**没覆盖到的（要补）：**", ""]
+        # ⚠️ 这一段是**模型的看法**（`align` 的提示），不是判定：覆盖度的数字在上面那张
+        #    按时间窗算的表里。写清"提示"两个字，读者才不会把两处不一致当成打架。
+        L += ["**模型觉得没讲到的（提示，不是判定；判定看上面那张表）：**", ""]
         L += [f"- `{_one(m.get('ts'))}` {_one(m.get('point'))}"
               + (f" —— {_one(m.get('why'))}" if m.get("why") else "") for m in miss]
         L += [""]

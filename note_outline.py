@@ -191,28 +191,43 @@ def _roots_text(roots: list, var: str) -> str:
 
 # ---------------------------------------------------------------- 课件函数表 / 账本
 def _course_functions(review: dict) -> dict:
-    """正文里出现过的函数（每个名字取**最常见**的那条定义）→ `{name: {var, poly}}`。
+    """正文里出现过的**所有**多项式函数 → `{name: [{var, poly}, …]}`。
 
-    ⚠️ 同名多定义时按出现次数投票（同一节课里 AC 只应该有一个形状；例题里的变式
-       函数名不同，不会撞）。
+    ⚠️ 第五轮实测（产物 I）：这里原先是"每个名字取**最常见**的那条定义"—— 可这节
+       课里 `MC` 不止一条（教材例题 `MC=2q`、本课例题 `MC=3q²−24q+60`），出现次数
+       多的是**教材那条**，于是纲里 `3Q²−12Q+60` 找不到"同次数同首项"的对照 →
+       只能标 ⚠、改不动。函数的**名字**不是唯一键，**形状**才是：候选全留，
+       匹配时按形状挑（挑完还要用结论回验 —— 配错也留不下）。
     """
     import note_math
-    from collections import Counter
     cand: dict = {}
+
+    def _add(defs: dict) -> None:
+        for name, (var, expr, fn) in defs.items():
+            poly = _poly_of(fn, var)
+            if poly is None:
+                continue
+            cand.setdefault(name, []).append((var, note_math._clean_expr(expr), poly))
+
     for s in (review.get("sections") or []):
         for _kind, u in note_math._units(s):
-            for name, (var, expr, fn) in note_math.functions(u).items():
-                poly = _poly_of(fn, var)
-                if poly is None:
-                    continue
-                cand.setdefault(name, []).append((var, note_math._clean_expr(expr), poly))
+            # ⚠️ 两道都要走：`functions(整个单元)` 才认得出 `AC(q)=TC(q)/q` 这种互相引用，
+            #    但它**同名只留第一条定义**（`if name in defs: continue`）—— 本课里
+            #    `MC(q)=2q` 与 `MC(q)=3q²−24q+60` 各一条，只走第一道就只剩 `2q`。
+            #    所以再逐句扫一遍，把第二条形状也收进来。
+            _add(note_math.functions(u))
+            for text in u:
+                _add(note_math.functions([text]))
     out: dict = {}
     for name, lst in cand.items():
-        key = Counter((v, e) for v, e, _p in lst).most_common(1)[0][0]
+        seen: set = set()
+        shapes: list = []
         for v, e, p in lst:
-            if (v, e) == key:
-                out[name] = {"var": v, "poly": p}
-                break
+            if (v, e) in seen:
+                continue
+            seen.add((v, e))
+            shapes.append({"var": v, "poly": p})
+        out[name] = shapes
     return out
 
 
@@ -257,7 +272,7 @@ def _near_miss(p, q) -> bool:
 
 
 def _matches_course(p, course: dict) -> bool:
-    return any(q["poly"].close(p) for q in course.values())
+    return any(fn["poly"].close(p) for lst in course.values() for fn in lst)
 
 
 # ---------------------------------------------------------------- 四档判据
@@ -307,17 +322,18 @@ def _reconcile_equation(eq: dict, course: dict, claimed: list):
     if pl is None or pr is None:
         return None
     for side, p in (("right", pr), ("left", pl)):
-        for fn in course.values():
-            if fn["var"].lower() != var.lower() or not _near_miss(p, fn["poly"]):
-                continue
-            if side == "right":
-                left, right = eq["left"], _poly_text(fn["poly"], var)
-                roots = _roots(pl - fn["poly"])
-            else:
-                left, right = _poly_text(fn["poly"], var), eq["right"]
-                roots = _roots(fn["poly"] - pr)
-            if roots is not None and _same_set(roots, claimed):
-                return left, right
+        for lst in course.values():
+            for fn in lst:
+                if fn["var"].lower() != var.lower() or not _near_miss(p, fn["poly"]):
+                    continue
+                if side == "right":
+                    left, right = eq["left"], _poly_text(fn["poly"], var)
+                    roots = _roots(pl - fn["poly"])
+                else:
+                    left, right = _poly_text(fn["poly"], var), eq["right"]
+                    roots = _roots(fn["poly"] - pr)
+                if roots is not None and _same_set(roots, claimed):
+                    return left, right
     return None
 
 
@@ -351,13 +367,18 @@ def _check_text(text: str, course: dict, ledger: list) -> tuple:
     # ③ 代入（`AC(4)=12` → 按课件函数重算）
     hits = [m for m in _SUBST.finditer(t)]
     for m in reversed(hits):
-        fn = course.get(m.group("name"))
-        if not fn:
+        lst = course.get(m.group("name"))
+        if not lst:
             continue
         x, v = float(m.group("x")), float(m.group("v"))
-        want = sum(c * (x ** k) for k, c in fn["poly"].t.items())
-        if _same(want, v):
+        vals = [sum(c * (x ** k) for k, c in fn["poly"].t.items()) for fn in lst]
+        if any(_same(want, v) for want in vals):
+            continue                      # 有一个形状对得上 → 算对，不动
+        # ⚠️ 同名多条（教材例题 `MC=2q` 与本课例题 `MC=3q²−24q+60` 并存）时**不猜**：
+        #    多个形状都对不上时无从判定该按哪条改 —— 留给正文那道核（它按单元分辖）。
+        if len(lst) != 1:
             continue
+        want = vals[0]
         right = _fmt(want)
         t = t[:m.start("v")] + right + t[m.end("v"):]
         fixes.append(f"{m.group('name')}({_fmt(x)}) = {right}（原写 {_fmt(v)}）")

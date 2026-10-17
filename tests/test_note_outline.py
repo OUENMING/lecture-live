@@ -91,6 +91,40 @@ class TestOutlineNumbers(unittest.TestCase):
         self.assertIn("AC(4) = 28", zh, zh)            # 16 − 48 + 60 = 28
         self.assertIn("已更正", zh)
 
+    def test_同名多条函数按形状挑中少数那条(self):
+        """⭐ 产物 I 实测：这节课 `MC` 不止一条（教材例题 `MC=2q`、本课例题
+        `MC=3q²−24q+60`），出现多的是**教材那条** —— 早先按"最常见"取值，
+        `3Q²−12Q+60` 就找不到对照、只能标 ⚠。候选要全留，按形状挑。"""
+        body = {"sections": [{"heading": "S", "prose": [
+            "教材例题：$TC(q)=q^2+225$，$AC(q)=q+225/q$，$MC(q)=2q$。",
+            "本课例题：$TC(q)=q^3-12q^2+60q$，$MC(q)=3q^2-24q+60$。",
+            "教材里也有 $MC(q)=2q$ 这一条。",
+        ]}]}
+        out, fixes, warns = no.check(_items(LIVE_12Q), review=body)
+        zh = _zhs(out)[0]
+        self.assertIn("= 3Q² − 24Q + 60", zh)
+        self.assertEqual(warns, [], warns)
+
+    def test_同名多条对不上时不猜代入值(self):
+        """`MC` 有两条形状、都对不上 `MC(4)=99` → 不猜（正文那道核按单元分辖）。"""
+        body = {"sections": [{"heading": "S", "prose": [
+            "教材例题：$TC(q)=q^2+225$，$MC(q)=2q$。",
+            "本课例题：$TC(q)=q^3-12q^2+60q$，$MC(q)=3q^2-24q+60$。",
+        ]}]}
+        zh = "在 q = 4 处，MC(4) = 99。"
+        out, fixes, warns = no.check(_items(zh), review=body)
+        self.assertEqual(_zhs(out)[0], zh)
+        self.assertEqual((fixes, warns), ([], []))
+
+    def test_同名多条里有一条对得上就算对(self):
+        body = {"sections": [{"heading": "S", "prose": [
+            "教材例题：$TC(q)=q^2+225$，$MC(q)=2q$。",
+            "本课例题：$TC(q)=q^3-12q^2+60q$，$MC(q)=3q^2-24q+60$。",
+        ]}]}
+        out, fixes, warns = no.check(_items("在 q = 4 处，MC(4) = 12。"), review=body)
+        self.assertEqual(_zhs(out)[0], "在 q = 4 处，MC(4) = 12。")
+        self.assertEqual((fixes, warns), ([], []))
+
     def test_方程对但结论错_改结论(self):
         out, fixes, warns = no.check(
             _items("Q² − 12Q + 60 = 3Q² − 24Q + 60，所以 Q = 0 或 Q = 5。"), review=BODY)

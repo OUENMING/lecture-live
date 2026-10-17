@@ -3347,6 +3347,16 @@ def run(args) -> None:
                     for _k, _v in (getattr(_t, "term_stats", None) or {}).items():
                         _tm[_k] = _tm.get(_k, 0) + _v
                 tester.note_block("terms", _tm)
+                # ⭐ 3.10：Soniox 实时流的生产量具（engine / 退回原因 / 封口句数 + 上移
+                #    延迟 / 术语进 context 数与被截数）。这是"没有它，后面所有优化都是
+                #    感觉变好了"那一格 —— 理由见 `stream_asr.StreamASR.metrics()`。
+                #    ⚠️ 没建流（`stream is None`）就不写 —— `blocks.stream` 缺席 =
+                #       这节课没用 Soniox（与"采不到"区分开）。
+                if stream is not None:
+                    try:
+                        tester.note_block("stream", stream.metrics())
+                    except Exception:                     # noqa: BLE001
+                        pass
                 # ⭐ 采集面 ⑤：实时总结的只读快照。⚠️ 口径对齐离线探针的
                 #    `metrics.json`（能对上的字段名逐字一致）；对不上的那几项
                 #    它**刻意不返回**，别在这里补 —— 见 `LiveSummarizer.stats()`。
@@ -3473,13 +3483,22 @@ def run(args) -> None:
             # ⚠️ 只记**只读计数**，不在这里现算指标 —— 指标归 `scripts/class_report.py`
             #    （它读同一份 JSONL；生产路径只负责"如实记下来"）。
             if live is not None:
+                # ⭐ 3.10：Soniox 流的 `stream` 块（engine / 退回原因 / 封口句数 + 上移
+                #    延迟 / 术语截断）。没建流就不带这个键 —— 老形状的读端零感知
+                #    （`close()` 本来就把任意 `**summary` 原样并进 summary 行）。
+                _stream_m = None
+                if stream is not None:
+                    try:
+                        _stream_m = stream.metrics()
+                    except Exception:                     # noqa: BLE001
+                        _stream_m = None
                 live.close(
                     echo_retries=local_tr.echo_retries,   # 本地小模型回显重试次数（只读计数）
                     mode=translator._mode,
                     source=args.source,
                     draft_engine=draft.name,               # 收尾时生效的（熔断过就是 parakeet）
                     draft_fallback=draft.fallback_reason,
-                )
+                    **({} if _stream_m is None else {"stream": _stream_m}))
                 echo(f"🎥 现场采集已收尾: {live.path}")
 
             # ---- 小更新：退出时在**独立进程**里自动拉（详见 _auto_update_on_exit）----

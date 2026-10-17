@@ -428,6 +428,47 @@ def t_general_official_shape() -> None:
     assert all(k != "domain" for k, _ in stream_asr.general_pairs("Mystery 101"))
 
 
+def t_metrics_seal_counts_and_latency() -> None:
+    """⭐ 3.10 量具：封口句数 + 上移延迟（墙钟 − 句尾音频时刻）—— 注入时钟做**精确**断言。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    clk = {"t": 100.0}
+    got: "queue.Queue[Sealed]" = queue.Queue()
+    s = make_asr(wk, son, on_sealed=got.put, clock=lambda: clk["t"])
+    try:
+        assert wait_until(s.alive)
+        s.feed(silence(SR // 10))                 # 第一块音频：延迟零点 = 100.0
+        clk["t"] = 102.0                          # 句尾音频 0.4 s 的那句在墙钟 102.0 封口
+        son.to_send.put({"tokens": [tok("Hi", 0, 300, True), tok(".", 300, 400, True)]})
+        assert wait_until(lambda: not got.empty()), "final 句号该立刻封口"
+        assert got.get_nowait().end_s == 0.4
+        clk["t"] = 103.30
+        son.to_send.put({"tokens": [tok(" Bye", 400, 900), tok(".", 900, 1000)]})
+        assert wait_until(lambda: "Bye." in s.draft_text()), s.draft_text()
+        clk["t"] = 103.61                         # 候选句号挂了 0.31 s -> P_stable 到了
+        son.to_send.put({"tokens": [tok(" Bye", 400, 900), tok(".", 900, 1000)]})
+        assert wait_until(lambda: not got.empty()), "P_stable 0.3 s 后该封口"
+        m = s.metrics()
+        assert m["engine"] == "soniox" and m["fallback_reason"] == "", m
+        assert m["sealed_n"] == 2, m
+        lat = m["seal_latency_s"]
+        assert lat and lat["n"] == 2, lat
+        assert abs(lat["p50"] - 2.105) < 0.1, lat   # (1.6 + 2.61) / 2
+        assert m["terms_n"] == 2 and m["terms_dropped"] == 0, m   # make_asr 的两条都进了
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_seal_latency_pure() -> None:
+    """延迟公式：负数钳 0（丢块/抖动）；没喂过音频 -> None（**不是 0** —— 那是两回事）。"""
+    f = stream_asr.seal_latency_s
+    assert abs(f(10.5, 9.0, 1.2) - 0.3) < 1e-9, f(10.5, 9.0, 1.2)
+    assert f(9.0, 9.0, 0.5) == 0.0
+    assert f(60.0, None, 1.0) is None
+
+
 def t_classify_and_notice() -> None:
     assert classify_error("organization_balance_exhausted") == "fatal"
     assert classify_error("unauthenticated") == "fatal"
@@ -574,6 +615,7 @@ def t_transport_key_429_is_local() -> None:
     try:
         assert wait_until(lambda: s.reason() != ""), "429 该一开始就退回"
         assert s.reason() == "quota", s.reason()
+        assert s.metrics()["fallback_reason"] == "quota"     # ⭐ 3.10：退回原因进量具块
         assert not s.alive()
         assert "额度" in s.notice_text()
         assert len(son.connections) == 0, "没额度不该去连 Soniox"
@@ -751,6 +793,8 @@ def main() -> int:
         ("config: 没术语不带 context", t_context_no_terms_stays_clean),
         ("config: text 与 terms 同一预算", t_context_text_shares_the_budget),
         ("config: general 官方形状", t_general_official_shape),
+        ("量具: seal_latency 纯函数", t_seal_latency_pure),
+        ("量具: 封口数 + 上移延迟（metrics）", t_metrics_seal_counts_and_latency),
         ("classify_error / notice_for", t_classify_and_notice),
         ("transport: 正常出两句 + config", t_transport_happy_path),
         ("transport: 致命错误不重连", t_transport_fatal_error_no_retry),

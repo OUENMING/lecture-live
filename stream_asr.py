@@ -102,6 +102,8 @@ CONTEXT_TEXT_MAX = 1500
 TERMS_MAX = 100
 #: 序列化骨架（键名、引号、逗号、括号）的保守余量 —— `build_context` 记账用。
 _CONTEXT_SERIAL_MARGIN = 64
+#: 封口延迟样本上限（一节课几十~几百句；封顶只为防异常时内存失控）。
+SEAL_LAT_MAX = 5000
 
 #: 开关：`auto`（默认）| `off`。**是否真的启用还要调用方再看两个条件**
 #: （有通行码 + 云端定稿开着 + 翻译档不是 raw）—— 那是 `wanted()` 的语义，见 HANDBOOK §6.1。
@@ -353,6 +355,31 @@ class StreamCore:
 # 第二层：传输
 # ══════════════════════════════════════════════════════════════════════
 
+# ── 生产量具（纯函数）──
+
+def seal_latency_s(now: float, audio_t0: float | None, end_s: float) -> float | None:
+    """封口延迟（秒）= 上移墙钟 − 句尾的音频时刻 —— 与离线评估「句号词尾→上移」同口径。
+
+    实时推流下「音频时刻 + 推流滞后 ≈ 墙钟」，所以它量的是**用户多等的那段**：
+    Soniox 处理 + P_stable(0.3 s) + 轮询粒度 + 网络。`audio_t0` 没设（还没喂过音频）→ `None`。
+    负数钳到 0（丢块 / 时钟抖动会让它略小于 0 —— 0 表示「没多等」）。
+    """
+    if audio_t0 is None:
+        return None
+    return max(0.0, (float(now) - float(audio_t0)) - float(end_s))
+
+
+def _pcts(vals: Iterable[float]) -> dict | None:
+    """一串数 → `{"p50", "p90", "n"}`；**空表 → None**（"没采到"与"延迟为 0"要分得开，
+    同 `testmode.pcts` 的口径）。"""
+    xs = list(vals)
+    if not xs:
+        return None
+    a = np.asarray(xs, dtype=float)
+    return {"p50": round(float(np.percentile(a, 50)), 1),
+            "p90": round(float(np.percentile(a, 90)), 1),
+            "n": int(a.size)}
+
 # ── context 组装（纯函数；config 消息与它的记账都从这儿出）──
 #
 # ⚠️ 官方口径（context 页，2026-10-17 核对）：terms + general + text **合起来**
@@ -572,6 +599,7 @@ class StreamASR:
         self._key = request_key or _KeyClient(timeout=key_timeout_s).request_key
 
         self._lock = threading.Lock()               # 保护 core / 状态字段
+        self._clock = clock
         self._core = StreamCore(clock=clock, stable_s=stable_s)
         #: ⚠️ **真的有界**（`maxsize`）：满了 `put_nowait` 抛 `Full` → 丢最旧。
         #    手写「先看 qsize 再 put」不是判据（多线程下照涨），真踩过：队列永远不满、从不丢。
@@ -579,6 +607,11 @@ class StreamASR:
         self._events: "queue.Queue[tuple]" = queue.Queue()
         self._dropped = 0
         self._samples = 0                           # 采到的样本总数（含丢掉的）
+        #: ⭐ 3.10 生产量具：第一块音频的墙钟（封口延迟的零点，见 `seal_latency_s`）。
+        self._audio_t0: float | None = None
+        #: ⭐ 3.10：从 `_fire` 出去的封口句数 + 每句的上移延迟（秒）。收尾 `metrics()` 用。
+        self._sealed_n = 0
+        self._seal_lat: list[float] = []
         self._marks: list[tuple[int, int]] = []     # (段首累计样本, 段号)
         self._seg = 0
         self._alive = False
@@ -610,11 +643,21 @@ class StreamASR:
     def metrics(self) -> dict:
         """这一节课的只读快照（启动日志与收尾报告共用）。**随时可调、永不抛**。
 
-        ⚠️ 这里只记**事实**（进了几条术语、截了几条）—— 指标怎么算归读的人
-        （启动日志 / `livemetrics` / `testmode`）。
+        形状 = 收尾报告里的 `stream` 块（`.live.jsonl` 的 summary 行 / testmode 的
+        `blocks.stream`）：`engine` / `fallback_reason`（`""` = 没退回）/ `sealed_n`
+        （从 `_fire` 出去的封口句数）/ `seal_latency_s`（`{p50, p90, n}`，秒；`None` = 一句
+        都没封）/ `terms_n` / `terms_dropped`。
+        ⚠️ 只记**事实** —— 指标怎么算归读的人（`scripts/class_report.py`）。
         """
+        with self._lock:
+            n = self._sealed_n
+            lat = list(self._seal_lat)
+            reason = self._reason
         st = self._ctx_stats
         return {"engine": ENGINE,
+                "fallback_reason": reason,
+                "sealed_n": n,
+                "seal_latency_s": _pcts(lat),
                 "terms_n": int(st.get("terms_n") or 0),
                 "terms_dropped": int(st.get("terms_dropped") or 0)}
 
@@ -628,6 +671,8 @@ class StreamASR:
             pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
             with self._lock:
                 self._samples += n
+                if self._audio_t0 is None:
+                    self._audio_t0 = self._clock()   # ⭐ 3.10：封口延迟的零点（只写一次）
             try:
                 self._audio.put_nowait(pcm)
             except queue.Full:
@@ -933,6 +978,13 @@ class StreamASR:
     # ---- 状态
 
     def _fire(self, s: Sealed) -> None:
+        # ⭐ 3.10 量具：计数 + 上移延迟（墙钟 − 句尾音频时刻）。锁内只做加法，微秒级。
+        with self._lock:
+            self._sealed_n += 1
+            if len(self._seal_lat) < SEAL_LAT_MAX:
+                lat = seal_latency_s(self._clock(), self._audio_t0, s.end_s)
+                if lat is not None:
+                    self._seal_lat.append(lat)
         cb = self._on_sealed
         if cb is None:
             return

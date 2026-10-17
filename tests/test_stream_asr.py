@@ -347,6 +347,87 @@ def t_core_flush_pending() -> None:
     assert c.draft_text() == "" and c.flush() == []
 
 
+def t_context_budget_hard_cap_and_counting() -> None:
+    """⭐ 超长术语表：config 总长 ≤ 官方口径预算（terms+general+text 合起来），
+    被截的条数**如实记账**（不许静默）—— 从前客户端上限 30 000 ≈ 官方 3 倍，一撞就整节课退回。"""
+    terms = [f"term{i:03d}-" + "x" * 36 for i in range(400)]          # ≈400×45 字符
+    s = StreamASR(passcode="", terms=terms, general="ECON10730 Data Analysis",
+                  terms_max=400)
+    try:
+        ctx = s._config()["context"]
+        assert len(json.dumps(ctx, ensure_ascii=False)) <= stream_asr.CONTEXT_CHAR_BUDGET
+        m = s.metrics()
+        assert m["terms_n"] + m["terms_dropped"] == 400, m
+        assert 0 < m["terms_n"] < 400, m
+        assert len(ctx["terms"]) == m["terms_n"]
+        assert ctx["terms"][0] == terms[0], "顺序保持：先到先保（本课词排在前的语义）"
+        assert ctx["terms"][-1] == terms[m["terms_n"] - 1]
+    finally:
+        s.stop()
+
+
+def t_context_count_cap_is_the_normal_path() -> None:
+    """⭐ 平时走的是**条数小目标**（`TERMS_MAX`）不是字符上限：101 条短词该截 1 条；
+    `terms_max` 可配置（判据/调参用）。"""
+    terms = [f"t{i:03d}" for i in range(stream_asr.TERMS_MAX + 1)]
+    s = StreamASR(passcode="", terms=terms)
+    try:
+        m = s.metrics()
+        assert m["terms_n"] == stream_asr.TERMS_MAX and m["terms_dropped"] == 1, m
+    finally:
+        s.stop()
+    s2 = StreamASR(passcode="", terms=terms, terms_max=5)
+    try:
+        m2 = s2.metrics()
+        assert m2["terms_n"] == 5 and m2["terms_dropped"] == len(terms) - 5, m2
+    finally:
+        s2.stop()
+
+
+def t_context_no_terms_stays_clean() -> None:
+    """没有术语、也没有课名 → **不带 context**（不凭空发明上下文）；
+    有课名时也不带空的 `terms` 键。"""
+    s = StreamASR(passcode="", terms=[])
+    try:
+        assert "context" not in s._config(), s._config()
+    finally:
+        s.stop()
+    s2 = StreamASR(passcode="", terms=[], general="ECON10730 Data Analysis")
+    try:
+        ctx = s2._config().get("context") or {}
+        assert "terms" not in ctx and ctx.get("general"), ctx
+    finally:
+        s2.stop()
+
+
+def t_context_text_shares_the_budget() -> None:
+    """`context.text` 与 terms/general **同一预算**：超了截到上限，总量仍 ≤ 预算；
+    且它排在 terms 之后 —— 术语不被 text 挤掉。"""
+    terms = [f"term{i:03d}-" + "x" * 16 for i in range(50)]
+    s = StreamASR(passcode="", terms=terms, general="ECON10730 Data Analysis",
+                  context_text="课件大纲摘要 " * 2000)
+    try:
+        ctx = s._config()["context"]
+        assert "text" in ctx, sorted(ctx)
+        assert len(ctx["text"]) <= stream_asr.CONTEXT_TEXT_MAX, len(ctx["text"])
+        assert len(json.dumps(ctx, ensure_ascii=False)) <= stream_asr.CONTEXT_CHAR_BUDGET
+        assert s.metrics()["terms_dropped"] == 0, "术语没超量：text 不许把 terms 挤掉"
+    finally:
+        s.stop()
+
+
+def t_general_official_shape() -> None:
+    """`general` 用官方模板的形状 `[{key, value}]`（旧版发的 `{"title": …}` 是错的形状）；
+    认不出的课号前缀**不发 domain**（猜错领域比不给更坏）。"""
+    pairs = stream_asr.general_pairs("ECON10730 Data Analysis")
+    assert pairs[0] == ("topic", "ECON10730 Data Analysis"), pairs
+    assert ("domain", "economics") in pairs, pairs
+    assert ("setting", "university lecture") in pairs, pairs
+    assert len(pairs) <= stream_asr.GENERAL_KEYS_MAX
+    assert stream_asr.general_pairs("") == []
+    assert all(k != "domain" for k, _ in stream_asr.general_pairs("Mystery 101"))
+
+
 def t_classify_and_notice() -> None:
     assert classify_error("organization_balance_exhausted") == "fatal"
     assert classify_error("unauthenticated") == "fatal"
@@ -387,7 +468,10 @@ def t_transport_happy_path() -> None:
         assert cfg["sample_rate"] == 16000 and cfg["num_channels"] == 1
         assert cfg["language_hints"] == ["en"] and cfg["enable_endpoint_detection"] is True
         assert cfg["context"]["terms"] == ["OLS", "regression"]
-        assert cfg["context"]["general"][0]["title"] == "ECON10730 Data Analysis"
+        g = {e["key"]: e["value"] for e in cfg["context"]["general"]}
+        assert g["topic"] == "ECON10730 Data Analysis"
+        assert g["domain"] == "economics" and g["setting"] == "university lecture"
+        assert g["language"] == "English"
         assert "api_key" not in cfg, "key 不许进 config 消息（只在 Authorization 头里）"
         assert hdr(son.connections[0]["headers"], "Authorization") == "Bearer fake-key"
         # ⚠️ 块长 120 ms（3840 B）：一份 0.1 s 的样本还凑不满一块，会被 carry 住 ——
@@ -662,6 +746,11 @@ def main() -> int:
         ("core: final 换了时间戳不重封", t_core_final_with_shifted_timing_not_resealed),
         ("core: 最早的句号先封口", t_core_earliest_period_seals_while_next_sentence_grows),
         ("core: 收尾 flush 半句", t_core_flush_pending),
+        ("config: 超长术语表 ≤ 预算 + 截断记账", t_context_budget_hard_cap_and_counting),
+        ("config: 平时按条数小目标（TERMS_MAX）", t_context_count_cap_is_the_normal_path),
+        ("config: 没术语不带 context", t_context_no_terms_stays_clean),
+        ("config: text 与 terms 同一预算", t_context_text_shares_the_budget),
+        ("config: general 官方形状", t_general_official_shape),
         ("classify_error / notice_for", t_classify_and_notice),
         ("transport: 正常出两句 + config", t_transport_happy_path),
         ("transport: 致命错误不重连", t_transport_fatal_error_no_retry),

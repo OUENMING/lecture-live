@@ -1873,19 +1873,30 @@ def run(args) -> None:
     if stream_gate.start_ok(passcode=api_key_val, cloud_ok=_cloud_asr_ok()):
         try:
             import stream_asr
-            from translator import course_term_list, course_title
+            from translator import (course_term_list, course_title, load_terms,
+                                    merge_terms)
 
             def _sealed_in(s, _q=sealedq, _ev=_wake_fw):
                 # ⚠️ 这是 Soniox **后台收线程**在调：只许入队 + 叫醒，绝不碰 `_emit`/UI。
                 _q.put(s)
                 _ev.set()
 
+            # ⭐ terms = 本课表（prep 排名序）**在前** + 公共表在后 —— 顺序就是优先级，
+            #    超量时先保本课词。公共表从前**从来没发给 Soniox**（glossary.txt 开头
+            #    自己写着「5 个课号发音极近…必须全列，否则必然听混」）。
+            #    ⚠️ 平时只取前 `stream_asr.TERMS_MAX`（100）条：官方没写 context 大小
+            #    对延迟的影响，上限（9000 字符）只兜底 —— 先小后大，用真课数据调。
+            _terms = merge_terms(course_term_list(args.glossary, args.course),
+                                 load_terms(args.glossary, None))
             stream = stream_asr.StreamASR(
                 passcode=api_key_val,
-                terms=course_term_list(args.glossary, args.course),
+                terms=_terms,
                 general=course_title(args.glossary, args.course),
                 on_sealed=_sealed_in)
-            echo("🎧 实时识别: Soniox（连不上会自动退回本地）")
+            # ⚠️ 截了多少条**不许静默**（进 context 的与没进的都要在启动行上看得见）。
+            _m = stream.metrics()
+            _cut = "" if not _m["terms_dropped"] else f"（截 {_m['terms_dropped']} 条）"
+            echo(f"🎧 实时识别: Soniox（连不上会自动退回本地）· 术语 {_m['terms_n']} 条{_cut}")
         except Exception as e:                                 # noqa: BLE001
             echo(f"⚠ 实时识别起不来，本节课走本地：{type(e).__name__}: {e}")
             stream = None

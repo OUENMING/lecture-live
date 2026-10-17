@@ -372,6 +372,20 @@ class MainWiring(unittest.TestCase):
         self.assertIn("gate.on else None", src)
         self.assertIn("if ts is not None:", src)
 
+    def test_Soniox_术语本课在前公共表在后(self):
+        """⭐⭐ 3.10：Soniox 的 terms = 本课表（前）+ 公共表（后）。
+
+        公共表从前**从来没发给 Soniox**（`glossary.txt` 开头自己写着「5 个课号发音
+        极近…必须全列，否则必然听混」——那条对 ASR 同样成立）。顺序就是优先级：
+        超量时先保本课词；去重交给 `merge_terms`（唯一定义点）。
+        """
+        src = ast.unparse(_func("run"))
+        self.assertIn("merge_terms(course_term_list(args.glossary, args.course), "
+                      "load_terms(args.glossary, None))", src,
+                      "terms 不是「本课表 + 公共表」的合并（或顺序反了）")
+        i = src.index("stream_asr.StreamASR(")
+        self.assertIn("terms=_terms", src[i:i + 400], "合并结果没进 StreamASR")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

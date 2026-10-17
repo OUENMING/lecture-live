@@ -268,6 +268,25 @@ class CarryBirths(unittest.TestCase):
     def test_rewrite_ignores_lone_coincidences(self):
         self.assertEqual(self._new("今天的课", "我们的书"), "我们的书")
 
+    def test_revision_fades_softly_growth_fully(self):
+        """Owen 10-17「整句突然消失一下再出现」：草稿译文换定稿译文 = 改字 -> 从 `D_REVISE_FROM` 起淡；
+        往后长出来的字照旧从 `D_TYPE_FROM` 起。"""
+        sh = tvm._REVISE_SHIFT
+        self.assertGreater(sh, 0.0)
+        old, new = "在接下来的课程和这个学期里", "在接下来的课上，也就是这个学期剩下的时间里"
+        nb = tvm.carry_births(old, [1.0] * len(old), new, 9.0, soft=sh)
+        fresh = [c for c, b in zip(new, nb) if b == 9.0]
+        self.assertEqual(fresh, [], "改字的字从 20% 起淡了（整句闪没）")
+        self.assertTrue(all(b in (1.0, 9.0 - sh) for b in nb))
+        grow = tvm.carry_births("价格", [3.0, 4.0], "价格与成本", 9.0, soft=sh)
+        self.assertEqual(grow, [3.0, 4.0, 9.0, 9.0, 9.0], "往后长的字也被当改字了")
+        trunc = tvm.carry_births("… seller in the", [0.0] * 15, "… in the market", 9.0,
+                                 min_run=3, soft=sh)
+        self.assertTrue(all(b == 9.0 for b in trunc[-7:]), "开头截断后新长的词被当改字了")
+        # 起淡亮度确实是 D_REVISE_FROM（与 `_type_paint` 同一条曲线）
+        e = tvm.motion.ease_out(tvm.motion.progress(9.0 - sh, 9.0, tvm.D_TYPE_S))
+        self.assertAlmostEqual(tvm.D_TYPE_FROM + (1 - tvm.D_TYPE_FROM) * e, tvm.D_REVISE_FROM, places=3)
+
     def test_keeps_previous_births(self):
         nb = tvm.carry_births("价格", [3.0, 4.0], "价格与", 9.0)
         self.assertEqual(nb, [3.0, 4.0, 9.0])

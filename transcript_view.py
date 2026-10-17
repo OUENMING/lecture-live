@@ -139,10 +139,31 @@ D_BLUR_PX = 4.0
 #: 流式中文每次只来两三个字, 直接冒出来就是「跳字」; 淡进来读着是连续的。
 D_TYPE_FROM = 0.2
 D_TYPE_S = 0.26
+#: **改字**（不是往后长）的新字从这个亮度起淡，不从 `D_TYPE_FROM`。
+#: ⚠️ Owen 10-17：草稿译文换成定稿译文时「整句突然消失一下再出现」—— 措辞一换，大半个字
+#:    同时掉到 20% 再长回来，看上去就是整句闪没了。往后长的新字照旧从 20% 起（那是「新来的」
+#:    信号）；改掉的字只做一次轻淡换（0.65 → 1），屏上的墨量不再塌下去。
+D_REVISE_FROM = 0.65
+
+
+def _revise_shift() -> float:
+    """让 `D_TYPE_FROM` 起的那条曲线**从 `D_REVISE_FROM` 起跑**要把出生时刻往前挪多少秒。"""
+    target = (D_REVISE_FROM - D_TYPE_FROM) / (1.0 - D_TYPE_FROM)
+    lo, hi = 0.0, 1.0
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if motion.ease_out(mid) < target:
+            lo = mid
+        else:
+            hi = mid
+    return hi * D_TYPE_S
+
+
+_REVISE_SHIFT = _revise_shift()
 
 
 def carry_births(prev: str, births: list, display: str, now: float, *,
-                 min_run: int = 2) -> list:
+                 min_run: int = 2, soft: float = 0.0) -> list:
     """上一版每个字的出现时刻 → 新版每个字的出现时刻（新字记 `now`, 旧字原样带过去）。
 
     按**字**对齐、忽略换行: 中文折行点会随句子变长挪动（`_shape_zh`）, 英文开头截断
@@ -158,10 +179,21 @@ def carry_births(prev: str, births: list, display: str, now: float, *,
     for i in keep:
         out[i] = now
     sm = difflib.SequenceMatcher(None, "".join(c for c, _ in pc), dc, autojunk=False)
+    last_a = last_b = 0                       # 最后一段算数的匹配之后，新旧各从哪开始
+    matched = False
     for a, b, n in sm.get_matching_blocks():
         if n >= min_run or (n and a == 0 and b == 0):
+            matched = True
+            last_a, last_b = a + n, b + n
             for k in range(n):
                 out[keep[b + k]] = pc[a + k][1]
+    if soft and matched:
+        # 改字 vs 往后长：新字在最后一段匹配**之前**（夹在中间被换掉的）→ 改字；
+        # 在之后、且旧版那里本来还有字（尾巴被换掉）→ 改字；旧版尾巴完整、只是后面多出来 → 新长的。
+        tail_replaced = last_a < len(pc)
+        for bi, i in enumerate(keep):
+            if out[i] == now and (bi < last_b or tail_replaced):
+                out[i] = now - soft
     return out
 
 
@@ -876,7 +908,7 @@ class TranscriptView:
         prev = old[0] if old else lbl.stringValue()
         births = old[1] if old else [0.0] * len(prev)
         nb = carry_births(prev, births, display, self._clock(),
-                          min_run=2 if which == "zh" else 3)
+                          min_run=2 if which == "zh" else 3, soft=_REVISE_SHIFT)
         self._type[(slot_j, which)] = (display, nb)
         self._type_paint(slot_j, which)
 

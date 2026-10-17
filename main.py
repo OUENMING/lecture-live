@@ -13,7 +13,7 @@
   => 音频循环永不阻塞; 所有 UI 调用都在主线程(悬浮窗要求)
 """
 from __future__ import annotations
-import argparse, collections, os, pathlib, queue, re, shlex, sys, threading, time
+import argparse, collections, datetime, os, pathlib, queue, re, shlex, sys, threading, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from capture import load_source, SR, SilenceWatch
@@ -1688,6 +1688,41 @@ def run(args) -> None:
                 pass
         return new, st
 
+    # 🧭 课前回顾（2026-10-17）：收尾时把这一节的产物压成**下一节开课时**要显示的那几行。
+    #    ⚠️ **额外调用的上限是 1 次**（`recap.build` 里那一次），而且：
+    #      · 纯转录档 / `--save-notes no`：**一个请求都不发**（`DESIGN.md` 的硬契约，
+    #        与 `_keypoints_for` / `_lost_explain_for` 同一条规矩）；
+    #      · 没 key：不调模型，只存骨架（知识点那一行就没有解释）；
+    #      · 失败：笔记照写（它是第九层，`close()` 里兜着）。
+    def _recap_for(payload: dict) -> dict:
+        import recap as _recap
+        try:
+            if args.save_notes == "no" or trans.get("mode") == "raw":
+                return {}
+            data = payload if isinstance(payload, dict) else {}
+            prev = _recap.load(args.course or "")
+            duties = _recap.merge_duties(
+                (prev or {}).get("duties"),
+                _recap.duties_from_items(duty_board.items(), day=_duty_day))
+
+            def _chat(system, user, max_tokens):
+                import llm_client
+                return llm_client.chat_json(api_key_val, args.cloud_model, system,
+                                            user, max_tokens=max_tokens,
+                                            temperature=0.3, timeout=120.0)
+
+            return _recap.build(
+                course=data.get("course") or "", date=data.get("date") or "",
+                session=data.get("session") or "",
+                chapters=(data.get("chapters") or {}).get("chapters") or [],
+                keypoints=data.get("keypoints") or [],
+                lost=[x for x in (data.get("lost") or [])],
+                duties=duties, tail=data.get("tail") or "",
+                chat=(_chat if api_key_val else None))
+        except Exception as e:                            # noqa: BLE001
+            echo(f"⚠ 课前回顾没生成（笔记照写）：{type(e).__name__}: {str(e)[:60]}")
+            return {}
+
     writer = ObsidianWriter(vault, args.course, mode=args.save_notes,
                             api_key=api_key_val, model=args.cloud_model,
                             glossary_path=args.glossary,
@@ -1695,7 +1730,8 @@ def run(args) -> None:
                             polish_model=args.polish_model or None,
                             keypoints_fn=_keypoints_for,
                             lost_explain_fn=_lost_explain_for,
-                            backfill_fn=_backfill_for)
+                            backfill_fn=_backfill_for,
+                            recap_fn=_recap_for)
     notes = TermNotes()                                 # 术语通俗解析(查表)
 
     # 测试模式: 采一份完整报告 + 留音频。**任何采集失败都不能影响上课** ——
@@ -1865,6 +1901,116 @@ def run(args) -> None:
         hintq.put([t for t in (*finals[-4:], last_draft["en"]) if t])
         return True
 
+    # ══════════════════════════════════════════════════════════════════════
+    # 一些事儿（2026-10-17）—— 板子 + 决定出口 + 提醒事项
+    #
+    # `live_summary` 认出来的 `课务` payload 走 `_summ_emit` 那条线（worker 线程），
+    # 这里把它变成「一些事儿」条目（`duty.Board`），用户点头才写提醒事项。
+    # ⚠️ 三处纪律：
+    #   ① `offer()` 在 **worker 线程**（`_summ_emit`），其余都在主线程；
+    #     `Board` 内部一把锁，`streamq` 推给界面。
+    #   ② 提醒事项走 `osascript`，**可能弹授权框**（几十秒）→ 一律在 worker 上，
+    #     主线程只 `queue.put`（与 `ask_about_this` 同一条规矩）。
+    #   ③ 决定**先落旁路文件**（`duty.save_decision`，在 `Board.decide` 里），
+    #     再谈写提醒事项 —— 授权的几十秒里用户已经点了「记下」，那条不能等。
+    # ══════════════════════════════════════════════════════════════════════
+    import duty as _duty
+
+    _duty_day = datetime.date.today()
+    duty_board = _duty.Board(day=_duty_day,
+                             path=_duty.sidecar_path(writer.session_path))
+
+    def _duty_push() -> None:
+        """把板子的当前状态推给界面（主线程之外也能调：`streamq` 是线程安全的）。"""
+        try:
+            streamq.put_nowait(("duty", duty_board.items()))
+        except Exception:                                     # noqa: BLE001
+            pass
+
+    def _duty_decided(action: str, item: dict) -> None:
+        """悬浮窗卡片的决定出口（**AppKit 主线程**，必须 O(1) 返回）。
+
+        `action` ∈ `save / ignore / undo / type`。写盘（旁路文件）与起 worker 之外
+        什么都不做 —— 提醒事项那条路要几十秒（可能弹授权框）。
+        """
+        rid = str((item or {}).get("id") or "")
+        if not rid:
+            return
+        if action == "type":
+            cur = duty_board.get(rid) or {}
+            duty_board.decide(rid, str(cur.get("action") or "pending"),
+                              type_=str(item.get("type") or ""), source="card")
+            _duty_push()
+            _duty_wrapup_sync()
+            return
+        if action in ("save", "ignore"):
+            snap = duty_board.decide(
+                rid, "saved" if action == "save" else "ignored",
+                title=item.get("title"), date=item.get("date"),
+                time_=item.get("time"), type_=item.get("type"), source="card")
+            _duty_push()
+            _duty_wrapup_sync()
+            if action == "save" and snap is not None:
+                _duty_remind(snap)
+            return
+        if action == "undo":
+            duty_board.decide(rid, "pending", source="card")
+            duty_board.note_reminder(rid, True, "")   # 清掉上一条回执（撤销后重新来过）
+            _duty_push()
+            _duty_wrapup_sync()
+
+    def _duty_remind(snap: dict) -> None:
+        """把一条「记下」写进 macOS 提醒事项 —— **worker 线程**。
+
+        ⚠️ 失败（拒绝授权 / 超时）**不静默**：条目落 `~/.classlive/duty-backup.jsonl`，
+           卡上写明原因（回执走 `("duty_result", …)`，见 `drain`）。
+        """
+        rid = str(snap.get("id") or "")
+
+        def _work() -> None:
+            ok, reason = True, ""
+            try:
+                ok, reason = _duty.write_reminder(_duty.reminder_argv(snap))
+            except Exception as e:                            # noqa: BLE001
+                ok, reason = False, f"{type(e).__name__}: {str(e)[:60]}"
+            if not ok:
+                try:
+                    _duty.backup(snap, reason)
+                except Exception:                             # noqa: BLE001
+                    pass
+            try:
+                duty_board.note_reminder(rid, ok, reason)
+            except Exception:                                 # noqa: BLE001
+                pass
+            try:
+                streamq.put_nowait(("duty_result", rid, bool(ok), str(reason)))
+            except Exception:                                 # noqa: BLE001
+                pass
+            echo(f"[{now()}] 📌 一些事儿：{snap.get('title') or rid} → "
+                 + ("已记入提醒事项" if ok else f"写不进提醒事项（{reason}）"))
+
+        threading.Thread(target=_work, daemon=True, name="duty-remind").start()
+
+    def _duty_wrapup_sync() -> None:
+        """收尾汇总卡开着时**当场**把决定送回去。
+
+        ⚠️ 必需：`ui.duty_wrapup()` 是**主线程阻塞 + 自己 pump** 的（那几十秒里
+           `drain()` 不跑），所以只靠 `streamq` 那一条路卡片不会更新 ——
+           `duty_wrapup_sync` 是直的（它自己把重画排到下一帧，见 `_card_defer`）。
+        """
+        fn = getattr(ui, "duty_wrapup_sync", None)
+        if callable(fn):
+            try:
+                fn(duty_board.items())
+            except Exception:                                 # noqa: BLE001
+                pass
+
+    def _duty_stats() -> dict:
+        try:
+            return duty_board.stats()
+        except Exception:                                     # noqa: BLE001
+            return {}
+
     ui = TerminalUI() if args.ui == "terminal" else _load_overlay(
         on_quit=stopping.set,
         # ❓ 要的是**按下那一刻** —— 所以它不设标志位, 直接落盘一个时间戳。
@@ -1879,6 +2025,9 @@ def run(args) -> None:
         # late binding: start_new_topic 定义在下面的问答状态块里, 这里只是把回调
         # 装上(按钮到点名前一定已经定义好了)。
         on_new_topic=lambda: start_new_topic(),
+        # ⭐ 一些事儿：卡片上的决定（记下 / 忽略 / 撤销 / 改类型）唯一出口。
+        #    ⚠️ AppKit 主线程回调 —— 实现见 `_duty_decided`（只落盘 + 起 worker，立刻返回）。
+        on_duty=_duty_decided,
         # ⭐ 采集面 ⑦：UI 使用度。⚠️ `tester` 是 `None` 时传 `None`（不是传个假
         #    回调）—— `Overlay` 那边默认就是空 lambda，**零开销零行为**。
         note=(tester.note_ui if tester is not None else None),
@@ -1922,6 +2071,37 @@ def run(args) -> None:
     #    → **更新卡片整个消失**。（2026-09-28 OCR 审计发现）
     if not getattr(ui, "drives_appkit", False) and whatsnew:
         _print_whatsnew_box(**whatsnew)
+
+    # ⭐ 一些事儿 / 课前回顾（2026-10-17）：把「这节课是谁」与**上一节的回顾**给界面。
+    #    ⚠️ 回顾**不调模型**（上节课收尾时已经生成并存下）—— 读本地文件、立刻显示。
+    #    📄「今天可能讲什么」要看**今天**新传的课件，那份要抽文本 → 丢 worker、
+    #    晚 1–2 秒补进来（`("recap_more", …)`），不许挡开课（启动线上有计时判据）。
+    try:
+        _set_sess = getattr(ui, "set_session", None)
+        if callable(_set_sess):
+            _set_sess(course=args.course or "", day=_duty_day)
+        if args.course:
+            import recap as _recap
+            _prev = _recap.load(args.course)
+            if _prev:
+                streamq.put(("recap", _prev, args.course, _duty_day))
+                _duty_push()                       # 小卡也一起亮（板子可能已从旁路回放）
+
+                def _today_work(_c=args.course, _d=_prev) -> None:
+                    try:
+                        extra = _recap.today_extra(_c, _d)
+                    except Exception:                 # noqa: BLE001
+                        extra = {}
+                    if extra:
+                        try:
+                            streamq.put_nowait(("recap_more", extra))
+                        except Exception:             # noqa: BLE001
+                            pass
+
+                threading.Thread(target=_today_work, daemon=True,
+                                 name="recap-today").start()
+    except Exception as e:                                # noqa: BLE001
+        echo(f"⚠ 课前回顾没显示（课堂不受影响）：{type(e).__name__}: {str(e)[:60]}")
 
     seen_proper: collections.Counter = collections.Counter()   # 出现次数(≥2 才查)
     queried_proper: set = set()                         # 已发起过查询的(防重复请求)
@@ -2804,6 +2984,16 @@ def run(args) -> None:
         line = summary_log_line(payload)
         if line:
             echo(f"[{now()}] {line}")
+        # ⭐ 一些事儿（2026-10-17）：同一份 payload 里 `kind == "deadline"` 的那些
+        #    再喂给板子 —— **复用** `live_summary` 已认出来的候选（正则立刻上屏 +
+        #    模型过 Jev 闸门），这里只多做一道"有没有时间指向"的过滤（在 `duty` 里）。
+        #    ⚠️ 这一行在 **worker 线程**：`Board.offer` 自己带锁、只追加，绝不许抛。
+        if isinstance(payload, dict) and payload.get("kind") == "deadline":
+            try:
+                if duty_board.offer(payload) is not None:
+                    _duty_push()
+            except Exception:                                # noqa: BLE001
+                pass
         if bool(getattr(ui, "_closed", False)):
             return
         try:
@@ -2915,6 +3105,29 @@ def run(args) -> None:
                 #    （见 `summary_log_line`：收尾时主循环已退出、这里根本跑不到，
                 #     放在这儿会让**最后一章永远静默**）。
                 fn = getattr(ui, "summary_update", None)
+                if callable(fn):
+                    fn(item[1])
+            elif item[0] == "duty":                 # ("duty", [条目…]) 一些事儿的当前状态
+                # ⭐ 板子（`duty.Board`）是唯一真源，这里把它的投影推给悬浮窗：
+                #    角落小卡 + 打开中的可编辑卡片都从这份投影重画。
+                # ⚠️ 与 summary 那条同一个 getattr 守卫：TerminalUI 没有 `duty_update`，
+                #    而 `drain()` 没有 try/except，直接调会打死主循环。
+                fn = getattr(ui, "duty_update", None)
+                if callable(fn):
+                    fn(item[1])
+            elif item[0] == "duty_result":          # ("duty_result", id, ok, 原因)
+                # ⚠️ 回执走 ui 那一侧；不放任「失败静默」是这一条的存在理由。
+                fn = getattr(ui, "duty_reminder_result", None)
+                if callable(fn):
+                    fn(item[1], bool(item[2]), str(item[3]))
+            elif item[0] == "recap":                # ("recap", {上一节的回顾})
+                fn = getattr(ui, "recap_show", None)
+                if callable(fn):
+                    fn(item[1], course=str(item[2]) if len(item) > 2 else "",
+                       day=item[3] if len(item) > 3 else None)
+            elif item[0] == "recap_more":           # ("recap_more", {今天的行})
+                # 📄「今天可能讲什么」晚 1–2 秒补进来（课件抽文本在 worker 上跑）
+                fn = getattr(ui, "recap_update", None)
                 if callable(fn):
                     fn(item[1])
             elif item[0] == "hint":                 # ("hint", 一句话 | "")  ❓ 点拨
@@ -3278,6 +3491,22 @@ def run(args) -> None:
                 #    —— 所以它跳过整段收尾（不精修、不写笔记），只关文件。
                 give_up = (ans is False)
 
+            # ⭐ 一些事儿：下课把**漏处理的一次性确认**（原型 §④，挂在收尾这条路上）。
+            #    ⚠️ 位置：`ask_save` 之后、`writer.close()` 之前的 worker **之前** ——
+            #       `obsidian_writer` 渲染笔记时要读决定（旁路文件），所以决定必须先落。
+            #    ⚠️ 超时不是错误：没确认的不写任何地方，笔记里标「未确认」。
+            if not give_up:
+                _dw = getattr(ui, "duty_wrapup", None)
+                if callable(_dw):
+                    try:
+                        _n_dw = _dw(duty_board.items(), timeout=20.0)
+                        if _n_dw:
+                            echo(f"📌 一些事儿：收尾确认了 {_n_dw} 条")
+                    except Exception as e:                    # noqa: BLE001
+                        echo(f"⚠ 一些事儿收尾汇总失败（笔记照写）："
+                             f"{type(e).__name__}: {str(e)[:60]}")
+                _duty_stats()
+
             _cancel = threading.Event()
             if not give_up:
                 # ⚠️ 2026-10-12 起**卡上不再有 [跳过精修] 那个按钮**（精修默认不跑，
@@ -3425,6 +3654,9 @@ def run(args) -> None:
                 #    `metrics.json`（能对上的字段名逐字一致）；对不上的那几项
                 #    它**刻意不返回**，别在这里补 —— 见 `LiveSummarizer.stats()`。
                 tester.note_block("live", summ.stats())
+                # ⭐ 一些事儿（2026-10-17）：认到几条 / 记下几条 / 忽略几条 / 推算几条。
+                #    ⚠️ 只读快照，不参与任何判定（同 `live` 那一格）。
+                tester.note_block("duty", _duty_stats())
                 # ⭐ 第 4 项：跨段半句合并的计数。`failed` = 触发了却没换成
                 #    （重翻失败 / 超时 / 行已被别的路径改过）—— 从两个计数器算出来，
                 #    不另立一个可能不同步的真源。
@@ -3684,7 +3916,8 @@ def startup_timing(tp: dict, wall0: float, click_wall: float | None) -> dict:
 
 def _load_overlay(on_quit=None, on_translate=None, on_submit=None,
                   on_ask=None, on_new_topic=None, on_lost=None, note=None,
-                  on_vis=None, on_wait=None, on_view=None, on_power_event=None):
+                  on_vis=None, on_wait=None, on_view=None, on_power_event=None,
+                  on_duty=None):
     """建悬浮窗。**失败回退终端 UI**（`drives_appkit` 为假 = 回退了）。
 
     ⚠️⚠️ **这一层的形参必须与调用点**逐字**对齐**（2026-09-30 事故）：
@@ -3702,7 +3935,7 @@ def _load_overlay(on_quit=None, on_translate=None, on_submit=None,
                     on_submit=on_submit, on_ask=on_ask,
                     on_new_topic=on_new_topic, on_lost=on_lost, note=note,
                     on_vis=on_vis, on_wait=on_wait, on_view=on_view,
-                    on_power_event=on_power_event)
+                    on_power_event=on_power_event, on_duty=on_duty)
         o.show()
         return o
     except Exception as e:       # noqa: BLE001

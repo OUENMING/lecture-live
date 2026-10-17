@@ -427,7 +427,46 @@ def _polish_state(stats: dict | None) -> str:
     return "partial" if stats.get("failed") else "ok"
 
 
-def _render_outline_section(items: dict) -> list:
+def _duty_section_md(items: list, *, day=None) -> list:
+    """「一些事儿」那一节的内容行。**纯函数**。
+
+    ⭐ 有**决定**（`sessions/<同名>.duty.jsonl` 里用户按过的）时只列两类：
+       **记下的**（带提醒事项的去向）+ **未处理的**（标「未确认」）；
+       **忽略掉的不写** —— 用户已经明确把它扔了。
+    ⚠️ 没有旁路文件的老会话走 `_render_outline_section` 里那条**老路**
+       （`deadline_worthy` 过滤 + 「待确认」），一个字不改 —— 那是历史笔记的样子。
+    """
+    import duty as _duty
+    out: list = []
+    for d in items:
+        title = str(d.get("title") or d.get("quote") or "").strip()
+        bits = [str(d.get("type") or "其他")]
+        when = ""
+        try:
+            when = _duty.fmt_when(d, day=day)
+        except Exception:                                 # noqa: BLE001
+            when = str(d.get("date") or "")
+        if when:
+            bits.append(when + ("·推算" if d.get("inferred") else ""))
+        bits.append("**未确认**" if d.get("action") == "pending" else "已记下")
+        if d.get("action") == "saved":
+            if d.get("reminders") == "ok":
+                bits.append("已写进提醒事项")
+            elif d.get("reminders") == "failed":
+                bits.append(f"⚠ 提醒事项没写成（{d.get('reason') or '未知'}，已备份本机）")
+        out.append(f"- **{title}**")
+        quote = str(d.get("quote") or "").strip()
+        tail = " · ".join(x for x in (
+            str(d.get("t") or ""),
+            f"来源 {d.get('source')}" if d.get("source") else "",
+            f"“{quote}”" if quote else "") if x)
+        out.append(f"  · {' · '.join(bits)}")
+        if tail:
+            out.append(f"  · {tail}")
+    return out
+
+
+def _render_outline_section(items: dict, decisions=None) -> list:
     """课堂纲要 -> 笔记里那一节。**纯函数**（不起窗口、不联网、可单测）。
 
     ⚠️ **返回空列表 = 这一节什么都不该写**（既没课务也没正式章）——
@@ -437,27 +476,47 @@ def _render_outline_section(items: dict) -> list:
        「英文合成句 + 括注中文术语」，作者后来两次要求「中文占比再提高」→ 按①实现。
        ⚠️ `en` 一个字没丢：它在小字那行。
     ⚠️ 没有合成句的章**退回它的原子要点**（不写"（空）"）。
+    ⭐ 2026-10-17：「Deadlines · 课务」这一节改名「一些事儿」，并且**有决定时**
+       只列用户「记下的」+「未处理的」（`decisions`，来自旁路文件）——
+       见 `_duty_section_md`。
     """
-    ds = list(items.get("deadlines") or ())
+    ds_raw = list(items.get("deadlines") or ())
     chs = [c for c in (items.get("chapters") or ()) if c.get("status") == "final"]
-    if not ds and not chs:
+    decisions = [x for x in (decisions or ()) if isinstance(x, dict)]
+    duty_rows = [d for d in decisions if d.get("action") in ("saved", "pending")]
+    if not ds_raw and not chs and not duty_rows:
         return []
-    # ⚠️ 2026-10-17 step 1：课务那一段**多一道闸门**（判据在 `chapter.deadline_worthy`，
-    #    纯函数）。直播时"宁可多报"（`deadline_hits` 的取舍），但笔记是**留一个学期**
-    #    的那份 —— 审计实测那份笔记 5 条课务 0 条是真的，读者会学会整块跳过。
-    #    ⚠️ 被挡下的**不是静默消失**：下面写一行"已过滤 N 条"，与术语表页脚同一条纪律。
-    try:
-        import chapter as _chapter
-        kept = [d for d in ds
-                if _chapter.deadline_worthy(d.get("quote", ""),
-                                            changed=bool(d.get("changed")))]
-        _n_drop = len(ds) - len(kept)
-    except Exception:                                         # noqa: BLE001
-        kept, _n_drop = ds, 0                                 # 附加层不许拖垮主体
-    ds = kept
+    # ⭐ 2026-10-17「一些事儿」：**有旁路文件就走新路** —— 那一节只列
+    #    「记下的」+「未处理的（未确认）」（作者拍板）。忽略掉的不写。
+    # ⚠️ 没有旁路文件（老会话 / 纯转录档 / 手工重放）时，走下面那条**老路**
+    #    （`deadline_worthy` 过滤 + 「待确认」），一个字不改。
+    _n_drop = 0
+    if decisions:
+        # 记账：直播那一路认到、但**没进「一些事儿」**的那些（没有时间指向 /
+        # 用户忽略了）—— 按原话对，不按条数（条数在两批之间本来就对不上）。
+        _quotes = {str(x.get("quote") or "") for x in duty_rows}
+        _n_drop = sum(1 for d in ds_raw
+                      if str(d.get("quote") or "") not in _quotes)
+        ds = []                                          # 新路不再用 live 的 deadline 流
+    else:
+        # ⚠️ 2026-10-17 step 1：课务那一段**多一道闸门**（判据在 `chapter.deadline_worthy`，
+        #    纯函数）。直播时"宁可多报"（`deadline_hits` 的取舍），但笔记是**留一个学期**
+        #    的那份 —— 审计实测那份笔记 5 条课务 0 条是真的，读者会学会整块跳过。
+        #    ⚠️ 被挡下的**不是静默消失**：下面写一行"已过滤 N 条"，与术语表页脚同一条纪律。
+        try:
+            import chapter as _chapter
+            kept = [d for d in ds_raw
+                    if _chapter.deadline_worthy(d.get("quote", ""),
+                                                changed=bool(d.get("changed")))]
+            _n_drop = len(ds_raw) - len(kept)
+        except Exception:                                         # noqa: BLE001
+            kept, _n_drop = ds_raw, 0                             # 附加层不许拖垮主体
+        ds = kept
     out: list = ["## 📑 课堂纲要", ""]
-    if ds:
-        out += ["### Deadlines · 课务", ""]
+    if duty_rows:
+        out += ["### 一些事儿", ""] + _duty_section_md(duty_rows) + [""]
+    elif ds:
+        out += ["### 一些事儿", ""]
         for d in ds:
             out.append(f"- **{d.get('quote', '')}**")
             out.append(f"  · {d.get('t', '')} · 来源 {d.get('source', '')}"
@@ -465,7 +524,9 @@ def _render_outline_section(items: dict) -> list:
         out.append("")
     if _n_drop:
         # ⚠️ 记账（不静默）：读者要能分辨"这课真没有课务"与"课务被过滤了"。
-        out += [f"*（另有 {_n_drop} 条课务线索疑似误报，未收录）*", ""]
+        _why = "不在「一些事儿」里（没有时间指向，或你忽略了）" if decisions \
+            else "疑似误报"
+        out += [f"*（另有 {_n_drop} 条课务线索{_why}，未收录）*", ""]
     def _pair_md(x, en_key: str, flag: str = "") -> list:
         """⭐ **排法① 在笔记里的唯一定义点**：Markdown 两行（中文大字 + 英文降小字）。
 
@@ -505,7 +566,8 @@ class ObsidianWriter:
                  api_key: str | None = None, model: str = "deepseek-flash",
                  glossary_path: str | None = None, polish: bool = True,
                  polish_model: str | None = None, keypoints=None,
-                 keypoints_fn=None, lost_explain_fn=None, backfill_fn=None):
+                 keypoints_fn=None, lost_explain_fn=None, backfill_fn=None,
+                 recap_fn=None):
         self.mode = mode
         # ⚠️⚠️ **`enabled` 只管一件事：要不要记录**（`sessions/` 那层底稿）。
         #    **「写不写 Obsidian 笔记」是另一件事** —— 由 `self._vault is not None` 判
@@ -560,6 +622,12 @@ class ObsidianWriter:
         #: ❓ 课后讲解：`fn(blocks) -> [{"explain","q","a"}, …]`（与 blocks 等长，否则不用）。
         #: ⚠️ 同 keypoints：块要到收尾才齐，所以走回调。`None` = 不讲，笔记逐字不变。
         self._lost_explain_fn = lost_explain_fn
+        #: ⭐ 课前回顾的生成出口（`main` 注入）—— 拿这一节的产物换下一节开课时要显示的
+        #: 那几行。⚠️ 它**允许发一次**模型请求（`recap.build` 里那次，出口是
+        #: `llm_client`）；`main` 负责按档位挡住（纯转录档一个请求都不发）。
+        self._recap_fn = recap_fn
+        #: 「一些事儿」的决定（旁路文件回放）—— 笔记那一节据此过滤（见 close）。
+        self._duty_items: list = []
         #: 🩹 漏译句课后补译（3.9.7 第 2 项）：`fn(entries) -> (新 entries, {"need","done"})`。
         #: ⚠️ `None` = 不补（本模块的默认）：**档位与 key 的判据在 `main`**
         #:    （纯转录档一个请求都不发、只英·校档不要中文）—— 这里只负责在渲染笔记
@@ -1586,6 +1654,37 @@ class ObsidianWriter:
             chapter_items = self._chapter_items()
         except Exception as e:                            # noqa: BLE001
             print(f"⚠ 📑 课堂纲要失败({str(e)[:60]}); 笔记照常生成")
+        # ⭐ 一些事儿（2026-10-17）：用户按下的「记下 / 忽略」在**旁路文件**里
+        #    （`sessions/<同名>.duty.jsonl`）。笔记那一节据此只列
+        #    「记下的」+「未处理的」。⚠️ 读不到 = 老会话 → 走老路（不静默失败）。
+        try:
+            import duty as _duty
+            self._duty_items = _duty.load(_duty.sidecar_path(self.session_path))
+        except Exception:                                 # noqa: BLE001
+            self._duty_items = []
+        # 🧭 课前回顾（2026-10-17，第九层）：把这一节的产物压成**下一节开课时**要
+        #    显示的那几行（知识点 + 一句解释 / 重点 / 没解决 / 一些事儿 / 结尾那句）。
+        #    ⚠️ 额外调用**上限 1 次**（在 `recap.build` 里；出口由 `main` 注入的
+        #       `recap_fn` 给，纯转录档 main 直接挡掉）；失败 / 没 key / 结构坏
+        #       → 只存骨架或什么都不存，**笔记一个字不动**。
+        try:
+            if self._recap_fn is not None:
+                import recap as _recap
+                _data = self._recap_fn({
+                    "course": self._course or "",
+                    "date": self._date or "",
+                    "session": (Path(self.session_path).name
+                                if self.session_path else ""),
+                    "chapters": chapter_items,
+                    "keypoints": keypoint_items,
+                    "lost": lost_items,
+                    "duties": list(getattr(self, "_duty_items", []) or []),
+                    "tail": _recap.tail_quote(entries),
+                })
+                if _data:
+                    _recap.save(self._course or "", _data)
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ 课前回顾没生成({str(e)[:60]}); 笔记照常")
         # 🗓 复习排程（间隔复习日期 —— 写进笔记，**不做推送**）。
         import note_v2
         import note_render
@@ -1598,6 +1697,7 @@ class ObsidianWriter:
         self._anki_name = stem.name + ".anki.csv"
         data = self._note_data(entries, review, qa_items, polish_state, lost_items,
                                keypoint_items, chapter_items, review_missing)
+        data.duty_items = list(getattr(self, "_duty_items", []) or [])
         self._write_sidecars(data)
         note = note_render.render(data)
 

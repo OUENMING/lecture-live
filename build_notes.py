@@ -518,6 +518,12 @@ class TermNotes:
         merged = dict(self._auto)
         merged.update(self._curated)                      # curated 覆盖 auto
         self._all = merged
+        # ⭐ 2026-10-17：`entry_of` 的来源表（`auto` 先、`curated` 后 —— 与上面
+        #    `merged` 同一个覆盖方向，两处一起改才不漂）。
+        self._src_of: dict = {}
+        for src, table in (("auto", self._auto), ("curated", self._curated)):
+            for t, e in table.items():
+                self._src_of[t.lower()] = (src, e)
         idx = []
         for t, e in merged.items():
             # gloss(完整解析) 与 basic(一行速查) **都参与匹配**; 只有 skip 永不显示。
@@ -535,6 +541,21 @@ class TermNotes:
 
     def known(self) -> set:
         return {k.lower() for k in self._all}
+
+    def entry_of(self, term: str) -> tuple:
+        """术语 -> `(来源, 条目)`。来源取 `"curated"` / `"auto"`；查不到 -> `("", {})`。
+
+        ⭐ 2026-10-17 加（笔记术语表止血）。**`match()` 只返回 `(term, detail)`** ——
+        「这条解析是从哪来的、它是不是一个人名」在调用方那一侧完全看不见，
+        而 `term_notes_auto.json` 里的人名条目（`type: person`）与错语境义
+        （`USC` → 南加州大学）正是靠这两个字段才能挡下来。
+
+        ⚠️ **`curated` 优先**（与 `_build_index` 里的 `merged.update(curated)` 同一条
+           纪律）：一个词两边都有时，显示的是人工/付费构建的那一份，
+           来源标签也必须跟着它走 —— 否则笔记会说"这是自动缓存的解析"而内容是人工的。
+        """
+        k = (term or "").lower()
+        return self._src_of.get(k, ("", {}))
 
     def add(self, term: str, note: str, type_: str = "") -> None:
         """自动查到的专有名词 -> 写 term_notes_auto.json (可整文件删除)。"""

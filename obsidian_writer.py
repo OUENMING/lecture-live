@@ -30,6 +30,7 @@ from __future__ import annotations
 import bisect, json, os, re, time
 from pathlib import Path
 
+import note_terms
 import paths
 
 DEFAULT_COURSE = "LECTURE"          # 没设课程代码时的占位名(线下课常不设)
@@ -441,6 +442,19 @@ def _render_outline_section(items: dict) -> list:
     chs = [c for c in (items.get("chapters") or ()) if c.get("status") == "final"]
     if not ds and not chs:
         return []
+    # ⚠️ 2026-10-17 step 1：课务那一段**多一道闸门**（判据在 `chapter.deadline_worthy`，
+    #    纯函数）。直播时"宁可多报"（`deadline_hits` 的取舍），但笔记是**留一个学期**
+    #    的那份 —— 审计实测那份笔记 5 条课务 0 条是真的，读者会学会整块跳过。
+    #    ⚠️ 被挡下的**不是静默消失**：下面写一行"已过滤 N 条"，与术语表页脚同一条纪律。
+    try:
+        import chapter as _chapter
+        kept = [d for d in ds
+                if _chapter.deadline_worthy(d.get("quote", ""),
+                                            changed=bool(d.get("changed")))]
+        _n_drop = len(ds) - len(kept)
+    except Exception:                                         # noqa: BLE001
+        kept, _n_drop = ds, 0                                 # 附加层不许拖垮主体
+    ds = kept
     out: list = ["## 📑 课堂纲要", ""]
     if ds:
         out += ["### Deadlines · 课务", ""]
@@ -449,6 +463,9 @@ def _render_outline_section(items: dict) -> list:
             out.append(f"  · {d.get('t', '')} · 来源 {d.get('source', '')}"
                        f" · **待确认**" + ("  · **已改期**" if d.get("changed") else ""))
         out.append("")
+    if _n_drop:
+        # ⚠️ 记账（不静默）：读者要能分辨"这课真没有课务"与"课务被过滤了"。
+        out += [f"*（另有 {_n_drop} 条课务线索疑似误报，未收录）*", ""]
     def _pair_md(x, en_key: str, flag: str = "") -> list:
         """⭐ **排法① 在笔记里的唯一定义点**：Markdown 两行（中文大字 + 英文降小字）。
 
@@ -511,6 +528,13 @@ class ObsidianWriter:
         self._model = model
         self._glossary_path = glossary_path or str(
             Path(__file__).with_name("glossary.txt"))
+        #: 💡 本课术语表的**过滤结果**（`note_terms.Selection`）—— 由 `_glossary()`
+        #: 在渲染时填，页脚那行 `已从术语表过滤 N 条…` 读它。`None` = 还没算过。
+        self._gloss_sel = None
+        #: 📖 本课**课件索引**（`materials.Materials`）—— 由 `close()` 建好后塞进来。
+        #: `None` = 没有课件：术语语境核对退到"只看本课术语表"，且笔记头部写明
+        #: 「本课未做课件核对」（2026-10-17 step 2 的退化档）。
+        self._materials = None
         self._polish = polish               # 落笔前二次精修(见 polish.py)
         self._polish_model = polish_model or model
         #: 🎯 Jev 的重点句：`[(概率, 句子, [原始行下标]), …]`。
@@ -612,19 +636,68 @@ class ObsidianWriter:
 
     # ---- 复习层素材 ----
     def _glossary(self, entries: list[dict]) -> list[tuple[str, str, str]]:
-        """本课命中的术语 [(术语, 解析, 首次出现时间)]。纯本地查表, 零网络。"""
+        """本课命中的术语 [(术语, 解析, 首次出现时间)]。纯本地查表, 零网络。
+
+        ⚠️ 2026-10-17 step 1：这一层**不再原样返回命中结果** —— 过滤（人名 / 口语词 /
+        常识词 / 错语境义）在 `note_terms.select`（唯一定义点），这里只做接线：
+        命中来源是 `TermNotes`（预置 + 自动缓存），语境核对是「本课术语表 ∪ 本课课件」。
+        被挡下的条目进 `self._gloss_sel.dropped`，渲染时写一行页脚 ——
+        **静默丢东西是本仓库反复咬人的那一类失败**。
+        """
+        sel = self._term_selection(entries)
+        self._gloss_sel = sel
+        return [(h.term, h.gloss, h.ts) for h in sel.hits]
+
+    def _term_selection(self, entries: list[dict]) -> note_terms.Selection:
+        """`_glossary` 的实质。**纯本地**（术语表读盘 + 记忆化, 不发请求）。"""
         try:
             from build_notes import TermNotes
-        except Exception:                                 # noqa: BLE001
-            return []
+        except Exception:                                     # noqa: BLE001
+            return note_terms.Selection(hits=[], dropped=[])
         notes = TermNotes()
-        seen, out = set(), []
-        for e in entries:
-            for t, d in notes.match(e["en"] or e["asr"]):
-                if t not in seen:
-                    seen.add(t)
-                    out.append((t, d, e["ts"]))
-        return out
+
+        def match(sentence: str):
+            for term, detail in notes.match(sentence):
+                src, _meta = notes.entry_of(term)
+                yield term, detail, (note_terms.SRC_CURATED if src == "curated"
+                                     else note_terms.SRC_AUTO)
+
+        def type_of(term: str) -> str:
+            return str(notes.entry_of(term)[1].get("type") or "")
+
+        return note_terms.select(entries, match=match, type_of=type_of,
+                                 verify=self._term_verified)
+
+    def _term_verified(self, term: str) -> bool:
+        """自动缓存里的词能不能证明"本课真的用过它"。
+
+        ⭐ 两个来源（任一命中即可）：**本课术语表**（`glossary/<课号>.txt`，
+        `prep` 从课件里长出来的）与**本课课件材料**（step 2 的 `materials` 索引）。
+        ⚠️ 没有课件索引时（旧会话 / 材料缺失）只剩术语表 —— 这时候宁可**少显示**：
+        自动缓存的错语境义（`USC` → 南加州大学）正是靠这里挡下来的。
+        """
+        k = (term or "").strip().lower()
+        if not k:
+            return False
+        if k in self._course_terms_lower():
+            return True
+        idx = self._materials
+        return bool(idx is not None and idx.verify(term))
+
+    def _course_terms_lower(self) -> set:
+        """本课术语表的小写词集合（记忆化 —— 渲染层每句都问一遍）。"""
+        cached = getattr(self, "_course_terms_cache", None)
+        if cached is not None:
+            return cached
+        try:
+            from translator import course_term_list
+            got = {t.strip().lower() for t in
+                   course_term_list(self._glossary_path, self._course) if t.strip()}
+        except Exception:                                     # noqa: BLE001
+            got = set()
+        self._course_terms_cache = got
+        return got
+
 
     def _call_review(self, transcript: str) -> dict:
         """对一段转录调一次 LLM, 返回规范化后的复习层 dict。失败 -> {}。"""
@@ -1230,6 +1303,13 @@ class ObsidianWriter:
             L += [f"- **{t}** — {d}　`{ts}`" for t, d, ts in gloss]
         else:
             L += ["*（本课没有命中术语表）*"]
+        # ⚠️ 被过滤掉的条目**记账**（`note_terms.Selection.footer`）——
+        #    读者要能分辨"本课真的只有这些术语"与"术语表被挡掉了一半"。
+        #    没有过滤时 `footer()` 返回空串，常态不占版面。
+        if self._gloss_sel is not None:
+            _foot = self._gloss_sel.footer()
+            if _foot:
+                L.append(_foot)
         L += [""]
 
         # ❓ 按钮 2026-09-29 起**兼**表「重点」和「没听懂」（⭐ 按钮已并进来），

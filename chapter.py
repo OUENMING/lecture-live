@@ -151,6 +151,82 @@ def deadline_hits(en) -> dict | None:
     return {"changed": bool(CHANGED_RE.search(s))}
 
 
+# ── 笔记里那一节的第二道闸门（2026-10-17 step 1 止血）────────────────────────
+#
+# 为什么需要：`deadline_hits` 的误报是**设计上接受**的（上面那段：直播时宁可多显示），
+# 但审计发现这些误报**原样进了笔记**并且永远留在那里（`notes/report.md` §1.2 A8）：
+# 那份笔记的「Deadlines · 课务」**5 条里 0 条是真的** ——
+#   `The deadline is alive.`（ASR 把"person is alive"听碎）/ `I have the final exam of
+#   last year.` / `At the final exam, I made the assumption…` …
+# 后果不是"多几行"，而是读者**学会整块跳过**：真 deadline 来时会一起错过（原话）。
+#
+# ⚠️ 分工刻意如此：**直播那一层不动**（`deadline_hits` 的词表一个字不改 ——
+#    把误报压下去就会漏真 deadline，那是直播路径的取舍），第二道闸门挂在
+#    **笔记渲染**上（`obsidian_writer._render_outline_section`）。同一份数据
+#    在课上"宁可多报"、在笔记"宁可少留"，因为笔记是**会留一个学期**的那份。
+
+#: 时间锚点 —— 课务**真的成立**的标志（"什么时候"）。
+#: ⚠️ `by\s+the` / 裸 `will` **不算锚点**：实测 `But by the time you get to the final
+#:    exam, you have done the processes.` 会被 `by\s+\w+` 放行，而它是句废话。
+TIME_ANCHOR_RE = re.compile(
+    r"\b(today|tonight|tomorrow|yesterday|"
+    r"(?:this|next|last|coming)\s+(?:week|monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday|month|semester|term|class|lecture|tutorial)|"
+    r"week\s*\d+|(?:mon|tues|wednes|thurs|fri|satur|sun)day|"
+    r"january|february|march|april|may|june|july|august|september|october|"
+    r"november|december|midnight|noon|end\s+of\s+(?:the\s+)?(?:week|month|term)|"
+    r"by\s+(?:next|this|tomorrow|tonight|the\s+\d|end\s+of|\d)|"
+    r"on\s+(?:the\s+)?\d{1,2}(?:st|nd|rd|th)?|"
+    r"\d{1,2}\s*(?:am|pm)|\d{1,2}[:.]\d{2}|"
+    r"\d+\s+(?:days?|hours?|weeks?)\b|"
+    r"reading\s+week|study\s+week|"
+    r"周[一二三四五六日末]|星期[一二三四五六日]|下周|本周|这周|今天|明天|之前|截止)\b",
+    re.I)
+
+#: 提交/改期动作 —— 与时间锚点并列的第二种"这条课务是真的"的证据
+#: （`Hand in your essay tomorrow` 有时间锚点；`Submit it on Brightspace` 靠这个）。
+ACTION_RE = re.compile(
+    r"\b(submit\w*|hand(?:ed|s|ing)?\s+in|upload\w*|post(?:ed|ing)?\s+(?:it|them|your)|"
+    r"extended?|extension|postpon\w*|reschedul\w*|"
+    r"cancell?ed|no\s+(?:class|lecture|tutorial|lab)|"
+    r"brightspace|canvas|moodle|blackboard|"
+    r"moved?\s+to|starts?\s+(?:on|at)|finish(?:es)?\s+(?:on|by))\b", re.I)
+
+#: 过去/非课务的标记 —— 命中它**且没有时间锚点**时丢掉。
+#: ⚠️ 只挡 `last year/week/time`、`already`、`used to` 这类**明确回指过去**的词：
+#:    课堂上"讲去年的卷子"很常见，而它**不是**一条 deadline（实测 2/5 条误报都是它）。
+PAST_RE = re.compile(
+    r"\b(last\s+(?:year|week|semester|term|time)|yesterday|used\s+to|"
+    r"already\s+(?:passed|happened|done)|has\s+passed)\b", re.I)
+
+
+def deadline_worthy(quote: str, *, changed: bool = False) -> bool:
+    """**笔记**里这条课务值不值得留。纯函数，只吃原句。
+
+    ⭐ 判据（缺一不可）：
+      ① 有时间锚点 **或** 提交/改期动作（`TIME_ANCHOR_RE` / `ACTION_RE`）；
+      ② 不是"只回指过去"的句子（`PAST_RE` 命中时，只有**同时**有时间锚点才留）。
+
+    ⚠️ `changed=True`（已改期）**直接放行**：那是 `CHANGED_RE` 亲手判的强信号，
+       压掉它等于把「已改期」这个功能在笔记里删掉。
+    ⚠️ 少留是有代价的（真 deadline 被挡掉）—— 所以判据**只挡明确讲不通的句子**，
+       宁可放过"讨论考试"那种模糊句（它至少提到了未来）。
+       📏 实测（vault 全部笔记里 14 条进过笔记的课务条目）：**挡 10 / 留 4** ——
+       挡掉的 10 条里含审计点名的全部 5 条（`notes/report.md` §1.2 A8），
+       留下的 4 条全是真课务（Brightspace 上的 assignment / 本周三停课 /
+       本周出勤 / 下周分组）。判据见 `tests/test_note_format.py`。
+    """
+    s = str(quote or "")
+    if changed:
+        return True
+    if not s.strip():
+        return False
+    has_anchor = bool(TIME_ANCHOR_RE.search(s))
+    if PAST_RE.search(s) and not has_anchor:
+        return False
+    return has_anchor or bool(ACTION_RE.search(s))
+
+
 # ---------------------------------------------------------------- 数据类
 @dataclasses.dataclass(frozen=True)
 class Chapter:

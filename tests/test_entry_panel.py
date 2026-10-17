@@ -2854,12 +2854,16 @@ def _whisper_card_section() -> None:
             if _wk:
                 _kw = _wk[0][2]
                 _labels = [t for t, _f, _k in (_kw.get("buttons") or [])]
-                check("⭐⭐ 两颗按钮都在、顺序是 移到废纸篓 / 保留",
-                      _labels == ["移到废纸篓", "保留"], str(_labels))
-                _btns = _kw.get("buttons") or []
-                if len(_btns) == 2:
+                check("⭐⭐ 两颗按钮都在、顺序是 保留 / 移到废纸篓（主按钮在右）",
+                      _labels == ["保留", "移到废纸篓"], str(_labels))
+                _kinds = {t: k for t, _f, k in (_kw.get("buttons") or [])}
+                # ⭐ 作者 2026-10-18：这张卡是来建议清理的 → 「移到废纸篓」是主按钮
+                check("⭐⭐「移到废纸篓」是 primary、「保留」是 secondary",
+                      _kinds == {"移到废纸篓": "primary", "保留": "secondary"}, str(_kinds))
+                _by = {t: f for t, f, _k in (_kw.get("buttons") or [])}
+                if set(_by) == {"保留", "移到废纸篓"}:
                     # 点「保留」-> 真的写进 whisper_card 的状态（隔离在 tempdir）
-                    _btns[1][1]()
+                    _by["保留"]()
                     check("⭐「保留」-> 真的记下了（`whisper_card.answer`）",
                           _WC.answered(root=root / "state") == "keep",
                           repr(_WC.answered(root=root / "state")))
@@ -2870,7 +2874,7 @@ def _whisper_card_section() -> None:
                                   (_rm.append(str(p)),
                                    {"ok": True, "refused": False, "error": ""})[1])
                     try:
-                        _btns[0][1]()
+                        _by["移到废纸篓"]()
                     finally:
                         _WC.remove = _real_remove
                     check("⭐「移到废纸篓」-> 接到 `whisper_card.remove`（注册表路径）",

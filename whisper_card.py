@@ -171,7 +171,7 @@ def card_texts(size_now: str) -> tuple:
     """卡片三行：`(标题, 正文, 小字)`。**纯函数**（文案单独钉得住）。"""
     body = (f"本地 Whisper（{size_now}，以前的定稿模型）只在云端转写关掉时才会用到 ——"
             f"云端转写（默认开）更准。")
-    note = ("清掉只是省空间；想要回来：跑 `cl doctor`，按它给的命令重下"
+    note = ("清掉只是省空间；想要回来：跑「cl doctor」，按它给的命令重下"
             "（约 538 MB）。")
     return ("旧的本地 Whisper 还能清掉", body, note)
 

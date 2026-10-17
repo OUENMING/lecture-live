@@ -2929,8 +2929,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         import whatsnew
         _queue_card("whisper", lambda: whatsnew.build(
             title, "", body=body, note=note,
-            buttons=[("移到废纸篓", _card_done(_remove_whisper), "secondary"),
-                     ("保留", _card_done(_keep_whisper), "primary")],
+            # ⭐ 主次（作者 2026-10-18）：这张卡就是来建议清理的 → 「移到废纸篓」是主按钮
+            #    （进废纸篓可还原，不算不可逆）；「保留」退为次级。
+            buttons=[("保留", _card_done(_keep_whisper), "secondary"),
+                     ("移到废纸篓", _card_done(_remove_whisper), "primary")],
             over=win))
 
     def _show_update(offer: dict, gen) -> None:

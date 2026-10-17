@@ -34,10 +34,22 @@ import time
 import motion
 import objc_own
 
-IDLE_S = 6.0          # 闲置多久才自动回底(仅在离开底部后又有新句定稿时)
 BOTTOM_EPS = 3.0      # origin.y <= 此值即视为在底部(橡皮筋的负值也算)
 MOVE_EPS = 1.5        # 与期望 origin 相差超过此值 -> 判定为用户/惯性滚动
 FLUSH_DT = 0.016      # 渲染合并闸门 = 一帧
+
+# ---- 视口归谁：一条规矩（2026-10-17 修「往上翻被拽回底部」）----
+# ⭐ **回到底部只由用户触发**（自己滚到底 / 点「↓ N 句新的」）。两条老规矩都撤了:
+#   ① 「闲置 6s 自动回底」(`IDLE_S`, 已删) —— 探针实测(两种布局, `scripts/
+#      probe_scroll_flash.py`)读着读着 5.4s 后整屏被拽走; 一节 50 分钟的课里
+#      "读着刚才那几段"是常态, 定时器分不清"人在读"和"人走了", 用户代价远大于收益。
+#   ② 「跟随态钉底无脑 `scrollToPoint_(0)`」—— 它**可以和手势抢**: 程序滚动一旦
+#      落在「用户把视口滚走」与「下一个 tick」之间(空闲档让步里 `nextEventMatchingMask`
+#      当场派发滚轮就是那条路径), 钉底把视口拽回 0 并把 `_expected_origin` 一起写成 0,
+#      于是 tick 读到"没动过" —— 用户的滚动被**吞掉**, 跟随永远翻不了假。
+# 现在: **每一次程序滚动之前**都先过 `_sync_user_origin`（`tick` 与 `_paint` 两处调用,
+# 判据只有一份）, 视口不在期望位置就一律视为用户在滚 -> 交还给他; 钉底只吸收
+# `BOTTOM_EPS` 以内的零头(橡皮筋 / 亚像素), 永不远距离往回拽。
 
 # ---- 新行淡入（A5）与译文超限截断（#7）----
 #: 上滚时**真正的新行**额外淡入的时长 = `motion.MOVE_S` 的前 55%。
@@ -359,9 +371,11 @@ class TranscriptView:
 
         self._follow = True
         self._expected_origin = 0.0
-        self._last_user_t = 0.0
-        self._new_since_leave = False
-        self._pending_appends = 0
+        #: 离开底部以后**定稿了几句**（0 = 在底部）。给「↓ N 句新的」用；
+        #: 它只数**定稿追加**（`_set_items` 里 `n > len(_items)`）—— 那是读者关心的
+        #: "下面又有几句新话"，而实时行显形/消失只是**几何**变化（由 `_paint` 的
+        #: 浏览保护按行数差补位移，见那里）。
+        self._new_since_leave = 0
         self._hold = False          # 答案接管期间: 不自动回底(见 set_scroll_hold)
         # ---- 新行入列的上滚(见 _start_roll) ----
         # 时钟与「减弱动态效果」都可注入: 位移是时间的纯函数, 探针可以确定性地断言每一帧。
@@ -517,22 +531,19 @@ class TranscriptView:
 
         为什么不能直接用 set_content: 它把"条数变多"一律当成"字幕追加了新句"。
         答案接管时条数会从 N 条字幕整体换成 M 条答案行、退出时再换回来, 差值本来
-        没有语义, 却会凭空记成"来了 N-M 句新话": _pending_appends 于是触发浏览保护
-        位移(把视口推到一个无意义的位置), 并置 _new_since_leave 让闲置回底在 6s
-        后把读者拽走。换内容 = 换一整套坐标系, 记账必须清零重来。"""
+        没有语义, 却会凭空记成"来了 N-M 句新话"（「↓ N 句新的」会亮起来一个假数,
+        浏览保护也会把视口推到一个无意义的位置）。换内容 = 换一整套坐标系,
+        记账必须清零重来。"""
         self._set_items(list(items), None, False, bulk=True)
 
     def _set_items(self, items, live, live_visible: bool, bulk: bool) -> None:
         n = len(items)
-        if not bulk and n > len(self._items):
-            self._pending_appends += n - len(self._items)
-            if not self._follow:
-                # "只有真的有新内容才回底": 新句子(定稿)才算新内容。
-                # 流式增量不算 —— 行高固定, 实时行增长不会移动文档。
-                self._new_since_leave = True
+        if not bulk and n > len(self._items) and not self._follow:
+            # "只有真的有新内容才算"：新句子(定稿)才算 —— 流式增量不算（行高固定,
+            # 实时行增长不会移动文档）。**在底部时不计**（跟随态没人需要这个数）。
+            self._new_since_leave += n - len(self._items)
         elif bulk:
-            self._pending_appends = 0
-            self._new_since_leave = False
+            self._new_since_leave = 0
             self._count_reset = True
             self._end_roll()
         self._items = items
@@ -557,17 +568,16 @@ class TranscriptView:
         self.mark_dirty(urgent=True)
 
     def set_scroll_hold(self, on: bool) -> None:
-        """接管期间冻住自动滚动: 不自动跟随、不闲置回底。
+        """接管期间冻住自动滚动: 不自动跟随。
 
-        ⚠️ 为什么必须显式关: 答案可能比视口长得多, 读长答案时 `tick()` 有两条
-        路径会**主动移动视口** —— ① 视口一到 0(内容短于视口, 顶部=底部)就被判成
-        "用户回到底部" 而重新跟随, 内容一长就每帧钉回底部; ② 新行追加后闲置 6s
-        回底。两条都会把正在读长答案的人拽走。
-        用户仍然可以自由滚动、也可以点 ↓最新 去看最新一行(那不是自动的)。"""
+        ⚠️ 为什么必须显式关: 答案可能比视口长得多, 读长答案时 `tick()` 有一条路径
+        会**主动移动视口** —— 视口一到 0(内容短于视口, 顶部=底部)就被判成"用户回到
+        底部"而重新跟随, 内容一长就每帧钉回底部。用户仍然可以自由滚动（回底只由
+        用户触发, 见文件头「视口归谁」）。"""
         self._hold = bool(on)
         if on:
             self._follow = False
-            self._new_since_leave = False
+            self._new_since_leave = 0
             self._expected_origin = self._scroll.contentView().bounds().origin.y
             self._on_follow_change(False)
 
@@ -659,7 +669,7 @@ class TranscriptView:
         clip = self._scroll.contentView()
         clip.scrollToPoint_((0.0, 0.0))
         self._expected_origin = clip.bounds().origin.y
-        self._new_since_leave = False
+        self._new_since_leave = 0
         if not self._follow:
             self._follow = True
             self._on_follow_change(True)
@@ -673,7 +683,7 @@ class TranscriptView:
         h = self._doc.frame().size.height
         clip.scrollToPoint_((0.0, max(0.0, h - clip.bounds().size.height)))
         self._expected_origin = clip.bounds().origin.y
-        self._new_since_leave = False
+        self._new_since_leave = 0
 
     def scroll_to_index(self, index: int) -> None:
         """把**第 `index` 条**滚到**视口顶部**（`items[0]` = 屏幕上最上面那行）。
@@ -705,11 +715,19 @@ class TranscriptView:
         y = max(0.0, min(y, max(0.0, h - vh)))
         clip.scrollToPoint_((0.0, y))
         self._expected_origin = clip.bounds().origin.y
-        self._new_since_leave = False
+        self._new_since_leave = 0
 
     @property
     def following(self) -> bool:
         return self._follow
+
+    @property
+    def new_since_leave(self) -> int:
+        """离开底部以后**定稿了几句**（0 = 在底部 / 没人需要这个数）。
+
+        给宿主画「↓ N 句新的」用 —— 那是**提示**，不是自动回底: 回底只由用户
+        自己滚到底或点那个按钮触发（见文件头「视口归谁」）。"""
+        return int(self._new_since_leave)
 
     # ---- 对外: 驱动 ----
     def mark_dirty(self, urgent: bool = False) -> None:
@@ -736,7 +754,10 @@ class TranscriptView:
         我们自己 scrollToPoint_ 期间触发, 正是把程序滚动误判成用户滚动的环);
         ③惯性自然处理: 每个 tick 都在动就持续刷新计时, 停下后计时才开始。
 
-        新行入列的上滚也在这里逐帧推进(pump 每轮都调 tick)。"""
+        新行入列的上滚也在这里逐帧推进(pump 每轮都调 tick)。
+
+        ⭐ 2026-10-17: 用户滚动的判定搬进 `_sync_user_origin`（`_paint` 也要过它,
+        理由见那个函数）。本函数只剩「翻状态」这一半。"""
         if self._roll_t0 is not None:
             self._step_roll()
         if self._lzd_t0 is not None:
@@ -744,15 +765,7 @@ class TranscriptView:
         if self._type:
             self._step_type()
         clip = self._scroll.contentView()
-        cur = clip.bounds().origin.y
-        if abs(cur - self._expected_origin) > MOVE_EPS:
-            self._last_user_t = time.monotonic()
-            if self._follow and cur > BOTTOM_EPS:
-                self._end_roll()          # 用户一滚就交还给他, 不和他抢
-                self._follow = False
-                self._new_since_leave = False
-                self._on_follow_change(False)
-            self._expected_origin = cur
+        if self._sync_user_origin(clip):
             # 滚动改变了可见 level 区间, 池必须跟着重算 —— 否则滚过 K-2 行后
             # 新露出的位置没有槽位, 会是空白。
             # ⚠️ 必须 urgent: 滚动是**离散的用户事件**, 和定稿/术语同级, 不能排在
@@ -763,16 +776,39 @@ class TranscriptView:
             self.mark_dirty(urgent=True)
             return
         if not self._follow:
-            # ⚠️ _hold(答案接管)期间这两条自动回底都必须关掉: "视口回到 0" 在答案
-            # 比视口短时**恒成立**(顶部即底部), 一旦据此重新跟随, 内容长过视口后
-            # 每帧都会被钉回底部; 闲置回底同理, 读长答案读到一半就被拽走。
-            if not self._hold and cur <= BOTTOM_EPS:   # 用户自己滚回底部
+            # ⚠️ `_hold`(答案接管)期间自动回底必须关掉: "视口回到 0" 在答案比视口短时
+            # **恒成立**(顶部即底部), 一旦据此重新跟随, 内容长过视口后每帧都会被钉回底部。
+            # ⚠️ 「闲置 6s 回底」那条 2026-10-17 **删了**（探针实测: 读着读着整屏被拽走,
+            #    见文件头「视口归谁」）—— 回底只由用户触发。
+            if not self._hold and clip.bounds().origin.y <= BOTTOM_EPS:   # 用户自己滚回底部
                 self._follow = True
-                self._new_since_leave = False
+                self._new_since_leave = 0
                 self._on_follow_change(True)
-            elif (self._new_since_leave and not self._hold
-                  and time.monotonic() - self._last_user_t >= IDLE_S):
-                self.scroll_to_bottom()
+
+    def _sync_user_origin(self, clip) -> bool:
+        """视口位置与程序记的期望值不符 -> 那是**用户在滚**, 视口归他。返回是否刚接手。
+
+        ⚠️ 为什么 `tick` 与 `_paint` **都**要过这里: 只在 tick 里判不够 —— 程序滚动
+        （钉底 / 浏览保护）也能发生在两次 tick 之间。真课路径: 空闲档的让步
+        （`Overlay._wait_interruptible`）里 `nextEventMatchingMask` 当场派发了滚轮 →
+        clip 先动, 紧接着 `drain()` 里一个定稿触发 `_paint` → 老代码的钉底把视口拽回
+        0 **并把 `_expected_origin` 也写成 0** → 下一个 tick 读到"没动过" → 用户的滚动
+        被吞掉、跟随永远翻不了假（`scripts/probe_scroll_flash.py` 与最小复现都钉着）。
+        判据放在**每一次程序滚动之前**, 这种时序就不存在了。
+
+        ⚠️ 只改状态, **不** `mark_dirty` —— `tick` 的调用方要重算槽位池（它自己
+        `mark_dirty(urgent=True)`）, 而 `_paint` 的调用方正在画（再标一次会递归）。
+        """
+        cur = clip.bounds().origin.y
+        if abs(cur - self._expected_origin) <= MOVE_EPS:
+            return False
+        if self._follow and cur > BOTTOM_EPS:
+            self._end_roll()          # 用户一滚就交还给他, 不和他抢
+            self._follow = False
+            self._new_since_leave = 0
+            self._on_follow_change(False)
+        self._expected_origin = cur
+        return True
 
     # ---- 渲染 ----
     def _row_texts(self, r: int):
@@ -1273,6 +1309,11 @@ class TranscriptView:
 
     def _paint(self) -> None:
         clip = self._scroll.contentView()
+        # ⭐ 先认视口归谁, 再画 —— 这是「程序滚动不许和手势抢」的闸门: 视口不在我们
+        #    记的位置上, 就说明用户滚过了（哪怕 tick 还没轮到）, 立刻交还给他。
+        #    ⚠️ 少了这一步, 钉底 / 浏览保护会拿**过期的** `_follow` 把用户的滚动拽回去,
+        #       还把 `_expected_origin` 一起改写 —— tick 从此读不出"用户动过"。
+        self._sync_user_origin(clip)
         view_h = clip.bounds().size.height
         doc_w = clip.bounds().size.width
         self._ensure_pool(view_h)               # 视口可能因换屏变大, 池要跟上
@@ -1306,31 +1347,37 @@ class TranscriptView:
                 #    与"合并"无关(接管换渲染源)。那时只改 `_history`, 不做过渡。
                 and not self._verbatim)
 
-        # 浏览保护: 未跟随时新追加的行会把老内容整体上移 k*row_h,
-        # 把视口同步上移同样距离, 视线不动。必须回写 _expected_origin,
-        # 否则下一个 tick 会把我们自己的位移误判成用户滚动。
-        k = self._pending_appends
-        if k and not self._follow:
-            oy = clip.bounds().origin.y
-            clip.scrollToPoint_((0.0, oy + k * self._row_h))
-            self._expected_origin = clip.bounds().origin.y
-        self._pending_appends = 0
-        if grew < 0 and not self._follow:
-            # 反向的浏览保护: 少一行时**上面的行整体下移**一格, 视口跟着下移同样的
-            # 距离, 视线不动(mirror 上面那一条)。手动回看时那一行本来就在视口外,
-            # 所以这一支**不做位移动画**(只有内容淡换, 见 _start_merge_roll)。
-            oy = clip.bounds().origin.y
-            clip.scrollToPoint_((0.0, max(0.0, oy + grew * self._row_h)))
-            self._expected_origin = clip.bounds().origin.y
-
+        # 浏览保护: 未跟随时**行数变了几行**就把视口跟着挪几行（定稿追加、实时行
+        # 显形/消失都算 —— `count` 才是"老内容被挪了几格"的唯一真相；原来只数定稿
+        # 追加, 于是实时行显形那一帧把视线往最新那边拽一行, 每句一次, 定稿时又反向
+        # 拽回来 —— 就是"底下很闪、一直想把我拉回去"的形状）。
+        # ⚠️ 必须放在**文档换高之后**（下面那段）: 视口贴文档顶时, 早滚一步会被
+        #    AppKit 按**旧**高度 clamp 回去, 补偿就丢了。
+        # 必须回写 _expected_origin, 否则下一个 tick 会把我们自己的位移误判成用户滚动。
         width_changed = abs(self._doc_w - doc_w) > 0.5
         if abs(self._doc_h - doc_h) > 0.5 or width_changed:
             self._doc_h, self._doc_w = doc_h, doc_w
             self._doc.setFrame_(((0.0, 0.0), (doc_w, doc_h)))
+        if grew and not self._follow:
+            # 正负同一支: 多一行 -> 上移一格; 少一行 -> 下移一格（合并吞行 / 实时行
+            # 收起）。手动回看时被吞的那一行本来就在视口外, 所以这一支**不做位移动画**
+            # （只有内容淡换, 见 _start_merge_roll）。
+            # 少行时「↓ N 句新的」跟着减（半句合并把两行并成一行, 那两句现在是一行）。
+            if grew < 0:
+                self._new_since_leave = max(0, self._new_since_leave + grew)
+            oy = clip.bounds().origin.y
+            clip.scrollToPoint_((0.0, max(0.0, oy + grew * self._row_h)))
+            self._expected_origin = clip.bounds().origin.y
 
         if self._follow:
-            # 跟随态: 钉在底部(origin 0), 内容从下往上铺
-            if clip.bounds().origin.y != 0.0:
+            # 跟随态: 钉在底部(origin 0), 内容从下往上铺。
+            # ⚠️ 只吸收 `BOTTOM_EPS` 以内的**零头**（橡皮筋 / 亚像素）—— 更远的位置
+            #    一定是用户在滚, 上面 `_sync_user_origin` 已经把它交还了（follow 已翻假,
+            #    走不到这里）。绝不再无脑 `scrollToPoint_(0)`: 那正是"和手势抢"。
+            #    负值（往下拽过头的橡皮筋）一律吸收: 不翻转坐标系时, origin<0 只可能是
+            #    底边外的弹性回弹, 不可能是用户想待的位置。
+            oy = clip.bounds().origin.y
+            if oy != 0.0 and oy <= BOTTOM_EPS:
                 clip.scrollToPoint_((0.0, 0.0))
             self._expected_origin = clip.bounds().origin.y
             if grew > 0:

@@ -901,7 +901,7 @@ class TestSession:
     def note_ui(self, name: str) -> None:
         """⭐ **UI 使用度**（采集面 ⑦）：某个交互被用了几次。
 
-        名字由 `overlay` 那边给（`submit` / `ask` / `new_topic` / `lost` /
+        名字由 `overlay` 那边给（`submit` / `ask` / `new_topic` / `latest` / `lost` /
         `outline` / `trans_mode` / `quit` / `hide` / `show` / `on_top` / `not_on_top` / `reopen` / `edge_tab`，
         以及 3.9.7 文字稳定包那两个：`draft_append` / `draft_rewrite` ——
         草稿更新里「纯追加」与「改了前面已显示的词」各多少次，用来量逐词淡换的收益）。

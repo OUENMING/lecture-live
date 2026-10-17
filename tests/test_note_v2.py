@@ -556,6 +556,26 @@ class HtmlComponents(unittest.TestCase):
         self.assertEqual(note_math.pretty_tex("x^{-1}"), "x⁻¹")
         self.assertEqual(note_math.pretty_tex(r"x=\pm 1"), "x=± 1")
 
+    def test_兜底不露_TeX_命令(self):
+        """⭐ 第五轮自查（产物 H 的截图/HTML 扫描）：兜底里还露着 12 处反斜杠命令 ——
+        `p = \\min AC`、`\\sqrt{\\frac{2}{3}}`、`AC(q) = \\underline{\\hspace{1cm}}`、
+        `q^*=6`、`(q^n)'=nq^{n-1}`。逐条钉住（KaTeX 没加载时肉眼看到的就是这些）。"""
+        import note_math
+        pt = note_math.pretty_tex
+        self.assertEqual(pt(r"p = \min AC"), "p = min AC")
+        self.assertEqual(pt(r"q = \sqrt{\frac{2}{3}} \approx 0.816"), "q = √((2)/(3)) ≈ 0.816")
+        self.assertEqual(pt(r"AC'(q) = \underline{\hspace{1cm}}"), "AC'(q) = ____")
+        self.assertEqual(pt(r"\underline{\hspace{1cm}}"), "____")
+        self.assertEqual(pt("q^*=6"), "q*=6")
+        self.assertEqual(pt("(q^n)'=nq^{n-1}"), "(qⁿ)'=nqⁿ⁻¹")      # 单字母上标
+        self.assertEqual(pt("x^{T}"), "xᵀ")                          # 转置
+        self.assertEqual(pt("AC_{min}"), "ACₘᵢₙ")
+        self.assertEqual(pt("x^12345"), "x¹²³⁴⁵")
+        # ⚠️ 认不出的**绝不硬转**：`q^{q}` 若丢掉上标就成了 `qq`（读者当乘积）——
+        #    与 `x^-1` 同口径：宁可露 TeX 源码，不许显示错的数学。
+        self.assertEqual(pt("q^{q}"), "q^{q}")
+        self.assertEqual(pt("x^-1"), "x^-1")
+
     def test_撇号与_pm_的兜底只转义一次(self):
         """⚠️ 第三轮截图抓到：兜底文字被 escape 两次 —— 页面上显示字面量 `&#x27;`、`&lt;`。
 

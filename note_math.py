@@ -84,36 +84,105 @@ _SUBS = {"0": "\u2080", "1": "\u2081", "2": "\u2082", "3": "\u2083", "4": "\u208
          "5": "\u2085", "6": "\u2086", "7": "\u2087", "8": "\u2088", "9": "\u2089"}
 
 
+#: 上标里的字母（Unicode 的"修饰字母"区）：`q^n` → `qⁿ`、`x^T`（转置）→ `xᵀ`。
+#: 认得出的都在这里；认不出的（大写 C/F/Q/S/X/Y/Z、小写 q）**不转**（见 `_script`）。
+_SUP_LETTERS = {"a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "f": "ᶠ", "g": "ᵍ",
+                "h": "ʰ", "i": "ⁱ", "j": "ʲ", "k": "ᵏ", "l": "ˡ", "m": "ᵐ", "n": "ⁿ",
+                "o": "ᵒ", "p": "ᵖ", "r": "ʳ", "s": "ˢ", "t": "ᵗ", "u": "ᵘ", "v": "ᵛ",
+                "w": "ʷ", "x": "ˣ", "y": "ʸ", "z": "ᶻ",
+                "A": "ᴬ", "B": "ᴮ", "D": "ᴰ", "E": "ᴱ", "G": "ᴳ", "H": "ᴴ", "I": "ᴵ",
+                "J": "ᴶ", "K": "ᴷ", "L": "ᴸ", "M": "ᴹ", "N": "ᴺ", "O": "ᴼ", "P": "ᴾ",
+                "R": "ᴿ", "T": "ᵀ", "U": "ᵁ", "V": "ⱽ", "W": "ᵂ"}
+#: 下标里的字母：`AC_{min}` → `ACₘᵢₙ`。同样只收 Unicode 里真有的那些。
+_SUB_LETTERS = {"a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ", "l": "ₗ",
+                "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ",
+                "u": "ᵤ", "v": "ᵥ", "x": "ₓ"}
+_SUP_ALL = {**_SUPERS, **_SUP_LETTERS, "*": "*"}       # `q^*` → `q*`（经济学写法）
+_SUB_ALL = {**_SUBS, "+": "₊", "-": "₋", **_SUB_LETTERS}
+
+#: 常见命令 → Unicode（第五轮：`p = \min AC`、`\sqrt{\frac{2}{3}}`、
+#: `AC(q) = \underline{\hspace{1cm}}` 在兜底里原样露出反斜杠 —— 截图自查抓到的）。
+_TEX_CMD = {
+    # 函数名 / 算子
+    "min": "min", "max": "max", "ln": "ln", "log": "log", "lg": "lg", "exp": "exp",
+    "sin": "sin", "cos": "cos", "tan": "tan", "cot": "cot", "sec": "sec", "csc": "csc",
+    "arcsin": "arcsin", "arccos": "arccos", "arctan": "arctan", "lim": "lim",
+    "det": "det", "dim": "dim", "gcd": "gcd", "mod": "mod", "left": "", "right": "",
+    # 关系 / 运算
+    "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠", "approx": "≈",
+    "sim": "~", "simeq": "≃", "equiv": "≡", "propto": "∝", "pm": "±", "mp": "∓",
+    "times": "×", "cdot": "·", "div": "÷", "ast": "*", "infty": "∞", "partial": "∂",
+    "nabla": "∇", "sum": "Σ", "prod": "Π", "int": "∫", "sqrt": "√", "perp": "⊥",
+    "angle": "∠", "circ": "∘", "bullet": "•", "cdots": "⋯", "ldots": "…", "dots": "…",
+    # 箭头
+    "to": "→", "rightarrow": "→", "longrightarrow": "→", "leftarrow": "←", "gets": "←",
+    "Rightarrow": "⇒", "Leftarrow": "⇐", "Leftrightarrow": "⇔", "mapsto": "↦",
+    "up": "↑", "down": "↓",
+    # 希腊字母（经济学里常见的）
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
+    "varepsilon": "ε", "zeta": "ζ", "eta": "η", "theta": "θ", "kappa": "κ",
+    "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "pi": "π", "rho": "ρ",
+    "sigma": "σ", "tau": "τ", "phi": "φ", "varphi": "φ", "chi": "χ", "psi": "ψ",
+    "omega": "ω", "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Pi": "Π",
+    "Sigma": "Σ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+    # 间距
+    "quad": " ", "qquad": "  ",
+}
+#: 单字符命令（反斜杠后不是字母）：空白类直接吃掉，符号类去反斜杠。
+_TEX_CHAR_CMD = {r"\%": "%", r"\$": "$", r"\&": "&", r"\#": "#", r"\_": "_",
+                 r"\,": " ", r"\;": " ", r"\:": " ", r"\!": "", r"\ ": " "}
+
+
 def _script(body: str, table: dict) -> str:
-    return "".join(table.get(c, c) for c in body)
+    """整组都认得出才转；有一个认不出就返回 `""`（调用处原样留 TeX 源码）。
+
+    ⚠️ 这道"认不全就放弃"是第五轮补的：老实现认不出就把原字符留在**基线**上 ——
+       `q^{q}` 会变成 `qq`（读者当乘积）、`AC_{min}` 会变成 `ACmin`。
+       作者口径一贯是「宁可露 TeX 源码，不许显示错的数学」（同 `x^-1`）。
+    """
+    if not body or any(c not in table for c in body):
+        return ""
+    return "".join(table[c] for c in body)
 
 
 def pretty_tex(text: str) -> str:
-    """TeX → 能直接读的 Unicode（`x^{3}` → `x³`、`q_{1}` → `q₁`）。
+    """TeX → 能直接读的 Unicode（`x^{3}` → `x³`、`q_{1}` → `q₁`、`q^n` → `qⁿ`）。
 
     ⚠️ 用途只有一个：**KaTeX 没加载时页面上显示的兜底文字**（作者 2026-10-17：
        「任何短文本都要过同一个渲染……不许露 `^{}`」）。真正的数学仍走 KaTeX
        （`data-tex` 里是原样 TeX），`$…$` 标记照旧。
     """
     s = str(text or "")
-    s = re.sub(r"\^\{([^{}]{1,12})\}", lambda m: _script(m.group(1), _SUPERS), s)
-    # ⚠️⚠️ 上标只吃**紧跟 `^` 的那一个 token**：花括号组，或一段纯数字（1–4 位）。
+
+    def _sup(m):
+        conv = _script(m.group(1).strip("{}"), _SUP_ALL)
+        return conv or m.group(0)      # 认不出 → 原样留（宁可露源码）
+
+    def _sub(m):
+        conv = _script(m.group(1).strip("{}"), _SUB_ALL)
+        return conv or m.group(0)
+
+    # ⚠️⚠️ 上标只吃**紧跟 `^` 的那一个 token**：`{…}`、纯数字串、单个字母、`*`。
     #    历史两次翻车（都是"读出来是错的数学"，作者第四轮再次点名）：
     #      · `[0-9+-]{1,3}` → `Q^3-12Q^2+60Q` 被写成 `Q³⁻¹2Q²⁺⁶0Q`（把 `-12`/`+60` 也上标了）；
     #      · 带符号版 `-?[0-9]{1,3}` 仍会把 `x^2-3` 之外的 `x^-1` 当指数（`-1` 未必是符号）。
-    #    现在：**数字串（不带符号）或 `{…}`**；其余一律留在基线 ——
+    #    现在：数字串（不带符号）/ 单个字母 / `{…}` / `*`；其余一律留在基线 ——
     #    KaTeX 没加载时宁可露出 `x^-1` 这样的 TeX 源码，也不许显示错的数学。
-    s = re.sub(r"\^\s*(\{[^{}]{1,12}\}|[0-9]{1,4})", lambda m: _script(m.group(1).strip("{}"), _SUPERS), s)
-    s = re.sub(r"_\{([^{}]{1,12})\}", lambda m: _script(m.group(1), _SUBS), s)
-    s = re.sub(r"_(\d{1,3})", lambda m: _script(m.group(1), _SUBS), s)
-    s = s.replace(r"\times", "×").replace(r"\cdot", "·").replace(r"\div", "÷")
+    s = re.sub(r"\^\s*(\{[^{}]{1,12}\}|[0-9]+|[A-Za-z]|\*)", _sup, s)
+    s = re.sub(r"_\s*(\{[^{}]{1,12}\}|[0-9]{1,3})", _sub, s)
+
+    # 带参数的命令（先长后短：`\underline{\hspace{…}}` 要整套吃掉）
+    s = re.sub(r"\\underline\s*\{\s*\\hspace\s*\{[^{}]{0,16}\}\s*\}", "____", s)
+    s = re.sub(r"\\(?:text|mathrm|mathbf|mathit|mathsf|operatorname)\s*\{([^{}]{1,60})\}",
+               r"\1", s)
+    s = re.sub(r"\\hspace\s*\{[^{}]{0,16}\}", " ", s)
+    s = re.sub(r"\\underline\s*\{([^{}]{1,60})\}", r"\1", s)
     s = re.sub(r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}",
                lambda m: f"({m.group(1)})/({m.group(2)})", s)
-    for a, b in ((r"\left", ""), (r"\right", ""), (r"\Rightarrow", "⇒"),
-                 (r"\times", "×"), (r"\div", "÷"), (r"\pm", "±"), (r"\mp", "∓"),
-                 (r"\leq", "≤"), (r"\le", "≤"), (r"\geq", "≥"), (r"\ge", "≥"),
-                 (r"\neq", "≠"), (r"\infty", "∞"), (r"\to", "→"), (r"\approx", "≈")):
+    s = re.sub(r"\\sqrt\s*\{([^{}]{1,60})\}", lambda m: f"√({m.group(1)})", s)
+    for a, b in _TEX_CHAR_CMD.items():
         s = s.replace(a, b)
+    s = re.sub(r"\\([A-Za-z]+)", lambda m: _TEX_CMD.get(m.group(1), m.group(0)), s)
     return s
 
 

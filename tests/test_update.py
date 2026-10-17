@@ -988,6 +988,79 @@ check("⚠️ 对照：改 `make-app.sh`（结构那一类）-> **必须**还得
 check("⚠️ 对照：改 `tools/make_icon.py` -> 还得重建（图标那半不能再丢一次）",
       _stale(), "图标源码改了却不重建")
 
+# ============== H. `make-app.sh --check` 的退出码（2026-10-18）==============
+# HANDBOOK §10 记的账：`--check` **恒返回 0**（即使它自己刚打了 ❌）——
+# 与 `install.sh --check`（早就 `exit $_bad`）不一致，脚本化调用读不出「缺件」。
+# 判据在**真脚本**上跑（沙盒里放真的 `make-app.sh` + `tools/make_icon.py`），
+# 而且**一条都不许碰真 `ClassLive.app`**。
+print("\n--- H. make-app.sh --check 的退出码 ---")
+
+_chk = ROOT / "checkapp"
+(_chk / "tools").mkdir(parents=True)
+for _f in ("make-app.sh", "tools/make_icon.py"):
+    shutil.copy2(_real_root / _f, _chk / _f)
+
+
+def _chk_run() -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", str(_chk / "make-app.sh"), "--check"],
+                          capture_output=True, text=True)
+
+
+def _chk_fp() -> str:
+    return subprocess.run(["bash", str(_chk / "make-app.sh"), "--fingerprint"],
+                          capture_output=True, text=True).stdout.strip()
+
+
+_r = _chk_run()
+check("⚪ .app 不存在 -> 退出码 0（⚪ 不是问题，别把「没构建」说成缺件）",
+      _r.returncode == 0 and "⚪" in _r.stdout and "❌" not in _r.stdout,
+      f"rc={_r.returncode} out={_r.stdout.strip()[-80:]!r}")
+
+_appd = _chk / "ClassLive.app"
+(_appd / "Contents").mkdir(parents=True)
+_r = _chk_run()
+_bad_n = _r.stdout.count("❌")
+check("⭐⭐ .app 缺件 -> 退出码 1（原来恒 0 —— 这条就是那笔账）",
+      _r.returncode == 1, f"rc={_r.returncode} 打了 {_bad_n} 条 ❌")
+check("⭐⭐ 而且**报全**、不是见一个就停（≥2 条 ❌ 才够「report everything」）",
+      _bad_n >= 2, f"只打了 {_bad_n} 条 ❌")
+check("⚠️ 报完之后还说了「需要处理」（别让人对着退出码猜）",
+      "需要处理" in _r.stdout, _r.stdout.strip()[-60:])
+
+# 全就位那一档：MacOS/python 真文件 + lib/ + pyvenv.cfg + Info.plist + 戳记 + 图标
+(_appd / "Contents" / "MacOS").mkdir(exist_ok=True)
+(_appd / "Contents" / "lib").mkdir(exist_ok=True)
+(_appd / "Contents" / "Resources").mkdir(exist_ok=True)
+(_appd / "Contents" / "pyvenv.cfg").write_text("home = /x\n", encoding="utf-8")
+(_appd / "Contents" / "Info.plist").write_text(
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+    '<plist version="1.0"><dict>\n'
+    '  <key>CFBundleExecutable</key><string>python</string>\n'
+    '  <key>CFBundleIconFile</key><string>AppIcon</string>\n'
+    '</dict></plist>\n', encoding="utf-8")
+(_appd / "Contents" / "Resources" / "AppIcon.icns").write_bytes(b"icns")
+_py = _appd / "Contents" / "MacOS" / "python"
+_py.write_text('#!/bin/sh\necho "stub-python"\n', encoding="utf-8")
+_py.chmod(0o755)
+(_appd / "Contents" / ".build-stamp").write_text(_chk_fp(), encoding="utf-8")
+_r = _chk_run()
+check("✅ 全就位（含戳记 / 图标）-> 退出码 0、一条 ❌ 都没有",
+      _r.returncode == 0 and "❌" not in _r.stdout,
+      f"rc={_r.returncode} out={_r.stdout.strip()[-120:]!r}")
+
+# ⚠️ 只有「符号链接」那一条时**仍是 0**：它是 ⚠️ 不是 ❌（判据只认 ❌）。
+_real_py = _appd / "Contents" / "real_python"
+_real_py.write_text('#!/bin/sh\necho "stub-python"\n', encoding="utf-8")
+_real_py.chmod(0o755)
+_py.unlink()
+_py.symlink_to(_real_py)
+_r = _chk_run()
+check("⚠️ 只有符号链接这一条 -> ⚠️ 不算问题，退出码仍是 0",
+      _r.returncode == 0 and "⚠️" in _r.stdout,
+      f"rc={_r.returncode} 有⚠️={'⚠️' in _r.stdout}")
+
 # ============== B14 ⭐ 只缺**可选**模型 -> 卡片不列「下载模型」==============
 # 2026-10-11 外部审查抓出：`pending_steps` 没按 `required` 过滤 —— 只缺可选的 Whisper / Qwen 时
 # 卡片写「缺模型的话课上会直接起不来」，而 `run_step("models")` 又跳过可选的、什么都不下 →

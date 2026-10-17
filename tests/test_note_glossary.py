@@ -24,33 +24,87 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import note_glossary as ng          # noqa: E402
+import note_terms as nt             # noqa: E402
 import prep                         # noqa: E402
 
+#: ⚠️ 用例换成 **SOC10020** 的句子（作者第六轮：新判据不许再用 10-15 那节课的语料）。
 ENTRIES = [
-    {"ts": "13:31:00", "en": "the marginal cost is the cost of one extra unit",
-     "zh": "边际成本是多做一个的成本", "asr": "", "star": False},
-    {"ts": "13:32:00", "en": "so the shutdown price equals the minimum average cost",
-     "zh": "停业价格等于最小平均成本", "asr": "", "star": False},
+    {"ts": "13:09:00", "en": "start from the research question, not from the method",
+     "zh": "从研究问题出发，而不是从方法出发", "asr": "", "star": False},
+    {"ts": "13:10:00", "en": "your research question decides the methodology",
+     "zh": "研究问题决定方法论", "asr": "", "star": False},
+    {"ts": "13:11:00", "en": "and the methodology decides which research methods fit",
+     "zh": "方法论决定哪些研究方法合适", "asr": "", "star": False},
 ]
 
 REVIEW = {
-    "sections": [{"heading": "边际成本（marginal cost）",
-                  "terms": [{"en": "marginal cost", "zh": "边际成本"},
+    "sections": [{"heading": "研究问题（research question）",
+                  "terms": [{"en": "research question", "zh": "研究问题"},
                             {"en": "Masha", "zh": "同学的名字"}]}],
-    "terms": [{"en": "shutdown price", "zh": "停业价格"},
+    "terms": [{"en": "methodology", "zh": "方法论"},
               {"en": "Interesting", "zh": "有趣的"},
-              {"en": "opportunity cost", "zh": "机会成本"}],   # 最后一个没在课上出现
+              {"en": "opportunity cost", "zh": "机会成本"}],   # 最后一个课上没出现
 }
+
+
+class _Mats:
+    """课件替身：`candidates` 只读 `_blob`（全文，小写）。"""
+
+    def __init__(self, blob: str = ""):
+        self._blob = blob
 
 
 class Candidates(unittest.TestCase):
     def test_只收真出现过的(self):
         keep, rejected = ng.candidates(REVIEW, ENTRIES)
-        self.assertIn("marginal cost", keep)
-        self.assertIn("shutdown price", keep)
+        self.assertIn("research question", keep)
+        self.assertIn("methodology", keep)
         self.assertNotIn("opportunity cost", keep, "课上没讲过的词不该进库")
-        reasons = dict(rejected)
-        self.assertIn("本课转录与课件里都没出现过", reasons.get("opportunity cost", ""))
+        self.assertIn("只出现过 0 次", dict(rejected).get("opportunity cost", ""))
+
+    def test_只出现一次不收(self):
+        """⭐ 第六轮第 4 条：要出现过 **≥2 次**（一次多半是顺口一说）。"""
+        rev = {"terms": [{"en": "validity", "zh": "效度"}]}
+        entries = [{"ts": "13:12:00", "en": "this is about validity only once", "zh": "", "asr": ""}]
+        keep, rejected = ng.candidates(rev, entries)
+        self.assertEqual(keep, [])
+        self.assertIn("只出现过 1 次", dict(rejected).get("validity", ""))
+        # 出现两次就进（学科词不该被词形判据挡在门外）
+        entries *= 2
+        keep2, _r = ng.candidates(rev, entries)
+        self.assertEqual(keep2, ["validity"])
+
+    def test_机构平台学位课型词不收(self):
+        """作者点名的 `Brightspace` / `PhD` / `tutorial`：**真的**出现在课上和课件里，
+        只有那张小表能挡住（实测 ECON10740 材料里 `Brightspace` 出现 23 次）。"""
+        rev = {"terms": [{"en": t, "zh": ""} for t in
+                         ("Brightspace", "PhD", "tutorial", "evidence", "AI", "director")]}
+        entries = [{"ts": "13:12:00", "en": "upload to Brightspace for the tutorial. "
+                                             "the tutorial is on Brightspace. evidence and AI "
+                                             "again: evidence, AI. PhD director PhD director.",
+                    "zh": "", "asr": ""}]
+        keep, rejected = ng.candidates(rev, entries)
+        self.assertEqual(keep, [], keep)
+        for t in ("Brightspace", "PhD", "tutorial", "evidence", "director"):
+            self.assertIn("机构", dict(rejected).get(t, ""), t)
+
+    def test_学科词优先_课件里的排前面(self):
+        """⭐ 第 4 条：学科词优先 —— 课件（这门课的教材）里出现过的排前面。"""
+        rev = {"terms": [{"en": "sampling frame", "zh": "抽样框"},
+                         {"en": "mixed methods", "zh": "混合方法"}]}
+        entries = [{"ts": "13:13:00",
+                    "en": "sampling frame twice: sampling frame", "zh": "", "asr": ""}]
+        keep, _r = ng.candidates(rev, entries, materials=_Mats("mixed methods in chapter 3, "
+                                                               "mixed methods again"))
+        self.assertEqual(keep, ["mixed methods", "sampling frame"])
+
+    def test_每节上限_15(self):
+        terms = [{"en": f"subject term {i}", "zh": ""} for i in range(18)]
+        blob = " ".join(f"subject term {i} twice: subject term {i}" for i in range(18))
+        keep, rejected = ng.candidates({"terms": terms}, [],
+                                       materials=_Mats(blob))
+        self.assertEqual(len(keep), nt.MAX_TERMS)
+        self.assertTrue(any("上限" in why for _t, why in rejected), rejected)
 
     def test_人名常识词挡下(self):
         """`type_of` 就是运行时查词缓存里的类型 —— 人名**经常在课上出现**，
@@ -67,17 +121,15 @@ class Candidates(unittest.TestCase):
         self.assertTrue(dict(rejected).get("Interesting"), "Interesting 该被挡下")
 
     def test_课件里出现也算出现过(self):
-        class M:
-            def verify(self, term):
-                return term == "opportunity cost"
-        keep, _rej = ng.candidates(REVIEW, ENTRIES, materials=M())
+        keep, _rej = ng.candidates(REVIEW, ENTRIES,
+                                   materials=_Mats("opportunity cost: opportunity cost"))
         self.assertIn("opportunity cost", keep)
 
     def test_去重(self):
-        dup = {"terms": [{"en": "marginal cost", "zh": "x"},
-                         {"en": "Marginal Cost", "zh": "y"}]}
+        dup = {"terms": [{"en": "research question", "zh": "x"},
+                         {"en": "Research Question", "zh": "y"}]}
         keep, _ = ng.candidates(dup, ENTRIES)
-        self.assertEqual(keep, ["marginal cost"])
+        self.assertEqual(keep, ["research question"])
 
 
 class Append(unittest.TestCase):

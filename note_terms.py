@@ -43,12 +43,35 @@ pdf powerpoint excel word outlook zoom google microsoft windows mac
 celsius fahrenheit euro dollar
 """.split())
 
-#: 口语/元话语词：课堂上高频，但**从来不是术语**。进表的后果同「Interesting」。
+#: 机构 / 平台 / 学位 / 职位 / 课型 / 日常词 —— **可维护的小表**（作者第六轮第 4 条）。
+#: 判据是「这门课（以及任何一门课）都不需要解释它」：`Brightspace` 是学校平台、
+#: `PhD` 是学位、`tutorial` 是课型、`director` 是职位。
+#: ⚠️ 为什么"出现过"挡不住它们：它们**真的**出现在转录与课件里（实测 ECON10740 的
+#:    材料里 `Brightspace` 23 次、`director` 1 次），所以必须有这张表。
+#: ⚠️ 表要**保持小**、按需增补（作者点名的 8 个 + 同类里最常撞见的那几个）。
+#:    名单一旦变长，说明有别的信号没接上 —— 那该去修信号，不是继续往这里加词。
+GENERIC = frozenset("""
+brightspace moodle canvas blackboard panopto turnitin
+phd masters master bachelor undergraduate postgraduate
+tutorial tutorials seminar seminars lecture lectures lab workshop
+director professor lecturer tutor teacher
+evidence ai conclusion introduction summary overview
+campus university college school module modules semester
+assignment assignments exam exams essay essays quiz mcq
+slide slides pdf powerpoint excel zoom teams outlook email
+""".split())
+
+#: 「口语/元话语词」：课堂上高频，但**从来不是术语**。进表的后果同「Interesting」。
 _DISCOURSE = frozenset("""
 yeah yep ok okay right well now so just very really quite actually basically
 interesting important difficult easy good bad nice great fine sure maybe perhaps
 anything something everything nothing everyone anybody somebody nobody
 """.split())
+
+#: 入库的两条数量纪律（作者第六轮第 4 条；判据在 `note_glossary.candidates`）。
+#: ⚠️ 放这里而不是 `note_glossary`：它们是**口径**，与 `EVERYDAY`/`GENERIC` 同族。
+MIN_HITS = 2          # 词要在本课转录或课件里出现过 **≥2 次**（一次多半是顺口一说）
+MAX_TERMS = 15        # 每节入库上限（入库只追加，宁缺勿滥）
 
 #: 人物头衔/称谓开头的短语 —— 自动缓存里 `Mister X` 这类。
 _TITLE_RE = re.compile(r"^(mr|mrs|ms|dr|prof|professor|sir|lady|lord)\.?\s", re.I)
@@ -114,6 +137,10 @@ def drop_reason(term: str, *, type_: str = "", source: str = SRC_AUTO,
     """
     if not (term or "").strip():
         return "空词条"
+    if term.strip().lower() in GENERIC:
+        # ⚠️ 放在人名判据之前：`director` 那种词在任何一门课里都不是术语，
+        #    不依赖"查得到类型"这一步（类型来自运行时缓存，常常查不到）。
+        return "机构/平台/学位/职位/课型/日常词"
     if (type_ or "").lower() == "person":
         return "人名"
     if _TITLE_RE.match(term.strip()):

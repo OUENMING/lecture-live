@@ -45,23 +45,39 @@ class Outcome:
         return f"💡 本课新加入术语库 {len(self.added)} 条：{' · '.join(self.added)}"
 
 
-def _in_text(term: str, blob: str) -> bool:
-    """词面出现在语料里（**复用** `build_notes.compile_term` 的词边界口径）。"""
+def _count(term: str, blob: str) -> int:
+    """词面在语料里出现几次。
+
+    ⚠️ 走 `build_notes.compile_term` —— 术语匹配的**唯一定义点**（允许多/复数、
+       不允许子串命中）。这里再写一份正则就是"一条纪律两处定义"。
+    """
     if not term or not blob:
-        return False
+        return 0
     try:
         from build_notes import compile_term
-        return bool(compile_term(term).search(blob))
+        return len(compile_term(term).findall(blob))
     except Exception:                                         # noqa: BLE001
-        return term.lower() in blob.lower()
+        return blob.lower().count(term.lower())
+
+
+def _blob_of(materials) -> str:
+    """课件索引的全文（**唯一出处**：`Materials._blob`）。拿不到就是空串。"""
+    return str(getattr(materials, "_blob", "") or "")
 
 
 def candidates(review: dict, entries: list, *, materials=None, type_of=None) -> tuple:
     """复习层 + 转录 + 课件 → `(可入库的词, 被挡下的 [(词, 原因)])`。**纯函数**。
 
-    ⭐ 两道闸门（作者的两条要求逐字落地）：
-      ① **真的出现过**：转录里有（🎙）或课件里有（📖）—— 都没有的不收；
-      ② **是学科术语**：`note_terms.drop_reason`（人名 / 口语词 / 常识词 / 称谓开头）。
+    ⭐ 作者第六轮第 4 条的**四条闸门**（逐条落地）：
+      ① **出现过 ≥2 次**（转录 + 课件合计）：一次多半是顺口一说/噪声；
+      ② **不是机构/平台/学位/职位/课型/日常词**（`note_terms.GENERIC` 那张小表）；
+      ③ **学科词优先**：课件里出现过的排前面（课件是这门课的"教材"，它写下来的
+         才是这门课要考的词）；
+      ④ **每节上限 15 条**：入库是"只追加"的，宁缺勿滥（一次收 58 条、其中 34 条
+         不是术语，下一节课的实时翻译就把这些噪声全量注入 prompt 了）。
+
+    ⚠️ 与 `note_terms.drop_reason` 的分工：那张表管"是不是术语"（词形/语境），
+       这里管"在这门课里成不成立"（出处次数、优先序、配额）。
 
     `type_of(词) -> "person"|"org"|…`（可选）：运行时查词缓存里记着类型的那些词
     （人名最常见）在这里就能被认出来 —— 否则只能靠"课上没出现过"顺带挡掉，
@@ -77,6 +93,7 @@ def candidates(review: dict, entries: list, *, materials=None, type_of=None) -> 
             if t.get("en"):
                 terms.append(t["en"])
     transcript = "\n".join((e.get("en") or e.get("asr") or "") for e in entries)
+    blob = _blob_of(materials)
     type_of = type_of or (lambda _t: "")
     keep: list = []
     rejected: list = []
@@ -91,11 +108,17 @@ def candidates(review: dict, entries: list, *, materials=None, type_of=None) -> 
         if why:
             rejected.append((t, why))
             continue
-        if _in_text(t, transcript) or (materials is not None and materials.verify(t)):
-            keep.append(t)
-        else:
-            rejected.append((t, "本课转录与课件里都没出现过"))
-    return keep, rejected
+        n_t, n_m = _count(t, transcript), _count(t, blob)
+        if n_t + n_m < nt.MIN_HITS:
+            rejected.append((t, f"本课只出现过 {n_t + n_m} 次（要求 ≥{nt.MIN_HITS}）"))
+            continue
+        keep.append({"term": t, "hits": n_t + n_m, "in_materials": bool(n_m)})
+    # ③ 学科词优先：课件里出现过 > 只在转录里出现；再按出现次数；同分保持原顺序
+    keep.sort(key=lambda x: (0 if x["in_materials"] else 1, -x["hits"]))
+    out = [x["term"] for x in keep[:nt.MAX_TERMS]]
+    for x in keep[nt.MAX_TERMS:]:
+        rejected.append((x["term"], f"超过每节 {nt.MAX_TERMS} 条上限"))
+    return out, rejected
 
 
 def deleted_terms(course: str, *, glossary_txt, state_path=None, glossary_path=None) -> set:

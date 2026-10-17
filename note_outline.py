@@ -181,7 +181,7 @@ def _roots(p) -> list | None:
         r = math.sqrt(max(d, 0.0))
         return sorted({round((-b - r) / (2 * a), 6), round((-b + r) / (2 * a), 6)})
     if deg == 1:
-        return sorted({round(-t[0] / t[1], 6)})
+        return sorted({round(-t.get(0, 0.0) / t[1], 6)})
     return []
 
 
@@ -272,6 +272,11 @@ def _equations(text: str) -> list:
         left, right = lt[2], rt[2]
         var = _var_of(left + right)
         if not var:
+            continue
+        # ⚠️ `Q = 0` / `Q = 6` 是**结论**的写法，不是要解的方程 —— 实测原子要点
+        #    「方程给出 Q = 0 或 Q = 6」被当成 `Q = 0`，再拿后面的 `Q = 6` 去对，
+        #    报出一条假的「应按 Q = 0 得 Q = 0」。判据：一侧是光杆变量、另一侧是数 → 跳过。
+        if re.fullmatch(r"[qQx]", left) or re.fullmatch(r"[qQx]", right):
             continue
         # `lt` 的区间本来就相对 `text`；`rt` 的区间相对后半段 → 加回 m.end()。
         out.append({"start": lt[0], "end": m.end() + rt[1],

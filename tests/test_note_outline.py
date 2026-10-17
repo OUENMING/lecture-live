@@ -127,6 +127,19 @@ class TestOutlineNumbers(unittest.TestCase):
         out, _f, _w = no.check(_items("在 Q = 3 处，AC(3) 最小。"), review=body)
         self.assertIn("Q = 3", _zhs(out)[0])
 
+    def test_结论写法不是方程_不许报假_重算(self):
+        """⚠️ 第五轮预演实测：原子「方程给出 Q = 0 或 Q = 6」被当成 `Q = 0` 去解，
+        再拿 `Q = 6` 当结论 → 报出一条假的「应按 Q = 0 得 Q = 0」。"""
+        out, fixes, warns = no.check(_items("方程给出 Q = 0 或 Q = 6，答案是 Q = 6。"), review=BODY)
+        self.assertEqual(_zhs(out)[0], "方程给出 Q = 0 或 Q = 6，答案是 Q = 6。")
+        self.assertEqual((fixes, warns), ([], []))
+
+    def test_一次方程没有常数项也不许崩(self):
+        """⚠️ 预演实测的 `KeyError: 0`：`3q = 0` 的差是 `3q`（没有常数项）。"""
+        out, fixes, warns = no.check(_items("令 3q = 0，所以 q = 0。"), review={"sections": []})
+        self.assertIn("q = 0", _zhs(out)[0])
+        self.assertEqual((fixes, warns), ([], []))
+
     def test_跑两遍不会叠两个已更正(self):
         out1, _f, _w = no.check(_items(LIVE_12Q, LIVE_289), review=BODY)
         out2, fixes2, warns2 = no.check(out1, review=BODY)

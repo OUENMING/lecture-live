@@ -105,11 +105,18 @@ class StreamGate:
         return seg
 
     def seg_of(self, end_s: float) -> int:
-        """封口句的音频时刻 -> **本地**段号（`seg_gen["n"]` 那一套，从 0 开始）。"""
+        """封口句的段号：`max(音频所在的本地段, 上一句 + 1)` —— **每句一个新号**。
+
+        ⚠️ 为什么每句都要新号（10-17 浮窗实测）：草稿中文的「换句就清」靠 `DraftView.on_draft`
+           看到**更大的段号**才触发。本地一段出好几句时，同一段里第二句的草稿沿用旧号 →
+           上一句的草稿中文挂到下一句底下（"So, what we're" 底下显示「而且它是相互」）。
+        ⚠️ 本地段号因此会被拉高：`main._open_segment` 用 `draft_seg(k + 1)` 推进 `seg_gen`，
+           退回本地之后的编号仍然只增不减（否则本地草稿全被判过期）。
+        """
         if self._stream is None:
             return 0
-        seg = max(0, int(self._stream.seg_for_audio(end_s) - self._base))
-        self._fin = max(self._fin, seg)
+        seg = max(0, int(self._stream.seg_for_audio(end_s) - self._base), self._fin + 1)
+        self._fin = seg
         return seg
 
     def draft_seg(self, cur: int) -> int:

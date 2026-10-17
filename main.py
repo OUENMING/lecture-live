@@ -114,6 +114,10 @@ def all_settled(finalq, streamq, drafts, busy: bool, carry_text: str) -> bool:
             and not busy and not carry_text)
 
 
+#: Soniox 封口句的劈句上限（`_emit(max_words=)`）；本地 VAD 段仍是 25。
+STREAM_MAX_WORDS = 40
+
+
 def split_sentences(text: str, max_words: int = 25) -> list[str]:
     """按句末标点把 ASR 长段切成句子。
     - 过短碎片(<=2词)并入前一句;
@@ -1886,6 +1890,9 @@ def run(args) -> None:
             echo(f"⚠ 实时识别起不来，本节课走本地：{type(e).__name__}: {e}")
             stream = None
     gate = stream_gate.StreamGate(stream, sr=SR)
+    # Soniox 逐句封口会把 "Okay?" 单独封成一句 -> 屏上并进上一行（`caption_flow.is_tail`）
+    if gate.on and callable(getattr(ui, "set_tail_merge", None)):
+        ui.set_tail_merge(True)
 
     # ---- 问答线程状态(Phase 2) ----
     # 一节课一条线程: 一个**冻结的转录快照** + 一个只追加的 turns 列表。
@@ -1927,7 +1934,9 @@ def run(args) -> None:
     def _open_segment() -> int:
         """音频结束那一刻调：返回刚结束那一段的编号，并把"当前段"推进到下一段。"""
         k = seg_gen["n"]
-        seg_gen["n"] = k + 1
+        # Soniox 每封一句就占一个新号（`gate.seg_of`）-> 本地段号跟着跳过去，只增不减；
+        # 没建流时 `draft_seg` 原样返回 = 改前的 `k + 1`
+        seg_gen["n"] = gate.draft_seg(k + 1)
         gate.mark()                      # Soniox 那边同一刻开新段（段号对齐，见 stream_gate）
         seg_ended_at[k] = time.monotonic()
         if live is not None:
@@ -2112,7 +2121,7 @@ def run(args) -> None:
     _tr_idle: "collections.deque" = collections.deque()
     _tr_last = {"end": None}
 
-    def _emit(text: str, seg: int | None = None) -> None:
+    def _emit(text: str, seg: int | None = None, max_words: int = 25) -> None:
         # ⭐ `seg` = 这段文本属于哪一段缓冲（`livemetrics` 的分组键；一段 VAD → N 句定稿，
         #    **不是 1:1**）。定稿那条路由 `finalq` 带过来（**音频结束那一刻**定的）；
         #    carry 兜底那条路没得带，取当前段。
@@ -2125,7 +2134,7 @@ def run(args) -> None:
         if not running.is_set():
             return
         final_gen["n"] += 1                      # 通知草稿线程: 重置节流
-        for sent in split_sentences(text):
+        for sent in split_sentences(text, max_words=max_words):
             if trans["mode"] == "raw":
                 # 纯转录: 一个 LLM 请求都不发。ASR 原样上屏、原样落盘。
                 # 这是给"不需要翻译、也不想联 API"的场景 —— 离线、零成本、零首字延迟。
@@ -2237,7 +2246,10 @@ def run(args) -> None:
                         continue
                     busy["on"] = True        # 冲刷等待要看它（`all_settled` 的 busy）
                     try:
-                        _emit(_s.text, gate.seg_of(_s.end_s))
+                        # ⚠️ Soniox 封的本来就是**一句**：别再按 25 词从逗号劈成两行 —— 劈开
+                        #    后第二半要排在第一半翻完之后才开始译（10-17 浮窗逐帧：多等 ~1 s，
+                        #    中文先显示整句草稿译文再缩回半句）。真长到 40 词以上才劈。
+                        _emit(_s.text, gate.seg_of(_s.end_s), max_words=STREAM_MAX_WORDS)
                     finally:
                         busy["on"] = False
             # 1) 定稿优先

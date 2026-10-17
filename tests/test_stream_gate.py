@@ -196,13 +196,23 @@ class AlignmentWithRealStreamASR(unittest.TestCase):
 
     def test_本地段号从_0_开始且跟着_mark_走(self):
         self.g.mark()                                 # 音频开始前：本地第 0 段（main 里也这么做）
-        self.assertEqual(self.g.seg_of(0.1), 0)
         self._feed_s(1.0)
         self.g.mark()                                 # 第 0 段结束 -> 第 1 段开始（1.0 s 处）
-        self.assertEqual(self.g.seg_of(0.1), 0)       # 第 0 段的句子还在第 0 段
-        self.assertEqual(self.g.seg_of(0.99), 0)
+        self.assertEqual(self.g.seg_of(0.5), 0)       # 第 0 段的句子在第 0 段
         self.assertEqual(self.g.seg_of(1.0), 1)       # 边界含在新段（与 seg_for_audio 同式）
-        self.assertEqual(self.g.seg_of(9.9), 1)
+
+    def test_同一段里每句一个新号_草稿跟在后面(self):
+        """⚠️ 10-17 浮窗实测：同一本地段里的第二句沿用旧号 -> 上一句的草稿中文挂到下一句底下。"""
+        from draft_translate import DraftView
+        dv = DraftView()
+        self.g.mark()
+        self._feed_s(5.0)                             # 本地一直是第 0 段
+        a = self.g.seg_of(1.0)
+        nxt = self.g.draft_seg(0)
+        self.assertTrue(dv.on_draft(nxt))             # 下一句的草稿 -> 换句，清旧中文
+        b = self.g.seg_of(3.0)                        # 同一本地段的第二句
+        self.assertGreater(b, a)
+        self.assertTrue(dv.on_draft(self.g.draft_seg(0)), "第二句之后的草稿没触发清中文")
 
     def test_第一段那句即使封口很晚也不会归错段(self):
         """⚠️ 真踩过的形状：`seg_for_audio` 对"第一个 mark 之前"返回**当时的** `_seg`，
@@ -271,6 +281,16 @@ class MainWiring(unittest.TestCase):
         self.assertIn("_emit", src)
         # 后台回调只入队（不许在 `_sealed_in` 里碰 _emit —— 那是"只许一个线程调 _emit"）
         self.assertNotIn("_emit", ast.unparse(_func("_sealed_in")))
+
+    def test_封口句不按_25_词劈开(self):
+        """Soniox 封的是一整句：`_emit` 带 `STREAM_MAX_WORDS`（本地路径仍是默认 25）。"""
+        self.assertIn("_emit(_s.text, gate.seg_of(_s.end_s), max_words=STREAM_MAX_WORDS)",
+                      MAIN_SRC)
+        import main
+        sent = "What we're going to do for the rest of the class, for the rest of the semester, " \
+               "is we're going to start to talk about how you apply those tools to more realistic situations."
+        self.assertEqual(len(main.split_sentences(sent)), 2)
+        self.assertEqual(len(main.split_sentences(sent, max_words=main.STREAM_MAX_WORDS)), 1)
 
     def test_收尾先停流再投哨兵(self):
         # ⚠️ 用整行匹配：`finalq.put(_QUIT)` 在注释里也出现过（讲到哨兵纪律那一段）

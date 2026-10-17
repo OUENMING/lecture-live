@@ -42,6 +42,21 @@ live 那一格留在原地等下一段草稿来升级。
 ⚠️ 桥只比**长度**、不比文本：同一段的 `cur_zh` 是从空串开始长起来的，长度就是进度；
 去比文本反而会在"定稿译文更长但说的是同一句"时白等。
 
+## 让位节奏（10-17 Soniox 接入后加；`now` 不传 = 不启用，逐字退回上面的老规矩）
+
+Soniox 封口后约 0.5 s 下一句就出字，而译文要 ~1 s 才写完 —— 老规矩「下一段草稿一到，
+定稿行就让位上移」会让每句都**译到一半就被顶上去**、回改改到一半就上移（Owen 10-17 实测）。
+三条（原型 `buildPlan` / `dCards` 的同一套门槛）：
+
+1. **攒够词才开新行**：下一句草稿 ≥ `MIN_WORDS` 个词才占新行；上一句封口已过 `GAP_S`
+   （老师停了一下）时 1 个词就开。
+2. **上一句译完才让位**：定稿还在流式时草稿不上屏；流了 `HOLD_MAX_S` 还没完也让位（翻译卡住
+   不能一直挡着）。
+3. **短尾巴并进上一行**：封口不到 `MIN_WORDS` 词、离上一句定稿 ≤ `GAP_S` 的句子（"Okay?"）
+   不单开一行，接在上一行后面（`merge_live`；判据 `is_tail`，落盘不受影响 —— 只改屏上）。
+
+`recheck_at` = 结果下一次可能因为**时间**而变的时刻（宿主到点重画一次；`None` = 不用）。
+
 ## 输入就是 `Overlay` 里的现成状态
 
 `cur_en` / `cur_zh` / `seed_en` / `streaming` 与 `_render` cap 分支逐字同义；
@@ -56,6 +71,22 @@ import typing
 
 #: 草稿桥的换手点：定稿中文长到草稿译文的这个比例之前，中文槽继续显示草稿译文。
 BRIDGE_RATIO = 0.6
+#: 新开一行要的词数（原型 `D_MIN_WORDS`；Owen 10-17 定 3）；也是「短尾巴」的上限（不含）。
+MIN_WORDS = 3
+#: 离上一句定稿超过这么久 = 老师停过 → 1 个词也开新行；短尾巴只在这个窗口内并（原型 `D_GAP`）。
+GAP_S = 3.0
+#: 定稿流式最多挡草稿这么久（翻译卡住时不能一直挡；实测译完 p50 1.1 s、p90 1.3 s）。
+HOLD_MAX_S = 2.5
+
+
+def n_words(text: str) -> int:
+    return len((text or "").split())
+
+
+def is_tail(en: str, since_last_final: float | None) -> bool:
+    """这句是不是该并进上一行的短尾巴（"Okay?" 一类）。`since_last_final=None` = 没有上一行。"""
+    return (since_last_final is not None and since_last_final <= GAP_S
+            and 0 < n_words(en) < MIN_WORDS)
 
 
 class CaptionRows(typing.NamedTuple):
@@ -69,12 +100,62 @@ class CaptionRows(typing.NamedTuple):
     live_zh: str
     live_visible: bool
     live_kind: str
+    recheck_at: float | None = None
 
 
 def caption_rows(history: list[tuple[str, str]], *, cur_en: str, cur_zh: str,
                  seed_en: str, streaming: bool, draft: str, draft_zh: str,
-                 draft_over: bool) -> CaptionRows:
-    """算这一帧屏上该有什么。见文件头：四种组合 + 草稿桥。不碰输入（`history` 只读）。"""
+                 draft_over: bool, now: float | None = None,
+                 final_t0: float | None = None, last_final_t: float | None = None,
+                 merge_live: bool = False, bridge_zh: str = "") -> CaptionRows:
+    """算这一帧屏上该有什么。见文件头：四种组合 + 草稿桥 + 让位节奏。不碰输入（`history` 只读）。
+
+    `now` / `final_t0`（这句定稿开始流式的时刻）/ `last_final_t`（上一句定稿上屏的时刻）
+    同一个时钟；`now=None` 时让位节奏整段不启用。
+    """
+    if now is None:
+        return _rows(history, cur_en=cur_en, cur_zh=cur_zh, seed_en=seed_en,
+                     streaming=streaming, draft=draft, draft_zh=draft_zh, draft_over=draft_over)
+    recheck = []
+    # ⓪ 这句定稿已经开始（`seed_en` 到了）但译文第一个字还没来（~1 s）：行照样占住。
+    #    ⚠️ 不占的话 Soniox 封口那一刻这句从草稿里消失、定稿又还没开始流 -> 整行空一秒再回来
+    #    （10-17 浮窗逐帧 OCR 抓到）。中文先接着显示这句封口前的草稿译文（`bridge_zh`）。
+    if seed_en and not streaming and not cur_zh:
+        streaming = True
+    has_final = bool(streaming or cur_zh or cur_en)
+    # ③ 短尾巴：屏上不单开一行，接在上一行后面（流式中就接上 —— 定稿到了不再跳一次）
+    if has_final and merge_live and history:
+        en = (seed_en or cur_en) if streaming else cur_en
+        pe, pz = history[-1]
+        history = list(history[:-1]) + [(f"{pe} {en}".strip(), f"{pz}{cur_zh}")]
+        cur_en = cur_zh = seed_en = ""
+        streaming = has_final = False
+    # ② 上一句没译完 -> 草稿先不上屏（到 HOLD_MAX_S 为止）
+    if has_final and draft_over and (draft or draft_zh):
+        t_end = (final_t0 if final_t0 is not None else now) + HOLD_MAX_S
+        if now < t_end:
+            recheck.append(t_end)
+            draft = draft_zh = ""
+    # ① 攒够词才开新行（只管「下一句」的草稿：它要占的是**新**行）
+    new_row = draft_over or not has_final
+    if new_row and (draft or draft_zh) and n_words(draft) < MIN_WORDS:
+        gap_ok = (last_final_t is None or now - last_final_t > GAP_S) and n_words(draft) >= 1
+        if not gap_ok:
+            if last_final_t is not None:
+                recheck.append(last_final_t + GAP_S + 1e-3)
+            draft = draft_zh = ""
+    if has_final and not draft and bridge_zh:
+        # 下一句草稿被挡着：草稿桥改用**这句自己**封口前的草稿译文（`draft_zh` 此时可能已是
+        # 下一句的了）
+        draft_zh, draft_over = bridge_zh, False
+    r = _rows(history, cur_en=cur_en, cur_zh=cur_zh, seed_en=seed_en, streaming=streaming,
+              draft=draft, draft_zh=draft_zh, draft_over=draft_over)
+    return r._replace(recheck_at=min(recheck) if recheck else None)
+
+
+def _rows(history, *, cur_en, cur_zh, seed_en, streaming, draft, draft_zh,
+          draft_over) -> CaptionRows:
+    """四种组合 + 草稿桥（改前的 `caption_rows` 本体，一字未改）。"""
     # ① 定稿行：存在性 / 英文取谁，与 `_render` cap 分支逐字同义。
     #    ⚠️ `streaming` 为真时**不要求有字**：那一格是留给刚定稿这一句的
     #    （ASR 原句 / 译文都还没到就先占住），行在、内容可以先是空串。

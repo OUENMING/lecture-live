@@ -1177,6 +1177,14 @@ class Overlay:
         self._cur_en_seed = ""      # 定稿流式时英文行的占位（ASR 原句），见 seed_en
         self._draft_over = False    # 定稿流式时草稿是更新一段的 → 照常显示，见 draft_over_stream
         self._draft = ""
+        # 让位节奏（`caption_flow` 文件头「让位节奏」）：这句定稿开始流式的时刻 / 上一句定稿
+        # 上屏的时刻 / 这句是不是并进上一行的短尾巴（流式一开始就定，定稿时照办）/ 到点重画
+        self._final_t0 = None
+        self._last_final_t = None
+        self._merge_live = False
+        self._flow_due = None
+        self._tail_merge = False    # 短尾巴并行只在 Soniox 实时识别时开（`set_tail_merge`）
+        self._seed_zh = ""          # 这句定稿开始时手边的草稿译文（`caption_rows(bridge_zh=)`）
         self._shadow = _make_shadow()
         self._targets = []        # ⚠️ 必须常驻: NSControl.setTarget_ 是弱引用,
                                   # 不保存就会被 Python GC 回收 -> target() 变 None -> 点击失效
@@ -2615,7 +2623,26 @@ class Overlay:
             return "◈ " + " · ".join(t for t, _ in self._terms) + "  ▸ 点开解析"
         return ""
 
+    def _final_started(self, en: str) -> None:
+        """这句定稿开始上屏（`seed_en` / 第一个增量）：记时刻、定它是不是短尾巴。只定一次。"""
+        if self._final_t0 is not None:
+            return
+        self._final_t0 = self._clock()
+        self._seed_zh = self._draft_zh_val
+        since = (self._final_t0 - self._last_final_t) if self._last_final_t is not None else None
+        self._merge_live = (self._tail_merge and bool(self._log.rows)
+                            and caption_flow.is_tail(en, since))
+
+    def set_tail_merge(self, on: bool) -> None:
+        """短尾巴（"Okay?"）并进上一行：`main` 在这节课建了 Soniox 流时打开。
+
+        ⚠️ 只给 Soniox：它逐句封口，"Okay?" 这种口头禅会单独封成一句；本地路径按 VAD 段出句，
+           没有这个形状 —— 一直开着反而会把本地的短句（含一大批判据夹具）并掉。
+        """
+        self._tail_merge = bool(on)
+
     def stream_zh(self, delta: str):
+        self._final_started(self._cur_en_seed or self._cur_en)
         self._streaming = True
         self._cur_zh += delta
         self._mark_dirty()
@@ -2634,6 +2661,7 @@ class Overlay:
     def seed_en(self, text: str):
         """这句定稿的 ASR 原句：模型先吐 ZH 后吐 EN，中文打字时英文行用它占位，`finalize` 换成修正版。"""
         self._cur_en_seed = text or ""
+        self._final_started(self._cur_en_seed)
         self._mark_dirty()
 
     def hearing(self, flag: bool) -> None:
@@ -2685,7 +2713,19 @@ class Overlay:
         """
         if not zh and not en:
             return None
-        tok = self._log.append(en, zh)
+        now = self._clock()
+        if self._final_t0 is None:            # 没流式就直接定稿（只英档 / 失败兜底）：此刻判
+            since = (now - self._last_final_t) if self._last_final_t is not None else None
+            self._merge_live = (self._tail_merge and bool(self._log.rows)
+                                and caption_flow.is_tail(en, since))
+        if self._merge_live and self._log.rows:
+            # 短尾巴（"Okay?"）接在上一行后面 —— 与流式期 `caption_rows` 的显示逐字一致
+            pe, pz = self._log.rows[-1]
+            tok = self._log.amend_last(f"{pe} {en}".strip(), f"{pz}{zh}")
+        else:
+            tok = self._log.append(en, zh)
+        self._final_t0, self._merge_live, self._seed_zh = None, False, ""
+        self._last_final_t = now
         self._cur_zh, self._cur_en, self._streaming = "", "", False
         self._cur_en_seed, self._draft_over = "", False
         if clear_draft:
@@ -3649,6 +3689,9 @@ class Overlay:
         if self._hint is not None and now >= self._hint[1]:
             self._hint = None                    # 点拨到期 -> 术语行还给术语
             self._mark_dirty()
+        if self._flow_due is not None and self._clock() >= self._flow_due:
+            self._flow_due = None                # 让位节奏到点（`caption_rows.recheck_at`）
+            self._mark_dirty(urgent=True)
         if busy:
             self._last_ev_t = now
         self._last_pump_t = self._clock()
@@ -4492,7 +4535,10 @@ class Overlay:
                     self._history, cur_en=self._cur_en, cur_zh=self._cur_zh,
                     seed_en=self._cur_en_seed, streaming=self._streaming,
                     draft=self._draft, draft_zh=self._draft_zh_val,
-                    draft_over=self._draft_over)
+                    draft_over=self._draft_over, now=self._clock(),
+                    final_t0=self._final_t0, last_final_t=self._last_final_t,
+                    merge_live=self._merge_live, bridge_zh=self._seed_zh)
+                self._flow_due = r.recheck_at
                 self._tv.set_zh_expected(self._trans_mode == "both")
                 self._tv.set_content(r.items, r.live_en, r.live_zh, r.live_visible,
                                      r.live_kind)

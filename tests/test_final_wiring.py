@@ -181,7 +181,7 @@ class TestWiringShape(unittest.TestCase):
             self.assertTrue({"steps", "trace"} <= kws)
 
     def test_emit_skips_after_giving_up(self):
-        m = re.search(r"def _emit\(text: str, seg: int \| None = None\) -> None:\n(.*?)final_gen\[", SRC, re.S)
+        m = re.search(r"def _emit\(text: str, seg: int \| None = None[^)]*\) -> None:\n(.*?)final_gen\[", SRC, re.S)
         self.assertIsNotNone(m)
         self.assertIn("running.is_set()", m.group(1), "R25: _emit 前要判 running")
 

@@ -305,5 +305,77 @@ class Sequence(unittest.TestCase):
         self.assertEqual(r.live_kind, "none")
 
 
+H = [("Perfect competition is a benchmark.", "完全竞争是一个基准。")]
+
+
+class Pacing(unittest.TestCase):
+    """让位节奏（`now` 传了才启用）：攒够词才开新行 / 上一句译完才让位 / 短尾巴并进上一行。
+
+    ⚠️ 10-17 Owen 实测的症状：Soniox 封口 0.5 s 后下一句就出字，老规矩让上一句译到一半就上移。
+    """
+
+    def test_streaming_final_holds_next_draft_until_done(self):
+        """上一句还在流式（译文没写完）-> 下一句草稿再长也不上屏，定稿行不让位。"""
+        r = call(H, now=11.0, final_t0=10.0, streaming=True, seed_en="Monopoly is rare.",
+                 cur_zh="垄断", draft="So a market with one firm", draft_over=True)
+        self.assertEqual(n_rows(r), 2)                       # 历史 + 定稿行，没有第三行
+        self.assertEqual(r.live_kind, "final")
+        self.assertEqual(r.live_zh, "垄断")
+        self.assertAlmostEqual(r.recheck_at, 10.0 + C.HOLD_MAX_S)
+
+    def test_hold_gives_up_after_max(self):
+        r = call(H, now=10.0 + C.HOLD_MAX_S, final_t0=10.0, streaming=True,
+                 seed_en="Monopoly is rare.", cur_zh="垄断",
+                 draft="So a market with one firm", draft_over=True)
+        self.assertEqual(r.live_kind, "draft")
+        self.assertEqual(n_rows(r), 3)
+
+    def test_next_draft_needs_three_words(self):
+        """上一句已定稿：下一句草稿 <3 词不开新行，到 3 词才开。"""
+        r = call(H, now=20.5, last_final_t=20.0, draft="So a")
+        self.assertFalse(r.live_visible)
+        self.assertEqual(n_rows(r), 1)
+        self.assertAlmostEqual(r.recheck_at, 20.0 + C.GAP_S, places=2)
+        r = call(H, now=20.6, last_final_t=20.0, draft="So a market")
+        self.assertTrue(r.live_visible)
+        self.assertEqual(r.live_en, "So a market")
+
+    def test_after_a_pause_one_word_opens_a_row(self):
+        r = call(H, now=24.0, last_final_t=20.0, draft="Now")
+        self.assertTrue(r.live_visible)
+
+    def test_same_sentence_draft_is_not_gated(self):
+        """本地路径：草稿是**这一段**的（不是下一句）-> 不受 3 词门槛限制。"""
+        r = call(H, now=20.5, last_final_t=20.0, streaming=True, seed_en="",
+                 draft="Okay", draft_zh="好", draft_over=False)
+        self.assertEqual(r.live_kind, "draft")             # 草稿桥照旧
+
+    def test_short_tail_merges_into_previous_row(self):
+        r = call(H, now=21.0, last_final_t=20.5, final_t0=20.8, merge_live=True,
+                 streaming=True, seed_en="Okay?", cur_zh="好吗？")
+        self.assertEqual(n_rows(r), 1)                     # 不多一行
+        self.assertEqual(r.items[-1], ("Perfect competition is a benchmark. Okay?",
+                                       "完全竞争是一个基准。好吗？"))
+
+    def test_seed_holds_the_row_before_first_zh(self):
+        """封口 -> 定稿开始（seed 到了）-> 第一个中文字之前：这句不许从屏上消失，中文接着显示它的草稿译文。"""
+        r = call(H, now=30.2, final_t0=30.0, seed_en="Monopoly is rare.", streaming=False,
+                 draft="So", draft_zh="所以", draft_over=True, bridge_zh="垄断很少")
+        self.assertEqual(n_rows(r), 2)
+        self.assertEqual((r.live_en, r.live_zh), ("Monopoly is rare.", "垄断很少"))
+
+    def test_is_tail(self):
+        self.assertTrue(C.is_tail("Okay?", 1.0))
+        self.assertTrue(C.is_tail("Right, okay.", 2.9))
+        self.assertFalse(C.is_tail("So a market.", 1.0))   # 3 词：自成一行
+        self.assertFalse(C.is_tail("Okay?", 3.5))          # 停过：自成一行
+        self.assertFalse(C.is_tail("Okay?", None))         # 没有上一行
+
+    def test_no_now_keeps_old_rules(self):
+        r = call(H, streaming=True, seed_en="x y", cur_zh="中", draft="a", draft_over=True)
+        self.assertEqual(r.live_kind, "draft")
+        self.assertIsNone(r.recheck_at)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

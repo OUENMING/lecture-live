@@ -93,7 +93,11 @@ class DLayout(unittest.TestCase):
         o.add_draft("second segment begins")
         o.draft_over_stream(True)
         o._mark_dirty(urgent=True)
-        self.assertTrue(tv.rolling, "新一段草稿到了却没起跑")
+        # 10-17 让位节奏：上一句还在流式（没译完）-> 下一段草稿先不上屏、不起跑
+        self.assertFalse(tv.rolling, "上一句没译完就让位了")
+        o.finalize("first segment", "第一段的定稿", clear_draft=False)
+        o._mark_dirty(urgent=True)
+        self.assertTrue(tv.rolling, "上一句译完、新一段草稿够 3 词却没起跑")
         self.assertAlmostEqual(self._y(tv, 0), 0.0, places=3, msg="新行不该位移")
         self.assertAlmostEqual(self._slot(tv, 0)["alpha"], 0.0, places=3, msg="新行应从 α0 显影")
         self.assertAlmostEqual(self._y(tv, 1), 0.0, places=3,
@@ -114,10 +118,39 @@ class DLayout(unittest.TestCase):
         self.assertEqual(s0.get("blur", 0.0), 0.0, "模糊没摘掉")
         self.assertEqual(s0["en"].stringValue(), "second segment begins")
 
+    def test_short_tail_joins_previous_row_only_with_soniox(self):
+        """"Okay?" 离上一句 ≤3 s 封口 -> 并进上一行（行数不变）；没开 tail_merge（本地路径）-> 自成一行。"""
+        for on in (True, False):
+            with self.subTest(tail_merge=on):
+                o = self._overlay()
+                o.set_tail_merge(on)
+                o.finalize("Monopoly is rare.", "垄断很少见。")
+                n = len(o._history)
+                self.now[0] += 1.0
+                o.seed_en("Okay?")
+                o.stream_zh("好吗？")
+                o._mark_dirty(urgent=True)
+                o.finalize("Okay?", "好吗？")
+                if on:
+                    self.assertEqual(len(o._history), n)
+                    self.assertEqual(o._history[-1], ("Monopoly is rare. Okay?", "垄断很少见。好吗？"))
+                else:
+                    self.assertEqual(len(o._history), n + 1)
+
+    def test_short_next_draft_waits_and_rechecks_after_gap(self):
+        o = self._overlay()                           # 上一句定稿在 100.0，此刻 101.0
+        o.add_draft("So a")
+        o._mark_dirty(urgent=True)
+        self.assertFalse(o._tv._live_visible, "2 个词就开了新行")
+        self.assertAlmostEqual(o._flow_due, 100.0 + 3.0, places=2)   # 到点重画（停顿后 1 词也开）
+        o.add_draft("So a market")
+        o._mark_dirty(urgent=True)
+        self.assertTrue(o._tv._live_visible)
+
     def test_entry_waits_for_old_row_to_clear(self):
         o = self._overlay()
         tv = o._tv
-        o.add_draft("hello there")
+        o.add_draft("hello there everyone")         # ≥3 词才开新行（10-17 让位节奏）
         o._mark_dirty(urgent=True)
         self.assertTrue(tv.rolling)
         self.now[0] += tvm.D_ENTER_DELAY_S * 0.9

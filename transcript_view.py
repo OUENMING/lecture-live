@@ -252,6 +252,14 @@ class LineLog:
         self.ids.append(self._seq)
         return self._seq
 
+    def amend_last(self, en: str, zh: str) -> int | None:
+        """把最后一行换成 `(en, zh)`，身份号不变（短尾巴并进上一行用）。没有行 -> `None`。
+        行数不变 -> `_set_items` 不起滚动画，只是那一行文字长了。"""
+        if not self.rows:
+            return None
+        self.rows[-1] = (en, zh)
+        return self.ids[-1]
+
     def replace_pair(self, tail_id, next_id, en: str, zh: str) -> bool:
         """把 `tail_id` 那一行换成 `(en, zh)`、**并删掉** `next_id` 那一行（一次原子改两行）。
 

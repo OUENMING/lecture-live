@@ -283,6 +283,47 @@ def main() -> int:
           E.last_course_of(_rows) == "B", str(E.last_course_of(_rows)))
     check("一门都没上过 -> None", E.last_course_of([R(course="A", last=None)]) is None)
 
+    print("\n--- ⑦b 结果区：导出清单 + 已在表里/你删过可展开 ---")
+    _e = {"added": ["a"], "removed": set(), "not_added": ["x", "y"],
+          "skipped_existing": ["old", "dup", "old"], "failed": []}
+    check("⭐ 已在表里/你删过：去重保序",
+          E.skipped_terms(_e) == ["old", "dup"], str(E.skipped_terms(_e)))
+    check("⚠️ 非字符串 / 空项不混进列表（不把 None 变成 'None'）",
+          E.skipped_terms({"skipped_existing": [None, "", "  ", "ok"]}) == ["ok"],
+          str(E.skipped_terms({"skipped_existing": [None, "", "  ", "ok"]})))
+    check("头部写出这组的计数（原来只有「另有 M 个没加」）",
+          "2 个已在表里/你删过" in E.result_header(_e), E.result_header(_e))
+    check("没有这组时头部一个字都不提",
+          "已在表里" not in E.result_header({"added": ["a"]}))
+
+    _h_collapsed = E.card_height(_e)
+    check("⭐ 收起时多出**一行入口**（展开按钮那行）",
+          abs(_h_collapsed - E.card_height({**_e, "skipped_existing": []})
+              - E.RESULT_ROW) < 1e-9,
+          f"{E.card_height({**_e, 'skipped_existing': []})} -> {_h_collapsed}")
+    check("⭐ 展开后每个词各占一行（1 + len）",
+          abs(E.card_height(_e, show_skipped=True) - _h_collapsed
+              - 2 * E.RESULT_ROW) < 1e-9,
+          f"{_h_collapsed} -> {E.card_height(_e, show_skipped=True)}")
+
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as _td:
+        _root = pathlib.Path(_td)
+        _p = E.export_not_added("ECON10740", ["x", "y"], root=_root,
+                                today="2026-10-17")
+        check("⭐ 清单落在**课程目录**里（`paths.course_dir` 的布局）",
+              _p == _root / "courses" / "ECON10740" / "没加的术语_2026-10-17.txt",
+              str(_p))
+        _txt = _p.read_text(encoding="utf-8")
+        check("⭐ 一行一个词 —— 与 `glossary/<课号>.txt` 同语法，可原样贴过去",
+              [ln for ln in _txt.splitlines()
+               if ln.strip() and not ln.startswith("#")] == ["x", "y"],
+              repr(_txt))
+        check("⚠️ 清单里写着这是哪门课、哪天（别让用户对着文件猜）",
+              "ECON10740" in _txt and "2026-10-17" in _txt, _txt.splitlines()[0])
+        check("⚠️ 空清单也照样写成文件（不抛、不写半个）",
+              E.export_not_added("X", [], root=_root, today="2026-10-17").exists())
+
     print("\n--- ⑧ 卡片高度：**与坐标同一组常数推导** ---")
     check("⭐ card_height(None) == CARD_H —— 这条把推导锁住",
           E.card_height(None) == E.CARD_H,
@@ -552,6 +593,7 @@ def main() -> int:
 
     _add_wiring_section()
     _digit_hint_section()
+    _result_actions_section()
     _target_liveness_section()
     _chip_section()
     _test_mode_section()
@@ -2525,6 +2567,73 @@ def _digit_hint_section() -> None:
                   all(float(v.font().pointSize()) < 11.0 for v in labels))
         finally:
             h.close()
+
+
+def _result_actions_section() -> None:
+    """⑦c 「导出清单」/「展开」的**接线**真的通（点得到底，不是函数被调到）。
+
+    ⚠️ 与 ⑭ 同一条理由：接线坏掉时 AppKit 吞异常、纯函数全绿，症状统一是
+       「点了没反应」。这里真建一张卡、真 `performClick_()`。
+    """
+    print("\n--- ⑦c 导出清单 / 展开：接线真的通 ---")
+    try:
+        from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
+                            NSButton, NSTextField)
+    except Exception as e:                                    # noqa: BLE001
+        check("AppKit 可用（这一节要真卡片）", False, f"{type(e).__name__}: {e}")
+        return
+
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory)
+
+    def buttons(card):
+        return [v for v in card.subviews() if isinstance(v, NSButton)]
+
+    def texts(card):
+        return [v.stringValue() for v in card.subviews() if isinstance(v, NSTextField)]
+
+    ent = {"added": ["keep"], "removed": set(), "not_added": ["x", "y"],
+           "skipped_existing": ["old1", "old2"], "failed": []}
+    calls: list = []
+
+    def _card(show):
+        return E._make_card(R(), on_start=None, on_drop_files=lambda c, p: False,
+                            width=640.0, entry=ent,
+                            on_export=lambda: calls.append("export"),
+                            show_skipped=show,
+                            on_toggle_skipped=lambda: calls.append("toggle"))
+
+    c0 = _card(False)
+    titles = sorted(b.title() for b in buttons(c0))
+    check("⭐ 收起态三颗按钮都在：删 + 导出清单 + 展开",
+          titles == ["删", "导出清单", "展开"], str(titles))
+    check("⭐ 收起时那组词**不在**文字里（默认收起）",
+          "old1" not in texts(c0) and "old2" not in texts(c0), str(texts(c0)))
+    check("⭐ 收起态有入口那一行（计数）",
+          any("已在表里 / 你删过 2 个" in t for t in texts(c0)), str(texts(c0)))
+
+    _b = next(b for b in buttons(c0) if b.title() == "导出清单")
+    _b.performClick_(None)
+    check("⭐⭐ 点「导出清单」-> 回调真的跑了（不是空按钮）",
+          calls == ["export"], str(calls))
+    _b2 = next(b for b in buttons(c0) if b.title() == "展开")
+    _b2.performClick_(None)
+    check("⭐⭐ 点「展开」-> 回调真的跑了", calls == ["export", "toggle"], str(calls))
+
+    c1 = _card(True)
+    check("⭐ 展开后逐条列出来",
+          "old1" in texts(c1) and "old2" in texts(c1), str(texts(c1)))
+    check("⭐ 展开后按钮变「收起」",
+          sorted(b.title() for b in buttons(c1)) == ["删", "导出清单", "收起"],
+          str(sorted(b.title() for b in buttons(c1))))
+    # 高度与行循环不许脱钩（同 ⑥ 那条：少算会从底部掉出去，看顶端看不出来）
+    for _tag, _c, _sh in (("收起", c0, False), ("展开", c1, True)):
+        _ch = float(_c.frame().size.height)
+        check(f"⭐ {_tag}态：卡片高度 == card_height(entry, show_skipped={_sh})",
+              abs(_ch - E.card_height(ent, show_skipped=_sh)) < 0.01,
+              f"{_ch} vs {E.card_height(ent, show_skipped=_sh)}")
+        _low = min(float(v.frame().origin.y) for v in _c.subviews())
+        check(f"⭐ {_tag}态：没有子视图掉出卡片底部", _low >= -0.01, f"最低 y={_low:.1f}")
 
 
 def _add_wiring_section() -> None:

@@ -690,6 +690,57 @@ def kept_added(entry) -> list[str]:
     return [t for t in (e.get("added") or []) if t not in gone]
 
 
+def skipped_terms(entry) -> list[str]:
+    """「已在表里 / 你删过」的候选词 —— `prep.skipped_existing` 的原样列表（去重保序）。
+
+    ⚠️ 与 `kept_added` 同一条纪律：**列表和计数必须同源**。头部那个「K 个已在表里 /
+       你删过」和展开后的列表都从这一份数据算，不另存一个数。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in ((entry or {}).get("skipped_existing") or ()):
+        if not isinstance(t, str):
+            continue
+        s = t.strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def export_not_added(course: str, terms, *, root=None, today=None) -> pathlib.Path:
+    """把「没加」的候选词写成**能直接贴进术语表**的文本；返回文件路径。
+
+    落 `<课程目录>/没加的术语_<YYYY-MM-DD>.txt`（`paths.course_dir`，即
+    `~/.classlive/courses/<课号>/`）。文件是一行一个词、`#` 开头是注释 ——
+    与 `glossary/<课号>.txt` 的语法相同，挑中的词可以原样贴过去。
+
+    ⚠️ 路径**必须走 `paths.course_dir`**（课程目录布局的唯一定义点）——
+       面板里已经有过「自己拼路径 → 注入点失效 → 写到真实目录」的事故。
+    ⚠️ 失败**照旧往外抛**：调用方要把它变成一句人话（静默当成「导出了」更坏）。
+    """
+    import datetime as _dt
+    day = _dt.date.today().isoformat() if today is None else str(today)
+    p = paths.course_dir(course, root=root) / f"没加的术语_{day}.txt"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"# {course} · 没自动加入术语表的候选词 · {day}",
+             f"# 要用的词直接贴进 glossary/{course}.txt（一行一个）", ""]
+    lines += [str(t) for t in (terms or ()) if str(t).strip()]
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def reveal_in_finder(path) -> None:
+    """在访达里选中这个文件。**只在主线程调**（按钮 action 本来就在主线程）。
+
+    ⚠️ 失败往外抛 —— 调用方把它变成状态行；「导出了但找不到」比不导出更糟。
+    """
+    from AppKit import NSWorkspace
+    from Foundation import NSURL
+    NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
+        [NSURL.fileURLWithPath_(str(path))])
+
+
 def abort_msg(code) -> str:
     """prep 的 abort 代号 -> **人话**。
 
@@ -735,6 +786,8 @@ def result_header(entry) -> str:
         parts.append(f"已删 {len(e['removed'])}")
     if e.get("not_added"):
         parts.append(f"另有 {len(e['not_added'])} 个没加")
+    if skipped_terms(e):
+        parts.append(f"{len(skipped_terms(e))} 个已在表里/你删过")
     if e.get("failed"):
         parts.append(f"⚠️ {len(e['failed'])} 个文件失败")
     if e.get("aborted"):
@@ -784,7 +837,7 @@ def delete_msg(course: str, res) -> str:
     return f"{course}：{head}" + "".join(f" · {x}" for x in (mid, tail) if x)
 
 
-def card_height(entry=None) -> float:
+def card_height(entry=None, *, show_skipped: bool = False) -> float:
     """卡片高度 —— **按内容累加推导，不是抄一个数**。
 
     ⚠️ 它必须和 `_make_card` 里那些 `y` 用**同一组常数**推出来。抄一个固定高度的话，
@@ -794,6 +847,9 @@ def card_height(entry=None) -> float:
        实测：把整个算式换成 `h = 88.0`（写死）**照样全绿**，因为硬编码的 88 恰好
        等于正确值。真正的锁在 `tests/test_panel.py`：**把卡片建出来，断言没有子视图
        超出 `card_height(entry)`** —— 那条不管你常数怎么改都成立。
+
+    `show_skipped` = 「已在表里 / 你删过」那组**展开**了吗（默认收起）：收起时只算
+    那一行「展开」的入口，展开后每个词再各占一行。
 
     无结果时的算式（= `CARD_H` 那个 56）：
         上内边距 10 + 两行标题（18 + 16+2） + 下内边距 10
@@ -809,10 +865,13 @@ def card_height(entry=None) -> float:
         #     `tests/test_panel.py` 那条「没有子视图超出卡片高度」能兜住（它要求
         #     夹具里**真的有**这些内容，否则兜不住）。
         #     2026-09-28 加 `failed` / `not_added` / `aborted` 三档时就是成对改的。
+        _sk = skipped_terms(entry)
         n = (len(kept_added(entry))                        # 加了（每条一个「删」按钮）
              + (1 if entry.get("undo") else 0)             # 撤销
              + len(entry.get("failed") or [])              # 失败（逐文件，带原因）
              + len(entry.get("not_added") or [])           # 没加（逐条）
+             + (1 if _sk else 0)                           # 「已在表里/你删过」展开入口
+             + (len(_sk) if show_skipped else 0)           # 展开后的逐条
              + (1 if entry.get("aborted") else 0))         # 没跑完的人话
         h += RESULT_LEAD + n * RESULT_ROW
     return h
@@ -1361,13 +1420,17 @@ def _stagger_in(views) -> None:
 
 def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
                entry=None, on_delete=None, on_undo=None, on_delete_course=None,
-               hinted=False, why=None, on_select=None, index=None):
+               hinted=False, why=None, on_select=None, index=None,
+               on_export=None, show_skipped=False, on_toggle_skipped=None):
     """一张卡 = 一个落点 + 两行内容（+ 跑过之后的结果列表）。
 
     `hinted` = **选中的那张**（课表猜的，或用户点过的）：只有它画「开始上课」。
     `why` = 课表为什么猜它 —— 画在**这张卡**的第二行（原来在底栏，离卡太远，2026-10-14）。
     `on_select(course)` = 点没选中的卡 → 选中它（整张卡就是点击目标，卡上不再各挂一颗按钮）。
     `index` = 卡号（1 起）。**只在前 5 张画**，它是数字键选课的可见提示（小号、低对比）。
+    `on_export()` = 「导出清单」按钮的动作（`not_added` 非空时才出现）。
+    `show_skipped` / `on_toggle_skipped()` = 「已在表里 / 你删过」那组的展开态与开关
+    （默认收起；展开后逐条列出）。
     """
     from AppKit import NSButton, NSColor, NSFont, NSMakeRect
 
@@ -1417,7 +1480,7 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     view = panel.make_drop_target(_enter, _drop, _exit)
     holder["view"] = view
     # ⚠️ 高度用 `card_height(entry)`，**不是 `CARD_H`** —— 有结果列表的卡会更高。
-    ch = card_height(entry)
+    ch = card_height(entry, show_skipped=show_skipped)
     view.setFrame_(NSMakeRect(0.0, 0.0, width, ch))
     view._course = r.course
     view._tag = r.course
@@ -1513,9 +1576,19 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     if entry is not None:
         y -= CARD_GAP_V
         y -= RESULT_LEAD
+        # ⭐ 「导出清单」（`PLAN-entry-panel §3.6` 那格 ⬜）：摆在**结果头那一行**的右侧 ——
+        #    它属于「没加」这一组，贴在头行上比另占一整行更近；也省掉一次高度记账。
+        #    ⚠️ 只在**真有没加的词**时才建：空清单按钮是在请用户导出一个空文件。
+        _na = entry.get("not_added") or []
+        _exp_w = 84.0 if (_na and on_export is not None) else 0.0
         view.addSubview_(panel.make_label(
             result_header(entry),
-            NSMakeRect(CARD_PAD, y + 6.0, inner_w, RESULT_LEAD - 6.0), 11.0, alpha=DIM))
+            NSMakeRect(CARD_PAD, y + 6.0,
+                       inner_w - (_exp_w + 10.0 if _exp_w else 0.0),
+                       RESULT_LEAD - 6.0), 11.0, alpha=DIM, truncate=True))
+        if _exp_w:
+            view.addSubview_(mk("导出清单", width - CARD_PAD - _exp_w, on_export,
+                                y=y + 3.0, w=_exp_w, h=RESULT_LEAD - 8.0))
         # 「没跑完」的人话紧跟头部 —— **它是那一屏的头版**（读序上不该被埋在最后）。
         # ⚠️ 与 `card_height` 的项数**成对**，见那里的注。
         if entry.get("aborted"):
@@ -1564,6 +1637,26 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
             view.addSubview_(panel.make_label(
                 t, NSMakeRect(CARD_PAD, y + 3.0, inner_w, 16.0), 12.0,
                 truncate=True))
+        # ⭐ 「已在表里 / 你删过」那组（`PLAN-entry-panel §3.6`）：从「只给计数」改成
+        #    **默认收起、点开看列表**。⚠️ 收起态也占一行（那是入口），所以
+        #    `card_height` 里 1 + (展开时 len) 与这里逐项对应。
+        _sk = skipped_terms(entry)
+        if _sk:
+            y -= RESULT_ROW
+            view.addSubview_(panel.make_label(
+                ("▾ " if show_skipped else "▸ ") + f"已在表里 / 你删过 {len(_sk)} 个",
+                NSMakeRect(CARD_PAD, y + 3.0, inner_w - 64.0, 16.0), 11.0, alpha=DIM,
+                truncate=True))
+            view.addSubview_(mk("收起" if show_skipped else "展开",
+                                width - CARD_PAD - 56.0,
+                                on_toggle_skipped or (lambda: None),
+                                y=y + 1.0, w=56.0, h=RESULT_ROW - 6.0))
+        if show_skipped:
+            for t in _sk:
+                y -= RESULT_ROW
+                view.addSubview_(panel.make_label(
+                    t, NSMakeRect(CARD_PAD, y + 3.0, inner_w, 16.0), 12.0,
+                    truncate=True))
         # 排完之后 y 应当**恰好**等于 `CARD_PAD + BTN_H`（`card_height` 的算式保证）。
         # 对不上就是算式与坐标漂了 —— 那正是 `tests/test_panel.py` 第 ⑥ 组在量的东西。
 
@@ -3877,6 +3970,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                               why=_why,
                               on_select=pick,
                               index=_i + 1,
+                              on_export=lambda c=r.course: export_not_added_list(c),
+                              show_skipped=(r.course in (S.get("expanded") or ())),
+                              on_toggle_skipped=lambda c=r.course: toggle_skipped(c),
                               # ⚠️ **课号要在这里绑好。** `_make_card` 只传词
                               #    （它不知道也不该知道课号之外的上下文）——
                               #    第一版直接传 `do_delete`（两个参数），调用点只给一个，
@@ -3997,6 +4093,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 S["result"][course] = {
                     "added": list(getattr(res, "added", None) or []),
                     "not_added": list(getattr(res, "not_added", None) or []),
+                    # ⚠️ 「已在表里 / 你删过」要能**展开看列表**（§3.6 那格），所以
+                    #    存逐条、不存计数 —— 计数一律由 `skipped_terms()` 从这一份算。
+                    "skipped_existing": list(getattr(res, "skipped_existing", None) or []),
                     "failed": list(getattr(res, "failed", None) or []),
                     "removed": set(),
                     "undo": None,
@@ -4120,6 +4219,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    （`S["result"]` 是**故意**跨面板的，别把这条规矩套到它头上。）
             S["batch"] = None
             S["search"] = None
+            # 「已在表里/你删过」的展开态是**这一块界面的**状态 —— 关掉就该回到默认收起。
+            S.pop("expanded", None)
             # ⚠️ 「装完自动开始上课」只属于**这一个**面板：关了再开不许冒出一次没人点的开课。
             S.pop("start_after_update", None)
             # ⚠️ 导入那条也是**模块级**的，同上面三条 —— 2026-09-29 补。
@@ -4278,6 +4379,39 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         entry["undo"] = None
         set_status(f"已把「{u['text']}」放回原位置")
         _later(refresh)                # ⚠️ 同上：别在 action 里拆 sender 的视图
+
+    def toggle_skipped(course):
+        """展开 / 收起「已在表里 / 你删过」那组（默认收起）。
+
+        ⚠️ 展开态存在 `S["expanded"]`（模块级、跨重画）—— 重画是**整块重建卡片**，
+           把状态放在视图上会随旧卡片一起没。关面板时清掉，下次回来仍是默认收起。
+        ⚠️ `_later`：这是按钮 action 里调的，同步 `refresh()` 会把 sender 整块拆掉。
+        """
+        exp = S.setdefault("expanded", set())
+        if course in exp:
+            exp.discard(course)
+        else:
+            exp.add(course)
+        _later(refresh)
+
+    def export_not_added_list(course):
+        """「导出清单」：把没加的候选词写成文本，并在**访达里显示**它。
+
+        ⚠️ 整段自己 try/except 并把结果写进状态行 —— 按钮 action 里的异常会被
+           AppKit 吞掉（HANDBOOK 那条），症状是「点了没反应」而日志里没有痕迹。
+        """
+        entry = S["result"].get(course) or {}
+        terms = list(entry.get("not_added") or [])
+        if not terms:
+            set_status(f"{course}：没有「没加」的候选词可导出")
+            return
+        try:
+            p = export_not_added(course, terms, root=state_root)
+            reveal_in_finder(p)
+        except Exception as e:                            # noqa: BLE001
+            set_status(f"{course}：清单没导成（{type(e).__name__}: {str(e)[:60]}）")
+            return
+        set_status(f"{course}：清单已存到 {_short_home(str(p))}（已在访达里显示）")
 
     from AppKit import NSButton
 

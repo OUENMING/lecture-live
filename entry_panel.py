@@ -49,6 +49,8 @@ import timetable as T
 # ── 尺寸（每条都有出处，见模块头）────────────────────────────────────
 PAD = 20.0             # 面板内边距（实测：System Settings 20pt）
 CARD_PAD = 10.0        # 卡片内边距（实测 10pt）
+NUM_W = 15.0           # 卡号提示的宽度（`1`–`5`，小号低对比）
+DIGIT_SLOTS = 5        # 数字键只到 5（路线图原话 `1`–`5`）
 CARD_GAP = 10.5        # 卡片间距（实测 10.5pt）
 CARD_H = 56.0          # 按内容累加，非抄来的（2026-10-12 按钮并进标题行：88 → 56）
 CARD_RADIUS = 5.0      # 卡片圆角（实测 5pt）
@@ -575,6 +577,57 @@ def readiness_line(r: courses.Readiness) -> str:
     """
     return (f"{_num(r.materials, '份课件')} · {_num(r.terms, '条术语')}"
             f" · 上次上课 {_short_date(r.last_session)}")
+
+
+def last_course_of(rows) -> str | None:
+    """「上次那门」= **最近一次真上过课**的那门（`last_session` 是 ISO 日期，可直接比）。
+
+    没有历史 → `None`（回车什么都不做，不猜）。
+    """
+    best = None
+    for r in rows:
+        d = getattr(r, "last_session", None)
+        if d and (best is None or d > best[0]):
+            best = (d, r.course)
+    return best[1] if best else None
+
+
+#: 不当作「选课键」的修饰符：⌘ / ⌃ / ⌥（Shift 不算 —— `1` 和 `!` 是两回事，
+#: 而 `charactersIgnoringModifiers` 在 Shift 下仍给 `1`，所以用字符本身判断就够）。
+_KEY_MODS = (1 << 20) | (1 << 18) | (1 << 19)
+
+
+def key_course(char: str, order, last: str | None = None, *,
+               editing: bool = False, modifiers: int = 0) -> str | None:
+    """一个**按键** -> 该选中哪门课；`None` = 不处理（事件照常往下走）。
+
+    ⚠️ 输入框有焦点时一律不处理 —— 在搜索框里打 `1` 必须只是打一个 `1`。
+    ⚠️ 带 ⌘ / ⌃ / ⌥ 的也不处理：那是系统快捷键，不是选课。
+    ⚠️ 数字只认 `1`–`5`（`DIGIT_SLOTS`）—— 面板上看得见的提示也只画五张。
+    """
+    if editing or not char or (int(modifiers) & _KEY_MODS):
+        return None
+    ch = str(char)
+    if ch in "12345":
+        i = int(ch) - 1
+        return order[i] if i < len(order) and i < DIGIT_SLOTS else None
+    if ch in ("\r", "\n"):
+        return last if last in order else None
+    return None
+
+
+def key_course_from_event(event, order, last: str | None = None, *,
+                          editing: bool = False) -> str | None:
+    """真实 `NSEvent` -> 该选中哪门课（判据用假事件对象也能喂）。
+
+    事件形状读不出来 → `None`（不抢键）。
+    """
+    try:
+        char = event.charactersIgnoringModifiers()
+        mods = int(event.modifierFlags())
+    except Exception:                                     # noqa: BLE001
+        return None
+    return key_course(char, order, last, editing=editing, modifiers=mods)
 
 
 def body_height(n: int, screen_h: float, *, card_h: float = CARD_H) -> float:
@@ -1308,12 +1361,13 @@ def _stagger_in(views) -> None:
 
 def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
                entry=None, on_delete=None, on_undo=None, on_delete_course=None,
-               hinted=False, why=None, on_select=None):
+               hinted=False, why=None, on_select=None, index=None):
     """一张卡 = 一个落点 + 两行内容（+ 跑过之后的结果列表）。
 
     `hinted` = **选中的那张**（课表猜的，或用户点过的）：只有它画「开始上课」。
     `why` = 课表为什么猜它 —— 画在**这张卡**的第二行（原来在底栏，离卡太远，2026-10-14）。
     `on_select(course)` = 点没选中的卡 → 选中它（整张卡就是点击目标，卡上不再各挂一颗按钮）。
+    `index` = 卡号（1 起）。**只在前 5 张画**，它是数字键选课的可见提示（小号、低对比）。
     """
     from AppKit import NSButton, NSColor, NSFont, NSMakeRect
 
@@ -1405,7 +1459,8 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     # ⚠️ 原来这里还有一个「选择文件…」（单课加课件）。2026-09-28 删掉 ——
     #    作者说「卡片看着太繁杂」。能力没丢：拖到卡上 = 加到那门课；不想拖 → 底部统一入口。
     acts_w = sum(w for _t, w, _a in acts) + 8.0 * max(len(acts) - 1, 0)
-    text_w = inner_w - (acts_w + 12.0 if acts else 0.0)
+    num_w = NUM_W if (index is not None and 1 <= index <= DIGIT_SLOTS) else 0.0
+    text_w = inner_w - num_w - (acts_w + 12.0 if acts else 0.0)
 
     # ⚠️⚠️ **从上往下排。** 卡片是**非翻转**坐标（y 向上），所以「往下」= y **递减**。
     #    第一版让结果块从卡片底部往上长 —— 于是**列表是倒的**（最后加的排最上面），
@@ -1414,8 +1469,13 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     y = ch - CARD_PAD
     y -= L1_H
     # ⚠️ 两行都 `truncate=True`：按钮占走右边之后，长课名不截就会折行、第二行被静默吃掉。
+    if num_w:
+        # 数字键的可见提示：小号、低对比。**不抢标题的阅读顺序** ——
+        # 它只是「按 1–5 也能选」的提示，选中状态仍由描边和主按钮表达。
+        view.addSubview_(panel.make_label(
+            str(index), NSMakeRect(CARD_PAD, y, NUM_W, L1_H), 10.0, alpha=0.32))
     _t = panel.make_label(
-        card_title(r), NSMakeRect(CARD_PAD, y, text_w, L1_H), 13.0, bold=True,
+        card_title(r), NSMakeRect(CARD_PAD + num_w, y, text_w, L1_H), 13.0, bold=True,
         truncate=True)
     _style_title(_t, r.course)
     view.addSubview_(_t)
@@ -1857,6 +1917,49 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         """
         S["picked"] = course
         _later(refresh)
+
+    def _on_key(event):
+        """数字键 `1`–`5` / 回车 -> 选中那门课（**不直接开课**，与点卡片等价）。
+
+        ⚠️ 输入框有焦点、带 ⌘/⌃/⌥、或面板不是 key window 时**原样放行** ——
+           在搜索框里打 `1` 必须只是打一个 `1`（`_win_is_editing` 的判据是「任何
+           field editor」，不是某一个框）。
+        """
+        try:
+            if not win.isVisible() or not win.isKeyWindow():
+                return event
+            course = key_course_from_event(
+                event, S.get("order") or [], S.get("last_course"),
+                editing=_win_is_editing(win))
+        except Exception as e:                            # noqa: BLE001
+            # AppKit 会吞 action 里的异常（HANDBOOK 那条）—— 这里自己出声，
+            # 否则症状就是「按数字没反应」而日志里一个字都没有。
+            print(f"[entry_panel] 数字键选课出错：{type(e).__name__}: {e}", flush=True)
+            return event
+        if course is None:
+            return event
+        pick(course)
+        return None                                        # 吃掉这个键
+
+    def _install_key_monitor():
+        """挂本地键盘监视。**先摘旧的** —— 面板可能被 build 多次（测试/重新打开）。
+
+        ⚠️ 只监视 `keyDown`，且 `_on_key` 自己按「窗口可见 + 是 key + 不在编辑」
+           三重判据决定放不放行。返回的 monitor 必须留住，`do_close` 里摘掉。
+        """
+        from AppKit import NSEvent, NSEventMaskKeyDown
+        old = S.pop("key_monitor", None)
+        if old is not None:
+            try:
+                NSEvent.removeMonitor_(old)
+            except Exception:                             # noqa: BLE001
+                pass
+        try:
+            S["key_monitor"] = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                NSEventMaskKeyDown, _on_key)
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ 数字键选课没挂上（{type(e).__name__}: {e}）—— 鼠标点卡照旧",
+                  flush=True)
 
     # ⚠️ 用 `visibleFrame`（去掉菜单栏 / Dock），不是 `frame` —— 后者会让面板钻到 Dock 底下。
     _vis = NSScreen.mainScreen().visibleFrame()
@@ -3601,6 +3704,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         ⚠️ 它同时负责**切换落点条的两个状态**（提示 ↔ 批量动作）—— 那是唯一需要
            "面板级"而非"卡片级"改动的东西，塞在这里比另开一条更新路径省事。
         """
+        # ⚠️ 数字键只对**课程卡片**生效：下面几条模式各自 `return`，所以先把顺序清空，
+        #    否则批量/搜索/导入卡上按 `1` 会去选中一张**看不见的**卡。
+        S["order"] = []
         for sub in list(doc.subviews()):
             sub.removeFromSuperview()
 
@@ -3726,6 +3832,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _hint = _gs[_gi].course if 0 <= _gi < len(_gs) else None
         if _hint:
             rows.sort(key=lambda r: (r.course != _hint,))
+        # 数字键的顺序**与屏幕上显示的顺序同源**（就是这一份 rows），
+        # 回车用的「上次那门」也从这里算（最近一次真上过课的那门）。
+        S["order"] = [r.course for r in rows]
+        S["last_course"] = last_course_of(rows)
         # 选中的那张：用户点过的优先，否则课表猜的。⚠️ 点选**不重排** —— 卡片在手底下跳走更糟。
         _sel = S.get("picked") or _hint
         _why = _gs[_gi].why if (_hint and _sel == _hint) else None
@@ -3758,7 +3868,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, _eh)))
             return
         _cards: list = []
-        for r in rows:
+        for _i, r in enumerate(rows):
             entry = S["result"].get(r.course)
             card = _make_card(r, on_start=on_start,
                               on_drop_files=run_prep, width=WIDTH - 2 * PAD,
@@ -3766,6 +3876,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                               hinted=(r.course == _sel),
                               why=_why,
                               on_select=pick,
+                              index=_i + 1,
                               # ⚠️ **课号要在这里绑好。** `_make_card` 只传词
                               #    （它不知道也不该知道课号之外的上下文）——
                               #    第一版直接传 `do_delete`（两个参数），调用点只给一个，
@@ -3947,6 +4058,15 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             win.orderOut_(None)
         except Exception:                                 # noqa: BLE001
             pass
+        # ⚠️ 数字键监视器必须摘 —— 不然关掉面板之后它还在，闭包攥着 win，
+        #    而且再开面板会**多挂一条**（`_install_key_monitor` 只认得 S 里最新那条）。
+        _mon = S.pop("key_monitor", None)
+        if _mon is not None:
+            try:
+                from AppKit import NSEvent
+                NSEvent.removeMonitor_(_mon)
+            except Exception:                             # noqa: BLE001
+                pass
         _close_offer()                   # 「有新版本」卡跟着面板走（它的按钮闭包也持着本面板）
         # ⚠️⚠️ **必须断环，否则每开/关一次漏掉一整个面板。**
         #     实测（审查代理量的，连跑两遍一致）：开/关 3 轮之后
@@ -4283,6 +4403,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     win.setFrameOrigin_((_vis.origin.x + (_vis.size.width - WIDTH) / 2.0,
                          panel_y(h, _vis.origin.y, _vis.size.height)))
     win.orderFrontRegardless()
+    # ⭐ 开课面板：数字键 `1`–`5` 选课（回车 = 上次那门）。只在**有「开始上课」**的
+    #    那一档挂 —— 上课中从菜单栏打开的面板不选课，别抢键。
+    if on_start is not None:
+        _install_key_monitor()
     # ⭐ 焦点守卫的链子**从这里起**（窗口刚上屏）—— 不是在定义处（见 `_guard_start`）。
     _guard_start(win)
     # ⭐ 面板**已经上屏**了 → 现在把搜索框放回"可以被点进焦点"的状态。

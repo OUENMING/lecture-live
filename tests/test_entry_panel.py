@@ -241,6 +241,48 @@ def main() -> int:
           E.kept_added(_dup) == ["b"] and "本次加了 1 个" in E.result_header(_dup),
           f"{E.kept_added(_dup)} / {E.result_header(_dup)}")
 
+    print("\n--- ⑧b 数字键选课：**键事件** -> 选中哪门 ---")
+    # ⚠️ 判据落在 `key_course_from_event` 上（真 `NSEvent` 与假事件同形），
+    #    不是「有没有装监视器」——装上了但映射错，用户按 2 选中的是第 3 门，
+    #    而那种错**不会报错**。
+    class _Ev:
+        def __init__(self, ch, mods=0):
+            self._ch, self._mods = ch, mods
+
+        def charactersIgnoringModifiers(self):
+            return self._ch
+
+        def modifierFlags(self):
+            return self._mods
+
+    _order = ["AA10010", "BB20020", "CC30030"]
+    check("按 1 / 2 / 3 -> 第 1 / 2 / 3 门",
+          [E.key_course_from_event(_Ev(str(i)), _order) for i in (1, 2, 3)]
+          == _order,
+          str([E.key_course_from_event(_Ev(str(i)), _order) for i in (1, 2, 3)]))
+    check("按 4（只有 3 张卡）-> 不动", E.key_course_from_event(_Ev("4"), _order) is None)
+    check("按 0 / 6 / 字母 / 空格 -> 一律不处理",
+          all(E.key_course_from_event(_Ev(c), _order) is None
+              for c in ("0", "6", "a", " ")))
+    check("回车 -> 上次那门",
+          E.key_course_from_event(_Ev("\r"), _order, "BB20020") == "BB20020")
+    check("回车但还没有「上次那门」-> 不动（不猜第一张）",
+          E.key_course_from_event(_Ev("\r"), _order, None) is None)
+    check("⚠️ 输入框有焦点 -> 一个键都不抢（1 / 5 / 回车）",
+          all(E.key_course_from_event(_Ev(c), _order, _order[0], editing=True) is None
+              for c in ("1", "5", "\r")))
+    check("⚠️ 带 ⌘ / ⌃ / ⌥ -> 不抢（那是系统快捷键）",
+          all(E.key_course_from_event(_Ev("1", m), _order) is None
+              for m in (1 << 20, 1 << 18, 1 << 19)))
+    check("事件形状读不出来 -> 不处理（不抛）",
+          E.key_course_from_event(object(), _order) is None)
+    # 「上次那门」= 最近一次**真上过课**的那门；没上过的课不参与。
+    _rows = [R(course="A", last="2026-09-01"), R(course="B", last="2026-10-16"),
+             R(course="C", last=None)]
+    check("⭐ 上次那门 = 最近一次真上过课的那门",
+          E.last_course_of(_rows) == "B", str(E.last_course_of(_rows)))
+    check("一门都没上过 -> None", E.last_course_of([R(course="A", last=None)]) is None)
+
     print("\n--- ⑧ 卡片高度：**与坐标同一组常数推导** ---")
     check("⭐ card_height(None) == CARD_H —— 这条把推导锁住",
           E.card_height(None) == E.CARD_H,
@@ -509,6 +551,7 @@ def main() -> int:
           _m3.startswith("⚠️") and "磁盘满了" in _m3, _m3)
 
     _add_wiring_section()
+    _digit_hint_section()
     _target_liveness_section()
     _chip_section()
     _test_mode_section()
@@ -2431,6 +2474,57 @@ def _key_entry_section() -> None:
         E.popup_menu = _orig_popup
         if _rmod is not None:
             _rmod.items = _orig_items
+
+
+def _digit_hint_section() -> None:
+    """⑧c 数字键的**可见提示**真的画在卡上（小号、低对比）。
+
+    ⚠️ 为什么要建窗口：提示是 AppKit 视图，纯函数那边看不到。判据挑**字号 10** 的
+       标签 —— 面板上其余文字是 11/12/13，只有这个数字提示是 10，所以不会把
+       「1 份课件」里的 `1` 误认成卡号。
+    """
+    print("\n--- ⑧c 数字键提示画在卡上（1–5，小号）---")
+    import tempfile
+
+    try:
+        from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
+                            NSTextField)
+    except Exception as e:                                    # noqa: BLE001
+        check("AppKit 可用（这一节要真窗口）", False, f"{type(e).__name__}: {e}")
+        return
+
+    app = NSApplication.sharedApplication()
+    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
+    def walk(v, out=None):
+        out = [] if out is None else out
+        out.append(v)
+        for c in (v.subviews() or []):
+            walk(c, out)
+        return out
+
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        gl = root / "glossary.txt"
+        gl.write_text("# public table\n", encoding="utf-8")
+        (root / "glossary").mkdir()
+        for c in ("AA10010", "BB20020"):
+            (root / "glossary" / f"{c}.txt").write_text(f"# {c}\n", encoding="utf-8")
+        h = E.build(glossary=gl, sessions_dir=root / "sessions",
+                    state_root=root / "state", on_start=lambda c: None)
+        check("面板建起来了", h is not None)
+        if h is None:
+            return
+        try:
+            labels = [v for v in walk(h.window.contentView(), [])
+                      if isinstance(v, NSTextField)
+                      and float(v.font().pointSize()) == 10.0]
+            got = sorted(v.stringValue() for v in labels)
+            check("⭐ 两张卡分别有 1 / 2（小号 10pt）", got == ["1", "2"], str(got))
+            check("⭐ 而且它们不是标题/准备度那种 11–13pt 的字",
+                  all(float(v.font().pointSize()) < 11.0 for v in labels))
+        finally:
+            h.close()
 
 
 def _add_wiring_section() -> None:

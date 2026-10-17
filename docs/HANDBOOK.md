@@ -289,6 +289,8 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_UPLOAD` | `1` | 测试模式课后上传；测试 / 探针一律设 `0` | 运维开关，长期 |
 | `CLASSLIVE_UPLOAD_ENDPOINT` / `_TOKEN` | 内置 | 上传端点与 write-only 令牌（测试指到本机假服务器） | 测试接缝，长期 |
 | `CLASSLIVE_CLOUD_ASR` | 未设 | `0` = 本进程强制本地定稿：不发请求、不写 `cloud-asr.json` / `install-id`、不弹告知（探针 / 回放脚本默认设 0） | 隐私开关，长期 |
+| `CLASSLIVE_STREAM_ASR` | `auto` | `off` = 关 Soniox 实时识别（`stream_asr.py`，可用时草稿与定稿都由它出、一句封口就送翻译）；`auto` 时还要**有通行码 + 云端定稿开着 + 翻译档不是 `raw`** 才真启用。不可用/额度尽 → 本节课退回现有本地流水线（走 notice 提示一次） | 发布开关：真课过闸、一版没出事后评估退役旧草稿/定稿路径 |
+| `CLASSLIVE_STREAM_ASR_ENDPOINT` | 内置 | Soniox 领 key 端点（判据指到本机假 Worker）；不设时跟随 `CLASSLIVE_ASR_ENDPOINT` 换路径 | 测试接缝，长期 |
 | `CLASSLIVE_ASR_ENDPOINT` | 内置 | 云端定稿端点（测试指到本机假服务器；断网实测指到不可达地址） | 测试接缝，长期 |
 | `CLASSLIVE_ASR_TOKEN` | 内置 | 云端定稿的公开令牌（测试用） | 测试接缝，长期 |
 | `CLASSLIVE_NO_AUTO_UPDATE` | 空 | 关后台自动更新（排查用；日志在 `~/Library/Logs/ClassLive/update.log`） | 运维开关，长期 |

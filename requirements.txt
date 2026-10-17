@@ -38,3 +38,8 @@ huggingface-hub>=1.30
 # 定稿上云前把一段音频压成 Ogg/Opus（千问吃 WAV 慢约 10 倍：11–23 s vs 1.2 s）。
 # wheel 自带 libsndfile，不依赖 ffmpeg；缺它时 final_asr 自动改走本地定稿。
 soundfile>=0.13
+
+# Soniox 实时识别（`stream_asr.py`）：`websockets.sync.client` 同步 API（不把 asyncio 引进主线程）。
+# 15 起才有 `additional_headers`（旧名 `extra_headers` 已删）；打包链的 Python 是 3.12。
+# ⚠️ 避开 Python 3.13.6（官方 SDK README 警示其 ssl 回归会挂住实时连接）。
+websockets>=15

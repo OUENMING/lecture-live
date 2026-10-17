@@ -98,6 +98,45 @@ def candidates(review: dict, entries: list, *, materials=None, type_of=None) -> 
     return keep, rejected
 
 
+def deleted_terms(course: str, *, glossary_txt, state_path=None, glossary_path=None) -> set:
+    """**作者删过**的词（小写集合）：墓碑里有、而表里已经没有。
+
+    ⭐ 这是"删过的不复活"那条规矩的**第三种用法**（前两种：`prep.prepare` 选词、
+    `note_glossary.append` 落表）—— 课上候选词池（`live_terms`）也归它管：
+    作者从术语表里删掉一个词，就是想让它**整条链路**都别再出现。
+
+    ⚠️ 墓碑**不等于**删过：它是"曾经过过表"。差别就是"表里还有没有这一行" ——
+       少了这一步，一个正常还在表里的词会被当成"删过"，候选池白丢一批词。
+    """
+    import pathlib
+    if glossary_path is None:
+        try:
+            import courses
+            glossary_path = courses.glossary_file(glossary_txt, course)
+        except Exception:                                     # noqa: BLE001
+            return set()
+    if state_path is None:
+        try:
+            import paths
+            state_path = paths.prep_state(course)
+        except Exception:                                     # noqa: BLE001
+            return set()
+    import prep
+    try:
+        tomb = {k.lower() for k in (prep._load_state(pathlib.Path(state_path)) or {})}
+    except Exception:                                         # noqa: BLE001
+        return set()
+    if not tomb:
+        return set()
+    try:
+        cur = {ln.strip().lower() for ln in
+               pathlib.Path(glossary_path).read_text(encoding="utf-8").splitlines()
+               if ln.strip() and not ln.strip().startswith("#")}
+    except Exception:                                         # noqa: BLE001
+        return set()
+    return tomb - cur
+
+
 def append(terms: list, *, course: str, glossary_txt, state_path=None,
            glossary_path=None) -> Outcome:
     """把 `terms` 追加进本课术语表 + 写墓碑。**失败一律走 `Outcome.aborted`，不抛。**

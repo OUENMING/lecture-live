@@ -315,6 +315,14 @@ class RenderShape(unittest.TestCase):
         out = nr.render(d)
         self.assertIn("未做课件核对", out)
 
+    def test_精修那一行跟着_polish_字段走(self):
+        """⭐ `--polish auto` 开着写"不再精修"就是假话（附录 A 那行是给读者的凭据）。"""
+        self.assertIn("逐句转录不再精修", nr.render(self._data(polish_state="off")))
+        for st in ("ok", "partial", "failed", "interrupted"):
+            out = nr.render(self._data(polish_state=st))
+            self.assertNotIn("逐句转录不再精修", out, st)
+            self.assertIn("转录做过精修", out, st)
+
     def test_转录不精修_原样(self):
         e = entries(1)
         e[0]["en"] = "the origional en sentence"

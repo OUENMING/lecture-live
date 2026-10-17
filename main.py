@@ -639,6 +639,24 @@ class EngineRouter:
                 return self._local.fix_stream(en, context, None)
         return self._local.fix_stream(en, context, on_en)
 
+    def add_terms(self, words) -> list:
+        """把课上候选词并进**两个**引擎的候选池（链路体检 ⭐2）。
+
+        ⚠️ 两个都喂：`_fallback` 一次降级之后，后面那些句子读的是**本地**那份池子；
+           只喂当前在用的那个 = 一降级就把这节课的词全丢了（而本文件头写着降级是
+           **常态**：中国用户 8 节课 16 个洞）。
+        ⚠️ 任一引擎报错**不影响另一个**，也绝不抛给调用方 —— 它只是锦上添花。
+        """
+        new: list = []
+        for eng in (self._cloud, self._local):
+            if eng is None or not hasattr(eng, "add_terms"):
+                continue
+            try:
+                new += list(eng.add_terms(words) or ())
+            except Exception:                                 # noqa: BLE001
+                continue
+        return new
+
     @property
     def uses_cloud(self) -> bool:
         """只读: 当前是否走云端(草稿译文线程据此决定要不要给定稿让路)。"""
@@ -717,6 +735,32 @@ class EngineRouter:
             return self._cloud.hint(lines)
         except Exception:                         # noqa: BLE001
             return ""
+
+
+def live_terms_step(pool, router, finals) -> list:
+    """已定稿文本 -> 过门的候选词 -> 翻译侧候选池（链路体检 ⭐2 的**接线点**）。
+
+    返回这次**新进池**的词（空列表 = 没到步长 / 没有新词）。**绝不抛** ——
+    它跑在定稿线程里，是额外一层（同 `close()` 那八层的纪律）。
+
+    ⚠️ 单独一个函数而不是写进 `_emit`：`_emit` 有两百行、三条 `continue` 分支
+       （纯转录 / 只英·校 / 翻译），接线点在四条路上都要走到；抽出来既能单测，
+       也**只改一处**（那三条分支的尽头都是 `finals.append(...)`，见调用点）。
+    """
+    if pool is None or not finals:
+        return []
+    try:
+        got = pool.update(finals)
+    except Exception:                                         # noqa: BLE001
+        return []
+    if not got:
+        return []
+    if router is not None:
+        try:
+            router.add_terms(got)
+        except Exception:                                      # noqa: BLE001
+            pass
+    return got
 
 
 class TerminalUI:
@@ -1551,6 +1595,29 @@ def run(args) -> None:
     #    → 上次用过的。**没有兜底目录** —— 拿不到就不写 Obsidian，绝不凭空造一个。
     #    拿到了就**记下来**：双击 `.app` 起的那条路没有 shell 环境变量，不记下次还是找不到。
     vault = resolve_vault(args.vault)
+    # ⭐2（2026-10-17，链路体检）：**课上候选词池** —— 已定稿文本里反复出现、过了门的词
+    #    并进翻译侧的候选池（`extra_terms`）。起点是上面那批 `corpus` 转录词。
+    #    ⚠️ 课件核对（`verify`）**懒加载**：这里在启动路径上，而 `Materials.for_course`
+    #       要把本课材料读一遍 —— 挪到第一次抽取时再建，别让上课启动多花那几百毫秒
+    #       （`tests/test_startup_timing.py` 盯着这条线）。
+    #    ⚠️ **不碰 Soniox**：它的 context 是会话开始时定的，改要重开会话（`live_terms`
+    #       文件头有查证），所以这一课的词只靠 `glossary/<课号>.txt` 在**下节课**带上。
+    #    ⚠️ 建不起来 / 抽不到词都**只影响术语召回**，绝不挡开课（同 `extra_terms` 那条）。
+    live_pool = None
+    if args.course and vault:
+        try:
+            import live_terms as _lt
+            import note_glossary as _ng
+
+            def _verify_factory(_c=args.course, _v=vault):
+                import materials as _mt
+                return _mt.Materials.for_course(_v, _c).verify
+
+            live_pool = _lt.LivePool(
+                initial=extra_terms, verify_factory=_verify_factory,
+                deleted=_ng.deleted_terms(args.course, glossary_txt=args.glossary))
+        except Exception as _e:                       # noqa: BLE001
+            print(f"⚠ 课上候选词池没建起来（只影响术语召回）：{type(_e).__name__}: {_e}")
     if vault:
         remember_vault(vault)
     elif args.save_notes != "no":
@@ -2223,6 +2290,15 @@ def run(args) -> None:
                     seen_proper[pn] += 1
                     if seen_proper[pn] == 2:
                         properq.put(pn)
+        # ⭐2（链路体检）：这一轮定稿的句子喂给候选词池 —— 到步长且过了门的新词
+        #    并进翻译侧候选池（`EngineRouter.add_terms` → 云端 + 本地两份）。
+        #    ⚠️ 放在**循环之后**而不是每句后面：`finals` 只增不减，一轮喂一次结果一样，
+        #       却只要一处调用点（三条 `continue` 分支各写一遍迟早漏一处）。
+        #    ⚠️ 步长在池子里（`live_terms.STEP_SENTENCES`）：没到就立刻返回，零开销。
+        _new_terms = live_terms_step(live_pool, translator, finals)
+        if _new_terms:
+            echo(f"💬 本课候选词 +{len(_new_terms)}：{' · '.join(_new_terms[:6])}"
+                 + ("…" if len(_new_terms) > 6 else ""))
 
     def _force_emit_carry() -> None:
         if not carry["text"]:
@@ -3242,6 +3318,15 @@ def run(args) -> None:
                                                    qa=qa_snapshot,
                                                    on_progress=_ui_progress,
                                                    cancel=_cancel)
+                        # ⭐2：本课候选词池那一行也走**现成通道**（收尾卡/终端串）——
+                        # 不新建 UI。⚠️ 追加而不是新 print：收尾卡里只有这一段文字，
+                        # 分开 print 在终端会跟卡片错位。**失败绝不影响收尾**。
+                        try:
+                            if live_pool is not None:
+                                _box["msg"] = (str(_box["msg"] or "")
+                                               + "\n   " + live_pool.report())
+                        except Exception:                 # noqa: BLE001
+                            pass
                     except BaseException as e:            # noqa: BLE001
                         _box["err"] = e
                     finally:

@@ -174,21 +174,82 @@ def merge_terms(*groups) -> list:
 
 
 def load_terms(glossary_path: str | None, course: str | None = None) -> list[str]:
-    """公共术语 + 分课程术语(glossary/<课号>.txt)。"""
+    """公共术语 + 分课程术语(glossary/<课号>.txt)。
+
+    ⚠️ 2026-10-17：分课程那一半走 `course_term_list`（带**加载上限与排序**）——
+       公共表是手写的、几十条封顶，不设上限；本课表会长（`prep` + 笔记都在追加），
+       所以它必须与 `always` 那一档**同一份口径**（否则动态召回池还会全量吃下全表）。
+    """
     g = [_load_terms(glossary_path)]
-    if course and glossary_path:
-        p = course_terms_path(glossary_path, course)
-        if p is not None:
-            g.append(_load_terms(str(p)))
+    g.append(course_term_list(glossary_path, course))
     return merge_terms(*g)
 
 
-def course_term_list(glossary_path: str | None, course: str | None) -> list[str]:
-    """**只**取分课程术语(不含公共表)。这些词每句全量注入 —— 见 select_terms 的说明。"""
+#: 分课程术语**加载上限**（2026-10-17 加；作者约束：术语库不能越堆越多）。
+#:
+#: 为什么要有上限：这些词**每句全量注入**（`select_terms` 的 `always`），
+#: 而 `prep.py` 自己量过：36 条 ≈ 597 字符 ≈ 整条 prompt 的 23%，120 条 ≈ 60%。
+#: 上限取 60 与 `prep.DEFAULT_MAX_TOTAL` 同量级（那条是"往表里加"的上限，
+#: 这条是"从表里读"的上限）——两条一起保证"表再长，每句也只带 60 条"。
+TERM_LOAD_LIMIT = 60
+
+
+def _recency_rank(terms: list, state_path) -> list:
+    """术语表 → **加载顺序**：手写的在前，自动追加的按**新近度**（日期倒序）。
+
+    ⭐ 为什么要分两段（`prep-state.json` 的 `appended` 就是"哪些是自动加的 + 哪天加的"）：
+      · 手写那一段是课的**领域先验**（课名、`derivative`、`optimization` 这种），
+        它不该被后来的自动词挤掉 —— 挤掉了 Soniox/翻译就丢了领域；
+      · 自动追加的那一段会**一直变长**（`prep` 从课件抽、笔记收尾再从转录抽），
+        而"这节课要用的是最近几次课长出来的词" —— 所以新的排前面，撞上限时
+        掉出去的是**最旧的**（作者口径「超出淘汰最旧/最少的」）。
+      · 拿不到 state（用户手写了全表 / 换机器）→ 全表当手写，按文件顺序 ——
+        仍然受 `limit` 约束，只是淘汰的是**尾部**（追加写在尾部）。
+    """
+    if state_path is None or not terms:
+        return list(terms)
+    import prep
+    try:
+        state = prep._load_state(pathlib.Path(state_path)) or {}
+    except Exception:                                          # noqa: BLE001
+        state = {}
+    if not isinstance(state, dict) or not state:
+        return list(terms)
+    added = {str(k).lower(): str(v) for k, v in state.items()}
+    hand = [t for t in terms if t.lower() not in added]
+    auto = [t for t in terms if t.lower() in added]
+    # ⚠️ 日期倒序、**同日保文件顺序**（`sorted` 稳定）—— 同一节课加的那批里，
+    #    先抽到的在前（与 `note_glossary` 追加顺序一致，可解释）。
+    auto.sort(key=lambda x: added.get(x.lower(), ""), reverse=True)
+    return hand + auto
+
+
+def course_term_list(glossary_path: str | None, course: str | None, *,
+                     limit: int | None = TERM_LOAD_LIMIT,
+                     state_path=None) -> list[str]:
+    """**只**取分课程术语(不含公共表)。这些词每句全量注入 —— 见 select_terms 的说明。
+
+    ⭐ 2026-10-17：**加载有上限**（`TERM_LOAD_LIMIT`，默认 60 条），排序见
+       `_recency_rank`（手写在前、自动追加按新近度）。`limit=None` = 不设限
+       （判据/导出/面板显示这类"要全表"的场合用它）。
+    ⚠️ 上限的作用是**每句注入的量**：表可以一直追加，但每句只带 60 条，
+       多出来的（最旧的自动词）不加载 —— 见 `docs/HANDBOOK.md` 的账。
+    """
     if not course or not glossary_path:
         return []
     p = course_terms_path(glossary_path, course)
-    return _load_terms(str(p)) if p is not None else []
+    if p is None:
+        return []
+    terms = _load_terms(str(p))
+    if state_path is None:
+        # 状态路径的**唯一入口**是 `paths.prep_state`（别在这里手拼 `.classlive/…`）。
+        try:
+            import paths
+            state_path = paths.prep_state(course)
+        except Exception:                                      # noqa: BLE001
+            state_path = None
+    ranked = _recency_rank(terms, state_path)
+    return ranked if limit is None else ranked[:max(0, int(limit))]
 
 
 def course_title(glossary_path: str | None, course: str | None) -> str:
@@ -606,6 +667,21 @@ class Translator:
 
     def _apply_chat(self, user_content: str, system: str = SYSTEM_PROMPT) -> str:
         return _apply_chat_generic(self._tokenizer, user_content, system)
+
+    def add_terms(self, words) -> list:
+        """把**课上现出现的候选词**并进候选池（链路体检 ⭐2）。返回真加进去的那些。
+
+        ⚠️ 走 `merge_terms` —— 池子的**唯一定义点**（理由见它的 docstring：外面拼
+           会绕过 `load_terms` 的去重，重复条目白占一个 `max_dyn` 名额）。
+        ⚠️ 只进候选池（`dyn` 那一档），**不进 `course_terms`**（每句全量注入那档）——
+           这条纪律 2026-09-29 就定了（见 `__init__` 里那段实测）。
+        ⚠️ 每句都会读 `self._terms`，所以**中途追加立刻生效**，不需要重启引擎。
+        """
+        new = [w for w in merge_terms(words) if w.lower() not in
+               {t.lower() for t in self._terms}]
+        if new:
+            self._terms = merge_terms(self._terms, new)
+        return new
 
     def _terms_context(self, en: str, context: list[str]) -> str:
         ctx = context[-self._max_ctx:] if self._max_ctx > 0 else []

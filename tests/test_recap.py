@@ -82,6 +82,18 @@ class Build(unittest.TestCase):
                           "平均成本最低的地方，边际成本正好和它相等。",
                           "这条带数字 3 的不要", "第四条不要"]}
 
+    def test_额外调用最多一次(self):
+        """⭐ 任务书那条：「额外调用 ≤1 次」。**数调用**，不是"看着像一次"。"""
+        n = {"calls": 0}
+
+        def chat(system, user, max_tokens):
+            n["calls"] += 1
+            return {"points": [{"name": "停业价格", "explain": "x"}], "stars": []}
+
+        recap.build(course="X", date="2026-10-15", chapters=self.CHAPTERS,
+                    keypoints=self.KEYS, lost=[], duties=[], tail="", chat=chat)
+        self.assertEqual(n["calls"], 1)
+
     def test_一问就出两样(self):
         data = recap.build(course="ECON10790", date="2026-10-15",
                            chapters=self.CHAPTERS, keypoints=self.KEYS,

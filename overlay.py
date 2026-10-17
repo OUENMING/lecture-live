@@ -1589,6 +1589,8 @@ class Overlay:
         self._card_status_lbl = None
         self._session_course = ""              # 这节课是谁（卡片副标题 / 推算依据）
         self._session_day = None
+        #: 卡片的**延迟重画**标志 —— 见 `_card_defer()`（绝不在点击回调里拆视图）
+        self._card_redo = False
         #: 一些事儿的投影（`main` 从板子推过来；主线程读写）
         self._duty_items: list = []
         self._duty_open_id = ""                # 卡片当前打开哪一条
@@ -3024,10 +3026,8 @@ class Overlay:
             it = self._duty_get(self._duty_open_id)
             if it is None:
                 self._card_close()                        # 那条没了（撤销 / 清空）
-            else:
-                sig = self._duty_sig(it)
-                if sig != getattr(self, "_duty_card_sig", None):
-                    self._duty_card_fill(it)
+            elif self._duty_sig(it) != getattr(self, "_duty_card_sig", None):
+                self._card_defer()                        # 下一帧重画（见 `_card_defer`）
         elif self._card_kind == "wrapup":
             self.duty_wrapup_sync(self._duty_items)
 
@@ -3135,6 +3135,7 @@ class Overlay:
             return
         self._note("duty_type")
         self._on_duty("type", {**it, "type": str(t)})
+        self._card_defer()
 
     def _duty_act(self, action: str, item) -> None:
         """卡片上的按钮：`save` / `ignore` / `undo` / `next` —— 全走 `main` 那一个出口。
@@ -3154,6 +3155,7 @@ class Overlay:
         payload = {**item, **self._card_read_fields()}
         self._note("duty_" + action)
         self._on_duty(action, payload)
+        self._card_defer()
 
     def duty_reminder_result(self, rid: str, ok: bool, reason: str) -> None:
         """提醒事项写完（成功 / 失败）—— 卡片上那句状态改口（失败**写明原因**）。"""
@@ -3233,6 +3235,7 @@ class Overlay:
             for it in list(self._duty_wrapup or []):
                 if it.get("action") == "pending":
                     self._on_duty("ignore", it)
+            self._card_defer()
             return
         if action == "done":
             self._duty_wrapup_done = True
@@ -3241,6 +3244,7 @@ class Overlay:
         if it is None:
             return
         self._on_duty("save" if action == "save" else "ignore", it)
+        self._card_defer()
 
     def duty_wrapup_sync(self, items) -> None:
         """收尾汇总期间 `main` 推来的最新板子 —— 就地换掉那批条目并重画。"""
@@ -3253,7 +3257,7 @@ class Overlay:
         if sig == tuple((x.get("id"), x.get("action")) for x in old):
             return
         self._duty_wrapup = new
-        self._wrapup_card_fill()
+        self._card_defer()
 
     # ---- 课前回顾 ----
     def set_session(self, *, course: str = "", day=None) -> None:
@@ -3584,6 +3588,33 @@ class Overlay:
         if blk["side"]:
             blk["extra"] = self._card_new_label(CARD_META_SZ, 0.62)
         return fld
+
+    def _card_defer(self) -> None:
+        """把「重画当前卡片」排到**下一帧**（`pump` 里消费）。
+
+        ⚠️ 为什么必须延迟：重画会 `removeFromSuperview` 掉整张卡的所有子视图，
+           而这条路的入口常常是**这些子视图自己的点击回调**（「记下」「类型 chip」
+           「忽略」）—— 在派发事件的回调里把视图拆掉是踩钢丝。排到下一帧就没有
+           这个问题，代价是 ≤ 一帧（空闲档 0.1 s）的视觉延迟。
+        """
+        self._card_redo = True
+        self._mark_dirty(urgent=True)
+
+    def _card_refill(self) -> None:
+        """按 `_card_kind` 重画当前卡片（`_card_defer` 的落点）。"""
+        k = self._card_kind
+        if not k:
+            return
+        if k == "duty":
+            it = self._duty_get(self._duty_open_id)
+            if it is None:
+                self._card_close()
+            else:
+                self._duty_card_fill(it)
+        elif k == "wrapup":
+            self._wrapup_card_fill()
+        elif k == "recap":
+            self._recap_fill()
 
     def _card_done(self) -> None:
         """一块卡片内容填完了：摆一次 frame + 标脏（**每个 fill 的最后一步**）。
@@ -4642,6 +4673,11 @@ class Overlay:
         if self._panel.isKeyWindow() and not self._is_editing():
             self._release_focus()
         self._sync_focus_look()      # 细线/光标跟着真实编辑状态走(委托回调不可靠)
+        # 卡片重画一律**延迟到这一帧**（`_card_defer`）—— 绝不在点击回调里拆掉
+        # 正在派发事件的那个视图。
+        if self._card_redo:
+            self._card_redo = False
+            self._card_refill()
         self._bar_tick(time.monotonic())
         # 用户拖过窗口边缘 -> 把宽度/转录区高度收进来并重排。放在 tick 之前:
         # tick 要基于更新后的几何算池, 顺序反了会画一帧旧几何。

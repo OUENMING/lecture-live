@@ -1954,8 +1954,11 @@ def run(args) -> None:
                 _duty_remind(snap)
             return
         if action == "undo":
+            # ⚠️ 撤销**不动** `reminders` 那一条事件：旁路文件是"发生过什么"的账，
+            #    撤销只是把 action 改回 pending（卡上那句状态由 `duty.status_line`
+            #    按 action 判 —— pending 时不显示，所以旧回执不会露出来）。重新「记下」
+            #    会再写一次提醒事项、也再记一条回执。
             duty_board.decide(rid, "pending", source="card")
-            duty_board.note_reminder(rid, True, "")   # 清掉上一条回执（撤销后重新来过）
             _duty_push()
             _duty_wrapup_sync()
 
@@ -3505,7 +3508,6 @@ def run(args) -> None:
                     except Exception as e:                    # noqa: BLE001
                         echo(f"⚠ 一些事儿收尾汇总失败（笔记照写）："
                              f"{type(e).__name__}: {str(e)[:60]}")
-                _duty_stats()
 
             _cancel = threading.Event()
             if not give_up:

@@ -843,6 +843,51 @@ class TestF11Program(unittest.TestCase):
         rows = nm.program_rows(rev["sections"][0])
         self.assertEqual([], rows, "没有 program 不许做数值判断")
 
+    def test_补全题同一批数_过(self):
+        """F11 §4：faded = 例题原样挖空（数不换）→ 不报。"""
+        sec = {"heading": "h", "ts": "13:16",
+               "example": {"title": "📖 Ex5", "prompt": "$TC(q)=q^{3}-12q^{2}+60q$",
+                           "steps": [{"text": "求 $AC$。", "why": ""}],
+                           "answer": "$AC=q^2-12q+60$。"},
+               "faded": {"q": "补全：$TC(q)=q^{3}-12q^{2}+60q$ 时 $AC=$ ____",
+                         "blanks": ["$q^2-12q+60$"], "a": "$q^2-12q+60$"}}
+        self.assertEqual([], nm.reuse_rows(sec))
+
+    def test_补全题冒新数字_拦(self):
+        sec = {"heading": "h", "ts": "13:16",
+               "example": {"title": "📖 Ex5", "prompt": "$TC(q)=q^{3}-12q^{2}+60q$",
+                           "steps": [], "answer": "$AC=q^2-12q+60$。"},
+               "faded": {"q": "补全：$TC(q)=q^{3}-12q^{2}+100q$ 时 $AC=$ ____",
+                         "blanks": ["$q^2-12q+100$"], "a": "$q^2-12q+100$"}}
+        rows = nm.reuse_rows(sec)
+        self.assertTrue(rows, "补全题换了给定数（100）必须拦")
+        self.assertIn("同一道例题", str(rows[0].get("how")))
+
+    def test_补全题答案的派生值不误伤(self):
+        """解里的派生值（dAC/dq=0 → q=6）不是新算术 —— 只查题面。"""
+        sec = {"heading": "h", "ts": "13:16",
+               "example": {"title": "📖 Ex5", "prompt": "$TC(q)=q^{3}-12q^{2}+60q$",
+                           "steps": [], "answer": "$AC=q^2-12q+60$。"},
+               "faded": {"q": "补全：$TC(q)=q^{3}-12q^{2}+60q$，令 $AC'=0$ 得 $q=$ ____",
+                         "blanks": ["6"], "a": "$q=6$"}}
+        self.assertEqual([], nm.reuse_rows(sec))
+
+    def test_没有例题或faded_空(self):
+        self.assertEqual([], nm.reuse_rows({"heading": "h"}))
+        self.assertEqual([], nm.reuse_rows({"heading": "h", "faded": {"q": "x", "a": "y"}}))
+
+    def test_补全题新数字_进机械核并归faded单元(self):
+        """接进 `check_review`：补全题的新数字要能被返修闸看得见（归 faded 单元）。"""
+        sec = {"heading": "h", "ts": "13:16",
+               "example": {"title": "📖 Ex5", "prompt": "$TC(q)=q^{3}-12q^{2}+60q$",
+                           "steps": [], "answer": "$AC=q^2-12q+60$。"},
+               "faded": {"q": "补全：$TC(q)=q^{3}-12q^{2}+100q$ 时 $AC=$ ____",
+                         "blanks": ["$q^2-12q+100$"], "a": "$q^2-12q+100$"}}
+        rev = {"sections": [sec]}
+        bad = [r for r in nm.check_review(rev) if r.get("status") == "mismatch"
+               and nm.unit_of_claim(sec, str(r.get("claim") or "")) == "faded"]
+        self.assertTrue(bad, "补全题的新数字没进机械核（返修闸看不见）")
+
 
 if __name__ == "__main__":
     unittest.main()

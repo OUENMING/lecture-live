@@ -632,6 +632,7 @@ def check_review(review: dict, *, transcript: str = "") -> list:
                 rows += _rows_for_text(t, fdefs)
             rows += _qvsp_rows(u, fdefs_by_text)      # ⭐ F9：q 不许当 P（整单元一起看）
         rows += program_rows(s)                       # ⭐ F11 §2：例题 program 代码算、逐数对
+        rows += reuse_rows(s)                         # ⭐ F11 §4：补全题必须是同一道例题挖空
     # ⚠️ 同一句断言在 `prose` 与 `answer` 各出现一次 → 会出两行一模一样的核对表；
     #    空的 claim 也在这里丢掉（实测第三份产物上有两行全空）。
     seen: set = set()
@@ -1352,7 +1353,7 @@ def _conclusion_nums(text: str) -> list:
     s = re.sub(r"[_^]\s*\{[^{}]*\}", " ", s)        # 下标/上标整块去掉
     s = re.sub(r"[_^]\s*-?\d+(?:\.\d+)?", " ", s)   # 免花括号的 _1 / ^2
     out: list = []
-    for m in re.finditer(r"(?<![A-Za-z0-9.])-?\d+(?:\.\d+)?(?![A-Za-z0-9])", s):
+    for m in re.finditer(r"(?<![A-Za-z0-9.])-?\d+(?:\.\d+)?(?![0-9.])", s):
         tok = m.group(0)
         if "." not in tok and len(tok.lstrip("-")) < 2:
             continue                                # 单个数字多是结构（=0、第1步），不当结论值
@@ -1452,4 +1453,47 @@ def program_rows(section: dict) -> list:
                      "recomputed": f"{target}={_fmt(tval)}" if tval is not None else "",
                      "how": "例题 program 执行通过：答案等于目标量，数字逐一落在程序值/给定里"})
     return rows
+
+
+def reuse_rows(section: dict) -> list:
+    """⭐ F11 §4：补全题（faded）必须是**同一道例题**挖空 —— 不许引入新数字。
+
+    "补全题 = 同一道例题，把**卡点那一步**挖空"（作者裁定）：同一批数 → 不产生新算术。
+    faded 里冒出例题没有的数（新给定/新答案）→ 一条 mismatch（喂返修，复检仍错整件撤）。
+    没有例题或没有 faded → 空（不做判断）。
+    """
+    if not isinstance(section, dict):
+        return []
+    ex, fd = section.get("example"), section.get("faded")
+    if not isinstance(ex, dict) or not isinstance(fd, dict):
+        return []
+    if not (fd.get("q") or fd.get("a")):
+        return []
+    allowed: list = []
+    src = [ex.get("prompt"), ex.get("answer"), str(ex.get("explanation") or "")]
+    for st in (ex.get("steps") or []):
+        src += [_txt(st.get("text")), _txt(st.get("why"))] if isinstance(st, dict) else [str(st)]
+    for t in src:
+        for n in re.findall(r"-?\d+(?:\.\d+)?", str(t or "")):
+            try:
+                allowed.append(float(n))
+            except ValueError:
+                pass
+    for v in (ex.get("givens") or {}).values():
+        try:
+            allowed.append(float(v))
+        except (TypeError, ValueError):
+            pass
+    vals, _err = run_program(ex.get("program") or [], ex.get("givens") or {})
+    allowed += [float(v) for v in vals.values()]
+    # ⚠️ 只查**题面**（新给定才会出现在这里）；`blanks`/`a` 是**照例题算出来的解**，
+    #    本来就会冒出例题里没有的字面值（如 dAC/dq=0 → q=6）—— 不当新算术。
+    bad = [n for n in _conclusion_nums(str(fd.get("q") or ""))
+           if not any(_sig_match(n, a) for a in allowed)]
+    if bad:
+        claim = str(fd.get("q") or fd.get("a") or "补全题")
+        return [{"claim": claim[:120], "status": "mismatch", "recomputed": "",
+                 "how": f"补全题（faded）里出现了例题没有的数字（{'、'.join(bad[:3])}）—— "
+                        "补全题必须是**同一道例题**挖空（F11 §4：同一批数、无新算术）"}]
+    return []
 

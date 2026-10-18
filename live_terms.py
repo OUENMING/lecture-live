@@ -59,6 +59,17 @@ ECON10790 全课（345 句）跑一遍：过门的 16 条里，领域词占大�
 过 `difflib`），而且总量由上限管着；把它们钉死要等词性/频次信号（`corpus` 的跨课
 IDF 是现成的一条路，但那是它自己的接口）。**先说清楚，不装作没有。**
 
+## ⭐ 第五道门：Jev 判「像不像本课术语」（可选；E2 实测）
+
+上面那格残留噪声（点名垃圾 `Anything` / `Interesting` / `UCD` / `Ireland`）有一条补丁：
+候选词过一遍 Jev —— 问「**一个一年级学生在这门课里要不要解释这个词**」。
+2026-10-18 的离线实验（`scratchpad/jev_exp/report.md` §E2，102 条真候选）：
+**AUC(REAL vs JUNK) = 0.976**，点名的 9 条垃圾全排在点名真词之下。
+
+接法是**注入式**的（同 `verify` / `type_of`，`extract` 保持纯函数）：`judge(terms) →
+[0–1 | None]`。低于 `JUDGE_MIN_P` 的词进 `rejected`（"判据：不像术语"）；`None`（没答）
+= 照留。**没接 judge / 没配 token / 超时 —— 一律等于没装闸门**（词照收，同装它之前）。
+
 ## 两条上限（作者 2026-10-17：术语库/抽词**不能越堆越多**）
 
 上下文一多，转录与翻译都变慢（`prep.py` 量过：术语块 36 条 ≈ 597 字符 ≈ prompt 的 23%）。
@@ -92,6 +103,16 @@ import re
 
 #: 同一个词至少出现几次才算候选（作者口径：「≥2 次」—— 一次是巧合，两次算反复）。
 MIN_COUNT = 2
+#: ⭐ 术语闸门（`judge`）的阈值：**低于它 = 砍**。E2 离线实验标定（2026-10-18）：
+#: - `AUC(REAL vs JUNK) = 0.976`（102 条真候选，`scratchpad/jev_exp/report.md` §E2）；
+#: - 真词最低 0.51（`data analysis`）、垃圾中位 0.155；
+#: - 0.35 卡在「点名垃圾里最贵的真垃圾 `Euro` 0.34」和「最便宜的真词 0.51」之间：
+#:   `Anything` 0.03 / `Interesting` 0.04 / `UCD` 0.12 / `Ireland` 0.18 全砍，真词零误伤。
+#: ⚠️ `Dutch`（0.83）是**已知假阳性**（课上说的是 `Dutch disease`，被切成了单个词）——
+#:    那是形状层的锅，这一刀补不了它。
+#: ⚠️ 与 `live_summary.DEADLINE_MIN_P` 同一条纪律：**改问法 / 改 state 形状必须重新标定**
+#:    （绝对分跨 prompt、跨批大小都会整体平移 —— 官方 `jaggedness #5` 的实测版）。
+JUDGE_MIN_P = 0.35
 #: 池子上限（默认 40 = "几十条量级"，作者 2026-10-17）。环境变量 `CLASSLIVE_LIVE_TERMS_MAX`
 #: 可配 —— 见 `_env_limit()`。⚠️ 撞上限时**不是先到先得**：按"本课出现句数 + 新近度"
 #: 淘汰计数最少/最旧的（`LivePool._trim`），且**必须出声**（`report()` 里报淘汰条数）——
@@ -216,11 +237,14 @@ def _looks_term(phrase: str, *, verify, position: int) -> bool:
 
 def extract(finals: list, *, verify=None, deleted=(), known=(),
             min_count: int = MIN_COUNT, limit: int = MAX_TERMS,
-            type_of=None) -> Candidates:
-    """已定稿句子 → 候选词。**纯函数**（`verify` / `type_of` 都是注入的判据）。
+            type_of=None, judge=None) -> Candidates:
+    """已定稿句子 → 候选词。**纯函数**（`verify` / `type_of` / `judge` 都是注入的判据）。
 
     计数单位是"**出现过的句子数**"而不是 token 总数 —— 同一句里连说三遍只是重复，
     跨句复现才说明它是这节课的词。
+
+    ⭐ `judge`（可选，E2 那层）：`judge(terms) -> [0–1 | None]`。低于 `JUDGE_MIN_P`
+    的丢进 `rejected`（"判据：不像术语"）、`None`（没答）照留。**不接 = 与装它之前逐字一样。**
     """
     import note_terms as nt
     fn = _edge_functions()
@@ -285,6 +309,11 @@ def extract(finals: list, *, verify=None, deleted=(), known=(),
               if k in shape_ok and shape_ok[k] and k in first_seen]
     _kept = {w.lower() for w in _drop_subphrases(terms + _extra)}
     terms = [w for w in terms if w.lower() in _kept]
+    if judge is not None and terms:
+        # ⭐ 第五道门（E2）：判据分数 < `JUDGE_MIN_P` 的砍掉（`None` = 没答 → 留）。
+        #    ⚠️ 放在子短语合并**之后**：只判极大短语 —— 判据不用为碎片花钱，
+        #       被砍的也是个完整的词（子短语本来就已经被合并掉了）。
+        terms = _drop_by_judge(terms, judge, rejected)
     trimmed = max(0, len(terms) - limit)
     stats = {k: (c, last_seen.get(k, -1)) for k, c in seen_in.items()}
     return Candidates(terms=terms[:limit], rejected=rejected, trimmed=trimmed,
@@ -309,6 +338,33 @@ def _drop_subphrases(terms: list) -> list:
     return out
 
 
+def _drop_by_judge(terms: list, judge, rejected: list) -> list:
+    """`judge(terms) -> [0–1 | None]`：低于 `JUDGE_MIN_P` 的进 `rejected`，其余照留。
+
+    ⚠️ **fail-soft 有两层**：判据抛异常、或返回的列表比 `terms` 短 → 缺的都当"没答"（留）
+       —— 闸门坏了 = **没装闸门**，绝不许反过来把候选词带走（同 `verify` 懒加载那条纪律：
+       建不起来只少收一类词，不挡上课）。
+    ⚠️ 认不出数字的值（`None` / 形状不对）也当"没答"：`None`（没拿到）与 `0.0`（真判了 0）
+       是两件事，**只有数字才参与比较**。
+    """
+    try:
+        ps = list(judge(terms))
+    except Exception:                                         # noqa: BLE001
+        return terms
+    out = []
+    for i, w in enumerate(terms):
+        p = ps[i] if i < len(ps) else None
+        try:
+            v = None if p is None else float(p)
+        except (TypeError, ValueError):
+            v = None
+        if v is not None and v < JUDGE_MIN_P:
+            rejected.append((w, "判据：不像术语"))
+            continue
+        out.append(w)
+    return out
+
+
 def _is_subseq(small: list, big: list) -> bool:
     it = iter(big)
     return all(w in it for w in small)
@@ -323,11 +379,15 @@ class LivePool:
     ⭐ 上限（作者 2026-10-17）：`limit`（默认 `MAX_TERMS`，`CLASSLIVE_LIVE_TERMS_MAX` 可配）。
        撞上限时**按本课出现句数 + 新近度淘汰最少的/最旧的**，不是先到先得 ——
        这样"这节课真正反复说的词"一定留得住，被淘汰的是那句提过一次的。
+
+    ⭐ 术语闸门（E2，可选）：`judge` 原样传给 `extract` —— 只影响"哪些词算候选"，
+       不影响池子容量/淘汰。**缓存与超时不在这一层**（那是调用方的事，见
+       `main.make_term_judge`）；这一层只保证"调用方给什么判据就用什么"。
     """
 
     def __init__(self, initial=(), *, verify=None, verify_factory=None,
                  deleted=(), known=(), type_of=None, min_count: int = MIN_COUNT,
-                 limit: int | None = None, step: int = STEP_SENTENCES):
+                 limit: int | None = None, step: int = STEP_SENTENCES, judge=None):
         self._pool: list = []
         #: 小写词 -> {"count": 本课出现句数, "last": 最后一次出现的句号,
         #:            "first": 进池顺序（淘汰的**最后**一道 tie-break）}
@@ -339,6 +399,9 @@ class LivePool:
         self._deleted = set(deleted or ())
         self._known = {str(x) for x in (known or ())}
         self._type_of = type_of
+        #: ⭐ 第五道门（E2）：术语判据，原样传 `extract` —— **缓存 / 超时是调用方的事**
+        #:（`main.make_term_judge`）。这里只是把它存住。
+        self._judge = judge
         self._min_count = min_count
         self._limit = _env_limit() if limit is None else max(0, int(limit))
         self._step = max(1, int(step))
@@ -426,7 +489,7 @@ class LivePool:
         got = extract(finals, verify=self._verify, deleted=self._deleted,
                       known=self._known | {w.lower() for w in self._pool},
                       min_count=self._min_count, limit=10 ** 6,
-                      type_of=self._type_of)
+                      type_of=self._type_of, judge=self._judge)
         self._rejected = got.rejected
         # ⚠️ 池子里的老词也要跟着这节课走：它这节课又被说了 5 次 → 计数变 5、
         #    新近度变新，淘汰顺序随之推后。**不更新这一格，淘汰就是按出生顺序**——

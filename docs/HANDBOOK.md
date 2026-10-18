@@ -286,6 +286,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_NOTE_MERGE` | `1` | 课后笔记里把切成两三行的同一句话并回一行、整句重译（只改笔记，`sessions/` 不动）—— `note_merge.py` | 发布开关（3.9.5）：`0` = 照旧逐行 |
 | `CLASSLIVE_LIVE_SUMMARY` | `1` | 实时总结（章节合成 / 纲要落盘 / 发 streamq） | 运维开关，长期 |
 | `CLASSLIVE_LIVE_TERMS_MAX` | `40` | **课上候选词池**的上限（链路体检 ⭐2：已定稿文本里反复出现、过门的词进翻译候选池）—— `live_terms.LivePool`；撞上限按「本课出现句数 + 新近度」淘汰最少的/最旧的 | 运维开关，长期（调大 = 池子更全也更占上下文） |
+| `CLASSLIVE_JEV_TERMS` | `1` | **术语闸门**（链路体检 ⭐2 第五道门，E2 离线实验 AUC 0.976）：新候选词过一遍 Jev「像不像本课术语」，低于 `live_terms.JUDGE_MIN_P` 的砍掉（判过的不重问、硬超时 4 s）—— `main.make_term_judge`；`0` = 完全不装闸门 | 发布开关：真课过闸、一版没出事后评估去留 |
 | `CLASSLIVE_TERM_ZH` | `1` | **术语中文译名注入**（#4 B2，2026-10-17 作者拍板）：命中的「英文 — 中文」进每句 prompt 的**变化段**（云端定稿/草稿、本地定稿/草稿四处同一纯函数 `translator.select_term_zh`，不注入全表）；译名源 = `term_notes.json` 的 **basic 档** ∩ 本课术语表（`translator.term_zh_map`） | 发布开关：真课过闸、一版没出事后评估退役 |
 | `CLASSLIVE_TERM_ZH_MAX` | `8` | 译名注入的**条数上限**（`translator.select_term_zh`） | 运维开关，长期（调大 = 更全也更占上下文） |
 | `CLASSLIVE_LIVE_LOG` | 平时关、测试模式开 | 现场采集 `<会话>.live.jsonl` —— `livemetrics.py` | 运维开关，长期 |

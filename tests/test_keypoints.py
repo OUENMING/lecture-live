@@ -241,6 +241,104 @@ def t_pick_uses_provider_token():
         f"两家 key 互不通用，混用 = 401 → 静默空表")
 
 
+# ---------------------------------------------------------------- 术语闸门（E2）
+@case("⭐⭐ `judge_terms`：键是 `S1..Sn` 的 `noul`（写成 `q1` 会被 `parse_answers` 静默跳过）")
+def t_judge_terms_S_keys():
+    orig_prov, orig_ask = kp.provider_token, kp.ask_commandcode
+    seen: dict = {}
+
+    def fake_ask(state, questions, *, token, **kw):
+        seen.update(state=state, questions=questions, token=token)
+        return {"answers": {k: {"type": "noul", "noul": 0.8} for k in questions}}
+    kp.provider_token = lambda: "TOK-OF-PROVIDER"
+    kp.ask_commandcode = fake_ask
+    try:
+        got = kp.judge_terms(["marginal revenue", "Euro"], course_title="ECON10770 X")
+    finally:
+        kp.provider_token, kp.ask_commandcode = orig_prov, orig_ask
+    assert got == [0.8, 0.8], f"按编号对齐拿到的分数不对：{got!r}"
+    assert sorted(seen["questions"]) == ["S1", "S2"], seen["questions"].keys()
+    assert all(v["type"] == "noul" for v in seen["questions"].values())
+    assert seen["token"] == "TOK-OF-PROVIDER", "token 不是 `provider_token()` 那家的"
+    assert "S1. marginal revenue  [course: ECON10770 X]" in seen["state"]
+    assert seen["state"].startswith(
+        "These are candidate terms extracted from the raw transcripts of university "
+        "lectures.")
+
+
+@case("⭐⭐ 问法**逐字**冻结（与 E2 问法 A 相同）—— 改它必须重标 `live_terms.JUDGE_MIN_P`")
+def t_judge_terms_wording_frozen():
+    """⚠️ 绝对分跨 prompt 会整体平移（官方 `jaggedness` 的实测版）：这句话动了、
+    阈值没重标，闸门就会悄悄砍错。所以这里逐字钉住 —— 红了的正确反应是**重跑 E2
+    标定**，不是把测试改掉。"""
+    assert kp.TERM_INSTRUCTION == (
+        "Look at line {tag} only. Would a first-year student in this course need this "
+        "term explained, because it is a domain term of the subject being taught rather "
+        "than everyday English? Ignore every other line."), "问法改过？先重标 JUDGE_MIN_P"
+
+
+@case("⭐ `judge_terms`：>20 条分两批，各一批一个请求，仍按 `S1..Sn` 原位拼回")
+def t_judge_terms_batches():
+    orig_prov, orig_ask = kp.provider_token, kp.ask_commandcode
+    sizes: list = []
+
+    def fake_ask(state, questions, *, token, **kw):
+        sizes.append(len(questions))
+        return {"answers": {k: {"type": "noul", "noul": 0.5} for k in questions}}
+    kp.provider_token = lambda: "T"
+    kp.ask_commandcode = fake_ask
+    try:
+        got = kp.judge_terms([f"term {i}" for i in range(21)], course_title="X")
+    finally:
+        kp.provider_token, kp.ask_commandcode = orig_prov, orig_ask
+    assert sizes == [20, 1], f"批大小不对：{sizes}"
+    assert got == [0.5] * 21, f"两批的结果没按原位拼回：{got!r}"
+
+
+@case("⭐⭐ `judge_terms`：没配 token → 全 `None`，**一个请求都不发**（功能关着）")
+def t_judge_terms_without_token():
+    import urllib.request
+    orig_prov, orig_open = kp.provider_token, urllib.request.urlopen
+    calls: list = []
+
+    def boom(*a, **kw):
+        calls.append(1)
+        raise AssertionError("没配 token 却发了请求")
+    kp.provider_token = lambda: ""
+    urllib.request.urlopen = boom
+    try:
+        got = kp.judge_terms(["a", "b"], course_title="X")
+    finally:
+        kp.provider_token, urllib.request.urlopen = orig_prov, orig_open
+    assert got == [None, None], f"没配 token 该全 None：{got!r}"
+    assert not calls, "没配 token 却发了请求"
+
+
+@case("⭐ `judge_terms`：单批失败只丢那批（其余照常）+ 出声，绝不抛（同 `score`）")
+def t_judge_terms_batch_isolation():
+    import contextlib
+    orig_prov, orig_ask = kp.provider_token, kp.ask_commandcode
+    n = {"c": 0}
+
+    def flaky(state, questions, *, token, **kw):
+        n["c"] += 1
+        if n["c"] == 1:
+            raise RuntimeError("Jev 500")
+        return {"answers": {k: {"type": "noul", "noul": 0.7} for k in questions}}
+    kp.provider_token = lambda: "T"
+    kp.ask_commandcode = flaky
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            got = kp.judge_terms([f"term {i}" for i in range(21)], course_title="X")
+    finally:
+        kp.provider_token, kp.ask_commandcode = orig_prov, orig_ask
+    assert len(got) == 21, len(got)
+    assert all(p is None for p in got[:20]), f"第 1 批该全 None：{got[:20]}"
+    assert got[20] == 0.7, "第 2 批被第 1 批带走了"
+    assert "判术语失败" in buf.getvalue(), f"失败没出声：{buf.getvalue()!r}"
+
+
 @case("⭐⭐ `rebuild_note.py` 必须接 `keypoints_fn` —— 走假写入器真跑一遍 main()")
 def t_rebuild_wires_keypoints():
     # 动机（2026-10-01 作者实测）：补生成那条路漏了这一行接线 →

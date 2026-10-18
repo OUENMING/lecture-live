@@ -32,6 +32,14 @@ DeepSeek 便宜得多、也快得多（实测一次 20 问 ≈ 1550 input / 355 
 | 字段叫 **`instructions`**（不是 `text`），`type` 必填 | `400 param: questions.q1.instructions` |
 | ⚠️ **必须发 `User-Agent`** | urllib 默认发 `Python-urllib/3.x` → Cloudflare **403 `error code: 1010`**。**它看起来像"请求太大"** —— 我先用 curl 试小的过了、再用 urllib 试大的 403，差点去查 size 上限 |
 | 一次最多 **20 个问题** | `400 at most 20 questions per call`。⚠️ **这条不在官方文档里** —— 官方只有 token 预算、**没有数量上限**，所以 **20 是 CommandCode 代理加的** |
+
+## 第二个出口：术语闸门（`judge_terms`，2026-10-18）
+
+课上候选词池（`live_terms`）的第五道门 **也是从这条唯一接入点走的**：问「一个一年级
+学生在这门课里要不要解释这个词」—— 与离线实验 E2 的问法 A 逐字相同
+（`scratchpad/jev_exp/report.md` §E2，102 条真候选 **AUC 0.976**）。
+阈值在 `live_terms.JUDGE_MIN_P`；**缓存与硬超时在调用方**（`main.make_term_judge`）。
+⚠️ 与 `INSTRUCTION` 同一条纪律：**改问法 / 改 state 形状必须重新标定那个阈值**。
 """
 from __future__ import annotations
 
@@ -77,6 +85,14 @@ OFFICIAL_MODEL = "jev-1.13.0"
 INSTRUCTION = (
     "Look at line {tag} only. If a student had to pass an exam on this lecture, "
     "would they write {tag} down on their revision sheet? Ignore every other line.")
+
+#: 术语闸门的问法 —— 与 E2 实验的问法 A **逐字相同**（`run_e2.py` 的 `INSTR_A`；
+#: A 0.975 / B 0.964，A 更好）。⚠️ 改这句话**必须重新标定** `live_terms.JUDGE_MIN_P`
+#: （与 `INSTRUCTION` 同一条纪律，见模块头「第二个出口」）。
+TERM_INSTRUCTION = (
+    "Look at line {tag} only. Would a first-year student in this course need this term "
+    "explained, because it is a domain term of the subject being taught rather than "
+    "everyday English? Ignore every other line.")
 
 
 #: 句末标点。⚠️ **只认 ASCII 的三种** —— 转录里几乎不出现中文标点，
@@ -127,6 +143,23 @@ def build_questions(n: int, *, tag=lambda i: f"S{i + 1}") -> dict:
     return {f"S{i + 1}": {"type": "noul",
                           "instructions": INSTRUCTION.format(tag=tag(i))}
             for i in range(n)}
+
+
+def term_state(terms, *, course_title: str = "") -> str:
+    """候选词 → 术语闸门的 `state`。**纯函数。**
+
+    ⭐ 与 E2 实验的骨架逐字相同（`run_e2.py::one`），只有两处**必要**的差别：
+    - E2 每行尾随一句「真句」（`— lecture: "…"`）—— `live_terms` 抽取时没留句，
+      这也是官方 `jaggedness #5` 的口径（state 里只放判据要的东西）；**不造**。
+    - E2 是多课混批（每行带自己的 `[course: …]` 标签）；课上每轮只有**一节课**的词，
+      所以 `course_title` 一份，逐行照贴 —— "tagged with the course it came from" 不变。
+    """
+    head = ("These are candidate terms extracted from the raw transcripts of university "
+            "lectures. Each numbered line is one candidate term, tagged with the course "
+            "it came from.")
+    tag = f"  [course: {course_title}]" if course_title else ""
+    return head + "\n\n" + "\n".join(
+        f"S{i + 1}. {t}{tag}" for i, t in enumerate(terms or ()))
 
 
 def parse_answers(payload, n: int) -> list:
@@ -396,6 +429,51 @@ def ask_one(state: str, instruction: str, *, token_value: str = "",
         #    同 `atom._atom_flush` 那条「提不出来是少几条要点，不是课跑不下去」的写法。
         print(f"⚠ Jev 打分失败({type(e).__name__}: {str(e)[:60]})")
         return None
+
+
+def judge_terms(terms, *, course_title: str = "", timeout: float = 4.0,
+                token_value: str = "") -> list:
+    """候选词 → 每词一个 0–1 概率（`None` = 这次没拿到）。**绝不抛。**
+
+    ⭐ 课上候选词闸门（下游 `live_terms.JUDGE_MIN_P`）：问「一个一年级学生在这门课里
+       要不要解释这个词」—— 与 E2 实验的问法 A 逐字相同（`scratchpad/jev_exp/
+       report.md` §E2；102 条真候选 AUC 0.976）。
+
+    - 一批（≤ `CHUNK` = 20 题，键 `S1..Sn`）**一个请求**；批与批**串行** ——
+      课上每轮只有几条新词，正常就是 1 次；
+    - ⚠️ **没配 token → 全 `None`，一个请求都不发**（= 功能关着，同 `pick`）；
+    - ⚠️ 单批失败 → 只有那批全 `None`（**不许连坐**，同 `score`），而且要**出声**；
+    - `timeout` 给 `ask_commandcode` 的 socket 超时。⚠️ 这只是**第一道**；调用方
+      （`main.make_term_judge`）另有一道**硬截止**（另一条线程 + `future.result`）——
+      「定稿线程最多等几秒」由那道保证。
+    """
+    terms = list(terms or ())
+    out: list = [None] * len(terms)
+    if not terms:
+        return out
+    try:
+        tok = token_value or provider_token()
+    except Exception:                                         # noqa: BLE001
+        return out
+    if not tok:
+        return out
+    for lo in range(0, len(terms), CHUNK):
+        part = terms[lo:lo + CHUNK]
+        try:
+            # ⚠️ 键名必须是 `S1..Sn` 这种形状 —— `parse_answers` 只认这一套
+            #   （见 `ask_one` 那条实测：写成 `q1` 会被**静默跳过**，
+            #    表象是"闸门把假阳性全拦住了"—— 最难查的一类）。
+            qs = {f"S{i + 1}": {"type": "noul",
+                                "instructions": TERM_INSTRUCTION.format(tag=f"S{i + 1}")}
+                  for i in range(len(part))}
+            got = ask_commandcode(term_state(part, course_title=course_title),
+                                  qs, token=tok, timeout=timeout)
+            out[lo:lo + len(part)] = parse_answers(got, len(part))
+        except Exception as e:                                # noqa: BLE001
+            # fail-soft 是对的（课上少一刀），但**要出声** —— 「闸门坏了」不许看起来
+            # 像「闸门在正常工作」（同 `score` / `ask_one` 那条纪律）。
+            print(f"⚠ Jev 判术语失败({type(e).__name__}: {str(e)[:60]})")
+    return out
 
 
 def token(*, root=None) -> str:

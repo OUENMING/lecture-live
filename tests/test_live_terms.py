@@ -7,10 +7,13 @@
    · 与笔记侧同一套门（人名/常识词/作者删过）；
    · 池子大小有上限、截断**出声**。
 """
+import contextlib
+import io
 import os
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -123,6 +126,43 @@ class Extract(unittest.TestCase):
         got = lt.extract(finals("part of the story", "part of the problem"))
         self.assertNotIn("part of the", [t.lower() for t in got.terms])
         self.assertNotIn("of the", [t.lower() for t in got.terms])
+
+    # ---- 第五道门：注入式 `judge`（E2，2026-10-18）----
+    def test_术语判据_砍低分留高分(self):
+        """⭐ E2（`scratchpad/jev_exp/report.md` §E2）：`judge` 分数 < `JUDGE_MIN_P`
+        的词进 `rejected`（原因「判据：不像术语」），高分照留。"""
+        seen = finals("it costs forty Euro here", "another Euro again",
+                      "the shutdown price is low", "shutdown price again")
+        got = lt.extract(seen, verify=mats_yes,
+                         judge=lambda ts: [0.34 if t.lower() == "euro" else 0.9
+                                           for t in ts])
+        self.assertIn("shutdown price", got.terms, "真词被误伤")
+        self.assertNotIn("Euro", got.terms, "判据说不像术语的词没砍掉")
+        self.assertIn(("Euro", "判据：不像术语"), got.rejected)
+
+    def test_术语判据_没答的一律照留(self):
+        """`None` = "没答"（≠"答了 0"）：照留 —— 没配 token / 超时走的就是这条。"""
+        seen = finals("it costs forty Euro here", "another Euro again")
+        got = lt.extract(seen, verify=mats_yes, judge=lambda ts: [None] * len(ts))
+        self.assertIn("Euro", got.terms)
+        self.assertEqual([w for w, why in got.rejected if "不像术语" in why], [])
+
+    def test_术语判据_炸了照留(self):
+        """⚠️ 闸门坏了 = **没装闸门**：判据抛异常不许把候选词带走（fail-soft）。"""
+        def boom(_ts):
+            raise RuntimeError("judge down")
+        got = lt.extract(finals("it costs forty Euro here", "another Euro again"),
+                         verify=mats_yes, judge=boom)
+        self.assertIn("Euro", got.terms)
+
+    def test_术语判据_阈值边界是半开区间(self):
+        """`JUDGE_MIN_P` 的含义钉死：**低于** 0.35 砍、**等于** 0.35 留。
+        （0.35 = E2 里最贵的真垃圾 `Euro` 0.34 与最便宜的真词 0.51 之间。）"""
+        seen = finals("it costs forty Euro here", "another Euro again")
+        for p, kept in ((0.34, False), (lt.JUDGE_MIN_P, True)):
+            got = lt.extract(seen, verify=mats_yes,
+                             judge=lambda ts, p=p: [p] * len(ts))
+            self.assertEqual("Euro" in got.terms, kept, f"p={p} 的取舍不对")
 
     def test_上限截断有记账(self):
         # ⚠️ 两个坑都在这里避开了：`_WORD` 不认数字（`Alpha0`/`Alpha1` 会退化成同一个词），
@@ -302,6 +342,89 @@ class Wiring(unittest.TestCase):
     def test_没有池子就是空操作(self):
         import main as M
         self.assertEqual(M.live_terms_step(None, None, ["x"]), [])
+
+
+class 术语闸门(unittest.TestCase):
+    """⭐ E2（2026-10-18）：`main.make_term_judge` = **整节课的缓存 + 硬截止 + 记账**。
+
+    三个不变量：见过的词**一次都不重问**；超时 = 全当"没答"（词照留）但**不许超时**
+    （硬截止）；`CLASSLIVE_JEV_TERMS=0` = 不装闸门。判据是**注入的**（`ask=`），
+    全离线 —— 生产那条 `ask` 是 `keypoints.judge_terms`（`tests/test_keypoints.py` 钉它）。
+    """
+
+    def _judge(self, **kw):
+        import main as M
+        with mock.patch.dict(os.environ, {"CLASSLIVE_JEV_TERMS": "1"}):
+            return M.make_term_judge(course_title="ECON10770 X", **kw)
+
+    def test_缓存_见过的词一次都不重问(self):
+        asked = []
+
+        def ask(todo):
+            asked.append(list(todo))
+            return [0.9] * len(todo)
+        j = self._judge(ask=ask)
+        self.assertEqual(j(["Alpha Beta"]), [0.9])
+        self.assertEqual(j(["Alpha Beta"]), [0.9], "缓存没命中（两次分数不一样）")
+        self.assertEqual(asked, [["Alpha Beta"]], "第二次又问了一遍见过的词")
+
+    def test_超时_硬截止_词照留且出声(self):
+        """⚠️ 判据跑在定稿线程上：到点必须回来（实测：没有硬截止会等满判据）。"""
+        def slow(todo):
+            time.sleep(0.8)
+            return [0.01] * len(todo)
+        j = self._judge(timeout=0.05, ask=slow)
+        buf = io.StringIO()
+        t0 = time.monotonic()
+        with contextlib.redirect_stdout(buf):
+            got = j(["Alpha Beta"])
+        dt = time.monotonic() - t0
+        self.assertEqual(got, [None], "超时该当'没答'（照留），不许拿 0.01 当答案")
+        self.assertLess(dt, 0.7, f"没有硬截止（等了 {dt:.2f}s）")
+        self.assertIn("照留", buf.getvalue(), "超时了却一声不响")
+
+    def test_超时也进缓存_不重问(self):
+        calls = []
+
+        def slow(todo):
+            calls.append(list(todo))
+            time.sleep(0.8)
+            return [0.9] * len(todo)
+        j = self._judge(timeout=0.03, ask=slow)
+        with contextlib.redirect_stdout(io.StringIO()):
+            j(["Alpha Beta"])
+            j(["Alpha Beta"])
+        self.assertEqual(len(calls), 1, "超时的词被重问了（缓存没记没答）")
+
+    def test_环境变量0_完全不装(self):
+        import main as M
+        with mock.patch.dict(os.environ, {"CLASSLIVE_JEV_TERMS": "0"}):
+            self.assertIsNone(M.make_term_judge(course_title="X"),
+                              "CLASSLIVE_JEV_TERMS=0 该完全不装闸门")
+        with mock.patch.dict(os.environ, {"CLASSLIVE_JEV_TERMS": "yes"}):
+            self.assertIsNotNone(
+                M.make_term_judge(course_title="X", ask=lambda ts: [None] * len(ts)),
+                "只有明确的 \"0\" 才是关（坏值=开，同 `_env_limit`）")
+
+    def test_端到端_垃圾砍掉真词进池_第二轮不再问(self):
+        """接线点（`live_terms_step`）走一遍：垃圾不进池、真词进池；第二轮
+        `Euro` 还在当候选（它没进池）—— 判据**只许命中缓存**，不许再发请求。"""
+        import main as M
+        asked = []
+
+        def ask(todo):
+            asked.append(sorted(t.lower() for t in todo))
+            return [0.04 if t.lower() == "euro" else 0.9 for t in todo]
+        pool = lt.LivePool(step=1, verify=mats_yes, judge=self._judge(ask=ask))
+        lines = ["it costs forty Euro here", "another Euro again",
+                 "the shutdown price is low", "shutdown price again"]
+        got = M.live_terms_step(pool, None, finals(*lines))
+        self.assertEqual(got, ["shutdown price"], f"过门的词不对：{got}")
+        self.assertIn(("Euro", "判据：不像术语"), pool._rejected)
+        # 第二轮：又来一句（步长才走到）——`Euro` 仍是候选，只许命中缓存
+        got2 = M.live_terms_step(pool, None, finals(*lines, "and then the workshop ends"))
+        self.assertEqual(got2, [])
+        self.assertEqual(len(asked), 1, f"第二轮对见过的词又重新问了：{asked}")
 
 
 class 上限_按频次与新近度(unittest.TestCase):

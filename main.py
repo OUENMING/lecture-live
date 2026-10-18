@@ -13,7 +13,7 @@
   => 音频循环永不阻塞; 所有 UI 调用都在主线程(悬浮窗要求)
 """
 from __future__ import annotations
-import argparse, collections, datetime, os, pathlib, queue, re, shlex, sys, threading, time
+import argparse, collections, concurrent.futures, datetime, os, pathlib, queue, re, shlex, sys, threading, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from capture import load_source, SR, SilenceWatch
@@ -744,6 +744,11 @@ def live_terms_step(pool, router, finals) -> list:
     返回这次**新进池**的词（空列表 = 没到步长 / 没有新词）。**绝不抛** ——
     它跑在定稿线程里，是额外一层（同 `close()` 那八层的纪律）。
 
+    ⭐ 第五道门（Jev 术语闸门，可选）**在池子里面**跑：`LivePool(judge=…)` →
+    `extract(judge=…)`。它只对新候选**判一次**（按小写词缓存整节课）、有硬超时
+    （`JEV_TERMS_TIMEOUT`）；超时/出错 = 全当"没答"，词照留 —— 也就是**这里这层
+    `try` 之上还有两层各自的兜底**，任何一层的失败都退化到"没装闸门"。
+
     ⚠️ 单独一个函数而不是写进 `_emit`：`_emit` 有两百行、三条 `continue` 分支
        （纯转录 / 只英·校 / 翻译），接线点在四条路上都要走到；抽出来既能单测，
        也**只改一处**（那三条分支的尽头都是 `finals.append(...)`，见调用点）。
@@ -762,6 +767,97 @@ def live_terms_step(pool, router, finals) -> list:
         except Exception:                                      # noqa: BLE001
             pass
     return got
+
+
+#: 术语闸门一笔的**硬超时**（秒）。⚠️ 它跑在**定稿线程**上（`live_terms_step` 那条），
+#: 而这个线程每 25 句还要回去接着定稿 —— 宁可这一批判据全放弃（= 全当"没答"，词照留），
+#: 也不许让定稿等一次网络。
+#: ⭐ 4 s ≈ 官方实测一批 20 题 0.24–0.43 s（`keypoints` 模块头，2026-10-12）的 10 倍。
+JEV_TERMS_TIMEOUT = 4.0
+
+
+def _jev_terms_on() -> bool:
+    """`CLASSLIVE_JEV_TERMS=0` 关掉术语闸门（默认开）。⚠️ 坏值 = 开（同 `_env_limit`）。"""
+    return (os.environ.get("CLASSLIVE_JEV_TERMS") or "").strip() != "0"
+
+
+def _call_within(fn, timeout: float):
+    """`fn()` 在 `timeout` 秒内结束 → 结果；超时 / 抛 → `None`（**硬截止**）。
+
+    ⚠️ 判据跑在**一条单独的线程**上（`ThreadPoolExecutor`），调用线程到点就走 ——
+       `urlopen` 的 socket 超时管不了 DNS 那种"根本没到 socket"的挂起，
+       这道才管。`shutdown(wait=False)`：超时后**不 join** 还在飞的请求；
+       它自己的 socket 超时（`judge_terms(timeout=…)` 传下去的）会收拾它。
+    ⚠️ 判一批新建一个执行器：这是**每节课几次**的路径，不是热路径 ——
+       换来的是"超时线程不跨轮复用"的口径。
+    """
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        try:
+            return ex.submit(fn).result(timeout=timeout)
+        except Exception:                                     # noqa: BLE001
+            return None
+    finally:
+        ex.shutdown(wait=False)
+
+
+def make_term_judge(*, course_title: str = "", timeout: float = JEV_TERMS_TIMEOUT,
+                    ask=None):
+    """造「术语闸门」judge（`terms -> [0–1 | None]`）给 `LivePool(judge=…)`。**绝不抛。**
+
+    三层，每层都能单独坏、坏了都退化到"没装闸门"（词照收）：
+
+    1. **缓存**（按小写词，整节课）：判过的词（含判成 `None` 的）**一次都不重问** ——
+       被砍的词下轮会**又**被抽出来（它没进池子），没有这一格就是每 25 句重问一遍
+       同一批垃圾、每轮白花一次请求；
+    2. **硬截止**（`timeout`，见 `_call_within`）：定稿线程最多等 `timeout` 秒；
+    3. `ask` **注入**（默认现取 `keypoints.judge_terms`）：判据传个假的就能离线跑。
+
+    ⚠️ **绝不静默**：超时 / 出错 → 全当"没答"，同时打一行 ⚠（「闸门坏了」不许看起来
+       像「闸门把垃圾全拦住了」）；成功也记一行账（「数调用」）。
+    ⚠️ 没配 Jev token 时也发不出请求（`keypoints` 那边挡的：全 `None`、零请求）——
+       这一层不需要知道 token 的事。
+    ⚠️ `CLASSLIVE_JEV_TERMS=0` → **返回 `None`**（= 不装闸门，与装它之前逐字一样）。
+    """
+    if not _jev_terms_on():
+        return None
+    cache: dict = {}
+    stats = {"calls": 0}                # 实际送出去的批数（每批 ≤ 20 题 = 1 请求）
+
+    def _ask(todo):
+        if ask is not None:
+            return ask(todo)
+        import keypoints as _kp
+        return _kp.judge_terms(todo, course_title=course_title, timeout=timeout)
+
+    def judge(terms) -> list:
+        words = [str(t) for t in (terms or ())]
+        keys = [w.lower() for w in words]
+        todo, todo_keys = [], set()
+        for w, k in zip(words, keys):
+            if k not in cache and k not in todo_keys:       # 同一批里重样的也只问一次
+                todo.append(w)
+                todo_keys.add(k)
+        if todo:
+            stats["calls"] += 1
+            got = _call_within(lambda: _ask(todo), timeout)
+            if got is None:
+                echo(f"⚠ 术语闸门：{timeout:g}s 内没拿到（超时/出错）"
+                     f" —— 这 {len(todo)} 个词照留")
+                got = [None] * len(todo)
+            else:
+                echo(f"💬 术语闸门：Jev 判了 {len(todo)} 个候选词"
+                     f"（本课第 {stats['calls']} 批）")
+            got = list(got)
+            for i, w in enumerate(todo):
+                p = got[i] if i < len(got) else None
+                try:
+                    cache[w.lower()] = None if p is None else float(p)
+                except (TypeError, ValueError):
+                    cache[w.lower()] = None
+        return [cache.get(k) for k in keys]
+
+    return judge
 
 
 class TerminalUI:
@@ -1616,6 +1712,9 @@ def run(args) -> None:
     #    ⚠️ **不碰 Soniox**：它的 context 是会话开始时定的，改要重开会话（`live_terms`
     #       文件头有查证），所以这一课的词只靠 `glossary/<课号>.txt` 在**下节课**带上。
     #    ⚠️ 建不起来 / 抽不到词都**只影响术语召回**，绝不挡开课（同 `extra_terms` 那条）。
+    #    ⭐ 第五道门（E2，2026-10-18）：`make_term_judge` 造的 Jev 判据（**缓存 + 硬超时
+    #       + 记账**）从 `judge=` 进池子 —— 只对**新候选**判、判过的不重问；判据没配 /
+    #       超时 / 出错都退化成"没装闸门"（词照收）。见 `make_term_judge` 的说明。
     live_pool = None
     if args.course and vault:
         try:
@@ -1626,9 +1725,20 @@ def run(args) -> None:
                 import materials as _mt
                 return _mt.Materials.for_course(_v, _c).verify
 
+            _judge = None
+            try:
+                from translator import course_title as _course_title
+                _judge = make_term_judge(
+                    course_title=_course_title(args.glossary, args.course))
+            except Exception as _e:                   # noqa: BLE001
+                # ⚠️ **单算一块**：闸门没建起来（比如术语表编码坏了）只少一刀，
+                #    不能让上面那个 `try` 把整个池子带走。
+                print(f"⚠ 术语闸门没建起来（只少一道候选词判据）："
+                      f"{type(_e).__name__}: {_e}")
             live_pool = _lt.LivePool(
                 initial=extra_terms, verify_factory=_verify_factory,
-                deleted=_ng.deleted_terms(args.course, glossary_txt=args.glossary))
+                deleted=_ng.deleted_terms(args.course, glossary_txt=args.glossary),
+                judge=_judge)
         except Exception as _e:                       # noqa: BLE001
             print(f"⚠ 课上候选词池没建起来（只影响术语召回）：{type(_e).__name__}: {_e}")
     if vault:
@@ -2563,6 +2673,8 @@ def run(args) -> None:
         #    ⚠️ 放在**循环之后**而不是每句后面：`finals` 只增不减，一轮喂一次结果一样，
         #       却只要一处调用点（三条 `continue` 分支各写一遍迟早漏一处）。
         #    ⚠️ 步长在池子里（`live_terms.STEP_SENTENCES`）：没到就立刻返回，零开销。
+        #    ⚠️ 术语闸门（Jev，可选）在**这一步里面**（池子自己判新候选）：本线程
+        #       最多为它多等 `JEV_TERMS_TIMEOUT` 秒（硬截止）；超时 = 词照收。
         _new_terms = live_terms_step(live_pool, translator, finals)
         if _new_terms:
             echo(f"💬 本课候选词 +{len(_new_terms)}：{' · '.join(_new_terms[:6])}"

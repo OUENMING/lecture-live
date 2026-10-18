@@ -1642,6 +1642,191 @@ check("⭐⭐ F8 开机钩子排在 `from capture import …` **之前**（认 j
       f"hook={_i_hook} first_app_import={_i_app} "
       f"node={type(_tree_main.body[_i_hook]).__name__ if _i_hook >= 0 else '?'}")
 
+# ======================= F9. 修（repair）判据 = 一个纯函数（2026-10-18 审查）=======
+# D2/D3/D4/D20/D22/D23 全挤在原 `repair_interrupted_apply` 的分支里（互相纠缠、没法逐行
+# 验）。现在判据搬进 `update._decide_repair()`（纯函数、无 I/O）—— 这里**逐行**表驱动，
+# 外加几个真跑 git 的集成现场。
+print("\nF9. 修（repair）判据：纯函数逐行 + 真现场\n")
+
+
+def _dplan(**kw):
+    base = dict(head_now="H", head_before="H", target="T", ancestor=True,
+                dirty=set(), changed={"a"}, dirty_matches_target=True,
+                untracked_in_way=set(), had_lock=True, mine_lock=True,
+                repair_failed=False)
+    base.update(kw)
+    return update._decide_repair(**base)
+
+
+# ⚠️ 每一行的"变异验证"：把 `_decide_repair` 里对应那条分支删掉/改向 -> 该行红。
+_rows = [
+    # (说明, kwargs, 期望 action, 期望 rm_lock)
+    ("HEAD 已在 target -> 只撤 journal，**绝不碰锁**（D22）",
+     dict(head_now="T", had_lock=True), update.R_DONE, False),
+    ("HEAD 两边都不是 -> 只撤 journal", dict(head_now="X"), update.R_OTHER, False),
+    ("不是快进（分叉）-> 不动工作区", dict(ancestor=False), update.R_DIVERGED, False),
+    ("`git diff HEAD` 失败（dirty=None）-> fail closed（D4）",
+     dict(dirty=None), update.R_LEAVE, False),
+    ("`git diff head..target` 失败（changed=None）-> fail closed",
+     dict(changed=None), update.R_LEAVE, False),
+    ("查不出挡路文件（None）-> fail closed", dict(untracked_in_way=None),
+     update.R_LEAVE, False),
+    ("上次动手后失败过、这次又没脏 -> 不敢说干净（D20）",
+     dict(repair_failed=True, dirty=set()), update.R_LEAVE, False),
+    ("本次要换的路径一个都不脏 -> 干净（工作区没写过）",
+     dict(dirty=set()), update.R_CLEAN, False),
+    ("**没有锁**但工作区已等于 target -> 照样补完（D23②）",
+     dict(dirty={"a"}, changed={"a"}, had_lock=False), update.R_FINISH, False),
+    ("有锁 + 脏⊆changed + 内容=target -> 补完、删锁",
+     dict(dirty={"a"}, changed={"a"}, had_lock=True, mine_lock=True),
+     update.R_FINISH, True),
+    ("有锁 + 内容≠target（写了一半/混着用户改动）-> 备份+回滚",
+     dict(dirty={"a"}, changed={"a", "b"}, dirty_matches_target=False,
+          had_lock=True, mine_lock=True), update.R_ROLLBACK, True),
+    ("**没锁** + 内容≠target -> 那是用户自己改的，一个字节不动（D23①/F3）",
+     dict(dirty={"a"}, changed={"a"}, dirty_matches_target=False,
+          had_lock=False), update.R_CLEAN, False),
+    ("脏的与本次要换的**没有交集** -> 干净、不 checkout（D3：空 pathspec 会 fatal）",
+     dict(dirty={"a"}, changed={"b"}), update.R_CLEAN, False),
+    ("补完时把挡路的未跟踪文件带上备份（D2）",
+     dict(dirty={"a"}, changed={"a"}, untracked_in_way={"z"}, had_lock=True),
+     update.R_FINISH, True),
+    ("没抢到 update.lock（mine_lock=False）-> 不删锁",
+     dict(dirty={"a"}, changed={"a"}, had_lock=True, mine_lock=False),
+     update.R_FINISH, False),
+]
+for _desc, _kw, _act, _lock in _rows:
+    _p = _dplan(**_kw)
+    check(f"F9 判据：{_desc}",
+          _p["action"] == _act and _p["rm_lock"] == _lock,
+          f"得 {_p['action']}/rm_lock={_p['rm_lock']}，期望 {_act}/{_lock}")
+check("F9 D2：补完时备份清单里带着挡路的未跟踪文件",
+      _dplan(dirty={"a"}, changed={"a"}, untracked_in_way={"z"})["backup"] == ["z"])
+check("F9 D3：回滚清单 = 脏 ∩ changed（不含用户的无关改动）",
+      _dplan(dirty={"a", "q"}, changed={"a", "b"}, dirty_matches_target=False,
+             had_lock=True)["roll"] == ["a"])
+
+# ⚠️ D4 的关键实现：**git 查询失败必须返回 `None`**（返回空集 = fail open）。
+_orig_raw = update._git_raw
+
+
+def _boom_raw(*a, **k):
+    return 128, b"", "boom"
+
+
+update._git_raw = _boom_raw
+try:
+    _d4 = update._dirty_tracked()
+    _c4 = update._changed_paths("H", "T")
+    _u4 = update._untracked_in_way({"a"})
+finally:
+    update._git_raw = _orig_raw
+check("F9 D4 git 查询失败 -> `None`（不是空集；空集会让判据 fail open 去 reset）",
+      _d4 is None and _c4 is None and _u4 is None, f"{_d4} {_c4} {_u4}")
+
+# ---- 集成：D22 HEAD 已在 target 时**不许**碰别人的 index.lock ----
+_tmpD22, _seedD22, _cloneD22 = new_world()
+_fetch(_cloneD22)
+_hb22, _tg22 = _sha(_cloneD22), _sha(_cloneD22, "@{u}")
+# 先把 HEAD 挪到 target（模拟"那次 pull 已经跑完"），再摆一个锁 + journal
+sh("git", "reset", "--hard", _tg22, cwd=_cloneD22)
+update._write_apply_journal(_hb22, _tg22)
+(_cloneD22 / ".git" / "index.lock").write_text("foreign", encoding="utf-8")
+# ⚠️ 变异验证：把 `R_DONE` 分支里的 `_rm_stale_index_lock()` 加回来 -> 这条红（锁被删）。
+_r22 = update.repair_interrupted_apply()
+_l22 = _cloneD22 / ".git" / "index.lock"
+_l22_txt = _l22.read_text(encoding="utf-8") if _l22.exists() else "<被删了>"
+check("F9 D22 HEAD 已在 target -> 撤 journal 但**不动** index.lock（可能就是别人的）",
+      _r22["repaired"] and not update.apply_journal_path().exists()
+      and _l22_txt == "foreign", f"{_r22} lock={_l22_txt!r}")
+(_cloneD22 / ".git" / "index.lock").unlink(missing_ok=True)
+
+# ---- 集成：D3 脏的与本次要换的没有交集 -> 干净收场（原来 checkout 空 pathspec fatal）----
+_tmpD3, _seedD3, _cloneD3 = new_world()
+_big_release(_seedD3)
+_fetch(_cloneD3)
+_hb3, _tg3 = _sha(_cloneD3), _sha(_cloneD3, "@{u}")
+update._write_apply_journal(_hb3, _tg3)
+(_cloneD3 / "requirements.txt").write_text("numpy>=2.0\n# 用户自己改的\n", encoding="utf-8")
+(_cloneD3 / ".git" / "index.lock").write_text("", encoding="utf-8")
+# ⚠️ 变异验证：把 `if not roll: return R_CLEAN` 删掉 -> 这条红（`git checkout head --` 空
+#    pathspec -> fatal -> ok=False 且 journal 留着 —— 正是 D3）。
+_r3 = update.repair_interrupted_apply()
+check("F9 D3 脏的与本次无关 -> 干净收场、用户改动逐字还在、journal 撤掉",
+      _r3["repaired"] and _r3["action"] == "上次没换成（干净）—— 工作区没动"
+      and (_cloneD3 / "requirements.txt").read_text() == "numpy>=2.0\n# 用户自己改的\n"
+      and not update.apply_journal_path().exists(), str(_r3))
+(_cloneD3 / ".git" / "index.lock").unlink(missing_ok=True)
+
+# ---- 集成：D23② 没有 index.lock，但工作区内容已等于 target -> 照样补完 ----
+_tmpD23, _seedD23, _cloneD23 = new_world()
+_big_release(_seedD23)
+_fetch(_cloneD23)
+_hb23, _tg23 = _sha(_cloneD23), _sha(_cloneD23, "@{u}")
+update._write_apply_journal(_hb23, _tg23)
+_half_swap(_cloneD23, _seedD23, ["VERSION"], lock=False)      # 写完、但锁已释放
+# ⚠️ 变异验证：把"内容比对"那条 FINISH 判据删掉（只看锁）-> 这条红（判成干净、树半新）。
+_r23 = update.repair_interrupted_apply()
+check("F9 D23② 没锁但树已等于 target -> 补完（不只信 index.lock）",
+      _r23["repaired"] and _sha(_cloneD23) == _tg23
+      and (_cloneD23 / "VERSION").read_text().strip() == "0.0.2"
+      and not sh("git", "status", "--porcelain", cwd=_cloneD23), str(_r23))
+
+# ---- 集成：D2 reset 前把挡路的未跟踪文件**备份**下来 ----
+_tmpD2, _seedD2, _cloneD2 = new_world()
+_big_release(_seedD2)
+_fetch(_cloneD2)
+_hbD2, _tgD2 = _sha(_cloneD2), _sha(_cloneD2, "@{u}")
+update._write_apply_journal(_hbD2, _tgD2)
+_half_swap(_cloneD2, _seedD2, ["VERSION"], lock=True)          # 半个换 + 锁
+(_cloneD2 / "extra.py").write_text("# 用户自己放的同名文件\n", encoding="utf-8")
+# ⚠️ 变异验证：把 `backup=sorted(untracked_in_way)` 去掉 -> 这条红（用户文件被静默删掉）。
+_rD2 = update.repair_interrupted_apply()
+_bdir = pathlib.Path(_rD2.get("backup_dir") or "")
+_bk = list(_bdir.rglob("extra.py")) if str(_bdir) and _bdir.exists() else []
+check("F9 D2 补完前把挡路的未跟踪文件备份了（不是静默删掉）",
+      _rD2["repaired"] and _bk
+      and _bk[0].read_text() == "# 用户自己放的同名文件\n"
+      and (_cloneD2 / "extra.py").read_text() != "# 用户自己放的同名文件\n",
+      f"{_rD2.get('backup_dir')} bk={_bk}")
+
+# ---- 集成：D19 `pull()` 在 journal→pull 这段**必须持 update.lock** ----
+_tmpD19, _seedD19, _cloneD19 = new_world()
+_big_release(_seedD19)
+_fetch(_cloneD19)
+_saved_mine = update._LOCK_MINE
+update._LOCK_MINE = False
+update.STATE_DIR.mkdir(parents=True, exist_ok=True)
+_fk = update.STATE_DIR / "update.lock"
+_fk.write_text("999999", encoding="utf-8")                     # 别人正拿着（新鲜）
+update._rm_journal(update.apply_journal_path())
+try:
+    _r19 = update.pull()
+finally:
+    update._LOCK_MINE = _saved_mine
+# ⚠️ 变异验证：把 `pull()` 里那段 `_acquire_lock()` 去掉 -> 这条红
+#    （它照样写 journal、跑 git pull、更新装上了 —— 与另一个更新器并发换代码）。
+check("F9 D19 没抢到锁 -> `pull()` 在写 journal 前就停手（不并发换代码）",
+      (not _r19["ok"]) and _r19.get("blocked")
+      and not update.apply_journal_path().exists()
+      and (_cloneD19 / "VERSION").read_text().strip() == "0.0.1"
+      and _fk.read_text() == "999999", str(_r19)[:140])
+_fk.unlink(missing_ok=True)
+
+# ---- 集成：D20 上次动手失败过 -> 这次保留 journal、一个字节不动 ----
+_tmpD20, _seedD20, _cloneD20 = new_world()
+_big_release(_seedD20)
+_fetch(_cloneD20)
+_hb20, _tg20 = _sha(_cloneD20), _sha(_cloneD20, "@{u}")
+update._write_apply_journal(_hb20, _tg20)
+update._mark_repair_failed(update.apply_journal_path())        # 记一笔"上次动手后失败"
+_r20 = update.repair_interrupted_apply()
+check("F9 D20 journal 里有 repair_failed + 工作区干净 -> 保留 journal（不当成干净）",
+      (not _r20["ok"]) and _r20.get("skipped")
+      and update.apply_journal_path().exists()
+      and (_cloneD20 / "VERSION").read_text().strip() == "0.0.1", str(_r20))
+update._rm_journal(update.apply_journal_path())
+
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}")

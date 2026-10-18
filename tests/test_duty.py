@@ -319,6 +319,23 @@ class ReminderScript(unittest.TestCase):
         # ⚠️ 日期按分量设（不是 date "…"，那个会被区域设置解析成别的日子）
         self.assertIn("set day of theDate to dDay", duty.SCRIPT)
 
+    def test_设月份前先把_day_归_1(self):
+        """⭐ DB 审查 D-0：AppleScript 的分量赋值顺序陷阱 —— `set month` 时若 day 比
+        目标月长会**溢出进下个月**（今天 31 号、目标 2 月 → 3/1），整条提醒的日期错。
+        正确顺序：day=1 → year → month → day。
+
+        ⚠️ 这条只能**结构断言**：真跑要 osascript + 真的往「提醒事项」里写（判据不许
+        碰用户的真数据），而 `current date` 的 day 由运行日决定，造不出稳定的红。
+        """
+        s = duty.SCRIPT
+        i_reset = s.index("set day of theDate to 1")      # 先归 1
+        i_year = s.index("set year of theDate to dYear")
+        i_month = s.index("set month of theDate to dMonth")
+        i_day = s.index("set day of theDate to dDay")
+        self.assertLess(i_reset, i_year, "先把 day 归 1 再设 year")
+        self.assertLess(i_year, i_month, "year 要在 month 之前")
+        self.assertLess(i_month, i_day, "day 在最后设")
+
     def test_参数形状(self):
         item = {"title": "交作业", "quote": "Hand in your essay tomorrow.",
                 "t": "13:52:56", "date": "2026-10-13", "time": "", "inferred": True,

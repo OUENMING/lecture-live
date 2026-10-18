@@ -339,6 +339,11 @@ SCRIPT = """on run argv
     end if
     set l to list tList
     set theDate to current date
+    -- ⚠️ DB 审查 D-0：**必须先把 day 归 1，再设 year/month/day**。AppleScript 的日期
+    --    分量赋值有经典陷阱：若当前 day（"今天"）比目标月长，`set month` 会溢出进下个月
+    --    （1/31 → 设 2 月 → 3/1），日期就错了/整条写不进去。归 1 之后溢出不可能发生。
+    --    （macscripter 的 setDate 讨论：day<29 → year → month → day 是唯一稳的顺序。）
+    set day of theDate to 1
     set year of theDate to dYear
     set month of theDate to dMonth
     set day of theDate to dDay

@@ -549,8 +549,14 @@ def card_title(r: courses.Readiness) -> str:
 _CJK_PARENS = re.compile(r"\s*\(([^()]*[\u3400-\u9fff][^()]*)\)")
 
 
+#: 卡片标题里课名的白字 alpha（比次要文字 DIM 0.62 实一档：课名要读得清，只是让课号先跳出来）。
+TITLE_NAME_ALPHA = 0.74
+
+
 def _style_title(label, course: str) -> None:
-    """卡片标题：课号降一档（次要色、常规字重），课名保持粗白 —— 两样原来同色同重挤在一行。
+    """卡片标题：课号粗白（高亮），课名降一档（次要色、常规字重）—— 两样原来同色同重挤在一行。
+
+    ⭐ 2026-10-18 作者改：原来是课号降一档、课名粗白；选课时先认课号，反过来。
 
     只改外观：`stringValue()` 还是 `card_title(r)` 原文（阅读顺序判据靠它）。失败就保持原样。
     """
@@ -565,12 +571,12 @@ def _style_title(label, course: str) -> None:
         para = NSMutableParagraphStyle.alloc().init()
         para.setLineBreakMode_(NSLineBreakByTruncatingTail)
         s = NSMutableAttributedString.alloc().initWithString_attributes_(text, {
-            NSFontAttributeName: NSFont.boldSystemFontOfSize_(13.0),
-            NSForegroundColorAttributeName: NSColor.whiteColor(),
+            NSFontAttributeName: NSFont.systemFontOfSize_(13.0),
+            NSForegroundColorAttributeName: NSColor.whiteColor().colorWithAlphaComponent_(TITLE_NAME_ALPHA),
             NSParagraphStyleAttributeName: para})
         s.addAttributes_range_({
-            NSFontAttributeName: NSFont.systemFontOfSize_(13.0),
-            NSForegroundColorAttributeName: NSColor.whiteColor().colorWithAlphaComponent_(DIM)},
+            NSFontAttributeName: NSFont.boldSystemFontOfSize_(13.0),
+            NSForegroundColorAttributeName: NSColor.whiteColor()},
             (0, len(course)))
         label.setAttributedStringValue_(s)
     except Exception:                                     # noqa: BLE001

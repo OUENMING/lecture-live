@@ -838,11 +838,16 @@ def t_gave_up_hint():
 # ---------------------------------------------------------------- 3.10：笔记那一步的补生成
 
 def _journal_fixture(d, stem, *, note="pending", note_file="", h1="# ECON10790 · 2026-10-14 · 实时会话日志\n\n",
-                     body="> [!abstract] 10:00:00\n> hello world\n\n"):
-    """造一节课的现场：会话文件 + `.pending.json`（journal）。返回 `(sess, mk)`。"""
+                     body="> [!abstract] 10:00:00\n> hello world\n\n",
+                     tail=".pending.json"):
+    """造一节课的现场：会话文件 + 残局 journal。返回 `(sess, mk)`。
+
+    `tail` 给 `.pending.json`（默认）或 `.recovered.json` —— 后者是 `recover_pending`
+    处理完改成的那名字，补笔记**必须也认它**（D25）。
+    """
     sess = pathlib.Path(d) / (stem + ".md")
     sess.write_text(h1 + body, encoding="utf-8")
-    mk = pathlib.Path(d) / (stem + ".pending.json")
+    mk = pathlib.Path(d) / (stem + tail)
     steps = {"transcode": "done", "report": "pending", "upload": "pending", "note": note}
     mk.write_text(__import__("json").dumps(
         {"stem": stem, "started": "x", "steps": steps, **({"note_file": note_file}
@@ -876,6 +881,30 @@ def t_note_resume_noop():
         r2 = main.resume_pending_notes(d, online=lambda: True,
                                        rebuild=lambda *a, **k: {"ok": True})
         assert r2["found"] == 0, r2
+
+
+@case("⭐⭐ D25 残局已改名成 `.recovered.json` -> 补笔记**照样扫到**（默认配置下不再空转）")
+def t_note_resume_recovered_tail():
+    with tempfile.TemporaryDirectory() as d:
+        # ⚠️ 现场：`recover_pending` 已把 `.pending.json` 改名成 `.recovered.json`
+        #    （音频全是 opus 时是**同步改名**），note 仍欠着。旧的 glob 只认前者。
+        _sess, mk = _journal_fixture(d, "2026-10-14_160000_ECON10790",
+                                     tail=".recovered.json")
+        out_note = pathlib.Path(d) / "Lectures" / "2026-10-14_160000_ECON10790.md"
+        out_note.parent.mkdir()
+        seen = []
+
+        def _fake_rebuild(sess, *, log=None, **k):
+            seen.append(str(sess))
+            out_note.write_text("note", encoding="utf-8")
+            return {"ok": True, "note": str(out_note), "error": ""}
+
+        r = main.resume_pending_notes(d, online=lambda: True, rebuild=_fake_rebuild)
+        # ⚠️ 变异验证：`main.resume_pending_notes` 的 glob 改回只认 `PENDING_TAIL`
+        #    -> found==0、一个都不补（D25 的原症状）。
+        assert r["found"] == 1 and r["attempted"] == 1 and seen, (r, seen)
+        _wait(lambda: _journal_steps(mk).get("note") == "done")
+        assert _journal_steps(mk)["note"] == "done", _journal_steps(mk)
 
 
 @case("⭐⭐ `note_file` 记着、文件也在 -> 记 done，不重建")

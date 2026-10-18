@@ -1123,9 +1123,18 @@ def main() -> int:
         #    会**把标记重新写出来**（下次启动又"恢复"一节收过尾的课）-> 这条红。
         _t23c.journal_upload_done()
         _t23c.journal_upload_done()                # 幂等：不许复活
-        check("⭐⭐ 上传排完 -> 撤掉 journal；再调一次也**不许复活**",
+        check("⭐⭐ 上传排完 -> 撤掉 `.pending.json`；再调一次也**不许复活**",
               not (_d23 / ("fin" + tm.upload_mod.PENDING_TAIL)).exists()
               and _t23c._pending_marker is None,
+              str([p.name for p in _d23.glob("fin.*")]))
+        # ⭐⭐ 2026-10-18 审查 D27：笔记还欠着（这一节 `note` 仍是 pending）-> journal
+        #    必须**改名留住**（`.recovered.json`），不然补笔记那边永远扫不到。
+        #    ⚠️ 不留 `.pending.json`：那会让 `recover_pending` 把已排过上传的这节重复入队。
+        check("⭐⭐ D27 笔记没写成 -> 改名为 `.recovered.json` 留作残局（不是删掉）",
+              (_d23 / "fin.recovered.json").exists()
+              and _json2.loads((_d23 / "fin.recovered.json")
+                               .read_text(encoding="utf-8")
+                               ).get("steps", {}).get("note") == "pending",
               str([p.name for p in _d23.glob("fin.*")]))
     finally:
         _sh.rmtree(_d23, ignore_errors=True)

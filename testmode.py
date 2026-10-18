@@ -1393,13 +1393,30 @@ class TestSession:
            音频与报告永远不上传。现在标记活到"上传已排队"这一刻。
         ⚠️ 幂等：上传关着（`CLASSLIVE_UPLOAD=0`）时 `finish()` 已经删过 ——
            这里 `_pending_marker is None` 直接返回。
+        ⭐⭐ 3.10（2026-10-18 审查 D27）：**笔记那一步还没写成时不删，改名留成残局**
+           —— 否则「收尾时 `writer.close()` 失败（磁盘满 / vault 写不进 / 精修崩）→
+           `note` 仍 pending」这一格**永远没人接**（补笔记那边再也扫不到）。
+           ⚠️ 改名成 `.recovered.json`（**不是**留着 `.pending.json`）：后者会让
+              `recover_pending` 把**已经排过上传**的这节重新入队 → 重复上传
+              （`enqueue` 只按队列内 key 去重、不查台账）。
+           ⚠️ `resume_pending_notes` 也认这个后缀（`upload.RESIDUAL_TAILS`）。
         """
         self._journal(steps={"upload": "done"})
         mk = getattr(self, "_pending_marker", None)
         if mk is None:
             return
         try:
-            mk.unlink(missing_ok=True)
+            _steps = (journal_read(mk).get("steps") or {})
+        except Exception:                                     # noqa: BLE001
+            _steps = {}
+        try:
+            if _steps.get("note") != "done":
+                # 残局：欠笔记。改个名留在盘上，等下次启动 `resume_pending_notes` 来补。
+                mk = pathlib.Path(mk)
+                mk.replace(mk.with_name(mk.name.replace(upload_mod.PENDING_TAIL,
+                                                        upload_mod.RECOVERED_TAIL)))
+            else:
+                mk.unlink(missing_ok=True)
         except OSError:
             pass
         self._pending_marker = None

@@ -570,19 +570,22 @@ def resume_pending_notes(sessions_dir, *, online=None, rebuild=None, log=None) -
         sd = pathlib.Path(sessions_dir)
         if not sd.is_dir():
             return out
-        marks = sorted(sd.glob("*" + _upmod.PENDING_TAIL))
+        # ⚠️⚠️ **两种残局名字都收**（2026-10-18 审查 D25）：上面那条 `recover_pending`
+        #    会把 `.pending.json` **改名**成 `.recovered.json`，排在它后面的这里只认
+        #    `.pending.json` 的话**永远扫不到** —— 正好只在"不需要补传"的配置下有效。
+        #    `residual_journals` 是那份命名规则的唯一定义点。
+        marks = _upmod.residual_journals(sd)
     except Exception:                                     # noqa: BLE001
         return out
     on = online or (lambda: _tm.net_type() != "none")
     rb = rebuild or rebuild_note_for
-    for mk in marks:
+    for mk, stem in marks:
         try:
             j = _tm.journal_read(mk)
             steps = j.get("steps") or {}
             if steps.get("note") != "pending":
                 continue
             out["found"] += 1
-            stem = mk.name[: -len(_upmod.PENDING_TAIL)]
             sess = sd / (stem + ".md")
             nf = str(j.get("note_file") or "")
             if nf and pathlib.Path(nf).is_file():
@@ -2113,11 +2116,16 @@ def run(args) -> None:
         import upload as _upmod
         import obsidian_writer as _owmod
         import upload_endpoint as _uemod
+        # ⭐⚠️ **先把共享队列拿出来，交给 `recover_pending` 用**（2026-10-18 审查 D6）：
+        #    它内部要是自己 `new` 一份 `UploadQueue`，两个实例各有一份 `_items` 内存副本、
+        #    各一把 `_lock`，却写**同一个**队列文件 —— 那把锁保护不到跨实例的写。主线程
+        #    下面那次 `pump` 与后台的 `_resume_transcode` 必须和这里**同一个实例**。
+        _q = _shared_upload_queue()
         _r = _upmod.recover_pending(
-            _owmod.SESSIONS, _upmod.make_http_send(_uemod.endpoint(), _uemod.token()),
+            _owmod.SESSIONS,
             # ⭐ 3.10：残段**先转码再排**（后台）—— 崩溃补传也走 opus
             #    （一段 600 s：1.7 MB vs 19 MB）。转不成就原样传 wav。
-            transcode=transcode_one)
+            transcode=transcode_one, queue=_q)
         if _r.get("queued"):
             echo(f"📤 发现上次没收尾的测试课 {_r['found']} 节"
                  f" —— 已把已录到的部分排进上传队列（带 crash_recovered 标记）")
@@ -2137,7 +2145,8 @@ def run(args) -> None:
         #    ⚠️ 丢后台线程，**不阻塞启动**。
         #    ⚠️⚠️ **上传关着就别推**（`CLASSLIVE_UPLOAD=0`）—— 判据/离线跑全靠它
         #       （`_upmod.upload_enabled()` 是唯一定义点，不许各写一份 env 判断）。
-        _q = _shared_upload_queue()          # ⚠️ 与收尾那条路**同一个实例**（审查 F25）
+        # ⚠️ `_q` 就是上面交给 `recover_pending` 的那一份实例（2026-10-18 审查 D6）——
+        #    同一条队列、同一把锁。
         if _q.pending and _upmod.upload_enabled():
             _pn = _q.pending
             threading.Thread(target=lambda: _q.pump(max_items=_pn), daemon=True,

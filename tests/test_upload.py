@@ -502,6 +502,92 @@ def main() -> int:
         check("⭐ `upload_enabled()`：`1` 与**不设**都算开（默认就是开）",
               _on1 is True and _on2 is True)
 
+        print("\n--- T19 ⭐⭐ 2026-10-18 审查 D6/D7/D16 ---")
+        # D16: 条目已按 key 立好（只排了 meta），随后补上的 opus 曾被 key 去重丢掉
+        _rs4 = tmp / "sess4"
+        _rs4.mkdir()
+        _stem4 = "2026-10-18_160000_CRASHED4"
+        (_rs4 / f"{_stem4}.001.opus").write_bytes(b"OggS" + b"\0" * 8 + b"OpusHead" + b"\0" * 8)
+        _pre_meta = _rs4 / f"{_stem4}.meta.json"
+        _pre_meta.write_text("{}", encoding="utf-8")
+        _root7 = tmp / "cl9"
+        _qp = upload.UploadQueue(lambda *a: True, root=_root7, now=lambda: _now[0])
+        _qp.enqueue([_pre_meta], _stem4)                 # 上一次已把这条立起来（只排了 meta）
+        (_rs4 / f"{_stem4}{upload.PENDING_TAIL}").write_text(
+            json.dumps({"steps": {"transcode": "pending"}}), encoding="utf-8")
+        _su4 = os.environ.get("CLASSLIVE_UPLOAD")
+        os.environ["CLASSLIVE_UPLOAD"] = "1"
+        try:
+            _r4 = upload.recover_pending(_rs4, lambda l, k: False, root=_root7,
+                                         now=lambda: _now[0])
+        finally:
+            if _su4 is None:
+                os.environ.pop("CLASSLIVE_UPLOAD", None)
+            else:
+                os.environ["CLASSLIVE_UPLOAD"] = _su4
+        _q4 = upload.UploadQueue(lambda *a: True, root=_root7, now=lambda: _now[0])
+        _names4 = [pathlib.Path(f).name for i in _q4.items() for f in i["files"]]
+        # ⚠️ 变异验证：`recover_pending` 里 `q.add_files` 改回 `q.enqueue` -> 这条红
+        #    （key 命中 -> 返回 0，那段 opus 永远排不进去）。
+        check("⭐⭐ D16 条目已在也把新 opus **并进同一条**（key 去重不许丢文件）",
+              _q4.pending == 1 and f"{_stem4}.001.opus" in _names4 and _r4["queued"] >= 1,
+              f"queued={_r4['queued']} pending={_q4.pending} names={_names4}")
+
+        # D6: 传进来的那**一份**实例必须就是被收进的实例（跨线程同一把锁）
+        _rs5 = tmp / "sess5"
+        _rs5.mkdir()
+        _stem5 = "2026-10-18_160000_CRASHED5"
+        (_rs5 / f"{_stem5}.001.opus").write_bytes(b"OggS" + b"\0" * 8 + b"OpusHead" + b"\0" * 8)
+        (_rs5 / f"{_stem5}{upload.PENDING_TAIL}").write_text("{}", encoding="utf-8")
+        _root8 = tmp / "cl10"
+        _shared = upload.UploadQueue(lambda *a: True, root=_root8, now=lambda: _now[0])
+        _su5 = os.environ.get("CLASSLIVE_UPLOAD")
+        os.environ["CLASSLIVE_UPLOAD"] = "1"
+        try:
+            # ⚠️ 注意 `send=None`：给了 `queue` 就不该再另起一个发送器
+            _r5 = upload.recover_pending(_rs5, None, queue=_shared, now=lambda: _now[0])
+        finally:
+            if _su5 is None:
+                os.environ.pop("CLASSLIVE_UPLOAD", None)
+            else:
+                os.environ["CLASSLIVE_UPLOAD"] = _su5
+        # ⚠️ 变异验证：`recover_pending` 里不看 `queue`（自己 new 一份）-> 这条红
+        #    （主线程那份共享实例 pending 还是 0 —— 两个实例各写同一文件 = 锁形同虚设）。
+        check("⭐⭐ D6 收进的是**传进来的那一份实例**（D6：跨线程同一把锁）",
+              _r5["found"] == 1 and _shared.pending == 1, f"{_r5} shared={_shared.pending}")
+
+        # D7: 两条 pump 线程并发时，同一个对象只许发一次（原子占位）
+        _root9 = tmp / "cl11"
+        _d7f = tmp / "d7.json"
+        _d7f.write_text("{}", encoding="utf-8")
+        _calls7: list = []
+        _b7 = threading.Barrier(2, timeout=0.6)
+
+        def _slow7(local, key):
+            _calls7.append(key)
+            try:
+                _b7.wait()                       # 逼两条线程在"发送中"相遇
+            except Exception:                    # noqa: BLE001
+                pass
+            return True
+
+        _q11 = upload.UploadQueue(_slow7, root=_root9, now=lambda: _now[0])
+        _q11.enqueue([_d7f], "sess-D7")
+        _go7 = threading.Barrier(3)
+
+        def _run7():
+            _go7.wait()
+            _q11.pump()
+
+        _t1 = threading.Thread(target=_run7)
+        _t2 = threading.Thread(target=_run7)
+        _t1.start(); _t2.start(); _go7.wait()
+        _t1.join(timeout=5); _t2.join(timeout=5)
+        _key7 = f"{upload.session_key('sess-D7')}/d7.json"
+        # ⚠️ 变异验证：把 `pump` 里那段 `_inflight` 占位删掉 -> 这条红（两条线程各发一遍）。
+        check("⭐⭐ D7 并发两条 pump：同一个对象**只发一次**（先原子占位再发）",
+              _calls7.count(_key7) == 1, f"calls={_calls7}")
+
         bad = [n for n, ok, _ in RESULTS if not ok]
         print("\n" + "=" * 60)
         print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

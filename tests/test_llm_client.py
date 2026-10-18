@@ -42,6 +42,17 @@ class Rec:
         return _Resp(self.content)
 
 
+class _Resp2:
+    def __init__(self, content, finish):
+        self._c, self._f = content, finish
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"choices": [{"message": {"content": self._c}, "finish_reason": self._f}]}
+
+
 def _old_payload(model, system, user, max_tokens, temperature):
     """收口之前四处手写的请求体（逐字抄自 git 历史），钉「行为不变」。"""
     return {"model": model, "stream": False, "max_tokens": max_tokens,
@@ -84,6 +95,79 @@ class T(unittest.TestCase):
         self.rec.content = "not json"
         with self.assertRaises(json.JSONDecodeError):
             llm_client.chat_json("k", "m", "s", "u", max_tokens=1)
+
+    # ── F11 §0：思考模式（只给课后笔记那条链）──────────────────────────────
+    def test_effort_low_enables_thinking(self):
+        """`effort="low"` → 开思考 + `reasoning_effort`；思考模式下 temperature 被忽略（不发）。"""
+        llm_client.chat_json("sk-x", "m", "S", "U", max_tokens=99, effort="low")
+        body = self.rec.calls[0]["json"]
+        self.assertEqual(body["thinking"], {"type": "enabled"})
+        self.assertEqual(body["reasoning_effort"], "low")
+        self.assertNotIn("temperature", body, "思考模式下 temperature 会被忽略，不该发")
+        self.assertEqual(body["max_tokens"], 99)
+
+    def test_no_effort_keeps_thinking_disabled(self):
+        """不传 effort（翻译/实时摘要/分类/术语）→ 现状逐字不变。"""
+        llm_client.chat_json("sk-x", "m", "S", "U", max_tokens=99, temperature=0.4)
+        self.assertEqual(self.rec.calls[0]["json"], _old_payload("m", "S", "U", 99, 0.4))
+
+    def test_writer_note_exit_uses_low_effort(self):
+        """⭐ 课后笔记的**唯一出口**（`ObsidianWriter._chat` / `_chat_meta`）传 low —— 别的出口不传。"""
+        import obsidian_writer
+        seen = []
+
+        def fake(key, model, system, user, *, max_tokens, **kw):
+            seen.append({"key": key, "model": model, "max_tokens": max_tokens, **kw})
+            return ({"ok": 1}, "stop", 8) if kw.get("return_meta") else {"ok": 1}
+
+        orig = llm_client.chat_json
+        llm_client.chat_json = fake
+        try:
+            me = type("W", (), {"_key": "k", "_model": "m"})()
+            obsidian_writer.ObsidianWriter._chat(me, "S", "U", 100)
+            obsidian_writer.ObsidianWriter._chat_meta(me, "S", "U", 100)
+        finally:
+            llm_client.chat_json = orig
+        self.assertEqual([c.get("effort") for c in seen], ["low", "low"])
+        self.assertEqual(obsidian_writer.NOTE_EFFORT, "low")
+
+    def test_thinking_truncation_falls_back_to_disabled(self):
+        """⭐ 带 effort 的调用收到 `finish_reason=length` → 关思考重来一次（不丢块）。"""
+        seq = [_Resp2("", "length"), _Resp2('{"ok": 2}', "stop")]
+        calls = []
+
+        def fake(url, headers=None, json=None, timeout=None):
+            calls.append(json)
+            return seq[len(calls) - 1]
+
+        orig = httpx.post
+        httpx.post = fake
+        try:
+            out = llm_client.chat_json("sk-x", "m", "S", "U", max_tokens=4096, effort="low")
+        finally:
+            httpx.post = orig
+        self.assertEqual(out, {"ok": 2})
+        self.assertEqual(len(calls), 2, "截断必须重来一次")
+        self.assertEqual(calls[0]["thinking"], {"type": "enabled"})
+        self.assertEqual(calls[1]["thinking"], {"type": "disabled"}, "重来那次必须关思考")
+        self.assertNotIn("reasoning_effort", calls[1])
+
+    def test_no_effort_never_falls_back(self):
+        """不带 effort 时行为逐字不变：截断照样抛（一次性，不重来）。"""
+        calls = []
+
+        def fake(url, headers=None, json=None, timeout=None):
+            calls.append(json)
+            return _Resp2("", "length")
+
+        orig = httpx.post
+        httpx.post = fake
+        try:
+            with self.assertRaises(json.JSONDecodeError):
+                llm_client.chat_json("sk-x", "m", "S", "U", max_tokens=10)
+        finally:
+            httpx.post = orig
+        self.assertEqual(len(calls), 1, "不带 effort 不许重来")
 
     def test_passcode_goes_to_worker_with_install_id(self):
         import final_asr

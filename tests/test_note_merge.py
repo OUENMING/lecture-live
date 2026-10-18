@@ -36,6 +36,27 @@ def fake_chat(log=None, fail=()):
     return chat
 
 
+class EffortF11(unittest.TestCase):
+    """⭐ F11 §0：碎句合并也属于「课后笔记」那条链 → 思考 low 档。"""
+
+    def test_碎句合并走思考low档(self):
+        import llm_client
+        seen = []
+
+        def fake(key, model, system, user, *, max_tokens, **kw):
+            seen.append(kw)
+            return {"zh": "x"}
+
+        orig = llm_client.chat_json
+        llm_client.chat_json = fake
+        try:
+            NM._chat("k", "m", "s", "u", 400, 30)
+        finally:
+            llm_client.chat_json = orig
+        self.assertEqual(seen[0].get("effort"), "low")
+
+
+
 class Runs(unittest.TestCase):
     def test_碎句接到第一行有句号为止(self):
         es = [E("10:00:00", "We start here."), E("10:00:03", "because in the end"),

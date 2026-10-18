@@ -36,6 +36,10 @@ import paths
 DEFAULT_COURSE = "LECTURE"          # 没设课程代码时的占位名(线下课常不设)
 SESSIONS = Path(__file__).with_name("sessions")
 
+#: ⭐ F11 §0（作者 2026-10-18）：**课后笔记**那条链统一用 DeepSeek 思考模式的 low 档。
+#: ⚠️ 只给笔记生成用（`_chat` / `_chat_meta` 两个出口）；作者选了 low、不是 high，别调高。
+NOTE_EFFORT = "low"
+
 
 def resolve_vault(cli: str | None = None, *, env=None, root=None) -> str | None:
     """Obsidian 库路径：`--vault` → `$OBSIDIAN_VAULT` → `~/.classlive/vault` → **None**。
@@ -1084,14 +1088,18 @@ class ObsidianWriter:
 
     # ---- 复习层 v2（2026-10-17）----
     def _chat(self, system: str, user: str, max_tokens: int) -> dict:
-        """`note_v2` 那三条调用的**唯一出口**（`chat(system, user, max_tokens) -> dict`）。
+        """`note_v2` 那几条调用的**唯一出口**（`chat(system, user, max_tokens) -> dict`）。
 
-        ⚠️ 收在这里的理由：判据要能整体换掉它（零网络），而三个步骤各接一次
-           `llm_client` 就是三处重复的 try/异常口径。
+        ⚠️ 收在这里的理由：判据要能整体换掉它（零网络），而几个步骤各接一次
+           `llm_client` 就是几处重复的 try/异常口径。
+        ⭐ F11 §0：这个出口**只服务课后笔记**（review / align / verify / repair /
+           overview / shorten）—— 它们统一走思考模式的 low 档（作者 2026-10-18）。
+           翻译 / 实时摘要 / 分类 / 术语查询各走各的出口，**不开思考**（延迟）。
         """
         import llm_client
         obj = llm_client.chat_json(self._key, self._model, system, user,
-                                   max_tokens=max_tokens, temperature=0.3, timeout=300)
+                                   max_tokens=max_tokens, temperature=0.3, timeout=300,
+                                   effort=NOTE_EFFORT)
         return obj if isinstance(obj, dict) else {}
 
     def _chat_meta(self, system: str, user: str, max_tokens: int):
@@ -1101,7 +1109,8 @@ class ObsidianWriter:
         import llm_client
         obj, finish, nchars = llm_client.chat_json(self._key, self._model, system, user,
                                                    max_tokens=max_tokens, temperature=0.3,
-                                                   timeout=300, return_meta=True)
+                                                   timeout=300, return_meta=True,
+                                                   effort=NOTE_EFFORT)
         return (obj if isinstance(obj, dict) else {}), finish, nchars
 
     def _with_overview(self, review: dict) -> tuple:

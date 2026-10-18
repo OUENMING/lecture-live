@@ -128,6 +128,7 @@ BLOCKS = frozenset({
     #          术语进 context 数与被截数（`stream_asr.StreamASR.metrics()` 的产物）。
     #          没建流（`stream is None`）时这一块**缺席** = 这节课没用 Soniox。
     "stream",
+    "duty",     # 「一些事儿」计数（`main._duty_stats()`：认出 / 记下 / 忽略 / 漏处理）
 })
 
 #: `note_event(..., data=…)` 最多几个字段（`_small_data`；功能使用度一条也就 1–2 个）。

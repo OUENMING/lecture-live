@@ -35,3 +35,20 @@ class SystemInfo(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class 块名都登记了(unittest.TestCase):
+    def test_代码里每个_note_block_字面量都在_BLOCKS(self):
+        """合并几条分支各自加块名，漏登记的会被 `note_block` 拒收（报告缺那一格）。
+
+        2026-10-18 合并检查抓到 `"duty"` 漏了 —— 这里扫全仓库，以后再漏直接红。
+        """
+        import re
+        root = Path(__file__).resolve().parent.parent
+        used = {}
+        for f in sorted(root.glob("*.py")):
+            for name in re.findall(r'note_block\(\s*"([a-z_]+)"', f.read_text(encoding="utf-8")):
+                used.setdefault(name, f.name)
+        self.assertIn("duty", used, "扫描没扫到已知调用点 —— 正则失效了")
+        missing = {n: f for n, f in used.items() if n not in testmode.BLOCKS}
+        self.assertEqual(missing, {}, "这些块名没在 testmode.BLOCKS 登记")

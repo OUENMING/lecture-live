@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import typing
 
+import motion
 import objc_own
 
 # ⚠️ 只为让 PyObjC 认得 `CGColorRef`：不导入 Quartz 时，每次 `NSColor….CGColor()`
@@ -550,6 +551,47 @@ def make_button_target(cb):
     t = objc_own.own("ButtonTarget", NSObject, {"clicked_": clicked}).alloc().init()
     t._cb = cb
     return t
+
+
+def make_button(rect):
+    """造一颗**带按压反馈**的按钮 —— 面板里可点按钮的唯一工厂。
+
+    按下缩到 `motion.PRESS_SCALE`、抬起按 `motion.SPRING_STOPS` 回弹到 1
+    （时长 / 曲线 / 过冲全在 `motion.py`，值来自 Claude Desktop 那套设计系统，
+    2026-10-18）。拿到的就是一颗普通 `NSButton` 子类实例：`style_primary` /
+    `setTarget_` / `setAction_` / 键盘等价键 / `performClick_` 全部照常。
+
+    ⚠️ **为什么是子类**（而不是窗口级事件监视器 / `sendEvent_`）—— 2026-10-18
+       真 CGEvent 探针实测：按钮的跟踪循环（`NSCell.trackMouse…`）把 mouseUp
+       **直接吞掉**，本地事件监视器只看得到 mouseDown、**看不到 mouseUp**；
+       而 `mouseDown_` 包一层 `super` 的写法里，`super` 恰好在 mouse-up 时返回
+       （含「拖出去松开」），action 也在其中**恰好触发一次**。所以只有这条路
+       拿得到「抬起」这个时机。
+    ⚠️ **勾选框 / 菜单项 / 系统弹窗的按钮**不走这里（本工厂只管面板里可点的
+       push button）；禁用的按钮在 `mouseDown_` 里自会跳过（`isEnabled`）。
+    """
+    return _press_button_class().alloc().initWithFrame_(rect)
+
+
+def _press_button_class():
+    """按压反馈的按钮类（`objc_own` 拥有，进程里只定义一次）。"""
+    from AppKit import NSButton
+    import objc
+
+    def mouse_down(self, event):                          # noqa: N802
+        try:
+            if self.isEnabled():
+                motion.press_down(self)
+        except Exception:                                 # noqa: BLE001
+            pass
+        # 跟踪循环在 super 里面：一直转到 mouse-up（里面/外面松开都算）。
+        objc.super(objc_own.cls_of("PressButton"), self).mouseDown_(event)
+        try:
+            motion.press_up(self)
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    return objc_own.own("PressButton", NSButton, {"mouseDown_": mouse_down})
 
 
 #: 按钮三档分量，一眼看得出先点哪个（2026-10-12 设计评审；10-13 次要档也换成胶囊）：

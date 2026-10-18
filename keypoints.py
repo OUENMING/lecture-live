@@ -146,6 +146,52 @@ def parse_answers(payload, n: int) -> list:
     return out
 
 
+def ask_batch(state: str, instructions: list, *, token: str | None = None,
+              timeout: float = 90.0, batch_size: int = 20, tries: int = 2) -> list:
+    """一批 `noul` 问题（`S1…Sn`，**≤ batch_size/请求**）→ 逐条概率（拿不到 = `None`）。**永不抛。**
+
+    ⭐ F9b：笔记的「支持性核对」（`note_guards.support_check`）用这个口 ——
+       Jev 在 E3（一条 claim 一个 state）AUC=1.000；这是它的**生产入口**。
+    接口（deep module，见 `keypoints` 模块惯例）：
+      · 返回值长度恒等于 `len(instructions)`；调用方逐条对位，不用 try；
+      · `token` 不传 → `provider_token()`；**没配 token → 全 None、不发请求**（fail-soft）；
+      · `>batch_size` 自动切批（每批独立 `state` —— 同一份 state 会被重复计费，见 `score()`）；
+      · 429/529/5xx/超时 → 该批至多再试 `tries-1` 次（退避）；其它异常/解析不出 → 该批全 None。
+    """
+    items = [str(x or "") for x in (instructions or [])]
+    if not items:
+        return []
+    if token is None:
+        token = provider_token()
+    out: list = [None] * len(items)
+    if not token:
+        return out
+    step = max(1, min(20, int(batch_size)))
+    for base in range(0, len(items), step):
+        part = items[base:base + step]
+        qs = {f"S{i + 1}": {"type": "noul", "instructions": t}
+              for i, t in enumerate(part)}
+        payload = None
+        for k in range(max(1, int(tries))):
+            try:
+                payload = ask_commandcode(state, qs, token=token, timeout=timeout)
+                break
+            except Exception as e:                                # noqa: BLE001
+                msg = str(e)
+                transient = any(x in msg for x in ("429", "529", "500", "502", "503",
+                                                   "连不上", "timed out", "timeout"))
+                if transient and k + 1 < max(1, int(tries)):
+                    import time
+                    time.sleep(1.5 * (2 ** k))
+                    continue
+                payload = None
+                break
+        got = parse_answers(payload, len(part))
+        for i, p in enumerate(got):
+            out[base + i] = p
+    return out
+
+
 def score(sents, *, ask) -> list:
     """一批句子 → 每句一个概率（`None` = 这次没拿到）。
 

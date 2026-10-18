@@ -1028,3 +1028,65 @@ def merge_checks(det: list, llm: list) -> list:
     det = det or []
     seen = {_norm_claim(r.get("claim")) for r in det}
     return list(det) + [r for r in (llm or []) if _norm_claim(r.get("claim")) not in seen]
+
+
+#: `NAME(a) = NAME2(b)`：模型自写 checks 里「两边相等」式的断言（F9b）。
+_EQ_SIDES = re.compile(r"(?P<n1>[A-Za-z][A-Za-z0-9]{0,5})\s*\(\s*(?P<a>-?\d+(?:\.\d+)?)\s*\)"
+                       r"\s*[=＝]\s*"
+                       r"(?P<n2>[A-Za-z][A-Za-z0-9]{0,5})\s*\(\s*(?P<b>-?\d+(?:\.\d+)?)\s*\)")
+
+
+def mech_override_rows(rows: list, review_data: dict) -> list:
+    """模型写错的 mismatch 行 —— 机械核能复算**两边相等** → 降成 `unchecked`（F9b 作者点名）。
+
+    现场（f9b §8）：模型拿自己写错的 `MC(q)=3q²−12q+60` 算 `MC(6)=96`，断言
+    「`MC(6)=AC(6)` 不相等」；而课上的 `MC=3q²−24q+60` 代进去 **24=24** —— 这条模型核
+    行是拿错式子算出来的假行。只要**某一节**同时定义了等式两边的名字、代值后相等，
+    这行就作废：正文不标 ⚠、修正说明不列（`corrections_from_mismatch` 只收 `mismatch`），
+    原行**仍在 `checks` 台账里**（降级信息写进 `how`）。
+
+    ⚠️ 只认「一节里两名字都有定义」的复算，跨节凑不出 → 不动（宁缺勿滥）。
+    """
+    defs_by_sec: list = []
+    for s in (review_data.get("sections") or []):
+        d: dict = {}
+        clash: set = set()
+        if isinstance(s, dict):
+            for _k, unit in _units(s):
+                for t in unit:
+                    for name, (var, expr, fn) in functions([t]).items():
+                        if name in d and d[name][1] != expr:
+                            clash.add(name)      # 同节两个不同定义 → 这个名字作废
+                        d.setdefault(name, (var, expr, fn))
+        for name in clash:
+            d.pop(name, None)
+        defs_by_sec.append(d)
+    out = []
+    for r in (rows or []):
+        row = r
+        if isinstance(r, dict) and r.get("status") == "mismatch":
+            for m in _EQ_SIDES.finditer(str(r.get("claim") or "")):
+                n1, a, n2, b = (m.group("n1"), m.group("a"),
+                                m.group("n2"), m.group("b"))
+                hit = None
+                for d in defs_by_sec:
+                    if n1 not in d or n2 not in d:
+                        continue
+                    try:
+                        v1 = d[n1][2](float(a))
+                        v2 = d[n2][2](float(b))
+                    except Exception:                          # noqa: BLE001
+                        continue
+                    if abs(v1 - v2) <= 1e-6 * max(1.0, abs(v1), abs(v2)):
+                        hit = (v1, v2)
+                        break
+                if hit:
+                    row = dict(r)
+                    row["status"] = "unchecked"
+                    row["how"] = (str(r.get("how") or "")
+                                  + f"（机械核复算：{n1}({a})={_fmt(hit[0])}、"
+                                    f"{n2}({b})={_fmt(hit[1])}，两边相等 —— 这条模型核行"
+                                    "作废，只留台账）")
+                    break
+        out.append(row)
+    return out

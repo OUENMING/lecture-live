@@ -359,6 +359,33 @@ def _terms(v) -> list:
     return out
 
 
+#: 例题从口述还原出来的标记（标题里有它 → 合标 `🎙+✏️`，F9b 作者点名）。
+_RECON_LABEL = "🎙+✏️"
+_RECON_WORD = "按口述还原"
+#: 自补默认标（变式/挖空没标 emoji → `✏️`；F9b 作者点名：代码里定，不靠模型写）。
+_SELF_MARK = "✏️"
+_LABELED = re.compile(r"^\s*(?:🎙|✏️|📖)")
+
+
+def with_recon_label(title: str) -> str:
+    """标题含「按口述还原」→ 合标 `🎙+✏️`（幂等：已合标的原样返回）。"""
+    t = _one_line(title) if isinstance(title, str) else ""
+    if not t or _RECON_WORD not in t:
+        return t
+    for pre in ("🎙+✏️", "🎙", "✏️"):
+        if t.startswith(pre):
+            t = t[len(pre):].lstrip()
+            break
+    return f"{_RECON_LABEL} {t}"
+
+
+def _self_label(q: str) -> str:
+    """无标签的变式/挖空 → 补 `✏️`（有 🎙/✏️/📖 的都不碰）。"""
+    if not q or _LABELED.match(q):
+        return q
+    return f"{_SELF_MARK} {q}"
+
+
 def _clean_section(s) -> dict:
     if not isinstance(s, dict):
         return {}
@@ -391,13 +418,13 @@ def _clean_section(s) -> dict:
             continue
         q = _one_line(v.get("q") or v.get("question"))
         if q:
-            r["variants"].append({"q": q, "steps": _steps(v.get("steps")),
+            r["variants"].append({"q": _self_label(q), "steps": _steps(v.get("steps")),
                                   "a": _one_line(v.get("a") or v.get("answer"))})
     fd = s.get("faded")
     if isinstance(fd, dict):
         q = _one_line(fd.get("q"))
         if q:
-            r["faded"] = {"q": q, "blanks": _lines(fd.get("blanks")),
+            r["faded"] = {"q": _self_label(q), "blanks": _lines(fd.get("blanks")),
                           "a": _one_line(fd.get("a") or fd.get("answer"))}
     pl = s.get("plot")
     if isinstance(pl, dict) and _one_line(pl.get("kind")) in PLOT_KINDS:
@@ -405,6 +432,13 @@ def _clean_section(s) -> dict:
         r["plot"] = {"kind": _one_line(pl.get("kind")),
                      "title": _one_line(pl.get("title")),
                      "params": params if isinstance(params, dict) else {}}
+    # ⭐ F9b（作者点名，代码里定不靠提示词）：
+    #   · 「按口述还原」的例题 → 合标 🎙+✏️；· 空壳 example/faded/plot 直接摘掉。
+    if r["example"].get("title"):
+        r["example"]["title"] = with_recon_label(r["example"]["title"])
+    for k in ("example", "faded", "plot"):
+        if not r.get(k):
+            r.pop(k, None)
     return r
 
 
@@ -1458,8 +1492,10 @@ def _finish(det: list, llm_rows: list, review_data: dict) -> list:
        · 模型核是在**评自己的作业**，它说 `ok` 不算核过 → 这一类要降。
        合并后再降会把机械核那 30 条 `ok` 一起抹掉（实测：10790 的 ✅ 从 61 掉到 17）。
     """
-    return note_math.merge_checks(cap_model_rows(det, review_data),
-                                  cap_model_rows(llm_rows, review_data, llm=True))
+    return note_math.mech_override_rows(
+        note_math.merge_checks(cap_model_rows(det, review_data),
+                               cap_model_rows(llm_rows, review_data, llm=True)),
+        review_data)
 
 
 def corrections_from_mismatch(checks: list) -> list:

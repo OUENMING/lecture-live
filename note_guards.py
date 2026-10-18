@@ -250,6 +250,9 @@ def scrub(review: dict) -> tuple:
             blk = s.get(key)
             if not isinstance(blk, dict):
                 continue
+            if not any(blk.get(f) for f in ("title", "prompt", "steps", "answer",
+                                            "q", "a", "blanks")):
+                continue        # ⚠️ 空壳不碰 —— 碰一下就长出 `"steps": []`（F9b 作者点名）
             if key == "faded" and not _one(blk.get("a")) and before.get(id(blk)):
                 s[key] = {}
                 gone += 1
@@ -705,3 +708,233 @@ def drop_trivial_cues(review: dict) -> tuple:
         s["cues"] = kept
     warns = [f"丢掉了 {len(dropped)} 条纯算术线索问题（计算器能答，帮不了复习）"] if dropped else []
     return out, [], warns
+
+
+# ---------------------------------------------------------------- F9b：支持性核对（Jev）
+#: E3 的指令**原文**（`jev_exp/run_e3.py`）—— 一词不改：分辨力建立在它上面（AUC 1.000）。
+SUPPORT_INSTR = ("Look at the transcript excerpt only. Does this transcript excerpt state "
+                 "the following? \"{claim}\" Answer yes only if the excerpt actually says "
+                 "it; a mathematically correct fact that the excerpt does not state is not "
+                 "a yes.")
+#: E3 的 state 前言**原文**。
+SUPPORT_PREAMBLE = ("This is a transcript excerpt from a university lecture. Each line is "
+                    "one sentence the lecturer or a student said, in order, with its "
+                    "timestamp.")
+#: E3 的标签分布：supported 最低 0.31、unsupported 最高 0.04 —— 0.15 在两簇中间的空档。
+SUPPORT_TAU = 0.15
+#: 成本上限：每节 ≤2 次请求（≤20 问/批 → ≤40 条 claim）。
+SUPPORT_MAX_REQ = 2
+SUPPORT_BATCH = 20
+#: 「讲义说过 X」的句子判据 + 「自补」豁免（✏️ 本来就不要求转录支持）。
+_SUPPORT_WORDS = re.compile(r"课上|老师|本课")
+_SUPPORT_SELF = re.compile(r"✏️|自补|自编")
+#: 房子里的免责/对照句式 —— 不是「讲义说过」：⚠ 免责句与教材对照（📚）句。
+#: ⚠️ 后者若收进来，[转录里没找到这句] 会挂到"未核对"句自己头上（F9b 实测）。
+_SUPPORT_SKIP = re.compile(r"📚|未核对|只给了片段|核算对不上")
+#: 例题标题里的 `🎙 13:40` / `（🎙 13:36–13:38）` —— 课**实际用**它的时刻。
+#: ⚠️ 窗口要用它，不是小节 `ts`（F9b 实测：§3 小节 13:25:49、例题标 🎙 13:40，
+#:    用小节 ts 会把窗口放到"刚宣布做 Exercise 5"那几句上，题目本身在 14 分钟外）。
+_TS_IN_TITLE = re.compile(r"🎙\s*(\d{1,2}:\d{2}(?::\d{2})?)")
+
+
+def _hms(s) -> int | None:
+    """`13:16:28` / `13:16–13:24` / `13:16-13:24` → 秒（取首个时刻；拿不到 None）。E3 的同款口径。"""
+    try:
+        raw = str(s or "").replace("–", ":").replace("-", ":")
+        p = [int(x) for x in raw.split(":")[:3]]
+    except ValueError:
+        return None
+    if not p:
+        return None
+    while len(p) < 3:
+        p.append(0)
+    return p[0] * 3600 + p[1] * 60 + p[2]
+
+
+def _support_window(entries: list, want) -> tuple:
+    """claim 时间戳 →（最近一行的 ±8/+32 窗口）。拿不到 ts / 空转录 → 全篇。"""
+    if not entries:
+        return 0, 0
+    if want is None:
+        return 0, len(entries)
+    stamped = [(i, _hms(e.get("ts"))) for i, e in enumerate(entries)
+               if isinstance(e, dict)]
+    stamped = [(i, t) for i, t in stamped if t is not None]
+    if not stamped:
+        return 0, len(entries)
+    i = min(stamped, key=lambda x: abs(x[1] - want))[0]
+    return max(0, i - 8), min(len(entries), i + 32)
+
+
+def _support_state(entries: list, lo: int, hi: int) -> str:
+    """转录切片 → state（E3 的 `L<n> [hh:mm:ss] sentence` 原格式，编号是全篇行号）。"""
+    lines = [f"L{lo + j + 1} [{e.get('ts')}] {e.get('en') or e.get('asr')}"
+             for j, e in enumerate(entries[lo:hi])
+             if isinstance(e, dict) and (e.get("en") or e.get("asr"))]
+    return SUPPORT_PREAMBLE + "\n\n" + "\n".join(lines)
+
+
+def _support_clip(t: str, *, n: int = 140) -> str:
+    """长句在标点处截（**逐字子串** —— annotate 的定位靠它，不许加省略号）。"""
+    if len(t) <= n:
+        return t
+    cut = -1
+    for ch in "，；。、,;":
+        cut = max(cut, t.rfind(ch, 0, n))
+    if cut >= 60:
+        return t[:cut + 1]
+    return t[:n]
+
+
+def support_claims(review: dict) -> list:
+    """抽「讲义说过 X」类 claim —— 支持性核对（Jev）的输入。**纯函数。**
+
+    收（作者 F9b 第 1 条）：
+      · 例题块（标题带 🎙，含 🎙+✏️）的题面 —— 「课上给的函数/数字/定义」；
+      · 正文里含「课上/老师/本课」的句子（E3 的字段范围：prose/algebra）。
+    不收：
+      · ✏️ 自补块（无 🎙 的）与自补句 —— 自补充本就不要求转录支持，查了是假警报；
+      · 无标签的例题 —— 保守：只查断言"讲义说过"的东西；
+      · 免责句（`⚠ …未核对`）与教材对照句（`📚`）—— 那是**注释自己的话**，
+        不是"讲义说过 X"（挂上去会出现"未核对句被标：转录里没找到这句"的笑话）；
+      · pitfalls/conclusion 等注记字段（E3 只扫 prose/algebra/example，跟它）。
+    claim 一律是逐字原文（annotate 靠它在正文里定位）。
+    """
+    out: list = []
+    seen: set = set()
+
+    def add(text, si: int, field: str, ts: str | None = None) -> None:
+        t = _support_clip(_one(text))
+        if len(t) < 6 or t in seen:
+            return
+        seen.add(t)
+        out.append({"claim": t, "si": si, "field": field, "ts": ts})
+
+    for si, s in enumerate(review.get("sections") or []):
+        if not isinstance(s, dict):
+            continue
+        ex = s.get("example")
+        if isinstance(ex, dict) and "🎙" in str(ex.get("title") or ""):
+            m = _TS_IN_TITLE.search(str(ex.get("title") or ""))
+            add(ex.get("prompt"), si, "example", m.group(1) if m else None)
+        for k in ("prose", "algebra"):
+            v = s.get(k)
+            for para in (v if isinstance(v, list) else [v]):
+                for sent in _sentences(str(para or "")):
+                    if (_SUPPORT_WORDS.search(sent) and not _SUPPORT_SELF.search(sent)
+                            and not _SUPPORT_SKIP.search(sent)
+                            and not sent.lstrip().startswith("⚠")):
+                        add(sent, si, k)
+    return out
+
+
+def _recon_ok(section: dict) -> bool:
+    """F9 的「按口述还原」验证：题面给了函数、该块机械核 ≥1 条 ok 且 0 条 mismatch。"""
+    try:
+        import note_math
+        ex = section.get("example")
+        if not isinstance(ex, dict) or not note_math._FUNC_DEF.search(
+                str(ex.get("prompt") or "")):
+            return False
+        rows = note_math.check_review({"sections": [section]})
+        mine = [r for r in rows
+                if note_math.unit_of_claim(section, str(r.get("claim") or ""))
+                in note_math.MODEL_AUTHORED]
+        return bool(mine) and (not any(r.get("status") == "mismatch" for r in mine)
+                               and any(r.get("status") == "ok" for r in mine))
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def support_check(review: dict, *, entries: list, ask=None,
+                  max_requests: int = SUPPORT_MAX_REQ,
+                  tau: float = SUPPORT_TAU) -> tuple:
+    """F9b：把「讲义说过 X」的 claim 过一遍 Jev（E3 口径）→ p < tau 的挂 ⚠。
+
+    · state = claim 时间戳附近 ±8/+32 行（例题用标题里 🎙 的时刻、正文句用小节 ts；
+      同批多条时取窗口并集）；一批 ≤20 问（`S1…Sn`）；
+    · **只标不改**，两个落点：
+        – 台账：`checks` 追加 `status=mismatch`、`how=转录里没找到这句（核对）`
+          → 链上最后的 `annotate_mismatches` 落 ⚠（"核算对不上"的既有机制）；
+        – 🎙 例题给定被标、且 F9 重建验证通过 → 标题改挂 🎙+✏️「按口述还原」
+          （`note_v2.with_recon_label`；没通过验证的照常挂 ⚠）；
+    · 每节 ≤ `max_requests` 次请求（超出的 claim 不查，条数进提醒）；`ask(state, instrs)` 可注入；
+    · 没配 provider / 任何异常 → 全 None 空转，**永不抛**（既不花钱也不挡生成）。
+    """
+    out = copy.deepcopy(review)
+    claims = support_claims(out)
+    if not claims or not entries:
+        return out, [], []
+    if ask is None:
+        def ask(state, instructions):                          # noqa: E306
+            try:
+                import keypoints
+                return keypoints.ask_batch(state, instructions)
+            except Exception:                                  # noqa: BLE001
+                return [None] * len(instructions)
+    secs = out.get("sections") or []
+    tries = max(1, int(max_requests))
+    cap = tries * SUPPORT_BATCH
+    over = max(0, len(claims) - cap)
+    claims = claims[:cap]
+    rows_new: list = []
+    relabeled = 0
+    n_flag = 0
+    used = 0
+    for base in range(0, len(claims), SUPPORT_BATCH):
+        if used >= tries:
+            break
+        part = list(range(base, min(base + SUPPORT_BATCH, len(claims))))
+        used += 1
+
+        def _want(i: int):                                     # noqa: E306
+            c = claims[i]
+            if c.get("ts"):
+                return _hms(c["ts"])       # 例题：标题里 🎙 的时刻
+            si = c["si"]
+            sec = secs[si] if 0 <= si < len(secs) else {}
+            return _hms(sec.get("ts")) if isinstance(sec, dict) else None
+
+        wins = [_support_window(entries, _want(i)) for i in part]
+        state = _support_state(entries, min(w[0] for w in wins), max(w[1] for w in wins))
+        instrs = [SUPPORT_INSTR.format(claim=claims[i]["claim"]) for i in part]
+        try:
+            ps = list(ask(state, instrs))
+        except Exception:                                      # noqa: BLE001
+            ps = []
+        for k, i in enumerate(part):
+            p = ps[k] if k < len(ps) else None
+            if not isinstance(p, (int, float)) or float(p) >= tau:
+                continue
+            c = claims[i]
+            sec = secs[c["si"]] if 0 <= c["si"] < len(secs) else None
+            if c["field"] == "example" and isinstance(sec, dict) and _recon_ok(sec):
+                t = _one((sec.get("example") or {}).get("title"))
+                if "按口述还原" not in t:
+                    t = (t + "（按口述还原）") if t else "按口述还原"
+                try:
+                    from note_v2 import with_recon_label
+                    t = with_recon_label(t)
+                except Exception:                              # noqa: BLE001
+                    pass
+                sec.setdefault("example", {})["title"] = t
+                relabeled += 1
+                continue
+            rows_new.append({"claim": c["claim"], "status": "mismatch",
+                             "recomputed": f"support p={float(p):.2f}",
+                             "how": "转录里没找到这句（核对）"})
+            n_flag += 1
+    if rows_new:
+        try:
+            import note_math
+            out["checks"] = note_math.merge_checks(out.get("checks") or [], rows_new)
+        except Exception:                                      # noqa: BLE001
+            out["checks"] = list(out.get("checks") or []) + rows_new
+    bits = [f"{n_flag} 条挂 ⚠「转录里没找到这句（核对）」"] if n_flag else []
+    if relabeled:
+        bits.append(f"{relabeled} 条例题给定没找到 → 按口述还原挂牌")
+    if over:
+        bits.append(f"{over} 条超成本上限没查")
+    msgs = [f"支持性核对：查了 {len(claims)} 条（{used} 次请求，上限 {tries}）"
+            + ("；" + "；".join(bits) if bits else "；全部在转录里找到")]
+    return out, [], msgs

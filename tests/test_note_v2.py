@@ -72,7 +72,8 @@ class Clean(unittest.TestCase):
             "kind": "supply_demand", "params": {"d0": 100}}}]})
         self.assertEqual(good["sections"][0]["plot"]["kind"], "supply_demand")
         bad = nv._clean({"sections": [{"heading": "H", "plot": {"kind": "自作主张"}}]})
-        self.assertEqual(bad["sections"][0]["plot"], {})
+        self.assertNotIn("plot", bad["sections"][0],
+                         "非法 kind 的图整块摘掉（F9b：空壳 example/faded/plot 不留）")
 
     def test_checks_status_只认三档(self):
         got = nv._clean({"checks": [{"claim": "x", "status": "嗯"}]})

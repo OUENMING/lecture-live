@@ -1247,6 +1247,12 @@ class ObsidianWriter:
                               transcript="\n".join(
                                   str(e.get("en") or e.get("asr") or "") for e in entries)),
                            "引用逐字核对"),
+                          # ⭐ F9b：「支持性核对」—— 断言"讲义说过 X"的 claim 过一遍 Jev
+                          #    （E3 口径，≤2 次请求/节）；p<0.15 挂 ⚠「转录里没找到这句」。
+                          #    只标不改；例题给定验证过重建的改挂 🎙+✏️「按口述还原」。
+                          #    没配 Jev key → 空转（全 None），不花钱不挡生成。
+                          (lambda r: note_guards.support_check(r, entries=entries),
+                           "支持性核对"),
                           # ⚠️ 必须最后：标注要落在**已经清完**的正文上，也不能再进串讲的输入
                           (lambda r: note_guards.annotate_mismatches(r), "核算结果落正文")):
             try:

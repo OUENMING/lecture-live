@@ -173,7 +173,9 @@ def card_texts(size_now: str) -> tuple:
             f"云端转写（默认开）更准。")
     note = ("清掉只是省空间；想要回来：跑「cl doctor」，按它给的命令重下"
             "（约 538 MB）。")
-    return ("旧的本地 Whisper 还能清掉", body, note)
+    # 标题（作者 2026-10-18 定稿）：「6 倍」= 定稿 p50 本地 Whisper 2.7 s → 云端 0.42 s
+    #   （`docs/RESEARCH-cloud-asr.md` 两张表）。
+    return ("V1 版本转录模型该退役啦（现在模型可比它快 6 倍）", body, note)
 
 
 # ---------------------------------------------------------------- 删除

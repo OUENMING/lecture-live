@@ -221,6 +221,34 @@ class Align(unittest.TestCase):
         self.assertIn("最多 10 条", seen["sys"])
 
 
+    def test_截断的第一次会重试(self):
+        """F9c：无骨架路径第一次被 `max_tokens` 截断（SOC10020 实测：Unterminated string）
+        → 1.5× 重试一次。"""
+        calls = []
+
+        def chat(s, u, m):
+            calls.append(m)
+            if len(calls) == 1:
+                raise ValueError("Unterminated string starting at: line 1 column 4314")
+            return {"covered": [], "notes": "重试成功"}
+
+        got = nv.align(REVIEW, chat=chat, max_tokens=2000)
+        self.assertEqual(calls, [2000, 3000], "第一次失败 → 1.5× 重试一次")
+        self.assertNotIn("failed", got)
+        self.assertEqual(got["notes"], "重试成功")
+
+    def test_两次都失败才报_failed(self):
+        calls = []
+
+        def chat(s, u, m):
+            calls.append(m)
+            raise ValueError("bad json")
+
+        got = nv.align(REVIEW, chat=chat, max_tokens=2000)
+        self.assertIn("failed", got)
+        self.assertEqual(calls, [2000, 3000])
+
+
 class VerifyNumbers(unittest.TestCase):
     def test_挑出带等号的断言(self):
         claims = nv.numeric_claims({"sections": [SECTION]})

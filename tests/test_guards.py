@@ -137,6 +137,8 @@ class SelfTalk(unittest.TestCase):
         self.assertEqual([v["q"] for v in vs], ["题的题面"], vs)
         self.assertEqual(vs[0]["a"], "$q=3$")
         self.assertTrue(any("整题不出" in w for w in warns), warns)
+        self.assertTrue(any(isinstance(x, dict) for x in removed),
+                        f"F9c：宁缺丢掉的题块也要进守卫台账计数：{removed}")
 
     def test_短答案不许被扔(self):
         """⚠️ 判据实测过的坑：加"答案太短就不出"会扔掉真题（`$q=3$` 这种）。"""

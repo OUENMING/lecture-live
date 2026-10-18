@@ -233,6 +233,7 @@ def scrub(review: dict) -> tuple:
     # ⚠️ 只说"清空"这一种。**不许**顺手加"删了太短就扔"这类判据：数学答案本来就短
     #    （`$q=3$`），长度判据会开始扔真题（判据实测：变式答案 `6` 被扔掉）。
     gone = 0
+    dropped_blocks: list = []        # 宁缺丢掉的题块（守卫台账计数用，见函数末）
     for s in (out.get("sections") or []):
         if not isinstance(s, dict):
             continue
@@ -242,6 +243,7 @@ def scrub(review: dict) -> tuple:
                 continue
             if not _one(v.get("a")) and before.get(id(v)):
                 gone += 1
+                dropped_blocks.append({"kind": "variants", "why": "答案被清空（宁缺）"})
                 continue                       # 答案被清空了 → 这道变式不出
             v["steps"] = [x for x in (v.get("steps") or []) if _alive(x)]
             keep.append(v)
@@ -256,6 +258,7 @@ def scrub(review: dict) -> tuple:
             if key == "faded" and not _one(blk.get("a")) and before.get(id(blk)):
                 s[key] = {}
                 gone += 1
+                dropped_blocks.append({"kind": key, "why": "答案被清空（宁缺）"})
                 continue
             blk["steps"] = [x for x in (blk.get("steps") or []) if _alive(x)]
         s["prose"] = [x for x in (s.get("prose") or []) if _one(x)]
@@ -275,7 +278,9 @@ def scrub(review: dict) -> tuple:
                      "（不许第一人称、不许猜过程、不许自己跟自己讨论）")
     if gone:
         warns.append(f"{gone} 道题的答案被清空 → 整题不出（宁缺）")
-    return out, removed, warns
+    # ⭐ F9c：宁缺丢掉的题块也要进守卫台账 —— 返回值里带小标记（长度=被删处数，
+    #    写作层的 `guards: dropped N` 用；原因在 warns 里）。
+    return out, list(removed) + dropped_blocks, warns
 
 
 def _one(v) -> str:

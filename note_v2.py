@@ -253,7 +253,8 @@ ALIGN_SYS = """你在给一节英文课的**复盘笔记**做覆盖度核对与�
  "materials_used": ["笔记里引用到的课件文件名"],
  "missing": [{"ts": "HH:MM", "point": "没被覆盖的知识点", "why": "为什么可能漏了（一句）"}],
  "notes": "一句总评：这份笔记的覆盖度如何、最该补什么（≤60 字）"}
-⚠️ 只做对照，不要发明输入里没有的知识点。只输出 JSON。"""
+⚠️ 只做对照，不要发明输入里没有的知识点。**输出要短**：每条的 `point` ≤20 字、
+   `missing` 最多 10 条（长了会被截断，整份回执就废了）。只输出 JSON。"""
 
 VERIFY_SYS = """你在给课堂笔记做**数字与公式的第三道核**（前两道是写作时的代数自洽与课件对照）。
 输入是一批断言（公式/代入/方程的解），以及可能附上的课件片段。
@@ -1202,11 +1203,21 @@ def align(review_data: dict, *, chat, materials=None,
     user = (f"Professor's knowledge points (in order):\n{lines}\n\n"
             f"Note section headings:\n" + "\n".join(f"- {s}" for s in secs))
     sys_prompt = ALIGN_SYS_SK if sk_points else ALIGN_SYS
-    try:
-        obj = chat(sys_prompt, user, max_tokens)
-    except Exception as e:                                     # noqa: BLE001
-        # ⚠️ 这里**不吞**：上层按 `failed` 报出去（作者第六轮第 2 条）。
-        return {"failed": f"{type(e).__name__}: {str(e)[:80]}"}
+    obj = None
+    last = ""
+    # ⭐ F9c：长清单（无骨架路径）会把输出撑破 `max_tokens` → 截断的 JSON 解析直接失败。
+    #    先按 1.5× 重试一次（实测 SOC10020 第一次就是截断 —— "Unterminated string"）。
+    for mt in (max_tokens, int(max_tokens * 1.5)):
+        try:
+            obj = chat(sys_prompt, user, mt)
+            last = ""
+            break
+        except Exception as e:                                 # noqa: BLE001
+            last = f"{type(e).__name__}: {str(e)[:80]}"
+            obj = None
+    if obj is None:
+        # ⚠️ 不吞：两次都失败才按 `failed` 报出去（作者第六轮第 2 条）。
+        return {"failed": last or "模型没回 JSON"}
     if not isinstance(obj, dict):
         return {"failed": "模型没回 JSON 对象"}
     out: dict = {}

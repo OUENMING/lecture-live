@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 import copy
+import math
 import re
 import unicodedata
 
@@ -768,62 +769,99 @@ def _retr_tokens(claim: str) -> dict:
     return {"nums": nums, "latin": latin, "grams": grams}
 
 
-def _retr_score(entry: dict, toks: dict) -> float:
-    """一条转录（EN/ASR + ZH）与 claim token 的重叠分。**纯函数。**
+def _retr_hits(entry: dict, toks: dict) -> list:
+    """条目命中的 token（`(kind, token)` 列表）。**纯函数。**
 
     数字/拉丁词用**词边界**匹配（`12` 不撞 `312`、`ac` 不撞 `interaction`），
-    中文 2-gram 按占比归一（长句不刷分）。数字是最硬的锚（2 分/个）。
+    中文 2-gram 直接查 ZH 行。
     """
     if not isinstance(entry, dict):
-        return 0.0
+        return []
     en = (str(entry.get("en") or "") + " " + str(entry.get("asr") or "")).lower()
     zh = str(entry.get("zh") or "")
-    s = 0.0
+    zhc = re.sub(r"[^\u4e00-\u9fff]", "", zh)
+    out: list = []
     for n in toks["nums"]:
         pat = r"(?<!\d)" + re.escape(n) + r"(?!\d)"
         if re.search(pat, en) or re.search(pat, zh):
-            s += 2.0
+            out.append(("num", n))
     for w in toks["latin"]:
         pat = r"(?<![a-z])" + re.escape(w) + r"(?![a-z])"
         if re.search(pat, en):
-            s += 1.0
-    if toks["grams"]:
-        zhc = re.sub(r"[^\u4e00-\u9fff]", "", zh)
-        hit = sum(1 for g in toks["grams"] if g in zhc)
-        s += 1.5 * hit / max(1, len(toks["grams"]))
-    return s
+            out.append(("lat", w))
+    for g in toks["grams"]:
+        if g in zhc:
+            out.append(("gram", g))
+    return out
+
+
+def _retr_weight(df: int, n: int, *, lo: float = 0.5, hi: float = 6.0) -> float:
+    """token 的 idf 权重：`w = log2(N/df)`，贴地 `lo`、封顶 `hi`。**纯函数。**
+
+    ⭐ F9d 实测（SOC §22）：满课都出现的词（UCD）不该和稀有词（高中/退出/停业）
+    同权 —— 越稀有越硬。只出现一两次的词顶到 6，满课词落到地板 0.5。
+    """
+    return max(lo, min(hi, math.log2(max(1, n) / max(1, df))))
+
+
+def _retr_score(entry: dict, toks: dict, weights: dict | None = None) -> float:
+    """条目得分 = 命中 token 的 idf 权重之和（`weights=None` → 数命中条数）。**纯函数。**"""
+    hits = _retr_hits(entry, toks)
+    if weights is None:
+        return float(len(hits))
+    return float(sum(weights.get(t, 1.0) for t in hits))
 
 
 def _support_windows(entries: list, claim: str, *, prior=None, fallback=None,
                      limit: int = 2) -> list:
     """claim → 检索出的 1–2 个窗口 `[(lo, hi)]`。**纯函数。**
 
-    ⭐ F9d（作者实测）：正文 claim 没有自己的时间戳，拿小节 `ts` 取窗口会离讲师真说的
-    地方很远（SOC：claim 在 §13:27，原话在 **13:30:16** → 假警）。改为**检索**：
-    claim 的数字/拉丁词/中文 2-gram 逐条打分（EN+ASR+ZH 一起看 —— 中文 claim 直接
-    对 ZH 行），命中点展开成前 8 后 32 行的窗口，取总分最高的 1–2 个。
+    ⭐ F9d（作者实测两轮）：正文 claim 没有自己的时间戳，拿小节 `ts` 取窗口会离讲师
+    真说的地方很远（SOC：claim 在 §13:27，原话在 **13:30:16** → 假警）。改为**检索**：
+    claim 的数字/拉丁词/中文 2-gram（EN+ASR+ZH 一起看，中文 claim 对 ZH 行）——
+    ① 命中条目的「前 8 后 32 行」作候选窗；② 窗口分 = **窗口覆盖到的 token 的 idf
+    权重之和**（同一个词在窗口里刷 30 遍也只算一次 —— 密集的常见词区不该压过
+    含稀有词的真锚区，SOC §22 实测：UCD 满课都是，把窗口拽到了错的区域）；
+    ③ 取分最高的 1–2 个互不重叠的窗口。
     · `prior`（🎙 时刻）是**强先验**：给定时它那个窗口永远保留；
     · 完全没有命中 → `prior` → `fallback`（小节 ts）→ 全篇（老兜底）。
     """
     rows = [e for e in (entries or []) if isinstance(e, dict)]
     toks = _retr_tokens(claim)
-    scores = [_retr_score(e, toks) for e in rows]
-    # 噪音地板：低于最高分 5%（且 <0.2）的命中不算锚 —— 一个 2-gram 的偶合会把
-    # 窗口和真锚连成一整段（F9d 实测：0.028 的填充句把 13:30 的窗口拖回 13:27）。
-    floor = max(0.2, 0.05 * (max(scores) if scores else 0.0))
-    cands: list = []
-    for i, s in enumerate(scores):
-        if s >= floor:
-            cands.append((max(0, i - 8), min(len(rows), i + 32)))
-    cands.sort()
-    merged: list = []
-    for lo, hi in cands:
-        if merged and lo <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
-        else:
-            merged.append((lo, hi))
-    merged.sort(key=lambda w: -sum(scores[w[0]:w[1]]))
-    picked = merged[:max(1, limit)]
+    n = max(1, len(rows))
+    hits: dict = {}                     # token → 出现的条目下标（去重：每 token 只记一次）
+    for i, e in enumerate(rows):
+        for t in _retr_hits(e, toks):
+            hits.setdefault(t, []).append(i)
+    weights = {t: _retr_weight(len(idxs), n) for t, idxs in hits.items()}
+
+    def _cov(win: tuple) -> set:        # 窗口覆盖到的 token 集合
+        lo, hi = win
+        return {t for t, idxs in hits.items() if any(lo <= i < hi for i in idxs)}
+
+    def cover(win: tuple) -> float:     # 窗口分 = 覆盖 token 的 idf 之和（token 不重复计）
+        return sum(weights[t] for t in _cov(win))
+
+    cands = sorted({(max(0, i - 8), min(n, i + 32))
+                    for idxs in hits.values() for i in idxs})
+    # 覆盖分相同时（窗口长度不同、含的 token 一样）取**更紧**的窗口 ——
+    # 不然 40 行的窗会在「同分」里先被选走，恰好把结尾的原话截掉（F9d 实测）。
+    def _rank(w: tuple):
+        c = cover(w)
+        return (-c, -(c / max(1, w[1] - w[0])), w[0])
+    cands.sort(key=_rank)
+    picked: list = []
+    covered: set = set()
+    for w in cands:                     # 互不重叠才算第二个窗口
+        if any(w[0] <= p[1] and p[0] <= w[1] for p in picked):
+            continue
+        w_cov = _cov(w)
+        if picked and not (w_cov - covered):
+            continue        # 第二个窗口必须带来新 token —— 否则只是把密集常见词拖进来
+        picked.append(w)
+        covered |= w_cov
+        if len(picked) >= max(1, limit):
+            break
     if prior is not None:
         pw = _support_window(rows, prior)
         if pw[1] > pw[0] and pw not in picked:

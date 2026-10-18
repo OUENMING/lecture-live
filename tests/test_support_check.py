@@ -224,6 +224,56 @@ class RetrievalF9d(unittest.TestCase):
         self.assertGreater(ng._retr_score({"ts": "10:00:01",
                                            "en": "value 12 at the AC minimum"}, toks), 0.0)
 
+    def test_越稀有越硬_idf权重(self):
+        self.assertGreater(ng._retr_weight(1, 100), 5.0, "只出现一次的词该是硬锚")
+        self.assertLess(ng._retr_weight(100, 100), 1.0, "满课都出现的词该落到地板")
+
+    #: §22 的原话（真实转录 13:45:39–13:46:14）：注意 UCD/女性/体育 满课都是，
+    #: 而 高中/退出/假设性 只在这里出现 —— 窗口必须靠后者定位（作者 F9d 实测）。
+    SOC22 = [
+        {"ts": "13:45:39", "en": "Supposedly I get the answer that women do not participate as much as men do.",
+         "zh": "假设我得到的答案是，女性参与的程度不如男性。"},
+        {"ts": "13:45:51", "en": "in UCD sports because at high school level most of the women drop out of sports.",
+         "zh": "在UCD的体育运动中，因为在高中阶段，大多数女性退出了体育运动。"},
+        {"ts": "13:45:52", "en": "So therefore because they do not continue sports, they are not able to continue their",
+         "zh": "所以，因为她们不再继续参加体育运动，她们就无法继续她们的"},
+        {"ts": "13:46:02", "en": "in high school, there is a reason why they do not end up participating at university level.",
+         "zh": "在高中阶段，有一个原因导致她们最终没有在大学阶段参与。"},
+        {"ts": "13:46:03", "en": "It's a completely hypothetical scenario.", "zh": "这完全是一个假设性的情景。"},
+        {"ts": "13:46:04", "en": "It's not true.", "zh": "事实并非如此。"},
+        {"ts": "13:46:20", "en": "Another question for me probably, why do girls drop out in high school? Right?",
+         "zh": "对我来说，另一个问题可能是，为什么女孩在高中就退出了？对吧？"},
+    ]
+    #: 同课的 UCD/女性/体育 密集区（满课都是这些词 —— 用它们定窗会跑偏）。
+    UCD_DENSE = [{"ts": f"14:{i:02d}:00", "en": "in UCD sports women do not participate as much",
+                  "zh": "在UCD里女性参加体育运动的比例低于男性"} for i in range(30)]
+    #: 中间隔一段无关内容：密集区的窗口够不到真锚（相当于课里隔了十分钟）。
+    GAP = [{"ts": f"14:{40 + i // 60:02d}:{i % 60:02d}", "en": "neutral course logistics sentence",
+            "zh": "无关的课程事务填充。"} for i in range(35)]
+
+    def test_SOC22假警_检索到13点45的假设情景_不挂(self):
+        claim = ("假设你发现 UCD 里女性参加体育运动的比例低于男性，原因是高中阶段很多女生退出了运动"
+                 "——这个场景是课上临时编的假设，不是真实结论。")
+        # 两段密集区 + 中间隔开：按「条目命中求和」定窗会被两段密集区占满两个名额；
+        # 按「覆盖 token」定窗则真锚（稀有词）永远排第一。
+        entries = (self.UCD_DENSE + self.GAP + self.UCD_DENSE + self.GAP[:2]
+                   + self.SOC22)
+        calls: list = []
+
+        def ask(state, instructions):
+            calls.append(state)
+            return [0.9 if "13:46:03" in state else 0.01] * len(instructions)
+
+        review = {"sections": [{"heading": "结果之后", "ts": "13:45", "prose": [claim]}]}
+        out, _, _ = ng.support_check(review, entries=entries, ask=ask)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("13:46:03", calls[0],
+                      "窗口被满课都是的 UCD/女性/体育 拽走了，没找到 13:45 的原话")
+        self.assertNotIn("14:00:00", calls[0],
+                         "密集常见词区不该进 state（覆盖不到新 token 的窗口不选）")
+        rows = [r for r in (out.get("checks") or []) if r.get("status") == "mismatch"]
+        self.assertFalse(rows, f"原话就在转录里，不该挂 ⚠：{rows}")
+
     def test_例题时刻是先验_与检索窗口并存(self):
         entries = [{"ts": f"09:{i:02d}:00", "en": f"filler {i}", "zh": "填充。"} for i in range(60)]
         entries[50] = {"ts": "09:50:00", "en": "the 2000 figure", "zh": "2000 这个数字。"}

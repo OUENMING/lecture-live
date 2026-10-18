@@ -10,6 +10,7 @@
    · 把 `check_review` 里的 `abs(d1) > tol` 改成 `False` → 反例用例红；
    · 把 `functions` 的 `**` 解析去掉 → 正确样例也红（会变成"没有函数"）。
 """
+import json
 import os
 import sys
 import unittest
@@ -970,6 +971,72 @@ class ConserveF12(unittest.TestCase):
                 if r.get("status") == "mismatch"]
         self.assertTrue(rows, "坏方程式没进机械核")
         self.assertEqual("example", nm.unit_of_claim(sec, str(rows[0].get("claim") or "")))
+
+
+class DerivF12(unittest.TestCase):
+    """⭐ F12：**声明的**导数关系按数值导数核对（跨学科：不认「边际」/「MC」）。"""
+
+    @staticmethod
+    def _sec(prompt, steps, program=None, answer=""):
+        ex = {"title": "🎙 13:40", "prompt": prompt, "steps": steps, "answer": answer}
+        if program is not None:
+            ex["program"] = program
+        return {"heading": "h", "ts": "13:40", "prose": [], "example": ex}
+
+    def _flags(self, sec):
+        return [r for r in nm.check_review({"sections": [sec]})
+                if r.get("status") == "mismatch"]
+
+    def test_econ_9真错必须拦(self):
+        # 作者点名：TC' 是 3q²−24q+60，笔记写 3q²−12q+60（dTC/dq 记法声明了关系）。
+        sec = self._sec("$TC(q)=q^3-12q^2+60q$，用 MC=AC 求最低点。",
+                        [{"text": "$MC = dTC/dq = 3q^2 - 12q + 60$", "why": ""}],
+                        answer="$q=6$")
+        self.assertTrue(self._flags(sec))
+
+    def test_正确的MC必须过(self):
+        sec = self._sec("$TC(q)=q^3-12q^2+60q$。",
+                        [{"text": "$MC = dTC/dq = 3q^2 - 24q + 60$", "why": ""}],
+                        answer="$MC=3q^2-24q+60$")
+        self.assertEqual([], self._flags(sec))
+
+    def test_prime记法也核(self):
+        good = self._sec("$AC(q)=q^2-12q+60$。",
+                         [{"text": "$AC'(q)=2q-12$", "why": ""}], answer="$AC'=2q-12$")
+        bad = self._sec("$AC(q)=q^2-12q+60$。",
+                        [{"text": "$AC'(q)=2q-60$", "why": ""}], answer="$AC'=2q-60$")
+        self.assertEqual([], self._flags(good))
+        self.assertTrue(self._flags(bad))
+
+    def test_physics_换名也认_program声明(self):
+        good = self._sec("$x(t)=5t^2$，求 $t=2$ 时速度 $v$。",
+                         [{"text": "$v(t)=10t$", "why": ""}, {"text": "$v(2)=20$", "why": ""}],
+                         program=[{"var": "v", "op": "deriv", "expr": "5*t^2", "x": "t", "at": 2}],
+                         answer="$v(2)=20$（$v(t)=10t$）")
+        bad = json.loads(json.dumps(good))
+        bad["example"]["steps"] = [{"text": "$v(t)=5t$", "why": ""}]
+        bad["example"]["answer"] = "$v(2)=20$（$v(t)=5t$）"
+        self.assertEqual([], self._flags(good))
+        self.assertTrue(self._flags(bad))
+
+    def test_没声明关系不判断(self):
+        # 只有 x(t)=5t² 与 v(t)=5t（错），但没有 prime/d 记法、program 也没有 deriv 步
+        # → 关系没被声明 → **不判断**（不许靠名字猜）。
+        sec = self._sec("$x(t)=5t^2$。", [{"text": "$v(t)=5t$", "why": ""}], answer="$v(t)=5t$")
+        self.assertEqual([], self._flags(sec))
+
+    def test_令导数为零是解方程不误伤(self):
+        # ⭐ 实测假警：`令 f'(x)=0，得 x=±1` 是**解方程**，不是"导数恒为 0"。
+        sec = self._sec("$f(x)=x^3-3x$。",
+                        [{"text": "令 $f'(x)=0$，得 $x=1$ 或 $x=-1$", "why": ""},
+                         {"text": "$f''(x)=6x$", "why": ""}],
+                        answer="$x=1$（极小），$x=-1$（极大）")
+        self.assertEqual([], self._flags(sec))
+
+    def test_点不够就不判断(self):
+        # 域外点太多（log 在负值）→ 有效点 <5 → 不判断（宁可漏，不误伤）。
+        sec = self._sec("$f(x)=\\ln(x)$。", [{"text": "$f'(x)=1/x$", "why": ""}], answer="$1/x$")
+        self.assertEqual([], self._flags(sec))
 
 
 class VerdictF12(unittest.TestCase):

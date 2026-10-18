@@ -647,6 +647,7 @@ def check_review(review: dict, *, transcript: str = "") -> list:
             rows += _qvsp_rows(u, fdefs_by_text)      # ⭐ F9：q 不许当 P（整单元一起看）
         rows += program_rows(s)                       # ⭐ F11 §2：例题 program 代码算、逐数对
         rows += conserve_rows(s)                      # ⭐ F12 §1：例题里的化学方程式必须配平
+        rows += deriv_rows(s)                         # ⭐ F12：例题声明的导数关系按数值导数核
         rows += reuse_rows(s)                         # ⭐ F11 §4：补全题必须是同一道例题挖空
     # ⚠️ 同一句断言在 `prose` 与 `answer` 各出现一次 → 会出两行一模一样的核对表；
     #    空的 claim 也在这里丢掉（实测第三份产物上有两行全空）。
@@ -1741,6 +1742,163 @@ def conserve_rows(section: dict) -> list:
                 return [{"claim": (t or eq)[:120], "status": "mismatch", "recomputed": "",
                          "how": f"方程式「{eq[:60]}」没配平：{why}（F12 §1 守恒核对）"}]
     return []
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# F12（本轮）：**导数/关系核对** —— 例子说了一个函数，又说它的导函数，就按数值导数
+# 在 ≥5 个点上比。跨学科：不认「边际」/「MC」，只认**声明的导数关系**：
+#   · 文本写了导数记法（`F'(x)=…` / `F''(x)=…` / `dF/dx=…`）；
+#   · 或 program 里有 `deriv` 步（声明"这个名字是那个表达式的导数"）。
+# ════════════════════════════════════════════════════════════════════════════
+_DERIV_PRIME = re.compile(
+    r"(?<![A-Za-z0-9])(?P<name>[A-Za-z][A-Za-z0-9]{0,5})\s*(?P<primes>['′]{1,2})\s*"
+    r"(?:\(\s*(?P<var>[A-Za-z])\s*\))?\s*[=＝]\s*(?P<expr>[^，,。；;、\n]+)")
+_DERIV_D = re.compile(
+    r"\bd\s*(?P<name>[A-Za-z][A-Za-z0-9]{0,5})\s*(?:\(\s*(?P<var1>[A-Za-z])\s*\))?\s*"
+    r"/\s*d\s*(?P<var2>[A-Za-z])")
+
+
+def _rhs_after(text: str, pos: int):
+    """`pos` 之后第一个 `=` 右边的表达式（截到句读/下一个等号）。**纯函数。**"""
+    m = re.search(r"[=＝]\s*([^\n]+)", str(text)[pos:])
+    if not m:
+        return None
+    expr = re.split(r"[，,。；;、=＝]", m.group(1))[0].strip()
+    return expr or None
+
+
+def _has_var(expr: str, var: str) -> bool:
+    """表达式里到底有没有那个自变量。**纯函数。**
+
+    ⚠️ 必须的闸：`令 f'(x)=0，得 x=±1` 是**解方程**，不是"f 的导数恒为 0"。
+    只认右边**含自变量**的式子（`3x^2-3`、`2q-12`、`10t`），常数（含 0）一律不当导数断言。
+    """
+    if not var:
+        return False
+    return re.search(rf"(?<![A-Za-z]){re.escape(var)}(?![A-Za-z0-9])",
+                     _clean_expr(str(expr or ""))) is not None
+
+
+def _deriv_points(ex: dict) -> list:
+    """数值比对用的采样点：优先 program 的 `range`，否则默认正区间。**纯函数。**"""
+    for st in (ex.get("program") or []):
+        rng = st.get("range") if isinstance(st, dict) else None
+        if isinstance(rng, (list, tuple)) and len(rng) == 2:
+            try:
+                lo, hi = float(rng[0]), float(rng[1])
+            except (TypeError, ValueError):
+                continue
+            if lo < hi:
+                return [lo + (hi - lo) * i / 6 for i in range(7)]
+    return [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]
+
+
+def _cmp_deriv(base_expr: str, base_var: str, claim_expr: str, claim_var: str,
+               order: int, pts: list, ns: dict):
+    """`claim_expr` 是否等于 `base_expr` 的 `order` 阶数值导数 → `(ok, worst)`。**纯函数。**
+
+    `worst = (差, 点, 应有值, 断言值)`；点不足 5 个或编译不了 → `None`（不判断）。
+    """
+    fb = _compile(base_expr, base_var, ns)
+    fc = _compile(claim_expr, claim_var, ns)
+    if fb is None or fc is None:
+        return None
+    used = 0
+    worst = None
+    for x in pts:
+        try:
+            got = float(fc(x))
+            if order == 2:
+                h = max(1e-4, abs(x) * 1e-5)
+                want = (fb(x + h) - 2 * fb(x) + fb(x - h)) / (h * h)
+            else:
+                want = _d1(fb, x)
+        except Exception:                                   # noqa: BLE001
+            continue
+        if not (math.isfinite(got) and math.isfinite(want)):
+            continue
+        used += 1
+        d = abs(want - got)
+        if d > max(1e-9, 1e-6 * max(abs(want), abs(got))):
+            if worst is None or d > worst[0]:
+                worst = (d, x, want, got)
+    if used < 5:
+        return None
+    return (worst is None, worst)
+
+
+def deriv_rows(section: dict) -> list:
+    """⭐ F12（本轮）：例题里**声明的导数关系**按数值导数核对。**纯函数，无 LLM。**
+
+    关系只能来自**声明**（记法或 program 的 `deriv` 步），不是字母名。在 ≥5 个采样点上
+    比（rel 1e-6 / abs 1e-9）；不满足 → mismatch（走 F8 返修：返一次，复检仍错整件撤）。
+    没声明关系 / 函数没定义 / 点不够 → 不判断（返回空）。
+    """
+    if not isinstance(section, dict):
+        return []
+    ex = section.get("example")
+    if not isinstance(ex, dict):
+        return []
+    texts = [str(ex.get("prompt") or "")]
+    for st in (ex.get("steps") or []):
+        texts.append(_txt(st.get("text")) if isinstance(st, dict) else str(st))
+    texts.append(str(ex.get("answer") or ""))
+    plan = ex.get("plan")
+    if isinstance(plan, dict):
+        for k in ("steps", "knowns", "target"):
+            v = plan.get(k)
+            if v:
+                texts += [str(x) for x in (v if isinstance(v, list) else [v])]
+    fdefs = functions(texts)
+    if not fdefs:
+        return []
+    ns = {name: tup[2] for name, tup in fdefs.items()}
+    pts = _deriv_points(ex)
+    rows: list = []
+
+    def _row(claim: str, why: str, want: float) -> dict:
+        return {"claim": claim[:120], "status": "mismatch", "recomputed": _fmt(want), "how": why}
+
+    for t in texts:                                          # A. 记法声明的导数
+        for m in _DERIV_PRIME.finditer(t):
+            base = fdefs.get(m.group("name"))
+            if not base:
+                continue
+            order = 2 if len(m.group("primes")) >= 2 else 1
+            var = m.group("var") or base[0]
+            if not _has_var(m.group("expr"), var):
+                continue                                     # `令 f'(x)=0` 这类解方程，不是导数断言
+            res = _cmp_deriv(base[1], base[0], m.group("expr"), var, order, pts, ns)
+            if res and not res[0]:
+                _d, x, want, got = res[1]
+                rows.append(_row(t, (f"导数对不上：在 {_fmt(x)} 处 {m.group('name')} 的 {order} 阶"
+                                     f"导数是 {_fmt(want)}，断言写 {_fmt(got)}（F12 导数核对）"), want))
+        for m in _DERIV_D.finditer(t):
+            base = fdefs.get(m.group("name"))
+            if not base:
+                continue
+            rhs = _rhs_after(t, m.end())
+            if not rhs or not _has_var(rhs, m.group("var2") or base[0]):
+                continue
+            res = _cmp_deriv(base[1], base[0], rhs, m.group("var2") or base[0], 1, pts, ns)
+            if res and not res[0]:
+                _d, x, want, got = res[1]
+                rows.append(_row(t, (f"d{m.group('name')}/d{m.group('var2')} 对不上：在 {_fmt(x)} 处"
+                                     f"数值导数是 {_fmt(want)}，断言写 {_fmt(got)}（F12 导数核对）"), want))
+    for st in (ex.get("program") or []):                     # B. program 的 deriv 步
+        if not (isinstance(st, dict) and str(st.get("op")) == "deriv"):
+            continue
+        vname, bexpr, bvar = str(st.get("var") or ""), str(st.get("expr") or ""), str(st.get("x") or "")
+        cd = fdefs.get(vname)
+        if not (vname and bexpr and cd) or not _has_var(cd[1], cd[0]):
+            continue
+        res = _cmp_deriv(bexpr, bvar or cd[0], cd[1], cd[0], 1, pts, ns)
+        if res and not res[0]:
+            _d, x, want, got = res[1]
+            rows.append(_row(f"{vname} 的导数",
+                             (f"{vname}（program 声明为 {bexpr} 的导数）对不上：在 {_fmt(x)} 处"
+                              f"数值导数是 {_fmt(want)}，断言写 {_fmt(got)}（F12 导数核对）"), want))
+    return rows
 
 
 #: 英文数词 → 数值（教授口述「four molecules」也算把 4 说出来了）。

@@ -181,6 +181,25 @@ def b_conserve_dupe_species():
     return _mism(rev)
 
 
+def b_deriv_wrong_mc():
+    """⭐ F12：`dTC/dq` 记法声明了导数关系，写错系数必须拦（作者点名的 econ §9）。"""
+    rev = {"sections": [_sec(example=_ex(
+        prompt="$TC(q)=q^3-12q^2+60q$，用 MC=AC 求最低点。",
+        steps=[{"text": "$MC = dTC/dq = 3q^2 - 12q + 60$", "why": ""}],
+        answer="$q=6$"))]}
+    return _mism(rev)
+
+
+def b_deriv_physics_wrong():
+    """⭐ F12：物理换名（program 的 deriv 步声明关系），写错也必须拦。"""
+    rev = {"sections": [_sec(example=_ex(
+        [{"var": "v", "op": "deriv", "expr": "5*t^2", "x": "t", "at": 2}],
+        prompt="$x(t)=5t^2$，求 $t=2$ 时速度 $v$。",
+        steps=[{"text": "$v(t)=5t$", "why": ""}],
+        answer="$v(2)=20$（$v(t)=5t$）"))]}
+    return _mism(rev)
+
+
 def b_verdict_forced_fragment():
     """⭐ F12 §2：complete 但结论数字不在 quote、也无 program → 强制 fragment。"""
     ex = _ex(answer="P≈346.4。")
@@ -326,13 +345,43 @@ def p_verdict_supported_stays_complete():
     return str(out.get("verdict")) != "complete"
 
 
+def p_deriv_mc_ok():
+    """⭐ F12：正确的 MC（TC'=3q²−24q+60）必须过。"""
+    rev = {"sections": [_sec(example=_ex(
+        prompt="$TC(q)=q^3-12q^2+60q$。",
+        steps=[{"text": "$MC = dTC/dq = 3q^2 - 24q + 60$", "why": ""}],
+        answer="$MC=3q^2-24q+60$"))]}
+    return _mism(rev)
+
+
+def p_deriv_physics_ok():
+    """⭐ F12：physics 换名（v 是 program 的 deriv 步）也必须过。"""
+    rev = {"sections": [_sec(example=_ex(
+        [{"var": "v", "op": "deriv", "expr": "5*t^2", "x": "t", "at": 2}],
+        prompt="$x(t)=5t^2$，求 $t=2$ 时速度 $v$。",
+        steps=[{"text": "$v(t)=10t$", "why": ""}, {"text": "$v(2)=20$", "why": ""}],
+        answer="$v(2)=20$（$v(t)=10t$）"))]}
+    return _mism(rev)
+
+
+def p_deriv_solve_zero_ok():
+    """⭐ F12：`令 f'(x)=0` 是解方程，不许当"导数恒为 0"（实测假警）。"""
+    rev = {"sections": [_sec(example=_ex(
+        prompt="$f(x)=x^3-3x$。",
+        steps=[{"text": "令 $f'(x)=0$，得 $x=1$ 或 $x=-1$", "why": ""},
+               {"text": "$f''(x)=6x$", "why": ""}],
+        answer="$x=1$（极小），$x=-1$（极大）"))]}
+    return _mism(rev)
+
+
 MUST_BLOCK = [b_limit_as_min, b_limit_extremum_word, b_program_monotonic,
               b_program_answer_intermediate, b_program_wild_number, b_faded_new_number,
               b_q_as_p, b_value_as_point, b_self_talk, b_first_person_guess,
               b_trivial_cue, b_dupe_sentence, b_sign_contradiction,
               b_flow_repeats_example, b_same_title_component, b_unsupported_numeric_claim,
               b_conserve_bad_chem, b_conserve_unbalanced, b_conserve_charge_unbalanced,
-              b_conserve_dupe_species, b_verdict_forced_fragment]
+              b_conserve_dupe_species, b_verdict_forced_fragment, b_deriv_wrong_mc,
+              b_deriv_physics_wrong]
 
 MUST_PASS = [p_sum_chain_no_false_div, p_chemistry_imperative_not_collected, p_program_ok,
              p_chained_fraction_ok, p_rounding_stationary_ok, p_min_point_not_flagged,
@@ -340,7 +389,8 @@ MUST_PASS = [p_sum_chain_no_false_div, p_chemistry_imperative_not_collected, p_p
              p_valid_flow_kept, p_single_label_untouched, p_non_numeric_downgrade_not_warned,
              p_min_at_six_ok, p_sign_correct_ok, p_symbol_claim_retrieves, p_no_program_skip,
              p_conserve_mno4_ok, p_conserve_fe_ok, p_conserve_nonchem_arrow_ok,
-             p_verdict_supported_stays_complete]
+             p_verdict_supported_stays_complete, p_deriv_mc_ok, p_deriv_physics_ok,
+             p_deriv_solve_zero_ok]
 
 
 class FrozenBench(unittest.TestCase):

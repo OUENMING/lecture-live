@@ -196,6 +196,15 @@ def render(d: NoteData) -> str:
         L += [f"> ✅ 数字核对：{n_ok + n_bad} 处已核"
               + (f"（其中 {n_bad} 处按 📖/📚 改过）" if n_bad else "")
               + f" · {n_un} 处待你确认（明细见详细版）"]
+    # 精修出了异常（失败 / 部分失败 / 被跳过）要在正文说一句；常态 off 不报警（只进抬头）。
+    # ⚠️ d26ab88 改简版时把这几行一起删了 → 只剩抬头 `polish:`，test_wrapup 慢档红了一天。
+    try:
+        from obsidian_writer import _POLISH_NOTE
+    except Exception:                                          # noqa: BLE001
+        _POLISH_NOTE = {}
+    _warn = _POLISH_NOTE.get(d.polish_state)
+    if _warn:
+        L += [f"> {_warn}"]
     if d.katex_ok is False:
         L += ["> ⚠ 这次没装上公式字体（详细版里公式会显示成 TeX 源码）"]
     L += [""]

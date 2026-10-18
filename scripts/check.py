@@ -49,7 +49,7 @@ BASELINE = ROOT / "scripts/pyright_baseline.json"
 SLOW_FOR = {
     "test_update.py": ["update.py", "whatsnew.py", "cl", "make-app.sh", "install.sh", "VERSION"],
     "test_live_summary.py": ["live_summary.py", "chapter.py", "main.py"],
-    "test_wrapup.py": ["wrapup.py", "polish.py", "obsidian_writer.py", "keypoints.py", "main.py"],
+    "test_wrapup.py": ["wrapup.py", "polish.py", "obsidian_writer.py", "note_render.py", "keypoints.py", "main.py"],
     "test_fetch_model.py": ["fetch_model.py", "models.py"],
 }
 

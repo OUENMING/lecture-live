@@ -752,6 +752,34 @@ class TestF13ProgramIdentifiersAndGivens(unittest.TestCase):
         rows = nm.program_rows({"example": ex})
         self.assertEqual(["ok"], [r["status"] for r in rows], rows)
 
+    def test_减号被当成分子的符号_不许假指控(self):
+        """⚠️ F13 复跑实测的**假指控**（BUSI3243 的 R² 例子）：
+        `$R^2=1-38/200=0.81$` —— `_DIV` 的 `-?` 把前面那个**减号**吃进分子（a=-38），
+        算出 -0.19 就印 ⚠「-38÷200=-0.19，不是0.81」。那是**和式里的一项**。"""
+        t = ("TSS=200、RSS=38，$R^2=1-38/200=0.81$；若换个模型 RSS 变成 60，"
+             "R² 掉到 $1-60/200=0.70$。")
+        rows = nm._rows_for_text(t, {})
+        self.assertEqual([], [r for r in rows if "÷" in str(r.get("how"))], rows)
+
+    def test_单项除法与一元负号照旧核(self):
+        """反向：单独一项的除法、以及真的**一元**负号，判据照旧。"""
+        ok = nm._rows_for_text("密度 = 40/2 = 20。", {})
+        self.assertEqual(["ok"], [r["status"] for r in ok if "÷" in str(r["how"])], ok)
+        bad = nm._rows_for_text("$R^2=38/200=0.81$。", {})
+        self.assertEqual(["mismatch"], [r["status"] for r in bad if "÷" in str(r["how"])], bad)
+        neg = nm._rows_for_text("斜率 = -38/2 = -19。", {})
+        self.assertEqual(["ok"], [r["status"] for r in neg if "÷" in str(r["how"])], neg)
+
+    def test_没有_givens_的老例题照旧(self):
+        """反向：没有 `givens` 的例题（econ 那几道 `60*q+500/q`）不许被 ④b 误伤。"""
+        sec = {"heading": "[13:16] 停产价格", "ts": "13:16",
+               "example": {"title": "🎙 13:16", "prompt": "求 AC 最低点",
+                           "program": [{"var": "q_star", "op": "argmin",
+                                        "expr": "60*q + 500/q", "x": "q", "range": [1, 10]}],
+                           "steps": [{"text": "求导", "why": ""}], "answer": "q*=2.89"}}
+        rows = nm.program_rows(sec)
+        self.assertEqual(["ok"], [r["status"] for r in rows], rows)
+
     def test_很多不像题面量的_givens_不许误伤(self):
         """F13 复跑实测的**误报**：两道没有 `a` 的例题上写着 `{'a': 1.0}`（模型自己的
         记账），旧判据把这题算对的 ✅ 判成"没用到给定"。无关的 given 不算题面给的量。"""

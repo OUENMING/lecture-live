@@ -43,6 +43,27 @@ class SplitChunks(unittest.TestCase):
         c = [c for c in mt.split_chunks(MD) if "shutdown" in c.text][0]
         self.assertIn("§Exercise 7", c.cite())
 
+    def test_标题后紧跟正文不许丢(self):
+        """DB 审查 D-16：`## 标题\\n正文`（中间没有空行）的块 —— 标题只吃自己那一行，
+        后面的正文必须留下。旧实现把整块当标题 `continue` 掉 → **静默丢正文**。"""
+        text = "## Exercise 5 answer\nAverage cost is AC = q^2 - 12q + 60."
+        chunks = mt.split_chunks(text)
+        self.assertEqual([c.heading for c in chunks], ["Exercise 5 answer"], chunks)
+        self.assertIn("Average cost", chunks[0].text, "标题后的正文被丢了")
+
+    def test_标题后正文也进检索与核对(self):
+        text = ("## Exercise 5 answer\n"
+                "The shutdown price equals the minimum of the average cost.")
+        idx = mt.Materials([mt.Chunk(file="f.md", heading=c.heading, text=c.text)
+                            for c in mt.split_chunks(text)])
+        self.assertTrue(idx.verify("shutdown price"), "正文丢了 → 核对判成没出现过")
+
+    def test_多个标题连排每段各自成块(self):
+        text = "# A\n# B\nbody of B"
+        chunks = mt.split_chunks(text)
+        self.assertEqual([c.heading for c in chunks], ["B"], chunks)
+        self.assertIn("body of B", chunks[0].text)
+
 
 class Search(unittest.TestCase):
     def _idx(self):
@@ -71,6 +92,26 @@ class Search(unittest.TestCase):
                             for i in range(20)])
         got = idx.search("word", k=10, max_chars=500)
         self.assertLessEqual(sum(len(c.text) for c in got), 1500)
+
+    def test_无标题材料的块不被当成同一节吞掉(self):
+        """DB 审查 D-1：没有 markdown 标题的材料（`.txt`）所有块 `heading` 都是 `""` ——
+        旧键 `(file, heading)` 相同 → 只能返回得分最高的一块，top-k 退化成 1 块。"""
+        q = "transfer pricing elasticity of demand"
+        body = "\n\n".join(f"{q} " * 8 + f"这是第 {i} 段的独有内容。" for i in range(3))
+        chunks = [mt.Chunk(file="notes.txt", heading=c.heading, text=c.text)
+                  for c in mt.split_chunks(body)]
+        self.assertGreater(len(chunks), 1, "夹具本身该切成多块")
+        idx = mt.Materials(chunks)
+        got = idx.search(q, k=3)
+        self.assertGreater(len(got), 1, "无标题文件只返回了一块（top-k 退化成 1）")
+        self.assertEqual({c.text for c in got}, {c.text for c in chunks})
+
+    def test_有标题的节仍然只留一块(self):
+        """去重的本意（同一节不重复取）不许被上面的修复破坏。"""
+        idx = mt.Materials([mt.Chunk(file="f.md", heading="S",
+                                     text=f"word alpha part {i}") for i in range(5)])
+        got = idx.search("word alpha", k=3)
+        self.assertEqual(len(got), 1, "同一节的多个块该只留一块")
 
 
 class Verify(unittest.TestCase):

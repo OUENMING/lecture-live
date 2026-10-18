@@ -92,20 +92,38 @@ def split_chunks(text: str, *, heading: str = "") -> list:
         if body:
             out.append(Chunk(file="", heading=cur, text=body[:CHUNK_MAX]))
 
-    for block in re.split(r"\n\s*\n", text or ""):
-        m = _HEADING.match(block)
-        if m:
+    def add(body: str):
+        """一段**正文**（已确认不是标题）→ 并进当前块（超长就落一块）。"""
+        body = body.strip()
+        if not body:
+            return
+        if buf and sum(len(x) for x in buf) + len(body) > CHUNK_TARGET:
             flush()
-            cur = m.group(2) if len(m.groups()) > 1 else m.group(1)
-            cur = cur.strip().strip("#").strip()
-            continue
-        if not block.strip():
-            continue
-        if buf and sum(len(x) for x in buf) + len(block) > CHUNK_TARGET:
-            flush()
-        buf.append(block.strip())
+        buf.append(body)
         if sum(len(x) for x in buf) > CHUNK_MAX:
             flush()
+
+    for block in re.split(r"\n\s*\n", text or ""):
+        if not block.strip():
+            continue
+        # ⚠️ 标题**只吃它自己那一行**。老实现把「以标题开头」的整块都当标题 `continue`
+        #    掉 —— 块边界只有空行，于是像 `## Exercise 5 answer\nAverage cost is …`
+        #    这种「标题后紧跟正文、中间没有空行」的块（slides / 手写 `.md` / 拖进来的
+        #    `.txt` 很常见）**正文整段被静默丢弃**：`search` 检索不到、`verify`（由各块
+        #    拼成）也判成"本课材料里没出现过"。改为逐行判，标题后剩下的行继续走切块。
+        body_lines: list = []
+        for line in block.split("\n"):
+            m = _HEADING.match(line)
+            if m:
+                if body_lines:                 # 标题前攒的正文属于**上一个**标题
+                    add("\n".join(body_lines))
+                    body_lines = []
+                flush()
+                cur = (m.group(1) or "").strip().strip("#").strip()
+                continue
+            body_lines.append(line)
+        if body_lines:
+            add("\n".join(body_lines))
     flush()
     return out
 
@@ -240,7 +258,12 @@ class Materials:
         seen_heads: set = set()
         for s, i in scored:
             c = self._chunks[i]
-            key = (c.file, c.heading)
+            # ⚠️ 「同一节连着命中时只留一块」只对**有标题的节**有意义 —— `(file, heading)`
+            #    是节的**身份**。没有标题的材料（纯 `.txt`、或通篇只有一个 `# 标题` 之外
+            #    没有子标题）所有块 `heading` 相同（`""`）→ 旧键把它们当同一节，该文件只能
+            #    返回得分最高的那一块，top-k 检索对这类文件直接退化成 1 块（**静默**：
+            #    不报错，只是内容永不被检索到）。无名节用块序号当身份（= 不按节去重）。
+            key = (c.file, c.heading) if c.heading else (c.file, i)
             if key in seen_heads:                 # 同一节连着命中时只留一块，省 prompt
                 continue
             body = c.text[:CHUNK_MAX]

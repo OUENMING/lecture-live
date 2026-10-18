@@ -43,11 +43,14 @@ def headers(key: str) -> dict:
 
 
 def chat_json(key: str, model: str, system: str, user: str, *, max_tokens: int,
-              temperature: float = 0.2, timeout: float = 180.0):
+              temperature: float = 0.2, timeout: float = 180.0, return_meta: bool = False):
     """非流式、`response_format=json_object`、关掉思考模式；返回模型给的 JSON（**原样**，可能不是 dict）。
 
     ⚠️ 失败一律抛（`httpx.HTTPError` / `KeyError` / `json.JSONDecodeError`…）—— 吞不吞、吞成什么，
        是调用方的事（它们各自的约定不同：`None` / `{}` / 往上抛给收尾锁）。
+    ⚠️ `return_meta=True` → `(obj, finish_reason)`：只有"截断必须当失败"的调用方
+       （`note_v2.overview` 五分钟串讲）要它 —— `finish_reason=="length"` 的 JSON
+       有时还能解析出来，而半截的叙述印进笔记比没有更坏（2026-10-18）。
     """
     import httpx
     payload = {"model": model, "stream": False, "max_tokens": max_tokens,
@@ -58,4 +61,8 @@ def chat_json(key: str, model: str, system: str, user: str, *, max_tokens: int,
     r = httpx.post(f"{base_for(key)}/chat/completions", headers=headers(key),
                    json=payload, timeout=timeout)
     r.raise_for_status()
-    return json.loads(r.json()["choices"][0]["message"]["content"])
+    choice = (r.json().get("choices") or [{}])[0]
+    obj = json.loads(choice["message"]["content"])
+    if return_meta:
+        return obj, str(choice.get("finish_reason") or "")
+    return obj

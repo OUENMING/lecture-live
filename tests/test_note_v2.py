@@ -270,11 +270,55 @@ class VerifyNumbers(unittest.TestCase):
 
 class Schedule(unittest.TestCase):
     def test_间隔日期(self):
+        # ⭐ 作者 2026-10-18 拍板：今晚 / +3 天 / +7 天（日期从**上课那天**算）。
         self.assertEqual(nv.review_dates("2026-10-15"),
-                         ["2026-10-17", "2026-10-22", "2026-11-05"])
+                         ["2026-10-15", "2026-10-18", "2026-10-22"])
 
     def test_日期坏了返回空(self):
         self.assertEqual(nv.review_dates("不是日期"), [])
+
+    def test_三档标签与动作(self):
+        rows = nv.schedule_rows(["2026-10-15", "2026-10-18", "2026-10-22"])
+        self.assertEqual([r["label"] for r in rows], ["今晚", "+3 天", "+7 天"])
+        self.assertEqual(rows[0]["date"], "2026-10-15")
+        self.assertTrue(all(r["task"] for r in rows), rows)
+        self.assertEqual(nv.schedule_rows([]), [])
+
+
+class Overview(unittest.TestCase):
+    """五分钟串讲的生成侧（全替身 chat，零网络）—— 版式 A，作者 2026-10-18。"""
+
+    def _rev(self):
+        return {"sections": [dict(SECTION), dict(SECTION, heading="第二节")]}
+
+    def test_输出字段被收进来(self):
+        def chat(s, u, mt):
+            self.assertIn("第 2 节", u)          # 输入用的是合并后的小节
+            self.assertNotIn("sentence about cost", u, "串讲输入里不该有转录原文")
+            return {"paragraphs": ["**一段。**", "**二段。**"],
+                    "one_line_takeaway": "一句话", "takeaways": ["a", "b", "c", "d"],
+                    "self_check": "yes"}
+        got = nv.overview(self._rev(), chat=chat)
+        self.assertEqual(got["paragraphs"], ["**一段。**", "**二段。**"])
+        self.assertEqual(got["one_line"], "一句话")
+        self.assertEqual(got["takeaways"], ["a", "b", "c"])   # 至多 3 条
+        self.assertEqual(got["self_check"], "yes")
+
+    def test_截断当失败(self):
+        """⭐ `finish_reason=="length"` → 整段不要（半截叙述比没有更坏）。"""
+        def cm(s, u, mt):
+            return {"paragraphs": ["半截……"]}, "length"
+        self.assertEqual(nv.overview(self._rev(), chat=lambda *a: {}, chat_meta=cm), {})
+
+    def test_没小节不调用(self):
+        def boom(*a):
+            raise AssertionError("不该调用")
+        self.assertEqual(nv.overview({}, chat=boom), {})
+
+    def test_调用炸了返回空(self):
+        def boom(s, u, mt):
+            raise RuntimeError("网络炸了")
+        self.assertEqual(nv.overview(self._rev(), chat=boom), {})
 
 
 class Anki(unittest.TestCase):
@@ -381,14 +425,20 @@ class RenderShape(unittest.TestCase):
         self.assertIn("变式", h)
         self.assertTrue("2q-12" in h, "补全题的空也在详细版里")
 
-    def test_自测_题干在简版_答案在详细版(self):
-        """⭐ 简版列题干（复习时知道自己要会什么），「先答再揭晓」的答案在详细版。"""
+    def test_自测_题干在简版_答案折叠在简版(self):
+        """⭐ 版式 A（作者 2026-10-18）：简版列 3–5 题**带折叠答案**（Obsidian callout `-`）。
+        ⚠️ 折叠≠裸文本：答案只许出现在 `> [!question]- 答案` 的引用行里（点一下才展开），
+        否则就是"题还没做就看到了"；完整题库与逐步解析仍在详细版。"""
         md = nr.render(self._data())
-        self.assertIn("自测 1 题", md)
+        self.assertIn("复习速测（先想再看）", md)
         self.assertIn("为什么 $MC<AC$ 时 $AC$ 会下降？", md)
-        self.assertNotIn("低于平均的数掺进来会把平均拉低", md, "答案不该在简版里（会剧透）")
+        self.assertIn("> [!question]- 答案", md)
+        ans = "低于平均的数掺进来会把平均拉低。"
+        j = md.index(ans)
+        self.assertEqual(md[j - 2:j], "> ", "答案没在折叠 callout 里（会剧透）")
+        self.assertIn("自测共 1 题", md)
         h = nh.note_page(self._data())
-        self.assertIn("低于平均的数掺进来会把平均拉低", h)
+        self.assertIn(ans, h)
         self.assertIn("先答再揭晓", h)
 
     def test_覆盖度与三道核清单在详细版(self):

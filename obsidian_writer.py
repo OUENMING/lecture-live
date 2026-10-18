@@ -1042,6 +1042,41 @@ class ObsidianWriter:
                                    max_tokens=max_tokens, temperature=0.3, timeout=300)
         return obj if isinstance(obj, dict) else {}
 
+    def _chat_meta(self, system: str, user: str, max_tokens: int):
+        """同 `_chat`，但带回 `finish_reason` —— 只有「五分钟串讲」走这条路：
+        截断（`length`）必须被当成**失败**（半截叙述印进笔记比没有更坏，2026-10-18）。"""
+        import llm_client
+        obj, finish = llm_client.chat_json(self._key, self._model, system, user,
+                                           max_tokens=max_tokens, temperature=0.3,
+                                           timeout=300, return_meta=True)
+        return (obj if isinstance(obj, dict) else {}), finish
+
+    def _with_overview(self, review: dict) -> tuple:
+        """⭐ 五分钟串讲（版式 A，2026-10-18）：合并后**一次小调用**，输入只有小节（无转录）。
+
+        ⚠️ 失败（调用炸了 / 截断 / 模型没回可用内容）都不许抛、也不许印半截：
+           记一条 ⚠ 到页尾、速览退回首句兜底 —— 笔记照常生成（fail-soft）。
+        """
+        import note_v2
+        try:
+            got = note_v2.overview(review, chat=self._chat, chat_meta=self._chat_meta)
+        except Exception as e:                                 # noqa: BLE001
+            return review, [], [f"五分钟串讲没生成（{type(e).__name__}）—— 详细版里少这一层"]
+        if not got or not got.get("paragraphs"):
+            return review, [], ["五分钟串讲没生成（模型没回可用内容/被截断）—— 详细版里少这一层"]
+        out = dict(review)
+        out["overview_long"] = list(got["paragraphs"])
+        meta: dict = {}
+        if got.get("one_line"):
+            meta["one_line"] = got["one_line"]
+        if got.get("takeaways"):
+            meta["takeaways"] = list(got["takeaways"])
+        if meta:
+            out["overview"] = meta
+        if got.get("self_check"):
+            print(f"   🧵 串讲自检：{got['self_check'][:70]}", flush=True)
+        return out, [], []
+
     def _review_v2(self, entries: list[dict], on_progress=None) -> dict:
         """v2 复习层：课件索引 → 分块 review → 覆盖度对齐 → 数字三道核 → 术语库。
 
@@ -1132,12 +1167,17 @@ class ObsidianWriter:
         except Exception as e:                                # noqa: BLE001
             print(f"⚠ 数字核对失败({str(e)[:60]}); 笔记照常生成")
         # ⭐ 正文纪律（作者第 2、3 条）：删猜测句 / 引号里的英文必须逐字。
+        # ⭐ 版式 A（2026-10-18）：清理链里插一步「五分钟串讲」—— 放在讲解已经清过一遍
+        #    之后，它自己再被后面的第二遍 `scrub` 与 `quote_check` 覆盖（新写的散文
+        #    必须走同一条纪律，不能因为是"总结层"就免检）。
         for fn, label in ((lambda r: note_ledger.reconcile(r),
                            "更正账本核对"),
                           (lambda r: note_guards.scrub(r), "猜测句清理"),
                           (lambda r: note_guards.ensure_caliber(
                               r, materials=self._materials), "停产价格口径"),
                           (lambda r: note_ledger.ensure_min_value(r), "最小平均成本补值"),
+                          (lambda r: self._with_overview(r), "五分钟串讲"),
+                          (lambda r: note_guards.scrub(r), "猜测句清理（串讲）"),
                           (lambda r: note_guards.quote_check(
                               r, materials=self._materials,
                               transcript="\n".join(

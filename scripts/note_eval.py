@@ -481,18 +481,21 @@ def child_run(key: str, out: pathlib.Path, mode: str, label: str,
     calls: list = []
     orig_chat = llm_client.chat_json
 
-    def _chat(key_, model, system, user, *, max_tokens, temperature=0.2, timeout=180.0):
+    def _chat(key_, model, system, user, *, max_tokens, temperature=0.2, timeout=180.0,
+              return_meta=False):
+        """`llm_client.chat_json` 的替身（带 tape / 用量）。`return_meta` 是
+        「五分钟串讲」那条路（要看 `finish_reason`）—— 回放/真调都按 `"stop"` 记。"""
         k = _tape_key(system, user, max_tokens)
         usage["prompt_chars"] += len(system or "") + len(user or "")
-        if k in tape:
-            usage["calls"] += 1
-            return copy.deepcopy(tape[k])
-        got = orig_chat(key_, model, system, user, max_tokens=max_tokens,
-                        temperature=temperature, timeout=timeout)
         usage["calls"] += 1
-        usage["resp_chars"] += len(json.dumps(got, ensure_ascii=False))
-        calls.append({"k": k, "max_tokens": max_tokens, "resp": got})
-        return got
+        if k in tape:
+            got = copy.deepcopy(tape[k])
+        else:
+            got = orig_chat(key_, model, system, user, max_tokens=max_tokens,
+                            temperature=temperature, timeout=timeout)
+            usage["resp_chars"] += len(json.dumps(got, ensure_ascii=False))
+            calls.append({"k": k, "max_tokens": max_tokens, "resp": got})
+        return (got, "stop") if return_meta else got
     llm_client.chat_json = _chat
 
     raw_box: dict = {}

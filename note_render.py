@@ -212,6 +212,15 @@ def render(d: NoteData) -> str:
         # ⚠️ 上限 5 条：`review_plan` 是**每块**各给 2–3 条再合并的（5 块 = 十几条），
         #    铺出来就是一屏噪音 —— 这一节是"学完会什么"，不是课后作业清单。
         L += ["**学完你应该会：**", ""] + [f"- {_one(x)}" for x in plan[:5]] + [""]
+    # ⭐ 版式 A（作者 2026-10-18）：带日期的复习排程行（今晚 / +3 天 / +7 天）。
+    #    日期从**上课那天**算（不是生成那天）；md 只写日期与动作，不推送。
+    import note_v2
+    sched = note_v2.schedule_rows(list(d.review_dates or []))
+    if sched:
+        L += ["**复习排程**（笔记只写日期，不推送）："
+              + " · ".join(f'{r["label"]} `{r["date"]}` {r["task"]}' for r in sched), ""]
+        L += ["> ⚠️ **感觉顺利 ≠ 学得牢**：重读一遍觉得「都懂」是最常见的错觉（desirable "
+              "difficulty）。真正的检验是**合上笔记能不能写出来** —— 收尾那三句总结就是干这个的。", ""]
 
     # ── ④ 课堂纲要（骨架先于细节）──────────────────────────────────────
     try:
@@ -222,6 +231,15 @@ def render(d: NoteData) -> str:
                 L += _sec
     except Exception:                                          # noqa: BLE001
         pass
+
+    # ── ④b 复习速测（先想再看；3–5 题，答案折叠）—— 版式 A，作者 2026-10-18 ──
+    # ⚠️ 折叠答案用的是 Obsidian callout 的 `-` 语法（点一下才展开），不是把答案印在题目下。
+    if qa:
+        L += ["## 复习速测（先想再看）", ""]
+        L += ["*先合上笔记自己答，答完展开对照；完整题库与逐步解析在详细版。*", ""]
+        for i, x in enumerate(qa[:5], 1):
+            L += [f"{i}. **{_one(x.get('q'))}**", "",
+                  "> [!question]- 答案", "> " + _one(x.get("a")), ""]
 
     # ── ⑤ 本课术语 ────────────────────────────────────────────────────
     L += ["## 本课术语", ""]
@@ -240,11 +258,6 @@ def render(d: NoteData) -> str:
 
     # ── ⑥ 一些事儿（复习排程 / Anki / 我标的地方 / 标星句 / 🎯）──────────
     L += ["## 一些事儿", ""]
-    if d.review_dates:
-        L += ["**复习排程**（笔记只写日期，不推送）："
-              + " · ".join(f"第 {i + 1} 次 `{dt}`" for i, dt in enumerate(d.review_dates)), ""]
-        L += ["> ⚠️ **感觉顺利 ≠ 学得牢**：重读一遍觉得「都懂」是最常见的错觉（desirable "
-              "difficulty）。真正的检验是**合上笔记能不能写出来**。", ""]
     if d.anki_name:
         L += [f"- 自测与术语已导出为 Anki 卡：`{d.anki_name}`（导入 Anki → File → Import）"]
     if d.lost_items:
@@ -263,9 +276,11 @@ def render(d: NoteData) -> str:
             tag = f"L{ix[0] + 1}" if len(ix) == 1 else f"L{ix[0] + 1}–{ix[-1] + 1}"
             L += [f"- `{p:.2f}` `{tag}` {text}"]
     if qa:
-        L += ["", f"**自测 {len(qa)} 题**（先自己想，答案与解析在详细版里）：", ""]
-        for i, x in enumerate(qa, 1):
-            L += [f"{i}. {_one(x.get('q'))}"]
+        n_shown = min(len(qa), 5)
+        more = len(qa) - n_shown
+        L += ["", f"**自测共 {len(qa)} 题**：上面「复习速测」列了 {n_shown} 题（答案折叠）；"
+              + (f"另外 {more} 题与全部逐步解析在详细版 HTML 里。" if more
+                 else "完整解析在详细版 HTML 里。")]
     L += [""]
 
     # ── ⑦ 生成核对记录（内部 · 折叠）───────────────────────────────────

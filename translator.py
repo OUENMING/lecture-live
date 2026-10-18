@@ -10,7 +10,7 @@
 用一把锁保证串行生成(GPU 上顺序执行)。
 """
 from __future__ import annotations
-import difflib, pathlib, re, threading
+import difflib, os, pathlib, re, threading
 
 
 # 常驻核心词(高频概念): 无论句子内容都注入, 约 15 token。
@@ -22,6 +22,37 @@ CORE_TERMS = [
 ]
 MAX_DYNAMIC_TERMS = 3
 NO_TERMS = "(无特定术语)"           # `select_terms` 没有任何术语时的占位（云端 prompt 里不再用它，见 `select_term_parts`）
+
+#: ⭐ #4 B2（2026-10-17 作者拍板）：术语**中文译名**注入的开关与上限。
+#: 开关在内（默认开，`CLASSLIVE_TERM_ZH=0` 关）—— `select_term_zh` 里判，
+#: 调用方拿到的永远是"按当下开关该注入的"，不可能忘。
+TERM_ZH_ENV = "CLASSLIVE_TERM_ZH"
+TERM_ZH_MAX_ENV = "CLASSLIVE_TERM_ZH_MAX"
+#: 每句最多注入几条译名（`CLASSLIVE_TERM_ZH_MAX` 可配；先 8 条，作者 2026-10-17）。
+TERM_ZH_MAX = 8
+#: 译名段的小标题（四处 prompt 共用同一份，别各写各的）。
+TERM_ZH_HEADER = "Term translations for this utterance (prefer these Chinese renderings):"
+
+
+def term_zh_enabled() -> bool:
+    """`CLASSLIVE_TERM_ZH`：默认**开**；`0/false/no/off` 关。"""
+    v = (os.environ.get(TERM_ZH_ENV) or "").strip().lower()
+    if not v:
+        return True
+    return v in ("1", "true", "yes", "on")
+
+
+def _term_zh_max() -> int:
+    """`CLASSLIVE_TERM_ZH_MAX` → 条数上限；没设/不合法 → `TERM_ZH_MAX`（**不抛**）。"""
+    raw = (os.environ.get(TERM_ZH_MAX_ENV) or "").strip()
+    if raw:
+        try:
+            n = int(raw)
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+    return TERM_ZH_MAX
 
 
 SYSTEM_PROMPT = """你是英文课堂字幕校正+翻译助手。给你一句 ASR 转写的英文、课程领域、本课术语表, 以及最近几句上下文。
@@ -279,6 +310,74 @@ def course_title(glossary_path: str | None, course: str | None) -> str:
     return ""
 
 
+#: ⭐ #4 B2（2026-10-17 作者拍板：只注入**本句命中**的译名，不注入全表）：
+#: 复核过的**错语境**条目 —— `term_notes.json` 里的释义与课堂语境不符，一律不进译名表。
+#: 这五条来自 `scratchpad/chain/ab/review.txt`（B2 实验的人工复核）；⚠️ 它们今天**全是
+#: gloss 档**（`level != "basic"` 已天然挡住）—— 名单是**第二道闸**：哪天被改成 basic、
+#: 或又冒出新条目，判据（`tests/test_translator.py`）仍然钉着"不许注入"。
+#: 表里每行都写"为什么"。名单一旦变长就说明有别的信号没接上（同 EVERYDAY 的纪律）。
+_ZH_BLOCKED = {
+    "cso": "term_notes=公民社会组织；本课术语表配对的是 Central Statistics Office（中央统计局）",
+    "moderator": "term_notes=调节变量（统计模型语境）；课堂里是主持老师",
+    "panel": "term_notes=面板数据（计量语境）；课堂里是 panel discussion（嘉宾讨论）",
+    "fiona macmanus": "人名（嘉宾）；term_notes 的公民社会研究语境与本课对不上",
+    "epoch": "term_notes=地质纪元（气候/地质课语境）；经济课无此用法",
+}
+
+
+def term_zh_map(glossary_path: str | None, course: str | None, *,
+                notes=None, terms: list | None = None) -> dict[str, str]:
+    """本课「英文 → 中文译名」表（译名注入的数据源）。**永不抛**（拿不到 → `{}`）。
+
+    数据源（2026-10-17 查证）：
+      · 笔记 v2 的中文对照走 `build_notes.TermNotes` 读 `term_notes.json`
+        （basic = 一行速查 / gloss = 完整解析）—— **只取 basic 档**：短、正是要的"中文名"；
+      · `term_notes_auto.json`（运行时缓存）里 `add()` 写的一律是 gloss 档 → 天然不进；
+      · 复习层 `terms[{en, zh}]`（`note_v2`）只在收尾生成、不落盘 → 课上读不到，不用。
+
+    闸（任一不过就不注入）：
+      1. 词在**本课术语表**里（`course_term_list`，与 always 段同一份加载口径与上限）；
+      2. `TermNotes` 查得到 且 `level == "basic"` 且 detail 非空（= "有中文名"）；
+      3. 不是人名条目（`type: person`）；
+      4. 不在 `_ZH_BLOCKED`（A/B 复核过的错语境条目，见上）。
+
+    ⚠️ 刻意**不**沿用 `note_terms.drop_reason` 的「常识词」那一支：它判的是
+       "值不值得给学生讲"（`slope`/`plot`/`graph` 被它挡），而译名注入是为**翻译一致性**
+       —— "slope — 斜率"恰恰有用。取舍有判据钉着（test_translator 的 B2 用例）。
+    """
+    try:
+        import build_notes
+        ts = list(terms) if terms is not None else course_term_list(glossary_path, course)
+        if not ts:
+            return {}
+        if notes is None:
+            # ⚠️ curated 文件不存在就别构造 TermNotes —— 它构造时会打印"术语表未加载"
+            #    警告；课上用不了译名是**常态**（用户可能根本没有这份文件），
+            #    不该每次开课都吓一跳。auto 缓存里没有 basic 档，跳过它不丢东西。
+            if not pathlib.Path(build_notes.NOTES_FILE).exists():
+                return {}
+            notes = build_notes.TermNotes()
+        out: dict[str, str] = {}
+        for t in ts:
+            k = str(t).strip()
+            if not k or k.lower() in _ZH_BLOCKED:
+                continue
+            try:
+                _src, entry = notes.entry_of(k)
+            except Exception:                                  # noqa: BLE001
+                continue
+            if not isinstance(entry, dict) or entry.get("level") != "basic":
+                continue
+            if str(entry.get("type") or "").lower() == "person":
+                continue
+            detail = str(entry.get("detail") or "").strip()
+            if detail:
+                out[k] = detail
+        return out
+    except Exception:                                          # noqa: BLE001
+        return {}
+
+
 def core_terms(course: str | None = None) -> list[str]:
     """常驻核心词: 通用核心 + 当前课号(课号发音极近, 必须常驻防听混)。"""
     core = list(CORE_TERMS)
@@ -366,6 +465,44 @@ def select_terms(sentence: str, terms: list[str],
     stable, dyn = select_term_parts(sentence, terms, core, max_dyn, always, stats)
     picked = stable + dyn
     return "\n".join(picked) if picked else NO_TERMS
+
+
+def select_term_zh(sentence: str, zh_map, *, max_n: int | None = None,
+                   enabled: bool | None = None) -> list[str]:
+    """本句命中的「英文 — 中文」条目（≤ 上限）。**纯函数、唯一定义点**。
+
+    云端定稿 / 云端草稿 / 本地定稿 / 本地草稿四处都调它；量具（`.live.jsonl` 的
+    `term_zh_n`）也拿同一把尺子数 —— 注入与记账不可能各算各的。
+
+    命中判据**复用 `select_term_parts` 的动态召回**（字面包含优先、difflib ≥ 0.6）：
+    与术语池同一套召回，不另写一份 —— B2 实验（`scratchpad/chain/ab/`）里就是这么跑的。
+
+    ⚠️ **开关在里面**（`CLASSLIVE_TERM_ZH`，默认开）：调用方拿到的永远是"按当下开关
+       该注入的"，不可能忘。`enabled=` 只给判据注入用；`max_n=None` → 读
+       `CLASSLIVE_TERM_ZH_MAX`（默认 `TERM_ZH_MAX`）。
+    """
+    if enabled is None:
+        enabled = term_zh_enabled()
+    if not enabled or not zh_map or not sentence:
+        return []
+    n = _term_zh_max() if max_n is None else max(0, int(max_n))
+    if n <= 0:
+        return []
+    _stable, dyn = select_term_parts(sentence, list(zh_map), core=[], always=[],
+                                     max_dyn=n)
+    return [f"{t} — {zh_map[t]}" for t in dyn]
+
+
+def term_zh_block(sentence: str, zh_map, *, max_n: int | None = None) -> str:
+    """`select_term_zh` 的 prompt 段落形态（无命中 → `""`，一个字符不加）。
+
+    四处 prompt（云端定稿两种布局 / 云端草稿 / 本地两种）共用这一份标题与排版 ——
+    别各写各的。段落以空行结尾，直接拼在下一节前面。
+    """
+    hits = select_term_zh(sentence, zh_map, max_n=max_n)
+    if not hits:
+        return ""
+    return TERM_ZH_HEADER + "\n" + "\n".join(hits) + "\n\n"
 
 
 DRAFT_SYSTEM = "你是实时字幕翻译器。把用户给的英文口语快速译成中文, 只输出中文译文。"
@@ -567,7 +704,8 @@ class Translator:
     """懒加载 mlx-lm 模型; 生成用锁串行; chat template 提升指令遵循。"""
 
     def __init__(self, model: str, glossary_path: str | None, max_context: int = 2,
-                 course: str | None = None, extra_terms: list | None = None):
+                 course: str | None = None, extra_terms: list | None = None,
+                 term_zh: dict | None = None):
         self._model = None
         self._tokenizer = None
         #: ⭐ 本地加载的**失败闩锁**（2026-10-01 审查 F2）：一旦确定「装不了 / 装不上」，
@@ -585,6 +723,9 @@ class Translator:
         #    prompt 的 **60%**（实测 1544 字符 / 总 ~2582 字符）→ 那条路会过量。
         self._terms = merge_terms(load_terms(glossary_path, course), extra_terms)
         self._course_terms = course_term_list(glossary_path, course)
+        #: ⭐ #4 B2：本课「英文 → 中文」译名表（`term_zh_map` 建好后由工厂传进来）。
+        #:    命中的条目按 `select_term_zh` 注入每句 prompt 的**变化段**（不注入全表）。
+        self._term_zh = dict(term_zh or {})
         #: ⭐ 术语注入的**只读计数**（`select_terms` 填）。
         #: ⚠️ 名字与 `cloud_translator.CloudTranslator.term_stats` **必须一致** ——
         #:    `main.py` 收尾时两个引擎各读一次再合并（它俩本来就各有一份）。
@@ -683,14 +824,18 @@ class Translator:
             self._terms = merge_terms(self._terms, new)
         return new
 
-    def _terms_context(self, en: str, context: list[str]) -> str:
+    def _terms_context(self, en: str, context: list[str], zh: bool = True) -> str:
         ctx = context[-self._max_ctx:] if self._max_ctx > 0 else []
         ctx_block = "\n".join(f"- {c}" for c in ctx) if ctx else "(无)"
         terms = select_terms(en, self._terms, core=self._core,
                              always=self._course_terms, stats=self.term_stats)
+        # ⭐ #4 B2：译名段 = 逐句变化的内容 → 放在上下文之后、待处理这句之前。
+        #    `zh=False`（只矫正英文那些调用点）：EN-only 模式没有译文，不注入译名（白占 token）。
+        zblock = term_zh_block(en, self._term_zh) if zh else ""
         return (f"{domain_block(self._domain)}"
                 f"课程术语:\n{terms}\n\n"
                 f"最近上下文(已校正):\n{ctx_block}\n\n"
+                f"{zblock}"
                 f"待处理这句 ASR:\n{en}")
 
     def _user_content(self, en: str, context: list[str]) -> str:
@@ -731,7 +876,7 @@ class Translator:
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
         self._ensure()
-        prompt = self._apply_chat(self._terms_context(en, context), FIX_SYSTEM)
+        prompt = self._apply_chat(self._terms_context(en, context, zh=False), FIX_SYSTEM)
         buf: list[str] = []
         with self._lock:
             for resp in stream_generate(
@@ -753,7 +898,10 @@ class Translator:
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
         self._ensure()
-        prompt = _apply_chat_generic(self._tokenizer, en, DRAFT_SYSTEM)
+        # ⭐ #4 B2：命中的译名放在这句之前（草稿 prompt 只有一句，译名段就是它的"变化段"）。
+        #    无命中 → ""（与旧行为逐字相同）。
+        user = term_zh_block(en, self._term_zh) + en
+        prompt = _apply_chat_generic(self._tokenizer, user, DRAFT_SYSTEM)
         buf: list[str] = []
         with self._lock:
             for resp in stream_generate(self._model, self._tokenizer, prompt=prompt,
@@ -767,6 +915,7 @@ class Translator:
 
 
 def load_translator(model: str, glossary_path: str | None, max_context: int = 2,
-                    course: str | None = None, extra_terms: list | None = None):
+                    course: str | None = None, extra_terms: list | None = None,
+                    term_zh: dict | None = None):
     return Translator(model, glossary_path, max_context, course=course,
-                      extra_terms=extra_terms)
+                      extra_terms=extra_terms, term_zh=term_zh)

@@ -13,7 +13,8 @@ from __future__ import annotations
 import json, os, pathlib
 
 import llm_client
-from translator import Result, _StreamParser, _clean_fix, domain_block, select_term_parts
+from translator import (Result, _StreamParser, _clean_fix, domain_block,
+                        select_term_parts, term_zh_block)
 
 # 云端用**英文** system prompt: 实测比中文指令首字快约 15%(0.51s vs 0.60s),
 # 译文也更自然; 符合 DeepSeek 官方"提示词保持单一语言"的建议。
@@ -260,7 +261,8 @@ class CloudTranslator:
                  glossary_terms: list[str] | None = None, max_context: int = 2,
                  timeout: float = 30.0, core: list[str] | None = None,
                  course_terms: list[str] | None = None, domain: str = "",
-                 collect_usage: bool = False, ctx_chunk: int = DEFAULT_CTX_CHUNK):
+                 collect_usage: bool = False, ctx_chunk: int = DEFAULT_CTX_CHUNK,
+                 term_zh: dict | None = None):
         import httpx
         self._key = api_key
         self._model = model
@@ -270,6 +272,9 @@ class CloudTranslator:
         self._terms = glossary_terms or []
         self._core = core or []
         self._course_terms = course_terms or []
+        #: ⭐ #4 B2：本课「英文 → 中文」译名表（`translator.term_zh_map` 建好后由工厂传进来）。
+        #:    命中的条目按 `translator.select_term_zh` 注入每句 prompt 的**变化段**（不注入全表）。
+        self._term_zh = dict(term_zh or {})
         #: ⭐ 术语注入的**只读计数**（`select_terms` 填，**不改它的返回值契约**）。
         #: 用途：判断「术语系统值不值」—— 见 `CLAUDE.md` 提到的注入成本模型。
         #: ⚠️ 名字与 `translator.Translator.term_stats` **必须一致** ——
@@ -382,19 +387,25 @@ class CloudTranslator:
             return context[max(0, (n // c) * c - c):]
         return context[-self._max_ctx:] if self._max_ctx > 0 else []
 
-    def _user_content(self, en: str, context: list[str], tail: str) -> str:
+    def _user_content(self, en: str, context: list[str], tail: str,
+                      zh: bool = True) -> str:
         """一句的 user 消息。`tail` = 末尾的任务指令（翻译 / 只矫正，措辞与老版逐字相同）。
 
         ⚠️ 老布局（`ctx_chunk==0`）**逐字不变**。块对齐布局把**稳定的**东西放前面
         （课程 + 核心/课程术语），**随句变的**放后面（前文窗口之后才是本句召回的术语与本句）——
         前缀缓存只认「从头开始逐字相同的那一段」，顺序错了就白搭。
+        ⭐ #4 B2：译名段（命中的「英文 — 中文」）也是**随句变**的 → 放在两种布局的
+        变化段里（本句的前一节之后、`ASR utterance` 之前）。无命中 → 一个字符不加。
+        `zh=False`（只矫正英文）：不注入译名（EN-only 没有译文，白占 token）。
         """
         ctx = self._ctx_window(context)
         ctx_block = _lines_or_none([f"- {c}" for c in ctx])
+        zblock = term_zh_block(en, self._term_zh) if zh else ""
         if self._ctx_chunk <= 0:
             return (f"{domain_block(self._domain)}"
                     f"Course terms:\n{self._terms_block(en)}\n\n"
                     f"Recent context (already corrected):\n{ctx_block}\n\n"
+                    f"{zblock}"
                     f"ASR utterance:\n{en}\n\n" + tail)
         stable, dyn = select_term_parts(en, self._terms, core=self._core,
                                         always=self._course_terms, stats=self.term_stats)
@@ -402,6 +413,7 @@ class CloudTranslator:
                 f"Course terms:\n{_lines_or_none(stable)}\n\n"
                 f"Recent context (already corrected):\n{ctx_block}\n\n"
                 f"Extra terms possibly relevant to this utterance:\n{_lines_or_none(dyn)}\n\n"
+                f"{zblock}"
                 f"ASR utterance:\n{en}\n\n" + tail)
 
     # ---- 与本地 Translator 同接口 ----
@@ -432,7 +444,8 @@ class CloudTranslator:
         user = self._user_content(
             en, context,
             f"Now output that same utterance with ASR mishearings fixed. "
-            f"English only — no Chinese, no label.")
+            f"English only — no Chinese, no label.",
+            zh=False)                    # ⭐ #4：EN-only 模式不注入译名
         msgs = [{"role": "system", "content": FIX_SYSTEM_CLOUD},
                 {"role": "user", "content": user}]
         buf: list[str] = []
@@ -540,7 +553,8 @@ class CloudTranslator:
 
     def _draft_user(self, en: str, context: list[str]) -> str:
         """草稿的 user 消息: 稳定内容在前(领域 → 课程术语), 随句变的在后(上一句 → 本句) ——
-        前缀缓存只认从头逐字相同的那段。三样都没有时返回 `en` 原文(与旧行为逐字相同)。"""
+        前缀缓存只认从头逐字相同的那段。三样都没有时返回 `en` 原文(与旧行为逐字相同)。
+        ⭐ #4 B2：译名段随句变 → 放在上一句之后、本句之前；无命中 → 不加。"""
         parts = []
         dom = domain_block(self._domain).strip()
         if dom:
@@ -550,6 +564,9 @@ class CloudTranslator:
         prev = context[-1] if context else ""
         if prev:
             parts.append(f"Previous sentence (context only, do not translate):\n{prev}")
+        zh = term_zh_block(en, self._term_zh).strip()
+        if zh:
+            parts.append(zh)
         if not parts:
             return en
         parts.append(f"Current speech (may stop mid-sentence; translate only what is there):\n{en}")
@@ -559,7 +576,7 @@ class CloudTranslator:
 def load_translator(api_key: str, model: str, glossary_path: str | None,
                     max_context: int = 2, course: str | None = None,
                     extra_terms: list | None = None, ctx_chunk: int = DEFAULT_CTX_CHUNK,
-                    collect_usage: bool = False):
+                    collect_usage: bool = False, term_zh: dict | None = None):
     from translator import (load_terms, merge_terms, core_terms, course_term_list,
                             course_title)
     return CloudTranslator(api_key, model,
@@ -568,4 +585,5 @@ def load_translator(api_key: str, model: str, glossary_path: str | None,
                            max_context=max_context, core=core_terms(course),
                            course_terms=course_term_list(glossary_path, course),
                            domain=course_title(glossary_path, course),
-                           ctx_chunk=ctx_chunk, collect_usage=collect_usage)
+                           ctx_chunk=ctx_chunk, collect_usage=collect_usage,
+                           term_zh=term_zh)

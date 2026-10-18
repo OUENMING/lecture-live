@@ -377,6 +377,172 @@ def t_draft_ctx_on_order():
         os.environ.pop("CLASSLIVE_DRAFT_CONTEXT", None)
 
 
+# ---------------------------------------------------------------- #4 B2：术语译名注入（2026-10-17）
+@case("⭐ `select_term_zh`：命中 / 不命中 / 大小写 / 复数（同 `select_term_parts` 一把尺子）")
+def t_term_zh_match():
+    zh = {"elasticity": "弹性", "slope": "斜率", "policy": "政策"}
+    assert T.select_term_zh("the elasticity of demand falls", zh, enabled=True) == \
+        ["elasticity — 弹性"], "命中丢了"
+    assert T.select_term_zh("completely unrelated words here", zh, enabled=True) == [], \
+        "不命中却注入了"
+    assert T.select_term_zh("ELASTICITY matters", zh, enabled=True) == ["elasticity — 弹性"], \
+        "大小写不敏感（两边都 lower）"
+    assert T.select_term_zh("these policies matter", zh, enabled=True) == ["policy — 政策"], \
+        "复数该被同一套 difflib 召回接住"
+
+
+@case("⭐ `select_term_zh`：上限截断（`max_n` 与默认 `TERM_ZH_MAX`）")
+def t_term_zh_cap():
+    big = {f"term{i}": f"译{i}" for i in range(12)}
+    sent = " ".join(f"term{i}" for i in range(12))
+    assert len(T.select_term_zh(sent, big, max_n=3, enabled=True)) == 3, "max_n 没截断"
+    assert len(T.select_term_zh(sent, big, enabled=True)) == T.TERM_ZH_MAX, \
+        "默认上限应是 TERM_ZH_MAX"
+
+
+@case("⭐⭐ `CLASSLIVE_TERM_ZH` 开关：默认开；`0` 关；`enabled=False` 关（开关在纯函数里，调用方不可能忘）")
+def t_term_zh_switch():
+    import os
+    zh = {"elasticity": "弹性"}
+    os.environ.pop("CLASSLIVE_TERM_ZH", None)
+    try:
+        assert T.term_zh_enabled() is True, "默认应开"
+        assert T.select_term_zh("the elasticity of demand", zh) == ["elasticity — 弹性"]
+        os.environ["CLASSLIVE_TERM_ZH"] = "0"
+        assert T.term_zh_enabled() is False
+        assert T.select_term_zh("the elasticity of demand", zh) == [], "关掉后还在注入"
+        os.environ["CLASSLIVE_TERM_ZH"] = "1"
+        assert T.term_zh_enabled() is True
+    finally:
+        os.environ.pop("CLASSLIVE_TERM_ZH", None)
+    assert T.select_term_zh("the elasticity of demand", zh, enabled=False) == []
+
+
+@case("⭐ `CLASSLIVE_TERM_ZH_MAX` 可配；不合法值退回默认（不抛）")
+def t_term_zh_max_env():
+    import os
+    big = {f"term{i}": f"译{i}" for i in range(12)}
+    sent = " ".join(f"term{i}" for i in range(12))
+    try:
+        os.environ["CLASSLIVE_TERM_ZH_MAX"] = "2"
+        assert len(T.select_term_zh(sent, big)) == 2
+        os.environ["CLASSLIVE_TERM_ZH_MAX"] = "abc"
+        assert len(T.select_term_zh(sent, big)) == T.TERM_ZH_MAX, "非法值应退回默认"
+    finally:
+        os.environ.pop("CLASSLIVE_TERM_ZH_MAX", None)
+
+
+class _FakeTermNotes:
+    """`build_notes.TermNotes` 的最小替身：`entry_of(term) -> (来源, 条目)`。"""
+
+    def __init__(self, table):
+        self._t = table
+
+    def entry_of(self, term):
+        return self._t.get((term or "").lower(), ("", {}))
+
+
+@case("⭐⭐ 译名数据源闸（#4 B2）：basic 档才进；无中文名/空解析/人名不进；**A/B 五条错语境拒**")
+def t_term_zh_map_gates():
+    """数据源 = `term_notes.json` 的 basic 档 ∩ 本课术语表（`term_zh_map` 的 docstring）。
+    五条错语境（A/B 复核）今天全是 gloss 档 —— 这里**故意给 basic 档**，
+    钉的是第二道闸（`_ZH_BLOCKED`）也真挡得住。"""
+    notes = _FakeTermNotes({
+        "alpha": ("curated", {"level": "basic", "detail": "甲的速查"}),
+        "beta": ("curated", {"level": "gloss", "detail": "乙的完整解析"}),
+        "gamma": ("auto", {"level": "gloss", "detail": "丙（auto 一律 gloss）"}),
+        "delta": ("curated", {"level": "basic", "detail": " "}),
+        "zeta": ("curated", {"level": "basic", "detail": "泽", "type": "person"}),
+        "fiona macmanus": ("curated", {"level": "basic", "detail": "公民社会研究者"}),
+        "cso": ("curated", {"level": "basic", "detail": "公民社会组织"}),
+        "moderator": ("curated", {"level": "basic", "detail": "调节变量"}),
+        "panel": ("curated", {"level": "basic", "detail": "面板数据"}),
+        "epoch": ("curated", {"level": "basic", "detail": "地质纪元"}),
+        "notlisted": ("curated", {"level": "basic", "detail": "不在术语表里"}),
+    })
+    terms = ["alpha", "beta", "gamma", "delta", "zeta", "fiona macmanus", "cso",
+             "moderator", "panel", "epoch", "omega"]
+    m = T.term_zh_map(None, None, terms=terms, notes=notes)
+    assert m == {"alpha": "甲的速查"}, f"闸漏了：{m}"
+    assert T.term_zh_map(None, None) == {}, "没有课/没有表 → 空表（不注入）"
+
+
+@case("⭐ 云端块对齐布局：译名段在「Extra terms」之后、「ASR utterance」之前；不命中**一个字符不加**")
+def t_cloud_term_zh_chunked():
+    import cloud_translator as CT
+    tr = CT.CloudTranslator("k", "m", glossary_terms=["oligopoly"], course_terms=["oligopoly"],
+                            domain="Econ", ctx_chunk=10, term_zh={"oligopoly": "寡头垄断"})
+    u = tr._user_content("the oligopoly case", ["c0"], "TAIL")
+    a, b, c = (u.index("Extra terms possibly relevant to this utterance:"),
+               u.index("oligopoly — 寡头垄断"), u.index("ASR utterance:"))
+    assert a < b < c, f"译名段位置不对（该在变化段里）：{u!r}"
+    u2 = tr._user_content("the price of coffee", ["c0"], "TAIL")
+    assert "Term translations" not in u2, f"不命中却加了段：{u2!r}"
+
+
+@case("⭐⭐ 老布局（ctx_chunk=0）：无表时逐字不变（既有冻结判据钉着）；有命中只多一段")
+def t_cloud_term_zh_legacy():
+    import cloud_translator as CT
+    base = CT.CloudTranslator("k", "m", glossary_terms=["oligopoly"], ctx_chunk=0)
+    tr = CT.CloudTranslator("k", "m", glossary_terms=["oligopoly"], ctx_chunk=0,
+                            term_zh={"oligopoly": "寡头垄断"})
+    u0 = base._user_content("the oligopoly case", ["a", "b"], "TAIL")
+    u1 = tr._user_content("the oligopoly case", ["a", "b"], "TAIL")
+    zb = ("Term translations for this utterance (prefer these Chinese renderings):\n"
+          "oligopoly — 寡头垄断\n\n")
+    assert u1 == u0.replace("ASR utterance:", zb + "ASR utterance:", 1), \
+        "老布局应只多「译名段」，其余逐字不变"
+    # 只矫正英文（fix_stream）：EN-only 模式不注入译名
+    got = {}
+    tr._stream_chat = lambda messages, max_tokens: got.update(m=messages) or iter(["x"])
+    tr.fix_stream("the oligopoly case", ["a"])
+    assert "Term translations" not in got["m"][1]["content"], "fix_stream 不该注入译名"
+
+
+@case("⭐ 云端草稿：译名段在上一句之后、本句之前；开关关掉后不加")
+def t_cloud_term_zh_draft():
+    import os
+    import cloud_translator as CT
+    os.environ["CLASSLIVE_DRAFT_CONTEXT"] = "1"
+    os.environ.pop("CLASSLIVE_TERM_ZH", None)
+    try:
+        tr = CT.CloudTranslator("k", "m", course_terms=["T1"], domain="Econ 101",
+                                ctx_chunk=0, term_zh={"T1": "术语一"})
+        u = _capture_draft_msgs(tr, "the T1 case", context=["prev sentence."])[1]["content"]
+        a, b, c, d = (u.index("Course: Econ 101"), u.index("prev sentence."),
+                      u.index("T1 — 术语一"), u.index("the T1 case"))
+        assert a < b < c < d, f"草稿译名段位置不对：{u!r}"
+        os.environ["CLASSLIVE_TERM_ZH"] = "0"
+        u_off = _capture_draft_msgs(tr, "the T1 case", context=["prev sentence."])[1]["content"]
+        assert "Term translations" not in u_off, "开关关掉后草稿还在注入"
+    finally:
+        os.environ.pop("CLASSLIVE_DRAFT_CONTEXT", None)
+        os.environ.pop("CLASSLIVE_TERM_ZH", None)
+
+
+@case("⭐ 本地定稿：`_terms_context` 有命中才加译名段；`zh=False`（EN-only）不加")
+def t_local_term_zh():
+    w = T.Translator("m", None, course=None, term_zh={"policy": "政策"})
+    ctx = w._terms_context("the policy changed", [])
+    assert "policy — 政策" in ctx and \
+        ctx.index("policy — 政策") < ctx.index("待处理这句 ASR:"), ctx
+    assert "Term translations" not in w._terms_context("the policy changed", [], zh=False), \
+        "EN-only 不该注入译名"
+    assert "Term translations" not in w._terms_context("nothing relevant here", []), \
+        "不命中不该加段"
+
+
+@case("⭐ main 接线（源检查）：两个引擎同一份表；量具与注入同一把尺子；drain 转发 term_zh_n")
+def t_main_wiring_term_zh():
+    src = (HERE / "main.py").read_text(encoding="utf-8")
+    assert src.count("term_zh=term_zh") == 2, "两个引擎工厂都要拿到译名表（降级后不丢）"
+    assert "term_zh_map(args.glossary, args.course)" in src, "译名表要从本课术语建"
+    assert "select_term_zh(sent, term_zh)" in src, "量具必须与注入同一把尺子"
+    assert "term_zh_n=_tzn" in src, "drain 要把 term_zh_n 转发给 live.final"
+    lm = (HERE / "livemetrics.py").read_text(encoding="utf-8")
+    assert 'extra["term_zh_n"] = int(term_zh_n)' in lm, "量具字段要真落盘（不给就不写）"
+
+
 def main_() -> int:
     print("=" * 60)
     fail: list[str] = []

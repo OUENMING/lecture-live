@@ -376,6 +376,47 @@ def _fmt(v, pct=False, nd=3):
     return f"{v * 100:.1f}%" if pct else f"{v:.{nd}f}"
 
 
+def _fmt_stream(st: dict) -> str:
+    """`stream` 块 → 一行。**缺字段就跳过那一段**（老文件 / 部分字段都不许炸）。"""
+    parts = []
+    if st.get("engine"):
+        parts.append(f"engine={st['engine']}")
+    if st.get("fallback_reason"):
+        parts.append(f"退回={st['fallback_reason']}")
+    else:
+        parts.append("未退回")
+    if st.get("sealed_n") is not None:
+        parts.append(f"封口 {st['sealed_n']} 句")
+    lat = st.get("seal_latency_s")
+    if isinstance(lat, dict) and lat.get("n"):
+        parts.append(f"seal p50 {_fmt(lat.get('p50'))}s / p90 {_fmt(lat.get('p90'))}s")
+    if st.get("terms_n") is not None:
+        _d = st.get("terms_dropped") or 0
+        parts.append(f"术语 {st['terms_n']} 条" + (f"（截 {_d}）" if _d else ""))
+    return " · ".join(parts) if parts else "（空块）"
+
+
+def _stream_lines(res: dict) -> list[str]:
+    """⭐ 3.10：`stream` 块（Soniox 生产量具）的展示行。
+
+    单份读 `res["stream"]`；汇总读 `res["summaries"]` 逐份列（每份的 `source` 在前）。
+    没有这个键（2026-10-17 之前的文件 / 这节课没用 Soniox）→ 一行都不出，**不报错**。
+    """
+    out: list[str] = []
+    one = res.get("stream")
+    if isinstance(one, dict):
+        out.append("")
+        out.append("Soniox 流（stream 块）：" + _fmt_stream(one))
+    elif res.get("pooled"):
+        rows = [(dict(s), s.get("stream")) for s in res.get("summaries") or []]
+        rows = [(s, st) for s, st in rows if isinstance(st, dict)]
+        if rows:
+            out.append("")
+            out.append("Soniox 流（各份）：")
+            out.extend(f"  {s.get('source') or '?'}  {_fmt_stream(st)}" for s, st in rows)
+    return out
+
+
 def render(res: dict) -> str:
     lines = []
     a = res["meta"]
@@ -414,6 +455,7 @@ def render(res: dict) -> str:
                            ("final_delay_s", "段结束→定稿上屏")):
             v = lat[key]
             lines.append(f"  {label:<14}{_fmt(v['p50'])} / {_fmt(v['p95'])}   n={v['n']}")
+    lines.extend(_stream_lines(res))
     hc = res.get("hallucination_candidates") or []
     lines.append("")
     lines.append(f"腰斩臆造候选: {len(hc)} 条（**要人耳听**，机械判据会误报）")
@@ -468,6 +510,11 @@ def build_report(path, *, ref=None, ks=DEFAULT_KS, want_disagreement=False,
     summ = [e for e in events if e.get("kind") == "summary"]
     if summ:
         res["summary"] = summ[-1]
+        # ⭐ 3.10：Soniox 生产量具（engine / 退回 / 封口 + 上移延迟 / 术语截断）。
+        #    老文件没有这个键 → 不建 `stream`，`render` 自然跳过（**兼容**）。
+        st = summ[-1].get("stream")
+        if isinstance(st, dict):
+            res["stream"] = st
     samples = _latency_samples(events)
     if samples is not None:
         res["live_latency"] = {k: M.summarize_latency(v) for k, v in samples.items()}

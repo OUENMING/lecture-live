@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import threading
 import time
 import urllib.parse
@@ -81,6 +82,28 @@ RESPONSE_TIMEOUT_S = 15.0
 FINISH_WAIT_S = 3.0
 #: 领 key 的 POST 超时（开课关键路径，短；重试由退回政策管）。
 KEY_TIMEOUT_S = 4.0
+
+# ── Soniox `context` 的预算（官方 context 页 2026-10-17 核对：
+#    https://soniox.com/docs/stt/concepts/context —— 上限 8 000 token ≈ 10 000 字符，
+#    超了回 `invalid_request`，而它在 `FATAL_ERROR_TYPES` 里 = 整节课退回本地）──
+#: terms + general + text **合起来**的字符预算；留一成余量吃序列化骨架与估算偏差。
+#: ⚠️ 从前是 30 000（≈ 官方口径的 3 倍）—— 词表一大就会静默踩线，这是那次收口的原因。
+CONTEXT_CHAR_BUDGET = 9000
+#: 单条术语字符上限 —— 超了整条跳过（手抄的长句不是术语）。
+TERM_MAX_CHARS = 200
+#: `general` 的键值对数上限（官方 Tips：10 个以内）与单个值字符上限。
+GENERAL_KEYS_MAX = 10
+GENERAL_VALUE_MAX = 200
+#: `context.text`（课件大纲摘要）字符上限 —— 官方：text 影响力弱于 general / terms。
+CONTEXT_TEXT_MAX = 1500
+#: **平时**进 `context.terms` 的条数目标（可配置：`StreamASR(terms_max=…)`）。
+#: ⚠️ 上限（`CONTEXT_CHAR_BUDGET`）只兜底；官方没说 context 大小对延迟的影响，
+#: 所以平时就按这个**小目标**走 —— 先小后大，用真课数据说话（#3 的 terms_n 与封口延迟）。
+TERMS_MAX = 100
+#: 序列化骨架（键名、引号、逗号、括号）的保守余量 —— `build_context` 记账用。
+_CONTEXT_SERIAL_MARGIN = 64
+#: 封口延迟样本上限（一节课几十~几百句；封顶只为防异常时内存失控）。
+SEAL_LAT_MAX = 5000
 
 #: 开关：`auto`（默认）| `off`。**是否真的启用还要调用方再看两个条件**
 #: （有通行码 + 云端定稿开着 + 翻译档不是 raw）—— 那是 `wanted()` 的语义，见 HANDBOOK §6.1。
@@ -332,6 +355,129 @@ class StreamCore:
 # 第二层：传输
 # ══════════════════════════════════════════════════════════════════════
 
+# ── 生产量具（纯函数）──
+
+def seal_latency_s(now: float, audio_t0: float | None, end_s: float) -> float | None:
+    """封口延迟（秒）= 上移墙钟 − 句尾的音频时刻 —— 与离线评估「句号词尾→上移」同口径。
+
+    实时推流下「音频时刻 + 推流滞后 ≈ 墙钟」，所以它量的是**用户多等的那段**：
+    Soniox 处理 + P_stable(0.3 s) + 轮询粒度 + 网络。`audio_t0` 没设（还没喂过音频）→ `None`。
+    负数钳到 0（丢块 / 时钟抖动会让它略小于 0 —— 0 表示「没多等」）。
+    """
+    if audio_t0 is None:
+        return None
+    return max(0.0, (float(now) - float(audio_t0)) - float(end_s))
+
+
+def _pcts(vals: Iterable[float]) -> dict | None:
+    """一串数 → `{"p50", "p90", "n"}`；**空表 → None**（"没采到"与"延迟为 0"要分得开，
+    同 `testmode.pcts` 的口径）。"""
+    xs = list(vals)
+    if not xs:
+        return None
+    a = np.asarray(xs, dtype=float)
+    return {"p50": round(float(np.percentile(a, 50)), 1),
+            "p90": round(float(np.percentile(a, 90)), 1),
+            "n": int(a.size)}
+
+# ── context 组装（纯函数；config 消息与它的记账都从这儿出）──
+#
+# ⚠️ 官方口径（context 页，2026-10-17 核对）：terms + general + text **合起来**
+#    8 000 token ≈ 10 000 字符，超了回 `invalid_request` = 整节课退回本地。
+#    但那只当**兜底**：平时按 TERMS_MAX 条的小目标走（context 越大越可能拖慢
+#    转录，官方没给大小-延迟曲线 —— 先小后大，拿真课数据调）。
+
+#: 课号前缀 → 领域（`general.domain`）。认不出的前缀**不发这个键** —— 猜错领域比不给更坏。
+_DOMAINS = {
+    "ECON": "economics", "SOC": "sociology", "COMP": "computer science",
+    "CS": "computer science", "MATH": "mathematics", "STAT": "statistics",
+    "PHIL": "philosophy", "PSY": "psychology", "FIN": "finance",
+    "ACC": "accounting", "LAW": "law", "GEOG": "geography", "HIST": "history",
+}
+
+
+def _domain_of(title: str) -> str:
+    """课名开头形如 `ECON10730 …` → `"economics"`；认不出返回 `""`。"""
+    m = re.match(r"\s*([A-Za-z]{2,})\s*\d", title or "")
+    return _DOMAINS.get(m.group(1).upper(), "") if m else ""
+
+
+def general_pairs(title: str) -> list[tuple[str, str]]:
+    """课程标题 → 官方 `general` 模板的键值对（≤ `GENERAL_KEYS_MAX` 个短键值）。
+
+    模板（官方 context 页 §Tips / §Experimental，2026-10-17 核对）：
+    `topic`（课名）/ `domain`（由课号前缀认，认不出不发）/ `setting` / `language`。
+    **没有标题 → 空表**（不凭空发明上下文）。
+    """
+    t = (title or "").strip()
+    if not t:
+        return []
+    out = [("topic", t)]
+    d = _domain_of(t)
+    if d:
+        out.append(("domain", d))
+    out.extend([("setting", "university lecture"), ("language", "English")])
+    return out[:GENERAL_KEYS_MAX]
+
+
+def build_context(terms: Iterable[str], title: str = "", text: str = "",
+                  *, budget: int = CONTEXT_CHAR_BUDGET,
+                  terms_max: int = TERMS_MAX) -> tuple[dict, dict]:
+    """组装 Soniox `context` 消息 + 记账。**纯函数** —— 判据直接喂它。
+
+    优先序（预算/条数不够时先保前面的）：general（领域先验）→ terms（**按给定顺序**
+    取前 `terms_max` 条 —— 撞上限时先保排在前的）→ text（截到剩余额度，`CONTEXT_TEXT_MAX` 封顶）。
+
+    预算按**序列化后的字符数**算（官方 8 000 token ≈ 10 000 字符；默认 9 000 留余量），
+    三个段落**合起来**不许超。返回 `(ctx, stats)`；`ctx` 空 dict = 不带 context 键。
+    `stats` 键：`terms_n` / `terms_dropped`（**不进 context 的条数 —— 必须记账，不许静默**）/
+    `terms_chars` / `general_n` / `text_chars`。
+    """
+    ctx: dict = {}
+    stats = {"terms_n": 0, "terms_dropped": 0, "terms_chars": 0,
+             "general_n": 0, "text_chars": 0}
+    pairs = general_pairs(title)
+    if pairs:
+        ctx["general"] = [{"key": k, "value": str(v)[:GENERAL_VALUE_MAX]}
+                          for k, v in pairs[:GENERAL_KEYS_MAX]]
+        stats["general_n"] = len(ctx["general"])
+    used = len(json.dumps(ctx, ensure_ascii=False)) if ctx else 2
+    room = max(0, budget - used - _CONTEXT_SERIAL_MARGIN)
+    all_terms = [str(t).strip() for t in terms if str(t).strip()]
+    kept: list[str] = []
+    for i, t in enumerate(all_terms):
+        if i >= max(0, int(terms_max)):
+            stats["terms_dropped"] += len(all_terms) - i
+            break
+        if len(t) > TERM_MAX_CHARS:
+            stats["terms_dropped"] += 1        # 手抄的长句不是术语：跳过、记账、继续
+            continue
+        if len(t) + 4 > room:
+            stats["terms_dropped"] += len(all_terms) - i
+            break
+        room -= len(t) + 4
+        kept.append(t)
+    if kept:
+        ctx["terms"] = kept
+        stats["terms_n"] = len(kept)
+        stats["terms_chars"] = sum(len(t) for t in kept)
+    txt = (text or "").strip()
+    if txt:
+        cap = min(CONTEXT_TEXT_MAX, max(0, room - 12))    # `, "text": ""` 的骨架
+        cut = txt[:cap]
+        if cut:
+            ctx["text"] = cut
+            stats["text_chars"] = len(cut)
+    # 兜底：转义字符（引号等）让保守估计漏了 → 从尾部继续丢术语（照旧记账）。
+    while ctx.get("terms") and len(json.dumps(ctx, ensure_ascii=False)) > budget:
+        ctx["terms"].pop()
+        stats["terms_n"] -= 1
+        stats["terms_dropped"] += 1
+    if not ctx.get("terms"):
+        ctx.pop("terms", None)
+    return ctx, stats
+
+
 class _KeyClient:
     """领 key 的 HTTP 客户端（注入接缝：判据里换成假 Worker / 固定响应）。
 
@@ -418,6 +564,9 @@ class StreamASR:
     参数（都能注入，判据里不碰真网络）：
     - `passcode`: `cl-…` 通行码；空串 = 一开始就退回（没通行码）。
     - `terms` / `general`: 课程术语（`context.terms`）与课名（`context.general`）。
+      ⚠️ `terms` 的**顺序就是优先级**（本课词在前）—— 超 `terms_max` / 预算时先保前面的。
+    - `context_text`: 课件大纲摘要（`context.text`，可选；受同一预算约束，截断到剩余额度）。
+    - `terms_max`: 平时进 context 的条数目标（见模块常量 `TERMS_MAX`）。
     - `on_sealed`: `Callable[[Sealed], None]`，收线程**锁外**调（调用方只该入队）。
     - `clock` / `stable_s`: 透传给 `StreamCore`。
     - `request_key`: 注入的领 key 函数（默认 `_KeyClient`）。
@@ -435,10 +584,16 @@ class StreamASR:
                  key_timeout_s: float = KEY_TIMEOUT_S, keepalive_s: float = KEEPALIVE_S,
                  response_timeout_s: float = RESPONSE_TIMEOUT_S,
                  finish_wait_s: float = FINISH_WAIT_S, audio_max_s: float = QUEUE_MAX_S,
-                 chunk_s: float = CHUNK_S, ws_url: str = WS_URL, region: str = "") -> None:
+                 chunk_s: float = CHUNK_S, ws_url: str = WS_URL, region: str = "",
+                 context_text: str = "", terms_max: int = TERMS_MAX) -> None:
         self._passcode = (passcode or "").strip()
         self._terms = tuple(str(t).strip() for t in terms if str(t).strip())
         self._general = general or ""
+        self._context_text = context_text or ""
+        #: context 在**构造期**就装好（terms/general/text 到收尾都不变）：
+        # 启动日志要能立刻报「进 context 几条 / 截掉几条」（见 `metrics()`）。
+        self._ctx, self._ctx_stats = build_context(
+            self._terms, self._general, self._context_text, terms_max=terms_max)
         self._on_sealed = on_sealed
         self._stable_s = float(stable_s)
         self._keepalive_s = float(keepalive_s)
@@ -450,6 +605,7 @@ class StreamASR:
         self._key = request_key or _KeyClient(timeout=key_timeout_s, region=region).request_key
 
         self._lock = threading.Lock()               # 保护 core / 状态字段
+        self._clock = clock
         self._core = StreamCore(clock=clock, stable_s=stable_s)
         #: ⚠️ **真的有界**（`maxsize`）：满了 `put_nowait` 抛 `Full` → 丢最旧。
         #    手写「先看 qsize 再 put」不是判据（多线程下照涨），真踩过：队列永远不满、从不丢。
@@ -457,6 +613,11 @@ class StreamASR:
         self._events: "queue.Queue[tuple]" = queue.Queue()
         self._dropped = 0
         self._samples = 0                           # 采到的样本总数（含丢掉的）
+        #: ⭐ 3.10 生产量具：第一块音频的墙钟（封口延迟的零点，见 `seal_latency_s`）。
+        self._audio_t0: float | None = None
+        #: ⭐ 3.10：从 `_fire` 出去的封口句数 + 每句的上移延迟（秒）。收尾 `metrics()` 用。
+        self._sealed_n = 0
+        self._seal_lat: list[float] = []
         self._marks: list[tuple[int, int]] = []     # (段首累计样本, 段号)
         self._seg = 0
         self._alive = False
@@ -485,6 +646,27 @@ class StreamASR:
         """给人看的一行（`reason()` 的文案）；**没退回时是空串**（别报假警）。"""
         return notice_for(self.reason()) if self.reason() else ""
 
+    def metrics(self) -> dict:
+        """这一节课的只读快照（启动日志与收尾报告共用）。**随时可调、永不抛**。
+
+        形状 = 收尾报告里的 `stream` 块（`.live.jsonl` 的 summary 行 / testmode 的
+        `blocks.stream`）：`engine` / `fallback_reason`（`""` = 没退回）/ `sealed_n`
+        （从 `_fire` 出去的封口句数）/ `seal_latency_s`（`{p50, p90, n}`，秒；`None` = 一句
+        都没封）/ `terms_n` / `terms_dropped`。
+        ⚠️ 只记**事实** —— 指标怎么算归读的人（`scripts/class_report.py`）。
+        """
+        with self._lock:
+            n = self._sealed_n
+            lat = list(self._seal_lat)
+            reason = self._reason
+        st = self._ctx_stats
+        return {"engine": ENGINE,
+                "fallback_reason": reason,
+                "sealed_n": n,
+                "seal_latency_s": _pcts(lat),
+                "terms_n": int(st.get("terms_n") or 0),
+                "terms_dropped": int(st.get("terms_dropped") or 0)}
+
     def feed(self, samples) -> None:
         """音频回调：float32 样本 → 有界队列。**绝不阻塞**，满了丢最旧。"""
         try:
@@ -495,6 +677,8 @@ class StreamASR:
             pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
             with self._lock:
                 self._samples += n
+                if self._audio_t0 is None:
+                    self._audio_t0 = self._clock()   # ⭐ 3.10：封口延迟的零点（只写一次）
             try:
                 self._audio.put_nowait(pcm)
             except queue.Full:
@@ -639,26 +823,18 @@ class StreamASR:
         return err
 
     def _config(self) -> dict:
-        """config 消息。`context` 只在有内容时带；总量压在 8000 token 内（粗估 4 字符/token）。"""
+        """config 消息。`context` 在构造期就装好了（`build_context`），这里只搬 —— 重连时也一致。
+
+        ⚠️ 预算按官方口径收口：8 000 token ≈ 10 000 字符、留一成余量，且
+        **terms + general + text 合起来**算（官方 context 页，2026-10-17 核对）。
+        从前是 30 000 字符的客户端上限（≈ 官方 3 倍）—— 词表一大就会踩 `invalid_request`
+        （= 整节课退回本地）。被拿掉的条数在 `metrics()` 里记账，启动日志/报告都会写出来。
+        """
         cfg: dict = {"model": "stt-rt-v5", "audio_format": "pcm_s16le",
                      "sample_rate": SR, "num_channels": 1,
                      "language_hints": ["en"], "enable_endpoint_detection": True}
-        budget = 30000                              # ≈7500 token 的上界（官方上限 8000）
-        terms: list[str] = []
-        for t in self._terms:
-            if len(t) > 200:
-                continue
-            if budget - len(t) - 1 < 0:
-                break
-            budget -= len(t) + 1
-            terms.append(t)
-        ctx: dict = {}
-        if terms:
-            ctx["terms"] = terms
-        if self._general and budget > 200:
-            ctx["general"] = [{"title": self._general[:200]}]
-        if ctx:
-            cfg["context"] = ctx
+        if self._ctx:
+            cfg["context"] = self._ctx
         return cfg
 
     def _send_loop(self, ws) -> str:
@@ -808,6 +984,13 @@ class StreamASR:
     # ---- 状态
 
     def _fire(self, s: Sealed) -> None:
+        # ⭐ 3.10 量具：计数 + 上移延迟（墙钟 − 句尾音频时刻）。锁内只做加法，微秒级。
+        with self._lock:
+            self._sealed_n += 1
+            if len(self._seal_lat) < SEAL_LAT_MAX:
+                lat = seal_latency_s(self._clock(), self._audio_t0, s.end_s)
+                if lat is not None:
+                    self._seal_lat.append(lat)
         cb = self._on_sealed
         if cb is None:
             return

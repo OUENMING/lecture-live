@@ -143,6 +143,47 @@ def main() -> int:
     check("⭐ 没有 `last_steps`（parakeet 直通）-> 不当成发过",
           SE._sent_request(_Stub()) is False)
 
+    # ── ⭐⭐ 节流真的「请求到请求」≥ pace_s（2026-10-17 模拟课堂 A/B 抓到：原来只隔一次生效，
+    #    相邻间隔 0.0 / 3.36 s 交替，有效速率 ≈ 2×）。真 `replay` + 桩 Segmenter（每块都收一段）。
+    #    改坏：把 `wait` 改回拿上一趟时刻算（`pace_s - (t_req - last_req)`）-> 这条红。
+    import types
+    import numpy as np
+
+    class _SegEveryChunk:
+        def __init__(self, on_partial, on_end):
+            self._end = on_end
+
+        def accept(self, x):
+            self._end(np.zeros(160, dtype=np.float32))
+
+        def flush(self):
+            pass
+
+    class _PacedFinal:
+        last_source, last_fell_back, last_steps = "groq", False, ("cloud:groq",)
+
+        def __init__(self):
+            self.times: list = []
+
+        def transcribe(self, buf):
+            import time as _t
+            self.times.append(_t.monotonic())
+            return "x"
+
+    _real_vad = sys.modules.get("vad")
+    sys.modules["vad"] = types.SimpleNamespace(Segmenter=_SegEveryChunk, time=None)
+    try:
+        _pf = _PacedFinal()
+        SE.replay(np.zeros(1600 * 5, dtype=np.float32), _Stub(), _pf, pace_s=0.05)
+    finally:
+        if _real_vad is not None:
+            sys.modules["vad"] = _real_vad
+        else:
+            sys.modules.pop("vad", None)
+    _gaps = [b - a for a, b in zip(_pf.times, _pf.times[1:])]
+    check("⭐⭐ 节流：相邻两趟请求的间隔每一次都 ≥ pace_s（不是隔一次）",
+          len(_gaps) >= 3 and min(_gaps) >= 0.045, f"{[round(g, 3) for g in _gaps]}")
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

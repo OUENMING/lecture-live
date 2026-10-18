@@ -417,5 +417,44 @@ class ReplaceEnvelope(unittest.TestCase):
         self.assertEqual((rep["seg_i"], rep["seg_j"]), (7, 8))
 
 
+class SummaryStreamBlock(unittest.TestCase):
+    """⭐ 3.10：`close(stream=…)` 把 Soniox 流的量具带进 summary 行；
+    **不带**时那行一个字不多（老读端零感知）。
+
+    生产者是 `stream_asr.StreamASR.metrics()`（形状：engine / fallback_reason /
+    sealed_n / seal_latency_s{p50,p90,n} / terms_n / terms_dropped）；
+    消费者是 `scripts/class_report.py`（用 `.get` 逐字段读，缺了不报错）。
+    """
+
+    def test_stream_block_round_trips(self):
+        log, p = _mk_log()
+        st = {"engine": "soniox", "fallback_reason": "", "sealed_n": 3,
+              "seal_latency_s": {"p50": 0.9, "p90": 1.4, "n": 3},
+              "terms_n": 12, "terms_dropped": 2}
+        log.close(stream=st)
+        self.assertEqual(_lines(p)[-1]["stream"], st)
+
+    def test_no_stream_key_when_not_given(self):
+        log, p = _mk_log()
+        log.close()
+        self.assertNotIn("stream", _lines(p)[-1])
+
+
+class TermZhN(unittest.TestCase):
+    """⭐ #4 B2：`final(term_zh_n=…)` —— 给了就落盘、不给就不写（同 `lat` 的规矩）。"""
+
+    def test_term_zh_n_written_when_given(self):
+        log, p = _mk_log()
+        log.final("hello", "你好", "hello", term_zh_n=3)
+        log.close()
+        self.assertEqual(_lines(p)[-2]["term_zh_n"], 3)
+
+    def test_term_zh_n_absent_by_default(self):
+        log, p = _mk_log()
+        log.final("hello", "你好", "hello")
+        log.close()
+        self.assertNotIn("term_zh_n", _lines(p)[-2])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -347,6 +347,128 @@ def t_core_flush_pending() -> None:
     assert c.draft_text() == "" and c.flush() == []
 
 
+def t_context_budget_hard_cap_and_counting() -> None:
+    """⭐ 超长术语表：config 总长 ≤ 官方口径预算（terms+general+text 合起来），
+    被截的条数**如实记账**（不许静默）—— 从前客户端上限 30 000 ≈ 官方 3 倍，一撞就整节课退回。"""
+    terms = [f"term{i:03d}-" + "x" * 36 for i in range(400)]          # ≈400×45 字符
+    s = StreamASR(passcode="", terms=terms, general="ECON10730 Data Analysis",
+                  terms_max=400)
+    try:
+        ctx = s._config()["context"]
+        assert len(json.dumps(ctx, ensure_ascii=False)) <= stream_asr.CONTEXT_CHAR_BUDGET
+        m = s.metrics()
+        assert m["terms_n"] + m["terms_dropped"] == 400, m
+        assert 0 < m["terms_n"] < 400, m
+        assert len(ctx["terms"]) == m["terms_n"]
+        assert ctx["terms"][0] == terms[0], "顺序保持：先到先保（本课词排在前的语义）"
+        assert ctx["terms"][-1] == terms[m["terms_n"] - 1]
+    finally:
+        s.stop()
+
+
+def t_context_count_cap_is_the_normal_path() -> None:
+    """⭐ 平时走的是**条数小目标**（`TERMS_MAX`）不是字符上限：101 条短词该截 1 条；
+    `terms_max` 可配置（判据/调参用）。"""
+    terms = [f"t{i:03d}" for i in range(stream_asr.TERMS_MAX + 1)]
+    s = StreamASR(passcode="", terms=terms)
+    try:
+        m = s.metrics()
+        assert m["terms_n"] == stream_asr.TERMS_MAX and m["terms_dropped"] == 1, m
+    finally:
+        s.stop()
+    s2 = StreamASR(passcode="", terms=terms, terms_max=5)
+    try:
+        m2 = s2.metrics()
+        assert m2["terms_n"] == 5 and m2["terms_dropped"] == len(terms) - 5, m2
+    finally:
+        s2.stop()
+
+
+def t_context_no_terms_stays_clean() -> None:
+    """没有术语、也没有课名 → **不带 context**（不凭空发明上下文）；
+    有课名时也不带空的 `terms` 键。"""
+    s = StreamASR(passcode="", terms=[])
+    try:
+        assert "context" not in s._config(), s._config()
+    finally:
+        s.stop()
+    s2 = StreamASR(passcode="", terms=[], general="ECON10730 Data Analysis")
+    try:
+        ctx = s2._config().get("context") or {}
+        assert "terms" not in ctx and ctx.get("general"), ctx
+    finally:
+        s2.stop()
+
+
+def t_context_text_shares_the_budget() -> None:
+    """`context.text` 与 terms/general **同一预算**：超了截到上限，总量仍 ≤ 预算；
+    且它排在 terms 之后 —— 术语不被 text 挤掉。"""
+    terms = [f"term{i:03d}-" + "x" * 16 for i in range(50)]
+    s = StreamASR(passcode="", terms=terms, general="ECON10730 Data Analysis",
+                  context_text="课件大纲摘要 " * 2000)
+    try:
+        ctx = s._config()["context"]
+        assert "text" in ctx, sorted(ctx)
+        assert len(ctx["text"]) <= stream_asr.CONTEXT_TEXT_MAX, len(ctx["text"])
+        assert len(json.dumps(ctx, ensure_ascii=False)) <= stream_asr.CONTEXT_CHAR_BUDGET
+        assert s.metrics()["terms_dropped"] == 0, "术语没超量：text 不许把 terms 挤掉"
+    finally:
+        s.stop()
+
+
+def t_general_official_shape() -> None:
+    """`general` 用官方模板的形状 `[{key, value}]`（旧版发的 `{"title": …}` 是错的形状）；
+    认不出的课号前缀**不发 domain**（猜错领域比不给更坏）。"""
+    pairs = stream_asr.general_pairs("ECON10730 Data Analysis")
+    assert pairs[0] == ("topic", "ECON10730 Data Analysis"), pairs
+    assert ("domain", "economics") in pairs, pairs
+    assert ("setting", "university lecture") in pairs, pairs
+    assert len(pairs) <= stream_asr.GENERAL_KEYS_MAX
+    assert stream_asr.general_pairs("") == []
+    assert all(k != "domain" for k, _ in stream_asr.general_pairs("Mystery 101"))
+
+
+def t_metrics_seal_counts_and_latency() -> None:
+    """⭐ 3.10 量具：封口句数 + 上移延迟（墙钟 − 句尾音频时刻）—— 注入时钟做**精确**断言。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    clk = {"t": 100.0}
+    got: "queue.Queue[Sealed]" = queue.Queue()
+    s = make_asr(wk, son, on_sealed=got.put, clock=lambda: clk["t"])
+    try:
+        assert wait_until(s.alive)
+        s.feed(silence(SR // 10))                 # 第一块音频：延迟零点 = 100.0
+        clk["t"] = 102.0                          # 句尾音频 0.4 s 的那句在墙钟 102.0 封口
+        son.to_send.put({"tokens": [tok("Hi", 0, 300, True), tok(".", 300, 400, True)]})
+        assert wait_until(lambda: not got.empty()), "final 句号该立刻封口"
+        assert got.get_nowait().end_s == 0.4
+        clk["t"] = 103.30
+        son.to_send.put({"tokens": [tok(" Bye", 400, 900), tok(".", 900, 1000)]})
+        assert wait_until(lambda: "Bye." in s.draft_text()), s.draft_text()
+        clk["t"] = 103.61                         # 候选句号挂了 0.31 s -> P_stable 到了
+        son.to_send.put({"tokens": [tok(" Bye", 400, 900), tok(".", 900, 1000)]})
+        assert wait_until(lambda: not got.empty()), "P_stable 0.3 s 后该封口"
+        m = s.metrics()
+        assert m["engine"] == "soniox" and m["fallback_reason"] == "", m
+        assert m["sealed_n"] == 2, m
+        lat = m["seal_latency_s"]
+        assert lat and lat["n"] == 2, lat
+        assert abs(lat["p50"] - 2.105) < 0.1, lat   # (1.6 + 2.61) / 2
+        assert m["terms_n"] == 2 and m["terms_dropped"] == 0, m   # make_asr 的两条都进了
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_seal_latency_pure() -> None:
+    """延迟公式：负数钳 0（丢块/抖动）；没喂过音频 -> None（**不是 0** —— 那是两回事）。"""
+    f = stream_asr.seal_latency_s
+    assert abs(f(10.5, 9.0, 1.2) - 0.3) < 1e-9, f(10.5, 9.0, 1.2)
+    assert f(9.0, 9.0, 0.5) == 0.0
+    assert f(60.0, None, 1.0) is None
+
+
 def t_classify_and_notice() -> None:
     assert classify_error("organization_balance_exhausted") == "fatal"
     assert classify_error("unauthenticated") == "fatal"
@@ -387,7 +509,10 @@ def t_transport_happy_path() -> None:
         assert cfg["sample_rate"] == 16000 and cfg["num_channels"] == 1
         assert cfg["language_hints"] == ["en"] and cfg["enable_endpoint_detection"] is True
         assert cfg["context"]["terms"] == ["OLS", "regression"]
-        assert cfg["context"]["general"][0]["title"] == "ECON10730 Data Analysis"
+        g = {e["key"]: e["value"] for e in cfg["context"]["general"]}
+        assert g["topic"] == "ECON10730 Data Analysis"
+        assert g["domain"] == "economics" and g["setting"] == "university lecture"
+        assert g["language"] == "English"
         assert "api_key" not in cfg, "key 不许进 config 消息（只在 Authorization 头里）"
         assert hdr(son.connections[0]["headers"], "Authorization") == "Bearer fake-key"
         # ⚠️ 块长 120 ms（3840 B）：一份 0.1 s 的样本还凑不满一块，会被 carry 住 ——
@@ -490,6 +615,7 @@ def t_transport_key_429_is_local() -> None:
     try:
         assert wait_until(lambda: s.reason() != ""), "429 该一开始就退回"
         assert s.reason() == "quota", s.reason()
+        assert s.metrics()["fallback_reason"] == "quota"     # ⭐ 3.10：退回原因进量具块
         assert not s.alive()
         assert "额度" in s.notice_text()
         assert len(son.connections) == 0, "没额度不该去连 Soniox"
@@ -680,6 +806,13 @@ def main() -> int:
         ("core: final 换了时间戳不重封", t_core_final_with_shifted_timing_not_resealed),
         ("core: 最早的句号先封口", t_core_earliest_period_seals_while_next_sentence_grows),
         ("core: 收尾 flush 半句", t_core_flush_pending),
+        ("config: 超长术语表 ≤ 预算 + 截断记账", t_context_budget_hard_cap_and_counting),
+        ("config: 平时按条数小目标（TERMS_MAX）", t_context_count_cap_is_the_normal_path),
+        ("config: 没术语不带 context", t_context_no_terms_stays_clean),
+        ("config: text 与 terms 同一预算", t_context_text_shares_the_budget),
+        ("config: general 官方形状", t_general_official_shape),
+        ("量具: seal_latency 纯函数", t_seal_latency_pure),
+        ("量具: 封口数 + 上移延迟（metrics）", t_metrics_seal_counts_and_latency),
         ("classify_error / notice_for", t_classify_and_notice),
         ("transport: 正常出两句 + config", t_transport_happy_path),
         ("transport: 致命错误不重连", t_transport_fatal_error_no_retry),

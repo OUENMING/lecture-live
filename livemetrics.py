@@ -217,7 +217,7 @@ class LiveLog:
             pass
 
     def final(self, en: str, zh: str = "", raw: str = "", *, seg: int = 0,
-              lat: tuple | None = None) -> None:
+              lat: tuple | None = None, term_zh_n: int | None = None) -> None:
         """一句定稿上屏 —— 同时把句号推进（`utt` 只是"第几句"，**分组看 `seg`**）。
 
         ⭐ `lat` = 这一句的**译文延迟** 4 元组 `(zh_first_ms, zh_done_ms, seg_to_zh_ms,
@@ -225,12 +225,19 @@ class LiveLog:
         ⚠️ **不给就不写那四个键** —— 同 `draft(engine=…)` 的规矩：老文件 / 老读端
            零感知（`("final", …)` 那条 tag 只有**双语档**那个产出点会给，纯转录与
            只英·校两条路没送过翻译，报引擎名会让人以为它们翻出来了）。
+
+        ⭐ #4 B2：`term_zh_n` = 这一句**注入 prompt 的译名条数**（`translator.select_term_zh`
+        数的，与注入共用同一把尺子）—— 同样**不给就不写**。真课复查用它回答
+        "译名到底有没有命中、命中多少"。
         """
         try:
             extra = ({}
                      if lat is None else
                      {"zh_first_ms": lat[0], "zh_done_ms": lat[1],
                       "seg_to_zh_ms": lat[2], "tr_model": lat[3]})
+            # ⭐ #4 B2：这一句注入的译名条数 —— **不给就不写**（同上面 lat 的规矩）。
+            if term_zh_n is not None:
+                extra["term_zh_n"] = int(term_zh_n)
             self._put("final", utt=self._utt, seg=seg, text=en or "", zh=zh or "",
                       raw=raw or "", n_draft=self._n_draft, **extra)
             self._utt += 1

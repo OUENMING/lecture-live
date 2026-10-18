@@ -145,7 +145,7 @@ def replay(audio: np.ndarray, drafter, asr_final, *, draft_filter=None, progress
     from vad import Segmenter
     import vad
     clock = {"t": 0.0}
-    cur = {"drafts": [], "last_req": 0.0}
+    cur = {"drafts": []}
 
     class _VirtualTime:          # Segmenter 用 time.monotonic() 判 1s 一次的草稿节拍
         @staticmethod            # 不换成回放时钟的话，快于实时的回放几乎触发不了草稿
@@ -186,12 +186,14 @@ def replay(audio: np.ndarray, drafter, asr_final, *, draft_filter=None, progress
         #    —— 按"最后是谁给的文本"（`last_source`）判会漏掉它们，而那正是最需要
         #    减速的时刻（2026-10-12 全仓审查核实）。
         #    → 判据用生产自己记的 `steps`：里面有没有 `cloud:` 那一步，就是"发没发"。
+        #    ⚠️ 睡在**这一趟请求之后**、量的是**这一趟**的发出时刻：睡到 `t_req + pace_s`，
+        #    下一趟才可能更早不了。原来拿「上一趟」的时刻算、再把账记成这一趟没睡前的时刻，
+        #    实测相邻间隔 0.0 / 3.36 s 交替，有效速率 ≈ 2×（2026-10-17 模拟课堂 A/B 抓到）。
         if pace_s:
             if _sent_request(asr_final):
-                wait = pace_s - (t_req - cur["last_req"])
+                wait = pace_s - (time.monotonic() - t_req)
                 if wait > 0:
                     time.sleep(wait)
-                cur["last_req"] = t_req
         if hasattr(draft_filter, "reset"):
             draft_filter.reset()                 # 定稿一到，冻结前缀作废
 

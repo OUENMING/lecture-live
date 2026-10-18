@@ -479,5 +479,57 @@ class RegionProbe(unittest.TestCase):
         self.assertEqual(out.count("地区探测"), 2)
 
 
+class StreamBlock(unittest.TestCase):
+    """⭐ 3.10：`stream` 块（Soniox 生产量具）—— 单份展示、汇总逐份列；
+    老文件（2026-10-17 之前 / 没用 Soniox）没有这个键 → **零报错、零行**。"""
+
+    def _ev(self, stream=None):
+        ev = [_draft(0, "a b", t=1.0, buf_s=1.0), _final(0, "a b.", t=2.0)]
+        summ = {"kind": "summary", "t": 9.0}
+        if stream is not None:
+            summ["stream"] = stream
+        ev.append(summ)
+        return ev
+
+    def test_block_is_surfaced_and_rendered(self):
+        st = {"engine": "soniox", "fallback_reason": "", "sealed_n": 2,
+              "seal_latency_s": {"p50": 0.9, "p90": 1.4, "n": 2},
+              "terms_n": 100, "terms_dropped": 3}
+        res = CR.build_report(_write(self._ev(st)), ks=(None,))
+        self.assertEqual(res["stream"]["terms_n"], 100)
+        txt = CR.render(res)
+        self.assertIn("Soniox 流", txt)
+        self.assertIn("未退回", txt)
+        self.assertIn("封口 2 句", txt)
+        self.assertIn("p50 0.9", txt)
+        self.assertIn("截 3", txt)
+
+    def test_fallback_reason_is_shown(self):
+        res = CR.build_report(
+            _write(self._ev({"engine": "soniox", "fallback_reason": "quota",
+                             "terms_n": 1, "terms_dropped": 0})), ks=(None,))
+        self.assertIn("退回=quota", CR.render(res))
+
+    def test_old_file_without_stream_is_fine(self):
+        """兼容：老文件的 summary 行没有 `stream` → 不建键、不显示、不报错。"""
+        res = CR.build_report(_write(self._ev()), ks=(None,))
+        self.assertNotIn("stream", res)
+        self.assertNotIn("Soniox 流", CR.render(res))
+
+    def test_partial_block_does_not_crash(self):
+        res = CR.build_report(_write(self._ev({"terms_n": 5})), ks=(None,))
+        CR.render(res)                                  # 缺字段也照画（— 占位）
+
+    def test_pooled_shows_each_source(self):
+        a = CR.build_report(_write(self._ev({"engine": "soniox", "sealed_n": 1})),
+                            ks=(None,), keep_samples=True)
+        b = CR.build_report(_write(self._ev({"engine": "soniox", "sealed_n": 2})),
+                            ks=(None,), keep_samples=True)
+        txt = CR.render(CR.pool_sweeps([a, b]))
+        self.assertIn("Soniox 流（各份）", txt)
+        self.assertIn("封口 1 句", txt)
+        self.assertIn("封口 2 句", txt)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

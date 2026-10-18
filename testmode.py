@@ -123,6 +123,10 @@ BLOCKS = frozenset({
     "energy",   # ⭐ 3.9.8 ①：可见/隐藏分桶的能耗/唤醒/CPU + pump 各档时长（`energy.EnergyProbe`）
     "capture",  # ⭐ 3.9.8 ④：收音断档（墙钟 vs 音频秒）+ 断档列表（`note_chunk` 累计）
     "region_probe",  # ⭐ Soniox 多地区路由：探测结果 + 决策（`region_route.Router.snapshot()`）
+    # ⭐ 3.10：Soniox 实时流的生产量具 —— engine / 退回原因 / 封口句数 + 上移延迟 /
+    #          术语进 context 数与被截数（`stream_asr.StreamASR.metrics()` 的产物）。
+    #          没建流（`stream is None`）时这一块**缺席** = 这节课没用 Soniox。
+    "stream",
 })
 
 

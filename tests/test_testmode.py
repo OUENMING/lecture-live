@@ -781,6 +781,10 @@ def main() -> int:
         _t21.note_block("backfill", {"need": 1, "done": 1})
         _t21.note_block("energy", _t21.energy_block(120.0))
         _t21.note_block("capture", _t21.capture_block())
+        _t21.note_block("stream", {"engine": "soniox", "fallback_reason": "",
+                                   "sealed_n": 1,
+                                   "seal_latency_s": {"p50": 0.9, "p90": 0.9, "n": 1},
+                                   "terms_n": 5, "terms_dropped": 0})
         _rep21 = json.loads(pathlib.Path(_t21.finish(bundle=False)).read_text(encoding="utf-8"))
         check("⭐⭐ 六个新格全在：energy / capture / merge.items / backfill.items / "
               "ui.view / ui.streamq_dwell_ms / translation_latency.by_idle",
@@ -801,6 +805,12 @@ def main() -> int:
               bool(json.dumps(_rep21, ensure_ascii=False)), "ok")
         check("⭐ `block_names` 里有 energy / capture（该有哪几块的清单）",
               {"energy", "capture"} <= set(_rep21["block_names"]), str(_rep21["block_names"]))
+        check("⭐⭐ `blocks.stream`（Soniox 生产量具）原样落进报告",
+              _rep21["blocks"].get("stream", {}).get("engine") == "soniox"
+              and _rep21["blocks"]["stream"].get("sealed_n") == 1,
+              str(_rep21["blocks"].get("stream")))
+        check("⭐ `stream` 在 `block_names` 清单里（该有哪几块）",
+              "stream" in _rep21["block_names"], str(_rep21["block_names"]))
     finally:
         shutil.rmtree(_d11, ignore_errors=True)
 

@@ -1763,13 +1763,13 @@ def _numbers_in(text: str) -> list:
     return out
 
 
-#: 例题里"像结论"的数字（题面/步骤/答案）—— verdict 核对用。
+#: 例题里"像结论"的数字（**题面 + 答案**）—— verdict 核对用。
+#: ⚠️ 只取题面/答案：步骤里是**中间算术**（如 32−25=7、8 与 5 的 LCM=40），
+#:    本来就不该在 quote 里逐字出现；步骤里的野数字由机械核（program/代入）另管。
 def _example_numbers(ex: dict) -> list:
     out: list = []
-    for t in [ex.get("prompt"), ex.get("answer"), str(ex.get("explanation") or "")]:
+    for t in (ex.get("prompt"), ex.get("answer")):
         out += _conclusion_nums(str(t or ""))
-    for st in (ex.get("steps") or []):
-        out += _conclusion_nums(_txt(st.get("text")) if isinstance(st, dict) else str(st))
     return out
 
 
@@ -1792,10 +1792,13 @@ def enforce_source_verdict(ex: dict) -> dict:
     qnums = _numbers_in(sc.get("quote"))
     vals, _err = run_program(ex.get("program") or [], ex.get("givens") or {})
     derived = [float(v) for v in vals.values()]
-    for n in _example_numbers(ex):
-        if any(_sig_match(n, d) for d in derived):
+    for tok in _example_numbers(ex):
+        # 按**绝对值**比：口语 quote 里几乎不带负号（"minus 12" ↔ 例题写 −12），
+        # 符号对不对是机械核的活，这里只问"这个数在不在 quote 里"。
+        t = str(tok).lstrip("-+")
+        if any(_sig_match(t, abs(d)) for d in derived):
             continue
-        if any(_sig_match(n, q) for q in qnums):
+        if any(_sig_match(t, abs(q)) for q in qnums):
             continue
         out["verdict"] = "fragment"
         out["forced"] = True

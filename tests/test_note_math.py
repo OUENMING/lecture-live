@@ -985,8 +985,22 @@ class VerdictF12(unittest.TestCase):
         self.assertEqual("complete", nm.enforce_source_verdict(ex)["verdict"])
 
     def test_数词也算说出来(self):
-        ex = {"prompt": "配平半反应，产物侧要几个 H₂O？", "steps": [], "answer": "需要 4 个 H₂O。",
-              "source_check": {"quote": "we need four molecules.", "verdict": "complete"}}
+        ex = {"prompt": "需要多少电子？", "steps": [], "answer": "需要 40 个电子。",
+              "source_check": {"quote": "we need forty electrons.", "verdict": "complete"}}
+        self.assertEqual("complete", nm.enforce_source_verdict(ex)["verdict"])
+
+    def test_负号不算没说过(self):
+        # 口语 quote 写「minus 12」/「12」，例题写 −12 —— 不许因符号判成 fragment。
+        ex = {"prompt": "$TC=q^3-12q^2+60q$", "steps": [], "answer": "$q=6$",
+              "source_check": {"quote": "Q squared minus 12 Q plus 60", "verdict": "complete"}}
+        self.assertEqual("complete", nm.enforce_source_verdict(ex)["verdict"])
+
+    def test_中间算术不在quote不降级(self):
+        # 「8 与 5 的 LCM 是 40」是步骤里的推导，本来就不在 quote 里 —— 不降级。
+        ex = {"prompt": "两个半反应分别产生 8 e⁻ 和消耗 5 e⁻，如何合并？",
+              "steps": [{"text": "8 和 5 的最小公倍数是 40。", "why": ""}],
+              "answer": "分别乘以 5 和 8 后相加。",
+              "source_check": {"quote": "eight electrons ... five electrons", "verdict": "complete"}}
         self.assertEqual("complete", nm.enforce_source_verdict(ex)["verdict"])
 
     def test_program算出来的允许(self):

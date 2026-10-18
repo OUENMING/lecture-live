@@ -1084,6 +1084,18 @@ check("✅ 全就位（含戳记 / 图标）-> 退出码 0、一条 ❌ 都没�
       _r.returncode == 0 and "❌" not in _r.stdout,
       f"rc={_r.returncode} out={_r.stdout.strip()[-120:]!r}")
 
+# ⭐⭐ C9（2026-10-18 审查）：`MacOS/python` **存在但不可执行** -> 与构建自检 ⑧ / `cl`
+#    同一口径判坏（原来这里只判 `-e`，于是 exFAT/U 盘丢权限的坏 .app 报"就位"、退出 0）。
+_py.chmod(0o644)
+_r = _chk_run()
+# 变异验证：把 `-x "$APP/Contents/MacOS/python"` 改回 `-e` -> 这条红（报"就位"、退出 0）。
+check("⭐⭐ C9 MacOS/python 存在但不可执行 -> ❌ + 退出码 1",
+      _r.returncode == 1 and "不可执行" in _r.stdout,
+      f"rc={_r.returncode} out={_r.stdout.strip()[-90:]!r}")
+_py.chmod(0o755)
+_r = _chk_run()
+check("⭐ 对照：恢复可执行位 -> 又变回退出码 0", _r.returncode == 0, f"rc={_r.returncode}")
+
 # ⚠️ 只有「符号链接」那一条时**仍是 0**：它是 ⚠️ 不是 ❌（判据只认 ❌）。
 _real_py = _appd / "Contents" / "real_python"
 _real_py.write_text('#!/bin/sh\necho "stub-python"\n', encoding="utf-8")

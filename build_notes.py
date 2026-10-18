@@ -204,11 +204,21 @@ def _fallback_level(entry: dict) -> str:
 
 
 def collect_terms(course: str | None = None) -> list[str]:
-    from translator import load_terms
-    terms = load_terms(str(HERE / "glossary.txt"), course)
+    """术语库要覆盖的**全表**（公共 + 分课程）。
+
+    ⚠️ 不走 `translator.load_terms`：那条有每句注入的加载上限（`TERM_LOAD_LIMIT`），
+       而这里的结果是 `--rebuild` 的保留集 —— 截断了就把第 60 条之后的
+       已建释义当垃圾删掉（`term_notes.json` 是用户数据，2026-10-18 合并检查抓到）。
+    """
+    from translator import _load_terms, course_term_list, merge_terms
+    g = str(HERE / "glossary.txt")
+
+    def _full(c):
+        return merge_terms(_load_terms(g), course_term_list(g, c, limit=None))
+    terms = _full(course)
     if course is None:
         for f in sorted((HERE / "glossary").glob("*.txt")):
-            terms += load_terms(str(HERE / "glossary.txt"), f.stem)
+            terms += _full(f.stem)
     seen, out = set(), []
     for t in terms:
         k = t.lower()

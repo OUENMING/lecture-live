@@ -34,6 +34,12 @@ macOS 在整机没有输入、又没别的大活时会**空闲睡眠**。ClassLi
 from __future__ import annotations
 
 import contextlib
+import time
+
+#: 墙钟一次跳这么多 = 系统睡过一觉。⚠️ **唯一定义点** ——
+#: `main.check_clock_and_device`（上课期间的 2 s 保安线程）与 `WakeWatch`（收尾
+#: spinner 的 tick）共用它；两处各写一个 10.0 迟早会漂成两个数。
+SLEEP_GAP_S = 10.0
 
 #: `NSActivityIdleSystemSleepDisabled`（Foundation `NSProcessInfo.h`，值已在
 #: 这台机器上实测：1048576）。**没有**用 `NSActivityUserInitiated` —— 那个还会
@@ -117,6 +123,10 @@ def keep_system_awake(process_info=None, log=None):
     ⚠️ 释放放在 `finally` 里是**要求**（不是风格）：拿住了不还，这台机器的空闲
     睡眠就永远被这个进程拦着 —— 而"拦着不睡"正是这个模块要干的事，泄漏出去的
     后果（笔记本不合盖也永远不睡）比不拿还糟。
+    ⚠️⚠️ **它挡不住合盖**（clamshell sleep 是电源策略定的，任何 app 的 activity
+    都拦不住）—— 见文件头那条。合盖那条路的答案是**可续跑**：收尾的每一步要么
+    当场做完、要么被日志记下、下次启动接着做（`testmode` 的 journal +
+    `upload.recover_pending` + `update.repair_interrupted_apply`）。
     """
     act = Activity(process_info, log=log)
     act.begin()
@@ -124,3 +134,45 @@ def keep_system_awake(process_info=None, log=None):
         yield act
     finally:
         act.end()
+
+
+class WakeWatch:
+    """睡醒探测：**轮询墙钟跳变**。`check()` 返回"距上次问话之间系统睡过一觉吗"。
+
+    ## 为什么是轮询，不是 `NSWorkspaceDidWakeNotification`
+
+    理由与 `main.check_clock_and_device` **逐字同源**（那边管上课期间的探测，这里
+    给收尾期间用）：那两条通知必须挂在 `NSWorkspace.notificationCenter()` 上、
+    而且**靠 run loop 投递** —— `--ui terminal` 那条路根本没有 run loop，通知
+    永远到不了。墙钟跳变不挑模式、也不挑谁在跑。
+
+    ## 形状
+
+        w = WakeWatch()                      # 记下当前墙钟
+        ...每轮 tick 里...  if w.check():   # 睡过一觉 -> 补做网络步骤
+        w.sleep_seconds                      # 刚那次跳了多少秒（只读，判据用）
+
+    ⚠️ 时钟是**墙钟**（`time.time`），不是 monotonic —— monotonic 在 macOS 睡眠
+    期间**不前进**，正因如此，所有**超时**（`spin_until` / subprocess / httpx）
+    都不会把睡眠算成"卡住"；而"发现睡过"恰恰要靠 monotonic 不动的那个差值。
+    ⚠️ 它只是探测，**永不抛**、不持有任何资源；`check()` 可以任意频率调。
+    """
+
+    def __init__(self, *, gap_s: float = SLEEP_GAP_S, clock=None):
+        self._gap_s = float(gap_s)
+        self._clock = clock or time.time
+        self._wall = self._clock()
+        #: 上一次 `check()` 量到的跳变秒数（没睡就是 0）。
+        self.sleep_seconds = 0.0
+        #: 累计发现了几次睡醒（判据用）。
+        self.wakes = 0
+
+    def check(self) -> bool:
+        """这一轮与上一轮之间墙钟跳变 > `gap_s` 吗。**永不抛。**"""
+        now = self._clock()
+        gap = now - self._wall
+        self._wall = now
+        self.sleep_seconds = gap if gap > self._gap_s else 0.0
+        if self.sleep_seconds:
+            self.wakes += 1
+        return bool(self.sleep_seconds)

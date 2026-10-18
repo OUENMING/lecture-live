@@ -124,5 +124,80 @@ class Wiring(unittest.TestCase):
         self.assertIn("run(args)", calls, "`run(args)` 没被那个 `with` 包住")
 
 
+class WakeWatchCase(unittest.TestCase):
+    """⭐ 3.10：睡醒探测 —— 收尾 spinner 的 tick 靠它发现"睡过一觉"（`main._spin`）。
+
+    ⚠️ 时钟注入假墙钟，**不真睡**。
+    """
+
+    def test_没跳变就不报(self):
+        t = [100.0]
+        w = power.WakeWatch(clock=lambda: t[0])
+        self.assertFalse(w.check())
+        t[0] += 2.0
+        self.assertFalse(w.check())
+        self.assertEqual((w.wakes, w.sleep_seconds), (0, 0.0))
+
+    def test_墙钟跳变_报一次_然后归零(self):
+        t = [100.0]
+        w = power.WakeWatch(clock=lambda: t[0])
+        t[0] += power.SLEEP_GAP_S + 5.0            # 睡了一觉
+        self.assertTrue(w.check())
+        self.assertAlmostEqual(w.sleep_seconds, power.SLEEP_GAP_S + 5.0)
+        self.assertFalse(w.check(), "同一次睡醒只许报一次")
+        self.assertEqual(w.wakes, 1)
+
+    def test_阈值可调(self):
+        t = [0.0]
+        w = power.WakeWatch(gap_s=3.0, clock=lambda: t[0])
+        t[0] += 4.0
+        self.assertTrue(w.check())
+
+
+class SleepGapSingleSource(unittest.TestCase):
+    """⚠️ `SLEEP_GAP_S` 只有一份定义（`power.py`）—— 上课那条保安线程与收尾的
+    `WakeWatch` 共用。两处各写一个 10.0 迟早会漂成两个数。"""
+
+    def test_main_读的是_power_那份(self):
+        src = (HERE / "main.py").read_text(encoding="utf-8")
+        self.assertIn("SLEEP_GAP_S = power.SLEEP_GAP_S", src,
+                      "main.py 又自己写了一份字面量 —— 改回 `power.SLEEP_GAP_S`")
+        self.assertEqual(power.SLEEP_GAP_S, 10.0, "值变了要两边一起想清楚")
+
+
+class WakeWiring(unittest.TestCase):
+    """睡醒补传真的接在收尾 spinner 上（AST，不起进程）。"""
+
+    def _tree(self):
+        return ast.parse((HERE / "main.py").read_text(encoding="utf-8"))
+
+    def _fn(self, name):
+        for n in ast.walk(self._tree()):
+            if isinstance(n, ast.FunctionDef) and n.name == name:
+                return n
+        return None
+
+    def test_tick_里看一眼_wake(self):
+        tick = self._fn("_tick")
+        self.assertIsNotNone(tick, "main.py 里找不到 _tick（收尾 spinner）")
+        calls = [ast.unparse(n) for n in ast.walk(tick)]
+        # ⚠️ 变异验证：把 `_wake.check()` 那段删掉 -> 这条红（睡醒没人补推）。
+        self.assertTrue(any("_wake.check()" in c for c in calls),
+                        "收尾 spinner 的 tick 没接睡醒探测")
+        # ⚠️ 变异验证：把 `retry_pending_uploads(...)` 那行删掉 -> 这条红。
+        self.assertTrue(any("retry_pending_uploads" in c for c in calls),
+                        "睡醒了却没补推上传")
+
+    def test_上课那条保安线程_睡醒也补推(self):
+        txt = ast.unparse(self._tree())
+        # ⚠️ 变异验证：把 `on_wake=_on_wake_net` 改回 `_reset_net` -> 这条红。
+        self.assertIn("on_wake=_on_wake_net", txt)
+        fn = self._fn("_on_wake_net")
+        self.assertIsNotNone(fn, "`_on_wake_net` 不见了")
+        calls = [ast.unparse(n) for n in ast.walk(fn)]
+        self.assertTrue(any("retry_pending_uploads" in c for c in calls),
+                        "上课睡醒只复位了连接池，没补推上传")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

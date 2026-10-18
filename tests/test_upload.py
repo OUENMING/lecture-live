@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import pathlib
 import shutil
 import sys
 import tempfile
 import threading
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
@@ -291,9 +293,19 @@ def main() -> int:
         (rsess / f"{stem}{upload.PENDING_TAIL}").write_text(
             '{"stem": "x", "started": "2026-09-30 16:00:00"}', encoding="utf-8")
         rroot = tmp / "cl3"
-        got = upload.recover_pending(
-            rsess, upload.make_local_send(str(tmp / "srv2")), root=rroot,
-            now=lambda: _now[0])
+        # ⚠️ check.py 跑判据时设 `CLASSLIVE_UPLOAD=0`（判据不许真上传）—— 而这一条
+        #    测的正是"上传开着时怎么补传"，所以这里把开关显式打开、完事还原。
+        _saved_up14 = os.environ.get("CLASSLIVE_UPLOAD")
+        os.environ["CLASSLIVE_UPLOAD"] = "1"
+        try:
+            got = upload.recover_pending(
+                rsess, upload.make_local_send(str(tmp / "srv2")), root=rroot,
+                now=lambda: _now[0])
+        finally:
+            if _saved_up14 is None:
+                os.environ.pop("CLASSLIVE_UPLOAD", None)
+            else:
+                os.environ["CLASSLIVE_UPLOAD"] = _saved_up14
         check("⭐⭐ 找到残留标记并**排进了队列**（不然崩溃那类数据全丢）",
               got["found"] == 1 and got["queued"] >= 2,
               f"found={got['found']} queued={got['queued']}")
@@ -337,6 +349,158 @@ def main() -> int:
         _led = json.loads(upload.paths.upload_ledger(root=_rq).read_text(encoding="utf-8"))
         check("⭐ 台账真写进去了（读回来是那一节）",
               "2026-10-12_ECON10740" in _led, str(list(_led)[:3]))
+
+        print("\n--- T16 ⭐⭐ 3.10：逐文件进度（重试只补缺的）/ 睡醒提前 / 并文件 ---")
+        # ① 传到一半失败 -> 只记住成功的那几个；重试**只补缺的**
+        _root4 = tmp / "cl4"
+        _sends: list = []
+
+        def _flaky2(local, key):
+            _sends.append(key)
+            return len(_sends) < 3                # 前两个成，第三个败
+
+        f2 = [tmp / f"a{i}.json" for i in (1, 2, 3)]
+        for p in f2:
+            p.write_text('{"a": 1}', encoding="utf-8")
+        q7 = upload.UploadQueue(_flaky2, root=_root4, now=lambda: _now[0])
+        q7.enqueue(f2, "sess-E")
+        q7.pump()
+        it = q7.items()[0]
+        # ⚠️ 变异验证：把 `sent_files` 那段记档删掉 -> 这条红（重试整条重来）。
+        check("⭐⭐ 传成的文件记进 `sent_files`（逐文件进度**落盘**）",
+              sorted(it.get("sent_files") or []) == ["a1.json", "a2.json"],
+              str(it.get("sent_files")))
+        _now[0] += upload.BACKOFF_MIN_S + 1.0
+        _again: list = []
+        q7._send = lambda local, key: (_again.append(key), True)[1]
+        q7.pump()
+        # ⚠️ 变异验证：把 `if remote in (it.get("sent_files") ...)` 删掉 -> 这条红
+        #    （a1/a2 会被重发 —— 对象名确定不会重复，但 9 MB 白传一遍）。
+        check("⭐⭐ 重试**只补没传成的那个**（原来整条重来）",
+              _again == [f"{upload.session_key('sess-E')}/a3.json"], str(_again))
+        check("⭐ 补完 -> 整条出队", q7.pending == 0, str(q7.pending))
+
+        # ② `retry_now`：睡醒把没到点的提前 —— **有界**
+        _root5 = tmp / "cl5"
+        q8 = upload.UploadQueue(lambda *a: False, root=_root5, now=lambda: _now[0])
+        q8.enqueue([f2[0]], "sess-F")
+        q8.pump()                                 # 失败 -> next_at = now + 60
+        check("⭐ 还没到点 -> 不试（退避生效）", q8.pump()["failed"] == 0)
+        n = q8.retry_now()
+        it = q8.items()[0]
+        # ⚠️ 变异验证：`retry_now` 里把 `wake_retries` 上限判断删掉 -> 下面"到顶不动"那条红。
+        check("⭐⭐ 睡醒：提前到「现在」（`wake_retries` 记账）",
+              n == 1 and it["next_at"] == _now[0] and it["wake_retries"] == 1, str(it))
+        for _ in range(upload.WAKE_RETRY_MAX + 2):
+            q8.retry_now()
+            q8.pump()                             # 每次都失败 -> next_at 又推到未来
+        it = q8.items()[0]
+        check("⭐⭐ 提前超过上限 -> **不动**（退回正常退避，别把服务端当靶子）",
+              q8.retry_now() == 0 and it["wake_retries"] == upload.WAKE_RETRY_MAX
+              and it["next_at"] > _now[0], str(it))
+
+        # ③ `add_files`：并进**同一条**（`enqueue` 会按 key 拒绝）
+        _root6 = tmp / "cl6"
+        q9 = upload.UploadQueue(lambda *a: True, root=_root6, now=lambda: _now[0])
+        q9.enqueue([f2[0]], "sess-G")
+        n3 = q9.add_files([f2[1], f2[2]], "sess-G")
+        # ⚠️ 变异验证：`add_files` 改用 `enqueue` -> 返回 0、文件永远排不进去 -> 这条红。
+        check("⭐⭐ `add_files` 并进**同一条**（后台转出的 opus 补进崩溃那条）",
+              n3 == 2 and q9.pending == 1 and len(q9.items()[0]["files"]) == 3,
+              str(q9.items()))
+        check("⚠️ 同一路径再来一次 -> 0（去重）", q9.add_files([f2[1]], "sess-G") == 0)
+        check("⭐ 没有条目时 `add_files` 自己开一条",
+              q9.add_files([f2[0]], "sess-H") == 1 and q9.pending == 2,
+              str(q9.pending))
+
+        print("\n--- T17 ⭐⭐ 3.10：崩溃残段**先转码再排**（不再原样传 wav）---")
+        _rs2 = tmp / "sess2"
+        _rs2.mkdir()
+        _stem2 = "2026-10-14_160000_CRASHED2"
+        for _i in (1, 2):
+            (_rs2 / f"{_stem2}.{_i:03d}.wav").write_bytes(b"RIFF" + b"\0" * 64)
+        (_rs2 / f"{_stem2}{upload.PENDING_TAIL}").write_text(json.dumps(
+            {"stem": _stem2, "started": "x",
+             "steps": {"transcode": "pending", "report": "pending",
+                       "upload": "pending"}}), encoding="utf-8")
+        _rroot2 = tmp / "cl7"
+        _tc: list = []
+
+        def _fake_tc(wav, opus=None, *, delete=True):
+            _tc.append(pathlib.Path(wav).name)
+            o = pathlib.Path(wav).with_suffix(".opus")
+            o.write_bytes(b"OggS" + b"\0" * 8 + b"OpusHead" + b"\0" * 8)
+            if delete:
+                pathlib.Path(wav).unlink(missing_ok=True)
+            return o, ""
+
+        # ⚠️ 判据是在 check.py 里跑的，而它设 `CLASSLIVE_UPLOAD=0` —— 这一节要的是
+        #    "上传**开着**"那半（残段补传是上传开着才做的事）。
+        _saved_up2 = os.environ.get("CLASSLIVE_UPLOAD")
+        os.environ["CLASSLIVE_UPLOAD"] = "1"
+        try:
+            got2 = upload.recover_pending(_rs2, lambda local, key: False,  # 永不成功 -> 条目留着
+                                          transcode=_fake_tc, root=_rroot2,
+                                          now=lambda: _now[0])
+        finally:
+            if _saved_up2 is None:
+                os.environ.pop("CLASSLIVE_UPLOAD", None)
+            else:
+                os.environ["CLASSLIVE_UPLOAD"] = _saved_up2
+        # ⚠️ 变异验证：`recover_pending` 里不看 `transcode`（把残段直接排上）-> 这条红。
+        check("⭐⭐ 有残段 -> 交给后台转码（`jobs` 记账；wav 先不排）",
+              got2["found"] == 1 and got2["jobs"] == 1, str(got2))
+        _deadline = time.time() + 5.0
+        while time.time() < _deadline and (_rs2 / f"{_stem2}{upload.PENDING_TAIL}").exists():
+            time.sleep(0.05)
+        q10 = upload.UploadQueue(lambda *a: True, root=_rroot2, now=lambda: _now[0])
+        _names2 = [pathlib.Path(f).name for i in q10.items() for f in i["files"]]
+        check("⭐⭐ 转完的 opus 进了**同一条**条目（不是新开一条）",
+              q10.pending == 1 and sum(n.endswith(".opus") for n in _names2) == 2,
+              str(_names2))
+        check("⭐ 两个残段都过了一遍转码", len(_tc) == 2, str(_tc))
+        # ⚠️ 变异验证：把后台线程里那次改名删掉 -> 这条红（残局永远不结案）。
+        check("⭐⭐ 后台活干完才**改名**标记（半路被杀 -> 下次重来）",
+              not (_rs2 / f"{_stem2}{upload.PENDING_TAIL}").exists()
+              and (_rs2 / f"{_stem2}.recovered.json").exists(),
+              str([p.name for p in _rs2.iterdir()]))
+        _meta2 = json.loads((_rs2 / f"{_stem2}.meta.json").read_text(encoding="utf-8"))
+        check("⭐ meta 带上 journal 的 `steps`（收件端看得出这节欠过什么）",
+              _meta2.get("steps", {}).get("transcode") == "pending", str(_meta2))
+
+        print("\n--- T18 ⭐⭐ 上传关着：不排、也不改名（留着残局，等开着再补）---")
+        _rs3 = tmp / "sess3"
+        _rs3.mkdir()
+        _stem3 = "2026-10-15_160000_CRASHED3"
+        (_rs3 / f"{_stem3}.001.opus").write_bytes(
+            b"OggS" + b"\0" * 8 + b"OpusHead" + b"\0" * 8)
+        (_rs3 / f"{_stem3}{upload.PENDING_TAIL}").write_text("{}", encoding="utf-8")
+        _saved_env = os.environ.get("CLASSLIVE_UPLOAD")
+        os.environ["CLASSLIVE_UPLOAD"] = "0"
+        try:
+            _r3 = upload.recover_pending(_rs3, upload.make_local_send(str(tmp / "srv4")),
+                                         root=tmp / "cl8", now=lambda: _now[0])
+            # ⚠️ 变异验证：把 `if not upload_enabled(): return` 删掉 -> 这条红
+            #    （一次离线启动会把残局"吃掉"却不上传）。
+            check("⭐⭐ 关着 -> 一条都不排，标记**还留着**",
+                  _r3["queued"] == 0
+                  and (_rs3 / f"{_stem3}{upload.PENDING_TAIL}").exists(), str(_r3))
+            check("⭐ `upload_enabled()` 说的是同一件事（唯一定义点）",
+                  upload.upload_enabled() is False)
+        finally:
+            if _saved_env is None:
+                os.environ.pop("CLASSLIVE_UPLOAD", None)
+            else:
+                os.environ["CLASSLIVE_UPLOAD"] = _saved_env
+        _saved3 = os.environ.get("CLASSLIVE_UPLOAD")
+        os.environ["CLASSLIVE_UPLOAD"] = "1"
+        _on1 = upload.upload_enabled()
+        os.environ.pop("CLASSLIVE_UPLOAD", None)          # 不设 -> 默认开
+        _on2 = upload.upload_enabled()
+        if _saved3 is not None:
+            os.environ["CLASSLIVE_UPLOAD"] = _saved3
+        check("⭐ `upload_enabled()`：`1` 与**不设**都算开（默认就是开）",
+              _on1 is True and _on2 is True)
 
         bad = [n for n, ok, _ in RESULTS if not ok]
         print("\n" + "=" * 60)

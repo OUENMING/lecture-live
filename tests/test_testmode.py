@@ -964,6 +964,171 @@ def main() -> int:
     finally:
         _sh.rmtree(_d22, ignore_errors=True)
 
+    print("\n--- T23 ⭐⭐ 3.10：段一转完就转（后台工人）+ wav 只在验过后删 + journal ---")
+    # ⚠️ 这一节：合成 wav（真 `wave` 模块写）/ 真 soundfile 兜底 / fake 工人。
+    #    不碰真 sessions/、不联网、不起 ffmpeg（PATH 掐掉 —— 逼它走兜底那条）。
+    import json as _json2
+    import threading as _th
+    import wave as _wave
+
+    _d23 = pathlib.Path(_tf.mkdtemp(prefix="cl_tm_tc_"))
+    try:
+        def _mk_wav(p, secs=0.5):
+            with _wave.open(str(p), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(tm.SR)
+                w.writeframes(b"\0\0" * int(tm.SR * secs))
+
+        # ① `_opus_ok`：**头不对就不算数**（原来只看 size>0 —— 半截文件照样骗过）
+        _junk = _d23 / "junk.opus"
+        _junk.write_bytes(b"NOTOGG" * 100)
+        _empty = _d23 / "empty.opus"
+        _empty.write_bytes(b"")
+        _good = _d23 / "good.opus"
+        _good.write_bytes(b"OggS" + b"\0" * 20 + b"OpusHead" + b"\0" * 20)
+        # ⚠️ 变异验证：`_opus_ok` 改回 `exists() and size>0` → 这条红。
+        check("⭐⭐ `_opus_ok`：非空但**不是 Ogg/Opus** 的不算数（半截文件不许冒充成品）",
+              tm._opus_ok(_good) and not tm._opus_ok(_junk) and not tm._opus_ok(_empty),
+              f"good={tm._opus_ok(_good)} junk={tm._opus_ok(_junk)}")
+        check("⚠️ 不存在的文件 -> False（不抛）",
+              tm._opus_ok(_d23 / "nope.opus") is False)
+
+        # ② `transcode_one`：真 soundfile 兜底（PATH 里没有 ffmpeg）
+        _w1 = _d23 / "seg1.wav"
+        _mk_wav(_w1)
+        _saved_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = str(_d23)            # 掐掉 ffmpeg -> 只能走兜底
+        try:
+            _o1, _why1 = tm.transcode_one(_w1)
+        finally:
+            os.environ["PATH"] = _saved_path
+        check("⭐⭐ `transcode_one`：ffmpeg 不在 -> soundfile 兜底，opus 真产出",
+              _o1 is not None and tm._opus_ok(_o1) and _why1.startswith("ffmpeg"),
+              f"{_o1} {_why1[:60]}")
+        # ⚠️ 变异验证：把 `wav.unlink` 挪到 `_opus_ok` 判断之前 → 这条红（wav 没了）。
+        check("⭐⭐ **wav 验过 opus 才删**（兜底成功 -> wav 走人）", not _w1.exists())
+        _w2 = _d23 / "seg2.wav"
+        _mk_wav(_w2)
+        os.environ["PATH"] = str(_d23)
+        try:
+            _o2, _ = tm.transcode_one(_w2, delete=False)
+        finally:
+            os.environ["PATH"] = _saved_path
+        check("⭐⭐ `delete=False`（后台工人那一档）：**不删 wav**（删除留给收尾对账）",
+              _o2 is not None and _w2.exists(), f"opus={_o2} wav={_w2.exists()}")
+        _badw = _d23 / "bad.wav"
+        _badw.write_bytes(b"this is not a wav" * 50)
+        _o3, _why3 = tm.transcode_one(_badw)
+        check("⭐⭐ 转不成 -> `(None, 原因)`，**wav 留着**、不留半截 opus",
+              _o3 is None and _badw.exists() and not (_d23 / "bad.opus").exists(),
+              _why3[:80])
+
+        # ③ `_TranscodeWorker`：**一个线程、按顺序**、结果记账
+        _order, _state = [], {"live": 0, "max": 0}
+        _lk23 = _th.Lock()
+
+        def _fake_tc(wav, opus=None, *, delete=True):
+            with _lk23:
+                _order.append(pathlib.Path(wav).name)
+                _state["live"] += 1
+                _state["max"] = max(_state["max"], _state["live"])
+            time.sleep(0.05)                     # 给"并行"留出暴露窗口
+            o = pathlib.Path(wav).with_suffix(".opus")
+            o.write_bytes(b"OggS" + b"\0" * 8 + b"OpusHead" + b"\0" * 8)
+            with _lk23:
+                _state["live"] -= 1
+            return o, ""
+
+        _wk = tm._TranscodeWorker(transcode=_fake_tc)
+        _wavs23 = []
+        for _i in (1, 2, 3):
+            _p = _d23 / f"w{_i}.wav"
+            _mk_wav(_p)
+            _wavs23.append(_p)
+        for _p in _wavs23:
+            _wk.submit(_p)
+        _wk.drain(10.0)
+        # ⚠️ 变异验证：把 `_run` 改成开线程池并行 -> 这条红（上课期间跟 ASR 抢核）。
+        check("⭐⭐ 后台工人：**一次只转一段**（并行会把字幕拖慢）",
+              _state["max"] == 1, f"max={_state['max']}")
+        check("⭐⭐ 按提交顺序、每段都转完（`finished` 记账）",
+              _order == ["w1.wav", "w2.wav", "w3.wav"]
+              and [p.name for p in _wk.finished()] == ["w1.opus", "w2.opus", "w3.opus"],
+              f"order={_order} done={[p.name for p in _wk.finished()]}")
+        check("⭐ 排空后 `unfinished()` 为空（收尾不用跳开谁）", _wk.unfinished() == [])
+        _wk.stop()
+
+        # ④ 段一转完就喂工人（`_rotate_wav`）—— 收尾只剩最后一段
+        _sub = []
+        _fake_w = type("_W", (), {
+            "submit": lambda self, p: _sub.append(p),
+            "drain": lambda self, t=0: None,
+            "finished": lambda self: [],
+            "unfinished": lambda self: [],
+            "stop": lambda self: None})()
+        _t23b = tm.TestSession(_d23 / "rot.md", record_audio=True)
+        _t23b._transcode = _fake_w
+        _t23b._rotate_wav()                        # 第 1 段关掉 -> 喂
+        _t23b._rotate_wav()                        # 第 2 段关掉 -> 喂
+        # ⚠️ 变异验证：把 `_rotate_wav` 里那两行 submit 删掉 -> 这条红（收尾又转全部）。
+        check("⭐⭐ `_rotate_wav`：关掉的段**当场**交给后台工人",
+              [p.name for p in _sub] == ["rot.001.wav", "rot.002.wav"], str(_sub))
+
+        # ⑤ journal：开录就写下"还欠哪几步"；收尾逐步更新；**上传排完才撤**
+        _mk23 = _d23 / ("rot" + tm.upload_mod.PENDING_TAIL)
+        _j = _json2.loads(_mk23.read_text(encoding="utf-8"))
+        check("⭐⭐ 开录就写下 journal：还欠哪三步（转码 / 报告 / 上传）",
+              _j.get("steps") == {"transcode": "pending", "report": "pending",
+                                  "upload": "pending"} and _j.get("pid"),
+              str(_j.get("steps")))
+
+        _t23c = tm.TestSession(_d23 / "fin.md", record_audio=True)
+        _t23c._wav.writeframes(b"\0\0" * (tm.SR // 2))    # 第一段写点真样本
+        _t23c._rotate_wav()                               # 001 交给**真**工人（后台）
+        _t23c._wav.writeframes(b"\0\0" * (tm.SR // 2))    # 最后一段
+        # ⚠️ 判据是在 check.py 里跑的，而它设 `CLASSLIVE_UPLOAD=0`（判据不许真上传）——
+        #    这一节要的是"上传**开着**"那半（收尾才留着 journal 等排上传）。
+        _saved_up = os.environ.get("CLASSLIVE_UPLOAD")
+        os.environ["CLASSLIVE_UPLOAD"] = "1"
+        os.environ["PATH"] = str(_d23)                    # 逼转码走 soundfile
+        try:
+            _t23c.finish(bundle=False)
+        finally:
+            os.environ["PATH"] = _saved_path
+            if _saved_up is None:
+                os.environ.pop("CLASSLIVE_UPLOAD", None)
+            else:
+                os.environ["CLASSLIVE_UPLOAD"] = _saved_up
+        _af = {p.name for p in _t23c.audio_files}
+        check("⭐⭐ 收尾对账：后台转好的 + 最后一段，两段都成了 opus",
+              _af == {"fin.001.opus", "fin.002.opus"}, str(sorted(_af)))
+        check("⭐⭐ **wav 只在拿到验过的 opus 之后才删**（两段 wav 都没了）",
+              not (_d23 / "fin.001.wav").exists()
+              and not (_d23 / "fin.002.wav").exists(),
+              str([p.name for p in _d23.glob("fin.*")]))
+        _j2 = {}
+        try:
+            _j2 = _json2.loads((_d23 / ("fin" + tm.upload_mod.PENDING_TAIL))
+                               .read_text(encoding="utf-8"))
+        except Exception:                             # 标记被提前撤了 / 读不了 -> 下面那条红
+            _j2 = {}
+        # ⚠️ 变异验证：`finish` 里 `_journal(report="done")` 删掉 -> 这条红。
+        check("⭐⭐ 收尾把 journal 更新到「转码+报告 done、上传还欠着」（标记**还在**）",
+              _j2.get("steps") == {"transcode": "done", "report": "done",
+                                   "upload": "pending"},
+              str(_j2.get("steps")))
+        # ⚠️ 变异验证：`journal_upload_done` 里不置 `_pending_marker = None` -> 第二次调
+        #    会**把标记重新写出来**（下次启动又"恢复"一节收过尾的课）-> 这条红。
+        _t23c.journal_upload_done()
+        _t23c.journal_upload_done()                # 幂等：不许复活
+        check("⭐⭐ 上传排完 -> 撤掉 journal；再调一次也**不许复活**",
+              not (_d23 / ("fin" + tm.upload_mod.PENDING_TAIL)).exists()
+              and _t23c._pending_marker is None,
+              str([p.name for p in _d23.glob("fin.*")]))
+    finally:
+        _sh.rmtree(_d23, ignore_errors=True)
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

@@ -58,6 +58,7 @@ import functools
 import json
 import os
 import pathlib
+import queue
 import re
 import resource
 import shutil
@@ -134,6 +135,238 @@ def _sf_opus(wav: pathlib.Path, opus: pathlib.Path) -> str | None:
         return None
     except Exception as e:                               # noqa: BLE001
         return f"{type(e).__name__}: {str(e)[:100]}"
+
+
+def _opus_ok(p: pathlib.Path) -> bool:
+    """一个 opus 分段**真的可用吗**：非空 + Ogg/Opus 头。
+
+    ⚠️⚠️ 这是「转成了才删 wav」那句判据的**唯一实现** —— 原来是
+       `exists() and size>0`，而**被杀在写文件中间的 opus 完全可能 size>0**
+       （Ogg 头先落盘、正文半截）→ 删掉 wav = 永久丢一段音频。
+       判据加"头对不对"：`OggS` 容器 + `OpusHead` 识别块，两条都在才算数。
+    ⚠️ 只看**头**，不整文件解码：600 s 的段解码一遍要十几秒，而收尾这条路上
+       每个分段都要问一次。半截**正文**的检测交给 `soundfile` 那条兜底路自己
+       （它写成功就意味着解码器认），以及上传端的完整性。
+    """
+    try:
+        if not p.is_file() or p.stat().st_size <= 0:
+            return False
+        with open(p, "rb") as f:
+            head = f.read(64)
+        return head[:4] == b"OggS" and b"OpusHead" in head
+    except OSError:
+        return False
+
+
+def transcode_one(wav: pathlib.Path, opus: pathlib.Path | None = None,
+                  *, delete: bool = True) -> tuple:
+    """**一段** wav → Opus。返回 `(opus 路径 | None, 原因串)`。永不抛。
+
+    - ffmpeg 优先（同段实测 4.3 s），失败 / 不存在 → `_sf_opus` 兜底（15.8 s）。
+    - ⭐⭐ **wav 只在 opus 验过（`_opus_ok`）之后才删**；半截的 opus 删掉，
+      wav 留着 —— 宁可占地方，也别丢音频（原来只看 size>0，见 `_opus_ok`）。
+    - `delete=False`：**不删 wav**，只产出 opus —— 后台工人用这一档。删除留给
+      收尾的 reconciliation（见 `finish`）：这样"后台还在转、收尾已经列好清单"
+      这个竞态里，**wav 一定还在盘上**，最坏是多传一份，绝不丢一段。
+    - 原因串：`""` = ffmpeg 那条就成功了；非空 = 描述 ffmpeg/soundfile 怎么失败的
+      （收尾那条路拿它记 `events`，见 `_to_opus`）。
+
+    ⚠️ 模块级（不是 `TestSession` 的方法）：**崩溃补传**也要它 ——
+       `upload.recover_pending(transcode=transcode_one)` 在后台把上次没转完的
+       残段转掉，而不是原样传 wav（一位测试者 7 节课 610 MB wav 就是这么来的）。
+    """
+    opus = opus or wav.with_suffix(".opus")
+    why = ""
+    try:
+        pr = subprocess.run(
+            ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(wav),
+             "-c:a", "libopus", "-b:a", AUDIO_OPUS_BITRATE,
+             "-ac", "1", "-ar", str(SR), str(opus)],
+            capture_output=True, timeout=180)
+        if pr.returncode == 0 and _opus_ok(opus):
+            if delete:
+                wav.unlink(missing_ok=True)              # ⚠️ 验过了才删
+            return opus, ""
+        why = f"rc={pr.returncode} {pr.stderr.decode('utf-8', 'ignore')[:100]}"
+    except Exception as e:                               # noqa: BLE001
+        why = f"{type(e).__name__}: {str(e)[:100]}"
+    # 兜底：ffmpeg 不在 / 失败
+    err = _sf_opus(wav, opus)
+    if err is None and _opus_ok(opus):
+        if delete:
+            wav.unlink(missing_ok=True)                  # ⚠️ 验过了才删
+        return opus, f"ffmpeg {why}"
+    try:
+        opus.unlink(missing_ok=True)                     # 半截的别留着冒充成品
+    except OSError:
+        pass
+    return None, f"ffmpeg {why} · soundfile {err}"
+
+
+#: 收尾时最多**等后台上传工人多久**（秒）。它是收尾这条路上唯一"等一个后台线程"
+#: 的地方 —— 超时就把没碰过的 wav 原样留下（`_to_opus(skip=...)`），宁可传 wav，
+#: 也不把收尾卡死。实测一段 600 s 的 wav 转完 ≤ 16 s，正常等它几秒就完。
+TRANSCODE_DRAIN_S = 120.0
+
+
+class _TranscodeWorker:
+    """**一段一段**在后台把转好的 wav 变成 Opus 的工人（`_rotate_wav` 每转一段喂一个）。
+
+    ## 为什么要有它
+
+    原来转码**全部**堆在收尾：50 分钟 = 5 段 × 15.8 s（soundfile 兜底、4 线程）
+    ≈ 30 s 的纯等待。而 10-14 一节真课：收尾转码途中进程被合盖/退出打断 →
+    `.001.opus` 生成了、`.001.wav` 没删 → 那一段音频**两个名字都留着**，
+    而上传只传得上其中一个。段一转完就转掉，收尾只剩最后一段（和失败过的）。
+
+    ## 纪律（都写在判据里）
+
+    - **一个线程、按顺序**（`queue.Queue`）—— 转码是 CPU 活，上课期间跟 ASR /
+      翻译抢核会直接拉高字幕延迟。收尾那条路的 4 线程并行**不在这里**（见 `_to_opus`）。
+    - **低优先级**：线程自己降到 background QoS（`_set_background_qos`，ctypes 调
+      `pthread_set_qos_class_self_np`）。⚠️ **不用 `os.nice`** —— 那是**进程级**的，
+      会把录课 / ASR 一起降下去，不是我们要的。
+    - **永不抛**、**失败留 wav**（`transcode_one` 自己守着）。
+    - ⭐⭐ **工人自己不删 wav**（`transcode_one(delete=False)`）：删除只发生在收尾的
+      reconciliation 里（`finish` 拿到**验过的 opus** 才删对应的 wav）。这样"工人还在
+      转、收尾已经列好清单"那个竞态里，**wav 一定还在盘上** —— 最坏是多传一份，
+      绝不丢一段音频。
+    - **`drain()` 有上限**：收尾最多等 `TRANSCODE_DRAIN_S`；超时 `stop()` 收摊，
+      没碰过的 wav 原样交给上传（宁可传 wav，不丢音频）。
+    """
+
+    def __init__(self, transcode=transcode_one, *, log=None):
+        self._transcode = transcode
+        self._log = log
+        self._q: queue.Queue = queue.Queue()
+        self._th: threading.Thread | None = None
+        self._busy: pathlib.Path | None = None      # 正在转的那段（drain/unfinished 用）
+        self._done: list[pathlib.Path] = []
+        self._stop = threading.Event()
+        self._mu = threading.Lock()                 # 护 `_busy` / `_done` 两个小状态
+
+    # ---- 喂 / 等 ----
+    def submit(self, wav: pathlib.Path) -> None:
+        """排队（第一个 submit 才真的起线程）。永不抛。"""
+        try:
+            if self._stop.is_set():
+                return
+            self._q.put(pathlib.Path(wav))
+            self._ensure_thread()
+        except Exception:                                # noqa: BLE001
+            self._warn("⚠ 转码工人排不进队（这一段留到收尾一起转）")
+
+    def drain(self, timeout_s: float = TRANSCODE_DRAIN_S) -> None:
+        """等它把排队的做完（**有上限**）。超时就 `stop()` 收摊，绝不死等。"""
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while time.monotonic() < deadline:
+            if self._q.empty() and not self._busy_path():
+                return
+            time.sleep(0.1)
+        if self._q.empty() and not self._busy_path():
+            return
+        self._warn(f"⚠ 后台转码没等完（>{timeout_s:.0f}s）—— 剩下的 wav 原样上传")
+        self.stop()
+
+    def stop(self) -> None:
+        """收摊：不再接新活，工人做完手上那段就退。**不 join**（它是 daemon）。"""
+        self._stop.set()
+
+    # ---- 只读（收尾拼 `audio_files` 用）----
+    def finished(self) -> list:
+        """已经转好的 opus 路径（快照）。"""
+        with self._mu:
+            return list(self._done)
+
+    def unfinished(self) -> list:
+        """**还没转成**的 wav 路径（排队中 + 手上那段）—— 收尾跳开它们，别两头转。"""
+        out = []
+        while True:                                      # Queue 没有 peek；捞出来再放回去
+            try:
+                out.append(self._q.get_nowait())
+            except Exception:                            # noqa: BLE001
+                break
+        for p in out:
+            self._q.put(p)
+        b = self._busy_path()
+        if b is not None:
+            out.append(b)
+        return out
+
+    def _busy_path(self):
+        with self._mu:
+            return self._busy
+
+    def _warn(self, msg: str) -> None:
+        if self._log is not None:
+            try:
+                self._log(msg)
+            except Exception:                            # noqa: BLE001
+                pass
+
+    def _ensure_thread(self) -> None:
+        if self._th is not None and self._th.is_alive():
+            return
+        self._th = threading.Thread(target=self._run, daemon=True,
+                                    name="cl-transcode")
+        self._th.start()
+
+    def _run(self) -> None:
+        _set_background_qos()
+        while not self._stop.is_set():
+            try:
+                wav = self._q.get(timeout=0.5)
+            except Exception:                            # noqa: BLE001  Queue.Empty
+                continue
+            if self._stop.is_set():
+                return
+            with self._mu:
+                self._busy = wav
+            try:
+                # ⚠️ `delete=False` —— wav 归收尾的 reconciliation 删（见类 docstring）
+                opus, why = self._transcode(wav, delete=False)
+                if opus is not None:
+                    with self._mu:
+                        self._done.append(opus)
+                else:
+                    self._warn(f"⚠ 后台转码没成（{wav.name}）：{why[:120]}")
+            except Exception as e:                       # noqa: BLE001
+                self._warn(f"⚠ 后台转码崩了（{wav.name}）：{type(e).__name__}")
+            finally:
+                with self._mu:
+                    self._busy = None
+
+
+#: `QOS_CLASS_BACKGROUND`（`sys/qos.h`：`QOS_CLASS_BACKGROUND = 0x09`）。
+_QOS_BACKGROUND = 0x09
+_QOS_BOUND: dict = {}
+
+
+def _set_background_qos() -> bool:
+    """把**当前线程**降到 background QoS。拿不到就什么都不做（返回 False）。永不抛。
+
+    ⚠️ 是**线程级**的（`pthread_set_qos_class_self_np`）：只降这个转码线程。
+       `os.nice` 是进程级的，会把录课 / ASR 一起降 —— 那条路**不用**。
+    ⚠️ 绑定结果缓存（`_QOS_BOUND`）：判据要能在非 macOS / 绑定失败时静默降级。
+    """
+    if "fn" not in _QOS_BOUND:
+        try:
+            import ctypes
+            lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+            fn = lib.pthread_set_qos_class_self_np
+            fn.restype = ctypes.c_int
+            fn.argtypes = [ctypes.c_int, ctypes.c_int]
+            _QOS_BOUND["fn"] = fn
+        except Exception:                                # noqa: BLE001
+            _QOS_BOUND["fn"] = None
+    fn = _QOS_BOUND["fn"]
+    if fn is None:
+        return False
+    try:
+        return fn(_QOS_BACKGROUND, 0) == 0
+    except Exception:                                    # noqa: BLE001
+        return False
+
 
 #: `TestSession.note_block()` 认的名字（见那个方法的 docstring）。
 #: ⚠️ **多一格就在这儿加一行** —— 名字打错**不会**静默建键，会进 `events` 报一声。
@@ -951,6 +1184,10 @@ class TestSession:
         self._seg_i = 0                  # 当前是第几段（从 1 起）
         self._seg_n = 0                  # 当前段已写入多少样本（切点判据用这个）
         self.audio_files: list = []      # 收尾转码后的 Opus 分段（`finish` 里填）
+        #: ⭐ 3.10：**课上就在后台转**的工人（`_rotate_wav` 每转一段喂一个）。
+        #:    收尾只剩最后一段 + 失败过的；见 `_TranscodeWorker` 的 docstring。
+        #:    ⚠️ 线程**懒起**（第一个 submit 才起）—— 没转过段就不多一个线程。
+        self._transcode = _TranscodeWorker(log=lambda m: print(m, flush=True))
 
         if self.record_audio:
             # ⚠️⚠️ **这一段必须包起来**（2026-09-28 审查指出）：模块头的承诺是
@@ -967,12 +1204,20 @@ class TestSession:
             #    ⚠️ 收尾会删它；**没删成 = 下一次启动 `upload.recover_pending` 会把
             #       这一节已录到的部分排进上传队列**（带 `crash_recovered: true`）。
             #    ⚠️ 没有它，「崩溃那一整类数据」全丢 —— 而崩溃现场恰恰最该看。
+            # ⭐⭐ 3.10 起它同时是 **journal**：`steps` 列出「还欠哪几步」，
+            #    每完成一步就更新（`_journal`）—— 崩溃补传照它接着做
+            #    （转码残段 / 补报告 / 排队上传），不再只靠"哪些文件在盘上"猜。
+            #    ⚠️ 它不是**第二套**机制：还是这一个 `.pending.json`，还是
+            #       `recover_pending` 那条路（任务原话：extend，不是另起一套）。
             try:
                 self._pending_marker = pathlib.Path(
                     str(self.stem) + upload_mod.PENDING_TAIL)
                 self._pending_marker.write_text(
                     json.dumps({"stem": self.stem.name, "pid": os.getpid(),
-                                "started": time.strftime("%Y-%m-%d %H:%M:%S")},
+                                "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                "steps": {"transcode": "pending",
+                                          "report": "pending",
+                                          "upload": "pending"}},
                                ensure_ascii=False), encoding="utf-8")
             except Exception:                             # noqa: BLE001
                 self._pending_marker = None
@@ -1046,59 +1291,102 @@ class TestSession:
             cand.append(pathlib.Path(self.session_path))
         return [p for p in cand if p.is_file()]
 
-    def _to_opus(self) -> list:
-        """把 wav 分段转成 Opus，**转成功一个删一个**。返回 opus 路径表。
+    # ---- 崩溃 journal（就是那个 `.pending.json`，不是第二套机制）----
+    def _journal(self, **steps) -> None:
+        """把「哪几步做完了」写进崩溃 journal（tmp→rename，**失败一律吞**）。
 
-        ⚠️ 跑在**收尾**，不在上课路径上 —— 实测 5.1 分钟音频转 2.13 秒
-           （折合 50 分钟约 21 秒）。「绝不能影响上课」那条纪律因此自动满足。
+        ⚠️ 它只是残局记录 —— 绝不能因为它把课 / 收尾拦下来。
+        ⚠️ `finish()` 之后 `_pending_marker` 会被清掉（或整个删掉）—— 那之后的
+           调用**不许把标记重新写出来**（不然下次启动会对一节收过尾的课
+           `recover_pending`）。所以这里先看 `_pending_marker is None`。
+        """
+        mk = getattr(self, "_pending_marker", None)
+        if mk is None:
+            return
+        try:
+            cur = {}
+            if mk.exists():
+                cur = json.loads(mk.read_text(encoding="utf-8")) or {}
+            if not isinstance(cur, dict):
+                cur = {}
+            cur.setdefault("steps", {})
+            cur["steps"].update({k: v for k, v in steps.items()})
+            cur["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            tmp = mk.with_suffix(".tmp")                 # `<stem>.pending.tmp`
+            tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(mk)
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def journal_upload_done(self) -> None:
+        """上传那一步排完了（`main.start_upload` 之后调）—— 记一笔并**撤掉 journal**。
+
+        ⚠️ 撤得晚是**故意的**：原来 `finish()` 一进门就把标记删了 —— 那之后
+           「报告写到一半被杀 / 排上传之前被杀」都会**没有任何残局记录**，
+           音频与报告永远不上传。现在标记活到"上传已排队"这一刻。
+        ⚠️ 幂等：上传关着（`CLASSLIVE_UPLOAD=0`）时 `finish()` 已经删过 ——
+           这里 `_pending_marker is None` 直接返回。
+        """
+        self._journal(upload="done")
+        mk = getattr(self, "_pending_marker", None)
+        if mk is None:
+            return
+        try:
+            mk.unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._pending_marker = None
+
+    def _to_opus(self, *, skip=None) -> list:
+        """把**剩下的** wav 分段转成 Opus，**转成功一个删一个**。返回 opus 路径表。
+
+        ⚠️ 跑在**收尾**，不在上课路径上。⭐ 3.10 起**多数段在课上就转完了**
+           （`_TranscodeWorker` 搭 `_rotate_wav`）—— 这里通常只剩**最后一段**
+           和失败过的。实测 600 s 一段：ffmpeg 4.3 s / soundfile 兜底 15.8 s。
         ⚠️ **失败就保留那个 wav**（宁可占地方，别丢音频）—— 并记进 `events`。
+        ⚠️ `skip`：后台工人**正在/还要**碰的那些段，这里一个都不碰
+           （同一个文件两头转 = 两个进程抢着写同一个 opus）。
+        ⚠️ 逐段并行（4 路）：分段之间互不相干，而 soundfile 那条路 ~38× 实时 ——
+           50 分钟串行要 80 s。ffmpeg 那条也一起并行（原来只有兜底并行）。
         ⚠️ PATH：照 `capture.load_file` 的形状调（`ffmpeg` 是外部二进制；
            `.app` 双击那条路靠 `cl` 补的 PATH，不是这里补）。
-        ⚠️ 3 分钟超时：正常一条分段约 20 秒，卡住说明 ffmpeg 出问题了。
         ⭐ ffmpeg 不在 / 失败 → **soundfile 兜底**（`_sf_opus`，2026-10-14 起）。
            之前这一步失败就原样传 wav：一位没装 ffmpeg 的测试者 7 节课传了 610.8 MB wav，
-           同批走 opus 约 58 MB（10.5×）。soundfile + libsndfile 本来就打在 `.app` 里（定稿上云在用）。
-           ffmpeg 仍然排第一：同一段 600 s 实测 ffmpeg 4.3 s / 1.74 MB，soundfile 15.8 s / 2.59 MB。
+           同批走 opus 约 58 MB（10.5×）。
         """
-        out, fallback = [], []
-        for wav in list(self._wav_paths):
-            opus = wav.with_suffix(".opus")
-            why = ""
-            try:
-                pr = subprocess.run(
-                    ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(wav),
-                     "-c:a", "libopus", "-b:a", AUDIO_OPUS_BITRATE,
-                     "-ac", "1", "-ar", str(SR), str(opus)],
-                    capture_output=True, timeout=180)
-                if pr.returncode == 0 and opus.exists() and opus.stat().st_size > 0:
-                    out.append(opus)
-                    wav.unlink(missing_ok=True)          # ⚠️ 转成了才删
-                    continue
-                why = f"rc={pr.returncode} {pr.stderr.decode('utf-8', 'ignore')[:100]}"
-            except Exception as e:                       # noqa: BLE001
-                why = f"{type(e).__name__}: {str(e)[:100]}"
-            fallback.append((wav, opus, why))
-        if fallback:
-            # 慢的那条（~38× 实时）：分段之间互不相干，并行编（cffi 调 C 时放 GIL）。
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=min(4, len(fallback))) as ex:
-                errs = list(ex.map(lambda f: _sf_opus(f[0], f[1]), fallback))
-            for (wav, opus, why), err in zip(fallback, errs):
-                ok = err is None and opus.exists() and opus.stat().st_size > 0
+        skip = {pathlib.Path(p) for p in (skip or ())}
+        todo = [w for w in list(self._wav_paths) if w.exists() and w not in skip]
+        if not todo:
+            return []
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(4, len(todo))) as ex:
+            got = list(ex.map(lambda w: (w, *transcode_one(w)), todo))
+        out = []
+        for wav, opus, why in got:
+            if opus is not None:
+                out.append(opus)
+                if why:                                  # ffmpeg 没成、soundfile 成的
+                    self.events.append({
+                        "t": round(time.monotonic() - self.t0, 2),
+                        "kind": "transcode_soundfile",
+                        "detail": f"{wav.name}: {why}"})
+            else:
                 self.events.append({
                     "t": round(time.monotonic() - self.t0, 2),
-                    "kind": "transcode_soundfile" if ok else "transcode_failed",
-                    "detail": f"{wav.name}: ffmpeg {why}" + ("" if ok else f" · soundfile {err}")})
-                if ok:
-                    out.append(opus)
-                    wav.unlink(missing_ok=True)          # ⚠️ 转成了才删
-                else:
-                    opus.unlink(missing_ok=True)         # 半截的 opus 别留着冒充成品
+                    "kind": "transcode_failed",
+                    "detail": f"{wav.name}: {why}"})
         return out
 
     def _rotate_wav(self) -> None:
-        """关掉当前段、开下一段。**失败就降级成「不再录」**，不抛。"""
+        """关掉当前段、开下一段。**失败就降级成「不再录」**，不抛。
+
+        ⭐ 3.10：**关掉的那一段当场丢给后台工人转**（`_TranscodeWorker`）——
+           转码不再全堆在收尾；收尾只剩最后一段 + 失败过的。
+        """
+        prev = self._wav_path
         self._close_wav()
+        if prev is not None:
+            self._transcode.submit(prev)
         self._seg_i += 1
         self._seg_n = 0
         path, w = self._open_wav(self._seg_i)
@@ -1558,21 +1846,35 @@ class TestSession:
             self._close_wav()
         if self.stem is None:
             return None
-        # ⭐ 收尾转码：wav 分段 -> Opus，转成了就删 wav（见 `_to_opus`）。
+        # ⭐ 收尾转码：先把后台工人等一等（课上已经转掉大半），再转剩下的，最后对账。
         #    ⚠️ 排在**最前面**（报告落盘之前），这样报告里那个 `audio_saved`
         #       和 `audio_files` 说的是**最终状态**。
         #    ⚠️ 转码失败留下的 wav **也要列进去**（Worker 收 `audio.NNN.wav`）——
         #       不然没装 ffmpeg 的机器上只传得上报告和转录，音频**静默丢**。
-        self.audio_files = self._to_opus() if self.record_audio else []
+        #    ⚠️⚠️ **wav 在这里才删**（工人自己不删，见 `_TranscodeWorker`）：
+        #       拿到**验过的 opus** 才动它 —— "工人还在转、收尾已列清单"那个竞态里
+        #       wav 一定还在盘上，最坏多传一份，绝不丢一段。
+        self.audio_files = []
         if self.record_audio:
+            self._transcode.drain(TRANSCODE_DRAIN_S)
+            done = self._transcode.finished()
+            for opus in done:
+                try:
+                    opus.with_suffix(".wav").unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self.audio_files += done
+            self.audio_files += self._to_opus(skip=self._transcode.unfinished())
+            # ⚠️ 对账：等收尾这几秒里工人可能又转完一段 —— 补进清单（去重）。
+            self.audio_files += [p for p in self._transcode.finished()
+                                 if p not in self.audio_files]
             self.audio_files += [w for w in self._wav_paths if w.exists()]
-        # ⭐ 收尾走到了 —— 撤掉崩溃标记（`recover_pending` 靠它认「这一节没收尾」）。
-        _mk = getattr(self, "_pending_marker", None)
-        if _mk is not None:
-            try:
-                _mk.unlink(missing_ok=True)
-            except Exception:                             # noqa: BLE001
-                pass
+            self._journal(transcode=("done" if not any(w.exists() for w in self._wav_paths)
+                                     else "pending"))
+        # ⚠️⚠️ **标记不在这里删**（3.10 改）：原来一进门就删 —— 之后"报告写到一半
+        #    被杀 / 排上传之前被杀"就**没有任何残局记录**（音频与报告永远不上传）。
+        #    现在它活到"上传已排队"（`journal_upload_done`，收尾那边调）；
+        #    上传**关着**时没人会来排 —— 那时在 `finish()` 末尾自己撤（见下）。
 
         dur = time.monotonic() - self.t0
         cpu = self._cpu() - self._cpu0
@@ -1721,7 +2023,14 @@ class TestSession:
         out = str(self.stem) + ".report.json"
         with open(out, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=1)
+        # ⭐ 报告落盘了 —— journal 记一笔（它已经不只是"崩溃标记"，见 `_journal`）。
+        self._journal(report="done")
         if bundle:
             self.bundle_path = make_bundle(self.stem, out, self.session_path,
                                            audio_paths=getattr(self, "audio_files", []))
+        # ⚠️ 上传**关着**时没人会来调 `journal_upload_done()` —— 那时在这里自己撤。
+        #    ⚠️ 判据与 `main.start_upload` **同一个**（`upload.upload_enabled()`），
+        #       不许各写一份 env 判断。
+        if not upload_mod.upload_enabled():
+            self.journal_upload_done()
         return out

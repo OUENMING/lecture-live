@@ -16,6 +16,16 @@ from __future__ import annotations
 import argparse, collections, concurrent.futures, datetime, os, pathlib, queue, re, shlex, sys, threading, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ⭐⭐ 3.10：**半换的树不许开始上课** —— 上次换代码要是被打断（合盖 / 强杀 / 断电），
+#    在**任何 app 模块被 import 之前**把它收尾（判据在 tests/test_update.py）。
+#    ⚠️ 为什么非得在这儿：混着的树 import 到哪个坏文件就死在哪个坏文件上 ——
+#       `main()` 都进不去，那时再修就晚了（现场与修法见
+#       `update.repair_interrupted_apply()` 的 docstring）。
+#    ⚠️ 常驻成本 = 一次 `import update`（纯 stdlib，见它文件头）+ 一次 `exists()`；
+#       没有 journal（几乎每次启动）连 git 都不碰。
+import update as _boot_update                                      # noqa: E402
+if _boot_update.apply_journal_path().exists():
+    _boot_update.repair_interrupted_apply(say=lambda m: print(f"🧰 {m}", flush=True))
 from capture import load_source, SR, SilenceWatch
 from vad import Segmenter
 import draft_policy
@@ -34,7 +44,7 @@ from cloud_translator import (DEFAULT_CTX_CHUNK, load_api_key,
                               answer_user_content)
 from obsidian_writer import ObsidianWriter, resolve_vault, remember_vault
 from build_notes import (TermNotes, format_gloss, detect_proper_nouns, lookup_term)
-from testmode import TestSession, system_info
+from testmode import TestSession, system_info, transcode_one
 import changelog
 import keyentry
 import instance_lock
@@ -44,7 +54,9 @@ import power
 
 PARTIAL_MAX_S = 10          # 草稿只转写最近 N 秒, 限制单次耗时
 DEVICE_CHECK_S = 2.0        # 实时音源: 多久重探一次「默认输入设备还是不是那个」
-SLEEP_GAP_S = 10.0          # 墙钟一次跳这么多 = 系统睡过一觉(见 check_clock_and_device)
+SLEEP_GAP_S = power.SLEEP_GAP_S   # 墙钟一次跳这么多 = 系统睡过一觉(见 check_clock_and_device)
+#                                 ⚠️ **定义在 `power.py`** —— 收尾那个 `WakeWatch` 与
+#                                 这条 2 s 保安线程共用同一份（两处各写 10.0 会漂）。
 #: 收尾时留给实时总结的上限（秒）——提残余窗口 + 给当前章做一次正式合成。
 #: ⚠️ 它只是**上限**，不是固定等待：正常那一节实测 6–9 秒就走完了。
 #: ⚠️ 定这个数的约束是**收尾不能明显变慢**（复习层 / 写盘还在等它），而不是"够用"。
@@ -379,6 +391,28 @@ def start_upload(tester) -> dict:
                               name="cl-upload")
         th.start()
     return {"queued": n, "pending": pending, "thread": th}
+
+
+def retry_pending_uploads(*, reason: str = "") -> int:
+    """把**还没传成的**条目提前到"现在"再推一把（睡醒 / 网络恢复时调）。返回动了几条。
+
+    ⚠️ 有界（`upload.WAKE_RETRY_MAX`）：睡一觉就无限重推是把服务端当靶子打 ——
+       超过上限的条目退回正常退避（1 → 120 min），这条纪律不许被"睡醒"废掉。
+    ⚠️ 丢后台线程，**绝不阻塞**调用方（收尾 spinner 的 tick / 上课那 2 s 保安线程）。
+    ⚠️ 上传关着 / 队列空 / 出错都只是"这次没推" —— 永不抛。
+    """
+    try:
+        import upload as _up
+        if not _up.upload_enabled():
+            return 0
+        q = _shared_upload_queue()
+        n = q.retry_now()
+        if q.pending:
+            threading.Thread(target=lambda: q.pump(max_items=q.pending), daemon=True,
+                             name="cl-upload-wake").start()
+        return n
+    except Exception:                                     # noqa: BLE001
+        return 0
 
 
 def summary_log_line(payload) -> str | None:
@@ -1867,7 +1901,10 @@ def run(args) -> None:
         import obsidian_writer as _owmod
         import upload_endpoint as _uemod
         _r = _upmod.recover_pending(
-            _owmod.SESSIONS, _upmod.make_http_send(_uemod.endpoint(), _uemod.token()))
+            _owmod.SESSIONS, _upmod.make_http_send(_uemod.endpoint(), _uemod.token()),
+            # ⭐ 3.10：残段**先转码再排**（后台）—— 崩溃补传也走 opus
+            #    （一段 600 s：1.7 MB vs 19 MB）。转不成就原样传 wav。
+            transcode=transcode_one)
         if _r.get("queued"):
             echo(f"📤 发现上次没收尾的测试课 {_r['found']} 节"
                  f" —— 已把已录到的部分排进上传队列（带 crash_recovered 标记）")
@@ -1875,8 +1912,10 @@ def run(args) -> None:
         #    ⚠️ 上一次收尾时那个 daemon 线程多半被进程退出杀了（实测：
         #       报告传上去了、9 MB 的音频没传完）→ 不在这里补一次，它就**永远传不完**。
         #    ⚠️ 丢后台线程，**不阻塞启动**。
+        #    ⚠️⚠️ **上传关着就别推**（`CLASSLIVE_UPLOAD=0`）—— 判据/离线跑全靠它
+        #       （`_upmod.upload_enabled()` 是唯一定义点，不许各写一份 env 判断）。
         _q = _shared_upload_queue()          # ⚠️ 与收尾那条路**同一个实例**（审查 F25）
-        if _q.pending:
+        if _q.pending and _upmod.upload_enabled():
             _pn = _q.pending
             threading.Thread(target=lambda: _q.pump(max_items=_pn), daemon=True,
                              name="cl-upload-startup").start()
@@ -1992,6 +2031,17 @@ def run(args) -> None:
         final_asr.reset_connections()
         if cloud_tr is not None:
             cloud_tr.reset_connections()
+
+    def _on_wake_net() -> None:
+        """⭐ 3.10：睡醒之后**网络那两件事**一起做：
+
+        ① 连接池复位（`_reset_net` —— 睡前的连接可能半开）；
+        ② 积压上传补推一把（`retry_pending_uploads`）—— 启动时那次补传要是
+           正好睡在半路，那条条目多半已经失败/超时了，醒来立刻（有界地）重试。
+        ⚠️ 跑在**上课那 2 s 保安线程**上 —— 两件事都不阻塞（②丢后台线程）。
+        """
+        _reset_net()
+        retry_pending_uploads(reason="课上睡醒")
 
     def submit_question(q: str) -> None:
         """悬浮窗输入框回车回调 -> 把问题投进问答线程(Phase 2)。
@@ -3514,7 +3564,7 @@ def run(args) -> None:
                 _dev["next"] = time.monotonic() + DEVICE_CHECK_S
                 check_clock_and_device(src, args.source,
                                        lambda m, warn=False: notify(m, warn, src=""), _dev,
-                                       on_wake=_reset_net)
+                                       on_wake=_on_wake_net)
                 if tester is not None:
                     # ⭐ 3.10：⏱ 设备便宜样本 —— 搭这个 2 s 定时器；内部每 10 分钟
                     #    才真采一次（没到间隔就是一次单调钟比较，零开销）。
@@ -3672,6 +3722,11 @@ def run(args) -> None:
                 """用户把窗口关了吗（Overlay 的 ✕）。TerminalUI 没有这个概念。"""
                 return bool(getattr(ui, "_closed", False))
 
+            # ⭐ 3.10：**收尾期间的睡醒探测** —— 收尾没有上课那条 2 s 保安线程
+            #    （`check_clock_and_device` 随主循环一起退了），而收尾恰恰是
+            #    "纯等待 + 网络"最密的一段。搭在 spinner 的 tick 上，不另起线程。
+            _wake = power.WakeWatch()
+
             def _spin(until) -> None:
                 """守着 pump 等 `until()` 为真，或用户关窗。逻辑在 `spin_until`（可测）。
 
@@ -3690,6 +3745,14 @@ def run(args) -> None:
                         ui.pump()
                     else:
                         time.sleep(0.02)
+                    # ⭐ 3.10：每轮看一眼**墙钟跳变**（睡过一觉就跳一大截）——
+                    #    睡过去再醒来时，收尾里那些网络步骤多半已经失败/超时了，
+                    #    这里立刻把它们（有界地）补推一把。机制与
+                    #    `check_clock_and_device` 同源；不用 NSWorkspace 通知的
+                    #    理由逐字在那条函数里（通知靠 run loop 投递，终端模式没有）。
+                    if _wake.check():
+                        retry_pending_uploads(
+                            reason=f"睡醒 {_wake.sleep_seconds:.0f}s")
 
                 spin_until(until, _tick, _ui_gone)
 
@@ -3994,6 +4057,11 @@ def run(args) -> None:
                             if _th.is_alive():
                                 echo(f"   📤 还没传完（超过 {UPLOAD_JOIN_S:.0f} 秒）"
                                      f" —— 留着，下次启动接着传")
+                        # ⭐⭐ 3.10：**上传排完了才撤 journal**（见 `journal_upload_done`）。
+                        #    在这之前被杀 / 断电 —— 下次启动的 `recover_pending` 接得住
+                        #    （原来是 `finish()` 一进门就撤：那之后被杀 = 音频与报告
+                        #     **永远**不上传，谁也不认识那节残局）。
+                        tester.journal_upload_done()
                     except Exception as _e:               # noqa: BLE001
                         echo(f"   ⚠ 上传排队失败（{type(_e).__name__}）—— 不影响其余")
                 elif _repfile:
@@ -4290,6 +4358,11 @@ def main():
     #         没有"进程活着但不上课"的窗口（面板是另一个短进程，`entry_launch.py`）。
     #    想收窄成"只罩收尾"：把 `with` 挪进 `run()` 的 `finally`（代价：那 400 行整体
     #    缩进 4 格）。**不改系统设置**、**合盖照样会睡** —— 见 `power.py`。
+    #    ⚠️⭐ 3.10 把"合盖照样会睡"这句话接上了后半句：**可续跑才是那条路的答案** ——
+    #       收尾每一步要么当场做完、要么被 journal 记下、下次启动接着做
+    #       （`testmode` 的 `.pending.json` journal + `upload.recover_pending` +
+    #        `update.repair_interrupted_apply` + `main` 开课前的那个钩子）。
+    #       所以这里**不**去拦合盖（拦不住），也不再需要更长的持有范围。
     with power.keep_system_awake():
         run(args)
 

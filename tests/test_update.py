@@ -1465,6 +1465,179 @@ check("⭐ E9 关掉面板没开课 -> 也起退出时的自动更新",
       "_u.spawn_auto_update()" in _src_el
       and _src_el.index('rc["code"] == CANCELLED') < _src_el.index("_u.spawn_auto_update()"))
 
+# ======================= F. 换代码被打断（3.10）=======================
+# 现场（实测，不是假想）：3000 个文件的一版全量改动、kill 落在 `git pull` 的
+# checkout 中段 -> 工作区**半新半旧**（298/3000 已是新版）、HEAD 还指着旧提交、
+# `.git/index.lock` 留在那（之后**每一次** pull 都死在 File exists —— 永远装不上）。
+# 判据分两条腿：真跑一遍 `pull()`（journal 写没写 / 撤没撤），以及**手工摆出**
+# 半换现场再让 `repair_interrupted_apply()` 收尾（现场可摆、不赌 kill 时机）。
+print("\nF. 换代码被打断 -> journal + 开机/更新前收尾\n")
+
+import ast                                                        # noqa: E402
+
+_REPO = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _big_release(seed, ver="0.0.2"):
+    """一版动到**好几个文件**的发布（VERSION / CHANGELOG / 两个 .py）。"""
+    for n in ("mod.py", "extra.py"):
+        (seed / n).write_text(f"# {n} v1\n", encoding="utf-8")
+    sh("git", "add", "-A", cwd=seed)
+    sh("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "files",
+       cwd=seed)
+    sh("git", "push", cwd=seed)
+    release(seed, ver)
+
+
+def _fetch(clone):
+    sh("git", "fetch", "--quiet", cwd=clone)
+
+
+def _sha(clone, ref="HEAD"):
+    return sh("git", "rev-parse", ref, cwd=clone)
+
+
+def _half_swap(clone, seed, names, *, lock=True):
+    """把 target 版的部分文件抄进工作区 + 留下被杀 git 的 `index.lock`（现场还原）。"""
+    for n in names:
+        (clone / n).write_text((seed / n).read_text(encoding="utf-8"), encoding="utf-8")
+    if lock:
+        (clone / ".git" / "index.lock").write_text("", encoding="utf-8")
+
+
+# F1 没有 journal -> 什么都不做
+_tmpF1, _seedF1, _cloneF1 = new_world()
+_r = update.repair_interrupted_apply()
+check("F1 没有 journal -> 什么都不做（常驻成本 = 一次 exists()）",
+      _r["ok"] and not _r["repaired"] and not _r["action"], str(_r))
+
+# F2 **主路**：半换 + index.lock + journal -> 把那次更新**做完**
+_tmpF2, _seedF2, _cloneF2 = new_world()
+_big_release(_seedF2)
+_fetch(_cloneF2)
+_hb, _tg = _sha(_cloneF2), _sha(_cloneF2, "@{u}")
+update._write_apply_journal(_hb, _tg)
+_half_swap(_cloneF2, _seedF2, ["VERSION", "mod.py"])
+_r = update.repair_interrupted_apply()
+_clean = sh("git", "status", "--porcelain", cwd=_cloneF2)
+# ⚠️ 变异验证：把 `reset --hard target` 那段删掉 -> 这条红（永远停在半换）。
+check("⭐⭐ F2 半换 + 陈旧锁 + journal -> `reset --hard` **补完**（HEAD 到 target、树干净）",
+      _r["repaired"] and _sha(_cloneF2) == _tg and not _clean
+      and (_cloneF2 / "VERSION").read_text().strip() == "0.0.2"
+      and (_cloneF2 / "extra.py").exists(), f"{_r} clean={_clean!r}")
+# ⚠️ 变异验证：把 `_rm_stale_index_lock()` 删掉 -> 这条红（之后每次 pull 都 File exists）。
+check("⭐⭐ F2b 陈旧 `index.lock` 清了（不清 = 以后每次 pull 都死在 File exists）",
+      not (_cloneF2 / ".git" / "index.lock").exists())
+check("⭐⭐ F2c journal 撤了（不撤 -> 每次启动都重修一遍）",
+      not update.apply_journal_path().exists())
+
+# F3 **干净地没换成**（没有 index.lock）-> 工作区**一个字节不动**，只撤 journal
+_tmpF3, _seedF3, _cloneF3 = new_world()
+_big_release(_seedF3)
+_fetch(_cloneF3)
+update._write_apply_journal(_sha(_cloneF3), _sha(_cloneF3, "@{u}"))
+(_cloneF3 / "mod.py").write_text("# 用户自己改的，别动我\n", encoding="utf-8")
+_r = update.repair_interrupted_apply()
+# ⚠️ 变异验证：把"没有 index.lock -> 只撤 journal"那条分支删掉（一律 reset --hard）
+#    -> 这条红（用户自己改的东西被吃掉）。
+check("⭐⭐ F3 没有 index.lock（那次 merge 干净地没换成）-> 用户改的**逐字还在**",
+      _r["repaired"] and (_cloneF3 / "mod.py").read_text() == "# 用户自己改的，别动我\n"
+      and (_cloneF3 / "VERSION").read_text().strip() == "0.0.1"
+      and not update.apply_journal_path().exists(), str(_r))
+
+# F4 不是快进（本地有分叉）-> 一个字节不动（`reset --hard` 会把用户自己的提交吃掉）
+_tmpF4, _seedF4, _cloneF4 = new_world()
+_big_release(_seedF4)
+commit(_cloneF4, "local: 我自己提交的", version="9.9.9-local")
+_fetch(_cloneF4)
+update._write_apply_journal(_sha(_cloneF4), _sha(_cloneF4, "@{u}"))
+(_cloneF4 / ".git" / "index.lock").write_text("", encoding="utf-8")
+_r = update.repair_interrupted_apply()
+# ⚠️ 变异验证：把 `merge-base --is-ancestor` 那道闸删掉 -> 这条红（本地提交被 reset 掉）。
+check("⭐⭐ F4 分叉 -> **不动**（本地提交还在），只撤 journal",
+      (_cloneF4 / "VERSION").read_text().strip() == "9.9.9-local"
+      and not _r["repaired"] and not update.apply_journal_path().exists(), str(_r))
+
+# F5 正常 `pull()`：动手**之前**写 journal、换完撤掉
+_tmpF5, _seedF5, _cloneF5 = new_world()
+_big_release(_seedF5)
+_calls = []
+_real_w = update._write_apply_journal
+
+
+def _spy_w(hb, tg):
+    _calls.append((hb, tg))
+    return _real_w(hb, tg)
+
+
+update._write_apply_journal = _spy_w
+try:
+    _r = update.pull()
+finally:
+    update._write_apply_journal = _real_w
+# ⚠️ 变异验证：把 `_write_apply_journal(...)` 那行删掉 -> 这条红（换到一半被杀没据可查）。
+check("⭐⭐ F5 `pull()` 动手前写下 journal（head_before -> target）、换完撤掉",
+      _r["ok"] and len(_calls) == 1
+      and _calls[0][1] == _sha(_cloneF5, "HEAD")      # target == 换完之后的 HEAD
+      and _calls[0][0] != _calls[0][1],               # head_before != target
+      f"calls={len(_calls)} ok={_r['ok']}")
+check("⭐ F5b 换完 journal 不在盘上、版本真的换了",
+      not update.apply_journal_path().exists()
+      and (_cloneF5 / "VERSION").read_text().strip() == "0.0.2",
+      (_cloneF5 / "VERSION").read_text().strip())
+
+# F6 脏工作区 -> `pull()` 在**写 journal 之前**就停手（journal 不该出现）
+_tmpF6, _seedF6, _cloneF6 = new_world()
+_big_release(_seedF6)
+(_cloneF6 / "requirements.txt").write_text("numpy>=2.0\n# 别丢我\n", encoding="utf-8")
+_r = update.pull()
+# ⚠️ 变异验证：把 `_write_apply_journal(...)` 挪到脏检查**之前** -> 这条红
+#    （一次"干净拒绝"也会留下 journal，下次启动还得白修一遍）。
+check("⭐⭐ F6 脏工作区 -> 停手且**没写 journal**（拒绝发生在动手之前）",
+      (not _r["ok"]) and _r.get("blocked") and not update.apply_journal_path().exists(),
+      str(_r)[:120])
+_r2 = update.repair_interrupted_apply()
+check("⭐ F6b 没有 journal -> 修复是 no-op（工作区一个字节不动）",
+      not _r2["repaired"] and not _r2["action"]
+      and (_cloneF6 / "requirements.txt").read_text() == "numpy>=2.0\n# 别丢我\n"
+      and (_cloneF6 / "VERSION").read_text().strip() == "0.0.1", str(_r2))
+
+# F7 `auto_update` 在**分支/限频检查之前**就修 —— 半换的树会把那些检查全带偏
+_tmpF7, _seedF7, _cloneF7 = new_world()
+_big_release(_seedF7)
+_fetch(_cloneF7)
+_hb7, _tg7 = _sha(_cloneF7), _sha(_cloneF7, "@{u}")          # ⚠️ 先读（换分支后没有 @{u}）
+sh("git", "checkout", "-q", "-b", "side", cwd=_cloneF7)      # 不在正式版那条线上
+update._write_apply_journal(_hb7, _tg7)
+_half_swap(_cloneF7, _seedF7, ["VERSION", "mod.py"])         # ⚠️ 摆现场**之后**才有锁
+with _mock.patch.object(update, "_finish_in_child", _fake_fin):
+    _r = update.auto_update()
+# ⚠️ 变异验证：把 auto_update 里那段 repair 挪到分支检查**之后** -> 这条红（跳过 -> 不修）。
+check("⭐⭐ F7 分支不对 -> 自动更新照样**先修**（repair 在分支检查之前）",
+      (_cloneF7 / "VERSION").read_text().strip() == "0.0.2"
+      and not sh("git", "status", "--porcelain", cwd=_cloneF7), str(_r)[:140])
+
+# F8 开机钩子在任何 app 模块 import **之前**（混着的树进不了 main()，钩子必须更早）
+_tree_main = ast.parse((_REPO / "main.py").read_text(encoding="utf-8"))
+
+
+def _first(seq, pred):
+    for i, n in enumerate(seq):
+        if pred(n):
+            return i
+    return -1
+
+
+_i_app = _first(_tree_main.body, lambda n: isinstance(n, ast.ImportFrom)
+                and n.module == "capture")
+_i_hook = _first(_tree_main.body, lambda n: isinstance(n, ast.If)
+                 and "repair_interrupted_apply" in ast.unparse(n))
+# ⚠️ 变异验证：把钩子挪到 import 之后 -> 这条红（`from capture import` 先炸就没人修了）。
+check("⭐⭐ F8 开机钩子排在 `from capture import …` **之前**（且认 journal）",
+      0 <= _i_hook < _i_app
+      and "apply_journal_path" in ast.unparse(_tree_main.body[_i_hook]),
+      f"hook={_i_hook} first_app_import={_i_app}")
+
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
 print(f"\n{'=' * 60}")

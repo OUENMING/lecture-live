@@ -55,6 +55,29 @@ def _git(*args: str, timeout: int = TIMEOUT) -> tuple[int, str, str]:
         return -1, "", str(e)
 
 
+def _git_raw(*args: str, timeout: int = TIMEOUT) -> tuple[int, bytes, str]:
+    """同 `_git`，但 **stdout 原样是字节**（不 strip）。
+
+    ⚠️ 只为 `-z` 的路径解析存在：`_git` 会 `.strip()`，而 `git status --porcelain`
+    的首行形如 ` M a.py` —— 那个前导空格正是状态码的第一位，洗掉就把路径切错。
+    """
+    try:
+        r = subprocess.run(["git", *args], cwd=HERE, capture_output=True,
+                           timeout=timeout)
+        return r.returncode, r.stdout, r.stderr.decode("utf-8", "replace").strip()
+    except subprocess.TimeoutExpired:
+        return -1, b"", f"超时（>{timeout}s）"
+    except Exception as e:                                # noqa: BLE001
+        return -1, b"", str(e)
+
+
+def _z_paths(rc: int, raw: bytes) -> set:
+    """`git … -z` 输出 -> 路径集合（NUL 分隔，**不解析引号转义**）。"""
+    if rc != 0:
+        return set()
+    return {p.decode("utf-8", "replace") for p in raw.split(b"\0") if p}
+
+
 def version() -> str:
     f = HERE / "VERSION"
     return f.read_text(encoding="utf-8").strip() if f.exists() else "?"
@@ -515,6 +538,14 @@ def pull() -> dict:
         out["error"] = "这不是 git 仓库，没法更新。"
         return {**out, "user_msg": _friendly(out)}
 
+    # ⭐⭐ 3.10：**先收尾上一次被打断的换代码**（合盖 / 强杀落在 `git pull` 中间）。
+    #     半换的树既跑不对，又会让下面每一步 git 都失败（实测：陈旧 index.lock
+    #     让 `pull` **永远**死在 `Unable to create … index.lock`）。
+    #     ⚠️ 修复自己管锁（`_LOCK_MINE`）—— `apply` / `auto_update` 已经持锁时不再抢。
+    _rp = repair_interrupted_apply()
+    if _rp.get("repaired"):
+        out["repair"] = _rp
+
     # ⚠️⚠️ **边界④：只更新「正式版那条线」**（2026-09-30 加）。放在最前面 ——
     #    它最便宜（不含网络）、也最根本：站在错的线上，后面每一条都白搭。
     #    加它之前 `pull()` 只问 `@{u}`，于是有两条**实测**出来的静默路：
@@ -572,7 +603,15 @@ def pull() -> dict:
         return out
 
     # ⚠️ 边界②：--ff-only。分叉时这里会失败，那是**想要**的结果。
+    # ⭐⭐ 3.10：**换代码之前写 journal** —— 杀/合盖在这之后，下一次任何一条更新路
+    #     （`pull` / `auto_update` / `main` 开机那次）都能认出来并补完。
+    _write_apply_journal(_git("rev-parse", "HEAD")[1], _git("rev-parse", "@{u}")[1])
     rc, so, se = _git("pull", "--ff-only", timeout=TIMEOUT * 2)
+    if rc == 0:
+        _rm_journal(apply_journal_path())                 # 换完了 -> journal 使命结束
+    # ⚠️ 失败时**不撤** journal：干净失败（分叉 / 撞车 / 网络）与"git 死在半路"
+    #    在这里长得一样，判据归 `repair_interrupted_apply()`（它看 index.lock）——
+    #    干净失败那条路也只是下次启动顺手撤掉，不会白动工作区。
     if rc != 0:
         # ⚠️⚠️ **「拉不动」有三种，别都当成网络问题**（2026-09-30 加第三条）。
         #    实测 git 的两种原文：
@@ -617,6 +656,20 @@ RATE_LIMIT_S = 300      # 五分钟最多查一次（2026-10-13 从一小时改�
 #                         更新就这样一拖再拖。五分钟仍挡得住「连开连关」的抖动。
 LOCK_STALE_S = 900      # 锁超过 15 分钟当**陈旧**、自过期 —— 崩溃的更新器不能永久堵住以后
 
+#: ⭐⭐ 3.10：**换代码这一步的 journal**（`apply-journal.json`）。`pull()` 在
+#: `git pull` **之前**写下 `{head_before, target}`、换完删掉。它是"换到一半被杀"
+#: 这件事唯一的证据 —— 实测（3000 个文件、kill 落在 checkout 中段）：
+#:   · 工作区**半新半旧**（298/3000 已是新版）、HEAD 还指着旧提交 → 跑起来是混的；
+#:   · `.git/index.lock` 留在那 → 之后**每一次** `git pull` 都死在
+#:     `Unable to create '…/index.lock': File exists` —— 更新**永远**装不上。
+#: 判据与修法在 `repair_interrupted_apply()`（那份 docstring 就是现场报告）。
+APPLY_JOURNAL = "apply-journal.json"
+
+#: 本进程现在握着 `update.lock`（`_acquire_lock` 抢到时置位、`_release_lock` 清）。
+#: `repair_interrupted_apply()` 靠它决定"要不要自己再抢一次" —— 已经持锁时再抢
+#: 会拿到 `busy`，等于把**自己**的修复挡在门外。
+_LOCK_MINE = False
+
 
 def _log(msg: str) -> None:
     """自动更新是**静默**的 —— 静默失败没有日志就没法排查，所以必须落一行。
@@ -658,9 +711,11 @@ def _acquire_lock() -> str:
             os.close(fd)
         return True
 
+    global _LOCK_MINE
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         if _take():
+            _LOCK_MINE = True
             return "held"
         try:
             stale = (time.time() - lock.stat().st_mtime) >= LOCK_STALE_S
@@ -668,7 +723,10 @@ def _acquire_lock() -> str:
                 lock.unlink()
         except OSError:
             stale = False
-        return "held" if (stale and _take()) else "busy"
+        got = bool(stale and _take())
+        if got:
+            _LOCK_MINE = True
+        return "held" if got else "busy"
     except Exception as e:                                # noqa: BLE001
         _log(f"⚠ 更新锁处理异常（{type(e).__name__}: {str(e)[:80]}）")
         return "error"
@@ -680,12 +738,239 @@ def _release_lock() -> None:
        C 立刻能拿到 → 两个更新器同时 pull；2026-09-25 全量 OCR）；
     ② 只记一个 `held` 标志不够：A 持锁超过 STALE 被 B 抢走后，A 的 finally 仍会删掉 B 的锁。
     """
+    global _LOCK_MINE
     try:
         lock = STATE_DIR / "update.lock"
         if lock.read_text(encoding="utf-8").strip() == str(os.getpid()):
             lock.unlink(missing_ok=True)
+            _LOCK_MINE = False
     except Exception:                                     # noqa: BLE001
         pass
+
+
+def apply_journal_path() -> pathlib.Path:
+    """换代码那份 journal 的落点。⚠️ 一处定义 —— `main.py` 开机那次检查也读它。"""
+    return STATE_DIR / APPLY_JOURNAL
+
+
+def _rm_journal(j) -> None:
+    try:
+        pathlib.Path(j).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _index_lock_path() -> pathlib.Path:
+    rc, gd, _ = _git("rev-parse", "--git-dir")
+    p = pathlib.Path(gd) if (rc == 0 and gd) else pathlib.Path(".git")
+    return (p if p.is_absolute() else HERE / p) / "index.lock"
+
+
+def _rm_stale_index_lock() -> None:
+    """删掉一次**死掉的** git 留下的 `.git/index.lock`。
+
+    ⚠️ 只在"我们持着 `update.lock` + journal 在"时才被调到 —— 那证明它属于一次
+       被杀掉的 pull（活着的换代码过程一定持着 update.lock，见 `_acquire_lock`）。
+    ⚠️ 不删的后果是**实测**出来的：之后每一次 `git pull` 都死在
+       `Unable to create '…/index.lock': File exists` —— 更新**永远**装不上。
+    """
+    try:
+        _index_lock_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _dirty_tracked() -> set:
+    """跟踪文件里相对 HEAD 改过（含已暂存）的路径。⚠️ 未跟踪的不算 ——
+    `reset --hard` 不碰它们，而"脏"这个词在 `pull()` 里也只算跟踪文件（同源）。"""
+    rc, raw, _ = _git_raw("diff", "--name-only", "-z", "--no-renames", "HEAD")
+    return _z_paths(rc, raw)
+
+
+def _worktree_matches(ref: str, paths) -> bool:
+    """这些路径的工作区内容**已经等于 `ref`** 吗（`git diff --quiet ref -- paths`）。
+
+    ⚠️ 它是"完成/回滚"的分水岭：只有每个脏文件都**已经是新版内容**时才敢
+       `reset --hard target` —— 否则那可能是用户自己改的（`reset` 会把它吃掉）。
+    """
+    paths = [p for p in paths]
+    if not paths:
+        return True
+    rc, _, _ = _git("diff", "--quiet", "--no-renames", ref, "--", *paths)
+    return rc == 0
+
+
+def _backup_paths(paths) -> pathlib.Path:
+    """把路径备份到 `STATE_DIR/dirty-backup/<时间戳>/`（**保留目录结构**）。返回备份目录。
+
+    照 `repair_generated` 的老规矩：动手之前先备份 —— 与"绝不 stash / 绝不丢弃"
+    是同一条纪律。
+    """
+    bdir = STATE_DIR / "dirty-backup" / time.strftime("%Y%m%d-%H%M%S")
+    bdir.mkdir(parents=True, exist_ok=True)
+    for rel in paths:
+        src = HERE / rel
+        if src.is_file():
+            dst = bdir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+    return bdir
+
+
+def repair_interrupted_apply(*, say=None) -> dict:
+    """收尾**上一次被打断的那次换代码**（合盖 / 强杀 / 断电落在 `git pull` 中间）。
+
+    返回 `{ok, repaired, action, head_before, target, backup_dir, error, skipped}`。
+
+    ## 为什么必须有它（实测现场，不是假想）
+
+    3000 个文件的一版全量改动、kill 落在 checkout 中段：
+      · 工作区**半新半旧**（298 个已是新版、2701 个还是旧版）—— 而 `HEAD` 还指着
+        **旧**提交 → 这份树**跑起来是混的**（Python 逐文件 import，混着就是混着）；
+      · `.git/index.lock` 留在那 → 之后**每一次** `git pull` 都死在
+        `Unable to create '…/index.lock': File exists` —— **永远停在半换状态**。
+    "合盖 / 睡着"正是这条路上最常见的打断方式（10-14 那节课的收尾转码就是被合盖
+    打断的），而更新器恰恰在**退出时**跑 —— 合盖发生在退出更新里毫不稀奇。
+
+    ## 判据（**只碰这次更新本来就要换的文件**）
+
+    0. 没有 journal -> 什么都不做（常驻成本 = 一次 `exists()`）。
+    1. `HEAD == target`（换完了、只是没删 journal）-> 撤 journal（顺手清陈旧锁）。
+    2. `HEAD == head_before` 且 **没有** `.git/index.lock`（那次 merge **干净地**
+       没换成 —— 分叉 / 撞车 / 网络）-> 撤 journal，**工作区一个字节不动**。
+       ⚠️ 这条是给"拒绝"让路的：`git` 拒绝之前不会写任何文件，把它当成半换去
+          `reset --hard` 就会**吃掉用户自己改的东西**。
+    3. `HEAD == head_before` 且 **有** `index.lock`（merge 进程死在半路）:
+       - 脏路径 ⊆ 本次要换的路径、且每个脏文件的内容**已经等于 target** ->
+         `reset --hard target` —— **把那次更新做完**（与"没被打断"同一个结局）。
+       - 其他形状（脏里混着用户的东西 / 有写了一半的文件）-> **先备份**，
+         再把"本次要换的那几个脏路径"回滚到 `head_before`（一致性优先，恢复成
+         旧版），journal 撤掉、日志点名。
+    4. `target` 不是 `head_before` 的后代（分叉 / 用户自己提交过）-> **一个字节不动**
+       （`reset --hard` 会把用户自己的提交吃掉）。
+    5. 其他形状（HEAD 两边都不是）-> 不动，撤 journal、日志点名。
+
+    ⚠️ 锁：与 `auto_update` / `apply` **同一把**（`update.lock`）。调用方已经拿着
+       （`_LOCK_MINE`）就直接干；没有就自己抢，抢不到（`busy`）就跳过 ——
+       "同一时刻只有一个换代码的人"这条不破。
+    ⚠️ 每一步都**永不抛**：它是收尾/开机路径上的一步，坏了只能"这次没修成"。
+    """
+    out = {"ok": True, "repaired": False, "action": "", "head_before": "",
+           "target": "", "backup_dir": "", "error": "", "skipped": False}
+
+    def _say(s: str) -> None:
+        if say is not None:
+            try:
+                say(s)
+            except Exception:                             # noqa: BLE001
+                pass
+
+    j = apply_journal_path()
+    try:
+        if not j.exists():
+            return out
+    except OSError:
+        return out
+
+    mine_here = False
+    if not _LOCK_MINE:
+        lk = _acquire_lock()
+        if lk == "busy":
+            return {**out, "skipped": True, "action": "另一个更新在跑 —— 这次不修"}
+        mine_here = lk == "held"
+    try:
+        try:
+            data = json.loads(j.read_text(encoding="utf-8")) or {}
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:                                 # noqa: BLE001
+            data = {}
+        head_before = str(data.get("head_before") or "")
+        target = str(data.get("target") or "")
+        if not head_before or not target:
+            _rm_journal(j)                                # 坏了就没法再指路
+            _log("⚠ 换代码 journal 读不出来 —— 已撤掉（工作区没动）")
+            return {**out, "action": "journal 坏了（工作区没动）"}
+        out["head_before"], out["target"] = head_before, target
+        head_now = _git("rev-parse", "HEAD")[1]
+
+        if head_now == target:                            # 1. 换完了，只是没删 journal
+            _rm_stale_index_lock()
+            _rm_journal(j)
+            _log("收尾上次被打断的更新：HEAD 已在目标提交上 —— 撤掉 journal")
+            return {**out, "repaired": True, "action": "上次其实换完了 —— 撤掉 journal"}
+
+        if head_now != head_before:                       # 5. 对不上
+            _rm_journal(j)
+            _log(f"⚠ 换代码 journal 与现状对不上（HEAD={head_now[:8]}）"
+                 f" —— 已撤 journal，工作区没动")
+            return {**out, "ok": False, "action": f"HEAD 两边都不是（{head_now[:8]}）"}
+
+        rc_anc, _, _ = _git("merge-base", "--is-ancestor", head_before, target)
+        if rc_anc != 0:                                   # 4. 分叉
+            _rm_journal(j)
+            _log("⚠ 上次换代码不是快进（本地有分叉）—— 已撤 journal，工作区一个字节没动")
+            return {**out, "ok": False, "action": "不是快进（分叉）—— 工作区没动"}
+
+        if not _index_lock_path().exists():               # 2. 干净地没换成
+            _rm_journal(j)
+            _log("上次换代码没换成（干净地失败 / 拒绝）—— 工作区一个字节没动")
+            return {**out, "repaired": True, "action": "上次没换成（干净）—— 工作区没动"}
+
+        # 3. merge 死在半路 —— 现场在这里
+        rc, raw, _ = _git_raw("diff", "--name-only", "-z", "--no-renames",
+                              head_before, target)
+        changed = _z_paths(rc, raw)
+        dirty = _dirty_tracked()
+        _rm_stale_index_lock()                            # ⚠️ 任何 git 写操作之前
+        if (not dirty or dirty <= changed) and _worktree_matches(target, dirty):
+            rc, _, se = _git("reset", "--hard", target)
+            if rc != 0:
+                _log(f"⚠ 收尾被打断的更新失败：{se[:160]}")
+                return {**out, "ok": False, "error": f"reset 失败：{se[:120]}"}
+            _rm_journal(j)
+            _log(f"收尾上次被打断的更新：reset --hard {target[:8]}"
+                 f"（{len(dirty)} 个半换文件）")
+            _say(f"上次更新被打断过 —— 已补完（{target[:8]}）")
+            return {**out, "repaired": True,
+                    "action": f"补完更新（{len(dirty)} 个文件）"}
+        # 混着用户的东西 -> 备份 + 把半换的那几个回滚到旧版（一致性优先）
+        roll = sorted(dirty & changed)
+        try:
+            bdir = str(_backup_paths(roll))
+        except OSError as e:
+            _log(f"⚠ 半换现场要回滚，但备份失败（{e}）—— 先不动")
+            return {**out, "ok": False, "error": f"备份失败，先不动：{e}"}
+        rc, _, se = _git("checkout", head_before, "--", *roll)
+        if rc != 0:
+            _log(f"⚠ 半换现场回滚失败：{se[:160]}")
+            return {**out, "ok": False, "error": f"回滚失败：{se[:120]}"}
+        _rm_journal(j)
+        _log(f"⚠ 上次换代码被打断、且工作区还有别的改动 —— 已把半换的 {len(roll)} 个"
+             f"文件回滚到旧版（原件备份在 {bdir}）；这次更新没做，下次再说")
+        _say(f"上次更新被打断过 —— 已回滚到旧版（原件备份在 {bdir}）")
+        return {**out, "repaired": True,
+                "action": f"回滚到旧版（{len(roll)} 个文件）", "backup_dir": bdir}
+    finally:
+        if mine_here:
+            _release_lock()
+
+
+def _write_apply_journal(head_before: str, target: str) -> None:
+    """写下"要换代码了"（tmp→rename，永不抛）。写不成**照常换** ——
+    大不了这次没有恢复凭据，不能让 journal 把更新拦下来。"""
+    try:
+        p = apply_journal_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"head_before": head_before, "target": target,
+                                   "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                   "pid": os.getpid()}, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(p)
+    except Exception as e:                                # noqa: BLE001
+        _log(f"⚠ 换代码 journal 没写进盘（{type(e).__name__}: {str(e)[:60]}）"
+             f" —— 这次换到一半被杀就没人接得住")
 
 
 def auto_update() -> dict:
@@ -725,6 +1010,12 @@ def auto_update() -> dict:
         if _lk == "busy":
             return {**out, "skipped": True, "reason": "已有更新在跑"}
         held = _lk == "held"                          # "error" = 抢锁逻辑自己坏了：照旧无锁继续（已记日志）
+        # ⭐⭐ 3.10：**先修上次被打断的换代码**，而且要在分支 / 脏检查**之前** ——
+        #     半换的树会把脏检查带偏（298 个"用户改的"文件 → 静默跳过 → 永远不修）。
+        #     ⚠️ 这里持着锁，修复不用再抢（`_LOCK_MINE`）。
+        _rp = repair_interrupted_apply()
+        if _rp.get("repaired"):
+            _log(f"先收尾上次被打断的更新：{_rp.get('action')}")
         try:
             stamp.write_text("", encoding="utf-8")
         except Exception:                                 # noqa: BLE001
@@ -1527,6 +1818,9 @@ def _cli() -> int:
     if not r["ok"]:
         print(f"❌ {r['error']}")
         return 1
+    _rp = r.get("repair") or {}
+    if _rp.get("repaired"):
+        print(f"🧰 {_rp.get('action')}")
     if r["skipped"]:
         print(f"✅ 已经是最新的 ({r['after']})。")
         return 0

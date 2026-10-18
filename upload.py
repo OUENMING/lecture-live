@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import threading
@@ -47,9 +48,24 @@ import paths
 BACKOFF_MIN_S = 60.0
 BACKOFF_MAX_S = 7200.0
 
+#: 睡醒后**最多**把同一条目提前几次（`retry_now`）。⚠️ 有界是纪律：
+#: 睡一觉就无限重推 = 拿服务端当靶子打；超过它退回正常退避（1 → 120 min）。
+WAKE_RETRY_MAX = 3
+
 #: 超过这么久还没传成的条目**丢弃**（同 Firefox 的 ping 最大年龄 14 天）。
 #: ⚠️ 它同时挡在服务端保留期前面：手动清掉的对象，本机队列**不该还想重传**。
 EXPIRE_S = 14 * 86400
+
+
+def upload_enabled() -> bool:
+    """上传总开关（`CLASSLIVE_UPLOAD=0` 关）。⚠️ **唯一定义点**。
+
+    三个读端：`main.start_upload`（关着就不排队）、`TestSession.finish`
+    （关着时没人来排上传 → journal 自己撤，见 `journal_upload_done`）、
+    `recover_pending`（关着时**不排也不改名** —— 留着残局，等开着的那次启动再补）。
+    """
+    return os.environ.get("CLASSLIVE_UPLOAD", "1") == "1"
+
 
 #: 值里含**绝对路径**、上传前要去掉的键。⚠️ 不做这一步就会把**用户名和目录结构**
 #: 一起传上去 —— 见 `docs/PLAN-test-mode.md` §6.6。
@@ -180,6 +196,56 @@ class UploadQueue:
             self._save_ledger(stem, key)
         return len(paths_ok)
 
+    def add_files(self, files, stem: str) -> int:
+        """把**新的文件**并进已有条目（没有条目就新开一条）。返回真的加进去几个。
+
+        ⭐ 3.10：崩溃补传先把残段 wav 排上、后台又把同一段转成了 opus ——
+        这时要给**同一条**条目补上 opus 路径。⚠️ 不能用 `enqueue`：它按 key 去重，
+        已有条目时**直接返回 0**（那份新文件就永远排不进去）。
+        """
+        key = session_key(stem)
+        add = [str(p) for p in files if pathlib.Path(p).is_file()]
+        if not add:
+            return 0
+        with self._lock:
+            for it in self._items:
+                if it.get("key") != key:
+                    continue
+                have = list(it.get("files") or [])
+                new = [f for f in add if f not in have]
+                if new:
+                    it["files"] = have + new
+                    self._save()
+                return len(new)
+            self._items.append({"stem": str(stem), "key": key, "files": add,
+                                "tries": 0, "next_at": 0.0, "created": self._now()})
+            self._save()
+            self._save_ledger(stem, key)
+        return len(add)
+
+    def retry_now(self) -> int:
+        """把**还没到点**的条目提前到"现在"（睡醒 / 网络刚恢复时调）。返回动了几条。
+
+        ⚠️ **有界**（`WAKE_RETRY_MAX`）：超过上限的条目**不动** —— 睡一觉就无限
+           重推是把服务端当靶子打；那几条退回正常退避（1 → 120 min）。
+        ⚠️ 只动 `next_at`，不动 `tries` —— 它表达的是"这一次提前了"，
+           不是"又失败了一次"（退避的账不许被睡醒搅乱）。
+        """
+        now = self._now()
+        n = 0
+        with self._lock:
+            for it in self._items:
+                if float(it.get("next_at") or 0) <= now:
+                    continue                                  # 本来就到点了
+                if int(it.get("wake_retries") or 0) >= WAKE_RETRY_MAX:
+                    continue                                  # 提前过太多次 -> 认退避
+                it["wake_retries"] = int(it.get("wake_retries") or 0) + 1
+                it["next_at"] = now
+                n += 1
+            if n:
+                self._save()
+        return n
+
     # ------------------------------------------------------------ 出队
     def _prepare(self, local: pathlib.Path) -> pathlib.Path | None:
         """发之前要加工的场合（脱敏）。⚠️ 加工出来的是**临时文件**，调用方负责删。
@@ -203,9 +269,9 @@ class UploadQueue:
     def pump(self, max_items: int = 1) -> dict:
         """试一轮。返回 `{sent, failed, expired, pending}`。
 
-        ⚠️ **逐文件失败分开**（Sentry 那条）：一节课里某个文件挂了，
-           下一次重试从**整条**再来一遍 —— 但**别的条目不受影响**。
-           （对象名是确定的，所以重发已经成功的那几个只是覆盖，不会重复。）
+        ⚠️ **逐文件失败分开**（Sentry 那条）：一节课里某个文件挂了，**别的条目不受影响**；
+           同一条目下次重试**只补没传成的那些**（逐文件进度在 `sent_files` 里，
+           ⭐ 3.10 —— 对象名确定，重发只是覆盖，但 9 MB 白传一遍没必要）。
         ⚠️ 一次只试 `max_items` 条（默认 1）—— 回连后一次性倒空会被服务端风控。
         ⚠️⚠️ **列表的读改写都过 `_lock`；网络调用不过**（2026-10-01 审查 F25）：
            实例收成进程级唯一一份之后，两条线程（启动补传 / 收尾入队）会同时碰
@@ -236,9 +302,15 @@ class UploadQueue:
                 local = pathlib.Path(f)
                 if not local.is_file():
                     continue                                  # 文件没了 -> 跳过（不是失败）
+                remote = _remote_name(local)
+                # ⭐⭐ 3.10：**已经传成的文件不再重发**（逐文件进度落在队列里）——
+                #    上次传到一半被杀 / 睡过去，这次只补缺的那几个。原来整条重来：
+                #    对象名确定所以不重复，但 9 MB 的音频白传一遍。
+                if remote in (it.get("sent_files") or []):
+                    continue
                 staged = self._prepare(local)
                 try:
-                    good = bool(self._send(staged, f"{it['key']}/{_remote_name(local)}"))
+                    good = bool(self._send(staged, f"{it['key']}/{remote}"))
                 except Exception:                             # noqa: BLE001
                     good = False                              # send 不许抛，但兜一层
                 finally:
@@ -249,7 +321,11 @@ class UploadQueue:
                             pass
                 if not good:
                     ok = False
-                    break                                     # 这条先放下，下次整条重试
+                    break                                     # 这条先放下，下次从缺的那个接着
+                with self._lock:                              # ⚠️ 立刻落盘 —— 传到一半被杀才接得上
+                    if it in self._items:
+                        it.setdefault("sent_files", []).append(remote)
+                        self._save()
             with self._lock:
                 if ok:
                     if it in self._items:                     # ⚠️ 另一线程可能已经动过
@@ -313,56 +389,151 @@ def _remote_name(local: pathlib.Path) -> str:
 PENDING_TAIL = ".pending.json"
 
 
-def recover_pending(sessions_dir, send, *, root=None, clock=time.monotonic, now=time.time) -> dict:
+def recover_pending(sessions_dir, send, *, transcode=None, root=None,
+                    clock=time.monotonic, now=time.time) -> dict:
     """开机扫残留的 `.pending.json`（上次跑测试模式**没收尾**），把它们排进队列。
 
-    返回 `{found, queued}`。
+    返回 `{found, queued, jobs}`。`jobs` = 交给后台转码的会话数（见下）。
 
     ⚠️⚠️ **为什么必须有这一步**：`TestSession.finish()` 跑不到（崩溃 / 强杀 / 关机）
        → **没有 report**，而 `enqueue` 是在 `finish()` 里调的 → 那一整类数据全丢。
        `.pending` 是**开录时就写好**的，所以它比 `finish()` 活得久。
+       ⭐ 3.10 起标记还活着更久：它活到"上传已排队"（`journal_upload_done`）——
+       "收过尾但还没排上传就被杀"这一格现在也有人接。
     ⚠️ **不删标记，改名**（`.pending.json` → `.recovered.json`）——
        删了就再也看不出"这一节崩过"。⚠️ 而改名之后不会重复触发。
     ⚠️ **只排真的存在的文件** —— 崩溃时音频可能是半截的，那也是数据。
+    ⚠️ **上传关着**（`CLASSLIVE_UPLOAD=0`）时**不排也不改名** —— 留着残局，
+       等开着的那次启动再补（不然一次离线启动会把残局"吃掉"却不上传）。
+    ⭐⭐ `transcode`（`testmode.transcode_one`）注入后：残段 wav **先转码再排**
+       （后台线程）—— 崩溃补传也走 opus（一段 600 s：1.7 MB vs 19 MB）。
+       转不成就原样传 wav（数据不丢）。⚠️ 改名推迟到后台转完 —— 转码中途被杀，
+       下次启动重来一遍（`enqueue` 按 key 去重、转码只碰还在的 wav，重复跑安全）。
     """
     import json as _json
     sd = pathlib.Path(sessions_dir)
-    out = {"found": 0, "queued": 0}
+    out = {"found": 0, "queued": 0, "jobs": 0}
     if not sd.is_dir():
         return out
+    if not upload_enabled():
+        return out
     q = UploadQueue(send, root=root, clock=clock, now=now)
+    jobs: list = []
     for mk in sorted(sd.glob("*" + PENDING_TAIL)):
         out["found"] += 1
         stem = mk.name[: -len(PENDING_TAIL)]
-        files = sorted(sd.glob(stem + ".*.opus")) + sorted(sd.glob(stem + ".*.wav"))
+        steps = {}
+        try:
+            _j = _json.loads(mk.read_text(encoding="utf-8")) or {}
+            if isinstance(_j, dict) and isinstance(_j.get("steps"), dict):
+                steps = _j["steps"]
+        except Exception:                                     # noqa: BLE001
+            steps = {}                                        # 坏的当没有（老标记就是这形状）
+        opus_all = sorted(sd.glob(stem + ".*.opus"))
+        wavs = sorted(sd.glob(stem + ".*.wav"))
+        opus = []
+        if opus_all:
+            # ⭐ 验过头的 opus 才算数；同一段两个名字都在时 **opus 优先**（wav 别跟着传）。
+            #    ⚠️ 半截 opus（崩溃在转码中间）**不能**顶掉好 wav —— 那等于丢一段音频；
+            #    但**没有 wav 的那种照传**（它是这一段唯一的副本，半截也是数据 ——
+            #    同"崩溃时音频可能是半截的，那也是数据"那条既有纪律）。
+            #    惰性 import：`upload` 是底层模块，顶层不能 import testmode（它 import 我们）。
+            import testmode as _tm
+            good, bad = [], []
+            for p in opus_all:
+                (good if _tm._opus_ok(p) else bad).append(p)
+            _all_wav = set(wavs)
+            _ok_wav = {p.with_suffix(".wav") for p in good}
+            wavs = [w for w in wavs if w not in _ok_wav]
+            opus = good + [p for p in bad if p.with_suffix(".wav") not in _all_wav]
+        audio_now = opus
+        pending_audio: list = []
+        if transcode is not None and wavs:
+            # ⭐ 残段先转码（后台）—— 现在**先不排**，等转出 opus 再排（省 10×）。
+            pending_audio = list(wavs)
+        else:
+            audio_now = opus + wavs
+        files = list(audio_now)
         rep = sd / (stem + ".report.json")
         if rep.is_file():
             files.append(rep)
         sess = sd / (stem + ".md")
         if sess.is_file():
             files.append(sess)
-        if files:
-            # 写一份 meta，标明这次是**崩过的**
+        if files or pending_audio:
+            # 写一份 meta，标明这次是**崩过的**。
+            # ⚠️ 即使音频还在后台转也要写（它是"这一节崩过"的凭据；只排它一条
+            #    也把条目先立起来，后台转完的 opus 用 `add_files` 并进来）。
             meta = sd / (stem + ".meta.json")
             try:
                 # ⚠️⚠️ **不写 stem、不写原始文件名** —— 那会把课号 + 精确时间戳带进
                 #      上传正文（`_prepare` 的 scrub 只认路径，不认这两个字段）。
                 #      要反查用哈希 `key`（与 upload-ledger.json 对得上）。
+                #    ⭐ `steps` 把 journal 里"还欠哪几步"原样带上（只有步骤名，
+                #      没有内容）—— 收件端一眼知道这一节是"收过尾没排上传"还是
+                #      "课上崩了"。
                 info = {"crash_recovered": True, "key": session_key(stem),
                         "recovered_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "n_files": len(files),
-                        "kinds": sorted({f.suffix for f in files})}
+                        "n_files": len(files) + len(pending_audio),
+                        "kinds": sorted({f.suffix for f in files + list(pending_audio)})}
+                if steps:
+                    info["steps"] = {str(k): str(v) for k, v in steps.items()}
+                if pending_audio:
+                    info["transcode_queued"] = len(pending_audio)
                 meta.write_text(_json.dumps(info, ensure_ascii=False, indent=1),
                                 encoding="utf-8")
                 files.append(meta)
             except Exception:                                 # noqa: BLE001
                 pass
+        if files:
             out["queued"] += q.enqueue(files, stem)
+        if pending_audio:
+            jobs.append((stem, pending_audio))
+            continue                                          # ⚠️ 改名推迟到后台转完
         try:
             mk.replace(mk.with_name(mk.name.replace(PENDING_TAIL, ".recovered.json")))
         except Exception:                                     # noqa: BLE001
             pass
+    if jobs:
+        out["jobs"] = len(jobs)
+        threading.Thread(target=_resume_transcode, args=(q, jobs, transcode, sd),
+                         daemon=True, name="cl-upload-transcode").start()
     return out
+
+
+def _resume_transcode(q: UploadQueue, jobs: list, transcode, sd: pathlib.Path) -> None:
+    """把崩溃残段的 wav **在后台**转成 opus，转完并进同一条队列条目。**永不抛。**
+
+    ⚠️ wav 的删除交给 `transcode`（`testmode.transcode_one`：**验过 opus 才删**）——
+       转不成的那条原样留在队列里（数据不丢，只是大）。
+    ⚠️ 全部做完才把 `.pending.json` 改名 `.recovered.json`（半路被杀 -> 下次重来，
+       重复跑是安全的：enqueue 按 key 去重、转码只碰还在的 wav）。
+    """
+    for stem, wavs in jobs:
+        try:
+            made, left = [], []
+            for wav in wavs:
+                try:
+                    opus, _why = transcode(wav)
+                except Exception:                             # noqa: BLE001
+                    opus = None
+                (made if opus is not None else left).append(opus or wav)
+            if made:
+                q.add_files(made, stem)
+            if left:
+                q.add_files(left, stem)                       # 没转成的原样传
+        except Exception:                                     # noqa: BLE001
+            pass
+        mk = sd / (stem + PENDING_TAIL)
+        try:
+            mk.replace(mk.with_name(mk.name.replace(PENDING_TAIL, ".recovered.json")))
+        except Exception:                                     # noqa: BLE001
+            pass
+    try:
+        if q.pending:
+            q.pump(max_items=q.pending)
+    except Exception:                                         # noqa: BLE001
+        pass
 
 
 def make_http_send(base_url: str, token: str, *, timeout: float = 60.0):

@@ -1228,7 +1228,39 @@ class F13SymbolConsistency(unittest.TestCase):
         self.assertEqual({"甲组", "乙组"},
                          {h["label"] for h in nm.symbol_mismatches(sec)})
 
-    def test_数字版讲解判不了_不许报(self):
+    def test_标签与式子隔着一句也要认(self):
+        """⭐ F13 复跑实测的**漏检**（BUSI3243 §17，v2）：同一节里
+        `女性 female=1，…系数变成 β3+β4` 与 `女性每多一年经验只拿 β3` ——
+        只认"标签紧邻限定词"的旧判据两边都提不出来，判据空转。"""
+        sec = {"heading": "[09:32] 交互项：让斜率随组别变化", "ts": "09:32",
+               "algebra": ("$\\hat{y}=\\beta_0+\\beta_1 female+\\beta_3 exp"
+                           "+\\beta_4(female\\times exp)$；female=0 斜率 β3，female=1 斜率 β3+β4。"),
+               "prose": [
+                   "写成 $\\hat{y}=\\beta_0+\\beta_1 female+\\beta_3 exp"
+                   "+\\beta_4(female\\times exp)$：男性 female=0，斜率就是 β3；"
+                   "女性 female=1，$exp$ 前面的系数变成 β3+β4。",
+                   "课上口述的正是这个结构：女性每多一年经验只拿 β3 那部分，"
+                   "男性拿 β3+β4，两项相加。"]}
+        got = {(h["label"], tuple(h["algebra"][0])) for h in nm.symbol_mismatches(sec)}
+        self.assertIn(("女性", ("beta_3",)), got, got)
+        self.assertIn(("男性", ("beta_3",)), got, got)
+
+    def test_同组两种情形不算矛盾(self):
+        """反向（v2 §6 实测误报）：`D=0 时 E(y)=β0，D=1 时 E(y)=β0+δ` 是**同一件事的
+        两种情形**，不许读成"两个组的式子不一样"（`时` 是虚词，不是组名）。"""
+        sec = {"heading": "[09:15] 虚拟变量", "ts": "09:15", "prose": [
+            "式子为 $y_i=\\beta_0+\\delta D_i+u_i$，$D_i=0$ 时 $E(y)=\\beta_0$，"
+            "$D_i=1$ 时 $E(y)=\\beta_0+\\delta$，故 $\\delta$ 是两组均值差。"]}
+        self.assertEqual([], nm.symbol_mismatches(sec))
+
+    def test_讲解与讲解之间也要比(self):
+        """代数行提不出标签时，**两段讲解之间**的矛盾照样要报。"""
+        sec = {"heading": "H", "ts": "09:32",
+               "algebra": "$\\hat{y}=a+b\\cdot female$",
+               "prose": ["女性的斜率是 β3+β4。", "女性的斜率是 β3。"]}
+        self.assertEqual(["女性"], [h["label"] for h in nm.symbol_mismatches(sec)])
+
+
         sec = {"algebra": "女性斜率 $\\beta_2+\\beta_3$，男性斜率 $\\beta_2$",
                "prose": ["女性的经验斜率是 1.5，男性是 2.3。"]}
         self.assertEqual([], nm.symbol_mismatches(sec))

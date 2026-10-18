@@ -1581,10 +1581,30 @@ def _sym_expr(txt) -> frozenset:
     return frozenset(syms)
 
 
-#: 中文：「标签 [的] 限定词 [是|=] 表达式」；标签非贪婪 → 不吃掉限定词前面的字。
-_MAP_ZH = re.compile(r"(?P<label>[\u4e00-\u9fff]{1,4}?)(?:的)?(?P<qual>"
-                     + "|".join(_QUAL_WORDS)
-                     + r")\s*(?:是|为|＝|=|:)?\s*(?P<expr>[" + _SYM_CHARS + r"]{0,40})")
+#: 中文分组标签：**从句首连续的汉字串里取前 2 字**（`女性每多一年经验只拿 β3` → `女性`）。
+#: ⚠️ 为什么不是"标签 (的) 限定词"紧邻：实测（BUSI3243 §17，v2）同一节里三处说法
+#:    `女性 female=1，…系数变成 β3+β4` / `女性每多一年经验只拿 β3` / 代数行 `female=0 斜率 β3`
+#:    —— 紧邻档只能提出后两者的碎片（标签成了 `女`/`这`/`斜`，互不相认）→ 判据空转。
+#: 标签必须是**汉字串的开头**（`(?<![\u4e00-\u9fff])`）—— 否则会从词中间起
+#: （`女性的经验回报` → 标签变成 `性的`/`的经`/`验`），这种碎片会把同一句话
+#: 重复算成好几个"分组"，判据也跟着重复报。
+#: 标签 **≥2 个汉字**：单字多是虚词（`D=0 时 E(y)=β0` 的 `时` 会被当成组名，
+#: 于是"两个 case"被读成"两个组的式子不一样" —— v2 §6 实测误报）。
+#: 组名（女性/男性/甲组/乙组）都是 ≥2 字，代价可接受。
+_CH_LABEL = r"(?<![\u4e00-\u9fff])(?P<label>[\u4e00-\u9fff]{2,6})"
+_VERB = r"(?:是|为|就是|变成|拿|得|得到|=|＝|:|：)"
+_SYM = r"(?P<expr>[" + _SYM_CHARS + r"]{0,40})"
+#: ① 标签 + 哑变量赋值 +…+ 动词/等号 + 表达式（`男性 female=0，斜率就是 β3`）
+_MAP_LDUMMY = re.compile(_CH_LABEL + r"(?:的)?\s*(?P<dummy>[A-Za-z][A-Za-z0-9]{0,12})"
+                         r"\s*[=＝]\s*[01](?![0-9])[^。；;]{0,16}?" + _VERB + r"\s*" + _SYM)
+#: ② 标签 +…(≤20 字)…+ 动词/等号 + 表达式（`女性每多一年经验只拿 β3`）
+_MAP_LVERB = re.compile(_CH_LABEL + r"(?:的)?[^。；;]{0,20}?" + _VERB + r"\s*" + _SYM)
+#: ③ 标签 + 限定词 [+ 动词] + 表达式（老档：`女性斜率 β3`，标签与限定词紧邻）
+_MAP_LQUAL = re.compile(_CH_LABEL + r"(?:的)?(?P<qual>" + "|".join(_QUAL_WORDS) + r")\s*"
+                        + _VERB + r"?\s*" + _SYM)
+#: ④ 哑变量赋值 +…+ 表达式（`female=0 斜率 β3`）→ 键写成 `female=0`
+_MAP_DUMMY = re.compile(r"(?<![A-Za-z0-9_])(?P<dummy>[A-Za-z][A-Za-z0-9]{0,12})\s*[=＝]\s*(?P<v>[01])"
+                        r"(?![0-9])[^。；;]{0,16}?" + _SYM)
 #: 英文：限定词在前（`slope_{male}=\beta_2`）或标签在前（`male slope = \beta_2`）。
 _MAP_EN = re.compile(r"(?P<qual>slope|coefficient|return|effect|elasticity)\s*"
                      r"(?:of|for)?\s*[_ ]?\s*(?P<label>[A-Za-z]{2,12})\s*(?:is|=|:)?\s*"
@@ -1594,46 +1614,89 @@ _MAP_EN2 = re.compile(r"(?P<label>[A-Za-z]{2,12})\s*(?:'s)?\s*(?P<qual>slope|coe
                       r"(?P<expr>[" + _SYM_CHARS + r"]{0,40})", re.I)
 
 
+def _finditer_all(rx, s: str):
+    """**重叠**扫描（`finditer` 从一个匹配的末尾继续，会漏掉同一小句里的第二个标签）。
+
+    ⚠️ 实测（BUSI3243 §17）：`…只拿 β3 那部分，男性拿 β3+β4` —— 第一个匹配吃掉
+       `女性…拿 β3` 之后，扫描从 `那部分` 起，`男性` 这个标签就丢了。
+    """
+    pos = 0
+    while pos <= len(s):
+        m = rx.search(s, pos)
+        if m is None:
+            return
+        yield m
+        pos = m.start() + 1
+
+
+def _group_key(label: str) -> str:
+    """标签 → 比较用的键：中文取**前 2 字**（`女性每多一年经验只` → `女性`）。**纯函数。**"""
+    s = str(label or "").strip().lower()
+    if not s:
+        return ""
+    return s[:2] if re.match(r"[\u4e00-\u9fff]", s) else s
+
+
 def group_exprs(text) -> dict:
     """一段文本 → `{分组标签: {符号表达式集合, …}}`（同一标签的多种写法都留着）。
 
     ⚠️ 只有**纯符号表达式**才算（`β2+β3` 算；`0.3 个单位` 不算）—— 数字版的说法
-       交给别的判据（同一节里数字版与符号版本来就不同档）。**纯函数。**
+       交给别的判据。标签两来源：**中文组名**（取前 2 字）与**哑变量赋值**
+       （`female=0`/`female=1`，与组名分开记，互为佐证）。**纯函数。**
     """
     s = _sym_norm(text)
     out: dict = {}
-    for rx in (_MAP_ZH, _MAP_EN, _MAP_EN2):
-        for m in rx.finditer(s):
-            expr = _sym_expr(m.group("expr") or "")
-            if not expr:
-                continue
-            label = m.group("label").strip().lower()
-            if not label:
-                continue
-            out.setdefault(label, set()).add(expr)
+
+    def put(label: str, expr_txt: str) -> None:
+        key = _group_key(label)
+        expr = _sym_expr(expr_txt or "")
+        if key and expr:
+            out.setdefault(key, set()).add(expr)
+
+    for rx in (_MAP_LDUMMY, _MAP_LVERB, _MAP_LQUAL):
+        for m in _finditer_all(rx, s):
+            put(m.group("label"), m.group("expr"))
+    for rx in (_MAP_EN, _MAP_EN2):
+        for m in _finditer_all(rx, s):
+            put(m.group("label"), m.group("expr"))
+    for m in _finditer_all(_MAP_DUMMY, s):
+        put(f"{m.group('dummy').lower()}={m.group('v')}", m.group("expr"))
+    return out
+
+
+def section_group_exprs(section: dict) -> dict:
+    """一节里**该描述同一个模型**的那些文本 → `{标签: {表达式集合}}`。
+
+    纳入：`algebra`（代数行）+ 每一段 `prose`（讲解）。
+    不纳入：例题/变式/补全（它们可能是另换参数的同一模型，或另一道题）。
+    **代数与讲解之间、讲解与讲解之间**都要比 —— v2 §17 的矛盾就出在"讲解第 2 段
+    与第 1 段/代数行"之间（旧判据只比 algebra↔prose，漏掉了）。**纯函数。**
+    """
+    if not isinstance(section, dict):
+        return {}
+    texts = [section.get("algebra") or ""] + [_txt(x) for x in (section.get("prose") or [])]
+    out: dict = {}
+    for t in texts:
+        for label, exprs in group_exprs(t).items():
+            out.setdefault(label, set()).update(exprs)
     return out
 
 
 def symbol_mismatches(section: dict) -> list:
-    """同一节里「代数行」与「讲解」的**分组 → 符号表达式**对不上 → 一条发现。**纯函数。**
+    """同一节里「代数行/讲解」对**同一个分组**给出**不同符号式子** → 一条发现。**纯函数。**
 
     ⚠️ 只在**两边都给出同一个分组标签的符号表达式**、且**没有一个说法对得上**时才报
        （一边没写符号版就判不了，绝不猜）。
     """
-    if not isinstance(section, dict):
-        return []
-    alg = group_exprs(section.get("algebra") or "")
-    if not alg:
-        return []
-    prose = group_exprs(" ".join(_txt(x) for x in (section.get("prose") or [])))
+    got = section_group_exprs(section)
     out: list = []
-    for label, a_sets in sorted(alg.items()):
-        p_sets = prose.get(label)
-        if not p_sets or (a_sets & p_sets):
+    for label, exprs in sorted(got.items()):
+        if len(exprs) < 2:
             continue
-        out.append({"label": label,
-                    "algebra": sorted(sorted(s) for s in a_sets),
-                    "prose": sorted(sorted(s) for s in p_sets)})
+        # ⚠️ 判据是"**两句话给的不是同一个式子**"（`{β2,β3}` 与 `{β3}` 就是不一样）——
+        #    只看符号有没有交集会把"和式 vs 单项"这一档放过（v1 §16 的女性正是这样）。
+        out.append({"label": label, "algebra": sorted(sorted(x) for x in exprs),
+                    "prose": sorted(sorted(x) for x in exprs)})
     return out
 
 

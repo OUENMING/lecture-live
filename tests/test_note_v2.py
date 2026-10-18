@@ -372,6 +372,23 @@ class ConceptUnits(unittest.TestCase):
         self.assertEqual(len(got["sections"]), 1)
         self.assertEqual(got["sections"][0]["heading"], "最优化练习与停业价格")
 
+    def test_分钟数封顶防乱标_ts(self):
+        """模型乱标/重复标 ts（BUSI 实测 60 分钟一节）→ 单节分钟封顶 10，不再无限放宽上限。"""
+        rev = {"sections": [
+            self._sec("09:20", "[09:20] A：一"),
+            self._sec("09:20", "[09:20] A：二"),
+            self._sec("10:20", "[10:20] B：三"),
+        ]}
+        got = nv.merge_units(rev, end_ts="10:25")
+        self.assertEqual(got["sections"][0]["minutes"], nv.UNIT_MAX_MINUTES,
+                         "60 分钟的乱车位要封到 10")
+
+    def test_速览上限封顶_600(self):
+        """BUSI 两次「速览没生成」的根因之一：乱 ts 把上限撑到 3206 字 → 撞 3500 token 截断。"""
+        self.assertEqual(nv.speedout_max_chars(133.6), nv.FASTVIEW_MAX_CHARS)
+        self.assertEqual(nv.speedout_max_chars(25.7), nv.FASTVIEW_MAX_CHARS)
+        self.assertEqual(nv.speedout_max_chars(1.0), 120)
+
     def test_没有_sections_原样返回(self):
         rev = {"qa": [{"q": "x", "a": "y"}]}
         self.assertEqual(nv.merge_units(rev), rev)

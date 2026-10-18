@@ -1059,8 +1059,8 @@ class ObsidianWriter:
            速览那一块就不出现 —— 笔记照常生成（fail-soft）。
         """
         import note_v2
-        mins = float(review.get("minutes") or 0.0) or 45.0
-        max_chars = max(120, int(note_v2.CEILING_PER_MIN * mins * note_v2.FASTVIEW_SHARE))
+        mins = float(review.get("minutes") or 0.0)
+        max_chars = note_v2.speedout_max_chars(mins)
         try:
             got = note_v2.overview(review, chat=self._chat, chat_meta=self._chat_meta,
                                    max_chars=max_chars)

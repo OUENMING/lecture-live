@@ -497,8 +497,24 @@ _DEDUP_KEY = {
 
 
 # ---------------------------------------------------------------- 速览（原五分钟串讲）
-#: 速览的长度上限（CJK 字符）= 正文上限的 10%（作者 2026-10-18 第七轮）。
+# ---------------------------------------------------------------- 速览（原五分钟串讲）
+#: 速览的长度上限比例：正文上限的 10%（作者 2026-10-18 第七轮）。
 FASTVIEW_SHARE = 0.10
+
+#: 单个概念单元的分钟数上限（防模型乱标/重复标 ts：2026-10-18 实测 BUSI3243 有一节
+#: 标 `09:20` 的内容其实在 10:0x，单节"时长"被算成 60 分钟 → 字数上限过宽 → 少压了字数；
+#: ECS170 同理 53/36/23 分钟）。封顶只是收紧上限，方向永远是"宁少勿多"。
+UNIT_MAX_MINUTES = 10.0
+
+#: 速览上限的绝对帽（作者要求"3–6 句"≈ 200–400 字）。不设帽时被乱 ts 撑到 3206 字 →
+#: 模型照着写 → 撞 `OVERVIEW_MAX_TOKENS=3500` 截断 → 「速览没生成」（BUSI 两次实录）。
+FASTVIEW_MAX_CHARS = 600
+
+
+def speedout_max_chars(minutes: float) -> int:
+    """速览的字数上限：正文上限的 10%，且**封顶 600 字**（`FASTVIEW_MAX_CHARS`）。"""
+    return max(120, min(FASTVIEW_MAX_CHARS,
+                        int(CEILING_PER_MIN * float(minutes or 45.0) * FASTVIEW_SHARE)))
 
 
 def overview(review_data: dict, *, chat, chat_meta=None,
@@ -665,7 +681,7 @@ def merge_units(review: dict, *, end_ts: str = "") -> dict:
         first = members[0]
         m = dict(first)
         known = [minutes[i] for i in g if minutes[i]]
-        m["minutes"] = round(sum(known), 1) if known else None
+        m["minutes"] = round(min(sum(known), UNIT_MAX_MINUTES), 1) if known else None
         if len(g) > 1:
             m["ts"] = f"{first.get('ts')}–{members[-1].get('ts')}"
             m["heading"] = _stem(first.get("heading")) or first.get("heading")

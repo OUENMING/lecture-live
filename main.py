@@ -1934,7 +1934,7 @@ def run(args) -> None:
     duty_board = _duty.Board(day=_duty_day,
                              path=_duty.sidecar_path(writer.session_path))
 
-    def _feature(name: str, **data) -> None:
+    def _feature(name: str, data: dict | None = None, **kw) -> None:
         """⭐ **功能使用度**（测试模式，作者 2026-10-17）：一条动作送给**两个既有出口**。
 
             overlay（悬浮窗那边）──┐
@@ -1950,6 +1950,9 @@ def run(args) -> None:
         3. 自己吞异常（它在 `drain()` 的回执路径上 —— 采集坏了不许影响上课）。
         """
         try:
+            # overlay 按位置传 `(name, dict)`，main 自己按关键字传 —— 两种都收
+            #（合并后对不上过：TypeError 被 overlay 吞掉 → 悬浮窗事件全丢，2026-10-18）
+            data = {**(data or {}), **kw}
             item = feature_usage.clean(name, data)
             if item is None:
                 return

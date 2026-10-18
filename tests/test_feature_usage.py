@@ -504,6 +504,29 @@ class main那条线(unittest.TestCase):
         self.assertIn('_feature("duty.reminder"', seg, "回执那条没报功能事件")
         self.assertIn("reason_kind", seg, "失败原因没归类（原文不许进报告）")
 
+    def test_悬浮窗按位置传参也收得到(self):
+        """overlay 调 `on_feature(name, dict)`（位置参数），main 自己调 `_feature(name, k=v)`。
+
+        合并前 `_feature(name, **data)` 只收关键字 → overlay 那边 TypeError 被吞，
+        悬浮窗的功能事件全丢（2026-10-18 合并检查抓到）。这里把真函数体抠出来跑两种调法。
+        """
+        import ast
+        import textwrap
+        src = (self.ROOT / "main.py").read_text(encoding="utf-8")
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_feature")
+        seen = []
+
+        class _T:
+            def note_event(self, kind, data=None):
+                seen.append((kind, data))
+        ns = {"feature_usage": FU, "tester": _T(), "live": None}
+        exec(textwrap.dedent(ast.get_source_segment(src, fn)), ns)
+        ns["_feature"]("duty.card", {"type": "调课", "src": "regex"})
+        ns["_feature"]("duty.card", type="调课", src="regex")
+        self.assertEqual(len(seen), 2, f"位置 / 关键字两种调法各该记一条：{seen}")
+        self.assertEqual(seen[0], seen[1])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

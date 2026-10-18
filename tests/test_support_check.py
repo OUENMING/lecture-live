@@ -598,6 +598,67 @@ class CleaningF9b(unittest.TestCase):
                             "scrub 碰了空壳 —— 又长出 F9b 要删的那种壳")
 
 
+class ExampleSchemaF11(unittest.TestCase):
+    """⭐ F11 §1/§2：例题的来源核对 / 计划 / 程序 —— schema 清洗 + anchor 校验。"""
+
+    def test_四件套被解析下来(self):
+        r = note_v2._clean_section({"heading": "h", "example": {
+            "title": "🎙 13:16 停产价格", "prompt": "$AC(q)=60q+500/q$，求 P。",
+            "source_check": {"quote": "the average cost at 2.89", "anchor_ts": "13:16:29",
+                             "verdict": "fragment"},
+            "plan": {"knowns": ["AC(q)=60q+500/q"], "target": "P（价格，欧元）",
+                     "steps": ["令 AC'=0"]},
+            "givens": {"K": "500"},
+            "program": [{"var": "q_star", "op": "argmin", "expr": "60*q + 500/q",
+                         "x": "q", "range": [1, 10]},
+                        {"var": "P", "op": "eval", "expr": "60*q + 500/q", "x": "q",
+                         "at": "q_star"}],
+            "answer": "P≈346.4。"}})
+        ex = r["example"]
+        self.assertEqual(ex["source_check"]["verdict"], "fragment")
+        self.assertEqual(ex["source_check"]["anchor_ts"], "13:16:29")
+        self.assertEqual(ex["plan"]["target"], "P（价格，欧元）")
+        self.assertEqual(ex["givens"], {"K": 500.0})
+        self.assertEqual([s["var"] for s in ex["program"]], ["q_star", "P"])
+        self.assertEqual(ex["program"][0]["range"], [1, 10])
+
+    def test_讲解折进steps(self):
+        """`explanation`（最后写的讲解）要进 steps —— 否则不渲染、也不进判据。"""
+        r = note_v2._clean_section({"heading": "h", "example": {
+            "prompt": "题面", "explanation": "照着程序值讲一遍。"}})
+        self.assertEqual([s["text"] for s in r["example"]["steps"]],
+                         ["照着程序值讲一遍。"])
+
+    def test_anchor_优先新字段_越界退回None(self):
+        sec = {"ts": "13:16"}
+        ex = {"source_check": {"anchor_ts": "13:16:29"}}
+        self.assertEqual(ng._example_anchor(ex, "13:16", sec), "13:16:29")
+        # 标题 ts 作兜底
+        self.assertEqual(ng._example_anchor({}, "13:18", sec), "13:18")
+        # 越界（本节 13:16 → 13:31，anchor 13:50）→ None（退回 F9d 检索）
+        self.assertIsNone(ng._example_anchor({"source_check": {"anchor_ts": "13:50"}},
+                                             "13:20", sec))
+
+    def test_anchor_区间节也认(self):
+        self.assertTrue(ng._anchor_ok("13:22", {"ts": "13:16–13:24"}))
+        self.assertFalse(ng._anchor_ok("13:26", {"ts": "13:16–13:24"}))
+
+    def test_recon_ok_认程序(self):
+        """有 program 且程序核通过 → 按口述还原成立（题面没有函数也认 —— 程序就是证明）。"""
+        sec = {"heading": "h", "ts": "13:16",
+               "example": {"title": "🎙+✏️ 按口述还原",
+                           "prompt": "某工厂的成本函数见程序，求最低平均成本对应的价格。",
+                           "program": [
+                               {"var": "q_star", "op": "argmin", "expr": "60*q + 500/q",
+                                "x": "q", "range": [1, 10]},
+                               {"var": "P", "op": "eval", "expr": "60*q + 500/q",
+                                "x": "q", "at": "q_star"}],
+                           "steps": [{"text": "代入得 346.4。", "why": ""}],
+                           "answer": "P≈346.4。"}}
+        self.assertTrue(ng._recon_ok(sec))
+
+
+
 class MechOverride(unittest.TestCase):
     """模型自写的 mismatch 行：节内函数复算两边相等 → 作废只留台账（F9b 作者点名）。"""
 

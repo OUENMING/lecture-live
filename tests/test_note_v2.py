@@ -392,6 +392,32 @@ class ExerciseRepair(unittest.TestCase):
         self.assertEqual(got["sections"][0], clean)
         self.assertEqual(warns, [])
 
+    def test_program跑崩_触发返修(self):
+        """⭐ F11 §2：program 的 mismatch 归 example 单元 → 走既有返修闸。"""
+        import note_math as nm
+        unit = {"heading": "[13:16] 停产价格", "ts": "13:16", "q": "题？",
+                "prose": ["讲解。"],
+                "example": {"title": "🎙 13:16", "prompt": "求最低平均成本对应的价格。",
+                            "program": [
+                                {"var": "q_star", "op": "argmin",
+                                 "expr": "(60*q + 500)/q", "x": "q", "range": [1, 10]},
+                                {"var": "P", "op": "eval", "expr": "(60*q + 500)/q",
+                                 "x": "q", "at": "q_star"}],
+                            "steps": [{"text": "令导数为零。", "why": ""}],
+                            "answer": "最低点为 60。"}}
+        rows = nm.check_review({"sections": [unit]})
+        bad = [r for r in rows if r.get("status") == "mismatch"
+               and nm.unit_of_claim(unit, str(r.get("claim") or "")) in nm.MODEL_AUTHORED]
+        self.assertTrue(bad, "program 跑崩的 mismatch 必须归到 example 单元（返修才会醒）")
+        calls = []
+
+        def chat(s, u, m):
+            calls.append(u)
+            return {"prose": ["课上的函数没录全，例题先撤了。"], "example": None, "note": "撤"}
+        got, stats, _ = nv.repair_exercises({"sections": [unit], "checks": []}, chat=chat)
+        self.assertEqual(len(calls), 1, "program 跑崩要触发一次返修")
+        self.assertNotIn("example", got["sections"][0])
+
 
 class Schedule(unittest.TestCase):
     def test_间隔日期(self):

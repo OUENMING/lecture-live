@@ -164,6 +164,34 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
   ⚠️ 只讲**一类题/算法怎么做**，**不要**拿它复述某一道具体题的步骤（那是 example 的 steps，
   两边不许重复）；迭代算法可以 `loop_to: 1` 指回第几步（从 1 数）。不合适就别放。
 
+## 二之二、例题怎么写（⭐ 2026-10-18 起：**顺序不许换** —— 来源 → 计划 → 程序 → 讲解）
+看到课上做了例题，**先填三个字段、最后才写讲解**（讲解照机器算出来的值写）：
+
+① `source_check`（**先看课上到底给了什么**，不许跳）：
+   {"quote": "出处里逐字给的原话/式子（≤80 字）", "anchor_ts": "HH:MM",
+    "verdict": "complete|fragment|none"}
+   · `quote` 必须**逐字**来自转录或课件片段；`anchor_ts` 是你看到那句话的**转录时间戳**
+     （就用给你的那段里 [HH:MM:SS] 上的时刻）。
+   · complete=题面全部给定都在出处里；fragment=只给了片段（如只念了 `2.89`「60 乘它加 500」）；
+     none=课上没给、这题是你自补的。
+② `plan`：{"knowns": ["已知…（逐条）"], "target": "要求的量（**写清含义和单位**，如「P（价格，欧元）」）",
+   "steps": ["打算怎么一步步算（纯文字，不给数字）"]}
+   ⚠️ target 是**要回答的那个量**本身，不是它的取点（求价格就写 P，不是 q*）。
+③ `program`（**代码算，你只填数据**）：一小串步骤，机器会执行并把值算准：
+   [{"var": "q_star", "op": "argmin", "expr": "60*q + 500/q", "x": "q", "range": [1, 10]},
+    {"var": "P", "op": "eval", "expr": "60*q + 500/q", "x": "q", "at": "q_star"}]
+   · `op` 只许：**argmin / argmax**（区间内求极小/极大，必须真有内部极值点，落端点算失败）、
+     **root**（区间内求零点）、**eval**（在 `at` 处代入）、**deriv**（在 `at` 处求数值导数）；
+   · `var` 是这一步算出的变量名；`expr` 用 `x` 当自变量，可引用前面步骤的 `var` 与 `givens`；
+   · argmin/argmax/root 要给 `range: [lo, hi]`；eval/deriv 要给 `at`（一个数、或前面算出的变量名）；
+   · 题面里的符号常数写进 `givens`（如 {"K": 500}）；
+   · **最后一步的 `var` 就是答案那个量（target）** —— 若答案是「把 q* 代回」，
+     最后一步就该是 `eval`（var=P），不许停在 q*。
+④ `steps` / `answer`（**讲解**，最后写）：照程序算出来的值，从头讲到尾。
+   ⚠️ 讲解/步骤/答案里的**每个数字**都要等于程序算出的某个值、或题面给定
+     （机器会逐一复核；对不上就返修，返不回来整块撤）—— 不许自己心算一个没算过的数。
+   片段题（verdict=fragment）不许硬还原：按 §三 写「片段 + 一个 ✏️ 自补例」。
+
 ## 三、数学与例题的硬规矩（2026-10-17 验收抓到过反例，逐条遵守）
 - **公式一律 LaTeX**：行内 `$…$`、独立 `$$…$$`。多项式/导数/分式都必须写，例如
   `$q^{3}-12q^{2}+60q$`、`$AC'(q)=2q-12$`、`$v(t)=20-5t$`。**不许**写 `q^3-3q^2+12q` 这种纯文本；
@@ -227,6 +255,15 @@ __CALIBER__
     "algebra": "代数主线：只列式子与结果（≤80 字，可空）",
     "intuition": "一句人话直觉（≤40 字，可空）",
     "example": {"title": "例题名（标出处，如 📖 Exercise 5）", "prompt": "题面",
+                "source_check": {"quote": "出处里逐字的原话/式子", "anchor_ts": "HH:MM",
+                                 "verdict": "complete|fragment|none"},
+                "plan": {"knowns": ["已知…"], "target": "要求的量（含义+单位）",
+                         "steps": ["打算怎么算（纯文字）"]},
+                "givens": {"K": 500},
+                "program": [{"var": "q_star", "op": "argmin", "expr": "60*q + 500/q",
+                             "x": "q", "range": [1, 10]},
+                            {"var": "P", "op": "eval", "expr": "60*q + 500/q",
+                             "x": "q", "at": "q_star"}],
                 "steps": [{"text": "这一步做什么", "why": "为什么这一步成立"}],
                 "answer": "结论"},
     "variants": [{"q": "变式题", "steps": ["…"], "a": "答案"}],
@@ -536,6 +573,80 @@ def clamp_components(review: dict) -> tuple:
     return out, dropped, warns
 
 
+# ⭐ F11 §1/§2：例题的来源核对 / 计划 / 程序 —— schema 清洗（纯函数）。
+def _clean_source_check(sc) -> dict:
+    """`source_check`：出处里**逐字**给的原话 + 时间戳 + 结论（complete/fragment/none）。"""
+    if not isinstance(sc, dict):
+        return {}
+    d: dict = {}
+    q = _one_line(sc.get("quote"))
+    if q:
+        d["quote"] = q[:120]
+    at = _one_line(sc.get("anchor_ts"))
+    if at:
+        d["anchor_ts"] = at
+    vd = _one_line(sc.get("verdict")).lower()
+    if vd in ("complete", "fragment", "none"):
+        d["verdict"] = vd
+    return d
+
+
+def _clean_plan(pl) -> dict:
+    """`plan`：已知 / 要求的量（含义+单位） / 步骤（纯文字）。"""
+    if not isinstance(pl, dict):
+        return {}
+    d: dict = {}
+    kn = _lines(pl.get("knowns"))
+    if kn:
+        d["knowns"] = kn
+    tg = _one_line(pl.get("target"))
+    if tg:
+        d["target"] = tg
+    ps = _lines(pl.get("steps"))
+    if ps:
+        d["steps"] = ps
+    return d
+
+
+def _clean_givens(v) -> dict:
+    """`givens`：题面里的符号常数 → 数值表。"""
+    out: dict = {}
+    if not isinstance(v, dict):
+        return out
+    for k, x in v.items():
+        if isinstance(x, bool):
+            continue
+        if isinstance(x, (int, float)):
+            out[str(k)] = float(x)
+        else:
+            try:
+                out[str(k)] = float(str(x).strip())
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def _clean_program(v) -> list:
+    """`program`：步骤表（只搬运字段，合法性交给 `note_math.run_program` 判 ——
+    坏程序要让**它自己的报错**浮出来（进返修），不许在这里静默丢掉。"""
+    out: list = []
+    if not isinstance(v, list):
+        return out
+    for st in v:
+        if not isinstance(st, dict):
+            continue
+        d: dict = {"var": _one_line(st.get("var")), "op": _one_line(st.get("op")),
+                   "expr": _one_line(st.get("expr")), "x": _one_line(st.get("x"))}
+        rng = st.get("range")
+        if isinstance(rng, (list, tuple)) and len(rng) == 2:
+            d["range"] = [rng[0], rng[1]]
+        if "at" in st:
+            d["at"] = st.get("at")
+        if d["var"] or d["expr"]:
+            out.append(d)
+    return out
+
+
 def _clean_section(s) -> dict:
     if not isinstance(s, dict):
         return {}
@@ -559,11 +670,26 @@ def _clean_section(s) -> dict:
     ex = s.get("example")
     if isinstance(ex, dict):
         steps = _steps(ex.get("steps"))
+        expl = _one_line(ex.get("explanation"))
+        if expl and all(expl != _one_line(st.get("text")) for st in steps):
+            steps = steps + [{"text": expl, "why": ""}]     # 讲解最后写：折进 steps（会被渲染、会被核）
         if steps or _one_line(ex.get("prompt")):
             r["example"] = {"title": _one_line(ex.get("title")),
                             "prompt": _one_line(ex.get("prompt")),
                             "steps": steps,
                             "answer": _one_line(ex.get("answer"))}
+            sc = _clean_source_check(ex.get("source_check"))
+            if sc:
+                r["example"]["source_check"] = sc
+            pl = _clean_plan(ex.get("plan"))
+            if pl:
+                r["example"]["plan"] = pl
+            gv = _clean_givens(ex.get("givens"))
+            if gv:
+                r["example"]["givens"] = gv
+            pg = _clean_program(ex.get("program"))
+            if pg:
+                r["example"]["program"] = pg
     for v in (s.get("variants") or []):
         if not isinstance(v, dict):
             continue
@@ -828,7 +954,9 @@ REPAIR_SYS = """你在**返修**一节课堂笔记里"算错了/立不住的例�
    该函数没有最低点。
 4) 讲解（prose）里提到这些数字的句子**一起改**，别让正文和题块打架；
    对照表/步骤图（compare/flow）里的数字错了就改格子/步骤，改不干净就整个**撤掉**。
-5) 不写"我算错了/我改正了"这类话；直接给改好的内容。
+5) 例题现在带 `source_check` / `plan` / `program`（F11 §2：**代码算**）：**错在数就改 `program`**
+   （改对步骤、区间/代入点），再照它算出来的值重写 `steps`/`answer`；`source_check`/`plan` 一并带回。
+6) 不写"我算错了/我改正了"这类话；直接给改好的内容。
 
 输入：这一节现在的文本（JSON）+ 机械核发现的错行。
 严格输出 JSON：{"prose": ["…"], "example": {…}|null, "variants": [...], "faded": {…}|null,

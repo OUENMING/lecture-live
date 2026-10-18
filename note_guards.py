@@ -958,6 +958,41 @@ def _hms(s) -> int | None:
     return p[0] * 3600 + p[1] * 60 + p[2]
 
 
+#: 一节（无区间 ts 时）默认跨度 15 分钟 —— 同 `note_v2._transcript_window` 的兜底。
+SECTION_SPAN = 15 * 60
+
+
+def _anchor_ok(anchor, sec) -> bool:
+    """例题的 `anchor_ts` 是否**落在本节的时间范围**里（F11 §1）。**纯函数。**
+
+    节 `ts` 可能是单点（`13:16`）或区间（`13:16–13:24`）；拿不到节起点就放行（保守）。
+    不在范围 → 调用方丢掉这个时间戳，退回 F9d 的**检索取窗**。
+    """
+    t = _hms(anchor)
+    if t is None:
+        return False
+    base = _hms(sec.get("ts")) if isinstance(sec, dict) else None
+    if base is None:
+        return True
+    lo, hi = base, base + SECTION_SPAN
+    parts = re.split(r"[–-]", str(sec.get("ts") or ""))
+    if len(parts) > 1:
+        hi2 = _hms(parts[1])
+        if hi2 is not None and hi2 > lo:
+            hi = hi2
+    return lo - 60 <= t <= hi + 60
+
+
+def _example_anchor(ex: dict, title_ts, sec) -> str | None:
+    """例题的 🎙 时刻：优先 `source_check.anchor_ts`（F11 §1 的新字段），
+    其次是标题里的 `🎙 HH:MM`；**校验落在本节范围内**，越界 → `None`（退回检索）。"""
+    sc = ex.get("source_check") if isinstance(ex.get("source_check"), dict) else {}
+    ts = str(sc.get("anchor_ts") or title_ts or "").strip() or None
+    if ts and not _anchor_ok(ts, sec):
+        return None
+    return ts
+
+
 def _support_window(entries: list, want) -> tuple:
     """claim 时间戳 →（最近一行的 ±8/+32 窗口）。拿不到 ts / 空转录 → 全篇。"""
     if not entries:
@@ -1077,8 +1112,9 @@ def support_claims(review: dict) -> list:
         title = str((ex or {}).get("title") or "") if isinstance(ex, dict) else ""
         if isinstance(ex, dict) and "🎙" in title:
             m = _TS_IN_TITLE.search(title)
+            ts0 = _example_anchor(ex, m.group(1) if m else None, s)
             for g in _prompt_givens(ex.get("prompt")):     # F9d：只收具体给定
-                add(g, si, "example", m.group(1) if m else None,
+                add(g, si, "example", ts0,
                     "📖" if "📖" in title else "🎙", min_len=3)
         for k in ("prose", "algebra"):
             v = s.get(k)
@@ -1092,14 +1128,21 @@ def support_claims(review: dict) -> list:
 
 
 def _recon_ok(section: dict) -> bool:
-    """F9 的「按口述还原」验证：题面给了函数、该块机械核 ≥1 条 ok 且 0 条 mismatch。"""
+    """F9/F11 的「按口述还原」验证：该块的**机械核**（含 F11 §2 的 program 行）
+    ≥1 条 ok 且 0 条 mismatch。
+
+    ⭐ F11 §2：题面有 `program`（代码算）也算 —— 程序把片段里每个数字都复现出来了，
+    是比"函数能复算"更硬的证明；没有 program 时仍要求题面里有函数（老口径）。
+    """
     try:
         import note_math
         ex = section.get("example")
-        if not isinstance(ex, dict) or not note_math._FUNC_DEF.search(
-                str(ex.get("prompt") or "")):
+        if not isinstance(ex, dict):
             return False
-        rows = note_math.check_review({"sections": [section]})
+        has_prog = isinstance(ex.get("program"), list) and bool(ex.get("program"))
+        if not has_prog and not note_math._FUNC_DEF.search(str(ex.get("prompt") or "")):
+            return False
+        rows = note_math.check_review({"sections": [section]})   # 已含 program_rows
         mine = [r for r in rows
                 if note_math.unit_of_claim(section, str(r.get("claim") or ""))
                 in note_math.MODEL_AUTHORED]

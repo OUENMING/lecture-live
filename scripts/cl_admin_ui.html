@@ -318,10 +318,30 @@ details.sub>summary:hover{color:var(--ink)}
     <div class="card" id="quota"></div>
   </section>
 
+  <!-- 平台：Soniox / OpenRouter 的余额、用量、并发。本机 key 只读，key 从不进页面。 -->
+  <section class="block">
+    <div class="hd"><h2>平台</h2><span class="note" id="pnote"></span><span class="spacer"></span>
+      <span class="note" id="pdash"></span></div>
+    <div id="platforms"></div>
+  </section>
+
   <section class="block">
     <div class="hd"><h2>云端服务</h2><span class="note">近 24 小时</span><span class="spacer"></span>
       <span class="note" id="sage"></span></div>
     <div class="card" id="svc"></div>
+  </section>
+
+  <!-- 3.10 新数据：Soniox 实时流 / OpenRouter 快速通道 / 客户端版本 / 课后笔记 /
+       「一些事儿」· 设备 · 能耗 · 收音断档（前四样来自 AE，后一样来自上传的 report.json）。 -->
+  <section class="block">
+    <div class="hd"><h2>3.10 新数据</h2><span class="note" id="dnote"></span></div>
+    <div class="card" id="dash310"></div>
+  </section>
+
+  <!-- 测试模式：每节上传了 report.json 的课（只有测试模式会写报告并上传）。 -->
+  <section class="block">
+    <div class="hd"><h2>测试模式</h2><span class="note" id="tmnote"></span></div>
+    <div class="card" id="testmode"></div>
   </section>
 
   <section class="block">
@@ -405,6 +425,8 @@ var state = {
   codes: [], days_data: [], prev_data: [], quota: null, limit: null,
   expanded: null, showRevoked: false, busy: false, loaded: false, err: null,
   minCache: {}, minDay: {}, winCache: {}, folds: {},
+  cf: undefined, r2: undefined, health: undefined, logs: undefined, ae: undefined,
+  ae310: undefined, reports: undefined, soniox: undefined, openrouter: undefined,
   prices: JSON.parse(localStorage.getItem("clui-prices") || "null") || {cache:0.003, miss:0.15, out:0.60}
 };
 var $ = function(s){ return document.querySelector(s); };
@@ -743,7 +765,8 @@ function stackMini(parts, w){    /* 表格里的构成条：6px 高，够小不�
 function fold(summary, nodes, key){   /* 卡片里的小节折起来（整块的用 details.prices，同一个语言） */
   var d = el("details", "sub");
   // 带 key 的记住开合：每分钟自动刷新、或某个来源晚到一步重画整块时，点开的那节不该自己合上。
-  if(key){ d.open = !!state.folds[key]; d.addEventListener("toggle", function(){ state.folds[key] = d.open; }); }
+  if(key){ d.open = !!state.folds[key] || !!qExpand; d.addEventListener("toggle", function(){ state.folds[key] = d.open; }); }
+  else if(qExpand) d.open = true;
   d.appendChild(el("summary", null, summary));
   nodes.forEach(function(n){ if(n) d.appendChild(n); });
   return d;
@@ -1294,6 +1317,289 @@ function renderService(){
 }
 
 
+/* ---------- 渲染：平台（Soniox / OpenRouter，2026-10-18）----------
+   Soniox：本机项目 key 只读 —— `/v1/usage/summary`（近 7 天花费）+ `/v1/concurrency-limits`（并发）
+           + `/v1/usage-logs`（Soniox 侧真值：会话数 / 音频秒 × 码名）。组织 key 有才读余额。
+   OpenRouter：本机**管理 key** —— `/credits`（余额）+ `/analytics/meta` + `/analytics/query`（近 7 天）。
+   ⚠️ 不接 Observability destinations（那把请求内容推给第三方）；analytics 只有数字。key 从不进页面。 */
+function money(v){
+  if(v == null || !isFinite(Number(v))) return "无";
+  var n = Number(v), a = Math.abs(n);
+  if(a >= 1000) return "$" + (n/1000).toFixed(a >= 10000 ? 0 : 1) + "k";
+  if(a === 0) return "$0";
+  return "$" + n.toFixed(a < 0.01 ? 4 : a < 1 ? 3 : 2);
+}
+function dash(v, node){ return (v == null) ? el("span", "mut", "—") : (node == null ? String(v) : node); }
+function median(a){ if(!a || !a.length) return null; var b = a.slice().sort(function(x, y){ return x - y; }), m = b.length >> 1; return b.length % 2 ? b[m] : (b[m-1] + b[m]) / 2; }
+function sumField(rows, key){ return (rows || []).reduce(function(a, r){ return a + (+r[key] || 0); }, 0); }
+function runwayDays(bal, spent7){ if(bal == null || !(spent7 > 0)) return null; return Math.max(0, Math.floor(bal / (spent7 / 7))); }
+/* 上游尝试串（blob4）→ 快速通道归类。命中 = openrouter:200；退回 = `…>deepseek:…`（试了 OpenRouter 没用）；
+   直连 = deepseek:…（没走 OpenRouter，或它冷却中）。首字中位按组内 n 加权。 */
+function fastStats(ae3){
+  var rows = (ae3 && ae3.fast) || [];
+  if(!rows.length) return null;
+  var s = {hit:0, back:0, direct:0, other:0, to:0, fOr:0, orN:0, fDs:0, dsN:0};
+  rows.forEach(function(r){
+    var up = String(r.up || ""), n = +r.n || 0, f = +r.f50 || 0;
+    if(up === "openrouter:200"){ s.hit += n; if(f){ s.fOr += f*n; s.orN += n; } }
+    else if(up.indexOf(">deepseek:") >= 0){ s.back += n; if(up.indexOf("openrouter:timeout") >= 0) s.to += n; }
+    else if(up.indexOf("deepseek:") === 0){ s.direct += n; if(f){ s.fDs += f*n; s.dsN += n; } }
+    else s.other += n;
+  });
+  s.f50Or = s.orN ? Math.round(s.fOr / s.orN) : null;
+  s.f50Ds = s.dsN ? Math.round(s.fDs / s.dsN) : null;
+  s.total = s.hit + s.back + s.direct + s.other;
+  return s;
+}
+function platformCard(title, note, body){
+  var c = el("div", "card"), h = el("div", "ch");
+  h.appendChild(el("h3", null, title));
+  if(note) h.appendChild(el("span", "note", note));
+  c.appendChild(h); c.appendChild(body); return c;
+}
+function renderPlatforms(){
+  var box = $("#platforms"); box.innerHTML = "";
+  var sx = state.soniox, or = state.openrouter, ae3 = state.ae310;
+  var haveSx = sx && !sx.error, haveOr = or && !or.error;
+  var sxCost = 0, sxToday = 0;
+  if(haveSx) sx.regions.forEach(function(r){ var u = sx.usage[r] || {}; sxCost += (u.cost_7d || 0); sxToday += (u.cost_today || 0); });
+  var orRows = (haveOr && or.query && or.query.rows) || [];
+  var orCost = sumField(orRows, "total_usage"), orReq = sumField(orRows, "request_count");
+  var orBal = haveOr && or.credits && or.credits.total != null && or.credits.used != null ? or.credits.total - or.credits.used : null;
+  var sxBal = haveSx && sx.balance ? sx.balance.available : null;
+  var sxRun = runwayDays(sxBal, sxCost), orRun = runwayDays(orBal, orCost);
+  var users310 = 0, usersAll = 0;
+  ((ae3 && ae3.rollout) || []).forEach(function(r){ var u = +r.users || 0; usersAll += u; if(String(r.ver) === "3.10.0") users310 += u; });
+  var row = el("div", "hero s5");
+  row.appendChild(svcStat("Soniox 近 7 天", pending(sx) ? "…" : haveSx ? money(sxCost) : "读不到",
+    haveSx ? ("今日 " + money(sxToday) + (sxBal != null ? " · 余额 " + money(sxBal) + (sxRun != null ? " · 撑 " + sxRun + " 天" : "") : "")) : (sx && sx.error ? sx.error : "")));
+  var c0 = haveSx ? sx.concurrency : null;
+  row.appendChild(svcStat("Soniox 并发", c0 && c0.limit != null ? num(c0.current) + " / " + num(c0.limit) : "…",
+    c0 && c0.limit ? Math.round((1 - (c0.current || 0) / c0.limit) * 100) + "% 余量" : "",
+    c0 && c0.limit && (c0.current || 0) / c0.limit > .8 ? "warn" : null));
+  row.appendChild(svcStat("OpenRouter 近 7 天", pending(or) ? "…" : haveOr && or.query ? money(orCost) : or && or.error ? "没配" : "…",
+    orBal != null ? "余额 " + money(orBal) + (orRun != null ? " · 撑 " + orRun + " 天" : "") : ""));
+  row.appendChild(svcStat("OpenRouter 请求", pending(or) ? "…" : num(orReq), orReq ? "≈ " + money(orCost / orReq * 1000) + " / 千次" : ""));
+  row.appendChild(svcStat("3.10.0 普及", usersAll ? Math.round(users310 / usersAll * 100) + "%" : "…",
+    usersAll ? users310 + " / " + usersAll + " 人（7 天）" : ""));
+  box.appendChild(row);
+  var grid = el("div", "charts"); grid.style.marginTop = "12px";
+  grid.appendChild(platformCard("Soniox", "实时转写 · 本机项目 key 只读", sonioxBody(sx, ae3)));
+  grid.appendChild(platformCard("OpenRouter", "管理 key · 近 7 天", openrouterBody(or, ae3)));
+  box.appendChild(grid);
+  $("#pnote").textContent = "近 7 天 · 本机 key 只读";
+  var ages = [sx, or, ae3].filter(function(x){ return x && x.cache_age != null; }).map(function(x){ return x.cache_age; });
+  $("#pdash").textContent = ages.length ? (Math.max.apply(null, ages) < 60 ? "刚取" : Math.round(Math.max.apply(null, ages) / 60) + " 分钟前取") : "";
+}
+function sonioxBody(sx, ae3){
+  var box = el("div");
+  if(pending(sx)){ box.appendChild(el("div", "hint", "读取中…")); return box; }
+  if(sx.error){ box.appendChild(el("div", "hint", sx.error)); return box; }
+  var tri = [];
+  (sx.regions || []).forEach(function(r){
+    var u = sx.usage[r] || {};
+    tri.push([r.toUpperCase(), money(u.cost_7d), money(u.cost_today), sparkline((u.cost || []).slice(-31), {h: 18, color: "var(--d1)"})]);
+  });
+  if(tri.length) box.appendChild(mkTable([["项目区", ""], ["近 7 天花费", "r"], ["今日", "r"], ["走势", ""]], tri));
+  var keyOk = 0, keyAll = 0;
+  ((ae3 && ae3.soniox) || []).forEach(function(x){ var n = +x.n || 0; keyAll += n; if(+x.status === 200) keyOk += n; });
+  var logs = sx.logs || {};
+  var reps = state.reports && !state.reports.error ? state.reports.sessions.filter(function(s){ return s.stream; }) : null;
+  var line = el("div", "hint", "对账：Worker 签发临时 key " + num(keyOk) + " 把 · Soniox 用量日志 " +
+    (logs.sessions == null ? "—" : num(logs.sessions)) + " 次会话 · 上报报告里有 stream 的 " +
+    (reps == null ? "—" : num(reps.length)) + " 节");
+  line.title = "三个来源：AE 的 /v1/soniox/key 请求（Worker 侧）· Soniox /v1/usage-logs（Soniox 侧真值，每条一次会话）· 上传报告里 blocks.stream 存在（客户端侧）。对不上通常是「发了 key 没用 / 用了没上报」。";
+  box.appendChild(line);
+  box.appendChild(el("div", "hint", sx.balance
+    ? ("组织余额 " + money(sx.balance.available) + "（赠送 " + money(sx.balance.free) + " · 已用 " + money(sx.balance.used) + "）")
+    : (sx.balance_error || "")));
+  var models = {};
+  (sx.regions || []).forEach(function(r){ ((sx.usage[r] || {}).models || []).forEach(function(m){ models[m.model] = (models[m.model] || 0) + (m.cost || 0); }); });
+  var mparts = Object.keys(models).map(function(k){ return {name: k, v: models[k]}; }).sort(function(a, b){ return b.v - a.v; });
+  if(mparts.length){
+    var md = el("div", "dtitle", "按模型（近 7 天花费）"); md.style.marginTop = "10px";
+    box.appendChild(md); box.appendChild(hBars(mparts, {unit: "US$"}));
+  }
+  return box;
+}
+function openrouterBody(or, ae3){
+  var box = el("div");
+  if(pending(or)){ box.appendChild(el("div", "hint", "读取中…")); return box; }
+  if(or.error){ box.appendChild(el("div", "hint", or.error)); return box; }
+  var c = or.credits, bal = c && c.total != null && c.used != null ? c.total - c.used : null;
+  var orRows = (or.query && or.query.rows) || [], spent7 = sumField(orRows, "total_usage"), run = runwayDays(bal, spent7);
+  var row = el("div", "hero");
+  row.appendChild(svcStat("已购买", c ? money(c.total) : "—", c ? "近 7 天用了 " + money(spent7) : ""));
+  row.appendChild(svcStat("已用", c ? money(c.used) : "—", ""));
+  row.appendChild(svcStat("余额", bal != null ? money(bal) : "—", run != null ? "撑 " + run + " 天" : ""));
+  row.appendChild(svcStat("近 7 天请求", num(sumField(orRows, "request_count")), ""));
+  box.appendChild(row);
+  if(or.credits_error) box.appendChild(el("div", "hint", or.credits_error));
+  if(orRows.length){
+    var byModel = {};
+    orRows.forEach(function(r){ var k = r.model || "?"; var x = byModel[k] = byModel[k] || {req: 0, cost: 0, tin: 0, tout: 0};
+      x.req += (+r.request_count || 0); x.cost += (+r.total_usage || 0); x.tin += (+r.tokens_prompt || 0); x.tout += (+r.tokens_completion || 0); });
+    var arr = Object.keys(byModel).sort(function(a, b){ return byModel[b].req - byModel[a].req; })
+      .map(function(k){ var x = byModel[k];
+        var td = el("span", null, money(x.cost)); td.title = shortNum(x.tin) + " 输入 / " + shortNum(x.tout) + " 输出 token";
+        return [k, num(x.req), td]; });
+    var md = el("div", "dtitle", "按模型（近 7 天 · 悬停看 token）"); md.style.marginTop = "10px";
+    box.appendChild(md);
+    box.appendChild(mkTable([["模型", ""], ["请求", "r"], ["花费", "r"]], arr.slice(0, 8)));
+    if(arr.length > 8) box.appendChild(el("div", "hint", "另有 " + (arr.length - 8) + " 个更小的没画。"));
+  } else if(or.query_error) box.appendChild(el("div", "hint", or.query_error));
+  var f = fastStats(ae3);
+  if(f){
+    box.appendChild(el("div", "hint", "快速通道：命中 " + num(f.hit) + " · 退回 " + num(f.back) + " · 直连 " + num(f.direct) +
+      " · 首字中位 OpenRouter " + ms(f.f50Or) + " / DeepSeek " + ms(f.f50Ds)))
+      .title = "AE 的 /v1/chat/completions 上游尝试串：命中 = openrouter:200；退回 = 试了 OpenRouter 没用又走 DeepSeek；直连 = 没走 OpenRouter（或它冷却中）。";
+  }
+  return box;
+}
+
+/* ---------- 渲染：3.10 新数据 ----------
+   ① Soniox 实时转写（AE 签发 + 报告 stream 块）② OpenRouter 快速通道（AE 上游串）
+   ③ 客户端版本普及（AE）④ 课后笔记花费（AE）⑤「一些事儿」/ 设备 / 能耗 / 收音（报告的块）。 */
+function renderDash310(){
+  var box = $("#dash310"); box.innerHTML = "";
+  var ae3 = state.ae310, rep = state.reports;
+  if(pending(ae3) && pending(rep)){ box.appendChild(el("div", "hint", "正在问 Cloudflare…")); return; }
+  $("#dnote").textContent = "AE 近 7 天 · 报告 = 上传的 report.json";
+  var sessions = rep && !rep.error ? rep.sessions : null;
+
+  // ① Soniox 实时转写
+  var sxParts = [], srows = (ae3 && ae3.soniox) || [], keyN = sumField(srows, "n");
+  if(ae3 && ae3.error) sxParts.push(el("div", "hint", ae3.error));
+  else if(ae3){
+    var byRegion = {};
+    srows.forEach(function(r){
+      var up = String(r.up || ""), st = +r.status || 0, n = +r.n || 0;
+      var m = /^soniox-([a-z]+):([0-9]+|timeout)(:probe)?$/.exec(up);
+      var reg = m ? m[1] : st >= 400 ? "失败（被拒 " + st + "）" : up || "?";
+      var k = reg + (m && m[3] ? " · 探测" : "");
+      byRegion[k] = (byRegion[k] || 0) + n;
+    });
+    sxParts.push(mkTable([["区 / 结果", ""], ["签发次数", "r"]],
+      Object.keys(byRegion).sort().map(function(k){ return [k, num(byRegion[k])]; })));
+    var streams = (sessions || []).filter(function(s){ return s.stream; });
+    if(sessions === null) sxParts.push(el("div", "hint", "报告的 stream 汇总等 report.json 回来…"));
+    else if(!streams.length) sxParts.push(el("div", "hint", "还没有哪节报告带 stream 块（3.10 的实时流量具；旧版本报告没有这一块）。"));
+    else{
+      var sealed = 0, lat = [];
+      streams.forEach(function(s){ sealed += (s.stream.sealed_n || 0); if(s.stream.p50 != null) lat.push(s.stream.p50); });
+      sxParts.push(el("div", "hint", "上报报告里用了 Soniox 的 " + streams.length + " 节 · 封口句共 " + num(sealed) +
+        " · 每节上移延迟中位 " + ms(median(lat) * 1000)));
+    }
+  }
+  box.appendChild(fold("Soniox 实时转写 · " + num(keyN) + " 次签发", sxParts, "sx"));
+
+  // ② OpenRouter 快速通道
+  var f = fastStats(ae3), fParts = [];
+  if(f){
+    var share = f.total ? f.hit / f.total * 100 : 0;
+    fParts.push(el("div", "hint", "命中率 " + share.toFixed(share < 1 ? 2 : 1) + "%（" + num(f.hit) + " / " + num(f.total) +
+      "）· 退回 " + num(f.back) + " · 超时 " + num(f.to) + " · 首字中位：OpenRouter " + ms(f.f50Or) + " / DeepSeek " + ms(f.f50Ds)));
+    fParts.push(mkTable([["上游尝试串", ""], ["次数", "r"], ["首字中位", "r"]],
+      (ae3.fast || []).slice(0, 12).map(function(r){ return [r.up || "（没记上游）", num(+r.n), ms(+r.f50)]; })));
+    fParts.push(el("div", "hint", "只把「实时翻译 / 草稿」（stream 且 max_tokens ≤ 400）送 OpenRouter；精修不绕道。中国用户离 DeepSeek 近，默认跳过（CN/HK/MO）。"));
+  } else fParts.push(el("div", "hint", ae3 && ae3.error ? ae3.error : "近 7 天没有翻译上游记录。"));
+  box.appendChild(fold("OpenRouter 快速通道" + (f ? " · 命中率 " + (f.total ? (f.hit / f.total * 100).toFixed(1) : 0) + "%" : ""), fParts, "fast"));
+
+  // ③ 客户端版本
+  var vrows = ((ae3 && ae3.rollout) || []).slice().sort(function(a, b){ return (+b.n || 0) - (+a.n || 0); });
+  var usersAll = sumField(vrows, "users"), vParts = [];
+  if(vrows.length){
+    vParts.push(mkTable([["客户端版本", ""], ["请求", "r"], ["人数", "r"], ["人数占比", "r"]],
+      vrows.map(function(r){ return [r.ver || "（没发版本头）", num(+r.n), num(+r.users), (usersAll ? Math.round((+r.users || 0) / usersAll * 100) : 0) + "%"]; })));
+    vParts.push(el("div", "hint", "版本头由客户端发（3.9.4.1 起）。「3.10.0」那行 = 这次新版的覆盖；3.9.x 是还没更新的。"));
+  } else vParts.push(el("div", "hint", ae3 && ae3.error ? ae3.error : "近 7 天没有版本记录。"));
+  box.appendChild(fold("客户端版本 · 3.10.0 覆盖 " + (usersAll ? Math.round((usersAll ? sumField(vrows.filter(function(r){ return String(r.ver) === "3.10.0"; }), "users") / usersAll : 0) * 100) + "%" : "—"), vParts, "ver"));
+
+  // ④ 课后笔记
+  var nrows = (ae3 && ae3.notes) || [], nParts = [];
+  if(nrows.length){
+    var tin = sumField(nrows, "tin"), tout = sumField(nrows, "tout"), hit = sumField(nrows, "hit"), calls = sumField(nrows, "n");
+    var cost = cluiCost({tokens_in: tin, tokens_out: tout, cache_hit: hit}, state.prices);
+    nParts.push(el("div", "hint", "近 7 天 " + num(calls) + " 次课后笔记 / 精修 · 输入 " + shortNum(tin) + " · 输出 " + shortNum(tout) +
+      " token · 命中 " + (tin ? Math.round(hit / tin * 100) : 0) + "% · 估算 " + money(cost) + "（闲时价 · 每次约 " + money(calls ? cost / calls : 0) + "）"));
+    nParts.push(mkTable([["码", ""], ["次数", "r"], ["输入 tok", "r"], ["输出 tok", "r"]],
+      nrows.map(function(r){ return [r.name, num(+r.n), shortNum(+r.tin), shortNum(+r.tout)]; })));
+    nParts.push(el("div", "hint", "口径：请求的 max_tokens > 600（实时翻译 / 草稿是几十，笔记预算是 14000/4000/2000/1500）。"));
+  } else nParts.push(el("div", "hint", ae3 && ae3.error ? ae3.error : "近 7 天没有笔记（max_tokens > 600）记录。"));
+  box.appendChild(fold("课后笔记 · " + num(sumField(nrows, "n")) + " 次", nParts, "note"));
+
+  // ⑤ 一些事儿 / 设备 / 能耗 / 收音
+  var rParts = [];
+  if(sessions === null) rParts.push(el("div", "hint", rep && rep.error ? rep.error : "等 report.json…"));
+  else if(!sessions.length) rParts.push(el("div", "hint", "上传桶里还没有 report.json（只有测试模式写报告并上传）。"));
+  else{
+    var duty = {items: 0, saved: 0, ignored: 0, pending: 0, inferred: 0};
+    sessions.forEach(function(s){ if(s.duty) Object.keys(duty).forEach(function(k){ duty[k] += (s.duty[k] || 0); }); });
+    rParts.push(el("div", "hint", "「一些事儿」：认到 " + num(duty.items) + " 条 · 记下 " + num(duty.saved) +
+      " · 忽略 " + num(duty.ignored) + " · 待定 " + num(duty.pending) + " · 推算 " + num(duty.inferred)));
+    var dev = sessions.filter(function(s){ return s.device; });
+    if(dev.length){
+      rParts.push(sub2("设备 / 环境（" + dev.length + " 节）"));
+      rParts.push(mkTable([["课", ""], ["机器", ""], ["草稿引擎", ""], ["内存 GB", "r"], ["供电", ""], ["网", ""], ["sessions MB", "r"]],
+        dev.slice(0, 12).map(function(s){ var d = s.device, sys = s.system || {};
+          return [s.name || s.id, d.model || "", sys.draft_engine || "",
+            dash(sys.ram_gb, sys.ram_gb != null ? num(sys.ram_gb, 1) : null),
+            (d.power || "") + (d.battery_pct != null ? " " + d.battery_pct + "%" : ""), d.net || "",
+            dash(d.sessions_mb, d.sessions_mb != null ? num(d.sessions_mb, 1) : null)]; })));
+    }
+    var en = sessions.filter(function(s){ return s.energy; });
+    if(en.length){
+      rParts.push(sub2("能耗（可见 / 隐藏分桶）"));
+      rParts.push(mkTable([["课", ""], ["墙钟", "r"], ["可见", "r"], ["隐藏", "r"], ["可见 W", "r"], ["隐藏 W", "r"], ["屏 Hz", "r"]],
+        en.slice(0, 12).map(function(s){ var e = s.energy;
+          return [s.name || s.id, dash(e.wall_s, fmtDur(e.wall_s)), dash(e.visible_s, fmtDur(e.visible_s)),
+            dash(e.hidden_s, fmtDur(e.hidden_s)), dash(e.visible_w), dash(e.hidden_w), dash(e.screen_hz, e.screen_hz != null ? num(e.screen_hz, 0) : null)]; })));
+      rParts.push(el("div", "hint", "可见 / 隐藏 = 悬浮窗在前台 / 后台两档；「隐藏 W」比「可见 W」低说明省电档真的生效了。"));
+    }
+    var cp = sessions.filter(function(s){ return s.capture; });
+    if(cp.length){
+      rParts.push(sub2("收音断档（墙钟 vs 音频秒）"));
+      rParts.push(mkTable([["课", ""], ["墙钟", "r"], ["音频秒", "r"], ["断档秒", "r"], ["断档次数", "r"]],
+        cp.slice(0, 12).map(function(s){ var c = s.capture;
+          return [s.name || s.id, dash(c.wall_s, fmtDur(c.wall_s)), dash(c.audio_s, fmtDur(c.audio_s)),
+            dash(c.deficit_s, c.deficit_s != null ? num(c.deficit_s, 1) : null), dash(c.gaps_n)]; })));
+      rParts.push(el("div", "hint", "断档秒 = 墙钟 − 实际音频秒；文件回放（--speed≠1）也会把它推大，不只是断档。"));
+    }
+  }
+  box.appendChild(fold("「一些事儿」· 设备 · 能耗 · 收音", rParts, "rep"));
+}
+
+/* ---------- 渲染：测试模式（每节上传了 report.json 的课）---------- */
+function renderTestMode(){
+  var box = $("#testmode"); box.innerHTML = "";
+  var rep = state.reports;
+  if(pending(rep)){ box.appendChild(el("div", "hint", "读取中…")); return; }
+  if(rep.error){ box.appendChild(el("div", "hint", rep.error)); return; }
+  var ss = rep.sessions || [];
+  $("#tmnote").textContent = ss.length + " 节 · 只有测试模式写报告并上传" + ((rep.errors && rep.errors.length) ? " · " + rep.errors.length + " 份读不出" : "");
+  if(!ss.length){ box.appendChild(el("div", "hint", "上传桶里还没有 report.json。")); return; }
+  box.appendChild(mkTable(
+    [["上传完", ""], ["是谁", ""], ["时长", "r"], ["音频", ""], ["Soniox 引擎", ""], ["封口句", "r"], ["上移 p50", "r"],
+     ["术语", "r"], ["区域", ""], ["矫正率", "r"], ["块", "r"]],
+    ss.map(function(s){
+      var st = s.stream, rp = s.region;
+      var engine = st ? (st.engine || "?") + (st.reason ? "（退回 " + st.reason + "）" : "")
+        : (s.blocks.indexOf("stream") >= 0 ? "—" : "没这块");
+      return [ago(Date.parse(s.updated)), s.name || el("span", "dim", s.id),
+        dash(s.duration_s, fmtDur(s.duration_s)), s.audio_saved ? "有" : dash(null),
+        engine, dash(st && st.sealed_n, st && st.sealed_n != null ? num(st.sealed_n) : null),
+        dash(st && st.p50, st && st.p50 != null ? ms(st.p50 * 1000) : null),
+        dash(st && st.terms_n, st && st.terms_n != null ? num(st.terms_n) : null),
+        rp ? ((rp.selected || "?") + (rp.switched ? "（切过）" : "")) : dash(null),
+        dash(s.corr && s.corr.changed_pct, s.corr && s.corr.changed_pct != null ? s.corr.changed_pct + "%" : null),
+        num(s.blocks.length)];
+    })));
+  var h = el("div", "hint", "「菠萝丁」暗号 = 把这节切回本地草稿 + 云端定稿（A/B 用），会写进 stream 的退回原因。块 = 这节 report.json 里采到的块数（3.10 满配 12）。");
+  h.style.marginTop = "8px";
+  box.appendChild(h);
+}
+
+
 /* ---------- 渲染：要注意（2026-10-15）----------
    判据全来自已经取到的数（AE 上游串 / 额度 / 上传桶 / 服务健康），这里只翻译成人话。
    每条 = [级别, 一句话出了什么事, 该做什么, 时间]。级别只有 bad / warn / ok 三种。 */
@@ -1774,6 +2080,25 @@ function renderPrices(){
   box.appendChild(el("p","hint","默认值是 deepseek-flash 闲时价（2026-10-14 回源 api-docs.deepseek.com 核过，与 docs/PLAN-passkey.md §5 一致）。" +
     "价目会变，所以这里不写死：改了立刻重算。UTC 周一至五 01 到 04、06 到 10 点是高峰，价乘 2。" +
     "只统计翻译的 token，不含整课精修 / 实时总结 / 讲解追问。"));
+  // 新平台的价格（只读，带出处与核价日期）—— 实时转写按小时、OpenRouter 快速通道按 token。
+  var t2 = el("table"); t2.style.marginTop = "14px";
+  var tb2 = el("tbody");
+  [["Soniox 实时转写", "≈ $0.12 / 小时（$2.00 / 1M 输入音频 token · 1 h ≈ 30k token）",
+    "soniox.com/pricing"],
+   ["Soniox 输出文本", "$4.00 / 1M token", "soniox.com/pricing"],
+   ["OpenRouter · deepseek-v4.1-flash", "$0.04 输入 / $0.144 输出 / $0.0016 缓存读（每 1M token）",
+    "openrouter.ai/api/v1/models"]].forEach(function(r){
+    var tr = el("tr");
+    tr.appendChild(el("td", null, r[0]));
+    tr.appendChild(el("td", "r mono", r[1]));
+    var td = el("td", "faint", r[2]); td.title = "核价日期 2026-10-18";
+    tr.appendChild(td);
+    tb2.appendChild(tr);
+  });
+  t2.appendChild(tb2); box.appendChild(t2);
+  box.appendChild(el("p","hint","Soniox 与 OpenRouter 两行是**读来的价、不是账**（2026-10-18 回源官方页核过）。" +
+    "Soniox 的花费以上面「平台」卡里 /v1/usage/summary 的**实际账单**为准；折算价只用来估。" +
+    "OpenRouter 快速通道只服务 stream 且 max_tokens ≤ 400 的实时翻译 / 草稿。"));
 }
 
 /* ---------- 发新码 ---------- */
@@ -1838,10 +2163,11 @@ function load(fresh){
     $("#err").innerHTML = "";
     renderKpis(); renderDaily(); renderPerDay(); renderQuota(); renderUsers(); renderAlerts();
   }).catch(function(e){ showErr(e.message); });
-  var slow = ["cf", "r2", "health", "logs", "ae"].map(function(k){
+  var slow = ["cf", "r2", "health", "logs", "ae", "ae310", "reports", "soniox", "openrouter"].map(function(k){
     return api(k, fresh ? {fresh: true} : {})
       .catch(function(e){ return {error: "面板服务没回（" + e.message + "）；比页面旧的话重开 cl_admin_ui.py。"}; })
-      .then(function(v){ state[k] = v; renderService(); renderAlerts();
+      .then(function(v){ state[k] = v;
+        renderService(); renderPlatforms(); renderDash310(); renderTestMode(); renderAlerts();
         if(k === "ae" && state.loaded) renderUsers(); });
   });
   return Promise.all([core].concat(slow)).then(function(){ progress(false); state.loading = false; });
@@ -1880,6 +2206,9 @@ $("#addbtn").addEventListener("click", function(){
 
 // `?theme=dark|light` 只为截图核对用（无头浏览器不好改 localStorage）；不写回存储。
 var qTheme = new URLSearchParams(location.search).get("theme");
+// `?expand=1` 只为截图核对用：把折叠的小节全打开（无头浏览器点不了）。不写回存储、不改设计。
+var qExpand = ["1", "true"].indexOf(new URLSearchParams(location.search).get("expand")) >= 0;
+if(qExpand) [].forEach.call(document.querySelectorAll("details.prices"), function(d){ d.open = true; });
 state.theme = (qTheme === "dark" || qTheme === "light") ? qTheme : (localStorage.getItem("clui-theme") || "auto");
 applyTheme();
 renderPrices();

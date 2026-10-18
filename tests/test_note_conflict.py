@@ -145,5 +145,58 @@ class GoldSetScorer(unittest.TestCase):
             self.assertTrue(e["question"] and e["answer"], e["id"])
 
 
+class DummySlopeSwap(unittest.TestCase):
+    """F14-2 ⑩：**同一节内**虚拟变量的"哪一组是 1"与"哪一组拿哪条斜率"对不上。
+
+    ⚠️ 这是 F13「代数↔讲解」判据（42b9d97）漏掉的那一类：组名只出现在讲解里，
+       代数里只有 `D=0/D=1` —— 对应关系要两步推理（`D=1 ⇔ 女性`、`D=1 ⇔ β₃+β₄`），
+       旧的键（组名）在代数里根本不存在，所以配不上对。
+    """
+
+    REAL17 = _case("C1-虚拟变量斜率写反")["input"]["review"]
+
+    def test_组名与斜率对不上时命中(self):
+        got = nc.dummy_slope_conflicts(self.REAL17)
+        self.assertEqual(1, len(got), got)
+        self.assertEqual(1, got[0]["section"], "fixture 里只有这一节")
+        self.assertEqual({"女性", "男性"}, set(got[0]["labels"]))
+        self.assertEqual({"0": ["b3"], "1": ["b3", "b4"]}, got[0]["slopes"])
+
+    def test_定义与讲解一致时不报(self):
+        rev = _case("C1-虚拟变量斜率一致")["input"]["review"]
+        self.assertEqual([], nc.dummy_slope_conflicts(rev))
+
+    def test_标在讲的那一段_并说出课上前后不一致(self):
+        c = _case("C1-虚拟变量斜率写反")["input"]
+        out, extra, warns = ng.flag_conflicts(c["review"], entries=c["entries"])
+        self.assertEqual(1, extra[0]["flagged"])
+        joined = " ".join(out["sections"][0].get("prose") or [])
+        self.assertIn("本节自己的定义与讲解对不上", joined)
+        self.assertIn("课上口述", joined, "转录自己前后不一致要一起写出来")
+
+
+class MissingTerm(unittest.TestCase):
+    """F14-2 ⑪：例题给某个变量一个系数，而本节模型式里它只在乘积项里（没有主效应）。"""
+
+    REAL15 = _case("C2-例题给了一个模型里没有主效应的项的系数")["input"]["review"]
+
+    def test_只在乘积里出现就命中(self):
+        got = nc.missing_term_conflicts(self.REAL15)
+        self.assertEqual(1, len(got), got)
+        self.assertEqual("male", got[0]["term"])
+        self.assertIn("乘积", got[0]["why"])
+
+    def test_模型里有独立项时不报(self):
+        rev = _case("C2-主效应在模型里")["input"]["review"]
+        self.assertEqual([], nc.missing_term_conflicts(rev))
+
+    def test_标注落在例题那一段(self):
+        c = _case("C2-例题给了一个模型里没有主效应的项的系数")["input"]
+        out, extra, warns = ng.flag_conflicts(c["review"])
+        self.assertEqual(1, extra[0]["flagged"])
+        joined = " ".join(out["sections"][0].get("prose") or [])
+        self.assertIn("例题却给它一个系数", joined)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -94,6 +94,34 @@ def b9b_source_conflict(d: dict) -> bool:
     return bool(nc.source_sum_group_conflicts(d["entries"]))
 
 
+def c1_dummy_slope(d: dict) -> bool:
+    """同一节里"哪一组是 1"与"哪一组拿哪条斜率"对不上。"""
+    return bool(nc.dummy_slope_conflicts(d["review"]))
+
+
+def c2_missing_term(d: dict) -> bool:
+    """例题给某个变量一个系数，而本节模型式里它只在乘积项里。"""
+    return bool(nc.missing_term_conflicts(d["review"]))
+
+
+def c3_scrub_connective(d: dict) -> bool:
+    """删句会让段落以连接词开头 → 是不是把原句留住了。"""
+    _, _, warns = ng.scrub(d["review"])
+    return any("保留了原句" in w for w in warns)
+
+
+def c4_component_retime(d: dict) -> bool:
+    """挂错节的组件是不是被挪走了。"""
+    _, extra, _ = ng.retime_components(d["review"])
+    return bool(extra and int(extra[0].get("repaired") or 0))
+
+
+def c5_term_gloss(d: dict) -> bool:
+    """括注抑制有没有生效（原文几个字之后已有同一个英文括注 → 不再叠第二个）。"""
+    out = nv.announce_terms(d["text"], [tuple(x) for x in d["terms"]], set())
+    return out == d["text"]
+
+
 CHECKS = {
     "a2_cross_course_term": a2_cross_course_term,
     "a3_quote_label": a3_quote_label,
@@ -105,6 +133,11 @@ CHECKS = {
     "b8_point_value": b8_point_value,
     "b9_group_value": b9_group_value,
     "b9b_source_conflict": b9b_source_conflict,
+    "c1_dummy_slope": c1_dummy_slope,
+    "c2_missing_term": c2_missing_term,
+    "c3_scrub_connective": c3_scrub_connective,
+    "c4_component_retime": c4_component_retime,
+    "c5_term_gloss": c5_term_gloss,
 }
 
 

@@ -1049,5 +1049,435 @@
     }
    ]
   }
+ },
+ {
+  "id": "C1-虚拟变量斜率写反",
+  "check": "c1_dummy_slope",
+  "must": "flag",
+  "why": "§17：D=1 是女性、斜率定义说 D=1→β₃+β₄，讲解却说女性拿 β₃（F13 的代数↔讲解判据漏在这",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[09:31] 虚拟变量与交互项（dummy & interaction term）",
+      "ts": "09:31",
+      "prose": [
+       "性别这种分类变量不能直接当数字用，办法是造一个 0/1 的虚拟变量。课上把男性设为基准组：female 取 1 表示女性、取 0 表示男性，于是性别系数就是“其他条件相同时，女性相对男性的差”。基准组只能留一个，两组各放一个虚拟变量会完全共线。（⚠ 转录里没找到这句原话）",
+       "接着要问经验对结果的影响是否因性别而异 —— 这就是交互项，也就是课上说的“第四个 X”：经验乘以 female。写出来是 $y=\\beta_0+\\beta_3 e+\\beta_4 (D\\cdot e)$，$e$ 是经验年数、$D$ 是女性虚拟变量。于是女性每多一年经验增加 $\\beta_3=0.3$，男性每多一年增加 $\\beta_3+\\beta_4=0.3+0.4=0.7$。"
+      ],
+      "algebra": "$y=\\beta_0+\\beta_3 e+\\beta_4 D e$；$D=0$ 斜率 $\\beta_3$，$D=1$ 斜率 $\\beta_3+\\beta_4$",
+      "pitfalls": [
+       "把 0.4 当成男性的斜率（它只是差额）",
+       "两组各放一个 dummy，掉进虚拟变量陷阱"
+      ],
+      "variants": [],
+      "terms": [
+       {
+        "en": "dummy variable",
+        "zh": "虚拟变量"
+       },
+       {
+        "en": "interaction term",
+        "zh": "交互项"
+       },
+       {
+        "en": "base group",
+        "zh": "基准组"
+       }
+      ],
+      "prereq_link": "上一节讲怎么读系数显著，这里讲系数本身是怎么摆进模型的。"
+     }
+    ]
+   },
+   "entries": [
+    {
+     "ts": "09:33:35",
+     "zh": "如果你是男性，每增加一年经验，你就会有0.3加0.4。",
+     "en": "And if you're male, every extra year of experience adds 0.3 plus 0.4."
+    },
+    {
+     "ts": "09:34:03",
+     "zh": "对于有经验的女工来说，随着经验的增加，每增加一年经验工资就会增加。",
+     "en": "For female workers, pay also rises as experience grows."
+    },
+    {
+     "ts": "09:34:15",
+     "zh": "每一年的经验，收益是β3加β4。",
+     "en": "For each additional year of experience, the slope is beta three plus beta four, so that."
+    }
+   ]
+  }
+ },
+ {
+  "id": "C1-虚拟变量斜率一致",
+  "check": "c1_dummy_slope",
+  "must": "pass",
+  "why": "讲解改成与定义一致（女性 β₃+β₄、男性 β₃）→ 不许报",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[09:31] 虚拟变量与交互项（dummy & interaction term）",
+      "ts": "09:31",
+      "prose": [
+       "性别这种分类变量不能直接当数字用，办法是造一个 0/1 的虚拟变量。课上把男性设为基准组：female 取 1 表示女性、取 0 表示男性，于是性别系数就是“其他条件相同时，女性相对男性的差”。基准组只能留一个，两组各放一个虚拟变量会完全共线。（⚠ 转录里没找到这句原话）",
+       "接着要问经验对结果的影响是否因性别而异 —— 这就是交互项，也就是课上说的“第四个 X”：经验乘以 female。写出来是 $y=\\beta_0+\\beta_3 e+\\beta_4 (D\\cdot e)$，$e$ 是经验年数、$D$ 是女性虚拟变量。于是女性每多一年经验增加 $\\beta_3+\\beta_4=0.7$，男性每多一年增加 $\\beta_3=0.3$。"
+      ],
+      "algebra": "$y=\\beta_0+\\beta_3 e+\\beta_4 D e$；$D=0$ 斜率 $\\beta_3$，$D=1$ 斜率 $\\beta_3+\\beta_4$",
+      "pitfalls": [
+       "把 0.4 当成男性的斜率（它只是差额）",
+       "两组各放一个 dummy，掉进虚拟变量陷阱"
+      ],
+      "variants": [],
+      "terms": [
+       {
+        "en": "dummy variable",
+        "zh": "虚拟变量"
+       },
+       {
+        "en": "interaction term",
+        "zh": "交互项"
+       },
+       {
+        "en": "base group",
+        "zh": "基准组"
+       }
+      ],
+      "prereq_link": "上一节讲怎么读系数显著，这里讲系数本身是怎么摆进模型的。"
+     }
+    ]
+   },
+   "entries": [
+    {
+     "ts": "09:33:35",
+     "zh": "如果你是男性，每增加一年经验，你就会有0.3加0.4。",
+     "en": "And if you're male, every extra year of experience adds 0.3 plus 0.4."
+    },
+    {
+     "ts": "09:34:03",
+     "zh": "对于有经验的女工来说，随着经验的增加，每增加一年经验工资就会增加。",
+     "en": "For female workers, pay also rises as experience grows."
+    },
+    {
+     "ts": "09:34:15",
+     "zh": "每一年的经验，收益是β3加β4。",
+     "en": "For each additional year of experience, the slope is beta three plus beta four, so that."
+    }
+   ]
+  }
+ },
+ {
+  "id": "C2-例题给了一个模型里没有主效应的项的系数",
+  "check": "c2_missing_term",
+  "must": "flag",
+  "why": "§15：模型式里 male 只在乘积项里，同节例题说「male 的系数是 −2」、常见错误也点了它",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[09:27] 交互项：差距随经验扩大",
+      "ts": "09:27",
+      "prose": [
+       "上一个模型默认男女的收入差距是个固定数，不管工龄多长都一样。但现实里这个差距往往随着经验累积而变大：工龄越长，差距越大。要刻画这种事，就把 gender 和 experience 相乘，作为新变量放进回归，这叫交互项（interaction term）。",
+       "举个具体例子：设 male 的系数是 −2、交互项系数是 −0.5（千元/年经验）。那么经验为 0 时差距是 2，经验为 10 年时差距是 $2+0.5\\times10=7$，差距确实随经验拉大。若交互项系数为零，就退回上节的常数差距模型。",
+       "所以这一节的回归是 $earnings=\\beta_0+\\beta_1 education+\\beta_2 experience+\\beta_3 (male\\times experience)+u$。male 单独项被乘积代替后，性别效应不再是一个数，而是“每多一年经验多差多少”。",
+       "容易错的是把交互项系数当成“经验对收入的效应”；它衡量的是**两组经验效应之差**，主效应还得看 experience 的系数。"
+      ],
+      "algebra": "$earnings=\\beta_0+\\beta_1 education+\\beta_2 experience+\\beta_3(male\\cdot experience)+u$",
+      "pitfalls": [
+       "把交互项系数当主效应读",
+       "加了乘积却漏掉主效应项"
+      ],
+      "variants": [],
+      "terms": [
+       {
+        "en": "interaction term",
+        "zh": "交互项"
+       }
+      ],
+      "prereq_link": "上一节假设性别差是一个常数，这一节把它放开。"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "C2-主效应在模型里",
+  "check": "c2_missing_term",
+  "must": "pass",
+  "why": "模型式补上 male 的独立项 → 例题给它系数就说得通，不许报",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[09:27] 交互项：差距随经验扩大",
+      "ts": "09:27",
+      "prose": [
+       "上一个模型默认男女的收入差距是个固定数，不管工龄多长都一样。但现实里这个差距往往随着经验累积而变大：工龄越长，差距越大。要刻画这种事，就把 gender 和 experience 相乘，作为新变量放进回归，这叫交互项（interaction term）。",
+       "举个具体例子：设 male 的系数是 −2、交互项系数是 −0.5（千元/年经验）。那么经验为 0 时差距是 2，经验为 10 年时差距是 $2+0.5\\times10=7$，差距确实随经验拉大。若交互项系数为零，就退回上节的常数差距模型。",
+       "所以这一节的回归是 $earnings=\\beta_0+\\beta_1 education+\\beta_2 experience+\\beta_3 (male\\times experience)+u$。male 单独项被乘积代替后，性别效应不再是一个数，而是“每多一年经验多差多少”。",
+       "容易错的是把交互项系数当成“经验对收入的效应”；它衡量的是**两组经验效应之差**，主效应还得看 experience 的系数。"
+      ],
+      "algebra": "$earnings=\\beta_0+\\beta_1 education+\\beta_2 experience+\\beta_4 male+\\beta_3(male\\cdot experience)+u$",
+      "pitfalls": [
+       "把交互项系数当主效应读",
+       "加了乘积却漏掉主效应项"
+      ],
+      "variants": [],
+      "terms": [
+       {
+        "en": "interaction term",
+        "zh": "交互项"
+       }
+      ],
+      "prereq_link": "上一节假设性别差是一个常数，这一节把它放开。"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "C3-删句后段首成了连接词",
+  "check": "c3_scrub_connective",
+  "must": "flag",
+  "why": "v3 实测：速览首句被猜测句清理删掉 → 剩下那段从「接着用 RMSE…」起（没头没脑）",
+  "input": {
+   "review": {
+    "overview_long": [
+     "我可能把这一段的前后顺序记错了。接着用 RMSE 看残差有多大，再回到系数表读 p 值，判断单个变量是否真的有用。然后讲交互项和虚拟变量（dummy variables）：类别变量要设 0/1，多个类别留基准类。"
+    ]
+   }
+  }
+ },
+ {
+  "id": "C3-删的是段尾猜测句",
+  "check": "c3_scrub_connective",
+  "must": "pass",
+  "why": "段首不是连接词 → 照旧删掉那句猜测句，不需要救回来",
+  "input": {
+   "review": {
+    "overview_long": [
+     "先讲 R² 怎么算，这是本节的主线。我可能把顺序听错了。"
+    ]
+   }
+  }
+ },
+ {
+  "id": "C4-组件挂错节",
+  "check": "c4_component_retime",
+  "must": "flag",
+  "why": "§7（ts=09:13）挂着「🎙 三种模型评估指标（09:07–09:10）」——整张表讲的是 6 分钟前的节",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[09:07] R²：被解释的变动比例",
+      "ts": "09:07",
+      "prose": [
+       "R² 回答的是一个比例问题：因变量 y 的变动里，有多大一块被模型解释掉了。课上给的数是 0.81 —— y 每变动 100 份，约有 81 份能由模型里的自变量说清楚，剩下 19 份是模型没抓住的。",
+       "写成式子就是 $R^2=1-\\frac{SS_{res}}{SS_{tot}}$，1 减去残差平方和占总平方和的比例。最容易错的是把它读成“模型正确的概率”：它只是解释比例，模型系统性偏了，R² 照样可以很高。"
+      ],
+      "algebra": "",
+      "pitfalls": [
+       "把 R² 当成预测准确率或正确概率。"
+      ],
+      "variants": [],
+      "terms": [
+       {
+        "en": "R-squared",
+        "zh": "决定系数"
+       }
+      ],
+      "prereq_link": ""
+     },
+     {
+      "heading": "[09:13] 交互项：让一个变量的作用依赖另一个",
+      "ts": "09:13",
+      "prose": [
+       "有时 y 对 x 的斜率不是一个常数，而是随着另一个变量 z 变。这时光放 x 和 z 不够，要放交互项 $x\\cdot z$，把它当成一个新造出来的自变量。",
+       "它的系数读作：z 每多一单位，x 的斜率就变动多少。课上提到把“未来”这一维也纳入模型，用的正是这种思路 —— 让某个变量的作用写成另一个变量的函数。"
+      ],
+      "algebra": "",
+      "pitfalls": [
+       "放交互项却漏了主效应；把交互项系数读成“x 对 y 的固定影响”。"
+      ],
+      "variants": [],
+      "terms": [],
+      "prereq_link": "",
+      "compare": {
+       "title": "🎙 三种模型评估指标（09:07–09:10）",
+       "cols": [
+        "",
+        "R²",
+        "调整后 R²",
+        "RMSE"
+       ],
+       "rows": [
+        {
+         "label": "定义",
+         "cells": [
+          "$1-SS_{res}/SS_{tot}$",
+          "$1-(1-R^2)\\frac{n-1}{n-p-1}$",
+          "$\\sqrt{SS_{res}/n}$"
+         ]
+        },
+        {
+         "label": "加变量时",
+         "cells": [
+          "只升不降",
+          "可能下降",
+          "可能升可能降"
+         ]
+        },
+        {
+         "label": "方向",
+         "cells": [
+          "越大越好",
+          "越大越好",
+          "越小越好"
+         ]
+        },
+        {
+         "label": "单位",
+         "cells": [
+          "无",
+          "无",
+          "与 y 相同"
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "C4-组件时间对得上",
+  "check": "c4_component_retime",
+  "must": "pass",
+  "why": "组件标题的时间落在本节范围内 → 一个字不动",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[09:07] R²：被解释的变动比例",
+      "ts": "09:07",
+      "prose": [
+       "R² 回答的是一个比例问题：因变量 y 的变动里，有多大一块被模型解释掉了。课上给的数是 0.81 —— y 每变动 100 份，约有 81 份能由模型里的自变量说清楚，剩下 19 份是模型没抓住的。",
+       "写成式子就是 $R^2=1-\\frac{SS_{res}}{SS_{tot}}$，1 减去残差平方和占总平方和的比例。最容易错的是把它读成“模型正确的概率”：它只是解释比例，模型系统性偏了，R² 照样可以很高。"
+      ],
+      "algebra": "",
+      "pitfalls": [
+       "把 R² 当成预测准确率或正确概率。"
+      ],
+      "variants": [],
+      "terms": [
+       {
+        "en": "R-squared",
+        "zh": "决定系数"
+       }
+      ],
+      "prereq_link": ""
+     },
+     {
+      "heading": "[09:13] 交互项：让一个变量的作用依赖另一个",
+      "ts": "09:13",
+      "prose": [
+       "有时 y 对 x 的斜率不是一个常数，而是随着另一个变量 z 变。这时光放 x 和 z 不够，要放交互项 $x\\cdot z$，把它当成一个新造出来的自变量。",
+       "它的系数读作：z 每多一单位，x 的斜率就变动多少。课上提到把“未来”这一维也纳入模型，用的正是这种思路 —— 让某个变量的作用写成另一个变量的函数。"
+      ],
+      "algebra": "",
+      "pitfalls": [
+       "放交互项却漏了主效应；把交互项系数读成“x 对 y 的固定影响”。"
+      ],
+      "variants": [],
+      "terms": [],
+      "prereq_link": "",
+      "compare": {
+       "title": "🎙 交互项怎么读（09:13–09:16）",
+       "cols": [
+        "",
+        "R²",
+        "调整后 R²",
+        "RMSE"
+       ],
+       "rows": [
+        {
+         "label": "定义",
+         "cells": [
+          "$1-SS_{res}/SS_{tot}$",
+          "$1-(1-R^2)\\frac{n-1}{n-p-1}$",
+          "$\\sqrt{SS_{res}/n}$"
+         ]
+        },
+        {
+         "label": "加变量时",
+         "cells": [
+          "只升不降",
+          "可能下降",
+          "可能升可能降"
+         ]
+        },
+        {
+         "label": "方向",
+         "cells": [
+          "越大越好",
+          "越大越好",
+          "越小越好"
+         ]
+        },
+        {
+         "label": "单位",
+         "cells": [
+          "无",
+          "无",
+          "与 y 相同"
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "C5-括注在几个字之后",
+  "check": "c5_term_gloss",
+  "must": "flag",
+  "why": "「方差分析模型（ANOVA）」曾被插成「方差分析（ANOVA）模型（ANOVA）」",
+  "input": {
+   "text": "只放虚拟变量的回归叫方差分析模型（ANOVA）；虚拟变量外再加连续变量叫协方差分析模型（ANCOVA）。",
+   "terms": [
+    [
+     "方差分析",
+     "ANOVA"
+    ],
+    [
+     "协方差分析",
+     "ANCOVA"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "C5-没有括注时照常插",
+  "check": "c5_term_gloss",
+  "must": "pass",
+  "why": "原文没有括注 → 照旧插一次（抑制判据不许把正常括注也挡掉）",
+  "input": {
+   "text": "只放虚拟变量的回归叫方差分析，虚拟变量外再加连续变量叫协方差分析。",
+   "terms": [
+    [
+     "方差分析",
+     "ANOVA"
+    ],
+    [
+     "协方差分析",
+     "ANCOVA"
+    ]
+   ]
+  }
  }
 ]

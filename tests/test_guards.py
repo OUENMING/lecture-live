@@ -891,5 +891,71 @@ class F14AsrOrphans(unittest.TestCase):
         self.assertEqual(rev, out)
 
 
+class F14NoDanglingConnective(unittest.TestCase):
+    """F14-2 #3：删句不许让段落**以连接词开头**（速览实测：「接着用 RMSE 看残差…」）。
+
+    ⚠️ 第一句是猜测句被删掉的，剩下的从「接着」起 —— 读者不知道在接什么。
+       作者拍板：宁可**留着那一句**（prefer keeping the sentence）。
+    """
+
+    #: 后半段是 v3/busi3243 速览的真实文字（清理后；首句在日志里被「猜测句清理（串讲）」删掉）。
+    REAL_TAIL = ("接着用 RMSE 看残差有多大，再回到系数表读 p 值，判断单个变量是否真的有用。"
+                 "然后讲交互项和虚拟变量：类别变量要设 0/1，多个类别留基准类。")
+
+    def test_段首是连接词时保留被删的那句(self):
+        rev = {"overview_long": ["我可能把这一段的前后顺序记错了。" + self.REAL_TAIL]}
+        out, removed, warns = ng.scrub(rev)
+        got = out["overview_long"][0]
+        self.assertTrue(got.startswith("我可能"), f"该保留原句，实际：{got[:40]}")
+        self.assertIn("接着用 RMSE", got)
+        self.assertFalse(any("接着" in x for x in [got[:1]]))
+        self.assertTrue(any("保留了原句" in w for w in warns), warns)
+        self.assertEqual([], removed, "保留下来的那句不该记进删除清单")
+
+    def test_删掉结尾的猜测句照旧删(self):
+        rev = {"overview_long": ["先讲 R² 怎么算，这是本节的主线。我可能把这里的顺序听错了。"]}
+        out, removed, warns = ng.scrub(rev)
+        self.assertEqual(["先讲 R² 怎么算，这是本节的主线。"], out["overview_long"])
+        self.assertEqual(1, len(removed))
+        self.assertFalse(any("保留了原句" in w for w in warns), warns)
+
+
+class F14ComponentRetime(unittest.TestCase):
+    """F14-2 #4：对照表/步骤图挂错小节（标题 🎙 时间比小节早 ≥3 分钟）→ 按时间挪回。
+
+    实测：v3 busi §7（ts=09:13）挂着「🎙 三种模型评估指标（09:07–09:10）」。
+    """
+
+    def _rev(self, title):
+        return {"sections": [
+            {"heading": "R²", "ts": "09:07", "prose": ["x"]},
+            {"heading": "共线", "ts": "09:09", "prose": ["y"]},
+            {"heading": "交互项", "ts": "09:13",
+             "compare": {"title": title, "cols": ["", "R²"], "rows": []}}]}
+
+    def test_时间差得远就挪到真正讲它的那一节(self):
+        out, extra, warns = ng.retime_components(
+            self._rev("🎙 三种模型评估指标（09:07–09:10）"))
+        self.assertEqual(1, extra[0]["repaired"])
+        self.assertNotIn("compare", out["sections"][2])
+        self.assertIn("三种模型评估指标", out["sections"][0]["compare"]["title"],
+                      "ts=09:07 的那一节才是它讲的地方")
+        self.assertTrue(warns and "挂错" in warns[0], warns)
+
+    def test_时间对得上就不动(self):
+        rev = self._rev("🎙 交互项怎么读（09:13–09:16）")
+        out, extra, warns = ng.retime_components(rev)
+        self.assertEqual(rev, out)
+        self.assertEqual([], warns)
+
+    def test_目标节已有同类组件就宁缺丢掉(self):
+        rev = self._rev("🎙 三种模型评估指标（09:07–09:10）")
+        rev["sections"][0]["compare"] = {"title": "已有的表", "cols": ["a"], "rows": []}
+        out, extra, warns = ng.retime_components(rev)
+        self.assertEqual(1, extra[0]["dropped"], "目标节已有同类组件 → 宁缺")
+        self.assertNotIn("compare", out["sections"][2])
+        self.assertEqual("已有的表", out["sections"][0]["compare"]["title"])
+
+
 if __name__ == "__main__":
     unittest.main()

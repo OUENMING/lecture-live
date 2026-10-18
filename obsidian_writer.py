@@ -1355,6 +1355,10 @@ class ObsidianWriter:
         for fn, label in ((lambda r: self._repair_exercises(r, entries), "例题返修"),
                           # ⭐ F10：对照表/步骤图全讲各 ≤3（逐节的 schema 校验在
                           #    `note_v2._clean_section` 里；这一刀是**全篇**上限）。
+                          # ⭐ F14-2 ④：挂错节的对照表/步骤图（标题 🎙 时间比小节早 ≥3 分钟）
+                          #    → 按时间挪回真正讲它的那一节；目标节已有同类 → 宁缺丢掉。
+                          #    放在上限那一刀**之前**：上限按讲算，挪动不改变总数。
+                          (lambda r: note_guards.retime_components(r), "组件错挂"),
                           (lambda r: note_v2.clamp_components(r), "组件上限"),
                           # ⭐ F11 ③：跨件重复闸（flow 复述本节例题步骤 ≥3 条 / 组件同名）。
                           (lambda r: note_v2.dedupe_components(r), "组件去重"),
@@ -1436,7 +1440,7 @@ class ObsidianWriter:
                     if isinstance(st, dict):
                         self._guard_counts["downgraded"] += int(st.get("downgraded") or 0)
                 elif label in ("无课件来源降级", "悬空节指路", "ASR 噪声清理",
-                               "跨节矛盾") and extra_items:
+                               "跨节矛盾", "组件错挂") and extra_items:
                     st = extra_items[0]
                     if isinstance(st, dict):
                         for k in ("repaired", "dropped", "downgraded", "flagged"):

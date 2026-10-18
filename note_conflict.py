@@ -322,10 +322,185 @@ def source_sum_group_conflicts(entries: list) -> list:
     return [{"kind": "source-self-conflict", "groups": sorted(sums), "quotes": quotes}]
 
 
+# ---- ⑩ 虚拟变量：组别 ↔ 0/1 ↔ 斜率，三方对不上 ------------------------------
+#: 组别定义两种语序：`1 表示女性` / `0 代表男性`；`女性取 1` / `男性赋值为 0`。
+_DEF_V2L = re.compile(r"(?P<v>[01])\s*(?:表示|代表|对应|指|是|＝|=)\s*(?P<label>[\u4e00-\u9fff]{2,4})")
+_DEF_L2V = re.compile(r"(?P<label>[\u4e00-\u9fff]{2,4})\s*(?:取|设|赋)\s*(?:值\s*)?(?:为|成)?\s*(?P<v>[01])")
+#: 系数式（一个系数，可跟上若干加减项）——TeX 写法 `\beta_3` 与 Unicode 写法 `β₃` 都认。
+_COEF_PAT = (r"\\?[βbB](?:eta)?[_^]?\{?[A-Za-z0-9₀-₉]*\}?"
+             r"(?:\s*[+＋\-−]\s*\\?[βbB](?:eta)?[_^]?\{?[A-Za-z0-9₀-₉]*\}?)*")
+#: 虚拟变量取值 → 斜率：`D=0 斜率 β₃` / `D=1 的斜率是 β₃+β₄`。
+_DEF_SLOPE = re.compile(r"(?P<d>[A-Za-z])\s*[=＝]\s*(?P<v>[01])\s*[^。；;，,、：:]{0,10}?"
+                        r"(?:斜率|系数)\s*[^。；;，,、：:]{0,4}?(?:是|为|＝|=)?\s*"
+                        r"(?P<expr>" + _COEF_PAT + r")")
+#: 组别 → 斜率：**组名必须已经认出来**（`女性每多一年经验增加 β₃`）。
+#: ⚠️ 不许拿 `[\u4e00-\u9fff]{2,4}` 当组名：它会把「于是女性」「男性每多」一起吞进去
+#:    （实测），组名只能来自 `_DEF_V2L`/`_DEF_L2V` 那张表。
+_SLOPE_GAP = r"[^。；;，,、：:]{0,24}?(?:增加|多|加|是|为|等于)\s*[^。；;，,、：:]{0,3}?"
+
+
+def _slope_said(text: str, label: str) -> frozenset:
+    """本节里「`label` … 增加 <系数式>」抄到的斜率（取第一处）。**纯函数。**"""
+    rx = re.compile(re.escape(label) + _SLOPE_GAP + r"(?P<expr>" + _COEF_PAT + r")")
+    m = rx.search(str(text or ""))
+    return _coef_terms(m.group("expr")) if m else frozenset()
+
+
+#: 系数式里的项（`β₃+β₄` → `{b3, b4}`）—— 比较用**项的集合**，与加法顺序无关。
+_EXPR_SPLIT = re.compile(r"\s*[+＋\-−]\s*")
+#: 系数原子：`\beta_3` / `β₃` / `β3` / `b3` 都归一成 `b3`（TeX 写法与 Unicode 写法同一件事）。
+_COEF_BODY = r"\\?[βbB](?:eta)?[_^]?\{?[A-Za-z0-9₀-₉]*\}?"
+
+
+def _norm_coef(s: str) -> str:
+    """系数符号归一：TeX 的 `\\beta_3`、Unicode 的 `β₃`、朴素的 `b3` → 同一个 `b3`。**纯函数。**"""
+    import unicodedata
+    s = unicodedata.normalize("NFKC", str(s or "")).lower()
+    s = s.replace("\\beta", "b").replace("beta", "b").replace("β", "b")
+    return re.sub(r"[\s{}\\$^_'`]", "", s)
+
+
+def _coef_terms(expr: str) -> frozenset:
+    """系数式 → 项的集合（`β₃+β₄` ≡ `β₄＋β₃` ≡ `\\beta_3+\\beta_4`）。**纯函数。**"""
+    out = set()
+    for p in _EXPR_SPLIT.split(_norm_coef(expr)):
+        if p:
+            out.add(p)
+    return frozenset(out)
+
+
+def _section_text(s: dict) -> str:
+    """一节用于**对读**的文本（式 + 讲解 + 例题 + 常见错误，顺序即阅读顺序）。"""
+    parts = [str(s.get("algebra") or ""), str(s.get("prereq_link") or ""),
+             str(s.get("prereq") or ""), str(s.get("conclusion") or ""),
+             str(s.get("intuition") or "")]
+    parts += [str(x) for x in (s.get("prose") or [])]
+    parts += [str(x) for x in (s.get("pitfalls") or [])]
+    ex = s.get("example") or {}
+    if isinstance(ex, dict):
+        parts += [str(ex.get("prompt") or ""), str(ex.get("answer") or "")]
+        parts += [str(x.get("text") if isinstance(x, dict) else x)
+                  for x in (ex.get("steps") or [])]
+    for v in (s.get("variants") or []):
+        if isinstance(v, dict):
+            parts += [str(v.get("q") or ""), str(v.get("a") or "")]
+    return "\n".join(p for p in parts if p)
+
+
+def dummy_slope_conflicts(review: dict) -> list:
+    r"""**同一节内**：虚拟变量的"哪一组是 1"与"哪一组拿哪条斜率"对不上。F14-2 #1
+
+    ⚠️ 为什么 F13 的"代数↔讲解"判据抓不到（42b9d97 实测漏掉 §17）：它按**组名**配对，
+       而这里组名只出现在**讲解**里、代数里只有 `D=0/D=1`；对应关系要**两步推理**
+       （`D=1 ⇔ 女性`，`D=1 ⇔ β₃+β₄`）才成立 —— 旧的键（组名）在代数里根本不存在。
+    ⚠️ 为什么 `source_sum_group_conflicts`（⑨b）也抓不到 §17：⑨b 只看**转录**（找"同一个
+       两项之和被安在两个组上"），不看笔记；它这次**确实报了**（warn 里那行
+       `课上口述前后不一致：female 09:34:15；男性 09:33:35`），但旧版只在**跨节**矛盾时
+       才把 ⚠ 落到正文，所以 §17 那里读者什么都没看到。
+    判据：同节里 ① 组别↔0/1 ② 0/1↔斜率式 ③ 组别↔斜率式 三张表，两两推出来的斜率
+    必须一致（按**项的集合**比，与加法顺序无关）；不一致 → 一条 `dummy-slope`。
+    """
+    out: list = []
+    for i, s in enumerate(review.get("sections") or [], 1):
+        if not isinstance(s, dict):
+            continue
+        text = _section_text(s)
+        defs: dict = {}
+        for m in _DEF_V2L.finditer(text):
+            defs.setdefault(m.group("label"), m.group("v"))
+        for m in _DEF_L2V.finditer(text):
+            defs.setdefault(m.group("label"), m.group("v"))
+        slopes: dict = {}
+        for m in _DEF_SLOPE.finditer(text):
+            slopes.setdefault(m.group("v"), _coef_terms(m.group("expr")))
+        if not defs or len(slopes) < 2:
+            continue
+        bad = []
+        for label, v in defs.items():
+            want, got = slopes.get(v), _slope_said(text, label)
+            if not want or not got or want == got:
+                continue
+            bad.append({"label": label, "v": v,
+                        "want": sorted(want), "said": sorted(got)})
+        if bad:
+            out.append({"kind": "dummy-slope", "sections": [i], "section": i,
+                        "labels": [b["label"] for b in bad], "detail": bad,
+                        "defs": defs, "slopes": {k: sorted(v) for k, v in slopes.items()},
+                        "texts": [f"{b['label']}：定义说 {','.join(b['want'])}、"
+                                  f"讲解说 {','.join(b['said'])}" for b in bad]})
+    return out
+
+
+# ---- ⑪ 例题给了一个"本节的模型式里没有的项"一个系数 -------------------------
+#: `male 的系数` / `系数 male`（例题/常见错误里的说法）。
+_NAMED_COEF = re.compile(r"(?<![A-Za-z\-])(?P<n1>[A-Za-z][A-Za-z0-9_]{1,20})\s*的(?:系数|斜率)"
+                         r"|(?:系数|斜率)\s*(?:是|为|＝|=)?\s*"
+                         r"(?<![A-Za-z\-])(?P<n2>[A-Za-z][A-Za-z0-9_]{1,20})")
+#: 模型式里的项（`β₃(male\cdot experience)` → 变量集合 `{male, experience}`）。
+_MODEL_TERM = re.compile(r"(?<![A-Za-z\-])[A-Za-z][A-Za-z0-9_]{1,20}")
+_COEF_LIKE = re.compile(r"^(?:b|beta)_?\d+$")
+
+
+def _model_summands(algebra: str) -> list:
+    """模型式 → 每个加法项的**变量集合**（系数与 TeX 标记不算变量）。**纯函数。**
+
+    ⚠️ 不许把整串先归一：`\beta_1 education` 去掉空格会粘成 `b1education`（实测把
+       `experience 的系数` 误报成"模型里没有这一项"）。逐项的**变量名**照原文抽，
+       只把每个名字单独拿去判"是不是系数"（`\beta_0`→`b0`）。
+    """
+    body = re.sub(r"\$+", " ", str(algebra or ""))
+    out = []
+    for part in re.split(r"[+＋\-−=]", body):
+        names = set()
+        for m in _MODEL_TERM.finditer(part):
+            if m.start() > 0 and part[m.start() - 1] == "\\":
+                continue                     # `\cdot` / `\beta_0`：标记，不是变量
+            if _COEF_LIKE.match(_norm_coef(m.group(0))):
+                continue
+            names.add(m.group(0).lower())
+        if names:
+            out.append(names)
+    return out
+
+
+def missing_term_conflicts(review: dict) -> list:
+    r"""例题/常见错误给某个变量"一个系数"，但本节**展示的模型式**里没有它的独立项。F14-2 #2
+
+    ⚠️ 实测（v3 busi §15）：`earnings=β₀+β₁education+β₂experience+β₃(male·experience)+u`
+       里 `male` 只**藏在乘积里**（没有主效应项），而同节的例题说「male 的系数是 −2」、
+       同节的常见错误写着「加了乘积却漏掉主效应项」—— 读者照着例题做题会找不到那个系数。
+    判据：`X 的系数` 里的 X 在本节模型式里 ① 完全没出现，**或** ② 只出现在"多于一个变量的
+    乘积"里（= 只有交互项、没有主效应）→ 一条 `missing-term`。只**标注**，不改模型。
+    """
+    out: list = []
+    for i, s in enumerate(review.get("sections") or [], 1):
+        if not isinstance(s, dict):
+            continue
+        terms = _model_summands(str(s.get("algebra") or ""))
+        if not terms:
+            continue
+        standalone = {t for grp in terms if len(grp) == 1 for t in grp}
+        in_product = {t for grp in terms if len(grp) > 1 for t in grp}
+        text = _section_text(s)
+        named: dict = {}
+        for m in _NAMED_COEF.finditer(text):
+            named.setdefault((m.group("n1") or m.group("n2")).lower(), m.group(0))
+        for name, phrase in named.items():
+            if name in standalone or _COEF_LIKE.match(name):
+                continue
+            why = ("只出现在乘积项里（没有单独的主效应项）" if name in in_product
+                   else "本节的模型式里没有这一项")
+            out.append({"kind": "missing-term", "sections": [i], "section": i,
+                        "term": name, "why": why, "texts": [phrase]})
+    return out
+
+
 def conflicts(review: dict, *, entries: list | None = None) -> list:
-    """全部跨节矛盾（守卫用的一站式入口）。**纯函数。**"""
+    """全部跨节/节内对不上的地方（守卫用的一站式入口）。**纯函数。**"""
     out = (point_value_conflicts(review)
-           + group_number_conflicts(review, entries=entries))
+           + group_number_conflicts(review, entries=entries)
+           + dummy_slope_conflicts(review)
+           + missing_term_conflicts(review))
     if entries:
         out += source_sum_group_conflicts(entries)
     return out

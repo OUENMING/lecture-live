@@ -165,6 +165,12 @@ def _norm_ctx(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+#: 段落**开头**不该是这些连接词 —— 它们回指上文；段首出现说明**上一句刚被删掉**。
+#: ⭐ F14-2 #3（作者实测）：速览首句是猜测句被删，剩下那段以「接着用 RMSE 看残差…」开头。
+_LEAD_CONNECTIVE = re.compile(r"^\s*(?:接着|然后|随后|于是|因此|所以|那么|这样|同样|另外|反之|"
+                              r"不过|但|而且|并且|同时|其次|最后|第三|第二|第四)")
+
+
 def _sentences(text: str) -> list:
     """粗切句（本仓库的笔记是短句 + 折叠块，够用；切不动的长句会整句保留）。"""
     return [x for x in re.split(r"(?<=[。！？!?])\s*|\n+", str(text or "")) if x.strip()]
@@ -193,7 +199,10 @@ def scrub(review: dict) -> tuple:
         if isinstance(q, dict):
             before[id(q)] = _one(q.get("a")) + "\x00" + _one(q.get("q"))
 
+    rescued = 0
+
     def clean(v: str, prose_like: bool, solution: bool) -> str:
+        nonlocal rescued
         kept, dropped, frag = [], [], False
         parts = _sentences(v)
         # ⚠️ 问句那一档要**成串**才动手：解答里单独一个反问是正常的写法
@@ -208,6 +217,21 @@ def scrub(review: dict) -> tuple:
                 frag = frag or bool(_FRAGMENT.search(s))
                 continue
             kept.append(s)
+        if not dropped:
+            return v
+        # ⭐ F14-2 #3：**删完不许让这一段以连接词开头**。连接词回指上文，第一句被删掉之后
+        #    从「接着…」起读，读者不知道在接什么 —— 宁可**把那一句留着**（作者：
+        #    prefer keeping the sentence），也不留一个没头没脑的段落。
+        for _ in range(3):
+            body = "".join(kept).strip()
+            if not dropped or not _LEAD_CONNECTIVE.match(body):
+                break
+            first = next((x for x in parts if x in dropped), None)
+            if first is None:
+                break
+            kept.insert(0, first)
+            dropped.remove(first)
+            rescued += 1
         if not dropped:
             return v
         removed.extend(dropped)
@@ -278,6 +302,9 @@ def scrub(review: dict) -> tuple:
     if removed:
         warns.append(f"正文删掉 {len(removed)} 处猜测句/自言自语"
                      "（不许第一人称、不许猜过程、不许自己跟自己讨论）")
+    if rescued:
+        warns.append(f"{rescued} 处删句后会让段落以连接词开头 → 保留了原句"
+                     "（宁可留着，也不留没头没脑的段落）")
     if gone:
         warns.append(f"{gone} 道题的答案被清空 → 整题不出（宁缺）")
     # ⭐ F9c：宁缺丢掉的题块也要进守卫台账 —— 返回值里带小标记（长度=被删处数，
@@ -1067,9 +1094,75 @@ def _find_and_append(s: dict, needle: str, mark: str) -> bool:
     return False
 
 
+def _beta(tok: str) -> str:
+    """归一后的系数名 → 给人看的写法（`b3` → `β₃`；认不出就原样）。**纯函数。**"""
+    m = re.fullmatch(r"b(\d+)", str(tok or ""))
+    if not m:
+        return str(tok)
+    return "β" + "".join("₀₁₂₃₄₅₆₇₈₉"[int(d)] for d in m.group(1)) \
+        if all(d.isdigit() for d in m.group(1)) else "β" + m.group(1)
+
+
 def _snip(t: str, n: int = 46) -> str:
     s = re.sub(r"\s+", "", str(t or ""))
     return (s[:n] + "…") if len(s) > n else s
+
+
+# ---- F14-2 ④ 组件挂错节（对照表/步骤图的时间与它挂的那一节对不上）----------------
+#: 组件标题里的 🎙 时刻：`🎙 三种模型评估指标（09:07–09:10）`。
+_TITLE_TIME = re.compile(r"(\d{1,2}):(\d{2})(?::(\d{2}))?")
+#: 判定"挂错"的余量（分钟）：组件讲的时刻比所挂小节**早**这么多以上 → 挂错了。
+COMPONENT_LAG_MIN = 3
+
+
+def retime_components(review: dict) -> tuple:
+    """对照表/步骤图挂错小节时，按**时间**挪到真正讲它的那一节。F14-2 ④
+
+    ⚠️ 作者实测（v3 busi §7，ts=09:13）：那一节挂着「🎙 三种模型评估指标（09:07–09:10）」——
+       整张表讲的是 09:07–09:10，挂到了 6 分钟后的节里；读者会以为它是这节的内容。
+    判据（只看时间，不看内容 —— 域中立）：标题里的 🎙 起点比所挂小节的 ts **早
+    `COMPONENT_LAG_MIN` 分钟以上** → 找 ts ≤ 组件起点的那一节（取最晚的）搬过去；
+    目标节已有同类组件（一节只放一张对照表/一张步骤图）→ 宁缺丢掉，并记账。
+    返回 `(review, [{"repaired": n, "dropped": m}], warns)`。
+    """
+    out = copy.deepcopy(review)
+    secs = [s for s in (out.get("sections") or []) if isinstance(s, dict)]
+    if len(secs) < 2:
+        return review, [], []
+    ts = [_hms(s.get("ts")) for s in secs]
+    moved: list = []
+    gone: list = []
+    for i, s in enumerate(secs):
+        for key in ("compare", "flow"):
+            comp = s.get(key)
+            if not isinstance(comp, dict):
+                continue
+            t = _TITLE_TIME.search(str(comp.get("title") or ""))
+            if not t or ts[i] is None:
+                continue
+            start = int(t.group(1)) * 3600 + int(t.group(2)) * 60
+            if start >= ts[i] - COMPONENT_LAG_MIN * 60:
+                continue                      # 时间对得上（或组件讲的是本节之后）→ 不动
+            cands = [j for j in range(len(secs))
+                     if ts[j] is not None and ts[j] <= start and j != i]
+            if not cands:
+                cands = [0]
+            target = max(cands, key=lambda j: ts[j] or 0)
+            if secs[target].get(key):
+                s.pop(key, None)              # 目标节已经有同类组件 → 宁缺
+                gone.append(f"{key}「{_one(str(comp.get('title')))[:20]}」")
+                continue
+            secs[i].pop(key, None)
+            secs[target][key] = comp
+            moved.append(f"{key}「{_one(str(comp.get('title')))[:20]}」"
+                         f"§{i + 1}→§{target + 1}")
+    bits = []
+    if moved:
+        bits.append(f"{len(moved)} 个组件挂错了节，已按时间挪回：" + "、".join(moved[:3]))
+    if gone:
+        bits.append(f"{len(gone)} 个挂错且目标节已有同类 → 宁缺丢掉：" + "、".join(gone[:3]))
+    warns = ["组件错挂：" + "；".join(bits)] if bits else []
+    return out, [{"repaired": len(moved), "dropped": len(gone)}], warns
 
 
 def flag_conflicts(review: dict, *, entries: list | None = None) -> tuple:
@@ -1102,6 +1195,25 @@ def flag_conflicts(review: dict, *, entries: list | None = None) -> tuple:
         if c["kind"] == "source-self-conflict":
             continue
         kind = c["kind"]
+        if kind in ("dummy-slope", "missing-term"):
+            # ⭐ F14-2 ⑩⑪：**本节自己**的式与讲解对不上（不是跨节）。
+            #    ⚠ 要落在**讲解那句**上（读者先读到的就是它）。
+            j = c["sections"][-1]
+            later = secs[j - 1]
+            if kind == "dummy-slope":
+                first = c["detail"][0]
+                mark = (f"（⚠ 本节自己的定义与讲解对不上：按「{first['label']}="
+                        f"{first['v']}」该是 {'+'.join(_beta(t) for t in first['want'])}，"
+                        f"讲解却说 {'+'.join(_beta(t) for t in first['said'])}{src_note}）")
+                needle = first["label"]
+            else:
+                mark = (f"（⚠ 本节模型式里 {c['term']} {c['why']}，"
+                        f"例题却给它一个系数{src_note}）")
+                needle = c["texts"][0]
+            if _find_and_append(later, needle, mark):
+                n += 1
+                details.append(f"§{j}（{kind}：{c.get('labels') or c.get('term')}）")
+            continue
         i, j = c["sections"]
         later = secs[j - 1]
         title = _ref_title(secs[i - 1])

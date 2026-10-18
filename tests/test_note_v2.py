@@ -2090,5 +2090,22 @@ class F12VerdictWiring(unittest.TestCase):
         self.assertTrue([r for r in rows if r.get("status") == "mismatch"])
 
 
+class TermGlossNoDup(unittest.TestCase):
+    """F14-2 #5：术语括注不许叠第二个 —— `方差分析模型（ANOVA）` 实测被插成
+    `方差分析（ANOVA）模型（ANOVA）`（括注在**几个字之后**，紧跟一个字符的判据看不见）。"""
+
+    def test_括注在几个字之后就不许再插(self):
+        got = nv.announce_terms("只放虚拟变量的回归叫方差分析模型（ANOVA）；另一种叫协方差分析模型。",
+                                [("方差分析", "ANOVA"), ("协方差分析", "ANCOVA")], set())
+        self.assertNotIn("方差分析（ANOVA）模型（ANOVA）", got)
+        self.assertIn("方差分析模型（ANOVA）", got)
+
+    def test_没有任何括注时照旧插一次(self):
+        got = nv.announce_terms("只放虚拟变量的回归叫方差分析，另一种叫协方差分析。",
+                                [("方差分析", "ANOVA"), ("协方差分析", "ANCOVA")], set())
+        self.assertIn("方差分析（ANOVA）", got)
+        self.assertIn("协方差分析（ANCOVA）", got)
+
+
 if __name__ == "__main__":
     unittest.main()

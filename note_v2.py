@@ -2356,9 +2356,22 @@ def announce_terms(text: str, terms, seen: set) -> str:
                 continue
             seen.add((zh, en))
             continue
+        # ⭐ F14-2 #5：括注可能落在**几个字之后**（中文语序反过来）：
+        #    `方差分析模型（ANOVA）` —— 紧跟一个字符的判据看不见它，再插一次就成了
+        #    `方差分析（ANOVA）模型（ANOVA）`（作者实测）。窗口内已有同一个英文括注
+        #    就算"已经括注过"，不再叠第二个。
+        m2 = re.match(r"^[^（(]{0,6}[（(]([^）)]{1,60})[）)]", out[i + len(zh):])
+        if m2 and _same_en(m2.group(1), en):
+            seen.add((zh, en))
+            continue
         out = out[:i] + f"{zh}（{en}）" + out[i + len(zh):]
         seen.add((zh, en))
     return out
+
+
+def _same_en(inner: str, en: str) -> bool:
+    """括注里的写法与术语表的英文是不是同一个词（大小写/空格不论）。**纯函数。**"""
+    return _one_line(inner).lower() == _one_line(en).lower()
 
 
 def canon_en(zh: str, canon) -> str:

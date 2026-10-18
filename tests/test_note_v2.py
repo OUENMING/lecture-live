@@ -1467,7 +1467,6 @@ class DedupeF11(unittest.TestCase):
 
 class GuardLedgerF11(unittest.TestCase):
     """⭐ F11 §3：静默降级的计数要进守卫台账行（`downgraded N`）。"""
-
     def test_降级计数进了台账(self):
         import pathlib
         src = (pathlib.Path(__file__).resolve().parent.parent
@@ -1641,6 +1640,35 @@ class F9cPromptRotation(unittest.TestCase):
         got = nv._caliber_block(_Mat())
         self.assertIn("停产价格", got)
         self.assertIn("📖 2025-12 期末卷", got, "注入的口径要带本课材料的出处")
+
+
+class F11Budgets(unittest.TestCase):
+    """⭐ F11-9：思考 low 档下，笔记那几类调用改用 `*_MAX_TOKENS_THINKING`（实测预算）。"""
+
+    def test_思考预算不小于旧口径_review覆盖实测(self):
+        # 实测最大：content≈3964 + reasoning 4483（合计 7943）→ review 预算要 ≥ 8192。
+        self.assertGreaterEqual(nv.REVIEW_MAX_TOKENS_THINKING, 8192)
+        # 每类都要 ≥ 实测完成量（content+reasoning）；这里按观测值逐个卡。
+        measured = {"REVIEW_MAX_TOKENS_THINKING": 7943, "REPAIR_MAX_TOKENS_THINKING": 2332,
+                    "VERIFY_MAX_TOKENS_THINKING": 532, "OVERVIEW_MAX_TOKENS_THINKING": 223,
+                    "SHORTEN_MAX_TOKENS_THINKING": 2500}
+        for const, need in measured.items():
+            self.assertGreaterEqual(getattr(nv, const), need, const)
+
+    def test_函数默认用思考预算(self):
+        import inspect
+        for fn, const in ((nv.review, "REVIEW_MAX_TOKENS_THINKING"),
+                          (nv.repair_exercises, "REPAIR_MAX_TOKENS_THINKING"),
+                          (nv.verify_numbers, "VERIFY_MAX_TOKENS_THINKING"),
+                          (nv.overview, "OVERVIEW_MAX_TOKENS_THINKING"),
+                          (nv.shorten_overlimit, "SHORTEN_MAX_TOKENS_THINKING")):
+            self.assertEqual(inspect.signature(fn).parameters["max_tokens"].default,
+                             getattr(nv, const), fn.__name__)
+
+    def test_align仍用关思考预算(self):
+        import inspect
+        self.assertEqual(inspect.signature(nv.align).parameters["max_tokens"].default,
+                         nv.ALIGN_MAX_TOKENS)
 
 
 if __name__ == "__main__":

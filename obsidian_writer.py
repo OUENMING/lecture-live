@@ -1107,8 +1107,8 @@ class ObsidianWriter:
         """同 `_chat`，但**关思考** —— 只给 `align`（覆盖度/课件核对）。
 
         ⚠️ F11 §0 实测（SOC10020 真跑）：align 的输出是**长列表**（covered / not_covered），
-        开思考时推理 token 把 4096 的口径吃光 → `Unterminated string` 截断 → 那一栏空。
-        它对"想清楚"没有增益，关掉。（其余笔记生成调用仍走 low 档。）
+        开思考时推理 token 把每一类的口径吃光（旧的 2000 预算）→ `Unterminated string`
+        截断 → 那一栏空。它对"想清楚"没有增益，关掉。（其余笔记生成调用仍走 low 档。）
         """
         import llm_client
         obj = llm_client.chat_json(self._key, self._model, system, user,

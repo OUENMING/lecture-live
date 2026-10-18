@@ -246,6 +246,13 @@ class T(unittest.TestCase):
                 if p.name != "llm_client.py" and "api.deepseek.com" in p.read_text(encoding="utf-8")]
         self.assertEqual(hits, [], "DeepSeek 地址只许在 llm_client.py 里出现")
 
+    def test_docstring记的是真实的上限(self):
+        """⭐ F11-9：不许再写死"压到 4096"（Worker 现为 8192，commit 0335853）。"""
+        src = (HERE / "llm_client.py").read_text(encoding="utf-8")
+        self.assertNotIn("压到 4096", src)
+        self.assertNotIn("4096 时 content", src)
+        self.assertIn("8192", src, "该记下真实的 Worker 上限 8192")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

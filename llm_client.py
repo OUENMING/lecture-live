@@ -58,11 +58,14 @@ def chat_json(key: str, model: str, system: str, user: str, *, max_tokens: int,
        `reasoning_effort` ∈ low/high/max；思考模式下 `temperature` 被忽略，故不发；
        推理只从 `message.reasoning_content` 回来，**绝不进笔记**）。
        其余调用方（翻译 / 实时摘要 / 分类 / 术语查询）**不传** → 现状逐字不变（思考关闭）。
-    ⚠️ **截断自动降级**（F11 §0 实测）：通行码走 Worker 时 `max_tokens` 被压到 4096
-       （`handler.js` 的 `LLM_MAX_TOKENS`），而思考的推理 token **计入** `completion_tokens`
-       —— 真 review 块实测 `max_tokens=4096` 时 `finish_reason=length`、`content` 空
-       （推理吃掉全部 4096，整块丢）。所以带 `effort` 的调用一旦收到 `length`，
-       **同一次重来、关掉思考**再取结果：笔记照常，不丢块（Worker 上限提上去后这条极少触发）。
+    ⚠️ **截断自动降级**（F11 §0 实测）：思考的推理 token **计入** `completion_tokens` ——
+       真 review 块实测 `max_tokens=6000` 时 `finish_reason=length`、`content` 被截
+       （推理吃掉大半预算，整块 JSON 解析失败）。所以带 `effort` 的调用一旦收到 `length`，
+       **同一次重来、关掉思考**再取结果：笔记照常，不丢块。
+    ⚠️ Worker（通行码）的对话输出上限是 **8192**（`handler.js` 的 `LLM_MAX_TOKENS`，
+       commit `0335853` 2026-10-18 已部署）。**截断的真正来源是我们的 per-call 预算**
+       （旧 REVIEW 6000 / REPAIR 3000 / VERIFY 2500 / OVERVIEW 3500 / SHORTEN 2500 偏小），
+       不是 Worker —— F11-9 已把笔记那几类调成 `*_MAX_TOKENS_THINKING`（见 `note_v2`）。
     """
     import httpx
 
@@ -85,7 +88,7 @@ def chat_json(key: str, model: str, system: str, user: str, *, max_tokens: int,
 
     choice, finish = _once(effort)
     if effort and finish == "length":
-        # 思考把 token 吃光（实测通行码 4096 时 content 为空）→ 关思考重来一次。
+        # 思考把 token 吃光（实测 review 块：推理吃掉大半预算 → content 被截）→ 关思考重来一次。
         choice, finish = _once(None)
     content = choice["message"]["content"]
     obj = json.loads(content)

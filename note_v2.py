@@ -34,10 +34,18 @@ import re
 
 REVIEW_CHUNK = 70           # 每块喂多少句（同旧版：块太大 JSON 会被截断）
 REVIEW_WORKERS = 5
-REVIEW_MAX_TOKENS = 6000    # v2 每块输出更长（讲解 + 例题 + 变式）—— 实测取值见 out/ 那份验收笔记
-#: 版式 A（2026-10-18）每块还多输出 q/cues/conclusion/algebra/intuition；
-#: 实测首试 6000 偶有截断、退避档 9000 被接受且够用（基线一次重试成功、failed 全空）——
-#: 把 9000 留给退避，不把第一档顶上去（那会把退避推到没实测过的 12k 以上）。
+REVIEW_MAX_TOKENS = 6000    # 关思考时的每块上限（旧口径，保留）
+# ⭐ F11-9：**思考 low 档**的每类预算 —— 实测（test key，7 次真调用）：
+#   review 块最大 content≈3964 / reasoning=4483（合计 7943，逼近 Worker 的 8192）；
+#   repair content≈403 / reasoning=1929；verify 532；overview 223。
+# 提案 = max(content) + max(reasoning)×1.5，向上取整到千：
+REVIEW_MAX_TOKENS_THINKING = 11000   # 3964 + 4483×1.5 ≈ 10689
+REPAIR_MAX_TOKENS_THINKING = 4000    # 403 + 1929×1.5 ≈ 3297
+VERIFY_MAX_TOKENS_THINKING = 2000    # 365 + 167×1.5 ≈ 616
+OVERVIEW_MAX_TOKENS_THINKING = 1500  # 91 + 132×1.5 ≈ 289
+SHORTEN_MAX_TOKENS_THINKING = 4000   # 未单独实测（输出≈一节的压缩）；按 review 比例保守给
+# ⚠️ Worker（通行码）输出上限 8192（commit 0335853）；提案里 review 要 11000 → **Worker 需再抬到 11000+**。
+#    在那之前，客户端发 11000 会被 Worker 压到 8192（仍是比旧 6000 好的口径）。
 ALIGN_MAX_TOKENS = 2000
 VERIFY_MAX_TOKENS = 2500
 
@@ -995,7 +1003,7 @@ def speedout_max_chars(minutes: float) -> int:
 
 
 def overview(review_data: dict, *, chat, chat_meta=None,
-             max_tokens: int = OVERVIEW_MAX_TOKENS,
+             max_tokens: int = OVERVIEW_MAX_TOKENS_THINKING,
              max_chars: int = 220) -> dict:
     """概念单元 → 开头的「速览」（**一次小调用**，输入只有标题/问题/结论）。
 
@@ -1124,7 +1132,7 @@ def _transcript_window(entries: list | None, sec: dict, *, limit: int = 2800) ->
 
 def repair_exercises(review: dict, *, chat, entries: list | None = None,
                      flags: list | None = None,
-                     max_tokens: int = REPAIR_MAX_TOKENS) -> tuple:
+                     max_tokens: int = REPAIR_MAX_TOKENS_THINKING) -> tuple:
     """题块被机械核判错 → **每节一次**返修；复检仍错 → 撤掉题块（F8-b/c，作者点名）。
 
     触发（确定性）：对每一节单跑 `note_math.check_review`，`mismatch` 行且
@@ -1442,7 +1450,7 @@ SHORTEN_SYS = """你在做一件事：把一节笔记的「讲解」压到字数
 
 
 def shorten_overlimit(review: dict, *, chat, ratio: float = SHORTEN_RATIO,
-                      max_tokens: int = SHORTEN_MAX_TOKENS,
+                      max_tokens: int = SHORTEN_MAX_TOKENS_THINKING,
                       max_calls: int = SHORTEN_MAX_CALLS) -> tuple:
     """超上限 >`ratio`（1.5×）的单元做**一次**压缩调用（只改 `prose`；F7-f 收紧）。
 
@@ -1489,7 +1497,7 @@ def _user_content(lines: list, *, domain: str = "", materials_block: str = "",
 
 def review(entries: list, *, chat, domain: str = "", materials=None,
            on_progress=None, workers: int = REVIEW_WORKERS,
-           max_tokens: int = REVIEW_MAX_TOKENS, extra: str = "",
+           max_tokens: int = REVIEW_MAX_TOKENS_THINKING, extra: str = "",
            skeleton: list | None = None) -> dict:
     """分块调 LLM → 合并。`chat(system, user, max_tokens) -> dict`。
 
@@ -1884,7 +1892,7 @@ def cap_model_rows(rows: list, review_data: dict, *, llm: bool = False) -> list:
 
 
 def verify_numbers(review_data: dict, *, chat, materials=None,
-                   transcript: str = "", max_tokens: int = VERIFY_MAX_TOKENS,
+                   transcript: str = "", max_tokens: int = VERIFY_MAX_TOKENS_THINKING,
                    exercise_flags: list | None = None) -> list:
     """数字/公式第三道核（1 次调用）→ 规范化后的 `checks` 列表（不是 dict）。
 

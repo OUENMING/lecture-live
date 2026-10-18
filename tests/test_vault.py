@@ -346,7 +346,9 @@ def _case_outline_wiring():
         i_oc = out.index("## 📑 课堂纲要")
         i_kc = out.index("## 本课术语")
         assert i_ov < i_oc < i_kc, f"位置错了：速览@{i_ov} 纲要@{i_oc} 术语@{i_kc}"
-        assert "### Deadlines · 课务" in out
+        # ⚠️ 2026-10-17：「Deadlines · 课务」改名为「一些事儿」（作者拍板；
+        #    同一节，只是标题与过滤来源换了 —— 见 `obsidian_writer._duty_section_md`）。
+        assert "### 一些事儿" in out
         assert "### 从GDP到GNI（" in out
         assert "中文一。" in out
 

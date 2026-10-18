@@ -753,7 +753,8 @@ def main() -> int:
           E.Handles._fields == ("window", "close", "refresh", "set_status",
                                 "start_batch", "search", "add_course",
                                 "import_timetable",
-                                "delete_course", "start_classify"),
+                                "delete_course", "start_classify",
+                                "focus_fields"),
           f"实际 {E.Handles._fields}")
 
     print("\n--- ⑰ 导入课表（拖 `.ics` 进来）---")

@@ -412,6 +412,10 @@ def main() -> int:
             check("带 `source=regex` / `changed=False` / `src=[1]`",
                   bool(ds) and ds[0]["source"] == "regex"
                   and ds[0]["changed"] is False and ds[0]["src"] == [1], str(ds))
+            # ⭐ 2026-10-17：卡片/小卡的标题是**中文摘要** —— 正则路径把**已经在手边**
+            #    的那句即时译文一路带下去（零额外调用）。
+            check("⭐ `zh` 跟着下来（中文摘要用它）",
+                  bool(ds) and ds[0].get("zh") == "期中作业下周五截止", str(ds))
         with tempfile.TemporaryDirectory() as d:
             s, emits, _ = make(d, ["A"])
             s.feed((1, "10:00:00", "We pushed the deadline to Wednesday.", "我们把截止推到周三"))
@@ -878,7 +882,7 @@ def main() -> int:
                 if sysp is atom.SYS:
                     return {"topic": "A", "topic_zh": "",
                             "points": [{"text": "The essay is due Friday.", "kind": "课务",
-                                        "src": [0], "terms": []}]}
+                                        "src": [0], "terms": [], "zh": "论文周五截止"}]}
                 return {"title": "T", "title_zh": "", "sentences": []}
 
             _s = L.LiveSummarizer(
@@ -904,6 +908,9 @@ def main() -> int:
             r, s = _mk_gate_case(lambda t: L.DEADLINE_MIN_P + 0.01, d)
             check("⭐⭐ 高于阈值 -> 报", len(r) == 1 and s.gate_calls == 1,
                   f"报了 {len(r)} 条")
+            # ⭐ 2026-10-17：模型路径的中文摘要 = `Atom.zh`（**这次调用本来就给的中文**）。
+            check("⭐ 模型路径的 `zh`（`Atom.zh`）也跟着 payload 下来",
+                  bool(r) and r[0].get("zh") == "论文周五截止", str(r))
         with tempfile.TemporaryDirectory() as d:
             def _boom(t):
                 raise RuntimeError("jev 挂了")

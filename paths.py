@@ -350,3 +350,27 @@ def install_id(*, root=None) -> pathlib.Path:
     只是随机串，不含任何个人信息；删了会重新生成。
     """
     return _root(root) / "install-id"
+
+
+def duty_backup(*, root=None) -> pathlib.Path:
+    """「一些事儿」写不进提醒事项时的**本地备份** —— `~/.classlive/duty-backup.jsonl`。
+
+    ⚠️ 为什么必须有（而不是只把失败写在卡上）：写提醒事项要过系统的**自动化授权**
+       （`tell application "Reminders"`）—— 首次会弹窗，拒绝 / 超时都算失败。
+       那时**用户已经点了「记下」**，条目绝不能因为一次授权没点就消失。
+       → 卡片上写明失败原因，条目落这里；成功的那条**不写**（它已经在提醒事项里）。
+    ⚠️ 只追加、只失败时写（同 `.lost.jsonl` 的纪律：文件不删、是证据）。
+    """
+    return _root(root) / "duty-backup.jsonl"
+
+
+def recap_state(course: str, *, root=None) -> pathlib.Path:
+    """「课前回顾」的**上一节产物** —— `~/.classlive/courses/<课号>/recap.json`。
+
+    ⚠️ **按课存，不按会话存**：它要活到**下一节同一门课**（开课时直接读），
+       跟 `sessions/` 那种一节课一份的东西不是一类。放 `sessions/` 里就等于
+       每次开课都要扫目录猜"上次是哪一节"。
+    ⚠️ 形状与写入点见 `recap` 模块头；这里只定义路径。
+    """
+    return course_dir(course, root=root) / "recap.json"
+

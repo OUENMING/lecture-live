@@ -39,6 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import stream_metrics as M          # noqa: E402
 import stream_eval as SE            # noqa: E402
+import feature_usage as FU          # noqa: E402
 
 
 # ---------------------------------------------------------------- 读事件
@@ -249,6 +250,8 @@ def pool_sweeps(res_list) -> dict:
     res: dict = {"meta": meta, "sweep": out, "pooled": True,
                  "hallucination_candidates": [dict(c, source=s) for r, s in zip(res_list, srcs)
                                               for c in r.get("hallucination_candidates") or []],
+                 # ⭐ 功能使用度：多节课**先加计数**（同上面那条规矩，不是对次数取平均）。
+                 "feature_usage": FU.merge([r.get("feature_usage") for r in res_list]),
                  "warnings": [f"[{s}] {w}" for r, s in zip(res_list, srcs)
                               for w in r.get("warnings") or []]}
     sums = [dict(r["summary"], source=s) for r, s in zip(res_list, srcs) if r.get("summary")]
@@ -470,6 +473,15 @@ def render(res: dict) -> str:
     if rp:
         lines.append("")
         lines.extend(_region_probe_lines(rp))
+    # ⭐ 功能使用度：老文件 / 没开测试模式的课上**一条都没有** —— 那一行说明白，
+    #    别让人把"没采到"读成"没用过"（`n_events == 0` 时只打一行）。
+    fu = res.get("feature_usage") or {}
+    lines.append("")
+    lines.append("功能使用（测试模式）")
+    if fu.get("n_events"):
+        lines.extend(FU.lines(fu))
+    else:
+        lines.append("  —（这份文件里没有功能事件：老文件，或这节课没开测试模式）")
     for w in res.get("warnings") or []:
         lines.append("")
         lines.append(f"⚠️ {w}")
@@ -506,6 +518,10 @@ def build_report(path, *, ref=None, ks=DEFAULT_KS, want_disagreement=False,
         "hallucination_candidates": hallucination_candidates(utts),
         "region_probe": region_probe_event(events),
         "warnings": warns,
+        # ⭐ 功能使用度（作者 2026-10-17）：**只记动作与计数，不记任何文本**。
+        #    ⚠️ 从同一份事件流里数出来的（口径在 `feature_usage.py`）；
+        #       老文件里没有这些事件 → 全零的块，`render()` 那边不会炸。
+        "feature_usage": FU.block(events),
     }
     summ = [e for e in events if e.get("kind") == "summary"]
     if summ:

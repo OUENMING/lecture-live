@@ -439,6 +439,17 @@ def _measure_text_h(text: str, width: float, font) -> float:
         NSMakeSize(width, 1e7), NSStringDrawingUsesLineFragmentOrigin).size.height
 
 
+def _measure_attr_h(attr, width: float) -> float:
+    """**属性串**按宽度折行后的实测高度（px）。`_measure_text_h` 的属性串版。
+
+    ⚠️ 为什么单开一个：知识点那种「一段话两种字重」用的是 `NSMutableAttributedString`，
+       拿它去问单字体版会按纯文字量（字重不同 → 折行点不同 → 卡片高度会差一行）。
+    """
+    from AppKit import NSMakeSize, NSStringDrawingUsesLineFragmentOrigin
+    return attr.boundingRectWithSize_options_(
+        NSMakeSize(width, 1e7), NSStringDrawingUsesLineFragmentOrigin).size.height
+
+
 def _text_width(text: str, font) -> float:
     """单行排版宽度(px), AppKit 实测。"""
     from AppKit import NSAttributedString, NSFontAttributeName
@@ -638,6 +649,159 @@ def edge_tab_frame(win, vis) -> tuple[tuple[float, float], tuple[float, float], 
 #: ⚠️ 低于它时标签和点击区**一起隐藏** —— 半个标题比没有标题更让人分心，
 #:    而且点击区太小会变成"点不中"的挫败源。
 CHAPTER_MIN_W = 90.0
+
+# ---- 一些事儿 / 课前回顾（2026-10-17，原型 proto_duty / proto_recap 已拍板）----
+#: 角落小卡：压在**最上面那条旧字幕**上（旧行正在滚走，覆盖代价最小；绝不压正在变的两行）。
+CHIP_H = 22.0
+CHIP_GAP = 4.0                    # 与转录区顶边的距离
+#: ⭐ 小卡的两个亮度档（作者 2026-10-17：「新条目到达时亮起，约 8 秒没人理就自动降到
+#: 低亮度（不消失，仍可点），再来新条目重新亮起；全部处理完淡出」）。
+#: ⚠️ 低亮度**不是消失**：小卡是「一些事儿」唯一的常驻入口，暗到看不清等于把人关在外面 ——
+#:    0.55 是磨砂上小字的最低可读档（调研 §⑥ 那张实测 α 表，见 ui-research.md）。
+CHIP_ALPHA_HOT = 0.92
+CHIP_ALPHA_DIM = 0.55
+
+
+def chip_alpha(now: float, hot_until: float) -> float:
+    """小卡此刻该多亮（**纯函数** = 这条策略的唯一定义点）。
+
+    亮过 `hot_until` → 低亮度档；否则亮档。**永远 > 0**：降到低亮度不等于收起。
+    """
+    return CHIP_ALPHA_HOT if now < hot_until else CHIP_ALPHA_DIM
+
+
+def chip_pending_ids(items) -> set:
+    """待处理条目的 id 集合（纯函数）—— 与小卡上那行字无关，只数**没处理的**。"""
+    return {str(x.get("id") or "") for x in (items or ())
+            if isinstance(x, dict) and x.get("action") == "pending"} - {""}
+
+
+def chip_new_pending(prev, items) -> bool:
+    """有没有**新**的待处理条目（纯函数）：小卡据此重新亮起（`_chip_lit`）。
+
+    ⚠️ 判据是 **id 集合的差**，不是那行字变了没有 —— 两条标题一模一样的课务
+       （`+1` 的计数又没跨过 `limit`）不该让第二件事悄悄暗着。
+    """
+    return bool(chip_pending_ids(items) - set(prev or ()))
+#: 卡片（接管转录区的那块）的内边距与排版。
+CARD_PAD = 14.0
+CARD_TITLE_SZ = 13.0
+CARD_SUB_SZ = 10.5
+CARD_TEXT_SZ = 12.5
+CARD_META_SZ = 10.5
+#: ⭐ 卡片里**所有**按钮 / 胶囊：高度、左右内边距、字号（作者 2026-10-17 定的口径）。
+#: 为什么 28：macOS 的**标准控件高度就是 28**（HIG 的 regular control size），
+#: 而作者还要「命中区 ≥28」—— 可见胶囊 = 命中区 = 28，一处都不用猜。
+CARD_BTN_H = 28.0
+CARD_BTN_PAD_X = 10.0            # 胶囊里的左右留白（作者：≥10pt，判据直接量它）
+CARD_BTN_FONT = 12.5
+#: role → `(填充, 描边, 字色, 字重)` —— **全 app 按钮 / 胶囊的唯一配色表**。
+#: `primary` = 有底的胶囊（记下）；`secondary` = ghost；`plain` = 纯文字；
+#: `chip-on / chip-off` = 类型胶囊的两档（选中态用 **primary 的填充**，不只是描边）。
+BTN_STYLE = {
+    "primary":   (0.19, 0.36, 0.98, 0.23),
+    "secondary": (0.05, 0.13, 0.66, None),
+    "plain":     (0.00, 0.00, 0.55, None),
+    "chip-on":   (0.19, 0.36, 0.98, 0.23),
+    "chip-off":  (0.03, 0.09, 0.62, None),
+}
+#: 字重 Medium（0.23）—— 「主按钮比次按钮明显」靠填充与字重，不靠放大字号。
+BTN_WEIGHT_MED = 0.23
+
+CARD_ROW_H = 24.0                 # 老口径（只剩 `CARD_FOOTER_H` 还引用它，见下）
+CARD_BLOCK_GAP = 6.0
+CARD_LINE_SZ = 17.0               # 卡片正文实测一行高（12.5pt ≈ 15px + 余量）
+#: 卡片底部给按钮留的高度（**永远钉在底部** —— 裁掉出口等于把人关在卡片里）。
+#: = 胶囊高 + 上下各 4pt（按钮行本身还要 2pt 的块间距）。
+CARD_FOOTER_H = CARD_BTN_H + 8.0
+#: 同一行相邻两颗按钮之间的间距（作者：统一 8pt）。
+CARD_BTN_GAP = 8.0
+#: 收尾汇总一行的行高（标题 + 原话一行小字）。
+CARD_DUTY_ROW_H = 34.0
+#: 卡片最多显示几条（点开逐条看的设计：一屏一条，其余进收尾汇总）。
+CARD_POINTS_MAX = 6
+CARD_STARS_MAX = 3
+CARD_OPEN_MAX = 2
+CARD_DUTY_MAX = 3
+
+#: ⭐ 「上卡下字幕」（作者 2026-10-17 拍板，评估了外部意见「卡片下方 160pt 空毛玻璃」）：
+#: 卡片钉在转录区**顶边**、字幕在它下面继续滚（原来卡片占了整窗、课上改卡片就看不到字幕）。
+#: 这三个常数是那条规矩的全部数字（几何判据直接量它们，见 `test_duty_card_ui`）。
+CARD_SUB_GAP = 10.0               # 卡片底 → 字幕区顶 的间距
+CARD_SUB_ROWS_MIN = 2             # 卡片下方**至少**留几行字幕（× 当前 `_row_h`）
+CARD_MAX_FRAC = 0.60              # 卡片最高占转录区的比例（超过就**卡片内部滚动**）
+CARD_MIN_H = 96.0                 # 卡片绝对下限（极端小窗时别压成一条线）
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 卡片视觉 —— **方案 A（零色相极简）**，作者 2026-10-17 拍板（B「跟随系统强调色」不做）。
+#
+# 依据（Apple HIG materials / buttons / color + 三个同类 app 的做法，全文见
+# `scratchpad/recap/ui-research.md`）：
+#   · 层次**只用字的白 alpha 与一道发丝边**表达 —— 不铺深色底块、不用实心大白块。
+#     磨砂上「一屏一块深色」是 thick 材质的语义（压住底图），卡片只是面板里的一区。
+#   · 一屏 1–2 个 primary；主按钮要有**看得见的底**（作者定的 0.18–0.20），
+#     次按钮 ghost（极轻的底 + 一道边），第三档是纯文字。
+#   · 小字（10.5–11pt）alpha **≥ 0.55** —— 磨砂上的可读下限（ui-research §⑥ 那张 α 表）。
+# ══════════════════════════════════════════════════════════════════════════════
+CARD_HAIRLINE = 0.07             # 卡片容器：只有这一道边（不再填深色底）
+CARD_LABEL_ALPHA = 0.70          # 分区标题（作者 2026-10-17：与正文太接近 → 提一档）
+CARD_LABEL_SZ = 12.5             # 分区标题字号（它要**比正文大**才立得住层级）
+CARD_LABEL_WT = 0.30             # 分区标题字重 Semibold（正文 Regular / 知识点名 Medium）
+CARD_LABEL_GAP = 6.0             # 分区标题之上多留一点空 —— 分组靠间距，不靠色块
+CARD_META_ALPHA = 0.56           # 元信息 / 副标题
+
+#: 输入框：外壳高 = 按钮高（同一行才齐），左右内边距 8pt，日期框按内容定宽。
+FIELD_FILL = 0.035
+#: 外壳描边那两档 α —— **不在这里另起数字**：就是 panel 那套聚焦指示的两档
+#: （静止 / 聚焦），见 `panel.FOCUS_RING_IDLE` / `panel.FOCUS_RING_ON`。
+FIELD_BORDER = panel.FOCUS_RING_IDLE
+FIELD_BORDER_FOCUS = panel.FOCUS_RING_ON
+FIELD_RADIUS = 8.0
+#: 输入框左右内边距。⭐ 作者 2026-10-17：要**跟上面类型胶囊的文字左缘对齐**。
+#: ⚠️ 为什么是 8 而不是胶囊的 10：两条渲染路径的**墨迹**起点不一样 ——
+#:    胶囊（NSButton，居中段落）居中算的是**墨迹**，文字左缘落在 frame.x + 10.45；
+#:    输入框（NSTextFieldCell）从**字框**起点画，墨迹还要再进去约 2.5pt。
+#:    于是 8 + 2.5 ≈ 10.45 才是屏幕上同一条竖线（实测，判据在
+#:    `tests/test_duty_card_ui.py::test_输入框文字垂直居中且左缘与胶囊对齐` 里量墨迹）。
+FIELD_PAD_X = 8.0
+#: 编辑态那行字的微调：字段编辑器（NSTextView）的行盒与 cell 的 drawing rect 差约这么多
+#: （实测：不补 → 打字时文字比静止态高 1.25pt；补上后中线差 0.25pt）。**量出来的，不是猜的**。
+FIELD_EDITOR_NUDGE = 1.25
+CARD_DATE_W = 132.0              # 日期框：按内容定宽（ISO 日期 + 内边距），不拉满整行
+#: 分区标题前的小图标（SF Symbols，**单色**、跟文字同一色阶）。
+CARD_SYMBOL_PT = 11.0
+
+#: 按钮的三档层级（HIG：一屏 1–2 个 prominent，其余用**样式**分层）。
+BTN_ROLES = ("primary", "secondary", "plain")
+
+
+def card_button_specs(specs) -> list:
+    """`(label, code[, role])` → 一律三元的 `(label, code, role)`（**纯函数**）。
+
+    缺省（老调用点）：**第一个是 primary、其余 secondary**。
+    ⚠️ 作者 2026-10-17 点名的规矩：层级要**每个按钮自己声明**，别再靠位置猜 ——
+       「全部忽略」这种批量放弃永远不许落到 primary（`_wrapup_card_fill` 显式写 plain）。
+    """
+    out = []
+    for i, spec in enumerate(specs or []):
+        label, code = str(spec[0]), str(spec[1])
+        role = str(spec[2]) if len(spec) > 2 else ("primary" if i == 0 else "secondary")
+        if role not in BTN_ROLES:
+            role = "secondary"
+        out.append((label, code, role))
+    return out
+
+
+#: 卡片里"文字自己就说完了"的块（值直接写进标签）；其余块由各自的 place 函数填。
+_CARD_TEXT_KINDS = frozenset({"label", "note", "text", "quote", "meta", "point"})
+
+
+def _card_line_h(font) -> float:
+    """卡片里某字号的一行高（同 `_layout` 里章节条那个算法）。"""
+    try:
+        return float(math.ceil(font.ascender() - font.descender() + font.leading()))
+    except Exception:                                     # noqa: BLE001
+        return CARD_LINE_SZ
 
 
 class _Pair(typing.NamedTuple):
@@ -913,6 +1077,44 @@ def _xy(p) -> tuple:
         return float(p[0]), float(p[1])
 
 
+def _make_center_cell():
+    """一个把单行文字**垂直居中**画的 `NSTextFieldCell`（作者 2026-10-17 点名的那类修法）。
+
+    ⚠️ 为什么必须有它：`NSTextFieldCell` 默认把文字**贴着 frame 顶**画。框高 28、字 12.5 时
+       实测墨水中心在 7.25（框中心 14）—— 就是作者看到的「文字贴顶、下面空一大截」。
+       重写 `drawingRectForBounds_` 把**行盒**摆到中线；`titleRectForBounds_` 跟着走，
+       判据才能直接量「文字 rect 中心 == 框中心」。
+    ⚠️ 类名由 `objc_own` 管（全项目 ObjC 子类只此一处定义），别在这里写死类名。
+    """
+    from AppKit import NSTextFieldCell, NSMakeRect
+
+    def _line_h(cell) -> float:
+        f = cell.font()
+        return float(f.ascender()) - float(f.descender())
+
+    def drawing_rect(self, rect):                       # noqa: N802
+        r = NSTextFieldCell.drawingRectForBounds_(self, rect)
+        try:
+            line = _line_h(self)
+            if line > 0.0:
+                y = rect.origin.y + (rect.size.height - line) / 2.0
+                # ⚠️ 左右也用**整宽**：cell 默认还留了约 2.5pt 的横向内边距，
+                #    留着的话"输入框文字左缘 == 胶囊文字左缘"会差出这 2.5pt
+                #    （作者 2026-10-17 量的就是这条竖线）。外边距由外壳的 `FIELD_PAD_X` 给。
+                return NSMakeRect(rect.origin.x, y, rect.size.width, line)
+        except Exception:                               # noqa: BLE001
+            pass
+        return r
+
+    def title_rect(self, rect):                         # noqa: N802
+        return drawing_rect(self, rect)
+
+    return objc_own.own("CardFieldCell", NSTextFieldCell, {
+        "drawingRectForBounds_": drawing_rect,
+        "titleRectForBounds_": title_rect,
+    })
+
+
 def _make_input_delegate(on_submit, on_cancel):
     """输入框委托: 回车/Esc 走 control:textView:doCommandBySelector:。
 
@@ -1085,7 +1287,8 @@ def _pineapple_icon(pt: float = 16.0, scale: int = 2):
 class Overlay:
     def __init__(self, on_quit=None, on_translate=None, on_submit=None,
                  on_ask=None, on_new_topic=None, on_lost=None, note=None,
-                 on_vis=None, on_wait=None, on_view=None, on_power_event=None):
+                 on_vis=None, on_wait=None, on_view=None, on_power_event=None,
+                 on_duty=None, on_feature=None):
         # ⚠️ 窗口 chrome / 材质 / scrim 那几样已经搬进 panel.py 了，这里的名字要
         #    跟着删干净 —— 留着会让「材质在哪配的」这个问题仍然答成 overlay.py，
         #    等于配方原料还散在两个文件里。
@@ -1096,8 +1299,7 @@ class Overlay:
                             NSWindowStyleMaskClosable, NSWindowStyleMaskFullSizeContentView,
                             NSWindowTitleHidden,
                             NSTextAlignmentLeft, NSFont, NSLineBreakByWordWrapping,
-                            NSLineBreakByTruncatingTail, NSView,
-                            NSFocusRingTypeNone)
+                            NSLineBreakByTruncatingTail, NSView)
 
         self._width = WIDTH
         self._height = HEIGHT
@@ -1126,6 +1328,18 @@ class Overlay:
         self._on_submit = on_submit or (lambda q: None)
         self._on_ask = on_ask or (lambda: None)
         self._on_new_topic = on_new_topic or (lambda: None)
+        #: ⭐ 「一些事儿」的决定出口：`fn(action, item)`，action ∈ `"save" | "ignore" | "undo"`。
+        #:    ⚠️ **只在这一个口子上跑** —— 卡片只回决定，写提醒事项 / 落盘 / 撤销全在 `main`。
+        #:    它是 AppKit 主线程回调，所以实现必须 O(1) 返回（重活交 worker）。
+        self._on_duty = on_duty or (lambda _a, _it: None)
+        #: ⭐ **功能使用度**（作者 2026-10-17）—— `fn(name, data)`：悬浮窗里"用没用
+        #:    某个功能"那条线（卡片出现 / 记下 / 忽略 / 改字段 / 回顾出现 / 收起…）。
+        #:    ⚠️ 与 `_note`（UI 使用度的**计数**）不是一回事：这个带字段（类型 / 来源 /
+        #:      距出现多少秒），汇总进 `report.json` 的 `feature_usage`。
+        #:    ⚠️ **绝不带任何文本内容** —— 白名单在 `feature_usage.clean()`（`_feature` 里过）。
+        #:    ⚠️ 默认 `None`（`main` 不装采集器就传 `None`）：`_feature` 第一件事就是
+        #:      `is None` 早退 —— 普通模式下**零开销、零行为**，与那七个 `on_*` 同规矩。
+        self._on_feature = on_feature
         #: ⭐ **UI 使用度**（测试模式采集面 ⑦）—— 每次交互报一声给采集器。
         #:    ⚠️ 与上面那七个 `on_*` 不是一类：那些**干活**，这个**只记账**。
         #:    形状（一个名字字符串）与 `testmode.TestSession.note_ui` 对齐。
@@ -1398,7 +1612,11 @@ class Overlay:
         self._input.setBezeled_(False)
         self._input.setBordered_(False)
         self._input.setDrawsBackground_(False)
-        self._input.setFocusRingType_(NSFocusRingTypeNone)  # 去掉 AppKit 默认蓝环
+        # ⚠️ 系统聚焦环（用户的强调色蓝环）在这条输入行上是**没有替代品**时的**禁**项：
+        #    Apple HIG 允许"用背景/边框表示聚焦"时关掉它。本行的替代就是它**自己那条
+        #    细线**（`_input_rule`：白 α0.18 → 聚焦 0.45）—— 同一种语言，所以关得。
+        #    关环的写法（常量、别写数字）统一在 `panel.no_focus_ring` 一处。
+        panel.no_focus_ring(self._input)
         self._input.setFont_(_ui_font(14.0))
         self._input.setTextColor_(NSColor.whiteColor())
         self._input.setMaximumNumberOfLines_(1)
@@ -1515,8 +1733,7 @@ class Overlay:
         #    系统改不了它的颜色，整排只有它跳色；模板符号跟着同排文字的单色走（同菜单栏图标那条 HIG）。
         #    取不到符号（老系统）就留着 emoji。
         self._symbolize(self._btn_lost, "questionmark", "重点 / 没听懂")
-        self._btn_close = self._button("✕", self._quit, "退出")
-        # 「–」隐藏：窗口收进菜单栏，转写、录音、落盘都照常（同 Apple「实时字幕」的菜单栏用法）。
+        self._btn_close = self._button("✕", self._quit, "退出")        # 「–」隐藏：窗口收进菜单栏，转写、录音、落盘都照常（同 Apple「实时字幕」的菜单栏用法）。
         #   系统那种最小化做不了：本 app 是 `.accessory`（没有 Dock 图标），最小化的窗口无处可去。
         self._btn_hide = self._button(
             "–", self._hide_window, "隐藏字幕（录音照常）\n  找回：点屏幕边上的小菠萝，或菜单栏菠萝 →「显示字幕」")
@@ -1530,6 +1747,12 @@ class Overlay:
             "把刚讲的这一段讲清楚(中文讲解, 关键处留一行 EN：英文原文)")
         self._btn_topic = self._button(
             "字幕", self._new_topic, "结束当前问答线程, 回到字幕")
+        # ⭐ 「回顾」：课前回顾的回头路（原型 §淡出与回看：教授开口自动淡出，
+        #    顶栏留一颗按钮原样叫回来）。只有真有回顾数据时才显示。
+        self._btn_recap = self._button(
+            "回顾", self._recap_toggle,
+            "上节课的知识点 / 重点 / 待办（教授开口后自动收起）")
+        self._btn_recap.setHidden_(True)
         # ⚠️ 「展开/收回」按钮已删(2026-09-24)。它原本承担的是"解锁滚动"——
         # 而滚动权限已与收起/展开解耦(见 transcript_view.set_collapsed), 现在
         # **拉窗口 = 看几句, 滚动 = 往回翻**, 两者正交, 不需要这个按钮。
@@ -1542,7 +1765,7 @@ class Overlay:
         #    （`_new_topic` 现在也 `scroll_to_bottom()`）。
         #    ⚠️ 顺带的好处：`❓` 成了最左那个按钮，**章节条多出约 90px 可用宽度**
         #    （原来那份宽度被一个不可点的隐藏按钮吃掉 —— 见下面 `_layout` 的注释）。
-        self._bar = [self._btn_lost, self._btn_ask, self._btn_topic,
+        self._bar = [self._btn_recap, self._btn_lost, self._btn_ask, self._btn_topic,
                      self._btn_trans, self._btn_hide, self._btn_close]
         # ---- 「↓ N 句新的」（往回翻时的提示，2026-10-17）----
         # ⭐ 为什么要有它: 「闲置 6s 自动回底」删了（见 `transcript_view` 文件头
@@ -1556,6 +1779,69 @@ class Overlay:
         self._install_bar_hover()
         self._install_status_item()               # 菜单栏: 鼠标穿透开关 + 退出
         self._install_reopen()
+
+        # ---- 一些事儿 / 课前回顾（2026-10-17）----
+        # 三块共用**同一块接管区**（`self._card_view`）—— 一次只开一块，`_card_kind` 说是哪块。
+        # ⚠️ 为什么接管转录区而不是新开窗口：答案 / 纲要已经是这个做法（一块最大的区域、
+        #    渲染源整个换掉、字幕在后台照常累积）—— 不引入第二套窗口生命周期。
+        self._card_kind = ""                   # "" | "duty" | "wrapup" | "recap"
+        self._card_view = None                 # 懒建（没有这些功能的课一个 view 都不建）
+        #: 卡片**内部**那个滚动区（作者 2026-10-17「上卡下字幕」：卡片高了就在卡里滚）。
+        #: 内容块都挂在 `_card_doc` 上；`_card_view` 只当外框（发丝边）+ 钉住页脚按钮。
+        self._card_scroll = None
+        self._card_doc = None
+        #: 下一次 `_card_relayout` 把卡片内部滚回**顶部**（只在开卡时置真；平时不动 ——
+        #: 用户滚到哪就是哪）。
+        self._card_scroll_top = False
+        #: 开卡前字幕区的滚动位置 + 跟随状态（`(origin_y, at_bottom)`；关卡还原）。
+        self._card_sub_scroll = None
+        self._card_fields: list = []           # 卡片里可编辑的输入框（`_is_editing` 要看）
+        #: 输入框 → 它的聚焦指示句柄（`panel.FocusBorder`）—— 每帧 `_sync_focus_look`
+        #: 按**每个框自己**的编辑状态调 `set_focus`（不这么存的话普通 `NSTextField`
+        #: 实例上挂不住属性，见 `panel.focus_field` 的 docstring）。
+        self._card_focus: dict = {}
+        self._card_blocks: list = []           # 本次卡片建出来的子视图（关的时候撤掉）
+        self._card_pending: list = []          # 待摆的块（`_card_relayout` 消费）
+        self._card_title = ""
+        self._card_sub_text = ""
+        self._card_status_lbl = None
+        self._session_course = ""              # 这节课是谁（卡片副标题 / 推算依据）
+        self._session_day = None
+        #: 卡片的**延迟重画**标志 —— 见 `_card_defer()`（绝不在点击回调里拆视图）
+        self._card_redo = False
+        #: 一些事儿的投影（`main` 从板子推过来；主线程读写）
+        self._duty_items: list = []
+        self._duty_open_id = ""                # 卡片当前打开哪一条
+        self._duty_wrapup = []                 # 收尾汇总那批条目
+        self._duty_wrapup_done = True          # 收尾汇总处理完了吗（main 的等待判据）
+        #: 课前回顾：`_recap_data` 是 recap.card() 的产物（行）；`_recap_on` = 现在在屏上。
+        self._recap_data = None
+        self._recap_on = False
+        self._recap_touched = False            # 用户手动收起来过（不再自动弹）
+        #: ⭐ 功能使用度（测试模式）：回顾**上屏**那一刻（monotonic）—— 教授开口自动淡出时
+        #:    报「距出现多少秒」。`None` = 这次没记（老路径 / 已经报过了）。
+        self._recap_t0 = None
+        #: ⭐ 上一次渲染出来的是**哪几块**（`_recap_fill` 里按 rows 填）—— 「出现」那条
+        #:    事件要带它（作者要看"有哪几块"，而块名是封闭词表，不是文本）。
+        self._recap_blocks: list = []
+        #: 角落小卡：图标（SF Symbols 单色，见 `_symbol_icon`）+ 标签 + 透明点击区
+        #: （标签/点击区的造法同 `_chapter_lbl` / `_gloss_hit`）
+        self._chip_icon = self._symbol_icon(self._ve, "pin", CARD_META_SZ, CHIP_ALPHA_HOT)
+        self._chip_lbl = self._label(
+            CARD_META_SZ, NSColor.whiteColor().colorWithAlphaComponent_(CHIP_ALPHA_HOT),
+            1, self._trunc)
+        self._chip_hit = _make_click_view(self._chip_click)
+        ve.addSubview_(self._chip_lbl)
+        ve.addSubview_(self._chip_hit)
+        self._chip_lbl.setHidden_(False)     # 可见性由 `_chip_apply` 管（0 档淡完才 setHidden_）
+        self._chip_lbl.setAlphaValue_(0.0)
+        self._chip_hit.setHidden_(True)
+        self._chip_text = ""
+        #: 小卡的两个亮度档的状态：此刻该显示吗 / 已经落到哪一档 / 亮到几时。
+        self._chip_show = False
+        self._chip_alpha = 0.0
+        self._chip_hot_until = 0.0
+        self._chip_pend = set()              # 上次见到的那批待处理 id（认"新条目"）
 
         self._layout()
         self._move_to_corner()
@@ -1771,9 +2057,19 @@ class Overlay:
         返回 False 会让不变量在没有可靠依据的情况下**主动抢走焦点** —— 正在打字
         时被抢是最坏的失败模式。检测不出来就当作在打字, 保守。"""
         try:
-            return self._input.currentEditor() is not None
+            if self._input.currentEditor() is not None:
+                return True
         except Exception:                     # noqa: BLE001
             return True
+        # ⚠️ 2026-10-17：卡片里也可能有输入框（一些事儿的标题 / 日期）—— 同样算"在打字"，
+        #    否则那条「键盘不自留」的不变量会在用户改标题改到一半时把焦点抢走。
+        for _key, fld, _box in getattr(self, "_card_fields", []):
+            try:
+                if fld.currentEditor() is not None:
+                    return True
+            except Exception:                             # noqa: BLE001
+                return True
+        return False
 
     def _set_rule_focus(self, on: bool) -> None:
         """细线: 白 α0.18(静止) <-> 白 α0.45(聚焦)。
@@ -1828,7 +2124,59 @@ class Overlay:
             self._on_input_focus()
         else:
             self._on_input_blur()
+        self._card_fields_focus_look(on)
         self._focus_look_on = on
+
+    def _card_fields_focus_look(self, on: bool) -> None:
+        """卡片输入框的聚焦态：**正在编辑的那一格**，白细框提亮一档（`FIELD_BORDER_FOCUS`）。
+
+        ⚠️ 原来是「`on` 为真就把**所有**外壳提亮」—— 作者 2026-10-17 要去掉蓝环时
+           顺手核对，发现那和 docstring 说的「正在编辑的那一格」对不上：⌨ 输入行
+           在打字时两张卡的外壳也一起亮。现在**逐框读它自己的编辑状态**
+           （`currentEditor()` 非空 = 这一格在编辑），`on` 只当"整块区域在编辑"的总闸。
+        ⚠️ 与主输入框同一套机制（每帧比对状态 —— 委托回调实测从不触发，见上面）。
+           `panel.focus_field` 的事件钩子也会切同一个句柄，两条路都调它、都幂等。
+        """
+        if not getattr(self, "_card_fields", None):
+            return
+        handles = getattr(self, "_card_focus", None) or {}
+        for _key, fld, _box in self._card_fields:
+            h = handles.get(fld)
+            if h is None:
+                continue
+            editing = False
+            if on:
+                try:
+                    editing = fld.currentEditor() is not None
+                except Exception:                         # noqa: BLE001
+                    editing = False
+            try:
+                h.set_focus(editing)
+            except Exception:                             # noqa: BLE001
+                pass
+            if editing:
+                self._set_editor_inset(fld)
+
+    def _set_editor_inset(self, fld) -> None:
+        """编辑中把**字段编辑器**的正文压到与静止态同一高度。
+
+        ⚠️ 手工量过：静止时文字在框内 8.5..20（居中 cell 的功劳）；一进编辑态，
+           字段编辑器（NSTextView）铺满整框、正文贴顶（1.5..12.5）—— 点进输入框
+           文字会**跳一下**。把它的 `textContainerInset` 上边距设成 (框高-行高)/2 就齐了。
+        """
+        try:
+            ed = fld.currentEditor()
+            if ed is None:
+                return
+            f = fld.font()
+            line = float(f.ascender()) - float(f.descender())
+            top = max(0.0, (float(fld.frame().size.height) - line) / 2.0
+                      + FIELD_EDITOR_NUDGE)
+            # ⚠️ `NSSize` 的语义是 (width=水平, height=垂直) —— 写成 (top, 0) 会去改**左右**
+            #    边距（实测返回 width=top、height=0），垂直纹丝不动。
+            ed.setTextContainerInset_((0.0, top))
+        except Exception:                                 # noqa: BLE001
+            pass
 
     def _release_focus(self):
         """主动把 key window 交还出去。
@@ -2278,8 +2626,12 @@ class Overlay:
             self._draft_box_y_zh = base + DRAFT_H + 4
         self._render_draft()
         self._scroll_y = BOTTOM_PAD + self._pinned
-        self._tv.set_frame(self._scroll_y, self._scroll_h)           # 转录区
-        self._sync_newline_pill()          # 「↓ N 句新的」跟着转录区几何走
+        # ⭐ 「上卡下字幕」（作者 2026-10-17）：没卡时转录区就是整段；**卡片开着时**
+        #    由 `_card_relayout` 摆（它才知道卡片最终多高 —— 两处都写就等于两个写点，
+        #    哪天两份算术分了家，卡片底与字幕顶就会差几个像素）。
+        if not self._card_kind:
+            self._tv.set_frame(self._scroll_y, self._scroll_h)       # 转录区
+        self._sync_newline_pill()          # 「↓ N 句新的」跟着转录区几何走（底边锚在 _scroll_y，卡片开着也成立）
         # 顶栏: 从右边缘往左摆(列表是左->右顺序, 故 reversed)。sizeToFit 取文字
         # 实际宽度, 加内边距; 图标(⭐/✕)保底 28px 点击区 —— 它们的字形只有 15-24px,
         # 直接按字宽会给一个点不中的小目标。
@@ -2358,6 +2710,44 @@ class Overlay:
         self._drag_layer.setFrame_(((0.0, 0.0), (self._width, self._height)))
         self._ve.setFrame_(self._panel.contentView().bounds())
         self._scrim.setFrame_(self._ve.bounds())
+        # ---- 角落小卡（一些事儿）与接管卡片 -------------------------------------
+        # 小卡压在**最上面那条旧字幕**上（原型 §①：旧行正在滚走，覆盖代价最小；
+        # 绝不压正在变的那两行）。它在转录区**内部**的右上角，跟着转录区的几何走。
+        cw = 0.0
+        icon_w = 0.0
+        if self._chip_text:
+            try:
+                self._chip_lbl.setStringValue_(self._chip_text)
+                self._chip_lbl.sizeToFit()
+                icon_w = (float(CARD_META_SZ) + 2.0 + 5.0) if self._chip_icon is not None else 0.0
+                cw = min(float(self._chip_lbl.frame().size.width) + 18.0 + icon_w,
+                         self._width - 2 * PAD)
+            except Exception:                             # noqa: BLE001
+                cw = 0.0
+        show_chip = bool(self._chip_text) and cw > 40.0 and not self._card_kind
+        if show_chip and not self._chip_show:
+            self._chip_lit()                 # 新条目 → 亮起 + 续 8 秒（淡入）
+        self._chip_show = show_chip
+        self._chip_hit.setHidden_(not show_chip)
+        if self._chip_icon is not None:
+            self._chip_icon.setHidden_(not show_chip)
+        if not show_chip:
+            self._chip_apply(0.0)            # 收起 = 淡出（alpha 到 0，不 setHidden_）
+        if show_chip:
+            _cx = self._width - PAD - cw
+            _cy = self._scroll_y + self._scroll_h - CHIP_H - CHIP_GAP
+            _ch = max(CHIP_H - 6.0, _card_line_h(self._chip_lbl.font()))
+            if self._chip_icon is not None:
+                _iw = float(CARD_META_SZ) + 2.0
+                self._chip_icon.setFrame_(
+                    ((_cx + 9.0, _cy + (CHIP_H - _iw) / 2.0), (_iw, _iw)))
+            self._chip_lbl.setFrame_(
+                NSMakeRect(_cx + 9.0 + icon_w, _cy + (CHIP_H - _ch) / 2.0,
+                           max(10.0, cw - 18.0 - icon_w), _ch))
+            self._chip_hit.setFrame_(((_cx, _cy), (cw, CHIP_H)))
+        if self._card_view is not None and self._card_kind:
+            # 卡片的**位置与大小都由 `_card_relayout` 写**（高度随内容，不再是整块转录区）
+            self._card_relayout()
 
     def show(self):
         from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
@@ -2533,6 +2923,9 @@ class Overlay:
             self._draft_end_fade()        # 草稿让位淡出
             self._draft_rev_normalize()   # 草稿改字淡换（属性串要收回普通串）
             self._draft_shown = False     # 别把「隐藏前那份草稿」当成本帧刚变空 → 又起跑一次淡出
+            # 小卡：隐藏期间它可能已经过点 —— 直接落到此刻该在的那一档（别补播淡变）。
+            self._chip_apply(chip_alpha(self._clock(), self._chip_hot_until)
+                             if self._chip_show else 0.0)
             self._mark_dirty(urgent=True)  # 立刻 _render() 一帧（`_flush_if_due` 里 urgent 无条件 flush）
         finally:
             self._no_animate = False
@@ -2607,6 +3000,10 @@ class Overlay:
 
     def add_draft(self, en: str):
         self._draft = en
+        # ⭐ 课前回顾让位：教授开口了（第一条有效草稿）。⚠️ O(1) 早退（`_recap_on` 为假时
+        #    一个分支就走完）—— `add_draft` 在 drain 里被高频调用，这里不许做别的。
+        if self._recap_on and en and len(en.strip()) >= 2:
+            self._recap_maybe_hide()
         self._mark_dirty(urgent=True)
 
     def draft_zh(self, zh: str):
@@ -2659,6 +3056,8 @@ class Overlay:
         """这句定稿开始上屏（`seed_en` / 第一个增量）：记时刻、定它是不是短尾巴。只定一次。"""
         if self._final_t0 is not None:
             return
+        if self._recap_on:                                # 定稿开始 = 教授开口（更硬的信号）
+            self._recap_maybe_hide()
         self._final_t0 = self._clock()
         self._seed_zh = self._draft_zh_val
         since = (self._final_t0 - self._last_final_t) if self._last_final_t is not None else None
@@ -2894,6 +3293,1571 @@ class Overlay:
                 d["changed"] = bool(d.get("changed") or p.get("changed"))
                 return
         self._outline["deadlines"].append(dict(p))
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 一些事儿 + 课前回顾（2026-10-17 作者拍板 · 原型 proto_duty / proto_recap）
+    #
+    # 两块共用同一套「接管区」机制（`self._card_view`）：
+    #   · 一些事儿：**角落小卡**（课上不打扰）→ 点开是可编辑卡片 → 收尾汇总
+    #   · 课前回顾：教授开口前一直占着转录区，开口（第一条草稿/定稿）后淡出
+    #
+    # ⚠️ 纪律（`CLAUDE.md` / `.claude/rules/appkit-ui.md`）：
+    #   · 所有方法都在**主线程**（`drain` / AppKit 回调）；
+    #   · 卡片里的点击区一律走 `_make_click_view`（**自己实现 `mouseDown_`** ——
+    #     磨砂面板上的裸视图默认会把点击当拖窗口，见 appkit-ui 雷区）；
+    #   · 卡片上的输入框**不抢焦点**：面板本来就是 NonactivatingPanel，用户点进去才编辑；
+    #   · 「减弱动态效果」时不做淡入淡出（`_recap_hide` 那一条）。
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # ---- 一些事儿：投影 / 角落小卡 ----
+    def duty_update(self, items) -> None:
+        """`main` 把板子的当前内容推过来（认到新候选 / 用户改了决定都走这里）。
+
+        ⚠️ 主线程，O(条数)：只是**重画一行字 + 一次 `_layout`**（卡片开着时可能重摆一次卡）。
+        """
+        self._duty_items = list(items or [])
+        # ⭐ 有新条目 → 小卡重新亮起（`motion.CHIP_HOT_S` 秒后降到低亮度，见 `_chip_tick`）。
+        if chip_new_pending(self._chip_pend, self._duty_items):
+            self._chip_lit()
+        self._chip_pend = chip_pending_ids(self._duty_items)
+        txt = ""
+        try:
+            import duty as _duty
+            txt = _duty.chip_text(self._duty_items)
+        except Exception:                                 # noqa: BLE001
+            txt = ""
+        if txt != self._chip_text:
+            self._chip_text = txt
+            self._layout()
+            self._mark_dirty(urgent=True)
+        if self._card_kind == "duty" and self._duty_open_id:
+            it = self._duty_get(self._duty_open_id)
+            if it is None:
+                self._card_close()                        # 那条没了（撤销 / 清空）
+            elif self._duty_sig(it) != getattr(self, "_duty_card_sig", None):
+                self._card_defer()                        # 下一帧重画（见 `_card_defer`）
+        elif self._card_kind == "wrapup":
+            self.duty_wrapup_sync(self._duty_items)
+
+    @staticmethod
+    def _duty_sig(item) -> tuple:
+        return tuple(str(item.get(k) or "") for k in
+                     ("id", "action", "reminders", "reason", "type", "title",
+                      "date", "time"))
+
+    def _chip_click(self) -> None:
+        """点角落小卡 → 打开最新的那条（原型：一屏最多一条，点开逐条看）。"""
+        self._note("duty_chip")
+        self._release_focus()
+        pend = self._duty_pending()
+        if pend:
+            self._duty_open(pend[-1].get("id") or "")
+
+    # ---- 角落小卡：亮 / 暗两档（策略见 `motion.CHIP_HOT_S` 与 `chip_alpha`）----
+    def _chip_lit(self) -> None:
+        """小卡**亮起**并续 `motion.CHIP_HOT_S` 秒：新条目到达、或它从收起转回显示时调。"""
+        self._chip_hot_until = self._clock() + motion.CHIP_HOT_S
+        self._chip_apply(CHIP_ALPHA_HOT)
+
+    def _chip_apply(self, alpha: float) -> None:
+        """把整块小卡（字 + 点击区）推到某一档亮度。到点了是**降到暗档**，不是收起。
+
+        ⚠️ 走 Core Animation（同 `_set_bar_shown`）：起跑那一帧提交，之后由渲染服务器跑。
+           窗口重新可见那一帧（`_no_animate`）、或「减弱动态效果」下，直接落位不做淡变。
+        ⚠️ 落到 0 档要**真的收起来**（`setHidden_`）：留着"透明但在"的视图会占住右上角那
+           一小块鼠标（拖窗口 / 滚轮在那儿失灵）。收起只发生**淡出跑完之后**，
+           所以看得见的那 0.2 s 里它还在 —— 淡出跑完前又有新条目的话会被再点亮、不收。
+        """
+        alpha = float(alpha)
+        if abs(alpha - float(self._chip_alpha)) < 0.01:
+            return
+        self._chip_alpha = alpha
+        gone = alpha <= 0.01
+        if getattr(self, "_no_animate", False) or motion.reduce_motion():
+            self._chip_lbl.setAlphaValue_(alpha)
+            if self._chip_icon is not None:
+                self._chip_icon.setAlphaValue_(alpha)
+            self._chip_lbl.setHidden_(gone)
+            if self._chip_icon is not None:
+                self._chip_icon.setHidden_(gone)
+            return
+        self._chip_lbl.setHidden_(False)                  # 要淡就先把字放出来
+        if self._chip_icon is not None:
+            self._chip_icon.setHidden_(False)
+        try:
+            from AppKit import NSAnimationContext
+
+            def _done():
+                if self._chip_alpha <= 0.01:              # 淡出跑完了才收；中途亮起就不收
+                    self._chip_lbl.setHidden_(True)
+                    if self._chip_icon is not None:
+                        self._chip_icon.setHidden_(True)
+
+            def _fade(ctx):
+                ctx.setDuration_(motion.STATE_S)
+                self._chip_lbl.animator().setAlphaValue_(alpha)
+                if self._chip_icon is not None:
+                    self._chip_icon.animator().setAlphaValue_(alpha)
+            NSAnimationContext.runAnimationGroup_completionHandler_(_fade, _done)
+        except Exception:                                 # noqa: BLE001
+            self._chip_lbl.setAlphaValue_(alpha)
+            if self._chip_icon is not None:
+                self._chip_icon.setAlphaValue_(alpha)
+                self._chip_icon.setHidden_(gone)
+            self._chip_lbl.setHidden_(gone)
+
+    def _chip_tick(self, now: float) -> None:
+        """pump 每帧：亮档到点 → 降到低亮度（**不消失、仍可点**）。
+
+        ⚠️ 只有正在显示时才动它；收起态（`_chip_show=False`）由 `_layout` 管成 0。
+           `_chip_apply` 自己抵挡重复调用 —— 到点之后每帧都是一次 float 比较。
+        """
+        if self._chip_show:
+            self._chip_apply(chip_alpha(now, self._chip_hot_until))
+
+    def _duty_get(self, rid: str):
+        for x in self._duty_items:
+            if x.get("id") == rid:
+                return x
+        return None
+
+    def _feature(self, name: str, **data) -> None:
+        """⭐ **功能使用度**（测试模式）：报一条动作 —— `fn(name, data)`。
+
+        ## 三条纪律（与 `_note` 一样，但更硬）
+
+        1. ⚠️⚠️ **绝不带任何文本内容**（作者 2026-10-17 点名）：标题 / 原话 / 日期值
+           一个字都不进。`feature_usage.clean()` 是那道闸 —— 不在白名单里的字段
+           **在这里就被丢掉**，调用点手滑也漏不出去（判据：`tests/test_feature_usage.py`）。
+        2. 跑在 AppKit 主线程回调里 → **O(1)**、自己吞异常（`note_*` 同一条规矩：
+           采集坏了不许影响用户点按钮）。
+        3. 默认 `None` = 不装采集器 = 一次调用都不发生（`main` 普通模式传 `None`）。
+
+        ⚠️ `feature_usage` 是懒 import（只在真报事件时付一次）：`overlay` 的模块级
+           import 越少越好（它要在窗口起来之前就加载）。
+        """
+        if self._on_feature is None:
+            return
+        try:
+            import feature_usage as _fu
+            item = _fu.clean(name, data)
+            if item is not None:
+                self._on_feature(item[0], item[1])
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _duty_pending(self) -> list:
+        return [x for x in self._duty_items if x.get("action") == "pending"]
+
+    # ---- 一些事儿：可编辑卡片 ----
+    def _duty_open(self, rid: str) -> None:
+        it = self._duty_get(rid)
+        if it is None:
+            return
+        self._note("duty_card")
+        # ⭐ 功能使用度：卡片出现（**类型 + 来源** —— 作者要知道是正则那条先上屏的
+        #    还是模型那条；两者都不是文本）。⚠️ 空值会被 `feature_usage.clean` 丢掉。
+        self._feature("duty.card", type=str(it.get("type") or ""),
+                      src=str(it.get("source") or ""))
+        self._duty_open_id = rid
+        self._card_open("duty")
+        self._duty_card_fill(it)
+
+    def _duty_card_fill(self, item) -> None:
+        """重画整张卡（字段值取自条目 —— 用户改过的以板子为准）。"""
+        import duty as _duty
+        self._duty_card_sig = self._duty_sig(item)
+        course = str(getattr(self, "_session_course", "") or "")
+        sub = " · ".join(x for x in (
+            course or "这节",
+            f"原话 {item.get('t')}" if item.get("t") else "",
+            f"来源 {item.get('source') or '—'}") if x)
+        self._card_reset("一些事儿", sub)
+        # 类型（四选一，点一下立刻生效；可再点回来）
+        self._card_label("类型")
+        self._card_chips(_duty.TYPES, str(item.get("type") or "其他"),
+                         lambda t: self._duty_pick_type(t))
+        # 标题 / 日期
+        self._card_label("标题")
+        self._card_field("title", str(item.get("title") or ""))
+        self._card_label("日期")
+        val = str(item.get("date") or "")
+        if item.get("time"):
+            val = (val + " " + str(item["time"])).strip()
+        side = _duty.fmt_when(item, day=self._session_day)
+        if item.get("date") and item.get("inferred"):
+            side = (side + " · 推算") if side else "推算"
+        self._card_field("date", val, side=side)
+        conv = self._duty_conv_line(item)
+        if conv:
+            self._card_note(conv)
+        # 原话（只读 + 时间戳）
+        self._card_label("原话（只读）")
+        src_ids = ", ".join(str(x) for x in (item.get("src") or []))
+        self._card_quote(f"“{item.get('quote') or ''}”",
+                         " · ".join(x for x in (
+                             str(item.get("t") or ""),
+                             f"来源 {item.get('source') or '—'}",
+                             f"第 {src_ids} 句" if src_ids else "") if x))
+        # 动作
+        # ⭐ 层级自己声明（作者 2026-10-17）：`记下` 是唯一 primary（有底的胶囊），
+        #    `忽略` / `下一条` 走 plain（它们原来共用一块 0.07 的灰底 + 0.80 白字，
+        #    一屏三颗都在喊）；`撤销` 是次按钮（它只在已处理的条目上出现，独苗）。
+        acts = ([("记下", "save", "primary"), ("忽略", "ignore", "plain")]
+                if item.get("action") == "pending" else [("撤销", "undo", "secondary")])
+        if len(self._duty_pending()) > 1:
+            acts.append(("下一条", "next", "plain"))
+        self._card_actions(acts, lambda a, r=item: self._duty_act(a, r))
+        st = _duty.status_line(item)
+        if st:
+            self._card_note(st, _duty.status_symbol(item))
+        self._card_done()
+
+    def _duty_conv_line(self, item) -> str:
+        """日期那行小字：算出来的写算式（原型「已换算」那一行），算不出的说明白。"""
+        if item.get("date") and item.get("inferred") and item.get("phrase"):
+            try:
+                import duty_when as _dw
+                w = _dw.resolve(str(item.get("quote") or ""), day=self._session_day)
+                if w is not None:
+                    return _dw.explain(w, day=self._session_day)
+            except Exception:                             # noqa: BLE001
+                return ""
+        if item.get("undecided"):
+            return "原话只说到这个范围，指不出具体哪一天 —— 先留空，或你补一个。"
+        if not item.get("date"):
+            return "原话没提日期：留空也行，或你补一个。"
+        return ""
+
+    def _duty_pick_type(self, t: str) -> None:
+        """类型 chip 被点：**立刻**写进板子（可撤销 = 再点回来）。"""
+        self._release_focus()
+        it = self._duty_get(self._duty_open_id)
+        if it is None:
+            return
+        self._note("duty_type")
+        self._on_duty("type", {**it, "type": str(t)})
+        self._card_defer()
+
+    def _duty_act(self, action: str, item) -> None:
+        """卡片上的按钮：`save` / `ignore` / `undo` / `next` —— 全走 `main` 那一个出口。
+
+        ⚠️ 字段值**在这里现取**（标题 / 日期输入框），随动作一起交出去 ——
+           用户改完标题直接点「记下」是最自然的顺序。
+        """
+        self._release_focus()
+        if action in ("save", "ignore", "next"):
+            # ⭐ 功能使用度：**改没改**（作者 2026-10-17：只记"改了没"，**不记改成了什么**）。
+            #    ⚠️ 比较完立刻把值丢掉 —— 进事件流的只有两个布尔。
+            #    ⚠️ `next` 也记（改了字段又翻走，是真实发生过的动作）。
+            cur = self._card_read_fields()
+            t_ch = str(cur.get("title") or "") != str(item.get("title") or "")
+            d_ch = (str(cur.get("date") or "") != str(item.get("date") or "")
+                    or str(cur.get("time") or "") != str(item.get("time") or ""))
+            if t_ch or d_ch:
+                self._feature("duty.edit", title=bool(t_ch), date=bool(d_ch))
+        if action == "next":
+            self._feature("duty.next")
+            pend = self._duty_pending()
+            if pend:
+                nxt = pend[0]
+                if nxt.get("id") == item.get("id") and len(pend) > 1:
+                    nxt = pend[1]
+                self._duty_open(nxt.get("id") or "")
+            return
+        payload = {**item, **self._card_read_fields()}
+        self._note("duty_" + action)
+        # ⭐ 功能使用度：`duty.save` / `duty.ignore`（**没有** `duty.undo` —— 撤销不是
+        #    作者要看的三个动作之一；它另有 `_note("duty_undo")` 那条 UI 计数）。
+        self._feature("duty." + action)
+        self._on_duty(action, payload)
+        self._card_defer()
+
+    def duty_reminder_result(self, rid: str, ok: bool, reason: str) -> None:
+        """提醒事项写完（成功 / 失败）—— 卡片上那句状态改口（失败**写明原因**）。"""
+        for i, x in enumerate(self._duty_items):
+            if x.get("id") == rid:
+                it = dict(x)
+                it["reminders"] = "ok" if ok else "failed"
+                it["reason"] = str(reason or "")
+                self._duty_items[i] = it
+                if self._card_kind == "duty" and self._duty_open_id == rid:
+                    self._duty_card_fill(it)
+                return
+
+    # ---- 一些事儿：收尾汇总（下课一次性确认）----
+    def duty_wrapup_show(self, items) -> bool:
+        """摆出**收尾汇总**卡（原型 §④）。没有待处理条目 → 不显示、返回 `False`。
+
+        ⚠️ 非阻塞：`main` 用 `duty_wrapup()`（它 pump 到用户处理完），
+           探针用这一对 `show` / `finish` —— 否则探针没法在卡还在屏上时截图。
+        """
+        pend = [x for x in (items or []) if x.get("action") == "pending"]
+        if not pend or self._closed:
+            return False
+        self._duty_wrapup = [dict(x) for x in (items or [])]
+        self._duty_wrapup_done = False
+        self._card_open("wrapup")
+        self._wrapup_card_fill()
+        # ⭐ 功能使用度：收尾汇总**真的出现了**（0 条待确认时上面已经早退 —— 不出现
+        #    就没有这条事件，正好是真话）。
+        self._feature("duty.wrapup", n=len(self._duty_wrapup), pending=len(pend))
+        return True
+
+    def duty_wrapup(self, items, *, timeout: float = 20.0) -> int:
+        """下课：**漏处理的一次性确认**。主线程调用、自己 pump。
+
+        返回「处理掉的条数」。没有待处理条目 → 立刻返回 0。
+        ⚠️ 超时**不是错误**：没确认的条目不写任何地方（笔记里标「未确认」），
+           所以走开也不会丢东西 —— 与 `ask_save`（超时按"存"）正好相反，
+           因为这里的默认动作是"什么都不做"。
+        """
+        if not self.duty_wrapup_show(items):
+            return 0
+        deadline = time.monotonic() + timeout
+        while not self._duty_wrapup_done:
+            if self._closed or time.monotonic() >= deadline:
+                break
+            self.pump()
+            time.sleep(0.05)
+        if not self._duty_wrapup_done and not self._closed:
+            # ⭐ 功能使用度：**超时**（20s 没人理）—— 关窗不算超时（那是另一回事）。
+            #    `left` = 还剩几条没确认（0 条的超时不会出现：那样早就不显示这张卡了）。
+            self._feature("duty.wrapup.timeout", left=sum(
+                1 for x in self._duty_wrapup if x.get("action") == "pending"))
+        self.duty_wrapup_finish()
+        return sum(1 for x in self._duty_wrapup
+                   if x.get("action") in ("saved", "ignored"))
+
+    def duty_wrapup_finish(self) -> None:
+        """收摊：放行等待（`main` 的 `duty_wrapup` 或探针）并把卡收掉。"""
+        self._duty_wrapup_done = True
+        if self._card_kind == "wrapup":
+            self._card_close()
+
+    def _wrapup_card_fill(self) -> None:
+        items = list(self._duty_wrapup or [])
+        pend = [x for x in items if x.get("action") == "pending"]
+        done = [x for x in items if x.get("action") != "pending"]
+        self._card_reset("下课了",
+                         f"一些事儿 · 这节课识别到 {len(items)} 条"
+                         f"（{len(done)} 已处理 · {len(pend)} 待确认）")
+        if not items:
+            self._card_text("这节课没有课务候选。")
+        for it in items[:8]:
+            self._card_duty_row(it)
+        self._card_note("没确认的不会写进任何地方（笔记里标「未确认」）。")
+        # ⚠️ 按钮**放最后一个块** —— `_card_relayout` 把最后那个按钮块钉在卡片底部，
+        #    一屏放不下时被裁的只会是内容，出口永远点得到。
+        # ⭐ 层级自己声明（作者 2026-10-17）：「全部忽略」是**批量放弃**，永远不是 primary
+        #    （它原来是一块白色实心，被点名「突兀」）；「完成」是安静的次按钮。
+        # ⭐ 作者 2026-10-17：页脚放**右下角**、与每行「忽略」同一条右缘（原来在左下，
+        #    被 ghost 按钮的内边距顶进去 ~14pt，看起来像缩进错位）。
+        specs = [("全部忽略", "all", "plain")] if pend else [("完成", "done", "secondary")]
+        self._card_actions(specs, lambda a: self._wrapup_act(a), align="right")
+        self._card_done()
+
+    def _wrapup_act(self, action: str, rid: str = "") -> None:
+        self._release_focus()
+        if action == "all":
+            pend = [it for it in list(self._duty_wrapup or [])
+                    if it.get("action") == "pending"]
+            for it in pend:
+                self._on_duty("ignore", it)
+            # ⭐ 功能使用度：一次性放掉了几条（`n` = 真的动过的条数，不是卡上总数）。
+            self._feature("duty.wrapup.all", n=len(pend))
+            self._card_defer()
+            return
+        if action == "done":
+            self._duty_wrapup_done = True
+            return
+        it = next((x for x in (self._duty_wrapup or []) if x.get("id") == rid), None)
+        if it is None:
+            return
+        # ⭐ 功能使用度：**收尾里的**逐条动作（与卡片上的 `duty.save/ignore` 分开 ——
+        #    作者要分得清"平时处理的"和"收尾补处理的"）。
+        self._feature("duty.wrapup.save" if action == "save" else "duty.wrapup.ignore")
+        self._on_duty("save" if action == "save" else "ignore", it)
+        self._card_defer()
+
+    def duty_wrapup_sync(self, items) -> None:
+        """收尾汇总期间 `main` 推来的最新板子 —— 就地换掉那批条目并重画。"""
+        if self._card_kind != "wrapup":
+            return
+        # ⚠️ 处理状态没变就别重画整张卡（用户可能正要点那一行）。
+        new = [dict(x) for x in (items or [])]
+        old = self._duty_wrapup or []
+        sig = tuple((x.get("id"), x.get("action")) for x in new)
+        if sig == tuple((x.get("id"), x.get("action")) for x in old):
+            return
+        self._duty_wrapup = new
+        self._card_defer()
+
+    # ---- 课前回顾 ----
+    def set_session(self, *, course: str = "", day=None) -> None:
+        """这节课是谁（课号 + 上课日）—— 卡片副标题与「推算」都用它。主线程。"""
+        self._session_course = str(course or "")
+        self._session_day = day
+
+    def recap_show(self, data, *, course: str = "", day=None) -> None:
+        """开课时把上一节的回顾摆进转录区（`main` 在第一条字幕前调）。
+
+        ⚠️ **没有回顾数据就不显示**（首节课 C1：什么都不弹）—— 连按钮都不点灯。
+        """
+        if not data:
+            return
+        if course:
+            self._session_course = str(course)
+        if day is not None:
+            self._session_day = day
+        self._recap_data = dict(data)
+        self._recap_touched = False
+        self._btn_recap.setHidden_(False)
+        self._recap_on = True
+        self._card_open("recap")
+        if self._recap_fill():
+            self._recap_announce()
+
+    def recap_update(self, data) -> None:
+        """📄「今天可能讲什么」晚 1–2 秒补进来（课件抽文本在 worker 上跑）。"""
+        if not data:
+            return
+        opened = False
+        if self._recap_data is None:
+            self._recap_data = dict(data)
+            self._btn_recap.setHidden_(False)
+            if not self._recap_on and not self._recap_touched:
+                self._recap_on = True
+                self._card_open("recap")
+                # ⚠️ 这条也是一次「回顾出现」：开课时没有回顾数据（首节课 / 上一节没记录）
+                #    → `recap_show` 什么都没摆；1–2 秒后这条数据才把卡**真的**弹出来。
+                opened = True
+        else:
+            self._recap_data.update(dict(data))
+        if self._recap_on:
+            if self._recap_fill() and opened:
+                self._recap_announce()
+
+    def _recap_fill(self) -> bool:
+        """把回顾渲染进卡。回 `True` = **真上屏了**（调用方靠它决定记不记「出现」）。"""
+        try:
+            import recap as _recap
+            # ⭐ 2026-10-17（作者）：duties 按**今天**过滤（`self._session_day` =
+            #    开课时 `main` 给的今天）—— 存下来的那份可能已经旧了。
+            rows = _recap.card(self._recap_data or {}, day=self._session_day)
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ 课前回顾渲染失败({str(e)[:60]}); 不显示")
+            self._card_close()
+            return False
+        # ⭐ 功能使用度：这次到底有哪几块（键序 = 报告里那行字的顺序）。
+        self._recap_blocks = [k for k in ("points", "stars", "open", "duties", "today")
+                              if rows.get(k)]
+        self._card_reset("课前回顾",
+                         f"{rows.get('course') or ''} · 上一节 {rows.get('date') or ''}",
+                         action=("收起", self._recap_dismiss))
+        # ⚠️ 分区标题的图标一律走 **SF Symbols 单色**（作者 2026-10-17：emoji 全换掉，
+        #    跟文字同一色阶）—— 符号名由这里给，拿不到符号就只剩文字（不空洞）。
+        if rows.get("points"):
+            self._card_label("上节的知识点（按讲的顺序）", "book")
+            for i, pt in enumerate(rows["points"][:CARD_POINTS_MAX], 1):
+                # ⚠️ 名字与解释**同一行**（原型 `.rlist li` 的排法）：六个知识点 ×2 行
+                #    在 60% 屏高的卡片里才放得下别的块。名字 Medium + 解释常规做层级。
+                self._card_point(i, str(pt.get("name") or ""), str(pt.get("explain") or ""))
+        if rows.get("stars"):
+            self._card_label("最值得记的重点", "star")
+            for s in rows["stars"][:CARD_STARS_MAX]:
+                self._card_text("· " + str(s))
+        if rows.get("open"):
+            self._card_label("上节没解决的", "questionmark.circle")
+            for s in rows["open"][:CARD_OPEN_MAX]:
+                self._card_text("· " + str(s))
+        if rows.get("duties"):
+            self._card_label("临近的一些事儿", "pin")
+            for d in rows["duties"][:CARD_DUTY_MAX]:
+                when = str(d.get("when") or "")
+                self._card_text(f"· {d.get('type') or ''} {d.get('title') or ''}"
+                                + (f"　{when}" if when else ""))
+        if rows.get("today"):
+            self._card_label("今天可能讲什么", "doc.text")
+            for t in rows["today"][:2]:
+                self._card_text("· " + str(t))
+        self._card_done()
+        return True
+
+    def _recap_dismiss(self, reason: str = "manual") -> None:
+        """手动点掉 / 教授开口后自动淡出 → 顶栏留「回顾」可回看。
+
+        ⚠️ `reason`（2026-10-17 加）**只影响测试模式的那条记录**，行为一字不变：
+           `"manual"` = 卡上那颗「收起」；`"auto"` = 教授开口后淡出；
+           `"toggle"` = 顶栏「回顾」按钮收起来的（它算"展开/收起次数"，**不是**
+           "手动收起" —— 作者要看的是两颗不同的东西）。
+        """
+        if reason == "manual":
+            self._feature("recap.dismiss")
+        self._recap_touched = True
+        self._recap_on = False
+        self._card_close()
+
+    def _recap_announce(self) -> None:
+        """回顾**上屏**了 —— 记一条（`recap.shown`）。三条开卡路径共用（出现次数才算对）。"""
+        self._recap_t0 = time.monotonic()
+        self._feature("recap.shown", blocks=list(self._recap_blocks or ()))
+
+    def _recap_toggle(self) -> None:
+        if self._recap_on:
+            self._feature("recap.toggle", on=False)
+            self._recap_dismiss("toggle")
+        elif self._recap_data is not None:
+            self._note("recap_open")
+            self._feature("recap.toggle", on=True)
+            self._recap_on = True
+            self._card_open("recap")
+            if self._recap_fill():
+                self._recap_announce()
+
+    def _recap_maybe_hide(self) -> None:
+        """教授开口（第一条有效草稿 / 定稿）→ 回顾让位（同 `EXIT_S` 的淡出节奏）。"""
+        if not self._recap_on:
+            return
+        self._note("recap_auto_hide")
+        # ⭐ 功能使用度：**距出现多少秒**（作者问的是"教授讲多久之后回顾才让位"）。
+        #    ⚠️ 动画开始前就算 —— 那 0.2s 的淡出不该算进"出现时长"。
+        self._feature("recap.auto_hide", s=(time.monotonic() - self._recap_t0)
+                      if self._recap_t0 is not None else None)
+        self._recap_t0 = None
+        try:
+            from AppKit import NSAnimationContext
+            if not motion.reduce_motion() and self._card_view is not None:
+                def _fade(ctx):
+                    ctx.setDuration_(motion.EXIT_S)
+                    self._card_view.animator().setAlphaValue_(0.0)
+                NSAnimationContext.runAnimationGroup_completionHandler_(
+                    _fade, lambda: self._recap_dismiss("auto"))
+                self._card_view.setAlphaValue_(1.0)
+                return
+        except Exception:                                 # noqa: BLE001
+            pass
+        self._recap_dismiss("auto")                       # 「减弱动态效果」/ 起不来 → 直接换
+
+    # ---- 卡片里的小积木（都只是 `_card_add` 的薄包装）----
+    def _card_label(self, text: str, symbol: str = "") -> None:
+        """分区标题（可选一个 **SF Symbols** 单色小图标 —— 与文字同一色阶）。
+
+        ⚠️ `symbol` 是符号**名**（`book` / `star` / `pin`…），不是 emoji：
+           作者 2026-10-17 拍板「emoji 全换单色 SF Symbols，跟文字同色阶」。
+        """
+        self._card_add("label", text, symbol=symbol)
+
+    def _card_note(self, text: str, symbol: str = "") -> None:
+        """卡片上的一行说明（可配一个 **SF Symbols** 单色小图标 —— 同分区标题那一套）。"""
+        self._card_add("note", text, symbol=symbol)
+
+    def _card_text(self, text: str, *, strong: bool = False, alpha: float = 0.0) -> None:
+        self._card_add("text", text, strong=strong,
+                       alpha=alpha or (0.88 if strong else 0.78))
+
+    def _card_point(self, num: int, name: str, expl: str) -> None:
+        """知识点一行：**名字 Medium + 解释常规、同一行**（作者：字重对比拉出层级）。
+
+        ⚠️ 属性串（一段文字两种字重）—— 字号走 `_ui_font`，颜色只走白 alpha 两档，
+           不另起一套排版语言。`blk["text"]` 留纯文字版（量高 / 调试用）。
+        """
+        plain = f"{num} {name}" + (f"：{expl}" if expl else "")
+        attr = None
+        try:
+            from AppKit import NSMutableAttributedString, NSAttributedString
+            a = NSMutableAttributedString.alloc().init()
+            a.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
+                f"{num} ", {"NSFont": _ui_font(CARD_TEXT_SZ),
+                            # ⚠️ 序号也要过可读下限（0.62）：太暗时磨砂会把底下的暖色透上来，
+                            #    白字读起来像"黄的"（2026-10-17 在截图上抓到）。
+                            "NSColor": self._NSColor.whiteColor().colorWithAlphaComponent_(0.62)}))
+            a.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
+                name, {"NSFont": _ui_font(CARD_TEXT_SZ, BTN_WEIGHT_MED),
+                       "NSColor": self._NSColor.whiteColor().colorWithAlphaComponent_(0.93)}))
+            if expl:
+                a.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
+                    f"：{expl}", {"NSFont": _ui_font(CARD_TEXT_SZ),
+                                  "NSColor": self._NSColor.whiteColor().colorWithAlphaComponent_(0.68)}))
+            attr = a
+        except Exception:                                 # noqa: BLE001
+            attr = None                                   # 造不出属性串 → 退回纯文字
+        self._card_add("point", plain, attr=attr, name=name, expl=expl)
+
+    def _card_quote(self, text: str, meta: str) -> None:
+        self._card_add("quote", text)
+        self._card_add("meta", meta)
+
+    def _card_field(self, key: str, value: str, *, side: str = "") -> None:
+        self._card_add("field", key=key, value=value, side=side)
+
+    def _card_chips(self, labels, chosen: str, on_pick) -> None:
+        self._card_add("chips", chips=list(labels), chosen=str(chosen), on_pick=on_pick)
+
+    def _card_actions(self, specs, on_act, *, align: str = "left") -> None:
+        """按钮行。`align="right"` = 这一排**贴右**（收尾卡的页脚用它，与行内按钮同一条右缘）。"""
+        self._card_add("buttons", buttons=list(specs), on_act=on_act, align=align)
+
+    def _card_duty_row(self, item) -> None:
+        """一整行的收尾条目（视图由 `_card_place_duty_row` **一次**造好并缓存）。"""
+        self._card_add("duty_row", duty_row=dict(item))
+
+    def _card_field_done(self) -> None:
+        """输入框里按了回车 / Esc —— 结束编辑、交还 key（面板不自留键盘）。"""
+        try:
+            self._panel.makeFirstResponder_(None)
+        except Exception:                             # noqa: BLE001
+            pass
+        self._release_focus()
+
+    def _card_read_fields(self) -> dict:
+        """现取卡片里两个输入框的值 → `{"title":…, "date":…, "time":…}`。"""
+        out: dict = {}
+        for key, fld, _box in getattr(self, "_card_fields", []):
+            try:
+                val = str(fld.stringValue() or "").strip()
+            except Exception:                             # noqa: BLE001
+                continue
+            if key == "title":
+                out["title"] = val
+            elif key == "date":
+                out["date"] = val[:10]
+                out["time"] = val[10:].strip()
+        return out
+
+    # ---- 接管区的公共机制 ----
+    def _ensure_card_view(self):
+        if self._card_view is None:
+            from AppKit import NSView
+            v = NSView.alloc().initWithFrame_(((0, 0), (0, 0)))
+            v.setWantsLayer_(True)
+            try:
+                # ⚠️ 2026-10-17 作者：「底下的色块太丑」—— 那块 (0.09,0.09,0.11,0.55) 的
+                #    深色底**删了**。卡片只是面板里的一区（thin 材质的语义是给交互元素，
+                #    thick 才是"压住底图"），现在只留一道发丝边把这一区框出来。
+                layer = v.layer()
+                layer.setCornerRadius_(12.0)
+                scale = self._backing_scale()
+                layer.setBorderWidth_(1.0 / (scale or 2.0))
+                layer.setBorderColor_(
+                    self._NSColor.whiteColor().colorWithAlphaComponent_(CARD_HAIRLINE).CGColor())
+            except Exception:                             # noqa: BLE001
+                pass
+            self._ve.addSubview_(v)
+            self._card_view = v
+            # ⭐ 卡片内容区：一个**内部**滚动视图（作者 2026-10-17「上卡下字幕」——
+            #    卡片高于转录区约 60% 时内容在卡里滚，不再"整块藏掉"）。
+            #    内容块挂 `_card_doc`；页脚按钮挂 `_card_view`（永远点得到，见 `_card_host`）。
+            from AppKit import (NSScrollView, NSView, NSScrollElasticityAutomatic)
+            sc = NSScrollView.alloc().initWithFrame_(((0.0, 0.0), (0.0, 0.0)))
+            sc.setDrawsBackground_(False)              # 卡片只有发丝边，滚动区不许再铺底
+            sc.setHasVerticalScroller_(True)
+            sc.setAutohidesScrollers_(True)            # 不需要时不常驻（同转录区）
+            try:
+                sc.setVerticalScrollElasticity_(NSScrollElasticityAutomatic)
+            except Exception:                          # noqa: BLE001
+                pass
+            doc = NSView.alloc().initWithFrame_(((0.0, 0.0), (0.0, 0.0)))
+            sc.setDocumentView_(doc)
+            sc.setHidden_(False)
+            v.addSubview_(sc)
+            self._card_scroll, self._card_doc = sc, doc
+        return self._card_view
+
+    def _card_host(self):
+        """卡片里**内容块**的父视图 —— 卡片内部那个可滚动的文档（作者 2026-10-17）。
+
+        ⚠️ 为什么不再直接用 `_card_view`：卡片高了要在**自己里面**滚（下面留字幕），
+           内容得挂在文档视图上才滚得动。
+        ⚠️ 页脚按钮**刻意**不在这里（`_card_place_buttons(..., host=…)` 指名给外框）：
+           「记下 / 全部忽略」必须永远点得到，不许跟着内容滚出去。
+        """
+        self._ensure_card_view()
+        return self._card_doc if self._card_doc is not None else self._card_view
+
+    @staticmethod
+    def _backing_scale() -> float:
+        """发丝边宽 = 1 **物理**像素（Retina 上 0.5pt）—— 全 app 一套口径。"""
+        try:
+            from AppKit import NSScreen
+            s = NSScreen.mainScreen()
+            return float(s.backingScaleFactor()) if s else 2.0
+        except Exception:                                 # noqa: BLE001
+            return 2.0
+
+    def _card_pill(self, v, *, h: float, fill: float, border: float,
+                   radius: float | None = None) -> None:
+        """给一个标签铺「轻底 + 发丝边」（胶囊 / 输入框 / 按钮的**唯一入口**）。
+
+        ⚠️ 底色走 **layer**（`drawsBackground_` 关掉）：CALayer 的 `cornerRadius` 会裁它
+           自己的背景色，而 NSTextField 自己画的底色不受圆角约束（会露出直角）。
+        """
+        try:
+            v.setDrawsBackground_(False)
+        except Exception:                                 # noqa: BLE001
+            pass
+        try:
+            v.setWantsLayer_(True)
+            layer = v.layer()
+            layer.setCornerRadius_(float(radius if radius is not None else h / 2.0))
+            layer.setBackgroundColor_(
+                self._NSColor.whiteColor().colorWithAlphaComponent_(float(fill)).CGColor()
+                if fill > 0 else None)
+            scale = self._backing_scale()
+            layer.setBorderWidth_(1.0 / (scale or 2.0) if border > 0 else 0.0)
+            if border > 0:
+                layer.setBorderColor_(
+                    self._NSColor.whiteColor().colorWithAlphaComponent_(float(border)).CGColor())
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _symbol_icon(self, parent, name: str, pt: float, alpha: float):
+        """造一个 **SF Symbols 单色**小图（`contentTintColor` 跟着白 alpha 走）。
+
+        作者 2026-10-17：emoji 全换单色 SF Symbols，跟文字同一色阶。
+        拿不到符号（没 AppKit / 系统没这个符号）→ `None`，调用方**退回纯文字**
+        （绝不在屏幕上留一个当啷的空格）。
+        """
+        try:
+            from AppKit import (NSImage, NSImageSymbolConfiguration, NSImageView,
+                                NSImageScaleProportionallyDown)
+            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, name)
+            if img is None:
+                return None
+            img = img.imageWithSymbolConfiguration_(
+                NSImageSymbolConfiguration.configurationWithPointSize_weight_(float(pt), 0.23))
+            if img is None:
+                return None
+            img.setTemplate_(True)                        # 模板图 → 下面那 tint 才生效
+            iv = NSImageView.alloc().initWithFrame_(((0, 0), (pt + 2.0, pt + 2.0)))
+            iv.setImage_(img)
+            try:
+                iv.setImageScaling_(NSImageScaleProportionallyDown)
+            except Exception:                             # noqa: BLE001
+                pass
+            try:
+                iv.setContentTintColor_(
+                    self._NSColor.whiteColor().colorWithAlphaComponent_(float(alpha)))
+            except Exception:                             # noqa: BLE001
+                pass
+            parent.addSubview_(iv)
+            return iv
+        except Exception:                                 # noqa: BLE001
+            return None
+
+    def _tv_scroll_state(self):
+        """字幕区此刻的**滚动位置 + 跟随状态**（`(origin_y, at_bottom)`；取不到 → `None`）。
+
+        ⚠️ 关卡时要还原的就是这一对（作者 2026-10-17：「滚动位置/跟随状态不乱」）——
+           视口一高一矮，同一个 `origin` 指向的内容会变，所以还原要**在摆回全高之后**做。
+        """
+        try:
+            clip = self._tv._scroll.contentView()
+            return (float(clip.bounds().origin.y), bool(self._tv.is_at_bottom()))
+        except Exception:                                 # noqa: BLE001
+            return None
+
+    def _tv_scroll_restore(self, st) -> None:
+        """把字幕区还原到存下来的那个位置（`_tv_scroll_state` 的对手）。"""
+        if not st:
+            return
+        origin, at_bottom = st
+        try:
+            if at_bottom:
+                self._tv.scroll_to_bottom()               # 位置等价，还顺手把 _follow 摆回
+                return
+            clip = self._tv._scroll.contentView()
+            doc_h = float(self._tv._doc.frame().size.height)
+            clip.scrollToPoint_((0.0, min(max(0.0, origin),
+                                           max(0.0, doc_h - clip.bounds().size.height))))
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _card_open(self, kind: str) -> None:
+        """进卡片态：卡片钉在转录区**顶边**、字幕留在它下面继续滚（「上卡下字幕」）。
+
+        ⚠️ 与旧版的两处不同（都**删掉**了，作者 2026-10-17 拍板）：
+           · 不再 `_tv._scroll.setHidden_(True)` —— 字幕要留在卡片下面（不挡字幕）；
+           · 不再自动 `_apply_mode(False)` —— **窗口不随卡片伸缩**（判据：开关卡片
+             前后 `_panel.frame()` 完全相等）。
+        ⚠️ 尺寸只在**进入**时改一次（旧版那记「同答案接管的纪律」的话仍成立：`_apply_mode`
+           会取 NSScreen、重设全部 subview frame、整窗重绘 —— 每块内容都调一次等于
+           每帧重建面板。这里已经不再调它，但**每帧不重摆**这条纪律照旧）。
+        """
+        self._ensure_card_view()
+        self._card_kind = kind
+        self._card_clear_blocks()
+        self._card_fields = []
+        self._card_focus = {}
+        self._card_scroll_top = True          # 新卡：内容从**顶部**看起
+        self._card_sub_scroll = self._tv_scroll_state()   # 存下字幕区的滚动位置
+        self._card_view.setHidden_(False)
+        self._layout()
+        self._mark_dirty(urgent=True)
+
+    def _card_close(self) -> None:
+        self._card_kind = ""
+        self._duty_open_id = ""
+        self._duty_wrapup_done = True
+        self._card_clear_blocks()
+        self._card_fields = []
+        self._card_focus = {}
+        if self._card_view is not None:
+            self._card_view.setHidden_(True)
+        self._layout()                        # 转录区恢复**全高**（`_card_sub_h` 见没卡）
+        self._tv_scroll_restore(self._card_sub_scroll)
+        self._card_sub_scroll = None
+        self._card_scroll_top = False
+        self._mark_dirty(urgent=True)
+        # ⚠️ 关了才刷新小卡：卡片开着时它藏起来了（`_layout` 里那个 `not _card_kind`）
+        self.duty_update(self._duty_items)
+
+    def _card_clear_blocks(self) -> None:
+        for v in self._card_blocks:
+            try:
+                v.removeFromSuperview()
+            except Exception:                             # noqa: BLE001
+                pass
+        self._card_blocks = []
+        self._card_pending = []
+
+    # ---- 卡片排版：一个自上而下的游标 ------------------------------------------
+    #
+    # 一块 = `{"kind": …, "view": …, "extra": …}`；`view` 在**加块时**造一次，
+    # `_card_relayout()` 只写 frame（宽度变了要重排：`_layout` 每帧会调它）。
+    def _card_reset(self, title: str, sub: str = "", *, action=None) -> None:
+        """起一张卡：标题（+ 右上角小动作，原型 `rcap-x` 那个「收起」）+ 副标题。"""
+        self._card_clear_blocks()
+        self._card_title = str(title or "")
+        self._card_sub_text = str(sub or "")
+        self._card_hdr_act = None
+        self._card_add("title")
+        if action:
+            self._card_add("hdr_action", text=str(action[0]), on_act=action[1])
+            self._card_hdr_act = self._card_pending[-1]
+        self._card_add("sub")
+
+    def _card_add(self, kind: str, text: str = "", *, size: float = CARD_TEXT_SZ,
+                  alpha: float = 0.78, strong: bool = False, wrap: bool = False,
+                  key: str = "", value: str = "", side: str = "",
+                  chips=None, chosen: str = "", on_pick=None,
+                  buttons=None, on_act=None, duty_row=None, meta: str = "",
+                  align: str = "left", symbol: str = "", attr=None,
+                  name: str = "", expl: str = "") -> None:
+        blk = {"kind": kind, "text": str(text or ""), "size": size, "alpha": alpha,
+               "strong": strong, "wrap": wrap, "key": key, "value": value,
+               "side": str(side or ""), "chips": chips, "chosen": chosen,
+               "on_pick": on_pick, "buttons": buttons, "on_act": on_act,
+               "duty_row": duty_row, "meta": str(meta or ""), "align": str(align),
+               "view": None,
+               "extra": None, "rows": [], "symbol": str(symbol or ""),
+               "attr": attr, "name": str(name or ""), "expl": str(expl or ""),
+               "icon": False, "h": 0.0, "h_w": 0.0, "box": None, "fld": None,
+               "mid": 0.0}
+        blk["view"] = self._card_make(blk)    # 视图由各自的 maker 登记进 `_card_blocks`
+        if blk["view"] is not None and blk["kind"] in _CARD_TEXT_KINDS:
+            if attr is not None:
+                blk["view"].setAttributedStringValue_(attr)
+            else:
+                blk["view"].setStringValue_(blk["text"])
+        if blk["kind"] == "title":
+            blk["view"].setStringValue_(self._card_title)
+        elif blk["kind"] == "sub":
+            blk["view"].setStringValue_(self._card_sub_text)
+        self._card_pending.append(blk)
+
+    def _card_make_field(self, blk):
+        """输入行那块的**装配**：外壳 + 内缩字段 + （日期）右侧那行「推算」说明。"""
+        box, fld = self._card_field_box(str(blk["value"] or ""))
+        d = _make_input_delegate(lambda f=fld: self._card_field_done(),
+                                 lambda f=fld: self._card_field_done())
+        self._targets.append(d)               # ⚠️ setDelegate_ 是弱引用，必须保命
+        fld.setDelegate_(d)
+        self._card_fields.append((blk["key"], fld, box))
+        blk["fld"] = fld
+        if blk["side"]:
+            blk["extra"] = self._card_new_label(CARD_META_SZ, CARD_META_ALPHA)
+        blk["box"] = box
+        return box
+
+    def _card_make(self, blk):
+        kind = blk["kind"]
+        if kind == "title":
+            return self._card_new_label(CARD_TITLE_SZ, 0.95, strong=True)
+        if kind == "sub":
+            return self._card_new_label(CARD_SUB_SZ, CARD_META_ALPHA)
+        if kind == "label":
+            lbl = self._card_new_label(CARD_LABEL_SZ, CARD_LABEL_ALPHA,
+                                       weight=CARD_LABEL_WT)
+            if blk.get("symbol"):
+                iv = self._symbol_icon(self._card_host(), blk["symbol"],
+                                       CARD_SYMBOL_PT, CARD_LABEL_ALPHA)
+                if iv is not None:
+                    self._card_blocks.append(iv)      # ⚠️ 谁建的谁进清单 —— 关卡片时要收干净
+                    blk["extra"] = iv
+                    blk["icon"] = True
+            return lbl
+        if kind == "note":
+            lbl = self._card_new_label(CARD_META_SZ, CARD_META_ALPHA, wrap=True)
+            if blk.get("symbol"):
+                iv = self._symbol_icon(self._card_host(), blk["symbol"],
+                                       CARD_META_SZ + 1.0, CARD_META_ALPHA)
+                if iv is not None:
+                    self._card_blocks.append(iv)
+                    blk["extra"] = iv
+                    blk["icon"] = True
+            return lbl
+        if kind == "text":
+            return self._card_new_label(blk["size"], blk["alpha"], strong=blk["strong"],
+                                        wrap=True)
+        if kind == "point":
+            return self._card_new_label(CARD_TEXT_SZ, 0.88, wrap=True)
+        if kind == "quote":
+            return self._card_new_label(CARD_TEXT_SZ, 0.78, wrap=True)
+        if kind == "meta":
+            return self._card_new_label(CARD_META_SZ, CARD_META_ALPHA)
+        if kind == "field":
+            return self._card_make_field(blk)
+        if kind == "hdr_action":
+            lbl = self._card_new_label(10.5, 0.45)
+            lbl.setStringValue_(blk["text"])
+            hit = _make_click_view(lambda b=blk: (self._release_focus(),
+                                                   b["on_act"]() if b["on_act"] else None))
+            self._card_host().addSubview_(hit)
+            self._card_blocks.append(hit)
+            blk["extra"] = hit
+            return lbl
+        return None                                      # chips / buttons / duty_row
+
+    def _card_new_label(self, size, alpha, *, strong=False, wrap=False, weight=None):
+        lbl = self._label(size, self._NSColor.whiteColor().colorWithAlphaComponent_(alpha),
+                          0 if wrap else 1, self._wrap if wrap else self._trunc)
+        if strong or weight is not None:
+            # ⚠️ 走 `_ui_font`（tnum + palt 的唯一出口）—— 裸 `NSFont.systemFontOfSize_weight_`
+            #    会被 `test_fontmotion_A` 判成"又抄了一份没有 tnum 的字体"（A2 收拢）。
+            lbl.setFont_(_ui_font(size, 0.4 if strong else float(weight)))
+        lbl.setTextColor_(self._NSColor.whiteColor().colorWithAlphaComponent_(alpha))
+        self._card_host().addSubview_(lbl)
+        self._card_blocks.append(lbl)         # ⚠️ 谁建的谁进清单 —— 关卡片时要收干净
+        return lbl
+
+    def _card_btn_style(self, b, role: str) -> None:
+        """按 role 刷一颗胶囊的**层**（填充 / 描边 / 字色 / 字重）—— 唯一配色入口。"""
+        fill, border, fg, weight = BTN_STYLE.get(str(role), BTN_STYLE["secondary"])
+        try:
+            b.setFont_(_ui_font(CARD_BTN_FONT, weight) if weight else _ui_font(CARD_BTN_FONT))
+        except Exception:                                 # noqa: BLE001
+            pass
+        try:
+            b.setContentTintColor_(
+                self._NSColor.whiteColor().colorWithAlphaComponent_(float(fg)))
+        except Exception:                                 # noqa: BLE001
+            pass
+        try:
+            title = b.title()
+            if title:
+                from AppKit import (NSMutableAttributedString, NSMutableParagraphStyle,
+                                    NSTextAlignmentCenter)
+                a = NSMutableAttributedString.alloc().initWithString_(str(title))
+                # ⚠️⚠️ 属性串里的**段落样式**决定对齐 —— 不写它，`setAlignment_` 白设，
+                #     文字照样贴左（作者这轮报的头号问题，2026-10-17 实测）。
+                para = NSMutableParagraphStyle.alloc().init()
+                para.setAlignment_(NSTextAlignmentCenter)
+                a.addAttributes_range_({"NSFont": b.font(),
+                                        "NSColor": self._NSColor.whiteColor()
+                                        .colorWithAlphaComponent_(float(fg)),
+                                        "NSParagraphStyle": para},
+                                       (0, a.length()))
+                b.setAttributedTitle_(a)
+        except Exception:                                 # noqa: BLE001
+            pass
+        try:
+            b.setWantsLayer_(True)
+            layer = b.layer()
+            layer.setCornerRadius_(CARD_BTN_H / 2.0)
+            scale = self._backing_scale()
+            layer.setBorderWidth_(1.0 / (scale or 2.0) if border > 0 else 0.0)
+            if border > 0:
+                layer.setBorderColor_(
+                    self._NSColor.whiteColor().colorWithAlphaComponent_(border).CGColor())
+            layer.setBackgroundColor_(
+                self._NSColor.whiteColor().colorWithAlphaComponent_(fill).CGColor()
+                if fill > 0 else None)
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _card_button(self, label: str, role: str, on_click, *, host=None):
+        """卡片里**所有**按钮 / 类型胶囊的唯一工厂（作者 2026-10-17 点名）。
+
+        复用的就是顶栏「双语」那套模式胶囊：**无边框 `NSButton` + 圆角层**
+        （1 物理像素描边、圆角 = 高/2，同 `MODE_CHIP_*` 的做法），文字由 AppKit
+        **水平垂直居中**（`NSTextAlignmentCenter`）—— 全 app 只有这一个函数造按钮，
+        不许任何一处再自己拼「NSTextField + 背景」（那正是这轮几何 bug 的来源）。
+
+        返回造好、接好 target/action、加进卡片的 `NSButton`（宽度由调用方摆）。
+
+        ⚠️ `host` = 挂到哪个父视图（默认 `_card_host()` = 卡片内部那个滚动文档）。
+           **页脚那一行必须传 `self._card_view`** —— 它要永远钉在卡片底部点得到，
+           不然内容一滚，「记下 / 全部忽略」就被滚出视野（等于把人关在卡片里）。
+        """
+        from AppKit import (NSButton, NSButtonTypeMomentaryChange, NSMakeRect,
+                            NSTextAlignmentCenter)
+        b = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 10.0, CARD_BTN_H))
+        b.setBordered_(False)
+        try:
+            b.setButtonType_(NSButtonTypeMomentaryChange)
+        except Exception:                                 # noqa: BLE001
+            pass
+        b.setTitle_(str(label))
+        b.setFont_(_ui_font(CARD_BTN_FONT))
+        # ⚠️ 对齐要设到 **cell** 上（`NSButton.setAlignment_` 在这里不落地 —— 实测
+        #    `cell().alignment()` 仍是 1=左对齐，正是作者看到的「文字贴左」）。
+        try:
+            from AppKit import NSTextAlignmentCenter
+            b.cell().setAlignment_(NSTextAlignmentCenter)
+        except Exception:                                 # noqa: BLE001
+            pass
+        b.setAlignment_(NSTextAlignmentCenter)            # ⚠️ 居中是判据（`test_duty_card_ui`）
+        self._card_btn_style(b, role)
+        target = _make_button_target(lambda: (self._release_focus(), on_click()))
+        self._targets.append(target)                      # 强引用，防 GC
+        b.setTarget_(target)
+        b.setAction_("clicked:")
+        (host if host is not None else self._card_host()).addSubview_(b)
+        self._card_blocks.append(b)
+        return b
+
+    def _card_button_w(self, b, label: str) -> float:
+        """一颗胶囊的整宽 = 文字宽 + 左右留白 ×2（判据：留白 ≥ `CARD_BTN_PAD_X`）。"""
+        return _text_width(str(label), b.font()) + 2.0 * CARD_BTN_PAD_X
+
+    def _card_field_box(self, value: str):
+        """一个输入行：**外壳**（28 高的圆角层，就是按钮那一套）+ 内缩 8pt 的输入框。
+
+        ⚠️ `NSTextField` 自己没有 padding 这一项 —— 用「外壳画底、字段内缩 8pt」实现，
+           判据直接量 `字段.frame().x - 外壳.frame().x == FIELD_PAD_X`。
+        返回 `(box, fld)`；**聚焦指示画在外壳上**（`panel.focus_border(host=box)`）：
+        静止 / 聚焦两档 α 就是 `FIELD_BORDER` / `FIELD_BORDER_FOCUS`（= panel 那套）。
+        ⚠️ 环的那一半也在同一个入口里关掉了（`panel.FOCUS_RING_*` 那段文件头讲了
+           「关环 + 补替代」为什么是一件事的两半）—— 这里原来写的是
+           `setFocusRingType_(0)`，**0 是 Default 不是 None**，蓝环一直在。
+        """
+        from AppKit import NSView, NSTextField, NSMakeRect
+        box = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 10.0, CARD_BTN_H))
+        box.setWantsLayer_(True)
+        self._card_pill(box, h=CARD_BTN_H, fill=FIELD_FILL, border=FIELD_BORDER,
+                        radius=FIELD_RADIUS)
+        # ⚠️ 用 `panel.focus_field` **不是为了那几条事件钩子**（下面每帧的
+        #    `_card_fields_focus_look` 才是权威）—— 是因为它一个入口就把「关环 +
+        #    白细框」两半都做齐了，别再手写一遍那两条（曾经漏掉一半的那次见 docstring）。
+        fld, handle = panel.focus_field(
+            NSTextField, NSMakeRect(FIELD_PAD_X, 0.0, 10.0, CARD_BTN_H),
+            radius=FIELD_RADIUS, host=box, key="CardField")
+        if fld is None:
+            fld = NSTextField.alloc().initWithFrame_(
+                NSMakeRect(FIELD_PAD_X, 0.0, 10.0, CARD_BTN_H))
+        if not hasattr(self, "_card_focus"):
+            self._card_focus = {}
+        self._card_focus[fld] = handle          # 句柄给每帧的聚焦同步读（见下）
+        try:
+            # ⚠️ 先把 cell 换掉、**再**设其余属性：这些 setter 都转发到 cell 上，
+            #    顺序反了会把刚设好的打在旧 cell 上（贴顶那个毛病就回来了）。
+            fld.setCell_(_make_center_cell().alloc().init())
+        except Exception as e:                            # noqa: BLE001
+            print(f"⚠ 输入框居中 cell 装不上({str(e)[:40]})；退回默认（文字会贴顶）")
+        fld.setEditable_(True); fld.setSelectable_(True)
+        fld.setBezeled_(False); fld.setBordered_(False)
+        fld.setDrawsBackground_(False)
+        # ⚠️⚠️ **环的类型挂在 cell 上** —— 上面那句 `setCell_()` 会把刚设好的
+        #    `NSFocusRingTypeNone` 一起换掉（新 cell 的默认是 `Default`＝蓝环照画）。
+        #    所以这一步必须放在**换 cell 之后**（2026-10-17 是本文件那条
+        #    「窗口里所有输入框都没有系统环」的判据抓出来的：两格外壳都对、
+        #    环类型却是 0）。
+        panel.no_focus_ring(fld)
+        fld.setFont_(_ui_font(12.5))
+        fld.setTextColor_(self._NSColor.whiteColor())
+        fld.setMaximumNumberOfLines_(1)
+        fld.setLineBreakMode_(self._trunc)
+        fld.setStringValue_(str(value or ""))
+        box.addSubview_(fld)
+        self._card_host().addSubview_(box)
+        self._card_blocks.append(box)
+        self._targets.append(box)                         # 强引用（同其他子视图）
+        return box, fld
+
+
+    def _card_defer(self) -> None:
+        """把「重画当前卡片」排到**下一帧**（`pump` 里消费）。
+
+        ⚠️ 为什么必须延迟：重画会 `removeFromSuperview` 掉整张卡的所有子视图，
+           而这条路的入口常常是**这些子视图自己的点击回调**（「记下」「类型 chip」
+           「忽略」）—— 在派发事件的回调里把视图拆掉是踩钢丝。排到下一帧就没有
+           这个问题，代价是 ≤ 一帧（空闲档 0.1 s）的视觉延迟。
+        """
+        self._card_redo = True
+        self._mark_dirty(urgent=True)
+
+    def _card_refill(self) -> None:
+        """按 `_card_kind` 重画当前卡片（`_card_defer` 的落点）。"""
+        k = self._card_kind
+        if not k:
+            return
+        if k == "duty":
+            it = self._duty_get(self._duty_open_id)
+            if it is None:
+                self._card_close()
+            else:
+                self._duty_card_fill(it)
+        elif k == "wrapup":
+            self._wrapup_card_fill()
+        elif k == "recap":
+            self._recap_fill()
+
+    def _card_done(self) -> None:
+        """一块卡片内容填完了：摆一次 frame + 标脏（**每个 fill 的最后一步**）。
+
+        ⚠️ 忘了它 = 卡片空白（子视图都造好了、frame 还停在 0×0）—— 实测踩过一次。
+        """
+        self._card_relayout()
+        self._mark_dirty(urgent=True)
+
+    @staticmethod
+    def _text_baseline_off(view, height: float) -> float:
+        """单行文本框里**基线**相对 frame 底边的偏移（AppKit 的 drawing rect + 字体 ascent）。
+
+        ⚠️ 不能按 `ascender` 硬算：输入框换了居中 cell 之后行盒被摆到中线，基线跟着下移
+           （实测 6.64 + 11.9 = 18.5，而不是 11.9）——「推算」那行要跟框内文字对齐，
+           就得按**同一个口径**量。
+        """
+        try:
+            from AppKit import NSMakeRect
+            r = view.cell().drawingRectForBounds_(
+                NSMakeRect(0.0, 0.0, max(20.0, float(view.frame().size.width)),
+                           float(height)))
+            return float(r.origin.y) + float(view.font().ascender())
+        except Exception:                                 # noqa: BLE001
+            try:
+                return float(view.font().ascender())
+            except Exception:                             # noqa: BLE001
+                return float(height) / 2.0
+
+    def _card_icon_w(self, blk) -> float:
+        """块前面那个小图标占的横向（图标 + 间距）；没有图标 → 0。
+
+        ⚠️ 量高与摆位**必须同一个口径**：量字时按整宽算、摆位时缩了 16pt，
+           折行点就不同 → 卡片高度会差一行（底部那行被裁）。
+        """
+        return (float(CARD_SYMBOL_PT) + 2.0 + 5.0) if blk.get("icon") else 0.0
+
+    def _card_block_h(self, blk, w: float) -> float:
+        """一个块要占多高（px）。**按宽度备忘**在块自己身上（`h` / `h_w`）。
+
+        ⚠️ 为什么备忘：`_card_relayout` 每帧都被 `_layout` 叫（上课时转录还在流，每帧都
+           有 flush）—— 折行量字（`_measure_text_h`）不便宜，而卡片开着的时候块是**死的**
+           （只在重画时整批重建）。宽度变了（拖窗口）才重算。
+        """
+        v = blk["view"]
+        if blk["wrap"]:
+            w = max(40.0, w - self._card_icon_w(blk))
+            if blk.get("h_w") != round(w, 1):
+                try:
+                    attr = blk.get("attr")
+                    if attr is not None:
+                        h = float(_measure_attr_h(attr, w))
+                    else:
+                        h = float(_measure_text_h(str(v.stringValue() or ""), w, v.font()))
+                except Exception:                         # noqa: BLE001
+                    h = CARD_LINE_SZ
+                blk["h_w"] = round(w, 1)
+                blk["h"] = max(h, _card_line_h(v.font()))
+            return float(blk["h"])
+        if blk["kind"] == "field":
+            return CARD_BTN_H
+        return _card_line_h(v.font())
+
+    def _card_natural_h(self, w: float, pending, footer) -> float:
+        """整张卡**内容自然高度**（含内边距与页脚）—— 卡片高度跟着内容走（作者 2026-10-17）。
+
+        ⚠️ 和 `_card_relayout` 用**同一个** `_card_block_h`：两处各算一套高度的话，
+           卡片高度与内容会差一两个像素，看起来像"底下永远悬着一条空白"。
+        """
+        h = 2 * CARD_PAD
+        for i, blk in enumerate(pending):
+            kind = blk["kind"]
+            if kind == "hdr_action":
+                continue
+            if kind == "sub" and not self._card_sub_text:
+                continue
+            if kind in ("chips", "buttons"):
+                h += CARD_BTN_H + 2.0
+                continue
+            if kind == "duty_row":
+                h += CARD_DUTY_ROW_H + 1.0
+                continue
+            v = blk["view"]
+            if v is None:
+                continue
+            # ⚠️ 与 `_card_relayout` 同一份规则：分区标题之上多留 `CARD_LABEL_GAP`
+            h += self._card_block_h(blk, w) + 2.0 + (
+                CARD_LABEL_GAP if (kind == "label" and i > 0) else 0.0)
+        h += CARD_FOOTER_H if footer is not None else 0.0
+        return h
+
+    def _card_plan(self) -> dict:
+        """卡片 + 字幕区的**唯一一份几何**（作者 2026-10-17「上卡下字幕」）。
+
+        返回 `{}`（没卡）或：
+
+        | 键 | 是什么 |
+        |---|---|
+        | `card` | 卡片外框（面板坐标，钉转录区**顶边**） |
+        | `doc_h` | 卡片**内容文档**高度（高过视口 = 卡片内部可以滚） |
+        | `clip_h` | 内容视口高（= 卡片高 − 上下内边距 − 页脚） |
+        | `shift` | 文档坐标 = 卡片坐标 + `shift`（页脚高；没页脚是 0） |
+        | `pending` / `footer` | 摆块用的两份清单（页脚已从 `pending` 里摘出来） |
+
+        ⚠️ **只有这一处**算「卡片多高、字幕让出多少」—— `_layout`（摆转录区）与
+           `_card_relayout`（摆卡片）都问它。两处各算一套的话，卡片底与字幕顶会差
+           几个像素（那种"底下悬着一条空白"的毛病作者已经点过一次）。
+        ⚠️ 上限两条一起管：**转录区的 `CARD_MAX_FRAC`** 与 **至少留下
+           `CARD_SUB_ROWS_MIN` 行字幕**（连 `CARD_SUB_GAP` 一起算）—— 超过哪条都
+           在卡片**内部**滚，窗口不伸缩。
+        """
+        if self._card_view is None or not self._card_kind:
+            return {}
+        from AppKit import NSMakeRect
+        region = max(1.0, float(getattr(self, "_scroll_h", 0.0) or 0.0))
+        W = float(self._width) - 2 * PAD
+        w = max(60.0, W - 2 * CARD_PAD)
+        pending = list(self._card_pending)
+        footer = None
+        if pending and pending[-1]["kind"] == "buttons" and pending[-1]["buttons"]:
+            footer = pending.pop()
+        natural = self._card_natural_h(w, pending, footer)
+        rows_h = CARD_SUB_ROWS_MIN * max(1.0, float(getattr(self, "_row_h", 0.0) or 1.0))
+        cap = min(CARD_MAX_FRAC * region, region - rows_h - CARD_SUB_GAP)
+        h = min(natural, max(CARD_MIN_H, cap))
+        shift = CARD_FOOTER_H if footer is not None else 0.0
+        clip_h = max(1.0, h - 2 * CARD_PAD - shift)
+        # ⚠️ 文档坐标 = **内容盒**（不含上下内边距 —— 那两条内边距由视口在卡片里的
+        #    位置实现）。这样"装得下"时 `doc_h == clip_h`，**一点滚动量都没有**；
+        #    若把内边距也算进文档，装得下的卡也能多滚 2×CARD_PAD（拍图里看到过
+        #    "内容明明不长却停在半中间"）。
+        content_h = max(0.0, self._card_natural_h(w, pending, None) - 2 * CARD_PAD)
+        doc_h = max(clip_h, content_h)
+        return {"card": NSMakeRect(PAD, float(self._scroll_y) + region - h, W, h),
+                "doc_h": doc_h, "clip_h": clip_h, "shift": shift,
+                "x": CARD_PAD, "w": w, "pending": pending, "footer": footer}
+
+    def _card_sub_h(self) -> float:
+        """字幕区**此刻**该多高：卡片开着就让出「卡片 + 间距」，否则是整段转录区。
+
+        （`_layout` 每帧问它一次；算术在 `_card_plan` 里，只有那一份。）
+        """
+        plan = self._card_plan()
+        if not plan:
+            return max(1.0, float(getattr(self, "_scroll_h", 0.0) or 0.0))
+        return max(0.0, float(self._scroll_h) - plan["card"].size.height - CARD_SUB_GAP)
+
+    def _card_scroll_to_top(self, doc_h: float, clip_h: float) -> None:
+        """卡片内部滚回**顶部**（非翻转坐标系：origin.y = 0 是底部，顶部 = docH − 视口高）。"""
+        try:
+            clip = self._card_scroll.contentView()
+            clip.scrollToPoint_((0.0, max(0.0, float(doc_h) - float(clip_h))))
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _card_relayout(self) -> None:
+        """把已加的块自上而下摆成 frame，**并定卡片自己的 frame**（`_layout` 每帧叫它）。
+
+        ⚠️ 卡片位置与大小**只由 `_card_plan` 写**（`_layout` 那边只摆转录区）：高度 =
+           min(内容自然高, 上限)，钉在转录区**顶边**往下长。
+        ⚠️ 内容挂在卡片**内部**的滚动文档上（`_card_host()`）：高过视口就在卡里滚，
+           不再"整块藏掉"（作者 2026-10-17「上卡下字幕」）。
+        ⚠️ **最后一行按钮钉在卡片底部**（`CARD_FOOTER_H`，挂在 `_card_view` 上而不是
+           文档上）：内容滚它不滚 —— 把出口裁掉等于把人关在卡片里（实测踩过一次）。
+        """
+        plan = self._card_plan()
+        if not plan:
+            return
+        from AppKit import NSMakeRect
+        self._card_view.setFrame_(plan["card"])
+        # ⭐ 字幕区跟着卡片的**实际高度**走（内容一变就重摆 —— 卡片变高，字幕区当场缩，
+        #    不能等到下一帧 `_layout`）。算术只有 `_card_sub_h` 一份。
+        self._tv.set_frame(float(self._scroll_y), self._card_sub_h())
+        if self._card_scroll is not None and self._card_doc is not None:
+            self._card_scroll.setFrame_(
+                NSMakeRect(0.0, CARD_PAD + plan["shift"],
+                           plan["card"].size.width, plan["clip_h"]))
+            self._card_doc.setFrame_(
+                NSMakeRect(0.0, 0.0, plan["card"].size.width, plan["doc_h"]))
+            if self._card_scroll_top and plan["pending"]:
+                # ⚠️ 只在**有内容**时滚这一次并清标记：开卡那一帧 `_layout` 先跑一遍
+                #    （块还没加进来、文档高度≈0），提前清掉的话内容进来时就不滚了 ——
+                #    表现为"卡片一开就停在半中间"（2026-10-17 拍图抓到的）。
+                self._card_scroll_to_top(plan["doc_h"], plan["clip_h"])
+                self._card_scroll_top = False     # 只滚这一次：之后用户滚到哪就是哪
+        x = plan["x"]
+        w = plan["w"]
+        pending = plan["pending"]
+        footer = plan["footer"]
+        H = plan["doc_h"]
+        y = H                                # ⚠️ 文档 = **内容盒**：块的上下内边距由视口
+        bottom = 0.0                         #    在卡片里的位置实现（见 `_card_plan`）
+        for i, blk in enumerate(pending):
+            kind = blk["kind"]
+            if kind == "sub" and not self._card_sub_text:
+                continue
+            v = blk["view"]
+            if kind == "chips":
+                y = self._card_place_chips(blk, x, y, w, bottom)
+                continue
+            if kind == "buttons":
+                y = self._card_place_buttons(blk, x, y, w, bottom)
+                continue
+            if kind == "duty_row":
+                y = self._card_place_duty_row(blk, x, y, w, bottom)
+                continue
+            if kind == "hdr_action":
+                continue                 # 跟标题同一行，由标题那一块摆（见下面「标题块」）
+            if v is None:
+                continue
+            if kind == "label" and i > 0:
+                y -= CARD_LABEL_GAP      # 分组靠间距（与 `_card_natural_h` 同一条规则）
+            h = self._card_block_h(blk, w)
+            y -= h
+            if y < bottom:
+                # ⚠️ 到这儿的块**不该存在**（文档高度就是内容自然高，摆得下）——
+                #    真到了只可能是高度算术与摆放算术分了家：藏掉它、别在旧 frame
+                #    上露半行。作者 2026-10-17 之后正常路径靠**卡片内部滚动**兜住。
+                try:
+                    v.setHidden_(True)
+                    if blk["extra"] is not None:
+                        blk["extra"].setHidden_(True)
+                except Exception:                         # noqa: BLE001
+                    pass
+                continue
+            v.setHidden_(False)
+            if kind == "title":
+                # 标题那一行右上角可能有小动作（「收起」）—— 跟标题同一行、贴右
+                act = getattr(self, "_card_hdr_act", None)
+                aw = 0.0
+                if act is not None and act.get("view") is not None:
+                    aw = self._card_text_w(act["view"], act["text"]) + 16.0
+                    ah = _card_line_h(act["view"].font())
+                    act["view"].setHidden_(False)
+                    act["view"].setFrame_(((x + w - aw + 8.0, y + (h - ah) / 2.0),
+                                           (aw - 8.0, ah)))
+                    if act["extra"] is not None:
+                        act["extra"].setHidden_(False)
+                        act["extra"].setFrame_(((x + w - aw, y), (aw, h)))
+                v.setFrame_(((x, y), (max(60.0, w - aw), h)))
+                y -= 2.0
+                continue
+            if kind == "field":
+                # ⚠️ 宽度：标题满行；**日期按内容定宽**（`CARD_DATE_W`）——「不知道要填
+                #    多少」的暗示来自一个拉满整行的框（HIG › Text fields：match the size
+                #    of a text field to the quantity of anticipated text）。
+                fw = CARD_DATE_W if blk["key"] == "date" else w
+                fw = min(fw, w)
+                v.setFrame_(((x, y), (fw, h)))
+                # 字段在内缩 `FIELD_PAD_X` 处的整高：外壳画底、字段自己不带底
+                blk["fld"].setFrame_(((FIELD_PAD_X, 0.0),
+                                      (max(20.0, fw - 2.0 * FIELD_PAD_X), h)))
+                if blk["side"] and blk["extra"] is not None:
+                    side = blk["extra"]
+                    sh = _card_line_h(side.font())
+                    # ⭐ 与框内文字**同一基线**（作者 2026-10-17：原来低了约 4pt）——
+                    #    两边的基线都按 `_text_baseline_off` 量，不靠"frame 居中"碰运气。
+                    fld_y = float(blk["fld"].frame().origin.y)
+                    # ⚠️ 两个口径各让一半：**基线**对齐是"读起来同一行"（作者点名的判据），
+                    #    **中线**对齐是"看起来居中"（字号差了 2pt，两个不可能同时为零）。
+                    #    各偏 ~0.5pt，两个判据都稳在 ≤1pt 以内。
+                    # ⚠️ `fld.frame()` 是**相对外壳**的（外框内 y=0），要加回外框在卡里的 y
+                    sy_base = (y + fld_y + self._text_baseline_off(blk["fld"], h)
+                               - self._text_baseline_off(side, sh))
+                    sy_center = (y + h / 2.0 - sh / 2.0)
+                    sy = (sy_base + sy_center) / 2.0
+                    side.setHidden_(False)
+                    side.setStringValue_(blk["side"])
+                    side.setFrame_(((x + fw + 8.0, sy),
+                                   (max(40.0, x + w - (x + fw + 8.0)), sh)))
+                elif blk["extra"] is not None:
+                    blk["extra"].setHidden_(True)
+                y -= 2.0
+                continue
+            icon = blk.get("extra") if blk.get("icon") else None
+            if icon is not None:
+                # 小图标：与文字同一色阶。单行**垂直居中**；折行的块**贴第一行**
+                # （多行说明的图标居中会飘在中间那行旁边，读起来像少了半个字）。
+                iw = float(CARD_SYMBOL_PT) + 2.0
+                iy = y + h - iw if blk["wrap"] else y + (h - iw) / 2.0
+                icon.setHidden_(False)
+                icon.setFrame_(((x, iy), (iw, iw)))
+                tx = x + iw + 5.0
+                v.setFrame_(((tx, y), (max(60.0, x + w - tx), h)))
+            else:
+                v.setFrame_(((x, y), (w, h)))
+            y -= 2.0
+        if footer is not None:
+            # ⚠️ `host=self._card_view`：页脚**不**进滚动文档 —— 永远钉在卡片底部。
+            self._card_place_buttons(footer, x, CARD_PAD + CARD_FOOTER_H, w, CARD_PAD,
+                                     host=self._card_view)
+
+    def _card_place_chips(self, blk, x, y, w, bottom: float = CARD_PAD) -> float:
+        """类型胶囊那一行：`考试 / 作业截止 / 调课 / 其他`。
+
+        ⭐ 与按钮**同一个工厂**（`_card_button`）：选中 = `chip-on`（**primary 的填充** +
+        更亮的描边 + Medium），没选中 = `chip-off`。文字居中与左右留白由工厂保证 ——
+        这里只摆位，一个像素都不自己算。
+        """
+        row_h = CARD_BTN_H
+        y -= row_h
+        if y < bottom:
+            return y
+        if blk["extra"] is None:
+            blk["extra"] = []
+            for name in (blk["chips"] or []):
+                btn = self._card_button(
+                    str(name), "chip-off",
+                    lambda n=name, b=blk: (b["on_pick"](n) if b["on_pick"] else None))
+                blk["extra"].append([btn, str(name)])
+        cx = x
+        for btn, name in blk["extra"]:
+            bw = self._card_button_w(btn, name)
+            if cx + bw > x + w:
+                btn.setHidden_(True)
+                continue
+            btn.setHidden_(False)
+            btn.setFrame_(((cx, y), (bw, row_h)))
+            self._card_btn_style(btn, "chip-on" if name == str(blk["chosen"])
+                                 else "chip-off")
+            cx += bw + CARD_BTN_GAP
+        return y - 2.0
+
+    def _card_place_buttons(self, blk, x, y, w, bottom: float = CARD_PAD, *,
+                            host=None) -> float:
+        """按钮那一行。
+
+        ⭐ 每颗按钮的层级由**它自己声明**（`card_button_specs`）→ 工厂 `_card_button`：
+        `primary` = 有底的胶囊、`secondary` = ghost、`plain` = 纯文字。
+        ⚠️ 这里**不许**再出现「第一个 = 主按钮」那种按位置猜的写法（作者 2026-10-17）。
+        """
+        specs = card_button_specs(blk["buttons"])
+        if not specs:
+            return y
+        y -= CARD_BTN_H
+        if y < bottom:
+            return y
+        if blk["extra"] is None:
+            blk["extra"] = []
+            for label, code, role in specs:
+                btn = self._card_button(
+                    label, role,
+                    lambda c=code, b=blk: (b["on_act"](c) if b["on_act"] else None),
+                    host=host)
+                blk["extra"].append([btn, str(label), str(code), str(role)])
+        row_rects = blk.setdefault("rows", [])
+        del row_rects[:]
+        right = str(blk.get("align") or "left") == "right"
+        # ⭐ 贴右时从右缘往左摆（第一颗仍是最左边那颗）—— 与行内按钮同一条右缘。
+        placed = []
+        bx = x + w if right else x
+        for btn, label, _code, _role in blk["extra"]:
+            bw = self._card_button_w(btn, label)
+            if right:
+                bx -= bw
+                if bx < x:
+                    btn.setHidden_(True)
+                    continue
+                placed.append((btn, bx, bw))
+                bx -= CARD_BTN_GAP
+            else:
+                if bx + bw > x + w:
+                    btn.setHidden_(True)
+                    continue
+                placed.append((btn, bx, bw))
+                bx += bw + CARD_BTN_GAP
+        for btn, px, bw in placed:
+            btn.setHidden_(False)
+            btn.setFrame_(((px, y), (bw, CARD_BTN_H)))
+            row_rects.append((px, y, bw, CARD_BTN_H))
+        return y - 2.0
+
+    def _card_place_duty_row(self, blk, x, y, w, bottom: float = CARD_PAD) -> float:
+        """收尾汇总里的一行：类型 · 标题 · 日期（+ 原话小字）+「记下 / 忽略」。
+
+        ⚠️ 视图**只造一次**（缓存在 `blk["extra"]`）—— 本函数每帧都被 `_card_relayout`
+           叫；上一版每帧新建一批标签，几秒就叠出几十层（作者看到的「两行高的方块」
+           就是层叠 + 旧口径的高度一起造出来的）。
+        按钮与**整行**垂直居中（两侧文字是两行，居中是这一行看起来最稳的锚）。
+        """
+        import duty as _duty
+        item = blk["duty_row"]
+        row_h = CARD_DUTY_ROW_H
+        y -= row_h
+        if y < bottom:
+            return y
+        if blk["extra"] is None:
+            head = self._card_new_label(CARD_TEXT_SZ, 0.90)
+            quote = self._card_new_label(CARD_META_SZ, CARD_META_ALPHA)
+            btns: dict = {}
+            if item.get("action") == "pending":
+                for label, act, role in card_button_specs(
+                        (("记下", "save", "primary"), ("忽略", "ignore", "plain"))):
+                    btns[act] = self._card_button(
+                        label, role,
+                        lambda a=act, it=item: self._wrapup_act(a, it.get("id") or ""))
+            else:
+                tag = self._card_new_label(11.5, 0.45)
+                tag.setStringValue_("已记" if item.get("action") == "saved" else "已忽略")
+                btns["tag"] = tag
+            blk["extra"] = {"head": head, "quote": quote, "buttons": btns}
+        v = blk["extra"]
+        when = _duty.fmt_when(item)
+        v["head"].setStringValue_(
+            f"{item.get('type') or '其他'} · {item.get('title') or ''}"
+            + (f"　{when}" if when else ""))
+        v["quote"].setStringValue_(
+            f"“{_duty.clean_quote(item.get('quote') or '', limit=56)}”"
+            + (f" · {item.get('t')}" if item.get("t") else ""))
+        btns = v["buttons"]
+        order = [k for k in ("save", "ignore") if k in btns] or ["tag"]
+        widths = {}
+        for k in order:
+            widths[k] = (self._card_button_w(btns[k], btns[k].title())
+                         if k != "tag" else 60.0)
+        bx = x + w
+        placed = []
+        for k in reversed(order):             # 从右往左摆（右对齐）
+            bw = widths[k]
+            bx -= bw
+            placed.append((k, bx, bw))
+            bx -= CARD_BTN_GAP
+        btn_left = bx + CARD_BTN_GAP
+        mid_y = y + (row_h - CARD_BTN_H) / 2.0
+        for k, px, bw in placed:
+            b = btns[k]
+            b.setHidden_(False)
+            if k == "tag":
+                th = _card_line_h(b.font())
+                b.setFrame_(((px, y + (row_h - th) / 2.0), (bw, th)))
+            else:
+                b.setFrame_(((px, mid_y), (bw, CARD_BTN_H)))
+        text_w = max(60.0, btn_left - x - 8.0)
+        v["head"].setFrame_(((x, y + row_h - 18.0), (text_w, 16.0)))
+        v["quote"].setFrame_(((x, y + 1.0), (text_w, 14.0)))
+        blk["mid"] = y + row_h / 2.0       # 这一行的**垂直中线**（按钮的 midY 要对上它）
+        return y - 1.0
+
+    def _card_text_w(self, lbl, text: str) -> float:
+        try:
+            import AppKit
+            size = AppKit.NSString.stringWithString_(str(text)).sizeWithAttributes_(
+                {AppKit.NSFontAttributeName: lbl.font()})
+            return float(size.width)
+        except Exception:                                 # noqa: BLE001
+            return float(len(str(text))) * 7.0
 
     def _fold_for_outline(self, text) -> list:
         """纲要的折行 —— 包 `_answer_fits` / `_answer_split_to_fit`。
@@ -3555,6 +5519,8 @@ class Overlay:
         ⚠️ `_hint` 到期 / `_chip_frames_later` 的 NSTimer 由**运行中的 run loop** 到点处理，
            长让步对它们的量化 ≤ `PUMP_IDLE_LONG_S`（0.1 s）；hint 是纯 TTL，
            chip 过渡由用户点击驱动（那一轮本来就在热档）。
+        ⚠️ 角落小卡的「亮 → 暗」换档（`_chip_tick`）同样按 ≤0.1 s 量化 —— 它是**纯 TTL**
+           且换的是亮度不是位置，晚 0.1 s 没人看得出来；起跑那帧照常 commit。
         """
         return bool(
             self._tv.animating                    # 上滚 / D 的中文提亮 / D 的新字淡入
@@ -3713,7 +5679,14 @@ class Overlay:
         if self._panel.isKeyWindow() and not self._is_editing():
             self._release_focus()
         self._sync_focus_look()      # 细线/光标跟着真实编辑状态走(委托回调不可靠)
+        # 卡片重画一律**延迟到这一帧**（`_card_defer`）—— 绝不在点击回调里拆掉
+        # 正在派发事件的那个视图。
+        if self._card_redo:
+            self._card_redo = False
+            self._card_refill()
         self._bar_tick(time.monotonic())
+        # 角落小卡：亮档到点 → 降到低亮度（不消失）。纯状态转换，没到点就是一次比较。
+        self._chip_tick(self._clock())
         # 用户拖过窗口边缘 -> 把宽度/转录区高度收进来并重排。放在 tick 之前:
         # tick 要基于更新后的几何算池, 顺序反了会画一帧旧几何。
         self._sync_panel_size()

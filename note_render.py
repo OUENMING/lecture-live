@@ -31,6 +31,9 @@ class NoteData:
     lost_items: list = dataclasses.field(default_factory=list)    # ❓ 标记块
     keypoint_items: list = dataclasses.field(default_factory=list)
     chapter_items: dict = dataclasses.field(default_factory=dict)
+    #: 「一些事儿」的决定（`sessions/<同名>.duty.jsonl` 回放）—— 有它时那一节
+    #: 只列「记下的」+「未处理的」；没有就走老路（`deadline_worthy` 过滤）。
+    duty_items: list = dataclasses.field(default_factory=list)
     polish_state: str = "off"
     review_missing: bool = False
     #: 📖 课件那一行（`materials.Materials.describe()` 或退化说明）。
@@ -217,7 +220,8 @@ def render(d: NoteData) -> str:
     try:
         import obsidian_writer as _ow
         if d.chapter_items:
-            _sec = _ow._render_outline_section(d.chapter_items, review=d.review)
+            _sec = _ow._render_outline_section(d.chapter_items, review=d.review,
+                                               decisions=d.duty_items or None)
             if _sec:
                 L += _sec
     except Exception:                                          # noqa: BLE001

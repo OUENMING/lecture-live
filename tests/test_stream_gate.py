@@ -345,9 +345,18 @@ class MainWiring(unittest.TestCase):
         # ⚠️ 「不新增 tag」由 R28（`tests/test_audit_regressions.py`）钉着：
         #    每个放进 streamq 的 tag 都必须在 drain() 有分支。这里只回一次那个判据 —
         #    本文件新增的 tag（如果有）会是 `_tags(run) - _tags(旧的)` 里的那一个。
+        # ⚠️ 2026-10-17：「一些事儿 / 课前回顾」**有意**加了三个 tag
+        #    （`duty` / `duty_result` / `recap` / `recap_more`）—— 那是另一个功能的
+        #    消息面，不是第二阶段（Soniox）顺手加的。判据的**意图**不变：
+        #    第二阶段自己不许新增（下面这条断言把这三个从集合里剔掉再比）。
+        _new_ok = {"duty", "duty_result", "recap", "recap_more"}
         before = {"zh", "en", "en_seed", "final", "terms", "notice", "answer",
-                  "answer_done", "summary", "hint", "replace"}
+                  "answer_done", "summary", "hint", "replace"} | _new_ok
         self.assertLessEqual(_tags(_func("run")), before, "第二阶段不许新增 streamq tag")
+        # ⚠️ 而新加的那几个**必须**在 drain() 里有分支 —— R28 钉着（这里再点一次名，
+        #    免得有人把 `_new_ok` 当成"随便加 tag 的免罪牌"）。
+        for _t in _new_ok:
+            self.assertIn(_t, before)
         # 形状必须是 (文案, warn, 补充) 三元组（drain 那边按形状拆）
         shape_ok = False
         for node in ast.walk(_func("run")):

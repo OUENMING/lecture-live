@@ -896,12 +896,8 @@ def _rows_for_text(t: str, fdefs: dict) -> list:
             rows.append({"claim": t, "status": "unchecked", "recomputed": "",
                          "how": "这句话里公式/推导太密，机械核挑不出唯一的那条结论（请人工复查）"})
         return rows
-    pairs = [(m.group("c") or m.group("c2") or m.group("c3"),
-              m.group("kind") or m.group("kind2") or m.group("kind3"))
-             for m in _MINMAX.finditer(tm)]
+    pairs = _minmax_pairs(tm)
     for c, word in pairs:
-        if c is None:
-            continue
         rows.append(_extremum_row(t, fdefs, c, word))
     return rows
 
@@ -941,6 +937,36 @@ def _sign_rows(t: str) -> list:
                              + ("（正）→ 凸 → 极小值" if sign > 0 else "（负）→ 凹 → 极大值")
                              + ("" if ok else f"；但句子里写的是「{c.group('conc')}」"))})
     return rows
+
+
+#: 「不是最小 / 谈不上最小 / 而不是最大」——**否定**里的 kind 词不是一条断言。
+_NEG_BEFORE = re.compile(r"(?:不是|并不是|而不是|算不上|谈不上|不属于|非|没|无|不)\s*$")
+
+
+def _negated_before(t: str, i: int) -> bool:
+    """`i`（kind 词的位置）前面 10 个字里有没有否定词。**纯函数。**
+
+    ⚠️ F13 复跑抓到的**假指控**（ECON10790 §10 实录）：句子写着
+       `$q=0$ 是边界上的高点，不是最小值` —— `_MINMAX` 把"**不是**最小"读成
+       "在 q=0 处取最小"，于是对一句**明确否认**它的话印出 ⚠「TC'(0)≠0，谈不上最小」。
+       否定词里的 kind 不是断言：这不是"猜"，是句子自己说了不是。
+    """
+    return bool(_NEG_BEFORE.search(str(t or "")[max(0, i - 10):i]))
+
+
+def _minmax_pairs(t: str) -> list:
+    """`_MINMAX` 的三档匹配 → `[(点, kind)]`（**滤掉否定里的 kind**）。**纯函数。**"""
+    out: list = []
+    for m in _MINMAX.finditer(t):
+        c = m.group("c") or m.group("c2") or m.group("c3")
+        if c is None:
+            continue
+        ki = next((m.start(g) for g in ("kind", "kind2", "kind3")
+                   if m.group(g) is not None), None)
+        if ki is not None and _negated_before(t, ki):
+            continue
+        out.append((c, m.group("kind") or m.group("kind2") or m.group("kind3")))
+    return out
 
 
 def _extremum_row(t: str, fdefs: dict, c: str, word: str) -> dict:
@@ -1612,7 +1638,7 @@ def symbol_mismatches(section: dict) -> list:
 
 
 def _uses_givens(prog, givens) -> bool:
-    """`program` 的式子里有没有**真的引用**题面给定的量（按名字比对）。**纯函数。**
+    """`program` 的式子里有没有**真的引用**给定的量（按名字比对）。**纯函数。**
 
     ⭐ F13 ④b：题面给了 `w1/w2/x2/θ`，而式子是 `2*u - 5`（把推导好的常数写死）——
        碰巧算对，但那**不是**"代码把题面参数算出来的"，不能算代码验证。
@@ -1628,6 +1654,50 @@ def _uses_givens(prog, givens) -> bool:
         if ids & names:
             return True
     return False
+
+
+def _prompt_tokens(text) -> set:
+    """题面里的标识符集合（`x_2` ≡ `x2`、`\\theta` ≡ `theta`）。**纯函数。**"""
+    s = re.sub(r"_\s*\{?\s*", "", str(text or "")).replace("}", "")
+    return {t.lower() for t in re.findall(r"[A-Za-z\u0370-\u03ff][A-Za-z0-9\u0370-\u03ff]*", s)}
+
+
+def _expr_literals(prog) -> set:
+    """`program` 式子里出现过的**数字字面量**（绝对值集合）。**纯函数。**"""
+    out: set = set()
+    for step in (prog or []):
+        if not isinstance(step, dict):
+            continue
+        for m in re.finditer(r"\d+(?:\.\d+)?", _clean_expr(str(step.get("expr") or ""))):
+            try:
+                out.add(abs(float(m.group(0))))
+            except ValueError:
+                continue
+    return out
+
+
+def relevant_givens(givens, prompt, prog) -> dict:
+    """`givens` 里**题面真给了**的那些：名字出现在题面（`x_2`≡`x2`），或它的值被写死在式子里。
+
+    ⚠️ F13 复跑抓到的**误报**：模型有时会塞一个与题面无关的 `givens`（实测两道没有 `a`
+       的例题上写着 `{'a': 1.0}`）—— 那不是"题面给定的量"，拿它把这道**算对的**题判成
+       "没用到给定"就是新造一个假判。**纯函数。**
+    """
+    if not isinstance(givens, dict) or not givens:
+        return {}
+    names = _prompt_tokens(prompt)
+    lits = _expr_literals(prog)
+    out: dict = {}
+    for k, v in givens.items():
+        n = re.sub(r"[_ {}$\\]", "", str(k)).lower()
+        try:
+            hard = abs(float(v)) in lits
+        except (TypeError, ValueError):
+            hard = False
+        if n in names or hard:
+            out[k] = v
+    return out
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1792,10 +1862,13 @@ def program_rows(section: dict) -> list:
         #    参数被写死在式子里（`2*u - 5` 对 `w1*x1+w2*x2-θ`），碰巧对不算。
         #    选择：**不指控、也不撤**（这道题本身是对的，撤掉正是 BUSI3243 的教训），
         #    标 `unchecked` —— 读者看到"未核对"，不再看到那个假的 ✅。
-        if givens and not _uses_givens(prog, givens):
+        #    ⚠️ 只拿**题面真给了的量**判（`relevant_givens`）：模型塞的无关 `givens`
+        #    （实测 `{'a': 1.0}` 落在两道没有 a 的例题上）不许把算对的题判成未核对。
+        rel = relevant_givens(givens, prompt, prog)
+        if rel and not _uses_givens(prog, rel):
             return [{"claim": str(claim0)[:120], "status": "unchecked", "recomputed": "",
                      "how": "例题的 program 没用到题面给定的量（"
-                            + "、".join(sorted(str(k) for k in givens)[:6])
+                            + "、".join(sorted(str(k) for k in rel)[:6])
                             + "）—— 参数写死在式子里，不算代码验证"}]
         rows.append({"claim": str(claim0)[:120], "status": "ok",
                      "recomputed": f"{target}={_fmt(tval)}" if tval is not None else "",

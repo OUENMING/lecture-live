@@ -752,7 +752,68 @@ class TestF13ProgramIdentifiersAndGivens(unittest.TestCase):
         rows = nm.program_rows({"example": ex})
         self.assertEqual(["ok"], [r["status"] for r in rows], rows)
 
-    def test_没有_givens_的老例题照旧(self):
+    def test_很多不像题面量的_givens_不许误伤(self):
+        """F13 复跑实测的**误报**：两道没有 `a` 的例题上写着 `{'a': 1.0}`（模型自己的
+        记账），旧判据把这题算对的 ✅ 判成"没用到给定"。无关的 given 不算题面给的量。"""
+        ex = {"title": "🎙 13:34", "prompt": "设 $TC(q)=q^{3}-12q^{2}+60q$，求 $AC(5)$。",
+              "givens": {"a": 1.0},
+              "program": [{"var": "AC5", "op": "eval", "expr": "q^2 - 12*q + 60",
+                           "x": "q", "at": 5}],
+              "steps": [{"text": "AC(5)=25", "why": ""}], "answer": "AC(5)=25"}
+        self.assertEqual({}, nm.relevant_givens(ex["givens"], ex["prompt"], ex["program"]))
+        rows = nm.program_rows({"example": ex})
+        self.assertEqual(["ok"], [r["status"] for r in rows], rows)
+
+    def test_题面真的给了的_givens_照旧判(self):
+        """反向：`x_2`/`\\theta` 这种**题面里真有**的量照旧参与判据（归一后比 token）。"""
+        ex = {"title": "✏️ 自补", "prompt": "输入 $x_1=3,\\ x_2=4$，阈值 $\\theta=1$，求 z",
+              "givens": {"x2": 4.0, "theta": 1.0},
+              "program": [{"var": "z", "op": "eval", "expr": "2*u - 5", "x": "u", "at": 3}],
+              "steps": [{"text": "z=1", "why": ""}], "answer": "z=1"}
+        self.assertEqual({"x2": 4.0, "theta": 1.0},
+                         nm.relevant_givens(ex["givens"], ex["prompt"], ex["program"]))
+        rows = nm.program_rows({"example": ex})
+        self.assertEqual(["unchecked"], [r["status"] for r in rows], rows)
+
+    def test_值被写死在式子里也算题面给的量(self):
+        """givens 名字不在题面（模型自己起的 b1/b2），但它的**值**被写死进式子 → 仍算。"""
+        ex = {"title": "✏️ 自补", "prompt": "隐藏神经元偏置 $-0.5$、$1.5$，求预激活",
+              "givens": {"b1": -0.5, "b2": 1.5},
+              "program": [{"var": "z", "op": "eval", "expr": "x + 1 - 0.5", "x": "x1", "at": 0}],
+              "steps": [{"text": "z=0.5", "why": ""}], "answer": "z=0.5"}
+        self.assertEqual({"b1": -0.5}, nm.relevant_givens(ex["givens"], ex["prompt"],
+                                                          ex["program"]))
+        rows = nm.program_rows({"example": ex})
+        self.assertEqual(["unchecked"], [r["status"] for r in rows], rows)
+
+    def test_否定里的_最小_不是断言(self):
+        """⚠️ F13 复跑抓到**假指控**（ECON10790 §10 实录）：`$q=0$ 是边界上的高点，
+        不是最小值` 曾被读成"在 q=0 处取最小" → 对一句明确否认它的话印 ⚠。"""
+        sec = {"heading": "H", "ts": "13:36", "prose": [
+            "用 $TC(q)=q^{3}-12q^{2}+60q$：$AC'=2q-12$。导数那条给出 $q=6$；"
+            "相等那条化简成 $2q^{2}-12q=0$，同样 $q=6$"
+            "（$q=0$ 是边界上的高点，不是最小值）。代回 $AC(6)=24$。"]}
+        bad = [r for r in nm.check_review({"sections": [sec]})
+               if r["status"] == "mismatch" and "谈不上" in str(r["how"])]
+        self.assertEqual([], bad, bad)
+
+    def test_真说最小还是照旧核(self):
+        """反向：句子**真的**声称在 q=0 处最小 → 照样 mismatch（不许把判据关掉）。"""
+        sec = {"heading": "H", "ts": "13:36", "prose": [
+            "用 $TC(q)=q^{3}-12q^{2}+60q$，在 $q=0$ 处取最小值。"]}
+        bad = [r for r in nm.check_review({"sections": [sec]})
+               if r["status"] == "mismatch" and "谈不上" in str(r["how"])]
+        self.assertEqual(1, len(bad), bad)
+        self.assertIn("TC'(0)", bad[0]["recomputed"])
+
+    def test_否定词的非经济用例(self):
+        """域中立：`x=0 不是最大值` / `谈不上最小` / `并不是极小值` 都算否定。"""
+        sec = {"heading": "H", "ts": "10:00", "prose": [
+            "对 $f(x)=x^{3}$：$x=0$ 是拐点，不是最大值；后面那个点谈不上最小。"]}
+        rows = nm.check_review({"sections": [sec]})
+        self.assertEqual([], [r for r in rows if "谈不上" in str(r["how"])], rows)
+
+
         """没有 `givens` 的例题（econ 那几道 `60*q+500/q`）不许被这条误伤。"""
         sec = {"heading": "[13:16] 停产价格", "ts": "13:16",
                "example": {"title": "🎙 13:16", "prompt": "求 AC 最低点",

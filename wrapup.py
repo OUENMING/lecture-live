@@ -27,6 +27,7 @@
 """
 from __future__ import annotations
 
+import motion
 import panel
 
 WIDTH = 380.0
@@ -208,9 +209,13 @@ def build(*, title: str = "收尾", on_close=None):
 
         def set_status(text, alpha=0.92):
             try:
-                status_lbl.setStringValue_(text or "")
+                # ⭐ 2026-10-18：状态词走 `motion.render_status` —— 换字时旧词上移淡出、
+                #    新词从下方淡入（交叉淡换）；「还在跑」（尾部「…」）时尾巴挂三颗
+                #    静默点（`正在生成笔记…` 就是这条路）。「减弱动态效果」下退化为
+                #    原来的直接设字。判据钉的 `_status_lbl` 读回口照旧（显示文字）。
                 status_lbl.setTextColor_(
                     NSColor.whiteColor().colorWithAlphaComponent_(alpha))
+                motion.render_status(status_lbl, text or "")
                 _relayout()
             except Exception:                             # noqa: BLE001
                 pass

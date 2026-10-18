@@ -2277,11 +2277,21 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         tail = "" if kind == "one" else CHIP_TAIL
         # ⚠️ 裁字的上限要**先扣掉胶囊自己的左右留白** —— 否则量出来正好占满的标题，
         #    加上留白之后比框宽 20pt，`NSCell` 会再裁一次，把尾巴那颗 ▾ 也吃掉。
-        title = chip_fit(text, tail, chip["max_w"] - 2 * CHIP_PAD,
+        # ⭐ 2026-10-18：还在跑的状态词（「下载中…」）尾巴挂三颗点 → 裁字的预算
+        #    先让出点的那一份（`motion.dots_reserve`），不然点会伸出胶囊外。
+        _raw_running = motion.is_running(text)
+        reserve = motion.dots_reserve() if _raw_running else 0.0
+        title = chip_fit(text, tail, chip["max_w"] - 2 * CHIP_PAD - reserve,
                          lambda s: text_width(s, btn.font()))
-        btn.setTitle_(title)
+        # ⚠️⚠️ 裁过字的标题尾部也有「…」，但它说的是「**被裁了**」，不是「还在跑」——
+        #     这一档显式传 `running=False` 把点关掉（`chip_fit` 的省略号照留）。
+        _body = title[:len(title) - len(tail)] if tail else title
+        _running = _raw_running and _body == text
+        # ⭐ 换字走 `motion.render_status`：交叉淡换 + 还在跑时挂点（点由渲染层管）。
+        motion.render_status(btn, title, running=_running)
         f = btn.frame()
-        w = min(text_width(title, btn.font()) + 2 * CHIP_PAD, chip["max_w"])
+        w = min(motion.status_width(title, btn.font(), running=_running) + 2 * CHIP_PAD,
+                chip["max_w"])
         btn.setFrame_(NSMakeRect(f.origin.x, f.origin.y,
                                  max(w, CHIP_MIN_W), CHIP_H))
 
@@ -3348,8 +3358,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if lb is None:
             return
         try:
-            lb.setStringValue_(text)
             lb.setTextColor_(NSColor.whiteColor())
+            # ⭐ 2026-10-18：换字走 `motion.render_status` —— 旧词上移淡出 / 新词从下方
+            #    淡入（交叉淡换）；「还在跑」（尾部「…」）的状态词尾巴挂三颗静默点。
+            #    ⚠️ 判据（⑲c）钉着本函数**只许一个实参** —— 别加 `running=` 之类的参数。
+            motion.render_status(lb, text)
         except Exception:                                 # noqa: BLE001
             pass
 

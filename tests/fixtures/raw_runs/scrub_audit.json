@@ -1,0 +1,230 @@
+{
+ "what": "F15-A 审计：**旧**猜测句判据在 6 份冻结 raw（v3×2 + v2×4）的**每一个字符串字段**（讲解/速览/自测答案/例题步骤/变体/常见错误…）上删掉的每一句，逐句手工分类。",
+ "rule_before": "F14 的 _SPEC/_SELF_TALK：hedge 词表含 `估计`/`猜`/`怀疑` 等名词义、且 `hedge + 8 字内出现 是/为/想` 即判猜测；`重新算` 类元话语不看小句位置。",
+ "rule_after": "F15-A：① 只认**第一人称**（我/我们）+ hedge；②『猜教授意图/口误』要 hedge **后面紧跟**意图词（简化/口误/听错…）；③ 动词类元话语必须在**小句开头**且未被否定；④ 线索问题字段永不当独白删；⑤ 答案/步骤删到 <8 字就保留原文。",
+ "label_method": "label=factual 表示这句是讲解/事实/常见错误/线索问题；label=self_talk 才是模型的思考过程漏进正文。分类是**手工**做的（逐句读）。",
+ "precision_before": {
+  "removed": 27,
+  "self_talk": 0,
+  "precision": 0.0
+ },
+ "cases": [
+  {
+   "job": "v2_busi3243",
+   "field": "sections.3.intuition",
+   "sentence": "RMSE 是“平均猜错几个单位”。",
+   "label": "factual",
+   "why": "RMSE 的定义（‘平均猜错几个单位’是释义，不是猜测）"
+  },
+  {
+   "job": "v2_busi3243",
+   "field": "sections.4.prose.0",
+   "sentence": "课上举的例子是 0.5%，也就是一千次里大概五次——概率这么低，说明这个变量不太可能是巧合，判为显著；p 值接近 0 就拒绝“它没用”。",
+   "label": "factual",
+   "why": "p 值的解释（‘大概五次’是频率描述）"
+  },
+  {
+   "job": "v2_busi3243",
+   "field": "sections.13.prose.3",
+   "sentence": "t 大可能只是样本大、标准误小，效应多大要看系数连同它的单位；t 不到 2 也不等于证明了没有影响，只是证据不足。",
+   "label": "factual",
+   "why": "t 值的解释（‘可能只是样本大’是事实性提醒）"
+  },
+  {
+   "job": "v2_busi3243",
+   "field": "sections.24.intuition",
+   "sentence": "估计值没变，只是变得「不确定」了，说话就没底气。",
+   "label": "factual",
+   "why": "方差的通俗说明（‘不确定’是术语，不是模型的不确定）"
+  },
+  {
+   "job": "v2_busi3243",
+   "field": "sections.32.prose.0",
+   "sentence": "系数估计本身仍然是无偏的：样本反复抽，平均下来还落在真值上。",
+   "label": "factual",
+   "why": "无偏性的解释（‘估计’是名词）"
+  },
+  {
+   "job": "v2_busi3243",
+   "field": "sections.32.prose.0",
+   "sentence": "坏在误差棒——估计量的方差是 $\\sigma^2/[SST_j(1-R_j^2)]$，那个 $1-R_j^2$ 在分母上，共线一起来，方差和标准误一起被吹大。",
+   "label": "factual",
+   "why": "方差公式的讲解（‘估计量’是名词）"
+  },
+  {
+   "job": "v2_busi3243",
+   "field": "sections.44.pitfalls.0",
+   "sentence": "看到 R² 高就以为模型好；高 R² 也可能是变量之间互相解释的结果",
+   "label": "factual",
+   "why": "R² 的提醒（‘可能’是事实性提醒）"
+  },
+  {
+   "job": "v2_busi3243",
+   "field": "sections.48.intuition",
+   "sentence": "点估计没歪，是误差棒画错了。",
+   "label": "factual",
+   "why": "点估计与误差棒的区分（术语）"
+  },
+  {
+   "job": "v2_busi3243",
+   "field": "sections.48.prose.1",
+   "sentence": "课上把这一串后果串起来讲：方差不再取到最小，于是这个估计量不再是最优、不再有效，也就丢掉了 BLUE 里的 B（best）。",
+   "label": "factual",
+   "why": "BLUE 后果的讲解（‘估计量’是名词）"
+  },
+  {
+   "job": "v2_busi3243",
+   "field": "sections.48.prose.3",
+   "sentence": "容易错的是听成「系数算错了」：系数点估计没错，错的是对它的不确定性的刻画。",
+   "label": "factual",
+   "why": "常见错误（‘听成’是学生常犯的错，不是模型在猜自己听错）"
+  },
+  {
+   "job": "v2_busi3243",
+   "field": "checks.22.claim",
+   "sentence": "t 大可能只是样本大、标准误小，效应多大要看系数连同它的单位；t 不到 2 也不等于证明了没有影响，只是证据不足。",
+   "label": "factual",
+   "why": "同 3（同一句在另一字段）"
+  },
+  {
+   "job": "v2_busi3243",
+   "field": "lecture_points.104.point",
+   "sentence": "该估计量不再是最优、不再有效（no longer best / efficient）",
+   "label": "factual",
+   "why": "术语小结行（名词）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "sections.2.prose.1",
+   "sentence": "变量越多，每个参数分到的数据越少，估计就越飘；你评估模型时看到的那点提升，可能只是把噪声也拟合进去了。",
+   "label": "factual",
+   "why": "多重共线的解释（‘估计就越飘’是名词/事实）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "sections.20.prose.0",
+   "sentence": "所以看到 t 值小，先别急着说变量没用，先怀疑是共线性把标准误吹大了。",
+   "label": "factual",
+   "why": "教学指导（‘先怀疑’是给学生的方法，不是自言自语）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "sections.22.prose.0",
+   "sentence": "一个变量完全可能因为和别的变量共享信息，t 值很小。",
+   "label": "factual",
+   "why": "事实性提醒（‘完全可能’）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "sections.23.q",
+   "sentence": "换数据估计量为何会变？",
+   "label": "factual",
+   "why": "线索问题（cue：笔记的产品内容就是这些自问）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "sections.23.prose.0",
+   "sentence": "估计量不是数据的固定属性：删掉几个观测、换一批样本，β̂ 就会动。",
+   "label": "factual",
+   "why": "作者点名的原文：factual sentence（‘估计量’被当成 hedge 误杀）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "sections.31.prose.1",
+   "sentence": "所以共线性真正的伤害出现在精度上，系数估计本身仍然是无偏的。",
+   "label": "factual",
+   "why": "共线性后果的讲解（名词）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "sections.38.prose.0",
+   "sentence": "F 显著就说明至少有一个参数不为零，模型整体有解释力——教授的表达是「模型是显著的，至少有一个估计出来的参数不为零」。",
+   "label": "factual",
+   "why": "转录原话（‘教授的表达是…’是引用，不是猜教授的意图）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "sections.43.cues.3",
+   "sentence": "有效估计量是什么意思？",
+   "label": "factual",
+   "why": "线索问题（cue）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "qa.4.a",
+   "sentence": "p 变小可能只是样本更大、估计更精确；效应大小看系数本身，不看 p。",
+   "label": "factual",
+   "why": "作者点名的原文：p 值解释（‘可能’是事实性 hedge，不是自言自语）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "corrections.10.fixed",
+   "sentence": "至少有一个估计参数不为零（not zero）",
+   "label": "factual",
+   "why": "小结行（名词）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "corrections.12.fixed",
+   "sentence": "异方差下OLS系数估计仍无偏，有偏的是系数方差或标准误的估计",
+   "label": "factual",
+   "why": "异方差的讲解（名词）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "lecture_points.80.point",
+   "sentence": "无相关时估计量方差退化为 σ² 除以 X 的变异；有相关时方差被放大。",
+   "label": "factual",
+   "why": "方差退化（名词）"
+  },
+  {
+   "job": "v3_busi3243",
+   "field": "lecture_points.114.point",
+   "sentence": "异方差下OLS估计量不再是最优、有效估计量。",
+   "label": "factual",
+   "why": "异方差结论（名词）"
+  },
+  {
+   "job": "v3_ecs170",
+   "field": "sections.26.prose.0",
+   "sentence": "反向那一步每层都要导数，而 sigmoid 的导数只要拿前向已经存下的输出 $f(z)$ 乘一下 $\\left(1-f(z)\\right)$，不用重新算 $e^{-z}$ —— 网络有多深，省下的重复计算就有多少。",
+   "label": "factual",
+   "why": "反向传播效率的讲解（‘不用重新算’被当自言自语误杀）"
+  },
+  {
+   "job": "v3_ecs170",
+   "field": "sections.55.compare.rows.0.cells.0",
+   "sentence": "每层重新算一次",
+   "label": "factual",
+   "why": "同 26 的片段"
+  }
+ ],
+ "must_flag_after": [
+  {
+   "sentence": "如果函数是这样，那么求导并令导数为零：无解，说明我可能听错了公式。",
+   "where": "prose",
+   "why": "作者点名（F14 第六轮）：第一人称 + 可能 + 听错"
+  },
+  {
+   "sentence": "所以原题可能不是这个函数，或者我漏掉了 q 的一次项。",
+   "where": "prose",
+   "why": "作者点名：第一人称 + 漏掉"
+  },
+  {
+   "sentence": "本课采用 AC 最低点作为停产价格，可能是简化处理（假设固定成本为零或忽略）。",
+   "where": "prose",
+   "why": "作者点名：hedge + 意图词『简化处理』"
+  },
+  {
+   "sentence": "这不对，因为行在列不打扫时无差异。",
+   "where": "prose",
+   "why": "作者点名 ECON10770 自言自语段的一小句（小句开头的『这不对，因为』）"
+  },
+  {
+   "sentence": "所以（打扫，不打扫）也是纳什均衡？检查：若行打扫、列不打扫，行得0，列得4；行偏离到不打扫得0，无利可图。这不对，因为行在列不打扫时无差异。但通常我们要求严格偏好？",
+   "where": "answer",
+   "why": "作者点名的整段自言自语（ECON10770 变式 2 的答案）：解答字段里成串的问句 + 『检查：』"
+  }
+ ],
+ "faithful_note": "收紧之后，这 6 份 raw 上**删掉 0 句**（旧判据 27 句全是被误杀的事实句）；5 条作者点名的真自言自语仍被删（见 must_flag_after）。"
+}

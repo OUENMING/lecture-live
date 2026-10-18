@@ -105,6 +105,32 @@ def _wrap_bare_frac(seg: str) -> str:
     return "".join(out)
 
 
+#: 裸 `\begin{…}…\end{…}` 环境（模型忘写 `$…$` 时漏出来的矩阵、cases 等；ECS 实测）。
+_ENV_HEAD = re.compile(r"\\begin\s*\{([A-Za-z*]+)\}")
+
+
+def _wrap_bare_env(seg: str) -> str:
+    """把**不在 `$…$` 里的** `\\begin{X}…\\end{X}` 包成 `$…$`。
+
+    ⚠️ 只认**自配对**的环境（`\\begin{X}` … 最近的 `\\end{X}`）——它自带定界符，
+       不会误吞真代码（ECS 的 `torch.nn.Linear(…)` 没有任何反斜杠命令）。
+    """
+    out: list = []
+    last = 0
+    for m in _ENV_HEAD.finditer(seg):
+        if m.start() < last:
+            continue
+        name = m.group(1)
+        end_m = re.compile(r"\\end\s*\{" + re.escape(name) + r"\}").search(seg, m.end())
+        if end_m is None or end_m.end() - m.start() > 2000:
+            continue
+        out.append(seg[last:m.start()])
+        out.append(f"${seg[m.start():end_m.end()]}$")
+        last = end_m.end()
+    out.append(seg[last:])
+    return "".join(out)
+
+
 def _convert_plain(seg: str) -> str:
     def fix(m):
         run = m.group(0)
@@ -118,9 +144,11 @@ def _convert_plain(seg: str) -> str:
         run = run.replace("−", "-").replace("×", r" \times ").replace("÷", r" \div ")
         return f"${run}$"
 
-    # ⚠️ 顺序：先包裸 `\frac{…}{…}`（会产生新的 `$…$`），再按 `$…$` 切开做普通式子的兜底 ——
-    #    反过来会把 `\frac{x^2}{2}` 里的 `x^2` 再包一层（`$\frac{$x^{2}$}{2}$`，坏的）。
+    # ⚠️ 顺序：先包裸 `\frac{…}{…}` 与 `\begin{…}…\end{…}`（会产生新的 `$…$`），
+    #    再按 `$…$` 切开做普通式子的兜底 —— 反过来会把 `\frac{x^2}{2}` 里的 `x^2`
+    #    再包一层（`$\frac{$x^{2}$}{2}$`，坏的）。
     seg = _wrap_bare_frac(seg)
+    seg = _wrap_bare_env(seg)
     out, last = [], 0
     for m in _SPAN.finditer(seg):
         out.append(_RUN.sub(fix, seg[last:m.start()]))

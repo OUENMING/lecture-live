@@ -588,6 +588,21 @@ class TestBareFrac(unittest.TestCase):
         got = nm.auto_tex(r"=\frac{∂E}{∂y}·\frac{∂y}{∂β}")
         self.assertEqual(got.count("$"), 4)
 
+    def test_裸矩阵环境包成公式(self):
+        """F7：ECS 实测 `W=\\begin{bmatrix}1&0\\\\0&1\\end{bmatrix}` 裸在正文里 → 包成 $…$。"""
+        got = nm.auto_tex(r"权重为 W=\begin{bmatrix}1&0\\0&1\end{bmatrix}，求输出。")
+        self.assertIn(r"$\begin{bmatrix}1&0\\0&1\end{bmatrix}$", got)
+        self.assertIn("权重为 W=", got)
+        self.assertIn("，求输出。", got)
+
+    def test_没有配对的_end_就不动(self):
+        self.assertNotIn("$", nm.auto_tex(r"\begin{bmatrix}1&0"))
+
+    def test_真代码不误吞(self):
+        """反引号外的真代码没有反斜杠命令 → 一个字节都不动。"""
+        s = "在 PyTorch 里，一行 torch.nn.Linear(in_features, out_features) 就定义了这个层。"
+        self.assertEqual(nm.auto_tex(s), s)
+
 
 if __name__ == "__main__":
     unittest.main()

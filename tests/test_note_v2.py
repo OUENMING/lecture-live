@@ -1060,6 +1060,22 @@ class RenderShape(unittest.TestCase):
         self.assertIn("x.html", out)
 
 
+class SelfContradictionWiring(unittest.TestCase):
+    """F13 ②b 的接线：`_finish`（机械核 ∪ 模型核）过一遍矛盾闸。"""
+
+    def test_自相矛盾的指控在_finish_里降级(self):
+        sec = {"heading": "H", "ts": "13:33",
+               "prose": ["真算一遍 AC(5)=25，确实比 28 小。"]}
+        rev = {"sections": [sec],
+               "checks": [{"claim": "AC(5)=25<28", "how": "25-60+60=25", "status": "ok"}]}
+        det = [{"claim": "真算一遍 AC(5)=25，确实比 28 小", "status": "mismatch",
+                "recomputed": "28", "how": "代入复算：AC(5)=28，断言写的是 25"}]
+        llm = [{"claim": "AC(5)=25<28", "how": "25-60+60=25", "status": "ok",
+                "recomputed": ""}]
+        got = nv._finish(det, llm, rev)
+        self.assertEqual(["unchecked", "ok"], [r["status"] for r in got], got)
+        self.assertIn("互相矛盾", got[0]["how"])
+
 class HtmlComponents(unittest.TestCase):
     def _page(self):
         d = nr.NoteData(date="2026-10-15", course="ECON10790", entries=entries(2),

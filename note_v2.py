@@ -2042,9 +2042,11 @@ def _finish(det: list, llm_rows: list, review_data: dict) -> list:
        · 模型核是在**评自己的作业**，它说 `ok` 不算核过 → 这一类要降。
        合并后再降会把机械核那 30 条 `ok` 一起抹掉（实测：10790 的 ✅ 从 61 掉到 17）。
     """
-    return note_math.mech_override_rows(
-        note_math.merge_checks(cap_model_rows(det, review_data),
-                               cap_model_rows(llm_rows, review_data, llm=True)),
+    return note_math.drop_contradicted_rows(
+        note_math.mech_override_rows(
+            note_math.merge_checks(cap_model_rows(det, review_data),
+                                   cap_model_rows(llm_rows, review_data, llm=True)),
+            review_data),
         review_data)
 
 

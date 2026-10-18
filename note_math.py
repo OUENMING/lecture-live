@@ -356,6 +356,14 @@ _BINOPS = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
            ast.Pow: lambda a, b: a ** b}
 
 
+class _BadExpr(ValueError):
+    """表达式**结构**不合法（未知符号 / 未知函数 / 不支持的运算）。
+
+    ⚠️ 与"某个点上算不出来"（除零 / 定义域 / 溢出）**必须分开**：前者是解析失败，
+       后者是合法表达式在探测点上的算术问题（F13 ④a）。
+    """
+
+
 def _eval(node, var: str, x: float, ns: dict):
     """`ast` 白名单求值（没有 `eval`：表达式来自模型，绝不能执行任意代码）。"""
     if isinstance(node, ast.Expression):
@@ -369,7 +377,7 @@ def _eval(node, var: str, x: float, ns: dict):
             return _FUNCS[node.id]
         if node.id in ns:
             return ns[node.id]
-        raise ValueError(f"未知符号 {node.id}")
+        raise _BadExpr(f"未知符号 {node.id}")
     if isinstance(node, ast.BinOp) and type(node.op) in _BINOPS:
         return _BINOPS[type(node.op)](_eval(node.left, var, x, ns),
                                       _eval(node.right, var, x, ns))
@@ -380,13 +388,23 @@ def _eval(node, var: str, x: float, ns: dict):
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
         fn = _FUNCS.get(node.func.id) or ns.get(node.func.id)
         if fn is None:
-            raise ValueError(f"未知函数 {node.func.id}")
+            raise _BadExpr(f"未知函数 {node.func.id}")
         return fn(*[_eval(a, var, x, ns) for a in node.args])
-    raise ValueError("表达式里有不支持的运算")
+    raise _BadExpr("表达式里有不支持的运算")
+
+
+#: 编译探测点：只要**有一个**能算出一个有限值就算解析成功。
+#: ⚠️ 固定用 `1.0` 探测会把 `1/(1-R2)` 判成"解析不了"（R2=1 处除零）——
+#:    BUSI3243 唯一那道例题的 program 就这么被撤掉的（F13 ④a）。
+_COMPILE_PROBES = (1.0, 2.0, 0.5, -1.0, 3.0, 7.0)
 
 
 def _compile(expr: str, var: str, ns: dict):
-    """表达式字符串 → 单变量函数。解析不了返回 `None`（= 未核对，不是 0）。"""
+    """表达式字符串 → 单变量函数。解析不了返回 `None`（= 未核对，不是 0）。
+
+    ⭐ F13 ④a：**结构错**（未知符号/函数/运算）→ `None`；某一点的**算术错**（除零/
+       定义域/溢出）→ 换探测点再试 —— 表达式本身是合法的。
+    """
     clean = _clean_expr(expr)
     if not clean:
         return None
@@ -394,10 +412,16 @@ def _compile(expr: str, var: str, ns: dict):
         tree = ast.parse(clean, mode="eval")
     except SyntaxError:
         return None
-    try:
-        _eval(tree, var, 1.0, ns)               # 先试算一次：未知符号在这里就炸
-    except Exception:                                          # noqa: BLE001
-        return None
+    for probe in _COMPILE_PROBES:
+        try:
+            _eval(tree, var, probe, ns)
+            break
+        except _BadExpr:
+            return None                     # 结构错：换哪个点都一样
+        except Exception:                                     # noqa: BLE001
+            continue                        # 这一点的算术错：换点
+    else:
+        return None                         # 所有探测点都算不出来 → 当解析不了（宁缺）
 
     def f(x):
         return _eval(tree, var, x, ns)
@@ -438,10 +462,15 @@ def functions(texts) -> dict:
             raw.append((name, var, expr))
         for m in _FUNC_DEF_BARE.finditer(str(text or "")):
             # ⭐ F11：裸定义 `AC=2q+1+32/q`（右边含数字才收）。自变量名从 expr 里推。
+            # ⚠️ F13 ②：`AC=28` 是"**某点上的值**"，不是常函数定义 —— 收成 AC≡28 会把
+            #    同段「q=4 时 AC=28」的 28 当成 AC 的函数，于是 `AC(5)` 复算成 28，
+            #    对一句**算对的**话印出 ⚠ 指控（ECON10790 §11 实录）。判据：右边必须
+            #    **真的用到自变量**（`_free_letter` 认得出来）才算定义；纯数字右边不算。
             name, expr = m.group("name"), m.group("expr").strip()
-            if not any(c.isdigit() for c in expr):
+            var = _free_letter(expr, {})
+            if var is None or not any(c.isdigit() for c in expr):
                 continue
-            raw.append((name, _free_letter(expr, {}) or "q", expr))
+            raw.append((name, var, expr))
     ns: dict = {}
     defs: dict = {}
     todo = list(raw)
@@ -598,6 +627,26 @@ MODEL_AUTHORED = ("example", "variants", "faded", "compare", "flow")
 ALSO_MODEL = ("qa",)
 
 
+def _claim_units(section: dict, claim: str) -> list:
+    """这条断言的**字面**落在这一节的哪些单元里（`_norm_claim` 口径）。**纯函数。**
+
+    ⚠️ 匹配规则只写在这里 —— `unit_of_claim`（取第一个）与「自己的核互相矛盾」
+       （`drop_contradicted_rows`，要看有没有落到这一节）都走它。
+    """
+    key = _norm_claim(claim)
+    if not key:
+        return []
+    key = key[:60]
+    hit: list = []
+    for kind, texts in _units(section):
+        for t in texts:
+            n = _norm_claim(t)
+            if n and (key in n or (len(n) > 20 and n[:60] in key)):
+                hit.append(kind)
+                break
+    return hit
+
+
 def unit_of_claim(section: dict, claim: str) -> str:
     """一条断言出自哪个单元 → `prose` / `example` / `variants` / `faded`（找不到 `""`）。
 
@@ -605,16 +654,8 @@ def unit_of_claim(section: dict, claim: str) -> str:
        机械核与模型核的行都只有 `claim` 文本，归属只能从它自己的字面回查。
        比对用 `_norm_claim`（去空白、小写），`claim` 被截过 160 字的也认（前缀匹配）。
     """
-    key = _norm_claim(claim)
-    if not key:
-        return ""
-    key = key[:60]
-    for kind, texts in _units(section):
-        for t in texts:
-            n = _norm_claim(t)
-            if n and (key in n or (len(n) > 20 and n[:60] in key)):
-                return kind
-    return ""
+    hit = _claim_units(section, claim)
+    return hit[0] if hit else ""
 
 
 
@@ -1457,6 +1498,112 @@ def _sig_match(claim: str, val: float) -> bool:
     return abs(round(val, dec) - c) <= 10.0 ** (-dec) * 0.5 + 1e-9
 
 
+def _uses_givens(prog, givens) -> bool:
+    """`program` 的式子里有没有**真的引用**题面给定的量（按名字比对）。**纯函数。**
+
+    ⭐ F13 ④b：题面给了 `w1/w2/x2/θ`，而式子是 `2*u - 5`（把推导好的常数写死）——
+       碰巧算对，但那**不是**"代码把题面参数算出来的"，不能算代码验证。
+    """
+    names = {str(k).strip() for k in (givens or {}) if str(k).strip()}
+    if not names:
+        return True                     # 没有给定可引用 → 不适用这条判据
+    for step in (prog or []):
+        if not isinstance(step, dict):
+            continue
+        ids = set(re.findall(r"[^\W\d_]\w*", _clean_expr(str(step.get("expr") or "")),
+                             re.UNICODE))
+        if ids & names:
+            return True
+    return False
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# F13 ②b：**自己的核对行互相矛盾**时不许指控
+# ════════════════════════════════════════════════════════════════════════════
+#: `名字(数值)=数值`：从一条核对行里抽"某个调用在某点上的值"。
+_CALL_VAL = re.compile(r"(?P<n>[A-Za-z][A-Za-z0-9]{0,7})\s*\(\s*(?P<a>-?\d+(?:\.\d+)?)\s*\)"
+                       r"\s*[=＝≈]\s*(?P<v>-?\d+(?:\.\d+)?)")
+
+
+def _row_calls(row) -> dict:
+    """一条核对行提到的全部 `(名字小写, 参数) → {"orig": 原样名, "vals": {值}}`。"""
+    txt = " ".join(str((row or {}).get(k) or "") for k in ("claim", "how", "recomputed"))
+    out: dict = {}
+    for m in _CALL_VAL.finditer(txt):
+        key = (m.group("n").lower(), float(m.group("a")))
+        slot = out.setdefault(key, {"orig": m.group("n"), "vals": set()})
+        slot["vals"].add(float(m.group("v")))
+    return out
+
+
+def _merge_calls(dst: dict, src: dict) -> None:
+    """把 `src`（`_row_calls` 的形状）并进 `dst`（原地）。"""
+    for k, slot in (src or {}).items():
+        cur = dst.setdefault(k, {"orig": slot["orig"], "vals": set()})
+        cur["vals"].update(slot["vals"])
+
+
+def drop_contradicted_rows(rows: list, review_data: dict) -> list:
+    """⭐ F13 ②b：**自己的核对行互相矛盾**时不许指控（ECON10790 §11 实录）。
+
+    现场：同一节的台账里既有 `AC(5)=25` 的 ✅ 行（`25-60+60=25`）、又有
+    `AC(5)=28` 的 ⚠ 行（bare `AC=28` 被当成常函数）。两条都是我们自己的核，
+    谁对判不了 —— 把 mismatch 降成 `unchecked`（不印 ⚠、不进修正说明），
+    `how` 里写明"本节另有核对行给出另一个值"。
+
+    判据**域中立**：抽 `名字(数值)=数值`，同一节里 `ok` 与 `mismatch` 对同一个调用
+    给出不同值 → 指控作废。定位不到的 `ok` 行（模型自己写的 checks 常是缩写版）
+    当"全局"用 —— 宁可少指控，也不许把一条假 ⚠ 印给读者。**纯函数。**
+    """
+    rows = [r for r in (rows or []) if isinstance(r, dict)]
+    secs = [s for s in (review_data.get("sections") or []) if isinstance(s, dict)]
+    ok_here: list = [dict() for _ in secs]
+    ok_any: dict = {}      # 只收**定位不到任何一节**的 ok 行（模型自己写的缩写版）
+    for r in rows:
+        if str(r.get("status")) != "ok":
+            continue
+        calls = _row_calls(r)
+        if not calls:
+            continue
+        claim = str(r.get("claim") or "")
+        hit = [i for i, s in enumerate(secs) if _claim_units(s, claim)]
+        if hit:
+            for i in hit:
+                _merge_calls(ok_here[i], calls)
+        else:
+            _merge_calls(ok_any, calls)
+    out: list = []
+    for r in rows:
+        if str(r.get("status")) != "mismatch":
+            out.append(r)
+            continue
+        calls = _row_calls(r)
+        claim = str(r.get("claim") or "")
+        hit = [i for i, s in enumerate(secs) if _claim_units(s, claim)]
+        bad = None
+        for k, slot in calls.items():
+            pool: dict = {}
+            for i in hit:
+                _merge_calls(pool, ok_here[i])
+            _merge_calls(pool, ok_any)
+            other = pool.get(k)
+            if other and (slot["vals"] - other["vals"]):
+                bad = (k, other)
+                break
+        if bad is None:
+            out.append(r)
+            continue
+        (name, arg), other = bad
+        row = dict(r)
+        row["status"] = "unchecked"
+        row["how"] = (str(r.get("how") or "")
+                      + f"（本节另有核对行给出 {other['orig']}({_fmt(arg)})="
+                      + "/".join(_fmt(v) for v in sorted(other["vals"]))
+                      + " —— 自己的两道核互相矛盾，不指控，只留台账）")
+        out.append(row)
+    return out
+
+
 def program_rows(section: dict) -> list:
     """例题的 `program` → 机械核对行（**代码算、逐数对**）。**纯函数，无 LLM。**
 
@@ -1528,6 +1675,15 @@ def program_rows(section: dict) -> list:
                          "how": f"这一步的数字 {n} 不在程序算出的值/题面给定里"})
             break                        # 一句话只标一条（别刷屏）
     if not rows:
+        # ⭐ F13 ④b：题面给了 `givens` 而 program 一个都没用 → 不是"代码验证"。
+        #    参数被写死在式子里（`2*u - 5` 对 `w1*x1+w2*x2-θ`），碰巧对不算。
+        #    选择：**不指控、也不撤**（这道题本身是对的，撤掉正是 BUSI3243 的教训），
+        #    标 `unchecked` —— 读者看到"未核对"，不再看到那个假的 ✅。
+        if givens and not _uses_givens(prog, givens):
+            return [{"claim": str(claim0)[:120], "status": "unchecked", "recomputed": "",
+                     "how": "例题的 program 没用到题面给定的量（"
+                            + "、".join(sorted(str(k) for k in givens)[:6])
+                            + "）—— 参数写死在式子里，不算代码验证"}]
         rows.append({"claim": str(claim0)[:120], "status": "ok",
                      "recomputed": f"{target}={_fmt(tval)}" if tval is not None else "",
                      "how": "例题 program 执行通过：答案等于目标量，数字逐一落在程序值/给定里"})

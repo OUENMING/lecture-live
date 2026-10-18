@@ -659,6 +659,110 @@ F9_FRAGMENTS = (
 )
 
 
+class TestF13BareValuesAndContradictions(unittest.TestCase):
+    """F13 ②/②b：裸值不当函数定义；自己的两道核矛盾时不指控。"""
+
+    def test_裸值不当函数定义(self):
+        """`AC=28`（某点上的值）不许收成常函数 —— 否则 `AC(5)` 复算成 28，
+        对一句**算对的**话印出 ⚠（ECON10790 §11 实录）。"""
+        sec = {"heading": "H", "ts": "13:33", "prose": [
+            "📖 卷子里 q=4 时 AC=28、MC=12，第 5 件只花 12，所以多生产一单位 AC 会下降"
+            "（真算一遍 AC(5)=25，确实比 28 小）。"]}
+        self.assertEqual({}, nm.functions(nm.units(sec)[0][1]))
+        rows = [r for r in nm.check_review({"sections": [sec]})
+                if r["status"] == "mismatch"]
+        self.assertEqual([], rows, rows)
+
+    def test_真用到自变量的裸定义照收(self):
+        """反向：`AC=2q+1+32/q`（F11 的裸定义）照旧收 —— 修复不许把这一档关掉。"""
+        sec = {"heading": "H", "ts": "13:16", "prose": ["$AC=2q+1+32/q$。"]}
+        self.assertIn("AC", nm.functions(nm.units(sec)[0][1]))
+
+    def test_自己的两道核矛盾就不指控(self):
+        sec = {"heading": "H", "ts": "13:33",
+               "prose": ["真算一遍 AC(5)=25，确实比 28 小。"]}
+        rows = [{"claim": "AC(5)=25<28", "how": "25-60+60=25", "status": "ok",
+                 "recomputed": ""},
+                {"claim": "真算一遍 AC(5)=25，确实比 28 小", "status": "mismatch",
+                 "recomputed": "28", "how": "代入复算：AC(5)=28，断言写的是 25"}]
+        got = nm.drop_contradicted_rows(rows, {"sections": [sec]})
+        self.assertEqual(["ok", "unchecked"], [r["status"] for r in got], got)
+        self.assertIn("互相矛盾", got[1]["how"])
+        self.assertIn("AC(5)=25", got[1]["how"])
+
+    def test_不矛盾的_mismatch_照留(self):
+        """反向：ok 行说的是**另一个调用**（`MC(5)=12`）→ 不许因此放掉 AC 的指控。"""
+        sec = {"heading": "H", "ts": "13:30", "prose": ["AC(5)=99 是错的。"]}
+        rows = [{"claim": "MC(5)=12", "how": "MC(5)=12", "status": "ok", "recomputed": ""},
+                {"claim": "AC(5)=99 是错的", "status": "mismatch", "recomputed": "25",
+                 "how": "代入复算：AC(5)=25，断言写的是 99"}]
+        got = nm.drop_contradicted_rows(rows, {"sections": [sec]})
+        self.assertEqual(["ok", "mismatch"], [r["status"] for r in got], got)
+
+    def test_别的节的_ok_不算本节矛盾(self):
+        """反向：ok 行落在**另一节**（定位得到）→ 不拿它替本节作废（域中立、按节）。"""
+        secA = {"heading": "A", "ts": "13:16", "prose": ["变式：AC(5)=17。"]}
+        secB = {"heading": "B", "ts": "13:20", "prose": ["这里写 AC(5)=99。"]}
+        rows = [{"claim": "变式：AC(5)=17", "how": "AC(5)=17", "status": "ok",
+                 "recomputed": ""},
+                {"claim": "这里写 AC(5)=99", "status": "mismatch", "recomputed": "25",
+                 "how": "代入复算：AC(5)=25，断言写的是 99"}]
+        got = nm.drop_contradicted_rows(rows, {"sections": [secA, secB]})
+        self.assertEqual(["ok", "mismatch"], [r["status"] for r in got], got)
+
+
+class TestF13ProgramIdentifiersAndGivens(unittest.TestCase):
+    """F13 ④a/④b：带数字的标识符要能解析；program 不用给定不算代码验证。"""
+
+    def test_带数字的标识符能解析(self):
+        """`1/(1-R2)`（BUSI3243 唯一那道例题）—— 旧版在 R2=1 处试算除零就判
+        「表达式解析不了」，返修一次仍不过 → 整块撤掉。"""
+        vals, err = nm.run_program(
+            [{"var": "VIF", "op": "eval", "expr": "1/(1-R2)", "x": "R2", "at": "0.9"}],
+            {"R2": 0.9})
+        self.assertEqual("", err, err)
+        self.assertAlmostEqual(vals["VIF"], 10.0, places=6)
+
+    def test_除零不算解析失败_未知符号才算(self):
+        vals, err = nm.run_program(
+            [{"var": "y", "op": "eval", "expr": "1/(q-1)", "x": "q", "at": 2}], {})
+        self.assertEqual("", err, err)
+        self.assertAlmostEqual(vals["y"], 1.0, places=9)
+        _v, err2 = nm.run_program(
+            [{"var": "y", "op": "eval", "expr": "Zz*2", "x": "q", "at": 1}], {})
+        self.assertIn("解析不了", err2)
+
+    def test_program没用给定就不算代码验证(self):
+        """givens 有 w1/w2，式子却是 `2*u - 5`（把常数写死）→ 不标 ✅（改标未核对）。"""
+        ex = {"title": "✏️ 自补", "prompt": "w1=2,w2=-1，求 z",
+              "givens": {"w1": 2.0, "w2": -1.0},
+              "program": [{"var": "z", "op": "eval", "expr": "2*u - 5", "x": "u", "at": 3}],
+              "steps": [{"text": "z=1", "why": ""}], "answer": "z=1"}
+        rows = nm.program_rows({"example": ex})
+        self.assertEqual(["unchecked"], [r["status"] for r in rows], rows)
+        self.assertIn("没用到题面给定的量", rows[0]["how"])
+        self.assertNotIn("执行通过", rows[0]["how"])
+
+    def test_program真的用了给定就算过(self):
+        ex = {"title": "🎙 13:16", "prompt": "w1=2,w2=-1,theta=1,x1=3,x2=4，求 z",
+              "givens": {"w1": 2.0, "w2": -1.0, "x1": 3.0, "x2": 4.0, "theta": 1.0},
+              "program": [{"var": "z", "op": "eval",
+                           "expr": "w1*x1 + w2*x2 - theta", "x": "x1", "at": 3}],
+              "steps": [{"text": "z=1", "why": ""}], "answer": "z=1"}
+        rows = nm.program_rows({"example": ex})
+        self.assertEqual(["ok"], [r["status"] for r in rows], rows)
+
+    def test_没有_givens_的老例题照旧(self):
+        """没有 `givens` 的例题（econ 那几道 `60*q+500/q`）不许被这条误伤。"""
+        sec = {"heading": "[13:16] 停产价格", "ts": "13:16",
+               "example": {"title": "🎙 13:16", "prompt": "求 AC 最低点",
+                           "program": [{"var": "q_star", "op": "argmin",
+                                        "expr": "60*q + 500/q", "x": "q", "range": [1, 10]}],
+                           "steps": [{"text": "求导", "why": ""}], "answer": "q*=2.89"}}
+        rows = nm.program_rows(sec)
+        self.assertEqual(["ok"], [r["status"] for r in rows], rows)
+
+
 class TestF9_QVSP(unittest.TestCase):
     """F9（作者读转录后重定口径）：课上的函数是 **AC(q)=60q+500/q**，q*=√(25/3)≈2.89，
     停产价格 **P=AC(q*)≈346.4** —— 「2.89 是**产量**，不是价格」。

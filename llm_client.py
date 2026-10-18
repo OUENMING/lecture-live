@@ -42,9 +42,47 @@ def headers(key: str) -> dict:
     return h
 
 
-def chat_json(key: str, model: str, system: str, user: str, *, max_tokens: int,
+#: **每次调用的硬墙钟上限**（秒，从发出请求算起）。
+#:
+#: ⚠️ 为什么不能只信 `httpx` 的 `timeout`（F13 实测，2026-10-18）：那是**每次读**的超时。
+#:    上游（DeepSeek，经 Worker 代理）在思考时会持续发**空行 keep-alive**，字节一直在滴
+#:    —— 每隔几秒来几个字节，`read` 超时永远不触发，一次调用就能把整条笔记链挂死
+#:    （实测：18 分钟 0% CPU、socket ESTABLISHED，笔记生成永不返回）。
+#:    所以按**总时长**算：超了就关连接、抛 `httpx.TimeoutException`（调用方已有的
+#:    重试 / 兜底 / 「这块失败」记录都能接）。
+CALL_DEADLINE_S = 300.0
+
+
+def _post_deadline(url: str, *, headers: dict, payload: dict, timeout: float,
+                   deadline: float) -> tuple:
+    """POST → `(status_code, body_bytes)`；**总时长超过 `deadline` 就主动断开**。
+
+    ⚠️ 用 `httpx.stream` 而不是 `httpx.post`：只有流式读才能在"字节一直滴"的时候按
+       **墙钟**叫停（`httpx.post` 会一直等到 body 读完，没有插手的地方）。
+    """
+    import time
+
+    import httpx
+
+    t0 = time.monotonic()
+    with httpx.stream("POST", url, headers=headers, json=payload,
+                      timeout=timeout) as r:
+        buf = bytearray()
+        for chunk in r.iter_bytes():
+            buf += chunk
+            spent = time.monotonic() - t0
+            if spent > deadline:
+                # 关连接由 with 负责（httpx 会把 socket 关掉，不留后台线程）。
+                raise httpx.ReadTimeout(
+                    f"本次调用超过总时长 {deadline:.0f}s（已过 {spent:.0f}s、"
+                    f"只收到 {len(buf)} 字节 —— 上游在滴 keep-alive 空行）",
+                    request=r.request)
+        return r.status_code, bytes(buf)
+
+
+def chat_json(key: str, model: str, system: str, user: str, *, max_tokens,
               temperature: float = 0.2, timeout: float = 180.0, return_meta: bool = False,
-              effort: str | None = None):
+              effort: str | None = None, deadline: float | None = None):
     """非流式、`response_format=json_object`；返回模型给的 JSON（**原样**，可能不是 dict）。
 
     ⚠️ 失败一律抛（`httpx.HTTPError` / `KeyError` / `json.JSONDecodeError`…）—— 吞不吞、吞成什么，
@@ -66,6 +104,8 @@ def chat_json(key: str, model: str, system: str, user: str, *, max_tokens: int,
        commit `0335853` 2026-10-18 已部署）。**截断的真正来源是我们的 per-call 预算**
        （旧 REVIEW 6000 / REPAIR 3000 / VERIFY 2500 / OVERVIEW 3500 / SHORTEN 2500 偏小），
        不是 Worker —— F11-9 已把笔记那几类调成 `*_MAX_TOKENS_THINKING`（见 `note_v2`）。
+    ⭐ F13：**硬墙钟上限** `deadline`（默认 `CALL_DEADLINE_S`，每次 `_once` 各算一次）——
+       `timeout` 只管"单次读"，滴 keep-alive 时永远不会触发（见 `_post_deadline`）。
     """
     import httpx
 
@@ -80,10 +120,14 @@ def chat_json(key: str, model: str, system: str, user: str, *, max_tokens: int,
         else:
             payload["temperature"] = temperature
             payload["thinking"] = {"type": "disabled"}
-        r = httpx.post(f"{base_for(key)}/chat/completions", headers=headers(key),
-                       json=payload, timeout=timeout)
-        r.raise_for_status()
-        ch = (r.json().get("choices") or [{}])[0]
+        url = f"{base_for(key)}/chat/completions"
+        status, body = _post_deadline(
+            url, headers=headers(key), payload=payload, timeout=timeout,
+            deadline=CALL_DEADLINE_S if deadline is None else deadline)
+        resp = httpx.Response(status, content=body,
+                              request=httpx.Request("POST", url))
+        resp.raise_for_status()                 # 与旧路径同一种异常（带 status/body）
+        ch = (resp.json().get("choices") or [{}])[0]
         return ch, str(ch.get("finish_reason") or "")
 
     choice, finish = _once(effort)

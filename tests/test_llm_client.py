@@ -3,13 +3,15 @@
 
     ClassLive.app/Contents/MacOS/python tests/test_llm_client.py
 
-不联网：`httpx.post` 换成记录器。不写文件。
+不联网：`llm_client._post_deadline` 换成记录器；墙钟用例用 `httpx.MockTransport`
+（假流，受控字节节奏）。不写文件。
 """
 from __future__ import annotations
 
 import json
 import pathlib
 import sys
+import time
 import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
@@ -34,12 +36,23 @@ class _Resp:
 
 
 class Rec:
-    def __init__(self, content='{"a": 1}'):
-        self.calls, self.content = [], content
+    """`llm_client._post_deadline` 的替身（F13：真正发请求的那一层）。
 
-    def __call__(self, url, headers=None, json=None, timeout=None):
-        self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
-        return _Resp(self.content)
+    记 `(url, headers, payload, timeout, deadline)`，回一段正常的 JSON 体 ——
+    这样"发出去的请求体/请求头/超时"这些不变量照旧可钉，而不必碰网络。
+    """
+
+    def __init__(self, content='{"a": 1}', finish=None, status=200):
+        self.calls, self.content = [], content
+        self.finish, self.status = finish, status
+
+    def __call__(self, url, *, headers=None, payload=None, timeout=None, deadline=None):
+        self.calls.append({"url": url, "headers": headers, "json": payload,
+                           "timeout": timeout, "deadline": deadline})
+        ch = {"message": {"content": self.content}}
+        if self.finish is not None:
+            ch["finish_reason"] = self.finish
+        return self.status, json.dumps({"choices": [ch]}).encode()
 
 
 class _Resp2:
@@ -62,14 +75,97 @@ def _old_payload(model, system, user, max_tokens, temperature):
                          {"role": "user", "content": user}]}
 
 
+class Deadline(unittest.TestCase):
+    """⭐ F13：**每次调用的硬墙钟上限**。
+
+    现场（2026-10-18 实测）：`httpx` 的 `timeout=180` 是**每次读**的超时；上游（DeepSeek
+    经 Worker 代理）思考时持续滴 **keep-alive 空行**，每隔几秒来几个字节 → read 超时永远
+    不触发，一次调用把整条笔记链挂死（18 分钟 0% CPU、socket ESTABLISHED）。
+    """
+
+    def _patch_stream(self, handler):
+        """把 `httpx.stream` 换成"带 MockTransport 的 Client.stream"（不联网、可控制字节节奏）。"""
+        import contextlib
+
+        def fake(method, url, **kw):
+            client = httpx.Client(transport=httpx.MockTransport(handler))
+
+            @contextlib.contextmanager
+            def _cm():
+                try:
+                    with client.stream(method, url, **kw) as r:
+                        yield r
+                finally:
+                    client.close()
+            return _cm()
+        orig = httpx.stream
+        httpx.stream = fake
+        return lambda: setattr(httpx, "stream", orig)
+
+    def test_上游滴字节也要按总时长叫停(self):
+        """滴 1 字节 / 20ms 的响应 → 必须在 deadline 附近抛超时，并把流提前关掉。"""
+        produced = {"n": 0}
+        total = 300
+
+        def trickle():
+            for _ in range(total):
+                time.sleep(0.02)
+                produced["n"] += 1
+                yield b" "
+
+        restore = self._patch_stream(lambda request: httpx.Response(200, content=trickle()))
+        t0 = time.monotonic()
+        try:
+            with self.assertRaises(httpx.TimeoutException) as cm:
+                llm_client.chat_json("sk-x", "m", "s", "u", max_tokens=1,
+                                     timeout=30, deadline=0.25)
+        finally:
+            restore()
+        spent = time.monotonic() - t0
+        self.assertLess(spent, 3.0, f"没在 deadline 附近停（{spent:.1f}s）")
+        self.assertLess(produced["n"], total, "流没被提前关掉（with 没生效）")
+        self.assertIn("总时长", str(cm.exception))
+
+    def test_正常路径照旧(self):
+        """一次正常返回：照样拿到 JSON，`deadline` 默认是 `CALL_DEADLINE_S`。"""
+        body = json.dumps({"choices": [{"message": {"content": '{"ok": 3}'}}]}).encode()
+        restore = self._patch_stream(lambda request: httpx.Response(200, content=body))
+        try:
+            self.assertEqual(llm_client.chat_json("sk-x", "m", "s", "u", max_tokens=1),
+                             {"ok": 3})
+        finally:
+            restore()
+
+    def test_HTTP_错误照旧抛(self):
+        """4xx/5xx 仍然抛 `HTTPStatusError`（带 status 与 body）。"""
+        restore = self._patch_stream(lambda request: httpx.Response(500, content=b"upstream boom"))
+        try:
+            with self.assertRaises(httpx.HTTPStatusError) as cm:
+                llm_client.chat_json("sk-x", "m", "s", "u", max_tokens=1)
+        finally:
+            restore()
+        self.assertEqual(cm.exception.response.status_code, 500)
+
+    def test_默认墙钟写在常量里(self):
+        self.assertEqual(llm_client.CALL_DEADLINE_S, 300.0)
+        self.rec = Rec()
+        orig = llm_client._post_deadline
+        llm_client._post_deadline = self.rec
+        try:
+            llm_client.chat_json("sk-x", "m", "s", "u", max_tokens=1)
+        finally:
+            llm_client._post_deadline = orig
+        self.assertEqual(self.rec.calls[0]["deadline"], llm_client.CALL_DEADLINE_S)
+
+
 class T(unittest.TestCase):
     def setUp(self):
         self.rec = Rec()
-        self._orig = httpx.post
-        httpx.post = self.rec
+        self._orig = llm_client._post_deadline
+        llm_client._post_deadline = self.rec
 
     def tearDown(self):
-        httpx.post = self._orig
+        llm_client._post_deadline = self._orig
 
     def test_build_notes_same_request(self):
         out = build_notes._chat_json("sk-x", "m", "S", "U", 99, temperature=0.4, timeout=15)
@@ -154,19 +250,21 @@ class T(unittest.TestCase):
 
     def test_thinking_truncation_falls_back_to_disabled(self):
         """⭐ 带 effort 的调用收到 `finish_reason=length` → 关思考重来一次（不丢块）。"""
-        seq = [_Resp2("", "length"), _Resp2('{"ok": 2}', "stop")]
+        seq = [("", "length"), ('{"ok": 2}', "stop")]
         calls = []
 
-        def fake(url, headers=None, json=None, timeout=None):
-            calls.append(json)
-            return seq[len(calls) - 1]
+        def fake(url, *, headers=None, payload=None, timeout=None, deadline=None):
+            calls.append(payload)
+            content, fin = seq[len(calls) - 1]
+            return 200, json.dumps({"choices": [
+                {"message": {"content": content}, "finish_reason": fin}]}).encode()
 
-        orig = httpx.post
-        httpx.post = fake
+        orig = llm_client._post_deadline
+        llm_client._post_deadline = fake
         try:
             out = llm_client.chat_json("sk-x", "m", "S", "U", max_tokens=4096, effort="low")
         finally:
-            httpx.post = orig
+            llm_client._post_deadline = orig
         self.assertEqual(out, {"ok": 2})
         self.assertEqual(len(calls), 2, "截断必须重来一次")
         self.assertEqual(calls[0]["thinking"], {"type": "enabled"})
@@ -177,17 +275,18 @@ class T(unittest.TestCase):
         """不带 effort 时行为逐字不变：截断照样抛（一次性，不重来）。"""
         calls = []
 
-        def fake(url, headers=None, json=None, timeout=None):
-            calls.append(json)
-            return _Resp2("", "length")
+        def fake(url, *, headers=None, payload=None, timeout=None, deadline=None):
+            calls.append(payload)
+            return 200, json.dumps({"choices": [
+                {"message": {"content": ""}, "finish_reason": "length"}]}).encode()
 
-        orig = httpx.post
-        httpx.post = fake
+        orig = llm_client._post_deadline
+        llm_client._post_deadline = fake
         try:
             with self.assertRaises(json.JSONDecodeError):
                 llm_client.chat_json("sk-x", "m", "S", "U", max_tokens=10)
         finally:
-            httpx.post = orig
+            llm_client._post_deadline = orig
         self.assertEqual(len(calls), 1, "不带 effort 不许重来")
 
     def test_passcode_goes_to_worker_with_install_id(self):

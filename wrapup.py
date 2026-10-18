@@ -112,7 +112,7 @@ def build(*, title: str = "收尾", on_close=None):
       · `set_buttons([(标题, 回调), …])` —— 换一批按钮，旧的直接摘掉
     """
     try:
-        from AppKit import (NSButton, NSColor, NSFont, NSMakeRect, NSTextField,
+        from AppKit import (NSColor, NSFont, NSMakeRect, NSTextField,
                             NSTextAlignmentLeft, NSLineBreakByTruncatingTail,
                             NSLineBreakByWordWrapping,
                             NSWindowStyleMaskBorderless,
@@ -238,8 +238,7 @@ def build(*, title: str = "收尾", on_close=None):
             n = len(specs)
             bw = btn_geom(n)
             for i, (text, cb) in enumerate(specs):
-                b = NSButton.alloc().initWithFrame_(
-                    NSMakeRect(btn_x(i, bw), PAD, bw, BTN_H))
+                b = panel.make_button(NSMakeRect(btn_x(i, bw), PAD, bw, BTN_H))
                 # ⚠️ 按钮必须**看起来像按钮**（第一版用无边框淡字，渲染出来与旁边的说明文字
                 #    分不出来，作者一眼看不出能点）→ 两档都是胶囊：
                 #    第一颗 = 主操作（「存入」/ 只有一颗时的「关闭」）实心；其余次要（淡底 + 发丝边）。

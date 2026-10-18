@@ -78,9 +78,9 @@ def _open(url: str) -> None:
 
 def _link(text: str, url: str, targets: list):
     """「详情 ↗」：无边框的淡色文字按钮，点了用浏览器开 `url`。target 塞进 `targets` 由调用方持住。"""
-    from AppKit import (NSAttributedString, NSButton, NSFont, NSFontAttributeName,
+    from AppKit import (NSAttributedString, NSFont, NSFontAttributeName,
                         NSForegroundColorAttributeName, NSMakeRect)
-    b = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 16))
+    b = panel.make_button(NSMakeRect(0, 0, 10, 16))
     b.setBordered_(False)
     b.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
         text, {NSFontAttributeName: NSFont.systemFontOfSize_weight_(11.0, _W),
@@ -233,7 +233,7 @@ def build(title: str, subtitle: str = "", groups: list[dict] | None = None, *,
     返回 `{"panel", "close", "_targets"}`（`_targets` 由调用方持住 —— target 是弱引用）。
     """
     try:
-        from AppKit import (NSButton, NSMakeRect, NSWindowStyleMaskBorderless,
+        from AppKit import (NSMakeRect, NSWindowStyleMaskBorderless,
                             NSWindowStyleMaskNonactivatingPanel)
         inner = WIDTH - 2 * PAD
         targets: list = []
@@ -353,7 +353,7 @@ def build(title: str, subtitle: str = "", groups: list[dict] | None = None, *,
         for text, fn, kind in reversed(list(buttons)):
             bw = max(80.0, 26.0 + 13.5 * len(text))
             x -= bw
-            b = NSButton.alloc().initWithFrame_(NSMakeRect(x, PAD, bw, 28.0))
+            b = panel.make_button(NSMakeRect(x, PAD, bw, 28.0))
             (panel.style_primary if kind == "primary" else panel.style_secondary)(b, text)
             tg = panel.make_button_target(_pick(fn))
             b.setTarget_(tg); b.setAction_("clicked:")

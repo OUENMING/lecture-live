@@ -499,11 +499,15 @@ def t_buttons_never_overflow():
     card = wrapup.build()
     assert card is not None, "卡片没建起来（这条判据需要 AppKit）"
     try:
+        from AppKit import NSButton as _NSB
         for n in (1, 2, 3, 4, 5):
             card["set_buttons"]([(f"按{i}", (lambda: None)) for i in range(n)])
             card["panel"].displayIfNeeded()
-            btns = [v for v in card["_fp"].glass.subviews()
-                    if type(v).__name__ == "NSButton"]
+            # ⚠️ 用 `isinstance` 而不是 `type(v).__name__ == "NSButton"`：
+            #    2026-10-18 起按钮是 `panel.make_button` 造的**子类**
+            #    （`_ClassLivePressButton`，带按压反馈）—— 按类名精确匹配会一个都数不到，
+            #    判据看着还在、其实恒真（"画出来 0 个按钮，期望 1" 当场抓到）。
+            btns = [v for v in card["_fp"].glass.subviews() if isinstance(v, _NSB)]
             assert len(btns) == n, f"画出来 {len(btns)} 个按钮，期望 {n}"
             right = max(float(b.frame().origin.x) + float(b.frame().size.width)
                         for b in btns)

@@ -1244,6 +1244,8 @@ class ObsidianWriter:
                           # ⭐ F10：对照表/步骤图全讲各 ≤3（逐节的 schema 校验在
                           #    `note_v2._clean_section` 里；这一刀是**全篇**上限）。
                           (lambda r: note_v2.clamp_components(r), "组件上限"),
+                          # ⭐ F11 ③：跨件重复闸（flow 复述本节例题步骤 ≥3 条 / 组件同名）。
+                          (lambda r: note_v2.dedupe_components(r), "组件去重"),
                           (lambda r: note_ledger.reconcile(r),
                            "更正账本核对"),
                           (lambda r: note_guards.scrub(r), "猜测句清理"),
@@ -1290,7 +1292,7 @@ class ObsidianWriter:
                     if isinstance(st, dict):
                         self._guard_counts["downgraded"] += int(st.get("downgraded") or 0)
                 elif label in ("猜测句清理", "猜测句清理（串讲）", "重复句去重",
-                               "纯算术线索问题", "组件上限") and isinstance(extra_items, list):
+                               "纯算术线索问题", "组件上限", "组件去重") and isinstance(extra_items, list):
                     self._guard_counts["dropped"] += len(extra_items)
                 for w in warns_:
                     self._note_warns.append(w)

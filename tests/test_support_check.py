@@ -720,6 +720,44 @@ class DowngradeF11(unittest.TestCase):
         self.assertEqual(extra, [{"downgraded": 0}])
 
 
+class SymbolRetrievalF11(unittest.TestCase):
+    """⭐ F11 ④：符号 claim（`MC=12`/`AC=28`/`q=4`/`AC(5)`）要按**精确 token** 取到材料。
+
+    F10 §五：`materials._query_terms` 丢掉 <3 字符词与纯数字 → `$MC=12$` 0 个查询词 →
+    材料片段取不到 → 判官看空材料 → 假警。修在支持核对这边（不走 BM25）。
+    """
+
+    def _mat(self, text):
+        class _M:
+            def __init__(self, t):
+                c = type("C", (), {})()
+                c.text = t
+                self._chunks = [c]
+
+            def search(self, q, k=3, **kw):
+                return []                        # 逼符号扫描那一条路（BM25 不管用）
+        return _M(text)
+
+    def test_纯符号claim走精确扫描(self):
+        # 真材料用的是数学斜体 + 空格（NFKC 折成 ASCII）
+        line = ("At \U0001D45E = 4 we have \U0001D434\U0001D436 = 28 and "
+                "\U0001D440\U0001D436 = 12.")
+        m = self._mat(line)
+        for claim in ("$MC=12$", "$AC=28$", "$q=4$"):
+            got = ng._materials_excerpts(m, claim)
+            self.assertTrue(got and "we have" in got[0], (claim, got))
+
+    def test_Name括号形式也认(self):
+        m = self._mat("For q = 5 the average cost is AC(5) = 22.5 from the table.")
+        got = ng._materials_excerpts(m, "$AC(5)$")
+        self.assertTrue(got and "22.5" in got[0], got)
+
+    def test_非符号claim不乱进(self):
+        m = self._mat("nothing relevant here")
+        self.assertEqual(ng._materials_excerpts(m, "完全无关的一句话"), [])
+        self.assertEqual(ng._retr_spans("完全无关的一句话"), [])
+
+
 
 class MechOverride(unittest.TestCase):
     """模型自写的 mismatch 行：节内函数复算两边相等 → 作废只留台账（F9b 作者点名）。"""

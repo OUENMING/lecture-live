@@ -1376,9 +1376,11 @@ class ComponentsF10(unittest.TestCase):
         src = (pathlib.Path(__file__).resolve().parent.parent
                / "obsidian_writer.py").read_text(encoding="utf-8")
         self.assertIn("note_v2.clamp_components", src)
+        self.assertIn("note_v2.dedupe_components", src)
         self.assertTrue(src.index("note_v2.clamp_components")
-                        < src.index('"纯算术线索问题", "组件上限")'),
+                        < src.index('"纯算术线索问题", "组件上限"'),
                         "链步与计数标签不在同一处（计数会漏）")
+        self.assertIn('"组件上限", "组件去重")', src)
 
     def test_复检仍错_表整件撤(self):
         sec = dict(SECTION, compare={
@@ -1403,6 +1405,64 @@ class ComponentsF10(unittest.TestCase):
         c = out["sections"][0]["compare"]
         self.assertEqual(c["cols"][0], "", "行头列的表头占位被剪了（列会错位）")
         self.assertEqual(c["rows"][1]["cells"], ["", "x"], "空格子被剪了（行会错位）")
+
+
+class DedupeF11(unittest.TestCase):
+    """⭐ F11 ③：跨件重复闸 —— flow 复述本节例题步骤 ≥3 条 → 撤；组件同名 → 撤后来那件。"""
+
+    def _sec(self, **kw):
+        s = {"heading": "h", "ts": "13:16", "prose": ["x"]}
+        s.update(kw)
+        return s
+
+    def test_flow复述例题步骤_撤(self):
+        ex = {"title": "🎙 13:16", "prompt": "配平", "steps": [
+            {"text": "写出两个半反应", "why": ""},
+            {"text": "配平氧原子", "why": ""},
+            {"text": "配平氢原子", "why": ""}]}
+        fl = {"title": "🎙 半反应配平流程", "steps": [
+            {"label": "写出两个半反应", "detail": ""},
+            {"label": "配平氧原子", "detail": ""},
+            {"label": "配平氢原子", "detail": ""},
+            {"label": "配平电荷", "detail": ""}]}
+        out, dropped, warns = nv.dedupe_components({"sections": [self._sec(example=ex, flow=fl)]})
+        self.assertNotIn("flow", out["sections"][0], "复述例题步骤的 flow 没撤")
+        self.assertTrue(dropped)
+        self.assertTrue(warns)
+
+    def test_flow步子不够_留(self):
+        ex = {"title": "🎙 13:16", "prompt": "p", "steps": [{"text": "求 $AC$", "why": ""}]}
+        fl = {"title": "算法", "steps": [{"label": "前向传播", "detail": ""},
+                                        {"label": "反向传播", "detail": ""},
+                                        {"label": "更新参数", "detail": ""}]}
+        out, dropped, _ = nv.dedupe_components({"sections": [self._sec(example=ex, flow=fl)]})
+        self.assertIn("flow", out["sections"][0])
+        self.assertEqual(dropped, [])
+
+    def test_同标题组件_后来那件撤(self):
+        rev = {"sections": [self._sec(compare=dict(_cmp())),
+                            self._sec(compare=dict(_cmp(), title="🎙 三种成本指标"))]}
+        out, dropped, _ = nv.dedupe_components(rev)
+        self.assertIn("compare", out["sections"][0])
+        self.assertNotIn("compare", out["sections"][1], "同名组件没撤（标签剥掉后同名）")
+        self.assertTrue(dropped)
+
+    def test_不同标题_都留(self):
+        rev = {"sections": [self._sec(compare=dict(_cmp())),
+                            self._sec(compare=dict(_cmp(), title="两种求法"))]}
+        out, dropped, _ = nv.dedupe_components(rev)
+        self.assertIn("compare", out["sections"][0])
+        self.assertIn("compare", out["sections"][1])
+        self.assertEqual(dropped, [])
+
+    def test_标题只一个标签(self):
+        self.assertEqual(nv._fold_labels("🎙 13:16 停产价格（🎙 10:23）"),
+                         "🎙 13:16 停产价格（10:23）")
+        self.assertEqual(nv._src_label("🎙 对照表（🎙 13:16）", "lecture"),
+                         "🎙 对照表（13:16）")
+        r = nv._clean_section({"heading": "h",
+                               "example": {"title": "🎙 13:16 X（🎙 10:23）", "prompt": "p"}})
+        self.assertEqual(r["example"]["title"].count("🎙"), 1, r["example"]["title"])
 
 
 class GuardLedgerF11(unittest.TestCase):

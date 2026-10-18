@@ -776,6 +776,52 @@ def _retr_tokens(claim: str) -> dict:
     return {"nums": nums, "latin": latin, "grams": grams}
 
 
+#: ⭐ F11 ④（作者裁定）：符号 claim（`MC=12`、`AC=28`、`AC(5)`）要能**原样**检索材料 ——
+#: 生成侧的材料检索（`materials._query_terms`）会丢 <3 字符词与纯数字，`$MC=12$` 于是
+#: 0 个查询词 → 材料片段取不到 → 判官看到空材料 → 假警（F10 §五：5 条真·假警）。
+#: 支持核对这边**不走 BM25**：把 `Name=number` / `Name(number)` 当**精确 token**，
+#: 在材料片段里做归一化子串扫描（NFKC 把数学斜体 𝑀𝐶 折成 ASCII，去空白/花括号/反斜杠）。
+_RETR_SPAN_EQ = re.compile(r"(?<![A-Za-z])[A-Za-z][A-Za-z0-9]{0,6}\s*[=＝]\s*-?\d+(?:\.\d+)?")
+_RETR_SPAN_CALL = re.compile(r"(?<![A-Za-z])[A-Za-z][A-Za-z0-9]{0,6}\s*\(\s*-?\d+(?:\.\d+)?\s*\)")
+
+
+def _norm_span(s) -> str:
+    """公式片段归一化：NFKC → 小写 → 去空白/`$`/花括号/反斜杠/`^`/`_`/全角等号。**纯函数。**"""
+    s = unicodedata.normalize("NFKC", str(s or "")).lower()
+    s = s.replace("＝", "=").replace("−", "-")
+    return re.sub(r"[\s$\\{}^_]", "", s)
+
+
+def _retr_spans(claim: str) -> list:
+    """claim 里的 `Name=number` / `Name(number)` / `$…=…$` 片段（归一化）。**纯函数。**"""
+    t = str(claim or "")
+    out: list = []
+    for m in _RETR_SPAN_EQ.finditer(t):
+        out.append(_norm_span(m.group(0)))
+    for m in _RETR_SPAN_CALL.finditer(t):
+        out.append(_norm_span(m.group(0)))
+    for m in re.finditer(r"\$[^$]{2,60}\$", t):        # 整条公式（含 `=`）也当一个 token
+        inner = m.group(0).strip("$")
+        if "=" in inner:
+            out.append(_norm_span(inner))
+    return [s for s in out if s]
+
+
+def _symbol_excerpts(materials, claim: str, *, k: int = 2) -> list:
+    """符号 claim → 材料里**含这个符号片段**的片段（精确 token 扫描）。**纯函数（只读材料）。**"""
+    spans = _retr_spans(claim)
+    if not spans:
+        return []
+    out: list = []
+    for c in (getattr(materials, "_chunks", None) or []):
+        blob = _norm_span(getattr(c, "text", ""))
+        if any(s in blob for s in spans):
+            out.append(str(getattr(c, "text", "") or ""))
+            if len(out) >= k:
+                break
+    return out
+
+
 def _retr_hits(entry: dict, toks: dict) -> list:
     """条目命中的 token（`(kind, token)` 列表）。**纯函数。**
 
@@ -1023,8 +1069,13 @@ def _materials_excerpts(materials, claim: str, *, k: int = 2,
     ⭐ F9d §0（作者裁定：支持核对必须与**生成时读的是同一份材料来源与同一检索口径**）：
     claim 本身检索不出词时（纯符号 `$MC=12$` / 纯中文短句 —— 材料是英文的），
     退一步用**本节转录窗口**再查一次（生成时正是拿转录片段查材料的）。
+    ⭐ F11 ④：符号 claim（`MC=12`/`AC(28)`/`AC(5)`）先走 `_symbol_excerpts` 的**精确 token
+    扫描**（材料里逐字有这个片段就取它）—— BM25 会因 <3 字符词/纯数字把查询词丢光。
     来源集没有第二个定义：`materials` 对象由调用方从生成链原样传进来。
     """
+    sym = _symbol_excerpts(materials, claim, k=k)
+    if sym:
+        return sym
     for q in (claim, context):
         if not q:
             continue

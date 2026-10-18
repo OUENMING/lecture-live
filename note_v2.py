@@ -469,8 +469,34 @@ CMP_PER_LECTURE = 3
 FLOW_PER_LECTURE = 3
 
 
+#: 标签 emoji（标题里只许出现**一个** —— F11 cosmetic：`🎙 …（🎙 10:23）` 是双标签）。
+_LABEL_EMOJI = re.compile(r"[🎙✏️📖]")
+_EMPTY_PAREN = re.compile(r"[（(]\s*[)）]")
+
+
+def _fold_labels(t: str) -> str:
+    """标题里只留**一个**标签：剥首标签后，把正文里再出现的 🎙/✏️/📖 去掉（含括号里的）。**纯函数。**"""
+    s = _one_line(t)
+    if not s:
+        return s
+    first = ""
+    for pre in ("🎙+✏️", "🎙", "✏️", "📖"):
+        if s.startswith(pre):
+            first = pre
+            s = s[len(pre):].lstrip()
+            break
+    s = _LABEL_EMOJI.sub("", s)
+    s = _EMPTY_PAREN.sub("", s)
+    s = re.sub(r"([（(])\s+", r"\1", s)
+    s = re.sub(r"\s+([)）])", r"\1", s)
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    if first == "🎙+✏️":
+        return f"🎙+✏️ {s}".strip()
+    return f"{first} {s}".strip() if first else s
+
+
 def _src_label(title: str, src) -> str:
-    """compare/flow 的标题按 `src` 挂 🎙/✏️（F9 标签纪律；缺省保守 `✏️`）。幂等。"""
+    """compare/flow 的标题按 `src` 挂 🎙/✏️（F9 标签纪律；缺省保守 `✏️`）。幂等，且**只一个标签**。"""
     t = _one_line(title)
     if not t:
         return t
@@ -480,6 +506,11 @@ def _src_label(title: str, src) -> str:
         if t.startswith(pre):
             t = t[len(pre):].lstrip()
             break
+    t = _LABEL_EMOJI.sub("", t)                 # ⭐ F11 cosmetic：正文里再出现的标签去掉
+    t = _EMPTY_PAREN.sub("", t)
+    t = re.sub(r"([（(])\s+", r"\1", t)
+    t = re.sub(r"\s+([)）])", r"\1", t)
+    t = re.sub(r"\s{2,}", " ", t).strip()
     return f"{mark} {t}"
 
 
@@ -557,6 +588,88 @@ def _clean_flow(fl) -> dict | None:
         loop = None                                        # 回到最后一步 = 没循环
     return {"title": _src_label(title, fl.get("src")), "steps": steps,
             "loop_to": loop}
+
+
+#: ⭐ F11 ③（作者裁定）：同节里 flow 与例题步骤重合 ≥3 条 → 撤 flow
+#: （"不要拿它复述某一道具体题的步骤"）；组件标题与**前面**某件同名 → 撤后来那件。
+DUP_STEP_MIN = 3
+
+
+def _comp_title_key(t) -> str:
+    """组件标题的比对键：去掉标签 emoji 与空白/标点，小写。**纯函数。**"""
+    return re.sub(r"[🎙✏️📖📚\s:：\-—–（()）]", "", str(t or "")).lower()
+
+
+def _step_key(s) -> str:
+    """一步的比对键：去空白与常见标点，小写。**纯函数。**"""
+    return re.sub(r"[\s，。、；：,.;:（）()→=＝·/]", "", str(s or "")).lower()
+
+
+def _common_run_len(a: str, b: str) -> int:
+    """两串的**最长公共子串**长度（步短语很短，直接扫）。**纯函数。**"""
+    if not a or not b:
+        return 0
+    best = 0
+    for i in range(len(a)):
+        for j in range(len(b)):
+            k = 0
+            while i + k < len(a) and j + k < len(b) and a[i + k] == b[j + k]:
+                k += 1
+            best = max(best, k)
+    return best
+
+
+def _steps_overlap(a: str, b: str) -> bool:
+    """一步与另一步是否讲的是同一件事（包含关系，或有 ≥4 字公共串）。**纯函数。**"""
+    x, y = _step_key(a), _step_key(b)
+    if not x or not y:
+        return False
+    if x in y or y in x:
+        return True
+    return _common_run_len(x, y) >= 4
+
+
+def dedupe_components(review: dict) -> tuple:
+    """⭐ F11 ③：跨件重复闸（作者裁定）。返回（review, 丢掉清单, 提醒）。
+
+    ① 同节里 `flow` 的步骤与本节例题 `example` 的步骤重合 ≥3 条 → 撤 flow；
+    ② `compare`/`flow` 的标题与**前面**某件同名（归一化后）→ 撤后来那件。
+    两处都进守卫台账（`dropped`）。
+    """
+    out = copy.deepcopy(review)
+    dropped: list = []
+    seen: set = set()
+    for s in (out.get("sections") or []):
+        if not isinstance(s, dict):
+            continue
+        for k in ("compare", "flow"):
+            comp = s.get(k)
+            if not isinstance(comp, dict):
+                continue
+            tk = _comp_title_key(comp.get("title"))
+            if tk and tk in seen:
+                dropped.append(f"{k}「{_one_line(comp.get('title'))[:20]}」（同标题）")
+                s.pop(k, None)
+            elif tk:
+                seen.add(tk)
+        fl, ex = s.get("flow"), s.get("example")
+        if isinstance(fl, dict) and isinstance(ex, dict):
+            esteps = [f"{st.get('text', '')} {st.get('why', '')}"
+                      for st in (ex.get("steps") or []) if isinstance(st, dict)]
+            n = 0
+            for fst in (fl.get("steps") or []):
+                if not isinstance(fst, dict):
+                    continue
+                ftxt = f"{fst.get('label', '')} {fst.get('detail', '')}"
+                if any(_steps_overlap(ftxt, e) for e in esteps):
+                    n += 1
+            if n >= DUP_STEP_MIN:
+                dropped.append(f"flow「{_one_line(fl.get('title'))[:20]}」"
+                               f"与例题步骤重合 {n} 条")
+                s.pop("flow", None)
+    warns = ([f"组件去重：丢了 {len(dropped)} 件（" + "、".join(dropped[:4])
+              + ("…" if len(dropped) > 4 else "") + "）"] if dropped else [])
+    return out, dropped, warns
 
 
 def clamp_components(review: dict) -> tuple:
@@ -732,7 +845,7 @@ def _clean_section(s) -> dict:
     # ⭐ F9b（作者点名，代码里定不靠提示词）：
     #   · 「按口述还原」的例题 → 合标 🎙+✏️；· 空壳 example/faded/plot/compare/flow 直接摘掉。
     if r["example"].get("title"):
-        r["example"]["title"] = with_recon_label(r["example"]["title"])
+        r["example"]["title"] = _fold_labels(with_recon_label(r["example"]["title"]))
     for k in ("example", "faded", "plot", "compare", "flow"):
         if not r.get(k):
             r.pop(k, None)

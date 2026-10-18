@@ -448,3 +448,225 @@ def quote_check(review: dict, *, materials=None, transcript: str = "") -> tuple:
     if stripped:
         warns.append(f"{len(stripped)} 处引用在材料/转录里找不到逐字原文（已去掉引号改转述）")
     return out, stripped, warns
+
+
+# ============================================================ 2026-10-18 Δ
+# 作者看截图抓的四处（同一张 §1 的图）：
+#   ① 错除法「5.3除以3，得到约2.89」正文照印，而三道核的核算结果只活在文末折叠清单里；
+#   ② 同一段里「⚠ 课上只给了片段…」抄了两遍（模型自己抄的格式，抄重了）；
+#   ③ 线索问题「5.3除以3等于多少？」—— 计算器能答的问题帮不了复习；
+#   ④（渲染层）「展开全部步骤」还是原生按钮的灰框。
+# ①③④ 的修法见各自函数；② 这里做确定性去重。
+
+#: 三道核判成 `mismatch` 的断言 → 正文里的标注格式（核算结果必须**落到读者眼前**）。
+#: ⚠️ 为什么只标不改数字：`5.3` 与 `2.89` 哪个是口播听错，机械核**不知道**
+#:    （8.67÷3 = 2.89 恰好成立）—— 改错比标错坏得多（与更正账本同一条纪律）。
+_MISMATCH_MARK = "（⚠ 核算对不上：{how}）"
+#: 允许被标注的字段（渲染进正文的那些；`sources`/`ts`/`title` 这类出处字段不碰）。
+_MARK_FIELDS = {"prose", "prereq", "conclusion", "algebra", "intuition", "pitfalls",
+                "prompt", "answer", "text", "why", "q", "a"}
+
+
+def _field_name(path: tuple) -> str:
+    """路径的**字段名**（最后一个字符串分量）—— `("sections", 0, "prose", 0)` → `prose`。
+
+    ⚠️ 不能拿 `path[-1]`：列表字段（`prose`/`sources`/`steps`）的末位是**下标**（int），
+       照 `path[-1]` 过滤会把正文全部漏掉（2026-10-18 写这个守卫时踩过一版）。
+    """
+    for p in reversed(path):
+        if isinstance(p, str):
+            return p
+    return ""
+
+
+def _div_bad_sentence_end(text: str):
+    """这段文本里第一条**算不对的除法**断在哪儿（返回句子结束下标）；没有 → None。
+
+    ⚠️ 判法重新走 `note_math._DIV`（与三道核同一只正则、同一套容差）—— 标注的位置
+       必须和"谁被核出问题"完全一致，不另写一套近似。
+    """
+    import note_math
+    for i, m in enumerate(note_math._DIV.finditer(text)):
+        try:
+            a, b, c = float(m.group("a")), float(m.group("b")), float(m.group("c"))
+        except ValueError:
+            continue
+        if not b:
+            continue
+        dec = len(m.group("c").split(".")[1]) if "." in m.group("c") else 0
+        if abs(round(a / b, dec) - c) > 1e-9:
+            j = min([x for x in (text.find(p, m.end()) for p in "。！？") if x >= 0]
+                    or [len(text)])
+            return j + 1
+    return None
+
+
+def annotate_mismatches(review: dict) -> tuple:
+    """三道核里 `status == "mismatch"` 的断言 → **正文原位标 ⚠**（就地，不改数字）。
+
+    ⚠️ 为什么不能只进"修正说明"（2026-10-18 Δ 的根因）：三段核的 mismatch 只落在
+       文末折叠的核对清单与「修正记录」里，而 §1 正文照样写着"5.3除以3，得到约2.89"——
+       读者把错算术当事实读 4 遍；清单那行还写着"已修正"（其实正文一个字没动）。
+       **核算结果必须跟着那句话走**；改不了（不知道哪个数是口播错的）就标 ⚠，不许静默。
+    ⚠️ 定位：claim 前 60 字在哪个字段里出现就标哪个字段；能定位到"哪一句"（除法）
+       就插在句号后，定位不到就缀在段尾（位置宁糙，不许不标）。
+    ⚠️ 幂等：字段里已有"核算对不上"就不再插（同一句可能同时有机械核与模型核两行）。
+    """
+    out = copy.deepcopy(review)
+    rows = [c for c in (out.get("checks") or [])
+            if isinstance(c, dict) and c.get("status") == "mismatch"]
+    if not rows:
+        return out, [], []
+    n = 0
+    for row in rows:
+        claim = _norm(str(row.get("claim") or ""))[:60]
+        how = str(row.get("how") or "").strip().rstrip("。；;，,")
+        if not claim or not how:
+            continue
+        mark = _MISMATCH_MARK.format(how=how)
+        for s in (out.get("sections") or []):
+            if not isinstance(s, dict):
+                continue
+            hit = None
+            for path in paths_of(s):
+                if not path or _field_name(path) not in _MARK_FIELDS:
+                    continue
+                v = _get(s, path)
+                if not isinstance(v, str) or not v:
+                    continue
+                # ⚠️ 比对时先把**已有标注**从字段里摘掉：标注插在句子中间，
+                #    不摘掉就会把 claim 的连续匹配打断（同一句的第二行会找不到承载字段）。
+                bare = _norm(re.sub(r"（⚠ 核算对不上：[^）]{0,80}）", "", v))
+                if claim in bare:
+                    if "核算对不上" in v:
+                        row["annotated"] = True      # 这一处已经有 ⚠（别行标的）
+                        hit = None
+                    else:
+                        hit = path
+                    break
+            if hit is None:
+                continue
+            v = _get(s, hit)
+            where = _div_bad_sentence_end(v)
+            _set(s, hit, (v.rstrip() + mark) if where is None
+                 else (v[:where] + mark + v[where:]))
+            row["annotated"] = True
+            n += 1
+            break
+    warns = [f"{n} 处核算不一致（三道核）已在正文原位标 ⚠"] if n else []
+    return out, [], warns
+
+
+#: 去重句首的连接词/强调符：`但课上只给了片段…` 与 `⚠ 课上只给了片段…` 是同一句。
+_DUPE_LEAD = re.compile(r"^(?:[⚠️!！?？\s、，。:：]+|但|不过|另外|同时|而且|而|于是|因此|所以|又|还|也)+")
+
+
+def _sentence_key(s: str) -> str:
+    return _DUPE_LEAD.sub("", re.sub(r"\s+", "", s))
+
+
+def dedupe_sentences(review: dict, *, min_chars: int = 10) -> tuple:
+    """同一字段里**整句的重复**只留第一遍（模型抄格式抄重了，读者看两遍）。
+
+    ⚠️ 只删**长句**（≥ `min_chars` 字**且**以句末标点收尾）：短句重复是正常行文
+       （"对。对。"），拿它开刀会误伤；`⚠ 课上只给了片段…` 这种 40 字的整句不在此列。
+    ⚠️ 带换行的字段整段跳过（rejoin 会把行结构吃掉）；`cover` 是台账，不碰。
+    """
+    out = copy.deepcopy(review)
+    dropped = 0
+    for path in paths_of(out):
+        if path and path[0] in _SKIP_TOP:
+            continue
+        v = _get(out, path)
+        if not isinstance(v, str) or "\n" in v:
+            continue
+        parts = _sentences(v)
+        if len(parts) < 2:
+            continue
+        kept, seen = [], set()
+        for s in parts:
+            if len(s.strip()) >= min_chars and s.rstrip()[-1] in "。！？!?":
+                k = _sentence_key(s)
+                if k in seen:
+                    dropped += 1
+                    continue
+                seen.add(k)
+            kept.append(s)
+        if len(kept) != len(parts):
+            _set(out, path, "".join(kept))
+    warns = [f"正文里删掉 {dropped} 处重复句"] if dropped else []
+    return out, [], warns
+
+
+#: 正文里的钟点时间戳（"教授在 12:50:41 以笑声结束…"）。节标题/出处字段上的时间戳不碰。
+_CLOCK_AT = re.compile(r"(?:在|于)\s*[\[(]?\d{1,2}:\d{2}(?::\d{2})?[\])]?\s*")
+_CLOCK_BARE = re.compile(r"(?<![:\d])\[?\d{1,2}:\d{2}(?::\d{2})?\]?(?![:\d])")
+
+
+def strip_clock_times(review: dict) -> tuple:
+    """正文里的钟点时间戳删掉 —— 时间在**节标题**上；正文指位置写（第 N 节）。
+
+    ⚠️ 不碰 `title`/`ts`/`sources`（那些地方的时间戳是**该有的**：题目出处）、
+       也不碰 `checks`（核对清单是台账，一个字都不许动）。
+    """
+    out = copy.deepcopy(review)
+    n = 0
+    for path in paths_of(out):
+        if not path or path[0] in _SKIP_TOP or path[0] == "checks":
+            continue
+        if _field_name(path) in ("title", "ts", "sources"):
+            continue
+        v = _get(out, path)
+        if not isinstance(v, str) or ":" not in v:
+            continue
+        v2 = _CLOCK_AT.sub("", v)
+        v2 = _CLOCK_BARE.sub("", v2)
+        v2 = re.sub(r"\s{2,}", " ", v2).strip(" ")
+        v2 = re.sub(r"[（(]\s*[）)]", "", v2)
+        if v2 != v:
+            _set(out, path, v2)
+            n += 1
+    warns = [f"正文里删掉 {n} 处钟点时间戳（时间在节标题上）"] if n else []
+    return out, [], warns
+
+
+#: 纯算术问题的尾巴（"…等于多少？" / "…是多少？"）。
+_ARITH_TAIL = re.compile(r"[，,、;；：:\s]*(?:等于|是|得|为|＝|=)\s*"
+                         r"(?:多少|几|什么数(?:字|值)?|什么)?[？?。！!]?\s*$")
+_ARITH_WORDS = re.compile(r"除以|除|乘以|乘|加上|加|减去|减")
+_ARITH_ONLY = re.compile(r"^[\d\s.+\-*/×÷()（）＝=]+$")
+
+
+def _trivial_arith_q(q: str) -> bool:
+    """纯算术问题（"5.3除以3等于多少？"）：计算器能答 → 复习价值为零 → 丢。"""
+    s = str(q or "").strip()
+    core = _ARITH_TAIL.sub("", s)
+    if core == s or len(core) > 24:
+        return False
+    core = _ARITH_WORDS.sub("/", core).replace(" ", "")
+    return bool(_ARITH_ONLY.fullmatch(core)) and any(ch.isdigit() for ch in core)
+
+
+def drop_trivial_cues(review: dict) -> tuple:
+    """每节的 `cues` 里丢掉纯算术问题（2026-10-18 Δ）。
+
+    ⚠️ 只动 `cues`（复习自问自答用）：`q`（本节回答）、`qa` 的位置和用途不同，
+       那里出现数字题另有上下文，不敢一刀切。
+    """
+    out = copy.deepcopy(review)
+    dropped: list = []
+    for s in (out.get("sections") or []):
+        if not isinstance(s, dict):
+            continue
+        cues = s.get("cues")
+        if not isinstance(cues, list):
+            continue
+        kept = []
+        for c in cues:
+            if isinstance(c, str) and _trivial_arith_q(c):
+                dropped.append(c)
+                continue
+            kept.append(c)
+        s["cues"] = kept
+    warns = [f"丢掉了 {len(dropped)} 条纯算术线索问题（计算器能答，帮不了复习）"] if dropped else []
+    return out, [], warns

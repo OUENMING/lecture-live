@@ -18,6 +18,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import note_guards as ng          # noqa: E402
 import note_ledger as nl          # noqa: E402
+import note_math as nm            # noqa: E402
 
 
 class Speculation(unittest.TestCase):
@@ -517,11 +518,133 @@ class Wiring(unittest.TestCase):
         self.assertIn("note_ledger.block", src, "账本没喂进 prompt")
         self.assertIn("note_guards.ensure_caliber", src, "口径对照没接线")
         self.assertIn("note_ledger.ensure_min_value", src, "最小平均成本补值没接线")
+        # 2026-10-18 Δ 的四步都要在链上（尤其 annotate 必须在**最后**：标注不许进串讲输入）
+        for key in ("note_guards.dedupe_sentences", "note_guards.strip_clock_times",
+                    "note_guards.drop_trivial_cues", "note_guards.annotate_mismatches"):
+            self.assertIn(key, src, f"{key} 没接线")
+        self.assertLess(src.index("引用逐字核对"), src.index("核算结果落正文"),
+                        "annotate 必须在清理链的最末（标注不许进串讲/scrub 的输入）")
 
     def test_prompt_里有两条纪律(self):
         import note_v2
         for key in ("⚠ 课上只给了片段", "不许第一人称", "引号"):
             self.assertIn(key, note_v2.REVIEW_SYS, f"prompt 缺纪律：{key}")
+        # 2026-10-18 Δ：三条新规矩（过渡段不单独成段 / 正文禁时间戳 / 线索问题禁纯算术）
+        for key in ("不许单独写一段讲解", "不许写钟点时间戳", "不许问纯算术"):
+            self.assertIn(key, note_v2.REVIEW_SYS, f"prompt 缺新规矩：{key}")
+
+
+class AnnotateMismatch(unittest.TestCase):
+    """2026-10-18 Δ：三道核的 mismatch 必须**落到正文原位**（作者看截图抓的）——
+    原来只进文末折叠清单，正文照样把错算术当事实印；清单里还写着"已修正"。"""
+
+    REAL = ("首先，我们计算了某个数值：5.3除以3，得到约2.89。这个数值是平均成本在特定产量下的值。"
+            "具体来说，平均成本函数为AC(q)= (60q+500)/q？但课上只给了片段："
+            "原题见📖 2025-12期末卷 Exercise 7 / 未核对。")
+    MECH = {"claim": REAL, "status": "mismatch", "recomputed": "5.3/3 ≈ 1.767",
+            "how": "5.3÷3=1.767，不是2.89"}
+
+    def test_错除法那一段在句子后面原位标出(self):
+        out, _, warns = ng.annotate_mismatches({"sections": [{"prose": [self.REAL]}],
+                                                "checks": [dict(self.MECH)]})
+        got = out["sections"][0]["prose"][0]
+        self.assertIn("得到约2.89。（⚠ 核算对不上：5.3÷3=1.767，不是2.89）这个数值", got)
+        self.assertTrue(out["checks"][0].get("annotated"))
+        self.assertEqual(1, got.count("核算对不上"))
+        self.assertTrue(warns and "1 处" in warns[0], warns)
+
+    def test_机械核与模型核同一句只标一次(self):
+        """同一条断言可能同时有机械核行与模型核行（两行 how 不同）—— 页面上只许一个 ⚠。"""
+        rows = [dict(self.MECH),
+                {"claim": self.REAL, "status": "mismatch", "recomputed": "5.3/3≈1.767",
+                 "how": "5.3除以3约1.77，不是2.89"}]
+        out, _, _ = ng.annotate_mismatches({"sections": [{"prose": [self.REAL]}], "checks": rows})
+        got = out["sections"][0]["prose"][0]
+        self.assertEqual(1, got.count("核算对不上"))
+        self.assertTrue(all(r.get("annotated") for r in out["checks"]))
+
+    def test_机械核与标注是一条链(self):
+        """从真句子出发：机械核出 `mismatch` → 标注落进正文（端到端，不起模型）。"""
+        rev = {"sections": [{"prose": [self.REAL]}]}
+        rows = [r for r in nm.check_review(rev) if "5.3" in r["claim"]]
+        self.assertEqual(["mismatch"], [r["status"] for r in rows])
+        out, _, _ = ng.annotate_mismatches({**rev, "checks": rows})
+        self.assertIn("核算对不上：5.3÷3=1.767，不是2.89", out["sections"][0]["prose"][0])
+
+    def test_没问题的行一个字不动(self):
+        rev = {"sections": [{"prose": [self.REAL]}],
+               "checks": [{"claim": self.REAL, "status": "ok", "how": "一致"},
+                          {"claim": self.REAL, "status": "unchecked", "how": "核不了"}]}
+        out, _, warns = ng.annotate_mismatches(rev)
+        self.assertEqual(self.REAL, out["sections"][0]["prose"][0])
+        self.assertEqual([], warns)
+        self.assertNotIn("annotated", out["checks"][0])
+
+    def test_找不到承载字段也不许炸(self):
+        out, _, warns = ng.annotate_mismatches(
+            {"sections": [{"prose": ["完全不相干的一段。"]}],
+             "checks": [dict(self.MECH)]})
+        self.assertEqual("完全不相干的一段。", out["sections"][0]["prose"][0])
+        self.assertEqual([], warns)
+
+
+class DedupeSentences(unittest.TestCase):
+    """2026-10-18 Δ②：模型抄格式抄两遍（真笔记里「⚠ 课上只给了片段…」一段出现两次）。"""
+
+    def test_课上只给了片段抄两遍只留一遍(self):
+        s = ("具体来说，平均成本函数为AC(q)= (60q+500)/q？但课上只给了片段："
+             "原题见📖 2025-12期末卷 Exercise 7 / 未核对。⚠ 课上只给了片段："
+             "原题见📖 2025-12期末卷 Exercise 7 / 未核对。")
+        out, _, warns = ng.dedupe_sentences({"sections": [{"prose": [s]}]})
+        got = out["sections"][0]["prose"][0]
+        self.assertEqual(1, got.count("课上只给了片段"), got)
+        self.assertIn("？但课上只给了片段：", got)
+        self.assertTrue(warns and "1 处" in warns[0], warns)
+
+    def test_短句重复是行文_不动(self):
+        s = "对。对。再算一遍。对。"
+        out, _, warns = ng.dedupe_sentences({"sections": [{"prose": [s]}]})
+        self.assertEqual(s, out["sections"][0]["prose"][0])
+        self.assertEqual([], warns)
+
+
+class StripClock(unittest.TestCase):
+    """2026-10-18 Δ⑥（leader 拍板）：正文不许写钟点时间戳 —— 时间在节标题上。"""
+
+    def test_教授在几点几分这种写法的戳删掉(self):
+        s = "纯粹的章节过渡：教授在 12:50:41 以笑声结束当前内容，没有讲授任何新概念。"
+        out, _, warns = ng.strip_clock_times({"sections": [{"prose": [s]}]})
+        got = out["sections"][0]["prose"][0]
+        self.assertNotIn("12:50:41", got)
+        self.assertIn("教授以笑声结束当前内容", got)
+        self.assertTrue(warns and "1 处" in warns[0], warns)
+
+    def test_节标题_出处字段_核对清单的时间戳一个字不动(self):
+        rev = {"sections": [{"ts": "12:50:41",
+                             "prose": ["正文。"],
+                             "example": {"title": "📖 卷（🎙 13:29）", "prompt": "p"}}],
+               "checks": [{"claim": "12:50:41 的断言", "status": "unchecked", "how": "h"}]}
+        out, _, _ = ng.strip_clock_times(rev)
+        self.assertEqual("12:50:41", out["sections"][0]["ts"])
+        self.assertEqual("📖 卷（🎙 13:29）", out["sections"][0]["example"]["title"])
+        self.assertEqual("12:50:41 的断言", out["checks"][0]["claim"])
+
+
+class TrivialCues(unittest.TestCase):
+    """2026-10-18 Δ③：纯算术线索问题（"5.3除以3等于多少？"）—— 计算器能答，丢。"""
+
+    def test_纯算术丢掉_真问题留着(self):
+        rev = {"sections": [{"cues": ["5.3除以3等于多少？", "停产价格如何定义？", "2+2是多少？"]}]}
+        out, _, warns = ng.drop_trivial_cues(rev)
+        self.assertEqual(["停产价格如何定义？"], out["sections"][0]["cues"])
+        self.assertTrue(warns and "2 条" in warns[0], warns)
+
+    def test_带文字的问题都留着(self):
+        keep = ["MC 和 AC 谁穿过谁？", "AC 的最小值等于多少？", "为什么要除以 q？",
+                "5.3 除以 3 在题里起了什么作用？"]
+        out, _, warns = ng.drop_trivial_cues({"sections": [{"cues": list(keep)}]})
+        self.assertEqual(keep, out["sections"][0]["cues"])
+        self.assertEqual([], warns)
 
 
 if __name__ == "__main__":

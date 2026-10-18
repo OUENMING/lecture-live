@@ -1173,6 +1173,9 @@ class ObsidianWriter:
         for fn, label in ((lambda r: note_ledger.reconcile(r),
                            "更正账本核对"),
                           (lambda r: note_guards.scrub(r), "猜测句清理"),
+                          (lambda r: note_guards.dedupe_sentences(r), "重复句去重"),
+                          (lambda r: note_guards.strip_clock_times(r), "正文时间戳清理"),
+                          (lambda r: note_guards.drop_trivial_cues(r), "纯算术线索问题"),
                           (lambda r: note_guards.ensure_caliber(
                               r, materials=self._materials), "停产价格口径"),
                           (lambda r: note_ledger.ensure_min_value(r), "最小平均成本补值"),
@@ -1182,7 +1185,9 @@ class ObsidianWriter:
                               r, materials=self._materials,
                               transcript="\n".join(
                                   str(e.get("en") or e.get("asr") or "") for e in entries)),
-                           "引用逐字核对")):
+                           "引用逐字核对"),
+                          # ⚠️ 必须最后：标注要落在**已经清完**的正文上，也不能再进串讲的输入
+                          (lambda r: note_guards.annotate_mismatches(r), "核算结果落正文")):
             try:
                 got_, extra_items, warns_ = fn(review)
                 review = got_

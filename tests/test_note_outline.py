@@ -169,6 +169,19 @@ class TestOutlineNumbers(unittest.TestCase):
             self.assertEqual(_zhs(out)[0], zh, f"误伤了：{zh}")
             self.assertEqual((fixes, warns), ([], []), zh)
 
+    def test_和式里的除法项不许改(self):
+        """⭐ DB 审查 D-25：`a + b/c = d`（或 `a 加上 b 除以 c 等于 d`）是**求和**，
+        除法项不是单条除法 —— 旧行为把算对的右值改成 a/b（`…等于 30` → `…等于 15`）。"""
+        body = {"sections": BODY["sections"]}
+        for zh in ("15 加上 225 除以 15 等于 30。",
+                   "代入得 AC=60×2.89+500/2.89≈173.4+173.0=346.4。"):
+            out, fixes, warns = no.check(_items(zh), review=body)
+            self.assertEqual(_zhs(out)[0], zh, f"改错了：{zh}")
+            self.assertEqual((fixes, warns), ([], []), zh)
+        # 反向：单条除法仍要核（修复不许把这一档一起关掉）
+        out, fixes, _w = no.check(_items("5.3 除以 3 等于 2.89。"), review=body)
+        self.assertIn("等于 1.767", _zhs(out)[0])
+
     def test_账本里的小整数不许乱换(self):
         """`_is_precise` 那道闸：账本若出现 `3 → 5`，纲里所有 3 都会被换掉。"""
         body = {"sections": [], "checks": [

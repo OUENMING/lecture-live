@@ -29,6 +29,8 @@ import copy
 import math
 import re
 
+import note_math
+
 #: 数字（带不带小数、正负号；Unicode 负号 `−` 也算）。
 _NUM = r"-?\d+(?:\.\d+)?"
 #: 「像式子」的一段：变量只认 q/Q/x（本课的数学就这三类），允许中间夹空格。
@@ -354,6 +356,11 @@ def _check_text(text: str, course: dict, ledger: list) -> tuple:
     # ② 除法（右往左替换，偏移不会挪）
     hits = [m for m in _DIV.finditer(t)]
     for m in reversed(hits):
+        # ⚠️ DB 审查 D-25：**和式里的除法项**不许当单条除法 —— `15 加上 225 除以 15 等于 30`
+        #    （或 `60×2.89+500/2.89≈346.4`）会命中 `a=225,b=15,c=30` → 把**算对的**
+        #    30 改成 15。判据与 `note_math` 共用（`is_sum_term`），不各写一份。
+        if note_math.is_sum_term(t, m.start("a")):
+            continue
         try:
             a, b, c = float(m.group("a")), float(m.group("b")), float(m.group("c"))
         except ValueError:

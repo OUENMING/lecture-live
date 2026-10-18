@@ -374,6 +374,25 @@ def p_deriv_solve_zero_ok():
     return _mism(rev)
 
 
+def b_deriv_latex_mc():
+    """⭐ F12：KaTeX 常态写法 `\\frac{dTC}{dq}=…` 写错系数必须拦。"""
+    rev = {"sections": [_sec(example=_ex(
+        prompt="$TC(q)=q^3-12q^2+60q$。",
+        steps=[{"text": r"$\frac{dTC}{dq}=3q^2-12q+60$", "why": ""}],
+        answer="$q=6$"))]}
+    return _mism(rev)
+
+
+def p_deriv_latex_mc_ok():
+    """⭐ F12：`\\frac{dTC}{dq}=3q²−24q+60` 必须过。"""
+    rev = {"sections": [_sec(example=_ex(
+        prompt="$TC(q)=q^3-12q^2+60q$。",
+        steps=[{"text": r"$\frac{dTC}{dq}=3q^2-24q+60$", "why": ""}],
+        answer="$q=6$"))]}
+    return _mism(rev)
+
+
+
 MUST_BLOCK = [b_limit_as_min, b_limit_extremum_word, b_program_monotonic,
               b_program_answer_intermediate, b_program_wild_number, b_faded_new_number,
               b_q_as_p, b_value_as_point, b_self_talk, b_first_person_guess,
@@ -381,7 +400,7 @@ MUST_BLOCK = [b_limit_as_min, b_limit_extremum_word, b_program_monotonic,
               b_flow_repeats_example, b_same_title_component, b_unsupported_numeric_claim,
               b_conserve_bad_chem, b_conserve_unbalanced, b_conserve_charge_unbalanced,
               b_conserve_dupe_species, b_verdict_forced_fragment, b_deriv_wrong_mc,
-              b_deriv_physics_wrong]
+              b_deriv_physics_wrong, b_deriv_latex_mc]
 
 MUST_PASS = [p_sum_chain_no_false_div, p_chemistry_imperative_not_collected, p_program_ok,
              p_chained_fraction_ok, p_rounding_stationary_ok, p_min_point_not_flagged,
@@ -390,7 +409,7 @@ MUST_PASS = [p_sum_chain_no_false_div, p_chemistry_imperative_not_collected, p_p
              p_min_at_six_ok, p_sign_correct_ok, p_symbol_claim_retrieves, p_no_program_skip,
              p_conserve_mno4_ok, p_conserve_fe_ok, p_conserve_nonchem_arrow_ok,
              p_verdict_supported_stays_complete, p_deriv_mc_ok, p_deriv_physics_ok,
-             p_deriv_solve_zero_ok]
+             p_deriv_solve_zero_ok, p_deriv_latex_mc_ok]
 
 
 class FrozenBench(unittest.TestCase):

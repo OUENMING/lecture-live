@@ -1033,6 +1033,29 @@ class DerivF12(unittest.TestCase):
                         answer="$x=1$（极小），$x=-1$（极大）")
         self.assertEqual([], self._flags(sec))
 
+    def test_latex_记法都要认得(self):
+        # 笔记是 KaTeX 渲染的 → LaTeX 是**常态**：每种写法都要"错的拦、对得过"。
+        base = "$TC(q)=q^3-12q^2+60q$。"
+        forms = [
+            r"$\frac{dTC}{dq}=3q^2-12q+60$",
+            r"$\frac{d}{dq}TC(q)=3q^2-12q+60$",
+            r"$\frac{\mathrm{d}TC}{\mathrm{d}q}=3q^2-12q+60$",
+            r"$\dfrac{dTC}{dq}=3q^2-12q+60$",
+            r"$\tfrac{dTC}{dq}=3q^2-12q+60$",
+            r"$\frac{\partial TC}{\partial q}=3q^2-12q+60$",
+            r"$\partial TC/\partial q=3q^2-12q+60$",
+            r"$\frac{d\,TC}{d\,q}=3q^2-12q+60$",
+            r"$TC^{\prime}(q)=3q^2-12q+60$",
+            r"$TC'\left(q\right)=3q^2-12q+60$",
+            r"$MC(q)=TC'(q)=3q^2-12q+60$",
+        ]
+        for s in forms:
+            self.assertTrue(self._flags(self._sec(base, [{"text": s, "why": ""}], answer="$q=6$")),
+                            f"该拦：{s}")
+            self.assertEqual([], self._flags(self._sec(
+                base, [{"text": s.replace("12q+60", "24q+60"), "why": ""}], answer="$q=6$")),
+                f"该过：{s}")
+
     def test_点不够就不判断(self):
         # 域外点太多（log 在负值）→ 有效点 <5 → 不判断（宁可漏，不误伤）。
         sec = self._sec("$f(x)=\\ln(x)$。", [{"text": "$f'(x)=1/x$", "why": ""}], answer="$1/x$")

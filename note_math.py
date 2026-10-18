@@ -1750,6 +1750,34 @@ def conserve_rows(section: dict) -> list:
 #   · 文本写了导数记法（`F'(x)=…` / `F''(x)=…` / `dF/dx=…`）；
 #   · 或 program 里有 `deriv` 步（声明"这个名字是那个表达式的导数"）。
 # ════════════════════════════════════════════════════════════════════════════
+#: ⭐ F12：笔记是 KaTeX 渲染的 → **LaTeX 记法才是常态**。先把导数记法折成朴素 `dX/dY`，
+#: 再让下面两个正则去认。`\frac{dTC}{dq}` / `\frac{d}{dq}TC(q)` / `\frac{\mathrm{d}TC}{\mathrm{d}q}`
+#: / `\dfrac` / `\tfrac` / `\partial` / `TC^{\prime}(q)` / `\left(` … 都归到这里。
+_DERIV_NORM: list = [
+    (re.compile(r"\\(?:left|right)\s*"), ""),                       # \left( \right) → ( )
+    (re.compile(r"\\(?:mathrm|text|operatorname)\s*\{([^{}]*)\}"), r"\1"),
+    (re.compile(r"\\partial\b"), "d"),                              # 偏导也当导
+    (re.compile(r"\\[dt]frac\b"), r"\\frac"),                       # \dfrac \tfrac → \frac
+    (re.compile(r"\\prime\b"), "'"),
+    (re.compile(r"\^\s*\{\s*('+)\s*\}"), r"\1"),                    # ^{\prime} / ^{\prime\prime}
+    (re.compile(r"\\[,;! ]"), ""),                                  # 细空格
+    # `\frac{dTC}{dq}` → `dTC/dq`
+    (re.compile(r"\\frac\s*\{\s*d\s*([A-Za-z][A-Za-z0-9]{0,5})\s*\}\s*\{\s*d\s*([A-Za-z])\s*\}"),
+     r"d\1/d\2"),
+    # `\frac{d}{dq}TC(q)` → `dTC/dq`
+    (re.compile(r"\\frac\s*\{\s*d\s*\}\s*\{\s*d\s*([A-Za-z])\s*\}\s*([A-Za-z][A-Za-z0-9]{0,5})"),
+     r"d\2/d\1"),
+]
+
+
+def _latex_math(text: str) -> str:
+    """把 LaTeX 里的**导数记法**折成朴素写法（别的 LaTeX 原样不动）。**纯函数。**"""
+    s = str(text or "")
+    for rx, rep in _DERIV_NORM:
+        s = rx.sub(rep, s)
+    return s
+
+
 _DERIV_PRIME = re.compile(
     r"(?<![A-Za-z0-9])(?P<name>[A-Za-z][A-Za-z0-9]{0,5})\s*(?P<primes>['′]{1,2})\s*"
     r"(?:\(\s*(?P<var>[A-Za-z])\s*\))?\s*[=＝]\s*(?P<expr>[^，,。；;、\n]+)")
@@ -1839,16 +1867,16 @@ def deriv_rows(section: dict) -> list:
     ex = section.get("example")
     if not isinstance(ex, dict):
         return []
-    texts = [str(ex.get("prompt") or "")]
+    texts = [_latex_math(ex.get("prompt") or "")]
     for st in (ex.get("steps") or []):
-        texts.append(_txt(st.get("text")) if isinstance(st, dict) else str(st))
-    texts.append(str(ex.get("answer") or ""))
+        texts.append(_latex_math(_txt(st.get("text")) if isinstance(st, dict) else str(st)))
+    texts.append(_latex_math(ex.get("answer") or ""))
     plan = ex.get("plan")
     if isinstance(plan, dict):
         for k in ("steps", "knowns", "target"):
             v = plan.get(k)
             if v:
-                texts += [str(x) for x in (v if isinstance(v, list) else [v])]
+                texts += [_latex_math(str(x)) for x in (v if isinstance(v, list) else [v])]
     fdefs = functions(texts)
     if not fdefs:
         return []

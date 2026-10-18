@@ -1570,8 +1570,11 @@ def announce_terms_in_review(review: dict, *, canon=None) -> dict:
         if zh and en:
             canon_map.setdefault(zh, en)
     # ⭐ F8-e：标题里已经写着的「中文（English）」也统一成术语表拼写（没有标准拼写的照旧）。
+    #    `title` 也走：覆盖度表的行标题 = 小节标题的再一次出现 —— 实测 F8 econ 的覆盖表
+    #    里还留着 `（Shutting Down Price）`，一处没换就等于页面上有两种拼写。
     for path, v in list(_walk_strings(out)):
-        if not path or _field_name(path) != "heading" or not isinstance(v, str) or not v:
+        if not path or _field_name(path) not in ("heading", "title") \
+                or not isinstance(v, str) or not v:
             continue
         new = canon_fix_parens(v, canon_map)
         if new != v:

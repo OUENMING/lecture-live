@@ -677,6 +677,15 @@ class AnnounceTerms(unittest.TestCase):
         got = nv.announce_terms_in_review(rev)
         self.assertEqual(got["sections"][0]["heading"], "[13:16] 停产价格")
 
+    def test_覆盖表的行标题也换(self):
+        """F8-e 补：覆盖度表（§9）的行标题 = 小节标题的再一次出现，也得换。"""
+        rev = {"sections": [{"heading": "停产价格（shutting down price）", "prose": ["x。"],
+                             "terms": [{"en": "shutting down price", "zh": "停产价格"}]}],
+               "cover": {"rows": [{"title": "✅ 停产价格（Shutting Down Price）"}]}}
+        got = nv.announce_terms_in_review(rev, canon=[["shutdown price", "停产价"]])
+        self.assertIn("停产价格（shutdown price）", got["cover"]["rows"][0]["title"],
+                      got["cover"]["rows"][0]["title"])
+
     def test_没术语就原样(self):
         rev = {"sections": [{"prose": ["随便说点什么。"]}]}
         self.assertEqual(nv.announce_terms_in_review(rev), rev)

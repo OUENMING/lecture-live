@@ -856,5 +856,264 @@ class SlowCache(unittest.TestCase):
                                      {"fresh": False, "name": "logs"}))
 
 
+# ---------------- 10：3.10 新量具（AE / R2 报告 / 平台账号） ----------------
+def _home_with(d, **files):
+    root = pathlib.Path(d) / ".classlive"
+    root.mkdir(exist_ok=True)
+    for name, content in files.items():
+        (root / name.replace("__", "-")).write_text(str(content) + "\n", encoding="utf-8")
+    return mock.patch.object(pathlib.Path, "home", return_value=pathlib.Path(d))
+
+
+class AE310(unittest.TestCase):
+    """`/api/ae310`：Soniox 临时 key / OpenRouter 快速通道 / 客户端版本 / 课后笔记。不联网（post 注入）。"""
+
+    def test_四路查询_形状与数据集(self):
+        import cl_admin_ui as U
+        sqls = []
+        def post(url, headers, sql):
+            sqls.append(sql)
+            return 200, {"data": [{"name": "amy", "n": "3"}]}
+        with tempfile.TemporaryDirectory() as d, _cf_home(d):
+            r = U.ae_310(post=post)
+        self.assertEqual(set(r), {"soniox", "fast", "rollout", "notes"})
+        self.assertTrue(all("classlive_events" in q for q in sqls))
+        self.assertTrue(any("blob1 = '/v1/soniox/key'" in q for q in sqls), "Soniox key 那路没查")
+        self.assertTrue(any("double11 > 600" in q for q in sqls), "笔记（max_tokens > 600）那路没查")
+        self.assertNotIn("SECRET", json.dumps(r))
+
+    def test_没开AE回pending(self):
+        import cl_admin_ui as U
+        with tempfile.TemporaryDirectory() as d, _cf_home(d):
+            r = U.ae_310(post=lambda *a: (403, {"errors": [{"message": "Authorization error"}]}))
+        self.assertTrue(r["pending"])
+
+
+REPORT = {
+    "generated": "2026-10-18 17:21:45",
+    "session_file": "/Users/owen/SECRET-session.md",
+    "note_file": "/Users/owen/Lectures/SECRET-note.md",
+    "audio_files": ["/Users/owen/SECRET-audio.001.opus"],
+    "duration_s": 1234.5, "audio_saved": True,
+    "blocks": {
+        "stream": {"engine": "soniox", "fallback_reason": "manual", "sealed_n": 12,
+                   "seal_latency_s": {"p50": 0.9, "p90": 1.7, "n": 12}, "terms_n": 5, "terms_dropped": 2},
+        "region_probe": {"default": "us", "selected": "us", "switched": False, "reason": "cache", "cached": True,
+                         "ms": 210, "timeout": False,
+                         "regions": {"us": {"connect_ms": 90, "rtt_ms": 200, "error": ""},
+                                     "jp": {"connect_ms": 300, "rtt_ms": 500, "error": "timeout"}}},
+        "duty": {"items": 4, "pending": 1, "saved": 2, "ignored": 1, "inferred": 0},
+        "device": {"start": {"machine": {"model": "MacBookPro18,3"}},
+                   "end": {"machine": {"model": "MacBookPro18,3", "cores_perf": 8, "cores_eff": 2},
+                           "power": {"power": "AC", "battery_pct": 83, "low_power_mode": False, "thermal": "nominal"},
+                           "net": "wifi", "locale": {"lang": "en-GB"},
+                           "footprint": {"sessions_mb": 12.3, "classlive_mb": 4900.1, "models_mb": 800.0,
+                                         "partial": False, "classlive_top": [{"name": "SECRET-dir", "mb": 100}]}}},
+        "energy": {"available": True, "wall_s": 247.6, "billed_energy_j": 54.7, "cpu_s": 57.3, "screen_hz": 120.0,
+                   "visible": {"wall_s": 229.4, "mean_w": 0.237}, "hidden": {"wall_s": 18.2, "mean_w": 0.014}},
+        "capture": {"available": True, "wall_s": 246.8, "audio_s": 237.7, "deficit_s": 9.1, "gaps": {"n": 2, "total_s": 3.2}},
+        "merge": {"triggered": 1, "replaced": 1, "failed": 0, "items": [{"en": "SECRET"}]},
+        "backfill": {"items": []},
+        "system": {"draft_engine": "nemotron", "draft_reason": "", "ram_gb": 16.0, "chip": "Apple M1 Pro",
+                   "macos": "15.7.5", "arch": "arm64"},
+        "ui": {"submit": 1, "hide": 1, "show": 1, "hidden_s": 18.3, "zh_overflow": {"overflow": 0, "seen": 598},
+               "streamq_dwell_ms": {"n": 871, "p50": 4.1, "p90": 10.8}},
+        "terms": {"calls": 58, "picked": 480, "empty": 0},
+        "live": {"calls_total": 2, "failed_calls": 0, "chapters": 0, "atoms": 7},
+    },
+    "asr": {"segments": 410, "words": 5000, "empty_pct": 1.2, "final_empty_pct": 0.5, "fell_back_pct": 3.0,
+            "source_pct": {"groq": 90.0, "local-whisper": 10.0}},
+    "correction": {"pairs": 100, "changed": 12, "changed_pct": 12.0},
+    "translation_latency": {"n": 200, "zh_first_ms": {"p50": 412, "p90": 900}},
+    "segments": [{"words": ["SECRET-transcript"]}],
+    "events": [{"kind": "SECRET"}],
+    "vad_report": "/Users/owen/SECRET-vad.txt",
+    "notes": ["SECRET note"],
+}
+
+
+class ReportSummary(unittest.TestCase):
+    """`_report_summary`：只回数字与枚举 —— 课堂文本 / 路径 / 逐段明细一个都不许漏。"""
+
+    def _sum(self, rep=None):
+        import cl_admin_ui as U
+        return U._report_summary(rep if rep is not None else REPORT, "abc123", "owen", "2026-10-18T17:22:00Z",
+                                 ["report.json", "transcript.md", "audio.001.opus"])
+
+    def test_数字与枚举都取到了(self):
+        r = self._sum()
+        self.assertEqual(r["duration_s"], 1234.5)
+        self.assertTrue(r["audio_saved"])
+        self.assertEqual(r["stream"], {"engine": "soniox", "reason": "manual", "sealed_n": 12, "p50": 0.9,
+                                       "p90": 1.7, "lat_n": 12, "terms_n": 5, "terms_dropped": 2})
+        self.assertEqual(r["region"]["default"], "us")
+        self.assertEqual(r["region"]["regions"]["jp"]["error"], "timeout")
+        self.assertEqual(r["region"]["regions"]["us"]["connect_ms"], 90)
+        self.assertEqual(r["duty"]["saved"], 2)
+        self.assertEqual(r["device"]["model"], "MacBookPro18,3")
+        self.assertEqual((r["device"]["sessions_mb"], r["device"]["classlive_mb"], r["device"]["partial"]),
+                         (12.3, 4900.1, False))
+        self.assertEqual(r["energy"]["visible_w"], 0.237)
+        self.assertEqual(r["capture"]["deficit_s"], 9.1)
+        self.assertEqual(r["merge"]["triggered"], 1)
+        self.assertEqual(r["system"]["draft_engine"], "nemotron")
+        self.assertEqual(r["ui"]["sq_p50"], 4.1)
+        self.assertEqual(r["asr"]["segments"], 410)
+        self.assertEqual(r["corr"]["changed_pct"], 12.0)
+        for k in ("stream", "region_probe", "duty", "device", "energy", "capture"):
+            self.assertIn(k, r["blocks"])
+
+    def test_绝不漏文本路径或逐段明细(self):
+        out = json.dumps(self._sum(), ensure_ascii=False)
+        for leak in ("SECRET", "/Users/owen", "vad_report", "session_file", "audio_files",
+                     "note_file", "classlive_top", "SECRET-transcript"):
+            self.assertNotIn(leak, out, f"报告摘要漏了 {leak}")
+
+    def test_长串被丢掉_缺块为_None_不炸(self):
+        import cl_admin_ui as U
+        r = U._report_summary({"blocks": {"stream": {"engine": "x" * 200, "fallback_reason": "y" * 200}}}, "s", "", "", [])
+        self.assertEqual(r["stream"]["engine"], "", "超长枚举串必须丢掉，不能当引擎名报")
+        self.assertEqual(r["stream"]["reason"], "")
+        self.assertIsNone(r["duty"], "没采到的块是 None，不是空 dict")
+        self.assertEqual(U._report_summary([], "s", "", "", [])["id"], "s", "非 dict 输入不许炸")
+
+
+class R2Reports(unittest.TestCase):
+    """`/api/reports`：列桶 → 挑 report.json → 现取 → 摘要。分页/别人的课/单份坏掉都要对。"""
+
+    def test_挑报告_分本机与别人_单份坏掉不连累(self):
+        import hashlib
+        import cl_admin_ui as U
+        h = lambda n: hashlib.sha256(n.encode()).hexdigest()[:16]          # noqa: E731
+        mine, other, norep = h("2026-10-18_171736_测试"), "0123456789abcdef", "ffffffffffffffff"
+        listing = {"success": True, "result_info": {"is_truncated": False}, "result": [
+            {"key": f"classlive-test/{mine}/report.json", "size": 7000, "last_modified": "2026-10-18T17:22:00Z"},
+            {"key": f"classlive-test/{mine}/transcript.md", "size": 900, "last_modified": "2026-10-18T17:22:00Z"},
+            {"key": f"classlive-test/{other}/report.json", "size": 5, "last_modified": "2026-10-18T10:00:00Z"},
+            {"key": f"classlive-test/{norep}/transcript.md", "size": 5, "last_modified": "2026-10-18T09:00:00Z"}]}
+        bodies = {f"classlive-test/{mine}/report.json": json.dumps(REPORT),
+                  f"classlive-test/{other}/report.json": "{not json"}
+        seen = []
+        def raw(key, headers):
+            seen.append((key, headers.get("Authorization")))
+            return bodies[key]
+        with tempfile.TemporaryDirectory() as d:
+            sd = pathlib.Path(d) / "sessions"; sd.mkdir()
+            (sd / "2026-10-18_171736_测试.md").write_text("x", encoding="utf-8")
+            with _home_with(d, cf__analytics__token="cfat_SECRET", cf__account__id="acct"):
+                r = U.r2_reports(get=lambda url, headers: listing, raw=raw, sessions_dir=sd)
+        self.assertEqual(r["candidates"], 2, "只有带 report.json 的会话才算")
+        self.assertEqual([s["id"] for s in r["sessions"]], [mine])
+        self.assertEqual(r["sessions"][0]["name"], "2026-10-18_171736_测试")
+        self.assertTrue(r["sessions"][0]["audio_saved"])
+        self.assertEqual(r["errors"], [f"{other}：JSONDecodeError"])
+        self.assertNotIn("SECRET", json.dumps(r))
+        self.assertNotIn(f"{norep}/transcript.md", json.dumps(r))
+
+    def test_没token回人话不联网(self):
+        import cl_admin_ui as U
+        called = []
+        with tempfile.TemporaryDirectory() as d, _home_with(d):
+            r = U.r2_reports(get=lambda *a: called.append(a))
+        self.assertIn("cf-analytics-token", r["error"])
+        self.assertEqual(called, [])
+
+
+def _sx_get(usage=None, conc=None, logs=None, bal=None):
+    usage = usage or {"total": {"days": ["2026-10-12", "2026-10-18"], "cost_usd": ["0.0000000000", "0.0082920000"],
+                                "total_cost_usd": "1.2328580000"},
+                      "models": [{"model": "stt-rt-v5", "total_cost_usd": "1.2328580000"}]}
+    conc = conc or {"project": {"current": {"transcribe_concurrent": 1, "tts_concurrent": 0},
+                                "limits": {"transcribe_concurrent": 100, "tts_concurrent": None}}}
+    logs = logs if logs is not None else {"usage_logs": [
+        {"uuid": "u1", "end_time": "2026-10-18T10:00:00Z", "input_audio_duration_ms": 60000, "client_reference_id": "owen"},
+        {"uuid": "u2", "end_time": "2026-10-18T10:05:00Z", "input_audio_duration_ms": 30000, "client_reference_id": "owen"}],
+        "next_page_cursor": None}
+    def get(url, headers):
+        if "/usage/summary" in url:
+            return usage
+        if "/concurrency-limits" in url:
+            return conc
+        if "/usage-logs" in url:
+            return logs
+        if "/organization/balance" in url:
+            return bal or {}
+        raise AssertionError(url)
+    return get
+
+
+class SonioxAccount(unittest.TestCase):
+    """`/api/soniox`：项目用量 / 并发 / 用量日志对账 / 组织余额（有 key 才查）。key 不进响应。"""
+
+    def test_用量_并发_日志对账(self):
+        import cl_admin_ui as U
+        with tempfile.TemporaryDirectory() as d, _home_with(d, soniox__token="sk_SONIOX_SECRET"):
+            r = U.soniox_account(get=_sx_get())
+        self.assertEqual(r["regions"], ["us"])
+        self.assertEqual(r["usage"]["us"]["cost_7d"], 1.2329)
+        self.assertEqual(r["usage"]["us"]["cost_today"], 0.0083)
+        self.assertEqual(r["concurrency"], {"current": 1, "limit": 100})
+        self.assertEqual((r["logs"]["sessions"], r["logs"]["audio_s"]), (2, 90.0))
+        self.assertEqual(r["logs"]["by_name"]["owen"], {"sessions": 2, "audio_s": 90.0})
+        self.assertIn("soniox-org-token", r["balance_error"])
+        self.assertIsNone(r["balance"])
+        self.assertNotIn("SONIOX_SECRET", json.dumps(r))
+
+    def test_组织key在时读余额(self):
+        import cl_admin_ui as U
+        bal = {"available_balance_usd": "57.42", "free_balance_usd": "0.00", "used_balance_usd": "12.58",
+               "balance_exhausted": False, "autopay_enabled": True}
+        with tempfile.TemporaryDirectory() as d, _home_with(d, soniox__token="k", soniox__org__token="org"):
+            r = U.soniox_account(get=_sx_get(bal=bal))
+        self.assertEqual(r["balance"], {"available": 57.42, "free": 0, "used": 12.58, "exhausted": False, "autopay": True})
+        self.assertEqual(r["balance_error"], "")
+
+    def test_没key回人话不联网(self):
+        import cl_admin_ui as U
+        called = []
+        with tempfile.TemporaryDirectory() as d, _home_with(d):
+            r = U.soniox_account(get=lambda *a: called.append(a))
+        self.assertIn("soniox-token", r["error"])
+        self.assertEqual(called, [])
+
+
+class OpenRouterAccount(unittest.TestCase):
+    """`/api/openrouter`：管理 key 的余额 + analytics（先 meta 取交集再 query）。没 key 回「没配」。"""
+
+    def test_余额_meta_查询指标取交集(self):
+        import cl_admin_ui as U
+        meta = {"data": {"metrics": ["total_usage", "request_count", "tokens_prompt", "tokens_completion", "latency_p50"],
+                         "dimensions": ["model", "provider", "day"], "granularities": ["day", "hour"]}}
+        credits = {"data": {"total_credits": 100.5, "total_usage": 25.5}}
+        qbody = {}
+        def get(url, headers):
+            if "/credits" in url:
+                return credits
+            if "/analytics/meta" in url:
+                return meta
+            raise AssertionError(url)
+        def post(url, headers, body):
+            qbody.update(body)
+            return {"data": {"data": [{"model": "deepseek/deepseek-v4.1-flash", "day": "2026-10-18",
+                                       "total_usage": 1.2, "request_count": 229}],
+                             "metadata": {"row_count": 1, "truncated": False}}}
+        with tempfile.TemporaryDirectory() as d, _home_with(d, openrouter__mgmt__token="sk-or-MGMT_SECRET"):
+            r = U.openrouter_account(get=get, post=post)
+        self.assertEqual(r["credits"], {"total": 100.5, "used": 25.5})
+        # 只查 meta 里真有的那四个；latency_p50 不查（查了会 400）
+        self.assertEqual(set(qbody["metrics"]), {"total_usage", "request_count", "tokens_prompt", "tokens_completion"})
+        self.assertEqual(qbody["dimensions"], ["model"])
+        self.assertEqual(r["query"]["rows"][0]["request_count"], 229)
+        self.assertNotIn("MGMT_SECRET", json.dumps(r))
+
+    def test_没key回没配(self):
+        import cl_admin_ui as U
+        called = []
+        with tempfile.TemporaryDirectory() as d, _home_with(d):
+            r = U.openrouter_account(get=lambda *a: called.append(a), post=lambda *a: called.append(a))
+        self.assertIn("openrouter-mgmt-token", r["error"])
+        self.assertEqual(called, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

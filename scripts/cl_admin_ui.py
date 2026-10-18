@@ -142,20 +142,17 @@ R2_BUCKET = "classlive-ingest"
 R2_KNOWN_MINE = {"2026-10-10_002058_TESTISO"}
 
 
-def r2_ingest(get=None, sessions_dir=None, ledger=None) -> dict:
-    """上传桶的**实时**清单（逐对象列，不是 Analytics —— `r2StorageAdaptiveGroups` 是每 10–30 分钟的快照，
-    2026-10-14 实测比真列表少 7 个对象 / 58 MB）。按会话前缀分组，并标出**哪些不是本机的课**：
-    本机 `sessions/` 里的会话名、上传账本里的会话名逐个算 `session_key`，对不上的就是别人的。
+def _r2_list(get=None):
+    """列上传桶的**全部**对象（分页拼齐）。回 `(objs, error)`；`error` 非空时 `objs` 为 `None`。
 
-    只回数字、前缀、文件名（`report.json` / `audio.003.wav` 这种）和本机自己的会话名；token 从不进响应。
+    `get(url, headers) -> dict` 测试注入；默认 httpx。token 只在这里读，从不进响应。
     """
-    import hashlib
     home = pathlib.Path.home() / ".classlive"
     try:
         tok = (home / "cf-analytics-token").read_text(encoding="utf-8").strip()
         acct = (home / "cf-account-id").read_text(encoding="utf-8").strip()
     except OSError:
-        return {"error": "没配 Cloudflare token（~/.classlive/cf-analytics-token）"}
+        return None, "没配 Cloudflare token（~/.classlive/cf-analytics-token）"
     if get is None:
         def get(url, headers):
             import httpx
@@ -167,14 +164,29 @@ def r2_ingest(get=None, sessions_dir=None, ledger=None) -> dict:
         try:
             j = get(url, {"Authorization": f"Bearer {tok}"})
         except Exception as e:                                        # noqa: BLE001
-            return {"error": f"列不了上传桶：{type(e).__name__}"}
+            return None, f"列不了上传桶：{type(e).__name__}"
         if not j.get("success", True) or j.get("errors"):
-            return {"error": "Cloudflare 拒了列桶：" + "；".join(str(x.get("message", ""))[:120] for x in (j.get("errors") or [])[:2])}
+            return None, "Cloudflare 拒了列桶：" + "；".join(str(x.get("message", ""))[:120] for x in (j.get("errors") or [])[:2])
         objs += j.get("result") or []
         info = j.get("result_info") or {}
         cursor = info.get("cursor")
         if not info.get("is_truncated") or not cursor:
             break
+    return objs, None
+
+
+def r2_ingest(get=None, sessions_dir=None, ledger=None) -> dict:
+    """上传桶的**实时**清单（逐对象列，不是 Analytics —— `r2StorageAdaptiveGroups` 是每 10–30 分钟的快照，
+    2026-10-14 实测比真列表少 7 个对象 / 58 MB）。按会话前缀分组，并标出**哪些不是本机的课**：
+    本机 `sessions/` 里的会话名、上传账本里的会话名逐个算 `session_key`，对不上的就是别人的。
+
+    只回数字、前缀、文件名（`report.json` / `audio.003.wav` 这种）和本机自己的会话名；token 从不进响应。
+    """
+    import hashlib
+    home = pathlib.Path.home() / ".classlive"
+    objs, err = _r2_list(get)
+    if err:
+        return {"error": err}
     names: set = set(R2_KNOWN_MINE)
     sd = pathlib.Path(sessions_dir) if sessions_dir else pathlib.Path(__file__).resolve().parent.parent / "sessions"
     try:
@@ -210,6 +222,219 @@ def r2_ingest(get=None, sessions_dir=None, ledger=None) -> dict:
     out.sort(key=lambda g: g["last"], reverse=True)
     return {"bucket": R2_BUCKET, "objects": len(objs), "bytes": sum(int(o.get("size") or 0) for o in objs),
             "sessions": out, "others": sum(1 for g in out if not g["mine"])}
+
+
+#: 上传的 `report.json`（测试模式）里 3.10 才有的块 —— 与 `testmode.BLOCKS` 一一对应。
+#: 缺一个键 = 「这节课没采到 / 版本太老」，与「采到了但是 0」是两回事，前端照这个区分。
+REPORT_BLOCKS = ("stream", "region_probe", "duty", "device", "energy", "capture",
+                 "merge", "backfill", "system", "ui", "terms", "live")
+
+
+def _num(v):
+    """数字才留（布尔不算数），其余 → None。JSON 里的数可能是字符串，这里只认真数。"""
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _enum(v, n=40):
+    """短枚举串（引擎名 / 区域 / 状态词）。**只留短串**，长了丢 —— 报告里不会有正文串，长串一律可疑。"""
+    s = str(v) if isinstance(v, str) else ""
+    return s if 0 < len(s) <= n else ""
+
+
+def _block(rep, key):
+    b = rep.get("blocks")
+    x = b.get(key) if isinstance(b, dict) else None
+    return x if isinstance(x, dict) else None
+
+
+def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list) -> dict:
+    """一份上传的 `report.json` → **只含数字与枚举**的摘要（纯函数，可单测）。
+
+    ⚠️ 白名单取值，**不是整份透传**：课堂文本、逐段明细（`segments`）、音频 / 会话 / 笔记文件路径
+    （`audio_files` / `session_file` / `note_file`）、`events` 时间线、`vad_report` 一律不出现。
+    每个派生字段各自兜底 —— 老版本报告缺哪一格，那一格就是 `None`（前端写「没采」，不写 0）。
+    """
+    rep = rep if isinstance(rep, dict) else {}
+    asr = rep.get("asr") if isinstance(rep.get("asr"), dict) else {}
+    corr = rep.get("correction") if isinstance(rep.get("correction"), dict) else {}
+    tl = rep.get("translation_latency") if isinstance(rep.get("translation_latency"), dict) else {}
+
+    st = _block(rep, "stream") or None
+    if st is not None:
+        sl = st.get("seal_latency_s") if isinstance(st.get("seal_latency_s"), dict) else {}
+        st = {"engine": _enum(st.get("engine"), 24), "reason": _enum(st.get("fallback_reason")),
+              "sealed_n": _num(st.get("sealed_n")), "p50": _num(sl.get("p50")), "p90": _num(sl.get("p90")),
+              "lat_n": _num(sl.get("n")), "terms_n": _num(st.get("terms_n")), "terms_dropped": _num(st.get("terms_dropped"))}
+
+    rp = _block(rep, "region_probe") or None
+    if rp is not None:
+        regions = rp.get("regions") if isinstance(rp.get("regions"), dict) else {}
+        rp = {"default": _enum(rp.get("default"), 8), "selected": _enum(rp.get("selected"), 8),
+              "switched": rp.get("switched") if isinstance(rp.get("switched"), bool) else None,
+              "reason": _enum(rp.get("reason")), "cached": rp.get("cached") if isinstance(rp.get("cached"), bool) else None,
+              "ms": _num(rp.get("ms")), "timeout": rp.get("timeout") if isinstance(rp.get("timeout"), bool) else None,
+              "regions": {k: {"connect_ms": _num((v or {}).get("connect_ms")), "rtt_ms": _num((v or {}).get("rtt_ms")),
+                              "error": _enum((v or {}).get("error"), 24)}
+                          for k, v in list(regions.items())[:6] if isinstance(v, dict)}}
+
+    dt_ = _block(rep, "duty") or None
+    if dt_ is not None:
+        dt_ = {k: _num(dt_.get(k)) for k in ("items", "pending", "saved", "ignored", "inferred")}
+
+    dv = _block(rep, "device") or None
+    if dv is not None:
+        end = dv.get("end") if isinstance(dv.get("end"), dict) else {}
+        start = dv.get("start") if isinstance(dv.get("start"), dict) else {}
+        src = end or start
+        mach = src.get("machine") if isinstance(src.get("machine"), dict) else {}
+        power = src.get("power") if isinstance(src.get("power"), dict) else {}
+        fp = end.get("footprint") if isinstance(end.get("footprint"), dict) else {}
+        dv = {"samples": len(dv.get("samples")) if isinstance(dv.get("samples"), list) else None,
+              "model": _enum(mach.get("model")), "cores_perf": _num(mach.get("cores_perf")),
+              "cores_eff": _num(mach.get("cores_eff")), "power": _enum(power.get("power"), 12),
+              "battery_pct": _num(power.get("battery_pct")), "low_power": power.get("low_power_mode")
+              if isinstance(power.get("low_power_mode"), bool) else None,
+              "thermal": _enum(power.get("thermal"), 12), "net": _enum((src.get("net") or ""), 12),
+              "lang": _enum((src.get("locale") or {}).get("lang") if isinstance(src.get("locale"), dict) else ""),
+              "sessions_mb": _num(fp.get("sessions_mb")), "classlive_mb": _num(fp.get("classlive_mb")),
+              "models_mb": _num(fp.get("models_mb")), "partial": fp.get("partial") if isinstance(fp.get("partial"), bool) else None}
+
+    en = _block(rep, "energy") or None
+    if en is not None:
+        vis = en.get("visible") if isinstance(en.get("visible"), dict) else {}
+        hid = en.get("hidden") if isinstance(en.get("hidden"), dict) else {}
+        en = {"available": en.get("available") if isinstance(en.get("available"), bool) else None,
+              "wall_s": _num(en.get("wall_s")), "cpu_s": _num(en.get("cpu_s")), "energy_j": _num(en.get("billed_energy_j")),
+              "screen_hz": _num(en.get("screen_hz")),
+              "visible_s": _num(vis.get("wall_s")), "visible_w": _num(vis.get("mean_w")),
+              "hidden_s": _num(hid.get("wall_s")), "hidden_w": _num(hid.get("mean_w"))}
+
+    cp = _block(rep, "capture") or None
+    if cp is not None:
+        gaps = cp.get("gaps") if isinstance(cp.get("gaps"), dict) else {}
+        cp = {"available": cp.get("available") if isinstance(cp.get("available"), bool) else None,
+              "wall_s": _num(cp.get("wall_s")), "audio_s": _num(cp.get("audio_s")), "deficit_s": _num(cp.get("deficit_s")),
+              "gaps_n": _num(gaps.get("n")), "gaps_s": _num(gaps.get("total_s"))}
+
+    mg = _block(rep, "merge") or None
+    if mg is not None:
+        mg = {k: _num(mg.get(k)) for k in ("triggered", "replaced", "failed")}
+    bf = _block(rep, "backfill") or None
+    if bf is not None:
+        items = bf.get("items") if isinstance(bf.get("items"), list) else None
+        bf = {"need": _num(bf.get("need")), "done": _num(bf.get("done")),
+              "items": len(items) if items is not None else None}
+    sys_ = _block(rep, "system") or None
+    if sys_ is not None:
+        sys_ = {"draft_engine": _enum(sys_.get("draft_engine"), 24), "draft_reason": _enum(sys_.get("draft_reason")),
+                "ram_gb": _num(sys_.get("ram_gb")), "chip": _enum(sys_.get("chip")), "macos": _enum(sys_.get("macos"), 16),
+                "arch": _enum(sys_.get("arch"), 12)}
+    ui = _block(rep, "ui") or None
+    if ui is not None:
+        zh = ui.get("zh_overflow") if isinstance(ui.get("zh_overflow"), dict) else {}
+        sq = ui.get("streamq_dwell_ms") if isinstance(ui.get("streamq_dwell_ms"), dict) else {}
+        ui = {"submit": _num(ui.get("submit")), "hide": _num(ui.get("hide")), "show": _num(ui.get("show")),
+              "new_topic": _num(ui.get("new_topic")), "hidden_s": _num(ui.get("hidden_s")),
+              "overflow": _num(zh.get("overflow")), "overflow_seen": _num(zh.get("seen")),
+              "sq_p50": _num(sq.get("p50")), "sq_p90": _num(sq.get("p90"))}
+    tm = _block(rep, "terms") or None
+    if tm is not None:
+        tm = {"calls": _num(tm.get("calls")), "picked": _num(tm.get("picked")), "empty": _num(tm.get("empty"))}
+    lv = _block(rep, "live") or None
+    if lv is not None:
+        lv = {"calls_total": _num(lv.get("calls_total")), "failed_calls": _num(lv.get("failed_calls")),
+              "chapters": _num(lv.get("chapters")), "atoms": _num(lv.get("atoms"))}
+
+    gen = _enum(rep.get("generated"), 24)
+    blocks = rep.get("blocks") if isinstance(rep.get("blocks"), dict) else {}
+    return {
+        "id": sid, "name": name, "files": sorted(str(x) for x in files)[:8], "updated": str(updated or ""),
+        "generated": gen, "duration_s": _num(rep.get("duration_s")),
+        "audio_saved": rep.get("audio_saved") if isinstance(rep.get("audio_saved"), bool) else None,
+        "provisional": bool(rep.get("provisional")),          # 课中临时快照（收尾那份没这个键）
+        "blocks": [k for k in REPORT_BLOCKS if k in blocks],  # 采到了哪几块
+        "asr": {"segments": _num(asr.get("segments")), "words": _num(asr.get("words")),
+                "empty_pct": _num(asr.get("empty_pct")), "final_empty_pct": _num(asr.get("final_empty_pct")),
+                "fell_back_pct": _num(asr.get("fell_back_pct")),
+                "source": {k: v for k, v in list((asr.get("source_pct") or {}).items())[:6]
+                           if _num(v) is not None} if isinstance(asr.get("source_pct"), dict) else {}},
+        "corr": {"pairs": _num(corr.get("pairs")), "changed": _num(corr.get("changed")),
+                 "changed_pct": _num(corr.get("changed_pct"))},
+        "tl": {"n": _num(tl.get("n")),
+               "first_p50": _num((tl.get("zh_first_ms") or {}).get("p50")) if isinstance(tl.get("zh_first_ms"), dict) else None},
+        "stream": st, "region": rp, "duty": dt_, "device": dv, "energy": en, "capture": cp,
+        "merge": mg, "backfill": bf, "system": sys_, "ui": ui, "terms": tm, "live": lv,
+    }
+
+
+#: 一次最多读几份报告（每份一次对象 GET；桶里几十节，只读最近的）。
+R2_REPORT_MAX = 30
+
+
+def r2_reports(get=None, raw=None, sessions_dir=None, ledger=None, max_fetch=R2_REPORT_MAX) -> dict:
+    """上传桶里**每节测试模式的课**的 `report.json` 只读摘要（3.10 的块：Soniox 实时流 / 区域探测 /
+    「一些事儿」/ 设备 / 能耗 / 收音断档 …）。
+
+    会话组里有 `report.json` = 这节是**测试模式**（只有测试模式写报告并上传）；`mine` 照 `r2_ingest`
+    的判据（本机 `sessions/` / 上传账本里有这个名字）。只取**最近** `max_fetch` 份。
+    ⚠️ 对象通过 R2 REST `GET …/objects/{key}` 现取；**只解析、绝不落盘**；`_report_summary` 只回数字与枚举。
+    """
+    import hashlib
+    home = pathlib.Path.home() / ".classlive"
+    objs, err = _r2_list(get)
+    if err:
+        return {"error": err}
+    names: set = set(R2_KNOWN_MINE)
+    sd = pathlib.Path(sessions_dir) if sessions_dir else pathlib.Path(__file__).resolve().parent.parent / "sessions"
+    try:
+        names |= {f.name.split(".")[0] for f in sd.iterdir()}
+    except OSError:
+        pass
+    try:
+        lg = json.loads(pathlib.Path(ledger or (home / "upload-ledger.json")).read_text(encoding="utf-8"))
+        if isinstance(lg, dict):
+            names |= set(map(str, lg))
+    except (OSError, ValueError):
+        pass
+    mine = {hashlib.sha256(n.encode("utf-8")).hexdigest()[:16]: n for n in names}
+    groups: dict = {}
+    for o in objs:
+        parts = str(o.get("key", "")).split("/")
+        if len(parts) < 3:
+            continue
+        g = groups.setdefault(parts[1], {"id": parts[1], "last": "", "files": [], "keys": {}})
+        g["last"] = max(g["last"], str(o.get("last_modified") or ""))
+        g["files"].append(parts[-1])
+        if parts[-1] == "report.json":
+            g["keys"]["report"] = str(o.get("key"))
+    cand = sorted((g for g in groups.values() if "report" in g["keys"]), key=lambda g: g["last"], reverse=True)[:max_fetch]
+    if raw is None:
+        tok = (home / "cf-analytics-token").read_text(encoding="utf-8").strip()
+        acct = (home / "cf-account-id").read_text(encoding="utf-8").strip()
+
+        def raw(key, headers):                                        # noqa: F811  对象内容 via R2 REST（只读）
+            import httpx
+            url = f"https://api.cloudflare.com/client/v4/accounts/{acct}/r2/buckets/{R2_BUCKET}/objects/{urllib.parse.quote(key, safe='')}"
+            return httpx.get(url, headers=headers, timeout=30).text
+        auth = {"Authorization": f"Bearer {tok}"}
+    else:
+        auth = {}
+    errors = []
+    errs_lock = threading.Lock()
+
+    def one(g):
+        uid = g["id"]
+        try:
+            rep = json.loads(raw(g["keys"]["report"], auth))          # `raw(key, headers) -> 正文文本`
+            return _report_summary(rep, uid, mine.get(uid, ""), g["last"], g["files"])
+        except Exception as e:                                       # noqa: BLE001  单份坏了不连累别的
+            with errs_lock:
+                errors.append(f"{uid}：{type(e).__name__}")
+            return None
+    with ThreadPoolExecutor(min(8, max(1, len(cand)))) as ex:         # 每份一次对象 GET：并发取，别串成 30 个来回
+        got = [r for r in ex.map(one, cand) if r is not None]
+    return {"bucket": R2_BUCKET, "objects": len(objs), "candidates": len(cand),
+            "sessions": got, "errors": errors[:5]}
 
 
 def _cf_creds():
@@ -557,9 +782,11 @@ _AE_SPEED = f"""SELECT toStartOfDay(timestamp) AS day, blob2 AS name,
  GROUP BY day, name, kind ORDER BY day DESC, name LIMIT 300 FORMAT JSON"""
 
 
-def ae_events(post=None) -> dict:
-    """逐请求事件的近 24 h 汇总：每个码 × 路径的请求数 / p50·p95 毫秒 / 出错数 / 音频秒 / token；
-    码 × 国家 × 节点 × 客户端版本；最近 30 条 ≥400 的请求。数据集还不存在（没开 Analytics Engine / 还没部署）→ 回 `pending`。"""
+def _ae_sqls(post, qs):
+    """并发跑一族 AE SQL（`qs` = ((key, sql), …)）→ `{key: rows}`；数据集缺席 / 被拒 → 一条错误对象。
+
+    `post(url, headers, sql) -> (status_code, json)` 测试注入；默认 httpx。
+    """
     cr = _cf_creds()
     if not cr:
         return {"error": "没配 Cloudflare 只读 token"}
@@ -573,10 +800,9 @@ def ae_events(post=None) -> dict:
             except ValueError:
                 return r.status_code, {"error": r.text[:200]}
     url = AE_SQL.format(acct=acct)
-    out = {}
-    qs = (("by_code", _AE_BY_CODE), ("geo", _AE_GEO), ("bad", _AE_BAD), ("up", _AE_UP), ("speed", _AE_SPEED))
     with ThreadPoolExecutor(len(qs)) as ex:                           # 几条互不依赖，一起问
         futs = [ex.submit(post, url, {"Authorization": f"Bearer {tok}"}, sql) for _, sql in qs]
+    out = {}
     for (key, _), f in zip(qs, futs):
         try:
             code, j = f.result()
@@ -590,14 +816,248 @@ def ae_events(post=None) -> dict:
                         "或开了还没重新部署 Worker；都做了仍是 403 → token 要有 Account Analytics: Read"}
             return {"error": f"Analytics Engine 拒了（{code}）：{msg}"}
         out[key] = j.get("data") or []
+    return out
+
+
+def ae_events(post=None) -> dict:
+    """逐请求事件的近 24 h 汇总：每个码 × 路径的请求数 / p50·p95 毫秒 / 出错数 / 音频秒 / token；
+    码 × 国家 × 节点 × 客户端版本；最近 30 条 ≥400 的请求。数据集还不存在（没开 Analytics Engine / 还没部署）→ 回 `pending`。"""
+    out = _ae_sqls(post, (("by_code", _AE_BY_CODE), ("geo", _AE_GEO), ("bad", _AE_BAD), ("up", _AE_UP), ("speed", _AE_SPEED)))
+    if "error" in out or out.get("pending"):
+        return out
     for r in out["bad"]:
         r.pop("ip", None)
     return out
 
 
+# ---- 3.10 新量具（Analytics Engine，近 7 天）----
+# 这些是 3.10 才开始记 / 才开始有量的东西；口径都对着 handler.js 的 track() 列注释：
+#   blob4 up  = 上游尝试串。翻译上是 `openrouter:<状态>` 或 `<openrouter 失败串>deepseek:<状态>` 或 `deepseek:<状态>`；
+#               Soniox 上是 `soniox-<区>:<状态>[:probe]`（签发临时 key 的结果）。
+#   blob5 ver = 客户端版本。double9 = 翻译首字毫秒。double11 = 请求的 max_tokens（>600 = 笔记 / 精修）。
+_AE_310_SONIOX = f"""SELECT blob4 AS up, blob2 AS name, double1 AS status, SUM(_sample_interval) AS n,
+ MIN(timestamp) AS first, MAX(timestamp) AS last
+ FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '7' DAY AND blob1 = '/v1/soniox/key'
+ GROUP BY up, name, status ORDER BY n DESC LIMIT 200 FORMAT JSON"""
+_AE_310_FAST = f"""SELECT blob4 AS up, double1 AS status, SUM(_sample_interval) AS n,
+ quantileExactWeighted(0.5)(double9, _sample_interval) AS f50, quantileExactWeighted(0.95)(double9, _sample_interval) AS f95,
+ quantileExactWeighted(0.5)(double2, _sample_interval) AS ms50
+ FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '7' DAY AND blob1 = '/v1/chat/completions'
+ GROUP BY up, status ORDER BY n DESC LIMIT 100 FORMAT JSON"""
+_AE_310_VER = f"""SELECT blob5 AS ver, SUM(_sample_interval) AS n, COUNT(DISTINCT blob2) AS users
+ FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '7' DAY GROUP BY ver ORDER BY n DESC LIMIT 100 FORMAT JSON"""
+_AE_310_NOTES = f"""SELECT blob2 AS name, SUM(_sample_interval) AS n, SUM(double4 * _sample_interval) AS tin,
+ SUM(double5 * _sample_interval) AS tout, SUM(double6 * _sample_interval) AS hit, MAX(double11) AS max_tok
+ FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '7' DAY AND blob1 = '/v1/chat/completions' AND double11 > 600
+ GROUP BY name ORDER BY n DESC LIMIT 100 FORMAT JSON"""
+
+
+def ae_310(post=None) -> dict:
+    """3.10 的新量具（近 7 天）：`soniox` Soniox 临时 key 签发（区 × 结果 × 探测 × 码）、
+    `fast` 翻译上游尝试串（OpenRouter 快速通道命中 / 退回 / 直连）、`rollout` 客户端版本普及、
+    `notes` 课后笔记（max_tokens > 600）按码的 token。数据集缺席 → 同 `ae_events` 回 `pending`。"""
+    return _ae_sqls(post, (("soniox", _AE_310_SONIOX), ("fast", _AE_310_FAST),
+                           ("rollout", _AE_310_VER), ("notes", _AE_310_NOTES)))
+
+
+# ---- 平台账号（Soniox / OpenRouter）：本机 key 只读 GET，key 从不进响应 ----
+#: Soniox 各区 API 基址 —— 与 Worker 的 `soniox-core.js` REGIONS 一一对应（加一个区改这里）。
+SONIOX_REGION_API = {"us": "https://api.soniox.com", "jp": "https://api.jp.soniox.com", "eu": "https://api.eu.soniox.com"}
+#: 各区项目 key 住在哪个本机文件（`~/.classlive/`）。没有这个文件 = 这个区本机没 key，不查。
+SONIOX_REGION_FILE = {"us": "soniox-token", "jp": "soniox-jp-token", "eu": "soniox-eu-token"}
+#: 组织级 key（余额 / 组织用量）：与项目 key 分开，**没有就看不到余额**（项目 key 查余额回 403）。
+SONIOX_ORG_FILE = "soniox-org-token"
+#: OpenRouter：**只用管理 key**（Settings → Management Keys；它不能发模型请求）。普通推理 key 打
+#: analytics 会 403，而 Observability 的「destinations」会把请求内容推给第三方（Langfuse 等）—— 隐私不行，不用。
+#: 管理 key 存在 `~/.classlive/openrouter-mgmt-token`；没有 → 卡片显示「没配」。
+OPENROUTER_MGMT_FILE = "openrouter-mgmt-token"
+OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
+OPENROUTER_META_URL = "https://openrouter.ai/api/v1/analytics/meta"
+OPENROUTER_QUERY_URL = "https://openrouter.ai/api/v1/analytics/query"
+#: 想查的指标（**先拿 `/analytics/meta` 问有哪些，取交集**，别硬查一个不存在的名字 → 400）。
+OPENROUTER_WANT_METRICS = ("total_usage", "request_count", "tokens_prompt", "tokens_completion", "reasoning_tokens")
+
+
+def _home_secret(*names) -> str:
+    """`~/.classlive/<名字>` 的第一行非空内容（第一个存在的文件的）。没有就是 `""`。**只读、从不外传**。"""
+    home = pathlib.Path.home() / ".classlive"
+    for n in names:
+        try:
+            lines = [x.strip() for x in (home / n).read_text(encoding="utf-8").splitlines() if x.strip()]
+        except OSError:
+            continue
+        if lines:
+            return lines[0]
+    return ""
+
+
+def _get_json(url, tok=None, get=None, timeout=20) -> dict:
+    """GET → JSON。`get(url, headers) -> dict` 测试注入；默认 httpx。`tok` 为空则不带 Authorization。"""
+    if get is None:
+        def get(url, headers):
+            import httpx
+            return httpx.get(url, headers=headers, timeout=timeout).json()
+    headers = {"Authorization": f"Bearer {tok}"} if tok else {}
+    r = get(url, headers)
+    return r if isinstance(r, dict) else {}
+
+
+def soniox_account(get=None, now=None) -> dict:
+    """本机 Soniox 项目 key 的用量与并发额度（只读；key 从不进响应）。
+
+    · `usage`   每区一个项目的用量：`GET /v1/usage/summary`（7 天与当日花费，美元）—— 官方 2026-10-18 核过。
+    · `concurrency` `GET /v1/concurrency-limits`（project 作用域）：当前并发 vs 上限。
+    · `balance` 组织余额 `GET /v1/organization/balance` —— **只在配了组织 key 时**查；项目 key 回 403，那种情况写明原因。
+    """
+    import datetime as dt
+    now = now or dt.datetime.now(dt.timezone.utc)
+    keys = {r: _home_secret(f) for r, f in SONIOX_REGION_FILE.items()}
+    keys = {r: k for r, k in keys.items() if k}
+    if not keys:
+        return {"error": "没配 Soniox key（~/.classlive/soniox-token）"}
+    s7 = (now - dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    u = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    usage, errs = {}, []
+    for region, key in keys.items():
+        try:
+            j = _get_json(f"{SONIOX_REGION_API[region]}/v1/usage/summary?start_time={s7}&end_time={u}", key, get)
+        except Exception as e:                                        # noqa: BLE001
+            errs.append(f"{region} 用量读不到：{type(e).__name__}")
+            continue
+        total = j.get("total") if isinstance(j.get("total"), dict) else {}
+        days = total.get("days") if isinstance(total.get("days"), list) else []
+        cost = total.get("cost_usd") if isinstance(total.get("cost_usd"), list) else []
+        today = cost[-1] if days and days[-1][:10] == now.strftime("%Y-%m-%d") and cost else None
+        models = [{"model": str(m.get("model") or ""), "cost": _f(m.get("total_cost_usd"))}
+                  for m in (j.get("models") or []) if isinstance(m, dict)][:6]
+        usage[region] = {"days": [str(d)[:10] for d in days], "cost": [_f(x) for x in cost],
+                         "cost_7d": _f(total.get("total_cost_usd")), "cost_today": _f(today) if today is not None else None,
+                         "models": models}
+    # 用量日志（`/v1/usage-logs`）：Soniox 侧的**真值** —— 每条一次会话，带音频秒与码名
+    # （client_reference_id = 码名，Worker 签发临时 key 时就带上了）。这是「Worker 发了多少把 key
+    # 对 Soniox 实际收了多少秒」的第三方对账口径。
+    logs = {"sessions": 0, "audio_s": 0.0, "by_name": {}, "more": False}
+    for region, key in keys.items():
+        try:
+            lj = _get_json(f"{SONIOX_REGION_API[region]}/v1/usage-logs?start_time={s7}&end_time={u}&limit=1000", key, get)
+        except Exception as e:                                        # noqa: BLE001
+            errs.append(f"{region} 用量日志读不到：{type(e).__name__}")
+            continue
+        rows = lj.get("usage_logs") if isinstance(lj.get("usage_logs"), list) else []
+        logs["more"] = logs["more"] or bool(lj.get("next_page_cursor"))
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            ms = r.get("input_audio_duration_ms")
+            sec = float(ms) / 1000.0 if isinstance(ms, (int, float)) else 0.0
+            nm = _enum(r.get("client_reference_id"), 24) or "-"
+            rd = logs["by_name"].setdefault(nm, {"sessions": 0, "audio_s": 0.0})
+            rd["sessions"] += 1
+            rd["audio_s"] = round(rd["audio_s"] + sec, 1)
+            logs["sessions"] += 1
+            logs["audio_s"] = round(logs["audio_s"] + sec, 1)
+    first = next(iter(keys))
+    concurrency = {"current": None, "limit": None}
+    try:
+        cj = _get_json(f"{SONIOX_REGION_API[first]}/v1/concurrency-limits", keys[first], get)
+        proj = cj.get("project") if isinstance(cj.get("project"), dict) else {}
+        org = cj.get("organization") if isinstance(cj.get("organization"), dict) else {}
+        pcur = (proj.get("current") or {}).get("transcribe_concurrent") if isinstance(proj.get("current"), dict) else None
+        plim = (proj.get("limits") or {}).get("transcribe_concurrent") if isinstance(proj.get("limits"), dict) else None
+        ocur = (org.get("current") or {}).get("transcribe_concurrent") if isinstance(org.get("current"), dict) else None
+        olim = (org.get("limits") or {}).get("transcribe_concurrent") if isinstance(org.get("limits"), dict) else None
+        cur, lim = _num(pcur), _num(plim)
+        if lim is None:                                               # 项目没设上限 → 看组织那档（实测上限在建在组织上）
+            lim, cur = _num(olim), _num(ocur)
+        concurrency = {"current": cur, "limit": lim}
+    except Exception as e:                                            # noqa: BLE001
+        errs.append(f"并发额度读不到：{type(e).__name__}")
+    balance = None
+    org = _home_secret(SONIOX_ORG_FILE)
+    if org:
+        try:
+            bj = _get_json(f"{SONIOX_REGION_API['us']}/v1/organization/balance", org, get)
+            balance = {"available": _f(bj.get("available_balance_usd")), "free": _f(bj.get("free_balance_usd")),
+                       "used": _f(bj.get("used_balance_usd")),
+                       "exhausted": bj.get("balance_exhausted") if isinstance(bj.get("balance_exhausted"), bool) else None,
+                       "autopay": bj.get("autopay_enabled") if isinstance(bj.get("autopay_enabled"), bool) else None}
+        except Exception as e:                                        # noqa: BLE001
+            errs.append(f"余额读不到：{type(e).__name__}")
+    return {"regions": sorted(usage), "usage": usage, "logs": logs, "concurrency": concurrency,
+            "balance": balance, "balance_error": "" if balance else
+            "没配组织 key（~/.classlive/soniox-org-token）—— 余额看不到；项目 key 查余额会被拒 403", "errors": errs[:4]}
+
+
+def openrouter_account(get=None, post=None, now=None) -> dict:
+    """本机 OpenRouter **管理 key** 的账户与用量（只读；key 从不进响应）。
+
+    · `GET /api/v1/credits`        账户购买 / 已用总额 → 余额（**要管理 key**；普通 key 403）。
+    · `GET /api/v1/analytics/meta` 先问有哪些 metric / dimension（官方原话：query 只能用它报的）。
+    · `POST /api/v1/analytics/query` 近 7 天按天 × 模型的用量（指标取 meta 里真有的那几个）。
+    管理 key 住在 `~/.classlive/openrouter-mgmt-token`（不能发模型请求，也读不到课堂文本）。
+
+    ⚠️ 我们**不接** Observability 的 destinations（那把请求内容推给第三方）；analytics 只有数。
+    """
+    import datetime as dt
+    key = _home_secret(OPENROUTER_MGMT_FILE)
+    if not key:
+        return {"error": "没配 OpenRouter 管理 key（放到 ~/.classlive/openrouter-mgmt-token；普通推理 key 读不了 analytics）"}
+    now = now or dt.datetime.now(dt.timezone.utc)
+    out: dict = {}
+    try:
+        c = _get_json(OPENROUTER_CREDITS_URL, key, get).get("data")
+        c = c if isinstance(c, dict) else {}
+        out["credits"] = {"total": _f(c.get("total_credits")), "used": _f(c.get("total_usage"))}
+    except Exception as e:                                            # noqa: BLE001
+        out["credits_error"] = f"余额读不到：{type(e).__name__}（403 = 这把不是管理 key）"
+    # meta：有哪些 metric / dimension。取名字（元素可能是串，也可能是带 name/id/key 的对象）。
+    meta = {}
+    try:
+        mj = _get_json(OPENROUTER_META_URL, key, get).get("data")
+        mj = mj if isinstance(mj, dict) else {}
+        names = lambda arr: [str(x) if isinstance(x, str) else str((x or {}).get("name") or (x or {}).get("id") or (x or {}).get("key") or "")
+                             for x in (arr or []) if isinstance(x, (str, dict))]
+        meta = {"metrics": [x for x in names(mj.get("metrics")) if x],
+                "dimensions": [x for x in names(mj.get("dimensions")) if x],
+                "granularities": [x for x in names(mj.get("granularities")) if x]}
+    except Exception as e:                                            # noqa: BLE001
+        out["meta_error"] = f"schema 读不到：{type(e).__name__}"
+    out["meta"] = meta
+    if post is None:
+        def post(url, headers, body):
+            import httpx
+            return httpx.post(url, headers=headers, json=body, timeout=25).json()
+    metrics = [m for m in OPENROUTER_WANT_METRICS if m in meta.get("metrics", [])]
+    if metrics:
+        body = {"metrics": metrics, "granularity": "day",
+                "time_range": {"start": (now - dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                               "end": now.strftime("%Y-%m-%dT%H:%M:%SZ")}}
+        if "model" in meta.get("dimensions", []):
+            body["dimensions"] = ["model"]
+        try:
+            qj = post(OPENROUTER_QUERY_URL, {"Authorization": f"Bearer {key}", "content-type": "application/json"}, body)
+            dd = (qj.get("data") or {}).get("data") if isinstance(qj.get("data"), dict) else None
+            out["query"] = {"metrics": metrics, "rows": [r for r in (dd or []) if isinstance(r, dict)][:200]}
+        except Exception as e:                                        # noqa: BLE001
+            out["query_error"] = f"analytics 查询失败：{type(e).__name__}"
+    else:
+        out["query_error"] = out.get("meta_error") or "meta 里没有我们认得的那几个指标（total_usage / request_count / …）"
+    return out
+
+
+def _f(v):
+    """字符串 / 数字 → float（整数就整数）；解析不出 → None。第三方余额字段都是字符串，这里统一。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return int(f) if f.is_integer() else round(f, 4)
+
+
 #: 慢的几个（直接问 Cloudflare，一个 0.5–2 s）走「先给旧的、后台再取」：页面每分钟自动刷一次，
 #: 不该每次都等 Cloudflare；手动点「刷新」带 `{"fresh": true}`，那一次同步重取。出错的结果不进缓存。
-SLOW = {"cf": cf_summary, "r2": r2_ingest, "health": cf_health, "logs": worker_logs, "ae": ae_events}
+SLOW = {"cf": cf_summary, "r2": r2_ingest, "health": cf_health, "logs": worker_logs, "ae": ae_events,
+        "ae310": ae_310, "reports": r2_reports, "soniox": soniox_account, "openrouter": openrouter_account}
 FRESH_S = 55                                                          # 这么新：直接给
 STALE_S = 15 * 60                                                     # 这么旧以内：先给旧的，后台重取；再旧就同步等
 _CACHE: dict = {}                                                     # name → (取到的 monotonic 时刻, 结果)
@@ -684,7 +1144,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(403, {"error": "缺少 %s 头（本机页面对任意网站的第一道闸）" % GATE_HEADER})
         name = path[len("/api/"):]
         # cf：Cloudflare 用量 · r2：上传桶清单 · health：延迟/上游/部署/节点/站点 · logs：Workers Logs 里我们写的事件 ·
-        # ae：Analytics Engine 逐请求事件。都是本机直接问 Cloudflare，不经 Worker。
+        # ae：Analytics Engine 逐请求事件 · ae310：3.10 的新量具（Soniox key / OpenRouter 快速通道 / 版本 / 笔记）·
+        # reports：上传桶里 report.json 的只读摘要 · soniox / openrouter：平台账号额度。都不经 Worker。
         if name in SLOW:
             raw = self.rfile.read(int(self.headers.get("content-length") or 0))
             try:

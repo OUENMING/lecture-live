@@ -122,6 +122,7 @@ BLOCKS = frozenset({
     "system",   # 机器画像 `{ram_gb, chip, macos, arch, draft_engine, draft_reason}`（`system_info`）
     "energy",   # ⭐ 3.9.8 ①：可见/隐藏分桶的能耗/唤醒/CPU + pump 各档时长（`energy.EnergyProbe`）
     "capture",  # ⭐ 3.9.8 ④：收音断档（墙钟 vs 音频秒）+ 断档列表（`note_chunk` 累计）
+    "region_probe",  # ⭐ Soniox 多地区路由：探测结果 + 决策（`region_route.Router.snapshot()`）
 })
 
 

@@ -12,6 +12,7 @@
 //   /docs/api-reference/other/get_usage_logs            GET /v1/usage-logs?start_time&end_time&limit&sort&cursor
 //                                                       （按 end_time 过滤、左闭右开、窗口 ≤ 31 天、start 不早于 91 天前）
 //   /docs/data-residency                               区域域名：美国 api.soniox.com / stt-rt.soniox.com
+//                                                                   欧盟 api.eu.soniox.com / stt-rt.eu.soniox.com
 //                                                                   日本 api.jp.soniox.com / stt-rt.jp.soniox.com
 //
 // ⚠️ **key 绝不进日志 / 事件**：本模块只回 {status, api_key} 两个字段，调用方只许用 status 与「有没有 key」，
@@ -21,15 +22,26 @@ export const STT_RT_MODEL = "stt-rt-v5";       // 客户端 start 消息里的�
 export const KEY_TTL_S = 60;                   // 能用来「开新流」的时长；官方 1–3600，开一条流 60 s 足够
 export const DEFAULT_MAX_SESSION_S = 10800;    // 单次会话上限 3 h（一节课的量）；官方上限 18000
 export const MAX_SESSION_S = 18000;
+export const PROBE_MAX_SESSION_S = 15;         // `purpose=probe` 的探测 key：够连上 + 发 200 ms 静音 + 结束帧
 const MINT_TIMEOUT_MS = 5000;                  // 发 key 的超时（官方没给 p99；探针到 api.* 的建连通常 < 300 ms）
 const LOG_TIMEOUT_MS = 10000;                  // 拉一页日志的超时
 const PAGE_LIMIT = 100;                        // 每页条数（官方没写默认值，只写「最大条数」）
 export const PAGE_CAP = 5;                     // 一次回收最多 5 页 = 500 条；拉满还有下一页由调用方决定游标推到哪
 
-const REGIONS = {
+// ---- 地区表（**加一个区只改这里**）----
+// 每个项目的 key 只能配本地区域名（官方 data-residency：地区在建项目时选，音频与转写只在该区处理与存储）。
+// `REGION_KEY_ENV` = 那个区的 key 住在哪个 secret；没配 = 这个区不存在（pickRegion 永远不选它，
+// cron 不拉它的用量日志，`/v1/soniox/key` 的显式 region 也会被忽略回默认）。
+// ⚠️ handler 的用量回收与 passes-core 的游标白名单都从这里 import —— 别在那边再抄一份 us/jp/eu。
+export const REGIONS = {
   us: { api: "https://api.soniox.com", ws: "wss://stt-rt.soniox.com/transcribe-websocket" },
   jp: { api: "https://api.jp.soniox.com", ws: "wss://stt-rt.jp.soniox.com/transcribe-websocket" },
+  eu: { api: "https://api.eu.soniox.com", ws: "wss://stt-rt.eu.soniox.com/transcribe-websocket" },
 };
+const REGION_KEY_ENV = { us: "SONIOX_KEY", jp: "SONIOX_KEY_JP", eu: "SONIOX_KEY_EU" };
+export const REGION_NAMES = Object.freeze(Object.keys(REGIONS));
+export const regionKey = (env, region) => env?.[REGION_KEY_ENV[region]] || "";
+export const configuredRegions = (env) => REGION_NAMES.filter((r) => regionKey(env, r));
 // 走日本区的访客：中国大陆 + 港澳台 + 日韩。依据 data-residency：选了区域的项目，音频与转写**只**在那个区域
 // 处理与存储 —— 这些地方的访客就近落日本，音频不出这个圈。
 const JP_COUNTRIES = new Set(["CN", "HK", "MO", "TW", "JP", "KR"]);
@@ -37,10 +49,21 @@ const JP_COUNTRIES = new Set(["CN", "HK", "MO", "TW", "JP", "KR"]);
 export const apiBase = (region) => REGIONS[region].api;
 export const wsUrl = (region) => REGIONS[region].ws;
 
-// 走哪个区：**两个条件都满足**才日本 —— ① 配了日本 key ② 访客国家在上表；否则一律美国。
-// 现在只配了美国 key，所以第一个条件 = false，自然全走美国；以后加了 SONIOX_KEY_JP 就自动切。
-export function pickRegion(country, env) {
-  return env?.SONIOX_KEY_JP && JP_COUNTRIES.has(String(country || "").toUpperCase()) ? "jp" : "us";
+// 走哪个区。**三层**判据（选择前都要求那个区配了 key，fail-safe：没配的区永远不选）：
+//   ① 国家表（CN/HK/MO/TW/JP/KR）-> jp；
+//   ② request.cf.continent：AS/OC -> jp；EU/AF -> eu；其余（NA/SA/AN/空）-> us；
+//   ③ 都没有 -> us。
+// ⚠️ 显式 `region=`（客户端探测后带的）**不在这里** —— 那是 `/v1/soniox/key` 的请求参数，由 handler 先判
+//    「那个区配没配 key」再落到本函数（没配就忽略回默认）。
+// 现在只配了美国 key：①② 里走 jp/eu 的分支都过不了「配了 key」这一关 -> 全走美国；加了
+// SONIOX_KEY_JP / SONIOX_KEY_EU 自动切（这条 fail-safe 是刻意的：配置缺了绝不能让选路炸掉）。
+export function pickRegion(country, env, continent = "") {
+  const cc = String(country || "").toUpperCase();
+  if (env?.SONIOX_KEY_JP && JP_COUNTRIES.has(cc)) return "jp";
+  const cont = String(continent || "").toUpperCase();
+  if ((cont === "AS" || cont === "OC") && env?.SONIOX_KEY_JP) return "jp";
+  if ((cont === "EU" || cont === "AF") && env?.SONIOX_KEY_EU) return "eu";
+  return "us";
 }
 
 // 单次会话上限（秒）：env 给了就用，夹进官方允许的 [1, 18000]；没给 / 非法 -> 默认 3 h。

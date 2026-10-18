@@ -254,6 +254,9 @@ def pool_sweeps(res_list) -> dict:
     sums = [dict(r["summary"], source=s) for r, s in zip(res_list, srcs) if r.get("summary")]
     if sums:
         res["summaries"] = sums
+    rps = [r.get("region_probe") for r in res_list if r.get("region_probe")]
+    if rps:
+        res["region_probe"] = rps
     samples = [r["_latency_samples"] for r in res_list if r.get("_latency_samples")]
     if samples:
         res["live_latency"] = {k: M.summarize_latency([x for s in samples for x in s[k]])
@@ -262,6 +265,48 @@ def pool_sweeps(res_list) -> dict:
         res["warnings"].append("各份有生产延迟、但没带原始样本 → 汇总里不出延迟"
                                "（用 build_report(..., keep_samples=True) 建）")
     return res
+
+
+# ---------------------------------------------------------------- 地区探测（Soniox 多地区路由）
+def region_probe_event(events) -> dict | None:
+    """`.live.jsonl` 里的 `region_probe` 事件（同一文件多条时后写的为准）。**没有 -> None**（老文件照读）。
+
+    形状由 `region_route.Router.snapshot()` 定：`{version, mode, run, ordinal, net, default,
+    selected, switched, reason, cached, [regions, ms, timeout]}`。
+    """
+    out = None
+    for e in events:
+        if e.get("kind") == "event" and e.get("event") == "region_probe":
+            out = {k: v for k, v in e.items() if k not in ("i", "t", "kind", "event")}
+    return out
+
+
+def _region_probe_lines(rp) -> list[str]:
+    """地区探测那一小块（单份或汇总列表都走这里）。形状不对 -> 空（坏行不该毁报告）。"""
+    if isinstance(rp, list):
+        return [ln for x in rp for ln in _region_probe_lines(x)]
+    if not isinstance(rp, dict):
+        return []
+
+    def ms(v):
+        return "—" if not isinstance(v, (int, float)) else f"{v:.0f}"
+
+    if rp.get("selected"):
+        head = f"默认 {rp.get('default') or '?'} -> 选中 {rp['selected']}（改道）"
+    else:
+        head = f"默认 {rp.get('default') or '?'} -> 走默认（未改道）"
+    line = f"地区探测: {head} · 原因 {rp.get('reason')}"
+    if rp.get("ordinal") is not None:
+        line += f" · 第 {rp['ordinal']} 节"
+    if rp.get("mode"):
+        line += f" · 模式 {rp['mode']}"
+    out = [line]
+    for r, v in (rp.get("regions") or {}).items():
+        v = v if isinstance(v, dict) else {}
+        err = str(v.get("error") or "")
+        out.append(f"  {r}: 建连 {ms(v.get('connect_ms'))} ms / 往返 {ms(v.get('rtt_ms'))} ms"
+                   + (f"（{err}）" if err else ""))
+    return out
 
 
 # ---------------------------------------------------------------- 腰斩臆造候选
@@ -379,6 +424,10 @@ def render(res: dict) -> str:
                      f"{c['unsupported_tail']!r}{flag}")
     if len(hc) > 12:
         lines.append(f"  …另有 {len(hc) - 12} 条见 --json")
+    rp = res.get("region_probe")
+    if rp:
+        lines.append("")
+        lines.extend(_region_probe_lines(rp))
     for w in res.get("warnings") or []:
         lines.append("")
         lines.append(f"⚠️ {w}")
@@ -413,6 +462,7 @@ def build_report(path, *, ref=None, ks=DEFAULT_KS, want_disagreement=False,
                  "sliding_excluded": _first.get("sliding_drafts_excluded", 0)},
         "sweep": sw,
         "hallucination_candidates": hallucination_candidates(utts),
+        "region_probe": region_probe_event(events),
         "warnings": warns,
     }
     summ = [e for e in events if e.get("kind") == "summary"]

@@ -50,9 +50,9 @@ function harness({ mint, logs, mintThrow = false } = {}) {
   const origFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     const u = String(url);
-    const m = /^https:\/\/api(\.jp)?\.soniox\.com\/(v1\/auth\/temporary-api-key|v1\/usage-logs)(\?.*)?$/.exec(u);
+    const m = /^https:\/\/api(\.jp|\.eu)?\.soniox\.com\/(v1\/auth\/temporary-api-key|v1\/usage-logs)(\?.*)?$/.exec(u);
     if (m) {
-      const region = m[1] ? "jp" : "us";
+      const region = m[1] === ".jp" ? "jp" : m[1] === ".eu" ? "eu" : "us";
       const auth = init.headers?.authorization || "";
       if (m[2] === "v1/auth/temporary-api-key") {
         calls.mint.push({ region, url: u, auth, body: JSON.parse(init.body) });
@@ -87,13 +87,15 @@ function harness({ mint, logs, mintThrow = false } = {}) {
   const call = async (req, e = env) => worker.fetch(req, e, ctx);
   // cron：先把 DO 的假时钟推到 scheduledTime（真机上是两个都跟着真实时间走，差在毫秒级）
   const cron = async (at = T0 + 3600_000, e = env) => { now = Math.max(now, at); return worker.scheduled({ scheduledTime: at }, e); };
-  const keyReq = (auth, { install = INSTALL, country = null, method = "POST" } = {}) => {
+  const keyReq = (auth, { install = INSTALL, country = null, continent = null, method = "POST", body = "" } = {}) => {
     const headers = {};
     if (auth !== null) headers.authorization = auth;
     if (install !== null) headers["x-classlive-install"] = install;
     const r = new Request("https://asr.bldcam.page/v1/soniox/key",
-      { method, headers, ...(method === "POST" ? { body: "" } : {}) });
-    if (country) Object.defineProperty(r, "cf", { value: { country, colo: "HKG" } });   // 边缘才有 request.cf
+      { method, headers, ...(method === "POST" ? { body } : {}) });
+    if (country || continent) {
+      Object.defineProperty(r, "cf", { value: { country, continent, colo: "HKG" } });   // 边缘才有 request.cf
+    }
     return r;
   };
   const asrReq = (auth, seconds = "12") => new Request("https://asr.bldcam.page/v1/transcribe", {
@@ -443,4 +445,133 @@ test("S16 转写照旧 200：新路由没动现有行为（同一道 PER_IP / PE
   const j = await (await h.call(h.asrReq("Bearer tok-public"))).json();
   assert.equal(j.provider, "groq");
   assert.equal((await h.call(h.asrReq("Bearer cl-x-zz"))).status, 403);
+}));
+
+// ---------- 17. 显式 region ----------
+test("S17 region：配了才听、没配忽略回默认；显式优先于国家表；坏值忽略", () => withHarness({}, async (h) => {
+  const { code } = await newCode(h, "amy");
+  const ask = async (body, env = h.env, req = {}) =>
+    (await h.call(h.keyReq(`Bearer ${code}`, { ...req, body: body === null ? "null" : JSON.stringify(body) }), env)).json();
+  // 没配 EU -> 忽略回默认（IE 默认 us）
+  let j = await ask({ region: "eu" });
+  assert.deepEqual([j.region, j.ws_url], ["us", "wss://stt-rt.soniox.com/transcribe-websocket"]);
+  assert.equal(h.calls.mint.at(-1).url, "https://api.soniox.com/v1/auth/temporary-api-key");
+  // 配上 EU -> 生效：域名 / ws / key / 会话上限四样都对
+  const eu = { ...h.env, SONIOX_KEY_EU: "soniox-eu-key" };
+  j = await ask({ region: "eu" }, eu);
+  assert.deepEqual([j.region, j.ws_url, j.max_session_s],
+    ["eu", "wss://stt-rt.eu.soniox.com/transcribe-websocket", 10800]);
+  assert.deepEqual([h.calls.mint.at(-1).url, h.calls.mint.at(-1).auth],
+    ["https://api.eu.soniox.com/v1/auth/temporary-api-key", "Bearer soniox-eu-key"]);
+  // 大小写 / 空白容错
+  assert.equal((await ask({ region: " EU " }, eu)).region, "eu");
+  // 显式优先于国家表：CN 访客 + JP key，显式要 us -> us
+  const jp = { ...h.env, SONIOX_KEY_JP: "soniox-jp-key" };
+  j = await ask({ region: "us" }, jp, { country: "CN" });
+  assert.equal(j.region, "us");
+  // 没配 JP 时显式要 jp -> 忽略回默认（CN 无 JP key -> us；fixture 没给 continent，第 2 步的大洲表不掺进来）
+  j = await ask({ region: "jp" }, h.env, { country: "CN" });
+  assert.equal(j.region, "us");
+  // 坏值 / 非字符串 / 空 / 坏 JSON：一律忽略回默认
+  for (const body of [{ region: "xx" }, { region: 42 }, { region: "" }, {}]) {
+    assert.equal((await ask(body)).region, "us", JSON.stringify(body));
+  }
+  j = await (await h.call(h.keyReq(`Bearer ${code}`, { body: "null" }))).json();
+  assert.equal(j.region, "us");
+  j = await (await h.call(h.keyReq(`Bearer ${code}`, { body: "{oops" }))).json();
+  assert.equal(j.region, "us", "坏 JSON 的 body 当没给");
+}));
+
+// ---------- 18. purpose=probe ----------
+test("S18 probe：15 s 上限；环境上限不干扰它；事件里带 :probe、不带 key", () => withHarness({}, async (h) => {
+  const { code } = await newCode(h, "amy");
+  const jp = { ...h.env, SONIOX_KEY_JP: "soniox-jp-key" };
+  let j = await (await h.call(h.keyReq(`Bearer ${code}`, { body: JSON.stringify({ purpose: "probe" }) }))).json();
+  assert.deepEqual([j.region, j.max_session_s], ["us", 15]);
+  assert.deepEqual(h.calls.mint.at(-1).body, {
+    usage_type: "transcribe_websocket", expires_in_seconds: 60, single_use: true,
+    max_session_duration_seconds: 15, client_reference_id: "amy",
+  });
+  // probe + 显式 region=jp；SONIOX_MAX_SESSION_S 给了也不许盖过 15
+  j = await (await h.call(
+    h.keyReq(`Bearer ${code}`, { body: JSON.stringify({ purpose: "probe", region: "jp" }) }),
+    { ...jp, SONIOX_MAX_SESSION_S: "7200" })).json();
+  assert.deepEqual([j.region, j.max_session_s], ["jp", 15]);
+  assert.equal(h.calls.mint.at(-1).body.max_session_duration_seconds, 15);
+  assert.equal(h.calls.mint.at(-1).url, "https://api.jp.soniox.com/v1/auth/temporary-api-key");
+  // purpose 不认识的值 = 不是 probe（照旧 10800）
+  j = await (await h.call(h.keyReq(`Bearer ${code}`, { body: JSON.stringify({ purpose: "x" }) }))).json();
+  assert.equal(j.max_session_s, 10800);
+  // AE：up 带 :probe；三轮事件里都没有 key
+  assert.deepEqual(h.calls.ae.map((e) => e.blobs[3]),
+    ["soniox-us:201:probe", "soniox-jp:201:probe", "soniox-us:201"]);
+  assert.ok(!JSON.stringify(h.calls.ae).includes(KEY), "事件里出现了 key");
+  assert.ok(!h.logged.join("\n").includes(KEY) && !h.logged.join("\n").includes(code), "日志里出现 key / 码");
+}));
+
+// ---------- 19. eu 全链路 ----------
+test("S19 eu：配上就参与 cron 回收（各用各的 key、各推各的游标）；白名单外的区照旧拒绝", () => withHarness({
+  logs: (region) => ({ usage_logs: [
+    logRec({ uuid: `${region}-1`, name: region === "eu" ? "ken" : "amy", end: "2026-10-17T08:10:00Z", ms: 12000 }),
+  ], next_page_cursor: null }),
+}, async (h) => {
+  const { code: amy } = await newCode(h, "amy");
+  const { code: ken } = await newCode(h, "ken");
+  const eu = { ...h.env, SONIOX_KEY_EU: "soniox-eu-key" };
+  await h.cron(T0 + 3600_000, eu);
+  const byRegion = h.calls.logs.reduce((a, c) => a.set(c.region, (a.get(c.region) ?? 0) + 1), new Map());
+  assert.deepEqual([...byRegion].sort(), [["eu", 1], ["us", 1]], "配了 EU 就该拉它；JP 没配不拉");
+  assert.equal(h.calls.logs.find((c) => c.region === "eu").auth, "Bearer soniox-eu-key");
+  const rows = (await h.stats({ day: TODAY })).days[0].rows;
+  assert.deepEqual([rows.find((r) => r.code === amy).rt_s, rows.find((r) => r.code === ken).rt_s], [12, 12],
+    "两个区各记各的（同名两条会撞内存 stub 的并发写，这里用不同名字 —— 真 DO 有 input gate 串行）");
+  assert.equal((await h.cursor("eu")).since_ms, T0 + 3600_000);
+  const bad = await (await h.pass.handle(new Request("https://passes/admin/rt/cursor",
+    { method: "POST", body: JSON.stringify({ region: "xx" }) }))).json();
+  assert.deepEqual(bad, { error: "bad_region" });
+}));
+
+// ---------- 20. 大洲表（默认选路，表驱动） ----------
+test("S20 大洲：AS/OC->jp、EU/AF->eu（没配则 us）、其余 us；国家表优先；没配的区永不被选", () => withHarness({}, async (h) => {
+  const { code } = await newCode(h, "amy");
+  const envs = {
+    "只有 us": h.env,
+    "+jp": { ...h.env, SONIOX_KEY_JP: "soniox-jp-key" },
+    "+eu": { ...h.env, SONIOX_KEY_EU: "soniox-eu-key" },
+    "+jp+eu": { ...h.env, SONIOX_KEY_JP: "soniox-jp-key", SONIOX_KEY_EU: "soniox-eu-key" },
+  };
+  // 每个大洲 × 四种配置（列序 = envs 的键序）
+  const WANT = {
+    AS: ["us", "jp", "us", "jp"], OC: ["us", "jp", "us", "jp"],
+    EU: ["us", "us", "eu", "eu"], AF: ["us", "us", "eu", "eu"],
+    NA: ["us", "us", "us", "us"], SA: ["us", "us", "us", "us"], AN: ["us", "us", "us", "us"],
+  };
+  const names = Object.keys(envs);
+  for (const [cont, want] of Object.entries(WANT)) {
+    for (let i = 0; i < names.length; i++) {
+      const j = await (await h.call(h.keyReq(`Bearer ${code}`, { continent: cont }), envs[names[i]])).json();
+      assert.equal(j.region, want[i], `${cont} / ${names[i]}`);
+    }
+  }
+  // 国家表**优先于**大洲表：CN/HK/MO/TW/JP/KR 即使大洲标成 EU 也走 jp（jp 配了）
+  for (const cc of ["CN", "HK", "MO", "TW", "JP", "KR"]) {
+    const j = await (await h.call(h.keyReq(`Bearer ${code}`, { country: cc, continent: "EU" }), envs["+jp+eu"])).json();
+    assert.equal(j.region, "jp", cc);
+  }
+  // 没配 jp（fail-safe）：国家表落空 -> 大洲兜底；AS/OC 也是 us
+  assert.equal((await (await h.call(h.keyReq(`Bearer ${code}`, { country: "CN", continent: "AS" }), envs["+eu"])).json()).region,
+    "us", "CN 没 jp key -> us");
+  assert.equal((await (await h.call(h.keyReq(`Bearer ${code}`, { country: "IE", continent: "EU" }), envs["+eu"])).json()).region,
+    "eu", "IE + eu key -> eu");
+  assert.equal((await (await h.call(h.keyReq(`Bearer ${code}`), envs["+jp+eu"])).json()).region,
+    "us", "没有 request.cf -> us");
+  assert.equal((await (await h.call(h.keyReq(`Bearer ${code}`, { continent: "eu" }), envs["+eu"])).json()).region,
+    "eu", "小写也认");
+  // ws / 上游 key 跟着大洲走
+  await h.call(h.keyReq(`Bearer ${code}`, { continent: "EU" }), envs["+eu"]);
+  assert.deepEqual([h.calls.mint.at(-1).url, h.calls.mint.at(-1).auth],
+    ["https://api.eu.soniox.com/v1/auth/temporary-api-key", "Bearer soniox-eu-key"]);
+  await h.call(h.keyReq(`Bearer ${code}`, { continent: "OC" }), envs["+jp"]);
+  assert.deepEqual([h.calls.mint.at(-1).url, h.calls.mint.at(-1).auth],
+    ["https://api.jp.soniox.com/v1/auth/temporary-api-key", "Bearer soniox-jp-key"]);
 }));

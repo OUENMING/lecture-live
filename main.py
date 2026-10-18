@@ -1947,11 +1947,31 @@ def run(args) -> None:
                 _q.put(s)
                 _ev.set()
 
+            # ⭐ 多地区路由（`region_route`）：开课前的地区真测（后台线程、总预算 3 s、**绝不阻塞**）
+            #    + 同网络 24 h 缓存 —— 本节的 `region=` 只可能来自缓存（本次探测等不起，见那个文件头）。
+            #    `on_done` 恰好一次：报告块（测试模式）与 live 事件（`CLASSLIVE_LIVE_LOG=1`）。
+            region = ""
+            try:
+                import region_route
+
+                def _probe_done(snap, _live=live, _tester=tester):
+                    if _live is not None:
+                        _live.event("region_probe", **snap)
+                    if _tester is not None:
+                        _tester.note_block("region_probe", snap)
+
+                _router = region_route.Router(passcode=api_key_val, endpoint=stream_asr.endpoint())
+                _router.start(on_done=_probe_done)
+                region = _router.region
+            except Exception as e:                             # noqa: BLE001
+                echo(f"⚠ 地区探测起不来（本节走 Worker 默认地区）：{type(e).__name__}: {e}")
+
             stream = stream_asr.StreamASR(
                 passcode=api_key_val,
                 terms=course_term_list(args.glossary, args.course),
                 general=course_title(args.glossary, args.course),
-                on_sealed=_sealed_in)
+                on_sealed=_sealed_in,
+                region=region)
             echo("🎧 实时识别: Soniox（连不上会自动退回本地）")
         except Exception as e:                                 # noqa: BLE001
             echo(f"⚠ 实时识别起不来，本节课走本地：{type(e).__name__}: {e}")

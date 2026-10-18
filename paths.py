@@ -333,6 +333,17 @@ def asr_admin_token(*, root=None) -> pathlib.Path:
     return _root(root) / "asr-admin-token"
 
 
+def region_probe_state(*, root=None) -> pathlib.Path:
+    """Soniox 地区探测的状态（`region-probe.json`）—— 每版本前 3 节课的计数 + 每网络 24 h 结果缓存。
+
+    形状（读者是 `region_route`）：`{"v": <版本>, "n": <已探测过的节数>,
+    "cache": {"<网络哈希>": {"at": <epoch>, "default": "us", "regions": {...}}}}`。
+    ⚠️ 版本对不上（`v` ≠ 当前 VERSION）**整个重置** —— 那是「每个新版本只测前 3 节课」的判据。
+    ⚠️ 网络指纹**只存哈希**（`region_route.network_key()`），明文 SSID / 网关 MAC 不落盘、不进日志。
+    """
+    return _root(root) / "region-probe.json"
+
+
 def install_id(*, root=None) -> pathlib.Path:
     """随机 32 位 hex，云端定稿 Worker 按它限流 —— `~/.classlive/install-id`（权限 600）。
 

@@ -339,12 +339,17 @@ class _KeyClient:
     （与 `final_asr._client` 同规矩：一个进程一条连接池）。
     """
 
-    def __init__(self, timeout: float = KEY_TIMEOUT_S) -> None:
+    def __init__(self, timeout: float = KEY_TIMEOUT_S, region: str = "") -> None:
         self._timeout = timeout
+        self._region = str(region or "").strip().lower()
         self._client = None
 
     def request_key(self, passcode: str) -> dict:
-        """`{"api_key", "ws_url", "region", "expires_in_seconds", "max_session_s"}`；失败抛 `_KeyError`。"""
+        """`{"api_key", "ws_url", "region", "expires_in_seconds", "max_session_s"}`；失败抛 `_KeyError`。
+
+        `region` 非空时随请求发给 Worker（`{"region": …}`）—— 那是**探测后的改道**（`region_route`）；
+        空串 = 不给，Worker 按国家表 / 大洲表选默认（老行为逐字不变）。
+        """
         import httpx
         if self._client is None:
             self._client = httpx.Client(timeout=self._timeout)
@@ -352,7 +357,7 @@ class _KeyClient:
                               headers={"Authorization": f"Bearer {asr_endpoint.token(passcode)}",
                                        "X-ClassLive-Install": final_asr.install_id(),
                                        "X-ClassLive-Version": asr_endpoint.version_header()},
-                              json={})
+                              json={"region": self._region} if self._region else {})
         js = None
         try:
             js = r.json()
@@ -416,6 +421,7 @@ class StreamASR:
     - `on_sealed`: `Callable[[Sealed], None]`，收线程**锁外**调（调用方只该入队）。
     - `clock` / `stable_s`: 透传给 `StreamCore`。
     - `request_key`: 注入的领 key 函数（默认 `_KeyClient`）。
+    - `region`: 领 key 时带的 `region=`（`region_route` 探测后的改道；`""` = 不带、Worker 选默认）。
     - `key_timeout_s` / `keepalive_s` / `response_timeout_s` / `finish_wait_s` /
       `audio_max_s` / `chunk_s` / `ws_url`: 判据用的小值接缝（生产全用模块常量）。
     """
@@ -429,7 +435,7 @@ class StreamASR:
                  key_timeout_s: float = KEY_TIMEOUT_S, keepalive_s: float = KEEPALIVE_S,
                  response_timeout_s: float = RESPONSE_TIMEOUT_S,
                  finish_wait_s: float = FINISH_WAIT_S, audio_max_s: float = QUEUE_MAX_S,
-                 chunk_s: float = CHUNK_S, ws_url: str = WS_URL) -> None:
+                 chunk_s: float = CHUNK_S, ws_url: str = WS_URL, region: str = "") -> None:
         self._passcode = (passcode or "").strip()
         self._terms = tuple(str(t).strip() for t in terms if str(t).strip())
         self._general = general or ""
@@ -441,7 +447,7 @@ class StreamASR:
         self._chunk_s = float(chunk_s)
         self._ws_url = ws_url
         self._max_chunks = max(1, int(float(audio_max_s) / self._chunk_s))
-        self._key = request_key or _KeyClient(timeout=key_timeout_s).request_key
+        self._key = request_key or _KeyClient(timeout=key_timeout_s, region=region).request_key
 
         self._lock = threading.Lock()               # 保护 core / 状态字段
         self._core = StreamCore(clock=clock, stable_s=stable_s)

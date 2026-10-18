@@ -677,6 +677,13 @@ def _rows_for_text(t: str, fdefs: dict) -> list:
     if lim is not None:
         rows.append(lim)
     for m in _DIV.finditer(t):
+        # ⭐ F9（F9 首跑实录）：**和式里的除法项**不许当单条除法 ——
+        #    `60×2.89+500/2.89≈173.4+173.0=346.4` 与 `15+225/15=30` 都是**求和**，
+        #    旧行为把 `500/2.89≈173.4`、`225/15=30` 读成单条除法 → 两条假 ⚠
+        #    （还因此把 §0 的题块按"复检仍错"撤了）。前一个字符是 `+`/`×`/`*` → 不猜。
+        prev = t[:m.start("a")].rstrip()
+        if prev.endswith(("+", "×", "*", "＋")):
+            continue
         try:
             a, b, c = float(m.group("a")), float(m.group("b")), float(m.group("c"))
         except ValueError:

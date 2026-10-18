@@ -699,6 +699,21 @@ class TestF9_QVSP(unittest.TestCase):
         bad = [r for r in nm.check_review(frag) if r.get("status") == "mismatch"]
         self.assertEqual([], bad, bad)
 
+    def test_和式里的除法项不许当单条(self):
+        """F9 首跑实录（真实产物）：这两句都是**求和** —— 旧行为把除法项读成单条除法，
+        报出两条假 ⚠（还因此把 §0 的题块按"复检仍错"撤了）。"""
+        cases = [
+            ("代入具体函数：AC(q)=60q+500/q，在q=2.89处，AC=60×2.89+500/2.89≈173.4+173.0=346.4。"
+             "所以停产价格约为346.4。", "500÷2.89"),
+            ("例如，若总成本 $TC(q)=q^2+225$，则 $AC(q)=q+225/q$，$MC(q)=2q$。令 $AC=MC$ 得 "
+             "$q^2=225$，$q=15$，此时 $AC(15)=15+225/15=30$，所以停产价格为30。", "225÷15"),
+        ]
+        for text, marker in cases:
+            rows = nm.check_review({"sections": [{"heading": "H", "ts": "13:16",
+                                                  "prose": [text]}]})
+            self.assertFalse([r for r in rows if r.get("status") == "mismatch"
+                              and marker in str(r.get("how") or "")], (text, rows))
+
 
 if __name__ == "__main__":
     unittest.main()

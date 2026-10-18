@@ -4300,9 +4300,9 @@ class Overlay:
            **页脚那一行必须传 `self._card_view`** —— 它要永远钉在卡片底部点得到，
            不然内容一滚，「记下 / 全部忽略」就被滚出视野（等于把人关在卡片里）。
         """
-        from AppKit import (NSButton, NSButtonTypeMomentaryChange, NSMakeRect,
+        from AppKit import (NSButtonTypeMomentaryChange, NSMakeRect,
                             NSTextAlignmentCenter)
-        b = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 10.0, CARD_BTN_H))
+        b = panel.make_button(NSMakeRect(0, 0, 10.0, CARD_BTN_H))  # 按压反馈同面板按钮
         b.setBordered_(False)
         try:
             b.setButtonType_(NSButtonTypeMomentaryChange)

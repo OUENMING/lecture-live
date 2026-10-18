@@ -872,9 +872,45 @@ class TestF11Program(unittest.TestCase):
                          "blanks": ["6"], "a": "$q=6$"}}
         self.assertEqual([], nm.reuse_rows(sec))
 
+    def test_自变量名不一致也认(self):
+        """模型把自变量写成 `x`，而 `x` 字段填 `q`（真跑 econ §3/§9 实测）→ 引擎要能认。"""
+        vals, err = nm.run_program([
+            {"var": "q_star", "op": "root", "expr": "x + 225/x - 2*x", "x": "q",
+             "range": [1, 30]}])
+        self.assertEqual("", err)
+        self.assertAlmostEqual(vals["q_star"], 15.0, places=4)
+
+    def test_步骤里的给定函数系数不算野数字(self):
+        """步骤里写出给定函数 `q^2 - 12q + 60`（**纯文本，不在 `$…$` 里**），
+        系数 12/60 是给定 —— 相依 caused by sign flip（题面是 `-12q^2`）也不许当野数字（econ §8 实测）。"""
+        rev = self._ex(program=[
+            {"var": "q_star", "op": "argmin", "expr": "x^2 - 12*x + 60", "x": "x",
+             "range": [1, 10]}],
+            prompt="总成本 $TC(q)=q^{3}-12q^{2}+60q$，求平均成本最低时的产量。",
+            steps=[{"text": "AC = TC/q = q^2 - 12q + 60，令导数为零。", "why": ""}],
+            answer="最低点在 $q=6$。")
+        bad = [r for r in nm.check_review(rev) if r.get("status") == "mismatch"]
+        self.assertEqual([], bad, bad)
+
     def test_没有例题或faded_空(self):
         self.assertEqual([], nm.reuse_rows({"heading": "h"}))
         self.assertEqual([], nm.reuse_rows({"heading": "h", "faded": {"q": "x", "a": "y"}}))
+
+    def test_变式用裸定义_不误报(self):
+        """变式写 `$AC=2q+1+32/q$`（裸定义，没 `(q)`）→ 不许回落拿例题的 AC 去核（econ §3 实测）。"""
+        sec = {"heading": "h", "ts": "13:25",
+               "example": {"title": "📖 Ex5", "prompt": "某企业成本函数 $TC(q)=q^{2}+225$。求停产价。",
+                           "steps": [{"text": "$AC(q)=q+225/q$，$MC(q)=2q$", "why": ""},
+                                     {"text": "令 $q+225/q=2q$ 得 $q=15$", "why": ""},
+                                     {"text": "$AC(15)=30$", "why": ""}],
+                           "answer": "停产价 $p=30$，产量 $q=15$。"},
+               "variants": [{"q": "✏️ 若 $TC(q)=2q^{2}+q+32$，求停产价。",
+                             "steps": [{"text": "裸定义：$AC=2q+1+32/q$，$MC=4q+1$", "why": ""},
+                                       {"text": "$2q+1+32/q=4q+1$ 得 $q=4$", "why": ""},
+                                       {"text": "$AC(4)=8+1+8=17$", "why": ""}],
+                             "a": "停产价 $p=17$。"}]}
+        bad = [r for r in nm.check_review({"sections": [sec]}) if r.get("status") == "mismatch"]
+        self.assertEqual([], bad, bad)
 
     def test_补全题新数字_进机械核并归faded单元(self):
         """接进 `check_review`：补全题的新数字要能被返修闸看得见（归 faded 单元）。"""

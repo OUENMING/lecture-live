@@ -1246,10 +1246,11 @@ def _to_self_title(t: str) -> str:
 
 
 def _downgrade_claim(out: dict, c: dict) -> bool:
-    """把一条 claim 的归属从 🎙 降成 ✏️（原地改 `out`）。成功返回 True。**纯函数（对 out 原地）。**
+    """把一条 claim 的归属从 🎙 降成 ✏️（原地改 `out`）。成功返回 True。
 
     · 例题给定（field=example）→ 该节例题标题 🎙→✏️；
-    · 正文句（prose/algebra）→ 找到那句话，去掉「老师在课上提到…」归属引语。
+    · 正文句（prose/algebra）→ 找到那句话，去掉「老师在课上提到…」归属引语
+      （容器类型不变：`prose` 是列表、`algebra` 是字符串）。
     """
     try:
         si = c.get("si")
@@ -1274,8 +1275,11 @@ def _downgrade_claim(out: dict, c: dict) -> bool:
                 if _norm_ctx(sent)[:60] == want[:60] or (want and want[:40] in _norm_ctx(sent)):
                     new = _strip_leadin(sent)
                     if new and new != sent:
-                        items[i] = str(para).replace(sent, new, 1)
-                        sec[key] = items
+                        if isinstance(v, list):
+                            v[i] = str(para).replace(sent, new, 1)
+                            sec[key] = v
+                        else:
+                            sec[key] = str(para).replace(sent, new, 1)
                         return True
         return False
     except Exception:                                          # noqa: BLE001

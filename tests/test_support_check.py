@@ -719,6 +719,15 @@ class DowngradeF11(unittest.TestCase):
         self.assertEqual(len(rows), 1, "判不了对错的数值 claim 仍要挂 ⚠")
         self.assertEqual(extra, [{"downgraded": 0}])
 
+    def test_algebra容器保持字符串(self):
+        """降级去引语时 `algebra` 仍是字符串（不许被写成列表 —— 渲染层按字符串读）。"""
+        rev = {"sections": [{"heading": "h", "ts": "13:16",
+                             "algebra": "老师说最低点处 $MC=AC$。"}]}
+        out, extra, _ = self._run(rev)
+        self.assertIsInstance(out["sections"][0]["algebra"], str)
+        self.assertEqual(out["sections"][0]["algebra"], "最低点处 $MC=AC$。")
+        self.assertEqual(extra, [{"downgraded": 1}])
+
 
 class SymbolRetrievalF11(unittest.TestCase):
     """⭐ F11 ④：符号 claim（`MC=12`/`AC=28`/`q=4`/`AC(5)`）要按**精确 token** 取到材料。

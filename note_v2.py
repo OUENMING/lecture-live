@@ -182,11 +182,15 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
     {"var": "P", "op": "eval", "expr": "60*q + 500/q", "x": "q", "at": "q_star"}]
    · `op` 只许：**argmin / argmax**（区间内求极小/极大，必须真有内部极值点，落端点算失败）、
      **root**（区间内求零点）、**eval**（在 `at` 处代入）、**deriv**（在 `at` 处求数值导数）；
-   · `var` 是这一步算出的变量名；`expr` 用 `x` 当自变量，可引用前面步骤的 `var` 与 `givens`；
+   · `var` 是这一步算出的变量名；`expr` 里的**自变量名要和 `x` 字段一致**
+     （schema 例子里是 `q`；别把自变量写成别的字母）；可引用前面步骤的 `var` 与 `givens`；
    · argmin/argmax/root 要给 `range: [lo, hi]`；eval/deriv 要给 `at`（一个数、或前面算出的变量名）；
    · 题面里的符号常数写进 `givens`（如 {"K": 500}）；
    · **最后一步的 `var` 就是答案那个量（target）** —— 若答案是「把 q* 代回」，
      最后一步就该是 `eval`（var=P），不许停在 q*。
+   ⚠️ **例题只要要算出一个数**（求极值 / 代入求值 / 求根），`program` 就是**必填** ——
+     不给 program 的数值例题等于没验过，会被撤（宁缺）。给不出 program 就别做成数值例题
+     （改成概念例，或按片段写）。纯定性例题（没有数要算）留空即可。
 ④ `steps` / `answer`（**讲解**，最后写）：照程序算出来的值，从头讲到尾。
    ⚠️ 讲解/步骤/答案里的**每个数字**都要等于程序算出的某个值、或题面给定
      （机器会逐一复核；对不上就返修，返不回来整块撤）—— 不许自己心算一个没算过的数。

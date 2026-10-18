@@ -277,6 +277,14 @@ def pretty_tex(text: str) -> str:
 _FUNC_DEF = re.compile(
     r"(?P<name>[A-Za-z][A-Za-z0-9]{0,5})\s*\(\s*(?P<var>[A-Za-z])\s*\)\s*[=＝]\s*"
     r"(?P<expr>[^，,。；;、\n和与$\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+)")
+#: ⭐ F11 补：**裸定义**（没有 `(q)`）—— `$AC=2q+1+32/q$`。
+#: ⚠️ 不认它 → 变式单元"没有函数" → 回落整节取到例题的 AC → 拿例题的 AC 去核变式的
+#:    `AC(4)=17` 报假 mismatch（真跑 econ §3 实测：AC(4)=60.25 ≠ 17）。判据刻意窄：
+#:    名字是**2+ 个大写**（`AC`/`MC`/`AVC`，不是 `q`）、右边**含数字**（排掉 `MC=AC`）。
+_FUNC_DEF_BARE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<name>[A-Z][A-Z0-9]{1,5})\s*[=＝]\s*"
+    r"(?P<expr>[^，,。；;、\n和与$=＝\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]*"
+    r"\d[^，,。；;、\n和与$=＝\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]*)")
 #: 数字（带不带小数、正负号）。
 #: ⚠️ 后面紧跟 `√`/字母/`/`/数字/小数点的不算（`q=10√6` 里的 `10` 不是那个点，
 #:    实测：人眼里是 10√6≈24.5，机械读成 10 → 报出 `AC'(10)≈−2.5≠0` 的假修正）。
@@ -425,6 +433,12 @@ def functions(texts) -> dict:
             if re.search(r"[A-Za-z][A-Za-z0-9]{0,5}\s*\(\s*[A-Za-z]\s*\)\s*[=＝]", expr):
                 continue          # 表达式里还嵌着另一个定义 → 这是解析吞多了，别用（见 _FUNC_DEF 注释）
             raw.append((name, var, expr))
+        for m in _FUNC_DEF_BARE.finditer(str(text or "")):
+            # ⭐ F11：裸定义 `AC=2q+1+32/q`（右边含数字才收）。自变量名从 expr 里推。
+            name, expr = m.group("name"), m.group("expr").strip()
+            if not any(c.isdigit() for c in expr):
+                continue
+            raw.append((name, _free_letter(expr, {}) or "q", expr))
     ns: dict = {}
     defs: dict = {}
     todo = list(raw)
@@ -1243,6 +1257,14 @@ def _prog_root(f, lo: float, hi: float):
     return None
 
 
+def _free_letter(expr: str, ns: dict):
+    """`expr` 里出现、且不在 `ns`/函数表里的**单个字母** —— 模型常把自变量写成 `x`，
+    而 `x` 字段填的是 `q`。只有一个候选才敢用（多个=歧义，不猜）。**纯函数。**"""
+    ids = set(re.findall(r"(?<![A-Za-z0-9_])[A-Za-z](?![A-Za-z0-9_])", str(expr or "")))
+    cand = [c for c in ids if c not in ns]
+    return cand[0] if len(cand) == 1 else None
+
+
 def run_program(program, givens=None) -> tuple:
     """执行模型的 `program` → `(values, error)`。**纯数值，绝不执行任意代码。**
 
@@ -1274,6 +1296,12 @@ def run_program(program, givens=None) -> tuple:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", x):
             return dict(ns), f"步骤 {var}（{op}）的 x={x!r} 不是单个变量名"
         f = _compile(expr, x, ns)
+        if f is None:
+            alt = _free_letter(expr, ns)          # 自变量名不一致（expr 写 x、x 字段写 q）
+            if alt and alt != x:
+                f = _compile(expr, alt, ns)
+                if f is not None:
+                    x = alt
         if f is None:
             return dict(ns), f"步骤 {var}（{op}）的表达式解析不了：{expr}"
         if op in ("argmin", "argmax"):
@@ -1340,6 +1368,38 @@ def run_program(program, givens=None) -> tuple:
     return dict(ns), ""
 
 
+def _given_numbers(ex: dict, vals: dict) -> list:
+    """例题的「允许数字」= 程序值 ∪ 题面数字 ∪ **公式里的**数字（题面/步骤/答案的 `$…$`）∪ givens。
+
+    ⚠️ 步骤里出现的给定函数（`$AC(q)=q^{2}-12q+60$`）里的系数是**给定**，不是"野数字" ——
+       不收进来会误报（econ §8 实测）。**纯函数。**
+    """
+    out: list = [float(v) for v in (vals or {}).values()]
+
+    def _nums(t) -> None:
+        for n in re.findall(r"-?\d+(?:\.\d+)?", str(t or "")):
+            try:
+                v = float(n)
+            except ValueError:
+                continue
+            out.append(v)
+            out.append(abs(v))      # 代数里系数移项会变号：给定 -12 也要认出现 +12 的地方
+
+    _nums(ex.get("prompt"))
+    for st in (ex.get("steps") or []):
+        t = (f"{st.get('text', '')} {st.get('why', '')}" if isinstance(st, dict) else str(st))
+        for m in re.finditer(r"\$[^$]+\$", t):
+            _nums(m.group(0))
+    for m in re.finditer(r"\$[^$]+\$", str(ex.get("answer") or "")):
+        _nums(m.group(0))
+    for v in (ex.get("givens") or {}).values():
+        try:
+            out.append(float(v))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def _conclusion_nums(text: str) -> list:
     """一段文本里"像结论"的数字（去掉下标/上标、LaTeX 命令、单数字结构量）。**纯函数。**
 
@@ -1402,13 +1462,8 @@ def program_rows(section: dict) -> list:
     target = str(prog[-1].get("var") or "")
     tval = vals.get(target)
     rows: list = []
-    # 允许的数 = 程序算出的每个值 ∪ 题面给定（prompt 里的数字 + givens 的数值）
-    allowed = [float(v) for v in vals.values()]
-    for m in re.findall(r"-?\d+(?:\.\d+)?", prompt):
-        try:
-            allowed.append(float(m))
-        except ValueError:
-            pass
+    # 允许的数 = 程序算出的每个值 ∪ 题面给定（prompt 里的数字 + givens + 公式里的数字）
+    allowed = _given_numbers(ex, vals)
     steps = ex.get("steps") or []
     texts: list = []
     for st in steps:

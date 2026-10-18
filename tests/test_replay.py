@@ -461,7 +461,7 @@ class 标注文案(unittest.TestCase):
 
     def test_矛盾引语露出两组各自的说法(self):
         """两句引语只截开头会都停在 `each additional year of…`，看不出矛盾在哪。"""
-        self.assertEqual("…of experience adds 0.3 plus 0.4.",
+        self.assertEqual("…extra year of experience adds 0.3 plus 0.4.",
                          ng._raw_snip_at("And if you're male, every extra year of experience adds 0.3 plus 0.4.",
                                          "0.3 plus 0.4", 44))
         self.assertEqual("For each additional year of experience…",       # key 在前 n 字里 → 照旧
@@ -476,7 +476,7 @@ class 标注文案(unittest.TestCase):
 
     # ④ 引语词边界
     def test_引语按词边界截断(self):
-        self.assertEqual("For each additional year of experience…",
+        self.assertEqual("For each additional year of experience, the…",
                          ng._raw_snip("For each additional year of experience, "
                                       "the slope is beta three plus beta four", 44))
         # 拉丁词中间不许切开：截断后的**最后一个词必须是完整的词**

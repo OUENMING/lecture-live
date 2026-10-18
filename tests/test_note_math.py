@@ -604,5 +604,35 @@ class TestBareFrac(unittest.TestCase):
         self.assertEqual(nm.auto_tex(s), s)
 
 
+class TestLimitExtremum(unittest.TestCase):
+    """F8-c（作者从 econ 变式 W3 抓到）：`q→∞` 的趋向值**不是**最值 —— 必须拦。
+
+    文本里是 TeX（`$q\\to\\infty$`）也要认（F7 的原句就是 TeX 写法）。
+    """
+
+    W3 = "$AC(q)=100+\\frac{400}{q}$，当$q\\to\\infty$时$AC\\to100$，最低点为100。"
+
+    def _rows(self, text):
+        rev = {"sections": [{"heading": "H", "ts": "13:16",
+                             "variants": [{"q": "求停产价格。", "a": text}]}]}
+        return [r for r in nm.check_review(rev)
+                if r.get("status") == "mismatch"
+                and "极限" in str(r.get("recomputed") or "")]
+
+    def test_TeX写法的最值断言拦住(self):
+        self.assertTrue(self._rows(self.W3))
+
+    def test_补全题_停产价格靠极限也要拦(self):
+        t = ("$AC(q)=80+\\frac{200}{q}$，当$q\\to\\infty$时$AC\\to80$，"
+             "故停产价格为80。")
+        self.assertTrue(self._rows(t))
+
+    def test_说清楚取不到就不误伤(self):
+        """正话：`取不到` —— 明说没有最低点的是对的，不许拦。"""
+        t = ("$AC(q)=100+\\frac{400}{q}$，当$q\\to\\infty$时$AC\\to100$，"
+             "但这个值在有限产量下取不到，所以该函数没有最低点。")
+        self.assertFalse(self._rows(t))
+
+
 if __name__ == "__main__":
     unittest.main()

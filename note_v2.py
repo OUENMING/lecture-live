@@ -88,15 +88,20 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
 ⚠️ **有把握的语气**：普通陈述**不许**用"可能 / 大概 / 似乎 / 也许 / 应该是 / 大概率"对冲；
 只有**真的核不出的数字或原话**才写一次「⚠ 课上没讲清：…」（一节最多一处）。
 其余情况就笃定地写 —— 你懂这个内容。
-⚠️ **能举例子就举例子**：每个概念配一个**具体例子**（课上的题/数字优先）。
-课上真没讲例子，就自己举一个**简单可信**的，以「举个例子：」开头，数字必须算得对
-（机械核会去算）。讲同一个道理的重复例子**只留一个**。
-　✗ 反面例（只把定义换个说法，不算例子）：「若某产量下 AC 最低为 2.89，则停产价格就是 2.89」
-　✓ 要这样：用课上的函数**动手走一步** —— 求 AC'、令它为 0 解出产量、代回 AC 得值。
-⚠️ **卡点**：老师哪一步是"跳着讲"的（默认你会、但多数同学卡住的那一步），就在讲解的
-行文里用一两句大白话补出来，例如「这里老师直接从 AC 跳到了 AC'，中间用的是商的求导
-法则：…」。**只在真有这种跳步时写**，不许当固定栏目；成块的前置知识仍走 `prereq`
-（两边不许说同一件事）。
+⚠️ **能举例子就举例子**：每个概念配一个**具体例子**；**题面数字必须逐一见于转录/课件**
+（"课上说的"四个字只配得上转录/课件里真有的数字）。
+　✓ 课上的题/数字齐全 → 直接用课上的（标 🎙）动手走一步：求导、解方程、代回。
+　✓ 转录只给了**片段**（如"60 times this plus 500 divided by this point"、只听到"2.89"）→
+　　先写一句「课上这道题的函数没录全」，再给**一个自编例**：以「举个例子（自编）：」开头，
+　　数字干净、从头算到尾（机械核会逐条重算；例题块自编时 `example.title` 写「自编例」）。
+　✗ 反面例（只把定义换个说法，不算例子）："若某产量下 AC 最低为 2.89，则停产价格就是 2.89"
+　✗ 反面例（把拼出来的函数说成课上的）："课上已知 $AC(q)=(60q+500)/q$…"——课上没说过这个函数。
+⚠️ **极值题必须有真的最值点**：求导=0 且二阶条件成立；**不许**用 q→∞ 之类的极限充当最小值
+（无穷远处的趋向值不是最小值）。没有最低点就明说"没有最低点"。
+讲同一个道理的重复例子**只留一个**。
+⚠️ **卡点**：老师哪一步是"跳着讲"的（默认你会、多数同学卡住的那一步），就在讲解的
+行文里用一两句大白话把它补出来。**补什么由那一步本身决定，不要套用固定句式**；
+只在真有跳步时写，不许当固定栏目；成块的前置知识仍走 `prereq`（两边不许说同一件事）。
 ⚠️ **开头句说"它是什么 / 为什么在意它"**，不许写"期末常考""考试要考""常考题型"这类应考话。
 每节按这条线走（不用写小标题，把内容排成这个顺序就行）：
 ① 它是什么、为什么会在意它（大白话）→ ② 一个带真实数字的例子 → ③ 正式的说法/公式（LaTeX）
@@ -146,10 +151,11 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
   `example.title` 写「📖 2025-12 期末卷 Exercise 5（🎙 13:29）」。只标 🎙 会让读者以为
   函数是转录里听来的（上课常常只念了片段）—— 判据会把这种例子挂进「未核对」。
   ⚠️ 题面里出现的**每个参数**都要能从出处推出来；答案里的数字都要能由题面算出。
-  **严禁**为了把例题写"完整"而自己设参数、编一个函数、或在题面里写「假设」。
+  **严禁**把自编数字说成课上的（"课上已知…"）—— 自编就写「自编例」（见 §二）；
+  不许在题面里写「假设」来圆场。
   课上只给了片段（如「the average cost at 2.89」「60 times this plus 500 divided by
-  this point」）→ 就**只写片段**，并明确说「原题不在本课材料里 / 只听到片段」，
-  在 `checks` 里标 `unchecked`。**不要反推函数。**
+  this point」）→ 明确说「原题不在本课材料里 / 课上函数没录全」，在 `checks` 里标
+  `unchecked`；**不要反推函数**；要给例子就按 §二 给一个**自编例**（标「自编例」）。
 - 凡「在 q*=… 处取最小/最大」「代入得 v」的结论：写出是**哪个函数**、并把导数检验
   写出来（`AC'=0` 且 `AC''>0`）。没有函数就不许下极值结论。
 - **停产价格（shutting down price）的口径**：本课官方材料（📖 2025-12 期末卷 Exercise 7
@@ -585,6 +591,157 @@ def overview(review_data: dict, *, chat, chat_meta=None,
     if sc:
         out["self_check"] = sc
     return out
+
+
+# ---------------------------------------------------------------- 例题返修（F8-b/c）
+REPAIR_MAX_TOKENS = 3000
+REPAIR_SYS = """你在**返修**一节课堂笔记里"算错了的例题块"。机械核发现了这些问题，必须修对，
+或者按规矩撤掉/降级 —— 绝不许把错数字留在题里。
+
+规矩：
+1) **题面数字必须逐一来自转录或课件**。转录只给了片段（比如只有"60 times this plus 500
+   divided by this point"和"2.89"这种半截话）→ 就写一句「课上这道题的函数没录全」，
+   不要再把它包装成"课上已知 AC=…"。
+2) 这种情况下给**一个自编例**：以「举个例子（自编）：」开头（例题块同理，`example.title`
+   写「自编例」），挑干净的数字，从头算到尾（机械核会逐条重算）。
+3) 变式/补全题同理：数字可以自定，但答案必须自洽；**极值不能靠 q→∞ 之类的极限论证**
+   （无穷远处的趋向值不是最小值）——要么真有最值点（求导=0 + 二阶条件），要么明说
+   该函数没有最低点。
+4) 讲解（prose）里提到这些数字的句子**一起改**，别让正文和题块打架。
+5) 不写"我算错了/我改正了"这类话；直接给改好的内容。
+
+输入：这一节现在的文本（JSON）+ 机械核发现的错行。
+严格输出 JSON：{"prose": ["…"], "example": {…}|null, "variants": [...], "faded": {…}|null,
+ "note": "一行说明改了什么"}"""
+
+
+def _transcript_window(entries: list | None, sec: dict, *, limit: int = 2800) -> str:
+    """这一节时间窗里转录真出现过的原话（返修时对照"哪些数字真是课上说的"）。"""
+    if not entries:
+        return ""
+    ts = str(sec.get("ts") or "")
+    parts = ts.split("–")
+    t0 = _ts_seconds(parts[0])
+    t1 = _ts_seconds(parts[1]) if len(parts) > 1 else None
+    if t0 is None:
+        return ""
+    if t1 is None or t1 <= t0:
+        t1 = t0 + 15 * 60
+    lines: list = []
+    for e in entries:
+        t = _ts_seconds(e.get("ts"))
+        if t is None or not (t0 <= t < t1):
+            continue
+        en = _one_line(e.get("en") or e.get("asr"))
+        if en:
+            lines.append(f"[{e.get('ts')}] {en}")
+        if sum(len(x) for x in lines) > limit:
+            break
+    if not lines:
+        return ""
+    return ("\n\n这一节转录里真出现过的原话（数字对照用；没有的数字就不是课上说的）：\n"
+            + "\n".join(lines)[:limit])
+
+
+def repair_exercises(review: dict, *, chat, entries: list | None = None,
+                     flags: list | None = None,
+                     max_tokens: int = REPAIR_MAX_TOKENS) -> tuple:
+    """题块被机械核判错 → **每节一次**返修；复检仍错 → 撤掉题块（F8-b/c，作者点名）。
+
+    触发（确定性）：对每一节单跑 `note_math.check_review`，`mismatch` 行且
+    `unit_of_claim` 落在 `MODEL_AUTHORED`（example / variants / faded）；再加上
+    `flags`（`verify_numbers` 在降级**之前**收下的题块 mismatch 行 —— 机械核碰到
+    LaTeX 函数会瞎，F7 实测 `AC(2.89)≈2.89` 只有模型核抓到）。
+    返修后复检：题块仍有 mismatch → `example` / `variants` / `faded` 整组撤（宁缺）。
+    台账（`checks`）同步换掉被返修小节的旧行、补进复检行。
+    """
+    out = copy.deepcopy(review)
+    secs = out.get("sections") or []
+    if not secs:
+        return out, [], []
+    snaps: list = []
+    calls = n_drop = 0
+    for s in secs:
+        if not isinstance(s, dict):
+            continue
+        rows = note_math.check_review({"sections": [s]})
+        bad = [r for r in rows if r.get("status") == "mismatch"
+               and note_math.unit_of_claim(s, str(r.get("claim") or ""))
+               in note_math.MODEL_AUTHORED]
+        seen_bad = {note_math._norm_claim(str(r.get("claim") or "")) for r in bad}
+        for r in (flags or []):
+            claim = str(r.get("claim") or "")
+            key = note_math._norm_claim(claim)
+            if not key or key in seen_bad:
+                continue
+            if note_math.unit_of_claim(s, claim) in note_math.MODEL_AUTHORED:
+                bad.append(dict(r))
+                seen_bad.add(key)
+        if not bad:
+            continue
+        snap = copy.deepcopy(s)
+        payload = {k: s.get(k) for k in ("heading", "q", "prose", "example",
+                                         "variants", "faded") if s.get(k)}
+        user = ("机械核在这节的**题**上发现这些算错了：\n"
+                + "\n".join(f"- {str(r.get('claim') or '')[:140]} → 机器算出来："
+                            f"{r.get('recomputed') or '?'}" for r in bad[:6])
+                + "\n\n这一节现在的文本（JSON）：\n"
+                + json.dumps(payload, ensure_ascii=False)[:4000]
+                + _transcript_window(entries, s)
+                + "\n\n按规矩返修这一节；严格输出 JSON"
+                  "（prose / example / variants / faded / note）。")
+        try:
+            got = chat(REPAIR_SYS, user, max_tokens)
+        except Exception:                                      # noqa: BLE001
+            continue
+        calls += 1
+        if isinstance(got, dict):
+            lines_ = _lines(got.get("prose"))
+            if lines_:
+                s["prose"] = lines_
+            for key in ("example", "faded"):
+                if key in got:
+                    val = got[key]
+                    if isinstance(val, dict) and any(val.get(k) for k in
+                                                     ("prompt", "steps", "q", "a", "blanks")):
+                        s[key] = val
+                    else:                                      # null/空 → 撤（宁缺）
+                        s.pop(key, None)
+            if "variants" in got:
+                vs = [v for v in (got.get("variants") or []) if isinstance(v, dict)]
+                if vs:
+                    s["variants"] = vs
+                else:
+                    s.pop("variants", None)
+        # 复检：题块还有 mismatch → 整组撤（文件里只留"讲课时引的原话"那条 ⚠ 路）
+        again = [r for r in note_math.check_review({"sections": [s]})
+                 if r.get("status") == "mismatch"
+                 and note_math.unit_of_claim(s, str(r.get("claim") or ""))
+                 in note_math.MODEL_AUTHORED]
+        if again:
+            for key in ("example", "variants", "faded"):
+                s.pop(key, None)
+            n_drop += 1
+        snaps.append((snap, s))
+    if snaps:
+        keep = []
+        for c in out.get("checks") or []:
+            if not isinstance(c, dict):
+                continue
+            claim = str(c.get("claim") or "")
+            if any(note_math.unit_of_claim(snap, claim) for snap, _ in snaps):
+                continue                                           # 旧文本的行，过期
+            keep.append(c)
+        fresh: list = []
+        for _, s in snaps:
+            fresh += note_math.check_review({"sections": [s]})
+        out["checks"] = note_math.merge_checks(keep, cap_model_rows(fresh, out))
+    warns: list = []
+    if calls:
+        warns.append(f"例题返修：{calls} 节各做了 1 次返修调用")
+    if n_drop:
+        warns.append(f"例题返修：{n_drop} 节的题块复检仍算错 → 已撤（宁缺）")
+    return out, [], warns
 
 
 def transcript_lines(entries: list) -> list:
@@ -1194,17 +1351,32 @@ def cap_model_rows(rows: list, review_data: dict, *, llm: bool = False) -> list:
 
 
 def verify_numbers(review_data: dict, *, chat, materials=None,
-                   transcript: str = "", max_tokens: int = VERIFY_MAX_TOKENS) -> list:
+                   transcript: str = "", max_tokens: int = VERIFY_MAX_TOKENS,
+                   exercise_flags: list | None = None) -> list:
     """数字/公式第三道核（1 次调用）→ 规范化后的 `checks` 列表（不是 dict）。
 
     ⚠️ `mismatch` **不改正文**：它进「修正说明」清单由渲染层显示 ——
        静默改数字是这份笔记最不能做的事（读者用它对答案）。
     ⭐ 第六轮：`mismatch` 只留给**讲解里那些来自 🎙 转录 / 📖 课件的断言**；
        例题解答 / 变式 / 补全题 / 自测是模型自己出的题，最多标未核对。
+    ⭐ F8-b：`exercise_flags`（调用方给的 list）会把**降级之前**题块里的 mismatch 行
+       收进去 —— 例题返修（`repair_exercises`）靠它，`checks` 里的降级口径不变。
     """
     # ⭐ 机械核**先跑**（2026-10-17 验收：模型对着自己编的函数"重算"当然自洽 ——
     #    自编 `TC=60q+500` + 凑出来的驻点 2.89 就这样溜过了三道核）。
     det = note_math.check_review(review_data, transcript=transcript)
+
+    def _collect(rows_: list) -> None:
+        if exercise_flags is None:
+            return
+        for r in rows_ or []:
+            if not isinstance(r, dict) or str(r.get("status")) != "mismatch":
+                continue
+            if _claim_origin(review_data, str(r.get("claim") or "")) in \
+                    set(note_math.MODEL_AUTHORED):
+                exercise_flags.append(dict(r))
+
+    _collect(det)
     claims = numeric_claims(review_data)
     if not claims:
         return _finish(det, _clean_checks(review_data.get("checks")), review_data)
@@ -1240,6 +1412,7 @@ def verify_numbers(review_data: dict, *, chat, materials=None,
                   "status": st if st in ("ok", "mismatch", "unchecked") else "unchecked",
                   "recomputed": _one_line(it.get("recomputed"))[:80]}
     out = [got[i] for i in sorted(got)]
+    _collect(out)                                              # 模型核的降级前标记（F8-b）
     # 模型自己写的 checks 也留着（它们带着别的依据）；同 claim 以核过的为准。
     seen = {c["claim"].strip().lower() for c in out}
     for row in _clean_checks(review_data.get("checks")):
@@ -1353,6 +1526,31 @@ def canon_en(zh: str, canon) -> str:
     return best_en
 
 
+#: 标题里已经写好的「中文（English）」——只统一英文，不新增括注（F8-e）。
+_PAREN_EN = re.compile(r"（([A-Za-z][^（）]{0,48})）")
+
+
+def canon_fix_parens(text: str, canon_map: dict) -> str:
+    """把标题里 `中文（English）` 的英文换成术语表的标准拼写（没有标准拼写的原样）。"""
+    s = str(text or "")
+    if not s or not canon_map:
+        return s
+
+    def repl(m) -> str:
+        head = s[:m.start()]
+        zh = ""
+        for k in range(len(head) - 1, -1, -1):
+            ch = head[k]
+            if "\u4e00" <= ch <= "\u9fff" or ch.isalnum() or ch in "·-_ ":
+                zh = ch + zh
+            else:
+                break
+        en_c = canon_en(zh.strip(), canon_map)
+        return f"（{en_c}）" if en_c else m.group(0)
+
+    return _PAREN_EN.sub(repl, s)
+
+
 def announce_terms_in_review(review: dict, *, canon=None) -> dict:
     """渲染前的一次性标注（返回**副本**）。
 
@@ -1371,6 +1569,16 @@ def announce_terms_in_review(review: dict, *, canon=None) -> dict:
             continue
         if zh and en:
             canon_map.setdefault(zh, en)
+    # ⭐ F8-e：标题里已经写着的「中文（English）」也统一成术语表拼写（没有标准拼写的照旧）。
+    for path, v in list(_walk_strings(out)):
+        if not path or _field_name(path) != "heading" or not isinstance(v, str) or not v:
+            continue
+        new = canon_fix_parens(v, canon_map)
+        if new != v:
+            obj = out
+            for k in path[:-1]:
+                obj = obj[k]
+            obj[path[-1]] = new
     terms = [(zh, (canon_en(zh, canon_map) or en)) for zh, en in collect_terms(out)]
     if not terms:
         return out

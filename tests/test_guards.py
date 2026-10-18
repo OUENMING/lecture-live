@@ -537,6 +537,11 @@ class Wiring(unittest.TestCase):
         # F7（作者点名）：卡点 / 题型一句话 / 反引号禁令 / 三档自测
         for key in ("卡点", "题型一句话", "反引号包公式", "tier"):
             self.assertIn(key, note_v2.REVIEW_SYS, f"prompt 缺 F7 规矩：{key}")
+        # F8（作者点名）：自编例要挂牌 / 课上没录全就说明 / 极限不是最值；
+        # 卡点不再给模板句（demo 会泄漏成固定句式）
+        for key in ("举个例子（自编）", "没录全", "极值题必须有真的最值点"):
+            self.assertIn(key, note_v2.REVIEW_SYS, f"prompt 缺 F8 规矩：{key}")
+        self.assertNotIn("这里老师直接从", note_v2.REVIEW_SYS, "卡点 demo 句式不许留")
 
 
 class AnnotateMismatch(unittest.TestCase):

@@ -303,5 +303,52 @@ class NextClassLoads(unittest.TestCase):
             self.assertNotIn("shutdown price", payload)
 
 
+class 泛词过滤_F8f(unittest.TestCase):
+    """F8-f（作者点名）：本课术语表里"任何课都出现"的**单单词泛词**要过滤 ——
+    除非术语库里真有它（规则原文：`unless the glossary has them`）。"""
+
+    def test_泛词丢掉_库里有就留(self):
+        d = tempfile.TemporaryDirectory()
+        try:
+            base = pathlib.Path(d.name)
+            (base / "glossary").mkdir(parents=True, exist_ok=True)
+            (base / "glossary.txt").write_text("# 公共术语表\n", encoding="utf-8")
+            # 本课词表里只放 derivative（模拟真库：derivative 在，别的不在）
+            (base / "glossary" / "TESTX.txt").write_text("derivative\n", encoding="utf-8")
+            import obsidian_writer as ow
+            w = ow.ObsidianWriter(None, "TESTX", mode="no",
+                                  glossary_path=str(base / "glossary.txt"))
+            review = {"sections": [{"ts": "13:16", "terms": [
+                {"en": "substitute", "zh": "替代品"},
+                {"en": "minimum", "zh": "最小值"},
+                {"en": "derivative", "zh": "导数"},
+                {"en": "marginal cost", "zh": "边际成本"},
+            ]}]}
+            words = {h.term.lower() for h in w._review_term_hits(review, [])}
+            self.assertNotIn("substitute", words)
+            self.assertNotIn("minimum", words)
+            self.assertIn("derivative", words, "术语库（glossary/TESTX.txt）里有就必须留")
+            self.assertIn("marginal cost", words, "多词短语永远不算泛词")
+        finally:
+            d.cleanup()
+
+    def test_同一中文只留一行_库行优先(self):
+        """F8-e（作者点名）：`shutting down price` 与 `shutdown price` 同为"停产价" → 只留一行。"""
+        sel = nt.Selection(hits=[nt.Hit(term="shutdown price", gloss="停产价", ts="13:25")],
+                           dropped=[])
+        extra = [nt.Hit(term="shutting down price", gloss="停产价", ts="13:17")]
+        text = " / ".join(nt.render_table(sel, extra=extra))
+        self.assertIn("shutdown price", text)
+        self.assertNotIn("shutting down price", text)
+
+    def test_占位gloss不参与合并(self):
+        """没有中文注的条目（占位 gloss）不许被并成一行 —— 那会把一堆词吞掉。"""
+        sel = nt.Selection(hits=[nt.Hit(term="alpha", gloss="（本课术语）"),
+                                 nt.Hit(term="beta", gloss="（本课术语）")], dropped=[])
+        text = " / ".join(nt.render_table(sel))
+        self.assertIn("alpha", text)
+        self.assertIn("beta", text)
+
+
 if __name__ == "__main__":
     unittest.main()

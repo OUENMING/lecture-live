@@ -638,9 +638,39 @@ _DIV = re.compile(r"(?P<a>-?\d+(?:\.\d+)?)\s*(?:除以|÷|/)\s*(?P<b>-?\d+(?:\.\
                   r"(?P<c>-?\d+(?:\.\d+)?)")
 
 
+#: 极限当最值（F8-c，作者从 econ W3 抓到）：`当 q→∞ 时 AC→100，最低点为 100` 必须拦 ——
+#: 无穷远处的趋向值**不是**最值点（有限产量处都到不了它），学生照抄就会答错整类题。
+_LIMIT_MARK = re.compile(r"→\s*∞|趋于\s*无穷|趋向\s*无穷|趋于\s*∞|取极限|无限趋近|无限接近")
+_LIMIT_EXT = re.compile(
+    r"(最低|最大|最小|极小|极大)[值点]{0,4}\s*(?:为|是|＝|=)\s*\$?-?\d"
+    r"|(?:停产价|停业价|关门价)[^，。；;]{0,6}(?:为|是|＝|=)\s*\$?-?\d")
+
+
+def _limit_extremum_row(t: str) -> dict | None:
+    """同一句里同时出现「→∞ / 取极限」与「某个数就是最值/停产价」→ 一条 mismatch 行。
+
+    ⚠️ 文本里是 TeX（`$q\\to\\infty$`）就先把 `\\to`/`\\infty` 归一成 `→`/`∞` 再判 ——
+       实测 econ W3 的原文正是 TeX 写法，只按 `→∞` 认会整条漏掉。
+    """
+    s = str(t or "")
+    if "\\to" in s or "\\infty" in s:                           # TeX 写法归一化
+        s = (s.replace("\\rightarrow", "→").replace("\\to", "→")
+             .replace("\\infty", "∞"))
+    for sent in re.split(r"[。；;！？\n]", s):
+        if _LIMIT_MARK.search(sent) and _LIMIT_EXT.search(sent):
+            return {"claim": str(t), "status": "mismatch",
+                    "recomputed": "最值不能由 q→∞ 的极限得到",
+                    "how": "极值题必须真的有最值点（求导=0 且二阶条件）；"
+                           "q→∞ 的趋向值不是最小值"}
+    return None
+
+
 def _rows_for_text(t: str, fdefs: dict) -> list:
     """一条文本里的极值/代入/二阶导/除法断言 → 核对行。"""
     rows: list = []
+    lim = _limit_extremum_row(t)
+    if lim is not None:
+        rows.append(lim)
     for m in _DIV.finditer(t):
         try:
             a, b, c = float(m.group("a")), float(m.group("b")), float(m.group("c"))

@@ -750,6 +750,35 @@ class ObsidianWriter:
         return note_terms.select(entries, match=match, type_of=type_of,
                                  verify=self._term_verified)
 
+    def _in_term_store(self, term: str) -> bool:
+        """术语库里真有没有这个词（F8-f 的例外："unless the glossary has them"）。
+
+        两处查：运行时词表（策展 JSON）+ 本课术语表（glossary/<课号>.txt）。
+        """
+        try:
+            notes = self._term_index()
+            if notes is not None and notes.entry_of(term)[0]:
+                return True
+        except Exception:                                       # noqa: BLE001
+            pass
+        try:
+            from translator import course_term_list
+            low = term.strip().lower()
+            return any(t.strip().lower() == low for t in
+                       (course_term_list(self._glossary_path, self._course, limit=None) or []))
+        except Exception:                                       # noqa: BLE001
+            return False
+
+    def _repair_exercises(self, review: dict, entries: list) -> tuple:
+        """⭐ F8-b/c：机械核判错的题块——每节一次返修；复检仍错就撤（宁缺）。"""
+        import note_v2
+        got, extra, warns = note_v2.repair_exercises(
+            review, chat=self._chat, entries=entries,
+            flags=getattr(self, "_exercise_flags", []) or [])
+        # 返修换了题目 → 修正台账（修正说明）跟着现场重建（旧行已由 repair 清掉）
+        self._corr_extra = note_v2.corrections_from_mismatch(got.get("checks") or [])
+        return got, extra, warns
+
     def _term_index(self):
         """运行时查词表（`build_notes.TermNotes`）。构造一次、记忆化。
 
@@ -1172,12 +1201,16 @@ class ObsidianWriter:
             if cv["n_covered"] < cv["n_points"]:
                 line += f"（缺 {cv['n_points'] - cv['n_covered']} 条，见 §9）"
             print("   " + line, flush=True)
+        # ⭐ F8-b：`flags` 在 try 外定义 —— 收的是**降级之前**题块里的 mismatch 行，
+        #    例题返修要靠它（核对本身失败也要把已经收下的交给返修）。
+        flags: list = []
         try:
             checks = note_v2.verify_numbers(
                 review, chat=self._chat, materials=self._materials,
                 # ⚠️ Jun「🎙 例子要能在转录里对上数字」那条判据要用它（第四轮）
                 transcript="\n".join(
-                    str(e.get("en") or e.get("asr") or "") for e in entries))
+                    str(e.get("en") or e.get("asr") or "") for e in entries),
+                exercise_flags=flags)
             if checks:
                 review["checks"] = checks
                 self._corr_extra = note_v2.corrections_from_mismatch(checks)
@@ -1187,11 +1220,13 @@ class ObsidianWriter:
                       f"{len(un)} 项未核对）", flush=True)
         except Exception as e:                                # noqa: BLE001
             print(f"⚠ 数字核对失败({str(e)[:60]}); 笔记照常生成")
+        self._exercise_flags = flags
         # ⭐ 正文纪律（作者第 2、3 条）：删猜测句 / 引号里的英文必须逐字。
         # ⭐ 版式 A（2026-10-18）：清理链里插一步「五分钟串讲」—— 放在讲解已经清过一遍
         #    之后，它自己再被后面的第二遍 `scrub` 与 `quote_check` 覆盖（新写的散文
         #    必须走同一条纪律，不能因为是"总结层"就免检）。
-        for fn, label in ((lambda r: note_ledger.reconcile(r),
+        for fn, label in ((lambda r: self._repair_exercises(r, entries), "例题返修"),
+                          (lambda r: note_ledger.reconcile(r),
                            "更正账本核对"),
                           (lambda r: note_guards.scrub(r), "猜测句清理"),
                           (lambda r: note_guards.dedupe_sentences(r), "重复句去重"),
@@ -1489,11 +1524,20 @@ class ObsidianWriter:
                         for t in (s.get("terms") or [])]
         tagged += [(t, "") for t in (review.get("terms") or [])]
         seen: set = set()
+        n_filtered = 0
         for t, sec_ts in tagged:
             en, zh = _one_line(t.get("en")), _one_line(t.get("zh"))
             if not en or en.lower() in seen:
                 continue
             seen.add(en.lower())
+            # ⭐ F8-f（作者点名）：复习层抽出的**泛词**（substitute / marginal / minimum…）也过
+            #    同一份常识词判据（`note_terms.drop_reason`，与术语库同一条口径）+ 单单词
+            #    泛词表（`note_terms.too_common`）—— 原来这条路绕过了 select()，泛词全溜进表里。
+            #    **术语库真有这个词就留**（规则原文："unless the glossary has them"）。
+            why = note_terms.drop_reason(en, type_="", source=note_terms.SRC_LECTURE)
+            if (why or note_terms.too_common(en)) and not self._in_term_store(en):
+                n_filtered += 1
+                continue
             ts = ""
             if compile_term is not None:
                 try:
@@ -1511,6 +1555,9 @@ class ObsidianWriter:
                 ts = sec_ts
             out.append(note_terms.Hit(term=en, gloss=zh or "（本课术语）", ts=ts,
                                       source=note_terms.SRC_LECTURE))
+        if n_filtered:
+            print(f"   ⚠ 术语表过滤：{n_filtered} 条泛词/常识词"
+                  f"（术语库里没有的才丢，F8-f）", flush=True)
         return out
 
     def _atomic_write(self, path: Path, text: str) -> None:

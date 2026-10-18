@@ -1301,7 +1301,7 @@ def note_page(d) -> str:
     closing = ('<section class="card" id="sum3"><h3>ⓑ 合上书，写 3 句总结</h3>'
                '<label class="muted" for="sum3box">写完再点「对照速览」，看漏了什么</label>'
                '<p><textarea class="sum" id="sum3box" '
-               'placeholder="1. 这节课先说……&#10;2. 关键的一步是……&#10;3. 考试要会……"></textarea></p>'
+               'placeholder="1. 这节课先说……&#10;2. 关键的一步是……&#10;3. 我还没弄懂的是……"></textarea></p>'
                '<p><button class="btn" type="button" data-cmp="#overview">对照速览</button></p>'
                "</section>")
     overview = _overview_html(review, sections, list(d.review_dates or []))

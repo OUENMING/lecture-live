@@ -6,6 +6,7 @@
      附录 B 的转录**不精修**、中文占比达标（作者验收表里那条）；
    · `note_html` 的**六个组件**在页面上真的存在（含"没有 KaTeX 也不白屏"）。
 """
+import json
 import os
 import re
 import sys
@@ -267,6 +268,95 @@ class VerifyNumbers(unittest.TestCase):
         got = nv.verify_numbers({"sections": [SECTION]},
                                 chat=lambda s, u, m: {"items": [{"i": 99, "status": "ok"}]})
         self.assertEqual([c for c in got if c.get("claim")], [])
+
+
+class ExerciseRepair(unittest.TestCase):
+    """F8-b（作者第七轮抓到的回归）：econ 第一节把**拼出来的函数**说成课上的，
+    还端着一个 ⚠ 出货。规矩：题块被核出错 → **每节一次**返修（错行喂回去）；
+    复检仍错 → 撤掉题块（宁缺）；⚠ 只留给讲课时引的原话数字。
+
+    fixture = `tests/f8_econ_unit1.json`：runs/f7 econ 第一节的**原样 JSON**（作者点名）。
+    它身上的病：① 变式/补全用 `q→∞` 的极限充当最值（作者判 fail）；
+    ② 例题里 `AC(2.89)≈2.89` 只有模型核抓得到（`\\frac` 函数机械核算不了）——
+    所以触发 = 机械核 ∪ 降级**之前**的模型核（`flags`）。
+    """
+
+    def _unit(self) -> dict:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "f8_econ_unit1.json")
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_触发一次返修_正文与题块一起换(self):
+        calls = []
+
+        def chat(s, u, m):
+            calls.append(u)
+            return {"prose": ["课上这道题的函数没录全。举个例子（自编）：$AC(q)=q+\\frac{9}{q}$，"
+                              "$AC'(q)=1-\\frac{9}{q^2}=0$ 得 $q=3$，$AC(3)=3+3=6$。"],
+                    "example": {"title": "自编例",
+                                "prompt": "求 $AC(q)=q+\\frac{9}{q}$ 的最小值。",
+                                "steps": [{"text": "$AC'(q)=1-\\frac{9}{q^2}=0$", "why": "驻点"},
+                                          {"text": "$q=3$", "why": "正根"},
+                                          {"text": "$AC(3)=3+3=6$", "why": "代回"}],
+                                "answer": "6"},
+                    "variants": [{"q": "求 $AC(q)=q+\\frac{16}{q}$ 的最小值。",
+                                  "steps": [],
+                                  "a": "$AC'(q)=1-\\frac{16}{q^2}=0$，$q=4$，$AC(4)=8$。"}],
+                    "faded": None, "note": "换自编例"}
+        got, _, warns = nv.repair_exercises({"sections": [self._unit()], "checks": []},
+                                            chat=chat, flags=[])
+        self.assertEqual(len(calls), 1, "一节只许返修一次")
+        s = got["sections"][0]
+        self.assertIn("举个例子（自编）", s["prose"][0])
+        self.assertEqual(s["example"]["title"], "自编例")
+        self.assertNotIn("faded", s, "faded=null 就是撤掉")
+        self.assertTrue(any("返修调用" in w for w in warns), warns)
+        # 台账：换掉的题块，旧 claim 不许留在核定表里（过期行 = 假修正）
+        claims = [str(c.get("claim") or "") for c in got["checks"]]
+        self.assertFalse(any("最低点为100" in c for c in claims), claims)
+        self.assertFalse(any("计算$AC(2.89)" in c for c in claims), claims)
+
+    def test_复检仍错就撤题块(self):
+        unit = self._unit()
+
+        def chat(s, u, m):
+            return {"prose": ["还是那句：$AC(2.89)\\approx2.89$。"],
+                    "example": unit["example"], "variants": unit["variants"], "note": "没改"}
+        got, _, warns = nv.repair_exercises({"sections": [unit], "checks": []}, chat=chat)
+        s = got["sections"][0]
+        for k in ("example", "variants", "faded"):
+            self.assertNotIn(k, s, f"{k} 复检仍错必须撤（宁缺）")
+        self.assertTrue(any("已撤" in w for w in warns), warns)
+
+    def test_模型核的旗子也触发(self):
+        """机械核碰到 `\\frac` 函数会瞎（F7 实测）——降级前的模型核行必须能叫醒返修。"""
+        unit = {"heading": "[13:16] 停产价格", "ts": "13:16", "q": "题？",
+                "prose": ["随便一句。"],
+                "example": {"title": "🎙 13:16", "prompt": "求停产价格。",
+                            "steps": [{"text": "$AC(2.89)\\approx2.89$。", "why": ""}],
+                            "answer": "2.89"}}
+        flags = [{"claim": "$AC(2.89)\\approx2.89$。", "status": "mismatch",
+                  "how": "该值约233，非2.89", "recomputed": "$AC(2.89)\\approx233$"}]
+        calls = []
+
+        def chat(s, u, m):
+            calls.append(u)
+            return {"example": None, "prose": ["课上的函数没录全，例题先撤了。"], "note": "撤"}
+        got, _, _ = nv.repair_exercises({"sections": [unit], "checks": []},
+                                        chat=chat, flags=flags)
+        self.assertEqual(len(calls), 1, "模型核标了错却没人叫返修")
+        self.assertNotIn("example", got["sections"][0])
+
+    def test_没问题不发调用(self):
+        clean = {"heading": "[13:40] 干干净净", "ts": "13:40", "q": "这节问什么？",
+                 "prose": ["这一节没有数字断言。"],
+                 "example": {"title": "📖 无", "prompt": "看看就好", "steps": [], "answer": "好"}}
+
+        def chat(*a):
+            raise AssertionError("干净的一节不该发返修调用")
+        got, _, warns = nv.repair_exercises({"sections": [clean]}, chat=chat)
+        self.assertEqual(got["sections"][0], clean)
+        self.assertEqual(warns, [])
 
 
 class Schedule(unittest.TestCase):
@@ -570,6 +660,23 @@ class AnnounceTerms(unittest.TestCase):
         self.assertIn("停产价格（shutting down price）", got2["sections"][0]["prose"][0],
                       "没有标准拼写时照旧用模型写法")
 
+    def test_标题也换标准拼写(self):
+        """F8-e（作者点名）：标题里已写好的「中文（English）」也要换成术语表拼写。"""
+        rev = {"sections": [{"heading": "[13:16] 停产价格（shutting down price）",
+                             "prose": ["讲讲看。"],
+                             "terms": [{"en": "shutting down price", "zh": "停产价格"}]}]}
+        got = nv.announce_terms_in_review(rev, canon=[["shutdown price", "停产价"]])
+        self.assertEqual(got["sections"][0]["heading"], "[13:16] 停产价格（shutdown price）")
+        got2 = nv.announce_terms_in_review(rev)
+        self.assertEqual(got2["sections"][0]["heading"],
+                         "[13:16] 停产价格（shutting down price）", "没有标准拼写就照旧")
+
+    def test_标题没括注不硬加(self):
+        rev = {"sections": [{"heading": "[13:16] 停产价格", "prose": ["讲讲看。"],
+                             "terms": [{"en": "shutdown price", "zh": "停产价"}]}]}
+        got = nv.announce_terms_in_review(rev)
+        self.assertEqual(got["sections"][0]["heading"], "[13:16] 停产价格")
+
     def test_没术语就原样(self):
         rev = {"sections": [{"prose": ["随便说点什么。"]}]}
         self.assertEqual(nv.announce_terms_in_review(rev), rev)
@@ -794,6 +901,12 @@ class HtmlComponents(unittest.TestCase):
         self.assertIn('<svg class="plot"', h)                    # 4 图
         self.assertIn("@media print", h)                         # 6 打印兜底
         self.assertIn("prefers-reduced-motion", h)               # 6 动效纪律
+
+    def test_三句总结占位不提考试(self):
+        """F8-g（作者点名）：合上书写的第三句是"我还没弄懂的是…"——不要应考话。"""
+        h = self._page()
+        self.assertIn("我还没弄懂的是", h)
+        self.assertNotIn("考试要会", h)
 
     def test_公式离线不白屏(self):
         h = self._page()

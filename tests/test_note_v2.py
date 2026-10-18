@@ -1405,6 +1405,20 @@ class ComponentsF10(unittest.TestCase):
         self.assertEqual(c["rows"][1]["cells"], ["", "x"], "空格子被剪了（行会错位）")
 
 
+class GuardLedgerF11(unittest.TestCase):
+    """⭐ F11 §3：静默降级的计数要进守卫台账行（`downgraded N`）。"""
+
+    def test_降级计数进了台账(self):
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parent.parent
+               / "obsidian_writer.py").read_text(encoding="utf-8")
+        self.assertIn('label == "支持性核对"', src,
+                      "支持性核对的返值没人接（降级会漏计）")
+        self.assertIn('"downgraded"', src)
+        self.assertIn("downgraded {self._guard_counts['downgraded']}", src,
+                      "台账行里没有 downgraded")
+
+
 class HtmlPlots(unittest.TestCase):
     def test_三个_kind_都画得出(self):
         for kind in nv.PLOT_KINDS:

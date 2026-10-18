@@ -625,7 +625,8 @@ class ObsidianWriter:
         self._corr_extra: list = []
         #: 🧮 F9c：守卫台账 —— 每个能删/能改内容的守卫都要在这里留下**计数**，
         #:    写作末尾拼成 `guards: repaired N, dropped N, flagged N`（批量审计用）。
-        self._guard_counts: dict = {"repaired": 0, "dropped": 0, "flagged": 0}
+        self._guard_counts: dict = {"repaired": 0, "dropped": 0, "flagged": 0,
+                                     "downgraded": 0}
         self._guard_summary: str = ""
         self._polish = polish               # 落笔前二次精修(见 polish.py)
         self._polish_model = polish_model or model
@@ -1284,6 +1285,10 @@ class ObsidianWriter:
                     if isinstance(st, dict):
                         self._guard_counts["repaired"] += int(st.get("repaired") or 0)
                         self._guard_counts["dropped"] += int(st.get("dropped") or 0)
+                elif label == "支持性核对" and extra_items:
+                    st = extra_items[0]
+                    if isinstance(st, dict):
+                        self._guard_counts["downgraded"] += int(st.get("downgraded") or 0)
                 elif label in ("猜测句清理", "猜测句清理（串讲）", "重复句去重",
                                "纯算术线索问题", "组件上限") and isinstance(extra_items, list):
                     self._guard_counts["dropped"] += len(extra_items)
@@ -1299,7 +1304,8 @@ class ObsidianWriter:
         self._guard_summary = (
             f"guards: repaired {self._guard_counts['repaired']}, "
             f"dropped {self._guard_counts['dropped']}, "
-            f"flagged {self._guard_counts['flagged']}")
+            f"flagged {self._guard_counts['flagged']}, "
+            f"downgraded {self._guard_counts['downgraded']}")
         print("🧮 " + self._guard_summary, flush=True)
         # 💡 术语库：作者硬要求（从笔记抽词 → `prep.append_terms` 只追加 + 墓碑）。
         try:

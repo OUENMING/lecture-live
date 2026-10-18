@@ -1152,6 +1152,85 @@ def _recon_ok(section: dict) -> bool:
         return False
 
 
+# ── F11 §3：🎙 没找到但内容没毛病 → 静默降级 ✏️ ────────────────────────────────
+#: 课上/老师的**归属引语** —— 降级时去掉，句子读起来就是笔记自己的话（不再是"讲义说过"）。
+#: ⚠️ 锚在**句首**（`^`）：只在句子开头的归属引语上动手，别把「这门课上的图」这类
+#:    句中的「课上」误删。
+_SUPPORT_LEAD = re.compile(
+    r"^\s*(?:(?:老师|教授|讲师)\s*(?:在)?\s*(?:课上|课堂|本课)?\s*(?:的)?\s*"
+    r"|(?:课上|课堂|本课|这节(?:课)?)\s*(?:的|里|中|上)?\s*)"
+    r"(?:提到|强调|指出|说过|讲到|说|讲|称|认为)?[，,：:、]?\s*")
+
+
+def _strip_leadin(s: str) -> str:
+    """去掉句首的「老师在课上提到/强调…」这类**归属引语**（§3 降级）。**纯函数。**"""
+    t = _SUPPORT_LEAD.sub("", str(s or ""), count=1)
+    return t.lstrip("，,：:、。！？ ").strip()
+
+
+def _content_ok(sec, claim: str) -> bool:
+    """这条 claim 的**内容**是否没毛病（§3）：非数值，或本节 program 跑通。**纯函数。**
+
+    数值题（含数字）而**没有**跑通的 program → 判不了"内容对不对" → 留给 ⚠（数值错存世）。
+    """
+    if not re.search(r"\d", str(claim or "")):
+        return True
+    try:
+        import note_math
+        if isinstance(sec, dict) and isinstance(sec.get("example"), dict):
+            rows = note_math.program_rows(sec)
+            if rows and not any(r.get("status") == "mismatch" for r in rows):
+                return True
+    except Exception:                                          # noqa: BLE001
+        pass
+    return False
+
+
+def _to_self_title(t: str) -> str:
+    """例题标题 🎙 → ✏️（§3 降级）。**纯函数。**"""
+    s = str(t or "")
+    s = s.replace("🎙+✏️", "✏️").replace("🎙", "✏️")
+    s = _strip_leadin(s)
+    return _one(s)
+
+
+def _downgrade_claim(out: dict, c: dict) -> bool:
+    """把一条 claim 的归属从 🎙 降成 ✏️（原地改 `out`）。成功返回 True。**纯函数（对 out 原地）。**
+
+    · 例题给定（field=example）→ 该节例题标题 🎙→✏️；
+    · 正文句（prose/algebra）→ 找到那句话，去掉「老师在课上提到…」归属引语。
+    """
+    try:
+        si = c.get("si")
+        secs = out.get("sections") or []
+        sec = secs[si] if isinstance(si, int) and 0 <= si < len(secs) else None
+        if not isinstance(sec, dict):
+            return False
+        if c.get("field") == "example":
+            ex = sec.get("example")
+            if not isinstance(ex, dict):
+                return False
+            ex["title"] = _to_self_title(ex.get("title"))
+            return True
+        key = str(c.get("field") or "")
+        if key not in ("prose", "algebra"):
+            return False
+        v = sec.get(key)
+        items = list(v) if isinstance(v, list) else ([v] if v else [])
+        want = _norm_ctx(c.get("claim"))
+        for i, para in enumerate(items):
+            for sent in _sentences(str(para or "")):
+                if _norm_ctx(sent)[:60] == want[:60] or (want and want[:40] in _norm_ctx(sent)):
+                    new = _strip_leadin(sent)
+                    if new and new != sent:
+                        items[i] = str(para).replace(sent, new, 1)
+                        sec[key] = items
+                        return True
+        return False
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
 def support_check(review: dict, *, entries: list, materials=None, ask=None,
                   max_requests: int = SUPPORT_MAX_REQ,
                   tau: float = SUPPORT_TAU) -> tuple:
@@ -1169,6 +1248,9 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
           （📖 的是 `材料里没找到这句（核对）`）→ 链上最后的 `annotate_mismatches` 落 ⚠；
         – 🎙 例题给定被标、且 F9 重建验证通过 → 标题改挂 🎙+✏️「按口述还原」
           （`note_v2.with_recon_label`；没通过验证的照常挂 ⚠；📖 的不挂）；
+    · ⭐ F11 §3（作者 2026-10-18）：p<τ 但**内容没毛病**（非数值，或本节 program 跑通）→
+      **静默降级** 🎙→✏️（去「老师在课上提到/强调」这类归属引语），正文**不挂 ⚠**，
+      降级条数走第二返回值 `{"downgraded": N}`（写作层的台账行）；⚠ 只留给存世的数值/理论错；
     · 一次核对（= 一节课）≤ `max_requests` 次请求（超出的**批**不查，条数进提醒）；
       `ask(state, instrs)` 可注入（假判官在位测里用）；
     · 没配 provider / 任何异常 → 全 None 空转，**永不抛**（既不花钱也不挡生成）。
@@ -1208,6 +1290,7 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
     rows_new: list = []
     relabeled = 0
     n_flag = 0
+    downgraded = 0
     used = 0
 
     def _want(c: dict):                                        # noqa: E306
@@ -1259,6 +1342,13 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
                 sec.setdefault("example", {})["title"] = t
                 relabeled += 1
                 continue
+            # ⭐ F11 §3（作者 2026-10-18）：p<τ 但**内容正确**（非数值，或本节 program 通过）
+            #    → **静默降级** 🎙→✏️（去掉「老师在课上提到/强调」这类归属引语），
+            #    正文里**不挂 ⚠**；⚠ 只留给存世的数值/理论错。逐条进台账 `downgraded N`。
+            if _content_ok(sec, c["claim"]):
+                if _downgrade_claim(out, c):
+                    downgraded += 1
+                continue
             rows_new.append({"claim": c["claim"], "status": "mismatch",
                              "recomputed": f"support p={float(p):.2f}", "how": how})
             n_flag += 1
@@ -1271,10 +1361,12 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
     bits = [f"{n_flag} 条挂 ⚠（转录/材料里没找到）"] if n_flag else []
     if relabeled:
         bits.append(f"{relabeled} 条例题给定没找到 → 按口述还原挂牌")
+    if downgraded:
+        bits.append(f"{downgraded} 条 🎙 没找到但内容没毛病 → 静默降 ✏️")
     if exempt:
         bits.append(f"{exempt} 条 📖 题面豁免（没有材料）")
     if skipped:
         bits.append(f"{skipped} 条超成本上限没查")
     msgs = [f"支持性核对：查了 {used} 批（上限 {tries} 次请求）"
             + ("；" + "；".join(bits) if bits else "；全部找到")]
-    return out, [], msgs
+    return out, [{"downgraded": downgraded}], msgs

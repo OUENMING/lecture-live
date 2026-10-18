@@ -313,16 +313,17 @@ class Judging(unittest.TestCase):
                                              ask=ask)
         return out, extra, warns, calls
 
-    def test_p_低于_tau_挂台账与警告(self):
+    def test_p_低于_tau_数值题挂台账(self):
+        """⭐ F11 §3：p<τ 的**数值** claim（没有跑通的 program）照旧挂 ⚠；非数值 → 静默降 ✏️。"""
         out, extra, warns, calls = self._run(0.05)
         rows = [r for r in (out.get("checks") or []) if r.get("status") == "mismatch"]
-        self.assertEqual(len(rows), 3, f"该挂 3 条，得到 {len(rows)}")
+        self.assertEqual(len(rows), 1, f"只有那条数值给定该挂，得到 {len(rows)}：{rows}")
         self.assertEqual(rows[0]["how"], "转录里没找到这句（核对）")
         self.assertIn("support p=0.05", rows[0]["recomputed"])
         self.assertTrue(any("挂 ⚠" in w for w in warns), warns)
-        self.assertEqual(extra, [])
-        # ⭐ 只标不改：正文逐字不动
-        self.assertEqual(out["sections"][0]["prose"][0], "课上先写 $AC(q)=TC(q)/q$。")
+        # §3：非数值的两句正文静默降级（去归属引语），计数回传
+        self.assertEqual(extra, [{"downgraded": 2}], extra)
+        self.assertTrue(any("静默降" in w for w in warns), warns)
 
     def test_p_None_什么都不做(self):
         out, _, warns, _ = self._run(None)
@@ -656,6 +657,67 @@ class ExampleSchemaF11(unittest.TestCase):
                            "steps": [{"text": "代入得 346.4。", "why": ""}],
                            "answer": "P≈346.4。"}}
         self.assertTrue(ng._recon_ok(sec))
+
+
+class DowngradeF11(unittest.TestCase):
+    """⭐ F11 §3：🎙 claim p<τ 但内容没毛病 → **静默降** ✏️（去归属引语），正文不挂 ⚠。"""
+
+    def _run(self, review, p=0.05):
+        def ask(state, instructions):
+            return [p] * len(instructions)
+        return ng.support_check(review, entries=ENTRIES, ask=ask)
+
+    def test_正文去归属引语(self):
+        rev = {"sections": [{"heading": "h", "ts": "13:16",
+                             "prose": ["老师在课上强调最低点处 $MC=AC$。"]}]}
+        out, extra, warns = self._run(rev)
+        self.assertEqual(out["sections"][0]["prose"][0], "最低点处 $MC=AC$。")
+        self.assertEqual(extra, [{"downgraded": 1}])
+        self.assertFalse([r for r in (out.get("checks") or [])
+                          if r.get("status") == "mismatch"], "降级不该在正文挂 ⚠")
+
+    def test_句中课上不被误删(self):
+        rev = {"sections": [{"heading": "h", "ts": "13:16",
+                             "prose": ["老师说这门课上的图很好。"]}]}
+        out, _, _ = self._run(rev)
+        self.assertEqual(out["sections"][0]["prose"][0], "这门课上的图很好。",
+                         "句中的「课上」被误删了")
+
+    def test_例题标题降成自补(self):
+        rev = {"sections": [{"heading": "h", "ts": "13:16",
+                             "example": {"title": "🎙 13:16 概念对照",
+                                         "prompt": "已知 $MC=AC$。"}}]}
+        out, extra, _ = self._run(rev)
+        self.assertEqual(out["sections"][0]["example"]["title"], "✏️ 13:16 概念对照")
+        self.assertEqual(extra, [{"downgraded": 1}])
+
+    def test_program跑通的数值claim也降(self):
+        """数值 claim，但本节 program 跑通（内容对）→ 降级，不挂 ⚠。"""
+        rev = {"sections": [{"heading": "h", "ts": "13:16",
+                             "prose": ["课上的答案 $P=346.4$。"],
+                             "example": {"title": "✏️ 例题", "prompt": "求价格。",
+                                         "program": [
+                                             {"var": "q_star", "op": "argmin",
+                                              "expr": "60*q + 500/q", "x": "q",
+                                              "range": [1, 10]},
+                                             {"var": "P", "op": "eval",
+                                              "expr": "60*q + 500/q", "x": "q",
+                                              "at": "q_star"}],
+                                         "steps": [{"text": "代入得 346.4。", "why": ""}],
+                                         "answer": "P≈346.4。"}}]}
+        out, extra, _ = self._run(rev)
+        self.assertFalse([r for r in (out.get("checks") or [])
+                          if r.get("status") == "mismatch"], "内容对的数值 claim 不该挂 ⚠")
+        self.assertEqual(out["sections"][0]["prose"][0], "答案 $P=346.4$。")
+        self.assertEqual(extra, [{"downgraded": 1}])
+
+    def test_数值claim没有program照旧挂(self):
+        rev = {"sections": [{"heading": "h", "ts": "13:16",
+                             "prose": ["课上算出 AC(2.89)≈2.89。"]}]}
+        out, extra, _ = self._run(rev)
+        rows = [r for r in (out.get("checks") or []) if r.get("status") == "mismatch"]
+        self.assertEqual(len(rows), 1, "判不了对错的数值 claim 仍要挂 ⚠")
+        self.assertEqual(extra, [{"downgraded": 0}])
 
 
 

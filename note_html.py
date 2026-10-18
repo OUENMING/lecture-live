@@ -15,9 +15,9 @@
 
 | # | 要求 | 实现在哪 |
 |---|---|---|
-| 1 | 顶部「五分钟速览」= 一句话 + 3 takeaways + **五分钟串讲**（整节课的连贯叙述，段首加粗断言、每段点名小节号并链到锚点）+ 带日期的复习排程（今晚 / +3 天 / +7 天） | `_overview_html` + `_link_sections`；串讲数据来自 `note_v2.overview`（**一次额外小调用**） |
+| 1 | 顶部「速览」= 3–6 句短段落（读者上过课、扫一眼捡线）+ 带日期的复习排程（今晚 / +3 天 / +7 天） | `_overview_html` + `_link_sections`；速览数据来自 `note_v2.overview`（**一次额外小调用**） |
 | 2 | 每节左栏 **sticky 线索栏**（1–3 条线索问题 + 术语「中文 (English)」）；窄屏折到节上方 | `_cue_html`（`.grid` 两栏；`@media (max-width:760px)` 单栏） |
-| 3 | 每节 **Q 本节回答 → 讲解 → E 三种看法（📈/🧮/💡，只画真有的）→ C 考试结论** | `_section_html` 的 `.qec`；E 的图形轨只在真有 `plot` 时出 |
+| 3 | 每节 **Q 本节回答 → 讲解（含 卡点 补话、前置补课 fold）→ E 三种看法（📈/🧮/💡，只画真有的）→ 题型一句话**（`conclusion`，不加标签的普通段落） | `_section_html` 的 `.qec`；E 的图形轨只在真有 `plot` 时出 |
 | 4 | 例题梯度 **W1 完整（每步「为什么？先想 5 秒」）→ W2 补全（真输入框 + 「对答案」，**答案不印在题面旁**）→ W3 变式（答案折叠）**；⚠ 常见错误高亮块 | `_example_html` / `_faded_html` / `_variants_html` |
 | 5 | 收尾：自测（既有）+ **合上书写 3 句总结** + 「对照速览」（滚回速览） | `note_page` 的 closing 卡 + `data-cmp` |
 | 6 | 图上的**十字光标**（跟随鼠标/手指显示当前 (x, y)，纯 SVG + 原生 JS，打印隐藏） | `svg()` 里的 `.cross` + `_JS` 的 pointermove 段 |
@@ -527,9 +527,12 @@ details{border:1px dashed var(--line);border-radius:8px;padding:6px 10px;margin:
 details summary{cursor:pointer;font-weight:600;color:var(--accent)}
 details[open] summary{margin-bottom:6px}
 details.step{background:transparent;border-style:solid;border-color:var(--line)}
-formula,.tex{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);
- padding:1px 4px;border-radius:4px;font-size:15px}
-.tex.done{background:none;padding:0;font-family:inherit}
+formula,.tex{font-family:Georgia,"Times New Roman","Songti SC",serif;font-style:italic;
+ background:var(--code);padding:1px 4px;border-radius:4px;font-size:15px}
+/* ⚠️ F7（作者点名）：`.tex` 渲染前是**等宽 + 代码底色**——KaTeX 没跑（资产缺失/截图太早）时
+   每条公式看起来都像行内代码。默认态换成**衬线斜体**（数学的样子），真代码仍然走 code{} 的
+   等宽（ECS 的 PyTorch 引用不受影响）；KaTeX 成功后由 .done 交还给它的排版。 */
+.tex.done{background:none;padding:0;font-family:inherit;font-style:normal}
 .plots{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
 figure.fig{margin:0;background:var(--card);border:1px solid var(--line);border-radius:12px;
  padding:8px}
@@ -553,6 +556,7 @@ code{background:var(--code);padding:1px 4px;border-radius:4px}
 .tr{border-bottom:1px dotted var(--line);padding:3px 0;font-size:14px}
 .tr b,.tr i{color:var(--muted);font-style:normal;font-weight:600;margin-right:4px}
 details.internal{border-style:solid}
+.qa-tier{font-size:15px;margin:18px 0 4px;color:var(--muted)}
 .q{border-left:3px solid var(--c2);padding-left:10px;margin:14px 0}
 .q .a{margin-top:6px}
 footer{color:var(--muted);font-size:13px;margin-top:40px}
@@ -981,10 +985,16 @@ def _tracks_html(sec: dict, fig: str) -> str:
     return "".join(o)
 
 
+def _strip_ts_prefix(heading) -> str:
+    """显示用标题：剥掉 `[HH:MM] ` 前缀（可多段）—— 时间戳由标题旁的 🎙 chip 显示，
+    标题里再印一遍就是重复（作者 F7 截图点名）。**只剥显示层**，数据不动（覆盖度还用）。"""
+    return re.sub(r"^\s*(?:\[[^\]]*\]\s*)+", "", str(heading or "")).strip()
+
+
 def _section_html(sec: dict, idx: int, *, reveal: bool = True, fig: str = "") -> str:
     cls = "reveal" if reveal else ""
     o = [f'<section class="card {cls}" id="kp{idx}">',
-         f'<h3>{idx}. {inline(sec.get("heading"))}'
+         f'<h3>{idx}. {inline(_strip_ts_prefix(sec.get("heading")))}'
          + (f' <code>🎙 {html.escape(str(sec.get("ts")))}</code>' if sec.get("ts") else "")
          + "</h3>"]
     if sec.get("prereq_link"):
@@ -1007,7 +1017,8 @@ def _section_html(sec: dict, idx: int, *, reveal: bool = True, fig: str = "") ->
     if tracks:
         o.append(f'<div><span class="lab">E 三种看法</span>{tracks}</div>')
     if sec.get("conclusion"):
-        o.append(f'<div><span class="lab">C 考试结论</span>{inline(sec["conclusion"])}</div>')
+        # ⭐ F7③：题型一句话 —— 普通段落收口（不是"考试结论"栏、无标签、不做表）。
+        o.append(f'<div class="approach">{inline(sec["conclusion"])}</div>')
     o.append("</div>")
     # ── 例题梯度：W1 完整 → W2 补全（真输入框）→ W3 变式（答案折叠）─────
     ex = sec.get("example") or {}
@@ -1082,7 +1093,14 @@ def page(title: str, head: list, toc_items: list, sections_html: list, qa: list,
         f'<li><a href="#kp{i}">{inline(t)}</a></li>'
         for i, t in enumerate(toc_items, 1))
     qa_html = ""
+    import note_v2 as _nv
+    _tier = ""
     for i, q in enumerate(qa, 1):
+        t = _nv.qa_tier(q)
+        if t != _tier:
+            qa_html += (f'<h3 class="qa-tier">{html.escape(t)}'
+                        f'<span class="muted"> · {html.escape(_nv.QA_TIER_DESC.get(t, ""))}</span></h3>')
+            _tier = t
         qa_html += (f'<div class="q"><p><strong>{i}. {inline(q.get("q"))}</strong></p>'
                     f'<details><summary>先自己想 · 再揭晓</summary>'
                     f'<div class="a">{inline(q.get("a"))}</div></details></div>')
@@ -1105,7 +1123,7 @@ def page(title: str, head: list, toc_items: list, sections_html: list, qa: list,
 <p><button id="expand" type="button">展开全部步骤</button></p>
 {''.join(sections_html)}
 {('<h2>图</h2><div class="plots">' + ''.join(plots) + "</div>") if plots else ''}
-<h2>自测（先答再揭晓）</h2>{qa_html or '<p>（本节没生成自测）</p>'}
+<h2 id="selftest">自测（先答再揭晓 · 三档）</h2>{qa_html or '<p>（本节没生成自测）</p>'}
 {closing_html}
 {extra_html}
 <footer>{footer}<p>🎙 课上一手 · 📖 课件材料 · 📚 标准理论；冲突时 📖 &gt; 📚 &gt; 🎙。
@@ -1121,7 +1139,9 @@ def note_page(d) -> str:
     import note_v2
     # ⭐ 术语就地括注（作者 2026-10-18）：渲染层确定性执行，全篇每个术语只在首次出现处
     #    写「中文（English）」—— 和 md 共用同一份实现（`note_v2.announce_terms_in_review`）。
-    review = note_v2.announce_terms_in_review(d.review or {})
+    #    F7-e：`term_pairs`（术语表最终行）提供**标准拼写**，盖过模型/转录写法。
+    review = note_v2.announce_terms_in_review(
+        d.review or {}, canon=getattr(d, "term_pairs", None))
     sections = review.get("sections") or []
     head = [f"<div>🕐 {html.escape(str(d.entries[0]['ts'] if d.entries else '—'))} – "
             f"{html.escape(str(d.entries[-1]['ts'] if d.entries else '—'))} · "

@@ -416,6 +416,29 @@ class ChunkBudget(unittest.TestCase):
         self.assertEqual(int(m.group(1)), 720)      # 默认按 3 分钟
 
 
+class QaTiers(unittest.TestCase):
+    """三档自测（F7②）：基础/中等/挑战 各取 ≤2，档序固定，`tier` 归一落到数据上。"""
+
+    def test_每档至多两题_按档排序(self):
+        qa = [{"q": f"q{i}", "a": "a", "tier": t} for i, t in enumerate(
+            ["挑战", "基础", "中等", "基础", "挑战", "基础", "中等"])]
+        got = nv.pick_qa_tiers(qa)
+        self.assertEqual([x["tier"] for x in got], ["基础", "基础", "中等", "中等", "挑战", "挑战"])
+        self.assertEqual([x["q"] for x in got][:2], ["q1", "q3"])
+
+    def test_没标档按kind兜底(self):
+        qa = [{"q": "1", "a": "a", "kind": "concept"},
+              {"q": "2", "a": "a", "kind": "calc"},
+              {"q": "3", "a": "a", "kind": "trap"},
+              {"q": "4", "a": "a"}]
+        got = nv.pick_qa_tiers(qa)
+        self.assertEqual([x["tier"] for x in got], ["基础", "中等", "中等", "挑战"])
+
+    def test_坏输入不炸(self):
+        self.assertEqual(nv.pick_qa_tiers(None), [])
+        self.assertEqual(nv.pick_qa_tiers(["x", 1]), [])
+
+
 class ShortenOverlimit(unittest.TestCase):
     """超限单元压缩（第七轮 H）：> 上限 ×1.15 才发一次调用；失败/变不短都不动原文。"""
 
@@ -445,6 +468,31 @@ class ShortenOverlimit(unittest.TestCase):
         self.assertEqual(calls, [], "没超限不许发调用")
         self.assertEqual(got["sections"][0]["prose"], ["字" * 200])
         self.assertEqual(warns, [])
+
+    def test_1_15倍到1_5倍之间不发(self):
+        """F7-f 收紧：300 字 > 旧阈值 276（1.15×）但 ≤ 新阈值 360（1.5×）→ 不许发。"""
+        calls = []
+
+        def chat(s, u, mt):
+            calls.append(u)
+            return {"prose": ["短"]}
+        nv.shorten_overlimit(self._rev(300), chat=chat)
+        self.assertEqual(len(calls), 0)
+
+    def test_每讲至多五次(self):
+        """F7-f：7 个超限单元 → 只发 5 次（把 F6 的 18 次压到个位数）。"""
+        calls = []
+
+        def chat(s, u, mt):
+            calls.append(u)
+            return {"prose": ["短"]}
+        rev = {"sections": [{"ts": "13:16", "heading": f"H{i}", "prose": ["字" * 1000],
+                             "minutes": 1.0} for i in range(7)]}
+        got, _, warns = nv.shorten_overlimit(rev, chat=chat)
+        self.assertEqual(len(calls), 5)
+        self.assertTrue(warns and "5 个单元" in warns[0])
+        self.assertEqual([s["prose"] for s in got["sections"]][5:],
+                         [["字" * 1000], ["字" * 1000]], "第 6、7 个不动")
 
     def test_变不短就不动(self):
         def chat(s, u, mt):
@@ -511,6 +559,16 @@ class AnnounceTerms(unittest.TestCase):
                              "terms": [["边际成本", "marginal cost"]]}]}
         got = nv.announce_terms_in_review(rev)
         self.assertIn("边际成本（marginal cost）", got["sections"][0]["prose"][0])
+
+    def test_标准拼写盖过模型写法(self):
+        """F7-e：术语表里是 shutdown price，转录/模型写成 shutting down price → 用术语表的。"""
+        rev = {"sections": [{"prose": ["先看停产价格怎么定。"],
+                             "terms": [{"en": "shutting down price", "zh": "停产价格"}]}]}
+        got = nv.announce_terms_in_review(rev, canon=[["shutdown price", "停产价"]])
+        self.assertIn("停产价格（shutdown price）", got["sections"][0]["prose"][0])
+        got2 = nv.announce_terms_in_review(rev)
+        self.assertIn("停产价格（shutting down price）", got2["sections"][0]["prose"][0],
+                      "没有标准拼写时照旧用模型写法")
 
     def test_没术语就原样(self):
         rev = {"sections": [{"prose": ["随便说点什么。"]}]}
@@ -623,10 +681,17 @@ class RenderShape(unittest.TestCase):
 
     def test_自测_题干在简版_答案折叠在简版(self):
         """⭐ 版式 A（作者 2026-10-18）：简版列 3–5 题**带折叠答案**（Obsidian callout `-`）。
+        F7②：按 基础/中等/挑战 三档分组（题数上限不变）。
         ⚠️ 折叠≠裸文本：答案只许出现在 `> [!question]- 答案` 的引用行里（点一下才展开），
         否则就是"题还没做就看到了"；完整题库与逐步解析仍在详细版。"""
         md = nr.render(self._data())
-        self.assertIn("复习速测（先想再看）", md)
+        self.assertIn("复习速测（先想再看 · 三档）", md)
+        self.assertIn("**基础** —", md)
+        self.assertIn("为什么 $MC<AC$ 时 $AC$ 会下降？", md)
+        self.assertIn("> [!question]- 答案", md)
+        ans = "低于平均的数掺进来会把平均拉低。"
+        j = md.index(ans)
+        self.assertEqual(md[j - 2:j], "> ", "答案没在折叠 callout 里（会剧透）")
         self.assertIn("为什么 $MC<AC$ 时 $AC$ 会下降？", md)
         self.assertIn("> [!question]- 答案", md)
         ans = "低于平均的数掺进来会把平均拉低。"

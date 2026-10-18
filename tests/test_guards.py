@@ -534,6 +534,9 @@ class Wiring(unittest.TestCase):
         #    「不许单独成段」（同一判据，措辞跟着 prompt 的现行版本走）。
         for key in ("不许单独成段", "不许写钟点时间戳", "不许问纯算术"):
             self.assertIn(key, note_v2.REVIEW_SYS, f"prompt 缺新规矩：{key}")
+        # F7（作者点名）：卡点 / 题型一句话 / 反引号禁令 / 三档自测
+        for key in ("卡点", "题型一句话", "反引号包公式", "tier"):
+            self.assertIn(key, note_v2.REVIEW_SYS, f"prompt 缺 F7 规矩：{key}")
 
 
 class AnnotateMismatch(unittest.TestCase):

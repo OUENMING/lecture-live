@@ -80,8 +80,10 @@ class CueQEC(unittest.TestCase):
         self.assertIn('class="cue cue-scroll"', h)
         self.assertIn("线索问题", h)
         self.assertIn("边际成本 (marginal cost)", h)
-        for lab in ("Q 本节回答", "E 三种看法", "C 考试结论"):
+        # F7③：C 考试结论栏目撤了（conclusion 改成不加标签的"题型一句话"段落）
+        for lab in ("Q 本节回答", "E 三种看法"):
             self.assertIn(f'<span class="lab">{lab}</span>', h)
+        self.assertNotIn("C 考试结论", h)
         self.assertIn('data-tr="g"', h)
         self.assertIn('data-tr="a"', h)
         self.assertIn('data-tr="i"', h)
@@ -317,10 +319,59 @@ class TermAnnotation(unittest.TestCase):
         self.assertIn("先看边际成本（marginal cost）怎么算。", h)
         self.assertIn("边际成本再出现时不括注。", h, "第一处之后的不再加")
 
+    def test_标准拼写盖过模型写法(self):
+        """F7-e：术语表里有标准拼写 → 括注用它（术语表行来自 NoteData.term_pairs）。"""
+        d = self._data()
+        d.term_pairs = [["standard cost", "边际成本"]]
+        h = nh.note_page(d)
+        self.assertIn("（standard cost）", h)
+        self.assertNotIn("（marginal cost）", h)
+
     def test_md_速览里的首次括注(self):
         md = nr.render(self._data(md_visible=True))
         self.assertEqual(md.count("边际成本（marginal cost）"), 1)
         self.assertIn("这节课先说边际成本（marginal cost）这条线。", md)
+
+
+class F7Display(unittest.TestCase):
+    """F7（作者点名）：标题不重复印时间戳 / 公式渲染前不像代码 / 题型一句话 / 三档自测。"""
+
+    def test_标题不再印两遍时间戳(self):
+        sec = {"ts": "13:16", "heading": "[13:16] 停产价格（shutting down price）",
+               "q": "怎么定？", "prose": ["正式地说。"],
+               "conclusion": "看到求停产价格的题，先写 AC 再求导。"}
+        h = nh.note_page(_data(review={"sections": [sec]}))
+        self.assertIn("<h3>1. 停产价格（shutting down price） <code>🎙 13:16</code></h3>", h)
+        self.assertEqual(h.count("[13:16] 停产价格"), 1, "只剩知识点地图那一处")
+
+    def test_题型一句话是普通段落(self):
+        sec = {"ts": "13:16", "heading": "停产价格", "prose": ["x。"],
+               "conclusion": "看到求停产价格的题，先写出 AC。"}
+        h = nh.note_page(_data(review={"sections": [sec]}))
+        self.assertIn('<div class="approach">看到求停产价格的题，先写出 AC。</div>', h)
+        self.assertNotIn("C 考试结论", h)
+
+    def test_公式渲染前不像代码(self):
+        h = nh.note_page(_data())
+        m = re.search(r"formula,\.tex\{([^}]*)\}", h)
+        self.assertTrue(m, "没找到 .tex 的前置样式")
+        self.assertNotIn("monospace", m.group(1), "渲染前是等宽 = 看起来像代码")
+        self.assertIn("serif", m.group(1))
+        self.assertIn("code{background:var(--code)", h, "真代码样式不动")
+
+    def test_自测按三档分组(self):
+        d = _data(review={"sections": [SEC],
+                          "qa": [{"q": "基础题", "a": "a", "tier": "基础"},
+                                 {"q": "中等题", "a": "a", "tier": "中等"},
+                                 {"q": "挑战题", "a": "a", "tier": "挑战"}]})
+        h = nh.note_page(d)
+        i0, i1, i2 = h.index(">基础<"), h.index(">中等<"), h.index(">挑战<")
+        self.assertLess(i0, i1)
+        self.assertLess(i1, i2)
+        self.assertIn('id="selftest"', h)
+        md = nr.render(d)
+        self.assertIn("**基础** —", md)
+        self.assertIn("**挑战** —", md)
 
 
 if __name__ == "__main__":

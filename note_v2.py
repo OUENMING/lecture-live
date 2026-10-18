@@ -91,9 +91,20 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
 ⚠️ **能举例子就举例子**：每个概念配一个**具体例子**（课上的题/数字优先）。
 课上真没讲例子，就自己举一个**简单可信**的，以「举个例子：」开头，数字必须算得对
 （机械核会去算）。讲同一个道理的重复例子**只留一个**。
+　✗ 反面例（只把定义换个说法，不算例子）：「若某产量下 AC 最低为 2.89，则停产价格就是 2.89」
+　✓ 要这样：用课上的函数**动手走一步** —— 求 AC'、令它为 0 解出产量、代回 AC 得值。
+⚠️ **卡点**：老师哪一步是"跳着讲"的（默认你会、但多数同学卡住的那一步），就在讲解的
+行文里用一两句大白话补出来，例如「这里老师直接从 AC 跳到了 AC'，中间用的是商的求导
+法则：…」。**只在真有这种跳步时写**，不许当固定栏目；成块的前置知识仍走 `prereq`
+（两边不许说同一件事）。
+⚠️ **开头句说"它是什么 / 为什么在意它"**，不许写"期末常考""考试要考""常考题型"这类应考话。
 每节按这条线走（不用写小标题，把内容排成这个顺序就行）：
 ① 它是什么、为什么会在意它（大白话）→ ② 一个带真实数字的例子 → ③ 正式的说法/公式（LaTeX）
 → ④ 学生真正容易错的那一处（一句话点破）。
+⚠️ **教一种能做的题的节**（求 / 推 / 分类），最后用**一句大白话**收口：看到什么样的题、
+第一步做什么（如「看到求停产价格的题，先写出 AC，令 AC'=0 找最低点，再代回 AC」）。
+写进 `conclusion` 字段（渲染层接在正文末尾）；**不加标签**、不做表；
+概念 / 历史 / 课务这类没有题型的节留空。
 ⚠️ **篇幅只设上限**（见用户消息里这段的"字数上限"）：写超是违规，**没写够不违规** ——
    绝不许为凑字数加话；宁可短。
 ⚠️ **不要退化成考点清单**：真正的列举（步骤、分类、对比项）才用 bullet，其余写成连贯段落。
@@ -109,20 +120,26 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
 - `cues`：1–3 条**线索问题**（≤25 字/条）：复习时盖住正文、只看问题自问自答用的 ——
   只问**概念 / 方法 / 结论**（答得出 = 这一节真懂了）；**不许问纯算术**（"5.3除以3等于多少？"
   这种计算器就能答的题帮不了复习，写了也会被丢掉）。
-- `conclusion`：**考试结论**（≤40 字）—— 这类题怎么答才拿分（可空）。
+- `conclusion`：**题型一句话**（≤40 字）：这节教的题"看到什么 → 第一步做什么"；
+  概念 / 历史 / 课务这类没有题型的节留空（渲染层把它接在正文末尾，不加标签）。
 - `algebra`：**代数主线**（≤80 字）：只列式子与结果的推导主线（这节真的用公式推了才填，可空）。
 - `intuition`：**一句人话直觉**（≤40 字）：不写公式也能记住的那种说法（可空）。
-- `prereq`：理解这一节需要、而**教授没讲**的前置概念 —— 揉碎了补上（懂就空着）。
+- `prereq`：理解这一节需要、而**教授没讲**的前置知识 —— 揉碎了补上（懂就空着）。
+  ⚠️ 单步"跳讲"的补话写在正文里（见上面的「卡点」），这里只放**成块**的前置知识，两边不重复。
 - `prereq_link`：这一节用到上一节的什么（衔接一句话，第一节能空）。
 - `example`：**教授课上做的例题，完整写出来** —— 题目 + 一步步解 + **每步为什么**。
   教授没做例题就空着；有例题而你没写全，是最严重的失分。
 - `variants`：在例题基础上给 1–2 道**变式题**（含完整解答步骤）。
 - `faded`：把例题的关键步骤挖空的**补全题**（答案分开写）。
 - `pitfalls`：学生最容易错的地方。
+- `qa`：这一块的**自测题**（3–5 题，三档都尽量有），每题标 `tier`：
+  **基础** = 回忆一个定义/事实；**中等** = 换个数字或案例用一次；**挑战** = 合两个想法、或抓一个坑。
+  答案里的数字必须自洽（会过机械核）。
 
 ## 三、数学与例题的硬规矩（2026-10-17 验收抓到过反例，逐条遵守）
 - **公式一律 LaTeX**：行内 `$…$`、独立 `$$…$$`。多项式/导数/分式都必须写，例如
-  `$q^{3}-12q^{2}+60q$`、`$AC'(q)=2q-12$`。**不许**写 `q^3-3q^2+12q` 这种纯文本。
+  `$q^{3}-12q^{2}+60q$`、`$AC'(q)=2q-12$`。**不许**写 `q^3-3q^2+12q` 这种纯文本；
+  **也不许用反引号包公式** —— 反引号 `` `…` `` 在页面上是**代码**样式，只留给真代码。
 - **例题的题面只能来自两个地方**：🎙 教授课上**完整写出来**的式子，或 📖 课件/试卷原文
   （`example.title` 写明「📖 文件名 + 题号」或「🎙 HH:MM」）。
   ⚠️ 教授课上一道一道过的**试卷题**（如 "this was last year, question one"）两个来源都要标：
@@ -179,7 +196,7 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
     "prereq_link": "用到上一节的…（可空）",
     "prose": ["第一段", "第二段"],
     "prereq": "前置概念补课（可空）",
-    "conclusion": "考试结论：这类题怎么答才拿分（≤40 字，可空）",
+    "conclusion": "题型一句话：看到什么题、第一步做什么（≤40 字，可空）",
     "algebra": "代数主线：只列式子与结果（≤80 字，可空）",
     "intuition": "一句人话直觉（≤40 字，可空）",
     "example": {"title": "例题名（标出处，如 📖 Exercise 5）", "prompt": "题面",
@@ -191,7 +208,7 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
     "terms": [{"en": "English term", "zh": "中文"}],
     "sources": ["🎙 HH:MM", "📖 文件名"],
     "plot": {"kind": "cost_curves", "title": "图名", "params": {"a": 1}}}]},
- "qa": [{"q": "自测题（中文题干，术语用英文）", "a": "答案（含步骤）", "kind": "concept|calc|trap"}],
+ "qa": [{"q": "自测题（中文题干，术语用英文）", "a": "答案（含步骤）", "tier": "基础|中等|挑战", "kind": "concept|calc|trap"}],
  "corrections": [{"where": "…", "spoken": "…", "fixed": "…", "basis": "…"}],
  "checks": [{"claim": "…", "how": "…", "status": "ok"}],
  "terms": [{"en": "本课出现的学科术语", "zh": "中文"}],
@@ -408,7 +425,9 @@ def _clean(obj) -> dict:
             continue
         q, a = _one_line(x.get("q")), _one_line(x.get("a"))
         if q and a:
-            qa.append({"q": q, "a": a, "kind": _one_line(x.get("kind"))})
+            # ⭐ F7②：档位字段要留着（全讲按 基础/中等/挑战 各取 ≤2 题）。
+            qa.append({"q": q, "a": a, "kind": _one_line(x.get("kind")),
+                       "tier": _one_line(x.get("tier"))})
     if qa:
         r["qa"] = qa
     corr = []
@@ -733,6 +752,41 @@ def merge_units(review: dict, *, end_ts: str = "") -> dict:
     return out
 
 
+#: 自测三档（作者 F7②）：基础=回忆定义/事实 · 中等=换数字/案例用一次 · 挑战=合两个想法或抓坑。
+QA_TIERS = ("基础", "中等", "挑战")
+QA_TIER_DESC = {"基础": "回忆定义/事实", "中等": "换个数字或案例用一次",
+                "挑战": "合两个想法、或抓一个坑"}
+_QA_KIND_TO_TIER = {"concept": "基础", "calc": "中等", "trap": "挑战"}
+
+
+def qa_tier(item: dict) -> str:
+    """归一自测题的档位：模型标的 `tier` 优先；没标就按 `kind` 兜底（纯函数）。"""
+    t = _one_line(item.get("tier")) if isinstance(item, dict) else ""
+    for k in QA_TIERS:
+        if t.startswith(k):
+            return k
+    kind = _one_line((item or {}).get("kind")).lower()
+    return _QA_KIND_TO_TIER.get(kind, "中等")
+
+
+def pick_qa_tiers(qa: list, *, per_tier: int = 2) -> list:
+    """全讲的自测 → 基础/中等/挑战 各取 ≤`per_tier` 题，按档排序（F7②）。
+
+    纯函数、确定性；每题补上归一后的 `tier` 字段（渲染层按档分组）。
+    """
+    buckets: dict = {k: [] for k in QA_TIERS}
+    for item in (qa or []):
+        if not isinstance(item, dict):
+            continue
+        k = qa_tier(item)
+        if len(buckets[k]) < per_tier:
+            buckets[k].append(dict(item, tier=k))
+    return [x for k in QA_TIERS for x in buckets[k]]
+
+
+SHORTEN_RATIO = 1.5
+#: 每讲至多压缩几次（作者 F7-f：≤5 —— 把 F6 实测的 18 次压到个位数）。
+SHORTEN_MAX_CALLS = 5
 SHORTEN_MAX_TOKENS = 2500
 SHORTEN_SYS = """你在做一件事：把一节笔记的「讲解」压到字数上限以内。读者是要复习的大学生。
 
@@ -742,18 +796,21 @@ SHORTEN_SYS = """你在做一件事：把一节笔记的「讲解」压到字数
 严格输出 JSON：{"prose": ["第 1 段", "第 2 段", "…"]}"""
 
 
-def shorten_overlimit(review: dict, *, chat, ratio: float = 1.15,
-                      max_tokens: int = SHORTEN_MAX_TOKENS) -> tuple:
-    """超上限 >{ratio} 的单元做**一次**压缩调用（只改 `prose`；作者 2026-10-18 第七轮 H）。
+def shorten_overlimit(review: dict, *, chat, ratio: float = SHORTEN_RATIO,
+                      max_tokens: int = SHORTEN_MAX_TOKENS,
+                      max_calls: int = SHORTEN_MAX_CALLS) -> tuple:
+    """超上限 >`ratio`（1.5×）的单元做**一次**压缩调用（只改 `prose`；F7-f 收紧）。
 
-    ⚠️ 只对超限的单元发（每个单元最多 1 次）；失败/变不短都不动原文（fail-soft）。
-       调用数记在 warn 里（验收要数它）。
+    ⚠️ 只对超限的单元发（每个单元最多 1 次、每讲至多 `max_calls` 次）；
+       失败/变不短都不动原文（fail-soft）。调用数记在 warn 里（验收要数它）。
     """
     out = copy.deepcopy(review)
     n = 0
     for s in (out.get("sections") or []):
         if not isinstance(s, dict):
             continue
+        if n >= max_calls:
+            break
         mins = s.get("minutes")
         if not mins:
             continue
@@ -773,7 +830,7 @@ def shorten_overlimit(review: dict, *, chat, ratio: float = 1.15,
         if lines and sum(_cjk(x) for x in lines) < sum(_cjk(x) for x in prose):
             s["prose"] = lines
             n += 1
-    warns = [f"超限单元压缩：{n} 个单元各做了 1 次压缩调用"] if n else []
+    warns = [f"超限单元压缩：{n} 个单元各做了 1 次压缩调用（每讲至多 {max_calls} 次）"] if n else []
     return out, [], warns
 
 
@@ -854,6 +911,9 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
         # ⭐ 概念单元（第七轮 A）：相邻、同主干的小节并成一个单元 ——
         #    覆盖度（ts 变成区间）、渲染、长度上限全按单元走。
         got = merge_units(got, end_ts=str(entries[-1].get("ts") or "") if entries else "")
+    if got.get("qa"):
+        # ⭐ F7②：全讲的自测按 基础/中等/挑战 三档各取 ≤2 题（渲染层按档分组）。
+        got["qa"] = pick_qa_tiers(got.get("qa"))
     if got.get("title_zh"):
         meta["title_zh"] = got.pop("title_zh")
     got.update(meta)
@@ -1276,15 +1336,42 @@ def announce_terms(text: str, terms, seen: set) -> str:
     return out
 
 
-def announce_terms_in_review(review: dict) -> dict:
+def canon_en(zh: str, canon) -> str:
+    """标准拼写查询（F7-e）：全等优先；否则**包含**匹配取最长（`停产价格` 命中 `停产价`）。
+
+    `canon` = `{zh: en}`（由术语表的 `(en, zh)` 对折成；同 zh 首见者赢）。
+    """
+    zh = _one_line(zh)
+    if not zh or not canon:
+        return ""
+    if zh in canon:
+        return canon[zh]
+    best_len, best_en = 0, ""
+    for zh_c, en_c in canon.items():
+        if zh_c and (zh_c in zh or zh in zh_c) and len(zh_c) > best_len:
+            best_len, best_en = len(zh_c), en_c
+    return best_en
+
+
+def announce_terms_in_review(review: dict, *, canon=None) -> dict:
     """渲染前的一次性标注（返回**副本**）。
 
     ⚠️ walk 顺序 = **阅读顺序**：`overview_long`（页首速览）先走，然后才轮到大字典里
        其余字段（小节……）。这样「首次出现」落在读者**最先读到**的地方；md 简版只渲染
        速览那一段，也才拿得到自己的首次括注（小节讲解不搬到 md 里）。
+    ⭐ `canon`（F7-e）：术语表的 `[(en, zh)]` 对 —— 有标准拼写就**盖过**模型/转录写法
+       （`shutting down price` → `shutdown price`）。
     """
     out = copy.deepcopy(review)
-    terms = collect_terms(out)
+    canon_map: dict = {}
+    for pair in (canon or []):
+        try:
+            en, zh = _one_line(pair[0]), _one_line(pair[1])
+        except Exception:                                      # noqa: BLE001
+            continue
+        if zh and en:
+            canon_map.setdefault(zh, en)
+    terms = [(zh, (canon_en(zh, canon_map) or en)) for zh, en in collect_terms(out)]
     if not terms:
         return out
     seen: set = set()

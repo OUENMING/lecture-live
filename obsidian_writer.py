@@ -279,6 +279,25 @@ def _one_line(v) -> str:
     return " ".join(v.split()) if isinstance(v, str) else ""
 
 
+def _term_pairs_norm(extra, sel) -> list:
+    """术语表最终行的 `(en, zh)` 对（**与 `render_table` 同序同去重**：本课词在前）。
+
+    ⭐ F7-e：渲染层拿它当**标准拼写**的查表 —— 转录里听成 `shutting down price`、
+       术语表里是 `shutdown price` 时，正文括注必须跟术语表（作者点名）。
+    """
+    out: list = []
+    seen: set = set()
+    for h in list(extra or []) + list(getattr(sel, "hits", None) or []):
+        en = _one_line(getattr(h, "term", ""))
+        zh = _one_line(getattr(h, "gloss", ""))
+        if not en or en.lower() in seen:
+            continue
+        seen.add(en.lower())
+        if zh:
+            out.append([en, zh])
+    return out
+
+
 def _asked_question(turn_content: str) -> str:
     """从问答线程的 user turn 里取回**用户原话**。
 
@@ -1447,6 +1466,7 @@ class ObsidianWriter:
             glossary_added=list(self._gloss_added),
             term_footer=sel.footer(),
             term_rows=note_terms.render_table(sel, extra=extra),
+            term_pairs=_term_pairs_norm(extra, sel),
             review_dates=list(self._review_dates),
             anki_name=self._anki_name, html_name=self._html_name,
             corrections_extra=list(self._corr_extra), warns=warns)

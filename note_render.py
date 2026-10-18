@@ -41,6 +41,8 @@ class NoteData:
     term_footer: str = ""
     #: 术语表（已过滤/已合并）行 —— `note_terms.render_table` 的输出。
     term_rows: list = dataclasses.field(default_factory=list)
+    #: 术语表最终行按渲染顺序的 (en, zh) 对 —— 渲染层的**标准拼写**括注查它（F7-e）。
+    term_pairs: list = dataclasses.field(default_factory=list)
     #: 复习排程日期 ISO 列表（`note_v2.review_dates`）。
     review_dates: list = dataclasses.field(default_factory=list)
     #: Anki CSV 文件名（写了才有；只写进说明那一行）。
@@ -145,8 +147,9 @@ def _detail_link(d: "NoteData") -> list:
 def render(d: NoteData) -> str:
     """`NoteData` -> **简版** Markdown（作者第六轮第 6 条）。"""
     import note_v2
-    # ⭐ 术语就地括注：与 HTML 共用同一份实现（作者 2026-10-18）。
-    review = note_v2.announce_terms_in_review(d.review or {})
+    # ⭐ 术语就地括注：与 HTML 共用同一份实现（作者 2026-10-18）；F7-e 带上标准拼写表。
+    review = note_v2.announce_terms_in_review(d.review or {},
+                                              canon=getattr(d, "term_pairs", None))
     d = dataclasses.replace(d, review=review)
     entries = d.entries
     ts0 = entries[0]["ts"] if entries else "—"
@@ -229,12 +232,19 @@ def render(d: NoteData) -> str:
     except Exception:                                          # noqa: BLE001
         pass
 
-    # ── ④b 复习速测（先想再看；3–5 题，答案折叠）—— 版式 A，作者 2026-10-18 ──
+    # ── ④b 复习速测（先想再看；三档各 ≤2 题，答案折叠）—— F7② ──────────────
     # ⚠️ 折叠答案用的是 Obsidian callout 的 `-` 语法（点一下才展开），不是把答案印在题目下。
     if qa:
-        L += ["## 复习速测（先想再看）", ""]
+        L += ["## 复习速测（先想再看 · 三档）", ""]
         L += ["*先合上笔记自己答，答完展开对照；完整题库与逐步解析在详细版。*", ""]
-        for i, x in enumerate(qa[:5], 1):
+        import note_v2
+        i, tier_now = 0, ""
+        for x in qa[:6]:
+            t = note_v2.qa_tier(x)
+            if t != tier_now:
+                L += [f"**{t}** — {note_v2.QA_TIER_DESC.get(t, '')}：", ""]
+                tier_now = t
+            i += 1
             L += [f"{i}. **{_one(x.get('q'))}**", "",
                   "> [!question]- 答案", "> " + _one(x.get("a")), ""]
 

@@ -510,6 +510,18 @@ class 回放页脚(unittest.TestCase):
         self.assertEqual("", data.html_name, "回放不装 KaTeX 资源，不许留一个指不到的文件名")
         self.assertEqual("", data.anki_name)
 
+    def test_速览沿用真跑的原文(self):
+        """速览是守卫链之后的模型层，review_raw.json 里没有 —— 回放页不许是空的。"""
+        import note_html
+        for job in ("v3_busi3243", "v3_ecs170"):
+            nd = _data(job)
+            want = nd["review"]["overview_long"]
+            self.assertTrue(want, job)
+            rev, warns, would, counts = nr.replay(nd, _raw(job))
+            data = nr.note_data_from(nd, rev, warns=warns, would=would, counts=counts)
+            self.assertEqual(want, data.review.get("overview_long"), job)
+            self.assertIn(str(want[0])[:20], note_html.note_page(data), job)
+
     def test_台账按回放数字重算(self):
         nd = _data("v3_ecs170")
         rev, warns, would, counts = nr.replay(nd, _raw("v3_ecs170"))

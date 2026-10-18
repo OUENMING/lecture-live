@@ -143,6 +143,11 @@ def note_data_from(note_data: dict, review: dict, *, warns: list,
     import dataclasses
     fields = {f.name for f in dataclasses.fields(note_render.NoteData)}
     kw = {k: v for k, v in (note_data or {}).items() if k in fields}
+    # ⚠️ 守卫链之后才跑的模型层（速览 `overview_long` 等）不在 review_raw.json 里 ——
+    #    回放出来的 review 里没有这些键，要从真跑的 review 补回来，否则速览整块是空的。
+    review = dict(review)
+    for k, v in ((note_data or {}).get("review") or {}).items():
+        review.setdefault(k, v)
     kw["review"] = review
     head = ["本页由**冻结回放**重生成（守卫链重跑；速览/串讲/例题返修等模型层沿用原产物）"]
     kw["warns"] = head + list(warns)

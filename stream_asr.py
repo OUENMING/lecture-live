@@ -743,9 +743,9 @@ class StreamASR:
     def stop(self) -> None:
         """收尾：发空文本帧，最多等 `finish_wait_s` 收 final，再关。可重复调。"""
         with self._lock:
-            if self._stopped:
-                return
             self._stopped = True
+        # ⚠️ 已经停过也要等：暗号切回本地（`force_local`）的那条后台线程可能还在收尾，
+        #    下课这一下直接返回的话，最后半句的 `on_sealed` 会落在 `sealedq` 判空之后（丢句）。
         self._thread.join(timeout=self._finish_wait_s + 2.0)
 
     def force_local(self) -> None:

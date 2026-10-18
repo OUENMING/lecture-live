@@ -81,5 +81,23 @@ class 接线(unittest.TestCase):
         self.assertLess(s.index("hidden_switch.register("), s.index("hidden_switch.clear()"))
 
 
+
+class Whisper卡数课(unittest.TestCase):
+    """Soniox 上的课也算「用过云端」—— 否则 3.10 用户永远攒不够 3 节，Whisper 卡永远不出。"""
+
+    def test_只走_Soniox_也算(self):
+        import main
+
+        class S:
+            def __init__(self, n):
+                self.n = n
+
+            def metrics(self):
+                return {"sealed_n": self.n}
+        self.assertTrue(main._class_used_cloud_asr(False, S(12)))
+        self.assertFalse(main._class_used_cloud_asr(False, S(0)))
+        self.assertFalse(main._class_used_cloud_asr(False, None))
+        self.assertTrue(main._class_used_cloud_asr(True, None))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -3935,12 +3935,28 @@ def run(args) -> None:
             _draft_model_on_exit()
             # ⭐ 这节课的定稿用过云端 → 记一节（那张「旧的本地 Whisper 还能清掉」的卡
             #    要「本版本上已上完 ≥3 节云端定稿的课」；计数失败不拦任何事）。
-            if cloud_final["used"]:
+            if _class_used_cloud_asr(cloud_final["used"], stream):
                 try:
                     import whisper_card
                     whisper_card.note_cloud_class()
                 except Exception:                         # noqa: BLE001
                     pass
+
+
+def _class_used_cloud_asr(final_used: bool, stream) -> bool:
+    """这节课的识别用过云端吗（给 Whisper 卡数课）。
+
+    ⚠️ 3.10 起 Soniox 在跑时本地定稿那条路整个不走（`allow_local()` 为假）→
+       `cloud_final["used"]` 一直是假；只看它的话，用 Soniox 上课的人永远攒不够 3 节，
+       那张卡永远不出（2026-10-18 收尾检查抓到：small-fixes × chain-fix 两个分支各自成立）。
+       Soniox 封出过句子 = 音频上过云端，同样算一节。
+    """
+    if final_used:
+        return True
+    try:
+        return bool(stream is not None and int(stream.metrics().get("sealed_n") or 0) > 0)
+    except Exception:                                         # noqa: BLE001
+        return False
 
 
 #: `SilenceWatch` 按音源的（等多久, 报什么）。⚠️ 只说现象 + 最可能的两个原因，不替用户动系统设置。

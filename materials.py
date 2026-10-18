@@ -159,6 +159,13 @@ class Materials:
                 self._df[t] = self._df.get(t, 0) + 1
         if self._n:
             self._avg = sum(self._len) / self._n
+        #: 真的有**多个节**的文件（标题数 > 1）—— "同一节只留一块"的去重只对它们有意义。
+        #  ⚠️ DB 审查 D-1：单节 / 无标题的文件（纯 .txt、通篇只有一个 `# 标题`）所有块
+        #  `heading` 相同，按节去重等于把整份材料压成一块（top-k 退化成 1，**静默**）。
+        heads: dict = {}
+        for c in self._chunks:
+            heads.setdefault(c.file, set()).add(c.heading)
+        self._multi_section = {f for f, hs in heads.items() if len(hs) > 1}
         self._blob = "\n".join(c.text for c in self._chunks).lower()
         self._rx: dict = {}
 
@@ -258,12 +265,13 @@ class Materials:
         seen_heads: set = set()
         for s, i in scored:
             c = self._chunks[i]
-            # ⚠️ 「同一节连着命中时只留一块」只对**有标题的节**有意义 —— `(file, heading)`
-            #    是节的**身份**。没有标题的材料（纯 `.txt`、或通篇只有一个 `# 标题` 之外
-            #    没有子标题）所有块 `heading` 相同（`""`）→ 旧键把它们当同一节，该文件只能
-            #    返回得分最高的那一块，top-k 检索对这类文件直接退化成 1 块（**静默**：
-            #    不报错，只是内容永不被检索到）。无名节用块序号当身份（= 不按节去重）。
-            key = (c.file, c.heading) if c.heading else (c.file, i)
+            # ⚠️ 「同一节连着命中时只留一块」只在**真的有多个节**的文件里才成立 ——
+            #    `(file, heading)` 是节的**身份**。没有标题（`heading=""`）或整篇只有一个
+            #    标题的文件，所有块"同一节" → 旧键把整份材料压成得分最高的一块，top-k
+            #    检索退化成 1 块（**静默**：不报错，只是内容永不被检索到）。无名节/单节
+            #    文件用块序号当身份（= 不按节去重）；多节文件照旧只留一块，省 prompt。
+            key = ((c.file, c.heading) if (c.heading and c.file in self._multi_section)
+                   else (c.file, i))
             if key in seen_heads:                 # 同一节连着命中时只留一块，省 prompt
                 continue
             body = c.text[:CHUNK_MAX]

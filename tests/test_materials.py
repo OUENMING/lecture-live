@@ -106,12 +106,28 @@ class Search(unittest.TestCase):
         self.assertGreater(len(got), 1, "无标题文件只返回了一块（top-k 退化成 1）")
         self.assertEqual({c.text for c in got}, {c.text for c in chunks})
 
-    def test_有标题的节仍然只留一块(self):
-        """去重的本意（同一节不重复取）不许被上面的修复破坏。"""
-        idx = mt.Materials([mt.Chunk(file="f.md", heading="S",
-                                     text=f"word alpha part {i}") for i in range(5)])
-        got = idx.search("word alpha", k=3)
-        self.assertEqual(len(got), 1, "同一节的多个块该只留一块")
+    def test_只有一个标题的材料也不被压成一块(self):
+        """同一形状的第二例：通篇只有一个 `# 标题`（整份材料 = 一节）—— 按节去重等于
+        把整份材料压成一块，静默丢内容。"""
+        q = "transfer pricing elasticity of demand"
+        text = "# ECON10790 Final Exam\n\n" + "\n\n".join(
+            f"{q} " * 8 + f"第 {i} 题。" for i in range(3))
+        chunks = [mt.Chunk(file="exam.md", heading=c.heading, text=c.text)
+                  for c in mt.split_chunks(text)]
+        heads = {c.heading for c in chunks}
+        self.assertEqual(len(heads), 1, heads)          # 真的只有一个节
+        idx = mt.Materials(chunks)
+        got = idx.search(q, k=3)
+        self.assertGreater(len(got), 1, "单节材料被压成一块（静默丢内容）")
+
+    def test_多节文件的同一节仍然只留一块(self):
+        """去重的本意（同一节不重复取、省 prompt）不许被上面的修复破坏。"""
+        idx = mt.Materials([mt.Chunk(file="f.md", heading=h,
+                                     text=f"word alpha part {i} {h}")
+                            for i, h in enumerate(["S1", "S2", "S3"])])
+        got = idx.search("word alpha part", k=3)
+        heads = [c.heading for c in got]
+        self.assertEqual(len(heads), len(set(heads)), f"同一节取了两块：{heads}")
 
 
 class Verify(unittest.TestCase):

@@ -604,26 +604,33 @@ def dedupe_sentences(review: dict, *, min_chars: int = 10) -> tuple:
 
 #: 正文里的钟点时间戳（"教授在 12:50:41 以笑声结束…"）。节标题/出处字段上的时间戳不碰。
 _CLOCK_AT = re.compile(r"(?:在|于)\s*[\[(]?\d{1,2}:\d{2}(?::\d{2})?[\])]?\s*")
+#: 戳挡在"的"前（"12:50:28 的「a one day pleasure」是…"）→ 连"的"一起收，
+#: 不然剩个残句（"； 的「…」是…"，回放自查抓到）。
+_CLOCK_POSS = re.compile(r"(?<![:\d])\d{1,2}:\d{2}(?::\d{2})?\s*的")
 _CLOCK_BARE = re.compile(r"(?<![:\d])\[?\d{1,2}:\d{2}(?::\d{2})?\]?(?![:\d])")
 
 
 def strip_clock_times(review: dict) -> tuple:
     """正文里的钟点时间戳删掉 —— 时间在**节标题**上；正文指位置写（第 N 节）。
 
-    ⚠️ 不碰 `title`/`ts`/`sources`（那些地方的时间戳是**该有的**：题目出处）、
-       也不碰 `checks`（核对清单是台账，一个字都不许动）。
+    ⚠️ 不碰：`title`/`ts`/`sources`（题目出处的戳是**该有的**）、**`heading`**
+       （节标题里 `[13:16]` 前缀就是"时间在标题上"的那一处）、`checks`/`corrections`/
+       `cover`（台账，一个字都不许动；`corrections.where` 存的就是原话发生时间）、
+       以及引语字段（原话引用必须逐字）。
+       —— 2026-10-18 回放自查抓到：初版把这些全删了（9 个标题前缀 + 账本 where）。
     """
     out = copy.deepcopy(review)
     n = 0
     for path in paths_of(out):
-        if not path or path[0] in _SKIP_TOP or path[0] == "checks":
+        if not path or path[0] in _SKIP_TOP or path[0] in ("checks", "corrections"):
             continue
-        if _field_name(path) in ("title", "ts", "sources"):
+        if _field_name(path) in ("title", "ts", "sources", "heading", "where", "quote", "spoken"):
             continue
         v = _get(out, path)
         if not isinstance(v, str) or ":" not in v:
             continue
         v2 = _CLOCK_AT.sub("", v)
+        v2 = _CLOCK_POSS.sub("", v2)
         v2 = _CLOCK_BARE.sub("", v2)
         v2 = re.sub(r"\s{2,}", " ", v2).strip(" ")
         v2 = re.sub(r"[（(]\s*[）)]", "", v2)

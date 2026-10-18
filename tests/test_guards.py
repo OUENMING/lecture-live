@@ -649,15 +649,31 @@ class StripClock(unittest.TestCase):
         self.assertIn("教授以笑声结束当前内容", got)
         self.assertTrue(warns and "1 处" in warns[0], warns)
 
-    def test_节标题_出处字段_核对清单的时间戳一个字不动(self):
-        rev = {"sections": [{"ts": "12:50:41",
+    def test_戳挡在的字前连的一起收(self):
+        """回放自查抓到：`；12:50:28 的「…」是…` 只删戳会剩个残句（"； 的…"）。"""
+        s = "这是本段唯一有实际安排信息的一句话；12:50:28 的「a one day pleasure」是课堂收尾的插话。"
+        out, _, _ = ng.strip_clock_times({"sections": [{"prose": [s]}]})
+        got = out["sections"][0]["prose"][0]
+        self.assertNotIn("12:50:28", got)
+        self.assertIn("；「a one day pleasure」是课堂收尾的插话。", got)
+
+    def test_节标题_出处_台账的时间戳一个字不动(self):
+        """⚠️ 回放自查（2026-10-18）：初版把节标题的 `[13:16]` 前缀和账本的
+        `corrections.where`（原话发生时间）也删了 —— 时间在标题上是**该有的**。"""
+        rev = {"sections": [{"heading": "[12:50] 章节过渡", "ts": "12:50:41",
                              "prose": ["正文。"],
-                             "example": {"title": "📖 卷（🎙 13:29）", "prompt": "p"}}],
-               "checks": [{"claim": "12:50:41 的断言", "status": "unchecked", "how": "h"}]}
+                             "example": {"title": "📖 卷（🎙 13:29）", "prompt": "p"},
+                             "sources": ["🎙 12:50:41-12:51:00"]}],
+               "checks": [{"claim": "12:50:41 的断言", "status": "unchecked", "how": "h"}],
+               "corrections": [{"where": "12:50:41", "spoken": "教授在 12:50:41 说"}]}
         out, _, _ = ng.strip_clock_times(rev)
+        self.assertEqual("[12:50] 章节过渡", out["sections"][0]["heading"])
         self.assertEqual("12:50:41", out["sections"][0]["ts"])
         self.assertEqual("📖 卷（🎙 13:29）", out["sections"][0]["example"]["title"])
+        self.assertEqual("🎙 12:50:41-12:51:00", out["sections"][0]["sources"][0])
         self.assertEqual("12:50:41 的断言", out["checks"][0]["claim"])
+        self.assertEqual("12:50:41", out["corrections"][0]["where"])
+        self.assertEqual("教授在 12:50:41 说", out["corrections"][0]["spoken"])
 
 
 class TrivialCues(unittest.TestCase):

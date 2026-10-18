@@ -1180,6 +1180,8 @@ class ObsidianWriter:
                               r, materials=self._materials), "停产价格口径"),
                           (lambda r: note_ledger.ensure_min_value(r), "最小平均成本补值"),
                           (lambda r: self._with_overview(r), "五分钟串讲"),
+                          # 串讲的正文也吃同一条纪律（它是 overview 层新写的散文，第一遍清完在它之前）
+                          (lambda r: note_guards.strip_clock_times(r), "正文时间戳清理（串讲）"),
                           (lambda r: note_guards.scrub(r), "猜测句清理（串讲）"),
                           (lambda r: note_guards.quote_check(
                               r, materials=self._materials,

@@ -362,6 +362,16 @@ class ConceptUnits(unittest.TestCase):
                          ["[13:16] A：一", "[13:18] B：二", "[13:20] A：三"],
                          "单成员单元保持原标题")
 
+    def test_双前缀也认(self):
+        """防御：模型自己在标题里写了 `[13:16]`（`merge_blocks` 还会再加一层）。"""
+        rev = {"sections": [
+            self._sec("13:16", "[13:16] [13:16] 最优化练习与停业价格：一"),
+            self._sec("13:18", "[13:18] [13:18] 最优化练习与停业价格：二"),
+        ]}
+        got = nv.merge_units(rev, end_ts="13:20")
+        self.assertEqual(len(got["sections"]), 1)
+        self.assertEqual(got["sections"][0]["heading"], "最优化练习与停业价格")
+
     def test_没有_sections_原样返回(self):
         rev = {"qa": [{"q": "x", "a": "y"}]}
         self.assertEqual(nv.merge_units(rev), rev)

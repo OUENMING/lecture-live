@@ -293,6 +293,17 @@ class TestSecondDerivative(unittest.TestCase):
         rows = nm.check_review(rev)
         self.assertTrue([r for r in rows if r["status"] == "mismatch"], rows)
 
+    def test_convex_与凸同侧不许报假矛盾(self):
+        """⭐ DB 审查 D-26：`_DIR_WORD` 收英文 `convex|concave`，但"极小侧"词表原来只有中文 ——
+        句中写 `convex`（二阶导为正、结论是极小）会被判成"方向矛盾"，对算对的句子报假 mismatch。"""
+        rev = {"sections": [{"example": {"title": "📖 某卷", "prompt": "$f(x)=x^2-4x$",
+                                         "steps": [{"text": "$f''(2)=2>0$，函数是 convex 的，"
+                                                            "故为极小值点。"}],
+                                         "answer": "x=2"}}]}
+        rows = [r for r in nm.check_review(rev) if "二阶导" in r["how"] or "f''" in r["recomputed"]]
+        self.assertTrue(rows, "二阶导断言一条都没核")
+        self.assertEqual([r["status"] for r in rows], ["ok"], rows)
+
     def test_正文的除法也要核(self):
         """⭐ 第六轮（产物 I 的 §1）：正文写着「这里用到了5.3除以3得到2.89的计算」——
         三道核**一句没拦**（原来没有除法这一档），而 living 摘要里 2.89 的账本

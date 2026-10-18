@@ -2219,7 +2219,11 @@ class Overlay:
         若被吞 -> 退回"提交后让出焦点"的旧行为, 或改成"答案流结束后再让出"。"""
         text = (self._input.stringValue() or "").strip()
         self._input.setStringValue_("")
-        if text:
+        import hidden_switch
+        said = hidden_switch.handle(text) if text else None
+        if said is not None:                  # 暗号：不当问题发出去，状态写回一行
+            self.notice(said, warn=False)
+        elif text:
             self._note("submit")
             self._on_submit(text)
         # 放在回调**之后**: 回调抛错也不能把焦点丢掉(否则下一问又要重新点一次)。

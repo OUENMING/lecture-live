@@ -87,6 +87,22 @@ class StreamGate:
         except Exception:                                    # noqa: BLE001
             pass
 
+    def force_local(self) -> str:
+        """暗号「菠萝丁」：把这节课切回本地草稿 + 云端定稿（翻译不动）。返回给人看的一行。
+
+        关流要等收尾（最多几秒）→ 丢后台线程，主线程立刻返回。之后照常由主循环的
+        `take_notice()` 报一次、闸自动放开 —— 和断线退回走同一条路。单向：不会再切回 Soniox。
+        """
+        if self._stream is None:
+            return "这节课本来就是本地识别"
+        if self._stopped or self._freed or self._stream.reason():
+            return "已经是本地识别了"
+        import threading
+
+        threading.Thread(target=self._stream.force_local, name="stream-asr-manual",
+                         daemon=True).start()
+        return "正在切到本地识别 + 云端定稿…"
+
     # ---- 段号
 
     def mark(self) -> int:

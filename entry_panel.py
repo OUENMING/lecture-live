@@ -3402,6 +3402,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     def run_search(q: str):
         """标题行搜索框回车 → 全库搜。**只读**，不改任何文件。"""
         q = (q or "").strip()
+        import hidden_switch
+        said = hidden_switch.handle(q)           # 上课中打暗号：只换识别模型，不搜
+        if said is not None:
+            set_status(said)
+            return
         if not q:
             S["search"] = None
             set_status("已清除搜索")

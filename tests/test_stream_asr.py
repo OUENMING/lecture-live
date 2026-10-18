@@ -572,6 +572,25 @@ def t_transport_fatal_error_code_only_no_retry() -> None:
         wk.close()
 
 
+def t_transport_force_local_manual() -> None:
+    """暗号「菠萝丁」：手动关流 → 原因记 manual、文案说清楚、不重连。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son)
+    try:
+        assert wait_until(s.alive)
+        s.force_local()
+        assert wait_until(lambda: not s.alive() and s.reason() != ""), "该退回"
+        assert s.reason() == "manual", s.reason()
+        assert "菠萝丁" in s.notice_text(), s.notice_text()
+        assert len(wk.requests) == 1, "手动退回不许再领 key"
+        assert s.metrics()["fallback_reason"] == "manual"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
 def t_transport_balance_exhausted_falls_back_now() -> None:
     """`organization_balance_exhausted`（余额用完）是致命类：**不重连**，直接退回本地。"""
     son = FakeSoniox()
@@ -867,6 +886,7 @@ def main() -> int:
         ("transport: 正常出两句 + config", t_transport_happy_path),
         ("transport: 致命错误不重连", t_transport_fatal_error_no_retry),
         ("transport: 只有 error_code 的致命错误也不重连", t_transport_fatal_error_code_only_no_retry),
+        ("transport: 暗号手动退回（manual）", t_transport_force_local_manual),
         ("transport: 余额耗尽 → 不重连直接退回", t_transport_balance_exhausted_falls_back_now),
         ("transport: 断线重连一次", t_transport_reconnect_once),
         ("transport: 封过句之后重连还能接着封", t_transport_reconnect_after_sealing_keeps_sealing),

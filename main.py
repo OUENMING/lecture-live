@@ -2221,6 +2221,9 @@ def run(args) -> None:
             echo(f"⚠ 实时识别起不来，本节课走本地：{type(e).__name__}: {e}")
             stream = None
     gate = stream_gate.StreamGate(stream, sr=SR)
+    # 暗号「菠萝丁」（悬浮窗输入行 / 上课中开的面板搜索框）→ 只换识别模型，其余照旧
+    import hidden_switch
+    hidden_switch.register(gate.force_local)
     # Soniox 逐句封口会把 "Okay?" 单独封成一句 -> 屏上并进上一行（`caption_flow.is_tail`）
     _tail = {"on": gate.on and callable(getattr(ui, "set_tail_merge", None))}
     if _tail["on"]:
@@ -3456,6 +3459,7 @@ def run(args) -> None:
             #    `sealedq` 里剩下的封口句全丢（和 `seg.flush()` 那一处的纪律同源）。
             #    ⚠️ 排在 `seg.flush()` **之后**：flush 会把最后那半句的音频交给
             #       `_utterance_end`，此时流还活着 -> 本地那道闸仍关着，尾巴不会做两遍。
+            hidden_switch.clear()         # 下课了：暗号变回普通文字
             if gate.on:
                 _drafts_done.set()        # 草稿轮询线程先停（别再往 `drafts` 里放）
                 gate.stop()               # 内部 `stream.stop()`：最多等 finish_wait_s

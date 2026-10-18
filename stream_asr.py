@@ -131,6 +131,7 @@ NOTICES = {
     "timeout": "实时识别没有响应，已切回本地识别",
     "disconnected": "实时识别掉线了，已切回本地识别",
     "error": "实时识别出错了，已切回本地识别",
+    "manual": "已切到本地识别 + 云端定稿（菠萝丁）；翻译不变",
 }
 NOTICE_DEFAULT = "实时识别暂不可用，已切回本地识别"
 
@@ -632,6 +633,7 @@ class StreamASR:
         self._fatal = False
         self._reason = ""
         self._retried = False
+        self._manual = False                        # `force_local()` 关的（退回原因记 manual）
         self._pending = ""                          # 上次会话的死因（重连时先清、判死时先看）
         self._thread = threading.Thread(target=self._run, name="stream-asr", daemon=True)
         self._thread.start()
@@ -745,6 +747,17 @@ class StreamASR:
                 return
             self._stopped = True
         self._thread.join(timeout=self._finish_wait_s + 2.0)
+
+    def force_local(self) -> None:
+        """手动退回本地（暗号「菠萝丁」，`hidden_switch`）：像收尾一样关掉，但原因记 `manual`。
+
+        ⚠️ 会阻塞到收尾完成（最多 `finish_wait_s`）—— 调用方放后台线程（`StreamGate.force_local`）。
+        """
+        with self._lock:
+            if self._stopped or self._finished:
+                return
+            self._manual = True
+        self.stop()
 
     # ---- 控制线程
 
@@ -1028,7 +1041,7 @@ class StreamASR:
             self._finished = True
             self._alive = False
             if self._stopped:
-                self._reason = ""
+                self._reason = "manual" if self._manual else ""
             else:
                 self._reason = reason or "error"
         # 收尾后不再投递（`_finish_stream` 已 flush 过一次；这里只是把残留清干净）

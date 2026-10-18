@@ -1193,6 +1193,45 @@ def main() -> int:
               and not list(_d24.glob("*.tmp")),
               f"{_st24} files={[p.name for p in _d24.glob('*.tmp')]}")
 
+        # ⭐⭐ 2026-10-18 审查 D8：provisional 快照**不碰**共享的视图采样状态，
+        #    且 UI 线程不停新增档位时快照读视图块**不抛**。
+        _t24.note_view(7, 3, 420.0)               # 开一个"正在计时的"采样
+        _cur_before, _t0_before = _t24._view_cur, _t24._view_t0
+        _rows_before = dict(_t24._view_rows_s)
+        _t24.report_payload(provisional=True)
+        # ⚠️ 变异验证：把 `self._view_close()` 挪回 provisional 分支**之前** -> 这条红
+        #    （cur 被清成 None、上一次样本被记进 rows_s）。
+        check("⭐⭐ D8 provisional 快照**不 close** 视图采样（不碰 cur/t0/rows_s）",
+              _t24._view_cur == _cur_before and _t24._view_t0 == _t0_before
+              and dict(_t24._view_rows_s) == _rows_before,
+              f"cur={_t24._view_cur!r} rows={_t24._view_rows_s!r}")
+
+        # ⚠️⚠️ 2026-10-18 事故：这里原来起一个线程 `while not stop` 无限新增档位 + 读 3000 次，
+        #    每次读都复制并排序越长越大的 dict -> 涨到 72 GB，整台 Mac 被 jetsam 拖死；
+        #    而且靠线程时序，变异下也不稳定变红。改成**确定性**判据：一个"别人正在往里加键"
+        #    的 dict —— 谁直接遍历它（没先取副本），谁就当场 RuntimeError。
+        class _Growing8(dict):
+            def items(self):                       # 遍历途中有人加键（= UI 线程并发写）
+                for _i, _kv in enumerate(list(dict.items(self))):
+                    if _i == 0:
+                        self[max(self) + 1] = 0.0
+                    yield _kv
+                raise RuntimeError("dictionary changed size during iteration")
+        _err8: list = []
+        _saved8 = (_t24._view_rows_s, _t24._view_lines_s)
+        _t24._view_rows_s = _Growing8({1: 1.0, 2: 2.0})
+        _t24._view_lines_s = _Growing8({1: 1.0})
+        try:
+            _t24._view_block()
+        except Exception as _e8:                                 # noqa: BLE001
+            _err8.append(repr(_e8))
+        finally:
+            _t24._view_rows_s, _t24._view_lines_s = _saved8
+        # ⚠️ 变异验证：把 `_view_block` 的副本读取去掉（直接 `sorted(self._view_rows_s.items())`）
+        #    -> 红（RuntimeError）。
+        check("⭐⭐ D8 UI 线程新增档位时快照读视图块 -> 不抛（先取副本）",
+              not _err8, str(_err8))
+
         # ③ 超预算 -> **不再采**（这次也不写）：把预算临时压到 -1 就是"一定超"
         _saved_max = tm.PROVISIONAL_MAX_MS
         tm.PROVISIONAL_MAX_MS = -1.0

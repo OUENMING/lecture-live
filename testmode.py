@@ -1256,6 +1256,14 @@ class TestSession:
         #: ⭐ 3.10：课中那份**临时报告快照**的状态（见 `_snapshot_report`）。
         #:    ⚠️ 一把锁护两个写手（快照线程 / `finish`）—— 别让"临时的"盖掉"正式的"。
         self._snap_lock = threading.Lock()
+        #: ⭐ ⑤ 视图采样（`_view_*`）是**两个线程**碰的状态：快照线程（`cl-snap` 跑
+        #:    `report_payload(provisional=True)`）与 UI 线程的 `note_view`。
+        #:    ⚠️ 2026-10-18 审查 D8：`d.get(k,0.0)+dt` 的读改写会丢更新，而
+        #:    `_view_block()` 遍历 `_view_rows_s.items()` 时若 UI 线程恰好新增键会抛
+        #:    `RuntimeError`（被快照线程静默吞掉 = 快照凭空消失）。这把锁护住它，
+        #:    并且**快照那条路不再 `_view_close()`**（provisional 不碰共享状态）。
+        #:    用 `RLock`：`note_view` → `_view_close` 是同线程重入。
+        self._view_lock = threading.RLock()
         self._snap_thread: threading.Thread | None = None
         self._snap_n = 0                     # 采了几次（进正式报告的账）
         self._snap_ms: float | None = None   # 最近一次：构建 + 序列化耗时
@@ -1702,14 +1710,16 @@ class TestSession:
 
         ⚠️ `overlay` 在 pump 里**每秒最多采一次**（它自己限流）；这里按**时间加权**
            把「上一次采样到这一次」的秒数记进上一份样本，所以累计秒数 ≈ 该档位在屏上的时长。
+        ⚠️ 视图状态**跨线程**（快照线程也读它）—— 全在 `_view_lock` 里改（审查 D8）。
         """
         now = time.monotonic()
-        self._view_close(now)
-        self._view_cur = (int(rows), int(lines), float(width))
-        self._view_t0 = now
-        self._view_n += 1
-        if len(self._view_w) < VIEW_W_MAX:
-            self._view_w.append(float(width))
+        with self._view_lock:
+            self._view_close(now)
+            self._view_cur = (int(rows), int(lines), float(width))
+            self._view_t0 = now
+            self._view_n += 1
+            if len(self._view_w) < VIEW_W_MAX:
+                self._view_w.append(float(width))
 
     @_safe
     def note_merge_item(self, job: dict, en: str, zh: str, replaced: bool) -> None:
@@ -1757,7 +1767,8 @@ class TestSession:
         """
         if self.energy is not None:
             self.energy.on_vis(visible)
-        self._view_close(time.monotonic())
+        with self._view_lock:
+            self._view_close(time.monotonic())
 
     @_safe
     def add_wait(self, tier: str, seconds: float) -> None:
@@ -1779,27 +1790,42 @@ class TestSession:
         self._cap_last_wall = w
 
     def _view_close(self, now: float | None = None) -> None:
-        """⑤ 把「上一次采样 → 现在」的秒数记进上一次那份样本（时间加权）。**绝不抛**。"""
-        cur = self._view_cur
-        if cur is None:
-            return
-        if now is None:
-            now = time.monotonic()
-        dt = now - (self._view_t0 if self._view_t0 is not None else now)
-        rows, lines, _w = cur
-        if dt > 0:
-            self._view_rows_s[rows] = self._view_rows_s.get(rows, 0.0) + dt
-            self._view_lines_s[lines] = self._view_lines_s.get(lines, 0.0) + dt
-        self._view_cur = None
-        self._view_t0 = None
+        """⑤ 把「上一次采样 → 现在」的秒数记进上一次那份样本（时间加权）。**绝不抛**。
+
+        ⚠️ 读改写 `_view_rows_s` / `_view_lines_s` 在 `_view_lock` 里（可重入）——
+           快照线程也可能在跑（审查 D8）。
+        """
+        with self._view_lock:
+            cur = self._view_cur
+            if cur is None:
+                return
+            if now is None:
+                now = time.monotonic()
+            dt = now - (self._view_t0 if self._view_t0 is not None else now)
+            rows, lines, _w = cur
+            if dt > 0:
+                self._view_rows_s[rows] = self._view_rows_s.get(rows, 0.0) + dt
+                self._view_lines_s[lines] = self._view_lines_s.get(lines, 0.0) + dt
+            self._view_cur = None
+            self._view_t0 = None
 
     def _view_block(self) -> dict:
-        """⑤ 视图块（进 `blocks.ui.view`）。宽度 p50 用 `np.median`。"""
-        out = {"samples": self._view_n,
-               "rows_s": {str(k): round(v, 1) for k, v in sorted(self._view_rows_s.items())},
-               "lines_s": {str(k): round(v, 1) for k, v in sorted(self._view_lines_s.items())},
-               "width_p50": (round(float(np.median(np.asarray(self._view_w, dtype=float))), 1)
-                             if self._view_w else None)}
+        """⑤ 视图块（进 `blocks.ui.view`）。宽度 p50 用 `np.median`。
+
+        ⚠️⚠️ **先取副本再算**（审查 D8）：`_view_rows_s` 是 UI 线程在写的 dict，
+           直接 `sorted(...items())` 时若它恰好新增键会抛 `RuntimeError: dict changed
+           size during iteration` —— 而调用方是快照线程，异常被静默吞掉 = 快照凭空消失。
+        """
+        with self._view_lock:
+            rows_s = dict(self._view_rows_s)
+            lines_s = dict(self._view_lines_s)
+            widths = list(self._view_w)
+            n = self._view_n
+        out = {"samples": n,
+               "rows_s": {str(k): round(v, 1) for k, v in sorted(rows_s.items())},
+               "lines_s": {str(k): round(v, 1) for k, v in sorted(lines_s.items())},
+               "width_p50": (round(float(np.median(np.asarray(widths, dtype=float))), 1)
+                             if widths else None)}
         return out
 
     def energy_block(self, screen_hz: float | None = None) -> dict:
@@ -2126,7 +2152,11 @@ class TestSession:
         #    ⚠️⚠️ 快照（`provisional`）走**副本**：`setdefault` 是"先到先得"，而快照
         #       跑在课中 —— 它要是先填了，正式报告就拿到 10 分钟前的旧 items。
         #       见 `report_payload` 的 docstring。
-        self._view_close()
+        # ⭐⭐ 2026-10-18 审查 D8：`_view_close()` 会改写共享的视图采样状态
+        #    （`_view_rows_s` / `_view_lines_s` / `_view_cur` / `_view_t0`），而 provisional
+        #    快照跑在 **`cl-snap` 后台线程**上、UI 线程的 `note_view` 也在改同一批状态 ——
+        #    所以 provisional 那条路**不 close**（只读一份副本）；正式那份（收尾线程，
+        #    已 join 掉快照线程）才 close。
         if provisional:
             extra = dict(self._extra)
             _ui = dict(extra.get("ui") or {})
@@ -2140,6 +2170,7 @@ class TestSession:
             _bf.setdefault("items", list(self._backfill_items))
             extra["backfill"] = _bf
         else:
+            self._view_close()          # ⭐ 正式那份（收尾线程）才收口视图计时（D8）
             self._extra.setdefault("ui", dict(self._ui))
             _ui = self._extra.get("ui")
             if isinstance(_ui, dict):

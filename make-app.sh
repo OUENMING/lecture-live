@@ -104,6 +104,10 @@ fi
 # ⚠️⚠️ 与 `install.sh --check` 同一套（`_bad` + 最后 `exit "$_bad"`）——
 #    原来这里无论报什么最后都 `exit 0`，于是 `if ./make-app.sh --check; then` 永远为真，
 #    脚本化调用读不出「缺件」。进 `set -e` 的调用方更要看退出码：一条 ❌ 都不该被当成"没事"。
+#    ⚠️ **与 `install.sh --check` 有一处刻意不同**：`.app` **根本不存在**这一档这里是
+#       ⚪ 且**不计入退出码**（源码检出里 ".app 还没构建" 是正常状态，不是缺件）——
+#       `install.sh --check` 对同一状态报 ❌、退出 1。要问"该不该重建"用
+#       `--up-to-date`（那份判据的唯一实现），别用 `--check` 的退出码。
 # ⚠️ **报全**的纪律不变：一条 ❌ 也不早退，先把现状全说完，最后才用退出码汇报。
 if [ "${1:-}" = "--check" ]; then
   _bad=0
@@ -128,10 +132,13 @@ if [ "${1:-}" = "--check" ]; then
       #    ⚠️ 这一档是 ⚠️ 不是 ❌（理论上还能修）：**不计入退出码**。
       say "   ⚠️ MacOS/$_EXE_C   **符号链接** → 双击会没反应！重跑 ./make-app.sh"
     else
-      if [ -e "$APP/Contents/MacOS/python" ]; then
+      if [ -x "$APP/Contents/MacOS/python" ]; then
         say "   MacOS/python      就位"
       else
-        say "   MacOS/python      ❌ 缺"; _bad=1
+        # ⚠️ 判**可执行位**不是"存在"（2026-10-18 审查 C9）：与构建自检 ⑧ 和 `cl` 同一口径。
+        #    `MacOS/python` 存在但不可执行（exFAT/U 盘来回拷、rsync 没带 -p、备份还原丢权限）
+        #    时双击没反应、`cl` 直接判它坏 —— 而 `--check` 是它**唯一**能被脚本查出来的地方。
+        say "   MacOS/python      ❌ 缺 / 不可执行"; _bad=1
       fi
       # ⚠️ 这里必须同时判 `-f`：上面的 `-e` 查的是**硬编码的 python**，
       #    而这一行查的是 `$_EXE_C`（Info.plist 里那个名字）—— 两者可以不是同一个。

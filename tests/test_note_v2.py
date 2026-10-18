@@ -691,11 +691,11 @@ class ShortenOverlimit(unittest.TestCase):
 
         def chat(s, u, mt):
             calls.append(u)
-            return {"prose": ["短"]}
+            return {"prose": ["好" * 500 + "。"]}          # 压到一半，仍是散文（过地板）
         got, _, warns = nv.shorten_overlimit(self._rev(1000), chat=chat)
         self.assertEqual(len(calls), 1)
         self.assertIn("上限是 240 字", calls[0])
-        self.assertEqual(got["sections"][0]["prose"], ["短"])
+        self.assertEqual(got["sections"][0]["prose"], ["好" * 500 + "。"])
         self.assertTrue(warns and "1 个单元" in warns[0], "调用数要记账")
 
     def test_没超限不发(self):
@@ -728,7 +728,11 @@ class ShortenOverlimit(unittest.TestCase):
             return {"prose": ["短"]}
         rev = {"sections": [{"ts": "13:16", "heading": f"H{i}", "prose": ["字" * 1000],
                              "minutes": 1.0} for i in range(7)]}
-        got, _, warns = nv.shorten_overlimit(rev, chat=chat)
+
+        def chat2(s, u, mt):
+            calls.append(u)
+            return {"prose": ["好" * 500 + "。"]}
+        got, _, warns = nv.shorten_overlimit(rev, chat=chat2)
         self.assertEqual(len(calls), 5)
         self.assertTrue(warns and "5 个单元" in warns[0])
         self.assertEqual([s["prose"] for s in got["sections"]][5:],
@@ -747,6 +751,29 @@ class ShortenOverlimit(unittest.TestCase):
         got, _, warns = nv.shorten_overlimit(self._rev(1000), chat=boom)
         self.assertEqual(got["sections"][0]["prose"], ["字" * 1000])
         self.assertEqual(warns, [])
+
+    def test_压成电报体_留原文(self):
+        """⭐ F14 ⑦（作者实录）：ECS170 §23/§29 被压成「阶跃0/1无梯度→sigmoid/tanh饱和→
+        ReLU修负区与不光滑；先试ReLU。」「前向算输出；反向链式传梯度，sigmoid导数复用」——
+        更短了，但没法读了。可读性地板：宁长勿电报。"""
+        for bad in ("阶跃0/1无梯度→sigmoid/tanh饱和→ReLU修负区与不光滑；先试ReLU。",
+                    "前向算输出；反向链式传梯度，sigmoid导数复用"):
+            with self.subTest(bad=bad[:12]):
+                def chat(s, u, mt, _b=bad):
+                    return {"prose": [_b]}
+                orig = ["原" * 800 + "。"]
+                rev = {"sections": [{"ts": "17:07", "heading": "H", "prose": orig,
+                                     "minutes": 1.0}]}
+                got, _, warns = nv.shorten_overlimit(rev, chat=chat)
+                self.assertEqual(orig, got["sections"][0]["prose"], "电报体不许替换原文")
+                self.assertTrue(any("可读性" in w for w in warns), warns)
+
+    def test_地板的三条判据(self):
+        old = ["原" * 800 + "。"]
+        self.assertIn("太狠", nv.too_compressed(["好" * 100 + "。"], old))
+        self.assertIn("箭头", nv.too_compressed(["好" * 500 + "。", "甲→乙→丙→丁"], old))
+        self.assertIn("标点", nv.too_compressed(["好" * 500], old))
+        self.assertEqual("", nv.too_compressed(["好" * 400 + "。"], old))
 
     def test_没有_minutes_跳过(self):
         def boom(*a):

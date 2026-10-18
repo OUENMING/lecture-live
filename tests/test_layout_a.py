@@ -49,6 +49,26 @@ def _data(**kw):
     return d
 
 
+class TermFooter(unittest.TestCase):
+    """F14 ②：术语表被挡下的行要**在 HTML 里也记账** —— md 早就有那一行，HTML 没有。
+
+    （A2 让术语表从 88 行缩到 59 行；读者只看得见行数变少，看不见"为什么少"就是静默丢东西。）
+    """
+
+    def test_术语页脚渲染进_HTML(self):
+        d = _data(term_rows=["**marginal cost** — 边际成本 · 本课"],
+                  term_footer="*（已从术语表过滤 20 条非本课术语："
+                              "跨课术语库（本课没把它当术语用） 20）*")
+        h = nh.note_page(d)
+        self.assertIn("已从术语表过滤 20 条", h)
+        self.assertIn("跨课术语库", h)
+        self.assertIn('class="term-foot"', h)
+
+    def test_没有页脚就不多印一行(self):
+        h = nh.note_page(_data(term_rows=["**x** — y"]))
+        self.assertNotIn('class="term-foot"', h)
+
+
 class Blanks(unittest.TestCase):
     def test_填空是输入框_答案只在_data_ans(self):
         frag = nh._faded_html({"q": "…$f'(x)=$ ____。", "blanks": ["$3x^2-3$"],

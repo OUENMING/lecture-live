@@ -158,15 +158,16 @@ def too_common(term: str, *, verified: bool = False) -> bool:
 
 
 def drop_reason(term: str, *, type_: str = "", source: str = SRC_AUTO,
-                verified: bool = False) -> str:
+                verified: bool = False, lecture_term: bool = False) -> str:
     """一条命中该不该进笔记术语表。返回原因 = 丢掉；返回 `""` = 保留。
 
-    ⚠️ **参数只有判据需要的四样**（词面、条目类型、来源、是否已核对本课语境）——
-       这是一个纯函数，`Selection` 那边只负责记账。判据放这里的原因同
-       `chapter.deadline_hits`：它会同时被显示层与测试调用，两处各写一份就会漂。
+    ⚠️ **参数只有判据需要的那几样**（词面、条目类型、来源、是否已核对本课语境、
+       本课是否真把它当术语）—— 这是一个纯函数，`Selection` 那边只负责记账。
 
     保留规则（按来源）：
-      · `课术语表` / `术语库`：非人名、非口语常识词 → 留；
+      · `课术语表`：非人名、非口语常识词 → 留；
+      · `术语库`（**跨课共享**）：还要 `verified`（本课术语表/课件里出现过）**或**
+        `lecture_term`（本课复习层真把它当术语抽出来了）。⭐ F14 ②
       · `自动缓存`：**再**要 `verified` —— 本课术语表或本课课件里真实出现过。
         ⚠️ 这一条是「错语境义」的唯一止血点：`USC` 的缓存解析（南加州大学）
           与本课（Universal Social Charge）**词面完全相同**，只有"本课材料里
@@ -188,6 +189,20 @@ def drop_reason(term: str, *, type_: str = "", source: str = SRC_AUTO,
             return "常识词（单词条、本课无出处）"
         if not verified:
             return "无法核对本课语境"
+        return _common_word_signal(term)
+    if source == SRC_CURATED:
+        why = _common_word_signal(term)          # 口语/常识词这一档理由更具体，先说它
+        if why:
+            return why
+        if not (verified or lecture_term):
+            # ⭐ F14 ②：术语库是**全课共享**的一只文件（社会学/经济学的词条也躺在里面），
+            #    旧版对 `术语库` 来源**无条件放行** → ECS170（CS 课）的术语表里长出
+            #    `structure — 社会结构，影响行为的规则和制度 · 术语库`、
+            #    `variable — 会变化的量，比如收入、年龄` —— 那是**别的课的定义**。
+            #    纪律：本课没有把它当术语用（材料/术语表没出现过，复习层也没抽出来）
+            #    → 一律不显示；被挡下的进页脚记账（不静默丢）。
+            return "跨课术语库（本课没把它当术语用）"
+        return ""
     return _common_word_signal(term)
 
 
@@ -229,22 +244,24 @@ class Selection:
 
 
 def select(entries: list[dict], *, match, type_of=None, verify=None,
-           max_n: int = 0) -> Selection:
+           max_n: int = 0, lecture_terms=None) -> Selection:
     """转录命中 → 过滤后的术语表。**纯逻辑**（读写全在注入的两个函数里）。
 
     入参：
       · `entries` —— `obsidian_writer._parse` 的输出（每句 `{ts,en,zh,asr}`）；
       · `match(sentence) -> [(term, gloss, source, type_), …]` —— 命中来源
         （生产是 `obsidian_writer._term_hits`，判据注入替身）；
-      · `verify(term) -> bool` —— 自动缓存条目的语境核对（默认全 False：
-        **没有核对手段时宁可少显示** —— 这条纪律与 `TermNotes` 读不出时的
-        降级方向一致）。
+      · `verify(term) -> bool` —— 语境核对（默认全 False：**没有核对手段时宁愿少显示**
+        —— 这条纪律与 `TermNotes` 读不出时的降级方向一致）；
+      · `lecture_terms` —— 本课复习层抽出来的术语（小写集合）。⭐ F14 ②：`术语库`
+        是跨课共享的，只有本课真把它当术语用（`verify` 或在本集合里）才允许显示。
 
     ⚠️ 顺序：先出现的先留（`ts` 是最早那句），且**同词只留一条** ——
        同一节课里同一个词会在几十句里命中，不去重这张表就没法读。
     """
     verify = verify or (lambda _t: False)
     type_of = type_of or (lambda _t: "")
+    lect = {str(t).strip().lower() for t in (lecture_terms or []) if str(t).strip()}
     seen: set = set()
     kept: list = []
     dropped: list = []
@@ -254,13 +271,13 @@ def select(entries: list[dict], *, match, type_of=None, verify=None,
             if key in seen:
                 continue
             seen.add(key)
-            # ⚠️ `verified` **只对自动缓存那条路有含义**（另外两条来源本身就是本课的），
-            #    所以只有它去问 `verify()` —— 别让它替课术语表/术语库也发问，
-            #    那会让一个注入的假函数（判据）决定本课术语的命运。
-            why = (drop_reason(term, type_=type_of(term), source=source,
-                               verified=verify(term))
-                   if source == SRC_AUTO
-                   else drop_reason(term, type_=type_of(term), source=source))
+            # ⚠️ 只有 `自动缓存` 与 `术语库` 两条路去问 `verify()`（它们可能来自别的课）；
+            #    课术语表就是本课的，不必问。
+            if source in (SRC_AUTO, SRC_CURATED):
+                why = drop_reason(term, type_=type_of(term), source=source,
+                                  verified=verify(term), lecture_term=key in lect)
+            else:
+                why = drop_reason(term, type_=type_of(term), source=source)
             if why:
                 dropped.append(Dropped(term, why))
                 continue

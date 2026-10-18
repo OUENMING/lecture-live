@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 import copy
+import json
 import math
 import re
 import unicodedata
@@ -489,7 +490,30 @@ def quote_check(review: dict, *, materials=None, transcript: str = "") -> tuple:
 #: 三道核判成 `mismatch` 的断言 → 正文里的标注格式（核算结果必须**落到读者眼前**）。
 #: ⚠️ 为什么只标不改数字：`5.3` 与 `2.89` 哪个是口播听错，机械核**不知道**
 #:    （8.67÷3 = 2.89 恰好成立）—— 改错比标错坏得多（与更正账本同一条纪律）。
-_MISMATCH_MARK = "（⚠ 核算对不上：{how}）"
+#: ⭐ F14 ③：**两种命中必须是两种标签**。数值/公式重算不一致（我们算出来对不上）与
+#:    "归属性引语没找到原话"（我们查不到出处）方向完全相反，旧版共用「核算对不上」，
+#:    读者把后者读成"数字算错了"（实测：ECS170 一条 `课件末页公式` 被标成核算不符）。
+_MISMATCH_MARK = "（⚠ 数字对不上：{how}）"
+_QUOTE_MARK = "（⚠ {how}）"
+#: 归属性引语没找到时的 `how`（把旧文案"转录里没找到这句（核对）"改成人话）。
+_QUOTE_HOW = {"tr": "转录里没找到这句原话", "mat": "材料里没找到这句原话"}
+#: 任何已落地的标注（幂等 + 剥离共用；旧文案一起认，历史产物里还有）。
+_ANY_MARK = re.compile(r"（⚠ (?:核算对不上|数字对不上|转录里没找到这句原话|"
+                       r"材料里没找到这句原话)[^）]*）")
+
+
+def is_quote_row(row: dict) -> bool:
+    """这一行是「归属性引语没找到原话」还是「数值/公式重算对不上」。**纯函数。**"""
+    if str(row.get("kind") or "") == "support":
+        return True
+    if str(row.get("recomputed") or "").startswith("support p="):
+        return True
+    return "没找到这句" in str(row.get("how") or "")
+
+
+def _quote_how(row: dict) -> str:
+    """引语没找到时的诚实说法（转录查不到 / 材料查不到）。**纯函数。**"""
+    return _QUOTE_HOW["mat"] if "材料" in str(row.get("how") or "") else _QUOTE_HOW["tr"]
 #: 允许被标注的字段（渲染进正文的那些；`sources`/`ts`/`title` 这类出处字段不碰）。
 _MARK_FIELDS = {"prose", "prereq", "conclusion", "algebra", "intuition", "pitfalls",
                 "prompt", "answer", "text", "why", "q", "a"}
@@ -545,7 +569,8 @@ def annotate_mismatches(review: dict) -> tuple:
             if isinstance(c, dict) and c.get("status") == "mismatch"]
     if not rows:
         return out, [], []
-    n = 0
+    n_num = 0
+    n_quote = 0
     for row in rows:
         raw = str(row.get("claim") or "")
         # ⚠️ 前缀长度取在**原串**上再归一化：`_norm` 把 CJK 全剥掉，先归一化再截 60 字
@@ -577,7 +602,7 @@ def annotate_mismatches(review: dict) -> tuple:
                     v = _get(s, path)
                     if not isinstance(v, str) or not v:
                         continue
-                    clean = re.sub(r"（⚠ 核算对不上：[^）]*）", "", v)
+                    clean = _ANY_MARK.sub("", v)
                     bare = _norm_ctx(clean) if mode == "ctx" else _norm(clean)
                     hits = [len(p) for p in pool if p in bare]
                     if hits and (best is None or max(hits) > best[0]):
@@ -588,17 +613,432 @@ def annotate_mismatches(review: dict) -> tuple:
             continue
         _, si, path = best
         v = _get(out["sections"][si], path)
-        if "核算对不上" in v:
+        if _ANY_MARK.search(v):
             row["annotated"] = True      # 这一处已经有 ⚠（别行标的）
             continue
-        mark = _MISMATCH_MARK.format(how=how)
-        where = _div_bad_sentence_end(v)
+        if is_quote_row(row):
+            # ⭐ F14 ③：引语没找到 → 用**说清是哪件事**的标签，且台账里也换同一句人话
+            mark = _QUOTE_MARK.format(how=_quote_how(row))
+            row["how"] = _quote_how(row)
+        else:
+            mark = _MISMATCH_MARK.format(how=how)
+        where = None if is_quote_row(row) else _div_bad_sentence_end(v)
         _set(out["sections"][si], path, (v.rstrip() + mark) if where is None
              else (v[:where] + mark + v[where:]))
         row["annotated"] = True
-        n += 1
-    warns = [f"{n} 处核算不一致（三道核）已在正文原位标 ⚠"] if n else []
+        if is_quote_row(row):
+            n_quote += 1
+        else:
+            n_num += 1
+    bits = []
+    if n_num:
+        bits.append(f"{n_num} 处数字对不上")
+    if n_quote:
+        bits.append(f"{n_quote} 处归属性引语没找到原话")
+    warns = ["、".join(bits) + "，已在正文原位标 ⚠"] if bits else []
     return out, [], warns
+
+
+# ============================================================ F14 ④⑤⑥ Δ
+# 作者逐字读完 v2 的 BUSI3243 / ECS170 抓到的三处（自动审计一条都没报）：
+#   ④ 悬空节指路：「ReLU 的负区零梯度问题在第三节」（其实在第 21 节）；
+#   ⑤ 没有课件却声称有：「课件末页公式…」（该讲是 `📖 无课件材料`）；
+#   ⑥ ASR 噪声抄进正文：「误以为 ReLU 负区间输出是 1 或常数 9」（转录 `1, 9, … 0`）、
+#      「课程本身不要求 S1」（转录 `We don't require S1`）。
+
+def _walk_text(node, fn, *, skip=frozenset()) -> None:
+    """就地：对 `node` 里所有**字符串叶子**调 `fn`（`skip` 里的 key 整个子树跳过）。
+
+    ⚠️ 只认 dict/list/str（笔记数据就这三种）；`skip` 用来保护逐字转录字段。
+    """
+    if isinstance(node, dict):
+        for k, v in list(node.items()):
+            if k in skip:
+                continue
+            if isinstance(v, str):
+                node[k] = fn(v)
+            else:
+                _walk_text(v, fn, skip=skip)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            if isinstance(v, str):
+                node[i] = fn(v)
+            else:
+                _walk_text(v, fn, skip=skip)
+
+
+# ---- ⑤ 没课件时，「课件/PPT 里写着」这类声称全是假的 --------------------------
+#: 材料来源词：出现它 = 声称"这是课件/讲义里写的"。
+_MAT_SRC = re.compile(r"(?:课件|讲义|PPT|ppt|幻灯片|[Ss]lides?)\s*"
+                      r"(?:末页|最后一页|第\s*\d+\s*页)?")
+#: 没课件时的降级目标（与页脚/图例里的 `📚 标准理论` 同一口径）。
+_DOWNGRADE_SRC = "📚 标准教材"
+#: 逐字转录字段 —— 这些字**不许**被改写（它们本来就是原文）。
+_RAW_KEYS = frozenset({"spoken", "quote", "en", "zh", "asr", "ts"})
+
+
+def strip_false_sources(review: dict, *, has_materials: bool) -> tuple:
+    """没课件时，「课件/PPT 里写着 X」这类声称**全是假的** → 降级成 📚 标准教材。F14 ⑤
+
+    ⚠️ 为什么必须做：ECS170 那一讲页头写着 `📖 无课件材料`，正文却写
+       「**课件末页公式**：σ(z)=…」，台账里还有一行 `阶跃定义与课件一致` ——
+       读者会以为有课件支撑（**假出处比没有出处坏**）。
+    ⚠️ 有课件时一个字不动（📖 是真的）。降级目标选 📚：标准教材**永远**在。
+    返回 `(review, [{"downgraded": n}], warns)`（计数进守卫台账）。
+    """
+    if has_materials:
+        return review, [], []
+    out = copy.deepcopy(review)
+    n_src = n_tag = n_title = 0
+
+    def fix(s: str) -> str:
+        nonlocal n_src
+        new = _MAT_SRC.sub(_DOWNGRADE_SRC, s)
+        if new != s:
+            n_src += 1
+        return new
+
+    for s in out.get("sections") or []:
+        if not isinstance(s, dict):
+            continue
+        src = s.get("sources")
+        if isinstance(src, list):
+            keep = [x for x in src
+                    if not (isinstance(x, str) and ("📖" in x or _MAT_SRC.search(x)))]
+            if len(keep) != len(src):
+                n_tag += len(src) - len(keep)
+                s["sources"] = keep
+        ex = s.get("example")
+        if isinstance(ex, dict) and isinstance(ex.get("title"), str) and "📖" in ex["title"]:
+            ex["title"] = ex["title"].replace("📖", "✏️")
+            n_title += 1
+        _walk_text(s, fix, skip=_RAW_KEYS | {"sources"})
+    _walk_text(out.get("checks") or [], fix, skip=_RAW_KEYS)
+    _walk_text(out.get("corrections") or [], fix, skip=_RAW_KEYS)
+    bits = []
+    if n_src:
+        bits.append(f"{n_src} 处「课件/PPT」来源声称 → 📚 标准教材")
+    if n_tag:
+        bits.append(f"{n_tag} 条 📖 出处标签（本课没有课件）已去掉")
+    if n_title:
+        bits.append(f"{n_title} 道例题的 📖 标题 → ✏️")
+    warns = ["没课件：" + "、".join(bits)] if bits else []
+    return out, [{"downgraded": n_src + n_tag + n_title}], warns
+
+
+# ---- ④ 悬空的「第 N 节 / 上一节」指路 --------------------------------------
+_REF_NUM = re.compile(r"第\s*([0-9]{1,3}|[一二三四五六七八九十]{1,3})\s*节")
+_REF_REL = re.compile(r"(?:上|前|下|后)(?:一)?(?:小)?节")
+_REF_ANY = re.compile(r"(?:" + _REF_NUM.pattern + r"|" + _REF_REL.pattern + r")")
+#: 汉字数词（够到 39 节）。
+_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+           "十": 10}
+#: 概念词的虚字表：含这些字的二字组不算概念词（判据要域中立 → 只认功能字，不认学科词）。
+_STOP_CH = set("的在不和与是了也就把被这那有要会能可对为以之其中上下前后里个种些"
+               "所但而且或者如果因节已经出现讲过说明先再更最把让使给向从到对于")
+_ASCII_STOP = frozenset({"the", "and", "for", "with", "that", "this", "from", "are", "not",
+                         "you", "its", "has", "have", "was", "but", "can"})
+#: 允许出现"节指路"的字段（正文/链接行；出处与转录字段不碰）。
+_REF_FIELDS = frozenset({"prose", "prereq_link", "conclusion", "intuition", "algebra",
+                         "pitfalls", "q", "prompt", "answer", "text", "why", "a"})
+
+
+def _cn_int(s: str):
+    """「三」→3、「十二」→12、「21」→21；认不出 → None。**纯函数。**"""
+    if str(s).isdigit():
+        return int(s)
+    if len(s) == 1:
+        return _CN_NUM.get(s)
+    if len(s) == 2 and s[0] == "十":
+        return (10 + _CN_NUM.get(s[1], 0)) or None
+    if len(s) == 2 and s[1] == "十":
+        return (_CN_NUM.get(s[0], 0) * 10) or None
+    if len(s) == 3 and s[1] == "十":
+        return (_CN_NUM.get(s[0], 0) * 10 + _CN_NUM.get(s[2], 0)) or None
+    return None
+
+
+def _concept_tokens(text: str) -> set:
+    """一段话 → 概念词集合（ASCII 词 + 不含虚字的汉字二字组）。**纯函数。**"""
+    out: set = set()
+    for w in re.findall(r"[A-Za-z][A-Za-z0-9_.]{1,}", str(text or "")):
+        lw = w.lower()
+        if lw not in _ASCII_STOP:
+            out.add("en:" + lw)
+    for run in re.findall(r"[\u4e00-\u9fff]{2,}", str(text or "")):
+        for i in range(len(run) - 1):
+            bg = run[i:i + 2]
+            if not (set(bg) & _STOP_CH):
+                out.add("zh:" + bg)
+    return out
+
+
+def _section_blob(s: dict) -> str:
+    """一节的可检索全文（判"这个概念讲在哪一节"）。**纯函数。**"""
+    parts = [str(s.get("heading") or ""), str(s.get("q") or ""),
+             str(s.get("conclusion") or ""), str(s.get("algebra") or ""),
+             str(s.get("intuition") or ""), " ".join(s.get("prose") or [])]
+    for p in (s.get("prereq_link"), s.get("prereq")):
+        parts.append(str(p or ""))
+    for t in (s.get("terms") or []):
+        if isinstance(t, dict):
+            parts.append(str(t.get("en") or "") + " " + str(t.get("zh") or ""))
+    return " ".join(parts)
+
+
+def _ref_title(s: dict, limit: int = 18) -> str:
+    """节标题 → 指路用短名（去掉 `[13:23] ` 前缀与结尾括注，太长截断）。**纯函数。**"""
+    t = re.sub(r"^\s*\[[^\]]*\]\s*", "", str(s.get("heading") or "")).strip()
+    t = re.sub(r"\s*[（(][^）)]*[）)]\s*$", "", t).strip()
+    return (t[:limit] + "…") if len(t) > limit else t
+
+
+def _ref_edits_in(text: str, si: int, secs: list, toks: list) -> list:
+    """一段文本里的节指路 → `[(起, 止, 替换)]`（**纯函数**；`""` = 删掉这块指路）。"""
+    edits: list = []
+    for m in _REF_ANY.finditer(text):
+        num = _REF_NUM.fullmatch(m.group(0))
+        head_start = max([text.rfind(p, 0, m.start())
+                          for p in "。；;，,！？!?\n"] + [-1]) + 1
+        mt = _concept_tokens(text[head_start:m.start()])
+        scores = []
+        for j, tk in enumerate(toks):
+            if j == si:
+                continue
+            sc = (3 * len([x for x in mt if x.startswith("en:") and x in tk])
+                  + len([x for x in mt if x.startswith("zh:") and x in tk]))
+            if sc:
+                scores.append((sc, j))
+        scores.sort(key=lambda p: (-p[0], p[1]))
+        best = scores[0] if scores else None
+        start = m.start()
+        pre = re.search(r"(?:在|见|参见|详见|关于)\s*$", text[:m.start()])
+        if pre and pre.start() >= head_start:
+            start = pre.start()
+        target = None
+        if num is not None:
+            n = _cn_int(num.group(1))
+            if best and best[0] >= 3 and (best[1] + 1) != n:
+                target = f"「{_ref_title(secs[best[1]])}」一节"
+            else:
+                # 号数越界 / 只有弱命中：**只把号换成中性方位词**，句子内容一个字不动。
+                # ⚠️ 这里不许删整句（v3 实测：定不下来的 5 处整句被删 → 正文破了洞）。
+                target = "前面" if (best is None or best[1] < si) else "后面"
+        else:
+            exp = si + 1 if m.group(0).startswith(("下", "后")) else si - 1
+            if best and best[0] >= 3 and best[1] != exp:
+                target = f"「{_ref_title(secs[best[1]])}」一节"
+        if target is not None:
+            end = m.end()
+            if target.startswith("「"):
+                pass                        # `在「标题」一节` —— 留着"在"读得顺
+            else:
+                start = m.start()           # 中性方位词：留着"在"（"在前面提过"）
+                if text[m.end():m.end() + 1] in ("里", "中"):
+                    end = m.end() + 1       # 顺带吃掉紧跟的「里/中」→ "在前面给过"
+            edits.append((start, end, target))
+    return edits
+
+
+def fix_section_refs(review: dict) -> tuple:
+    """悬空的「第 N 节 / 上一节」指路 → 按**概念**落到真正讲它的那一节。F14 ④
+
+    ⚠️ 为什么必须做（作者实录）：「**ReLU 的负区零梯度问题在第三节**」（其实在第 21 节）、
+       「**sigmoid 的饱和问题在第一节已出现**」（其实是第 18 节）—— 读者按这条线回翻会翻错。
+    ⚠️ 判据（域中立，不认学科词）：把指路**前面那个小句**里的概念词（ASCII 词 + 无虚字的
+       汉字二字组）拿到各节全文里数命中；高分节 ≠ 它说的那一节 → 改成
+       `「那一节的标题」一节`（标题是读者在目录里看得见的名字；节号目录里不显示）。
+    ⚠️ 只改有证据的：**相对指路**（上一节/下一节）只有在**别处**存在高分命中时才动 ——
+       它本来就多半是对的，没证据不许碰（机器不许把对的改错）。
+    ⚠️ 号数越界 / 只有弱命中 / 一点线索都没有 → 只把**号**换成中性方位词（前面/后面），
+       句子内容一个字不动（v3 实测：删整句会在正文里留破洞）。
+    返回 `(review, [{"repaired": n, "dropped": m}], warns)`。
+    """
+    out = copy.deepcopy(review)
+    secs = [s for s in (out.get("sections") or []) if isinstance(s, dict)]
+    if len(secs) < 3:
+        return review, [], []
+    toks = [_concept_tokens(_section_blob(s)) for s in secs]
+    fixed = neutral = dropped = 0
+    for si, s in enumerate(secs):
+        for path in paths_of(s):
+            if _field_name(path) not in _REF_FIELDS:
+                continue
+            v = _get(s, path)
+            if not isinstance(v, str) or not v:
+                continue
+            edits = _ref_edits_in(v, si, secs, toks)
+            if not edits:
+                continue
+            for a, b, repl in sorted(edits, reverse=True):
+                if repl.startswith("「"):
+                    fixed += 1
+                else:
+                    neutral += 1
+                # ⚠️ 只换**指路那几个字**（`第 7 节` → `前面` / `「标题」一节`），
+                #    句子其余部分一个字不动 —— v3 实测删整句会在正文里留下破洞。
+                v = v[:a] + repl + v[b:]
+            _set(s, path, v)
+    bits = []
+    if fixed:
+        bits.append(f"{fixed} 处节指路按内容改到**真正讲它的那一节**")
+    if neutral:
+        bits.append(f"{neutral} 处定不下来 → 改成中性说法")
+    if dropped:
+        bits.append(f"{dropped} 处删掉没线索的指路")
+    warns = ["、".join(bits)] if bits else []
+    return out, [{"repaired": fixed, "dropped": neutral + dropped}], warns
+
+
+# ---- ⑥ ASR 噪声被抄进正文 -------------------------------------------------
+#: 把裸数字当名词用（`常数 9`）—— 转录里的"数字清单"常被这么误读。
+_ASR_NOMINAL = re.compile(r"(?:常数|常量|数字|号码|编号)\s*[=＝]?\s*(?P<d>\d{1,4})")
+#: 一次性标识符：`S1` / `Q2` / `ABC` / `XYZs`（≥2 字、含数字或全大写；公式变量不走这里）。
+_ASR_IDENT = re.compile(r"(?<![\w$.])(?:[A-Za-z]{1,4}\d{1,3}|[A-Z]{2,8}s?)(?![\w$.=])")
+#: 切小句的分隔符。
+_CLAUSE_SEP = "。；;！？!?，,\n"
+
+
+def _clause_span(text: str, i: int) -> tuple:
+    """`i` 所在小句的 [起, 止)（不含分隔符）。**纯函数。**"""
+    left = max([text.rfind(p, 0, i) for p in _CLAUSE_SEP] + [-1]) + 1
+    right = min([x for x in (text.find(p, i) for p in _CLAUSE_SEP) if x >= 0]
+                or [len(text)])
+    return left, right
+
+
+def _mask_math(text: str) -> str:
+    """把 `$…$` 与 `\\命令` 抹成等长空格（**保持下标**，便于把结果映射回原文）。"""
+    s = re.sub(r"\$[^$]*\$", lambda m: " " * len(m.group(0)), str(text or ""))
+    return re.sub(r"\\[A-Za-z]+", lambda m: " " * len(m.group(0)), s)
+
+
+def _occurrences(tok: str, lines: list) -> list:
+    """某 token（字面 + 词边界）出现在哪些转录行里。**纯函数。**"""
+    rx = re.compile(r"(?<![\w.])" + re.escape(tok) + r"(?![\w.])", re.I)
+    return [ln for ln in lines if rx.search(ln)]
+
+
+def _ident_shape(tok: str) -> bool:
+    """像"编号"的词（`S1`/`Q2`/`ABC`/`XYZs`）；普通英文词、公式变量不算。**纯函数。**
+
+    ⚠️ 含数字的那一支**必须以大写字母开头**：`S1`（章节/工具编号）是候选，
+       `b1`/`x2`/`q1`（公式里的小写变量，正文里写成纯文本时也长这样）**不是** ——
+       v3 实测把「系数 b1」里的 b1 当噪声删掉过（公式变量在正文里很常见）。
+    """
+    if len(tok) < 2:
+        return False
+    if re.search(r"\d", tok):
+        return len(tok) <= 5 and tok[0].isupper()
+    return bool(re.fullmatch(r"[A-Z]{2,8}s?", tok))
+
+
+def _unknown_idents(line: str, known) -> set:
+    """一行转录里"说不通"的编号词（不在材料/术语表/本课术语里）。**纯函数。**"""
+    out = set()
+    for m in _ASR_IDENT.finditer(_mask_math(line)):
+        tok = m.group(0)
+        if _ident_shape(tok) and not known(tok):
+            out.add(tok.lower())
+    return out
+
+
+def _garbled_line(line: str, known) -> bool:
+    """这一行像不像"被截断/拼错的噪声行"。**纯函数。**
+
+    ⚠️ 两个条件缺一不可：① 没有句末标点（ASR 常常整行截断）；② 行里**≥2 个说不通的
+       编号词**（`… We don't require S1 for`）—— 单独一个词可能是真术语，
+       一行里挤着两个谁都不认识的编号，才是"这段没听清"的现场证据。
+    """
+    s = str(line or "").strip()
+    if not s or re.search(r"[.!?]\s*$", s):
+        return False
+    return len(_unknown_idents(s, known)) >= 2
+
+
+def drop_asr_orphans(review: dict, *, entries: list, known) -> tuple:
+    """正文里"只活在转录噪声里"的常数/编号 → 删掉那一小块。F14 ⑥
+
+    ⚠️ 为什么必须做（作者实录）：转录 `Outputs listed: 1, 9, then 0 as a constant.` 被读成
+       「输出是 1 **或常数 9**」；转录 `… We don't require S1 for` + `… but S1 matters a lot for ML or HCI` 被抄成「课程本身**不要求 S1**」。两句都是**拼接噪声**，
+       读者会把它当课上事实。
+    两条判据（都要求"无据"：材料/术语表/本课术语里都没有）：
+      ① 裸数字当名词（`常数 N`）：它的转录出现**全在"数字清单"行**（`1, 9, …`）；
+      ② 编号词（`S1`）：正文里**只出现一次**、从不出现在公式/例题/术语里，
+         而且出现它的**每一行**都是"截断 + 挤着 ≥2 个不认识的编号词"的**噪声行**。
+    ⚠️ 判据极保守（宁可漏）：宁可少删，也不许把 `AC`/`RSS`/`SVM`/`DJI` 这种真缩写删掉
+       —— 上一版只按"转录里只出现一次"判，econ 一讲误删 113 处，被这条纪律拦下。
+    返回 `(review, [{"dropped": n}], warns)`；删了什么逐条进 warn。
+    """
+    out = copy.deepcopy(review)
+    lines = [str(e.get("en") or e.get("asr") or "") for e in (entries or [])]
+    tech = json.dumps([{k: s.get(k) for k in
+                        ("algebra", "terms", "example", "variants", "faded", "program")}
+                       for s in (out.get("sections") or []) if isinstance(s, dict)],
+                      ensure_ascii=False).lower()
+    prose_count: dict = {}
+    for s in out.get("sections") or []:
+        if isinstance(s, dict):
+            for t in (s.get("prose") or []) + (s.get("pitfalls") or []):
+                for m in _ASR_IDENT.finditer(_mask_math(str(t))):
+                    prose_count[m.group(0).lower()] = prose_count.get(m.group(0).lower(), 0) + 1
+    removed: list = []
+    for s in out.get("sections") or []:
+        if not isinstance(s, dict):
+            continue
+        for path in paths_of(s):
+            if _field_name(path) not in _REF_FIELDS:
+                continue
+            v = _get(s, path)
+            if not isinstance(v, str) or not v:
+                continue
+            masked = _mask_math(v)
+            edits: list = []
+            for m in _ASR_NOMINAL.finditer(masked):
+                d = m.group("d")
+                if known(d):
+                    continue
+                occ = _occurrences(d, lines)
+                if not occ or not all(("constant" in ln.lower()
+                                       or re.search(r"\d\s*,\s*\d", ln)) for ln in occ):
+                    continue
+                a, _b = _clause_span(v, m.start())
+                seg = v[a:m.start()]
+                conn = max([seg.rfind(p) for p in ("或", "和", "以及", "及", "、")] + [-1])
+                edits.append((a + conn if conn >= 0 else a, m.end()))
+                removed.append(f"「常数 {d}」（转录里只出现在数字清单里）")
+            for m in _ASR_IDENT.finditer(masked):
+                tok = m.group(0)
+                if not _ident_shape(tok) or known(tok):
+                    continue
+                low = tok.lower()
+                # ⚠️ 同一条噪声可能被模型在**几节里各抄一遍**（v3 实测：同一个编出来的
+                #    先修课编号出现在 3 处正文里）——所以是"≤3 处"，不是"只此一次"。
+                #    再多的（>3）就不动：那更像一个真记号，宁可漏删。
+                if not (1 <= prose_count.get(low, 0) <= 3):
+                    continue
+                if re.search(r"(?<![A-Za-z])" + re.escape(low) + r"(?![A-Za-z])", tech):
+                    continue                                   # 公式/例题/术语里出现过 → 真记号
+                occ = _occurrences(tok, lines)
+                if not occ or not all(_garbled_line(ln, known) for ln in occ):
+                    continue
+                a, b = _clause_span(v, m.start())
+                if b - a <= 4:
+                    continue
+                edits.append((a, b))
+                removed.append(f"「{tok}」（转录里只出现在拼错的噪声行里）")
+            for a, b in sorted(set(edits), reverse=True):
+                v = v[:a] + v[b:]
+            if edits:
+                v = re.sub(r"\s+([，。；、！？])", r"\1", v)
+                v = re.sub(r"[，,。]\s*[，,。]", "。", v)
+                v = re.sub(r"^[，,、]\s*", "", v).strip()
+                _set(s, path, v)
+    warns = []
+    if removed:
+        warns.append(f"删掉 {len(removed)} 处只活在转录噪声里的字样："
+                     + "；".join(removed[:5]))
+    return out, [{"dropped": len(removed)}], warns
 
 
 #: 去重句首的连接词/强调符：`但课上只给了片段…` 与 `⚠ 课上只给了片段…` 是同一句。
@@ -752,7 +1192,7 @@ _SUPPORT_WORDS = re.compile(r"课上|老师|本课")
 _SUPPORT_SELF = re.compile(r"✏️|自补|自编")
 #: 房子里的免责/对照句式 —— 不是「讲义说过」：⚠ 免责句与教材对照（📚）句。
 #: ⚠️ 后者若收进来，[转录里没找到这句] 会挂到"未核对"句自己头上（F9b 实测）。
-_SUPPORT_SKIP = re.compile(r"📚|未核对|只给了片段|核算对不上")
+_SUPPORT_SKIP = re.compile(r"📚|未核对|只给了片段|核算对不上|数字对不上|没找到这句原话")
 #: 例题标题里的 `🎙 13:40` / `（🎙 13:36–13:38）` —— 课**实际用**它的时刻。
 #: ⚠️ 窗口要用它，不是小节 `ts`（F9b 实测：§3 小节 13:25:49、例题标 🎙 13:40，
 #:    用小节 ts 会把窗口放到"刚宣布做 Exercise 5"那几句上，题目本身在 14 分钟外）。
@@ -1408,7 +1848,7 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
                 if _downgrade_claim(out, c):
                     downgraded += 1
                 continue
-            rows_new.append({"claim": c["claim"], "status": "mismatch",
+            rows_new.append({"claim": c["claim"], "status": "mismatch", "kind": "support",
                              "recomputed": f"support p={float(p):.2f}", "how": how})
             n_flag += 1
     if rows_new:

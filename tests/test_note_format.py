@@ -91,8 +91,19 @@ class TermStopgap(unittest.TestCase):
         for t in ("Interesting", "Euro", "Celsius"):
             self.assertEqual(nt.drop_reason(t, source=nt.SRC_CURATED), "口语/常识词", t)
             self.assertTrue(nt.drop_reason(t, source=nt.SRC_LECTURE), t)
-        # 专有名词不许被这条误伤（`Coase` 是经济学课要收的词）
-        self.assertEqual(nt.drop_reason("Coase", source=nt.SRC_CURATED), "")
+        # 专有名词不许被这条误伤（`Coase` 是经济学课要收的词）—— 但必须是**本课**的词
+        self.assertEqual(nt.drop_reason("Coase", source=nt.SRC_CURATED,
+                                        lecture_term=True), "")
+
+    def test_跨课术语库必须有本课证据(self):
+        """⭐ F14 ②：术语库是全课共享的一只文件。ECS170（CS 课）的术语表里长出过
+        `structure — 社会结构，影响行为的规则和制度 · 术语库`、
+        `variable — 会变化的量，比如收入、年龄` —— 别的课的定义，读者会当真。"""
+        for t in ("structure", "variable", "dataset"):
+            why = nt.drop_reason(t, source=nt.SRC_CURATED)
+            self.assertIn("跨课术语库", why, t)
+            self.assertEqual("", nt.drop_reason(t, source=nt.SRC_CURATED, lecture_term=True), t)
+            self.assertEqual("", nt.drop_reason(t, source=nt.SRC_CURATED, verified=True), t)
 
     def test_错语境义挡下_usc(self):
         """⭐ B1 那条：`USC` 的缓存解析是南加州大学，而本课是 Universal Social Charge。
@@ -111,10 +122,16 @@ class TermStopgap(unittest.TestCase):
             nt.drop_reason("Google Scholar", type_="org", source=nt.SRC_AUTO,
                            verified=True), "")
 
-    def test_预置术语库不要求核对(self):
-        """`term_notes.json` 是人工/付费构建的（按「中英对照价值」分过级），不重复设卡。"""
-        self.assertEqual(nt.drop_reason("marginal cost", source=nt.SRC_CURATED), "")
-        self.assertEqual(nt.drop_reason("stationary point", source=nt.SRC_CURATED), "")
+    def test_预置术语库也要本课证据(self):
+        """`term_notes.json` 里的定义确实是人工/付费建的，但它**不分课**。
+        ⭐ F14 ②：仍然要一条本课证据（本课术语表/课件里有，或复习层把它当术语抽出来）。
+        多词短语（`marginal cost`）不受"常识词"那档影响，所以给上证据就直接放行。"""
+        self.assertEqual(nt.drop_reason("marginal cost", source=nt.SRC_CURATED,
+                                        lecture_term=True), "")
+        self.assertEqual(nt.drop_reason("stationary point", source=nt.SRC_CURATED,
+                                        verified=True), "")
+        self.assertEqual(nt.drop_reason("marginal cost", source=nt.SRC_CURATED),
+                         "跨课术语库（本课没把它当术语用）")
 
     def test_单token非缩写的自动缓存要核对(self):
         self.assertTrue(nt.drop_reason("Mohari", type_="place", source=nt.SRC_AUTO))
@@ -143,7 +160,9 @@ class TermSelect(unittest.TestCase):
             {"ts": "13:21:00", "en": "The marginal cost is below the average cost."},
             {"ts": "13:22:00", "en": "USC is a charge on income."},
         ]
+        # ⭐ F14 ②：`术语库` 行要有本课证据 —— 这里注入"本课复习层抽到过这两个词"
         sel = nt.select(entries, match=self._match,
+                        lecture_terms={"marginal cost", "derivative"},
                         type_of=lambda t: "person" if t in ("Masha", "Larry") else "concept")
         self.assertEqual([h.term for h in sel.hits], ["derivative", "marginal cost"])
         self.assertEqual(sel.hits[0].ts, "13:20:00", "时间戳该取最早命中那句")
@@ -164,15 +183,18 @@ class TermSelect(unittest.TestCase):
                           "en": "Masha asked a good question about the derivative."}],
                         match=self._match,
                         type_of=lambda t: "person" if t == "Masha" else "")
-        self.assertIn("已从术语表过滤 1 条", sel.footer())
+        # Masha（人名）+ derivative（术语库但本课无据）→ 2 条都在页脚记账
+        self.assertIn("已从术语表过滤 2 条", sel.footer())
+        self.assertIn("跨课术语库", sel.footer())
 
     def test_上限截断也记账(self):
         """⚠️ 超额只截断会**静默丢东西** —— 被截的必须进 `dropped`。"""
         def match(sentence):
             return [("marginal cost", "边际成本", nt.SRC_CURATED),
                     ("average cost", "平均成本", nt.SRC_CURATED)]
-        sel = nt.select([{"ts": "13:21:00", "en": "whatever"}],
-                        match=match, type_of=lambda t: "", max_n=1)
+        sel = nt.select([{"ts": "13:21:00", "en": "whatever"}], match=match,
+                        type_of=lambda t: "", max_n=1,
+                        lecture_terms={"marginal cost", "average cost"})
         self.assertEqual([h.term for h in sel.hits], ["marginal cost"])
         self.assertEqual([d.reason for d in sel.dropped], ["超出上限"])
 

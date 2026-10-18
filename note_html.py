@@ -554,6 +554,7 @@ svg.plot .dot{fill:var(--c3)}
 svg.plot .lbl,svg.plot .tick{fill:var(--muted);font-size:11px;font-family:inherit}
 .slider{display:flex;align-items:center;gap:10px;padding:2px 8px 6px;flex-wrap:wrap}
 .slider p.hint{flex-basis:100%;margin:0 0 2px 2px;color:var(--muted);font-size:13px}
+p.term-foot{margin:6px 0 0;color:var(--muted);font-size:13px}
 .slider input{flex:1;accent-color:var(--accent)}
 nav.toc{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 18px}
 nav.toc ol{margin:6px 0;padding-left:22px}
@@ -1273,6 +1274,11 @@ def note_page(d) -> str:
     if d.term_rows:
         extra += "<h2>本课术语</h2><ul>" + "".join(
             f"<li>{inline(str(r).lstrip('- '))}</li>" for r in d.term_rows) + "</ul>"
+        if d.term_footer:
+            # ⭐ F14 ②：被挡下的术语行要**在 HTML 里也记账**（md 早就有这一行）。
+            #    终端读者看的就是这份 HTML；行数 88→59 却不说为什么 = 静默丢东西。
+            extra += (f'<p class="term-foot">'
+                      f'{inline(str(d.term_footer).strip().strip("*"))}</p>')
     if d.glossary_added:
         extra += ("<h2>本课新加入术语库</h2><p>"
                   + " · ".join(f"<code>{html.escape(str(t))}</code>" for t in d.glossary_added)

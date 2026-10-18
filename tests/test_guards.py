@@ -562,9 +562,9 @@ class AnnotateMismatch(unittest.TestCase):
         out, _, warns = ng.annotate_mismatches({"sections": [{"prose": [self.REAL]}],
                                                 "checks": [dict(self.MECH)]})
         got = out["sections"][0]["prose"][0]
-        self.assertIn("得到约2.89。（⚠ 核算对不上：5.3÷3=1.767，不是2.89）这个数值", got)
+        self.assertIn("得到约2.89。（⚠ 数字对不上：5.3÷3=1.767，不是2.89）这个数值", got)
         self.assertTrue(out["checks"][0].get("annotated"))
-        self.assertEqual(1, got.count("核算对不上"))
+        self.assertEqual(1, got.count("数字对不上"))
         self.assertTrue(warns and "1 处" in warns[0], warns)
 
     def test_机械核与模型核同一句只标一次(self):
@@ -574,7 +574,7 @@ class AnnotateMismatch(unittest.TestCase):
                  "how": "5.3除以3约1.77，不是2.89"}]
         out, _, _ = ng.annotate_mismatches({"sections": [{"prose": [self.REAL]}], "checks": rows})
         got = out["sections"][0]["prose"][0]
-        self.assertEqual(1, got.count("核算对不上"))
+        self.assertEqual(1, got.count("数字对不上"))
         self.assertTrue(all(r.get("annotated") for r in out["checks"]))
 
     def test_机械核与标注是一条链(self):
@@ -583,7 +583,7 @@ class AnnotateMismatch(unittest.TestCase):
         rows = [r for r in nm.check_review(rev) if "5.3" in r["claim"]]
         self.assertEqual(["mismatch"], [r["status"] for r in rows])
         out, _, _ = ng.annotate_mismatches({**rev, "checks": rows})
-        self.assertIn("核算对不上：5.3÷3=1.767，不是2.89", out["sections"][0]["prose"][0])
+        self.assertIn("数字对不上：5.3÷3=1.767，不是2.89", out["sections"][0]["prose"][0])
 
     def test_没问题的行一个字不动(self):
         rev = {"sections": [{"prose": [self.REAL]}],
@@ -611,8 +611,8 @@ class AnnotateMismatch(unittest.TestCase):
                 {"heading": "H2", "ts": "13:40", "prose": ["无关的一节。"]}],
                "checks": [{"claim": "课上报的 20", "status": "mismatch", "how": "应为 12"}]}
         out, _, warns = ng.annotate_mismatches(rev)
-        self.assertNotIn("核算对不上", str(out["sections"][0]["faded"]))
-        self.assertNotIn("核算对不上", out["sections"][0]["prose"][0])
+        self.assertNotIn("数字对不上", str(out["sections"][0]["faded"]))
+        self.assertNotIn("数字对不上", out["sections"][0]["prose"][0])
         self.assertFalse(out["checks"][0].get("annotated"))
         self.assertEqual([], warns)
 
@@ -631,7 +631,7 @@ class AnnotateMismatch(unittest.TestCase):
         ded, _, _ = ng.dedupe_sentences(rev)
         out, _, warns = ng.annotate_mismatches(ded)
         got = out["sections"][0]["prose"][0]
-        self.assertIn("核算对不上：5.3除以3约1.77，不是2.89", got)
+        self.assertIn("数字对不上：5.3除以3约1.77，不是2.89", got)
         self.assertTrue(out["checks"][0].get("annotated"))
         self.assertTrue(warns and "1 处" in warns[0], warns)
 
@@ -642,9 +642,9 @@ class AnnotateMismatch(unittest.TestCase):
         out, _, _ = ng.annotate_mismatches({"sections": [{"prose": [self.REAL]}],
                                             "checks": [row]})
         got = out["sections"][0]["prose"][0]
-        self.assertIn("核算对不上：数值二阶导(正)与结论矛盾）", got)
+        self.assertIn("数字对不上：数值二阶导(正)与结论矛盾）", got)
         out2, _, _ = ng.annotate_mismatches(out)         # 幂等：再来一遍不插第二个
-        self.assertEqual(1, out2["sections"][0]["prose"][0].count("核算对不上"))
+        self.assertEqual(1, out2["sections"][0]["prose"][0].count("数字对不上"))
 
 
 class DedupeSentences(unittest.TestCase):
@@ -722,6 +722,173 @@ class TrivialCues(unittest.TestCase):
         out, _, warns = ng.drop_trivial_cues({"sections": [{"cues": list(keep)}]})
         self.assertEqual(keep, out["sections"][0]["cues"])
         self.assertEqual([], warns)
+
+
+class F14LabelSplit(unittest.TestCase):
+    """F14 ③：**数值对不上** 与 **引语没找到原话** 必须是两个标签。
+
+    旧版两者共用「核算对不上」，读者把"我们查不到出处"读成"数字算错了"
+    （ECS170 里一条 `课件末页公式` 被标成核算不符，方向完全相反）。"""
+
+    def _rev(self):
+        return {"sections": [{"heading": "H", "ts": "17:09",
+                              "prose": ["课件末页把公式写成指数形式。"]}],
+                "checks": []}
+
+    def test_引语没找到用另一句人话_不冒充数字错(self):
+        rev = self._rev()
+        rev["checks"] = [{"claim": "课件末页把公式写成指数形式。", "status": "mismatch",
+                          "kind": "support", "recomputed": "support p=0.08",
+                          "how": "转录里没找到这句（核对）"}]
+        out, _, warns = ng.annotate_mismatches(rev)
+        got = out["sections"][0]["prose"][0]
+        self.assertIn("（⚠ 转录里没找到这句原话）", got)
+        self.assertNotIn("数字对不上", got)
+        self.assertNotIn("核算对不上", got)
+        self.assertEqual("转录里没找到这句原话", out["checks"][0]["how"])
+        self.assertTrue(warns and "引语" in warns[0], warns)
+
+    def test_数字对不上还是数字对不上(self):
+        rev = self._rev()
+        rev["checks"] = [{"claim": "课件末页把公式写成指数形式。", "status": "mismatch",
+                          "recomputed": "40/2 ≈ 21", "how": "40÷2=20，不是21"}]
+        out, _, warns = ng.annotate_mismatches(rev)
+        got = out["sections"][0]["prose"][0]
+        self.assertIn("（⚠ 数字对不上：40÷2=20，不是21）", got)
+        self.assertNotIn("原话", got)
+        self.assertTrue(warns and "数字" in warns[0], warns)
+
+    def test_旧标签的产物照样认得出不重复标(self):
+        """历史产物里还是旧标签 —— 幂等判断必须认它，否则会叠第二个 ⚠。"""
+        rev = {"sections": [{"heading": "H", "prose": ["A。\n（⚠ 核算对不上：旧的）"]}],
+               "checks": [{"claim": "A。", "status": "mismatch", "how": "x"}]}
+        out, _, _ = ng.annotate_mismatches(rev)
+        self.assertEqual(1, out["sections"][0]["prose"][0].count("⚠"))
+
+
+class F14SectionRefs(unittest.TestCase):
+    """F14 ④：悬空的「第 N 节」指路 → 按**概念**落到真正讲它的那一节。"""
+
+    def _rev(self):
+        return {"sections": [
+            {"heading": "[17:05] ReLU 的定义", "prose": ["ReLU 是分段线性：z>0 输出 z。"]},
+            {"heading": "[17:06] ReLU 的导数优势与缺陷",
+             "prose": ["负区间导数恒 0，神经元收不到梯度。"]},
+            {"heading": "[17:08] Leaky ReLU",
+             "prereq_link": "ReLU 的负区零梯度问题在第三节。",
+             "prose": ["负区仍有梯度。"]}]}
+
+    def test_指路按内容落到真正讲它的那一节(self):
+        out, extra, warns = ng.fix_section_refs(self._rev())
+        got = out["sections"][2]["prereq_link"]
+        self.assertIn("「ReLU 的导数优势与缺陷」一节", got)
+        self.assertNotIn("第三节", got)
+        self.assertEqual(1, extra[0]["repaired"])
+        self.assertTrue(warns and "真正讲它的那一节" in warns[0], warns)
+
+    def test_对的相对指路一个字不动(self):
+        rev = {"sections": [
+            {"heading": "A", "prose": ["讲 x 的一节。"]},
+            {"heading": "B", "prereq_link": "上一节的 x 这里用上。", "prose": ["用 x。"]}]}
+        out, extra, warns = ng.fix_section_refs(rev)
+        self.assertEqual(rev, out)
+        self.assertEqual([], warns)
+
+    def test_越界的节号退成中性说法(self):
+        rev = {"sections": [
+            {"heading": "A", "prose": ["讲了阈值这件事。"]},
+            {"heading": "B", "prose": ["别的。"]},
+            {"heading": "C", "prereq_link": "阈值的问题见第 99 节。", "prose": ["x"]}]}
+        out, extra, _ = ng.fix_section_refs(rev)
+        self.assertNotIn("第 99 节", out["sections"][2]["prereq_link"])
+        self.assertIn("前面", out["sections"][2]["prereq_link"])
+
+    def test_认不出线索也只换号_不删句子(self):
+        """v3 实测的教训：定不下来就把整句删了 → 正文破洞。只许把号换成方位词。"""
+        rev = {"sections": [
+            {"heading": "A", "prose": ["甲。"]},
+            {"heading": "B", "prose": ["乙。"]},
+            {"heading": "C", "prereq_link": "这条结论在第七节里给过。", "prose": ["丙。"]}]}
+        out, extra, _ = ng.fix_section_refs(rev)
+        got = out["sections"][2]["prereq_link"]
+        self.assertNotIn("第七节", got)
+        self.assertEqual("这条结论在前面给过。", got)
+        self.assertNotIn("。。", got)
+
+
+class F14FalseSources(unittest.TestCase):
+    """F14 ⑤：没课件时，「课件/PPT 里写着」这类声称全是假的 → 降级 📚 标准教材。"""
+
+    def _rev(self):
+        return {"sections": [{"heading": "H", "ts": "17:09",
+                              "sources": ["🎙 17:09:34", "📖 2025-12 期末卷"],
+                              "prose": ["课件末页公式：$\\sigma(z)=1/(1+e^{-z})$。"]}],
+                "checks": [{"claim": "x", "status": "ok", "how": "阶跃定义与课件一致"}],
+                "corrections": [{"where": "某处", "spoken": "课件里说的", "fixed": "y",
+                                 "basis": "📚 二阶导判别法"}]}
+
+    def test_没课件时降级(self):
+        out, extra, warns = ng.strip_false_sources(self._rev(), has_materials=False)
+        s = out["sections"][0]
+        self.assertNotIn("课件", s["prose"][0])
+        self.assertIn("📚 标准教材", s["prose"][0])
+        self.assertEqual(["🎙 17:09:34"], s["sources"])
+        self.assertNotIn("课件", out["checks"][0]["how"])
+        self.assertIn("📚 标准教材", out["checks"][0]["how"])
+        self.assertEqual("课件里说的", out["corrections"][0]["spoken"], "逐字转录字段不许改")
+        self.assertTrue(extra[0]["downgraded"] >= 3 and warns)
+
+    def test_有课件时一个字不动(self):
+        rev = self._rev()
+        out, extra, warns = ng.strip_false_sources(rev, has_materials=True)
+        self.assertEqual(rev, out)
+        self.assertEqual([], warns) and self.assertEqual([], extra)
+
+
+class F14AsrOrphans(unittest.TestCase):
+    """F14 ⑥：只活在转录噪声里的常数/编号 → 删掉那一小块（两点都要，宁缺勿滥）。"""
+
+    def _entries(self, *lines):
+        return [{"ts": "17:05", "en": t} for t in lines]
+
+    def test_常数_9_这种数字清单噪声被删(self):
+        rev = {"sections": [{"heading": "H", "ts": "17:05",
+                             "pitfalls": ["误以为 ReLU 负区间输出是 1 或常数 9；实际是 0。"]}]}
+        ents = self._entries("Outputs listed: 1, 9, then 0 as a constant.")
+        out, extra, warns = ng.drop_asr_orphans(rev, entries=ents, known=lambda _t: False)
+        got = out["sections"][0]["pitfalls"][0]
+        self.assertNotIn("常数 9", got)
+        self.assertIn("输出是 1", got)
+        self.assertEqual(1, extra[0]["dropped"])
+        self.assertTrue(warns)
+
+    def test_一次性编号_S1_被删(self):
+        rev = {"sections": [{"heading": "H", "ts": "17:56",
+                             "prose": ["考试不考，项目里也不要求，课程本身不要求 S1。但以后会用。"]}]}
+        ents = self._entries("There are plenty of TLAs you will pick up on your own later. We don't require S1 for",
+                             "this module, but S1 matters a lot for ML or HCI")
+        out, extra, _ = ng.drop_asr_orphans(rev, entries=ents, known=lambda _t: False)
+        got = out["sections"][0]["prose"][0]
+        self.assertNotIn("S1", got)
+        self.assertIn("但以后会用", got)
+
+    def test_真缩写与完整句子不许误删(self):
+        """`DJI`（完整句子里的一次性品牌）与 `RSS`（在公式里用的缩写）都不许碰。"""
+        rev = {"sections": [{"heading": "H", "ts": "16:44",
+                             "prose": ["新相机（如 DJI Pocket 4）用 10 bit。"],
+                             "algebra": "$RMSE=\\sqrt{RSS/n}$",
+                             "example": {"prompt": "求 RSS 与 TSS。"}}]}
+        ents = self._entries("Some newer cameras like the DJI Pocket 4 record 10 bits.",
+                             "when RSS is large the fit is poor")
+        out, extra, warns = ng.drop_asr_orphans(rev, entries=ents, known=lambda _t: False)
+        self.assertEqual(rev, out)
+        self.assertEqual([], warns)
+
+    def test_材料里有的编号不算噪声(self):
+        rev = {"sections": [{"heading": "H", "prose": ["模型叫 S1。"], "algebra": "$x$"}]}
+        ents = self._entries("We don't require S1 for", "but S1 matters a lot for ML or HCI")
+        out, extra, _ = ng.drop_asr_orphans(rev, entries=ents, known=lambda t: t == "S1")
+        self.assertEqual(rev, out)
 
 
 if __name__ == "__main__":

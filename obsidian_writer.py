@@ -283,6 +283,24 @@ def _one_line(v) -> str:
     return " ".join(v.split()) if isinstance(v, str) else ""
 
 
+def _lecture_terms(review: dict) -> set:
+    """本课**自己**抽出来的术语（复习层 `terms` + 每节的 `terms`）。**纯函数。**
+
+    ⭐ F14 ②⑥ 都用它：术语库门槛（本课真把它当术语用才算数）与 ASR 噪声判据
+       （本课术语里有的词不是噪声）。
+    """
+    out: set = set()
+    for t in (review.get("terms") or []):
+        if isinstance(t, dict):
+            out.add(str(t.get("en") or "").strip().lower())
+    for s in (review.get("sections") or []):
+        if isinstance(s, dict):
+            for t in (s.get("terms") or []):
+                if isinstance(t, dict):
+                    out.add(str(t.get("en") or "").strip().lower())
+    return {x for x in out if x}
+
+
 def _term_pairs_norm(extra, sel) -> list:
     """术语表最终行的 `(en, zh)` 对 —— **与 `render_table` 同源**（`note_terms.final_rows`）。
 
@@ -811,8 +829,13 @@ class ObsidianWriter:
         self._gloss_sel = sel
         return [(h.term, h.gloss, h.ts) for h in sel.hits]
 
-    def _term_selection(self, entries: list[dict]) -> note_terms.Selection:
-        """`_glossary` 的实质。**纯本地**（术语表读盘 + 记忆化, 不发请求）。"""
+    def _term_selection(self, entries: list[dict], *,
+                        review: dict | None = None) -> note_terms.Selection:
+        """`_glossary` 的实质。**纯本地**（术语表读盘 + 记忆化, 不发请求）。
+
+        ⭐ F14 ②：把**本课复习层抽出的术语**传下去 —— `术语库` 是跨课共享的一只文件，
+           只有本课真把它当术语用（本课术语表/课件里有，或复习层抽到过）才允许显示。
+        """
         notes = self._term_index()
         if notes is None:
             return note_terms.Selection(hits=[], dropped=[])
@@ -827,7 +850,8 @@ class ObsidianWriter:
             return str(notes.entry_of(term)[1].get("type") or "")
 
         return note_terms.select(entries, match=match, type_of=type_of,
-                                 verify=self._term_verified)
+                                 verify=self._term_verified,
+                                 lecture_terms=_lecture_terms(review or {}))
 
     def _in_term_store(self, term: str) -> bool:
         """术语库里真有没有这个词（F8-f 的例外："unless the glossary has them"）。
@@ -1336,6 +1360,14 @@ class ObsidianWriter:
                           (lambda r: note_v2.dedupe_components(r), "组件去重"),
                           (lambda r: note_ledger.reconcile(r),
                            "更正账本核对"),
+                          # ⭐ F14 ⑤：没课件时「课件/PPT 里写着」这类声称全是假的
+                          #    （该讲页头就写着 `📖 无课件材料`）→ 降级 📚 标准教材。
+                          #    要排在支持性那一步**之前**：📖 例题标题要先降级，
+                          #    不然它拿着 📖 标题当"有材料"去查。
+                          (lambda r: note_guards.strip_false_sources(
+                              r, has_materials=bool(self._materials is not None
+                                                    and len(self._materials))),
+                           "无课件来源降级"),
                           (lambda r: note_guards.scrub(r), "猜测句清理"),
                           (lambda r: note_guards.dedupe_sentences(r), "重复句去重"),
                           (lambda r: note_guards.strip_clock_times(r), "正文时间戳清理"),
@@ -1349,6 +1381,15 @@ class ObsidianWriter:
                           #    它新写的散文也照样吃后面的 scrub / quote_check（同串讲）。
                           (lambda r: note_v2.fix_symbol_consistency(
                               r, chat=self._chat, entries=entries), "代数/讲解一致性"),
+                          # ⭐ F14 ④⑥：正文的两个"来源噪声"闸 —— 悬空节指路（「在第三节」其实
+                          #    在第 21 节）与 ASR 拼接噪声（「输出是 1 或常数 9」/「不要求 S1」）。
+                          #    放在速览之前：速览照最终正文写。
+                          (lambda r: note_guards.fix_section_refs(r), "悬空节指路"),
+                          (lambda r: note_guards.drop_asr_orphans(
+                              r, entries=entries,
+                              known=lambda t: (self._term_verified(t)
+                                               or str(t).strip().lower() in _lecture_terms(r))),
+                           "ASR 噪声清理"),
                           # ⭐ 第七轮 H：超上限的单元先压干净，速览才照着**最终长度**写
                           (lambda r: self._shorten_overlimit(r), "超限单元压缩"),
                           (lambda r: self._with_overview(r), "速览"),
@@ -1390,6 +1431,12 @@ class ObsidianWriter:
                     st = extra_items[0]
                     if isinstance(st, dict):
                         self._guard_counts["downgraded"] += int(st.get("downgraded") or 0)
+                elif label in ("无课件来源降级", "悬空节指路", "ASR 噪声清理") \
+                        and extra_items:
+                    st = extra_items[0]
+                    if isinstance(st, dict):
+                        for k in ("repaired", "dropped", "downgraded", "flagged"):
+                            self._guard_counts[k] += int(st.get(k) or 0)
                 elif label in ("猜测句清理", "猜测句清理（串讲）", "重复句去重",
                                "纯算术线索问题", "组件上限", "组件去重") and isinstance(extra_items, list):
                     self._guard_counts["dropped"] += len(extra_items)
@@ -1640,7 +1687,7 @@ class ObsidianWriter:
                    chapter_items: dict, review_missing: bool):
         """把 writer 的运行时状态 -> `note_render.NoteData`（**纯数据组装**）。"""
         import note_render
-        sel = self._term_selection(entries)          # 💡 命中 + 过滤 + 记账
+        sel = self._term_selection(entries, review=review)     # 💡 命中 + 过滤 + 记账
         self._gloss_sel = sel
         extra = self._review_term_hits(review, entries)
         mats = self._materials

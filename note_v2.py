@@ -1621,12 +1621,41 @@ SHORTEN_RATIO = 1.5
 #: 每讲至多压缩几次（作者 F7-f：≤5 —— 把 F6 实测的 18 次压到个位数）。
 SHORTEN_MAX_CALLS = 5
 SHORTEN_MAX_TOKENS = 2500
+#: ⭐ F14 ⑦：可读性地板。压过头会掉成电报体（实测「阶跃0/1无梯度→sigmoid/tanh饱和→
+#:    ReLU修负区与不光滑；先试ReLU。」「前向算输出；反向链式传梯度，sigmoid导数复用」）
+#:    —— 压完**不达标就不替换**，宁可留着超限的原文（读者的可读性 > 字数上限）。
+SHORTEN_FLOOR_FRAC = 0.45          # 压缩后至少保留原文这个比例
+SHORTEN_FLOOR_CHARS = 80           # 且正文至少这么多字
+SHORTEN_ARROW_MAX = 1              # 「→」当分句符用超过这个数 = 电报体
 SHORTEN_SYS = """你在做一件事：把一节笔记的「讲解」压到字数上限以内。读者是要复习的大学生。
 
 · **保留**：全部事实、数字、公式、例子、结论；语气与术语写法不变（中文（English））。
 · **删掉**：重复的话（同一意思说两遍）、绕圈的过渡、与主线无关的旁支、空洞的强调。
 · 不许引入新内容，不许改数字或公式；宁短勿长。
+· ⚠️ **仍然是给人读的散文**：保留完整句子（主谓宾、句末句号），不许把句子压成
+  `A→B→C；先试 D` 这种箭头电报体，也不许只剩半句话。
 严格输出 JSON：{"prose": ["第 1 段", "第 2 段", "…"]}"""
+
+
+def too_compressed(lines: list, prose: list) -> str:
+    """压缩结果是不是"没法读了"。返回原因（`""` = 可以接受）。**纯函数。**
+
+    ⚠️ F14 ⑦ 的根因不是预算太小，而是**验收条件只有一个"更短"** —— 模型交回
+       "更短但只剩关键词"的版本也照样替换。这里补上可读性地板：
+        ① 掉得太狠（< 原文 45%，或正文 < 80 字）；
+        ② 箭头当分句符（`→` 多于 1 个）；
+        ③ 原来的散文有句末标点，压完一个都没有（句子结构没了）。
+    """
+    old = "".join(str(x) for x in (prose or []))
+    new = "".join(str(x) for x in (lines or []))
+    n_old, n_new = _cjk(old), _cjk(new)
+    if n_new < max(SHORTEN_FLOOR_CHARS, int(n_old * SHORTEN_FLOOR_FRAC)):
+        return f"压得太狠（{int(n_old)} 字 → {int(n_new)} 字）"
+    if new.count("→") > SHORTEN_ARROW_MAX:
+        return f"箭头分句 {new.count('→')} 处，成了电报体"
+    if re.search(r"[。！？]", old) and not re.search(r"[。！？]", new):
+        return "句末标点全没了（句子结构被压掉）"
+    return ""
 
 
 def shorten_overlimit(review: dict, *, chat, ratio: float = SHORTEN_RATIO,
@@ -1635,10 +1664,12 @@ def shorten_overlimit(review: dict, *, chat, ratio: float = SHORTEN_RATIO,
     """超上限 >`ratio`（1.5×）的单元做**一次**压缩调用（只改 `prose`；F7-f 收紧）。
 
     ⚠️ 只对超限的单元发（每个单元最多 1 次、每讲至多 `max_calls` 次）；
-       失败/变不短都不动原文（fail-soft）。调用数记在 warn 里（验收要数它）。
+       失败/变不短/压成电报体都不动原文（fail-soft）。F14 ⑦ 加了可读性地板
+       `too_compressed` —— 读者的可读性优先于字数上限。
     """
     out = copy.deepcopy(review)
     n = 0
+    n_skip = 0
     for s in (out.get("sections") or []):
         if not isinstance(s, dict):
             continue
@@ -1660,10 +1691,21 @@ def shorten_overlimit(review: dict, *, chat, ratio: float = SHORTEN_RATIO,
         except Exception:                                       # noqa: BLE001
             continue
         lines = _lines(got.get("prose")) if isinstance(got, dict) else []
-        if lines and sum(_cjk(x) for x in lines) < sum(_cjk(x) for x in prose):
-            s["prose"] = lines
-            n += 1
-    warns = [f"超限单元压缩：{n} 个单元各做了 1 次压缩调用（每讲至多 {max_calls} 次）"] if n else []
+        if not lines:
+            continue
+        if sum(_cjk(x) for x in lines) >= sum(_cjk(x) for x in prose):
+            continue
+        why = too_compressed(lines, prose)
+        if why:
+            n_skip += 1                    # 压过头 → 留原文（宁长勿电报）
+            continue
+        s["prose"] = lines
+        n += 1
+    warns = []
+    if n:
+        warns.append(f"超限单元压缩：{n} 个单元各做了 1 次压缩调用（每讲至多 {max_calls} 次）")
+    if n_skip:
+        warns.append(f"超限单元压缩：{n_skip} 个单元压成了电报体/太短 → 保留原文（可读性优先）")
     return out, [], warns
 
 

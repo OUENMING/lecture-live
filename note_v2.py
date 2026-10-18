@@ -973,6 +973,20 @@ def _dedup(items: list, key) -> list:
     return out
 
 
+def sort_sections_by_ts(sections: list) -> list:
+    """按 `ts` **稳定**排序（课堂顺序）。**全部分节都有可解析 ts 时才动** ——
+    有一个解不出就原样返回（宁缺勿错序）。**纯函数。**
+
+    ⚠️ F13 #5：实测 BUSI3243 §7 `[09:20]` 排在 §8 `[09:19]` 之前 —— 模型把某一节的
+       ts 写错，读者看到的章节序就不是时间序。稳定排序：并列（同一分钟）保持原序。
+    """
+    secs = list(sections or [])
+    ks = [_ts_seconds((s or {}).get("ts")) if isinstance(s, dict) else None for s in secs]
+    if not ks or any(k is None for k in ks):
+        return secs
+    return [s for _i, s in sorted(enumerate(secs), key=lambda t: (ks[t[0]], t[0]))]
+
+
 def merge_blocks(blocks: list) -> dict:
     """各块结果 -> 一份 review dict。**按块序**（合并顺序就是笔记顺序 = 课堂顺序）。
 
@@ -1004,6 +1018,8 @@ def merge_blocks(blocks: list) -> dict:
     out = {k: (v if k in ("title_zh", "sections") else _dedup(v, _key(k)))
            for k, v in out.items()}
     out["sections"] = [s for s in out["sections"] if s]
+    # ⭐ F13 #5：章节序按时间排（模型把某节 ts 写错时，读者读到的顺序还是课堂顺序）。
+    out["sections"] = sort_sections_by_ts(out["sections"])
     return {k: v for k, v in out.items() if v}
 
 
@@ -1873,6 +1889,51 @@ def align(review_data: dict, *, chat, materials=None,
 _NUM = re.compile(r"\d+(?:\.\d+)?")
 
 
+def checks_summary(checks) -> dict:
+    """三道核台账 → 计数。**唯一定义点**：md 页头、HTML 页头、终端那一行都读它。
+
+    · `n_checked` = **真的复算过**的（`ok` + `mismatch`）；
+    · `n_bad` = 复算发现**对不上**的（`mismatch`；⚠️ 正文不改，只标出来）；
+    · `n_un` = 核不了、**待读者确认**的（`unchecked`）。
+    """
+    rows = [c for c in (checks or []) if isinstance(c, dict)]
+    n_ok = sum(1 for c in rows if c.get("status") == "ok")
+    n_bad = sum(1 for c in rows if c.get("status") == "mismatch")
+    n_un = sum(1 for c in rows if c.get("status") == "unchecked")
+    return {"total": len(rows), "n_ok": n_ok, "n_bad": n_bad, "n_un": n_un,
+            "n_checked": n_ok + n_bad}
+
+
+def checks_headline(checks) -> str:
+    """页头那一句（md 与 HTML **共用** → 两处不可能不一样）。空表 → 空串。
+
+    ⚠️ F13 #2：旧文案写「（其中 N 处按 📖/📚 **改过**）」—— 而 `mismatch` 的口径是
+       **正文不改**（`note_math.check_review` 的 docstring 明写），那是句假话。
+       现在只说"对不上"，改没改正文由各处的修正记录（`corrections`）负责说。
+    """
+    s = checks_summary(checks)
+    if not (s["n_checked"] or s["n_un"]):
+        return ""
+    return (f"✅ 数字核对：{s['n_checked']} 处已核"
+            + (f"（{s['n_bad']} 处对不上）" if s["n_bad"] else "")
+            + f" · {s['n_un']} 处待你确认")
+
+
+def _clip_outside_math(s, n: int) -> str:
+    """截到 `n` 字，但**不许切在 `$…$` 中间**（切了就补 `…`）。**纯函数。**
+
+    ⚠️ F13 #6：ECS170 实测一条 claim 被 160 字截断，留下半个公式
+       （`… 并给出 $\\hat y_2=2.5`）—— 渲染出来是一段未闭合的 `$…$`。
+    """
+    t = str(s or "")
+    if len(t) <= n:
+        return t
+    head = t[:n]
+    if head.count("$") % 2:                 # 切在数学段里 → 退到那个 `$` 之前
+        head = head[:head.rfind("$")]
+    return head.rstrip() + "…"
+
+
 def _claim_text(v) -> str:
     """`checks` 里的一条断言 → 单行字符串。
 
@@ -1928,18 +1989,20 @@ def numeric_claims(review_data: dict, *, limit: int = 24) -> list:
         head = _one_line(s.get("heading"))
         ex = s.get("example") or {}
         if ex.get("prompt") or ex.get("steps") or ex.get("answer"):
-            ctx = f"本节例题「{_one_line(ex.get('title')) or '例题'}」的题面：{_one_line(ex.get('prompt'))[:160]}"
+            ctx = (f"本节例题「{_one_line(ex.get('title')) or '例题'}」的题面："
+                   + _clip_outside_math(_one_line(ex.get('prompt')), 160))
             texts = ([ex.get("prompt", ""), ex.get("answer", "")]
                      + [st.get("text", "") for st in (ex.get("steps") or [])])
             out += _num_items(head, texts, "example", ctx, limit)
         for j, v in enumerate(s.get("variants") or [], 1):
-            ctx = f"本节变式 {j} 自己的题面：{_one_line(v.get('q'))[:160]}"
+            ctx = (f"本节变式 {j} 自己的题面："
+                   + _clip_outside_math(_one_line(v.get('q')), 160))
             texts = ([v.get("q", ""), v.get("a", "")]
                      + [st.get("text", "") for st in (v.get("steps") or [])])
             out += _num_items(head, texts, "variant", ctx, limit)
         fd = s.get("faded") or {}
         out += _num_items(head, [fd.get("q", ""), fd.get("a", "")], "faded",
-                          f"本节补全题的题面：{_one_line(fd.get('q'))[:160]}", limit)
+                          f"本节补全题的题面：{_clip_outside_math(_one_line(fd.get('q')), 160)}", limit)
         # ⭐ F10：对照表 / 步骤图里的数字和正文一个待遇（格子文本进核）。
         cmp = s.get("compare") or {}
         if cmp.get("title"):
@@ -1960,7 +2023,7 @@ def numeric_claims(review_data: dict, *, limit: int = 24) -> list:
             return out[:limit]
     for q in (review_data.get("qa") or []):
         out += _num_items("自测", [q.get("a", "")], "qa",
-                          f"自测题：{_one_line(q.get('q'))[:160]}", limit)
+                          f"自测题：{_clip_outside_math(_one_line(q.get('q')), 160)}", limit)
         if len(out) >= limit:
             return out[:limit]
     # 已有 checks 的也带上（模型自己写的断言最值得复核）
@@ -2116,8 +2179,8 @@ def verify_numbers(review_data: dict, *, chat, materials=None,
         if not (0 <= i < len(claims)):
             continue
         st = _one_line(it.get("status")).lower()
-        got[i] = {"claim": claims[i]["text"][:160],
-                  "how": (_one_line(it.get("note")) or "")[:160],
+        got[i] = {"claim": _clip_outside_math(claims[i]["text"], 160),
+                  "how": _clip_outside_math(_one_line(it.get("note")) or "", 160),
                   "status": st if st in ("ok", "mismatch", "unchecked") else "unchecked",
                   "recomputed": _one_line(it.get("recomputed"))[:80]}
     out = [got[i] for i in sorted(got)]
@@ -2208,6 +2271,15 @@ def _walk_strings(obj, path: tuple = ()):
 _ABBREV = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,5}$")
 
 
+def _inside_longer_term(text: str, zh: str, i: int, zhs) -> bool:
+    """`zh` 在 `i` 处是不是某个**更长的已知术语**的前缀。**纯函数。**
+
+    ⚠️ F13 #4：`停产价` ⊂ `停产价格` —— 在 `停产价格` 的"停产价"处插括注会把词劈开
+       （实测：`停产价（shutdown price）格（shutting down price）`，速览首句）。
+    """
+    return any(len(z) > len(zh) and text.startswith(z, i) for z in zhs if z)
+
+
 def announce_terms(text: str, terms, seen: set) -> str:
     """术语**首次**出现 → 「中文（English）」；全篇每个术语只括注一次。
 
@@ -2217,12 +2289,18 @@ def announce_terms(text: str, terms, seen: set) -> str:
       · 括注就是这个词的英文（大小写不论）→ 原样；
       · 括注是缩写（`（AC）`）→ 并入成 `（average cost, AC）`；
       · 别的写法（整句英文等）→ 不加第二个（`标注` 宁缺勿叠）。
+    ⭐ F13 #4：只在**词边界**上加 —— 匹配处若落在更长的已知术语里就跳过（不许劈词）。
     """
     out = str(text or "")
+    zhs = [str(z) for z, _en in (terms or ()) if z]
     for zh, en in (terms or ()):
         if (zh, en) in seen or zh not in out:
             continue
         i = out.find(zh)
+        while i != -1 and _inside_longer_term(out, zh, i, zhs):
+            i = out.find(zh, i + 1)
+        if i == -1:
+            continue
         m = re.match(r"（([^）]{1,60})）", out[i + len(zh):])
         if m:
             inner = m.group(1).strip()

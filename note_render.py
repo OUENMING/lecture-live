@@ -63,6 +63,11 @@ class NoteData:
     katex_ok: bool = True
 
 
+#: md「复习速测」最多列几题（`note_render` 的渲染与下面那句"上面列了 N 题"**共用**
+#: 这一个数 —— F13 #3：原来列表用 6、计数用 5，列了 6 题却说列了 5 题）。
+QA_MD_MAX = 6
+
+
 # ⚠️ `_POLISH_NOTE` **不在这里** —— 它的唯一定义点在 `obsidian_writer`（`polish:`
 #    这个字段就是在那里定的，`test_wrapup` 也钉着 `ow._POLISH_NOTE`）。
 #    本模块渲染时去那边取（同 `_render_outline_section` 的做法），不抄第二份。
@@ -209,9 +214,6 @@ def render(d: NoteData) -> str:
 
     # ── ② 这段课（几行事实；详细版里还有这些 + 全部内容）──────────────────
     checks = list(review.get("checks") or [])
-    n_ok = sum(1 for c in checks if c.get("status") == "ok")
-    n_bad = sum(1 for c in checks if c.get("status") == "mismatch")
-    n_un = sum(1 for c in checks if c.get("status") == "unchecked")
     pts = review.get("lecture_points") or []
     cov = review.get("covered") or []
     cv = review.get("cover") or {}
@@ -222,9 +224,16 @@ def render(d: NoteData) -> str:
         if cv["n_points"] > cv["n_covered"]:
             cov_line += f"（缺 {cv['n_points'] - cv['n_covered']}，明细见详细版）"
     elif pts:
-        n_cov = sum(1 for c in cov if _one(c.get("section")) and
-                    _one(c.get("section")) not in ("缺失", "missing", "-", "无"))
-        cov_line = f"覆盖度：教授知识点 {len(pts)} 个 → 笔记覆盖 {n_cov} 个"
+        # ⚠️ F13 #1：`covered` 为空（对齐回执没拿到 / 模型没逐条抄）**不许**说"覆盖 0 个"
+        #    —— 读起来像"整讲一条都没覆盖"。那是"没核对成"，不是"没覆盖"。
+        rows = [c for c in cov if _one(c.get("section"))]
+        if not rows:
+            cov_line = (f"覆盖度：教授知识点 {len(pts)} 个 · 这次没做成逐条对齐"
+                        "（明细见详细版）")
+        else:
+            n_cov = sum(1 for c in rows
+                        if _one(c.get("section")) not in ("缺失", "missing", "-", "无"))
+            cov_line = f"覆盖度：教授知识点 {len(pts)} 个 → 笔记覆盖 {n_cov} 个"
     else:
         cov_line = "覆盖度：未生成知识点清单"
     L += ["> [!info] 这段课", ">"]
@@ -233,10 +242,12 @@ def render(d: NoteData) -> str:
     if d.materials_line:
         L += [f"> {d.materials_line}"]
     L += [f"> {cov_line}"]
-    if n_ok or n_bad or n_un:
-        L += [f"> ✅ 数字核对：{n_ok + n_bad} 处已核"
-              + (f"（其中 {n_bad} 处按 📖/📚 改过）" if n_bad else "")
-              + f" · {n_un} 处待你确认（明细见详细版）"]
+    # ⭐ F13 #2：页头那行与 HTML **共用** `note_v2.checks_headline`（一处定义）——
+    #    终端那行也读同一个计数，三处不可能再各说一个数。
+    import note_v2
+    headline = note_v2.checks_headline(checks)
+    if headline:
+        L += [f"> {headline}（明细见详细版）"]
     # 精修出了异常（失败 / 部分失败 / 被跳过）要在正文说一句；常态 off 不报警（只进抬头）。
     # ⚠️ d26ab88 改简版时把这几行一起删了 → 只剩抬头 `polish:`，test_wrapup 慢档红了一天。
     try:
@@ -286,8 +297,9 @@ def render(d: NoteData) -> str:
         L += ["## 复习速测（先想再看 · 三档）", ""]
         L += ["*先合上笔记自己答，答完展开对照；完整题库与逐步解析在详细版。*", ""]
         import note_v2
+        n_shown = min(len(qa), QA_MD_MAX)
         i, tier_now = 0, ""
-        for x in qa[:6]:
+        for x in qa[:QA_MD_MAX]:
             t = note_v2.qa_tier(x)
             if t != tier_now:
                 L += [f"**{t}** — {note_v2.QA_TIER_DESC.get(t, '')}：", ""]
@@ -349,7 +361,9 @@ def render(d: NoteData) -> str:
             tag = f"L{ix[0] + 1}" if len(ix) == 1 else f"L{ix[0] + 1}–{ix[-1] + 1}"
             L += [f"- `{p:.2f}` `{tag}` {text}"]
     if qa:
-        n_shown = min(len(qa), 5)
+        # ⚠️ F13 #3：原来数的是 `min(len(qa), 5)`，而上面 ④b 列的是 `qa[:6]`
+        #    —— 列了 6 题却说"上面列了 5 题"。两处都读 `QA_MD_MAX`（一个口径）。
+        n_shown = min(len(qa), QA_MD_MAX)
         more = len(qa) - n_shown
         L += ["", f"**自测共 {len(qa)} 题**：上面「复习速测」列了 {n_shown} 题（答案折叠）；"
               + (f"另外 {more} 题与全部逐步解析在详细版 HTML 里。" if more

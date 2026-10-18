@@ -1318,10 +1318,9 @@ class ObsidianWriter:
             if checks:
                 review["checks"] = checks
                 self._corr_extra = note_v2.corrections_from_mismatch(checks)
-                bad = [c for c in checks if c.get("status") == "mismatch"]
-                un = [c for c in checks if c.get("status") == "unchecked"]
-                print(f"🥉 数字三道核：{len(checks)} 项（{len(bad)} 项修正、"
-                      f"{len(un)} 项未核对）", flush=True)
+                # ⚠️ F13 #2：终端那行**不再在这里打** —— 这里只是半场的数字
+                #    （后面返修、正文核对还会加减行）。统一在链条跑完后按**最终**
+                #    `review["checks"]` 打，与 md/HTML 页头读同一个计数。
         except Exception as e:                                # noqa: BLE001
             print(f"⚠ 数字核对失败({str(e)[:60]}); 笔记照常生成")
         self._exercise_flags = flags
@@ -1399,6 +1398,13 @@ class ObsidianWriter:
                     print(f"   ⚠ {label}：{w}", flush=True)
             except Exception as e:                            # noqa: BLE001
                 print(f"⚠ {label}失败({str(e)[:60]}); 笔记照常生成")
+        # 🥉 F13 #2：三道核那行按**最终**台账打（与 md/HTML 页头同一个计数函数）。
+        #    ⚠️ 旧版在 `verify_numbers` 之后立刻打，那是半场数字（后面返修/支持性核对
+        #    还会加减行）→ 终端 72 项、页头 48 处，两套数。
+        _cs = note_v2.checks_summary(review.get("checks") or [])
+        print(f"🥉 数字三道核：{_cs['n_checked']} 处已核"
+              f"（{_cs['n_bad']} 处对不上）· {_cs['n_un']} 处未核对 · 共 {_cs['total']} 条",
+              flush=True)
         # 🧮 F9c：守卫台账行（批量审计：一批笔记 `grep guards:` 就能看谁被动过）。
         self._guard_counts["flagged"] = len(
             [c for c in (review.get("checks") or [])

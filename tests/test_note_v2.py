@@ -1021,6 +1021,66 @@ class RenderShape(unittest.TestCase):
         self.assertIn("📖 课件 2 份 / 索引 9 段", out)
         self.assertIn("覆盖度：教授知识点 1 个 → 笔记覆盖 1 个", out)
 
+    # ── F13 #1/#2/#3/#6（页头三处 + 截断）──────────────────────────────
+    def test_覆盖度没核对成_不许说覆盖0个(self):
+        """F13 #1：`covered` 为空（对齐回执没拿到）不许印「笔记覆盖 0 个」——
+        读起来像"整讲一条都没覆盖"，那是**没核对成**，不是没覆盖。"""
+        rev = {"sections": [SECTION],
+               "lecture_points": [{"ts": "13:31", "point": "A"}, {"ts": "13:32", "point": "B"}],
+               "covered": []}
+        out = nr.render(self._data(review=rev))
+        self.assertIn("教授知识点 2 个", out)
+        self.assertNotIn("笔记覆盖 0 个", out)
+        self.assertIn("没做成逐条对齐", out)
+
+    def test_页头与详细版同一个计数_且不写改过(self):
+        """F13 #2：md 与 HTML 页头**共用** `checks_headline`；`mismatch` 正文不改
+        （`check_review` 的 docstring 明写），不许写"按 📖/📚 改过"。"""
+        checks = [{"claim": "MC(4)=12", "how": "x", "status": "ok"},
+                  {"claim": "AC(5)=28", "how": "y", "status": "mismatch"},
+                  {"claim": "z", "how": "w", "status": "unchecked"}]
+        d = self._data(review=dict(REVIEW, checks=checks))
+        md, h = nr.render(d), nh.note_page(d)
+        want = nv.checks_headline(checks)
+        self.assertIn(want, md)
+        self.assertIn(want, h)
+        for t in (md, h):
+            self.assertNotIn("改过", t)
+        self.assertIn("2 处已核", md)
+        self.assertIn("（1 处对不上）", md)
+
+    def test_checks_headline_空台账不印(self):
+        self.assertEqual("", nv.checks_headline([]))
+        self.assertEqual("", nv.checks_headline(None))
+
+    def test_自测列几题就说列了几题(self):
+        """F13 #3：列 6 题却说"上面列了 5 题"（列表用 6、计数用 5）。"""
+        rev = dict(REVIEW, qa=[{"q": f"Q{i}?", "a": f"A{i}", "tier": "基础"}
+                               for i in range(6)])
+        out = nr.render(self._data(review=rev))
+        self.assertIn("自测共 6 题", out)
+        self.assertIn("上面「复习速测」列了 6 题", out)
+        self.assertGreaterEqual(out.count("> [!question]- 答案"), 6)
+
+    def test_claim截断不切在公式中间(self):
+        """F13 #6：160 字截断会留下半个 `$…$`（ECS170 实测）。"""
+        s = "x" * 70 + "$abcdef$" + "y" * 100
+        got = nv._clip_outside_math(s, 75)           # 75 落在 `$abcdef` 里
+        self.assertEqual(got, "x" * 70 + "…", got)
+        self.assertEqual(got.count("$") % 2, 0, got)
+        self.assertLessEqual(len(got), 76)
+        self.assertEqual(nv._clip_outside_math("短的原文", 75), "短的原文")
+        # 不切在数学里时照旧截断
+        self.assertEqual(nv._clip_outside_math("z" * 100, 10), "z" * 10 + "…")
+        # 报告里的现场：整串被截断时 `$` 不许是奇数
+        ecc = ("网络有两个输出，$E=\\tfrac12[(\\hat y_1-1)^2+(\\hat y_2-2)^2]$，标签 "
+               "$y_1=1$、$y_2=2$。求 $\\partial E/\\partial\\hat y_2$，并给出 "
+               "$\\hat y_2=2.5$ 与全部逐步解析。")
+        for n in (40, 60, 80, 100, 120, 140, 160):
+            got2 = nv._clip_outside_math(ecc, n)
+            self.assertEqual(0, got2.count("$") % 2, (n, got2))
+
+
     def test_没课件时头部明说(self):
         d = self._data(materials_line="📖 无课件材料",
                        warns=["本课**未做课件核对** —— 没找到这门课的课件材料"])
@@ -1058,6 +1118,73 @@ class RenderShape(unittest.TestCase):
         self.assertIn("2026-10-17", out)
         self.assertIn("x.anki.csv", out)
         self.assertIn("x.html", out)
+
+
+class HeaderWiring(unittest.TestCase):
+    """F13 #2 的接线：终端那行与页头**同源**（一处定义、三处引用）。"""
+
+    SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "obsidian_writer.py")
+
+    def test_终端只打一次且在链条之后(self):
+        t = open(self.SRC, encoding="utf-8").read()
+        self.assertEqual(1, t.count("🥉 数字三道核"), "三道核那行只许有一处 print")
+        i = t.index("🥉 数字三道核")
+        self.assertIn("checks_summary(review.get(\"checks\")", t[max(0, i - 500):i + 200],
+                      "终端那行必须读**最终**台账（不是 verify 之后立刻打）")
+        # 那行要在 `guards:` 台账同一段里（链条跑完），不在 verify_numbers 里
+        self.assertLess(t.index("except Exception as e:                                # noqa: BLE001\n            print(f\"⚠ 数字核对失败"),
+                        i)
+
+
+class SectionOrder(unittest.TestCase):
+    """F13 #5：章节序按时间排（模型把某一节的 ts 写错时）。"""
+
+    def test_章节按时间排(self):
+        secs = [{"heading": "A", "ts": "09:20"}, {"heading": "B", "ts": "09:19"}]
+        got = nv.sort_sections_by_ts(secs)
+        self.assertEqual([s["heading"] for s in got], ["B", "A"])
+
+    def test_ts_解不出就原样(self):
+        secs = [{"heading": "A", "ts": "09:20"}, {"heading": "B", "ts": "坏"}]
+        self.assertEqual(nv.sort_sections_by_ts(secs), secs)
+
+    def test_并列保持原序(self):
+        secs = [{"heading": "A", "ts": "09:20"}, {"heading": "B", "ts": "09:20"}]
+        self.assertEqual([s["heading"] for s in nv.sort_sections_by_ts(secs)], ["A", "B"])
+
+    def test_merge_blocks_顺带排序(self):
+        blocks = [{"sections": [{"heading": "H2", "ts": "09:20", "prose": ["p"]}]},
+                  {"sections": [{"heading": "H1", "ts": "09:19", "prose": ["p"]}]}]
+        got = nv.merge_blocks(blocks)
+        self.assertEqual([s["heading"] for s in got["sections"]],
+                         ["[09:19] H1", "[09:20] H2"])
+
+
+class TermAnnotationBoundary(unittest.TestCase):
+    """F13 #4：术语括注只在**词边界**上加。"""
+
+    def test_不许在更长术语的前缀处插括注(self):
+        """`停产价` ⊂ `停产价格` —— 插在"停产价"处会把词劈成
+        `停产价（shutdown price）格（shutting down price）`（速览首句实测）。"""
+        text = "先解释停产价格为什么是最低点。"
+        for terms in ([("停产价", "shutdown price"), ("停产价格", "shutting down price")],
+                      [("停产价格", "shutting down price"), ("停产价", "shutdown price")]):
+            got = nv.announce_terms(text, terms, set())
+            self.assertNotIn("停产价（shutdown price）格", got)
+            self.assertEqual(got.count("（"), 1, (terms, got))
+            self.assertIn("停产价格（", got)
+
+    def test_正常括注照旧(self):
+        got = nv.announce_terms("平均成本最低点。", [("平均成本", "average cost")], set())
+        self.assertIn("平均成本（average cost）", got)
+
+    def test_只括注一次(self):
+        seen: set = set()
+        terms = [("平均成本", "average cost")]
+        first = nv.announce_terms("平均成本很低。", terms, seen)
+        second = nv.announce_terms("平均成本还是低。", terms, seen)
+        self.assertEqual(second, "平均成本还是低。")
 
 
 class F13SymbolConsistency(unittest.TestCase):

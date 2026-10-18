@@ -1243,15 +1243,11 @@ def note_page(d) -> str:
     if d.materials_line:
         head.append(f"<div>{inline(d.materials_line)}</div>")
     checks = review.get("checks") or []
-    if checks:
-        n_ok = sum(1 for c in checks if c.get("status") == "ok")
-        n_bad = sum(1 for c in checks if c.get("status") == "mismatch")
-        n_un = sum(1 for c in checks if c.get("status") == "unchecked")
-        # ⚠️ 学生只看到一句话（作者 2026-10-17 第三轮：「页头给学生看的是内部诊断」）：
-        #    生成器的工作记录（哪条公式被改过、删了几句猜测）挪到页尾折叠。
-        head.append(f'<div>✅ 数字核对：{n_ok + n_bad} 处已核'
-                    + (f"（其中 {n_bad} 处按 📖/📚 改过）" if n_bad else "")
-                    + f' · {n_un} 处待你确认（<a href="#checks">点开看</a>）</div>')
+    # ⭐ F13 #2：与 md 页头、终端那一行**共用** `note_v2.checks_summary`（一处定义）。
+    #    ⚠️ 旧文案写「（其中 N 处按 📖/📚 改过）」是假话 —— `mismatch` 正文不改。
+    headline = note_v2.checks_headline(checks)
+    if headline:
+        head.append(f'<div>{headline}（<a href="#checks">点开看</a>）</div>')
     # ⭐ 图放**它所属的知识点里**（作者第三轮第 1 条：不许全堆在最后一个区），
     #    同一张图（同 kind + 同参数）只出一张 —— 实测有 5 张一模一样的 AC/MC 曲线。
     plots_by_idx: dict = {}

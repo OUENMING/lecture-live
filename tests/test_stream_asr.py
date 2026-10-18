@@ -554,6 +554,24 @@ def t_transport_fatal_error_no_retry() -> None:
         wk.close()
 
 
+def t_transport_fatal_error_code_only_no_retry() -> None:
+    """错误帧**只有 `error_code`**（没有 `error_type`）也认得出致命类，不白烧一把 key 重连。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son)
+    try:
+        assert wait_until(s.alive)
+        son.to_send.put({"error_code": 401, "error_message": "x"})
+        son.to_send.put(("close", 1008, "policy violation"))
+        assert wait_until(lambda: not s.alive() and s.reason() != ""), "该直接退回"
+        assert s.reason() == "error", s.reason()
+        assert len(wk.requests) == 1, f"只给数字码的致命错误也不许重连：领了 {len(wk.requests)} 次 key"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
 def t_transport_balance_exhausted_falls_back_now() -> None:
     """`organization_balance_exhausted`（余额用完）是致命类：**不重连**，直接退回本地。"""
     son = FakeSoniox()
@@ -848,6 +866,7 @@ def main() -> int:
         ("classify_error / notice_for", t_classify_and_notice),
         ("transport: 正常出两句 + config", t_transport_happy_path),
         ("transport: 致命错误不重连", t_transport_fatal_error_no_retry),
+        ("transport: 只有 error_code 的致命错误也不重连", t_transport_fatal_error_code_only_no_retry),
         ("transport: 余额耗尽 → 不重连直接退回", t_transport_balance_exhausted_falls_back_now),
         ("transport: 断线重连一次", t_transport_reconnect_once),
         ("transport: 封过句之后重连还能接着封", t_transport_reconnect_after_sealing_keeps_sealing),

@@ -965,7 +965,10 @@ class StreamASR:
                 if not isinstance(msg, dict):
                     continue
                 et = msg.get("error_type")
-                if isinstance(et, str) and et:
+                if not (isinstance(et, str) and et):
+                    ec = msg.get("error_code")         # 只给数字码的错误帧：按数字串分类
+                    et = str(ec) if isinstance(ec, int) and not isinstance(ec, bool) else ""
+                if et:
                     self._events.put(("err", et))
                     continue
                 toks = msg.get("tokens")

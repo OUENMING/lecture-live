@@ -65,6 +65,10 @@ OPUS_KW: dict = {"compression_level": 0.8}
 
 ENV_SWITCH = "CLASSLIVE_CLOUD_ASR"
 
+#: `FinalResult.source` 里属于**云端**的那几个 —— `main` 用它记「这节课的定稿用过云端」
+#: （那张「旧的本地 Whisper 还能清掉」的卡按它数课数，见 `whisper_card.py`）。
+CLOUD_SOURCES = ("groq", "qwen")
+
 
 def echo(msg: str) -> None:
     print(msg, flush=True)

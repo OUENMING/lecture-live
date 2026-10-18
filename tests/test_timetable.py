@@ -313,7 +313,7 @@ def t_load_bad_shapes():
       · `{"X": 5}`（`rows` 不可迭代）→ `for r in rows` 抛 `TypeError`，
         而它在 `try` **之外**（`TypeError` 虽在列表里也救不到这条语句）。
 
-    ⚠️ 为什么这条重要：唯一的调用方 `entry_panel._guesses()` 那行
+    ⚠️ 为什么这条重要：唯一的调用方 `entry_panel._likely()` 那行
        `T.load(store.load_json(paths.timetable(...), {}))` **没有兜底**，
        而 `store.load_json` **只校验顶层是 dict、不校验嵌套形状** →
        一份被手改坏的 `timetable.json` 会让**整个面板 build 时抛异常**。

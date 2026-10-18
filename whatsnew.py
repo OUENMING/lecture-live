@@ -364,8 +364,11 @@ def build(title: str, subtitle: str = "", groups: list[dict] | None = None, *,
         if over is not None:
             try:
                 f = over.frame()
+                # 默认顶边下 120pt；面板矮（只有 1–2 门课）时这样会把卡压到面板底边、
+                # 盖住「选择文件 / 关闭」→ 改成面板内垂直居中（2026-10-18 拍图抓到）。
+                drop = min(120.0, max(16.0, (f.size.height - h) / 2.0))
                 p.setFrameOrigin_((f.origin.x + (f.size.width - WIDTH) / 2.0,
-                                   f.origin.y + f.size.height - h - 120.0))
+                                   f.origin.y + f.size.height - h - drop))
             except Exception:                             # noqa: BLE001
                 pass
         p.orderFrontRegardless()      # ⚠️ 不是 makeKeyAndOrderFront —— 绝不抢焦点

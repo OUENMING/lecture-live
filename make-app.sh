@@ -2,7 +2,7 @@
 # 把仓库里的 venv 变成一个可以双击的 ClassLive.app
 #
 #   ./make-app.sh            # 构建（已存在就重建）
-#   ./make-app.sh --check    # 只检查现状，不动任何东西
+#   ./make-app.sh --check    # 只检查现状，不动任何东西；有 ❌ → 退出码 1（2026-10-18）
 #   ./make-app.sh --up-to-date   # 构建输入没变 = 退出码 0（判据的唯一实现）
 #   ./make-app.sh --fingerprint  # 只打印当前指纹（给判据用，不建也不查）
 #
@@ -100,7 +100,13 @@ if [ "${1:-}" = "--up-to-date" ]; then
 fi
 
 # ---------- --check：只报告现状 ----------
+# 退出码（2026-10-18 补）：**打了 ❌ 就非 0**，⚠️ / ⚪ 一律算 0。
+# ⚠️⚠️ 与 `install.sh --check` 同一套（`_bad` + 最后 `exit "$_bad"`）——
+#    原来这里无论报什么最后都 `exit 0`，于是 `if ./make-app.sh --check; then` 永远为真，
+#    脚本化调用读不出「缺件」。进 `set -e` 的调用方更要看退出码：一条 ❌ 都不该被当成"没事"。
+# ⚠️ **报全**的纪律不变：一条 ❌ 也不早退，先把现状全说完，最后才用退出码汇报。
 if [ "${1:-}" = "--check" ]; then
+  _bad=0
   say "ClassLive.app 构建现状"
   say "──────────────────────────────────"
   if [ -d "$APP" ]; then
@@ -119,21 +125,38 @@ if [ "${1:-}" = "--check" ]; then
     if [ -n "$_EXE_C" ] && [ -L "$APP/Contents/MacOS/$_EXE_C" ]; then
       # ⚠️ 报了就**不再报"就位"** —— `-e` / `-x` 都会跟随符号链接，
       #    两条一起打出来会自相矛盾（"是符号链接" + "就位"），反而让人困惑。
+      #    ⚠️ 这一档是 ⚠️ 不是 ❌（理论上还能修）：**不计入退出码**。
       say "   ⚠️ MacOS/$_EXE_C   **符号链接** → 双击会没反应！重跑 ./make-app.sh"
     else
-      say "   MacOS/python      $([ -e "$APP/Contents/MacOS/python" ] && echo 就位 || echo '❌ 缺')"
+      if [ -e "$APP/Contents/MacOS/python" ]; then
+        say "   MacOS/python      就位"
+      else
+        say "   MacOS/python      ❌ 缺"; _bad=1
+      fi
       # ⚠️ 这里必须同时判 `-f`：上面的 `-e` 查的是**硬编码的 python**，
       #    而这一行查的是 `$_EXE_C`（Info.plist 里那个名字）—— 两者可以不是同一个。
       #    只判 `-n` 的话，Info.plist 指向一个不存在的文件时照样打「真文件 ✅」。
       if [ -n "$_EXE_C" ] && [ -f "$APP/Contents/MacOS/$_EXE_C" ]; then
         say "   MacOS/$_EXE_C   真文件 ✅"
       elif [ -n "$_EXE_C" ]; then
-        say "   MacOS/$_EXE_C   ❌ 缺（Info.plist 指向它，但文件不在）"
+        say "   MacOS/$_EXE_C   ❌ 缺（Info.plist 指向它，但文件不在）"; _bad=1
       fi
     fi
-    say "   lib/              $([ -d "$APP/Contents/lib" ] && echo 就位 || echo '❌ 缺')"
-    say "   pyvenv.cfg        $([ -f "$APP/Contents/pyvenv.cfg" ] && echo 就位 || echo '❌ 缺')"
-    say "   Info.plist        $([ -f "$APP/Contents/Info.plist" ] && echo 就位 || echo '❌ 缺')"
+    if [ -d "$APP/Contents/lib" ]; then
+      say "   lib/              就位"
+    else
+      say "   lib/              ❌ 缺"; _bad=1
+    fi
+    if [ -f "$APP/Contents/pyvenv.cfg" ]; then
+      say "   pyvenv.cfg        就位"
+    else
+      say "   pyvenv.cfg        ❌ 缺"; _bad=1
+    fi
+    if [ -f "$APP/Contents/Info.plist" ]; then
+      say "   Info.plist        就位"
+    else
+      say "   Info.plist        ❌ 缺"; _bad=1
+    fi
     # 戳记：对不上说明 make-app.sh / make_icon.py 改过了，这个 .app 该重建
     # ⚠️ **`VERSION` 不在里面** —— 它每版都变，而落点只有 Finder 看得到（见文件头那张表）。
     if [ ! -f "$STAMP" ]; then
@@ -154,6 +177,7 @@ if [ "${1:-}" = "--check" ]; then
       say "   图标              $_ICON_N.icns ✅"
     else
       say "   图标              ❌ 声明了 $_ICON_N 但 Resources/$_ICON_N.icns 不存在"
+      _bad=1
     fi
     if [ -x "$APP/Contents/MacOS/python" ]; then
       say "   能不能跑           $("$APP/Contents/MacOS/python" -c 'import sys;print(sys.version.split()[0])' 2>&1 | tail -1)"
@@ -168,7 +192,8 @@ if [ "${1:-}" = "--check" ]; then
     say "旧布局（重构前的 .venv，现在可以删）："
     say "   .venv             $(du -sh "$HERE/.venv" | cut -f1)"
   fi
-  exit 0
+  [ "$_bad" = 0 ] || say "   ── 上面标 ❌ 的地方需要处理（⚠️ / ⚪ 不计）"
+  exit "$_bad"
 fi
 
 # ---------- 前置检查 ----------

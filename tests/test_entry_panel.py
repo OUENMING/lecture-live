@@ -241,8 +241,8 @@ def main() -> int:
           E.kept_added(_dup) == ["b"] and "本次加了 1 个" in E.result_header(_dup),
           f"{E.kept_added(_dup)} / {E.result_header(_dup)}")
 
-    print("\n--- ⑧b 数字键选课：**键事件** -> 选中哪门 ---")
-    # ⚠️ 判据落在 `key_course_from_event` 上（真 `NSEvent` 与假事件同形），
+    print("\n--- ⑧b 数字键选课 / 回车开课：**键事件** -> 动作 ---")
+    # ⚠️ 判据落在 `key_intent_from_event` 上（真 `NSEvent` 与假事件同形），
     #    不是「有没有装监视器」——装上了但映射错，用户按 2 选中的是第 3 门，
     #    而那种错**不会报错**。
     class _Ev:
@@ -256,32 +256,95 @@ def main() -> int:
             return self._mods
 
     _order = ["AA10010", "BB20020", "CC30030"]
-    check("按 1 / 2 / 3 -> 第 1 / 2 / 3 门",
-          [E.key_course_from_event(_Ev(str(i)), _order) for i in (1, 2, 3)]
-          == _order,
-          str([E.key_course_from_event(_Ev(str(i)), _order) for i in (1, 2, 3)]))
-    check("按 4（只有 3 张卡）-> 不动", E.key_course_from_event(_Ev("4"), _order) is None)
+    check("按 1 / 2 / 3 -> 选中第 1 / 2 / 3 门",
+          [E.key_intent_from_event(_Ev(str(i)), _order) for i in (1, 2, 3)]
+          == [("select", c) for c in _order],
+          str([E.key_intent_from_event(_Ev(str(i)), _order) for i in (1, 2, 3)]))
+    check("按 4（只有 3 张卡）-> 不动", E.key_intent_from_event(_Ev("4"), _order) is None)
     check("按 0 / 6 / 字母 / 空格 -> 一律不处理",
-          all(E.key_course_from_event(_Ev(c), _order) is None
+          all(E.key_intent_from_event(_Ev(c), _order) is None
               for c in ("0", "6", "a", " ")))
-    check("回车 -> 上次那门",
-          E.key_course_from_event(_Ev("\r"), _order, "BB20020") == "BB20020")
-    check("回车但还没有「上次那门」-> 不动（不猜第一张）",
-          E.key_course_from_event(_Ev("\r"), _order, None) is None)
+    # ⭐ 2026-10-18：回车不再是「选中上次那门」，而是**直接开课**（用当前选中的那门）。
+    check("⭐ 回车 -> **开始上课**那门（不再只是选中）",
+          E.key_intent_from_event(_Ev("\r"), _order, "BB20020") == ("start", "BB20020"),
+          str(E.key_intent_from_event(_Ev("\r"), _order, "BB20020")))
+    check("回车键的另一种写法（keypad Enter = `\\n`）同样 -> 开始",
+          E.key_intent_from_event(_Ev("\n"), _order, "BB20020") == ("start", "BB20020"))
+    check("回车但没有选中的那门 -> 不动（不猜第一张）",
+          E.key_intent_from_event(_Ev("\r"), _order, None) is None)
+    check("⚠️ 选中的课不在表里（刚被删）-> 不开始",
+          E.key_intent_from_event(_Ev("\r"), _order, "ZZ99999") is None)
     check("⚠️ 输入框有焦点 -> 一个键都不抢（1 / 5 / 回车）",
-          all(E.key_course_from_event(_Ev(c), _order, _order[0], editing=True) is None
+          all(E.key_intent_from_event(_Ev(c), _order, _order[0], editing=True) is None
               for c in ("1", "5", "\r")))
     check("⚠️ 带 ⌘ / ⌃ / ⌥ -> 不抢（那是系统快捷键）",
-          all(E.key_course_from_event(_Ev("1", m), _order) is None
+          all(E.key_intent_from_event(_Ev("1", m), _order) is None
               for m in (1 << 20, 1 << 18, 1 << 19)))
     check("事件形状读不出来 -> 不处理（不抛）",
-          E.key_course_from_event(object(), _order) is None)
-    # 「上次那门」= 最近一次**真上过课**的那门；没上过的课不参与。
+          E.key_intent_from_event(object(), _order) is None)
     _rows = [R(course="A", last="2026-09-01"), R(course="B", last="2026-10-16"),
              R(course="C", last=None)]
     check("⭐ 上次那门 = 最近一次真上过课的那门",
           E.last_course_of(_rows) == "B", str(E.last_course_of(_rows)))
     check("一门都没上过 -> None", E.last_course_of([R(course="A", last=None)]) is None)
+
+    print("\n--- ⑧c 「最可能那门」的排法（纯函数；now / 课表 / 上次那门全注入）---")
+    # 2026-10-18 是周日；造一个**周二 10:35** 的时刻。
+    import datetime as _dt
+    import timetable as _T
+    _now = _dt.datetime(2026, 10, 20, 10, 35)
+
+    def _slot(hh, mm, *, minutes=60, weekday=1, iv=1, anchor=None, skip=()):
+        return _T.Slot(weekday, hh, mm, minutes, interval=iv,
+                       anchor=anchor or _dt.date(2026, 10, 13), skip=tuple(skip))
+
+    def _lc(entries, when, **kw):
+        got = E.likely_course(entries, when, **kw)
+        return (got.course, got.why) if got else None
+
+    def _lc_course(entries, when, **kw):
+        """只要课号（None 安全 —— 判据**不许因为被测函数返回 None 而崩**）。"""
+        got = E.likely_course(entries, when, **kw)
+        return got.course if got else None
+
+    check("① 正开着的课（10:00 开始、60 分钟）-> 就是它",
+          _lc([("AA10010", [_slot(10, 0)])], _now) == ("AA10010", "课表上 10:00 是这门"),
+          str(_lc([("AA10010", [_slot(10, 0)])], _now)))
+    check("① 跨过整点的长课也算正开着（9:30 开始、120 分钟）",
+          _lc_course([("AA10010", [_slot(9, 30, minutes=120)])], _now) == "AA10010")
+    check("① 时长没写（0）-> 退回「同一小时」老口径（10:05 算开着）",
+          _lc_course([("AA10010", [_slot(10, 5, minutes=0)])], _now) == "AA10010")
+    check("② 20 分钟内要开（10:50）-> 也算它",
+          _lc_course([("AA10010", [_slot(10, 50)])], _now) == "AA10010")
+    check("② 21 分钟后（10:56）-> 不算「马上要上」",
+          _lc([("AA10010", [_slot(10, 56)])], _now) is None)
+    check("① 正开着 > ② 20 分钟内要开（现在这节赢，不是下一节）",
+          _lc_course([("AA10010", [_slot(9, 0, minutes=120)]),
+                      ("BB20020", [_slot(10, 50)])], _now) == "AA10010")
+    check("③ 课表全不命中 -> 上次那门",
+          _lc([("AA10010", [_slot(14, 0)])], _now,
+              last_used="CC30030") == ("CC30030", "上次上的是这门"))
+    check("③ 没有课表、只有历史 -> 上次那门",
+          _lc_course([], _now, last_used="CC30030") == "CC30030")
+    check("④ 课表/历史都没有 -> None（没证据就不猜）",
+          _lc([], _now) is None)
+    check("⚠️ 双周课这周不上（iv=2、锚点落在另一周）-> 不算",
+          _lc([("AA10010", [_slot(10, 0, iv=2, anchor=_dt.date(2026, 10, 13))])],
+              _now) is None)
+    check("⚠️ 对照：双周课的「该上那周」-> 照样命中",
+          _lc_course([("AA10010", [_slot(10, 0, iv=2, anchor=_dt.date(2026, 10, 6))])],
+                     _now) == "AA10010")
+    check("⚠️ 停课日（EXDATE）-> 不算",
+          _lc([("AA10010", [_slot(10, 0, skip=[_dt.date(2026, 10, 20)])])],
+              _now) is None)
+    check("⚠️ 别的周几的同一时间 -> 不算（只认今天）",
+          _lc([("AA10010", [_slot(10, 0, weekday=3)])], _now) is None)
+    check("并列时取**更晚开始**的（同时段两门 → 刚开的那节）",
+          _lc_course([("AA10010", [_slot(9, 40, minutes=120)]),
+                      ("BB20020", [_slot(10, 20, minutes=120)])], _now) == "BB20020")
+    check("⚠️ 先列谁不影响结果（同一份输入 -> 同一个答案）",
+          _lc_course([("BB20020", [_slot(10, 20, minutes=120)]),
+                      ("AA10010", [_slot(9, 40, minutes=120)])], _now) == "BB20020")
 
     print("\n--- ⑦b 结果区：导出清单 + 已在表里/你删过可展开 ---")
     _e = {"added": ["a"], "removed": set(), "not_added": ["x", "y"],
@@ -594,6 +657,8 @@ def main() -> int:
     _add_wiring_section()
     _digit_hint_section()
     _result_actions_section()
+    _enter_section()
+    _whisper_card_section()
     _target_liveness_section()
     _chip_section()
     _test_mode_section()
@@ -2634,6 +2699,194 @@ def _result_actions_section() -> None:
               f"{_ch} vs {E.card_height(ent, show_skipped=_sh)}")
         _low = min(float(v.frame().origin.y) for v in _c.subviews())
         check(f"⭐ {_tag}态：没有子视图掉出卡片底部", _low >= -0.01, f"最低 y={_low:.1f}")
+
+
+def _enter_section() -> None:
+    """⑧d 回车 = 「开始上课」：**驱动真的 `_on_key`**，与卡片按钮对拍。
+
+    ⚠️ 为什么破例建窗口（同 ⑬）：这条钉的是**接线** —— 「回车 → `on_start`」和
+       「点按钮 → `on_start`」必须是**同一条路、同一门课**。接线坏掉时 AppKit
+       吞异常、纯函数判据全绿，症状统一是「按了没反应」。
+
+    ⚠️ 不跑事件循环：`on_start` 是桩、同步的。
+    ⚠️ `_win_hot` / `_win_is_editing` 在判据里换掉 —— 测试进程里窗口拿不到 key，
+       而那两条不是本节要测的东西（守卫那节有自己的判据）。
+    ⚠️ 写端全部隔离在 tempdir（glossary / sessions / state_root 都指过去）。
+    """
+    print("\n--- ⑧d 回车 = 「开始上课」：接线真的通（建窗口，不跑事件循环）---")
+    import tempfile
+
+    try:
+        from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
+                            NSButton)
+    except Exception as e:                                    # noqa: BLE001
+        check("AppKit 可用（这一节要真窗口）", False, f"{type(e).__name__}: {e}")
+        return
+
+    class _Ev:
+        def __init__(self, ch):
+            self._ch = ch
+
+        def charactersIgnoringModifiers(self):
+            return self._ch
+
+        def modifierFlags(self):
+            return 0
+
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        gl = root / "glossary.txt"
+        gl.write_text("# public table\n", encoding="utf-8")
+        (root / "glossary").mkdir()
+        for c in ("AA10010", "BB20020"):
+            (root / "glossary" / f"{c}.txt").write_text(f"# {c}\n", encoding="utf-8")
+        ses = root / "sessions"
+        ses.mkdir()
+        # 「上次那门」= 最近一次真上过课的 —— 没有课表时预选就回落到它
+        (ses / "2026-10-01_090000_BB20020.md").write_text("# 一节课\n", encoding="utf-8")
+        NSApplication.sharedApplication().setActivationPolicy_(
+            NSApplicationActivationPolicyAccessory)
+        started: list = []
+        h = E.build(glossary=gl, sessions_dir=ses, state_root=root / "state",
+                    on_start=started.append)
+        check("面板建起来了", h is not None)
+        if h is None:
+            return
+        _hot, _edit = E._win_hot, E._win_is_editing
+        E._win_hot, E._win_is_editing = (lambda w: True), (lambda w: False)
+        try:
+            handler = E.S.get("key_handler")
+            check("⚠️ 前置：拿到真的 `_on_key`（拿不到下面全是空转）",
+                  callable(handler), str(handler)[:70])
+            _lk = E.S.get("likely")
+            check("⭐ 预选 = 上次那门（没有课表，回落到 last_used）",
+                  bool(_lk) and _lk.course == "BB20020", str(_lk))
+            if not callable(handler):
+                return
+            handler(_Ev("\r"))
+            check("⭐⭐ 回车 -> `on_start` 被调到、课号 = 选中的那门",
+                  started == ["BB20020"], str(started))
+
+            # 对拍：卡片上那颗「开始上课」——**同一个 `on_start`、同一门课**
+            def walk(v, out=None):
+                out = [] if out is None else out
+                out.append(v)
+                for c in (v.subviews() or []):
+                    walk(c, out)
+                return out
+
+            btns = [v for v in walk(h.window.contentView())
+                    if isinstance(v, NSButton) and v.title() == "开始上课"]
+            check("⚠️ 前置：卡片上恰好一颗「开始上课」（否则下一条空转）",
+                  len(btns) == 1, f"{len(btns)} 颗")
+            if btns:
+                btns[0].performClick_(None)
+            check("⭐⭐ 点按钮 -> 同一个 `on_start`、同一门课（与回车逐字对上）",
+                  started == ["BB20020", "BB20020"], str(started))
+
+            # 正在编辑（任何 field editor）时，回车与数字键都不许被抢
+            E._win_is_editing = (lambda w: True)
+            started.clear()
+            handler(_Ev("\r"))
+            handler(_Ev("1"))
+            check("⭐⭐ 输入框有焦点时回车**不抢**（在输入行里回车 = 建课）",
+                  started == [], str(started))
+            check("⚠️ 编辑中数字键也不抢（搜索框里打 `1` 只是打一个 `1`）",
+                  E.S.get("picked") is None, str(E.S.get("picked")))
+
+            # 没有可预选的那一门 -> 回车什么都不做（不挑第一张）
+            E._win_is_editing = (lambda w: False)
+            started.clear()
+            _kept = E.S.pop("likely", None)
+            handler(_Ev("\r"))
+            check("⭐ 课表/历史都没有 -> 回车什么都不做",
+                  started == [], str(started))
+            if _kept is not None:
+                E.S["likely"] = _kept
+        finally:
+            E._win_hot, E._win_is_editing = _hot, _edit
+            try:
+                h.close()
+            except Exception:                                 # noqa: BLE001
+                pass
+
+
+def _whisper_card_section() -> None:
+    """⑧e 「旧的 Whisper」那张卡的**接线**：该出时真的排出来、按钮接到真回调。
+
+    ⚠️ 四个出卡条件在 `tests/test_whisper_card.py` 里逐条钉着（那是它的家）；
+       这一节只钉「条件为真时，开课面板真的把它排出来、两颗按钮接对了」——
+       排卡这条线坏掉时不出声（卡片静默不出现），纯函数判据全绿也照样发生。
+    """
+    print("\n--- ⑧e Whisper 卡：接线（条件为真 -> 真的排、按钮接对）---")
+    import tempfile
+
+    try:
+        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+    except Exception as e:                                    # noqa: BLE001
+        check("AppKit 可用（这一节要真面板）", False, f"{type(e).__name__}: {e}")
+        return
+    import whatsnew as _WN
+    import whisper_card as _WC
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory)
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        gl = root / "glossary.txt"
+        gl.write_text("# public table\n", encoding="utf-8")
+        (root / "glossary").mkdir()
+        (root / "glossary" / "AA10010.txt").write_text("# AA10010\n", encoding="utf-8")
+        built: list = []
+        _real_later, _real_build = E._later, _WN.build
+        _real_offer, _real_remove = _WC.should_offer, _WC.remove
+        E._later = lambda fn, *a: fn(*a)          # 把排下一轮 runloop 的那几步同步跑掉
+        _WN.build = (lambda title, subtitle="", **kw:
+                     built.append((title, subtitle, kw)) or None)
+        _WC.should_offer = lambda **kw: True      # 条件那半由 test_whisper_card 钉
+        h = None
+        try:
+            h = E.build(glossary=gl, sessions_dir=root / "sessions",
+                        state_root=root / "state", on_start=lambda c: None)
+            check("面板建起来了", h is not None)
+            _wk = [b for b in built if b[0] == _WC.card_texts("")[0]]
+            check("⭐⭐ 条件为真 -> 真的排了一张 Whisper 卡（标题对上）",
+                  len(_wk) == 1, f"built={[b[0] for b in built]}")
+            if _wk:
+                _kw = _wk[0][2]
+                _labels = [t for t, _f, _k in (_kw.get("buttons") or [])]
+                check("⭐⭐ 两颗按钮都在、顺序是 保留 / 移到废纸篓（主按钮在右）",
+                      _labels == ["保留", "移到废纸篓"], str(_labels))
+                _kinds = {t: k for t, _f, k in (_kw.get("buttons") or [])}
+                # ⭐ 作者 2026-10-18：这张卡是来建议清理的 → 「移到废纸篓」是主按钮
+                check("⭐⭐「移到废纸篓」是 primary、「保留」是 secondary",
+                      _kinds == {"移到废纸篓": "primary", "保留": "secondary"}, str(_kinds))
+                _by = {t: f for t, f, _k in (_kw.get("buttons") or [])}
+                if set(_by) == {"保留", "移到废纸篓"}:
+                    # 点「保留」-> 真的写进 whisper_card 的状态（隔离在 tempdir）
+                    _by["保留"]()
+                    check("⭐「保留」-> 真的记下了（`whisper_card.answer`）",
+                          _WC.answered(root=root / "state") == "keep",
+                          repr(_WC.answered(root=root / "state")))
+                    # 点「移到废纸篓」-> 接到 `whisper_card.remove` 且传的是注册表路径
+                    # ⚠️ 换成桩再点 —— **绝不在判据里碰真的 ~/models**
+                    _rm: list = []
+                    _WC.remove = (lambda p, **kw:
+                                  (_rm.append(str(p)),
+                                   {"ok": True, "refused": False, "error": ""})[1])
+                    try:
+                        _by["移到废纸篓"]()
+                    finally:
+                        _WC.remove = _real_remove
+                    check("⭐「移到废纸篓」-> 接到 `whisper_card.remove`（注册表路径）",
+                          _rm == [_WC.whisper_path()], str(_rm))
+        finally:
+            E._later, _WN.build = _real_later, _real_build
+            _WC.should_offer, _WC.remove = _real_offer, _real_remove
+            if h is not None:
+                try:
+                    h.close()
+                except Exception:                             # noqa: BLE001
+                    pass
 
 
 def _add_wiring_section() -> None:

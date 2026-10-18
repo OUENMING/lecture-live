@@ -160,7 +160,7 @@ test("翻译：公开令牌不代付（401），未知码 403，模型白名单�
     const { code } = await (await h.call(h.adminReq("add", { name: "a" }))).json();
     assert.equal((await h.call(h.chatReq(code, body({ model: "deepseek-reasoner" })))).status, 400);
     await (await h.call(h.chatReq(code, body({ max_tokens: 999999 })))).text();
-    assert.equal(h.calls.deepseek.at(-1).body.max_tokens, 4096);
+    assert.equal(h.calls.deepseek.at(-1).body.max_tokens, 8192);
     assert.equal(h.calls.deepseek.length, 1, "被拒的请求不许打到上游");
   } finally { h.restore(); }
 });

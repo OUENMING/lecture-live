@@ -122,7 +122,7 @@ let fastLlmDownUntil = 0;                    // 本 isolate 内存：跟 lease �
 export function _resetFastLlm() { fastLlmDownUntil = 0; }
 // 只放行客户端真用的模型（`main.py --cloud-model` / `keyentry` 的默认值），别让码变成任意模型的代付。
 const LLM_MODELS = new Set(["deepseek-flash", "deepseek-chat"]);
-const LLM_MAX_TOKENS = 4096;   // 客户端最大的一处是精修 / 讲解 4000
+const LLM_MAX_TOKENS = 8192;   // 笔记讲解一次要 6000（note_v2.REVIEW_MAX_TOKENS）；4096 时会被静默截断（2026-10-18）
 const LLM_MAX_BYTES = 256 * 1024;
 // Jev（TypeSafe System One）：通行码代付「重点句」「课务」两个打分功能。
 // ⚠️ 模型钉死 —— `live_summary.DEADLINE_MIN_P` 的阈值是按这一版标定的（官方：调过阈值就钉版本）。

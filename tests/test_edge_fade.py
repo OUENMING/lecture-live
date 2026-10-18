@@ -157,6 +157,32 @@ class 真窗口(unittest.TestCase):
         finally:
             o.close()
 
+    def test_底部最透明_带子走完全不透明(self):
+        """⭐⭐ C1（2026-10-18 审查）：底边渐隐的**透明端必须在视口底**。
+
+        ⚠️ 渐变方向只由 alpha 曲线决定 —— `apply()` 两条 edge **同一组 start/end**
+        （location 0 = 视口顶）。第一版两条 edge 各翻一次 startPoint，方向叠翻转，
+        `edge="bottom"` 与 `"top"` 完全等价（底边那条带子根本没出现）。
+        ⚠️ 这条必须在**真的装上去之后**读（`_mask_stops` 单看是看不出来的）。
+        """
+        o = self._overlay()
+        try:
+            tv = o._tv._scroll
+            self.assertTrue(edge_fade.apply(tv, edge="bottom"), "装不上遮罩")
+            m = tv.layer().mask()
+            # 变异验证：把 `apply()` 里 `if edge == "top" ... else startPoint=(0.5, 0.0)`
+            #    改回来 -> 这条红（location 0 落在视口**底**，底边渐隐变成顶边渐隐）。
+            self.assertAlmostEqual(float(m.startPoint().y), 1.0, places=3,
+                                   msg="location 0 不在视口顶 —— 底边方向又被翻了一次")
+            self.assertAlmostEqual(float(m.endPoint().y), 0.0, places=3)
+            alphas = [_cg_alpha(c) for c in m.colors()]
+            self.assertAlmostEqual(alphas[0], 1.0, places=3,
+                                   msg="视口顶该全不透明（底边渐隐只动底边）")
+            self.assertAlmostEqual(alphas[-1], 0.0, places=3,
+                                   msg="视口底不是全透明 —— 底边那条带子根本没出现")
+        finally:
+            o.close()
+
     def test_顶部最透明_带子走完全不透明(self):
         o = self._overlay()
         try:

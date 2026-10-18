@@ -75,7 +75,9 @@ def _mask_stops(view_h: float, edge: str, px: float):
         out_loc.append(1.0)
         out_a.append(1.0)
     if edge == "bottom":
-        # 底边渐隐 = 把整条曲线**倒过来**（顶边那段是实心的）
+        # 底边渐隐 = 把整条曲线**倒过来**（顶边那段变成实心）。⚠️ `apply()` **两个 edge
+        # 用同一组 start/end**（location 0 = 视口顶），所以方向只由这里的 alpha 决定 ——
+        # 别再去翻 `apply` 的 startPoint（翻转叠翻转 = 底边渐隐根本没出现，审查 C1）。
         out_loc = [1.0 - v for v in reversed(out_loc)]
         out_a = list(reversed(out_a))
     return out_loc, out_a
@@ -106,15 +108,14 @@ def apply(view, *, edge: str = "top", px: float = BAND_PX) -> bool:
         m.setColors_([NSColor.blackColor().colorWithAlphaComponent_(a).CGColor()
                       for a in alphas])
         m.setLocations_(locs)
-        # ⚠️ 渐变从**带子的外缘**（全透明那头）起算：`startPoint=(0.5, 1.0)` 就是
-        #    这条滚动视图**视觉上的顶边** —— 2026-10-17 拍图核过（`fade-check2.png`：
-        #    卡片底下第一行变淡、再往下的行不受影响）。写反了会变成底边渐隐，别凭"y 朝上"推。
-        if edge == "top":
-            m.setStartPoint_((0.5, 1.0))
-            m.setEndPoint_((0.5, 0.0))
-        else:
-            m.setStartPoint_((0.5, 0.0))
-            m.setEndPoint_((0.5, 1.0))
+        # ⚠️⚠️ **两个 edge 用同一组 start/end**（2026-10-18 审查 C1）：`location 0 = 视口
+        #    顶`、`location 1 = 视口底`，**恒定的**。方向靠 `_mask_stops` 里的 alpha 曲线
+        #    区分（顶边渐隐：顶透明；底边渐隐：底透明）。
+        #    第一版两条 edge 各翻一次 —— 翻转叠翻转，`edge="bottom"` 的结果与 `"top"`
+        #    **完全等价**（底边那条带子根本没出现）。`(0.5, 1.0) = 视觉顶边`，
+        #    2026-10-17 拍图核过（`fade-check2.png`），别凭"y 朝上"推。
+        m.setStartPoint_((0.5, 1.0))
+        m.setEndPoint_((0.5, 0.0))
         lay.setMask_(m)
         return True
     except Exception:                                     # noqa: BLE001

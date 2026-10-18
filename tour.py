@@ -150,7 +150,7 @@ def _reduce_motion() -> bool:
 def build(on_done=None, pages=PAGES):
     """构造并显示第 1 页。失败返回 None。`on_done(finished: bool)`：看完 = True，跳过 = False。"""
     try:
-        from AppKit import (NSAttributedString, NSButton, NSColor, NSFont,
+        from AppKit import (NSAttributedString, NSColor, NSFont,
                             NSFontAttributeName, NSForegroundColorAttributeName,
                             NSImage, NSImageSymbolConfiguration, NSImageView, NSMakeRect,
                             NSMutableAttributedString, NSMutableParagraphStyle,
@@ -274,7 +274,7 @@ def build(on_done=None, pages=PAGES):
             NSAnimationContext.endGrouping()
 
         def button(text, x, w, *, alpha, primary=False, secondary=False, key=""):
-            b = NSButton.alloc().initWithFrame_(NSMakeRect(x, fy, w, FOOT_H))
+            b = panel.make_button(NSMakeRect(x, fy, w, FOOT_H))
             b.setBordered_(False)
             b.setWantsLayer_(True)
             col = (NSColor.blackColor().colorWithAlphaComponent_(0.85) if primary

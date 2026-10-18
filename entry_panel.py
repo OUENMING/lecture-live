@@ -1052,7 +1052,7 @@ def _make_search_card(hits, *, width, open_idx=None, open_text=None,
           它自己接管点击 —— **不必碰 `mouseDownCanMoveWindow` 那个雷**。
        ⚠️ 回来的 target 必须由调用方持有（`setTarget_` 是**弱引用**）。
     """
-    from AppKit import NSButton, NSColor, NSFont, NSView, NSMakeRect
+    from AppKit import NSColor, NSFont, NSView, NSMakeRect
 
     spans = (open_text or "").splitlines()
     h = search_card_height(len(hits), open_block_lines(open_text))
@@ -1087,7 +1087,7 @@ def _make_search_card(hits, *, width, open_idx=None, open_text=None,
         if on_open is None:
             view.addSubview_(panel.make_label(hit.text or "", rect, 12.0, truncate=True))
         else:
-            b = NSButton.alloc().initWithFrame_(rect)
+            b = panel.make_button(rect)
             b.setTitle_(hit.text or "")
             b.setBordered_(False)
             b.setAlignment_(0)                            # 左对齐（NSTextAlignmentLeft）
@@ -1197,7 +1197,7 @@ def _make_import_card(rows, *, width, warn, on_confirm, on_cancel, targets=None)
 
     ⚠️ 回来的 target 必须由调用方持有（`setTarget_` 是**弱引用**）。
     """
-    from AppKit import NSButton, NSColor, NSFont, NSView, NSMakeRect
+    from AppKit import NSColor, NSFont, NSView, NSMakeRect
 
     h = import_card_height(rows)
     inner_w = width - 2 * CARD_PAD
@@ -1211,7 +1211,7 @@ def _make_import_card(rows, *, width, warn, on_confirm, on_cancel, targets=None)
     targets = targets if targets is not None else []
 
     def _btn(text, x, y, w, action, primary=False):
-        b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, BTN_H))
+        b = panel.make_button(NSMakeRect(x, y, w, BTN_H))
         (panel.style_primary if primary else panel.style_secondary)(b, text, size=12.0)
         t = _target(action)
         b.setTarget_(t)                                  # ⚠️ 弱引用 —— 靠 targets 留
@@ -1494,7 +1494,7 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     `show_skipped` / `on_toggle_skipped()` = 「已在表里 / 你删过」那组的展开态与开关
     （默认收起；展开后逐条列出）。
     """
-    from AppKit import NSButton, NSColor, NSFont, NSMakeRect
+    from AppKit import NSColor, NSFont, NSMakeRect
 
     holder: dict = {}
 
@@ -1612,7 +1612,7 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
 
     # 按钮的竖直中心 = 文字块（标题 + 准备度）的中心。⚠️ 与上面两行同一组常数推出。
     def mk(title, x, action, y=CARD_PAD, w=92.0, h=BTN_H):
-        b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
+        b = panel.make_button(NSMakeRect(x, y, w, h))
         # ⭐ 一屏只有**一颗**主按钮：选中那张卡的「开始上课」（2026-10-13 设计评审：
         #    原来五张卡十几颗按钮一样重，眼睛找不到起点）。其余一律次要胶囊 —— 与收尾卡 /
         #    功能介绍卡同一套（`panel.style_primary` / `style_secondary`）。
@@ -1998,7 +1998,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
            on_test_mode=None, test_mode=False,
            on_cloud_asr=None, cloud_asr=False, cloud_asr_locked=False,
            on_restart=None) -> Handles:
-    from AppKit import (NSButton, NSColor, NSFont, NSScreen, NSSearchField,
+    from AppKit import (NSColor, NSFont, NSScreen, NSSearchField,
                         NSTextField,
                         NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel)
     from Foundation import NSMakeRect
@@ -2300,11 +2300,21 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         tail = "" if kind == "one" else CHIP_TAIL
         # ⚠️ 裁字的上限要**先扣掉胶囊自己的左右留白** —— 否则量出来正好占满的标题，
         #    加上留白之后比框宽 20pt，`NSCell` 会再裁一次，把尾巴那颗 ▾ 也吃掉。
-        title = chip_fit(text, tail, chip["max_w"] - 2 * CHIP_PAD,
+        # ⭐ 2026-10-18：还在跑的状态词（「下载中…」）尾巴挂三颗点 → 裁字的预算
+        #    先让出点的那一份（`motion.dots_reserve`），不然点会伸出胶囊外。
+        _raw_running = motion.is_running(text)
+        reserve = motion.dots_reserve() if _raw_running else 0.0
+        title = chip_fit(text, tail, chip["max_w"] - 2 * CHIP_PAD - reserve,
                          lambda s: text_width(s, btn.font()))
-        btn.setTitle_(title)
+        # ⚠️⚠️ 裁过字的标题尾部也有「…」，但它说的是「**被裁了**」，不是「还在跑」——
+        #     这一档显式传 `running=False` 把点关掉（`chip_fit` 的省略号照留）。
+        _body = title[:len(title) - len(tail)] if tail else title
+        _running = _raw_running and _body == text
+        # ⭐ 换字走 `motion.render_status`：交叉淡换 + 还在跑时挂点（点由渲染层管）。
+        motion.render_status(btn, title, running=_running)
         f = btn.frame()
-        w = min(text_width(title, btn.font()) + 2 * CHIP_PAD, chip["max_w"])
+        w = min(motion.status_width(title, btn.font(), running=_running) + 2 * CHIP_PAD,
+                chip["max_w"])
         btn.setFrame_(NSMakeRect(f.origin.x, f.origin.y,
                                  max(w, CHIP_MIN_W), CHIP_H))
 
@@ -2715,7 +2725,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    （`chip_fit` 就按这个上限裁）。
         chip["max_w"] = max(CHIP_MIN_W,
                             (PAD + WIDTH - 2 * PAD - SEARCH_W - 10.0) - chip_x)
-        _btn = NSButton.alloc().initWithFrame_(
+        _btn = panel.make_button(
             NSMakeRect(chip_x, h - PAD - TITLE_H + 2.75, CHIP_MIN_W, CHIP_H))
         _btn.setBordered_(False)
         # ⚠️ **中性的胶囊**：一层很淡的白底 + 细描边。不画绿点/红点 ——
@@ -3222,7 +3232,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     add_reply = panel.make_label(ADD_HINT, NSMakeRect(
         CARD_PAD, ADD_REPLY_Y, W_IN - 2 * CARD_PAD, 17.0), 11.0, alpha=DIM)
 
-    _add_cancel = NSButton.alloc().initWithFrame_(
+    _add_cancel = panel.make_button(
         NSMakeRect(W_IN - CARD_PAD - 208.0, ADD_ROW_Y, 100.0, BTN_H))
     panel.style_secondary(_add_cancel, "取消", size=12.0)
     _add_cancel_t = _target(close_add)
@@ -3248,7 +3258,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     _add_cancel.setKeyEquivalent_("\x1b")
     strip_targets.append(_add_cancel_t)
 
-    _add_ok = NSButton.alloc().initWithFrame_(
+    _add_ok = panel.make_button(
         NSMakeRect(W_IN - CARD_PAD - 100.0, ADD_ROW_Y, 100.0, BTN_H))
     panel.style_primary(_add_ok, "新建", size=12.0)
     _add_ok_t = _target(lambda: submit_add())
@@ -3273,7 +3283,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if p.runModal() == 1:                             # NSModalResponseOK
             run_batch([str(u.path()) for u in p.URLs()])
 
-    _pick_btn = NSButton.alloc().initWithFrame_(
+    _pick_btn = panel.make_button(
         NSMakeRect(W_IN - CARD_PAD - PICK_W, (DROP_H - BTN_H) / 2.0, PICK_W, BTN_H))
     panel.style_secondary(_pick_btn, "选择文件…", size=12.0)
     _pick_t = _target(_pick_batch_files)
@@ -3288,7 +3298,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    放在标题行右侧的话，用户在面板顶上点一下、输入框在面板最底下冒出来，
     #    中间隔着四百点且**没有任何动效** —— 那是一处静默的可发现性失败。
     #    （`docs/PLAN-entry-panel.md` 的草图把它画在右上角；本轮的实现挪到了这里。）
-    _add_btn = NSButton.alloc().initWithFrame_(
+    _add_btn = panel.make_button(
         NSMakeRect(W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W, (DROP_H - BTN_H) / 2.0,
                    ADD_W, BTN_H))
     panel.style_secondary(_add_btn, ADD_TITLE, size=12.0)
@@ -3309,7 +3319,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # ⚠️ 放这儿不放卡片上：作者 2026-09-28 删过卡片上的「选择文件…」（原话「卡片看着太繁杂」），
     #    而这是个**全局**状态（这节课录不录、传不传），底部那条正是全局控件的位置。
     if _tm_in_strip:
-        tm_btn = NSButton.alloc().initWithFrame_(
+        tm_btn = panel.make_button(
             NSMakeRect(W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W - 8.0 - TEST_W,
                        switch_y(0, 1), TEST_W, BTN_H))
         tm_btn.setTitle_(test_mode_title(tm_on[0]))    # 两态同宽（判据钉着）
@@ -3345,7 +3355,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 # 主按钮在最右（macOS 惯例；2026-10-13 全面板统一）
                 ("取消", _cancel_batch, W_IN - CARD_PAD - 100.0 - 8.0 - 100.0, 100.0, False),
                 ("确认", _confirm_batch, W_IN - CARD_PAD - 100.0, 100.0, True)):
-            b = NSButton.alloc().initWithFrame_(
+            b = panel.make_button(
                 NSMakeRect(x, (DROP_H - BTN_H) / 2.0, w, BTN_H))
             (panel.style_primary if primary else panel.style_secondary)(b, title, size=12.0)
             t = _target(fn)
@@ -3373,8 +3383,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if lb is None:
             return
         try:
-            lb.setStringValue_(text)
             lb.setTextColor_(NSColor.whiteColor())
+            # ⭐ 2026-10-18：换字走 `motion.render_status` —— 旧词上移淡出 / 新词从下方
+            #    淡入（交叉淡换）；「还在跑」（尾部「…」）的状态词尾巴挂三颗静默点。
+            #    ⚠️ 判据（⑲c）钉着本函数**只许一个实参** —— 别加 `running=` 之类的参数。
+            motion.render_status(lb, text)
         except Exception:                                 # noqa: BLE001
             pass
 
@@ -3902,7 +3915,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     strip_holder["actions"] = _batch_buttons()                # 建在函数定义之后
 
     # 搜索模式下那一块的动作区（**位置与批量那对完全重合** —— 换着显示，不同时出现）。
-    _clr = NSButton.alloc().initWithFrame_(
+    _clr = panel.make_button(
         NSMakeRect(W_IN - CARD_PAD - 100.0, (DROP_H - BTN_H) / 2.0, 100.0, BTN_H))
     panel.style_secondary(_clr, "清除", size=12.0)
     _clr_t = _target(lambda: run_search(""))
@@ -4538,8 +4551,6 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             return
         set_status(f"{course}：清单已存到 {_short_home(str(p))}（已在访达里显示）")
 
-    from AppKit import NSButton
-
     status_holder["label"] = panel.make_label(
         "拖课件到某张卡上 = 加到那门课　·　拖到下面那个虚线框 = 自动分到各课",
         # 原来 `PAD + 6` 比右边按钮里的字高 2pt（拍图量墨迹，2026-10-14）
@@ -4549,7 +4560,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     # 「功能介绍」：随时重看那张介绍卡（Owen 2026-10-13 要的入口）。逃生口那一档的分量 ——
     # 无边框淡字，不跟「关闭」抢；放在「关闭」左边，底栏只此两颗。
     tour_tgt = _target(lambda: show_tour(root=state_root))
-    tour_btn = NSButton.alloc().initWithFrame_(
+    tour_btn = panel.make_button(
         NSMakeRect(WIDTH - PAD - 76.0 - 8.0 - TOUR_BTN_W, PAD + 2.0, TOUR_BTN_W, 26.0))
     tour_btn.setBordered_(False)
     tour_btn.setTitle_("功能介绍")
@@ -4575,7 +4586,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         do_close()
 
     btn_tgt = _target(_close_clicked)
-    btn = NSButton.alloc().initWithFrame_(
+    btn = panel.make_button(
         NSMakeRect(WIDTH - PAD - 76.0, PAD + 2.0, 76.0, 26.0))
     panel.style_secondary(btn, "关闭", size=12.0)
     btn.setTarget_(btn_tgt)                             # ⚠️ 弱引用 —— 靠下面那行留住

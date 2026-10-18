@@ -1864,8 +1864,8 @@ class Overlay:
         return lbl
 
     def _button(self, title, cb, tooltip: str = ""):
-        from AppKit import NSButton, NSMakeRect
-        b = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 60, 24))
+        from AppKit import NSMakeRect
+        b = panel.make_button(NSMakeRect(0, 0, 60, 24))
         b.setTitle_(title); b.setBordered_(False)
         b.setFont_(self._NSFont.systemFontOfSize_(14))
         if tooltip:

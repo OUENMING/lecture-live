@@ -27,6 +27,7 @@
 """
 from __future__ import annotations
 
+import motion
 import panel
 
 WIDTH = 380.0
@@ -112,7 +113,7 @@ def build(*, title: str = "收尾", on_close=None):
       · `set_buttons([(标题, 回调), …])` —— 换一批按钮，旧的直接摘掉
     """
     try:
-        from AppKit import (NSButton, NSColor, NSFont, NSMakeRect, NSTextField,
+        from AppKit import (NSColor, NSFont, NSMakeRect, NSTextField,
                             NSTextAlignmentLeft, NSLineBreakByTruncatingTail,
                             NSLineBreakByWordWrapping,
                             NSWindowStyleMaskBorderless,
@@ -208,9 +209,13 @@ def build(*, title: str = "收尾", on_close=None):
 
         def set_status(text, alpha=0.92):
             try:
-                status_lbl.setStringValue_(text or "")
+                # ⭐ 2026-10-18：状态词走 `motion.render_status` —— 换字时旧词上移淡出、
+                #    新词从下方淡入（交叉淡换）；「还在跑」（尾部「…」）时尾巴挂三颗
+                #    静默点（`正在生成笔记…` 就是这条路）。「减弱动态效果」下退化为
+                #    原来的直接设字。判据钉的 `_status_lbl` 读回口照旧（显示文字）。
                 status_lbl.setTextColor_(
                     NSColor.whiteColor().colorWithAlphaComponent_(alpha))
+                motion.render_status(status_lbl, text or "")
                 _relayout()
             except Exception:                             # noqa: BLE001
                 pass
@@ -238,8 +243,7 @@ def build(*, title: str = "收尾", on_close=None):
             n = len(specs)
             bw = btn_geom(n)
             for i, (text, cb) in enumerate(specs):
-                b = NSButton.alloc().initWithFrame_(
-                    NSMakeRect(btn_x(i, bw), PAD, bw, BTN_H))
+                b = panel.make_button(NSMakeRect(btn_x(i, bw), PAD, bw, BTN_H))
                 # ⚠️ 按钮必须**看起来像按钮**（第一版用无边框淡字，渲染出来与旁边的说明文字
                 #    分不出来，作者一眼看不出能点）→ 两档都是胶囊：
                 #    第一颗 = 主操作（「存入」/ 只有一颗时的「关闭」）实心；其余次要（淡底 + 发丝边）。

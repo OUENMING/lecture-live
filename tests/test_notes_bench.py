@@ -10,7 +10,8 @@
 
 转录切片（真课 3–5 分钟）在 `tests/fixtures/notes_bench/*.md`，供**网络**跑量器
 `scripts/notes_bench.py` 用；本文件只钉**判据**，不跑量。切片的来源与窗口写在
-每个 fixture 头部的注释里。
+每个 fixture 头部的注释里。测试朋友课上的切片（busi3243/ecs170/che002a）只放本地、
+不入库（见 .gitignore）；入库的只有作者自己的课。
 """
 from __future__ import annotations
 
@@ -426,9 +427,8 @@ class FrozenBench(unittest.TestCase):
     def test_切片清单齐全(self):
         import glob
         files = sorted(os.path.basename(p) for p in glob.glob(os.path.join(FIX, "*.md")))
-        self.assertGreaterEqual(len(files), 12, f"切片不足 12：{files}")
-        for name in ("econ10790-1315.md", "soc10020-dublin.md", "che002a-stoich.md",
-                     "che002a-redox.md", "ecs170-grad.md", "admin-none.md"):
+        self.assertGreaterEqual(len(files), 6, f"切片不足 6：{files}")
+        for name in ("econ10790-1315.md", "soc10020-dublin.md", "admin-none.md"):
             self.assertIn(name, files, f"缺切片 {name}")
 
     def test_切片是真转录(self):

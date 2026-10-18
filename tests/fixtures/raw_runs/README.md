@@ -12,6 +12,9 @@
 | `v2_busi3243/`, `v2_ecs170/`, `v2_econ10790/`, `v2_che002a/` | `runs/final_v2/*` | 只有 `review_raw.json` —— 用途是**判据的假阳性面**（旧猜测句判据在这 4 份上删掉的每一句都进了 `scrub_audit.json`） |
 | `scrub_audit.json` | 本仓库生成 | F15-A 审计：旧判据删掉的每一句 + 逐句手工分类 + 收紧前后的精确率 |
 
+> ⚠️ `note_data.json` 里有整节课的转录，是测试朋友的数据 —— **只放本地、不入库**（`.gitignore`）。
+> 没有它时 `tests/test_replay.py` 里依赖转录的用例跳过，其余照跑。
+
 ## 怎么用
 
 ```bash

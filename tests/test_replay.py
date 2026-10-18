@@ -33,6 +33,9 @@ def _load(job: str, name: str) -> dict:
 
 
 def _data(job: str) -> dict:
+    # note_data.json 带整节课转录，是测试朋友的数据，不入库（见 .gitignore）；本机没有就跳过
+    if not (RAW / job / "note_data.json").exists():
+        raise unittest.SkipTest(f"{job}/note_data.json 只在本地（朋友的转录不入库）")
     return _load(job, "note_data.json")
 
 

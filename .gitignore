@@ -34,6 +34,12 @@ term_notes*.bak
 
 # ── 课堂记录（个人内容，不入库）────────────────────────
 sessions/
+# 测试朋友课上的转录（完整转录 / 逐字切片）只放本地：仓库是公开的，朋友没授权公开。
+# 测试缺这些文件时跳过；由他们课生成的 AI 笔记片段（review_raw.json 等）可以入库。
+tests/fixtures/raw_runs/*/note_data.json
+tests/fixtures/notes_bench/busi3243-*.md
+tests/fixtures/notes_bench/ecs170-*.md
+tests/fixtures/notes_bench/che002a-*.md
 
 # ── 工具产物 ─────────────────────────────────────────
 # archify 的工作目录：每画一张图一个文件夹（HTML + 视觉核实的 PNG）。

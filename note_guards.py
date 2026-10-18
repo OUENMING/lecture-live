@@ -310,10 +310,23 @@ _MIN_WORD = re.compile(r"minimum|lowest|average cost|break-even|AVC|"
                        r"average variable cost|最低", re.I)
 
 
+def _complete_text(text: str, max_chars: int = 500) -> str:
+    """截到**句末**为止 —— 绝不切在句子中间（作者 2026-10-18：`[:200]` 把出处切在
+    "…→ 2q + 1" 半句上）。500 字以内找不到句末标点（罕见）就给全文，不猜。"""
+    if len(text) <= max_chars:
+        return text
+    window = text[:max_chars]
+    cut = max(window.rfind(m) for m in "。！？.!?")
+    if cut >= 60:
+        return window[:cut + 1].strip()
+    return text
+
+
 def _shutdown_source(materials) -> str:
     """课件里那条停产价格定义 → `"📖 <文件名>：<原话>"`；找不到返回 `""`。
 
     ⚠️ 找不到就**不写**（宁缺）：机器没资格替这门课断言"我们的口径和教科书不一样"。
+    ⚠️ 出处**不许截半句**（2026-10-18）：只裁到句末为止。
     """
     if materials is None:
         return ""
@@ -327,34 +340,50 @@ def _shutdown_source(materials) -> str:
         cite = str(hit.cite() or "").strip()
         # ⚠️ `cite()` 自己已经带 `📖 文件名 §段`（来源标记的唯一定义点在 materials），
         #    这里再加一个前缀就会写成「📖 📖 文件名」（实测踩到）。
-        return f"{cite}：{text[:200]}" if cite.startswith("📖") else f"📖 {cite}：{text[:200]}"
+        body = _complete_text(text)
+        return f"{cite}：{body}" if cite.startswith("📖") else f"📖 {cite}：{body}"
     return ""
 
 
 def ensure_caliber(review: dict, *, materials=None) -> tuple:
-    """涉及停产价格的节：**课件里找得到出处**才补那句对照（并带出处），否则不补。
+    """口径对照**只进讲它的那一节**（标题命中优先，其次第一个提到的节）；至多一节。
 
-    判据（作者第六轮第 5 条）：
-      · 只在课件（📖）真的写了"本课停产价格 = AC 最低点"这种与教科书不同的口径时
-        才写对照，并**带上出处**；
-      · 课件里没有 / 读不到课件 / 课件写的本来就是 AVC 口径 → **一个字不写**。
+    ⚠️ 现状的两个 bug（作者 2026-10-18 点名）：
+      · 同一段口径被**复制进好几个小节**（13:23 的二阶导数节也算 —— 它的标题带着
+        章名前缀「最优化练习与停业价格」，一提到就命中）；
+      · 出处被 `[:200]` **切断在半句**上（"…→ 2q + 1"）。
+    现在：只挑**第一个**"关于它"的小节（标题里有它 → 正文里提到它），在那里补一条
+    **完整的**（截到句末）对照；找不到出处 / 找不到这一节 → 一个字不写。
     """
     out = copy.deepcopy(review)
     added: list = []
     src = _shutdown_source(materials)
     if not src:
         return out, added, []
-    for s in (out.get("sections") or []):
-        blob = " ".join([str(s.get("heading") or "")] + [str(x) for x in (s.get("prose") or [])]
-                        + [str((s.get("example") or {}).get("prompt") or "")])
-        if not _SHUTDOWN.search(blob) or _HAS_AVC.search(blob):
-            continue
-        s.setdefault("prose", [])
-        s["prose"] = list(s["prose"]) + [
-            f"⚠ 口径对照（📚）：标准教科书把**停产价格**定义为平均可变成本（AVC）的最低点，"
-            f"而把 AC 的最低点叫**盈亏平衡价（break-even price）**；本课材料另有口径 —— {src}"]
-        added.append(str(s.get("heading") or ""))
-    return out, added, ([f"{len(added)} 节缺 AVC 口径对照，已按课件出处补上"] if added else [])
+    secs = out.get("sections") or []
+    target = None
+    for s in secs:              # 标题命中优先（讲定义的那些节几乎总在标题里点名）
+        if _SHUTDOWN.search(str(s.get("heading") or "")):
+            target = s
+            break
+    if target is None:          # 退一档：第一个正文里提到它的节
+        for s in secs:
+            blob = " ".join([str(x) for x in (s.get("prose") or [])]
+                            + [str((s.get("example") or {}).get("prompt") or "")])
+            if _SHUTDOWN.search(blob):
+                target = s
+                break
+    if target is None:
+        return out, added, []
+    if _HAS_AVC.search(" ".join([str(target.get("heading") or "")]
+                                + [str(x) for x in (target.get("prose") or [])])):
+        return out, added, []   # 这一节自己已经写了 AVC 口径 → 没什么可对照的
+    target.setdefault("prose", [])
+    target["prose"] = list(target["prose"]) + [
+        "⚠ 口径对照（📚）：标准教科书把**停产价格**定义为平均可变成本（AVC）的最低点，"
+        f"而把 AC 的最低点叫**盈亏平衡价（break-even price）**；本课材料另有口径 —— {src}"]
+    added.append(str(target.get("heading") or ""))
+    return out, added, [f"口径对照只补进讲它的那一节（{added[0]}）；出处按课件原文，不截半句"]
 
 
 def _sources(materials, transcript: str) -> str:

@@ -412,6 +412,47 @@ class Caliber(unittest.TestCase):
                                                    / "obsidian_writer.py").read_text("utf-8"),
                       "写端没把课件传进去 → 对照永远补不上")
 
+    def test_多处提到也只在讲它的那一节补(self):
+        """⭐ 作者 2026-10-18 点名：口径段曾被复制进好几个小节。
+
+        13:16 的定义节 + 13:23 的二阶导数节（它的标题带着章名前缀"最优化练习与停业价格"）
+        都提到它 —— 只许补进**第一个**（讲它的那节），别处一个字不加。
+        """
+        rev = {"sections": [
+            {"heading": "[13:16] 平均成本与停业价格", "prose": ["停业价格是价格临界点。"]},
+            {"heading": "[13:23] 最优化练习与停业价格：用二阶导数判断极值",
+             "prose": ["这一节接着练习，顺带提到停业价格。"]},
+            {"heading": "[13:40] 二阶导数的符号", "prose": ["$f''<0$ 是极大。"]}]}
+        out, added, warns = ng.ensure_caliber(rev, materials=self._mats(self.MATERIAL))
+        self.assertEqual(len(added), 1, f"口径被复制进了 {len(added)} 节")
+        self.assertIn("AVC", " ".join(out["sections"][0]["prose"]))
+        self.assertNotIn("口径对照", " ".join(out["sections"][1]["prose"]), "第二节也被插了")
+        self.assertNotIn("口径对照", " ".join(out["sections"][2]["prose"]))
+        self.assertTrue(warns)
+
+    def test_出处不截半句(self):
+        """⭐ 作者 2026-10-18 点名的第二个 bug：`[:200]` 把出处切在"…2q + 1"半句上。
+
+        构造：第一句 >60 字、句末标点落在 200 字之后；后面再堆一段**超窗口**的长文 ——
+        旧实现会切断第一句，新实现必须整句保留、以句末标点收尾，且窗口外的内容不硬塞。
+        """
+        first = ("supply a positive quantity so long as the price is above the minimum of the "
+                 "average cost, and this is the rule the firm follows in the short run for the "
+                 "whole of the trading period, until market conditions change substantially and "
+                 "the managers revisit all of their fixed contracts. ")
+        filler = "then more explanation keeps going here without a sentence break " * 6
+        long_blob = first + filler + "that is the lowest acceptable price for this firm."
+        self.assertGreater(len(first), 205, "这条用例要长过旧的 200 字截断点")
+        rev = {"sections": [{"heading": "停业价格", "prose": ["停业价格是价格临界点。"]}]}
+        out, added, _w = ng.ensure_caliber(rev, materials=self._mats(long_blob))
+        self.assertTrue(added)
+        body = out["sections"][0]["prose"][-1]
+        self.assertRegex(body, r"[.。!！?？]$", "出处没有收在句末（被截半句）")
+        self.assertIn("the managers revisit all of their fixed contracts.", body,
+                      "完整的第一句必须留着（旧实现在 200 字处切断）")
+        self.assertNotIn("lowest acceptable price", body,
+                         "窗口外的内容被硬塞进来（应截到句末为止）")
+
 
 class MinValue(unittest.TestCase):
     """⭐ 作者第三轮第 4 条：官方解答里 `AC(6)=24`，三次生成的产物都没写出来。"""

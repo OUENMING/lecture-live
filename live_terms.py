@@ -151,6 +151,12 @@ def _edge_functions() -> frozenset:
     return frozenset(FUNCTION_FIRST) | frozenset(_STOP)
 
 
+#: `judge` 还没判出结果的**哨兵**（⭐ 2026-10-18 审查 D17）：判据现在**非阻塞** ——
+#: 没判过的词这一轮返回 `PENDING`，`_drop_by_judge` 把它**这一轮不收**（它没进池，
+#: 下一轮会被重新抽出来；那时判据结果已经在缓存里）。
+#: ⚠️ 与 `None`（判据**明确**"没答"、词照留）是两件事 —— 混了就等于"没判 = 放行"。
+PENDING = object()
+
 #: 短语**中间**允许出现的"连接词"（白名单，不是黑名单）。
 #: ⚠️ 实测（ECON10790 全课）：不做这一条时池子里一半是**句子片段** ——
 #:    `function is concave` / `x is negative` / `calculate the value` / `q equals`。
@@ -243,8 +249,9 @@ def extract(finals: list, *, verify=None, deleted=(), known=(),
     计数单位是"**出现过的句子数**"而不是 token 总数 —— 同一句里连说三遍只是重复，
     跨句复现才说明它是这节课的词。
 
-    ⭐ `judge`（可选，E2 那层）：`judge(terms) -> [0–1 | None]`。低于 `JUDGE_MIN_P`
-    的丢进 `rejected`（"判据：不像术语"）、`None`（没答）照留。**不接 = 与装它之前逐字一样。**
+    ⭐ `judge`（可选，E2 那层）：`judge(terms) -> [0–1 | None | PENDING]`。低于 `JUDGE_MIN_P`
+    的丢进 `rejected`（"判据：不像术语"）、`None`（没答）照留、`PENDING`（判据还在飞，
+    ⭐ 2026-10-18 D17）**这一轮不收**（下一轮判据到位再收）。**不接 = 与装它之前逐字一样。**
     """
     import note_terms as nt
     fn = _edge_functions()
@@ -339,11 +346,15 @@ def _drop_subphrases(terms: list) -> list:
 
 
 def _drop_by_judge(terms: list, judge, rejected: list) -> list:
-    """`judge(terms) -> [0–1 | None]`：低于 `JUDGE_MIN_P` 的进 `rejected`，其余照留。
+    """`judge(terms) -> [0–1 | None | PENDING]`：低于 `JUDGE_MIN_P` 的进 `rejected`。
 
-    ⚠️ **fail-soft 有两层**：判据抛异常、或返回的列表比 `terms` 短 → 缺的都当"没答"（留）
-       —— 闸门坏了 = **没装闸门**，绝不许反过来把候选词带走（同 `verify` 懒加载那条纪律：
-       建不起来只少收一类词，不挡上课）。
+    · 数字 < `JUDGE_MIN_P` -> 砍（进 `rejected`，记原因）。
+    · `None`（判据明确"没答"）-> 照留（fail-soft：闸门坏了 = 没装闸门）。
+    · `PENDING`（判据还在飞，见 `live_terms.PENDING`）-> **这一轮不收、也不记 rejected**
+      （它没进池，下一轮会被重新抽出来；那时结果已在缓存里）。
+
+    ⚠️ **fail-soft 还有一层**：判据抛异常、或返回的列表比 `terms` 短 → 缺的都当"没答"（留）
+       —— 闸门坏了 = **没装闸门**，绝不许反过来把候选词带走（同 `verify` 懒加载那条纪律）。
     ⚠️ 认不出数字的值（`None` / 形状不对）也当"没答"：`None`（没拿到）与 `0.0`（真判了 0）
        是两件事，**只有数字才参与比较**。
     """
@@ -354,6 +365,8 @@ def _drop_by_judge(terms: list, judge, rejected: list) -> list:
     out = []
     for i, w in enumerate(terms):
         p = ps[i] if i < len(ps) else None
+        if p is PENDING:
+            continue                                          # 还没判 -> 这轮不收（D17）
         try:
             v = None if p is None else float(p)
         except (TypeError, ValueError):
@@ -381,8 +394,9 @@ class LivePool:
        这样"这节课真正反复说的词"一定留得住，被淘汰的是那句提过一次的。
 
     ⭐ 术语闸门（E2，可选）：`judge` 原样传给 `extract` —— 只影响"哪些词算候选"，
-       不影响池子容量/淘汰。**缓存与超时不在这一层**（那是调用方的事，见
-       `main.make_term_judge`）；这一层只保证"调用方给什么判据就用什么"。
+       不影响池子容量/淘汰。**缓存 / 超时 / 非阻塞都在这一层之外**（那是调用方的事，
+       见 `main.make_term_judge`；判据还在飞时它返回 `PENDING`，`extract` 这一轮不收）；
+       这一层只保证"调用方给什么判据就用什么"。
     """
 
     def __init__(self, initial=(), *, verify=None, verify_factory=None,

@@ -995,9 +995,10 @@ def live_terms_step(pool, router, finals) -> list:
     它跑在定稿线程里，是额外一层（同 `close()` 那八层的纪律）。
 
     ⭐ 第五道门（Jev 术语闸门，可选）**在池子里面**跑：`LivePool(judge=…)` →
-    `extract(judge=…)`。它只对新候选**判一次**（按小写词缓存整节课）、有硬超时
-    （`JEV_TERMS_TIMEOUT`）；超时/出错 = 全当"没答"，词照留 —— 也就是**这里这层
-    `try` 之上还有两层各自的兜底**，任何一层的失败都退化到"没装闸门"。
+    `extract(judge=…)`。它只对新候选**判一次**（按小写词缓存整节课）；⭐ 2026-10-18
+    （D17）判据**非阻塞** —— 没判过的这一轮返回 `PENDING`、**这一轮不收**，下一轮判据
+    到位再收。超时/出错 = 全当"没答"，词照留 —— 也就是**这里这层 `try` 之上还有两层
+    各自的兜底**，任何一层的失败都退化到"没装闸门"。
 
     ⚠️ 单独一个函数而不是写进 `_emit`：`_emit` 有两百行、三条 `continue` 分支
        （纯转录 / 只英·校 / 翻译），接线点在四条路上都要走到；抽出来既能单测，
@@ -1019,9 +1020,9 @@ def live_terms_step(pool, router, finals) -> list:
     return got
 
 
-#: 术语闸门一笔的**硬超时**（秒）。⚠️ 它跑在**定稿线程**上（`live_terms_step` 那条），
-#: 而这个线程每 25 句还要回去接着定稿 —— 宁可这一批判据全放弃（= 全当"没答"，词照留），
-#: 也不许让定稿等一次网络。
+#: 术语闸门一笔的**硬超时**（秒）。⚠️ 判据**跑在后台线程上**（2026-10-18 审查 D17：
+#: 原来同步跑在**定稿线程**上 —— 只要某批出现新候选词，定稿 / 字幕推进就被卡住最多
+#: 这么长）。这一档现在是**后台那一次的硬截止**：到点就全当"没答"（词照留）。
 #: ⭐ 4 s ≈ 官方实测一批 20 题 0.24–0.43 s（`keypoints` 模块头，2026-10-12）的 10 倍。
 JEV_TERMS_TIMEOUT = 4.0
 
@@ -1053,25 +1054,32 @@ def _call_within(fn, timeout: float):
 
 def make_term_judge(*, course_title: str = "", timeout: float = JEV_TERMS_TIMEOUT,
                     ask=None):
-    """造「术语闸门」judge（`terms -> [0–1 | None]`）给 `LivePool(judge=…)`。**绝不抛。**
+    """造「术语闸门」judge（`terms -> [0–1 | None | live_terms.PENDING]`）给 `LivePool(judge=…)`。
 
-    三层，每层都能单独坏、坏了都退化到"没装闸门"（词照收）：
+    ⭐⭐ 2026-10-18（审查 D17）：**判据不再阻塞定稿线程**。`judge()` 立刻返回 ——
+    缓存里有的直接给分数；没判过的**丢后台问**、本轮返回 `live_terms.PENDING`
+    （= 还没判 → 这一轮**不收**，下一轮判据到位再来；候选词没进池，下轮会被重新抽出）。
+    ⚠️ 为什么必须这样：`judge` 是**网络**判据（硬超时 `JEV_TERMS_TIMEOUT` ≈ 4 s），而它
+       跑在**定稿线程**上（`main.live_terms_step` → `LivePool.update` → `extract`）——
+       只要某批出现新候选词，定稿 / 字幕推进就会被卡住最多 ~4 s，与「不许让定稿等一次
+       网络」那条注释相反。
 
-    1. **缓存**（按小写词，整节课）：判过的词（含判成 `None` 的）**一次都不重问** ——
-       被砍的词下轮会**又**被抽出来（它没进池子），没有这一格就是每 25 句重问一遍
-       同一批垃圾、每轮白花一次请求；
-    2. **硬截止**（`timeout`，见 `_call_within`）：定稿线程最多等 `timeout` 秒；
+    三层（每层都能单独坏、坏了都退化到"没装闸门"）：
+
+    1. **缓存**（按小写词，整节课）：判过的词（含判成 `None` 的）**一次都不重问**；
+    2. **硬截止**（`timeout`，见 `_call_within`）：后台那次最多等 `timeout` 秒；
     3. `ask` **注入**（默认现取 `keypoints.judge_terms`）：判据传个假的就能离线跑。
 
-    ⚠️ **绝不静默**：超时 / 出错 → 全当"没答"，同时打一行 ⚠（「闸门坏了」不许看起来
-       像「闸门把垃圾全拦住了」）；成功也记一行账（「数调用」）。
-    ⚠️ 没配 Jev token 时也发不出请求（`keypoints` 那边挡的：全 `None`、零请求）——
-       这一层不需要知道 token 的事。
+    ⚠️ **绝不静默**：超时 / 出错 → 全当"没答"（`None`，词照留），同时打一行 ⚠；成功也记一行。
+    ⚠️ 没配 Jev token 时也发不出请求（`keypoints` 那边挡的：全 `None`、零请求）。
     ⚠️ `CLASSLIVE_JEV_TERMS=0` → **返回 `None`**（= 不装闸门，与装它之前逐字一样）。
     """
     if not _jev_terms_on():
         return None
+    import live_terms as _lt
     cache: dict = {}
+    inflight: set = set()
+    lock = threading.Lock()
     stats = {"calls": 0}                # 实际送出去的批数（每批 ≤ 20 题 = 1 请求）
 
     def _ask(todo):
@@ -1080,32 +1088,49 @@ def make_term_judge(*, course_title: str = "", timeout: float = JEV_TERMS_TIMEOU
         import keypoints as _kp
         return _kp.judge_terms(todo, course_title=course_title, timeout=timeout)
 
+    def _work(todo, todo_keys) -> None:
+        """后台那一批：问一次、结果进缓存。**绝不抛**（daemon 线程里）。"""
+        try:
+            got = _call_within(lambda: _ask(todo), timeout)
+            with lock:
+                if got is None:
+                    echo(f"⚠ 术语闸门：{timeout:g}s 内没拿到（超时/出错）"
+                         f" —— 这 {len(todo)} 个词照留")
+                    got = [None] * len(todo)
+                else:
+                    echo(f"💬 术语闸门：Jev 判了 {len(todo)} 个候选词"
+                         f"（本课第 {stats['calls']} 批）")
+                got = list(got)
+                for i, w in enumerate(todo):
+                    p = got[i] if i < len(got) else None
+                    try:
+                        cache[w.lower()] = None if p is None else float(p)
+                    except (TypeError, ValueError):
+                        cache[w.lower()] = None
+                inflight.difference_update(todo_keys)
+        except Exception:                                     # noqa: BLE001
+            with lock:
+                inflight.difference_update(todo_keys)
+
     def judge(terms) -> list:
+        """**非阻塞**：缓存的给分数，没判过的丢后台、本轮给 `PENDING`。"""
         words = [str(t) for t in (terms or ())]
         keys = [w.lower() for w in words]
         todo, todo_keys = [], set()
-        for w, k in zip(words, keys):
-            if k not in cache and k not in todo_keys:       # 同一批里重样的也只问一次
+        with lock:
+            out = [cache.get(k, _lt.PENDING) for k in keys]
+            for w, k in zip(words, keys):
+                if k in cache or k in inflight or k in todo_keys:
+                    continue                                  # 判过 / 正在飞 -> 只管读缓存
                 todo.append(w)
                 todo_keys.add(k)
+            if todo:
+                inflight.update(todo_keys)
+                stats["calls"] += 1
         if todo:
-            stats["calls"] += 1
-            got = _call_within(lambda: _ask(todo), timeout)
-            if got is None:
-                echo(f"⚠ 术语闸门：{timeout:g}s 内没拿到（超时/出错）"
-                     f" —— 这 {len(todo)} 个词照留")
-                got = [None] * len(todo)
-            else:
-                echo(f"💬 术语闸门：Jev 判了 {len(todo)} 个候选词"
-                     f"（本课第 {stats['calls']} 批）")
-            got = list(got)
-            for i, w in enumerate(todo):
-                p = got[i] if i < len(got) else None
-                try:
-                    cache[w.lower()] = None if p is None else float(p)
-                except (TypeError, ValueError):
-                    cache[w.lower()] = None
-        return [cache.get(k) for k in keys]
+            threading.Thread(target=_work, args=(todo, todo_keys), daemon=True,
+                             name="cl-term-judge").start()
+        return out
 
     return judge
 
@@ -1962,9 +1987,10 @@ def run(args) -> None:
     #    ⚠️ **不碰 Soniox**：它的 context 是会话开始时定的，改要重开会话（`live_terms`
     #       文件头有查证），所以这一课的词只靠 `glossary/<课号>.txt` 在**下节课**带上。
     #    ⚠️ 建不起来 / 抽不到词都**只影响术语召回**，绝不挡开课（同 `extra_terms` 那条）。
-    #    ⭐ 第五道门（E2，2026-10-18）：`make_term_judge` 造的 Jev 判据（**缓存 + 硬超时
-    #       + 记账**）从 `judge=` 进池子 —— 只对**新候选**判、判过的不重问；判据没配 /
-    #       超时 / 出错都退化成"没装闸门"（词照收）。见 `make_term_judge` 的说明。
+    #    ⭐ 第五道门（E2，2026-10-18）：`make_term_judge` 造的 Jev 判据（**缓存 + 后台
+    #       硬截止 + 记账 + 非阻塞**）从 `judge=` 进池子 —— 只对**新候选**判、判过的不重问；
+    #       判据还在飞时这一轮**不收**（`PENDING`）；没配 / 超时 / 出错都退化成"没装闸门"
+    #       （词照收）。见 `make_term_judge` 的说明。
     live_pool = None
     if args.course and vault:
         try:

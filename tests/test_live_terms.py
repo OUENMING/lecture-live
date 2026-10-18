@@ -39,6 +39,19 @@ def mats_no(_phrase):
     return False
 
 
+def _await(j, terms, timeout: float = 3.0):
+    """轮询到判据不再是 `PENDING`（等后台那一批落地）。**只用已在飞/已缓存的词** ——
+    `make_term_judge` 对 in-flight 的词不会再发请求，所以这里不会打乱 `asked` 计数。"""
+    end = time.time() + timeout
+    last = None
+    while time.time() < end:
+        last = j(list(terms))
+        if all(x is not lt.PENDING for x in last):
+            return last
+        time.sleep(0.02)
+    return last
+
+
 class Extract(unittest.TestCase):
     def test_出现两次才收(self):
         got = lt.extract(finals("so the shutdown price is low",
@@ -345,11 +358,12 @@ class Wiring(unittest.TestCase):
 
 
 class 术语闸门(unittest.TestCase):
-    """⭐ E2（2026-10-18）：`main.make_term_judge` = **整节课的缓存 + 硬截止 + 记账**。
+    """⭐ E2（2026-10-18）：`main.make_term_judge` = **缓存 + 后台硬截止 + 记账**。
 
-    三个不变量：见过的词**一次都不重问**；超时 = 全当"没答"（词照留）但**不许超时**
-    （硬截止）；`CLASSLIVE_JEV_TERMS=0` = 不装闸门。判据是**注入的**（`ask=`），
-    全离线 —— 生产那条 `ask` 是 `keypoints.judge_terms`（`tests/test_keypoints.py` 钉它）。
+    ⭐⭐ 2026-10-18（审查 D17）：判据**非阻塞** —— 首轮对没判过的词返回 `PENDING`，
+    后台跑完才进缓存。四个不变量：首轮立刻返回（不卡定稿线程）；见过的词**一次都不
+    重问**；超时 = 全当"没答"（词照留）但**不许阻塞**；`CLASSLIVE_JEV_TERMS=0` = 不装闸门。
+    判据是**注入的**（`ask=`），全离线 —— 生产那条 `ask` 是 `keypoints.judge_terms`。
     """
 
     def _judge(self, **kw):
@@ -357,30 +371,47 @@ class 术语闸门(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CLASSLIVE_JEV_TERMS": "1"}):
             return M.make_term_judge(course_title="ECON10770 X", **kw)
 
-    def test_缓存_见过的词一次都不重问(self):
+    def test_非阻塞_首轮PENDING_判完进缓存不重问(self):
         asked = []
 
         def ask(todo):
             asked.append(list(todo))
             return [0.9] * len(todo)
         j = self._judge(ask=ask)
-        self.assertEqual(j(["Alpha Beta"]), [0.9])
+        # ⚠️ 变异验证：把 `judge()` 改回同步 `_call_within(...)` -> 这条红（首轮不是 PENDING）。
+        self.assertEqual(j(["Alpha Beta"]), [lt.PENDING],
+                         "首轮没给 PENDING —— 判据还在阻塞定稿线程")
+        self.assertEqual(_await(j, ["Alpha Beta"]), [0.9], "判完没进缓存")
         self.assertEqual(j(["Alpha Beta"]), [0.9], "缓存没命中（两次分数不一样）")
         self.assertEqual(asked, [["Alpha Beta"]], "第二次又问了一遍见过的词")
 
-    def test_超时_硬截止_词照留且出声(self):
-        """⚠️ 判据跑在定稿线程上：到点必须回来（实测：没有硬截止会等满判据）。"""
+    def test_非阻塞_判据再慢首轮也立刻返回(self):
+        """⭐⭐ D17 的核心判据：判据**不在定稿线程上等** —— 哪怕判据要 0.6 s，
+        `judge()` 首轮也必须**立刻**带着 `PENDING` 回来。"""
         def slow(todo):
-            time.sleep(0.8)
+            time.sleep(0.6)
+            return [0.9] * len(todo)
+        j = self._judge(timeout=5.0, ask=slow)           # 截止远大于判据耗时
+        t0 = time.monotonic()
+        first = j(["Alpha Beta"])
+        dt = time.monotonic() - t0
+        # ⚠️ 变异验证：把 `judge()` 里起线程那行改成同步 `_work(...)` -> 这条红
+        #    （首轮阻塞 ~0.6 s —— 正是"让定稿等一次网络"）。
+        self.assertEqual(first, [lt.PENDING], "首轮该立刻返回 PENDING")
+        self.assertLess(dt, 0.2, f"首轮阻塞了 {dt:.2f}s（判据还在定稿线程上）")
+        self.assertEqual(_await(j, ["Alpha Beta"]), [0.9], "判完没进缓存")
+
+    def test_超时_词照留且出声(self):
+        """⚠️ 后台那一批有硬截止：超时 = 全当"没答"（词照留），并出声。"""
+        def slow(todo):
+            time.sleep(0.5)
             return [0.01] * len(todo)
         j = self._judge(timeout=0.05, ask=slow)
         buf = io.StringIO()
-        t0 = time.monotonic()
         with contextlib.redirect_stdout(buf):
-            got = j(["Alpha Beta"])
-        dt = time.monotonic() - t0
+            self.assertEqual(j(["Alpha Beta"]), [lt.PENDING], "首轮不是 PENDING")
+            got = _await(j, ["Alpha Beta"])
         self.assertEqual(got, [None], "超时该当'没答'（照留），不许拿 0.01 当答案")
-        self.assertLess(dt, 0.7, f"没有硬截止（等了 {dt:.2f}s）")
         self.assertIn("照留", buf.getvalue(), "超时了却一声不响")
 
     def test_超时也进缓存_不重问(self):
@@ -393,6 +424,7 @@ class 术语闸门(unittest.TestCase):
         j = self._judge(timeout=0.03, ask=slow)
         with contextlib.redirect_stdout(io.StringIO()):
             j(["Alpha Beta"])
+            _await(j, ["Alpha Beta"])
             j(["Alpha Beta"])
         self.assertEqual(len(calls), 1, "超时的词被重问了（缓存没记没答）")
 
@@ -406,25 +438,32 @@ class 术语闸门(unittest.TestCase):
                 M.make_term_judge(course_title="X", ask=lambda ts: [None] * len(ts)),
                 "只有明确的 \"0\" 才是关（坏值=开，同 `_env_limit`）")
 
-    def test_端到端_垃圾砍掉真词进池_第二轮不再问(self):
-        """接线点（`live_terms_step`）走一遍：垃圾不进池、真词进池；第二轮
-        `Euro` 还在当候选（它没进池）—— 判据**只许命中缓存**，不许再发请求。"""
+    def test_端到端_判据在飞不收_判完垃圾砍真词进池_不重问(self):
+        """接线点（`live_terms_step`）：首轮判据在飞 -> 一个都不收（`PENDING`）；判完
+        第二轮真词进池、垃圾被砍；之后判据**只许命中缓存**，不再发请求。"""
         import main as M
         asked = []
 
         def ask(todo):
             asked.append(sorted(t.lower() for t in todo))
             return [0.04 if t.lower() == "euro" else 0.9 for t in todo]
-        pool = lt.LivePool(step=1, verify=mats_yes, judge=self._judge(ask=ask))
+        j = self._judge(ask=ask)
+        pool = lt.LivePool(step=1, verify=mats_yes, judge=j)
         lines = ["it costs forty Euro here", "another Euro again",
                  "the shutdown price is low", "shutdown price again"]
+        # ⚠️ 变异验证：把 `_drop_by_judge` 里 `PENDING` 那条 continue 删掉（当 None 放行）
+        #    -> 这条红（首轮就把还没判的 `Euro` 收进池）。
         got = M.live_terms_step(pool, None, finals(*lines))
-        self.assertEqual(got, ["shutdown price"], f"过门的词不对：{got}")
+        self.assertEqual(got, [], "判据还在飞 —— 这一轮不该收词（PENDING）")
+        _await(j, ["Euro"])                              # 等后台那一批落地
+        got2 = M.live_terms_step(pool, None, finals(*lines, "and then it ends"))
+        self.assertIn("shutdown price", got2, f"过门的词不对：{got2}")
+        self.assertNotIn("euro", [w.lower() for w in pool.terms()], "垃圾进池了")
         self.assertIn(("Euro", "判据：不像术语"), pool._rejected)
-        # 第二轮：又来一句（步长才走到）——`Euro` 仍是候选，只许命中缓存
-        got2 = M.live_terms_step(pool, None, finals(*lines, "and then the workshop ends"))
-        self.assertEqual(got2, [])
-        self.assertEqual(len(asked), 1, f"第二轮对见过的词又重新问了：{asked}")
+        got3 = M.live_terms_step(pool, None,
+                                 finals(*lines, "and then it ends", "still Euro"))
+        self.assertEqual(got3, [], "见过的词不该再进池")
+        self.assertEqual(len(asked), 1, f"判据被重问了：{asked}")
 
 
 class 上限_按频次与新近度(unittest.TestCase):

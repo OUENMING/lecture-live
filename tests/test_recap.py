@@ -248,6 +248,24 @@ class 临近的一些事儿_按今天过滤(unittest.TestCase):
         rows = [self._row("过去的", "2020-01-01"), self._row("将来的", "2030-01-01")]
         self.assertEqual(len(recap.upcoming(rows, day=None)), 2)
 
+    def test_有日期的条目不受_carry_上限(self):
+        """⭐ DB 审查 D-17：`carry` 只该管**没日期**的 —— 有日期的由日期窗口限寿。
+        窗口内的事项（10 天后的考试）不许因为随课传了几次就被丢。"""
+        row = self._row("考试", "2026-10-26", carry=recap.DUTIES_CARRY_MAX + 5)
+        self.assertTrue(recap.upcoming([row], day=self.DAY), "窗口内的有条目被 carry 丢了")
+
+    def test_不知道今天时有日期的照旧受_carry_管(self):
+        """规则 ③：不知道今天就没有日期窗口可依，只能靠 carry 限寿。"""
+        row = self._row("考试", "2026-10-26", carry=recap.DUTIES_CARRY_MAX)
+        self.assertEqual(recap.upcoming([row], day=None), [])
+
+    def test_窗口内的考试随课传三节仍在(self):
+        """端到端：10 天后的考试连并 3 节（`carry` 涨到 3）都还在。"""
+        one = [self._row("考试", "2026-10-26")]
+        two = recap.merge_duties(one, [], day=self.DAY)
+        three = recap.merge_duties(two, [], day=self.DAY)
+        self.assertEqual([x["title"] for x in three], ["考试"])
+
     def test_坏形状不炸(self):
         self.assertEqual(recap.upcoming(None, day=self.DAY), [])
         self.assertEqual(recap.upcoming([None, "x", 3], day=self.DAY), [])

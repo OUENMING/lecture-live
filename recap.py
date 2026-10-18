@@ -255,11 +255,14 @@ def upcoming(duties, *, day=None) -> list:
     for x in (duties or []):
         if not isinstance(x, dict):
             continue
-        if today is not None:
-            d = _iso_date(x.get("date"))
-            if d is not None and (d < today or d > horizon):
-                continue
-        if int(x.get("carry") or 0) >= DUTIES_CARRY_MAX:
+        d = _iso_date(x.get("date"))
+        if today is not None and d is not None and (d < today or d > horizon):
+            continue
+        # ⚠️ DB 审查 D-17：`carry` 上限只约束**没有可用日期**的条目 —— 有日期的由日期
+        #    窗口自然限寿。`merge_duties` 每合并一次给所有条目 `carry+1`，旧版把窗口内
+        #    的事项（如 10 天后的考试）在第 3 节课丢掉 = 与规则 ① 矛盾，**且无声**。
+        #    不知道今天（`today is None`）时日期判不了远近 → 照旧全部受 carry 管（规则 ③）。
+        if (d is None or today is None) and int(x.get("carry") or 0) >= DUTIES_CARRY_MAX:
             continue
         out.append(x)
     return out

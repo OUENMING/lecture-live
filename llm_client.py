@@ -43,19 +43,56 @@ def headers(key: str) -> dict:
 
 
 def chat_json(key: str, model: str, system: str, user: str, *, max_tokens: int,
-              temperature: float = 0.2, timeout: float = 180.0):
-    """非流式、`response_format=json_object`、关掉思考模式；返回模型给的 JSON（**原样**，可能不是 dict）。
+              temperature: float = 0.2, timeout: float = 180.0, return_meta: bool = False,
+              effort: str | None = None):
+    """非流式、`response_format=json_object`；返回模型给的 JSON（**原样**，可能不是 dict）。
 
     ⚠️ 失败一律抛（`httpx.HTTPError` / `KeyError` / `json.JSONDecodeError`…）—— 吞不吞、吞成什么，
        是调用方的事（它们各自的约定不同：`None` / `{}` / 往上抛给收尾锁）。
+    ⚠️ `return_meta=True` → `(obj, finish_reason)`：只有"截断必须当失败"的调用方
+       （`note_v2.overview` 五分钟串讲）要它 —— `finish_reason=="length"` 的 JSON
+       有时还能解析出来，而半截的叙述印进笔记比没有更坏（2026-10-18）。
+    ⭐ F11 §0（作者 2026-10-18）：`effort` 只给**课后笔记**那条链用（`review` / `repair` /
+       `verify` / `overview` / `shorten` / `align`，`note_merge`）——
+       传 `"low"` 就开思考模式（官方：`thinking={"type":"enabled"}` +
+       `reasoning_effort` ∈ low/high/max；思考模式下 `temperature` 被忽略，故不发；
+       推理只从 `message.reasoning_content` 回来，**绝不进笔记**）。
+       其余调用方（翻译 / 实时摘要 / 分类 / 术语查询）**不传** → 现状逐字不变（思考关闭）。
+    ⚠️ **截断自动降级**（F11 §0 实测）：思考的推理 token **计入** `completion_tokens` ——
+       真 review 块实测 `max_tokens=6000` 时 `finish_reason=length`、`content` 被截
+       （推理吃掉大半预算，整块 JSON 解析失败）。所以带 `effort` 的调用一旦收到 `length`，
+       **同一次重来、关掉思考**再取结果：笔记照常，不丢块。
+    ⚠️ Worker（通行码）的对话输出上限是 **8192**（`handler.js` 的 `LLM_MAX_TOKENS`，
+       commit `0335853` 2026-10-18 已部署）。**截断的真正来源是我们的 per-call 预算**
+       （旧 REVIEW 6000 / REPAIR 3000 / VERIFY 2500 / OVERVIEW 3500 / SHORTEN 2500 偏小），
+       不是 Worker —— F11-9 已把笔记那几类调成 `*_MAX_TOKENS_THINKING`（见 `note_v2`）。
     """
     import httpx
-    payload = {"model": model, "stream": False, "max_tokens": max_tokens,
-               "temperature": temperature, "thinking": {"type": "disabled"},
-               "response_format": {"type": "json_object"},
-               "messages": [{"role": "system", "content": system},
-                            {"role": "user", "content": user}]}
-    r = httpx.post(f"{base_for(key)}/chat/completions", headers=headers(key),
-                   json=payload, timeout=timeout)
-    r.raise_for_status()
-    return json.loads(r.json()["choices"][0]["message"]["content"])
+
+    def _once(eff: str | None):
+        payload = {"model": model, "stream": False, "max_tokens": max_tokens,
+                   "response_format": {"type": "json_object"},
+                   "messages": [{"role": "system", "content": system},
+                                {"role": "user", "content": user}]}
+        if eff:
+            payload["thinking"] = {"type": "enabled"}
+            payload["reasoning_effort"] = eff
+        else:
+            payload["temperature"] = temperature
+            payload["thinking"] = {"type": "disabled"}
+        r = httpx.post(f"{base_for(key)}/chat/completions", headers=headers(key),
+                       json=payload, timeout=timeout)
+        r.raise_for_status()
+        ch = (r.json().get("choices") or [{}])[0]
+        return ch, str(ch.get("finish_reason") or "")
+
+    choice, finish = _once(effort)
+    if effort and finish == "length":
+        # 思考把 token 吃光（实测 review 块：推理吃掉大半预算 → content 被截）→ 关思考重来一次。
+        choice, finish = _once(None)
+    content = choice["message"]["content"]
+    obj = json.loads(content)
+    if return_meta:
+        # ⭐ F9：带上**返回长度**（chars）—— 速览为空/截断时诊断要有数（finish/len/max_tokens）。
+        return obj, finish, len(content)
+    return obj

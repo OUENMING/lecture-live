@@ -120,6 +120,38 @@ def _common_word_signal(term: str) -> str:
     return ""
 
 
+#: F8-f（作者点名）：**单单词**里的"泛词"——任何一门课都会出现、出现也不说明是术语。
+#: 运行环境没有词频库（wordfreq / zipf）→ 声明这张**小而保守**的表（作者点名的四个 + 同族），
+#: 只吃单单词（`marginal cost` 这种多词短语是术语，不走这条）。
+#: 例外由**调用方**管：术语库里真有这个词就留（`unless the glossary has them`，
+#: 见 `obsidian_writer._in_term_store` 的调用点）。
+#: 单单词泛词 —— 两层（F9c 域中立化）：
+#: · `ALWAYS`：任何学科里单独出现都不是术语 → 一律算泛词；
+#: · `UNLESS_VERIFIED`：在**别的学科里是正词**（化学的 substitution 取代反应、
+#:   derivative 衍生物；社会学的 marginal……）→ 只有"本课材料里真出现过"才保留。
+TOO_COMMON_ALWAYS = frozenset("""
+minimum maximum
+""".split())
+TOO_COMMON_UNLESS_VERIFIED = frozenset("""
+substitute substitution marginal derivative
+""".split())
+
+
+def too_common(term: str, *, verified: bool = False) -> bool:
+    """单单词泛词判据（F8-f；F9c 域中立版）。多词短语永远不算（`marginal cost` 是术语）。
+
+    `verified` = 本课材料里真出现过这个词（调用方查 `Materials.verify`）——
+    在经济学里 `substitute` 是口头词，在化学里 `substitution` 是正词；
+    判据只能看**这门课自己**用不用它，不能拿一份写死的学科表赌。
+    """
+    t = (term or "").strip().lower()
+    if not t or any(c in t for c in " -"):
+        return False
+    if t in TOO_COMMON_ALWAYS:
+        return True
+    return t in TOO_COMMON_UNLESS_VERIFIED and not verified
+
+
 def drop_reason(term: str, *, type_: str = "", source: str = SRC_AUTO,
                 verified: bool = False) -> str:
     """一条命中该不该进笔记术语表。返回原因 = 丢掉；返回 `""` = 保留。
@@ -256,6 +288,27 @@ def render_table(sel: "Selection", *, extra: list | None = None) -> list:
             continue
         seen.add(h.term.lower())
         rows.append(h)
+    # ⭐ F8-e（作者点名）：同一个中文（gloss）只留一行 —— 术语库行（`sel.hits`）优先，
+    #    其次取**更短**的英文（`shutdown price` 胜 `shutting down price`）。
+    #    占位 gloss（"（本课术语）"）不参与合并，否则会把一堆词并成一行。
+    store_terms = {h.term.lower() for h in (sel.hits or [])}
+    merged: list = []
+    pos: dict = {}
+    for h in rows:
+        g = (h.gloss or "").strip()
+        if not g or g.startswith("（"):
+            merged.append(h)
+            continue
+        cur = pos.get(g)
+        if cur is None:
+            pos[g] = len(merged)
+            merged.append(h)
+            continue
+        a = merged[cur]
+        a_store, h_store = a.term.lower() in store_terms, h.term.lower() in store_terms
+        if (h_store and not a_store) or (h_store == a_store and len(h.term) < len(a.term)):
+            merged[cur] = h
+    rows = merged
     out = []
     for h in rows:
         tail = f"　`{h.ts}`" if h.ts else ""

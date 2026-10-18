@@ -504,6 +504,89 @@ def t_score_concurrent_keeps_order():
     assert dt < 6 * 0.15 * 0.75, f"6 批 × 0.15 s 用了 {dt:.2f} s —— 没并发起来"
 
 
+# ---------------------------------------------------------------- F9b：ask_batch（支持性核对的入口）
+@case("⭐⭐ ask_batch：≤20 问/批、`S` 键、>20 自动切批（键名是 parse_answers 的唯一口径）")
+def t_ask_batch_batches_and_keys():
+    seen = []
+
+    def fake(state, questions, *, token, timeout=60.0, **kw):
+        seen.append((state, list(questions.keys())))
+        return {"answers": {k: {"noul": 0.9} for k in questions}}
+
+    orig = kp.ask_commandcode
+    kp.ask_commandcode = fake
+    try:
+        # 故意传大 batch_size：**20/批是硬顶**，不许被参数顶穿
+        got = kp.ask_batch("state", [f"q{i}" for i in range(1, 26)], token="t",
+                           batch_size=100)
+    finally:
+        kp.ask_commandcode = orig
+    assert [len(k) for _, k in seen] == [20, 5], f"切批不对：{seen}"
+    assert seen[0][1] == [f"S{i}" for i in range(1, 21)]
+    assert seen[1][1] == [f"S{i}" for i in range(1, 6)]
+    assert got == [0.9] * 25, f"得到 {got!r}"
+
+
+@case("⭐ ask_batch：没 token → 全 None，一个请求都不发（fail-soft）")
+def t_ask_batch_no_token():
+    calls = []
+    orig_ask, orig_prov = kp.ask_commandcode, kp.provider_token
+    kp.ask_commandcode = lambda *a, **k: calls.append(1)
+    kp.provider_token = lambda: ""
+    try:
+        got = kp.ask_batch("s", ["q1", "q2"])
+    finally:
+        kp.ask_commandcode, kp.provider_token = orig_ask, orig_prov
+    assert got == [None, None] and not calls, f"得到 {got!r}，请求 {len(calls)} 次"
+
+
+@case("⭐ ask_batch：炸了/解析不出 → 该批全 None，**永不抛**")
+def t_ask_batch_never_raises():
+    def boom(state, questions, *, token, timeout=60.0, **kw):
+        raise RuntimeError("boom")
+
+    orig = kp.ask_commandcode
+    kp.ask_commandcode = boom
+    try:
+        got = kp.ask_batch("s", ["q1", "q2", "q3"], token="t")
+    finally:
+        kp.ask_commandcode = orig
+    assert got == [None, None, None], f"得到 {got!r}"
+
+
+@case("⭐ ask_batch：瞬时错误重试一次（429 后成功）")
+def t_ask_batch_retry_transient():
+    n = {"k": 0}
+
+    def flaky(state, questions, *, token, timeout=60.0, **kw):
+        n["k"] += 1
+        if n["k"] == 1:
+            raise RuntimeError("HTTP 429 too many requests")
+        return {"answers": {k: {"noul": 0.5} for k in questions}}
+
+    orig = kp.ask_commandcode
+    kp.ask_commandcode = flaky
+    try:
+        got = kp.ask_batch("s", ["q1", "q2"], token="t", tries=2)
+    finally:
+        kp.ask_commandcode = orig
+    assert got == [0.5, 0.5] and n["k"] == 2, f"得到 {got!r}，调用 {n['k']} 次"
+
+
+@case("⭐ ask_batch：缺键/乱序靠 parse_answers 对位回填（错位在 top-k 下看不出来）")
+def t_ask_batch_backfill():
+    def fake(state, questions, *, token, timeout=60.0, **kw):
+        return {"answers": {"S2": {"noul": 0.2}, "S1": {"noul": 0.8}}}
+
+    orig = kp.ask_commandcode
+    kp.ask_commandcode = fake
+    try:
+        got = kp.ask_batch("s", ["a", "b", "c"], token="t")
+    finally:
+        kp.ask_commandcode = orig
+    assert got == [0.8, 0.2, None], f"得到 {got!r}"
+
+
 def main_() -> int:
     print("=" * 60)
     fail: list[str] = []

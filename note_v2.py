@@ -26,6 +26,7 @@
 ⚠️ 失败一律 fail-soft：某块失败只少那一块（旧版同款纪律），绝不抛。
 """
 from __future__ import annotations
+import copy
 import dataclasses
 import json
 import note_math
@@ -33,7 +34,19 @@ import re
 
 REVIEW_CHUNK = 70           # 每块喂多少句（同旧版：块太大 JSON 会被截断）
 REVIEW_WORKERS = 5
-REVIEW_MAX_TOKENS = 6000    # v2 每块输出更长（讲解 + 例题 + 变式）—— 实测取值见 out/ 那份验收笔记
+REVIEW_MAX_TOKENS = 6000    # 关思考时的每块上限（旧口径，保留）
+# ⭐ F11-9：**思考 low 档**的每类预算 —— 实测（test key，7 次真调用）：
+#   review 块最大 content≈3964 / reasoning=4483（合计 7943）；repair 2332；verify 532；overview 223。
+# 提案 = max(content) + max(reasoning)×1.5，向上取整到千。
+# ⭐ F12：finish_reason 探针（5 片 × low/high）实测**两档各 1/5 撞 `length`**
+#   （low completion=10998/reasoning 8046；high 10998/8935）——11000 太贴顶 → review 提到 14000。
+REVIEW_MAX_TOKENS_THINKING = 14000   # 11000 时低档也会撞 length；high 曾到 10403（reasoning 8502）
+REPAIR_MAX_TOKENS_THINKING = 4000    # 403 + 1929×1.5 ≈ 3297
+VERIFY_MAX_TOKENS_THINKING = 2000    # 365 + 167×1.5 ≈ 616
+OVERVIEW_MAX_TOKENS_THINKING = 1500  # 91 + 132×1.5 ≈ 289
+SHORTEN_MAX_TOKENS_THINKING = 4000   # 未单独实测（输出≈一节的压缩）；按 review 比例保守给
+# ⚠️ Worker（通行码）输出上限 **16384**（2026-10-18 14:42Z 部署）→ review 的 14000 不会被压。
+#    仍保留"截断 → 关思考重来"兜底（见 llm_client.chat_json）。
 ALIGN_MAX_TOKENS = 2000
 VERIFY_MAX_TOKENS = 2500
 
@@ -53,6 +66,11 @@ PLOT_KINDS = {
 REVIEW_SYS = """你是课堂笔记写作者。给一名靠中文听英文课的本科生写**课后自学笔记** ——
 目标是：**一个没去上课的学生，只看这份笔记就能把这段课学会**。
 
+读者是谁：The reader is a Chinese-speaking first-year undergraduate at an English-taught
+university. They attended this lecture but could not fully follow it; they have no textbook,
+slides or recording — these notes are their only way to re-learn THIS lecture.
+（课程不限经济学 —— 数学、CS、社会学都可以；按内容类型写，不套学科标签。）
+
 输入：一段逐句中英转录（带 [HH:MM:SS] 时间戳）；可能另附**本课课件/试卷的检索片段**。
 
 ## 一、教授讲到的必须讲（覆盖度）
@@ -64,42 +82,162 @@ REVIEW_SYS = """你是课堂笔记写作者。给一名靠中文听英文课的�
    "要点"里列的每一条都要被某一节讲到、并原样（可整理成句）进 `lecture_points`。
    实时要点是课堂上一句句记下来的：**合并两条 = 丢内容**，宁可两小节。
 
-## 二、每一节怎么写（由浅入深，像学长给学弟讲，不要教科书腔）
-`prose` 是**连贯的中文段落**（2–5 段），按这个顺序讲透：
-① 它是什么（大白话）→ ② 为什么需要它 / 在经济学或社会学里解决什么问题 →
-③ 在哪里用到 → ④ 这门课/这类考试会怎么考。
-⚠️ **不要一条一条 bullet 堆**：用完整的句子把道理讲通；公式用 LaTeX（行内 $…$，独立 $$…$$）。
-⚠️ 术语首次出现写「中文（English term）」；英文原话**只在**引用定义原文/考试原题时出现。
+## 二、每一节怎么写（一位懂这门课的老助教，给"来上过课但没完全跟上"的同学讲）
+你是**懂这门课的人**：自信、具体、大白话 —— 助教课下给同学把这一节讲明白，
+**由浅入深、娓娓道来**。不是学生复述课上听到的东西（"教授指出…"整节**最多出现一次**），
+也不是教科书腔。
+⚠️ **不要任何"装置"**：不写"本节的重点是："「必会三条」「先记住这三点」这类标语；
+不写"首先…其次…最后…"的流水账链、不写"需要注意的是""值得一提""总而言之""这节课很重要"。
+把话说进句子里，不要给句子上标签。
+⚠️ **一遍说完**：同一个意思不许换个说法再说一遍（车轱辘话）；不把标题改成一句话当讲解；
+前一段给过的背景，后一段不再重复。同一个数字/式子**全篇只在真正需要它的地方出现**。
+⚠️ **过渡段 / 课务 / 学生提问这类"没在讲知识"的片段**：不许单独成段 —— 能并进邻段就一句话
+带过，不能就索性不写。
+⚠️ 正文里**不许写钟点时间戳**（`12:50:41` 这种）—— 时间在节标题上；要指位置写（第 N 节）。
+⚠️ **有把握的语气**：普通陈述**不许**用"可能 / 大概 / 似乎 / 也许 / 应该是 / 大概率"对冲；
+只有**真的核不出的数字或原话**才写一次「⚠ 课上没讲清：…」（一节最多一处）。
+其余情况就笃定地写 —— 你懂这个内容。
+⚠️ **能举例子就举例子**：每个概念配一个**具体例子**；**每个例子带标签**（HTML 与 md 里都看得见）：
+　🎙 **课上**：题面/数字**逐字**来自转录或课件；对不上就不许贴。
+　✏️ **自补**：你自己出的（半截的补全、或全新例子）—— 讲解/例题/变式/补全/自测哪里都能用，
+　　　只要知识正确、数字从头到尾算得对（机械核会逐条重算）。
+　🎙+✏️「按口述还原」：转录只留片段，但**有一个函数能复现每一个片段数字**，且能从头验到尾
+　　　（求导/代入都复核得出）→ 可以还原，标签写 🎙+✏️「按口述还原」；复现不了就**只留片段**：
+　　　🎙 写「课上算出 ≈2.89，函数没录全」，另配一个 ✏️ 自补例。
+　　（一个道理，各科同构。经济例：片段只剩「2.89」与「60 乘它 + 500 除以它」，还原成
+　　　`AC(q)=60q+500/q` → 取点 q*≈2.89、答案 P=AC(q*)≈346.4。物理例：片段只剩「2.5 秒」
+　　　与「20 减 5 乘它」，还原成 `v(t)=20-5t` → 取点 t=2.5 s、答案 v=7.5。）
+　⛔ **片段数字不许换角色**：2.89 是取点 q* 就不能当答案 —— 答案必须拿函数现算
+　　（P=AC(q*)≈346.4，**不是** P≈2.89；物理同理：2.5 s 是时间，速度要拿 v(t) 现算）。
+　✗ 反面例（把同一个数换个名字说两遍，不算还原）："最低为 2.89，所以答案就是 2.89"
+⚠️ **极值题必须有真的最值点**：求导=0 且二阶条件成立；**不许**用 q→∞ 之类的极限充当最小值
+（无穷远处的趋向值不是最小值）。没有最低点就明说"没有最低点"。
+讲同一个道理的重复例子**只留一个**。
+⚠️ **卡点**：老师哪一步是"跳着讲"的（默认你会、多数同学卡住的那一步），就在讲解的
+行文里用一两句大白话把它补出来。**补什么由那一步本身决定，不要套用固定句式**；
+只在真有跳步时写，不许当固定栏目；成块的前置知识仍走 `prereq`（两边不许说同一件事）。
+⚠️ **开头句说"它是什么 / 为什么在意它"**，不许写"期末常考""考试要考""常考题型"这类应考话。
+每节按这条线走（不用写小标题，把内容排成这个顺序就行）：
+① 它是什么、为什么会在意它（大白话）→ ② 一个带真实数字的例子 → ③ 正式的说法/公式（LaTeX）
+→ ④ 学生真正容易错的那一处（一句话点破）。
+⚠️ **教一种能做的题的节**（求 / 推 / 分类），最后用**一句大白话**收口：看到什么样的题、
+第一步做什么（数学/理科：「看到求极值的题，先写函数、令导数为零、再代回」；
+非数学课：「看到『比较 A 和 B』，先定两个比较维度、再逐项对」）。
+写进 `conclusion` 字段（渲染层接在正文末尾）；**不加标签**、不做表；
+概念 / 历史 / 课务这类没有题型的节留空。
+⚠️ **篇幅只设上限**（见用户消息里这段的"字数上限"）：写超是违规，**没写够不违规** ——
+   绝不许为凑字数加话；宁可短。
+⚠️ **不要退化成考点清单**：真正的列举（步骤、分类、对比项）才用 bullet，其余写成连贯段落。
+
+**照着这个语感写**（两段**格式示范**，内容是别处的、照抄内容算错）：
+> 利息本身也会生利息，所以"每年 5%、存三年"不是在 1000 欧上简单加 150 欧。举个例子：
+> 1000 欧元按复利存三年是 1000×1.05³ ≈ 1157.6 欧，利息约 157.6 欧，比单利多 7.6 欧 ——
+> 多出来的就是"利滚利"。写成式子就是 $FV = PV(1+r)^n$。最容易错的是把年数当加法：
+> 1000×(1+5%×3) 算的是单利；两个都要会，但别混。
+> 半衰期也不是"等它衰掉一半"，而是**每过一个半衰期、浓度乘一次 0.5**：从 100 份开始，
+> 两个半衰期后剩 25 份 —— 写成式子就是 $N(t)=N_0(1/2)^{t/T}$。最容易错的是把"两个半衰期"
+> 读成"剩一半的一半"之外再打一次折；先写清楚每个半衰期发生**一次**乘以 0.5，再代。
 
 另外按需填：
-- `prereq`：理解这一节需要、而**教授没讲**的前置概念 —— 揉碎了补上（懂就空着）。
+- `q`：**本节回答的一个问题**（≤30 字，问句）—— 读者复习时只看这一问就该想起这一节。
+- `cues`：1–3 条**线索问题**（≤25 字/条）：复习时盖住正文、只看问题自问自答用的 ——
+  只问**概念 / 方法 / 结论**（答得出 = 这一节真懂了）；**不许问纯算术**（"5.3除以3等于多少？"
+  这种计算器就能答的题帮不了复习，写了也会被丢掉）。
+- `conclusion`：**题型一句话**（≤40 字）：这节教的题"看到什么 → 第一步做什么"；
+  概念 / 历史 / 课务这类没有题型的节留空（渲染层把它接在正文末尾，不加标签）。
+- `algebra`：**代数主线**（≤80 字）：只列式子与结果的推导主线（这节真的用公式推了才填，可空）。
+- `intuition`：**一句人话直觉**（≤40 字）：不写公式也能记住的那种说法（可空）。
+- `prereq`：理解这一节需要、而**教授没讲**的前置知识 —— 揉碎了补上（懂就空着）。
+  ⚠️ 单步"跳讲"的补话写在正文里（见上面的「卡点」），这里只放**成块**的前置知识，两边不重复。
 - `prereq_link`：这一节用到上一节的什么（衔接一句话，第一节能空）。
 - `example`：**教授课上做的例题，完整写出来** —— 题目 + 一步步解 + **每步为什么**。
   教授没做例题就空着；有例题而你没写全，是最严重的失分。
 - `variants`：在例题基础上给 1–2 道**变式题**（含完整解答步骤）。
 - `faded`：把例题的关键步骤挖空的**补全题**（答案分开写）。
 - `pitfalls`：学生最容易错的地方。
+- `qa`：这一块的**自测题**（3–5 题，三档都尽量有），每题标 `tier`：
+  **基础** = 回忆一个定义/事实；**中等** = 换个数字或案例用一次；**挑战** = 合两个想法、或抓一个坑。
+  答案里的数字必须自洽（会过机械核）。
+- `compare`：**2–4 个容易被学生混起来的东西**的对照表（经济：AC vs AVC vs MC；CS：Sigmoid vs
+  ReLU；文科：两种研究方法）—— 只有"分不清、老混"的内容才放。例：
+  {"title": "三种成本指标", "cols": ["", "平均成本 AC", "边际成本 MC"],
+   "rows": [{"label": "定义", "cells": ["$TC/q$", "$dTC/dq$"]},
+            {"label": "最低点处", "cells": ["与 MC 相等", "穿过 AC 最低点"]}], "src": "lecture"}
+  ⚠️ 表**替掉**它覆盖的那段对照讲解（正文只留一句话指到表）；对照列 2–4、行 2–7、
+  每格 ≤40 字（可写公式）；每节至多 1 张、全讲至多 3 张；格子数字和正文一个待遇（照过三道核）。
+- `flow`：本节教的一个**有序流程**（3–7 步）：算法（forward → loss → backprop → update）；
+  一类题的解法（找 AC → 令 AC'=0 → 验二阶导 → 代回）。例：
+  {"title": "梯度下降一轮", "steps": [{"label": "前向传播", "detail": "算出预测与损失"},
+            {"label": "反向传播", "detail": "链式法则算各层梯度"},
+            {"label": "更新参数", "detail": "沿负梯度走一步"}], "loop_to": 1, "src": "lecture"}
+  ⚠️ 只讲**一类题/算法怎么做**，**不要**拿它复述某一道具体题的步骤（那是 example 的 steps，
+  两边不许重复）；迭代算法可以 `loop_to: 1` 指回第几步（从 1 数）。不合适就别放。
+
+## 二之二、例题怎么写（⭐ 2026-10-18 起：**顺序不许换** —— 来源 → 计划 → 程序 → 讲解）
+看到课上做了例题，**先填三个字段、最后才写讲解**（讲解照机器算出来的值写）：
+
+① `source_check`（**先看课上到底给了什么**，不许跳）：
+   {"quote": "出处里逐字给的原话/式子（≤80 字）", "anchor_ts": "HH:MM",
+    "verdict": "complete|fragment|none"}
+   · `quote` 必须**逐字**来自转录或课件片段；`anchor_ts` 是你看到那句话的**转录时间戳**
+     （就用给你的那段里 [HH:MM:SS] 上的时刻）。
+   · complete=题面全部给定都在出处里；fragment=只给了片段（如只念了 `2.89`「60 乘它加 500」）；
+     none=课上没给、这题是你自补的。
+② `plan`：{"knowns": ["已知…（逐条）"], "target": "要求的量（**写清含义和单位**，如「P（价格，欧元）」）",
+   "steps": ["打算怎么一步步算（纯文字，不给数字）"]}
+   ⚠️ target 是**要回答的那个量**本身，不是它的取点（求价格就写 P，不是 q*）。
+③ `program`（**代码算，你只填数据**）：一小串步骤，机器会执行并把值算准：
+   [{"var": "q_star", "op": "argmin", "expr": "60*q + 500/q", "x": "q", "range": [1, 10]},
+    {"var": "P", "op": "eval", "expr": "60*q + 500/q", "x": "q", "at": "q_star"}]
+   · `op` 只许：**argmin / argmax**（区间内求极小/极大，必须真有内部极值点，落端点算失败）、
+     **root**（区间内求零点）、**eval**（在 `at` 处代入）、**deriv**（在 `at` 处求数值导数）；
+   · `var` 是这一步算出的变量名；`expr` 里的**自变量名要和 `x` 字段一致**
+     （schema 例子里是 `q`；别把自变量写成别的字母）；可引用前面步骤的 `var` 与 `givens`；
+   · argmin/argmax/root 要给 `range: [lo, hi]`；eval/deriv 要给 `at`（一个数、或前面算出的变量名）；
+   · 题面里的符号常数写进 `givens`（如 {"K": 500}）；
+   · **最后一步的 `var` 就是答案那个量（target）** —— 若答案是「把 q* 代回」，
+     最后一步就该是 `eval`（var=P），不许停在 q*。
+   ⚠️ **例题只要要算出一个数**（求极值 / 代入求值 / 求根），`program` 就是**必填** ——
+     不给 program 的数值例题等于没验过，会被撤（宁缺）。给不出 program 就别做成数值例题
+     （改成概念例，或按片段写）。纯定性例题（没有数要算）留空即可。
+④ `steps` / `answer`（**讲解**，最后写）：照程序算出来的值，从头讲到尾。
+   ⚠️ 讲解/步骤/答案里的**每个数字**都要等于程序算出的某个值、或题面给定
+     （机器会逐一复核；对不上就返修，返不回来整块撤）—— 不许自己心算一个没算过的数。
+   片段题（verdict=fragment）不许硬还原：按 §三 写「片段 + 一个 ✏️ 自补例」。
+
+## 二之三、练习怎么给（⭐ F11 §4：**复用**，不是另造）
+- `faded`（补全题）= **本节例题原样**，把**卡点那一步**挖空（数一个都不许换）——
+  题目、给定、答案都是同一套；只是把最关键的一步留成空让读者填。
+  （渲染时：HTML 挖空处点开才见答案；md 折叠。）没有例题就不给补全题。
+- `variants`（变式）= 在例题基础上**换数字**的新题（标 ✏️，数字可以有程序/自己算，答案必须自洽）。
+- `qa`（自测）三档要**分工**：
+  **基础** = 一个**辨析**（题里放一个经典混淆项，如"产量 vs 价格"、"边际 vs 平均"）；
+  **中等** = **只给起步**（"第一步该列哪个式子/用哪个模型"，不给最终数）；
+  **挑战** = **定性参数变动**（"若 X 变大，Y 会怎样、为什么"）。
+  ⚠️ 自测里只要出现**数值答案**，就和例题同等待遇：给 `program` 让机器算（不许心算）。
+- **没有计算的节**（概念 / 历史 / 课务）：**不给**例题 / 变式 / 补全题；
+  合适的对照表 `compare` / 步骤图 `flow` 可放，再加 **2 道概念自测**就够。
 
 ## 三、数学与例题的硬规矩（2026-10-17 验收抓到过反例，逐条遵守）
 - **公式一律 LaTeX**：行内 `$…$`、独立 `$$…$$`。多项式/导数/分式都必须写，例如
-  `$q^{3}-12q^{2}+60q$`、`$AC'(q)=2q-12$`。**不许**写 `q^3-3q^2+12q` 这种纯文本。
+  `$q^{3}-12q^{2}+60q$`、`$AC'(q)=2q-12$`、`$v(t)=20-5t$`。**不许**写 `q^3-3q^2+12q` 这种纯文本；
+  **也不许用反引号包公式** —— 反引号 `` `…` `` 在页面上是**代码**样式，只留给真代码。
 - **例题的题面只能来自两个地方**：🎙 教授课上**完整写出来**的式子，或 📖 课件/试卷原文
   （`example.title` 写明「📖 文件名 + 题号」或「🎙 HH:MM」）。
   ⚠️ 教授课上一道一道过的**试卷题**（如 "this was last year, question one"）两个来源都要标：
   `example.title` 写「📖 2025-12 期末卷 Exercise 5（🎙 13:29）」。只标 🎙 会让读者以为
   函数是转录里听来的（上课常常只念了片段）—— 判据会把这种例子挂进「未核对」。
   ⚠️ 题面里出现的**每个参数**都要能从出处推出来；答案里的数字都要能由题面算出。
-  **严禁**为了把例题写"完整"而自己设参数、编一个函数、或在题面里写「假设」。
+  **严禁**把自编数字说成课上的（"课上已知…"）—— 自补就写 ✏️（见 §二）；
+  不许在题面里写「假设」来圆场。
   课上只给了片段（如「the average cost at 2.89」「60 times this plus 500 divided by
-  this point」）→ 就**只写片段**，并明确说「原题不在本课材料里 / 只听到片段」，
-  在 `checks` 里标 `unchecked`。**不要反推函数。**
+  this point」）→ 按 §二：能**完整复现**（一个函数对得上每个片段数字、AC'=0 到 P=AC(q*)
+  都能验）就标 🎙+✏️「按口述还原」；复现不了就把片段标 🎙（「函数没录全」）另配 ✏️ 自补例。
+  **不许把片段数字当另一个量用**（2.89 是 q*，不许写成 P≈2.89）；没有函数的例子
+  **不许给算出来的答案**（机械核核不了它，直接标 `unchecked` 也救不了 —— 宁缺毋滥）。
 - 凡「在 q*=… 处取最小/最大」「代入得 v」的结论：写出是**哪个函数**、并把导数检验
   写出来（`AC'=0` 且 `AC''>0`）。没有函数就不许下极值结论。
-- **停产价格（shutting down price）的口径**：本课官方材料（📖 2025-12 期末卷 Exercise 7
-  官方解答）按「**平均成本 AC 的最低点**」定义（原话 "the minimum of the average cost…
-  the lowest acceptable price"）。标准教科书口径是**平均可变成本 AVC 的最低点**，而 AC
-  最低点叫**盈亏平衡价（break-even price）**。写到这一节时：按本课 📖 口径讲，并**加一句**
-  与标准口径的对照（标 📚）。
+__CALIBER__
 
 ## 三之三、正文纪律（作者 2026-10-17 验收点名，逐字遵守）
 - **不许第一人称、不许写猜测过程**。正文只写结论；「我可能听错了」「或者我漏掉了」
@@ -133,11 +271,25 @@ REVIEW_SYS = """你是课堂笔记写作者。给一名靠中文听英文课的�
  "lecture_points": [{"ts": "HH:MM", "point": "教授讲的知识点（中文一句）"}],
  "sections": [
    {"heading": "小标题（中文；有术语就写「中文（English term）」）",
+    "q": "本节回答的问题（≤30 字，问句）",
+    "cues": ["复习线索问题 1", "（至多 3 条，≤25 字/条）"],
     "ts": "本节起点时间戳",
     "prereq_link": "用到上一节的…（可空）",
     "prose": ["第一段", "第二段"],
     "prereq": "前置概念补课（可空）",
+    "conclusion": "题型一句话：看到什么题、第一步做什么（≤40 字，可空）",
+    "algebra": "代数主线：只列式子与结果（≤80 字，可空）",
+    "intuition": "一句人话直觉（≤40 字，可空）",
     "example": {"title": "例题名（标出处，如 📖 Exercise 5）", "prompt": "题面",
+                "source_check": {"quote": "出处里逐字的原话/式子", "anchor_ts": "HH:MM",
+                                 "verdict": "complete|fragment|none"},
+                "plan": {"knowns": ["已知…"], "target": "要求的量（含义+单位）",
+                         "steps": ["打算怎么算（纯文字）"]},
+                "givens": {"K": 500},
+                "program": [{"var": "q_star", "op": "argmin", "expr": "60*q + 500/q",
+                             "x": "q", "range": [1, 10]},
+                            {"var": "P", "op": "eval", "expr": "60*q + 500/q",
+                             "x": "q", "at": "q_star"}],
                 "steps": [{"text": "这一步做什么", "why": "为什么这一步成立"}],
                 "answer": "结论"},
     "variants": [{"q": "变式题", "steps": ["…"], "a": "答案"}],
@@ -145,8 +297,12 @@ REVIEW_SYS = """你是课堂笔记写作者。给一名靠中文听英文课的�
     "pitfalls": ["…"],
     "terms": [{"en": "English term", "zh": "中文"}],
     "sources": ["🎙 HH:MM", "📖 文件名"],
-    "plot": {"kind": "cost_curves", "title": "图名", "params": {"a": 1}}}]},
- "qa": [{"q": "自测题（中文题干，术语用英文）", "a": "答案（含步骤）", "kind": "concept|calc|trap"}],
+    "plot": {"kind": "cost_curves", "title": "图名", "params": {"a": 1}},
+    "compare": {"title": "对照表名（标出处）", "cols": ["", "概念 A", "概念 B"],
+                "rows": [{"label": "行头", "cells": ["…", "…"]}], "src": "lecture|self"},
+    "flow": {"title": "流程名（标出处）", "steps": [{"label": "≤16 字", "detail": "≤50 字（可省）"}],
+             "loop_to": null, "src": "lecture|self"}}]},
+ "qa": [{"q": "自测题（中文题干，术语用英文）", "a": "答案（含步骤）", "tier": "基础|中等|挑战", "kind": "concept|calc|trap"}],
  "corrections": [{"where": "…", "spoken": "…", "fixed": "…", "basis": "…"}],
  "checks": [{"claim": "…", "how": "…", "status": "ok"}],
  "terms": [{"en": "本课出现的学科术语", "zh": "中文"}],
@@ -178,7 +334,8 @@ ALIGN_SYS = """你在给一节英文课的**复盘笔记**做覆盖度核对与�
  "materials_used": ["笔记里引用到的课件文件名"],
  "missing": [{"ts": "HH:MM", "point": "没被覆盖的知识点", "why": "为什么可能漏了（一句）"}],
  "notes": "一句总评：这份笔记的覆盖度如何、最该补什么（≤60 字）"}
-⚠️ 只做对照，不要发明输入里没有的知识点。只输出 JSON。"""
+⚠️ 只做对照，不要发明输入里没有的知识点。**输出要短**：每条的 `point` ≤20 字、
+   `missing` 最多 10 条（长了会被截断，整份回执就废了）。只输出 JSON。"""
 
 VERIFY_SYS = """你在给课堂笔记做**数字与公式的第三道核**（前两道是写作时的代数自洽与课件对照）。
 输入是一批断言（公式/代入/方程的解），以及可能附上的课件片段。
@@ -202,6 +359,37 @@ VERIFY_SYS = """你在给课堂笔记做**数字与公式的第三道核**（前
    - "unchecked"：信息不足、算不出来，或出自模型自己出的题（**不许猜**，标它）。
 输出严格 JSON：
 {"items": [{"i": 序号, "status": "ok|mismatch|unchecked", "recomputed": "你算出来的值", "note": "依据或为什么不一致（≤60 字）"}]}
+只输出 JSON。"""
+
+
+#: 「五分钟串讲」（版式 A，作者 2026-10-18 拍板 + 当日追认）：合并后的一次小调用。
+#: ⚠️ 输入只有合并后的小节（标题 + 讲解 + 关键结果），**没有转录** —— 转录一节课 3–5 万字，
+#:    而串讲要的是"整节课的线"，不是逐句材料；输入大了这笔账（时长/费用）会失控。
+#: ⚠️ `max_tokens=3500`（作者 2026-10-18 追认）：约 2500 字 + JSON 外壳的上限；
+#:    截断（`finish_reason=="length"` 或 JSON 解析失败）按**失败**处理 —— 走速览兜底，
+#:    不许把半截叙述印上去（半截的"串讲"比没有更坏）。
+OVERVIEW_MAX_TOKENS = 3500
+OVERVIEW_SYS = """你在给一节课的**课后笔记**写开头的「速览」——读者的处境是：**上过这节课**，
+只是没完全跟上；现在扫一眼开头，把课上的线重新捡起来。**短**是第一要求。
+
+输入：这节课每个单元（概念单元）的编号、标题、它回答的问题、结论（按课堂顺序。
+
+## 怎么写
+- **3–6 句连贯的话**（1–2 段，不要 bullet、不要小标题）。
+- 说清：这节课讲了哪几件事、它们怎么连起来（一件事 → 下一件事的关系）。
+- **不要推导、不要公式、不要举例子**；数字**最多出现一个**（全课最重要的那个）。
+- 语气像同学问你"今天讲了啥"：自然、干脆、看得懂。
+- 字数**不超过**用户消息里给的上限（上限，不是目标 —— 宁短勿长）。
+
+## 硬规矩
+⚠️ 只根据输入写：不许引入输入里没有的知识点、数字、人名；不许写"输入/材料"。
+⚠️ 不许写猜测、感想、与内容无关的话。
+⚠️ 术语照输入里的写法（中文（English））。
+
+## 输出（严格 JSON）
+{"summary": ["第 1 段（3–6 句）", "（需要的话）第 2 段"],
+ "self_check": "一行自检：上过课但没跟上的同学读完后能不能想起这节课的线？yes/no + 哪里最弱（≤60 字）"}
+
 只输出 JSON。"""
 
 
@@ -256,6 +444,348 @@ def _terms(v) -> list:
     return out
 
 
+#: 例题从口述还原出来的标记（标题里有它 → 合标 `🎙+✏️`，F9b 作者点名）。
+_RECON_LABEL = "🎙+✏️"
+_RECON_WORD = "按口述还原"
+#: 自补默认标（变式/挖空没标 emoji → `✏️`；F9b 作者点名：代码里定，不靠模型写）。
+_SELF_MARK = "✏️"
+_LABELED = re.compile(r"^\s*(?:🎙|✏️|📖)")
+
+
+def with_recon_label(title: str) -> str:
+    """标题含「按口述还原」→ 合标 `🎙+✏️`（幂等：已合标的原样返回）。"""
+    t = _one_line(title) if isinstance(title, str) else ""
+    if not t or _RECON_WORD not in t:
+        return t
+    for pre in ("🎙+✏️", "🎙", "✏️"):
+        if t.startswith(pre):
+            t = t[len(pre):].lstrip()
+            break
+    return f"{_RECON_LABEL} {t}"
+
+
+def _self_label(q: str) -> str:
+    """无标签的变式/挖空 → 补 `✏️`（有 🎙/✏️/📖 的都不碰）。"""
+    if not q or _LABELED.match(q):
+        return q
+    return f"{_SELF_MARK} {q}"
+
+
+#: 对比表 / 步骤图的上限（作者 F10；**代码里强制**，不只靠提示词）。
+CMP_COLS_MAX = 4            # 对照列（不含第一列行头）
+CMP_ROWS_MAX = 7
+CMP_CELL_MAX = 40
+FLOW_STEPS_MAX = 7
+FLOW_LABEL_MAX = 16
+FLOW_DETAIL_MAX = 50
+CMP_PER_LECTURE = 3
+FLOW_PER_LECTURE = 3
+
+
+#: 标签 emoji（标题里只许出现**一个** —— F11 cosmetic：`🎙 …（🎙 10:23）` 是双标签）。
+_LABEL_EMOJI = re.compile(r"[🎙✏️📖]")
+_EMPTY_PAREN = re.compile(r"[（(]\s*[)）]")
+
+
+def _fold_labels(t: str) -> str:
+    """标题里只留**一个**标签：剥首标签后，把正文里再出现的 🎙/✏️/📖 去掉（含括号里的）。**纯函数。**"""
+    s = _one_line(t)
+    if not s:
+        return s
+    first = ""
+    for pre in ("🎙+✏️", "🎙", "✏️", "📖"):
+        if s.startswith(pre):
+            first = pre
+            s = s[len(pre):].lstrip()
+            break
+    s = _LABEL_EMOJI.sub("", s)
+    s = _EMPTY_PAREN.sub("", s)
+    s = re.sub(r"([（(])\s+", r"\1", s)
+    s = re.sub(r"\s+([)）])", r"\1", s)
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    if first == "🎙+✏️":
+        return f"🎙+✏️ {s}".strip()
+    return f"{first} {s}".strip() if first else s
+
+
+def _src_label(title: str, src) -> str:
+    """compare/flow 的标题按 `src` 挂 🎙/✏️（F9 标签纪律；缺省保守 `✏️`）。幂等，且**只一个标签**。"""
+    t = _one_line(title)
+    if not t:
+        return t
+    mark = ("🎙" if str(src or "").strip().lower() in ("lecture", "🎙", "课上")
+            else _SELF_MARK)
+    for pre in ("🎙+✏️", "🎙", "✏️", "📖"):
+        if t.startswith(pre):
+            t = t[len(pre):].lstrip()
+            break
+    t = _LABEL_EMOJI.sub("", t)                 # ⭐ F11 cosmetic：正文里再出现的标签去掉
+    t = _EMPTY_PAREN.sub("", t)
+    t = re.sub(r"([（(])\s+", r"\1", t)
+    t = re.sub(r"\s+([)）])", r"\1", t)
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    return f"{mark} {t}"
+
+
+def _cmp_cut(x, n: int) -> str:
+    """格子文本截到 `n` 字；若截断了未闭合的 `$…$`，退到最后一个 `$` 之前（别露半截公式）。"""
+    t = _one_line(x)
+    if len(t) <= n:
+        return t
+    t = t[:n]
+    if t.count("$") % 2:
+        t = t[:t.rfind("$")].rstrip()
+    return t
+
+
+def _clean_compare(cmp) -> dict | None:
+    """`compare` 规格校验 + 裁剪（F10）。**纯函数**；不合规 → `None`（调用方丢掉）。"""
+    if not isinstance(cmp, dict):
+        return None
+    title = _one_line(cmp.get("title"))
+    cols_in = cmp.get("cols")
+    rows_in = cmp.get("rows")
+    if not title or not isinstance(rows_in, list) or not isinstance(cols_in, list):
+        return None
+    if len(cols_in) < 3 or len(cols_in) > CMP_COLS_MAX + 1:  # 行头列 + 2–4 对照列
+        return None
+    cols = [_cmp_cut(c, CMP_CELL_MAX) for c in cols_in[:CMP_COLS_MAX + 1]]
+    if any(not c for c in cols[1:]):                       # 对照列必须有名字
+        return None
+    ncol = len(cols) - 1
+    rows: list = []
+    for r in rows_in:
+        if not isinstance(r, dict):
+            continue
+        label = _cmp_cut(r.get("label"), CMP_CELL_MAX)
+        cells = [_cmp_cut(x, CMP_CELL_MAX) for x in (r.get("cells") or [])]
+        if not label or len(cells) != ncol:
+            continue                                       # 对齐不了的整行不要
+        rows.append({"label": label, "cells": cells})
+        if len(rows) >= CMP_ROWS_MAX:
+            break
+    if len(rows) < 2:
+        return None
+    return {"title": _src_label(title, cmp.get("src")), "cols": cols, "rows": rows}
+
+
+def _clean_flow(fl) -> dict | None:
+    """`flow` 规格校验 + 裁剪（F10）。**纯函数**；不合规 → `None`（调用方丢掉）。"""
+    if not isinstance(fl, dict):
+        return None
+    title = _one_line(fl.get("title"))
+    steps_in = fl.get("steps")
+    if not title or not isinstance(steps_in, list):
+        return None
+    steps: list = []
+    for st in steps_in:
+        if isinstance(st, dict):
+            label = _one_line(st.get("label"))
+            detail = _one_line(st.get("detail"))
+        else:
+            label, detail = _one_line(st), ""
+        if not label:
+            continue
+        steps.append({"label": label[:FLOW_LABEL_MAX],
+                      "detail": detail[:FLOW_DETAIL_MAX]})
+        if len(steps) >= FLOW_STEPS_MAX:
+            break
+    if len(steps) < 3:
+        return None
+    loop = fl.get("loop_to")
+    try:
+        loop = int(loop)
+    except (TypeError, ValueError):
+        loop = None
+    if loop is not None and not (1 <= loop <= len(steps) - 1):
+        loop = None                                        # 回到最后一步 = 没循环
+    return {"title": _src_label(title, fl.get("src")), "steps": steps,
+            "loop_to": loop}
+
+
+#: ⭐ F11 ③（作者裁定）：同节里 flow 与例题步骤重合 ≥3 条 → 撤 flow
+#: （"不要拿它复述某一道具体题的步骤"）；组件标题与**前面**某件同名 → 撤后来那件。
+DUP_STEP_MIN = 3
+
+
+def _comp_title_key(t) -> str:
+    """组件标题的比对键：去掉标签 emoji 与空白/标点，小写。**纯函数。**"""
+    return re.sub(r"[🎙✏️📖📚\s:：\-—–（()）]", "", str(t or "")).lower()
+
+
+def _step_key(s) -> str:
+    """一步的比对键：去空白与常见标点，小写。**纯函数。**"""
+    return re.sub(r"[\s，。、；：,.;:（）()→=＝·/]", "", str(s or "")).lower()
+
+
+def _common_run_len(a: str, b: str) -> int:
+    """两串的**最长公共子串**长度（步短语很短，直接扫）。**纯函数。**"""
+    if not a or not b:
+        return 0
+    best = 0
+    for i in range(len(a)):
+        for j in range(len(b)):
+            k = 0
+            while i + k < len(a) and j + k < len(b) and a[i + k] == b[j + k]:
+                k += 1
+            best = max(best, k)
+    return best
+
+
+def _steps_overlap(a: str, b: str) -> bool:
+    """一步与另一步是否讲的是同一件事（包含关系，或有 ≥4 字公共串）。**纯函数。**"""
+    x, y = _step_key(a), _step_key(b)
+    if not x or not y:
+        return False
+    if x in y or y in x:
+        return True
+    return _common_run_len(x, y) >= 4
+
+
+def dedupe_components(review: dict) -> tuple:
+    """⭐ F11 ③：跨件重复闸（作者裁定）。返回（review, 丢掉清单, 提醒）。
+
+    ① 同节里 `flow` 的步骤与本节例题 `example` 的步骤重合 ≥3 条 → 撤 flow；
+    ② `compare`/`flow` 的标题与**前面**某件同名（归一化后）→ 撤后来那件。
+    两处都进守卫台账（`dropped`）。
+    """
+    out = copy.deepcopy(review)
+    dropped: list = []
+    seen: set = set()
+    for s in (out.get("sections") or []):
+        if not isinstance(s, dict):
+            continue
+        for k in ("compare", "flow"):
+            comp = s.get(k)
+            if not isinstance(comp, dict):
+                continue
+            tk = _comp_title_key(comp.get("title"))
+            if tk and tk in seen:
+                dropped.append(f"{k}「{_one_line(comp.get('title'))[:20]}」（同标题）")
+                s.pop(k, None)
+            elif tk:
+                seen.add(tk)
+        fl, ex = s.get("flow"), s.get("example")
+        if isinstance(fl, dict) and isinstance(ex, dict):
+            esteps = [f"{st.get('text', '')} {st.get('why', '')}"
+                      for st in (ex.get("steps") or []) if isinstance(st, dict)]
+            n = 0
+            for fst in (fl.get("steps") or []):
+                if not isinstance(fst, dict):
+                    continue
+                ftxt = f"{fst.get('label', '')} {fst.get('detail', '')}"
+                if any(_steps_overlap(ftxt, e) for e in esteps):
+                    n += 1
+            if n >= DUP_STEP_MIN:
+                dropped.append(f"flow「{_one_line(fl.get('title'))[:20]}」"
+                               f"与例题步骤重合 {n} 条")
+                s.pop("flow", None)
+    warns = ([f"组件去重：丢了 {len(dropped)} 件（" + "、".join(dropped[:4])
+              + ("…" if len(dropped) > 4 else "") + "）"] if dropped else [])
+    return out, dropped, warns
+
+
+def clamp_components(review: dict) -> tuple:
+    """全讲上限：`compare` / `flow` 各 ≤3（作者 F10）。返回（review, 丢掉清单, 提醒）。
+
+    ⚠️ 上限按**讲**算（跨节）—— 逐节的 schema 在 `_clean_section` 里已经收过一遍，
+       这里是全篇的一刀（景象：模型在每节都放一张表）。
+    """
+    out = copy.deepcopy(review)
+    dropped: list = []
+    seen = {"compare": 0, "flow": 0}
+    for s in (out.get("sections") or []):
+        if not isinstance(s, dict):
+            continue
+        for k in ("compare", "flow"):
+            if k not in s:
+                continue
+            if seen[k] >= (CMP_PER_LECTURE if k == "compare" else FLOW_PER_LECTURE):
+                t = s.get(k) if isinstance(s.get(k), dict) else {}
+                dropped.append(f"{k}「{_one_line(t.get('title'))[:24]}」")
+                s.pop(k, None)
+            else:
+                seen[k] += 1
+    warns = ([f"组件上限：丢了 {len(dropped)} 个超限的对照表/步骤图（"
+              + "、".join(dropped[:4]) + ("…" if len(dropped) > 4 else "") + "）"]
+             if dropped else [])
+    return out, dropped, warns
+
+
+# ⭐ F11 §1/§2：例题的来源核对 / 计划 / 程序 —— schema 清洗（纯函数）。
+def _clean_source_check(sc) -> dict:
+    """`source_check`：出处里**逐字**给的原话 + 时间戳 + 结论（complete/fragment/none）。"""
+    if not isinstance(sc, dict):
+        return {}
+    d: dict = {}
+    q = _one_line(sc.get("quote"))
+    if q:
+        d["quote"] = q[:120]
+    at = _one_line(sc.get("anchor_ts"))
+    if at:
+        d["anchor_ts"] = at
+    vd = _one_line(sc.get("verdict")).lower()
+    if vd in ("complete", "fragment", "none"):
+        d["verdict"] = vd
+    return d
+
+
+def _clean_plan(pl) -> dict:
+    """`plan`：已知 / 要求的量（含义+单位） / 步骤（纯文字）。"""
+    if not isinstance(pl, dict):
+        return {}
+    d: dict = {}
+    kn = _lines(pl.get("knowns"))
+    if kn:
+        d["knowns"] = kn
+    tg = _one_line(pl.get("target"))
+    if tg:
+        d["target"] = tg
+    ps = _lines(pl.get("steps"))
+    if ps:
+        d["steps"] = ps
+    return d
+
+
+def _clean_givens(v) -> dict:
+    """`givens`：题面里的符号常数 → 数值表。"""
+    out: dict = {}
+    if not isinstance(v, dict):
+        return out
+    for k, x in v.items():
+        if isinstance(x, bool):
+            continue
+        if isinstance(x, (int, float)):
+            out[str(k)] = float(x)
+        else:
+            try:
+                out[str(k)] = float(str(x).strip())
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def _clean_program(v) -> list:
+    """`program`：步骤表（只搬运字段，合法性交给 `note_math.run_program` 判 ——
+    坏程序要让**它自己的报错**浮出来（进返修），不许在这里静默丢掉。"""
+    out: list = []
+    if not isinstance(v, list):
+        return out
+    for st in v:
+        if not isinstance(st, dict):
+            continue
+        d: dict = {"var": _one_line(st.get("var")), "op": _one_line(st.get("op")),
+                   "expr": _one_line(st.get("expr")), "x": _one_line(st.get("x"))}
+        rng = st.get("range")
+        if isinstance(rng, (list, tuple)) and len(rng) == 2:
+            d["range"] = [rng[0], rng[1]]
+        if "at" in st:
+            d["at"] = st.get("at")
+        if d["var"] or d["expr"]:
+            out.append(d)
+    return out
+
+
 def _clean_section(s) -> dict:
     if not isinstance(s, dict):
         return {}
@@ -263,33 +793,63 @@ def _clean_section(s) -> dict:
     if not head:
         return {}
     r = {"heading": head, "ts": _one_line(s.get("ts")),
+         "q": _one_line(s.get("q")),
+         "cues": _lines(s.get("cues"))[:3],
+         "conclusion": _one_line(s.get("conclusion")),
+         "algebra": _one_line(s.get("algebra")),
+         "intuition": _one_line(s.get("intuition")),
          "prereq_link": _one_line(s.get("prereq_link")),
          "prose": _lines(s.get("prose")) or _lines(s.get("detail")),
          "prereq": _one_line(s.get("prereq")),
          "pitfalls": _lines(s.get("pitfalls")),
          "terms": _terms(s.get("terms")),
          "sources": _lines(s.get("sources")),
-         "variants": [], "steps": [], "example": {}, "faded": {}, "plot": {}}
+         "variants": [], "steps": [], "example": {}, "faded": {}, "plot": {},
+        "compare": {}, "flow": {}}
     ex = s.get("example")
     if isinstance(ex, dict):
         steps = _steps(ex.get("steps"))
+        expl = _one_line(ex.get("explanation"))
+        if expl and all(expl != _one_line(st.get("text")) for st in steps):
+            steps = steps + [{"text": expl, "why": ""}]     # 讲解最后写：折进 steps（会被渲染、会被核）
         if steps or _one_line(ex.get("prompt")):
             r["example"] = {"title": _one_line(ex.get("title")),
                             "prompt": _one_line(ex.get("prompt")),
                             "steps": steps,
                             "answer": _one_line(ex.get("answer"))}
+            sc = _clean_source_check(ex.get("source_check"))
+            if sc:
+                r["example"]["source_check"] = sc
+            pl = _clean_plan(ex.get("plan"))
+            if pl:
+                r["example"]["plan"] = pl
+            gv = _clean_givens(ex.get("givens"))
+            if gv:
+                r["example"]["givens"] = gv
+            pg = _clean_program(ex.get("program"))
+            if pg:
+                r["example"]["program"] = pg
+            # ⭐ F12 §2：verdict 的 "complete" 由**代码**复核（每个结论数字要在 quote 里
+            #    或由 program 算出）；证不成立 → 强制 fragment + 标题挂「课上片段」。
+            sc = note_math.enforce_source_verdict(r["example"])
+            if sc:
+                r["example"]["source_check"] = sc
+                if str(sc.get("verdict")) == "fragment" and sc.get("forced"):
+                    t = str(r["example"].get("title") or "")
+                    if "片段" not in t:
+                        r["example"]["title"] = (t + "（课上片段）") if t else "课上片段"
     for v in (s.get("variants") or []):
         if not isinstance(v, dict):
             continue
         q = _one_line(v.get("q") or v.get("question"))
         if q:
-            r["variants"].append({"q": q, "steps": _steps(v.get("steps")),
+            r["variants"].append({"q": _self_label(q), "steps": _steps(v.get("steps")),
                                   "a": _one_line(v.get("a") or v.get("answer"))})
     fd = s.get("faded")
     if isinstance(fd, dict):
         q = _one_line(fd.get("q"))
         if q:
-            r["faded"] = {"q": q, "blanks": _lines(fd.get("blanks")),
+            r["faded"] = {"q": _self_label(q), "blanks": _lines(fd.get("blanks")),
                           "a": _one_line(fd.get("a") or fd.get("answer"))}
     pl = s.get("plot")
     if isinstance(pl, dict) and _one_line(pl.get("kind")) in PLOT_KINDS:
@@ -297,6 +857,20 @@ def _clean_section(s) -> dict:
         r["plot"] = {"kind": _one_line(pl.get("kind")),
                      "title": _one_line(pl.get("title")),
                      "params": params if isinstance(params, dict) else {}}
+    # ⭐ F10：对比表 / 步骤图 —— 模型只填数据；schema 不合规就丢、超限在代码里裁。
+    cmp = _clean_compare(s.get("compare"))
+    if cmp:
+        r["compare"] = cmp
+    fl = _clean_flow(s.get("flow"))
+    if fl:
+        r["flow"] = fl
+    # ⭐ F9b（作者点名，代码里定不靠提示词）：
+    #   · 「按口述还原」的例题 → 合标 🎙+✏️；· 空壳 example/faded/plot/compare/flow 直接摘掉。
+    if r["example"].get("title"):
+        r["example"]["title"] = _fold_labels(with_recon_label(r["example"]["title"]))
+    for k in ("example", "faded", "plot", "compare", "flow"):
+        if not r.get(k):
+            r.pop(k, None)
     return r
 
 
@@ -327,7 +901,9 @@ def _clean(obj) -> dict:
             continue
         q, a = _one_line(x.get("q")), _one_line(x.get("a"))
         if q and a:
-            qa.append({"q": q, "a": a, "kind": _one_line(x.get("kind"))})
+            # ⭐ F7②：档位字段要留着（全讲按 基础/中等/挑战 各取 ≤2 题）。
+            qa.append({"q": q, "a": a, "kind": _one_line(x.get("kind")),
+                       "tier": _one_line(x.get("tier"))})
     if qa:
         r["qa"] = qa
     corr = []
@@ -415,6 +991,265 @@ _DEDUP_KEY = {
 }
 
 
+# ---------------------------------------------------------------- 速览（原五分钟串讲）
+# ---------------------------------------------------------------- 速览（原五分钟串讲）
+#: 速览的长度上限比例：正文上限的 10%（作者 2026-10-18 第七轮）。
+FASTVIEW_SHARE = 0.10
+
+#: 单个概念单元的分钟数上限（防模型乱标/重复标 ts：2026-10-18 实测 BUSI3243 有一节
+#: 标 `09:20` 的内容其实在 10:0x，单节"时长"被算成 60 分钟 → 字数上限过宽 → 少压了字数；
+#: ECS170 同理 53/36/23 分钟）。封顶只是收紧上限，方向永远是"宁少勿多"。
+UNIT_MAX_MINUTES = 10.0
+
+#: 速览上限的绝对帽（作者要求"3–6 句"≈ 200–400 字）。不设帽时被乱 ts 撑到 3206 字 →
+#: 模型照着写 → 撞 `OVERVIEW_MAX_TOKENS=3500` 截断 → 「速览没生成」（BUSI 两次实录）。
+FASTVIEW_MAX_CHARS = 600
+
+
+def speedout_max_chars(minutes: float) -> int:
+    """速览的字数上限：正文上限的 10%，且**封顶 600 字**（`FASTVIEW_MAX_CHARS`）。"""
+    return max(120, min(FASTVIEW_MAX_CHARS,
+                        int(CEILING_PER_MIN * float(minutes or 45.0) * FASTVIEW_SHARE)))
+
+
+def overview(review_data: dict, *, chat, chat_meta=None,
+             max_tokens: int = OVERVIEW_MAX_TOKENS_THINKING,
+             max_chars: int = 220) -> dict:
+    """概念单元 → 开头的「速览」（**一次小调用**，输入只有标题/问题/结论）。
+
+    ⚠️ 2026-10-18 第七轮（作者）：旧的「五分钟串讲」（6–10 段、重新讲一遍）**作废** ——
+       读者是**上过课**的人，扫一眼要的是"把线捡回来"：3–6 句、≤ 正文上限的 10%。
+       输入也瘦身成 **标题 + 本节问题 + 结论**（不再喂讲解全文）—— BUSI3243 那种 44 节的课
+       旧玩法输入太大直接截断（实测「串讲没生成」）。
+    返回 `{"summary", "self_check"}`；失败/截断 → `{}`（fail-soft）。
+    ⚠️ `chat_meta(system, user, max_tokens) -> (obj, finish_reason)`：截断 = 失败
+       （半截的叙述比没有更坏，作者 2026-10-18 追认）。
+    """
+    secs = [s for s in (review_data.get("sections") or []) if isinstance(s, dict)]
+    if not secs:
+        return {}
+    lines: list = []
+    for i, s in enumerate(secs, 1):
+        bits = [f"第 {i} 单元「{_one_line(s.get('heading'))}」"]
+        q = _one_line(s.get("q"))
+        c = _one_line(s.get("conclusion"))
+        if q:
+            bits.append(f"它回答：{q}")
+        if c:
+            bits.append(f"结论：{c}")
+        lines.append("\n".join(bits))
+    user = ("这节课的单元（按课堂顺序）：\n\n" + "\n\n".join(lines)
+            + f"\n\n现在写「速览」：3–6 句连贯的话说清这节课讲了哪几件事、怎么连起来；"
+              f"**总字数不超过 {int(max_chars)} 字**（上限，宁短勿长）；不要公式、不要例子、"
+              "数字最多一个；严格输出 JSON（summary / self_check）。")
+    def _one() -> tuple:
+        """一次尝试 → `(obj, finish, 返回长度)`；炸了也当空（fail-soft 不变）。"""
+        try:
+            if chat_meta is not None:
+                res = chat_meta(OVERVIEW_SYS, user, max_tokens)
+                obj0, finish0 = res[0], str(res[1] or "")
+                n0 = res[2] if len(res) > 2 else None
+            else:
+                obj0 = chat(OVERVIEW_SYS, user, max_tokens)
+                finish0, n0 = "", None
+        except Exception:                                      # noqa: BLE001
+            return {}, "", None
+        return (obj0 if isinstance(obj0, dict) else {}), finish0, n0
+
+    def _pick(res0: tuple) -> dict:
+        obj0, finish0, _n0 = res0
+        if str(finish0).lower() == "length":
+            return {}          # 截断 = 失败（宁可没有，不许印半截）
+        out0: dict = {}
+        paras0 = _lines((obj0 or {}).get("summary") or (obj0 or {}).get("paragraphs")
+                        or (obj0 or {}).get("overview_long"))
+        if paras0:
+            out0["summary"] = paras0
+        sc0 = _one_line((obj0 or {}).get("self_check"))
+        if sc0:
+            out0["self_check"] = sc0
+        return out0
+
+    res = _one()
+    got = _pick(res)
+    if not got.get("summary"):
+        # ⭐ F9（作者点名：ECS 丢速览要诊断 + 重试）：空/截断先**重试一次**，
+        #    诊断数字（finish_reason / 返回长度 / max_tokens）打进日志；两次都不行才认输。
+        _obj0, _fin0, _n0 = res
+        print(f"   ⚠ 速览第一次为空（finish={_fin0 or '?'} · "
+              f"len={_n0 if _n0 is not None else '?'} · max_tokens={max_tokens}），重试一次",
+              flush=True)
+        got = _pick(_one())
+    if not got.get("summary"):
+        print("   ⚠ 速览重试后仍为空（诊断见上一行）", flush=True)
+    return got
+
+# ---------------------------------------------------------------- 例题返修（F8-b/c）
+REPAIR_MAX_TOKENS = 3000
+REPAIR_SYS = """你在**返修**一节课堂笔记里"算错了/立不住的例题块"。机械核发现了这些问题，必须修对，
+或者按规矩撤掉/降级 —— 绝不许把错数字留在题里。
+
+规矩：
+1) **每个例子带标签**：🎙 课上（逐字来自转录/课件）/ ✏️ 自补（自己出的）。
+   转录只给了片段 → 若**有一个函数能复现每一个片段数字**（q* 与 P 都能验：AC'=0 解出 q*、
+   P=AC(q*)）→ 可以还原，标签写 🎙+✏️「按口述还原」；对不上就**只留片段**：🎙 写
+   「课上算出 q≈2.89，函数没录全」，**另配一个 ✏️ 自补例**（干净数字、从头算到尾）。
+2) ⛔ **片段数字不许换角色**：q 就是 q、P 就是 P —— 2.89 是产量（q*），
+   P 必须拿 AC(q*) 现算（如 AC=60q+500/q：q*≈2.89，P≈346.4，不是 P≈2.89）。
+   没有函数的例子**不许给算出来的答案**。
+3) 变式/补全题：数字可以自定（标 ✏️），但答案必须自洽；**极值不能靠 q→∞ 之类的极限论证**
+   （无穷远处的趋向值不是最小值）——要么真有最值点（求导=0 + 二阶条件），要么明说
+   该函数没有最低点。
+4) 讲解（prose）里提到这些数字的句子**一起改**，别让正文和题块打架；
+   对照表/步骤图（compare/flow）里的数字错了就改格子/步骤，改不干净就整个**撤掉**。
+5) 例题现在带 `source_check` / `plan` / `program`（F11 §2：**代码算**）：**错在数就改 `program`**
+   （改对步骤、区间/代入点），再照它算出来的值重写 `steps`/`answer`；`source_check`/`plan` 一并带回。
+6) 不写"我算错了/我改正了"这类话；直接给改好的内容。
+
+输入：这一节现在的文本（JSON）+ 机械核发现的错行。
+严格输出 JSON：{"prose": ["…"], "example": {…}|null, "variants": [...], "faded": {…}|null,
+ "compare": {…}|null, "flow": {…}|null,
+ "note": "一行说明改了什么"}"""
+
+
+def _transcript_window(entries: list | None, sec: dict, *, limit: int = 2800) -> str:
+    """这一节时间窗里转录真出现过的原话（返修时对照"哪些数字真是课上说的"）。"""
+    if not entries:
+        return ""
+    ts = str(sec.get("ts") or "")
+    parts = ts.split("–")
+    t0 = _ts_seconds(parts[0])
+    t1 = _ts_seconds(parts[1]) if len(parts) > 1 else None
+    if t0 is None:
+        return ""
+    if t1 is None or t1 <= t0:
+        t1 = t0 + 15 * 60
+    lines: list = []
+    for e in entries:
+        t = _ts_seconds(e.get("ts"))
+        if t is None or not (t0 <= t < t1):
+            continue
+        en = _one_line(e.get("en") or e.get("asr"))
+        if en:
+            lines.append(f"[{e.get('ts')}] {en}")
+        if sum(len(x) for x in lines) > limit:
+            break
+    if not lines:
+        return ""
+    return ("\n\n这一节转录里真出现过的原话（数字对照用；没有的数字就不是课上说的）：\n"
+            + "\n".join(lines)[:limit])
+
+
+def repair_exercises(review: dict, *, chat, entries: list | None = None,
+                     flags: list | None = None,
+                     max_tokens: int = REPAIR_MAX_TOKENS_THINKING) -> tuple:
+    """题块被机械核判错 → **每节一次**返修；复检仍错 → 撤掉题块（F8-b/c，作者点名）。
+
+    触发（确定性）：对每一节单跑 `note_math.check_review`，`mismatch` 行且
+    `unit_of_claim` 落在 `MODEL_AUTHORED`（example / variants / faded）；再加上
+    `flags`（`verify_numbers` 在降级**之前**收下的题块 mismatch 行 —— 机械核碰到
+    LaTeX 函数会瞎，F7 实测 `AC(2.89)≈2.89` 只有模型核抓到）。
+    返修后复检：题块仍有 mismatch → `example` / `variants` / `faded` 整组撤（宁缺）。
+    台账（`checks`）同步换掉被返修小节的旧行、补进复检行。
+    """
+    out = copy.deepcopy(review)
+    secs = out.get("sections") or []
+    if not secs:
+        return out, [], []
+    snaps: list = []
+    calls = n_drop = 0
+    for s in secs:
+        if not isinstance(s, dict):
+            continue
+        rows = note_math.check_review({"sections": [s]})
+        bad = [r for r in rows if r.get("status") == "mismatch"
+               and note_math.unit_of_claim(s, str(r.get("claim") or ""))
+               in note_math.MODEL_AUTHORED]
+        seen_bad = {note_math._norm_claim(str(r.get("claim") or "")) for r in bad}
+        for r in (flags or []):
+            claim = str(r.get("claim") or "")
+            key = note_math._norm_claim(claim)
+            if not key or key in seen_bad:
+                continue
+            if note_math.unit_of_claim(s, claim) in note_math.MODEL_AUTHORED:
+                bad.append(dict(r))
+                seen_bad.add(key)
+        if not bad:
+            continue
+        snap = copy.deepcopy(s)
+        payload = {k: s.get(k) for k in ("heading", "q", "prose", "example",
+                                         "variants", "faded", "compare",
+                                         "flow") if s.get(k)}
+        user = ("机械核在这节的**题**上发现这些算错了：\n"
+                + "\n".join(f"- {str(r.get('claim') or '')[:140]} → 机器算出来："
+                            f"{r.get('recomputed') or '?'}" for r in bad[:6])
+                + "\n\n这一节现在的文本（JSON）：\n"
+                + json.dumps(payload, ensure_ascii=False)[:4000]
+                + _transcript_window(entries, s)
+                + "\n\n按规矩返修这一节；严格输出 JSON"
+                  "（prose / example / variants / faded / compare / flow / note）。")
+        try:
+            got = chat(REPAIR_SYS, user, max_tokens)
+        except Exception:                                      # noqa: BLE001
+            continue
+        calls += 1
+        if isinstance(got, dict):
+            lines_ = _lines(got.get("prose"))
+            if lines_:
+                s["prose"] = lines_
+            for key in ("example", "faded"):
+                if key in got:
+                    val = got[key]
+                    if isinstance(val, dict) and any(val.get(k) for k in
+                                                     ("prompt", "steps", "q", "a", "blanks")):
+                        s[key] = val
+                    else:                                      # null/空 → 撤（宁缺）
+                        s.pop(key, None)
+            if "variants" in got:
+                vs = [v for v in (got.get("variants") or []) if isinstance(v, dict)]
+                if vs:
+                    s["variants"] = vs
+                else:
+                    s.pop("variants", None)
+            for key, fn in (("compare", _clean_compare), ("flow", _clean_flow)):
+                if key in got:
+                    val = fn(got.get(key))
+                    if val:
+                        s[key] = val
+                    else:                                      # 不合规/空 → 撤（宁缺）
+                        s.pop(key, None)
+        # 复检：题块还有 mismatch → 整组撤（文件里只留"讲课时引的原话"那条 ⚠ 路）
+        again = [r for r in note_math.check_review({"sections": [s]})
+                 if r.get("status") == "mismatch"
+                 and note_math.unit_of_claim(s, str(r.get("claim") or ""))
+                 in note_math.MODEL_AUTHORED]
+        if again:
+            for key in ("example", "variants", "faded", "compare", "flow"):
+                s.pop(key, None)
+            n_drop += 1
+        snaps.append((snap, s))
+    if snaps:
+        keep = []
+        for c in out.get("checks") or []:
+            if not isinstance(c, dict):
+                continue
+            claim = str(c.get("claim") or "")
+            if any(note_math.unit_of_claim(snap, claim) for snap, _ in snaps):
+                continue                                           # 旧文本的行，过期
+            keep.append(c)
+        fresh: list = []
+        for _, s in snaps:
+            fresh += note_math.check_review({"sections": [s]})
+        out["checks"] = note_math.merge_checks(keep, cap_model_rows(fresh, out))
+    warns: list = []
+    if calls:
+        warns.append(f"例题返修：{calls} 节各做了 1 次返修调用")
+    if n_drop:
+        warns.append(f"例题返修：{n_drop} 节的题块复检仍算错 → 已撤（宁缺）")
+    # ⭐ F9c：守卫计数走第二返回值（写作层拿去拼 `guards: repaired/dropped/flagged` 行）。
+    return out, [{"repaired": calls, "dropped": n_drop}], warns
+
+
 def transcript_lines(entries: list) -> list:
     return [f"[{e['ts']}] {e['en'] or e['asr']}"
             for e in entries if (e.get("en") or e.get("asr"))]
@@ -422,6 +1257,244 @@ def transcript_lines(entries: list) -> list:
 
 def chunk_lines(lines: list, size: int = REVIEW_CHUNK) -> list:
     return [lines[i:i + size] for i in range(0, len(lines), size)]
+
+
+# ---------------------------------------------------------------- 概念单元（2026-10-18 第七轮）
+#: 正文（全部可见文字）的字数上限（CJK 字符/分钟）。作者校准：旧产出 ≈335 字/分
+#: （ECON10790 8660 字 / 25.7 分），新上限 = 下调 25–30% → **240 字/分**。
+CEILING_PER_MIN = 240
+
+
+def _ts_seconds(ts) -> int | None:
+    """`13:16:28` / `13:16` → 秒；解不出返回 None（**不猜**）。"""
+    try:
+        parts = str(ts).strip().split(":")
+        if len(parts) == 2:
+            h, m = int(parts[0]), int(parts[1])
+            s = 0
+        elif len(parts) == 3:
+            h, m, s = (int(x) for x in parts)
+        else:
+            return None
+        return h * 3600 + m * 60 + s
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
+def _stem(heading: str) -> str:
+    """标题主干：去 `[HH:MM]` 前缀（**可以多段**，防御模型自己在标题里写了时间）、
+    取第一个 `：:` 之前的部分（概念分组用）。
+
+    ECON10790 的九个时间节 → `最优化练习与停业价格` ×3、`平均成本、边际成本及其相互作用` ×3、
+    `最小化函数的两种方法` ×3 → **3 个概念单元**（作者 2026-10-18 第七轮 A）。
+    """
+    h = re.sub(r"^\s*(?:\[[^\]]*\]\s*)*", "", str(heading or "")).strip()
+    return h.split("：", 1)[0].split(":", 1)[0].strip() or h
+
+
+def chunk_budget_line(chunk: list) -> str:
+    """这一块的「字数上限」提示（≈240 CJK 字/分钟）。"""
+    tss: list = []
+    for ln in chunk:
+        t = _ts_seconds(str(ln).split(" ", 1)[0].strip("[]"))
+        if t is not None:
+            tss.append(t)
+    mins = (max(tss) - min(tss)) / 60.0 + 0.5 if len(tss) >= 2 else 3.0
+    ceil = max(150, int(CEILING_PER_MIN * mins / 10) * 10)
+    return (f"\n⚠️ **这段的字数上限**：这段约 {mins:.0f} 分钟；全部可见文字（讲解+例题+其余）"
+            f"合计**至多 {ceil} 字**（CJK 计）—— 上限不是目标：写超是违规，宁少勿多。\n")
+
+
+def _cjk(v) -> int:
+    """计字口径（与验收量具同一份）：去空白、拉丁字母、数字后数剩下的。"""
+    return len(re.sub(r"[A-Za-z0-9\s]", "", str(v or "")))
+
+
+def unit_cjk(sec: dict) -> int:
+    """一个单元的**全部可见文字**的计字（讲解 + 例题 + 结论 + 常见错误）。"""
+    n = _cjk("".join(str(x) for x in (sec.get("prose") or [])))
+    for k in ("q", "conclusion", "algebra", "intuition", "prereq"):
+        n += _cjk(sec.get(k))
+    ex = sec.get("example") or {}
+    n += _cjk(ex.get("prompt")) + _cjk(ex.get("answer"))
+    for st in (ex.get("steps") or []):
+        n += _cjk((st or {}).get("text"))
+    for x in (sec.get("pitfalls") or []):
+        n += _cjk(x)
+    return n
+
+
+def merge_units(review: dict, *, end_ts: str = "") -> dict:
+    """相邻且**同一概念**（标题主干相同）的小节并成「单元」（作者 2026-10-18 第七轮 A）。
+
+    确定性分组（不额外调模型）：主干相同的**连续**小节并成一个单元；单元拿到
+    `minutes`（成员分钟数之和，按"本节起点 → 下一节起点"算，最后一节算到课末）、
+    `ts` 区间（`13:16–13:24`）。字段合并规则：
+      · `prose` 顺序拼接；`q/cues/conclusion/algebra/intuition/prereq*` 取第一个非空；
+      · `example` 只留**第一个**（讲同一个道理的重复例子不留两份）；
+      · `variants/faded` 取第一个非空；`pitfalls/terms/sources` 去重并起来。
+    """
+    secs = [s for s in (review.get("sections") or []) if isinstance(s, dict)]
+    if not secs:
+        return review
+    starts = [_ts_seconds(s.get("ts")) for s in secs]
+    end = _ts_seconds(end_ts)
+    minutes: list = []
+    for i, st in enumerate(starts):
+        nxt = starts[i + 1] if (i + 1 < len(starts)) else None
+        if st is None:
+            minutes.append(None)
+        elif nxt is not None and nxt > st:
+            minutes.append(round((nxt - st) / 60.0, 1))
+        elif end is not None and end > st:
+            minutes.append(round((end - st) / 60.0, 1))
+        else:
+            minutes.append(None)
+    groups: list = []
+    for i, s in enumerate(secs):
+        stem = _stem(s.get("heading"))
+        if groups and stem and stem == _stem(secs[groups[-1][-1]].get("heading")):
+            groups[-1].append(i)
+        else:
+            groups.append([i])
+    out_secs: list = []
+    for g in groups:
+        members = [secs[i] for i in g]
+        first = members[0]
+        m = dict(first)
+        known = [minutes[i] for i in g if minutes[i]]
+        m["minutes"] = round(min(sum(known), UNIT_MAX_MINUTES), 1) if known else None
+        if len(g) > 1:
+            m["ts"] = f"{first.get('ts')}–{members[-1].get('ts')}"
+            m["heading"] = _stem(first.get("heading")) or first.get("heading")
+        m["prose"] = [str(x) for s2 in members for x in (s2.get("prose") or []) if str(x).strip()]
+        cues, seen_c = [], set()
+        for s2 in members:
+            for c in (s2.get("cues") or []):
+                k = str(c).strip()
+                if k and k not in seen_c:
+                    seen_c.add(k)
+                    cues.append(c)
+        if cues:
+            m["cues"] = cues
+        for key in ("q", "conclusion", "algebra", "intuition", "prereq", "prereq_link"):
+            m[key] = next((s2.get(key) for s2 in members
+                           if str(s2.get(key) or "").strip()), m.get(key))
+        exs, seen_ex = [], set()
+        for s2 in members:
+            ex = s2.get("example") or {}
+            if not (ex.get("prompt") or ex.get("steps")):
+                continue
+            k = re.sub(r"\W+", "", str(ex.get("prompt") or ex.get("title") or ""))[:60]
+            if k in seen_ex:
+                continue
+            seen_ex.add(k)
+            exs.append(ex)
+        if exs:
+            m["example"] = exs[0]
+        for key in ("variants", "faded"):
+            val = next((s2.get(key) for s2 in members if s2.get(key)), None)
+            if val:
+                m[key] = val
+        for key in ("pitfalls", "terms", "sources"):
+            vals, seen_b = [], set()
+            for s2 in members:
+                for x in (s2.get(key) or []):
+                    k = str(x)
+                    if k and k not in seen_b:
+                        seen_b.add(k)
+                        vals.append(x)
+            if vals:
+                m[key] = vals
+        out_secs.append(m)
+    out = dict(review)
+    out["sections"] = out_secs
+    allmin = [s.get("minutes") for s in out_secs if s.get("minutes")]
+    if allmin:
+        out["minutes"] = round(sum(allmin), 1)
+    return out
+
+
+#: 自测三档（作者 F7②）：基础=回忆定义/事实 · 中等=换数字/案例用一次 · 挑战=合两个想法或抓坑。
+QA_TIERS = ("基础", "中等", "挑战")
+QA_TIER_DESC = {"基础": "回忆定义/事实", "中等": "换个数字或案例用一次",
+                "挑战": "合两个想法、或抓一个坑"}
+_QA_KIND_TO_TIER = {"concept": "基础", "calc": "中等", "trap": "挑战"}
+
+
+def qa_tier(item: dict) -> str:
+    """归一自测题的档位：模型标的 `tier` 优先；没标就按 `kind` 兜底（纯函数）。"""
+    t = _one_line(item.get("tier")) if isinstance(item, dict) else ""
+    for k in QA_TIERS:
+        if t.startswith(k):
+            return k
+    kind = _one_line((item or {}).get("kind")).lower()
+    return _QA_KIND_TO_TIER.get(kind, "中等")
+
+
+def pick_qa_tiers(qa: list, *, per_tier: int = 2) -> list:
+    """全讲的自测 → 基础/中等/挑战 各取 ≤`per_tier` 题，按档排序（F7②）。
+
+    纯函数、确定性；每题补上归一后的 `tier` 字段（渲染层按档分组）。
+    """
+    buckets: dict = {k: [] for k in QA_TIERS}
+    for item in (qa or []):
+        if not isinstance(item, dict):
+            continue
+        k = qa_tier(item)
+        if len(buckets[k]) < per_tier:
+            buckets[k].append(dict(item, tier=k))
+    return [x for k in QA_TIERS for x in buckets[k]]
+
+
+SHORTEN_RATIO = 1.5
+#: 每讲至多压缩几次（作者 F7-f：≤5 —— 把 F6 实测的 18 次压到个位数）。
+SHORTEN_MAX_CALLS = 5
+SHORTEN_MAX_TOKENS = 2500
+SHORTEN_SYS = """你在做一件事：把一节笔记的「讲解」压到字数上限以内。读者是要复习的大学生。
+
+· **保留**：全部事实、数字、公式、例子、结论；语气与术语写法不变（中文（English））。
+· **删掉**：重复的话（同一意思说两遍）、绕圈的过渡、与主线无关的旁支、空洞的强调。
+· 不许引入新内容，不许改数字或公式；宁短勿长。
+严格输出 JSON：{"prose": ["第 1 段", "第 2 段", "…"]}"""
+
+
+def shorten_overlimit(review: dict, *, chat, ratio: float = SHORTEN_RATIO,
+                      max_tokens: int = SHORTEN_MAX_TOKENS_THINKING,
+                      max_calls: int = SHORTEN_MAX_CALLS) -> tuple:
+    """超上限 >`ratio`（1.5×）的单元做**一次**压缩调用（只改 `prose`；F7-f 收紧）。
+
+    ⚠️ 只对超限的单元发（每个单元最多 1 次、每讲至多 `max_calls` 次）；
+       失败/变不短都不动原文（fail-soft）。调用数记在 warn 里（验收要数它）。
+    """
+    out = copy.deepcopy(review)
+    n = 0
+    for s in (out.get("sections") or []):
+        if not isinstance(s, dict):
+            continue
+        if n >= max_calls:
+            break
+        mins = s.get("minutes")
+        if not mins:
+            continue
+        ceil = int(CEILING_PER_MIN * float(mins))
+        cur = unit_cjk(s)
+        if cur <= ceil * ratio:
+            continue
+        prose = [str(x) for x in (s.get("prose") or []) if str(x).strip()]
+        if not prose:
+            continue
+        user = (f"讲解的上限是 {ceil} 字（现在约 {cur} 字）。原文：\n\n" + "\n\n".join(prose))
+        try:
+            got = chat(SHORTEN_SYS, user, max_tokens)
+        except Exception:                                       # noqa: BLE001
+            continue
+        lines = _lines(got.get("prose")) if isinstance(got, dict) else []
+        if lines and sum(_cjk(x) for x in lines) < sum(_cjk(x) for x in prose):
+            s["prose"] = lines
+            n += 1
+    warns = [f"超限单元压缩：{n} 个单元各做了 1 次压缩调用（每讲至多 {max_calls} 次）"] if n else []
+    return out, [], warns
 
 
 def _user_content(lines: list, *, domain: str = "", materials_block: str = "",
@@ -434,7 +1507,7 @@ def _user_content(lines: list, *, domain: str = "", materials_block: str = "",
 
 def review(entries: list, *, chat, domain: str = "", materials=None,
            on_progress=None, workers: int = REVIEW_WORKERS,
-           max_tokens: int = REVIEW_MAX_TOKENS, extra: str = "",
+           max_tokens: int = REVIEW_MAX_TOKENS_THINKING, extra: str = "",
            skeleton: list | None = None) -> dict:
     """分块调 LLM → 合并。`chat(system, user, max_tokens) -> dict`。
 
@@ -449,7 +1522,7 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
     from concurrent.futures import ThreadPoolExecutor
     from materials import snippets_block
 
-    def one(chunk: list) -> dict:
+    def one(chunk: list, ex_base: str) -> dict:
         """一块 → 一次调用；**失败要退一步**。
 
         ⚠️ 第四轮实测（run F）：带上章节骨架后，17/20 条要点的那几块输出超过
@@ -462,13 +1535,15 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
         sk_block = note_cover.block_for(skeleton, chunk) if skeleton else ""
         hits = materials.search("\n".join(chunk)) if materials is not None else []
         m_block = snippets_block(hits)
-        tries = [(extra + sk_block, max_tokens),
-                 (extra + sk_block, int(max_tokens * 1.5)),
-                 (extra, int(max_tokens * 1.5))]
+        tries = [(ex_base + sk_block, max_tokens),
+                 (ex_base + sk_block, int(max_tokens * 1.5)),
+                 (ex_base, int(max_tokens * 1.5))]
+        sys_text = (REVIEW_SYS.replace("__PLOTS__", _plots_menu())
+                    .replace("__CALIBER__", _caliber_block(materials)))
         for ex2, mt in tries:
             try:
                 user = _user_content(chunk, domain=domain, materials_block=m_block, extra=ex2)
-                got = _clean(chat(REVIEW_SYS.replace("__PLOTS__", _plots_menu()), user, mt))
+                got = _clean(chat(sys_text, user, mt))
                 if got:
                     return got
             except Exception:                                 # noqa: BLE001
@@ -478,7 +1553,9 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
     failed: list = []
 
     ex = ThreadPoolExecutor(min(workers, len(chunks)))
-    futs = [ex.submit(one, c) for c in chunks]
+    # ⭐ 每一块带上**自己的**字数上限（≈240 CJK 字/分钟；第七轮 H）——上限不是目标，
+    #    "宁少勿多"写进了提示词；生成后还有超限压缩兜底。
+    futs = [ex.submit(one, c, extra + chunk_budget_line(c)) for c in chunks]
     ex.shutdown(wait=False)
     blocks = []
     for ci, fut in enumerate(futs):
@@ -495,6 +1572,13 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
             failed.append(ci)
         blocks.append(b)
     got = merge_blocks(blocks)
+    if got.get("sections"):
+        # ⭐ 概念单元（第七轮 A）：相邻、同主干的小节并成一个单元 ——
+        #    覆盖度（ts 变成区间）、渲染、长度上限全按单元走。
+        got = merge_units(got, end_ts=str(entries[-1].get("ts") or "") if entries else "")
+    if got.get("qa"):
+        # ⭐ F7②：全讲的自测按 基础/中等/挑战 三档各取 ≤2 题（渲染层按档分组）。
+        got["qa"] = pick_qa_tiers(got.get("qa"))
     if got.get("title_zh"):
         meta["title_zh"] = got.pop("title_zh")
     got.update(meta)
@@ -507,6 +1591,25 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
 
 def _plots_menu() -> str:
     return " · ".join(f"`{k}`（{v}）" for k, v in PLOT_KINDS.items())
+
+
+def _caliber_block(materials) -> str:
+    """课程专属口径段 —— **只有本课材料里真的写着这条定义**才注入（F9c）。
+
+    ⚠️ 这段以前写死在通用提示词里：任何课（化学、社会学）都会读到经济学的停产价格口径。
+       同 `ensure_caliber` 的教训（一句写死的话插到别的课就是**假的本课口径**）。
+       检测走 `note_guards._shutdown_source`（唯一定义点）；材料里找不到 → 空串，不注入。
+    """
+    try:
+        import note_guards
+        src = note_guards._shutdown_source(materials) if materials is not None else ""
+    except Exception:                                          # noqa: BLE001
+        return ""
+    if not src:
+        return ""
+    return ("- **停产价格（shutting down price）的口径**：本课官方材料（" + src + "）按「**平均成本 AC "
+            "的最低点**」定义。标准教科书口径是**平均可变成本 AVC 的最低点**，而 AC 最低点叫**盈亏平衡价"
+            "（break-even price）**。写到这一节时：按本课 📖 口径讲，并**加一句**与标准口径的对照（标 📚）。\n")
 
 
 # ---------------------------------------------------------------- 覆盖度对齐
@@ -540,11 +1643,21 @@ def align(review_data: dict, *, chat, materials=None,
     user = (f"Professor's knowledge points (in order):\n{lines}\n\n"
             f"Note section headings:\n" + "\n".join(f"- {s}" for s in secs))
     sys_prompt = ALIGN_SYS_SK if sk_points else ALIGN_SYS
-    try:
-        obj = chat(sys_prompt, user, max_tokens)
-    except Exception as e:                                     # noqa: BLE001
-        # ⚠️ 这里**不吞**：上层按 `failed` 报出去（作者第六轮第 2 条）。
-        return {"failed": f"{type(e).__name__}: {str(e)[:80]}"}
+    obj = None
+    last = ""
+    # ⭐ F9c：长清单（无骨架路径）会把输出撑破 `max_tokens` → 截断的 JSON 解析直接失败。
+    #    先按 1.5× 重试一次（实测 SOC10020 第一次就是截断 —— "Unterminated string"）。
+    for mt in (max_tokens, int(max_tokens * 1.5)):
+        try:
+            obj = chat(sys_prompt, user, mt)
+            last = ""
+            break
+        except Exception as e:                                 # noqa: BLE001
+            last = f"{type(e).__name__}: {str(e)[:80]}"
+            obj = None
+    if obj is None:
+        # ⚠️ 不吞：两次都失败才按 `failed` 报出去（作者第六轮第 2 条）。
+        return {"failed": last or "模型没回 JSON"}
     if not isinstance(obj, dict):
         return {"failed": "模型没回 JSON 对象"}
     out: dict = {}
@@ -669,6 +1782,19 @@ def numeric_claims(review_data: dict, *, limit: int = 24) -> list:
         fd = s.get("faded") or {}
         out += _num_items(head, [fd.get("q", ""), fd.get("a", "")], "faded",
                           f"本节补全题的题面：{_one_line(fd.get('q'))[:160]}", limit)
+        # ⭐ F10：对照表 / 步骤图里的数字和正文一个待遇（格子文本进核）。
+        cmp = s.get("compare") or {}
+        if cmp.get("title"):
+            cells = [c for r in (cmp.get("rows") or [])
+                     for c in (r.get("cells") or [])]
+            out += _num_items(head, cells, "compare",
+                              f"本节对照表「{_one_line(cmp.get('title'))}」的格子", limit)
+        fl = s.get("flow") or {}
+        if fl.get("title"):
+            steps_txt = [f"{st.get('label', '')}：{st.get('detail', '')}"
+                         for st in (fl.get("steps") or [])]
+            out += _num_items(head, steps_txt, "flow",
+                              f"本节步骤图「{_one_line(fl.get('title'))}」", limit)
         # 讲解排在每节的最后：额度先给"模型自己出的题"（它们最容易串参数），
         # 讲解那一档量大且稳（作者的正文纪律已经压过一轮）。
         out += _num_items(head, list(s.get("prose") or []), "prose", "", limit)
@@ -704,7 +1830,8 @@ def _num_items(where: str, texts, origin: str, ctx: str, limit: int) -> list:
 
 #: `origin` → 给模型看的标签（口径不同，见 `VERIFY_SYS`）。
 _ORIGIN_ZH = {"prose": "讲解（🎙/📖）", "example": "例题解", "variant": "变式",
-              "faded": "补全题", "qa": "自测", "checks": "讲解（🎙/📖）"}
+              "faded": "补全题", "qa": "自测", "checks": "讲解（🎙/📖）",
+              "compare": "对照表", "flow": "步骤图"}
 #: 「模型自己出的题」——判据用 `note_math.MODEL_AUTHORED` + 自测。
 _MODEL_ORIGINS = set(note_math.MODEL_AUTHORED) | set(note_math.ALSO_MODEL)
 #: 收窄降级在行尾留下的**可数标记**（评测按它统计"这条本来会变成什么"）：
@@ -775,17 +1902,32 @@ def cap_model_rows(rows: list, review_data: dict, *, llm: bool = False) -> list:
 
 
 def verify_numbers(review_data: dict, *, chat, materials=None,
-                   transcript: str = "", max_tokens: int = VERIFY_MAX_TOKENS) -> list:
+                   transcript: str = "", max_tokens: int = VERIFY_MAX_TOKENS_THINKING,
+                   exercise_flags: list | None = None) -> list:
     """数字/公式第三道核（1 次调用）→ 规范化后的 `checks` 列表（不是 dict）。
 
     ⚠️ `mismatch` **不改正文**：它进「修正说明」清单由渲染层显示 ——
        静默改数字是这份笔记最不能做的事（读者用它对答案）。
     ⭐ 第六轮：`mismatch` 只留给**讲解里那些来自 🎙 转录 / 📖 课件的断言**；
        例题解答 / 变式 / 补全题 / 自测是模型自己出的题，最多标未核对。
+    ⭐ F8-b：`exercise_flags`（调用方给的 list）会把**降级之前**题块里的 mismatch 行
+       收进去 —— 例题返修（`repair_exercises`）靠它，`checks` 里的降级口径不变。
     """
     # ⭐ 机械核**先跑**（2026-10-17 验收：模型对着自己编的函数"重算"当然自洽 ——
     #    自编 `TC=60q+500` + 凑出来的驻点 2.89 就这样溜过了三道核）。
     det = note_math.check_review(review_data, transcript=transcript)
+
+    def _collect(rows_: list) -> None:
+        if exercise_flags is None:
+            return
+        for r in rows_ or []:
+            if not isinstance(r, dict) or str(r.get("status")) != "mismatch":
+                continue
+            if _claim_origin(review_data, str(r.get("claim") or "")) in \
+                    set(note_math.MODEL_AUTHORED):
+                exercise_flags.append(dict(r))
+
+    _collect(det)
     claims = numeric_claims(review_data)
     if not claims:
         return _finish(det, _clean_checks(review_data.get("checks")), review_data)
@@ -821,6 +1963,7 @@ def verify_numbers(review_data: dict, *, chat, materials=None,
                   "status": st if st in ("ok", "mismatch", "unchecked") else "unchecked",
                   "recomputed": _one_line(it.get("recomputed"))[:80]}
     out = [got[i] for i in sorted(got)]
+    _collect(out)                                              # 模型核的降级前标记（F8-b）
     # 模型自己写的 checks 也留着（它们带着别的依据）；同 claim 以核过的为准。
     seen = {c["claim"].strip().lower() for c in out}
     for row in _clean_checks(review_data.get("checks")):
@@ -839,8 +1982,10 @@ def _finish(det: list, llm_rows: list, review_data: dict) -> list:
        · 模型核是在**评自己的作业**，它说 `ok` 不算核过 → 这一类要降。
        合并后再降会把机械核那 30 条 `ok` 一起抹掉（实测：10790 的 ✅ 从 61 掉到 17）。
     """
-    return note_math.merge_checks(cap_model_rows(det, review_data),
-                                  cap_model_rows(llm_rows, review_data, llm=True))
+    return note_math.mech_override_rows(
+        note_math.merge_checks(cap_model_rows(det, review_data),
+                               cap_model_rows(llm_rows, review_data, llm=True)),
+        review_data)
 
 
 def corrections_from_mismatch(checks: list) -> list:
@@ -856,13 +2001,213 @@ def corrections_from_mismatch(checks: list) -> list:
     return out
 
 
+# ---------------------------------------------------------------- 术语括注（2026-10-18 追认）
+#: 正文类字段（术语就地括注的作用范围；台账/出处字段一个都不碰）。
+_TERM_FIELDS = {"prose", "prereq", "conclusion", "algebra", "intuition", "pitfalls",
+                "prompt", "answer", "text", "why", "q", "a", "cues"}
+
+
+def collect_terms(review: dict) -> list:
+    """全篇术语对 `[(zh, en)]`：按各节 `terms` 的出现顺序去重（dict 与 2 元组都认）。"""
+    out: list = []
+    seen: set = set()
+    for s in (review.get("sections") or []):
+        if not isinstance(s, dict):
+            continue
+        for t in (s.get("terms") or []):
+            zh = en = ""
+            if isinstance(t, dict):
+                zh, en = str(t.get("zh") or "").strip(), str(t.get("en") or "").strip()
+            elif isinstance(t, (list, tuple)) and len(t) >= 2:
+                zh, en = str(t[0] or "").strip(), str(t[1] or "").strip()
+            if zh and en and (zh, en) not in seen:
+                seen.add((zh, en))
+                out.append((zh, en))
+    return out
+
+
+def _field_name(path: tuple) -> str:
+    for p in reversed(path):
+        if isinstance(p, str):
+            return p
+    return ""
+
+
+def _walk_strings(obj, path: tuple = ()):
+    if isinstance(obj, str):
+        yield path, obj
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _walk_strings(v, path + (k,))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from _walk_strings(v, path + (i,))
+
+
+#: 括注里的缩写（`（AC）`）—— 并入成 `（average cost, AC）` 而不是叠第二个括注（F9）。
+_ABBREV = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,5}$")
+
+
+def announce_terms(text: str, terms, seen: set) -> str:
+    """术语**首次**出现 → 「中文（English）」；全篇每个术语只括注一次。
+
+    HTML 与 md **共用这一份**（作者 2026-10-18：术语必须带英文 —— 渲染层确定性执行，
+    不再指望模型每处都写）。`seen` 由调用方跨字段携带；已经括注过的跳过。
+    ⭐ F9（作者点名）：**已经跟着任何括注就不许再叠第二个** ——
+      · 括注就是这个词的英文（大小写不论）→ 原样；
+      · 括注是缩写（`（AC）`）→ 并入成 `（average cost, AC）`；
+      · 别的写法（整句英文等）→ 不加第二个（`标注` 宁缺勿叠）。
+    """
+    out = str(text or "")
+    for zh, en in (terms or ()):
+        if (zh, en) in seen or zh not in out:
+            continue
+        i = out.find(zh)
+        m = re.match(r"（([^）]{1,60})）", out[i + len(zh):])
+        if m:
+            inner = m.group(1).strip()
+            if inner.lower() == str(en).lower():
+                seen.add((zh, en))
+                continue
+            if _ABBREV.fullmatch(inner):
+                j0 = i + len(zh) + m.start(1)
+                out = out[:j0] + f"{en}, {inner}" + out[i + len(zh) + m.end(1):]
+                seen.add((zh, en))
+                continue
+            seen.add((zh, en))
+            continue
+        out = out[:i] + f"{zh}（{en}）" + out[i + len(zh):]
+        seen.add((zh, en))
+    return out
+
+
+def canon_en(zh: str, canon) -> str:
+    """标准拼写查询（F7-e）：全等优先；否则**包含**匹配取最长（`停产价格` 命中 `停产价`）。
+
+    `canon` = `{zh: en}`（由术语表的 `(en, zh)` 对折成；同 zh 首见者赢）。
+    """
+    zh = _one_line(zh)
+    if not zh or not canon:
+        return ""
+    if zh in canon:
+        return canon[zh]
+    best_len, best_en = 0, ""
+    for zh_c, en_c in canon.items():
+        if zh_c and (zh_c in zh or zh in zh_c) and len(zh_c) > best_len:
+            best_len, best_en = len(zh_c), en_c
+    return best_en
+
+
+#: 标题里已经写好的「中文（English）」——只统一英文，不新增括注（F8-e）。
+_PAREN_EN = re.compile(r"（([A-Za-z][^（）]{0,48})）")
+
+
+def canon_fix_parens(text: str, canon_map: dict) -> str:
+    """把标题里 `中文（English）` 的英文换成术语表的标准拼写（没有标准拼写的原样）。"""
+    s = str(text or "")
+    if not s or not canon_map:
+        return s
+
+    def repl(m) -> str:
+        head = s[:m.start()]
+        zh = ""
+        for k in range(len(head) - 1, -1, -1):
+            ch = head[k]
+            if "\u4e00" <= ch <= "\u9fff" or ch.isalnum() or ch in "·-_ ":
+                zh = ch + zh
+            else:
+                break
+        en_c = canon_en(zh.strip(), canon_map)
+        return f"（{en_c}）" if en_c else m.group(0)
+
+    return _PAREN_EN.sub(repl, s)
+
+
+def announce_terms_in_review(review: dict, *, canon=None) -> dict:
+    """渲染前的一次性标注（返回**副本**）。
+
+    ⚠️ walk 顺序 = **阅读顺序**：`overview_long`（页首速览）先走，然后才轮到大字典里
+       其余字段（小节……）。这样「首次出现」落在读者**最先读到**的地方；md 简版只渲染
+       速览那一段，也才拿得到自己的首次括注（小节讲解不搬到 md 里）。
+    ⭐ `canon`（F7-e）：术语表的 `[(en, zh)]` 对 —— 有标准拼写就**盖过**模型/转录写法
+       （`shutting down price` → `shutdown price`）。
+    """
+    out = copy.deepcopy(review)
+    canon_map: dict = {}
+    for pair in (canon or []):
+        try:
+            en, zh = _one_line(pair[0]), _one_line(pair[1])
+        except Exception:                                      # noqa: BLE001
+            continue
+        if zh and en:
+            canon_map.setdefault(zh, en)
+    # ⭐ F8-e：标题里已经写着的「中文（English）」也统一成术语表拼写（没有标准拼写的照旧）。
+    #    `title` 也走：覆盖度表的行标题 = 小节标题的再一次出现 —— 实测 F8 econ 的覆盖表
+    #    里还留着 `（Shutting Down Price）`，一处没换就等于页面上有两种拼写。
+    for path, v in list(_walk_strings(out)):
+        if not path or _field_name(path) not in ("heading", "title") \
+                or not isinstance(v, str) or not v:
+            continue
+        new = canon_fix_parens(v, canon_map)
+        if new != v:
+            obj = out
+            for k in path[:-1]:
+                obj = obj[k]
+            obj[path[-1]] = new
+    terms = [(zh, (canon_en(zh, canon_map) or en)) for zh, en in collect_terms(out)]
+    if not terms:
+        return out
+    seen: set = set()
+
+    def _done() -> bool:
+        return len(seen) == len(terms)
+
+    # ① 页首速览（html 与 md 都渲染它）
+    for i, v in enumerate(list(out.get("overview_long") or [])):
+        if not isinstance(v, str) or not v:
+            continue
+        new = announce_terms(v, terms, seen)
+        if new != v:
+            out["overview_long"][i] = new
+        if _done():
+            return out
+    # ② 其余正文类字段（按 dict 顺序；小节/自测……）
+    for path, v in list(_walk_strings(out)):
+        if not path or path[0] in ("cover", "checks", "corrections", "overview_long"):
+            continue
+        if _field_name(path) not in _TERM_FIELDS:
+            continue
+        if not isinstance(v, str) or not v:
+            continue
+        new = announce_terms(v, terms, seen)
+        if new != v:
+            obj = out
+            for k in path[:-1]:
+                obj = obj[k]
+            obj[path[-1]] = new
+        if _done():
+            break
+    return out
+
+
 # ---------------------------------------------------------------- 复习排程
-def review_dates(date_str: str, *, offsets=(2, 7, 21)) -> list:
+#: 三个复习档（作者 2026-10-18 拍板：**今晚 / +3 天 / +7 天**，日期从上课那天算）。
+#: ⚠️ 每档配的动作是**静态**的（与课程无关）：现在重做例题，三天后做变式+自测，
+#:    七天后只看线索问题口头答 —— 不再用早先的 2/7/21 天（那时没有"今晚"这一档，
+#:    而作者要的是"下课今晚就有一件事可做"）。
+REVIEW_SLOTS = (
+    ("今晚", 0, "重做例题 + 补全题"),
+    ("+3 天", 3, "变式 + 自测"),
+    ("+7 天", 7, "只看线索问题，口头答"),
+)
+
+
+def review_dates(date_str: str, *, offsets=(0, 3, 7)) -> list:
     """间隔复习日期（写进笔记的「复习排程」那一节；不做推送）。
 
-    ⚠️ 间隔取 2/7/21 天：`docs/PLAN-notes-and-ui.md` §2 的调研口径（Cepeda 2006/2008：
-       最优间隔随目标保留期增长；Dunlosky 2013 里 spacing 是唯二 high utility 之一）。
-       刻意**不做**"智能排程" —— 笔记只写日期，什么时候看由人定。
+    ⚠️ 间隔取 0/3/7 天（作者 2026-10-18 拍板）：上课当晚重做例题 → +3 天变式+自测 →
+       +7 天只看线索问题口头答。刻意**不做**"智能排程" —— 笔记只写日期，
+       什么时候看由人定。
     """
     import datetime
     try:
@@ -870,6 +2215,18 @@ def review_dates(date_str: str, *, offsets=(2, 7, 21)) -> list:
     except ValueError:
         return []
     return [(d0 + datetime.timedelta(days=o)).isoformat() for o in offsets]
+
+
+def schedule_rows(dates: list) -> list:
+    """复习日期 + 静态档位 → `[{"label", "date", "task"}]`（md 与 HTML 共用一份口径）。
+
+    ⚠️ 标签按**位置**取（今晚/+3 天/+7 天）—— 日期从上课那天算，位置天然对齐；
+       日期算不出来（坏日期）时 `dates=[]`，调用方整段跳过。
+    """
+    out = []
+    for (label, _off, task), d in zip(REVIEW_SLOTS, dates or []):
+        out.append({"label": label, "date": str(d), "task": task})
+    return out
 
 
 def anki_rows(review_data: dict, *, course: str = "", date: str = "") -> list:

@@ -44,6 +44,8 @@ class NoteData:
     term_footer: str = ""
     #: 术语表（已过滤/已合并）行 —— `note_terms.render_table` 的输出。
     term_rows: list = dataclasses.field(default_factory=list)
+    #: 术语表最终行按渲染顺序的 (en, zh) 对 —— 渲染层的**标准拼写**括注查它（F7-e）。
+    term_pairs: list = dataclasses.field(default_factory=list)
     #: 复习排程日期 ISO 列表（`note_v2.review_dates`）。
     review_dates: list = dataclasses.field(default_factory=list)
     #: Anki CSV 文件名（写了才有；只写进说明那一行）。
@@ -54,6 +56,8 @@ class NoteData:
     corrections_extra: list = dataclasses.field(default_factory=list)
     #: 头部警告（如「本课未做课件核对」）—— 每行一条，进页尾内部记录。
     warns: list = dataclasses.field(default_factory=list)
+    #: 🧮 F9c：守卫台账一行（`guards: repaired N, dropped N, flagged N`）—— 页尾核对记录首行。
+    guard_summary: str = ""
     #: 交互版有没有拿到 KaTeX 副本（`note_html.install_assets`）——
     #: 只有**已知失败**时才写一行说明（不知道就不说）。
     katex_ok: bool = True
@@ -117,6 +121,39 @@ def _polish_line(state: str) -> str:
             "逐句记录里是精修后的那版，`sessions/` 里的原始记录未动。")
 
 
+def compare_md(cmp: dict) -> list:
+    """`compare` → md **管道表**（作者 F10 的 md 格式；`|` 转义成 `\\|`）。"""
+    cols = [str(c) for c in (cmp.get("cols") or [])]
+    rows = [r for r in (cmp.get("rows") or []) if isinstance(r, dict)]
+
+    def esc(x) -> str:
+        return _one(x).replace("|", "\\|")
+
+    L = ["| " + " | ".join(esc(c) for c in cols) + " |",
+         "|" + "---|" * len(cols)]
+    for r in rows:
+        cells = [esc(r.get("label"))] + [esc(c) for c in (r.get("cells") or [])]
+        L.append("| " + " | ".join(cells) + " |")
+    return L
+
+
+def flow_md(fl: dict) -> list:
+    """`flow` → md 编号列表（非末步带 `→`；回路一行「↺ 回到第 N 步」）。"""
+    steps = [s for s in (fl.get("steps") or []) if isinstance(s, dict)]
+    L: list = []
+    for i, st in enumerate(steps, 1):
+        tail = " →" if i < len(steps) else ""
+        d = f" —— {_one(st.get('detail'))}" if st.get("detail") else ""
+        L.append(f"{i}. **{_one(st.get('label'))}**{d}{tail}")
+    try:
+        loop = int(fl.get("loop_to")) if fl.get("loop_to") is not None else None
+    except (TypeError, ValueError):
+        loop = None
+    if loop and 1 <= loop <= len(steps) - 1:
+        L.append(f"↺ 回到第 {loop} 步")
+    return L
+
+
 def _missing_line(d: "NoteData") -> str:
     """「这次没生成讲解」那一行 —— **两种原因分开说**（同旧版 `_render_note` 的取舍）。
 
@@ -147,8 +184,12 @@ def _detail_link(d: "NoteData") -> list:
 
 def render(d: NoteData) -> str:
     """`NoteData` -> **简版** Markdown（作者第六轮第 6 条）。"""
+    import note_v2
+    # ⭐ 术语就地括注：与 HTML 共用同一份实现（作者 2026-10-18）；F7-e 带上标准拼写表。
+    review = note_v2.announce_terms_in_review(d.review or {},
+                                              canon=getattr(d, "term_pairs", None))
+    d = dataclasses.replace(d, review=review)
     entries = d.entries
-    review = d.review or {}
     ts0 = entries[0]["ts"] if entries else "—"
     ts1 = entries[-1]["ts"] if entries else "—"
     sections = review.get("sections") or []
@@ -209,21 +250,24 @@ def render(d: NoteData) -> str:
         L += ["> ⚠ 这次没装上公式字体（详细版里公式会显示成 TeX 源码）"]
     L += [""]
 
-    # ── ③ 五分钟速览 ──────────────────────────────────────────────────
-    L += ["## 0 · 五分钟速览", ""]
-    if sections:
-        L += ["这节讲的东西按下面的顺序串起来：", ""]
-        for i, s in enumerate(sections, 1):
-            gist = _first_sentence((s.get("prose") or [""])[0])
-            L += [f"{i}. **{_one(s.get('heading'))}**" + (f" —— {gist}" if gist else "")]
-        L += [""]
+    # ── ③ 速览（2026-10-18 第七轮：短；替代"五分钟串讲"）────────────────
+    #    读者**上过这节课**：3–6 句把线捡回来 + 复习排程。逐节 gist 清单与
+    #    "学完你应该会"清单按作者第七轮意见撤掉（太长、典型的 AI 装置）。
+    L += ["## 0 · 速览", ""]
+    paras = [str(p).strip() for p in (review.get("overview_long") or []) if str(p).strip()]
+    if paras:
+        L += paras + [""]
     else:
         L += [_missing_line(d), ""]
-    plan = review.get("review_plan") or []
-    if plan:
-        # ⚠️ 上限 5 条：`review_plan` 是**每块**各给 2–3 条再合并的（5 块 = 十几条），
-        #    铺出来就是一屏噪音 —— 这一节是"学完会什么"，不是课后作业清单。
-        L += ["**学完你应该会：**", ""] + [f"- {_one(x)}" for x in plan[:5]] + [""]
+    # ⭐ 版式 A（作者 2026-10-18）：带日期的复习排程行（今晚 / +3 天 / +7 天）。
+    #    日期从**上课那天**算（不是生成那天）；md 只写日期与动作，不推送。
+    import note_v2
+    sched = note_v2.schedule_rows(list(d.review_dates or []))
+    if sched:
+        L += ["**复习排程**（笔记只写日期，不推送）："
+              + " · ".join(f'{r["label"]} `{r["date"]}` {r["task"]}' for r in sched), ""]
+        L += ["> ⚠️ **感觉顺利 ≠ 学得牢**：重读一遍觉得「都懂」是最常见的错觉（desirable "
+              "difficulty）。真正的检验是**合上笔记能不能写出来** —— 收尾那三句总结就是干这个的。", ""]
 
     # ── ④ 课堂纲要（骨架先于细节）──────────────────────────────────────
     try:
@@ -235,6 +279,40 @@ def render(d: NoteData) -> str:
                 L += _sec
     except Exception:                                          # noqa: BLE001
         pass
+
+    # ── ④b 复习速测（先想再看；三档各 ≤2 题，答案折叠）—— F7② ──────────────
+    # ⚠️ 折叠答案用的是 Obsidian callout 的 `-` 语法（点一下才展开），不是把答案印在题目下。
+    if qa:
+        L += ["## 复习速测（先想再看 · 三档）", ""]
+        L += ["*先合上笔记自己答，答完展开对照；完整题库与逐步解析在详细版。*", ""]
+        import note_v2
+        i, tier_now = 0, ""
+        for x in qa[:6]:
+            t = note_v2.qa_tier(x)
+            if t != tier_now:
+                L += [f"**{t}** — {note_v2.QA_TIER_DESC.get(t, '')}：", ""]
+                tier_now = t
+            i += 1
+            L += [f"{i}. **{_one(x.get('q'))}**", "",
+                  "> [!question]- 答案", "> " + _one(x.get("a")), ""]
+
+    # ── ④c 结构卡（F10：对照表 / 步骤图 —— md 用最朴素的格式）──────────────
+    #    ⚠️ md 是简版（作者第六轮 6）：这里只放这两类**结构化小件**（管道表 / 编号列表），
+    #       正文/例题/变式仍旧只在详细版 HTML 里。
+    cards = [s for s in sections if isinstance(s, dict)
+             and (s.get("compare") or s.get("flow"))]
+    if cards:
+        L += ["## 结构卡（对照表 / 步骤图）", ""]
+        for s in cards:
+            head = _one(s.get("heading"))
+            if head:
+                L += [f"**{head}**", ""]
+            if s.get("compare"):
+                c = s["compare"]
+                L += [f"*{_one(c.get('title'))}*", ""] + compare_md(c) + [""]
+            if s.get("flow"):
+                fl = s["flow"]
+                L += [f"*{_one(fl.get('title'))}*", ""] + flow_md(fl) + [""]
 
     # ── ⑤ 本课术语 ────────────────────────────────────────────────────
     L += ["## 本课术语", ""]
@@ -253,11 +331,6 @@ def render(d: NoteData) -> str:
 
     # ── ⑥ 一些事儿（复习排程 / Anki / 我标的地方 / 标星句 / 🎯）──────────
     L += ["## 一些事儿", ""]
-    if d.review_dates:
-        L += ["**复习排程**（笔记只写日期，不推送）："
-              + " · ".join(f"第 {i + 1} 次 `{dt}`" for i, dt in enumerate(d.review_dates)), ""]
-        L += ["> ⚠️ **感觉顺利 ≠ 学得牢**：重读一遍觉得「都懂」是最常见的错觉（desirable "
-              "difficulty）。真正的检验是**合上笔记能不能写出来**。", ""]
     if d.anki_name:
         L += [f"- 自测与术语已导出为 Anki 卡：`{d.anki_name}`（导入 Anki → File → Import）"]
     if d.lost_items:
@@ -276,9 +349,11 @@ def render(d: NoteData) -> str:
             tag = f"L{ix[0] + 1}" if len(ix) == 1 else f"L{ix[0] + 1}–{ix[-1] + 1}"
             L += [f"- `{p:.2f}` `{tag}` {text}"]
     if qa:
-        L += ["", f"**自测 {len(qa)} 题**（先自己想，答案与解析在详细版里）：", ""]
-        for i, x in enumerate(qa, 1):
-            L += [f"{i}. {_one(x.get('q'))}"]
+        n_shown = min(len(qa), 5)
+        more = len(qa) - n_shown
+        L += ["", f"**自测共 {len(qa)} 题**：上面「复习速测」列了 {n_shown} 题（答案折叠）；"
+              + (f"另外 {more} 题与全部逐步解析在详细版 HTML 里。" if more
+                 else "完整解析在详细版 HTML 里。")]
     L += [""]
 
     # ── ⑦ 生成核对记录（内部 · 折叠）───────────────────────────────────
@@ -312,11 +387,14 @@ def render(d: NoteData) -> str:
         if review.get("materials_used"):
             L += [f"  引用到的材料：{' · '.join(_one(x) for x in review['materials_used'])}"]
         L += [""]
-    if d.warns:
+    if d.warns or getattr(d, "guard_summary", ""):
         # ⚠️ 生成器的**工作记录**（改了哪条公式、删了几句猜测、口径是不是补的）放页尾折叠：
         #    学生不需要它，但"笔记被机器动过哪里"必须留痕（作者第三轮的要求）。
         L += ["> [!note]- 生成核对记录（内部 · 点开看）", "> "]
         import note_math
+        if getattr(d, "guard_summary", ""):
+            # 🧮 F9c：守卫台账一行 —— 批量审计时 grep `guards:` 就够，不用逐份打开。
+            L += [f"> - {d.guard_summary}"]
         for w in d.warns:
             # 短文本也要过同一个渲染（作者第三轮第 2 条）：md 里包成 `$…$`，
             # HTML 侧走 inline()（KaTeX + Unicode 兜底）。

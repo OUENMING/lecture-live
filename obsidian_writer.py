@@ -36,6 +36,10 @@ import paths
 DEFAULT_COURSE = "LECTURE"          # 没设课程代码时的占位名(线下课常不设)
 SESSIONS = Path(__file__).with_name("sessions")
 
+#: ⭐ F11 §0（作者 2026-10-18）：**课后笔记**那条链统一用 DeepSeek 思考模式的 low 档。
+#: ⚠️ 只给笔记生成用（`_chat` / `_chat_meta` 两个出口）；作者选了 low、不是 high，别调高。
+NOTE_EFFORT = "low"
+
 
 def resolve_vault(cli: str | None = None, *, env=None, root=None) -> str | None:
     """Obsidian 库路径：`--vault` → `$OBSIDIAN_VAULT` → `~/.classlive/vault` → **None**。
@@ -277,6 +281,25 @@ def _flat(v: str) -> str:
 def _one_line(v) -> str:
     """压成单行; 非字符串 -> 空串。渲染层据此丢弃任何多余换行。"""
     return " ".join(v.split()) if isinstance(v, str) else ""
+
+
+def _term_pairs_norm(extra, sel) -> list:
+    """术语表最终行的 `(en, zh)` 对（**与 `render_table` 同序同去重**：本课词在前）。
+
+    ⭐ F7-e：渲染层拿它当**标准拼写**的查表 —— 转录里听成 `shutting down price`、
+       术语表里是 `shutdown price` 时，正文括注必须跟术语表（作者点名）。
+    """
+    out: list = []
+    seen: set = set()
+    for h in list(extra or []) + list(getattr(sel, "hits", None) or []):
+        en = _one_line(getattr(h, "term", ""))
+        zh = _one_line(getattr(h, "gloss", ""))
+        if not en or en.lower() in seen:
+            continue
+        seen.add(en.lower())
+        if zh:
+            out.append([en, zh])
+    return out
 
 
 def _asked_question(turn_content: str) -> str:
@@ -663,6 +686,11 @@ class ObsidianWriter:
         self._note_warns: list = []
         #: 🥉 三道核判成 `mismatch` 的条目 -> 修正说明（`note_v2.corrections_from_mismatch`）。
         self._corr_extra: list = []
+        #: 🧮 F9c：守卫台账 —— 每个能删/能改内容的守卫都要在这里留下**计数**，
+        #:    写作末尾拼成 `guards: repaired N, dropped N, flagged N`（批量审计用）。
+        self._guard_counts: dict = {"repaired": 0, "dropped": 0, "flagged": 0,
+                                     "downgraded": 0}
+        self._guard_summary: str = ""
         self._polish = polish               # 落笔前二次精修(见 polish.py)
         self._polish_model = polish_model or model
         #: 🎯 Jev 的重点句：`[(概率, 句子, [原始行下标]), …]`。
@@ -799,6 +827,35 @@ class ObsidianWriter:
 
         return note_terms.select(entries, match=match, type_of=type_of,
                                  verify=self._term_verified)
+
+    def _in_term_store(self, term: str) -> bool:
+        """术语库里真有没有这个词（F8-f 的例外："unless the glossary has them"）。
+
+        两处查：运行时词表（策展 JSON）+ 本课术语表（glossary/<课号>.txt）。
+        """
+        try:
+            notes = self._term_index()
+            if notes is not None and notes.entry_of(term)[0]:
+                return True
+        except Exception:                                       # noqa: BLE001
+            pass
+        try:
+            from translator import course_term_list
+            low = term.strip().lower()
+            return any(t.strip().lower() == low for t in
+                       (course_term_list(self._glossary_path, self._course, limit=None) or []))
+        except Exception:                                       # noqa: BLE001
+            return False
+
+    def _repair_exercises(self, review: dict, entries: list) -> tuple:
+        """⭐ F8-b/c：机械核判错的题块——每节一次返修；复检仍错就撤（宁缺）。"""
+        import note_v2
+        got, extra, warns = note_v2.repair_exercises(
+            review, chat=self._chat, entries=entries,
+            flags=getattr(self, "_exercise_flags", []) or [])
+        # 返修换了题目 → 修正台账（修正说明）跟着现场重建（旧行已由 repair 清掉）
+        self._corr_extra = note_v2.corrections_from_mismatch(got.get("checks") or [])
+        return got, extra, warns
 
     def _term_index(self):
         """运行时查词表（`build_notes.TermNotes`）。构造一次、记忆化。
@@ -1101,15 +1158,70 @@ class ObsidianWriter:
 
     # ---- 复习层 v2（2026-10-17）----
     def _chat(self, system: str, user: str, max_tokens: int) -> dict:
-        """`note_v2` 那三条调用的**唯一出口**（`chat(system, user, max_tokens) -> dict`）。
+        """`note_v2` 那几条调用的**唯一出口**（`chat(system, user, max_tokens) -> dict`）。
 
-        ⚠️ 收在这里的理由：判据要能整体换掉它（零网络），而三个步骤各接一次
-           `llm_client` 就是三处重复的 try/异常口径。
+        ⚠️ 收在这里的理由：判据要能整体换掉它（零网络），而几个步骤各接一次
+           `llm_client` 就是几处重复的 try/异常口径。
+        ⭐ F11 §0：这个出口**只服务课后笔记**（review / align / verify / repair /
+           overview / shorten）—— 它们统一走思考模式的 low 档（作者 2026-10-18）。
+           翻译 / 实时摘要 / 分类 / 术语查询各走各的出口，**不开思考**（延迟）。
+        """
+        import llm_client
+        obj = llm_client.chat_json(self._key, self._model, system, user,
+                                   max_tokens=max_tokens, temperature=0.3, timeout=300,
+                                   effort=NOTE_EFFORT)
+        return obj if isinstance(obj, dict) else {}
+
+    def _chat_plain(self, system: str, user: str, max_tokens: int) -> dict:
+        """同 `_chat`，但**关思考** —— 只给 `align`（覆盖度/课件核对）。
+
+        ⚠️ F11 §0 实测（SOC10020 真跑）：align 的输出是**长列表**（covered / not_covered），
+        开思考时推理 token 把每一类的口径吃光（旧的 2000 预算）→ `Unterminated string`
+        截断 → 那一栏空。它对"想清楚"没有增益，关掉。（其余笔记生成调用仍走 low 档。）
         """
         import llm_client
         obj = llm_client.chat_json(self._key, self._model, system, user,
                                    max_tokens=max_tokens, temperature=0.3, timeout=300)
         return obj if isinstance(obj, dict) else {}
+
+    def _chat_meta(self, system: str, user: str, max_tokens: int):
+        """同 `_chat`，但带回 `finish_reason` + 返回长度 —— 只有「速览」走这条路：
+        截断（`length`）必须被当成**失败**（半截叙述印进笔记比没有更坏，2026-10-18）；
+        F9 起为空/截断会在 `note_v2.overview` 里**重试一次**（诊断数字见那里的打印）。"""
+        import llm_client
+        obj, finish, nchars = llm_client.chat_json(self._key, self._model, system, user,
+                                                   max_tokens=max_tokens, temperature=0.3,
+                                                   timeout=300, return_meta=True,
+                                                   effort=NOTE_EFFORT)
+        return (obj if isinstance(obj, dict) else {}), finish, nchars
+
+    def _with_overview(self, review: dict) -> tuple:
+        """⭐ 速览（2026-10-18 第七轮）：概念单元 → **一次小调用**，3–6 句、≤ 正文上限的 10%。
+
+        ⚠️ 旧的「五分钟串讲」（6–10 段重讲一遍）作废（作者原话：太长、假设读者没来上课）。
+        ⚠️ 失败（调用炸了 / 截断 / 模型没回可用内容）都不许抛、不许印半截：记一条 ⚠ 到页尾，
+           速览那一块就不出现 —— 笔记照常生成（fail-soft）。
+        """
+        import note_v2
+        mins = float(review.get("minutes") or 0.0)
+        max_chars = note_v2.speedout_max_chars(mins)
+        try:
+            got = note_v2.overview(review, chat=self._chat, chat_meta=self._chat_meta,
+                                   max_chars=max_chars)
+        except Exception as e:                                 # noqa: BLE001
+            return review, [], [f"速览没生成（{type(e).__name__}）—— 详细版里少这一层"]
+        if not got or not got.get("summary"):
+            return review, [], ["速览没生成（模型没回可用内容/被截断）—— 详细版里少这一层"]
+        out = dict(review)
+        out["overview_long"] = list(got["summary"])
+        if got.get("self_check"):
+            print(f"   🧵 速览自检：{got['self_check'][:70]}", flush=True)
+        return out, [], []
+
+    def _shorten_overlimit(self, review: dict) -> tuple:
+        """⭐ 超限单元压缩（第七轮 H）：超过上限 15% 的单元**各做一次**压缩调用（fail-soft）。"""
+        import note_v2
+        return note_v2.shorten_overlimit(review, chat=self._chat)
 
     def _review_v2(self, entries: list[dict], on_progress=None) -> dict:
         """v2 复习层：课件索引 → 分块 review → 覆盖度对齐 → 数字三道核 → 术语库。
@@ -1167,7 +1279,7 @@ class ObsidianWriter:
             #    覆盖度的数字由 `note_cover.report` 按时间窗算 —— 模型的整份回执
             #    曾经被 `max_tokens` 截断、异常又被吞成 `{}`，三节课全报"0/117"。
             #    ⚠️ 现在**失败要说出来**（`align` 返回 `{"failed": ...}`）。
-            got = note_v2.align(review, chat=self._chat,
+            got = note_v2.align(review, chat=self._chat_plain,
                                 materials=self._materials, skeleton=sk)
             if got.get("failed"):
                 msg = (f"覆盖度/课件核对没做成（{got['failed']}）—— 覆盖度仍按时间窗"
@@ -1185,12 +1297,16 @@ class ObsidianWriter:
             if cv["n_covered"] < cv["n_points"]:
                 line += f"（缺 {cv['n_points'] - cv['n_covered']} 条，见 §9）"
             print("   " + line, flush=True)
+        # ⭐ F8-b：`flags` 在 try 外定义 —— 收的是**降级之前**题块里的 mismatch 行，
+        #    例题返修要靠它（核对本身失败也要把已经收下的交给返修）。
+        flags: list = []
         try:
             checks = note_v2.verify_numbers(
                 review, chat=self._chat, materials=self._materials,
                 # ⚠️ Jun「🎙 例子要能在转录里对上数字」那条判据要用它（第四轮）
                 transcript="\n".join(
-                    str(e.get("en") or e.get("asr") or "") for e in entries))
+                    str(e.get("en") or e.get("asr") or "") for e in entries),
+                exercise_flags=flags)
             if checks:
                 review["checks"] = checks
                 self._corr_extra = note_v2.corrections_from_mismatch(checks)
@@ -1200,28 +1316,80 @@ class ObsidianWriter:
                       f"{len(un)} 项未核对）", flush=True)
         except Exception as e:                                # noqa: BLE001
             print(f"⚠ 数字核对失败({str(e)[:60]}); 笔记照常生成")
+        self._exercise_flags = flags
         # ⭐ 正文纪律（作者第 2、3 条）：删猜测句 / 引号里的英文必须逐字。
-        for fn, label in ((lambda r: note_ledger.reconcile(r),
+        # ⭐ 版式 A（2026-10-18）：清理链里插一步「五分钟串讲」—— 放在讲解已经清过一遍
+        #    之后，它自己再被后面的第二遍 `scrub` 与 `quote_check` 覆盖（新写的散文
+        #    必须走同一条纪律，不能因为是"总结层"就免检）。
+        for fn, label in ((lambda r: self._repair_exercises(r, entries), "例题返修"),
+                          # ⭐ F10：对照表/步骤图全讲各 ≤3（逐节的 schema 校验在
+                          #    `note_v2._clean_section` 里；这一刀是**全篇**上限）。
+                          (lambda r: note_v2.clamp_components(r), "组件上限"),
+                          # ⭐ F11 ③：跨件重复闸（flow 复述本节例题步骤 ≥3 条 / 组件同名）。
+                          (lambda r: note_v2.dedupe_components(r), "组件去重"),
+                          (lambda r: note_ledger.reconcile(r),
                            "更正账本核对"),
                           (lambda r: note_guards.scrub(r), "猜测句清理"),
+                          (lambda r: note_guards.dedupe_sentences(r), "重复句去重"),
+                          (lambda r: note_guards.strip_clock_times(r), "正文时间戳清理"),
+                          (lambda r: note_guards.drop_trivial_cues(r), "纯算术线索问题"),
                           (lambda r: note_guards.ensure_caliber(
                               r, materials=self._materials), "停产价格口径"),
                           (lambda r: note_ledger.ensure_min_value(r), "最小平均成本补值"),
+                          # ⭐ 第七轮 H：超上限的单元先压干净，速览才照着**最终长度**写
+                          (lambda r: self._shorten_overlimit(r), "超限单元压缩"),
+                          (lambda r: self._with_overview(r), "速览"),
+                          # 串讲的正文也吃同一条纪律（它是 overview 层新写的散文，第一遍清完在它之前）
+                          (lambda r: note_guards.strip_clock_times(r), "正文时间戳清理（串讲）"),
+                          (lambda r: note_guards.scrub(r), "猜测句清理（串讲）"),
                           (lambda r: note_guards.quote_check(
                               r, materials=self._materials,
                               transcript="\n".join(
                                   str(e.get("en") or e.get("asr") or "") for e in entries)),
-                           "引用逐字核对")):
+                           "引用逐字核对"),
+                          # ⭐ F9b：「支持性核对」—— 断言"讲义说过 X"的 claim 过一遍 Jev
+                          #    （E3 口径，按节分批 ≤15 次请求/节）；p<0.15 挂 ⚠
+                          #    「转录/材料里没找到这句」。只标不改；例题给定验证过重建的
+                          #    改挂 🎙+✏️「按口述还原」。📖 题面对材料判、没材料豁免。
+                          #    没配 Jev key → 空转（全 None），不花钱不挡生成。
+                          (lambda r: note_guards.support_check(
+                              r, entries=entries, materials=self._materials),
+                           "支持性核对"),
+                          # ⚠️ 必须最后：标注要落在**已经清完**的正文上，也不能再进串讲的输入
+                          (lambda r: note_guards.annotate_mismatches(r), "核算结果落正文")):
             try:
                 got_, extra_items, warns_ = fn(review)
                 review = got_
                 if extra_items and label == "更正账本核对":
                     self._corr_extra = list(self._corr_extra) + list(extra_items)
+                # 🧮 F9c 守卫台账：每处删/改都计数（原因在 `warns_` 里，逐条进核对记录）。
+                if label == "例题返修" and extra_items:
+                    st = extra_items[0]
+                    if isinstance(st, dict):
+                        self._guard_counts["repaired"] += int(st.get("repaired") or 0)
+                        self._guard_counts["dropped"] += int(st.get("dropped") or 0)
+                elif label == "支持性核对" and extra_items:
+                    st = extra_items[0]
+                    if isinstance(st, dict):
+                        self._guard_counts["downgraded"] += int(st.get("downgraded") or 0)
+                elif label in ("猜测句清理", "猜测句清理（串讲）", "重复句去重",
+                               "纯算术线索问题", "组件上限", "组件去重") and isinstance(extra_items, list):
+                    self._guard_counts["dropped"] += len(extra_items)
                 for w in warns_:
                     self._note_warns.append(w)
                     print(f"   ⚠ {label}：{w}", flush=True)
             except Exception as e:                            # noqa: BLE001
                 print(f"⚠ {label}失败({str(e)[:60]}); 笔记照常生成")
+        # 🧮 F9c：守卫台账行（批量审计：一批笔记 `grep guards:` 就能看谁被动过）。
+        self._guard_counts["flagged"] = len(
+            [c for c in (review.get("checks") or [])
+             if isinstance(c, dict) and c.get("status") == "mismatch"])
+        self._guard_summary = (
+            f"guards: repaired {self._guard_counts['repaired']}, "
+            f"dropped {self._guard_counts['dropped']}, "
+            f"flagged {self._guard_counts['flagged']}, "
+            f"downgraded {self._guard_counts['downgraded']}")
+        print("🧮 " + self._guard_summary, flush=True)
         # 💡 术语库：作者硬要求（从笔记抽词 → `prep.append_terms` 只追加 + 墓碑）。
         try:
             import note_glossary
@@ -1465,9 +1633,11 @@ class ObsidianWriter:
             glossary_added=list(self._gloss_added),
             term_footer=sel.footer(),
             term_rows=note_terms.render_table(sel, extra=extra),
+            term_pairs=_term_pairs_norm(extra, sel),
             review_dates=list(self._review_dates),
             anki_name=self._anki_name, html_name=self._html_name,
-            corrections_extra=list(self._corr_extra), warns=warns)
+            corrections_extra=list(self._corr_extra), warns=warns,
+            guard_summary=getattr(self, "_guard_summary", ""))
         # ⚠️ `kaTeX` 那一格由 `_write_sidecars` 在**真装过之后**回填（`note_html` 是纯渲染，
         #    装资源是 I/O）—— 默认 True = "还不知道"，只有**已知失败**才写那一行警告。
 
@@ -1487,11 +1657,26 @@ class ObsidianWriter:
                         for t in (s.get("terms") or [])]
         tagged += [(t, "") for t in (review.get("terms") or [])]
         seen: set = set()
+        n_filtered = 0
         for t, sec_ts in tagged:
             en, zh = _one_line(t.get("en")), _one_line(t.get("zh"))
             if not en or en.lower() in seen:
                 continue
             seen.add(en.lower())
+            # ⭐ F8-f（作者点名）+ F9c（域中立）：泛词判据分两层 ——
+            #    `minimum/maximum` 一律算泛词；`substitution/derivative/…` 是某些课的
+            #    正词（化学的取代反应/衍生物）→ **本课材料里出现过就留**（Materials.verify）。
+            #    **术语库真有这个词也留**（规则原文："unless the glossary has them"）。
+            why = note_terms.drop_reason(en, type_="", source=note_terms.SRC_LECTURE)
+            try:
+                in_course = bool(self._materials is not None
+                                 and self._materials.verify(en))
+            except Exception:                               # noqa: BLE001
+                in_course = False
+            if (why or note_terms.too_common(en, verified=in_course)) \
+                    and not self._in_term_store(en):
+                n_filtered += 1
+                continue
             ts = ""
             if compile_term is not None:
                 try:
@@ -1509,6 +1694,9 @@ class ObsidianWriter:
                 ts = sec_ts
             out.append(note_terms.Hit(term=en, gloss=zh or "（本课术语）", ts=ts,
                                       source=note_terms.SRC_LECTURE))
+        if n_filtered:
+            print(f"   ⚠ 术语表过滤：{n_filtered} 条泛词/常识词"
+                  f"（术语库里没有的才丢，F8-f）", flush=True)
         return out
 
     def _atomic_write(self, path: Path, text: str) -> None:

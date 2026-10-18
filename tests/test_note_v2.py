@@ -6,6 +6,7 @@
      附录 B 的转录**不精修**、中文占比达标（作者验收表里那条）；
    · `note_html` 的**六个组件**在页面上真的存在（含"没有 KaTeX 也不白屏"）。
 """
+import json
 import os
 import re
 import sys
@@ -13,6 +14,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import note_html as nh          # noqa: E402
+import note_math as nm          # noqa: E402
 import note_render as nr        # noqa: E402
 import note_v2 as nv            # noqa: E402
 
@@ -71,7 +73,8 @@ class Clean(unittest.TestCase):
             "kind": "supply_demand", "params": {"d0": 100}}}]})
         self.assertEqual(good["sections"][0]["plot"]["kind"], "supply_demand")
         bad = nv._clean({"sections": [{"heading": "H", "plot": {"kind": "自作主张"}}]})
-        self.assertEqual(bad["sections"][0]["plot"], {})
+        self.assertNotIn("plot", bad["sections"][0],
+                         "非法 kind 的图整块摘掉（F9b：空壳 example/faded/plot 不留）")
 
     def test_checks_status_只认三档(self):
         got = nv._clean({"checks": [{"claim": "x", "status": "嗯"}]})
@@ -124,6 +127,7 @@ class ReviewCall(unittest.TestCase):
         self.assertIn("📖 final.md §Exercise 5", seen["user"])
         self.assertIn("Course: ECON10790 Maths", seen["user"])
         self.assertIn("cost_curves", seen["system"], "图菜单没进 prompt")
+        self.assertIn("字数上限", seen["user"], "每块的长度上限（第七轮 H）没进 prompt")
 
     def test_块失败要退一步_不许静默丢(self):
         """⭐ 第四轮 run F 的实测：带章节骨架后 4/5 块输出被截断 → 静默丢半节课。
@@ -218,6 +222,34 @@ class Align(unittest.TestCase):
         self.assertIn("最多 10 条", seen["sys"])
 
 
+    def test_截断的第一次会重试(self):
+        """F9c：无骨架路径第一次被 `max_tokens` 截断（SOC10020 实测：Unterminated string）
+        → 1.5× 重试一次。"""
+        calls = []
+
+        def chat(s, u, m):
+            calls.append(m)
+            if len(calls) == 1:
+                raise ValueError("Unterminated string starting at: line 1 column 4314")
+            return {"covered": [], "notes": "重试成功"}
+
+        got = nv.align(REVIEW, chat=chat, max_tokens=2000)
+        self.assertEqual(calls, [2000, 3000], "第一次失败 → 1.5× 重试一次")
+        self.assertNotIn("failed", got)
+        self.assertEqual(got["notes"], "重试成功")
+
+    def test_两次都失败才报_failed(self):
+        calls = []
+
+        def chat(s, u, m):
+            calls.append(m)
+            raise ValueError("bad json")
+
+        got = nv.align(REVIEW, chat=chat, max_tokens=2000)
+        self.assertIn("failed", got)
+        self.assertEqual(calls, [2000, 3000])
+
+
 class VerifyNumbers(unittest.TestCase):
     def test_挑出带等号的断言(self):
         claims = nv.numeric_claims({"sections": [SECTION]})
@@ -268,13 +300,496 @@ class VerifyNumbers(unittest.TestCase):
         self.assertEqual([c for c in got if c.get("claim")], [])
 
 
+class ExerciseRepair(unittest.TestCase):
+    """F8-b（作者第七轮抓到的回归）：econ 第一节把**拼出来的函数**说成课上的，
+    还端着一个 ⚠ 出货。规矩：题块被核出错 → **每节一次**返修（错行喂回去）；
+    复检仍错 → 撤掉题块（宁缺）；⚠ 只留给讲课时引的原话数字。
+
+    fixture = `tests/f8_econ_unit1.json`：runs/f7 econ 第一节的**原样 JSON**（作者点名）。
+    它身上的病：① 变式/补全用 `q→∞` 的极限充当最值（作者判 fail）；
+    ② 例题里 `AC(2.89)≈2.89` 只有模型核抓得到（`\\frac` 函数机械核算不了）——
+    所以触发 = 机械核 ∪ 降级**之前**的模型核（`flags`）。
+    """
+
+    def _unit(self) -> dict:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "f8_econ_unit1.json")
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_触发一次返修_正文与题块一起换(self):
+        calls = []
+
+        def chat(s, u, m):
+            calls.append(u)
+            return {"prose": ["课上这道题的函数没录全。举个例子（自编）：$AC(q)=q+\\frac{9}{q}$，"
+                              "$AC'(q)=1-\\frac{9}{q^2}=0$ 得 $q=3$，$AC(3)=3+3=6$。"],
+                    "example": {"title": "自编例",
+                                "prompt": "求 $AC(q)=q+\\frac{9}{q}$ 的最小值。",
+                                "steps": [{"text": "$AC'(q)=1-\\frac{9}{q^2}=0$", "why": "驻点"},
+                                          {"text": "$q=3$", "why": "正根"},
+                                          {"text": "$AC(3)=3+3=6$", "why": "代回"}],
+                                "answer": "6"},
+                    "variants": [{"q": "求 $AC(q)=q+\\frac{16}{q}$ 的最小值。",
+                                  "steps": [],
+                                  "a": "$AC'(q)=1-\\frac{16}{q^2}=0$，$q=4$，$AC(4)=8$。"}],
+                    "faded": None, "note": "换自编例"}
+        got, stats, warns = nv.repair_exercises({"sections": [self._unit()], "checks": []},
+                                                chat=chat, flags=[])
+        self.assertEqual(len(calls), 1, "一节只许返修一次")
+        self.assertEqual(stats, [{"repaired": 1, "dropped": 0}],
+                         "F9c：返修计数要回传（守卫台账行用）")
+        s = got["sections"][0]
+        self.assertIn("举个例子（自编）", s["prose"][0])
+        self.assertEqual(s["example"]["title"], "自编例")
+        self.assertNotIn("faded", s, "faded=null 就是撤掉")
+        self.assertTrue(any("返修调用" in w for w in warns), warns)
+        # 台账：换掉的题块，旧 claim 不许留在核定表里（过期行 = 假修正）
+        claims = [str(c.get("claim") or "") for c in got["checks"]]
+        self.assertFalse(any("最低点为100" in c for c in claims), claims)
+        self.assertFalse(any("计算$AC(2.89)" in c for c in claims), claims)
+
+    def test_复检仍错就撤题块(self):
+        unit = self._unit()
+
+        def chat(s, u, m):
+            return {"prose": ["还是那句：$AC(2.89)\\approx2.89$。"],
+                    "example": unit["example"], "variants": unit["variants"], "note": "没改"}
+        got, stats, warns = nv.repair_exercises({"sections": [unit], "checks": []}, chat=chat)
+        self.assertEqual(stats, [{"repaired": 1, "dropped": 1}],
+                         "F9c：复检仍错被撤的那节也要计数（宁缺= dropped）")
+        s = got["sections"][0]
+        for k in ("example", "variants", "faded"):
+            self.assertNotIn(k, s, f"{k} 复检仍错必须撤（宁缺）")
+        self.assertTrue(any("已撤" in w for w in warns), warns)
+
+    def test_模型核的旗子也触发(self):
+        """机械核看不到的错（LLM 标记）也必须能叫醒返修 —— F8 时 `\\frac` 函数是这种；
+        F9 换一个机械核更看不见的形态（没有函数、没有可复算的等式，只有 LLM 核出的错）。"""
+        unit = {"heading": "[13:16] 停产价格", "ts": "13:16", "q": "题？",
+                "prose": ["随便一句。"],
+                "example": {"title": "🎙 13:16", "prompt": "求停产价格。",
+                            "steps": [{"text": "把 2.89 代进去。", "why": ""}],
+                            "answer": "2.89"}}
+        flags = [{"claim": "把 2.89 代进去。", "status": "mismatch",
+                  "how": "代入后约233，非2.89", "recomputed": "233"}]
+        calls = []
+
+        def chat(s, u, m):
+            calls.append(u)
+            return {"example": None, "prose": ["课上的函数没录全，例题先撤了。"], "note": "撤"}
+        got, _, _ = nv.repair_exercises({"sections": [unit], "checks": []},
+                                        chat=chat, flags=flags)
+        self.assertEqual(len(calls), 1, "模型核标了错却没人叫返修")
+        self.assertNotIn("example", got["sections"][0])
+
+    def test_没问题不发调用(self):
+        clean = {"heading": "[13:40] 干干净净", "ts": "13:40", "q": "这节问什么？",
+                 "prose": ["这一节没有数字断言。"],
+                 "example": {"title": "📖 无", "prompt": "看看就好", "steps": [], "answer": "好"}}
+
+        def chat(*a):
+            raise AssertionError("干净的一节不该发返修调用")
+        got, _, warns = nv.repair_exercises({"sections": [clean]}, chat=chat)
+        self.assertEqual(got["sections"][0], clean)
+        self.assertEqual(warns, [])
+
+    def test_program跑崩_触发返修(self):
+        """⭐ F11 §2：program 的 mismatch 归 example 单元 → 走既有返修闸。"""
+        import note_math as nm
+        unit = {"heading": "[13:16] 停产价格", "ts": "13:16", "q": "题？",
+                "prose": ["讲解。"],
+                "example": {"title": "🎙 13:16", "prompt": "求最低平均成本对应的价格。",
+                            "program": [
+                                {"var": "q_star", "op": "argmin",
+                                 "expr": "(60*q + 500)/q", "x": "q", "range": [1, 10]},
+                                {"var": "P", "op": "eval", "expr": "(60*q + 500)/q",
+                                 "x": "q", "at": "q_star"}],
+                            "steps": [{"text": "令导数为零。", "why": ""}],
+                            "answer": "最低点为 60。"}}
+        rows = nm.check_review({"sections": [unit]})
+        bad = [r for r in rows if r.get("status") == "mismatch"
+               and nm.unit_of_claim(unit, str(r.get("claim") or "")) in nm.MODEL_AUTHORED]
+        self.assertTrue(bad, "program 跑崩的 mismatch 必须归到 example 单元（返修才会醒）")
+        calls = []
+
+        def chat(s, u, m):
+            calls.append(u)
+            return {"prose": ["课上的函数没录全，例题先撤了。"], "example": None, "note": "撤"}
+        got, stats, _ = nv.repair_exercises({"sections": [unit], "checks": []}, chat=chat)
+        self.assertEqual(len(calls), 1, "program 跑崩要触发一次返修")
+        self.assertNotIn("example", got["sections"][0])
+
+
 class Schedule(unittest.TestCase):
     def test_间隔日期(self):
+        # ⭐ 作者 2026-10-18 拍板：今晚 / +3 天 / +7 天（日期从**上课那天**算）。
         self.assertEqual(nv.review_dates("2026-10-15"),
-                         ["2026-10-17", "2026-10-22", "2026-11-05"])
+                         ["2026-10-15", "2026-10-18", "2026-10-22"])
 
     def test_日期坏了返回空(self):
         self.assertEqual(nv.review_dates("不是日期"), [])
+
+    def test_三档标签与动作(self):
+        rows = nv.schedule_rows(["2026-10-15", "2026-10-18", "2026-10-22"])
+        self.assertEqual([r["label"] for r in rows], ["今晚", "+3 天", "+7 天"])
+        self.assertEqual(rows[0]["date"], "2026-10-15")
+        self.assertTrue(all(r["task"] for r in rows), rows)
+        self.assertEqual(nv.schedule_rows([]), [])
+
+
+class Overview(unittest.TestCase):
+    """速览的生成侧（全替身 chat，零网络）—— 第七轮，作者 2026-10-18（替代五分钟串讲）。"""
+
+    def _rev(self):
+        return {"sections": [dict(SECTION), dict(SECTION, heading="第二节")]}
+
+    def test_输出字段被收进来(self):
+        def chat(s, u, mt):
+            self.assertIn("第 2 单元", u)          # 输入用的是合并后的概念单元
+            self.assertNotIn("先说直觉", u, "速览输入里不该有讲解全文")
+            self.assertIn("不超过", u)             # 上限写进了用户消息
+            return {"summary": ["先讲了这个，再把它用到那个上，两条线在这里接上。"],
+                    "self_check": "yes"}
+        got = nv.overview(self._rev(), chat=chat, max_chars=200)
+        self.assertEqual(got["summary"], ["先讲了这个，再把它用到那个上，两条线在这里接上。"])
+        self.assertEqual(got["self_check"], "yes")
+
+    def test_截断当失败(self):
+        """⭐ `finish_reason=="length"` → 整段不要（半截叙述比没有更坏）。"""
+        def cm(s, u, mt):
+            return {"paragraphs": ["半截……"]}, "length"
+        self.assertEqual(nv.overview(self._rev(), chat=lambda *a: {}, chat_meta=cm), {})
+
+    def test_没小节不调用(self):
+        def boom(*a):
+            raise AssertionError("不该调用")
+        self.assertEqual(nv.overview({}, chat=boom), {})
+
+    def test_调用炸了返回空(self):
+        def boom(s, u, mt):
+            raise RuntimeError("网络炸了")
+        self.assertEqual(nv.overview(self._rev(), chat=boom), {})
+
+    def test_空回复重试一次(self):
+        """F9（作者点名）：首次空/截断 → **重试一次**；ECS 丢速览的补丁。"""
+        calls = []
+
+        def cm(s, u, mt):
+            calls.append(1)
+            if len(calls) == 1:
+                return {"self_check": "只自己评了一句"}, "stop", 12
+            return {"summary": ["第二次拿到了。"]}, "stop", 40
+        got = nv.overview(self._rev(), chat=None, chat_meta=cm)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(got["summary"], ["第二次拿到了。"])
+
+    def test_截断也重试_两次都败才认输(self):
+        calls = []
+
+        def cm(s, u, mt):
+            calls.append(1)
+            return {}, "length", 3500
+        self.assertEqual(nv.overview(self._rev(), chat=None, chat_meta=cm), {})
+        self.assertEqual(len(calls), 2, "重试正好一次")
+
+
+class ConceptUnits(unittest.TestCase):
+    """概念单元（第七轮 A）：相邻同主干的小节并成一个单元；单元带 minutes 与 ts 区间。"""
+
+    def _sec(self, ts, heading, **kw):
+        return {"ts": ts, "heading": heading, "prose": [f"{heading}·讲解。"],
+                "q": f"{heading}·问？", "example": {"prompt": f"{heading}·题",
+                                                   "steps": [], "answer": "答"},
+                "pitfalls": ["坑"], "terms": [{"en": "x", "zh": "某"}], **kw}
+
+    def test_相邻同主干并成一个单元(self):
+        rev = {"sections": [
+            self._sec("13:16", "[13:16] 最优化练习与停业价格：计算平均成本"),
+            self._sec("13:18", "[13:18] 最优化练习与停业价格：三次函数练习",
+                      terms=[{"en": "y", "zh": "另"}]),
+            self._sec("13:20", "[13:20] 平均成本、边际成本及其相互作用：相互位置"),
+            self._sec("13:22", "[13:22] 平均成本、边际成本及其相互作用：交点"),
+        ]}
+        got = nv.merge_units(rev, end_ts="13:24")
+        heads = [s["heading"] for s in got["sections"]]
+        self.assertEqual(heads, ["最优化练习与停业价格", "平均成本、边际成本及其相互作用"])
+        a = got["sections"][0]
+        self.assertEqual(a["ts"], "13:16–13:18")
+        self.assertEqual(a["minutes"], 4.0)          # 13:16→13:18 + 13:18→13:20
+        self.assertEqual(a["prose"], ["[13:16] 最优化练习与停业价格：计算平均成本·讲解。",
+                                      "[13:18] 最优化练习与停业价格：三次函数练习·讲解。"])
+        self.assertEqual(a["example"]["prompt"], "[13:16] 最优化练习与停业价格：计算平均成本·题",
+                         "重复例子只留第一个")
+        self.assertEqual(len(a["terms"]), 2)         # 各自去重后并起来
+        self.assertEqual(got["minutes"], 8.0)
+
+    def test_只并相邻的(self):
+        rev = {"sections": [
+            self._sec("13:16", "[13:16] A：一"),
+            self._sec("13:18", "[13:18] B：二"),
+            self._sec("13:20", "[13:20] A：三"),
+        ]}
+        got = nv.merge_units(rev, end_ts="13:22")
+        self.assertEqual(len(got["sections"]), 3, "中间的 B 把两段 A 隔开了，不许跨着并")
+        self.assertEqual([s["heading"] for s in got["sections"]],
+                         ["[13:16] A：一", "[13:18] B：二", "[13:20] A：三"],
+                         "单成员单元保持原标题")
+
+    def test_双前缀也认(self):
+        """防御：模型自己在标题里写了 `[13:16]`（`merge_blocks` 还会再加一层）。"""
+        rev = {"sections": [
+            self._sec("13:16", "[13:16] [13:16] 最优化练习与停业价格：一"),
+            self._sec("13:18", "[13:18] [13:18] 最优化练习与停业价格：二"),
+        ]}
+        got = nv.merge_units(rev, end_ts="13:20")
+        self.assertEqual(len(got["sections"]), 1)
+        self.assertEqual(got["sections"][0]["heading"], "最优化练习与停业价格")
+
+    def test_分钟数封顶防乱标_ts(self):
+        """模型乱标/重复标 ts（BUSI 实测 60 分钟一节）→ 单节分钟封顶 10，不再无限放宽上限。"""
+        rev = {"sections": [
+            self._sec("09:20", "[09:20] A：一"),
+            self._sec("09:20", "[09:20] A：二"),
+            self._sec("10:20", "[10:20] B：三"),
+        ]}
+        got = nv.merge_units(rev, end_ts="10:25")
+        self.assertEqual(got["sections"][0]["minutes"], nv.UNIT_MAX_MINUTES,
+                         "60 分钟的乱车位要封到 10")
+
+    def test_速览上限封顶_600(self):
+        """BUSI 两次「速览没生成」的根因之一：乱 ts 把上限撑到 3206 字 → 撞 3500 token 截断。"""
+        self.assertEqual(nv.speedout_max_chars(133.6), nv.FASTVIEW_MAX_CHARS)
+        self.assertEqual(nv.speedout_max_chars(25.7), nv.FASTVIEW_MAX_CHARS)
+        self.assertEqual(nv.speedout_max_chars(1.0), 120)
+
+    def test_没有_sections_原样返回(self):
+        rev = {"qa": [{"q": "x", "a": "y"}]}
+        self.assertEqual(nv.merge_units(rev), rev)
+
+    def test_最后一节按课末算分钟(self):
+        rev = {"sections": [self._sec("13:16", "[13:16] A：一"),
+                            self._sec("13:20", "[13:20] B：二")]}
+        got = nv.merge_units(rev, end_ts="13:26")
+        self.assertEqual(got["sections"][1]["minutes"], 6.0)
+
+
+class ChunkBudget(unittest.TestCase):
+    """每块的长度上限（第七轮 H）：≈240 CJK 字/分钟，写进提示词。"""
+
+    def test_上限按分钟算(self):
+        chunk = ["[13:16:00] a", "[13:16:30] b", "[13:20:00] c"]     # 4 分钟
+        m = re.search(r"至多 (\d+) 字", nv.chunk_budget_line(chunk))
+        self.assertTrue(m, "上限没写进提示行")
+        n = int(m.group(1))
+        self.assertGreaterEqual(n, 960)      # ≥ 240×4
+        self.assertLessEqual(n, 1200)        # ≤ 240×5（含半分钟余量）
+
+    def test_没有时间戳给保守值(self):
+        m = re.search(r"至多 (\d+) 字", nv.chunk_budget_line(["没有时间戳的行"]))
+        self.assertEqual(int(m.group(1)), 720)      # 默认按 3 分钟
+
+
+class QaTiers(unittest.TestCase):
+    """三档自测（F7②）：基础/中等/挑战 各取 ≤2，档序固定，`tier` 归一落到数据上。"""
+
+    def test_每档至多两题_按档排序(self):
+        qa = [{"q": f"q{i}", "a": "a", "tier": t} for i, t in enumerate(
+            ["挑战", "基础", "中等", "基础", "挑战", "基础", "中等"])]
+        got = nv.pick_qa_tiers(qa)
+        self.assertEqual([x["tier"] for x in got], ["基础", "基础", "中等", "中等", "挑战", "挑战"])
+        self.assertEqual([x["q"] for x in got][:2], ["q1", "q3"])
+
+    def test_没标档按kind兜底(self):
+        qa = [{"q": "1", "a": "a", "kind": "concept"},
+              {"q": "2", "a": "a", "kind": "calc"},
+              {"q": "3", "a": "a", "kind": "trap"},
+              {"q": "4", "a": "a"}]
+        got = nv.pick_qa_tiers(qa)
+        self.assertEqual([x["tier"] for x in got], ["基础", "中等", "中等", "挑战"])
+
+    def test_坏输入不炸(self):
+        self.assertEqual(nv.pick_qa_tiers(None), [])
+        self.assertEqual(nv.pick_qa_tiers(["x", 1]), [])
+
+
+class ShortenOverlimit(unittest.TestCase):
+    """超限单元压缩（第七轮 H）：> 上限 ×1.15 才发一次调用；失败/变不短都不动原文。"""
+
+    def _rev(self, cjk: int, minutes=1.0):
+        return {"sections": [{"ts": "13:16", "heading": "H",
+                              "prose": ["字" * cjk], "minutes": minutes}]}
+
+    def test_超限才发调用(self):
+        calls = []
+
+        def chat(s, u, mt):
+            calls.append(u)
+            return {"prose": ["短"]}
+        got, _, warns = nv.shorten_overlimit(self._rev(1000), chat=chat)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("上限是 240 字", calls[0])
+        self.assertEqual(got["sections"][0]["prose"], ["短"])
+        self.assertTrue(warns and "1 个单元" in warns[0], "调用数要记账")
+
+    def test_没超限不发(self):
+        calls = []
+
+        def chat(s, u, mt):
+            calls.append(u)
+            return {"prose": ["短"]}
+        got, _, warns = nv.shorten_overlimit(self._rev(200), chat=chat)
+        self.assertEqual(calls, [], "没超限不许发调用")
+        self.assertEqual(got["sections"][0]["prose"], ["字" * 200])
+        self.assertEqual(warns, [])
+
+    def test_1_15倍到1_5倍之间不发(self):
+        """F7-f 收紧：300 字 > 旧阈值 276（1.15×）但 ≤ 新阈值 360（1.5×）→ 不许发。"""
+        calls = []
+
+        def chat(s, u, mt):
+            calls.append(u)
+            return {"prose": ["短"]}
+        nv.shorten_overlimit(self._rev(300), chat=chat)
+        self.assertEqual(len(calls), 0)
+
+    def test_每讲至多五次(self):
+        """F7-f：7 个超限单元 → 只发 5 次（把 F6 的 18 次压到个位数）。"""
+        calls = []
+
+        def chat(s, u, mt):
+            calls.append(u)
+            return {"prose": ["短"]}
+        rev = {"sections": [{"ts": "13:16", "heading": f"H{i}", "prose": ["字" * 1000],
+                             "minutes": 1.0} for i in range(7)]}
+        got, _, warns = nv.shorten_overlimit(rev, chat=chat)
+        self.assertEqual(len(calls), 5)
+        self.assertTrue(warns and "5 个单元" in warns[0])
+        self.assertEqual([s["prose"] for s in got["sections"]][5:],
+                         [["字" * 1000], ["字" * 1000]], "第 6、7 个不动")
+
+    def test_变不短就不动(self):
+        def chat(s, u, mt):
+            return {"prose": ["更长的" * 500]}
+        got, _, warns = nv.shorten_overlimit(self._rev(1000), chat=chat)
+        self.assertEqual(got["sections"][0]["prose"], ["字" * 1000])
+        self.assertEqual(warns, [])
+
+    def test_调用炸了_fail_soft(self):
+        def boom(s, u, mt):
+            raise RuntimeError("炸")
+        got, _, warns = nv.shorten_overlimit(self._rev(1000), chat=boom)
+        self.assertEqual(got["sections"][0]["prose"], ["字" * 1000])
+        self.assertEqual(warns, [])
+
+    def test_没有_minutes_跳过(self):
+        def boom(*a):
+            raise AssertionError("不该调用")
+        rev = {"sections": [{"heading": "H", "prose": ["字" * 5000]}]}
+        got, _, warns = nv.shorten_overlimit(rev, chat=boom)
+        self.assertEqual(warns, [])
+
+
+class AnnounceTerms(unittest.TestCase):
+    """术语就地括注（第七轮 F）：首次出现 → 「中文（English）」；HTML 与 md 共用这一份。"""
+
+    def test_首次出现才括注(self):
+        terms, seen = [("边际成本", "marginal cost")], set()
+        a = nv.announce_terms("先讲边际成本，再讲边际成本。", terms, seen)
+        self.assertEqual(a, "先讲边际成本（marginal cost），再讲边际成本。")
+        b = nv.announce_terms("后面又见边际成本。", terms, seen)
+        self.assertEqual(b, "后面又见边际成本。")
+
+    def test_已经括注的不重复加(self):
+        terms, seen = [("边际成本", "marginal cost")], set()
+        t = "边际成本（marginal cost）是定义。"
+        self.assertEqual(nv.announce_terms(t, terms, seen), t)
+        self.assertIn(terms[0], seen)
+
+    def test_in_review_首次落在正文_台账不碰_原_dict不动(self):
+        rev = {"sections": [{"heading": "边际成本", "prose": ["先说边际成本。"],
+                             "q": "边际成本怎么算？",
+                             "terms": [{"en": "marginal cost", "zh": "边际成本"}]}],
+               "cover": {"rows": [{"title": "边际成本"}]}}
+        got = nv.announce_terms_in_review(rev)
+        self.assertEqual(got["sections"][0]["prose"][0], "先说边际成本（marginal cost）。")
+        self.assertEqual(got["sections"][0]["heading"], "边际成本",
+                         "标题保持干净（目录/地图里会重复出现）")
+        self.assertEqual(got["sections"][0]["q"], "边际成本怎么算？", "只标首次")
+        self.assertEqual(got["cover"]["rows"][0]["title"], "边际成本", "台账不碰")
+        self.assertEqual(rev["sections"][0]["prose"][0], "先说边际成本。", "原 dict 不许动")
+
+    def test_速览先走(self):
+        """walk 顺序 = 阅读顺序：页首速览先拿首次括注，小节里后出现的保持干净。"""
+        rev = {"overview_long": ["先看边际成本。"],
+               "sections": [{"prose": ["再说边际成本。"],
+                             "terms": [{"en": "marginal cost", "zh": "边际成本"}]}]}
+        got = nv.announce_terms_in_review(rev)
+        self.assertEqual(got["overview_long"][0], "先看边际成本（marginal cost）。")
+        self.assertEqual(got["sections"][0]["prose"][0], "再说边际成本。")
+
+    def test_2元组形状也认(self):
+        rev = {"sections": [{"prose": ["先说边际成本。"],
+                             "terms": [["边际成本", "marginal cost"]]}]}
+        got = nv.announce_terms_in_review(rev)
+        self.assertIn("边际成本（marginal cost）", got["sections"][0]["prose"][0])
+
+    def test_标准拼写盖过模型写法(self):
+        """F7-e：术语表里是 shutdown price，转录/模型写成 shutting down price → 用术语表的。"""
+        rev = {"sections": [{"prose": ["先看停产价格怎么定。"],
+                             "terms": [{"en": "shutting down price", "zh": "停产价格"}]}]}
+        got = nv.announce_terms_in_review(rev, canon=[["shutdown price", "停产价"]])
+        self.assertIn("停产价格（shutdown price）", got["sections"][0]["prose"][0])
+        got2 = nv.announce_terms_in_review(rev)
+        self.assertIn("停产价格（shutting down price）", got2["sections"][0]["prose"][0],
+                      "没有标准拼写时照旧用模型写法")
+
+    def test_标题也换标准拼写(self):
+        """F8-e（作者点名）：标题里已写好的「中文（English）」也要换成术语表拼写。"""
+        rev = {"sections": [{"heading": "[13:16] 停产价格（shutting down price）",
+                             "prose": ["讲讲看。"],
+                             "terms": [{"en": "shutting down price", "zh": "停产价格"}]}]}
+        got = nv.announce_terms_in_review(rev, canon=[["shutdown price", "停产价"]])
+        self.assertEqual(got["sections"][0]["heading"], "[13:16] 停产价格（shutdown price）")
+        got2 = nv.announce_terms_in_review(rev)
+        self.assertEqual(got2["sections"][0]["heading"],
+                         "[13:16] 停产价格（shutting down price）", "没有标准拼写就照旧")
+
+    def test_标题没括注不硬加(self):
+        rev = {"sections": [{"heading": "[13:16] 停产价格", "prose": ["讲讲看。"],
+                             "terms": [{"en": "shutdown price", "zh": "停产价"}]}]}
+        got = nv.announce_terms_in_review(rev)
+        self.assertEqual(got["sections"][0]["heading"], "[13:16] 停产价格")
+
+    def test_覆盖表的行标题也换(self):
+        """F8-e 补：覆盖度表（§9）的行标题 = 小节标题的再一次出现，也得换。"""
+        rev = {"sections": [{"heading": "停产价格（shutting down price）", "prose": ["x。"],
+                             "terms": [{"en": "shutting down price", "zh": "停产价格"}]}],
+               "cover": {"rows": [{"title": "✅ 停产价格（Shutting Down Price）"}]}}
+        got = nv.announce_terms_in_review(rev, canon=[["shutdown price", "停产价"]])
+        self.assertIn("停产价格（shutdown price）", got["cover"]["rows"][0]["title"],
+                      got["cover"]["rows"][0]["title"])
+
+    def test_缩写括注并入(self):
+        """F9（作者点名）：`平均成本（AC）` → `（average cost, AC）`，不叠第二个括注。"""
+        terms, seen = [("平均成本", "average cost")], set()
+        self.assertEqual(nv.announce_terms("均值上平均成本（AC）更低。", terms, seen),
+                         "均值上平均成本（average cost, AC）更低。")
+
+    def test_已有同词英文括注不叠(self):
+        """F9：`（Shutting Down Price）` 与词条英文只差大小写 → 原样（不许出现两个括注）。"""
+        terms, seen = [("停产价格", "shutting down price")], set()
+        t = "停产价格（Shutting Down Price）由最低点决定。"
+        self.assertEqual(nv.announce_terms(t, terms, seen), t)
+
+    def test_别的括注也不叠(self):
+        """F9：已有别的写法（整句英文）→ 不加第二个（标注宁缺勿叠）。"""
+        t = "边际成本（average / marginal cost）的怪写法。"
+        terms, seen = [("边际成本", "marginal cost")], set()
+        self.assertEqual(nv.announce_terms(t, terms, seen), t)
+
+    def test_没术语就原样(self):
+        rev = {"sections": [{"prose": ["随便说点什么。"]}]}
+        self.assertEqual(nv.announce_terms_in_review(rev), rev)
 
 
 class Anki(unittest.TestCase):
@@ -316,7 +831,7 @@ class RenderShape(unittest.TestCase):
                                                     "title_zh": "成本函数", "t0": "13:16:28",
                                                     "t1": "13:20:00"}]})
         out = nr.render(d)
-        i_quick = out.index("## 0 · 五分钟速览")
+        i_quick = out.index("## 0 · 速览")
         i_kc = out.index("## 📑 课堂纲要")
         i_term = out.index("## 本课术语")
         i_misc = out.index("## 一些事儿")
@@ -381,14 +896,27 @@ class RenderShape(unittest.TestCase):
         self.assertIn("变式", h)
         self.assertTrue("2q-12" in h, "补全题的空也在详细版里")
 
-    def test_自测_题干在简版_答案在详细版(self):
-        """⭐ 简版列题干（复习时知道自己要会什么），「先答再揭晓」的答案在详细版。"""
+    def test_自测_题干在简版_答案折叠在简版(self):
+        """⭐ 版式 A（作者 2026-10-18）：简版列 3–5 题**带折叠答案**（Obsidian callout `-`）。
+        F7②：按 基础/中等/挑战 三档分组（题数上限不变）。
+        ⚠️ 折叠≠裸文本：答案只许出现在 `> [!question]- 答案` 的引用行里（点一下才展开），
+        否则就是"题还没做就看到了"；完整题库与逐步解析仍在详细版。"""
         md = nr.render(self._data())
-        self.assertIn("自测 1 题", md)
+        self.assertIn("复习速测（先想再看 · 三档）", md)
+        self.assertIn("**基础** —", md)
         self.assertIn("为什么 $MC<AC$ 时 $AC$ 会下降？", md)
-        self.assertNotIn("低于平均的数掺进来会把平均拉低", md, "答案不该在简版里（会剧透）")
+        self.assertIn("> [!question]- 答案", md)
+        ans = "低于平均的数掺进来会把平均拉低。"
+        j = md.index(ans)
+        self.assertEqual(md[j - 2:j], "> ", "答案没在折叠 callout 里（会剧透）")
+        self.assertIn("为什么 $MC<AC$ 时 $AC$ 会下降？", md)
+        self.assertIn("> [!question]- 答案", md)
+        ans = "低于平均的数掺进来会把平均拉低。"
+        j = md.index(ans)
+        self.assertEqual(md[j - 2:j], "> ", "答案没在折叠 callout 里（会剧透）")
+        self.assertIn("自测共 1 题", md)
         h = nh.note_page(self._data())
-        self.assertIn("低于平均的数掺进来会把平均拉低", h)
+        self.assertIn(ans, h)
         self.assertIn("先答再揭晓", h)
 
     def test_覆盖度与三道核清单在详细版(self):
@@ -398,15 +926,17 @@ class RenderShape(unittest.TestCase):
         self.assertTrue("修正记录" in h)
         self.assertTrue("代入求导" in h, "修正记录必须写出依据（否则读者没法回源）")
 
-    def test_速览里的句子在句末收(self):
-        """实测踩到过：`prose[:80]` 把「令 $f'(x)=0$ 解」这种半句留在速览里。"""
+    def test_速览用短段落而不是清单(self):
+        """第七轮（作者）：速览 = 3–6 句短段落；逐节 gist 清单与「学完你应该会」清单都撤了。"""
         d = self._data()
-        d.review = {"sections": [dict(SECTION, prose=[
-            "第一节讲的东西先是这个道理，然后还有一个更长的解释，最后落到定义上。"])]}
+        d.review = {"sections": [dict(SECTION, prose=["第一节讲的东西先是这个道理。"])],
+                    "overview_long": ["这节课先说 A，再把 A 用到了 B 上。"],
+                    "review_plan": ["重做例题（10 分钟）"]}
         out = nr.render(d)
-        gist = [ln for ln in out.splitlines() if ln.startswith("1. **")][0]
-        self.assertTrue(gist.endswith("。"), gist)
-        self.assertLess(len(gist), 120, gist)
+        self.assertIn("这节课先说 A，再把 A 用到了 B 上。", out)
+        self.assertNotIn("学完你应该会", out)
+        self.assertFalse(any(ln.startswith("1. **") for ln in out.splitlines()),
+                         "逐节 gist 清单该撤了")
 
     def test_三道核的_mismatch_措辞不同_它是发现不是口误(self):
         d = self._data(corrections_extra=[{"kind": "check", "where": "三道核",
@@ -481,6 +1011,12 @@ class HtmlComponents(unittest.TestCase):
         self.assertIn('<svg class="plot"', h)                    # 4 图
         self.assertIn("@media print", h)                         # 6 打印兜底
         self.assertIn("prefers-reduced-motion", h)               # 6 动效纪律
+
+    def test_三句总结占位不提考试(self):
+        """F8-g（作者点名）：合上书写的第三句是"我还没弄懂的是…"——不要应考话。"""
+        h = self._page()
+        self.assertIn("我还没弄懂的是", h)
+        self.assertNotIn("考试要会", h)
 
     def test_公式离线不白屏(self):
         h = self._page()
@@ -581,7 +1117,8 @@ class HtmlComponents(unittest.TestCase):
         生成器的活日志（改了哪条公式 / 删了几句猜测）挪到页尾折叠里。"""
         d = nr.NoteData(date="2026-10-15", course="ECON10790", entries=entries(2),
                         review=REVIEW, html_name="x.html",
-                        warns=["MC 与 TC 不自洽（AC(q) → 3q^2-24q+60）"])
+                        warns=["MC 与 TC 不自洽（AC(q) → 3q^2-24q+60）"],
+                        guard_summary="guards: repaired 1, dropped 2, flagged 3")
         h = nh.note_page(d)
         head = h[:h.index('id="kp1"')]
         self.assertIn("处已核", head)
@@ -593,6 +1130,9 @@ class HtmlComponents(unittest.TestCase):
         head = md[:md.index("## 附录")]
         self.assertNotIn("不自洽", head, "md 页头还有内部诊断")
         self.assertTrue("生成核对记录（内部" in md.split("## 附录")[1], "内部记录该在页尾")
+        # 🧮 F9c：守卫台账行两种渲染都要有（批量审计 `grep guards:` 用）
+        self.assertIn("guards: repaired 1, dropped 2, flagged 3", md)
+        self.assertIn("guards: repaired 1, dropped 2, flagged 3", h)
 
     def test_图只有一份且放在它的知识点里(self):
         """⚠️ 作者第三轮：图表区出现 5 张一模一样的 AC/MC 曲线，而且全堆在末尾。"""
@@ -699,6 +1239,244 @@ class HtmlComponents(unittest.TestCase):
         h = self._page()
         urls = set(re.findall(r'(?:src|href)="(https?://[^"]+)"', h))
         self.assertTrue(all("katex" in u for u in urls), urls)
+
+
+def _cmp() -> dict:
+    return {"title": "三种成本指标", "src": "lecture",
+            "cols": ["", "平均成本 AC", "边际成本 MC"],
+            "rows": [{"label": "定义", "cells": ["$TC/q$", "$dTC/dq$"]},
+                     {"label": "最低点处", "cells": ["与 $MC$ 相等", "穿过 $AC$ 最低点"]}]}
+
+
+def _flow() -> dict:
+    return {"title": "梯度下降一轮", "src": "lecture",
+            "steps": [{"label": "前向传播", "detail": "算出预测与损失"},
+                      {"label": "反向传播", "detail": "链式法则算各层梯度"},
+                      {"label": "更新参数", "detail": "沿负梯度走一步"}],
+            "loop_to": 1}
+
+
+class ComponentsF10(unittest.TestCase):
+    """F10：对照表 `compare` / 步骤图 `flow` —— 模型只填数据，schema/上限/标签在代码里。"""
+
+    def test_清洗_合法对比表_按src标lecture(self):
+        r = nv._clean_section(dict(SECTION, compare=_cmp()))
+        c = r["compare"]
+        self.assertTrue(c["title"].startswith("🎙 "), c["title"])
+        self.assertEqual(c["cols"][0], "", "行头列的占位不许被清洗吃掉")
+        self.assertEqual(len(c["rows"]), 2)
+
+    def test_清洗_自补表标自补(self):
+        r = nv._clean_section(dict(SECTION, flow=dict(_flow(), src="self")))
+        self.assertTrue(r["flow"]["title"].startswith("✏️ "), r["flow"]["title"])
+
+    def test_无效规格丢掉_不崩(self):
+        self.assertNotIn("compare", nv._clean_section(dict(SECTION, compare={"title": "x"})))
+        self.assertNotIn("flow", nv._clean_section(
+            dict(SECTION, flow={"title": "x", "steps": [{"label": "a"}]})))
+        # 对照列太少（只剩 1 列）/ 格子数与列数对不上 → 丢；只剩 1 行 → 丢
+        self.assertNotIn("compare", nv._clean_section(
+            dict(SECTION, compare=dict(_cmp(), cols=["", "只有一个"]))))
+        self.assertNotIn("compare", nv._clean_section(
+            dict(SECTION, compare=dict(_cmp(), rows=[{"label": "a", "cells": ["x"]}] * 2))))
+        self.assertNotIn("compare", nv._clean_section(
+            dict(SECTION, compare=dict(_cmp(), rows=[{"label": "a", "cells": ["x", "y"]}]))))
+
+    def test_上限在代码里裁(self):
+        rows = [{"label": f"r{i}", "cells": ["数" * 60, "ok"]} for i in range(12)]
+        c = nv._clean_section(dict(SECTION, compare=dict(_cmp(), rows=rows)))["compare"]
+        self.assertEqual(len(c["rows"]), nv.CMP_ROWS_MAX)
+        self.assertLessEqual(len(c["rows"][0]["cells"][0]), nv.CMP_CELL_MAX)
+        self.assertEqual(c["rows"][0]["cells"][0].count("$") % 2, 0, "截断不许留半截公式")
+        steps = [{"label": "长" * 30, "detail": "细" * 80} for _ in range(9)]
+        fl = nv._clean_section(dict(SECTION, flow={"title": "t", "src": "lecture",
+                                                   "steps": steps}))["flow"]
+        self.assertEqual(len(fl["steps"]), nv.FLOW_STEPS_MAX)
+        self.assertLessEqual(len(fl["steps"][0]["label"]), nv.FLOW_LABEL_MAX)
+        self.assertLessEqual(len(fl["steps"][0]["detail"]), nv.FLOW_DETAIL_MAX)
+        # 对照列超 4 → 整件丢（截列会让行对不上位）
+        wide = dict(_cmp(), cols=[""] + [f"c{i}" for i in range(6)],
+                    rows=[{"label": "a", "cells": ["1"] * 6}] * 2)
+        self.assertNotIn("compare", nv._clean_section(dict(SECTION, compare=wide)))
+
+    def test_loop越界归零(self):
+        self.assertIsNone(nv._clean_section(
+            dict(SECTION, flow=dict(_flow(), loop_to=9)))["flow"]["loop_to"])
+        self.assertIsNone(nv._clean_section(
+            dict(SECTION, flow=dict(_flow(), loop_to=3)))["flow"]["loop_to"],
+            "回到最后一步 = 没有回路")
+        self.assertEqual(nv._clean_section(
+            dict(SECTION, flow=dict(_flow(), loop_to=1)))["flow"]["loop_to"], 1)
+
+    def test_全讲上限三张(self):
+        rev = {"sections": [dict(SECTION, heading=f"h{i}", compare=_cmp())
+                            for i in range(5)]}
+        out, dropped, warns = nv.clamp_components(rev)
+        self.assertEqual(sum(1 for s in out["sections"] if s.get("compare")), 3)
+        self.assertEqual(len(dropped), 2)
+        self.assertTrue(warns and "组件上限" in warns[0], warns)
+
+    def test_html_渲染成表与竖栈(self):
+        h = nh.compare_html(_cmp())
+        self.assertIn("<table", h)
+        self.assertIn('class="cmpwrap"', h)
+        self.assertIn('class="rowh"', h)
+        f = nh.flow_html(_flow())
+        self.assertIn('class="flow has-loop"', f)
+        self.assertIn("grid-row:1 / -1", f)
+        self.assertIn("↺ 回到第 1 步", f)
+        self.assertIn('class="stp last"', f)
+
+    def test_转义_script当文本(self):
+        h = nh.compare_html(dict(_cmp(), rows=[
+            {"label": "<script>alert(1)</script>", "cells": ["<b>x</b>", "ok"]},
+            {"label": "r", "cells": ["a", "b"]}]))
+        self.assertNotIn("<script>", h)
+        self.assertIn("&lt;script&gt;", h)
+        self.assertNotIn("<b>x</b>", h)
+
+    def test_md_管道表与编号列表(self):
+        L = nr.compare_md(_cmp())
+        self.assertTrue(L[0].startswith("| "))
+        self.assertTrue(L[1].startswith("|---"))
+        self.assertIn("平均成本 AC", L[0])
+        L2 = nr.flow_md(_flow())
+        self.assertIn("1. **前向传播**", L2[0])
+        self.assertTrue(L2[1].endswith("→"))
+        self.assertEqual(L2[-1], "↺ 回到第 1 步")
+        L3 = nr.compare_md(dict(_cmp(), rows=[{"label": "a|b", "cells": ["c|d", "e"]},
+                                              {"label": "r", "cells": ["x", "y"]}]))
+        self.assertIn("a\\|b", L3[2], "格子里的 | 要转义，不然 md 表散架")
+
+    def test_md_结构卡进简版(self):
+        d = nr.NoteData(date="2026-10-15", course="ECON10790", entries=entries(2),
+                        review=dict(REVIEW, sections=[dict(SECTION, compare=_cmp(),
+                                                           flow=_flow())]),
+                        review_dates=[])
+        md = nr.render(d)
+        self.assertIn("## 结构卡", md)
+        self.assertIn("| 平均成本 AC |", md)
+        self.assertIn("↺ 回到第 1 步", md)
+
+    def test_格子数字进机械核与模型核(self):
+        import note_math
+        sec = dict(SECTION, compare=dict(_cmp(), rows=[
+            {"label": "定义", "cells": ["$AC(q)=q^{2}-12q+60$", "$MC(q)=3q^{2}-24q+60$"]},
+            {"label": "算值", "cells": ["$AC(6)=24$", "$MC(6)=96$"]}]))
+        rows = note_math.check_review({"sections": [sec]})
+        self.assertTrue(any("MC(6)" in str(r.get("claim")) for r in rows),
+                        "对照表格子里的断言没进机械核")
+        claim = next(str(r.get("claim")) for r in rows if "MC(6)" in str(r.get("claim")))
+        self.assertEqual(note_math.unit_of_claim(sec, claim), "compare")
+        nums = nv.numeric_claims({"sections": [sec]})
+        self.assertTrue(any(n.get("origin") == "compare" for n in nums),
+                        "对照表格子没进模型核的清单")
+
+    def test_链上有组件上限且进台账(self):
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parent.parent
+               / "obsidian_writer.py").read_text(encoding="utf-8")
+        self.assertIn("note_v2.clamp_components", src)
+        self.assertIn("note_v2.dedupe_components", src)
+        self.assertTrue(src.index("note_v2.clamp_components")
+                        < src.index('"纯算术线索问题", "组件上限"'),
+                        "链步与计数标签不在同一处（计数会漏）")
+        self.assertIn('"组件上限", "组件去重")', src)
+
+    def test_复检仍错_表整件撤(self):
+        sec = dict(SECTION, compare={
+            "title": "t", "src": "lecture", "cols": ["", "AC", "MC"],
+            "rows": [{"label": "定义", "cells": ["$AC(q)=q^{2}-12q+60$",
+                                                 "$MC(q)=3q^{2}-24q+60$"]},
+                     {"label": "算值", "cells": ["$AC(6)=24$", "$MC(6)=96$"]}]})
+
+        def chat(system, user, max_tokens):                        # noqa: ARG001
+            return {}                                              # 返修没改东西
+
+        out, extra, warns = nv.repair_exercises({"sections": [sec]}, chat=chat)
+        self.assertNotIn("compare", out["sections"][0], "复检仍错，表没撤（宁缺纪律）")
+        self.assertTrue(any("已撤" in w for w in warns), warns)
+
+    def test_scrub不剪对照表的空格(self):
+        import note_guards as ng
+        sec = dict(SECTION, compare=dict(_cmp(), rows=[
+            {"label": "定义", "cells": ["$TC/q$", "$dTC/dq$"]},
+            {"label": "空一格", "cells": ["", "x"]}]))
+        out, _, _ = ng.scrub({"sections": [sec]})
+        c = out["sections"][0]["compare"]
+        self.assertEqual(c["cols"][0], "", "行头列的表头占位被剪了（列会错位）")
+        self.assertEqual(c["rows"][1]["cells"], ["", "x"], "空格子被剪了（行会错位）")
+
+
+class DedupeF11(unittest.TestCase):
+    """⭐ F11 ③：跨件重复闸 —— flow 复述本节例题步骤 ≥3 条 → 撤；组件同名 → 撤后来那件。"""
+
+    def _sec(self, **kw):
+        s = {"heading": "h", "ts": "13:16", "prose": ["x"]}
+        s.update(kw)
+        return s
+
+    def test_flow复述例题步骤_撤(self):
+        ex = {"title": "🎙 13:16", "prompt": "配平", "steps": [
+            {"text": "写出两个半反应", "why": ""},
+            {"text": "配平氧原子", "why": ""},
+            {"text": "配平氢原子", "why": ""}]}
+        fl = {"title": "🎙 半反应配平流程", "steps": [
+            {"label": "写出两个半反应", "detail": ""},
+            {"label": "配平氧原子", "detail": ""},
+            {"label": "配平氢原子", "detail": ""},
+            {"label": "配平电荷", "detail": ""}]}
+        out, dropped, warns = nv.dedupe_components({"sections": [self._sec(example=ex, flow=fl)]})
+        self.assertNotIn("flow", out["sections"][0], "复述例题步骤的 flow 没撤")
+        self.assertTrue(dropped)
+        self.assertTrue(warns)
+
+    def test_flow步子不够_留(self):
+        ex = {"title": "🎙 13:16", "prompt": "p", "steps": [{"text": "求 $AC$", "why": ""}]}
+        fl = {"title": "算法", "steps": [{"label": "前向传播", "detail": ""},
+                                        {"label": "反向传播", "detail": ""},
+                                        {"label": "更新参数", "detail": ""}]}
+        out, dropped, _ = nv.dedupe_components({"sections": [self._sec(example=ex, flow=fl)]})
+        self.assertIn("flow", out["sections"][0])
+        self.assertEqual(dropped, [])
+
+    def test_同标题组件_后来那件撤(self):
+        rev = {"sections": [self._sec(compare=dict(_cmp())),
+                            self._sec(compare=dict(_cmp(), title="🎙 三种成本指标"))]}
+        out, dropped, _ = nv.dedupe_components(rev)
+        self.assertIn("compare", out["sections"][0])
+        self.assertNotIn("compare", out["sections"][1], "同名组件没撤（标签剥掉后同名）")
+        self.assertTrue(dropped)
+
+    def test_不同标题_都留(self):
+        rev = {"sections": [self._sec(compare=dict(_cmp())),
+                            self._sec(compare=dict(_cmp(), title="两种求法"))]}
+        out, dropped, _ = nv.dedupe_components(rev)
+        self.assertIn("compare", out["sections"][0])
+        self.assertIn("compare", out["sections"][1])
+        self.assertEqual(dropped, [])
+
+    def test_标题只一个标签(self):
+        self.assertEqual(nv._fold_labels("🎙 13:16 停产价格（🎙 10:23）"),
+                         "🎙 13:16 停产价格（10:23）")
+        self.assertEqual(nv._src_label("🎙 对照表（🎙 13:16）", "lecture"),
+                         "🎙 对照表（13:16）")
+        r = nv._clean_section({"heading": "h",
+                               "example": {"title": "🎙 13:16 X（🎙 10:23）", "prompt": "p"}})
+        self.assertEqual(r["example"]["title"].count("🎙"), 1, r["example"]["title"])
+
+
+class GuardLedgerF11(unittest.TestCase):
+    """⭐ F11 §3：静默降级的计数要进守卫台账行（`downgraded N`）。"""
+    def test_降级计数进了台账(self):
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parent.parent
+               / "obsidian_writer.py").read_text(encoding="utf-8")
+        self.assertIn('label == "支持性核对"', src,
+                      "支持性核对的返值没人接（降级会漏计）")
+        self.assertIn('"downgraded"', src)
+        self.assertIn("downgraded {self._guard_counts['downgraded']}", src,
+                      "台账行里没有 downgraded")
 
 
 class HtmlPlots(unittest.TestCase):
@@ -829,6 +1607,97 @@ class VerifyNarrowing(unittest.TestCase):
         var = [r for r in rows if "5-3=2" in r["claim"]]
         self.assertTrue(all(r["status"] == "unchecked" for r in var),
                         "模型对自己的解答自洽 → 判 ok 等于没核，要降成未核对")
+
+
+class F9cPromptRotation(unittest.TestCase):
+    """F9c 泛化：通用提示词里不再写死某学科的口径；例子跨学科轮换；口径段按材料注入。"""
+
+    def test_通用提示词里不再写死经济学口径(self):
+        self.assertNotIn("停产价格", nv.REVIEW_SYS,
+                         "通用提示词里不许留某学科独有的内容（口径段改为按材料注入）")
+        self.assertIn("__CALIBER__", nv.REVIEW_SYS)
+
+    def test_例子跨学科轮换(self):
+        for key in ("v(t)=20-5t", "半衰期", "比较 A 和 B"):
+            self.assertIn(key, nv.REVIEW_SYS, f"prompt 缺轮换例：{key}")
+
+    def test_口径段_只在材料里有时注入(self):
+        class _Nope:
+            def search(self, q, k=3, **kw):
+                return []
+
+        class _Mat:
+            def search(self, q, k=3, **kw):
+                class C:
+                    text = ("Shutting down price: the minimum of the average cost, "
+                            "the lowest acceptable price.")
+
+                    def cite(self):
+                        return "📖 2025-12 期末卷 Exercise 7"
+                return [C()]
+
+        self.assertEqual("", nv._caliber_block(None))
+        self.assertEqual("", nv._caliber_block(_Nope()))
+        got = nv._caliber_block(_Mat())
+        self.assertIn("停产价格", got)
+        self.assertIn("📖 2025-12 期末卷", got, "注入的口径要带本课材料的出处")
+
+
+class F11Budgets(unittest.TestCase):
+    """⭐ F11-9：思考 low 档下，笔记那几类调用改用 `*_MAX_TOKENS_THINKING`（实测预算）。"""
+
+    def test_思考预算不小于旧口径_review覆盖实测(self):
+        # F12 finish_reason 探针：两档各 1/5 撞 length（low completion=10998）→ review 提到 14000。
+        self.assertGreaterEqual(nv.REVIEW_MAX_TOKENS_THINKING, 14000)
+        # 每类都要 ≥ 实测完成量（content+reasoning）；这里按观测值逐个卡。
+        measured = {"REVIEW_MAX_TOKENS_THINKING": 10998, "REPAIR_MAX_TOKENS_THINKING": 2332,
+                    "VERIFY_MAX_TOKENS_THINKING": 532, "OVERVIEW_MAX_TOKENS_THINKING": 223,
+                    "SHORTEN_MAX_TOKENS_THINKING": 2500}
+        for const, need in measured.items():
+            self.assertGreaterEqual(getattr(nv, const), need, const)
+
+    def test_函数默认用思考预算(self):
+        import inspect
+        for fn, const in ((nv.review, "REVIEW_MAX_TOKENS_THINKING"),
+                          (nv.repair_exercises, "REPAIR_MAX_TOKENS_THINKING"),
+                          (nv.verify_numbers, "VERIFY_MAX_TOKENS_THINKING"),
+                          (nv.overview, "OVERVIEW_MAX_TOKENS_THINKING"),
+                          (nv.shorten_overlimit, "SHORTEN_MAX_TOKENS_THINKING")):
+            self.assertEqual(inspect.signature(fn).parameters["max_tokens"].default,
+                             getattr(nv, const), fn.__name__)
+
+    def test_align仍用关思考预算(self):
+        import inspect
+        self.assertEqual(inspect.signature(nv.align).parameters["max_tokens"].default,
+                         nv.ALIGN_MAX_TOKENS)
+
+
+class F12VerdictWiring(unittest.TestCase):
+    """⭐ F12 §2：`_clean_section` 要**代码**复核 verdict，并给降级件挂「课上片段」标。"""
+
+    def _clean(self, ex: dict) -> dict:
+        sec = {"heading": "h", "ts": "10:36", "prose": ["讲解。"], "example": ex}
+        return nv._clean_section(sec).get("example") or {}
+
+    def test_数字无据_complete降fragment加标记(self):
+        got = self._clean({"title": "🎙 10:36:12 配平半反应", "prompt": "配平。", "steps": [],
+                           "answer": "需要投入 999 个电子。",
+                           "source_check": {"quote": "we need four molecules", "verdict": "complete"}})
+        self.assertEqual("fragment", got["source_check"]["verdict"])
+        self.assertIn("片段", got["title"])
+
+    def test_数字有据_保持complete不加标记(self):
+        got = self._clean({"title": "🎙 10:36:12 配平半反应", "prompt": "配平。", "steps": [],
+                           "answer": "需要 4 个 H₂O。",
+                           "source_check": {"quote": "we need four molecules", "verdict": "complete"}})
+        self.assertEqual("complete", got["source_check"]["verdict"])
+        self.assertNotIn("片段", got["title"])
+
+    def test_坏方程式进机械核走返修(self):
+        got = self._clean({"title": "🎙 10:36", "prompt": "配平半反应。", "steps": [],
+                           "answer": "8H⁺ + 4H₂O + 8e⁻ → 4H₂O"})
+        rows = nm.check_review({"sections": [{"heading": "h", "example": got}]})
+        self.assertTrue([r for r in rows if r.get("status") == "mismatch"])
 
 
 if __name__ == "__main__":

@@ -11,6 +11,9 @@
    （`capped` / `clamped` / `peak_db` 直方图）—— 那是 `PLAN-audio-gain.md` **步 1**。
 2. ⭐ **它们描述的是归一化「之前」的电平** —— 与 `testmode` 已有的
    `block_rms_dbfs_*`（量的是**之后**）是两组不同的数，别混。
+3. ⭐⭐ **3.10 `device` 块**（T22）：`pmset` 三种文本（AC / 电池 / 台式机无电池）、
+   磁盘 fake、体积扫描（顶层前 5 大 + 预算 → `partial`）、全采集器炸了也照落盘
+   （值全 null）、⏱ tick 的闸门与「不碰子进程」。
 
 ⚠️ 语料全是合成的（`numpy` 造的块），不碰 `sessions/`、不联网、不起 AppKit。
 ⚠️ 每条断言先问「把实现改坏它会不会红」—— 见每条的注释。
@@ -813,6 +816,153 @@ def main() -> int:
               "stream" in _rep21["block_names"], str(_rep21["block_names"]))
     finally:
         shutil.rmtree(_d11, ignore_errors=True)
+
+    print("\n--- T22 ⭐⭐ 3.10 `device` 块：pmset / 磁盘 / 体积 / 全炸 / ⏱ tick ---")
+    # ⚠️ 这一节的语料全是合成的（文本样本 / tmp 目录 / fake），不碰真盘、不联网、
+    #    不调真 sysctl/pmset —— 每条的变异验证写在它自己头上。
+    import json as _json
+    import shutil as _sh
+    import tempfile as _tf
+
+    # ① `pmset -g batt` 的三种文本（纯函数，不碰真机）
+    _ac = tm.parse_pmset("Now drawing from 'AC Power'\n"
+                         " -InternalBattery-0 (id=1)\t100%; charged; "
+                         "0:00 remaining present: true\n")
+    _bat = tm.parse_pmset("Now drawing from 'Battery Power'\n"
+                          " -InternalBattery-0 (id=1)\t83%; discharging; "
+                          "4:12 remaining present: true\n")
+    _desk = tm.parse_pmset("Now drawing from 'AC Power'\n")     # 台式机：没有电池行
+    # ⚠️ 变异验证：`m.group(2)` 写成 `m.group(1)`（状态词变成数字）→ 前两条红。
+    check("⭐ pmset(AC)：power=AC / 100% / charged",
+          (_ac["power"], _ac["battery_pct"], _ac["battery_state"])
+          == ("AC", 100, "charged"), str(_ac))
+    # ⚠️ 变异验证：power 映射写成恒 "AC" → 这条红。
+    check("⭐⭐ pmset(电池)：power=battery / 83% / discharging（别把两种供电都写成 AC）",
+          (_bat["power"], _bat["battery_pct"], _bat["battery_state"])
+          == ("battery", 83, "discharging"), str(_bat))
+    # ⚠️ 变异验证：`battery_pct` 初值写成 0 → 这条红（"没电池"与"电量 0%"是两件事）。
+    check("⭐⭐ pmset(台式机)：没有电池行 → 电量/状态 = None（**不是 0**）",
+          (_desk["power"], _desk["battery_pct"], _desk["battery_state"])
+          == ("AC", None, None), str(_desk))
+
+    # ② 磁盘：fake `disk_usage`（不碰真盘）
+    class _U22:
+        free, total = 123 * 10**9, 500 * 10**9
+    # ⚠️ 变异验证：free/total 对调 → 这条红。
+    _dsk = tm._disk(usage=lambda _p: _U22())
+    check("⭐ `_disk`：free/total 按 GB 报（fake disk_usage）",
+          (_dsk["free_gb"], _dsk["total_gb"]) == (123.0, 500.0), str(_dsk))
+
+    # ③ 体积扫描：真目录树（tmp）+ 顶层前 5 大 + 预算
+    _d22 = pathlib.Path(_tf.mkdtemp(prefix="cl_tm_dev_"))
+    try:
+        def _mk22(p, mb):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"x" * int(mb * 1e6))
+        _sess22 = _d22 / "sessions"
+        _mk22(_sess22 / "a.md", 1.0)
+        _mk22(_sess22 / "b.md", 0.5)
+        _cl22 = _d22 / ".classlive"
+        _mk22(_cl22 / "eval" / "big.bin", 2.0)
+        _mk22(_cl22 / "eval" / "big2.bin", 1.0)
+        _mk22(_cl22 / "models" / "m.bin", 0.4)
+        _mk22(_cl22 / "direct.json", 0.2)
+        for _i in range(4):                    # 4 个小目录 → 顶层共 6 个子项
+            _mk22(_cl22 / f"small{_i}" / "x", 0.11 + _i * 0.01)
+        # ⚠️ 变异验证：`kids[:5]` 改 `[:3]` → 第一条红；`kids.sort` 删掉 → 两条都红
+        #    （scandir 顺序不是大小序）。
+        _fp = tm.footprint(sessions_dir=_sess22, classlive_dir=_cl22)
+        check("⭐⭐ `footprint`：三个体积 + 顶层前 5 大（降序、名字对）",
+              (_fp["sessions_mb"], _fp["classlive_mb"], _fp["partial"])
+              == (1.5, 4.1, False)
+              and [k["name"] for k in _fp["classlive_top"]]
+              == ["eval", "models", "direct.json", "small3", "small2"],
+              str(_fp))
+        check("⭐ `footprint`：每个子项带 MB（最大的 eval = 3.0）",
+              bool(_fp["classlive_top"]) and _fp["classlive_top"][0]["mb"] == 3.0,
+              str(_fp["classlive_top"]))
+        # ⚠️ 变异验证：把 deadline 写成 `float("inf")`（等于没有预算）→ 这条红。
+        _fp0 = tm.footprint(sessions_dir=_sess22, classlive_dir=_cl22, budget_s=0.0)
+        check("⭐⭐ 预算用完 → `partial: true`（停下，不硬走完）",
+              _fp0["partial"] is True, str(_fp0))
+
+        # ④ 所有采集器都炸 → 每个值 null，块照样落进报告
+        _patched = {}
+
+        def _boom22(*_a, **_kw):
+            raise RuntimeError("probe down")
+        for _nm in ("_disk", "_power_full", "_machine", "_displays", "audio_info",
+                    "net_type", "_locale", "footprint"):
+            _patched[_nm] = getattr(tm, _nm)
+            setattr(tm, _nm, _boom22)
+        try:
+            try:
+                _st22 = tm.device_start(src=None)
+            except Exception:                  # 契约是"不抛"——抛了也要能报红而不是炸掉本文件
+                _st22 = None
+            _t22 = tm.TestSession(_d22 / "dev.md", wall_clock=time.time)
+            _t22.note_device_start(src=None)
+            _t22.note_device_tick()
+            _t22.note_block("device", _t22.device_block())
+            _rp22 = _t22.finish(bundle=False)
+            _rep22 = (_json.loads(pathlib.Path(_rp22).read_text(encoding="utf-8"))
+                      if _rp22 else {})
+        finally:
+            for _nm, _fn in _patched.items():
+                setattr(tm, _nm, _fn)
+        # ⚠️ 变异验证：`_guard` 改成直接调用（去掉每个值自己的兜底）→ 这条红
+        #    （device_start 会抛 → `_st22` 是 None，而不是"七个 null"）。
+        check("⭐⭐ 每个采集器都炸：`device_start` 七个值全是 None（一个都不带走）",
+              isinstance(_st22, dict)
+              and set(_st22) == {"disk", "power", "machine", "displays", "audio",
+                                 "net", "locale"}
+              and all(v is None for v in _st22.values()), str(_st22))
+        _dev_blk = (_rep22.get("blocks") or {}).get("device") or {}
+        # ⚠️ 变异验证：从 `BLOCKS` 里删掉 "device" → 这条红（bad_block + 块缺席）。
+        check("⭐⭐ 全炸也要落盘：`blocks.device` 在、start/end 是 null、没有 bad_block",
+              "device" in (_rep22.get("blocks") or {})
+              and (_dev_blk.get("start") or {}).get("disk") is None
+              and (_dev_blk.get("end") or {}).get("disk") is None
+              and (_dev_blk.get("end") or {}).get("footprint") is None
+              and not [e for e in _rep22.get("events", [])
+                       if e.get("kind") == "bad_block"],
+              str(_dev_blk)[:160])
+
+        # ⑤ ⏱ tick：闸门（没到 10 分钟不采）+ 到点采一份 + **不碰子进程**
+        _t23 = tm.TestSession(_d22 / "tick.md", wall_clock=time.time)
+        _t23.note_device_start(src=None)
+        _t23.note_device_tick()                # 刚开课：还没到 10 分钟
+        _gated = len(_t23._device["samples"])
+        _t23._device_next = 0.0                # 把闸门打开（= 10 分钟到了）
+        _sub_calls = []
+        _orig_run = tm.subprocess.run
+
+        def _no_sub22(*a, **kw):
+            _sub_calls.append(a)
+            raise AssertionError("⏱ 样本里出现了子进程调用")
+        tm.subprocess.run = _no_sub22
+        try:
+            _t23.note_device_tick()
+            _t23.note_device_tick()            # 刚采过 → 闸门重新关上
+        finally:
+            tm.subprocess.run = _orig_run
+        _smps = _t23._device["samples"]
+        # ⚠️ 变异验证：删掉 `if now < self._device_next: return` → 这条红。
+        check("⭐⭐ `note_device_tick`：没到 10 分钟一份都不采（开课那次不算）",
+              _gated == 0, f"gated={_gated}")
+        # ⚠️ 变异验证：删掉 `self._device_next = now + DEVICE_SAMPLE_S`（不重新上闸）→ 这条红。
+        check("⭐⭐ 到点采一份、且立刻重新上闸（同一分钟内不会连采）",
+              len(_smps) == 1, f"samples={_smps}")
+        # ⚠️ 变异验证：`device_cheap` 改成调 `_power_full()`（会起子进程）→ 这条红。
+        check("⭐⭐ ⏱ 样本**不碰子进程**（子进程只在 start/end 允许）",
+              not _sub_calls, f"subprocess calls={_sub_calls}")
+        # ⚠️ 变异验证：`s["t_s"] = …` 那行删掉 → 这条红。
+        check("⭐ 样本形状：t_s + 三个便宜值",
+              bool(_smps) and set(_smps[0]) == {"t_s", "low_power_mode",
+                                                "thermal", "net"},
+              str(_smps[:1]))
+    finally:
+        _sh.rmtree(_d22, ignore_errors=True)
 
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)

@@ -21,11 +21,21 @@
 *流水线*: 首字中文延迟（草稿 `lag_s` / 定稿 `translation_latency`）、定稿延迟、翻译失败、
           云端降级、退化回退次数
 *资源*  : CPU 秒(整段 + 折算实时占比)、峰值内存
+*设备*  : ⭐ 3.10（`device` 块）—— 磁盘余量/总量、我们自己的体积（sessions/ ·
+          ~/.classlive/ · ~/models/，收尾一次 + `~/.classlive` 顶层前 5 大）、
+          供电（电池 % / AC / 低电量模式 / 热压力）、机器（型号 / 性能核 / 能效核 /
+          开机时长 / 显示器）、输入设备（名字 / 采样率 / 通道）、网络类型
+          （Wi-Fi / 以太网 / 无）、语言 / 时区。开课与收尾各一份 + 中间每 10 分钟
+          一份便宜样本（搭主循环既有的设备定时器，**不新起线程/轮询**）
 *能耗*  : 可见/不可见两档的能耗(J)/唤醒次数/CPU 秒/墙钟 + pump 各档时长（3.9.8 ①，`energy.py`）
 *唤醒*  : `streamq` 每条 item 从 put 到 drain 的停留时间 p50/p90/p99/max（3.9.8 ②）
 *补采*  : 跨段合并 / 课后补译的**原文**（3.9.8 ③）；收音断档与系统睡眠（3.9.8 ④）；
           字幕可见行数 / 档位行数 / 面板宽（3.9.8 ⑤）
 *收尾*  : VAD 诊断原文(report())、会话文件路径
+
+⚠️ **隐私口径（3.10 `device` 块）**：只收硬件 / 环境的**画像** —— 没有序列号、
+   主机名、用户名、SSID、IP、MAC；体积扫描只 stat **我们自己的目录**，报告里只出现
+   我们自己的目录名（`sessions/` · `~/.classlive/` · `~/models/` 的顶层子项）。
 
 用法
 ----
@@ -48,8 +58,11 @@ import functools
 import json
 import os
 import pathlib
+import re
 import resource
+import shutil
 import subprocess
+import threading
 
 import models
 import upload as upload_mod
@@ -94,6 +107,19 @@ IDLE_SPLIT_MS = 7000.0
 #: ⑤ 面板宽度 p50 用的样本上限（每秒最多一个，一节课 ≤ ~3600 个）。
 VIEW_W_MAX = 20000
 
+# ---- ⭐ 3.10 设备/环境块（`device`）的常量 ----
+#: ⏱ 便宜样本的间隔（秒）：开课 / 收尾各一份全量，中间每 10 分钟一份便宜的
+#: （低电量模式 / 热压力 / 网络类型）。**搭主循环既有的设备探查定时器**
+#: （`main` 的 `_dev` tick，2 s 一次）—— 不新起线程、不新起轮询。
+DEVICE_SAMPLE_S = 600.0
+#: 收尾体积扫描的**总预算**（秒）：`~/.classlive` 在本机 4.9 GB / 6.1 万个文件
+#: （实测走一遍 0.48 s），别人的机器可能更慢 —— 超预算就停，已经量到的照报，
+#: 标 `partial: true`。
+FOOTPRINT_BUDGET_S = 5.0
+#: 只读子进程（`sysctl` / `pmset`）的超时（秒）。⚠️ 子进程**只有 start/end 两处**会调
+#: —— 10 分钟的 ⏱ 样本全部走进程内 API（见 `device_cheap`）。
+PROBE_TIMEOUT_S = 2.0
+
 
 def _sf_opus(wav: pathlib.Path, opus: pathlib.Path) -> str | None:
     """不靠 ffmpeg 把一段 wav 编成 Ogg/Opus。成功返回 None，失败返回一句原因（不抛）。
@@ -129,6 +155,10 @@ BLOCKS = frozenset({
     #          没建流（`stream is None`）时这一块**缺席** = 这节课没用 Soniox。
     "stream",
     "duty",     # 「一些事儿」计数（`main._duty_stats()`：认出 / 记下 / 忽略 / 漏处理）
+    "device",   # ⭐ 3.10：设备/环境画像 —— `{start, end, samples}`（磁盘/供电/机器/
+                #           显示器/音频/网络/语言 + 我们自己的体积）。见 `device_start`
+                #           / `device_cheap` / `device_end`（start 与 end 各一份全量，
+                #           中间每 `DEVICE_SAMPLE_S` 一份便宜样本）。
 })
 
 #: `note_event(..., data=…)` 最多几个字段（`_small_data`；功能使用度一条也就 1–2 个）。
@@ -350,6 +380,485 @@ def collect_env() -> dict:
         "packages": {n: pkg(n) for n in
                      ("sherpa-onnx", "numpy", "sounddevice", "mlx-lm", "httpx", "soundfile")},
         "models_mb": models_sz,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ⭐ 3.10 `device` 块：设备/环境画像（开课 / 收尾 / ⏱ 每 10 分钟）
+#
+# 回答的全是**规划题**：包和模型还能做多大（磁盘）、用户跑在电池上吗（供电）、
+# 低端 Mac 有多少（核数/内存/显示器）、教室的输入设备和网络是什么（音频/网络）。
+# 三条纪律与模块头一致，这里更严：
+#   · 每个值**各自** try/except，失败 = null（不是 0），绝不带走上课；
+#   · 子进程（`sysctl` / `pmset`）≤ `PROBE_TIMEOUT_S` 秒，且**只有 start/end** 会调；
+#     10 分钟的 ⏱ 样本全走进程内 API（Foundation / ctypes / AppKit）；
+#   · **隐私**：没有序列号 / 主机名 / 用户名 / SSID / IP / MAC；体积扫描只 stat
+#     我们自己的目录（见模块头「隐私口径」）。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _run_read(cmd, *, timeout: float = PROBE_TIMEOUT_S) -> str | None:
+    """只读子进程 → stdout；失败 / 超时 / 非零退出 → `None`。**绝不抛**。"""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout if r.returncode == 0 else None
+    except Exception:                                         # noqa: BLE001
+        return None
+
+
+def _sysctl(name: str) -> str | None:
+    """`sysctl -n <name>` → 去空白的值；拿不到（含 Intel 上不存在的 perflevel）→ `None`。"""
+    out = _run_read(["sysctl", "-n", name])
+    return out.strip() if out else None
+
+
+def _guard(fn, *a, **kw):
+    """跑一个采集器：**任何异常 → `None`**。每个值各自兜底（见 `device_start`）。
+
+    ⚠️ 这一层与模块头的 `_safe` 是两件事：`_safe` 管"整个方法不许把课带崩"，
+       这一层管"一个值采不到 = 那个值是 null，别的值照采"。
+    """
+    try:
+        return fn(*a, **kw)
+    except Exception:                                         # noqa: BLE001
+        return None
+
+
+def _disk(home=None, *, usage=None) -> dict:
+    """home 所在卷的余量 / 总量（GB）。`usage` 可注入（判据传假的，不碰真盘）。
+
+    ⚠️ 用 `shutil.disk_usage`（一次 statvfs，微秒级）；失败 → 两个 `None`（不是 0）。
+    """
+    try:
+        u = (usage or shutil.disk_usage)(home or pathlib.Path.home())
+        return {"free_gb": round(u.free / 1e9, 1), "total_gb": round(u.total / 1e9, 1)}
+    except Exception:                                         # noqa: BLE001
+        return {"free_gb": None, "total_gb": None}
+
+
+def parse_pmset(text: str) -> dict:
+    """`pmset -g batt` 的文本 → 供电快照。**纯函数**（判据喂三种样本）。
+
+    - `Now drawing from 'AC Power'` / `'Battery Power'` → `power`（"AC" / "battery"）
+    - `…\t83%; discharging; 4:12 remaining present: true` → `battery_pct` + `battery_state`
+      （状态词**原样**留：charging / discharging / charged / "AC attached" /
+      "finishing charge" —— 别在这里做闭集，macOS 换词比我们快）
+    - ⚠️ **台式机只有第一行**（没有电池行）→ 电量与状态都是 `None`（**不是 0**：
+      "没电池" 与 "电量 0%" 是两件事）。
+    """
+    out = {"power": None, "battery_pct": None, "battery_state": None}
+    m = re.search(r"drawing from '([^']*)'", text or "")
+    if m:
+        src = m.group(1).strip().lower()
+        out["power"] = "AC" if "ac" in src else ("battery" if "batt" in src else src)
+    m = re.search(r"(\d+)%;\s*([^;]+);", text or "")
+    if m:
+        out["battery_pct"] = int(m.group(1))
+        out["battery_state"] = m.group(2).strip()
+    return out
+
+
+def _ns_power() -> dict:
+    """进程内的两个免费读数（**无子进程**，⏱ 用）：低电量模式 / 热压力。
+
+    - `isLowPowerModeEnabled()` → 用户开着「低电量模式」时 CPU 会被压（能耗数据要能分档）
+    - `thermalState()` → 0/1/2/3 = nominal / fair / serious / critical（macOS 热压力档；
+      机器烫到降频时，这节课的延迟数就不能当"正常水平"读）
+    拿不到 → 两个 `None`。**绝不抛**。
+    """
+    out = {"low_power_mode": None, "thermal": None}
+    try:
+        from Foundation import NSProcessInfo
+        pi = NSProcessInfo.processInfo()
+        out["low_power_mode"] = bool(pi.isLowPowerModeEnabled())
+        st = int(pi.thermalState())
+        out["thermal"] = {0: "nominal", 1: "fair", 2: "serious",
+                          3: "critical"}.get(st, str(st))
+    except Exception:                                         # noqa: BLE001
+        pass
+    return out
+
+
+def _power_full() -> dict:
+    """完整供电快照（start/end）：`pmset` 的电池读数 + 进程内那两个。**绝不抛**。"""
+    out = dict(parse_pmset(_run_read(["pmset", "-g", "batt"]) or ""))
+    out.update(_ns_power())
+    return out
+
+
+def _machine() -> dict:
+    """机器画像（start）：型号 / 性能核 / 能效核 / 开机多久。**绝不抛**。
+
+    ⚠️ `hw.perflevel0/1` 是 Apple Silicon 的口径；**Intel 机器上没有这两个 oid**
+       → 两个核数如实 `None`（不是 0 —— 0 会被读成"没有核"）。
+    ⚠️ 开机时长（`kern.boottime`）：开机太久的机器内存碎片/后台进程多，
+       性能数据要和它对读。
+    """
+    out = {"model": None, "cores_perf": None, "cores_eff": None, "uptime_s": None}
+    out["model"] = _sysctl("hw.model")
+    for key, oid in (("cores_perf", "hw.perflevel0.physicalcpu"),
+                     ("cores_eff", "hw.perflevel1.physicalcpu")):
+        v = _sysctl(oid)
+        if v and v.isdigit():
+            out[key] = int(v)
+    m = re.search(r"sec\s*=\s*(\d+)", _sysctl("kern.boottime") or "")
+    if m:
+        out["uptime_s"] = round(max(0.0, time.time() - int(m.group(1))), 1)
+    return out
+
+
+def _displays() -> dict:
+    """主屏尺寸 / backing scale / 屏数（AppKit，**start 专用**）。拿不到 → `None` 字段。
+
+    ⚠️ 外接 4K 屏会把合成/渲染成本整个换一档 —— 延迟数据要能对上屏幕配置。
+    """
+    out = {"count": None, "main_w": None, "main_h": None, "scale": None}
+    try:
+        import AppKit
+        scr = AppKit.NSScreen.screens()
+        out["count"] = len(scr)
+        if scr:
+            f = scr[0].frame()
+            out["main_w"] = round(float(f.size.width), 1)
+            out["main_h"] = round(float(f.size.height), 1)
+            out["scale"] = round(float(scr[0].backingScaleFactor()), 2)
+    except Exception:                                         # noqa: BLE001
+        pass
+    return out
+
+
+def audio_info(src=None) -> dict:
+    """正在用的输入设备：名字（capture 自己给的）+ 原生采样率 / 输入通道数。
+
+    ⚠️ **不开第二条流**：名字从 `src.device_name` 拿（capture 的属性），
+       采样率 / 通道数走 `sounddevice.query_devices(名字)` 的**查询** —— 与
+       capture 解析设备用的是同一张表，查询不开流（实测 0.004 ms，见
+       `main.check_clock_and_device` 的注释）。
+    ⚠️ 文件音源（`src` 没有 `device_name`）/ 查询失败 → 全 `None`。**绝不抛**。
+    """
+    out = {"device_name": None, "samplerate": None, "channels": None}
+    try:
+        name = str(getattr(src, "device_name", "") or "")
+    except Exception:                                         # noqa: BLE001
+        name = ""
+    if not name:
+        return out
+    out["device_name"] = name
+    try:
+        import sounddevice as sd
+        info = sd.query_devices(name)
+        rate = info.get("default_samplerate")
+        out["samplerate"] = int(round(float(rate))) if rate else None
+        out["channels"] = int(info.get("max_input_channels") or 0) or None
+    except Exception:                                         # noqa: BLE001
+        pass
+    return out
+
+
+#: `SCNetworkInterfaceGetInterfaceType` 的官方类型串 → 我们的口径。
+_NET_KINDS = {"IEEE80211": "wifi", "Ethernet": "ethernet", "WWAN": "cellular"}
+
+_SC_BIND: dict = {}
+
+
+def _sc_bindings():
+    """一次性绑好 SystemConfiguration + CoreFoundation 的 ctypes 签名。失败 → `None`。
+
+    ⚠️ **为什么是 ctypes 而不是子进程**：网络类型是 ⏱ 样本（每 10 分钟一次），
+       而子进程只在 start/end 允许（见 `PROBE_TIMEOUT_S`）。这两个框架的 pyobjc
+       绑定没装，所以直接 ctypes 调（只读、微秒级）。
+    ⚠️ **只用「默认路由走哪个接口」+「这个接口是什么类型」** ——
+       不取 SSID / IP / MAC（见模块头「隐私口径」）。
+    """
+    if _SC_BIND.get("tried"):
+        return _SC_BIND.get("api")
+    _SC_BIND["tried"] = True
+    try:
+        import ctypes
+        sc = ctypes.CDLL("/System/Library/Frameworks/SystemConfiguration.framework/"
+                         "SystemConfiguration")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/"
+                         "CoreFoundation")
+        P = ctypes.c_void_p
+        cf.CFStringCreateWithCString.restype = P
+        cf.CFStringCreateWithCString.argtypes = [P, ctypes.c_char_p, ctypes.c_uint32]
+        cf.CFStringGetCString.restype = ctypes.c_bool
+        cf.CFStringGetCString.argtypes = [P, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+        cf.CFDictionaryGetValue.restype = P
+        cf.CFDictionaryGetValue.argtypes = [P, P]
+        cf.CFArrayGetCount.restype = ctypes.c_long
+        cf.CFArrayGetCount.argtypes = [P]
+        cf.CFArrayGetValueAtIndex.restype = P
+        cf.CFArrayGetValueAtIndex.argtypes = [P, ctypes.c_long]
+        cf.CFRelease.restype = None
+        cf.CFRelease.argtypes = [P]
+        sc.SCDynamicStoreCreate.restype = P
+        sc.SCDynamicStoreCreate.argtypes = [P, P, P, P]
+        sc.SCDynamicStoreCopyValue.restype = P
+        sc.SCDynamicStoreCopyValue.argtypes = [P, P]
+        sc.SCNetworkInterfaceCopyAll.restype = P
+        sc.SCNetworkInterfaceGetBSDName.restype = P
+        sc.SCNetworkInterfaceGetBSDName.argtypes = [P]
+        sc.SCNetworkInterfaceGetInterfaceType.restype = P
+        sc.SCNetworkInterfaceGetInterfaceType.argtypes = [P]
+        _SC_BIND["api"] = (sc, cf)
+    except Exception:                                         # noqa: BLE001
+        _SC_BIND["api"] = None
+    return _SC_BIND["api"]
+
+
+def net_type() -> str | None:
+    """正在用的网络接口类型：`wifi` / `ethernet` / `cellular` / 别的类型小写 / `none`。
+
+    `none` = **没有默认路由**（真离线）；探不到（框架 / 绑定失败）→ `None`
+    —— "没网" 与 "没探到" 是两件事，别混。
+    ⚠️ 只读、进程内、**不碰 SSID / IP / MAC**（见 `_sc_bindings`）。
+    """
+    import ctypes
+    api = _sc_bindings()
+    if api is None:
+        return None
+    sc, cf = api
+    UTF8 = 0x08000100
+    created: list = []
+    keep: list = []
+
+    def cfstr(s: str):
+        r = cf.CFStringCreateWithCString(None, s.encode("utf-8"), UTF8)
+        if r:
+            created.append(r)
+        return r
+
+    def val(ref) -> str | None:
+        if not ref:
+            return None
+        buf = ctypes.create_string_buffer(128)
+        if not cf.CFStringGetCString(ref, buf, len(buf), UTF8):
+            return None
+        return buf.value.decode("utf-8", "replace")
+
+    try:
+        store = sc.SCDynamicStoreCreate(None, cfstr("classlive-device"), None, None)
+        if not store:
+            return None
+        keep.append(store)
+        d = sc.SCDynamicStoreCopyValue(store, cfstr("State:/Network/Global/IPv4"))
+        primary = None
+        if d:
+            keep.append(d)
+            primary = val(cf.CFDictionaryGetValue(d, cfstr("PrimaryInterface")))
+        if not primary:
+            return "none"
+        arr = sc.SCNetworkInterfaceCopyAll()
+        if not arr:
+            return None
+        keep.append(arr)
+        for i in range(cf.CFArrayGetCount(arr)):
+            item = cf.CFArrayGetValueAtIndex(arr, i)
+            if val(sc.SCNetworkInterfaceGetBSDName(item)) != primary:
+                continue
+            typ = val(sc.SCNetworkInterfaceGetInterfaceType(item))
+            return _NET_KINDS.get(typ or "", (typ or "").lower() or None)
+        return "other"                    # 有默认路由但类型不在表里（VPN / 隧道等）
+    except Exception:                                         # noqa: BLE001
+        return None
+    finally:
+        for r in keep + created:
+            try:
+                cf.CFRelease(r)
+            except Exception:                                 # noqa: BLE001
+                pass
+
+
+def _locale() -> dict:
+    """语言 / 地区 / 时区名（zh / en 用户构成用）。拿不到 → `None` 字段。**绝不抛**。"""
+    out = {"locale": None, "lang": None, "timezone": None}
+    try:
+        from Foundation import NSLocale, NSTimeZone
+        out["locale"] = str(NSLocale.currentLocale().localeIdentifier())
+        langs = NSLocale.preferredLanguages()
+        out["lang"] = str(langs[0]) if langs else None
+        out["timezone"] = str(NSTimeZone.localTimeZone().name())
+    except Exception:                                         # noqa: BLE001
+        pass
+    return out
+
+
+def device_start(src=None) -> dict:
+    """开课的设备/环境快照（**测试模式专用**）。**每个值各自兜底，失败 = null。**
+
+    `src` = 正在用的音源（拿它的 `device_name`，不开第二条流）。
+    """
+    return {
+        "disk": _guard(_disk),
+        "power": _guard(_power_full),
+        "machine": _guard(_machine),
+        "displays": _guard(_displays),
+        "audio": _guard(audio_info, src),
+        "net": _guard(net_type),
+        "locale": _guard(_locale),
+    }
+
+
+def device_cheap() -> dict:
+    """⏱ 便宜样本（每 `DEVICE_SAMPLE_S`）：低电量模式 / 热压力 / 网络类型。
+
+    ⚠️ **无子进程、无 AppKit** —— 这两条是它能每 10 分钟跑一次的根据
+       （见 `PROBE_TIMEOUT_S` 那条纪律）。`t_s` 由 `note_device_tick` 补。
+    """
+    out = _guard(_ns_power) or {"low_power_mode": None, "thermal": None}
+    out["net"] = _guard(net_type)
+    return out
+
+
+def _device_dirs() -> dict:
+    """体积扫描的三个根：安装目录的 `sessions/`、`~/.classlive`、`~/models`。
+
+    ⚠️ 三个都取**公开定义点**（`obsidian_writer.SESSIONS` / `paths.STATE_ROOT` /
+       `models.MODELS_ROOT`）—— 不在这里手拼路径。拿不到 → 那个键不传（= null）。
+    """
+    out: dict = {}
+    try:
+        import obsidian_writer
+        out["sessions_dir"] = obsidian_writer.SESSIONS
+    except Exception:                                         # noqa: BLE001
+        pass
+    try:
+        import paths
+        out["classlive_dir"] = paths.STATE_ROOT
+    except Exception:                                         # noqa: BLE001
+        pass
+    try:
+        out["models_dir"] = pathlib.Path(os.path.expanduser(models.MODELS_ROOT))
+    except Exception:                                         # noqa: BLE001
+        pass
+    return out
+
+
+def _dir_bytes(root, deadline: float) -> tuple[int, bool]:
+    """目录递归大小（**只 stat，不读内容、不跟随符号链接**）→ `(字节, 走完没)`。
+
+    超 `deadline`（`time.monotonic`）→ 提前停，`走完没=False`。
+    """
+    total, stack = 0, [pathlib.Path(root)]
+    while stack:
+        if time.monotonic() > deadline:
+            return total, False
+        d = stack.pop()
+        try:
+            with os.scandir(d) as it:
+                n = 0
+                for e in it:
+                    n += 1
+                    if n % 1024 == 0 and time.monotonic() > deadline:
+                        return total, False
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(pathlib.Path(e.path))
+                        elif e.is_file(follow_symlinks=False):
+                            total += e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            return total, False           # 读不进去的目录 = 量不全（宁可标不完整）
+    return total, True
+
+
+def _children(root, deadline: float) -> tuple[list, bool]:
+    """顶层子项 → `[(名字, 字节, 走完没)]`。超 deadline → 提前停（`complete=False`）。"""
+    kids, complete = [], True
+    with os.scandir(root) as it:          # ⚠️ 根读不进去 → 抛给调用方（那边记 partial）
+        for e in it:
+            if time.monotonic() > deadline:
+                complete = False
+                break
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    b, ok = _dir_bytes(e.path, deadline)
+                elif e.is_file(follow_symlinks=False):
+                    b, ok = e.stat(follow_symlinks=False).st_size, True
+                else:
+                    continue
+            except OSError:
+                b, ok = 0, False
+            kids.append((e.name, b, ok))
+            if not ok:
+                complete = False
+    return kids, complete
+
+
+def footprint(*, sessions_dir=None, classlive_dir=None, models_dir=None,
+              budget_s: float = FOOTPRINT_BUDGET_S) -> dict:
+    """我们自己的体积：`sessions/` · `~/.classlive/` · `~/models/` + 顶层前 5 大。
+
+    ⚠️ **收尾只跑一次**，在**后台线程**里跑，总预算 `budget_s` 秒：`~/.classlive`
+       在本机 4.9 GB / 6.1 万个文件（实测走一遍 0.48 s），别人的机器可能更慢 ——
+       超预算就**停**，已经量到的照报，`partial: true`（宁可少一个数，不许卡收尾）。
+    ⚠️ **只 stat，不读文件内容、不写任何东西**；报告里只出现**我们自己的目录名**
+       （`~/.classlive` 顶层前 5 大 —— 不往目录里递归报名字）。
+    目录不存在 → 那个键 `None`（不是 0：目录不在 ≠ 体积为零）。
+    """
+    deadline = time.monotonic() + max(0.0, float(budget_s))
+    out: dict = {"sessions_mb": None, "classlive_mb": None, "models_mb": None,
+                 "classlive_top": [], "partial": False, "budget_s": budget_s}
+
+    def work() -> None:
+        # ① ~/.classlive：顶层前 5 大 + 总量（一次遍历）—— 这块里最贵的答案
+        try:
+            if classlive_dir is not None:
+                root = pathlib.Path(classlive_dir)
+                if root.is_dir():
+                    kids, complete = _children(root, deadline)
+                    kids.sort(key=lambda k: -k[1])
+                    out["classlive_top"] = [{"name": n, "mb": round(b / 1e6, 1)}
+                                            for n, b, _ok in kids[:5]]
+                    out["classlive_mb"] = (round(sum(b for _n, b, _ok in kids) / 1e6, 1)
+                                           if (kids or complete) else None)
+                    if not complete:
+                        out["partial"] = True
+        except OSError:
+            out["partial"] = True
+        # ② sessions / models
+        for key, d in (("sessions_mb", sessions_dir), ("models_mb", models_dir)):
+            try:
+                if d is None:
+                    continue
+                root = pathlib.Path(d)
+                if not root.is_dir():
+                    continue
+                b, ok = _dir_bytes(root, deadline)
+                out[key] = round(b / 1e6, 1) if (ok or b) else None
+                if not ok:
+                    out["partial"] = True
+            except OSError:
+                out["partial"] = True
+
+    th = threading.Thread(target=work, daemon=True, name="cl-footprint")
+    th.start()
+    th.join(timeout=max(0.5, float(budget_s)) + 0.5)
+    if th.is_alive():                     # 正常不会：worker 自己看 deadline。兜底不静默
+        out["partial"] = True
+    return out
+
+
+def device_end(src=None, *, dirs=None, budget_s: float = FOOTPRINT_BUDGET_S) -> dict:
+    """收尾的设备/环境快照：磁盘 / 供电 / 音频 / 网络 / 语言 + **我们自己的体积**。
+
+    ⚠️ `footprint` 在**后台线程**里跑（预算 `budget_s` 秒，超了 `partial: true`）。
+       `dirs` 不给 → 现取（`_device_dirs()`）；判据 / 冒烟可以显式传**只读**的真目录。
+    **每个值各自兜底，失败 = null；绝不抛。**
+    """
+    dirs = _device_dirs() if dirs is None else dict(dirs)
+    return {
+        "disk": _guard(_disk),
+        "power": _guard(_power_full),
+        "audio": _guard(audio_info, src),
+        "net": _guard(net_type),
+        "locale": _guard(_locale),
+        "footprint": _guard(footprint, budget_s=budget_s,
+                            sessions_dir=dirs.get("sessions_dir"),
+                            classlive_dir=dirs.get("classlive_dir"),
+                            models_dir=dirs.get("models_dir")),
     }
 
 
@@ -953,6 +1462,50 @@ class TestSession:
             }
         except Exception as e:                            # noqa: BLE001
             return {"available": False, "reason": f"{type(e).__name__}: {str(e)[:80]}"}
+
+    # ---- ⭐ 3.10 `device` 块：start / end / ⏱ 每 10 分钟 ----
+    @_safe
+    def note_device_start(self, src=None) -> None:
+        """开课的设备/环境快照（`device` 块的 start）。⚠️ **测试模式专用**。
+
+        `src` = 正在用的音源（拿它的 `device_name`；**不开第二条流**）。
+        之后每 `DEVICE_SAMPLE_S` 由 `note_device_tick` 补一份便宜样本。
+        """
+        self._device = {"start": device_start(src), "samples": []}
+        self._device_next = time.monotonic() + DEVICE_SAMPLE_S
+
+    @_safe
+    def note_device_tick(self) -> None:
+        """⏱ 便宜采样（低电量模式 / 热压力 / 网络类型），每 `DEVICE_SAMPLE_S` 一次。
+
+        ⚠️ **搭主循环既有的设备探查定时器**（`main` 里 `_dev` 那个，2 s 一跑）——
+           没新线程、没新轮询；没到间隔就是**一次单调钟比较**直接返回。
+        """
+        dev = getattr(self, "_device", None)
+        if not dev or dev.get("start") is None:
+            return
+        now = time.monotonic()
+        if now < getattr(self, "_device_next", 0.0):
+            return
+        self._device_next = now + DEVICE_SAMPLE_S
+        s = device_cheap()
+        s["t_s"] = round(now - self.t0, 1)
+        dev["samples"].append(s)
+
+    def device_block(self, src=None) -> dict:
+        """收尾的 `device` 块：`{start, end, samples}`。**永不抛**（失败 = null）。
+
+        ⚠️ `end` 里含**我们自己的体积扫描**（后台线程 + 5 s 预算，超了 `partial`）——
+           这是这一块里唯一可能花掉几秒的东西（本机实测 0.5 s）。
+        """
+        dev = getattr(self, "_device", None) or {}
+        try:
+            end = device_end(src)
+        except Exception:                                 # noqa: BLE001
+            end = None
+        return {"start": dev.get("start"),
+                "end": end,
+                "samples": list(dev.get("samples") or [])}
 
     @_safe
     def note_ui(self, name: str) -> None:

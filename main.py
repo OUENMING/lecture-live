@@ -3134,6 +3134,11 @@ def run(args) -> None:
             pass
         return
 
+    if tester is not None:
+        # ⭐ 3.10 `device` 块：开课快照 —— 磁盘 / 供电 / 机器 / 显示器 / 音频
+        #    （拿 `src` 的设备名，**不开第二条流**）/ 网络类型 / 语言时区。
+        #    收尾再取一份 + 体积扫描；中间每 10 分钟一份便宜样本（搭 `_dev` 定时器）。
+        tester.note_device_start(src)
     # ⭐ 3.9.7 省电：实时采音的**新块到达**也要立刻叫醒主循环（它可能正睡在 0.1/0.25 s 的让步里）。
     #    `CallbackSource` 在声卡回调线程调（`wake()` 跨线程安全）；文件回放由主循环自己 poll，
     #    不需要这条。拿不到 waker 的源（替身 / 老对象）→ 什么都不做。
@@ -3510,6 +3515,10 @@ def run(args) -> None:
                 check_clock_and_device(src, args.source,
                                        lambda m, warn=False: notify(m, warn, src=""), _dev,
                                        on_wake=_reset_net)
+                if tester is not None:
+                    # ⭐ 3.10：⏱ 设备便宜样本 —— 搭这个 2 s 定时器；内部每 10 分钟
+                    #    才真采一次（没到间隔就是一次单调钟比较，零开销）。
+                    tester.note_device_tick()
             # ⚠️ 判据是 `drives_appkit`（**UI 对象自己说的**），不是 `args.ui`：见收尾
             #    `_spin` 里那段同款说明 —— `_load_overlay` 失败时会**静默回退**
             #    `TerminalUI()`，那时 args 还写着 overlay → 每轮调一个空 pump、
@@ -3908,6 +3917,11 @@ def run(args) -> None:
                 # ⭐ 3.9.8 ④：收音断档（墙钟 vs 实际音频秒）。⚠️ 用 time.time ——
                 #    monotonic 在系统睡眠时不走，而"睡过去了、中间没声音"正是它要抓的。
                 tester.note_block("capture", tester.capture_block())
+                # ⭐ 3.10：设备/环境块（start 在开课时 / ⏱ 样本搭 `_dev` 定时器 /
+                #    end 在这里）。end 里含**我们自己的体积扫描**（sessions/ ·
+                #    ~/.classlive/ · ~/models/ + 顶层前 5 大）—— 后台线程 + 5 s
+                #    预算，超了 `partial: true`，绝不卡收尾。
+                tester.note_block("device", tester.device_block(src))
                 # ⭐ 译文超出档位行数的次数/分母 —— 原来只在 `transcript_view` 里自增、
                 #    哪儿都不导出，「F 只有 ≈1%」只能拿离线回放外推（2026-10-14 C4）。
                 _ovs = getattr(ui, "overflow_stats", None)

@@ -530,7 +530,9 @@ class Wiring(unittest.TestCase):
         for key in ("⚠ 课上只给了片段", "不许第一人称", "引号"):
             self.assertIn(key, note_v2.REVIEW_SYS, f"prompt 缺纪律：{key}")
         # 2026-10-18 Δ：三条新规矩（过渡段不单独成段 / 正文禁时间戳 / 线索问题禁纯算术）
-        for key in ("不许单独写一段讲解", "不许写钟点时间戳", "不许问纯算术"):
+        # ⚠️ 2026-10-18 第七轮：「过渡段」那条的措辞从「不许单独写一段讲解」收紧成
+        #    「不许单独成段」（同一判据，措辞跟着 prompt 的现行版本走）。
+        for key in ("不许单独成段", "不许写钟点时间戳", "不许问纯算术"):
             self.assertIn(key, note_v2.REVIEW_SYS, f"prompt 缺新规矩：{key}")
 
 

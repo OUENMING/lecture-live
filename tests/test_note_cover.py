@@ -248,5 +248,27 @@ class Wiring(unittest.TestCase):
         self.assertIn('id="checks"', ht, "HTML 的「点开看」锚点还是死链")
 
 
+class RangeTs(unittest.TestCase):
+    """第七轮：小节 `ts` 可以是**区间**（概念单元合并后的 `13:16–13:24`）。
+
+    区间就是它自己的窗口 —— 不再是「起点 + 15 分钟半径」：合并单元声明到哪儿，
+    覆盖就算到哪儿（单元之间不会互相吃掉对方的窗口）。
+    """
+
+    def test_hms_range_认区间(self):
+        self.assertEqual(nc.hms_range("13:16–13:24"), (nc.hms("13:16"), nc.hms("13:24")))
+        self.assertEqual(nc.hms_range("13:16"), (nc.hms("13:16"), None))
+        self.assertEqual(nc.hms_range("坏值"), (None, None))
+
+    def test_区间就是它自己的窗口_不再叠半径(self):
+        sk = [{"t0": "13:16", "t1": "13:30", "title": "章", "points": [
+            {"gi": 1, "ts": "13:20", "zh": "中点"},
+            {"gi": 2, "ts": "13:28", "zh": "窗外"}]}]
+        rep = nc.report(sk, [{"ts": "13:16–13:24", "heading": "合并单元"}])
+        got = {p["gi"]: p["ok"] for row in rep["rows"] for p in row["points"]}
+        self.assertTrue(got[1], "区间内的点该算覆盖")
+        self.assertFalse(got[2], "超出区间的点不许再吃 15 分钟半径")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

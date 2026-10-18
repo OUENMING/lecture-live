@@ -36,7 +36,6 @@ SEC = {
 }
 REVIEW = {"title_zh": "成本函数", "sections": [SEC],
           "qa": [{"q": "Q1?", "a": "A1", "kind": "concept"}],
-          "overview": {"one_line": "一句话总览。", "takeaways": ["t1", "t2", "t3"]},
           "overview_long": ["**第一段。**（第 1 节）讲这个。",
                             "**第二段。**（第 1、2 节）接着讲。"]}
 
@@ -139,11 +138,13 @@ class LeadBold(unittest.TestCase):
         self.assertIn('<strong class="keyline">第一节的第一句。</strong>', h)
         self.assertIn('<strong>第二段的第一句。</strong>', h)
 
-    def test_串讲段落链到小节锚点_越界不硬链(self):
+    def test_速览段落链到小节锚点_越界不硬链(self):
         h = nh.note_page(_data())
         self.assertIn('id="overview"', h)
-        self.assertIn("五分钟串讲", h)
-        self.assertIn('href="#kp1"', h)
+        self.assertIn("<h3>速览</h3>", h)
+        self.assertNotIn("五分钟", h, "旧的五分钟串讲该撤了")
+        self.assertIn(
+            '<p><strong>第一段。</strong>（第 <a href="#kp1">1</a> 节）讲这个。</p>', h)
         self.assertNotIn("href", nh._link_sections("见（第 9 节）", 2))
         self.assertEqual(nh._link_sections("（第 1 节）", 1), '（第 <a href="#kp1">1</a> 节）')
 
@@ -243,13 +244,20 @@ class WhyAcc(unittest.TestCase):
 
 class Inline(unittest.TestCase):
     def test_粗体跨公式也要成对(self):
-        """⚠️ 2026-10-18 截图自查：串讲的加粗断言句里常带 `$…$` —— 首尾 `**` 落在公式
+        """⚠️ 2026-10-18 截图自查：加粗断言句里常带 `$…$` —— 首尾 `**` 落在公式
         两边的不同段里，逐段处理会在页面上留下字面 `**`（截图里肉眼可见）。"""
         got = nh.inline("**两种方法等价，因为有 $MC=AC$。**（第 8 节）求导法也行。")
         self.assertNotIn("**", got)
         self.assertIn("<strong>两种方法等价，因为有 ", got)
         self.assertIn('data-tex="MC=AC"', got)
         self.assertIn("</strong>（第 8 节）", got)
+
+    def test_落单的加粗符不再露出来(self):
+        """⚠️ 第七轮泄漏扫描：模型写不配对的 `**`（三节课样本实测 14–20 处）→
+        页面不许露出字面 `**`（宁可不加粗，不许露语法）。"""
+        got = nh.inline("先说一句。**然后这段忘了闭合，旁边还有一个 **emphasis** 词。")
+        self.assertNotIn("**", got)
+        self.assertIn("<strong>然后这段忘了闭合", got)
 
 
 class ChecksTable(unittest.TestCase):
@@ -285,6 +293,34 @@ class Controls(unittest.TestCase):
         self.assertIn(".printonly{display:none}", h)
         self.assertIn(".screenonly{display:none!important}", h)
         self.assertIn(".printonly{display:inline!important}", h)
+
+
+class TermAnnotation(unittest.TestCase):
+    """第七轮 F：术语**首次**出现 → 「中文（English）」；HTML 与 md 共用同一份实现。
+
+    ⚠️ walk 顺序 = 阅读顺序：速览（`overview_long`）先走；标题不标（目录里会重复出现）。
+    """
+
+    def _data(self, md_visible=False):
+        sec = {"ts": "13:31", "heading": "边际成本",
+               "prose": ["先看边际成本怎么算。", "边际成本再出现时不括注。"],
+               "q": "边际成本是什么？",
+               "terms": [{"en": "marginal cost", "zh": "边际成本"}]}
+        rev = {"sections": [sec], "qa": []}
+        if md_visible:
+            rev["overview_long"] = ["这节课先说边际成本这条线。"]
+        return _data(review=rev)
+
+    def test_html_首次括注_只一次(self):
+        h = nh.note_page(self._data())
+        self.assertEqual(h.count("边际成本（marginal cost）"), 1)
+        self.assertIn("先看边际成本（marginal cost）怎么算。", h)
+        self.assertIn("边际成本再出现时不括注。", h, "第一处之后的不再加")
+
+    def test_md_速览里的首次括注(self):
+        md = nr.render(self._data(md_visible=True))
+        self.assertEqual(md.count("边际成本（marginal cost）"), 1)
+        self.assertIn("这节课先说边际成本（marginal cost）这条线。", md)
 
 
 if __name__ == "__main__":

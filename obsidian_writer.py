@@ -1052,30 +1052,32 @@ class ObsidianWriter:
         return (obj if isinstance(obj, dict) else {}), finish
 
     def _with_overview(self, review: dict) -> tuple:
-        """⭐ 五分钟串讲（版式 A，2026-10-18）：合并后**一次小调用**，输入只有小节（无转录）。
+        """⭐ 速览（2026-10-18 第七轮）：概念单元 → **一次小调用**，3–6 句、≤ 正文上限的 10%。
 
-        ⚠️ 失败（调用炸了 / 截断 / 模型没回可用内容）都不许抛、也不许印半截：
-           记一条 ⚠ 到页尾、速览退回首句兜底 —— 笔记照常生成（fail-soft）。
+        ⚠️ 旧的「五分钟串讲」（6–10 段重讲一遍）作废（作者原话：太长、假设读者没来上课）。
+        ⚠️ 失败（调用炸了 / 截断 / 模型没回可用内容）都不许抛、不许印半截：记一条 ⚠ 到页尾，
+           速览那一块就不出现 —— 笔记照常生成（fail-soft）。
         """
         import note_v2
+        mins = float(review.get("minutes") or 0.0) or 45.0
+        max_chars = max(120, int(note_v2.CEILING_PER_MIN * mins * note_v2.FASTVIEW_SHARE))
         try:
-            got = note_v2.overview(review, chat=self._chat, chat_meta=self._chat_meta)
+            got = note_v2.overview(review, chat=self._chat, chat_meta=self._chat_meta,
+                                   max_chars=max_chars)
         except Exception as e:                                 # noqa: BLE001
-            return review, [], [f"五分钟串讲没生成（{type(e).__name__}）—— 详细版里少这一层"]
-        if not got or not got.get("paragraphs"):
-            return review, [], ["五分钟串讲没生成（模型没回可用内容/被截断）—— 详细版里少这一层"]
+            return review, [], [f"速览没生成（{type(e).__name__}）—— 详细版里少这一层"]
+        if not got or not got.get("summary"):
+            return review, [], ["速览没生成（模型没回可用内容/被截断）—— 详细版里少这一层"]
         out = dict(review)
-        out["overview_long"] = list(got["paragraphs"])
-        meta: dict = {}
-        if got.get("one_line"):
-            meta["one_line"] = got["one_line"]
-        if got.get("takeaways"):
-            meta["takeaways"] = list(got["takeaways"])
-        if meta:
-            out["overview"] = meta
+        out["overview_long"] = list(got["summary"])
         if got.get("self_check"):
-            print(f"   🧵 串讲自检：{got['self_check'][:70]}", flush=True)
+            print(f"   🧵 速览自检：{got['self_check'][:70]}", flush=True)
         return out, [], []
+
+    def _shorten_overlimit(self, review: dict) -> tuple:
+        """⭐ 超限单元压缩（第七轮 H）：超过上限 15% 的单元**各做一次**压缩调用（fail-soft）。"""
+        import note_v2
+        return note_v2.shorten_overlimit(review, chat=self._chat)
 
     def _review_v2(self, entries: list[dict], on_progress=None) -> dict:
         """v2 复习层：课件索引 → 分块 review → 覆盖度对齐 → 数字三道核 → 术语库。
@@ -1179,7 +1181,9 @@ class ObsidianWriter:
                           (lambda r: note_guards.ensure_caliber(
                               r, materials=self._materials), "停产价格口径"),
                           (lambda r: note_ledger.ensure_min_value(r), "最小平均成本补值"),
-                          (lambda r: self._with_overview(r), "五分钟串讲"),
+                          # ⭐ 第七轮 H：超上限的单元先压干净，速览才照着**最终长度**写
+                          (lambda r: self._shorten_overlimit(r), "超限单元压缩"),
+                          (lambda r: self._with_overview(r), "速览"),
                           # 串讲的正文也吃同一条纪律（它是 overview 层新写的散文，第一遍清完在它之前）
                           (lambda r: note_guards.strip_clock_times(r), "正文时间戳清理（串讲）"),
                           (lambda r: note_guards.scrub(r), "猜测句清理（串讲）"),

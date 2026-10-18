@@ -403,7 +403,11 @@ def inline(text: str) -> str:
         out.append(_tex_span(m.group(0)))
         last = m.end()
     out.append(_prose_html(s[last:]))
-    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", "".join(out), flags=re.S)
+    html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", "".join(out), flags=re.S)
+    # ⚠️ 模型偶尔写**落单的加粗符**（没有配对的 `**`）—— 那是强调语法不是内容：
+    #    成对的已被上一行收走，剩下的直接清掉（宁可不加粗，不许在页面上露出字面 `**`）。
+    #    三节课样本实测 14–20 处（2026-10-18 泄漏扫描）。
+    return re.sub(r"\*\*", "", html)
 
 
 def _unquote_md(block) -> str:
@@ -1044,28 +1048,19 @@ def _link_sections(text_html: str, n_sections: int) -> str:
 
 
 def _overview_html(review: dict, sections: list, dates: list) -> str:
-    """顶部「五分钟速览」：一句话 + 3 takeaways + 五分钟串讲 + 复习排程。
+    """顶部「速览」（2026-10-18 第七轮）：几句话说清这节课的线 + 复习排程。
 
-    ⚠️ 串讲（`overview_long`）是**一次额外小调用**的产物；没有也照渲染（少那一块，
-       页尾的 ⚠ 记录里会说）——「一节课的线」不该因为一次调用失败整页报废。
+    ⚠️ 读者是**上过课**的人：短、自然、能续上记忆 —— 不再是"五分钟串讲"（作废）。
+    ⚠️ 速览（`overview_long`）是一次额外小调用的产物；没有也别把整页报废（页尾会记 ⚠）。
     """
     import note_v2
-    ov = review.get("overview") or {}
-    one = str(ov.get("one_line") or "").strip() or str(review.get("title_zh") or "").strip()
-    takes = [str(t) for t in (ov.get("takeaways") or []) if str(t).strip()][:3]
     paras = [str(p) for p in (review.get("overview_long") or []) if str(p).strip()]
     sched = note_v2.schedule_rows(dates)
-    if not (one or takes or paras or sched):
+    if not (paras or sched):
         return ""
-    o = ['<div class="over" id="overview"><h3>五分钟速览</h3>']
-    if one:
-        o.append(f'<p><b>一句话：</b>{inline(one)}</p>')
-    if takes:
-        o.append("<ul>" + "".join(f"<li>{inline(t)}</li>" for t in takes) + "</ul>")
+    o = ['<div class="over" id="overview"><h3>速览</h3>']
     if paras:
-        o.append('<h4 class="story-h">五分钟串讲：把整节课从头讲一遍</h4><div class="story">')
         o += [f"<p>{_link_sections(inline(p), len(sections))}</p>" for p in paras]
-        o.append("</div>")
     if sched:
         o.append('<p class="sched-line"><b>复习排程：</b>（笔记只写日期，不推送）</p>')
         o.append('<ul class="sched">' + "".join(
@@ -1123,7 +1118,10 @@ def page(title: str, head: list, toc_items: list, sections_html: list, qa: list,
 
 def note_page(d) -> str:
     """`note_render.NoteData` -> 自包含 HTML。**纯渲染**（失败由调用方兜底）。"""
-    review = d.review or {}
+    import note_v2
+    # ⭐ 术语就地括注（作者 2026-10-18）：渲染层确定性执行，全篇每个术语只在首次出现处
+    #    写「中文（English）」—— 和 md 共用同一份实现（`note_v2.announce_terms_in_review`）。
+    review = note_v2.announce_terms_in_review(d.review or {})
     sections = review.get("sections") or []
     head = [f"<div>🕐 {html.escape(str(d.entries[0]['ts'] if d.entries else '—'))} – "
             f"{html.escape(str(d.entries[-1]['ts'] if d.entries else '—'))} · "

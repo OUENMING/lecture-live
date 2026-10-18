@@ -124,6 +124,7 @@ class ReviewCall(unittest.TestCase):
         self.assertIn("📖 final.md §Exercise 5", seen["user"])
         self.assertIn("Course: ECON10790 Maths", seen["user"])
         self.assertIn("cost_curves", seen["system"], "图菜单没进 prompt")
+        self.assertIn("字数上限", seen["user"], "每块的长度上限（第七轮 H）没进 prompt")
 
     def test_块失败要退一步_不许静默丢(self):
         """⭐ 第四轮 run F 的实测：带章节骨架后 4/5 块输出被截断 → 静默丢半节课。
@@ -286,22 +287,20 @@ class Schedule(unittest.TestCase):
 
 
 class Overview(unittest.TestCase):
-    """五分钟串讲的生成侧（全替身 chat，零网络）—— 版式 A，作者 2026-10-18。"""
+    """速览的生成侧（全替身 chat，零网络）—— 第七轮，作者 2026-10-18（替代五分钟串讲）。"""
 
     def _rev(self):
         return {"sections": [dict(SECTION), dict(SECTION, heading="第二节")]}
 
     def test_输出字段被收进来(self):
         def chat(s, u, mt):
-            self.assertIn("第 2 节", u)          # 输入用的是合并后的小节
-            self.assertNotIn("sentence about cost", u, "串讲输入里不该有转录原文")
-            return {"paragraphs": ["**一段。**", "**二段。**"],
-                    "one_line_takeaway": "一句话", "takeaways": ["a", "b", "c", "d"],
+            self.assertIn("第 2 单元", u)          # 输入用的是合并后的概念单元
+            self.assertNotIn("先说直觉", u, "速览输入里不该有讲解全文")
+            self.assertIn("不超过", u)             # 上限写进了用户消息
+            return {"summary": ["先讲了这个，再把它用到那个上，两条线在这里接上。"],
                     "self_check": "yes"}
-        got = nv.overview(self._rev(), chat=chat)
-        self.assertEqual(got["paragraphs"], ["**一段。**", "**二段。**"])
-        self.assertEqual(got["one_line"], "一句话")
-        self.assertEqual(got["takeaways"], ["a", "b", "c"])   # 至多 3 条
+        got = nv.overview(self._rev(), chat=chat, max_chars=200)
+        self.assertEqual(got["summary"], ["先讲了这个，再把它用到那个上，两条线在这里接上。"])
         self.assertEqual(got["self_check"], "yes")
 
     def test_截断当失败(self):
@@ -319,6 +318,176 @@ class Overview(unittest.TestCase):
         def boom(s, u, mt):
             raise RuntimeError("网络炸了")
         self.assertEqual(nv.overview(self._rev(), chat=boom), {})
+
+
+class ConceptUnits(unittest.TestCase):
+    """概念单元（第七轮 A）：相邻同主干的小节并成一个单元；单元带 minutes 与 ts 区间。"""
+
+    def _sec(self, ts, heading, **kw):
+        return {"ts": ts, "heading": heading, "prose": [f"{heading}·讲解。"],
+                "q": f"{heading}·问？", "example": {"prompt": f"{heading}·题",
+                                                   "steps": [], "answer": "答"},
+                "pitfalls": ["坑"], "terms": [{"en": "x", "zh": "某"}], **kw}
+
+    def test_相邻同主干并成一个单元(self):
+        rev = {"sections": [
+            self._sec("13:16", "[13:16] 最优化练习与停业价格：计算平均成本"),
+            self._sec("13:18", "[13:18] 最优化练习与停业价格：三次函数练习",
+                      terms=[{"en": "y", "zh": "另"}]),
+            self._sec("13:20", "[13:20] 平均成本、边际成本及其相互作用：相互位置"),
+            self._sec("13:22", "[13:22] 平均成本、边际成本及其相互作用：交点"),
+        ]}
+        got = nv.merge_units(rev, end_ts="13:24")
+        heads = [s["heading"] for s in got["sections"]]
+        self.assertEqual(heads, ["最优化练习与停业价格", "平均成本、边际成本及其相互作用"])
+        a = got["sections"][0]
+        self.assertEqual(a["ts"], "13:16–13:18")
+        self.assertEqual(a["minutes"], 4.0)          # 13:16→13:18 + 13:18→13:20
+        self.assertEqual(a["prose"], ["[13:16] 最优化练习与停业价格：计算平均成本·讲解。",
+                                      "[13:18] 最优化练习与停业价格：三次函数练习·讲解。"])
+        self.assertEqual(a["example"]["prompt"], "[13:16] 最优化练习与停业价格：计算平均成本·题",
+                         "重复例子只留第一个")
+        self.assertEqual(len(a["terms"]), 2)         # 各自去重后并起来
+        self.assertEqual(got["minutes"], 8.0)
+
+    def test_只并相邻的(self):
+        rev = {"sections": [
+            self._sec("13:16", "[13:16] A：一"),
+            self._sec("13:18", "[13:18] B：二"),
+            self._sec("13:20", "[13:20] A：三"),
+        ]}
+        got = nv.merge_units(rev, end_ts="13:22")
+        self.assertEqual(len(got["sections"]), 3, "中间的 B 把两段 A 隔开了，不许跨着并")
+        self.assertEqual([s["heading"] for s in got["sections"]],
+                         ["[13:16] A：一", "[13:18] B：二", "[13:20] A：三"],
+                         "单成员单元保持原标题")
+
+    def test_没有_sections_原样返回(self):
+        rev = {"qa": [{"q": "x", "a": "y"}]}
+        self.assertEqual(nv.merge_units(rev), rev)
+
+    def test_最后一节按课末算分钟(self):
+        rev = {"sections": [self._sec("13:16", "[13:16] A：一"),
+                            self._sec("13:20", "[13:20] B：二")]}
+        got = nv.merge_units(rev, end_ts="13:26")
+        self.assertEqual(got["sections"][1]["minutes"], 6.0)
+
+
+class ChunkBudget(unittest.TestCase):
+    """每块的长度上限（第七轮 H）：≈240 CJK 字/分钟，写进提示词。"""
+
+    def test_上限按分钟算(self):
+        chunk = ["[13:16:00] a", "[13:16:30] b", "[13:20:00] c"]     # 4 分钟
+        m = re.search(r"至多 (\d+) 字", nv.chunk_budget_line(chunk))
+        self.assertTrue(m, "上限没写进提示行")
+        n = int(m.group(1))
+        self.assertGreaterEqual(n, 960)      # ≥ 240×4
+        self.assertLessEqual(n, 1200)        # ≤ 240×5（含半分钟余量）
+
+    def test_没有时间戳给保守值(self):
+        m = re.search(r"至多 (\d+) 字", nv.chunk_budget_line(["没有时间戳的行"]))
+        self.assertEqual(int(m.group(1)), 720)      # 默认按 3 分钟
+
+
+class ShortenOverlimit(unittest.TestCase):
+    """超限单元压缩（第七轮 H）：> 上限 ×1.15 才发一次调用；失败/变不短都不动原文。"""
+
+    def _rev(self, cjk: int, minutes=1.0):
+        return {"sections": [{"ts": "13:16", "heading": "H",
+                              "prose": ["字" * cjk], "minutes": minutes}]}
+
+    def test_超限才发调用(self):
+        calls = []
+
+        def chat(s, u, mt):
+            calls.append(u)
+            return {"prose": ["短"]}
+        got, _, warns = nv.shorten_overlimit(self._rev(1000), chat=chat)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("上限是 240 字", calls[0])
+        self.assertEqual(got["sections"][0]["prose"], ["短"])
+        self.assertTrue(warns and "1 个单元" in warns[0], "调用数要记账")
+
+    def test_没超限不发(self):
+        calls = []
+
+        def chat(s, u, mt):
+            calls.append(u)
+            return {"prose": ["短"]}
+        got, _, warns = nv.shorten_overlimit(self._rev(200), chat=chat)
+        self.assertEqual(calls, [], "没超限不许发调用")
+        self.assertEqual(got["sections"][0]["prose"], ["字" * 200])
+        self.assertEqual(warns, [])
+
+    def test_变不短就不动(self):
+        def chat(s, u, mt):
+            return {"prose": ["更长的" * 500]}
+        got, _, warns = nv.shorten_overlimit(self._rev(1000), chat=chat)
+        self.assertEqual(got["sections"][0]["prose"], ["字" * 1000])
+        self.assertEqual(warns, [])
+
+    def test_调用炸了_fail_soft(self):
+        def boom(s, u, mt):
+            raise RuntimeError("炸")
+        got, _, warns = nv.shorten_overlimit(self._rev(1000), chat=boom)
+        self.assertEqual(got["sections"][0]["prose"], ["字" * 1000])
+        self.assertEqual(warns, [])
+
+    def test_没有_minutes_跳过(self):
+        def boom(*a):
+            raise AssertionError("不该调用")
+        rev = {"sections": [{"heading": "H", "prose": ["字" * 5000]}]}
+        got, _, warns = nv.shorten_overlimit(rev, chat=boom)
+        self.assertEqual(warns, [])
+
+
+class AnnounceTerms(unittest.TestCase):
+    """术语就地括注（第七轮 F）：首次出现 → 「中文（English）」；HTML 与 md 共用这一份。"""
+
+    def test_首次出现才括注(self):
+        terms, seen = [("边际成本", "marginal cost")], set()
+        a = nv.announce_terms("先讲边际成本，再讲边际成本。", terms, seen)
+        self.assertEqual(a, "先讲边际成本（marginal cost），再讲边际成本。")
+        b = nv.announce_terms("后面又见边际成本。", terms, seen)
+        self.assertEqual(b, "后面又见边际成本。")
+
+    def test_已经括注的不重复加(self):
+        terms, seen = [("边际成本", "marginal cost")], set()
+        t = "边际成本（marginal cost）是定义。"
+        self.assertEqual(nv.announce_terms(t, terms, seen), t)
+        self.assertIn(terms[0], seen)
+
+    def test_in_review_首次落在正文_台账不碰_原_dict不动(self):
+        rev = {"sections": [{"heading": "边际成本", "prose": ["先说边际成本。"],
+                             "q": "边际成本怎么算？",
+                             "terms": [{"en": "marginal cost", "zh": "边际成本"}]}],
+               "cover": {"rows": [{"title": "边际成本"}]}}
+        got = nv.announce_terms_in_review(rev)
+        self.assertEqual(got["sections"][0]["prose"][0], "先说边际成本（marginal cost）。")
+        self.assertEqual(got["sections"][0]["heading"], "边际成本",
+                         "标题保持干净（目录/地图里会重复出现）")
+        self.assertEqual(got["sections"][0]["q"], "边际成本怎么算？", "只标首次")
+        self.assertEqual(got["cover"]["rows"][0]["title"], "边际成本", "台账不碰")
+        self.assertEqual(rev["sections"][0]["prose"][0], "先说边际成本。", "原 dict 不许动")
+
+    def test_速览先走(self):
+        """walk 顺序 = 阅读顺序：页首速览先拿首次括注，小节里后出现的保持干净。"""
+        rev = {"overview_long": ["先看边际成本。"],
+               "sections": [{"prose": ["再说边际成本。"],
+                             "terms": [{"en": "marginal cost", "zh": "边际成本"}]}]}
+        got = nv.announce_terms_in_review(rev)
+        self.assertEqual(got["overview_long"][0], "先看边际成本（marginal cost）。")
+        self.assertEqual(got["sections"][0]["prose"][0], "再说边际成本。")
+
+    def test_2元组形状也认(self):
+        rev = {"sections": [{"prose": ["先说边际成本。"],
+                             "terms": [["边际成本", "marginal cost"]]}]}
+        got = nv.announce_terms_in_review(rev)
+        self.assertIn("边际成本（marginal cost）", got["sections"][0]["prose"][0])
+
+    def test_没术语就原样(self):
+        rev = {"sections": [{"prose": ["随便说点什么。"]}]}
+        self.assertEqual(nv.announce_terms_in_review(rev), rev)
 
 
 class Anki(unittest.TestCase):
@@ -360,7 +529,7 @@ class RenderShape(unittest.TestCase):
                                                     "title_zh": "成本函数", "t0": "13:16:28",
                                                     "t1": "13:20:00"}]})
         out = nr.render(d)
-        i_quick = out.index("## 0 · 五分钟速览")
+        i_quick = out.index("## 0 · 速览")
         i_kc = out.index("## 📑 课堂纲要")
         i_term = out.index("## 本课术语")
         i_misc = out.index("## 一些事儿")
@@ -448,15 +617,17 @@ class RenderShape(unittest.TestCase):
         self.assertTrue("修正记录" in h)
         self.assertTrue("代入求导" in h, "修正记录必须写出依据（否则读者没法回源）")
 
-    def test_速览里的句子在句末收(self):
-        """实测踩到过：`prose[:80]` 把「令 $f'(x)=0$ 解」这种半句留在速览里。"""
+    def test_速览用短段落而不是清单(self):
+        """第七轮（作者）：速览 = 3–6 句短段落；逐节 gist 清单与「学完你应该会」清单都撤了。"""
         d = self._data()
-        d.review = {"sections": [dict(SECTION, prose=[
-            "第一节讲的东西先是这个道理，然后还有一个更长的解释，最后落到定义上。"])]}
+        d.review = {"sections": [dict(SECTION, prose=["第一节讲的东西先是这个道理。"])],
+                    "overview_long": ["这节课先说 A，再把 A 用到了 B 上。"],
+                    "review_plan": ["重做例题（10 分钟）"]}
         out = nr.render(d)
-        gist = [ln for ln in out.splitlines() if ln.startswith("1. **")][0]
-        self.assertTrue(gist.endswith("。"), gist)
-        self.assertLess(len(gist), 120, gist)
+        self.assertIn("这节课先说 A，再把 A 用到了 B 上。", out)
+        self.assertNotIn("学完你应该会", out)
+        self.assertFalse(any(ln.startswith("1. **") for ln in out.splitlines()),
+                         "逐节 gist 清单该撤了")
 
     def test_三道核的_mismatch_措辞不同_它是发现不是口误(self):
         d = self._data(corrections_extra=[{"kind": "check", "where": "三道核",

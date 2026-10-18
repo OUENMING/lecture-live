@@ -336,13 +336,14 @@ def _case_outline_wiring():
 
         entries = [{"ts": "15:00:10", "en": "a", "zh": "b", "asr": "", "star": False}]
         out = w._render_note(entries, {}, [], "ok", [], None, items)
-        # ⚠️ 2026-10-17 v2 版式：小节名换了（`## 🎯 Overview 概览` → `## 0 · 五分钟速览`、
-        #    `## 📚 Key Concepts 知识点详解` → `## 讲解（由浅入深）`），**这条判据的不变量不变**：
+        # ⚠️ 2026-10-17 v2 版式：小节名换过（`## 🎯 Overview 概览` → `## 0 · 五分钟速览`
+        #    → 2026-10-18 第七轮缩成 `## 0 · 速览`；`## 📚 Key Concepts 知识点详解` →
+        #    `## 讲解（由浅入深）`），**这条判据的不变量不变**：
         #    骨架（纲要）必须在**导言之后、讲解之前**。
         # ⚠️ 2026-10-17 第六轮：md 变简版，`## 讲解（由浅入深）` 那一层搬进了同目录的
         #    详细版 HTML → 第三个锚点换成讲解搬走后紧接着的那一节（术语表）。
         #    **不变量本身一个字没动**：纲要在导言之后、在细节层之前。
-        i_ov = out.index("## 0 · 五分钟速览")
+        i_ov = out.index("## 0 · 速览")
         i_oc = out.index("## 📑 课堂纲要")
         i_kc = out.index("## 本课术语")
         assert i_ov < i_oc < i_kc, f"位置错了：速览@{i_ov} 纲要@{i_oc} 术语@{i_kc}"
@@ -357,7 +358,7 @@ def _case_outline_wiring():
         out2 = w2._render_note(entries, {}, [], "ok", [],
                                None, w2._chapter_items())
         assert "课堂纲要" not in out2, "没有旁路文件时那一节必须整节消失"
-        assert "## 0 · 五分钟速览" in out2, "但笔记其余部分照常"
+        assert "## 0 · 速览" in out2, "但笔记其余部分照常"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

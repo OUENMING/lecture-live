@@ -49,6 +49,18 @@ def hms(s) -> int | None:
     return h * 3600 + m * 60 + sec
 
 
+def hms_range(s) -> tuple:
+    """`"13:16–13:24"` → `(起, 止)`；单值 `"13:16"` → `(起, None)`；坏值 → `(None, None)`。
+
+    ⭐ 2026-10-18（概念单元合并）：小节 `ts` 可以是**区间**（合并后的单元）。
+       区间就是它自己的窗口；单值照旧吃 `SECTION_SPAN` 的覆盖半径。
+    """
+    parts = re.split(r"[–—-]", str(s or "").strip(), maxsplit=1)
+    start = hms(parts[0])
+    end = hms(parts[1]) if len(parts) > 1 else None
+    return start, end
+
+
 def _one(s) -> str:
     return " ".join(str(s or "").split())
 
@@ -179,6 +191,8 @@ def report(sk: list, sections) -> dict:
       · 一节的覆盖半径 = 它自己的起点往后 `SECTION_SPAN` 秒（实测节间距最长 5.3 分钟，
         取 15 分钟 = 近三倍余量 —— 连着的节之间不会再出现缝，而"这段时间真的没节"
         （15 分钟以上空档）照样报得出来）；
+      · ⭐ 2026-10-18：小节的 `ts` 可以是**区间**（`13:16–13:24`，概念单元合并后）——
+        区间就是它自己的窗口，不再叠加 `SECTION_SPAN`；
       · 要点 `ok` ⟺ 有时间戳、且有某一节落在它的覆盖半径内；
       · 章：有要点看要点（有一条 ok 就算这章讲到了）；没有要点看有没有节落在
         `[t0, t1]`（老口径，实时要点可能一条都没记下）。
@@ -193,9 +207,9 @@ def report(sk: list, sections) -> dict:
     for s in (sections or []):
         if not isinstance(s, dict):
             continue
-        t = hms(s.get("ts"))
+        t, te = hms_range(s.get("ts"))
         if t is not None:
-            secs.append((t, _one(s.get("heading"))))
+            secs.append((t, te, _one(s.get("heading"))))
     secs.sort(key=lambda x: x[0])
 
     def near(t) -> tuple:
@@ -203,8 +217,9 @@ def report(sk: list, sections) -> dict:
         if t is None:
             return "", None
         best = None
-        for ts, head in secs:
-            if ts <= t < ts + SECTION_SPAN:
+        for ts, te, head in secs:
+            stop = te if (te is not None and te > ts) else ts + SECTION_SPAN
+            if ts <= t < stop:
                 best = (head, ts)
         return best or ("", None)
 
@@ -220,7 +235,7 @@ def report(sk: list, sections) -> dict:
             n_covered += 1 if head else 0
             pts.append({"gi": p.get("gi"), "ts": p.get("ts"), "point": p.get("zh"),
                         "section": head, "ok": bool(head)})
-        secs_here = [h for t, h in secs if t0 is not None and t0 <= t <= t1]
+        secs_here = [h for t, te, h in secs if t0 is not None and t0 <= t <= t1]
         if pts:
             ok = any(p["ok"] for p in pts)
             why = "" if ok else "这一章的要点一条都没落到节里（这段时间没有节）"

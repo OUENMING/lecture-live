@@ -61,6 +61,50 @@ def auto_tex(text: str) -> str:
     return "".join(out)
 
 
+def _balanced(s: str, i: int) -> int:
+    """`s[i] == '{'` → 配对 `}` 的下一位；扫不到返回 -1。"""
+    depth = 0
+    while i < len(s):
+        if s[i] == "{":
+            depth += 1
+        elif s[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+#: 裸 `\frac{…}{…}`（模型忘写 `$…$` 时漏出来的 LaTeX 命令，BUSI3243/ECS170 实录 12/16 处）。
+_FRAC_HEAD = re.compile(r"\\frac\s*\{")
+
+
+def _wrap_bare_frac(seg: str) -> str:
+    """把**不在 `$…$` 里的** `\\frac{…}{…}` 包成 `$…$`（花括号配平扫，`\\frac{\\hat{β}}{SE(\\hat{β})}` 里套着 `{}`）。
+
+    ⚠️ 只包 `\\frac` 的**两个参数**，不动周围文字：`t = \\frac{a}{b}` → `t = $\\frac{a}{b}$`。
+    """
+    out: list = []
+    last = 0
+    for m in _FRAC_HEAD.finditer(seg):
+        if m.start() < last:
+            continue
+        j = _balanced(seg, m.end() - 1)                 # 第一个 `{`
+        if j < 0:
+            continue
+        k = j + (len(seg[j:]) - len(seg[j:].lstrip()))
+        if k >= len(seg) or seg[k] != "{":
+            continue
+        e = _balanced(seg, k)                            # 第二个 `{`
+        if e < 0:
+            continue
+        out.append(seg[last:m.start()])
+        out.append(f"${seg[m.start():e]}$")
+        last = e
+    out.append(seg[last:])
+    return "".join(out)
+
+
 def _convert_plain(seg: str) -> str:
     def fix(m):
         run = m.group(0)
@@ -74,7 +118,16 @@ def _convert_plain(seg: str) -> str:
         run = run.replace("−", "-").replace("×", r" \times ").replace("÷", r" \div ")
         return f"${run}$"
 
-    return _RUN.sub(fix, seg)
+    # ⚠️ 顺序：先包裸 `\frac{…}{…}`（会产生新的 `$…$`），再按 `$…$` 切开做普通式子的兜底 ——
+    #    反过来会把 `\frac{x^2}{2}` 里的 `x^2` 再包一层（`$\frac{$x^{2}$}{2}$`，坏的）。
+    seg = _wrap_bare_frac(seg)
+    out, last = [], 0
+    for m in _SPAN.finditer(seg):
+        out.append(_RUN.sub(fix, seg[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(_RUN.sub(fix, seg[last:]))
+    return "".join(out)
 
 
 _SUPERS = {"0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3", "4": "\u2074",

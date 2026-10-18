@@ -144,8 +144,11 @@ def _detail_link(d: "NoteData") -> list:
 
 def render(d: NoteData) -> str:
     """`NoteData` -> **简版** Markdown（作者第六轮第 6 条）。"""
+    import note_v2
+    # ⭐ 术语就地括注：与 HTML 共用同一份实现（作者 2026-10-18）。
+    review = note_v2.announce_terms_in_review(d.review or {})
+    d = dataclasses.replace(d, review=review)
     entries = d.entries
-    review = d.review or {}
     ts0 = entries[0]["ts"] if entries else "—"
     ts1 = entries[-1]["ts"] if entries else "—"
     sections = review.get("sections") or []
@@ -197,21 +200,15 @@ def render(d: NoteData) -> str:
         L += ["> ⚠ 这次没装上公式字体（详细版里公式会显示成 TeX 源码）"]
     L += [""]
 
-    # ── ③ 五分钟速览 ──────────────────────────────────────────────────
-    L += ["## 0 · 五分钟速览", ""]
-    if sections:
-        L += ["这节讲的东西按下面的顺序串起来：", ""]
-        for i, s in enumerate(sections, 1):
-            gist = _first_sentence((s.get("prose") or [""])[0])
-            L += [f"{i}. **{_one(s.get('heading'))}**" + (f" —— {gist}" if gist else "")]
-        L += [""]
+    # ── ③ 速览（2026-10-18 第七轮：短；替代"五分钟串讲"）────────────────
+    #    读者**上过这节课**：3–6 句把线捡回来 + 复习排程。逐节 gist 清单与
+    #    "学完你应该会"清单按作者第七轮意见撤掉（太长、典型的 AI 装置）。
+    L += ["## 0 · 速览", ""]
+    paras = [str(p).strip() for p in (review.get("overview_long") or []) if str(p).strip()]
+    if paras:
+        L += paras + [""]
     else:
         L += [_missing_line(d), ""]
-    plan = review.get("review_plan") or []
-    if plan:
-        # ⚠️ 上限 5 条：`review_plan` 是**每块**各给 2–3 条再合并的（5 块 = 十几条），
-        #    铺出来就是一屏噪音 —— 这一节是"学完会什么"，不是课后作业清单。
-        L += ["**学完你应该会：**", ""] + [f"- {_one(x)}" for x in plan[:5]] + [""]
     # ⭐ 版式 A（作者 2026-10-18）：带日期的复习排程行（今晚 / +3 天 / +7 天）。
     #    日期从**上课那天**算（不是生成那天）；md 只写日期与动作，不推送。
     import note_v2

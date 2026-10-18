@@ -566,5 +566,28 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(nm.merge_checks([], []), [])
 
 
+class TestBareFrac(unittest.TestCase):
+    """第七轮：模型忘写 `$…$` 的裸 `\\frac{…}{…}` 也要包成公式（BUSI3243/ECS170 实测 12/16 处）。"""
+
+    def test_裸_frac_连嵌套花括号一起包(self):
+        got = nm.auto_tex(r"算一下 t = \frac{\hat{β}_j}{SE(\hat{β}_j)}，再查表。")
+        self.assertIn(r"$\frac{\hat{β}_j}{SE(\hat{β}_j)}$", got)
+        self.assertIn("算一下 t = ", got)
+        self.assertIn("，再查表。", got)
+
+    def test_已经在公式里的不动_幂等(self):
+        s = r"$t = \frac{a}{b}$"
+        self.assertEqual(nm.auto_tex(s), s)
+        once = nm.auto_tex(r"\frac{1}{1+e^{-z}}")
+        self.assertEqual(nm.auto_tex(once), once)
+
+    def test_括号不配平就不动(self):
+        self.assertNotIn("$", nm.auto_tex(r"\frac{1}{2 没闭合"))
+
+    def test_两个_frac_各自包(self):
+        got = nm.auto_tex(r"=\frac{∂E}{∂y}·\frac{∂y}{∂β}")
+        self.assertEqual(got.count("$"), 4)
+
+
 if __name__ == "__main__":
     unittest.main()

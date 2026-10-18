@@ -1368,6 +1368,16 @@ class ComponentsF10(unittest.TestCase):
         self.assertNotIn("compare", out["sections"][0], "复检仍错，表没撤（宁缺纪律）")
         self.assertTrue(any("已撤" in w for w in warns), warns)
 
+    def test_scrub不剪对照表的空格(self):
+        import note_guards as ng
+        sec = dict(SECTION, compare=dict(_cmp(), rows=[
+            {"label": "定义", "cells": ["$TC/q$", "$dTC/dq$"]},
+            {"label": "空一格", "cells": ["", "x"]}]))
+        out, _, _ = ng.scrub({"sections": [sec]})
+        c = out["sections"][0]["compare"]
+        self.assertEqual(c["cols"][0], "", "行头列的表头占位被剪了（列会错位）")
+        self.assertEqual(c["rows"][1]["cells"], ["", "x"], "空格子被剪了（行会错位）")
+
 
 class HtmlPlots(unittest.TestCase):
     def test_三个_kind_都画得出(self):

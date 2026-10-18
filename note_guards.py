@@ -290,9 +290,16 @@ def _one(v) -> str:
 
 
 def _prune_empty(obj) -> None:
-    """列表里的空串剪掉（原地）。`review_plan` / `blanks` / `prose` 这些都可能被清空。"""
+    """列表里的空串剪掉（原地）。`review_plan` / `blanks` / `prose` 这些都可能被清空。
+
+    ⚠️ F10：`compare` 里的空格是**位置占位**（行头列的表头常为空、格子里也可能留空）——
+       剪掉会把列错位（che002a 实测：`["", "氧化", "还原"]` 被剪成 `["氧化", "还原"]`，
+       表头原地左移一格）。这一支不剪，其余位置照旧。
+    """
     if isinstance(obj, dict):
-        for v in obj.values():
+        for k, v in obj.items():
+            if k == "compare":      # 对照表：串的位置就是语义
+                continue
             _prune_empty(v)
         return
     if not isinstance(obj, list):

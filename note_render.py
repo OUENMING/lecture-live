@@ -53,6 +53,8 @@ class NoteData:
     corrections_extra: list = dataclasses.field(default_factory=list)
     #: 头部警告（如「本课未做课件核对」）—— 每行一条，进页尾内部记录。
     warns: list = dataclasses.field(default_factory=list)
+    #: 🧮 F9c：守卫台账一行（`guards: repaired N, dropped N, flagged N`）—— 页尾核对记录首行。
+    guard_summary: str = ""
     #: 交互版有没有拿到 KaTeX 副本（`note_html.install_assets`）——
     #: 只有**已知失败**时才写一行说明（不知道就不说）。
     katex_ok: bool = True
@@ -321,11 +323,14 @@ def render(d: NoteData) -> str:
         if review.get("materials_used"):
             L += [f"  引用到的材料：{' · '.join(_one(x) for x in review['materials_used'])}"]
         L += [""]
-    if d.warns:
+    if d.warns or getattr(d, "guard_summary", ""):
         # ⚠️ 生成器的**工作记录**（改了哪条公式、删了几句猜测、口径是不是补的）放页尾折叠：
         #    学生不需要它，但"笔记被机器动过哪里"必须留痕（作者第三轮的要求）。
         L += ["> [!note]- 生成核对记录（内部 · 点开看）", "> "]
         import note_math
+        if getattr(d, "guard_summary", ""):
+            # 🧮 F9c：守卫台账一行 —— 批量审计时 grep `guards:` 就够，不用逐份打开。
+            L += [f"> - {d.guard_summary}"]
         for w in d.warns:
             # 短文本也要过同一个渲染（作者第三轮第 2 条）：md 里包成 `$…$`，
             # HTML 侧走 inline()（KaTeX + Unicode 兜底）。

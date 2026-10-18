@@ -92,12 +92,15 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
 　🎙 **课上**：题面/数字**逐字**来自转录或课件；对不上就不许贴。
 　✏️ **自补**：你自己出的（半截的补全、或全新例子）—— 讲解/例题/变式/补全/自测哪里都能用，
 　　　只要知识正确、数字从头到尾算得对（机械核会逐条重算）。
-　🎙+✏️「按口述还原」：转录只留片段，但**有一个函数能复现每一个片段数字**（含 q* 与 P），
-　　　且能从头验到尾（AC'=0 解出 q*、P=AC(q*)）→ 可以还原，标签写 🎙+✏️「按口述还原」；
-　　　复现不了就**只留片段**：🎙 写「课上算出 q≈2.89，函数没录全」，另配一个 ✏️ 自补例。
-　⛔ **片段数字不许换角色**：2.89 是产量（q*）就不是价格 —— P 必须拿 AC(q*) 现算
-　　（如 `AC(q)=60q+500/q`：q*≈2.89，P=AC(q*)≈346.4，**不是** P≈2.89）。
-　✗ 反面例（只把定义换个说法，不算例子）："若某产量下 AC 最低为 2.89，则停产价格就是 2.89"
+　🎙+✏️「按口述还原」：转录只留片段，但**有一个函数能复现每一个片段数字**，且能从头验到尾
+　　　（求导/代入都复核得出）→ 可以还原，标签写 🎙+✏️「按口述还原」；复现不了就**只留片段**：
+　　　🎙 写「课上算出 ≈2.89，函数没录全」，另配一个 ✏️ 自补例。
+　　（一个道理，各科同构。经济例：片段只剩「2.89」与「60 乘它 + 500 除以它」，还原成
+　　　`AC(q)=60q+500/q` → 取点 q*≈2.89、答案 P=AC(q*)≈346.4。物理例：片段只剩「2.5 秒」
+　　　与「20 减 5 乘它」，还原成 `v(t)=20-5t` → 取点 t=2.5 s、答案 v=7.5。）
+　⛔ **片段数字不许换角色**：2.89 是取点 q* 就不能当答案 —— 答案必须拿函数现算
+　　（P=AC(q*)≈346.4，**不是** P≈2.89；物理同理：2.5 s 是时间，速度要拿 v(t) 现算）。
+　✗ 反面例（把同一个数换个名字说两遍，不算还原）："最低为 2.89，所以答案就是 2.89"
 ⚠️ **极值题必须有真的最值点**：求导=0 且二阶条件成立；**不许**用 q→∞ 之类的极限充当最小值
 （无穷远处的趋向值不是最小值）。没有最低点就明说"没有最低点"。
 讲同一个道理的重复例子**只留一个**。
@@ -109,18 +112,22 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
 ① 它是什么、为什么会在意它（大白话）→ ② 一个带真实数字的例子 → ③ 正式的说法/公式（LaTeX）
 → ④ 学生真正容易错的那一处（一句话点破）。
 ⚠️ **教一种能做的题的节**（求 / 推 / 分类），最后用**一句大白话**收口：看到什么样的题、
-第一步做什么（如「看到求停产价格的题，先写出 AC，令 AC'=0 找最低点，再代回 AC」）。
+第一步做什么（数学/理科：「看到求极值的题，先写函数、令导数为零、再代回」；
+非数学课：「看到『比较 A 和 B』，先定两个比较维度、再逐项对」）。
 写进 `conclusion` 字段（渲染层接在正文末尾）；**不加标签**、不做表；
 概念 / 历史 / 课务这类没有题型的节留空。
 ⚠️ **篇幅只设上限**（见用户消息里这段的"字数上限"）：写超是违规，**没写够不违规** ——
    绝不许为凑字数加话；宁可短。
 ⚠️ **不要退化成考点清单**：真正的列举（步骤、分类、对比项）才用 bullet，其余写成连贯段落。
 
-**照着这个语感写**（一段**格式示范**，内容是别处的、照抄内容算错）：
+**照着这个语感写**（两段**格式示范**，内容是别处的、照抄内容算错）：
 > 利息本身也会生利息，所以"每年 5%、存三年"不是在 1000 欧上简单加 150 欧。举个例子：
 > 1000 欧元按复利存三年是 1000×1.05³ ≈ 1157.6 欧，利息约 157.6 欧，比单利多 7.6 欧 ——
 > 多出来的就是"利滚利"。写成式子就是 $FV = PV(1+r)^n$。最容易错的是把年数当加法：
 > 1000×(1+5%×3) 算的是单利；两个都要会，但别混。
+> 半衰期也不是"等它衰掉一半"，而是**每过一个半衰期、浓度乘一次 0.5**：从 100 份开始，
+> 两个半衰期后剩 25 份 —— 写成式子就是 $N(t)=N_0(1/2)^{t/T}$。最容易错的是把"两个半衰期"
+> 读成"剩一半的一半"之外再打一次折；先写清楚每个半衰期发生**一次**乘以 0.5，再代。
 
 另外按需填：
 - `q`：**本节回答的一个问题**（≤30 字，问句）—— 读者复习时只看这一问就该想起这一节。
@@ -145,7 +152,7 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
 
 ## 三、数学与例题的硬规矩（2026-10-17 验收抓到过反例，逐条遵守）
 - **公式一律 LaTeX**：行内 `$…$`、独立 `$$…$$`。多项式/导数/分式都必须写，例如
-  `$q^{3}-12q^{2}+60q$`、`$AC'(q)=2q-12$`。**不许**写 `q^3-3q^2+12q` 这种纯文本；
+  `$q^{3}-12q^{2}+60q$`、`$AC'(q)=2q-12$`、`$v(t)=20-5t$`。**不许**写 `q^3-3q^2+12q` 这种纯文本；
   **也不许用反引号包公式** —— 反引号 `` `…` `` 在页面上是**代码**样式，只留给真代码。
 - **例题的题面只能来自两个地方**：🎙 教授课上**完整写出来**的式子，或 📖 课件/试卷原文
   （`example.title` 写明「📖 文件名 + 题号」或「🎙 HH:MM」）。
@@ -162,11 +169,7 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
   **不许给算出来的答案**（机械核核不了它，直接标 `unchecked` 也救不了 —— 宁缺毋滥）。
 - 凡「在 q*=… 处取最小/最大」「代入得 v」的结论：写出是**哪个函数**、并把导数检验
   写出来（`AC'=0` 且 `AC''>0`）。没有函数就不许下极值结论。
-- **停产价格（shutting down price）的口径**：本课官方材料（📖 2025-12 期末卷 Exercise 7
-  官方解答）按「**平均成本 AC 的最低点**」定义（原话 "the minimum of the average cost…
-  the lowest acceptable price"）。标准教科书口径是**平均可变成本 AVC 的最低点**，而 AC
-  最低点叫**盈亏平衡价（break-even price）**。写到这一节时：按本课 📖 口径讲，并**加一句**
-  与标准口径的对照（标 📚）。
+__CALIBER__
 
 ## 三之三、正文纪律（作者 2026-10-17 验收点名，逐字遵守）
 - **不许第一人称、不许写猜测过程**。正文只写结论；「我可能听错了」「或者我漏掉了」
@@ -802,7 +805,8 @@ def repair_exercises(review: dict, *, chat, entries: list | None = None,
         warns.append(f"例题返修：{calls} 节各做了 1 次返修调用")
     if n_drop:
         warns.append(f"例题返修：{n_drop} 节的题块复检仍算错 → 已撤（宁缺）")
-    return out, [], warns
+    # ⭐ F9c：守卫计数走第二返回值（写作层拿去拼 `guards: repaired/dropped/flagged` 行）。
+    return out, [{"repaired": calls, "dropped": n_drop}], warns
 
 
 def transcript_lines(entries: list) -> list:
@@ -1093,10 +1097,12 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
         tries = [(ex_base + sk_block, max_tokens),
                  (ex_base + sk_block, int(max_tokens * 1.5)),
                  (ex_base, int(max_tokens * 1.5))]
+        sys_text = (REVIEW_SYS.replace("__PLOTS__", _plots_menu())
+                    .replace("__CALIBER__", _caliber_block(materials)))
         for ex2, mt in tries:
             try:
                 user = _user_content(chunk, domain=domain, materials_block=m_block, extra=ex2)
-                got = _clean(chat(REVIEW_SYS.replace("__PLOTS__", _plots_menu()), user, mt))
+                got = _clean(chat(sys_text, user, mt))
                 if got:
                     return got
             except Exception:                                 # noqa: BLE001
@@ -1144,6 +1150,25 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
 
 def _plots_menu() -> str:
     return " · ".join(f"`{k}`（{v}）" for k, v in PLOT_KINDS.items())
+
+
+def _caliber_block(materials) -> str:
+    """课程专属口径段 —— **只有本课材料里真的写着这条定义**才注入（F9c）。
+
+    ⚠️ 这段以前写死在通用提示词里：任何课（化学、社会学）都会读到经济学的停产价格口径。
+       同 `ensure_caliber` 的教训（一句写死的话插到别的课就是**假的本课口径**）。
+       检测走 `note_guards._shutdown_source`（唯一定义点）；材料里找不到 → 空串，不注入。
+    """
+    try:
+        import note_guards
+        src = note_guards._shutdown_source(materials) if materials is not None else ""
+    except Exception:                                          # noqa: BLE001
+        return ""
+    if not src:
+        return ""
+    return ("- **停产价格（shutting down price）的口径**：本课官方材料（" + src + "）按「**平均成本 AC "
+            "的最低点**」定义。标准教科书口径是**平均可变成本 AVC 的最低点**，而 AC 最低点叫**盈亏平衡价"
+            "（break-even price）**。写到这一节时：按本课 📖 口径讲，并**加一句**与标准口径的对照（标 📚）。\n")
 
 
 # ---------------------------------------------------------------- 覆盖度对齐

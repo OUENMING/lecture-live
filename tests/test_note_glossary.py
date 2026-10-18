@@ -307,6 +307,45 @@ class 泛词过滤_F8f(unittest.TestCase):
     """F8-f（作者点名）：本课术语表里"任何课都出现"的**单单词泛词**要过滤 ——
     除非术语库里真有它（规则原文：`unless the glossary has them`）。"""
 
+    def test_F9c_材料里有的词留(self):
+        """F9c 域中立：`substitution` 在化学课是正词 —— 本课材料里出现就留；
+        `minimum` 哪门课都算泛词（本课材料里有也要过库那关）。"""
+        import note_terms as nt2
+        self.assertTrue(nt2.too_common("minimum", verified=True), "minimum 哪门课都是泛词")
+        self.assertFalse(nt2.too_common("substitution", verified=True),
+                         "本课材料里出现 → 留着（化学课的正词）")
+        self.assertTrue(nt2.too_common("substitution"),
+                        "没有出处时仍按泛词处理（经济学口头词）")
+
+    def test_F9c_writer_按材料核实(self):
+        """写作层真的把 `Materials.verify` 喂给了判据：同一个词，材料里有就留、没有就丢。"""
+        d = tempfile.TemporaryDirectory()
+        try:
+            base = pathlib.Path(d.name)
+            (base / "glossary").mkdir(parents=True, exist_ok=True)
+            (base / "glossary.txt").write_text("# 公共术语表\n", encoding="utf-8")
+            import obsidian_writer as ow
+            w = ow.ObsidianWriter(None, "TESTX", mode="no",
+                                  glossary_path=str(base / "glossary.txt"))
+
+            class _Mat:
+                def verify(self, term, *, max_n=2):
+                    return term.strip().lower() == "substitution"
+
+            review = {"sections": [{"ts": "13:16", "terms": [
+                {"en": "substitution", "zh": "取代反应"},
+            ]}]}
+            w._materials = None
+            self.assertNotIn("substitution",
+                             {h.term.lower() for h in w._review_term_hits(review, [])},
+                             "没有材料出处 → 按泛词处理（经济学口头词）")
+            w._materials = _Mat()
+            self.assertIn("substitution",
+                          {h.term.lower() for h in w._review_term_hits(review, [])},
+                          "材料里有 → 留（化学课的正词）")
+        finally:
+            d.cleanup()
+
     def test_泛词丢掉_库里有就留(self):
         d = tempfile.TemporaryDirectory()
         try:

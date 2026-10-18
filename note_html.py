@@ -1294,8 +1294,11 @@ def note_page(d) -> str:
     title = f"{d.course} · {d.date}" + (f" · {review.get('title_zh')}"
                                         if review.get("title_zh") else "")
     warns_html = ""
-    if d.warns:
+    if d.warns or getattr(d, "guard_summary", ""):
+        sum_line = (f'<div>· {inline(d.guard_summary)}</div>'
+                    if getattr(d, "guard_summary", "") else "")
         warns_html = ("<details class=\"internal\"><summary>生成核对记录（内部 · 点开看）</summary>"
+                      + sum_line
                       + "".join(f"<div>· {inline(w)}</div>" for w in d.warns) + "</details>")
     # ── 收尾：合上书写 3 句 → 对照速览（版式 A；概念图不在这一版里）────────
     closing = ('<section class="card" id="sum3"><h3>ⓑ 合上书，写 3 句总结</h3>'

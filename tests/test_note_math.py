@@ -688,7 +688,7 @@ class TestF9_QVSP(unittest.TestCase):
         self.assertTrue(any(nm.unit_of_claim(s, str(r.get("claim") or "")) in nm.MODEL_AUTHORED
                             for r in rows), "行列必须落在题块里（走 F8 返修路径）")
         joined = " ".join(str(r.get("how") or "") for r in rows)
-        self.assertIn("产量", joined)
+        self.assertIn("代入点", joined)
 
     def test_只留片段_不误伤(self):
         frag = {"sections": [{"heading": "[13:16]", "ts": "13:16",
@@ -697,6 +697,29 @@ class TestF9_QVSP(unittest.TestCase):
                         "steps": [{"text": "老师只给了片段，复算不了。", "why": ""}],
                         "answer": ""}}]}
         bad = [r for r in nm.check_review(frag) if r.get("status") == "mismatch"]
+        self.assertEqual([], bad, bad)
+
+    def test_两个角色撞数_拦(self):
+        """F9c 域中立：不许用「停产价格」字样，只认「同一个数 ≈ 取点、却出现在另一角色上」。"""
+        rev = {"sections": [{"heading": "H", "ts": "13:16",
+                             "prose": ["在 $q\\approx2.89$ 处取最低。"],
+                             "example": {"title": "🎙 13:16",
+                                         "prompt": "课上给出 $q\\approx2.89$ 处取最小，求答案。",
+                                         "steps": [{"text": "所以答案 $P\\approx2.89$。", "why": ""}],
+                                         "answer": ""}}]}
+        rows = [r for r in nm.check_review(rev) if r.get("status") == "mismatch"]
+        self.assertTrue(rows, "q≈2.89 与 P≈2.89 撞数必须被拦")
+        self.assertIn("≈ 取点", " ".join(str(r.get("recomputed") or "") for r in rows))
+
+    def test_最低点为取点不误伤(self):
+        """「最低点为6」= 说的是取点本身，是正话 —— 不许拦。"""
+        rev = {"sections": [{"heading": "H", "ts": "13:16",
+                             "prose": ["令 $f'(x)=0$ 得 $x=6$，最低点为6。"],
+                             "example": {"title": "🎙 13:16",
+                                         "prompt": "已知 $f(x)=x^{2}-12x$，求最低点。",
+                                         "steps": [{"text": "$f'(x)=2x-12=0$ 得 $x=6$。", "why": ""}],
+                                         "answer": ""}}]}
+        bad = [r for r in nm.check_review(rev) if r.get("status") == "mismatch"]
         self.assertEqual([], bad, bad)
 
     def test_和式里的除法项不许当单条(self):

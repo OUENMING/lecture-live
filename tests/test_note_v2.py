@@ -304,9 +304,11 @@ class ExerciseRepair(unittest.TestCase):
                                   "steps": [],
                                   "a": "$AC'(q)=1-\\frac{16}{q^2}=0$，$q=4$，$AC(4)=8$。"}],
                     "faded": None, "note": "换自编例"}
-        got, _, warns = nv.repair_exercises({"sections": [self._unit()], "checks": []},
-                                            chat=chat, flags=[])
+        got, stats, warns = nv.repair_exercises({"sections": [self._unit()], "checks": []},
+                                                chat=chat, flags=[])
         self.assertEqual(len(calls), 1, "一节只许返修一次")
+        self.assertEqual(stats, [{"repaired": 1, "dropped": 0}],
+                         "F9c：返修计数要回传（守卫台账行用）")
         s = got["sections"][0]
         self.assertIn("举个例子（自编）", s["prose"][0])
         self.assertEqual(s["example"]["title"], "自编例")
@@ -323,7 +325,9 @@ class ExerciseRepair(unittest.TestCase):
         def chat(s, u, m):
             return {"prose": ["还是那句：$AC(2.89)\\approx2.89$。"],
                     "example": unit["example"], "variants": unit["variants"], "note": "没改"}
-        got, _, warns = nv.repair_exercises({"sections": [unit], "checks": []}, chat=chat)
+        got, stats, warns = nv.repair_exercises({"sections": [unit], "checks": []}, chat=chat)
+        self.assertEqual(stats, [{"repaired": 1, "dropped": 1}],
+                         "F9c：复检仍错被撤的那节也要计数（宁缺= dropped）")
         s = got["sections"][0]
         for k in ("example", "variants", "faded"):
             self.assertNotIn(k, s, f"{k} 复检仍错必须撤（宁缺）")
@@ -1058,7 +1062,8 @@ class HtmlComponents(unittest.TestCase):
         生成器的活日志（改了哪条公式 / 删了几句猜测）挪到页尾折叠里。"""
         d = nr.NoteData(date="2026-10-15", course="ECON10790", entries=entries(2),
                         review=REVIEW, html_name="x.html",
-                        warns=["MC 与 TC 不自洽（AC(q) → 3q^2-24q+60）"])
+                        warns=["MC 与 TC 不自洽（AC(q) → 3q^2-24q+60）"],
+                        guard_summary="guards: repaired 1, dropped 2, flagged 3")
         h = nh.note_page(d)
         head = h[:h.index('id="kp1"')]
         self.assertIn("处已核", head)
@@ -1070,6 +1075,9 @@ class HtmlComponents(unittest.TestCase):
         head = md[:md.index("## 附录")]
         self.assertNotIn("不自洽", head, "md 页头还有内部诊断")
         self.assertTrue("生成核对记录（内部" in md.split("## 附录")[1], "内部记录该在页尾")
+        # 🧮 F9c：守卫台账行两种渲染都要有（批量审计 `grep guards:` 用）
+        self.assertIn("guards: repaired 1, dropped 2, flagged 3", md)
+        self.assertIn("guards: repaired 1, dropped 2, flagged 3", h)
 
     def test_图只有一份且放在它的知识点里(self):
         """⚠️ 作者第三轮：图表区出现 5 张一模一样的 AC/MC 曲线，而且全堆在末尾。"""
@@ -1306,6 +1314,40 @@ class VerifyNarrowing(unittest.TestCase):
         var = [r for r in rows if "5-3=2" in r["claim"]]
         self.assertTrue(all(r["status"] == "unchecked" for r in var),
                         "模型对自己的解答自洽 → 判 ok 等于没核，要降成未核对")
+
+
+class F9cPromptRotation(unittest.TestCase):
+    """F9c 泛化：通用提示词里不再写死某学科的口径；例子跨学科轮换；口径段按材料注入。"""
+
+    def test_通用提示词里不再写死经济学口径(self):
+        self.assertNotIn("停产价格", nv.REVIEW_SYS,
+                         "通用提示词里不许留某学科独有的内容（口径段改为按材料注入）")
+        self.assertIn("__CALIBER__", nv.REVIEW_SYS)
+
+    def test_例子跨学科轮换(self):
+        for key in ("v(t)=20-5t", "半衰期", "比较 A 和 B"):
+            self.assertIn(key, nv.REVIEW_SYS, f"prompt 缺轮换例：{key}")
+
+    def test_口径段_只在材料里有时注入(self):
+        class _Nope:
+            def search(self, q, k=3, **kw):
+                return []
+
+        class _Mat:
+            def search(self, q, k=3, **kw):
+                class C:
+                    text = ("Shutting down price: the minimum of the average cost, "
+                            "the lowest acceptable price.")
+
+                    def cite(self):
+                        return "📖 2025-12 期末卷 Exercise 7"
+                return [C()]
+
+        self.assertEqual("", nv._caliber_block(None))
+        self.assertEqual("", nv._caliber_block(_Nope()))
+        got = nv._caliber_block(_Mat())
+        self.assertIn("停产价格", got)
+        self.assertIn("📖 2025-12 期末卷", got, "注入的口径要带本课材料的出处")
 
 
 if __name__ == "__main__":

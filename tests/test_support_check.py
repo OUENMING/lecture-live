@@ -32,6 +32,25 @@ ENTRIES[29] = {"ts": "13:16:29",
                "en": "the average cost at 2.89 is the shutting down price"}
 
 
+class _FakeMat:
+    """最小材料替身：`_chunks` 非空（= 有材料）+ `search` 给一段文本。"""
+
+    def __init__(self, text):
+        class _C:
+            pass
+        c = _C()
+        c.text = text
+        self._chunks = [c]
+        self._text = text
+
+    def search(self, q, k=3, **kw):
+        class _C:
+            pass
+        c = _C()
+        c.text = self._text
+        return [c]
+
+
 def _mk_review() -> dict:
     return {"sections": [
         {"heading": "停产价格", "ts": "13:16",
@@ -118,23 +137,41 @@ class Judging(unittest.TestCase):
         out, _, warns, _ = self._run(None)
         self.assertFalse([r for r in (out.get("checks") or [])
                           if r.get("status") == "mismatch"])
-        self.assertTrue(any("全部在转录里找到" in w for w in warns), warns)
+        self.assertTrue(any("全部找到" in w for w in warns), warns)
 
     def test_tau_边界不挂(self):
         out, _, _, _ = self._run(0.15)
         self.assertFalse([r for r in (out.get("checks") or [])
                           if r.get("status") == "mismatch"])
 
-    def test_state_与指令是E3原文(self):
+    def test_state_与指令是E3原文_按节分批(self):
         _, _, _, calls = self._run(None)
+        self.assertEqual(len(calls), 2, "两节有 claim → 两次请求（按节分批）")
         state, instrs = calls[0]
         self.assertTrue(state.startswith(ng.SUPPORT_PREAMBLE))
         self.assertIn("L1 [13:16:00] line 0", state)
-        self.assertIn("L33 [13:16:32] line 32", state)
+        self.assertIn("L32 [13:16:31] line 31", state)
+        self.assertNotIn("line 59", state, "第一节的窗口不许伸到第二节去")
         self.assertIn("[13:16:29] the average cost at 2.89 is the shutting down price",
                       state)
         self.assertTrue(instrs[0].startswith("Look at the transcript excerpt only."))
         self.assertIn("Answer yes only if the excerpt actually says it", instrs[0])
+        self.assertIn("L60 [13:16:59] line 59", calls[1][0], "第二节有自己的窗口")
+
+    def test_按节分批_各用各的窗口(self):
+        r = {"sections": [
+            {"heading": "A", "ts": "13:16", "prose": ["课上先写 $AC(q)=TC(q)/q$。"]},
+            {"heading": "B", "ts": "13:16:50", "prose": ["老师强调 $MC=AC$。"]}]}
+        calls: list = []
+
+        def ask(state, instructions):
+            calls.append(state)
+            return [None] * len(instructions)
+
+        ng.support_check(r, entries=ENTRIES, ask=ask)
+        self.assertEqual(len(calls), 2, "两节 → 两次请求")
+        self.assertNotIn("L60", calls[0], "第一节的窗口不该带第二节的时段")
+        self.assertIn("L60 [13:16:59] line 59", calls[1])
 
     def test_单条claim窗口是前8后32(self):
         r = {"sections": [{"heading": "h", "ts": "13:16",
@@ -166,10 +203,11 @@ class Judging(unittest.TestCase):
         self.assertNotIn("L1 [13:16:00]", state,
                          "没按标题的 🎙 时刻定窗口（还在用小节 ts）")
 
-    def test_成本上限_2次请求40条(self):
+    def test_成本上限_15次请求(self):
         secs = [{"heading": f"h{i}", "ts": "13:16",
-                 "example": {"title": f"🎙 13:16 例{i}", "prompt": f"已知 $x{i}=0$，课上求 i={i}。"}}
-                for i in range(45)]
+                 "example": {"title": f"🎙 13:16 例{i}",
+                             "prompt": f"已知 $x{i}=0$，课上求 i={i}。"}}
+                for i in range(20)]
         calls: list = []
 
         def ask(state, instructions):
@@ -177,8 +215,7 @@ class Judging(unittest.TestCase):
             return [None] * len(instructions)
 
         out, _, warns = ng.support_check({"sections": secs}, entries=ENTRIES, ask=ask)
-        self.assertEqual(len(calls), 2, "上限 2 次请求")
-        self.assertEqual(sum(len(x) for x in calls), 40, "40 条 = 2×20")
+        self.assertEqual(len(calls), 15, "上限 15 次请求")
         self.assertTrue(any("5 条超成本上限没查" in w for w in warns), warns)
 
     def test_判官炸了也不抛(self):
@@ -188,6 +225,64 @@ class Judging(unittest.TestCase):
         out, extra, warns = ng.support_check(_mk_review(), entries=ENTRIES, ask=ask)
         self.assertFalse([r for r in (out.get("checks") or [])
                           if r.get("status") == "mismatch"])
+
+
+class MaterialsJudge(unittest.TestCase):
+    """F9c：📖 题面**对材料判**、没材料豁免 —— 绝不许因"讲师没念过卷子上的题"挂 📖。"""
+
+    SEC = {"heading": "例", "ts": "13:25",
+           "example": {"title": "📖 2025-12 期末卷 Exercise 5（🎙 13:40）",
+                       "prompt": "$TC(q)=q^{3}-12q^{2}+60q$，求平均成本最低点处的产量与价格。"}}
+
+    def test_题面对材料判(self):
+        calls: list = []
+
+        def ask(state, instructions):
+            calls.append((state, instructions))
+            return [0.05] * len(instructions)
+
+        out, _, warns = ng.support_check(
+            {"sections": [dict(self.SEC)]}, entries=ENTRIES,
+            materials=_FakeMat("一些课件正文。"), ask=ask)
+        self.assertEqual(len(calls), 1)
+        state, instrs = calls[0]
+        self.assertTrue(state.startswith(ng.SUPPORT_MAT_PREAMBLE))
+        self.assertIn("materials excerpt", instrs[0])
+        rows = [r for r in (out.get("checks") or []) if r.get("status") == "mismatch"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["how"], "材料里没找到这句（核对）")
+        self.assertTrue(any("挂 ⚠" in w for w in warns), warns)
+
+    def test_没材料就豁免(self):
+        calls: list = []
+
+        def ask(state, instructions):
+            calls.append(instructions)
+            return [0.05] * len(instructions)
+
+        out, _, warns = ng.support_check({"sections": [dict(self.SEC)]},
+                                         entries=ENTRIES, ask=ask)
+        self.assertFalse(calls, "没有材料 → 这条不该问 Jev")
+        self.assertFalse([r for r in (out.get("checks") or [])
+                          if r.get("status") == "mismatch"])
+        self.assertTrue(any("豁免" in w for w in warns), warns)
+
+    def test_材料题被标也不挂牌(self):
+        sec = {"heading": "停产价格", "ts": "13:16",
+               "example": {"title": "📖 卷子（🎙 13:16）",
+                           "prompt": "已知 $AC(q)=q^{2}-12q+60$，求最低点的产量。",
+                           "steps": [{"text": "$AC(6)=6^{2}-12\\times 6+60=24$",
+                                      "why": "代入"}]}}
+
+        def ask(state, instructions):
+            return [0.05] * len(instructions)
+
+        out, _, _ = ng.support_check({"sections": [sec]}, entries=ENTRIES,
+                                     materials=_FakeMat("text"), ask=ask)
+        self.assertEqual(out["sections"][0]["example"]["title"], "📖 卷子（🎙 13:16）",
+                         "📖 被标不许挂牌（挂牌是 🎙 重建的出口）")
+        rows = [r for r in (out.get("checks") or []) if r.get("status") == "mismatch"]
+        self.assertEqual(len(rows), 1)
 
 
 class Relabel(unittest.TestCase):

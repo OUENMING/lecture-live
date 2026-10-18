@@ -604,7 +604,7 @@ def dedupe_sentences(review: dict, *, min_chars: int = 10) -> tuple:
     ⚠️ 带换行的字段整段跳过（rejoin 会把行结构吃掉）；`cover` 是台账，不碰。
     """
     out = copy.deepcopy(review)
-    dropped = 0
+    gone: list = []
     for path in paths_of(out):
         if path and path[0] in _SKIP_TOP:
             continue
@@ -619,14 +619,14 @@ def dedupe_sentences(review: dict, *, min_chars: int = 10) -> tuple:
             if len(s.strip()) >= min_chars and s.rstrip()[-1] in "。！？!?":
                 k = _sentence_key(s)
                 if k in seen:
-                    dropped += 1
+                    gone.append(s)
                     continue
                 seen.add(k)
             kept.append(s)
         if len(kept) != len(parts):
             _set(out, path, "".join(kept))
-    warns = [f"正文里删掉 {dropped} 处重复句"] if dropped else []
-    return out, [], warns
+    warns = [f"正文里删掉 {len(gone)} 处重复句"] if gone else []
+    return out, gone, warns
 
 
 #: 正文里的钟点时间戳（"教授在 12:50:41 以笑声结束…"）。节标题/出处字段上的时间戳不碰。
@@ -707,7 +707,7 @@ def drop_trivial_cues(review: dict) -> tuple:
             kept.append(c)
         s["cues"] = kept
     warns = [f"丢掉了 {len(dropped)} 条纯算术线索问题（计算器能答，帮不了复习）"] if dropped else []
-    return out, [], warns
+    return out, dropped, warns
 
 
 # ---------------------------------------------------------------- F9b：支持性核对（Jev）
@@ -720,10 +720,19 @@ SUPPORT_INSTR = ("Look at the transcript excerpt only. Does this transcript exce
 SUPPORT_PREAMBLE = ("This is a transcript excerpt from a university lecture. Each line is "
                     "one sentence the lecturer or a student said, in order, with its "
                     "timestamp.")
+#: 材料（📖）判官的平行版本：只换"来源"两处（F9c 作者裁定 —— 📖 题面对材料判）。
+SUPPORT_MAT_INSTR = ("Look at the materials excerpt only. Does this materials excerpt "
+                     "state the following? \"{claim}\" Answer yes only if the excerpt "
+                     "actually says it; a mathematically correct fact that the excerpt "
+                     "does not state is not a yes.")
+SUPPORT_MAT_PREAMBLE = ("This is an excerpt from the course materials (slides / exam "
+                        "sheet) of a university lecture. Each numbered line is one "
+                        "sentence or bullet from those materials.")
 #: E3 的标签分布：supported 最低 0.31、unsupported 最高 0.04 —— 0.15 在两簇中间的空档。
 SUPPORT_TAU = 0.15
-#: 成本上限：每节 ≤2 次请求（≤20 问/批 → ≤40 条 claim）。
-SUPPORT_MAX_REQ = 2
+#: F9c（作者裁定）：局部性优先 —— **按节分批判**（每节自己 ±8/+32 的窗口），每节 ≤15 次请求。
+#: Jev 便宜（~$0.0002/次）且永远在线；旧的"并集窗口"会把窗口稀释成整节课。
+SUPPORT_MAX_REQ = 15
 SUPPORT_BATCH = 20
 #: 「讲义说过 X」的句子判据 + 「自补」豁免（✏️ 本来就不要求转录支持）。
 _SUPPORT_WORDS = re.compile(r"课上|老师|本课")
@@ -774,6 +783,26 @@ def _support_state(entries: list, lo: int, hi: int) -> str:
     return SUPPORT_PREAMBLE + "\n\n" + "\n".join(lines)
 
 
+def _materials_excerpts(materials, claim: str, *, k: int = 2) -> list:
+    """claim → 材料 top-k 片段（BM25，`Materials.search`）。拿不到 → `[]`。"""
+    try:
+        return [str(getattr(c, "text", "") or "") for c in materials.search(claim, k=k)]
+    except Exception:                                          # noqa: BLE001
+        return []
+
+
+def _support_mat_state(excerpts: list) -> str:
+    """材料片段 → state（`M<i>. sentence`，逐行编号）。"""
+    lines: list = []
+    for x in excerpts:
+        for ln in str(x or "").splitlines():
+            t = ln.strip()
+            if t:
+                lines.append(t[:240])
+    return SUPPORT_MAT_PREAMBLE + "\n\n" + "\n".join(f"M{i + 1}. {t}"
+                                                     for i, t in enumerate(lines))
+
+
 def _support_clip(t: str, *, n: int = 140) -> str:
     """长句在标点处截（**逐字子串** —— annotate 的定位靠它，不许加省略号）。"""
     if len(t) <= n:
@@ -799,24 +828,27 @@ def support_claims(review: dict) -> list:
         不是"讲义说过 X"（挂上去会出现"未核对句被标：转录里没找到这句"的笑话）；
       · pitfalls/conclusion 等注记字段（E3 只扫 prose/algebra/example，跟它）。
     claim 一律是逐字原文（annotate 靠它在正文里定位）。
+    ⭐ F9c：每条带 `src` —— `📖` 的题面**对材料判**（不是转录），`🎙` 的对转录判。
     """
     out: list = []
     seen: set = set()
 
-    def add(text, si: int, field: str, ts: str | None = None) -> None:
+    def add(text, si: int, field: str, ts: str | None = None, src: str = "🎙") -> None:
         t = _support_clip(_one(text))
         if len(t) < 6 or t in seen:
             return
         seen.add(t)
-        out.append({"claim": t, "si": si, "field": field, "ts": ts})
+        out.append({"claim": t, "si": si, "field": field, "ts": ts, "src": src})
 
     for si, s in enumerate(review.get("sections") or []):
         if not isinstance(s, dict):
             continue
         ex = s.get("example")
-        if isinstance(ex, dict) and "🎙" in str(ex.get("title") or ""):
-            m = _TS_IN_TITLE.search(str(ex.get("title") or ""))
-            add(ex.get("prompt"), si, "example", m.group(1) if m else None)
+        title = str((ex or {}).get("title") or "") if isinstance(ex, dict) else ""
+        if isinstance(ex, dict) and "🎙" in title:
+            m = _TS_IN_TITLE.search(title)
+            add(ex.get("prompt"), si, "example", m.group(1) if m else None,
+                "📖" if "📖" in title else "🎙")
         for k in ("prose", "algebra"):
             v = s.get(k)
             for para in (v if isinstance(v, list) else [v]):
@@ -846,19 +878,22 @@ def _recon_ok(section: dict) -> bool:
         return False
 
 
-def support_check(review: dict, *, entries: list, ask=None,
+def support_check(review: dict, *, entries: list, materials=None, ask=None,
                   max_requests: int = SUPPORT_MAX_REQ,
                   tau: float = SUPPORT_TAU) -> tuple:
-    """F9b：把「讲义说过 X」的 claim 过一遍 Jev（E3 口径）→ p < tau 的挂 ⚠。
+    """F9c：把「讲义说过 X」的 claim 过一遍 Jev（E3 口径）→ p < tau 的挂 ⚠。
 
-    · state = claim 时间戳附近 ±8/+32 行（例题用标题里 🎙 的时刻、正文句用小节 ts；
-      同批多条时取窗口并集）；一批 ≤20 问（`S1…Sn`）；
+    · **按节分批判**（作者 F9c：局部性优先）：每节自己一批，窗口 = claim 附近 ±8/+32 行
+      （例题用标题里 🎙 的时刻、正文句用小节 ts）；一批 ≤20 问（`S1…Sn`）；
+    · 📖 题面**对材料判**（`Materials.search` 的 top-k 片段做 state，指令平行版）；
+      **没有材料就豁免** —— 绝不许因为"讲师没念过卷子上的题"挂 📖；
     · **只标不改**，两个落点：
         – 台账：`checks` 追加 `status=mismatch`、`how=转录里没找到这句（核对）`
-          → 链上最后的 `annotate_mismatches` 落 ⚠（"核算对不上"的既有机制）；
+          （📖 的是 `材料里没找到这句（核对）`）→ 链上最后的 `annotate_mismatches` 落 ⚠；
         – 🎙 例题给定被标、且 F9 重建验证通过 → 标题改挂 🎙+✏️「按口述还原」
-          （`note_v2.with_recon_label`；没通过验证的照常挂 ⚠）；
-    · 每节 ≤ `max_requests` 次请求（超出的 claim 不查，条数进提醒）；`ask(state, instrs)` 可注入；
+          （`note_v2.with_recon_label`；没通过验证的照常挂 ⚠；📖 的不挂）；
+    · 一次核对（= 一节课）≤ `max_requests` 次请求（超出的**批**不查，条数进提醒）；
+      `ask(state, instrs)` 可注入（假判官在位测里用）；
     · 没配 provider / 任何异常 → 全 None 空转，**永不抛**（既不花钱也不挡生成）。
     """
     out = copy.deepcopy(review)
@@ -874,41 +909,62 @@ def support_check(review: dict, *, entries: list, ask=None,
                 return [None] * len(instructions)
     secs = out.get("sections") or []
     tries = max(1, int(max_requests))
-    cap = tries * SUPPORT_BATCH
-    over = max(0, len(claims) - cap)
-    claims = claims[:cap]
+    mat_ok = bool(getattr(materials, "_chunks", None)) if materials is not None else False
+
+    # 工作清单：按节序（每节先转录批、再材料批）；超上限的批整批不查。
+    by_sec: dict = {}
+    for c in claims:
+        by_sec.setdefault(c["si"], []).append(c)
+    work: list = []
+    exempt = 0
+    for si in sorted(by_sec):
+        part = by_sec[si]
+        t_part = [c for c in part if c.get("src") != "📖"]
+        m_part = [c for c in part if c.get("src") == "📖"]
+        for kind, items in (("tr", t_part), ("mat", m_part)):
+            if kind == "mat" and not mat_ok:
+                exempt += len(items)
+                continue
+            for i in range(0, len(items), SUPPORT_BATCH):
+                work.append((kind, si, items[i:i + SUPPORT_BATCH]))
+    skipped = sum(len(w[2]) for w in work[tries:])
     rows_new: list = []
     relabeled = 0
     n_flag = 0
     used = 0
-    for base in range(0, len(claims), SUPPORT_BATCH):
-        if used >= tries:
-            break
-        part = list(range(base, min(base + SUPPORT_BATCH, len(claims))))
+
+    def _want(c: dict):                                        # noqa: E306
+        if c.get("ts"):
+            return _hms(c["ts"])           # 例题：标题里 🎙 的时刻（不是小节 ts）
+        si = c["si"]
+        sec = secs[si] if 0 <= si < len(secs) else {}
+        return _hms(sec.get("ts")) if isinstance(sec, dict) else None
+
+    for kind, si, part in work[:tries]:
         used += 1
-
-        def _want(i: int):                                     # noqa: E306
-            c = claims[i]
-            if c.get("ts"):
-                return _hms(c["ts"])       # 例题：标题里 🎙 的时刻
-            si = c["si"]
-            sec = secs[si] if 0 <= si < len(secs) else {}
-            return _hms(sec.get("ts")) if isinstance(sec, dict) else None
-
-        wins = [_support_window(entries, _want(i)) for i in part]
-        state = _support_state(entries, min(w[0] for w in wins), max(w[1] for w in wins))
-        instrs = [SUPPORT_INSTR.format(claim=claims[i]["claim"]) for i in part]
+        if kind == "mat":
+            excerpts: list = []
+            for c in part:
+                excerpts.extend(_materials_excerpts(materials, c["claim"]))
+            state = _support_mat_state(excerpts)
+        else:
+            wins = [_support_window(entries, _want(c)) for c in part]
+            state = _support_state(entries, min(w[0] for w in wins),
+                                   max(w[1] for w in wins))
+        instr_tpl = SUPPORT_MAT_INSTR if kind == "mat" else SUPPORT_INSTR
+        instrs = [instr_tpl.format(claim=c["claim"]) for c in part]
         try:
             ps = list(ask(state, instrs))
         except Exception:                                      # noqa: BLE001
             ps = []
-        for k, i in enumerate(part):
+        how = "材料里没找到这句（核对）" if kind == "mat" else "转录里没找到这句（核对）"
+        for k, c in enumerate(part):
             p = ps[k] if k < len(ps) else None
             if not isinstance(p, (int, float)) or float(p) >= tau:
                 continue
-            c = claims[i]
             sec = secs[c["si"]] if 0 <= c["si"] < len(secs) else None
-            if c["field"] == "example" and isinstance(sec, dict) and _recon_ok(sec):
+            if (kind == "tr" and c["field"] == "example"
+                    and isinstance(sec, dict) and _recon_ok(sec)):
                 t = _one((sec.get("example") or {}).get("title"))
                 if "按口述还原" not in t:
                     t = (t + "（按口述还原）") if t else "按口述还原"
@@ -921,8 +977,7 @@ def support_check(review: dict, *, entries: list, ask=None,
                 relabeled += 1
                 continue
             rows_new.append({"claim": c["claim"], "status": "mismatch",
-                             "recomputed": f"support p={float(p):.2f}",
-                             "how": "转录里没找到这句（核对）"})
+                             "recomputed": f"support p={float(p):.2f}", "how": how})
             n_flag += 1
     if rows_new:
         try:
@@ -930,11 +985,13 @@ def support_check(review: dict, *, entries: list, ask=None,
             out["checks"] = note_math.merge_checks(out.get("checks") or [], rows_new)
         except Exception:                                      # noqa: BLE001
             out["checks"] = list(out.get("checks") or []) + rows_new
-    bits = [f"{n_flag} 条挂 ⚠「转录里没找到这句（核对）」"] if n_flag else []
+    bits = [f"{n_flag} 条挂 ⚠（转录/材料里没找到）"] if n_flag else []
     if relabeled:
         bits.append(f"{relabeled} 条例题给定没找到 → 按口述还原挂牌")
-    if over:
-        bits.append(f"{over} 条超成本上限没查")
-    msgs = [f"支持性核对：查了 {len(claims)} 条（{used} 次请求，上限 {tries}）"
-            + ("；" + "；".join(bits) if bits else "；全部在转录里找到")]
+    if exempt:
+        bits.append(f"{exempt} 条 📖 题面豁免（没有材料）")
+    if skipped:
+        bits.append(f"{skipped} 条超成本上限没查")
+    msgs = [f"支持性核对：查了 {used} 批（上限 {tries} 次请求）"
+            + ("；" + "；".join(bits) if bits else "；全部找到")]
     return out, [], msgs

@@ -652,11 +652,12 @@ class DedupeSentences(unittest.TestCase):
         s = ("具体来说，平均成本函数为AC(q)= (60q+500)/q？但课上只给了片段："
              "原题见📖 2025-12期末卷 Exercise 7 / 未核对。⚠ 课上只给了片段："
              "原题见📖 2025-12期末卷 Exercise 7 / 未核对。")
-        out, _, warns = ng.dedupe_sentences({"sections": [{"prose": [s]}]})
+        out, gone, warns = ng.dedupe_sentences({"sections": [{"prose": [s]}]})
         got = out["sections"][0]["prose"][0]
         self.assertEqual(1, got.count("课上只给了片段"), got)
         self.assertIn("？但课上只给了片段：", got)
         self.assertTrue(warns and "1 处" in warns[0], warns)
+        self.assertEqual(1, len(gone), "删掉的句子要回传（F9c 守卫台账计数用）")
 
     def test_短句重复是行文_不动(self):
         s = "对。对。再算一遍。对。"
@@ -708,9 +709,10 @@ class TrivialCues(unittest.TestCase):
 
     def test_纯算术丢掉_真问题留着(self):
         rev = {"sections": [{"cues": ["5.3除以3等于多少？", "停产价格如何定义？", "2+2是多少？"]}]}
-        out, _, warns = ng.drop_trivial_cues(rev)
+        out, gone, warns = ng.drop_trivial_cues(rev)
         self.assertEqual(["停产价格如何定义？"], out["sections"][0]["cues"])
         self.assertTrue(warns and "2 条" in warns[0], warns)
+        self.assertEqual(2, len(gone), "丢掉的线索要回传（F9c 守卫台账计数用）")
 
     def test_带文字的问题都留着(self):
         keep = ["MC 和 AC 谁穿过谁？", "AC 的最小值等于多少？", "为什么要除以 q？",

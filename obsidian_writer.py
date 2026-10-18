@@ -619,6 +619,10 @@ class ObsidianWriter:
         self._note_warns: list = []
         #: 🥉 三道核判成 `mismatch` 的条目 -> 修正说明（`note_v2.corrections_from_mismatch`）。
         self._corr_extra: list = []
+        #: 🧮 F9c：守卫台账 —— 每个能删/能改内容的守卫都要在这里留下**计数**，
+        #:    写作末尾拼成 `guards: repaired N, dropped N, flagged N`（批量审计用）。
+        self._guard_counts: dict = {"repaired": 0, "dropped": 0, "flagged": 0}
+        self._guard_summary: str = ""
         self._polish = polish               # 落笔前二次精修(见 polish.py)
         self._polish_model = polish_model or model
         #: 🎯 Jev 的重点句：`[(概率, 句子, [原始行下标]), …]`。
@@ -1248,10 +1252,12 @@ class ObsidianWriter:
                                   str(e.get("en") or e.get("asr") or "") for e in entries)),
                            "引用逐字核对"),
                           # ⭐ F9b：「支持性核对」—— 断言"讲义说过 X"的 claim 过一遍 Jev
-                          #    （E3 口径，≤2 次请求/节）；p<0.15 挂 ⚠「转录里没找到这句」。
-                          #    只标不改；例题给定验证过重建的改挂 🎙+✏️「按口述还原」。
+                          #    （E3 口径，按节分批 ≤15 次请求/节）；p<0.15 挂 ⚠
+                          #    「转录/材料里没找到这句」。只标不改；例题给定验证过重建的
+                          #    改挂 🎙+✏️「按口述还原」。📖 题面对材料判、没材料豁免。
                           #    没配 Jev key → 空转（全 None），不花钱不挡生成。
-                          (lambda r: note_guards.support_check(r, entries=entries),
+                          (lambda r: note_guards.support_check(
+                              r, entries=entries, materials=self._materials),
                            "支持性核对"),
                           # ⚠️ 必须最后：标注要落在**已经清完**的正文上，也不能再进串讲的输入
                           (lambda r: note_guards.annotate_mismatches(r), "核算结果落正文")):
@@ -1260,11 +1266,29 @@ class ObsidianWriter:
                 review = got_
                 if extra_items and label == "更正账本核对":
                     self._corr_extra = list(self._corr_extra) + list(extra_items)
+                # 🧮 F9c 守卫台账：每处删/改都计数（原因在 `warns_` 里，逐条进核对记录）。
+                if label == "例题返修" and extra_items:
+                    st = extra_items[0]
+                    if isinstance(st, dict):
+                        self._guard_counts["repaired"] += int(st.get("repaired") or 0)
+                        self._guard_counts["dropped"] += int(st.get("dropped") or 0)
+                elif label in ("猜测句清理", "猜测句清理（串讲）", "重复句去重",
+                               "纯算术线索问题") and isinstance(extra_items, list):
+                    self._guard_counts["dropped"] += len(extra_items)
                 for w in warns_:
                     self._note_warns.append(w)
                     print(f"   ⚠ {label}：{w}", flush=True)
             except Exception as e:                            # noqa: BLE001
                 print(f"⚠ {label}失败({str(e)[:60]}); 笔记照常生成")
+        # 🧮 F9c：守卫台账行（批量审计：一批笔记 `grep guards:` 就能看谁被动过）。
+        self._guard_counts["flagged"] = len(
+            [c for c in (review.get("checks") or [])
+             if isinstance(c, dict) and c.get("status") == "mismatch"])
+        self._guard_summary = (
+            f"guards: repaired {self._guard_counts['repaired']}, "
+            f"dropped {self._guard_counts['dropped']}, "
+            f"flagged {self._guard_counts['flagged']}")
+        print("🧮 " + self._guard_summary, flush=True)
         # 💡 术语库：作者硬要求（从笔记抽词 → `prep.append_terms` 只追加 + 墓碑）。
         try:
             import note_glossary
@@ -1511,7 +1535,8 @@ class ObsidianWriter:
             term_pairs=_term_pairs_norm(extra, sel),
             review_dates=list(self._review_dates),
             anki_name=self._anki_name, html_name=self._html_name,
-            corrections_extra=list(self._corr_extra), warns=warns)
+            corrections_extra=list(self._corr_extra), warns=warns,
+            guard_summary=getattr(self, "_guard_summary", ""))
         # ⚠️ `kaTeX` 那一格由 `_write_sidecars` 在**真装过之后**回填（`note_html` 是纯渲染，
         #    装资源是 I/O）—— 默认 True = "还不知道"，只有**已知失败**才写那一行警告。
 
@@ -1537,12 +1562,18 @@ class ObsidianWriter:
             if not en or en.lower() in seen:
                 continue
             seen.add(en.lower())
-            # ⭐ F8-f（作者点名）：复习层抽出的**泛词**（substitute / marginal / minimum…）也过
-            #    同一份常识词判据（`note_terms.drop_reason`，与术语库同一条口径）+ 单单词
-            #    泛词表（`note_terms.too_common`）—— 原来这条路绕过了 select()，泛词全溜进表里。
-            #    **术语库真有这个词就留**（规则原文："unless the glossary has them"）。
+            # ⭐ F8-f（作者点名）+ F9c（域中立）：泛词判据分两层 ——
+            #    `minimum/maximum` 一律算泛词；`substitution/derivative/…` 是某些课的
+            #    正词（化学的取代反应/衍生物）→ **本课材料里出现过就留**（Materials.verify）。
+            #    **术语库真有这个词也留**（规则原文："unless the glossary has them"）。
             why = note_terms.drop_reason(en, type_="", source=note_terms.SRC_LECTURE)
-            if (why or note_terms.too_common(en)) and not self._in_term_store(en):
+            try:
+                in_course = bool(self._materials is not None
+                                 and self._materials.verify(en))
+            except Exception:                               # noqa: BLE001
+                in_course = False
+            if (why or note_terms.too_common(en, verified=in_course)) \
+                    and not self._in_term_store(en):
                 n_filtered += 1
                 continue
             ts = ""

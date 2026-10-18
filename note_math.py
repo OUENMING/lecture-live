@@ -643,26 +643,39 @@ _DIV = re.compile(r"(?P<a>-?\d+(?:\.\d+)?)\s*(?:除以|÷|/)\s*(?P<b>-?\d+(?:\.\
                   r"(?:\s*/\s*(?P<d>-?\d+(?:\.\d+)?))?")
 
 
-#: 极限当最值（F8-c，作者从 econ W3 抓到）：`当 q→∞ 时 AC→100，最低点为 100` 必须拦 ——
-#: 无穷远处的趋向值**不是**最值点（有限产量处都到不了它），学生照抄就会答错整类题。
+#: 极限当最值（F8-c）：`当 q→∞ 时 f→100，最低点为 100` 必须拦 ——
+#: 无穷远处的趋向值**不是**最值点（有限定义域处都到不了它），照抄就会答错整类题。
+#: ⭐ F9c（去领域化）：不认「停产价/停业价/关门价」这类题面词 —— 改认域中立结构：
+#:   ① 最值词（最低/最大/最小/极小/极大）后面跟着数字断言；或
+#:   ② **把 →∞ 的极限值本身当答案端出来**（`AC→80，故…为80`：80 既是极限又是"答案"）。
 _LIMIT_MARK = re.compile(r"→\s*∞|趋于\s*无穷|趋向\s*无穷|趋于\s*∞|取极限|无限趋近|无限接近")
-_LIMIT_EXT = re.compile(
-    r"(最低|最大|最小|极小|极大)[值点]{0,4}\s*(?:为|是|＝|=)\s*\$?-?\d"
-    r"|(?:停产价|停业价|关门价)[^，。；;]{0,6}(?:为|是|＝|=)\s*\$?-?\d")
+_LIMIT_EXT = re.compile(r"(最低|最大|最小|极小|极大)[值点]{0,4}\s*(?:为|是|＝|=)\s*\$?-?\d")
+_LIMIT_VAL = re.compile(r"→\s*\$?(-?\d+(?:\.\d+)?)")
 
 
 def _limit_extremum_row(t: str) -> dict | None:
-    """同一句里同时出现「→∞ / 取极限」与「某个数就是最值/停产价」→ 一条 mismatch 行。
+    """同一句里同时出现「→∞ / 取极限」与「某个数就是最值/答案」→ 一条 mismatch 行。
 
-    ⚠️ 文本里是 TeX（`$q\\to\\infty$`）就先把 `\\to`/`\\infty` 归一成 `→`/`∞` 再判 ——
-       实测 econ W3 的原文正是 TeX 写法，只按 `→∞` 认会整条漏掉。
+    ⚠️ 文本里是 TeX（`$q\\to\\infty$`）就先把 `\\to`/`\\infty` 归一成 `→`/`∞` 再判。
+    ⭐ F9c：第二种形态（极限值被当答案）按**数值重现**认 —— 域中立，任何课都成立。
     """
     s = str(t or "")
     if "\\to" in s or "\\infty" in s:                           # TeX 写法归一化
         s = (s.replace("\\rightarrow", "→").replace("\\to", "→")
              .replace("\\infty", "∞"))
     for sent in re.split(r"[。；;！？\n]", s):
-        if _LIMIT_MARK.search(sent) and _LIMIT_EXT.search(sent):
+        if not _LIMIT_MARK.search(sent):
+            continue
+        hit = bool(_LIMIT_EXT.search(sent))
+        if not hit:
+            m = _LIMIT_VAL.search(sent)
+            # ⚠️ 「趋近值重现」必须落在**分句边界**上（`故…为80。`）—— 公式里的
+            #    同一个常数不算（`AC(q)=80+2000/q → 80`：那个 80 是系数，不是断言）。
+            if m and re.search(rf"(?:为|是|＝|=|答案[是为]?|结论[是为]?|结果[是为]?)\s*\$?"
+                               rf"{re.escape(m.group(1))}(?![0-9.])(?=[，,。；;、！？]|$)",
+                               sent):
+                hit = True
+        if hit:
             return {"claim": str(t), "status": "mismatch",
                     "recomputed": "最值不能由 q→∞ 的极限得到",
                     "how": "极值题必须真的有最值点（求导=0 且二阶条件）；"
@@ -915,21 +928,34 @@ def _SUBST_rows(t: str, fdefs: dict, rows: list) -> list:
     return rows
 
 
-#: F9（作者读转录后定的新口径）：**q 不许当 P 用** ——「2.89 是产量，不是价格」。
-_QV_MIN = re.compile(r"最低|最小|极大|极小|停产|停业|关门")
-_QV_ARG = re.compile(r"[qQ]\s*(?:[=≈]|\\approx\s*)\s*(?P<x>\d+(?:\.\d+)?)")
-_QV_PRICE = re.compile(
-    r"(?:停产|停业|关门)[^。；\n]{0,12}?价[^。；\n]{0,10}?(?:约\s*为?|为|是|＝|=|≈|\\approx\s*)\s*\$?(?P<p>\d+(?:\.\d+)?)"
-    r"|(?:^|[；;。：:\s])P\s*(?:约\s*为?|为|是|＝|=|≈|\\approx\s*)\s*\$?(?P<p2>\d+(?:\.\d+)?)")
+#: F9 的「取点的值不许当答案」守卫（F9c 去领域化：不认学科词，只认数学结构）。
+#:
+#: 结构一（evaluate-at-point）：`AC(2.89)≈2.89` —— 代入结果≈代入点本身，而没有函数能复算。
+#: 结构二（argmin vs min value）：**同一个数以两个不同角色出现** ——
+#:   `q≈2.89 … P≈2.89`（两个单字母量撞数）；或「<中文主语>为 N」而主语不含「点」，
+#:   却把 N≈x* 端出来当答案（`…为2.89` 这种没有函数兜底的写法）。
+_QV_MIN = re.compile(r"最低|最小|极大|极小|最大|驻点|拐点")
+_QV_ARG = re.compile(r"[qQx]\s*(?:[=≈]|\\approx\s*)\s*(?P<x>\d+(?:\.\d+)?)")
+#: 单字母量的数字断言：`P≈2.89`（P 是任意量名；与取点数撞了才查）。
+_QV_SYM = re.compile(r"(?<![A-Za-z])(?P<s>[A-Za-z])\s*(?:[=≈]|\\approx\s*)"
+                     r"\s*\$?(?P<v>-?\d+(?:\.\d+)?)")
+#: 「<中文主语> 为/是/= N」——主语含「点」= 说的是取点（豁免），除非它端的是 N≈x*。
+_QV_ROLE = re.compile(r"(?P<subj>[\u4e00-\u9fff]{2,8})\s*"
+                      r"(?:约\s*为?|为|是|等于|＝|=|≈|\\approx\s*)\s*"
+                      r"\$?(?P<v>-?\d+(?:\.\d+)?)")
+
+
+def _close(a: float, b: float, *, tol: float = 0.02) -> bool:
+    return abs(a - b) <= tol * max(1.0, abs(a), abs(b))
 
 
 def _qvsp_rows(unit_texts: list, fdefs_by_text: list) -> list:
-    """F9：极小值/停产价格题里「q 当 P」的两条守卫（整单元一起看）。
+    """F9：极值题里「取点的值被当成答案」的两条守卫（整单元一起看）。**域中立。**
 
     ① 代入值 ≈ 代入点（`AC(2.89)≈2.89`），而这一节没有函数能复算 → mismatch；
-    ② 写着最低/停产价格、却没有函数、还端着一个算好的价格数 → mismatch
-       （⬜「没有给出函数，无法复算极值」那条的升级：要么给函数，要么只留片段）；
-       有函数时：价格数 ≈ 驻点值 且函数复算对不上 → mismatch（P 必须拿 AC(q*) 算）。
+    ② 同一个数 ≈ 某个取点数 x*，却以**另一个角色**出现（`P≈2.89` 与 `q≈2.89` 撞数、
+       或「<中文主语>为2.89」而主语不含「点」）：没有函数 → mismatch；
+       有函数但函数在取点上算出的不是这个数 → mismatch。
     """
     blob = " ".join(str(x or "") for x in unit_texts)
     if not blob or not _QV_MIN.search(blob):
@@ -942,43 +968,59 @@ def _qvsp_rows(unit_texts: list, fdefs_by_text: list) -> list:
             for m in _SUBST.finditer(cl.strip()):
                 name = next((n for n in (fd or {}) if n.lower() == m.group("name").lower()), None)
                 x, v = float(m.group("c")), float(m.group("v"))
-                if name is None and abs(v - x) <= 0.02 * max(1.0, abs(x)):
+                if name is None and _close(v, x):
                     rows.append({"claim": str(t), "status": "mismatch",
                                  "recomputed": f"{m.group('name')}({_fmt(x)})：答案值≈取点",
                                  "how": f"答案值 {_fmt(v)} 恰好等于代入点 {_fmt(x)}，而这里"
-                                        "没有能复算的函数 —— 像是把产量 q 当成了价格 P"
+                                        "没有能复算的函数 —— 像是把代入点本身当成了答案"
                                         "（F9：给出函数，或只留片段）"})
-    # ② 价格/答案那一档
+    # ② argmin vs min value
     name, fn = None, None
     for fd in (fdefs_by_text or []):
         name = _pick(fd or {}, blob)
         if name:
             fn = (fd or {})[name][2]
             break
+
+    def _verified(x: float, v: float) -> bool:
+        if fn is None:
+            return False
+        try:
+            return _close(float(fn(x)), v)
+        except Exception:                                     # noqa: BLE001
+            return False
+
+    def _flag(t: str, v: float, x: float) -> None:
+        if fn is None:
+            rows.append({"claim": str(t), "status": "mismatch",
+                         "recomputed": f"答案值 {_fmt(v)} ≈ 取点 {_fmt(x)}",
+                         "how": "这一节给的是极值/答案，却没有给出函数（无法复算）—— "
+                                "没有函数的例子不许端着一个算好的数"
+                                "（F9：给出函数，或只留片段）"})
+        else:
+            rows.append({"claim": str(t), "status": "mismatch",
+                         "recomputed": f"答案值 {_fmt(v)} ≈ 取点 {_fmt(x)}",
+                         "how": f"答案值 {_fmt(v)} 与取点 {_fmt(x)} 撞数，而 {name} 在取点上"
+                                f"算出来的不是这个数 —— 答案要拿函数现算（F9）"})
+
+    all_syms: list = []
     for t in unit_texts:
-        for m in _QV_PRICE.finditer(str(t or "")):
-            p = m.group("p") or m.group("p2")
-            if not p:
-                continue
-            pv = float(p)
-            if name is None:
-                rows.append({"claim": str(t), "status": "mismatch",
-                             "recomputed": f"价格/答案 {_fmt(pv)}",
-                             "how": "这一节写着最低/停产价格，却没有给出函数（无法复算）—— "
-                                    "没有函数的例子不许端着一个算好的数"
-                                    "（F9：给出函数，或只留片段）"})
-                continue
-            if not any(abs(pv - x) <= 0.02 * max(1.0, abs(x)) for x in xs):
-                continue
-            try:
-                verified = any(abs(fn(x) - pv) <= 0.02 * max(1.0, abs(pv)) for x in xs)
-            except Exception:                                 # noqa: BLE001
-                verified = False
-            if not verified:
-                rows.append({"claim": str(t), "status": "mismatch",
-                             "recomputed": f"价格/答案 {_fmt(pv)} ≈ 驻点值",
-                             "how": f"答案值 {_fmt(pv)} 与驻点值相同，而 {name} 在驻点算出来的"
-                                    "不是这个数 —— P 必须拿 AC(q*) 算（F9：q 不是 P）"})
+        for m in _QV_SYM.finditer(str(t or "")):
+            all_syms.append((m.group("s"), float(m.group("v")), str(t)))
+    for x in xs:
+        hits = [(sy, v, t) for sy, v, t in all_syms if _close(v, x)]
+        if len({sy for sy, _v, _t in hits}) >= 2 and not any(
+                _verified(x, v) for _sy, v, _t in hits):
+            _flag(hits[-1][2], hits[-1][1], x)     # 标在**另一个角色**那句话上
+            break
+    for t in unit_texts:
+        for m in _QV_ROLE.finditer(str(t or "")):
+            v = float(m.group("v"))
+            if "点" in m.group("subj"):
+                continue                            # 「最低点为6」= 说取点，豁免
+            if any(_close(v, x) and not _verified(x, v) for x in xs):
+                _flag(str(t), v, next(x for x in xs if _close(v, x)))
+                break
     return rows
 
 

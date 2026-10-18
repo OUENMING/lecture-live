@@ -738,5 +738,111 @@ class TestF9_QVSP(unittest.TestCase):
                               and marker in str(r.get("how") or "")], (text, rows))
 
 
+class TestF11Program(unittest.TestCase):
+    """F11 §2：**代码算、模型讲** —— 例题给 program，note_math 数值引擎执行。
+
+    作者 2026-10-18 批准这轮架构改动（反转 10-17 的"禁止代码算答案"）：
+    两次例题错误都是模型自己算/自己还原出来的。程序只用现成的数值引擎
+    （`ast` 白名单 + 数值导数），**没有新依赖（无 sympy）**。
+    """
+
+    def _ex(self, **kw) -> dict:
+        ex = {"title": "🎙 13:16", "prompt": "已知 $AC(q)=60q+500/q$，求停产价格。",
+              "steps": [{"text": "令 $AC'(q)=0$ 求驻点。", "why": "一阶条件"},
+                        {"text": "把 $q^*$ 代回 $AC$。", "why": "求价格"}],
+              "answer": "停产价格约为346.4。"}
+        ex.update(kw)
+        return {"sections": [{"heading": "[13:16] 停产价格", "ts": "13:16",
+                              "prose": ["讲解。"], "example": ex}]}
+
+    def test_argmin_eval_端到端(self):
+        rev = self._ex(program=[
+            {"var": "q_star", "op": "argmin", "expr": "60*q + 500/q", "x": "q",
+             "range": [1, 10]},
+            {"var": "P", "op": "eval", "expr": "60*q + 500/q", "x": "q", "at": "q_star"}])
+        vals, err = nm.run_program(rev["sections"][0]["example"]["program"])
+        self.assertEqual("", err)
+        self.assertAlmostEqual(vals["q_star"], 2.8868, places=3)
+        self.assertAlmostEqual(vals["P"], 346.41, places=1)
+        bad = [r for r in nm.check_review(rev) if r.get("status") == "mismatch"]
+        self.assertEqual([], bad, bad)
+
+    def test_单调函数当最值_程序落端点_失败(self):
+        """`(60q+500)/q` 单调递减 —— argmin 会落到区间端点，program 直接失败（F8 那类错的根治）。"""
+        rev = self._ex(program=[
+            {"var": "q_star", "op": "argmin", "expr": "(60*q + 500)/q", "x": "q",
+             "range": [1, 10]},
+            {"var": "P", "op": "eval", "expr": "(60*q + 500)/q", "x": "q", "at": "q_star"}],
+            answer="最低点为 60。")
+        rows = [r for r in nm.check_review(rev) if r.get("status") == "mismatch"]
+        self.assertTrue(rows, "单调函数的 argmin 必须失败")
+        self.assertIn("端点", " ".join(str(r.get("how") or "") for r in rows))
+
+    def test_答案端出中间量_P对不上q星(self):
+        """目标量是最后一步的 var：答案写了中间量 q*≈2.89 而不是 P≈346.4 → mismatch。"""
+        rev = self._ex(program=[
+            {"var": "q_star", "op": "argmin", "expr": "60*q + 500/q", "x": "q",
+             "range": [1, 10]},
+            {"var": "P", "op": "eval", "expr": "60*q + 500/q", "x": "q", "at": "q_star"}],
+            steps=[{"text": "驻点 $q^*\\approx2.89$。", "why": ""}],
+            answer="停产价格为 2.89。")
+        rows = [r for r in nm.check_review(rev) if r.get("status") == "mismatch"]
+        how = " ".join(str(r.get("how") or "") for r in rows)
+        self.assertTrue(rows, "答案端中间量必须拦")
+        self.assertIn("中间量", how)
+
+    def test_步骤里的野数字_拦(self):
+        """步骤里冒出一个既不是程序值、也不是题面给定的数 → mismatch（喂返修）。"""
+        rev = self._ex(program=[
+            {"var": "q_star", "op": "argmin", "expr": "60*q + 500/q", "x": "q",
+             "range": [1, 10]},
+            {"var": "P", "op": "eval", "expr": "60*q + 500/q", "x": "q", "at": "q_star"}],
+            steps=[{"text": "驻点 $q^*\\approx2.89$，代入得 999。", "why": ""}],
+            answer="停产价格约为346.4。")
+        rows = [r for r in nm.check_review(rev) if r.get("status") == "mismatch"]
+        self.assertTrue(any("999" in str(r.get("how") or "") for r in rows), rows)
+
+    def test_argmin找内部极小_argmax落端点(self):
+        """`(q-3)^2` 在 [0,6] 有内部极小 3：`argmin` 找得到，`argmax` 落端点 → 失败。
+        钉住 op 的方向（argmin/argmax 不许互换）。"""
+        vals, err = nm.run_program([
+            {"var": "p", "op": "argmin", "expr": "(q-3)^2", "x": "q", "range": [0, 6]}])
+        self.assertEqual("", err)
+        self.assertAlmostEqual(vals["p"], 3.0, places=4)
+        _v, err = nm.run_program([
+            {"var": "p", "op": "argmax", "expr": "(q-3)^2", "x": "q", "range": [0, 6]}])
+        self.assertIn("端点", err)
+
+    def test_deriv_与_root(self):
+        vals, err = nm.run_program([
+            {"var": "slope", "op": "deriv", "expr": "q^3 - 3*q", "x": "q", "at": 1}])
+        self.assertEqual("", err)
+        self.assertAlmostEqual(vals["slope"], 0.0, places=6)
+        vals, err = nm.run_program([
+            {"var": "r", "op": "root", "expr": "q^2 - 4", "x": "q", "range": [0, 10]}])
+        self.assertEqual("", err)
+        self.assertAlmostEqual(vals["r"], 2.0, places=6)
+
+    def test_givens_常量表能用(self):
+        vals, err = nm.run_program(
+            [{"var": "y", "op": "eval", "expr": "K/q", "x": "q", "at": 4}],
+            {"K": 100})
+        self.assertEqual("", err)
+        self.assertAlmostEqual(vals["y"], 25.0)
+
+    def test_坏的op_与坏的表达式_给人话(self):
+        _v, err = nm.run_program([{"var": "a", "op": "integrate",
+                                   "expr": "q", "x": "q", "range": [0, 1]}])
+        self.assertIn("未知 op", err)
+        _v, err = nm.run_program([{"var": "a", "op": "eval", "expr": "q +* 2",
+                                   "x": "q", "at": 1}])
+        self.assertIn("解析不了", err)
+
+    def test_没有program的例题_整段跳过(self):
+        rev = self._ex()                     # 定性/概念题：没有 program
+        rows = nm.program_rows(rev["sections"][0])
+        self.assertEqual([], rows, "没有 program 不许做数值判断")
+
+
 if __name__ == "__main__":
     unittest.main()

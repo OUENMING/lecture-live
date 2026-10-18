@@ -631,6 +631,7 @@ def check_review(review: dict, *, transcript: str = "") -> list:
                 fdefs_by_text.append(fdefs)
                 rows += _rows_for_text(t, fdefs)
             rows += _qvsp_rows(u, fdefs_by_text)      # ⭐ F9：q 不许当 P（整单元一起看）
+        rows += program_rows(s)                       # ⭐ F11 §2：例题 program 代码算、逐数对
     # ⚠️ 同一句断言在 `prose` 与 `answer` 各出现一次 → 会出两行一模一样的核对表；
     #    空的 claim 也在这里丢掉（实测第三份产物上有两行全空）。
     seen: set = set()
@@ -1148,3 +1149,307 @@ def mech_override_rows(rows: list, review_data: dict) -> list:
                     break
         out.append(row)
     return out
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# F11 §2：**代码算，模型讲** —— 例题不再由模型"心算"出答案，而是给一份小 program，
+# 由 note_math 的数值引擎（`ast` 白名单 + 数值导数，**没有 sympy**）执行；
+# 模型只负责把算出来的值讲成人话。通用：任何课、任何量，无领域键。
+# ════════════════════════════════════════════════════════════════════════════
+#: 步骤形状（模型只填数据）：
+#:   {"var": "q_star", "op": "argmin", "expr": "60*q + 500/q", "x": "q", "range": [1, 10]}
+#:   {"var": "P", "op": "eval", "expr": "60*q + 500/q", "x": "q", "at": "q_star"}
+#: op：argmin / argmax（区间内有真极值才成立）· root（区间内求零点）·
+#:     eval（在 at 处代入）· deriv（在 at 处的数值导数）。
+PROGRAM_OPS = ("argmin", "argmax", "root", "eval", "deriv")
+_PROG_GRID = 4000                       # 扫描采样数（找极值/根的初始包围）
+
+
+def _prog_at(step: dict, ns: dict):
+    """`at`（代入点）→ `(float, "")`；拿不到 → `(None, 原因)`。"""
+    at = step.get("at")
+    if at is None:
+        return None, "缺 at（代入点是哪个数/哪个变量）"
+    if isinstance(at, (int, float)):
+        return float(at), ""
+    s = str(at).strip()
+    try:
+        return float(s), ""
+    except ValueError:
+        pass
+    if s in ns:
+        return float(ns[s]), ""
+    m = re.search(r"-?\d+(?:\.\d+)?", s)          # `q = 2.89` 这种写法
+    if m:
+        return float(m.group(0)), ""
+    return None, f"at={at!r} 不是数、也不是已算出的变量"
+
+
+def _prog_extremum(f, lo: float, hi: float, want_min: bool):
+    """区间内求极值点（先密集扫描定位，再三等分细化）。**纯数值。**"""
+    n = _PROG_GRID
+    xs = [lo + (hi - lo) * i / (n - 1) for i in range(n)]
+    best, best_y = xs[0], None
+    for x in xs:
+        try:
+            y = f(x)
+        except Exception:                                      # noqa: BLE001
+            continue
+        if best_y is None or (y < best_y if want_min else y > best_y):
+            best, best_y = x, y
+    if best_y is None:
+        return None
+    i = xs.index(best)
+    a, b = xs[max(0, i - 1)], xs[min(n - 1, i + 1)]
+    for _ in range(200):                                       # 三分法
+        m1 = a + (b - a) / 3
+        m2 = b - (b - a) / 3
+        try:
+            c1, c2 = f(m1), f(m2)
+        except Exception:                                      # noqa: BLE001
+            break
+        if (c1 < c2) == want_min:
+            b = m2
+        else:
+            a = m1
+    return (a + b) / 2
+
+
+def _prog_root(f, lo: float, hi: float):
+    """区间内求 f(x)=0 的第一个根（扫描找变号区间 + 二分）。**纯数值。**"""
+    n = _PROG_GRID
+    px, py = lo, None
+    for i in range(n):
+        x = lo + (hi - lo) * i / (n - 1)
+        try:
+            y = f(x)
+        except Exception:                                      # noqa: BLE001
+            continue
+        if py is not None and (y == 0 or py * y < 0):
+            a, b = px, x
+            for _ in range(200):
+                m = (a + b) / 2
+                try:
+                    fm = f(m)
+                except Exception:                              # noqa: BLE001
+                    break
+                if f(a) * fm <= 0:
+                    b = m
+                else:
+                    a = m
+            return (a + b) / 2
+        px, py = x, y
+    return None
+
+
+def run_program(program, givens=None) -> tuple:
+    """执行模型的 `program` → `(values, error)`。**纯数值，绝不执行任意代码。**
+
+    `values`：`{变量名: float}`（含 `givens` 里的常量）；`error==""` 表示成功，
+    否则是**一句人话**的失败原因（哪一步、为什么）。`givens` 是可选的常量表
+    （题面里给的符号常数，如 `{"K": 500}`）。
+    """
+    ns: dict = {}
+    for k, v in (givens or {}).items():
+        try:
+            ns[str(k)] = float(v)
+        except (TypeError, ValueError):
+            continue
+    if not isinstance(program, list) or not program:
+        return dict(ns), "program 为空"
+    for step in program:
+        if not isinstance(step, dict):
+            return dict(ns), "program 里有不是对象的步骤"
+        var = str(step.get("var") or "").strip()
+        op = str(step.get("op") or "").strip()
+        expr = str(step.get("expr") or "").strip()
+        x = str(step.get("x") or "q").strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", var):
+            return dict(ns), f"步骤 {op or '?'}：变量名 {var!r} 不合法"
+        if op not in PROGRAM_OPS:
+            return dict(ns), f"未知 op：{op!r}（只许 {'/'.join(PROGRAM_OPS)}）"
+        if not expr:
+            return dict(ns), f"步骤 {var}（{op}）没有 expr"
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", x):
+            return dict(ns), f"步骤 {var}（{op}）的 x={x!r} 不是单个变量名"
+        f = _compile(expr, x, ns)
+        if f is None:
+            return dict(ns), f"步骤 {var}（{op}）的表达式解析不了：{expr}"
+        if op in ("argmin", "argmax"):
+            rng = step.get("range")
+            if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+                return dict(ns), f"步骤 {var}（{op}）缺 range=[lo, hi]"
+            try:
+                lo, hi = float(rng[0]), float(rng[1])
+            except (TypeError, ValueError):
+                return dict(ns), f"步骤 {var}（{op}）的 range 不是两个数"
+            if not lo < hi:
+                return dict(ns), f"步骤 {var}（{op}）要 lo < hi"
+            want_min = op == "argmin"
+            xs = _prog_extremum(f, lo, hi, want_min)
+            if xs is None:
+                return dict(ns), f"步骤 {var}：区间内算不出值（定义域问题）"
+            span = hi - lo
+            if xs - lo <= 1e-3 * span or hi - xs <= 1e-3 * span:
+                return dict(ns), (f"步骤 {var}：{op} 落在区间端点 —— "
+                                  f"这个函数在 [{lo:g}, {hi:g}] 上没有内部极值点"
+                                  f"（单调/端点最优不算）")
+            try:
+                d1, d2 = _d1(f, xs), _d2(f, xs)
+            except Exception:                                  # noqa: BLE001
+                return dict(ns), f"步骤 {var}：极值点附近算不出导数"
+            scale = max(1.0, abs(xs))
+            if abs(d1) > 1e-2 * scale:
+                return dict(ns), f"步骤 {var}：该点一阶导≈{_fmt(d1)}≠0，不是驻点"
+            bad = (want_min and d2 < 0) or (not want_min and d2 > 0)
+            if bad:
+                return dict(ns), (f"步骤 {var}：二阶条件不成立（f''≈{_fmt(d2)}，"
+                                  f"这是{'极大' if d2 < 0 else '极小'}）")
+            ns[var] = xs
+        elif op == "root":
+            rng = step.get("range")
+            if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+                return dict(ns), f"步骤 {var}（root）缺 range=[lo, hi]"
+            try:
+                lo, hi = float(rng[0]), float(rng[1])
+            except (TypeError, ValueError):
+                return dict(ns), f"步骤 {var}（root）的 range 不是两个数"
+            if not lo < hi:
+                return dict(ns), f"步骤 {var}（root）要 lo < hi"
+            r0 = _prog_root(f, lo, hi)
+            if r0 is None:
+                return dict(ns), f"步骤 {var}：区间 [{lo:g}, {hi:g}] 里没有零点"
+            ns[var] = r0
+        elif op == "eval":
+            pt, why = _prog_at(step, ns)
+            if pt is None:
+                return dict(ns), f"步骤 {var}（eval）{why}"
+            try:
+                ns[var] = float(f(pt))
+            except Exception:                                  # noqa: BLE001
+                return dict(ns), f"步骤 {var}：在 {_fmt(pt)} 处算不出值"
+        else:                                                  # deriv
+            pt, why = _prog_at(step, ns)
+            if pt is None:
+                return dict(ns), f"步骤 {var}（deriv）{why}"
+            try:
+                ns[var] = float(_d1(f, pt))
+            except Exception:                                  # noqa: BLE001
+                return dict(ns), f"步骤 {var}：在 {_fmt(pt)} 处算不出导数"
+    return dict(ns), ""
+
+
+def _conclusion_nums(text: str) -> list:
+    """一段文本里"像结论"的数字（去掉下标/上标、LaTeX 命令、单数字结构量）。**纯函数。**
+
+    例：`q_{1}+3q_{2}` 里的 1/2 不算；`AC(q)=q^{2}-12q+60` 里的 2 不算、12/60 算；
+    `AC'(q)=0` 里的 0 不算（单数字多是结构量：令导数为零、第 1 步）；
+    `答案 P≈346.4` 里的 346.4 算。⚠️ `\\approx2.89` 这种**命令紧贴数字**的写法
+    要先把 LaTeX 命令换成空格 —— 否则 `2.89` 左边没有词边界，只会抠出 `89`。
+    """
+    s = str(text or "")
+    s = re.sub(r"\\[A-Za-z]+", " ", s)              # LaTeX 命令当分隔符（\approx \cdot …）
+    s = re.sub(r"[_^]\s*\{[^{}]*\}", " ", s)        # 下标/上标整块去掉
+    s = re.sub(r"[_^]\s*-?\d+(?:\.\d+)?", " ", s)   # 免花括号的 _1 / ^2
+    out: list = []
+    for m in re.finditer(r"(?<![A-Za-z0-9.])-?\d+(?:\.\d+)?(?![A-Za-z0-9])", s):
+        tok = m.group(0)
+        if "." not in tok and len(tok.lstrip("-")) < 2:
+            continue                                # 单个数字多是结构（=0、第1步），不当结论值
+        out.append(tok)
+    return out
+
+
+def _sig_match(claim: str, val: float) -> bool:
+    """按**断言写的小数位**判等（`约等于 3.3` 不许判成错）。**纯函数。**"""
+    try:
+        c = float(claim)
+    except (TypeError, ValueError):
+        return False
+    if c == 0:
+        return abs(val) < 1e-9
+    dec = len(claim.split(".")[1]) if "." in claim else 0
+    return abs(round(val, dec) - c) <= 10.0 ** (-dec) * 0.5 + 1e-9
+
+
+def program_rows(section: dict) -> list:
+    """例题的 `program` → 机械核对行（**代码算、逐数对**）。**纯函数，无 LLM。**
+
+    规矩（F11 §2）：
+      · 执行 program；失败 → 一条 mismatch（例题整块立不住）；
+      · `target` = **最后一步的变量**；答案里的数必须对得上 target 的值，
+        对不上而为某个**中间量**的值 → mismatch（P vs q* 那类错）；
+      · explanation/步骤/答案里的**每个数字**都必须等于某个 program 值或题面给定，
+        否则 mismatch（喂给 F8 的返修闸：返一次，复检仍错整块撤）。
+    没有 `program` 的例题（定性/概念题）**整段跳过** —— 不做数值判断。
+    """
+    ex = section.get("example") if isinstance(section, dict) else None
+    if not isinstance(ex, dict):
+        return []
+    prog = ex.get("program")
+    if not isinstance(prog, list) or not prog:
+        return []
+    prompt = str(ex.get("prompt") or "")
+    claim0 = prompt or ex.get("title") or "例题"
+    givens = ex.get("givens") if isinstance(ex.get("givens"), dict) else {}
+    vals, err = run_program(prog, givens)
+    if err:
+        return [{"claim": str(claim0)[:120], "status": "mismatch", "recomputed": "",
+                 "how": f"例题的 program 跑不动：{err}"}]
+    if not isinstance(prog[-1], dict):
+        return []
+    target = str(prog[-1].get("var") or "")
+    tval = vals.get(target)
+    rows: list = []
+    # 允许的数 = 程序算出的每个值 ∪ 题面给定（prompt 里的数字 + givens 的数值）
+    allowed = [float(v) for v in vals.values()]
+    for m in re.findall(r"-?\d+(?:\.\d+)?", prompt):
+        try:
+            allowed.append(float(m))
+        except ValueError:
+            pass
+    steps = ex.get("steps") or []
+    texts: list = []
+    for st in steps:
+        if isinstance(st, dict):
+            texts += [str(st.get("text") or ""), str(st.get("why") or "")]
+        else:
+            texts.append(str(st or ""))
+    texts += [str(ex.get("answer") or ""), str(ex.get("explanation") or "")]
+    # ① 答案必须是 target 的值
+    ans_nums = _conclusion_nums(str(ex.get("answer") or "") + " " + str(ex.get("explanation") or ""))
+    if tval is not None and ans_nums:
+        if not any(_sig_match(n, tval) for n in ans_nums):
+            mids = {str(st.get("var")): vals.get(str(st.get("var")))
+                    for st in prog[:-1] if isinstance(st, dict)}
+            hit = next((v for v in mids.values() if v is not None
+                        and any(_sig_match(n, v) for n in ans_nums)), None)
+            if hit is not None:
+                which = next(k for k, v in mids.items() if v is not None and _sig_match(
+                    next(n for n in ans_nums if _sig_match(n, v)), v))
+                rows.append({"claim": str(ex.get("answer") or claim0)[:120],
+                             "status": "mismatch",
+                             "recomputed": f"{target}={_fmt(tval)}",
+                             "how": f"答案端出来的是中间量 {which}（{_fmt(hit)}），"
+                                    f"而这一步的目标 {target} 应等于 {_fmt(tval)}"})
+            else:
+                rows.append({"claim": str(ex.get("answer") or claim0)[:120],
+                             "status": "mismatch",
+                             "recomputed": f"{target}={_fmt(tval)}",
+                             "how": f"答案里没有目标量 {target} 的值（程序算出 {_fmt(tval)}）"})
+    # ② 步骤/答案里的每个数字都要对得上程序值或给定
+    for t in texts:
+        for n in _conclusion_nums(t):
+            if any(_sig_match(n, v) for v in allowed):
+                continue
+            rows.append({"claim": (t or str(claim0))[:120], "status": "mismatch",
+                         "recomputed": "程序值：" + "、".join(
+                             f"{k}={_fmt(v)}" for k, v in vals.items())[:80],
+                         "how": f"这一步的数字 {n} 不在程序算出的值/题面给定里"})
+            break                        # 一句话只标一条（别刷屏）
+    if not rows:
+        rows.append({"claim": str(claim0)[:120], "status": "ok",
+                     "recomputed": f"{target}={_fmt(tval)}" if tval is not None else "",
+                     "how": "例题 program 执行通过：答案等于目标量，数字逐一落在程序值/给定里"})
+    return rows
+

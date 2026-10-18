@@ -23,9 +23,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 #       `update.repair_interrupted_apply()` 的 docstring）。
 #    ⚠️ 常驻成本 = 一次 `import update`（纯 stdlib，见它文件头）+ 一次 `exists()`；
 #       没有 journal（几乎每次启动）连 git 都不碰。
-import update as _boot_update                                      # noqa: E402
-if _boot_update.apply_journal_path().exists():
-    _boot_update.repair_interrupted_apply(say=lambda m: print(f"🧰 {m}", flush=True))
+try:                                                              # 修不了也照常开课
+    import update as _boot_update                                  # noqa: E402
+    if _boot_update.apply_journal_path().exists():
+        _boot_update.repair_interrupted_apply(say=lambda m: print(f"🧰 {m}", flush=True))
+except Exception as _e:                                           # noqa: BLE001
+    print(f"⚠ 上次更新的收尾没修成（{type(_e).__name__}）—— 照常启动", flush=True)
 from capture import load_source, SR, SilenceWatch
 from vad import Segmenter
 import draft_policy

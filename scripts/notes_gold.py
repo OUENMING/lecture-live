@@ -122,6 +122,64 @@ def c5_term_gloss(d: dict) -> bool:
     return out == d["text"]
 
 
+# ---- F15 新增判据（作者 round 3 的 A–H）-----------------------------------
+def a8_scrub_keeps_factual(d: dict) -> bool:
+    """**事实句不许被猜测句判据删掉**（True = 一句都没删）。"""
+    _out, removed, _w = ng.scrub(d["review"])
+    return not removed
+
+
+def a9_scrub_cuts_self_talk(d: dict) -> bool:
+    """**真自言自语要删掉**（True = 删了）。"""
+    _out, removed, _w = ng.scrub(d["review"])
+    return bool(removed)
+
+
+def a10_solution_floor(d: dict) -> bool:
+    """答案只剩一句结论 → 保留原文（True = 答案没被切短）。"""
+    out, _removed, _w = ng.scrub(d["review"])
+    a = (out.get("qa") or [{}])[0].get("a") or ""
+    return a == (d["review"].get("qa") or [{}])[0].get("a")
+
+
+def c6_missing_term_gate(d: dict) -> bool:
+    """缺项判据**没**报（True = 不报；用于"没有模型式/不是乘积项"的 must-pass）。"""
+    return not nc.missing_term_conflicts(d["review"])
+
+
+def d3_symbol_sign(d: dict) -> bool:
+    """同节同一个左端、代入本节定义后对不上（F15-E）。"""
+    return bool(nc.symbol_sign_conflicts(d["review"]))
+
+
+def d4_sign_flip(d: dict) -> bool:
+    """跨节同一个符号一会减一会加（F15-F）。"""
+    return bool(nc.sign_flip_conflicts(d["review"]))
+
+
+def d5_dangling_pointer(d: dict) -> bool:
+    """指着本节没有的图表的句子被删掉了（F15-G）。"""
+    _out, extra, _w = ng.drop_dangling_pointers(d["review"])
+    return bool(extra and int(extra[0].get("dropped") or 0))
+
+
+def d6_empty_ledger(d: dict) -> bool:
+    """没有修正值的账本行被丢掉了（F15-D）。"""
+    _out, extra, _w = ng.clean_ledger(d["review"])
+    return bool(extra and int(extra[0].get("dropped") or 0))
+
+
+def d7_ledger_pointer(d: dict) -> bool:
+    """账本/复习安排里的「第 N 节」指路被收窄了（F15-H）。"""
+    _out, extra, _w = ng.clean_ledger(d["review"])
+    return bool(extra and int(extra[0].get("repaired") or 0))
+
+
+def d8_dup_gloss(d: dict) -> bool:
+    """同一个括注 12 字内叠了两次 → 被收成一个（F15 §3）。"""
+    return ng.collapse_dup_gloss(d["text"]) != d["text"]
+
+
 CHECKS = {
     "a2_cross_course_term": a2_cross_course_term,
     "a3_quote_label": a3_quote_label,
@@ -138,6 +196,16 @@ CHECKS = {
     "c3_scrub_connective": c3_scrub_connective,
     "c4_component_retime": c4_component_retime,
     "c5_term_gloss": c5_term_gloss,
+    "a8_scrub_keeps_factual": a8_scrub_keeps_factual,
+    "a9_scrub_cuts_self_talk": a9_scrub_cuts_self_talk,
+    "a10_solution_floor": a10_solution_floor,
+    "c6_missing_term_gate": c6_missing_term_gate,
+    "d3_symbol_sign": d3_symbol_sign,
+    "d4_sign_flip": d4_sign_flip,
+    "d5_dangling_pointer": d5_dangling_pointer,
+    "d6_empty_ledger": d6_empty_ledger,
+    "d7_ledger_pointer": d7_ledger_pointer,
+    "d8_dup_gloss": d8_dup_gloss,
 }
 
 

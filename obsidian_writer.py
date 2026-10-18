@@ -1389,6 +1389,12 @@ class ObsidianWriter:
                           #    在第 21 节）与 ASR 拼接噪声（「输出是 1 或常数 9」/「不要求 S1」）。
                           #    放在速览之前：速览照最终正文写。
                           (lambda r: note_guards.fix_section_refs(r), "悬空节指路"),
+                           # ⭐ F15-D/H：账本收尾 —— 没有修正值的行（页尾渲染成「「原话」→
+                           #    （依据：…）」的空箭头）丢掉；`where` 与复习安排里的「第 N 节」
+                           #    指路收窄成时间戳。
+                           (lambda r: note_guards.clean_ledger(r), "台账收尾"),
+                           # ⭐ F15-G：指路句指着**本节没有的图表**（组件被挪走/丢掉之后）→ 删句。
+                           (lambda r: note_guards.drop_dangling_pointers(r), "悬空图表指路"),
                           (lambda r: note_guards.drop_asr_orphans(
                               r, entries=entries,
                               known=lambda t: (self._term_verified(t)

@@ -2360,7 +2360,8 @@ def announce_terms(text: str, terms, seen: set) -> str:
         #    `方差分析模型（ANOVA）` —— 紧跟一个字符的判据看不见它，再插一次就成了
         #    `方差分析（ANOVA）模型（ANOVA）`（作者实测）。窗口内已有同一个英文括注
         #    就算"已经括注过"，不再叠第二个。
-        m2 = re.match(r"^[^（(]{0,6}[（(]([^）)]{1,60})[）)]", out[i + len(zh):])
+        # ⭐ F15 §3：窗口 6 → **12**（作者手读：括注落在更远几个字之外时又插了一个）。
+        m2 = re.match(r"^[^（(]{0,12}[（(]([^）)]{1,60})[）)]", out[i + len(zh):])
         if m2 and _same_en(m2.group(1), en):
             seen.add((zh, en))
             continue
@@ -2455,15 +2456,20 @@ def announce_terms_in_review(review: dict, *, canon=None) -> dict:
     def _done() -> bool:
         return len(seen) == len(terms)
 
+    def _tidy(text: str) -> str:
+        """F15 §3：括注不叠 —— 同一个括注 12 字内出现两次只留前一个（两种括号都认）。"""
+        import note_guards
+        return note_guards.collapse_dup_gloss(text)
+
     # ① 页首速览（html 与 md 都渲染它）
     for i, v in enumerate(list(out.get("overview_long") or [])):
         if not isinstance(v, str) or not v:
             continue
-        new = announce_terms(v, terms, seen)
+        new = _tidy(announce_terms(v, terms, seen))
         if new != v:
             out["overview_long"][i] = new
         if _done():
-            return out
+            return _tidy_all(out)
     # ② 其余正文类字段（按 dict 顺序；小节/自测……）
     for path, v in list(_walk_strings(out)):
         if not path or path[0] in ("cover", "checks", "corrections", "overview_long"):
@@ -2472,7 +2478,7 @@ def announce_terms_in_review(review: dict, *, canon=None) -> dict:
             continue
         if not isinstance(v, str) or not v:
             continue
-        new = announce_terms(v, terms, seen)
+        new = _tidy(announce_terms(v, terms, seen))
         if new != v:
             obj = out
             for k in path[:-1]:
@@ -2480,7 +2486,24 @@ def announce_terms_in_review(review: dict, *, canon=None) -> dict:
             obj[path[-1]] = new
         if _done():
             break
-    return out
+    return _tidy_all(out)
+
+
+def _tidy_all(review: dict) -> dict:
+    """全部正文类字段过一遍括注去重（提前 `_done()` 的那条路也要干净）。**纯函数。**"""
+    import note_guards
+    for path, v in list(_walk_strings(review)):
+        if not path or path[0] in ("cover", "checks", "corrections"):
+            continue
+        if _field_name(path) not in _TERM_FIELDS or not isinstance(v, str) or not v:
+            continue
+        new = note_guards.collapse_dup_gloss(v)
+        if new != v:
+            obj = review
+            for k in path[:-1]:
+                obj = obj[k]
+            obj[path[-1]] = new
+    return review
 
 
 # ---------------------------------------------------------------- 复习排程

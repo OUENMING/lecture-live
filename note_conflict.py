@@ -481,6 +481,13 @@ def missing_term_conflicts(review: dict) -> list:
             continue
         standalone = {t for grp in terms if len(grp) == 1 for t in grp}
         in_product = {t for grp in terms if len(grp) > 1 for t in grp}
+        # ⚠️ F15-B：**先确认本节真的摆着一条回归模型**。§15 的代数行是
+        #    `t=\hat\beta/SE(\hat\beta)`、`p=P(|T|>|t|)` —— 一条 t 检验式子，
+        #    根本没摆模型；旧判据却在它上面报「schooling 本节的模型式里没有这一项」，
+        #    而 schooling 压根没出现在那行里（假阳性 + 句子还缺字）。
+        #    门槛：模型式里要有 **≥2 个回归量**（各占一个加法项），才谈得上"漏了某一项"。
+        if len(standalone) < 2:
+            continue
         text = _section_text(s)
         named: dict = {}
         for m in _NAMED_COEF.finditer(text):
@@ -488,11 +495,258 @@ def missing_term_conflicts(review: dict) -> list:
         for name, phrase in named.items():
             if name in standalone or _COEF_LIKE.match(name):
                 continue
-            why = ("只出现在乘积项里（没有单独的主效应项）" if name in in_product
-                   else "本节的模型式里没有这一项")
+            # ⚠️ 只有"**只在乘积里**"这一种才报（F15-B 后半）：X 在模型式里
+            #    **完全没出现**时不许报 —— 那是"这一节没讲回归模型"，不是"漏了主效应"。
+            if name not in in_product:
+                continue
             out.append({"kind": "missing-term", "sections": [i], "section": i,
-                        "term": name, "why": why, "texts": [phrase]})
+                        "term": name, "why": "只出现在乘积项里（没有单独的主效应项）",
+                        "texts": [phrase]})
     return out
+
+
+# ---- E 一节之内：同一个左端的两个等式，代入本节的定义后数值对不上（差个负号）----
+#: Unicode 数学符号 → ASCII（`ast` 只认 ASCII 标识符）。
+_UNI_MATH = (("ŷ", "yhat"), ("β", "beta"), ("γ", "gamma"), ("θ", "theta"),
+             ("δ", "delta"), ("σ", "sigma"), ("α", "alpha"), ("λ", "lambda"),
+             ("μ", "mu"), ("ε", "epsilon"), ("φ", "phi"), ("ρ", "rho"),
+             ("τ", "tau"), ("²", "**2"), ("³", "**3"), ("⁴", "**4"),
+             ("−", "-"), ("×", "*"), ("·", "*"), ("⋅", "*"), ("÷", "/"))
+#: 左端是**一个记号**的等式（`g_j=…` / `A=…`）—— 这才是"定义"。
+_DEF_LHS = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def _eq_parts(seg: str) -> list:
+    """`a=b=c` → `[a,b,c]`（去掉 `$`、空段；**保留内部空格** —— 空格是隐式乘法的证据）。"""
+    seg = re.sub(r"\$", "", str(seg or "")).strip()
+    return [x.strip() for x in re.split(r"[=＝]", seg) if x.strip()]
+
+
+def _key(s: str) -> str:
+    """式子左端的比较键（去掉所有空白）。**纯函数。**"""
+    return re.sub(r"\s+", "", str(s or ""))
+
+
+def _to_py(expr: str) -> str:
+    """式子 → 可 `ast` 解析的 Python（Unicode/LaTeX 记号 + 隐式乘法）。**纯函数。**"""
+    import note_math
+    s = str(expr or "")
+    s = re.sub(r"\\hat\s*\{([^{}]+)\}", r"\1hat", s)        # \hat{y} → yhat
+    s = re.sub(r"\\hat\s*([A-Za-z])", r"\1hat", s)
+    s = re.sub(r"\\(?:text|mathrm|mathbf)\s*\{([^{}]*)\}", r"\1", s)
+    for k, v in _UNI_MATH:
+        s = s.replace(k, v)
+    s = re.sub(r"_{([^{}]*)}", r"_\1", s)                   # 下标花括号
+    # ⚠️ 空格是**隐式乘法**的唯一证据：`g_j b_h` → `g_j*b_h`。
+    #    必须在 `_clean_expr` 抹掉空格**之前**做 —— 否则会粘成 `g_jb_h`（一个不存在的名字）。
+    s = re.sub(r"(?<=[A-Za-z0-9_)\]])\s+(?=[A-Za-z(\d])", "*", s)
+    s = note_math._clean_expr(s)
+    # 隐式乘法：`yhat_j(` / `b_h(` —— 函数名（sqrt/exp/…）除外
+    funcs = set(note_math._FUNCS)
+    s = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)\(",
+               lambda m: m.group(0) if m.group(1) in funcs else m.group(1) + "*(", s)
+    return s
+
+
+def _py_names(py: str) -> set:
+    """表达式里的符号名（函数名不算）。**纯函数。**"""
+    import ast
+    import note_math
+    try:
+        tree = ast.parse(py, mode="eval")
+    except SyntaxError:
+        return set()
+    return {n.id for n in ast.walk(tree)
+            if isinstance(n, ast.Name) and n.id not in note_math._FUNCS}
+
+
+def _free_names(py: str, defs: dict, depth: int = 0) -> set:
+    """**代入本节定义之后**的自由符号（定义里的记号再展开一层）。**纯函数。**"""
+    out: set = set()
+    for n in _py_names(py):
+        if n in defs and depth < 3:
+            out |= _free_names(defs[n], defs, depth + 1)
+        else:
+            out.add(n)
+    return out
+
+
+#: 探测点用的变量取值（都是**正**的小数）：正负号判据在这里最稳。
+_PROBES = (0.3, 0.7, 0.45, 0.8, 0.2)
+
+
+def _eval_py(py: str, ns: dict, seed: float):
+    """在 `ns` 下求值（`_eval` 是白名单求值，不执行任意代码）。失败返回 `None`。**纯函数。**"""
+    import ast
+    import note_math
+    try:
+        tree = ast.parse(py, mode="eval")
+        return note_math._eval(tree, "", seed, dict(ns))
+    except Exception:                                         # noqa: BLE001
+        return None
+
+
+def _resolve_ns(py: str, defs: dict, ns: dict, seed: float, depth: int = 0) -> dict:
+    """把表达式里引用的**本节定义**逐个算成数（递归，深度上限 3）。**纯函数。**"""
+    out = dict(ns)
+    if depth > 3:
+        return out
+    for n in _py_names(py):
+        if n in out or n not in defs:
+            continue
+        out = _resolve_ns(defs[n], defs, out, seed, depth + 1)
+        v = _eval_py(defs[n], out, seed)
+        if v is None:
+            return out
+        out[n] = v
+    return out
+
+
+def symbol_sign_conflicts(review: dict) -> list:
+    r"""**同节之内**：同一个左端写了两次，代入本节自己的定义后两边数值对不上。F15-E
+
+    ⚠️ 为什么必须做（作者手读 v3/ecs170 §53 抓到）：本节先写
+        `∂E/∂w_hj=(ŷ_j-y_j)ŷ_j(1-ŷ_j)b_h`，又定义 `g_j=(y_j-ŷ_j)ŷ_j(1-ŷ_j)`，
+        最后写 `∂E/∂w_hj=g_j b_h` —— **按它自己的定义，右边差一个负号**。
+        没有任何判据读"记号定义"，读者照着算会一直差号。
+    判据：① 收集本节里"左端是单个记号"的定义 `NAME=expr`（连等式取最右一段）；
+        ② 左端相同（去空白后逐字）的其它等式是**断言**，把定义代进去**数值**比对；
+        ③ 只认**结构**：两边自由符号集合必须一致、至少一个探测点能算 → 才下结论；
+        ④ 三个探测点全都对不上才报，两边成 −1 比例 → 说"差一个负号"，否则说"对不上"。
+    只**标注**，一个式子都不改。
+    """
+    out: list = []
+    for i, s in enumerate(review.get("sections") or [], 1):
+        if not isinstance(s, dict):
+            continue
+        eqs: list = []
+        # ⚠️ 只认 `$…$` 里的式子（`algebra` 与讲解里的公式都带 `$`）。
+        #    不认"裸中文行文里恰好有等号"的那种 —— 实测把 `\hat{y}_j` 的花括号当成了
+        #    等号两侧（提取出一堆 `\`=``}` 的垃圾），假阳性全是那么来的。
+        for m in re.finditer(r"\$[^$]+\$", _section_text(s)):
+            eqs.append(_eq_parts(m.group(0)))
+        defs: dict = {}
+        claims: dict = {}
+        for parts in (x for x in eqs if x):
+            if len(parts) < 2:
+                continue
+            lhs, rhs = parts[0], parts[-1]
+            k = _key(lhs)
+            if _DEF_LHS.match(k) and not re.search(r"[+\-*/^]", k):
+                defs.setdefault(k, _to_py(rhs))
+            claims.setdefault(k, []).append(rhs)
+        for lhs, rhss in claims.items():
+            uniq: list = []
+            for r in rhss:
+                if r not in uniq:
+                    uniq.append(r)
+            if len(uniq) < 2:
+                continue
+            base = _to_py(uniq[0])
+            base_names = _free_names(base, defs)
+            for other in uniq[1:]:
+                oth = _to_py(other)
+                if not base or not oth:
+                    continue
+                # 结构：**代入本节定义之后**的自由符号集合要一致（`g_j b_h` 与
+                # `(yhat-y)yhat(1-yhat)b` 的自由符号都是 `{yhat_j,y_j,b_h}`）。
+                if not base_names or _free_names(oth, defs) != base_names:
+                    continue                     # 结构不同 → 未核对，不猜
+                sign = same = 0
+                ok = 0
+                for seed in _PROBES:
+                    ns0 = {n: seed + 0.05 * k for k, n in enumerate(sorted(base_names))}
+                    va = _eval_py(base, _resolve_ns(base, defs, ns0, seed), seed)
+                    vb = _eval_py(oth, _resolve_ns(oth, defs, ns0, seed), seed)
+                    if va is None or vb is None or abs(va) < 1e-9 or abs(vb) < 1e-9:
+                        continue
+                    ok += 1
+                    if abs(va + vb) <= 1e-6 * max(1.0, abs(va)):
+                        sign += 1
+                    elif abs(va - vb) <= 1e-6 * max(1.0, abs(va)):
+                        same += 1
+                if ok >= 2 and sign >= ok:
+                    out.append({"kind": "symbol-sign", "sections": [i], "section": i,
+                                "term": lhs, "why": "差一个负号",
+                                "texts": [f"{lhs}={uniq[0]}", f"{lhs}={other}"]})
+                    break
+    return out
+
+
+# ---- F 跨节：同一个符号，一节当阈值**减**、另一节当偏置**加** -------------------
+#: 偏置/阈值类的符号（只认希腊字母）：`-\gamma` / `+\theta`。
+#: 偏置/阈值符号的出现形状。三道闸都是**实测**加上的（每一道都对应一个假阳性）：
+#:   ① 符号后面**必须就此打住**：`+\alpha\ln K` 里的 α 是乘在别人身上的系数
+#:      （柯布–道格拉斯），`+\alpha_1x_{i2}` 后面跟着变量同理 —— 只有
+#:      `+\gamma`、`-\gamma_h)`、`+\theta` 这种（后面是 `)`/`,`/行末）才是被加上的偏置项；
+#:   ② 加减号前面得是**式子里的东西**（`)`/`]`/`}`/字母/数字/`=`）—— 中文行文里的
+#:      "——θ"、"和 θ" 不算；
+#:   ③ `_{1-\alpha}` 这种**花括号下标里面**的符号不收（卡方分位数）。
+_SIGN_SYM = re.compile(r"(?<=[)\]}\w=])"
+                       r"(?P<s>[+＋\-−])\s*(?P<sym>\\?(?:gamma|theta|beta|alpha|delta|"
+                       r"lambda|sigma|epsilon|phi|rho|tau)"
+                       r"|[\u03b1-\u03c9])(?P<sub>_(?:\{[A-Za-z0-9]{1,3}\}|[A-Za-z0-9]))?"
+                       r"(?![A-Za-z\\}\d])")
+#: 数学片段（只在这些里面看加减号，免得把中文行文的破折号当符号）。
+_MATH_SPAN = re.compile(r"\$[^$]+\$")
+
+
+def sign_flip_conflicts(review: dict) -> list:
+    r"""**跨节**：同一个符号，前面当阈值**减**、后面当偏置**加**。F15-F
+
+    ⚠️ 实测（v3/ecs170）：§37/§38 写 `h_h=f(\sum v_{ih}x_i-\gamma_h)`；§45 写
+        `h=f(xV+\gamma)`、`\hat y=hW+\theta` —— 同一门课里 γ/θ 一会儿减一会儿加。
+        读者按 §37 记，到 §45 就配错号。
+    判据：只认**希腊字母**（`\gamma`/`γ` 这类偏置/阈值符号）：先出现的写法定"约定"，
+    后面某一节出现**反号的同符号**且那一节自己没有混用 → 在后一节标 ⚠。
+    ⚠️ 合法的不同符号（`\theta` 与 `b`，且文中写明 `b=-\theta`）**不许报** —— 不同符号。
+    """
+    per: dict = {}
+    for i, s in enumerate(review.get("sections") or [], 1):
+        if not isinstance(s, dict):
+            continue
+        text = str(s.get("algebra") or "") + "\n" + "\n".join(
+            m.group(0) for m in _MATH_SPAN.finditer(_section_text(s)))
+        for m in _SIGN_SYM.finditer(text):
+            sym = _norm_symbol(m.group("sym"))
+            per.setdefault((i, sym), set()).add(-1 if m.group("s") in "-−" else 1)
+    conv: dict = {}
+    for (i, sym), signs in sorted(per.items()):
+        if len(signs) == 1 and sym not in conv:
+            conv[sym] = (i, next(iter(signs)))
+    out: list = []
+    for (i, sym), signs in sorted(per.items()):
+        if sym not in conv or i <= conv[sym][0] or len(signs) != 1:
+            continue
+        if next(iter(signs)) == conv[sym][1]:
+            continue
+        j = conv[sym][0]
+        how = "减去" if conv[sym][1] < 0 else "加上"
+        out.append({"kind": "sign-flip", "sections": [j, i], "section": i,
+                    "sym": sym, "texts": [sym],
+                    "why": f"前面（第 {j} 节）把 {_pretty_sym(sym)} 当阈值{how}，"
+                           f"这里写成{'加上' if how == '减去' else '减去'}"
+                           f"（偏置写法 b=−θ 是另一回事）"})
+    return out
+
+
+def _norm_symbol(sym: str) -> str:
+    """`\\gamma` / `γ` → 同一个规范名。**纯函数。**"""
+    import unicodedata
+    s = str(sym or "").lstrip("\\")
+    s = unicodedata.normalize("NFKC", s).lower()
+    for g, name in (("γ", "gamma"), ("θ", "theta"), ("β", "beta"), ("α", "alpha"),
+                    ("δ", "delta"), ("λ", "lambda"), ("σ", "sigma"),
+                    ("ε", "epsilon"), ("φ", "phi"), ("ρ", "rho"), ("τ", "tau")):
+        s = s.replace(g, name)
+    return s
+
+
+def _pretty_sym(sym: str) -> str:
+    """规范名 → 给人看的样子（`gamma` → `γ`）。**纯函数。**"""
+    return {"gamma": "γ", "theta": "θ", "beta": "β", "alpha": "α", "delta": "δ",
+            "lambda": "λ", "sigma": "σ", "epsilon": "ε", "phi": "φ",
+            "rho": "ρ", "tau": "τ"}.get(str(sym), str(sym))
 
 
 def conflicts(review: dict, *, entries: list | None = None) -> list:
@@ -500,7 +754,9 @@ def conflicts(review: dict, *, entries: list | None = None) -> list:
     out = (point_value_conflicts(review)
            + group_number_conflicts(review, entries=entries)
            + dummy_slope_conflicts(review)
-           + missing_term_conflicts(review))
+           + missing_term_conflicts(review)
+           + symbol_sign_conflicts(review)
+           + sign_flip_conflicts(review))
     if entries:
         out += source_sum_group_conflicts(entries)
     return out

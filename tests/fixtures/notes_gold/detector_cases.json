@@ -1479,5 +1479,347 @@
     ]
    ]
   }
+ },
+ {
+  "id": "D3-同一节差一个负号",
+  "check": "d3_symbol_sign",
+  "must": "flag",
+  "why": "v3/ecs170 §53 原话：先写 ∂E/∂w_hj=(ŷ-y)ŷ(1-ŷ)b_h，又定义 g_j=(y-ŷ)ŷ(1-ŷ)，最后写 ∂E/∂w_hj=g_j b_h（差一个负号）",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "17:50",
+      "prose": [
+       "对 $w_{hj}$ 求偏导，三块相乘得 $\\partial E/\\partial w_{hj}=(\\hat y_j-y_j)\\hat y_j(1-\\hat y_j)b_h$。",
+       "把前三块单独取个名字：$g_j=-(\\hat y_j-y_j)\\hat y_j(1-\\hat y_j)=(y_j-\\hat y_j)\\hat y_j(1-\\hat y_j)$。于是 $\\partial E/\\partial w_{hj}=g_j b_h$。"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "D3-代入定义两边一致",
+  "check": "d3_symbol_sign",
+  "must": "pass",
+  "why": "同一定义（正号版），第二个等式代进去数值一致 → 不许报",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "17:50",
+      "prose": [
+       "$g_j=\\hat y_j(1-\\hat y_j)$。",
+       "$\\partial E/\\partial w_{hj}=\\hat y_j(1-\\hat y_j)b_h$。",
+       "$\\partial E/\\partial w_{hj}=g_j b_h$。"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "D4-gamma一会减一会加",
+  "check": "d4_sign_flip",
+  "must": "flag",
+  "why": "v3/ecs170：§37 h_h=f(Σv x−γ_h) vs §45 h=f(xV+γ)",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "A",
+      "ts": "17:30",
+      "prose": [
+       "讲解。"
+      ],
+      "algebra": "$h_h=f(\\sum_i v_{ih}x_i-\\gamma_h)$"
+     },
+     {
+      "heading": "B",
+      "ts": "17:41",
+      "prose": [
+       "讲解。"
+      ],
+      "algebra": "$h=f(xV+\\gamma)$"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "D4-θ与b是不同符号",
+  "check": "d4_sign_flip",
+  "must": "pass",
+  "why": "b 与 θ 是两个符号（b=−θ 写明）→ 不许报",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "A",
+      "ts": "16:53",
+      "prose": [
+       "讲解。"
+      ],
+      "algebra": "$\\sum_i w_i x_i+b>0,\\ b=-\\theta$"
+     },
+     {
+      "heading": "B",
+      "ts": "17:41",
+      "prose": [
+       "讲解。"
+      ],
+      "algebra": "$h=f(xV+b)$，$\\hat y=hW+b$"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "D5-悬空图表指路句",
+  "check": "d5_dangling_pointer",
+  "must": "flag",
+  "why": "v3/ecs170 §22：『三者差别看下表即可』但本节没有表",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "17:50",
+      "prose": [
+       "Leaky ReLU 只改 ReLU 的负半轴。",
+       "三者差别看下表即可，不用背长段。"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "D5-有表就不是悬空",
+  "check": "d5_dangling_pointer",
+  "must": "pass",
+  "why": "本节确实有对照表 → 指路句是对的",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "17:08",
+      "prose": [
+       "结论见下表。"
+      ],
+      "compare": {
+       "title": "t",
+       "cols": [
+        "a",
+        "b"
+       ],
+       "rows": [
+        [
+         "1",
+         "2"
+        ]
+       ]
+      }
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "D6-空修正行",
+  "check": "d6_empty_ledger",
+  "must": "flag",
+  "why": "corrections.fixed 为空 → 页尾会渲染成『「原话」→ （依据：…）』的空箭头",
+  "input": {
+   "review": {
+    "corrections": [
+     {
+      "where": "10:03:29",
+      "spoken": "原话",
+      "fixed": "",
+      "basis": "b"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "D6-有修正值不动",
+  "check": "d6_empty_ledger",
+  "must": "pass",
+  "why": "有修正值的行不许丢",
+  "input": {
+   "review": {
+    "corrections": [
+     {
+      "where": "10:03:29",
+      "spoken": "原话",
+      "fixed": "正确值"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "D7-账本第N节",
+  "check": "d7_ledger_pointer",
+  "must": "flag",
+  "why": "『第 3 节（🎙 17:02）』指路收窄成时间戳",
+  "input": {
+   "review": {
+    "corrections": [
+     {
+      "where": "第 3 节（🎙 17:02）",
+      "spoken": "q",
+      "fixed": "y"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "D7-没有节号就一个字不动",
+  "check": "d7_ledger_pointer",
+  "must": "pass",
+  "why": "复习安排里没有「第 N 节」→ 不许动",
+  "input": {
+   "review": {
+    "review_plan": [
+     "读 §3"
+    ]
+   }
+  }
+ },
+ {
+  "id": "D8-括注叠了两次",
+  "check": "d8_dup_gloss",
+  "must": "flag",
+  "why": "『方差分析（ANOVA）模型（ANOVA）』—— 模型自己叠了一个括注",
+  "input": {
+   "text": "方差分析（ANOVA）模型（ANOVA）与 t 检验。"
+  }
+ },
+ {
+  "id": "D8-不同括注不许收",
+  "check": "d8_dup_gloss",
+  "must": "pass",
+  "why": "两个不同的英文括注不是重复",
+  "input": {
+   "text": "交互项（interaction term）与虚拟变量（dummy）。"
+  }
+ },
+ {
+  "id": "A8-事实句不许删",
+  "check": "a8_scrub_keeps_factual",
+  "must": "flag",
+  "why": "作者 A：`估计量不是数据的固定属性…` 是事实句（`估计` 是名词），不是猜测",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "17:50",
+      "prose": [
+       "估计量不是数据的固定属性：删掉几个观测、换一批样本，β̂ 就会动。"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "A8-答案里的可能不是猜测",
+  "check": "a8_scrub_keeps_factual",
+  "must": "flag",
+  "why": "作者 A：`p 变小可能只是样本更大` 是事实说明",
+  "input": {
+   "review": {
+    "qa": [
+     {
+      "q": "p 值小就说明效应大吗？",
+      "a": "不能。p 变小可能只是样本更大、估计更精确；效应大小看系数本身，不看 p。"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "A9-真自言自语要删",
+  "check": "a9_scrub_cuts_self_talk",
+  "must": "flag",
+  "why": "作者点名的三句之一（第一人称 + 猜自己听错）",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "17:50",
+      "prose": [
+       "如果函数是这样，那么求导并令导数为零：无解，说明我可能听错了公式。"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "A10-答案只剩结论就保留原文",
+  "check": "a10_solution_floor",
+  "must": "flag",
+  "why": "作者 A：删到只剩『不能。』（<8 字）→ 保留原文",
+  "input": {
+   "review": {
+    "qa": [
+     {
+      "q": "能这么说吗？",
+      "a": "不能。我可能听错了公式。"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "B2-没有模型式不报缺项",
+  "check": "c6_missing_term_gate",
+  "must": "flag",
+  "why": "作者 B：§15 的代数行是 t 检验式、没有回归模型 → `schooling 的系数` 不许报缺项",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "17:50",
+      "prose": [
+       "schooling 的系数是 0.5。"
+      ],
+      "algebra": "$t=\\hat\\beta/SE(\\hat\\beta)$"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "B2-只有乘积项才报缺项",
+  "check": "c6_missing_term_gate",
+  "must": "pass",
+  "why": "真的只有乘积项（male 藏在 male·experience 里）→ 该报",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "17:50",
+      "prose": [
+       "male 的系数是 −2。"
+      ],
+      "algebra": "$y=\\beta_0+\\beta_1 education+\\beta_2 experience+\\beta_3(male\\cdot experience)+u$"
+     }
+    ]
+   }
+  }
  }
 ]

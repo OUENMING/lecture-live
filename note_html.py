@@ -1296,6 +1296,11 @@ def note_page(d) -> str:
                           + (f" —— 重算：<b>{fixed}</b>" if fixed else "")
                           + (f"（{inline(c.get('basis'))}）" if c.get("basis") else "") + "</div>")
                 continue
+            # ⚠️ F15-D：没有修正值的行**不许渲染**成「「原话」→ （依据：…）」—— 那个空箭头
+            #    读者会当成"修正成了空"。数据层已由 `note_guards.clean_ledger` 丢掉，
+            #    这里是渲染层的兜底（老笔记 / 旁路进来的 `corrections_extra` 也走这里）。
+            if not fixed:
+                continue
             extra += (f"<div>· <b>{inline(c.get('where')) or '—'}</b>："
                       f"「{inline(c.get('spoken'))}」→ <b>{fixed}</b>"
                       + (f"（依据：{inline(c.get('basis'))}）" if c.get("basis") else "")

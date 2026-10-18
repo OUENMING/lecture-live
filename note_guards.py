@@ -37,11 +37,15 @@ import unicodedata
 #: 第一人称 + 猜测：单独一个「我们来看」不算违规（数学写作习惯），猜过程才算。
 _HEDGE = r"可能|也许|大概|似乎|恐怕|估计|不确定|猜|怀疑|说不定|应该是|或许"
 _GUESS = r"听错|漏掉|漏了|记错|看错|说错|写错|错|口误|不是这个|不同|是别的|反推|凑"
+#: 「猜教授的口误/简化」那一档只认**意图/口误词**（F15-A 收紧）。
+#: ⚠️ 旧版这里是 `(?:是|为|想|为了|故意|{_GUESS})` —— 一个「是」就够了，于是
+#:    「可能只是把噪声也拟合进去了」「估计量**不是**数据的固定属性」
+#:    「换数据估计量为何会变？」全被当猜测句删掉（frozen raw 实测：26 处删除 **0 处**是真
+#:    自言自语，精确率 0%）。猜教授的意图长这样：「可能是简化处理」「大概是听错了」。
+_INTENT = r"简化|口误|听错|漏了|漏掉|记错|看错|说错|写错|反推|凑数|故意|搞混|糊弄|笔误"
 _SPEC = re.compile(rf"(?:我|我们)[^。；;\n]{{0,20}}(?:{_HEDGE}|{_GUESS})"
-                   # 「可能是简化处理」这类"猜教授的意图"：可能/也许 后面 8 个字内出现
-                   # 「是/为/想/为了/故意」就删（实测作者点名的那句就长这样）。
-                   rf"|(?:{_HEDGE})[^。；;\n]{{0,8}}(?:是|为|想|为了|故意|{_GUESS})"
-                   rf"|（\s*(?:假设|假定)"
+                   # 「猜教授的意图/口误」：hedge 在前、意图词在后、8 字内（顺序有意义）。
+                   rf"|(?:{_HEDGE})[^。；;\n]{{0,8}}(?:{_INTENT})"
                    rf"|（\s*(?:{_HEDGE})\s*）")
 
 #: ⭐ 第六轮（作者 2026-10-17）：**自言自语** —— 模型的思考过程漏进了答案。
@@ -51,11 +55,16 @@ _SPEC = re.compile(rf"(?:我|我们)[^。；;\n]{{0,20}}(?:{_HEDGE}|{_GUESS})"
 #: 那些句子不是讲解，是它在跟自己讨论；留在答案里读者会以为那是结论。
 #: ⚠️ 判据刻意窄：只认**元话语**（检查/重新想/这不对/等等），不认"？"本身 ——
 #:    正文里问句是正常的（「为什么会这样？」），宽一层就开始删真内容。
-_SELF_TALK = re.compile(r"需要(?:仔细|重新)?(?:检查|核对)|重新检查|重新想|重新算|"
-                        r"让我(?:想|想想|算|检查)|我想想|先看看|"
-                        r"检查[:：](?=\s*(?:若|如果|给定|假设))|"
-                        r"这不对[，,]?因为|(?<=[。；;？?])这不对|"
-                        r"(?:等等|嗯)[，,]")
+#: ⚠️ F15-A：动词类的元话语（重新算/重新检查/先看看…）必须**在小句开头**且**没有否定前缀**
+#:    —— frozen raw 实测：「sigmoid 的导数只要…**不用重新算** $e^{-z}$」被当成自言自语删掉。
+#:    （`这不对`/`检查：` 这两档天生就是独白，照旧。）
+_START = r"(?:^|[。；;？?！!\n])\s*"
+_NEG = r"(?<![不没无需别])\s*"
+_SELF_TALK = re.compile(rf"(?:{_START})(?:需要(?:仔细|重新)?(?:检查|核对)|重新检查|重新想|重新算|"
+                        rf"让我(?:想|想想|算|检查)|我想想|先看看)"
+                        rf"|{_START}检查[:：](?=\s*(?:若|如果|给定|假设))"
+                        rf"|这不对[，,]?因为|(?<=[。；;？?])这不对"
+                        rf"|(?:{_START})(?:等等|嗯)[，,]")
 
 #: 自问自答的**第二档**：以问号收尾的句子 + 解答里冒出来的「检查：」。
 #: ⚠️ 只在**解答字段**里生效（`_solution_like`）—— 讲解与自测**题面**里的问句是正常的
@@ -171,6 +180,150 @@ _LEAD_CONNECTIVE = re.compile(r"^\s*(?:接着|然后|随后|于是|因此|所以
                               r"不过|但|而且|并且|同时|其次|最后|第三|第二|第四)")
 
 
+#: 「删完之后段落不许以这些词开头」—— 连接词 + 指代上文的代词（F15 §2 ②）。
+#: ⚠️ 作者补的：`这种`/`这个`/`这`/`该`/`它`（「**这种**"动"就是抽样波动…」）。
+_SAFE_LEAD = re.compile(r"^\s*(?:接着|然后|随后|于是|因此|所以|那么|这样|同样|另外|反之|"
+                        r"不过|但|同时|此外|而且|并且|又|也|还|再|其中|其次|最后|"
+                        r"这种|这个|这些|这里|这一|那|那种|那个|该|它|它们|"
+                        # ⚠️ 光秃秃的「这」只在**回指**时才拦：`这是本段唯一…`（自指、正常行文）
+                        #    不许拦 —— 实测误伤了时间戳那条判据的用例（`这是本段唯一有实际
+                        #    安排信息的一句话；12:50:28 的…`）。
+                        r"这(?!(?:是|时|条|段|句|位|次|么)))")
+#: 叠标点（同一种或混着来都算）：`，，` `，。` `。；`…
+_SAFE_DOUBLE_PUNCT = re.compile(r"[，,。；;、]\s*[，,。；;、]")
+#: 空括号：`（）` / `()` / `（ ）`
+_SAFE_EMPTY_PAREN = re.compile(r"（\s*）|\(\s*\)")
+#: 删句之后"只剩一句结论"的字段（答案/步骤）至少要留这么多字，否则保留原文（F15-A）。
+SAFE_SOLUTION_MIN = 8
+
+_IMMUNE_TOK = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,20}")
+
+
+def _sentences_with_spans(text: str) -> list:
+    """每句 `(句子, 起, 止)`（止含句末标点）。**纯函数。**"""
+    s = str(text or "")
+    out, start = [], 0
+    for m in re.finditer(r"[。！？!?]\s*|\n+", s):
+        seg = s[start:m.end()]
+        if seg.strip():
+            out.append((seg, start, m.end()))
+        start = m.end()
+    if start < len(s) and s[start:].strip():
+        out.append((s[start:], start, len(s)))
+    return out
+
+
+def immune_tokens(*texts) -> set:
+    """在 `$…$` / `$$…$$` 里出现过的记号 —— 这些词**不许**当噪声删（F15 §2 ④）。**纯函数。**
+
+    ⚠️ 公式里写 `VIF_j`、正文里写 `VIF` 是**同一个记号**（下标在正文里常被省掉）——
+       所以除了全名，也收它的基名（`_` 前面那截）。
+    """
+    out: set = set()
+    for t in texts:
+        for seg in re.findall(r"\$\$[^$]*\$\$|\$[^$]*\$", str(t or "")):
+            for tok in _IMMUNE_TOK.findall(seg):
+                out.add(tok.lower())
+                base = tok.split("_")[0].lower()
+                if len(base) >= 2:
+                    out.add(base)
+    return out
+
+
+def immune_from_review(review: dict) -> set:
+    """全笔记（含公式卡/代码）里出现过的记号集合。**纯函数。**"""
+    parts: list = []
+    for path in paths_of(review or {}):
+        if not path or path[0] in _SKIP_TOP:
+            continue
+        v = _get(review, path)
+        if isinstance(v, str) and v:
+            parts.append(v)
+    return immune_tokens(*parts)
+
+
+def _bad_after(text: str) -> str:
+    """删完之后正文"坏了"吗（F15 §2 ②③）。返回原因（`""` = 没问题）。**纯函数。**"""
+    t = str(text or "")
+    if _SAFE_LEAD.match(t):
+        return "删后段首成了连接词/代词"
+    if t.count("$") % 2:
+        return "$ 不配对"
+    if _SAFE_EMPTY_PAREN.search(t):
+        return "留下空括号"
+    if _SAFE_DOUBLE_PUNCT.search(t):
+        return "叠标点"
+    if re.match(r"^\s*[，,。；;、！？!?]", t):
+        return "删后段首是标点"
+    return ""
+
+
+def _merge_spans(spans) -> list:
+    """把重叠/相邻的删除区间并成一个（**必须**：否则从后往前改字时下标会漂）。**纯函数。**"""
+    out: list = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def safe_delete(text: str, removals, *, immune=frozenset(), fix=None) -> tuple:
+    """正文里**删字**的唯一入口（F15 §2）。返回 `(新文本, 被打回的, 真删掉的)`。
+
+    `removals` = `[(起, 止), …]`（半开区间，同一字段的坐标系）。四条护栏，**每条都能
+    独立把一次删除打回**（打回 = 保留原文，并记下原因）：
+
+      ① **第一句不许删**（整句覆盖才算；句内的小改仍可，但要过 ②③④）。
+         ⚠️ 例外：整段**全删**（字段被清空，后面没有段落可"没头没脑"）不算删第一句
+         —— 宁缺那一条（`答案整段独白 → 整题不出`）就得靠这个例外。
+      ② 删后段首是连接词/指代词（接着/然后/因此/所以/其中/但/同时/此外/它/该/这/这种…）→ 打回；
+      ③ 删后 `$` 不配对 / 留下空括号 / 叠标点 / 段首标点 → 打回；
+      ④ 要删的字里含**别处公式/代码里出现过**的记号 → 打回（公式变量不是噪声）。
+
+    `fix` = 该守卫**自己**的收尾规整（如"删完把 `，。` 并成 `。`"）——检查 ②③ 时先
+    套上它：护栏要拦的是**成品**，不是中间态（否则 ASR 噪声那支的空档标点会把它自己
+    的删除打回）。
+    """
+    s = str(text or "")
+    spans = _merge_spans({(int(a), int(b)) for a, b in (removals or [])
+                          if 0 <= int(a) < int(b) <= len(s)})
+    if not spans:
+        return s, [], []
+    sent = _sentences_with_spans(s)
+    first = (sent[0][1], sent[0][2]) if sent else None
+    # 整段全删？（只按非空白字符算）
+    whole = True
+    for i, ch in enumerate(s):
+        if ch.isspace():
+            continue
+        if not any(a <= i < b for a, b in spans):
+            whole = False
+            break
+    cur, blocked, kept = s, [], []
+    for a, b in reversed(spans):            # 从后往前：前面的下标不会漂
+        if first and a <= first[0] and b >= first[1] and not whole:
+            blocked.append({"span": (a, b), "why": "第一句不许删", "text": s[a:b]})
+            continue
+        if immune:
+            toks = {t.lower() for t in _IMMUNE_TOK.findall(s[a:b])}
+            if toks & set(immune):
+                blocked.append({"span": (a, b), "why": "公式/代码里出现过这个记号",
+                                "text": s[a:b]})
+                continue
+        cand = s[:a] + s[b:]
+        why = _bad_after(fix(cand) if fix else cand)
+        if why:
+            blocked.append({"span": (a, b), "why": why, "text": s[a:b]})
+            continue
+        cur = cand
+        kept.append((a, b))
+    if fix and cur != s:
+        cur = fix(cur)
+    return cur, blocked, kept
+
+
 def _sentences(text: str) -> list:
     """粗切句（本仓库的笔记是短句 + 折叠块，够用；切不动的长句会整句保留）。"""
     return [x for x in re.split(r"(?<=[。！？!?])\s*|\n+", str(text or "")) if x.strip()]
@@ -199,43 +352,40 @@ def scrub(review: dict) -> tuple:
         if isinstance(q, dict):
             before[id(q)] = _one(q.get("a")) + "\x00" + _one(q.get("q"))
 
-    rescued = 0
+    immune = immune_from_review(review)
 
-    def clean(v: str, prose_like: bool, solution: bool) -> str:
-        nonlocal rescued
-        kept, dropped, frag = [], [], False
-        parts = _sentences(v)
+    held_back = 0
+
+    def clean(v: str, prose_like: bool, solution: bool, immune) -> str:
+        """删猜测句 → 新文本。**删除本身走 `safe_delete`**（F15 §2 的四条护栏）。"""
+        nonlocal held_back
+        sent = _sentences_with_spans(v)
         # ⚠️ 问句那一档要**成串**才动手：解答里单独一个反问是正常的写法
         #    （「为什么会这样？因为价格等于边际成本…」），而成串的问句（实测那一段有 6 句）
         #    是模型在跟自己讨论。一条规则两个方向都要站得住。
-        doubts = sum(1 for x in parts if _SELF_Q.search(x))
-        for s in parts:
-            if (_SPEC.search(s) or _SELF_TALK.search(s)
-                    or (solution and _SOLUTION_META.search(s))
-                    or (solution and doubts >= 2 and _SELF_Q.search(s))):
-                dropped.append(s.strip())
-                frag = frag or bool(_FRAGMENT.search(s))
-                continue
-            kept.append(s)
-        if not dropped:
+        doubts = sum(1 for x, _a, _b in sent if _SELF_Q.search(x))
+        drop, frag = [], False
+        for x, a, b in sent:
+            if (_SPEC.search(x) or _SELF_TALK.search(x)
+                    or (solution and _SOLUTION_META.search(x))
+                    or (solution and doubts >= 2 and _SELF_Q.search(x))):
+                drop.append((a, b))
+                frag = frag or bool(_FRAGMENT.search(x))
+        if not drop:
             return v
-        # ⭐ F14-2 #3：**删完不许让这一段以连接词开头**。连接词回指上文，第一句被删掉之后
-        #    从「接着…」起读，读者不知道在接什么 —— 宁可**把那一句留着**（作者：
-        #    prefer keeping the sentence），也不留一个没头没脑的段落。
-        for _ in range(3):
-            body = "".join(kept).strip()
-            if not dropped or not _LEAD_CONNECTIVE.match(body):
-                break
-            first = next((x for x in parts if x in dropped), None)
-            if first is None:
-                break
-            kept.insert(0, first)
-            dropped.remove(first)
-            rescued += 1
-        if not dropped:
+        body, blocked, _kept = safe_delete(v, drop, immune=immune)
+        held_back += len(blocked)
+        if blocked and not _kept:
+            return v                       # 全被打回 → 一个字不动
+        body = body.strip()
+        # ⭐ F15-A②：**答案/步骤里只剩一句结论**（"不能。"/"是。"）不许留着 —— 读者会以为
+        #    那就是全部。少到这个地步就把原文整段留着（宁可留一句猜测，也不给半句结论）。
+        #    ⚠️ 只在**还剩东西**时兜：整段都是独白（删空）照旧走"宁缺、整题不出"那条。
+        if solution and body and len(body) < SAFE_SOLUTION_MIN:
+            held_back += 1
             return v
-        removed.extend(dropped)
-        body = "".join(kept).strip()
+        # 只把**真删掉的**句子记进台账（被打回/被兜住的还在正文里，记进去就成了假数）。
+        removed.extend(v[a:b].strip() for a, b in sorted(_kept))
         if frag and prose_like and FIXED_LINE not in body:
             # ⚠️ 用空格接在末尾，不换行：`prose` 的每个元素就是**一段**（渲染层按段写），
             #    内嵌 `\n` 会破坏"每个字段是单行字符串"那条数据纪律。
@@ -248,7 +398,7 @@ def scrub(review: dict) -> tuple:
         v = _get(out, path)
         if not isinstance(v, str) or not v:
             continue
-        new = clean(v, _prose_like(path), _solution_like(path))
+        new = clean(v, _prose_like(path), _solution_like(path), immune)
         if new != v:
             _set(out, path, new)
 
@@ -302,9 +452,10 @@ def scrub(review: dict) -> tuple:
     if removed:
         warns.append(f"正文删掉 {len(removed)} 处猜测句/自言自语"
                      "（不许第一人称、不许猜过程、不许自己跟自己讨论）")
-    if rescued:
-        warns.append(f"{rescued} 处删句后会让段落以连接词开头 → 保留了原句"
-                     "（宁可留着，也不留没头没脑的段落）")
+    if held_back:
+        warns.append(f"{held_back} 处删除被安全闸打回并**保留了原句**"
+                     "（第一句 / 段首连接词代词 / $ 不配对 / 叠标点 / 公式里出现过的记号 / "
+                     "答案只剩一句结论）")
     if gone:
         warns.append(f"{gone} 道题的答案被清空 → 整题不出（宁缺）")
     # ⭐ F9c：宁缺丢掉的题块也要进守卫台账 —— 返回值里带小标记（长度=被删处数，
@@ -544,6 +695,10 @@ def _quote_how(row: dict) -> str:
 #: 允许被标注的字段（渲染进正文的那些；`sources`/`ts`/`title` 这类出处字段不碰）。
 _MARK_FIELDS = {"prose", "prereq", "conclusion", "algebra", "intuition", "pitfalls",
                 "prompt", "answer", "text", "why", "q", "a"}
+#: ⚠️ F15-E 实测：⚠ 落到 `algebra` 上 = 把括注缀进公式行（读者会把注释当成式子的一部分）。
+#:    矛盾标注只许落在**讲解类**字段上。
+_MARK_TEXT_FIELDS = ("prose", "pitfalls", "conclusion", "intuition", "prereq",
+                     "prereq_link")
 
 
 def _field_name(path: tuple) -> str:
@@ -998,6 +1153,7 @@ def drop_asr_orphans(review: dict, *, entries: list, known) -> tuple:
     返回 `(review, [{"dropped": n}], warns)`；删了什么逐条进 warn。
     """
     out = copy.deepcopy(review)
+    immune = immune_from_review(review)
     lines = [str(e.get("en") or e.get("asr") or "") for e in (entries or [])]
     tech = json.dumps([{k: s.get(k) for k in
                         ("algebra", "terms", "example", "variants", "faded", "program")}
@@ -1054,13 +1210,20 @@ def drop_asr_orphans(review: dict, *, entries: list, known) -> tuple:
                     continue
                 edits.append((a, b))
                 removed.append(f"「{tok}」（转录里只出现在拼错的噪声行里）")
-            for a, b in sorted(set(edits), reverse=True):
-                v = v[:a] + v[b:]
             if edits:
-                v = re.sub(r"\s+([，。；、！？])", r"\1", v)
-                v = re.sub(r"[，,。]\s*[，,。]", "。", v)
-                v = re.sub(r"^[，,、]\s*", "", v).strip()
-                _set(s, path, v)
+                # 收尾规整（§2 的 `fix`）：删掉"…不要求，S1。"里的那一小块会剩下
+                # 一个空档标点（`，。`）—— 先并掉，再让护栏看成品。
+                v2, blocked, kept_spans = safe_delete(
+                    v, sorted(set(edits)), immune=immune,
+                    fix=lambda t: re.sub(r"^[，,、]\s*", "",
+                                         re.sub(r"[，,。]\s*[，,。]", "。",
+                                                re.sub(r"\s+([，。；、！？])", r"\1", t))))
+                if not kept_spans:
+                    continue
+                v2 = re.sub(r"\s+([，。；、！？])", r"\1", v2)
+                v2 = re.sub(r"[，,。]\s*[，,。]", "。", v2)
+                v2 = re.sub(r"^[，,、]\s*", "", v2).strip()
+                _set(s, path, v2)
     warns = []
     if removed:
         warns.append(f"删掉 {len(removed)} 处只活在转录噪声里的字样："
@@ -1069,19 +1232,24 @@ def drop_asr_orphans(review: dict, *, entries: list, known) -> tuple:
 
 
 # ---- ⑧⑨ 跨节矛盾 ----------------------------------------------------------
-def _find_and_append(s: dict, needle: str, mark: str) -> bool:
+def _find_and_append(s: dict, needle: str, mark: str, *, fields=None) -> bool:
     """把 `mark` 缀到 `s` 里含 `needle` 的那个字段（找不到就缀到第一段 prose）。**就地。**
 
     ⚠️ 缀在**句末**（`。`/`；` 之后），不切在句子中间。
+    `fields` 可收窄可落笔的字段（默认 `_MARK_FIELDS`）—— 跨节矛盾这类**讲解**不该落到
+    自测题干（`q`）上（实测：转录前后不一致那条被缀进了「性别如何改变经验的斜率？」）。
     """
     needle = re.sub(r"\s+", "", str(needle or ""))[:14]
     cands: list = []
     for path in paths_of(s):
-        if _field_name(path) not in _MARK_FIELDS:
+        if _field_name(path) not in (fields or _MARK_FIELDS):
             continue
         v = _get(s, path)
         if isinstance(v, str) and v:
             cands.append((path, v))
+    order = list(fields or _MARK_FIELDS)
+    cands.sort(key=lambda pv: order.index(_field_name(pv[0]))
+               if _field_name(pv[0]) in order else 99)   # 讲解优先，别落到 `conclusion` 之后
     for path, v in cands:
         if needle and needle in re.sub(r"\s+", "", v):
             j = max([v.rfind(p) for p in "。；;"]) + 1
@@ -1165,6 +1333,189 @@ def retime_components(review: dict) -> tuple:
     return out, [{"repaired": len(moved), "dropped": len(gone)}], warns
 
 
+# ---------------------------------------------------------------- 渲染前的收尾小闸
+#: 括注（两种括号都认）：`（ANOVA）` / `(ANOVA)`。
+_GLOSS = re.compile(r"[（(]([^）)]{1,60})[）)]")
+#: 钟点/节号里引用的图表指路词。
+_PTR_WORDS = ("下表", "上图", "下图", "见表", "见图", "如表", "如图", "见下表",
+              "见下图", "见上图", "见下表", "看下表", "看下图")
+
+
+def collapse_dup_gloss(text: str, *, window: int = 12, immune=frozenset()) -> str:
+    """同一个括注在 `window` 字内出现两次 → 只留前一个。**删字走 `safe_delete`。**
+
+    ⚠️ F15 §3（作者手读 v3）：`方差分析（ANOVA）模型（ANOVA）` —— 模型自己叠了一个括注。
+       两种括号风格（`（）` 与 `()`）都要认。
+    """
+    s = str(text or "")
+    kept: list = []                                  # [(上一个括注的结尾, 归一后的内容)]
+    drop: list = []
+    for m in _GLOSS.finditer(s):
+        inner = " ".join(m.group(1).split()).lower()
+        if any(0 <= m.start() - e <= window and i == inner for e, i in kept):
+            drop.append((m.start(), m.end()))
+            continue
+        kept.append((m.end(), inner))
+    if not drop:
+        return s
+    # ⚠️ 删掉 `(OLS)` 会留下两个空格（`用  与`）—— 收尾把空档并掉（§2 的 `fix`）。
+    out, _b, kept_spans = safe_delete(s, drop, immune=immune,
+                                      fix=lambda t: re.sub(r"[ \t]{2,}", " ", t))
+    return out if kept_spans else s
+
+
+#: 复习安排/账本里指路的节号（`第 3 节` / `第二节` / `第 21 节`）。
+_SEC_PTR = re.compile(r"[（(]?\s*第\s*[0-9一二三四五六七八九十百]+\s*节\s*[）)]?")
+#: 整块括注**只装着**一句节指路（`（对照第二节）`）→ 连括号一起拿走。
+_SEC_PTR_WHOLE = re.compile(r"[（(][^）)]{0,10}第\s*[0-9一二三四五六七八九十百]+\s*节"
+                            r"[^）)]{0,10}[）)]")
+
+
+def clean_ledger(review: dict) -> tuple:
+    """账本两处收尾（F15-D/H）。**只删/只收窄，不改写。**
+
+    ① **空修正行**：`fixed` 为空的 `corrections` 行在页尾渲染成
+       「「原话」→ （依据：…）」—— 一个空箭头。丢掉（依据仍在 `basis` 里，不影响溯源）。
+    ② **悬空节号**：`corrections[].where`（如 `第 3 节（🎙 17:02）`）与 `review_plan`
+       里的「第 N 节」是指路，指错了没人能查 → 只留时间戳（`（🎙 17:02）`），
+       取消节号；`where` 里没有时间戳、去掉节号后什么都不剩 → 保留原样（宁可留着）。
+    """
+    out = copy.deepcopy(review)
+    dropped: list = []
+    rows: list = []
+    for c in (out.get("corrections") or []):
+        if (isinstance(c, dict) and c.get("kind") != "check"
+                and not _one(c.get("fixed"))):
+            dropped.append(_one(c.get("where")) or _one(c.get("spoken"))[:24])
+            continue
+        rows.append(c)
+    if out.get("corrections") is not None:
+        out["corrections"] = rows
+    n = 0
+    for c in rows:
+        if not isinstance(c, dict):
+            continue
+        w = _one(c.get("where"))
+        if not w or not _SEC_PTR.search(w):
+            continue
+        new = _one(re.sub(r"\s{2,}", " ", _SEC_PTR.sub("", w)).strip(" ，,、"))
+        if new and new != _one(w):
+            c["where"] = new
+            n += 1
+    plan = []
+    for item in (out.get("review_plan") or []):
+        s = _one(item)
+        if not s:
+            continue
+        if _SEC_PTR.search(s):
+            # 「（对照第二节）」整块拿走 —— 只删 `第二节` 会留下没配对的「（对照」。
+            new = _SEC_PTR_WHOLE.sub("", s)
+            if new == s:
+                new = _SEC_PTR.sub("", s)
+            new = _one(re.sub(r"\s{2,}", " ", new)).strip(" ，,、")
+            if (new and new != s and new.count("（") == new.count("）")
+                    and new.count("(") == new.count(")")):
+                plan.append(new)
+                n += 1
+                continue
+        plan.append(item)
+    if out.get("review_plan") is not None:
+        out["review_plan"] = plan
+    warns = []
+    if dropped:
+        warns.append(f"账本里 {len(dropped)} 行修正没有修正值（空箭头）→ 丢掉")
+    if n:
+        warns.append(f"{n} 处账本/复习安排里的「第 N 节」指路收窄成时间戳")
+    return out, [{"dropped": len(dropped), "repaired": n}], warns
+
+
+def drop_dangling_pointers(review: dict) -> tuple:
+    """指路句指着**本节根本没有的组件**（`三者差别看下表即可`，这一节没有表）→ 删掉那句。
+
+    ⚠️ F15-G（作者手读 v3/ecs170 §22）：组件被前面的守卫挪走/丢掉之后，指路句成了悬空的
+       指针 —— 读者按它去看表，什么也找不到。判据只认**表格/图**（`下表`/`上图`…），
+       并且那一节确实没有 `compare`/`flow`/`plot` 时才动手；删句走 `safe_delete`。
+    """
+    out = copy.deepcopy(review)
+    gone: list = []
+    for i, s in enumerate(out.get("sections") or [], 1):
+        if not isinstance(s, dict):
+            continue
+        if any(s.get(k) for k in ("compare", "flow", "plot")):
+            continue                              # 本节确实有表/图 → 指路是对的
+        immune = immune_from_review(out)
+        for path in paths_of(s):
+            if _field_name(path) not in ("prose", "pitfalls"):
+                continue
+            v = _get(s, path)
+            if not isinstance(v, str) or not any(w in v for w in _PTR_WORDS):
+                continue
+            spans = [(a, b) for seg, a, b in _sentences_with_spans(v)
+                     if any(w in seg for w in _PTR_WORDS)]
+            if not spans:
+                continue
+            new, _blocked, kept_spans = safe_delete(v, spans, immune=immune)
+            if not kept_spans or new == v:
+                continue
+            new = new.strip()
+            if new:
+                _set(s, path, new)
+            else:
+                # 整段就是一句指路 → 这个元素直接不出（不留空串：渲染层按段写）
+                holder = s
+                for k in path[:-1]:
+                    holder = holder[k]
+                if isinstance(holder, list):
+                    holder.remove(v)
+                else:
+                    holder[path[-1]] = ""
+            gone.append(f"§{i}「{_one(v)[:18]}」")
+    warns = []
+    if gone:
+        warns.append(f"删掉 {len(gone)} 句指向不存在图表的指路句：" + "、".join(gone[:3]))
+    return out, [{"dropped": len(gone)}], warns
+
+
+def _raw_snip(t: str, n: int = 40) -> str:
+    """截断但**保留原有空格**（引语必须逐字，`_snip` 会把空格全吃掉）。**纯函数。**"""
+    s = str(t or "").strip()
+    return s if len(s) <= n else s[:n].rstrip() + "…"
+
+
+def _hhmmss(t: str) -> str:
+    """`09:33` → `09:33:00`（一律写成 HH:MM:SS）。**纯函数。**"""
+    m = re.match(r"\s*(\d{1,2}):(\d{2})(?::(\d{2}))?", str(t or ""))
+    return f"{int(m.group(1)):02d}:{m.group(2)}:{m.group(3) or '00'}" if m else str(t or "")
+
+
+def _tsec(t: str) -> int:
+    """`HH:MM(:SS)` → 秒；认不出 → `-1`。**纯函数。**"""
+    m = re.match(r"\s*(\d{1,2}):(\d{2})(?::(\d{2}))?", str(t or ""))
+    if not m:
+        return -1
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3) or 0)
+
+
+def _source_conflict_section(secs: list, src: dict) -> int:
+    """哪一节的**时间跨度**同时盖住那两句原话（1 起数；找不到 → 0）。**纯函数。**
+
+    ⚠️ 判据是"本节 ts → 下一节 ts"，不是"本节 ts"：§16 的 ts 是 09:31，而两句原话
+       发生在 09:33:35 / 09:34:15 —— 它们落在 §16 的跨度里（§17 从 09:35 开始）。
+    """
+    qts = [x for x in (_tsec(q.get("ts")) for q in (src.get("quotes") or [])) if x >= 0]
+    if len(qts) < 2:
+        return 0
+    starts = [_tsec(s.get("ts")) for s in secs]
+    for i in range(len(secs)):
+        a = starts[i]
+        if a < 0:
+            continue
+        b = next((x for x in starts[i + 1:] if x >= 0), None)
+        if all(a <= q and (b is None or q < b) for q in qts):
+            return i + 1
+    return 0
+
+
 def flag_conflicts(review: dict, *, entries: list | None = None) -> tuple:
     """对不上的地方（跨节 / 本节自己的式与讲解）→ 原位标 ⚠。F14 ⑧⑨ + F14-2 ⑩⑪
 
@@ -1183,18 +1534,32 @@ def flag_conflicts(review: dict, *, entries: list | None = None) -> tuple:
         return review, [], []
     got = note_conflict.conflicts(out, entries=entries)
     src = next((c for c in got if c["kind"] == "source-self-conflict"), None)
-    src_note = ""
-    if src:
-        q = src["quotes"]
-        src_note = ("；课上口述本身前后不一致（"
-                    + "；".join(f"{x['ts']} 说「{_snip(x['quote'], 36)}」" for x in q[:2])
-                    + "）")
     n = 0
     details: list = []
     for c in got:
         if c["kind"] == "source-self-conflict":
             continue
         kind = c["kind"]
+        if kind == "sign-flip":
+            # ⭐ F15-F：跨节同一个符号一会减一会加 → 落在**后一节**那句公式上。
+            j = c["sections"][-1]
+            later = secs[j - 1]
+            mark = f"（⚠ {c['why']}）"
+            if _find_and_append(later, c["texts"][0], mark, fields=_MARK_TEXT_FIELDS):
+                n += 1
+                details.append(f"§{j}（{kind}：{c['sym']}）")
+            continue
+        if kind == "symbol-sign":
+            # ⭐ F15-E：同一节里同一个左端写了两次、代入本节定义后对不上 → 原式后面标 ⚠。
+            j = c["sections"][-1]
+            later = secs[j - 1]
+            mark = (f"（⚠ 本节自己的定义代入后两边对不上（{c['why']}）："
+                    f"本节先写「{_raw_snip(c['texts'][1], 44)}」，"
+                    f"后面又写「{_raw_snip(c['texts'][0], 44)}」）")
+            if _find_and_append(later, c["texts"][1], mark, fields=_MARK_TEXT_FIELDS):
+                n += 1
+                details.append(f"§{j}（{kind}：{c['term']}）")
+            continue
         if kind in ("dummy-slope", "missing-term"):
             # ⭐ F14-2 ⑩⑪：**本节自己**的式与讲解对不上（不是跨节）。
             #    ⚠ 要落在**讲解那句**上（读者先读到的就是它）。
@@ -1204,13 +1569,14 @@ def flag_conflicts(review: dict, *, entries: list | None = None) -> tuple:
                 first = c["detail"][0]
                 mark = (f"（⚠ 本节自己的定义与讲解对不上：按「{first['label']}="
                         f"{first['v']}」该是 {'+'.join(_beta(t) for t in first['want'])}，"
-                        f"讲解却说 {'+'.join(_beta(t) for t in first['said'])}{src_note}）")
+                        f"讲解却说 {'+'.join(_beta(t) for t in first['said'])}）")
                 needle = first["label"]
             else:
-                mark = (f"（⚠ 本节模型式里 {c['term']} {c['why']}，"
-                        f"例题却给它一个系数{src_note}）")
+                # ⚠️ F15-B：原来这里是 `本节模型式里 {term} {why}`，而 `why` 本身就写着
+                #    "本节的模型式里…" → 句子重复了一整截（作者手读抓到）。
+                mark = (f"（⚠ {c['term']} {c['why']}，例题却给它一个系数）")
                 needle = c["texts"][0]
-            if _find_and_append(later, needle, mark):
+            if _find_and_append(later, needle, mark, fields=_MARK_TEXT_FIELDS):
                 n += 1
                 details.append(f"§{j}（{kind}：{c.get('labels') or c.get('term')}）")
             continue
@@ -1219,24 +1585,41 @@ def flag_conflicts(review: dict, *, entries: list | None = None) -> tuple:
         title = _ref_title(secs[i - 1])
         if kind == "point-value":
             a, b = c["texts"]
-            mark = (f"（⚠ 与「{title}」一节对不上：{_snip(a)}；{_snip(b)}{src_note}）")
+            mark = (f"（⚠ 与「{title}」一节对不上：{_snip(a)}；{_snip(b)}）")
             needle = b
         else:
             v1, v2 = c["values"]
             mark = (f"（⚠ 与「{title}」一节对不上：{c['label']} 那节写 "
                     f"{','.join(f'{x:g}' for x in v1)}、这节写 "
-                    f"{','.join(f'{x:g}' for x in v2)}{src_note}）")
+                    f"{','.join(f'{x:g}' for x in v2)}）")
             needle = next((x for x in (later.get("prose") or [])
                            if c["label"] in str(x)), "")
-        if _find_and_append(later, needle, mark):
+        if _find_and_append(later, needle, mark, fields=_MARK_TEXT_FIELDS):
             n += 1
             details.append(f"§{j} ↔ §{i}（{c.get('label') or c.get('var')}）")
+    # ── ⭐ F15-C：转录自己前后不一致 → **挂到真正讲它的那一节**去 ────────────────
+    # ⚠️ 原来它被拼进上面**任何**一条 mark 的尾巴（`src_note`），于是落在了
+    #    §15（09:29 t 检验那节）——可两句原话发生在 09:32:33 / 09:34:15，讲的是 §16。
+    #    判据：那一节的**时间跨度**（本节 ts → 下一节 ts，`sources` 佐证）要同时盖住两句话。
+    src_section = _source_conflict_section(secs, src) if src else 0
+    if src and src_section:
+        # ⚠️ 一律 `🎙 HH:MM:SS`：戳是**证据**（而且带 🎙 的时间戳不会被时间戳清理删掉）；
+        #    引语保留原有空格（作者 C：不许把英文原话的空格吃掉）。
+        q = [x for x in (src.get("quotes") or []) if str(x.get("ts") or "").strip()][:2]
+        note = ("（⚠ 课上口述本身前后不一致："
+                + "；".join(f"🎙 {_hhmmss(x['ts'])} 说「{_raw_snip(x['quote'], 44)}」"
+                           for x in q) + "）") if q else ""
+        if note and _find_and_append(secs[src_section - 1], str(q[0].get("quote") or "")[:12],
+                                     note, fields=("prose", "pitfalls", "conclusion", "intuition")):
+            details.append(f"§{src_section}（课上口述前后不一致）")
     warns = []
     if n:
         warns.append(f"{n} 处跨节对不上已在后一节原位标 ⚠：" + "、".join(details))
     if src:
+        where = (f"（已挂到 §{src_section}）" if src_section
+                 else "（没找到时间跨度同时盖住两句的那一节 —— 未挂正文）")
         warns.append("课上口述前后不一致：" + "；".join(
-            f"{x['group']} {x['ts']}" for x in src["quotes"][:3]))
+            f"{x['group']} {x['ts']}" for x in src["quotes"][:3]) + where)
     return out, [{"flagged": n}], warns
 
 
@@ -1257,26 +1640,28 @@ def dedupe_sentences(review: dict, *, min_chars: int = 10) -> tuple:
     """
     out = copy.deepcopy(review)
     gone: list = []
+    immune = immune_from_review(review)
     for path in paths_of(out):
         if path and path[0] in _SKIP_TOP:
             continue
         v = _get(out, path)
         if not isinstance(v, str) or "\n" in v:
             continue
-        parts = _sentences(v)
-        if len(parts) < 2:
+        if len(_sentences(v)) < 2:
             continue
-        kept, seen = [], set()
-        for s in parts:
-            if len(s.strip()) >= min_chars and s.rstrip()[-1] in "。！？!?":
-                k = _sentence_key(s)
+        seen, drop = set(), []
+        for seg, a, b in _sentences_with_spans(v):
+            if len(seg.strip()) >= min_chars and seg.rstrip()[-1] in "。！？!?":
+                k = _sentence_key(seg)
                 if k in seen:
-                    gone.append(s)
+                    drop.append((a, b))
                     continue
                 seen.add(k)
-            kept.append(s)
-        if len(kept) != len(parts):
-            _set(out, path, "".join(kept))
+        if drop:
+            new_v, blocked, kept_spans = safe_delete(v, drop, immune=immune)
+            gone.extend(v[a:b].strip() for a, _b in kept_spans)
+            if kept_spans and new_v != v:
+                _set(out, path, new_v)
     warns = [f"正文里删掉 {len(gone)} 处重复句"] if gone else []
     return out, gone, warns
 
@@ -1287,6 +1672,20 @@ _CLOCK_AT = re.compile(r"(?:在|于)\s*[\[(]?\d{1,2}:\d{2}(?::\d{2})?[\])]?\s*")
 #: 不然剩个残句（"； 的「…」是…"，回放自查抓到）。
 _CLOCK_POSS = re.compile(r"(?<![:\d])\d{1,2}:\d{2}(?::\d{2})?\s*的")
 _CLOCK_BARE = re.compile(r"(?<![:\d])\[?\d{1,2}:\d{2}(?::\d{2})?\]?(?![:\d])")
+
+
+def _swallow_parens(text: str, a: int, b: int) -> tuple:
+    """删除区间**向外含住包它的括号**（`（12:50:28）` 整对拿走，不留空括号）。**纯函数。**
+
+    ⚠️ 只吃**紧贴着**、且只包住这一段的括号：`（12:50:28）` → 连括号删；`（12:50:28 说的）`
+       里括号还包着别的字 → 不动（留给 §2 的空括号护栏去打回）。
+    """
+    s = str(text or "")
+    pairs = (("（", "）"), ("(", ")"))
+    for op, cl in pairs:
+        if a > 0 and b < len(s) and s[a - 1] == op and s[b] == cl:
+            return (a - 1, b + 1)
+    return (a, b)
 
 
 def strip_clock_times(review: dict) -> tuple:
@@ -1300,6 +1699,7 @@ def strip_clock_times(review: dict) -> tuple:
     """
     out = copy.deepcopy(review)
     n = 0
+    immune = immune_from_review(review)
     for path in paths_of(out):
         if not path or path[0] in _SKIP_TOP or path[0] in ("checks", "corrections"):
             continue
@@ -1308,11 +1708,24 @@ def strip_clock_times(review: dict) -> tuple:
         v = _get(out, path)
         if not isinstance(v, str) or ":" not in v:
             continue
-        v2 = _CLOCK_AT.sub("", v)
-        v2 = _CLOCK_POSS.sub("", v2)
-        v2 = _CLOCK_BARE.sub("", v2)
+        # ⚠️ `🎙 09:34:15 说「…」` 里的戳是**证据**（转录原话发生的时间），不是行文里的
+        #    钟点 —— 与 `sources` 上的戳同一条纪律。实测：第二遍清理把跨节矛盾 ⚠ 里刚写进去
+        #    的那个时间戳吃掉了，句子剩成「 说「…」」。
+        spans = [_swallow_parens(v, m.start(), m.end())
+                 for rx in (_CLOCK_AT, _CLOCK_POSS, _CLOCK_BARE)
+                 for m in rx.finditer(v)
+                 if not v[max(0, m.start() - 3):m.start()].rstrip().endswith("🎙")]
+        if not spans:
+            continue
+        # 收尾规整（§2 的 `fix`）：删完把空档并掉 —— 护栏看的是**成品**。
+        # ⚠️ 空括号**不在这里**收：括号随戳一起被 `_swallow_parens` 整对拿走，
+        #    剩下「（）」就交给 §2 ③ 打回（那才是纪律本身）。
+        v2, blocked, kept_spans = safe_delete(
+            v, spans, immune=immune,
+            fix=lambda t: re.sub(r"\s{2,}", " ", t).strip(" "))
+        if not kept_spans:
+            continue
         v2 = re.sub(r"\s{2,}", " ", v2).strip(" ")
-        v2 = re.sub(r"[（(]\s*[）)]", "", v2)
         if v2 != v:
             _set(out, path, v2)
             n += 1

@@ -269,6 +269,21 @@ class RangeTs(unittest.TestCase):
         self.assertTrue(got[1], "区间内的点该算覆盖")
         self.assertFalse(got[2], "超出区间的点不许再吃 15 分钟半径")
 
+    def test_合并单元末成员那段也算覆盖(self):
+        """⭐ DB 审查 D-28 的**用户可见后果**：单元区间终点若是末成员起点（`13:16–13:18`），
+        13:18–13:20 那段没有任何窗口 → 落在那里的实时要点被印成"还没落到笔记"。"""
+        import note_v2 as nv
+        rev = {"sections": [
+            {"ts": "13:16", "heading": "[13:16] 最优化练习与停业价格：一", "prose": ["a"]},
+            {"ts": "13:18", "heading": "[13:18] 最优化练习与停业价格：二", "prose": ["b"]},
+        ]}
+        unit = nv.merge_units(rev, end_ts="13:20")["sections"][0]
+        sk = [{"t0": "13:16", "t1": "13:24", "title": "章", "points": [
+            {"gi": 1, "ts": "13:19", "zh": "末成员那段的要点"}]}]
+        rep = nc.report(sk, [unit])
+        got = {p["gi"]: p["ok"] for row in rep["rows"] for p in row["points"]}
+        self.assertTrue(got[1], f"末成员那段的要点判成没落进笔记（unit.ts={unit['ts']}）")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

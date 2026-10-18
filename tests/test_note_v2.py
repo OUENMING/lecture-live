@@ -221,6 +221,19 @@ class Align(unittest.TestCase):
         self.assertNotIn('"covered"', seen["sys"], "有骨架时不该再要逐条 covered")
         self.assertIn("最多 10 条", seen["sys"])
 
+    def test_not_covered_类型不对也不抛(self):
+        """⭐ DB 审查 D-23：模型回 dict/数字时直接切片会抛，异常冒到 `close()` 的兜底
+        → `review = {}` → **整个复习层丢掉**（本模块的纪律是 fail-soft，绝不抛）。"""
+        sk = [{"i": 1, "title": "T", "t0": "13:16:28", "t1": "13:26:35",
+               "points": [{"ts": "13:17:46", "zh": "停产价格", "en": "", "terms": [],
+                           "kind": "要点"}]}]
+        for bad in ({"i": 2}, 5, "x", None):
+            def chat(s, u, m, _bad=bad):
+                return {"covered": [], "not_covered": _bad, "notes": "ok"}
+            got = nv.align(REVIEW, chat=chat, skeleton=sk)
+            self.assertIsInstance(got, dict, bad)
+            self.assertNotIn("failed", got, bad)
+
 
     def test_截断的第一次会重试(self):
         """F9c：无骨架路径第一次被 `max_tokens` 截断（SOC10020 实测：Unterminated string）
@@ -393,6 +406,36 @@ class ExerciseRepair(unittest.TestCase):
         self.assertEqual(got["sections"][0], clean)
         self.assertEqual(warns, [])
 
+    def test_返修回的字符串_steps_要归一化(self):
+        """⭐ DB 审查 D-10：模型偶尔把 `steps` 写成纯字符串数组 —— 回写若不归一化，
+        下游渲染 `st.get("text")` 抛 AttributeError → 整份详细版 HTML 被静默丢掉
+        （返修本意是修对题）。回写必须走初始解析同一套归一化。"""
+        unit = {"heading": "[13:16] 停产价格", "ts": "13:16", "q": "题？",
+                "prose": ["讲解。"],
+                "example": {"title": "🎙 13:16", "prompt": "求停产价格。",
+                            "steps": [{"text": "把 2.89 代进去。", "why": ""}],
+                            "answer": "2.89"}}
+        flags = [{"claim": "把 2.89 代进去。", "status": "mismatch",
+                  "how": "代入后约233", "recomputed": "233"}]
+
+        def chat(s, u, m):
+            return {"prose": ["重来。"],
+                    "example": {"title": "🎙 13:16", "prompt": "求停产价格。",
+                                "steps": ["把 60 代进去", "得 233"], "answer": "233"},
+                    "variants": [{"q": "求 AC(4)。", "steps": ["先求导"],
+                                  "a": "28"}]}
+        got, _stats, _w = nv.repair_exercises({"sections": [unit], "checks": []},
+                                              chat=chat, flags=flags)
+        sec = got["sections"][0]
+        steps = sec["example"]["steps"]
+        self.assertTrue(all(isinstance(x, dict) for x in steps), steps)
+        self.assertEqual([x["text"] for x in steps], ["把 60 代进去", "得 233"])
+        self.assertTrue(all(isinstance(x, dict) for x in sec["variants"][0]["steps"]),
+                        sec["variants"])
+        # 下游真的渲染得出来（不报 AttributeError）
+        import note_html as nh
+        self.assertIn("把 60 代进去", nh._example_html(sec["example"], "x"))
+
     def test_program跑崩_触发返修(self):
         """⭐ F11 §2：program 的 mismatch 归 example 单元 → 走既有返修闸。"""
         import note_math as nm
@@ -514,7 +557,7 @@ class ConceptUnits(unittest.TestCase):
         heads = [s["heading"] for s in got["sections"]]
         self.assertEqual(heads, ["最优化练习与停业价格", "平均成本、边际成本及其相互作用"])
         a = got["sections"][0]
-        self.assertEqual(a["ts"], "13:16–13:18")
+        self.assertEqual(a["ts"], "13:16–13:20")     # 单元结束时刻 = 下一节起点（不是 13:18）
         self.assertEqual(a["minutes"], 4.0)          # 13:16→13:18 + 13:18→13:20
         self.assertEqual(a["prose"], ["[13:16] 最优化练习与停业价格：计算平均成本·讲解。",
                                       "[13:18] 最优化练习与停业价格：三次函数练习·讲解。"])
@@ -522,6 +565,30 @@ class ConceptUnits(unittest.TestCase):
                          "重复例子只留第一个")
         self.assertEqual(len(a["terms"]), 2)         # 各自去重后并起来
         self.assertEqual(got["minutes"], 8.0)
+
+    def test_单元ts终点是结束时刻(self):
+        """⭐ DB 审查 D-28：区间终点 = 单元的**结束时刻**（下一节起点 / 末组用课末），
+        与同一条单元算出的 `minutes` 同口径 —— 旧版取最后一个成员的**起点**。"""
+        rev = {"sections": [
+            self._sec("13:16", "[13:16] 最优化练习与停业价格：一"),
+            self._sec("13:18", "[13:18] 最优化练习与停业价格：二"),
+            self._sec("13:20", "[13:20] 平均成本、边际成本：别的主干"),
+        ]}
+        a = nv.merge_units(rev, end_ts="13:24")["sections"][0]
+        self.assertEqual(a["ts"], "13:16–13:20")     # 不是 13:16–13:18
+        self.assertEqual(a["minutes"], 4.0)          # 13:16→13:20
+        # 末组（后面没有别的节）算到课末
+        rev2 = {"sections": [self._sec("13:16", "[13:16] X：一"),
+                             self._sec("13:18", "[13:18] X：二")]}
+        b = nv.merge_units(rev2, end_ts="13:26")["sections"][0]
+        self.assertEqual(b["ts"], "13:16–13:26")
+
+    def test_ts精度跟着起点(self):
+        """起点带秒（`13:16:28`）时终点也带秒 —— 不把模型写的精度悄悄改掉。"""
+        rev = {"sections": [self._sec("13:16:28", "[13:16:28] X：一"),
+                            self._sec("13:18:02", "[13:18:02] X：二")]}
+        a = nv.merge_units(rev, end_ts="13:20:00")["sections"][0]
+        self.assertEqual(a["ts"], "13:16:28–13:20:00")
 
     def test_只并相邻的(self):
         rev = {"sections": [

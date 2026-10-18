@@ -786,6 +786,71 @@ def _clean_program(v) -> list:
     return out
 
 
+def _clean_example(ex) -> dict:
+    """`example` 字典 → 归一形状（`steps` 一律 `[{text, why}]`）。**唯一定义点**。
+
+    ⚠️ 初始解析（`_clean_section`）与返修回写（`repair_exercises`）都走它 —— 模型偶尔
+       把 `steps` 写成纯字符串数组，下游渲染（`st.get("text")`）/ `unit_cjk` 会
+       `AttributeError` → 整份 HTML 被静默丢掉（DB 审查 D-10）。两处各写一份必漂。
+    """
+    if not isinstance(ex, dict):
+        return {}
+    steps = _steps(ex.get("steps"))
+    expl = _one_line(ex.get("explanation"))
+    if expl and all(expl != _one_line(st.get("text")) for st in steps):
+        steps = steps + [{"text": expl, "why": ""}]     # 讲解最后写：折进 steps（会被渲染、会被核）
+    if not (steps or _one_line(ex.get("prompt"))):
+        return {}
+    out = {"title": _one_line(ex.get("title")), "prompt": _one_line(ex.get("prompt")),
+           "steps": steps, "answer": _one_line(ex.get("answer"))}
+    sc = _clean_source_check(ex.get("source_check"))
+    if sc:
+        out["source_check"] = sc
+    pl = _clean_plan(ex.get("plan"))
+    if pl:
+        out["plan"] = pl
+    gv = _clean_givens(ex.get("givens"))
+    if gv:
+        out["givens"] = gv
+    pg = _clean_program(ex.get("program"))
+    if pg:
+        out["program"] = pg
+    # ⭐ F12 §2：verdict 的 "complete" 由**代码**复核（每个结论数字要在 quote 里
+    #    或由 program 算出）；证不成立 → 强制 fragment + 标题挂「课上片段」。
+    sc = note_math.enforce_source_verdict(out)
+    if sc:
+        out["source_check"] = sc
+        if str(sc.get("verdict")) == "fragment" and sc.get("forced"):
+            t = str(out.get("title") or "")
+            if "片段" not in t:
+                out["title"] = (t + "（课上片段）") if t else "课上片段"
+    return out
+
+
+def _clean_faded(fd) -> dict:
+    """`faded`（挖空题）→ 归一形状；不合规/空返回 `{}`（调用方据此撤）。**唯一定义点**。"""
+    if not isinstance(fd, dict):
+        return {}
+    q = _one_line(fd.get("q"))
+    if not q:
+        return {}
+    return {"q": _self_label(q), "blanks": _lines(fd.get("blanks")),
+            "a": _one_line(fd.get("a") or fd.get("answer"))}
+
+
+def _clean_variants(vs) -> list:
+    """`variants` → 归一形状（`steps` 一律 `[{text, why}]`）。**唯一定义点**。"""
+    out = []
+    for v in (vs or []):
+        if not isinstance(v, dict):
+            continue
+        q = _one_line(v.get("q") or v.get("question"))
+        if q:
+            out.append({"q": _self_label(q), "steps": _steps(v.get("steps")),
+                        "a": _one_line(v.get("a") or v.get("answer"))})
+    return out
+
+
 def _clean_section(s) -> dict:
     if not isinstance(s, dict):
         return {}
@@ -806,51 +871,11 @@ def _clean_section(s) -> dict:
          "sources": _lines(s.get("sources")),
          "variants": [], "steps": [], "example": {}, "faded": {}, "plot": {},
         "compare": {}, "flow": {}}
-    ex = s.get("example")
-    if isinstance(ex, dict):
-        steps = _steps(ex.get("steps"))
-        expl = _one_line(ex.get("explanation"))
-        if expl and all(expl != _one_line(st.get("text")) for st in steps):
-            steps = steps + [{"text": expl, "why": ""}]     # 讲解最后写：折进 steps（会被渲染、会被核）
-        if steps or _one_line(ex.get("prompt")):
-            r["example"] = {"title": _one_line(ex.get("title")),
-                            "prompt": _one_line(ex.get("prompt")),
-                            "steps": steps,
-                            "answer": _one_line(ex.get("answer"))}
-            sc = _clean_source_check(ex.get("source_check"))
-            if sc:
-                r["example"]["source_check"] = sc
-            pl = _clean_plan(ex.get("plan"))
-            if pl:
-                r["example"]["plan"] = pl
-            gv = _clean_givens(ex.get("givens"))
-            if gv:
-                r["example"]["givens"] = gv
-            pg = _clean_program(ex.get("program"))
-            if pg:
-                r["example"]["program"] = pg
-            # ⭐ F12 §2：verdict 的 "complete" 由**代码**复核（每个结论数字要在 quote 里
-            #    或由 program 算出）；证不成立 → 强制 fragment + 标题挂「课上片段」。
-            sc = note_math.enforce_source_verdict(r["example"])
-            if sc:
-                r["example"]["source_check"] = sc
-                if str(sc.get("verdict")) == "fragment" and sc.get("forced"):
-                    t = str(r["example"].get("title") or "")
-                    if "片段" not in t:
-                        r["example"]["title"] = (t + "（课上片段）") if t else "课上片段"
-    for v in (s.get("variants") or []):
-        if not isinstance(v, dict):
-            continue
-        q = _one_line(v.get("q") or v.get("question"))
-        if q:
-            r["variants"].append({"q": _self_label(q), "steps": _steps(v.get("steps")),
-                                  "a": _one_line(v.get("a") or v.get("answer"))})
-    fd = s.get("faded")
-    if isinstance(fd, dict):
-        q = _one_line(fd.get("q"))
-        if q:
-            r["faded"] = {"q": _self_label(q), "blanks": _lines(fd.get("blanks")),
-                          "a": _one_line(fd.get("a") or fd.get("answer"))}
+    # ⚠️ 组件归一走**唯一定义点**（`_clean_example`/`_clean_variants`/`_clean_faded`）——
+    #    返修回写（`repair_exercises`）复用同一套（DB 审查 D-10）。
+    r["example"] = _clean_example(s.get("example"))
+    r["variants"] = _clean_variants(s.get("variants"))
+    r["faded"] = _clean_faded(s.get("faded"))
     pl = s.get("plot")
     if isinstance(pl, dict) and _one_line(pl.get("kind")) in PLOT_KINDS:
         params = pl.get("params")
@@ -1197,16 +1222,18 @@ def repair_exercises(review: dict, *, chat, entries: list | None = None,
             lines_ = _lines(got.get("prose"))
             if lines_:
                 s["prose"] = lines_
-            for key in ("example", "faded"):
+            # ⚠️ DB 审查 D-10：回写必须**走与初始解析同一套归一化** —— 模型偶尔把
+            #    `steps` 写成纯字符串数组，下游渲染（`st.get("text")`）/ `unit_cjk`
+            #    会 AttributeError → 整份详细版 HTML 被静默丢掉（返修本意是修对题）。
+            for key, fn in (("example", _clean_example), ("faded", _clean_faded)):
                 if key in got:
-                    val = got[key]
-                    if isinstance(val, dict) and any(val.get(k) for k in
-                                                     ("prompt", "steps", "q", "a", "blanks")):
+                    val = fn(got.get(key))
+                    if val:
                         s[key] = val
-                    else:                                      # null/空 → 撤（宁缺）
+                    else:                                      # null/空/不合规 → 撤（宁缺）
                         s.pop(key, None)
             if "variants" in got:
-                vs = [v for v in (got.get("variants") or []) if isinstance(v, dict)]
+                vs = _clean_variants(got.get("variants"))
                 if vs:
                     s["variants"] = vs
                 else:
@@ -1279,6 +1306,18 @@ def _ts_seconds(ts) -> int | None:
         return h * 3600 + m * 60 + s
     except Exception:                                   # noqa: BLE001
         return None
+
+
+def _fmt_ts(seconds: int, like) -> str:
+    """秒 → 时间串；精度跟着 `like`（`13:16:28` → 带秒，`13:16` → 不带）。**纯函数**。
+
+    ⚠️ 合并单元的 `ts` 区间要跟**起点**同一精度 —— 起点是模型写的（可能是 `13:16:28`），
+       终点是我们算出来的（下一节起点 / 课末），别把精度悄悄改了。
+    """
+    h, rem = divmod(int(seconds) % 86400, 3600)
+    m, s = divmod(rem, 60)
+    return (f"{h:02d}:{m:02d}:{s:02d}" if str(like or "").count(":") == 2
+            else f"{h:02d}:{m:02d}")
 
 
 def _stem(heading: str) -> str:
@@ -1365,7 +1404,24 @@ def merge_units(review: dict, *, end_ts: str = "") -> dict:
         known = [minutes[i] for i in g if minutes[i]]
         m["minutes"] = round(min(sum(known), UNIT_MAX_MINUTES), 1) if known else None
         if len(g) > 1:
-            m["ts"] = f"{first.get('ts')}–{members[-1].get('ts')}"
+            # ⚠️ DB 审查 D-28：区间终点要用单元的**结束时刻**（下一个成员的起点 / 末组用
+            #    课末），不是最后一个成员自己的起点 —— 同一条单元给 `minutes` 算的正是
+            #    「首成员起点 → 下一节起点」，两处口径必须一致。旧版 `13:16–13:18` 让
+            #    `note_cover.near()` 的覆盖窗口只到 13:18，末成员那段时间（13:18–13:20）
+            #    没有窗口 → 落在那段的实时要点被误判成"没落进笔记"，印给读者看。
+            last = g[-1]
+            nxt = starts[last + 1] if (last + 1 < len(starts)) else None
+            if starts[last] is None:
+                end_sec = None
+            elif nxt is not None and nxt > starts[last]:
+                end_sec = nxt
+            elif end is not None and end > starts[last]:
+                end_sec = end
+            else:
+                end_sec = None
+            end_s = (_fmt_ts(end_sec, first.get("ts")) if end_sec is not None
+                     else members[-1].get("ts"))
+            m["ts"] = f"{first.get('ts')}–{end_s}"
             m["heading"] = _stem(first.get("heading")) or first.get("heading")
         m["prose"] = [str(x) for s2 in members for x in (s2.get("prose") or []) if str(x).strip()]
         cues, seen_c = [], set()
@@ -1683,8 +1739,12 @@ def align(review_data: dict, *, chat, materials=None,
     if covered:
         out["covered"] = covered
     # ⭐ 有骨架时：`not_covered` 是**提示**（最多 10 条），进 `missing` 那一栏给人看。
+    # ⚠️ DB 审查 D-23：模型可能回 dict/数字 —— 直接切片会 `TypeError/KeyError` 冒到
+    #    `close()` 的兜底 → `review = {}` → **整个复习层（全部小节/例题/自测/核对）丢掉**，
+    #    与本模块「某块失败只少那一块，绝不抛」的纪律相反。先判类型。
     hints = []
-    for x in (obj.get("not_covered") or [])[:10]:
+    nc = obj.get("not_covered")
+    for x in (nc if isinstance(nc, list) else [])[:10]:
         if not isinstance(x, dict):
             continue
         p = by_gi.get(x.get("i")) if isinstance(x.get("i"), int) else None

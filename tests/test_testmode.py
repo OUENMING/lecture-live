@@ -1078,9 +1078,10 @@ def main() -> int:
         # ⑤ journal：开录就写下"还欠哪几步"；收尾逐步更新；**上传排完才撤**
         _mk23 = _d23 / ("rot" + tm.upload_mod.PENDING_TAIL)
         _j = _json2.loads(_mk23.read_text(encoding="utf-8"))
-        check("⭐⭐ 开录就写下 journal：还欠哪三步（转码 / 报告 / 上传）",
+        check("⭐⭐ 开录就写下 journal：还欠哪四步（转码 / 报告 / 上传 / 笔记）",
               _j.get("steps") == {"transcode": "pending", "report": "pending",
-                                  "upload": "pending"} and _j.get("pid"),
+                                  "upload": "pending", "note": "pending"}
+              and _j.get("pid"),
               str(_j.get("steps")))
 
         _t23c = tm.TestSession(_d23 / "fin.md", record_audio=True)
@@ -1114,9 +1115,9 @@ def main() -> int:
         except Exception:                             # 标记被提前撤了 / 读不了 -> 下面那条红
             _j2 = {}
         # ⚠️ 变异验证：`finish` 里 `_journal(report="done")` 删掉 -> 这条红。
-        check("⭐⭐ 收尾把 journal 更新到「转码+报告 done、上传还欠着」（标记**还在**）",
+        check("⭐⭐ 收尾把 journal 更新到「转码+报告 done、上传+笔记还欠着」（标记**还在**）",
               _j2.get("steps") == {"transcode": "done", "report": "done",
-                                   "upload": "pending"},
+                                   "upload": "pending", "note": "pending"},
               str(_j2.get("steps")))
         # ⚠️ 变异验证：`journal_upload_done` 里不置 `_pending_marker = None` -> 第二次调
         #    会**把标记重新写出来**（下次启动又"恢复"一节收过尾的课）-> 这条红。
@@ -1128,6 +1129,150 @@ def main() -> int:
               str([p.name for p in _d23.glob("fin.*")]))
     finally:
         _sh.rmtree(_d23, ignore_errors=True)
+
+    print("\n--- T24 ⭐⭐ 3.10：课中临时报告快照（provisional）+ 笔记那一步 ---")
+    # ⚠️ 语料：真 TestSession（temp 目录）+ 合成段；快照线程真起（落盘走真原子写）。
+    _d24 = pathlib.Path(_tf.mkdtemp(prefix="cl_tm_snap_"))
+    # ⚠️ 判据在 check.py 里跑（它设 `CLASSLIVE_UPLOAD=0`）—— 这一节要的是"上传开着"
+    #    那半（journal 才活到 `finish()` 之后，见 ⑤）。整节先打开、完事还原。
+    _saved_up24 = os.environ.get("CLASSLIVE_UPLOAD")
+    os.environ["CLASSLIVE_UPLOAD"] = "1"
+    try:
+        _t24 = tm.TestSession(_d24 / "2026-10-18_090000_SNAP.md", record_audio=True)
+        for _i in range(12):
+            _t24.note_segment(np.zeros(tm.SR, dtype=np.float32), text=f"sentence {_i}",
+                              asr_ms=100.0 + _i, model="qwen", logprob=-0.1)
+        _t24.note_ui("submit")
+        _t24._merge_items.append({"tail_ts": "10:00:01", "next_ts": "10:00:05"})
+        # ① 快照的载荷：标 provisional + snapshot_at；正式那份**不许**带这两个键
+        #    ⚠️ 顺序要紧：**先**建快照（看它不碰共享状态），再建正式那份。
+        _p24 = _t24.report_payload(provisional=True)
+        # ⚠️⚠️ 共享状态：快照**不许**把派生格 setdefault 进 `_extra` —— 不然正式
+        #    报告会拿到 10 分钟前的旧 items（merge/backfill 少最后一段）。
+        #    ⚠️ 变异验证：把 provisional 那条分支改成直接 `self._extra.setdefault(...)`
+        #    -> 这条红（`_extra` 被快照写脏）。
+        check("⭐⭐ 快照**不碰共享状态**（`_extra` 里没被塞派生格）",
+              "merge" not in _t24._extra and "ui" not in _t24._extra,
+              str(sorted(_t24._extra)))
+        _t24._merge_items.append({"tail_ts": "10:00:09", "next_ts": "10:00:12"})
+        _f24 = _t24.report_payload()
+        # ⚠️ 变异验证：把 `if provisional:` 那两行删掉 -> 这条红。
+        check("⭐⭐ 快照载荷标 `provisional` + `snapshot_at`；正式那份不带",
+              _p24.get("provisional") is True and _p24.get("snapshot_at")
+              and "provisional" not in _f24 and "snapshot_at" not in _f24,
+              f"provisional={_p24.get('provisional')} final={_f24.get('provisional')}")
+        check("⭐⭐ 快照里看得到**当前**的 items（1 条）；正式那份是**全部**（2 条）",
+              len(_p24["blocks"]["merge"]["items"]) == 1
+              and len(_f24["blocks"]["merge"]["items"]) == 2,
+              f"snap={len(_p24['blocks']['merge']['items'])} "
+              f"final={len(_f24['blocks']['merge']['items'])}")
+
+        # ② 真走一遍快照线程：文件 + 账
+        _rep24 = _d24 / "2026-10-18_090000_SNAP.report.json"
+        _t24._snapshot_report()
+        _th24 = _t24._snap_thread
+        if _th24 is not None:
+            _th24.join(timeout=10)
+        _got24 = _json2.loads(_rep24.read_text(encoding="utf-8"))
+        _st24 = _t24._snap_stats()
+        # ⚠️ 变异验证：把 `_atomic_json` 换成直接 `open(..., "w")` -> 留下 `.tmp` 的那条红。
+        check("⭐⭐ 快照真落盘（原子：不留 `.tmp`）+ 账记下来了",
+              _got24.get("provisional") is True and _st24["n"] == 1
+              and _st24["last_ms"] is not None
+              and _st24["last_ms"] <= tm.PROVISIONAL_MAX_MS
+              and _st24["last_bytes"] > 0
+              and not list(_d24.glob("*.tmp")),
+              f"{_st24} files={[p.name for p in _d24.glob('*.tmp')]}")
+
+        # ③ 超预算 -> **不再采**（这次也不写）：把预算临时压到 -1 就是"一定超"
+        _saved_max = tm.PROVISIONAL_MAX_MS
+        tm.PROVISIONAL_MAX_MS = -1.0
+        try:
+            _rep24.unlink()                                # 清掉上一份，看它还写不写
+            _t24._snap_thread = None
+            _t24._snapshot_report()
+            _th24b = _t24._snap_thread
+            if _th24b is not None:
+                _th24b.join(timeout=10)
+        finally:
+            tm.PROVISIONAL_MAX_MS = _saved_max
+        # ⚠️ 变异验证：把 `if ms > PROVISIONAL_MAX_MS:` 那段删掉 -> 这条红。
+        check("⭐⭐ 超过预算 -> **不写、以后也不采**（记一条 event 说明为什么）",
+              not _rep24.exists() and _t24._snap_off
+              and any(e.get("kind") == "provisional_skipped" for e in _t24.events),
+              f"off={_t24._snap_off!r} exists={_rep24.exists()}")
+
+        # ④ 收尾：正式的赢（快照在 `finish` 之后不许再写），且报告里带上快照的账
+        _t24._snap_off = ""                                # 放它再采一次
+        _t24._snap_thread = None
+        _t24._snapshot_report()
+        _t24.finish(bundle=False)
+        _fin24 = _json2.loads(_rep24.read_text(encoding="utf-8"))
+        _th24c = _t24._snap_thread
+        if _th24c is not None:
+            _th24c.join(timeout=10)
+        # ⚠️ 变异验证：`finish` 里去掉 `self._finishing = True`（快照还能写）-> 这条红
+        #    （取决于时序；`_finish_snapshots` 的 join 让它在真实节奏下稳定）。
+        check("⭐⭐ 收尾之后盘上是**正式那份**（不带 provisional）",
+              "provisional" not in _fin24 and _fin24.get("segments"),
+              f"provisional={'provisional' in _fin24}")
+        check("⭐ 快照的账进了正式报告（`provisional_snapshots`）",
+              (_fin24.get("provisional_snapshots") or {}).get("n", 0) >= 1,
+              str(_fin24.get("provisional_snapshots")))
+
+        # ⑥ `_finishing` 一置位，快照线程**就不许写**（哪怕它已经跑到写那一步）
+        _rep24.unlink(missing_ok=True)
+        _t24._finishing = True
+        _t24._snapshot_worker()                            # 直接调线程体（确定，不赌时序）
+        # ⚠️ 变异验证：把 `if self._finishing: return` 删掉 -> 这条红。
+        check("⭐⭐ `_finishing` 之后快照**不许再写**（正式的赢到底）",
+              not _rep24.exists(), f"exists={_rep24.exists()}")
+        _t24._finishing = False
+
+        # ⑤ 笔记那一步：`finish(note_path=…)` 只在**文件真在**时记 done
+        #    ⚠️ 判据在 check.py 里跑（它设 `CLASSLIVE_UPLOAD=0`）—— 这里要的是
+        #    "上传开着"那半（journal 才活到 finish 之后）。
+        _saved_up24 = os.environ.get("CLASSLIVE_UPLOAD")
+        os.environ["CLASSLIVE_UPLOAD"] = "1"
+        try:
+            _mk24 = _d24 / ("2026-10-18_090000_SNAP" + tm.upload_mod.PENDING_TAIL)
+            _j24 = _json2.loads(_mk24.read_text(encoding="utf-8"))
+            check("⭐ 收尾后 journal 里 `note` 还是 pending（这次没传 note_path）",
+                  (_j24.get("steps") or {}).get("note") == "pending",
+                  str(_j24.get("steps")))
+            _note24 = _d24 / "2026-10-18_SNAPX.md"
+            _note24.write_text("note", encoding="utf-8")
+            _t24b = tm.TestSession(_d24 / "2026-10-18_091000_SNAP2.md", record_audio=True)
+            _t24b.finish(bundle=False, note_path=str(_note24))
+            _j24b = _json2.loads((_d24 / ("2026-10-18_091000_SNAP2"
+                                          + tm.upload_mod.PENDING_TAIL))
+                                 .read_text(encoding="utf-8"))
+            # ⚠️ 变异验证：把 `if pathlib.Path(_np).is_file():` 那半删掉 -> 这条红
+            #    （笔记没写成也记 done -> 补传那边永远不补）。
+            check("⭐⭐ 笔记写过了 -> `note: done` + `note_file` 记下落点",
+                  (_j24b.get("steps") or {}).get("note") == "done"
+                  and _j24b.get("note_file") == str(_note24),
+                  f"{_j24b.get('steps')} note_file={_j24b.get('note_file')!r}")
+            _t24c = tm.TestSession(_d24 / "2026-10-18_092000_SNAP3.md", record_audio=True)
+            _t24c.finish(bundle=False, note_path=str(_d24 / "not-written.md"))
+            _j24c = _json2.loads((_d24 / ("2026-10-18_092000_SNAP3"
+                                          + tm.upload_mod.PENDING_TAIL))
+                                 .read_text(encoding="utf-8"))
+            check("⭐⭐ 落点给了但**文件不在** -> 仍是 pending（补传那边要能看出来）",
+                  (_j24c.get("steps") or {}).get("note") == "pending"
+                  and _j24c.get("note_file"),
+                  f"{_j24c.get('steps')} note_file={_j24c.get('note_file')!r}")
+        finally:
+            if _saved_up24 is None:
+                os.environ.pop("CLASSLIVE_UPLOAD", None)
+            else:
+                os.environ["CLASSLIVE_UPLOAD"] = _saved_up24
+    finally:
+        _sh.rmtree(_d24, ignore_errors=True)
+        if _saved_up24 is None:
+            os.environ.pop("CLASSLIVE_UPLOAD", None)
+        else:
+            os.environ["CLASSLIVE_UPLOAD"] = _saved_up24
 
     bad = [n for n, ok, _ in RESULTS if not ok]
     print("\n" + "=" * 60)

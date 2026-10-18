@@ -835,6 +835,253 @@ def t_gave_up_hint():
     assert main._gave_up_hint("/x/a.md", None, 3)[1].endswith("<课号>")
 
 
+# ---------------------------------------------------------------- 3.10：笔记那一步的补生成
+
+def _journal_fixture(d, stem, *, note="pending", note_file="", h1="# ECON10790 · 2026-10-14 · 实时会话日志\n\n",
+                     body="> [!abstract] 10:00:00\n> hello world\n\n"):
+    """造一节课的现场：会话文件 + `.pending.json`（journal）。返回 `(sess, mk)`。"""
+    sess = pathlib.Path(d) / (stem + ".md")
+    sess.write_text(h1 + body, encoding="utf-8")
+    mk = pathlib.Path(d) / (stem + ".pending.json")
+    steps = {"transcode": "done", "report": "pending", "upload": "pending", "note": note}
+    mk.write_text(__import__("json").dumps(
+        {"stem": stem, "started": "x", "steps": steps, **({"note_file": note_file}
+                                                          if note_file else {})},
+        ensure_ascii=False), encoding="utf-8")
+    return sess, mk
+
+
+def _journal_steps(mk) -> dict:
+    import json
+    return (json.loads(pathlib.Path(mk).read_text(encoding="utf-8")).get("steps") or {})
+
+
+def _wait(pred, timeout: float = 5.0) -> bool:
+    """等一个条件成立（有界）—— 补生成跑在**后台线程**上，落笔是异步的。"""
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return pred()
+
+
+@case("⭐⭐ 没有 journal / `note` 不是 pending -> 一条都不碰")
+def t_note_resume_noop():
+    with tempfile.TemporaryDirectory() as d:
+        r = main.resume_pending_notes(d, online=lambda: True,
+                                      rebuild=lambda *a, **k: {"ok": True})
+        assert r == {"found": 0, "attempted": 0, "done": 0, "skipped": 0, "failed": 0}, r
+        _sess, _mk = _journal_fixture(d, "2026-10-14_160000_ECON10790", note="done")
+        r2 = main.resume_pending_notes(d, online=lambda: True,
+                                       rebuild=lambda *a, **k: {"ok": True})
+        assert r2["found"] == 0, r2
+
+
+@case("⭐⭐ `note_file` 记着、文件也在 -> 记 done，不重建")
+def t_note_resume_already_written():
+    with tempfile.TemporaryDirectory() as d:
+        note = pathlib.Path(d) / "2026-10-14_ECON10790.md"
+        note.write_text("note", encoding="utf-8")
+        _sess, mk = _journal_fixture(d, "2026-10-14_160000_ECON10790", note_file=str(note))
+        calls = []
+        r = main.resume_pending_notes(
+            d, online=lambda: True,
+            rebuild=lambda *a, **k: (calls.append(1), {"ok": True})[1])
+        # 改坏：把 `if nf and pathlib.Path(nf).is_file():` 那段删掉 -> 这条红（会重建）。
+        assert r["done"] == 1 and r["attempted"] == 0 and not calls, (r, calls)
+        assert _journal_steps(mk)["note"] == "done", _journal_steps(mk)
+
+
+@case("⭐⭐ 离线 -> 什么都不记（下次启动再补），不重建")
+def t_note_resume_offline():
+    with tempfile.TemporaryDirectory() as d:
+        _sess, mk = _journal_fixture(d, "2026-10-14_160000_ECON10790")
+        calls = []
+        r = main.resume_pending_notes(
+            d, online=lambda: False,
+            rebuild=lambda *a, **k: (calls.append(1), {"ok": True})[1])
+        # 改坏：把 `if not on():` 那段删掉 -> 这条红（离线也去重建）。
+        assert r["skipped"] == 1 and r["attempted"] == 0 and not calls, (r, calls)
+        assert _journal_steps(mk)["note"] == "pending", _journal_steps(mk)
+
+
+@case("⭐⭐ 在线 -> 后台补；成功记 done + note_file（**每节一次**）")
+def t_note_resume_rebuild_ok():
+    with tempfile.TemporaryDirectory() as d:
+        _sess, mk = _journal_fixture(d, "2026-10-14_160000_ECON10790")
+        out_note = pathlib.Path(d) / "Lectures" / "2026-10-14_ECON10790.md"
+        out_note.parent.mkdir()
+        seen = []
+
+        def _fake_rebuild(sess, *, log=None, **k):
+            seen.append(str(sess))
+            out_note.write_text("note", encoding="utf-8")
+            return {"ok": True, "note": str(out_note), "error": ""}
+
+        r = main.resume_pending_notes(d, online=lambda: True, rebuild=_fake_rebuild)
+        assert r["attempted"] == 1 and seen and seen[0].endswith("ECON10790.md"), (r, seen)
+        _wait(lambda: _journal_steps(mk).get("note") == "done")
+        import json
+        j = json.loads(mk.read_text(encoding="utf-8"))
+        assert j["steps"]["note"] == "done" and j.get("note_file") == str(out_note), j
+        # ⚠️ **每节一次**：再跑一遍不会再来（不再是 pending）
+        r2 = main.resume_pending_notes(d, online=lambda: True, rebuild=_fake_rebuild)
+        assert r2["found"] == 0 and len(seen) == 1, (r2, seen)
+
+
+@case("⭐⭐ 重建失败 -> 记 failed（不再重试，免得每次开课都白跑）")
+def t_note_resume_rebuild_fail():
+    with tempfile.TemporaryDirectory() as d:
+        _sess, mk = _journal_fixture(d, "2026-10-14_160000_ECON10790")
+        r = main.resume_pending_notes(
+            d, online=lambda: True,
+            rebuild=lambda *a, **k: {"ok": False, "error": "没设库"})
+        assert r["attempted"] == 1, r
+        _wait(lambda: _journal_steps(mk).get("note") == "failed")
+        r2 = main.resume_pending_notes(d, online=lambda: True,
+                                       rebuild=lambda *a, **k: {"ok": True})
+        assert r2["found"] == 0, r2
+
+
+@case("⭐⭐ 同日同课已有一份**不早于**会话文件的笔记 -> 跳过，绝不生成第二份")
+def t_note_resume_existing_note():
+    with tempfile.TemporaryDirectory() as d:
+        _sess, mk = _journal_fixture(d, "2026-10-14_160000_ECON10790")
+        vault = pathlib.Path(d) / "vault"
+        (vault / "Lectures").mkdir(parents=True)
+        note = vault / "Lectures" / "2026-10-14_161200_ECON10790.md"
+        note.write_text("note", encoding="utf-8")          # 比会话文件新
+        os.utime(note, (time.time() + 5, time.time() + 5))
+        saved = ow.resolve_vault
+        ow.resolve_vault = lambda cli=None, **k: str(vault)
+        calls = []
+        try:
+            r = main.resume_pending_notes(
+                d, online=lambda: True,
+                rebuild=lambda *a, **k: (calls.append(1), {"ok": True})[1])
+        finally:
+            ow.resolve_vault = saved
+        # 改坏：把 `_note_looks_written` 那段删掉 -> 这条红（会多出一份笔记）。
+        assert r["done"] == 1 and not calls, (r, calls)
+        assert _journal_steps(mk)["note"] == "done", _journal_steps(mk)
+        # ⚠️ 而**比会话文件旧**的笔记不算（那是上一节课的）—— 这时该去重建。
+        os.utime(note, (time.time() - 3600, time.time() - 3600))
+        _sess2, mk2 = _journal_fixture(d, "2026-10-14_170000_ECON10790")
+        calls2 = []
+        ow.resolve_vault = lambda cli=None, **k: str(vault)
+        try:
+            r2 = main.resume_pending_notes(
+                d, online=lambda: True,
+                rebuild=lambda *a, **k: (calls2.append(1), {"ok": False, "error": "x"})[1])
+        finally:
+            ow.resolve_vault = saved
+        assert r2["attempted"] == 1 and calls2, (r2, calls2)
+        # ⚠️ 等后台那条线程落完笔再走（不然 `TemporaryDirectory` 清理会撞上它的写）
+        _wait(lambda: _journal_steps(mk2).get("note") == "failed")
+
+
+@case("⭐ 认（课号, 日期）：抬头优先、文件名兜底、垃圾给空")
+def t_session_course_date():
+    # 改坏：把抬头那条正则删掉 -> 第一条红（只剩文件名兜底，改过名的会话就认不出）。
+    assert main._session_course_date(
+        pathlib.Path("x.md"), "# ECON10790 · 2026-10-14 · 实时会话日志\n\n") == (
+            "ECON10790", "2026-10-14")
+    assert main._session_course_date(
+        pathlib.Path("2026-10-14_160000_ECON10740.md"), "（没有抬头）") == (
+            "ECON10740", "2026-10-14")
+    assert main._session_course_date(pathlib.Path("x.md"), "hello") == ("", "")
+
+
+@case("⭐ 开机那条路真的接了 `resume_pending_notes`（且失败不挡开课）")
+def t_note_resume_wired():
+    src = (pathlib.Path(__file__).resolve().parent.parent / "main.py").read_text(
+        encoding="utf-8")
+    assert "resume_pending_notes(_owmod.SESSIONS" in src, "开机那段没接上"
+    # ⚠️ 它在 try/except 里（清残局不许挡住开课 —— 与 `recover_pending` 同一条纪律）
+    i = src.index("resume_pending_notes(_owmod.SESSIONS")
+    seg = src[i:i + 400]
+    assert "except Exception" in seg, seg[:200]
+
+
+@case("⭐⭐ `rebuild_note_for`：同一条管道（mode=no -> 接管 -> close），两个细节都在")
+def t_rebuild_note_for_adapter():
+    """⚠️ 与 `scripts/rebuild_note.py` **同一条管道**：构造 `mode="no"` 的 writer、
+    接管成"已跑完的一节"、`close()`。这里用一个**假 writer** 钉住接线（真 writer 的
+    行为归 `t_writer_*` 那些用例）。"""
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        # ⚠️ 末行**故意截断**（多字节汉字只剩半个）—— `errors="replace"` 那条判据。
+        sess = d / "2026-10-14_160000_ECON10790.md"
+        sess.write_bytes(
+            b"# ECON10790 \xc2\xb7 2026-10-14 \xc2\xb7 \xe5\xae\x9e\xe6\x97\xb6\xe4\xbc\x9a\xe8\xaf\x9d\xe6\x97\xa5\xe5\xbf\x97\n\n"
+            b"> [!abstract] 10:00:00\n> hello world \xe4\xb8")
+        note = d / "vault" / "Lectures" / "2026-10-14_ECON10790.md"
+        note.parent.mkdir(parents=True)
+        got: dict = {}
+
+        class _FakeW:
+            inst = None
+
+            def __init__(self, **kw):
+                got["kw"] = kw
+                self.vault_path = None
+                _FakeW.inst = self
+
+            def close(self):
+                note.write_text("note", encoding="utf-8")     # 真 writer 就是在这写盘
+                self.vault_path = note
+                return "📝 已存入 Obsidian"
+
+            @staticmethod
+            def _parse(text):
+                return [ln for ln in text.splitlines() if ln.startswith("> [!abstract]")]
+
+        saved_w, saved_v = ow.ObsidianWriter, ow.resolve_vault
+        ow.ObsidianWriter = _FakeW
+        ow.resolve_vault = lambda cli=None, **k: str(d / "vault")
+        try:
+            r = main.rebuild_note_for(sess)
+            # ⚠️ 变异验证：把 `errors="replace"` 去掉 -> 上面那段截断字节会让这条红。
+            assert r["ok"] and r["note"] == str(note), r
+            assert got["kw"]["mode"] == "no", got["kw"].get("mode")
+            # ⚠️ 变异验证：把 `keypoints_fn=_kp.pick` 删掉 -> 这条红
+            #    （补出来的笔记少一整节「最值得记的几句」，而且不报错 —— 2026-10-01 实测）。
+            assert got["kw"].get("keypoints_fn") is not None, "没接 keypoints_fn"
+            assert got["kw"].get("polish") is False, "补笔记不该偷偷跑精修（默认 off）"
+            w = _FakeW.inst
+            assert w.enabled is True and w.mode == "yes" and w.session_path == sess, (
+                w.enabled, w.mode, w.session_path)
+            assert w._n == 1 and w._course == "ECON10790" and w._date == "2026-10-14", (
+                w._n, w._course, w._date)
+            # 没有可读句段 -> 拒绝生成空笔记（**不许**白跑一遍 close）
+            bare = d / "2026-10-14_161000_ECON10790.md"
+            bare.write_text("# ECON10790 · 2026-10-14 · 实时会话日志\n\n（空）\n",
+                            encoding="utf-8")
+            _FakeW.inst = None
+            r2 = main.rebuild_note_for(bare)
+            # ⚠️ 变异验证：把 `if n == 0:` 那段删掉 -> 这条红（会建 writer 并 close）。
+            assert (not r2["ok"]) and "空笔记" in r2["error"] and _FakeW.inst is None, r2
+        finally:
+            ow.ObsidianWriter, ow.resolve_vault = saved_w, saved_v
+
+
+@case("⭐ 没设库 -> 不写、给出可读原因（补笔记要有落点）")
+def t_rebuild_note_for_no_vault():
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        sess = d / "2026-10-14_160000_ECON10790.md"
+        sess.write_text("# ECON10790 · 2026-10-14 · 实时会话日志\n\n"
+                        "> [!abstract] 10:00:00\n> hello\n\n", encoding="utf-8")
+        saved_v = ow.resolve_vault
+        ow.resolve_vault = lambda cli=None, **k: None
+        try:
+            r = main.rebuild_note_for(sess)
+        finally:
+            ow.resolve_vault = saved_v
+        assert (not r["ok"]) and "笔记库" in r["error"], r
+
+
 CASES_FAIL: list[str] = []
 
 if __name__ == "__main__":

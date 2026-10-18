@@ -1630,13 +1630,17 @@ def _first(seq, pred):
 
 _i_app = _first(_tree_main.body, lambda n: isinstance(n, ast.ImportFrom)
                 and n.module == "capture")
-_i_hook = _first(_tree_main.body, lambda n: isinstance(n, ast.If)
-                 and "repair_interrupted_apply" in ast.unparse(n))
+# ⚠️ a9d4e5d 起钩子包在 `try` 里（修不了也照常开课）—— Try / If 都认，
+#    但**必须**是其中一个（裸调一段，出意外就把 app 拦在门外了）。
+_i_hook = _first(_tree_main.body,
+                 lambda n: "repair_interrupted_apply" in ast.unparse(n))
 # ⚠️ 变异验证：把钩子挪到 import 之后 -> 这条红（`from capture import` 先炸就没人修了）。
-check("⭐⭐ F8 开机钩子排在 `from capture import …` **之前**（且认 journal）",
+check("⭐⭐ F8 开机钩子排在 `from capture import …` **之前**（认 journal + 包了 try）",
       0 <= _i_hook < _i_app
-      and "apply_journal_path" in ast.unparse(_tree_main.body[_i_hook]),
-      f"hook={_i_hook} first_app_import={_i_app}")
+      and "apply_journal_path" in ast.unparse(_tree_main.body[_i_hook])
+      and isinstance(_tree_main.body[_i_hook], (ast.Try, ast.If)),
+      f"hook={_i_hook} first_app_import={_i_app} "
+      f"node={type(_tree_main.body[_i_hook]).__name__ if _i_hook >= 0 else '?'}")
 
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]

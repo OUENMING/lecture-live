@@ -418,6 +418,216 @@ def retry_pending_uploads(*, reason: str = "") -> int:
         return 0
 
 
+def _session_course_date(sess, text: str) -> tuple:
+    """从会话文件认 `(课号, 日期)`。**纯函数**（判据直接喂字符串）。
+
+    先认**抬头**（`ObsidianWriter.__init__` 写的那行 `# {课号} · {日期} · 实时会话日志`）
+    —— 那是写入方自己的格式，比文件名约定可靠；认不出再从文件名推
+    （`YYYY-MM-DD_HHMMSS_课号.md`，`scripts/rebuild_note.py` 的老办法）。
+    都认不出返回 `("", "")`。
+    """
+    m = re.match(r"#\s*(.+?)\s*·\s*(\d{4}-\d{2}-\d{2})\s*·", text or "")
+    if m:
+        return m.group(1).strip(), m.group(2)
+    m2 = re.match(r"(\d{4}-\d{2}-\d{2})_\d{6}_(.+?)(?:\.md)?$",
+                  getattr(sess, "name", "") or "")
+    if m2:
+        return m2.group(2), m2.group(1)
+    return "", ""
+
+
+def rebuild_note_for(session_path, *, vault=None, polish=False, log=None) -> dict:
+    """给一节课补一份 Obsidian 笔记（**in-process 版**的 `scripts/rebuild_note.py`）。
+    返回 `{ok, note, error, msg}`。**永不抛**。
+
+    ⚠️ 为什么要它：收尾被打断（合盖 / 被杀）时笔记那一步可能整个没跑 ——
+       `sessions/` 里有逐句日志，但**没人会去手动跑那个脚本**。这条给
+       `resume_pending_notes` 用（开机后台补）。
+    ⚠️ 与脚本的关系：**同一条管道**（构造 `mode="no"` 的 `ObsidianWriter` → 接管
+       成"已跑完的一节" → `close()`）。脚本那条是给人手动跑的 CLI（还能 `--polish`）。
+       两个细节两边都要有（脚本里各有一段血泪注释，这里逐字同源）：
+         ① 读会话文件必须 `errors="replace"`（写到一半被杀，末行汉字可能只剩半个）；
+         ② 必须接 `keypoints_fn`，不然补出来的笔记**少一整节**「最值得记的几句」
+            而且**不报任何错**。
+    ⚠️ `polish=False` 是**跟 app 现在的默认走**（`--polish` 默认 off，2026-10-12
+       起精修默认不跑）：补笔记是"把缺的补上"，不该在下次开机时偷偷跑十几分钟精修。
+    """
+    out = {"ok": False, "note": "", "error": "", "msg": ""}
+
+    def _say(s: str) -> None:
+        if log is not None:
+            try:
+                log(s)
+            except Exception:                             # noqa: BLE001
+                pass
+
+    try:
+        sess = pathlib.Path(session_path)
+        if not sess.is_file():
+            return {**out, "error": "没有会话文件"}
+        import obsidian_writer as _ow
+        text = sess.read_text(encoding="utf-8", errors="replace")
+        n = len(_ow.ObsidianWriter._parse(text))
+        if n == 0:
+            return {**out, "error": "会话文件里没有能读懂的句段（拒绝生成空笔记）"}
+        course, date = _session_course_date(sess, text)
+        if not course or not date:
+            return {**out, "error": "认不出课号 / 日期"}
+        v = vault or _ow.resolve_vault(None)
+        if not v:
+            return {**out, "error": "还没设笔记库（~/.classlive/vault 里也没有）"}
+        import keypoints as _kp
+        from cloud_translator import load_api_key
+        w = _ow.ObsidianWriter(vault=v, course=course, mode="no",
+                               api_key=load_api_key(None), model="deepseek-flash",
+                               glossary_path=str(pathlib.Path(__file__).with_name(
+                                   "glossary.txt")),
+                               polish=polish, keypoints_fn=_kp.pick)
+        # 接管成「已跑完的一节」——同脚本：不新建会话文件，指到既有那份上。
+        w.enabled = True
+        w.mode = "yes"
+        w.session_path = sess
+        w._course = course
+        w._date = date
+        w._n = n
+        _say(f"▶ 补笔记 {sess.name} → {course} · {date} · {n} 句")
+        out["msg"] = str(w.close() or "")
+        note = str(getattr(w, "vault_path", "") or "")
+        out["note"] = note
+        out["ok"] = bool(note) and pathlib.Path(note).is_file()
+        if not out["ok"]:
+            out["error"] = "close() 没写出笔记（看输出：多半是没设库）"
+        return out
+    except Exception as e:                                # noqa: BLE001
+        return {**out, "error": f"{type(e).__name__}: {str(e)[:160]}"}
+
+
+def _note_looks_written(sessions_dir, stem: str, sess, log=None) -> bool:
+    """这节课**看起来**已经有笔记了吗（保守判据，只用来**跳过**补写）。
+
+    判据：`Lectures/` 下同日同课有一份笔记，且它的 mtime **不早于**会话文件 ——
+    那多半就是这节课自己的笔记（`writer.close()` 写完、收尾还没记上就被杀了）。
+    ⚠️ 宁可漏补（日志里说清楚，手动跑脚本还能补），**绝不**生成第二份。
+    """
+    import obsidian_writer as _ow
+    try:
+        course, date = _session_course_date(sess, "")
+        if not course or not date:
+            return False
+        v = _ow.resolve_vault(None)
+        if not v:
+            return False
+        lectures = pathlib.Path(v) / "Lectures"
+        if not lectures.is_dir():
+            return False
+        try:
+            s_mtime = sess.stat().st_mtime
+        except OSError:
+            return False
+        for p in lectures.glob(f"{date}_*{course}.md"):
+            try:
+                if p.stat().st_mtime >= s_mtime:
+                    if log is not None:
+                        try:
+                            log(f"· 已有 {p.name}（不早于会话文件）—— 当成这节课的笔记，跳过")
+                        except Exception:                 # noqa: BLE001
+                            pass
+                    return True
+            except OSError:
+                continue
+    except Exception:                                     # noqa: BLE001
+        return False
+    return False
+
+
+def resume_pending_notes(sessions_dir, *, online=None, rebuild=None, log=None) -> dict:
+    """开机扫 journal，把**还欠的笔记**在后台补出来。返回 `{found, attempted, done, skipped, failed}`。
+
+    ## 判据（顺序即优先级）
+
+    1. 只认 `steps.note == "pending"` 的 journal（`done` / `failed` 都不再碰）。
+    2. `note_file` 记着落点、而那份文件**在** -> 直接记 `done`（只是没来得及记）。
+    3. 同日同课已有一份**不早于**会话文件的笔记 -> 记 `done` 跳过（保守判据，
+       见 `_note_looks_written`）。
+    4. 不在线（`net_type()=="none"`）-> **什么都不记**，下次启动再说
+       （探不到 = `None` 当在线 —— 试一次，失败也只是记一笔）。
+    5. 在线 -> 后台补（`rebuild`，默认 `rebuild_note_for`）；成功记 `done` +
+       `note_file`，失败记 `failed` —— **每节一次**，不重试（免得每次开课都白跑）。
+    ⚠️ 永不抛：它跑在开机那条路上（`recover_pending` 的邻居）。
+    """
+    import testmode as _tm
+    import upload as _upmod
+    out = {"found": 0, "attempted": 0, "done": 0, "skipped": 0, "failed": 0}
+
+    def _say(s: str) -> None:
+        if log is not None:
+            try:
+                log(s)
+            except Exception:                             # noqa: BLE001
+                pass
+
+    try:
+        sd = pathlib.Path(sessions_dir)
+        if not sd.is_dir():
+            return out
+        marks = sorted(sd.glob("*" + _upmod.PENDING_TAIL))
+    except Exception:                                     # noqa: BLE001
+        return out
+    on = online or (lambda: _tm.net_type() != "none")
+    rb = rebuild or rebuild_note_for
+    for mk in marks:
+        try:
+            j = _tm.journal_read(mk)
+            steps = j.get("steps") or {}
+            if steps.get("note") != "pending":
+                continue
+            out["found"] += 1
+            stem = mk.name[: -len(_upmod.PENDING_TAIL)]
+            sess = sd / (stem + ".md")
+            nf = str(j.get("note_file") or "")
+            if nf and pathlib.Path(nf).is_file():
+                _tm.journal_update(mk, steps={"note": "done"})
+                out["done"] += 1
+                _say(f"· 笔记其实已经写好了（{pathlib.Path(nf).name}）—— 记一笔")
+                continue
+            if not sess.is_file():
+                _tm.journal_update(mk, steps={"note": "failed"})
+                out["failed"] += 1
+                _say(f"⚠ {stem}：没有会话文件，笔记补不了")
+                continue
+            if _note_looks_written(sd, stem, sess, log=_say):
+                _tm.journal_update(mk, steps={"note": "done"})
+                out["done"] += 1
+                continue
+            try:
+                if not on():
+                    out["skipped"] += 1
+                    _say(f"· 离线 —— {stem} 的笔记下次启动再补")
+                    continue
+            except Exception:                             # noqa: BLE001
+                pass                                      # 探不到 -> 当在线，试一次
+            out["attempted"] += 1
+
+            def _job(mk=mk, sess=sess) -> None:
+                r = rb(sess, log=_say)
+                if r.get("ok"):
+                    _tm.journal_update(mk, steps={"note": "done"},
+                                       note_file=str(r.get("note") or ""))
+                    _say(f"✅ 笔记补好了 → {r.get('note')}")
+                else:
+                    _tm.journal_update(mk, steps={"note": "failed"})
+                    _say(f"⚠ {sess.name} 的笔记没补成：{r.get('error')}")
+
+            try:
+                threading.Thread(target=_job, daemon=True,
+                                 name="cl-note-resume").start()
+            except Exception:                             # noqa: BLE001
+                out["failed"] += 1
+        except Exception:                                 # noqa: BLE001
+            continue                                      # 一节坏了不挡别的
+    return out
+
+
 def summary_log_line(payload) -> str | None:
     """实时总结的 payload → 终端那一行；**不是正式章就返回 `None`**。**纯函数。**
 
@@ -1911,6 +2121,16 @@ def run(args) -> None:
         if _r.get("queued"):
             echo(f"📤 发现上次没收尾的测试课 {_r['found']} 节"
                  f" —— 已把已录到的部分排进上传队列（带 crash_recovered 标记）")
+        # ⭐ 3.10：**笔记那一步的补生成**（journal 的 `note` 步）—— 收尾要是没跑到
+        #    writer.close()（合盖 / 被杀），这里在后台把它补出来：要在线、每节一次、
+        #    绝不覆盖已有笔记（同日同课已有一份就当它写过了，见 `_note_looks_written`）。
+        try:
+            _nr = resume_pending_notes(_owmod.SESSIONS, log=lambda m: echo("   " + m))
+            if _nr.get("attempted"):
+                echo(f"📝 有一节课的笔记没写成 —— 后台补生成中"
+                     f"（{_nr['attempted']} 节）")
+        except Exception:                                 # noqa: BLE001
+            pass
         # ⭐ **启动时把积压的队列推一把** —— 这才是「攒着下次发」的正主。
         #    ⚠️ 上一次收尾时那个 daemon 线程多半被进程退出杀了（实测：
         #       报告传上去了、9 MB 的音频没传完）→ 不在这里补一次，它就**永远传不完**。
@@ -4016,7 +4236,11 @@ def run(args) -> None:
                     try:
                         _tf["rep"] = tester.finish(
                             vad_report=_vad,
-                            note_path=str(getattr(writer, "note_path", "") or ""),
+                            # ⚠️ `vault_path`（不是 `note_path` —— writer 上**没有**这个
+                            #    属性，`getattr(..., "")` 一直静默给空串）：它是
+                            #    `close()` 真正写出笔记时记下的落点。报告里的 `note_file`
+                            #    与 journal 的「笔记那一步」都读它（3.10）。
+                            note_path=str(getattr(writer, "vault_path", "") or ""),
                             # ⚠️ `--no-bundle` 原来只声明、没人读（2026-09-28
                             #    OCR 审计发现）—— README 写明它能「不打包，只写报告」，
                             #    不接上线这个开关就是个谎。

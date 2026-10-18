@@ -113,6 +113,11 @@ VIEW_W_MAX = 20000
 #: （低电量模式 / 热压力 / 网络类型）。**搭主循环既有的设备探查定时器**
 #: （`main` 的 `_dev` tick，2 s 一次）—— 不新起线程、不新起轮询。
 DEVICE_SAMPLE_S = 600.0
+#: 课中那份**临时报告快照**的预算（毫秒）。实测（50 分钟合成会话：250 段 /
+#: 400 事件 / 几块，本机）：构建 + 序列化 **4.6–9.7 ms**、**~170 KB** —— 一次快照
+#: 超过它就**不再采**：每 10 分钟一次的活也不许失控（快照只是"最坏情况下好过
+#: 没有"，不值得花大钱）。见 `TestSession._snapshot_report`。
+PROVISIONAL_MAX_MS = 50.0
 #: 收尾体积扫描的**总预算**（秒）：`~/.classlive` 在本机 4.9 GB / 6.1 万个文件
 #: （实测走一遍 0.48 s），别人的机器可能更慢 —— 超预算就停，已经量到的照报，
 #: 标 `partial: true`。
@@ -1147,6 +1152,66 @@ def make_bundle(stem: pathlib.Path, report_path: str | os.PathLike,
     return str(out)
 
 
+def journal_read(mk) -> dict:
+    """读一份崩溃 journal（那个 `.pending.json`）。**读不出来就当空**（永不抛）。
+
+    ⚠️ 读写这对函数是**模块级**的（不是 `TestSession` 的私有方法）—— 补传那边
+       （`main.resume_pending_notes`）也要读它、更新它。两处各写一份解析迟早会漂。
+    """
+    try:
+        got = json.loads(pathlib.Path(mk).read_text(encoding="utf-8")) or {}
+        return got if isinstance(got, dict) else {}
+    except Exception:                                    # noqa: BLE001
+        return {}
+
+
+def journal_update(mk, *, steps: dict | None = None, **kv) -> bool:
+    """更新一份崩溃 journal：`steps` 里的键并进去、`kv` 里的键**直接盖**。
+
+    - `steps`：转码 / 报告 / 上传 / 笔记这些**步骤状态**（`done` / `pending` /
+      `failed` …）。⚠️ 值只放短状态串 —— `upload.recover_pending` 会把 `steps`
+      原样抄进上传的 `meta.json`（路径之类的东西走 `kv`，那部分只留本机）。
+    - `kv`：别的顶层键（`note_file` 这类本机信息）。
+    - **tmp→rename**（半截文件不冒充 journal）；**失败一律吞**（它只是残局记录，
+      绝不能因为它把课 / 收尾拦下来）。返回是否写成功。
+    """
+    mk = pathlib.Path(mk)
+    try:
+        cur = journal_read(mk)
+        if steps:
+            cur.setdefault("steps", {})
+            if not isinstance(cur["steps"], dict):
+                cur["steps"] = {}
+            cur["steps"].update({k: v for k, v in steps.items()})
+        for k, v in kv.items():
+            cur[k] = v
+        cur["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        tmp = mk.with_suffix(".tmp")                     # `<stem>.pending.tmp`
+        tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(mk)
+        return True
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+def _atomic_json(path, payload) -> bool:
+    """`payload` 写进 `path`（**tmp→rename**，永不抛）。返回是否写成功。
+
+    ⚠️ 报告那两处（正式 + 课中快照）都走它：`recover_pending` 是**按文件名**收
+       `report.json` 的（它不解析内容）—— 半截 JSON 传上去就是一份坏报告，
+       而收件端看不出是"崩在写盘中间"还是"真没数据"。
+    """
+    try:
+        p = pathlib.Path(path)
+        tmp = p.with_suffix(p.suffix + ".tmp")           # `<stem>.report.json.tmp`
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        tmp.replace(p)
+        return True
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
 class TestSession:
     """一次测试课的采集器。所有 note_* 方法都保证不抛。"""
 
@@ -1188,6 +1253,17 @@ class TestSession:
         #:    收尾只剩最后一段 + 失败过的；见 `_TranscodeWorker` 的 docstring。
         #:    ⚠️ 线程**懒起**（第一个 submit 才起）—— 没转过段就不多一个线程。
         self._transcode = _TranscodeWorker(log=lambda m: print(m, flush=True))
+        #: ⭐ 3.10：课中那份**临时报告快照**的状态（见 `_snapshot_report`）。
+        #:    ⚠️ 一把锁护两个写手（快照线程 / `finish`）—— 别让"临时的"盖掉"正式的"。
+        self._snap_lock = threading.Lock()
+        self._snap_thread: threading.Thread | None = None
+        self._snap_n = 0                     # 采了几次（进正式报告的账）
+        self._snap_ms: float | None = None   # 最近一次：构建 + 序列化耗时
+        self._snap_bytes: int | None = None
+        self._snap_off = ""                  # 非空 = 不再采（原因）
+        #: ⭐ 收尾一开始就置位 —— 快照线程**看到它就不再写**（"正式的"赢到底，
+        #:    哪怕 `finish` 收线程时它已经卡在半路）。
+        self._finishing = False
 
         if self.record_audio:
             # ⚠️⚠️ **这一段必须包起来**（2026-09-28 审查指出）：模块头的承诺是
@@ -1217,7 +1293,8 @@ class TestSession:
                                 "started": time.strftime("%Y-%m-%d %H:%M:%S"),
                                 "steps": {"transcode": "pending",
                                           "report": "pending",
-                                          "upload": "pending"}},
+                                          "upload": "pending",
+                                          "note": "pending"}},
                                ensure_ascii=False), encoding="utf-8")
             except Exception:                             # noqa: BLE001
                 self._pending_marker = None
@@ -1292,31 +1369,21 @@ class TestSession:
         return [p for p in cand if p.is_file()]
 
     # ---- 崩溃 journal（就是那个 `.pending.json`，不是第二套机制）----
-    def _journal(self, **steps) -> None:
-        """把「哪几步做完了」写进崩溃 journal（tmp→rename，**失败一律吞**）。
+    def _journal(self, **fields) -> None:
+        """把「哪几步做完了」写进崩溃 journal。**失败一律吞**（见 `journal_update`）。
 
         ⚠️ 它只是残局记录 —— 绝不能因为它把课 / 收尾拦下来。
         ⚠️ `finish()` 之后 `_pending_marker` 会被清掉（或整个删掉）—— 那之后的
            调用**不许把标记重新写出来**（不然下次启动会对一节收过尾的课
            `recover_pending`）。所以这里先看 `_pending_marker is None`。
+        ⚠️ 形状：`_journal(steps={"report": "done"})` 记**步骤**；
+           `_journal(note_file="…")` 盖**顶层键**（本机信息，不进上传的 meta）。
+           写入端只有一份（`journal_update`），补传那边读的也是同一份。
         """
         mk = getattr(self, "_pending_marker", None)
         if mk is None:
             return
-        try:
-            cur = {}
-            if mk.exists():
-                cur = json.loads(mk.read_text(encoding="utf-8")) or {}
-            if not isinstance(cur, dict):
-                cur = {}
-            cur.setdefault("steps", {})
-            cur["steps"].update({k: v for k, v in steps.items()})
-            cur["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            tmp = mk.with_suffix(".tmp")                 # `<stem>.pending.tmp`
-            tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(mk)
-        except Exception:                                # noqa: BLE001
-            pass
+        journal_update(mk, **fields)
 
     def journal_upload_done(self) -> None:
         """上传那一步排完了（`main.start_upload` 之后调）—— 记一笔并**撤掉 journal**。
@@ -1327,7 +1394,7 @@ class TestSession:
         ⚠️ 幂等：上传关着（`CLASSLIVE_UPLOAD=0`）时 `finish()` 已经删过 ——
            这里 `_pending_marker is None` 直接返回。
         """
-        self._journal(upload="done")
+        self._journal(steps={"upload": "done"})
         mk = getattr(self, "_pending_marker", None)
         if mk is None:
             return
@@ -1779,6 +1846,89 @@ class TestSession:
         s = device_cheap()
         s["t_s"] = round(now - self.t0, 1)
         dev["samples"].append(s)
+        # ⭐ 3.10：**临时报告快照**（搭同一趟 10 分钟的车）—— 收尾要是被打断
+        #    （合盖 / 被杀 / 断电），下次启动补传的就是这一份（好过什么都没有）。
+        self._snapshot_report()
+
+    def _snap_stats(self) -> dict:
+        """课中快照的账（进正式报告，见 `report_payload`）。"""
+        return {"n": self._snap_n, "last_ms": self._snap_ms,
+                "last_bytes": self._snap_bytes,
+                "off": (self._snap_off or None)}
+
+    def _snapshot_report(self) -> None:
+        """课中把当前 `report.json` 内容**临时落一份**（标 `provisional`）。永不抛。
+
+        ## 为什么要有它
+
+        正式报告是**内存里那些累加器的快照** —— 进程一死（合盖 / 强杀 / 断电）
+        就什么都没了，而 `recover_pending` 只能补传**已经落盘**的东西。课中每
+        10 分钟先落一份"到目前为止"，最坏情况下补传的是它（标记 `provisional`，
+        读的人一眼知道这不是完整版）。
+
+        ## 三条纪律
+
+        - **原子**（`_atomic_json`，tmp→rename）：半截 JSON 不冒充报告
+          （`recover_pending` 按文件名收它，不解析内容）。
+        - **≤ `PROVISIONAL_MAX_MS`**：构建 + 序列化超过预算就**不再采** ——
+          每 10 分钟一次的开销也不许失控（快照只是"好过没有"，不值大钱）。
+        - **跑在后台短命线程上**：本函数由 `note_device_tick` 调，而它跑在**音频
+          循环**上 —— 一大坨 `json.dumps` 在 GIL 下会顶住音频回调（那是这个工具
+          最不能出的毛病）。一次只跑一个（`_snap_thread`），收尾前收干净。
+        """
+        if self.stem is None or self._snap_off:
+            return
+        th = self._snap_thread
+        if th is not None and th.is_alive():
+            return                                           # 上一份还没写完
+        try:
+            self._snap_thread = threading.Thread(
+                target=self._snapshot_worker, daemon=True, name="cl-snap")
+            self._snap_thread.start()
+        except Exception:                                    # noqa: BLE001
+            pass                                             # 起不了线程 -> 这次不采
+
+    def _snapshot_worker(self) -> None:
+        """快照线程本体：构建 -> 量耗时 -> 在预算内才落盘。**永不抛。**"""
+        try:
+            t0 = time.monotonic()
+            payload = self.report_payload(provisional=True)
+            blob = json.dumps(payload, ensure_ascii=False, indent=1)
+            ms = (time.monotonic() - t0) * 1000
+            if ms > PROVISIONAL_MAX_MS:
+                # ⚠️ 超预算 -> **这次不写、以后也不采**（记一条 event 说明为什么；
+                #    报告里 `provisional_snapshots.off` 也能看到）。
+                self._snap_off = f"构建+序列化 {ms:.0f} ms > {PROVISIONAL_MAX_MS:.0f} ms"
+                self.events.append({"t": round(time.monotonic() - self.t0, 2),
+                                    "kind": "provisional_skipped",
+                                    "detail": self._snap_off})
+                return
+            out = str(self.stem) + ".report.json"
+            # ⚠️ 与 `finish` 的正式写入**同一把锁**，且**收尾一开始就不许写**
+            #    （`_finishing`）—— "临时的"盖掉"正式的"是这一块唯一会丢数据的方式。
+            with self._snap_lock:
+                if self._finishing:
+                    return
+                ok = _atomic_json(out, payload)
+            if ok:
+                self._snap_n += 1
+                self._snap_ms = round(ms, 1)
+                self._snap_bytes = len(blob.encode("utf-8"))
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    def _finish_snapshots(self) -> None:
+        """收尾前把快照线程收干净（有界）—— 别让"临时的"盖掉"正式的"。永不抛。
+
+        ⚠️ 超时（卡在构建里）也不去抢它的锁：`_finishing` 已经置位，它**看到就不会
+           写**；正式那份写入用同一把锁，所以顺序永远是"快照在前、正式的在后"。
+        """
+        th = self._snap_thread
+        if th is not None and th.is_alive():
+            try:
+                th.join(timeout=5.0)
+            except Exception:                                # noqa: BLE001
+                pass
 
     def device_block(self, src=None) -> dict:
         """收尾的 `device` 块：`{start, end, samples}`。**永不抛**（失败 = null）。
@@ -1842,6 +1992,8 @@ class TestSession:
     @_safe_loud
     def finish(self, vad_report: str = "", note_path: str = "",
                bundle: bool = True) -> str | None:
+        # ⚠️ 第一件事：**关掉快照**（`_finishing`）—— 之后任何迟到的快照都不许写。
+        self._finishing = True
         if self._wav is not None:
             self._close_wav()
         if self.stem is None:
@@ -1869,13 +2021,57 @@ class TestSession:
             self.audio_files += [p for p in self._transcode.finished()
                                  if p not in self.audio_files]
             self.audio_files += [w for w in self._wav_paths if w.exists()]
-            self._journal(transcode=("done" if not any(w.exists() for w in self._wav_paths)
-                                     else "pending"))
+            self._journal(steps={"transcode": (
+                "done" if not any(w.exists() for w in self._wav_paths) else "pending")})
         # ⚠️⚠️ **标记不在这里删**（3.10 改）：原来一进门就删 —— 之后"报告写到一半
         #    被杀 / 排上传之前被杀"就**没有任何残局记录**（音频与报告永远不上传）。
         #    现在它活到"上传已排队"（`journal_upload_done`，收尾那边调）；
         #    上传**关着**时没人会来排 —— 那时在 `finish()` 末尾自己撤（见下）。
 
+        # ⭐ 报告内容：**唯一构建点**是 `report_payload`（课中那份临时快照也用它，
+        #    见 `_snapshot_report`）。⚠️ 先把课中那个快照线程收干净 —— 它写的也是
+        #    这个路径，别让"临时的"盖掉"正式的"。
+        self._finish_snapshots()
+        report = self.report_payload(vad_report=vad_report, note_path=note_path)
+        out = str(self.stem) + ".report.json"
+        # ⚠️ 与快照线程**同一把锁**（见 `_finish_snapshots`）—— 正式的这份必须是
+        #    最后落盘的那份。
+        with self._snap_lock:
+            _atomic_json(out, report)
+        # ⭐ 报告落盘了 —— journal 记一笔（它已经不只是"崩溃标记"，见 `_journal`）。
+        self._journal(steps={"report": "done"})
+        # ⭐⭐ 笔记那一步：`note_path` 是 writer 交上来的**落点**（没写成时是空串）。
+        #     ⚠️ 只记"知道落点"，`done` 要**文件真在**才记 —— 不然补传那边会以为
+        #        这节课有笔记、跳过重建。
+        _np = str(note_path or "")
+        if _np:
+            self._journal(note_file=_np)
+            if pathlib.Path(_np).is_file():
+                self._journal(steps={"note": "done"})
+        if bundle:
+            self.bundle_path = make_bundle(self.stem, out, self.session_path,
+                                           audio_paths=getattr(self, "audio_files", []))
+        # ⚠️ 上传**关着**时没人会来调 `journal_upload_done()` —— 那时在这里自己撤。
+        #    ⚠️ 判据与 `main.start_upload` **同一个**（`upload.upload_enabled()`），
+        #       不许各写一份 env 判断。
+        if not upload_mod.upload_enabled():
+            self.journal_upload_done()
+        return out
+
+    def report_payload(self, *, vad_report: str = "", note_path: str = "",
+                       provisional: bool = False) -> dict:
+        """这节课 `report.json` 的内容 —— **唯一构建点**。
+
+        两个调用方：收尾的正式版（`finish`）与课中每 10 分钟的临时快照
+        （`_snapshot_report`）。字段口径**不许各写一份** —— 快照要是少了哪一格，
+        崩溃补传上去的那份报告就缺那一格，而没人会知道是"快照没采"还是"真没有"。
+
+        ⚠️ `provisional=True` 时**不碰共享状态**：`_extra` 里那几个派生格
+           （`ui.view` / `merge.items` / `backfill.items`）是 `setdefault` 语义
+           （"外部显式 `note_block` 过就以它为准"），而快照跑在**课中** ——
+           它要是先填了，收尾那份正式报告就会拿到 10 分钟前的旧 items
+           （merge / backfill 会少最后一段）。所以快照用副本。
+        """
         dur = time.monotonic() - self.t0
         cpu = self._cpu() - self._cpu0
         rms_all = float(np.sqrt(self._sum_sq / max(self._n_samples, 1)))
@@ -1908,20 +2104,43 @@ class TestSession:
         # ⭐ UI 使用度是**累加**出来的（`note_ui` 每次自增），不经 `note_block` ——
         #    收尾这里补进 `_extra`，让七格在报告里**形状一致**（都在 `blocks` 下）。
         #    ⚠️ 用 `setdefault` 是防"调用方也显式 note_block 过一次 ui"（那样以它为准）。
-        self._extra.setdefault("ui", dict(self._ui))
         # ⭐ 3.9.8：新采的那些格落在**已有的块**里（形状与既有的 `zh_overflow` / `hidden_s`
         #    一致），不另建顶层键 —— `block_names` 那套"该有哪几块"的清单因此不用动形状。
+        #    ⚠️⚠️ 快照（`provisional`）走**副本**：`setdefault` 是"先到先得"，而快照
+        #       跑在课中 —— 它要是先填了，正式报告就拿到 10 分钟前的旧 items。
+        #       见 `report_payload` 的 docstring。
         self._view_close()
-        _ui = self._extra.get("ui")
-        if isinstance(_ui, dict):
+        if provisional:
+            extra = dict(self._extra)
+            _ui = dict(extra.get("ui") or {})
             _ui.setdefault("streamq_dwell_ms", dwell_summary(self._sq_ms))
             _ui.setdefault("view", self._view_block())
-        _mg = self._extra.setdefault("merge", {})
-        if isinstance(_mg, dict):
+            extra["ui"] = _ui
+            _mg = dict(extra.get("merge") or {})
             _mg.setdefault("items", list(self._merge_items))
-        _bf = self._extra.setdefault("backfill", {})
-        if isinstance(_bf, dict):
+            extra["merge"] = _mg
+            _bf = dict(extra.get("backfill") or {})
             _bf.setdefault("items", list(self._backfill_items))
+            extra["backfill"] = _bf
+        else:
+            self._extra.setdefault("ui", dict(self._ui))
+            _ui = self._extra.get("ui")
+            if isinstance(_ui, dict):
+                _ui.setdefault("streamq_dwell_ms", dwell_summary(self._sq_ms))
+                _ui.setdefault("view", self._view_block())
+            _mg = self._extra.setdefault("merge", {})
+            if isinstance(_mg, dict):
+                _mg.setdefault("items", list(self._merge_items))
+            _bf = self._extra.setdefault("backfill", {})
+            if isinstance(_bf, dict):
+                _bf.setdefault("items", list(self._backfill_items))
+            extra = self._extra
+        # 课中快照：正式那份还没成型（收尾才填 `audio_files`）—— 列**盘上现在有的**
+        # （wav 与后台已经转好的 opus），读的人一眼知道音频到哪一步了。
+        _audio_files = list(getattr(self, "audio_files", []))
+        if provisional and not _audio_files:
+            _audio_files = ([p for p in self._wav_paths if p.exists()]
+                            + [p for p in self._transcode.finished() if p.exists()])
         report = {
             "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
             "session_file": str(self.session_path) if self.session_path else None,
@@ -1929,7 +2148,7 @@ class TestSession:
             "audio_saved": bool(self.record_audio),
             # ⭐ 分段之后是**多个**文件（`<stem>.001.opus` …）。⚠️ 空表 = 没录，
             #    或者**转码全失败了**（后者看 `events` 里的 `transcode_failed`）。
-            "audio_files": [str(x) for x in getattr(self, "audio_files", [])],
+            "audio_files": [str(x) for x in _audio_files],
             "duration_s": round(dur, 1),
             "audio": {
                 "n_samples": self._n_samples,
@@ -2007,7 +2226,7 @@ class TestSession:
             # ⭐ 七格采集面里那些「整块快照」（`note_block` 收的）。
             # ⚠️ `block_names` 是**该有哪几块**的清单 —— 缺了就一眼看得出来
             #    （不然读报告的人分不清「没采到」和「本来就没有」）。
-            "blocks": self._extra,
+            "blocks": extra,
             "block_names": sorted(BLOCKS),
             # ⚠️ `_safe` 吞掉的采集异常按方法名计数 —— **空 = 采集全干净**。
             #    没有它，「采集坏了」和「本来就没数据」在报告里长得一模一样。
@@ -2018,19 +2237,14 @@ class TestSession:
             #       （口径定义在 `feature_usage.py`，判据在 `tests/test_feature_usage.py`）。
             #    ⚠️ 老文件里没这些事件 → 全零的块（渲染端不用 if）。
             "feature_usage": feature_usage.block(self.events),
+            # ⭐ 3.10：课中那份临时快照的**开销账**（采过几次 / 最近一次多少 ms /
+            #    多少字节 / 为什么停采）—— 正式报告里也带上，"快照值不值"有数可查。
+            #    ⚠️ 一次都没采过就没有这个键（"没采"与"采了 0 次"不是一回事）。
+            **({"provisional_snapshots": self._snap_stats()} if self._snap_n else {}),
             "segments": segs,
         }
-        out = str(self.stem) + ".report.json"
-        with open(out, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=1)
-        # ⭐ 报告落盘了 —— journal 记一笔（它已经不只是"崩溃标记"，见 `_journal`）。
-        self._journal(report="done")
-        if bundle:
-            self.bundle_path = make_bundle(self.stem, out, self.session_path,
-                                           audio_paths=getattr(self, "audio_files", []))
-        # ⚠️ 上传**关着**时没人会来调 `journal_upload_done()` —— 那时在这里自己撤。
-        #    ⚠️ 判据与 `main.start_upload` **同一个**（`upload.upload_enabled()`），
-        #       不许各写一份 env 判断。
-        if not upload_mod.upload_enabled():
-            self.journal_upload_done()
-        return out
+        if provisional:
+            # ⚠️ 读的人一眼知道"这不是完整版"（收尾那份没有这个键）。
+            report["provisional"] = True
+            report["snapshot_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        return report

@@ -13,6 +13,30 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tour
 
 
+def _pump(dt: float = 0.02) -> None:
+    """跑一拍 run loop —— 卡片收放是 60fps 自己驱动的 `callLater`，得排空 NSApp 事件队列。
+
+    ⚠️ 别用 `NSRunLoop.runMode_beforeDate_`：没有输入源时它**立刻返回**（实测 0.00s），
+       动画一拍都不走（2026-10-18 第一版这么写、判据当场红）。
+    """
+    from AppKit import NSApp, NSDate, NSDefaultRunLoopMode
+    ev = NSApp.nextEventMatchingMask_untilDate_inMode_dequeue_(
+        2 ** 30, NSDate.dateWithTimeIntervalSinceNow_(dt), NSDefaultRunLoopMode, True)
+    if ev:
+        NSApp.sendEvent_(ev)
+
+
+def _pump_until(pred, budget: float = 2.0) -> bool:
+    """一直跑到 `pred()` 为真（或超时）。"""
+    import time
+    end = time.monotonic() + budget
+    while time.monotonic() < end:
+        if pred():
+            return True
+        _pump()
+    return bool(pred())
+
+
 class Content(unittest.TestCase):
     def test_short_enough_to_be_finished(self):
         # Chameleon：3 步 72% → 4 步 45% → 7 步 16%；前 1% 没有超过 5 步的
@@ -58,6 +82,27 @@ class Content(unittest.TestCase):
                 continue
             a, b = [float(x) for x in re.findall(r"[\d.]+", sub)[-2:]]
             self.assertAlmostEqual(round((a - b) / a * 100), int(big.rstrip("%")), delta=1, msg=f"{lab}: {sub}")
+
+    def test_page_height_fits_content(self):
+        # ⭐ 卡片高度 = **这一页**的内容 + 固定留白（作者 2026-10-18：卡片跟着内容收，
+        #    三行字的页不再背数字页留下的 122pt 空带）。
+        # ⚠️ 变异验证：`page_height` 改回按最高页取 -> 这条红。
+        chrome = tour.page_height(("x", "t", ()))
+        top_chrome = tour.PAD + tour.BADGE + 14 + tour.TITLE_H + 8
+        for sym, ttl, lines in tour.PAGES:
+            self.assertAlmostEqual(tour.page_height((sym, ttl, lines)),
+                                   chrome + tour.body_h(lines), delta=0.01, msg=ttl)
+            # 裁剪线（`FOOT_ZONE`）与高度公式里脚注下面那一段必须**同一个式子**
+            # （改一处忘另一处 -> 红；见 `test_page_content_is_clipped_at_the_footer`）
+            self.assertAlmostEqual(tour.page_height((sym, ttl, lines)),
+                                   top_chrome + tour.body_h(lines) + tour.FOOT_ZONE,
+                                   delta=0.01, msg=ttl)
+        self.assertLess(tour.page_height(("x", "t", ("一行",))),
+                        tour.page_height(("x", "t", ("一行", "两行"))), "行少的页要更矮")
+        self.assertLess(tour.page_height(tour.PAGES[1]), tour.page_height(tour.PAGES[0]),
+                        "文字页（三行）要比数字页（2×2 格）矮")
+        self.assertLessEqual(tour.page_height(tour.PAGES[0]), tour.height(tour.PAGES),
+                             "没有哪一页能高过画布")
 
     def test_quoted_labels_exist_in_the_app(self):
         # tour.py 文件头规矩：**文案里提到的每个按钮 / 符号都要在界面上真的存在**（别照抄 README）。
@@ -179,6 +224,48 @@ class Behaviour(unittest.TestCase):
             pos.append((c["_title"].frame().origin.y, c["_badge"].frame().origin.y))
             c["next"]() if c["page"]() < len(tour.PAGES) - 1 else None
         self.assertEqual(len(set(pos)), 1, pos)
+
+    def test_top_edge_fixed_and_height_per_page(self):
+        # ⭐ 翻页：**顶边不动**（标题屏幕位置不跳）、高度 = 那一页的 `page_height`（底边收放）。
+        #    ⚠️ 收放是 60fps 自己驱动的 —— 每次翻页 pump 到走完（`motion.MOVE_S` + 余量）；
+        #       中间再抓一次顶边，钉住「动画途中也不跳」。
+        # ⚠️ 变异验证：`_fit` 里 `top` 改取底边（origin 不动、只改高）-> 这条红。
+        c = self.card
+        tops, tys = [], []
+        for i in range(len(tour.PAGES)):
+            f = c["panel"].frame()
+            tops.append(round(f.origin.y + f.size.height, 1))
+            self.assertAlmostEqual(f.size.height, tour.page_height(tour.PAGES[i]), delta=0.5,
+                                   msg=f"第 {i + 1} 页高度要按内容算")
+            r = c["_title"].convertRect_toView_(c["_title"].bounds(), None)   # -> 窗口坐标
+            tys.append(round(f.origin.y + r.origin.y, 1))
+            if i < len(tour.PAGES) - 1:
+                c["next"]()
+                _pump(0.04); _pump(0.04)         # 动画途中（~0.08s，60fps 已走了几帧）
+                f = c["panel"].frame()
+                self.assertAlmostEqual(f.origin.y + f.size.height, tops[0], delta=1.0,
+                                       msg=f"第 {i + 2} 页收放途中顶边跳了")
+                self.assertTrue(
+                    _pump_until(lambda: abs(c["panel"].frame().size.height
+                                            - tour.page_height(tour.PAGES[i + 1])) < 0.5),
+                    f"第 {i + 2} 页收放没走到位（还差 "
+                    f"{c['panel'].frame().size.height - tour.page_height(tour.PAGES[i + 1]):.0f}pt）")
+        self.assertEqual(len(set(tops)), 1, f"顶边要钉住: {tops}")
+        self.assertEqual(len(set(tys)), 1, f"标题屏幕位置要钉住: {tys}")
+        self.assertLess(c["panel"].frame().size.height, tour.height(tour.PAGES),
+                        "最后一页（三行）不该还是画布那么高")
+
+    def test_page_content_is_clipped_at_the_footer(self):
+        # 收放动画途中内容滑过裁剪线要被**裁掉**（不钻到进度点 / 按钮底下，2026-10-18 拍到过）：
+        # 裁剪层存在、开着 masksToBounds、下沿正好在 `FOOT_ZONE`、顶边贴住窗口顶边。
+        # ⚠️ 变异验证：去掉 `setMasksToBounds_(True)` -> 这条红。
+        clip = self.card["_clip"]
+        self.assertTrue(clip.layer().masksToBounds(), "裁剪层要开着 masksToBounds")
+        f = clip.frame()
+        self.assertAlmostEqual(f.origin.y, tour.FOOT_ZONE, delta=0.5, msg="裁剪线下沿")
+        self.assertAlmostEqual(f.origin.y + f.size.height,
+                               self.card["panel"].frame().size.height, delta=0.5,
+                               msg="裁剪层顶边要贴住窗口顶边（内容从顶对齐）")
 
     def test_current_dot_is_the_pill(self):
         c = self.card

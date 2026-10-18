@@ -94,6 +94,10 @@ LINE_H = 22.0
 DOTS_H = 16.0
 DOT, DOT_PILL, DOT_GAP = 6.0, 18.0, 6.0   # 进度点：当前页拉成胶囊（翻页时从圆点「长」过去）
 FOOT_H = 28.0
+#: 页脚区的高度（离窗口底）：`18 + DOTS_H + 14 + FOOT_H + PAD` —— 与 `page_height`
+#: 里脚注下面那一段是**同一个式子**。⚠️ 它还是页内容的**裁剪线**（`build` 里的 `clip`）：
+#: 收放动画途中内容滑过它就被裁掉，不会钻到进度点 / 按钮底下（2026-10-18 拍到的）。
+FOOT_ZONE = 18.0 + DOTS_H + 14.0 + FOOT_H + PAD
 TILE_H = 76.0          # 数字格：大数字 30 + 一句话 17 + 旧→新 14，上下各留约 8（原 66 时末行离底只剩 4pt）
 TILE_GAP = 8.0
 #: 数字格一行放几个。⚠️ 3.10 起是 **2×2**：四格挤一行时格宽只剩 97pt，「错字更少，模型能力更强」
@@ -128,8 +132,22 @@ def body_h(body) -> float:
 
 
 def height(pages=PAGES) -> float:
-    """卡片高度按**最高那一页**算 —— 翻页时窗口不跳（矮的那页正文顶对齐，下面留白）。"""
+    """**内容画布**的高度（按最高那一页算）。
+
+    ⚠️ 3.10 起这不是**窗口**高度：窗口跟着当前页收放（`page_height`），画布仍是
+    最高页那么大 —— 各页子视图的坐标因此永远相对画布顶算，翻页不用重排一个字。
+    """
     return PAD + BADGE + 14 + TITLE_H + 8 + max(body_h(p[2]) for p in pages) + 18 + DOTS_H + 14 + FOOT_H + PAD
+
+
+def page_height(page) -> float:
+    """纯函数：**这一页**的卡片高度 = 它的内容 + 固定留白。
+
+    作者 2026-10-18：卡片跟着内容收 —— 三行字的页不再背一条数字页留下的空带
+    （原来窗口恒等于最高页，第 2–5 页底部空 122pt）。窗口的收放见 `build._fit`：
+    **顶边不动、底边收放**，标题因此永不跳。
+    """
+    return PAD + BADGE + 14 + TITLE_H + 8 + body_h(page[2]) + 18 + DOTS_H + 14 + FOOT_H + PAD
 
 
 def dots(i: int, n: int) -> list:
@@ -170,10 +188,16 @@ def build(on_done=None, pages=PAGES):
         p.setHasShadow_(True)
         white = NSColor.whiteColor()
 
-        # 翻页时换的东西都在这一层里，整层淡入淡出（按钮和进度点不动）
+        # 翻页时换的东西都在这一层里，整层淡入淡出（按钮和进度点不动）。
+        # ⚠️ 外面再套一层 `clip`：裁剪线在页脚上沿（`FOOT_ZONE`）—— 收放动画途中
+        #    内容（脚注那一行）滑过它就被裁掉，不会钻到进度点 / 按钮底下（2026-10-18 拍到）。
+        clip = NSView.alloc().initWithFrame_(NSMakeRect(0, FOOT_ZONE, WIDTH, h - FOOT_ZONE))
+        clip.setWantsLayer_(True)
+        clip.layer().setMasksToBounds_(True)
+        ve.addSubview_(clip)
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, h))
         content.setWantsLayer_(True)
-        ve.addSubview_(content)
+        clip.addSubview_(content)
 
         def label(rect, size, *, alpha=1.0, weight=_W):
             lb = NSTextField.alloc().initWithFrame_(rect)
@@ -334,6 +358,56 @@ def build(on_done=None, pages=PAGES):
                 note.setStringValue_(STATS_NOTE)
                 note.setFrameOrigin_((PAD, body_top - off - body_h(lines)))
 
+        def _apply(top, h_t, x0):
+            """把 6 个框一次摆到「高 h_t、顶边 top」：窗口 + 玻璃 + scrim + 拖拽层 + 裁剪层 + 内容层。
+
+            ⚠️ 动画是**自己驱动**的（`motion.ease_out`，同 motion.py 那条 ease-out-cubic）：
+               NSWindow 的 animator 代理实测只认 `setFrameOrigin_` / `setFrame_display_`，
+               没有 `setFrame_`；而 `setFrame_display_animate_` 自带的时长/曲线改不了。
+               每帧 5 个直调 `setFrame_` 反而把「顶边不动」钉在构造里（见 `_fit`）。
+            """
+            p.setFrame_display_(NSMakeRect(x0, top - h_t, WIDTH, h_t), True)
+            box = NSMakeRect(0.0, 0.0, WIDTH, h_t)
+            ve.setFrame_(box)
+            fp.scrim.setFrame_(box)
+            fp.drag.setFrame_(box)
+            clip.setFrame_(NSMakeRect(0.0, FOOT_ZONE, WIDTH, h_t - FOOT_ZONE))
+            content.setFrameOrigin_((0.0, h_t - FOOT_ZONE - h))   # 内容层顶边贴住裁剪层顶边
+
+        def _fit(i, animate):
+            """把窗口收/放到第 `i` 页需要的高度：**顶边不动、底边收放**（标题永不跳）。
+
+            ⚠️ 动画只动 6 个框（`_apply`）—— 其余子视图的坐标是「相对内容层顶」
+               （图标/标题/正文/格子/脚注）或「相对窗口底」（按钮/进度点）的**常量**，
+               跟着这两层走就自动对位（不逐个子视图算）。屏幕上的不动点 = 顶边：
+               `origin.y + 高` 恒等于 `top`，内容层在裁剪层里的 y 恒等于 `裁剪层高 − 画布`。
+            ⚠️ 档位取 `motion.MOVE_S`（「有位移的」那一档）+ 同一条 ease-out-cubic；
+               弹簧仍只归按钮按压（motion.py 那条纪律），窗口收放不是按压反馈。
+               「减弱动态效果」开着 → 直接落位（HIG）。
+            """
+            h_t = page_height(pages[i])
+            f = p.frame()
+            top = f.origin.y + f.size.height            # 顶边（屏幕坐标）—— 翻页的不动点
+            x0 = f.origin.x
+            h0 = f.size.height
+            if not animate or _reduce_motion() or abs(h_t - h0) < 0.5:
+                _apply(top, h_t, x0)
+                return
+            import time
+            from PyObjCTools import AppHelper
+            t0 = time.monotonic()
+            gen = state["fit_gen"] = state.get("fit_gen", 0) + 1
+
+            def tick():
+                if state.get("fit_gen") != gen or state["closed"]:
+                    return                              # 被新的一次收放 / 关闭接管
+                t = motion.progress(t0, time.monotonic(), motion.MOVE_S)
+                _apply(top, h0 + (h_t - h0) * motion.ease_out(t), x0)
+                if t < 1.0:
+                    AppHelper.callLater(1.0 / 60.0, tick)
+
+            tick()
+
         def show(i, animate=True):
             if animate and not _reduce_motion():
                 from Quartz import CATransition
@@ -343,6 +417,7 @@ def build(on_done=None, pages=PAGES):
                 t.setTimingFunction_(motion.ca_timing())
                 content.layer().addAnimation_forKey_(t, "page")
             fill(i)
+            _fit(i, animate)
             set_dots(i, animate=animate and not _reduce_motion())
             last = i == len(pages) - 1
             retitle(nxt, "开始用" if last else "下一步")
@@ -385,7 +460,8 @@ def build(on_done=None, pages=PAGES):
         p.orderFrontRegardless()      # ⚠️ 不是 makeKeyAndOrderFront —— 绝不抢焦点
         return {"panel": p, "next": go_next, "back": go_back, "close": close,
                 "page": lambda: state["i"], "_targets": targets,
-                "_title": title, "_badge": badge, "_dots": dot_views}
+                "_title": title, "_badge": badge, "_dots": dot_views,
+                "_content": content, "_clip": clip}
     except objc_own.ObjcNameCollision:
         raise                         # 程序缺陷，不吞（同 whatsnew.build 那条）
     except Exception:                                     # noqa: BLE001

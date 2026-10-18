@@ -225,6 +225,19 @@ MODE_CHIP_BORDER_ALPHA = 0.15     # 描边宽 = 1 物理像素（Retina 上 0.5p
 MODE_CHIP_FONT_PT = 13.0          # 中等字重（HIG 正文默认字号）；同排动作按钮仍是 14pt 常规
 MODE_CHIP_H = 22.0                # 圆角 = 高 / 2 → 整圆胶囊
 MODE_CHIP_PAD = 10.0              # 在普通按钮 +10 之上再加 → 左右合计约 20pt
+#: 「↓ N 句新的」——往回翻时浮在转录区右下角的提示。
+#: ⚠️ 颜色 / 描边 / 圆角**复用** `MODE_CHIP_*`（同源，不另起 token）；只有尺寸单独
+#: 定义，且**比模式胶囊小一档**（作者 10-17：「胶囊做得更紧凑一点，现在有点大」）。
+#: 这四个数是**钉住的观感**：改它们 = 改样子，`tests/test_scroll_follow.py` 会红，
+#: 必须是有意的（那个用例同时量「标题装得进这个框」）。
+NEWLINE_FONT_PT = 12.0            # 字号（模式胶囊 13pt；`_ui_font` 自带 Medium 字重）
+NEWLINE_H = 19.0                  # 高（模式胶囊 22）
+NEWLINE_PAD = 6.0                 # 左右内边距（模式胶囊 10）
+NEWLINE_MIN_W = 56.0              # 最小宽（「↓ 1 句新的」也得是个点得中的目标）
+NEWLINE_INSET_B = 4.0             # 离转录区**底边**的距离（新内容那一头；原 6 → 4）
+#: 箭头与文字的间距：**细空格**（普通空格在 12pt 下太开，作者要求「间距收紧」）。
+#: ⚠️ 只进标题字符串，量宽/判据照旧量整串（没有第二套排版）。
+NEWLINE_ARROW_GAP = "\u2009"
 MODE_CHIP_ANIM_S = motion.STATE_S   # 切档：字淡入淡出 + 宽度过渡（时长统一在 motion.py）
 MODE_CHIP_HOVER_S = motion.FEEDBACK_S
 #: 切档时**整排 frame 过渡比文字淡换晚**这么多秒。来源: 字体/动效报告 §5 A7。
@@ -1316,12 +1329,19 @@ class Overlay:
                 NSColor.whiteColor().colorWithAlphaComponent_(0.80), self._trunc)
         f_big = (_ui_font(18.0),
                  NSColor.whiteColor(), NSLineBreakByWordWrapping)
+        #: 「↓ N 句新的」（往回翻时浮在转录区右下角）。⚠️ 先置 None: TranscriptView 的
+        #: `on_follow_change` 回调可能在 `_btn_new` 建好之前就被调（构造期的
+        #: `set_collapsed(True)` 会走 `scroll_to_bottom`），`_sync_newline_pill` 里
+        #: `getattr(self, "_btn_new", None)` 兜住那一下。
+        self._btn_new = None
+        self._pill_w = 0.0
         self._tv = TranscriptView(
             ve, self._label, f_zh, f_en, f_big,
             self._width, PAD, ROW_EN_H, ROW_GAP, ROW_ZH_H, ROW_H,
             max_scroll_h=self._expanded_h,
             measure=_measure_text_h,
-            wrap_zh=lambda t, w, final, _f=f_zh[0]: _wrap_zh(t, w, _f, final))
+            wrap_zh=lambda t, w, final, _f=f_zh[0]: _wrap_zh(t, w, _f, final),
+            on_follow_change=self._on_tv_follow_change)
         self._tv.set_collapsed(True)      # 初始收回态: 滚轮必须从一开始就被吞掉
         self._tv.set_d_style(LAYOUT_D)
         # 载入的宽度可能是窄窗(上次拖过) -> 立刻按它定行尺寸, 否则会先用 2 行的
@@ -1524,6 +1544,14 @@ class Overlay:
         #    （原来那份宽度被一个不可点的隐藏按钮吃掉 —— 见下面 `_layout` 的注释）。
         self._bar = [self._btn_lost, self._btn_ask, self._btn_topic,
                      self._btn_trans, self._btn_hide, self._btn_close]
+        # ---- 「↓ N 句新的」（往回翻时的提示，2026-10-17）----
+        # ⭐ 为什么要有它: 「闲置 6s 自动回底」删了（见 `transcript_view` 文件头
+        #    「视口归谁」）—— 新内容在下面**静默累积**，读者得有个**看得见**的出口:
+        #    这是唯一的回底入口（另一个是用户自己滚到底）。它浮在转录区右下角
+        #    （新内容那一头），只在"往回翻 **且** 下面真攒了定稿"时出现。
+        self._btn_new = self._button("", self._to_latest, "回到最新一句（有 N 句新的）")
+        self._btn_new.setHidden_(True)
+        self._style_newline_pill()
         self._sync_trans_button()
         self._install_bar_hover()
         self._install_status_item()               # 菜单栏: 鼠标穿透开关 + 退出
@@ -2251,6 +2279,7 @@ class Overlay:
         self._render_draft()
         self._scroll_y = BOTTOM_PAD + self._pinned
         self._tv.set_frame(self._scroll_y, self._scroll_h)           # 转录区
+        self._sync_newline_pill()          # 「↓ N 句新的」跟着转录区几何走
         # 顶栏: 从右边缘往左摆(列表是左->右顺序, 故 reversed)。sizeToFit 取文字
         # 实际宽度, 加内边距; 图标(⭐/✕)保底 28px 点击区 —— 它们的字形只有 15-24px,
         # 直接按字宽会给一个点不中的小目标。
@@ -3698,7 +3727,7 @@ class Overlay:
         if busy:
             self._last_ev_t = now
         self._last_pump_t = self._clock()
-        self._tv.tick()          # 跟随状态机 + 闲置回底(含滚动后的池重算) + 新行上滚的逐帧推进
+        self._tv.tick()          # 跟随状态机(含滚动后的池重算) + 新行上滚的逐帧推进
         if self._draft_fade_t0 is not None or self._draft_rev:
             # 草稿让位的淡出 / 改字淡换的逐帧推进(都只改透明度, 见 _render_draft)
             self._render_draft()
@@ -3793,6 +3822,92 @@ class Overlay:
             self._close_outline()
         self._clear_answer()
         self._tv.scroll_to_bottom()
+
+    def _to_latest(self):
+        """「↓ N 句新的」：回到底部跟着最新一句 —— **用户自己点的**，不是自动拽。
+
+        ⚠️ 这是「回底」的两个入口之一（另一个是用户自己滚到底）。自动回底
+        （闲置 6s）2026-10-17 删了，理由见 `transcript_view` 文件头「视口归谁」。
+        """
+        self._note("latest")
+        self._tv.scroll_to_bottom()
+        self._sync_newline_pill()
+
+    def _on_tv_follow_change(self, _follow: bool) -> None:
+        """TranscriptView 刚翻了跟随态（用户滚走 / 滚回底 / 接管）—— 同步那个提示。
+
+        ⚠️ 它从 `tick` / `_paint` 里被调（AppKit 主线程），只许做**一次**便宜的状态
+        同步：不改布局、不画（`_layout` / `_render` 各自还会再调一次 `_sync_newline_pill`）。
+        """
+        self._sync_newline_pill()
+
+    def _style_newline_pill(self) -> None:
+        """「↓ N 句新的」的外观：尺寸比模式胶囊小一档，**配方同源**（圆角 / 描边 / 底色
+        都取 `MODE_CHIP_*` 那几个 token，不另起一套）。"""
+        from AppKit import NSColor, NSScreen
+        b = getattr(self, "_btn_new", None)
+        if b is None:
+            return
+        try:
+            b.setFont_(_ui_font(NEWLINE_FONT_PT))         # A2: 与字幕同一个字体出口
+            b.setContentTintColor_(NSColor.whiteColor().colorWithAlphaComponent_(
+                MODE_CHIP_TEXT_ALPHA))
+            b.setWantsLayer_(True)
+            lay = b.layer()
+            lay.setCornerRadius_(NEWLINE_H / 2.0)         # 整圆胶囊，同模式胶囊的做法
+            scale = NSScreen.mainScreen().backingScaleFactor() if NSScreen.mainScreen() else 2.0
+            lay.setBorderWidth_(1.0 / (scale or 2.0))
+            lay.setBorderColor_(NSColor.whiteColor().colorWithAlphaComponent_(
+                MODE_CHIP_BORDER_ALPHA).CGColor())
+            lay.setBackgroundColor_(NSColor.whiteColor().colorWithAlphaComponent_(
+                MODE_CHIP_BG_ALPHA).CGColor())
+        except Exception:                                 # noqa: BLE001 外观是锦上添花
+            pass
+
+    def _newline_pill_width(self, title: str) -> float:
+        """这个标题要多宽（`sizeToFit` 实测 + 左右内边距，保底 `NEWLINE_MIN_W`）。
+
+        ⚠️ `sizeToFit` 会**当场改写 frame**（裸文字宽），量完把 frame / 标题还原 ——
+        调用方（`_sync_newline_pill`）随后会摆上正确的 frame。抽成方法是为了让判据
+        能对**任意标题**量（「文字不被截断」，见 `tests/test_scroll_follow.py`）。
+        """
+        b = self._btn_new
+        old_frame, old_title = b.frame(), b.title()
+        try:
+            b.setTitle_(title)
+            b.sizeToFit()
+            return max(float(b.frame().size.width) + 2.0 * NEWLINE_PAD, NEWLINE_MIN_W)
+        finally:
+            b.setTitle_(old_title)
+            b.setFrame_(old_frame)
+
+    def _sync_newline_pill(self) -> None:
+        """「↓ N 句新的」的显隐 / 文字 / 位置。**提示**，不是自动回底。
+
+        ⚠️ 每帧路径上（`_render`）也会调它 —— 所以文字没变时只读两个属性就返回；
+        宽度只在文字变了时重量一次（见 `_newline_pill_width`）。
+        """
+        b = getattr(self, "_btn_new", None)
+        if b is None:
+            return
+        n = self._tv.new_since_leave
+        show = bool(n > 0) and not self._tv.following and not self._closed
+        if show:
+            title = f"↓{NEWLINE_ARROW_GAP}{n} 句新的"
+            if b.title() != title:
+                b.setTitle_(title)
+                self._pill_w = 0.0
+        if bool(b.isHidden()) == show:
+            b.setHidden_(not show)
+        if not show:
+            return
+        if self._pill_w <= 0.0:
+            self._pill_w = self._newline_pill_width(b.title())
+        # 右边缘与转录区右边缘对齐（本来就是 0 间隙，收不动）；只收底边那一档。
+        b.setFrame_(((self._width - PAD - self._pill_w,
+                      self._scroll_y + NEWLINE_INSET_B),
+                     (self._pill_w, NEWLINE_H)))
+
     def _symbolize(self, b, symbol: str, label: str, size: float = 16.0) -> None:
         try:
             from AppKit import NSImage, NSImageOnly, NSImageSymbolConfiguration
@@ -4552,6 +4667,9 @@ class Overlay:
                     bool(self._streaming or self._cur_zh or self._cur_en))
         # 草稿与 💡 术语解析钉在面板底部, 不参与滚动
         self._render_draft()
+        # 「↓ N 句新的」：往回翻时下面又攒了几句定稿（`_set_items` 记的数）。
+        # ⚠️ 放这里（而不是 `_set_items` 里）: 提示归宿主画, 视图只报数。
+        self._sync_newline_pill()
         # 术语行 / ❓ 点拨换内容时淡换（2026-10-14 动效一轮：原来一下跳过去）
         self._set_cached("gloss", self._gloss_lbl, self._gloss_text(), fade=True)
         # 不再每次渲染都 orderFrontRegardless(会高频打扰窗口服务)

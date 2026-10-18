@@ -318,7 +318,7 @@ def source_sum_group_conflicts(entries: list) -> list:
     quotes = []
     for g in sorted(sums):
         r = next(x for x in rows if x["group"] == g)
-        quotes.append({"group": g, "ts": r["ts"], "quote": r["quote"]})
+        quotes.append({"group": g, "ts": r["ts"], "quote": r["quote"], "sum": r["sum"]})
     return [{"kind": "source-self-conflict", "groups": sorted(sums), "quotes": quotes}]
 
 

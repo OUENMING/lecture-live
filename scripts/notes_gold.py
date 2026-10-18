@@ -232,10 +232,12 @@ def c7_quote_word_ok(d: dict) -> bool:
     src = " ".join(str(e.get("en") or e.get("asr") or "") for e in (d.get("entries") or []))
     seen = False
     for m in marks:
-        for q in re.findall(r"「([^」]*)…」", m):
+        # 引语可以以 `…` 开头（前面省掉、露出矛盾那截）—— 开头也必须落在词边界上
+        for lead, q in re.findall(r"「(…?)([^」]*)…」", m):
             seen = True
             if re.search(r"[A-Za-z0-9]$", q) and not re.search(
-                    re.escape(q) + r"(?![A-Za-z0-9])", src):
+                    (r"(?<![A-Za-z0-9])" if lead else "") + re.escape(q) + r"(?![A-Za-z0-9])",
+                    src):
                 return False
     return seen
 

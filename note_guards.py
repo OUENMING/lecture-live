@@ -1562,6 +1562,30 @@ def _raw_snip(t: str, n: int = 40) -> str:
     return head.rstrip(" ,;:、，；：") + "…"
 
 
+def _raw_snip_at(t: str, key: str, n: int = 44) -> str:
+    """同 `_raw_snip`，但**必须露出 `key`**（矛盾所在的那截，如 `0.3 plus 0.4`）。**纯函数。**
+
+    ⚠️ 只截开头时，两句引语都停在 `each additional year of…`，读者看不出矛盾在哪
+    （BUSI3243 回放手读）。`key` 落在前 `n` 字之外 → 前面省掉、以 `…` 开头，窗口收在 `key` 后面。
+    """
+    s = str(t or "").strip()
+    k = str(key or "").strip()
+    pos = s.lower().find(k.lower()) if k else -1
+    if pos < 0 or pos + len(k) <= n or len(s) <= n:
+        return _raw_snip(s, n)
+    end = pos + len(k)
+    start = max(0, end - n)
+    if start and re.match(r"[A-Za-z]", s[start - 1:start]):
+        # 起点落在拉丁词中间 → 进到下一个空格之后（只往 key 方向收，不越过 key）
+        sp = s.find(" ", start, pos + 1)
+        start = sp + 1 if sp >= 0 else pos
+    body = s[start:end].lstrip(" ,;:、，；：")
+    tail = s[end:]
+    if tail and len(body) + len(tail) <= n:
+        body, tail = body + tail, ""
+    return ("…" if start else "") + body + ("…" if tail.strip() else "")
+
+
 def _hhmmss(t: str) -> str:
     """`09:33` → `09:33:00`（一律写成 HH:MM:SS）。**纯函数。**"""
     m = re.match(r"\s*(\d{1,2}):(\d{2})(?::(\d{2}))?", str(t or ""))
@@ -1690,7 +1714,7 @@ def flag_conflicts(review: dict, *, entries: list | None = None) -> tuple:
         #    引语保留原有空格（作者 C：不许把英文原话的空格吃掉）。
         q = [x for x in (src.get("quotes") or []) if str(x.get("ts") or "").strip()][:2]
         note = ("（⚠ 课上口述本身前后不一致："
-                + "；".join(f"🎙 {_hhmmss(x['ts'])} 说「{_raw_snip(x['quote'], 44)}」"
+                + "；".join(f"🎙 {_hhmmss(x['ts'])} 说「{_raw_snip_at(x['quote'], x.get('sum', ''), 64)}」"
                            for x in q) + "）") if q else ""
         if note and _find_and_append(secs[src_section - 1], str(q[0].get("quote") or "")[:12],
                                      note, fields=("prose", "pitfalls", "conclusion", "intuition")):

@@ -203,7 +203,7 @@ class C转录矛盾落节(unittest.TestCase):
         out, _extra, _w = ng.flag_conflicts(_raw("v3_busi3243"),
                                             entries=_data("v3_busi3243")["entries"])
         blob = json.dumps(out["sections"][15], ensure_ascii=False)
-        self.assertIn("🎙 09:34:15 说「For each additional year of experience", blob)
+        self.assertRegex(blob, r"🎙 09:34:15 说「…[^」]* [^」]*beta three plus beta four")
         self.assertNotIn("Foreachadditionalyear", blob)
 
     def test_时间跨度判据(self):
@@ -459,6 +459,21 @@ class 标注文案(unittest.TestCase):
                 self.assertIn("两种写法符号相反", m)
                 self.assertNotIn("是另一回事", m)
 
+    def test_矛盾引语露出两组各自的说法(self):
+        """两句引语只截开头会都停在 `each additional year of…`，看不出矛盾在哪。"""
+        self.assertEqual("…of experience adds 0.3 plus 0.4.",
+                         ng._raw_snip_at("And if you're male, every extra year of experience adds 0.3 plus 0.4.",
+                                         "0.3 plus 0.4", 44))
+        self.assertEqual("For each additional year of experience…",       # key 在前 n 字里 → 照旧
+                         ng._raw_snip_at("For each additional year of experience, the slope",
+                                         "year of", 40))
+        self.assertEqual("前面很短 0.3 plus 0.4", ng._raw_snip_at("前面很短 0.3 plus 0.4", "0.3 plus 0.4"))
+        _data("v3_busi3243")                   # 本机没有朋友的转录 → 跳过
+        marks = [m for _i, m in self._marks("v3_busi3243") if "前后不一致" in m]
+        self.assertEqual(1, len(marks), marks)
+        self.assertIn("0.3 plus 0.4", marks[0])
+        self.assertIn("beta three plus beta four", marks[0])
+
     # ④ 引语词边界
     def test_引语按词边界截断(self):
         self.assertEqual("For each additional year of experience…",
@@ -470,11 +485,12 @@ class 标注文案(unittest.TestCase):
             src = " ".join(str(e.get("en") or e.get("asr") or "")
                            for e in (nd.get("entries") or []))
             for i, mark in self._marks(job):
-                for q in re.findall(r"「([^」]*)…」", mark):
+                for lead, q in re.findall(r"「(…?)([^」]*)…」", mark):
                     if not re.search(r"[A-Za-z0-9]$", q):
                         continue                      # 中文/标点收尾，没有词边界问题
                     self.assertIsNotNone(
-                        re.search(re.escape(q) + r"(?![A-Za-z0-9])", src),
+                        re.search((r"(?<![A-Za-z0-9])" if lead else "")
+                                  + re.escape(q) + r"(?![A-Za-z0-9])", src),
                         f"{job} §{i} 切在词中间：…{q[-24:]}…")
 
 

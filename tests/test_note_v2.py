@@ -1060,6 +1060,19 @@ class RenderShape(unittest.TestCase):
         self.assertNotIn("笔记覆盖 0 个", out)
         self.assertIn("没做成逐条对齐", out)
 
+    def test_覆盖度没核对成_核对清单也不许整列标缺失(self):
+        """同 F13 #1，落到 HTML 核对清单的表：`covered` 为空时每行写「未核」，不写「⚠ 缺失」；
+        对齐做成了的那份照旧标缺失。"""
+        pts = [{"ts": "13:31", "point": "A"}, {"ts": "13:32", "point": "B"}]
+        h = nh.note_page(self._data(review={"sections": [SECTION], "lecture_points": pts}))
+        self.assertNotIn("⚠ 缺失", h)
+        self.assertEqual(2, h.count("<td>未核</td>"))
+        self.assertIn("没做成逐条对齐", h)
+        h = nh.note_page(self._data(review={"sections": [SECTION], "lecture_points": pts,
+                                            "covered": [{"point": "A", "section": "S1"}]}))
+        self.assertEqual(1, h.count("⚠ 缺失"))
+        self.assertNotIn("未核", h)
+
     def test_页头与详细版同一个计数_且不写改过(self):
         """F13 #2：md 与 HTML 页头**共用** `checks_headline`；`mismatch` 正文不改
         （`check_review` 的 docstring 明写），不许写"按 📖/📚 改过"。"""

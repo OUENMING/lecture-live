@@ -1365,15 +1365,18 @@ def note_page(d) -> str:
             # 退化档（没有章节骨架的旧会话）：教授知识点清单是模型自己列的，按文字对齐。
             cov = {inline(c.get("point")).lower(): c.get("section")
                    for c in (review.get("covered") or [])}
-            body += ("<h3>覆盖度</h3><p class=\"muted\">教授知识点（按文字对齐；"
-                     "有章节骨架时改成按时间窗算）。</p>"
+            # ⚠️ 与页头 F13 #1 同理：`covered` 为空 = 对齐没做（或没做成），不是一条都没覆盖 ——
+            #    不许整列印「⚠ 缺失」（BUSI3243/ECS170 回放 125/161 条全红）。只列知识点，不判。
+            note = ("教授知识点（按文字对齐；有章节骨架时改成按时间窗算）。" if cov else
+                    "教授知识点。这次没做成逐条对齐，下面只列课上讲了什么，不判覆盖。")
+            body += (f"<h3>覆盖度</h3><p class=\"muted\">{note}</p>"
                      "<table><tr><th>教授讲的（🎙）</th><th>笔记覆盖</th></tr>")
             for p in pts:
                 sec = cov.get(inline(p.get("point")).lower(), "")
                 ok = bool(sec) and sec not in ("缺失", "missing", "-")
+                mark = f"✅ {inline(sec)}" if ok else ("⚠ 缺失" if cov else "未核")
                 body += (f"<tr><td><code>{html.escape(str(p.get('ts') or ''))}</code> "
-                         f"{inline(p.get('point'))}</td><td>"
-                         + (f"✅ {inline(sec)}" if ok else "⚠ 缺失") + "</td></tr>")
+                         f"{inline(p.get('point'))}</td><td>{mark}</td></tr>")
             body += "</table>"
         if checks:
             body += ("<h3>数字 / 公式三道核</h3><table>"

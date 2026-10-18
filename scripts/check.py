@@ -160,13 +160,50 @@ def run_test(path: pathlib.Path, home: pathlib.Path) -> tuple:
                CLASSLIVE_NO_AUTO_UPDATE="1", CLASSLIVE_NOTE_MERGE="0",
                PYTHONDONTWRITEBYTECODE="1")
     t = time.monotonic()
-    try:
-        p = subprocess.run([str(PY), str(path)], cwd=ROOT, env=env,
-                           capture_output=True, text=True, timeout=300)
-        rc, out = p.returncode, p.stdout + p.stderr
-    except subprocess.TimeoutExpired:
-        rc, out = "超时", ""
+    p = subprocess.Popen([str(PY), str(path)], cwd=ROOT, env=env, text=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    rc, out = None, ""
+    while rc is None:
+        try:
+            out, _ = p.communicate(timeout=0.5)
+            rc = p.returncode
+        except subprocess.TimeoutExpired:
+            gb = _footprint_gb(p.pid)
+            if gb > TEST_MAX_GB:
+                p.kill()
+                out, _ = p.communicate()
+                rc = f"内存超限（{gb:.1f} GB > {TEST_MAX_GB} GB，已杀）"
+            elif time.monotonic() - t > 300:
+                p.kill()
+                out, _ = p.communicate()
+                rc = "超时"
     return path.name, rc, time.monotonic() - t, out
+
+
+#: ⭐ 单个测试文件的内存上限（phys footprint，含被压缩的那部分）。
+#: ⚠️ 2026-10-18 事故：一条并发判据无限新增 dict 键，`test_testmode.py` 涨到 72 GB，
+#:    这台 16 GB 的 Mac 连续 jetsam → WindowServer 看门狗超时 → 整个图形会话重启。
+#:    超限就杀掉、记红，不让一条测试拖死整台机器。
+TEST_MAX_GB = 3.0
+
+
+def _footprint_gb(pid: int) -> float:
+    """macOS 的 phys footprint（GB）；读不到给 0。不用 ps 的 RSS —— 压缩内存不算进去。"""
+    import ctypes
+
+    class _RU(ctypes.Structure):                       # struct rusage_info_v0
+        _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [
+            (n, ctypes.c_uint64) for n in ("user", "system", "pkg_idle_wkups",
+                                           "interrupt_wkups", "pageins", "wired",
+                                           "resident", "phys_footprint", "start", "exit")]
+    try:
+        lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+    except OSError:
+        return 0.0
+    r = _RU()
+    if lib.proc_pid_rusage(int(pid), 0, ctypes.byref(r)) != 0:
+        return 0.0
+    return r.phys_footprint / 1e9
 
 
 # ---------- 静态检查 ----------

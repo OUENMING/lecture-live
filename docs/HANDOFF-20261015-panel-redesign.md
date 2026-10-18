@@ -288,3 +288,45 @@ tok=$(cat ~/.classlive/cf-analytics-token 2>/dev/null | head -1)   # 凭证由�
 - 长说明收进 `title`（额度口径、节点 ≠ 人在哪、墙钟定义）。抽屉删了两处重复（真实音频秒、「这笔钱怎么来的」），
   客户端版本没有就不画。
 - 本节 §6 的「有意不做」一条没动。
+
+---
+
+## 补记 · 2026-10-18（3.10：Soniox / OpenRouter / 测试模式上板）
+
+3.10 开始记三样新东西（Soniox 实时流、OpenRouter 快速通道、客户端版本），测试模式的报告里也多了几块
+（`stream` / `region_probe` / `duty` / `device` / `energy` / `capture` …）。这一轮把它们摆上面板。
+
+**顺序**：KPI → 用户 → 用量图 → 额度 → **平台** → 服务 → **3.10 新数据** → **测试模式** → 价目表。
+设计语言一个字没动（复用 `hero` / `fold` / `mkTable` / `hBars` / `sparkline`），零外链。
+
+**三段各显示什么、数据从哪来**：
+
+| 段 | 显示 | 来源 |
+|---|---|---|
+| 平台 | 一眼五格：Soniox 7 天花费 · 并发、OpenRouter 7 天花费 · 请求、3.10.0 普及。两张卡：Soniox 分区花费 / 走势 / **对账** / 余额 / 按模型；OpenRouter 余额 + runway + 按模型 + 快速通道一行 | Soniox `/v1/usage/summary` + `/v1/concurrency-limits` + `/v1/usage-logs` + `/v1/organization/balance`；OpenRouter `/credits` + `/analytics/meta` + `/analytics/query`；普及率来自 AE |
+| 3.10 新数据 | 五个折叠：Soniox 实时转写（区×结果、报告 stream 汇总）、OpenRouter 快速通道（命中率 / 超时 / 首字 p50）、客户端版本普及、课后笔记（次数 / token / 花费）、「一些事儿」·设备·能耗·收音断档 | 前四样 AE（`/api/ae310`）；第五样上传桶的 `report.json`（`/api/reports`） |
+| 测试模式 | 每节报告一行：Soniox 引擎（退回原因）/ 封口句 / 上移 p50 / 术语 vs 矫正率 / 块数。**只有测试模式**写报告并上传 —— 报告在桶里 = 这节是测试模式 | `/api/reports` |
+
+**对外接口（都本机 GET，key 从不进响应）**：
+- Soniox：项目 key `~/.classlive/soniox-token`（可加 `soniox-jp-token` / `soniox-eu-token`，按区各查）；
+  组织余额另要 `~/.classlive/soniox-org-token`（**没有就写「余额看不到」**，项目 key 查余额回 403）。
+  官方 2026-10-18 核过：`/v1/usage/summary`、`/v1/usage-logs`（`client_reference_id` = 码名，Soniox 侧真值）、
+  `/v1/concurrency-limits`（上限在建在**组织**档，实测项目档是 null）、`/v1/organization/balance`。
+- OpenRouter：**只用管理 key** `~/.classlive/openrouter-mgmt-token`（普通推理 key 打 analytics 回 403）。
+  先 `/analytics/meta` 拿指标/维度，再 `/analytics/query` **只查它真有的**（查到不存在的名字会 400）。
+  **不接** Observability 的 destinations（那把请求内容推给 Langfuse 等 —— 隐私不行）。
+
+**报告摘要是白名单**（`_report_summary`）：只取数字与枚举，`segments` / `events` / 课堂文本 / `audio_files` /
+`session_file` / `note_file` / `vad_report` 一律不进响应；单份坏掉只记一条错、不连累别的。30 份对象 **8 路并发**
+取（实测 ~2 s；串行时能到十几秒）。
+
+**「菠萝丁」暗号**就是 A/B 开关（`stream_gate.force_local`：切回本地草稿 + 云端定稿），写进报告的
+`blocks.stream.fallback_reason`，所以测试模式那张表能看出哪节是 A/B 的 Soniox 半边。
+
+**判据**：`tests/test_cl_admin_ui.py` +12 条（`AE310` / `ReportSummary` / `R2Reports` / `SonioxAccount` /
+`OpenRouterAccount`，全注入、不联网）。变异检查 5/5 全被抓住（改 `_report_summary` 漏 segments、挑错键、
+换 AE 路径、日志计数 +0、去掉指标交集过滤 → 各自变红）。`check.py` 103 通过 / 1 跳过（`test_extract` 缺本机
+样本）/ ruff · pyright 干净。深浅两主题截图见 `/private/tmp/.../scratchpad/dash/shots/`（本轮临时目录）。
+
+**没做 / 想做的**：Worker 没记 OpenRouter 的 `generation_id`，所以拿不到逐次生成的花费与 provider
+—— 见下面的「Worker 侧建议」；面板现在只有账号级 `/analytics/query` 与 AE 的上游串。

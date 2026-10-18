@@ -36,16 +36,17 @@ REVIEW_CHUNK = 70           # 每块喂多少句（同旧版：块太大 JSON �
 REVIEW_WORKERS = 5
 REVIEW_MAX_TOKENS = 6000    # 关思考时的每块上限（旧口径，保留）
 # ⭐ F11-9：**思考 low 档**的每类预算 —— 实测（test key，7 次真调用）：
-#   review 块最大 content≈3964 / reasoning=4483（合计 7943，逼近 Worker 的 8192）；
-#   repair content≈403 / reasoning=1929；verify 532；overview 223。
-# 提案 = max(content) + max(reasoning)×1.5，向上取整到千：
-REVIEW_MAX_TOKENS_THINKING = 11000   # 3964 + 4483×1.5 ≈ 10689
+#   review 块最大 content≈3964 / reasoning=4483（合计 7943）；repair 2332；verify 532；overview 223。
+# 提案 = max(content) + max(reasoning)×1.5，向上取整到千。
+# ⭐ F12：finish_reason 探针（5 片 × low/high）实测**两档各 1/5 撞 `length`**
+#   （low completion=10998/reasoning 8046；high 10998/8935）——11000 太贴顶 → review 提到 14000。
+REVIEW_MAX_TOKENS_THINKING = 14000   # 11000 时低档也会撞 length；high 曾到 10403（reasoning 8502）
 REPAIR_MAX_TOKENS_THINKING = 4000    # 403 + 1929×1.5 ≈ 3297
 VERIFY_MAX_TOKENS_THINKING = 2000    # 365 + 167×1.5 ≈ 616
 OVERVIEW_MAX_TOKENS_THINKING = 1500  # 91 + 132×1.5 ≈ 289
 SHORTEN_MAX_TOKENS_THINKING = 4000   # 未单独实测（输出≈一节的压缩）；按 review 比例保守给
-# ⚠️ Worker（通行码）输出上限 8192（commit 0335853）；提案里 review 要 11000 → **Worker 需再抬到 11000+**。
-#    在那之前，客户端发 11000 会被 Worker 压到 8192（仍是比旧 6000 好的口径）。
+# ⚠️ Worker（通行码）输出上限 **16384**（2026-10-18 14:42Z 部署）→ review 的 14000 不会被压。
+#    仍保留"截断 → 关思考重来"兜底（见 llm_client.chat_json）。
 ALIGN_MAX_TOKENS = 2000
 VERIFY_MAX_TOKENS = 2500
 

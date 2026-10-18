@@ -1647,10 +1647,10 @@ class F11Budgets(unittest.TestCase):
     """⭐ F11-9：思考 low 档下，笔记那几类调用改用 `*_MAX_TOKENS_THINKING`（实测预算）。"""
 
     def test_思考预算不小于旧口径_review覆盖实测(self):
-        # 实测最大：content≈3964 + reasoning 4483（合计 7943）→ review 预算要 ≥ 8192。
-        self.assertGreaterEqual(nv.REVIEW_MAX_TOKENS_THINKING, 8192)
+        # F12 finish_reason 探针：两档各 1/5 撞 length（low completion=10998）→ review 提到 14000。
+        self.assertGreaterEqual(nv.REVIEW_MAX_TOKENS_THINKING, 14000)
         # 每类都要 ≥ 实测完成量（content+reasoning）；这里按观测值逐个卡。
-        measured = {"REVIEW_MAX_TOKENS_THINKING": 7943, "REPAIR_MAX_TOKENS_THINKING": 2332,
+        measured = {"REVIEW_MAX_TOKENS_THINKING": 10998, "REPAIR_MAX_TOKENS_THINKING": 2332,
                     "VERIFY_MAX_TOKENS_THINKING": 532, "OVERVIEW_MAX_TOKENS_THINKING": 223,
                     "SHORTEN_MAX_TOKENS_THINKING": 2500}
         for const, need in measured.items():

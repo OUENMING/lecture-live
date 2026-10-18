@@ -21,9 +21,12 @@ class 封顶对得上(unittest.TestCase):
         cap = int(m.group(1))
         found = {}
         for f in sorted(ROOT.glob("*.py")):
-            for name, n in re.findall(r"^([A-Z_]*MAX_TOKENS)\s*=\s*(\d+)", f.read_text(encoding="utf-8"), re.M):
+            for name, n in re.findall(r"^([A-Z_]*MAX_TOKENS[A-Z_]*)\s*=\s*(\d+)", f.read_text(encoding="utf-8"), re.M):
                 found[f"{f.name}:{name}"] = int(n)
         self.assertIn("note_v2.py:REVIEW_MAX_TOKENS", found, "扫描没扫到已知常量 —— 正则失效了")
+        # ⚠️ 2026-10-18：思考预算叫 `*_MAX_TOKENS_THINKING`，老正则只认 `…MAX_TOKENS =`，
+        #    14000 > 8192 也照样绿（假绿）。后缀也要收。
+        self.assertIn("note_v2.py:REVIEW_MAX_TOKENS_THINKING", found, "思考预算没扫到 —— 正则失效了")
         over = {k: v for k, v in found.items() if v > cap}
         self.assertEqual(over, {}, f"这些超过 Worker 封顶 {cap}（会被静默截断）")
 

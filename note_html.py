@@ -640,6 +640,11 @@ input.blank.no{border-color:var(--bad);color:var(--bad)}
 p.blankrow{margin:4px 0}
 .btn{cursor:pointer;border:none;background:var(--code);color:var(--fg);
  border-radius:6px;padding:4px 12px;font:inherit;font-size:14px}
+/* 「展开全部步骤」原来漏了样式（原生灰框）—— 和其他控件同一条填充式规则（2026-10-18 Δ④） */
+button#expand{cursor:pointer;border:none;background:var(--code);color:var(--fg);
+ border-radius:6px;padding:4px 12px;font:inherit;font-size:14px}
+/* 屏/纸两版提示文案：屏上显示、纸上隐藏（纸版规则在下面的打印块里） */
+.printonly{display:none}
 textarea.sum{width:100%;min-height:84px;font:inherit;font-size:15px;border:none;
  border-radius:8px;background:var(--code);color:var(--fg);padding:8px;box-sizing:border-box}
 /* 数字对齐：时间戳 / 排程日期 / 计数 / 表格数值列（tabular-nums 的适用范围按 A3） */
@@ -663,6 +668,9 @@ svg.plot .cross text{fill:var(--fg);font-size:11px}
  /* 交互件藏起来；填空保留成**空白下划线**（印出来可以用笔写） */
  #prog,#topbar,.slider,.tracks,.btn,button.why,textarea.sum,#expand{display:none!important}
  .cross{display:none!important}
+ /* 屏/纸两版提示文案（2026-10-18 Δ④）：纸上没有「对答案」按钮可点 */
+ .screenonly{display:none!important}
+ .printonly{display:inline!important}
  input.blank{border-bottom:1px solid #333;width:6em}
  /* 「为什么」的折叠动画：纸上**无条件全开**（不靠 JS 的 beforeprint） */
  .acc{grid-template-rows:1fr!important;opacity:1!important;transition:none!important}
@@ -901,7 +909,10 @@ def _faded_html(fd: dict, uid: str) -> str:
         body = f"<p>{inline(q)}</p>" + "".join(
             f'<p class="blankrow">{i}. {_blank_input(uid, i - 1, b)}</p>'
             for i, b in enumerate(blanks, 1))
-    return (f'<h4>W2 补全题（把关键步骤填上，再点「对答案」）</h4><div class="faded">{body}'
+    return (f'<h4>W2 补全题'
+            f'<span class="screenonly">（把关键步骤填上，再点「对答案」）</span>'
+            f'<span class="printonly">（用笔填上，再对照上方例题的解法核对）</span></h4>'
+            f'<div class="faded">{body}'
             f'<p><button class="btn" type="button" data-check="{uid}">对答案</button> '
             f'<span class="muted" data-checkmsg="{uid}"></span></p></div>')
 
@@ -1249,7 +1260,11 @@ def note_page(d) -> str:
             body += ("<h3>数字 / 公式三道核</h3><table>"
                      "<tr><th>断言</th><th>怎么核的</th><th>结果</th></tr>")
             for c in checks:
-                st = {"ok": "✅ 一致", "mismatch": "⚠ 已修正",
+                # ⭐ 2026-10-18 Δ：`mismatch` 现在会被 `note_guards.annotate_mismatches`
+                #    **原位标进正文**（"已修正"只有在别处真改过字才配得上 —— 原来一律写
+                #    "已修正"，而正文一个字没动，读者读到的是假话）。
+                st = {"ok": "✅ 一致",
+                      "mismatch": ("⚠ 正文已标注" if c.get("annotated") else "⚠ 有出入"),
                       "unchecked": "⬜ 未核对"}.get(str(c.get("status")), "⬜ 未核对")
                 rec = c.get("recomputed")
                 body += (f"<tr><td>{inline(c.get('claim'))}</td><td>{inline(c.get('how'))}</td>"

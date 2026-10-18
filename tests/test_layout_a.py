@@ -252,5 +252,40 @@ class Inline(unittest.TestCase):
         self.assertIn("</strong>（第 8 节）", got)
 
 
+class ChecksTable(unittest.TestCase):
+    """2026-10-18 Δ：核对清单的结果列不许写「已修正」——
+    三道核的 mismatch 现在会被标注落进**正文**，正文一个字没动过就不配"已修正"三个字。"""
+
+    def test_标注过的写正文已标注(self):
+        rev = dict(REVIEW, checks=[{"claim": "5.3除以3，得到约2.89", "status": "mismatch",
+                                    "how": "5.3÷3=1.767，不是2.89", "annotated": True,
+                                    "recomputed": "5.3/3 ≈ 1.767"}])
+        h = nh.note_page(_data(review=rev))
+        self.assertIn("⚠ 正文已标注", h)
+        self.assertNotIn("⚠ 已修正", h)
+
+    def test_没标上的写有出入(self):
+        rev = dict(REVIEW, checks=[{"claim": "x", "status": "mismatch", "how": "y"}])
+        h = nh.note_page(_data(review=rev))
+        self.assertIn("⚠ 有出入", h)
+
+
+class Controls(unittest.TestCase):
+    """2026-10-18 Δ④⑤：原生灰框按钮与屏幕专用文案。"""
+
+    def test_展开全部步骤是填充式按钮(self):
+        h = nh.note_page(_data())
+        self.assertIn("button#expand{cursor:pointer;border:none", h)
+
+    def test_W2提示屏纸两版(self):
+        h = nh.note_page(_data())
+        self.assertIn('class="screenonly">（把关键步骤填上，再点「对答案」）', h)
+        self.assertIn('class="printonly">（用笔填上，再对照上方例题的解法核对）', h)
+        # 屏上藏纸版、纸上藏屏版 —— 两条规则都要在（屏幕规则 + 打印块里的那两条）
+        self.assertIn(".printonly{display:none}", h)
+        self.assertIn(".screenonly{display:none!important}", h)
+        self.assertIn(".printonly{display:inline!important}", h)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

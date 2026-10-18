@@ -1060,6 +1060,109 @@ class RenderShape(unittest.TestCase):
         self.assertIn("x.html", out)
 
 
+class F13SymbolConsistency(unittest.TestCase):
+    """F13 ①：同一节里「代数行」与「讲解」的分组 → 符号式子必须一致。"""
+
+    SEC_BAD = {"heading": "[09:31] 虚拟变量与交互项", "ts": "09:31",
+               "algebra": ("$y = \\beta_0 + \\beta_1 female + \\beta_2 exper + "
+                           "\\beta_3 female \\times exper + u$；女性斜率 $\\beta_2+\\beta_3$，"
+                           "男性斜率 $\\beta_2$。"),
+               "prose": ["这样，女性的经验回报是 β3，男性的经验回报是 β3+β4。"]}
+    SEC_OK = {"heading": "[09:31] 交互项", "ts": "09:31",
+              "algebra": "女性斜率 $\\beta_2+\\beta_3$，男性斜率 $\\beta_2$",
+              "prose": ["女性的经验回报是 β2+β3，男性的经验回报是 β2。"]}
+
+    def _chat(self, obj, sink=None):
+        class _C:
+            def __init__(self):
+                self.n = 0
+
+            def __call__(self, system, user, max_tokens):
+                self.n += 1
+                if sink is not None:
+                    sink.append(user)
+                if isinstance(obj, Exception):
+                    raise obj
+                return obj
+        c = _C()
+        return c
+
+    def test_机械判据抓到分组对调(self):
+        hits = nm.symbol_mismatches(self.SEC_BAD)
+        self.assertEqual(["女性", "男性"], [h["label"] for h in hits], hits)
+
+    def test_说法一致不报(self):
+        self.assertEqual([], nm.symbol_mismatches(self.SEC_OK))
+
+    def test_非经济学科也认(self):
+        """判据域中立：化学/物理的"甲组系数/乙组斜率"同样按符号比。"""
+        sec = {"algebra": "甲组斜率 $\\alpha_1$，乙组斜率 $\\alpha_1+\\alpha_2$",
+               "prose": ["甲组的系数是 α2，乙组的系数是 α1。"]}
+        self.assertEqual({"甲组", "乙组"},
+                         {h["label"] for h in nm.symbol_mismatches(sec)})
+
+    def test_数字版讲解判不了_不许报(self):
+        sec = {"algebra": "女性斜率 $\\beta_2+\\beta_3$，男性斜率 $\\beta_2$",
+               "prose": ["女性的经验斜率是 1.5，男性是 2.3。"]}
+        self.assertEqual([], nm.symbol_mismatches(sec))
+
+    def test_返修成功后不标未核对(self):
+        rev = {"sections": [dict(self.SEC_BAD)]}
+        chat = self._chat({"ok": True,
+                           "algebra": "女性斜率 $\\beta_2+\\beta_3$，男性斜率 $\\beta_2$",
+                           "prose": ["女性的经验回报是 β2+β3，男性的经验回报是 β2。"]})
+        got, extra, warns = nv.fix_symbol_consistency(rev, chat=chat)
+        self.assertEqual(1, chat.n)
+        self.assertEqual([{"repaired": 1, "flagged": 0}], extra)
+        self.assertEqual([], warns)
+        self.assertEqual([], nm.symbol_mismatches(got["sections"][0]))
+        self.assertNotIn("checks", got)
+
+    def test_返修判不了就标未核对_不改正文(self):
+        rev = {"sections": [dict(self.SEC_BAD)]}
+        before = rev["sections"][0]["prose"][0]
+        chat = self._chat({"ok": False, "why": "转录没说清"})
+        got, extra, warns = nv.fix_symbol_consistency(rev, chat=chat)
+        self.assertEqual([{"repaired": 0, "flagged": 1}], extra)
+        self.assertEqual(before, got["sections"][0]["prose"][0], "正文不许被改")
+        rows = got["checks"]
+        self.assertEqual(["unchecked"], [r["status"] for r in rows])
+        self.assertIn("待你确认", rows[0]["how"])
+        self.assertTrue(any("一致性" in w for w in warns), warns)
+
+    def test_返修回来仍不一致_不算修过(self):
+        rev = {"sections": [dict(self.SEC_BAD)]}
+        chat = self._chat({"ok": True, "algebra": self.SEC_BAD["algebra"],
+                           "prose": ["女性的经验回报是 β9。"]})
+        got, extra, _w = nv.fix_symbol_consistency(rev, chat=chat)
+        self.assertEqual([{"repaired": 0, "flagged": 1}], extra)
+        self.assertEqual(self.SEC_BAD["prose"], got["sections"][0]["prose"],
+                         "复检仍不一致 → 不许把返修结果留下")
+        self.assertEqual(["unchecked"], [r["status"] for r in got["checks"]])
+
+    def test_调用失败_不抛_照旧标未核对(self):
+        rev = {"sections": [dict(self.SEC_BAD)]}
+        chat = self._chat(RuntimeError("boom"))
+        _got, extra, warns = nv.fix_symbol_consistency(rev, chat=chat)
+        self.assertEqual([{"repaired": 0, "flagged": 1}], extra)
+        self.assertTrue(any("失败" in w for w in warns), warns)
+
+    def test_每节至多一次_全讲有上限(self):
+        rev = {"sections": [dict(self.SEC_BAD) for _ in range(5)]}
+        chat = self._chat({"ok": False, "why": "x"})
+        _got, extra, _w = nv.fix_symbol_consistency(rev, chat=chat, max_calls=3)
+        self.assertEqual(3, chat.n)
+        self.assertEqual([{"repaired": 0, "flagged": 5}], extra)
+
+    def test_没问题的课一次都不调(self):
+        rev = {"sections": [dict(self.SEC_OK)]}
+        chat = self._chat({"ok": True})
+        got, extra, warns = nv.fix_symbol_consistency(rev, chat=chat)
+        self.assertEqual(0, chat.n)
+        self.assertEqual(([], []), (extra, warns))
+        self.assertEqual(rev, got)
+
+
 class SelfContradictionWiring(unittest.TestCase):
     """F13 ②b 的接线：`_finish`（机械核 ∪ 模型核）过一遍矛盾闸。"""
 

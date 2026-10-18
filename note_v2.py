@@ -1277,6 +1277,104 @@ def repair_exercises(review: dict, *, chat, entries: list | None = None,
     return out, [{"repaired": calls, "dropped": n_drop}], warns
 
 
+# ------------------------------------------------- F13 ①：代数行 / 讲解符号一致
+SYMBOL_FIX_MAX_TOKENS = 3000
+SYMBOL_FIX_SYS = """你在给一节课堂笔记做**内部一致性核对**（只修一处：符号写岔了）。
+
+问题：同一节里「代数行」与「讲解」对**同一个分组**给了**不同的符号式子**
+（例：代数说"女性斜率 β2+β3"，讲解说"女性的经验回报是 β3"）。两边必有一处错。
+
+给你：代数行、讲解（若干段）、这一节的课堂转录片段。
+
+规矩（逐字遵守）：
+1) **只有转录/材料能判定谁对时才改**。判不了就回 `{"ok": false, "why": "……"}` —— **不许猜**。
+2) 只改**符号**那一处：让代数行与讲解对同一个分组说同一件事。符号名要**成套**
+   （代数里用 `\\beta_0…\\beta_3`，讲解就不许冒出 `\\beta_4`）。
+3) **不许改数字**（数字是另一道核的事）、不许增删事实、不许改章节标题、不许改课程内容。
+4) 代数行保持 `$…$` LaTeX；讲解保持原来的中文口气和大致长度（不要顺手扩写）。
+
+只输出 JSON：
+{"ok": true, "algebra": "……", "prose": ["……", "……"]}
+或
+{"ok": false, "why": "转录里没说清哪个对"}
+"""
+
+
+def fix_symbol_consistency(review: dict, *, chat, entries: list | None = None,
+                           max_calls: int = 3) -> tuple:
+    """⭐ F13 ①：代数行与讲解的「分组 → 符号表达式」对不上 → **一次返修**（带转录片段）。
+
+    现场（BUSI3243 §16）：代数行 ⇒ 女性斜率 β2+β3、男性 β2；讲解却是"女性的经验回报
+    是 β3，男性 β3+β4" —— 两组**正好对调**，且 β 编号不是同一套。
+
+    · 不一致 → 每节至多 1 次调用（全讲 ≤ `max_calls`），**带这一节的转录片段**；
+    · 返修回来**复检**：仍不一致 → 不当成修过；
+    · 最终仍不一致 → 记一条 `unchecked`（台账可见、**不指控、不改正文**）+ 一条提醒。
+      （口径同 `mismatch`：正文不改；读者在"待你确认"里能看到"这节两处说法对不上"。）
+
+    返回 `(review, [{"repaired": n, "flagged": m}], [warn, …])` —— 与链条里其它一步同形。
+    """
+    secs = review.get("sections") or []
+    bad: list = []
+    for i, s in enumerate(secs):
+        hit = note_math.symbol_mismatches(s)
+        if hit:
+            bad.append((i, s, hit))
+    if not bad:
+        return review, [], []
+    fixed, used, warns = 0, 0, []
+    for i, s, hit in bad:
+        if used >= max_calls:
+            break
+        det = "\n".join(
+            f"- 「{h['label']}」：代数 {'+'.join(h['algebra'][0]) if h['algebra'] else '—'}"
+            f"，讲解 {'+'.join(h['prose'][0]) if h['prose'] else '—'}" for h in hit)
+        user = (f"这一节的代数行：\n{_one_line(s.get('algebra'))}\n\n"
+                f"这一节的讲解：\n"
+                + "\n".join(f"[{j + 1}] {_one_line(p)}" for j, p in enumerate(s.get("prose") or []))
+                + f"\n\n机械核发现的分组不一致：\n{det}\n"
+                + _transcript_window(entries, s))
+        used += 1
+        try:
+            obj = chat(SYMBOL_FIX_SYS, user, SYMBOL_FIX_MAX_TOKENS)
+        except Exception as e:                                 # noqa: BLE001
+            warns.append(f"代数/讲解一致性返修调用失败（{type(e).__name__}）")
+            continue
+        if not isinstance(obj, dict) or not obj.get("ok"):
+            continue
+        alg = _one_line(obj.get("algebra"))
+        prose = [_one_line(x) for x in (obj.get("prose") or []) if _one_line(x)]
+        if not alg and not prose:
+            continue
+        s2 = dict(s)
+        if alg:
+            s2["algebra"] = alg
+        if prose:
+            s2["prose"] = prose
+        if note_math.symbol_mismatches(s2):
+            continue                       # 复检仍不一致 → 不算修过
+        secs[i] = s2
+        fixed += 1
+    rows = list(review.get("checks") or [])
+    flagged = 0
+    for i, s, _hit in bad:
+        left = note_math.symbol_mismatches(secs[i])
+        if not left:
+            continue
+        flagged += 1
+        det = "；".join(f"「{h['label']}」代数 " + ("+".join(h["algebra"][0]) or "—")
+                        + " 对 讲解 " + ("+".join(h["prose"][0]) or "—") for h in left)
+        rows.append({"claim": _one_line(s.get("heading"))[:120], "status": "unchecked",
+                     "recomputed": "",
+                     "how": f"本节代数行与讲解对同一个分组说的式子不一样（{det}）"
+                            "—— 正文不改，待你确认"})
+        warns.append("代数/讲解一致性："
+                     f"「{_one_line(s.get('heading'))[:24]}」两处式子对不上，已标未核对")
+    if rows:
+        review["checks"] = rows
+    return review, [{"repaired": fixed, "flagged": flagged}], warns
+
+
 def transcript_lines(entries: list) -> list:
     return [f"[{e['ts']}] {e['en'] or e['asr']}"
             for e in entries if (e.get("en") or e.get("asr"))]

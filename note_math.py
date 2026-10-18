@@ -1498,6 +1498,119 @@ def _sig_match(claim: str, val: float) -> bool:
     return abs(round(val, dec) - c) <= 10.0 ** (-dec) * 0.5 + 1e-9
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# F13 ①：同一节里「代数行」与「讲解」的**分组 → 符号表达式**必须一致
+# ════════════════════════════════════════════════════════════════════════════
+# 现场（BUSI3243 §16）：代数行是 `y=β0+β1 female+β2 exper+β3 female×exper`，
+# 于是**女性斜率 β2+β3、男性斜率 β2**；讲解却写"女性的经验回报是 β3，男性是 β3+β4"
+# —— 两组斜率**正好对调**，β 编号也不是同一套（正文用 β3/β4，代数里没有 β4）。
+# 判据域中立：只比"同一个分组标签下的符号表达式"，不管课程、不管符号叫什么。
+_GREEK_NAMES = {"α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "epsilon",
+                "ζ": "zeta", "η": "eta", "θ": "theta", "ι": "iota", "κ": "kappa",
+                "λ": "lambda", "μ": "mu", "ν": "nu", "ξ": "xi", "π": "pi", "ρ": "rho",
+                "σ": "sigma", "ς": "sigma", "τ": "tau", "υ": "upsilon", "φ": "phi",
+                "ϕ": "phi", "χ": "chi", "ψ": "psi", "ω": "omega"}
+_SUB_DIGITS = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
+#: 分组标签后面的**限定词**（"女性的**经验回报**是 β3"）—— 中英各一版。
+_QUAL_WORDS = ("经验回报", "回报", "斜率", "系数", "工资", "收益", "效应", "弹性",
+               "slope", "coefficient", "return", "effect", "elasticity")
+#: 系数符号：希腊字母名（`beta_2`）或"单字母+下标"（`b2`）。别的词（female/educ）不算。
+_COEF = re.compile(r"(?P<g>alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa"
+                   r"|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|chi|psi|omega)"
+                   r"(?P<gi>_?\d+)?\b|(?<![A-Za-z\d_])(?P<l>[A-Za-z])(?P<li>_?\d+)")
+#: "纯符号表达式"允许出现的字符（其余字符 → 不是表达式，丢掉）。
+_SYM_CHARS = r"A-Za-z0-9_\\{}+\-*/()×·.=:$ \u0370-\u03ff\u2080-\u209c"
+
+
+def _sym_norm(t) -> str:
+    """`\\beta_2` / `β₂` / `beta_2` / `β2` → **同一个** `beta_2`；其余原样。**纯函数。**"""
+    s = str(t or "").translate(_SUB_DIGITS)
+    for ch, name in _GREEK_NAMES.items():
+        s = s.replace(ch, f" {name} ")
+    s = re.sub(r"\\([A-Za-z]+)", r" \1 ", s)          # `\beta_2` / `\text`
+    s = s.replace("{", " ").replace("}", " ").replace("$", " ").replace("\\", " ")
+    s = s.replace("−", "-").replace("×", "*").replace("·", "*")
+    s = re.sub(r"([A-Za-z])\s*_\s*(\d+)", r"\1_\2", s)
+    s = re.sub(r"([A-Za-z])\s+(\d)", r"\1_\2", s)     # `beta 2` → `beta_2`
+    return s
+
+
+def _coef_name(m) -> str:
+    if m.group("g"):
+        base, idx = m.group("g"), (m.group("gi") or "").lstrip("_")
+    else:
+        base, idx = m.group("l"), (m.group("li") or "").lstrip("_")
+    return f"{base}_{idx}" if idx else base
+
+
+def _sym_expr(txt) -> frozenset:
+    """一小段文本 → **系数符号集合**；不是纯符号表达式就返回空集。**纯函数。**"""
+    s = _sym_norm(txt)
+    syms: set = set()
+    rest = _COEF.sub(lambda m: (syms.add(_coef_name(m)), " ")[1], s)
+    if not syms:
+        return frozenset()
+    if re.sub(r"[\s+*/()\-_.=]", "", rest):           # 还剩词/中文/单位 → 不是表达式
+        return frozenset()
+    return frozenset(syms)
+
+
+#: 中文：「标签 [的] 限定词 [是|=] 表达式」；标签非贪婪 → 不吃掉限定词前面的字。
+_MAP_ZH = re.compile(r"(?P<label>[\u4e00-\u9fff]{1,4}?)(?:的)?(?P<qual>"
+                     + "|".join(_QUAL_WORDS)
+                     + r")\s*(?:是|为|＝|=|:)?\s*(?P<expr>[" + _SYM_CHARS + r"]{0,40})")
+#: 英文：限定词在前（`slope_{male}=\beta_2`）或标签在前（`male slope = \beta_2`）。
+_MAP_EN = re.compile(r"(?P<qual>slope|coefficient|return|effect|elasticity)\s*"
+                     r"(?:of|for)?\s*[_ ]?\s*(?P<label>[A-Za-z]{2,12})\s*(?:is|=|:)?\s*"
+                     r"(?P<expr>[" + _SYM_CHARS + r"]{0,40})", re.I)
+_MAP_EN2 = re.compile(r"(?P<label>[A-Za-z]{2,12})\s*(?:'s)?\s*(?P<qual>slope|coefficient|"
+                      r"return|effect|elasticity)\s*(?:is|=|:)?\s*"
+                      r"(?P<expr>[" + _SYM_CHARS + r"]{0,40})", re.I)
+
+
+def group_exprs(text) -> dict:
+    """一段文本 → `{分组标签: {符号表达式集合, …}}`（同一标签的多种写法都留着）。
+
+    ⚠️ 只有**纯符号表达式**才算（`β2+β3` 算；`0.3 个单位` 不算）—— 数字版的说法
+       交给别的判据（同一节里数字版与符号版本来就不同档）。**纯函数。**
+    """
+    s = _sym_norm(text)
+    out: dict = {}
+    for rx in (_MAP_ZH, _MAP_EN, _MAP_EN2):
+        for m in rx.finditer(s):
+            expr = _sym_expr(m.group("expr") or "")
+            if not expr:
+                continue
+            label = m.group("label").strip().lower()
+            if not label:
+                continue
+            out.setdefault(label, set()).add(expr)
+    return out
+
+
+def symbol_mismatches(section: dict) -> list:
+    """同一节里「代数行」与「讲解」的**分组 → 符号表达式**对不上 → 一条发现。**纯函数。**
+
+    ⚠️ 只在**两边都给出同一个分组标签的符号表达式**、且**没有一个说法对得上**时才报
+       （一边没写符号版就判不了，绝不猜）。
+    """
+    if not isinstance(section, dict):
+        return []
+    alg = group_exprs(section.get("algebra") or "")
+    if not alg:
+        return []
+    prose = group_exprs(" ".join(_txt(x) for x in (section.get("prose") or [])))
+    out: list = []
+    for label, a_sets in sorted(alg.items()):
+        p_sets = prose.get(label)
+        if not p_sets or (a_sets & p_sets):
+            continue
+        out.append({"label": label,
+                    "algebra": sorted(sorted(s) for s in a_sets),
+                    "prose": sorted(sorted(s) for s in p_sets)})
+    return out
+
+
 def _uses_givens(prog, givens) -> bool:
     """`program` 的式子里有没有**真的引用**题面给定的量（按名字比对）。**纯函数。**
 

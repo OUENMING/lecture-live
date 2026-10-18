@@ -1344,6 +1344,12 @@ class ObsidianWriter:
                           (lambda r: note_guards.ensure_caliber(
                               r, materials=self._materials), "停产价格口径"),
                           (lambda r: note_ledger.ensure_min_value(r), "最小平均成本补值"),
+                          # ⭐ F13 ①：同一节里「代数行」与「讲解」的分组→符号式子必须一致
+                          #    （对不上 → 一次返修带转录片段；仍不一致 → 标未核对）。
+                          #    放在 `_with_overview` **之前**：速览与串讲要照修好的正文写；
+                          #    它新写的散文也照样吃后面的 scrub / quote_check（同串讲）。
+                          (lambda r: note_v2.fix_symbol_consistency(
+                              r, chat=self._chat, entries=entries), "代数/讲解一致性"),
                           # ⭐ 第七轮 H：超上限的单元先压干净，速览才照着**最终长度**写
                           (lambda r: self._shorten_overlimit(r), "超限单元压缩"),
                           (lambda r: self._with_overview(r), "速览"),
@@ -1376,6 +1382,11 @@ class ObsidianWriter:
                     if isinstance(st, dict):
                         self._guard_counts["repaired"] += int(st.get("repaired") or 0)
                         self._guard_counts["dropped"] += int(st.get("dropped") or 0)
+                elif label == "代数/讲解一致性" and extra_items:
+                    st = extra_items[0]
+                    if isinstance(st, dict):
+                        self._guard_counts["repaired"] += int(st.get("repaired") or 0)
+                        self._guard_counts["downgraded"] += int(st.get("flagged") or 0)
                 elif label == "支持性核对" and extra_items:
                     st = extra_items[0]
                     if isinstance(st, dict):

@@ -587,6 +587,36 @@ class AnnotateMismatch(unittest.TestCase):
         self.assertEqual("完全不相干的一段。", out["sections"][0]["prose"][0])
         self.assertEqual([], warns)
 
+    def test_真实产线顺序_先去重再标注也找得到(self):
+        """⚠️ 2026-10-18 实测踩坑：`checks.claim` 是 `verify_numbers` 截过的 **160 字**，
+        而归一化（`_norm` 剥掉全部 CJK）会把前缀缩水 —— 先跑去重（删掉第二遍
+        "⚠ 课上只给了片段…"）再标注时，按"归一化后 60 字"去比就找不回来了。
+        现在前缀长度取在**原串**上（90/64/40/24 渐进），去重后照样命中。"""
+        dup = ("首先，我们计算了某个数值：5.3除以3，得到约2.89。这个数值是平均成本在特定产量下的值。"
+               "具体来说，平均成本函数为AC(q)= (60q+500)/q？但课上只给了片段："
+               "原题见📖 2025-12期末卷 Exercise 7 / 未核对。⚠ 课上只给了片段："
+               "原题见📖 2025-12期末卷 Exercise 7 / 未核对。")
+        rev = {"sections": [{"prose": [dup]}],
+               "checks": [{"claim": dup[:160], "status": "mismatch",
+                           "recomputed": "5.3/3 ≈ 1.767", "how": "5.3除以3约1.77，不是2.89"}]}
+        ded, _, _ = ng.dedupe_sentences(rev)
+        out, _, warns = ng.annotate_mismatches(ded)
+        got = out["sections"][0]["prose"][0]
+        self.assertIn("核算对不上：5.3除以3约1.77，不是2.89", got)
+        self.assertTrue(out["checks"][0].get("annotated"))
+        self.assertTrue(warns and "1 处" in warns[0], warns)
+
+    def test_how_里的全角括号不切坏标注(self):
+        """剥 marker 的正则靠"第一个 `）` 收口"——`how` 里的括号换成半角才切得干净。"""
+        row = {"claim": self.REAL, "status": "mismatch", "recomputed": "x",
+               "how": "数值二阶导（正）与结论矛盾"}
+        out, _, _ = ng.annotate_mismatches({"sections": [{"prose": [self.REAL]}],
+                                            "checks": [row]})
+        got = out["sections"][0]["prose"][0]
+        self.assertIn("核算对不上：数值二阶导(正)与结论矛盾）", got)
+        out2, _, _ = ng.annotate_mismatches(out)         # 幂等：再来一遍不插第二个
+        self.assertEqual(1, out2["sections"][0]["prose"][0].count("核算对不上"))
+
 
 class DedupeSentences(unittest.TestCase):
     """2026-10-18 Δ②：模型抄格式抄两遍（真笔记里「⚠ 课上只给了片段…」一段出现两次）。"""

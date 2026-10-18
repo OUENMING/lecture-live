@@ -519,40 +519,44 @@ def annotate_mismatches(review: dict) -> tuple:
         return out, [], []
     n = 0
     for row in rows:
-        claim = _norm(str(row.get("claim") or ""))[:60]
+        raw = str(row.get("claim") or "")
+        # ⚠️ 前缀长度取在**原串**上再归一化：`_norm` 把 CJK 全剥掉，先归一化再截 60 字
+        #    ≈ 原串 250 字 —— 去重/清时间戳正好动在那一段，这句话在去重后就找不回来了
+        #    （2026-10-18 实测：真实产线顺序 dedupe → annotate 全灭）。渐进缩短兜底。
+        prefixes = [p for p in (_norm(raw[:n]) for n in (90, 64, 40, 24)) if p]
+        # ⚠️ marker 里的 `how` 先把全角括号换成半角：剥 marker 的正则靠"第一个 `）` 收口"，
+        #    括号留在 how 里会把标注切成残渣（幂等判断与 claim 比对都靠它）。
         how = str(row.get("how") or "").strip().rstrip("。；;，,")
-        if not claim or not how:
+        how = how.replace("（", "(").replace("）", ")")
+        if not prefixes or not how:
             continue
-        mark = _MISMATCH_MARK.format(how=how)
-        for s in (out.get("sections") or []):
+        best = None                     # (前缀长度, section 下标, path) —— 更长的主人更可信
+        for si, s in enumerate(out.get("sections") or []):
             if not isinstance(s, dict):
                 continue
-            hit = None
             for path in paths_of(s):
                 if not path or _field_name(path) not in _MARK_FIELDS:
                     continue
                 v = _get(s, path)
                 if not isinstance(v, str) or not v:
                     continue
-                # ⚠️ 比对时先把**已有标注**从字段里摘掉：标注插在句子中间，
-                #    不摘掉就会把 claim 的连续匹配打断（同一句的第二行会找不到承载字段）。
-                bare = _norm(re.sub(r"（⚠ 核算对不上：[^）]{0,80}）", "", v))
-                if claim in bare:
-                    if "核算对不上" in v:
-                        row["annotated"] = True      # 这一处已经有 ⚠（别行标的）
-                        hit = None
-                    else:
-                        hit = path
-                    break
-            if hit is None:
-                continue
-            v = _get(s, hit)
-            where = _div_bad_sentence_end(v)
-            _set(s, hit, (v.rstrip() + mark) if where is None
-                 else (v[:where] + mark + v[where:]))
-            row["annotated"] = True
-            n += 1
-            break
+                bare = _norm(re.sub(r"（⚠ 核算对不上：[^）]*）", "", v))
+                hits = [len(p) for p in prefixes if p in bare]
+                if hits and (best is None or max(hits) > best[0]):
+                    best = (max(hits), si, path)
+        if best is None:
+            continue
+        _, si, path = best
+        v = _get(out["sections"][si], path)
+        if "核算对不上" in v:
+            row["annotated"] = True      # 这一处已经有 ⚠（别行标的）
+            continue
+        mark = _MISMATCH_MARK.format(how=how)
+        where = _div_bad_sentence_end(v)
+        _set(out["sections"][si], path, (v.rstrip() + mark) if where is None
+             else (v[:where] + mark + v[where:]))
+        row["annotated"] = True
+        n += 1
     warns = [f"{n} 处核算不一致（三道核）已在正文原位标 ⚠"] if n else []
     return out, [], warns
 

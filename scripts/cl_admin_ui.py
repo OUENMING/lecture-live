@@ -839,10 +839,14 @@ _AE_310_SONIOX = f"""SELECT blob4 AS up, blob2 AS name, double1 AS status, SUM(_
  MIN(timestamp) AS first, MAX(timestamp) AS last
  FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '7' DAY AND blob1 = '/v1/soniox/key'
  GROUP BY up, name, status ORDER BY n DESC LIMIT 200 FORMAT JSON"""
+# 快速通道命中率的分母只能是**够格**的请求（Worker `useFastLlm`：stream、max_tokens ≤ 400、不在 CN/HK/MO）。
+# 2026-10-18 实测：分母混进笔记 / 精修（max_tokens 1500–16384，设计上就不绕道）和通道上线前的老流量，
+# 命中率显示 1.1%；只数够格的是 229 / 239 ≈ 96%。首字 double9 > 0 ⇔ 流式（非流式不记首字）。
 _AE_310_FAST = f"""SELECT blob4 AS up, double1 AS status, SUM(_sample_interval) AS n,
  quantileExactWeighted(0.5)(double9, _sample_interval) AS f50, quantileExactWeighted(0.95)(double9, _sample_interval) AS f95,
  quantileExactWeighted(0.5)(double2, _sample_interval) AS ms50
  FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '7' DAY AND blob1 = '/v1/chat/completions'
+ AND double11 > 0 AND double11 <= 400 AND double9 > 0 AND blob6 NOT IN ('CN', 'HK', 'MO')
  GROUP BY up, status ORDER BY n DESC LIMIT 100 FORMAT JSON"""
 _AE_310_VER = f"""SELECT blob5 AS ver, SUM(_sample_interval) AS n, COUNT(DISTINCT blob2) AS users
  FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '7' DAY GROUP BY ver ORDER BY n DESC LIMIT 100 FORMAT JSON"""

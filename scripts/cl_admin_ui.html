@@ -1501,7 +1501,7 @@ function renderDash310(){
       "）· 退回 " + num(f.back) + " · 超时 " + num(f.to) + " · 首字中位：OpenRouter " + ms(f.f50Or) + " / DeepSeek " + ms(f.f50Ds)));
     fParts.push(mkTable([["上游尝试串", ""], ["次数", "r"], ["首字中位", "r"]],
       (ae3.fast || []).slice(0, 12).map(function(r){ return [r.up || "（没记上游）", num(+r.n), ms(+r.f50)]; })));
-    fParts.push(el("div", "hint", "只把「实时翻译 / 草稿」（stream 且 max_tokens ≤ 400）送 OpenRouter；精修不绕道。中国用户离 DeepSeek 近，默认跳过（CN/HK/MO）。"));
+    fParts.push(el("div", "hint", "只数够格的请求：「实时翻译 / 草稿」（stream 且 max_tokens ≤ 400、不在 CN/HK/MO）。笔记 / 精修设计上不绕道，不进分母；通道 2026-10-17 才上线，更早的直连也算在这 7 天里。"));
   } else fParts.push(el("div", "hint", ae3 && ae3.error ? ae3.error : "近 7 天没有翻译上游记录。"));
   box.appendChild(fold("OpenRouter 快速通道" + (f ? " · 命中率 " + (f.total ? (f.hit / f.total * 100).toFixed(1) : 0) + "%" : ""), fParts, "fast"));
 

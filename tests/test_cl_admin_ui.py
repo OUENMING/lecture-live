@@ -880,6 +880,9 @@ class AE310(unittest.TestCase):
         self.assertTrue(all("classlive_events" in q for q in sqls))
         self.assertTrue(any("blob1 = '/v1/soniox/key'" in q for q in sqls), "Soniox key 那路没查")
         self.assertTrue(any("double11 > 600" in q for q in sqls), "笔记（max_tokens > 600）那路没查")
+        fast = [q for q in sqls if "double11 <= 400" in q]
+        self.assertEqual(len(fast), 1, "快速通道那路的分母要只数够格请求（max_tokens ≤ 400）")
+        self.assertIn("double9 > 0", fast[0]); self.assertIn("NOT IN ('CN', 'HK', 'MO')", fast[0])
         self.assertNotIn("SECRET", json.dumps(r))
 
     def test_没开AE回pending(self):

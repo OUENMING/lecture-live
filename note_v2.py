@@ -828,6 +828,15 @@ def _clean_section(s) -> dict:
             pg = _clean_program(ex.get("program"))
             if pg:
                 r["example"]["program"] = pg
+            # ⭐ F12 §2：verdict 的 "complete" 由**代码**复核（每个结论数字要在 quote 里
+            #    或由 program 算出）；证不成立 → 强制 fragment + 标题挂「课上片段」。
+            sc = note_math.enforce_source_verdict(r["example"])
+            if sc:
+                r["example"]["source_check"] = sc
+                if str(sc.get("verdict")) == "fragment" and sc.get("forced"):
+                    t = str(r["example"].get("title") or "")
+                    if "片段" not in t:
+                        r["example"]["title"] = (t + "（课上片段）") if t else "课上片段"
     for v in (s.get("variants") or []):
         if not isinstance(v, dict):
             continue

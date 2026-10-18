@@ -925,5 +925,76 @@ class TestF11Program(unittest.TestCase):
         self.assertTrue(bad, "补全题的新数字没进机械核（返修闸看不见）")
 
 
+class ConserveF12(unittest.TestCase):
+    """⭐ F12 §1：例题里的化学方程式守恒核对（元素计数 + 电荷 + 无重复物种）。"""
+
+    def _why(self, eq):
+        return nm._check_equation(eq) if nm._looks_chemical(eq) else None
+
+    def test_坏例子必须拦(self):
+        # 作者点名的那条（CHE002A §18 真产物）：H₂O 两边都有、e⁻ 放错边 → 不守恒。
+        bad = "8H⁺ + 4H₂O + 8e⁻ → 4H₂O"
+        self.assertTrue(nm._looks_chemical(bad))
+        self.assertNotEqual("", self._why(bad))
+
+    def test_两条好例子必须过(self):
+        for good in ("MnO4⁻ + 8H⁺ + 5e⁻ → Mn²⁺ + 4H₂O", "Fe²⁺ → Fe³⁺ + e⁻"):
+            self.assertTrue(nm._looks_chemical(good), good)
+            self.assertEqual("", self._why(good), good)
+
+    def test_各种写法都要认得(self):
+        for good in ("2Na + Cl₂ → 2NaCl", "2Na + Cl2 → 2NaCl",
+                     "Ca(OH)₂ + 2H⁺ → Ca²⁺ + 2H₂O", "CuSO4·5H2O → CuSO4 + 5H2O",
+                     "Cr2O7²⁻ + 14H⁺ + 6e⁻ → 2Cr³⁺ + 7H₂O",
+                     "MnO_4^- + 8H^+ + 5e^- -> Mn^{2+} + 4H_2O"):
+            self.assertEqual("", self._why(good), good)
+
+    def test_不配平必须拦(self):
+        for bad in ("H₂ + O₂ → H₂O", "2H₂ + O₂ → H₂O", "NaCl → Na⁺"):
+            self.assertNotEqual("", self._why(bad), bad)
+
+    def test_非化学箭头不算(self):
+        for s in ("q → ∞", "AC → 80", "P = 60 → 346.4", "MC=AC → q=15"):
+            eqs = nm._equations_in(s)
+            self.assertFalse(any(nm._looks_chemical(e) for e in eqs), s)
+
+    def test_接进机械核归例题单元(self):
+        sec = {"heading": "h", "ts": "10:36",
+               "example": {"title": "🎙 10:36", "prompt": "配平半反应。", "steps": [],
+                           "answer": "8H⁺ + 4H₂O + 8e⁻ → 4H₂O"}}
+        rows = [r for r in nm.check_review({"sections": [sec]})
+                if r.get("status") == "mismatch"]
+        self.assertTrue(rows, "坏方程式没进机械核")
+        self.assertEqual("example", nm.unit_of_claim(sec, str(rows[0].get("claim") or "")))
+
+
+class VerdictF12(unittest.TestCase):
+    """⭐ F12 §2：`complete` 必须被代码复核（结论数字要在 quote 里或由 program 算出）。"""
+
+    def test_数字不在quote则强制fragment(self):
+        ex = {"prompt": "求停产价。$AC=60q+500/q$", "steps": [], "answer": "P≈346.4。",
+              "source_check": {"quote": "求最低平均成本。", "verdict": "complete"}}
+        out = nm.enforce_source_verdict(ex)
+        self.assertEqual("fragment", out["verdict"])
+        self.assertTrue(out.get("forced"))
+
+    def test_数字在quote则保留complete(self):
+        ex = {"prompt": "求停产价。", "steps": [], "answer": "P≈346.4。",
+              "source_check": {"quote": "停下来那点大约 346.4，是 sixty 乘这个加五百除这个。",
+                               "verdict": "complete"}}
+        self.assertEqual("complete", nm.enforce_source_verdict(ex)["verdict"])
+
+    def test_数词也算说出来(self):
+        ex = {"prompt": "配平半反应，产物侧要几个 H₂O？", "steps": [], "answer": "需要 4 个 H₂O。",
+              "source_check": {"quote": "we need four molecules.", "verdict": "complete"}}
+        self.assertEqual("complete", nm.enforce_source_verdict(ex)["verdict"])
+
+    def test_program算出来的允许(self):
+        ex = {"prompt": "求 P。", "steps": [], "answer": "P≈346.4。",
+              "program": [{"var": "P", "op": "eval", "expr": "60*q + 500/q", "x": "q", "at": 2.89}],
+              "source_check": {"quote": "把 2.89 带进去。", "verdict": "complete"}}
+        self.assertEqual("complete", nm.enforce_source_verdict(ex)["verdict"])
+
+
 if __name__ == "__main__":
     unittest.main()

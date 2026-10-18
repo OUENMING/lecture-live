@@ -157,6 +157,40 @@ def b_unsupported_numeric_claim():
     return any(r.get("status") == "mismatch" for r in (out.get("checks") or []))
 
 
+def b_conserve_bad_chem():
+    """⭐ F12 §1：作者点名的坏方程式（H₂O 两边都有、e⁻ 放错边）必须拦。"""
+    rev = {"sections": [_sec(example=_ex(answer="8H⁺ + 4H₂O + 8e⁻ → 4H₂O"))]}
+    return _mism(rev)
+
+
+def b_conserve_unbalanced():
+    """⭐ F12 §1：元素不守恒（H₂ + O₂ → H₂O）必须拦。"""
+    rev = {"sections": [_sec(example=_ex(answer="$H_2 + O_2 \\to H_2O$"))]}
+    return _mism(rev)
+
+
+def b_conserve_charge_unbalanced():
+    """⭐ F12 §1：元素平了但**电荷**不平（Fe²⁺ → Fe³⁺ 少写电子）必须拦。"""
+    rev = {"sections": [_sec(example=_ex(answer="Fe²⁺ → Fe³⁺"))]}
+    return _mism(rev)
+
+
+def b_conserve_dupe_species():
+    """⭐ F12 §1：元素/电荷都平了，但**同一物种两边都出现**（没化简）必须拦。"""
+    rev = {"sections": [_sec(example=_ex(answer="CO₂ + H₂O → H₂O + CO₂"))]}
+    return _mism(rev)
+
+
+def b_verdict_forced_fragment():
+    """⭐ F12 §2：complete 但结论数字不在 quote、也无 program → 强制 fragment。"""
+    ex = _ex(answer="P≈346.4。")
+    ex["source_check"] = {"quote": "求最低平均成本。", "verdict": "complete"}
+    rev = {"sections": [_sec(example=ex)]}
+    sec = rev["sections"][0]
+    sec["example"]["source_check"] = nm.enforce_source_verdict(dict(sec["example"]))
+    return sec["example"]["source_check"].get("verdict") == "fragment"
+
+
 # ---------------------------------------------------------------- MUST_PASS
 def p_sum_chain_no_false_div():
     rev = {"sections": [_sec(prose=[
@@ -265,26 +299,57 @@ def p_no_program_skip():
     return bool(nm.program_rows(_sec(example=_ex())))     # 会返回 [] → 干净
 
 
+def p_conserve_mno4_ok():
+    """⭐ F12 §1：标准酸性半反应配平，必须过。"""
+    rev = {"sections": [_sec(example=_ex(answer="MnO4⁻ + 8H⁺ + 5e⁻ → Mn²⁺ + 4H₂O"))]}
+    return _mism(rev)
+
+
+def p_conserve_fe_ok():
+    """⭐ F12 §1：`Fe²⁺ → Fe³⁺ + e⁻`，必须过。"""
+    rev = {"sections": [_sec(example=_ex(answer="Fe²⁺ → Fe³⁺ + e⁻"))]}
+    return _mism(rev)
+
+
+def p_conserve_nonchem_arrow_ok():
+    """⭐ F12 §1：非化学的箭头串（极限/取值）不许被当方程式。"""
+    rev = {"sections": [_sec(prose=["当 $q\\to\\infty$ 时 AC→80。"],
+                             example=_ex(answer="AC → 80"))]}
+    return _mism(rev)
+
+
+def p_verdict_supported_stays_complete():
+    """⭐ F12 §2：数字都在 quote 里（含数词）→ 仍 complete。"""
+    ex = _ex(prompt="求电子数。", answer="需要 40 个电子。", steps=[])
+    ex["source_check"] = {"quote": "we need forty electrons.", "verdict": "complete"}
+    out = nm.enforce_source_verdict(ex)
+    return str(out.get("verdict")) != "complete"
+
+
 MUST_BLOCK = [b_limit_as_min, b_limit_extremum_word, b_program_monotonic,
               b_program_answer_intermediate, b_program_wild_number, b_faded_new_number,
               b_q_as_p, b_value_as_point, b_self_talk, b_first_person_guess,
               b_trivial_cue, b_dupe_sentence, b_sign_contradiction,
-              b_flow_repeats_example, b_same_title_component, b_unsupported_numeric_claim]
+              b_flow_repeats_example, b_same_title_component, b_unsupported_numeric_claim,
+              b_conserve_bad_chem, b_conserve_unbalanced, b_conserve_charge_unbalanced,
+              b_conserve_dupe_species, b_verdict_forced_fragment]
 
 MUST_PASS = [p_sum_chain_no_false_div, p_chemistry_imperative_not_collected, p_program_ok,
              p_chained_fraction_ok, p_rounding_stationary_ok, p_min_point_not_flagged,
              p_chinese_habit_not_scrubbed, p_clean_section_no_repair, p_valid_compare_kept,
              p_valid_flow_kept, p_single_label_untouched, p_non_numeric_downgrade_not_warned,
-             p_min_at_six_ok, p_sign_correct_ok, p_symbol_claim_retrieves, p_no_program_skip]
+             p_min_at_six_ok, p_sign_correct_ok, p_symbol_claim_retrieves, p_no_program_skip,
+             p_conserve_mno4_ok, p_conserve_fe_ok, p_conserve_nonchem_arrow_ok,
+             p_verdict_supported_stays_complete]
 
 
 class FrozenBench(unittest.TestCase):
-    def test_必拦_16条(self):
+    def test_必拦全部(self):
         for f in MUST_BLOCK:
             with self.subTest(case=f.__name__):
                 self.assertTrue(f(), f"{f.__name__} 没被拦（假阴性 = 回归）")
 
-    def test_必过_16条(self):
+    def test_必过全部(self):
         for f in MUST_PASS:
             with self.subTest(case=f.__name__):
                 self.assertFalse(f(), f"{f.__name__} 被误伤（假阳性）")
@@ -294,7 +359,7 @@ class FrozenBench(unittest.TestCase):
         files = sorted(os.path.basename(p) for p in glob.glob(os.path.join(FIX, "*.md")))
         self.assertGreaterEqual(len(files), 12, f"切片不足 12：{files}")
         for name in ("econ10790-1315.md", "soc10020-dublin.md", "che002a-stoich.md",
-                     "ecs170-grad.md", "admin-none.md"):
+                     "che002a-redox.md", "ecs170-grad.md", "admin-none.md"):
             self.assertIn(name, files, f"缺切片 {name}")
 
     def test_切片是真转录(self):

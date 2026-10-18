@@ -14,6 +14,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import note_html as nh          # noqa: E402
+import note_math as nm          # noqa: E402
 import note_render as nr        # noqa: E402
 import note_v2 as nv            # noqa: E402
 
@@ -1669,6 +1670,34 @@ class F11Budgets(unittest.TestCase):
         import inspect
         self.assertEqual(inspect.signature(nv.align).parameters["max_tokens"].default,
                          nv.ALIGN_MAX_TOKENS)
+
+
+class F12VerdictWiring(unittest.TestCase):
+    """⭐ F12 §2：`_clean_section` 要**代码**复核 verdict，并给降级件挂「课上片段」标。"""
+
+    def _clean(self, ex: dict) -> dict:
+        sec = {"heading": "h", "ts": "10:36", "prose": ["讲解。"], "example": ex}
+        return nv._clean_section(sec).get("example") or {}
+
+    def test_数字无据_complete降fragment加标记(self):
+        got = self._clean({"title": "🎙 10:36:12 配平半反应", "prompt": "配平。", "steps": [],
+                           "answer": "需要投入 999 个电子。",
+                           "source_check": {"quote": "we need four molecules", "verdict": "complete"}})
+        self.assertEqual("fragment", got["source_check"]["verdict"])
+        self.assertIn("片段", got["title"])
+
+    def test_数字有据_保持complete不加标记(self):
+        got = self._clean({"title": "🎙 10:36:12 配平半反应", "prompt": "配平。", "steps": [],
+                           "answer": "需要 4 个 H₂O。",
+                           "source_check": {"quote": "we need four molecules", "verdict": "complete"}})
+        self.assertEqual("complete", got["source_check"]["verdict"])
+        self.assertNotIn("片段", got["title"])
+
+    def test_坏方程式进机械核走返修(self):
+        got = self._clean({"title": "🎙 10:36", "prompt": "配平半反应。", "steps": [],
+                           "answer": "8H⁺ + 4H₂O + 8e⁻ → 4H₂O"})
+        rows = nm.check_review({"sections": [{"heading": "h", "example": got}]})
+        self.assertTrue([r for r in rows if r.get("status") == "mismatch"])
 
 
 if __name__ == "__main__":

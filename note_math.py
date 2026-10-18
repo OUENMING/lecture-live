@@ -646,6 +646,7 @@ def check_review(review: dict, *, transcript: str = "") -> list:
                 rows += _rows_for_text(t, fdefs)
             rows += _qvsp_rows(u, fdefs_by_text)      # ⭐ F9：q 不许当 P（整单元一起看）
         rows += program_rows(s)                       # ⭐ F11 §2：例题 program 代码算、逐数对
+        rows += conserve_rows(s)                      # ⭐ F12 §1：例题里的化学方程式必须配平
         rows += reuse_rows(s)                         # ⭐ F11 §4：补全题必须是同一道例题挖空
     # ⚠️ 同一句断言在 `prose` 与 `answer` 各出现一次 → 会出两行一模一样的核对表；
     #    空的 claim 也在这里丢掉（实测第三份产物上有两行全空）。
@@ -1552,3 +1553,251 @@ def reuse_rows(section: dict) -> list:
                         "补全题必须是**同一道例题**挖空（F11 §4：同一批数、无新算术）"}]
     return []
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# F12 §1：**守恒核对**（conserve）—— 任何课写出来的**化学方程式**都要配平。
+# 跨学科通用：不认"配平"字样、不认课号，只认"两边化学物种的元素计数与电荷相等、
+# 且没有同一物种两边都出现"。没有 sympy、没有元素周期表 —— 只做符号计数。
+# ════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
+# F12 §1：**守恒核对**（conserve）—— 任何课写出来的**化学方程式**都要配平。
+# 跨学科通用：不认「配平」字样、不认课号，只认「两边化学物种的元素计数与电荷相等、
+# 且没有同一物种两边都出现」。没有 sympy、没有元素周期表 —— 只做符号计数。
+# ════════════════════════════════════════════════════════════════════════════
+_CI_SUB = "₀₁₂₃₄₅₆₇₈₉"
+_CI_SUP = "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻"
+_CI_CI_SUB_D = dict(zip(_CI_SUB, "0123456789"))
+_CI_CI_SUP_D = {"⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4",
+          "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9"}
+_ARROW_TOKENS = r"→|⟶|⇒|⇌|->"
+_LATEX_ARROW = re.compile(r"\\to\b|\\rightarrow\b|\\longrightarrow\b|\\leftrightarrow\b|\\rightleftharpoons\b")
+_ARROW = re.compile(_ARROW_TOKENS)
+_EQ_TOK = "0-9A-Za-z" + _CI_SUB + _CI_SUP + r"()\[\]+*·.\-_{}^"
+_EQ_CAND = re.compile(rf"[{_EQ_TOK}\s]+(?:→|⟶|⇒|⇌|->)[{_EQ_TOK}\s]+")
+
+
+def _read_count(s: str, i: int) -> tuple:
+    """读一个原子数（ASCII 或 unicode 下标）→ `(值, 新下标)`；没数字 → 1。**纯函数。**"""
+    out = ""
+    while i < len(s) and (s[i] in "0123456789" or s[i] in _CI_CI_SUB_D):
+        out += _CI_CI_SUB_D.get(s[i], s[i])
+        i += 1
+    return (int(out) if out else 1), i
+
+
+def _parse_formula(s: str) -> dict:
+    """化学式 → `{元素: 原子数}`（支持 `()`/`[]` 倍数与 `·` 水合物点）。**纯函数。**"""
+    i, stack = 0, [{}]
+    dot = 1
+    while i < len(s):
+        ch = s[i]
+        if ch in "([":
+            stack.append({})
+            i += 1
+        elif ch in ")]":
+            if len(stack) == 1:
+                return {}
+            grp = stack.pop()
+            i += 1
+            mul, i = _read_count(s, i)
+            for k, v in grp.items():
+                stack[-1][k] = stack[-1].get(k, 0) + v * mul
+        elif ch in "·*":
+            i += 1
+            dot, i = _read_count(s, i)          # `CuSO4·5H2O` 的 5 管住**后面整段**
+        elif ch.isupper():
+            j = i + 1
+            if j < len(s) and s[j].islower():
+                j += 1
+            el = s[i:j]
+            i = j
+            cnt, i = _read_count(s, i)
+            stack[-1][el] = stack[-1].get(el, 0) + cnt * dot
+        else:
+            return {}                            # 元素符号里的裸数字/怪字符 → 认不出
+    return stack[0] if len(stack) == 1 else {}
+
+
+def _parse_species(tok: str):
+    """一个物种 `4H₂O` / `MnO4⁻` / `Fe^{2+}` / `e⁻` → `(元素表, 电荷)`；认不出 → `None`。**纯函数。**"""
+    s = str(tok or "").strip()
+    if not s:
+        return None
+    m = re.match(r"^(\d+)\s*", s)
+    coeff = int(m.group(1)) if m else 1
+    s = (s[m.end():] if m else s).strip()
+    s = re.sub(r"_\s*\{([0-9]+)\}", r"\1", s)     # LaTeX 下标 `H_2O` / `H_{2}O`
+    s = re.sub(r"_\s*([0-9]+)", r"\1", s)
+    if s in ("e", "e-", "e⁻", "e−", "e^-", "e^−"):
+        return {"e": coeff}, -coeff
+    charge = 0
+    ms = re.search(rf"[{_CI_SUP}]+$", s)
+    if ms:
+        sup, s = ms.group(0), s[:ms.start()].strip()
+        digits = "".join(_CI_CI_SUP_D.get(c, "") for c in sup if c in _CI_CI_SUP_D)
+        sign = 1 if "⁺" in sup else (-1 if "⁻" in sup else 1)
+        charge = (int(digits) if digits else 1) * sign
+    else:
+        ml = re.search(r"\^\{?([0-9]?)([+-])\}?$", s)
+        if ml:
+            s = s[:ml.start()].strip()
+            charge = (int(ml.group(1)) if ml.group(1) else 1) * (1 if ml.group(2) == "+" else -1)
+        elif s.endswith("+") and len(s) > 1:
+            s, charge = s[:-1].strip(), 1
+        elif s.endswith("-") and len(s) > 1:
+            s, charge = s[:-1].strip(), -1
+    counts = _parse_formula(s)
+    if not counts:
+        return None
+    return {k: v * coeff for k, v in counts.items()}, charge * coeff
+
+
+def _looks_chemical(eq: str) -> bool:
+    """是不是「化学方程式」（而非 `q → ∞` / `AC → 80`）：要有元素符号 + 下标/上标电荷/电子。**纯函数。**"""
+    eq = str(eq or "")
+    if not _ARROW.search(eq) or not re.search(r"[A-Z][a-z]?", eq):
+        return False
+    return bool(re.search(rf"[{_CI_SUB}]|[A-Z][a-z]?\d|_\s*[0-9{{]", eq)
+                or re.search(rf"[{_CI_SUP}]|\^", eq)
+                or re.search(r"(^|\s)\d*e(\^?-|⁻)", eq))
+
+
+def _equations_in(text: str) -> list:
+    """一段文本里的化学方程式**候选**（`A + B → C + D`）。**纯函数。**"""
+    s = _LATEX_ARROW.sub("→", str(text or ""))        # `\to` / `\rightarrow` 当箭头
+    return [m.group(0).strip() for m in _EQ_CAND.finditer(s)]
+
+
+def _check_equation(eq: str) -> str:
+    """一条方程式 → 问题（人话）；配平则 `""`。**纯函数。**"""
+    parts = _ARROW.split(eq, maxsplit=1)
+    if len(parts) != 2:
+        return "箭头两边没分成两边"
+
+    def _side(txt: str):
+        toks = [t for t in re.split(r"\s+\+\s+", txt.strip()) if t.strip()]
+        counts: dict = {}
+        charge = 0
+        names: list = []
+        for t in toks:
+            sp = _parse_species(t)
+            if sp is None:
+                return None, t
+            c, ch = sp
+            for k, v in c.items():
+                if k == "e":
+                    continue                       # 电子不是元素：只贡献电荷，不进元素表
+                counts[k] = counts.get(k, 0) + v
+            charge += ch
+            names.append((tuple(sorted(c.items())), ch))
+        return (counts, charge, names), ""
+
+    left, bad = _side(parts[0])
+    if left is None:
+        return f"物种 {bad!r} 认不出（配平核不了）"
+    right, bad = _side(parts[1])
+    if right is None:
+        return f"物种 {bad!r} 认不出（配平核不了）"
+    (lc, lch, ln), (rc, rch, rn) = left, right
+    if lch != rch:
+        return f"电荷不平（左 {lch:+d}，右 {rch:+d}）"
+    diff = {k: (lc.get(k, 0), rc.get(k, 0)) for k in set(lc) | set(rc)
+            if lc.get(k, 0) != rc.get(k, 0)}
+    if diff:
+        bad = "；".join(f"{k} 左 {a} 右 {b}" for k, (a, b) in sorted(diff.items()))
+        return f"元素不守恒（{bad}）"
+    if set(ln) & set(rn):
+        return "同一物种在两边都出现（没有化简）"
+    return ""
+
+
+def conserve_rows(section: dict) -> list:
+    """⭐ F12 §1：例题里**化学方程式**的守恒核对。**纯函数，无 LLM。**
+
+    在 steps / answer / explanation 里找 `A + B → C + D` 形态的方程式；判定
+    元素计数相等、总电荷相等、没有同一物种两边都出现。任一条不满足 →
+    mismatch（走 F8 返修：返一次；复检仍错整件撤）。非化学的箭头串（`q → ∞`）不算。
+    """
+    if not isinstance(section, dict):
+        return []
+    ex = section.get("example")
+    if not isinstance(ex, dict):
+        return []
+    texts: list = []
+    for st in (ex.get("steps") or []):
+        texts.append(_txt(st.get("text")) if isinstance(st, dict) else str(st))
+    texts += [str(ex.get("answer") or ""), str(ex.get("explanation") or "")]
+    for t in texts:
+        for eq in _equations_in(t):
+            if not _looks_chemical(eq):
+                continue
+            why = _check_equation(eq)
+            if why:
+                return [{"claim": (t or eq)[:120], "status": "mismatch", "recomputed": "",
+                         "how": f"方程式「{eq[:60]}」没配平：{why}（F12 §1 守恒核对）"}]
+    return []
+
+
+#: 英文数词 → 数值（教授口述「four molecules」也算把 4 说出来了）。
+_NUM_WORDS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+              "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+              "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+              "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+              "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+              "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100}
+
+
+def _numbers_in(text: str) -> list:
+    """一段文本里的**所有**数字（阿拉伯数字 + 英文数词）。**纯函数。**"""
+    s = re.sub(r"\\[A-Za-z]+", " ", str(text or ""))
+    out: list = []
+    for m in re.finditer(r"-?\d+(?:\.\d+)?", s):
+        try:
+            out.append(float(m.group(0)))
+        except ValueError:
+            continue
+    for m in re.finditer(r"[A-Za-z]+", s):
+        w = m.group(0).lower()
+        if w in _NUM_WORDS:
+            out.append(float(_NUM_WORDS[w]))
+    return out
+
+
+#: 例题里"像结论"的数字（题面/步骤/答案）—— verdict 核对用。
+def _example_numbers(ex: dict) -> list:
+    out: list = []
+    for t in [ex.get("prompt"), ex.get("answer"), str(ex.get("explanation") or "")]:
+        out += _conclusion_nums(str(t or ""))
+    for st in (ex.get("steps") or []):
+        out += _conclusion_nums(_txt(st.get("text")) if isinstance(st, dict) else str(st))
+    return out
+
+
+def enforce_source_verdict(ex: dict) -> dict:
+    """⭐ F12 §2：把 `source_check.verdict` 的 `"complete"` 按**代码**核一遍。
+
+    `complete` 只有在**例题里每个结论数字都出现在 quote 里（含英文数词）、
+    或是 program 算出来的**时才成立；否则强制改成 `fragment`（模型自报不可信 ——
+    真跑 CHE §18：quote 是转录乱码却报了 complete）。返回（可能被改过的）`source_check`。
+    **纯函数。**（方程式**本身对不对**由 F12 §1 的 `conserve_rows` 管，不在这里。）
+    """
+    if not isinstance(ex, dict):
+        return {}
+    sc = ex.get("source_check")
+    if not isinstance(sc, dict):
+        return {}
+    out = dict(sc)
+    if str(sc.get("verdict")) != "complete":
+        return out
+    qnums = _numbers_in(sc.get("quote"))
+    vals, _err = run_program(ex.get("program") or [], ex.get("givens") or {})
+    derived = [float(v) for v in vals.values()]
+    for n in _example_numbers(ex):
+        if any(_sig_match(n, d) for d in derived):
+            continue
+        if any(_sig_match(n, q) for q in qnums):
+            continue
+        out["verdict"] = "fragment"
+        out["forced"] = True
+        return out
+    return out

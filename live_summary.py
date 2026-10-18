@@ -696,6 +696,7 @@ class LiveSummarizer:
                          "t_open": now}
             self._cid += 1
             self._interim_at = now
+            self._interim_n = -1          # 新章：上一章的句数不作数（撞上同一个数会白等 8 分钟）
         c = self._cur
         if title:                                         # 定题（开场那些空主题的窗口
             c["title"], c["title_zh"] = title, title_zh    # 早就攒在里面了）

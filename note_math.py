@@ -1623,6 +1623,8 @@ def _parse_species(tok: str):
     s = str(tok or "").strip()
     if not s:
         return None
+    s = re.sub(r"\((?:s|l|g|aq|sln|v|ppt|cr|am)\)", "", s, flags=re.I)   # 状态标 (s)(l)(g)(aq)
+    s = s.replace("↑", "").replace("↓", "")                              # 气体/沉淀箭头
     m = re.match(r"^(\d+)\s*", s)
     coeff = int(m.group(1)) if m else 1
     s = (s[m.end():] if m else s).strip()
@@ -1675,7 +1677,10 @@ def _check_equation(eq: str) -> str:
         return "箭头两边没分成两边"
 
     def _side(txt: str):
-        toks = [t for t in re.split(r"\s+\+\s+", txt.strip()) if t.strip()]
+        # ` + ` 是常态；没写空格的（`2H₂(g)+O₂(g)`）也要认。
+        parts_ = re.split(r"\s+\+\s+", txt.strip()) if " + " in txt \
+            else re.split(r"\+", txt.strip())
+        toks = [t for t in parts_ if t.strip()]
         counts: dict = {}
         charge = 0
         names: list = []

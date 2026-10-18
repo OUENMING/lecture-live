@@ -946,11 +946,15 @@ class ConserveF12(unittest.TestCase):
         for good in ("2Na + Cl₂ → 2NaCl", "2Na + Cl2 → 2NaCl",
                      "Ca(OH)₂ + 2H⁺ → Ca²⁺ + 2H₂O", "CuSO4·5H2O → CuSO4 + 5H2O",
                      "Cr2O7²⁻ + 14H⁺ + 6e⁻ → 2Cr³⁺ + 7H₂O",
-                     "MnO_4^- + 8H^+ + 5e^- -> Mn^{2+} + 4H_2O"):
+                     "MnO_4^- + 8H^+ + 5e^- -> Mn^{2+} + 4H_2O",
+                     "2H₂O(l) → 2H₂(g) + O₂(g)",              # 状态标 (l)(g)
+                     "2H₂(g)+O₂(g) → 2H₂O(l)",                # 不写空格的 +
+                     "NaOH(aq) + HCl(aq) → NaCl(aq) + H₂O(l)",
+                     "MnO4⁻(aq) + 8H⁺(aq) + 5e⁻ → Mn²⁺(aq) + 4H₂O(l)"):
             self.assertEqual("", self._why(good), good)
 
     def test_不配平必须拦(self):
-        for bad in ("H₂ + O₂ → H₂O", "2H₂ + O₂ → H₂O", "NaCl → Na⁺"):
+        for bad in ("H₂ + O₂ → H₂O", "2H₂ + O₂ → H₂O", "H₂+O₂→H₂O", "NaCl → Na⁺"):
             self.assertNotEqual("", self._why(bad), bad)
 
     def test_非化学箭头不算(self):

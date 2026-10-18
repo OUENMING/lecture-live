@@ -749,6 +749,154 @@ _SUPPORT_SKIP = re.compile(r"📚|未核对|只给了片段|核算对不上")
 #: ⚠️ 窗口要用它，不是小节 `ts`（F9b 实测：§3 小节 13:25:49、例题标 🎙 13:40，
 #:    用小节 ts 会把窗口放到"刚宣布做 Exercise 5"那几句上，题目本身在 14 分钟外）。
 _TS_IN_TITLE = re.compile(r"🎙\s*(\d{1,2}:\d{2}(?::\d{2})?)")
+#: 检索停用词：LaTeX 命令与排版词 —— 不是内容。
+_RETR_STOP = {"mathrm", "frac", "approx", "rightarrow", "to", "times", "text",
+              "operatorname", "begin", "end", "align", "leq", "geq", "left", "right"}
+#: 命名实体过滤（题面给定里的大写英文词尾巴）：句子开头的常见词不算实体。
+_ENTITY_STOP = {"the", "and", "for", "with", "from", "this", "that", "what", "why",
+                "when", "how", "are", "was", "were", "you", "they", "their", "about",
+                "into", "use", "one", "two", "can", "not", "but", "its", "has", "have"}
+
+
+def _retr_tokens(claim: str) -> dict:
+    """claim → 检索 token（数字 / 拉丁词 / 中文 2-gram）。**纯函数。**"""
+    t = str(claim or "")
+    nums = set(re.findall(r"\d+(?:\.\d+)?", t))
+    latin = {w.lower() for w in re.findall(r"[A-Za-z]{2,}", t)} - _RETR_STOP
+    zh = re.sub(r"[^\u4e00-\u9fff]", "", t)
+    grams = {zh[i:i + 2] for i in range(len(zh) - 1)} if len(zh) >= 2 else set()
+    return {"nums": nums, "latin": latin, "grams": grams}
+
+
+def _retr_score(entry: dict, toks: dict) -> float:
+    """一条转录（EN/ASR + ZH）与 claim token 的重叠分。**纯函数。**
+
+    数字/拉丁词用**词边界**匹配（`12` 不撞 `312`、`ac` 不撞 `interaction`），
+    中文 2-gram 按占比归一（长句不刷分）。数字是最硬的锚（2 分/个）。
+    """
+    if not isinstance(entry, dict):
+        return 0.0
+    en = (str(entry.get("en") or "") + " " + str(entry.get("asr") or "")).lower()
+    zh = str(entry.get("zh") or "")
+    s = 0.0
+    for n in toks["nums"]:
+        pat = r"(?<!\d)" + re.escape(n) + r"(?!\d)"
+        if re.search(pat, en) or re.search(pat, zh):
+            s += 2.0
+    for w in toks["latin"]:
+        pat = r"(?<![a-z])" + re.escape(w) + r"(?![a-z])"
+        if re.search(pat, en):
+            s += 1.0
+    if toks["grams"]:
+        zhc = re.sub(r"[^\u4e00-\u9fff]", "", zh)
+        hit = sum(1 for g in toks["grams"] if g in zhc)
+        s += 1.5 * hit / max(1, len(toks["grams"]))
+    return s
+
+
+def _support_windows(entries: list, claim: str, *, prior=None, fallback=None,
+                     limit: int = 2) -> list:
+    """claim → 检索出的 1–2 个窗口 `[(lo, hi)]`。**纯函数。**
+
+    ⭐ F9d（作者实测）：正文 claim 没有自己的时间戳，拿小节 `ts` 取窗口会离讲师真说的
+    地方很远（SOC：claim 在 §13:27，原话在 **13:30:16** → 假警）。改为**检索**：
+    claim 的数字/拉丁词/中文 2-gram 逐条打分（EN+ASR+ZH 一起看 —— 中文 claim 直接
+    对 ZH 行），命中点展开成前 8 后 32 行的窗口，取总分最高的 1–2 个。
+    · `prior`（🎙 时刻）是**强先验**：给定时它那个窗口永远保留；
+    · 完全没有命中 → `prior` → `fallback`（小节 ts）→ 全篇（老兜底）。
+    """
+    rows = [e for e in (entries or []) if isinstance(e, dict)]
+    toks = _retr_tokens(claim)
+    scores = [_retr_score(e, toks) for e in rows]
+    # 噪音地板：低于最高分 5%（且 <0.2）的命中不算锚 —— 一个 2-gram 的偶合会把
+    # 窗口和真锚连成一整段（F9d 实测：0.028 的填充句把 13:30 的窗口拖回 13:27）。
+    floor = max(0.2, 0.05 * (max(scores) if scores else 0.0))
+    cands: list = []
+    for i, s in enumerate(scores):
+        if s >= floor:
+            cands.append((max(0, i - 8), min(len(rows), i + 32)))
+    cands.sort()
+    merged: list = []
+    for lo, hi in cands:
+        if merged and lo <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    merged.sort(key=lambda w: -sum(scores[w[0]:w[1]]))
+    picked = merged[:max(1, limit)]
+    if prior is not None:
+        pw = _support_window(rows, prior)
+        if pw[1] > pw[0] and pw not in picked:
+            picked = ([picked[0]] if picked else []) + [pw]
+            picked = picked[:limit]
+    if not picked:
+        picked = [_support_window(rows, prior if prior is not None else fallback)]
+    return sorted(set(picked))
+
+
+def _support_state_multi(entries: list, ranges: list) -> str:
+    """多个窗口 → 一段 state（重叠/相邻先合并）。行号仍是**全篇**行号。
+
+    ⭐ F9d：EN 行后面接 `（ZH）…` —— 中文 claim 要对得上转录里的中文行
+    （作者点名）；一行一条，窗口仍 ≈40 行。
+    """
+    fused: list = []
+    for lo, hi in sorted(ranges):
+        if fused and lo <= fused[-1][1]:
+            fused[-1] = (fused[-1][0], max(fused[-1][1], hi))
+        else:
+            fused.append((lo, hi))
+    lines: list = []
+    for lo, hi in fused:
+        for j in range(lo, hi):
+            e = entries[j]
+            if not isinstance(e, dict):
+                continue
+            en = str(e.get("en") or e.get("asr") or "").strip()
+            if not en:
+                continue
+            zh = str(e.get("zh") or "").strip()
+            if zh and zh != en:
+                lines.append(f"L{j + 1} [{e.get('ts')}] {en}  （ZH）{zh}")
+            else:
+                lines.append(f"L{j + 1} [{e.get('ts')}] {en}")
+    return SUPPORT_PREAMBLE + "\n\n" + "\n".join(lines)
+
+
+def _prompt_givens(prompt: str, *, min_len: int = 3) -> list:
+    """例题题面 → 只取**具体给定**（作者 F9d 第 2 条）：公式/等式、数字、命名实体。
+
+    ⛔ 祈使话（配平/合并/求/计算…）永远不进来 —— 那些话讲师不会逐字念，
+       收进来只会制造"祈使题面 ≠ 口语逐字"的假警（CHE 实测 4/4）。
+    返回的每一条都是题面的**逐字子串**（annotate 的定位靠它）。
+    """
+    t = str(prompt or "")
+    out: list = []
+    seen: set = set()
+
+    def keep(x: str) -> None:
+        x = str(x or "").strip()
+        if len(x) >= min_len and x not in seen and x in t:
+            seen.add(x)
+            out.append(x)
+
+    spans: list = []
+    for m in re.finditer(r"\$[^$]+\$", t):
+        keep(m.group(0))
+        spans.append((m.start(), m.end()))
+    for m in re.finditer(r"[A-Za-z][A-Za-z0-9\-]{1,}", t):
+        if any(a <= m.start() < b for a, b in spans):
+            continue
+        w = m.group(0)
+        if w.lower() in _RETR_STOP or w.lower() in _ENTITY_STOP:
+            continue
+        if any(c.isdigit() for c in w) or (w[0].isupper() and len(w) >= 3):
+            keep(w)
+    for m in re.finditer(r"\d+(?:\.\d+)?", t):
+        if any(a <= m.start() < b for a, b in spans):
+            continue
+        keep(m.group(0))
+    return out
 
 
 def _hms(s) -> int | None:
@@ -824,7 +972,9 @@ def support_claims(review: dict) -> list:
     """抽「讲义说过 X」类 claim —— 支持性核对（Jev）的输入。**纯函数。**
 
     收（作者 F9b 第 1 条）：
-      · 例题块（标题带 🎙，含 🎙+✏️）的题面 —— 「课上给的函数/数字/定义」；
+      · 例题块（标题带 🎙，含 🎙+✏️）题面的**具体给定** —— 公式/等式、数字、命名实体
+        （`_prompt_givens`；⭐ F9d 第 2 条：**祈使话（配平/合并/求/计算）永远不收** ——
+        讲师不会逐字念题面，收进来只会制造假警，CHE 实测 4/4）；
       · 正文里含「课上/老师/本课」的句子（E3 的字段范围：prose/algebra）。
     不收：
       · ✏️ 自补块（无 🎙 的）与自补句 —— 自补充本就不要求转录支持，查了是假警报；
@@ -838,9 +988,10 @@ def support_claims(review: dict) -> list:
     out: list = []
     seen: set = set()
 
-    def add(text, si: int, field: str, ts: str | None = None, src: str = "🎙") -> None:
+    def add(text, si: int, field: str, ts: str | None = None, src: str = "🎙",
+            min_len: int = 6) -> None:
         t = _support_clip(_one(text))
-        if len(t) < 6 or t in seen:
+        if len(t) < min_len or t in seen:
             return
         seen.add(t)
         out.append({"claim": t, "si": si, "field": field, "ts": ts, "src": src})
@@ -852,8 +1003,9 @@ def support_claims(review: dict) -> list:
         title = str((ex or {}).get("title") or "") if isinstance(ex, dict) else ""
         if isinstance(ex, dict) and "🎙" in title:
             m = _TS_IN_TITLE.search(title)
-            add(ex.get("prompt"), si, "example", m.group(1) if m else None,
-                "📖" if "📖" in title else "🎙")
+            for g in _prompt_givens(ex.get("prompt")):     # F9d：只收具体给定
+                add(g, si, "example", m.group(1) if m else None,
+                    "📖" if "📖" in title else "🎙", min_len=3)
         for k in ("prose", "algebra"):
             v = s.get(k)
             for para in (v if isinstance(v, list) else [v]):
@@ -888,8 +1040,11 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
                   tau: float = SUPPORT_TAU) -> tuple:
     """F9c：把「讲义说过 X」的 claim 过一遍 Jev（E3 口径）→ p < tau 的挂 ⚠。
 
-    · **按节分批判**（作者 F9c：局部性优先）：每节自己一批，窗口 = claim 附近 ±8/+32 行
-      （例题用标题里 🎙 的时刻、正文句用小节 ts）；一批 ≤20 问（`S1…Sn`）；
+    · **按节分批判**（作者 F9c：局部性优先）：每节自己一批；⭐ F9d：每条 claim 的窗口
+      由**对转录的检索**决定（数字/拉丁词/中文 2-gram 打分，EN+ASR+ZH 一起看，命中处
+      ±8/+32 行，最多 2 个 —— 正文 claim 没有自己的时间戳，小节 ts 会离原话很远）；
+      例题标题里 🎙 的时刻是**强先验**（那个窗口永远保留）；检索没有任何命中 → 退回
+      小节 ts（老口径）；一批 ≤20 问（`S1…Sn`）；
     · 📖 题面**对材料判**（`Materials.search` 的 top-k 片段做 state，指令平行版）；
       **没有材料就豁免** —— 绝不许因为"讲师没念过卷子上的题"挂 📖；
     · **只标不改**，两个落点：
@@ -953,9 +1108,13 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
                 excerpts.extend(_materials_excerpts(materials, c["claim"]))
             state = _support_mat_state(excerpts)
         else:
-            wins = [_support_window(entries, _want(c)) for c in part]
-            state = _support_state(entries, min(w[0] for w in wins),
-                                   max(w[1] for w in wins))
+            wins: list = []
+            for c in part:
+                # F9d：例题标题的 🎙 时刻是强先验；正文 claim 纯检索、拿不到命中才回小节 ts。
+                wins += _support_windows(entries, c["claim"],
+                                         prior=_hms(c["ts"]) if c.get("ts") else None,
+                                         fallback=None if c.get("ts") else _want(c))
+            state = _support_state_multi(entries, wins)
         instr_tpl = SUPPORT_MAT_INSTR if kind == "mat" else SUPPORT_INSTR
         instrs = [instr_tpl.format(claim=c["claim"]) for c in part]
         try:

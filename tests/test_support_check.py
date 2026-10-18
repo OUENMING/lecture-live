@@ -72,9 +72,11 @@ def _mk_review() -> dict:
 class Extraction(unittest.TestCase):
     def test_只收讲义断言_自补一条不收(self):
         got = [c["claim"] for c in ng.support_claims(_mk_review())]
-        self.assertIn("已知 $AC(q)=60q+500/q$，求停产价格。", got)
+        self.assertIn("$AC(q)=60q+500/q$", got, "题面的具体给定要收（F9d 第 2 条）")
         self.assertIn("课上先写 $AC(q)=TC(q)/q$。", got)
         self.assertIn("老师说最低点处 $MC=AC$。", got)
+        self.assertNotIn("已知 $AC(q)=60q+500/q$，求停产价格。", got,
+                         "整句题面（含祈使话）被收成 claim —— F9d 只收给定")
         self.assertNotIn("已知 $f(x)=x^{3}-3x^{2}+4$，求驻点。", got, "✏️ 例题块被收了")
         self.assertNotIn("✏️ 自补：再多算一步。", got, "✏️ 句子被收了")
         self.assertNotIn("✏️ 自补：课上没讲到这里，自己补的推导。", got,
@@ -86,7 +88,7 @@ class Extraction(unittest.TestCase):
         r = _mk_review()
         r["sections"][0]["example"]["title"] = "🎙+✏️ 13:16 停产价格（按口述还原）"
         got = [c["claim"] for c in ng.support_claims(r)]
-        self.assertIn("已知 $AC(q)=60q+500/q$，求停产价格。", got)
+        self.assertIn("$AC(q)=60q+500/q$", got)
 
     def test_免责句和教材对照句不收(self):
         r = {"sections": [{"heading": "h", "ts": "13:16", "prose": [
@@ -107,6 +109,145 @@ class Extraction(unittest.TestCase):
         c = got[0]["claim"]
         self.assertLessEqual(len(c), 140)
         self.assertIn(c, long, "截完不再是逐字子串 —— annotate 会定位不到")
+
+
+class PromptGivensF9d(unittest.TestCase):
+    """⭐ F9d 第 2 条：例题块的 support claim = **具体给定**（公式/数字/实体），
+    祈使话（配平/合并/求/计算）永远不收 —— 讲师不会逐字念题面（CHE 实测 4/4 假警）。"""
+
+    def test_化学题_只收方程式不收配平合并(self):
+        prompt = ("把 $\\mathrm{Fe \\to Fe^{2+} + 2e^-}$ 与 "
+                  "$\\mathrm{2H^+ + 2e^- \\to H_2}$ 合并，写出总反应。")
+        got = ng._prompt_givens(prompt)
+        self.assertIn("$\\mathrm{Fe \\to Fe^{2+} + 2e^-}$", got)
+        self.assertIn("$\\mathrm{2H^+ + 2e^- \\to H_2}$", got)
+        self.assertFalse(any("合并" in g or "写出" in g for g in got), got)
+
+    def test_经济题_给定方程与数字(self):
+        prompt = "已知 $q=4$ 时 $AC=28$、$MC=12$。若企业继续生产，只算 $AC(5)$ 不给分。"
+        got = ng._prompt_givens(prompt)
+        self.assertIn("$q=4$", got)
+        self.assertIn("$AC=28$", got)
+        self.assertIn("$MC=12$", got)
+        self.assertIn("$AC(5)$", got)
+        self.assertFalse(any("不给分" in g for g in got), got)
+        self.assertNotIn("28", got, "公式外的裸数字重复收（公式里已经有了）")
+
+    def test_命名实体也收(self):
+        got = ng._prompt_givens("为什么越来越多的人不愿在都柏林读大学，而宁愿住在 Wicklow 通勤？")
+        self.assertIn("Wicklow", got)
+
+    def test_纯概念题没有具体给定_一条不收(self):
+        self.assertEqual(ng._prompt_givens("村委会发言少，怎么形成研究问题？"), [])
+
+    def test_逐字子串(self):
+        prompt = "已知 $AC(q)=60q+500/q$，求停产价格。"
+        for g in ng._prompt_givens(prompt):
+            self.assertIn(g, prompt, "给定必须是题面的逐字子串（annotate 靠它定位）")
+
+
+class RetrievalF9d(unittest.TestCase):
+    """⭐ F9d：claim 的窗口靠**对转录的检索**决定（数字/拉丁词/中文 2-gram，EN+ASR+ZH
+    都看）。正文 claim 没有自己的时间戳 —— 小节 ts 会把窗口放到离原话很远的地方
+    （作者实测：SOC 的 claim 在 §13:27，讲师 13:30:16 才说 → 假警）。"""
+
+    #: 真实转录行（sessions/2026-10-12_130857_SOC10020.md L1173–1200 / L1318–1390）。
+    #: 布局刻意让「小节 ts 窗口」够不到 13:30 —— 正是当年假警的成因。
+    SOC = ([
+        {"ts": "13:27:07", "en": "Obviously, it depends on your methodology, what you are trying to do.",
+         "zh": "显然，这取决于你的方法论，取决于你想要做什么。"},
+        {"ts": "13:27:08", "en": "It also depends on your research question.", "zh": "这也取决于你的研究问题。"},
+        {"ts": "13:27:09", "en": "It depends on the scope of your research.", "zh": "这取决于你研究的范围。"},
+        {"ts": "13:27:15", "en": "Let's focus on the quantitative first.", "zh": "我们先关注定量研究。"},
+    ] + [{"ts": f"13:28:{i:02d}", "en": "filler text about course logistics",
+          "zh": "这是一句与本题无关的课程事务填充内容。"} for i in range(36)] + [
+        {"ts": "13:29:53", "en": "Quantitative methods tend to answer certain questions, but they generally do not answer why.",
+         "zh": "定量方法倾向于回答某些问题，但它们通常不回答\u201c为什么\u201d。"},
+        {"ts": "13:30:05", "en": "to focus deeply on an individual's personal life or the personal life of your participants, then qualitative research methods are most important.",
+         "zh": "要深入关注个体的个人生活，或者你的参与者的个人生活，那么质性研究方法是最重要的。"},
+        {"ts": "13:30:16", "en": "So, for example, 2000 people, you want to understand their fear of crime, are they scared of criminal activities in Dublin,",
+         "zh": "所以，举个例子，2000个人，你想了解他们对犯罪的恐惧，他们是否害怕都柏林发生的犯罪活动，"},
+        {"ts": "13:30:28", "en": "What criminal activities are they scared of?", "zh": "他们害怕的是哪些犯罪活动？"},
+        {"ts": "13:30:29", "en": "If I want to know about this, maybe interview with 20 women about deeply understanding.",
+         "zh": "如果我想了解这一点，也许可以访谈20位女性，进行深入的理解。"},
+        {"ts": "13:30:37", "en": "what is it that they're scared of?", "zh": "他们害怕的到底是什么？"},
+        {"ts": "13:30:40", "en": "How do their personal experiences of this crime in the city actually",
+         "zh": "她们在这座城市中对此类犯罪的个人经历究竟是如何"},
+        {"ts": "13:30:45", "en": "tells or manipulates their feeling of feeling safe in the public.",
+         "zh": "讲述或操纵他们在公共场合感到安全的感觉。"},
+    ])
+    #: SOC note 里被误标的那句（f9c 产出原文）。
+    CLAIM = ("🎙 课上的例子：想了解都柏林 2000 人对犯罪的恐惧，可以深访 20 位女性，"
+             "问她们把什么算作犯罪、把什么算作恐惧、亲身遭遇如何改变她们在公共场所的安全感。")
+
+    def test_旧口径确实够不到_正是假警的成因(self):
+        old = ng._support_window(self.SOC, ng._hms("13:27"))
+        hit = [j for j, e in enumerate(self.SOC) if e.get("ts") == "13:30:16"]
+        self.assertTrue(hit)
+        self.assertFalse(any(j in range(*old) for j in hit),
+                         "小节的 ts 窗口居然覆盖了 13:30:16 —— 这个测试就失去意义了")
+
+    def test_SOC假警_检索到13点30的原话_不再挂(self):
+        calls: list = []
+
+        def ask(state, instructions):
+            calls.append(state)
+            return [0.9 if "13:30:16" in state else 0.01] * len(instructions)
+
+        review = {"sections": [{"heading": "怎么选", "ts": "13:27", "prose": [self.CLAIM]}]}
+        out, _, _ = ng.support_check(review, entries=self.SOC, ask=ask)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("13:30:16", calls[0], "窗口没检索到讲师真说这句的地方")
+        self.assertIn("都柏林", calls[0], "中文 claim 要对上转录的 ZH 行")
+        self.assertNotIn("13:27:07", calls[0], "窗口被无关句子拖回了小节开头（局部性没了）")
+        rows = [r for r in (out.get("checks") or []) if r.get("status") == "mismatch"]
+        self.assertFalse(rows, f"原话就在转录里，不该挂 ⚠：{rows}")
+
+    def test_中文claim只能靠ZH行定位(self):
+        entries = [{"ts": f"10:0{i}:00", "en": "unrelated english filler sentence",
+                    "zh": "这是一句填充。"} for i in range(60)]
+        entries[30] = {"ts": "10:05:00", "en": "what criminal activities are they scared of",
+                       "zh": "他们害怕的是哪些犯罪活动？"}
+        claim = "他们害怕的是哪些犯罪活动？"          # 无数字、无拉丁词 —— 只能靠 ZH 2-gram
+        wins = ng._support_windows(entries, claim)
+        self.assertEqual(len(wins), 1)
+        lo, hi = wins[0]
+        self.assertLessEqual(hi - lo, 45, f"窗口没截：{wins}")
+        self.assertTrue(lo <= 30 < hi, f"ZH 行的命中没进窗口：{wins}")
+
+    def test_数字与拉丁词都按边界匹配_不撞子串(self):
+        toks = ng._retr_tokens("课上给的是 12 与 AC。")
+        self.assertIn("12", toks["nums"])
+        self.assertEqual(ng._retr_score({"ts": "10:00:00",
+                                         "en": "the answer 1312 interaction happened"}, toks),
+                         0.0, "12 撞了 1312 / AC 撞了 interaction")
+        self.assertGreater(ng._retr_score({"ts": "10:00:01",
+                                           "en": "value 12 at the AC minimum"}, toks), 0.0)
+
+    def test_例题时刻是先验_与检索窗口并存(self):
+        entries = [{"ts": f"09:{i:02d}:00", "en": f"filler {i}", "zh": "填充。"} for i in range(60)]
+        entries[50] = {"ts": "09:50:00", "en": "the 2000 figure", "zh": "2000 这个数字。"}
+        claim = "课上用了 2000 这个数字。"
+        wins = ng._support_windows(entries, claim, prior=ng._hms("09:03"))
+        self.assertEqual(len(wins), 2, f"真锚 + 先验要都在：{wins}")
+        self.assertTrue(any(lo <= 50 < hi for lo, hi in wins), "检索到的真锚不在")
+        self.assertTrue(any(lo <= 3 < hi for lo, hi in wins), "🎙 先验窗口不在")
+
+    def test_检索没命中就退回小节ts(self):
+        entries = [{"ts": f"09:{i:02d}:00", "en": f"filler {i}"} for i in range(60)]
+        claim = "课上先写 $AC(q)=TC(q)/q$。"        # 这些 token 全不在转录里
+        self.assertEqual(ng._support_windows(entries, claim, fallback=ng._hms("09:50")),
+                         [(42, 60)], "没命中要退回小节 ts 的老口径")
+        calls: list = []
+
+        def ask(state, instructions):
+            calls.append(state)
+            return [None] * len(instructions)
+
+        review = {"sections": [{"heading": "h", "ts": "09:50", "prose": [claim]}]}
+        ng.support_check(review, entries=entries, ask=ask)
+        self.assertIn("L60 [09:59:00] filler 59", calls[0], "没接上小节 ts 的兜底窗口")
+        self.assertNotIn("L1 [09:00:00] filler 0", calls[0], "兜底没截窗口（把全篇塞进去了）")
 
 
 class Judging(unittest.TestCase):

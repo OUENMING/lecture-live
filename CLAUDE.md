@@ -13,7 +13,9 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 分支（什么时候读） | 读哪个 |
 |---|---|
 | ⭐⭐ **第一次接手 / 新会话** —— 全景手册（现状、硬规矩、事故与教训、开关登记、公开的账 §10） | `docs/HANDBOOK.md` |
-| ⭐⭐⭐ **当前这条线：3.9.4（通行码代付 Jev / 草稿段尾收尾 / 封口句译文锁定；标点切段与译文溢出**没做**的数据）**—— **新会话先读这份** | `docs/HANDOFF-20261012-3.9.4.md` |
+| ⭐⭐⭐ **当前：3.10.0**（Soniox 流式识别 + 多地区路由 / 笔记 v2 / 一些事儿 + 课前回顾 / 收尾可续跑）—— 改了什么看 `CHANGELOG.md` 的 [3.10.0] 节 | `CHANGELOG.md` |
+| ⭐ **课后笔记 v2**：生成 `note_v2.py`（REVIEW/ALIGN/VERIFY/OVERVIEW/REPAIR/SHORTEN 提示词）→ 代码核数 `note_math.py`（program / conserve / deriv，无 LLM）→ 讲没讲过 `note_guards.py`（检索 + Jev）→ 渲染 `note_html.py` / `note_render.py` → 落盘 `obsidian_writer.py`。规矩：**修复必须跨学科通用**（没人二审、自动生成），改完要过冻结判据集 | `tests/fixtures/notes_bench/`、`scripts/notes_bench.py`（联网跑量器，test key） |
+| 上一条线：3.9.4（通行码代付 Jev / 草稿段尾收尾 / 封口句译文锁定） | `docs/HANDOFF-20261012-3.9.4.md` |
 | 上一条线：3.9.3（清空老 Key / 旧 `.deepseek_key` 退休 / 弹窗 / 草稿模型课后自动下）+ 九条审查修复（现状 / 为什么 / 怎么做 / 还剩什么 / 踩过的坑） | `docs/HANDOFF-20261012-3.9.3.md` |
 | 上一条线：定稿上云 + R1 翻译空窗（历史背景，仍有效） | `docs/HANDOFF-20261011-cloud-asr-r1.md` |
 | R1 执行细则（3.8.11 已做；❓ 轻点拨 G 已做、待发版） | `docs/PLAN-r1-translation-gap.md` |

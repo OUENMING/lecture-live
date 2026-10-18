@@ -190,6 +190,9 @@ def ask_batch(state: str, instructions: list, *, token: str | None = None,
       · `token` 不传 → `provider_token()`；**没配 token → 全 None、不发请求**（fail-soft）；
       · `>batch_size` 自动切批（每批独立 `state` —— 同一份 state 会被重复计费，见 `score()`）；
       · 429/529/5xx/超时 → 该批至多再试 `tries-1` 次（退避）；其它异常/解析不出 → 该批全 None。
+      · ⚠️ **整批失败要出声**（同 `score()` 的纪律）：Jev key 过期 / 401 / 全局限流时
+        全部批次记 `None`，终端一句话都没有 —— 而唯一生产调用方（`note_guards.support_check`）
+        拿到全 `None` 会输出「支持性核对…全部找到」，于是"闸门坏了"和"闸门正常"长得一模一样。
     """
     items = [str(x or "") for x in (instructions or [])]
     if not items:
@@ -200,8 +203,10 @@ def ask_batch(state: str, instructions: list, *, token: str | None = None,
     if not token:
         return out
     step = max(1, min(20, int(batch_size)))
+    n_batches = n_failed = 0
     for base in range(0, len(items), step):
         part = items[base:base + step]
+        n_batches += 1
         qs = {f"S{i + 1}": {"type": "noul", "instructions": t}
               for i, t in enumerate(part)}
         payload = None
@@ -219,9 +224,17 @@ def ask_batch(state: str, instructions: list, *, token: str | None = None,
                     continue
                 payload = None
                 break
+        if payload is None:
+            n_failed += 1
         got = parse_answers(payload, len(part))
         for i, p in enumerate(got):
             out[base + i] = p
+    # ⚠️⚠️ 失败必须出声（DB 审查 D-19）：整批无回执（key 过期 / 401 / 全局限流）时旧版
+    #    静默返回全 None —— `support_check` 会把它当成"全部找到"。只打一行，不逐批刷屏。
+    if n_failed:
+        tail = ("（**全部**失败 —— 这一轮一条都没拿到）"
+                if n_failed == n_batches else "（其余批次照常）")
+        print(f"⚠ Jev 判分批 {n_failed}/{n_batches} 批没拿到{tail}")
     return out
 
 

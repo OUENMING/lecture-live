@@ -554,6 +554,38 @@ def t_ask_batch_never_raises():
     assert got == [None, None, None], f"得到 {got!r}"
 
 
+@case("⭐⭐ ask_batch：整批失败要**出声**（key 过期时不许静默当'全部找到'）")
+def t_ask_batch_failure_is_loud():
+    import contextlib
+
+    def boom(state, questions, *, token, timeout=60.0, **kw):
+        raise RuntimeError("HTTP 401 unauthorized")
+
+    orig = kp.ask_commandcode
+    kp.ask_commandcode = boom
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            got = kp.ask_batch("s", ["q1", "q2"], token="t", tries=1)
+    finally:
+        kp.ask_commandcode = orig
+    out = buf.getvalue()
+    assert got == [None, None], f"得到 {got!r}"
+    assert "没拿到" in out and "全部" in out, f"整批失败没有出声：{out!r}"
+    # 成功的批次不许被这条警告误伤（没失败 → 一个字都不打）
+    def ok(state, questions, *, token, timeout=60.0, **kw):
+        return {"answers": {k: {"noul": 0.5} for k in questions}}
+
+    kp.ask_commandcode = ok
+    buf2 = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf2):
+            kp.ask_batch("s", ["q1"], token="t")
+    finally:
+        kp.ask_commandcode = orig
+    assert buf2.getvalue() == "", f"没失败却打了警告：{buf2.getvalue()!r}"
+
+
 @case("⭐ ask_batch：瞬时错误重试一次（429 后成功）")
 def t_ask_batch_retry_transient():
     n = {"k": 0}

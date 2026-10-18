@@ -1347,6 +1347,7 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
     n_flag = 0
     downgraded = 0
     used = 0
+    n_scored = 0                    # 拿到真实概率的条数（判官真的回了值的）
 
     def _want(c: dict):                                        # noqa: E306
         if c.get("ts"):
@@ -1381,7 +1382,10 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
         how = "材料里没找到这句（核对）" if kind == "mat" else "转录里没找到这句（核对）"
         for k, c in enumerate(part):
             p = ps[k] if k < len(ps) else None
-            if not isinstance(p, (int, float)) or float(p) >= tau:
+            if not isinstance(p, (int, float)):
+                continue
+            n_scored += 1
+            if float(p) >= tau:
                 continue
             sec = secs[c["si"]] if 0 <= c["si"] < len(secs) else None
             if (kind == "tr" and c["field"] == "example"
@@ -1422,6 +1426,11 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
         bits.append(f"{exempt} 条 📖 题面豁免（没有材料）")
     if skipped:
         bits.append(f"{skipped} 条超成本上限没查")
+    # ⚠️⚠️ DB 审查 D-19：一条概率都没拿到（Jev key 过期 / 401 / 全局限流）时**不许**
+    #    说"全部找到" —— 那是"闸门坏了"与"闸门正常工作"长得一模一样的那个静默面，
+    #    而这层核对的全部价值就是拦住没出处的 claim。`ask_batch` 也会往终端打一行。
+    if used and not n_scored:
+        bits.append(f"⚠ 一条都没判成（{used} 批判官都没回执）—— 这一层这次没起作用")
     msgs = [f"支持性核对：查了 {used} 批（上限 {tries} 次请求）"
             + ("；" + "；".join(bits) if bits else "；全部找到")]
     return out, [{"downgraded": downgraded}], msgs

@@ -326,10 +326,13 @@ class Judging(unittest.TestCase):
         self.assertTrue(any("静默降" in w for w in warns), warns)
 
     def test_p_None_什么都不做(self):
+        """p=None（判官没回执）→ 不改正文；⚠️ 也**不许**说"全部找到"（DB 审查 D-19）——
+        那是"闸门坏了"长得像"闸门正常工作"的那个静默面。"""
         out, _, warns, _ = self._run(None)
         self.assertFalse([r for r in (out.get("checks") or [])
                           if r.get("status") == "mismatch"])
-        self.assertTrue(any("全部找到" in w for w in warns), warns)
+        self.assertFalse(any("全部找到" in w for w in warns), warns)
+        self.assertTrue(any("没判成" in w for w in warns), warns)
 
     def test_tau_边界不挂(self):
         out, _, _, _ = self._run(0.15)

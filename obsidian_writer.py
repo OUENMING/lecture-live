@@ -1231,6 +1231,9 @@ class ObsidianWriter:
         #    之后，它自己再被后面的第二遍 `scrub` 与 `quote_check` 覆盖（新写的散文
         #    必须走同一条纪律，不能因为是"总结层"就免检）。
         for fn, label in ((lambda r: self._repair_exercises(r, entries), "例题返修"),
+                          # ⭐ F10：对照表/步骤图全讲各 ≤3（逐节的 schema 校验在
+                          #    `note_v2._clean_section` 里；这一刀是**全篇**上限）。
+                          (lambda r: note_v2.clamp_components(r), "组件上限"),
                           (lambda r: note_ledger.reconcile(r),
                            "更正账本核对"),
                           (lambda r: note_guards.scrub(r), "猜测句清理"),
@@ -1273,7 +1276,7 @@ class ObsidianWriter:
                         self._guard_counts["repaired"] += int(st.get("repaired") or 0)
                         self._guard_counts["dropped"] += int(st.get("dropped") or 0)
                 elif label in ("猜测句清理", "猜测句清理（串讲）", "重复句去重",
-                               "纯算术线索问题") and isinstance(extra_items, list):
+                               "纯算术线索问题", "组件上限") and isinstance(extra_items, list):
                     self._guard_counts["dropped"] += len(extra_items)
                 for w in warns_:
                     self._note_warns.append(w)

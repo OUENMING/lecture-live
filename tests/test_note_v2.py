@@ -1214,6 +1214,161 @@ class HtmlComponents(unittest.TestCase):
         self.assertTrue(all("katex" in u for u in urls), urls)
 
 
+def _cmp() -> dict:
+    return {"title": "三种成本指标", "src": "lecture",
+            "cols": ["", "平均成本 AC", "边际成本 MC"],
+            "rows": [{"label": "定义", "cells": ["$TC/q$", "$dTC/dq$"]},
+                     {"label": "最低点处", "cells": ["与 $MC$ 相等", "穿过 $AC$ 最低点"]}]}
+
+
+def _flow() -> dict:
+    return {"title": "梯度下降一轮", "src": "lecture",
+            "steps": [{"label": "前向传播", "detail": "算出预测与损失"},
+                      {"label": "反向传播", "detail": "链式法则算各层梯度"},
+                      {"label": "更新参数", "detail": "沿负梯度走一步"}],
+            "loop_to": 1}
+
+
+class ComponentsF10(unittest.TestCase):
+    """F10：对照表 `compare` / 步骤图 `flow` —— 模型只填数据，schema/上限/标签在代码里。"""
+
+    def test_清洗_合法对比表_按src标lecture(self):
+        r = nv._clean_section(dict(SECTION, compare=_cmp()))
+        c = r["compare"]
+        self.assertTrue(c["title"].startswith("🎙 "), c["title"])
+        self.assertEqual(c["cols"][0], "", "行头列的占位不许被清洗吃掉")
+        self.assertEqual(len(c["rows"]), 2)
+
+    def test_清洗_自补表标自补(self):
+        r = nv._clean_section(dict(SECTION, flow=dict(_flow(), src="self")))
+        self.assertTrue(r["flow"]["title"].startswith("✏️ "), r["flow"]["title"])
+
+    def test_无效规格丢掉_不崩(self):
+        self.assertNotIn("compare", nv._clean_section(dict(SECTION, compare={"title": "x"})))
+        self.assertNotIn("flow", nv._clean_section(
+            dict(SECTION, flow={"title": "x", "steps": [{"label": "a"}]})))
+        # 对照列太少（只剩 1 列）/ 格子数与列数对不上 → 丢；只剩 1 行 → 丢
+        self.assertNotIn("compare", nv._clean_section(
+            dict(SECTION, compare=dict(_cmp(), cols=["", "只有一个"]))))
+        self.assertNotIn("compare", nv._clean_section(
+            dict(SECTION, compare=dict(_cmp(), rows=[{"label": "a", "cells": ["x"]}] * 2))))
+        self.assertNotIn("compare", nv._clean_section(
+            dict(SECTION, compare=dict(_cmp(), rows=[{"label": "a", "cells": ["x", "y"]}]))))
+
+    def test_上限在代码里裁(self):
+        rows = [{"label": f"r{i}", "cells": ["数" * 60, "ok"]} for i in range(12)]
+        c = nv._clean_section(dict(SECTION, compare=dict(_cmp(), rows=rows)))["compare"]
+        self.assertEqual(len(c["rows"]), nv.CMP_ROWS_MAX)
+        self.assertLessEqual(len(c["rows"][0]["cells"][0]), nv.CMP_CELL_MAX)
+        self.assertEqual(c["rows"][0]["cells"][0].count("$") % 2, 0, "截断不许留半截公式")
+        steps = [{"label": "长" * 30, "detail": "细" * 80} for _ in range(9)]
+        fl = nv._clean_section(dict(SECTION, flow={"title": "t", "src": "lecture",
+                                                   "steps": steps}))["flow"]
+        self.assertEqual(len(fl["steps"]), nv.FLOW_STEPS_MAX)
+        self.assertLessEqual(len(fl["steps"][0]["label"]), nv.FLOW_LABEL_MAX)
+        self.assertLessEqual(len(fl["steps"][0]["detail"]), nv.FLOW_DETAIL_MAX)
+        # 对照列超 4 → 整件丢（截列会让行对不上位）
+        wide = dict(_cmp(), cols=[""] + [f"c{i}" for i in range(6)],
+                    rows=[{"label": "a", "cells": ["1"] * 6}] * 2)
+        self.assertNotIn("compare", nv._clean_section(dict(SECTION, compare=wide)))
+
+    def test_loop越界归零(self):
+        self.assertIsNone(nv._clean_section(
+            dict(SECTION, flow=dict(_flow(), loop_to=9)))["flow"]["loop_to"])
+        self.assertIsNone(nv._clean_section(
+            dict(SECTION, flow=dict(_flow(), loop_to=3)))["flow"]["loop_to"],
+            "回到最后一步 = 没有回路")
+        self.assertEqual(nv._clean_section(
+            dict(SECTION, flow=dict(_flow(), loop_to=1)))["flow"]["loop_to"], 1)
+
+    def test_全讲上限三张(self):
+        rev = {"sections": [dict(SECTION, heading=f"h{i}", compare=_cmp())
+                            for i in range(5)]}
+        out, dropped, warns = nv.clamp_components(rev)
+        self.assertEqual(sum(1 for s in out["sections"] if s.get("compare")), 3)
+        self.assertEqual(len(dropped), 2)
+        self.assertTrue(warns and "组件上限" in warns[0], warns)
+
+    def test_html_渲染成表与竖栈(self):
+        h = nh.compare_html(_cmp())
+        self.assertIn("<table", h)
+        self.assertIn('class="cmpwrap"', h)
+        self.assertIn('class="rowh"', h)
+        f = nh.flow_html(_flow())
+        self.assertIn('class="flow has-loop"', f)
+        self.assertIn("grid-row:1 / -1", f)
+        self.assertIn("↺ 回到第 1 步", f)
+        self.assertIn('class="stp last"', f)
+
+    def test_转义_script当文本(self):
+        h = nh.compare_html(dict(_cmp(), rows=[
+            {"label": "<script>alert(1)</script>", "cells": ["<b>x</b>", "ok"]},
+            {"label": "r", "cells": ["a", "b"]}]))
+        self.assertNotIn("<script>", h)
+        self.assertIn("&lt;script&gt;", h)
+        self.assertNotIn("<b>x</b>", h)
+
+    def test_md_管道表与编号列表(self):
+        L = nr.compare_md(_cmp())
+        self.assertTrue(L[0].startswith("| "))
+        self.assertTrue(L[1].startswith("|---"))
+        self.assertIn("平均成本 AC", L[0])
+        L2 = nr.flow_md(_flow())
+        self.assertIn("1. **前向传播**", L2[0])
+        self.assertTrue(L2[1].endswith("→"))
+        self.assertEqual(L2[-1], "↺ 回到第 1 步")
+        L3 = nr.compare_md(dict(_cmp(), rows=[{"label": "a|b", "cells": ["c|d", "e"]},
+                                              {"label": "r", "cells": ["x", "y"]}]))
+        self.assertIn("a\\|b", L3[2], "格子里的 | 要转义，不然 md 表散架")
+
+    def test_md_结构卡进简版(self):
+        d = nr.NoteData(date="2026-10-15", course="ECON10790", entries=entries(2),
+                        review=dict(REVIEW, sections=[dict(SECTION, compare=_cmp(),
+                                                           flow=_flow())]),
+                        review_dates=[])
+        md = nr.render(d)
+        self.assertIn("## 结构卡", md)
+        self.assertIn("| 平均成本 AC |", md)
+        self.assertIn("↺ 回到第 1 步", md)
+
+    def test_格子数字进机械核与模型核(self):
+        import note_math
+        sec = dict(SECTION, compare=dict(_cmp(), rows=[
+            {"label": "定义", "cells": ["$AC(q)=q^{2}-12q+60$", "$MC(q)=3q^{2}-24q+60$"]},
+            {"label": "算值", "cells": ["$AC(6)=24$", "$MC(6)=96$"]}]))
+        rows = note_math.check_review({"sections": [sec]})
+        self.assertTrue(any("MC(6)" in str(r.get("claim")) for r in rows),
+                        "对照表格子里的断言没进机械核")
+        claim = next(str(r.get("claim")) for r in rows if "MC(6)" in str(r.get("claim")))
+        self.assertEqual(note_math.unit_of_claim(sec, claim), "compare")
+        nums = nv.numeric_claims({"sections": [sec]})
+        self.assertTrue(any(n.get("origin") == "compare" for n in nums),
+                        "对照表格子没进模型核的清单")
+
+    def test_链上有组件上限且进台账(self):
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parent.parent
+               / "obsidian_writer.py").read_text(encoding="utf-8")
+        self.assertIn("note_v2.clamp_components", src)
+        self.assertTrue(src.index("note_v2.clamp_components")
+                        < src.index('"纯算术线索问题", "组件上限")'),
+                        "链步与计数标签不在同一处（计数会漏）")
+
+    def test_复检仍错_表整件撤(self):
+        sec = dict(SECTION, compare={
+            "title": "t", "src": "lecture", "cols": ["", "AC", "MC"],
+            "rows": [{"label": "定义", "cells": ["$AC(q)=q^{2}-12q+60$",
+                                                 "$MC(q)=3q^{2}-24q+60$"]},
+                     {"label": "算值", "cells": ["$AC(6)=24$", "$MC(6)=96$"]}]})
+
+        def chat(system, user, max_tokens):                        # noqa: ARG001
+            return {}                                              # 返修没改东西
+
+        out, extra, warns = nv.repair_exercises({"sections": [sec]}, chat=chat)
+        self.assertNotIn("compare", out["sections"][0], "复检仍错，表没撤（宁缺纪律）")
+        self.assertTrue(any("已撤" in w for w in warns), warns)
+
+
 class HtmlPlots(unittest.TestCase):
     def test_三个_kind_都画得出(self):
         for kind in nv.PLOT_KINDS:

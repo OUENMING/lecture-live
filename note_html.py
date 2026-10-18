@@ -655,6 +655,36 @@ button#expand{cursor:pointer;border:none;background:var(--code);color:var(--fg);
 .printonly{display:none}
 textarea.sum{width:100%;min-height:84px;font:inherit;font-size:15px;border:none;
  border-radius:8px;background:var(--code);color:var(--fg);padding:8px;box-sizing:border-box}
+/* ---- F10：对照表 / 步骤图（模型只填数据；结构与样式在这一层写死）---- */
+.cmp-t{font-weight:600;margin-left:6px}
+.cmpwrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;margin:6px 0 4px;
+ background:var(--card)}
+table.cmp{border-collapse:collapse;min-width:520px;width:100%}
+table.cmp th,table.cmp td{border-top:1px solid var(--line);padding:6px 10px;font-size:14px;
+ text-align:left;vertical-align:top}
+table.cmp tbody tr:first-child th,table.cmp tbody tr:first-child td{border-top:none}
+table.cmp thead th{position:sticky;top:0;background:var(--code);z-index:2;white-space:nowrap}
+table.cmp th.rowh{position:sticky;left:0;background:var(--card);font-weight:600;
+ border-right:1px solid var(--line);white-space:nowrap;z-index:1}
+table.cmp thead th.rowh{z-index:3;background:var(--code)}
+.flow{display:grid;grid-template-columns:minmax(0,1fr);margin:6px 0 4px;max-width:420px}
+.flow.has-loop{grid-template-columns:minmax(0,1fr) 30px;column-gap:8px}
+.flow .stp{grid-column:1;position:relative;background:var(--code);border:1px solid var(--line);
+ border-radius:10px;padding:7px 12px;margin:0 0 24px}
+.flow .stp.last{margin-bottom:0}
+.flow .stp .n{display:inline-block;min-width:16px;color:var(--muted);
+ font-variant-numeric:tabular-nums}
+.flow .stp .d{display:block;color:var(--muted);font-size:13.5px;margin-top:1px}
+.flow .stp:not(.last)::before{content:"";position:absolute;left:50%;bottom:-19px;
+ width:2px;height:13px;background:var(--line);transform:translateX(-50%)}
+.flow .stp:not(.last)::after{content:"";position:absolute;left:50%;bottom:-9px;
+ transform:translateX(-50%);width:0;height:0;border-left:5px solid transparent;
+ border-right:5px solid transparent;border-top:7px solid var(--muted)}
+.floop{grid-column:2;border:2px solid var(--c2);border-left:none;border-radius:0 10px 10px 0;
+ position:relative;margin:2px 0}
+.floop span{position:absolute;top:50%;right:5px;transform:translateY(-50%);
+ writing-mode:vertical-rl;font-size:12px;color:var(--c2);letter-spacing:.04em;
+ background:var(--card);padding:4px 0}
 /* 数字对齐：时间戳 / 排程日期 / 计数 / 表格数值列（tabular-nums 的适用范围按 A3） */
 code,ul.sched li,th,td,.tick,.q .a,[data-checkmsg]{font-variant-numeric:tabular-nums}
 /* 按钮按压反馈（A7）：按下快、回弹带一点过冲；reduced-motion 下由全局规则关掉 */
@@ -689,6 +719,10 @@ svg.plot .cross text{fill:var(--fg);font-size:11px}
  details,figure.fig,.q,.qec>div{break-inside:avoid}
  h2,h3,h4{break-after:avoid}
  details{border-style:solid}
+ /* F10：对照表在纸上不许被裁（横向 overflow 展开），竖栈回到全宽 */
+ .cmpwrap{overflow:visible}
+ table.cmp{min-width:0}
+ .flow{max-width:none}
  [data-pane]{display:block!important}
  .story a{border-bottom:none;color:inherit}
  a[href^="http"]::after{content:" (" attr(href) ")";font-size:85%;word-break:break-all}
@@ -960,6 +994,44 @@ def _variants_html(variants: list) -> str:
     return "".join(o)
 
 
+# ---------------------------------------------------------------- F10：对照表 / 步骤图
+def compare_html(cmp: dict) -> str:
+    """`compare` 规格 → `<table>`（横向可滚 + 表头/首列 sticky；LaTeX 走 inline()）。"""
+    cols = [str(c) for c in (cmp.get("cols") or [])]
+    rows = [r for r in (cmp.get("rows") or []) if isinstance(r, dict)]
+    th = "".join(f'<th scope="col">{inline(c)}</th>' for c in cols[1:])
+    body = "".join(
+        f'<tr><th scope="row" class="rowh">{inline(r.get("label"))}</th>'
+        + "".join(f"<td>{inline(c)}</td>" for c in (r.get("cells") or []))
+        + "</tr>" for r in rows)
+    head = inline(cols[0]) if cols and cols[0] else ""
+    return (f'<div class="cmpwrap"><table class="cmp"><thead>'
+            f'<tr><th scope="col" class="rowh">{head}</th>{th}</tr>'
+            f"</thead><tbody>{body}</tbody></table></div>")
+
+
+def flow_html(fl: dict) -> str:
+    """`flow` 规格 → 竖排盒子 + CSS 箭头；`loop_to` 画右侧回路（纯 CSS，无 SVG/JS）。"""
+    steps = [s for s in (fl.get("steps") or []) if isinstance(s, dict)]
+    try:
+        loop = int(fl.get("loop_to")) if fl.get("loop_to") is not None else None
+    except (TypeError, ValueError):
+        loop = None
+    has = bool(loop and 1 <= loop <= len(steps) - 1)
+    o = [f'<div class="flow{" has-loop" if has else ""}">']
+    for i, st in enumerate(steps, 1):
+        d = (f'<span class="d">{inline(st.get("detail"))}</span>'
+             if st.get("detail") else "")
+        last = " last" if i == len(steps) else ""
+        o.append(f'<div class="stp{last}"><b><span class="n">{i}</span>'
+                 f'{inline(st.get("label"))}</b>{d}</div>')
+    if has:
+        o.append(f'<div class="floop" style="grid-row:{loop} / -1">'
+                 f"<span>↺ 回到第 {loop} 步</span></div>")
+    o.append("</div>")
+    return "".join(o)
+
+
 def _tracks_html(sec: dict, fig: str) -> str:
     """E 三种看法：**只画真的有的**（图形要真有图；代数/直觉要模型真填了）。
 
@@ -1013,6 +1085,15 @@ def _section_html(sec: dict, idx: int, *, reveal: bool = True, fig: str = "") ->
                      f'<p>{inline(sec["prereq"])}</p></details>')
     story.append("</div>")
     o.append("".join(story))
+    # ⭐ F10：对照表 / 步骤图（贴掉对照讲解的那张表就长在讲解后面）
+    if sec.get("compare"):
+        o.append(f'<div><span class="lab">T 对比表</span>'
+                 f'<span class="cmp-t">{inline(sec["compare"].get("title"))}</span>'
+                 + compare_html(sec["compare"]) + "</div>")
+    if sec.get("flow"):
+        o.append(f'<div><span class="lab">F 步骤图</span>'
+                 f'<span class="cmp-t">{inline(sec["flow"].get("title"))}</span>'
+                 + flow_html(sec["flow"]) + "</div>")
     tracks = _tracks_html(sec, fig)
     if tracks:
         o.append(f'<div><span class="lab">E 三种看法</span>{tracks}</div>')

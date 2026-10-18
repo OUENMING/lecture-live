@@ -544,6 +544,21 @@ def _units(s: dict) -> list:
     fd = s.get("faded") or {}
     if fd.get("q") or fd.get("a"):
         out.append(("faded", [_txt(fd.get("q")), _txt(fd.get("a"))]))
+    # ⭐ F10：对照表 / 步骤图 —— 格子与步骤文本也是判据的输入（数字照过三道核）。
+    cmp = s.get("compare") or {}
+    if isinstance(cmp, dict) and cmp.get("title"):
+        texts = [_txt(cmp.get("title"))] + [_txt(c) for c in (cmp.get("cols") or [])]
+        texts += [_txt(r.get("label")) for r in (cmp.get("rows") or [])
+                  if isinstance(r, dict)]
+        texts += [_txt(c) for r in (cmp.get("rows") or []) if isinstance(r, dict)
+                  for c in (r.get("cells") or [])]
+        out.append(("compare", [x for x in texts if x]))
+    fl = s.get("flow") or {}
+    if isinstance(fl, dict) and fl.get("title"):
+        texts = [_txt(fl.get("title"))]
+        texts += [f"{_txt(st.get('label'))}：{_txt(st.get('detail'))}"
+                  for st in (fl.get("steps") or []) if isinstance(st, dict)]
+        out.append(("flow", [x for x in texts if x]))
     return [(k, [x for x in u if x]) for k, u in out]
 
 
@@ -560,7 +575,8 @@ def units(s: dict) -> list:
 #: **不许**进「修正说明」。理由：错误的真正来源是转录/课件里的数（教授口误、
 #: ASR 听错、实时摘要抄错），不是模型算错；而拿例题的参数去改变式，实测抓到过
 #: 一整套假修正（ECON10770 厨房博弈：变式「价值 5 → 5−3=2」被改回例题的「4−3=1」）。
-MODEL_AUTHORED = ("example", "variants", "faded")
+#: ⭐ F10：对照表 / 步骤图也是模型自己填的（错就返修一次，再错整件撤），同一待遇。
+MODEL_AUTHORED = ("example", "variants", "faded", "compare", "flow")
 #: 自测题也是模型自己出的（答案由它自己写），同一条纪律。
 ALSO_MODEL = ("qa",)
 

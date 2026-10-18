@@ -476,6 +476,59 @@ class MaterialsJudge(unittest.TestCase):
         self.assertEqual(len(rows), 1)
 
 
+class MaterialsRetrievalF9d(unittest.TestCase):
+    """F9d §0（作者裁定）：📖 判官的材料来源 = **生成链读的那一份**（同一个 materials
+    对象，随链传进来）；claim 检索不出词（纯符号/中文短句，材料是英文的）→ 退回
+    **本节转录窗口**再查一次（生成时正是拿转录片段查材料的）——绝不另建第二份来源。"""
+
+    SEC = {"heading": "停产价格", "ts": "13:16",
+           "example": {"title": "📖 期末卷 Exercise 7(ii)（🎙 13:30）",
+                       "prompt": "已知 $q=4$ 时 $MC=12$。"}}
+
+    ENTRIES = [{"ts": "13:30:10", "en": "so the average cost at four is twenty eight",
+                "zh": "四处的平均成本是二十八。"},
+               {"ts": "13:30:12", "en": "and the marginal cost is twenty",
+                "zh": "边际成本是二十。"}]
+
+    class _Mat:
+        """复刻 r1 里 `$MC=12$` 的空 state：claim 查不出东西、转录上下文查得出。"""
+
+        def __init__(self):
+            class C:
+                pass
+            c = C()
+            c.text = "Exercise 7(ii): find MC(4)."
+            self._chunks = [c]
+            self._c = c
+
+        def search(self, q, k=3, **kw):
+            return [self._c] if "average" in str(q) else []
+
+    def test_claim查不出_退转录窗口再查(self):
+        calls: list = []
+
+        def ask(state, instructions):
+            calls.append(state)
+            return [0.9] * len(instructions)
+
+        out, _, _ = ng.support_check({"sections": [dict(self.SEC)]},
+                                     entries=self.ENTRIES, materials=self._Mat(),
+                                     ask=ask)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("M1.", calls[0], "材料片段没进 state（claim 查不出时没退上下文查询）")
+        self.assertIn("Exercise 7(ii)", calls[0])
+        rows = [r for r in (out.get("checks") or []) if r.get("status") == "mismatch"]
+        self.assertFalse(rows)
+
+    def test_材料来源就是生成链那一份(self):
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parent.parent
+               / "obsidian_writer.py").read_text(encoding="utf-8")
+        i = src.index("note_guards.support_check(")
+        self.assertIn("materials=self._materials", src[i:i + 240],
+                      "支持核对没拿到生成链的 materials（第二个来源集）")
+
+
 class Relabel(unittest.TestCase):
     """🎙 例题给定被标：重建验证通过 → 挂牌 🎙+✏️；没通过 → 照常 ⚠。"""
 

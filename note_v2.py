@@ -149,6 +149,20 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
 - `qa`：这一块的**自测题**（3–5 题，三档都尽量有），每题标 `tier`：
   **基础** = 回忆一个定义/事实；**中等** = 换个数字或案例用一次；**挑战** = 合两个想法、或抓一个坑。
   答案里的数字必须自洽（会过机械核）。
+- `compare`：**2–4 个容易被学生混起来的东西**的对照表（经济：AC vs AVC vs MC；CS：Sigmoid vs
+  ReLU；文科：两种研究方法）—— 只有"分不清、老混"的内容才放。例：
+  {"title": "三种成本指标", "cols": ["", "平均成本 AC", "边际成本 MC"],
+   "rows": [{"label": "定义", "cells": ["$TC/q$", "$dTC/dq$"]},
+            {"label": "最低点处", "cells": ["与 MC 相等", "穿过 AC 最低点"]}], "src": "lecture"}
+  ⚠️ 表**替掉**它覆盖的那段对照讲解（正文只留一句话指到表）；对照列 2–4、行 2–7、
+  每格 ≤40 字（可写公式）；每节至多 1 张、全讲至多 3 张；格子数字和正文一个待遇（照过三道核）。
+- `flow`：本节教的一个**有序流程**（3–7 步）：算法（forward → loss → backprop → update）；
+  一类题的解法（找 AC → 令 AC'=0 → 验二阶导 → 代回）。例：
+  {"title": "梯度下降一轮", "steps": [{"label": "前向传播", "detail": "算出预测与损失"},
+            {"label": "反向传播", "detail": "链式法则算各层梯度"},
+            {"label": "更新参数", "detail": "沿负梯度走一步"}], "loop_to": 1, "src": "lecture"}
+  ⚠️ 只讲**一类题/算法怎么做**，**不要**拿它复述某一道具体题的步骤（那是 example 的 steps，
+  两边不许重复）；迭代算法可以 `loop_to: 1` 指回第几步（从 1 数）。不合适就别放。
 
 ## 三、数学与例题的硬规矩（2026-10-17 验收抓到过反例，逐条遵守）
 - **公式一律 LaTeX**：行内 `$…$`、独立 `$$…$$`。多项式/导数/分式都必须写，例如
@@ -220,7 +234,11 @@ __CALIBER__
     "pitfalls": ["…"],
     "terms": [{"en": "English term", "zh": "中文"}],
     "sources": ["🎙 HH:MM", "📖 文件名"],
-    "plot": {"kind": "cost_curves", "title": "图名", "params": {"a": 1}}}]},
+    "plot": {"kind": "cost_curves", "title": "图名", "params": {"a": 1}},
+    "compare": {"title": "对照表名（标出处）", "cols": ["", "概念 A", "概念 B"],
+                "rows": [{"label": "行头", "cells": ["…", "…"]}], "src": "lecture|self"},
+    "flow": {"title": "流程名（标出处）", "steps": [{"label": "≤16 字", "detail": "≤50 字（可省）"}],
+             "loop_to": null, "src": "lecture|self"}}]},
  "qa": [{"q": "自测题（中文题干，术语用英文）", "a": "答案（含步骤）", "tier": "基础|中等|挑战", "kind": "concept|calc|trap"}],
  "corrections": [{"where": "…", "spoken": "…", "fixed": "…", "basis": "…"}],
  "checks": [{"claim": "…", "how": "…", "status": "ok"}],
@@ -390,6 +408,134 @@ def _self_label(q: str) -> str:
     return f"{_SELF_MARK} {q}"
 
 
+#: 对比表 / 步骤图的上限（作者 F10；**代码里强制**，不只靠提示词）。
+CMP_COLS_MAX = 4            # 对照列（不含第一列行头）
+CMP_ROWS_MAX = 7
+CMP_CELL_MAX = 40
+FLOW_STEPS_MAX = 7
+FLOW_LABEL_MAX = 16
+FLOW_DETAIL_MAX = 50
+CMP_PER_LECTURE = 3
+FLOW_PER_LECTURE = 3
+
+
+def _src_label(title: str, src) -> str:
+    """compare/flow 的标题按 `src` 挂 🎙/✏️（F9 标签纪律；缺省保守 `✏️`）。幂等。"""
+    t = _one_line(title)
+    if not t:
+        return t
+    mark = ("🎙" if str(src or "").strip().lower() in ("lecture", "🎙", "课上")
+            else _SELF_MARK)
+    for pre in ("🎙+✏️", "🎙", "✏️", "📖"):
+        if t.startswith(pre):
+            t = t[len(pre):].lstrip()
+            break
+    return f"{mark} {t}"
+
+
+def _cmp_cut(x, n: int) -> str:
+    """格子文本截到 `n` 字；若截断了未闭合的 `$…$`，退到最后一个 `$` 之前（别露半截公式）。"""
+    t = _one_line(x)
+    if len(t) <= n:
+        return t
+    t = t[:n]
+    if t.count("$") % 2:
+        t = t[:t.rfind("$")].rstrip()
+    return t
+
+
+def _clean_compare(cmp) -> dict | None:
+    """`compare` 规格校验 + 裁剪（F10）。**纯函数**；不合规 → `None`（调用方丢掉）。"""
+    if not isinstance(cmp, dict):
+        return None
+    title = _one_line(cmp.get("title"))
+    cols_in = cmp.get("cols")
+    rows_in = cmp.get("rows")
+    if not title or not isinstance(rows_in, list) or not isinstance(cols_in, list):
+        return None
+    if len(cols_in) < 3 or len(cols_in) > CMP_COLS_MAX + 1:  # 行头列 + 2–4 对照列
+        return None
+    cols = [_cmp_cut(c, CMP_CELL_MAX) for c in cols_in[:CMP_COLS_MAX + 1]]
+    if any(not c for c in cols[1:]):                       # 对照列必须有名字
+        return None
+    ncol = len(cols) - 1
+    rows: list = []
+    for r in rows_in:
+        if not isinstance(r, dict):
+            continue
+        label = _cmp_cut(r.get("label"), CMP_CELL_MAX)
+        cells = [_cmp_cut(x, CMP_CELL_MAX) for x in (r.get("cells") or [])]
+        if not label or len(cells) != ncol:
+            continue                                       # 对齐不了的整行不要
+        rows.append({"label": label, "cells": cells})
+        if len(rows) >= CMP_ROWS_MAX:
+            break
+    if len(rows) < 2:
+        return None
+    return {"title": _src_label(title, cmp.get("src")), "cols": cols, "rows": rows}
+
+
+def _clean_flow(fl) -> dict | None:
+    """`flow` 规格校验 + 裁剪（F10）。**纯函数**；不合规 → `None`（调用方丢掉）。"""
+    if not isinstance(fl, dict):
+        return None
+    title = _one_line(fl.get("title"))
+    steps_in = fl.get("steps")
+    if not title or not isinstance(steps_in, list):
+        return None
+    steps: list = []
+    for st in steps_in:
+        if isinstance(st, dict):
+            label = _one_line(st.get("label"))
+            detail = _one_line(st.get("detail"))
+        else:
+            label, detail = _one_line(st), ""
+        if not label:
+            continue
+        steps.append({"label": label[:FLOW_LABEL_MAX],
+                      "detail": detail[:FLOW_DETAIL_MAX]})
+        if len(steps) >= FLOW_STEPS_MAX:
+            break
+    if len(steps) < 3:
+        return None
+    loop = fl.get("loop_to")
+    try:
+        loop = int(loop)
+    except (TypeError, ValueError):
+        loop = None
+    if loop is not None and not (1 <= loop <= len(steps) - 1):
+        loop = None                                        # 回到最后一步 = 没循环
+    return {"title": _src_label(title, fl.get("src")), "steps": steps,
+            "loop_to": loop}
+
+
+def clamp_components(review: dict) -> tuple:
+    """全讲上限：`compare` / `flow` 各 ≤3（作者 F10）。返回（review, 丢掉清单, 提醒）。
+
+    ⚠️ 上限按**讲**算（跨节）—— 逐节的 schema 在 `_clean_section` 里已经收过一遍，
+       这里是全篇的一刀（景象：模型在每节都放一张表）。
+    """
+    out = copy.deepcopy(review)
+    dropped: list = []
+    seen = {"compare": 0, "flow": 0}
+    for s in (out.get("sections") or []):
+        if not isinstance(s, dict):
+            continue
+        for k in ("compare", "flow"):
+            if k not in s:
+                continue
+            if seen[k] >= (CMP_PER_LECTURE if k == "compare" else FLOW_PER_LECTURE):
+                t = s.get(k) if isinstance(s.get(k), dict) else {}
+                dropped.append(f"{k}「{_one_line(t.get('title'))[:24]}」")
+                s.pop(k, None)
+            else:
+                seen[k] += 1
+    warns = ([f"组件上限：丢了 {len(dropped)} 个超限的对照表/步骤图（"
+              + "、".join(dropped[:4]) + ("…" if len(dropped) > 4 else "") + "）"]
+             if dropped else [])
+    return out, dropped, warns
+
+
 def _clean_section(s) -> dict:
     if not isinstance(s, dict):
         return {}
@@ -408,7 +554,8 @@ def _clean_section(s) -> dict:
          "pitfalls": _lines(s.get("pitfalls")),
          "terms": _terms(s.get("terms")),
          "sources": _lines(s.get("sources")),
-         "variants": [], "steps": [], "example": {}, "faded": {}, "plot": {}}
+         "variants": [], "steps": [], "example": {}, "faded": {}, "plot": {},
+        "compare": {}, "flow": {}}
     ex = s.get("example")
     if isinstance(ex, dict):
         steps = _steps(ex.get("steps"))
@@ -436,11 +583,18 @@ def _clean_section(s) -> dict:
         r["plot"] = {"kind": _one_line(pl.get("kind")),
                      "title": _one_line(pl.get("title")),
                      "params": params if isinstance(params, dict) else {}}
+    # ⭐ F10：对比表 / 步骤图 —— 模型只填数据；schema 不合规就丢、超限在代码里裁。
+    cmp = _clean_compare(s.get("compare"))
+    if cmp:
+        r["compare"] = cmp
+    fl = _clean_flow(s.get("flow"))
+    if fl:
+        r["flow"] = fl
     # ⭐ F9b（作者点名，代码里定不靠提示词）：
-    #   · 「按口述还原」的例题 → 合标 🎙+✏️；· 空壳 example/faded/plot 直接摘掉。
+    #   · 「按口述还原」的例题 → 合标 🎙+✏️；· 空壳 example/faded/plot/compare/flow 直接摘掉。
     if r["example"].get("title"):
         r["example"]["title"] = with_recon_label(r["example"]["title"])
-    for k in ("example", "faded", "plot"):
+    for k in ("example", "faded", "plot", "compare", "flow"):
         if not r.get(k):
             r.pop(k, None)
     return r
@@ -672,11 +826,13 @@ REPAIR_SYS = """你在**返修**一节课堂笔记里"算错了/立不住的例�
 3) 变式/补全题：数字可以自定（标 ✏️），但答案必须自洽；**极值不能靠 q→∞ 之类的极限论证**
    （无穷远处的趋向值不是最小值）——要么真有最值点（求导=0 + 二阶条件），要么明说
    该函数没有最低点。
-4) 讲解（prose）里提到这些数字的句子**一起改**，别让正文和题块打架。
+4) 讲解（prose）里提到这些数字的句子**一起改**，别让正文和题块打架；
+   对照表/步骤图（compare/flow）里的数字错了就改格子/步骤，改不干净就整个**撤掉**。
 5) 不写"我算错了/我改正了"这类话；直接给改好的内容。
 
 输入：这一节现在的文本（JSON）+ 机械核发现的错行。
 严格输出 JSON：{"prose": ["…"], "example": {…}|null, "variants": [...], "faded": {…}|null,
+ "compare": {…}|null, "flow": {…}|null,
  "note": "一行说明改了什么"}"""
 
 
@@ -746,7 +902,8 @@ def repair_exercises(review: dict, *, chat, entries: list | None = None,
             continue
         snap = copy.deepcopy(s)
         payload = {k: s.get(k) for k in ("heading", "q", "prose", "example",
-                                         "variants", "faded") if s.get(k)}
+                                         "variants", "faded", "compare",
+                                         "flow") if s.get(k)}
         user = ("机械核在这节的**题**上发现这些算错了：\n"
                 + "\n".join(f"- {str(r.get('claim') or '')[:140]} → 机器算出来："
                             f"{r.get('recomputed') or '?'}" for r in bad[:6])
@@ -754,7 +911,7 @@ def repair_exercises(review: dict, *, chat, entries: list | None = None,
                 + json.dumps(payload, ensure_ascii=False)[:4000]
                 + _transcript_window(entries, s)
                 + "\n\n按规矩返修这一节；严格输出 JSON"
-                  "（prose / example / variants / faded / note）。")
+                  "（prose / example / variants / faded / compare / flow / note）。")
         try:
             got = chat(REPAIR_SYS, user, max_tokens)
         except Exception:                                      # noqa: BLE001
@@ -778,13 +935,20 @@ def repair_exercises(review: dict, *, chat, entries: list | None = None,
                     s["variants"] = vs
                 else:
                     s.pop("variants", None)
+            for key, fn in (("compare", _clean_compare), ("flow", _clean_flow)):
+                if key in got:
+                    val = fn(got.get(key))
+                    if val:
+                        s[key] = val
+                    else:                                      # 不合规/空 → 撤（宁缺）
+                        s.pop(key, None)
         # 复检：题块还有 mismatch → 整组撤（文件里只留"讲课时引的原话"那条 ⚠ 路）
         again = [r for r in note_math.check_review({"sections": [s]})
                  if r.get("status") == "mismatch"
                  and note_math.unit_of_claim(s, str(r.get("claim") or ""))
                  in note_math.MODEL_AUTHORED]
         if again:
-            for key in ("example", "variants", "faded"):
+            for key in ("example", "variants", "faded", "compare", "flow"):
                 s.pop(key, None)
             n_drop += 1
         snaps.append((snap, s))
@@ -1342,6 +1506,19 @@ def numeric_claims(review_data: dict, *, limit: int = 24) -> list:
         fd = s.get("faded") or {}
         out += _num_items(head, [fd.get("q", ""), fd.get("a", "")], "faded",
                           f"本节补全题的题面：{_one_line(fd.get('q'))[:160]}", limit)
+        # ⭐ F10：对照表 / 步骤图里的数字和正文一个待遇（格子文本进核）。
+        cmp = s.get("compare") or {}
+        if cmp.get("title"):
+            cells = [c for r in (cmp.get("rows") or [])
+                     for c in (r.get("cells") or [])]
+            out += _num_items(head, cells, "compare",
+                              f"本节对照表「{_one_line(cmp.get('title'))}」的格子", limit)
+        fl = s.get("flow") or {}
+        if fl.get("title"):
+            steps_txt = [f"{st.get('label', '')}：{st.get('detail', '')}"
+                         for st in (fl.get("steps") or [])]
+            out += _num_items(head, steps_txt, "flow",
+                              f"本节步骤图「{_one_line(fl.get('title'))}」", limit)
         # 讲解排在每节的最后：额度先给"模型自己出的题"（它们最容易串参数），
         # 讲解那一档量大且稳（作者的正文纪律已经压过一轮）。
         out += _num_items(head, list(s.get("prose") or []), "prose", "", limit)
@@ -1377,7 +1554,8 @@ def _num_items(where: str, texts, origin: str, ctx: str, limit: int) -> list:
 
 #: `origin` → 给模型看的标签（口径不同，见 `VERIFY_SYS`）。
 _ORIGIN_ZH = {"prose": "讲解（🎙/📖）", "example": "例题解", "variant": "变式",
-              "faded": "补全题", "qa": "自测", "checks": "讲解（🎙/📖）"}
+              "faded": "补全题", "qa": "自测", "checks": "讲解（🎙/📖）",
+              "compare": "对照表", "flow": "步骤图"}
 #: 「模型自己出的题」——判据用 `note_math.MODEL_AUTHORED` + 自测。
 _MODEL_ORIGINS = set(note_math.MODEL_AUTHORED) | set(note_math.ALSO_MODEL)
 #: 收窄降级在行尾留下的**可数标记**（评测按它统计"这条本来会变成什么"）：

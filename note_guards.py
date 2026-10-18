@@ -974,12 +974,41 @@ def _support_state(entries: list, lo: int, hi: int) -> str:
     return SUPPORT_PREAMBLE + "\n\n" + "\n".join(lines)
 
 
-def _materials_excerpts(materials, claim: str, *, k: int = 2) -> list:
-    """claim → 材料 top-k 片段（BM25，`Materials.search`）。拿不到 → `[]`。"""
+def _materials_excerpts(materials, claim: str, *, k: int = 2,
+                        context: str = "") -> list:
+    """claim → 材料 top-k 片段（BM25，`Materials.search`）。拿不到 → `[]`。
+
+    ⭐ F9d §0（作者裁定：支持核对必须与**生成时读的是同一份材料来源与同一检索口径**）：
+    claim 本身检索不出词时（纯符号 `$MC=12$` / 纯中文短句 —— 材料是英文的），
+    退一步用**本节转录窗口**再查一次（生成时正是拿转录片段查材料的）。
+    来源集没有第二个定义：`materials` 对象由调用方从生成链原样传进来。
+    """
+    for q in (claim, context):
+        if not q:
+            continue
+        try:
+            hits = materials.search(q, k=k)
+        except Exception:                                      # noqa: BLE001
+            hits = []
+        if hits:
+            return [str(getattr(c, "text", "") or "") for c in hits]
+    return []
+
+
+def _section_context(entries: list, secs: list, c: dict, *, cap: int = 2000) -> str:
+    """claim 所在小节转录窗口的文本（claim 检索不出词时拿它当查询）。**纯函数。**"""
     try:
-        return [str(getattr(c, "text", "") or "") for c in materials.search(claim, k=k)]
+        si = c.get("si")
+        sec = secs[si] if isinstance(si, int) and 0 <= si < len(secs) else {}
+        if not isinstance(sec, dict):
+            sec = {}
+        want = _hms(c["ts"]) if c.get("ts") else _hms(sec.get("ts"))
+        lo, hi = _support_window(entries, want)
+        txt = " ".join(str(e.get("en") or e.get("asr") or "")
+                       for e in entries[lo:hi] if isinstance(e, dict))
+        return txt[:cap]
     except Exception:                                          # noqa: BLE001
-        return []
+        return ""
 
 
 def _support_mat_state(excerpts: list) -> str:
@@ -1143,7 +1172,9 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
         if kind == "mat":
             excerpts: list = []
             for c in part:
-                excerpts.extend(_materials_excerpts(materials, c["claim"]))
+                excerpts.extend(_materials_excerpts(
+                    materials, c["claim"],
+                    context=_section_context(entries, secs, c)))
             state = _support_mat_state(excerpts)
         else:
             wins: list = []

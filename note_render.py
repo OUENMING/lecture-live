@@ -118,6 +118,39 @@ def _polish_line(state: str) -> str:
             "逐句记录里是精修后的那版，`sessions/` 里的原始记录未动。")
 
 
+def compare_md(cmp: dict) -> list:
+    """`compare` → md **管道表**（作者 F10 的 md 格式；`|` 转义成 `\\|`）。"""
+    cols = [str(c) for c in (cmp.get("cols") or [])]
+    rows = [r for r in (cmp.get("rows") or []) if isinstance(r, dict)]
+
+    def esc(x) -> str:
+        return _one(x).replace("|", "\\|")
+
+    L = ["| " + " | ".join(esc(c) for c in cols) + " |",
+         "|" + "---|" * len(cols)]
+    for r in rows:
+        cells = [esc(r.get("label"))] + [esc(c) for c in (r.get("cells") or [])]
+        L.append("| " + " | ".join(cells) + " |")
+    return L
+
+
+def flow_md(fl: dict) -> list:
+    """`flow` → md 编号列表（非末步带 `→`；回路一行「↺ 回到第 N 步」）。"""
+    steps = [s for s in (fl.get("steps") or []) if isinstance(s, dict)]
+    L: list = []
+    for i, st in enumerate(steps, 1):
+        tail = " →" if i < len(steps) else ""
+        d = f" —— {_one(st.get('detail'))}" if st.get("detail") else ""
+        L.append(f"{i}. **{_one(st.get('label'))}**{d}{tail}")
+    try:
+        loop = int(fl.get("loop_to")) if fl.get("loop_to") is not None else None
+    except (TypeError, ValueError):
+        loop = None
+    if loop and 1 <= loop <= len(steps) - 1:
+        L.append(f"↺ 回到第 {loop} 步")
+    return L
+
+
 def _missing_line(d: "NoteData") -> str:
     """「这次没生成讲解」那一行 —— **两种原因分开说**（同旧版 `_render_note` 的取舍）。
 
@@ -249,6 +282,24 @@ def render(d: NoteData) -> str:
             i += 1
             L += [f"{i}. **{_one(x.get('q'))}**", "",
                   "> [!question]- 答案", "> " + _one(x.get("a")), ""]
+
+    # ── ④c 结构卡（F10：对照表 / 步骤图 —— md 用最朴素的格式）──────────────
+    #    ⚠️ md 是简版（作者第六轮 6）：这里只放这两类**结构化小件**（管道表 / 编号列表），
+    #       正文/例题/变式仍旧只在详细版 HTML 里。
+    cards = [s for s in sections if isinstance(s, dict)
+             and (s.get("compare") or s.get("flow"))]
+    if cards:
+        L += ["## 结构卡（对照表 / 步骤图）", ""]
+        for s in cards:
+            head = _one(s.get("heading"))
+            if head:
+                L += [f"**{head}**", ""]
+            if s.get("compare"):
+                c = s["compare"]
+                L += [f"*{_one(c.get('title'))}*", ""] + compare_md(c) + [""]
+            if s.get("flow"):
+                fl = s["flow"]
+                L += [f"*{_one(fl.get('title'))}*", ""] + flow_md(fl) + [""]
 
     # ── ⑤ 本课术语 ────────────────────────────────────────────────────
     L += ["## 本课术语", ""]

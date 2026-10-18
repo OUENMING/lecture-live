@@ -4,7 +4,7 @@
     ClassLive.app/Contents/MacOS/python scripts/notes_bench.py [名字…] [--limit N]
 
 ⚠️ **花钱、要网**（test1 通行码）→ **不**进 `scripts/check.py`。
-⚠️ 隔离：`HOME` 指到 `--home`（默认 `/private/var/folders/.../opencode/notesbench-home`），
+⚠️ 隔离：`HOME` 指到 `--home`（默认 `<系统临时目录>/classlive-notesbench-home`），
    里面有 `test-key` + 已登记 `install-id` 的**副本**；`OBSIDIAN_VAULT` 指向临时目录。
    真 `~/.classlive` 只读（跑前跑后给指纹，变了就报）。
 不用真 vault、不写 sessions/、不部署任何东西。
@@ -21,6 +21,7 @@ import os
 import pathlib
 import shutil
 import sys
+import tempfile
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -94,8 +95,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("names", nargs="*", help="只跑这些 fixture 名（默认全跑）")
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--home", default=str(pathlib.Path(
-        "/private/var/folders/g1/7y1s2wp91txfzbj8ybmxqdb00000gn/T/opencode/notesbench-home")))
+    ap.add_argument("--home", default=str(pathlib.Path(tempfile.gettempdir())
+                                           / "classlive-notesbench-home"))
     args = ap.parse_args()
 
     real = pathlib.Path.home()

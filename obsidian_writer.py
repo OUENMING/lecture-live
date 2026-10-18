@@ -1103,6 +1103,18 @@ class ObsidianWriter:
                                    effort=NOTE_EFFORT)
         return obj if isinstance(obj, dict) else {}
 
+    def _chat_plain(self, system: str, user: str, max_tokens: int) -> dict:
+        """同 `_chat`，但**关思考** —— 只给 `align`（覆盖度/课件核对）。
+
+        ⚠️ F11 §0 实测（SOC10020 真跑）：align 的输出是**长列表**（covered / not_covered），
+        开思考时推理 token 把 4096 的口径吃光 → `Unterminated string` 截断 → 那一栏空。
+        它对"想清楚"没有增益，关掉。（其余笔记生成调用仍走 low 档。）
+        """
+        import llm_client
+        obj = llm_client.chat_json(self._key, self._model, system, user,
+                                   max_tokens=max_tokens, temperature=0.3, timeout=300)
+        return obj if isinstance(obj, dict) else {}
+
     def _chat_meta(self, system: str, user: str, max_tokens: int):
         """同 `_chat`，但带回 `finish_reason` + 返回长度 —— 只有「速览」走这条路：
         截断（`length`）必须被当成**失败**（半截叙述印进笔记比没有更坏，2026-10-18）；
@@ -1198,7 +1210,7 @@ class ObsidianWriter:
             #    覆盖度的数字由 `note_cover.report` 按时间窗算 —— 模型的整份回执
             #    曾经被 `max_tokens` 截断、异常又被吞成 `{}`，三节课全报"0/117"。
             #    ⚠️ 现在**失败要说出来**（`align` 返回 `{"failed": ...}`）。
-            got = note_v2.align(review, chat=self._chat,
+            got = note_v2.align(review, chat=self._chat_plain,
                                 materials=self._materials, skeleton=sk)
             if got.get("failed"):
                 msg = (f"覆盖度/课件核对没做成（{got['failed']}）—— 覆盖度仍按时间窗"

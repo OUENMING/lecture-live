@@ -131,6 +131,27 @@ class T(unittest.TestCase):
         self.assertEqual([c.get("effort") for c in seen], ["low", "low"])
         self.assertEqual(obsidian_writer.NOTE_EFFORT, "low")
 
+    def test_align_exit_has_no_thinking(self):
+        """`align`（长列表输出）关思考 —— SOC 实测开思考会截断（F11 §0）。"""
+        import obsidian_writer
+        seen = []
+
+        def fake(key, model, system, user, *, max_tokens, **kw):
+            seen.append(kw.get("effort", "MISSING"))
+            return {"ok": 1}
+
+        orig = llm_client.chat_json
+        llm_client.chat_json = fake
+        try:
+            me = type("W", (), {"_key": "k", "_model": "m"})()
+            obsidian_writer.ObsidianWriter._chat_plain(me, "S", "U", 100)
+        finally:
+            llm_client.chat_json = orig
+        self.assertEqual(seen, ["MISSING"], "align 那个出口不该带 effort")
+        import inspect
+        src = inspect.getsource(obsidian_writer.ObsidianWriter._review_v2)
+        self.assertIn("chat=self._chat_plain", src, "align 没走关思考的出口")
+
     def test_thinking_truncation_falls_back_to_disabled(self):
         """⭐ 带 effort 的调用收到 `finish_reason=length` → 关思考重来一次（不丢块）。"""
         seq = [_Resp2("", "length"), _Resp2('{"ok": 2}', "stop")]

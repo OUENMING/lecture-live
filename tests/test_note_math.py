@@ -305,6 +305,21 @@ class TestSecondDerivative(unittest.TestCase):
                                                       "10 除以 3 约等于 3.3。"]}]})
         self.assertEqual([r["status"] for r in ok], ["ok", "ok"], ok)
 
+    def test_真句子的逗号和约也要拦(self):
+        """⭐ 2026-10-18 Δ（作者看截图抓的）：这道档的**起因句**本身没被拦住 ——
+        真笔记里长的是「5.3除以3**，得到约**2.89」，比测试里那版紧的多了
+        **一个逗号 + 一个"约"**，正则就漏了（这一档当初就是为这句话写的！）。
+        判据：这句 → mismatch；紧版仍 mismatch、算对的仍 ok（宽了不许误报）。"""
+        real = "首先，我们计算了某个数值：5.3除以3，得到约2.89。这个数值是平均成本在特定产量下的值。"
+        rows = [r for r in nm.check_review({"sections": [{"prose": [real]}]}) if "5.3" in r["claim"]]
+        self.assertEqual([r["status"] for r in rows], ["mismatch"], rows)
+        self.assertIn("1.767", rows[0]["recomputed"])
+        vs = nm.check_review({"sections": [{"prose": [
+            "5.3除以3，得到约1.77。",                      # 算对（两位小数）
+            "10 除以 4，得到约 2.5。",                     # 算对（一位小数）
+        ]}]})
+        self.assertEqual([r["status"] for r in vs], ["ok", "ok"], vs)
+
     def test_拐点那句_f_两撇为零不许判方向(self):
         """⭐ 第五轮自查（产物 H 的假 ⚠）：`f''(0)=0 且两侧凹凸性改变` 是**拐点的定义**，
         `凹凸` 是名词不是方向断言 —— 当时被判成"说凹 → 该为极大"（假 ⚠）。"""

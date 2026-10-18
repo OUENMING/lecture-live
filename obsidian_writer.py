@@ -1091,13 +1091,14 @@ class ObsidianWriter:
         return obj if isinstance(obj, dict) else {}
 
     def _chat_meta(self, system: str, user: str, max_tokens: int):
-        """同 `_chat`，但带回 `finish_reason` —— 只有「五分钟串讲」走这条路：
-        截断（`length`）必须被当成**失败**（半截叙述印进笔记比没有更坏，2026-10-18）。"""
+        """同 `_chat`，但带回 `finish_reason` + 返回长度 —— 只有「速览」走这条路：
+        截断（`length`）必须被当成**失败**（半截叙述印进笔记比没有更坏，2026-10-18）；
+        F9 起为空/截断会在 `note_v2.overview` 里**重试一次**（诊断数字见那里的打印）。"""
         import llm_client
-        obj, finish = llm_client.chat_json(self._key, self._model, system, user,
-                                           max_tokens=max_tokens, temperature=0.3,
-                                           timeout=300, return_meta=True)
-        return (obj if isinstance(obj, dict) else {}), finish
+        obj, finish, nchars = llm_client.chat_json(self._key, self._model, system, user,
+                                                   max_tokens=max_tokens, temperature=0.3,
+                                                   timeout=300, return_meta=True)
+        return (obj if isinstance(obj, dict) else {}), finish, nchars
 
     def _with_overview(self, review: dict) -> tuple:
         """⭐ 速览（2026-10-18 第七轮）：概念单元 → **一次小调用**，3–6 句、≤ 正文上限的 10%。

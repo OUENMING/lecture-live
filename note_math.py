@@ -283,9 +283,9 @@ _FUNC_DEF = re.compile(
 _NUM = r"-?\d+(?:\.\d+)?(?![0-9.√√A-Za-z/])"
 #: 「在 q = 2.89 处取最小」「q=6 时 AC 最小」「最小平均成本对应 q = 6」
 _MINMAX = re.compile(
-    r"(?:在\s*)?[qQx]\s*\*?\s*[=＝]\s*(?P<c>" + _NUM + r")\s*(?:处|时|点)?[^。；;]{0,12}?"
+    r"(?:在\s*)?\$?[qQx]\s*\*?\s*[=＝≈]\s*(?P<c>" + _NUM + r")\$?\s*(?:处|时|点)?[^。；;]{0,12}?"
     r"(?P<kind>最小|最大|极小|极大)"
-    r"|(?P<kind2>最小|最大|极小|极大)[^。；;]{0,18}?[qQx]\s*\*?\s*[=＝]\s*(?P<c2>" + _NUM + r")"
+    r"|(?P<kind2>最小|最大|极小|极大)[^。；;]{0,18}?[qQx]\s*\*?\s*[=＝≈]\s*(?P<c2>" + _NUM + r")\$?"
     # 「使 AC 最小的产量约为 2.89」（数字在结论后面，这是实测里最常见的中文语序）
     # 「使 AC 最小的**产量**约为 2.89」——⚠️ 必须有"产量/产出/数量"，否则
     # 「最小平均成本**为 16**」里的 16 是值不是点，会报假修正（实测抓到两例）。
@@ -309,7 +309,7 @@ _DIR_MIN = {"极小", "最小", "凸"}
 #: ⚠️ 取**这一句里最后一个** `=`/`≈` 后面的数字（等号右边常是整条算式），
 #:    并要求它后面是标点/结尾（`233.01*2` 这种不算一个值）。
 _SUBST = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9]{0,5})\s*\(\s*(?P<c>" + _NUM + r")\s*\)"
-                    r"(?P<mid>[^。；;\n]*)[=＝≈]\s*(?P<v>" + _NUM + r")\s*$")
+                    r"(?P<mid>[^。；;\n]*)(?:[=＝≈]|\\approx\s*)(?P<v>" + _NUM + r")\s*\$?\s*$")
 #: 小句切分：`,` `，` `。` `；` `、` 与比较符两侧各是一条独立断言
 #: （`MC(4)=12 < AC(4)=28` 是两条，不是"MC(4) 等于 28"）。
 _CLAUSE = re.compile(r"[，,。；;、<>≤≥与和]")
@@ -609,9 +609,12 @@ def check_review(review: dict, *, transcript: str = "") -> list:
                 return local
             return {n: v for n, v in sec_defs.items() if per_name.get(n, 0) == 1}
         for u_idx, u in enumerate(units):
+            fdefs_by_text: list = []
             for t in u:
                 fdefs = _scope(t, u_idx)
+                fdefs_by_text.append(fdefs)
                 rows += _rows_for_text(t, fdefs)
+            rows += _qvsp_rows(u, fdefs_by_text)      # ⭐ F9：q 不许当 P（整单元一起看）
     # ⚠️ 同一句断言在 `prose` 与 `answer` 各出现一次 → 会出两行一模一样的核对表；
     #    空的 claim 也在这里丢掉（实测第三份产物上有两行全空）。
     seen: set = set()
@@ -635,7 +638,9 @@ def check_review(review: dict, *, transcript: str = "") -> list:
 #:    现在放行 `除数 后可选逗号` 与 `动词后可选"约"`；容差逻辑不变（按结果写的小数位判）。
 _DIV = re.compile(r"(?P<a>-?\d+(?:\.\d+)?)\s*(?:除以|÷|/)\s*(?P<b>-?\d+(?:\.\d+)?)"
                   r"\s*[，,、]?\s*(?:得到|得|等于|是|为|约等于|≈|=|＝)\s*[约]?\s*"
-                  r"(?P<c>-?\d+(?:\.\d+)?)")
+                  r"(?P<c>-?\d+(?:\.\d+)?)"
+                  # ⭐ F9：链式分数 `500/60=25/3`（作者读转录重建的式子）不是"500/60=25"。
+                  r"(?:\s*/\s*(?P<d>-?\d+(?:\.\d+)?))?")
 
 
 #: 极限当最值（F8-c，作者从 econ W3 抓到）：`当 q→∞ 时 AC→100，最低点为 100` 必须拦 ——
@@ -679,6 +684,18 @@ def _rows_for_text(t: str, fdefs: dict) -> list:
         if not b:
             continue
         want = a / b
+        d_s = m.group("d")
+        if d_s:                                     # ⭐ F9：链式分数 `500/60=25/3`
+            d = float(d_s)
+            if not d:
+                continue
+            claim_v = c / d
+            ok = abs(claim_v - want) <= 1e-3 * max(1.0, abs(claim_v))
+            rows.append({"claim": t, "status": "ok" if ok else "mismatch",
+                         "recomputed": f"{a:g}/{b:g} ≈ {_fmt(want)}",
+                         "how": f"{a:g}÷{b:g}={_fmt(want)}，断言写 {c:g}/{d:g}"
+                                + ("（一致）" if ok else "（对不上）")})
+            continue
         # 容差按断言写的小数位算（`约等于 3.3` 不许判成"错"）
         dec = len(m.group("c").split(".")[1]) if "." in m.group("c") else 0
         if abs(round(want, dec) - c) <= 1e-9:
@@ -749,7 +766,9 @@ def _rows_for_text(t: str, fdefs: dict) -> list:
     # ⚠️ 「点在前、结论在后」那一档（`x=1（极小值）`）**也不受整句密句守卫管**：实测
     #    `驻点为 x=1（极小值）…函数在 x>0 时凸` 里的 `>` 是**行文里的比较号**，
     #    跟"公式密到挑不出结论"不是一回事 —— 整句跳过把它埋了（第三轮离线复跑）。
-    for m in _PT_EXT.finditer(t):
+    # ⭐ F9：`q\approx2.89`（TeX）== `q≈2.89` —— 不归一化，舍入驻点的整条路都匹配不上。
+    tm = t.replace("\\approx", "≈")
+    for m in _PT_EXT.finditer(tm):
         if sign_rows:
             continue          # 这句的结论已经由符号逻辑那一档核过（避免一句两行、一行还挂着"没有函数"）
         rows.append(_extremum_row(t, fdefs, m.group("c"), m.group("kind")))
@@ -762,7 +781,7 @@ def _rows_for_text(t: str, fdefs: dict) -> list:
         return rows
     pairs = [(m.group("c") or m.group("c2") or m.group("c3"),
               m.group("kind") or m.group("kind2") or m.group("kind3"))
-             for m in _MINMAX.finditer(t)]
+             for m in _MINMAX.finditer(tm)]
     for c, word in pairs:
         if c is None:
             continue
@@ -824,21 +843,33 @@ def _extremum_row(t: str, fdefs: dict, c: str, word: str) -> dict:
         return {"claim": t, "status": "unchecked", "recomputed": "",
                 "how": f"{name} 在 q={c} 附近算不出来（定义域外/数值问题）"}
     tol = 1e-3 * max(1.0, abs(x))
+    flip = False
     if abs(d1) > tol:
-        return {"claim": t, "status": "mismatch",
-                "recomputed": f"{name}'({c})≈{_fmt(d1)}",
-                "how": f"数值求导：{name}'({c})≈{_fmt(d1)}≠0，"
-                       f"该点不是驻点，谈不上{word}"}
+        # ⭐ F9（作者读转录后重建：课上 q*≈2.89，真值 √(25/3)=2.8867…）：**舍入过的驻点**
+        #    不许报假 mismatch。判据：±1% 邻域里导数**变号** = 驻点就在舍入点旁边。
+        #    （实测：60q+500/q 在 q=2.89 的导数≈0.135≠0，但 2.86→2.92 之间变号。）
+        h = 0.01 * max(1.0, abs(x))
+        try:
+            flip = _d1(f, x - h) * _d1(f, x + h) < 0
+        except Exception:                                     # noqa: BLE001
+            flip = False
+        if not flip:
+            return {"claim": t, "status": "mismatch",
+                    "recomputed": f"{name}'({c})≈{_fmt(d1)}",
+                    "how": f"数值求导：{name}'({c})≈{_fmt(d1)}≠0，"
+                           f"该点不是驻点，谈不上{word}"}
     bad = (kind == "最小" and d2 < 0) or (kind == "最大" and d2 > 0)
     if bad:
         return {"claim": t, "status": "mismatch",
                 "recomputed": f"{name}''({c})≈{_fmt(d2)}",
                 "how": f"二阶条件不成立：{name}''({c})≈{_fmt(d2)}，"
                        f"这是{'最大' if d2 < 0 else '最小'}值"}
+    gotline = (f"数值求导：{name}'({c})≈{_fmt(d1)}"
+               + ("（x 有舍入：±1% 邻域内导数变号 → 驻点成立）" if flip
+                  else "（≈0，驻点成立）"))
     return {"claim": t, "status": "ok",
             "recomputed": f"{name}({c})={_fmt(f(x))}",
-            "how": f"数值求导：{name}'({c})≈{_fmt(d1)}（≈0，驻点成立）、"
-                   f"{name}''({c})≈{_fmt(d2)}（{word}的二阶条件成立）"}
+            "how": gotline + f"、{name}''({c})≈{_fmt(d2)}（{word}的二阶条件成立）"}
 
 
 def _SUBST_rows(t: str, fdefs: dict, rows: list) -> list:
@@ -874,6 +905,73 @@ def _SUBST_rows(t: str, fdefs: dict, rows: list) -> list:
                          "recomputed": f"{_fmt(got)}",
                          "how": f"代入复算：{name}({_fmt(x)})={_fmt(got)}"
                                 + ("（与断言一致）" if ok else f"，断言写的是 {_fmt(v)}")})
+    return rows
+
+
+#: F9（作者读转录后定的新口径）：**q 不许当 P 用** ——「2.89 是产量，不是价格」。
+_QV_MIN = re.compile(r"最低|最小|极大|极小|停产|停业|关门")
+_QV_ARG = re.compile(r"[qQ]\s*(?:[=≈]|\\approx\s*)\s*(?P<x>\d+(?:\.\d+)?)")
+_QV_PRICE = re.compile(
+    r"(?:停产|停业|关门)[^。；\n]{0,12}?价[^。；\n]{0,10}?(?:约\s*为?|为|是|＝|=|≈|\\approx\s*)\s*\$?(?P<p>\d+(?:\.\d+)?)"
+    r"|(?:^|[；;。：:\s])P\s*(?:约\s*为?|为|是|＝|=|≈|\\approx\s*)\s*\$?(?P<p2>\d+(?:\.\d+)?)")
+
+
+def _qvsp_rows(unit_texts: list, fdefs_by_text: list) -> list:
+    """F9：极小值/停产价格题里「q 当 P」的两条守卫（整单元一起看）。
+
+    ① 代入值 ≈ 代入点（`AC(2.89)≈2.89`），而这一节没有函数能复算 → mismatch；
+    ② 写着最低/停产价格、却没有函数、还端着一个算好的价格数 → mismatch
+       （⬜「没有给出函数，无法复算极值」那条的升级：要么给函数，要么只留片段）；
+       有函数时：价格数 ≈ 驻点值 且函数复算对不上 → mismatch（P 必须拿 AC(q*) 算）。
+    """
+    blob = " ".join(str(x or "") for x in unit_texts)
+    if not blob or not _QV_MIN.search(blob):
+        return []
+    xs = [float(m.group("x")) for m in _QV_ARG.finditer(blob)]
+    rows: list = []
+    # ① 代入值 ≈ 代入点
+    for t, fd in zip(unit_texts, fdefs_by_text or [{}] * len(unit_texts)):
+        for cl in _CLAUSE.split(str(t or "")):
+            for m in _SUBST.finditer(cl.strip()):
+                name = next((n for n in (fd or {}) if n.lower() == m.group("name").lower()), None)
+                x, v = float(m.group("c")), float(m.group("v"))
+                if name is None and abs(v - x) <= 0.02 * max(1.0, abs(x)):
+                    rows.append({"claim": str(t), "status": "mismatch",
+                                 "recomputed": f"{m.group('name')}({_fmt(x)})：答案值≈取点",
+                                 "how": f"答案值 {_fmt(v)} 恰好等于代入点 {_fmt(x)}，而这里"
+                                        "没有能复算的函数 —— 像是把产量 q 当成了价格 P"
+                                        "（F9：给出函数，或只留片段）"})
+    # ② 价格/答案那一档
+    name, fn = None, None
+    for fd in (fdefs_by_text or []):
+        name = _pick(fd or {}, blob)
+        if name:
+            fn = (fd or {})[name][2]
+            break
+    for t in unit_texts:
+        for m in _QV_PRICE.finditer(str(t or "")):
+            p = m.group("p") or m.group("p2")
+            if not p:
+                continue
+            pv = float(p)
+            if name is None:
+                rows.append({"claim": str(t), "status": "mismatch",
+                             "recomputed": f"价格/答案 {_fmt(pv)}",
+                             "how": "这一节写着最低/停产价格，却没有给出函数（无法复算）—— "
+                                    "没有函数的例子不许端着一个算好的数"
+                                    "（F9：给出函数，或只留片段）"})
+                continue
+            if not any(abs(pv - x) <= 0.02 * max(1.0, abs(x)) for x in xs):
+                continue
+            try:
+                verified = any(abs(fn(x) - pv) <= 0.02 * max(1.0, abs(pv)) for x in xs)
+            except Exception:                                 # noqa: BLE001
+                verified = False
+            if not verified:
+                rows.append({"claim": str(t), "status": "mismatch",
+                             "recomputed": f"价格/答案 {_fmt(pv)} ≈ 驻点值",
+                             "how": f"答案值 {_fmt(pv)} 与驻点值相同，而 {name} 在驻点算出来的"
+                                    "不是这个数 —— P 必须拿 AC(q*) 算（F9：q 不是 P）"})
     return rows
 
 

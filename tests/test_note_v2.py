@@ -329,14 +329,15 @@ class ExerciseRepair(unittest.TestCase):
         self.assertTrue(any("已撤" in w for w in warns), warns)
 
     def test_模型核的旗子也触发(self):
-        """机械核碰到 `\\frac` 函数会瞎（F7 实测）——降级前的模型核行必须能叫醒返修。"""
+        """机械核看不到的错（LLM 标记）也必须能叫醒返修 —— F8 时 `\\frac` 函数是这种；
+        F9 换一个机械核更看不见的形态（没有函数、没有可复算的等式，只有 LLM 核出的错）。"""
         unit = {"heading": "[13:16] 停产价格", "ts": "13:16", "q": "题？",
                 "prose": ["随便一句。"],
                 "example": {"title": "🎙 13:16", "prompt": "求停产价格。",
-                            "steps": [{"text": "$AC(2.89)\\approx2.89$。", "why": ""}],
+                            "steps": [{"text": "把 2.89 代进去。", "why": ""}],
                             "answer": "2.89"}}
-        flags = [{"claim": "$AC(2.89)\\approx2.89$。", "status": "mismatch",
-                  "how": "该值约233，非2.89", "recomputed": "$AC(2.89)\\approx233$"}]
+        flags = [{"claim": "把 2.89 代进去。", "status": "mismatch",
+                  "how": "代入后约233，非2.89", "recomputed": "233"}]
         calls = []
 
         def chat(s, u, m):
@@ -408,6 +409,28 @@ class Overview(unittest.TestCase):
         def boom(s, u, mt):
             raise RuntimeError("网络炸了")
         self.assertEqual(nv.overview(self._rev(), chat=boom), {})
+
+    def test_空回复重试一次(self):
+        """F9（作者点名）：首次空/截断 → **重试一次**；ECS 丢速览的补丁。"""
+        calls = []
+
+        def cm(s, u, mt):
+            calls.append(1)
+            if len(calls) == 1:
+                return {"self_check": "只自己评了一句"}, "stop", 12
+            return {"summary": ["第二次拿到了。"]}, "stop", 40
+        got = nv.overview(self._rev(), chat=None, chat_meta=cm)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(got["summary"], ["第二次拿到了。"])
+
+    def test_截断也重试_两次都败才认输(self):
+        calls = []
+
+        def cm(s, u, mt):
+            calls.append(1)
+            return {}, "length", 3500
+        self.assertEqual(nv.overview(self._rev(), chat=None, chat_meta=cm), {})
+        self.assertEqual(len(calls), 2, "重试正好一次")
 
 
 class ConceptUnits(unittest.TestCase):
@@ -685,6 +708,24 @@ class AnnounceTerms(unittest.TestCase):
         got = nv.announce_terms_in_review(rev, canon=[["shutdown price", "停产价"]])
         self.assertIn("停产价格（shutdown price）", got["cover"]["rows"][0]["title"],
                       got["cover"]["rows"][0]["title"])
+
+    def test_缩写括注并入(self):
+        """F9（作者点名）：`平均成本（AC）` → `（average cost, AC）`，不叠第二个括注。"""
+        terms, seen = [("平均成本", "average cost")], set()
+        self.assertEqual(nv.announce_terms("均值上平均成本（AC）更低。", terms, seen),
+                         "均值上平均成本（average cost, AC）更低。")
+
+    def test_已有同词英文括注不叠(self):
+        """F9：`（Shutting Down Price）` 与词条英文只差大小写 → 原样（不许出现两个括注）。"""
+        terms, seen = [("停产价格", "shutting down price")], set()
+        t = "停产价格（Shutting Down Price）由最低点决定。"
+        self.assertEqual(nv.announce_terms(t, terms, seen), t)
+
+    def test_别的括注也不叠(self):
+        """F9：已有别的写法（整句英文）→ 不加第二个（标注宁缺勿叠）。"""
+        t = "边际成本（average / marginal cost）的怪写法。"
+        terms, seen = [("边际成本", "marginal cost")], set()
+        self.assertEqual(nv.announce_terms(t, terms, seen), t)
 
     def test_没术语就原样(self):
         rev = {"sections": [{"prose": ["随便说点什么。"]}]}

@@ -151,6 +151,18 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _norm_ctx(s: str) -> str:
+    """比对归一化（**保留 CJK**）：NFKC → 小写 → 去标点 → 收空格（F9，annotate 两把钥匙之一）。
+
+    `_norm` 会把整段中文剥成空串（`课上报的 20` → `20`）—— 短数字 claim 拿 `20`
+    当钥匙会挂到任何含 20 的字段上（实测：挂进了 `q^2-8q+20` 的补全题）。
+    """
+    s = unicodedata.normalize("NFKC", str(s or "")).lower()
+    s = s.replace("’", "'").replace("“", '"').replace("”", '"')
+    s = re.sub(r"[^\u4e00-\u9fff0-9a-z'\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def _sentences(text: str) -> list:
     """粗切句（本仓库的笔记是短句 + 折叠块，够用；切不动的长句会整句保留）。"""
     return [x for x in re.split(r"(?<=[。！？!?])\s*|\n+", str(text or "")) if x.strip()]
@@ -523,27 +535,39 @@ def annotate_mismatches(review: dict) -> tuple:
         # ⚠️ 前缀长度取在**原串**上再归一化：`_norm` 把 CJK 全剥掉，先归一化再截 60 字
         #    ≈ 原串 250 字 —— 去重/清时间戳正好动在那一段，这句话在去重后就找不回来了
         #    （2026-10-18 实测：真实产线顺序 dedupe → annotate 全灭）。渐进缩短兜底。
-        prefixes = [p for p in (_norm(raw[:n]) for n in (90, 64, 40, 24)) if p]
+        # ⭐ F9（作者点名）：短数字 claim（`课上报的 20`）不许乱挂 —— 两把钥匙：
+        #    ① 带 CJK 上下文的前缀（保留中文；先试，最长者赢）；
+        #    ② 旧的剥-CJK 前缀只当**兜底**，且要够长、含字母（`20` 这种纯数字不许当钥匙）。
+        ctx = [p for p in (_norm_ctx(raw[:n]) for n in (90, 64, 40, 24)) if len(p) >= 6]
+        keys = [p for p in (_norm(raw[:n]) for n in (90, 64, 40, 24))
+                if len(p) >= 8 and any(c.isalpha() for c in p)]
         # ⚠️ marker 里的 `how` 先把全角括号换成半角：剥 marker 的正则靠"第一个 `）` 收口"，
         #    括号留在 how 里会把标注切成残渣（幂等判断与 claim 比对都靠它）。
         how = str(row.get("how") or "").strip().rstrip("。；;，,")
         how = how.replace("（", "(").replace("）", ")")
-        if not prefixes or not how:
+        if (not ctx and not keys) or not how:
             continue
         best = None                     # (前缀长度, section 下标, path) —— 更长的主人更可信
-        for si, s in enumerate(out.get("sections") or []):
-            if not isinstance(s, dict):
+        for mode in ("ctx", "keys"):
+            pool = ctx if mode == "ctx" else keys
+            if not pool:
                 continue
-            for path in paths_of(s):
-                if not path or _field_name(path) not in _MARK_FIELDS:
+            for si, s in enumerate(out.get("sections") or []):
+                if not isinstance(s, dict):
                     continue
-                v = _get(s, path)
-                if not isinstance(v, str) or not v:
-                    continue
-                bare = _norm(re.sub(r"（⚠ 核算对不上：[^）]*）", "", v))
-                hits = [len(p) for p in prefixes if p in bare]
-                if hits and (best is None or max(hits) > best[0]):
-                    best = (max(hits), si, path)
+                for path in paths_of(s):
+                    if not path or _field_name(path) not in _MARK_FIELDS:
+                        continue
+                    v = _get(s, path)
+                    if not isinstance(v, str) or not v:
+                        continue
+                    clean = re.sub(r"（⚠ 核算对不上：[^）]*）", "", v)
+                    bare = _norm_ctx(clean) if mode == "ctx" else _norm(clean)
+                    hits = [len(p) for p in pool if p in bare]
+                    if hits and (best is None or max(hits) > best[0]):
+                        best = (max(hits), si, path)
+            if best is not None:
+                break
         if best is None:
             continue
         _, si, path = best

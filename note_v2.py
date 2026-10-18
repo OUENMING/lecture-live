@@ -88,14 +88,16 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
 ⚠️ **有把握的语气**：普通陈述**不许**用"可能 / 大概 / 似乎 / 也许 / 应该是 / 大概率"对冲；
 只有**真的核不出的数字或原话**才写一次「⚠ 课上没讲清：…」（一节最多一处）。
 其余情况就笃定地写 —— 你懂这个内容。
-⚠️ **能举例子就举例子**：每个概念配一个**具体例子**；**题面数字必须逐一见于转录/课件**
-（"课上说的"四个字只配得上转录/课件里真有的数字）。
-　✓ 课上的题/数字齐全 → 直接用课上的（标 🎙）动手走一步：求导、解方程、代回。
-　✓ 转录只给了**片段**（如"60 times this plus 500 divided by this point"、只听到"2.89"）→
-　　先写一句「课上这道题的函数没录全」，再给**一个自编例**：以「举个例子（自编）：」开头，
-　　数字干净、从头算到尾（机械核会逐条重算；例题块自编时 `example.title` 写「自编例」）。
+⚠️ **能举例子就举例子**：每个概念配一个**具体例子**；**每个例子带标签**（HTML 与 md 里都看得见）：
+　🎙 **课上**：题面/数字**逐字**来自转录或课件；对不上就不许贴。
+　✏️ **自补**：你自己出的（半截的补全、或全新例子）—— 讲解/例题/变式/补全/自测哪里都能用，
+　　　只要知识正确、数字从头到尾算得对（机械核会逐条重算）。
+　🎙+✏️「按口述还原」：转录只留片段，但**有一个函数能复现每一个片段数字**（含 q* 与 P），
+　　　且能从头验到尾（AC'=0 解出 q*、P=AC(q*)）→ 可以还原，标签写 🎙+✏️「按口述还原」；
+　　　复现不了就**只留片段**：🎙 写「课上算出 q≈2.89，函数没录全」，另配一个 ✏️ 自补例。
+　⛔ **片段数字不许换角色**：2.89 是产量（q*）就不是价格 —— P 必须拿 AC(q*) 现算
+　　（如 `AC(q)=60q+500/q`：q*≈2.89，P=AC(q*)≈346.4，**不是** P≈2.89）。
 　✗ 反面例（只把定义换个说法，不算例子）："若某产量下 AC 最低为 2.89，则停产价格就是 2.89"
-　✗ 反面例（把拼出来的函数说成课上的）："课上已知 $AC(q)=(60q+500)/q$…"——课上没说过这个函数。
 ⚠️ **极值题必须有真的最值点**：求导=0 且二阶条件成立；**不许**用 q→∞ 之类的极限充当最小值
 （无穷远处的趋向值不是最小值）。没有最低点就明说"没有最低点"。
 讲同一个道理的重复例子**只留一个**。
@@ -151,11 +153,13 @@ slides or recording — these notes are their only way to re-learn THIS lecture.
   `example.title` 写「📖 2025-12 期末卷 Exercise 5（🎙 13:29）」。只标 🎙 会让读者以为
   函数是转录里听来的（上课常常只念了片段）—— 判据会把这种例子挂进「未核对」。
   ⚠️ 题面里出现的**每个参数**都要能从出处推出来；答案里的数字都要能由题面算出。
-  **严禁**把自编数字说成课上的（"课上已知…"）—— 自编就写「自编例」（见 §二）；
+  **严禁**把自编数字说成课上的（"课上已知…"）—— 自补就写 ✏️（见 §二）；
   不许在题面里写「假设」来圆场。
   课上只给了片段（如「the average cost at 2.89」「60 times this plus 500 divided by
-  this point」）→ 明确说「原题不在本课材料里 / 课上函数没录全」，在 `checks` 里标
-  `unchecked`；**不要反推函数**；要给例子就按 §二 给一个**自编例**（标「自编例」）。
+  this point」）→ 按 §二：能**完整复现**（一个函数对得上每个片段数字、AC'=0 到 P=AC(q*)
+  都能验）就标 🎙+✏️「按口述还原」；复现不了就把片段标 🎙（「函数没录全」）另配 ✏️ 自补例。
+  **不许把片段数字当另一个量用**（2.89 是 q*，不许写成 P≈2.89）；没有函数的例子
+  **不许给算出来的答案**（机械核核不了它，直接标 `unchecked` 也救不了 —— 宁缺毋滥）。
 - 凡「在 q*=… 处取最小/最大」「代入得 v」的结论：写出是**哪个函数**、并把导数检验
   写出来（`AC'=0` 且 `AC''>0`）。没有函数就不许下极值结论。
 - **停产价格（shutting down price）的口径**：本课官方材料（📖 2025-12 期末卷 Exercise 7
@@ -572,39 +576,62 @@ def overview(review_data: dict, *, chat, chat_meta=None,
             + f"\n\n现在写「速览」：3–6 句连贯的话说清这节课讲了哪几件事、怎么连起来；"
               f"**总字数不超过 {int(max_chars)} 字**（上限，宁短勿长）；不要公式、不要例子、"
               "数字最多一个；严格输出 JSON（summary / self_check）。")
-    try:
-        if chat_meta is not None:
-            obj, finish = chat_meta(OVERVIEW_SYS, user, max_tokens)
-            if str(finish or "").lower() == "length":
-                return {}          # 截断 = 失败（宁可没有，不许印半截）
-        else:
-            obj = chat(OVERVIEW_SYS, user, max_tokens)
-    except Exception:                                          # noqa: BLE001
-        return {}
-    if not isinstance(obj, dict):
-        return {}
-    out: dict = {}
-    paras = _lines(obj.get("summary") or obj.get("paragraphs") or obj.get("overview_long"))
-    if paras:
-        out["summary"] = paras
-    sc = _one_line(obj.get("self_check"))
-    if sc:
-        out["self_check"] = sc
-    return out
+    def _one() -> tuple:
+        """一次尝试 → `(obj, finish, 返回长度)`；炸了也当空（fail-soft 不变）。"""
+        try:
+            if chat_meta is not None:
+                res = chat_meta(OVERVIEW_SYS, user, max_tokens)
+                obj0, finish0 = res[0], str(res[1] or "")
+                n0 = res[2] if len(res) > 2 else None
+            else:
+                obj0 = chat(OVERVIEW_SYS, user, max_tokens)
+                finish0, n0 = "", None
+        except Exception:                                      # noqa: BLE001
+            return {}, "", None
+        return (obj0 if isinstance(obj0, dict) else {}), finish0, n0
 
+    def _pick(res0: tuple) -> dict:
+        obj0, finish0, _n0 = res0
+        if str(finish0).lower() == "length":
+            return {}          # 截断 = 失败（宁可没有，不许印半截）
+        out0: dict = {}
+        paras0 = _lines((obj0 or {}).get("summary") or (obj0 or {}).get("paragraphs")
+                        or (obj0 or {}).get("overview_long"))
+        if paras0:
+            out0["summary"] = paras0
+        sc0 = _one_line((obj0 or {}).get("self_check"))
+        if sc0:
+            out0["self_check"] = sc0
+        return out0
+
+    res = _one()
+    got = _pick(res)
+    if not got.get("summary"):
+        # ⭐ F9（作者点名：ECS 丢速览要诊断 + 重试）：空/截断先**重试一次**，
+        #    诊断数字（finish_reason / 返回长度 / max_tokens）打进日志；两次都不行才认输。
+        _obj0, _fin0, _n0 = res
+        print(f"   ⚠ 速览第一次为空（finish={_fin0 or '?'} · "
+              f"len={_n0 if _n0 is not None else '?'} · max_tokens={max_tokens}），重试一次",
+              flush=True)
+        got = _pick(_one())
+    if not got.get("summary"):
+        print("   ⚠ 速览重试后仍为空（诊断见上一行）", flush=True)
+    return got
 
 # ---------------------------------------------------------------- 例题返修（F8-b/c）
 REPAIR_MAX_TOKENS = 3000
-REPAIR_SYS = """你在**返修**一节课堂笔记里"算错了的例题块"。机械核发现了这些问题，必须修对，
+REPAIR_SYS = """你在**返修**一节课堂笔记里"算错了/立不住的例题块"。机械核发现了这些问题，必须修对，
 或者按规矩撤掉/降级 —— 绝不许把错数字留在题里。
 
 规矩：
-1) **题面数字必须逐一来自转录或课件**。转录只给了片段（比如只有"60 times this plus 500
-   divided by this point"和"2.89"这种半截话）→ 就写一句「课上这道题的函数没录全」，
-   不要再把它包装成"课上已知 AC=…"。
-2) 这种情况下给**一个自编例**：以「举个例子（自编）：」开头（例题块同理，`example.title`
-   写「自编例」），挑干净的数字，从头算到尾（机械核会逐条重算）。
-3) 变式/补全题同理：数字可以自定，但答案必须自洽；**极值不能靠 q→∞ 之类的极限论证**
+1) **每个例子带标签**：🎙 课上（逐字来自转录/课件）/ ✏️ 自补（自己出的）。
+   转录只给了片段 → 若**有一个函数能复现每一个片段数字**（q* 与 P 都能验：AC'=0 解出 q*、
+   P=AC(q*)）→ 可以还原，标签写 🎙+✏️「按口述还原」；对不上就**只留片段**：🎙 写
+   「课上算出 q≈2.89，函数没录全」，**另配一个 ✏️ 自补例**（干净数字、从头算到尾）。
+2) ⛔ **片段数字不许换角色**：q 就是 q、P 就是 P —— 2.89 是产量（q*），
+   P 必须拿 AC(q*) 现算（如 AC=60q+500/q：q*≈2.89，P≈346.4，不是 P≈2.89）。
+   没有函数的例子**不许给算出来的答案**。
+3) 变式/补全题：数字可以自定（标 ✏️），但答案必须自洽；**极值不能靠 q→∞ 之类的极限论证**
    （无穷远处的趋向值不是最小值）——要么真有最值点（求导=0 + 二阶条件），要么明说
    该函数没有最低点。
 4) 讲解（prose）里提到这些数字的句子**一起改**，别让正文和题块打架。
@@ -1491,20 +1518,39 @@ def _walk_strings(obj, path: tuple = ()):
             yield from _walk_strings(v, path + (i,))
 
 
+#: 括注里的缩写（`（AC）`）—— 并入成 `（average cost, AC）` 而不是叠第二个括注（F9）。
+_ABBREV = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,5}$")
+
+
 def announce_terms(text: str, terms, seen: set) -> str:
     """术语**首次**出现 → 「中文（English）」；全篇每个术语只括注一次。
 
     HTML 与 md **共用这一份**（作者 2026-10-18：术语必须带英文 —— 渲染层确定性执行，
     不再指望模型每处都写）。`seen` 由调用方跨字段携带；已经括注过的跳过。
+    ⭐ F9（作者点名）：**已经跟着任何括注就不许再叠第二个** ——
+      · 括注就是这个词的英文（大小写不论）→ 原样；
+      · 括注是缩写（`（AC）`）→ 并入成 `（average cost, AC）`；
+      · 别的写法（整句英文等）→ 不加第二个（`标注` 宁缺勿叠）。
     """
     out = str(text or "")
     for zh, en in (terms or ()):
         if (zh, en) in seen or zh not in out:
             continue
-        if f"{zh}（{en}）" in out:
+        i = out.find(zh)
+        m = re.match(r"（([^）]{1,60})）", out[i + len(zh):])
+        if m:
+            inner = m.group(1).strip()
+            if inner.lower() == str(en).lower():
+                seen.add((zh, en))
+                continue
+            if _ABBREV.fullmatch(inner):
+                j0 = i + len(zh) + m.start(1)
+                out = out[:j0] + f"{en}, {inner}" + out[i + len(zh) + m.end(1):]
+                seen.add((zh, en))
+                continue
             seen.add((zh, en))
             continue
-        out = out.replace(zh, f"{zh}（{en}）", 1)
+        out = out[:i] + f"{zh}（{en}）" + out[i + len(zh):]
         seen.add((zh, en))
     return out
 

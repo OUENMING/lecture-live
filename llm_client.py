@@ -62,7 +62,9 @@ def chat_json(key: str, model: str, system: str, user: str, *, max_tokens: int,
                    json=payload, timeout=timeout)
     r.raise_for_status()
     choice = (r.json().get("choices") or [{}])[0]
-    obj = json.loads(choice["message"]["content"])
+    content = choice["message"]["content"]
+    obj = json.loads(content)
     if return_meta:
-        return obj, str(choice.get("finish_reason") or "")
+        # ⭐ F9：带上**返回长度**（chars）—— 速览为空/截断时诊断要有数（finish/len/max_tokens）。
+        return obj, str(choice.get("finish_reason") or ""), len(content)
     return obj

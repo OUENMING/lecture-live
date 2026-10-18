@@ -634,5 +634,71 @@ class TestLimitExtremum(unittest.TestCase):
         self.assertFalse(self._rows(t))
 
 
+#: F9 的 fixture：**作者逐行核对过的转录原话**（`sessions/2026-10-15_131620_ECON10790.md`
+#: L19–L36、L64–L86 —— READ ONLY 抄来，含 ASR 的 "5.3 over 3"（= 口头 "25 over 3"））。
+F9_FRAGMENTS = (
+    "Did someone calculate this value, more or less? It's something close to 3. "
+    "3 point something. 5.3 over 3. Is what? 5.3 over 3. Yeah, but can you get the number? 2.8. "
+    "2.89. 2.89. 2.89. 2.89. The first one. According to the fact, yes. "
+    "The lowest acceptable price, the shutting down price to finish the question, "
+    "So we say, OK, the shutting down price is P equal the average cost at … 2.89. "
+    "So it's the value of your average cost at this quantity. "
+    "and it's therefore 60 times this plus 500 divided by this point."
+)
+
+
+class TestF9_QVSP(unittest.TestCase):
+    """F9（作者读转录后重定口径）：课上的函数是 **AC(q)=60q+500/q**，q*=√(25/3)≈2.89，
+    停产价格 **P=AC(q*)≈346.4** —— 「2.89 是**产量**，不是价格」。
+
+    期望（作者的验收）：要么按口述还原（端到端能验：AC'=0 解出 q*、P=AC(q*)），
+    要么只留片段；**永远不许 P≈2.89**。
+    """
+
+    def _good(self) -> dict:
+        return {"sections": [{"heading": "[13:16] 停产价格", "ts": "13:16",
+            "prose": ["按口述还原：$AC(q)=60q+500/q$ 在 $q\\approx2.89$ 处取最小值。"
+                      "$AC'(q)=60-500/q^2=0$ 得 $q^2=500/60=25/3$；停产价格 $P=AC(2.89)\\approx346.4$。"],
+            "example": {"title": "🎙+✏️ 按口述还原",
+                        "prompt": "已知 $AC(q)=60q+500/q$，求停产价格。",
+                        "steps": [{"text": "$AC'(q)=60-500/q^2=0$ 得 $q^2=25/3$，$q\\approx2.89$。",
+                                   "why": "驻点"},
+                                  {"text": "$AC(2.89)\\approx346.4$。", "why": "代回"}],
+                        "answer": "停产价格约为346.4。"}}]}
+
+    def test_按口述还原_端到端能验(self):
+        rows = nm.check_review(self._good(), transcript=F9_FRAGMENTS)
+        bad = [r for r in rows if r.get("status") == "mismatch"]
+        self.assertEqual([], bad, bad)
+        joined = " ".join(str(r.get("how")) for r in rows)
+        self.assertIn("25/3", joined, "链式分数 500/60=25/3 要有自己的行（不许读成 500/60=25）")
+        self.assertIn("舍入", joined, "q≈2.89 的驻点要按舍入容忍过（±1% 邻域变号）")
+        self.assertIn("346.4", joined, "P=AC(2.89)≈346.4 要真的代入复算过")
+
+    def test_旧写法_q当P_被拦(self):
+        """F8 出货的形态（`AC(2.89)≈2.89`、P≈2.89）—— 必须拦，且落在题块里（走返修）。"""
+        bad_case = {"sections": [{"heading": "[13:16]", "ts": "13:16",
+            "example": {"title": "🎙 13:16（片段）",
+                        "prompt": "已知平均成本函数在q=2.89时达到最小值，且AC(2.89)≈2.89，求停产价格。",
+                        "steps": [{"text": "代入得P≈2.89。", "why": ""}],
+                        "answer": "停产价格约为2.89。"}}]}
+        rows = [r for r in nm.check_review(bad_case) if r.get("status") == "mismatch"]
+        self.assertTrue(rows, "P≈2.89 必须被拦")
+        s = bad_case["sections"][0]
+        self.assertTrue(any(nm.unit_of_claim(s, str(r.get("claim") or "")) in nm.MODEL_AUTHORED
+                            for r in rows), "行列必须落在题块里（走 F8 返修路径）")
+        joined = " ".join(str(r.get("how") or "") for r in rows)
+        self.assertIn("产量", joined)
+
+    def test_只留片段_不误伤(self):
+        frag = {"sections": [{"heading": "[13:16]", "ts": "13:16",
+            "example": {"title": "🎙 13:16（片段）",
+                        "prompt": "课上算出 q≈2.89，函数没录全。",
+                        "steps": [{"text": "老师只给了片段，复算不了。", "why": ""}],
+                        "answer": ""}}]}
+        bad = [r for r in nm.check_review(frag) if r.get("status") == "mismatch"]
+        self.assertEqual([], bad, bad)
+
+
 if __name__ == "__main__":
     unittest.main()

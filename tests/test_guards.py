@@ -537,10 +537,12 @@ class Wiring(unittest.TestCase):
         # F7（作者点名）：卡点 / 题型一句话 / 反引号禁令 / 三档自测
         for key in ("卡点", "题型一句话", "反引号包公式", "tier"):
             self.assertIn(key, note_v2.REVIEW_SYS, f"prompt 缺 F7 规矩：{key}")
-        # F8（作者点名）：自编例要挂牌 / 课上没录全就说明 / 极限不是最值；
-        # 卡点不再给模板句（demo 会泄漏成固定句式）
-        for key in ("举个例子（自编）", "没录全", "极值题必须有真的最值点"):
+        # F8（作者点名）：课上没录全就说明 / 极限不是最值；卡点不再给模板句
+        for key in ("没录全", "极值题必须有真的最值点"):
             self.assertIn(key, note_v2.REVIEW_SYS, f"prompt 缺 F8 规矩：{key}")
+        # F9（作者逐行核转录后重定的口径）：两标签 / 按口述还原 / q 不许当 P
+        for key in ("🎙", "✏️", "按口述还原", "片段数字不许换角色", "不许给算出来的答案"):
+            self.assertIn(key, note_v2.REVIEW_SYS, f"prompt 缺 F9 规矩：{key}")
         self.assertNotIn("这里老师直接从", note_v2.REVIEW_SYS, "卡点 demo 句式不许留")
 
 
@@ -595,6 +597,21 @@ class AnnotateMismatch(unittest.TestCase):
             {"sections": [{"prose": ["完全不相干的一段。"]}],
              "checks": [dict(self.MECH)]})
         self.assertEqual("完全不相干的一段。", out["sections"][0]["prose"][0])
+        self.assertEqual([], warns)
+
+    def test_短数字claim只进台账不挂错地方(self):
+        """F9（作者点名）：`课上报的 20` 这类短/纯数字 claim 不许乱挂 ——
+        旧行为把它挂进了含 `20` 的补全题（q^2-8q+20）；现在周围词对不上 → 台账 only。"""
+        rev = {"sections": [
+                {"heading": "H1", "ts": "13:29",
+                 "faded": {"q": "若AC(q)=q^2-8q+20，求停产价格。"},
+                 "prose": ["把 Q=4 代进去：课上报的是 28 和 20，但 20 与式子对不上。"]},
+                {"heading": "H2", "ts": "13:40", "prose": ["无关的一节。"]}],
+               "checks": [{"claim": "课上报的 20", "status": "mismatch", "how": "应为 12"}]}
+        out, _, warns = ng.annotate_mismatches(rev)
+        self.assertNotIn("核算对不上", str(out["sections"][0]["faded"]))
+        self.assertNotIn("核算对不上", out["sections"][0]["prose"][0])
+        self.assertFalse(out["checks"][0].get("annotated"))
         self.assertEqual([], warns)
 
     def test_真实产线顺序_先去重再标注也找得到(self):

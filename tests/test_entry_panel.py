@@ -1212,6 +1212,31 @@ def _chip_section() -> None:
           _fit("abcdefghij", " ‣", 25.0, _m).endswith(" ‣"),
           repr(_fit("abcdefghij", " ‣", 25.0, _m)))
 
+    # ── D12：换字时**先摆好 frame、再 render_status** ─────────────────────
+    # `render_status` 里那三颗点按**当前** bounds 宽度居中定位，而 CALayer 子层是绝对
+    # 坐标、不跟 frame 挪 —— 顺序反了，点会按旧宽度定位（偏到文字中间 / 甩出右沿）。
+    try:
+        from AppKit import NSButton, NSFont, NSMakeRect
+        import motion as _motion12
+        _btn12 = NSButton.alloc().initWithFrame_(NSMakeRect(5.0, 0.0, 50.0, E.CHIP_H))
+        _btn12.setFont_(NSFont.systemFontOfSize_(11.0))
+        _seen12: list = []
+        _real_rs = _motion12.render_status
+        _motion12.render_status = \
+            lambda v, t, **k: _seen12.append(float(v.frame().size.width))
+        try:
+            E.chip_apply(_btn12, "◌  语音模型  下载中…", running=True, max_w=400.0)
+        finally:
+            _motion12.render_status = _real_rs
+        _final12 = float(_btn12.frame().size.width)
+        # 变异验证：把 `chip_apply` 里 setFrame_ 与 render_status 调换顺序 -> 这条红
+        #    （render_status 看到旧宽 50，最终宽 ~150）。
+        check("⭐⭐ D12 换字：**先摆好新宽度**再渲染（否则点按旧宽度定位、甩偏）",
+              len(_seen12) == 1 and _seen12[0] == _final12 and _final12 > 60.0,
+              f"seen={_seen12} final={_final12:.1f}")
+    except Exception as e:                                        # noqa: BLE001
+        check("⭐⭐ D12 chip_apply 判据", False, f"{type(e).__name__}: {e}")
+
     try:
         import tempfile
 

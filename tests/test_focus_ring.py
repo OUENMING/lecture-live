@@ -346,6 +346,23 @@ class 课程面板(unittest.TestCase):
             E.close_panel()
             td.cleanup()
 
+    def test_关面板要清掉守卫攥着的那几个输入框(self):
+        """⭐⭐ C7（2026-10-18 审查）：`_GUARD["focus"]` 攥的是**视图对象**（含 layer 与
+        FocusBorder 句柄）—— 关面板必须清回 `()`，否则最后一组输入框被**模块级**状态
+        强引用到下次面板打开（`_GUARD` 自己的不变量是"只吃纯数据"）。"""
+        E, h, td = self._build()
+        try:
+            self.assertTrue(E._GUARD.get("focus"),
+                            "build 之后守卫没攥住输入框 —— 判据会空转")
+            h.close()                         # ⚠️ `close_panel()` 读的是 `S["panel"]`，
+            #                                    这个 `_build` 没走那条路 —— 用句柄直关
+            # 变异验证：把 `do_close` 里那句 `_GUARD["focus"] = ()` 删掉 -> 这条红。
+            self.assertEqual(tuple(E._GUARD.get("focus") or ()), (),
+                             f"关面板后守卫还攥着 {E._GUARD.get('focus')!r}")
+        finally:
+            E.close_panel()
+            td.cleanup()
+
 
 # ══════════════════════════════════════════════════════════════════════
 # 四、生命周期（句柄不许成环）

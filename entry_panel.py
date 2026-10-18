@@ -157,6 +157,24 @@ CHIP_MIN_W = 56.0      # 再怎么裁也不许比它窄（再窄就只剩「… 
 CHIP_TAIL = "  ▾"
 
 
+def chip_apply(btn, title: str, *, running: bool, max_w: float) -> None:
+    """把已经裁好的 `title` 写上胶囊、并按文字宽摆好它的 frame。
+
+    ⚠️⚠️ **先摆好 frame、再 `motion.render_status`**（2026-10-18 审查 D12）：
+       `render_status` 里那三颗点按**当前** bounds 宽度居中定位（`motion._dots_at`
+       用 `view.bounds().size.width`），而 CALayer 子层是**绝对坐标**、不会跟着 frame 挪 ——
+       先渲染后改宽，点会按**旧宽度**定位（偏到文字中间或甩出右沿外），而且要一直留到
+       下一次换字。所以顺序不能反。
+    ⚠️ 宽度只用 `status_width`（文字 + 点占位）算，**不依赖旧 frame**，所以可以先算。
+    """
+    from AppKit import NSMakeRect
+    f = btn.frame()
+    w = min(motion.status_width(title, btn.font(), running=running) + 2 * CHIP_PAD,
+            max_w)
+    btn.setFrame_(NSMakeRect(f.origin.x, f.origin.y, max(w, CHIP_MIN_W), CHIP_H))
+    motion.render_status(btn, title, running=running)
+
+
 def ready_item_bad(it: dict) -> bool:
     """这一项算不算「要处理」。**纯函数**。
 
@@ -2311,12 +2329,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _body = title[:len(title) - len(tail)] if tail else title
         _running = _raw_running and _body == text
         # ⭐ 换字走 `motion.render_status`：交叉淡换 + 还在跑时挂点（点由渲染层管）。
-        motion.render_status(btn, title, running=_running)
-        f = btn.frame()
-        w = min(motion.status_width(title, btn.font(), running=_running) + 2 * CHIP_PAD,
-                chip["max_w"])
-        btn.setFrame_(NSMakeRect(f.origin.x, f.origin.y,
-                                 max(w, CHIP_MIN_W), CHIP_H))
+        #    ⚠️ 摆 width / setFrame_ / render_status 三者的**顺序**在 `chip_apply` 里，
+        #       别在这里拆开（D12：先渲染后改宽 = 三颗点按旧宽度定位）。
+        chip_apply(btn, title, running=_running, max_w=chip["max_w"])
 
     def _set_item(key: str, it: dict) -> None:
         """换掉某一项的状态并重画胶囊（主线程）。**改的是 `ready_by_key` 那份**。"""
@@ -4324,8 +4339,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             win._entry_targets = []          # 断关闭按钮那条
             status_holder["label"] = None    # 断 `set_status` → 标签 → `ve` 那条
             # ⭐ 断焦点守卫那条（可能还有一拍在排队）：清窗口 + 换代号，双保险。
+            # ⚠️⚠️ **`focus` 也要清**（2026-10-18 审查 C7）：它是**视图对象**的元组
+            #     （含 layer / FocusBorder 句柄），`_GUARD` 自己的不变量是"只吃纯数据"。
+            #     不清的话，面板关掉后最后一组输入框及其图层仍被模块级状态强引用，
+            #     直到下一次 `_guard_start` 才被替换 —— 又是一条跨面板的环。
             _GUARD["win"] = None
             _GUARD["gen"] = _GUARD.get("gen", 0) + 1
+            _GUARD["focus"] = ()
             # ⚠️ 落点条（批量入口）也要断 —— 它的 `_targets` 里那个 target 的
             #    `_fn` 是 `run_batch` → `_later(refresh)` → 闭包持有 `title_lbl`/`doc`
             #    → `ve` → `win`。与卡片那条**同一条环**，只是入口不同。
@@ -4726,7 +4746,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 #:     ⚠️ 没有它，上一代那条排队的 `callLater` 醒来会看见**新**窗口还可见 → 继续续期
 #:     → 每开关一次面板就多一条永不退出的 2 Hz 链子（2026-10-12 审查指出）。
 #:   · `waits` —— "窗口还不可见"已经等了几拍（`_GUARD_MAX_WAITS` 封顶）。
-_GUARD: dict = {"win": None, "gen": 0, "waits": 0}
+#:   · `focus` —— 要兜底同步聚焦框的那几个输入框。⚠️ **唯一不是纯数据的**（视图对象）——
+#:     所以 `do_close()` **必须把它清回 `()`**（2026-10-18 审查 C7），否则面板关掉后
+#:     最后一组输入框被模块级状态强引用到下次 `_guard_start`。
+_GUARD: dict = {"win": None, "gen": 0, "waits": 0, "focus": ()}
 
 #: 「还没上屏」最多等几拍（0.5 s/拍）。⚠️ 兜底用：窗口要是始终没上屏（构建成功但被丢弃 /
 #: 被系统藏起来），守卫也不会变成**无界轮询**。10 拍 = 5 s，远大于上屏所需。

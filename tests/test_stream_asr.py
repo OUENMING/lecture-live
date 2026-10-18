@@ -591,6 +591,38 @@ def t_transport_reconnect_once() -> None:
         wk.close()
 
 
+def t_transport_reconnect_after_sealing_keeps_sealing() -> None:
+    """重连**之前已经封过句**：新连接的 token 时间从 0 起，必须接着封口。
+
+    2026-10-18 合并检查抓到：水位线停在旧连接的时间上，新连接的词全被当旧词丢掉
+    → 整节课不再出字幕，`alive()` 却一直是真（本地也不接手）。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    got: "queue.Queue[Sealed]" = queue.Queue()
+    s = make_asr(wk, son, on_sealed=got.put)
+    try:
+        assert wait_until(s.alive)
+        s.feed(silence(SR))                                   # 流里 0–1 s
+        assert wait_until(lambda: son.connections and son.connections[0]["audio"] >= SR)
+        son.to_send.put({"tokens": [tok("First", 0, 400, True), tok(".", 400, 500, True)]})
+        assert wait_until(lambda: not got.empty()), "第一条连接该封出一句"
+        first = got.get_nowait()
+        son.to_send.put(("close", 1011, "boom"))
+        assert wait_until(lambda: len(son.connections) >= 2 and s.alive()), "该重连"
+        s.feed(silence(SR))                                   # 流里 1–2 s，走新连接
+        assert wait_until(lambda: son.connections[1]["audio"] > 0)
+        son.to_send.put({"tokens": [tok("Again", 0, 100, True), tok(".", 100, 150, True)]})
+        assert wait_until(lambda: not got.empty()), "重连后新词被当成旧词丢了（水位线没对齐）"
+        again = got.get_nowait()
+        assert again.text == "Again.", again
+        assert again.start_s >= first.end_s, f"新连接的时间该接在旧的后面：{first} → {again}"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
 def t_transport_reconnect_fails_fallback() -> None:
     son = FakeSoniox()
     wk = FakeWorker(son.url)
@@ -818,6 +850,7 @@ def main() -> int:
         ("transport: 致命错误不重连", t_transport_fatal_error_no_retry),
         ("transport: 余额耗尽 → 不重连直接退回", t_transport_balance_exhausted_falls_back_now),
         ("transport: 断线重连一次", t_transport_reconnect_once),
+        ("transport: 封过句之后重连还能接着封", t_transport_reconnect_after_sealing_keeps_sealing),
         ("transport: 重连也失败 → 退回", t_transport_reconnect_fails_fallback),
         ("transport: 领 key 429 → 本地", t_transport_key_429_is_local),
         ("transport: 没通行码 → 本地", t_transport_no_passcode),

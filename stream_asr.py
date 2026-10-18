@@ -609,7 +609,13 @@ class StreamASR:
         self._core = StreamCore(clock=clock, stable_s=stable_s)
         #: ⚠️ **真的有界**（`maxsize`）：满了 `put_nowait` 抛 `Full` → 丢最旧。
         #    手写「先看 qsize 再 put」不是判据（多线程下照涨），真踩过：队列永远不满、从不丢。
-        self._audio: "queue.Queue[bytes]" = queue.Queue(maxsize=self._max_chunks)
+        #: 元素 = `(这块第一个样本在本流里的位置, pcm)`：重连后要知道新会话的 0 ms 对应流里哪一刻。
+        self._audio: "queue.Queue[tuple[int, bytes]]" = queue.Queue(maxsize=self._max_chunks)
+        #: 本次会话的时间偏移（毫秒）：Soniox 每条连接的 token 时间都从 0 起，
+        #: 加上「这条连接发出的第一块音频在流里的位置」才是流时间。`None` = 这条连接还没发过音频。
+        #: ⚠️ 不加的话重连后新 token 全落在水位线之前被当旧词丢掉 → 整节课不再封口、
+        #:    `alive()` 却还是真（本地也不接手）—— 2026-10-18 合并检查抓到。
+        self._sess_off_ms: int | None = None
         self._events: "queue.Queue[tuple]" = queue.Queue()
         self._dropped = 0
         self._samples = 0                           # 采到的样本总数（含丢掉的）
@@ -676,15 +682,17 @@ class StreamASR:
                 return
             pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
             with self._lock:
+                start = self._samples
                 self._samples += n
                 if self._audio_t0 is None:
                     self._audio_t0 = self._clock()   # ⭐ 3.10：封口延迟的零点（只写一次）
+            item = (start, pcm)
             try:
-                self._audio.put_nowait(pcm)
+                self._audio.put_nowait(item)
             except queue.Full:
                 try:
                     self._audio.get_nowait()
-                    self._audio.put_nowait(pcm)
+                    self._audio.put_nowait(item)
                 except queue.Empty:
                     pass
                 with self._lock:
@@ -797,6 +805,7 @@ class StreamASR:
         #    不清的话重连后的第一个循环就把新连接判死（真踩过：重连明明成功却立刻退回）。
         with self._lock:
             self._pending = ""                      # 上次的死因作废
+            self._sess_off_ms = None                # 新连接的 0 ms 等第一块音频定
             while True:
                 try:
                     self._events.get_nowait()
@@ -871,7 +880,7 @@ class StreamASR:
             if dead:                                # 收线程死了
                 return "disconnected"
             try:
-                pcm = self._audio.get(timeout=0.2)
+                start, pcm = self._audio.get(timeout=0.2)
             except queue.Empty:
                 now = time.monotonic()
                 if now - last_audio > self._keepalive_s and now - last_send > self._keepalive_s:
@@ -882,6 +891,8 @@ class StreamASR:
                     last_send = now
                 continue
             last_audio = time.monotonic()
+            if self._sess_off_ms is None:           # 只有本线程写；收线程不碰
+                self._sess_off_ms = start * 1000 // SR
             try:
                 buf = np.frombuffer(pcm, dtype="<i2")
                 if carry.size:
@@ -916,8 +927,16 @@ class StreamASR:
                 if classify_error(payload) == "fatal":
                     fatal = True
             elif kind == "msg":
+                fin, nf = payload
+                off = self._sess_off_ms
+                if off is None:                     # 没发过音频就来了词（只有假服务会）：按当前流位置
+                    with self._lock:
+                        off = self._samples * 1000 // SR
+                if off:
+                    fin = [t._replace(start_ms=t.start_ms + off, end_ms=t.end_ms + off) for t in fin]
+                    nf = [t._replace(start_ms=t.start_ms + off, end_ms=t.end_ms + off) for t in nf]
                 with self._lock:
-                    self._core.feed(payload[0], payload[1])
+                    self._core.feed(fin, nf)
                     sealed = self._core.take_sentences()
                 for s in sealed:
                     self._fire(s)

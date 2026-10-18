@@ -48,11 +48,40 @@ class Content(unittest.TestCase):
         self.assertLess(w, tour.WIDTH - 2 * tour.PAD)
 
     def test_stats_percent_matches_before_after(self):
-        # 百分比必须能从「旧 → 新」那一栏算回来（防止只改了一边）
+        # 百分比必须能从「旧 → 新」那一栏算回来（防止只改了一边）。
+        # ⚠️ 3.10：只有 %-格能这么验 —— 「0.9 秒」「省电」那两格不是百分比（前者是一句实测、
+        #    后者是估算），它们不该带「旧 → 新」那一栏。
         import re
         for big, lab, sub in tour.STATS:
+            if not big.endswith("%"):
+                self.assertNotIn("→", sub, f"{lab}: 非百分比格不该有「旧 → 新」")
+                continue
             a, b = [float(x) for x in re.findall(r"[\d.]+", sub)[-2:]]
             self.assertAlmostEqual(round((a - b) / a * 100), int(big.rstrip("%")), delta=1, msg=f"{lab}: {sub}")
+
+    def test_quoted_labels_exist_in_the_app(self):
+        # tour.py 文件头规矩：**文案里提到的每个按钮 / 符号都要在界面上真的存在**（别照抄 README）。
+        # 这里把文案里「…」的标签抠出来逐个到 app 源码里找 —— 找不到就是编了 UI。
+        # ⚠️ 变异验证：把某条文案里的「课前回顾」改成「上节课回顾」-> 这条红。
+        import pathlib
+        import re
+        root = pathlib.Path(__file__).resolve().parent.parent
+        src = ""
+        for f in sorted(root.glob("*.py")):
+            if f.name == "tour.py":          # 文案自己不算「界面上存在」
+                continue
+            src += f.read_text(encoding="utf-8", errors="replace")
+        labels = set()
+        for _, _t, lines in tour.PAGES:
+            if tour.is_stats(lines):
+                continue
+            labels.update(re.findall(r"「([^」]+)」", " ".join(lines)))
+        self.assertTrue(labels, "文案里一个「」标签都没有？")
+        for lb in sorted(labels):
+            self.assertIn(lb, src, f"「{lb}」在 app 源码里找不到 —— 别编 UI")
+        # 没打引号、但同样是「界面上该有的东西」：顶栏三档模式的逐字名（`overlay.TRANS_MODE_TITLE`）。
+        for m in ("双语", "只英·校", "纯转录"):
+            self.assertIn(m, src, f"模式名「{m}」在 app 源码里找不到")
 
     def test_no_colour_emoji_and_no_removed_buttons(self):
         txt = "".join(t + "".join("".join(x) if not isinstance(x, str) else x for x in ls)

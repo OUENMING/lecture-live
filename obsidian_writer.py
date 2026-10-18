@@ -284,20 +284,21 @@ def _one_line(v) -> str:
 
 
 def _term_pairs_norm(extra, sel) -> list:
-    """术语表最终行的 `(en, zh)` 对（**与 `render_table` 同序同去重**：本课词在前）。
+    """术语表最终行的 `(en, zh)` 对 —— **与 `render_table` 同源**（`note_terms.final_rows`）。
 
     ⭐ F7-e：渲染层拿它当**标准拼写**的查表 —— 转录里听成 `shutting down price`、
        术语表里是 `shutdown price` 时，正文括注必须跟术语表（作者点名）。
+    ⚠️ DB 审查 D-7：顺序必须跟 `render_table` 的**同 gloss 合并规则**一致（术语库行优先）
+       —— 旧实现把 `extra` 排在 `sel.hits` 前面，而 `note_v2.announce_terms_in_review`
+       的 `canon_map.setdefault(zh, en)` 先到先得 → 正文括注用了 `extra` 的拼写、表格却
+       显示术语库那一行（页面上两种拼写，正是 F7-e/F8-e 要消除的）。
     """
+    import note_terms
     out: list = []
-    seen: set = set()
-    for h in list(extra or []) + list(getattr(sel, "hits", None) or []):
+    for h in note_terms.final_rows(sel, extra=extra):
         en = _one_line(getattr(h, "term", ""))
         zh = _one_line(getattr(h, "gloss", ""))
-        if not en or en.lower() in seen:
-            continue
-        seen.add(en.lower())
-        if zh:
+        if en and zh:
             out.append([en, zh])
     return out
 
@@ -889,14 +890,21 @@ class ObsidianWriter:
         return bool(idx is not None and idx.verify(term))
 
     def _course_terms_lower(self) -> set:
-        """本课术语表的小写词集合（记忆化 —— 渲染层每句都问一遍）。"""
+        """本课术语表的小写词集合（记忆化 —— 渲染层每句都问一遍）。
+
+        ⚠️ DB 审查 D-6：**必须 `limit=None`**（全表）。默认 `TERM_LOAD_LIMIT=60` 是
+            「每句注入 prompt」那条路的上限，用在这里会把第 60 条之后的词判成"核对不通过"
+            而从笔记术语表里丢掉 —— 与同文件的 `_in_term_store`（`limit=None`）和
+            `note_terms` 模块头「本课术语表里的词一定留」自相矛盾。
+        """
         cached = getattr(self, "_course_terms_cache", None)
         if cached is not None:
             return cached
         try:
             from translator import course_term_list
             got = {t.strip().lower() for t in
-                   course_term_list(self._glossary_path, self._course) if t.strip()}
+                   course_term_list(self._glossary_path, self._course,
+                                    limit=None) if t.strip()}
         except Exception:                                     # noqa: BLE001
             got = set()
         self._course_terms_cache = got

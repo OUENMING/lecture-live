@@ -380,6 +380,46 @@ class 泛词过滤_F8f(unittest.TestCase):
         self.assertIn("shutdown price", text)
         self.assertNotIn("shutting down price", text)
 
+    def test_标准拼写与表格同一行(self):
+        """⭐ DB 审查 D-7：`canon`（正文括注的标准拼写）必须与 `render_table` 显示的那一行一致
+        —— 旧实现把 `extra`（转录拼写）排在前面，`canon_map.setdefault` 先到先得 → 页面上
+        两种拼写（表格 `shutdown price`、括注 `shutting down price`）。"""
+        import note_v2 as nv
+        import obsidian_writer as ow
+        sel = nt.Selection(hits=[nt.Hit(term="shutdown price", gloss="停产价", ts="13:25")],
+                           dropped=[])
+        extra = [nt.Hit(term="shutting down price", gloss="停产价", ts="13:17")]
+        table = " / ".join(nt.render_table(sel, extra=extra))
+        self.assertIn("shutdown price", table)
+        pairs = ow._term_pairs_norm(extra, sel)
+        rev = {"sections": [{"prose": ["先看停产价格怎么定。"],
+                             "terms": [{"en": "shutting down price", "zh": "停产价"}]}]}
+        got = nv.announce_terms_in_review(rev, canon=pairs)
+        prose = got["sections"][0]["prose"][0]
+        self.assertIn("（shutdown price）", prose, prose)
+        self.assertNotIn("shutting down price", prose, prose)
+
+    def test_本课术语表全表参与核对(self):
+        """⭐ DB 审查 D-6：术语表 > `TERM_LOAD_LIMIT` 条时，第 60 条之后的词也要能核对通过
+        —— 那个上限是"每句注入 prompt"的量，不是"是不是本课术语"的判据。"""
+        import translator
+        d = tempfile.TemporaryDirectory()
+        try:
+            base = pathlib.Path(d.name)
+            (base / "glossary").mkdir(parents=True, exist_ok=True)
+            (base / "glossary.txt").write_text("# 公共\n", encoding="utf-8")
+            words = [f"zeta term {i:03d}" for i in range(translator.TERM_LOAD_LIMIT + 15)]
+            (base / "glossary" / "TESTX.txt").write_text(
+                "# TESTX\n" + "\n".join(words) + "\n", encoding="utf-8")
+            import obsidian_writer as ow
+            w = ow.ObsidianWriter(None, "TESTX", mode="no",
+                                  glossary_path=str(base / "glossary.txt"))
+            self.assertTrue(w._term_verified(words[0]))
+            self.assertTrue(w._term_verified(words[-1]),
+                            f"第 {translator.TERM_LOAD_LIMIT} 条之后的词被加载上限截掉了")
+        finally:
+            d.cleanup()
+
     def test_占位gloss不参与合并(self):
         """没有中文注的条目（占位 gloss）不许被并成一行 —— 那会把一堆词吞掉。"""
         sel = nt.Selection(hits=[nt.Hit(term="alpha", gloss="（本课术语）"),

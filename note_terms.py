@@ -92,11 +92,19 @@ def _common_word_signal(term: str) -> str:
 
     ⚠️ 复用 `build_notes` 的判据（`COMMON_WORDS` / `FUNCTION_FIRST` / 单音节），
        **不另写一份高频词表** —— 两份词表迟早漂移，而漂移是静默的。
+
+    ⚠️ DB 审查 D-20：**表里/口语名单要先判**。`Interesting` / `Euro` 是句中大写的单
+       token，若让下面「大写单 token = 专有名词」的提前 return 抢在前面，它们会被当
+       专有名词**放行**（`SRC_AUTO` 被 `drop_reason` 更早的分支兜住所以测不到；而
+       `本课`/`术语库` 两条来源会把它们**只追加**地写进术语表 —— 正是本模块要挡的）。
     """
     from build_notes import _looks_like_vocabulary, COMMON_WORDS
     words = (term or "").split()
     if not words:
         return ""
+    low = term.strip().lower()
+    if low in _DISCOURSE or low in EVERYDAY:
+        return "口语/常识词"
     # ⚠️ 缩写**不走**「普通词汇否决」：那个判据是给英文单词设计的，而
     #    `_syllables("usc") <= 1` 恒成立 → 会把 `USC`/`GNI` 全判成常识词。
     #    `build_notes.detect_proper_nouns` 早就用 `not phrase.isupper()` 挡过同一个坑。
@@ -106,13 +114,10 @@ def _common_word_signal(term: str) -> str:
     # ⚠️ **句中大写的单 token = 专有名词**，不走"普通词汇否决"：
     #    `_syllables("coase") <= 1`（`oa`+`e` 收成 1）会把它判成单音节常识词 ——
     #    而 `Coase` / `Renshaw` 正是这类课要收的词（实测：`Coase` 被挡下，
-    #    `tests/test_live_terms.py` 的红）。`Interesting` 那种真常识词走的是上面
-    #    的 `_DISCOURSE`/`EVERYDAY`（先判），不会因为这条漏网。
-    if len(words) == 1 and term[:1].isupper() and term.lower() not in COMMON_WORDS:
+    #    `tests/test_live_terms.py` 的红）。`Interesting` 那种真常识词走的是上面的
+    #    `_DISCOURSE`/`EVERYDAY`（**先判**），不会因为这条漏网。
+    if len(words) == 1 and term[:1].isupper() and low not in COMMON_WORDS:
         return ""
-    low = term.strip().lower()
-    if low in _DISCOURSE or low in EVERYDAY:
-        return "口语/常识词"
     if _looks_like_vocabulary(term.strip(), words):
         return "常识词（普通英语词汇）"
     if len(words) == 1 and low in COMMON_WORDS:
@@ -270,27 +275,25 @@ def select(entries: list[dict], *, match, type_of=None, verify=None,
     return Selection(hits=kept, dropped=dropped)
 
 
-def render_table(sel: "Selection", *, extra: list | None = None) -> list:
-    """`Selection` → 笔记里的术语表行（Markdown）。
+def final_rows(sel: "Selection", *, extra: list | None = None) -> list:
+    """术语表的**最终行**（唯一定义点）：`extra` 在前、按词面去重、同一 gloss 只留一行。
 
-    `extra` 是**本课讲到的术语**（复习层输出，带中文与时间戳）—— 它们排在最前，
-    且与命中项**按词面去重**（课术语表/术语库里的旧条目让位给本课语境）。
+    ⭐ F8-e（作者点名）：同一个中文（gloss）只留一行 —— 术语库行（`sel.hits`）优先，
+       其次取**更短**的英文（`shutdown price` 胜 `shutting down price`）。
+       占位 gloss（"（本课术语）"）不参与合并，否则会把一堆词并成一行。
+
+    ⚠️ DB 审查 D-7：**显示**（`render_table`）与**标准拼写**（`obsidian_writer._term_pairs_norm`
+       喂给 `note_v2.announce_terms_in_review` 的 `canon`）都必须从**这里**取 —— 两处各
+       排一次就会出现「表格里是 `shutdown price`、正文括注却是 `shutting down price`」，
+       正是 F7-e/F8-e 要消除的「页面上有两种拼写」。
     """
     rows: list = []
     seen: set = set()
-    for h in (extra or []):
+    for h in list(extra or []) + list(getattr(sel, "hits", None) or []):
         if not h.term or h.term.lower() in seen:
             continue
         seen.add(h.term.lower())
         rows.append(h)
-    for h in sel.hits:
-        if h.term.lower() in seen:
-            continue
-        seen.add(h.term.lower())
-        rows.append(h)
-    # ⭐ F8-e（作者点名）：同一个中文（gloss）只留一行 —— 术语库行（`sel.hits`）优先，
-    #    其次取**更短**的英文（`shutdown price` 胜 `shutting down price`）。
-    #    占位 gloss（"（本课术语）"）不参与合并，否则会把一堆词并成一行。
     store_terms = {h.term.lower() for h in (sel.hits or [])}
     merged: list = []
     pos: dict = {}
@@ -308,9 +311,17 @@ def render_table(sel: "Selection", *, extra: list | None = None) -> list:
         a_store, h_store = a.term.lower() in store_terms, h.term.lower() in store_terms
         if (h_store and not a_store) or (h_store == a_store and len(h.term) < len(a.term)):
             merged[cur] = h
-    rows = merged
+    return merged
+
+
+def render_table(sel: "Selection", *, extra: list | None = None) -> list:
+    """`Selection` → 笔记里的术语表行（Markdown）。
+
+    `extra` 是**本课讲到的术语**（复习层输出，带中文与时间戳）—— 它们排在最前，
+    且与命中项**按词面去重**（课术语表/术语库里的旧条目让位给本课语境）。
+    """
     out = []
-    for h in rows:
+    for h in final_rows(sel, extra=extra):
         tail = f"　`{h.ts}`" if h.ts else ""
         src = f" · {h.source}" if h.source else ""
         gloss = h.gloss or "—"

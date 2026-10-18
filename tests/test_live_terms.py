@@ -141,41 +141,52 @@ class Extract(unittest.TestCase):
         self.assertNotIn("of the", [t.lower() for t in got.terms])
 
     # ---- 第五道门：注入式 `judge`（E2，2026-10-18）----
+    # ⚠️ 夹具用 `Monopoly`（不是 E2 里的 `Euro`）：DB 审查 D-20 修好后，`Euro` 这类
+    #    日常词被 `drop_reason` 在**更早一道门**挡下（`口语/常识词`），根本到不了判据 ——
+    #    这里要钉的是**判据这一道门**，所以换一个词表不挡的候选。E2 的分数（0.34/0.51）照留。
     def test_术语判据_砍低分留高分(self):
         """⭐ E2（`scratchpad/jev_exp/report.md` §E2）：`judge` 分数 < `JUDGE_MIN_P`
         的词进 `rejected`（原因「判据：不像术语」），高分照留。"""
-        seen = finals("it costs forty Euro here", "another Euro again",
+        seen = finals("it costs forty Monopoly here", "another Monopoly again",
                       "the shutdown price is low", "shutdown price again")
         got = lt.extract(seen, verify=mats_yes,
-                         judge=lambda ts: [0.34 if t.lower() == "euro" else 0.9
+                         judge=lambda ts: [0.34 if t.lower() == "monopoly" else 0.9
                                            for t in ts])
         self.assertIn("shutdown price", got.terms, "真词被误伤")
-        self.assertNotIn("Euro", got.terms, "判据说不像术语的词没砍掉")
-        self.assertIn(("Euro", "判据：不像术语"), got.rejected)
+        self.assertNotIn("Monopoly", got.terms, "判据说不像术语的词没砍掉")
+        self.assertIn(("Monopoly", "判据：不像术语"), got.rejected)
 
     def test_术语判据_没答的一律照留(self):
         """`None` = "没答"（≠"答了 0"）：照留 —— 没配 token / 超时走的就是这条。"""
-        seen = finals("it costs forty Euro here", "another Euro again")
+        seen = finals("it costs forty Monopoly here", "another Monopoly again")
         got = lt.extract(seen, verify=mats_yes, judge=lambda ts: [None] * len(ts))
-        self.assertIn("Euro", got.terms)
+        self.assertIn("Monopoly", got.terms)
         self.assertEqual([w for w, why in got.rejected if "不像术语" in why], [])
 
     def test_术语判据_炸了照留(self):
         """⚠️ 闸门坏了 = **没装闸门**：判据抛异常不许把候选词带走（fail-soft）。"""
         def boom(_ts):
             raise RuntimeError("judge down")
-        got = lt.extract(finals("it costs forty Euro here", "another Euro again"),
+        got = lt.extract(finals("it costs forty Monopoly here", "another Monopoly again"),
                          verify=mats_yes, judge=boom)
-        self.assertIn("Euro", got.terms)
+        self.assertIn("Monopoly", got.terms)
 
     def test_术语判据_阈值边界是半开区间(self):
         """`JUDGE_MIN_P` 的含义钉死：**低于** 0.35 砍、**等于** 0.35 留。
-        （0.35 = E2 里最贵的真垃圾 `Euro` 0.34 与最便宜的真词 0.51 之间。）"""
-        seen = finals("it costs forty Euro here", "another Euro again")
+        （0.35 = E2 里最贵的真垃圾 0.34 与最便宜的真词 0.51 之间。）"""
+        seen = finals("it costs forty Monopoly here", "another Monopoly again")
         for p, kept in ((0.34, False), (lt.JUDGE_MIN_P, True)):
             got = lt.extract(seen, verify=mats_yes,
                              judge=lambda ts, p=p: [p] * len(ts))
-            self.assertEqual("Euro" in got.terms, kept, f"p={p} 的取舍不对")
+            self.assertEqual("Monopoly" in got.terms, kept, f"p={p} 的取舍不对")
+
+    def test_日常词比判据门更早挡下(self):
+        """⭐ DB 审查 D-20：`Euro`/`Interesting` 这类**日常词**由 `drop_reason` 直接挡下 ——
+        不许因为它们句中大写（"专有名词"启发式）就漏到判据门、甚至进术语表。"""
+        got = lt.extract(finals("it costs forty Euro here", "another Euro again"),
+                         verify=mats_yes)
+        self.assertEqual(got.terms, [])
+        self.assertIn(("Euro", "口语/常识词"), got.rejected)
 
     def test_上限截断有记账(self):
         # ⚠️ 两个坑都在这里避开了：`_WORD` 不认数字（`Alpha0`/`Alpha1` 会退化成同一个词），
@@ -440,28 +451,31 @@ class 术语闸门(unittest.TestCase):
 
     def test_端到端_判据在飞不收_判完垃圾砍真词进池_不重问(self):
         """接线点（`live_terms_step`）：首轮判据在飞 -> 一个都不收（`PENDING`）；判完
-        第二轮真词进池、垃圾被砍；之后判据**只许命中缓存**，不再发请求。"""
+        第二轮真词进池、垃圾被砍；之后判据**只许命中缓存**，不再发请求。
+
+        ⚠️ 夹具用 `Monopoly`（不是 E2 的 `Euro`）：D-20 修好后日常词在更早一道门就被
+        `drop_reason` 挡下，到不了判据 —— 这里要钉的是 `PENDING` 与判据缓存。"""
         import main as M
         asked = []
 
         def ask(todo):
             asked.append(sorted(t.lower() for t in todo))
-            return [0.04 if t.lower() == "euro" else 0.9 for t in todo]
+            return [0.04 if t.lower() == "monopoly" else 0.9 for t in todo]
         j = self._judge(ask=ask)
         pool = lt.LivePool(step=1, verify=mats_yes, judge=j)
-        lines = ["it costs forty Euro here", "another Euro again",
+        lines = ["it costs forty Monopoly here", "another Monopoly again",
                  "the shutdown price is low", "shutdown price again"]
         # ⚠️ 变异验证：把 `_drop_by_judge` 里 `PENDING` 那条 continue 删掉（当 None 放行）
-        #    -> 这条红（首轮就把还没判的 `Euro` 收进池）。
+        #    -> 这条红（首轮就把还没判的 `Monopoly` 收进池）。
         got = M.live_terms_step(pool, None, finals(*lines))
         self.assertEqual(got, [], "判据还在飞 —— 这一轮不该收词（PENDING）")
-        _await(j, ["Euro"])                              # 等后台那一批落地
+        _await(j, ["Monopoly"])                          # 等后台那一批落地
         got2 = M.live_terms_step(pool, None, finals(*lines, "and then it ends"))
         self.assertIn("shutdown price", got2, f"过门的词不对：{got2}")
-        self.assertNotIn("euro", [w.lower() for w in pool.terms()], "垃圾进池了")
-        self.assertIn(("Euro", "判据：不像术语"), pool._rejected)
+        self.assertNotIn("monopoly", [w.lower() for w in pool.terms()], "垃圾进池了")
+        self.assertIn(("Monopoly", "判据：不像术语"), pool._rejected)
         got3 = M.live_terms_step(pool, None,
-                                 finals(*lines, "and then it ends", "still Euro"))
+                                 finals(*lines, "and then it ends", "still Monopoly"))
         self.assertEqual(got3, [], "见过的词不该再进池")
         self.assertEqual(len(asked), 1, f"判据被重问了：{asked}")
 

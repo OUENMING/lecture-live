@@ -84,6 +84,16 @@ class TermStopgap(unittest.TestCase):
                   "European", "Euro", "Celsius", "PDF"):
             self.assertTrue(nt.drop_reason(t, source=nt.SRC_AUTO), f"没挡下：{t}")
 
+    def test_本课与术语库来源也要挡口语常识词(self):
+        """⭐ DB 审查 D-20：`SRC_AUTO` 被 `drop_reason` 更早的分支兜住，所以上面那条测不到
+        `_common_word_signal` 的判序 bug —— 「大写单 token = 专有名词」的提前 return 抢在
+        口语/常识词判断之前，`Interesting`/`Euro` 会从 `本课`/`术语库` 两条来源**放行**。"""
+        for t in ("Interesting", "Euro", "Celsius"):
+            self.assertEqual(nt.drop_reason(t, source=nt.SRC_CURATED), "口语/常识词", t)
+            self.assertTrue(nt.drop_reason(t, source=nt.SRC_LECTURE), t)
+        # 专有名词不许被这条误伤（`Coase` 是经济学课要收的词）
+        self.assertEqual(nt.drop_reason("Coase", source=nt.SRC_CURATED), "")
+
     def test_错语境义挡下_usc(self):
         """⭐ B1 那条：`USC` 的缓存解析是南加州大学，而本课是 Universal Social Charge。
 

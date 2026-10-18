@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sys
 import unittest
 
@@ -320,8 +321,9 @@ class F跨节正负号(unittest.TestCase):
              "algebra": "$h=f(xV+\\gamma)$"}]}
         out, extra, warns = ng.flag_conflicts(rev)
         self.assertEqual(1, extra[0]["flagged"])
-        self.assertIn("前面（第 1 节）把 γ 当阈值减去", json.dumps(out["sections"][1],
-                                                              ensure_ascii=False))
+        self.assertIn("第 1 节把 γ 当阈值减去", json.dumps(out["sections"][1],
+                                                          ensure_ascii=False))
+        self.assertIn("两种写法符号相反", json.dumps(out["sections"][1], ensure_ascii=False))
         self.assertTrue(warns)
 
 
@@ -334,7 +336,7 @@ class G悬空图表指路(unittest.TestCase):
         rev = _raw("v3_ecs170")
         self.assertTrue(any("下表" in p for p in rev["sections"][21].get("prose") or []),
                         "fixture 变了")
-        out, warns, _would = nr.guard_chain(rev, entries=_data("v3_ecs170")["entries"])
+        out, warns, _would, _counts = nr.guard_chain(rev, entries=_data("v3_ecs170")["entries"])
         self.assertFalse(any("三者差别看下表" in p
                              for p in (out["sections"][21].get("prose") or [])))
         self.assertTrue(any("指向不存在图表" in w for w in warns), warns)
@@ -396,6 +398,120 @@ class 括注不叠(unittest.TestCase):
         # 距离 7 个字：窗口 6 看不见（会再插一次），窗口 12 看得见
         got2 = nv.announce_terms("方差分析模型和它的记号（ANOVA）", [("方差分析", "ANOVA")], set())
         self.assertEqual("方差分析模型和它的记号（ANOVA）", got2)
+
+
+class 标注文案(unittest.TestCase):
+    """F15 round 4 ①②④：⚠ 里不许有裸的/截断的 LaTeX；式子整条进 `$…$` 或说人话；
+    正负号文案要把"为什么两种写法都对"说清楚；引语按词边界截断。"""
+
+    def _marks(self, job: str) -> list:
+        nd = _data(job) if (RAW / job / "note_data.json").exists() else {"entries": []}
+        rev, _w, _wo, _c = nr.replay(nd, _raw(job))
+        out = []
+        for i, s in enumerate(rev.get("sections") or [], 1):
+            for path in ng.paths_of(s):
+                v = ng._get(s, path)
+                if isinstance(v, str):
+                    for m in re.finditer(r"（⚠[^）]*）", v):
+                        out.append((i, m.group(0)))
+        return out
+
+    # ① 整条公式进 $…$
+    def test_美元号外不许有裸_LaTeX(self):
+        for job in ("v3_busi3243", "v3_ecs170"):
+            for i, mark in self._marks(job):
+                outside = re.sub(r"\$[^$]*\$", "", mark)
+                self.assertNotIn("\\", outside, f"{job} §{i} 裸 LaTeX：{mark[:90]}")
+
+    def test_美元号里不许有截断号(self):
+        for job in ("v3_busi3243", "v3_ecs170"):
+            for i, mark in self._marks(job):
+                for span in re.findall(r"\$[^$]*\$", mark):
+                    self.assertNotIn("…", span, f"{job} §{i} 截断的式子：{span[:60]}")
+
+    def test_差号标注说清应为与写成_并落在不符的那条上(self):
+        rev, _w, _wo, _c = nr.replay(_data("v3_ecs170"), _raw("v3_ecs170"))
+        s53 = rev["sections"][52]
+        hits = [(i, p) for i, p in enumerate(s53.get("prose") or []) if "差一个负号" in p]
+        self.assertEqual(1, len(hits), hits)
+        idx, para = hits[0]
+        self.assertEqual(1, idx, "⚠ 要贴在与定义不符的那条等式所在的那一段（不是第一段）")
+        at = para.find("（⚠")
+        self.assertIn("g_j", para[:at], "⚠ 前面应该正是 `=g_j\\,b_h` 那句")
+        self.assertIn("按本节的 $g_j=", para[at:])
+        self.assertIn("应为 $\\partial E/\\partial w_{hj}=-g_j b_h$", para)
+        self.assertIn("正文写成 $\\partial E/\\partial w_{hj}=g_j b_h$", para)
+        self.assertIn("差一个负号", para)
+        # 一个式子都不许改
+        self.assertEqual(_raw("v3_ecs170")["sections"][52]["algebra"],
+                         rev["sections"][52]["algebra"])
+
+    # ② 正负号文案
+    def test_正负号文案把两种写法说清(self):
+        for job in ("v3_ecs170", "v2_ecs170"):
+            marks = [m for _i, m in self._marks(job) if "当阈值" in m]
+            self.assertTrue(marks, f"{job} 没抓到正负号标注")
+            for m in marks:
+                self.assertIn("偏置 = −阈值", m)
+                self.assertIn("两种写法符号相反", m)
+                self.assertNotIn("是另一回事", m)
+
+    # ④ 引语词边界
+    def test_引语按词边界截断(self):
+        self.assertEqual("For each additional year of experience…",
+                         ng._raw_snip("For each additional year of experience, "
+                                      "the slope is beta three plus beta four", 44))
+        # 拉丁词中间不许切开：截断后的**最后一个词必须是完整的词**
+        for job in ("v3_busi3243", "v3_ecs170"):
+            nd = _data(job)
+            src = " ".join(str(e.get("en") or e.get("asr") or "")
+                           for e in (nd.get("entries") or []))
+            for i, mark in self._marks(job):
+                for q in re.findall(r"「([^」]*)…」", mark):
+                    if not re.search(r"[A-Za-z0-9]$", q):
+                        continue                      # 中文/标点收尾，没有词边界问题
+                    self.assertIsNotNone(
+                        re.search(re.escape(q) + r"(?![A-Za-z0-9])", src),
+                        f"{job} §{i} 切在词中间：…{q[-24:]}…")
+
+
+class 回放页脚(unittest.TestCase):
+    """F15-4③：核对记录那几行/台账必须按**回放结果**重算，不许沿用上一次真跑的那份。"""
+
+    def test_旧那行_missing_term_schooling_不许出现(self):
+        nd = _data("v3_busi3243")
+        old = " ".join(nd.get("warns") or [])
+        self.assertIn("missing-term：schooling", old, "fixture 变了（旧产物里本该有这行）")
+        rev, warns, would, counts = nr.replay(nd, _raw("v3_busi3243"))
+        data = nr.note_data_from(nd, rev, warns=warns, would=would, counts=counts)
+        blob = "\n".join(data.warns)
+        self.assertNotIn("missing-term", blob)
+        self.assertNotIn("schooling", blob)
+        self.assertNotIn("超限单元压缩", blob, "模型层的旧提醒也不该沿用")
+        self.assertEqual("", data.html_name, "回放不装 KaTeX 资源，不许留一个指不到的文件名")
+        self.assertEqual("", data.anki_name)
+
+    def test_台账按回放数字重算(self):
+        nd = _data("v3_ecs170")
+        rev, warns, would, counts = nr.replay(nd, _raw("v3_ecs170"))
+        data = nr.note_data_from(nd, rev, warns=warns, would=would, counts=counts)
+        self.assertTrue(data.guard_summary.startswith("guards: 回放(replay)"), data.guard_summary)
+        self.assertNotIn(nd["guard_summary"], data.guard_summary)
+        # 数字对得上本次回放自己数的那些
+        self.assertIn(f"flagged {counts['flagged']}", data.guard_summary)
+        self.assertIn(f"dropped {counts['dropped']}", data.guard_summary)
+        # 页脚第一行必须说明这是回放
+        self.assertIn("冻结回放", data.warns[0])
+
+    def test_回放表格里的标注仍然在(self):
+        """重算页脚不等于把正文标注也清掉 —— §53/§43 的 ⚠ 还在。"""
+        nd = _data("v3_ecs170")
+        rev, warns, would, counts = nr.replay(nd, _raw("v3_ecs170"))
+        data = nr.note_data_from(nd, rev, warns=warns, would=would, counts=counts)
+        blob = json.dumps(data.review, ensure_ascii=False)
+        self.assertIn("差一个负号", blob)
+        self.assertIn("偏置 = −阈值", blob)
+        self.assertTrue(any("原位标 ⚠" in w for w in data.warns), data.warns)
 
 
 class 安全删除四护栏(unittest.TestCase):
@@ -473,18 +589,18 @@ class 回放全链(unittest.TestCase):
 
     def test_两条链都跑得完(self):
         for job in ("v3_busi3243", "v3_ecs170"):
-            rev, warns, would = nr.replay(_data(job), _raw(job))
+            rev, warns, would, _counts = nr.replay(_data(job), _raw(job))
             self.assertTrue(rev.get("sections"), job)
             self.assertTrue(would, "would-repair 记账丢了")
             self.assertTrue(any("速览" in w for w in warns) or warns, warns)
 
     def test_回放后_v3_busi_S24_首句还在(self):
-        rev, _w, _wo = nr.replay(_data("v3_busi3243"), _raw("v3_busi3243"))
+        rev, _w, _wo, _c = nr.replay(_data("v3_busi3243"), _raw("v3_busi3243"))
         p = rev["sections"][23]["prose"][0]
         self.assertTrue(p.startswith("估计量不是数据的固定属性"), p[:40])
 
     def test_回放后_v3_ecs_S53_标了差号(self):
-        rev, _w, _wo = nr.replay(_data("v3_ecs170"), _raw("v3_ecs170"))
+        rev, _w, _wo, _c = nr.replay(_data("v3_ecs170"), _raw("v3_ecs170"))
         blob = json.dumps(rev["sections"][52], ensure_ascii=False)
         self.assertIn("差一个负号", blob)
 
@@ -495,7 +611,7 @@ class 回放全链(unittest.TestCase):
         for k in keep:
             os.environ.pop(k, None)
         try:
-            rev, _w, _wo = nr.replay(_data("v3_ecs170"), _raw("v3_ecs170"))
+            rev, _w, _wo, _c = nr.replay(_data("v3_ecs170"), _raw("v3_ecs170"))
             self.assertTrue(rev.get("sections"))
         finally:
             for k, v in keep.items():

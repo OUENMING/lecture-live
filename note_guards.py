@@ -1232,14 +1232,19 @@ def drop_asr_orphans(review: dict, *, entries: list, known) -> tuple:
 
 
 # ---- ⑧⑨ 跨节矛盾 ----------------------------------------------------------
-def _find_and_append(s: dict, needle: str, mark: str, *, fields=None) -> bool:
+def _find_and_append(s: dict, needle: str, mark: str, *, fields=None,
+                     exact: bool = False) -> bool:
     """把 `mark` 缀到 `s` 里含 `needle` 的那个字段（找不到就缀到第一段 prose）。**就地。**
 
     ⚠️ 缀在**句末**（`。`/`；` 之后），不切在句子中间。
     `fields` 可收窄可落笔的字段（默认 `_MARK_FIELDS`）—— 跨节矛盾这类**讲解**不该落到
     自测题干（`q`）上（实测：转录前后不一致那条被缀进了「性别如何改变经验的斜率？」）。
     """
-    needle = re.sub(r"\s+", "", str(needle or ""))[:14]
+    # ⚠️ 默认只取 needle 前 14 字（容错：模型的行文常有出入）；`exact=True` 时用**整条**
+    #    —— E 的 needle 是一条等式（`…=g_j b_h`），截到 14 字会先命中**另一条**等式所在的段落，
+    #    标注就飘到"第一条式子"上去了（F15-4① 明确要贴在与定义不符的那条上）。
+    needle = re.sub(r"\s+", "", str(needle or ""))
+    needle = needle if exact else needle[:14]
     cands: list = []
     for path in paths_of(s):
         if _field_name(path) not in (fields or _MARK_FIELDS):
@@ -1251,8 +1256,14 @@ def _find_and_append(s: dict, needle: str, mark: str, *, fields=None) -> bool:
     cands.sort(key=lambda pv: order.index(_field_name(pv[0]))
                if _field_name(pv[0]) in order else 99)   # 讲解优先，别落到 `conclusion` 之后
     for path, v in cands:
-        if needle and needle in re.sub(r"\s+", "", v):
-            j = max([v.rfind(p) for p in "。；;"]) + 1
+        hit = _find_ws(v, needle) if needle else None
+        if hit:
+            # ⚠️ F15-4①：标在**含 needle 的那一句之后**，不是段末 ——
+            #    「差一个负号」要贴着与定义不符的那条等式，不是飘在整段末尾。
+            j = min((p for p in (v.find(ch, hit[1]) for ch in "。；;") if p >= 0),
+                    default=-1) + 1
+            if j <= 0:
+                j = max([v.rfind(p) for p in "。；;"]) + 1
             _set(s, path, v[:j] + mark + v[j:])
             return True
     if cands:
@@ -1476,10 +1487,79 @@ def drop_dangling_pointers(review: dict) -> tuple:
     return out, [{"dropped": len(gone)}], warns
 
 
+def _math_bits(expr: str, limit: int = 88) -> str:
+    """式子 → `$…$`（**整条，绝不截断**）；太长或夹中文 → `""`（退回说人话）。**纯函数。**
+
+    ⚠️ F15-4①：标注里贴裸 LaTeX / 截断的 LaTeX 是最坏的一档 —— KaTeX 渲染不出来，
+       读者看到的是 `\\partialE/\\partialw_{hj}=(\\hat y_j-y_j)\\,\\ha…`。
+    """
+    s = _one(expr)
+    if not s or len(s) > limit or "$" in s or re.search(r"[\u4e00-\u9fff]", s):
+        return ""
+    return f"${s}$"
+
+
+def _symbol_sign_mark(c: dict) -> str:
+    """F15-E 的标注文案（F15-4①）：式子要么**整条**进 `$…$`，要么一个字都不贴。**纯函数。**"""
+    term = _one(c.get("term") or "")
+    other = _one(c.get("other") or "")
+    defs = {str(k): str(v) for k, v in (c.get("defs") or {}).items()}
+    shown, names = [], []
+    for k, v in defs.items():
+        names.append(_one(k))
+        bits = _math_bits(f"{_one(k)}={_one(v)}")
+        shown.append(bits or _one(k))
+    how = ("按本节的 " + "、".join(shown) + " 代入" if shown else "代入本节的记号定义")
+    want = _math_bits(f"{term}=-{other}")
+    said = _math_bits(f"{term}={other}")
+    why = _one(c.get("why") or "两边对不上")
+    if want and said:
+        return f"（⚠ {how}，应为 {want}；正文写成 {said}，{why}）"
+    if said:
+        return f"（⚠ {how}，正文这一条与定义不符（{why}）：{said}）"
+    if names:
+        return f"（⚠ {how}，本节第二次写的那个式子与定义不符（{why}））"
+    return f"（⚠ 本节同一个左端写了两次，代入定义后两边对不上（{why}））"
+
+
+#: 匹配时**忽略**的字距宏（`g_j b_h` 与 `g_j\,b_h` 是同一个式子，模型两种都写）。
+_THIN = r"(?:\s|\\[,;! ])*"
+
+
+def _find_ws(text: str, needle: str):
+    """在原文里找 `needle`（忽略空白与 `\\,` 类字距宏）→ `(起, 止)`；找不到 → `None`。**纯函数。**
+
+    ⚠️ 不能只去空白：v3/ecs §53 的代数行写 `g_j b_h`、讲解写 `g_j\\,b_h` —— 只去空白时
+       两者不相等，标注就找不到它的落点（退成"贴在本段第一句上"）。
+    """
+    n = re.sub(r"\\[,;! ]", "", re.sub(r"\s+", "", str(needle or "")))
+    if not n:
+        return None
+    try:
+        rx = re.compile(_THIN.join(re.escape(ch) for ch in n))
+    except re.error:
+        return None
+    m = rx.search(str(text or ""))
+    return (m.start(), m.end()) if m else None
+
+
 def _raw_snip(t: str, n: int = 40) -> str:
-    """截断但**保留原有空格**（引语必须逐字，`_snip` 会把空格全吃掉）。**纯函数。**"""
+    """截断但**保留原有空格**（引语必须逐字，`_snip` 会把空格全吃掉）。**纯函数。**
+
+    ⚠️ F15-4④：截断要落在**词边界**上。拉丁文按空格退到最后一个整词
+    （原来 `…each additional year of experience, goin…` 从词中间切开）；
+    中文按字切（没有词边界可用），标点处也可以收。
+    """
     s = str(t or "").strip()
-    return s if len(s) <= n else s[:n].rstrip() + "…"
+    if len(s) <= n:
+        return s
+    head = s[:n]
+    if re.search(r"[A-Za-z]$", head) and re.search(r"[A-Za-z]", s[n:n + 1]):
+        # 正切在一个拉丁词的中间 → 退到该词之前的最后一个空格
+        cut = head.rfind(" ")
+        if cut >= max(12, int(n * 0.5)):
+            head = head[:cut]
+    return head.rstrip(" ,;:、，；：") + "…"
 
 
 def _hhmmss(t: str) -> str:
@@ -1550,13 +1630,16 @@ def flag_conflicts(review: dict, *, entries: list | None = None) -> tuple:
                 details.append(f"§{j}（{kind}：{c['sym']}）")
             continue
         if kind == "symbol-sign":
-            # ⭐ F15-E：同一节里同一个左端写了两次、代入本节定义后对不上 → 原式后面标 ⚠。
+            # ⭐ F15-E：同一节里同一个左端写了两次、代入本节定义后对不上 → 标 ⚠。
+            # ⚠️ F15-4①：标注里**不许出现裸的/截断的 LaTeX**（旧的 `\partialE/\partialw_{hj}=
+            #    (\hat y_j-y_j)\,\ha…` 既渲染不出来也读不懂）。做法：把式子整条放进 `$…$`
+            #    让 KaTeX 渲染；式子太长/夹中文 → 退回**说人话**（不贴式子）。
+            #    ⚠ 落在**与定义不符的那一条等式**上（`g_j b_h` 那条），不是第一条。
             j = c["sections"][-1]
             later = secs[j - 1]
-            mark = (f"（⚠ 本节自己的定义代入后两边对不上（{c['why']}）："
-                    f"本节先写「{_raw_snip(c['texts'][1], 44)}」，"
-                    f"后面又写「{_raw_snip(c['texts'][0], 44)}」）")
-            if _find_and_append(later, c["texts"][1], mark, fields=_MARK_TEXT_FIELDS):
+            mark = _symbol_sign_mark(c)
+            if _find_and_append(later, c["texts"][1], mark, fields=_MARK_TEXT_FIELDS,
+                                exact=True):
                 n += 1
                 details.append(f"§{j}（{kind}：{c['term']}）")
             continue

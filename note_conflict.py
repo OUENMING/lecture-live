@@ -626,16 +626,20 @@ def symbol_sign_conflicts(review: dict) -> list:
         for m in re.finditer(r"\$[^$]+\$", _section_text(s)):
             eqs.append(_eq_parts(m.group(0)))
         defs: dict = {}
+        defs_raw: dict = {}          # 定义**原样**（标注里要把式子原封不动写出来）
         claims: dict = {}
+        lhs_disp: dict = {}          # 左端的**原样写法**（下标/空格都在）
         for parts in (x for x in eqs if x):
             if len(parts) < 2:
                 continue
             lhs, rhs = parts[0], parts[-1]
             k = _key(lhs)
+            lhs_disp.setdefault(k, lhs)
             if _DEF_LHS.match(k) and not re.search(r"[+\-*/^]", k):
                 defs.setdefault(k, _to_py(rhs))
+                defs_raw.setdefault(k, rhs)
             claims.setdefault(k, []).append(rhs)
-        for lhs, rhss in claims.items():
+        for k, rhss in claims.items():
             uniq: list = []
             for r in rhss:
                 if r not in uniq:
@@ -666,9 +670,31 @@ def symbol_sign_conflicts(review: dict) -> list:
                     elif abs(va - vb) <= 1e-6 * max(1.0, abs(va)):
                         same += 1
                 if ok >= 2 and sign >= ok:
+                    # ⚠️ F15-4①：**哪一条与定义不符**要指明。用人话说是这样：引用本节记号
+                    #    （`g_j`）的那条等式，代入定义后与另一条对不上 —— 该在它身上标 ⚠，
+                    #    而"应为"是把**它的右边**取负（`g_j b_h` → `−g_j b_h`），
+                    #    这样读起来就是现在这句：「应为 −g_j b_h；正文写成 g_j b_h，差一个负号」。
+                    others = _py_names(_to_py(other))
+                    bases = _py_names(_to_py(uniq[0]))
+                    if others & set(defs_raw):
+                        ref, plain = other, uniq[0]
+                    elif bases & set(defs_raw):
+                        ref, plain = uniq[0], other
+                    else:
+                        ref, plain = other, uniq[0]
+                    # 代入用到的**本节定义**（标注里要写清"按哪条定义代入"）。
+                    used = {n: defs_raw.get(n, "") for n in _py_names(_to_py(ref))
+                            if n in defs_raw}
+                    lhs = lhs_disp.get(k, k)
                     out.append({"kind": "symbol-sign", "sections": [i], "section": i,
                                 "term": lhs, "why": "差一个负号",
-                                "texts": [f"{lhs}={uniq[0]}", f"{lhs}={other}"]})
+                                "base": plain, "other": ref, "defs": used,
+                                # ⚠️ 两条都留**原样**（不截断）：标注里要放进 `$…$` 让 KaTeX 渲染，
+                                #    截断的 LaTeX（`\partialE/\partialw_{hj}=(\hat y_j-y_j)\,\ha…`）
+                                #    既渲染不出来、也读不懂。
+                                #    `texts[0]` = 本节**先写**的那条；`texts[1]` = **与定义不符**的那条
+                                #    （标注贴它 —— F15-4①）。
+                                "texts": [f"{lhs}={plain}", f"{lhs}={ref}"]})
                     break
     return out
 
@@ -722,11 +748,14 @@ def sign_flip_conflicts(review: dict) -> list:
             continue
         j = conv[sym][0]
         how = "减去" if conv[sym][1] < 0 else "加上"
+        # ⚠️ F15-4②：原来写「（偏置写法 b=−θ 是另一回事）」—— 读起来像"这条不作数"，
+        #    没告诉读者**为什么**两种写法都对。改成把理由说全：偏置 = −阈值，所以同一个
+        #    符号在两个位置上的正负号本来就该相反（换个写法而已，不是笔误）。
         out.append({"kind": "sign-flip", "sections": [j, i], "section": i,
                     "sym": sym, "texts": [sym],
-                    "why": f"前面（第 {j} 节）把 {_pretty_sym(sym)} 当阈值{how}，"
-                           f"这里写成{'加上' if how == '减去' else '减去'}"
-                           f"（偏置写法 b=−θ 是另一回事）"})
+                    "why": f"第 {j} 节把 {_pretty_sym(sym)} 当阈值{how}，"
+                           f"这里写成{'加上' if how == '减去' else '减去'}："
+                           f"这是偏置写法，偏置 = −阈值，两种写法符号相反"})
     return out
 
 

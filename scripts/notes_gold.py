@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -180,6 +181,79 @@ def d8_dup_gloss(d: dict) -> bool:
     return ng.collapse_dup_gloss(d["text"]) != d["text"]
 
 
+# ---- F15 round 4 的四处打磨（标注文案/页脚/引语截断）------------------------
+def _flag_marks(d: dict) -> list:
+    """跑一遍跨节矛盾 → 收集正文里所有 `（⚠…）` 标注。"""
+    out, _extra, _w = ng.flag_conflicts(d["review"], entries=d.get("entries"))
+    marks: list = []
+    for s in out.get("sections") or []:
+        for path in ng.paths_of(s):
+            v = ng._get(s, path)
+            if isinstance(v, str):
+                marks.extend(re.findall(r"（⚠[^）]*）", v))
+    return marks
+
+
+def e1_mark_no_bare_latex(d: dict) -> bool:
+    """⚠ 文案里**没有裸的/截断的 LaTeX**：`$…$` 之外不许有反斜杠，`$…$` 之内不许有 `…`。"""
+    marks = _flag_marks(d)
+    if not marks:
+        return False
+    for m in marks:
+        if "\\" in re.sub(r"\$[^$]*\$", "", m):
+            return False
+        for span in re.findall(r"\$[^$]*\$", m):
+            if "…" in span:
+                return False
+    return True
+
+
+def e2_symbol_sign_message(d: dict) -> bool:
+    """符号定义差号那条 ⚠ **在**、而且把"应为/写成"说清（按本节定义代入）。"""
+    marks = [m for m in _flag_marks(d) if "差一个负号" in m]
+    if not marks:
+        return False
+    m = marks[0]
+    return ("按本节的 $" in m and "应为 $" in m and "正文写成 $" in m and "g_j" in m)
+
+
+def f1_flip_wording(d: dict) -> bool:
+    """正负号文案说清"为什么两种写法都对"（偏置 = −阈值），不用"是另一回事"糊过去。"""
+    marks = [m for m in _flag_marks(d) if "当阈值" in m]
+    if not marks:
+        return False
+    return all("偏置 = −阈值" in m and "两种写法符号相反" in m and "是另一回事" not in m
+               for m in marks)
+
+
+def c7_quote_word_ok(d: dict) -> bool:
+    """转录引语的截断落在**词边界**上（不把拉丁词从中间切开）。"""
+    marks = _flag_marks(d)
+    src = " ".join(str(e.get("en") or e.get("asr") or "") for e in (d.get("entries") or []))
+    seen = False
+    for m in marks:
+        for q in re.findall(r"「([^」]*)…」", m):
+            seen = True
+            if re.search(r"[A-Za-z0-9]$", q) and not re.search(
+                    re.escape(q) + r"(?![A-Za-z0-9])", src):
+                return False
+    return seen
+
+
+def r1_replay_footer(d: dict) -> bool:
+    """回放的页脚/台账按**本次回放**重算（不沿用上一次真跑那几行）。"""
+    import notes_replay
+    nd, raw = d["note_data"], d["raw"]
+    rev, warns, would, counts = notes_replay.replay(nd, raw)
+    data = notes_replay.note_data_from(nd, rev, warns=warns, would=would, counts=counts)
+    blob = "\n".join(data.warns)
+    if any(w and w in blob for w in (nd.get("warns") or [])):
+        return False                              # 旧那几行还在 → 没重算
+    if (nd.get("guard_summary") or "") and nd["guard_summary"] in data.guard_summary:
+        return False
+    return data.guard_summary.startswith("guards: 回放(replay)")
+
+
 CHECKS = {
     "a2_cross_course_term": a2_cross_course_term,
     "a3_quote_label": a3_quote_label,
@@ -206,6 +280,11 @@ CHECKS = {
     "d6_empty_ledger": d6_empty_ledger,
     "d7_ledger_pointer": d7_ledger_pointer,
     "d8_dup_gloss": d8_dup_gloss,
+    "e1_mark_no_bare_latex": e1_mark_no_bare_latex,
+    "e2_symbol_sign_message": e2_symbol_sign_message,
+    "f1_flip_wording": f1_flip_wording,
+    "c7_quote_word_ok": c7_quote_word_ok,
+    "r1_replay_footer": r1_replay_footer,
 }
 
 

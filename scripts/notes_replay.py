@@ -56,10 +56,17 @@ def _lecture_terms(review: dict) -> set:
 
 
 def guard_chain(review: dict, *, entries: list) -> tuple:
-    """按写作层**同一个顺序**跑确定性的守卫（模型那几步跳过并记账）。**纯函数。**"""
+    """按写作层**同一个顺序**跑确定性的守卫（模型那几步跳过并记账）。
+
+    返回 `(review, warns, would_repair, counts)` —— `counts` 是**本次回放自己**数出来的
+    `{"repaired","dropped","flagged","downgraded"}`（F15-4③：核对记录页脚必须按回放结果重算，
+    不许沿用上一次真跑留下的那行 —— 旧的 `§15（missing-term：schooling）` 已经不该出现了）。
+    **纯函数**（除 deepcopy）。
+    """
     out = copy.deepcopy(review)
     warns: list = []
     would: list = []
+    counts: dict = {"repaired": 0, "dropped": 0, "flagged": 0, "downgraded": 0}
     known = lambda t: str(t).strip().lower() in _lecture_terms(out)   # noqa: E731
     steps = (
         (lambda r: note_guards.retime_components(r), "组件错挂"),
@@ -92,29 +99,58 @@ def guard_chain(review: dict, *, entries: list) -> tuple:
         out = got
         for x in (w or []):
             warns.append(str(x))
+        # 🧮 跟写作层同一条账：每个守卫自己报的 repaired/dropped/flagged/downgraded 加起来。
+        for st in (extra or []):
+            if not isinstance(st, dict):
+                continue
+            for k in counts:
+                try:
+                    counts[k] += int(st.get(k) or 0)
+                except (TypeError, ValueError):
+                    pass
+        for st in (extra or []):
+            if isinstance(st, dict):
+                continue
+            counts["dropped"] += 1           # 守卫台账里的非 dict 小标记 = 一处删
     for label, where in LLM_STEPS:
         would.append(f"{label}（{where}）")
-    return out, warns, would
+    return out, warns, would, counts
 
 
 def replay(note_data: dict, raw: dict) -> tuple:
-    """回放一次：返回 `(review, warns, would_repair)`。**纯函数**（除了 deepcopy）。"""
-    review, warns, would = guard_chain(raw, entries=note_data.get("entries") or [])
-    return review, warns, would
+    """回放一次：返回 `(review, warns, would_repair, counts)`。**纯函数**（除了 deepcopy）。"""
+    return guard_chain(raw, entries=note_data.get("entries") or [])
+
+
+def guard_summary(counts: dict, would: list) -> str:
+    """页脚那行台账 —— 按**本次回放**的数字重算。**纯函数。**"""
+    line = (f"guards: 回放(replay) repaired {counts['repaired']}, "
+            f"dropped {counts['dropped']}, flagged {counts['flagged']}, "
+            f"downgraded {counts['downgraded']}")
+    if would:
+        line += f" · 需要模型未跑 {len(would)} 步"
+    return line
 
 
 def note_data_from(note_data: dict, review: dict, *, warns: list,
-                   would: list) -> "note_render.NoteData":
-    """把回放出来的 review 装回 `NoteData`（其余字段沿用 v3 真跑的原值）。"""
+                   would: list, counts: dict) -> "note_render.NoteData":
+    """把回放出来的 review 装回 `NoteData`（其余字段沿用 v3 真跑的原值）。
+
+    ⚠️ F15-4③：`warns` 与 `guard_summary` **必须按回放结果重算**，不许沿用上一次真跑的那份 ——
+       旧那份里还写着「1 处跨节对不上已在后一节原位标 ⚠：§15（missing-term：schooling）」，
+       而那条标注已经被 B 修掉了；页脚说假话比页脚缺行更坏。
+    """
     import dataclasses
     fields = {f.name for f in dataclasses.fields(note_render.NoteData)}
     kw = {k: v for k, v in (note_data or {}).items() if k in fields}
     kw["review"] = review
-    kw["warns"] = list(note_data.get("warns") or []) + list(warns)
-    if would:
-        kw["guard_summary"] = (str(note_data.get("guard_summary") or "")
-                               + f" · replay(would-repair {len(would)})")
-    kw["html_name"] = ""      # 回放不装 KaTeX 资源，不留一个指不到的文件名
+    head = ["本页由**冻结回放**重生成（守卫链重跑；速览/串讲/例题返修等模型层沿用原产物）"]
+    kw["warns"] = head + list(warns)
+    kw["guard_summary"] = guard_summary(counts, would)
+    # 回放只跑守卫层：不装 KaTeX 资源（不留一个指不到的文件名），
+    # Anki 卡那行也是上次的产物 —— 一并清掉，免得指出错文件。
+    kw["html_name"] = ""
+    kw["anki_name"] = ""
     return note_render.NoteData(**kw)
 
 
@@ -129,8 +165,8 @@ def main() -> int:
     data_path, raw_path = pathlib.Path(args.data), pathlib.Path(args.raw)
     note_data = json.loads(data_path.read_text(encoding="utf-8"))
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
-    review, warns, would = replay(note_data, raw)
-    data = note_data_from(note_data, review, warns=warns, would=would)
+    review, warns, would, counts = replay(note_data, raw)
+    data = note_data_from(note_data, review, warns=warns, would=would, counts=counts)
 
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)

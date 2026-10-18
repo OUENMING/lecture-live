@@ -1821,5 +1821,140 @@
     ]
    }
   }
+ },
+ {
+  "id": "E1-标注里没有裸或截断的LaTeX",
+  "check": "e1_mark_no_bare_latex",
+  "must": "flag",
+  "why": "v3/ecs170 §53 旧文案是 `\\partialE/\\partialw_{hj}=(\\hat y_j-y_j)\\,\\ha…` —— 裸 LaTeX 且截断，KaTeX 渲染不出来；现在两条式子整条进 `$…$`",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[17:50] 链式法则串出 ∂E/∂w_hj 与临时项 g_j",
+      "ts": "17:50:44",
+      "algebra": "$\\partial E/\\partial w_{hj}=(\\hat y_j-y_j)\\hat y_j(1-\\hat y_j)b_h=g_j b_h$",
+      "prose": [
+       "对 $w_{hj}$ 求偏导，三块相乘得 $\\partial E/\\partial w_{hj}=(\\hat y_j-y_j)\\,\\hat y_j(1-\\hat y_j)\\,b_h$。",
+       "为了后面复用取个名字：$g_j=-(\\hat y_j-y_j)\\,\\hat y_j(1-\\hat y_j)=(y_j-\\hat y_j)\\,\\hat y_j(1-\\hat y_j)$。于是 $\\partial E/\\partial w_{hj}=g_j\\,b_h$。"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "E2-差号标注说清应为与写成",
+  "check": "e2_symbol_sign_message",
+  "must": "flag",
+  "why": "作者 round 4 ① 的原话格式：按本节 g_j 的定义代入，应为 `$\\partial E/\\partial w_{hj}=-g_j b_h$`；正文写成 `$g_j b_h$`，差一个负号",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[17:50] 链式法则串出 ∂E/∂w_hj 与临时项 g_j",
+      "ts": "17:50:44",
+      "algebra": "$\\partial E/\\partial w_{hj}=(\\hat y_j-y_j)\\hat y_j(1-\\hat y_j)b_h=g_j b_h$",
+      "prose": [
+       "对 $w_{hj}$ 求偏导，三块相乘得 $\\partial E/\\partial w_{hj}=(\\hat y_j-y_j)\\,\\hat y_j(1-\\hat y_j)\\,b_h$。",
+       "为了后面复用取个名字：$g_j=-(\\hat y_j-y_j)\\,\\hat y_j(1-\\hat y_j)=(y_j-\\hat y_j)\\,\\hat y_j(1-\\hat y_j)$。于是 $\\partial E/\\partial w_{hj}=g_j\\,b_h$。"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "F1-正负号文案说清两种写法",
+  "check": "f1_flip_wording",
+  "must": "flag",
+  "why": "「（偏置写法 b=−θ 是另一回事）」读起来像「这条不作数」；改成「这是偏置写法，偏置 = −阈值，两种写法符号相反」",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "A",
+      "ts": "17:30",
+      "prose": [
+       "讲解。"
+      ],
+      "algebra": "$h_h=f(\\sum_i v_{ih}x_i-\\gamma_h)$"
+     },
+     {
+      "heading": "B",
+      "ts": "17:41",
+      "prose": [
+       "讲解。"
+      ],
+      "algebra": "$h=f(xV+\\gamma)$"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "C7-引语按词边界截断",
+  "check": "c7_quote_word_ok",
+  "must": "flag",
+  "why": "转录矛盾引语原来切在词中间（`…each additional year of experience, goin…`）",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[09:31] 虚拟变量与交互项",
+      "ts": "09:31",
+      "prose": [
+       "讲解。"
+      ]
+     }
+    ]
+   },
+   "entries": [
+    {
+     "ts": "09:33:35",
+     "en": "And if you're male, every extra year of experience adds 0.3 plus 0.4.",
+     "zh": "如果你是男性，每增加一年经验，你就会有0.3加0.4。"
+    },
+    {
+     "ts": "09:34:03",
+     "en": "For female workers, pay also rises as experience grows.",
+     "zh": "对于有经验的女工来说，随着经验的增加，每增加一年经验工资就会增加。"
+    },
+    {
+     "ts": "09:34:15",
+     "en": "For each additional year of experience, the slope is beta three plus beta four, so that.",
+     "zh": "每一年的经验，收益是β3加β4。"
+    }
+   ]
+  }
+ },
+ {
+  "id": "R1-回放页脚按回放结果重算",
+  "check": "r1_replay_footer",
+  "must": "flag",
+  "why": "v3r busi 的核对记录里还留着上一次真跑的 `§15（missing-term：schooling）` —— 那条标注已被 B 修掉，页脚必须重算",
+  "input": {
+   "note_data": {
+    "warns": [
+     "1 处跨节对不上已在后一节原位标 ⚠：§15（missing-term：schooling）",
+     "超限单元压缩：3 个单元各做了 1 次压缩调用"
+    ],
+    "guard_summary": "guards: repaired 1, dropped 18, flagged 2, downgraded 2",
+    "entries": [],
+    "date": "2026-10-12",
+    "course": "BUSI3243"
+   },
+   "raw": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "09:45",
+      "prose": [
+       "讲解。"
+      ]
+     }
+    ]
+   }
+  }
  }
 ]

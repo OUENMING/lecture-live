@@ -347,7 +347,7 @@ def test_mode_title(on: bool) -> str:
 #: 「云端转写」不再是落点条上的常驻开关（2026-10-12 Owen：默认就是开，不必摆一颗关的按钮），
 #: 2026-10-16 起它是**标题行胶囊菜单**顶层那颗勾选项（`PLAN-396` §1）—— 要关的人点一下就找得到。
 CLOUD_ASR_TITLE = "云端转写 · 英文更准"
-CLOUD_ASR_TIP = "音频片段会发给 Groq / 阿里云转写，换更准的英文；取消勾选 = 全本地"
+CLOUD_ASR_TIP = "音频会发给 Soniox / Groq / 阿里云转写，换更准的英文；取消勾选 = 全本地"
 
 
 def cloud_item(*, cloud_on: bool, locked: bool) -> dict:

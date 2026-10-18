@@ -2,7 +2,7 @@
 
 ## 这是什么
 
-ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音频 → 转写 → 逐句修正并翻译 → 悬浮字幕 → 实时落盘、课后渲染双层 Obsidian 笔记。零参数 `cl` 启动；草稿/兜底识别跑在本机；翻译只发文本；定稿转写默认走云端（Groq / 阿里云，可关：面板开关或 `CLASSLIVE_CLOUD_ASR=0`，3.9.0 起），关掉后音频不出机器。MIT 开源，已脱敏。
+ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音频 → 转写 → 逐句修正并翻译 → 悬浮字幕 → 实时落盘、课后渲染双层 Obsidian 笔记。零参数 `cl` 启动；草稿/兜底识别跑在本机；翻译只发文本；识别默认走云端（实时字幕 Soniox 直连、3.10.0 起；定稿 Groq / 阿里云，3.9.0 起；可关：面板开关或 `CLASSLIVE_CLOUD_ASR=0`），关掉后音频不出机器。收件方名单变了要同步四处告知（README 隐私段、`final_asr.consent_text`（首次弹窗；收件方变了不重弹，Owen 10-18 定：以 GitHub 为准）、`entry_panel.CLOUD_ASR_TIP`、`main.resolve_cloud_asr_enabled` 终端那行）。MIT 开源，已脱敏。
 
 ## 文件地图
 

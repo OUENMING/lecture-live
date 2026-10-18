@@ -413,6 +413,9 @@ class TestConfigAndId(Base):
         t = final_asr.consent_text()
         self.assertIn("Groq", t)
         self.assertIn("阿里云", t)
+        self.assertIn("Soniox", t)                   # 2026-10-18：实时字幕的收件方
+        self.assertIn("课名", t)                     # Soniox 收课名 + 术语表 —— 不许写「不发课号」
+        self.assertNotIn("课号", t)
         self.assertNotIn("纯转录档就不出本机", t)
 
 

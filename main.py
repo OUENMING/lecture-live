@@ -1350,8 +1350,8 @@ def resolve_cloud_asr_enabled(*, read=final_asr.read_config, write=final_asr.wri
     if cfg["acknowledged"]:
         return True
     if not can_alert():
-        say("☁ 定稿转写默认走云端: 音频(Opus 压缩)经作者服务器转发给 Groq(美国)/阿里云百炼(中国)。"
-            "不想上云: CLASSLIVE_CLOUD_ASR=0 启动")
+        say("☁ 云端转写默认开: 音频发给 Soniox(实时字幕, 用通行码时直连)/ 经作者服务器发给 "
+            "Groq(美国)/阿里云百炼(新加坡)。不想上云: CLASSLIVE_CLOUD_ASR=0 启动")
         return True
     alert("定稿转写会用云端", final_asr.consent_text(), buttons=("好的",))
     write(True)

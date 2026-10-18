@@ -227,7 +227,8 @@ def extract(finals: list, *, verify=None, deleted=(), known=(),
     seen_in: dict = {}                 # 词 -> 出现在几句里
     first_seen: dict = {}              # 词 -> 第一次出现的位置（保序）
     last_seen: dict = {}               # 词 -> 最后一次出现在第几句（新近度）
-    shape_ok: dict = {}
+    shape_ok: dict = {}                # 词（小写）-> 有没有哪一次形状过关
+    shape_cache: dict = {}             # (原样, 是否句中) -> `_looks_term` 结果
     for si, sentence in enumerate(finals or []):
         toks = _WORD.findall(sentence or "")
         lows = [t.lower() for t in toks]
@@ -242,9 +243,14 @@ def extract(finals: list, *, verify=None, deleted=(), known=(),
                     continue
                 if len(gram) > 48:
                     continue
-                if gram.lower() not in shape_ok:
-                    shape_ok[gram.lower()] = _looks_term(gram, verify=verify, position=i)
-                if not shape_ok[gram.lower()]:
+                # ⚠️ 判形状的缓存按「原样大小写 + 是否句首」分开记：`Coase` 第一次出现在句首
+                #    被判否，不能连累后面句中的 `Coase`（2026-10-18 合并检查抓到）。
+                ck = (gram, i > 0)
+                if ck not in shape_cache:
+                    shape_cache[ck] = _looks_term(gram, verify=verify, position=i)
+                ok = shape_cache[ck]
+                shape_ok[gram.lower()] = shape_ok.get(gram.lower(), False) or ok
+                if not ok:
                     continue
                 if gram.lower() not in first_seen:
                     first_seen[gram.lower()] = (si, gram)
@@ -430,8 +436,8 @@ class LivePool:
             if st is not None and cnt > st["count"]:
                 st["count"], st["last"] = cnt, last
         new = self.add(got.terms, stats=got.stats)
-        self._trim()
-        return new
+        gone = {w.lower() for w in self._trim()}
+        return [w for w in new if w.lower() not in gone]   # 进池即被淘汰的不算「新进池」
 
     def _trim(self) -> list:
         """超上限时淘汰：**计数最少 → 最旧 → 最早进池**。返回这次淘汰掉的词。"""
@@ -440,9 +446,11 @@ class LivePool:
             victim = min(self._pool, key=self._evict_key)
             self._pool.remove(victim)
             self._stat.pop(victim.lower(), None)
-            self._evicted.append(victim)
             out.append(victim)
-        self._trimmed += len(out)
+            # 被淘汰的词下一轮抽取又会被捞回来再淘汰：账上只记一次（不然 `report()` 越报越多）
+            if victim.lower() not in {e.lower() for e in self._evicted}:
+                self._evicted.append(victim)
+                self._trimmed += 1
         return out
 
     def evicted(self) -> list:

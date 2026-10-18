@@ -57,6 +57,11 @@ class Extract(unittest.TestCase):
         got = lt.extract(finals("we follow Coase here", "as Coase said"))
         self.assertIn("Coase", got.terms)
 
+    def test_先在句首出现的专有名词句中照收(self):
+        """形状缓存不许按小写共用：句首那次判否，不能连累后面句中的 `Coase`。"""
+        got = lt.extract(finals("Coase said that", "we read Coase today", "ask Coase"))
+        self.assertIn("Coase", got.terms)
+
     def test_句首大写不算专有名词(self):
         """句首词天然大写 —— 只有**句中**大写才是专有名词的信号。"""
         got = lt.extract(finals("Hello there everyone", "Hello again folks"))
@@ -143,6 +148,18 @@ class Extract(unittest.TestCase):
 
 
 class Pool(unittest.TestCase):
+    def test_淘汰的词不会每轮再报一遍(self):
+        """被淘汰的词下一轮又被捞回来、又被淘汰：不许每轮当「新进池」报，账上只记一次。"""
+        pool = lt.LivePool(step=1, limit=1, verify=mats_yes)
+        f = ["we read Coase now", "ask Coase again", "then Pigou came",
+             "and Pigou left", "so Pigou won"]
+        self.assertEqual(pool.update(f), ["Pigou"], "进池即被淘汰的 Coase 不该算新进池")
+        for extra in ("nothing new here", "still nothing"):
+            f.append(extra)
+            self.assertEqual(pool.update(f), [], "被淘汰的词每轮又被报成新进池")
+        self.assertEqual(pool.evicted(), ["Coase"])
+        self.assertIn("1 条", pool.report())
+
     def test_步长_没到就立刻返回(self):
         pool = lt.LivePool(step=5, verify=mats_yes)
         first = pool.update(finals(*["Shutdown price is low"] * 6))

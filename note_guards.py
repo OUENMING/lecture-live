@@ -1041,6 +1041,93 @@ def drop_asr_orphans(review: dict, *, entries: list, known) -> tuple:
     return out, [{"dropped": len(removed)}], warns
 
 
+# ---- ⑧⑨ 跨节矛盾 ----------------------------------------------------------
+def _find_and_append(s: dict, needle: str, mark: str) -> bool:
+    """把 `mark` 缀到 `s` 里含 `needle` 的那个字段（找不到就缀到第一段 prose）。**就地。**
+
+    ⚠️ 缀在**句末**（`。`/`；` 之后），不切在句子中间。
+    """
+    needle = re.sub(r"\s+", "", str(needle or ""))[:14]
+    cands: list = []
+    for path in paths_of(s):
+        if _field_name(path) not in _MARK_FIELDS:
+            continue
+        v = _get(s, path)
+        if isinstance(v, str) and v:
+            cands.append((path, v))
+    for path, v in cands:
+        if needle and needle in re.sub(r"\s+", "", v):
+            j = max([v.rfind(p) for p in "。；;"]) + 1
+            _set(s, path, v[:j] + mark + v[j:])
+            return True
+    if cands:
+        path, v = cands[0]
+        _set(s, path, v.rstrip() + mark)
+        return True
+    return False
+
+
+def _snip(t: str, n: int = 46) -> str:
+    s = re.sub(r"\s+", "", str(t or ""))
+    return (s[:n] + "…") if len(s) > n else s
+
+
+def flag_conflicts(review: dict, *, entries: list | None = None) -> tuple:
+    """对不上的地方（跨节 / 本节自己的式与讲解）→ 原位标 ⚠。F14 ⑧⑨ + F14-2 ⑩⑪
+
+    ⚠️ 为什么必须做（作者逐字读 v2）：§14 写 `$z\\le0$ 输出 0`（还把「z=0 输出 1」
+       列成常见错误），§15 写「大于等于 0 输出 1」；BUSI §15 自补例男性 0.7、
+       §18 又写男性 0.3 —— **读者按哪一节复习都可能记反**。转录自己前后不一致时
+       （`if you're male … 0.3 plus 0.4` vs `for female workers … beta three plus
+       beta four`），笔记要说出"课上前后说法不一致"，不许挑一个当定论。
+    ⚠️ 只标不改（改哪边都可能改错，与三道核同一条纪律）。
+    返回 `(review, [{"flagged": n}], warns)`。
+    """
+    import note_conflict
+    out = copy.deepcopy(review)
+    secs = [s for s in (out.get("sections") or []) if isinstance(s, dict)]
+    if not secs:
+        return review, [], []
+    got = note_conflict.conflicts(out, entries=entries)
+    src = next((c for c in got if c["kind"] == "source-self-conflict"), None)
+    src_note = ""
+    if src:
+        q = src["quotes"]
+        src_note = ("；课上口述本身前后不一致（"
+                    + "；".join(f"{x['ts']} 说「{_snip(x['quote'], 36)}」" for x in q[:2])
+                    + "）")
+    n = 0
+    details: list = []
+    for c in got:
+        if c["kind"] == "source-self-conflict":
+            continue
+        kind = c["kind"]
+        i, j = c["sections"]
+        later = secs[j - 1]
+        title = _ref_title(secs[i - 1])
+        if kind == "point-value":
+            a, b = c["texts"]
+            mark = (f"（⚠ 与「{title}」一节对不上：{_snip(a)}；{_snip(b)}{src_note}）")
+            needle = b
+        else:
+            v1, v2 = c["values"]
+            mark = (f"（⚠ 与「{title}」一节对不上：{c['label']} 那节写 "
+                    f"{','.join(f'{x:g}' for x in v1)}、这节写 "
+                    f"{','.join(f'{x:g}' for x in v2)}{src_note}）")
+            needle = next((x for x in (later.get("prose") or [])
+                           if c["label"] in str(x)), "")
+        if _find_and_append(later, needle, mark):
+            n += 1
+            details.append(f"§{j} ↔ §{i}（{c.get('label') or c.get('var')}）")
+    warns = []
+    if n:
+        warns.append(f"{n} 处跨节对不上已在后一节原位标 ⚠：" + "、".join(details))
+    if src:
+        warns.append("课上口述前后不一致：" + "；".join(
+            f"{x['group']} {x['ts']}" for x in src["quotes"][:3]))
+    return out, [{"flagged": n}], warns
+
+
 #: 去重句首的连接词/强调符：`但课上只给了片段…` 与 `⚠ 课上只给了片段…` 是同一句。
 _DUPE_LEAD = re.compile(r"^(?:[⚠️!！?？\s、，。:：]+|但|不过|另外|同时|而且|而|于是|因此|所以|又|还|也)+")
 

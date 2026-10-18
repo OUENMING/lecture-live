@@ -1390,6 +1390,10 @@ class ObsidianWriter:
                               known=lambda t: (self._term_verified(t)
                                                or str(t).strip().lower() in _lecture_terms(r))),
                            "ASR 噪声清理"),
+                          # ⭐ F14 ⑧⑨：跨节矛盾（同一件事两处写成两个值；转录自己前后不一致）
+                          #    → 在**后一节**原位标 ⚠，说清"哪一节怎么写的"。只标不改。
+                          (lambda r: note_guards.flag_conflicts(r, entries=entries),
+                           "跨节矛盾"),
                           # ⭐ 第七轮 H：超上限的单元先压干净，速览才照着**最终长度**写
                           (lambda r: self._shorten_overlimit(r), "超限单元压缩"),
                           (lambda r: self._with_overview(r), "速览"),
@@ -1431,8 +1435,8 @@ class ObsidianWriter:
                     st = extra_items[0]
                     if isinstance(st, dict):
                         self._guard_counts["downgraded"] += int(st.get("downgraded") or 0)
-                elif label in ("无课件来源降级", "悬空节指路", "ASR 噪声清理") \
-                        and extra_items:
+                elif label in ("无课件来源降级", "悬空节指路", "ASR 噪声清理",
+                               "跨节矛盾") and extra_items:
                     st = extra_items[0]
                     if isinstance(st, dict):
                         for k in ("repaired", "dropped", "downgraded", "flagged"):

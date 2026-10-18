@@ -1,0 +1,1053 @@
+[
+ {
+  "id": "A2-术语库跨课定义",
+  "check": "a2_cross_course_term",
+  "must": "flag",
+  "why": "ECS170 术语表里长出过 `structure — 社会结构，影响行为的规则和制度 · 术语库`",
+  "input": {
+   "term": "structure",
+   "source": "术语库",
+   "verified": false,
+   "lecture_term": false
+  }
+ },
+ {
+  "id": "A2-本课抽到过就放行",
+  "check": "a2_cross_course_term",
+  "must": "pass",
+  "why": "本课复习层真把它当术语抽出来过 → 允许显示",
+  "input": {
+   "term": "structure",
+   "source": "术语库",
+   "verified": false,
+   "lecture_term": true
+  }
+ },
+ {
+  "id": "A2-本课术语表里有就放行",
+  "check": "a2_cross_course_term",
+  "must": "pass",
+  "why": "本课术语表/课件里出现过 → 允许显示",
+  "input": {
+   "term": "variable",
+   "source": "术语库",
+   "verified": true,
+   "lecture_term": false
+  }
+ },
+ {
+  "id": "A3-引语没找到用原话标签",
+  "check": "a3_quote_label",
+  "must": "flag",
+  "why": "读者要能一眼看出这是「没找到原话」而不是「数字算错」",
+  "input": {
+   "sections": [
+    {
+     "heading": "H",
+     "ts": "17:09",
+     "prose": [
+      "课件末页把公式写成指数形式。"
+     ]
+    }
+   ],
+   "checks": [
+    {
+     "claim": "课件末页把公式写成指数形式。",
+     "status": "mismatch",
+     "kind": "support",
+     "recomputed": "support p=0.08",
+     "how": "转录里没找到这句（核对）"
+    }
+   ]
+  }
+ },
+ {
+  "id": "A3-引语错不许冒充数字错",
+  "check": "a3_numeric_label",
+  "must": "pass",
+  "why": "引语没找到**不许**冒充「数字算错」（两个标签各管各的）",
+  "input": {
+   "sections": [
+    {
+     "heading": "H",
+     "ts": "17:09",
+     "prose": [
+      "课件末页把公式写成指数形式。"
+     ]
+    }
+   ],
+   "checks": [
+    {
+     "claim": "课件末页把公式写成指数形式。",
+     "status": "mismatch",
+     "kind": "support",
+     "recomputed": "support p=0.08",
+     "how": "转录里没找到这句（核对）"
+    }
+   ]
+  }
+ },
+ {
+  "id": "A3-数字错用数字标签",
+  "check": "a3_numeric_label",
+  "must": "flag",
+  "why": "数值对不上照旧走「数字对不上」",
+  "input": {
+   "sections": [
+    {
+     "heading": "H",
+     "ts": "17:09",
+     "prose": [
+      "课件末页把公式写成指数形式。"
+     ]
+    }
+   ],
+   "checks": [
+    {
+     "claim": "课件末页把公式写成指数形式。",
+     "status": "mismatch",
+     "recomputed": "40/2 ≈ 21",
+     "how": "40÷2=20，不是21"
+    }
+   ]
+  }
+ },
+ {
+  "id": "A3-数字错不许冒充引语错",
+  "check": "a3_quote_label",
+  "must": "pass",
+  "why": "数字错**不许**被标成「没找到原话」",
+  "input": {
+   "sections": [
+    {
+     "heading": "H",
+     "ts": "17:09",
+     "prose": [
+      "课件末页把公式写成指数形式。"
+     ]
+    }
+   ],
+   "checks": [
+    {
+     "claim": "课件末页把公式写成指数形式。",
+     "status": "mismatch",
+     "recomputed": "40/2 ≈ 21",
+     "how": "40÷2=20，不是21"
+    }
+   ]
+  }
+ },
+ {
+  "id": "A4-第三节其实是第21节",
+  "check": "a4_section_refs",
+  "must": "flag",
+  "why": "「ReLU 的负区零梯度问题在第三节」——真正讲它的是 §21",
+  "input": {
+   "sections": [
+    {
+     "heading": "[17:05] ReLU 的定义",
+     "prose": [
+      "ReLU 是分段线性：z>0 输出 z。"
+     ],
+     "terms": [
+      {
+       "en": "ReLU",
+       "zh": "修正线性单元"
+      }
+     ]
+    },
+    {
+     "heading": "[17:06] ReLU 的导数优势与缺陷",
+     "prose": [
+      "负区间导数恒 0，神经元收不到梯度。"
+     ],
+     "terms": [
+      {
+       "en": "ReLU",
+       "zh": "修正线性单元"
+      },
+      {
+       "en": "piecewise linear",
+       "zh": "分段线性"
+      }
+     ]
+    },
+    {
+     "heading": "[17:08] Leaky ReLU",
+     "prereq_link": "ReLU 的负区零梯度问题在第三节。",
+     "prose": [
+      "负区仍有梯度。"
+     ],
+     "terms": [
+      {
+       "en": "Leaky ReLU",
+       "zh": "带泄漏的 ReLU"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "id": "A4-对的相对指路不动",
+  "check": "a4_section_refs",
+  "must": "pass",
+  "why": "`上一节` 指的就是上一节 → 一个字不动",
+  "input": {
+   "sections": [
+    {
+     "heading": "[17:03] Sigmoid 饱和",
+     "prose": [
+      "sigmoid 两端饱和，梯度趋近 0。"
+     ]
+    },
+    {
+     "heading": "[17:04] 梯度消失",
+     "prereq_link": "上一节的饱和问题在这里成了梯度消失。",
+     "prose": [
+      "梯度乘上趋零的斜率。"
+     ],
+     "terms": [
+      {
+       "en": "sigmoid",
+       "zh": "S 形函数"
+      }
+     ]
+    },
+    {
+     "heading": "[17:05] 别的",
+     "prose": [
+      "x"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "id": "A5-没课件却说课件末页",
+  "check": "a5_false_sources",
+  "must": "flag",
+  "why": "该讲 `📖 无课件材料`，正文却写「课件末页公式」、台账还写「与课件一致」",
+  "input": {
+   "has_materials": false,
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "17:09",
+      "sources": [
+       "🎙 17:09:34",
+       "📖 2025-12 期末卷"
+      ],
+      "prose": [
+       "课件末页公式：$\\sigma(z)=1/(1+e^{-z})$。"
+      ],
+      "example": {
+       "title": "📖 期末卷 Exercise 3",
+       "prompt": "求 σ(z) 的导数。",
+       "answer": "f(1-f)"
+      }
+     }
+    ],
+    "checks": [
+     {
+      "claim": "x",
+      "status": "ok",
+      "how": "阶跃定义与课件一致"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "A5-有课件不许动",
+  "check": "a5_false_sources",
+  "must": "pass",
+  "why": "有课件时 📖 是真的，一个字不动",
+  "input": {
+   "has_materials": true,
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "17:09",
+      "sources": [
+       "🎙 17:09:34",
+       "📖 2025-12 期末卷"
+      ],
+      "prose": [
+       "课件末页公式：$\\sigma(z)=1/(1+e^{-z})$。"
+      ],
+      "example": {
+       "title": "📖 期末卷 Exercise 3",
+       "prompt": "求 σ(z) 的导数。",
+       "answer": "f(1-f)"
+      }
+     }
+    ],
+    "checks": [
+     {
+      "claim": "x",
+      "status": "ok",
+      "how": "阶跃定义与课件一致"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "A6-常数9来自数字清单",
+  "check": "a6_asr_orphans",
+  "must": "flag",
+  "why": "转录 `Outputs listed: 1, 9, then 0 as a constant.` 被读成「输出是 1 或常数 9」",
+  "input": {
+   "known": [],
+   "entries": [
+    {
+     "ts": "17:05:49",
+     "en": "Outputs listed: 1, 9, then 0 as a constant."
+    },
+    {
+     "ts": "17:56:08",
+     "en": "There are plenty of TLAs you will pick up on your own later. We don't require S1 for"
+    },
+    {
+     "ts": "17:56:09",
+     "en": "this module, but S1 matters a lot for ML or HCI"
+    }
+   ],
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "17:05",
+      "pitfalls": [
+       "误以为 ReLU 负区间输出是 1 或常数 9；实际是 0。"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "A6-S1来自拼错的噪声行",
+  "check": "a6_asr_orphans",
+  "must": "flag",
+  "why": "转录 `… We don't require S1 for` 被抄成「课程本身不要求 S1」",
+  "input": {
+   "known": [],
+   "entries": [
+    {
+     "ts": "17:05:49",
+     "en": "Outputs listed: 1, 9, then 0 as a constant."
+    },
+    {
+     "ts": "17:56:08",
+     "en": "There are plenty of TLAs you will pick up on your own later. We don't require S1 for"
+    },
+    {
+     "ts": "17:56:09",
+     "en": "this module, but S1 matters a lot for ML or HCI"
+    }
+   ],
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "17:56",
+      "prose": [
+       "考试不考，项目里也不要求，课程本身不要求 S1。但以后会用。"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "A6-同一条噪声抄了三处也删",
+  "check": "a6_asr_orphans",
+  "must": "flag",
+  "why": "v3 实测：同一个编出来的先修课编号被抄进 3 处正文 + 1 处问题 —— 只删一次的闸漏了",
+  "input": {
+   "known": [],
+   "entries": [
+    {
+     "ts": "17:05:49",
+     "en": "Outputs listed: 1, 9, then 0 as a constant."
+    },
+    {
+     "ts": "17:56:08",
+     "en": "There are plenty of TLAs you will pick up on your own later. We don't require S1 for"
+    },
+    {
+     "ts": "17:56:09",
+     "en": "this module, but S1 matters a lot for ML or HCI"
+    }
+   ],
+   "review": {
+    "sections": [
+     {
+      "heading": "H1",
+      "ts": "17:56",
+      "prose": [
+       "课程里 final project 可以从 ReLU 起步再换别的试；S1 不要求修，但对 AI 方向重要。"
+      ]
+     },
+     {
+      "heading": "H2",
+      "ts": "17:57",
+      "prose": [
+       "教授明确说这门课不要求先修 S1，没有也能跟。"
+      ],
+      "q": "这门课需要先修 S1 吗？"
+     },
+     {
+      "heading": "H3",
+      "ts": "17:58",
+      "prose": [
+       "但 S1 对走 AI 方向的人很重要，缺了这块基础算法类视频看不懂。"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "A6-真缩写与完整句不许删",
+  "check": "a6_asr_orphans",
+  "must": "pass",
+  "why": "`DJI` 出现在完整句子里、`RSS` 用在公式里 → 都不许删",
+  "input": {
+   "known": [],
+   "entries": [
+    {
+     "ts": "16:44",
+     "en": "newer cameras like the DJI Pocket 4 record 10 bits."
+    },
+    {
+     "ts": "17:26",
+     "en": "when RSS is large the fit is poor"
+    }
+   ],
+   "review": {
+    "sections": [
+     {
+      "heading": "H",
+      "ts": "16:44",
+      "prose": [
+       "新相机（如 DJI Pocket 4）用 10 bit。"
+      ],
+      "algebra": "$RMSE=\\sqrt{RSS/n}$"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "A7-电报体不许替换",
+  "check": "a7_shorten_floor",
+  "must": "flag",
+  "why": "§23 实测：更短了，但只剩箭头关键词",
+  "input": {
+   "prose": [
+    "原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原。"
+   ],
+   "lines": [
+    "阶跃0/1无梯度→sigmoid/tanh饱和→ReLU修负区与不光滑；先试ReLU。"
+   ]
+  }
+ },
+ {
+  "id": "A7-正常压缩照收",
+  "check": "a7_shorten_floor",
+  "must": "pass",
+  "why": "仍然是给人读的散文 → 允许替换",
+  "input": {
+   "prose": [
+    "原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原。"
+   ],
+   "lines": [
+    "先把 sigmoid 拆成两层来求导：外层是倒数，内层是指数加一。外层求导得负数，内层求导也是负数，两个负号互相抵消，于是一阶导只剩下指数项除以分母的平方。再把指数项用原来的分母表示，就得到只含输出、不再含自变量的形式，也就是课本上那条常用结论。这一步是后面反向传播反复要用的地方，值得自己动手推一遍，记住两个负号抵消这个细节，考试里写错符号最常见。",
+    "先把 sigmoid 拆成两层来求导：外层是倒数，内层是指数加一。外层求导得负数，内层求导也是负数，两个负号互相抵消，于是一阶导只剩下指数项除以分母的平方。再把指数项用原来的分母表示，就得到只含输出、不再含自变量的形式，也就是课本上那条常用结论。这一步是后面反向传播反复要用的地方，值得自己动手推一遍，记住两个负号抵消这个细节，考试里写错符号最常见。",
+    "先把 sigmoid 拆成两层来求导：外层是倒数，内层是指数加一。外层求导得负数，内层求导也是负数，两个负号互相抵消，于是一阶导只剩下指数项除以分母的平方。再把指数项用原来的分母表示，就得到只含输出、不再含自变量的形式，也就是课本上那条常用结论。这一步是后面反向传播反复要用的地方，值得自己动手推一遍，记住两个负号抵消这个细节，考试里写错符号最常见。"
+   ]
+  }
+ },
+ {
+  "id": "B8-阶跃在z=0一处0一处1",
+  "check": "b8_point_value",
+  "must": "flag",
+  "why": "§14 `z≤0 输出 0` vs §15 `≥0 输出 1`：同一个阶跃函数在 z=0 给了两个值",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[16:57] 二值阶跃函数及其缺陷",
+      "ts": "16:57",
+      "prose": [
+       "最直觉的激活函数是二值阶跃函数（binary step function）：$z>0$ 时输出 1，$z\\le 0$ 时输出 0（课上把 $z=0$ 划在 0 这一侧）。它就是个硬开关，等于在问『加权和越没越过门槛』。",
+       "问题是输出只有两个常数。$z=0.1$ 和 $z=100$ 都输出 1，神经元没法表达『强多少』这层信息；落在 0 那一侧也一样，全被压成同一个值。更麻烦的是导数：整条曲线在 0 两侧都是平的，导数处处为 0，只在 $z=0$ 处连导数都不存在。后面要按梯度调参数时，这个 0 会把信号直接掐断。",
+       "所以阶跃函数只适合做定性判断，不能拿来做需要『输入变一点、输出跟着变一点』的学习。"
+      ],
+      "algebra": "$f(z)=1\\ (z>0)$，$f(z)=0\\ (z\\le0)$；$f'(z)=0$ 除 $z=0$ 不可导",
+      "pitfalls": [
+       "以为阶跃函数在 z=0 处输出 1（课上定的是 0）",
+       "以为阶跃函数导数在别处非零"
+      ],
+      "variants": [],
+      "terms": [
+       {
+        "en": "binary step function",
+        "zh": "二值阶跃函数"
+       },
+       {
+        "en": "derivative",
+        "zh": "导数"
+       }
+      ],
+      "prereq_link": "上一节把 f 留成待定，这里填进第一个候选。"
+     },
+     {
+      "heading": "[16:59] 二值阶跃函数（binary step function）的梯度问题",
+      "ts": "16:59",
+      "prose": [
+       "阶跃函数是最直白的「开关」：输入 z 小于 0 输出 0，大于等于 0 输出 1。它把整条数轴切成两段常数，所以除了分界点，每一处的斜率都是 0；而 z=0 处从 0 直接跳到 1，是断点，导数根本不存在。",
+       "这件事在训练里是致命的：反向传播要用梯度告诉参数往哪边调，可这个函数给出的梯度只有两种结局 —— 0，或者不存在。梯度是 0 就等于没有任何方向信息。课上提到，早期提出神经网络时人们确实用过它，因为那时并不靠梯度来调参数；一旦要靠梯度学习，就必须换成能求导的函数。"
+      ],
+      "algebra": "",
+      "pitfalls": [
+       "以为「导数不存在」只发生在个别点无所谓 —— 其余所有点导数都是 0，同样传不出信息。"
+      ],
+      "variants": [],
+      "terms": [
+       {
+        "en": "binary step function",
+        "zh": "二值阶跃函数"
+       },
+       {
+        "en": "gradient",
+        "zh": "梯度"
+       },
+       {
+        "en": "backpropagation",
+        "zh": "反向传播"
+       }
+      ],
+      "prereq_link": ""
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "B8-两边同口径不报",
+  "check": "b8_point_value",
+  "must": "pass",
+  "why": "两节都写 `z≤0 → 0` → 一致，不许报",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[16:57] 二值阶跃函数及其缺陷",
+      "ts": "16:57",
+      "prose": [
+       "最直觉的激活函数是二值阶跃函数（binary step function）：$z>0$ 时输出 1，$z\\le 0$ 时输出 0（课上把 $z=0$ 划在 0 这一侧）。它就是个硬开关，等于在问『加权和越没越过门槛』。",
+       "问题是输出只有两个常数。$z=0.1$ 和 $z=100$ 都输出 1，神经元没法表达『强多少』这层信息；落在 0 那一侧也一样，全被压成同一个值。更麻烦的是导数：整条曲线在 0 两侧都是平的，导数处处为 0，只在 $z=0$ 处连导数都不存在。后面要按梯度调参数时，这个 0 会把信号直接掐断。",
+       "所以阶跃函数只适合做定性判断，不能拿来做需要『输入变一点、输出跟着变一点』的学习。"
+      ],
+      "algebra": "$f(z)=1\\ (z>0)$，$f(z)=0\\ (z\\le0)$；$f'(z)=0$ 除 $z=0$ 不可导",
+      "pitfalls": [
+       "以为阶跃函数在 z=0 处输出 1（课上定的是 0）",
+       "以为阶跃函数导数在别处非零"
+      ],
+      "variants": [],
+      "terms": [
+       {
+        "en": "binary step function",
+        "zh": "二值阶跃函数"
+       },
+       {
+        "en": "derivative",
+        "zh": "导数"
+       }
+      ],
+      "prereq_link": "上一节把 f 留成待定，这里填进第一个候选。"
+     },
+     {
+      "heading": "[16:59] 二值阶跃函数（binary step function）的梯度问题",
+      "ts": "16:59",
+      "prose": [
+       "阶跃函数是最直白的「开关」：输入 z 小于 0 输出 0，小于等于 0 输出 0。换句话讲，$z>0$ 输出 1，$z\\le 0$ 输出 0。它把整条数轴切成两段常数。"
+      ],
+      "algebra": "",
+      "pitfalls": [
+       "以为「导数不存在」只发生在个别点无所谓 —— 其余所有点导数都是 0，同样传不出信息。"
+      ],
+      "variants": [],
+      "terms": [
+       {
+        "en": "binary step function",
+        "zh": "二值阶跃函数"
+       },
+       {
+        "en": "gradient",
+        "zh": "梯度"
+       },
+       {
+        "en": "backpropagation",
+        "zh": "反向传播"
+       }
+      ],
+      "prereq_link": ""
+     }
+    ]
+   }
+  }
+ },
+ {
+  "id": "B9-男性0.7与0.3",
+  "check": "b9_group_value",
+  "must": "flag",
+  "why": "§15 自补例男性 0.7 vs §18「课上给出」男性 0.3",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[09:27] 交互项：差距随经验变化",
+      "ts": "09:27",
+      "prose": [
+       "上一个模型里性别只是一个平移：不管经验多少，男女差同一个数。课上换成新设定——差距本身随经验变大，经验越多差距越大，所以性别不能只作为一个单独的项放进去。",
+       "做法是把性别和经验相乘，用乘积项（交互项）进回归：$\\text{earnings}=\\beta_0+\\beta_1\\text{educ}+\\beta_2\\text{exp}+\\beta_3(\\text{male}\\times\\text{exp})+u$。女性 male=0，经验斜率就是 $\\beta_2$；男性是 $\\beta_2+\\beta_3$。",
+       "✏️ 自补例：β₂=0.5、β₃=0.2，女性每多一年经验收入多 0.5，男性多 0.7；起点相同时干到第 10 年，男性累计多 0.2×10=2.0。",
+       "最容易错的是把 β₃ 单独读成性别差距——它是一年经验带来的差距增量。而且这个模型没有单独的性别项，等于把经验为 0 时的差距设成 0，这个假设要自己想清楚再接受。"
+      ],
+      "algebra": "斜率：female=β2，male=β2+β3；差距=β3·exp",
+      "pitfalls": [
+       "把交互项系数当成平均性别差距",
+       "忘了模型没有性别主效应，差距在经验为零处被设为零"
+      ],
+      "variants": [],
+      "terms": [
+       {
+        "en": "interaction term",
+        "zh": "交互项"
+       },
+       {
+        "en": "slope",
+        "zh": "斜率"
+       }
+      ],
+      "prereq_link": "上一节的模型里性别只是一个平移，这里让它改变斜率。",
+      "flow": {
+       "title": "✏️ 读交互项模型的四步（自补）",
+       "steps": [
+        {
+         "label": "写方程",
+         "detail": "主效应加乘积项"
+        },
+        {
+         "label": "代 male=0",
+         "detail": "得女性的斜率 β₂"
+        },
+        {
+         "label": "代 male=1",
+         "detail": "得男性的斜率 β₂+β₃"
+        },
+        {
+         "label": "相减",
+         "detail": "差即 β₃，再乘经验得差距"
+        }
+       ],
+       "loop_to": null
+      }
+     },
+     {
+      "heading": "[09:33] 交互项：两组斜率分别怎么算",
+      "ts": "09:33",
+      "prose": [
+       "只有 experience 和 female，得到的是两条平行线：经验回报对所有人一样，性别只改变起点。要允许“经验的回报因性别而异”，就再加一项 $female\\times exp$，模型写成 $wage=\\beta_0+\\beta_1 exp+\\beta_2 female+\\beta_3(female\\times exp)$。",
+       "读法就是代两个数进去：$female=0$ 得 $\\beta_0+\\beta_1 exp$，男性每多一年经验涨 $\\beta_1$；$female=1$ 得 $(\\beta_0+\\beta_2)+(\\beta_1+\\beta_3)exp$，女性涨 $\\beta_1+\\beta_3$。给的例子是 $\\beta_1=0.3$、$\\beta_3=0.4$，男性每年 0.3，女性每年 0.7。最容易错的是把 $\\beta_3$ 直接说成“女性的斜率”——它只是女性比男性多出来的那 0.4。"
+      ],
+      "algebra": "$female=0:\\ \\beta_1$；$female=1:\\ \\beta_1+\\beta_3$，取 0.3 与 0.4 得 0.3 与 0.7",
+      "pitfalls": [
+       "把 β3 当成女性的斜率",
+       "忘记 0.3 已经在截距项里重复计入",
+       "以为两条线一定平行"
+      ],
+      "example": {
+       "title": "🎙+✏️ 「按口述还原」性别交互项的两组斜率（09:33）",
+       "prompt": "模型 $wage=\\beta_0+\\beta_1 exp+\\beta_2 female+\\beta_3(female\\times exp)$，其中 male 为基准组。课上给出 $\\beta_1=0.3$、$\\beta_3=0.4$。求男性与女性每多一年经验的回报。",
+       "steps": [
+        {
+         "text": "$female=0$：模型收缩成 $\\beta_0+\\beta_1 exp$",
+         "why": "交互项 $female\\times exp$ 这时整体为 0，虚拟变量项也为 0"
+        },
+        {
+         "text": "男性斜率 $=\\beta_1=0.3$",
+         "why": "基准组没有额外的截距项或斜率项"
+        },
+        {
+         "text": "$female=1$：模型收缩成 $(\\beta_0+\\beta_2)+(\\beta_1+\\beta_3)exp$",
+         "why": "此时虚拟变量和交互项都取到非零值"
+        },
+        {
+         "text": "女性斜率 $=\\beta_1+\\beta_3=0.3+0.4=0.7$",
+         "why": "experience 前的系数要合并同类项"
+        }
+       ],
+       "answer": "男性每多一年经验 0.3，女性 0.7。",
+       "source_check": {
+        "quote": "if you're male, each additional year of experience adds 0.3 plus 0.4",
+        "anchor_ts": "",
+        "verdict": "fragment"
+       },
+       "plan": {
+        "knowns": [
+         "$\\beta_1=0.3$（experience 的系数）",
+         "$\\beta_3=0.4$（交互项系数）",
+         "male 是基准组，即 $female=0$"
+        ],
+        "target": "两组每多一年经验的回报（回归系数，单位同 wage）",
+        "steps": [
+         "把 $female=0$ 代入，读出 experience 前剩下的系数",
+         "把 $female=1$ 代入，把 experience 前的两个系数相加",
+         "两个结果分别就是男性和女性的斜率"
+        ]
+       },
+       "givens": {
+        "b1": 0.3,
+        "b3": 0.4
+       },
+       "program": [
+        {
+         "var": "male_slope",
+         "op": "eval",
+         "expr": "b1",
+         "x": "b1",
+         "at": 0.3
+        },
+        {
+         "var": "female_slope",
+         "op": "eval",
+         "expr": "b1+b3",
+         "x": "b1",
+         "at": 0.3
+        }
+       ]
+      },
+      "variants": [
+       {
+        "q": "✏️ 同一模型，若 $\\beta_1=0.2$、$\\beta_3=0.5$，两组斜率各是多少？",
+        "steps": [
+         {
+          "text": "男性 $=\\beta_1=0.2$",
+          "why": ""
+         },
+         {
+          "text": "女性 $=\\beta_1+\\beta_3=0.2+0.5=0.7$",
+          "why": ""
+         }
+        ],
+        "a": "男性 0.2，女性 0.7。"
+       },
+       {
+        "q": "✏️ 若交互项系数 $\\beta_3$ 估出来是负数，说明什么？",
+        "steps": [
+         {
+          "text": "女性斜率 $=\\beta_1+\\beta_3$",
+          "why": ""
+         },
+         {
+          "text": "负的 $\\beta_3$ 意味着女性斜率更小",
+          "why": ""
+         }
+        ],
+        "a": "女性每多一年经验的回报低于男性，两条线不平行、女性那条更平。"
+       }
+      ],
+      "faded": {
+       "q": "✏️ 补全：模型同例题，$\\beta_1=0.3$、$\\beta_3=0.4$。女性斜率 $=\\beta_1+\\beta_3=$ ____，男性斜率 $=$ ____。",
+       "blanks": [
+        "0.7",
+        "0.3"
+       ],
+       "a": "女性 $0.3+0.4=0.7$，男性 $0.3$。",
+       "steps": []
+      },
+      "terms": [
+       {
+        "en": "interaction term",
+        "zh": "交互项"
+       },
+       {
+        "en": "slope",
+        "zh": "斜率"
+       }
+      ],
+      "prereq_link": "上一节的虚拟变量只让两条线平行错开，这一节让它斜率也不同。"
+     }
+    ]
+   },
+   "entries": [
+    {
+     "ts": "09:33:35",
+     "zh": "如果你是男性，每增加一年经验，你就会有0.3加0.4。",
+     "en": "And if you're male, every extra year of experience adds 0.3 plus 0.4."
+    },
+    {
+     "ts": "09:34:03",
+     "zh": "对于有经验的女工来说，随着经验的增加，每增加一年经验工资就会增加。",
+     "en": "For female workers, pay also rises as experience grows."
+    },
+    {
+     "ts": "09:34:15",
+     "zh": "每一年的经验，收益是β3加β4。",
+     "en": "For each additional year of experience, the slope is beta three plus beta four, so that."
+    }
+   ]
+  }
+ },
+ {
+  "id": "B9-两组数值一致不报",
+  "check": "b9_group_value",
+  "must": "pass",
+  "why": "两节写同一组数字 → 一致，不许报",
+  "input": {
+   "review": {
+    "sections": [
+     {
+      "heading": "[09:27] 交互项：差距随经验变化",
+      "ts": "09:27",
+      "prose": [
+       "上一个模型里性别只是一个平移：不管经验多少，男女差同一个数。课上换成新设定——差距本身随经验变大，经验越多差距越大，所以性别不能只作为一个单独的项放进去。",
+       "做法是把性别和经验相乘，用乘积项（交互项）进回归：$\\text{earnings}=\\beta_0+\\beta_1\\text{educ}+\\beta_2\\text{exp}+\\beta_3(\\text{male}\\times\\text{exp})+u$。女性 male=0，经验斜率就是 $\\beta_2$；男性是 $\\beta_2+\\beta_3$。",
+       "✏️ 自补例：β₂=0.5、β₃=0.2，女性每多一年经验收入多 0.5，男性多 0.7；起点相同时干到第 10 年，男性累计多 0.2×10=2.0。",
+       "最容易错的是把 β₃ 单独读成性别差距——它是一年经验带来的差距增量。而且这个模型没有单独的性别项，等于把经验为 0 时的差距设成 0，这个假设要自己想清楚再接受。"
+      ],
+      "algebra": "斜率：female=β2，male=β2+β3；差距=β3·exp",
+      "pitfalls": [
+       "把交互项系数当成平均性别差距",
+       "忘了模型没有性别主效应，差距在经验为零处被设为零"
+      ],
+      "variants": [],
+      "terms": [
+       {
+        "en": "interaction term",
+        "zh": "交互项"
+       },
+       {
+        "en": "slope",
+        "zh": "斜率"
+       }
+      ],
+      "prereq_link": "上一节的模型里性别只是一个平移，这里让它改变斜率。",
+      "flow": {
+       "title": "✏️ 读交互项模型的四步（自补）",
+       "steps": [
+        {
+         "label": "写方程",
+         "detail": "主效应加乘积项"
+        },
+        {
+         "label": "代 male=0",
+         "detail": "得女性的斜率 β₂"
+        },
+        {
+         "label": "代 male=1",
+         "detail": "得男性的斜率 β₂+β₃"
+        },
+        {
+         "label": "相减",
+         "detail": "差即 β₃，再乘经验得差距"
+        }
+       ],
+       "loop_to": null
+      }
+     },
+     {
+      "heading": "[09:33] 交互项：两组斜率分别怎么算",
+      "ts": "09:33",
+      "prose": [
+       "只有 experience 和 female，得到的是两条平行线：经验回报对所有人一样，性别只改变起点。要允许“经验的回报因性别而异”，就再加一项 $female\\times exp$，模型写成 $wage=\\beta_0+\\beta_1 exp+\\beta_2 female+\\beta_3(female\\times exp)$。",
+       "读法就是代两个数进去：$female=0$ 得 $\\beta_0+\\beta_1 exp$，男性每多一年经验涨 $\\beta_1$；$female=1$ 得 $(\\beta_0+\\beta_2)+(\\beta_1+\\beta_3)exp$，女性涨 $\\beta_1+\\beta_3$。给的例子是 $\\beta_1=0.3$、$\\beta_3=0.4$，男性每年 0.7，女性每年 0.5。最容易错的是把 $\\beta_3$ 直接说成“女性的斜率”——它只是女性比男性多出来的那 0.4。"
+      ],
+      "algebra": "$female=0:\\ \\beta_1$；$female=1:\\ \\beta_1+\\beta_3$，取 0.3 与 0.4 得 0.3 与 0.7",
+      "pitfalls": [
+       "把 β3 当成女性的斜率",
+       "忘记 0.3 已经在截距项里重复计入",
+       "以为两条线一定平行"
+      ],
+      "example": {
+       "title": "🎙+✏️ 「按口述还原」性别交互项的两组斜率（09:33）",
+       "prompt": "模型 $wage=\\beta_0+\\beta_1 exp+\\beta_2 female+\\beta_3(female\\times exp)$，其中 male 为基准组。课上给出 $\\beta_1=0.3$、$\\beta_3=0.4$。求男性与女性每多一年经验的回报。",
+       "steps": [
+        {
+         "text": "$female=0$：模型收缩成 $\\beta_0+\\beta_1 exp$",
+         "why": "交互项 $female\\times exp$ 这时整体为 0，虚拟变量项也为 0"
+        },
+        {
+         "text": "男性斜率 $=\\beta_1=0.3$",
+         "why": "基准组没有额外的截距项或斜率项"
+        },
+        {
+         "text": "$female=1$：模型收缩成 $(\\beta_0+\\beta_2)+(\\beta_1+\\beta_3)exp$",
+         "why": "此时虚拟变量和交互项都取到非零值"
+        },
+        {
+         "text": "女性斜率 $=\\beta_1+\\beta_3=0.3+0.4=0.7$",
+         "why": "experience 前的系数要合并同类项"
+        }
+       ],
+       "answer": "男性每多一年经验 0.3，女性 0.7。",
+       "source_check": {
+        "quote": "if you're male, each additional year of experience adds 0.3 plus 0.4",
+        "anchor_ts": "",
+        "verdict": "fragment"
+       },
+       "plan": {
+        "knowns": [
+         "$\\beta_1=0.3$（experience 的系数）",
+         "$\\beta_3=0.4$（交互项系数）",
+         "male 是基准组，即 $female=0$"
+        ],
+        "target": "两组每多一年经验的回报（回归系数，单位同 wage）",
+        "steps": [
+         "把 $female=0$ 代入，读出 experience 前剩下的系数",
+         "把 $female=1$ 代入，把 experience 前的两个系数相加",
+         "两个结果分别就是男性和女性的斜率"
+        ]
+       },
+       "givens": {
+        "b1": 0.3,
+        "b3": 0.4
+       },
+       "program": [
+        {
+         "var": "male_slope",
+         "op": "eval",
+         "expr": "b1",
+         "x": "b1",
+         "at": 0.3
+        },
+        {
+         "var": "female_slope",
+         "op": "eval",
+         "expr": "b1+b3",
+         "x": "b1",
+         "at": 0.3
+        }
+       ]
+      },
+      "variants": [
+       {
+        "q": "✏️ 同一模型，若 $\\beta_1=0.2$、$\\beta_3=0.5$，两组斜率各是多少？",
+        "steps": [
+         {
+          "text": "男性 $=\\beta_1=0.2$",
+          "why": ""
+         },
+         {
+          "text": "女性 $=\\beta_1+\\beta_3=0.2+0.5=0.7$",
+          "why": ""
+         }
+        ],
+        "a": "男性 0.2，女性 0.7。"
+       },
+       {
+        "q": "✏️ 若交互项系数 $\\beta_3$ 估出来是负数，说明什么？",
+        "steps": [
+         {
+          "text": "女性斜率 $=\\beta_1+\\beta_3$",
+          "why": ""
+         },
+         {
+          "text": "负的 $\\beta_3$ 意味着女性斜率更小",
+          "why": ""
+         }
+        ],
+        "a": "女性每多一年经验的回报低于男性，两条线不平行、女性那条更平。"
+       }
+      ],
+      "faded": {
+       "q": "✏️ 补全：模型同例题，$\\beta_1=0.3$、$\\beta_3=0.4$。女性斜率 $=\\beta_1+\\beta_3=$ ____，男性斜率 $=$ ____。",
+       "blanks": [
+        "0.7",
+        "0.3"
+       ],
+       "a": "女性 $0.3+0.4=0.7$，男性 $0.3$。",
+       "steps": []
+      },
+      "terms": [
+       {
+        "en": "interaction term",
+        "zh": "交互项"
+       },
+       {
+        "en": "slope",
+        "zh": "斜率"
+       }
+      ],
+      "prereq_link": "上一节的虚拟变量只让两条线平行错开，这一节让它斜率也不同。"
+     }
+    ]
+   },
+   "entries": [
+    {
+     "ts": "09:33:35",
+     "zh": "如果你是男性，每增加一年经验，你就会有0.3加0.4。",
+     "en": "And if you're male, every extra year of experience adds 0.3 plus 0.4."
+    },
+    {
+     "ts": "09:34:03",
+     "zh": "对于有经验的女工来说，随着经验的增加，每增加一年经验工资就会增加。",
+     "en": "For female workers, pay also rises as experience grows."
+    },
+    {
+     "ts": "09:34:15",
+     "zh": "每一年的经验，收益是β3加β4。",
+     "en": "For each additional year of experience, the slope is beta three plus beta four, so that."
+    }
+   ]
+  }
+ },
+ {
+  "id": "B9b-两项之和安在两个组上",
+  "check": "b9b_source_conflict",
+  "must": "flag",
+  "why": "09:33 `if you're male … 0.3 plus 0.4`；09:34 `for female workers … beta three plus beta four`",
+  "input": {
+   "entries": [
+    {
+     "ts": "09:33:35",
+     "zh": "如果你是男性，每增加一年经验，你就会有0.3加0.4。",
+     "en": "And if you're male, every extra year of experience adds 0.3 plus 0.4."
+    },
+    {
+     "ts": "09:34:03",
+     "zh": "对于有经验的女工来说，随着经验的增加，每增加一年经验工资就会增加。",
+     "en": "For female workers, pay also rises as experience grows."
+    },
+    {
+     "ts": "09:34:15",
+     "zh": "每一年的经验，收益是β3加β4。",
+     "en": "For each additional year of experience, the slope is beta three plus beta four, so that."
+    }
+   ]
+  }
+ },
+ {
+  "id": "B9b-只提一个组不报",
+  "check": "b9b_source_conflict",
+  "must": "pass",
+  "why": "只提了男性 → 谈不上前后不一致",
+  "input": {
+   "entries": [
+    {
+     "ts": "09:33:35",
+     "zh": "如果你是男性，每增加一年经验，你就会有0.3加0.4。",
+     "en": "And if you're male, every extra year of experience adds 0.3 plus 0.4."
+    }
+   ]
+  }
+ }
+]

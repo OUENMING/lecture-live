@@ -168,6 +168,83 @@ class DLayout(unittest.TestCase):
         tv._regeom()
         self.assertEqual(self._slot(tv, 1)["alpha_vis"], (1.0, 1.0), "往回翻时历史行应全亮")
 
+    def test_往回翻与滚回底部当场改亮度(self):
+        """⭐⭐ C10（2026-10-18 审查）：D 的按层降亮只在跟随态生效，而**已在原槽位**的行
+        不会随 `_follow` 翻转自动重算 —— 真实路径（`tick` / `_sync_user_origin`）里没有
+        `_regeom()`，于是往回翻时新滚进来的行亮、原有行暗，滚回底部也恢复不了。
+        这条**只走真实路径**（不手工 `_regeom()`）。"""
+        o = self._overlay(rows=6)
+        tv = o._tv
+        clip = tv._scroll.contentView()
+
+        def _vis():
+            return [s["alpha_vis"][0] for s in tv._slots
+                    if s["level"] is not None and not s["hidden"]]
+
+        self.assertTrue(any(a < 0.99 for a in _vis()), "跟随态本该有按层降亮的暗行")
+        clip.scrollToPoint_((0.0, max(1.0, float(tv._row_h) * 3.0)))
+        tv.tick()                                    # 真实路径：只有 tick
+        self.assertFalse(tv.following, "往回翻没把跟随关掉")
+        # 变异验证：把 `_sync_user_origin` 里翻假时那句 `_regeom()` 删掉 -> 这条红。
+        self.assertTrue(all(a > 0.999 for a in _vis()),
+                        f"往回翻时历史行没全亮：{_vis()}")
+        clip.scrollToPoint_((0.0, 0.0))
+        tv.tick()                                    # 第一拍：认出"视口动了"
+        tv.tick()                                    # 第二拍：判成"用户滚回底部" -> 重新跟随
+        self.assertTrue(tv.following, "滚回底部没恢复跟随")
+        # 变异验证：把 `tick` 里翻真时那句 `_regeom()` 删掉 -> 这条红。
+        self.assertTrue(any(a < 0.99 for a in _vis()),
+                        f"滚回底部后没恢复按层降亮：{_vis()}")
+
+    def test_答案接管期间不攒假的_新句_计数(self):
+        """⭐⭐ C2（2026-10-18 审查）：答案接管把 `_follow` 关掉（`set_scroll_hold`），
+        而答案行每帧在长 —— 原来 `_set_items` 只判 `not _follow`，于是每帧都算成"来了新句"，
+        右下角亮起一个假的「↓ N 句新的」（点它还会跳到答案底部）。"""
+        o = self._overlay(rows=1)
+        o.answer_delta("The first line of the answer goes here and it keeps going "
+                       "with more and more words so that it has to wrap into rows")
+        o._mark_dirty(urgent=True)
+        self.assertFalse(o._tv.following, "接管没把自动跟随关掉？")
+        for _ in range(6):
+            o.answer_delta(" and more words keep arriving to push the row count up")
+            o._mark_dirty(urgent=True)
+        self.assertGreater(o._tv._count(), 1, "答案没长成多行 —— 判据会空转")
+        # 变异验证：把 `_set_items` 里那句 `and not self._hold` 删掉 -> 这条红
+        #    （`new_since_leave` 攒成一个正数）。
+        self.assertEqual(o._tv.new_since_leave, 0, "接管期间攒出了假的「新句」计数")
+        b = getattr(o, "_btn_new", None)
+        if b is not None:
+            self.assertTrue(b.isHidden(), "读答案时亮起了假的「↓ N 句新的」")
+
+    def test_新行在实时行上面时从level1显影(self):
+        """⭐⭐ C11（2026-10-18 审查）：`(✗,✓) → (✓,✓)` 那一帧新行落在**实时行上面一格**
+        （level 1），实时行（草稿）本身没变 —— 它不该被重新淡入、也不该带位移；新行才该
+        在 level 1 原地显影。"""
+        o = self._overlay(rows=4)
+        tv = o._tv
+        tv.replace_items([("A1", "甲"), ("A2", "乙")])
+        tv.mark_dirty(urgent=True)
+        tv.set_content([("A1", "甲"), ("A2", "乙")], "draft en", "草稿", True,
+                       live_kind="draft")
+        tv.mark_dirty(urgent=True)
+        self.now[0] += 1.0
+        tv.tick()
+        tv.mark_dirty(urgent=True)
+        # 这一帧：历史多了一行（上一段的定稿），实时行**文本没变** -> 新行在 level 1
+        tv.set_content([("A1", "甲"), ("A2", "乙"), ("B", "丙")], "draft en", "草稿",
+                       True, live_kind="draft")
+        tv.mark_dirty(urgent=True)
+        s0, s1 = self._slot(tv, 0), self._slot(tv, 1)
+        self.assertIsNotNone(s0)
+        self.assertIsNotNone(s1)
+        # 变异验证：把 `_paint` D 分支改回一律 `_start_roll(grew, 0, grew)` -> 前两条红。
+        self.assertEqual(s0["alpha"], 1.0, "没变的草稿行被重新淡入了（屏上闪一下）")
+        self.assertAlmostEqual(s1["alpha"], 0.0, places=3,
+                               msg="新行（level 1）没从 α0 显影")
+        self.assertAlmostEqual(self._y(tv, 0), 0.0, places=3, msg="草稿行不该位移")
+        self.assertAlmostEqual(self._y(tv, 1), float(tv._row_h), places=3,
+                               msg="新行起跑时就该在原地（level 1），不带位移")
+
     def test_no_plate(self):
         """底板 10-17 取消: 转录区父视图里不该多出任何垫底的视图。"""
         o = self._overlay()

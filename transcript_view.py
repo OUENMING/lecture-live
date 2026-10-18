@@ -386,6 +386,10 @@ class TranscriptView:
         self._painted_count = 0     # 上一次 _paint 时的行数(含实时行) -> 判「多了几行」
         self._painted_items = 0     # 上一次 _paint 时的**历史行**数 -> 判「上一条新行」是谁(A5)
         self._painted_live = 0      # 上一次 _paint 时实时行在不在(1/0) -> 同上, 也用于幽灵的层号
+        # ⭐ 2026-10-18 审查 C11：上一次 _paint 时**实时行的文本** —— 判"这一帧新出现的行"
+        #    是在 level 0（实时行本身变了 / 刚出现）还是在它**上面一格**（历史多了一行、
+        #    实时行没变）。`(✓,✓)` 那条路（草稿已是下一段、上一段定稿刚开始流）就是后者。
+        self._painted_live_text = None
         self._count_reset = False   # 整体换内容(replace_items)那一轮不算「多了几行」
         self._roll_t0 = None        # 动画起跑时刻; None = 没在动
         self._roll_from = 0.0       # 起跑时内容往下偏多少 px(终点恒为 0; **负数 = 往上偏**)
@@ -539,7 +543,12 @@ class TranscriptView:
 
     def _set_items(self, items, live, live_visible: bool, bulk: bool) -> None:
         n = len(items)
-        if not bulk and n > len(self._items) and not self._follow:
+        # ⭐ 2026-10-18 审查 C2：接管期间（`_hold`，答案 / 纲要）**不算追加** ——
+        #    那些"行"是流式长出来的答案行（`_answer_rows.append`），不是定稿的新句。
+        #    原来只判 `not _follow`（接管把 `_follow` 也置假了）→ 每帧累加，
+        #    overlay 的「↓ N 句新的」在**读答案**时亮起一个假的数、点它还会跳到底部。
+        if (not bulk and n > len(self._items) and not self._follow
+                and not self._hold):
             # "只有真的有新内容才算"：新句子(定稿)才算 —— 流式增量不算（行高固定,
             # 实时行增长不会移动文档）。**在底部时不计**（跟随态没人需要这个数）。
             self._new_since_leave += n - len(self._items)
@@ -679,6 +688,7 @@ class TranscriptView:
         if not self._follow:
             self._follow = True
             self._on_follow_change(True)
+            self._regeom()            # ⭐ 审查 C10：回到跟随态 -> 当场恢复按层降亮
 
     def scroll_to_top(self) -> None:
         """滚到文档**顶部**(最早的一行) —— 答案接管时的落点。
@@ -790,6 +800,9 @@ class TranscriptView:
                 self._follow = True
                 self._new_since_leave = 0
                 self._on_follow_change(True)
+                # ⭐ 审查 C10：滚回底部要**当场**恢复按层降亮（同上，`_paint` 不会重算
+                #    已在原槽位的行）。
+                self._regeom()
 
     def _sync_user_origin(self, clip) -> bool:
         """视口位置与程序记的期望值不符 -> 那是**用户在滚**, 视口归他。返回是否刚接手。
@@ -813,6 +826,10 @@ class TranscriptView:
             self._follow = False
             self._new_since_leave = 0
             self._on_follow_change(False)
+            # ⭐ 2026-10-18 审查 C10：D 的按层降亮在 `_geom` 里写（只在跟随态生效）——
+            #    `_follow` 一翻假，屏上**已在原槽位**的行不会重算（`_paint` 只摆新进来的），
+            #    于是它们的亮度停在旧值（往回翻时本该全亮）。当场重算一次。
+            self._regeom()
         self._expected_origin = cur
         return True
 
@@ -1333,8 +1350,11 @@ class TranscriptView:
         #    「历史行数变了几行 + 实时行在不在」两个数, 见下面 lo/n 那段。
         items_before, live_before = self._painted_items, self._painted_live
         items_now, live_now = len(self._items), (1 if self._live_visible else 0)
+        live_text_now = tuple(self._live or ("", ""))
+        live_text_before = self._painted_live_text
         self._painted_count, self._count_reset = count, False
         self._painted_items, self._painted_live = items_now, live_now
+        self._painted_live_text = live_text_now if live_now else None
 
         # ⭐ 跨段半句合并(`Overlay.replace_merge` → `LineLog.replace_pair`):
         #    少一行**并且**尾句那一行的文字被换成合并译文 —— 两件事都要过渡, 不然
@@ -1393,13 +1413,25 @@ class TranscriptView:
                 #    ⚠️ 位移量仍然是 `grew`(老内容被顶高的格数), 与名单长度无关。
                 d_items = items_now - items_before
                 if self._d and not self._verbatim:
-                    # D: 新的永远是**最底那 grew 行**（草稿并进了实时行, 上一段还在流的那行
-                    #    被挪进 items —— 「历史多了一行」此时不代表它是新内容）。
-                    #    新行原地显影、不位移; 只有被顶上去的老行走位移。
-                    self._start_roll(grew, 0, grew)
+                    # D: 新行原地显影、不位移; 只有被顶上去的老行走位移。
+                    # ⭐⭐ C11：`grew` 与"哪几行是新的"**不是一回事** ——
+                    #   · 实时行这一帧变了 / 刚出现 -> 新行在 level 0（原口径）；
+                    #   · 实时行**没变**（草稿已是下一段、上一段的定稿刚开始流）——新行是
+                    #     `history + [定稿行]` 进来的那一行，落在**实时行上面一格**（level 1）。
+                    #     原来一律 `lo=0`/`_roll_off_lo=grew` 会：① 屏上没变的草稿行被
+                    #     重新淡入（已显示文字被改，CHI 2023）② 新行带位移、起跑时压在原位
+                    #     （"叠"）。
+                    _live_new = bool(live_now) and (
+                        not live_before or live_text_now != live_text_before)
+                    if _live_new:
+                        lo, n_new, off_lo = 0, grew, grew
+                    else:
+                        lo, n_new = live_now, d_items
+                        off_lo = live_now + d_items
+                    self._start_roll(n_new, lo, grew)
                     if self._roll_t0 is not None:
                         self._d_enter = True
-                        self._roll_off_lo = grew
+                        self._roll_off_lo = off_lo
                         self._regeom()
                 elif live_now and not live_before:
                     lo, n = 0, d_items + 1

@@ -321,6 +321,33 @@ class 真窗口(unittest.TestCase):
         finally:
             o.close()
 
+    def test_折行的块按折行算高(self):
+        """⭐⭐ C8（2026-10-18 审查）：note/text/point/quote 这几类标签是**可无限折行**的
+        （`_card_make` 里 `setMaximumNumberOfLines_(0)` + WordWrapping），所以量高必须按
+        折行算 —— 原来 `blk["wrap"]` 恒 False，一律按单行算，超出一行的内容被 AppKit
+        **静默裁掉**（无省略号），卡片高度与文档高度也一起低估。"""
+        o = self._overlay()
+        try:
+            _long = ("The instructor announced that the midterm will be moved to the "
+                     "week after the reading week, and the problem set covering the "
+                     "monopolist chapter is due on the same Friday afternoon.")
+            o.duty_update([_item("d1", quote=_long)])
+            o._duty_open("d1")
+            fill = [b for b in o._card_pending
+                    if b["kind"] in ("note", "text", "point", "quote") and b["view"]]
+            self.assertTrue(fill, "卡上没有可用于这一条的块 —— 判据会空转")
+            w = max(60.0, float(o._card_view.frame().size.width) - 2 * overlay.CARD_PAD)
+            wrapped = 0
+            for b in fill:
+                # 变异验证：把 `_card_add` 里 `wrap` 那格改回 `bool(wrap)`（恒 False）
+                #    -> 有长文本的那块 `_card_block_h` 回落到单行高 -> 这条红。
+                self.assertTrue(b["wrap"], f"{b['kind']} 块没标成折行：{b['text'][:30]!r}")
+                if o._card_block_h(b, w) > overlay._card_line_h(b["view"].font()) + 0.5:
+                    wrapped += 1
+            self.assertGreaterEqual(wrapped, 1, "长文本还是按单行算高 —— 会显示不全")
+        finally:
+            o.close()
+
     def test_卡片高度跟内容走(self):
         """⭐ 卡片高度跟着内容走；装不下时**卡片内部滚**（不藏块、不挤内容）。
 

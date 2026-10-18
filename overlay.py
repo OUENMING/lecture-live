@@ -795,6 +795,16 @@ def card_button_specs(specs) -> list:
 #: 卡片里"文字自己就说完了"的块（值直接写进标签）；其余块由各自的 place 函数填。
 _CARD_TEXT_KINDS = frozenset({"label", "note", "text", "quote", "meta", "point"})
 
+#: ⭐⭐ 卡片里**会折行**的块（2026-10-18 审查 C8）：`_card_make` 给这几类造的标签是
+#: `setMaximumNumberOfLines_(0)` + WordWrapping（可无限折行），所以量高 / 摆位也必须按
+#: **折行**算 —— 否则 `_card_block_h` 一律按单行算，超出一行的内容被 AppKit **静默裁掉**
+#: （无省略号），卡片高度与文档高度也一起低估（内容既显示不全、也滚不出来）。
+#: ⚠️ 影响面是主要新增界面：一些事儿卡片的「原话」quote、课前回顾的知识点（多个 ×2 行）、
+#:    stars/open/duties 那些整句 `_card_text`。
+#: ⚠️ 这是**唯一**的"哪些块折行"定义点 —— `_card_add` 用它填 `blk["wrap"]`，
+#:    `_card_block_h` 只读 `blk["wrap"]`。
+_CARD_WRAP_KINDS = frozenset({"note", "text", "point", "quote"})
+
 
 def _card_line_h(font) -> float:
     """卡片里某字号的一行高（同 `_layout` 里章节条那个算法）。"""
@@ -4149,7 +4159,11 @@ class Overlay:
                   align: str = "left", symbol: str = "", attr=None,
                   name: str = "", expl: str = "") -> None:
         blk = {"kind": kind, "text": str(text or ""), "size": size, "alpha": alpha,
-               "strong": strong, "wrap": wrap, "key": key, "value": value,
+               "strong": strong,
+               # ⭐⭐ C8：折行由**块类型**推出来（不是调用方那个默认 False 的形参）——
+               #    量高（`_card_block_h`）与摆位（`_card_relayout`）都读它。
+               "wrap": bool(wrap) or kind in _CARD_WRAP_KINDS,
+               "key": key, "value": value,
                "side": str(side or ""), "chips": chips, "chosen": chosen,
                "on_pick": on_pick, "buttons": buttons, "on_act": on_act,
                "duty_row": duty_row, "meta": str(meta or ""), "align": str(align),

@@ -204,6 +204,23 @@ class Crosshair(unittest.TestCase):
         self.assertIn("cross.style.display=''", h)
 
 
+class PlotSlider(unittest.TestCase):
+    """⭐ 可拖动参数：DB 审查 D-9 —— `data-plot` 必须同时挂在滑块的 div 与它要驱动的 svg 上，
+    否则 JS `querySelector('[data-plot=…]')` 只命中滑块自己，`querySelectorAll('polyline')`
+    恒为空 → 拖动参数从不重绘（静默失效）。"""
+
+    def test_svg_带_data_plot_供滑杆驱动(self):
+        s = nh.svg("supply_demand", {}, pid="p1")
+        head = s.split("</svg>")[0]
+        self.assertIn('data-plot="p1"', head)          # svg 上有（挂给 JS 重绘用）
+        self.assertIn('class="slider" data-plot="p1"', s)  # 滑块 div 上仍有（map 的键）
+
+    def test_js_点名选_svg(self):
+        """选择器不点名 `svg[...]` 时，会先命中滑块 div → 拿不到 polyline。"""
+        h = nh.note_page(_data())
+        self.assertIn('svg[data-plot="', h)
+
+
 class Motion(unittest.TestCase):
     def test_block_enter_与按压反馈(self):
         h = nh.note_page(_data())

@@ -165,8 +165,17 @@ def curves(kind: str, params: dict) -> list:
         xs = [x0 + (x1 - x0) * i / (_N - 1) for i in range(_N)]
         out.append((0, [(x, (d0 - x) / d1 if d1 else None) for x in xs]))
         out.append((1, [(x, (x - s0) / s1 if s1 else None) for x in xs]))
-        q = (d0 - s0) / (d1 + s1) if (d1 + s1) else None
-        pt = [(q, (d0 - q) / d1)] if q and q >= 0 else []
+        # ⚠️ 横轴是**数量 Q**、纵轴是**价格 p**（见 spec 的 xlabel/ylabel）——
+        #    均衡点是 (Q*, p*)：联立 d0−d1·p = s0+s1·p → p*=(d0−s0)/(d1+s1)，
+        #    再回代得 Q*=d0−d1·p*。旧版把算出的**价格**当横轴、又拿 `(d0−q)/d1`
+        #    当纵轴 → 点整个错位；且那条除法没有 d1 的零保护，模型给 d1=0 时抛
+        #    `ZeroDivisionError` → `note_page` 失败 → 整份 HTML 不生成（只留一句话）。
+        #    两条曲线都要有定义（d1、s1 非零）均衡点才有意义。
+        pt: list = []
+        if d1 and s1 and (d1 + s1):
+            p_star = (d0 - s0) / (d1 + s1)
+            if p_star >= 0:
+                pt = [(d0 - d1 * p_star, p_star)]
         out.append((2, pt))
     return out
 
@@ -254,7 +263,8 @@ def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p",
     # ⭐ 十字光标（2026-10-18）：线条 + 读数点初始隐藏（JS 跟着鼠标/手指动）。
     #    `data-*` 是**回读数据坐标**要的映射：采样点存的是 viewBox 坐标，
     #    没有这份映射 JS 只能显示屏幕坐标（对读者没有意义）。
-    parts = [f'<svg class="plot" data-cross="1" data-x0="{x0:.6g}" data-x1="{x1:.6g}" '
+    parts = [f'<svg class="plot" data-cross="1" data-plot="{pid}" '
+             f'data-x0="{x0:.6g}" data-x1="{x1:.6g}" '
              f'data-y0="{y0:.6g}" data-y1="{y1:.6g}" data-padl="{pad_l}" data-padt="{pad_t}" '
              f'data-iw="{iw:.6g}" data-ih="{ih:.6g}" viewBox="0 0 {w} {h}" role="img" '
              f'aria-label="{html.escape("、".join(spec["legend"]) or kind)}">',
@@ -750,7 +760,10 @@ _JS = r"""
   window.addEventListener('load',function(){tex();clearTimeout(t);});
  }
  d.querySelectorAll('.slider').forEach(function(w){
-  var svg=d.querySelector('[data-plot="'+w.getAttribute('data-plot')+'"]');
+  // ⚠️ `data-plot` 同时挂在 `<div class="slider">`（map 的键）与它要驱动的 `<svg class="plot">` 上。
+  //    选择器必须点名 `svg[data-plot=…]` —— 只写 `[data-plot=…]` 会先命中滑块 div 自己，
+  //    于是 `querySelectorAll('polyline')` 恒为空 → 拖动参数从不重绘（且不报错，静默失效）。
+  var svg=d.querySelector('svg[data-plot="'+w.getAttribute('data-plot')+'"]');
   var input=w.querySelector('input'), out=w.querySelector('.v');
   var opts=JSON.parse(w.getAttribute('data-opts')||'[]');
   var vals=JSON.parse(w.getAttribute('data-vals')||'[]');

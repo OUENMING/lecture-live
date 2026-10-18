@@ -1502,11 +1502,29 @@ class HtmlPlots(unittest.TestCase):
         self.assertAlmostEqual(pts[1], 1.0, places=6)
 
     def test_供需均衡点(self):
+        """⭐ 判据指向**几何**：联立 Qd=Qs 得 **p\*=30、Q\*=40** —— 标注点必须落在
+        两条曲线的交点 (Q\*, p\*) 上（横轴 Q、纵轴 p；旧版把价格 30 当横轴 → (30, 35) 错位）。"""
         series = nh.curves("supply_demand", {"d0": 100, "d1": 2, "s0": 10, "s1": 1})
         marker = [ps for idx, ps in series if idx == 2][0]
         q, p = marker[0]
-        self.assertAlmostEqual(q, 30.0, places=6)
-        self.assertAlmostEqual(p, 35.0, places=6)
+        self.assertAlmostEqual(q, 40.0, places=6)
+        self.assertAlmostEqual(p, 30.0, places=6)
+        # 交点真的在这两条曲线上（用解析式核：Qd=d0−d1·p、Qs=s0+s1·p）
+        d0, d1, s0, s1 = 100.0, 2.0, 10.0, 1.0
+        self.assertAlmostEqual(p, (d0 - q) / d1, places=6)
+        self.assertAlmostEqual(p, (q - s0) / s1, places=6)
+
+    def test_供需斜率零不崩(self):
+        """d1=0（模型给的参数）→ 旧版 `(d0−q)/d1` 抛 ZeroDivisionError，整份 HTML 不生成。"""
+        series = nh.curves("supply_demand", {"d0": 100, "d1": 0, "s0": 10, "s1": 1})
+        self.assertEqual([ps for idx, ps in series if idx == 2][0], [])
+        self.assertIn("<svg", nh.svg("supply_demand", {"d1": 0}))
+
+    def test_供需均衡数量为零也要标(self):
+        """Q\*=0 是合法均衡（`d0=s0=0`）—— `if q` 会把 0 当假值丢点。"""
+        series = nh.curves("supply_demand", {"d0": 0, "d1": 2, "s0": 0, "s1": 1})
+        marker = [ps for idx, ps in series if idx == 2][0]
+        self.assertEqual(marker, [(0.0, 0.0)])
 
     def test_未知_kind_返回空(self):
         self.assertEqual(nh.svg("随便画的", {}), "")

@@ -67,6 +67,10 @@ ROW_GAP = 5.0
 ROW_ZH_H = 47.0                                   # 每行中文两行
 ROW_H = ROW_EN_H + ROW_GAP + ROW_ZH_H             # 70.0
 GLOSS_H = 20.0                                    # 💡 解析: 收回态 = 一行(尾部省略)
+#: 术语行在**最后一次命中**之后留多久（秒）就自己收起（钉住的不收）。3.10.1：Owen 10-19
+#: 「出现术语的时候它不会自动隐藏」。⚠️ 不能短到「名字只活 1 句」（`terms()` 那条老教训：
+#: 跟着每句清空 = 太快消失）—— 20 s ≈ 5–8 句，够看一眼、够点开。
+TERM_SHOW_S = 20.0
 GLOSS_H_BIG = 46.0                                # 💡 解析: 展开态 = 三行(实测 42.0)+ 余量
 # 草稿块 = **2 行 roll-up**(2026-09-27 起, 原为 1 行)。
 # 高度是**实测**的: 11pt 单行 14.00px / 两行 28.00px, 12.5pt 单行 15.00px / 两行 30.00px
@@ -1433,6 +1437,10 @@ class Overlay:
         self._merge_live = False
         self._flow_due = None
         self._tail_merge = False    # 短尾巴并行只在 Soniox 实时识别时开（`set_tail_merge`）
+        self._next_gap = None       # 下一句与上一句之间的音频停顿（`next_gap`；用一次就清）
+        self._row_n = 0             # 最后一行里并了几句（`caption_flow.JOIN_MAX`）
+        self._merge_join = False    # 这次并行是「连着讲」那条（定稿时还要再量一次装不装得下）
+        self.join_undone = 0        # 估的时候装得下、真译文装不下 → 撤回并行的次数（观测用）
         self._seed_zh = ""          # 这句定稿开始时手边的草稿译文（`caption_rows(bridge_zh=)`）
         self._shadow = _make_shadow()
         self._targets = []        # ⚠️ 必须常驻: NSControl.setTarget_ 是弱引用,
@@ -1671,6 +1679,7 @@ class Overlay:
             self._trunc)
         ve.addSubview_(self._gloss_lbl)
         self._terms: list = []        # 当前句命中的 (术语, 解析), 不随 finalize 清空
+        self._terms_until = 0.0       # 术语行到这个时刻自己收起（`TERM_SHOW_S`；钉住的不收）
         self._pinned_term = None      # 被点开并钉住的术语 -> 解析永久留在屏上
         # ❓ 一行点拨（计划 §G1）: (文字, 到期的 monotonic)。占**术语行那一格**,
         # 到期自动让回术语 —— 不另开一行, 面板高度与布局一点不动。
@@ -3047,7 +3056,14 @@ class Overlay:
         钉住的术语(_pinned_term)更不会被新命中的术语顶掉。
         """
         self._terms = list(hits or [])
+        self._terms_until = self._clock() + TERM_SHOW_S
         self._mark_dirty(urgent=True)
+
+    def _terms_tick(self, now: float) -> None:
+        """pump 每帧：术语行过了 `TERM_SHOW_S` 没新命中 → 收起（钉住的、点拨占着的不动）。"""
+        if self._terms and self._pinned_term is None and now >= self._terms_until:
+            self._terms = []
+            self._mark_dirty()
 
     def show_hint(self, text: str, ttl: float) -> None:
         """❓ 按下后的反馈 / 一行点拨, 占术语行 `ttl` 秒。空串 = 清掉。
@@ -3088,8 +3104,31 @@ class Overlay:
         self._final_t0 = self._clock()
         self._seed_zh = self._draft_zh_val
         since = (self._final_t0 - self._last_final_t) if self._last_final_t is not None else None
-        self._merge_live = (self._tail_merge and bool(self._log.rows)
-                            and caption_flow.is_tail(en, since))
+        self._merge_live, self._merge_join = self._merge_decide(en, since, self._seed_zh)
+
+    def _merge_decide(self, en: str, since, zh_guess: str) -> tuple:
+        """这句并不并进上一行 →（并不并, 是不是「连着讲」那条）。停顿只用一次。
+
+        ⭐ 3.10.1「连着讲就并成一段」：中文还没译出来，拿**这句的草稿译文**估装不装得下
+           （`_seed_zh`）；定稿时 `finalize` 拿真译文再量一次，装不下就照旧开新行。
+        """
+        gap, self._next_gap = self._next_gap, None
+        if not (self._tail_merge and self._log.rows):
+            return False, False
+        if caption_flow.is_tail(en, since):
+            return True, False
+        pe, pz = self._log.rows[-1]
+        fits = self._tv.fits_row(f"{pe} {en}".strip(), f"{pz}{zh_guess}")
+        if caption_flow.is_join(gap, fits=fits, n_in_row=self._row_n):
+            return True, True
+        return False, False
+
+    def next_gap(self, gap_s) -> None:
+        """`main`：下一句定稿与上一句之间的**音频停顿**（秒；Soniox 词时间戳算的）。"""
+        try:
+            self._next_gap = None if gap_s is None else float(gap_s)
+        except (TypeError, ValueError):
+            self._next_gap = None
 
     def set_tail_merge(self, on: bool) -> None:
         """短尾巴（"Okay?"）并进上一行：`main` 在这节课建了 Soniox 流时打开。
@@ -3174,15 +3213,23 @@ class Overlay:
         now = self._clock()
         if self._final_t0 is None:            # 没流式就直接定稿（只英档 / 失败兜底）：此刻判
             since = (now - self._last_final_t) if self._last_final_t is not None else None
-            self._merge_live = (self._tail_merge and bool(self._log.rows)
-                                and caption_flow.is_tail(en, since))
+            self._merge_live, self._merge_join = self._merge_decide(en, since, zh)
+        if self._merge_live and self._merge_join and self._log.rows:
+            # 连着讲那条是拿草稿译文估的：真译文更长、装不下 → 照旧开新行（绝不截字）
+            pe, pz = self._log.rows[-1]
+            if not self._tv.fits_row(f"{pe} {en}".strip(), f"{pz}{zh}"):
+                self._merge_live = False
+                self.join_undone += 1
         if self._merge_live and self._log.rows:
-            # 短尾巴（"Okay?"）接在上一行后面 —— 与流式期 `caption_rows` 的显示逐字一致
+            # 短尾巴（"Okay?"）/ 连着讲的下一句接在上一行后面 —— 与流式期 `caption_rows` 的显示逐字一致
             pe, pz = self._log.rows[-1]
             tok = self._log.amend_last(f"{pe} {en}".strip(), f"{pz}{zh}")
+            self._row_n += 1
         else:
             tok = self._log.append(en, zh)
+            self._row_n = 1
         self._final_t0, self._merge_live, self._seed_zh = None, False, ""
+        self._merge_join = False
         self._last_final_t = now
         self._cur_zh, self._cur_en, self._streaming = "", "", False
         self._cur_en_seed, self._draft_over = "", False
@@ -5777,6 +5824,7 @@ class Overlay:
         # tick 要基于更新后的几何算池, 顺序反了会画一帧旧几何。
         self._sync_panel_size()
         now = time.monotonic()
+        self._terms_tick(self._clock())
         if self._hint is not None and now >= self._hint[1]:
             self._hint = None                    # 点拨到期 -> 术语行还给术语
             self._mark_dirty()

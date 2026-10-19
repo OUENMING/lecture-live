@@ -349,7 +349,9 @@ class MainWiring(unittest.TestCase):
         #    （`duty` / `duty_result` / `recap` / `recap_more`）—— 那是另一个功能的
         #    消息面，不是第二阶段（Soniox）顺手加的。判据的**意图**不变：
         #    第二阶段自己不许新增（下面这条断言把这三个从集合里剔掉再比）。
-        _new_ok = {"duty", "duty_result", "recap", "recap_more"}
+        # ⚠️ 2026-10-19（3.10.1）：「连着讲就并成一段」**有意**加 `gap`（上一句与这一句之间的
+        #    音频停顿，悬浮窗据此决定并不并行）—— 同样是新功能的消息面，drain 有分支（R28）。
+        _new_ok = {"duty", "duty_result", "recap", "recap_more", "gap"}
         before = {"zh", "en", "en_seed", "final", "terms", "notice", "answer",
                   "answer_done", "summary", "hint", "replace"} | _new_ok
         self.assertLessEqual(_tags(_func("run")), before, "第二阶段不许新增 streamq tag")

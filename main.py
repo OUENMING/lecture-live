@@ -3014,6 +3014,8 @@ def run(args) -> None:
         finally:
             busy["on"] = False
 
+    _sent_end = {"s": None}                      # 上一句 Soniox 封口句的末词时刻（`gap` 用）
+
     def final_worker():
         EMPTY = object()
         while running.is_set():
@@ -3028,6 +3030,11 @@ def run(args) -> None:
                         break
                     if not _s.text:
                         continue
+                    # ⭐ 3.10.1「连着讲就并成一段」：与上一句之间的**音频停顿**（词时间戳），
+                    #    悬浮窗据此决定并不并进上一行（`caption_flow.is_join`）。先于 `_emit` 入队。
+                    _gap = (_s.start_s - _sent_end["s"]) if _sent_end["s"] is not None else None
+                    _sent_end["s"] = _s.end_s
+                    streamq.put(("gap", _gap))
                     busy["on"] = True        # 冲刷等待要看它（`all_settled` 的 busy）
                     try:
                         # ⚠️ Soniox 封的本来就是**一句**：别再按 25 词从逗号劈成两行 —— 劈开
@@ -3608,6 +3615,12 @@ def run(args) -> None:
             elif item[0] == "en":
                 draft_view.on_stream(item[2] if len(item) > 2 else None)
                 ui.stream_en(item[1])
+            elif item[0] == "gap":                  # ("gap", 与上一句的音频停顿秒 | None)
+                fn = getattr(ui, "next_gap", None)  # 终端没有这一槽
+                if callable(fn):
+                    fn(item[1])
+                if item[1] is not None:
+                    live.event("sent_gap", gap_s=round(float(item[1]), 3))
             elif item[0] == "en_seed":              # ("en_seed", ASR 原句, seg)
                 draft_view.on_stream(item[2] if len(item) > 2 else None)
                 fn = getattr(ui, "seed_en", None)   # 终端没有这一槽

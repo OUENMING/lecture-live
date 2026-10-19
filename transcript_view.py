@@ -888,6 +888,23 @@ class TranscriptView:
         self._en2_cache[key] = out
         return out
 
+    def fits_row(self, en: str, zh: str) -> bool:
+        """`(en, zh)` 放进**一行**（当前宽度与档位）会不会被截。与 `_en_two_lines` 同一套口径：
+        中文 ≤ 档位行数；英文 1 行，或中文少用一行时英文借它排 2 行。量不了 → False（不并）。"""
+        if self._doc_w < 40.0:
+            return False
+        try:
+            w = self._doc_w - 4.0
+            shaped = self._shape_zh(zh, final=True) if zh else ""
+            if "\n" in shaped:
+                zh_n = shaped.count("\n") + 1
+            else:
+                zh_n = round(self._measure(zh, w, self._font_zh[0]) / self._lh(self._font_zh[0]))
+            en_n = round(self._measure(en, w, self._font_en[0]) / self._en_line_h())
+        except Exception:                                 # noqa: BLE001
+            return False
+        return zh_n <= self._lines and (en_n <= 1 or (en_n <= 2 and zh_n <= self._lines - 1))
+
     def _shape_zh(self, zh: str, *, final: bool) -> str:
         """中文按词组折行(定稿再避开孤尾)。**按 (文本, 宽度, 是否定稿) 记忆化** ——
         `_paint` 每帧都会对可见行走到这里, 而折一句要量十几次字宽。"""

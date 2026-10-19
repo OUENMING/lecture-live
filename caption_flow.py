@@ -54,6 +54,10 @@ Soniox 封口后约 0.5 s 下一句就出字，而译文要 ~1 s 才写完 —�
    不能一直挡着）。
 3. **短尾巴并进上一行**：封口不到 `MIN_WORDS` 词、离上一句定稿 ≤ `GAP_S` 的句子（"Okay?"）
    不单开一行，接在上一行后面（`merge_live`；判据 `is_tail`，落盘不受影响 —— 只改屏上）。
+4. **连着讲就并成一段**（3.10.1，Owen 10-19：「教授一口气讲两三句，屏上被切成两三个
+   句号，很割裂」）：这句和上一句之间的**音频停顿** ≤ `JOIN_GAP_S`、并完那一行仍装得下
+   （行高是固定档位，装不下就照旧开新行，绝不截字）、一行最多 `JOIN_MAX` 句 → 同样走
+   `merge_live`。判据 `is_join`。翻译仍一句一句出（延迟不变），落盘不变。
 
 `recheck_at` = 结果下一次可能因为**时间**而变的时刻（宿主到点重画一次；`None` = 不用）。
 
@@ -75,6 +79,12 @@ BRIDGE_RATIO = 0.6
 MIN_WORDS = 3
 #: 离上一句定稿超过这么久 = 老师停过 → 1 个词也开新行；短尾巴只在这个窗口内并（原型 `D_GAP`）。
 GAP_S = 3.0
+#: 两句之间的音频停顿（Soniox 上一句末词结束 → 这一句首词开始）不超过这么久 = 老师没停，
+#: 并成一段。⚠️ 1.0 s 是**先定的**（句间自然停顿多在 1 s 内、刻意停顿更长），还没有真课
+#: 的分布 —— 每句的停顿记进 live 日志（`sent_gap` 事件），上完一节课再按分布校准。
+JOIN_GAP_S = 1.0
+#: 一行最多并几句（再多就算装得下也太长，读起来像一堵墙）。
+JOIN_MAX = 3
 #: 定稿流式最多挡草稿这么久（翻译卡住时不能一直挡；实测译完 p50 1.1 s、p90 1.3 s）。
 HOLD_MAX_S = 2.5
 
@@ -87,6 +97,12 @@ def is_tail(en: str, since_last_final: float | None) -> bool:
     """这句是不是该并进上一行的短尾巴（"Okay?" 一类）。`since_last_final=None` = 没有上一行。"""
     return (since_last_final is not None and since_last_final <= GAP_S
             and 0 < n_words(en) < MIN_WORDS)
+
+
+def is_join(gap_s: float | None, *, fits: bool, n_in_row: int) -> bool:
+    """这句要不要并进上一行（连着讲的下一句）。`gap_s=None` = 不知道停顿（不并）。"""
+    return (gap_s is not None and 0 <= n_in_row < JOIN_MAX and fits
+            and -0.5 <= gap_s <= JOIN_GAP_S)
 
 
 class CaptionRows(typing.NamedTuple):

@@ -136,7 +136,52 @@ class 只英档(unittest.TestCase):
         o.set_trans_mode("both")
         self.assertAlmostEqual(o._row_h, both, delta=0.01)
 
-    def test_没有中文不并行(self):
+    def _say(self, o, en, *, ep=False):
+        if ep:
+            o.endpoint(True)
+        o.add_draft(en)
+        o._render()
+        o.finalize(en, "")
+        o._render()
+
+    def test_接着讲按英文行数接_写满才换行(self):
+        """只英档照样「讲完一口气才换行」（不然每句都上滚一次，Owen「有点跳」）。"""
+        o = self._overlay()
+        o.set_trans_mode("en")
+        o.set_tail_merge(True)
+        o._join_on = True
+        self._say(o, "And we're going to talk about monopoly profit maximization.")
+        self._say(o, "Okay?")
+        self.assertEqual(len(o._log.rows), 1, "上一行英文只有一行、没写满，接着讲却单开了一行")
+        self._say(o, "Now, so far on the producer side, we've been discussing one extreme of how "
+                     "the market's organized, which is perfect competition, a benchmark.")
+        n = len(o._log.rows)
+        self._say(o, "Which is monopoly.")
+        self.assertEqual(len(o._log.rows), n + 1, "最后一行英文写满了还接")
+        self._say(o, "A new topic now.", ep=True)
+        self.assertEqual(len(o._log.rows), n + 2, "有句间端点却没换行")
+
+    def test_装不下的英文大字_省略号看得见(self):
+        """截断要按实排宽（框宽 - 4）量：拿框宽量会多折一行，「…」被 maxlines 吃掉、句尾静默消失。"""
+        o = self._overlay()
+        o.set_trans_mode("en")
+        o._panel.setFrame_display_(((100, 100), (793, 502)), False)
+        o._sync_panel_size()
+        # 10-19 现场那一行（两句接成一行后装不下）：框宽量能放下「perfect c…」、实排放不下
+        en = ("And we're going to talk about monopoly profit maximization. Now, so far on the "
+              "producer side, we've been discussing one extreme of how the market's organized, "
+              "which is perfect competition.")
+        o.finalize(en, "")
+        o._render()
+        o._tv.tick()
+        lbl = next(s["zh"] for s in o._tv._slots if "producer" in (s["zh"].stringValue() or ""))
+        shown = lbl.stringValue()
+        self.assertTrue(shown.endswith("…"), f"装不下却没有省略号：{shown[-30:]!r}")
+        w = float(lbl.frame().size.width) - 4.0
+        need = O._measure_text_h(shown, w, lbl.font(), O.LINE_H)
+        self.assertLessEqual(need, float(lbl.frame().size.height) + 0.5, "截完还是比框高 → 末行被静默吃掉")
+
+    def test_没有中文不整段并成一行(self):
         o = self._overlay()
         o.set_trans_mode("en")
         o.set_tail_merge(True)
@@ -148,7 +193,9 @@ class 只英档(unittest.TestCase):
             o._render()
             o.finalize(en, "")
             o._render()
-        self.assertEqual(len(o._log.rows), 3, "只英档一整段并成了一行（会被截掉）")
+        self.assertGreater(len(o._log.rows), 1, "只英档一整段并成了一行（会被截掉）")
+        for en, _zh in o._log.rows:
+            self.assertLessEqual(o._tv.big_lines(en), o._tv.lines_tier(), f"这一行装不下：{en}")
 
 
 if __name__ == "__main__":

@@ -958,6 +958,18 @@ class TranscriptView:
         except Exception:                                 # noqa: BLE001
             return 99
 
+    def big_lines(self, en: str) -> int:
+        """没有中文时英文提成大字，按当前宽度折成几行（只英·校 / 纯转录档的「写满」口径）。"""
+        if not en:
+            return 0
+        if self._doc_w < 40.0:
+            return 99
+        try:
+            return max(1, round(self._measure_zh(en, self._doc_w - 4.0, self._font_en_big[0])
+                                / self._lh_zh()))
+        except Exception:                                 # noqa: BLE001
+            return 99
+
     def fits_row(self, en: str, zh: str) -> bool:
         """`(en, zh)` 放进**一行**（当前宽度与档位）会不会被截。与 `_en_two_lines` 同一套口径：
         中文 ≤ 档位行数；英文 1 行，或中文少用一行时英文借它排 2 行。量不了 → False（不并）。"""
@@ -1053,8 +1065,11 @@ class TranscriptView:
         if w < 20.0:
             return text                      # 还没摆过(宽度没定): 量了没意义
         try:
+            # ⚠️ 单元格左右各占 2 px → 实排宽 = 框宽 - 4（与 `zh_lines` / `fits_row` 同口径）。
+            #    拿框宽量，英文大字（按词折）会多折出一行被 maxlines 静默吃掉，「…」都看不见
+            #    （10-19 只英档：「which is perfect c…」显示成「which is perfect」）。
             return truncate_to_height(
-                text, lambda s: self._measure_zh(s, w, lbl.font()),
+                text, lambda s: self._measure_zh(s, w - 4.0, lbl.font()),
                 max(self._zh_h, float(lbl.frame().size.height)))
         except Exception:                    # noqa: BLE001 截断是显示层兜底, 坏了就交还 AppKit
             return text

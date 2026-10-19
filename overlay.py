@@ -3242,9 +3242,11 @@ class Overlay:
         if not (self._join_on and self._tail_merge and self._log.rows) or ep:
             return False
         pe, pz = self._log.rows[-1]
-        # 没有中文（只英·校 / 纯转录 / 译文失败）不接：`zh_lines("")` = 0 → 永远「没写满」，
-        # 一整段课会并成一行、超出的部分被截掉（10-19 只英档实测）。
-        return bool(pz) and self._tv.zh_lines(pz) < self._tv.lines_tier()
+        # 没有中文（只英·校 / 纯转录 / 译文失败）：英文提成大字，按**英文大字**的行数判写满。
+        # ⚠️ 不能拿 `zh_lines("")`（= 0 → 永远没满 → 一整段并成一行被截，10-19 只英档实测）；
+        #    也不能干脆不接（每句都推一次上滚，语速快时一秒多滚一次，Owen「有点跳」）。
+        n = self._tv.zh_lines(pz) if pz else self._tv.big_lines(pe)
+        return n < self._tv.lines_tier()
 
     def endpoint(self, between: bool) -> None:
         """`main`：Soniox 报了一个端点（`between` = 落在两句之间，不是一句话说到一半）。"""

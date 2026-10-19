@@ -220,17 +220,35 @@ class 真窗口(unittest.TestCase):
         try:
             # 视口高恰好是行高整数倍时没有「被裁的行」—— 默认几何会随行高常量变（3.11 英文两行
             # 把行高从 70 改成 84 后就正好对齐了），所以先把面板拉成一个**不整除**的高度。
-            f = o._panel.frame()
-            o._panel.setFrame_display_(((f.origin.x, f.origin.y),
-                                        (f.size.width, f.size.height + 17.0)), False)
-            o._sync_panel_size()
+            #    ⚠️ 加多少才不整除取决于当时的视口高（卡片 / 屏幕 / 记住的窗口尺寸），一个固定值
+            #    会时红时绿（10-19 行高 97 时撞上过）→ 换几个增量，取第一个真有「被裁的行」的。
+            # ⚠️ 输入框进出会让字幕区上让 `INPUT_LIFT`，而且按**真时钟**做动画 —— 不钉住的话视口高
+            #    随跑测试的时刻漂（10-19 时红时绿的真因）。减弱动态 = 一步到位，再钉成「收起」。
+            import motion
+            orig = motion.reduce_motion
+            motion.reduce_motion = lambda: True
+            self.addCleanup(lambda: setattr(motion, "reduce_motion", orig))
+            o._set_bar_shown(False)
+            o._lift_tick(0.0)
             self._feed(o, 8)
             o.duty_update([_item("d1")])
             o._duty_open("d1")
-            _level, cut = self._top_cut(o)
+            f = o._panel.frame()
+            tried = []
+            for extra in [17.0 + 12.0 * k for k in range(16)]:   # 卡片开着时视口要面板长过一截才跟着变
+                o._panel.setFrame_display_(((f.origin.x, f.origin.y),
+                                            (f.size.width, f.size.height + extra)), False)
+                o._sync_panel_size()
+                o._tv.tick()
+                _level, cut = self._top_cut(o)
+                tried.append((extra, round(float(o._panel.frame().size.height), 1),
+                              round(float(o._tv._scroll.contentView().bounds().size.height), 1),
+                              round(cut, 1)))
+                if 0.5 < cut < float(o._tv._row_h) - 0.5:
+                    break
             self.assertGreater(cut, 0.5,
                                f"视口顶边正好压在行边界上（cut={cut:.2f}）—— 这一档取不到「被裁的行」")
-            self.assertLess(cut, float(o._tv._row_h), "切掉量不该超过一行")
+            self.assertLess(cut, float(o._tv._row_h), f"切掉量不该超过一行（试过 {tried}）")
             band = edge_fade.band_height(float(o._tv._scroll.bounds().size.height))
             self.assertGreaterEqual(band, 1.0)
             # 切割线 = 视口顶边 = 带子的起点（那一端 α=0，所以切开的地方看不见）

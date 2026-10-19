@@ -1439,6 +1439,7 @@ class Overlay:
         self._tail_merge = False    # 短尾巴并行只在 Soniox 实时识别时开（`set_tail_merge`）
         self._next_gap = None       # 下一句与上一句之间的音频停顿（`next_gap`；用一次就清）
         self._row_n = 0             # 最后一行里并了几句（`caption_flow.JOIN_MAX`）
+        self._join_on = caption_flow.JOIN_ON   # 「连着讲就并成一段」默认关，见 caption_flow.JOIN_ON
         self._merge_join = False    # 这次并行是「连着讲」那条（定稿时还要再量一次装不装得下）
         self.join_undone = 0        # 估的时候装得下、真译文装不下 → 撤回并行的次数（观测用）
         self._seed_zh = ""          # 这句定稿开始时手边的草稿译文（`caption_rows(bridge_zh=)`）
@@ -3119,7 +3120,7 @@ class Overlay:
             return True, False
         pe, pz = self._log.rows[-1]
         fits = self._tv.fits_row(f"{pe} {en}".strip(), f"{pz}{zh_guess}")
-        if caption_flow.is_join(gap, fits=fits, n_in_row=self._row_n):
+        if self._join_on and caption_flow.is_join(gap, fits=fits, n_in_row=self._row_n):
             return True, True
         return False, False
 

@@ -42,6 +42,7 @@ class 真窗口(unittest.TestCase):
         o._clock = lambda: self.now[0]
         o._tv._clock = o._clock
         o.set_tail_merge(True)
+        o._join_on = True                            # 默认关；这里测的是开了以后的行为
         o.finalize("I would like you to read the Wall Street Journal critically.",
                    "我希望你们能批判性地读《华尔街日报》。")
         return o
@@ -106,6 +107,26 @@ class 真窗口(unittest.TestCase):
         o.next_gap(0.2)
         self._say(o, "Sometimes disagreeing.", "有时不同意。", gap=0.2)
         self.assertIsNone(o._next_gap)
+
+
+class 默认关(unittest.TestCase):
+    def test_默认不并(self):
+        """Owen 10-19：草稿先单占一行、封口后再并进上一行 = 一次跳动，还不如不并。"""
+        self.assertFalse(cf.JOIN_ON)
+        try:
+            from overlay import Overlay
+        except Exception as e:                       # noqa: BLE001
+            self.skipTest(f"AppKit 不可用, 跳过: {type(e).__name__}: {e}")
+        o = Overlay()
+        self.addCleanup(o.close)
+        o.set_tail_merge(True)
+        o.finalize("I would like you to read the Wall Street Journal critically.", "我希望你们能批判性地读《华尔街日报》。")
+        n = len(o._history)
+        o.next_gap(0.3)
+        o._draft_zh_val = "有时会不同意。"
+        o.seed_en("Sometimes disagreeing with it.")
+        o.finalize("Sometimes disagreeing with it.", "有时会不同意。")
+        self.assertEqual(len(o._history), n + 1)
 
 
 class 接线(unittest.TestCase):

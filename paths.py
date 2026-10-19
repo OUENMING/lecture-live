@@ -53,6 +53,24 @@ def _root(root) -> pathlib.Path:
     return pathlib.Path(root) if root is not None else STATE_ROOT
 
 
+#: 桌面上的笔记总文件夹（作者 2026-10-19 定名）。里面按课号分文件夹放详细版 HTML。
+NOTES_LIBRARY = "烤菠萝的笔记库"
+
+
+def notes_library(*, home=None) -> pathlib.Path:
+    """`~/Desktop/烤菠萝的笔记库` —— 每个人都有的笔记落点（有没有 Obsidian 库都写）。
+
+    ⚠️ 调用时才取 `Path.home()`（不在 import 时定死）：测试改 `HOME` 就能把写端隔离走。
+    """
+    return pathlib.Path(home if home is not None else pathlib.Path.home()) / "Desktop" / NOTES_LIBRARY
+
+
+def course_notes_dir(course: str, *, home=None) -> pathlib.Path:
+    """`~/Desktop/烤菠萝的笔记库/<课号>`。课号里的 `/` 换成 `-`（不许变成子目录）。"""
+    name = str(course or "LECTURE").strip().replace("/", "-").replace(":", "-") or "LECTURE"
+    return notes_library(home=home) / name
+
+
 def course_dir(course: str, *, root=None) -> pathlib.Path:
     """`root` 给了就用它 —— **别让调用方自己拼 `root/"courses"/<课号>`**。
 

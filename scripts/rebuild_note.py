@@ -83,11 +83,7 @@ def main() -> int:
         # ⚠️ 先看还有没有**记住过的**库（`~/.classlive/vault`）—— 与 `cl` 同一条路。
         from obsidian_writer import resolve_vault
         args.vault = resolve_vault(None)
-    if not args.vault:
-        print("✗ 找不到 Obsidian 库 —— 得知道笔记写到哪儿。\n"
-              "  例: --vault ~/Obsidian/MyVault   或设环境变量 OBSIDIAN_VAULT\n"
-              "  也可以先用 `cl` 跑一次（它会把选过的库记进 ~/.classlive/vault）。")
-        return 1
+    # ⭐ 3.10：没库也重建 —— 落桌面「烤菠萝的笔记库/<课号>/」（同收尾那条）。
 
     w = ObsidianWriter(vault=args.vault, course=args.course, mode="no",
                        api_key=load_api_key(None), model=args.model,
@@ -97,7 +93,7 @@ def main() -> int:
                        #    「🎯 这节课最值得记的几句」，而且**不报任何错** ——
                        #    作者在真笔记上对比才发现。`keypoints.pick` 本来就
                        #    「失败一律返回空表、绝不抛」，直接接即可。
-                       keypoints_fn=keypoints.pick)
+                       keypoints_fn=keypoints.pick, desk=True)
     # 接管成「已跑完的一节」
     w.enabled = True
     w.mode = "yes"

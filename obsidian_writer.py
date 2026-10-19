@@ -148,6 +148,27 @@ def _hms_str(sec: int) -> str:
     return f"{sec // 3600:02d}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
 
 
+def _pretty_path(p) -> str:
+    """路径给人看：家目录写成 `~`（收尾卡上一行放得下）。"""
+    s = str(p)
+    home = str(Path.home())
+    return "~" + s[len(home):] if s.startswith(home + os.sep) else s
+
+
+def desk_note_path(date: str, course: str, *, home=None) -> Path:
+    """桌面笔记库里这节课的 HTML 路径（`~/Desktop/烤菠萝的笔记库/<课号>/<日期>_<课号>.html`）。
+
+    ⚠️ 同 `note_path_for`：同日同课已有一份就加时间戳并存，**绝不覆盖**。
+    """
+    import paths
+    d = paths.course_notes_dir(course, home=home)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{date}_{course}.html"
+    if p.exists():
+        p = d / f"{date}_{time.strftime('%H%M%S')}_{course}.html"
+    return p
+
+
 def note_path_for(vault, date: str, course: str) -> Path:
     """今天这门课的笔记路径。**同日同课已有一份就加时间戳并存，绝不覆盖。**
 
@@ -661,7 +682,7 @@ class ObsidianWriter:
                  glossary_path: str | None = None, polish: bool = True,
                  polish_model: str | None = None, keypoints=None,
                  keypoints_fn=None, lost_explain_fn=None, backfill_fn=None,
-                 recap_fn=None):
+                 recap_fn=None, desk=False, open_fn=None, desk_home=None):
         self.mode = mode
         # ⚠️⚠️ **`enabled` 只管一件事：要不要记录**（`sessions/` 那层底稿）。
         #    **「写不写 Obsidian 笔记」是另一件事** —— 由 `self._vault is not None` 判
@@ -732,6 +753,15 @@ class ObsidianWriter:
         #:    （纯转录档一个请求都不发、只英·校档不要中文）—— 这里只负责在渲染笔记
         #:    **之前**放它跑一遍、并把拿回来的 entries 交给渲染。见 `backfill.py` 文件头。
         self._backfill_fn = backfill_fn
+        #: 🗂 桌面笔记库（3.10，作者 2026-10-19）：详细版 HTML 一律放
+        #: `~/Desktop/烤菠萝的笔记库/<课号>/`；生成完调 `open_fn(路径)` 自动打开。
+        #: ⚠️ `desk=False`（默认）= 不碰桌面：判据直接构造 writer 时绝不能往真桌面写
+        #:    （「测试必须隔离写端」）。`main` / 补笔记脚本显式传 `desk=True`。
+        #: ⚠️ `open_fn=None` = 不打开（判据 / 补笔记脚本走这条，不许弹浏览器）。
+        self._desk = bool(desk)
+        self._open_fn = open_fn
+        self._desk_home = desk_home
+        self.desk_html: Path | None = None
         self._n = 0
         self.session_path: Path | None = None
         self.vault_path: Path | None = None
@@ -745,13 +775,24 @@ class ObsidianWriter:
                 f"# {self._course} · {self._date} · 实时会话日志\n\n", encoding="utf-8")
 
     @property
-    def writes_notes(self) -> bool:
-        """这节课收尾会不会写 Obsidian 笔记（记录开着 **且** 有库）。
+    def save_where(self) -> str:
+        """收尾卡上「存到哪」那一行（作者 2026-10-19：卡上要提示位置）。不写笔记时为空。"""
+        if not self.writes_notes:
+            return ""
+        if self._desk:
+            import paths
+            return f"桌面 › {paths.NOTES_LIBRARY} › {paths.course_notes_dir(self._course).name}"
+        return "Obsidian 库 › Lectures"
 
-        ⚠️ `main` 拿它决定「问不问存不存」和「结论卡要不要等用户点关闭」——
-           没库时问「存入 Obsidian 吗？」是在问一件做不到的事。
+    @property
+    def writes_notes(self) -> bool:
+        """这节课收尾会不会写笔记。
+
+        ⭐ 3.10（作者 2026-10-19）：**没有 Obsidian 库也写** —— 落到桌面
+           `烤菠萝的笔记库/<课号>/`。所以只看记录开没开。
+           （旧口径「记录开着且有库」：朋友没设库就整节课没笔记。）
         """
-        return self.enabled and self._vault is not None
+        return self.enabled and (self._vault is not None or self._desk)
 
     # ---- 运行中: 每句立刻落盘(flush) ----
     def append(self, en: str, zh: str, flagged: bool = False, raw: str = "") -> str:
@@ -1525,8 +1566,18 @@ class ObsidianWriter:
                 print("⚠ 公式字体没装上（详细版里公式会显示成 TeX 源码）", flush=True)
                 self._note_warns.append("公式字体没装上（KaTeX 副本没复制过去）"
                                         " —— 详细版里公式显示为 TeX 源码")
-            self._atomic_write(stem.with_suffix(".html"), note_html.note_page(data))
+            page = note_html.note_page(data)
+            self._atomic_write(stem.with_suffix(".html"), page)
             print(f"🧩 交互版 HTML：{data.html_name}", flush=True)
+            desk = self.desk_html
+            if desk is not None and desk != stem.with_suffix(".html"):
+                # 🗂 有 Obsidian 库时，桌面笔记库再放一份（同一页、同一套 KaTeX 副本装到旁边）
+                try:
+                    note_html.install_assets(desk)
+                    self._atomic_write(desk, page)
+                except Exception as e:                        # noqa: BLE001
+                    print(f"⚠ 桌面笔记库那份没写出来({str(e)[:60]}); 库里那份照常")
+                    self.desk_html = None
         except Exception as e:                                # noqa: BLE001
             data.html_name = self._html_name = ""
             print(f"⚠ 交互版 HTML 没写出来({str(e)[:60]}); Markdown 版照常")
@@ -1840,12 +1891,11 @@ class ObsidianWriter:
         #       而它们**只服务于笔记** —— 没有库就没有笔记可写，跑了是白烧钱。
         #    ⚠️ 将来的「打包成 MD/PDF」接的正是这一档：`_render_note()` 是**纯函数**
         #       （不碰 vault），导出直接复用它换落点即可。
-        if self._vault is None:
-            # ⚠️ 这句会留在收尾卡上**等用户点关闭**（`main` 看 `writes_notes`）——
-            #    2026-10-12 朋友实测：原来先问「存入 Obsidian 吗？」、点了「存」再在一张
-            #    3 秒就关的卡上说没存成，她以为存好了，好几节课都没笔记。所以要写清「下次怎么办」。
-            return (f"📄 这节课记了 {self._n} 句，但还没设笔记库，所以没生成 Obsidian 笔记。\n"
-                    f"下次开课前在面板上点「笔记库」选好 Obsidian 库，之后每节课都会存进去。\n"
+        # ⭐ 3.10：没有 Obsidian 库**也生成笔记**（落桌面笔记库，见 `writes_notes`）。
+        #    旧版这里早退「没设笔记库，所以没生成」—— 朋友好几节课都没笔记。
+        #    只有既没库、又没开桌面笔记库（判据直接构造）时才早退。
+        if not self.writes_notes:
+            return (f"📄 这节课记了 {self._n} 句，还没设笔记库，所以没生成笔记。\n"
                     f"这节课的逐句记录在安装目录的 sessions/{self.session_path.name}")
         if self._n == 0:
             # ⚠️ 原来是 `self._n == 0` 直接 return —— 但"有提问、零句转录"(麦克风故障,
@@ -1865,7 +1915,7 @@ class ObsidianWriter:
         if self.mode == "ask":
             save = True if ask is None else bool(ask(self._n))
         if not save:
-            return (f"📝 未存入 Obsidian({self._n} 句)。"
+            return (f"📝 没保存笔记（{self._n} 句）。"
                     f"记录仍保留在:\n   {self.session_path}")
 
         # ⚠️ 进度一律**先 print（终端照旧）再转发给 UI**，两条路都要有 ——
@@ -1981,7 +2031,12 @@ class ObsidianWriter:
         #       同一路径为完整版（`_atomic_write`，Obsidian 开着也只看到旧版或新版）。
         #    ⚠️ 只动 `Lectures/`，`sessions/` 的**三方契约**格式一个字节不碰。
         #    ⚠️ 路径在这里算**一次**（见结尾那段：`note_path_for` 遇到同名会另存一份）。
-        self.vault_path = note_path_for(self._vault, self._date, self._course)
+        # 🗂 有 Obsidian 库：md 简版照旧进 `<库>/Lectures/`；没有库：md 跟 HTML 一起放桌面笔记库。
+        #    详细版 HTML 不管有没有库都在桌面笔记库里有一份（`_write_sidecars`）。
+        self.desk_html = (desk_note_path(self._date, self._course, home=self._desk_home)
+                          if self._desk else None)
+        self.vault_path = (note_path_for(self._vault, self._date, self._course)
+                           if self._vault else self.desk_html.with_suffix(".md"))
         # ⚠️ 基础版也带上**本地就能算**的两层（❓ 标记不讲解、📑 纲要）：传空会被渲染成
         #    「课上没按 ❓」——那是假话。`review_missing` 同理：有 key 时说「这次没生成」，
         #    不说「未配 API key」（2026-10-16 OCR 审查）。
@@ -2129,12 +2184,22 @@ class ObsidianWriter:
         # ⭐ 第六轮：md 变成**简版**之后，讲解/例题/变式/自测/图表/转录**只在 HTML 里** ——
         #    下课这一行必须给出它的路径（作者原话："下课提示里给 HTML 的路径"），
         #    否则按老习惯打开 md 的人会以为笔记少了几层。
-        html_line = (f"\n   详细版 HTML: {self.vault_path.with_suffix('.html')}"
-                     if self._html_name else "")
+        html_path = self.desk_html or (self.vault_path.with_suffix('.html') if self._html_name else None)
+        # 📂 桌面那份写成「桌面 › 烤菠萝的笔记库 › 课号 › 文件名」—— 与问句卡上「存到」同一口径
+        html_line = (f"\n   📂 {self.save_where} › {html_path.name}" if self.desk_html
+                     else f"\n   📂 {_pretty_path(html_path)}" if html_path else "")
+        md_line = (f"\n   Obsidian 简版：{_pretty_path(self.vault_path)}" if self._vault else "")
         # 💡 术语库那一句走**现成通道**（收尾卡 / 终端返回串）—— 不新建 UI
         #    （作者要求「有感知」：这节课往术语表里加了什么，得有人告诉他）。
         gloss_line = (f"\n   💡 新加入术语库 {len(self._gloss_added)} 条："
                       f"{' · '.join(self._gloss_added)}" if self._gloss_added else "")
-        return (f"📝 已存入 Obsidian({self._n} 句, 复习层: {layer}{extra}) → {self.vault_path}"
-                f"{html_line}{gloss_line}\n"
-                f"   原始逐句日志: {self.session_path}")
+        print(f"   原始逐句日志: {self.session_path}", flush=True)
+        if html_path is not None and self._open_fn is not None:
+            # 🗂 生成完自动打开详细版（作者 2026-10-19）；打不开只是少一步，笔记已经在盘上
+            try:
+                self._open_fn(str(html_path))
+                html_line += "（已自动打开）"
+            except Exception as e:                            # noqa: BLE001
+                print(f"⚠ 没能自动打开笔记({str(e)[:60]})", flush=True)
+        return (f"📝 笔记已保存（{self._n} 句，{layer}{extra}）"
+                f"{html_line}{md_line}{gloss_line}")

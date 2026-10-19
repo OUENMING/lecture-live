@@ -375,9 +375,9 @@ def _shared_upload_queue():
     global _upload_q_shared
     if _upload_q_shared is None:
         import upload as _up
-        import upload_endpoint as _ue
-        _upload_q_shared = _up.UploadQueue(
-            _up.make_http_send(_ue.endpoint(), _ue.token()))
+        # ⚠️ 发送器走 `upload.make_prod_send()` —— 与退出后那个 `--drain` 子进程
+        #    **同一份**（端点和令牌只有一处；各抄一份会漂到两个落点去）。
+        _upload_q_shared = _up.UploadQueue(_up.make_prod_send())
     return _upload_q_shared
 
 
@@ -1444,6 +1444,23 @@ def _update_mode_in(text: str, version: str) -> str:
     return changelog.update_mode(text, version)
 
 
+def _upload_on_exit() -> None:
+    """退出时把**还没传完**的队列交给独立进程传完（详见 `upload.spawn_exit_uploader`）。
+
+    ⚠️ 为什么必须有：上传在 daemon 线程里跑，收尾只等 `UPLOAD_JOIN_S`，进程一退
+       线程就死 —— 实测「报告传上去了、9 MB 的音频没传完」，剩下的要等**下次打开**
+       才补传。这里起一个 `setsid` 子进程，App 走了它接着传。
+    ⚠️ 三道闸（上传关 / `CLASSLIVE_NO_AUTO_UPDATE` / 队列空）**在 `upload` 里**
+       —— 一处定义，`entry_launch` 关面板那条也走同一个入口。
+    ⚠️ 永不抛：它跑在退出段，失败只是"这次没起后台传"，队列还在盘上等下次。
+    """
+    try:
+        import upload as _u
+        _u.spawn_exit_uploader()
+    except Exception:                                     # noqa: BLE001
+        pass
+
+
 def _auto_update_on_exit() -> None:
     """退出时**在独立进程里**检查/应用小更新。父进程立刻返回，**零退出延迟**。
 
@@ -2176,6 +2193,13 @@ def run(args) -> None:
         import upload as _upmod
         import obsidian_writer as _owmod
         import upload_endpoint as _uemod
+        # ⭐⭐⭐ **退出后留的那个 drainer 可能还在传**（3.10.x）。它写的是**同一个**
+        #    队列文件，而 `UploadQueue` 的锁只在进程内 —— 两个写者同时 `_save()`
+        #    会互相覆盖（把这次新排进来的条目整份抹掉）。**必须先让它退出**，
+        #    再构造本进程这份共享队列。⚠️ 放在这里而不是 `_shared_upload_queue`
+        #    内部：那个函数会被收尾路径调用，开机时也调一次 `stop_drainer` 就够了。
+        #    ⚠️ 它永不抛；杀不掉也照常开课（只杀锁文件里那个 pid，见其 docstring）。
+        _upmod.stop_drainer()
         # ⭐⚠️ **先把共享队列拿出来，交给 `recover_pending` 用**（2026-10-18 审查 D6）：
         #    它内部要是自己 `new` 一份 `UploadQueue`，两个实例各有一份 `_items` 内存副本、
         #    各一把 `_lock`，却写**同一个**队列文件 —— 那把锁保护不到跨实例的写。主线程
@@ -4461,6 +4485,10 @@ def run(args) -> None:
             _close_ui = getattr(ui, "close", None)
             if callable(_close_ui):
                 _close_ui()
+            # ⭐ **先把剩下的上传交出去**（独立进程，零退出延迟）—— 必须在
+            #    `_auto_update_on_exit()` **之前**：更新器会 `git pull` 换代码，
+            #    而 drainer 要的是**这一版**的 `upload.py` 与队列格式。
+            _upload_on_exit()
             _auto_update_on_exit()
             # ⭐ 下课了 —— 这才把那个可选的草稿模型放后台下（上课途中绝不下，见它的 docstring）
             _draft_model_on_exit()

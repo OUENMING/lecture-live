@@ -26,6 +26,17 @@
    `docs/PLAN-zero-config-upload.md`）；判据传一个**本地目录**或**本机 HTTP 服务器**
    （不碰真服务器、不需要凭据）。
 
+## 退出后把队列传完（⭐ App 退出时）
+
+    python upload.py --drain      # `spawn_exit_uploader` 起的那个独立进程
+
+⚠️ 上传线程是 daemon，进程一退就死；剩下的由这个子进程接着传（`setsid`，父进程不等它）。
+⚠️ **同一时刻只许一个进程写队列文件**（`UploadQueue` 的锁只在进程内）：
+   drainer 整个生命周期持 `~/.classlive/upload-drain.lock`；App 启动时先
+   `stop_drainer()`（只杀锁文件里那个 pid，且**先确认锁被持着**）再构造共享队列。
+   ⚠️ 判断"有没有 drainer"靠 **flock 抢不抢得到**，不是文件在不在 —— 进程怎么死
+   内核都会放锁；只按 pid 文件杀会误杀复用了那个 pid 的无辜进程。
+
 ## ⚠️ 为什么 key 是「会话名的哈希」
 
 原文件名 `2026-09-24_203440_ECON10770` 含**课号 + 精确时间戳** = 一份课表。
@@ -34,15 +45,28 @@
 """
 from __future__ import annotations
 
+import errno
+import fcntl
 import hashlib
 import json
 import os
 import pathlib
 import re
+import signal
+import subprocess
+import sys
 import threading
 import time
 
 import paths
+
+HERE = pathlib.Path(__file__).resolve().parent
+
+#: `fcntl.flock` 非阻塞抢锁失败时，"**真竞争**"的 errno 名单（其余是锁机制坏了）。
+#: ⚠️ 与 `instance_lock.probe` 同一条纪律：把 ENOLCK 也当成"有 drainer"，
+#:    下一步就会照着锁文件里的 pid 发信号 —— 那是**误杀**。
+#: ⚠️ 用 `errno.*` 符号，别写数字（`OSError.__new__` 会按 errno 重映射子类）。
+_BUSY_ERRNOS = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES}
 
 #: 重试退避的两端（秒）。⚠️ 上界照 Firefox Telemetry 那套（1 min → 120 min）。
 BACKOFF_MIN_S = 60.0
@@ -654,3 +678,347 @@ def make_local_send(base: str, *, root=None):
         except Exception:                                     # noqa: BLE001
             return False
     return send
+
+
+def make_prod_send():
+    """生产用的那一个 `send` —— **单一工厂**。
+
+    ⚠️ 两处必须走同一份：`main._shared_upload_queue()`（App 进程）与
+       `upload.py --drain`（退出后那个独立进程）。各抄一份的后果不是"风格问题"：
+       端点和令牌漂移之后，drainer 会把一节课传到**另一个**落点，而 App 认为它成功了
+       —— 队列清空、对象在错的地方。
+    ⚠️ 惰性 import `upload_endpoint`：它读的是判据用的两个 env 覆盖
+       （`CLASSLIVE_UPLOAD_ENDPOINT` / `CLASSLIVE_UPLOAD_TOKEN`），
+       所以**每次造 send 时**取，不在模块 import 时定死。
+    """
+    import upload_endpoint as _ue
+    return make_http_send(_ue.endpoint(), _ue.token())
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 退出后把队列传完：独立进程 + 跨进程唯一写者
+#
+# 问题（实测）：上传跑在 daemon 线程里，收尾只等 `UPLOAD_JOIN_S`，程序一退线程就死；
+# 剩下的要等**下次打开**才补传（报告传上去了、9 MB 音频没传完）。
+#
+# 形状：退出时 `spawn_exit_uploader()` 起一个 `setsid` 子进程 → `--drain` →
+#       拿 flock → 造 send（与 App 同一个工厂）→ `drain()` 一轮一条 → 放锁。
+# ⚠️ **跨进程只许一个写者**：`UploadQueue` 只有进程内的锁，两个进程同时 `_save()`
+#    会互相覆盖。所以 drainer 整个生命周期持 `upload-drain.lock`；
+#    App 启动时 `stop_drainer()` 先把它请走，再构造自己那份共享队列。
+# ══════════════════════════════════════════════════════════════════════
+
+#: 后台 QoS 包装器（低 CPU / 网络优先级，省电）。⚠️ 一处定义 —— 判据替换它来测 `-b`。
+TASKPOLICY = pathlib.Path("/usr/sbin/taskpolicy")
+
+
+def drain(queue, *, deadline_s: float = 7200, pause_s: float = 2.0,
+          should_stop=lambda: False, clock=time.monotonic,
+          sleep=time.sleep) -> dict:
+    """把队列**一轮一条**地传到空（或到点 / 被叫停）。返回 `{rounds, sent, failed, pending, reason}`。
+
+    `reason` 是**为什么停的**（日志与判据都靠它，不许只给个 bool）：
+      · `"empty"`   —— 队列空了（传完 / 过期丢光 / 本来就没有）
+      · `"backoff"` —— 剩下的条目都还没到 `next_at`（退避里）。⚠️ **不许空转**：
+                      再转下去只是每秒醒一次打自己的盘，服务端一点忙都帮不上。
+      · `"deadline"` —— 超过 `deadline_s`（默认 2 h）
+      · `"stopped"` —— `should_stop()` 为真（收到 SIGTERM）
+
+    ⚠️ 依赖全注入（`clock` / `sleep` / `should_stop`）：2 小时的循环要能在判据里
+       用假时钟秒过，否则这层逻辑永远只能靠"真跑一次看看"。
+    ⚠️ 轮间 `sleep(pause_s)` —— 回连后一口气倒空会被服务端风控（同 `pump` 的纪律）。
+    ⚠️ **怎么判"都在退避里"**：不重算 `next_at`（那是 `pump` 的语义，重算就有了两份
+       实现、两个时钟域）—— `pump` 的契约是 `sent + failed == 本轮试了几条`，
+       所以**一条都没试**就是全都还没到点。队列里只剩坏文件时 `pump` 会当场把它们
+       判成 `sent`（并发完移走），也不会走进这个分支。
+    """
+    out = {"rounds": 0, "sent": 0, "failed": 0, "pending": queue.pending,
+           "reason": "empty"}
+    started = clock()
+    while True:
+        if should_stop():
+            out["reason"] = "stopped"
+            break
+        if not queue.pending:
+            out["reason"] = "empty"
+            break
+        if clock() - started >= deadline_s:
+            out["reason"] = "deadline"
+            break
+        r = queue.pump(max_items=1)
+        out["rounds"] += 1
+        out["sent"] += int(r.get("sent") or 0)
+        out["failed"] += int(r.get("failed") or 0)
+        if not r.get("sent") and not r.get("failed"):
+            out["reason"] = "backoff"
+            break
+        out["pending"] = queue.pending
+        if not out["pending"]:
+            out["reason"] = "empty"
+            break
+        # ⚠️ 睡之前再看一眼：SIGTERM 落在这一轮里时不用白等 `pause_s`。
+        if should_stop():
+            out["reason"] = "stopped"
+            break
+        sleep(pause_s)
+    out["pending"] = queue.pending
+    return out
+
+
+class DrainLock:
+    """`upload-drain.lock` 的 flock 持有者（进程内一个实例 = 一个打开的文件描述）。
+
+    ⚠️ **flock 而不是 pidfile**：进程怎么死（含 `kill -9`）内核都会放锁；
+       pidfile 会留下一个死 pid 把以后所有 drainer 挡在门外
+       （同 `instance_lock` 的取舍，见 `tests/test_instance_lock.py` 的 C3）。
+    ⚠️ 拿不到锁**不是错误**：那说明已经有一个 drainer 在干活，本进程应当安静退出。
+    """
+
+    def __init__(self, *, root=None):
+        self.path = paths.upload_drain_lock(root=root)
+        self._fd = None
+        #: 上次抢锁失败是不是**真竞争**（有别的 drainer）。`stop_drainer` 只在这场
+        #: 为真时才去读 pid、发信号 —— 锁机制坏了（ENOLCK / 目录不可写）不算。
+        self.busy = False
+        #: 上次失败的原因（诊断用）。
+        self.last_error: OSError | None = None
+
+    def acquire(self) -> bool:
+        """非阻塞抢锁。拿到 → 写入自己的 pid（给 `stop_drainer` 认人）并返回 True。"""
+        self.busy = False
+        self.last_error = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        except Exception as e:                                # noqa: BLE001
+            self.last_error = e if isinstance(e, OSError) else None
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            self.last_error = e
+            self.busy = getattr(e, "errno", None) in _BUSY_ERRNOS
+            os.close(fd)
+            return False                                      # 已有一个 drainer（或锁坏了）
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+            os.fsync(fd)
+        except Exception:                                     # noqa: BLE001
+            pass                                              # pid 只是诊断信息，拿不到锁也要干活
+        self._fd = fd
+        return True
+
+    def release(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+        return False
+
+
+def _read_lock_pid(path) -> int | None:
+    try:
+        return int(pathlib.Path(path).read_text(encoding="utf-8").strip())
+    except Exception:                                         # noqa: BLE001
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    """`kill -0` 那条：只问"还在不在"，**不发信号**。"""
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                                           # 别人的进程（root）—— 活着
+    except OSError:
+        return False
+    return True
+
+
+def stop_drainer(timeout: float = 5.0, *, root=None) -> bool:
+    """App 启动时把上一次退出留下的 drainer 请走。返回"确实停掉了一个"。
+
+    ⚠️⚠️ **必须在构造共享队列之前调**：那个 drainer 还持着队列文件在写，
+       两个写者同时 `_save()` 会互相覆盖（可能把这次新排的条目整份抹掉）。
+    ⚠️ **只杀锁文件里那个 pid，且先确认锁还被持着** —— 绝不按进程名杀：
+       名字匹配会把用户另一个 ClassLive（或任何同名的东西）一起打死。
+       锁没人持有时**先读 pid 也不读**：一个陈旧的锁文件里可能躺着一个
+       早就被复用的 pid，照着它发信号就是误杀无辜进程。
+    ⚠️ 拿不到锁 → 读 pid → `SIGTERM`（drainer 会把手头这个文件发完就退）→
+       等锁释放（≤`timeout`）→ 还不放就 `SIGKILL` 再等 1 s。
+       ⚠️ 逐文件进度在 `sent_files` 里立刻落盘，所以 SIGKILL 也不会重复传已完成的文件。
+    ⚠️ **永不抛**：它跑在开机那条路上，杀不掉一个后台进程不该挡住上课。
+    """
+    try:
+        lock = DrainLock(root=root)
+        if lock.acquire():
+            lock.release()                                    # 没人持锁 -> 也没有 drainer
+            return False
+        # ⚠️ 抢不到锁**不一定是"有 drainer"**：锁机制自己坏掉（ENOLCK / 目录不可写）
+        #    也会失败。只有"真竞争"才继续往下读 pid —— 否则就是照着陈旧 pid 误杀。
+        if not lock.busy:
+            return False
+        pid = _read_lock_pid(lock.path)
+        # ⚠️ 再确认一次锁仍然被持着（pid 复用的唯一防线）：拿到锁就说明上面那次
+        #    "忙"只是与 drainer 退出的瞬间撞了一下，不该对它发信号。
+        if not pid or pid == os.getpid() or not _pid_alive(pid):
+            return False
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return False
+        if _wait_lock_free(lock, timeout):
+            return True
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        return _wait_lock_free(lock, 1.0)
+    except Exception:                                         # noqa: BLE001
+        return False
+
+
+def _wait_lock_free(lock: "DrainLock", timeout: float) -> bool:
+    """等 `lock` 变得可抢（= 持有者放了 / 死了）。抢到就立刻放掉。"""
+    end = time.monotonic() + max(0.0, timeout)
+    while True:
+        if lock.acquire():
+            lock.release()
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.05)
+
+
+def spawn_exit_uploader() -> bool:
+    """在**独立的后台进程**里把队列传完（仿 `update.spawn_auto_update`）。返回"起没起"。
+
+    ⚠️ `start_new_session=True` = `setsid`：父进程退出 / 被杀 / SIGHUP 打整个进程组，
+       它都继续跑完（与自动更新、草稿模型下载同一条纪律）。
+    ⚠️ `/usr/sbin/taskpolicy -b`：后台 QoS，低 CPU / 网络优先级 —— 用户已经合盖走人，
+       不该让一个补传把机器唤醒得跟上课一样。
+    ⚠️ **三道闸**（判据全靠它们，绝不真起进程）：
+       上传总开关 / `CLASSLIVE_NO_AUTO_UPDATE`（与自动更新同一道）/ 队列空。
+    ⚠️ "队列空"读的是**盘上那份**：`enqueue` / `pump` 都会立刻落盘，所以它和
+       App 内存里那份共享实例是一致的；这里不去碰共享实例，是为了让
+       `entry_launch`（面板那条路，没有共享队列）也能用同一个入口。
+    """
+    if not upload_enabled():
+        return False
+    if os.environ.get("CLASSLIVE_NO_AUTO_UPDATE"):
+        return False
+    try:
+        if not UploadQueue(make_prod_send()).pending:
+            return False
+    except Exception:                                         # noqa: BLE001
+        return False
+    try:
+        subprocess.Popen(
+            _drain_cmd(), cwd=HERE, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        return True
+    except Exception:                                         # noqa: BLE001
+        return False
+
+
+def _drain_cmd() -> list:
+    """`--drain` 那条命令行。⚠️ 判据替换 `TASKPOLICY` 来钉住 `-b` 的位置。"""
+    cmd = [sys.executable, str(HERE / "upload.py"), "--drain"]
+    if TASKPOLICY.exists():
+        cmd[:0] = [str(TASKPOLICY), "-b"]
+    return cmd
+
+
+def _drain_log(msg: str) -> None:
+    """drainer 的日志 —— 逐行追加到 `~/Library/Logs/ClassLive/upload.log`（与 `update.log` 同目录）。
+
+    ⚠️ 只写**计数 / 远端 key / 原因**：不写 token、不写本地完整路径
+       （key 是会话名哈希 + 按类型的稳定名，见 `_remote_name`）。**永不抛。**
+    """
+    try:
+        import update as _u
+        d = _u.STATE_DIR
+    except Exception:                                         # noqa: BLE001
+        d = pathlib.Path.home() / "Library" / "Logs" / "ClassLive"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "upload.log", "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {msg}\n")
+    except Exception:                                         # noqa: BLE001
+        pass
+
+
+def _logging_send(send):
+    """给 `send` 套一层逐文件日志（一行一个对象结果）。"""
+    def wrapped(local, key):
+        ok = bool(send(local, key))
+        _drain_log(f"{'✓' if ok else '✗'} {key}")
+        return ok
+    return wrapped
+
+
+def run_drain(*, root=None) -> int:
+    """`upload.py --drain` 的本体：拿锁 → 造 send → `drain()` → 放锁。返回退出码。
+
+    ⚠️ 拿不到锁 = 已经有一个 drainer 在跑（`stop_drainer` 之外的第二道保险）——
+       **直接退出 0**，不报错：这不是失败，是"有人在干这件事"。
+    ⚠️ SIGTERM → 置 `should_stop`，当前文件发完就退（逐文件进度已经落盘）。
+    """
+    lock = DrainLock(root=root)
+    if not lock.acquire():
+        _drain_log(f"已有 drainer 在跑（锁被占）—— 本进程退出 pid={os.getpid()}")
+        return 0
+    stop = threading.Event()
+
+    def _on_term(signum, frame):                              # noqa: ARG001
+        stop.set()
+
+    try:
+        signal.signal(signal.SIGTERM, _on_term)
+    except Exception:                                         # noqa: BLE001
+        pass                                                  # 非主线程 / 判据环境
+    try:
+        q = UploadQueue(_logging_send(make_prod_send()), root=root)
+        _drain_log(f"开始：待传 {q.pending} 节 pid={os.getpid()}")
+        r = drain(q, should_stop=stop.is_set)
+        _drain_log(f"结束（{r['reason']}）：轮 {r['rounds']} / 成 {r['sent']} / "
+                   f"败 {r['failed']} / 余 {r['pending']}")
+        return 0
+    except Exception as e:                                    # noqa: BLE001
+        _drain_log(f"⚠ 出错退出（{type(e).__name__}: {str(e)[:80]}）")
+        return 1
+    finally:
+        lock.release()
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--drain" in argv:
+        return run_drain()
+    print("用法: python upload.py --drain   # 把待上传队列传完（App 退出后由它起）")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+

@@ -284,6 +284,19 @@ def upload_queue(*, root=None) -> pathlib.Path:
     return _root(root) / "upload-queue.json"
 
 
+def upload_drain_lock(*, root=None) -> pathlib.Path:
+    """「退出后继续上传」那个后台 drainer 的**跨进程锁** —— `~/.classlive/upload-drain.lock`。
+
+    ⚠️ 它不是"别开两个 drainer"的礼貌提示，而是**唯一写者**的保证：
+       `UploadQueue` 只有进程内的 `_lock`，两个进程同时 `_save()` 会互相覆盖
+       （可能把 App 新排进来的条目整份抹掉）。持有者把 pid 写进来，
+       `upload.stop_drainer` 靠它找到该停的那一个进程。
+    ⚠️ 与 `update.lock` / `instance.lock` 不同：**按 pid 判新旧没用** ——
+       flock 由内核托管，进程怎么死都会自动释放（见 `tests/test_instance_lock.py` C3）。
+    """
+    return _root(root) / "upload-drain.lock"
+
+
 def upload_ledger(*, root=None) -> pathlib.Path:
     """上传台账 —— `~/.classlive/upload-ledger.json`，`会话名 -> 对象前缀`。
 

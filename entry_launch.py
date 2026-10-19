@@ -270,6 +270,15 @@ def main() -> int:
             _u.spawn_draft_model_download()
         except Exception:                       # noqa: BLE001
             pass
+        # ⭐ 只开面板看一眼就走的人，队列里也可能有上次没传完的东西 ——
+        #    同样交给独立进程（`spawn_exit_uploader` 自己按锁去重、队列空就不起）。
+        #    ⚠️ 本进程**不写队列**：`spawn_exit_uploader` 只读盘上那份的 `pending`，
+        #    真正的写发生在子进程里（它持锁）。
+        try:
+            import upload as _up
+            _up.spawn_exit_uploader()
+        except Exception:                       # noqa: BLE001
+            pass
     return rc["code"]
 
 

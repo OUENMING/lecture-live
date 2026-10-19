@@ -1051,7 +1051,10 @@ class SonioxAccount(unittest.TestCase):
     def test_用量_并发_日志对账(self):
         import cl_admin_ui as U
         with tempfile.TemporaryDirectory() as d, _home_with(d, soniox__token="sk_SONIOX_SECRET"):
-            r = U.soniox_account(get=_sx_get())
+            # ⚠️ 钉住「今天」：夹具里最后一天是 2026-10-18（不钉的话过了那天就红）
+            import datetime as dt
+            r = U.soniox_account(get=_sx_get(),
+                                 now=dt.datetime(2026, 10, 18, 12, tzinfo=dt.timezone.utc))
         self.assertEqual(r["regions"], ["us"])
         self.assertEqual(r["usage"]["us"]["cost_7d"], 1.2329)
         self.assertEqual(r["usage"]["us"]["cost_today"], 0.0083)

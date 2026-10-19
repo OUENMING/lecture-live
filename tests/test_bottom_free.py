@@ -76,5 +76,45 @@ class 真窗口(unittest.TestCase):
         self.assertIsNone(o._lift_anim)
 
 
+class 英文两行(unittest.TestCase):
+    """「英文最少两行、中文也两行」（3.11，Owen 10-19）：英文那一格两行、贴着自己的中文。"""
+
+    def _overlay(self):
+        if not O.LAYOUT_D:
+            self.skipTest("只管 D 布局")
+        o = O.Overlay()
+        self.addCleanup(o.close)
+        return o
+
+    def _slot_of(self, o, piece):
+        for s in o._tv._slots:
+            if piece in (s["en"].stringValue() or ""):
+                return s
+        self.fail(f"屏上没有「{piece}」")
+
+    def test_中文占满两行时英文也有两行(self):
+        o = self._overlay()
+        en = ("And perfect competition is a wonderful sort of theoretical benchmark but never "
+              "actually exists in reality, no market is perfectly competitive, which is monopoly.")
+        zh = "而完全竞争是一个很好的理论基准，但在现实中从未真正存在过。没有哪个市场是完全竞争的，另一个极端也就是垄断。"
+        o.finalize(en, zh)
+        o._render()
+        o._tv.tick()
+        s = self._slot_of(o, "perfect competition")
+        self.assertEqual(int(s["en2"]), 2, "英文没拿到两行")
+        self.assertEqual(s["en"].maximumNumberOfLines(), 2)
+
+    def test_英文一行时贴着中文_空行在顶上(self):
+        o = self._overlay()
+        o.finalize("Which is monopoly.", "也就是垄断。")
+        o._render()
+        o._tv.tick()
+        s = self._slot_of(o, "Which is monopoly")
+        e, z = s["en"].frame(), s["zh"].frame()
+        gap = float(e.origin.y) - float(z.origin.y + z.size.height)
+        self.assertAlmostEqual(gap, float(o._tv._gap), delta=0.5, msg="英文没贴着自己的中文")
+        self.assertLess(float(e.size.height), float(o._tv._en_h) - 1.0, "一行英文却占了整格")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

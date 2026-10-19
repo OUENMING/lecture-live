@@ -62,7 +62,9 @@ D_PIN_TAIL = 8.0
 VISIBLE_ROWS = 4 if LAYOUT_D else 3
 WIDTH = 660.0
 PAD = 16.0
-ROW_EN_H = 18.0                                   # 每行英文小字
+#: 每行英文小字那一格：一行 18（11pt 实测行高 14 + 余量 4）+ 再一行 14 = 两行
+#: （3.11，Owen 10-19；`transcript_view.EN_SLOT_LINES`）。
+ROW_EN_H = 18.0 + 14.0 + 8.0                      # 末项 = `transcript_view.EN_SLOT_TOP`（段间距）
 ROW_GAP = 5.0
 ROW_ZH_H = 47.0                                   # 每行中文两行
 ROW_H = ROW_EN_H + ROW_GAP + ROW_ZH_H             # 70.0

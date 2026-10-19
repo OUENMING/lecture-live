@@ -218,6 +218,12 @@ class 真窗口(unittest.TestCase):
         """
         o = self._overlay()
         try:
+            # 视口高恰好是行高整数倍时没有「被裁的行」—— 默认几何会随行高常量变（3.11 英文两行
+            # 把行高从 70 改成 84 后就正好对齐了），所以先把面板拉成一个**不整除**的高度。
+            f = o._panel.frame()
+            o._panel.setFrame_display_(((f.origin.x, f.origin.y),
+                                        (f.size.width, f.size.height + 17.0)), False)
+            o._sync_panel_size()
             self._feed(o, 8)
             o.duty_update([_item("d1")])
             o._duty_open("d1")

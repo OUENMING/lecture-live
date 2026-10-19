@@ -230,6 +230,13 @@ def d_dim(x: float) -> float:
 # 英文的, 所以把 L2 行放上去。想回退改这一个常量。
 # 只作用于**双语行**; 答案行与"翻译关闭时英文顶上"的行仍是大字在上(见 _layout)。
 EN_LINE_ON_TOP = True
+#: 英文小字那一格的行数（3.11，Owen 10-19：「英文最少两行、中文也两行」）。
+#: 英文**贴着自己的中文排**（底对齐）：只有一行时空出来的那行落在这一行的**顶上**，
+#: 成了两段之间的间距 —— 不夹在英文和中文之间（邻近律：英文要离自己的中文更近）。
+EN_SLOT_LINES = 2
+#: 英文格顶上留的段间距：英文两行写满时，它离**上一段的中文**也得比离自己的中文远
+#: （10-19 拍图：不留这一条时上一段中文底 → 英文顶只有 18 px，英文底 → 自己的中文 22 px，分组读反）。
+EN_SLOT_TOP = 8.0
 
 
 
@@ -862,27 +869,30 @@ class TranscriptView:
     def _en_line_h(self) -> float:
         return self._lh(self._font_en[0])
 
-    def _en_two_lines(self, big: str, sub: str, is_zh: bool) -> bool:
-        """这一行的英文要不要排两行。
+    def _en_two_lines(self, big: str, sub: str, is_zh: bool) -> int:
+        """这一行的英文排几行（0 = 不适用，走老的单格）。
 
-        英文小字原来**强制单行**、装不下就截成「…」: 3 节真课 1459 句里, 默认宽度
-        有 118 句(8%)被截, 窄窗(408)有 387 句(27%)。行高是固定档位、不能为它加高,
-        但**中文多数只用一行**(默认宽度 90%), 那一格里空着一行 —— 英文借它就行。
-        条件: 英文一行装不下、且中文比档位少用至少一行。中文也占满档位时照旧截断。
+        英文那一格本身就有 `EN_SLOT_LINES` 行；还装不下时，中文比档位少用至少一行 →
+        再借中文那格的一行（老规矩）。中文也占满档位时照旧截断。
         """
         if not (EN_LINE_ON_TOP and is_zh and sub) or self._doc_w < 40.0:
-            return False
+            return 0
         key = (sub, big, self._doc_w, self._lines)
         hit = self._en2_cache.get(key)
         if hit is not None:
             return hit
         w = self._doc_w - 4.0
-        en_n = round(self._measure(sub, w, self._font_en[0]) / self._en_line_h())
+        en_n = max(1, round(self._measure(sub, w, self._font_en[0]) / self._en_line_h()))
         if "\n" in big:
             zh_n = big.count("\n") + 1
         else:
             zh_n = round(self._measure(big, w, self._font_zh[0]) / self._lh(self._font_zh[0]))
-        out = en_n >= 2 and zh_n <= self._lines - 1
+        if en_n <= EN_SLOT_LINES:
+            out = en_n
+        elif zh_n <= self._lines - 1:
+            out = EN_SLOT_LINES + 1
+        else:
+            out = EN_SLOT_LINES
         if len(self._en2_cache) > 400:
             self._en2_cache.clear()
         self._en2_cache[key] = out
@@ -922,7 +932,8 @@ class TranscriptView:
             en_n = round(self._measure(en, w, self._font_en[0]) / self._en_line_h())
         except Exception:                                 # noqa: BLE001
             return False
-        return zh_n <= self._lines and (en_n <= 1 or (en_n <= 2 and zh_n <= self._lines - 1))
+        return zh_n <= self._lines and (en_n <= EN_SLOT_LINES
+                                        or (en_n <= EN_SLOT_LINES + 1 and zh_n <= self._lines - 1))
 
     def _shape_zh(self, zh: str, *, final: bool) -> str:
         """中文按词组折行(定稿再避开孤尾)。**按 (文本, 宽度, 是否定稿) 记忆化** ——
@@ -1149,7 +1160,7 @@ class TranscriptView:
         s["en_top"] = EN_LINE_ON_TOP and is_zh
         s["w"] = doc_w
         s["en2"] = self._en_two_lines(big, sub, is_zh)
-        s["en"].setMaximumNumberOfLines_(2 if s["en2"] else 1)
+        s["en"].setMaximumNumberOfLines_(max(1, int(s["en2"] or 1)))
         self._geom(j)
         self._set_text(j, "zh", big, self._font_zh[0] if is_zh else self._font_en_big[0])
         self._set_text(j, "en", sub, self._font_en[0])
@@ -1171,16 +1182,20 @@ class TranscriptView:
         off = 0.0 if (s.get("ghost") or level < self._roll_off_lo) else self._roll_off
         y = level * self._row_h - off
         if s["en_top"]:                              # 英文小字在上, 中文大字在下
-            s["en"].setFrame_(((0.0, y + self._zh_h + self._gap), (w, self._en_h)))
+            # ⭐ 底对齐：英文框只取它真用到的行数、贴着中文；没用到的行留在这一行顶上
+            n = min(max(1, int(s.get("en2") or 1)), EN_SLOT_LINES)
+            x = self._en_line_h()
+            h1 = self._en_h - EN_SLOT_TOP - (EN_SLOT_LINES - 1) * x   # 一行英文的框高
+            s["en"].setFrame_(((0.0, y + self._zh_h + self._gap), (w, h1 + (n - 1) * x)))
             s["zh"].setFrame_(((0.0, y), (w, self._zh_h)))
         else:                                        # 大字在上
             s["en"].setFrame_(((0.0, y), (w, self._en_h)))
             s["zh"].setFrame_(((0.0, y + self._en_h + self._gap), (w, self._zh_h)))
-        if s["en_top"] and s.get("en2"):
+        if s["en_top"] and int(s.get("en2") or 0) > EN_SLOT_LINES:
             # 英文借中文那格的一行: 英文框往下长一行, 中文框顶边跟着降 —— 行距不变
             # (所有行等高是回收池的命门), 中文只是从这一格的空行里让出位置。
             x = self._en_line_h()
-            s["en"].setFrame_(((0.0, y + self._zh_h + self._gap - x), (w, self._en_h + x)))
+            s["en"].setFrame_(((0.0, y + self._zh_h + self._gap - x), (w, self._en_h - EN_SLOT_TOP + x)))
             s["zh"].setFrame_(((0.0, y), (w, self._zh_h - x)))
         entering = False
         if s.get("ghost"):

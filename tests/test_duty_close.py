@@ -4,8 +4,8 @@
     「长条它不会自己缩回去，然后那个长条你点击之后你更改完它也没办法关闭。」
 
 ① 卡片右上角有「收起」；点了**下一帧**关（不在点击回调里拆视图）；
-② 点完「记下 / 忽略」→ 结果停 `motion.DUTY_DONE_HOLD_S` 秒 → 翻到下一条，没有了就收起；
-   停留期间撤销 → 不走；写提醒事项失败 → 不走（卡已收起就重新摆出来）；
+② 点完「记下 / 忽略」→ 停 `motion.DUTY_DONE_HOLD_S` 秒（作者 10-19 定 0 = 下一帧）→ 翻到下一条，没有了就收起；
+   下一帧之前撤销 → 不走；写提醒事项失败 → 不走（卡已收起就重新摆出来）；
 ③ 小卡亮档写全标题，暗档缩成「一些事儿 N」，新条目再展开。
 """
 import ast
@@ -33,7 +33,7 @@ class 纯函数(unittest.TestCase):
         self.assertEqual(overlay.chip_compact(0), "")
 
     def test_停留时长是常数(self):
-        self.assertGreater(motion.DUTY_DONE_HOLD_S, 0.0)
+        self.assertGreaterEqual(motion.DUTY_DONE_HOLD_S, 0.0)
         self.assertLessEqual(motion.DUTY_DONE_HOLD_S, 5.0)
 
 
@@ -124,8 +124,7 @@ class 真窗口(unittest.TestCase):
             o.duty_update([dict(x) for x in board])
             o._duty_open("d1")
             o._duty_act("save", o._duty_get("d1"))
-            self._pump(o)
-            self.assertEqual(o._duty_open_id, "d1", "停留期内还看着刚处理的那条（可撤销）")
+            self.assertEqual(o._duty_open_id, "d1", "不在点击回调里翻页")
             now[0] += motion.DUTY_DONE_HOLD_S
             self._pump(o)
             self.assertEqual((o._card_kind, o._duty_open_id), ("duty", "d2"))
@@ -138,14 +137,13 @@ class 真窗口(unittest.TestCase):
         finally:
             o.close()
 
-    def test_停留期撤销就不走(self):
+    def test_下一帧之前撤销就不走(self):
         board = [_item("d1")]
         o, now = self._overlay(board)
         try:
             o.duty_update([dict(x) for x in board])
             o._duty_open("d1")
             o._duty_act("save", o._duty_get("d1"))
-            self._pump(o)
             o._duty_act("undo", o._duty_get("d1"))
             self._pump(o)
             now[0] += motion.DUTY_DONE_HOLD_S * 2
@@ -161,7 +159,6 @@ class 真窗口(unittest.TestCase):
             o.duty_update([dict(x) for x in board])
             o._duty_open("d1")
             o._duty_act("save", o._duty_get("d1"))
-            self._pump(o)
             o.duty_reminder_result("d1", False, "没有授权")
             now[0] += motion.DUTY_DONE_HOLD_S * 2
             self._pump(o)

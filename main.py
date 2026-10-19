@@ -4072,6 +4072,9 @@ def run(args) -> None:
                 #    「用户已经说了不要这份笔记，这时候再花他的钱去合成章节是错的」
                 #    —— 所以它跳过整段收尾（不精修、不写笔记），只关文件。
                 give_up = (ans is False)
+                if give_up and tester is not None:
+                    # 不然下次开机 `resume_pending_notes` 会把它当成「收尾被打断」补出来
+                    tester.journal_note_skipped()
 
             # ⭐ 一些事儿：下课把**漏处理的一次性确认**（原型 §④，挂在收尾这条路上）。
             #    ⚠️ 位置：`ask_save` 之后、`writer.close()` 之前的 worker **之前** ——

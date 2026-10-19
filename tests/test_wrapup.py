@@ -883,6 +883,25 @@ def t_note_resume_noop():
         assert r2["found"] == 0, r2
 
 
+@case("⭐⭐ 下课点了「不存」→ journal 记 skipped，下次开机**不补**（Owen 10-19）")
+def t_note_resume_user_said_no():
+    import testmode as _tmod
+    with tempfile.TemporaryDirectory() as d:
+        _sess, mk = _journal_fixture(d, "2026-10-19_024046_测试")
+        t = _tmod.TestSession.__new__(_tmod.TestSession)
+        t._pending_marker = mk
+        t.journal_note_skipped()
+        assert _journal_steps(mk)["note"] == "skipped", _journal_steps(mk)
+        calls = []
+        r = main.resume_pending_notes(
+            d, online=lambda: True,
+            rebuild=lambda *a, **k: (calls.append(1), {"ok": True})[1])
+        assert r["found"] == 0 and not calls, (r, calls)
+        src = pathlib.Path(main.__file__).read_text(encoding="utf-8")
+        i = src.index("give_up = (ans is False)")
+        assert "tester.journal_note_skipped()" in src[i:i + 300], "点「不存」之后没记 skipped"
+
+
 @case("⭐⭐ D25 残局已改名成 `.recovered.json` -> 补笔记**照样扫到**（默认配置下不再空转）")
 def t_note_resume_recovered_tail():
     with tempfile.TemporaryDirectory() as d:

@@ -1393,6 +1393,14 @@ class TestSession:
             return
         journal_update(mk, **fields)
 
+    def journal_note_skipped(self) -> None:
+        """下课时用户**显式说了不存笔记** → journal 记 `skipped`。
+
+        ⚠️ 不记的话 `steps.note` 一直是 `pending`，下次启动 `main.resume_pending_notes`
+           会把这节课的笔记**偷偷补出来**（Owen 10-19：「我不是点了没有存笔记吗，为什么还会补生成」）。
+        """
+        self._journal(steps={"note": "skipped"})
+
     def journal_upload_done(self) -> None:
         """上传那一步排完了（`main.start_upload` 之后调）—— 记一笔并**撤掉 journal**。
 

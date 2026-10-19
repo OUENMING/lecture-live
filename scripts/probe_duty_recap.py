@@ -6,6 +6,7 @@
 拍六张（默认写到仓库外的临时目录，`--out` 指定就用它）：
   00-baseline  全屏基线（显示器在睡 / 没录屏权限 → 拍出来是黑的，先拦下）
   01-chip      课上：字幕在滚 + 角落小卡（不挡正在变的那两行）
+  01b-chip-dim 8 秒没人理：小卡降到暗档、缩成「一些事儿 N」（2026-10-19）
   02-card      点开：可编辑卡片（类型 / 标题 / 日期 + 推算依据 / 原话 / 记下·忽略）
   03-failed    记下失败：卡上写明原因（写不进提醒事项那条路）
   04-wrapup    收尾汇总：漏处理的一次性确认
@@ -269,6 +270,9 @@ def main() -> int:
                              "changed": ch})
             o.duty_update(board.items())
             shot(o, "01-chip")
+            o._chip_hot_until = o._clock()       # 跳过 8 秒亮档 → 暗档缩成「一些事儿 N」
+            o._chip_tick(o._clock())
+            shot(o, "01b-chip-dim")
 
             # ⚠️ 卡片那几张把面板加高（= 用户自己把窗拉大）：卡片「上卡下字幕」的**完整样子**
             #    在默认高的窗里只能看到卡片被 60% 封顶的那一截 —— 评审要看的是布局本身。
@@ -321,7 +325,7 @@ def main() -> int:
     bad = [n for n, sz in shots if sz <= 0]
     print(f"\n拍了 {len(shots)} 张 → {out}")
     print(f"动作轨迹：{decisions}")
-    miss = [k for k in ("01-chip", "02-card", "03-failed", "04-wrapup",
+    miss = [k for k in ("01-chip", "01b-chip-dim", "02-card", "03-failed", "04-wrapup",
                         "05-recap-a", "06-recap-b", "07-first", "08-recap-auto-hide")
             if k not in {n for n, _ in shots}]
     if miss:

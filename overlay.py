@@ -662,6 +662,15 @@ CHIP_ALPHA_HOT = 0.92
 CHIP_ALPHA_DIM = 0.55
 
 
+def chip_compact(n: int) -> str:
+    """小卡**暗档**那行字（纯函数）：`一些事儿 2` —— 亮档才写全标题。
+
+    ⚠️ 2026-10-19 作者报「长条不会自己缩回去」：暗档原来照样是整条
+       `类型 · 标题 · 日期 +N`，只是变淡 —— 一直横在字幕上。暗档改成只留计数。
+    """
+    return f"一些事儿 {int(n)}" if int(n) > 0 else ""
+
+
 def chip_alpha(now: float, hot_until: float) -> float:
     """小卡此刻该多亮（**纯函数** = 这条策略的唯一定义点）。
 
@@ -1822,6 +1831,9 @@ class Overlay:
         #: 一些事儿的投影（`main` 从板子推过来；主线程读写）
         self._duty_items: list = []
         self._duty_open_id = ""                # 卡片当前打开哪一条
+        #: 点完「记下 / 忽略」后几时自动翻页 / 收起（0 = 不排；见 `motion.DUTY_DONE_HOLD_S`）
+        self._duty_done_at = 0.0
+        self._card_shut = False                # 「收起」被点 → 下一帧关卡（同 `_card_redo`）
         self._duty_wrapup = []                 # 收尾汇总那批条目
         self._duty_wrapup_done = True          # 收尾汇总处理完了吗（main 的等待判据）
         #: 课前回顾：`_recap_data` 是 recap.card() 的产物（行）；`_recap_on` = 现在在屏上。
@@ -1851,6 +1863,7 @@ class Overlay:
         self._chip_show = False
         self._chip_alpha = 0.0
         self._chip_hot_until = 0.0
+        self._chip_compact = False           # 暗档 = 只写「一些事儿 N」（`chip_compact`）
         self._chip_pend = set()              # 上次见到的那批待处理 id（认"新条目"）
 
         self._layout()
@@ -2729,9 +2742,11 @@ class Overlay:
         # 绝不压正在变的那两行）。它在转录区**内部**的右上角，跟着转录区的几何走。
         cw = 0.0
         icon_w = 0.0
+        if self._chip_text and not self._card_kind and not self._chip_show:
+            self._chip_lit()                 # 收起 → 显示：先亮起（量宽要按全标题量）
         if self._chip_text:
             try:
-                self._chip_lbl.setStringValue_(self._chip_text)
+                self._chip_lbl.setStringValue_(self._chip_label())
                 self._chip_lbl.sizeToFit()
                 icon_w = (float(CARD_META_SZ) + 2.0 + 5.0) if self._chip_icon is not None else 0.0
                 cw = min(float(self._chip_lbl.frame().size.width) + 18.0 + icon_w,
@@ -2739,8 +2754,6 @@ class Overlay:
             except Exception:                             # noqa: BLE001
                 cw = 0.0
         show_chip = bool(self._chip_text) and cw > 40.0 and not self._card_kind
-        if show_chip and not self._chip_show:
-            self._chip_lit()                 # 新条目 → 亮起 + 续 8 秒（淡入）
         self._chip_show = show_chip
         self._chip_hit.setHidden_(not show_chip)
         if self._chip_icon is not None:
@@ -3331,7 +3344,8 @@ class Overlay:
         """
         self._duty_items = list(items or [])
         # ⭐ 有新条目 → 小卡重新亮起（`motion.CHIP_HOT_S` 秒后降到低亮度，见 `_chip_tick`）。
-        if chip_new_pending(self._chip_pend, self._duty_items):
+        lit = chip_new_pending(self._chip_pend, self._duty_items)
+        if lit:
             self._chip_lit()
         self._chip_pend = chip_pending_ids(self._duty_items)
         txt = ""
@@ -3340,7 +3354,7 @@ class Overlay:
             txt = _duty.chip_text(self._duty_items)
         except Exception:                                 # noqa: BLE001
             txt = ""
-        if txt != self._chip_text:
+        if txt != self._chip_text or lit:
             self._chip_text = txt
             self._layout()
             self._mark_dirty(urgent=True)
@@ -3371,7 +3385,14 @@ class Overlay:
     def _chip_lit(self) -> None:
         """小卡**亮起**并续 `motion.CHIP_HOT_S` 秒：新条目到达、或它从收起转回显示时调。"""
         self._chip_hot_until = self._clock() + motion.CHIP_HOT_S
+        self._chip_compact = False
         self._chip_apply(CHIP_ALPHA_HOT)
+
+    def _chip_label(self) -> str:
+        """小卡此刻那行字：亮档 = 全标题；暗档 = `一些事儿 N`（`chip_compact`）。"""
+        if self._chip_compact:
+            return chip_compact(len(self._duty_pending())) or self._chip_text
+        return self._chip_text
 
     def _chip_apply(self, alpha: float) -> None:
         """把整块小卡（字 + 点击区）推到某一档亮度。到点了是**降到暗档**，不是收起。
@@ -3428,6 +3449,11 @@ class Overlay:
         """
         if self._chip_show:
             self._chip_apply(chip_alpha(now, self._chip_hot_until))
+            compact = now >= self._chip_hot_until
+            if compact != self._chip_compact:
+                self._chip_compact = compact     # 亮 → 暗：长条缩成「一些事儿 N」
+                self._layout()
+                self._mark_dirty(urgent=True)
 
     def _duty_get(self, rid: str):
         for x in self._duty_items:
@@ -3486,7 +3512,7 @@ class Overlay:
             course or "这节",
             f"原话 {item.get('t')}" if item.get("t") else "",
             f"来源 {item.get('source') or '—'}") if x)
-        self._card_reset("一些事儿", sub)
+        self._card_reset("一些事儿", sub, action=("收起", self._duty_shut))
         # 类型（四选一，点一下立刻生效；可再点回来）
         self._card_label("类型")
         self._card_chips(_duty.TYPES, str(item.get("type") or "其他"),
@@ -3585,7 +3611,38 @@ class Overlay:
         #    作者要看的三个动作之一；它另有 `_note("duty_undo")` 那条 UI 计数）。
         self._feature("duty." + action)
         self._on_duty(action, payload)
+        # ⭐ 记下 / 忽略之后：结果停 `DUTY_DONE_HOLD_S` 秒（可撤销）→ 翻到下一条 / 收起
+        #    （`_duty_tick`）。撤销 = 回到待处理，不翻页。
+        self._duty_done_at = (self._clock() + motion.DUTY_DONE_HOLD_S
+                              if action in ("save", "ignore") else 0.0)
         self._card_defer()
+
+    def _duty_shut(self) -> None:
+        """卡片右上角「收起」：**下一帧**关（`_pump_once` 消费，同 `_card_defer` 的理由）。"""
+        self._note("duty_shut")
+        self._release_focus()
+        self._duty_done_at = 0.0
+        self._card_shut = True
+        self._mark_dirty(urgent=True)
+
+    def _duty_tick(self, now: float) -> None:
+        """pump 每帧：处理完的那条停够了 → 翻到下一条待处理；没有了就收起卡片。
+
+        ⚠️ 那条又回到待处理（撤销）就不走 —— 用户还在看它。
+        """
+        if not self._duty_done_at or now < self._duty_done_at:
+            return
+        self._duty_done_at = 0.0
+        if self._card_kind != "duty":
+            return
+        cur = self._duty_get(self._duty_open_id)
+        if cur is not None and cur.get("action") == "pending":
+            return
+        pend = [x for x in self._duty_pending() if x.get("id") != self._duty_open_id]
+        if pend:
+            self._duty_open(pend[0].get("id") or "")
+        else:
+            self._card_close()
 
     def duty_reminder_result(self, rid: str, ok: bool, reason: str) -> None:
         """提醒事项写完（成功 / 失败）—— 卡片上那句状态改口（失败**写明原因**）。"""
@@ -3596,7 +3653,11 @@ class Overlay:
                 it["reason"] = str(reason or "")
                 self._duty_items[i] = it
                 if self._card_kind == "duty" and self._duty_open_id == rid:
+                    if not ok:
+                        self._duty_done_at = 0.0          # 失败：停在这儿，让人看见原因
                     self._duty_card_fill(it)
+                elif not ok and not self._card_kind:
+                    self._duty_open(rid)                  # 卡已收起 → 失败要重新摆出来
                 return
 
     # ---- 一些事儿：收尾汇总（下课一次性确认）----
@@ -4112,6 +4173,8 @@ class Overlay:
     def _card_close(self) -> None:
         self._card_kind = ""
         self._duty_open_id = ""
+        self._duty_done_at = 0.0
+        self._card_shut = False
         self._duty_wrapup_done = True
         self._card_clear_blocks()
         self._card_fields = []
@@ -5699,9 +5762,14 @@ class Overlay:
         self._sync_focus_look()      # 细线/光标跟着真实编辑状态走(委托回调不可靠)
         # 卡片重画一律**延迟到这一帧**（`_card_defer`）—— 绝不在点击回调里拆掉
         # 正在派发事件的那个视图。
+        if self._card_shut:
+            self._card_shut = False
+            if self._card_kind:
+                self._card_close()
         if self._card_redo:
             self._card_redo = False
             self._card_refill()
+        self._duty_tick(self._clock())
         self._bar_tick(time.monotonic())
         # 角落小卡：亮档到点 → 降到低亮度（不消失）。纯状态转换，没到点就是一次比较。
         self._chip_tick(self._clock())

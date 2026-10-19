@@ -65,6 +65,24 @@
 （`_whatsnew_body` 从最新往下数到「你上次看过的版本」为止），多版本时每行前面标版本号。
 所以**每个版本的看点都要能独立看懂**，不要写"同上""见上一条"。
 
+## [3.10.2] - 2026-10-19
+
+### 更新方式
+
+auto
+
+### 更新看点
+- [改进] 下课关掉 ClassLive 后，没传完的录音和日志会在后台自己传完，不用等下次打开。
+- [改进] 传的时候用低优先级，不抢电、不抢网；传完自己退出。
+
+### 升级须知（3.10.1 → 3.10.2）
+- 没有新依赖、没有新模型，开课面板上自动更新。
+- `CLASSLIVE_UPLOAD=0` 照旧整个关掉上传（后台进程也不起）。
+
+### Added
+- 退出后台补传（`upload.spawn_exit_uploader` / `upload.py --drain`）：退出时队列里还有待传的，就起一个 `setsid` + `taskpolicy -b` 的独立进程，先等 App 进程退出，再一次一条、条间 2 s 传完，最长 2 h；失败按原退避停下。日志写 `~/Library/Logs/ClassLive/upload.log`（不含 token）。
+- 跨进程唯一写者：drainer 持 `~/.classlive/upload-drain.lock`（flock）；App 启动时先 `stop_drainer()`（只对锁里那个仍持锁的 pid 发 SIGTERM，超时再 SIGKILL），再构造上传队列。关面板那条路也会起补传。
+
 ## [3.10.1] - 2026-10-19
 
 ### 更新方式

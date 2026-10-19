@@ -285,6 +285,21 @@ def _show(expr: str) -> str:
     return s.rstrip("。；;，,、 ")
 
 
+def _is_ac_min(ac, x: float) -> bool:
+    """x 是不是函数 `ac` 的（局部）最低点：x>0、数值导数≈0、二阶差分>0。**纯函数**，算不出就 False。"""
+    if not (x > 0):
+        return False
+    try:
+        h = max(1e-4, abs(x) * 1e-4)
+        f0, fp, fm = float(ac(x)), float(ac(x + h)), float(ac(x - h))
+    except Exception:                                             # noqa: BLE001
+        return False
+    d1 = (fp - fm) / (2 * h)
+    d2 = (fp - 2 * f0 + fm) / (h * h)
+    scale = max(1.0, abs(f0))
+    return abs(d1) <= 1e-3 * scale and d2 > 0
+
+
 def ensure_min_value(review: dict) -> tuple:
     """有 AC 与驻点就**把最小值写出来**（作者第三轮第 4 条：官方解答里 `AC(6)=24`）。
 
@@ -307,12 +322,15 @@ def ensure_min_value(review: dict) -> tuple:
             poly = _poly_of(ac, var)      # 多项式时留一份（用于跟材料里的官方值比）
             pt = None
             for txt in u:
-                m = note_math._MINMAX.search(txt)
-                if not m:
-                    continue
-                c = m.group("c") or m.group("c2") or m.group("c3")
-                if c:
-                    pt = float(c)
+                for m in note_math._MINMAX.finditer(txt):
+                    c = m.group("c") or m.group("c2") or m.group("c3")
+                    # ⚠️ 3.10 发版前检查：取到的点必须**真是这条 AC 的最低点**（AC'≈0、AC''>0、
+                    #    产量 >0）。旧版拿本节文字里第一个「极值点」就代 —— 同一节里还有别的函数
+                    #    （练习一的 f(x) 在 x=-1 取极大），于是印出「Q*=-1 代回 AC：最小平均成本 73」。
+                    if c and _is_ac_min(ac, float(c)):
+                        pt = float(c)
+                        break
+                if pt is not None:
                     break
             if pt is None:
                 continue

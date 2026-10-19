@@ -752,6 +752,20 @@ class TestF13ProgramIdentifiersAndGivens(unittest.TestCase):
         rows = nm.program_rows({"example": ex})
         self.assertEqual(["ok"], [r["status"] for r in rows], rows)
 
+    def test_答案是第二个中间量_不炸(self):
+        """3.11 回归：答案端出的是**第二个**中间量 b（第一个 a 对不上答案）→
+        旧写法在 a 上求 `next(n …)` 抛 StopIteration → 整条数字核失败（ECON10790 实跑）。"""
+        ex = {"title": "✏️ 自补", "prompt": "x=2，求 c",
+              "givens": {"x": 2.0},
+              "program": [{"var": "a", "op": "eval", "expr": "x+1", "x": "x", "at": 2},
+                          {"var": "b", "op": "eval", "expr": "x*10", "x": "x", "at": 2},
+                          {"var": "c", "op": "eval", "expr": "x*100", "x": "x", "at": 2}],
+              "steps": [{"text": "b=20", "why": ""}], "answer": "c=20"}
+        rows = nm.program_rows({"example": ex})
+        bad = [r for r in rows if "中间量" in r.get("how", "")]
+        self.assertEqual(1, len(bad), rows)
+        self.assertIn("中间量 b", bad[0]["how"])
+
     def test_减号被当成分子的符号_不许假指控(self):
         """⚠️ F13 复跑实测的**假指控**（BUSI3243 的 R² 例子）：
         `$R^2=1-38/200=0.81$` —— `_DIV` 的 `-?` 把前面那个**减号**吃进分子（a=-38），

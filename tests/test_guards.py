@@ -469,6 +469,23 @@ class MinValue(unittest.TestCase):
         self.assertIn("AC(6)=24", out["sections"][0]["prose"][-1])
         self.assertTrue(warns)
 
+    def test_别的函数的极值点不拿来代(self):
+        """3.10 发版前实跑（ECON10790）：同一节里练习一的 f(x) 在 x=-1 取极大 →
+        旧版把 -1 代进 AC，印出「Q*=-1 代回 AC：最小平均成本 73」。点必须是 AC 自己的最低点。"""
+        rev = {"sections": [{"heading": "练习五", "prose": [
+            "f''(-1)<0，所以 x=-1 取极大；x=1 取极小。",
+            "AC(Q)=Q^2-12Q+60。"]}]}
+        out, added, _w = nl.ensure_min_value(rev)
+        self.assertEqual(added, [])
+        self.assertNotIn("73", " ".join(out["sections"][0]["prose"]))
+
+    def test_先出现别的点_后面才是_AC_的最低点(self):
+        rev = {"sections": [{"heading": "x", "prose": [
+            "x=-1 取极大。", "AC(Q)=Q^2-12Q+60。", "Q=6 处取最小。"]}]}
+        out, added, _w = nl.ensure_min_value(rev)
+        self.assertTrue(added)
+        self.assertIn("AC(6)=24", out["sections"][0]["prose"][-1])
+
     def test_已经写了值就不动(self):
         rev = {"sections": [{"prose": ["AC(Q)=Q^2-12Q+60。", "最小平均成本 AC(6)=24。"]}]}
         out, added, _w = nl.ensure_min_value(rev)

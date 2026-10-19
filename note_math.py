@@ -1896,11 +1896,11 @@ def program_rows(section: dict) -> list:
         if not any(_sig_match(n, tval) for n in ans_nums):
             mids = {str(st.get("var")): vals.get(str(st.get("var")))
                     for st in prog[:-1] if isinstance(st, dict)}
-            hit = next((v for v in mids.values() if v is not None
-                        and any(_sig_match(n, v) for n in ans_nums)), None)
+            # ⚠️ 3.11：旧写法第二个 next() 会对**不匹配**的中间量求 `next(n …)` → StopIteration
+            #    在生成器里变成 RuntimeError，整条数字核 / 例题返修失败（ECON10790 实跑抓到）。
+            which, hit = next(((k, v) for k, v in mids.items() if v is not None
+                               and any(_sig_match(n, v) for n in ans_nums)), (None, None))
             if hit is not None:
-                which = next(k for k, v in mids.items() if v is not None and _sig_match(
-                    next(n for n in ans_nums if _sig_match(n, v)), v))
                 rows.append({"claim": str(ex.get("answer") or claim0)[:120],
                              "status": "mismatch",
                              "recomputed": f"{target}={_fmt(tval)}",

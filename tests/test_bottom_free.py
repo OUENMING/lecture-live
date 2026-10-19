@@ -136,6 +136,18 @@ class 只英档(unittest.TestCase):
         o.set_trans_mode("both")
         self.assertAlmostEqual(o._row_h, both, delta=0.01)
 
+    def test_只英档开答案_小字那格放回来(self):
+        """答案 / 纲要接管时行里有「EN：」小字 —— 只英档收起的那格要放回来，关掉再收。"""
+        o = self._overlay()
+        o.set_trans_mode("en")
+        solo = o._row_h
+        o._answer_on = True
+        o._render()
+        self.assertAlmostEqual(o._row_h, solo + O.ROW_EN_H - O.ROW_EN_H_SOLO, delta=0.01)
+        o._answer_on = False
+        o._render()
+        self.assertAlmostEqual(o._row_h, solo, delta=0.01)
+
     def _say(self, o, en, *, ep=False):
         if ep:
             o.endpoint(True)

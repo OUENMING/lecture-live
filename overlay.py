@@ -2547,7 +2547,9 @@ class Overlay:
     def _apply_row_metrics(self, width: float) -> None:
         """按当前宽度算行尺寸并推给转录区(窄窗中文要更多行才不吞字)。"""
         lines = _lines_for_width(width)
-        solo = getattr(self, "_trans_mode", "both") != "both"
+        # 答案 / 纲要接管时照旧给小字那格留位（它们有「EN：」小字行）
+        solo = (getattr(self, "_trans_mode", "both") != "both"
+                and getattr(self, "_tv_mode", "cap") == "cap")
         zh_h, row_h = _zh_h_for(lines), _row_h_for(lines, solo)
         if abs(row_h - self._row_h) < 0.5:
             return
@@ -6852,6 +6854,7 @@ class Overlay:
             if self._tv_mode != "ans":
                 self._tv_mode = "ans"
                 self._tv.set_rows_verbatim(True)    # 行 = (大字中文讲解, 小字 EN：英文)
+                self._apply_row_metrics(self._width)
                 self._tv.set_scroll_hold(True)      # 读答案期间不许自动回底(坑 1)
                 self._tv.replace_items(rows)
                 # 答案是从第一行读起的**文档**, 不是"最新在最下"的字幕流
@@ -6864,6 +6867,7 @@ class Overlay:
             if self._tv_mode != "outline":
                 self._tv_mode = "outline"
                 self._tv.set_rows_verbatim(True)    # 行 = (大字, 小字)，原样解释
+                self._apply_row_metrics(self._width)
                 self._tv.set_scroll_hold(True)      # 读纲要期间不许自动回底
                 self._tv.replace_items(self._outline_snapshot)
                 # ⚠️ 落点是**分隔线**，不是顶也不是底（`scroll_to_index` 里有三条约束）
@@ -6876,6 +6880,7 @@ class Overlay:
         elif self._tv_mode != "cap":
             self._tv_mode = "cap"
             self._tv.set_rows_verbatim(False)
+            self._apply_row_metrics(self._width)
             self._tv.set_scroll_hold(False)
             self._tv.replace_items(self._history)
             self._tv.scroll_to_bottom()

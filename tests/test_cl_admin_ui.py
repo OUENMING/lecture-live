@@ -947,7 +947,7 @@ class ReportSummary(unittest.TestCase):
         r = self._sum()
         self.assertEqual(r["duration_s"], 1234.5)
         self.assertTrue(r["audio_saved"])
-        self.assertEqual(r["stream"], {"engine": "soniox", "reason": "manual", "sealed_n": 12, "p50": 0.9,
+        self.assertEqual(r["stream"], {"engine": "soniox", "reason": "manual", "detail": "", "sealed_n": 12, "p50": 0.9,
                                        "p90": 1.7, "lat_n": 12, "terms_n": 5, "terms_dropped": 2})
         self.assertEqual(r["region"]["default"], "us")
         self.assertEqual(r["region"]["regions"]["jp"]["error"], "timeout")
@@ -1119,6 +1119,39 @@ class OpenRouterAccount(unittest.TestCase):
             r = U.openrouter_account(get=lambda *a: called.append(a), post=lambda *a: called.append(a))
         self.assertIn("openrouter-mgmt-token", r["error"])
         self.assertEqual(called, [])
+
+
+class HabitsOf(unittest.TestCase):
+    """上课习惯：10 分钟格 → 节 / 时长 / 本地时段。"""
+
+    def _rows(self, name, start, n, country="US", ver="3.10.0"):
+        import datetime as dt
+        t0 = dt.datetime.fromisoformat(start)
+        return [{"name": name, "t": (t0 + dt.timedelta(minutes=10 * i)).strftime("%Y-%m-%d %H:%M:%S"),
+                 "country": country, "ver": ver, "n": 3} for i in range(n)]
+
+    def test_节与时长与本地时段(self):
+        import cl_admin_ui as U
+        # UTC 17:00 = 太平洋夏令时 10:00（周一 10-19）；6 格 = 60 分钟一节
+        rows = self._rows("a", "2026-10-19 17:00:00", 6)
+        rows += self._rows("a", "2026-10-16 17:00:00", 1)           # 只开了 10 分钟：算短打开
+        rows += self._rows("b", "2026-10-15 06:00:00", 12, country="CN", ver="3.9.6")
+        r = U.habits_of(rows)
+        a, b = r["people"]["a"], r["people"]["b"]
+        self.assertEqual((a["sessions"], a["short"], a["hours"]), (1, 1, 1.0))
+        self.assertEqual(a["tz"], "America/Los_Angeles")
+        self.assertEqual(a["by_hour"][10], 6)                         # 按他那边的钟，不按 UTC
+        self.assertEqual(a["by_wd"][0], 6)                            # 周一
+        self.assertEqual(b["tz"], "Asia/Shanghai")
+        self.assertEqual(b["by_hour"][14] + b["by_hour"][15], 12)
+        self.assertEqual(r["latest_ver"], "3.10.0")                   # 3.10.0 > 3.9.6（不按字符串比）
+
+    def test_间隔超过30分钟拆成两节(self):
+        import cl_admin_ui as U
+        rows = self._rows("a", "2026-10-19 10:00:00", 3) + self._rows("a", "2026-10-19 11:00:00", 3)
+        self.assertEqual(U.habits_of(rows)["people"]["a"]["sessions"], 2)
+        rows = self._rows("a", "2026-10-19 10:00:00", 3) + self._rows("a", "2026-10-19 10:50:00", 3)
+        self.assertEqual(U.habits_of(rows)["people"]["a"]["sessions"], 1)
 
 
 if __name__ == "__main__":

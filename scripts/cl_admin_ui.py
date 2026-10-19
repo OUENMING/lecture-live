@@ -227,7 +227,7 @@ def r2_ingest(get=None, sessions_dir=None, ledger=None) -> dict:
 #: 上传的 `report.json`（测试模式）里 3.10 才有的块 —— 与 `testmode.BLOCKS` 一一对应。
 #: 缺一个键 = 「这节课没采到 / 版本太老」，与「采到了但是 0」是两回事，前端照这个区分。
 REPORT_BLOCKS = ("stream", "region_probe", "duty", "device", "energy", "capture",
-                 "merge", "backfill", "system", "ui", "terms", "live")
+                 "merge", "backfill", "system", "ui", "terms", "live", "deps")
 
 
 def _num(v):
@@ -263,6 +263,8 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list) -
     if st is not None:
         sl = st.get("seal_latency_s") if isinstance(st.get("seal_latency_s"), dict) else {}
         st = {"engine": _enum(st.get("engine"), 24), "reason": _enum(st.get("fallback_reason")),
+              # 3.10.1 起：退回时的异常**类型**（只留冒号前那段，如 `ModuleNotFoundError`；后面的话不要）
+              "detail": _enum(str(st.get("fallback_detail") or "").split(":", 1)[0], 40),
               "sealed_n": _num(st.get("sealed_n")), "p50": _num(sl.get("p50")), "p90": _num(sl.get("p90")),
               "lat_n": _num(sl.get("n")), "terms_n": _num(st.get("terms_n")), "terms_dropped": _num(st.get("terms_dropped"))}
 
@@ -337,6 +339,12 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list) -
               "new_topic": _num(ui.get("new_topic")), "hidden_s": _num(ui.get("hidden_s")),
               "overflow": _num(zh.get("overflow")), "overflow_seen": _num(zh.get("seen")),
               "sq_p50": _num(sq.get("p50")), "sq_p90": _num(sq.get("p90"))}
+    dp = _block(rep, "deps") or None                       # 3.10.1：依赖现状（只留包名 / 布尔）
+    if dp is not None:
+        dp = {"missing": [_enum(x, 40) for x in (dp.get("missing") or [])[:10] if _enum(x, 40)]
+              if isinstance(dp.get("missing"), list) else None,
+              "uv": bool(dp.get("uv")) if "uv" in dp else None,
+              "stamp_ok": dp.get("stamp_ok") if isinstance(dp.get("stamp_ok"), bool) else None}
     tm = _block(rep, "terms") or None
     if tm is not None:
         tm = {"calls": _num(tm.get("calls")), "picked": _num(tm.get("picked")), "empty": _num(tm.get("empty"))}
@@ -363,7 +371,7 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list) -
         "tl": {"n": _num(tl.get("n")),
                "first_p50": _num((tl.get("zh_first_ms") or {}).get("p50")) if isinstance(tl.get("zh_first_ms"), dict) else None},
         "stream": st, "region": rp, "duty": dt_, "device": dv, "energy": en, "capture": cp,
-        "merge": mg, "backfill": bf, "system": sys_, "ui": ui, "terms": tm, "live": lv,
+        "merge": mg, "backfill": bf, "system": sys_, "ui": ui, "terms": tm, "live": lv, "deps": dp,
     }
 
 
@@ -1060,7 +1068,106 @@ def _f(v):
 
 #: 慢的几个（直接问 Cloudflare，一个 0.5–2 s）走「先给旧的、后台再取」：页面每分钟自动刷一次，
 #: 不该每次都等 Cloudflare；手动点「刷新」带 `{"fresh": true}`，那一次同步重取。出错的结果不进缓存。
-SLOW = {"cf": cf_summary, "r2": r2_ingest, "health": cf_health, "logs": worker_logs, "ae": ae_events,
+# ---- 上课习惯（近 30 天，Analytics Engine）----
+# 「在上课」= 这 10 分钟里有实时请求：云端转写、实时翻译（max_tokens ≤ 600，笔记 / 精修不算）、
+# 领 Soniox 临时 key（开课前的地区探测 `:probe` 不算）。用 Soniox 的人转写走直连、Worker 看不到，
+# 但实时翻译照样经过 Worker —— 所以这三样合起来才认得出每个人的每一节课。
+_AE_HABITS = f"""SELECT toStartOfInterval(timestamp, INTERVAL '10' MINUTE) AS t, blob2 AS name, blob6 AS country,
+ blob5 AS ver, SUM(_sample_interval) AS n
+ FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '30' DAY AND double1 = 200
+ AND ((blob1 = '/v1/transcribe') OR (blob1 = '/v1/chat/completions' AND double11 <= 600)
+      OR (blob1 = '/v1/soniox/key' AND NOT (blob4 LIKE '%:probe%')))
+ GROUP BY t, name, country, ver ORDER BY t LIMIT 20000 FORMAT JSON"""
+
+#: 国家 → 时区（只按国家猜；美国按太平洋 —— 现在唯一的美国用户在加州上课）。猜不出就用 UTC。
+_TZ_BY_COUNTRY = {"IE": "Europe/Dublin", "GB": "Europe/London", "CN": "Asia/Shanghai", "HK": "Asia/Hong_Kong",
+                  "MO": "Asia/Macau", "TW": "Asia/Taipei", "SG": "Asia/Singapore", "JP": "Asia/Tokyo",
+                  "KR": "Asia/Seoul", "US": "America/Los_Angeles", "CA": "America/Toronto",
+                  "AU": "Australia/Sydney", "DE": "Europe/Berlin", "FR": "Europe/Paris", "NL": "Europe/Amsterdam"}
+#: 一节课：相邻两个有请求的 10 分钟格隔不到这么久就算同一节。
+HABIT_GAP_S = 30 * 60
+#: 不到这么长的不算「一节课」（打开面板看一眼 / 试一句），只计入「短打开」。
+HABIT_MIN_S = 20 * 60
+
+
+def _ver_key(v):
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except ValueError:
+        return ()
+
+
+def habits_of(rows, now_ms=None) -> dict:
+    """AE 10 分钟格 → 每个人的上课习惯。**纯函数**（可单测）。
+
+    每人：`sessions`（节数，≥ `HABIT_MIN_S`）/ `short`（短打开次数）/ `hours` / `days`（上过课的天数）/
+    `tz` / `by_hour`（本地 0–23 点，按在课上的 10 分钟格数）/ `by_wd`（周一..周日）/ `recent`（最近几节
+    `[开始 ms, 结束 ms]`）/ `ver`（最近一次的客户端版本）/ `country`。另回 `latest_ver`（大家里最新的）。
+    """
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    now_ms = now_ms if now_ms is not None else time.time() * 1000
+    per: dict = {}
+    for r in rows or []:
+        nm = _enum(r.get("name"), 40)
+        if not nm or nm == "-":
+            continue
+        try:
+            t = dt.datetime.fromisoformat(str(r["t"]).replace(" ", "T")).replace(tzinfo=dt.timezone.utc)
+        except (KeyError, ValueError):
+            continue
+        d = per.setdefault(nm, {"b": set(), "cty": {}, "ver": ("", None)})
+        d["b"].add(t)
+        c = _enum(r.get("country"), 4) or "?"
+        d["cty"][c] = d["cty"].get(c, 0) + float(r.get("n") or 0)
+        v = _enum(r.get("ver"), 16)
+        if v and (d["ver"][1] is None or t >= d["ver"][1]):
+            d["ver"] = (v, t)
+    out, latest = {}, ""
+    for nm, d in per.items():
+        cty = max(d["cty"], key=d["cty"].get) if d["cty"] else "?"
+        tzn = _TZ_BY_COUNTRY.get(cty, "UTC")
+        tz = ZoneInfo(tzn)
+        bs = sorted(d["b"])
+        spans: list = []
+        for t in bs:
+            if spans and (t - spans[-1][1]).total_seconds() <= HABIT_GAP_S:
+                spans[-1][1] = t
+            else:
+                spans.append([t, t])
+        long_ = [s for s in spans if (s[1] - s[0]).total_seconds() + 600 >= HABIT_MIN_S]
+        by_hour, by_wd = [0] * 24, [0] * 7
+        in_long = {t for s, e in long_ for t in bs if s <= t <= e}
+        for t in in_long:
+            lt = t.astimezone(tz)
+            by_hour[lt.hour] += 1
+            by_wd[lt.weekday()] += 1
+        ms = lambda x: int(x.timestamp() * 1000)                       # noqa: E731
+        out[nm] = {"sessions": len(long_), "short": len(spans) - len(long_),
+                   "hours": round(sum((e - s).total_seconds() + 600 for s, e in long_) / 3600, 2),
+                   "days": len({s.astimezone(tz).date() for s, _ in long_}),
+                   "tz": tzn, "country": cty, "by_hour": by_hour, "by_wd": by_wd,
+                   "recent": [[ms(s), ms(e) + 600000] for s, e in long_[-12:]],
+                   "last": ms(bs[-1]) + 600000 if bs else None, "ver": d["ver"][0]}
+        if d["ver"][0] and _ver_key(d["ver"][0]) > _ver_key(latest):
+            latest = d["ver"][0]
+    return {"people": out, "latest_ver": latest, "since_days": 30}
+
+
+def habits(post=None) -> dict:
+    """近 30 天每个人的上课习惯（见 `habits_of`）。只读 AE 的数字列，不含文本。"""
+    got = _ae_sqls(post, (("rows", _AE_HABITS),))
+    if "error" in got or got.get("pending"):
+        return got
+    out = habits_of(got["rows"])
+    try:                                                              # 仓库里的版本 = 已发布的最新版（面板跑在 main 上）
+        out["repo_ver"] = (pathlib.Path(__file__).resolve().parent.parent / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        out["repo_ver"] = ""
+    return out
+
+
+SLOW = {"habits": habits, "cf": cf_summary, "r2": r2_ingest, "health": cf_health, "logs": worker_logs, "ae": ae_events,
         "ae310": ae_310, "reports": r2_reports, "soniox": soniox_account, "openrouter": openrouter_account}
 FRESH_S = 55                                                          # 这么新：直接给
 STALE_S = 15 * 60                                                     # 这么旧以内：先给旧的，后台重取；再旧就同步等

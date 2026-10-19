@@ -99,7 +99,7 @@ main{max-width:1280px;margin:0 auto;padding:24px}
 .kpi .sp{margin-top:10px;height:28px}
 
 /* ---- 两张图并排 ---- */
-.charts{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:12px}
+.charts{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:12px}
 .tag{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;font-size:10.5px;line-height:16px;color:var(--ink3);box-shadow:var(--ring2);vertical-align:1px}
 .card{background:var(--surface);border-radius:var(--rc);padding:16px;box-shadow:var(--ring2)}
 .card .ch{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}
@@ -205,6 +205,21 @@ details.sub>summary:hover{color:var(--ink)}
 .cal .cells i{display:block;height:12px;border-radius:2px;background:var(--recessed)}
 .cal .tot{font-size:11px;color:var(--ink2);text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
 .cal .axis{display:flex;justify-content:space-between;font-size:11px;color:var(--ink3)}
+/* 上课习惯（2026-10-19）：一人一行 —— 名字 + 节数/时长，一句「常在什么时候」，一条 24 小时条（本地时间）。 */
+.hab{display:grid;gap:14px}
+.hab .p{display:grid;gap:5px}
+.hab .top{display:flex;align-items:baseline;gap:8px;min-width:0}
+.hab .top b{font-weight:500;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hab .top .sum{margin-left:auto;font-size:11.5px;color:var(--ink2);font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.hab .say{font-size:12px;color:var(--ink2);line-height:1.45}
+.hab .say em{font-style:normal;color:var(--ink)}
+.hab .hrs{display:grid;grid-template-columns:repeat(24,minmax(0,1fr));gap:2px}
+.hab .hrs i{display:block;height:10px;border-radius:2px;background:var(--recessed)}
+.hab .hrs i.on{background:var(--d1)}
+.hab .ax{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));font-size:10.5px;color:var(--ink3);font-family:var(--mono)}
+.hab .sep{font-size:11px;color:var(--ink3);padding-top:4px;box-shadow:0 -1px 0 var(--line2)}
+.hab .p.lab b{color:var(--ink2)}
+.hab .p.lab .hrs i.on{background:var(--ink3)}
 /* 部署时间轴：段宽按时长分（flex-grow 由 JS 写死），段间 2px 留白，太短的段也有 2px 最小宽度。
    圆角 2px 跟日历格子同一档（微型标识，不是容器）。 */
 .depbar{display:flex;gap:2px;height:22px;margin-bottom:4px}
@@ -306,7 +321,7 @@ details.sub>summary:hover{color:var(--ink)}
         <div id="daily"></div>
       </div>
       <div class="card">
-        <div class="ch"><h3>谁在什么时候用</h3><span class="spacer"></span><span class="note" id="pernote"></span></div>
+        <div class="ch"><h3>上课习惯</h3><span class="spacer"></span><span class="note" id="pernote"></span></div>
         <div id="peruser"></div>
       </div>
     </div>
@@ -896,22 +911,83 @@ function renderDaily(){
 /* ---------- 渲染：每人 × 逐日（日历条）----------
    2026-10-14 换掉原来的「每人一根总条」：那根条的数字跟下面用户表同一列一个字都不差（重复），
    而且看不出「哪天在用」。日历条同一块地方给出节奏，跟任何表都不重复。 */
-function renderPerDay(){
+function renderPerDay(){ renderHabits(); }
+/* 上课习惯（近 30 天，AE）。「一节课」= 连着有实时请求、长于 20 分钟（后端 `habits_of` 的口径）。
+   时段一律按**他那边的本地时间**（按国家猜时区），一句话说清「常在周几、几点」，下面一条 24 小时条给眼睛看。 */
+var WD = ["周一","周二","周三","周四","周五","周六","周日"];
+var TZ_NAME = {"Europe/Dublin":"爱尔兰时间","Europe/London":"英国时间","Asia/Shanghai":"北京时间","Asia/Hong_Kong":"香港时间",
+  "America/Los_Angeles":"太平洋时间","America/Toronto":"东部时间","Asia/Tokyo":"日本时间","Asia/Singapore":"新加坡时间","UTC":"UTC"};
+function agoIn(ms, tz){                    /* 同 `ago`，但按**他那边**的时区写（和「常在几点」同一个钟） */
+  try{
+    var f = function(t){ return new Intl.DateTimeFormat("en-CA", {timeZone: tz, year:"numeric", month:"2-digit", day:"2-digit"}).format(new Date(t)); };
+    var hmz = new Intl.DateTimeFormat("en-GB", {timeZone: tz, hour:"2-digit", minute:"2-digit", hour12:false}).format(new Date(ms));
+    var d = f(ms), today = f(Date.now()), yest = f(Date.now() - 86400000);
+    return (d === today ? "今天 " : d === yest ? "昨天 " : d.slice(5) + " ") + hmz;
+  }catch(e){ return ago(ms); }
+}
+function isLab(name){ return /^test/.test(name) || name === "public"; }      /* 实验码 / 公共码：不是一个人 */
+function hourRanges(h){                     /* 24 格 → 「10–11 点、17–18 点」：只取到峰值一半以上的那些小时，连着的并成一段 */
+  var mx = Math.max.apply(null, h); if(!mx) return "";
+  var on = h.map(function(v){ return v >= mx * .5; }), out = [], i = 0;
+  while(i < 24){ if(!on[i]){ i++; continue; } var j = i; while(j + 1 < 24 && on[j + 1]) j++; out.push(i + "–" + (j + 1) + " 点"); i = j + 1; }
+  return out.slice(0, 3).join("、");
+}
+function topDays(w){
+  var mx = Math.max.apply(null, w); if(!mx) return "";
+  var d = w.map(function(v, i){ return v >= mx * .5 ? WD[i] : null; }).filter(Boolean);
+  return d.length >= 5 ? "几乎每天" : d.join("、");
+}
+function renderHabits(){
   var box = $("#peruser"); box.innerHTML = "";
-  var m = METRICS[state.metric];
-  var days = state.days_data;
-  if(!days.length){ box.appendChild(el("div","hint","这段时间没有记录。")); return; }
-  var view = days.slice(-31), labels = view.map(function(d){ return d.day; });
-  var items = state.codes.map(function(c){
-    var vals = view.map(function(d){ return m.pick(sumRows(d.rows, c.code)); });
-    return {name: c.name, vals: vals, total: vals.reduce(function(a, b){ return a + b; }, 0)};
-  }).filter(function(x){ return x.total > 0; }).sort(function(a, b){ return b.total - a.total; });
-  $("#pernote").textContent = m.label + " · 越深越多";
-  if(!items.length){ box.appendChild(el("div","hint","这段时间没有人用过。")); return; }
-  box.appendChild(calStrip(items.slice(0, 10), labels, m));
-  box.appendChild(el("div","hint", "一格一天 · 悬停看数" +
-    (items.length > 10 ? " · 另有 " + (items.length - 10) + " 个更小的没画" : "") +
-    (state.days > view.length ? " · 只画最后 " + view.length + " 天" : "")));
+  var hb = state.habits;
+  if(pending(hb)){ box.appendChild(el("div","hint","读取中…")); return; }
+  if(hb.error){ box.appendChild(el("div","hint", hb.error)); return; }
+  var ps = Object.keys(hb.people || {}).map(function(k){ var p = hb.people[k]; p.name = k; return p; })
+    .filter(function(p){ return p.sessions > 0; });
+  var people = ps.filter(function(p){ return !isLab(p.name); }).sort(function(a, b){ return b.hours - a.hours; });
+  var labs = ps.filter(function(p){ return isLab(p.name); }).sort(function(a, b){ return b.hours - a.hours; });
+  $("#pernote").textContent = "近 30 天 · 按各自的本地时间";
+  if(!people.length && !labs.length){ box.appendChild(el("div","hint","近 30 天还没有人上过一节完整的课。")); return; }
+  var g = el("div","hab");
+  function row(p, lab){
+    var r = el("div", "p" + (lab ? " lab" : ""));
+    var top = el("div","top");
+    top.appendChild(el("b", null, p.name));
+    top.appendChild(el("span","sum", p.sessions + " 节 · " + p.hours.toFixed(1) + " h"));
+    r.appendChild(top);
+    var days = topDays(p.by_wd), hrs = hourRanges(p.by_hour);
+    var say = el("div","say");
+    if(days || hrs){
+      say.appendChild(document.createTextNode("常在 "));
+      say.appendChild(el("em", null, [days, hrs].filter(Boolean).join(" · ")));
+      say.appendChild(document.createTextNode("（" + (TZ_NAME[p.tz] || p.tz) + "）"));
+    }
+    if(p.recent && p.recent.length){
+      var last = p.recent[p.recent.length - 1];
+      say.appendChild(document.createTextNode(" · 上次 " + agoIn(last[0], p.tz) + "，" + Math.round((last[1] - last[0]) / 60000) + " 分钟"));
+    }
+    r.appendChild(say);
+    var bar = el("div","hrs"), mx = Math.max.apply(null, p.by_hour) || 1;
+    p.by_hour.forEach(function(v, h){
+      var c = el("i", v ? "on" : null);
+      if(v) c.style.opacity = String(.25 + .75 * v / mx);
+      c.title = h + ":00–" + (h + 1) + ":00 · " + (v ? (v * 10) + " 分钟在课上" : "没有");
+      bar.appendChild(c);
+    });
+    r.appendChild(bar);
+    r.title = p.days + " 天上过课" + (p.short ? " · 另有 " + p.short + " 次短打开（不到 20 分钟）" : "") + (p.ver ? " · 版本 " + p.ver : "");
+    return r;
+  }
+  people.forEach(function(p){ g.appendChild(row(p, false)); });
+  var ax = el("div","ax"); ["0","6","12","18"].forEach(function(t){ ax.appendChild(el("span", null, t)); });
+  if(people.length) g.appendChild(ax);
+  if(labs.length){
+    g.appendChild(el("div","sep","实验 / 公共码（不是一个人，不算进上面）"));
+    labs.forEach(function(p){ g.appendChild(row(p, true)); });
+  }
+  box.appendChild(g);
+  var since = Object.keys(hb.people || {}).length ? "" : "";
+  box.appendChild(el("div","hint", "一节课 = 连续有实时请求超过 20 分钟 · 时区按所在国家猜 · 悬停看每小时分钟数" + since));
 }
 
 /* ---------- 渲染：额度 ----------
@@ -1578,14 +1654,26 @@ function renderTestMode(){
   var ss = rep.sessions || [];
   $("#tmnote").textContent = ss.length + " 节 · 只有测试模式写报告并上传" + ((rep.errors && rep.errors.length) ? " · " + rep.errors.length + " 份读不出" : "");
   if(!ss.length){ box.appendChild(el("div", "hint", "上传桶里还没有 report.json。")); return; }
+  // 默认只列近 7 天（更早的大多是 3.10 之前的报告，满屏「没这块」）；出过问题的那几节永远在上面。
+  var recent = ss.filter(function(s){ return Date.now() - Date.parse(s.updated) < 7 * 86400000; });
+  var older = ss.length - recent.length;
+  var view = state.tmAll ? ss : recent;
   box.appendChild(mkTable(
-    [["上传完", ""], ["是谁", ""], ["时长", "r"], ["音频", ""], ["Soniox 引擎", ""], ["封口句", "r"], ["上移 p50", "r"],
+    [["上传完", ""], ["是谁", ""], ["时长", "r"], ["音频", ""], ["实时字幕", ""], ["封口句", "r"], ["上移 p50", "r"],
      ["术语", "r"], ["区域", ""], ["矫正率", "r"], ["块", "r"]],
-    ss.map(function(s){
+    view.map(function(s){
       var st = s.stream, rp = s.region;
-      var engine = st ? (st.engine || "?") + (st.reason ? "（退回 " + st.reason + "）" : "")
-        : (s.blocks.indexOf("stream") >= 0 ? "—" : "没这块");
-      return [ago(Date.parse(s.updated)), s.name || el("span", "dim", s.id),
+      var engine;
+      if(st){
+        var bad = st.reason && st.reason !== "manual";
+        engine = el("span", bad ? "bad" : null, (st.engine || "?") + (st.reason ? "（退回 " + (st.detail || st.reason) + "）" : ""));
+        if(bad) engine.style.color = "var(--bad)";
+        if(s.deps && s.deps.missing && s.deps.missing.length) engine.title = "缺依赖：" + s.deps.missing.join("、");
+      } else engine = el("span", "faint", s.blocks.indexOf("stream") >= 0 ? "—" : "没采");
+      var who = s.name || reportWho(s);
+      var whoN = s.name ? s.name : who ? el("span", null, "≈ " + who) : el("span", "dim", s.id);
+      if(!s.name && who){ whoN.title = "报告只有哈希；按上课时间对出来的（报告 " + s.id + "）"; }
+      return [ago(Date.parse(s.updated)), whoN,
         dash(s.duration_s, fmtDur(s.duration_s)), s.audio_saved ? "有" : dash(null),
         engine, dash(st && st.sealed_n, st && st.sealed_n != null ? num(st.sealed_n) : null),
         dash(st && st.p50, st && st.p50 != null ? ms(st.p50 * 1000) : null),
@@ -1594,7 +1682,13 @@ function renderTestMode(){
         dash(s.corr && s.corr.changed_pct, s.corr && s.corr.changed_pct != null ? s.corr.changed_pct + "%" : null),
         num(s.blocks.length)];
     })));
-  var h = el("div", "hint", "「菠萝丁」暗号 = 把这节切回本地草稿 + 云端定稿（A/B 用），会写进 stream 的退回原因。块 = 这节 report.json 里采到的块数（3.10 满配 12）。");
+  if(older){
+    var tg = btn(state.tmAll ? "只看近 7 天" : "显示更早的 " + older + " 节", "toggle",
+      function(){ state.tmAll = !state.tmAll; renderTestMode(); });
+    box.appendChild(tg);
+  }
+  var h = el("div", "hint", "「菠萝丁」暗号 = 把这节切回本地草稿 + 云端定稿（A/B 用），会写进退回原因（manual）。红字 = 真的没连上。" +
+    "「≈ 名字」= 报告里只有哈希，按上课时间对出来的。块 = 这节 report.json 里采到的块数（3.10 满配 12，3.10.1 起 13）。");
   h.style.marginTop = "8px";
   box.appendChild(h);
 }
@@ -1606,6 +1700,24 @@ function renderTestMode(){
 var COUNTRY = {CN:"中国", HK:"香港", US:"美国", IE:"爱尔兰", GB:"英国", JP:"日本", SG:"新加坡", DE:"德国", FR:"法国",
   NL:"荷兰", CA:"加拿大", AU:"澳大利亚", KR:"韩国", TW:"台湾", MO:"澳门", PL:"波兰", "?":"未知"};
 function aeTime(t){ return Date.parse(String(t).replace(" ", "T") + "Z"); }
+function verKey(v){ return String(v || "").split(".").map(function(x){ return ("000" + (parseInt(x, 10) || 0)).slice(-3); }).join("."); }
+/* 一段时间里在上课的是谁：拿「上课习惯」里每人的最近几节去对时间（报告只有哈希，名字靠这个认）。对不上回 null。 */
+function whoAt(t0, t1){
+  var hb = state.habits; if(!hb || hb.error || !hb.people) return null;
+  var slack = 15 * 60000, best = null, bestOv = 0;
+  Object.keys(hb.people).forEach(function(nm){
+    (hb.people[nm].recent || []).forEach(function(s){
+      var ov = Math.min(t1 + slack, s[1]) - Math.max(t0 - slack, s[0]);
+      if(ov > bestOv){ bestOv = ov; best = nm; }
+    });
+  });
+  return best;
+}
+function reportWho(s){
+  if(s.name) return s.name;
+  var t1 = Date.parse(s.updated), t0 = t1 - (s.duration_s || 0) * 1000;
+  return isFinite(t1) ? whoAt(t0, t1) : null;
+}
 function renderAlerts(){
   var box = $("#alerts"); box.innerHTML = "";
   var out = [], ae = state.ae, q = state.quota, r2 = state.r2, h = state.health;
@@ -1642,6 +1754,36 @@ function renderAlerts(){
   if(h && !h.error && h.overall && h.overall.requests){
     var er = h.overall.errors / h.overall.requests;
     if(er > .01) out.push(["warn", "云端出错率 " + (er * 100).toFixed(1) + "%（24 小时）", "看「云端服务」里的每小时图找是哪一段。", ""]);
+  }
+  // ⭐ 2026-10-19：实时字幕退回（报告里 stream 有退回原因、不是「菠萝丁」手动切的）—— 那位美国用户整节走了 Groq，
+  //    面板上原来只在测试模式表里一格小字「退回 error」，谁也没看见。
+  var rep = state.reports;
+  if(rep && !rep.error){
+    (rep.sessions || []).filter(function(s){
+      return s.stream && s.stream.reason && s.stream.reason !== "manual" && Date.now() - Date.parse(s.updated) < 3 * 86400000;
+    }).forEach(function(s){
+      var who = reportWho(s), miss = s.deps && s.deps.missing && s.deps.missing.length ? s.deps.missing : null;
+      out.push(["bad", (who || "有人") + " 那节课的实时字幕没连上 Soniox（" + (s.stream.detail || s.stream.reason) + "），整节退回了旧识别",
+        miss ? "他电脑上缺依赖：" + miss.join("、") + "。3.10.1 自带兜底，更新后下节应该恢复；没恢复就看那节诊断包里的 update.log。"
+             : s.blocks.indexOf("deps") < 0 ? "这节报告来自 3.10.1 之前，没带诊断包；他更新后下一节会连日志一起传上来。"
+             : "看那节的诊断包（extra.tar.gz）里的 app.log 找原因。",
+        ago(Date.parse(s.updated))]);
+    });
+  }
+  // ⭐ 还在旧版本的人（近 14 天上过课的；实验码不算）。自动更新静默失败只写他本机的 update.log —— 这里是唯一看得见的地方。
+  var hb = state.habits;
+  if(hb && !hb.error && hb.people){
+    // 「旧」的口径：比**已经有人用上**的最新版旧，或者比仓库版本差一个小版本号（3.9 → 3.10）。
+    //   只差补丁号、而且还没人用上新版的（刚发版那几个小时）不报 —— 那时人人都「旧」，报了等于没报。
+    var mm = function(v){ return verKey(v).split(".").slice(0, 2).join("."); };
+    var newest = [hb.repo_ver, hb.latest_ver].filter(Boolean).sort(function(a, b){ return verKey(b) < verKey(a) ? -1 : 1; })[0];
+    var old = Object.keys(hb.people).filter(function(nm){
+      var p = hb.people[nm];
+      if(isLab(nm) || !p.ver || !p.last || Date.now() - p.last > 14 * 86400000) return false;
+      return (hb.latest_ver && verKey(p.ver) < verKey(hb.latest_ver)) || (hb.repo_ver && mm(p.ver) < mm(hb.repo_ver));
+    });
+    if(old.length) out.push(["warn", old.map(function(nm){ return nm + " 还在 " + hb.people[nm].ver; }).join("、") + "（最新 " + newest + "）",
+      "下次打开开课面板会自动更新。连着两节都没升上去，就看他诊断包里的 update.log。", ""]);
   }
   var loading = ae === undefined || r2 === undefined || h === undefined;
   $("#anote").textContent = loading ? "正在检查…" : "近 24 小时";
@@ -2163,11 +2305,12 @@ function load(fresh){
     $("#err").innerHTML = "";
     renderKpis(); renderDaily(); renderPerDay(); renderQuota(); renderUsers(); renderAlerts();
   }).catch(function(e){ showErr(e.message); });
-  var slow = ["cf", "r2", "health", "logs", "ae", "ae310", "reports", "soniox", "openrouter"].map(function(k){
+  var slow = ["habits", "cf", "r2", "health", "logs", "ae", "ae310", "reports", "soniox", "openrouter"].map(function(k){
     return api(k, fresh ? {fresh: true} : {})
       .catch(function(e){ return {error: "面板服务没回（" + e.message + "）；比页面旧的话重开 cl_admin_ui.py。"}; })
       .then(function(v){ state[k] = v;
         renderService(); renderPlatforms(); renderDash310(); renderTestMode(); renderAlerts();
+        if(k === "habits") renderHabits();
         if(k === "ae" && state.loaded) renderUsers(); });
   });
   return Promise.all([core].concat(slow)).then(function(){ progress(false); state.loading = false; });

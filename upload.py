@@ -943,7 +943,7 @@ def spawn_exit_uploader() -> bool:
 
 def _drain_cmd() -> list:
     """`--drain` 那条命令行。⚠️ 判据替换 `TASKPOLICY` 来钉住 `-b` 的位置。"""
-    cmd = [sys.executable, str(HERE / "upload.py"), "--drain"]
+    cmd = [sys.executable, str(HERE / "upload.py"), "--drain", f"--after-pid={os.getpid()}"]
     if TASKPOLICY.exists():
         cmd[:0] = [str(TASKPOLICY), "-b"]
     return cmd
@@ -977,8 +977,30 @@ def _logging_send(send):
     return wrapped
 
 
-def run_drain(*, root=None) -> int:
-    """`upload.py --drain` 的本体：拿锁 → 造 send → `drain()` → 放锁。返回退出码。
+#: drainer 起来后先等起它的那个进程（App / 面板）真正退出，最多等这么久。
+AFTER_PID_WAIT_S = 60.0
+
+
+def _wait_pid_gone(pid: int, timeout: float, *, clock=time.monotonic, sleep=time.sleep) -> bool:
+    """有界等 `pid` 退出。返回"等到了没有"。`pid <= 0` 视为已退出。"""
+    if pid <= 0:
+        return True
+    end = clock() + timeout
+    while _pid_alive(pid):
+        if clock() >= end:
+            return False
+        sleep(0.2)
+    return True
+
+
+def run_drain(*, root=None, after_pid: int = 0) -> int:
+    """`upload.py --drain` 的本体：拿锁 → 等父进程退出 → 造 send → `drain()` → 放锁。返回退出码。
+
+    ⚠️ `after_pid`（`spawn_exit_uploader` 传的是 App 自己的 pid）：App 退出前那几秒，
+       它自己的 `cl-upload` / `cl-upload-extra` daemon 线程可能还在最后一轮 `pump` 里、
+       还会 `_save()` 队列文件。**等它整个进程没了再读队列**，两个写者就不会重叠
+       （daemon 线程随进程一起死）。等不到（App 卡住）也照常开始 —— 最坏只是某个对象
+       重复 PUT 一次（对象名确定，幂等），不会丢条目以外的东西。
 
     ⚠️ 拿不到锁 = 已经有一个 drainer 在跑（`stop_drainer` 之外的第二道保险）——
        **直接退出 0**，不报错：这不是失败，是"有人在干这件事"。
@@ -998,6 +1020,8 @@ def run_drain(*, root=None) -> int:
     except Exception:                                         # noqa: BLE001
         pass                                                  # 非主线程 / 判据环境
     try:
+        if after_pid and not _wait_pid_gone(after_pid, AFTER_PID_WAIT_S):
+            _drain_log(f"父进程 {after_pid} {AFTER_PID_WAIT_S:.0f} s 内没退出 —— 照常开始")
         q = UploadQueue(_logging_send(make_prod_send()), root=root)
         _drain_log(f"开始：待传 {q.pending} 节 pid={os.getpid()}")
         r = drain(q, should_stop=stop.is_set)
@@ -1014,7 +1038,14 @@ def run_drain(*, root=None) -> int:
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--drain" in argv:
-        return run_drain()
+        after = 0
+        for a in argv:
+            if a.startswith("--after-pid="):
+                try:
+                    after = int(a.split("=", 1)[1])
+                except ValueError:
+                    after = 0
+        return run_drain(after_pid=after)
     print("用法: python upload.py --drain   # 把待上传队列传完（App 退出后由它起）")
     return 2
 

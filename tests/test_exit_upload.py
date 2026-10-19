@@ -327,8 +327,9 @@ def _case_spawn(tmp: pathlib.Path) -> None:
         cmd, kw = calls[-1] if calls else ([], {})
         check("⭐⭐ 队列里有东西 -> Popen 起了（`start_new_session=True`）",
               ok is True and kw.get("start_new_session") is True, f"{ok} {kw}")
-        check("⭐ 命令是 `<python> upload.py --drain`（cwd 在仓库根）",
-              cmd[:1] == [sys.executable] and cmd[-2:] == [str(HERE / "upload.py"), "--drain"]
+        check("⭐ 命令是 `<python> upload.py --drain --after-pid=<本进程>`（cwd 在仓库根）",
+              cmd[:1] == [sys.executable] and cmd[-3:-1] == [str(HERE / "upload.py"), "--drain"]
+              and cmd[-1] == f"--after-pid={os.getpid()}"
               and kw.get("cwd") == HERE, str(cmd))
         check("⭐ stdin/stdout/stderr 全 DEVNULL（不继承 App 的终端）",
               kw.get("stdin") == subprocess.DEVNULL
@@ -419,11 +420,19 @@ def _case_e2e(tmp: pathlib.Path) -> None:
            "CLASSLIVE_UPLOAD_TOKEN": "e2e-token",
            "CLASSLIVE_NO_AUTO_UPDATE": "1"}
     child = None
+    # 「App」= 一个还要活 1.5 s 的进程：drainer 必须等它退出才开始碰队列
+    fake_app = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"])
     try:
         child = subprocess.Popen(
-            [sys.executable, str(HERE / "upload.py"), "--drain"], cwd=HERE, env=env,
+            [sys.executable, str(HERE / "upload.py"), "--drain", f"--after-pid={fake_app.pid}"],
+            cwd=HERE, env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(0.8)
+        # ⚠️ 变异验证：删掉 `run_drain` 里的 `_wait_pid_gone` -> App 还活着时就发了、这条红。
+        check("⭐⭐ App 还没退出时 drainer 一个对象都不发（不和 App 的线程抢队列文件）",
+              fake_app.poll() is None and not srv.reqs, f"alive={fake_app.poll() is None} reqs={len(srv.reqs)}")
+        fake_app.wait(timeout=10)
         # ⚠️⚠️ **父进程不等它** —— 只轮询终点（有界 30 s）。这正是 App 退出时的形状。
         end = time.time() + 30
         while time.time() < end:

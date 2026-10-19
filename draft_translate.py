@@ -36,8 +36,18 @@ def sealed_prefix(text: str) -> str:
     return text[:m.end()] if m else ""
 
 
+def continues(prev: str, new: str, head: int = 24) -> bool:
+    """`new` 是不是 `prev` 那句接着长（开头 `head` 个字符一致；`prev` 太短不算）。"""
+    p, n = " ".join(prev.split()), " ".join(new.split())
+    if len(p) < 8:
+        return False
+    k = min(len(p), head)
+    return n[:k] == p[:k]
+
+
 class DraftView:
     def __init__(self) -> None:
+        self._last_en = ""         # 上一份英文草稿（判「新段 = 同一句接着长」）
         self.fin_seg = -1          # 已定稿上屏的最大段号
         self.seq = -1              # 已显示的最大送翻序号
         self.cur_seg = -1          # 屏上英文草稿所属段号
@@ -45,11 +55,17 @@ class DraftView:
         # 与 DraftTranslator 共享同一个 dict(收尾打印)
         self.stats = {"stale": 0, "yield_local": 0, "errors": 0}
 
-    def on_draft(self, seg: int) -> bool:
-        """新一段的第一份英文草稿 -> True: 调用方应清掉上一段残留的中文草稿。"""
+    def on_draft(self, seg: int, text: str | None = None) -> bool:
+        """新一段的第一份英文草稿 -> True: 调用方应清掉上一段残留的中文草稿。
+
+        ⭐ 3.11：给了 `text` 时，新段草稿若是上一份草稿**接着长**（同一句没封口、VAD 在句中切了段）
+           -> 不清：清了就空一拍，直到新段译文回来（10-19 回放实测 0.85 s，Owen 报「中文走到一半
+           突然消失一下」）。旧中文是这句前半截的译文，留着正是草稿桥要的。段号照样前进。
+        """
+        prev, self._last_en = self._last_en, text or ""
         if seg > self.cur_seg:
             self.cur_seg = seg
-            return True
+            return not continues(prev, text or "")
         return False
 
     def stale_en(self, seg: int) -> bool:

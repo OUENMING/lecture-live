@@ -3584,7 +3584,7 @@ def run(args) -> None:
                 break
             if draft_view.stale_en(_seg):            # 晚到的旧段草稿（段尾收尾那份）：不许盖回去
                 continue
-            if draft_view.on_draft(_seg):            # 新一段的第一份英文草稿: 清掉上一段残留的中文草稿
+            if draft_view.on_draft(_seg, _shown):    # 新一段的第一份英文草稿: 清掉上一段残留的中文草稿（同一句接着长的不清）
                 ui.draft_zh("")
             if live is not None:
                 # 吞异常，不会打死主循环。`lag_s` 在**这里**算：drain 就是上屏那一刻

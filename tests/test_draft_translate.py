@@ -13,6 +13,15 @@ class ViewClear(unittest.TestCase):
         self.assertFalse(v.on_draft(3))             # 同段后续草稿不再清
         self.assertTrue(v.on_draft(4))
 
+    def test_new_segment_continuing_same_draft_keeps_zh(self):
+        """⭐ 3.11（Owen 10-19「中文走到一半突然消失一下再出现」）：VAD 在一句话中间切了段，
+        Soniox 那句还没封口 → 新段第一份草稿是**同一句接着长**。清掉中文 = 空一拍（实测 0.85 s）。"""
+        v = D.DraftView()
+        self.assertTrue(v.on_draft(1, "Okay, so, um, let's continue"))
+        self.assertFalse(v.on_draft(2, "Okay, so, um, let's continue, this is a key point"))
+        self.assertEqual(v.cur_seg, 2, "段号照样前进（旧段译文照样过期）")
+        self.assertTrue(v.on_draft(3, " What we're going to do"), "真换了一句 → 照清")
+
     def test_older_segment_draft_never_clears(self):
         v = D.DraftView()
         v.on_draft(5)

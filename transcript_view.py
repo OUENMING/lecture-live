@@ -343,7 +343,7 @@ class LineLog:
 class TranscriptView:
     def __init__(self, parent, make_label, font_zh, font_en, font_en_big,
                  width, pad, en_h, gap, zh_h, row_h, max_scroll_h,
-                 on_follow_change=None, *, measure, wrap_zh=None):
+                 on_follow_change=None, *, measure, wrap_zh=None, zh_line_h=None):
         ScrollCls, DocCls = _view_classes()
         self._parent = parent
         self._make_label = make_label
@@ -358,6 +358,9 @@ class TranscriptView:
         #    注入才能既拿到同一把尺、又不引入依赖。
         #    用途只有一个: 把"文本超出档位行数"这个**静默裁切**变成可观测(见 _set_text)。
         self._measure = measure
+        # 中文那格的**固定行高**（pt；None = 字体自带的 21）。3.11 起 18pt 中文用 1.3 倍行距：
+        # 渲染（`_zh_attr`）与所有量中文的地方（`_measure_zh`）必须同一个值，否则折行数对不上。
+        self._zh_line_h = zh_line_h
         # 中文折行(`wrap_zh(text, label_w, final) -> 插好换行的文本`), 见 linebreak.py。
         # 注入而不是在这里 import: 它要量字宽, 尺子(字体)归 overlay 管。None = 交给 AppKit 逐字折。
         self._wrap_zh = wrap_zh
@@ -866,6 +869,42 @@ class TranscriptView:
             h = self._line_h[id(font)] = float(self._measure("中Hg", 1e4, font)) or 1.0
         return h
 
+    def _measure_zh(self, text: str, w: float, font) -> float:
+        """中文那格的文字高度（带固定行高）。与 `_zh_attr` 同一个行高。"""
+        if self._zh_line_h is None:
+            return self._measure(text, w, font)
+        return self._measure(text, w, font, self._zh_line_h)
+
+    def _lh_zh(self) -> float:
+        return self._zh_line_h or self._lh(self._font_zh[0])
+
+    def _zh_attr(self, lbl, display: str):
+        """中文那格的属性串（属性见 `_zh_attrs`）。"""
+        from AppKit import NSAttributedString
+        return NSAttributedString.alloc().initWithString_attributes_(display, self._zh_attrs(lbl))
+
+    def _zh_attrs(self, lbl, color=None) -> dict:
+        """中文那格的属性：字体 / 颜色 / 描边 + 固定行高的段落样式。"""
+        from AppKit import (NSFontAttributeName, NSForegroundColorAttributeName,
+                            NSShadowAttributeName, NSParagraphStyleAttributeName,
+                            NSMutableParagraphStyle, NSColor, NSBaselineOffsetAttributeName)
+        ps = NSMutableParagraphStyle.alloc().init()
+        ps.setLineBreakMode_(lbl.lineBreakMode())
+        ps.setAlignment_(lbl.alignment())
+        at = {NSFontAttributeName: lbl.font(), NSParagraphStyleAttributeName: ps,
+              NSForegroundColorAttributeName: color or lbl.textColor() or NSColor.whiteColor()}
+        if self._zh_line_h is not None:
+            ps.setMinimumLineHeight_(self._zh_line_h)
+            ps.setMaximumLineHeight_(self._zh_line_h)
+            # 多出来的行距 AppKit 全堆在字的上方；抬一半回去 = 上下各一半（字居中在行里）
+            extra = self._zh_line_h - self._lh(lbl.font())
+            if extra > 0:
+                at[NSBaselineOffsetAttributeName] = extra / 2.0
+        sh = lbl.shadow()
+        if sh is not None:
+            at[NSShadowAttributeName] = sh
+        return at
+
     def _en_line_h(self) -> float:
         return self._lh(self._font_en[0])
 
@@ -886,7 +925,7 @@ class TranscriptView:
         if "\n" in big:
             zh_n = big.count("\n") + 1
         else:
-            zh_n = round(self._measure(big, w, self._font_zh[0]) / self._lh(self._font_zh[0]))
+            zh_n = round(self._measure_zh(big, w, self._font_zh[0]) / self._lh_zh())
         if en_n <= EN_SLOT_LINES:
             out = en_n
         elif zh_n <= self._lines - 1:
@@ -913,7 +952,7 @@ class TranscriptView:
             shaped = self._shape_zh(zh, final=True)
             if "\n" in shaped:
                 return shaped.count("\n") + 1
-            return max(1, round(self._measure(zh, w, self._font_zh[0]) / self._lh(self._font_zh[0])))
+            return max(1, round(self._measure_zh(zh, w, self._font_zh[0]) / self._lh_zh()))
         except Exception:                                 # noqa: BLE001
             return 99
 
@@ -928,7 +967,7 @@ class TranscriptView:
             if "\n" in shaped:
                 zh_n = shaped.count("\n") + 1
             else:
-                zh_n = round(self._measure(zh, w, self._font_zh[0]) / self._lh(self._font_zh[0]))
+                zh_n = round(self._measure_zh(zh, w, self._font_zh[0]) / self._lh_zh())
             en_n = round(self._measure(en, w, self._font_en[0]) / self._en_line_h())
         except Exception:                                 # noqa: BLE001
             return False
@@ -994,6 +1033,16 @@ class TranscriptView:
             self._type_start(slot_j, which, lbl, display)
             return
         self._type.pop((slot_j, which), None)
+        self._put(lbl, which, display)
+
+    def _put(self, lbl, which: str, display: str) -> None:
+        """写标签。中文那格带固定行高（属性串），英文照旧纯文本。"""
+        if which == "zh" and self._zh_line_h is not None and display:
+            try:
+                lbl.setAttributedStringValue_(self._zh_attr(lbl, display))
+                return
+            except Exception:                    # noqa: BLE001 行距是锦上添花
+                pass
         lbl.setStringValue_(display)
 
     def _fit_zh(self, lbl, text: str) -> str:
@@ -1003,7 +1052,7 @@ class TranscriptView:
             return text                      # 还没摆过(宽度没定): 量了没意义
         try:
             return truncate_to_height(
-                text, lambda s: self._measure(s, w, lbl.font()), self._zh_h)
+                text, lambda s: self._measure_zh(s, w, lbl.font()), self._zh_h)
         except Exception:                    # noqa: BLE001 截断是显示层兜底, 坏了就交还 AppKit
             return text
 
@@ -1035,7 +1084,7 @@ class TranscriptView:
             alphas.append(round((D_TYPE_FROM + (1.0 - D_TYPE_FROM) * e) * 12) / 12)
         if not live:
             self._type.pop((slot_j, which), None)
-            lbl.setStringValue_(display)
+            self._put(lbl, which, display)
             return
         try:
             from AppKit import (NSAttributedString, NSFontAttributeName,
@@ -1051,6 +1100,9 @@ class TranscriptView:
             ps.setLineBreakMode_(lbl.lineBreakMode())
             ps.setAlignment_(lbl.alignment())
             attrs0[NSParagraphStyleAttributeName] = ps
+            if which == "zh" and self._zh_line_h is not None:
+                attrs0 = self._zh_attrs(lbl)
+                attrs0.pop(NSForegroundColorAttributeName, None)
             out = NSMutableAttributedString.alloc().init()
             i = 0
             n = len(display)
@@ -1067,7 +1119,7 @@ class TranscriptView:
             lbl.setAttributedStringValue_(out)
         except Exception:                        # noqa: BLE001 淡入是锦上添花
             self._type.pop((slot_j, which), None)
-            lbl.setStringValue_(display)
+            self._put(lbl, which, display)
 
     def _step_type(self) -> None:
         for key in list(self._type):
@@ -1131,7 +1183,7 @@ class TranscriptView:
         if w < 20.0:
             return                      # 还没摆过(宽度没定): 量了没意义, 别误报
         try:
-            need = self._measure(text, w, lbl.font())
+            need = self._measure_zh(text, w, lbl.font())
         except Exception:               # noqa: BLE001
             return                      # 量不了就算了 —— 这是观测, 不该影响功能
         self._zh_seen_n += 1

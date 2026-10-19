@@ -69,8 +69,8 @@ ROW_EN_H = 18.0 + 14.0 + 12.0                     # 末项 = `transcript_view.EN
 #: 中文行内 ≈3pt < 英文贴中文 ≈8pt < 段与段 ≈21pt（≥ 2×，分组一眼可读）。原来 5.0 时英文→中文 12pt、
 #: 段间 17.5pt，两级只差 1.5×，英文看着像挂在上一段下面。
 ROW_GAP = 1.0
-ROW_ZH_H = 47.0                                   # 每行中文两行
-ROW_H = ROW_EN_H + ROW_GAP + ROW_ZH_H             # 92.0（3.11 前 70.0）
+ROW_ZH_H = 52.0                                   # 每行中文两行 = 2 × LINE_H(23.5) + 5（3.11 前 47）
+ROW_H = ROW_EN_H + ROW_GAP + ROW_ZH_H             # 97.0（3.11 前 70.0）
 GLOSS_H = 20.0                                    # 💡 解析: 收回态 = 一行(尾部省略)
 #: 术语行在**最后一次命中**之后留多久（秒）就自己收起（钉住的不收）。3.10.1：Owen 10-19
 #: 「出现术语的时候它不会自动隐藏」。⚠️ 不能短到「名字只活 1 句」（`terms()` 那条老教训：
@@ -146,7 +146,9 @@ HEIGHT = BASE_H + VISIBLE_ROWS * ROW_H            # = 391.0
 # 这样最窄到 280px 仍然**一句不吞**。
 # ⚠️ 关键: 变的只是"等高的那个值", **所有行依然等高** —— 回收池依赖的不变量
 #    ("所有行等高")没有被破坏, 所以换一组统一尺寸是安全的。
-LINE_H = 21.0                                     # 18pt Medium 一行实测 21.0px
+#: 中文一行的**固定行高**。18pt Medium 字体自带 21.0（117%，偏紧）；3.11 起 1.3 倍 = 23.5
+#: （Butterick 120–145%；中文宜偏松）。渲染与量折行同一个值（`transcript_view._zh_attr` / `_measure_zh`）。
+LINE_H = 23.5
 LINE_TIERS = ((620.0, 2), (440.0, 3), (360.0, 4))
 MAX_LINES = 5
 # ⚠️ 下限取**两个约束里更紧的那个**：
@@ -195,7 +197,7 @@ def _lines_for_width(w: float) -> int:
 
 
 def _zh_h_for(lines: int) -> float:
-    return lines * LINE_H + 5.0                   # 与既有 2*21+5 = 47 同口径
+    return lines * LINE_H + 5.0                   # 2 行 = 52（3.11 前 2*21+5 = 47）
 
 
 def _row_h_for(lines: int) -> float:
@@ -438,16 +440,22 @@ def _make_shadow():
     return sh
 
 
-def _measure_text_h(text: str, width: float, font) -> float:
+def _measure_text_h(text: str, width: float, font, line_h: float | None = None) -> float:
     """文本按给定宽度折行后的**实测**高度(px)。主线程调用(AppKit)。
 
     用 AppKit 自己的排版引擎量, 不猜字符宽度: 折行的判据必须与标签渲染时的
     换行规则**同源**, 否则会出现"我们以为放得下、标签却静默裁掉第三行"
     (NSTextField 在 maximumNumberOfLines 超限时不留省略号也不报错)。"""
     from AppKit import (NSAttributedString, NSMakeSize, NSFontAttributeName,
-                        NSStringDrawingUsesLineFragmentOrigin)
-    a = NSAttributedString.alloc().initWithString_attributes_(
-        text, {NSFontAttributeName: font})
+                        NSStringDrawingUsesLineFragmentOrigin, NSMutableParagraphStyle,
+                        NSParagraphStyleAttributeName)
+    at = {NSFontAttributeName: font}
+    if line_h is not None:                       # 固定行高（中文那格，见 `LINE_H`）
+        ps = NSMutableParagraphStyle.alloc().init()
+        ps.setMinimumLineHeight_(line_h)
+        ps.setMaximumLineHeight_(line_h)
+        at[NSParagraphStyleAttributeName] = ps
+    a = NSAttributedString.alloc().initWithString_attributes_(text, at)
     return a.boundingRectWithSize_options_(
         NSMakeSize(width, 1e7), NSStringDrawingUsesLineFragmentOrigin).size.height
 
@@ -475,7 +483,7 @@ def _wrap_zh(text: str, label_w: float, font, final: bool) -> str:
     单元格左右各留 2px → 实排可用 `label_w - 4`; 我们再留 2px 余量取 `label_w - 6`,
     宁可少放半个字也不能让 AppKit 再折一次(多出的那行会被档位静默裁掉)。"""
     import linebreak
-    natural = max(1, int(round(_measure_text_h(text, label_w - 4, font) / LINE_H)))
+    natural = max(1, int(round(_measure_text_h(text, label_w - 4, font, LINE_H) / LINE_H)))
     return linebreak.wrap(text, lambda s: _text_width(s, font), label_w - 6,
                           natural_lines=natural, final=final)
 
@@ -1597,7 +1605,7 @@ class Overlay:
             ve, self._label, f_zh, f_en, f_big,
             self._width, PAD, ROW_EN_H, ROW_GAP, ROW_ZH_H, ROW_H,
             max_scroll_h=self._expanded_h,
-            measure=_measure_text_h,
+            measure=_measure_text_h, zh_line_h=LINE_H,
             wrap_zh=lambda t, w, final, _f=f_zh[0]: _wrap_zh(t, w, _f, final),
             on_follow_change=self._on_tv_follow_change)
         self._tv.set_collapsed(True)      # 初始收回态: 滚轮必须从一开始就被吞掉

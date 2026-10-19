@@ -69,6 +69,9 @@ ROW_EN_H = 18.0 + 14.0 + 12.0                     # 末项 = `transcript_view.EN
 #: 中文行内 ≈3pt < 英文贴中文 ≈8pt < 段与段 ≈21pt（≥ 2×，分组一眼可读）。原来 5.0 时英文→中文 12pt、
 #: 段间 17.5pt，两级只差 1.5×，英文看着像挂在上一段下面。
 ROW_GAP = 1.0
+#: 只英·校 / 纯转录档没有中文：英文提成大字、英文小字那格空着 —— 只留段间距（3.11，Owen 10-19）。
+#: 不收的话每行底下空 44 pt。
+ROW_EN_H_SOLO = 12.0
 ROW_ZH_H = 52.0                                   # 每行中文两行 = 2 × LINE_H(23.5) + 5（3.11 前 47）
 ROW_H = ROW_EN_H + ROW_GAP + ROW_ZH_H             # 97.0（3.11 前 70.0）
 GLOSS_H = 20.0                                    # 💡 解析: 收回态 = 一行(尾部省略)
@@ -200,8 +203,8 @@ def _zh_h_for(lines: int) -> float:
     return lines * LINE_H + 5.0                   # 2 行 = 52（3.11 前 2*21+5 = 47）
 
 
-def _row_h_for(lines: int) -> float:
-    return ROW_EN_H + ROW_GAP + _zh_h_for(lines)
+def _row_h_for(lines: int, solo: bool = False) -> float:
+    return (ROW_EN_H_SOLO if solo else ROW_EN_H) + ROW_GAP + _zh_h_for(lines)
 
 WEIGHT = 0.23                                     # NSFontWeightMedium
 FLUSH_DT = 0.016                                  # 渲染合并闸门 = 一帧(约 60Hz)
@@ -2544,11 +2547,12 @@ class Overlay:
     def _apply_row_metrics(self, width: float) -> None:
         """按当前宽度算行尺寸并推给转录区(窄窗中文要更多行才不吞字)。"""
         lines = _lines_for_width(width)
-        zh_h, row_h = _zh_h_for(lines), _row_h_for(lines)
+        solo = getattr(self, "_trans_mode", "both") != "both"
+        zh_h, row_h = _zh_h_for(lines), _row_h_for(lines, solo)
         if abs(row_h - self._row_h) < 0.5:
             return
         self._row_h, self._zh_h = row_h, zh_h
-        self._tv.set_row_metrics(zh_h, lines)
+        self._tv.set_row_metrics(zh_h, lines, ROW_EN_H_SOLO if solo else ROW_EN_H)
         # 行高变了 -> 最小高度也变了, 得同步给窗口, 否则缩不到新下限
         try:
             self._panel.setContentMinSize_((MIN_WIDTH, self._min_height()))
@@ -3238,7 +3242,9 @@ class Overlay:
         if not (self._join_on and self._tail_merge and self._log.rows) or ep:
             return False
         pe, pz = self._log.rows[-1]
-        return self._tv.zh_lines(pz) < self._tv.lines_tier()
+        # 没有中文（只英·校 / 纯转录 / 译文失败）不接：`zh_lines("")` = 0 → 永远「没写满」，
+        # 一整段课会并成一行、超出的部分被截掉（10-19 只英档实测）。
+        return bool(pz) and self._tv.zh_lines(pz) < self._tv.lines_tier()
 
     def endpoint(self, between: bool) -> None:
         """`main`：Soniox 报了一个端点（`between` = 落在两句之间，不是一句话说到一半）。"""
@@ -6318,6 +6324,7 @@ class Overlay:
             self._mi_outline.setAction_(
                 None if mode == "raw" else "clicked:")
         self._sync_trans_button()
+        self._apply_row_metrics(self._width)   # 只英 / 纯转录档行高收起英文那格（换回双语再放开）
         # ⚠️ 换字后胶囊宽度要跟着重算：原来切档不重排，「双语」那份宽度装「纯转录」会少约 4pt
         #    （裸文字时看不出，有了胶囊底就露馅）。`_layout` 只是几个 sizeToFit，不贵。
         self._layout()

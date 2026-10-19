@@ -116,5 +116,40 @@ class 英文两行(unittest.TestCase):
         self.assertLess(float(e.size.height), float(o._tv._en_h) - 1.0, "一行英文却占了整格")
 
 
+
+class 只英档(unittest.TestCase):
+    """「只英·校」档看效果（Owen 10-19）：没有中文时不许整段并成一行、行底下不许空一条带。"""
+
+    def _overlay(self):
+        if not O.LAYOUT_D:
+            self.skipTest("只管 D 布局")
+        o = O.Overlay()
+        self.addCleanup(o.close)
+        return o
+
+    def test_行高收起英文那格_换回双语再放开(self):
+        o = self._overlay()
+        both = o._row_h
+        o.set_trans_mode("en")
+        self.assertAlmostEqual(o._row_h, both - (O.ROW_EN_H - O.ROW_EN_H_SOLO), delta=0.01)
+        self.assertAlmostEqual(o._tv._row_h, o._row_h, delta=0.01, msg="转录区与悬浮窗行高两份")
+        o.set_trans_mode("both")
+        self.assertAlmostEqual(o._row_h, both, delta=0.01)
+
+    def test_没有中文不并行(self):
+        o = self._overlay()
+        o.set_trans_mode("en")
+        o.set_tail_merge(True)
+        o._join_on = True
+        for en in ("And we're going to talk about monopoly profit maximization.",
+                   "Now, so far on the producer side, we've been discussing perfect competition.",
+                   "Which is monopoly."):
+            o.add_draft(en)
+            o._render()
+            o.finalize(en, "")
+            o._render()
+        self.assertEqual(len(o._log.rows), 3, "只英档一整段并成了一行（会被截掉）")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

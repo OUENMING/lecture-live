@@ -615,7 +615,7 @@ class TranscriptView:
         w = self._doc.frame().size.width
         return w if w > 40.0 else self._width - 2 * self._pad
 
-    def set_row_metrics(self, zh_h: float, lines: int) -> None:
+    def set_row_metrics(self, zh_h: float, lines: int, en_h: float | None = None) -> None:
         """行尺寸随窗口宽度变(窄窗里中文要更多行才不吞字)。
 
         ⚠️ 变的只是"等高的那个值", **所有行依然等高** —— 回收池依赖的不变量是
@@ -631,10 +631,12 @@ class TranscriptView:
         重叠或留缝, 没有任何报错。行内三段(en_h / gap / zh_h)构造时就收到了,
         推得出来就推。(2026-09-27 OCR 指出这条双来源。)
         """
-        row_h = self._en_h + self._gap + float(zh_h)      # ← 唯一来源, 见 docstring
+        en_h = self._en_h if en_h is None else float(en_h)   # 只英 / 纯转录档收起英文那格
+        row_h = en_h + self._gap + float(zh_h)            # ← 唯一来源, 见 docstring
         if abs(float(row_h) - self._row_h) < 0.5:
             return
         self._end_roll()                  # 行高一变, 进行中的位移就没有意义了 —— 直接落位
+        self._en_h = en_h
         self._zh_h = float(zh_h)
         self._row_h = float(row_h)
         self._lines = int(lines)          # 见 __init__: 供 _ensure_pool 新增的槽位用
@@ -1052,7 +1054,8 @@ class TranscriptView:
             return text                      # 还没摆过(宽度没定): 量了没意义
         try:
             return truncate_to_height(
-                text, lambda s: self._measure_zh(s, w, lbl.font()), self._zh_h)
+                text, lambda s: self._measure_zh(s, w, lbl.font()),
+                max(self._zh_h, float(lbl.frame().size.height)))
         except Exception:                    # noqa: BLE001 截断是显示层兜底, 坏了就交还 AppKit
             return text
 
@@ -1210,6 +1213,8 @@ class TranscriptView:
         s = self._slots[j]
         s["level"] = level
         s["en_top"] = EN_LINE_ON_TOP and is_zh
+        # 只有大字、没有小字（只英·校 / 纯转录 / 译文失败）：整格给大字，英文那格不留空带
+        s["solo"] = bool(self._d and not is_zh and not sub and not self._verbatim)
         s["w"] = doc_w
         s["en2"] = self._en_two_lines(big, sub, is_zh)
         s["en"].setMaximumNumberOfLines_(max(1, int(s["en2"] or 1)))
@@ -1238,7 +1243,15 @@ class TranscriptView:
             n = min(max(1, int(s.get("en2") or 1)), EN_SLOT_LINES)
             x = self._en_line_h()
             h1 = self._en_h - EN_SLOT_TOP - (EN_SLOT_LINES - 1) * x   # 一行英文的框高
-            s["en"].setFrame_(((0.0, y + self._zh_h + self._gap), (w, h1 + (n - 1) * x)))
+            if h1 < x * 0.5:                         # 只英档收了行高、屏上还留着双语行：英文那格没地方 → 不画
+                h1, n = 0.0, 1
+            s["en"].setFrame_(((0.0, y + self._zh_h + self._gap), (w, h1 + (n - 1) * x if h1 else 0.0)))
+            s["zh"].setFrame_(((0.0, y), (w, self._zh_h)))
+        elif s.get("solo"):
+            # ⭐ 3.11：英文那格扩到两行后（`EN_SLOT_LINES`），只英档每行底下空出 44 pt 一条空带
+            #    （Owen 10-19 看只英·校档发现）。只有大字时它贴行底，英文那格不占地方
+            #    （只英 / 纯转录档的行高也跟着收，见 `overlay._row_h_for(solo=)`）。
+            s["en"].setFrame_(((0.0, y + self._zh_h), (w, 0.0)))
             s["zh"].setFrame_(((0.0, y), (w, self._zh_h)))
         else:                                        # 大字在上
             s["en"].setFrame_(((0.0, y), (w, self._en_h)))

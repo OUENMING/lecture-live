@@ -357,6 +357,7 @@ def main() -> int:
         try:
             from AppKit import NSApplication, NSEvent, NSLeftMouseDown
             ov._terms = [("Marginal cost", "边际成本")]
+            ov._render()                 # 术语行文字要先上屏：D 布局按它的宽度在顶栏留位置
             ov._layout()
             ov._panel.setFrameOrigin_((-4000.0, 0.0))   # 离屏显示: 不闪, 但必须真 isVisible
             ov._panel.orderFrontRegardless()

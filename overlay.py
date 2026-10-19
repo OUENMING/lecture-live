@@ -90,6 +90,8 @@ ROLL_HYSTERESIS = 8           # 底行长度与上一帧相差在此以内 -> �
 _CLAUSE_CHARS = ",;:，；：、—–"   # 从句边界锚点(中英都收: 草稿译文是中文)
 INPUT_H = 26.0                                    # ⌨ 单行输入框(含下方 1px 细线)
 INPUT_GAP = 6.0                                   # 输入框与它上面那行(💡)的间隔
+#: D 布局：鼠标进窗时字幕整体上让这么多，给输入框腾地方（不盖住最新一行）。
+INPUT_LIFT = INPUT_H + INPUT_GAP
 RULE_H = 1.0                                      # 输入框下方的细线: 取代填充块
 RULE_A = 0.18                                     # 细线静止不透明度(白)
 RULE_A_FOCUS = 0.45                               # 细线聚焦不透明度(白) —— 提到草稿那一档
@@ -113,7 +115,9 @@ def _pinned(gloss_h: float) -> float:
     输入行必须算进来: _pinned 同时喂 PINNED_H / BASE_H / _apply_mode 的总高重算,
     漏掉任何一处, 面板高度与实际内容就会错位(输入框被裁掉或盖住滚动区)。"""
     if LAYOUT_D:
-        return INPUT_H + INPUT_GAP + gloss_h + D_PIN_TAIL    # D: 没有草稿栏
+        # ⭐ 3.11（Owen 10-19「字幕几乎占满整个卡片」）：术语行挪进顶栏、输入框只在鼠标进来时
+        #    从底部滑出（字幕整体上让 `INPUT_LIFT`，见 `_lift_tick`）—— 底部固定区只剩一条缝。
+        return D_PIN_TAIL
     return INPUT_H + INPUT_GAP + gloss_h + 4 + DRAFT_H + DRAFT_ZH_H + 4
 
 
@@ -1442,6 +1446,9 @@ class Overlay:
         self._join_on = caption_flow.JOIN_ON   # 「连着讲就并成一段」，见 caption_flow.JOIN_ON
         #: ⭐ 3.11 端点换行：上一句之后 Soniox 报过**句间**端点没有（`endpoint`；定一次就清）
         self._ep_since = False
+        #: D 布局：字幕区底边此刻上让了多少（0 ↔ `INPUT_LIFT`，跟着输入框淡入淡出动画走）
+        self._lift = INPUT_LIFT if LAYOUT_D else 0.0
+        self._lift_anim: tuple | None = None    # (t0, from, to)
         #: 下一句接不接在最后一行后面：`None` = 还没定；**第一次上屏前**定，定了不改
         self._draft_join: bool | None = None
         self._merge_join = False    # 这次并行是「连着讲」那条（定稿时还要再量一次装不装得下）
@@ -2274,6 +2281,113 @@ class Overlay:
         self._input.setStringValue_("")
         self._release_focus()
 
+    def _place_tv(self) -> None:
+        """转录区的 frame（底边上让 `_lift`）+「↓ N 句新的」。卡片开着时由 `_card_relayout` 摆。"""
+        if not self._card_kind:
+            lift = float(self._lift)
+            self._tv.set_frame(self._scroll_y + lift, max(self._row_h, self._scroll_h - lift))
+        self._sync_newline_pill()
+
+    def _lift_target(self) -> float:
+        return INPUT_LIFT if (LAYOUT_D and getattr(self, "_bar_shown", True)) else 0.0
+
+    def _lift_tick(self, now: float) -> bool:
+        """pump 每帧：输入框淡入 → 字幕底边上让 `INPUT_LIFT`；淡出 → 落回去。返回是否还在动。
+
+        ⭐ Owen 10-19：输入框不许盖住最新一句 —— 它出来时字幕整体往上让，而不是压在字幕上。
+        时长同输入框的淡变（`motion.STATE_S` / `EXIT_S`），减弱动态效果时一步到位。
+        """
+        to = self._lift_target()
+        a = self._lift_anim
+        if a is None or a[2] != to:
+            if abs(self._lift - to) < 0.01:
+                self._lift_anim = None
+                return False
+            a = self._lift_anim = (now, float(self._lift), to)
+        t0, frm, to = a
+        dur = motion.STATE_S if to > frm else motion.EXIT_S
+        p = 1.0 if (motion.reduce_motion() or dur <= 0) else min(1.0, (now - t0) / dur)
+        e = 1.0 - (1.0 - p) ** 3                        # ease-out
+        v = frm + (to - frm) * e
+        if abs(v - self._lift) >= 0.25 or p >= 1.0:
+            self._lift = to if p >= 1.0 else v
+            self._place_tv()
+        if p >= 1.0:
+            self._lift_anim = None
+            return False
+        return True
+
+    def _place_header_text(self) -> None:
+        """顶栏左边那段文字：「在听」小点 + 章节条 +（D 布局）术语行。
+
+        按钮由 `_layout` 摆（`_hdr_left` = 最左按钮左边缘）；这里只摆文字 —— 术语换内容时
+        `_render` 也调它（术语宽度变了，章节条要跟着让）。
+        """
+        from AppKit import NSMakeRect
+        pad = PAD
+        left = getattr(self, "_hdr_left", self._width - pad)
+        avail = left - pad
+        _ctext = self._chapter_bar_text()
+        # 三个条件**全**满足才显示；否则标签和点击区**一起**隐藏（计划 §9.8）。
+        # 「在听」小点占顶栏最左, 章节条往右让出 EAR_D + EAR_GAP
+        _ear_y = float(math.floor(self._height - 28 + (24 - EAR_D) / 2))
+        self._ear.setFrame_(NSMakeRect(pad, _ear_y, EAR_D, EAR_D))
+        _cx = pad + EAR_D + EAR_GAP
+        avail -= EAR_D + EAR_GAP
+        # ⭐ 3.11 D：术语行住在顶栏**右边**（紧贴最左按钮），章节条让出它的宽度。
+        #    术语最多占一半；没有术语时章节条照旧占满。
+        _gw = 0.0
+        if LAYOUT_D:
+            _gtext = self._label_cache.get("gloss") or ""
+            if _gtext:
+                try:
+                    _gw = float(math.ceil(self._gloss_lbl.attributedStringValue().size().width)) + 6.0
+                except Exception:                         # noqa: BLE001
+                    _gw = avail * 0.5
+                # 上限：章节条要多宽就留多宽（至少给它一半），剩下的都给术语
+                _cap = avail * 0.5
+                try:
+                    from AppKit import NSFontAttributeName, NSString
+                    _cfit = float(NSString.stringWithString_(_ctext).sizeWithAttributes_(
+                        {NSFontAttributeName: self._chapter_lbl.font()}).width) + 8.0
+                    _cap = max(_cap, avail - _cfit - 8.0)
+                except Exception:                         # noqa: BLE001
+                    pass
+                _gw = min(_gw, float(math.floor(_cap)))
+            _glh = float(math.ceil(self._gloss_lbl.font().ascender()
+                                   - self._gloss_lbl.font().descender()
+                                   + self._gloss_lbl.font().leading()))
+            _gy = float(math.floor(self._height - 28 + (24 - _glh) / 2))
+            _gx = float(math.floor(left - _gw))
+            self._gloss_lbl.setFrame_(NSMakeRect(_gx, _gy, _gw, _glh))
+            self._gloss_hit.setFrame_(((_gx, self._height - 28), (_gw, 24)))
+            avail -= _gw + (8.0 if _gw else 0.0)
+        _cshow = bool(_ctext) and avail >= CHAPTER_MIN_W and self._trans_mode != "raw"
+        if self._chapter_lbl is not None:
+            self._chapter_lbl.setHidden_(not _cshow)
+        if self._chapter_hit is not None:
+            self._chapter_hit.setHidden_(not _cshow)
+        if _cshow:
+            # ⚠️ **宽度必须 `floor`** —— 可用宽度是「从右边缘逐个减 `sizeToFit()` 出来的
+            #    按钮宽」累减得到的，**几乎必然是小数**；不取整会让标签和点击区落在
+            #    **半像素**上 → 文字发虚（`RESEARCH-macos-aesthetic.md §7` 的指纹表）。
+            #    ⚠️ 取整之后标签与点击区**用同一个数**（同框），别各算各的。
+            _cw = float(math.floor(avail))
+            if self._chapter_lbl.stringValue() != _ctext:
+                motion.fade_swap(self._chapter_lbl)      # 新章节换标题：淡换，不跳（2026-10-14）
+            self._chapter_lbl.setStringValue_(_ctext)
+            # ⚠️ 标签**不能**和按钮一样给 24 高的框: NSTextField 把文字**贴顶**画,
+            #    NSButton 把标题**竖直居中** —— 同一个 24 高的行里, 12pt 的章节字
+            #    会比右边按钮字高出 5pt(2026-10-13 拍图量墨迹中心: 35.25 vs 40.25pt)。
+            #    框高取这个字号的一行高、在行里居中, 两边就落在同一条中线上。
+            _lh = float(math.ceil(self._chapter_lbl.font().ascender()
+                                  - self._chapter_lbl.font().descender()
+                                  + self._chapter_lbl.font().leading()))
+            # floor 而非 round: 奇数余量时往下取那半点 —— 量过, round 仍比按钮高 1pt。
+            _ly = float(math.floor(self._height - 28 + (24 - _lh) / 2))
+            self._chapter_lbl.setFrame_(NSMakeRect(_cx, _ly, _cw, _lh))
+            self._chapter_hit.setFrame_(((_cx, self._height - 28), (_cw, 24)))
+
     # ---- 展开 / 收回 ----
     def _gloss_h(self) -> float:
         """💡 解析高度: 收回态一行(尾部省略), 展开态最多四行铺满完整解析
@@ -2635,11 +2749,17 @@ class Overlay:
         # 💡 钉在固定区顶部: 收回态一行(尾部省略), 展开态三行铺满完整解析。
         # 文字不变, 只改 frame 高度/行数上限/换行模式 —— 一份字符串两态通用。
         # (AppKit: 要换行必须 WordWrapping; 单行才用 TruncatingTail 拿省略号。)
-        self._gloss_lbl.setMaximumNumberOfLines_(1 if self._collapsed else 3)
-        self._gloss_lbl.setLineBreakMode_(
-            self._trunc if self._collapsed else self._wrap)
-        self._gloss_lbl.setFrame_(NSMakeRect(pad, y, w, gh))
-        self._gloss_hit.setFrame_(NSMakeRect(pad, y, w, gh))     # 点击区与术语行同框
+        if LAYOUT_D:
+            # 术语行在顶栏（`_place_header_text`）：一行、尾部省略，展开态也不变高
+            self._gloss_lbl.setMaximumNumberOfLines_(1)
+            self._gloss_lbl.setLineBreakMode_(self._trunc)
+            gh = 0.0
+        else:
+            self._gloss_lbl.setMaximumNumberOfLines_(1 if self._collapsed else 3)
+            self._gloss_lbl.setLineBreakMode_(
+                self._trunc if self._collapsed else self._wrap)
+            self._gloss_lbl.setFrame_(NSMakeRect(pad, y, w, gh))
+            self._gloss_hit.setFrame_(NSMakeRect(pad, y, w, gh))     # 点击区与术语行同框
         # ⚠️ 草稿标签的 frame **只有 `_roll_into` 一个写者**(贴底 + 按实际行数收缩)。
         #    这里只算底边, 然后请它来摆 —— **别在这儿自己 setFrame_**。
         #    为什么: `_layout` 会被 `_sync_panel_size`(**pump 每帧** + live resize 的
@@ -2670,9 +2790,7 @@ class Overlay:
         # ⭐ 「上卡下字幕」（作者 2026-10-17）：没卡时转录区就是整段；**卡片开着时**
         #    由 `_card_relayout` 摆（它才知道卡片最终多高 —— 两处都写就等于两个写点，
         #    哪天两份算术分了家，卡片底与字幕顶就会差几个像素）。
-        if not self._card_kind:
-            self._tv.set_frame(self._scroll_y, self._scroll_h)       # 转录区
-        self._sync_newline_pill()          # 「↓ N 句新的」跟着转录区几何走（底边锚在 _scroll_y，卡片开着也成立）
+        self._place_tv()                   # 转录区 +「↓ N 句新的」（底边让出 `_lift`）
         # 顶栏: 从右边缘往左摆(列表是左->右顺序, 故 reversed)。sizeToFit 取文字
         # 实际宽度, 加内边距; 图标(⭐/✕)保底 28px 点击区 —— 它们的字形只有 15-24px,
         # 直接按字宽会给一个点不中的小目标。
@@ -2714,40 +2832,8 @@ class Overlay:
         #    可用宽度 = `(x + gap) - pad`。
         #    ⚠️ 计划 §1.3① 更正过原稿的写法：原稿是 `x - pad`，
         #       那会**多算一个 gap、少算 pad** → 章节条压到最左那个按钮上。
-        left = x + gap
-        avail = left - pad
-        _ctext = self._chapter_bar_text()
-        # 三个条件**全**满足才显示；否则标签和点击区**一起**隐藏（计划 §9.8）。
-        # 「在听」小点占顶栏最左, 章节条往右让出 EAR_D + EAR_GAP
-        _ear_y = float(math.floor(self._height - 28 + (24 - EAR_D) / 2))
-        self._ear.setFrame_(NSMakeRect(pad, _ear_y, EAR_D, EAR_D))
-        _cx = pad + EAR_D + EAR_GAP
-        avail -= EAR_D + EAR_GAP
-        _cshow = bool(_ctext) and avail >= CHAPTER_MIN_W and self._trans_mode != "raw"
-        if self._chapter_lbl is not None:
-            self._chapter_lbl.setHidden_(not _cshow)
-        if self._chapter_hit is not None:
-            self._chapter_hit.setHidden_(not _cshow)
-        if _cshow:
-            # ⚠️ **宽度必须 `floor`** —— 可用宽度是「从右边缘逐个减 `sizeToFit()` 出来的
-            #    按钮宽」累减得到的，**几乎必然是小数**；不取整会让标签和点击区落在
-            #    **半像素**上 → 文字发虚（`RESEARCH-macos-aesthetic.md §7` 的指纹表）。
-            #    ⚠️ 取整之后标签与点击区**用同一个数**（同框），别各算各的。
-            _cw = float(math.floor(avail))
-            if self._chapter_lbl.stringValue() != _ctext:
-                motion.fade_swap(self._chapter_lbl)      # 新章节换标题：淡换，不跳（2026-10-14）
-            self._chapter_lbl.setStringValue_(_ctext)
-            # ⚠️ 标签**不能**和按钮一样给 24 高的框: NSTextField 把文字**贴顶**画,
-            #    NSButton 把标题**竖直居中** —— 同一个 24 高的行里, 12pt 的章节字
-            #    会比右边按钮字高出 5pt(2026-10-13 拍图量墨迹中心: 35.25 vs 40.25pt)。
-            #    框高取这个字号的一行高、在行里居中, 两边就落在同一条中线上。
-            _lh = float(math.ceil(self._chapter_lbl.font().ascender()
-                                  - self._chapter_lbl.font().descender()
-                                  + self._chapter_lbl.font().leading()))
-            # floor 而非 round: 奇数余量时往下取那半点 —— 量过, round 仍比按钮高 1pt。
-            _ly = float(math.floor(self._height - 28 + (24 - _lh) / 2))
-            self._chapter_lbl.setFrame_(NSMakeRect(_cx, _ly, _cw, _lh))
-            self._chapter_hit.setFrame_(((_cx, self._height - 28), (_cw, 24)))
+        self._hdr_left = x + gap           # 最左按钮的左边缘（章节条 / 术语只能摆在它左边）
+        self._place_header_text()
         self._drag_layer.setFrame_(((0.0, 0.0), (self._width, self._height)))
         self._ve.setFrame_(self._panel.contentView().bounds())
         self._scrim.setFrame_(self._ve.bounds())
@@ -5674,6 +5760,7 @@ class Overlay:
             or self._dirty or self._urgent
             or self._tv._dirty or self._tv._urgent
             or getattr(self, "_bar_hide_at", None) is not None
+            or getattr(self, "_lift_anim", None) is not None
         )
 
     def _hot_wait_s(self) -> float:
@@ -5835,6 +5922,7 @@ class Overlay:
             self._card_refill()
         self._duty_tick(self._clock())
         self._bar_tick(time.monotonic())
+        self._lift_tick(time.monotonic())     # 输入框进出：字幕底边跟着让 / 落回
         # 角落小卡：亮档到点 → 降到低亮度（不消失）。纯状态转换，没到点就是一次比较。
         self._chip_tick(self._clock())
         # 用户拖过窗口边缘 -> 把宽度/转录区高度收进来并重排。放在 tick 之前:
@@ -6029,7 +6117,7 @@ class Overlay:
             self._pill_w = self._newline_pill_width(b.title())
         # 右边缘与转录区右边缘对齐（本来就是 0 间隙，收不动）；只收底边那一档。
         b.setFrame_(((self._width - PAD - self._pill_w,
-                      self._scroll_y + NEWLINE_INSET_B),
+                      self._scroll_y + float(getattr(self, "_lift", 0.0)) + NEWLINE_INSET_B),
                      (self._pill_w, NEWLINE_H)))
 
     def _symbolize(self, b, symbol: str, label: str, size: float = 16.0) -> None:
@@ -6807,5 +6895,8 @@ class Overlay:
         # ⚠️ 放这里（而不是 `_set_items` 里）: 提示归宿主画, 视图只报数。
         self._sync_newline_pill()
         # 术语行 / ❓ 点拨换内容时淡换（2026-10-14 动效一轮：原来一下跳过去）
+        _g_old = self._label_cache.get("gloss")
         self._set_cached("gloss", self._gloss_lbl, self._gloss_text(), fade=True)
+        if LAYOUT_D and self._label_cache.get("gloss") != _g_old:
+            self._place_header_text()       # 术语在顶栏：宽度变了，章节条跟着让
         # 不再每次渲染都 orderFrontRegardless(会高频打扰窗口服务)

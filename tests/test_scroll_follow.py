@@ -258,7 +258,7 @@ class ScrollFollow(unittest.TestCase):
         self.assertFalse(pill.isHidden())
         f = pill.frame()
         self.assertAlmostEqual(f.size.height, O.NEWLINE_H, delta=0.01)
-        self.assertAlmostEqual(f.origin.y, o._scroll_y + O.NEWLINE_INSET_B, delta=0.01)
+        self.assertAlmostEqual(f.origin.y, o._scroll_y + o._lift + O.NEWLINE_INSET_B, delta=0.01)
         self.assertAlmostEqual(f.origin.x + f.size.width,
                                o._width - O.PAD, delta=0.01,
                                msg="右边缘该与转录区右边缘对齐")

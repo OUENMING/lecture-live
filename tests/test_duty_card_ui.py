@@ -507,12 +507,13 @@ class 上卡下字幕(unittest.TestCase):
                 o._card_close()
                 for i in range(8):
                     o.finalize(f"Line number {i} keeps the transcript rolling.", f"第 {i} 行。")
+                # D 布局：输入框亮着时字幕底边上让 `_lift`（3.11，Owen 10-19）
                 self.assertEqual(float(o._tv._scroll.frame().size.height),
-                                 float(o._scroll_h), "开卡前字幕区就不是全高？")
+                                 float(o._scroll_h) - float(o._lift), "开卡前字幕区就不是全高？")
                 self._open(o, kind)
                 o._card_close()
                 self.assertAlmostEqual(float(o._tv._scroll.frame().size.height),
-                                       float(o._scroll_h), delta=0.75,
+                                       float(o._scroll_h) - float(o._lift), delta=0.75,
                                        msg=f"{kind}：关卡后字幕区没恢复全高")
                 self.assertTrue(o._tv.is_at_bottom(),
                                 f"{kind}：关卡后跟随状态丢了（没贴底）")

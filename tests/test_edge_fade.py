@@ -172,9 +172,11 @@ class 真窗口(unittest.TestCase):
             m = tv.layer().mask()
             # 变异验证：把 `apply()` 里 `if edge == "top" ... else startPoint=(0.5, 0.0)`
             #    改回来 -> 这条红（location 0 落在视口**底**，底边渐隐变成顶边渐隐）。
-            self.assertAlmostEqual(float(m.startPoint().y), 1.0, places=3,
+            # ⭐ 3.10.1：「视口顶」按图层的翻转算（转录区是翻转的 NSScrollView，顶 = y 0）
+            top = 0.0 if tv.layer().isGeometryFlipped() else 1.0
+            self.assertAlmostEqual(float(m.startPoint().y), top, places=3,
                                    msg="location 0 不在视口顶 —— 底边方向又被翻了一次")
-            self.assertAlmostEqual(float(m.endPoint().y), 0.0, places=3)
+            self.assertAlmostEqual(float(m.endPoint().y), 1.0 - top, places=3)
             alphas = [_cg_alpha(c) for c in m.colors()]
             self.assertAlmostEqual(alphas[0], 1.0, places=3,
                                    msg="视口顶该全不透明（底边渐隐只动底边）")
@@ -196,13 +198,15 @@ class 真窗口(unittest.TestCase):
             self.assertAlmostEqual(alphas[-1], 1.0, places=3,
                                    msg="带子走完不全不透明 —— 字幕会被吃掉")
             self.assertEqual(alphas, sorted(alphas), "alpha 不单调（会出现亮-暗-亮）")
-            # ⚠️ 渐变**方向**也钉住：起点必须是视口顶（`startPoint.y=1`）——
-            #    写反了整条带子会跑到底边（拍图核过：`fade-check2.png`）。
+            # ⚠️ 渐变**方向**也钉住：起点必须是**视觉**顶边 —— 写反了整条带子会跑到底边，
+            #    盖住最新那行中文的下半截（3.10.1 Owen 实测；原来钉的 `startPoint.y=1`
+            #    在翻转的 NSScrollView 上恰好是底边，拍图核过：`fade-fixed.png`）。
             #    ⚠️ 只钉配置、钉不住肉眼效果，所以这条和那张图是**一对**。
+            top = 0.0 if o._tv._scroll.layer().isGeometryFlipped() else 1.0
             sp, ep = m.startPoint(), m.endPoint()
-            self.assertAlmostEqual(float(sp.y), 1.0, places=3,
+            self.assertAlmostEqual(float(sp.y), top, places=3,
                                    msg=f"渐变的起点不在视口顶（startPoint={tuple(sp)}）")
-            self.assertAlmostEqual(float(ep.y), 0.0, places=3)
+            self.assertAlmostEqual(float(ep.y), 1.0 - top, places=3)
             self.assertEqual(float(sp.x), float(ep.x))
         finally:
             o.close()
@@ -273,6 +277,32 @@ class 真窗口(unittest.TestCase):
                     o._tv._scroll.frame().origin.y + o._tv._scroll.frame().size.height)
                 self.assertGreaterEqual(gap + 0.5, 8.0,
                                         f"{kind}: 卡片底与字幕区顶只隔了 {gap:.1f}pt")
+        finally:
+            o.close()
+
+
+class 起点是视觉顶边(unittest.TestCase):
+    """3.10.1（Owen 10-19「中文底下那一块被遮住」）：转录区是翻转的 `NSScrollView`，
+    原来写死的 `(0.5, 1.0)` 在它身上是**底边** —— 顶边渐隐整条落在最新那行中文的下半截。"""
+
+    def test_纯函数(self):
+        self.assertEqual(edge_fade.start_end(True)[0], (0.5, 0.0))
+        self.assertEqual(edge_fade.start_end(False)[0], (0.5, 1.0))
+
+    def test_真转录区_遮罩起点在顶(self):
+        try:
+            from overlay import Overlay
+        except Exception as e:                       # noqa: BLE001
+            self.skipTest(f"AppKit 不可用, 跳过: {e}")
+        o = Overlay()
+        try:
+            o.pump()
+            lay = o._tv._scroll.layer()
+            m = lay.mask()
+            self.assertIsNotNone(m)
+            top_y = 0.0 if lay.isGeometryFlipped() else 1.0
+            self.assertAlmostEqual(float(m.startPoint().y), top_y,
+                                   msg="渐变起点（透明那头）不在视觉顶边 —— 会盖住最新一行")
         finally:
             o.close()
 

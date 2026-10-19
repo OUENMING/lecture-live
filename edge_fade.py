@@ -83,6 +83,11 @@ def _mask_stops(view_h: float, edge: str, px: float):
     return out_loc, out_a
 
 
+def start_end(flipped: bool) -> tuple:
+    """渐变的起止点：起点 = **视觉顶边**。图层几何翻转时 y=0 才是顶。**纯函数。**"""
+    return ((0.5, 0.0), (0.5, 1.0)) if flipped else ((0.5, 1.0), (0.5, 0.0))
+
+
 def apply(view, *, edge: str = "top", px: float = BAND_PX) -> bool:
     """给 `view` 装（或重装）边缘渐隐遮罩。**fail-soft**：装不上回 `False`，绝不抛。
 
@@ -114,8 +119,13 @@ def apply(view, *, edge: str = "top", px: float = BAND_PX) -> bool:
         #    第一版两条 edge 各翻一次 —— 翻转叠翻转，`edge="bottom"` 的结果与 `"top"`
         #    **完全等价**（底边那条带子根本没出现）。`(0.5, 1.0) = 视觉顶边`，
         #    2026-10-17 拍图核过（`fade-check2.png`），别凭"y 朝上"推。
-        m.setStartPoint_((0.5, 1.0))
-        m.setEndPoint_((0.5, 0.0))
+        #    ⭐ 3.10.1（Owen 10-19「中文底下那一块被遮住」）：上面那句只对**不翻转**的图层成立。
+        #    转录区是 `NSScrollView` —— `isFlipped()=True`，图层 `geometryFlipped=True`，
+        #    `(0.5, 1.0)` 落在**视觉底边**：顶边渐隐整条跑到了最新那行中文的下半截上。
+        #    所以按图层自己的翻转取起止点（`start_end`），拍图核过 `fade-fixed.png`。
+        start, end = start_end(bool(lay.isGeometryFlipped()))
+        m.setStartPoint_(start)
+        m.setEndPoint_(end)
         lay.setMask_(m)
         return True
     except Exception:                                     # noqa: BLE001

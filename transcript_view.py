@@ -888,6 +888,25 @@ class TranscriptView:
         self._en2_cache[key] = out
         return out
 
+    def lines_tier(self) -> int:
+        """当前档位一行中文最多几行（`LINE_TIERS` 按宽度定）。"""
+        return int(self._lines)
+
+    def zh_lines(self, zh: str) -> int:
+        """`zh` 按当前宽度折成几行（与 `fits_row` 同一套口径）。量不了 → 很大（= 当它满了）。"""
+        if not zh:
+            return 0
+        if self._doc_w < 40.0:
+            return 99
+        try:
+            w = self._doc_w - 4.0
+            shaped = self._shape_zh(zh, final=True)
+            if "\n" in shaped:
+                return shaped.count("\n") + 1
+            return max(1, round(self._measure(zh, w, self._font_zh[0]) / self._lh(self._font_zh[0])))
+        except Exception:                                 # noqa: BLE001
+            return 99
+
     def fits_row(self, en: str, zh: str) -> bool:
         """`(en, zh)` 放进**一行**（当前宽度与档位）会不会被截。与 `_en_two_lines` 同一套口径：
         中文 ≤ 档位行数；英文 1 行，或中文少用一行时英文借它排 2 行。量不了 → False（不并）。"""

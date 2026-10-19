@@ -264,6 +264,15 @@ class StreamCore:
         out, self._sentences = self._sentences, []
         return out
 
+    def at_boundary(self) -> bool:
+        """此刻是不是在**两句之间**（手上没挂着半句，或挂着的那句已经说到句末标点）。
+
+        ⭐ 3.11 端点换行：Soniox 的 `<end>` 约 38% 落在一句话中间（老师说到一半停顿，
+        `snx/REPORT_ep.md`）—— 只有落在句与句之间的才算「讲完一口气」。
+        """
+        tail = (self.draft_text() or "").rstrip().rstrip("\"')\u201d\u2019")
+        return not tail or tail[-1] in ".?!"
+
     def pending(self) -> bool:
         """手上还有没有 token（收尾时判「还要不要等 final」用）。"""
         return bool(self._final or self._nonfinal)
@@ -580,6 +589,7 @@ class StreamASR:
 
     def __init__(self, *, passcode: str, terms: Iterable[str] = (),
                  general: str = "", on_sealed: Callable[[Sealed], None] | None = None,
+                 on_endpoint: Callable[[bool], None] | None = None,
                  clock: Callable[[], float] = time.monotonic, stable_s: float = STABLE_S,
                  request_key: Callable[[str], dict] | None = None,
                  key_timeout_s: float = KEY_TIMEOUT_S, keepalive_s: float = KEEPALIVE_S,
@@ -596,6 +606,10 @@ class StreamASR:
         self._ctx, self._ctx_stats = build_context(
             self._terms, self._general, self._context_text, terms_max=terms_max)
         self._on_sealed = on_sealed
+        #: ⭐ 3.11：Soniox `<end>`（语义端点）→ `on_endpoint(在两句之间?)`，收线程**锁外**调。
+        self._on_endpoint = on_endpoint
+        self._ep_n = 0
+        self._ep_between = 0
         self._stable_s = float(stable_s)
         self._keepalive_s = float(keepalive_s)
         self._response_timeout_s = float(response_timeout_s)
@@ -953,6 +967,17 @@ class StreamASR:
                     sealed = self._core.take_sentences()
                 for s in sealed:
                     self._fire(s)
+            elif kind == "end":
+                with self._lock:
+                    between = self._core.at_boundary()
+                    self._ep_n += 1
+                    self._ep_between += int(between)
+                cb = self._on_endpoint
+                if cb is not None:
+                    try:
+                        cb(between)
+                    except Exception:               # noqa: BLE001
+                        pass                        # 调用方的错不该打死收线程
         self._tick()
         if fatal:
             with self._lock:
@@ -991,6 +1016,10 @@ class StreamASR:
                 fin = [t for t in parsed if t.is_final]     # 逐 token 的 is_final（官方形状）
                 nf = [t for t in parsed if not t.is_final]
                 self._events.put(("msg", (fin, nf)))
+                # ⭐ 3.11：`<end>` 在 `parse_tokens` 里被当控制帧丢了 —— 这里单独报一声
+                #    （排在这条消息的词之后：先吃完它之前的词，再判是不是在两句之间）。
+                if any(isinstance(t, dict) and t.get("text") == "<end>" for t in toks):
+                    self._events.put(("end", None))
         except Exception:                           # noqa: BLE001
             pass
         finally:

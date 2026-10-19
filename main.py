@@ -2638,6 +2638,9 @@ def run(args) -> None:
                 terms=_terms,
                 general=course_title(args.glossary, args.course),
                 on_sealed=_sealed_in,
+                # ⭐ 3.11 端点换行：Soniox 语义端点（`<end>`）→ 悬浮窗定下一句另不另起一行；
+                #    先于下一句的草稿到（同一条 Soniox 流里 `<end>` 排在下一句的词前面）。
+                on_endpoint=lambda b: streamq.put(("ep", bool(b))),
                 region=region)
             # ⚠️ 截了多少条**不许静默**（进 context 的与没进的都要在启动行上看得见）。
             _m = stream.metrics()
@@ -3615,6 +3618,11 @@ def run(args) -> None:
             elif item[0] == "en":
                 draft_view.on_stream(item[2] if len(item) > 2 else None)
                 ui.stream_en(item[1])
+            elif item[0] == "ep":                   # ("ep", 在两句之间?) —— Soniox 语义端点
+                fn = getattr(ui, "endpoint", None)  # 终端没有这一槽
+                if callable(fn):
+                    fn(item[1])
+                live.event("endpoint", between=bool(item[1]))
             elif item[0] == "gap":                  # ("gap", 与上一句的音频停顿秒 | None)
                 fn = getattr(ui, "next_gap", None)  # 终端没有这一槽
                 if callable(fn):

@@ -85,10 +85,12 @@ GAP_S = 3.0
 JOIN_GAP_S = 1.0
 #: 一行最多并几句（再多就算装得下也太长，读起来像一堵墙）。
 JOIN_MAX = 3
-#: 默认关（Owen 10-19 试用：「先往上移、移上去之后再把那句并进上一句，还不如原来」）。
-#: 停顿要等这句封口才知道，而草稿早已单独占了一行 → 并入那一下必然是一次跳动。
-#: 要再开得先解决「草稿阶段就知道并不并」。
-JOIN_ON = False
+#: ⭐ 3.11 端点换行（试用分支）：Owen 10-19 第一版「封口后才并」会跳 —— 草稿先单占一行、
+#: 封口后再被吸进上一行。现在改成**下一句第一次上屏前就定**（`draft_join`），定了不改：
+#: 上一句之后 Soniox 报过句间端点（老师讲完一口气）或最后一行已经写满档位行数 → 另起一行，
+#: 否则草稿从第一个词起就接在最后一行后面。离线量（OCW 14.01 32 分钟 569 句，默认端点档）：
+#: 每分钟 17.6 行 → 8.5 行，平均一行 2.1 句，99% 的行仍装得下 2 行中文档位。
+JOIN_ON = True
 #: 定稿流式最多挡草稿这么久（翻译卡住时不能一直挡；实测译完 p50 1.1 s、p90 1.3 s）。
 HOLD_MAX_S = 2.5
 
@@ -127,7 +129,8 @@ def caption_rows(history: list[tuple[str, str]], *, cur_en: str, cur_zh: str,
                  seed_en: str, streaming: bool, draft: str, draft_zh: str,
                  draft_over: bool, now: float | None = None,
                  final_t0: float | None = None, last_final_t: float | None = None,
-                 merge_live: bool = False, bridge_zh: str = "") -> CaptionRows:
+                 merge_live: bool = False, bridge_zh: str = "",
+                 draft_join: bool = False) -> CaptionRows:
     """算这一帧屏上该有什么。见文件头：四种组合 + 草稿桥 + 让位节奏。不碰输入（`history` 只读）。
 
     `now` / `final_t0`（这句定稿开始流式的时刻）/ `last_final_t`（上一句定稿上屏的时刻）
@@ -143,19 +146,29 @@ def caption_rows(history: list[tuple[str, str]], *, cur_en: str, cur_zh: str,
     if seed_en and not streaming and not cur_zh:
         streaming = True
     has_final = bool(streaming or cur_zh or cur_en)
-    # ③ 短尾巴：屏上不单开一行，接在上一行后面（流式中就接上 —— 定稿到了不再跳一次）
+    busy = has_final                  # 这句定稿还在流（并进上一行了也算 —— 下一句照样等它译完）
+    # ③ 短尾巴 / 接着讲：屏上不单开一行，接在上一行后面（流式中就接上 —— 定稿到了不再跳一次）
     if has_final and merge_live and history:
         en = (seed_en or cur_en) if streaming else cur_en
         pe, pz = history[-1]
-        history = list(history[:-1]) + [(f"{pe} {en}".strip(), f"{pz}{cur_zh}")]
+        # 草稿桥同一条：定稿中文长过草稿译文的 BRIDGE_RATIO 之前，接着显示草稿译文
+        # （草稿阶段这一句已经以草稿译文接在这一行里了 —— 不能先清空再长回来）
+        zh = cur_zh if (not bridge_zh or len(cur_zh) >= BRIDGE_RATIO * len(bridge_zh)) else bridge_zh
+        history = list(history[:-1]) + [(f"{pe} {en}".strip(), f"{pz}{zh}")]
         cur_en = cur_zh = seed_en = ""
         streaming = has_final = False
     # ② 上一句没译完 -> 草稿先不上屏（到 HOLD_MAX_S 为止）
-    if has_final and draft_over and (draft or draft_zh):
+    if busy and (draft_over or not has_final) and (draft or draft_zh):
         t_end = (final_t0 if final_t0 is not None else now) + HOLD_MAX_S
         if now < t_end:
             recheck.append(t_end)
             draft = draft_zh = ""
+    # ⓪' 接着讲（3.11）：草稿从第一个词起就接在最后一行后面 —— 不占新行，也就不用攒词
+    if draft_join and history and not has_final and (draft or draft_zh):
+        pe, pz = history[-1]
+        items = list(history[:-1]) + [(f"{pe} {draft}".strip(), f"{pz}{draft_zh}")]
+        return CaptionRows(items, "", "", False, "none",
+                           min(recheck) if recheck else None)
     # ① 攒够词才开新行（只管「下一句」的草稿：它要占的是**新**行）
     new_row = draft_over or not has_final
     if new_row and (draft or draft_zh) and n_words(draft) < MIN_WORDS:

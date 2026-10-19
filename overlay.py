@@ -1439,7 +1439,11 @@ class Overlay:
         self._tail_merge = False    # 短尾巴并行只在 Soniox 实时识别时开（`set_tail_merge`）
         self._next_gap = None       # 下一句与上一句之间的音频停顿（`next_gap`；用一次就清）
         self._row_n = 0             # 最后一行里并了几句（`caption_flow.JOIN_MAX`）
-        self._join_on = caption_flow.JOIN_ON   # 「连着讲就并成一段」默认关，见 caption_flow.JOIN_ON
+        self._join_on = caption_flow.JOIN_ON   # 「连着讲就并成一段」，见 caption_flow.JOIN_ON
+        #: ⭐ 3.11 端点换行：上一句之后 Soniox 报过**句间**端点没有（`endpoint`；定一次就清）
+        self._ep_since = False
+        #: 下一句接不接在最后一行后面：`None` = 还没定；**第一次上屏前**定，定了不改
+        self._draft_join: bool | None = None
         self._merge_join = False    # 这次并行是「连着讲」那条（定稿时还要再量一次装不装得下）
         self.join_undone = 0        # 估的时候装得下、真译文装不下 → 撤回并行的次数（观测用）
         self._seed_zh = ""          # 这句定稿开始时手边的草稿译文（`caption_rows(bridge_zh=)`）
@@ -3113,16 +3117,34 @@ class Overlay:
         ⭐ 3.10.1「连着讲就并成一段」：中文还没译出来，拿**这句的草稿译文**估装不装得下
            （`_seed_zh`）；定稿时 `finalize` 拿真译文再量一次，装不下就照旧开新行。
         """
-        gap, self._next_gap = self._next_gap, None
+        self._next_gap = None
+        decided, self._draft_join = self._draft_join, None
         if not (self._tail_merge and self._log.rows):
             return False, False
+        if decided is not None:            # 草稿阶段已经定了（已经照这个上过屏）—— 不改，改了就是跳
+            return decided, decided
         if caption_flow.is_tail(en, since):
             return True, False
-        pe, pz = self._log.rows[-1]
-        fits = self._tv.fits_row(f"{pe} {en}".strip(), f"{pz}{zh_guess}")
-        if self._join_on and caption_flow.is_join(gap, fits=fits, n_in_row=self._row_n):
-            return True, True
+        if self._join_on:                  # 草稿一直没上过屏：此刻按同一条规矩定
+            j = self._join_decide()
+            return j, j
         return False, False
+
+    def _join_decide(self) -> bool:
+        """下一句接不接在最后一行后面（3.11 端点换行）。读一次就清掉端点标记。
+
+        另起一行 ⇐ 上一句之后 Soniox 报过句间端点（老师讲完一口气）或最后一行中文已经写满档位行数。
+        """
+        ep, self._ep_since = self._ep_since, False
+        if not (self._join_on and self._tail_merge and self._log.rows) or ep:
+            return False
+        pe, pz = self._log.rows[-1]
+        return self._tv.zh_lines(pz) < self._tv.lines_tier()
+
+    def endpoint(self, between: bool) -> None:
+        """`main`：Soniox 报了一个端点（`between` = 落在两句之间，不是一句话说到一半）。"""
+        if between:
+            self._ep_since = True
 
     def next_gap(self, gap_s) -> None:
         """`main`：下一句定稿与上一句之间的**音频停顿**（秒；Soniox 词时间戳算的）。"""
@@ -3215,12 +3237,6 @@ class Overlay:
         if self._final_t0 is None:            # 没流式就直接定稿（只英档 / 失败兜底）：此刻判
             since = (now - self._last_final_t) if self._last_final_t is not None else None
             self._merge_live, self._merge_join = self._merge_decide(en, since, zh)
-        if self._merge_live and self._merge_join and self._log.rows:
-            # 连着讲那条是拿草稿译文估的：真译文更长、装不下 → 照旧开新行（绝不截字）
-            pe, pz = self._log.rows[-1]
-            if not self._tv.fits_row(f"{pe} {en}".strip(), f"{pz}{zh}"):
-                self._merge_live = False
-                self.join_undone += 1
         if self._merge_live and self._log.rows:
             # 短尾巴（"Okay?"）/ 连着讲的下一句接在上一行后面 —— 与流式期 `caption_rows` 的显示逐字一致
             pe, pz = self._log.rows[-1]
@@ -6758,13 +6774,24 @@ class Overlay:
             # ⚠️ 不往 `_cur_en` 里拼 —— `stream_en` 是追加的，拼进去会和修正版粘在一起。
             if LAYOUT_D:
                 # D: 草稿并进最底那一行（四种组合 + 草稿桥, 见 caption_flow 文件头）
+                # ⭐ 3.11 端点换行：下一句的草稿**第一次**要上屏（上一句已定稿下屏）→ 此刻定它
+                #    接不接在最后一行后面；定了不改（封口 / 定稿都照这个走 —— 不跳）。
+                _busy = bool(self._streaming or self._cur_zh or self._cur_en or self._cur_en_seed)
+                if (self._draft_join is None and self._join_on and self._draft
+                        and not _busy):
+                    self._draft_join = self._join_decide()
                 r = caption_flow.caption_rows(
                     self._history, cur_en=self._cur_en, cur_zh=self._cur_zh,
                     seed_en=self._cur_en_seed, streaming=self._streaming,
                     draft=self._draft, draft_zh=self._draft_zh_val,
                     draft_over=self._draft_over, now=self._clock(),
                     final_t0=self._final_t0, last_final_t=self._last_final_t,
-                    merge_live=self._merge_live, bridge_zh=self._seed_zh)
+                    merge_live=self._merge_live, bridge_zh=self._seed_zh,
+                    draft_join=bool(self._draft_join))
+                if (self._draft_join is None and _busy and self._draft_over and self._draft
+                        and r.live_kind == "draft" and r.live_en == self._draft):
+                    # 上一句译了太久（`HOLD_MAX_S`），下一句的草稿已经单独占了一行上屏 → 就是新行
+                    self._draft_join = False
                 self._flow_due = r.recheck_at
                 self._tv.set_zh_expected(self._trans_mode == "both")
                 self._tv.set_content(r.items, r.live_en, r.live_zh, r.live_visible,

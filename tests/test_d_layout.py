@@ -124,6 +124,7 @@ class DLayout(unittest.TestCase):
             with self.subTest(tail_merge=on):
                 o = self._overlay()
                 o.set_tail_merge(on)
+                o._join_on = False          # 只测短尾巴这一条（端点换行另有 test_join_rows）
                 o.finalize("Monopoly is rare.", "垄断很少见。")
                 n = len(o._history)
                 self.now[0] += 1.0

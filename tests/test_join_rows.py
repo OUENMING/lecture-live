@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""「连着讲就并成一段」（3.10.1，Owen 10-19）：
+"""「讲完一口气才换行」（3.11 端点换行；Owen 10-19）：
 
     「教授一口气讲两三句，屏上被切成两三个句号，感觉很割裂。」
+    第一版（封口后才并）：「先往上移、移上去之后再把那句并进上一句，还不如原来。」
 
-判据三层：① `caption_flow.is_join` 纯函数；② 真 `Overlay`：停顿短 + 装得下 → 并进上一行，
-停顿长 / 装不下 / 满 `JOIN_MAX` 句 → 照旧开新行；估的时候装得下、真译文装不下 → 定稿时撤回；
-③ 接线：`main` 把停顿（`gap`）先于这句入队，`drain` 有分支、记 `sent_gap`。
+判据四层：① `caption_rows(draft_join=…)` 纯函数；② 真 `Overlay`：没有句间端点、最后一行没写满
+→ 下一句**从草稿第一个词起**就接在最后一行后面；有端点 / 写满 → 另起一行；
+③ ⭐ **不跳**：任何一句从第一次上屏到定稿，所在的行号不变（喂草稿 → 封口 → 流式 → 定稿全过程）；
+④ 接线：`stream_asr` 把 `<end>` 报成端点、判得出在不在两句之间；`main` 转给悬浮窗并记日志。
 """
 import os
 import pathlib
@@ -14,23 +16,56 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import caption_flow as cf  # noqa: E402
+import stream_asr  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+H = [("I would like you to read the Wall Street Journal.", "我希望你们读《华尔街日报》。")]
+
+
+def _rows(**kw):
+    base = dict(cur_en="", cur_zh="", seed_en="", streaming=False, draft="", draft_zh="",
+                draft_over=False, now=10.0, final_t0=None, last_final_t=9.0)
+    base.update(kw)
+    return cf.caption_rows(list(H), **base)
 
 
 class 纯函数(unittest.TestCase):
-    def test_停顿短且装得下才并(self):
-        self.assertTrue(cf.is_join(0.4, fits=True, n_in_row=1))
-        self.assertFalse(cf.is_join(cf.JOIN_GAP_S + 0.1, fits=True, n_in_row=1))
-        self.assertFalse(cf.is_join(0.4, fits=False, n_in_row=1))
-        self.assertFalse(cf.is_join(None, fits=True, n_in_row=1), "不知道停顿就不并")
+    def test_接着讲_草稿第一个词就接在最后一行(self):
+        r = _rows(draft="Sometimes", draft_zh="", draft_join=True)
+        self.assertEqual(len(r.items), 1)
+        self.assertTrue(r.items[-1][0].endswith("Journal. Sometimes"))
+        self.assertFalse(r.live_visible)
 
-    def test_一行最多几句(self):
-        self.assertTrue(cf.is_join(0.2, fits=True, n_in_row=cf.JOIN_MAX - 1))
-        self.assertFalse(cf.is_join(0.2, fits=True, n_in_row=cf.JOIN_MAX))
+    def test_不接_照旧攒词开新行(self):
+        r = _rows(draft="Sometimes", draft_zh="", draft_join=False)
+        self.assertFalse(r.live_visible, "不到 MIN_WORDS 个词不开新行（老规矩不变）")
+        r = _rows(draft="Sometimes disagreeing with it", draft_zh="", draft_join=False)
+        self.assertEqual((len(r.items), r.live_en), (1, "Sometimes disagreeing with it"))
+
+    def test_并进去的定稿_中文先接着显示草稿译文(self):
+        r = _rows(seed_en="Sometimes disagreeing.", streaming=True, cur_zh="有",
+                  merge_live=True, bridge_zh="有时不同意。")
+        self.assertTrue(r.items[-1][1].endswith("。有时不同意。"), "定稿中文刚开始流，不能先清空再长")
+
+
+class 端点判据(unittest.TestCase):
+    def _core(self, *texts):
+        c = stream_asr.StreamCore(clock=lambda: 0.0)
+        toks = [stream_asr.Tok(t, i * 100, i * 100 + 80, True) for i, t in enumerate(texts)]
+        c.feed(toks, [])
+        return c
+
+    def test_句末之后的端点在两句之间(self):
+        self.assertTrue(self._core("So", " that's", " it.").at_boundary())
+        self.assertTrue(stream_asr.StreamCore().at_boundary(), "手上没词 = 两句之间")
+
+    def test_一句话说到一半的端点不算(self):
+        self.assertFalse(self._core("So", " in", " the", " short", " run").at_boundary())
 
 
 class 真窗口(unittest.TestCase):
+    """驱动真 `Overlay`；`set_content` 打桩记下每一帧屏上的行（行号 = 从顶上数的绝对位置）。"""
+
     def _overlay(self):
         try:
             from overlay import Overlay
@@ -42,106 +77,101 @@ class 真窗口(unittest.TestCase):
         o._clock = lambda: self.now[0]
         o._tv._clock = o._clock
         o.set_tail_merge(True)
-        o._join_on = True                            # 默认关；这里测的是开了以后的行为
-        o.finalize("I would like you to read the Wall Street Journal critically.",
-                   "我希望你们能批判性地读《华尔街日报》。")
+        o._join_on = True
+        self.frames = []
+        real = o._tv.set_content
+
+        def spy(items, live_en, live_zh, live_visible, live_kind):
+            rows = [e for e, _z in items] + ([live_en] if live_visible else [])
+            self.frames.append(rows)
+            return real(items, live_en, live_zh, live_visible, live_kind)
+        o._tv.set_content = spy
         return o
 
-    def _say(self, o, en, zh, gap, draft_zh=None):
-        self.now[0] += 1.0
-        o.next_gap(gap)
-        o._draft_zh_val = zh if draft_zh is None else draft_zh   # 封口前手边的草稿译文
+    def _frame(self, o, dt=0.2):
+        self.now[0] += dt
+        o._render()
+
+    def _say(self, o, words, zh, *, ep_before=False):
+        """一句的全过程：（端点）→ 草稿逐词长 → 封口（seed_en）→ 中文流式 → 定稿。"""
+        if ep_before:
+            o.endpoint(True)
+        for k in range(1, len(words) + 1):
+            o.add_draft(" ".join(words[:k]))
+            o._draft_zh_val = zh[: max(1, len(zh) * k // len(words))]
+            self._frame(o)
+        en = " ".join(words)
         o.seed_en(en)
-        o.stream_zh(zh)
-        o._mark_dirty(urgent=True)
+        self._frame(o)
+        for k in range(1, len(zh) + 1, 3):
+            o.stream_zh(zh[:k])
+            self._frame(o, 0.05)
         o.finalize(en, zh)
+        self._frame(o)
+        return en
 
-    def test_连着讲并进上一行(self):
+    @staticmethod
+    def _row_of(frame, piece):
+        hits = [i for i, row in enumerate(frame) if piece in row]
+        return hits[-1] if hits else None
+
+    def _assert_no_jump(self, sentences):
+        for s in sentences:
+            key = " ".join(s.split()[:2])
+            seen = {self._row_of(f, key) for f in self.frames} - {None}
+            self.assertLessEqual(len(seen), 1, f"「{s}」上屏后换过行：{sorted(seen)}")
+
+    def test_没有端点_接着讲并进一行且不跳(self):
         o = self._overlay()
-        n = len(o._history)
-        self._say(o, "Sometimes disagreeing with it.", "有时会不同意。", gap=0.3)
-        self.assertEqual(len(o._history), n, "连着讲的下一句又单开了一行")
-        self.assertTrue(o._history[-1][0].endswith("critically. Sometimes disagreeing with it."))
-        self.assertTrue(o._history[-1][1].endswith("《华尔街日报》。有时会不同意。"))
+        a = self._say(o, "I would like you to read the Journal.".split(), "我希望你们读报。")
+        b = self._say(o, "Sometimes disagreeing with it.".split(), "有时会不同意。")
+        self.assertEqual(len(o._history), 1, "接着讲的下一句又单开了一行")
+        self.assertTrue(o._history[-1][0].endswith("Journal. Sometimes disagreeing with it."))
+        self._assert_no_jump([a, b])
 
-    def test_停顿长就开新行(self):
+    def test_有句间端点_另起一行且不跳(self):
         o = self._overlay()
-        n = len(o._history)
-        self._say(o, "Now, a new topic.", "现在换个话题。", gap=2.5)
-        self.assertEqual(len(o._history), n + 1)
+        a = self._say(o, "I would like you to read the Journal.".split(), "我希望你们读报。")
+        b = self._say(o, "Now a new topic today.".split(), "现在换个话题。", ep_before=True)
+        self.assertEqual(len(o._history), 2)
+        self._assert_no_jump([a, b])
 
-    def test_不知道停顿就开新行(self):
-        """本地识别路径没有词时间戳 → 不发 `gap` → 只有老的短尾巴规则。"""
+    def test_最后一行写满_另起一行且不跳(self):
         o = self._overlay()
-        n = len(o._history)
-        self._say(o, "Sometimes disagreeing with it.", "有时会不同意。", gap=None)
-        self.assertEqual(len(o._history), n + 1)
+        long_zh = "市场在均衡价格处出清，" * 9 + "。"
+        a = self._say(o, ("the market clears at the equilibrium price " * 4).split(), long_zh)
+        b = self._say(o, "Sometimes disagreeing with it.".split(), "有时会不同意。")
+        self.assertEqual(len(o._history), 2)
+        self._assert_no_jump([a, b])
 
-    def test_装不下就开新行_不截字(self):
+    def test_端点只管下一句(self):
         o = self._overlay()
-        n = len(o._history)
-        long_en = " ".join(["the market clears at the equilibrium price"] * 4) + "."
-        long_zh = "市场在均衡价格处出清，" * 8 + "。"
-        self._say(o, long_en, long_zh, gap=0.2)
-        self.assertEqual(len(o._history), n + 1)
-        self.assertEqual(o._history[-1], (long_en, long_zh), "整句要原样留着")
+        self._say(o, "I would like you to read the Journal.".split(), "我希望你们读报。")
+        self._say(o, "Now a new topic today.".split(), "现在换个话题。", ep_before=True)
+        self._say(o, "It is about prices.".split(), "是关于价格的。")
+        self.assertEqual(len(o._history), 2, "端点用过一次就清，第三句接回第二句后面")
 
-    def test_一行最多三句(self):
+    def test_三句连着讲都不跳(self):
         o = self._overlay()
-        n = len(o._history)
-        for k in range(cf.JOIN_MAX + 1):
-            self._say(o, f"Yes {k} ok.", f"对{k}。", gap=0.2)
-        self.assertEqual(len(o._history), n + 1, "满 JOIN_MAX 句后下一句该开新行")
-
-    def test_草稿译文短_真译文长_定稿时撤回(self):
-        o = self._overlay()
-        n = len(o._history)
-        real = "有时候会不同意里面写的东西，" * 6 + "。"
-        self._say(o, "Sometimes disagreeing with it.", real, gap=0.3, draft_zh="有时不同意。")
-        self.assertEqual(len(o._history), n + 1)
-        self.assertEqual(o._history[-1][1], real)
-        self.assertEqual(o.join_undone, 1)
-
-    def test_停顿只用一次(self):
-        o = self._overlay()
-        o.next_gap(0.2)
-        self._say(o, "Sometimes disagreeing.", "有时不同意。", gap=0.2)
-        self.assertIsNone(o._next_gap)
-
-
-class 默认关(unittest.TestCase):
-    def test_默认不并(self):
-        """Owen 10-19：草稿先单占一行、封口后再并进上一行 = 一次跳动，还不如不并。"""
-        self.assertFalse(cf.JOIN_ON)
-        try:
-            from overlay import Overlay
-        except Exception as e:                       # noqa: BLE001
-            self.skipTest(f"AppKit 不可用, 跳过: {type(e).__name__}: {e}")
-        o = Overlay()
-        self.addCleanup(o.close)
-        o.set_tail_merge(True)
-        o.finalize("I would like you to read the Wall Street Journal critically.", "我希望你们能批判性地读《华尔街日报》。")
-        n = len(o._history)
-        o.next_gap(0.3)
-        o._draft_zh_val = "有时会不同意。"
-        o.seed_en("Sometimes disagreeing with it.")
-        o.finalize("Sometimes disagreeing with it.", "有时会不同意。")
-        self.assertEqual(len(o._history), n + 1)
+        ss = [self._say(o, f"Point {k} is short.".split(), f"第{k}点很短。") for k in range(3)]
+        self.assertEqual(len(o._history), 1)
+        self._assert_no_jump(ss)
 
 
 class 接线(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.src = (ROOT / "main.py").read_text(encoding="utf-8")
+        cls.main = (ROOT / "main.py").read_text(encoding="utf-8")
+        cls.sa = (ROOT / "stream_asr.py").read_text(encoding="utf-8")
 
-    def test_停顿先于这句入队(self):
-        i_gap = self.src.index('streamq.put(("gap", _gap))')
-        i_emit = self.src.index("_emit(_s.text, gate.seg_of(_s.end_s)")
-        self.assertLess(i_gap, i_emit, "停顿要在这句的 en_seed 之前到悬浮窗")
+    def test_收线程把端点报出来(self):
+        self.assertIn('self._events.put(("end", None))', self.sa)
+        self.assertIn('elif kind == "end":', self.sa)
 
-    def test_drain_有分支并记日志(self):
-        self.assertIn('elif item[0] == "gap":', self.src)
-        self.assertIn('live.event("sent_gap"', self.src)
+    def test_main_转给悬浮窗并记日志(self):
+        self.assertIn('on_endpoint=lambda b: streamq.put(("ep", bool(b)))', self.main)
+        self.assertIn('elif item[0] == "ep":', self.main)
+        self.assertIn('live.event("endpoint"', self.main)
 
 
 if __name__ == "__main__":

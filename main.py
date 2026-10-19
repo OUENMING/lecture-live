@@ -259,6 +259,12 @@ def _terminal_usable(stream=None) -> bool:
         return False
 
 
+def _open_note(path: str) -> None:
+    """生成完自动打开详细版笔记（macOS `open` → 默认浏览器）。不等它、不抛到收尾里。"""
+    import subprocess
+    subprocess.Popen(["open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def _wrapup_plan(enabled: bool, writes_notes: bool, mode: str) -> str:
     """收尾开头那一步：`"notice"` 不问、直接说没生成笔记 / `"ask"` 问存不存 / `"auto"` 不问照存。
 
@@ -339,7 +345,7 @@ def _wrapup_route(ui, ui_gone: bool, terminal: bool | None = None) -> str:
     return "terminal" if terminal else "ui"
 
 
-def _ask_save_notes(n: int) -> bool:
+def _ask_save_notes(n: int, where: str = "") -> bool:
     """结束时问是否存入 Obsidian。
 
     ⚠️ **超时 / Ctrl+C / 非交互环境一律默认保存** —— 会话文件已实时落盘,
@@ -347,9 +353,10 @@ def _ask_save_notes(n: int) -> bool:
     ⚠️ 2026-09-28 加的超时：原来是个裸 `input()`，作者走开时它**永远不返回** ——
        实测挂过 4 小时 12 分，而且主线程卡在这里 → 界面冻死、退不掉。"""
     ans = _input_timed(
-        f"\n📝 本次共记录 {n} 句双语。存入 Obsidian 吗? [Y/n] ", ASK_TIMEOUT_S)
+        f"\n📝 本次共记录 {n} 句双语。保存笔记吗?"
+        + (f"（存到：{where}）" if where else "") + " [Y/n] ", ASK_TIMEOUT_S)
     if ans is None:
-        echo(f"\n(没等到回应（{ASK_TIMEOUT_S:.0f} 秒）/ 非交互环境 → 默认存入 Obsidian)")
+        echo(f"\n(没等到回应（{ASK_TIMEOUT_S:.0f} 秒）/ 非交互环境 → 默认保存笔记)")
         return True
     return ans.lower() in ("", "y", "yes", "是", "好", "存")
 
@@ -436,7 +443,7 @@ def _session_course_date(sess, text: str) -> tuple:
     return "", ""
 
 
-def rebuild_note_for(session_path, *, vault=None, polish=False, log=None) -> dict:
+def rebuild_note_for(session_path, *, vault=None, polish=False, log=None, desk_home=None) -> dict:
     """给一节课补一份 Obsidian 笔记（**in-process 版**的 `scripts/rebuild_note.py`）。
     返回 `{ok, note, error, msg}`。**永不抛**。
 
@@ -473,16 +480,16 @@ def rebuild_note_for(session_path, *, vault=None, polish=False, log=None) -> dic
         course, date = _session_course_date(sess, text)
         if not course or not date:
             return {**out, "error": "认不出课号 / 日期"}
+        # ⭐ 3.10：没有 Obsidian 库也补 —— 落桌面「烤菠萝的笔记库」（同收尾那条）
         v = vault or _ow.resolve_vault(None)
-        if not v:
-            return {**out, "error": "还没设笔记库（~/.classlive/vault 里也没有）"}
         import keypoints as _kp
         from cloud_translator import load_api_key
         w = _ow.ObsidianWriter(vault=v, course=course, mode="no",
                                api_key=load_api_key(None), model="deepseek-flash",
                                glossary_path=str(pathlib.Path(__file__).with_name(
                                    "glossary.txt")),
-                               polish=polish, keypoints_fn=_kp.pick)
+                               polish=polish, keypoints_fn=_kp.pick, desk=True,
+                               desk_home=desk_home)
         # 接管成「已跑完的一节」——同脚本：不新建会话文件，指到既有那份上。
         w.enabled = True
         w.mode = "yes"
@@ -1190,8 +1197,8 @@ class TerminalUI:
     # ⚠️ 终端这条路**本来就是它的主场**：问话走 `_ask_save_notes`，进度与结果由
     #    `obsidian_writer` 自己 `print` 出来。所以后两个是**有意的空操作** ——
     #    接了反而会让同一行打两遍。它们存在只为让 `main` 不必区分两条 UI。
-    def ask_save(self, n: int):
-        return _ask_save_notes(n)
+    def ask_save(self, n: int, where: str = ""):
+        return _ask_save_notes(n, where)
 
     def wrapup_progress(self, stage, done, total):
         pass
@@ -2020,8 +2027,8 @@ def run(args) -> None:
     if vault:
         remember_vault(vault)
     elif args.save_notes != "no":
-        print("⚠ 没设 Obsidian 库路径(设上 OBSIDIAN_VAULT, 或用 --vault 指定) —— "
-              "这次只写 sessions/, 不写 Obsidian 笔记")
+        print("ℹ️ 没设 Obsidian 库 —— 笔记存到桌面「烤菠萝的笔记库」"
+              "（想同时进 Obsidian：设 OBSIDIAN_VAULT 或用 --vault）")
 
     # 🎯 Jev 的重点句（2026-09-29）—— **收尾那一步**才跑，而且是 fail-soft。
     # ⚠️⚠️ **纯转录档一个模型请求都不发** —— 仓库的硬契约（`DESIGN.md:187`：
@@ -2131,7 +2138,8 @@ def run(args) -> None:
                             keypoints_fn=_keypoints_for,
                             lost_explain_fn=_lost_explain_for,
                             backfill_fn=_backfill_for,
-                            recap_fn=_recap_for)
+                            recap_fn=_recap_for,
+                            desk=True, open_fn=_open_note)
     notes = TermNotes()                                 # 术语通俗解析(查表)
 
     # 测试模式: 采一份完整报告 + 留音频。**任何采集失败都不能影响上课** ——
@@ -4029,13 +4037,13 @@ def run(args) -> None:
                 if _wrapup_route(ui, _ui_gone()) == "terminal":
                     # 窗口已经关了（✕ = 正常停止）或这个 UI 没有卡 —— 走终端那条，
                     # 它对超时 / EOF 一律**默认存**。理由见 `_wrapup_route` 的 docstring。
-                    ans = _ask_save_notes(writer.count)
+                    ans = _ask_save_notes(writer.count, writer.save_where)
                 else:
                     # ⚠️ 返回**只有 `True`/`False`**（2026-09-30 起）——「问话期间关窗」
                     #    不再是第三种答案（那时 `None` → `give_up` → **整节课没笔记**）。
                     #    它现在按「存」走，理由见 `Overlay.ask_save` 的 docstring：
                     #    一个朋友就是这么丢了一节课的笔记。
-                    ans = ui.ask_save(writer.count)
+                    ans = ui.ask_save(writer.count, where=writer.save_where)
                 save = bool(ans)
                 # ⚠️ `give_up` = 用户**显式说了不要**这份笔记（终端答 `n` / 卡上点「不存」）。
                 #    它与「关窗」**不是一回事** —— 关窗现在按存走。

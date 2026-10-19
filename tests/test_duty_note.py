@@ -192,7 +192,7 @@ class RecapLayer(unittest.TestCase):
 
         w = self._writer(boom)
         msg = w.close(ask=lambda n: True)
-        self.assertIn("已存入 Obsidian", msg or "")
+        self.assertIn("笔记已保存", msg or "")
         self.assertFalse(paths.recap_state("ECON10790").exists())
 
 

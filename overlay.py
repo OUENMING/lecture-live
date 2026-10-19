@@ -6404,7 +6404,7 @@ class Overlay:
     # （精修 2026-10-12 起默认不跑；但收尾仍然跑在 worker 上，这组机制照旧需要），
     # 而收尾跑在 AppKit 主线程上 → 界面冻死、退不掉（实测挂过 4 小时 12 分）。
     # 现在窗口全程留着，✕ 就是退出口，问话与进度都在卡上。
-    def ask_save(self, n: int, timeout: float = 20.0):
+    def ask_save(self, n: int, timeout: float = 20.0, where: str = ""):
         """问「这笔笔记存不存」。**自己 pump ** —— 所以这些秒里窗口一直是活的。
 
         ⚠️ **问话必须留在主线程**，不能丢进 worker：实测「worker 线程里做 `input()`
@@ -6443,10 +6443,11 @@ class Overlay:
             # 卡起不来不该让收尾停 —— 退回「默认存」，与终端超时同一条路。
             return True
         ans: dict = {"v": None}
-        card = _open_wrapup_card(self, wrapup_mod, f"本次共记录 {n} 句双语。\n存入 Obsidian 吗？")
+        card = _open_wrapup_card(self, wrapup_mod, f"本次共记录 {n} 句双语。\n保存笔记吗？"
+                                 + (f"\n📂 存到：{where}" if where else ""))
         if card is None:
             return True
-        card["set_buttons"]([("存入", lambda: ans.__setitem__("v", True)),
+        card["set_buttons"]([("保存", lambda: ans.__setitem__("v", True)),
                              ("不存", lambda: ans.__setitem__("v", False))])
 
         deadline = time.monotonic() + timeout
@@ -6458,7 +6459,7 @@ class Overlay:
             left = deadline - time.monotonic()
             if left <= 0:
                 break
-            card["set_hint"](f"{left:.0f} 秒后自动存入")
+            card["set_hint"](f"{left:.0f} 秒后自动保存")
             self.pump()
             time.sleep(0.05)
 

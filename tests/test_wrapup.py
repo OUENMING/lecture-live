@@ -267,7 +267,7 @@ def t_route_after_close():
     class _Shut:
         _closed = True
 
-        def ask_save(self, n, timeout=60.0):
+        def ask_save(self, n, timeout=60.0, where=""):
             return True                  # 与生产同款：关过窗不再等于放弃
     assert main._wrapup_route(_Shut(), True, terminal=True) == "terminal", (
         "有终端时退回终端那条（它默认存）")
@@ -290,7 +290,7 @@ def t_route_after_close_no_terminal():
     class _Shut:
         _closed = True
 
-        def ask_save(self, n, timeout=60.0):
+        def ask_save(self, n, timeout=60.0, where=""):
             return True
     assert main._wrapup_route(_Shut(), True, terminal=False) == "ui", (
         "没有终端时「退回终端」= 退回虚空：卡不出现、精修期间屏上什么都没有")
@@ -431,13 +431,13 @@ def t_ask_save_after_close_shows_card():
         wrapup_mod.build = real
 
     assert got is True, f"关过窗不算放弃，该默认存，拿到 {got!r}"
-    assert any(k == "status" and "存入 Obsidian 吗" in str(v)
+    assert any(k == "status" and "保存笔记吗" in str(v)
                for k, v in events), f"卡上没出现过问句：{events}"
-    assert any(k == "hint" and "自动存入" in str(v)
+    assert any(k == "hint" and "自动保存" in str(v)
                for k, v in events), (
         f"60 秒倒计时一次都没出现 = 循环一次都没跑（那个 85 毫秒的闪帧）：{events}")
     assert any(k == "buttons" and v == 2 for k, v in events), (
-        f"「存入 / 不存」两个按钮必须建出来：{events}")
+        f"「保存 / 不存」两个按钮必须建出来：{events}")
     kinds = [k for k, _ in events]
     assert kinds.index("buttons") < kinds.index("hint"), (
         f"按钮必须先于倒计时出现：{events}")
@@ -450,7 +450,7 @@ def t_route_open():
     class _Open:
         _closed = False
 
-        def ask_save(self, n, timeout=60.0):
+        def ask_save(self, n, timeout=60.0, where=""):
             return True
     assert main._wrapup_route(_Open(), False) == "ui"
 
@@ -1095,7 +1095,7 @@ def t_rebuild_note_for_adapter():
             ow.ObsidianWriter, ow.resolve_vault = saved_w, saved_v
 
 
-@case("⭐ 没设库 -> 不写、给出可读原因（补笔记要有落点）")
+@case("⭐ 没设库 -> 照样补，落桌面「烤菠萝的笔记库/<课号>/」（3.10）")
 def t_rebuild_note_for_no_vault():
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
@@ -1105,10 +1105,12 @@ def t_rebuild_note_for_no_vault():
         saved_v = ow.resolve_vault
         ow.resolve_vault = lambda cli=None, **k: None
         try:
-            r = main.rebuild_note_for(sess)
+            r = main.rebuild_note_for(sess, desk_home=d)
         finally:
             ow.resolve_vault = saved_v
-        assert (not r["ok"]) and "笔记库" in r["error"], r
+        lib = d / "Desktop" / "烤菠萝的笔记库" / "ECON10790"
+        assert r["ok"] and (lib / "2026-10-14_ECON10790.html").exists(), r
+        assert pathlib.Path(r["note"]).parent == lib, r
 
 
 CASES_FAIL: list[str] = []

@@ -153,7 +153,7 @@ class BaseLayerFirst(unittest.TestCase):
         self.assertNotIn(".tmp", " ".join(notes), "临时文件没被换走")
         self.assertIn("English point", text, "复习层没并进最终版")
         self.assertIn("本课主题", text)
-        self.assertIn("复习层: 讲解+例题+自测+校验清单", msg)
+        self.assertIn("讲解+例题+自测+校验清单", msg)
         # 🧩🃏 旁车文件（2026-10-17）：同目录同名，且 Markdown 里要写出它们的名字 ——
         #    写了名字却没写文件（或反过来）都是"假话"。
         sib = seen["siblings"]

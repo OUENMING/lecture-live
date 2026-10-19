@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """收尾卡的渲染探针（不在运行路径上，**改这张卡的观感前先跑它**）。
 
-    ClassLive.app/Contents/MacOS/python scripts/probe_wrapup.py ask|work|done|wide|live|afterclose|novault
+    ClassLive.app/Contents/MacOS/python scripts/probe_wrapup.py ask|work|done|wide|live|afterclose|novault|desk
 
 ⚠️ **必须用 `AppHelper.runEventLoop()`**，不是 `runConsoleEventLoop` ——
    后者只跑 `NSRunLoop.runMode_beforeDate_`，从不排空 NSApp 事件队列，
@@ -161,6 +161,48 @@ if phase == "novault":
         fail.append("没点关闭就算看过了 —— 卡会 3 秒自动走")
     print(f"novault：卡上 = {seen!r}")
     print("novault：" + ("全过 ✅" if not fail else "❌ " + " · ".join(fail)))
+    sys.exit(1 if fail else 0)
+
+if phase == "desk":
+    # ⭐ 桌面笔记库那条收尾（3.10，2026-10-19）：问句卡带「存到哪」→ 结论卡带 📂 路径。
+    #    真 Overlay + 真 writer（会话与「桌面」都在临时目录，不碰真 Desktop / sessions/，不自动打开）。
+    import tempfile
+    import time
+
+    import obsidian_writer as ow
+    from overlay import Overlay
+
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="probe-desk-"))
+    ow.SESSIONS = tmp / "sessions"
+    ow.SESSIONS.mkdir()
+    w = ow.ObsidianWriter(None, "ECON10790", mode="yes", desk=True, desk_home=tmp,
+                          open_fn=lambda _p: None)   # 假装打开过：卡上那句与真收尾一致
+    w.append("Supply goes up.", "供给上升。", raw="Supply goes up.")
+
+    o = Overlay()
+    o.show()
+    time.sleep(1.0)
+    o.pump()
+    print("desk：问句卡该出现了 —— 现在拍第 1 张（6 秒内）", flush=True)
+    got = o.ask_save(412, timeout=6.0, where=w.save_where)
+    msg = w.close().replace(str(tmp), "~")
+    o.wrapup_done(True, msg)
+    print("desk：结论卡该出现了 —— 现在拍第 2 张（10 秒内）", flush=True)
+    end = time.monotonic() + 10.0
+    seen = ""
+    while time.monotonic() < end:
+        o.pump()
+        time.sleep(0.02)
+        card = getattr(o, "_wrapup_card", None)
+        if card is not None:
+            seen = card["_status_lbl"].stringValue()
+    fail = []
+    if got is not True:
+        fail.append(f"ask 该超时返回 True，得到 {got!r}")
+    if "烤菠萝的笔记库" not in seen:
+        fail.append(f"结论卡上没位置：{seen!r}")
+    print(f"desk：卡上 = {seen!r}")
+    print("desk：" + ("全过 ✅" if not fail else "❌ " + " · ".join(fail)))
     sys.exit(1 if fail else 0)
 
 # 一个假的主面板当锚点（真面板是横长条，这里照那个比例）

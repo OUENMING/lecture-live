@@ -78,6 +78,8 @@ SUMMARY_FINISH_S = 25
 #:    结果是「报告传上去了、音频没传」（2026-09-30 实测就是这形状）。
 #: ⚠️ 也不能无限等 —— 收尾那条路上用户已经在等了。
 UPLOAD_JOIN_S = 10.0
+#: ⭐ 3.10.1 诊断包上传的有界等待（秒）。
+EXTRA_JOIN_S = 5.0
 
 # 以这些词收尾(且无句末标点)→ 句子没说完, 不能单独送 LLM 翻译
 DANGLING_TAILS = {
@@ -401,6 +403,30 @@ def start_upload(tester) -> dict:
                               name="cl-upload")
         th.start()
     return {"queued": n, "pending": pending, "thread": th}
+
+
+def start_upload_extras(tester, *, note_path: str = "") -> dict:
+    """收尾最后一步：打诊断包（`testmode.make_extras`）并进这节课的上传条目，后台试一次。
+
+    ⚠️ 与 `start_upload` 同一份队列、同一个 key（`add_files`：条目已传完被移走时会新开一条，
+       远端仍落在同一个前缀下）。有界等 `UPLOAD_JOIN_S`，等不到就留给下次启动。
+    ⚠️ 上传关着（`CLASSLIVE_UPLOAD=0`）→ 包也不打。
+    """
+    import upload as _up
+    if not _up.upload_enabled():
+        return {"queued": 0, "off": True}
+    import testmode as _tm
+    p = _tm.make_extras(tester.stem, note_path=note_path)
+    if not p:
+        return {"queued": 0}
+    q = _shared_upload_queue()
+    n = q.add_files([p], tester.stem.name)
+    th = threading.Thread(target=q.pump, kwargs={"max_items": 1}, daemon=True,
+                          name="cl-upload-extra")
+    th.start()
+    # 诊断包约 100 KB —— 等得比主上传短；没传完就留给下次启动，不拖收尾。
+    th.join(timeout=min(UPLOAD_JOIN_S, EXTRA_JOIN_S))
+    return {"queued": n, "path": p}
 
 
 def retry_pending_uploads(*, reason: str = "") -> int:
@@ -2209,6 +2235,12 @@ def run(args) -> None:
         echo(f"🧪 测试模式: 报告将写到 {tester.stem}.report.json")
         # ⭐ 3.9.7：机器画像（内存 / 芯片 / 草稿引擎）—— 答「有没有低内存用户」靠它。
         tester.note_block("system", system_info(draft.name, draft.reason))
+        # ⭐ 3.10.1：依赖现状 —— 「补依赖没成、整节课静默退回 Groq」那次只能找人要日志。
+        try:
+            import update as _upd
+            tester.note_block("deps", _upd.deps_diag())
+        except Exception:                                 # noqa: BLE001
+            pass
         # ⚠️ 提醒**放在启动时**：收尾才说就晚了，那时整节课已经录完。
         #    （2026-09-30 起测试模式下默认录 —— 见上面 `_rec` 那段。）
         if tester.record_audio:
@@ -2217,8 +2249,8 @@ def run(args) -> None:
             # ⚠️⚠️ **必须说"自动"**（2026-10-07）：原句是「发出去前请自己确认」——
             #    读起来像"你要手动发"，而 `start_upload`(收尾那段) 是**自动排队 + 后台就传**。
             #    披露与事实不一致，等于没披露。想关掉：`CLASSLIVE_UPLOAD=0`。
-            echo("      音频与逐字转录可能含**其他同学的声音** —— 收尾会**自动上传**给作者"
-                 "（Cloudflare R2）。想关掉: `CLASSLIVE_UPLOAD=0`。")
+            echo("      音频与逐字转录可能含**其他同学的声音** —— 收尾会连同笔记与诊断日志"
+                 "**自动上传**给作者（Cloudflare R2）。想关掉: `CLASSLIVE_UPLOAD=0`。")
         else:
             echo("   ℹ️ 只采指标, 不留常规音频（要留: 加 `--record-audio`）。")
         if tester.record_float:
@@ -4404,6 +4436,17 @@ def run(args) -> None:
                     draft_fallback=draft.fallback_reason,
                     **({} if _stream_m is None else {"stream": _stream_m}))
                 echo(f"🎥 现场采集已收尾: {live.path}")
+
+            # ⭐ 3.10.1：诊断包（日志 / 依赖 / 崩溃报告 / 旁路文件 / 笔记）—— 放在现场采集
+            #    收尾**之后**，`live.jsonl` 的 summary 行才在里面。并进同一节课的上传条目。
+            try:
+                if tester is not None and getattr(tester, "stem", None) is not None:
+                    _ux = start_upload_extras(
+                        tester, note_path=str(getattr(writer, "vault_path", "") or ""))
+                    if _ux.get("queued"):
+                        echo("   📤 诊断包（日志 / 依赖 / 现场采集）已排队上传")
+            except Exception as _e:                       # noqa: BLE001
+                echo(f"   ⚠ 诊断包没排上（{type(_e).__name__}）—— 不影响其余")
 
             # ---- 小更新：退出时在**独立进程**里自动拉（详见 _auto_update_on_exit）----
             # 放在 finally 的**最末**：等用户答完"是否保存笔记"、测试报告也打完，

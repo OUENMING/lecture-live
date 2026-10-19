@@ -1412,6 +1412,47 @@ def _child_env() -> dict:
     return env
 
 
+def deps_diag() -> dict:
+    """依赖现状的只读快照（测试报告 `blocks.deps` / 诊断包 `diag.json`）。**永不抛**。
+
+    ⭐ 3.10.1：一位测试者 3.10.0 拉下了代码、补依赖却没成（`websockets` 缺）——
+       整节课静默退回 Groq，而原因只在他本机的 `update.log` 里。这一块让报告自己说出：
+       requirements.txt 里**哪几个包没装上**、`uv` 找不找得到、指纹戳对不对得上。
+    ⚠️ 只看包名、不解析版本约束与环境标记（不想为此引进 `packaging`）——
+       「装了但版本太低」不在这里判，`installed` 里有版本号，读的人自己比。
+    """
+    out: dict = {"python": sys.executable}
+    try:
+        import importlib.metadata as md
+        import re as _re
+        names: list = []
+        for line in (HERE / "requirements.txt").read_text(encoding="utf-8").splitlines():
+            m = _re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._\-]*)", line.split("#", 1)[0])
+            if m and m.group(1) not in names:
+                names.append(m.group(1))
+        got = {}
+        for n in names:
+            try:
+                got[n] = md.version(n)
+            except Exception:                             # noqa: BLE001
+                got[n] = None
+        out["installed"] = got
+        out["missing"] = [n for n, v in got.items() if v is None]
+    except Exception as e:                                # noqa: BLE001
+        out["error"] = f"{type(e).__name__}: {str(e)[:120]}"
+    try:
+        out["uv"] = shutil.which("uv", path=_child_env().get("PATH", "")) or ""
+        import importlib.util
+        out["pip"] = importlib.util.find_spec("pip") is not None
+        cur = _reqs_hash()
+        st = _reqs_stamp()
+        done = st.read_text(encoding="utf-8").strip() if st.exists() else ""
+        out["stamp_ok"] = bool(cur) and cur == done
+    except Exception as e:                                # noqa: BLE001
+        out.setdefault("error", f"{type(e).__name__}: {str(e)[:120]}")
+    return out
+
+
 def _app_stale_reason() -> str:
     """`.app` 该不该重建。**最新就返回空串**，否则返回一句给人看的原因。
 
@@ -1579,8 +1620,10 @@ def run_step(key: str, on_line=None) -> dict:
                  "-r", str(HERE / "requirements.txt")],
                 cwd=HERE, env=_child_env(), capture_output=True, text=True, timeout=900)
             if r.returncode != 0:
+                # ⚠️ 3.10.1：留**最后三行**（原来只留一行）—— uv 的真原因常在倒数第二三行，
+                #    最后一行只是「hint: …」，而 `update.log` 是远程排查的唯一线索。
                 err = (r.stderr or r.stdout or "").strip().splitlines()
-                return {"ok": False, "error": err[-1] if err else "装依赖失败"}
+                return {"ok": False, "error": " | ".join(err[-3:]) if err else "装依赖失败"}
             mark_reqs_installed()
             say("依赖装好了")
             return {"ok": True, "error": ""}

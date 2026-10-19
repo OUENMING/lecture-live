@@ -2883,8 +2883,11 @@ class R18_RepoModulesLiveAtRepoRoot(unittest.TestCase):
         #    找到同名文件，被误判成「仓库模块搬错了地方」。
         def _vendor(p):
             parts = set(p.parts)
+            # ⭐ 3.10.1：仓库根下的 `vendor/`（自带的第三方包，如 websockets）同理 —— 它的
+            #    `typing.py` 不是「仓库模块搬错了地方」。只认根下那一层 `vendor/`。
             return bool(parts & {"__pycache__", ".venv", "_ocr_tmp"}) or \
-                "site-packages" in p.parts or "ClassLive.app" in p.parts
+                "site-packages" in p.parts or "ClassLive.app" in p.parts or \
+                p.relative_to(root).parts[:1] == ("vendor",)
 
         everywhere = {}
         for p in root.rglob("*.py"):

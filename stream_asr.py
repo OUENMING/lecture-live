@@ -646,6 +646,9 @@ class StreamASR:
         self._finished = False
         self._fatal = False
         self._reason = ""
+        #: ⭐ 3.10.1：退回原因是 `error` / `network` 时的**异常类型 + 一句话**（只进报告，
+        #: 不上屏）。那次 `websockets` 没装上，报告里只有一个 `error`，猜了半天。
+        self._detail = ""
         self._retried = False
         self._manual = False                        # `force_local()` 关的（退回原因记 manual）
         self._pending = ""                          # 上次会话的死因（重连时先清、判死时先看）
@@ -681,9 +684,11 @@ class StreamASR:
             n = self._sealed_n
             lat = list(self._seal_lat)
             reason = self._reason
+            detail = self._detail
         st = self._ctx_stats
         return {"engine": ENGINE,
                 "fallback_reason": reason,
+                "fallback_detail": detail,
                 "sealed_n": n,
                 "seal_latency_s": _pcts(lat),
                 "terms_n": int(st.get("terms_n") or 0),
@@ -782,10 +787,19 @@ class StreamASR:
                 reason = "no_passcode"
             else:
                 reason = self._attempts()
-        except Exception:                           # noqa: BLE001
+        except Exception as e:                      # noqa: BLE001
+            self._note_detail(e)
             reason = "error"
         finally:
             self._finish(reason)
+
+    def _note_detail(self, e: BaseException) -> None:
+        """记下最近一次失败的异常（类型 + 前 120 字）。永不抛。"""
+        try:
+            with self._lock:
+                self._detail = f"{type(e).__name__}: {str(e)[:120]}"
+        except Exception:                           # noqa: BLE001
+            pass
 
     def _attempts(self) -> str:
         """最多两次连接（网络类失败重领 key 重连一次）。返回退回原因（`""` = 干净停下）。
@@ -816,16 +830,19 @@ class StreamASR:
             key = self._key(self._passcode)
         except _KeyError as e:
             return _key_reason(e)
-        except Exception:                           # noqa: BLE001
+        except Exception as e:                      # noqa: BLE001
+            self._note_detail(e)
             return "network"
         ws_url = str(key.get("ws_url") or self._ws_url)
 
-        import websockets.sync.client as wsc
+        import ws_compat
+        wsc = ws_compat.client()
         try:
             ws = wsc.connect(ws_url, additional_headers={
                 "Authorization": f"Bearer {key['api_key']}"}, open_timeout=5.0,
                 close_timeout=1.0, ping_interval=20.0, legacy=True)
-        except Exception:                           # noqa: BLE001
+        except Exception as e:                      # noqa: BLE001
+            self._note_detail(e)
             return "network"
 
         # ⚠️ 新会话要**清掉上一次的遗留事件**（尤其收线程死时留下的那条 `("dead")`）——

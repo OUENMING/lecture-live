@@ -346,7 +346,14 @@ class UploadQueue:
                         self._save()
             with self._lock:
                 if ok:
-                    if it in self._items:                     # ⚠️ 另一线程可能已经动过
+                    # ⚠️ 3.10.1：本轮开始后 `add_files` 可能又并进了新文件（诊断包在收尾
+                    #    最后才排）—— 只发了快照里那几个就整条移走，新文件就永远不发了。
+                    #    还有没发的 → 留着（到点即发），不算失败。
+                    sent = set(it.get("sent_files") or [])
+                    rest = [f for f in (it.get("files") or [])
+                            if pathlib.Path(f).is_file()
+                            and _remote_name(pathlib.Path(f)) not in sent]
+                    if it in self._items and not rest:        # ⚠️ 另一线程可能已经动过
                         self._items.remove(it)
                     out["sent"] += 1
                 else:
@@ -394,6 +401,9 @@ def _remote_name(local: pathlib.Path) -> str:
     m = re.search(r"\.(\d{3})\.wav$", name)
     if m:
         return f"audio.{m.group(1)}.wav"
+    # ⭐ 3.10.1 诊断包（`testmode.make_extras`）。
+    if name.endswith(".extra.tar.gz"):
+        return "extra.tar.gz"
     # ⚠️ 崩溃补传的标记文件叫 `<stem>.meta.json` —— 同上，不认它就会漏课号+时间戳。
     if name.endswith(".meta.json"):
         return "meta.json"

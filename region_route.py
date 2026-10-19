@@ -300,7 +300,8 @@ def _ws_probe(ws_url: str, api_key: str, budget_s: float) -> dict:
 
     结束帧协议见文件头（官方原文 + 本机实测）；`budget_s` = 从现在到硬截止还剩多少。
     """
-    import websockets.sync.client as wsc
+    import ws_compat
+    wsc = ws_compat.client()
     out: dict = {"connect_ms": None, "rtt_ms": None, "error": ""}
     t0 = time.monotonic()
     # ⚠️ `close_timeout` 特意小：真机实测服务端在 `finished` 之后**自己先关**（官方示例也这么写），

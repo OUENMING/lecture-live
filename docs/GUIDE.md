@@ -452,6 +452,11 @@ cl test --no-bundle          # 不打包，只写报告
 包内：`README.txt` / `env.json`（系统+依赖版本+模型大小+git 提交）/ `report.json` /
 `session.md` / `audio.*`（若含）。
 
+**诊断包**（3.10.1 起，`<session>.extra.tar.gz`，一节课约 100 KB）：收尾最后再传一份 ——
+程序日志（`~/Library/Logs/ClassLive/*.log` 各取最后 512 KB）、依赖现状（哪些包没装上 / `uv` 在不在）、
+近 14 天 ClassLive 的崩溃报告（最多 5 份）、git 状态、现场采集 `live.jsonl` 等旁路文件、课后笔记。
+上传前抹掉通行码 / key 形状的串。目的：远程排查不用再找你要日志。
+
 **上传**：收尾时**自动**排进队列、后台就传，不等它跑完（有 10 秒上限，超了就留着，下次启动接着传）。
 失败自动退避（1 分钟 → 最多两小时一次），**攒过 14 天丢掉**。队列在 `~/.classlive/`
 里、跟着重启活下来。想整个关掉：`CLASSLIVE_UPLOAD=0`。

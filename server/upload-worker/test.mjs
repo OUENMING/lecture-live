@@ -66,6 +66,12 @@ await worker.fetch(req(P("audio.007.wav"), { bytes: new Uint8Array(5) }), env);
 await worker.fetch(req(P("meta.json"), { bytes: new Uint8Array(5) }), env);
 chk("audio.NNN.wav 与 meta.json 放行",
   puts.length === 2 && puts[0].key.endsWith("/audio.007.wav") && puts[1].key.endsWith("/meta.json"), true);
+// 3.10.1 诊断包放行；别的 .tar.gz 名字不放
+puts = [];
+chk("extra.tar.gz 放行", await status(req(P("extra.tar.gz"), { bytes: new Uint8Array(5) })), 200);
+chk("写进 classlive-test/<hash>/extra.tar.gz",
+  puts.length === 1 && puts[0].key === `classlive-test/${HASH}/extra.tar.gz`, true);
+chk("别的 tar.gz -> 400", await status(req(P("other.tar.gz"), { bytes: new Uint8Array(5) })), 400);
 // R2 写失败 -> 5xx（不能骗客户端 200）
 chk("R2 写失败 -> 502",
   await status(req(P("report.json"), { bytes: new Uint8Array(5) }),

@@ -1,7 +1,7 @@
 # 只开「真 bug」类规则；先不自动修（fix = false），不动代码风格。
 # 想看风格类噪音：uvx ruff check --isolated --select F401,F541,F841
 target-version = "py312"
-extend-exclude = ["docs", ".venv", ".wrangler", "ClassLive.app", "sessions", "glossary", "scripts/node_modules"]
+extend-exclude = ["docs", ".venv", ".wrangler", "ClassLive.app", "sessions", "glossary", "scripts/node_modules", "vendor"]
 fix = false
 
 [lint]

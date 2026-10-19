@@ -572,6 +572,47 @@ def t_transport_fatal_error_code_only_no_retry() -> None:
         wk.close()
 
 
+def t_transport_missing_websockets_records_detail() -> None:
+    """⭐ 3.10.1：本机缺 `websockets`（补依赖没成）→ 退回 `error`，且 `fallback_detail`
+    写出异常类型 —— 那位测试者的报告里只有一个 `error`，原因靠猜。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    import ws_compat
+    gone = ModuleNotFoundError("No module named 'websockets'")
+    with mock.patch.object(ws_compat, "client", side_effect=gone):
+        s = make_asr(wk, son)
+        try:
+            assert wait_until(lambda: not s.alive() and s.reason() != ""), "该退回"
+            assert s.reason() == "error", s.reason()
+            d = s.metrics()["fallback_detail"]
+            assert d.startswith(("ImportError", "ModuleNotFoundError")), d
+        finally:
+            s.stop()
+    son.close()
+    wk.close()
+
+
+def t_vendor_websockets_fallback_connects() -> None:
+    """⭐ 3.10.1：**本机没装 websockets** 时 `ws_compat.client()` 取仓库自带的那份，且真能连上。
+
+    子进程 `-I -S`：不加载 site-packages（= 那台补依赖失败的机器），`sys.path` 只有仓库根。
+    ⚠️ 变异验证：删掉 `ws_compat` 里 `sys.path.insert(0, v)` -> 子进程 ImportError、这条红。
+    """
+    import subprocess
+    son = FakeSoniox()
+    try:
+        code = ("import sys; sys.path.insert(0, %r)\n"
+                "import ws_compat; wsc = ws_compat.client()\n"
+                "import websockets; assert '/vendor/' in websockets.__file__, websockets.__file__\n"
+                "ws = wsc.connect(%r, open_timeout=5); ws.close(); print('OK')\n"
+                % (str(pathlib.Path(__file__).resolve().parent.parent), son.url))
+        r = subprocess.run([sys.executable, "-I", "-S", "-c", code],
+                           capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0 and "OK" in r.stdout, (r.stdout + r.stderr)[-400:]
+    finally:
+        son.close()
+
+
 def t_transport_force_local_manual() -> None:
     """暗号「菠萝丁」：手动关流 → 原因记 manual、文案说清楚、不重连。"""
     son = FakeSoniox()
@@ -886,6 +927,8 @@ def main() -> int:
         ("transport: 正常出两句 + config", t_transport_happy_path),
         ("transport: 致命错误不重连", t_transport_fatal_error_no_retry),
         ("transport: 只有 error_code 的致命错误也不重连", t_transport_fatal_error_code_only_no_retry),
+        ("transport: 缺 websockets → error + 异常类型", t_transport_missing_websockets_records_detail),
+        ("vendor: 没装 websockets 用自带那份、真能连上", t_vendor_websockets_fallback_connects),
         ("transport: 暗号手动退回（manual）", t_transport_force_local_manual),
         ("transport: 余额耗尽 → 不重连直接退回", t_transport_balance_exhausted_falls_back_now),
         ("transport: 断线重连一次", t_transport_reconnect_once),

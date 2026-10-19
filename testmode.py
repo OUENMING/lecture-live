@@ -36,6 +36,8 @@
 ⚠️ **隐私口径（3.10 `device` 块）**：只收硬件 / 环境的**画像** —— 没有序列号、
    主机名、用户名、SSID、IP、MAC；体积扫描只 stat **我们自己的目录**，报告里只出现
    我们自己的目录名（`sessions/` · `~/.classlive/` · `~/models/` 的顶层子项）。
+⚠️ **3.10.1 诊断包（`make_extras`）口径不同**：作者的测试者都授权了全量上传 ——
+   日志、崩溃报告、git 状态里的**绝对路径（含用户名）原样保留**；只抹凭据形状（`redact_secrets`）。
 
 用法
 ----
@@ -393,6 +395,7 @@ BLOCKS = frozenset({
     #          没建流（`stream is None`）时这一块**缺席** = 这节课没用 Soniox。
     "stream",
     "duty",     # 「一些事儿」计数（`main._duty_stats()`：认出 / 记下 / 忽略 / 漏处理）
+    "deps",     # ⭐ 3.10.1：依赖现状（`update.deps_diag()`：缺哪些包 / uv 在不在 / 指纹戳）
     "device",   # ⭐ 3.10：设备/环境画像 —— `{start, end, samples}`（磁盘/供电/机器/
                 #           显示器/音频/网络/语言 + 我们自己的体积）。见 `device_start`
                 #           / `device_cheap` / `device_end`（start 与 end 各一份全量，
@@ -1152,6 +1155,183 @@ def make_bundle(stem: pathlib.Path, report_path: str | os.PathLike,
     return str(out)
 
 
+#: ⭐ 3.10.1 诊断包（`<stem>.extra.tar.gz`）的上限。日志取**尾部**（新的在后）；
+#: 单个文件超过 `EXTRA_FILE_MAX` 就不进包（记进 `diag.json` 的 `skipped`），
+#: 整包压缩后超过 `EXTRA_TOTAL_MAX` 就放弃（Worker 单对象上限 32 MB）。
+LOG_TAIL_BYTES = 512 * 1024
+CRASH_MAX = 5
+CRASH_HEAD_BYTES = 96 * 1024
+CRASH_MAX_AGE_S = 14 * 86400
+EXTRA_FILE_MAX = 16 * 1024 * 1024
+EXTRA_TOTAL_MAX = 24 * 1024 * 1024
+
+#: 本节课旁路文件里**已经单独上传**的那几类（报告 / 转录 / 音频 / 包 / journal），
+#: 诊断包不再带一份。
+_EXTRA_SKIP_TAILS = (".report.json", ".opus", ".wav", ".bundle.zip",
+                     ".extra.tar.gz", ".pending.json", ".recovered.json", ".tmp",
+                     ".scrubbed")
+
+#: 上传前抹掉的**凭据形状**（作者的授权测试者同意全量上传日志，但他们的通行码 /
+#: key 不该跟着日志进桶）。只认形状，不认具体值。
+_SECRET_RES = (
+    re.compile(r"\b(cl-|apikey_|snx_(?:org_)?|gsk_|sk-|hf_)[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]{8,}"),
+    re.compile(r"""(["']?(?:api_key|apikey|token|passcode|password|secret)["']?\s*[:=]\s*["']?)"""
+               r"""[^\s"',}]{8,}""", re.I),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """把文本里像凭据的串换成 `<redacted>`。纯函数、永不抛。"""
+    try:
+        for rx in _SECRET_RES:
+            text = rx.sub(lambda m: m.group(1) + "<redacted>", text)
+    except Exception:                                    # noqa: BLE001
+        pass
+    return text
+
+
+def _tail_text(p: pathlib.Path, n: int) -> str:
+    with open(p, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(max(0, size - n))
+        raw = f.read()
+    return raw.decode("utf-8", "replace")
+
+
+def collect_diag() -> dict:
+    """诊断快照（进诊断包的 `diag.json`）。**永不抛**，每一格各自兜。
+
+    - `deps`：`update.deps_diag()` —— 哪些依赖没装上、`uv` 在不在、指纹戳对不对
+    - `logs`：`~/Library/Logs/ClassLive/*.log` 各取尾部 `LOG_TAIL_BYTES`（抹凭据）
+    - `crashes`：近 14 天 python / ClassLive 的崩溃报告，最新 `CRASH_MAX` 份、各取头部
+    - `git`：分支 / HEAD / 上游 / 工作区脏文件 —— 自动更新为什么没拉的常见原因
+    ⭐ 3.10.1：之前这些都只在用户本机，每次排查都要找人要日志。
+    """
+    out: dict = {"generated": time.strftime("%Y-%m-%d %H:%M:%S")}
+    try:
+        import update
+        out["deps"] = update.deps_diag()
+        logdir = update.STATE_DIR
+    except Exception as e:                               # noqa: BLE001
+        out["deps"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+        logdir = pathlib.Path.home() / "Library" / "Logs" / "ClassLive"
+    logs = {}
+    try:
+        for p in sorted(logdir.glob("*.log")):
+            try:
+                logs[p.name] = redact_secrets(_tail_text(p, LOG_TAIL_BYTES))
+            except Exception as e:                       # noqa: BLE001
+                logs[p.name] = f"<读不出: {type(e).__name__}>"
+    except Exception:                                    # noqa: BLE001
+        pass
+    out["logs"] = logs
+    crashes = []
+    try:
+        d = pathlib.Path.home() / "Library" / "Logs" / "DiagnosticReports"
+        now = time.time()
+        cand = [p for p in d.glob("*.ips")
+                if p.name.lower().startswith(("python", "classlive"))
+                and now - p.stat().st_mtime < CRASH_MAX_AGE_S]
+        cand.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for p in cand[:CRASH_MAX]:
+            try:
+                with open(p, "rb") as f:
+                    head = f.read(CRASH_HEAD_BYTES).decode("utf-8", "replace")
+                crashes.append({"name": p.name, "size": p.stat().st_size,
+                                "mtime": time.strftime("%Y-%m-%d %H:%M:%S",
+                                                       time.localtime(p.stat().st_mtime)),
+                                "head": redact_secrets(head)})
+            except Exception:                            # noqa: BLE001
+                continue
+    except Exception:                                    # noqa: BLE001
+        pass
+    out["crashes"] = crashes
+    git = {}
+    root = pathlib.Path(__file__).resolve().parent
+    for k, cmd in (("branch", ["git", "rev-parse", "--abbrev-ref", "HEAD"]),
+                   ("head", ["git", "rev-parse", "--short", "HEAD"]),
+                   ("upstream", ["git", "rev-parse", "--abbrev-ref", "@{u}"]),
+                   ("status", ["git", "status", "--porcelain"])):
+        try:
+            r = subprocess.run(cmd, cwd=root, capture_output=True, text=True,
+                               timeout=PROBE_TIMEOUT_S)
+            git[k] = (r.stdout.strip() if r.returncode == 0
+                      else f"<rc={r.returncode}> {r.stderr.strip()[:120]}")
+        except Exception as e:                           # noqa: BLE001
+            git[k] = f"<{type(e).__name__}>"
+    if isinstance(git.get("status"), str):
+        git["status"] = git["status"].splitlines()[:40]
+    out["git"] = git
+    return out
+
+
+def make_extras(stem: pathlib.Path, *, note_path: str = "",
+                diag=collect_diag) -> str | None:
+    """把这节课**还没单独上传**的东西打成 `<stem>.extra.tar.gz`。返回路径；失败 None。
+
+    里面：`diag.json`（`collect_diag()`）· `env.json` · 本节课的旁路文件
+    （`live.jsonl` / `atoms.jsonl` / `chapters.jsonl` / `duty.jsonl` / `blocks.npz` / `lost.jsonl` …，
+    按 `<stem>.` 前缀收、去掉前缀）· 课后笔记（`note.md`）。文本文件都过 `redact_secrets`。
+    ⚠️ 只在收尾跑一次（gzip 几 MB 文本，几十毫秒）—— 不加课中开销。
+    ⚠️ 已经单独上传的（报告 / 转录 / 音频）不重复带，见 `_EXTRA_SKIP_TAILS`。
+    """
+    import io
+    import tarfile
+
+    stem = pathlib.Path(stem)
+    out = pathlib.Path(str(stem) + ".extra.tar.gz")
+    skipped: list = []
+
+    def add_bytes(tf, name: str, data: bytes) -> None:
+        ti = tarfile.TarInfo(name)
+        ti.size = len(data)
+        ti.mtime = int(time.time())
+        tf.addfile(ti, io.BytesIO(data))
+
+    try:
+        members: list = []                               # (包内名, 路径)
+        for p in sorted(stem.parent.glob(stem.name + ".*")):
+            if (not p.is_file() or p.name.endswith(_EXTRA_SKIP_TAILS)
+                    or p.name == stem.name + ".md"):         # 转录本身单独传（transcript.md）
+                continue
+            members.append((p.name[len(stem.name) + 1:], p))
+        if note_path and pathlib.Path(note_path).is_file():
+            members.append(("note.md", pathlib.Path(note_path)))
+        try:
+            d = diag()
+        except Exception as e:                           # noqa: BLE001
+            d = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+        tmp = out.with_name(out.name + ".tmp")
+        with tarfile.open(tmp, "w:gz") as tf:
+            for name, p in members:
+                try:
+                    if p.stat().st_size > EXTRA_FILE_MAX:
+                        skipped.append({"name": name, "size": p.stat().st_size})
+                        continue
+                    data = p.read_bytes()
+                    if not name.endswith(".npz"):
+                        data = redact_secrets(data.decode("utf-8", "replace")).encode("utf-8")
+                    add_bytes(tf, name, data)
+                except Exception as e:                   # noqa: BLE001
+                    skipped.append({"name": name, "error": type(e).__name__})
+            d["skipped"] = skipped
+            add_bytes(tf, "diag.json", json.dumps(d, ensure_ascii=False, indent=1).encode("utf-8"))
+            try:
+                env = json.dumps(collect_env(), ensure_ascii=False, indent=1)
+            except Exception as e:                       # noqa: BLE001
+                env = json.dumps({"error": type(e).__name__})
+            add_bytes(tf, "env.json", env.encode("utf-8"))
+        if tmp.stat().st_size > EXTRA_TOTAL_MAX:
+            tmp.unlink(missing_ok=True)
+            return None
+        tmp.replace(out)
+        return str(out)
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
 def journal_read(mk) -> dict:
     """读一份崩溃 journal（那个 `.pending.json`）。**读不出来就当空**（永不抛）。
 
@@ -1194,6 +1374,18 @@ def journal_update(mk, *, steps: dict | None = None, **kv) -> bool:
         return False
 
 
+def _json_fallback(o):
+    """`json.dumps` 的 `default`：numpy 标量转成 Python 数，别的写成 `<类型名>`。"""
+    try:
+        if isinstance(o, np.generic):
+            return o.item()
+    except Exception:                                    # noqa: BLE001
+        pass
+    if isinstance(o, os.PathLike):
+        return os.fspath(o)
+    return f"<{type(o).__name__}>"
+
+
 def _atomic_json(path, payload) -> bool:
     """`payload` 写进 `path`（**tmp→rename**，永不抛）。返回是否写成功。
 
@@ -1204,8 +1396,12 @@ def _atomic_json(path, payload) -> bool:
     try:
         p = pathlib.Path(path)
         tmp = p.with_suffix(p.suffix + ".tmp")           # `<stem>.report.json.tmp`
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
-                       encoding="utf-8")
+        # ⚠️ 3.10.1：`default=_json_fallback` —— 报告里**任何一格**混进不能序列化的值
+        #    （numpy 标量 / 函数 / Path），原来整份 `json.dumps` 抛 → 被下面的 except 吞掉
+        #    → **整份报告静默没写**（探针 10-19 复现：`blocks.energy.screen_hz` 是个函数）。
+        #    现在那一格写成类型名，别的照常落盘。
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1,
+                                  default=_json_fallback), encoding="utf-8")
         tmp.replace(p)
         return True
     except Exception:                                    # noqa: BLE001

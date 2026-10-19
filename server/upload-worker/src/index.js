@@ -11,7 +11,7 @@
 // 详细设计与出处见 ../../docs/PLAN-zero-config-upload.md §5/§6。
 
 const MAX_BYTES = 32 * 1024 * 1024;                 // 单段 Opus 约 1–2 MB；一节课合计约 9 MB
-const NAME_OK = /^\/v1\/objects\/([0-9a-f]{16})\/(report\.json|transcript\.md|meta\.json|audio\.\d{3}\.(opus|wav))$/;
+const NAME_OK = /^\/v1\/objects\/([0-9a-f]{16})\/(report\.json|transcript\.md|meta\.json|extra\.tar\.gz|audio\.\d{3}\.(opus|wav))$/;
 
 /** 边读边计数，一超 `cap` 就 `cancel()` 掉剩余流并返回 `null`（超限）；正常路径返回 `Blob`。
  *  ⚠️ 别换成 `new Response(body).arrayBuffer()` / `request.arrayBuffer()` —— 那两条都是

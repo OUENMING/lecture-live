@@ -858,8 +858,10 @@ class R23_BuildArtifactsMustNotBeTracked(unittest.TestCase):
         _exts = (".png", ".jpg", ".jpeg", ".gif", ".icns", ".ico", ".pdf", ".zip",
                  ".whl", ".bin", ".so", ".dylib", ".a", ".o", ".mp3", ".wav", ".mp4",
                  ".onnx", ".npy", ".tar", ".gz")
+        # `docs/images/` 是 README 的静态截图（2026-10-19 起）：手工拍、不由构建生成，
+        # 所以不会像 assets/icon 那样「一构建就脏」—— 只放这一个目录。
         bad = [p for p in r.stdout.split()
-               if p.lower().endswith(_exts)]
+               if p.lower().endswith(_exts) and not p.startswith("docs/images/")]
         self.assertEqual(bad, [],
                          f"仓库里有被跟踪的二进制/产物：{bad}\n"
                          f"—— 构建/下载出来的东西**一律不入库**（见 R23）")

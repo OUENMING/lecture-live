@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/icon/ClassLive-1024.png" width="112" alt="ClassLive 图标">
+<img src="docs/images/icon.png" width="112" alt="ClassLive 图标">
 
 # ClassLive
 

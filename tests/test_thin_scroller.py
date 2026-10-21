@@ -385,12 +385,53 @@ class 真面板(unittest.TestCase):
     def test_藏着的时候不吃点击(self):
         E, h, td, sc, strip = self._build()
         try:
-            self.assertIsNone(strip.hitTest_(((8.0, 8.0),)),
+            outside = (8.0, 8.0)                         # 滚动视图左边，肯定不在条上
+            inside = (float(sc.bounds().size.width) - panel.THIN_STRIP / 2.0, 8.0)
+            self.assertIsNone(strip.hitTest_(outside),
                               "藏着的滑块还在右边偷走一条 16pt 的命中区")
             self._live_scroll(sc, 60.0)
             _pump(0.05)
-            self.assertIsNotNone(strip.hitTest_(((8.0, 8.0),)),
-                                 "亮着的时候该能点（拖动/翻页都靠它）")
+            self.assertIsNone(strip.hitTest_(outside),
+                              "亮着时框外的点也被吃了 —— 整个滚动视图都被它盖住")
+            self.assertIsNotNone(strip.hitTest_(inside),
+                                 "亮着的时候条上该能点（拖动/翻页都靠它）")
+        finally:
+            E.close_panel()
+            td.cleanup()
+
+    def test_亮着滚动条不吞课程卡按钮(self):
+        """用户症状：扫过右边让滚动条亮起后，点课程卡「开始上课」像没触发。
+
+        根因（2026-10-21）：`ThinScroller.hitTest_` 没按 frame 拒框外的点；
+        AppKit 会对每个子视图调 `hitTest_` 且传父视图坐标，返回 self 就盖住整个滚动区。
+        """
+        E, h, td, sc, strip = self._build()
+        try:
+            # 让第一张卡进入“选中”态，才会建「开始上课」按钮。
+            E.S["picked"] = CODES[0]
+            h.refresh()
+            _pump(0.1)
+            from AppKit import NSButton
+
+            def walk(v):
+                if isinstance(v, NSButton) and v.title() == "开始上课":
+                    return v
+                for c in (v.subviews() or []):
+                    got = walk(c)
+                    if got is not None:
+                        return got
+                return None
+
+            btn = walk(h.window.contentView())
+            self.assertIsNotNone(btn, "前置：没找到「开始上课」按钮")
+            self._live_scroll(sc, 60.0)
+            self.assertGreater(strip._model.alpha(), 0.0, "前置：滚动条没亮")
+            for frac in (0.5, 0.98):
+                pt = btn.convertPoint_toView_(
+                    (btn.frame().size.width * frac, btn.frame().size.height / 2.0), None)
+                hit = h.window.contentView().hitTest_(pt)
+                self.assertIs(hit, btn,
+                              f"滚动条亮着时，按钮 {frac:.0%} 处的点击被 {type(hit).__name__} 吃了")
         finally:
             E.close_panel()
             td.cleanup()

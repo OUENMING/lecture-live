@@ -493,9 +493,26 @@ def _thin_hooks() -> dict:
         _thin_paint(self)
 
     def hit_test(self, _pt):
-        """藏着的滑块**不吃点击**（细滑块不该在右边偷走一条 16pt 的命中区）。"""
+        """藏着的滑块**不吃点击**（细滑块不该在右边偷走一条 16pt 的命中区）。
+
+        ⚠️⚠️ **必须先按 frame 拒掉框外的点**（2026-10-21 实测的严重 bug）：
+        AppKit 把点传给子视图时用的是**父视图坐标**，而且会对每个子视图都调用
+        `hitTest_`；自定义实现如果不自己判边界，返回 `self` 就等于把**整个滚动视图**
+        都盖住了。症状：鼠标扫过右边、细滚动条亮起之后，点课程卡上的「开始上课」
+        任何位置都会被这条 16pt 的带子吃掉 —— 看起来像按钮没触发。
+        判据：`tests/test_thin_scroller.py` 的「亮着时框外不吃点击」/「课程卡按钮」两条。
+        """
         m = getattr(self, "_model", None)
         if m is None:
+            return None
+        # 子视图收到的点坐标在 superview 坐标系（本机 AppKit 实测；不是本地 bounds）。
+        f = self.frame()
+        try:
+            x, y = float(_pt.x), float(_pt.y)
+        except AttributeError:
+            x, y = float(_pt[0]), float(_pt[1])
+        if not (f.origin.x <= x <= f.origin.x + f.size.width
+                and f.origin.y <= y <= f.origin.y + f.size.height):
             return None
         if m.hovered or m.dragging or m.alpha() > 0.02:
             return self

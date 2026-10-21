@@ -49,6 +49,10 @@ import timetable as T
 # ── 尺寸（每条都有出处，见模块头）────────────────────────────────────
 PAD = 20.0             # 面板内边距（实测：System Settings 20pt）
 CARD_PAD = 10.0        # 卡片内边距（实测 10pt）
+#: 右侧给细滚动条留的净空（= `panel.THIN_STRIP` 的命中带宽度）。
+#: ⚠️ 卡片是满宽铺在滚动视图里的；按钮若贴到 `CARD_PAD`，最右 6pt 会压在
+#:    滚动条的 16pt 命中带上（2026-10-21 实测：点「开始上课」被滚动条吃掉）。
+SCROLLER_GUTTER = panel.THIN_STRIP
 NUM_W = 15.0           # 卡号提示的宽度（`1`–`5`，小号低对比）
 DIGIT_SLOTS = 5        # 数字键只到 5（路线图原话 `1`–`5`）
 CARD_GAP = 10.5        # 卡片间距（实测 10.5pt）
@@ -1583,7 +1587,8 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
         view.layer().setBorderColor_(
             NSColor.whiteColor().colorWithAlphaComponent_(SEL_LINE_A).CGColor())
 
-    inner_w = width - 2 * CARD_PAD
+    # 卡片内容右侧让出滚动条命中带；卡片背景仍铺满，视觉上少一条“按钮贴边”。
+    inner_w = width - 2 * CARD_PAD - SCROLLER_GUTTER
 
     # ── 按钮：右对齐，垂直居中在标题那两行旁边（不占自己的一行）──────────
     # ⚠️ 「开始上课」**只在调用方能兑现时才建**。
@@ -1651,7 +1656,7 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
         return b
 
     btn_y = ch - CARD_PAD - (L1_H + L2_H + 2.0) / 2.0 - BTN_H / 2.0
-    x = width - CARD_PAD - acts_w
+    x = width - CARD_PAD - SCROLLER_GUTTER - acts_w
     for title, w, action in acts:
         view.addSubview_(mk(title, x, action, y=btn_y, w=w))
         x += w + 8.0
@@ -1673,8 +1678,9 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
                        inner_w - (_exp_w + 10.0 if _exp_w else 0.0),
                        RESULT_LEAD - 6.0), 11.0, alpha=DIM, truncate=True))
         if _exp_w:
-            view.addSubview_(mk("导出清单", width - CARD_PAD - _exp_w, on_export,
-                                y=y + 3.0, w=_exp_w, h=RESULT_LEAD - 8.0))
+            view.addSubview_(mk("导出清单", width - CARD_PAD - SCROLLER_GUTTER - _exp_w,
+                                on_export, y=y + 3.0, w=_exp_w,
+                                h=RESULT_LEAD - 8.0))
         # 「没跑完」的人话紧跟头部 —— **它是那一屏的头版**（读序上不该被埋在最后）。
         # ⚠️ 与 `card_height` 的项数**成对**，见那里的注。
         if entry.get("aborted"):
@@ -1692,7 +1698,7 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
             #    common, undoable actions, even when they're destructive」；理由是同一条
             #    「A confirmation on an obvious action teaches people to dismiss
             #    confirmations reflexively」）—— 改成**撤销**，见下面那一段。
-            view.addSubview_(mk("删", width - CARD_PAD - 44.0,
+            view.addSubview_(mk("删", width - CARD_PAD - SCROLLER_GUTTER - 44.0,
                                 (lambda t=t: on_delete(t)) if on_delete else (lambda: None),
                                 y=y + 1.0, w=44.0, h=RESULT_ROW - 6.0))
         undo = entry.get("undo")
@@ -1706,7 +1712,7 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
             # ⚠️ **存下来**：删完之后要把它滚进视野 —— 见 `_scroll_undo_into_view`。
             #    只留最近一次删除的撤销（一层），所以一个卡片一个引用就够。
             view._undo_lbl = _undo_lbl
-            view.addSubview_(mk("撤销", width - CARD_PAD - 68.0,
+            view.addSubview_(mk("撤销", width - CARD_PAD - SCROLLER_GUTTER - 68.0,
                                 on_undo or (lambda: None),
                                 y=y + 1.0, w=68.0, h=RESULT_ROW - 6.0))
         # ⚠️ 下面两组**没有按钮**（它们不是可操作项，是要看的信息），所以能用满 `inner_w`。
@@ -1734,7 +1740,7 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
                 NSMakeRect(CARD_PAD, y + 3.0, inner_w - 64.0, 16.0), 11.0, alpha=DIM,
                 truncate=True))
             view.addSubview_(mk("收起" if show_skipped else "展开",
-                                width - CARD_PAD - 56.0,
+                                width - CARD_PAD - SCROLLER_GUTTER - 56.0,
                                 on_toggle_skipped or (lambda: None),
                                 y=y + 1.0, w=56.0, h=RESULT_ROW - 6.0))
         if show_skipped:

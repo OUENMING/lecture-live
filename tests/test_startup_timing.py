@@ -50,6 +50,19 @@ class StartupTiming(unittest.TestCase):
         self.assertNotIn("draft_ready_s", r["fields"])
         self.assertNotIn("就绪", r["line"])
 
+    def test_首屏_hud_用绝对偏移_后续链从它起算(self):
+        """P0 首屏发生在 audio 之前；它单列，且不能让 HUD 时间被重复算进“开麦试探”。"""
+        tp = dict(self.TP, hud=10.1)
+        r = main.startup_timing(tp, 1000.0, None)
+        f = r["fields"]
+        self.assertEqual(f["hud_s"], 0.1)
+        # audio 从 hud 起算：10.3-10.1=0.2；后面几段不变
+        self.assertEqual((f["audio_s"], f["draft_s"], f["translator_s"], f["overlay_s"]),
+                         (0.2, 1.4, 0.2, 0.5))
+        self.assertEqual(f["run_s"], 2.4)
+        self.assertIn("首屏 0.1", r["line"])
+        self.assertIn("字幕出现 2.4 s", r["line"])
+
 
 
 class ClickStamp(unittest.TestCase):

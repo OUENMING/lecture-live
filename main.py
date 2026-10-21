@@ -13,7 +13,7 @@
   => 音频循环永不阻塞; 所有 UI 调用都在主线程(悬浮窗要求)
 """
 from __future__ import annotations
-import argparse, collections, concurrent.futures, datetime, os, pathlib, queue, re, shlex, sys, threading, time
+import argparse, atexit, collections, concurrent.futures, datetime, os, pathlib, queue, re, shlex, sys, threading, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ⭐⭐ 3.10：**半换的树不许开始上课** —— 上次换代码要是被打断（合盖 / 强杀 / 断电），
@@ -54,6 +54,7 @@ import instance_lock
 import models
 import notice
 import power
+import startup_hud
 
 PARTIAL_MAX_S = 10          # 草稿只转写最近 N 秒, 限制单次耗时
 DEVICE_CHECK_S = 2.0        # 实时音源: 多久重探一次「默认输入设备还是不是那个」
@@ -1788,6 +1789,19 @@ def run(args) -> None:
     _tp = {"run": time.monotonic()}
     _t_wall0 = time.time()
     _t_click = _click_wall()
+    # ⏱ 细粒度起步 trace（P4）：现有 `startup_timing` 只到“段”这一级，
+    #    2026-10-21 首跑 13.7 s 的“翻译与术语”段里到底是谁慢，日志看不出来。
+    #    默认零输出；排查时 CLASSLIVE_STARTUP_TRACE=1 跑一次，每步一行。
+    _trace_on = os.environ.get("CLASSLIVE_STARTUP_TRACE") == "1"
+    _trace_last = _tp["run"]
+
+    def _trace(name: str) -> None:
+        nonlocal _trace_last
+        if not _trace_on:
+            return
+        now = time.monotonic()
+        echo(f"⏱ trace {name}: +{now - _trace_last:.3f}s (T+{now - _tp['run']:.3f}s)")
+        _trace_last = now
     # ---- 单实例锁 ----
     # ⚠️ 必须是 run() 的**第一件事**：抢在开音频设备、弹更新卡片、加载模型之前 ——
     #    否则第二个实例已经抢走了麦克风、已经烧了 API 调用，再说"你重复了"就晚了。
@@ -1857,10 +1871,36 @@ def run(args) -> None:
                 "没有麦克风权限的话，ClassLive 录到的会是一片安静 —— "
                 "程序看着在跑，但字幕一直是空的。")
 
+    # ⭐ 2026-10-21 P0：慢初始化之前先给一个看得见的小窗。实测首跑 23.0 s
+    #    （开麦试探 8.5 + 翻译/术语 13.7 + 悬浮窗 0.3）期间屏幕全空；
+    #    先把“正在准备…”显示出来，真悬浮窗建好后关掉。只在 overlay 路径建。
+    #    ⚠️ 放在麦克风权限检查之后：第一次要弹系统授权框时，不该先挂一个 HUD 在弹窗后面。
+    hud = startup_hud.open_if_enabled(args.ui)
+    if hud is not None:
+        # 兜底：开麦/模型失败会先弹模态框再 return，未捕获异常也可能穿出去；
+        # `close()` 幂等，退出时一定把「正在准备…」收掉（OCR 2026-10-21）。
+        atexit.register(hud.close)
+        _tp["hud"] = time.monotonic()
+        _trace("hud")
+        echo(f"⏱ 首屏 {_tp['hud'] - _tp['run']:.2f} s")
+
     # 该不该弹「本次更新」卡片 —— 只判断，不弹。弹的动作交给 UI 层：
     # 悬浮窗模式在 overlay.show() 里用非模态毛玻璃卡片（那时 activation policy
     # 已经是 Accessory，不会带 Python 图标，也不阻塞）；终端模式印字符框。
+    # ⚠️ 放在首屏之后：它最多要跑一次 3 s 超时的 git，不该挡住“先显示”。
     whatsnew = _maybe_notice_update()
+
+    def _hud_note(text: str) -> None:
+        if hud is not None:
+            try:
+                hud.note(text)
+            except Exception:                     # noqa: BLE001
+                pass
+
+    def _close_hud() -> None:
+        if hud is not None:
+            hud.close()
+
     # 音源最先打开: 失败(没麦/没 BlackHole/坏文件)在这里就给友好提示退出,
     # 不再走完 ASR/LLM 加载 + 悬浮窗后才崩出一个裸 traceback。
     # ⚠️ 这次只是**试开**: 验证完立刻关。句柄留着不关的话, mic 的 InputStream
@@ -1871,6 +1911,7 @@ def run(args) -> None:
         # ⚠️ 走 notice.alert 而不是 echo：`.app` 双击启动时没有终端，
         #    echo 出去的东西**没人看得见** —— 用户看到的是"双击了、什么都没发生"。
         #    （错误文本本身是好的，BlackHole 那条甚至带了 brew 安装命令。）
+        _close_hud()
         notice.alert(f"无法打开音源（{args.source}）", f"{e}")
         return
     try:
@@ -1884,6 +1925,8 @@ def run(args) -> None:
     #       复用同一句柄会在别处改动解码路径时把验证悄悄架空。
     probe_src = None
     _tp["audio"] = time.monotonic()
+    _trace("audio_probe")
+    _hud_note(startup_hud.TEXT_AUDIO)
 
     # 草稿/兜底用 Parakeet, **必需**: 缺了在这里说清楚然后退出, 不在课上静默降质。
     # 定稿(云端优先, Whisper 只是可选的本地兜底)在 `trans` 定义之后装配, 见下面 `final_asr.load_final`。
@@ -1891,6 +1934,7 @@ def run(args) -> None:
     try:
         asr = load_asr(args.model_dir, lazy=True)
     except Exception as e:                       # noqa: BLE001
+        _close_hud()
         notice.alert("模型没装好",
                      f"{e}\n\n装好再跑 —— `cl doctor` 会列出缺哪个、该跑哪条命令。")
         return
@@ -1912,6 +1956,7 @@ def run(args) -> None:
         try:
             asr.get()
         except Exception as e:                   # noqa: BLE001
+            _close_hud()
             notice.alert("模型没装好",
                          f"{e}\n\n装好再跑 —— `cl doctor` 会列出缺哪个、该跑哪条命令。")
             return
@@ -1920,6 +1965,8 @@ def run(args) -> None:
     else:
         echo("💤 Parakeet 用到再加载（草稿走 Nemotron；云端失败时第一次兜底多等约 1 秒）")
     _tp["draft"] = time.monotonic()
+    _trace("draft")
+    _hud_note(startup_hud.TEXT_TRANSLATOR)
     echo(f"✍️ 草稿引擎：{draft.name}" + (f"（{draft.reason}）" if draft.reason else ""))
 
     # ⭐⭐ 转录里挖出来的词 → 术语**候选池**（2026-09-29 加）。
@@ -1962,6 +2009,7 @@ def run(args) -> None:
                      f" —— 不加转录词")
         except Exception as _e:                       # noqa: BLE001
             print(f"⚠ 转录词表拿不到（只影响术语召回）：{type(_e).__name__}: {_e}")
+    _trace("corpus")
 
     # ⭐ #4 B2（2026-10-17 作者拍板）：译名表 = `term_notes.json` 的 **basic 档** ∩ 本课术语表
     #    （数据源与闸的全文说明见 `translator.term_zh_map`）。命中的「英文 — 中文」由
@@ -1970,14 +2018,17 @@ def run(args) -> None:
     #    ⚠️ **fail-soft**：拿不到就空表（= 不注入，行为与开关关掉一致）；绝不影响开课。
     #    ⚠️ 两个引擎喂**同一份**表 —— 降级到本地后译名不丢（同 `extra_terms` 那条纪律）。
     term_zh = term_zh_map(args.glossary, args.course)
+    _trace("term_zh")
     if term_zh:
         echo(f"🔤 译名表：{len(term_zh)} 条（命中才注入；CLASSLIVE_TERM_ZH=0 可关）")
 
     local_tr = load_translator(args.llm, args.glossary, args.context,
                                course=args.course, extra_terms=extra_terms,
                                term_zh=term_zh)
+    _trace("local_translator")
     cloud_tr = None
     api_key_val = load_api_key(args.api_key)
+    _trace("api_key")
     if args.engine in ("auto", "cloud"):
         if api_key_val:
             cloud_tr = load_cloud_translator(api_key_val, args.cloud_model,
@@ -1986,6 +2037,7 @@ def run(args) -> None:
                                              extra_terms=extra_terms,
                                              ctx_chunk=args.cloud_context,
                                              term_zh=term_zh)
+            _trace("cloud_translator")
             echo(f"☁ 引擎: {args.engine} (云端 {args.cloud_model})")
         else:
             echo("⚠ 未找到 DeepSeek API key(--api-key / DEEPSEEK_API_KEY / "
@@ -1994,6 +2046,7 @@ def run(args) -> None:
         echo(f"💻 引擎: local ({args.llm})")
 
     _tp["translator"] = time.monotonic()
+    _trace("translator_done")
     running = threading.Event()
     running.set()
     # ✕ / 菜单栏「退出」请求停机。**必须与 running 分开 —— 这是个真 bug 的修法**:
@@ -2025,6 +2078,7 @@ def run(args) -> None:
                                  notify=lambda m, w: notify(m, w, src="转写"))
     echo("☁ 定稿: 云端(Groq → 千问 → 本地 Parakeet)" if _why_off is None
          else f"💻 定稿: 本地({_why_off})")
+    _trace("final_asr")
     # ⚠️ 库路径在这里**收口**（`resolve_vault` 是唯一定义点）：`--vault` → `$OBSIDIAN_VAULT`
     #    → 上次用过的。**没有兜底目录** —— 拿不到就不写 Obsidian，绝不凭空造一个。
     #    拿到了就**记下来**：双击 `.app` 起的那条路没有 shell 环境变量，不记下次还是找不到。
@@ -2294,6 +2348,7 @@ def run(args) -> None:
     if live is not None:
         echo(f"🎥 现场采集: {live.path}")
         live.event("draft_engine", name=draft.name, reason=draft.reason)
+    _trace("writer_tester_live")
 
     # ⚠️ 元素是 `(原始假设, 上屏文本, 缓冲秒数, 转写耗时, 段号, put 时刻, 引擎, 送翻seq)`
     #    （2026-10-09 起；引擎是 R3 加的；seq 是 2026-10-21 加的，0 = 没送翻）：
@@ -2348,6 +2403,8 @@ def run(args) -> None:
                               #    （R28 钉着），而这条数据本来就不需要主线程、不需要 UI。
                               note=(tester.note_event if tester is not None else None))
     translator.warmup()
+    _trace("translator_warmup")
+    _hud_note(startup_hud.TEXT_OVERLAY)
 
     def _reset_net() -> None:
         """休眠唤醒后丢掉两边的 HTTP 连接池(睡前的连接可能半开)。"""
@@ -2595,6 +2652,9 @@ def run(args) -> None:
         except Exception:                                 # noqa: BLE001
             pass
     _tp["overlay"] = time.monotonic()
+    _trace("overlay")
+    if hud is not None:
+        hud.close()
     try:
         _st = startup_timing(_tp, _t_wall0, _t_click)
         echo("⏱ " + _st["line"])
@@ -4617,12 +4677,20 @@ def _click_wall() -> float | None:
 def startup_timing(tp: dict, wall0: float, click_wall: float | None) -> dict:
     """起步各段耗时 → 一行人话 + 事件字段。**纯函数**。
 
-    `tp` 是单调时钟打点（run → audio → draft → translator → overlay，缺的段跳过）；
+    `tp` 是单调时钟打点（run → hud → audio → draft → translator → overlay，缺的段跳过）；
     `click_wall` 是点按的墙钟时刻（`_click_wall` 读面板留的戳），只认 2 分钟内的（面板点了却没起来、隔很久才起的不算）。
     """
     order = [("audio", "开麦试探"), ("draft", "草稿模型"), ("translator", "翻译与术语"),
              ("overlay", "定稿 / 落盘 / 悬浮窗")]
     parts, fields, prev = [], {}, tp["run"]
+    # ⭐ 2026-10-21 P0：首屏 HUD 是**绝对偏移**，不插进 audio→overlay 那条链
+    #    （它发生在最前面，且终端模式没有这个打点）。
+    if "hud" in tp:
+        _hd = tp["hud"] - tp["run"]
+        fields["hud_s"] = round(_hd, 3)
+        parts.append(f"首屏 {_hd:.1f}")
+        # 首屏已单列；后续各段从它起算，否则 HUD 的建窗时间会被重复算进“开麦试探”。
+        prev = tp["hud"]
     for k, label in order:
         if k in tp:
             d = tp[k] - prev

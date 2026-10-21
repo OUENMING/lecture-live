@@ -718,6 +718,23 @@ class Wiring(unittest.TestCase):
         self.assertIn("activateIgnoringOtherApps_", src)
         self.assertLess(src.index("o.show()"), src.index("activateIgnoringOtherApps_"))
 
+    def test_首屏在建麦之前_真悬浮窗起来之后关(self):
+        """⭐ 2026-10-21 P0：首跑 23 s 里屏幕不能是空的。
+
+        顺序判据：`startup_hud.open_if_enabled` 必须在 `load_source` 之前
+        （开麦试探实测 8.5 s），`hud.close()` 必须在真悬浮窗（`_tp['overlay']`）之后。
+        """
+        run = _run_src()
+        self.assertIn("startup_hud.open_if_enabled(args.ui)", run)
+        self.assertLess(run.index("startup_hud.open_if_enabled"),
+                        run.index("load_source(args.source"), "首屏必须在开麦试探之前")
+        self.assertIn("hud.close()", run)
+        self.assertLess(run.index("_tp['overlay'] = time.monotonic()"),
+                        run.rindex("hud.close()"), "首屏要在真悬浮窗出现后才关")
+        self.assertIn("CLASSLIVE_STARTUP_TRACE", run)
+        for text in ("TEXT_AUDIO", "TEXT_TRANSLATOR", "TEXT_OVERLAY"):
+            self.assertIn(f"startup_hud.{text}", run, f"首屏文案没走 startup_hud.{text}")
+
     def test_overlay四个采集钩子都接了(self):
         """⚠️ 变异验证：少接一个（比如漏 `on_view`）→ 对应那条红（那格永远空）。"""
         run = _run_src()

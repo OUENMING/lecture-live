@@ -72,6 +72,12 @@ chk("extra.tar.gz 放行", await status(req(P("extra.tar.gz"), { bytes: new Uint
 chk("写进 classlive-test/<hash>/extra.tar.gz",
   puts.length === 1 && puts[0].key === `classlive-test/${HASH}/extra.tar.gz`, true);
 chk("别的 tar.gz -> 400", await status(req(P("other.tar.gz"), { bytes: new Uint8Array(5) })), 400);
+// 3.10.3 交互版（详细版）HTML 放行；别的 .html 不放
+puts = [];
+chk("note.html 放行", await status(req(P("note.html"), { bytes: new Uint8Array(5) })), 200);
+chk("写进 classlive-test/<hash>/note.html",
+  puts.length === 1 && puts[0].key === `classlive-test/${HASH}/note.html`, true);
+chk("别的 .html -> 400", await status(req(P("other.html"), { bytes: new Uint8Array(5) })), 400);
 // R2 写失败 -> 5xx（不能骗客户端 200）
 chk("R2 写失败 -> 502",
   await status(req(P("report.json"), { bytes: new Uint8Array(5) }),

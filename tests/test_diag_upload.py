@@ -140,6 +140,43 @@ def main() -> int:
               list(d.get("installed", {})).count("mlx-lm") == 1, str(d.get("installed")))
         check("deps_diag：uv / pip / stamp_ok 三格都在",
               all(k in d for k in ("uv", "pip", "stamp_ok")) and d["stamp_ok"] is False, str(d))
+
+        # ---- 6. 交互版（详细版）HTML 也进上传清单（2026-10-21）----
+        # 以前只传 markdown 速览版（包里的 note.md）→ 想看「用户那节课的详细版长什么样」
+        # 只能让用户把文件发过来。
+        import main as _main
+        note_md = tmp / "Lectures" / "CHE002A" / "2026-10-21_CHE002A.md"
+        note_md.parent.mkdir(parents=True, exist_ok=True)
+        note_md.write_text("# 笔记", encoding="utf-8")
+        note_html = note_md.with_suffix(".html")
+        note_html.write_text("<html>交互版</html>", encoding="utf-8")
+        pkg = pathlib.Path(str(stem) + ".extra.tar.gz")
+        pkg.write_bytes(b"PK-ish")
+
+        class _Q:
+            def __init__(self):
+                self.got: list = []
+                self.pending = 0
+
+            def add_files(self, files, stem_name):
+                self.got = list(files)
+                return len(self.got)
+
+            def pump(self, **kw):
+                return {}
+
+        q2 = _Q()
+        with mock.patch.object(_main, "_shared_upload_queue", lambda: q2), \
+                mock.patch.object(testmode, "make_extras", lambda s, note_path="": str(pkg)), \
+                mock.patch.object(upload, "upload_enabled", lambda: True):
+            r = _main.start_upload_extras(type("T", (), {"stem": stem})(), note_path=str(note_md))
+        names = [pathlib.Path(x).name for x in q2.got]
+        check("⭐⭐ 交互版 HTML 进上传清单（与诊断包同一条）",
+              note_html.name in names, f"files={names}")
+        check("⭐⭐ HTML 与 markdown 同 stem（`with_suffix('.html')` 找得到）",
+              note_html.is_file() and str(note_html) in [str(x) for x in q2.got], f"files={q2.got}")
+        check("⭐⭐ 远端名是 note.html（不漏课号+日期）",
+              upload._remote_name(note_html) == "note.html", upload._remote_name(note_html))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

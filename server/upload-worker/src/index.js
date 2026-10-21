@@ -11,7 +11,10 @@
 // 详细设计与出处见 ../../docs/PLAN-zero-config-upload.md §5/§6。
 
 const MAX_BYTES = 32 * 1024 * 1024;                 // 单段 Opus 约 1–2 MB；一节课合计约 9 MB
-const NAME_OK = /^\/v1\/objects\/([0-9a-f]{16})\/(report\.json|transcript\.md|meta\.json|extra\.tar\.gz|audio\.\d{3}\.(opus|wav))$/;
+// ⚠️ `note\.html` = 交互版（详细版）笔记，2026-10-21 加：以前只传 markdown 速览版，
+//    想看「用户那节课的详细版」得让用户把文件发过来。⚠️ 远端名**按类型**给稳定名 ——
+//    本地名带日期+课号（`2026-10-21_CHE002A.html`），原样传就是把课号漏回去。
+const NAME_OK = /^\/v1\/objects\/([0-9a-f]{16})\/(report\.json|transcript\.md|meta\.json|extra\.tar\.gz|note\.html|audio\.\d{3}\.(opus|wav))$/;
 
 /** 边读边计数，一超 `cap` 就 `cancel()` 掉剩余流并返回 `null`（超限）；正常路径返回 `Blob`。
  *  ⚠️ 别换成 `new Response(body).arrayBuffer()` / `request.arrayBuffer()` —— 那两条都是

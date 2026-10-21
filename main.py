@@ -413,6 +413,7 @@ def start_upload_extras(tester, *, note_path: str = "") -> dict:
        远端仍落在同一个前缀下）。有界等 `UPLOAD_JOIN_S`，等不到就留给下次启动。
     ⚠️ 上传关着（`CLASSLIVE_UPLOAD=0`）→ 包也不打。
     """
+    import pathlib as _pl
     import upload as _up
     if not _up.upload_enabled():
         return {"queued": 0, "off": True}
@@ -420,8 +421,17 @@ def start_upload_extras(tester, *, note_path: str = "") -> dict:
     p = _tm.make_extras(tester.stem, note_path=note_path)
     if not p:
         return {"queued": 0}
+    files = [p]
+    # ⭐ 交互版 HTML（详细版笔记：逐句讲解 / 例题 / 变式 / 自测详解 / 交互图）**单独传一份**。
+    #    以前只传了 markdown 速览版（包里的 note.md）→ 想看「用户那节课的详细版长什么样」
+    #    只能让用户把文件发过来。
+    #    ⚠️ HTML 与 markdown **同一个 stem**（`obsidian_writer._write_sidecars` 写的）→ 换后缀就是它。
+    if note_path:
+        html_path = _pl.Path(str(note_path)).with_suffix(".html")
+        if html_path.is_file():
+            files.append(html_path)
     q = _shared_upload_queue()
-    n = q.add_files([p], tester.stem.name)
+    n = q.add_files(files, tester.stem.name)
     th = threading.Thread(target=q.pump, kwargs={"max_items": 1}, daemon=True,
                           name="cl-upload-extra")
     th.start()

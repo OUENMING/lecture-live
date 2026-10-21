@@ -237,11 +237,18 @@ def main() -> int:
                             (f"{_stem}.md", "transcript.md"),
                             (f"{_stem}.001.opus", "audio.001.opus"),
                             (f"{_stem}.002.wav", "audio.002.wav"),
-                            (f"{_stem}.meta.json", "meta.json")):
+                            (f"{_stem}.meta.json", "meta.json"),
+                            ("2026-10-21_CHE002A.html", "note.html")):
             _got = upload._remote_name(pathlib.Path(_src))
             check(f"⭐ `{_want}`", _got == _want, _got)
             check(f"⚠️ `{_want}` 里**不含 stem**（不泄漏课号/时间戳）",
                   _stem not in _got, _got)
+        # ⚠️ 交互版 HTML 的本地名带**日期 + 课号**（`2026-10-21_CHE002A.html`）——
+        #    原样透传就是把一份课表漏回去（和 `.md` 那条同一件事）。
+        _html = upload._remote_name(pathlib.Path("2026-10-21_CHE002A.html"))
+        check("⭐⭐ 交互版 HTML 也按**类型**给稳定名（不漏课号+日期）",
+              _html == "note.html" and "CHE002A" not in _html and "2026-10-21" not in _html,
+              _html)
 
         print("\n--- T15 ⭐⭐ `make_http_send`：HTTPS PUT 的契约 ---")
         # 生产那条路 = PUT 到 Worker（**用户零配置**）。判据用一个本机 HTTP 服务器

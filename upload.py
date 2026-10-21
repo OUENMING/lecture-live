@@ -428,6 +428,10 @@ def _remote_name(local: pathlib.Path) -> str:
     # ⭐ 3.10.1 诊断包（`testmode.make_extras`）。
     if name.endswith(".extra.tar.gz"):
         return "extra.tar.gz"
+    # ⭐ 3.10.3 交互版 HTML（详细版笔记）。⚠️ 本地名带**日期 + 课号**（`2026-10-21_CHE002A.html`）
+    #    —— 原样透传就是把课号+日期漏回去（和 `.md` 那条同一件事），所以按**类型**给稳定名。
+    if name.endswith(".html"):
+        return "note.html"
     # ⚠️ 崩溃补传的标记文件叫 `<stem>.meta.json` —— 同上，不认它就会漏课号+时间戳。
     if name.endswith(".meta.json"):
         return "meta.json"

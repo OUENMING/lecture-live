@@ -2295,17 +2295,18 @@ def run(args) -> None:
         echo(f"🎥 现场采集: {live.path}")
         live.event("draft_engine", name=draft.name, reason=draft.reason)
 
-    # ⚠️ 元素是 `(原始假设, 上屏文本, 缓冲秒数, 转写耗时, 段号, put 时刻, 引擎)`（2026-10-09 起；引擎是 R3 加的）：
+    # ⚠️ 元素是 `(原始假设, 上屏文本, 缓冲秒数, 转写耗时, 段号, put 时刻, 引擎, 送翻seq)`
+    #    （2026-10-09 起；引擎是 R3 加的；seq 是 2026-10-21 加的，0 = 没送翻）：
     #    前缀冻结要拿"模型原始假设"跟"上屏的那份"做**同场 A/B**，两个都得留；
     #    后三个是现场采集要的（缓冲滑没滑 / 转写多久 / 归哪一段）。
-    #    `drafts` 只有这里一个产出方、`drain()` 一个消费方，改形状是局部的；
-    #    `drain()` 侧的 `_pair()` 仍兼容裸字符串与二元组（替身/老测试）。
-    drafts: "queue.Queue[tuple]" = _WakeQueue()        # 7 元组（见上）-> 主线程
+    #    `drafts` 有两个产出方（`partial_worker` / Soniox `stream_draft_worker`）、`drain()` 一个消费方，
+    #    改形状必须两处同改；`_pair()` 只对 8 元组负责（形状不对就当空草稿丢掉）。
+    drafts: "queue.Queue[tuple]" = _WakeQueue()        # 8 元组（见上）-> 主线程
     drafts_zh: "queue.Queue" = _WakeQueue()         # 草稿译文 (seq, seg, zh) -> 主线程
     streamq: "queue.Queue[tuple]" = _WakeQueue()    # ("zh"/"en"/"final"/"terms"/"notice"/"answer"/"answer_done"/"summary"/"hint"/"replace") -> 主线程
     # ⚠️ 加新 tag **必须**在 `drain()` 加同分支 —— 它是唯一的分发点，漏改即静默丢弃。
     #    2026-09-30 起 `drain()` 末尾有一条**兜底告警**（未识别的 tag 会 echo 一行）。
-    draft_view = DraftView()                            # 草稿译文的过期判据(只在主线程 drain() 里用)
+    draft_view = DraftView()                            # 草稿译文的过期判据（主线程清/判；草稿线程只取 generation/记 seq）
     draft_stats = draft_view.stats                      # 丢弃/让路/出错计数(收尾打印)
     properq: "queue.Queue" = queue.Queue()              # 待查专有名词
     answerq: "queue.Queue[str]" = queue.Queue()         # 待讲解的问题(Phase 2)
@@ -2844,11 +2845,15 @@ def run(args) -> None:
                 if t and not (_end[1] == last_gen and t == prev_text):
                     _eseg = _end[1]
                     prev_text = t
-                    drafts.put((t, stab.update(t) if stab is not None else t, len(_end[0]) / SR,
-                                time.monotonic() - _t_end, _eseg, _t_end, draft.name))
+                    _dseq = 0
                     if trans["mode"] == "both":
                         draft_seq += 1
-                        draft_tr.submit(draft_seq, _eseg, strip_dangling(t))
+                        _dseq = draft_seq
+                    drafts.put((t, stab.update(t) if stab is not None else t, len(_end[0]) / SR,
+                                time.monotonic() - _t_end, _eseg, _t_end, draft.name, _dseq))
+                    if _dseq:
+                        draft_tr.submit(_dseq, _eseg, strip_dangling(t),
+                                        gen=draft_view.generation())
             if buf is None or len(buf) == 0:
                 continue
             _t_put = latest.taken_t                  # 这份缓冲被交出来的时刻（量 `lag_s` 用）
@@ -2895,7 +2900,6 @@ def run(args) -> None:
                 #     离线量具就是栽在这上面，见 scripts/stream_eval.py 的 `sliding`）；
                 #    `seg` = 本段草稿所属的段号（`seg_gen`，见上面那一段说明）；
                 #    `_t_put` = 缓冲交出的时刻 → `drain()` 用它算上屏延迟 `lag_s`。
-                drafts.put((t, _shown, len(buf) / SR, _dt_draft, _seg, _t_put, _eng))
                 # 新句子开始 -> 重置草稿节流。**必须重置**: last_len 是**上一句**
                 # 收尾时的词数, 新句若更短(如 20 词 vs 30 词), "新增 ≥6 词"永远
                 # 不成立 -> 整句拿不到即时中文("首字中文 ~3s"特性静默失效)。
@@ -2920,12 +2924,16 @@ def run(args) -> None:
                     last_len=last_len, text=t, prev_text=prev_text,
                     sent_text=last_sent)
                 prev_text = t
+                _dseq = 0
                 if _ok:
                     last_tr, last_len, last_sent = now, _nw, t
                     # (seq, seg, text): seg 与 drafts 元组里那个段号同源 → drain() 据此丢过期译文
                     draft_seq += 1
-                    draft_tr.submit(draft_seq, _seg,
-                                    strip_dangling(t))   # 送翻前削掉结尾悬挂词（上屏/记录仍用原文）
+                    _dseq = draft_seq
+                drafts.put((t, _shown, len(buf) / SR, _dt_draft, _seg, _t_put, _eng, _dseq))
+                if _dseq:
+                    draft_tr.submit(_dseq, _seg, strip_dangling(t),
+                                    gen=draft_view.generation())   # 送翻前削掉结尾悬挂词（上屏/记录仍用原文）
             except Exception as e:                       # noqa: BLE001
                 echo(f"⚠ 草稿转写失败: {e}")
 
@@ -3224,7 +3232,7 @@ def run(args) -> None:
     # ---- Soniox 草稿线程（本地那半边由 `partial_worker` 管，它不参与）----
     # ⚠️ `partial_worker` 阻塞在 `latest.take()`，Soniox 模式下**没有东西进 `latest`**
     #    （两道闸关着）—— 所以另起一条轻线程按 0.15 s 轮询 `draft_text()`，变了才入队。
-    # 元组形状与本地路径**逐字一致**（7 元组），引擎名 `soniox`；
+    # 元组形状与本地路径**逐字一致**（8 元组，末项送翻 seq），引擎名 `soniox`；
     # `buf_s` = 本段已有多少秒音频（`gate.buf_s()`，与本地 `len(buf)/SR` 同口径）。
     # ⚠️ 窗口不可见时**不放草稿**（与本地同规矩）；不记 `draft_skipped` —— 那个数记的是
     #    "跳过的识别份数"，轮询次数没有对应关系，记进去只会把指标弄脏。
@@ -3253,7 +3261,6 @@ def run(args) -> None:
                     continue
                 last_t = t
                 _now = time.monotonic()
-                drafts.put((t, t, gate.buf_s(), 0.0, _seg, _now, stream.ENGINE))
                 # 草稿译文照旧（DraftTranslator 独立线程）；节流判据与本地路径同一份
                 # `draft_policy`（只是这条路上没有草稿模型，`compute_s` 恒 0）。
                 if trans["mode"] == "both":
@@ -3266,7 +3273,15 @@ def run(args) -> None:
                     if _ok:
                         last_tr, last_len, last_sent = _now, _nw, t
                         seq += 1
-                        draft_tr.submit(seq, _seg, strip_dangling(t))
+                        _dseq = seq
+                    else:
+                        _dseq = 0
+                else:
+                    _dseq = 0
+                drafts.put((t, t, gate.buf_s(), 0.0, _seg, _now, stream.ENGINE, _dseq))
+                if _dseq:
+                    draft_tr.submit(_dseq, _seg, strip_dangling(t),
+                                    gen=draft_view.generation())
             except Exception as e:                             # noqa: BLE001
                 echo(f"⚠ 实时草稿失败: {e}")
 
@@ -3623,30 +3638,35 @@ def run(args) -> None:
                      name="live-summary").start()
 
     def _pair(item) -> tuple:
-        """`drafts` 队列的元素 → `(raw, shown, buf_s, compute_s, seg, t_put, engine)`。
+        """`drafts` 队列的元素 → `(raw, shown, buf_s, compute_s, seg, t_put, engine, seq)`。
 
-        ⚠️ 产出方只有 `partial_worker` 一处（永远 7 元组），所以**按形状直接拆** ——
-           不再逐层猜"是不是裸字符串/二元组"（那种兼容梯子没有调用方，还会把
-           `buf_s` 静默猜成 0.0，而 `buf_s` 猜错 = 静默改掉回改率的口径）。
+        ⚠️ 产出方有 `partial_worker` 和 Soniox `stream_draft_worker` 两处（永远 8 元组）。
+           `seq` = 这份草稿送翻的序号；0 = 没送翻。主线程拿它在 `on_draft()` **之后**
+           重记代次 —— 草稿线程先按旧代次送翻，主线程清中文时才知道换句（见 OCR 2026-10-21）。
         ⚠️ 但**必须全函数不抛**：它在 `drain()` 里，而 `drain()` 没有 try/except ——
            这里抛一次 = 打死主循环 = 整节课的字幕停摆。形状不对就当空草稿丢掉。
         """
         try:
             return (item[0], item[1], float(item[2]), float(item[3]), int(item[4]), float(item[5]),
-                    str(item[6]))
+                    str(item[6]), int(item[7]) if len(item) > 7 else 0)
         except Exception:                                  # noqa: BLE001
-            return ("", "", 0.0, 0.0, 0, 0.0, "")          # ⚠️ 与上一行同形（7 项），否则 drain 拆包就抛
+            return ("", "", 0.0, 0.0, 0, 0.0, "", 0)      # ⚠️ 与上一行同形（8 项），否则 drain 拆包就抛
 
     def drain():
         while True:
             try:
-                _raw, _shown, _buf_s, _cpt, _seg, _t_put, _eng = _pair(drafts.get_nowait())
+                _raw, _shown, _buf_s, _cpt, _seg, _t_put, _eng, _dseq = _pair(drafts.get_nowait())
             except queue.Empty:
                 break
             if draft_view.stale_en(_seg):            # 晚到的旧段草稿（段尾收尾那份）：不许盖回去
                 continue
-            if draft_view.on_draft(_seg, _shown):    # 新一段的第一份英文草稿: 清掉上一段残留的中文草稿（同一句接着长的不清）
+            _clear = draft_view.on_draft(_seg, _shown)   # 新句第一份草稿：清掉上一句残留中文
+            if _clear:
                 ui.draft_zh("")
+            # ⚠️ 草稿线程送翻时读的是**清之前**的代次；这里在清之后重记，否则新句
+            #    第一份译文会被当成旧代次丢掉（OCR 2026-10-21 high）。
+            if _dseq:
+                draft_view.note_submitted(_dseq, draft_view.generation())
             if live is not None:
                 # 吞异常，不会打死主循环。`lag_s` 在**这里**算：drain 就是上屏那一刻
                 live.draft(_raw, _shown, seg=_seg, buf_s=_buf_s, compute_s=_cpt,

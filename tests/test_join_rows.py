@@ -36,9 +36,11 @@ class 纯函数(unittest.TestCase):
         self.assertTrue(r.items[-1][0].endswith("Journal. Sometimes"))
         self.assertFalse(r.live_visible)
 
-    def test_不接_照旧攒词开新行(self):
+    def test_不接_首词就开新行(self):
+        """2026-10-21：新句边界一到，第一份草稿就占新行；不再等 3 个词。"""
         r = _rows(draft="Sometimes", draft_zh="", draft_join=False)
-        self.assertFalse(r.live_visible, "不到 MIN_WORDS 个词不开新行（老规矩不变）")
+        self.assertTrue(r.live_visible, "首词就该占新行")
+        self.assertEqual((len(r.items), r.live_en), (1, "Sometimes"))
         r = _rows(draft="Sometimes disagreeing with it", draft_zh="", draft_join=False)
         self.assertEqual((len(r.items), r.live_en), (1, "Sometimes disagreeing with it"))
 
@@ -135,6 +137,14 @@ class 真窗口(unittest.TestCase):
         b = self._say(o, "Now a new topic today.".split(), "现在换个话题。", ep_before=True)
         self.assertEqual(len(o._history), 2)
         self._assert_no_jump([a, b])
+
+    def test_短口头禅_并进上一行(self):
+        """`Okay?` 这类 1 词短句即使有端点也并进上一行，不单独占行。"""
+        o = self._overlay()
+        self._say(o, "I would like you to read the Journal.".split(), "我希望你们读报。")
+        self._say(o, "Okay?".split(), "好的。", ep_before=True)
+        self.assertEqual(len(o._history), 1)
+        self.assertTrue(o._history[-1][0].endswith("Journal. Okay?"))
 
     def test_最后一行写满_另起一行且不跳(self):
         o = self._overlay()

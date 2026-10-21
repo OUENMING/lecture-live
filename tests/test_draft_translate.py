@@ -1,4 +1,4 @@
-import os, queue, sys, unittest
+import os, pathlib, queue, sys, unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import draft_translate as D
@@ -22,10 +22,80 @@ class ViewClear(unittest.TestCase):
         self.assertEqual(v.cur_seg, 2, "段号照样前进（旧段译文照样过期）")
         self.assertTrue(v.on_draft(3, " What we're going to do"), "真换了一句 → 照清")
 
+    def test_continues_uses_word_boundary(self):
+        self.assertFalse(D.continues("I", "Is that right?"))
+        self.assertFalse(D.continues("the", "there is a market"))
+        self.assertTrue(D.continues("I", "I think so"))
+        self.assertTrue(D.continues("So it should be", "So, it should be"))
+        self.assertTrue(D.continues("Okay?", "Okay? so"))
+        self.assertFalse(D.continues("So it should be open now.", "Now hold"))
+
+    def test_same_segment_punctuation_insertion_does_not_clear(self):
+        v = D.DraftView()
+        self.assertTrue(v.on_draft(70, "So it should be"))
+        self.assertFalse(v.on_draft(70, "So, it should be"))
+
+    def test_empty_draft_after_final_clears_once(self):
+        v = D.DraftView()
+        v.on_final(2)
+        g0 = v.generation()
+        self.assertTrue(v.on_draft(3))          # 空草稿 + 新段：清一次
+        g1 = v.generation()
+        self.assertEqual(g1, g0 + 1)
+        self.assertFalse(v.on_draft(3, "New sentence"))  # 同一份新句，不再清/自增
+        self.assertEqual(v.generation(), g1)
+
+    def test_same_segment_new_sentence_clears(self):
+        """同 seg 换句也要清（10-20：seg 70 的「所以它显」挂到 Okay?/Now hold 底下）。"""
+        v = D.DraftView()
+        self.assertTrue(v.on_draft(70, "So it should be open now."))
+        self.assertTrue(v.on_draft(70, "Okay?"))
+        # 短句继续长：不算换句，别反复清
+        self.assertFalse(v.on_draft(70, "Okay? so"))
+        self.assertTrue(v.on_draft(70, "Now hold on."))
+
+    def test_old_generation_translation_is_rejected(self):
+        v = D.DraftView()
+        v.on_draft(70, "So it should be open now.")
+        v.note_submitted(1, v.generation())
+        v.on_draft(70, "Now hold on.")              # 新句，gen +1
+        v.note_submitted(2, v.generation())
+        self.assertFalse(v.accept(1, 70), "上一代译文不许再上屏")
+        self.assertTrue(v.accept(2, 70))
+
+    def test_main_renotes_after_clear_keeps_first_translation(self):
+        """生产顺序：草稿线程先按旧代次送翻 -> 主线程 on_draft 清中文 -> 主线程重记。
+
+        OCR 2026-10-21 high：不在清之后再记一次，新句第一份译文会被当成旧代次丢掉，
+        中文要等下一个节流周期（~2.5 s）—— 正好复现要修的「空一拍」。
+        """
+        v = D.DraftView()
+        v.on_draft(70, "So it should be open now.")
+        v.note_submitted(1, v.generation())        # 草稿线程：清之前读的旧代次
+        v.on_draft(70, "Now hold on.")            # 主线程：新句 -> gen +1
+        v.note_submitted(1, v.generation())        # 主线程：按新代次重记同一 seq
+        self.assertTrue(v.accept(1, 70), "新句第一份译文不该被代次判据丢掉")
+
     def test_older_segment_draft_never_clears(self):
         v = D.DraftView()
         v.on_draft(5)
         self.assertFalse(v.on_draft(4))
+
+    def test_same_seg_final_does_not_force_next_draft_clear(self):
+        """s == cur_seg 时 final 可能属于同 seg 的上一句，不能给下一句草稿硬置清。"""
+        v = D.DraftView()
+        v.on_draft(70, "So it should be open now.")
+        v.on_final(70)
+        g = v.generation()
+        # 同一份草稿接着长（同一句的尾巴）：不应被 _clear_next 强行清/自增
+        self.assertFalse(v.on_draft(70, "So it should be open now. Okay?"))
+        self.assertEqual(v.generation(), g)
+
+    def test_newer_seg_final_sets_clear_next(self):
+        v = D.DraftView()
+        v.on_draft(70, "So it should be open now.")
+        v.on_final(71)
+        self.assertTrue(v.on_draft(71, "So it should be open now."))
 
     def test_final_of_current_segment_clears_draft(self):
         v = D.DraftView()
@@ -51,6 +121,20 @@ class ViewClear(unittest.TestCase):
         v.on_final(5)
         v.on_final(2)
         self.assertEqual(v.fin_seg, 5)
+
+
+class MainWiring(unittest.TestCase):
+    def test_main_notes_after_on_draft(self):
+        """⭐ 生产顺序：草稿线程先送翻，主线程 `on_draft()` 清完后必须按新代次重记 seq。
+
+        OCR 2026-10-21 high：只在草稿线程记（清之前）→ 新句第一份译文被代次判据丢掉。
+        """
+        src = (pathlib.Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+        a = src.index("_clear = draft_view.on_draft")
+        b = src.index("draft_view.note_submitted(_dseq", a)
+        self.assertGreater(b, a, "note_submitted 必须在 on_draft 之后")
+        self.assertEqual(src.count("draft_view.note_submitted("), 1,
+                         "只留主线程这一处；草稿线程先记会把新句第一份译文标成旧代次")
 
 
 class ViewStaleEn(unittest.TestCase):
@@ -181,7 +265,7 @@ class SubmitKeepsNewest(unittest.TestCase):
         t._q = Q()
         t.submit(7, 3, "最新的那句")
         # 改坏：把「清旧 / 入新」合回一个 try -> landed 为空 -> 这条红。
-        self.assertEqual(landed, [(7, 3, "最新的那句")],
+        self.assertEqual(landed, [(7, 3, "最新的那句", None)],
                          "⚠️ 新草稿被吞了 —— 与「只留最新」的意图正好相反")
 
 
@@ -309,6 +393,15 @@ class SealedLock(unittest.TestCase):
         self.go(1, 0, "A b c. D e")
         calls, _ = self.go(2, 1, "D e f")
         self.assertEqual(calls, [("D e f", ["prev final"])])
+
+    def test_new_generation_resets_lock(self):
+        """同 seg 但句子代次变了：封口锁必须作废（否则旧中文前缀被拼进新句）。"""
+        self.t.submit(1, 0, "A b c. D e", gen=1)
+        self.t.step(0)
+        self.calls.clear()
+        self.t.submit(2, 0, "A b c. D e f", gen=2)
+        self.t.step(0)
+        self.assertIn(("A b c.", ["prev final"]), self.calls)
 
     def test_failed_seal_translation_does_not_lock(self):
         self.bad.add("A b c.")

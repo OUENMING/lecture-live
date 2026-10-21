@@ -3239,16 +3239,26 @@ class Overlay:
         """下一句接不接在最后一行后面（3.11 端点换行）。读一次就清掉端点标记。
 
         另起一行 ⇐ 上一句之后 Soniox 报过句间端点（老师讲完一口气）或最后一行中文已经写满档位行数。
+        ⭐ 2026-10-21：`Okay?` / `So` 这类口头禅开头，即使有端点也先并进上一行，
+        避免 1 词草稿新起一行再被 final 并回去；内容词开头（如 `Now a new topic...`）
+        仍按端点/写满另起一行。
         """
         ep, self._ep_since = self._ep_since, False
-        if not (self._join_on and self._tail_merge and self._log.rows) or ep:
+        if not (self._join_on and self._tail_merge and self._log.rows):
             return False
         pe, pz = self._log.rows[-1]
         # 没有中文（只英·校 / 纯转录 / 译文失败）：英文提成大字，按**英文大字**的行数判写满。
         # ⚠️ 不能拿 `zh_lines("")`（= 0 → 永远没满 → 一整段并成一行被截，10-19 只英档实测）；
         #    也不能干脆不接（每句都推一次上滚，语速快时一秒多滚一次，Owen「有点跳」）。
         n = self._tv.zh_lines(pz) if pz else self._tv.big_lines(pe)
-        return n < self._tv.lines_tier()
+        if n >= self._tv.lines_tier():
+            return False
+        if caption_flow.is_tail_start(self._draft):
+            since = ((self._clock() - self._last_final_t)
+                     if self._last_final_t is not None else None)
+            if since is None or since <= caption_flow.GAP_S:
+                return True
+        return not ep
 
     def endpoint(self, between: bool) -> None:
         """`main`：Soniox 报了一个端点（`between` = 落在两句之间，不是一句话说到一半）。"""

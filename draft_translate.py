@@ -3,8 +3,8 @@
 R1 方案 C/5b (docs/PLAN-r1-translation-gap.md §C)。原来散在 `main.run()` 的闭包里,
 无法脱离整条流水线测试; 这里收成两个依赖全注入的类:
 
-  DraftView        纯状态机(无线程无 I/O)。只在主线程 `drain()` 里用:
-                   谁该清中文草稿槽、哪条译文已过期。
+  DraftView        状态机(无线程无 I/O)。主线程 `drain()` 用它清中文/判过期；
+                   草稿线程只调 `generation()` / `note_submitted()` 记送翻代次。
   DraftTranslator  只留最新的队列 + 工作线程循环。翻译/输出/让路判据都是注入的函数。
 
 ⚠️ 过期判据用段号 `fin_seg`(已定稿上屏的最大段号), 不是 `final_gen`:
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import queue
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 _SEALED = re.compile(r"[.?!](?=\s+\S)")
@@ -36,9 +37,29 @@ def sealed_prefix(text: str) -> str:
     return text[:m.end()] if m else ""
 
 
+def _norm_for_compare(text: str) -> str:
+    """比较草稿连续性用：小写、标点变空格、压空白。
+
+    ⚠️ 同段 ASR 常插入/改动逗号（"So it should be" → "So, it should be"）；
+        不归一化会被当成换句，清中文 + 代次自增，造成 0.85s 级空拍。
+    """
+    return " ".join(re.sub(r"[^\w\s]", " ", (text or "").lower(), flags=re.UNICODE).split())
+
+
 def continues(prev: str, new: str, head: int = 24) -> bool:
-    """`new` 是不是 `prev` 那句接着长（开头 `head` 个字符一致；`prev` 太短不算）。"""
-    p, n = " ".join(prev.split()), " ".join(new.split())
+    """`new` 是不是 `prev` 那句接着长（前缀/同句修正；`prev` 太短不算）。
+
+    ⚠️ 2026-10-21：先认**词边界前缀**。短句（"Okay?" → "Okay? so"）以前因
+    `len(p) < 8` 直接判 false，同段一长就又清一次中文；现在这类同句延伸保留。
+    ⚠️ 只做字符前缀会把 `I` / `Is that...`、`the` / `there...` 误判成同句
+    （OCR 2026-10-21）；必须带词边界，否则旧中文又挂到新句底下。
+    仍用 `head=24` 兼容 ASR 对开头几个词的改写。
+    """
+    p, n = _norm_for_compare(prev), _norm_for_compare(new)
+    if not p or not n:
+        return False
+    if n == p or n.startswith(p + " ") or p.startswith(n + " "):
+        return True
     if len(p) < 8:
         return False
     k = min(len(p), head)
@@ -52,21 +73,69 @@ class DraftView:
         self.seq = -1              # 已显示的最大送翻序号
         self.cur_seg = -1          # 屏上英文草稿所属段号
         self.stream_seg = None     # 正在流式吐字的那句定稿所属段号(没有在流 = None)
+        #: 句子代次：新句（同段换句也算）清中文时 +1。送翻时带上它，
+        #: 旧代次的译文回来了也不许再上屏（OCR/10-20 复现：同 seg 旧中文闪回）。
+        self.gen = 0
+        self._clear_next = False   # 刚定稿一句：下一份草稿一定是新句，必须清中文
+        self._seq_gen: dict[int, int] = {}   # 送翻 seq -> 当时的 gen（工作线程写，主线程读）
+        self._gen_lock = threading.Lock()
         # 与 DraftTranslator 共享同一个 dict(收尾打印)
         self.stats = {"stale": 0, "yield_local": 0, "errors": 0}
 
     def on_draft(self, seg: int, text: str | None = None) -> bool:
-        """新一段的第一份英文草稿 -> True: 调用方应清掉上一段残留的中文草稿。
+        """新句的第一份英文草稿 -> True: 调用方应清掉上一句残留的中文草稿。
 
-        ⭐ 3.11：给了 `text` 时，新段草稿若是上一份草稿**接着长**（同一句没封口、VAD 在句中切了段）
-           -> 不清：清了就空一拍，直到新段译文回来（10-19 回放实测 0.85 s，Owen 报「中文走到一半
-           突然消失一下」）。旧中文是这句前半截的译文，留着正是草稿桥要的。段号照样前进。
+        ⭐ 3.11：新段草稿若是上一份草稿**接着长**（同一句没封口、VAD 在句中切了段）
+           -> 不清：清了就空一拍，直到新段译文回来（10-19 回放实测 0.85 s，Owen 报
+           「中文走到一半突然消失一下」）。旧中文是这句前半截的译文，留着正是草稿桥要的。
+        ⭐ 2026-10-21：**同一个 seg 里换句也要清**。Soniox 每句封口后 `draft_seg` 有时
+           还没跳号，旧中文会挂到新英文底下（10-20 实测 154 次）。判据是文本不再接着长。
         """
-        prev, self._last_en = self._last_en, text or ""
+        if not text:
+            if seg > self.cur_seg:
+                self.cur_seg = seg
+                # 空草稿已经清过一次；别把 `on_final` 留的 `_clear_next` 再带到
+                # 第一份带文本草稿上（否则同句代次 +2，已送翻译文被判过期）。
+                self._clear_next = False
+                self._last_en = ""
+                self._bump_gen()
+                return True
+            return False
+
+        prev, self._last_en = self._last_en, text
+        clear_next, self._clear_next = self._clear_next, False
         if seg > self.cur_seg:
             self.cur_seg = seg
-            return not continues(prev, text or "")
-        return False
+            clear = clear_next or not continues(prev, text)
+        elif seg == self.cur_seg:
+            # 同段后续草稿：接着长 -> 保留旧中文（同句修正/跨段）；真换句 -> 清。
+            clear = clear_next or (bool(prev) and not continues(prev, text))
+        else:
+            clear = False
+        if clear:
+            self._bump_gen()
+        return clear
+
+    def _bump_gen(self) -> None:
+        with self._gen_lock:
+            self.gen += 1
+
+    def generation(self) -> int:
+        """当前句子代次（工作线程送翻时取；读一个 int，锁只为与清中文同步）。"""
+        with self._gen_lock:
+            return int(self.gen)
+
+    def note_submitted(self, seq: int, gen: int) -> None:
+        """记下某个送翻 seq 属于哪一代；`accept()` 据此丢掉上一代的晚到译文。"""
+        try:
+            s, g = int(seq), int(gen)
+        except Exception:                                  # noqa: BLE001
+            return
+        with self._gen_lock:
+            self._seq_gen[s] = g
+            if len(self._seq_gen) > 64:
+                # 只留最近一批；字典插入有序，最早的那个删掉
+                self._seq_gen.pop(next(iter(self._seq_gen)))
 
     def stale_en(self, seg: int) -> bool:
         """这份**英文**草稿过期了吗：屏上已是更新一段的草稿，或这段的定稿已经上屏。
@@ -78,10 +147,21 @@ class DraftView:
 
     def on_final(self, seg) -> bool:
         """先更新 fin_seg 再判: 屏上已是更新一段的草稿时(cur_seg > fin_seg), 旧段定稿不碰草稿槽。
-        返回值即 `finalize(clear_draft=)`。seg 缺失/非法时不动 fin_seg, 绝不抛。"""
+        返回值即 `finalize(clear_draft=)`。seg 缺失/非法时不动 fin_seg, 绝不抛。
+
+        ⭐ 这句定稿之后的第一份草稿一定是新句 -> 置 `_clear_next`；旧段定稿（seg < cur_seg）
+        不置，否则会把屏上已经更新的下一句中文误清。
+        """
         self.stream_seg = None
         try:
-            self.fin_seg = max(self.fin_seg, int(seg))
+            s = int(seg)
+            self.fin_seg = max(self.fin_seg, s)
+            # ⚠️ 只在 s > cur_seg（该 seg 还没有草稿）时置位。s == cur_seg 时，
+            # 屏上的草稿可能是**同 seg 的下一句**（本次要处理的 154 次），
+            # 强行清会让同一句续写也清 + 代次 +2，已送翻译文被丢。
+            # 同 seg 换句仍由 on_draft() 的 not continues(...) 负责。
+            if s > self.cur_seg:
+                self._clear_next = True
         except Exception:                                  # noqa: BLE001
             pass
         return self.cur_seg <= self.fin_seg
@@ -101,8 +181,21 @@ class DraftView:
         一律藏就是每句断档一次。段号不知道时按老行为(藏)。"""
         return self.stream_seg is not None and self.cur_seg > self.stream_seg
 
-    def accept(self, seq: int, seg: int) -> bool:
-        """译文能否上屏。False = 过期(这段已定稿 / 屏上已是更新一段的英文草稿 / 更新的译文已显示过), 已计数。"""
+    def accept(self, seq: int, seg: int, gen: int | None = None) -> bool:
+        """译文能否上屏。False = 过期(这段已定稿 / 屏上已是更新一段的英文草稿 / 更新的译文已显示过)。
+
+        ⭐ 2026-10-21：送翻时记的句子代次比当前旧 -> 这是上一句的晚到译文，必须丢。
+        只靠 seg 不行：Soniox 同段换句时 seg 可能还没跳。
+        """
+        with self._gen_lock:
+            # ⚠️ 不能 pop：同一条送翻可能分多段中文回调；清了 map 后第二段就查不到代次，
+            #    旧句的中文会在清空之后又贴回来。保留到 note_submitted 的 64 条淘汰。
+            submitted = self._seq_gen.get(int(seq), None) if isinstance(seq, int) else None
+            cur_gen = int(self.gen)
+        if (submitted is not None and submitted < cur_gen) or (
+                gen is not None and int(gen) < cur_gen):
+            self.stats["stale"] += 1
+            return False
         if seg <= self.fin_seg or seg < self.cur_seg or seq < self.seq:
             self.stats["stale"] += 1
             return False
@@ -130,11 +223,15 @@ class DraftTranslator:
         self.stats = stats
         self._q: queue.Queue = queue.Queue(maxsize=1)
         self._lock = {"seg": None, "en": "", "zh": "", "last": ""}   # 本段已封口的英文 / 锁住的中文 / 最后一句
+        self._gen: int | None = None                     # 当前句子代次；变了就作废封口锁
         self._pool = ThreadPoolExecutor(max_workers=1)    # 新封口那句与尾巴并发时，封口句走这条
         self._stopped = False
 
-    def submit(self, seq: int, seg: int, text: str) -> None:
-        item = (seq, seg, text)
+    def submit(self, seq: int, seg: int, text: str, gen: int | None = None) -> None:
+        # gen=None = 老调用方没传代次：不参与封口锁重置（兼容测试替身/旧路径）。
+        # 生产 main 三个 call site 都传 int；别用 0 当默认 —— DraftView.gen 首次清中文就是 1，
+        # 漏传会永远停在 0、gen != self._gen 永不成立，静默复用上一句中文前缀。
+        item = (seq, seg, text, None if gen is None else int(gen))
         try:
             self._q.put_nowait(item)
         except queue.Full:                                 # 只留最新
@@ -166,7 +263,11 @@ class DraftTranslator:
             self._stopped = True
             return True
         try:
-            seq, seg, text = item
+            if isinstance(item, tuple) and len(item) == 4:
+                seq, seg, text, gen = item
+            else:
+                seq, seg, text = item
+                gen = None
         except Exception:                                  # noqa: BLE001
             return True
         if not text or not self._mode_ok():
@@ -180,12 +281,12 @@ class DraftTranslator:
             self.stats["yield_local"] += 1
             return True
         try:
-            self._step_locked(seq, seg, text)
+            self._step_locked(seq, seg, text, gen)
         except Exception:                                  # noqa: BLE001
             self.stats["errors"] += 1
         return True
 
-    def _step_locked(self, seq: int, seg: int, text: str) -> None:
+    def _step_locked(self, seq: int, seg: int, text: str, gen: int | None = None) -> None:
         """封口句的中文**译一次就锁住**，之后只译没说完的那截，上屏拼成 `锁住的 + 尾巴`。
 
         新封口了一句 → 那一句与尾巴**并发**各译一次（尾巴不排在它后面）。
@@ -195,6 +296,10 @@ class DraftTranslator:
            `translate_draft` 的前文槽就是「上一句」（`cloud_translator._draft_user`）。
         """
         lk = self._lock
+        if gen is not None and gen != self._gen:
+            # 新一代句子：上一句的封口锁不能拿来拼新句（同 seg 也一样）
+            self._gen = gen
+            lk.update(seg=seg, en="", zh="", last="")
         if lk["seg"] != seg or not text.startswith(lk["en"]):
             lk.update(seg=seg, en="", zh="", last="")
         sealed = sealed_prefix(text)

@@ -138,15 +138,16 @@ class DLayout(unittest.TestCase):
                 else:
                     self.assertEqual(len(o._history), n + 1)
 
-    def test_short_next_draft_waits_and_rechecks_after_gap(self):
+    def test_short_next_draft_starts_at_first_word(self):
         o = self._overlay()                           # 上一句定稿在 100.0，此刻 101.0
         o.add_draft("So a")
         o._mark_dirty(urgent=True)
-        self.assertFalse(o._tv._live_visible, "2 个词就开了新行")
-        self.assertAlmostEqual(o._flow_due, 100.0 + 3.0, places=2)   # 到点重画（停顿后 1 词也开）
+        self.assertTrue(o._tv._live_visible, "首词就该占新行（2026-10-21）")
+        self.assertEqual(o._tv._live[0], "So a")
         o.add_draft("So a market")
         o._mark_dirty(urgent=True)
         self.assertTrue(o._tv._live_visible)
+        self.assertEqual(o._tv._live[0], "So a market")
 
     def test_entry_waits_for_old_row_to_clear(self):
         o = self._overlay()

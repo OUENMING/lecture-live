@@ -48,12 +48,13 @@ Soniox 封口后约 0.5 s 下一句就出字，而译文要 ~1 s 才写完 —�
 定稿行就让位上移」会让每句都**译到一半就被顶上去**、回改改到一半就上移（Owen 10-17 实测）。
 三条（原型 `buildPlan` / `dCards` 的同一套门槛）：
 
-1. **攒够词才开新行**：下一句草稿 ≥ `MIN_WORDS` 个词才占新行；上一句封口已过 `GAP_S`
-   （老师停了一下）时 1 个词就开。
+1. **新句首词就开新行**（2026-10-21 改）：新句边界一到，第一份草稿（`MIN_WORDS=1`）
+   就占新行；不再等 3 个词。`GAP_S` 现在只用于下面的「短尾巴并进上一行」判据。
 2. **上一句译完才让位**：定稿还在流式时草稿不上屏；流了 `HOLD_MAX_S` 还没完也让位（翻译卡住
    不能一直挡着）。
-3. **短尾巴并进上一行**：封口不到 `MIN_WORDS` 词、离上一句定稿 ≤ `GAP_S` 的句子（"Okay?"）
+3. **短尾巴并进上一行**：封口不到 `TAIL_WORDS` 词、离上一句定稿 ≤ `GAP_S` 的句子（"Okay?"）
    不单开一行，接在上一行后面（`merge_live`；判据 `is_tail`，落盘不受影响 —— 只改屏上）。
+   ⚠️ `TAIL_WORDS` 与 `MIN_WORDS` **分开**：前者管"口头禅并进去"，后者管"真新句多快开行"。
 4. **连着讲就并成一段**（3.10.1，Owen 10-19：「教授一口气讲两三句，屏上被切成两三个
    句号，很割裂」）：这句和上一句之间的**音频停顿** ≤ `JOIN_GAP_S`、并完那一行仍装得下
    （行高是固定档位，装不下就照旧开新行，绝不截字）、一行最多 `JOIN_MAX` 句 → 同样走
@@ -75,8 +76,16 @@ import typing
 
 #: 草稿桥的换手点：定稿中文长到草稿译文的这个比例之前，中文槽继续显示草稿译文。
 BRIDGE_RATIO = 0.6
-#: 新开一行要的词数（原型 `D_MIN_WORDS`；Owen 10-17 定 3）；也是「短尾巴」的上限（不含）。
-MIN_WORDS = 3
+#: 新开一行要的词数。2026-10-21 从 3 改成 1：新句边界一到，首词就占新行。
+MIN_WORDS = 1
+#: 「短尾巴」上限（不含）：`Okay?` / `So` 这类不到 3 词的句子并进上一行，不单独占行。
+#: ⚠️ 不要拿 `MIN_WORDS` 当这个阈值 —— 它现在是 1，会把 `is_tail` 变成永远 False。
+TAIL_WORDS = 3
+#: 草稿第一词就是这些口头禅/话语标记时，先并进上一行；避免 1 词草稿新起一行再被 final 并回去。
+#: ⚠️ 刻意**不含** `now`：`Now a new topic...` 是正常新句，不能因为首词短就并走。
+TAIL_STARTERS = frozenset({
+    "okay", "ok", "right", "yeah", "well", "so", "um", "uh", "hmm", "mm", "ah", "oh",
+})
 #: 离上一句定稿超过这么久 = 老师停过 → 1 个词也开新行；短尾巴只在这个窗口内并（原型 `D_GAP`）。
 GAP_S = 3.0
 #: 两句之间的音频停顿（Soniox 上一句末词结束 → 这一句首词开始）不超过这么久 = 老师没停，
@@ -102,7 +111,19 @@ def n_words(text: str) -> int:
 def is_tail(en: str, since_last_final: float | None) -> bool:
     """这句是不是该并进上一行的短尾巴（"Okay?" 一类）。`since_last_final=None` = 没有上一行。"""
     return (since_last_final is not None and since_last_final <= GAP_S
-            and 0 < n_words(en) < MIN_WORDS)
+            and 0 < n_words(en) < TAIL_WORDS)
+
+
+def is_tail_start(en: str) -> bool:
+    """草稿第一词是不是口头禅/话语标记（`Okay?`/`So`...），且还没长到 `TAIL_WORDS`。
+
+    只用于**决定草稿接到哪一行**：`Okay?` 这种先在上一行里长，不新起一行再被 final 并回去。
+    `Now a new topic...` 这类内容开头不在表里，照常按端点/写满决定新行。
+    """
+    words = (en or "").split()
+    if not words or len(words) >= TAIL_WORDS:
+        return False
+    return words[0].strip(".,!?;:\"'“”‘’()[]").lower() in TAIL_STARTERS
 
 
 def is_join(gap_s: float | None, *, fits: bool, n_in_row: int) -> bool:
@@ -169,14 +190,13 @@ def caption_rows(history: list[tuple[str, str]], *, cur_en: str, cur_zh: str,
         items = list(history[:-1]) + [(f"{pe} {draft}".strip(), f"{pz}{draft_zh}")]
         return CaptionRows(items, "", "", False, "none",
                            min(recheck) if recheck else None)
-    # ① 攒够词才开新行（只管「下一句」的草稿：它要占的是**新**行）
+    # ① 新句首词就开新行（只管「下一句」的草稿：它要占的是**新**行）
     new_row = draft_over or not has_final
-    if new_row and (draft or draft_zh) and n_words(draft) < MIN_WORDS:
-        gap_ok = (last_final_t is None or now - last_final_t > GAP_S) and n_words(draft) >= 1
-        if not gap_ok:
-            if last_final_t is not None:
-                recheck.append(last_final_t + GAP_S + 1e-3)
-            draft = draft_zh = ""
+    # 只有中文、英文还没到（草稿空串）：别把上一句的中文孤零零挂在新行上；等英文首词到了再显示。
+    # ⚠️ 2026-10-21：这里不再有「攒够 3 词 / 到 GAP_S 再开」那套门 —— `MIN_WORDS=1`，
+    #    任何有英文的草稿都直接占行；口头禅由 `TAIL_WORDS`/`TAIL_STARTERS` 走并行走廊。
+    if new_row and n_words(draft) < MIN_WORDS and draft_zh:
+        draft_zh = ""
     if has_final and not draft and bridge_zh:
         # 下一句草稿被挡着：草稿桥改用**这句自己**封口前的草稿译文（`draft_zh` 此时可能已是
         # 下一句的了）

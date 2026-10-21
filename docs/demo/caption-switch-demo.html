@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClassLive · 新句切行行为演示</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#141924; --panel2:#10151f; --line:#263041;
+    --text:#e7edf7; --muted:#8b98ad; --dim:#5d6b82;
+    --green:#6ee7b7; --red:#fb7185; --amber:#fbbf24; --blue:#93c5fd;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Noto Sans SC",sans-serif;}
+  body{padding:28px 30px 42px;min-height:100vh}
+  .wrap{max-width:1180px;margin:0 auto}
+  header{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;
+    border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:22px}
+  h1{font-size:21px;letter-spacing:.2px;margin:0 0 7px;font-weight:640}
+  .sub{color:var(--muted);font-size:13px;line-height:1.6;max-width:760px}
+  .tag{display:inline-block;border:1px solid var(--line);border-radius:999px;
+    padding:4px 10px;font-size:11px;color:var(--muted);margin-left:6px;white-space:nowrap}
+  .controls{display:flex;gap:8px;align-items:center;flex-shrink:0}
+  button,select{background:var(--panel);color:var(--text);border:1px solid var(--line);
+    border-radius:8px;padding:8px 12px;font:inherit;font-size:12px;cursor:pointer}
+  button:hover,select:hover{border-color:#3b4a63}
+  button.primary{background:#1f3a34;border-color:#2f5e51;color:var(--green)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media (max-width:900px){.grid{grid-template-columns:1fr}}
+  .card{background:linear-gradient(180deg,var(--panel),var(--panel2));
+    border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:14px 16px 12px;border-bottom:1px solid var(--line)}
+  .card-title{font-size:13px;font-weight:650}
+  .card-title .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;
+    background:var(--red);vertical-align:1px}
+  .card.proposed .card-title .dot{background:var(--green)}
+  .badge{font-size:10px;border-radius:999px;padding:3px 8px;border:1px solid var(--line);
+    color:var(--muted);white-space:nowrap}
+  .stage{padding:18px 16px 12px;min-height:238px;display:flex;flex-direction:column;
+    justify-content:flex-end;gap:12px;background:
+    radial-gradient(900px 300px at 50% 110%,rgba(147,197,253,.07),transparent 65%)}
+  .row{transition:opacity .22s ease, transform .22s ease;will-change:opacity,transform}
+  .row.prev{opacity:.42}
+  .row.prev .zh{font-size:18px}
+  .row .en{font-size:11.5px;line-height:1.5;color:#cbd5e1;letter-spacing:.1px}
+  .row .zh{font-size:22px;line-height:1.35;margin-top:2px;font-weight:560;letter-spacing:.1px}
+  .row.live .en{color:#f1f5f9}
+  .row.live .zh{color:#fff}
+  .row.old-zh .zh{color:var(--red);text-decoration:underline;
+    text-decoration-style:wavy;text-underline-offset:5px;text-decoration-thickness:1px}
+  .row.new-zh .zh{color:var(--green)}
+  .placeholder{height:54px;display:flex;align-items:center;color:var(--dim);
+    font-size:11.5px;border:1px dashed #263041;border-radius:8px;padding:0 12px}
+  .status{margin:0 16px;border-top:1px solid var(--line);padding:10px 0 0;min-height:34px;
+    font-size:11.5px;line-height:1.5;color:var(--muted)}
+  .status b{color:var(--text);font-weight:600}
+  .status .r{color:var(--red)} .status .g{color:var(--green)}
+  .log{margin:8px 16px 14px;background:#0b1018;border:1px solid #1f2937;border-radius:8px;
+    padding:8px 10px;font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+    color:#9fb0c9;min-height:54px;white-space:pre-wrap}
+  .log .c{color:var(--red)} .log .ok{color:var(--green)} .log .m{color:var(--amber)}
+  .timeline{margin-top:18px;background:var(--panel2);border:1px solid var(--line);
+    border-radius:10px;padding:12px 14px}
+  .bar{position:relative;height:6px;background:#1b2330;border-radius:999px;overflow:visible}
+  .fill{position:absolute;left:0;top:0;bottom:0;width:0;background:linear-gradient(90deg,#3b82f6,#6ee7b7);
+    border-radius:999px}
+  .mark{position:absolute;top:-4px;width:2px;height:14px;background:#64748b;border-radius:2px}
+  .mark.green{background:var(--green)} .mark.red{background:var(--red)}
+  .mark span{position:absolute;top:16px;left:4px;font-size:9.5px;color:var(--muted);white-space:nowrap}
+  .time{display:flex;justify-content:space-between;font-size:10.5px;color:var(--dim);margin-top:22px}
+  .note{margin-top:18px;display:grid;grid-template-columns:1.15fr .85fr;gap:16px}
+  @media (max-width:900px){.note{grid-template-columns:1fr}}
+  .note .box{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:13px 15px}
+  .note h2{font-size:12px;margin:0 0 8px;color:#cbd5e1;font-weight:650}
+  .note p,.note li{font-size:11.5px;line-height:1.65;color:var(--muted);margin:0}
+  .note ul{margin:0;padding-left:16px}
+  .note code{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:#c7d2fe}
+  .foot{color:var(--dim);font-size:10.5px;line-height:1.6;margin-top:16px}
+  .foot a{color:#93c5fd;text-decoration:none}
+  .pill{font-size:10px;border:1px solid #2f5e51;background:#13261f;color:var(--green);
+    border-radius:999px;padding:3px 7px;margin-left:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>新句切行 · 行为演示 <span class="tag">改前 vs 已采纳</span></h1>
+      <div class="sub">左：改前（3 词门槛 + 同段中文不清）。右：已采纳（新句首词切行 + 立即清旧中文，上一行冻结）。
+        这是行为演示，不是最终 UI；真悬浮窗的实拍在 <code>scripts/probe_caption_ui.py</code> 跑出的目录里。</div>
+    </div>
+    <div class="controls">
+      <button id="play" class="primary">暂停</button>
+      <button id="replay">重播</button>
+      <select id="speed" aria-label="速度">
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="1.5">1.5×</option>
+      </select>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="card" id="card-current">
+      <div class="card-head">
+        <div class="card-title"><span class="dot"></span>改前 · 3 词门槛</div>
+        <div class="badge">旧：MIN_WORDS=3 · 同段不清</div>
+      </div>
+      <div class="stage" id="stage-current"></div>
+      <div class="status" id="status-current"></div>
+      <div class="log" id="log-current"></div>
+    </section>
+
+    <section class="card proposed" id="card-proposed">
+      <div class="card-head">
+        <div class="card-title"><span class="dot"></span>提案 · 首词切行</div>
+        <div class="badge">新：MIN_WORDS=1 · TAIL_WORDS=3 · 旧中文立刻清</div>
+      </div>
+      <div class="stage" id="stage-proposed"></div>
+      <div class="status" id="status-proposed"></div>
+      <div class="log" id="log-proposed"></div>
+    </section>
+  </div>
+
+  <div class="timeline">
+    <div class="bar" id="bar">
+      <div class="fill" id="fill"></div>
+      <div class="mark green" style="left:23.3%"><span>新句首词</span></div>
+      <div class="mark red" style="left:36.6%"><span>现在到 3 词</span></div>
+      <div class="mark" style="left:51.6%"><span>本句中文</span></div>
+      <div class="mark green" style="left:66.6%"><span>下一句首词</span></div>
+    </div>
+    <div class="time"><span id="t0">0.0s</span><span id="t1">6.0s</span></div>
+  </div>
+
+  <div class="note">
+    <div class="box">
+      <h2>改前 / 改后的真实代码</h2>
+      <ul>
+        <li><b>改前</b> <code>DraftView.on_draft()</code>：只有 <code>seg &gt; cur_seg</code> 才可能清中文；同 seg 的下一句直接返回 <code>false</code>，旧中文留在 <code>_draft_zh_val</code>。</li>
+        <li><b>改后</b> <code>DraftView.on_draft()</code>：同 seg 但文本不再接着长（<code>continues()</code> 为假）也清；并给句子代次 +1，上一代的晚到译文由 <code>accept()</code> 丢掉。</li>
+        <li><b>改后</b> <code>caption_flow</code>：<code>MIN_WORDS=1</code>，首词就占新行；<code>TAIL_WORDS=3</code> + <code>TAIL_STARTERS</code> 把 <code>Okay?</code>/<code>So</code> 这类口头禅并进上一行。</li>
+        <li><code>HOLD_MAX_S=2.5</code>：上一句定稿还在流式时，下一句草稿最多被挡 2.5 秒（保留）。</li>
+      </ul>
+    </div>
+    <div class="box">
+      <h2>调研结论（先看方向）</h2>
+      <ul>
+        <li><b>BBC Subtitle Guidelines</b>：live subtitles 应 word by word、左到右出现；一句一个字幕，尽量在标点/句末换行，使用两行滚动。<span class="pill">支持首词切行</span></li>
+        <li><b>CHI 2023 · Text Stability in Live Captions</b>：实时字幕的抖动会显著增加分心/疲劳；应保留已显示行的换行、不要重排旧行，用平滑动画。<span class="pill">旧行冻结</span></li>
+        <li><b>Netflix Timed Text Style Guide</b>：换行在标点后/连词前，避免把名词和冠词拆开；最多两行。<span class="pill">句边界换行</span></li>
+        <li>结论：<b>新句首词切行方向正确</b>，但“Okay?”这类口头禅要并进上一行，不能每句都无条件新行。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="foot">
+    演示数据：按 10-20 ECON10740 的真实形状简化（同段多句、旧中文残留、改前 3 词门槛）。真实代码见
+    <code>draft_translate.py::DraftView</code>、<code>caption_flow.py::caption_rows</code>、<code>overlay.py::_render</code>。
+    调研源：BBC Subtitle Guidelines（2026-10-21 抓取）、Google Research / CHI 2023（2023-08-30）、Netflix English (USA) Timed Text Style Guide（2026-10-21 抓取）。
+  </div>
+</div>
+
+<script>
+(() => {
+  const TOTAL = 6.0;
+  const A = {en:"So it should be open now.", zh:"所以它现在应该已经开放了。", oldZh:"所以它显", start:0.0, zhAt:0.55};
+  const C = {en:"So go to Brightspace.", zh:"所以去 Brightspace。", start:1.4, words:[1.4,1.8,2.2,2.6], zhAt:3.1};
+  const D = {en:"Now hold on.", zh:"现在稍等一下。", start:4.0, words:[4.0,4.4,4.8], zhAt:5.25};
+
+  const $ = (id) => document.getElementById(id);
+  const stageC = $("stage-current"), stageP = $("stage-proposed");
+  const statusC = $("status-current"), statusP = $("status-proposed");
+  const logC = $("log-current"), logP = $("log-proposed");
+  const fill = $("fill"), playBtn = $("play"), speedSel = $("speed");
+  const freezeParam = new URLSearchParams(location.search).get("t");
+  const freezeAt = freezeParam === null ? null : Math.max(0, Math.min(TOTAL, parseFloat(freezeParam) || 0));
+  let paused = freezeAt !== null, speed = 1, elapsed = freezeAt || 0, last = performance.now();
+  playBtn.textContent = paused ? "播放" : "暂停";
+
+  function wordsAt(s, t) {
+    if (t < s.start) return [];
+    let n = 0;
+    for (const w of s.words) if (t >= w) n++;
+    return s.en.split(/\s+/).slice(0, n);
+  }
+  function visibleAt(s, t) { return t >= s.start; }
+
+  function rowHTML(en, zh, cls, label) {
+    const zhLine = zh ? `<div class="zh">${escapeHTML(zh)}</div>` :
+      `<div class="zh" style="color:var(--dim)">…</div>`;
+    return `<div class="row ${cls}">
+      ${label ? `<div class="en" style="color:var(--dim);font-size:10px;margin-bottom:2px">${label}</div>` : ""}
+      <div class="en">${escapeHTML(en)}</div>${zhLine}</div>`;
+  }
+  function escapeHTML(s) {
+    return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  }
+
+  function renderCurrent(t) {
+    const cOn = visibleAt(C, t), dOn = visibleAt(D, t);
+    let prevEn = A.en, prevZh = A.zh, prevLabel = "上一句";
+    let live = null, liveZh = "", old = false, status = "", log = "";
+    if (!cOn) {
+      status = `<b>${t < A.zhAt ? "上一句定稿在流式" : "上一句已上屏"}</b> · 新句还没开始`;
+      log = `t=${t.toFixed(2)}s  A 定稿${t>=A.zhAt?"已完成":"流式中"}`;
+    } else if (!dOn) {
+      const w = wordsAt(C, t);
+      if (w.length < 3) {
+        status = `新句已经说了 <b>${w.length}</b> 个词，UI 仍压着：<span class="r">MIN_WORDS=3</span>`;
+        log = `on_draft(70, "${w.join(" ") || "So"}") -> <span class="c">false</span>\nn_words=${w.length} < 3 -> <span class="c">hide</span>`;
+        prevZh = A.zh;
+      } else {
+        live = w.join(" ");
+        if (t < C.zhAt) {
+          liveZh = A.oldZh; old = true;
+          status = `新行出现，但中文槽还是上一句的「${A.oldZh}」<span class="r">（旧中文残留）</span>`;
+          log = `n_words=${w.length} >= 3 -> <span class="m">show new row</span>\nlive_zh = draft_zh = <span class="c">"${A.oldZh}"</span>  ← 上一句`;
+        } else {
+          liveZh = C.zh;
+          status = `本句中文到达「${C.zh}」<span class="r">（旧中文闪了约 0.9s）</span>`;
+          log = `stream_zh -> live_zh = "${C.zh}"`;
+        }
+      }
+    } else {
+      const w = wordsAt(D, t);
+      prevEn = C.en; prevZh = C.zh; prevLabel = "上一句";
+      if (w.length < 3) {
+        status = `下一句已经说了 <b>${w.length}</b> 个词，UI 仍压着：<span class="r">MIN_WORDS=3</span>`;
+        log = `on_draft(70, "${w.join(" ") || "Now"}") -> <span class="c">false</span>\nn_words=${w.length} < 3 -> <span class="c">hide</span>`;
+      } else {
+        live = w.join(" ");
+        if (t < D.zhAt) {
+          liveZh = C.zh; old = true;
+          status = `新行出现，但中文槽还是上一句的「${C.zh}」<span class="r">（旧中文残留）</span>`;
+          log = `n_words=${w.length} >= 3 -> <span class="m">show new row</span>\nlive_zh = draft_zh = <span class="c">"${C.zh}"</span>  ← 上一句`;
+        } else {
+          liveZh = D.zh;
+          status = `本句中文到达「${D.zh}」<span class="r">（旧中文闪了约 0.4s）</span>`;
+          log = `stream_zh -> live_zh = "${D.zh}"`;
+        }
+      }
+    }
+    stageC.innerHTML =
+      rowHTML(prevEn, prevZh, "prev", prevLabel) +
+      (live ? rowHTML(live, liveZh, old ? "live old-zh" : "live", "正在说") :
+        `<div class="placeholder">新句还没占新行（UI 压着）</div>`);
+    statusC.innerHTML = status;
+    logC.innerHTML = log;
+  }
+
+  function renderProposed(t) {
+    const cOn = visibleAt(C, t), dOn = visibleAt(D, t);
+    let prevEn = A.en, prevZh = A.zh, prevLabel = "上一句";
+    let live = null, liveZh = "", status = "", log = "";
+    if (!cOn) {
+      status = `<b>上一句已上屏</b> · 新句还没开始`;
+      log = `t=${t.toFixed(2)}s  A 已完成`;
+    } else if (!dOn) {
+      const w = wordsAt(C, t);
+      live = w.join(" ");
+      liveZh = t >= C.zhAt ? C.zh : "";
+      status = t < C.zhAt
+        ? `首词「${w[0] || "So"}」已经占新行；中文还没到 → <span class="g">中文槽清空，不挂上一句</span>`
+        : `本句中文到达「${C.zh}」<span class="g">（没有旧中文闪回）</span>`;
+      log = t < C.zhAt
+        ? `on_draft(70, "${w[0] || "So"}") -> <span class="ok">true</span>\nfirst word -> <span class="ok">show new row</span>\nlive_zh = ""  ← 旧中文已清`
+        : `stream_zh -> live_zh = "${C.zh}"`;
+    } else {
+      const w = wordsAt(D, t);
+      prevEn = C.en; prevZh = C.zh;
+      live = w.join(" ");
+      liveZh = t >= D.zhAt ? D.zh : "";
+      status = t < D.zhAt
+        ? `下一句首词「${w[0] || "Now"}」已经占新行；中文还没到 → <span class="g">中文槽清空</span>`
+        : `本句中文到达「${D.zh}」<span class="g">（上一行冻结）</span>`;
+      log = t < D.zhAt
+        ? `on_draft(70, "${w[0] || "Now"}") -> <span class="ok">true</span>\nfirst word -> <span class="ok">show new row</span>\nlive_zh = ""`
+        : `stream_zh -> live_zh = "${D.zh}"`;
+    }
+    stageP.innerHTML =
+      rowHTML(prevEn, prevZh, "prev", prevLabel) +
+      (live ? rowHTML(live, liveZh, liveZh && t >= (cOn && !dOn ? C.zhAt : D.zhAt) ? "live new-zh" : "live", "正在说") :
+        `<div class="placeholder">新句还没开始</div>`);
+    statusP.innerHTML = status;
+    logP.innerHTML = log;
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    if (!paused) elapsed = (elapsed + dt * speed) % TOTAL;
+    renderCurrent(elapsed);
+    renderProposed(elapsed);
+    fill.style.width = `${(elapsed / TOTAL) * 100}%`;
+    requestAnimationFrame(frame);
+  }
+
+  playBtn.onclick = () => { paused = !paused; playBtn.textContent = paused ? "播放" : "暂停"; };
+  $("replay").onclick = () => { elapsed = 0; last = performance.now(); paused = false; playBtn.textContent = "暂停"; };
+  speedSel.onchange = () => { speed = parseFloat(speedSel.value) || 1; };
+
+  requestAnimationFrame((now) => { last = now; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

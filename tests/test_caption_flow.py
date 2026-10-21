@@ -309,9 +309,10 @@ H = [("Perfect competition is a benchmark.", "完全竞争是一个基准。")]
 
 
 class Pacing(unittest.TestCase):
-    """让位节奏（`now` 传了才启用）：攒够词才开新行 / 上一句译完才让位 / 短尾巴并进上一行。
+    """让位节奏（`now` 传了才启用）：新句首词开新行 / 上一句译完才让位 / 短尾巴并进上一行。
 
     ⚠️ 10-17 Owen 实测的症状：Soniox 封口 0.5 s 后下一句就出字，老规矩让上一句译到一半就上移。
+    ⚠️ 10-21 改：首词就开行（不再等 3 词）；短尾巴由 `TAIL_WORDS` 管。
     """
 
     def test_streaming_final_holds_next_draft_until_done(self):
@@ -330,12 +331,12 @@ class Pacing(unittest.TestCase):
         self.assertEqual(r.live_kind, "draft")
         self.assertEqual(n_rows(r), 3)
 
-    def test_next_draft_needs_three_words(self):
-        """上一句已定稿：下一句草稿 <3 词不开新行，到 3 词才开。"""
-        r = call(H, now=20.5, last_final_t=20.0, draft="So a")
-        self.assertFalse(r.live_visible)
-        self.assertEqual(n_rows(r), 1)
-        self.assertAlmostEqual(r.recheck_at, 20.0 + C.GAP_S, places=2)
+    def test_next_draft_starts_new_row_at_first_word(self):
+        """上一句已定稿：下一句草稿第一个词就开新行（2026-10-21）。"""
+        r = call(H, now=20.5, last_final_t=20.0, draft="So")
+        self.assertTrue(r.live_visible)
+        self.assertEqual(r.live_en, "So")
+        self.assertEqual(n_rows(r), 2)
         r = call(H, now=20.6, last_final_t=20.0, draft="So a market")
         self.assertTrue(r.live_visible)
         self.assertEqual(r.live_en, "So a market")
@@ -370,6 +371,14 @@ class Pacing(unittest.TestCase):
         self.assertFalse(C.is_tail("So a market.", 1.0))   # 3 词：自成一行
         self.assertFalse(C.is_tail("Okay?", 3.5))          # 停过：自成一行
         self.assertFalse(C.is_tail("Okay?", None))         # 没有上一行
+
+    def test_is_tail_start(self):
+        self.assertTrue(C.is_tail_start("Okay?"))
+        self.assertTrue(C.is_tail_start("So"))
+        self.assertTrue(C.is_tail_start("Right, okay."))
+        self.assertFalse(C.is_tail_start("So a market"))     # 3 词：已经不是短开头
+        self.assertFalse(C.is_tail_start("Now"))             # 内容词开头，不许误并
+        self.assertFalse(C.is_tail_start("Now a new topic"))
 
     def test_no_now_keeps_old_rules(self):
         r = call(H, streaming=True, seed_en="x y", cur_zh="中", draft="a", draft_over=True)

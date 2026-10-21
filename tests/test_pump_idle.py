@@ -706,6 +706,18 @@ class Wiring(unittest.TestCase):
         src = _run_src()
         self.assertIn("streamq.set_stats(tester.note_streamq_dwell)", src)
 
+    def test_app启动路径先激活再抬悬浮窗(self):
+        """⭐ 2026-10-21：开课面板是非激活面板；只 orderFrontRegardless 会被前台 app 盖住。
+
+        真机症状：点开始后字幕不出来，再点一次 App（LaunchServices 发 rapp 激活）才出现。
+        修法：`.app` 路径在 o.show() 之后 activateIgnoringOtherApps(True) 再抬一次。
+        ⚠️ 不能无条件激活：上课中用户切别的 app，悬浮窗仍要不抢焦点。
+        """
+        src = ast.unparse(_func("_load_overlay"))
+        self.assertIn("CLASSLIVE_FROM_APP", src)
+        self.assertIn("activateIgnoringOtherApps_", src)
+        self.assertLess(src.index("o.show()"), src.index("activateIgnoringOtherApps_"))
+
     def test_overlay四个采集钩子都接了(self):
         """⚠️ 变异验证：少接一个（比如漏 `on_view`）→ 对应那条红（那格永远空）。"""
         run = _run_src()

@@ -4675,6 +4675,20 @@ def _load_overlay(on_quit=None, on_translate=None, on_submit=None,
                     on_power_event=on_power_event, on_duty=on_duty,
                     on_feature=on_feature)
         o.show()
+        # ⭐ 2026-10-21：.app 从开课面板切到录课主进程时，面板是 NonactivatingPanel，
+        #    进程本身**从未激活**；`orderFrontRegardless()` 只顶到它自己那一级，
+        #    用户当前在前台的浏览器/编辑器会把字幕盖住（实测：点开始后字幕不出来，
+        #    再点一次 App / LaunchServices 发 `rapp` 激活后才出现）。
+        #    只在 .app 这条路上激活一次；终端 `cl`、测试、探针都不改焦点。
+        #    ⚠️ 不能只在 `Overlay.show()` 里无条件 activate：上课中用户切到别的 app
+        #       时，面板仍应保持「不抢焦点」的既有语义。
+        if os.environ.get("CLASSLIVE_FROM_APP"):
+            try:
+                from AppKit import NSApplication
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                o._panel.orderFrontRegardless()
+            except Exception:                       # noqa: BLE001
+                pass
         return o
     except Exception as e:       # noqa: BLE001
         echo(f"⚠ 悬浮窗不可用({e}); 回退终端 UI。")

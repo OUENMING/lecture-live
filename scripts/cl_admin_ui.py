@@ -228,8 +228,11 @@ def r2_ingest(get=None, sessions_dir=None, ledger=None) -> dict:
 
 #: 上传的 `report.json`（测试模式）里 3.10 才有的块 —— 与 `testmode.BLOCKS` 一一对应。
 #: 缺一个键 = 「这节课没采到 / 版本太老」，与「采到了但是 0」是两回事，前端照这个区分。
+#: ⚠️ `vad` / `norm`（2026-10-21 加）：采集了但以前不在白名单里 → 面板连「采没采到」都不知道；
+#: 而 `dropped_s` / `weak_blocks` / `vad_resets` / `blind_dropped` 正是查「丢句」的关键量。
 REPORT_BLOCKS = ("stream", "region_probe", "duty", "device", "energy", "capture",
-                 "merge", "backfill", "system", "ui", "terms", "live", "deps")
+                 "merge", "backfill", "system", "ui", "terms", "live", "deps",
+                 "vad", "norm")
 
 
 def _num(v):
@@ -369,6 +372,17 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list,
     if lv is not None:
         lv = {"calls_total": _num(lv.get("calls_total")), "failed_calls": _num(lv.get("failed_calls")),
               "chapters": _num(lv.get("chapters")), "atoms": _num(lv.get("atoms"))}
+    vd = _block(rep, "vad") or None
+    if vd is not None:
+        # 断句 / 丢句的关键量：`dropped_s`（丢了多少秒）、`weak_blocks`（有语音却没过阈值）、
+        # `vad_resets`（清状态漂移）、`blind_dropped`（盲丢）、`hard_cuts`（撞 12 s 上限，只能硬切）。
+        vd = {k: _num(vd.get(k)) for k in ("cuts", "hard_cuts", "dropped", "dropped_s", "weak_blocks",
+                                            "vad_resets", "blind_dropped", "sentence_cuts")}
+    nm_ = _block(rep, "norm") or None
+    if nm_ is not None:
+        # 收音电平归一：capped / clamped 是「有多少块被削顶/被钳住」—— 麦克风太响或增益太狠的信号。
+        nm_ = {k: _num(nm_.get(k)) for k in ("blocks", "capped", "clamped")}
+        nm_["gain_db_max"] = _num(nm_.get("gain_db_max"))
 
     gen = _enum(rep.get("generated"), 24)
     blocks = rep.get("blocks") if isinstance(rep.get("blocks"), dict) else {}
@@ -390,6 +404,7 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list,
                "first_p50": _num((tl.get("zh_first_ms") or {}).get("p50")) if isinstance(tl.get("zh_first_ms"), dict) else None},
         "stream": st, "region": rp, "duty": dt_, "device": dv, "energy": en, "capture": cp,
         "merge": mg, "backfill": bf, "system": sys_, "ui": ui, "terms": tm, "live": lv, "deps": dp,
+        "vad": vd, "norm": nm_,
     }
 
 
@@ -465,8 +480,14 @@ def r2_reports(get=None, raw=None, sessions_dir=None, ledger=None, max_fetch=R2_
             "sessions": got, "errors": errors[:5]}
 
 
-#: 面板「看原文」能看哪几样（文件名 → 是不是二进制）。**不脱敏**（2026-10-21 作者定：都是用户授权过的课）。
-R2_RAW_FILES = ("report.json", "transcript.md")
+#: 面板「看原文」能看哪几样。**不脱敏**（2026-10-21 作者定：都是用户授权过的课）。
+R2_RAW_FILES = ("report.json", "transcript.md", "extra.tar.gz")
+
+#: 诊断包里**看**的那几个成员（文本）。其余（live.jsonl / blocks.npz / atoms.jsonl …）只列名字与大小 ——
+#: 它们是逐句/逐块数据，展开就是整节课，面板里不整段倒出来。
+R2_DIAG_MEMBERS = ("diag.json", "env.json", "note.md", "app.log")
+#: 单个成员的文本上限（`app.log` 能到几 MB，只给尾巴）。
+R2_DIAG_MAX = 200_000
 
 
 def r2_raw(sid, what="report.json", get=None, fetch=None, max_bytes=4_000_000) -> dict:
@@ -504,17 +525,59 @@ def r2_raw(sid, what="report.json", get=None, fetch=None, max_bytes=4_000_000) -
         def fetch(url, headers):
             import httpx
             r = httpx.get(url, headers=headers, timeout=60)
-            return r.status_code, r.text
+            return r.status_code, r.content          # ⚠️ 字节：诊断包是二进制
     try:
         status, body = fetch(url, {"Authorization": f"Bearer {tok}"})
     except Exception as e:                                            # noqa: BLE001
         return {"error": f"取不到原文：{type(e).__name__}"}
     if status != 200:
         return {"error": f"取不到原文：HTTP {status}"}
+    if what == "extra.tar.gz":
+        return _diag_pack(body)
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", "replace")
     body = str(body or "")
     if len(body) > max_bytes:
         return {"error": f"原文太大（{len(body)} 字节 > {max_bytes}），别整个拉"}
     return {"id": sid, "what": what, "bytes": len(body), "text": body}
+
+
+def _diag_pack(raw) -> dict:
+    """诊断包（`extra.tar.gz`）→ 里面几个**文本**成员 + 全部成员的清单。
+
+    为什么值得看：**面板上「他电脑上缺依赖 / 崩溃 / 日志」这些结论，现在全靠用户把包发过来**。
+    包在 R2 里躺着（每节测试模式的课都有），面板能自己解开看。
+
+    ⚠️ 只给文本成员（`diag.json` / `env.json` / `note.md` / `app.log` 尾巴）——
+    逐句日志（`live.jsonl`）与块数据（`blocks.npz`）只列名字与大小，不整段倒出来。
+    """
+    import io
+    import tarfile
+    try:
+        tf = tarfile.open(fileobj=io.BytesIO(raw))
+    except Exception as e:                                            # noqa: BLE001
+        return {"error": f"诊断包解不开：{type(e).__name__}"}
+    files, members = {}, []
+    for m in tf.getmembers():
+        if not m.isfile():
+            continue
+        members.append({"name": m.name, "bytes": m.size})
+        if m.name.split("/")[-1] not in R2_DIAG_MEMBERS or m.size > 4_000_000:
+            continue
+        try:
+            f = tf.extractfile(m)
+            if f is None:
+                continue
+            txt = f.read().decode("utf-8", "replace")
+        except Exception:                                            # noqa: BLE001
+            continue
+        if len(txt) > R2_DIAG_MAX:                                  # 只给尾巴（app.log 能几 MB）
+            txt = "…（前面截掉了，只给最后 %d 字符）\n" % R2_DIAG_MAX + txt[-R2_DIAG_MAX:]
+        files[m.name] = txt
+    members.sort(key=lambda x: x["name"])
+    if not files:
+        return {"error": "诊断包里没有可看的文本成员"}
+    return {"what": "extra.tar.gz", "bytes": len(raw), "files": files, "members": members}
 
 
 def _cf_creds():

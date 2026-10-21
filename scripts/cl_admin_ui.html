@@ -20,11 +20,11 @@
    --------------------------------------------------------------- */
 :root{
   --bg:#fafafa; --surface:#fff; --recessed:#f2f2f2;
-  --ink:#171717; --ink2:#4d4d4d; --ink3:#8f8f8f;
+  --ink:#171717; --ink2:#4d4d4d; --ink3:#6b6b6b;
   --line:rgba(0,0,0,.09); --line2:rgba(0,0,0,.055);
   --accent:#0072f5; --focus:#005fcc;
   --ok:#198038; --warn:#b25000; --bad:#d92d20;
-  --d1:#0f62fe; --d2:#009d9a; --d3:#8a3ffc; --d4:#ff832b;
+  --d1:#0f62fe; --d2:#009d9a; --d3:#8a3ffc; --d4:#ff832b; --d5:#00875a;
   --fill:rgba(15,98,254,.10);
   --ring:0 0 0 1px var(--line);
   --ring2:0 0 0 1px var(--line2);
@@ -35,21 +35,21 @@
 }
 :root[data-theme=dark]{
   --bg:#0a0a0a; --surface:#131313; --recessed:#1c1c1c;
-  --ink:#ededed; --ink2:#a1a1a1; --ink3:#6e6e6e;
+  --ink:#ededed; --ink2:#a1a1a1; --ink3:#8a8a8a;
   --line:rgba(255,255,255,.11); --line2:rgba(255,255,255,.06);
   --accent:#3291ff; --focus:#78a9ff;
   --ok:#42be65; --warn:#ffb784; --bad:#ff8389;
-  --d1:#4589ff; --d2:#009d9a; --d3:#a56eff; --d4:#eb6200;
+  --d1:#4589ff; --d2:#009d9a; --d3:#a56eff; --d4:#eb6200; --d5:#2fbf71;
   --fill:rgba(69,137,255,.16);
   --lift:0 0 0 1px rgba(255,255,255,.11), 0 2px 2px rgba(0,0,0,.3);
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){
   --bg:#0a0a0a; --surface:#131313; --recessed:#1c1c1c;
-  --ink:#ededed; --ink2:#a1a1a1; --ink3:#6e6e6e;
+  --ink:#ededed; --ink2:#a1a1a1; --ink3:#8a8a8a;
   --line:rgba(255,255,255,.11); --line2:rgba(255,255,255,.06);
   --accent:#3291ff; --focus:#78a9ff;
   --ok:#42be65; --warn:#ffb784; --bad:#ff8389;
-  --d1:#4589ff; --d2:#009d9a; --d3:#a56eff; --d4:#eb6200;
+  --d1:#4589ff; --d2:#009d9a; --d3:#a56eff; --d4:#eb6200; --d5:#2fbf71;
   --fill:rgba(69,137,255,.16);
   --lift:0 0 0 1px rgba(255,255,255,.11), 0 2px 2px rgba(0,0,0,.3);
 }}
@@ -339,6 +339,7 @@ details.sub>summary:hover{color:var(--ink)}
           <span class="spacer"></span>
           <div class="seg" id="metric" role="group" aria-label="指标">
             <button data-m="asr" aria-pressed="true">转写分钟</button>
+            <button data-m="rt">实时转写分钟</button>
             <button data-m="llm">翻译次数</button>
             <button data-m="tin">输入 token</button>
             <button data-m="tout">输出 token</button>
@@ -450,6 +451,8 @@ var HINT = "续期是「从现在起再加 N 天」。限额留空 = 不限，�
 var METRICS = {
   asr:  {label:"转写分钟", unit:"分", color:"var(--d1)", pick:function(u){ return u.asr_s/60; },
          total:function(v){ return fmtDur(v*60); }, cell:function(v){ return num(v, v < 10 ? 1 : 0) + " 分"; }},
+  rt:   {label:"实时转写分钟", unit:"分", color:"var(--d5)", pick:function(u){ return u.rt_s/60; },
+         total:function(v){ return fmtDur(v*60); }, cell:function(v){ return num(v, v < 10 ? 1 : 0) + " 分"; }},
   llm:  {label:"翻译次数", unit:"次", color:"var(--d2)", pick:function(u){ return u.llm_reqs; },
          total:function(v){ return num(v); }, cell:function(v){ return num(v) + " 次"; }},
   tin:  {label:"输入 token", unit:"tok", color:"var(--d3)", pick:function(u){ return u.tokens_in; },
@@ -499,7 +502,10 @@ function showHint(node, msg){ node.textContent = msg; node.style.color = "var(--
   setTimeout(function(){ node.textContent = HINT; node.style.color = ""; }, 3000); }
 
 /* ---------- 聚合 ---------- */
-var KEYS = ["asr_s","asr_reqs","llm_reqs","tokens_in","tokens_out","cache_hit","jev_reqs","jev_q"];
+/* ⚠️ `rt_s` / `rt_reqs`（2026-10-21 加）：**Soniox 实时转写**的秒数与会话数 ——
+   Worker 每小时 cron 从 Soniox 的用量日志回收进账本（`passes-core.js`）→ 不在 KEYS 里就永远看不见，
+   而「实时转写了多少分钟」是这个产品最核心的量（`asr_s` 是**定稿**转写，走的是另一条路）。 */
+var KEYS = ["asr_s","asr_reqs","llm_reqs","tokens_in","tokens_out","cache_hit","jev_reqs","jev_q","rt_s","rt_reqs"];
 function sumRows(rows, code){
   var t = {models:{}, vers:{}};
   KEYS.forEach(function(k){ t[k] = 0; });
@@ -897,8 +903,12 @@ function renderKpis(){
   var wd = dN && !prevEmpty;      /* 有可比区间才在格子里印环比 */
   var codes = state.codes;
   var live = codes.filter(function(c){ return !c.revoked && (!c.expires || c.expires > Date.now()); });
+  /* 「实时转写」是 Soniox 那条路（`rt_s`），跟「区间转写」（定稿，`asr_s`）**不是一回事** ——
+     分开放，别把两个分钟数加到一起说「转写了多少」。 */
+  var rtMin = t.rt_s/60, rtN = t.rt_reqs;
   box.appendChild(kpiCard("区间转写", fmtDur(t.asr_s), "",
-    num(t.asr_reqs) + " 段 · " + n + " 天", daily.map(function(x){ return x.asr_s/60; }), "var(--d1)",
+    num(t.asr_reqs) + " 段 · " + n + " 天" + (rtMin ? " · Soniox 实时 " + num(rtMin, rtMin < 10 ? 1 : 0) + " 分" : ""),
+    daily.map(function(x){ return x.asr_s/60; }), "var(--d1)",
     wd ? deltaOf(t.asr_s, prev.asr_s, dN) : ""));
   box.appendChild(kpiCard("区间翻译", num(t.llm_reqs), "次",
     "输入 " + shortNum(t.tokens_in) + " · 输出 " + shortNum(t.tokens_out) + " token",
@@ -1087,6 +1097,18 @@ function renderQuota(){
   });
   box.appendChild(qrow("千问", [qcell("今日段数", q.qwen.used, q.qwen.max)],
     q.qwen.exhausted.length ? "已耗尽 " + q.qwen.exhausted.join("、") : "一次性免费额度"));
+  /* 「哪些国家被 Groq 封了」= `/v1/admin/quota` 的 `groq_blocked`（**权威表**，Worker 按访客国家记的）——
+     以前只能靠 AE 里的 `groq:403` 字符串反推。空 = 现在没有国家被封。 */
+  var gb = q.groq_blocked || {};
+  var gbKeys = Object.keys(gb);
+  var gbCell = el("div","qcell");
+  var gbT = el("div","t");
+  gbT.appendChild(el("span", null, "被封国家"));
+  gbT.appendChild(el("b", null, gbKeys.length ? gbKeys.map(function(c){ return COUNTRY[c] || c; }).join("、") : "无"));
+  gbCell.appendChild(gbT);
+  box.appendChild(qrow("Groq 被封国家", [gbCell],
+    gbKeys.length ? "解禁时刻：" + gbKeys.map(function(c){ return (COUNTRY[c] || c) + " " + new Date(gb[c]).toLocaleTimeString(); }).join("、")
+                   : "现在没有访客国家被 Groq 拒（403）；被拒过的会出现在下面的「要注意」里"));
   var qh = el("p","hint","标「滚动」的格子是 Groq 报的剩余往回补到此刻，所以每分钟都在动；悬停看口径。");
   qh.title = "Groq 的次数与小时音频秒是连续回补的（每 43.2 秒回 1 次、每 0.5 秒回 1 秒音频），不是到 UTC 零点才清零。" +
     "底数是 Groq 最后一次回包报的剩余（名字下面那个钟点 = 底数有多新，不是面板多久没刷新）。Worker 拿它判，剩 5% 就主动降级；" +
@@ -1825,6 +1847,29 @@ function renderDash310(){
             dash(c.deficit_s, c.deficit_s != null ? num(c.deficit_s, 1) : null), dash(c.gaps_n)]; })));
       rParts.push(el("div", "hint", "断档秒 = 墙钟 − 实际音频秒；文件回放（--speed≠1）也会把它推大，不只是断档。"));
     }
+    /* 断句 / 丢句（VAD）与电平归一（norm）—— 2026-10-21 加：这两块以前**不在白名单**里，
+       面板连「采没采到」都不知道；而 `dropped_s` / `weak_blocks` / `vad_resets` / `blind_dropped`
+       正是查「丢句」的关键量。 */
+    var vd = sessions.filter(function(s){ return s.vad; });
+    if(vd.length){
+      rParts.push(sub2("断句与丢句（VAD）"));
+      rParts.push(mkTable([["课", ""], ["断句", "r"], ["硬切", "r"], ["丢弃", "r"], ["丢弃秒", "r"], ["弱音块", "r"], ["重建", "r"], ["盲丢", "r"]],
+        vd.slice(0, 12).map(function(s){ var v = s.vad;
+          return [s.name || s.id, dash(v.cuts), dash(v.hard_cuts), dash(v.dropped),
+            dash(v.dropped_s, v.dropped_s != null ? num(v.dropped_s, 1) : null),
+            dash(v.weak_blocks), dash(v.vad_resets), dash(v.blind_dropped)]; })));
+      rParts.push(el("div", "hint", "硬切 = 撞了 12 s 上限（段内没有够长的静音，只能硬切）；弱音块 = 有语音窗却没过阈值；" +
+        "重建 = 清掉了 VAD 的状态漂移；盲丢 = 没进 VAD 就丢的。丢句（丢弃秒 / 盲丢）不为 0 才要查。"));
+    }
+    var nms = sessions.filter(function(s){ return s.norm; });
+    if(nms.length){
+      rParts.push(sub2("电平归一（收音峰值归一器）"));
+      rParts.push(mkTable([["课", ""], ["块", "r"], ["削顶", "r"], ["钳住", "r"], ["最大增益 dB", "r"]],
+        nms.slice(0, 12).map(function(s){ var n = s.norm;
+          return [s.name || s.id, dash(n.blocks), dash(n.capped), dash(n.clamped),
+            dash(n.gain_db_max, n.gain_db_max != null ? num(n.gain_db_max, 1) : null)]; })));
+      rParts.push(el("div", "hint", "削顶 / 钳住的块多 = 麦克风太响或增益太狠（峰值被削掉，词会糊）。"));
+    }
   }
   box.appendChild(fold("「一些事儿」· 设备 · 能耗 · 收音", rParts, "rep"));
 }
@@ -1842,10 +1887,26 @@ function detailBtn(s){
     pre.style.maxHeight = "40vh"; pre.style.overflow = "auto";
     box.appendChild(pre);
     var bar = el("div", "rawbar");
-    [["report.json", "看 report.json 原文"], ["transcript.md", "看转录原文"]].forEach(function(p){
+    [["report.json", "看 report.json 原文"], ["transcript.md", "看转录原文"], ["extra.tar.gz", "看诊断包"]].forEach(function(p){
       bar.appendChild(btn(p[1], "toggle", function(){
         api("raw", {id: s.id, what: p[0]}).then(function(r){
           if(r.error){ box.appendChild(el("div", "hint", r.error)); return; }
+          if(r.files){                                    /* 诊断包：一堆文本成员 + 全部成员清单 */
+            var head = el("div", "dtitle", "诊断包 · " + num(r.bytes) + " 字节");
+            box.appendChild(head);
+            var mf = el("div", "hint", "包里有：" + (r.members || []).map(function(m){ return m.name + "（" + num(m.bytes) + " B）"; }).join(" · "));
+            box.appendChild(mf);
+            Object.keys(r.files).forEach(function(nm2){
+              var d = el("details");
+              var sm = el("summary", null, nm2 + "（" + num((r.files[nm2] || "").length) + " 字符）");
+              d.appendChild(sm);
+              var pre = el("pre", "raw", r.files[nm2]);
+              pre.style.maxHeight = "50vh"; pre.style.overflow = "auto";
+              d.appendChild(pre);
+              box.appendChild(d);
+            });
+            return;
+          }
           box.appendChild(el("div", "dtitle", p[0] + " · " + num(r.bytes) + " 字节"));
           var t = el("pre", "raw", r.text);
           t.style.maxHeight = "60vh"; t.style.overflow = "auto";
@@ -1916,6 +1977,10 @@ function renderTestMode(){
    每条 = [级别, 一句话出了什么事, 该做什么, 时间]。级别只有 bad / warn / ok 三种。 */
 var COUNTRY = {CN:"中国", HK:"香港", US:"美国", IE:"爱尔兰", GB:"英国", JP:"日本", SG:"新加坡", DE:"德国", FR:"法国",
   NL:"荷兰", CA:"加拿大", AU:"澳大利亚", KR:"韩国", TW:"台湾", MO:"澳门", PL:"波兰", "?":"未知"};
+/* Workers Logs 里 `denied` 的原因码 → 人话（`passes-core.js:123` 那一行的原文：
+   `unknown | revoked | expired | devices | quota`）。⚠️ 原因码是 Worker 自己定的，
+   **不认识的原样显示**（别猜）。 */
+var DENIED_NAME = {unknown:"码不认", revoked:"码被吊销", expired:"码过期", devices:"设备数超上限", quota:"额度没过"};
 function aeTime(t){ return Date.parse(String(t).replace(" ", "T") + "Z"); }
 function verKey(v){ return String(v || "").split(".").map(function(x){ return ("000" + (parseInt(x, 10) || 0)).slice(-3); }).join("."); }
 /* 一段时间里在上课的是谁：拿「上课习惯」里每人的最近几节去对时间（报告只有哈希，名字靠这个认）。对不上回 null。 */
@@ -1994,6 +2059,22 @@ function renderAlerts(){
   // ---- 知道就好 ----
   var ds429 = grp(function(r){ return /deepseek:429/.test(r.up); });
   if(ds429.n) add(know, "warn", "ds429", "DeepSeek 限流 " + num(ds429.n) + " 次", "偶发不用管；持续出现说明并发太高。", whenIn(ds429.last, ds429.who[0]));
+  /* 被 Worker 拒掉（403 = 通行码 / 设备数 / 额度没过）—— 2026-10-21 加：
+     以前只在 Workers Logs 里**列出来**，没人管；实测一天 88 次，全是 `denied: devices`（设备数超上限）。 */
+  var d403 = grp(function(r){ return +r.status === 403; });
+  if(d403.n){
+    var why = "";
+    var lg = state.logs;
+    if(lg && !lg.error && (lg.events || []).length){
+      var reasons = {};
+      (lg.events || []).forEach(function(e){ if(e.denied) reasons[e.denied] = (reasons[e.denied] || 0) + 1; });
+      var rk = Object.keys(reasons);
+      if(rk.length) why = "最近的原因：" + rk.map(function(k){ return (DENIED_NAME[k] || k) + " × " + reasons[k]; }).join("、");
+    }
+    add(know, "warn", "d403", (d403.who.join("、") || "有人") + " 被 Worker 拒了 " + num(d403.n) + " 次（403）",
+      "通行码、设备数上限或额度没过。改通行码的「设备上限」或给他换码；细节在「云端服务 → 转写速度」里。",
+      whenIn(d403.last, d403.who[0]) + (why ? " · " + why : ""));
+  }
   var g403 = grp(function(r){ return /groq:403/.test(r.up); });
   if(g403.n) add(know, "warn", "g403", (g403.who.join("、") || "有人") + " 的转写用不了 Groq（" + num(g403.n) + " 次被拒），全走了千问",
     "Groq 按访客国家拦，不服务中国大陆，换机房也绕不开。新版云端会自动对这个国家跳过 Groq；千问是一次性免费额度，用完不回来。", whenIn(g403.last, g403.who[0]));
@@ -2192,6 +2273,9 @@ function detailRow(c, agg, ser){
   // 设备 / 到期 / 最后在线 三项删了：抽屉就展开在这一行下面，同样的字在正上方一行里已经有了。
   // 「真实音频秒」也删了（2026-10-15）：跟上面「录了多久」后面那个秒数是同一个数。
   put("Jev", agg.jev_reqs + " 次 / " + agg.jev_q + " 题");
+  /* Soniox 实时转写（`rt_s`）：与上面「录了多久」（定稿转写 `asr_s`）**不是同一条路** ——
+     实时那条走 Soniox 直连，Worker 只回收用量，不经过它。 */
+  if(agg.rt_s) put("Soniox 实时转写", fmtDur(agg.rt_s) + " · " + num(agg.rt_reqs) + " 次会话");
   td.appendChild(kv);
 
   var minBox = el("div"); minBox.style.marginBottom = "18px";
@@ -2360,18 +2444,19 @@ function dayTable(c){
   box.appendChild(el("div","dtitle","逐日明细（UTC 日）"));
   var t = el("table");
   var hr = el("tr");
-  [["日期",""],["转写 (分)","r"],["段","r"],["活跃分钟","r"],["翻译","r"],["输入 tok","r"],["命中","r"],["输出 tok","r"],["Jev","r"],["花费","r"]]
+  [["日期",""],["转写 (分)","r"],["实时 (分)","r"],["段","r"],["活跃分钟","r"],["翻译","r"],["输入 tok","r"],["命中","r"],["输出 tok","r"],["Jev","r"],["花费","r"]]
     .forEach(function(x){ hr.appendChild(el("th", x[1], x[0])); });
   var th = el("thead"); th.appendChild(hr); t.appendChild(th);
   var tb = el("tbody"); t.appendChild(tb);
   var n = 0;
   state.days_data.slice().reverse().forEach(function(d){
     var u = (d.rows || []).filter(function(r){ return r.code === c.code; })[0];
-    if(!u || !(u.asr_reqs || u.llm_reqs || u.jev_reqs)) return;
+    if(!u || !(u.asr_reqs || u.llm_reqs || u.jev_reqs || u.rt_s)) return;
     n++;
     var tr = el("tr");
     tr.appendChild(el("td","mono", d.day === utcToday() ? d.day + "（今天）" : d.day));
     tr.appendChild(el("td","r mono", num((u.asr_s || 0)/60, 1)));
+    tr.appendChild(el("td","r mono", u.rt_s ? num(u.rt_s/60, 1) : "—"));
     tr.appendChild(el("td","r mono", num(u.asr_reqs || 0)));
     tr.appendChild(el("td","r mono", u.active_min == null ? "—" : num(u.active_min)));
     tr.appendChild(el("td","r mono", num(u.llm_reqs || 0)));
@@ -2384,7 +2469,8 @@ function dayTable(c){
   });
   if(!n){ box.appendChild(el("div","hint","这段时间没有用量。")); return box; }
   box.appendChild(t);
-  box.appendChild(el("div","hint","「活跃分钟」= 当天有请求的分钟数（逐分钟上线前的日子是 —）。Jev 是「次 / 题」。"));
+  box.appendChild(el("div","hint","「活跃分钟」= 当天有请求的分钟数（逐分钟上线前的日子是 —）。Jev 是「次 / 题」。" +
+    "「实时 (分)」= Soniox 实时转写（Worker 每小时回收用量）；「转写 (分)」是**定稿**转写，两条路不同，别相加。"));
   return box;
 }
 function renderDevices(c, box){

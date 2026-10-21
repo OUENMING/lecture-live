@@ -399,6 +399,36 @@ class R2Raw(unittest.TestCase):
             r = U.r2_raw(sid, "transcript.md", get=lambda url, headers: {"success": True, "result_info": {"is_truncated": False}, "result": []})
         self.assertIn("没有这节课", r["error"])
 
+    def test_诊断包解开给文本成员(self):
+        """诊断包（extra.tar.gz）：面板自己解开看 —— 不用再让用户把包发过来。"""
+        import cl_admin_ui as U
+        import io
+        import tarfile
+        sid = "0123456789abcdef"
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for name, text in (("diag.json", '{"deps": {"missing": ["websockets"]}}'),
+                               ("env.json", '{"classlive_version": "3.10.2"}'),
+                               ("note.md", "# 笔记"),
+                               ("live.jsonl", "逐句日志不该整段倒出来" * 50)):
+                data = text.encode("utf-8")
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        blob = buf.getvalue()
+        listing = {"success": True, "result_info": {"is_truncated": False}, "result": [
+            {"key": f"classlive-test/{sid}/extra.tar.gz", "size": len(blob), "last_modified": "2026-10-21T17:50:38Z"}]}
+        with tempfile.TemporaryDirectory() as d, _home_with(d, cf__analytics__token="cfat_SECRET", cf__account__id="acct"):
+            r = U.r2_raw(sid, "extra.tar.gz", get=lambda url, headers: listing,
+                         fetch=lambda url, headers: (200, blob))
+        self.assertEqual(r["what"], "extra.tar.gz")
+        self.assertIn("diag.json", r["files"])
+        self.assertIn("websockets", r["files"]["diag.json"])
+        self.assertIn("3.10.2", r["files"]["env.json"])
+        # 逐句日志只在清单里，不整段给
+        self.assertNotIn("live.jsonl", r["files"])
+        self.assertIn("live.jsonl", [m["name"] for m in r["members"]])
+
 
 class TzCase(unittest.TestCase):
     """按**各自时区**显示时刻（美国 / 中国用户）。
@@ -1042,6 +1072,9 @@ REPORT = {
                "streamq_dwell_ms": {"n": 871, "p50": 4.1, "p90": 10.8}},
         "terms": {"calls": 58, "picked": 480, "empty": 0},
         "live": {"calls_total": 2, "failed_calls": 0, "chapters": 0, "atoms": 7},
+        "vad": {"cuts": 55, "hard_cuts": 158, "dropped": 0, "dropped_s": 0.0, "weak_blocks": 33,
+                "vad_resets": 82, "blind_dropped": 0, "sentence_cuts": 0},
+        "norm": {"blocks": 22279, "capped": 3230, "clamped": 4619, "gain_db_max": 29.8},
     },
     "asr": {"segments": 410, "words": 5000, "empty_pct": 1.2, "final_empty_pct": 0.5, "fell_back_pct": 3.0,
             "source_pct": {"groq": 90.0, "local-whisper": 10.0}},
@@ -1084,6 +1117,14 @@ class ReportSummary(unittest.TestCase):
         self.assertEqual(r["corr"]["changed_pct"], 12.0)
         for k in ("stream", "region_probe", "duty", "device", "energy", "capture"):
             self.assertIn(k, r["blocks"])
+        # 2026-10-21 加：`vad` / `norm` 进了白名单（查丢句的关键量）
+        self.assertIn("vad", r["blocks"])
+        self.assertIn("norm", r["blocks"])
+        self.assertEqual(r["vad"]["hard_cuts"], 158)
+        self.assertEqual(r["vad"]["dropped_s"], 0.0)
+        self.assertEqual(r["vad"]["weak_blocks"], 33)
+        self.assertEqual(r["vad"]["vad_resets"], 82)
+        self.assertEqual((r["norm"]["capped"], r["norm"]["clamped"]), (3230, 4619))
 
     def test_绝不漏文本路径或逐段明细(self):
         out = json.dumps(self._sum(), ensure_ascii=False)

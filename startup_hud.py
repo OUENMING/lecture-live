@@ -32,7 +32,7 @@ import os
 WIDTH = 360.0
 HEIGHT = 72.0
 MARGIN = 24.0
-TITLE = "ClassLive 正在准备…"
+TITLE = "烤菠萝 正在准备…"
 SUB = "马上开始；第一次启动会多等一会儿"
 #: 主流程会用的状态文案。`main` / 探针都从这里取，避免两边各写一份漂移。
 TEXT_AUDIO = "正在加载语音模型…"

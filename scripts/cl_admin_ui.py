@@ -481,7 +481,12 @@ def r2_reports(get=None, raw=None, sessions_dir=None, ledger=None, max_fetch=R2_
 
 
 #: 面板「看原文」能看哪几样。**不脱敏**（2026-10-21 作者定：都是用户授权过的课）。
-R2_RAW_FILES = ("report.json", "transcript.md", "extra.tar.gz")
+R2_RAW_FILES = ("report.json", "transcript.md", "extra.tar.gz", "note.html")
+
+#: 交互版 HTML 里的 KaTeX 资产是**相对引用**（`.classlive-assets/katex/<ver>/…`）——
+#: 面板把它当页面打开时，那些路径要改指到**本机**的副本（仓库 `vendor/katex/`），
+#: 否则公式会退回 TeX 源码（页面还在，公式没了）。
+KATEX_LOCAL = pathlib.Path(__file__).resolve().parent.parent / "vendor" / "katex"
 
 #: 诊断包里**看**的那几个成员（文本）。其余（live.jsonl / blocks.npz / atoms.jsonl …）只列名字与大小 ——
 #: 它们是逐句/逐块数据，展开就是整节课，面板里不整段倒出来。
@@ -534,6 +539,9 @@ def r2_raw(sid, what="report.json", get=None, fetch=None, max_bytes=4_000_000) -
         return {"error": f"取不到原文：HTTP {status}"}
     if what == "extra.tar.gz":
         return _diag_pack(body)
+    if what == "note.html":
+        return {"id": sid, "what": what, "bytes": len(body), "text": body,
+                "view": f"/note/{sid}"}                      # 面板能直接把它当页面打开
     if isinstance(body, bytes):
         body = body.decode("utf-8", "replace")
     body = str(body or "")
@@ -1421,6 +1429,28 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
             except OSError as e:
                 self._json(500, {"error": f"读不到模板 {PAGE.name}：{e}"})
+        elif path.startswith("/assets/katex/"):
+            # 交互版 HTML 里的 KaTeX 资产是相对引用 → 改指到**本机**副本（仓库 vendor/katex/）。
+            rest = path[len("/assets/katex/"):]
+            f = KATEX_LOCAL / rest
+            try:
+                if not f.is_file() or not f.resolve().is_relative_to(KATEX_LOCAL.resolve()):
+                    return self._json(404, {"error": "没有这个资产"})
+                ctype = "font/woff2" if f.suffix == ".woff2" else (
+                    "text/css" if f.suffix == ".css" else "application/javascript")
+                self._send(200, f.read_bytes(), ctype)
+            except OSError as e:
+                self._json(404, {"error": f"资产读不到：{e}"})
+        elif path.startswith("/note/"):
+            # 交互版（详细版）笔记：当页面打开。⚠️ 只在本机环回、只读、不落盘。
+            sid = path[len("/note/"):].strip("/")
+            got = r2_raw(sid, "note.html")
+            if "error" in got:
+                return self._json(404, {"error": got["error"]})
+            page = str(got.get("text") or "")
+            # 把相对资产路径改成面板自己的（否则公式退回 TeX 源码）
+            page = re.sub(r"\.classlive-assets/katex/", "/assets/katex/", page)
+            self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
         else:
             self._json(404, {"error": "not found"})
 

@@ -153,6 +153,8 @@ tr.detail>td{background:var(--recessed);padding:16px 16px 18px 18px;white-space:
 pre.raw{font-family:var(--mono);font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;
   background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;margin:0 0 10px;color:var(--ink)}
 .rawbar{display:flex;gap:8px;flex-wrap:wrap}
+.btnlink{display:inline-block;font-size:12px;color:var(--accent);text-decoration:none;border-bottom:1px solid var(--line);padding-bottom:1px}
+.btnlink:hover{border-bottom-color:var(--accent)}
 .code{font-family:var(--mono);font-size:13px;font-weight:500;user-select:all;cursor:text}
 
 /* ---- 状态覆盖 ---- */
@@ -1910,10 +1912,19 @@ function detailBtn(s){
     pre.style.maxHeight = "40vh"; pre.style.overflow = "auto";
     box.appendChild(pre);
     var bar = el("div", "rawbar");
-    [["report.json", "看 report.json 原文"], ["transcript.md", "看转录原文"], ["extra.tar.gz", "看诊断包"]].forEach(function(p){
+    [["report.json", "看 report.json 原文"], ["transcript.md", "看转录原文"], ["extra.tar.gz", "看诊断包"], ["note.html", "看详细版"]].forEach(function(p){
       bar.appendChild(btn(p[1], "toggle", function(){
         api("raw", {id: s.id, what: p[0]}).then(function(r){
           if(r.error){ box.appendChild(el("div", "hint", r.error)); return; }
+          if(r.view){                                  /* 交互版（详细版）：直接当页面打开 */
+            var a = el("a", "btnlink", "↗ 打开详细版（交互页）");
+            a.href = r.view; a.target = "_blank"; a.rel = "noopener";
+            box.appendChild(el("div", "dtitle", "详细版笔记"));
+            box.appendChild(a);
+            box.appendChild(el("div", "hint", "3.10.3 起客户端会把这节课的交互版 HTML 一起传上来；" +
+              "这节课是 3.10.2，桶里还没有 —— 只有速览版。"));
+            return;
+          }
           if(r.files){                                    /* 诊断包：一堆文本成员 + 全部成员清单 */
             var head = el("div", "dtitle", "诊断包 · " + num(r.bytes) + " 字节");
             box.appendChild(head);

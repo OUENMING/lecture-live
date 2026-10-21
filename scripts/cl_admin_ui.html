@@ -1529,7 +1529,7 @@ function renderNow(){
   row.appendChild(svcStat("进行中花费", openCost ? ("≈" + money(openCost)) : "—",
     openCost ? "Soniox 未结算" : "没有进行中的会话"));
   row.appendChild(svcStat("今日 Soniox", money(today + openCost),
-    openCost ? ("已结算 " + money(today) + " + 进行中") : "已结算"));
+    openCost ? ("已结算 " + money(today) + " + 进行中") : "已结算（Soniox 的 UTC 日）"));
   row.appendChild(svcStat("余额", bal != null ? money(bal) : "—",
     run != null ? ("按今天 ≈ " + run + " 天") : (sx.balance_error ? "读不到" : "")));
   // 逐路一行：地区 / 码名 / 已多久 / 预计花费；分不出归属的单独标出来，不猜。
@@ -1701,6 +1701,29 @@ function sonioxBody(sx, ae3){
   if(mparts.length){
     var md = el("div", "dtitle", "按模型（近 7 天花费）"); md.style.marginTop = "10px";
     box.appendChild(md); box.appendChild(hBars(mparts, {unit: "US$"}));
+  }
+  /* 逐会话花费（2026-10-21 加）——「今日已结算」那个数**必须能对清**：
+     Soniox 的「日」是 **UTC 日**，而且一节课**跨过 UTC 日界**（当地傍晚开始、次日结束）时整节算在**结束那天**。
+     → 「今日」里可能含**前一晚**的课。不给逐会话明细，这个数看着就像「那节课的钱」。 */
+  var all = (sx.logs || {}).recent || [];
+  var sess = all.filter(function(s){ return s.audio_s >= 30; }).slice(0, 12);   /* 探针（几秒）略 */
+  if(sess.length){
+    var sd = el("div", "dtitle", "逐会话花费（最近 " + sess.length + " 次 · 音频 ≥ 30 秒）"); sd.style.marginTop = "12px";
+    box.appendChild(sd);
+    box.appendChild(mkTable([["码", ""], ["区", ""], ["起止（按他的时区）", ""], ["音频", "r"], ["这一节花了", "r"], ["≈$/小时", "r"]],
+      sess.map(function(s){
+        var tz = tzOf(s.name);
+        var st = s.start_ms, en = s.end_ms;
+        var when = (st ? (tz ? hmIn(st, tz) : hm(st)) : "?") + " → " + (en ? (tz ? hmIn(en, tz) : hm(en)) : "还在跑");
+        /* 跨 UTC 日界的那一节（当地傍晚开始、次日结束）—— Soniox 把它算在**结束那天**。 */
+        if(st && en && Math.floor(st/86400000) !== Math.floor(en/86400000)) when += "（跨 UTC 日界）";
+        var hrs = s.audio_s/3600;
+        return [s.name, (s.region || "?").toUpperCase(), when,
+          num(s.audio_s/60, 1) + " 分", money(s.cost),
+          s.cost && hrs ? "$" + num(s.cost/hrs, 3) : "—"];
+      })));
+    box.appendChild(el("div", "hint", "「≈$/小时」= 这一节的花费 ÷ 音频时长（官方价 $0.12/小时；实测真实课多在 0.11–0.14 之间）。" +
+      "「今日已结算」是 Soniox 的 **UTC 日**：跨日界的课（当地傍晚开始）整节算在**结束那天** —— 所以「今日」里可能含前一晚的课。"));
   }
   return box;
 }

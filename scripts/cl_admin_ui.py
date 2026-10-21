@@ -241,14 +241,29 @@ def _enum(v, n=40):
     return s if 0 < len(s) <= n else ""
 
 
+def _iso_ms(s):
+    """ISO8601（可带 Z）→ epoch ms；解析不了回 None。只用于用量日志的「开始 / 结束」对账。"""
+    import datetime as _dt
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        return int(_dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
 def _block(rep, key):
     b = rep.get("blocks")
     x = b.get(key) if isinstance(b, dict) else None
     return x if isinstance(x, dict) else None
 
 
-def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list) -> dict:
+def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list,
+                    report_at: str = "") -> dict:
     """一份上传的 `report.json` → **只含数字与枚举**的摘要（纯函数，可单测）。
+
+    `report_at` = `report.json` 自己的上传时刻（不是会话组里最后一个文件的 mtime）。
+    告警的「多久以前」用它：补传旧音频不会再把 2 天前的课说成「刚刚」。
 
     ⚠️ 白名单取值，**不是整份透传**：课堂文本、逐段明细（`segments`）、音频 / 会话 / 笔记文件路径
     （`audio_files` / `session_file` / `note_file`）、`events` 时间线、`vad_report` 一律不出现。
@@ -357,6 +372,7 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list) -
     blocks = rep.get("blocks") if isinstance(rep.get("blocks"), dict) else {}
     return {
         "id": sid, "name": name, "files": sorted(str(x) for x in files)[:8], "updated": str(updated or ""),
+        "report_at": str(report_at or updated or ""),
         "generated": gen, "duration_s": _num(rep.get("duration_s")),
         "audio_saved": rep.get("audio_saved") if isinstance(rep.get("audio_saved"), bool) else None,
         "provisional": bool(rep.get("provisional")),          # 课中临时快照（收尾那份没这个键）
@@ -410,11 +426,13 @@ def r2_reports(get=None, raw=None, sessions_dir=None, ledger=None, max_fetch=R2_
         parts = str(o.get("key", "")).split("/")
         if len(parts) < 3:
             continue
-        g = groups.setdefault(parts[1], {"id": parts[1], "last": "", "files": [], "keys": {}})
+        g = groups.setdefault(parts[1], {"id": parts[1], "last": "", "files": [], "keys": {}, "report_at": ""})
         g["last"] = max(g["last"], str(o.get("last_modified") or ""))
         g["files"].append(parts[-1])
         if parts[-1] == "report.json":
             g["keys"]["report"] = str(o.get("key"))
+            # `report.json` 自己的上传时刻 = 下课那一刻的可靠近似（3.10 起收尾先排它再排音频）。
+            g["report_at"] = str(o.get("last_modified") or "")
     cand = sorted((g for g in groups.values() if "report" in g["keys"]), key=lambda g: g["last"], reverse=True)[:max_fetch]
     if raw is None:
         tok = (home / "cf-analytics-token").read_text(encoding="utf-8").strip()
@@ -434,7 +452,7 @@ def r2_reports(get=None, raw=None, sessions_dir=None, ledger=None, max_fetch=R2_
         uid = g["id"]
         try:
             rep = json.loads(raw(g["keys"]["report"], auth))          # `raw(key, headers) -> 正文文本`
-            return _report_summary(rep, uid, mine.get(uid, ""), g["last"], g["files"])
+            return _report_summary(rep, uid, mine.get(uid, ""), g["last"], g["files"], g.get("report_at", ""))
         except Exception as e:                                       # noqa: BLE001  单份坏了不连累别的
             with errs_lock:
                 errors.append(f"{uid}：{type(e).__name__}")
@@ -948,7 +966,7 @@ def soniox_account(get=None, now=None) -> dict:
     # 用量日志（`/v1/usage-logs`）：Soniox 侧的**真值** —— 每条一次会话，带音频秒与码名
     # （client_reference_id = 码名，Worker 签发临时 key 时就带上了）。这是「Worker 发了多少把 key
     # 对 Soniox 实际收了多少秒」的第三方对账口径。
-    logs = {"sessions": 0, "audio_s": 0.0, "by_name": {}, "more": False}
+    logs = {"sessions": 0, "audio_s": 0.0, "by_name": {}, "more": False, "recent": []}
     for region, key in keys.items():
         try:
             lj = _get_json(f"{SONIOX_REGION_API[region]}/v1/usage-logs?start_time={s7}&end_time={u}&limit=1000", key, get)
@@ -968,22 +986,32 @@ def soniox_account(get=None, now=None) -> dict:
             rd["audio_s"] = round(rd["audio_s"] + sec, 1)
             logs["sessions"] += 1
             logs["audio_s"] = round(logs["audio_s"] + sec, 1)
+            # 逐条会话（只留数字与码名）：前端用它判「这条 key 的会话结束了没有」。
+            logs["recent"].append({"region": region, "name": nm,
+                                   "start_ms": _iso_ms(r.get("start_time")),
+                                   "end_ms": _iso_ms(r.get("end_time")),
+                                   "audio_s": round(sec, 1), "cost": _f(r.get("cost_usd"))})
+    logs["recent"] = sorted(logs["recent"], key=lambda x: (x["end_ms"] or x["start_ms"] or 0), reverse=True)[:60]
+    # 并发**按区**各查一次（面板要在 US/EU 行上分别显示「在线几路」；只查第一个区会把 EU 的 0 当成全局）。
+    conc_by: dict = {}
+    for region, key in keys.items():
+        try:
+            cj = _get_json(f"{SONIOX_REGION_API[region]}/v1/concurrency-limits", key, get)
+            proj = cj.get("project") if isinstance(cj.get("project"), dict) else {}
+            org = cj.get("organization") if isinstance(cj.get("organization"), dict) else {}
+            pcur = (proj.get("current") or {}).get("transcribe_concurrent") if isinstance(proj.get("current"), dict) else None
+            plim = (proj.get("limits") or {}).get("transcribe_concurrent") if isinstance(proj.get("limits"), dict) else None
+            ocur = (org.get("current") or {}).get("transcribe_concurrent") if isinstance(org.get("current"), dict) else None
+            olim = (org.get("limits") or {}).get("transcribe_concurrent") if isinstance(org.get("limits"), dict) else None
+            cur, lim = _num(pcur), _num(plim)
+            if lim is None:                                           # 项目没设上限 → 看组织那档（实测上限建在组织上）
+                lim, cur = _num(olim), _num(ocur)
+            conc_by[region] = {"current": cur, "limit": lim}
+        except Exception as e:                                        # noqa: BLE001
+            errs.append(f"{region} 并发读不到：{type(e).__name__}")
+            conc_by[region] = {"current": None, "limit": None}
     first = next(iter(keys))
-    concurrency = {"current": None, "limit": None}
-    try:
-        cj = _get_json(f"{SONIOX_REGION_API[first]}/v1/concurrency-limits", keys[first], get)
-        proj = cj.get("project") if isinstance(cj.get("project"), dict) else {}
-        org = cj.get("organization") if isinstance(cj.get("organization"), dict) else {}
-        pcur = (proj.get("current") or {}).get("transcribe_concurrent") if isinstance(proj.get("current"), dict) else None
-        plim = (proj.get("limits") or {}).get("transcribe_concurrent") if isinstance(proj.get("limits"), dict) else None
-        ocur = (org.get("current") or {}).get("transcribe_concurrent") if isinstance(org.get("current"), dict) else None
-        olim = (org.get("limits") or {}).get("transcribe_concurrent") if isinstance(org.get("limits"), dict) else None
-        cur, lim = _num(pcur), _num(plim)
-        if lim is None:                                               # 项目没设上限 → 看组织那档（实测上限在建在组织上）
-            lim, cur = _num(olim), _num(ocur)
-        concurrency = {"current": cur, "limit": lim}
-    except Exception as e:                                            # noqa: BLE001
-        errs.append(f"并发额度读不到：{type(e).__name__}")
+    concurrency = conc_by.get(first) or {"current": None, "limit": None}
     balance = None
     org = _home_secret(SONIOX_ORG_FILE)
     if org:
@@ -996,6 +1024,7 @@ def soniox_account(get=None, now=None) -> dict:
         except Exception as e:                                        # noqa: BLE001
             errs.append(f"余额读不到：{type(e).__name__}")
     return {"regions": sorted(usage), "usage": usage, "logs": logs, "concurrency": concurrency,
+            "concurrency_by_region": conc_by,
             "balance": balance, "balance_error": "" if balance else
             "没配组织 key（~/.classlive/soniox-org-token）—— 余额看不到；项目 key 查余额会被拒 403", "errors": errs[:4]}
 

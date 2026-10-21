@@ -980,6 +980,14 @@ class ReportSummary(unittest.TestCase):
         self.assertIsNone(r["duty"], "没采到的块是 None，不是空 dict")
         self.assertEqual(U._report_summary([], "s", "", "", [])["id"], "s", "非 dict 输入不许炸")
 
+    def test_report_at_用报告自己的上传时刻(self):
+        """告警的「多久以前」锚在 report.json 的上传时刻，不是组里最后文件的 mtime。"""
+        import cl_admin_ui as U
+        r = U._report_summary({}, "s", "", "2026-10-20T23:49:00Z", [], "2026-10-19T17:56:00Z")
+        self.assertEqual(r["report_at"], "2026-10-19T17:56:00Z")
+        self.assertEqual(U._report_summary({}, "s", "", "2026-10-20T23:49:00Z", [])["report_at"],
+                         "2026-10-20T23:49:00Z", "没给 report_at 时退回 updated，老调用方不炸")
+
 
 class R2Reports(unittest.TestCase):
     """`/api/reports`：列桶 → 挑 report.json → 现取 → 摘要。分页/别人的课/单份坏掉都要对。"""
@@ -1061,6 +1069,9 @@ class SonioxAccount(unittest.TestCase):
         self.assertEqual(r["concurrency"], {"current": 1, "limit": 100})
         self.assertEqual((r["logs"]["sessions"], r["logs"]["audio_s"]), (2, 90.0))
         self.assertEqual(r["logs"]["by_name"]["owen"], {"sessions": 2, "audio_s": 90.0})
+        self.assertEqual(r["concurrency_by_region"], {"us": {"current": 1, "limit": 100}})
+        self.assertEqual([x["audio_s"] for x in r["logs"]["recent"]], [30.0, 60.0],
+                         "逐条会话按结束时间倒序，给前端判「进行中」用")
         self.assertIn("soniox-org-token", r["balance_error"])
         self.assertIsNone(r["balance"])
         self.assertNotIn("SONIOX_SECRET", json.dumps(r))

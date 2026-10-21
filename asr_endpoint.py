@@ -41,6 +41,31 @@ def version_header() -> str:
     return update.version()
 
 
+@lru_cache(maxsize=1)
+def tz_header() -> str:
+    """`X-ClassLive-Tz` 的值：本机的 IANA 时区名（如 `Europe/Dublin` / `America/Los_Angeles`）。
+
+    为什么要有：面板要按**他自己那边**的钟显示「他常在周几几点上课」。只按国家猜是猜不准的 ——
+    美国横跨四个时区（美东/中部/山地/太平洋），同一个 `US` 猜出来的钟能差 3 小时。
+    客户端自己知道，比服务端按 IP 猜准。
+
+    怎么拿：macOS 的 `/etc/localtime` 是个软链，指向
+    `/var/db/timezone/tz/<版本>/zoneinfo/<Area>/<City>` —— 取软链里 `zoneinfo/` 后面的那段。
+    拿不到就**不发**（空串）：让服务端退回它按 IP 判的那个，别发一个假的。
+
+    缓存一次：时区不会在一次运行里变（用户换时区要重启 App）。
+    """
+    import os
+    try:
+        p = os.path.realpath("/etc/localtime")
+    except OSError:
+        return ""
+    if "/zoneinfo/" not in p:
+        return ""
+    tz = p.split("/zoneinfo/", 1)[1].strip("/")
+    return tz[:40] if "/" in tz else ""
+
+
 def token(passcode: str | None = None) -> str:
     """令牌。`CLASSLIVE_ASR_TOKEN` 覆盖（判据用）> 用户填的通行码 `cl-…`（一人一码：转写记到他名下）> 公开常量。"""
     env = os.environ.get("CLASSLIVE_ASR_TOKEN")

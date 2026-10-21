@@ -12,7 +12,9 @@
 ⚠️ 三件事：
   1. 页面上的数字全部来自真的 `asr.bldcam.page`（只读的 list/stats/quota，加你点的管理操作）。
   2. 「估算花费」是**本机乘出来的，不是账**。价目表可改，页面上标了价格日期。
-  3. 面板**只记数字**（`PLAN-passkey.md` §4）：看不到任何课堂文本、音频，也看不到完整码除非你展开。
+  3. **Worker 那边只记数字**（`PLAN-passkey.md` §4）：不记课堂文本、音频、IP、完整码。
+     但**上传桶里的原文能看**（作者 2026-10-21 定「不脱敏」）：`r2_raw` 取某节课的
+     `report.json` / `transcript.md` 原文，只在本机环回、只读、不落盘、令牌不进响应。
 
 判据在 `tests/test_cl_admin_ui.py`（只测转发层与花费计算，用本机假上游，不联网）。
 """
@@ -461,6 +463,58 @@ def r2_reports(get=None, raw=None, sessions_dir=None, ledger=None, max_fetch=R2_
         got = [r for r in ex.map(one, cand) if r is not None]
     return {"bucket": R2_BUCKET, "objects": len(objs), "candidates": len(cand),
             "sessions": got, "errors": errors[:5]}
+
+
+#: 面板「看原文」能看哪几样（文件名 → 是不是二进制）。**不脱敏**（2026-10-21 作者定：都是用户授权过的课）。
+R2_RAW_FILES = ("report.json", "transcript.md")
+
+
+def r2_raw(sid, what="report.json", get=None, fetch=None, max_bytes=4_000_000) -> dict:
+    """取上传桶里某节课的**原文**（`report.json` / `transcript.md`）—— 本机自用，**不做脱敏**。
+
+    作者 2026-10-21 定：桶里的东西都是用户授权过的（自己的课 + 朋友授权的课），面板不需要遮。
+    ⚠️ 仍然**只读、只在本机环回**：token 只在 Python 侧用，从不进响应；也**不落盘**。
+    `sid` = 桶里那个 16 位哈希（会话组 id），`what` = `report.json` / `transcript.md`。
+    `get` 列桶、`fetch` 取对象内容 —— 两个都测试注入。
+    """
+    if what not in R2_RAW_FILES:
+        return {"error": "只能看 " + " / ".join(R2_RAW_FILES)}
+    sid = str(sid or "")
+    if not re.fullmatch(r"[0-9a-f]{16}", sid):
+        return {"error": "会话 id 不认（要 16 位十六进制）"}
+    objs, err = _r2_list(get)
+    if err:
+        return {"error": err}
+    home = pathlib.Path.home() / ".classlive"
+    key = ""
+    for o in objs:
+        parts = str(o.get("key", "")).split("/")
+        if len(parts) >= 3 and parts[1] == sid and parts[-1] == what:
+            key = str(o.get("key"))
+            break
+    if not key:
+        return {"error": f"桶里没有这节课的 {what}"}
+    try:
+        tok = (home / "cf-analytics-token").read_text(encoding="utf-8").strip()
+        acct = (home / "cf-account-id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return {"error": "没配 Cloudflare token（~/.classlive/cf-analytics-token）"}
+    url = f"https://api.cloudflare.com/client/v4/accounts/{acct}/r2/buckets/{R2_BUCKET}/objects/{urllib.parse.quote(key, safe='')}"
+    if fetch is None:
+        def fetch(url, headers):
+            import httpx
+            r = httpx.get(url, headers=headers, timeout=60)
+            return r.status_code, r.text
+    try:
+        status, body = fetch(url, {"Authorization": f"Bearer {tok}"})
+    except Exception as e:                                            # noqa: BLE001
+        return {"error": f"取不到原文：{type(e).__name__}"}
+    if status != 200:
+        return {"error": f"取不到原文：HTTP {status}"}
+    body = str(body or "")
+    if len(body) > max_bytes:
+        return {"error": f"原文太大（{len(body)} 字节 > {max_bytes}），别整个拉"}
+    return {"id": sid, "what": what, "bytes": len(body), "text": body}
 
 
 def _cf_creds():
@@ -1102,13 +1156,15 @@ def _f(v):
 # 领 Soniox 临时 key（开课前的地区探测 `:probe` 不算）。用 Soniox 的人转写走直连、Worker 看不到，
 # 但实时翻译照样经过 Worker —— 所以这三样合起来才认得出每个人的每一节课。
 _AE_HABITS = f"""SELECT toStartOfInterval(timestamp, INTERVAL '10' MINUTE) AS t, blob2 AS name, blob6 AS country,
- blob5 AS ver, SUM(_sample_interval) AS n
+ blob5 AS ver, blob8 AS tz, SUM(_sample_interval) AS n
  FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '30' DAY AND double1 = 200
  AND ((blob1 = '/v1/transcribe') OR (blob1 = '/v1/chat/completions' AND double11 <= 600)
       OR (blob1 = '/v1/soniox/key' AND NOT (blob4 LIKE '%:probe%')))
- GROUP BY t, name, country, ver ORDER BY t LIMIT 20000 FORMAT JSON"""
+ GROUP BY t, name, country, ver, tz ORDER BY t LIMIT 20000 FORMAT JSON"""
 
-#: 国家 → 时区（只按国家猜；美国按太平洋 —— 现在唯一的美国用户在加州上课）。猜不出就用 UTC。
+#: 国家 → 时区（**兜底**）：只按国家猜。美国横跨四个时区（美东 / 中部 / 山地 / 太平洋），
+#: 同一个 `US` 猜出来的钟能差 3 小时 —— 所以有**实测值**（AE 的 blob8：客户端自报，或 Cloudflare 按 IP 判的）
+#: 时一律用实测的；猜不出才按国家猜，再猜不出用 UTC。
 _TZ_BY_COUNTRY = {"IE": "Europe/Dublin", "GB": "Europe/London", "CN": "Asia/Shanghai", "HK": "Asia/Hong_Kong",
                   "MO": "Asia/Macau", "TW": "Asia/Taipei", "SG": "Asia/Singapore", "JP": "Asia/Tokyo",
                   "KR": "Asia/Seoul", "US": "America/Los_Angeles", "CA": "America/Toronto",
@@ -1126,12 +1182,40 @@ def _ver_key(v):
         return ()
 
 
+def _tz_ok(name) -> bool:
+    """这个时区名能用吗（形状对 + `zoneinfo` 真认得）。"""
+    from zoneinfo import ZoneInfo
+    s = str(name or "")
+    if not s or len(s) > 40 or "/" not in s:
+        return False
+    try:
+        ZoneInfo(s)
+    except Exception:                                                 # noqa: BLE001  ZoneInfoNotFoundError 等
+        return False
+    return True
+
+
+def _tz_for(country, measured):
+    """时区名 + 来源：`measured`（实测）/ `country`（按国家猜）/ `utc`（兜底）。
+
+    实测值来自 AE 的 blob8 —— 客户端自报（`X-ClassLive-Tz`）优先，没有就取 Cloudflare 按 IP 判的那个
+    （`request.cf.timezone`）。**实测优先于国家猜**：美国一个国家四个时区，猜不出来。
+    """
+    if measured and _tz_ok(measured):
+        return str(measured), "measured"
+    c = _TZ_BY_COUNTRY.get(str(country or ""))
+    if c and _tz_ok(c):
+        return c, "country"
+    return "UTC", "utc"
+
+
 def habits_of(rows, now_ms=None) -> dict:
     """AE 10 分钟格 → 每个人的上课习惯。**纯函数**（可单测）。
 
     每人：`sessions`（节数，≥ `HABIT_MIN_S`）/ `short`（短打开次数）/ `hours` / `days`（上过课的天数）/
-    `tz` / `by_hour`（本地 0–23 点，按在课上的 10 分钟格数）/ `by_wd`（周一..周日）/ `recent`（最近几节
-    `[开始 ms, 结束 ms]`）/ `ver`（最近一次的客户端版本）/ `country`。另回 `latest_ver`（大家里最新的）。
+    `tz` / `tz_src`（时区来源：实测 / 按国家猜 / UTC）/ `by_hour`（本地 0–23 点，按在课上的 10 分钟格数）/
+    `by_wd`（周一..周日）/ `recent`（最近几节 `[开始 ms, 结束 ms]`）/ `ver`（最近一次的客户端版本）/ `country`。
+    另回 `latest_ver`（大家里最新的）。
     """
     import datetime as dt
     from zoneinfo import ZoneInfo
@@ -1145,17 +1229,20 @@ def habits_of(rows, now_ms=None) -> dict:
             t = dt.datetime.fromisoformat(str(r["t"]).replace(" ", "T")).replace(tzinfo=dt.timezone.utc)
         except (KeyError, ValueError):
             continue
-        d = per.setdefault(nm, {"b": set(), "cty": {}, "ver": ("", None)})
+        d = per.setdefault(nm, {"b": set(), "cty": {}, "ver": ("", None), "tz": ("", None)})
         d["b"].add(t)
         c = _enum(r.get("country"), 4) or "?"
         d["cty"][c] = d["cty"].get(c, 0) + float(r.get("n") or 0)
         v = _enum(r.get("ver"), 16)
         if v and (d["ver"][1] is None or t >= d["ver"][1]):
             d["ver"] = (v, t)
+        z = _enum(r.get("tz"), 40)                     # blob8：实测时区（取**最近一次**报的那个）
+        if z and (d["tz"][1] is None or t >= d["tz"][1]):
+            d["tz"] = (z, t)
     out, latest = {}, ""
     for nm, d in per.items():
         cty = max(d["cty"], key=d["cty"].get) if d["cty"] else "?"
-        tzn = _TZ_BY_COUNTRY.get(cty, "UTC")
+        tzn, tz_src = _tz_for(cty, d["tz"][0])
         tz = ZoneInfo(tzn)
         bs = sorted(d["b"])
         spans: list = []
@@ -1175,7 +1262,7 @@ def habits_of(rows, now_ms=None) -> dict:
         out[nm] = {"sessions": len(long_), "short": len(spans) - len(long_),
                    "hours": round(sum((e - s).total_seconds() + 600 for s, e in long_) / 3600, 2),
                    "days": len({s.astimezone(tz).date() for s, _ in long_}),
-                   "tz": tzn, "country": cty, "by_hour": by_hour, "by_wd": by_wd,
+                   "tz": tzn, "tz_src": tz_src, "country": cty, "by_hour": by_hour, "by_wd": by_wd,
                    "recent": [[ms(s), ms(e) + 600000] for s, e in long_[-12:]],
                    "last": ms(bs[-1]) + 600000 if bs else None, "ver": d["ver"][0]}
         if d["ver"][0] and _ver_key(d["ver"][0]) > _ver_key(latest):
@@ -1293,6 +1380,15 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, AttributeError):
                 fresh = False
             return self._json(200, cached(name, SLOW[name], fresh))
+        if name == "raw":                                             # 看某节课的原文（本机自用，不脱敏、不落盘）
+            raw_body = self.rfile.read(int(self.headers.get("content-length") or 0))
+            try:
+                b = json.loads(raw_body or b"{}")
+            except ValueError:
+                return self._json(400, {"error": "body 不是 JSON"})
+            if not isinstance(b, dict):
+                return self._json(400, {"error": "body 要是对象"})
+            return self._json(200, r2_raw(b.get("id"), str(b.get("what") or "report.json")))
         if name == "cfwin":                                           # 某一段时间的 Worker 延迟（抽屉里每个时段一行）
             raw = self.rfile.read(int(self.headers.get("content-length") or 0))
             try:

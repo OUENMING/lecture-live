@@ -314,6 +314,21 @@ class TestCloudPath(Base):
         self.assertEqual(h["content-type"], "audio/ogg")
         self.assertTrue(q["body"].startswith(b"OggS"))
 
+    def test_10b_带本机时区头(self):
+        """时区头（3.10.3 起）：Worker 拿它按**他自己那边**的钟显示「他常在几点上课」。
+
+        拿不到 IANA 时区名（不是 macOS / 软链不在）就**不发这个头** —— 空的比假的强。
+        """
+        srv = self.serve()
+        self.make().transcribe(audio(3))
+        h = {k.lower(): v for k, v in srv.reqs[0]["headers"].items()}
+        tz = final_asr.asr_endpoint.tz_header()
+        if tz:
+            self.assertEqual(h.get("x-classlive-tz"), tz)
+            self.assertRegex(tz, r"^[A-Za-z_]+/[A-Za-z0-9_+\-]+(/[A-Za-z0-9_+\-]+)?$", "IANA 形状")
+        else:
+            self.assertNotIn("x-classlive-tz", h)
+
     def test_never_raises(self):
         class Boom:
             def transcribe_lp(self, s):

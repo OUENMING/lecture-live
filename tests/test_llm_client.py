@@ -22,6 +22,7 @@ import httpx                                                          # noqa: E4
 import build_notes                                                    # noqa: E402
 import llm_client                                                     # noqa: E402
 import polish                                                         # noqa: E402
+import asr_endpoint                                                   # noqa: E402
 
 
 class _Resp:
@@ -300,9 +301,13 @@ class T(unittest.TestCase):
         c = self.rec.calls[0]
         self.assertEqual(c["url"], "https://asr.bldcam.page/v1/chat/completions")
         ver = (HERE / "VERSION").read_text(encoding="utf-8").strip()   # 独立读，不用被测函数当期望值
-        self.assertEqual(c["headers"], {"Authorization": "Bearer cl-ying-0123456789abcdef",
-                                        "X-ClassLive-Install": "ab" * 16,
-                                        "X-ClassLive-Version": ver})
+        want = {"Authorization": "Bearer cl-ying-0123456789abcdef",
+                "X-ClassLive-Install": "ab" * 16,
+                "X-ClassLive-Version": ver}
+        tz = asr_endpoint.tz_header()                                   # 时区头（3.10.3 起）：拿不到就不发
+        if tz:
+            want["X-ClassLive-Tz"] = tz
+        self.assertEqual(c["headers"], want)
 
     def test_native_key_never_sends_install_id(self):
         self.assertEqual(llm_client.headers("sk-abc"), {"Authorization": "Bearer sk-abc"})

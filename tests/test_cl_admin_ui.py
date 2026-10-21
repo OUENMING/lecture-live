@@ -313,6 +313,125 @@ def _cost_src() -> str:
     return src
 
 
+def _js_funcs(names) -> str:
+    """从页面脚本里按名字抠出几个函数（按大括号配对）。
+
+    用来把「按各自时区显示时刻」那几段**真源码**喂给 node 跑 —— 手抄一份的话，
+    页面改了判据还在绿，等于没测。
+    """
+    m = re.search(r"<script>(.*?)</script>", HTML, re.S)
+    assert m, "抠不到 <script> 块"
+    src = m.group(1)
+    out = []
+    for name in names:
+        i = src.find("function %s(" % name)
+        if i < 0:
+            raise AssertionError(f"页面里没有 function {name}()")
+        j = src.index("{", i)
+        depth = 0
+        for k in range(j, len(src)):
+            if src[k] == "{":
+                depth += 1
+            elif src[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    out.append(src[i:k + 1])
+                    break
+        else:
+            raise AssertionError(f"抠不出 function {name}() 的结尾")
+    return "\n".join(out)
+
+
+def _js_src(names) -> str:
+    """同 `_js_funcs`，另外把 `TZ_NAME` 那张时区中文名的表也抠出来（`var` 不是 function）。"""
+    src = _js_funcs(names)
+    m = re.search(r"<script>(.*?)</script>", HTML, re.S)
+    body = m.group(1)
+    i = body.find("var TZ_NAME = ")
+    if i < 0:
+        raise AssertionError("页面里没有 TZ_NAME 那张表")
+    return src + "\n" + body[i:body.index("};", i) + 1]
+
+
+class R2Raw(unittest.TestCase):
+    """`/api/raw`：看某节课的**原文**（report.json / 转录）。
+
+    2026-10-21 作者定：桶里的东西都经过用户授权，**面板不脱敏**。但仍然：只读、不落盘、token 不进响应。
+    """
+
+    def _listing(self, sid):
+        return {"success": True, "result_info": {"is_truncated": False}, "result": [
+            {"key": f"classlive-test/{sid}/report.json", "size": 7000, "last_modified": "2026-10-18T17:22:00Z"},
+            {"key": f"classlive-test/{sid}/transcript.md", "size": 900, "last_modified": "2026-10-18T17:22:00Z"}]}
+
+    def test_能取到报告与转录(self):
+        import cl_admin_ui as U
+        sid = "0123456789abcdef"
+        seen = {}
+
+        def fetch(url, headers):
+            seen["url"] = url
+            seen["auth"] = headers.get("Authorization")
+            return 200, "你好，这是课堂原文。"
+        with tempfile.TemporaryDirectory() as d, _home_with(d, cf__analytics__token="cfat_SECRET", cf__account__id="acct"):
+            r = U.r2_raw(sid, "report.json", get=lambda url, headers: self._listing(sid), fetch=fetch)
+        self.assertEqual(r["text"], "你好，这是课堂原文。")
+        self.assertEqual(r["what"], "report.json")
+        self.assertIn("0123456789abcdef", seen["url"])
+        self.assertEqual(seen["auth"], "Bearer cfat_SECRET")
+        self.assertNotIn("SECRET", json.dumps(r), "令牌不许进响应")
+
+    def test_只认那两种文件(self):
+        import cl_admin_ui as U
+        with tempfile.TemporaryDirectory() as d, _home_with(d, cf__analytics__token="cfat_SECRET", cf__account__id="acct"):
+            r = U.r2_raw("0123456789abcdef", "audio.001.opus")
+        self.assertIn("report.json", r["error"])
+
+    def test_会话_id_不认(self):
+        import cl_admin_ui as U
+        r = U.r2_raw("../../etc/passwd", "report.json")
+        self.assertIn("会话 id", r["error"])
+
+    def test_桶里没有就说没有(self):
+        import cl_admin_ui as U
+        sid = "0123456789abcdef"
+        with tempfile.TemporaryDirectory() as d, _home_with(d, cf__analytics__token="cfat_SECRET", cf__account__id="acct"):
+            r = U.r2_raw(sid, "transcript.md", get=lambda url, headers: {"success": True, "result_info": {"is_truncated": False}, "result": []})
+        self.assertIn("没有这节课", r["error"])
+
+
+class TzCase(unittest.TestCase):
+    """按**各自时区**显示时刻（美国 / 中国用户）。
+
+    钉住：客户端时区优先、没有就退回本机时间（不瞎猜）；`agoIn` / `hmIn` 真的换了钟。
+    """
+
+    @unittest.skipUnless(shutil.which("node"), "没有 node —— 显示那层的函数住在 HTML 里")
+    def test_按各自的时区出时刻(self):
+        js = (_js_src(["hm", "ago", "agoIn", "hmIn", "tzOf", "tzLabel", "whenIn"])
+              + "\nvar state = {habits: {people: {us: {tz: 'America/Los_Angeles', tz_src: 'measured'},"
+              + " cn: {tz: 'Asia/Shanghai', tz_src: 'country'}}}};"
+              + "\nconst T = Date.UTC(2026, 9, 21, 2, 30);"        # 2026-10-21 02:30Z
+              + "\nconst la = new Intl.DateTimeFormat('en-GB',{timeZone:'America/Los_Angeles',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(T));"
+              + "\nconst sh = new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(T));"
+              + "\nprocess.stdout.write(JSON.stringify({"
+              + "us: whenIn(T, 'us'), usHm: hmIn(T, 'America/Los_Angeles'),"
+              + " cn: whenIn(T, 'cn'), cnHm: hmIn(T, 'Asia/Shanghai'),"
+              + " unknown: whenIn(T, 'nobody'), local: ago(T), tz: tzOf('us'), lbl: tzLabel('Asia/Shanghai')"
+              + "}));")
+        p = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, f"node 报错：{p.stderr[:400]}")
+        g = json.loads(p.stdout)
+        # 02:30Z = 美西前一天 19:30（夏令时）= 北京 10:30
+        self.assertIn(g["usHm"], g["us"], f"美西钟点 {g['usHm']} 没出现在 {g['us']} 里")
+        self.assertIn(g["cnHm"], g["cn"], f"北京钟点 {g['cnHm']} 没出现在 {g['cn']} 里")
+        self.assertNotEqual(g["us"], g["cn"], "两个人的时刻不能一样")
+        # 认不出是谁 → 退回本机时间（不编一个时区出来）
+        self.assertEqual(g["unknown"], g["local"])
+        self.assertEqual(g["tz"], "America/Los_Angeles")
+        self.assertEqual(g["lbl"], "北京时间")
+
+
 class CostCase(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "没有 node —— 算式住在 HTML 里，Python 测不到")
     def test_花费算式与手算对拍(self):
@@ -1135,11 +1254,11 @@ class OpenRouterAccount(unittest.TestCase):
 class HabitsOf(unittest.TestCase):
     """上课习惯：10 分钟格 → 节 / 时长 / 本地时段。"""
 
-    def _rows(self, name, start, n, country="US", ver="3.10.0"):
+    def _rows(self, name, start, n, country="US", ver="3.10.0", tz=""):
         import datetime as dt
         t0 = dt.datetime.fromisoformat(start)
         return [{"name": name, "t": (t0 + dt.timedelta(minutes=10 * i)).strftime("%Y-%m-%d %H:%M:%S"),
-                 "country": country, "ver": ver, "n": 3} for i in range(n)]
+                 "country": country, "ver": ver, "tz": tz, "n": 3} for i in range(n)]
 
     def test_节与时长与本地时段(self):
         import cl_admin_ui as U
@@ -1156,6 +1275,33 @@ class HabitsOf(unittest.TestCase):
         self.assertEqual(b["tz"], "Asia/Shanghai")
         self.assertEqual(b["by_hour"][14] + b["by_hour"][15], 12)
         self.assertEqual(r["latest_ver"], "3.10.0")                   # 3.10.0 > 3.9.6（不按字符串比）
+        self.assertEqual(a["tz_src"], "country")                      # 没有实测值 → 按国家猜
+        self.assertEqual(b["tz_src"], "country")
+
+    def test_实测时区压过国家猜(self):
+        """美国横跨四个时区：实测（客户端自报 / Cloudflare 按 IP 判）压过「US → 太平洋」的猜。"""
+        import cl_admin_ui as U
+        rows = self._rows("a", "2026-10-19 22:00:00", 6, country="US", tz="America/New_York")
+        p = U.habits_of(rows)["people"]["a"]
+        self.assertEqual(p["tz"], "America/New_York")
+        self.assertEqual(p["tz_src"], "measured")
+        self.assertEqual(p["by_hour"][18], 6)                         # UTC 22:00 = 美东 18:00
+
+    def test_坏时区名退回国家猜(self):
+        import cl_admin_ui as U
+        rows = self._rows("a", "2026-10-19 17:00:00", 6, country="CN", tz="Not/AZone")
+        p = U.habits_of(rows)["people"]["a"]
+        self.assertEqual(p["tz"], "Asia/Shanghai")
+        self.assertEqual(p["tz_src"], "country")
+        rows = self._rows("b", "2026-10-19 17:00:00", 6, country="ZZ", tz="")
+        p2 = U.habits_of(rows)["people"]["b"]
+        self.assertEqual((p2["tz"], p2["tz_src"]), ("UTC", "utc"))
+
+    def test_时区取最近一次报的那个(self):
+        import cl_admin_ui as U
+        rows = self._rows("a", "2026-10-19 17:00:00", 3, tz="America/Los_Angeles")
+        rows += self._rows("a", "2026-10-20 17:00:00", 3, tz="America/New_York")
+        self.assertEqual(U.habits_of(rows)["people"]["a"]["tz"], "America/New_York")
 
     def test_间隔超过30分钟拆成两节(self):
         import cl_admin_ui as U

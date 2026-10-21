@@ -147,6 +147,12 @@ tr.detail>td{background:var(--recessed);padding:16px 16px 18px 18px;white-space:
 .acts .fld{width:118px}
 .acts .fld button{width:100%}
 .hint{font-size:11px;color:var(--ink3);margin-top:9px}
+/* 「看」抽屉：已解析的数字 + 原文（report.json / 转录）。面板不脱敏（作者 2026-10-21 定）。 */
+.detailbox{margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--recessed)}
+.detailbox:empty{display:none}
+pre.raw{font-family:var(--mono);font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;
+  background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;margin:0 0 10px;color:var(--ink)}
+.rawbar{display:flex;gap:8px;flex-wrap:wrap}
 .code{font-family:var(--mono);font-size:13px;font-weight:500;user-select:all;cursor:text}
 
 /* ---- 状态覆盖 ---- */
@@ -386,7 +392,8 @@ details.sub>summary:hover{color:var(--ink)}
     </details>
   </section>
 
-  <p class="foot">数据来自 asr.bldcam.page（Worker 的 /v1/admin/*）。面板只记数字：看不到任何课堂文本与音频。</p>
+  <p class="foot">数据来自 asr.bldcam.page（Worker 的 /v1/admin/*）与 Cloudflare（Analytics Engine / R2 / 统计）。
+    Worker 那边只记数字，不记课堂文本与音频；上传桶里的原文（report.json / 转录）可以点「看」展开 —— 那些课都经用户授权。</p>
 </main>
 
 <script>
@@ -934,10 +941,23 @@ function renderDaily(){
    而且看不出「哪天在用」。日历条同一块地方给出节奏，跟任何表都不重复。 */
 function renderPerDay(){ renderHabits(); }
 /* 上课习惯（近 30 天，AE）。「一节课」= 连着有实时请求、长于 20 分钟（后端 `habits_of` 的口径）。
-   时段一律按**他那边的本地时间**（按国家猜时区），一句话说清「常在周几、几点」，下面一条 24 小时条给眼睛看。 */
+   时段一律按**他那边的本地时间**：优先用实测时区（AE blob8 = 客户端自报 / Cloudflare 按 IP 判），
+   没有才按国家猜（美国四个时区，猜不准 —— 后端会标 `tz_src`）。 */
 var WD = ["周一","周二","周三","周四","周五","周六","周日"];
 var TZ_NAME = {"Europe/Dublin":"爱尔兰时间","Europe/London":"英国时间","Asia/Shanghai":"北京时间","Asia/Hong_Kong":"香港时间",
-  "America/Los_Angeles":"太平洋时间","America/Toronto":"东部时间","Asia/Tokyo":"日本时间","Asia/Singapore":"新加坡时间","UTC":"UTC"};
+  "America/Los_Angeles":"太平洋时间","America/Denver":"山地时间","America/Chicago":"中部时间","America/New_York":"美东时间",
+  "America/Toronto":"多伦多时间","America/Vancouver":"温哥华时间","Asia/Tokyo":"日本时间","Asia/Seoul":"韩国时间",
+  "Asia/Singapore":"新加坡时间","Asia/Taipei":"台北时间","Asia/Macau":"澳门时间","Australia/Sydney":"悉尼时间",
+  "Europe/Berlin":"柏林时间","Europe/Paris":"巴黎时间","Europe/Amsterdam":"阿姆斯特丹时间","UTC":"UTC"};
+function tzOf(name){                    /* 这个人的时区（实测优先）；没有就 null —— 宁可退回本机时间，也不瞎猜 */
+  var hb = state.habits; if(!hb || hb.error || !hb.people) return null;
+  var p = hb.people[name]; return (p && p.tz) ? p.tz : null;
+}
+function tzLabel(tz){ return tz ? (TZ_NAME[tz] || tz) : ""; }
+function hmIn(ms, tz){                  /* 钟点，按给定时区写 */
+  try{ return new Intl.DateTimeFormat("en-GB", {timeZone: tz, hour:"2-digit", minute:"2-digit", hour12:false}).format(new Date(ms)); }
+  catch(e){ return hm(ms); }
+}
 function agoIn(ms, tz){                    /* 同 `ago`，但按**他那边**的时区写（和「常在几点」同一个钟） */
   try{
     var f = function(t){ return new Intl.DateTimeFormat("en-CA", {timeZone: tz, year:"numeric", month:"2-digit", day:"2-digit"}).format(new Date(t)); };
@@ -946,6 +966,8 @@ function agoIn(ms, tz){                    /* 同 `ago`，但按**他那边**的
     return (d === today ? "今天 " : d === yest ? "昨天 " : d.slice(5) + " ") + hmz;
   }catch(e){ return ago(ms); }
 }
+/* 某个人的时刻：按他的时区写；认不出是谁就退回本机时间。 */
+function whenIn(ms, name){ var tz = tzOf(name); return tz ? agoIn(ms, tz) : ago(ms); }
 function isLab(name){ return /^test/.test(name) || name === "public"; }      /* 实验码 / 公共码：不是一个人 */
 function hourRanges(h){                     /* 24 格 → 「10–11 点、17–18 点」：只取到峰值一半以上的那些小时，连着的并成一段 */
   var mx = Math.max.apply(null, h); if(!mx) return "";
@@ -981,7 +1003,9 @@ function renderHabits(){
     if(days || hrs){
       say.appendChild(document.createTextNode("常在 "));
       say.appendChild(el("em", null, [days, hrs].filter(Boolean).join(" · ")));
-      say.appendChild(document.createTextNode("（" + (TZ_NAME[p.tz] || p.tz) + "）"));
+      /* 时区来源写清楚：实测（客户端自报 / Cloudflare 按 IP 判）还是按国家猜的（美国那四个时区猜不准）。 */
+      var tzs = (TZ_NAME[p.tz] || p.tz) + (p.tz_src === "measured" ? "·实测" : p.tz_src === "country" ? "·按国家猜" : "");
+      say.appendChild(document.createTextNode("（" + tzs + "）"));
     }
     if(p.recent && p.recent.length){
       var last = p.recent[p.recent.length - 1];
@@ -996,7 +1020,8 @@ function renderHabits(){
       bar.appendChild(c);
     });
     r.appendChild(bar);
-    r.title = p.days + " 天上过课" + (p.short ? " · 另有 " + p.short + " 次短打开（不到 20 分钟）" : "") + (p.ver ? " · 版本 " + p.ver : "");
+    r.title = p.days + " 天上过课" + (p.short ? " · 另有 " + p.short + " 次短打开（不到 20 分钟）" : "") + (p.ver ? " · 版本 " + p.ver : "") +
+      " · 时区 " + (p.tz || "?") + (p.tz_src === "measured" ? "（实测）" : p.tz_src === "country" ? "（按国家猜，美国有四个时区）" : "（没猜出来，按 UTC）");
     return r;
   }
   people.forEach(function(p){ g.appendChild(row(p, false)); });
@@ -1008,7 +1033,8 @@ function renderHabits(){
   }
   box.appendChild(g);
   var since = Object.keys(hb.people || {}).length ? "" : "";
-  box.appendChild(el("div","hint", "一节课 = 连续有实时请求超过 20 分钟 · 时区按所在国家猜 · 悬停看每小时分钟数" + since));
+  box.appendChild(el("div","hint", "一节课 = 连续有实时请求超过 20 分钟 · 时区优先用**实测值**（客户端自报 / Cloudflare 按 IP 判），" +
+    "没有才按所在国家猜（美国横跨四个时区，猜不准 —— 名字后会标「按国家猜」）· 悬停看每小时分钟数" + since));
 }
 
 /* ---------- 渲染：额度 ----------
@@ -1352,20 +1378,22 @@ function renderService(){
     var aeParts = [mkTable([["码",""],["路径",""],["请求","r"],["p50","r"],["p95","r"],["出错","r"],["音频 (分)","r"],["token","r"],["最后",""]],
       ae.by_code.map(function(r){
         return [r.name, P[r.path] || r.path, num(+r.n), ms(+r.p50), ms(+r.p95), el("span", +r.errors ? "bad" : "mut", num(+r.errors)),
-          num(+r.audio_s / 60, 1), num(+r.tokens), ago(Date.parse(String(r.last).replace(" ", "T") + "Z"))];
+          num(+r.audio_s / 60, 1), num(+r.tokens), whenIn(Date.parse(String(r.last).replace(" ", "T") + "Z"), r.name)];
       }))];
     var geo = {};
     ae.geo.forEach(function(r){ var g = geo[r.name] = geo[r.name] || {n:0, c:{}, o:{}, v:{}};
       g.n += +r.n; g.c[r.country || "?"] = (g.c[r.country || "?"] || 0) + (+r.n); g.o[r.colo || "?"] = (g.o[r.colo || "?"] || 0) + (+r.n);
       if(r.ver) g.v[r.ver] = (g.v[r.ver] || 0) + (+r.n); });
     function topk(o){ return Object.keys(o).sort(function(a, b){ return o[b] - o[a]; }).slice(0, 5).map(function(k){ return k + " " + o[k]; }).join(" · "); }
-    aeParts.push(sub2("每人在哪 · 走哪个节点 · 客户端版本"));
-    aeParts.push(mkTable([["码",""],["请求","r"],["国家",""],["节点",""],["版本",""]], Object.keys(geo).map(function(k){
-      var g = geo[k]; return [k, num(g.n), topk(g.c), topk(g.o), topk(g.v) || "（没报）"]; })));
+    aeParts.push(sub2("每人在哪 · 走哪个节点 · 客户端版本 · 他的时区"));
+    aeParts.push(mkTable([["码",""],["请求","r"],["国家",""],["节点",""],["版本",""],["时区",""]], Object.keys(geo).map(function(k){
+      var g = geo[k], tz = tzOf(k);
+      return [k, num(g.n), topk(g.c), topk(g.o), topk(g.v) || "（没报）",
+        tz ? (tzLabel(tz) + (state.habits && state.habits.people && state.habits.people[k] && state.habits.people[k].tz_src === "country" ? "（按国家猜）" : "（实测）")) : "—"]; })));
     if(ae.bad.length){
       aeParts.push(sub2("最近的失败请求（≥ 400）"));
       aeParts.push(mkTable([["时刻",""],["码",""],["路径",""],["状态","r"],["耗时","r"],["上游",""]], ae.bad.map(function(r){
-        return [ago(Date.parse(String(r.t).replace(" ", "T") + "Z")), r.name, P[r.path] || r.path, el("span","bad", String(r.status)), ms(+r.ms), r.up];
+        return [whenIn(Date.parse(String(r.t).replace(" ", "T") + "Z"), r.name), r.name, P[r.path] || r.path, el("span","bad", String(r.status)), ms(+r.ms), r.up];
       })));
     }
     box.appendChild(fold("每个人的请求明细 · " + Object.keys(geo).length + " 人" + (ae.bad.length ? " · 失败 " + ae.bad.length + " 条" : ""), aeParts, "ae"));
@@ -1381,15 +1409,17 @@ function renderService(){
     var rows = Object.keys(sp).sort().reverse().map(function(k){
       var d = sp[k], a = d.asr, l = d.live, n = d.note, o = d.old;
       var wpm = a && +a.words && +a.audio_s ? Math.round(+a.words / (+a.audio_s / 60)) : 0;
-      return [d.day, d.name,
+      return [d.day, d.name, tzOf(d.name) ? tzLabel(tzOf(d.name)) : "—",
         dash(a ? ms(+a.p50) + " / " + ms(+a.p95) : ""),
         dash(wpm ? wpm + " 词" : ""),
         dash(l && +l.first50 ? ms(+l.first50) : (o ? el("span", "mut", ms(+o.p50) + "*") : "")),
         dash(n ? ms(+n.done50) + " / " + ms(+n.done95) + " · " + num(+n.n) + " 次" : "")];
     });
     var spNote = el("div", "hint", "云端处理的耗时，不含用户到 Cloudflare 那段网络。「一般 / 慢的时候」= 中位数 / 95 分位。" +
-      "每分钟词数 = 转出来的英文词 ÷ 音频分钟。带 * 的是加列之前的数（到响应头为止，不是首字）。");
-    box.appendChild(fold("速度 · 每人每天", [mkTable([["日期",""],["码",""],["转写（一般 / 慢）","r"],["每分钟词数","r"],
+      "每分钟词数 = 转出来的英文词 ÷ 音频分钟。带 * 的是加列之前的数（到响应头为止，不是首字）。" +
+      "⚠️ **日期是 UTC 日**（Analytics Engine 只能按 UTC 切，一天从哪边开始改不了）；「时区」那列是这个人自己的时区 —— " +
+      "差一个时区的人，晚课可能落到第二天，别把它当成本地日。");
+    box.appendChild(fold("速度 · 每人每天", [mkTable([["日期",""],["码",""],["时区",""],["转写（一般 / 慢）","r"],["每分钟词数","r"],
       ["翻译首字","r"],["课后笔记（一般 / 慢）","r"]], rows), spNote], "speed"));
   }
   if(!(ae && !ae.error && ae.by_code.length) && ae) box.appendChild(fold("每个人的请求明细 · " + (ae.error ? "读不到" : "近 24 h 还没有"),
@@ -1407,10 +1437,12 @@ function renderService(){
         String(g.audio), g.bytes >= 1e6 ? (g.bytes/1e6).toFixed(1) + " MB" : Math.round(g.bytes/1e3) + " KB"];
     }));
     box.appendChild(fold("上传的课 · " + r2.sessions.length + " 节 · 别人的 " + others.length + " 节 · " + num(r2.objects) + " 个对象",
-      [t, el("div", "hint", "「别人」= 本机 sessions/ 和上传账本里都没有这个会话名。自己的只列最近 5 节。")], "r2"));
+      [t, el("div", "hint", "「别人」= 本机 sessions/ 和上传账本里都没有这个会话名。自己的只列最近 5 节。" +
+        "这里的时刻是**本机时间**（上传动作发生在谁的机器上不知道）；每节课按各自时区显示的时刻在「测试模式」那张表里。")], "r2"));
   } else if(r2) box.appendChild(fold("上传的课 · 读不到", [el("div", "hint", r2.error)], "r2"));
 
-  box.appendChild(el("div", "hint", "只记数字：码的名字、路径、状态、毫秒、音频秒、token、版本、国家、节点。不记文本、音频、IP、完整码。"));
+  box.appendChild(el("div", "hint", "Worker 记的只有数字：码的名字、路径、状态、毫秒、音频秒、token、版本、国家、节点、时区。不记文本、音频、IP、完整码。" +
+    "（课堂文本只在**上传桶**里：测试模式那节的 report.json 与 transcript.md —— 点「看」能看原文，作者 2026-10-21 定「不脱敏」。）"));
 }
 
 
@@ -1495,7 +1527,8 @@ function renderNow(){
           else if(st.sealed_n != null) tail += " · " + num(st.sealed_n) + " 句";
         }else tail = "没采流";
         var line = el("div", "nowline");
-        line.appendChild(el("span", null, "最近一节：" + (last.name || reportWho(last) || "别人") + " · " + ago(Date.parse(last.report_at)) +
+        var lastWho = last.name || reportWho(last);
+        line.appendChild(el("span", null, "最近一节：" + (lastWho || "别人") + " · " + whenIn(Date.parse(last.report_at), lastWho) +
           " · " + fmtDur(last.duration_s) + " · " + tail));
         hint.appendChild(line);
       }
@@ -1507,8 +1540,10 @@ function renderNow(){
       line.appendChild(el("i", "live-dot"));
       line.appendChild(el("b", null, r.region.toUpperCase() + " " + r.current + " 路在线"));
       r.sessions.forEach(function(s){
+        var tz = tzOf(s.name);
         line.appendChild(el("span", "sep", "·"));
-        line.appendChild(el("span", null, s.name + " 自 " + hm(s.ms) + "（" + nowAge(s.ms) + "，≈" + money(liveCost(Date.now() - s.ms)) + "）"));
+        line.appendChild(el("span", null, s.name + " 自 " + (tz ? hmIn(s.ms, tz) + " " + tzLabel(tz) : hm(s.ms)) +
+          "（" + nowAge(s.ms) + "，≈" + money(liveCost(Date.now() - s.ms)) + "）"));
       });
       if(r.unknown) line.appendChild(el("span", "warn", "· " + r.unknown + " 路归属不明"));
       hint.appendChild(line);
@@ -1795,6 +1830,32 @@ function renderDash310(){
 }
 
 /* ---------- 渲染：测试模式（每节上传了 report.json 的课）---------- */
+function detailBtn(s){
+  /* 「看」：把这节课**已解析的全部数字**摊开，再给两个原文入口。
+     2026-10-21 作者定：桶里的东西都经过用户授权，面板**不做脱敏**（原文也能看）。 */
+  return btn("看", "toggle", function(){
+    var box = document.getElementById("tmdetail");
+    if(!box) return;
+    box.innerHTML = "";
+    box.appendChild(el("div", "dtitle", (s.name || s.id) + " · " + (s.report_at || s.updated || "") + " · " + fmtDur(s.duration_s)));
+    var pre = el("pre", "raw", JSON.stringify(s, null, 1));
+    pre.style.maxHeight = "40vh"; pre.style.overflow = "auto";
+    box.appendChild(pre);
+    var bar = el("div", "rawbar");
+    [["report.json", "看 report.json 原文"], ["transcript.md", "看转录原文"]].forEach(function(p){
+      bar.appendChild(btn(p[1], "toggle", function(){
+        api("raw", {id: s.id, what: p[0]}).then(function(r){
+          if(r.error){ box.appendChild(el("div", "hint", r.error)); return; }
+          box.appendChild(el("div", "dtitle", p[0] + " · " + num(r.bytes) + " 字节"));
+          var t = el("pre", "raw", r.text);
+          t.style.maxHeight = "60vh"; t.style.overflow = "auto";
+          box.appendChild(t);
+        }).catch(function(e){ box.appendChild(el("div", "hint", String((e && e.message) || e))); });
+      }));
+    });
+    box.appendChild(bar);
+  });
+}
 function renderTestMode(){
   var box = $("#testmode"); box.innerHTML = "";
   var rep = state.reports;
@@ -1809,7 +1870,7 @@ function renderTestMode(){
   var view = state.tmAll ? ss : recent;
   box.appendChild(mkTable(
     [["上课", ""], ["是谁", ""], ["时长", "r"], ["音频", ""], ["实时字幕", ""], ["封口句", "r"], ["上移 p50", "r"],
-     ["术语", "r"], ["区域", ""], ["矫正率", "r"], ["块", "r"]],
+     ["术语", "r"], ["区域", ""], ["矫正率", "r"], ["块", "r"], ["看", ""]],
     view.map(function(s){
       var st = s.stream, rp = s.region;
       var engine;
@@ -1822,15 +1883,20 @@ function renderTestMode(){
       var who = s.name || reportWho(s);
       var whoN = s.name ? s.name : who ? el("span", null, "≈ " + who) : el("span", "dim", s.id);
       if(!s.name && who){ whoN.title = "报告只有哈希；按上课时间对出来的（报告 " + s.id + "）"; }
-      return [ago(Date.parse(s.report_at || s.updated)), whoN,
+      /* 别人的课按**他自己那边**的钟显示（报告上传时刻是 UTC；不换算就会差 8–16 小时）。 */
+      var sTz = who ? tzOf(who) : null;
+      if(sTz && !s.name){ whoN.appendChild(el("span", "dim", " · " + tzLabel(sTz))); }
+      return [(sTz ? agoIn(Date.parse(s.report_at || s.updated), sTz) : ago(Date.parse(s.report_at || s.updated))), whoN,
         dash(s.duration_s, fmtDur(s.duration_s)), s.audio_saved ? "有" : dash(null),
         engine, dash(st && st.sealed_n, st && st.sealed_n != null ? num(st.sealed_n) : null),
         dash(st && st.p50, st && st.p50 != null ? ms(st.p50 * 1000) : null),
         dash(st && st.terms_n, st && st.terms_n != null ? num(st.terms_n) : null),
         rp ? ((rp.selected || rp.default || "?") + (rp.switched ? "（切过）" : "")) : dash(null),
         dash(s.corr && s.corr.changed_pct, s.corr && s.corr.changed_pct != null ? s.corr.changed_pct + "%" : null),
-        num(s.blocks.length)];
+        num(s.blocks.length), detailBtn(s)];
     })));
+  var dbox = el("div", "detailbox"); dbox.id = "tmdetail";
+  box.appendChild(dbox);
   if(older){
     var tg = btn(state.tmAll ? "只看近 7 天" : "显示更早的 " + older + " 节", "toggle",
       function(){ state.tmAll = !state.tmAll; renderTestMode(); });
@@ -1838,7 +1904,8 @@ function renderTestMode(){
   }
   var h = el("div", "hint", "「菠萝丁」暗号 = 把这节切回本地草稿 + 云端定稿（A/B 用），会写进退回原因（manual）。红字 = 真的没连上。" +
     "「≈ 名字」= 报告里只有哈希，按上课时间对出来的。块 = 这节 report.json 里采到的块数（3.10 满配 12，3.10.1 起 13）。" +
-    "「上课」= report.json 的上传时刻（下课附近）；补传音频不会改这一列。");
+    "「上课」= report.json 的上传时刻（下课附近）；补传音频不会改这一列。" +
+    "⚠️ **时刻按这个人自己的时区写**（名字后面标了时区）—— 报告里是 UTC，不换算就差 8–16 小时。");
   h.style.marginTop = "8px";
   box.appendChild(h);
 }
@@ -1896,10 +1963,10 @@ function renderAlerts(){
   }
   var ds402 = grp(function(r){ return /deepseek:402/.test(r.up); });
   if(ds402.n) add(must, "bad", "ds402", "DeepSeek 拒了 " + num(ds402.n) + " 次（402 = 余额不足）",
-    "账户只剩赠送额度，充值部分是负数。去 DeepSeek 后台充值；不充的话之后的翻译和笔记可能接着失败。", ago(ds402.first) + " 起");
+    "账户只剩赠送额度，充值部分是负数。去 DeepSeek 后台充值；不充的话之后的翻译和笔记可能接着失败。", whenIn(ds402.first, ds402.who[0]) + " 起");
   var dead = grp(function(r){ return r.path === "/v1/transcribe" && +r.status >= 500; });
   if(dead.n) add(must, "bad", "asr5xx", "转写全挂 " + num(dead.n) + " 次（Groq 和千问都没拿到）",
-    "看下面「云端服务 → 转写速度」里的异常事件。", ago(dead.last));
+    "看下面「云端服务 → 转写速度」里的异常事件。", whenIn(dead.last, dead.who[0]));
   // Soniox 余额 < 7 天：课上到一半会退回本地，属于「现在要动手」。
   if(sx && !sx.error && sx.balance && sx.balance.available != null){
     var spent7 = 0; (sx.regions || []).forEach(function(r){ spent7 += (((sx.usage || {})[r] || {}).cost_7d || 0); });
@@ -1921,15 +1988,15 @@ function renderAlerts(){
         : "看那节的诊断包（extra.tar.gz）里的 app.log 找原因。";
       add(age < 86400000 ? must : know, "bad", "sx-" + s.id,
         (who || "有人") + " 那节课的实时字幕没连上 Soniox（" + (s.stream.detail || s.stream.reason) + "），整节退回了旧识别",
-        act, ago(at) + (age >= 86400000 ? "（旧报告）" : ""));
+        act, whenIn(at, who) + (age >= 86400000 ? "（旧报告）" : ""));
     });
   }
   // ---- 知道就好 ----
   var ds429 = grp(function(r){ return /deepseek:429/.test(r.up); });
-  if(ds429.n) add(know, "warn", "ds429", "DeepSeek 限流 " + num(ds429.n) + " 次", "偶发不用管；持续出现说明并发太高。", ago(ds429.last));
+  if(ds429.n) add(know, "warn", "ds429", "DeepSeek 限流 " + num(ds429.n) + " 次", "偶发不用管；持续出现说明并发太高。", whenIn(ds429.last, ds429.who[0]));
   var g403 = grp(function(r){ return /groq:403/.test(r.up); });
   if(g403.n) add(know, "warn", "g403", (g403.who.join("、") || "有人") + " 的转写用不了 Groq（" + num(g403.n) + " 次被拒），全走了千问",
-    "Groq 按访客国家拦，不服务中国大陆，换机房也绕不开。新版云端会自动对这个国家跳过 Groq；千问是一次性免费额度，用完不回来。", ago(g403.last));
+    "Groq 按访客国家拦，不服务中国大陆，换机房也绕不开。新版云端会自动对这个国家跳过 Groq；千问是一次性免费额度，用完不回来。", whenIn(g403.last, g403.who[0]));
   if(q && q.qwen){
     if(q.qwen.exhausted && q.qwen.exhausted.length) add(know, "warn", "qwen", "千问额度已用完：" + q.qwen.exhausted.join("、"),
       "这些模型不会再被调用；中国用户的转写会退回本机识别。", "");

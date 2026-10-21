@@ -178,10 +178,21 @@ function reportUsage(env, ctx, payload) {
 // 形状合法性由 passes-core.usage() 自己判 —— 存储不变量归那个模块管。
 const clientVer = (request) => (request.headers.get("x-classlive-version") || "").slice(0, 16);
 
+// 客户端自报的时区（3.10.3 起发）：IANA 名（如 `America/Los_Angeles`）。
+// ⚠️ 这个头**由客户端控制**（谁都能填任意串）—— 所以只当「显示用的提示」，
+// 面板按它显示这个人的本地时间；算不准也只影响「他常在几点上课」那张图，不会算错钱。
+// 形状合法性：只留 `A…/B…` 这种 IANA 形状，最长 40 字符。
+const clientTz = (request) => {
+  const s = String(request.headers.get("x-classlive-tz") || "").slice(0, 40);
+  return /^[A-Za-z_]+(\/[A-Za-z0-9_+\-]+){1,2}$/.test(s) ? s : "";
+};
+
 // ---- 逐请求事件（Analytics Engine，绑定名 AE；docs/PLAN-passkey.md §4「只记数字」）----
 // 每个非管理请求写一条，**写在请求结束时**（流式翻译等 usage 到了再写）。只放：
 //   index  = 码的名字段（`cl-<名字>-…` 的 <名字>；公开令牌 "public"；没认证 "-"）—— **不写完整码**
-//   blobs  = [路径, 码名, 模型, 上游尝试（"groq:200,qwen3-asr-flash:timeout"）, 客户端版本, 国家两字母, 节点三字母]
+//   blobs  = [路径, 码名, 模型, 上游尝试（"groq:200,qwen3-asr-flash:timeout"）, 客户端版本, 国家两字母, 节点三字母,
+//             时区（blob8，2026-10-21 加：客户端自报优先，没有就按 Cloudflare 判的 `request.cf.timezone`；
+//             目的是面板按**他自己那边**的钟显示「他常在几点上课」——国家只能猜到时区，猜不细到美东/美西）]
 //   doubles= [状态码, 毫秒, 音频秒, 输入 token, 输出 token, 缓存命中 token, Jev 题数,
 //             转写词数, 首字毫秒, 整段完成毫秒, 请求的 max_tokens]（后四列 2026-10-15 加：速度面板用；首字 / 完成只对翻译有）
 // ⚠️ 不写文本、音频、IP、完整码。列的顺序是 SQL 的 blob1… / double1…，改了要连 scripts/cl_admin_ui.py 一起改。
@@ -190,6 +201,7 @@ function newEvent(request, path, t0 = Date.now()) {
   return {
     path: AE_PATHS.has(path) ? path : "other", name: "-", model: "", up: "", ver: clientVer(request),
     country: String(request.cf?.country || "").slice(0, 2), colo: String(request.cf?.colo || "").slice(0, 4),
+    tz: clientTz(request) || String(request.cf?.timezone || "").slice(0, 40),
     status: 0, ms: 0, audio_s: 0, tokens_in: 0, tokens_out: 0, cache_hit: 0, jev_q: 0, pending: null,
     words: 0, first_ms: 0, done_ms: 0, max_tok: 0, t0,
   };
@@ -198,7 +210,7 @@ function track(env, ev) {
   try {
     env.AE?.writeDataPoint({
       indexes: [ev.name],
-      blobs: [ev.path, ev.name, ev.model, ev.up.slice(0, 200), ev.ver, ev.country, ev.colo],
+      blobs: [ev.path, ev.name, ev.model, ev.up.slice(0, 200), ev.ver, ev.country, ev.colo, ev.tz],
       doubles: [ev.status, ev.ms, ev.audio_s, ev.tokens_in, ev.tokens_out, ev.cache_hit, ev.jev_q,
                 ev.words, ev.first_ms, ev.done_ms, ev.max_tok],
     });

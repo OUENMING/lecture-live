@@ -388,6 +388,9 @@ class FinalASR:
                    "X-ClassLive-Version": asr_endpoint.version_header(),
                    "X-Audio-Seconds": f"{seconds:.1f}",
                    "Content-Type": "audio/ogg"}
+        tz = asr_endpoint.tz_header()
+        if tz:
+            headers["X-ClassLive-Tz"] = tz          # 面板按他自己的钟显示「他常在几点上课」
         fut = self._pool.submit(self._post, body, headers, deadline)
         try:
             status, js = fut.result(timeout=max(0.0, t_end - time.monotonic()))

@@ -293,9 +293,20 @@ class MainWiring(unittest.TestCase):
         self.assertNotIn("_emit", ast.unparse(_func("_sealed_in")))
 
     def test_封口句不按_25_词劈开(self):
-        """Soniox 封的是一整句：`_emit` 带 `STREAM_MAX_WORDS`（本地路径仍是默认 25）。"""
-        self.assertIn("_emit(_s.text, gate.seg_of(_s.end_s), max_words=STREAM_MAX_WORDS)",
-                      MAIN_SRC)
+        """Soniox 封的是一整句：`_emit` 带 `STREAM_MAX_WORDS`（本地路径仍是默认 25）。
+
+        ⚠️ 2026-10-21：原来用**整行字符串**匹配，加一个 `seg_t0=` 就误红；
+        改成 AST 只钉「这个关键字存在且值是 STREAM_MAX_WORDS」，形状变了也不误报。
+        """
+        tree = ast.parse(ast.unparse(_func("final_worker")))
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "_emit"]
+        self.assertTrue(calls, "final_worker 里没有 _emit 调用")
+        kws = {k.arg: ast.unparse(k.value) for c in calls for k in c.keywords}
+        self.assertEqual(kws.get("max_words"), "STREAM_MAX_WORDS",
+                         f"_emit 的 max_words 不对: {kws}")
+        self.assertIn("seg_t0", kws, "Soniox 句尾墙钟没传给 _emit（seg_to_zh 会算错）")
         import main
         sent = "What we're going to do for the rest of the class, for the rest of the semester, " \
                "is we're going to start to talk about how you apply those tools to more realistic situations."

@@ -76,8 +76,21 @@ QUEUE_MAX_S = 10.0
 STABLE_S = 0.3
 #: 静音（没有音频可推）时每 5 s 一条 keepalive；官方硬线是 20 s。
 KEEPALIVE_S = 5.0
-#: 「在推音频但这么久没有任何响应」→ 判死（半开连接不会自己报错）。
+#: 「这么久**一条消息都没收到**」→ 判死（半开连接不会自己报错）。
+#: ⚠️ 口径是 `got`（最近一条**服务端消息**），不是 `last_audio`/`last_send`（客户端自己
+#: 在发）——Soniox 在静音/只发 keepalive 时也会每 ~1 s 回一条进度消息（2026-10-21 实测），
+#: 所以「有音频在推」不能当成「服务端还活着」。10-20 ECON10740 的 2m41s 静默就是
+#: 旧口径 `max(got, last_audio, last_send)` 让 `last_audio` 恒新、永不触发造成的。
 RESPONSE_TIMEOUT_S = 15.0
+#: 服务端处理进度落后已发送音频这么多秒 → 认为流已经「跟不上实时」（消息还在来，
+#: 但内容是旧的）。`total_audio_proc_ms` 是 Soniox 官方给的进度字段（2026-10-21 核对）。
+BACKLOG_S = 3.0
+#: 落后持续这么久才动作 —— 挡掉正常的 1 s 级抖动，也给普通断线重连后的
+#: 积压一点追平时间（服务端通常 1–2.5× 实时；3 s 内追平就不折腾）。
+BACKLOG_HOLD_S = 3.0
+#: 服务端一直回 `total_audio_proc_ms=0`（消息在来、但一毫秒音频都没处理）的兜底。
+#: 开流/大 context 就绪时 0 是合法的；但持续这么久仍是 0 → 判 `stale` 重连。
+ZERO_PROC_TIMEOUT_S = 15.0
 #: 收尾：发空文本帧后最多等这么久把最后的 final 收进来。
 FINISH_WAIT_S = 3.0
 #: 领 key 的 POST 超时（开课关键路径，短；重试由退回政策管）。
@@ -129,6 +142,7 @@ NOTICES = {
     "not_configured": "实时识别暂不可用，已切回本地识别",
     "network": "实时识别连不上（网络），已切回本地识别",
     "timeout": "实时识别没有响应，已切回本地识别",
+    "stale": "实时识别跟不上实时，已切回本地识别",
     "disconnected": "实时识别掉线了，已切回本地识别",
     "error": "实时识别出错了，已切回本地识别",
     "manual": "已切到本地识别 + 云端定稿（菠萝丁）；翻译不变",
@@ -581,7 +595,8 @@ class StreamASR:
     - `clock` / `stable_s`: 透传给 `StreamCore`。
     - `request_key`: 注入的领 key 函数（默认 `_KeyClient`）。
     - `region`: 领 key 时带的 `region=`（`region_route` 探测后的改道；`""` = 不带、Worker 选默认）。
-    - `key_timeout_s` / `keepalive_s` / `response_timeout_s` / `finish_wait_s` /
+    - `key_timeout_s` / `keepalive_s` / `response_timeout_s` / `backlog_s` /
+      `backlog_hold_s` / `zero_proc_timeout_s` / `finish_wait_s` /
       `audio_max_s` / `chunk_s` / `ws_url`: 判据用的小值接缝（生产全用模块常量）。
     """
 
@@ -594,6 +609,8 @@ class StreamASR:
                  request_key: Callable[[str], dict] | None = None,
                  key_timeout_s: float = KEY_TIMEOUT_S, keepalive_s: float = KEEPALIVE_S,
                  response_timeout_s: float = RESPONSE_TIMEOUT_S,
+                 backlog_s: float = BACKLOG_S, backlog_hold_s: float = BACKLOG_HOLD_S,
+                 zero_proc_timeout_s: float = ZERO_PROC_TIMEOUT_S,
                  finish_wait_s: float = FINISH_WAIT_S, audio_max_s: float = QUEUE_MAX_S,
                  chunk_s: float = CHUNK_S, ws_url: str = WS_URL, region: str = "",
                  context_text: str = "", terms_max: int = TERMS_MAX) -> None:
@@ -613,6 +630,9 @@ class StreamASR:
         self._stable_s = float(stable_s)
         self._keepalive_s = float(keepalive_s)
         self._response_timeout_s = float(response_timeout_s)
+        self._backlog_s = float(backlog_s)
+        self._backlog_hold_s = float(backlog_hold_s)
+        self._zero_proc_timeout_s = float(zero_proc_timeout_s)
         self._finish_wait_s = float(finish_wait_s)
         self._chunk_s = float(chunk_s)
         self._ws_url = ws_url
@@ -631,8 +651,40 @@ class StreamASR:
         #: ⚠️ 不加的话重连后新 token 全落在水位线之前被当旧词丢掉 → 整节课不再封口、
         #:    `alive()` 却还是真（本地也不接手）—— 2026-10-18 合并检查抓到。
         self._sess_off_ms: int | None = None
+        #: 本次会话**已经发出去**的样本数 —— 判「服务端落后多少」的被减数。
+        #: ⚠️ 与 `total_audio_proc_ms` 一样都是**会话相对**口径（重连后从 0 起）；
+        #:    不要拿 `_sess_off_ms` 加绝对时刻再相减（差值会抵消，守卫却会被骗）。
+        self._sent_samples = 0
+        #: 最近一条消息里的 `total_audio_proc_ms`（会话相对毫秒）。
+        #: `-1` = 还没收到（0 是**合法值**：刚开流时服务端确实处理到 0 ms）。
+        self._proc_rel_ms = -1.0
+        #: 收到那条进度消息的**同一刻**已经发出去多少毫秒音频。用这个跟
+        #: `_proc_rel_ms` 相减，才是「消息到达时服务端落后多少」—— 不能拿
+        #: 现在的 `_sent_samples` 去减旧消息，否则消息间隔（~1.5 s）会被算成落后。
+        self._proc_sent_ms = 0.0
+        self._last_msg_at = 0.0
+        self._msg_gap_max = 0.0
+        #: 带 `total_audio_proc_ms` 的消息序号 / 起计那条的序号。hold 必须等到**新读数**
+        #: 仍落后才动作 —— 只拿一条冻结读数等时间过去，会把「服务端已追平但下一条消息
+        #: 还没到」误判成持续落后（OCR 2026-10-21 第 3 条）。
+        self._proc_seq = 0
+        self._backlog_seq = 0
+        self._backlog_since: float | None = None
+        self._backlog_max_s = 0.0
+        #: `total_audio_proc_ms` 一直为 0 的起计时刻（`None` = 没在 0 上卡住）。
+        self._zero_proc_since: float | None = None
+        #: 起计时那条消息的序号；兜底也必须等到**新读数**仍为 0，
+        #: 否则后续缺 `total` 字段的消息会让 0 冻结、15s 后误判（OCR 第三轮第 1 条）。
+        self._zero_proc_seq = 0
+        #: 这次重连要不要「跳到实时」（丢弃积压音频）。timeout / stale 置位；
+        #: 普通断线不清，按原样续传（10 s 队列内的短缺口不丢内容）。
+        self._skip_next = False
+        self._skipped_s = 0.0
+        self._sess_n = 0
+        self._reconnects = 0
         self._events: "queue.Queue[tuple]" = queue.Queue()
         self._dropped = 0
+        self._dropped_samples = 0                   # 队列满丢掉的样本数（算 dropped_s 用）
         self._samples = 0                           # 采到的样本总数（含丢掉的）
         #: ⭐ 3.10 生产量具：第一块音频的墙钟（封口延迟的零点，见 `seal_latency_s`）。
         self._audio_t0: float | None = None
@@ -677,7 +729,8 @@ class StreamASR:
         形状 = 收尾报告里的 `stream` 块（`.live.jsonl` 的 summary 行 / testmode 的
         `blocks.stream`）：`engine` / `fallback_reason`（`""` = 没退回）/ `sealed_n`
         （从 `_fire` 出去的封口句数）/ `seal_latency_s`（`{p50, p90, n}`，秒；`None` = 一句
-        都没封）/ `terms_n` / `terms_dropped`。
+        都没封）/ `reconnects` / `skipped_s` / `backlog_max_s` / `msg_gap_max_s` /
+        `dropped_chunks` / `dropped_s` / `terms_n` / `terms_dropped`。
         ⚠️ 只记**事实** —— 指标怎么算归读的人（`scripts/class_report.py`）。
         """
         with self._lock:
@@ -685,12 +738,25 @@ class StreamASR:
             lat = list(self._seal_lat)
             reason = self._reason
             detail = self._detail
+            reconnects = self._reconnects
+            skipped_s = self._skipped_s
+            backlog_max_s = self._backlog_max_s
+            msg_gap_max_s = self._msg_gap_max
+            dropped = self._dropped
+            dropped_samples = self._dropped_samples
         st = self._ctx_stats
         return {"engine": ENGINE,
                 "fallback_reason": reason,
                 "fallback_detail": detail,
                 "sealed_n": n,
                 "seal_latency_s": _pcts(lat),
+                #: ⭐ 2026-10-21：卡顿/断流的可观测性（报告里直接看得到）
+                "reconnects": int(reconnects),
+                "skipped_s": round(float(skipped_s), 1),
+                "backlog_max_s": round(float(backlog_max_s), 1),
+                "msg_gap_max_s": round(float(msg_gap_max_s), 2),
+                "dropped_chunks": int(dropped),
+                "dropped_s": round(float(dropped_samples) / float(SR), 1),
                 "terms_n": int(st.get("terms_n") or 0),
                 "terms_dropped": int(st.get("terms_dropped") or 0)}
 
@@ -711,13 +777,26 @@ class StreamASR:
             try:
                 self._audio.put_nowait(item)
             except queue.Full:
+                # 先腾一格（可能消费者刚好取走了最后一块），再试着把新块放进去。
+                # ⚠️ 记账按**真正没进队的那一块**：消费者取空时新块其实放得下，
+                #    不能只加 `_dropped` 却漏 `_dropped_samples`（OCR 第三轮第 2 条）。
+                old = None
                 try:
-                    self._audio.get_nowait()
-                    self._audio.put_nowait(item)
+                    old = self._audio.get_nowait()
                 except queue.Empty:
                     pass
-                with self._lock:
-                    self._dropped += 1
+                dropped_item = None
+                try:
+                    self._audio.put_nowait(item)
+                except queue.Full:
+                    dropped_item = item
+                else:
+                    if old is not None:
+                        dropped_item = old
+                if dropped_item is not None:
+                    with self._lock:
+                        self._dropped += 1
+                        self._dropped_samples += len(dropped_item[1]) // 2
         except Exception:                           # noqa: BLE001
             pass                                    # 音频回调永不抛（仓库雷区）
 
@@ -730,6 +809,18 @@ class StreamASR:
         """采到的样本总数（含丢掉的）—— 调用方拿它算 `buf_s` / 音频时刻。"""
         with self._lock:
             return self._samples
+
+    def sentence_wall_t0(self, end_s: float) -> float | None:
+        """封口句「句尾音频」对应的**墙钟**（`_clock()` 同源）。
+
+        `main` 用它填 `tr_latency.done(seg_t0=…)`：Soniox 的段号是跳的，
+        `seg_ended_at[seg]` 在 Soniox 模式下指不到那一句（10-20 只有 179/1191 句有值，
+        且起点是本地 VAD 段尾，不是这句的句尾）。用句尾音频 + 首块音频墙钟才是
+        用户真正等的时间。`_audio_t0` 没设（还没喂过音频）→ None。
+        """
+        with self._lock:
+            t0 = self._audio_t0
+        return None if t0 is None else float(t0) + float(end_s)
 
     def mark_segment(self) -> int:
         """新 VAD 段开始：记下「现在」在流里的样本位置，返回段号。
@@ -802,11 +893,17 @@ class StreamASR:
             pass
 
     def _attempts(self) -> str:
-        """最多两次连接（网络类失败重领 key 重连一次）。返回退回原因（`""` = 干净停下）。
+        """通常最多两次连接；特殊情况下允许第三次「跳实时」。返回退回原因（`""` = 干净停下）。
+
+        普通断线会先续传队列；如果重连本身较慢、队列攒了几秒，第二次会话可能因
+        `stale` 判死。这时**不要**直接退回本地 —— 再给一次 `skip` 重连（第三次），
+        丢掉积压跳到实时，云端的质量还能保住。最多三次，之后才退回。
+        第一次就是 `stale` 的只重试一次；只有「`disconnected`/`network` → `stale`」才多给一次。
 
         ⚠️ 判死时先看 `_pending`：会话常常是「先 N 秒无响应、服务端随后关连接」——
         照返回值会记成 `disconnected`，把真正的原因盖掉。
         """
+        last_err = ""
         while True:
             err = self._session()
             with self._lock:
@@ -818,11 +915,17 @@ class StreamASR:
                     return "disconnected"           # 收线程死了但会话没报错
                 if err == "disconnected" and self._pending:
                     err = self._pending
-                if err not in ("network", "timeout", "disconnected"):
+                # 普通断线 / 建连失败后仍 stale：允许再走一次 skip（第三次连接）。
+                if (err == "stale" and self._retried
+                        and last_err in ("disconnected", "network")):
+                    last_err = "stale"
+                    continue
+                if err not in ("network", "timeout", "disconnected", "stale"):
                     return err
                 if self._retried:
                     return err
                 self._retried = True
+                last_err = err
 
     def _session(self) -> str:
         """一次完整会话。返回 `""`（正常收尾）或失败原因。"""
@@ -844,6 +947,38 @@ class StreamASR:
         except Exception as e:                      # noqa: BLE001
             self._note_detail(e)
             return "network"
+
+        # ⭐ 2026-10-21：timeout / stale 之后的重连要**跳到实时**，不是把积压续传。
+        #    实时字幕慢 8.6 s 比丢几秒更糟；丢掉的几秒留给课后补译（音频还在）。
+        with self._lock:
+            self._sess_n += 1
+            if self._sess_n > 1:
+                self._reconnects += 1
+            skip = self._skip_next
+            self._skip_next = False
+            self._proc_rel_ms = -1.0
+            self._proc_sent_ms = 0.0
+            self._sent_samples = 0
+            self._proc_seq = 0
+            self._backlog_seq = 0
+            self._backlog_since = None
+            self._zero_proc_since = None
+            self._zero_proc_seq = 0
+            self._last_msg_at = time.monotonic()
+        if skip:
+            dropped = 0
+            while True:
+                try:
+                    _start, pcm = self._audio.get_nowait()
+                except queue.Empty:
+                    break
+                dropped += len(pcm) // 2
+            self._skipped_s += dropped / float(SR)
+            # 旧会话挂着的那半句先封出去（有内容就上屏，不跟新会话的词混在一起）
+            with self._lock:
+                sealed = self._core.flush()
+            for s in sealed:
+                self._fire(s)
 
         # ⚠️ 新会话要**清掉上一次的遗留事件**（尤其收线程死时留下的那条 `("dead")`）——
         #    不清的话重连后的第一个循环就把新连接判死（真踩过：重连明明成功却立刻退回）。
@@ -893,9 +1028,11 @@ class StreamASR:
     def _send_loop(self, ws) -> str:
         """推音频 / keepalive / 判死。返回 `""`（正常收尾）或失败原因。
 
-        ⚠️ 判死只在**在推音频**时算（`last_audio`）：静音期 Soniox 本来就不出词，
-        拿「很久没响应」判死会把安静的课全判掉；keepalive 本身会引来回应，
-        所以 `max(got, last_audio, last_send)` 之后 N 秒还没动静才是真死。
+        ⚠️ 判死看 **`got`**（最近一条**服务端消息**），不看 `last_audio`/`last_send`
+        （那是客户端自己在发）。Soniox 在静音/只发 keepalive 时也会每 ~1 s 回一条
+        进度消息（2026-10-21 实测），所以「有音频在推」不等于「服务端还活着」。
+        旧写法 `max(got, last_audio, last_send)` 让 `last_audio` 每块都刷新 →
+        永不触发（10-20 ECON10740 的 2m41s 静默没有任何日志）。
         """
         last_audio = time.monotonic()
         last_send = last_audio
@@ -915,12 +1052,58 @@ class StreamASR:
             if fatal or self._fatal:
                 return "error"
             now = time.monotonic()
-            if now - max(got, last_audio, last_send) > self._response_timeout_s:
-                # 判死时连接往往紧接着也断：先记原因（`_pending`），`_attempts` 才不会
-                # 把死因记成 disconnected。
+            # ⚠️ 只看 `got`（服务端消息）：Soniox 在静音/keepalive 时每 ~1 s 回一条
+            #    进度消息（2026-10-21 实测），所以持续有音频并不代表服务端活着。
+            #    旧写法 `max(got, last_audio, last_send)` 里 last_audio 每块都刷新 →
+            #    永不触发（10-20 的 2m41s 静默没有任何日志，就是这么来的）。
+            if now - got > self._response_timeout_s:
                 with self._lock:
                     self._pending = "timeout"
+                    self._skip_next = True          # 15 s 的积压不值得续传，跳到实时
                 return "timeout"
+            # 消息还在来、但内容落后已发送音频 → 流「跟不上实时」（10-20 卡完稳定
+            # 慢 8.6 s 就是这个形状）。用官方 `total_audio_proc_ms` 判，不猜。
+            # ⚠️ 两个量都是**会话相对**：`_proc_sent_ms` 是收到那条进度消息时
+            #    已发出的量，`_proc_rel_ms` 是那条消息里的服务端进度 —— 相减才是
+            #    「消息到达时服务端落后多少」。拿**现在**的 `_sent_samples` 去减旧消息
+            #    会把消息间隔（~1.5 s）算成落后，正常抖动也可能误判。
+            if self._proc_rel_ms > 0 and self._proc_sent_ms > 0:
+                lag_ms = self._proc_sent_ms - self._proc_rel_ms
+                if lag_ms > self._backlog_max_s * 1000.0:
+                    self._backlog_max_s = lag_ms / 1000.0
+                if lag_ms > self._backlog_s * 1000.0:
+                    if self._backlog_since is None:
+                        self._backlog_since = now
+                        self._backlog_seq = self._proc_seq
+                    # hold 必须等到**新读数**仍落后：只拿一条冻结读数等时间过去，
+                    # 会把「服务端已追平、下一条消息还没到」误判成持续落后。
+                    elif (now - self._backlog_since >= self._backlog_hold_s
+                          and self._proc_seq > self._backlog_seq):
+                        with self._lock:
+                            self._pending = "stale"
+                            self._skip_next = True
+                        return "stale"
+                else:
+                    self._backlog_since = None
+            else:
+                self._backlog_since = None
+            # ⚠️ 服务端一直回 `total=0`（消息在来、但一毫秒音频都没处理）：
+            #    上面的 `got` 判死会被「消息在来」骗过，落后判据又因 `>0` 跳过。
+            #    开流/大 context 就绪时 0 合法，所以给足 grace；持续 15 s 仍是 0 → stale。
+            if self._proc_rel_ms == 0 and self._proc_sent_ms > 0:
+                if self._zero_proc_since is None:
+                    self._zero_proc_since = now
+                    self._zero_proc_seq = self._proc_seq
+                elif (now - self._zero_proc_since >= self._zero_proc_timeout_s
+                      and self._proc_seq > self._zero_proc_seq):
+                    # 必须等到新的进度消息仍是 0：缺 `total` 字段的消息不更新序号，
+                    # 不能让一条冻结的 0 读数把正常流误判（OCR 第三轮第 1 条）。
+                    with self._lock:
+                        self._pending = "stale"
+                        self._skip_next = True
+                    return "stale"
+            else:
+                self._zero_proc_since = None
             if dead:                                # 收线程死了
                 return "disconnected"
             try:
@@ -944,6 +1127,7 @@ class StreamASR:
                 i = 0
                 while i + chunk_samples <= buf.size:
                     ws.send(buf[i:i + chunk_samples].tobytes())
+                    self._sent_samples += chunk_samples
                     last_send = time.monotonic()
                     i += chunk_samples
                 carry = buf[i:].copy()
@@ -967,11 +1151,19 @@ class StreamASR:
                 dead = True
                 continue
             got = time.monotonic()
+            if kind in ("msg", "end"):
+                if self._last_msg_at > 0:
+                    self._msg_gap_max = max(self._msg_gap_max, got - self._last_msg_at)
+                self._last_msg_at = got
             if kind == "err":
                 if classify_error(payload) == "fatal":
                     fatal = True
             elif kind == "msg":
-                fin, nf = payload
+                if len(payload) >= 3:
+                    fin, nf, tot = payload[0], payload[1], payload[2]
+                else:                               # 兼容旧事件形状（收线程现在恒发 3 元组）
+                    fin, nf = payload
+                    tot = None
                 off = self._sess_off_ms
                 if off is None:                     # 没发过音频就来了词（只有假服务会）：按当前流位置
                     with self._lock:
@@ -979,6 +1171,13 @@ class StreamASR:
                 if off:
                     fin = [t._replace(start_ms=t.start_ms + off, end_ms=t.end_ms + off) for t in fin]
                     nf = [t._replace(start_ms=t.start_ms + off, end_ms=t.end_ms + off) for t in nf]
+                if isinstance(tot, (int, float)) and not isinstance(tot, bool):
+                    # 官方进度字段：`total_audio_proc_ms` 是**本会话**相对时刻。
+                    # 与 `_sent_samples` 同口径；不要加 `_sess_off_ms`（见字段注释）。
+                    with self._lock:
+                        self._proc_rel_ms = float(tot)
+                        self._proc_sent_ms = self._sent_samples * 1000.0 / SR
+                        self._proc_seq += 1
                 with self._lock:
                     self._core.feed(fin, nf)
                     sealed = self._core.take_sentences()
@@ -1032,7 +1231,13 @@ class StreamASR:
                 parsed = parse_tokens(toks)
                 fin = [t for t in parsed if t.is_final]     # 逐 token 的 is_final（官方形状）
                 nf = [t for t in parsed if not t.is_final]
-                self._events.put(("msg", (fin, nf)))
+                # ⭐ 官方进度字段（2026-10-21 核对 Audio progress tracking）：服务端处理到
+                #    哪一刻。空 `tokens` 的进度消息也带它 —— 这是「流跟不上实时」的唯一
+                #    可靠判据（不能拿客户端发了多少音频冒充）。
+                tot = msg.get("total_audio_proc_ms")
+                if not isinstance(tot, (int, float)) or isinstance(tot, bool):
+                    tot = None
+                self._events.put(("msg", (fin, nf, tot)))
                 # ⭐ 3.11：`<end>` 在 `parse_tokens` 里被当控制帧丢了 —— 这里单独报一声
                 #    （排在这条消息的词之后：先吃完它之前的词，再判是不是在两句之间）。
                 if any(isinstance(t, dict) and t.get("text") == "<end>" for t in toks):

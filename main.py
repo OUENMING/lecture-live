@@ -2945,7 +2945,8 @@ def run(args) -> None:
     _tr_idle: "collections.deque" = collections.deque()
     _tr_last = {"end": None}
 
-    def _emit(text: str, seg: int | None = None, max_words: int = 25) -> None:
+    def _emit(text: str, seg: int | None = None, max_words: int = 25,
+              seg_t0: float | None = None) -> None:
         # ⭐ `seg` = 这段文本属于哪一段缓冲（`livemetrics` 的分组键；一段 VAD → N 句定稿，
         #    **不是 1:1**）。定稿那条路由 `finalq` 带过来（**音频结束那一刻**定的）；
         #    carry 兜底那条路没得带，取当前段。
@@ -3028,7 +3029,8 @@ def run(args) -> None:
                 _tr_last["end"] = time.monotonic()
                 _tr_idle.append(_idle_ms)
             streamq.put(("final", en, zh, sent, seg,
-                         _lt.done(seg_t0=seg_ended_at.get(seg),
+                         _lt.done(seg_t0=(seg_t0 if seg_t0 is not None
+                                          else seg_ended_at.get(seg)),
                                   model=args.cloud_model if (_cloud0 and translator.uses_cloud)
                                   else "local"),
                          _zh_n))
@@ -3099,7 +3101,10 @@ def run(args) -> None:
                         # ⚠️ Soniox 封的本来就是**一句**：别再按 25 词从逗号劈成两行 —— 劈开
                         #    后第二半要排在第一半翻完之后才开始译（10-17 浮窗逐帧：多等 ~1 s，
                         #    中文先显示整句草稿译文再缩回半句）。真长到 40 词以上才劈。
-                        _emit(_s.text, gate.seg_of(_s.end_s), max_words=STREAM_MAX_WORDS)
+                        _emit(_s.text, gate.seg_of(_s.end_s),
+                              max_words=STREAM_MAX_WORDS,
+                              seg_t0=(stream.sentence_wall_t0(_s.end_s)
+                                      if stream is not None else None))
                     finally:
                         busy["on"] = False
             # 1) 定稿优先

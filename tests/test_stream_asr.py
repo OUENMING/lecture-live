@@ -766,6 +766,264 @@ def t_transport_stall_times_out() -> None:
         wk.close()
 
 
+def t_transport_stall_with_continuous_audio_times_out() -> None:
+    """⭐ 2026-10-21：**持续喂音频**、服务器一声不吭 → 必须判死。
+
+    旧判据：`now - max(got, last_audio, last_send) > timeout`；`last_audio` 每取一块
+    音频就刷新 → 有音频时 `max` 恒 ≈ now，**永不触发**。10-20 ECON10740 就是这样
+    静默了 2m41s 而没有任何日志。这里用「一直喂」把那个形状钉住。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, response_timeout_s=0.5, keepalive_s=2.0, stable_s=0.3)
+    try:
+        assert wait_until(s.alive)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1.2:        # 超过 response_timeout 仍在喂
+            s.feed(silence(SR // 10))
+            time.sleep(0.02)
+            if s.reason() == "timeout":
+                break
+        # ⚠️ 必须在**还在喂的时候**就判死；等停止喂再判会测到旧判据的「静音超时」那条路
+        assert s.reason() == "timeout", f"持续喂了 1.2s 仍未判死: {s.reason()!r}"
+        assert not s.alive()
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_progress_messages_keep_alive() -> None:
+    """静音期只要服务端**回进度消息**，就不许判死（Soniox 实测 ~1 s 一条）。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, response_timeout_s=0.5, keepalive_s=2.0, stable_s=0.3)
+    try:
+        assert wait_until(s.alive)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1.4:
+            son.to_send.put({"tokens": [], "total_audio_proc_ms": 0})
+            time.sleep(0.15)
+            assert s.reason() == "", f"有进度消息却判死了: {s.reason()!r}"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_zero_progress_after_reconnect_not_stale() -> None:
+    """重连后服务端 `total_audio_proc_ms=0` 是正常的，**不许**因此再判 stale。
+
+    OCR 2026-10-21 抓到的边界：旧实现用 `_proc_abs_ms = total + _sess_off_ms`，重连后
+    `_sess_off_ms > 0`，`total=0` 也会让绝对守卫放行 → 新会话推 3 s 音频就误重连。
+    现在两个量都按**会话相对**算，`total=0` 时守卫为假。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, response_timeout_s=5.0, keepalive_s=2.0,
+                 backlog_s=0.5, backlog_hold_s=0.2, stable_s=0.3)
+    try:
+        assert wait_until(s.alive)
+        s.feed(silence(SR))                       # 第一段 1 s，建立 _sess_off_ms=1000
+        assert wait_until(lambda: son.connections and son.connections[0]["audio"] >= SR)
+        son.to_send.put(("close", 1011, "boom"))
+        assert wait_until(lambda: len(son.connections) >= 2, 5.0), "该重连"
+        son.to_send.put({"tokens": [], "total_audio_proc_ms": 0})
+        s.feed(silence(SR * 2))                   # 新会话 2 s；若用绝对守卫会误判 stale
+        time.sleep(0.8)
+        assert s.reason() == "", f"total=0 被误判 stale: {s.reason()!r}"
+        assert len(son.connections) == 2, \
+            f"total=0 被误判 stale，连接数={len(son.connections)}"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_backlog_reconnects_to_live() -> None:
+    """服务端进度落后已发送音频 → `stale`，重连并把积压丢掉（跳到实时）。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, response_timeout_s=5.0, keepalive_s=2.0,
+                 backlog_s=0.5, backlog_hold_s=0.2, stable_s=0.3)
+    try:
+        assert wait_until(s.alive)
+        s.feed(silence(SR * 2))                   # 2 s 音频进队列
+        assert wait_until(lambda: son.connections and son.connections[0]["audio"] >= SR * 2)
+        # 服务端只处理到 0.5 s -> 落后 1.5 s，超过 0.5 s 门槛（>0 才判，挡开流误报）
+        son.to_send.put({"tokens": [], "total_audio_proc_ms": 500})
+        assert wait_until(lambda: s.metrics()["backlog_max_s"] > 0.5, 2.0)
+        # 第二条**新读数**仍然落后（判据要求 hold 期间有新消息确认，不能拿冻结值等时间）
+        son.to_send.put({"tokens": [], "total_audio_proc_ms": 500})
+        assert wait_until(lambda: len(son.connections) >= 2, 5.0), \
+            f"落后 1.5 s / 门槛 0.5 s 该重连，实际连接数={len(son.connections)}"
+        assert s.metrics()["reconnects"] >= 1
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_backlog_caught_up_no_stale() -> None:
+    """落后读数之后服务端追平：**不许**因为「时间过去了」就判 stale。
+
+    OCR 2026-10-21 第 3 条：`_proc_rel_ms` 只在消息到达时更新，循环每轮拿同一组
+    冻结值重算 lag。这里把 hold 设得比下一条消息早，验证没有新读数时不会动作；
+    下一条 `total=2000` 追平后必须清零。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, response_timeout_s=5.0, keepalive_s=2.0,
+                 backlog_s=0.5, backlog_hold_s=0.1, zero_proc_timeout_s=15.0,
+                 stable_s=0.3)
+    try:
+        assert wait_until(s.alive)
+        s.feed(silence(SR * 2))
+        assert wait_until(lambda: son.connections and son.connections[0]["audio"] >= SR * 2)
+        son.to_send.put({"tokens": [], "total_audio_proc_ms": 500})
+        assert wait_until(lambda: s.metrics()["backlog_max_s"] > 0.5, 2.0)
+        time.sleep(0.25)                          # 超过 hold，但没有新读数 -> 不该动作
+        assert s.reason() == "", f"没有新读数就判 stale: {s.reason()!r}"
+        son.to_send.put({"tokens": [], "total_audio_proc_ms": 2000})   # 追平
+        time.sleep(0.6)
+        assert s.reason() == ""
+        assert s.metrics()["reconnects"] == 0, "追平后不该重连"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_zero_proc_stuck_reconnects() -> None:
+    """服务端一直回 `total=0`（消息在来但不处理音频）→ 必须判 stale。
+
+    OCR 2026-10-21 第 2 条：`got` 被持续刷新、`total=0` 又被 `>0` 守卫跳过，
+    两端都判不出来。补 `_zero_proc_since` 兜底。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, response_timeout_s=5.0, keepalive_s=2.0,
+                 backlog_s=0.5, backlog_hold_s=0.2, zero_proc_timeout_s=0.5,
+                 stable_s=0.3)
+    try:
+        assert wait_until(s.alive)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 3.0:
+            s.feed(silence(SR // 10))
+            son.to_send.put({"tokens": [], "total_audio_proc_ms": 0})
+            time.sleep(0.1)
+            if s.reason():
+                break
+        assert s.reason() == "stale", f"卡在 total=0 未判死: {s.reason()!r}"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_zero_proc_frozen_reading_no_stale() -> None:
+    """`total=0` 之后消息**不带** total：0 是冻结读数，不许因此判 stale。
+
+    OCR 第三轮第 1 条：`_recv_loop` 允许 `tot=None`；如果只拿上一条 0 读数等时间，
+    后续缺字段的消息会让 0 永远不更新 → 15s 后误判。起计时也要记序号。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, response_timeout_s=5.0, keepalive_s=2.0,
+                 backlog_s=0.5, backlog_hold_s=0.2, zero_proc_timeout_s=0.5,
+                 stable_s=0.3)
+    try:
+        assert wait_until(s.alive)
+        s.feed(silence(SR))
+        assert wait_until(lambda: son.connections and son.connections[0]["audio"] >= SR)
+        son.to_send.put({"tokens": [], "total_audio_proc_ms": 0})
+        time.sleep(0.15)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1.0:
+            son.to_send.put({"tokens": []})        # 没有 total 字段
+            s.feed(silence(SR // 10))
+            time.sleep(0.1)
+        assert s.reason() == "", f"冻结的 0 读数被误判: {s.reason()!r}"
+        assert s.metrics()["reconnects"] == 0
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_normal_reconnect_stale_retries_live() -> None:
+    """普通断线续传后仍 stale：允许再跳一次实时，不要直接退回本地。
+
+    OCR 2026-10-21 第 1 条：重连本身慢时队列积压会让第二次会话判 stale，
+    而 `_retried` 已用尽 → 整节课退回本地。这里给「disconnected → stale」
+    多一次 `skip` 重连（最多第三次）。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, response_timeout_s=5.0, keepalive_s=2.0,
+                 backlog_s=0.5, backlog_hold_s=0.2, zero_proc_timeout_s=15.0,
+                 stable_s=0.3)
+    try:
+        assert wait_until(s.alive)
+        s.feed(silence(SR))
+        assert wait_until(lambda: son.connections and son.connections[0]["audio"] >= SR)
+        son.to_send.put(("close", 1011, "boom"))
+        assert wait_until(lambda: len(son.connections) >= 2 and s.alive(), 5.0)
+        s.feed(silence(SR * 2))
+        assert wait_until(lambda: son.connections[1]["audio"] >= SR * 2, 5.0)
+        son.to_send.put({"tokens": [], "total_audio_proc_ms": 500})
+        assert wait_until(lambda: s.metrics()["backlog_max_s"] > 0.5, 2.0)
+        son.to_send.put({"tokens": [], "total_audio_proc_ms": 500})
+        assert wait_until(lambda: len(son.connections) >= 3, 5.0), \
+            "普通断线续传后 stale 应再跳一次，而不是直接退回本地"
+        assert s.reason() == "", f"不该退回: {s.reason()!r}"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_network_then_stale_retries_live() -> None:
+    """建连失败（network）→ 续传后 stale：也要允许再跳一次，不要直接退回本地。
+
+    OCR 第三轮第 3 条：首因是 `network`（key/WS 建连失败）时，旧条件只认
+    `disconnected`，第二次 stale 会直接 return。这里用「第一次返回坏 ws_url」复现。
+    """
+    son = FakeSoniox()
+
+    class BadThenGood(FakeWorker):
+        def __init__(self, ws_url: str) -> None:
+            self.n = 0
+            super().__init__(ws_url)
+
+        def reply(self):
+            self.n += 1
+            if self.n == 1:
+                return 200, {"api_key": "fake-key", "ws_url": "ws://127.0.0.1:1/",
+                             "region": "us", "expires_in_seconds": 60,
+                             "max_session_s": 14400}
+            return super().reply()
+
+    wk = BadThenGood(son.url)
+    s = make_asr(wk, son, response_timeout_s=5.0, keepalive_s=2.0,
+                 backlog_s=0.5, backlog_hold_s=0.2, zero_proc_timeout_s=15.0,
+                 stable_s=0.3)
+    try:
+        assert wait_until(s.alive, 8.0), f"第一次建连失败后该重连成功: {s.reason()!r}"
+        s.feed(silence(SR * 2))
+        assert wait_until(lambda: son.connections and son.connections[0]["audio"] >= SR * 2)
+        son.to_send.put({"tokens": [], "total_audio_proc_ms": 500})
+        assert wait_until(lambda: s.metrics()["backlog_max_s"] > 0.5, 2.0)
+        son.to_send.put({"tokens": [], "total_audio_proc_ms": 500})
+        assert wait_until(lambda: len(son.connections) >= 2, 5.0), \
+            "network → stale 也应再跳一次，而不是直接退回本地"
+        assert s.reason() == "", f"不该退回: {s.reason()!r}"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
 def t_transport_queue_full_drops_oldest() -> None:
     """队列满 → 丢最旧、`feed()` 不阻塞。
 
@@ -774,7 +1032,9 @@ def t_transport_queue_full_drops_oldest() -> None:
     """
     son = FakeSoniox(stall_after=1)
     wk = FakeWorker(son.url)
-    s = make_asr(wk, son, audio_max_s=0.5, chunk_s=0.1)     # 队列上限 5 块
+    # ⚠️ 故意用默认 `_chunk_s=0.12`，但每块喂 0.1 s —— 生产也是这个错位
+    #    （capture.CHUNK=0.1 s，模块默认 0.12）。`dropped_s` 必须按样本数算。
+    s = make_asr(wk, son, audio_max_s=0.5)                  # 队列上限约 4 块
     try:
         assert wait_until(s.alive)
         worst = 0.0
@@ -788,6 +1048,10 @@ def t_transport_queue_full_drops_oldest() -> None:
         assert s.cum_samples() == 300 * 1600
         assert s.dropped() > 0, "队列满了该丢最旧"
         assert s._audio.qsize() <= s._max_chunks, "队列必须是有界的"
+        m = s.metrics()
+        assert m["dropped_chunks"] == s.dropped()
+        # 每块 0.1 s：按样本数算的秒数应跟块数一致（不能拿 _chunk_s=0.12 估）
+        assert abs(m["dropped_s"] - s.dropped() * 0.1) < 0.011, m
     finally:
         son._done.set()                           # 先放开卡住的假服务，收尾才不用等满
         s.stop()
@@ -937,6 +1201,15 @@ def main() -> int:
         ("transport: 领 key 429 → 本地", t_transport_key_429_is_local),
         ("transport: 没通行码 → 本地", t_transport_no_passcode),
         ("transport: 15 s 无响应判死", t_transport_stall_times_out),
+        ("transport: 持续喂音频也必须判死", t_transport_stall_with_continuous_audio_times_out),
+        ("transport: 进度消息保活不误判", t_transport_progress_messages_keep_alive),
+        ("transport: 重连后 total=0 不误判", t_transport_zero_progress_after_reconnect_not_stale),
+        ("transport: 进度落后 → 重连跳实时", t_transport_backlog_reconnects_to_live),
+        ("transport: 追平后不许判 stale", t_transport_backlog_caught_up_no_stale),
+        ("transport: total=0 卡死 → stale", t_transport_zero_proc_stuck_reconnects),
+        ("transport: 冻结的 total=0 不误判", t_transport_zero_proc_frozen_reading_no_stale),
+        ("transport: 普通断线后 stale 再跳一次", t_transport_normal_reconnect_stale_retries_live),
+        ("transport: network 后 stale 再跳一次", t_transport_network_then_stale_retries_live),
         ("transport: 队列满丢旧不阻塞", t_transport_queue_full_drops_oldest),
         ("transport: 静音时 keepalive", t_transport_keepalive_when_idle),
         ("transport: stop() 干净收尾", t_transport_stop_clean),

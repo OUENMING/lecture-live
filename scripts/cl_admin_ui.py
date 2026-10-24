@@ -381,8 +381,7 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list,
     nm_ = _block(rep, "norm") or None
     if nm_ is not None:
         # 收音电平归一：capped / clamped 是「有多少块被削顶/被钳住」—— 麦克风太响或增益太狠的信号。
-        nm_ = {k: _num(nm_.get(k)) for k in ("blocks", "capped", "clamped")}
-        nm_["gain_db_max"] = _num(nm_.get("gain_db_max"))
+        nm_ = {k: _num(nm_.get(k)) for k in ("blocks", "capped", "clamped", "gain_db_max")}
 
     gen = _enum(rep.get("generated"), 24)
     blocks = rep.get("blocks") if isinstance(rep.get("blocks"), dict) else {}
@@ -540,7 +539,9 @@ def r2_raw(sid, what="report.json", get=None, fetch=None, max_bytes=4_000_000) -
     if what == "extra.tar.gz":
         return _diag_pack(body)
     if what == "note.html":
-        return {"id": sid, "what": what, "bytes": len(body), "text": body,
+        if isinstance(body, bytes):                  # ⚠️ 默认 fetch 给字节：不解码 → json.dumps 抛 TypeError / str(bytes) 出 b'…' 串
+            body = body.decode("utf-8", "replace")
+        return {"id": sid, "what": what, "bytes": len(body), "text": str(body or ""),
                 "view": f"/note/{sid}"}                      # 面板能直接把它当页面打开
     if isinstance(body, bytes):
         body = body.decode("utf-8", "replace")
@@ -1404,8 +1405,10 @@ class Handler(BaseHTTPRequestHandler):
         if not str(a[1] if len(a) > 1 else "").startswith("2"):
             sys.stderr.write("  %s\n" % (fmt % a))
 
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
+    def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
         self.send_response(code)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.send_header("content-type", ctype)
         self.send_header("content-length", str(len(body)))
         self.send_header("cache-control", "no-store")
@@ -1450,7 +1453,10 @@ class Handler(BaseHTTPRequestHandler):
             page = str(got.get("text") or "")
             # 把相对资产路径改成面板自己的（否则公式退回 TeX 源码）
             page = re.sub(r"\.classlive-assets/katex/", "/assets/katex/", page)
-            self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            # ⚠️ 桶里的 HTML 是任何持公开 token 的人都能传的 → 当不可信内容发：sandbox（无 allow-same-origin）
+            #    让它拿不到面板这个 origin（管理 API 同源）；脚本可跑（交互图要用）但碰不到面板。
+            self._send(200, page.encode("utf-8"), "text/html; charset=utf-8",
+                       {"content-security-policy": "sandbox allow-scripts"})
         else:
             self._json(404, {"error": "not found"})
 

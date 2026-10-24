@@ -151,6 +151,17 @@ class PanelCase(unittest.TestCase):
         self.assertNotIn("Authorization", r.text)
         self.assertNotIn("Bearer", r.text)
 
+    def test_详细版笔记页带_sandbox_CSP(self):
+        """桶里的 HTML 任何持公开 token 的人都能传 → /note/ 必须 sandbox，不得同源（否则能调管理 API）。"""
+        import httpx
+        from unittest import mock
+        with mock.patch.object(cl_admin_ui, "r2_raw", return_value={"text": "<script>1</script>"}):
+            r = httpx.get(self.base + "/note/0123456789abcdef", timeout=10)
+        self.assertEqual(r.status_code, 200)
+        csp = r.headers.get("content-security-policy", "")
+        self.assertIn("sandbox", csp)
+        self.assertNotIn("allow-same-origin", csp)
+
     def test_别的_GET_路径是_404(self):
         import httpx
         self.assertEqual(httpx.get(self.base + "/api/list", timeout=10).status_code, 404)
@@ -380,6 +391,18 @@ class R2Raw(unittest.TestCase):
         self.assertIn("0123456789abcdef", seen["url"])
         self.assertEqual(seen["auth"], "Bearer cfat_SECRET")
         self.assertNotIn("SECRET", json.dumps(r), "令牌不许进响应")
+
+    def test_详细版笔记字节要解码(self):
+        """默认 fetch 给字节：note.html 分支以前原样返回 bytes → json.dumps 抛 TypeError。"""
+        import cl_admin_ui as U
+        sid = "0123456789abcdef"
+        lst = {"success": True, "result_info": {"is_truncated": False},
+               "result": [{"key": f"classlive-test/{sid}/note.html", "size": 9, "last_modified": "2026-10-18T17:22:00Z"}]}
+        with tempfile.TemporaryDirectory() as d, _home_with(d, cf__analytics__token="t", cf__account__id="a"):
+            r = U.r2_raw(sid, "note.html", get=lambda u, h: lst, fetch=lambda u, h: (200, "<p>公式</p>".encode()))
+        self.assertEqual(r["text"], "<p>公式</p>")
+        json.dumps(r)                                  # 不抛即可序列化
+        self.assertEqual(r["view"], f"/note/{sid}")
 
     def test_只认那两种文件(self):
         import cl_admin_ui as U
@@ -1125,6 +1148,7 @@ class ReportSummary(unittest.TestCase):
         self.assertEqual(r["vad"]["weak_blocks"], 33)
         self.assertEqual(r["vad"]["vad_resets"], 82)
         self.assertEqual((r["norm"]["capped"], r["norm"]["clamped"]), (3230, 4619))
+        self.assertEqual(r["norm"]["gain_db_max"], 29.8, "最大增益 dB 以前被覆盖成恒 None")
 
     def test_绝不漏文本路径或逐段明细(self):
         out = json.dumps(self._sum(), ensure_ascii=False)

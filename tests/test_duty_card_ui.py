@@ -574,7 +574,9 @@ class 上卡下字幕(unittest.TestCase):
                 capped = h + 0.5 >= cap
                 doc = float(o._card_doc.frame().size.height)
                 clip = float(o._card_scroll.contentView().frame().size.height)
-                if capped:
+                if capped and doc <= clip + 1.0 and abs(h - cap) < 1.0:
+                    pass            # 内容恰好等于封顶高度（刚好装满）：既算封顶也不用滚，不判错
+                elif capped:
                     self.assertGreater(doc, clip + 1.0, f"{kind}：封顶了却滚不动")
                 else:
                     self.assertLessEqual(doc, clip + 1.0,

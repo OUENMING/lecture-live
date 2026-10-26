@@ -372,7 +372,9 @@ class TodayExtra(unittest.TestCase):
         """⭐ 原型 B 态：没传课件 → `today` 那一行不出现（不报错、不提示缺东西）。"""
         with tempfile.TemporaryDirectory() as d:
             self._write_material(d, "ECON10790", "old.md", "# 老课件", age_days=9)
-            data = {"date": "2026-10-15", "tail": "x"}
+            # 上节课日期取「5 天前」：比 9 天前的老课件新、跟着真实今天走（写死日期会随时间烂掉）
+            last = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+            data = {"date": last, "tail": "x"}
             got = recap.today_extra("ECON10790", data, root=d)
             self.assertEqual(got, {})
             self.assertEqual(recap.card(got), {"course": "", "date": "", "points": [],

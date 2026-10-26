@@ -198,6 +198,7 @@ def make_asr(worker: FakeWorker, soniox: FakeSoniox, *, on_sealed=None, **kw) ->
     kw.setdefault("keepalive_s", 0.5)
     kw.setdefault("response_timeout_s", 1.5)
     kw.setdefault("stable_s", 0.3)
+    kw.setdefault("retry_delays_s", (0.0, 0.1, 0.1, 0.1))   # 生产是 0/30/120/300 s，测试压到 0.1 s
     return StreamASR(passcode="cl-test", terms=["OLS", "regression"],
                      general="ECON10730 Data Analysis", on_sealed=on_sealed, **kw)
 
@@ -702,16 +703,116 @@ def t_transport_reconnect_after_sealing_keeps_sealing() -> None:
 
 
 def t_transport_reconnect_fails_fallback() -> None:
+    """服务整个下线：按预算（这里 2 次）重连都失败才退回，不是无限重试。"""
     son = FakeSoniox()
     wk = FakeWorker(son.url)
-    s = make_asr(wk, son)
+    s = make_asr(wk, son, retry_delays_s=(0.0, 0.1))
     try:
         assert wait_until(s.alive)
-        son.close()                               # 服务整个下线：重连必失败
+        son.close()
         assert wait_until(lambda: not s.alive() and s.reason() != "", 8.0), \
-            f"重连也失败该退回（reason={s.reason()!r}）"
-        assert len(wk.requests) <= 2, "最多重连一次"
+            f"预算用完该退回（reason={s.reason()!r}）"
+        assert len(wk.requests) == 3, f"1 次首连 + 2 次重连，实际领 key {len(wk.requests)} 次"
         s.feed(silence(1000))
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_second_drop_still_reconnects() -> None:
+    """⭐ 10-23 ECON10770：一节课第二次掉线不能直接退回本地（旧写法整节课只给一次重连）。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, retry_delays_s=(0.0, 0.1, 0.1))
+    try:
+        assert wait_until(s.alive)
+        son.to_send.put(("close", 1011, "boom"))
+        assert wait_until(lambda: len(son.connections) >= 2 and s.alive()), "第一次掉线该重连"
+        son.to_send.put(("close", 1011, "boom again"))
+        assert wait_until(lambda: len(son.connections) >= 3 and s.alive(), 8.0), \
+            "第二次掉线也该重连，而不是退回本地"
+        assert s.reason() == "", s.reason()
+        assert s.metrics()["reconnects"] == 2, s.metrics()["reconnects"]
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_backoff_waits_between_retries() -> None:
+    """第二次重连前要等退避时间；等待期间不判退回（本地接手），恢复后自动回到 Soniox。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, retry_delays_s=(0.0, 1.0))
+    try:
+        assert wait_until(s.alive)
+        son.to_send.put(("close", 1011, "a"))
+        assert wait_until(lambda: len(son.connections) >= 2 and s.alive())
+        t0 = time.monotonic()
+        son.to_send.put(("close", 1011, "b"))
+        assert wait_until(lambda: not s.alive(), 3.0), "掉线后 alive 该为假（本地接手）"
+        assert s.reason() == "", "退避等待中不是退回"
+        assert wait_until(lambda: len(son.connections) >= 3 and s.alive(), 8.0)
+        assert time.monotonic() - t0 >= 0.9, "第二次重连之前该等满退避时间"
+        assert s.metrics()["down_s"] >= 0.8, s.metrics()["down_s"]
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_budget_resets_after_stable_session() -> None:
+    """上一个会话稳定跑过 `retry_reset_s` → 预算还原（长课不能只给固定几次）。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, retry_delays_s=(0.0,), retry_reset_s=0.3)
+    try:
+        assert wait_until(s.alive)
+        for n in (2, 3, 4):
+            time.sleep(0.5)                                  # 每个会话都稳定超过 0.3 s
+            son.to_send.put(("close", 1011, f"drop{n}"))
+            assert wait_until(lambda n=n: len(son.connections) >= n and s.alive(), 5.0), \
+                f"第 {n} 次连接该接上（预算只有 1 次、靠稳定还原）"
+        assert s.reason() == ""
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_stop_interrupts_backoff() -> None:
+    """退避等待中下课：`stop()` 不能被 30 s 的等待拖住。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, retry_delays_s=(0.0, 30.0))
+    try:
+        assert wait_until(s.alive)
+        son.to_send.put(("close", 1011, "a"))
+        assert wait_until(lambda: len(son.connections) >= 2 and s.alive())
+        son.to_send.put(("close", 1011, "b"))
+        assert wait_until(lambda: not s.alive(), 3.0)
+        t0 = time.monotonic()
+        s.stop()
+        assert time.monotonic() - t0 < 5.0, "stop() 被退避等待拖住了"
+        assert s.reason() == "", s.reason()
+    finally:
+        son.close()
+        wk.close()
+
+
+def t_transport_close_code_in_detail() -> None:
+    """退回时 `fallback_detail` 带服务端的 close code + 原因（10-23 那次是空的）。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, retry_delays_s=())
+    try:
+        assert wait_until(s.alive)
+        son.to_send.put(("close", 1011, "boom"))
+        assert wait_until(lambda: s.reason() != "", 8.0)
+        m = s.metrics()
+        assert m["fallback_reason"] == "disconnected", m
+        assert "1011" in m["fallback_detail"], m["fallback_detail"]
     finally:
         s.stop()
         son.close()
@@ -752,7 +853,7 @@ def t_transport_stall_times_out() -> None:
     son = FakeSoniox()
     wk = FakeWorker(son.url)
     # ⚠️ keepalive 要**比响应超时慢**，否则每次 keepalive 都会把判死窗口往后推
-    s = make_asr(wk, son, response_timeout_s=0.5, keepalive_s=2.0, stable_s=0.3)
+    s = make_asr(wk, son, retry_delays_s=(), response_timeout_s=0.5, keepalive_s=2.0, stable_s=0.3)
     try:
         assert wait_until(s.alive)
         for _ in range(30):                       # 一直喂，Soniox 一声不吭
@@ -775,7 +876,7 @@ def t_transport_stall_with_continuous_audio_times_out() -> None:
     """
     son = FakeSoniox()
     wk = FakeWorker(son.url)
-    s = make_asr(wk, son, response_timeout_s=0.5, keepalive_s=2.0, stable_s=0.3)
+    s = make_asr(wk, son, retry_delays_s=(), response_timeout_s=0.5, keepalive_s=2.0, stable_s=0.3)
     try:
         assert wait_until(s.alive)
         t0 = time.monotonic()
@@ -902,7 +1003,7 @@ def t_transport_zero_proc_stuck_reconnects() -> None:
     """
     son = FakeSoniox()
     wk = FakeWorker(son.url)
-    s = make_asr(wk, son, response_timeout_s=5.0, keepalive_s=2.0,
+    s = make_asr(wk, son, retry_delays_s=(), response_timeout_s=5.0, keepalive_s=2.0,
                  backlog_s=0.5, backlog_hold_s=0.2, zero_proc_timeout_s=0.5,
                  stable_s=0.3)
     try:
@@ -1198,6 +1299,11 @@ def main() -> int:
         ("transport: 断线重连一次", t_transport_reconnect_once),
         ("transport: 封过句之后重连还能接着封", t_transport_reconnect_after_sealing_keeps_sealing),
         ("transport: 重连也失败 → 退回", t_transport_reconnect_fails_fallback),
+        ("transport: 第二次掉线仍重连", t_transport_second_drop_still_reconnects),
+        ("transport: 重连前按退避等待", t_transport_backoff_waits_between_retries),
+        ("transport: 稳定跑过后预算还原", t_transport_budget_resets_after_stable_session),
+        ("transport: stop() 打断退避", t_transport_stop_interrupts_backoff),
+        ("transport: 退回详情带 close code", t_transport_close_code_in_detail),
         ("transport: 领 key 429 → 本地", t_transport_key_429_is_local),
         ("transport: 没通行码 → 本地", t_transport_no_passcode),
         ("transport: 15 s 无响应判死", t_transport_stall_times_out),

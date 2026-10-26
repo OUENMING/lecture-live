@@ -91,6 +91,15 @@ BACKLOG_HOLD_S = 3.0
 #: 服务端一直回 `total_audio_proc_ms=0`（消息在来、但一毫秒音频都没处理）的兜底。
 #: 开流/大 context 就绪时 0 是合法的；但持续这么久仍是 0 → 判 `stale` 重连。
 ZERO_PROC_TIMEOUT_S = 15.0
+#: ⭐ 2026-10-26 掉线自愈：第 n 次重连**之前**等多久（秒）；长度 = 预算（一段「连续不稳」里最多重连几次）。
+#: 第一次立刻重连（短暂抖动不该多等）；之后 30 s → 2 min → 5 min 退避，免得网络刚掉时
+#: 连着撞墙。等待期间 Soniox 不出词，本地草稿 / 定稿照常接手（`allow_local()` 看 `alive()`），
+#: 恢复后自动换回 Soniox。10-23 ECON10770 就是「一节课只给一次重连」→ 第二次掉线后 38% 的课退回本地。
+RETRY_DELAYS_S = (0.0, 30.0, 120.0, 300.0)
+#: 上一个会话稳定跑过这么久 → 预算还原（一节课 3 小时，不能只给 4 次）。
+RETRY_RESET_S = 600.0
+#: 等待不短于这么久，重连时丢掉队列里的旧音频跳到实时（本地已经替这段出过字了）。
+RETRY_SKIP_AFTER_S = 5.0
 #: 收尾：发空文本帧后最多等这么久把最后的 final 收进来。
 FINISH_WAIT_S = 3.0
 #: 领 key 的 POST 超时（开课关键路径，短；重试由退回政策管）。
@@ -613,7 +622,9 @@ class StreamASR:
                  zero_proc_timeout_s: float = ZERO_PROC_TIMEOUT_S,
                  finish_wait_s: float = FINISH_WAIT_S, audio_max_s: float = QUEUE_MAX_S,
                  chunk_s: float = CHUNK_S, ws_url: str = WS_URL, region: str = "",
-                 context_text: str = "", terms_max: int = TERMS_MAX) -> None:
+                 context_text: str = "", terms_max: int = TERMS_MAX,
+                 retry_delays_s: Iterable[float] = RETRY_DELAYS_S,
+                 retry_reset_s: float = RETRY_RESET_S) -> None:
         self._passcode = (passcode or "").strip()
         self._terms = tuple(str(t).strip() for t in terms if str(t).strip())
         self._general = general or ""
@@ -634,6 +645,8 @@ class StreamASR:
         self._backlog_hold_s = float(backlog_hold_s)
         self._zero_proc_timeout_s = float(zero_proc_timeout_s)
         self._finish_wait_s = float(finish_wait_s)
+        self._retry_delays_s = tuple(max(0.0, float(d)) for d in retry_delays_s)
+        self._retry_reset_s = float(retry_reset_s)
         self._chunk_s = float(chunk_s)
         self._ws_url = ws_url
         self._max_chunks = max(1, int(float(audio_max_s) / self._chunk_s))
@@ -701,7 +714,9 @@ class StreamASR:
         #: ⭐ 3.10.1：退回原因是 `error` / `network` 时的**异常类型 + 一句话**（只进报告，
         #: 不上屏）。那次 `websockets` 没装上，报告里只有一个 `error`，猜了半天。
         self._detail = ""
-        self._retried = False
+        #: 掉线期间（上一个会话断了 → 新会话出词前）的累计秒数，进 `metrics()["down_s"]`。
+        self._down_since: float | None = None
+        self._down_s = 0.0
         self._manual = False                        # `force_local()` 关的（退回原因记 manual）
         self._pending = ""                          # 上次会话的死因（重连时先清、判死时先看）
         self._thread = threading.Thread(target=self._run, name="stream-asr", daemon=True)
@@ -730,7 +745,7 @@ class StreamASR:
         `blocks.stream`）：`engine` / `fallback_reason`（`""` = 没退回）/ `sealed_n`
         （从 `_fire` 出去的封口句数）/ `seal_latency_s`（`{p50, p90, n}`，秒；`None` = 一句
         都没封）/ `reconnects` / `skipped_s` / `backlog_max_s` / `msg_gap_max_s` /
-        `dropped_chunks` / `dropped_s` / `terms_n` / `terms_dropped`。
+        `down_s` / `dropped_chunks` / `dropped_s` / `terms_n` / `terms_dropped`。
         ⚠️ 只记**事实** —— 指标怎么算归读的人（`scripts/class_report.py`）。
         """
         with self._lock:
@@ -744,6 +759,8 @@ class StreamASR:
             msg_gap_max_s = self._msg_gap_max
             dropped = self._dropped
             dropped_samples = self._dropped_samples
+            down_s = self._down_s + (time.monotonic() - self._down_since
+                                     if self._down_since is not None else 0.0)
         st = self._ctx_stats
         return {"engine": ENGINE,
                 "fallback_reason": reason,
@@ -752,6 +769,7 @@ class StreamASR:
                 "seal_latency_s": _pcts(lat),
                 #: ⭐ 2026-10-21：卡顿/断流的可观测性（报告里直接看得到）
                 "reconnects": int(reconnects),
+                "down_s": round(float(down_s), 1),      # 掉线期间 Soniox 没出词的累计秒数
                 "skipped_s": round(float(skipped_s), 1),
                 "backlog_max_s": round(float(backlog_max_s), 1),
                 "msg_gap_max_s": round(float(msg_gap_max_s), 2),
@@ -893,19 +911,21 @@ class StreamASR:
             pass
 
     def _attempts(self) -> str:
-        """通常最多两次连接；特殊情况下允许第三次「跳实时」。返回退回原因（`""` = 干净停下）。
+        """连接 → 掉线 → 退避重连，直到预算用完才退回本地。返回退回原因（`""` = 干净停下）。
 
-        普通断线会先续传队列；如果重连本身较慢、队列攒了几秒，第二次会话可能因
-        `stale` 判死。这时**不要**直接退回本地 —— 再给一次 `skip` 重连（第三次），
-        丢掉积压跳到实时，云端的质量还能保住。最多三次，之后才退回。
-        第一次就是 `stale` 的只重试一次；只有「`disconnected`/`network` → `stale`」才多给一次。
+        ⭐ 2026-10-26 自愈：从前整节课只给**一次**重连（`_retried` 永不还原），第二次掉线就
+        永久退回（10-23 ECON10770：12:06 用掉唯一一次，12:31 又被掐 → 后 19 min、38% 的课退回本地）。
+        现在按 `RETRY_DELAYS_S` 退避重连，且上一个会话稳定跑过 `RETRY_RESET_S` 就把预算还原。
+        致命类（key 被拒 / 余额用完 / 额度）不在可重连之列，照旧立刻退回。
 
         ⚠️ 判死时先看 `_pending`：会话常常是「先 N 秒无响应、服务端随后关连接」——
         照返回值会记成 `disconnected`，把真正的原因盖掉。
         """
-        last_err = ""
+        fails = 0
         while True:
+            t0 = time.monotonic()
             err = self._session()
+            ran = time.monotonic() - t0
             with self._lock:
                 if self._stopped:
                     return ""
@@ -915,17 +935,31 @@ class StreamASR:
                     return "disconnected"           # 收线程死了但会话没报错
                 if err == "disconnected" and self._pending:
                     err = self._pending
-                # 普通断线 / 建连失败后仍 stale：允许再走一次 skip（第三次连接）。
-                if (err == "stale" and self._retried
-                        and last_err in ("disconnected", "network")):
-                    last_err = "stale"
-                    continue
-                if err not in ("network", "timeout", "disconnected", "stale"):
-                    return err
-                if self._retried:
-                    return err
-                self._retried = True
-                last_err = err
+            if err not in ("network", "timeout", "disconnected", "stale"):
+                return err
+            if ran >= self._retry_reset_s:
+                fails = 0                           # 上一个会话稳定跑过：预算还原
+            if fails >= len(self._retry_delays_s):
+                return err
+            delay = self._retry_delays_s[fails]
+            fails += 1
+            with self._lock:
+                self._down_since = time.monotonic()
+                if delay >= RETRY_SKIP_AFTER_S:
+                    self._skip_next = True          # 等这么久，旧音频没必要续传
+            if delay > 0 and not self._wait(delay):
+                return ""
+
+    def _wait(self, seconds: float) -> bool:
+        """退避等待；`stop()` 随时打断（返回 False）。"""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            with self._lock:
+                if self._stopped:
+                    return False
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        with self._lock:
+            return not self._stopped
 
     def _session(self) -> str:
         """一次完整会话。返回 `""`（正常收尾）或失败原因。"""
@@ -997,6 +1031,9 @@ class StreamASR:
             ws.send(json.dumps(self._config()))
             with self._lock:
                 self._alive = True
+                if self._down_since is not None:
+                    self._down_s += time.monotonic() - self._down_since
+                    self._down_since = None
             err = self._send_loop(ws)
         except Exception:                           # noqa: BLE001
             err = "disconnected"
@@ -1008,7 +1045,24 @@ class StreamASR:
             except Exception:                       # noqa: BLE001
                 pass
             recv.join(timeout=2.0)
+            self._note_close(ws, err)
         return err
+
+    def _note_close(self, ws, err: str) -> None:
+        """服务端关连接的 close code + 原因记进 `fallback_detail`（只在掉线类原因时）。永不抛。
+
+        10-23 那次 `fallback_detail` 是空的，只知道「被掐了」，不知道是谁掐的、为什么。
+        """
+        if err not in ("disconnected", "timeout", "stale"):
+            return
+        try:
+            code = getattr(ws, "close_code", None)
+            why = str(getattr(ws, "close_reason", "") or "")[:80]
+            if code is not None or why:
+                with self._lock:
+                    self._detail = f"close {code} {why}".strip()
+        except Exception:                           # noqa: BLE001
+            pass
 
     def _config(self) -> dict:
         """config 消息。`context` 在构造期就装好了（`build_context`），这里只搬 —— 重连时也一致。

@@ -5,7 +5,7 @@
 # ClassLive
 
 **英文课，实时看中文。**<br>
-老师讲英文，屏幕上同步滚出中英双语字幕；没听懂当场问，下课自动出笔记。
+老师讲英文，屏幕上同步滚出中英双语字幕；下课自动出笔记。
 
 [![Release](https://img.shields.io/github/v/release/OUENMING/lecture-live?style=flat-square&color=blueviolet)](https://github.com/OUENMING/lecture-live/releases/latest) [![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon-lightgrey?style=flat-square&logo=apple)](#快速开始) [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE) [![Stars](https://img.shields.io/github/stars/OUENMING/lecture-live?style=flat-square)](https://github.com/OUENMING/lecture-live/stargazers)
 
@@ -14,7 +14,7 @@
 </div>
 
 > [!NOTE]
-> **正在进行初步测试。** 发邮件到 **enming.owen@outlook.com** 获取免费测试 key（通行码），填进去就能用，不用自己注册任何云服务。
+> **测试中。** 发邮件到 **enming.owen@outlook.com** 获取免费测试 key（通行码），填进去就能用，不用自己注册任何云服务。
 
 <p align="center">
   <img src="docs/images/hero.jpg" width="900" alt="ClassLive 悬浮字幕盖在课件上：英文在上、中文在下，最底一行是正在听的那句">

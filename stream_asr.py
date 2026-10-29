@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import random
 import re
 import threading
 import time
@@ -81,7 +82,10 @@ KEEPALIVE_S = 5.0
 #: 在发）——Soniox 在静音/只发 keepalive 时也会每 ~1 s 回一条进度消息（2026-10-21 实测），
 #: 所以「有音频在推」不能当成「服务端还活着」。10-20 ECON10740 的 2m41s 静默就是
 #: 旧口径 `max(got, last_audio, last_send)` 让 `last_audio` 恒新、永不触发造成的。
-RESPONSE_TIMEOUT_S = 15.0
+RESPONSE_TIMEOUT_S = 8.0
+#: ⚠️ 2026-10-29 从 15 → 8：13 节上传课里健康会话的 `msg_gap_max_s` 都在 1.1–1.7 s（10 节），
+#: 出问题的两节是 5.4 / 6.0 s；8 s 是健康最大值的 ~5 倍。重连现在很便宜（立刻 → 2 s → 5 s），
+#: 误判的代价远小于「半开连接白等 15 s」。
 #: 服务端处理进度落后已发送音频这么多秒 → 认为流已经「跟不上实时」（消息还在来，
 #: 但内容是旧的）。`total_audio_proc_ms` 是 Soniox 官方给的进度字段（2026-10-21 核对）。
 BACKLOG_S = 3.0
@@ -92,14 +96,33 @@ BACKLOG_HOLD_S = 3.0
 #: 开流/大 context 就绪时 0 是合法的；但持续这么久仍是 0 → 判 `stale` 重连。
 ZERO_PROC_TIMEOUT_S = 15.0
 #: ⭐ 2026-10-26 掉线自愈：第 n 次重连**之前**等多久（秒）；长度 = 预算（一段「连续不稳」里最多重连几次）。
-#: 第一次立刻重连（短暂抖动不该多等）；之后 30 s → 2 min → 5 min 退避，免得网络刚掉时
-#: 连着撞墙。等待期间 Soniox 不出词，本地草稿 / 定稿照常接手（`allow_local()` 看 `alive()`），
+#: 第一次立刻重连（短暂抖动不该多等）；之后逐步放慢，免得网络刚掉时
+#: 连着撞墙（具体档位见下面 2026-10-29 的改动）。等待期间 Soniox 不出词，本地草稿 / 定稿照常接手（`allow_local()` 看 `alive()`），
 #: 恢复后自动换回 Soniox。10-23 ECON10770 就是「一节课只给一次重连」→ 第二次掉线后 38% 的课退回本地。
-RETRY_DELAYS_S = (0.0, 30.0, 120.0, 300.0)
-#: 上一个会话稳定跑过这么久 → 预算还原（一节课 3 小时，不能只给 4 次）。
-RETRY_RESET_S = 600.0
-#: 等待不短于这么久，重连时丢掉队列里的旧音频跳到实时（本地已经替这段出过字了）。
-RETRY_SKIP_AFTER_S = 5.0
+#:
+#: ⭐ 2026-10-29 改：原表 `(0, 30, 120, 300)` 对「连上就跑几十秒再掉」的链路等于自杀 ——
+#: 中国用户 BUSI3222 一节课 Soniox 只有 4 个出词窗（128/36/152/343 s），窗间空档 35/140/307 s ≈
+#: 退避表本身；4 次预算耗尽后 57 min 全本地。同行惯例：Soniox 官方 SDK 默认 1/2/4 s；AWS / gRPC /
+#: websocket.org 的惯例是**封顶 30 s + 抖动**、长连接客户端近似无限重试（出处见
+#: `docs/PLAN-stream-reconnect-20261029.md`）。这里 = 立刻 → 2 → 5 → 10 → 20 s，之后每 30 s 一次，
+#: 连续失败约 31 min 才放弃（官方限速 100 次/分，30 s 一次远低于它）。
+RETRY_DELAYS_S = (0.0, 2.0, 5.0, 10.0, 20.0) + (30.0,) * 60
+#: 上一个会话稳定跑过这么久 → 预算还原。⚠️ 不能在「一连上」就还原（连上就掉的链路会永远停在最短间隔）；
+#: 60 s ≈ 这一分钟里它真的在出词。原来 600 s：窗口都短于它 → 预算永远还原不了。
+RETRY_RESET_S = 60.0
+#: 退避之前等待不短于这么久，重连时丢掉队列里的旧音频跳到实时（掉线期间本地已经替这段出过字了；
+#: Soniox 要求「实时或近实时」发音频，持续突发会被断开，所以不补发积压）。
+RETRY_SKIP_AFTER_S = 2.0
+#: 退避抖动幅度（±比例）。多位用户同时被同一次故障掐掉时别同时撞回去。
+RETRY_JITTER = 0.2
+#: 一次 `ws.send` 卡住超过这么久 → 判流卡死、掐掉 socket 重连。
+#: ⚠️ 为什么要它：`send` 在 websockets 里是持锁 `sendall`，对端收不动（TCP 窗口塞满）时发送线程
+#: 卡在里面，判死循环跟着停摆，库自带的 ping 超时也要拿同一把锁 —— 只能等 TCP 自己超时（分钟级）；
+#: 这期间 `alive()` 仍为真 → 本地定稿被闸住、音频队列满了丢最旧 = 内容永久丢失
+#: （10-29 第 1 节 3 个 >30 s 长洞、dropped 596 s）。
+SEND_STUCK_S = 5.0
+#: `metrics()["sessions"]` 最多记这么多条（30 s 一次的长期重连也撑得住一整天，不会无限长）。
+SESS_LOG_MAX = 120
 #: 收尾：发空文本帧后最多等这么久把最后的 final 收进来。
 FINISH_WAIT_S = 3.0
 #: 领 key 的 POST 超时（开课关键路径，短；重试由退回政策管）。
@@ -668,7 +691,8 @@ class StreamASR:
                  chunk_s: float = CHUNK_S, ws_url: str = WS_URL, region: str = "",
                  context_text: str = "", terms_max: int = TERMS_MAX,
                  retry_delays_s: Iterable[float] = RETRY_DELAYS_S,
-                 retry_reset_s: float = RETRY_RESET_S) -> None:
+                 retry_reset_s: float = RETRY_RESET_S, retry_jitter: float = RETRY_JITTER,
+                 send_stuck_s: float = SEND_STUCK_S) -> None:
         self._passcode = (passcode or "").strip()
         self._terms = tuple(str(t).strip() for t in terms if str(t).strip())
         self._general = general or ""
@@ -691,6 +715,14 @@ class StreamASR:
         self._finish_wait_s = float(finish_wait_s)
         self._retry_delays_s = tuple(max(0.0, float(d)) for d in retry_delays_s)
         self._retry_reset_s = float(retry_reset_s)
+        self._retry_jitter = max(0.0, float(retry_jitter))
+        self._send_stuck_s = float(send_stuck_s)
+        #: 正在 `ws.send` 里的起始时刻（`None` = 没在发）。看门狗线程读，只有发送线程写。
+        self._send_since: float | None = None
+        #: ⭐ 逐会话记录（P3）：每个会话结束记一条，进 `metrics()["sessions"]`。
+        #: 以前只留最后一次的 close code，4 次重连各自为什么掉、跑了多久全不知道。
+        self._sess_log: list[dict] = []
+        self._t_start = time.monotonic()
         self._chunk_s = float(chunk_s)
         self._ws_url = ws_url
         self._max_chunks = max(1, int(float(audio_max_s) / self._chunk_s))
@@ -805,6 +837,7 @@ class StreamASR:
             dropped_samples = self._dropped_samples
             down_s = self._down_s + (time.monotonic() - self._down_since
                                      if self._down_since is not None else 0.0)
+            sessions = [dict(x) for x in self._sess_log]
         st = self._ctx_stats
         return {"engine": ENGINE,
                 "fallback_reason": reason,
@@ -820,7 +853,9 @@ class StreamASR:
                 "dropped_chunks": int(dropped),
                 "dropped_s": round(float(dropped_samples) / float(SR), 1),
                 "terms_n": int(st.get("terms_n") or 0),
-                "terms_dropped": int(st.get("terms_dropped") or 0)}
+                "terms_dropped": int(st.get("terms_dropped") or 0),
+                #: 每个会话一条：`at` 开始于第几秒 / `ran_s` 跑了多久 / `why` 怎么结束的 / `detail` close code 等
+                "sessions": sessions}
 
     def feed(self, samples) -> None:
         """音频回调：float32 样本 → 有界队列。**绝不阻塞**，满了丢最旧。"""
@@ -996,18 +1031,23 @@ class StreamASR:
                     return "disconnected"           # 收线程死了但会话没报错
                 if err == "disconnected" and self._pending:
                     err = self._pending
+                if len(self._sess_log) < SESS_LOG_MAX:
+                    self._sess_log.append({"at": round(t0 - self._t_start, 1), "ran_s": round(ran, 1),
+                                           "why": err, "detail": self._detail[:40]})
             if err not in ("network", "timeout", "disconnected", "stale"):
                 return err
             if ran >= self._retry_reset_s:
                 fails = 0                           # 上一个会话稳定跑过：预算还原
             if fails >= len(self._retry_delays_s):
                 return err
-            delay = self._retry_delays_s[fails]
+            base = self._retry_delays_s[fails]
             fails += 1
             with self._lock:
                 self._down_since = time.monotonic()
-                if delay >= RETRY_SKIP_AFTER_S:
+                if base >= RETRY_SKIP_AFTER_S:
                     self._skip_next = True          # 等这么久，旧音频没必要续传
+            # 抖动：同一次故障掐掉的人别同一秒撞回去（AWS Builders' Library：封顶退避 + 抖动）
+            delay = base * (1.0 + random.uniform(-self._retry_jitter, self._retry_jitter)) if base > 0 else 0.0
             if delay > 0 and not self._wait(delay):
                 return ""
 
@@ -1060,6 +1100,7 @@ class StreamASR:
             self._zero_proc_since = None
             self._zero_proc_seq = 0
             self._last_msg_at = time.monotonic()
+            self._send_since = None
         if skip:
             dropped = 0
             while True:
@@ -1095,7 +1136,13 @@ class StreamASR:
                 if self._down_since is not None:
                     self._down_s += time.monotonic() - self._down_since
                     self._down_since = None
-            err = self._send_loop(ws)
+            wd_stop = threading.Event()
+            threading.Thread(target=self._send_watchdog, args=(ws, wd_stop), name="stream-asr-wd",
+                             daemon=True).start()
+            try:
+                err = self._send_loop(ws)
+            finally:
+                wd_stop.set()
         except Exception:                           # noqa: BLE001
             err = "disconnected"
         finally:
@@ -1109,6 +1156,27 @@ class StreamASR:
             self._note_close(ws, err)
         return err
 
+    def _send_watchdog(self, ws, stop: threading.Event) -> None:
+        """发送线程在 `ws.send` 里卡超过 `send_stuck_s` → 掐掉 socket，让会话按 `stale` 重连。
+
+        ⚠️ 必须是**另一条线程**：发送线程自己卡在 `sendall` 里，没法判自己；库的 ping 超时要拿
+        同一把 `protocol_mutex`，也救不了（见 `SEND_STUCK_S`）。`close_socket()` 不拿锁，
+        它 shutdown 之后卡住的 `sendall` 立刻抛 OSError，发送线程走正常的「掉线」出口。
+        """
+        while not stop.wait(0.5):
+            since = self._send_since
+            if since is None or time.monotonic() - since < self._send_stuck_s:
+                continue
+            with self._lock:
+                self._pending = "stale"
+                self._skip_next = True
+                self._detail = f"send stuck >{self._send_stuck_s:g}s"
+            try:
+                ws.close_socket()
+            except Exception:                       # noqa: BLE001
+                pass
+            return
+
     def _note_close(self, ws, err: str) -> None:
         """服务端关连接的 close code + 原因记进 `fallback_detail`（只在掉线类原因时）。永不抛。
 
@@ -1121,7 +1189,12 @@ class StreamASR:
             why = str(getattr(ws, "close_reason", "") or "")[:80]
             if code is not None or why:
                 with self._lock:
-                    self._detail = f"close {code} {why}".strip()
+                    # ⚠️ 看门狗先写了「send stuck」：socket 是我们自己掐的，close 1006 只是结果，
+                    #    别拿它盖掉真正的原因（不然报告里又只剩一句看不出原因的 1006）。
+                    if self._detail.startswith("send stuck"):
+                        self._detail = f"{self._detail}; close {code}".strip()
+                    else:
+                        self._detail = f"close {code} {why}".strip()
         except Exception:                           # noqa: BLE001
             pass
 
@@ -1227,9 +1300,12 @@ class StreamASR:
                 now = time.monotonic()
                 if now - last_audio > self._keepalive_s and now - last_send > self._keepalive_s:
                     try:                            # ⚠️ 发送失败按断线处理，绝不停在这
+                        self._send_since = time.monotonic()
                         ws.send(json.dumps({"type": "keepalive"}))
                     except Exception:               # noqa: BLE001
                         return "disconnected"
+                    finally:
+                        self._send_since = None
                     last_send = now
                 continue
             last_audio = time.monotonic()
@@ -1241,12 +1317,15 @@ class StreamASR:
                     buf = np.concatenate((carry, buf))
                 i = 0
                 while i + chunk_samples <= buf.size:
+                    self._send_since = time.monotonic()
                     ws.send(buf[i:i + chunk_samples].tobytes())
+                    self._send_since = None
                     self._sent_samples += chunk_samples
                     last_send = time.monotonic()
                     i += chunk_samples
                 carry = buf[i:].copy()
             except Exception:                       # noqa: BLE001
+                self._send_since = None
                 return "disconnected"
         return self._finish_stream(ws)
 

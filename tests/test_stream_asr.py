@@ -198,7 +198,8 @@ def make_asr(worker: FakeWorker, soniox: FakeSoniox, *, on_sealed=None, **kw) ->
     kw.setdefault("keepalive_s", 0.5)
     kw.setdefault("response_timeout_s", 1.5)
     kw.setdefault("stable_s", 0.3)
-    kw.setdefault("retry_delays_s", (0.0, 0.1, 0.1, 0.1))   # 生产是 0/30/120/300 s，测试压到 0.1 s
+    kw.setdefault("retry_delays_s", (0.0, 0.1, 0.1, 0.1))   # 生产见 stream_asr.RETRY_DELAYS_S，测试压到 0.1 s
+    kw.setdefault("retry_jitter", 0.0)                        # 既有判据量精确退避时间；抖动单独有一条
     return StreamASR(passcode="cl-test", terms=["OLS", "regression"],
                      general="ECON10730 Data Analysis", on_sealed=on_sealed, **kw)
 
@@ -781,6 +782,119 @@ def t_transport_budget_resets_after_stable_session() -> None:
         wk.close()
 
 
+# ── 2026-10-29 中国用户断联（docs/PLAN-stream-reconnect-20261029.md）──
+
+def t_transport_send_stuck_watchdog_reconnects() -> None:
+    """⭐ `ws.send` 卡死（上行塞死、连接还活着）→ 看门狗掐 socket → 按 stale 重连。
+
+    ⚠️ 本机回环上对端不读也**卡不住** `sendall`（实测：40 s 灌进 2574 s 音频都没阻塞，最后是库的
+       ping 超时在 40 s 救场），所以不拿「真的塞死 TCP」当夹具，而是把第一条连接的 `send` 换成
+       阻塞到 `close_socket()` 被调用为止 —— 与真卡死同形（卡在 send 里、靠掐 socket 才出得来）。
+    ⚠️ `response_timeout_s=60`：只有看门狗能让它重连，别让旧的无响应判据抢了功劳。
+    """
+    import websockets.sync.client as wsc
+    real_connect = wsc.connect
+    unblock = threading.Event()
+    calls = {"n": 0}
+
+    def connect(*a, **kw):
+        ws = real_connect(*a, **kw)
+        calls["n"] += 1
+        if calls["n"] == 1:                                   # 只让第一条连接卡
+            real_send, real_close = ws.send, ws.close_socket
+            sent = {"n": 0}
+
+            def send(data, *aa, **kk):
+                if isinstance(data, bytes):
+                    sent["n"] += 1
+                    if sent["n"] > 3:
+                        unblock.wait(30.0)                    # 卡在 send 里
+                        raise OSError("socket closed under a blocked send")
+                return real_send(data, *aa, **kk)
+
+            def close_socket():
+                unblock.set()
+                real_close()
+            ws.send, ws.close_socket = send, close_socket
+        return ws
+
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    with mock.patch.object(wsc, "connect", connect):
+        s = make_asr(wk, son, response_timeout_s=60.0, send_stuck_s=0.6, retry_delays_s=(0.0,))
+        try:
+            assert wait_until(s.alive)
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 8.0 and len(son.connections) < 2:
+                s.feed(silence(1600))
+                time.sleep(0.02)
+            assert len(son.connections) >= 2, "发送卡死该被看门狗发现并重连"
+            assert time.monotonic() - t0 < 6.0, "看门狗该在 send_stuck_s(0.6) 之后很快动手，而不是等别的判据"
+            sess = s.metrics()["sessions"]
+            assert sess and sess[0]["why"] == "stale", sess
+            assert sess[0]["detail"].startswith("send stuck"), f"看门狗写的原因被 close 1006 盖掉了: {sess}"
+        finally:
+            unblock.set()
+            s.stop()
+            son.close()
+            wk.close()
+
+
+def t_transport_backoff_has_jitter() -> None:
+    """退避带抖动：抖动取下限时，第二次重连比基准退避（1.0 s）早。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    with mock.patch("stream_asr.random.uniform", return_value=-0.5):
+        s = make_asr(wk, son, retry_delays_s=(0.0, 1.0), retry_jitter=0.5)
+        try:
+            assert wait_until(s.alive)
+            son.to_send.put(("close", 1011, "a"))
+            assert wait_until(lambda: len(son.connections) >= 2 and s.alive())
+            t0 = time.monotonic()
+            son.to_send.put(("close", 1011, "b"))
+            assert wait_until(lambda: len(son.connections) >= 3 and s.alive(), 5.0)
+            waited = time.monotonic() - t0
+            assert 0.3 <= waited < 0.95, f"抖动下限该把 1.0 s 退避压到 ~0.5 s，实测 {waited:.2f}"
+        finally:
+            s.stop()
+            son.close()
+            wk.close()
+
+
+def t_transport_sessions_log_per_drop() -> None:
+    """每次掉线都留一条：开始时刻 / 跑了多久 / 原因 / close code（以前只剩最后一次）。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, retry_delays_s=(0.0, 0.0, 0.0))
+    try:
+        assert wait_until(s.alive)
+        for n, code in ((2, 1011), (3, 1012)):
+            time.sleep(0.15)
+            son.to_send.put(("close", code, f"x{n}"))
+            assert wait_until(lambda n=n: len(son.connections) >= n and s.alive(), 5.0)
+        sess = s.metrics()["sessions"]
+        assert len(sess) == 2, sess
+        assert [x["why"] for x in sess] == ["disconnected", "disconnected"], sess
+        assert "1011" in sess[0]["detail"] and "1012" in sess[1]["detail"], sess
+        assert all(x["ran_s"] > 0.1 for x in sess), sess
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_retry_policy_constants_fit_the_incident() -> None:
+    """钉住 10-29 那节课的形状：出词窗只有 36–343 s、掉线频繁 → 预算必须扛得住、还原不能要 10 分钟。
+    窗间空档要短（< 1 分钟就接回），且长期重连不能放弃得太早。"""
+    d = stream_asr.RETRY_DELAYS_S
+    assert d[0] == 0.0 and d[1] <= 5.0, "头两次重连必须几乎立刻（原表 0/30 s 是 57 分钟全本地的原因）"
+    assert max(d) <= 30.0, "单次退避封顶 30 s（同行惯例）"
+    assert list(d) == sorted(d), "退避只增不减"
+    assert sum(d) >= 20 * 60, f"连续失败至少坚持 20 分钟再放弃，实际 {sum(d):.0f}s"
+    assert stream_asr.RETRY_RESET_S <= 120.0, "会话跑过 ≤2 分钟就该还原预算（原 600 s 窗口永远够不着）"
+    assert stream_asr.RESPONSE_TIMEOUT_S <= 10.0, "半开连接最多白等 ~10 s"
+
+
 def t_transport_stop_interrupts_backoff() -> None:
     """退避等待中下课：`stop()` 不能被 30 s 的等待拖住。"""
     son = FakeSoniox()
@@ -1302,6 +1416,10 @@ def main() -> int:
         ("transport: 第二次掉线仍重连", t_transport_second_drop_still_reconnects),
         ("transport: 重连前按退避等待", t_transport_backoff_waits_between_retries),
         ("transport: 稳定跑过后预算还原", t_transport_budget_resets_after_stable_session),
+        ("transport: 发送卡死 → 看门狗重连", t_transport_send_stuck_watchdog_reconnects),
+        ("transport: 退避带抖动", t_transport_backoff_has_jitter),
+        ("transport: 每次掉线记一条会话日志", t_transport_sessions_log_per_drop),
+        ("transport: 退避常量贴合 10-29 形状", t_retry_policy_constants_fit_the_incident),
         ("transport: stop() 打断退避", t_transport_stop_interrupts_backoff),
         ("transport: 退回详情带 close code", t_transport_close_code_in_detail),
         ("transport: 领 key 429 → 本地", t_transport_key_429_is_local),

@@ -60,7 +60,7 @@ import re
 import threading
 import time
 import urllib.parse
-from typing import Callable, Iterable, NamedTuple
+from typing import Callable, Iterable, NamedTuple, Sequence
 
 import numpy as np
 
@@ -322,6 +322,50 @@ class StreamCore:
             self._final, self._nonfinal = [], []
             self._cand_key, self._cand_at = None, None
         return self.take_sentences()
+
+    # ---- 语意封口（`semantic_seal.py` 用）
+
+    def unsealed_words(self) -> list[str]:
+        """未封口那段文字的词（按空白切）。语意封口按「第几个词」说话，两边的切法必须一致。"""
+        return self.draft_text().split()
+
+    def seal_through_word(self, k: int, expect: Sequence[str] | None = None) -> bool:
+        """语意封口：把未封口文字的前 `k+1` 个词（0 起）当一句封掉，水位线推到第 `k` 词末 token 的 `end_ms`。
+
+        ⭐ 走的就是句号封口那条 `_seal` —— 水位线之前的词之后一律当旧词丢，所以 Soniox 后来把
+        这段变 final / 补上句号都不会再封一遍。**触发判据换了，去重机制没换。**
+        不封的情况（返回 `False`，什么都不动）：`k` 越界；`expect` 给了而当前前缀已经变了
+        （决策花了一秒，这期间 Soniox 改了词或这句已被句号封走）；第 `k` 词落在一个跨词 token 中间。
+        """
+        toks = self._final + self._nonfinal
+        text = "".join(t.text for t in toks)
+        words = text.split()
+        if k < 0 or k >= len(words):
+            return False
+        if expect is not None and words[:k + 1] != list(expect[:k + 1]):
+            return False
+        # 每个 token 的最后一个非空白字符落在第几个词里
+        widx, prev_space, last_word = -1, True, []
+        for t in toks:
+            lw = None
+            for ch in t.text:
+                if ch.isspace():
+                    prev_space = True
+                else:
+                    if prev_space:
+                        widx += 1
+                    prev_space = False
+                    lw = widx
+            last_word.append(lw)
+        end = None
+        for t, lw in zip(toks, last_word):
+            if lw is not None and lw <= k:
+                end = t if lw == k else end
+        if end is None:
+            return False
+        self._seal(end)
+        self._update_candidate()
+        return True
 
     # ---- 内部
 
@@ -868,6 +912,23 @@ class StreamASR:
         with self._lock:
             return self._core.draft_text()
 
+    def unsealed_words(self) -> list[str]:
+        """未封口那段的词（语意封口用，见 `StreamCore.unsealed_words`）。"""
+        with self._lock:
+            return self._core.unsealed_words()
+
+    def seal_through_word(self, k: int, expect: Sequence[str] | None = None) -> bool:
+        """语意封口：前 `k+1` 个词当一句送出去（见 `StreamCore.seal_through_word`）。
+
+        和 `_tick` 同一个写法：锁里只改核心，`on_sealed` 回调在锁外发。
+        """
+        with self._lock:
+            ok = self._core.seal_through_word(k, expect)
+            sealed = self._core.take_sentences() if ok else []
+        for s in sealed:
+            self._fire(s, record_lat=False)
+        return ok
+
     def stop(self) -> None:
         """收尾：发空文本帧，最多等 `finish_wait_s` 收 final，再关。可重复调。"""
         with self._lock:
@@ -1323,11 +1384,13 @@ class StreamASR:
 
     # ---- 状态
 
-    def _fire(self, s: Sealed) -> None:
+    def _fire(self, s: Sealed, *, record_lat: bool = True) -> None:
         # ⭐ 3.10 量具：计数 + 上移延迟（墙钟 − 句尾音频时刻）。锁内只做加法，微秒级。
+        #    语意封口（`record_lat=False`）不进延迟分布：它的「延迟」是我们故意等的，
+        #    混进去会把 `seal_latency_s` 这个健康指标拉歪。
         with self._lock:
             self._sealed_n += 1
-            if len(self._seal_lat) < SEAL_LAT_MAX:
+            if record_lat and len(self._seal_lat) < SEAL_LAT_MAX:
                 lat = seal_latency_s(self._clock(), self._audio_t0, s.end_s)
                 if lat is not None:
                     self._seal_lat.append(lat)

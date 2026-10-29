@@ -2723,6 +2723,7 @@ def run(args) -> None:
     sealedq: "queue.Queue" = queue.Queue()      # `on_sealed` 只往这里入队（Soniox 收线程）
     _wake_fw = threading.Event()                # 叫醒 `final_worker`：sealedq / finalq 有货
     stream = None
+    _sem = None                                 # 语意封口（`stream` 建好后才起，见下）
     if stream_gate.start_ok(passcode=api_key_val, cloud_ok=_cloud_asr_ok()):
         try:
             import stream_asr
@@ -2773,6 +2774,18 @@ def run(args) -> None:
             _m = stream.metrics()
             _cut = "" if not _m["terms_dropped"] else f"（截 {_m['terms_dropped']} 条）"
             echo(f"🎧 实时识别: Soniox（连不上会自动退回本地）· 术语 {_m['terms_n']} 条{_cut}")
+            # ⭐ 语意封口（`semantic_seal.py`）：Soniox 标点崩塌、一大段没有标点时，按「一个意思讲完」封口。
+            #    平时（有标点）一次都不介入、不调模型；`CLASSLIVE_SEMANTIC_SEAL=0` 关。
+            if os.environ.get("CLASSLIVE_SEMANTIC_SEAL", "1") != "0":
+                try:
+                    import semantic_seal
+                    _sem = semantic_seal.SemanticSealer(
+                        stream, semantic_seal.llm_decide(api_key_val, args.cloud_model),
+                        on_seal=lambda _i, _live=live: (_live.event("semantic_seal", **_i)
+                                                        if _live is not None else None))
+                    _sem.start()
+                except Exception as e:                         # noqa: BLE001
+                    echo(f"⚠ 语意封口起不来（只影响没有标点的长段）：{type(e).__name__}: {e}")
         except Exception as e:                                 # noqa: BLE001
             echo(f"⚠ 实时识别起不来，本节课走本地：{type(e).__name__}: {e}")
             stream = None
@@ -4069,6 +4082,12 @@ def run(args) -> None:
             #    ⚠️ 排在 `seg.flush()` **之后**：flush 会把最后那半句的音频交给
             #       `_utterance_end`，此时流还活着 -> 本地那道闸仍关着，尾巴不会做两遍。
             hidden_switch.clear()         # 下课了：暗号变回普通文字
+            if _sem is not None:
+                _sem.stop()               # 先停：别在收尾 flush 的同时又封一句
+                if live is not None:
+                    live.event("semantic_seal_summary", **_sem.stats)
+                if tester is not None:
+                    tester.note_block("semantic_seal", dict(_sem.stats))
             if gate.on:
                 _drafts_done.set()        # 草稿轮询线程先停（别再往 `drafts` 里放）
                 gate.stop()               # 内部 `stream.stop()`：最多等 finish_wait_s

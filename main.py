@@ -3768,8 +3768,9 @@ def run(args) -> None:
                 continue
             if not draft_view.accept(_dseq, _dseg):  # 这段已定稿上屏 / 更新的译文已显示过
                 continue
+            _clipped = draft_tr.take_clipped(_dseq)
             if live is not None:
-                live.draft_zh(_zh)
+                live.draft_zh(_zh, clipped=_clipped)
             ui.draft_zh(_zh)
         while True:
             try:

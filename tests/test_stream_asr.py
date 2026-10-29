@@ -200,6 +200,7 @@ def make_asr(worker: FakeWorker, soniox: FakeSoniox, *, on_sealed=None, **kw) ->
     kw.setdefault("stable_s", 0.3)
     kw.setdefault("retry_delays_s", (0.0, 0.1, 0.1, 0.1))   # 生产见 stream_asr.RETRY_DELAYS_S，测试压到 0.1 s
     kw.setdefault("retry_jitter", 0.0)                        # 既有判据量精确退避时间；抖动单独有一条
+    kw.setdefault("drop_log", "")                             # 默认关：别让几十条判据的输出被掉线行淹掉
     return StreamASR(passcode="cl-test", terms=["OLS", "regression"],
                      general="ECON10730 Data Analysis", on_sealed=on_sealed, **kw)
 
@@ -840,6 +841,163 @@ def t_transport_send_stuck_watchdog_reconnects() -> None:
             wk.close()
 
 
+def t_transport_config_send_stuck_covered() -> None:
+    """⭐ config 帧（建连后第一条 send）卡死 → 也要被看门狗救。
+
+    2026-10-29 复核发现：看门狗原来只盯 keepalive 与音频两条路，config 帧和收尾空帧的
+    `ws.send` 不设 `_send_since` → 那两处卡死它永远看不见。这里把第一条连接的**文本帧**
+    卡住，断言仍然靠看门狗重连（`response_timeout_s=60` 排除旧判据抢功）。
+    """
+    import websockets.sync.client as wsc
+    real_connect = wsc.connect
+    unblock = threading.Event()
+    calls = {"n": 0}
+
+    def connect(*a, **kw):
+        ws = real_connect(*a, **kw)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            real_send, real_close = ws.send, ws.close_socket
+            state = {"blocked": False}
+
+            def send(data, *aa, **kk):
+                if isinstance(data, str) and not state["blocked"]:
+                    state["blocked"] = True                  # 只卡 config 那一帧（收尾空帧是后面的事）
+                    unblock.wait(30.0)
+                    raise OSError("socket closed under a blocked config send")
+                return real_send(data, *aa, **kk)
+
+            def close_socket():
+                unblock.set()
+                real_close()
+            ws.send, ws.close_socket = send, close_socket
+        return ws
+
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    with mock.patch.object(wsc, "connect", connect):
+        s = make_asr(wk, son, response_timeout_s=60.0, send_stuck_s=0.6, retry_delays_s=(0.0,))
+        try:
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 8.0 and len(son.connections) < 2:
+                time.sleep(0.02)
+            assert len(son.connections) >= 2, "config 帧卡死该被看门狗发现并重连"
+            sess = s.metrics()["sessions"]
+            assert sess and sess[0]["detail"].startswith("send stuck"), sess
+        finally:
+            unblock.set()
+            s.stop()
+            son.close()
+            wk.close()
+
+
+def t_transport_keepalive_send_stuck_covered() -> None:
+    """⭐ 静音时 keepalive 那条 `ws.send` 卡死 → 也要被看门狗救（MUT8 曾漏过）。"""
+    import websockets.sync.client as wsc
+    real_connect = wsc.connect
+    unblock = threading.Event()
+    calls = {"n": 0}
+
+    def connect(*a, **kw):
+        ws = real_connect(*a, **kw)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            real_send, real_close = ws.send, ws.close_socket
+
+            def send(data, *aa, **kk):
+                if isinstance(data, str) and data and "keepalive" in data:
+                    unblock.wait(30.0)
+                    raise OSError("socket closed under a blocked keepalive send")
+                return real_send(data, *aa, **kk)
+
+            def close_socket():
+                unblock.set()
+                real_close()
+            ws.send, ws.close_socket = send, close_socket
+        return ws
+
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    with mock.patch.object(wsc, "connect", connect):
+        # keepalive_s 小 → 不喂音频也会很快走到那条 send
+        s = make_asr(wk, son, response_timeout_s=60.0, send_stuck_s=0.6,
+                     keepalive_s=0.2, retry_delays_s=(0.0,))
+        try:
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 10.0 and len(son.connections) < 2:
+                time.sleep(0.02)
+            assert len(son.connections) >= 2, "keepalive 发送卡死该被看门狗发现并重连"
+            sess = s.metrics()["sessions"]
+            assert sess and sess[0]["detail"].startswith("send stuck"), sess
+        finally:
+            unblock.set()
+            s.stop()
+            son.close()
+            wk.close()
+
+
+def t_transport_watchdog_thread_does_not_leak() -> None:
+    """⭐ 每次会话结束看门狗线程都要退出（MUT9 曾漏过：`wd_stop` 不置位 → 每次重连漏一条线程）。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    before = sum(1 for t in threading.enumerate() if t.name == "stream-asr-wd")
+    # ⚠️ 退避表要给够：只有一条的话第二轮掉线就直接退回本地，测不出「多次重连后的线程数」
+    s = make_asr(wk, son, retry_delays_s=(0.0, 0.0, 0.0, 0.0))
+    try:
+        assert wait_until(s.alive)
+        for want in (2, 3):                                   # 逼它掉线重连两轮（每轮等新连接真的起来）
+            son.to_send.put(("close", 1011, "test"))          # 假服务端主动关：走正常重连
+            t1 = time.monotonic()
+            while time.monotonic() - t1 < 5.0 and len(son.connections) < want:
+                time.sleep(0.02)
+            assert len(son.connections) >= want, f"没重连起来就是空转：{len(son.connections)}"
+            assert wait_until(s.alive, 3.0), "重连后该重新 alive"
+        s.stop()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            alive = sum(1 for t in threading.enumerate() if t.name == "stream-asr-wd")
+            if alive <= before:
+                return
+            time.sleep(0.1)
+        alive = sum(1 for t in threading.enumerate() if t.name == "stream-asr-wd")
+        raise AssertionError(f"看门狗线程泄漏：开始 {before} 条，结束还剩 {alive} 条")
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_transport_drop_log_goes_to_stdout() -> None:
+    """⭐ 每次掉线往 stdout 打一行 —— 这是普通上课（非测试模式）唯一的现场线索。
+
+    `sessions[]` 只进 `blocks.stream` 与 `.live.jsonl`，两者平时都关；stdout 进 `app.log`
+    （双击 `.app` 时改道），而 `app.log` 本来就在诊断包里。10-29 那节课手上什么都没有，
+    只能拿草稿时间戳反推 —— 这一条就是为那种时候留的。
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    buf = io.StringIO()
+    s = make_asr(wk, son, retry_delays_s=(0.0, 0.0), drop_log="DROP {ran}s {why}{detail} #{n}")
+    try:
+        with redirect_stdout(buf):
+            assert wait_until(s.alive)
+            son.to_send.put(("close", 1011, "x"))
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 5.0 and not buf.getvalue().strip():
+                time.sleep(0.02)
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+    out = buf.getvalue()
+    assert "DROP" in out, f"掉线没有打到 stdout：{out!r}"
+    assert "#1" in out and "disconnected" in out, out
+    assert "1011" in out, f"close code 该带上：{out!r}"
+
+
 def t_transport_backoff_has_jitter() -> None:
     """退避带抖动：抖动取下限时，第二次重连比基准退避（1.0 s）早。"""
     son = FakeSoniox()
@@ -1417,7 +1575,11 @@ def main() -> int:
         ("transport: 重连前按退避等待", t_transport_backoff_waits_between_retries),
         ("transport: 稳定跑过后预算还原", t_transport_budget_resets_after_stable_session),
         ("transport: 发送卡死 → 看门狗重连", t_transport_send_stuck_watchdog_reconnects),
+        ("transport: config 帧卡死 → 看门狗重连", t_transport_config_send_stuck_covered),
+        ("transport: keepalive 卡死 → 看门狗重连", t_transport_keepalive_send_stuck_covered),
+        ("transport: 看门狗线程不泄漏", t_transport_watchdog_thread_does_not_leak),
         ("transport: 退避带抖动", t_transport_backoff_has_jitter),
+        ("transport: 掉线打到 stdout", t_transport_drop_log_goes_to_stdout),
         ("transport: 每次掉线记一条会话日志", t_transport_sessions_log_per_drop),
         ("transport: 退避常量贴合 10-29 形状", t_retry_policy_constants_fit_the_incident),
         ("transport: stop() 打断退避", t_transport_stop_interrupts_backoff),

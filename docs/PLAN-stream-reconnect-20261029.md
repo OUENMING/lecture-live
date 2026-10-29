@@ -63,3 +63,31 @@ Soniox 一节课里 4 段在线（128 / 36 / 152 / 343 s），之后 ~57 min 全
 - 真实日本/欧洲链路上的行为没跑过；测试用本地假 Worker + FakeSoniox。
 - `RESPONSE_TIMEOUT_S = 8` 在网络差的用户那边会不会误杀健康连接——取决于他们的 `msg_gap_max_s` 分布，目前只有 13 节课的样本。
 - 新退避表对 Soniox 服务端侧的压力（每用户最多 ~每 30 s 一次握手）没和 Soniox 确认。
+
+## 独立复核（2026-10-29，两个子代理 + 自己复核）
+
+### 抓到并已修
+
+| 问题 | 怎么发现的 | 改法 | 判据 |
+|---|---|---|---|
+| **config 帧 / 收尾空帧的 `ws.send` 没被看门狗覆盖** | 子代理 A 的变异与 grep 都指向这里；自己核对 4 处 `ws.send` 只有 2 处设了 `_send_since` | 抽出 `_timed_send()`，四处发送全走它；看门狗线程提到**第一次 send 之前**起 | `t_transport_config_send_stuck_covered` |
+| **keepalive 卡死没有任何判据**（MUT8 剔掉计时仍全绿） | 子代理 A 的变异 MUT8 | 同上（覆盖 `_timed_send`）+ 新判据 | `t_transport_keepalive_send_stuck_covered` |
+| **`wd_stop` 不置位会每次重连漏一条线程**（MUT9 全绿） | 子代理 A 的变异 MUT9 | `finally` 里无条件 `wd_stop.set()`（原来只在 `_send_loop` 的内层 finally） | `t_transport_watchdog_thread_does_not_leak`（实测泄漏时 24 → 27 条） |
+| **普通上课时掉线不留任何痕迹** | 自己查：`sessions[]` 只进 `blocks.stream` 与 `.live.jsonl`，**两者默认都关** | `DROP_LOG` + `drop_log` 注入参数，每次掉线打一行到 stdout（进 `app.log`，`app.log` 已在诊断包里） | `t_transport_drop_log_goes_to_stdout` |
+
+四处新判据都过了变异验证：把对应实现改坏，它们各自变红。
+
+### 复核确认成立（不改）
+
+- `msg_gap_max_s` 的历史分布：健康会话 1.1 / 1.1 / 1.1 / 1.1 / 1.11 / 1.2 / 1.3 / 1.51 / 1.6 / 1.7 s；
+  出问题的 2.9 / 5.41 / 6.01 s。`RESPONSE_TIMEOUT_S = 8` 对健康会话有 ~4.7× 余量。
+  复算方法：读 `allrep/*.json` 的 `blocks.stream`（20 份有这个块，其余是 3.10.3 之前的报告）。
+- `_send_since` 无锁读写：只有发送线程写、看门狗读，最坏是「晚半拍发现卡死」，不会误杀 —— 可接受。
+- `metrics()["sessions"]` 新增键：`main.py` 整块透传给 `tester.note_block("stream", …)` 与
+  `live.close(stream=…)`，两者都原样接收任意键；`scripts/class_report.py` / 面板按已知键取，多一个键无影响。
+
+### 仍未验证（上线后第一批数据要看）
+
+- 真实链路（中国 → jp）上的行为没跑过；测试都是本机假服务。
+- `RESPONSE_TIMEOUT_S = 8` 对**网络比现有样本更差**的用户会不会误杀，没有证据。
+- 新退避（每 30 s 一次握手，约 35 min）对 Soniox 侧速率限制的影响，没和官方确认。

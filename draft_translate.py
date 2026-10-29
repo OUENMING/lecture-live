@@ -37,6 +37,31 @@ def sealed_prefix(text: str) -> str:
     return text[:m.end()] if m else ""
 
 
+#: 草稿译文只送最后这么多词。依据（2026-10-28，美国用户 10-27 ECS170 `live.jsonl`）：
+#:   · `translate_draft` 输出上限 120 token ≈ 230 汉字 ≈ 英文开头 ~150 词；无标点时整段重译，
+#:     英文涨到 3400 字、中文恒 ≈230 字且只含开头（78 次更新 75 种措辞）。
+#:   · 2 行档（宽 ~660 px）放得下约 60–70 汉字 ≈ 40 英文词。
+#:   · 健康课里未封口部分 >40 词的草稿只占 0–2%（该课 26%），所以平时几乎碰不到。
+TAIL_WORDS = 40
+#: 窗口起点按这个步长跳（不是每多一词就滑一格）：相邻两次送翻的开头相同 → 中文开头不抖、前缀缓存吃得到。
+TAIL_STEP = 8
+
+
+def clip_tail(text: str | None, max_words: int = TAIL_WORDS, step: int = TAIL_STEP) -> str:
+    """长草稿只留尾巴：≤ `max_words` 词原样返回；否则丢掉开头 `step` 的整数倍个词，
+    使剩下 `max_words-step+1 … max_words` 词。返回值一定是 `text` 的后缀（保留原来的空白与标点）。
+
+    只用于**还没说完**的那截（整段重译 / 封口锁之后的 rest / 尾巴）；封口句要整句译整句锁，不裁。
+    """
+    t = (text or "").strip()
+    starts = [m.start() for m in re.finditer(r"\S+", t)]
+    n = len(starts)
+    if n <= max_words:
+        return t
+    cut = -(-(n - max_words) // step) * step            # 向上取整到 step 的倍数
+    return t[starts[cut]:]
+
+
 def _norm_for_compare(text: str) -> str:
     """比较草稿连续性用：小写、标点变空格、压空白。
 
@@ -226,6 +251,25 @@ class DraftTranslator:
         self._gen: int | None = None                     # 当前句子代次；变了就作废封口锁
         self._pool = ThreadPoolExecutor(max_workers=1)    # 新封口那句与尾巴并发时，封口句走这条
         self._stopped = False
+        #: 被 `clip_tail` 裁过的送翻序号（复盘用：`live.jsonl` 的 draft_zh 带 `clipped`）。只留最近一小撮，防无限涨。
+        self._clipped: set[int] = set()
+        self.clipped_n = 0
+
+    def take_clipped(self, seq: int) -> bool:
+        """这个 `seq` 的译文是不是只译了英文尾巴。取一次就清（主线程 `drain()` 上屏时问）。"""
+        try:
+            return seq in self._clipped
+        finally:
+            self._clipped.discard(seq)
+
+    def _clip(self, seq: int, text: str) -> str:
+        out = clip_tail(text)
+        if out != (text or "").strip():
+            self.clipped_n += 1
+            self._clipped.add(seq)
+            if len(self._clipped) > 64:
+                self._clipped.discard(min(self._clipped))
+        return out
 
     def submit(self, seq: int, seg: int, text: str, gen: int | None = None) -> None:
         # gen=None = 老调用方没传代次：不参与封口锁重置（兼容测试替身/旧路径）。
@@ -305,7 +349,7 @@ class DraftTranslator:
         sealed = sealed_prefix(text)
         if len(sealed) > len(lk["en"]):
             new_en = sealed[len(lk["en"]):].strip()
-            tail = text[len(sealed):].strip()
+            tail = self._clip(seq, text[len(sealed):].strip())   # 封口句整句译整句锁，只裁没说完的尾巴
             f_new = self._pool.submit(self._once, new_en, [lk["last"]] if lk["last"] else self._context())
             zh_tail = self._once(tail, [new_en]) if tail else ""
             zh_new = f_new.result()
@@ -315,9 +359,9 @@ class DraftTranslator:
                 return
             lk.update(en="", zh="", last="")
         if not lk["en"]:
-            self._translate(text, lambda d: self._output(seq, seg, d), self._context())
+            self._translate(self._clip(seq, text), lambda d: self._output(seq, seg, d), self._context())
             return
-        rest = text[len(lk["en"]):].strip()
+        rest = self._clip(seq, text[len(lk["en"]):].strip())
         if not rest:
             self._output(seq, seg, lk["zh"])
             return

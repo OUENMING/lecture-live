@@ -86,6 +86,19 @@ class OpenFor(unittest.TestCase):
         log.close()
 
 
+class DraftZhClippedMark(unittest.TestCase):
+    """draft_zh 的 `clipped`：只在草稿译文只译了英文尾巴时才带（复盘数「多少秒在裁」）。"""
+
+    def test_key_only_present_when_clipped(self):
+        log, p = _mk_log()
+        log.draft_zh("没裁")
+        log.draft_zh("裁了", clipped=True)
+        log.close()
+        zs = [r for r in _lines(p) if r["kind"] == "draft_zh"]
+        self.assertNotIn("clipped", zs[0])
+        self.assertIs(zs[1]["clipped"], True)
+
+
 class Writes(unittest.TestCase):
     def test_fields_survive_the_round_trip(self):
         log, p = _mk_log()

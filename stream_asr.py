@@ -123,6 +123,11 @@ RETRY_JITTER = 0.2
 SEND_STUCK_S = 5.0
 #: `metrics()["sessions"]` 最多记这么多条（30 s 一次的长期重连也撑得住一整天，不会无限长）。
 SESS_LOG_MAX = 120
+#: 每次掉线往 stdout 打一行。⚠️ 为什么要有：`sessions[]` 只进测试报告与 `.live.jsonl`，**两者平时都关** ——
+#: 普通上课出事时手上什么都没有（10-29 中国用户那节只能靠草稿时间戳反推）。stdout 进
+#: `app.log`（双击 `.app` 时 sitecustomize 改道），而 `app.log` 本来就在诊断包里（`testmode.R2_DIAG_MEMBERS`），
+#: 不用新开文件、不用新开关。空串 = 不打（判据里关掉，别污染输出）。
+DROP_LOG = "💥 实时识别掉线：{ran} s · {why}{detail}（第 {n} 次）"
 #: 收尾：发空文本帧后最多等这么久把最后的 final 收进来。
 FINISH_WAIT_S = 3.0
 #: 领 key 的 POST 超时（开课关键路径，短；重试由退回政策管）。
@@ -692,7 +697,7 @@ class StreamASR:
                  context_text: str = "", terms_max: int = TERMS_MAX,
                  retry_delays_s: Iterable[float] = RETRY_DELAYS_S,
                  retry_reset_s: float = RETRY_RESET_S, retry_jitter: float = RETRY_JITTER,
-                 send_stuck_s: float = SEND_STUCK_S) -> None:
+                 send_stuck_s: float = SEND_STUCK_S, drop_log: str = DROP_LOG) -> None:
         self._passcode = (passcode or "").strip()
         self._terms = tuple(str(t).strip() for t in terms if str(t).strip())
         self._general = general or ""
@@ -722,6 +727,8 @@ class StreamASR:
         #: ⭐ 逐会话记录（P3）：每个会话结束记一条，进 `metrics()["sessions"]`。
         #: 以前只留最后一次的 close code，4 次重连各自为什么掉、跑了多久全不知道。
         self._sess_log: list[dict] = []
+        #: 掉线一行话的模板（`""` = 不往 stdout 打）。见 `DROP_LOG` 的 why。
+        self._drop_log = drop_log
         self._t_start = time.monotonic()
         self._chunk_s = float(chunk_s)
         self._ws_url = ws_url
@@ -1034,6 +1041,16 @@ class StreamASR:
                 if len(self._sess_log) < SESS_LOG_MAX:
                     self._sess_log.append({"at": round(t0 - self._t_start, 1), "ran_s": round(ran, 1),
                                            "why": err, "detail": self._detail[:40]})
+                n_sess = len(self._sess_log)
+            if self._drop_log:
+                # ⚠️ 锁外打（stdout 可能阻塞；别让它占着状态锁）。
+                try:
+                    print(self._drop_log.format(
+                        ran=f"{ran:.0f}", why=err,
+                        detail=f" · {self._detail[:40]}" if self._detail else "",
+                        n=n_sess), flush=True)
+                except Exception:                   # noqa: BLE001
+                    pass
             if err not in ("network", "timeout", "disconnected", "stale"):
                 return err
             if ran >= self._retry_reset_s:
@@ -1129,23 +1146,24 @@ class StreamASR:
         recv = threading.Thread(target=self._recv_loop, args=(ws,), name="stream-asr-recv",
                                 daemon=True)
         recv.start()
+        # ⚠️ 看门狗要在**第一次 send 之前**起来：config 帧和收尾空帧同样是会卡在 `sendall` 里的
+        #    `ws.send`（2026-10-29 复核发现：原来只盯 keepalive 与音频两条路，这两处没被覆盖）。
+        wd_stop = threading.Event()
+        threading.Thread(target=self._send_watchdog, args=(ws, wd_stop), name="stream-asr-wd",
+                         daemon=True).start()
         try:
-            ws.send(json.dumps(self._config()))
+            self._timed_send(ws, json.dumps(self._config()))
             with self._lock:
                 self._alive = True
                 if self._down_since is not None:
                     self._down_s += time.monotonic() - self._down_since
                     self._down_since = None
-            wd_stop = threading.Event()
-            threading.Thread(target=self._send_watchdog, args=(ws, wd_stop), name="stream-asr-wd",
-                             daemon=True).start()
-            try:
-                err = self._send_loop(ws)
-            finally:
-                wd_stop.set()
+            err = self._send_loop(ws)
         except Exception:                           # noqa: BLE001
             err = "disconnected"
         finally:
+            wd_stop.set()                       # 任何出口都别留一条挂着 0.5 s 一轮的线程
+            self._send_since = None
             with self._lock:
                 self._alive = False
             try:
@@ -1155,6 +1173,18 @@ class StreamASR:
             recv.join(timeout=2.0)
             self._note_close(ws, err)
         return err
+
+    def _timed_send(self, ws, data) -> None:
+        """`ws.send` + 计时（看门狗靠 `_send_since` 判「发送卡死」）。
+
+        ⚠️ **每一条 send 都必须走这里**。漏一条 = 那条路上的卡死看门狗看不见
+        （2026-10-29 复核：config 帧与收尾空帧原来就是漏的）。
+        """
+        self._send_since = time.monotonic()
+        try:
+            ws.send(data)
+        finally:
+            self._send_since = None
 
     def _send_watchdog(self, ws, stop: threading.Event) -> None:
         """发送线程在 `ws.send` 里卡超过 `send_stuck_s` → 掐掉 socket，让会话按 `stale` 重连。
@@ -1300,12 +1330,9 @@ class StreamASR:
                 now = time.monotonic()
                 if now - last_audio > self._keepalive_s and now - last_send > self._keepalive_s:
                     try:                            # ⚠️ 发送失败按断线处理，绝不停在这
-                        self._send_since = time.monotonic()
-                        ws.send(json.dumps({"type": "keepalive"}))
+                        self._timed_send(ws, json.dumps({"type": "keepalive"}))
                     except Exception:               # noqa: BLE001
                         return "disconnected"
-                    finally:
-                        self._send_since = None
                     last_send = now
                 continue
             last_audio = time.monotonic()
@@ -1317,16 +1344,13 @@ class StreamASR:
                     buf = np.concatenate((carry, buf))
                 i = 0
                 while i + chunk_samples <= buf.size:
-                    self._send_since = time.monotonic()
-                    ws.send(buf[i:i + chunk_samples].tobytes())
-                    self._send_since = None
+                    self._timed_send(ws, buf[i:i + chunk_samples].tobytes())
                     self._sent_samples += chunk_samples
                     last_send = time.monotonic()
                     i += chunk_samples
                 carry = buf[i:].copy()
             except Exception:                       # noqa: BLE001
-                self._send_since = None
-                return "disconnected"
+                return "disconnected"              # `_timed_send` 的 finally 已经清了 `_send_since`
         return self._finish_stream(ws)
 
     def _drain_events(self, got: float, dead: bool = False) -> tuple[float, bool, bool]:
@@ -1444,7 +1468,7 @@ class StreamASR:
     def _finish_stream(self, ws) -> str:
         """收尾：空文本帧 → 等最后的 final → 关。"""
         try:
-            ws.send("")
+            self._timed_send(ws, "")
         except Exception:                           # noqa: BLE001
             return "disconnected"
         deadline = time.monotonic() + self._finish_wait_s

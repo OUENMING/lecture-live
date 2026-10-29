@@ -420,6 +420,113 @@ class SealedLock(unittest.TestCase):
         self.assertEqual(out, (3, 0, "<A b c.><D e.>"))
 
 
+def _words(n, prefix="w"):
+    return " ".join(f"{prefix}{i}" for i in range(n))
+
+
+class ClipTail(unittest.TestCase):
+    """`clip_tail`：长草稿送翻前只留尾巴（10-27 ECS170：无标点 → 整段重译被 120 token 截在开头）。"""
+
+    def test_short_text_is_untouched(self):
+        for n in (0, 1, D.TAIL_WORDS - 1, D.TAIL_WORDS):
+            t = _words(n)
+            self.assertEqual(D.clip_tail(t), t, n)
+        self.assertEqual(D.clip_tail(""), "")
+        self.assertEqual(D.clip_tail(None), "")
+
+    def test_result_is_a_suffix_within_bounds_and_keeps_the_last_word(self):
+        for n in range(D.TAIL_WORDS + 1, 400):
+            t = _words(n)
+            out = D.clip_tail(t)
+            self.assertTrue(t.endswith(out), n)
+            k = len(out.split())
+            self.assertLessEqual(k, D.TAIL_WORDS, n)
+            self.assertGreater(k, D.TAIL_WORDS - D.TAIL_STEP, n)
+            self.assertEqual(out.split()[-1], f"w{n - 1}", n)
+
+    def test_window_start_moves_in_steps_so_consecutive_drafts_share_a_prefix(self):
+        """窗口起点按 TAIL_STEP 跳，不是每多一词就滑一格 —— 否则每次更新中文开头都换措辞（抖）。"""
+        starts = []
+        for n in range(D.TAIL_WORDS + 1, D.TAIL_WORDS + 3 * D.TAIL_STEP):
+            starts.append(D.clip_tail(_words(n)).split()[0])
+        self.assertEqual(len(set(starts)), 3, starts)       # 3 个台阶，不是 3*STEP 个
+        self.assertEqual(starts[0], f"w{D.TAIL_STEP}")
+
+    def test_original_spacing_inside_the_window_is_kept(self):
+        t = " ".join(["a,"] * 30 + ["b."] + ["c"] * 30)
+        out = D.clip_tail(t)
+        self.assertTrue(t.endswith(out))
+        self.assertIn("b. c", out)
+
+
+class LongUnsealedDraft(SealedLock):
+    """⭐ 症状级判据：草稿一直没标点，中文必须跟着**此刻**说的话走（不是冻在开头）。
+
+    继承 `SealedLock` 只为复用它的假翻译 / 假输出（`<英文>` 回显）；父类的用例会在这里重跑一遍，无害。
+    """
+
+    def test_no_punct_long_draft_translates_only_the_tail(self):
+        t = _words(200)
+        calls, out = self.go(1, 0, t)
+        self.assertEqual(len(calls), 1)
+        sent = calls[0][0]
+        self.assertTrue(t.endswith(sent))
+        self.assertLessEqual(len(sent.split()), D.TAIL_WORDS, "送翻的英文要有上界（旧行为：整段 200 词）")
+        self.assertEqual(out[2], f"<{sent}>")
+        self.assertTrue(out[2].endswith("w199>"), "中文对应的是最新说的那几个词")
+
+    def test_zh_follows_the_speech_while_the_draft_keeps_growing(self):
+        seen = []
+        for n, seq in zip(range(60, 400, 40), range(1, 100)):
+            calls, out = self.go(seq, 0, _words(n))
+            seen.append((calls[0][0].split()[-1], out[2]))
+        for (last, zh), n in zip(seen, range(60, 400, 40)):
+            self.assertEqual(last, f"w{n - 1}")
+            self.assertTrue(zh.endswith(f"w{n - 1}>"), zh[-20:])
+
+    def test_short_draft_is_sent_verbatim(self):
+        t = _words(D.TAIL_WORDS)
+        calls, out = self.go(1, 0, t)
+        self.assertEqual(calls, [(t, ["prev final"])])
+        self.assertEqual(out[2], f"<{t}>")
+
+    def test_sealed_sentence_is_translated_whole_only_the_tail_is_clipped(self):
+        """封口句要整句译、整句锁（锁住的中文之后不再重译）；被裁的只能是还没说完的尾巴。"""
+        sealed = _words(70, "s") + "."
+        tail = _words(150, "t")
+        calls, out = self.go(1, 0, f"{sealed} {tail}")
+        sent = {c[0] for c in calls}
+        self.assertIn(sealed, sent, "封口句不能被裁")
+        tails = [c for c in sent if c != sealed]
+        self.assertEqual(len(tails), 1)
+        self.assertLessEqual(len(tails[0].split()), D.TAIL_WORDS)
+        self.assertTrue(tails[0].endswith("t149"))
+        self.assertTrue(out[2].startswith(f"<{sealed}>"))
+
+    def test_clipped_mark_is_reported_once_per_seq_and_only_when_clipped(self):
+        self.go(1, 0, _words(200))
+        self.go(2, 0, _words(10))
+        self.assertTrue(self.t.take_clipped(1))
+        self.assertFalse(self.t.take_clipped(1), "取一次就清")
+        self.assertFalse(self.t.take_clipped(2), "没裁就没有标记")
+        self.assertEqual(self.t.clipped_n, 1)
+
+    def test_clipped_marks_do_not_grow_without_bound(self):
+        for i in range(1, 200):
+            self.go(i, 0, _words(200))
+        self.assertLessEqual(len(self.t._clipped), 64)
+
+    def test_rest_after_lock_is_clipped_and_keeps_the_locked_zh_in_front(self):
+        self.go(1, 0, "A b c. D e")                             # 先锁住 "A b c."
+        rest = _words(120, "r")
+        calls, out = self.go(2, 0, f"A b c. {rest}")
+        self.assertEqual(len(calls), 1)
+        self.assertLessEqual(len(calls[0][0].split()), D.TAIL_WORDS)
+        self.assertTrue(calls[0][0].endswith("r119"))
+        self.assertTrue(out[2].startswith("<A b c.>"))
+        self.assertTrue(out[2].endswith("r119>"))
+
+
 class TranslatorRun(unittest.TestCase):
     def test_run_exits_when_event_cleared(self):
         import threading

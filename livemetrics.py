@@ -209,10 +209,14 @@ class LiveLog:
         except Exception:                                  # noqa: BLE001
             pass
 
-    def draft_zh(self, zh: str) -> None:
-        """草稿译文的一段增量（`ui.draft_zh` 吃什么这里就记什么）。"""
+    def draft_zh(self, zh: str, *, clipped: bool = False) -> None:
+        """草稿译文的一段增量（`ui.draft_zh` 吃什么这里就记什么）。
+        `clipped`：这份译文只译了英文尾巴（`draft_translate.clip_tail`）；没裁就不带这个键。"""
         try:
-            self._put("draft_zh", utt=self._utt, text=zh)
+            if clipped:
+                self._put("draft_zh", utt=self._utt, text=zh, clipped=True)
+            else:
+                self._put("draft_zh", utt=self._utt, text=zh)
         except Exception:                                  # noqa: BLE001
             pass
 

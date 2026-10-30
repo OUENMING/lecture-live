@@ -89,7 +89,8 @@ main{max-width:1280px;margin:0 auto;padding:24px}
 .hd .spacer{flex:1}
 
 /* ---- KPI 卡：Geist 的 14/28/12 三行式，padding 16 ---- */
-.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}
+.kpis.s5{grid-template-columns:repeat(5,minmax(0,1fr))}
 .kpi{background:var(--surface);border-radius:var(--rc);padding:16px;box-shadow:var(--ring2)}
 .kpi .k{font-size:12px;color:var(--ink2)}
 .kpi .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:28px;font-weight:600;
@@ -100,7 +101,7 @@ main{max-width:1280px;margin:0 auto;padding:24px}
 
 /* ---- 两张图并排 ---- */
 .charts{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:12px}
-.tag{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;font-size:10.5px;line-height:16px;color:var(--ink3);box-shadow:var(--ring2);vertical-align:1px}
+.tag{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;font-size:11px;line-height:17px;color:var(--ink3);box-shadow:var(--ring2);vertical-align:1px}
 .card{background:var(--surface);border-radius:var(--rc);padding:16px;box-shadow:var(--ring2)}
 .card .ch{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}
 .card .ch h3{margin:0;font-size:12px;font-weight:600;color:var(--ink2)}
@@ -249,6 +250,7 @@ details.sub>summary:hover{color:var(--ink)}
 /* 那行小字是「大数的注解」。中间必须有分隔符：`1h49m` 直接接 `6,564 秒` 会读成 `1h49m6`（实测 22px→12px
    只靠 2px 间距分不开两个数字）。用面板其它地方同一个中点分隔。 */
 .hero.s5{grid-template-columns:repeat(5,minmax(0,1fr));margin-bottom:20px}
+.hero.s6{grid-template-columns:repeat(6,minmax(0,1fr));margin-bottom:20px}
 .hero .sub{display:block;margin-top:1px}
 .hero b.bad{color:var(--bad)} .hero b.warn{color:var(--warn)}
 .hint.warn{color:var(--warn)}
@@ -272,12 +274,20 @@ details.sub>summary:hover{color:var(--ink)}
 .nowline{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--ink2)}
 .nowline .sep{color:var(--ink3)}
 .hero b small{font-size:12px;font-weight:500;letter-spacing:0;color:var(--ink2);margin-left:5px}
+/* 今天那块：课表一行一节，问题用 10.5px 的小标（同 .tag 一档，不新造字号）。 */
+.chip{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;line-height:17px;margin-right:4px;
+  color:var(--ink2);box-shadow:var(--ring2);white-space:nowrap}
+.chip.bad{color:var(--bad);box-shadow:inset 0 0 0 1px currentColor}
+.chip.warn{color:var(--warn);box-shadow:inset 0 0 0 1px currentColor}
+.chip.ok{color:var(--ok)}
 
 @media (max-width:1000px){
-  .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+  /* 表都是 nowrap 的，窄屏只能横向滚 —— 滚在表自己身上，别把整页撑出去。 */
+  #users,#testmode,#platforms{overflow-x:auto}
+  .kpis,.kpis.s5{grid-template-columns:repeat(2,minmax(0,1fr))}
   .charts{grid-template-columns:minmax(0,1fr)}
   .dsplit{grid-template-columns:minmax(0,1fr)}
-  .hero,.hero.s5{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .hero,.hero.s5,.hero.s6{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 </style>
 </head>
@@ -304,26 +314,41 @@ details.sub>summary:hover{color:var(--ink)}
 <main>
   <div id="err"></div>
 
-  <!-- 「现在」：先回答「此刻有没有人在上课、Soniox 是不是还连着、今天到底花了多少」。
-       数字全部来自 Soniox 并发 + 用量日志 + Worker 的 key 发放；不用等会话结束结算。 -->
+  <!-- ⚠️ 页面口径（2026-10-30 重排）：**顶上的区间开关管整页**。
+       「现在」那一块永远说「此刻」（跟区间无关，标题里写死）；
+       下面所有带数字的块都跟着 今天 / 7 天 / 30 天 走，块标题里写明当前区间，不再出现「顶上 7 天、块里今天」。 -->
+
+  <!-- 现在：只回答「此刻有没有人在上课、Soniox 还连着吗、进行中花了多少」。 -->
   <section class="block">
-    <div class="hd"><h2>现在</h2><span class="note" id="nownote">正在读取…</span></div>
+    <div class="hd"><h2>现在</h2><span class="note" id="nownote">正在读取…</span><span class="spacer"></span>
+      <span class="note">与上面的区间无关，永远是最新一刻</span></div>
     <div class="card">
       <div class="hero" id="nowrow"></div>
       <div class="nowline" id="nowhint"></div>
     </div>
   </section>
 
-  <!-- 「要注意」：把散在下面各处的异常翻成人话，一条一句「出了什么事 + 该做什么」。没有就一行「一切正常」。 -->
+  <!-- 概况：当前区间的五个总量 + 一个「其中回退多少」。回退那条是 Owen 2026-10-30 定的口径：
+       没有回退就写 0，有就写多少分钟。 -->
+  <section class="block">
+    <div class="hd"><h2>概况</h2><span class="note" id="rangenote">当前区间</span><span class="spacer"></span>
+      <span class="note" id="fresh2"></span></div>
+    <div class="kpis s5" id="kpis"></div>
+    <div class="hint" id="durhint" style="margin-top:10px">转写时长 = 实时与定稿合并后的时长：同一天同一个码两条路都记过时取较长的那个，不相加（不重复计）；回退时长单独一格，没有回退就是 0。</div>
+    <div class="hint" id="kpnote"></div>
+  </section>
+
+  <!-- 要注意：一条一句「出了什么事 + 该做什么」。没有就一行「没有要动手的」。 -->
   <section class="block">
     <div class="hd"><h2>要注意</h2><span class="note" id="anote"></span></div>
     <div class="card alerts" id="alerts"></div>
   </section>
 
+  <!-- 每一节：当前区间里上传了 report.json 的课。原来「测试模式」那张表并进来（同一份数据两张表）。 -->
   <section class="block">
-    <div class="kpis" id="kpis"></div>
-    <!-- 环比没有可比时（上一个同样长的区间一条记录都没有）在这里说一次，不往四个格子里各塞一句一样的 -->
-    <div class="hint" id="kpnote"></div>
+    <div class="hd"><h2>每一节</h2><span class="note" id="tmnote"></span><span class="spacer"></span>
+      <span class="note">只有测试模式会写报告并上传</span></div>
+    <div class="card" id="testmode"></div>
   </section>
 
   <section class="block">
@@ -340,8 +365,7 @@ details.sub>summary:hover{color:var(--ink)}
           <h3>每日用量</h3><span class="note">按 UTC 日 · 浅色柱 = 今天还没过完</span>
           <span class="spacer"></span>
           <div class="seg" id="metric" role="group" aria-label="指标">
-            <button data-m="asr" aria-pressed="true">转写分钟</button>
-            <button data-m="rt">实时转写分钟</button>
+            <button data-m="dur" aria-pressed="true">转写时长</button>
             <button data-m="llm">翻译次数</button>
             <button data-m="tin">输入 token</button>
             <button data-m="tout">输出 token</button>
@@ -356,15 +380,15 @@ details.sub>summary:hover{color:var(--ink)}
     </div>
   </section>
 
+  <!-- 钱与健康：额度、平台账号、云端服务三块合成一条线 —— 都是「要不要动手」的输入。 -->
   <section class="block">
-    <div class="hd"><h2>系统额度</h2><span class="note" id="qnote"></span><span class="spacer"></span>
+    <div class="hd"><h2>钱与额度</h2><span class="note" id="qnote"></span><span class="spacer"></span>
       <span class="note">到 95% 自动降级</span></div>
     <div class="card" id="quota"></div>
   </section>
 
-  <!-- 平台：Soniox / OpenRouter 的余额、用量、并发。本机 key 只读，key 从不进页面。 -->
   <section class="block">
-    <div class="hd"><h2>平台</h2><span class="note" id="pnote"></span><span class="spacer"></span>
+    <div class="hd"><h2>平台账号</h2><span class="note" id="pnote"></span><span class="spacer"></span>
       <span class="note" id="pdash"></span></div>
     <div id="platforms"></div>
   </section>
@@ -375,17 +399,11 @@ details.sub>summary:hover{color:var(--ink)}
     <div class="card" id="svc"></div>
   </section>
 
-  <!-- 3.10 新数据：Soniox 实时流 / OpenRouter 快速通道 / 客户端版本 / 课后笔记 /
-       「一些事儿」· 设备 · 能耗 · 收音断档（前四样来自 AE，后一样来自上传的 report.json）。 -->
+  <!-- 明细：实时流质量 / 版本 / 笔记 / 设备 / 能耗 / 收音。原来是一整块「3.10 新数据」，太长，收成折叠。 -->
   <section class="block">
-    <div class="hd"><h2>3.10 新数据</h2><span class="note" id="dnote"></span></div>
+    <div class="hd"><h2>明细</h2><span class="note" id="dnote"></span><span class="spacer"></span>
+      <span class="note">点开看分项</span></div>
     <div class="card" id="dash310"></div>
-  </section>
-
-  <!-- 测试模式：每节上传了 report.json 的课（只有测试模式会写报告并上传）。 -->
-  <section class="block">
-    <div class="hd"><h2>测试模式</h2><span class="note" id="tmnote"></span></div>
-    <div class="card" id="testmode"></div>
   </section>
 
   <section class="block">
@@ -451,9 +469,11 @@ var GATE = {"X-ClassLive-Admin":"1"};
 var NS = "http://www.w3.org/2000/svg";
 var HINT = "续期是「从现在起再加 N 天」。限额留空 = 不限，改动立刻生效。转写秒按每次请求至少 10 秒计。";
 var METRICS = {
-  asr:  {label:"转写分钟", unit:"分", color:"var(--d1)", pick:function(u){ return u.asr_s/60; },
+  /* 「转写时长」= `x_s`（逐日 max(asr_s, rt_s) 的和，见 sumRows 上面的注释）。
+     两条路合成一个数：看的人只关心「这节课录了多久」，不关心它走的是哪条管线。 */
+  dur:  {label:"转写时长", unit:"分", color:"var(--d1)", pick:function(u){ return u.x_s/60; },
          total:function(v){ return fmtDur(v*60); }, cell:function(v){ return num(v, v < 10 ? 1 : 0) + " 分"; }},
-  rt:   {label:"实时转写分钟", unit:"分", color:"var(--d5)", pick:function(u){ return u.rt_s/60; },
+  fb:   {label:"回退时长", unit:"分", color:"var(--warn)", pick:function(u){ return u.fb_s/60; },
          total:function(v){ return fmtDur(v*60); }, cell:function(v){ return num(v, v < 10 ? 1 : 0) + " 分"; }},
   llm:  {label:"翻译次数", unit:"次", color:"var(--d2)", pick:function(u){ return u.llm_reqs; },
          total:function(v){ return num(v); }, cell:function(v){ return num(v) + " 次"; }},
@@ -468,7 +488,7 @@ var MODEL_NAME = {v3:"whisper-large-v3", turbo:"whisper-turbo", qwen:"千问", o
 var MODEL_COLOR = {v3:"var(--d1)", turbo:"var(--d2)", qwen:"var(--d3)", other:"var(--d4)"};
 var MODEL_ORDER = ["v3", "turbo", "qwen", "other"];
 var state = {
-  days: 7, theme: "auto", metric: "asr",
+  days: 7, theme: "auto", metric: "dur",
   codes: [], days_data: [], prev_data: [], quota: null, limit: null,
   expanded: null, showRevoked: false, busy: false, loaded: false, err: null,
   minCache: {}, minDay: {}, winCache: {}, folds: {},
@@ -508,12 +528,26 @@ function showHint(node, msg){ node.textContent = msg; node.style.color = "var(--
    Worker 每小时 cron 从 Soniox 的用量日志回收进账本（`passes-core.js`）→ 不在 KEYS 里就永远看不见，
    而「实时转写了多少分钟」是这个产品最核心的量（`asr_s` 是**定稿**转写，走的是另一条路）。 */
 var KEYS = ["asr_s","asr_reqs","llm_reqs","tokens_in","tokens_out","cache_hit","jev_reqs","jev_q","rt_s","rt_reqs"];
+/* 转写时长**合并口径**（2026-10-30 定，Owen 拍板）：
+   3.10 之前只有定稿转写（`asr_s`），3.10 起主要走 Soniox 实时（`rt_s`），两条路**都是转写**，
+   所以对外只报一个「转写时长」= 逐 (日 × 码) 取 max(asr_s, rt_s) 再相加：
+   同一天同一个人要么走实时要么走定稿；两边都有时（课上掉线回退）实时那段已经覆盖了大部分音频，
+   取 max 不会重复计。**回退**（`fb_s`）另记：当天实时开着、但仍走了定稿的那部分秒数 ——
+   它就是「回退了多少」，没有回退就是 0。
+   ⚠️ `asr_s + rt_s` 直接相加是错的（会把回退段算两遍，30 天会虚高到 26.4 h）。 */
+function durOf(r){                                  /* 一行的合并时长 / 回退时长 */
+  var a = +r.asr_s || 0, t = +r.rt_s || 0;
+  return {x: Math.max(a, t), fb: t > 0 ? a : 0};
+}
 function sumRows(rows, code){
-  var t = {models:{}, vers:{}};
+  var t = {models:{}, vers:{}, x_s: 0, fb_s: 0, fb_days: 0};
   KEYS.forEach(function(k){ t[k] = 0; });
   (rows || []).forEach(function(r){
     if(code && r.code !== code) return;
     KEYS.forEach(function(k){ t[k] += (r[k] || 0); });
+    var d = durOf(r);
+    t.x_s += d.x; t.fb_s += d.fb;
+    if(d.fb > 0) t.fb_days += 1;
     var m = r.models || {}, v = r.vers || {};
     Object.keys(m).forEach(function(k){ t.models[k] = (t.models[k]||0) + m[k]; });
     Object.keys(v).forEach(function(k){ t.vers[k] = (t.vers[k]||0) + v[k]; });
@@ -603,6 +637,18 @@ function sparkline(vals, opt){
 /* ---------- 图 2：每日柱（每日用量），带轴、网格、hover 读数 ----------
    为什么是柱不是折线：每天是一个**离散的总量**，不是连续量；而且「今天」只过了一部分 ——
    折线会把今天画成一次「下跌」。柱可以把今天单独画成浅色（进行中），1 天的区间也画得出来。 */
+/* 图都是在 `requestAnimationFrame` 里画的：**后台标签页不跑 rAF**（记忆 browser-hidden-tab-blocks-everything），
+   于是整块图空白、而且不会自己恢复。统一挂一道「回到前台就补画」。2026-10-30 加。 */
+var _redraws = [];
+function redrawOnVisible(fn){
+  if(_redraws.indexOf(fn) < 0) _redraws.push(fn);
+}
+if(document.addEventListener){
+  document.addEventListener("visibilitychange", function(){
+    if(document.visibilityState === "visible") _redraws.forEach(function(f){ try{ f(); }catch(e){} });
+  });
+  window.addEventListener("focus", function(){ _redraws.forEach(function(f){ try{ f(); }catch(e){} }); });
+}
 function colChart(items, meta, today){
   var wrap = el("div","chartwrap");
   var tip = el("div","tip"); wrap.appendChild(tip);
@@ -653,6 +699,7 @@ function colChart(items, meta, today){
     wrap.appendChild(s);
   }
   requestAnimationFrame(draw);
+  redrawOnVisible(draw);
   if(window.ResizeObserver){
     new ResizeObserver(function(){ if(!busy){ busy = true; requestAnimationFrame(function(){ busy = false; draw(); }); } }).observe(wrap);
   }
@@ -779,6 +826,7 @@ function minuteChart(lanes, t0, n, opt){
     wrap.appendChild(s);
   }
   requestAnimationFrame(draw);
+  redrawOnVisible(draw);
   if(window.ResizeObserver){
     new ResizeObserver(function(){ if(!busy){ busy = true; requestAnimationFrame(function(){ busy = false; draw(); }); } }).observe(wrap);
   }
@@ -886,57 +934,76 @@ function kpiCard(k, v, unit, sub, sparkVals, color, delta){
 }
 function renderKpis(){
   var box = $("#kpis"); box.innerHTML = "";
-  var all = allRows();
-  var t = sumRows(all, null);
+  var t = sumRows(allRows(), null);
   var n = state.days_data.length;
   var daily = state.days_data.map(function(d){ return sumRows(d.rows, null); });
   // 环比：`load()` 一次要 2× 天数的 stats，前一半留在 state.prev_data。
   var prev = sumRows(state.prev_data.reduce(function(a,d){ return a.concat(d.rows); }, []), null);
   var dN = state.prev_data.length;
-  // 上一个区间**一条记录都没有**时，四个格子会各印一句「前 N 天没有」—— 同一句话四遍不是信息。
-  // 这种情况只在下面说一次；有数据时每格各报自己的环比。
+  // 上一个区间**一条记录都没有**时，每格会各印一句「前 N 天没有」—— 同一句话几遍不是信息，只说一次。
   var prevEmpty = dN > 0 && !state.prev_data.some(function(d){
-    return (d.rows || []).some(function(r){ return r.asr_reqs || r.llm_reqs || r.jev_reqs; }); });
+    return (d.rows || []).some(function(r){ return r.asr_reqs || r.llm_reqs || r.jev_reqs || r.rt_reqs; }); });
   var kpnote = $("#kpnote");
   kpnote.textContent = prevEmpty
     ? "前 " + dN + " 天（" + state.prev_data[0].day + " – " + state.prev_data[dN - 1].day + "）一条记录都没有，环比没有可比。"
     : (!dN ? "这一档拿不到上一个同样长的区间（后端最多给 366 天），所以没有环比。" : "");
-  if(kpnote.textContent) kpnote.style.marginTop = "10px";
+  kpnote.style.marginTop = kpnote.textContent ? "10px" : "0";
   var wd = dN && !prevEmpty;      /* 有可比区间才在格子里印环比 */
   var codes = state.codes;
   var live = codes.filter(function(c){ return !c.revoked && (!c.expires || c.expires > Date.now()); });
-  /* 「实时转写」是 Soniox 那条路（`rt_s`），跟「区间转写」（定稿，`asr_s`）**不是一回事** ——
-     分开放，别把两个分钟数加到一起说「转写了多少」。 */
-  var rtMin = t.rt_s/60, rtN = t.rt_reqs;
-  box.appendChild(kpiCard("区间转写", fmtDur(t.asr_s), "",
-    num(t.asr_reqs) + " 段 · " + n + " 天" + (rtMin ? " · Soniox 实时 " + num(rtMin, rtMin < 10 ? 1 : 0) + " 分" : ""),
-    daily.map(function(x){ return x.asr_s/60; }), "var(--d1)",
-    wd ? deltaOf(t.asr_s, prev.asr_s, dN) : ""));
-  box.appendChild(kpiCard("区间翻译", num(t.llm_reqs), "次",
+  var rn = $("#rangenote");
+  if(rn){
+    var d0 = state.days_data[0], d1 = state.days_data[state.days_data.length - 1];
+    rn.textContent = state.days === 1 ? "今天（UTC 日 " + utcToday() + "）"
+      : "最近 " + state.days + " 天 · " + (d0 ? d0.day.slice(5) : "?") + " – " + (d1 ? d1.day.slice(5) : "?") + "（UTC 日）";
+  }
+
+  /* ① 转写时长（合并口径）：定稿 + 实时合成一个数 —— 这两条路都是「这节课录了多久」。
+     副行才写它由哪两条路组成，两个数不相加（同一天两边都有时会有重叠，取的是较长的那条）。 */
+  box.appendChild(kpiCard("转写时长", fmtDur(t.x_s), "",
+    "实时 " + fmtDur(t.rt_s) + " · 定稿 " + fmtDur(t.asr_s) + " · " + t.rt_reqs + " 段实时 / " + t.asr_reqs + " 段定稿",
+    daily.map(function(x){ return x.x_s/60; }), "var(--d1)",
+    wd ? deltaOf(t.x_s, prev.x_s, dN) : ""));
+
+  /* ② 回退时长：实时开着、但仍走了定稿的那部分秒数（`fb_s`，Owen 2026-10-30 定）。
+     **没有回退就写「0」，不藏这一格** —— 藏起来就不知道是「没回退」还是「面板没在看」。 */
+  box.appendChild(kpiCard("回退时长", fmtDur(t.fb_s), "",
+    t.fb_s ? (t.fb_days + " 天有回退 · 占转写 " + Math.round(t.fb_s / Math.max(1, t.x_s) * 100) + "%") : "没有回退 · 全走实时",
+    daily.map(function(x){ return x.fb_s/60; }), "var(--warn)",
+    wd ? deltaOf(t.fb_s, prev.fb_s, dN) : ""));
+
+  /* ③ 翻译 */
+  box.appendChild(kpiCard("翻译", num(t.llm_reqs), "次",
     "输入 " + shortNum(t.tokens_in) + " · 输出 " + shortNum(t.tokens_out) + " token",
     daily.map(function(x){ return x.llm_reqs; }), "var(--d2)",
     wd ? deltaOf(t.llm_reqs, prev.llm_reqs, dN) : ""));
-  // ⚠️ 价目表是**闲时价**；DeepSeek 高峰（UTC 周一至五 01–04、06–10 点）×2。Worker 只按 UTC 日记总数、
-  //    不分时段，所以这里只能给区间：下限 = 全在闲时，上限 = 全在高峰。
+
+  /* ④ 花费。⚠️ 价目表是**闲时价**；DeepSeek 高峰（UTC 周一至五 01–04、06–10 点）×2。
+     Worker 只按 UTC 日记总数、不分时段，所以这里只能给区间：下限 = 全在闲时，上限 = 全在高峰。 */
   var cost = cluiCost(t, state.prices), prevCost = cluiCost(prev, state.prices);
-  box.appendChild(kpiCard("花费估算", "$" + cost.toFixed(3), "起",
+  box.appendChild(kpiCard("翻译花费", "$" + cost.toFixed(3), "起",
     "全在高峰最多 $" + (cost * 2).toFixed(3) + (t.tokens_in ? " · 缓存命中 " + Math.round(t.cache_hit/t.tokens_in*100) + "%" : ""),
     daily.map(function(x){ return cluiCost(x, state.prices); }), "var(--d3)",
     wd ? deltaOf(cost, prevCost, dN) : ""));
-  // 走势 = **每天有用量的码的个数**（原来画的是「这天有没有记录」的 0/1，读不出东西）
+
+  /* ⑤ 在用的人：**整段里**有过用量的码数（不是只看最后一天 —— 那和顶上「30 天」的标题打架）。 */
   function actives(days){
     return days.map(function(d){
-      var seen = {}; (d.rows || []).forEach(function(r){ if(r.asr_reqs || r.llm_reqs || r.jev_reqs) seen[r.code] = 1; });
+      var seen = {}; (d.rows || []).forEach(function(r){ if(r.asr_reqs || r.llm_reqs || r.jev_reqs || r.rt_reqs) seen[r.code] = 1; });
       return Object.keys(seen).length;
     });
   }
   var perDay = actives(state.days_data);
-  var todayN = perDay.length ? perDay[perDay.length - 1] : 0;
-  // 这一格的大数是「今天」，所以环比也取上一个区间的**最后一天**（同日位置），不拿整段跟一天比。
-  var prevDay = actives(state.prev_data).slice(-1)[0] || 0;
-  box.appendChild(kpiCard("在用的码", String(todayN), "今天",
-    "有效 " + live.length + " / 共 " + codes.length + " · 设备 " + codes.reduce(function(a,c){ return a + c.devices; }, 0) + " 台",
-    perDay, "var(--d4)", wd ? deltaOf(todayN, prevDay, dN) : ""));
+  var usedCodes = {};
+  state.days_data.forEach(function(d){ (d.rows || []).forEach(function(r){
+    if(r.asr_reqs || r.llm_reqs || r.jev_reqs || r.rt_reqs) usedCodes[r.code || r.name] = 1; }); });
+  var usedN = Object.keys(usedCodes).length;
+  var prevUsed = {};
+  state.prev_data.forEach(function(d){ (d.rows || []).forEach(function(r){
+    if(r.asr_reqs || r.llm_reqs || r.jev_reqs || r.rt_reqs) prevUsed[r.code || r.name] = 1; }); });
+  box.appendChild(kpiCard("用过的码", String(usedN), "个",
+    "这 " + n + " 天里 · 在册有效 " + live.length + " / 共 " + codes.length + " · 设备 " + codes.reduce(function(a,c){ return a + c.devices; }, 0) + " 台",
+    perDay, "var(--d4)", wd ? deltaOf(usedN, Object.keys(prevUsed).length, dN) : ""));
 }
 
 /* ---------- 渲染：每日折线 ---------- */
@@ -1263,6 +1330,14 @@ function svcStat(k, v, sub, cls){
   return d;
 }
 function pending(x){ return x === undefined; }
+/* 最新版号：仓库 VERSION（面板跑 main，`habits` 接口带 repo_ver 回来）优先，读不到就用 AE 里最高的那个。 */
+function newestVersion(ae3){
+  var hb = state.habits;
+  var repo = hb && !hb.error ? hb.repo_ver : "";
+  var seen = ((ae3 && ae3.rollout) || []).map(function(r){ return String(r.ver || ""); }).filter(Boolean);
+  var top = seen.sort(function(a, b){ return verKey(b) < verKey(a) ? -1 : 1; })[0] || "";
+  return repo || top;
+}
 function renderService(){
   var box = $("#svc"); box.innerHTML = "";
   var cf = state.cf, r2 = state.r2, h = state.health, lg = state.logs, ae = state.ae;
@@ -1508,6 +1583,116 @@ function liveOf(sx, ae3){
   return out;
 }
 function nowAge(ms){ return fmtDur(Math.max(0, Date.now() - ms) / 1000); }
+/* ---------- 渲染：今天（2026-10-30）----------
+   回答「今天这一整天跑了什么」：今日用量 / 花费 / 上了几节课 / 每节课的质量。
+   数据全部已经在手（stats 今日那一行 · reports 里 report_at 是今天的 · soniox 逐会话），不再额外请求。
+   ⚠️ 「今天」= UTC 日（Worker 的账本就按 UTC 分日，和「每日用量」那张图同一口径），标题里写明了。 */
+/* ---------- 渲染：每一节（2026-10-30 重排）----------
+   原来分成「今天」和「测试模式」两块：同一份 report.json 画两遍，而且顶上是 7 天、块里写「今天」——
+   一眼就打架。现在**只有这一块**，跟着顶上的区间走（今天 / 7 天 / 30 天）。
+   「现在」那一块仍然只管此刻；花费与总量的合计在「概况」。 */
+function rangeLabel(){
+  return state.days === 1 ? "今天" : "近 " + state.days + " 天";
+}
+/* 一节课的质量问题：每条 {lv, txt, why}，空的 = 没问题。判据都来自报告自己的数字。 */
+function classIssues(s){
+  var out = [], st = s.stream;
+  /* 实时掉了（`reason` 不是 manual）就是**回退**：这节走回了定稿转写。回退多久由账本给（`fb_s`），
+     报告这边只说「掉过」，两处口径不同别混。 */
+  if(st && st.reason && st.reason !== "manual") out.push({lv:"bad", txt:"实时掉了 " + (st.detail || st.reason),
+    why:"实时流断开，这节退回定稿转写；回退时长按账本（实时开着但仍走定稿的秒数）算"});
+  else if(st && st.detail && !st.reason) out.push({lv:"", txt:"断过 " + st.detail,
+    why:"实时流断开过，但已重连续上；这条只说明过程，不算这节出了问题"});
+  else if(!st) out.push({lv:"warn", txt:"没采流"});
+  /* deps.missing 里只有 websockets = 假警报：3.10.1 起用仓库里的 vendor 兜底。 */
+  var miss = (s.deps && s.deps.missing) || [];
+  var real = miss.filter(function(m){ return m !== "websockets"; });
+  if(real.length) out.push({lv:"warn", txt:"缺 " + real.join("、")});
+  else if(miss.length && st && st.reason && st.reason !== "manual") out.push({lv:"warn", txt:"缺 websockets（走 vendor 兜底）"});
+  var v = s.vad || {};
+  if((v.blind_dropped || 0) > 0) out.push({lv:"warn", txt:"盲丢 " + v.blind_dropped + " 块"});
+  if((v.dropped_s || 0) > 0.5) out.push({lv:"warn", txt:"丢句 " + num(v.dropped_s, 1) + " 秒"});
+  var m = s.merge || {};
+  if((m.failed || 0) > 0) out.push({lv:"warn", txt:"合并失败 " + m.failed});
+  var a = s.asr || {};
+  if((a.empty_pct || 0) > 5) out.push({lv:"warn", txt:"空转写 " + num(a.empty_pct, 1) + "% 段"});
+  var lv = s.live || {};
+  if((lv.failed_calls || 0) > 0) out.push({lv:"warn", txt:"AI 调用失败 " + lv.failed_calls + " / " + num(lv.calls_total || 0)});
+  var tl = s.tl || {};
+  if(tl.first_p50 != null && tl.first_p50 > 3000) out.push({lv:"warn", txt:"翻译首字 " + ms(tl.first_p50)});
+  /* 字幕溢出：按**更新次数**算，含纯转录的英文大字（10-21 实测按句算中文 0%）—— 只当线索，阈值 50%。 */
+  var ui = s.ui || {};
+  if((ui.overflow_seen || 0) > 0 && (ui.overflow || 0) / ui.overflow_seen > 0.5)
+    out.push({lv:"warn", txt:"字幕超宽 " + Math.round(ui.overflow / ui.overflow_seen * 100) + "%",
+      why:"按更新次数算，含纯转录的英文大字；不是「中文译文超限」的结论"});
+  /* 环境类（低功耗 / 降频）用中性小标：影响速度但不是故障。 */
+  var dv = s.device || {};
+  if(dv.low_power) out.push({lv:"", txt:"低功耗", why:"macOS 低功耗模式会压 CPU，实时字幕与翻译都会变慢"});
+  if(dv.thermal && dv.thermal !== "nominal") out.push({lv:"", txt:"降频 " + dv.thermal, why:"机器过热降频，转写会变慢"});
+  return out;
+}
+function renderClasses(){
+  var box = $("#testmode"), note = $("#tmnote");
+  var rep = state.reports;
+  if(pending(rep)){ if(note) note.textContent = "读取中…"; return; }
+  if(rep.error){ box.innerHTML = ""; box.appendChild(el("div","hint", rep.error)); return; }
+  var since = new Date(Date.now() - state.days * 86400000);
+  if(state.days === 1){
+    /* 「今天」= UTC 日（账本与「每日用量」都是 UTC 日）。 */
+    since = new Date(Date.now());
+    since.setUTCHours(0, 0, 0, 0);
+  }
+  var all = (rep.sessions || []).filter(function(s){ return !s.provisional; });
+  var view = all.filter(function(s){ return Date.parse(s.report_at || s.updated) >= since.getTime(); });
+  var older = all.length - view.length;
+  note.textContent = rangeLabel() + " " + view.length + " 节" + (older > 0 ? " · 另有更早的 " + older + " 节" : "");
+  box.innerHTML = "";
+  if(!view.length){
+    box.appendChild(el("div","hint", rangeLabel() + "还没有上传的课（只有测试模式会写 report.json）。" +
+      (older > 0 ? "把上面的区间切到 7 天 / 30 天能看到更早的 " + older + " 节。" : "")));
+    return;
+  }
+  var totDur = 0, sealed = 0, lats = [], f50s = [];
+  view.forEach(function(s){
+    totDur += s.duration_s || 0;
+    var st = s.stream || {};
+    sealed += st.sealed_n || 0;
+    if(st.p50 != null) lats.push(st.p50);
+    if(s.tl && s.tl.first_p50 != null) f50s.push(s.tl.first_p50);
+  });
+  var sum = el("div","hero s5");
+  sum.appendChild(svcStat("节数", num(view.length), fmtDur(totDur)));
+  sum.appendChild(svcStat("实时上移", lats.length ? "p50 " + ms(median(lats) * 1000) : "—", "封口 " + num(sealed) + " 句"));
+  sum.appendChild(svcStat("翻译首字", f50s.length ? "p50 " + ms(median(f50s)) : "—", f50s.length + " 节有数"));
+  var withIss = view.filter(function(s){ return classIssues(s).some(function(x){ return x.lv; }); }).length;
+  sum.appendChild(svcStat("有问题的节", num(withIss), withIss ? "看下面「问题」列" : "都没有", withIss ? "warn" : null));
+  var fell = view.filter(function(s){ return s.stream && s.stream.reason && s.stream.reason !== "manual"; }).length;
+  sum.appendChild(svcStat("实时掉了的节", num(fell), fell ? "回了定稿转写" : "没有", fell ? "bad" : null));
+  box.appendChild(sum);
+
+  box.appendChild(mkTable(
+    [["上课（他那边的钟）", ""], ["是谁", ""], ["时长", "r"], ["实时字幕", ""], ["封口句", "r"], ["上移 p50", "r"], ["问题", ""], ["看", ""]],
+    view.slice().sort(function(a,b){ return Date.parse(b.report_at || b.updated) - Date.parse(a.report_at || a.updated); })
+      .map(function(s){
+        var st = s.stream, whoNm = s.name || reportWho(s);
+        var whoN = s.name ? s.name : whoNm ? el("span", null, "≈ " + whoNm) : el("span", "dim", s.id);
+        var sTz = whoNm ? tzOf(whoNm) : null;
+        var iss = classIssues(s);
+        var cellIss = el("span"); cellIss.style.whiteSpace = "normal";
+        if(!iss.length) cellIss.appendChild(el("span","chip ok","没问题"));
+        else iss.forEach(function(x){ var c = el("span","chip " + x.lv, x.txt); if(x.why) c.title = x.why; cellIss.appendChild(c); });
+        var whenTxt = sTz ? agoIn(Date.parse(s.report_at || s.updated), sTz) : ago(Date.parse(s.report_at || s.updated));
+        var whenNode = el("span", null, whenTxt);
+        whenNode.title = "按他的时区；这块按" + (state.days === 1 ? " UTC 日" : "最近 " + state.days + " 天") + "收课。";
+        return [whenNode, whoN, dash(s.duration_s, fmtDur(s.duration_s)),
+          st ? (st.engine || "?") : "没采", dash(st && st.sealed_n, st && st.sealed_n != null ? num(st.sealed_n) : null),
+          dash(st && st.p50, st && st.p50 != null ? ms(st.p50 * 1000) : null), cellIss, detailBtn(s)];
+      })));
+  var dbox = el("div", "detailbox"); dbox.id = "tmdetail";
+  box.appendChild(dbox);
+  box.appendChild(el("div","hint","「实时掉了」= 实时流断开后退回定稿转写（回退多久看「概况 · 回退时长」）；" +
+    "「断过」= 断开过但已重连续上。红字 = 真出问题，橙字 = 看一眼，灰标 = 环境因素。"));
+}
 function renderNow(){
   var row = $("#nowrow"), hint = $("#nowhint"), note = $("#nownote");
   if(!row) return;
@@ -1629,8 +1814,11 @@ function renderPlatforms(){
   var orBal = haveOr && or.credits && or.credits.total != null && or.credits.used != null ? or.credits.total - or.credits.used : null;
   var sxBal = haveSx && sx.balance ? sx.balance.available : null;
   var sxRun = runwayDays(sxBal, sxCost), orRun = runwayDays(orBal, orCost);
+  /* 「最新版覆盖」：写死 "3.10.0" 是 10-19 那天的口径，版本往前走就变成永远 0%。
+     现在按**仓库版本**（面板跑在 main 上，VERSION 就是已发布的最新版）算；读不到就退回 AE 里最新的那个。 */
+  var newestVer = newestVersion(ae3);
   var users310 = 0, usersAll = 0;
-  ((ae3 && ae3.rollout) || []).forEach(function(r){ var u = +r.users || 0; usersAll += u; if(String(r.ver) === "3.10.0") users310 += u; });
+  ((ae3 && ae3.rollout) || []).forEach(function(r){ var u = +r.users || 0; usersAll += u; if(String(r.ver) === newestVer) users310 += u; });
   // 进行中的会话（Soniox 结束后才结算）单独加进「今日」，否则上课时看永远是 $0。
   var lv = haveSx ? liveOf(sx, ae3) : null, sxOpen = 0, sxLiveN = 0;
   if(lv) lv.forEach(function(r){ sxLiveN += r.current; r.sessions.forEach(function(s){ sxOpen += liveCost(Date.now() - s.ms); }); });
@@ -1644,8 +1832,8 @@ function renderPlatforms(){
   row.appendChild(svcStat("OpenRouter 近 7 天", pending(or) ? "…" : haveOr && or.query ? money(orCost) : or && or.error ? "没配" : "…",
     orBal != null ? "余额 " + money(orBal) + (orRun != null ? " · 撑 " + orRun + " 天" : "") : ""));
   row.appendChild(svcStat("OpenRouter 请求", pending(or) ? "…" : num(orReq), orReq ? "≈ " + money(orCost / orReq * 1000) + " / 千次" : ""));
-  row.appendChild(svcStat("3.10.0 普及", usersAll ? Math.round(users310 / usersAll * 100) + "%" : "…",
-    usersAll ? users310 + " / " + usersAll + " 人（7 天）" : ""));
+  row.appendChild(svcStat("最新版覆盖", usersAll && newestVer ? Math.round(users310 / usersAll * 100) + "%" : "…",
+    usersAll ? users310 + " / " + usersAll + " 人（7 天）" + (newestVer ? " · " + newestVer : "") : ""));
   box.appendChild(row);
   var grid = el("div", "charts"); grid.style.marginTop = "12px";
   grid.appendChild(platformCard("Soniox", "实时转写 · 本机项目 key 只读", sonioxBody(sx, ae3)));
@@ -1669,6 +1857,24 @@ function sonioxBody(sx, ae3){
       money(u.cost_7d), money(u.cost_today), sparkline((u.cost || []).slice(-31), {h: 18, color: "var(--d1)"})]);
   });
   if(tri.length) box.appendChild(mkTable([["项目区", ""], ["在线", "r"], ["近 7 天花费", "r"], ["今日已结算", "r"], ["走势", ""]], tri));
+  /* 这张表只列**本机有项目 key 文件**的区（`~/.classlive/soniox-<区>-token`）。Worker 上配了 secret
+     但本机没存 key 的区（现在 JP 就是）在这里看不到 —— 明写出来，别让人以为那个区没在用。 */
+  var have = sx.regions || [];
+  var fromKeys = {};
+  ((ae3 && ae3.soniox) || []).forEach(function(x){
+    var m = /^soniox-([a-z]{2}):/.exec(String(x.up || ""));
+    if(m && !(m[1] in fromKeys)) fromKeys[m[1]] = 1;
+  });
+  var gaps = Object.keys(fromKeys).filter(function(r){ return have.indexOf(r) < 0; });
+  if(gaps.length){
+    var gl = el("div", "hint", "Worker 还在用 " + gaps.map(function(r){ return r.toUpperCase(); }).join("、") +
+      " 区（近 7 天签发过 key），但本机没有这一区的项目 key（" +
+      gaps.map(function(r){ return "~/.classlive/soniox-" + r + "-token"; }).join("、") +
+      "），所以它的花费与用量这里读不到 —— 表里没有这一行，上面「Soniox 近 7 天 / 今日」也不含它，" +
+      "逐会话与在线那几行同样少这一区。补上这个文件就自动多一行。");
+    gl.style.marginTop = "8px";
+    box.appendChild(gl);
+  }
   // ⚠️ 「今日」是**已结算**：Soniox 按会话结算，课上那一路在结束前一直是 0。这里把进行中的单独写出来。
   var lv = liveOf(sx, ae3);
   if(lv && lv.some(function(r){ return r.current > 0; })){
@@ -1688,6 +1894,28 @@ function sonioxBody(sx, ae3){
   var keyOk = 0, keyAll = 0;
   ((ae3 && ae3.soniox) || []).forEach(function(x){ var n = +x.n || 0; keyAll += n; if(+x.status === 200) keyOk += n; });
   var logs = sx.logs || {};
+  /* 按码对账：Soniox 说这个人用了多少分钟（第三方真值，主 key 之外的一手账）。
+     和用户表的「实时」列（Worker 每小时回收进账本）应当接近；差得多就说明回收漏了。 */
+  var byNm = logs.by_name || {}, nmKeys = Object.keys(byNm);
+  if(nmKeys.length){
+    var agg = {};
+    allRows().forEach(function(r){
+      var a = agg[r.name] || (agg[r.name] = {rt_s: 0});
+      a.rt_s += (r.rt_s || 0);
+    });
+    var rowsBn = nmKeys.map(function(nm){
+      var sSec = byNm[nm].audio_s || 0, wSec = (agg[nm] || {}).rt_s || 0;
+      var diff = wSec - sSec;
+      var mark = Math.abs(diff) > Math.max(120, sSec * 0.05)
+        ? el("span", "warn", (diff > 0 ? "账本多 " : "账本少 ") + fmtDur(Math.abs(diff))) : el("span", "faint", "对得上");
+      return [nm, num(byNm[nm].sessions), fmtDur(sSec), fmtDur(wSec), mark];
+    }).sort(function(a, b){ return String(a[0]) < String(b[0]) ? -1 : 1; });
+    box.appendChild(sub2("按码对账 · Soniox 日志 × 账本（近 7 天）"));
+    box.appendChild(mkTable([["码", ""], ["会话", "r"], ["Soniox 日志", "r"], ["账本（实时列）", "r"], ["差", ""]], rowsBn));
+    box.appendChild(el("div", "hint", "Soniox 那列是平台自己记的（每条会话带码名），是钱层面的真值；" +
+      "账本那列是 Worker 每小时从同一份日志回收进通行码账本的秒数。差 > 5%（且 >2 分钟）才标出来 —— " +
+      "对账差通常是「回收那一小时挂了」或「会话还没结束」。" + (logs.more ? " ⚠️ 这次只拉了 1000 条，更早的没算进去。" : "")));
+  }
   var reps = state.reports && !state.reports.error ? state.reports.sessions.filter(function(s){ return s.stream; }) : null;
   var line = el("div", "hint", "对账：Worker 签发临时 key " + num(keyOk) + " 把 · Soniox 用量日志 " +
     (logs.sessions == null ? "—" : num(logs.sessions)) + " 次会话 · 上报报告里有 stream 的 " +
@@ -1774,6 +2002,21 @@ function renderDash310(){
   $("#dnote").textContent = "AE 近 7 天 · 报告 = 上传的 report.json";
   var sessions = rep && !rep.error ? rep.sessions : null;
 
+  /* 实时流质量（2026-10-30 加）：`stream` 块里除了 p50 / sealed_n，还有 p90、参与统计的句数（lat_n）、
+     术语池与裁掉的条数 —— 这些以前只在「看」的原始 JSON 里。一节课一行，看趋势用。 */
+  var qParts = [], qs = (sessions || []).filter(function(s){ return s.stream && s.stream.lat_n; });
+  if(qs.length){
+    qParts.push(mkTable([["课", ""], ["引擎", ""], ["句数", "r"], ["p50", "r"], ["p90", "r"], ["术语", "r"], ["裁掉", "r"], ["退回原因", ""]],
+      qs.slice(0, 12).map(function(s){ var st = s.stream;
+        return [s.name || s.id, st.engine || "?",
+          num(st.lat_n), ms(st.p50 != null ? st.p50 * 1000 : null), ms(st.p90 != null ? st.p90 * 1000 : null),
+          dash(st.terms_n, st.terms_n != null ? num(st.terms_n) : null),
+          dash(st.terms_dropped, st.terms_dropped != null ? num(st.terms_dropped) : null),
+          st.reason ? (st.reason + (st.detail ? "（" + st.detail + "）" : "")) : "—"]; })));
+    qParts.push(el("div", "hint", "p50 / p90 = 句末到上屏的延迟（客户端侧的 stream 块）；术语 = 实时流里带了多少条术语偏置。" +
+      "「裁掉」不等于 0 说明术语池塞满了，后面的被丢了 —— 专有名词容易听错。"));
+  } else if(sessions && sessions.length) qParts.push(el("div", "hint", "这些报告没有 stream 的延迟分布（3.10.1 之前的版本只记封口句数）。"));
+
   // ① Soniox 实时转写
   var sxParts = [], srows = (ae3 && ae3.soniox) || [], keyN = sumField(srows, "n");
   if(ae3 && ae3.error) sxParts.push(el("div", "hint", ae3.error));
@@ -1799,6 +2042,7 @@ function renderDash310(){
     }
   }
   box.appendChild(fold("Soniox 实时转写 · " + num(keyN) + " 次签发", sxParts, "sx"));
+  if(sessions !== null) box.appendChild(fold("实时流质量 · " + qs.length + " 节有延迟分布", qParts, "streamq"));
 
   // ② OpenRouter 快速通道
   var f = fastStats(ae3), fParts = [];
@@ -1818,9 +2062,11 @@ function renderDash310(){
   if(vrows.length){
     vParts.push(mkTable([["客户端版本", ""], ["请求", "r"], ["人数", "r"], ["人数占比", "r"]],
       vrows.map(function(r){ return [r.ver || "（没发版本头）", num(+r.n), num(+r.users), (usersAll ? Math.round((+r.users || 0) / usersAll * 100) : 0) + "%"]; })));
-    vParts.push(el("div", "hint", "版本头由客户端发（3.9.4.1 起）。「3.10.0」那行 = 这次新版的覆盖；3.9.x 是还没更新的。"));
+    vParts.push(el("div", "hint", "版本头由客户端发（3.9.4.1 起）。最新版 = " + (newestVersion(ae3) || "?") +
+      "（面板仓库的 VERSION）；比它低的都是还没更新的。（没发版本头的 227 次来自老客户端。）"));
   } else vParts.push(el("div", "hint", ae3 && ae3.error ? ae3.error : "近 7 天没有版本记录。"));
-  box.appendChild(fold("客户端版本 · 3.10.0 覆盖 " + (usersAll ? Math.round((usersAll ? sumField(vrows.filter(function(r){ return String(r.ver) === "3.10.0"; }), "users") / usersAll : 0) * 100) + "%" : "—"), vParts, "ver"));
+  var nv = newestVersion(ae3);
+  box.appendChild(fold("客户端版本 · 最新版 " + (nv || "?") + " 覆盖 " + (usersAll && nv ? Math.round(sumField(vrows.filter(function(r){ return String(r.ver) === nv; }), "users") / usersAll * 100) + "%" : "—"), vParts, "ver"));
 
   // ④ 课后笔记
   var nrows = (ae3 && ae3.notes) || [], nParts = [];
@@ -1847,19 +2093,23 @@ function renderDash310(){
     var dev = sessions.filter(function(s){ return s.device; });
     if(dev.length){
       rParts.push(sub2("设备 / 环境（" + dev.length + " 节）"));
-      rParts.push(mkTable([["课", ""], ["机器", ""], ["草稿引擎", ""], ["内存 GB", "r"], ["供电", ""], ["网", ""], ["sessions MB", "r"]],
+      rParts.push(mkTable([["课", ""], ["机器", ""], ["系统", ""], ["草稿引擎", ""], ["核（性能/能效）", "r"], ["内存 GB", "r"], ["供电", ""], ["网", ""], ["sessions MB", "r"]],
         dev.slice(0, 12).map(function(s){ var d = s.device, sys = s.system || {};
-          return [s.name || s.id, d.model || "", sys.draft_engine || "",
-            dash(sys.ram_gb, sys.ram_gb != null ? num(sys.ram_gb, 1) : null),
+          var cores = (d.cores_perf != null || d.cores_eff != null) ? num(d.cores_perf || 0) + " / " + num(d.cores_eff || 0) : null;
+          return [s.name || s.id, d.model || sys.chip || "", [sys.macos ? "macOS " + sys.macos : "", sys.arch || ""].filter(Boolean).join(" "),
+            sys.draft_engine || "",
+            dash(cores), dash(sys.ram_gb, sys.ram_gb != null ? num(sys.ram_gb, 1) : null),
             (d.power || "") + (d.battery_pct != null ? " " + d.battery_pct + "%" : ""), d.net || "",
             dash(d.sessions_mb, d.sessions_mb != null ? num(d.sessions_mb, 1) : null)]; })));
     }
     var en = sessions.filter(function(s){ return s.energy; });
     if(en.length){
       rParts.push(sub2("能耗（可见 / 隐藏分桶）"));
-      rParts.push(mkTable([["课", ""], ["墙钟", "r"], ["可见", "r"], ["隐藏", "r"], ["可见 W", "r"], ["隐藏 W", "r"], ["屏 Hz", "r"]],
+      rParts.push(mkTable([["课", ""], ["墙钟", "r"], ["CPU 秒", "r"], ["CPU 占墙钟", "r"], ["可见", "r"], ["隐藏", "r"], ["可见 W", "r"], ["隐藏 W", "r"], ["屏 Hz", "r"]],
         en.slice(0, 12).map(function(s){ var e = s.energy;
-          return [s.name || s.id, dash(e.wall_s, fmtDur(e.wall_s)), dash(e.visible_s, fmtDur(e.visible_s)),
+          var cpuPct = (e.cpu_s != null && e.wall_s) ? Math.round(e.cpu_s / e.wall_s * 100) + "%" : null;
+          return [s.name || s.id, dash(e.wall_s, fmtDur(e.wall_s)), dash(e.cpu_s, e.cpu_s != null ? num(e.cpu_s, 0) : null),
+            dash(cpuPct), dash(e.visible_s, fmtDur(e.visible_s)),
             dash(e.hidden_s, fmtDur(e.hidden_s)), dash(e.visible_w), dash(e.hidden_w), dash(e.screen_hz, e.screen_hz != null ? num(e.screen_hz, 0) : null)]; })));
       rParts.push(el("div", "hint", "可见 / 隐藏 = 悬浮窗在前台 / 后台两档；「隐藏 W」比「可见 W」低说明省电档真的生效了。"));
     }
@@ -1878,9 +2128,9 @@ function renderDash310(){
     var vd = sessions.filter(function(s){ return s.vad; });
     if(vd.length){
       rParts.push(sub2("断句与丢句（VAD）"));
-      rParts.push(mkTable([["课", ""], ["断句", "r"], ["硬切", "r"], ["丢弃", "r"], ["丢弃秒", "r"], ["弱音块", "r"], ["重建", "r"], ["盲丢", "r"]],
+      rParts.push(mkTable([["课", ""], ["断句", "r"], ["句切", "r"], ["硬切", "r"], ["丢弃", "r"], ["丢弃秒", "r"], ["弱音块", "r"], ["重建", "r"], ["盲丢", "r"]],
         vd.slice(0, 12).map(function(s){ var v = s.vad;
-          return [s.name || s.id, dash(v.cuts), dash(v.hard_cuts), dash(v.dropped),
+          return [s.name || s.id, dash(v.cuts), dash(v.sentence_cuts), dash(v.hard_cuts), dash(v.dropped),
             dash(v.dropped_s, v.dropped_s != null ? num(v.dropped_s, 1) : null),
             dash(v.weak_blocks), dash(v.vad_resets), dash(v.blind_dropped)]; })));
       rParts.push(el("div", "hint", "硬切 = 撞了 12 s 上限（段内没有够长的静音，只能硬切）；弱音块 = 有语音窗却没过阈值；" +
@@ -1951,61 +2201,6 @@ function detailBtn(s){
     box.appendChild(bar);
   });
 }
-function renderTestMode(){
-  var box = $("#testmode"); box.innerHTML = "";
-  var rep = state.reports;
-  if(pending(rep)){ box.appendChild(el("div", "hint", "读取中…")); return; }
-  if(rep.error){ box.appendChild(el("div", "hint", rep.error)); return; }
-  var ss = rep.sessions || [];
-  $("#tmnote").textContent = ss.length + " 节 · 只有测试模式写报告并上传" + ((rep.errors && rep.errors.length) ? " · " + rep.errors.length + " 份读不出" : "");
-  if(!ss.length){ box.appendChild(el("div", "hint", "上传桶里还没有 report.json。")); return; }
-  // 默认只列近 7 天（更早的大多是 3.10 之前的报告，满屏「没这块」）；出过问题的那几节永远在上面。
-  var recent = ss.filter(function(s){ return Date.now() - Date.parse(s.report_at || s.updated) < 7 * 86400000; });
-  var older = ss.length - recent.length;
-  var view = state.tmAll ? ss : recent;
-  box.appendChild(mkTable(
-    [["上课", ""], ["是谁", ""], ["时长", "r"], ["音频", ""], ["实时字幕", ""], ["封口句", "r"], ["上移 p50", "r"],
-     ["术语", "r"], ["区域", ""], ["矫正率", "r"], ["块", "r"], ["看", ""]],
-    view.map(function(s){
-      var st = s.stream, rp = s.region;
-      var engine;
-      if(st){
-        var bad = st.reason && st.reason !== "manual";
-        engine = el("span", bad ? "bad" : null, (st.engine || "?") + (st.reason ? "（退回 " + (st.detail || st.reason) + "）" : ""));
-        if(bad) engine.style.color = "var(--bad)";
-        if(s.deps && s.deps.missing && s.deps.missing.length) engine.title = "缺依赖：" + s.deps.missing.join("、");
-      } else engine = el("span", "faint", s.blocks.indexOf("stream") >= 0 ? "—" : "没采");
-      var who = s.name || reportWho(s);
-      var whoN = s.name ? s.name : who ? el("span", null, "≈ " + who) : el("span", "dim", s.id);
-      if(!s.name && who){ whoN.title = "报告只有哈希；按上课时间对出来的（报告 " + s.id + "）"; }
-      /* 别人的课按**他自己那边**的钟显示（报告上传时刻是 UTC；不换算就会差 8–16 小时）。 */
-      var sTz = who ? tzOf(who) : null;
-      if(sTz && !s.name){ whoN.appendChild(el("span", "dim", " · " + tzLabel(sTz))); }
-      return [(sTz ? agoIn(Date.parse(s.report_at || s.updated), sTz) : ago(Date.parse(s.report_at || s.updated))), whoN,
-        dash(s.duration_s, fmtDur(s.duration_s)), s.audio_saved ? "有" : dash(null),
-        engine, dash(st && st.sealed_n, st && st.sealed_n != null ? num(st.sealed_n) : null),
-        dash(st && st.p50, st && st.p50 != null ? ms(st.p50 * 1000) : null),
-        dash(st && st.terms_n, st && st.terms_n != null ? num(st.terms_n) : null),
-        rp ? ((rp.selected || rp.default || "?") + (rp.switched ? "（切过）" : "")) : dash(null),
-        dash(s.corr && s.corr.changed_pct, s.corr && s.corr.changed_pct != null ? s.corr.changed_pct + "%" : null),
-        num(s.blocks.length), detailBtn(s)];
-    })));
-  var dbox = el("div", "detailbox"); dbox.id = "tmdetail";
-  box.appendChild(dbox);
-  if(older){
-    var tg = btn(state.tmAll ? "只看近 7 天" : "显示更早的 " + older + " 节", "toggle",
-      function(){ state.tmAll = !state.tmAll; renderTestMode(); });
-    box.appendChild(tg);
-  }
-  var h = el("div", "hint", "「菠萝丁」暗号 = 把这节切回本地草稿 + 云端定稿（A/B 用），会写进退回原因（manual）。红字 = 真的没连上。" +
-    "「≈ 名字」= 报告里只有哈希，按上课时间对出来的。块 = 这节 report.json 里采到的块数（3.10 满配 12，3.10.1 起 13）。" +
-    "「上课」= report.json 的上传时刻（下课附近）；补传音频不会改这一列。" +
-    "⚠️ **时刻按这个人自己的时区写**（名字后面标了时区）—— 报告里是 UTC，不换算就差 8–16 小时。");
-  h.style.marginTop = "8px";
-  box.appendChild(h);
-}
-
-
 /* ---------- 渲染：要注意（2026-10-15）----------
    判据全来自已经取到的数（AE 上游串 / 额度 / 上传桶 / 服务健康），这里只翻译成人话。
    每条 = [级别, 一句话出了什么事, 该做什么, 时间]。级别只有 bad / warn / ok 三种。 */
@@ -2081,8 +2276,14 @@ function renderAlerts(){
     }).forEach(function(s){
       var at = Date.parse(s.report_at || s.updated) || 0, age = Date.now() - at;
       if(!at || age >= 3 * 86400000) return;
-      var who = reportWho(s), miss = s.deps && s.deps.missing && s.deps.missing.length ? s.deps.missing : null;
-      var act = miss ? "他电脑上缺依赖：" + miss.join("、") + "。3.10.1 自带兜底，更新后下节应该恢复；没恢复就看那节诊断包里的 update.log。"
+      /* ⚠️ `deps.missing` 里**只有** websockets = 假警报：3.10.1 起 `ws_compat` 用仓库里的 vendor/websockets 兜底，
+         没装也连得上（实测一节 477 句、无退回）。deps_diag 只查 importlib.metadata，不知道兜底，于是一路误报。
+         —— 2026-10-21 实测结论，见记忆 classlive-deps-missing-false-alarm-20261021。 */
+      var who = reportWho(s);
+      var miss = (s.deps && s.deps.missing && s.deps.missing.length) ? s.deps.missing.filter(function(m){ return m !== "websockets"; }) : null;
+      var missOnlyWs = !miss && s.deps && (s.deps.missing || []).indexOf("websockets") >= 0;
+      var act = miss && miss.length ? "他电脑上缺依赖：" + miss.join("、") + "。3.10.1 自带兜底，更新后下节应该恢复；没恢复就看那节诊断包里的 update.log。"
+        : missOnlyWs ? "只缺 websockets，而 3.10.1+ 自带 vendor 兜底 —— 缺它本身不是退回的原因，去看那节诊断包里的 app.log。"
         : s.blocks.indexOf("deps") < 0 ? "这节报告来自 3.10.1 之前，没带诊断包；他更新后下一节会连日志一起传上来。"
         : "看那节的诊断包（extra.tar.gz）里的 app.log 找原因。";
       add(age < 86400000 ? must : know, "bad", "sx-" + s.id,
@@ -2119,10 +2320,15 @@ function renderAlerts(){
       "到上限当天就不再用千问。", "");
   }
   if(r2 && !r2.error){
-    var half = r2.sessions.filter(function(g){ return !g.mine && g.files.indexOf("transcript.md") < 0 &&
-      Date.now() - Date.parse(g.last) < 2 * 86400000; });
+    /* ⚠️ 只算**已经放了 30 分钟以上**的：刚下课的课正在传，那时候只有 report.json 是正常的
+       （2026-10-30 实测：17:53 那节刚下课就报「只传了一半」，是假警报）。 */
+    var HALF_MS = 30 * 60000;
+    var half = r2.sessions.filter(function(g){
+      var age = Date.now() - Date.parse(g.last);
+      return !g.mine && g.files.indexOf("transcript.md") < 0 && age < 2 * 86400000 && age > HALF_MS;
+    });
     if(half.length) add(know, "warn", "half", half.length + " 节别人的课只传了一半（没有转录）",
-      "多半是传到一半退出了 App；他下次打开会接着传。明细在「云端服务 → 上传的课」。", ago(Date.parse(half[0].last)));
+      "多半是传到一半退出了 App；他下次打开会接着传。明细在「云端服务 → 上传的课」。（只算放了 30 分钟以上的，刚下课那节正在传不算。）", ago(Date.parse(half[0].last)));
   }
   if(h && !h.error && h.overall && h.overall.requests){
     var er = h.overall.errors / h.overall.requests;
@@ -2163,8 +2369,10 @@ function renderAlerts(){
   must.slice(0, 3).forEach(function(a){ box.appendChild(row(a)); });
   if(must.length > 3) box.appendChild(fold("其余 " + (must.length - 3) + " 条要动手", must.slice(3).map(row), "mustrest"));
   if(know.length){
-    var d = fold("知道就好 · " + know.length + " 条", know.map(row), "know");
-    box.appendChild(d);
+    /* 默认展开：这几条本来就是「看一眼就好」，折起来反而要多点一次（检测器报 text-occlusion 也是这个）。
+       超过 5 条才折，免得抢「要动手」的视线。用户点过一次之后按他的选择记着。 */
+    if(!("know" in state.folds)) state.folds.know = know.length <= 5;
+    box.appendChild(fold("知道就好 · " + know.length + " 条", know.map(row), "know"));
   }
 }
 
@@ -2203,7 +2411,9 @@ function renderUsers(){
   var hr = el("tr");
   // 列序 = 看简历的顺序：是谁 → 还活着吗 → 干了什么（模型 / 时长 / 段数 / 翻译 / 花销）→ 设备与到期。
   // 「每日转写」那根迷你曲线删了：正上方日历条已经把「哪天在用」画得更清楚，同一件事不占两处。
-  [["名字",""],["状态",""],["在哪",""],["转写延迟","r"],["用了什么模型",""],["录了多久","r"],["段","r"],["翻译","r"],["花费 (闲时价)","r"],
+  /* 「转写时长」= 合并口径（实时与定稿取较长的那个，见 `durOf`）—— 不再分成两列各报一半。
+     「其中回退」= 那天实时开着、但仍走了定稿的秒数：**没有回退就是 0**（明写，不藏）。 */
+  [["名字",""],["状态",""],["在哪",""],["转写延迟","r"],["用了什么模型",""],["转写时长","r"],["其中回退","r"],["段","r"],["翻译","r"],["花费 (闲时价)","r"],
    ["设备","r"],["到期",""],["最后在线",""]].forEach(function(c){ hr.appendChild(el("th", c[1], c[0])); });
   var thead = el("thead"); thead.appendChild(hr); t.appendChild(thead);
   var tb = el("tbody"); t.appendChild(tb);
@@ -2222,9 +2432,9 @@ function renderUsers(){
     //   ⚠️ 关了云端转写的人上课也会是 0 → 只提示，不下结论。
     var odd = state.days_data.filter(function(d){
       var u = (d.rows || []).filter(function(r){ return r.code === c.code; })[0];
-      return u && u.llm_reqs > 0 && !u.asr_reqs;
+      return u && u.llm_reqs > 0 && !u.asr_reqs && !u.rt_s;      /* 走 Soniox 实时的那天别标：那是上课 */
     }).map(function(d){ return d.day === utcToday() ? "今天" : d.day.slice(5); });
-    if(odd.length){
+    if(odd.length && !isLab(c.name)){
       var tg2 = el("span","tag", odd.length === 1 ? odd[0] + "只有翻译" : odd.length + " 天只有翻译");
       tg2.title = odd.join("、") + "：有翻译、没有云端转写 —— 多半是实验 / 测试；关了云端转写的人上课也会这样";
       td0.appendChild(tg2);
@@ -2259,7 +2469,16 @@ function renderUsers(){
       tdM.appendChild(nod);
     }
     tr.appendChild(tdM);
-    tr.appendChild(el("td","r mono", fmtDur(agg.asr_s)));
+    var tdX = el("td","r mono", agg.x_s ? fmtDur(agg.x_s) : "0m");
+    if(agg.x_s) tdX.title = "合并：实时 " + fmtDur(agg.rt_s) + " / 定稿 " + fmtDur(agg.asr_s) +
+      "（同一天两边都有时取较长的那个，不相加）";
+    tr.appendChild(tdX);
+    var tdFb = el("td","r mono" + (agg.fb_s ? " warn" : " faint"), fmtDur(agg.fb_s || 0));
+    tdFb.title = agg.fb_s
+      ? "有 " + agg.fb_days + " 天实时没连上/掉了，这段音频走了定稿转写，共 " + num(agg.fb_s) + " 秒。" +
+        "「转写时长」是两条路取较长的那个，所以回退时长不会超过它。"
+      : "这段区间里没有回退（实时一直开着，没走定稿）";
+    tr.appendChild(tdFb);
     tr.appendChild(el("td","r mono", num(agg.asr_reqs)));
     tr.appendChild(el("td","r mono", num(agg.llm_reqs)));
     tr.appendChild(el("td","r mono", "$" + cluiCost(agg, state.prices).toFixed(3)));
@@ -2281,7 +2500,7 @@ function renderUsers(){
 }
 
 function detailRow(c, agg, ser){
-  var tr = el("tr","detail"); var td = el("td"); td.colSpan = 12;
+  var tr = el("tr","detail"); var td = el("td"); td.colSpan = 13;
 
   // 顶上这四个是「这个人干了多少」—— 从下面那格 kv 里提上来单列一行。kv 里剩下的是算账用的
   // （token 怎么分、缓存命中多少），两种东西混在一片小字里，谁也一眼分不出该看哪个。
@@ -2293,7 +2512,7 @@ function detailRow(c, agg, ser){
     if(small) b.appendChild(el("small", null, small));
     d.appendChild(b); hero.appendChild(d);
   }
-  big("录了多久", fmtDur(agg.asr_s), "· " + num(agg.asr_s, 0) + " 秒");
+  big("转写时长", fmtDur(agg.x_s), "· 实时 " + fmtDur(agg.rt_s) + " / 定稿 " + fmtDur(agg.asr_s));
   big("转写段数", num(agg.asr_reqs));
   big("翻译次数", num(agg.llm_reqs));
   big("花费", "$" + cluiCost(agg, state.prices).toFixed(3), "· 闲时价");
@@ -2309,6 +2528,7 @@ function detailRow(c, agg, ser){
   put("Jev", agg.jev_reqs + " 次 / " + agg.jev_q + " 题");
   /* Soniox 实时转写（`rt_s`）：与上面「录了多久」（定稿转写 `asr_s`）**不是同一条路** ——
      实时那条走 Soniox 直连，Worker 只回收用量，不经过它。 */
+  put("其中回退", fmtDur(agg.fb_s || 0) + (agg.fb_s ? "（" + agg.fb_days + " 天）" : "") );
   if(agg.rt_s) put("Soniox 实时转写", fmtDur(agg.rt_s) + " · " + num(agg.rt_reqs) + " 次会话");
   td.appendChild(kv);
 
@@ -2478,7 +2698,7 @@ function dayTable(c){
   box.appendChild(el("div","dtitle","逐日明细（UTC 日）"));
   var t = el("table");
   var hr = el("tr");
-  [["日期",""],["转写 (分)","r"],["实时 (分)","r"],["段","r"],["活跃分钟","r"],["翻译","r"],["输入 tok","r"],["命中","r"],["输出 tok","r"],["Jev","r"],["花费","r"]]
+  [["日期",""],["转写 (分)","r"],["其中回退","r"],["段","r"],["活跃分钟","r"],["翻译","r"],["输入 tok","r"],["命中","r"],["输出 tok","r"],["Jev","r"],["花费","r"]]
     .forEach(function(x){ hr.appendChild(el("th", x[1], x[0])); });
   var th = el("thead"); th.appendChild(hr); t.appendChild(th);
   var tb = el("tbody"); t.appendChild(tb);
@@ -2489,8 +2709,11 @@ function dayTable(c){
     n++;
     var tr = el("tr");
     tr.appendChild(el("td","mono", d.day === utcToday() ? d.day + "（今天）" : d.day));
-    tr.appendChild(el("td","r mono", num((u.asr_s || 0)/60, 1)));
-    tr.appendChild(el("td","r mono", u.rt_s ? num(u.rt_s/60, 1) : "—"));
+    var du = durOf(u);
+    var tdX = el("td","r mono", du.x ? num(du.x/60, 1) : "0");
+    tdX.title = "实时 " + num((u.rt_s||0)/60,1) + " 分 / 定稿 " + num((u.asr_s||0)/60,1) + " 分";
+    tr.appendChild(tdX);
+    tr.appendChild(el("td","r mono" + (du.fb ? " warn" : " faint"), du.fb ? num(du.fb/60,1) : "0"));
     tr.appendChild(el("td","r mono", num(u.asr_reqs || 0)));
     tr.appendChild(el("td","r mono", u.active_min == null ? "—" : num(u.active_min)));
     tr.appendChild(el("td","r mono", num(u.llm_reqs || 0)));
@@ -2504,7 +2727,8 @@ function dayTable(c){
   if(!n){ box.appendChild(el("div","hint","这段时间没有用量。")); return box; }
   box.appendChild(t);
   box.appendChild(el("div","hint","「活跃分钟」= 当天有请求的分钟数（逐分钟上线前的日子是 —）。Jev 是「次 / 题」。" +
-    "「实时 (分)」= Soniox 实时转写（Worker 每小时回收用量）；「转写 (分)」是**定稿**转写，两条路不同，别相加。"));
+    "「转写 (分)」= 当天实时与定稿里**较长**的那个（同一天两边都有时是回退，取长的那个不重复计）；" +
+    "「其中回退」= 实时开着但仍走了定稿的分钟数，没有回退就是 0。"));
   return box;
 }
 function renderDevices(c, box){
@@ -2675,15 +2899,19 @@ function load(fresh){
     if(qOpen && !state.openedOnce){ state.openedOnce = true;
       var hitc = state.codes.filter(function(c){ return c.name === qOpen; })[0]; if(hitc) state.expanded = hitc.code; }
     $("#err").innerHTML = "";
-    renderKpis(); renderDaily(); renderPerDay(); renderQuota(); renderUsers(); renderAlerts(); renderNow();
+    renderKpis(); renderDaily(); renderPerDay(); renderQuota(); renderUsers(); renderAlerts(); renderNow(); renderClasses();
+    /* 慢的那几个接口可能**先于**账本回来（Soniox 只用 0.3 s，账本要 0.6 s），那时 `state.days_data` 还是空的 ——
+       依赖账本的块（平台卡里的「按码对账」等）会画成 0 并且再也不会重画。账本一到就把它们重画一遍。 */
+    if(state.soniox !== undefined){ renderPlatforms(); renderAlerts(); }
+    if(state.reports !== undefined) renderClasses();
   }).catch(function(e){ showErr(e.message); });
   var slow = ["habits", "cf", "r2", "health", "logs", "ae", "ae310", "reports", "soniox", "openrouter"].map(function(k){
     return api(k, fresh ? {fresh: true} : {})
       .catch(function(e){ return {error: "面板服务没回（" + e.message + "）；比页面旧的话重开 cl_admin_ui.py。"}; })
       .then(function(v){ state[k] = v;
         if(k === "soniox") state.sonioxAt = Date.now();
-        renderService(); renderPlatforms(); renderDash310(); renderTestMode(); renderAlerts();
-        if(k === "soniox" || k === "ae310" || k === "reports") renderNow();
+        renderService(); renderPlatforms(); renderDash310(); renderClasses(); renderAlerts();
+        if(k === "soniox" || k === "ae310" || k === "reports"){ renderNow(); renderClasses(); }
         if(k === "habits") renderHabits();
         if(k === "ae" && state.loaded) renderUsers(); });
   });

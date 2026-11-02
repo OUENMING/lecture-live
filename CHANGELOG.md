@@ -65,6 +65,72 @@
 （`_whatsnew_body` 从最新往下数到「你上次看过的版本」为止），多版本时每行前面标版本号。
 所以**每个版本的看点都要能独立看懂**，不要写"同上""见上一条"。
 
+## [3.10.5] - 2026-11-02
+
+### 更新方式
+
+auto
+
+### 更新看点
+- [改进] 优化笔记：专业术语改成英文原词（`effusion（泻流）`）；面板的转写时长不再把实时和定稿两遍相加
+- [修复] 修复一些 bug：回放收尾崩溃、依赖误报、报告说不清的三件事
+
+### 升级须知（3.10.4 → 3.10.5）
+- 没有新依赖、没有新模型；开课面板上自动更新。
+- 笔记里的术语写法变了（英文在前、中文在括号里）。想退回旧写法：`CLASSLIVE_NOTE_TERM_EN=0`。
+
+### Added
+- 笔记术语英文化（`note_v2.announce_terms(..., en_first=True)`）：首次 `English（中文）`、同一节后续直接英文；日常词与元话语不动；长词优先不劈词；已经写成 `中文（English）` 的翻过来；标题同步反向。开关 `CLASSLIVE_NOTE_TERM_EN`（默认开，`0` 退回旧口径），登记在 HANDBOOK §6.1。三门课真调用实测：ECON10790 / SOC10020 / ECON10740，正文残留 0。
+- `note_v2.term_en_residue()`：数出「术语表里有、正文还只剩中文」的条目（量具，不进渲染路径）。
+- `stream_asr` 报告块新增 `dropped_windows`：丢包按（连接序号 × 分钟）归桶。之前只有 `dropped_s` 一个总数，10-29 那节丢的 596 s 说不清丢在哪一段。
+- 报告块 `blocks.counts`：`entries_raw` / `entries_after_merge` / `entries_rendered` / `merged`（`ObsidianWriter.entry_counts()`）。来由是一节课上同时出现「页脚 774 句 / 转录 797 块」，差 23 条而没有产物能解释。
+- region 快照新增 `late` / `if_ready` / `net_ok`：把「探测没跑」和「跑完了但那会儿还没结果」分开。
+- `region_route.warm()`：面板打开时后台预热一轮地区探测（幂等，同进程只跑一次；`Router.needs_probe` 是唯一判据）。
+
+### Changed
+- 面板整页按顶部区间重排；KPI 五格（转写 / 回退 / 翻译 / 翻译花费 / 用过的码）；原「今天」块与「测试模式」表合成「每一节」；逐日明细改成「转写时长 | 其中回退」。
+- 面板转写时长按 (日 × 码) 取 `max(asr_s, rt_s)`，回退时长单独一格（30 天实测 25.33 h；直接相加虚高到 26.4 h，回退段被算两遍）。
+- Soniox 按码对账、实时流质量、CPU 秒、核数、句切等以前只在原始 JSON 里的字段，现在上面板。
+
+### Fixed
+- `main.drain()` 的 `ep` / `gap` 分支补 `live is None` 守卫：`--save-notes no` 的 file 回放收尾遇到残留队列项会 `AttributeError`（真课不受影响）。
+- `update.deps_diag()` 认仓库自带的 `vendor/<包>`：3.10.1 给 websockets 做了 vendor 兜底，但诊断只查 `importlib.metadata`，「能用但没 pip 装」的机器被报缺、白折腾一遍。
+- 新网络上的第一节课吃不到地区测速：`region` 必须在领 Soniox key 之前定死，而探测要 3 s，原来只能在下一节生效。改成面板打开时后台预热，结果写进同一份缓存。
+- 面板三处假警报（deps.missing websockets、刚下课的半传、字幕超宽口径）；后台标签页 rAF 不跑导致图空白；慢接口先到导致账本相关块画成 0 且不重画。
+
+## [3.10.5] - 2026-11-02
+
+### 更新方式
+
+auto
+
+### 更新看点
+- [改进] 优化笔记
+- [修复] 修复 bug
+
+### 升级须知（3.10.4 → 3.10.5）
+- 没有新依赖、没有新模型；开课面板上自动更新。
+- 笔记里的术语写法变了（英文在前、中文在括号里）。想退回旧写法：`CLASSLIVE_NOTE_TERM_EN=0`。
+
+### Added
+- 笔记术语英文化（`note_v2.announce_terms(..., en_first=True)`）：首次 `English（中文）`、同一节后续直接英文；日常词与元话语不动；长词优先不劈词；已经写成 `中文（English）` 的翻过来；标题同步反向。开关 `CLASSLIVE_NOTE_TERM_EN`（默认开，`0` 退回旧口径），登记在 HANDBOOK §6.1。三门课真调用实测：ECON10790 / SOC10020 / ECON10740，正文残留 0。
+- `note_v2.term_en_residue()`：数出「术语表里有、正文还只剩中文」的条目（量具，不进渲染路径）。
+- `stream_asr` 报告块新增 `dropped_windows`：丢包按（连接序号 × 分钟）归桶。之前只有 `dropped_s` 一个总数，10-29 那节丢的 596 s 说不清丢在哪一段。
+- 报告块 `blocks.counts`：`entries_raw` / `entries_after_merge` / `entries_rendered` / `merged`（`ObsidianWriter.entry_counts()`）。来由是一节课上同时出现「页脚 774 句 / 转录 797 块」，差 23 条而没有产物能解释。
+- region 快照新增 `late` / `if_ready` / `net_ok`：把「探测没跑」和「跑完了但那会儿还没结果」分开。
+- `region_route.warm()`：面板打开时后台预热一轮地区探测（幂等，同进程只跑一次；`Router.needs_probe` 是唯一判据）。
+
+### Changed
+- 面板整页按顶部区间重排；KPI 五格（转写 / 回退 / 翻译 / 翻译花费 / 用过的码）；原「今天」块与「测试模式」表合成「每一节」；逐日明细改成「转写时长 | 其中回退」。
+- 面板转写时长按 (日 × 码) 取 `max(asr_s, rt_s)`，回退时长单独一格（30 天实测 25.33 h；直接相加虚高到 26.4 h，回退段被算两遍）。
+- Soniox 按码对账、实时流质量、CPU 秒、核数、句切等以前只在原始 JSON 里的字段，现在上面板。
+
+### Fixed
+- `main.drain()` 的 `ep` / `gap` 分支补 `live is None` 守卫：`--save-notes no` 的 file 回放收尾遇到残留队列项会 `AttributeError`（真课不受影响）。
+- `update.deps_diag()` 认仓库自带的 `vendor/<包>`：3.10.1 给 websockets 做了 vendor 兜底，但诊断只查 `importlib.metadata`，「能用但没 pip 装」的机器被报缺、白折腾一遍。
+- 新网络上的第一节课吃不到地区测速：`region` 必须在领 Soniox key 之前定死，而探测要 3 s，原来只能等下一节。改成面板打开时后台预热，结果写进同一份缓存。
+- 面板三处假警报（deps.missing websockets、刚下课的半传、字幕超宽口径）；后台标签页 rAF 不跑导致图空白；慢接口先到导致账本相关块画成 0 且不重画。
+
 ## [3.10.4] - 2026-10-29
 
 ### 更新方式

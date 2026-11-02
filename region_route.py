@@ -263,6 +263,34 @@ def network_key(*, run: Callable = subprocess.run, timeout: float = 0.8,
     return ""
 
 
+#: 预热只做一次（同进程）。面板可能反复开关，探测不许跟着反复跑。
+_WARMED = threading.Event()
+
+
+def warm(*, passcode: str, endpoint: str, **kw) -> bool:
+    """开课**前**预热一次地区探测（2026-11-02）。返回是否真的起了这一轮。
+
+    为什么需要：`region` 必须在领 Soniox key **之前**定死，而探测要 3 s ——
+    新网络上的第一节课永远赶不上（10-29 朋友那节：探测 3 s 后回来，key 早领完了，
+    报告里只剩一个 `not_ready`）。把它挪到「用户还在面板上挑课」的时候跑，
+    结果写进同一份缓存，开课时 `plan()` 就能读到。
+
+    幂等：同进程只起一次；不该跑（缓存新鲜 / 前 3 节用完了 / 开关 off）返回 False。
+    永不抛；后台线程，**不阻塞开课**。
+    """
+    if _WARMED.is_set():
+        return False
+    _WARMED.set()
+    try:
+        r = Router(passcode=passcode, endpoint=endpoint, **kw)
+        if not r.needs_probe:
+            return False
+        r.start()
+        return True
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 传输（真实现；判据注入替身，不碰网络）
 # ══════════════════════════════════════════════════════════════════════
@@ -454,6 +482,11 @@ class Router:
                           now=self._clock())
 
     # ---- 主程序碰的三个成员
+
+    @property
+    def needs_probe(self) -> bool:
+        """这次构造**要不要**真跑一轮探测（缓存新鲜 / 次数用完 / 开关关 → False）。"""
+        return bool(self._plan["run"])
 
     @property
     def region(self) -> str:

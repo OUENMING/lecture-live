@@ -365,6 +365,36 @@ def t_snapshot_late_and_net() -> None:
     assert snap["if_ready"]["selected"] == "jp", snap
     assert snap["reason"] == "off", "决策那一格仍是开课那一刻的（不许改写历史）"
 
+
+def t_warm_once() -> None:
+    """2026-11-02：开课前预热 —— 该跑就跑一次，同进程第二次不再建 Router。"""
+    state = pathlib.Path(_TMP.name) / "rp-warm.json"
+    state.unlink(missing_ok=True)
+    RR._WARMED.clear()
+    orig, made = RR.Router, []
+    def _spy(**kw):
+        made.append(kw)
+        return orig(**kw)
+    RR.Router = _spy
+    try:
+        # 开关 off -> 不跑
+        assert RR.warm(passcode="x", endpoint="http://x", env_value="off",
+                       state_path=state, net_key_fn=lambda: "netA") is False
+        # 幂等：第二次**连 Router 都不建**（那是「反复开面板就反复探测」的入口）
+        assert RR.warm(passcode="x", endpoint="http://x", env_value="off",
+                       state_path=state, net_key_fn=lambda: "netA") is False
+        assert len(made) == 1, f"预热不幂等：建了 {len(made)} 次 Router"
+    finally:
+        RR.Router = orig
+        RR._WARMED.clear()
+    # needs_probe 是预热判据本身
+    r_off = RR.Router(passcode="x", endpoint="http://x", state_path=state,
+                      clock=lambda: NOW, env_value="off", net_key_fn=lambda: "netA")
+    assert r_off.needs_probe is False
+    r_auto = RR.Router(passcode="x", endpoint="http://x", state_path=state,
+                       clock=lambda: NOW, env_value="auto", net_key_fn=lambda: "netA")
+    assert r_auto.needs_probe is True
+
 def main() -> int:
     print("region_route 判据（全部离线）")
     for name, fn in [
@@ -379,6 +409,7 @@ def main() -> int:
         ("Router: 第 1 节起 3 节的完整故事（缓存/改道/on_done）", t_router_first_three_classes),
         ("Router: off / force / 状态文件坏掉不抛", t_router_off_force_and_corrupt_state),
         ("Router: 探测晚到时的 late / if_ready / net_ok", t_snapshot_late_and_net),
+        ("预热：warm() 只跑一次 / needs_probe 判据", t_warm_once),
     ]:
         check(name, fn)
     print(f"\n{'❌ 失败 ' + str(len(FAILED)) + '：' + '、'.join(FAILED) if FAILED else '✅ 全部通过'}")

@@ -3220,5 +3220,24 @@ class R32_ReportCountsWiring(unittest.TestCase):
         self.assertIn('note_block("counts"', src, "收尾没把三档句数写进报告")
 
 
+class R33_FileReplayDrainGuards(unittest.TestCase):
+    """R33 `drain()` 的 `ep` / `gap` 分支必须判 `live is None`（2026-11-02）。
+
+    真课不会崩：`live` 只有 file 回放（`--save-notes no`）才是 None，而那条路
+    收尾时可能还剩 (`ep`/`gap`) 队列项，`live.event(...)` 直接 AttributeError。
+    这一条钉**源码里两处守卫都在**；行为验证要真跑一次 file 回放，check.py 不做。
+    """
+
+    def test_two_branches_guard_live_none(self):
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+        i = src.index('elif item[0] == "ep":')
+        j = src.index('elif item[0] == "en_seed":')
+        block = src[i:j]
+        self.assertIn("if live is not None:", block, "ep 分支没判空")
+        self.assertIn("live is not None", block, "gap 分支没判空")
+        self.assertEqual(block.count("live.event("), 2, "两个分支各一处事件")
+        self.assertEqual(block.count("live is not None"), 2, "两处事件各要一个守卫")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -3787,12 +3787,13 @@ def run(args) -> None:
                 fn = getattr(ui, "endpoint", None)  # 终端没有这一槽
                 if callable(fn):
                     fn(item[1])
-                live.event("endpoint", between=bool(item[1]))
+                if live is not None:                # ⚠️ file 回放（live=None）时这里原本会崩
+                    live.event("endpoint", between=bool(item[1]))
             elif item[0] == "gap":                  # ("gap", 与上一句的音频停顿秒 | None)
                 fn = getattr(ui, "next_gap", None)  # 终端没有这一槽
                 if callable(fn):
                     fn(item[1])
-                if item[1] is not None:
+                if item[1] is not None and live is not None:
                     live.event("sent_gap", gap_s=round(float(item[1]), 3))
             elif item[0] == "en_seed":              # ("en_seed", ASR 原句, seg)
                 draft_view.on_stream(item[2] if len(item) > 2 else None)

@@ -228,6 +228,29 @@ def main() -> int:
         import notice
         notice.alert(_ke.KEY_RESET_TITLE, _ke.KEY_RESET_MESSAGE)
 
+    # ⭐ 地区探测预热（2026-11-02）：趁用户还在面板上挑课，把 Soniox 多地区真测跑掉。
+    #    为什么：`region` 必须在领 key **之前**定死，而探测要 3 s —— 不预热的话，
+    #    新网络上的**第一节课**永远吃不到结果（10-29 实测：探测 3 s 后回来，key 早领完了，
+    #    报告里只剩 `not_ready`）。后台线程、永不抛、不阻塞面板。
+    #    ⚠️ 整段丢进后台线程：`Router.__init__` 里同步取网络指纹（`route` / `arp`，
+    #       预算 1 s），放主线程就是给面板打开加 1 s —— 预热没资格让人等。
+    def _warm_probe() -> None:
+        try:
+            import region_route
+            import stream_asr
+            from cloud_translator import load_api_key
+            _pk = load_api_key(None)
+            if _pk:
+                region_route.warm(passcode=_pk, endpoint=stream_asr.endpoint())
+        except Exception:                       # noqa: BLE001  预热失败不影响开课
+            pass
+
+    try:
+        import threading
+        threading.Thread(target=_warm_probe, name="region-warm", daemon=True).start()
+    except Exception:                           # noqa: BLE001
+        pass
+
     cloud_on, cloud_locked = _cloud_state()
     try:
         h = entry_panel.open_panel(on_start=on_start, on_close=on_close,

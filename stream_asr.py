@@ -123,6 +123,8 @@ RETRY_JITTER = 0.2
 SEND_STUCK_S = 5.0
 #: `metrics()["sessions"]` 最多记这么多条（30 s 一次的长期重连也撑得住一整天，不会无限长）。
 SESS_LOG_MAX = 120
+#: 丢包逐窗口账的上限（窗口 = 当前连接 × 分钟）。超了并进一个溢出桶 —— 记账不许无界增长。
+DROP_WINDOW_MAX = 240
 #: 每次掉线往 stdout 打一行。⚠️ 为什么要有：`sessions[]` 只进测试报告与 `.live.jsonl`，**两者平时都关** ——
 #: 普通上课出事时手上什么都没有（10-29 中国用户那节只能靠草稿时间戳反推）。stdout 进
 #: `app.log`（双击 `.app` 时 sitecustomize 改道），而 `app.log` 本来就在诊断包里（`testmode.R2_DIAG_MEMBERS`），
@@ -781,6 +783,9 @@ class StreamASR:
         self._events: "queue.Queue[tuple]" = queue.Queue()
         self._dropped = 0
         self._dropped_samples = 0                   # 队列满丢掉的样本数（算 dropped_s 用）
+        #: `(会话序号, 分钟)` -> `[块数, 样本数]`。为什么要分窗：只有总量时
+        #: 「596 s 丢在哪一段」永远只能猜（2026-10-29 中国用户那节课）。
+        self._drop_buckets: dict = {}
         self._samples = 0                           # 采到的样本总数（含丢掉的）
         #: ⭐ 3.10 生产量具：第一块音频的墙钟（封口延迟的零点，见 `seal_latency_s`）。
         self._audio_t0: float | None = None
@@ -842,6 +847,7 @@ class StreamASR:
             msg_gap_max_s = self._msg_gap_max
             dropped = self._dropped
             dropped_samples = self._dropped_samples
+            buckets = dict(self._drop_buckets)
             down_s = self._down_s + (time.monotonic() - self._down_since
                                      if self._down_since is not None else 0.0)
             sessions = [dict(x) for x in self._sess_log]
@@ -859,6 +865,12 @@ class StreamASR:
                 "msg_gap_max_s": round(float(msg_gap_max_s), 2),
                 "dropped_chunks": int(dropped),
                 "dropped_s": round(float(dropped_samples) / float(SR), 1),
+                #: ⭐ 2026-11-02：丢在哪一段。`sess`=第几次连接，`at`=开课第几秒起的这一分钟。
+                "dropped_windows": sorted(
+                    ({"sess": k[0], "at": k[1] * 60, "chunks": v[0],
+                      "s": round(float(v[1]) / float(SR), 1)}
+                     for k, v in buckets.items()),
+                    key=lambda d: (d["sess"], d["at"])),
                 "terms_n": int(st.get("terms_n") or 0),
                 "terms_dropped": int(st.get("terms_dropped") or 0),
                 #: 每个会话一条：`at` 开始于第几秒 / `ran_s` 跑了多久 / `why` 怎么结束的 / `detail` close code 等
@@ -901,8 +913,29 @@ class StreamASR:
                     with self._lock:
                         self._dropped += 1
                         self._dropped_samples += len(dropped_item[1]) // 2
+                        self._note_drop_locked(len(dropped_item[1]) // 2)
         except Exception:                           # noqa: BLE001
             pass                                    # 音频回调永不抛（仓库雷区）
+
+    def _note_drop_locked(self, samples: int) -> None:
+        """丢包按「当前连接 × 分钟」归桶。**调用方已持 `self._lock`；绝不抛。**
+
+        ⚠️ 为什么不记每一条：一次卡顿能丢几千块（10-29 实测 5960 块），逐条记会把
+           报告撑爆。按分钟归桶已经够回答「丢在哪一段」。
+        """
+        try:
+            t = time.monotonic() - self._t_start
+            key = (len(self._sess_log), int(t // 60))
+            b = self._drop_buckets.get(key)
+            if b is None:
+                if len(self._drop_buckets) >= DROP_WINDOW_MAX:
+                    b = self._drop_buckets.setdefault((len(self._sess_log), -1), [0, 0])
+                else:
+                    b = self._drop_buckets[key] = [0, 0]
+            b[0] += 1
+            b[1] += samples
+        except Exception:                           # noqa: BLE001  音频回调里，绝不抛
+            pass
 
     def dropped(self) -> int:
         """因为队列满被丢掉的块数（诊断用）。"""

@@ -3191,5 +3191,34 @@ class R30_EnvFlagsAreRegistered(unittest.TestCase):
                          f"这些开关代码在读、HANDBOOK §6.1 没登记：{sorted(used - listed)}")
 
 
+class R32_ReportCountsWiring(unittest.TestCase):
+    """R32 三档句数真的进了收尾报告（2026-11-02）。
+
+    来由：同一节课出现过「页脚 774 句 / 转录 797 块」，差 23 条而**没有任何产物能解释**。
+    修法是把 raw → 合并后 → 渲染用 三个数写进 `blocks.counts`，让差额自己说话。
+    这一条钉的是**接线**（块名 / 方法 / 调用点），因为它一旦被谁顺手删掉是静默的。
+    """
+
+    def test_blocks_registered(self):
+        import testmode
+        self.assertIn("counts", testmode.BLOCKS)
+
+    def test_writer_exposes_counts(self):
+        from obsidian_writer import ObsidianWriter
+        w = object.__new__(ObsidianWriter)
+        self.assertEqual(w.entry_counts(), {}, "没跑过收尾 -> 空 dict，不许编数")
+        w._entry_counts = {"entries_raw": 797, "entries_after_merge": 791,
+                           "entries_rendered": 791, "merged": 6}
+        got = w.entry_counts()
+        self.assertEqual(got["entries_raw"], 797)
+        self.assertEqual(got["entries_after_merge"], 791)
+        got["entries_raw"] = 0
+        self.assertEqual(w.entry_counts()["entries_raw"], 797, "返回副本，调用方改不动")
+
+    def test_main_reports_counts(self):
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+        self.assertIn('note_block("counts"', src, "收尾没把三档句数写进报告")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -487,10 +487,22 @@ class Router:
                 "ordinal": p["ordinal"], "net": p["net"],
                 "default": default, "selected": self.region,
                 "switched": bool(p["switched"]), "reason": p["reason"], "cached": bool(p["cached"])}
+        snap["late"] = False
         if probe is not None:
             snap["regions"] = probe.get("regions") or {}
             snap["ms"] = probe.get("ms")
             snap["timeout"] = bool(probe.get("timeout"))
+            # ⭐ 2026-11-02：`selected`/`reason` 说的是**开课那一刻**的决策。探测跑完时
+            #    决策已经定死，报告却只剩一个 `not_ready` —— 读的人分不清「探测没跑」
+            #    和「跑完了，但那会儿还没结果」。把「如果当时就用这份数据会怎么选」
+            #    一并写出来，再标一下网络指纹有没有拿到（拿不到 = 缓存永远写不进）。
+            if probe.get("default") and not p["cached"]:
+                d_now = decide(ready=True, default=str(probe["default"]),
+                               regions=probe.get("regions") or {})
+                snap["late"] = True
+                snap["if_ready"] = {"selected": d_now["selected"], "switched": d_now["switched"],
+                                    "reason": d_now["reason"]}
+        snap["net_ok"] = bool(p["net"])
         return snap
 
     # ---- 内部

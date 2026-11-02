@@ -1747,6 +1747,13 @@ class ObsidianWriter:
             entries, review or {}, qa_items or [], polish_state, lost_items or [],
             keypoint_items or [], chapter_items or {}, review_missing))
 
+    def entry_counts(self) -> dict:
+        """三档句数（`entries_raw` / `entries_after_merge` / `entries_rendered` + `merged`）。
+
+        收尾报告 `blocks.counts` 的唯一来源；没走到那一步就是空 dict（不编数）。
+        """
+        return dict(getattr(self, "_entry_counts", {}) or {})
+
     def _note_data(self, entries: list[dict], review: dict, qa_items: list,
                    polish_state: str, lost_items: list, keypoint_items: list,
                    chapter_items: dict, review_missing: bool):
@@ -1984,6 +1991,11 @@ class ObsidianWriter:
             except Exception as e:                        # noqa: BLE001
                 polish_state = "failed"
                 print(f"⚠ 精修失败({str(e)[:60]}); 用直播版转录生成笔记")
+        # ⭐ 2026-11-02：三档句数记账（收尾报告 `blocks.counts`）。为什么要它：
+        #    同一节课出现过「页脚 774 句 / 转录 797 块」两个数，差了 23 条而**没有任何
+        #    产物能解释**——差额本身就是结论（哪一层吞了），所以先把它记下来。
+        _n_raw = len(entries)
+        _merged_n = 0
         # ✂️ 碎句合并：字幕切成两三行的同一句话并回一行、整句重译（实测见 `note_merge.py` 文件头）。
         #    ⚠️ 同 polish：只改笔记里的 entries，`sessions/` 不动；额外一层，失败不许带走底座。
         #    放在复习层**之前**：复习层 / 🎯 重点句读到的也是整句。
@@ -1997,6 +2009,7 @@ class ObsidianWriter:
                         entries, self._key, self._model,
                         domain=course_title(self._glossary_path, self._course),
                         stats=mstats, cancel=cancel)
+                    _merged_n = int(mstats.get("merged") or 0)
                     if mstats.get("merged"):
                         print(f"✂️ 碎句合并：{mstats['merged']} 句由几行并回一行"
                               + (f"（{mstats['runs'] - mstats['merged']} 句没并成，照旧分行）"
@@ -2021,6 +2034,10 @@ class ObsidianWriter:
                           flush=True)
             except Exception as e:                        # noqa: BLE001
                 print(f"⚠ 漏译句补译失败({str(e)[:60]}); 笔记照旧")
+        # ⭐ 三档句数：raw（会话文件解析出来的）→ after_merge（并句后）→ rendered（交给渲染的）。
+        #    `sessions/` 一个字节不改，所以 raw 之后还能跟导出文件对账。
+        self._entry_counts = {"entries_raw": _n_raw, "entries_after_merge": len(entries),
+                              "entries_rendered": len(entries), "merged": _merged_n}
         # ⭐⭐ 3.9.7 第 5b 项：**基础版先原子落盘**（转写 + 译文这一层，含精修 /
         #    碎句合并 / 补译；不需要再调模型）。
         #    ⚠️⚠️ 为什么：复习层（`REVIEW_WORKERS=5` 并发那一段）实测要几十秒，

@@ -1841,6 +1841,27 @@ update._rm_journal(update.apply_journal_path())
 
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]
+# ======================= C. deps_diag 认 vendor（2026-11-02）=======================
+print("\nC. deps_diag：仓库自带的包不算 missing\n")
+
+_d = pathlib.Path(tempfile.mkdtemp(prefix="cl_deps_"))
+(_d / "requirements.txt").write_text("vendoronlypkg>=1\nnever-installed-xyz>=0\n", encoding="utf-8")
+(_d / "vendor" / "vendoronlypkg").mkdir(parents=True)
+_old_here = update.HERE
+update.HERE = _d
+try:
+    diag = update.deps_diag()
+finally:
+    update.HERE = _old_here
+check("C1 vendor 里的包不算 missing",
+      "vendoronlypkg" not in (diag.get("missing") or [])
+      and "vendoronlypkg" in (diag.get("vendored") or []),
+      f"missing={diag.get('missing')} vendored={diag.get('vendored')}")
+check("C2 真没装的仍然报 missing",
+      "never-installed-xyz" in (diag.get("missing") or []),
+      f"missing={diag.get('missing')}")
+shutil.rmtree(_d, ignore_errors=True)
+
 print(f"\n{'=' * 60}")
 print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")
 if bad:

@@ -1539,6 +1539,26 @@ def t_transport_segments() -> None:
         wk.close()
 
 
+
+def t_drop_windows() -> None:
+    """2026-11-02：丢包按「连接 × 分钟」归桶，且**总量必须等于各窗之和**。
+
+    ⚠️ 走真入口 `feed()`（不是直接调内部记账）—— 直接调内部函数测不到「feed 忘了记账」
+    这条最可能的回归（初版就是这么写的，变异验证时红了才发现）。
+    """
+    s = StreamASR(passcode="", terms=[], audio_max_s=0.2)     # 队列只有两三格
+    chunk = np.zeros(SR // 10, dtype="float32")               # 100 ms
+    for _ in range(12):
+        s.feed(chunk)
+    m = s.metrics()
+    w = m["dropped_windows"]
+    assert m["dropped_chunks"] >= 1, f"队列没满？{m}"
+    assert len(w) == 1, w
+    assert w[0]["sess"] == 0 and w[0]["at"] == 0, w
+    assert w[0]["chunks"] == m["dropped_chunks"], (w, m)
+    assert w[0]["s"] == m["dropped_s"], (w, m)
+
+
 def main() -> int:
     print("stream_asr 判据（全部离线）")
     for name, fn in [
@@ -1603,6 +1623,7 @@ def main() -> int:
         ("transport: 默认领 key 客户端（真头）", t_transport_default_key_client),
         ("transport: region= 进领 key 请求体", t_transport_region_goes_to_worker),
         ("transport: 段号映射", t_transport_segments),
+        ("stream: 丢包逐窗口记账（2026-11-02）", t_drop_windows),
     ]:
         check(name, fn)
     print(f"\n{'❌ 失败 ' + str(len(FAILED)) + '：' + '、'.join(FAILED) if FAILED else '✅ 全部通过'}")

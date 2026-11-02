@@ -1438,6 +1438,16 @@ def deps_diag() -> dict:
                 got[n] = None
         out["installed"] = got
         out["missing"] = [n for n, v in got.items() if v is None]
+        # ⭐ 2026-11-02：仓库自带的 `vendor/<包>` 也算「有」—— 3.10.1 给 `websockets`
+        #    做了 vendor 兜底，可这里只认 `importlib.metadata`，于是「能用 but 没 pip 装」
+        #    的机器会在诊断里报 missing，读的人去补依赖、白折腾一遍。
+        #    ⚠️ 只影响诊断；运行路径走 `ws_compat`，与这一格无关。
+        vend = HERE / "vendor"
+        if vend.is_dir():
+            vendored = sorted(n for n in out["missing"] if (vend / n).is_dir())
+            if vendored:
+                out["vendored"] = vendored
+                out["missing"] = [n for n in out["missing"] if n not in vendored]
     except Exception as e:                                # noqa: BLE001
         out["error"] = f"{type(e).__name__}: {str(e)[:120]}"
     try:

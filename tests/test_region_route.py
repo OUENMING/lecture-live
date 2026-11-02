@@ -342,6 +342,29 @@ def t_router_off_force_and_corrupt_state() -> None:
     assert r.snapshot()["reason"] in ("not_ready", "cache_stale") and r.region == ""
 
 
+
+def t_snapshot_late_and_net() -> None:
+    """2026-11-02：探测跑完但决策早已定死时，`late` / `if_ready` / `net_ok` 要说得清。
+
+    「selected 空 + reason=not_ready」原来分不清两种事：探测没跑，还是跑完了但那会儿
+    还没有结果。三个新字段把这件事变成可读的。
+    """
+    state = pathlib.Path(_TMP.name) / "rp-late.json"
+    r = RR.Router(passcode="cl-test", endpoint="http://x/v1/soniox/key", version="3.9.7",
+                  state_path=state, clock=lambda: NOW, env_value="off",
+                  net_key_fn=lambda: "")
+    snap = r.snapshot()
+    assert snap["net_ok"] is False, snap
+    assert "late" not in snap or snap["late"] is False, "没探测时不该有 late=True"
+    # 模拟「探测在开课 3 秒后回来，但开课那一刻只有默认地区」
+    r._probe = {"default": "jp", "regions": {"jp": {"connect_ms": 640.3, "rtt_ms": 304.9, "error": ""}},
+                "ms": 3022, "timeout": False}
+    snap = r.snapshot()
+    assert snap["late"] is True, snap
+    assert snap["if_ready"]["reason"] == "no_other", snap
+    assert snap["if_ready"]["selected"] == "jp", snap
+    assert snap["reason"] == "off", "决策那一格仍是开课那一刻的（不许改写历史）"
+
 def main() -> int:
     print("region_route 判据（全部离线）")
     for name, fn in [
@@ -355,6 +378,7 @@ def main() -> int:
         ("run_probe: 硬截止（阶段二卡住也不超）", t_probe_hard_deadline),
         ("Router: 第 1 节起 3 节的完整故事（缓存/改道/on_done）", t_router_first_three_classes),
         ("Router: off / force / 状态文件坏掉不抛", t_router_off_force_and_corrupt_state),
+        ("Router: 探测晚到时的 late / if_ready / net_ok", t_snapshot_late_and_net),
     ]:
         check(name, fn)
     print(f"\n{'❌ 失败 ' + str(len(FAILED)) + '：' + '、'.join(FAILED) if FAILED else '✅ 全部通过'}")

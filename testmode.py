@@ -385,6 +385,8 @@ BLOCKS = frozenset({
     "terms",    # 术语注入条数（core / always / scored）
     "ui",       # UI 使用度（纲要开了几次、点了哪些按钮）
     "backfill",  # 🩹 漏译句课后补译的计数 `{need, done}`（`backfill.backfill_entries`）
+    "counts",   # ⭐ 2026-11-02：三档句数 `{entries_raw, entries_after_merge, entries_rendered, merged}`
+                #             （`ObsidianWriter.entry_counts()`）—— 页脚与转录块对不上时靠它对账
     "merge",    # 跨段半句合并的计数 `{triggered, replaced, failed}` + `items`（3.9.7 第 4 项 / 3.9.8 ③）
     "system",   # 机器画像 `{ram_gb, chip, macos, arch, draft_engine, draft_reason}`（`system_info`）
     "energy",   # ⭐ 3.9.8 ①：可见/隐藏分桶的能耗/唤醒/CPU + pump 各档时长（`energy.EnergyProbe`）

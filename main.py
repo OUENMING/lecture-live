@@ -4422,6 +4422,11 @@ def run(args) -> None:
                 # ⭐ 一些事儿（2026-10-17）：认到几条 / 记下几条 / 忽略几条 / 推算几条。
                 #    ⚠️ 只读快照，不参与任何判定（同 `live` 那一格）。
                 tester.note_block("duty", _duty_stats())
+                # ⭐ 三档句数（2026-11-02）：页脚「N 句」与转录块数对不上时，差额在这一格里。
+                try:
+                    tester.note_block("counts", writer.entry_counts())
+                except Exception:                     # noqa: BLE001
+                    pass
                 # ⭐ 第 4 项：跨段半句合并的计数。`failed` = 触发了却没换成
                 #    （重翻失败 / 超时 / 行已被别的路径改过）—— 从两个计数器算出来，
                 #    不另立一个可能不同步的真源。

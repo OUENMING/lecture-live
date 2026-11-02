@@ -192,7 +192,8 @@ def render(d: NoteData) -> str:
     import note_v2
     # ⭐ 术语就地括注：与 HTML 共用同一份实现（作者 2026-10-18）；F7-e 带上标准拼写表。
     review = note_v2.announce_terms_in_review(d.review or {},
-                                              canon=getattr(d, "term_pairs", None))
+                                              canon=getattr(d, "term_pairs", None),
+                                              en_first=note_v2._term_en_enabled())
     d = dataclasses.replace(d, review=review)
     entries = d.entries
     ts0 = entries[0]["ts"] if entries else "—"

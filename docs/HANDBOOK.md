@@ -284,6 +284,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_DRAFT_HOLDBACK` | 空（关） | 草稿显示层前缀冻结，数字 = 灰尾词数 —— `draft_stable.py` | 实验开关：R3 换 Nemotron 后重新评估去留 |
 | `CLASSLIVE_LAYOUT` | `d` | 悬浮窗布局：`d` = 草稿并进最底那一行 + 原地显影 + 新字淡入，无底板（2026-10-17 定版）；`classic` = 老布局（底部单独草稿栏）—— `overlay.LAYOUT_D` / `caption_flow.py` / `transcript_view` 的「D 布局」 | 发布开关：D 上线一版没出事就删 `classic` 和草稿栏代码 |
 | `CLASSLIVE_NOTE_MERGE` | `1` | 课后笔记里把切成两三行的同一句话并回一行、整句重译（只改笔记，`sessions/` 不动）—— `note_merge.py` | 发布开关（3.9.5）：`0` = 照旧逐行 |
+| `CLASSLIVE_NOTE_TERM_EN` | `1` | 课后笔记正文里的关键术语用**英文原词**（首次 `English（中文）`、同节后续直接英文；日常词/元话语不动）—— `note_v2.announce_terms` / `note_html` / `note_render` | 发布开关（2026-11-02）：`0` = 退回「中文（English）」一次性括注 |
 | `CLASSLIVE_LIVE_SUMMARY` | `1` | 实时总结（章节合成 / 纲要落盘 / 发 streamq） | 运维开关，长期 |
 | `CLASSLIVE_LIVE_TERMS_MAX` | `40` | **课上候选词池**的上限（链路体检 ⭐2：已定稿文本里反复出现、过门的词进翻译候选池）—— `live_terms.LivePool`；撞上限按「本课出现句数 + 新近度」淘汰最少的/最旧的 | 运维开关，长期（调大 = 池子更全也更占上下文） |
 | `CLASSLIVE_JEV_TERMS` | `1` | **术语闸门**（链路体检 ⭐2 第五道门，E2 离线实验 AUC 0.976）：新候选词过一遍 Jev「像不像本课术语」，低于 `live_terms.JUDGE_MIN_P` 的砍掉（判过的不重问、硬超时 4 s）—— `main.make_term_judge`；`0` = 完全不装闸门 | 发布开关：真课过闸、一版没出事后评估去留 |

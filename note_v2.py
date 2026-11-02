@@ -29,6 +29,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import os
 import note_math
 import re
 
@@ -261,7 +262,11 @@ __CALIBER__
   `checks` 每条：{"claim": 断言（如 "MC(4)=12"）, "how": 怎么核的, "status": "ok|mismatch|unchecked"}。
 
 ## 四、语言与格式
-- 正文**全中文**（除术语的英文原形、公式、引用原话）。
+- 正文**全中文**（除术语的英文原形、公式、引用原话）；术语的英文原形**交给渲染层**统一换，
+  你只管把 `terms` 列全。
+- `terms` 要**列全本节所有学科术语**：含元素名、化合物名、定律名、带公式符号的量名
+  （`rms speed` / `molar mass` / `ammonium chloride`）。**不要只列生僻词** ——
+  漏一条，正文里那个词就只剩中文，读者在考卷上认不出来。
 - `sections` 里每个字段都是**单行字符串**（不出现换行、markdown 标记、引号）；
   `prose` / `steps` 是字符串数组，每个元素一段/一步。
 - 适合画图的节给 `plot`：kind 只能从这三个里选 —— __PLOTS__（给不出参数就空着）。
@@ -2322,7 +2327,110 @@ def _inside_longer_term(text: str, zh: str, i: int, zhs) -> bool:
     return any(len(z) > len(zh) and text.startswith(z, i) for z in zhs if z)
 
 
-def announce_terms(text: str, terms, seen: set) -> str:
+def _term_en_enabled() -> bool:
+    """`CLASSLIVE_NOTE_TERM_EN`（默认开）：正文关键术语用英文原词。"""
+    v = os.environ.get("CLASSLIVE_NOTE_TERM_EN", "").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _ascii_en(en: str) -> bool:
+    """英文原词够不够格当正文用词：有字母、全 ASCII、不成一整句。**纯函数。**"""
+    e = str(en or "").strip()
+    return 1 < len(e) <= 48 and e.isascii() and any(c.isalpha() for c in e)
+
+
+def _englishable(zh: str, en: str) -> bool:
+    """这条术语能不能把正文里的中文换成英文原词。**纯函数。**
+
+    ⚠️ 刻意保守：`note_terms` 那两张表（日常词 / 元话语词）里的不收 ——
+       否则「注意」「老师」也会变英文，正文读起来就滑向「全英化」那一版。
+    """
+    if not str(zh or "").strip() or not _ascii_en(en):
+        return False
+    if str(zh).strip() in _ZH_STOP:
+        return False
+    import note_terms
+    low = str(en).strip().lower()
+    if low in note_terms.EVERYDAY or low in note_terms.GENERIC:
+        return False
+    return not note_terms.too_common(low)
+
+
+#: 中文元话语/日常词 —— 英文化模式一律不碰（判据：任何一门课的正文都会出现）。
+#: ⚠️ 表要**保持小**：它只收「换成英文就一定读着别扭」的词；学科词不许进来。
+_ZH_STOP = frozenset("""
+注意 这里 这个 那个 这种 这些 那些 我们 你们 他们 大家 老师 教授 同学
+意思 情况 时候 部分 内容 地方 东西 事情 时间 然后 所以 但是 因为 如果 就是 还是
+""".split())
+
+
+def _is_cjk(ch: str) -> bool:
+    return bool(ch) and "\u4e00" <= ch <= "\u9fff"
+
+
+def _swap_bare(text: str, zh: str, en: str, zhs):
+    """正文里的中文术语 → 英文原词。返回 `(新文本, 换了几处)`。**纯函数。**
+
+    · 不劈更长的已知术语（`_inside_longer_term`）；
+    · 已经写成「中文（English）」的原样跳过；
+    · 中英之间补一个空格（中文排版惯例；不补会读成 `effusion速率`）。
+    """
+    out, i, n = [], 0, 0
+    while True:
+        j = text.find(zh, i)
+        if j == -1:
+            out.append(text[i:])
+            return "".join(out), n
+        if _inside_longer_term(text, zh, j, zhs):
+            out.append(text[i:j + len(zh)])
+            i = j + len(zh)
+            continue
+        m = re.match(r"（([^）]{1,60})）", text[j + len(zh):])
+        if m and _same_en(m.group(1), en):
+            # 已经是「中文（English）」→ 翻成「English（中文）」（同一篇里只许一种写法）
+            out.append(text[i:j])
+            out.append(f"{en}（{zh}）")
+            i = j + len(zh) + m.end()
+            n += 1
+            continue
+        if text[max(0, j - 1):j] in ("（", "("):
+            out.append(text[i:j + len(zh)])
+            i = j + len(zh)
+            continue
+        prev = text[j - 1] if j else ""
+        nxt = text[j + len(zh)] if j + len(zh) < len(text) else ""
+        piece = (" " if _is_cjk(prev) else "") + en + (" " if _is_cjk(nxt) else "")
+        out.append(text[i:j])
+        out.append(piece)
+        i = j + len(zh)
+        n += 1
+
+
+def _gloss_first(text: str, en: str, zh: str) -> str:
+    """把 `（中文）` 挂在英文原词的首次出现后面（已在括注里的不算）。**纯函数。**"""
+    m = re.search(r"(?<![A-Za-z])" + re.escape(en) + r"(?![A-Za-z])", text)
+    if not m:
+        return text
+    before = text[max(0, m.start() - 1):m.start()]
+    if before in ("（", "(") or text[m.end():m.end() + 1] in ("（", "("):
+        return text
+    tail = text[m.end():]
+    # 英文后面已经留了给中文的空格（`effusion 速率`）—— 括注插在它前面，空格要收掉。
+    if tail.startswith(" ") and len(tail) > 1 and _is_cjk(tail[1]):
+        tail = tail[1:]
+    return text[:m.end()] + f"（{zh}）" + tail
+
+
+#: 标题里的「中文（English）」——英文化模式要反过来写成「English（中文）」。
+_HEAD_ZH_EN = re.compile(r"([\u4e00-\u9fff][^（）]{0,18})（([A-Za-z][^（）]{0,48})）")
+
+
+def flip_head(text: str) -> str:
+    """标题「中文（English）」→「English（中文）」。**纯函数。**"""
+    return _HEAD_ZH_EN.sub(lambda m: f"{m.group(2)}（{m.group(1)}）", str(text or ""))
+
+
+def announce_terms(text: str, terms, seen: set, *, en_first: bool = False) -> str:
     """术语**首次**出现 → 「中文（English）」；全篇每个术语只括注一次。
 
     HTML 与 md **共用这一份**（作者 2026-10-18：术语必须带英文 —— 渲染层确定性执行，
@@ -2332,11 +2440,29 @@ def announce_terms(text: str, terms, seen: set) -> str:
       · 括注是缩写（`（AC）`）→ 并入成 `（average cost, AC）`；
       · 别的写法（整句英文等）→ 不加第二个（`标注` 宁缺勿叠）。
     ⭐ F13 #4：只在**词边界**上加 —— 匹配处若落在更长的已知术语里就跳过（不许劈词）。
+    ⭐ 2026-11-02（作者定，`CLASSLIVE_NOTE_TERM_EN`）：`en_first=True` 时反过来 ——
+      首次 `English（中文）`、同字段其余出现直接 `English`。**放在渲染层做而不是靠模型**：
+      模型写的是中文句子，它会自己退回中文；可核的产物是词表，不是它的自觉。
     """
     out = str(text or "")
     zhs = [str(z) for z, _en in (terms or ()) if z]
-    for zh, en in (terms or ()):
-        if (zh, en) in seen or zh not in out:
+    # 英文化时先替换长的（`氨基酸` 先于 `氨`），否则短词会把长词劈开。
+    ordered = (sorted(terms or (), key=lambda p: -len(str(p[0] or "")))
+               if en_first else list(terms or ()))
+    for zh, en in ordered:
+        zh, en = str(zh or ""), str(en or "")
+        if not zh or zh not in out:
+            continue
+        if en_first:
+            if not _englishable(zh, en):
+                continue                       # 日常词/元话语：连括注都不加
+            out, swapped = _swap_bare(out, zh, en, zhs)
+            if (zh, en) not in seen:
+                if swapped:
+                    out = _gloss_first(out, en, zh)
+                seen.add((zh, en))
+            continue
+        if (zh, en) in seen:
             continue
         i = out.find(zh)
         while i != -1 and _inside_longer_term(out, zh, i, zhs):
@@ -2417,12 +2543,13 @@ def canon_fix_parens(text: str, canon_map: dict) -> str:
     return _PAREN_EN.sub(repl, s)
 
 
-def announce_terms_in_review(review: dict, *, canon=None) -> dict:
+def announce_terms_in_review(review: dict, *, canon=None, en_first: bool = False) -> dict:
     """渲染前的一次性标注（返回**副本**）。
 
     ⚠️ walk 顺序 = **阅读顺序**：`overview_long`（页首速览）先走，然后才轮到大字典里
        其余字段（小节……）。这样「首次出现」落在读者**最先读到**的地方；md 简版只渲染
        速览那一段，也才拿得到自己的首次括注（小节讲解不搬到 md 里）。
+    ⭐ `en_first`（2026-11-02）：关键术语英文化 —— 首次 `English（中文）`、后续直接英文。
     ⭐ `canon`（F7-e）：术语表的 `[(en, zh)]` 对 —— 有标准拼写就**盖过**模型/转录写法
        （`shutting down price` → `shutdown price`）。
     """
@@ -2443,6 +2570,8 @@ def announce_terms_in_review(review: dict, *, canon=None) -> dict:
                 or not isinstance(v, str) or not v:
             continue
         new = canon_fix_parens(v, canon_map)
+        if en_first:
+            new = flip_head(new)
         if new != v:
             obj = out
             for k in path[:-1]:
@@ -2454,7 +2583,8 @@ def announce_terms_in_review(review: dict, *, canon=None) -> dict:
     seen: set = set()
 
     def _done() -> bool:
-        return len(seen) == len(terms)
+        # 英文化模式下每个字段都要走（后面的字段还要把残留的中文换成英文）。
+        return not en_first and len(seen) == len(terms)
 
     def _tidy(text: str) -> str:
         """F15 §3：括注不叠 —— 同一个括注 12 字内出现两次只留前一个（两种括号都认）。"""
@@ -2465,7 +2595,7 @@ def announce_terms_in_review(review: dict, *, canon=None) -> dict:
     for i, v in enumerate(list(out.get("overview_long") or [])):
         if not isinstance(v, str) or not v:
             continue
-        new = _tidy(announce_terms(v, terms, seen))
+        new = _tidy(announce_terms(v, terms, seen, en_first=en_first))
         if new != v:
             out["overview_long"][i] = new
         if _done():
@@ -2478,7 +2608,7 @@ def announce_terms_in_review(review: dict, *, canon=None) -> dict:
             continue
         if not isinstance(v, str) or not v:
             continue
-        new = _tidy(announce_terms(v, terms, seen))
+        new = _tidy(announce_terms(v, terms, seen, en_first=en_first))
         if new != v:
             obj = out
             for k in path[:-1]:
@@ -2487,6 +2617,32 @@ def announce_terms_in_review(review: dict, *, canon=None) -> dict:
         if _done():
             break
     return _tidy_all(out)
+
+
+def term_en_residue(review: dict) -> list:
+    """英文化之后**仍然只写中文**的术语 `[(zh, en)]`（只查正文类字段）。**纯函数。**
+
+    用途：把「术语表没盖住正文」这件事变成可数的一条账（调研 2026-11-02：
+      约束靠代码，覆盖靠核对 —— 静默漏改正是本仓库反复咬人的那一类失败）。
+    不是判据、不进渲染路径；量具 / 测试 / 面板报告用。
+    """
+    terms = collect_terms(review)
+    out = []
+    for zh, en in terms:
+        if not _englishable(zh, en):
+            continue
+        bare = 0
+        for path, v in _walk_strings(review):
+            if _field_name(path) not in _TERM_FIELDS or not isinstance(v, str):
+                continue
+            for m in re.finditer(re.escape(zh), v):
+                before = v[max(0, m.start() - 1):m.start()]
+                after = v[m.end():m.end() + 1]
+                if before not in ("（", "(") and after not in ("（", ")", "(", "）"):
+                    bare += 1
+        if bare:
+            out.append((zh, en))
+    return out
 
 
 def _tidy_all(review: dict) -> dict:

@@ -15,6 +15,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import note_html as nh          # noqa: E402
 import note_render as nr        # noqa: E402
 
+# ⚠️ 本文件的判据钉的是 **2026-10-18 的括注格式**「中文（English）」。
+#    2026-11-02 起的英文化版本（`English（中文）`）另有判据：本文件末尾 `TermEn`
+#    与 `test_note_v2.AnnounceTermsEn`。生产默认是开（`CLASSLIVE_NOTE_TERM_EN=1`）。
+os.environ["CLASSLIVE_NOTE_TERM_EN"] = "0"
+
 SEC = {
     "heading": "边际成本（marginal cost）", "ts": "13:31",
     "q": "多生产一单位要多花多少？",
@@ -409,6 +414,49 @@ class F7Display(unittest.TestCase):
         md = nr.render(d)
         self.assertIn("**基础** —", md)
         self.assertIn("**挑战** —", md)
+
+
+class TermEn(unittest.TestCase):
+    """2026-11-02：`CLASSLIVE_NOTE_TERM_EN=1` → 正文写英文原词，首现带中文括注。"""
+
+    def _env(self, val):
+        old = os.environ.get("CLASSLIVE_NOTE_TERM_EN")
+        os.environ["CLASSLIVE_NOTE_TERM_EN"] = val
+        return old
+
+    @staticmethod
+    def _restore(old):
+        if old is None:
+            os.environ.pop("CLASSLIVE_NOTE_TERM_EN", None)
+        else:
+            os.environ["CLASSLIVE_NOTE_TERM_EN"] = old
+
+    def _rev(self):
+        sec = {"ts": "13:31", "heading": "边际成本",
+               "prose": ["先看边际成本怎么算。", "边际成本再出现时不括注。"],
+               "q": "边际成本是什么？",
+               "terms": [{"en": "marginal cost", "zh": "边际成本"}]}
+        return _data(review={"sections": [sec], "qa": []})
+
+    def test_html_正文用英文原词(self):
+        old = self._env("1")
+        try:
+            h = nh.note_page(self._rev())
+        finally:
+            self._restore(old)
+        self.assertIn("marginal cost（边际成本）怎么算", h)
+        self.assertIn("marginal cost 再出现时不括注", h)
+        self.assertNotIn("边际成本（marginal cost）", h)
+
+    def test_md_不出现中文前置括注(self):
+        """简版 Markdown 不渲染讲解段（只放速览/术语/一些事儿）——
+           这里钉的是「别漏出旧格式的括注」。"""
+        old = self._env("1")
+        try:
+            md = nr.render(self._rev())
+        finally:
+            self._restore(old)
+        self.assertNotIn("边际成本（marginal cost）", md)
 
 
 if __name__ == "__main__":

@@ -1236,7 +1236,8 @@ def note_page(d) -> str:
     #    写「中文（English）」—— 和 md 共用同一份实现（`note_v2.announce_terms_in_review`）。
     #    F7-e：`term_pairs`（术语表最终行）提供**标准拼写**，盖过模型/转录写法。
     review = note_v2.announce_terms_in_review(
-        d.review or {}, canon=getattr(d, "term_pairs", None))
+        d.review or {}, canon=getattr(d, "term_pairs", None),
+        en_first=note_v2._term_en_enabled())
     sections = review.get("sections") or []
     head = [f"<div>🕐 {html.escape(str(d.entries[0]['ts'] if d.entries else '—'))} – "
             f"{html.escape(str(d.entries[-1]['ts'] if d.entries else '—'))} · "

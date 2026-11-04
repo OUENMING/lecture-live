@@ -12,6 +12,9 @@
 //                         可选 body `{region:"us|jp|eu", purpose:"probe"}`：region 只在配了那个区的 key 时才听
 //                         （没配 = 忽略回默认）；purpose=probe 发 15 s 会话上限的探测 key（事件里带 :probe，
 //                         便于把探测与真上课的花费分开看）。
+//   POST /v1/jev          Jev 打分代付（通行码专属）。**中国区访客（国家 CN/HK/MO 或时区 Asia/Shanghai
+//                         那一族）默认走 CommandCode**（secret `JEV_CC_KEY`），其余与换道失败一律回官方
+//                         `JEV_KEY`；`ev.up` 记成 `jev-cc:200` / `jev-cc:403,jev:200`（2026-11-04）。
 //   scheduled()           Cron（每小时）：把 Soniox 用量日志的音频秒按码名回收进 Passes 的 rt_s
 
 // ⚠️ **CHAIN 只在这里定义一处**；DO 从 /plan 请求里收，避免两处列表漂移。
@@ -130,6 +133,17 @@ const JEV_URL = "https://api.typesafe.ai/v1/systemone";
 const JEV_MODEL = "jev-1.13.0";
 const JEV_MAX_Q = 20;            // 客户端 `keypoints.CHUNK`；多了是滥用，不是正常调用
 const JEV_MAX_BYTES = 64 * 1024; // 一批 20 句的 state 实测几 KB
+// 中国区访客默认改走 CommandCode 代理（Owen 2026-11-04 定）：同一模型两家都认，只是换了谁记账。
+// 非中国区仍走官方 —— 官方 key 只在作者本机与默认路径用。
+// ⚠️ **必须有 User-Agent**：CommandCode 缺了直接 403（`keypoints` 模块头那条实测），官方不需要但也不介意。
+// ⚠️ 模型 ID 两家不通用：官方 `jev-1.13.0`，CommandCode `typesafe/jev`（拿错 400 Unknown model）。
+const JEV_CC_URL = "https://api.commandcode.ai/provider/v1/systemone";
+const JEV_CC_MODEL = "typesafe/jev";
+const JEV_CC_UA = "ClassLive/0.0 (+https://github.com/OUENMING/lecture-live)";   // 与 `keypoints.UA` 同一串
+// 判「中国区」的两层：Cloudflare 判的国家（改不了）+ 客户端自报时区（挂了 VPN 也认得出来）。
+// 国家表默认同 FAST_LLM_SKIP（CN,HK,MO）；env `JEV_CC_COUNTRIES` 可改。
+const JEV_CC_COUNTRIES_DEFAULT = "CN,HK,MO";
+const JEV_CN_TZ = /^Asia\/(Shanghai|Chongqing|Chungking|Harbin|Urumqi|Kashgar|Hong_Kong|Macau|Macao)(\/|$)/;
 const DENY = {   // 码不能用 -> HTTP 状态；客户端按「云端不可用」走现有降级
   unknown: 403, revoked: 403, expired: 403, devices: 403, quota: 429,
 };
@@ -350,8 +364,27 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
   return new Response(text, { status: up.status, headers });
 }
 
+// 中国区访客走 CommandCode 吗？—— 两层判据见 `JEV_CC_COUNTRIES_DEFAULT` / `JEV_CN_TZ`。
+// ⚠️ 没配 `JEV_CC_KEY` 就**永远不走**（fail-safe：secret 缺了不能让选路炸掉，同 Soniox 的分区那条）。
+export function useCommandCodeJev(env, ev) {
+  if (!env.JEV_CC_KEY) return false;
+  const cc = String(ev?.country || "").toUpperCase();
+  const list = String(env.JEV_CC_COUNTRIES ?? JEV_CC_COUNTRIES_DEFAULT)
+    .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+  if (cc && list.includes(cc)) return true;
+  return JEV_CN_TZ.test(String(ev?.tz || ""));
+}
+
+// 一次上游调用。`ua` 为空就不带那个头（官方不需要）。
+function askJev(url, model, key, ua, body) {
+  const headers = { authorization: `Bearer ${key}`, "content-type": "application/json" };
+  if (ua) headers["user-agent"] = ua;
+  return fetch(url, { method: "POST", headers,
+    body: JSON.stringify({ model, state: body.state, questions: body.questions }) });
+}
+
 async function jev(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
-  if (!env.JEV_KEY) return json(503, { error: "jev_not_configured" });
+  if (!env.JEV_KEY && !env.JEV_CC_KEY) return json(503, { error: "jev_not_configured" });
   if (Number(request.headers.get("content-length")) > JEV_MAX_BYTES) return json(413, { error: "too_large" });
   const raw = await request.text();
   if (raw.length > JEV_MAX_BYTES) return json(413, { error: "too_large" });
@@ -359,14 +392,30 @@ async function jev(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
   try { body = JSON.parse(raw); } catch { return json(400, { error: "bad_json" }); }
   const q = body && typeof body.questions === "object" && body.questions ? Object.keys(body.questions).length : 0;
   if (!body || typeof body.state !== "string" || q < 1 || q > JEV_MAX_Q) return json(400, { error: "bad_request" });
-  const up = await fetch(JEV_URL, {
-    method: "POST",
-    headers: { authorization: `Bearer ${env.JEV_KEY}`, "content-type": "application/json" },
-    body: JSON.stringify({ model: JEV_MODEL, state: body.state, questions: body.questions }),
-  });
+  // 尝试过哪几家 —— `ev.up` 里按顺序记（`jev-cc:403,jev:200`），面板能看出「换了道又退回来了」。
+  const tried = [];
+  let up = null;
+  if (useCommandCodeJev(env, ev)) {
+    up = await askJev(JEV_CC_URL, JEV_CC_MODEL, env.JEV_CC_KEY, JEV_CC_UA, body);
+    tried.push(`jev-cc:${up.status}`);
+    ev.model = JEV_CC_MODEL;
+    // CommandCode 不配合（403 / 429 / 断流）→ **同一请求退回官方**，不能让中国区用户因为换道反而没有 Jev。
+    // ⚠️ 只有 2xx 才认；其余一律退（多发一次比整块功能哑掉便宜）。
+    if (up.ok) {
+      ev.up = tried.join(",");
+    } else if (!env.JEV_KEY) {
+      ev.up = tried.join(",");
+    } else {
+      up = null;
+    }
+  }
+  if (!up) {
+    up = await askJev(JEV_URL, JEV_MODEL, env.JEV_KEY, "", body);
+    tried.push(`jev:${up.status}`);
+    ev.model = JEV_MODEL;
+    ev.up = tried.join(",");
+  }
   const text = await up.text();
-  ev.model = JEV_MODEL;
-  ev.up = `jev:${up.status}`;
   ev.jev_q = q;
   if (up.ok) ctx?.waitUntil?.(ok.then((y) => { if (y) reportUsage(env, ctx, { code, jev_q: q, ver: clientVer(request) }); }));   // 上游错误不记用量（同 chat）
   return new Response(text, { status: up.status, headers: { "content-type": up.headers.get("content-type") || "application/json" } });

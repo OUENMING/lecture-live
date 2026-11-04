@@ -762,6 +762,18 @@ def drain(queue, *, deadline_s: float = 7200, pause_s: float = 2.0,
         out["rounds"] += 1
         out["sent"] += int(r.get("sent") or 0)
         out["failed"] += int(r.get("failed") or 0)
+        # ⭐ 3.11 E：每轮上传一条（条数 / 结果 / 还剩几条，**不记文件名**）。
+        try:
+            import telemetry as _tel
+            _tel.emit("upload.batch",
+                      {"sent": int(r.get("sent") or 0), "failed": int(r.get("failed") or 0),
+                       "expired": int(r.get("expired") or 0), "pending": int(queue.pending),
+                       "round": out["rounds"],
+                       "result": "ok" if r.get("sent") else ("fail" if r.get("failed") else "none")},
+                      component="upload",
+                      severity="info" if r.get("sent") else "warn")
+        except Exception:                                     # noqa: BLE001
+            pass
         if not r.get("sent") and not r.get("failed"):
             out["reason"] = "backoff"
             break

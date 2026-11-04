@@ -1239,6 +1239,12 @@ class StreamASR:
         with self._lock:
             self._connect_attempts += 1
             self._detail = ""
+        # ⭐ 3.11 E：每次连接尝试一条宽事件（含领 key / 握手失败）。
+        try:
+            import telemetry as _tel
+            _tel.emit("net.connect", {"attempt": self._connect_attempts}, component="asr")
+        except Exception:                           # noqa: BLE001
+            pass
         try:
             key = self._key(self._passcode)
         except _KeyError as e:
@@ -1329,6 +1335,15 @@ class StreamASR:
                 pass
             recv.join(timeout=2.0)
             self._note_close(ws, err)
+            # ⭐ 3.11 E：会话怎么结束的（close code 在 `_detail` 里）。
+            try:
+                import telemetry as _tel
+                _tel.emit("ws.close", {"why": str(err or "ok"),
+                                       "code": getattr(ws, "close_code", None),
+                                       "detail": str(self._detail or "")[:80]},
+                          component="asr")
+            except Exception:                           # noqa: BLE001
+                pass
         return err
 
     def _timed_send(self, ws, data) -> None:
@@ -1678,6 +1693,19 @@ class StreamASR:
                 lat = seal_latency_s(self._clock(), self._audio_t0, s.end_s)
                 if lat is not None:
                     self._seal_lat.append(lat)
+        # ⭐ 3.11 E：ASR 段事件（**只记字符数桶，不记文本**；落在两句之间的端点由
+        #    `endpoints_between_n` 那段管）。
+        try:
+            import telemetry as _tel
+            n = len(str(s.text or ""))
+            _tel.emit("asr.segment",
+                      {"audio_s": round(max(0.0, float(s.end_s) - float(s.start_s)), 2),
+                       "char_bucket": ("0" if n == 0 else "1-20" if n <= 20
+                                       else "21-100" if n <= 100 else ">100"),
+                       "semantic": not record_lat},
+                      component="asr")
+        except Exception:                           # noqa: BLE001
+            pass
         cb = self._on_sealed
         if cb is None:
             return

@@ -6762,13 +6762,71 @@ class Overlay:
         """⚠️ 这个**从工作线程被调** —— UI 回写一律回主线程（`CLAUDE.md` 的不变量）。
 
         形状照 `entry_panel._make_batch_card` 那份来：回调在工作线程里，`callAfter` 回主线程。
+        ⭐ 3.11：进度**按完成量算**、阶段清单固定 5 行（`note_progress`），不再只写一句
+           「正在生成笔记…」—— 计划 §6 的假进度问题（原来报的是「正在等第几块」）。
         """
-        # ⚠️ **不再写阶段名**（2026-10-12）：精修默认不跑之后，剩下能报的阶段
-        #    （复习层 / 讲解）对用户没有意义 —— 而卡上写「精修 3/19」更是假话。
-        #    这里只维持一句状态词（HIG：状态词 + 转圈，别给假进度条）。
-        #    ⚠️ 终端那条路**照旧逐行打阶段**（`obsidian_writer._prog` → `print`），
-        #       所以"还在动"这个信息没有丢，只是不再挤在收尾卡上。
-        self._wrapup_ui(self._wrapup_show, "正在生成笔记…")
+        try:
+            import note_progress as _np
+            p = getattr(self, "_np_prog", None)
+            if p is None:
+                p = _np.Progress(course=str(getattr(self, "_np_course", "") or ""),
+                                 history=_np.load_history(
+                                     course=str(getattr(self, "_np_course", "") or "")))
+                self._np_prog = p
+            cur = getattr(self, "_np_stage", "")
+            key = _np.stage_of(stage)
+            if key != cur:
+                self._np_stage = key
+                p.begin(key)
+            p.tick(key, int(done or 0), int(total or 0))
+            self._np_render()
+        except Exception:                                 # noqa: BLE001
+            # ⚠️ 进度模型坏了退回旧的单行状态词 —— 绝不因为进度让收尾卡看起来卡住。
+            self._wrapup_ui(self._wrapup_show, "正在生成笔记…")
+
+    def _np_render(self) -> None:
+        """把 `note_progress` 的快照画到卡上（状态行 + 阶段清单 + 提示行）。"""
+        import note_progress as _np
+        p = getattr(self, "_np_prog", None)
+        if p is None:
+            return
+        snap = p.snapshot()
+        head, rows, hint = _np.card_lines(snap, elapsed_s=p.elapsed())
+        text = head + (("\n" + rows) if rows else "")
+        self._wrapup_ui(self._np_show, text, hint or None)
+
+    def _np_show(self, text: str, hint: str | None = None) -> None:
+        """主线程：状态行（可多行清单）+ 提示行。"""
+        card = getattr(self, "_wrapup_card", None)
+        if card is None:
+            return
+        try:
+            if hint is not None:
+                card["set_hint"](hint)
+        except Exception:                                 # noqa: BLE001
+            pass
+        card["set_status"](text)
+
+    def wrapup_progress_finish(self, ok: bool = True) -> None:
+        """收尾结束：给进度模型收口并把**本次各阶段耗时**写进历史（ETA 的样本）。
+
+        ⚠️ 从工作线程调（同 `wrapup_done`）。失败时 `ok=False` —— 只影响最后那格。
+        """
+        try:
+            import note_progress as _np
+            p = getattr(self, "_np_prog", None)
+            if p is None:
+                return
+            cur = getattr(self, "_np_stage", "")
+            if cur:
+                p.finish(cur, ok=bool(ok))
+            if ok:
+                p.all_done()
+            else:
+                p.fail("收尾失败")
+            _np.save_timing(p.durations(), course=str(getattr(self, "_np_course", "") or ""))
+        except Exception:                                 # noqa: BLE001
+            pass
 
     def wrapup_done(self, ok: bool, msg: str) -> None:
         """⚠️ 同样**从工作线程被调**。看板不自动关 —— 由 main 决定去留。"""

@@ -1999,6 +1999,15 @@ class ObsidianWriter:
         #    `--ui terminal` 那条没有 UI，而 UI 那条也不该逼人回头看终端。
         #    ⚠️ 转发那步包 try：一个坏的回调不该把整节课的笔记带下水。
         def _prog(stage, done, total):
+            # ⭐ 3.11 E：笔记阶段进元数据脊柱（每块完成一条；不写正文）。
+            try:
+                import telemetry as _tel
+                _tel.emit("layer.transition",
+                          {"layer": "note", "stage": str(stage),
+                           "done": int(done or 0), "total": int(total or 0)},
+                          component="note")
+            except Exception:                             # noqa: BLE001
+                pass
             # ⭐ 3.11：复习层**总块数**只在这里拿得到（`review()` 全失败时返回 `{}`，
             #    连 `chunk_stats` 都没有）。失败数在 `_review_v2` 回来时补。
             if stage == "review":
@@ -2182,6 +2191,8 @@ class ObsidianWriter:
         #    ⚠️ 这一版会**原子重写**基础版：内容只会更多（qa / ❓ / 重点句那一层是在
         #       复习层**之后**才算的）—— 不是把基础版留在盘上不管。
         review_missing = bool(self._key) and not (review.get("sections") or [])
+        # ⭐ 3.11：复习层这一段到此结束，进「重点句 · 术语 · 核对」那一格（卡片阶段清单）。
+        _prog("layers", 0, 1)
 
         # 问答行自带 try/except: 渲染问答抛出去就再也没有那份转录笔记了。隔离是硬要求:
         # 笔记的底座是逐句转录, 它是不能丢的那件事; 问答只是额外一层。
@@ -2270,6 +2281,9 @@ class ObsidianWriter:
         #    `note_path_for` 遇到同名会**另存一份带时间戳的** —— 再算一次就变成
         #    「同一节课两份笔记」，而且用户看到的还是缺复习层那份的兄弟文件。
         self._atomic_write(self.vault_path, note)
+        # ⭐ 3.11：笔记正文已落盘 —— 卡片的「重点句 · 术语 · 核对」那格到此为止
+        #    （后面只剩收尾报告 / 上传）。
+        _prog("check", 0, 1)
         layer = ("讲解+例题+自测+校验清单" if review.get("sections")
                  else "术语表+标记(复习层这次没生成)" if review_missing
                  else "术语表+标记(未生成讲解)")

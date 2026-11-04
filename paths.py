@@ -405,3 +405,11 @@ def recap_state(course: str, *, root=None) -> pathlib.Path:
     """
     return course_dir(course, root=root) / "recap.json"
 
+
+
+def telemetry_dir(*, root=None) -> pathlib.Path:
+    """元数据脊柱 —— `~/.classlive/telemetry/`（`events.jsonl` / `content.jsonl` / 心跳）。
+
+    ⚠️ 与 `sessions/` 分开：这是**诊断数据**，不是笔记契约；按会话前缀可整节删除。
+    """
+    return _root(root) / "telemetry"

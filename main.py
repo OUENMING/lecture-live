@@ -1791,6 +1791,12 @@ def resolve_cloud_asr_enabled(*, read=final_asr.read_config, write=final_asr.wri
     return True
 
 
+# ⭐ 3.11 E：心跳要读的「哪一层活着」。放**模块级**而不是 `run()` 的新形参 ——
+#    `run(args)` 是很多判据/替身直接接管的签名，加形参会把它们全打断
+#    （`test_wrapup` 的 `--polish` 默认值那条就是这么红的）。
+TEL_CTX: dict = {}
+
+
 def run(args) -> None:
     # ⏱ 起步计时（2026-10-14 作者：「点开始上课之后字幕卡片弹出的速度」）—— 先量再改。
     #    各段用 `_tp` 记单调时钟；点按时刻读面板留的一次性戳（`_click_wall`）。
@@ -2798,6 +2804,22 @@ def run(args) -> None:
             echo(f"⚠ 实时识别起不来，本节课走本地：{type(e).__name__}: {e}")
             stream = None
     gate = stream_gate.StreamGate(stream, sr=SR)
+    # ⭐ 3.11 E：把「哪一层活着」挂进心跳 —— 每次心跳现取，不额外起线程。
+    #    ⚠️ `src` 这时还没建（在音频循环那边），所以用一个可变表，循环里更新。
+    _layers: dict = {"capture": False, "stream": False}
+    if TEL_CTX:
+        def _layer_states() -> dict:
+            out = {"capture": bool(_layers.get("capture")),
+                   "stream": bool(stream is not None and stream.alive()),
+                   "stream_fell_back": bool(gate.fell_back)}
+            try:
+                out["live_summary"] = bool(summ is not None)
+                out["asr_mode"] = str(trans.get("mode") or "")
+                out["silence_s"] = round(float(_layers.get("silence_s") or 0.0), 0)
+            except Exception:                       # noqa: BLE001
+                pass
+            return out
+        TEL_CTX["state"] = _layer_states
     # 暗号「菠萝丁」（悬浮窗输入行 / 上课中开的面板搜索框）→ 只换识别模型，其余照旧
     import hidden_switch
     hidden_switch.register(gate.force_local)
@@ -3127,12 +3149,34 @@ def run(args) -> None:
             if tester is not None:
                 _tr_last["end"] = time.monotonic()
                 _tr_idle.append(_idle_ms)
-            streamq.put(("final", en, zh, sent, seg,
-                         _lt.done(seg_t0=(seg_t0 if seg_t0 is not None
-                                          else seg_ended_at.get(seg)),
-                                  model=args.cloud_model if (_cloud0 and translator.uses_cloud)
-                                  else "local"),
-                         _zh_n))
+            _lat = _lt.done(seg_t0=(seg_t0 if seg_t0 is not None
+                                    else seg_ended_at.get(seg)),
+                            model=args.cloud_model if (_cloud0 and translator.uses_cloud)
+                            else "local")
+            # ⭐ 3.11 E：翻译批次一条（延迟数字 + 引擎名，**不记文本**）。
+            try:
+                import telemetry as _tel
+                _tel.emit("translate.batch",
+                          {"n": 1, "zh_first_ms": _lat[0], "zh_done_ms": _lat[1],
+                           "seg_to_zh_ms": _lat[2], "engine": _lat[3],
+                           "ok": bool(zh), "idle_ms": _idle_ms},
+                          component="translate",
+                          severity="info" if zh else "warn")
+            except Exception:                       # noqa: BLE001
+                pass
+            # ⭐ 3.11 E：逐句内容单独一条 `content.jsonl`（Owen 2026-11-03 已授权全量）。
+            #    与上面那条元数据分开文件：小的可以长期留，大的按会话删。
+            try:
+                import telemetry as _tel
+                _tel.content("translate.pair",
+                             {"seg": int(seg) if seg is not None else None,
+                              "en": str(en or ""), "asr_raw": str(sent or ""),
+                              "zh": str(zh or ""), "model": _lat[3],
+                              "ms": _lat[1], "terms_n": _zh_n},
+                             component="translate")
+            except Exception:                       # noqa: BLE001
+                pass
+            streamq.put(("final", en, zh, sent, seg, _lat, _zh_n))
             # 术语/专有名词: 命中术语表就把 (术语, 解析) 交给 UI —— 由 UI 决定
             # 什么时候展开(悬浮窗默认只列术语名, 点击才显示解析)。
             hits = notes.match(sent)
@@ -3196,6 +3240,15 @@ def run(args) -> None:
                     _sent_end["s"] = _s.end_s
                     streamq.put(("gap", _gap))
                     busy["on"] = True        # 冲刷等待要看它（`all_settled` 的 busy）
+                    # ⭐ 3.11 E：封口句原文进 content.jsonl（只记 ASR 出来的那一刻）。
+                    try:
+                        import telemetry as _tel
+                        _tel.content("asr.final",
+                                     {"text": str(_s.text), "start_s": round(float(_s.start_s), 2),
+                                      "end_s": round(float(_s.end_s), 2)},
+                                     component="asr")
+                    except Exception:           # noqa: BLE001
+                        pass
                     try:
                         # ⚠️ Soniox 封的本来就是**一句**：别再按 25 词从逗号劈成两行 —— 劈开
                         #    后第二半要排在第一半翻完之后才开始译（10-17 浮窗逐帧：多等 ~1 s，
@@ -3744,6 +3797,12 @@ def run(args) -> None:
             return ("", "", 0.0, 0.0, 0, 0.0, "", 0)      # ⚠️ 与上一行同形（8 项），否则 drain 拆包就抛
 
     def drain():
+        # ⭐ 3.11 E：让心跳带上「这节课到底出了几句」—— 崩溃后不必翻 sessions/。
+        if TEL_CTX:
+            try:
+                TEL_CTX["sentences"] = int(TEL_CTX.get("sentences") or 0) + 1
+            except Exception:                       # noqa: BLE001
+                pass
         while True:
             try:
                 _raw, _shown, _buf_s, _cpt, _seg, _t_put, _eng, _dseq = _pair(drafts.get_nowait())
@@ -3988,6 +4047,7 @@ def run(args) -> None:
         while running.is_set() and not stopping.is_set():
             chunk = src.poll()
             if chunk is not None and len(chunk):
+                _layers["capture"] = True            # ⭐ 3.11 E：心跳里的收音层
                 # ⚠️ 喂音频**排在 `seg.accept()` 之前**：段尾那一刻 `_utterance_end` 会
                 #    `mark_segment()`，它记的是"现在采到多少样本" —— 后喂会让 Soniox 的
                 #    段界少这一块，边界附近那句就会归错段（见 `stream_gate.mark`）。
@@ -4005,6 +4065,7 @@ def run(args) -> None:
                         live.block(_p, _g, seg.last_ratio, len(chunk))
                     _sv = _silence.feed(_p, len(chunk)) if _silence is not None else None
                     if _sv == "silent":
+                        _layers["silence_s"] = float(_layers.get("silence_s") or 0.0) + 0.5
                         notify(_silence_cfg[1], True, src="收音")
                     elif _sv == "back":
                         notify("收音恢复了", False, src="收音")
@@ -4280,6 +4341,19 @@ def run(args) -> None:
                 _ui_begin = None if _no_notes else getattr(ui, "wrapup_begin", None)
                 if callable(_ui_begin):
                     _ui_begin(_cancel)
+                # ⭐ 3.11：卡片上的阶段清单从这里开始。`sessions/` 早在课上逐句落盘了，
+                #    「保存逐句记录」这一段直接算完成；收尾这条路上卡着的是后面四段。
+                _np_say = getattr(ui, "wrapup_progress", None)
+                _np_course = str(getattr(writer, "_course", "") or "")
+                # ⭐ 3.11：把课号交给卡（ETA 历史按课号分桶）。UI 自己不许去问 writer。
+                try:
+                    ui._np_course = _np_course
+                except Exception:                         # noqa: BLE001
+                    pass
+                _np_t0 = time.monotonic()
+                if callable(_np_say):
+                    _np_say("save", 1, 1)
+                    _np_say("base", 0, 1)
                 _done = threading.Event()
 
                 def _wrap():
@@ -4313,7 +4387,6 @@ def run(args) -> None:
                         _box["err"] = e
                     finally:
                         _done.set()                       # ⚠️ 不置的话主线程等到天荒
-
                 threading.Thread(target=_wrap, daemon=True).start()
                 # ⚠️⚠️ **Ctrl+C 打不到 worker 上** —— Python 的信号 handler 只在主线程跑
                 #    （PEP 475），所以中断永远落在这一句 `_spin` 里。不接住的话异常从这里
@@ -4382,6 +4455,13 @@ def run(args) -> None:
             #    点关闭；而重构前那两条是**静默成功退出**的。
             #    （2026-09-28 OCR 审计发现。）
             _ok = "err" not in _box
+            # ⭐ 3.11：给进度模型收口 + 把本次各阶段耗时写进历史（卡片「预计还要」的样本）。
+            try:
+                _npf = locals().get("_np_say") and getattr(ui, "wrapup_progress_finish", None)
+                if callable(_npf):
+                    _npf(_ok)
+            except Exception:                             # noqa: BLE001
+                pass
             _done_ui = getattr(ui, "wrapup_done", None)
             if _done_ui is not None:
                 _done_ui(_ok, msg or ("收尾失败" if not _ok else "收尾结束"))
@@ -4923,8 +5003,40 @@ def main():
     #       （`testmode` 的 `.pending.json` journal + `upload.recover_pending` +
     #        `update.repair_interrupted_apply` + `main` 开课前的那个钩子）。
     #       所以这里**不**去拦合盖（拦不住），也不再需要更长的持有范围。
+    # ⭐ 3.11 E：逐分钟把「哪一层还活着」写进心跳（`layer_states`）—— 崩溃后看最后
+    #    一口气就知道死在哪一步。层状态从 `TEL_CTX`（模块级，`run` 里填）现取。
+    TEL_CTX.clear()
+    TEL_CTX["t0"] = time.monotonic()
+
     with power.keep_system_awake():
-        run(args)
+        # ⭐ 3.11 E：元数据脊柱（正常模式也建会话；内容进单独文件）。
+        #    任何异常都只影响这一节少数据 —— `telemetry` 自己永不抛。
+        import telemetry as _tel
+        _tel.start(attrs={"mode": "test" if args.test_mode else "normal",
+                          "source": str(args.source),
+                          "cloud_asr": os.environ.get("CLASSLIVE_CLOUD_ASR", "")})
+
+        def _hb_provider() -> dict:
+            fn = TEL_CTX.get("state")
+            st = {}
+            if callable(fn):
+                try:
+                    st = fn() or {}
+                except Exception:                     # noqa: BLE001
+                    st = {}
+            return {"layer_states": st,
+                    "counters": {"uptime_s": round(time.monotonic() - TEL_CTX.get("t0", 0.0), 0),
+                                 "sentences": int(TEL_CTX.get("sentences", 0) or 0)}}
+
+        _tel.start_heartbeat(_hb_provider)
+        try:
+            run(args)
+            _tel.end("ok")
+        except BaseException as _e:                       # noqa: BLE001
+            _tel.end("abnormal", {"error_class": type(_e).__name__})
+            raise
+        finally:
+            _tel.close()
 
 
 if __name__ == "__main__":

@@ -121,7 +121,8 @@ class Wiring(unittest.TestCase):
             guarded.append(node)
         self.assertTrue(guarded, "main() 里没有 `with power.keep_system_awake()`")
         calls = [ast.unparse(n) for w in guarded for n in ast.walk(w)]
-        self.assertIn("run(args)", calls, "`run(args)` 没被那个 `with` 包住")
+        self.assertTrue(any(c.startswith("run(args") for c in calls),
+                        f"`run(args)` 没被那个 `with` 包住：{calls}")
 
 
 class WakeWatchCase(unittest.TestCase):

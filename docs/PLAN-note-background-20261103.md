@@ -315,3 +315,43 @@ P0 单独上线也有价值：至少卡不再说谎，最坏等待从 15 分钟�
 10. **握手/超时**：5 秒握手误判会让主进程内联跑，重新占锁；`note-jobs` 固定 10 分钟会把活 worker 当死（实测最坏 15:49）。→ pipe 心跳 + pid/启动时间判活。
 
 **结论：先上 P0（真实进度 + 90 秒/5 分钟预算 + 收尾卡），再补跨进程所有权，最后拆 worker。不要按现计划直接拆。**
+
+---
+
+## 13 进展（2026-11-04）
+
+| 项 | 状态 | 落在哪 |
+|---|---|---|
+| P0 真实进度 / 阶段清单 / 区间 ETA | ✅ 已提交 `ba4a88d` | `note_progress.py`、收尾卡 |
+| 遥测脊柱（E） | ✅ 已提交 `ba4a88d` | `telemetry.py` |
+| §12-2 活 worker 被当残局 | ✅ 所有权层已上 | `note_jobs.py` + `main.resume_pending_notes` / `upload.recover_pending` 先问 `alive()` |
+| §12-3 同一节两个写者 | ✅ 占位互斥 | `note_jobs.claim()`（`O_CREAT\|O_EXCL`） |
+| §12-10 固定超时把活 worker 当死 | ✅ 心跳判活 | `STALE_S=180` + pid 存活，**不看总时长** |
+| 其余（1/4/5/6/7/8/9） | ⬜ 待做 | 拆 worker 之前必须逐条处理 |
+
+判据：`tests/test_note_jobs.py`（8 组）、`test_wrapup` 新增「活 worker 不补第二份」、
+`test_upload` 新增「活 worker 不算残局」；两条都做过红绿对照。
+
+### 13.1 F P1 上半：跨进程所有权 + worker 本体（2026-11-04）
+
+| §12 项 | 状态 | 落在哪 |
+|---|---|---|
+| 2 活 worker 被当残局 | ✅ | `note_jobs.alive()`；`resume_pending_notes` / `recover_pending` 先问它 |
+| 3 同一节两个写者 | ✅ | `note_jobs.claim()`（`O_CREAT\|O_EXCL`） |
+| 10 固定超时判死 | ✅ | `STALE_S=180` + pid，判活**不看总时长** |
+| 4 上传队列跨进程 | ✅ | worker 只写 `note-outbox/`；主进程 `upload.drain_note_outbox()` 入队 |
+| 5 更新脚本杀 worker | ✅ | `make-app.sh` ③ 加第二条探针：`note_jobs.active()` 非空就停下来问人 |
+| 6 管道不等价 | ✅ 本机档 | spec 带 mode / cloud-model / glossary / polish / 档位；三个回调在 worker 里按 spec 重建 |
+| 7 纯转录 / 本地档契约 | ✅ | spec 的 `use_cloud` / `trans_mode` / `ever_off`；三条回调先判档再发请求 |
+| 8 电源 | ✅ | worker 全程 `power.keep_system_awake()` |
+| 9 线程退出 | ✅ | worker 收尾走 `os._exit(rc)`，不等残留线程 |
+| 1 报告只能在主进程写 | ⚠️ 部分 | 报告 / bundle / 上传仍全在主进程；worker 只写笔记 + 出箱。`note_file` 那一路由 journal 与 `note-jobs` 两条兜 |
+| §4.4 删中间笔记 | ✅（后台模式） | `ObsidianWriter(base_note=False)`；进程内那条**保留**基础版（回滚时仍要它兜底） |
+
+**实测（隔离 HOME，`/tmp/nw-e2e`）**：真派生 → `setsid` → 4 句会话 → worker 写出
+`Lectures/` 等价的 md + 交互 HTML → journal 记 `note=done` + `note_file` →
+`note-outbox/` 落一张票 → 收工状态 `done` → `alive()` 转 False。日志**单份**。
+
+**还没做**（要真跑一节课才算验过）：`main.py` 那条派生分支在真课上的表现
+（卡片「已交给后台」文案、锁释放时机、与实时总结的顺序）。
+判据：`tests/test_note_jobs.py`、`tests/test_note_worker.py`（13 组）。

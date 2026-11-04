@@ -296,6 +296,34 @@ if [ "$_lockstate" = "held" ]; then
   fail "有 ClassLive 正在上课（单实例锁被占着）—— 重建会打断它。
     先退出 ClassLive（或等这节下课），再重跑：./make-app.sh 或 cl update"
 fi
+
+# ⭐ 3.11 F：后台**收尾 worker** 也在用 `$APP/Contents/` 里的解释器与标准库 ——
+#    重建会把它换成另一个 inode，备份一删，worker 后面任何一次 `import` 都会失败
+#    （笔记写到一半没了）。所以它也走「停下来问人」这条，同上面那条锁探针。
+#    ⚠️ 判据只有一个实现（`note_jobs.alive`：pid + 心跳），不在这里重写一份。
+_nj_out="$(mktemp -t classlive-nj)"
+( cd "$HERE" && "$APP/Contents/MacOS/python" -c 'import json, note_jobs; print(json.dumps(note_jobs.active(), ensure_ascii=False))' >"$_nj_out" 2>/dev/null ) &
+_nj_pid=$!
+for _ in $(seq 1 20); do
+  kill -0 "$_nj_pid" 2>/dev/null || break
+  sleep 0.1
+done
+_nj_busy=""
+if kill -0 "$_nj_pid" 2>/dev/null; then
+  pkill -P "$_nj_pid" 2>/dev/null || true
+  kill "$_nj_pid" 2>/dev/null || true
+else
+  wait "$_nj_pid" 2>/dev/null || true
+  _nj_busy="$(cat "$_nj_out" 2>/dev/null || true)"
+fi
+rm -f "$_nj_out"
+case "$_nj_busy" in
+  ""|"[]") ;;
+  *)
+    fail "有后台任务正在生成笔记（${_nj_busy}）—— 重建会把它的解释器换掉，笔记可能写不完。
+    等它写完（或先停掉：面板「后台任务」那里），再重跑：./make-app.sh 或 cl update"
+    ;;
+esac
 _PAT="$(printf '%s' "${APP#"$HERE"/}/Contents/MacOS/python" | sed 's/[][\\.^$*?+(){}|]/\\&/g')"
 _pids="$(pgrep -f "$_PAT" 2>/dev/null || true)"
 if [ -n "$_pids" ]; then

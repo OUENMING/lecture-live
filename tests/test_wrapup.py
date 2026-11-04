@@ -902,6 +902,36 @@ def t_note_resume_user_said_no():
         assert "tester.journal_note_skipped()" in src[i:i + 300], "点「不存」之后没记 skipped"
 
 
+@case("⭐⭐ 后台 worker 还活着 -> 不补第二份（§12 第 2 条：活 worker 不许被当残局）")
+def t_note_resume_skips_live_worker():
+    import note_jobs as _nj
+    stem = "2026-11-04_160000_ECON10790"
+
+    def _run(jd):
+        """一个干净的现场（补成功会把 journal 改成 done，所以每个分支各用一份）。"""
+        d = tempfile.mkdtemp()
+        _journal_fixture(d, stem)
+        calls = []
+        r = main.resume_pending_notes(
+            d, online=lambda: True, jobs_root=jd,
+            rebuild=lambda *a, **k: (calls.append(1), {"ok": True})[1])
+        return r, calls
+
+    with tempfile.TemporaryDirectory() as jd:
+        # ① 没有任务记录 -> 照常补
+        r0, c0 = _run(jd)
+        assert r0["attempted"] == 1 and c0, r0
+        # ② 有活任务 -> 一条都不补
+        assert _nj.claim(stem, root=jd) is True
+        r1, c1 = _run(jd)
+        # ⚠️ 变异验证：把 `if _nj.alive(...)` 那段删掉 -> attempted==1、calls 非空，这条红。
+        assert r1["attempted"] == 0 and r1["skipped"] == 1 and not c1, (r1, c1)
+        # ③ 任务结束了就该补
+        _nj.finish(stem, root=jd)
+        r2, c2 = _run(jd)
+        assert r2["attempted"] == 1 and c2, (r2, c2)
+
+
 @case("⭐⭐ D25 残局已改名成 `.recovered.json` -> 补笔记**照样扫到**（默认配置下不再空转）")
 def t_note_resume_recovered_tail():
     with tempfile.TemporaryDirectory() as d:

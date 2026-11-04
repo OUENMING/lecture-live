@@ -13,7 +13,7 @@
   => 音频循环永不阻塞; 所有 UI 调用都在主线程(悬浮窗要求)
 """
 from __future__ import annotations
-import argparse, atexit, collections, concurrent.futures, datetime, os, pathlib, queue, re, shlex, sys, threading, time
+import argparse, atexit, collections, concurrent.futures, datetime, os, pathlib, queue, re, shlex, subprocess, sys, threading, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ⭐⭐ 3.10：**半换的树不许开始上课** —— 上次换代码要是被打断（合盖 / 强杀 / 断电），
@@ -546,6 +546,213 @@ def rebuild_note_for(session_path, *, vault=None, polish=False, log=None, desk_h
         return {**out, "error": f"{type(e).__name__}: {str(e)[:160]}"}
 
 
+#: 后台收尾的开关（`CLASSLIVE_NOTE_WORKER=0` 退回进程内收尾 —— 计划 §10 的回滚开关）。
+def note_worker_enabled() -> bool:
+    """要不要把笔记交给后台进程。⚠️ **默认开**（2026-11-04）；设 0 即退回今天的行为。"""
+    v = str(os.environ.get("CLASSLIVE_NOTE_WORKER") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def note_job_spec(*, session_path, course: str, vault=None, polish=False,
+                  cloud_model: str = "deepseek-flash", polish_model=None,
+                  glossary=None, use_cloud: bool = False, trans_mode: str = "both",
+                  ever_off: bool = False, qa=None, gl_mode=None) -> dict:
+    """worker 的 job spec —— **过进程边界的唯一一份输入**（`note_jobs.write(spec=…)`）。
+
+    ⚠️ **不含任何 key**：`use_cloud` 只是「这一节有没有可用 key」这个**决定**，
+       真的去读 key 是 worker 自己的事（`note_worker._cloud_key`）。
+       spec 住在 `~/.classlive/note-jobs/`，而 key 住在同一目录族的 `credentials` ——
+       没必要让 key 多跑一趟序列化。
+    ⚠️ 值必须**都能 JSON 序列化**（`qa` 是纯 dict 的列表）。
+    ⚠️ 档位这几项都要带上：光有 `use_cloud` 分不出「纯转录」（一个请求都不许发）
+       与「本地档」—— `note_worker.build_callbacks` 的三条判据全靠它们。
+    """
+    return {
+        "session": str(session_path or ""),
+        "course": str(course or ""),
+        "vault": str(vault) if vault else None,
+        "date": time.strftime("%Y-%m-%d"),
+        "polish": bool(polish),
+        "cloud_model": str(cloud_model or "deepseek-flash"),
+        "polish_model": polish_model or None,
+        "glossary": str(glossary) if glossary else None,
+        "use_cloud": bool(use_cloud),
+        "trans_mode": str(trans_mode or "both"),
+        "ever_off": bool(ever_off),
+        "duties": [],
+        "qa": list(qa or [])[:200],
+    }
+
+
+def spawn_note_worker(stem: str, spec: dict, *, jobs_root=None, log_path=None,
+                      python=None, popen=None) -> bool:
+    """派生一个脱离父进程的 `note_worker`。返回「真的起来了」。**永不抛。**
+
+    ⚠️ `start_new_session=True` = `setsid`：父进程退出（收尾结束、窗口关掉）
+       **不会**把它带走 —— 这正是整件事的目的。
+    ⚠️ `stdout` / `stderr` 必须重定向到文件：终端在父进程退出后就没了，
+       不重定向的话 worker 一 `print` 就 `EPIPE` 崩掉。
+    ⚠️ 先 `claim()` 占位再 `Popen`：占不上说明已经有别的进程在做这一节
+       （`note_jobs` 那张表），那就**不要**再起一个。
+    """
+    import note_jobs as _nj
+    try:
+        # ⚠️⚠️ `jobs_root` 是 **`note_jobs` 的 root**（它自己会接上 `note-jobs/`）——
+        #    这里原来是 `root = jobs_root or _nj.jobs_dir()`，而 `jobs_dir()` 返回的
+        #    **已经含 `note-jobs`**，默认那条路于是写成 `…/note-jobs/note-jobs/`。
+        #    worker 拿到的是 `--jobs-root <root>`，两边必须同一种口径。
+        #    （`tests/test_note_worker.py` 的 e2e 抓到。）
+        root = jobs_root if jobs_root is not None else None
+        if not _nj.claim(stem, root=root, spec=spec):
+            return False
+        jobs_dir = _nj.jobs_dir(root=root)
+        lp = log_path or (jobs_dir.parent / "note-worker.log")
+        args = [python or sys.executable, "-m", "note_worker", stem]
+        if jobs_root is not None:
+            args += ["--jobs-root", str(jobs_root)]
+        # ⚠️ **不传 `--log`**：下面已经把 stdout/stderr 重定向到同一个文件了，
+        #    再让 worker 自己写一遍就是每行两条（2026-11-04 e2e 实测）。
+        #    `--log` 留给手工前台跑（那时 stdout 在终端，需要另存一份）。
+        kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                  stdin=subprocess.DEVNULL, start_new_session=True)
+        try:
+            lp.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(lp, "a", encoding="utf-8")
+            kw["stdout"] = kw["stderr"] = fh
+        except Exception:                                 # noqa: BLE001
+            fh = None                                     # 文件开不了也得起来（别丢笔记）
+        run = popen or (lambda a, k: subprocess.Popen(
+            a, cwd=str(pathlib.Path(__file__).resolve().parent),
+            # ⚠️ worker 的 `import main`（为了复用 `rebuild_note_for`）绝不会跑主循环：
+            #    它只看 `__name__ == "__main__"`，而 `-m note_worker` 下不是。
+            #    这一行把意图写死：将来谁加了一个 import 期就有副作用的模块，
+            #    不会在后台进程里被误触发。
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, **k))
+        try:
+            run(args, kw)
+        except BaseException:
+            # ⚠️ 派不起来就必须把占位撤掉 —— 留一个假的 `running` 会让两个恢复函数
+            #    永远跳过这一节（`alive()` 看 pid：占位时写的是**父进程**的 pid，
+            #    父进程还活着，心跳却是父进程的钟）。宁可记 `failed` 让下次启动补。
+            _nj.finish(stem, _nj.FAILED, root=root, error="worker 没起来")
+            raise
+        finally:
+            if fh is not None:
+                try:
+                    fh.close()                            # 子进程自己持有 fd
+                except Exception:                         # noqa: BLE001
+                    pass
+        return True
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+def _spawn_note_worker(*, writer, ui, stem, qa_snapshot, live_pool, course,
+                       api_key_val, trans, args, echo):
+    """收尾那一刻的**分岔**：派生成功则返回 True（笔记交给后台），否则 `None`（走原路）。
+
+    ⚠️ 返回 `None` 的每一条都**不是错误**，是"这次别拆"：开关关着、没会话文件、
+       worker 起不来。判据越保守越好 —— 拆失败的代价是**整节课没有笔记**，
+       而回退后的进程内路径是跑了一年的那条。
+    """
+    try:
+        if not note_worker_enabled():
+            return None
+        sess = pathlib.Path(str(stem or ""))
+        if not sess.is_file():
+            return None
+        if not bool(getattr(writer, "writes_notes", False)):
+            return None                                   # 没库又没桌面笔记库 = 没有笔记可写
+        try:
+            qa = qa_snapshot() if callable(qa_snapshot) else (qa_snapshot or [])
+        except Exception:                                 # noqa: BLE001
+            qa = []
+        spec = note_job_spec(
+            session_path=sess,
+            course=course or str(getattr(writer, "_course", "") or ""),
+            vault=getattr(writer, "_vault", None),
+            polish=bool(getattr(writer, "_polish", False)),
+            cloud_model=str(getattr(writer, "_model", "") or "deepseek-flash"),
+            polish_model=getattr(writer, "_polish_model", None),
+            glossary=getattr(writer, "_glossary_path", None),
+            use_cloud=bool(api_key_val),
+            trans_mode=str((trans or {}).get("mode") or "both"),
+            ever_off=bool((trans or {}).get("ever_off")),
+            qa=qa)
+        if not spawn_note_worker(str(sess.name)[:-3] if sess.name.endswith(".md")
+                                 else sess.name, spec):
+            return None
+        if callable(getattr(ui, "wrapup_handed_off", None)):
+            try:
+                ui.wrapup_handed_off()                    # 卡片换成「后台生成中」
+            except Exception:                             # noqa: BLE001
+                pass
+        echo("🔁 笔记交给后台生成 —— 现在可以关窗口，下一节课随时能开")
+        return True
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
+def resume_stale_note_jobs(sessions_dir, *, rebuild=None, log=None, jobs_root=None) -> dict:
+    """开机扫 `note-jobs`：**标着 running 但其实已经死了**的那几节，重跑一遍。
+
+    ⚠️ 为什么不能只靠 journal（`resume_pending_notes`）：journal 只有测试模式才写。
+       普通课如果 worker 被**更新脚本杀掉 / 强制退出 / 机器重启**，那一节没有任何
+       journal 可扫 —— 而 `sessions/` 里有逐句记录，笔记完全能补。这里的判据是
+       `note_jobs.alive()`（pid + 心跳，§12-10）：不活 = 该我们接手。
+    ⚠️ 每节**只补一次**：跑完把状态落成 done / failed，`alive()` 之后永远 False。
+    ⚠️ 永不抛（跑在开机那条路上）。
+    """
+    import note_jobs as _nj
+    out = {"found": 0, "done": 0, "failed": 0}
+
+    def _say(s: str) -> None:
+        if log is not None:
+            try:
+                log(s)
+            except Exception:                             # noqa: BLE001
+                pass
+
+    try:
+        sd = pathlib.Path(sessions_dir)
+        d = _nj.jobs_dir(root=jobs_root)
+        if not sd.is_dir() or not d.is_dir():
+            return out
+        rb = rebuild or rebuild_note_for
+        for p in sorted(d.glob("*.json")):
+            stem = p.stem
+            j = _nj.read(stem, root=jobs_root)
+            if str(j.get("state") or "") != _nj.RUNNING:
+                continue
+            if _nj.alive(stem, root=jobs_root):
+                continue                                  # 还在跑，别动
+            sess = sd / (stem + ".md")
+            if not sess.is_file():
+                _nj.finish(stem, _nj.FAILED, root=jobs_root, error="没有会话文件")
+                out["failed"] += 1
+                continue
+            out["found"] += 1
+            # 已经有笔记了（worker 写完、只是没来得及记状态）→ 直接收工。
+            nf = str(j.get("note") or "")
+            if nf and pathlib.Path(nf).is_file():
+                _nj.finish(stem, _nj.DONE, root=jobs_root, note=nf)
+                out["done"] += 1
+                continue
+            _say(f"· {stem}：后台任务没跑完，补生成")
+            r = rb(sess, log=_say)
+            if r.get("ok"):
+                _nj.finish(stem, _nj.DONE, root=jobs_root,
+                           note=str(r.get("note") or ""))
+                out["done"] += 1
+                _say(f"✅ 笔记补好了 → {r.get('note')}")
+            else:
+                _nj.finish(stem, _nj.FAILED, root=jobs_root, error=str(r.get("error") or ""))
+                out["failed"] += 1
+    except Exception:                                     # noqa: BLE001
+        return out
+    return out
+
+
 def _note_looks_written(sessions_dir, stem: str, sess, log=None) -> bool:
     """这节课**看起来**已经有笔记了吗（保守判据，只用来**跳过**补写）。
 
@@ -584,7 +791,8 @@ def _note_looks_written(sessions_dir, stem: str, sess, log=None) -> bool:
     return False
 
 
-def resume_pending_notes(sessions_dir, *, online=None, rebuild=None, log=None) -> dict:
+def resume_pending_notes(sessions_dir, *, online=None, rebuild=None, log=None,
+                         jobs_root=None) -> dict:
     """开机扫 journal，把**还欠的笔记**在后台补出来。返回 `{found, attempted, done, skipped, failed}`。
 
     ## 判据（顺序即优先级）
@@ -623,11 +831,19 @@ def resume_pending_notes(sessions_dir, *, online=None, rebuild=None, log=None) -
         return out
     on = online or (lambda: _tm.net_type() != "none")
     rb = rebuild or rebuild_note_for
+    import note_jobs as _nj
     for mk, stem in marks:
         try:
             j = _tm.journal_read(mk)
             steps = j.get("steps") or {}
             if steps.get("note") != "pending":
+                continue
+            # ⭐ 3.11：后台 worker 正在生成这一节 → **不许补第二份**（§12 第 2 条）。
+            #    判活看心跳 + pid，不是「跑了多久」—— 实测最长 15:49。
+            if _nj.alive(stem, root=jobs_root):
+                out["found"] += 1
+                out["skipped"] += 1
+                _say(f"· {stem}：后台还在生成笔记 —— 不重复补")
                 continue
             out["found"] += 1
             sess = sd / (stem + ".md")
@@ -2291,6 +2507,25 @@ def run(args) -> None:
         if _r.get("queued"):
             echo(f"📤 发现上次没收尾的测试课 {_r['found']} 节"
                  f" —— 已把已录到的部分排进上传队列（带 crash_recovered 标记）")
+        # ⭐ 3.11 F：**笔记出箱** —— 后台 worker 写完笔记时落的那张票（`note-outbox/`）。
+        #    这里把它的文件并进**本进程**的上传队列（worker 自己不碰队列，§12-4），
+        #    然后按平时那条路发。⚠️ 只入队、不阻塞启动。
+        try:
+            _ob = _upmod.drain_note_outbox(queue=_q)
+            if _ob.get("merged"):
+                echo(f"📝 后台生成的笔记已并入上传队列（{_ob['merged']} 节）")
+        except Exception:                                 # noqa: BLE001
+            pass
+        # ⭐ 3.11 F：**后台 worker 死了但没留下 journal** 的那几节（更新脚本杀掉 /
+        #    强杀 / 重启）—— 照样用 `sessions/` 里的逐句记录补出来。判据是
+        #    `note_jobs.alive()`，不是 journal（普通课根本不写 journal）。
+        try:
+            _sj = resume_stale_note_jobs(_owmod.SESSIONS,
+                                         log=lambda m: echo("   " + m))
+            if _sj.get("found"):
+                echo(f"📝 有 {_sj['found']} 节后台笔记没跑完 —— 补生成中")
+        except Exception:                                 # noqa: BLE001
+            pass
         # ⭐ 3.10：**笔记那一步的补生成**（journal 的 `note` 步）—— 收尾要是没跑到
         #    writer.close()（合盖 / 被杀），这里在后台把它补出来：要在线、每节一次、
         #    绝不覆盖已有笔记（同日同课已有一份就当它写过了，见 `_note_looks_written`）。
@@ -4355,6 +4590,16 @@ def run(args) -> None:
                     _np_say("save", 1, 1)
                     _np_say("base", 0, 1)
                 _done = threading.Event()
+                # ⭐ 3.11 F：收尾**后台化** —— 把笔记交给一个脱离父进程的 worker，
+                #    主进程写完 `sessions/` 就能退、把单实例锁放掉（下一节随时能开）。
+                #    ⚠️ 这里是**分岔**，不是替代：派生不成功就走下面原来那段（今天的
+                #       行为一个字不变）。判据见 `_spawn_note_worker`：开关、档位、
+                #       有没有可读的会话文件，任何一条不满足都返回 None。
+                _spawned = _spawn_note_worker(
+                    writer=writer, ui=ui, stem=getattr(writer, "session_path", None),
+                    qa_snapshot=qa_snapshot, live_pool=live_pool,
+                    course=_np_course, api_key_val=api_key_val,
+                    trans=trans, args=args, echo=echo)
 
                 def _wrap():
                     try:
@@ -4387,7 +4632,20 @@ def run(args) -> None:
                         _box["err"] = e
                     finally:
                         _done.set()                       # ⚠️ 不置的话主线程等到天荒
-                threading.Thread(target=_wrap, daemon=True).start()
+                if _spawned is None:
+                    threading.Thread(target=_wrap, daemon=True).start()
+                else:
+                    # ⭐ 3.11 F：笔记已经交给后台 worker 了。
+                    #    · `_done` 立刻置位 —— 主线程不必也没法等它（它在另一个进程里）；
+                    #    · 实时总结仍在**本进程**收尾（它写的是这节课的纲要文件，不是笔记）；
+                    #    · 失败的兜底是 `note_jobs` 的收工状态 + 下次启动
+                    #      `resume_pending_notes`（§4.3 表里那一格）。
+                    _done.set()
+                    try:
+                        summ.finish(timeout_s=SUMMARY_FINISH_S, cancel=_cancel)
+                    except BaseException as e:            # noqa: BLE001
+                        echo(f"⚠ 实时总结收尾失败（笔记照写）："
+                             f"{type(e).__name__}: {str(e)[:80]}")
                 # ⚠️⚠️ **Ctrl+C 打不到 worker 上** —— Python 的信号 handler 只在主线程跑
                 #    （PEP 475），所以中断永远落在这一句 `_spin` 里。不接住的话异常从这里
                 #    穿出去，进程立刻退出，**把正在写盘的 daemon worker 连同写到一半的

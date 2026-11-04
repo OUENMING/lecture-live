@@ -485,7 +485,7 @@ def residual_journals(sessions_dir) -> list:
 
 
 def recover_pending(sessions_dir, send=None, *, transcode=None, queue=None,
-                    root=None, clock=time.monotonic, now=time.time) -> dict:
+                    root=None, clock=time.monotonic, now=time.time, jobs_root=None) -> dict:
     """开机扫残留的 `.pending.json`（上次跑测试模式**没收尾**），把它们排进队列。
 
     返回 `{found, queued, jobs}`。`jobs` = 交给后台转码的会话数（见下）。
@@ -520,9 +520,14 @@ def recover_pending(sessions_dir, send=None, *, transcode=None, queue=None,
     #    主线程的 `_save()` 覆盖。共用同一实例，`_lock` 才真正管住这条路径。
     q = queue if queue is not None else UploadQueue(send, root=root, clock=clock, now=now)
     jobs: list = []
+    import note_jobs as _nj                                # 只依赖标准库，不会成环
     for mk in sorted(sd.glob("*" + PENDING_TAIL)):
-        out["found"] += 1
         stem = mk.name[: -len(PENDING_TAIL)]
+        # ⭐ 3.11：后台 worker 还在跑这一节 → **不算残局**（下面会把它改名成
+        #    `.recovered.json`，而 worker 写完还要回去记 `note=done`）。
+        if _nj.alive(stem, root=jobs_root):
+            continue
+        out["found"] += 1
         steps = {}
         try:
             _j = _json.loads(mk.read_text(encoding="utf-8")) or {}
@@ -860,6 +865,52 @@ def _read_lock_pid(path) -> int | None:
         return int(pathlib.Path(path).read_text(encoding="utf-8").strip())
     except Exception:                                         # noqa: BLE001
         return None
+
+
+def drain_note_outbox(queue=None, *, root=None, sessions_dir=None) -> dict:
+    """把后台 worker 写的**笔记出箱**并进上传队列（§12-4：跨进程只有一个写者）。
+
+    `~/.classlive/note-outbox/<stem>.json` = `{"stem", "files":[…], "at"}`，由
+    `note_worker` 写完笔记时落一张票。这里**只做入队**，传输仍归本进程的 drainer ——
+    两个进程同时写 `upload-queue.json` 会互相覆盖（`_save()` 是整份覆盖）。
+
+    ⭐ 用 `add_files` 而不是 `enqueue`：这一节的条目多半已经在队列里了（收尾时
+    `start_upload` 排过报告 / 音频），`enqueue` 会按 key 直接返回 0，笔记就永远排不进去。
+    ⚠️ 成功的票**挪到 `sent/`** 而不是删（同"要清理就挪不删"的既有做法）。
+    """
+    import json as _json
+    out = {"found": 0, "merged": 0, "kept": 0}
+    try:
+        if root is not None:
+            d = pathlib.Path(root) / "note-outbox"
+        else:
+            import paths
+            d = paths.STATE_ROOT / "note-outbox"
+        if not d.is_dir():
+            return out
+        q = queue
+        for p in sorted(d.glob("*.json")):
+            out["found"] += 1
+            try:
+                info = _json.loads(p.read_text(encoding="utf-8")) or {}
+                stem = str(info.get("stem") or p.stem)
+                files = [str(f) for f in (info.get("files") or [])]
+                if q is None:
+                    q = UploadQueue(None, root=root)
+                n = q.add_files(files, stem) if files else 0
+            except Exception:                                     # noqa: BLE001
+                out["kept"] += 1
+                continue
+            out["merged"] += 1 if n else 0
+            try:
+                sent = d / "sent"
+                sent.mkdir(exist_ok=True)
+                p.replace(sent / p.name)
+            except Exception:                                     # noqa: BLE001
+                out["kept"] += 1
+    except Exception:                                             # noqa: BLE001
+        return out
+    return out
 
 
 def _pid_alive(pid: int) -> bool:

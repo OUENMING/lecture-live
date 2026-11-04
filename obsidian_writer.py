@@ -695,7 +695,8 @@ class ObsidianWriter:
                  glossary_path: str | None = None, polish: bool = True,
                  polish_model: str | None = None, keypoints=None,
                  keypoints_fn=None, lost_explain_fn=None, backfill_fn=None,
-                 recap_fn=None, desk=False, open_fn=None, desk_home=None):
+                 recap_fn=None, desk=False, open_fn=None, desk_home=None,
+                 base_note: bool = True):
         self.mode = mode
         # ⚠️⚠️ **`enabled` 只管一件事：要不要记录**（`sessions/` 那层底稿）。
         #    **「写不写 Obsidian 笔记」是另一件事** —— 由 `self._vault is not None` 判
@@ -711,6 +712,10 @@ class ObsidianWriter:
         #       也还没记住过库）就会命中。而那些正是**最需要会话底稿**的人
         #       —— 将来的「打包成 MD/PDF」导出的也就是它。
         self.enabled = mode != "no"
+        #: ⭐ 3.11：要不要在复习层**之前**先落一版基础笔记（`close()` 里那一步）。
+        #: 后台 worker 派生时置 False —— 生成在另一个进程里，用户看盘上那份只会看到
+        #: 半成品；详情见 `close()` 里那一段。
+        self._base_note = bool(base_note)
         self._vault = os.path.expanduser(vault) if vault else None
         self._course = course or DEFAULT_COURSE
         self._date = time.strftime("%Y-%m-%d")
@@ -733,6 +738,8 @@ class ObsidianWriter:
         #: 🗓 间隔复习日期（`note_v2.review_dates`）。
         self._review_dates: list = []
         #: 🔁 Anki CSV / 交互 HTML 的**文件名**（渲染时写进笔记的说明那几行）。
+        #: ⭐ 3.11：后台模式（`base_note=False`）跳过基础版那一步、而 `close()` 有两处
+        #: 读它 —— 必须**先是个字符串**，否则 `if self._html_name` 为真、拼路径时炸。
         self._anki_name = ""
         self._html_name = ""
         #: ⚠ 头部警告（构图方塞；渲染层照单全收）。
@@ -2163,10 +2170,16 @@ class ObsidianWriter:
         import note_render
         base_stem = self.vault_path.with_suffix("")
         self._html_name = base_stem.name + ".html"
-        base_data = self._note_data(entries, {}, [], polish_state, base_lost, [],
-                                    base_chapters, bool(self._key))
-        self._write_sidecars(base_data)
-        self._atomic_write(self.vault_path, note_render.render(base_data))
+        # ⭐ 3.11 后台收尾（`note_worker`）：生成在**另一个进程**里跑，盘上那份「基础版」
+        #    没有意义 —— 用户这次打开时要么还没有，要么就是完整版（计划 §4.4「只能打开
+        #    完整笔记」）。置 `base_note=False` 就跳过这一步，只在完整版结束时原子写一次。
+        #    ⚠️ 默认 True = **今天的行为一个字不变**：开关没开（`CLASSLIVE_NOTE_WORKER=0`）
+        #       时仍然有中间笔记兜底（崩溃时盘上至少有一份可读）。
+        if self._base_note:
+            base_data = self._note_data(entries, {}, [], polish_state, base_lost, [],
+                                        base_chapters, bool(self._key))
+            self._write_sidecars(base_data)
+            self._atomic_write(self.vault_path, note_render.render(base_data))
         if self._key:
             print("🤖 正在生成复习层(讲解 + 例题 + 自测)…", flush=True)
         # ⚠️ 同 `polish` 那条：复习层要跑好几轮 LLM（按 `note_v2.REVIEW_CHUNK` 分块），

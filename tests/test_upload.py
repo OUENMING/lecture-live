@@ -332,6 +332,38 @@ def main() -> int:
               and (rsess / f"{stem}.recovered.json").exists(),
               str([p.name for p in rsess.iterdir()]))
 
+        # ── ⭐ 3.11：后台 worker 还活着 -> **不算残局**（§12 第 2 条）──────────────
+        # ⚠️ 判据要能抓住「把活任务改名成 .recovered.json」这个错：worker 写完还要
+        #    回去记 `note=done`，标记被提前改掉它就再也找不到自己那节。
+        import note_jobs as _nj
+        _js = tmp / "jobs15"
+        _rs15 = tmp / "sess15"
+        _rs15.mkdir()
+        _stem15 = "2026-11-04_160000_LIVE"
+        (_rs15 / f"{_stem15}.001.opus").write_bytes(b"FAKEOPUS" * 10)
+        (_rs15 / f"{_stem15}{upload.PENDING_TAIL}").write_text('{"stem": "x"}', encoding="utf-8")
+        os.environ["CLASSLIVE_UPLOAD"] = "1"
+        try:
+            assert _nj.claim(_stem15, root=_js) is True
+            _live = upload.recover_pending(
+                _rs15, upload.make_local_send(str(tmp / "srv15")), root=tmp / "cl15",
+                now=lambda: _now[0], jobs_root=_js)
+            # ⚠️ 变异验证：把 `if _nj.alive(...)` 那段删掉 -> found==1、标记被改名，这条红。
+            check("⭐⭐ 活 worker 那节**不算残局**：不排、不改名",
+                  _live["found"] == 0
+                  and (_rs15 / f"{_stem15}{upload.PENDING_TAIL}").exists(),
+                  f"{_live} {[p.name for p in _rs15.iterdir()]}")
+            _nj.finish(_stem15, root=_js)
+            _dead = upload.recover_pending(
+                _rs15, upload.make_local_send(str(tmp / "srv15")), root=tmp / "cl15",
+                now=lambda: _now[0], jobs_root=_js)
+            check("⭐ 任务结束之后照常补传", _dead["found"] == 1, str(_dead))
+        finally:
+            if _saved_up14 is None:
+                os.environ.pop("CLASSLIVE_UPLOAD", None)
+            else:
+                os.environ["CLASSLIVE_UPLOAD"] = _saved_up14
+
         # ── ⭐ 台账 `_save_ledger` 必须在锁里（2026-10-12 全仓审查）──────────────
         # ⚠️ 它是「读当前 → 合并 → 写回」的复合更新，两个并发 `enqueue` 在锁外跑就会互相覆盖；
         #    而台账丢一条 = 远端那一节课**删不掉**（`key` 是哈希、不可逆）。

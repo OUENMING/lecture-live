@@ -6807,6 +6807,22 @@ class Overlay:
             pass
         card["set_status"](text)
 
+    def wrapup_handed_off(self) -> None:
+        """⭐ 3.11 F：笔记已经交给后台进程 —— 卡片改成「后台生成中」，可以关窗了。
+
+        ⚠️ **这不是"完成"**：笔记还没有。文案必须让用户知道去哪里看结果
+           （桌面笔记库 / Obsidian），而不是说「已保存」—— 那是假话。
+        ⚠️ 工作线程不调它（只有主线程那条收尾路会调），所以这里不必再回主线程。
+        """
+        self._np_stage = "handoff"
+        try:
+            card = getattr(self, "_wrapup_card", None)
+            if card is not None:
+                card["set_status"]("笔记已交给后台生成")
+                card["set_hint"]("可以关窗口了；写好后在笔记库里出现")
+        except Exception:                                 # noqa: BLE001
+            pass
+
     def wrapup_progress_finish(self, ok: bool = True) -> None:
         """收尾结束：给进度模型收口并把**本次各阶段耗时**写进历史（ETA 的样本）。
 

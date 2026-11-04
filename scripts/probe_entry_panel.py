@@ -300,6 +300,18 @@ def main() -> int:
         _U.apply = _fake_apply
         _U.defer_to_exit = lambda v: (print(f"（桩）下课后自动装 {v}"), True)[1]
 
+    # `PROBE_BG=1` —— 造一个**活着的**后台任务（pid = 本进程），好让面板上那行
+    #    「后台生成笔记：… · 已用 …  [停止]」上屏（3.11 F 的 P2 行）。
+    #    ⚠️ 写的是 `ISO/note-jobs/`（隔离根）—— 面板的读端根也跟着 `state_root`，
+    #       所以它读的正是这一份，一个字节都不碰真 `~/.classlive`。
+    if os.environ.get("PROBE_BG"):
+        import note_jobs as _NJ
+        _stem = "2026-11-04_160000_ECON10790"
+        _NJ.claim(_stem, root=ISO, pid=os.getpid(),
+                  spec={"course": "ECON10790", "session": ""})
+        _NJ.heartbeat(_stem, root=ISO, stage="review", done=3, total=5)
+        print(f"\nPROBE_BG —— 造了一个活任务（{_stem}，pid=本进程）")
+
     h = entry_panel.open_panel(glossary=ISO / "glossary.txt", state_root=ISO,
                                sessions_dir=sess_iso,
                                # ⚠️ `on_start` 必须给个桩 —— 不给的话卡片上**一个按钮都不画**

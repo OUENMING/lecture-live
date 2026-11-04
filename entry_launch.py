@@ -55,6 +55,7 @@ from __future__ import annotations
 import os
 import pathlib
 import sys
+import threading
 import time
 import traceback
 
@@ -134,6 +135,10 @@ def main() -> int:
     #    面板的零课程空状态（`empty_state_lines`）与「＋ 新增课程」早就有了。
     #    代价：从没建过课、想直接录音的人要先建一门课；想跳过面板用 `CL_NO_PANEL=1`。
 
+    # ⭐ 3.11：面板开课时最多等预热 1 s —— 预热线程是守护线程，进程一退就没了；
+    #    等这一下能让结果落进缓存（探测预算 3 s，通常前面挑课的时间已经跑完）。
+    _warm_ref: dict = {"th": None}
+
     def on_start(course: str) -> None:
         """用户点了「开始上课」。
 
@@ -141,6 +146,9 @@ def main() -> int:
            不该有任何机会被当成 shell 语法。内容不带换行（与 `cl` 的
            `printf '%s'` 一致，下游读的是整个文件）。
         """
+        _wt = _warm_ref.get("th")
+        if _wt is not None and _wt.is_alive():
+            _wt.join(timeout=1.0)               # ⭐ 3.11：有界；别让预热拖住开课
         try:
             CFG.write_text(course, encoding="utf-8")
             print(f"✅ 课程已设为 {course}")
@@ -250,8 +258,9 @@ def main() -> int:
             pass
 
     try:
-        import threading
-        threading.Thread(target=_warm_probe, name="region-warm", daemon=True).start()
+        _wth = threading.Thread(target=_warm_probe, name="region-warm", daemon=True)
+        _warm_ref["th"] = _wth
+        _wth.start()
     except Exception:                           # noqa: BLE001
         pass
 

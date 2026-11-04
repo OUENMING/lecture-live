@@ -264,3 +264,20 @@
    它只是**用量标签**：v5 兜底的那几节会被标成 v6（少数，可接受）。
    Worker 测试 116/116；`wrangler deploy` 版本 `3ecd22f1-a4ee-4204-8181-407cda3af863`；
    部署后 `POST /v1/soniox/key`（测试码 + probe）回 200 有 key、`asr.bldcam.page` 正常。
+
+### 批次 D —— 已落地（未提交，2026-11-04）
+
+- **四个问题并行**：`run_probe()` 不再「先同步问默认、成功才问其余」；默认 + us/jp/eu
+  一起发，仍按**回的 region** 去重。默认领 key 失败时其余区照样有测量（`attempts` 全记）。
+- **`n` 按探测幂等**：`Router(probe_id=…)`，缺省按「网络指纹 + 20 分钟窗口」
+  （`PROBE_DEDUPE_S`）派生；`_persist()` 见同一 id 只刷缓存、不推 `n`
+  （面板预热 + main 两个进程不再各 +1）。`state_for()` 保留 `last_probe_id`，换版本清零。
+- **原子写**：`region-probe.json` 改 tmp → `os.replace`（半截 JSON 不再毁下一节）。
+- **选地区与探测解耦**：`plan()` 在 `run=False`（前 3 节用完后）仍用新鲜缓存 `decide()`；
+  `off` 仍不改道。第 4 节起也能吃缓存里的改道结果。
+- **面板预热**：`entry_launch.on_start` 对 warm 线程 `join(timeout=1.0)`（有界），
+  进程退出前给预热一个落盘机会；线程句柄存 `_warm_ref`。
+- **判据**：`t_probe_dedup_and_measures` 改为断言四个 ask 全发；新增
+  `t_persist_n_idempotent_per_probe`（同窗口 n=1、下一窗口 n=2、无 `.tmp`）；
+  `t_router_first_three_classes` 第 4 节断言缓存仍能改道（region=jp / reason=faster）。
+- `check.py` 全绿（115 文件 / ruff / pyright / 写端隔离）。

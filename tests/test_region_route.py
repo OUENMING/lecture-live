@@ -138,7 +138,8 @@ def t_state_version_reset() -> None:
     assert st["cache"] == old["cache"], "版本变了不该丢网络缓存"
     same = RR.state_for(old, "3.9.6")
     assert same["n"] == 3 and "n1" in same["cache"]
-    assert RR.state_for("坏形状", "3.9.7") == {"v": "3.9.7", "n": 0, "cache": {}}
+    assert RR.state_for("坏形状", "3.9.7") == {"v": "3.9.7", "n": 0, "cache": {},
+                                               "last_probe_id": ""}
     assert RR.state_for({"v": "3.9.7", "n": -2, "cache": []}, "3.9.7")["n"] == 0
     assert RR.state_for({"v": "3.9.7", "n": True, "cache": []}, "3.9.7")["n"] == 0, "bool 不是计数"
 
@@ -235,9 +236,12 @@ def t_probe_dedup_and_measures() -> None:
         return {"connect_ms": 1.0, "rtt_ms": 1.0, "error": ""}
     out2 = RR.run_probe(endpoint="x", passcode="p", fetch_key=fetch_down, ws_probe=ws_never, timeout_s=2.0)
     assert out2["default"] is None and out2["regions"] == {} and calls2["n"] == 0 and out2["timeout"] is True
-    # ⭐ 3.11：`attempts` 独立记账 —— 默认地区领 key 失败也要看得见，不能只剩一个空 regions。
-    assert out2["attempts"] == [{"ask": "", "region": "", "ok": False,
-                                 "error": "key_failed"}], out2["attempts"]
+    # ⭐ 3.11：四个问题**并行**都问过 —— 默认失败不再让 us/eu 根本不测；
+    #    attempts 独立记账，`regions` 仍是空（决策只认完整测量）。
+    assert out2["attempts"] and {a["ask"] for a in out2["attempts"]} == {"", "us", "jp", "eu"}, \
+        out2["attempts"]
+    assert all(a["error"] == "key_failed" for a in out2["attempts"]), out2["attempts"]
+    assert out2["default"] is None and out2["regions"] == {}, out2
     assert any(a["error"] == "duplicate" for a in out["attempts"]), out["attempts"]
     assert {a["region"] for a in out["attempts"] if a["ok"]} == {"us", "jp"}, out["attempts"]
 
@@ -269,10 +273,13 @@ def t_probe_hard_deadline() -> None:
 def t_router_first_three_classes() -> None:
     calls, fetch, ws = _fakes()
     state = pathlib.Path(_TMP.name) / "rp-flow.json"
+    # ⭐ 3.11：`n` 按 20 分钟窗口去重 —— 三节"课"用同一个冻结时钟会算成一节，
+    #    这里每节推进一个窗口（真实三节课的间隔远大于它）。
+    clock_ref = {"now": NOW}
 
     def mk(**kw):
         return RR.Router(passcode="cl-test", endpoint="http://x/v1/soniox/key", version="3.9.7",
-                         state_path=state, clock=lambda: NOW, net_key_fn=lambda: "netA",
+                         state_path=state, clock=lambda: clock_ref["now"], net_key_fn=lambda: "netA",
                          fetch_key=fetch, ws_probe=ws, timeout_s=2.0, **kw)
 
     snaps: list = []
@@ -296,6 +303,7 @@ def t_router_first_three_classes() -> None:
     assert st["v"] == "3.9.7" and st["n"] == 1 and "netA" in st["cache"], st
     # 2️⃣ 缓存命中（jp 比默认快 120 ms）-> 本节领正式 key 带 region=jp
     snaps.clear(); done.clear()
+    clock_ref["now"] += RR.PROBE_DEDUPE_S
     r2 = mk(env_value="")
     assert r2.region == "jp", r2.snapshot()
     s2 = r2.snapshot()
@@ -306,16 +314,18 @@ def t_router_first_three_classes() -> None:
     assert json.loads(state.read_text(encoding="utf-8"))["n"] == 2
     # 3️⃣ 最后一节（第 3 节）
     done.clear()
+    clock_ref["now"] += RR.PROBE_DEDUPE_S
     r3 = mk(env_value="")
     assert r3.region == "jp"
     r3.start(on_done=cb)
     assert done.wait(3.0)
     assert json.loads(state.read_text(encoding="utf-8"))["n"] == 3
-    # 4️⃣ 用完：不探测、不带 region、on_done **同步**调（报告块照样有）
+    # 4️⃣ 用完：不探测，但**缓存仍要能改道**（3.11：选地区与 should_run 解耦）
     n_before = len(calls["fetch"])
     done.clear(); snaps.clear()
+    clock_ref["now"] += RR.PROBE_DEDUPE_S
     r4 = mk(env_value="")
-    assert r4.region == "" and r4.snapshot()["reason"] == "done"
+    assert r4.region == "jp" and r4.snapshot()["reason"] == "faster", r4.snapshot()
     r4.start(on_done=cb)
     assert snaps and snaps[0]["run"] is False, "第 4 节 on_done 要同步调"
     assert len(calls["fetch"]) == n_before, "第 4 节不该再探测"
@@ -454,6 +464,33 @@ def t_ws_probe_marks_model_error() -> None:
     assert out.get("model_error") is True, out
 
 
+def t_persist_n_idempotent_per_probe() -> None:
+    """⭐ 3.11：面板预热与 main 各探一次，`n` 只 +1（同一个 20 分钟窗口）。
+
+    同一窗口的第二个 Router（另一进程）看到 `last_probe_id` 相同 -> 只刷缓存、不推 n。
+    窗口外（下一节）照常 +1；写盘是 tmp→replace，不留 `.tmp`。
+    """
+    state = pathlib.Path(_TMP.name) / "rp-idem.json"
+    state.unlink(missing_ok=True)
+    probe = {"default": "us", "regions": {"us": r(100, 50)}, "ms": 10, "timeout": False}
+    base = 1_800_000_000.0                       # 正好在 1200 s 窗口边界上
+
+    def once(now, pid=None):
+        rr = RR.Router(passcode="p", endpoint="e", version="3.9.7", state_path=state,
+                       clock=lambda: now, env_value="1", net_key_fn=lambda: "netZ",
+                       probe_id=pid)
+        rr._probe = probe
+        rr._persist()
+
+    once(base)                                   # 面板预热
+    once(base + 60)                              # main：同一节课
+    st = json.loads(state.read_text(encoding="utf-8"))
+    assert st["n"] == 1, f"同一窗口把 n 推了两次：{st}"
+    once(base + RR.PROBE_DEDUPE_S)               # 下一节
+    assert json.loads(state.read_text(encoding="utf-8"))["n"] == 2
+    assert not (state.parent / (state.name + ".tmp")).exists(), "原子写留下了 .tmp"
+
+
 def main() -> int:
     print("region_route 判据（全部离线）")
     for name, fn in [
@@ -461,9 +498,10 @@ def main() -> int:
         ("decide: not_ready / 默认缺数 / 只配一区 / 多区取最快", t_decide_not_ready_timeout_single),
         ("cache: 24 h 命中、过期不认、倒时钟不认、形状坏不认", t_cache_hit_expired),
         ("state: 版本变了只重置计数、缓存留着", t_state_version_reset),
+        ("persist: 同一节课 n 只 +1、原子写不留 .tmp", t_persist_n_idempotent_per_probe),
         ("plan: 前 3 节 / 第 4 节 done / 版本重置 / 开关 auto·off·force", t_plan_counter_version_env),
         ("network_key: 只回哈希（MAC 优先、SSID 兜底、拿不到回空）", t_network_key_hashes_only),
-        ("run_probe: 按回的 region 去重、阶段一失败即止", t_probe_dedup_and_measures),
+        ("run_probe: 按回的 region 去重、四个问题并行", t_probe_dedup_and_measures),
         ("run_probe: model_not_available 记 model_error（不拉黑地区）", t_probe_model_error_not_region_down),
         ("ws_probe: model_not_available → model_error 标记", t_ws_probe_marks_model_error),
         ("run_probe: 硬截止（阶段二卡住也不超）", t_probe_hard_deadline),

@@ -80,6 +80,9 @@ CACHE_NETS = 8
 #: ⭐ 3.11：一轮探测最多记多少次**领 key 尝试**（含失败的默认地区和重复区）——
 #:    报告体积有界；正常一轮 ≤ 4 次（默认 + 3 个区）。
 ATTEMPTS_MAX = 8
+#: ⭐ 3.11：`n`（每版本前 N 节）按**时间窗**去重 —— 面板预热与 main 是**两个进程**，
+#:    同一节课会各探测一次；20 分钟窗口内算同一次探测。窗口外（下节课）照常 +1。
+PROBE_DEDUPE_S = 1200
 #: 探测请求在 Worker 报的用途（Worker 事件里带 `:probe`，与真上课分开算）。
 PURPOSE = "probe"
 
@@ -110,11 +113,13 @@ def state_for(state, version: str) -> dict:
     cache = s.get("cache")
     cache = cache if isinstance(cache, dict) else {}
     if s.get("v") != version:
-        return {"v": version, "n": 0, "cache": cache}
+        return {"v": version, "n": 0, "cache": cache, "last_probe_id": ""}
     n = s.get("n")
     return {"v": version,
             "n": n if isinstance(n, int) and not isinstance(n, bool) and n >= 0 else 0,
-            "cache": cache}
+            "cache": cache,
+            # ⭐ 3.11：最近一次已计入 `n` 的探测 id（见 `PROBE_DEDUPE_S`）。
+            "last_probe_id": str(s.get("last_probe_id") or "")}
 
 
 def should_run(mode_v: str, state: dict) -> tuple[bool, int | None]:
@@ -212,12 +217,18 @@ def plan(*, state, version: str, net: str, env_value: str | None, now: float,
     run, ordinal = should_run(mode_v, st)
     raw = (st.get("cache") or {}).get(str(net)) if net else None
     cached = cache_get(st, net, now, ttl)
-    if run and cached:
-        d = decide(ready=True, default=str(cached.get("default") or ""), regions=cached.get("regions") or {})
+    # ⭐ 3.11：「选地区」与「要不要再探测」解耦 —— 前 3 节试跑完之后，缓存里的测量
+    #    仍然要能改道（原来 `run=False` 一律 `selected=""`，`n≥3` 后永远走默认）。
+    if mode_v == "off":
+        d = {"selected": "", "switched": False, "reason": "off"}
+    elif cached:
+        d = decide(ready=True, default=str(cached.get("default") or ""),
+                   regions=cached.get("regions") or {})
     elif run:
-        d = {"selected": "", "switched": False, "reason": "cache_stale" if isinstance(raw, dict) else "not_ready"}
+        d = {"selected": "", "switched": False,
+             "reason": "cache_stale" if isinstance(raw, dict) else "not_ready"}
     else:
-        d = {"selected": "", "switched": False, "reason": mode_v if mode_v == "off" else "done"}
+        d = {"selected": "", "switched": False, "reason": "done"}
     return {"run": run, "ordinal": ordinal, "mode": mode_v, "net": str(net or ""),
             "default": (str(cached.get("default") or "") or None) if cached else None,
             "selected": str(d["selected"] or ""), "switched": bool(d["switched"]),
@@ -398,15 +409,13 @@ def run_probe(*, endpoint: str, passcode: str, fetch_key: Callable | None = None
               clock: Callable[[], float] = time.monotonic) -> dict:
     """并行探测所有已配置地区。**总耗时 ≤ `timeout_s`**（硬截止；没量完的区给 None + 错误名）。
 
-    两波（都在这一个预算里）：
-      ① 不带 region 问一次 Worker —— 这条回的 `region` 就是**默认地区**，顺便量它；
-      ② 其余地区并行问；**没配的区会回默认地区** —— 按**回的 region** 去重：
-         同一个地区永远只量一次、只开一条流（旧 Worker 不认 region，这一条也天然成立）。
+    ⭐ 3.11：**四个问题一起问**（不带 region 的默认问题 + us/jp/eu），按**回的 region**
+    去重：同一个地区只量一次、只开一条流；Old Worker 不认 region 时全回默认，也成立。
+    `default` = 不带 region 那次**回的**地区（它失败时是 `""`，但其余区的测量仍保留）。
     回 `{default, regions: {区: {connect_ms, rtt_ms, error}}, attempts, ms, timeout}`。
 
     ⭐ 3.11：`attempts` 是**独立**的一次次领 key 记录（含默认地区失败 / 没配的区 / 重复区），
     不进 `regions` —— `decide()` 只认完整测量，`regions=={}` 的既有判据不能变。
-    从前 default 领 key 失败（CN→jp 502）时 us/eu 根本没被测，报告里却只剩一个空 `regions`。
     """
     t0 = clock()
     deadline = t0 + float(timeout_s)
@@ -455,16 +464,26 @@ def run_probe(*, endpoint: str, passcode: str, fetch_key: Callable | None = None
             note_attempt(ask, reg, res["error"])
         return reg
 
-    default = attempt("")                                          # ① 默认地区（同步：它决定后面问哪些）
-    if default:
-        others = [r for r in REGIONS if r != default]
-        ths = [threading.Thread(target=attempt, args=(r,), name=f"region-probe-{r}", daemon=True)
-               for r in others]
-        for th in ths:
-            th.start()
-        for th in ths:
-            th.join(timeout=max(0.0, deadline - clock()))          # 到点就放（线程是守护的）
+    # ⭐ 3.11：四个问题**并行**（默认 + us/jp/eu）。原来先同步问默认，默认领 key 失败
+    #    （CN→jp 502 那类）时其余区根本不测，报告里只剩一个空 regions。
+    #    仍按**回的 region** 去重：同一个地区只量一次、只开一条流；旧 Worker 不认
+    #    `region` 时四个问题都回同一个区，也天然成立。
+    by_ask: dict = {}
+    asks = [""] + list(REGIONS)
+
+    def run_one(ask: str) -> None:
+        got_reg = attempt(ask)
+        with lock:
+            by_ask[ask] = got_reg
+
+    ths = [threading.Thread(target=run_one, args=(a,), daemon=True,
+                            name=f"region-probe-{a or 'default'}") for a in asks]
+    for th in ths:
+        th.start()
+    for th in ths:
+        th.join(timeout=max(0.0, deadline - clock()))          # 到点就放（线程是守护的）
     with lock:
+        default = str(by_ask.get("") or "")
         regs = {k: dict(v) for k, v in got.items()}
         atts = [dict(x) for x in attempts]
     for v in regs.values():
@@ -491,6 +510,7 @@ class Router:
                  state_path=None, env_value: str | None = None,
                  clock: Callable[[], float] = time.time, net_key_fn: Callable | None = None,
                  fetch_key: Callable | None = None, ws_probe: Callable | None = None,
+                 probe_id: str | None = None,
                  timeout_s: float = PROBE_TIMEOUT_S) -> None:
         self._passcode = str(passcode or "")
         self._endpoint = str(endpoint or "")
@@ -513,6 +533,10 @@ class Router:
                           env_value=(env_value if env_value is not None
                                      else os.environ.get(ENV, "")),
                           now=self._clock())
+        # ⭐ 3.11：面板预热与 main 是两个进程，同一节课会各建一次 Router。
+        #    id 按「网络指纹 + 20 分钟窗口」派生 —— 两边算得出同一个；窗口外是新课，照常 +1。
+        self._probe_id = str(probe_id or
+                             f"{self._net or '-'}:{int(self._clock() // PROBE_DEDUPE_S)}")
 
     # ---- 主程序碰的三个成员
 
@@ -585,20 +609,30 @@ class Router:
             return {}
 
     def _persist(self) -> None:
-        """计数 +1、命中默认地区就把结果写缓存。**一次写盘**（失败吞掉：探测数据丢掉，不该影响课）。
+        """计数 +1、命中默认地区就把结果写缓存。**一次原子写盘**（失败吞掉：探测数据丢掉，不该影响课）。
 
         ⚠️ 计数按**跑过就算**（失败也 +1）：上限就是上限（最多 3 次探测），
            不然网络一直挂会变成「无限次重试」，就不是「前 3 节课」了。
+        ⭐ 3.11：同一个 `probe_id`（网络 + 20 分钟窗口）只计一次 —— 面板预热与 main
+           各跑一轮不再把 n 推两格。没有 id（理论上不会）时退回旧行为。
         """
         st = dict(self._state)
-        st["n"] = int(st.get("n") or 0) + 1
+        pid = self._probe_id
+        if not pid or st.get("last_probe_id") != pid:
+            st["n"] = int(st.get("n") or 0) + 1
+            if pid:
+                st["last_probe_id"] = pid
         probe = self._probe or {}
         if probe.get("default"):
             st = cache_put(st, self._net, self._clock(), str(probe["default"]),
                            probe.get("regions") or {})
         self._state = st
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._state_path.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+        # ⚠️ tmp→replace：半截 JSON 会让下一节课 `_load()` 失败、缓存与计数全丢
+        #    （原来直接 `write_text` 覆盖，断电/被杀就命中）。
+        tmp = self._state_path.with_name(self._state_path.name + ".tmp")
+        tmp.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self._state_path)
 
     def _work(self, on_done: Callable[[dict], None] | None) -> None:
         try:

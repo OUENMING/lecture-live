@@ -280,6 +280,105 @@ def t_drain_note_outbox() -> None:
               upload.drain_note_outbox(root=str(root))["found"] == 0)
 
 
+def t_notify_is_best_effort() -> None:
+    seen = []
+
+    class _P:
+        returncode = 0
+
+    ok = NW._notify("标题", "正文", runner=lambda a: (seen.append(list(a)), _P())[1])
+    check("⭐ 通知走静态脚本 + argv（文案不拼进 AppleScript 源）",
+          ok is True and len(seen) == 1 and seen[0] == ["标题", "正文"], str(seen))
+
+    class _Bad:
+        returncode = 1
+
+    check("⭐ 通知失败返回 False，不抛",
+          NW._notify("t", "b", runner=lambda a: _Bad()) is False)
+
+    def _boom(_a):
+        raise OSError("no osascript")
+
+    check("⭐⭐ 没有 osascript 也不许影响 `run()`（笔记已经写好了）",
+          NW._notify("t", "b", runner=_boom) is False)
+
+
+def t_spawn_decision_wrapper() -> None:
+    """`_spawn_note_worker` 的每一条「别拆」判据 —— 拆失败 = 整节课没笔记，越保守越好。
+
+    ⚠️ **绝不真派生**：`main.spawn_note_worker` 全程打桩（不然这条判据会真的起一个
+       worker 去写用户的笔记库）。
+    """
+    class _UI:
+        def __init__(self):
+            self.handed = 0
+
+        def wrapup_handed_off(self):
+            self.handed += 1
+
+    class _W:
+        writes_notes = True
+        _vault = None
+        _polish = False
+        _model = "deepseek-flash"
+        _polish_model = None
+        _glossary_path = None
+        _course = "ECON10790"
+
+    class _NoNotes(_W):
+        writes_notes = False
+
+    saved = os.environ.pop("CLASSLIVE_NOTE_WORKER", None)
+    orig = main.spawn_note_worker
+    spawned: list = []
+    main.spawn_note_worker = lambda stem, spec, **k: (spawned.append((stem, spec)), True)[1]
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            sess = pathlib.Path(d, "2026-11-04_160000_ECON10790.md")
+            sess.write_text("x", encoding="utf-8")
+            ui = _UI()
+            got = main._spawn_note_worker(
+                writer=_W(), ui=ui, stem=sess, qa_snapshot=lambda: [],
+                live_pool=None, course="ECON10790", api_key_val=None,
+                trans={"mode": "both"}, args=None, echo=lambda *_: None)
+            check("⭐⭐ 条件都满足 -> True，并且卡片收到「已交给后台」",
+                  got is True and ui.handed == 1 and len(spawned) == 1, str(got))
+            check("⭐ spec 是 `note_job_spec` 那份（不是随便一个 dict）",
+                  (spawned[0][1] or {}).get("course") == "ECON10790", str(spawned[0][1])[:80])
+
+        os.environ["CLASSLIVE_NOTE_WORKER"] = "0"
+        spawned.clear()
+        check("⭐⭐ 开关关着 -> None（退回今天的行为，一次都不派）",
+              main._spawn_note_worker(
+                  writer=_W(), ui=_UI(), stem=sess, qa_snapshot=lambda: [],
+                  live_pool=None, course="", api_key_val=None, trans={}, args=None,
+                  echo=lambda *_: None) is None and not spawned)
+
+        os.environ["CLASSLIVE_NOTE_WORKER"] = "1"
+        check("⭐⭐ 没有会话文件 -> None（不许派一个注定失败的 worker）",
+              main._spawn_note_worker(
+                  writer=_W(), ui=_UI(), stem="/tmp/definitely-missing.md",
+                  qa_snapshot=lambda: [], live_pool=None, course="", api_key_val=None,
+                  trans={}, args=None, echo=lambda *_: None) is None)
+        check("⭐ 不写笔记（没库也没桌面库）-> None",
+              main._spawn_note_worker(
+                  writer=_NoNotes(), ui=_UI(), stem=sess, qa_snapshot=lambda: [],
+                  live_pool=None, course="", api_key_val=None, trans={}, args=None,
+                  echo=lambda *_: None) is None)
+        main.spawn_note_worker = lambda stem, spec, **k: False
+        check("⭐⭐ 派生失败 -> None（调用方据此走进程内那条，不丢笔记）",
+              main._spawn_note_worker(
+                  writer=_W(), ui=_UI(), stem=sess, qa_snapshot=lambda: [],
+                  live_pool=None, course="", api_key_val=None, trans={}, args=None,
+                  echo=lambda *_: None) is None)
+    finally:
+        main.spawn_note_worker = orig
+        if saved is None:
+            os.environ.pop("CLASSLIVE_NOTE_WORKER", None)
+        else:
+            os.environ["CLASSLIVE_NOTE_WORKER"] = saved
+
+
 def main_() -> int:
     print("note_worker 判据（派生用替身）")
     for name, fn in [
@@ -293,6 +392,8 @@ def main_() -> int:
         ("outbox", t_outbox_written_only_on_success),
         ("跳过基础版", t_writer_skips_base_note_when_asked),
         ("开关", t_worker_enabled_switch),
+        ("通知 best-effort", t_notify_is_best_effort),
+        ("派生分岔判据", t_spawn_decision_wrapper),
         ("开机补死任务", t_resume_stale_note_jobs),
         ("笔记出箱入队", t_drain_note_outbox),
         ("开关登记", t_handbook_registers_switch),

@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import threading
 import time
@@ -223,6 +224,9 @@ def run(stem: str, *, root=None, log=None, heartbeat_s: float | None = None) -> 
     if out["ok"]:
         _outbox(stem, out["note"], root=root)
         _mark_journal(spec, out["note"])
+        # ⭐ 用户可能已经走了（这正是拆进程的意义）—— 完成后给一条系统通知。
+        _notify("笔记写好了",
+                f"{spec.get('course') or ''} · {pathlib.Path(out['note']).stem}")
         _jobs.finish(stem, _jobs.DONE, root=root, note=out["note"])
     else:
         _jobs.finish(stem, _jobs.FAILED, root=root, error=out["error"])
@@ -249,6 +253,29 @@ def _mark_journal(spec: dict, note: str) -> bool:
             _tm.journal_update(mk, steps={"note": "done"}, note_file=str(note or ""))
             hit += 1
         return bool(hit)
+    except Exception:                                     # noqa: BLE001
+        return False
+
+
+def _notify(title: str, body: str, *, runner=None) -> bool:
+    """系统通知（`osascript`）—— 笔记写完了用户人可能已经离开窗口。
+
+    ⚠️ worker 是**脱离 AppKit 的子进程**：没有 run loop、没有 NSApplication，
+       正经的 `UNUserNotificationCenter` 在这里用不了。`display notification`
+       是唯一不引入依赖、也不需要登录项的路。
+    ⚠️ 失败一律当没有（未授予通知权限 / 找不到 osascript / 超时）——
+       **笔记已经写好了**，通知只是锦上添花。
+    ⚠️ 文案不拼进 AppleScript 源里（同 `duty.SCRIPT` 的既有做法）：一条静态脚本 +
+       argv，没有转义面。
+    """
+    script = ('on run argv\n'
+              '  display notification (item 2 of argv) with title (item 1 of argv)\n'
+              'end run')
+    try:
+        run = runner or (lambda a: subprocess.run(
+            ["osascript", "-e", script, *a], capture_output=True, text=True, timeout=8))
+        p = run([str(title), str(body)])
+        return int(getattr(p, "returncode", 1) or 0) == 0
     except Exception:                                     # noqa: BLE001
         return False
 

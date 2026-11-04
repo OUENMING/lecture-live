@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import subprocess
 import time
 
 #: 任务状态。`running` 之外的一律不算「还在跑」。
@@ -191,6 +192,20 @@ def alive(stem: str, *, root=None, now=time.time, alive_fn=None) -> bool:
     return age < STALE_S
 
 
+def _is_zombie(pid: int) -> bool:
+    """僵尸进程（已经死了、只是没人 `wait`）—— `kill -0` 对它**照样成功**。
+
+    ⚠️ macOS 上 `ps -o stat=` 给 `Z` / `Z+`。取不到（ps 失败 / 没这列）当**不是**僵尸
+       —— 宁可多等一个超时，也不要把活进程当死的（后者会去 SIGKILL 一个正在写笔记的 worker）。
+    """
+    try:
+        out = subprocess.run(["ps", "-o", "stat=", "-p", str(int(pid))],
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+    except Exception:                                    # noqa: BLE001
+        return False
+    return bool(out) and out.upper().startswith("Z")
+
+
 def stop(stem: str, *, root=None, timeout: float = 6.0, now=time.time) -> bool:
     """请后台任务**停下来**（面板上的「停止」）。返回「真的发出信号了」。
 
@@ -198,6 +213,11 @@ def stop(stem: str, *, root=None, timeout: float = 6.0, now=time.time) -> bool:
        `upload.stop_drainer` 那条既有纪律（名字匹配会连带打死别的实例）。
     ⚠️ 先 `SIGTERM`：worker 装了 handler，会在**批次边界**停、并把已拿到的部分写成笔记
        （`obsidian_writer.close(cancel=…)`）。等 `timeout` 还不退才 `SIGKILL`。
+    ⚠️ **僵尸算死**：worker 被别的进程 `Popen` 出来之后，父进程没 `wait` 就会留一个
+       `Z` 状态的空壳，而 `kill -0` 对它照样成功 —— 不判这一条，每次「停止」都会
+       白等满 `timeout`（2026-11-04 实测：一个已经退出 5 秒的进程还在被当活的）。
+    ⚠️ 确认它真的没了之后，由**这里**把状态收成 `stopped`：被 SIGKILL 的 worker
+       没机会自己记一笔，留着 `running` + 旧心跳会让开机恢复再跑一遍。
     ⚠️ 永不抛：它可能跑在 UI 回调里。
     """
     import signal
@@ -206,7 +226,7 @@ def stop(stem: str, *, root=None, timeout: float = 6.0, now=time.time) -> bool:
         if str(j.get("state") or "") in _ENDED:
             return False
         pid = int(j.get("pid") or 0)
-        if not pid or pid == os.getpid() or not pid_alive(pid):
+        if not pid or pid == os.getpid() or not pid_alive(pid) or _is_zombie(pid):
             # 已经不在了 —— 顺手把状态收成 stopped（不然 `alive()` 会一直
             # 看到 running + 旧心跳，等 STALE_S 才自己过期）。
             finish(stem, STOPPED, root=root, now=now)
@@ -215,13 +235,15 @@ def stop(stem: str, *, root=None, timeout: float = 6.0, now=time.time) -> bool:
         deadline = float(now()) + max(0.0, float(timeout))
         import time as _t
         while _t.time() < deadline:
-            if not pid_alive(pid):
+            if not pid_alive(pid) or _is_zombie(pid):
+                finish(stem, STOPPED, root=root, now=now)
                 return True
             _t.sleep(0.15)
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
+        finish(stem, STOPPED, root=root, now=now)
         return True
     except Exception:                                    # noqa: BLE001
         return False

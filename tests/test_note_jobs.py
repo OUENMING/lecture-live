@@ -160,6 +160,27 @@ def t_stop_only_signals_recorded_pid() -> None:
         check("⭐⭐ 记录里是本进程 pid -> 不发信号（不许自尽）",
               NJ.stop("s2", root=d, now=clk, timeout=0.1) is False)
 
+        # 僵尸：已经退出、但父进程没 wait -> `kill -0` 照样成功。不许白等满超时。
+        import subprocess as _sp
+        z = _sp.Popen(["true"])
+        z.wait()                                          # 现在它是僵尸，直到被回收
+        # ⚠️ 这里已经被 wait 掉了，所以再造一个不 wait 的：
+        z2 = _sp.Popen(["true"])
+        import time as _t2
+        _t2.sleep(0.2)                                    # 让它跑完、进入僵尸
+        NJ.write("s4", {"state": NJ.RUNNING, "pid": z2.pid}, root=d, now=clk)
+        _t0 = _t2.time()
+        got4 = NJ.stop("s4", root=d, now=clk, timeout=3.0)
+        _dt = _t2.time() - _t0
+        try:
+            z2.kill()
+        except Exception:                                  # noqa: BLE001
+            pass
+        check("⭐⭐ 僵尸进程算死 —— 不白等满超时（实测 0.01 s 而不是 5 s）",
+              got4 is False and _dt < 1.0
+              and NJ.read("s4", root=d).get("state") == NJ.STOPPED,
+              f"{got4} {_dt:.2f}s {NJ.read('s4', root=d).get('state')}")
+
         # 已经结束 -> 什么都不做
         NJ.finish("s3", NJ.DONE, root=d, now=clk)
         check("⭐ 已经结束的任务 -> 不发信号", NJ.stop("s3", root=d, now=clk) is False)

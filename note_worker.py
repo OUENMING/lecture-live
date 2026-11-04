@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import threading
@@ -164,8 +165,14 @@ def build_writer(spec: dict, *, callbacks: dict | None = None):
 
 
 # ---------------------------------------------------------------- 跑
-def run(stem: str, *, root=None, log=None, heartbeat_s: float | None = None) -> dict:
-    """跑一节：读 spec → 写笔记 → 收工状态 → outbox。**永不抛**（返回 `{ok, note, error}`）。"""
+def run(stem: str, *, root=None, log=None, heartbeat_s: float | None = None,
+        cancel=None) -> dict:
+    """跑一节：读 spec → 写笔记 → 收工状态 → outbox。**永不抛**（返回 `{ok, note, error}`）。
+
+    `cancel`：一个 `threading.Event`（SIGTERM 那条路会置它）。置位后**在批次边界**
+    放弃精修 / 复习层，**但笔记照写**（用已经拿到的部分）—— 与 Ctrl+C 的语义逐字相同
+    （`obsidian_writer.close(cancel=…)` 的 docstring）。不传 = 不取消。
+    """
     out = {"ok": False, "note": "", "error": ""}
 
     def _say(s: str) -> None:
@@ -209,7 +216,7 @@ def run(stem: str, *, root=None, log=None, heartbeat_s: float | None = None) -> 
             _say(f"▶ {stem}：{spec.get('course')} · {spec.get('date')} · {w._n} 句")
             msg = w.close(ask=lambda _n: True,           # 收尾前已问过（用户说了要存）
                           qa=(spec.get("qa") or None),
-                          on_progress=_progress)
+                          on_progress=_progress, cancel=cancel)
             note = str(getattr(w, "vault_path", "") or "")
             out["note"] = note
             out["ok"] = bool(note) and pathlib.Path(note).is_file()
@@ -349,9 +356,24 @@ def main(argv=None) -> int:
             except Exception:                            # noqa: BLE001
                 pass
 
+    # ⭐ SIGTERM = 面板上那个「停止」/ 系统关机：**在批次边界停**，笔记照写。
+    #    ⚠️ 不装 handler 的话 python 的默认动作是立刻死 —— 盘上什么都没有
+    #    （同 `obsidian_writer` 里那两处 KeyboardInterrupt 护栏要防的事，
+    #     而信号只投递到主线程，所以在主线程信号 handler 里置位即可）。
+    cancel = threading.Event()
+
+    def _on_term(_sig, _frm):
+        cancel.set()
+        _log("⏹ 收到停止请求 —— 正把笔记写出来（再收到一次就强退）")
+
+    try:
+        signal.signal(signal.SIGTERM, _on_term)
+    except Exception:                                     # noqa: BLE001
+        pass
+
     rc = 0
     for stem in stems:
-        r = run(stem, root=jobs_root, log=_log)
+        r = run(stem, root=jobs_root, log=_log, cancel=cancel)
         _log(f"{'✅' if r['ok'] else '⚠'} {stem} {r['note'] or r['error']}")
         if not r["ok"]:
             rc = 1

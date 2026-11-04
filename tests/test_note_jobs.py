@@ -144,6 +144,27 @@ def t_active_lists_live_only() -> None:
               [r["stem"] for r in got] == ["live1"], str(got))
 
 
+def t_stop_only_signals_recorded_pid() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        clk = Clock()
+        # 记录里的 pid 不存在（真的不存在 —— 不替换 `os.kill`，那条 patch 会让
+        # `pid_alive` 跟着说谎，判据就成了自娱自乐）
+        NJ.write("s1", {"state": NJ.RUNNING, "pid": 999_999_999}, root=d, now=clk)
+        got = NJ.stop("s1", root=d, now=clk, timeout=0.1)
+        check("⭐ pid 已经不在 -> 不发信号，直接把状态收成 stopped（免得白等 180 s）",
+              got is False and NJ.read("s1", root=d).get("state") == NJ.STOPPED,
+              str((got, NJ.read("s1", root=d).get("state"))))
+
+        # 记录里是**自己** -> 绝不许发（那是自尽）
+        NJ.write("s2", {"state": NJ.RUNNING, "pid": os.getpid()}, root=d, now=clk)
+        check("⭐⭐ 记录里是本进程 pid -> 不发信号（不许自尽）",
+              NJ.stop("s2", root=d, now=clk, timeout=0.1) is False)
+
+        # 已经结束 -> 什么都不做
+        NJ.finish("s3", NJ.DONE, root=d, now=clk)
+        check("⭐ 已经结束的任务 -> 不发信号", NJ.stop("s3", root=d, now=clk) is False)
+
+
 def main() -> int:
     print("note_jobs 判据（注入时钟，不碰 AppKit）")
     for name, fn in [
@@ -155,6 +176,7 @@ def main() -> int:
         ("结束后的心跳不复活", t_heartbeat_does_not_resurrect),
         ("坏 stem / 写不进去", t_bad_stem_and_unwritable),
         ("active 只列活任务", t_active_lists_live_only),
+        ("停止只认记录里的 pid", t_stop_only_signals_recorded_pid),
     ]:
         print(f"\n--- {name} ---")
         try:

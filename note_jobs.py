@@ -191,6 +191,42 @@ def alive(stem: str, *, root=None, now=time.time, alive_fn=None) -> bool:
     return age < STALE_S
 
 
+def stop(stem: str, *, root=None, timeout: float = 6.0, now=time.time) -> bool:
+    """请后台任务**停下来**（面板上的「停止」）。返回「真的发出信号了」。
+
+    ⚠️ **只给任务记录里那个 pid 发信号**，绝不按进程名杀 —— 同
+       `upload.stop_drainer` 那条既有纪律（名字匹配会连带打死别的实例）。
+    ⚠️ 先 `SIGTERM`：worker 装了 handler，会在**批次边界**停、并把已拿到的部分写成笔记
+       （`obsidian_writer.close(cancel=…)`）。等 `timeout` 还不退才 `SIGKILL`。
+    ⚠️ 永不抛：它可能跑在 UI 回调里。
+    """
+    import signal
+    try:
+        j = read(stem, root=root)
+        if str(j.get("state") or "") in _ENDED:
+            return False
+        pid = int(j.get("pid") or 0)
+        if not pid or pid == os.getpid() or not pid_alive(pid):
+            # 已经不在了 —— 顺手把状态收成 stopped（不然 `alive()` 会一直
+            # 看到 running + 旧心跳，等 STALE_S 才自己过期）。
+            finish(stem, STOPPED, root=root, now=now)
+            return False
+        os.kill(pid, signal.SIGTERM)
+        deadline = float(now()) + max(0.0, float(timeout))
+        import time as _t
+        while _t.time() < deadline:
+            if not pid_alive(pid):
+                return True
+            _t.sleep(0.15)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        return True
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
 def active(*, root=None, now=time.time) -> list:
     """现在还在跑的 stem 列表（按心跳时间倒序）。给面板「后台任务」行用。"""
     out = []

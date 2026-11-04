@@ -182,7 +182,7 @@ def t_writer_skips_base_note_when_asked() -> None:
     import obsidian_writer as ow
     src = pathlib.Path(ow.__file__).read_text(encoding="utf-8")
     i = src.index("import note_render\n        base_stem")
-    seg = src[i:i + 900]
+    seg = src[i:i + 1500]
     check("⭐⭐ `close()` 里那次基础版落盘被 `_base_note` 挡住了",
           "if self._base_note:" in seg, seg[:200])
     w = ow.ObsidianWriter(vault=None, course="T", mode="no", base_note=False)
@@ -379,6 +379,31 @@ def t_spawn_decision_wrapper() -> None:
             os.environ["CLASSLIVE_NOTE_WORKER"] = saved
 
 
+def t_wrapup_card_never_claims_saved() -> None:
+    """后台模式下卡片不许说「收尾结束 / 已保存」—— 笔记那时还没写出来。
+
+    ⚠️ 这条是**源码判据**（`run()` 那个巨型收尾块没法在判据里真跑）——
+       它钉的是两个具体的错：
+       ① spawned 分支不设 `_box["msg"]` → `wrapup_done(_ok, msg or "收尾结束")`
+          把卡片上的「已交给后台」覆盖成一句假话；
+       ② spawned 分支不清 `_np_say` → `wrapup_progress_finish` 把一份**没量过任何
+          阶段耗时**的假样本写进 ETA 历史。
+    """
+    src = pathlib.Path(main.__file__).read_text(encoding="utf-8")
+    i = src.index("if _spawned is None:")
+    seg = src[i:i + 1500]
+    check("⭐⭐ 后台分支给了「已交给后台」的文案（不许落到『收尾结束』那条默认值）",
+          '_box["msg"]' in seg and "后台" in seg, seg[:160])
+    j = src.index("_npf = (locals().get(\"_np_say\")")
+    seg2 = src[j:j + 400]
+    check("⭐⭐ 后台模式不写 ETA 假样本（`_spawned is None` 才收口）",
+          "_spawned is None" in seg2, seg2[:160])
+    k = src.index("_spawned = None   # ⚠️")
+    check("⭐ `_spawned` 在分岔之前就定义（`give_up` 那条路也要能读）",
+          k < src.index("if not give_up:") + 2000 and k < src.index("if _spawned is None:"),
+          "")
+
+
 def main_() -> int:
     print("note_worker 判据（派生用替身）")
     for name, fn in [
@@ -394,6 +419,7 @@ def main_() -> int:
         ("开关", t_worker_enabled_switch),
         ("通知 best-effort", t_notify_is_best_effort),
         ("派生分岔判据", t_spawn_decision_wrapper),
+        ("卡片不说假话", t_wrapup_card_never_claims_saved),
         ("开机补死任务", t_resume_stale_note_jobs),
         ("笔记出箱入队", t_drain_note_outbox),
         ("开关登记", t_handbook_registers_switch),

@@ -4568,6 +4568,7 @@ def run(args) -> None:
                              f"{type(e).__name__}: {str(e)[:60]}")
 
             _cancel = threading.Event()
+            _spawned = None   # ⚠️ `give_up` 那条路进不了下面那块，收口处要读它
             if not give_up:
                 # ⚠️ 2026-10-12 起**卡上不再有 [跳过精修] 那个按钮**（精修默认不跑，
                 #    按钮没意义了）—— `wrapup_begin` 留着当口子，调用点不动。
@@ -4646,6 +4647,11 @@ def run(args) -> None:
                     except BaseException as e:            # noqa: BLE001
                         echo(f"⚠ 实时总结收尾失败（笔记照写）："
                              f"{type(e).__name__}: {str(e)[:80]}")
+                    # ⚠️ 必须给一句文案：`wrapup_done(_ok, msg or "收尾结束")` 在没有 msg
+                    #    时会把卡片上的「已交给后台」**覆盖成「收尾结束」** —— 而笔记
+                    #    其实还没写出来（假话）。见下面 `_done_ui` 那个调用点。
+                    _box["msg"] = ("🔁 笔记已交给后台生成 —— 可以关窗口，"
+                                   "写好后会通知你")
                 # ⚠️⚠️ **Ctrl+C 打不到 worker 上** —— Python 的信号 handler 只在主线程跑
                 #    （PEP 475），所以中断永远落在这一句 `_spin` 里。不接住的话异常从这里
                 #    穿出去，进程立刻退出，**把正在写盘的 daemon worker 连同写到一半的
@@ -4714,8 +4720,11 @@ def run(args) -> None:
             #    （2026-09-28 OCR 审计发现。）
             _ok = "err" not in _box
             # ⭐ 3.11：给进度模型收口 + 把本次各阶段耗时写进历史（卡片「预计还要」的样本）。
+            #    ⚠️ **后台模式不记**：这一节从没在本进程量过任何一个阶段的耗时，
+            #       收口写进去的是一份"几乎全是 0"的假样本 —— ETA 会被它带偏。
             try:
-                _npf = locals().get("_np_say") and getattr(ui, "wrapup_progress_finish", None)
+                _npf = (locals().get("_np_say") and _spawned is None
+                        and getattr(ui, "wrapup_progress_finish", None))
                 if callable(_npf):
                     _npf(_ok)
             except Exception:                             # noqa: BLE001

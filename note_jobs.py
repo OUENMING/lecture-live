@@ -260,7 +260,10 @@ def active(*, root=None, now=time.time) -> list:
             stem = p.stem
             if alive(stem, root=root, now=now):
                 j = read(stem, root=root)
-                out.append({"stem": stem, "stage": j.get("stage") or "",
+                # ⚠️ 课号在 `spec` 里 —— 面板那一行要显示「ECON10790」，从那里取；
+                #    没有 spec（旧记录 / 手工造的）就留空，显示层退回 stem。
+                course = str((j.get("spec") or {}).get("course") or "")
+                out.append({"stem": stem, "course": course, "stage": j.get("stage") or "",
                             "done": j.get("done"), "total": j.get("total"),
                             "started_at": j.get("started_at"), "updated": j.get("updated")})
     except Exception:                                # noqa: BLE001

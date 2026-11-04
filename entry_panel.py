@@ -36,6 +36,7 @@ import os
 import pathlib
 import re
 import threading
+import time
 import typing
 
 import courses
@@ -70,6 +71,11 @@ HAIRLINE = 0.5         # 描边（实测 0.5pt；scale 2 上正好 1 设备像�
 TITLE_H = 34.0
 PANEL_TITLE = "烤菠萝"      # 面板标题（2026-10-14 作者改名；菜单栏那项仍叫「开课前的准备…」，说的是它干什么）
 FOOT_H = 46.0
+#: 后台任务行（3.11 F）：有后台笔记在生成时，落点条上方多这一行。
+#: ⚠️ 高度是**预留的**（没有任务时整行隐藏、但空间还在）—— 面板高度在 build 时
+#:    就定死了，运行中长高/缩高要重排整棵树（`refresh()` 只重画卡片，不动窗口）。
+#:    宁可常驻 22pt 空白，也不要一个会在用户眼下跳动的窗口。
+BG_H = 22.0
 WIDTH = 680.0
 # 卡片区高度：**长到装下为止，但最多占屏幕 60%**。
 # ⚠️ 原来写死 420（= 4.3 张卡），于是「5 门课」就必有半张卡被切在边上 ——
@@ -885,6 +891,52 @@ def result_header(entry) -> str:
         #    塞进这行紧凑的 `　·　` 串里会把它撑爆）。
         parts.append("⚠️ 没跑完")
     return "　·　".join(parts)
+
+
+def bg_row_text(active, *, now=None) -> str:
+    """后台任务行的文字（**纯函数**，不碰 AppKit）。空列表 -> 空串（整行隐藏）。
+
+    形状：`后台生成笔记：ECON10790 · 复习层 · 已用 3:12`；多于一节时在末尾加「（共 N 节）」。
+    ⚠️ 阶段名走 `note_progress.STAGES` 的**唯一定义点**（`note_jobs` 存的就是那里的键）；
+       认不出的键原样显示 —— 不许显示空白（用户会以为卡死了）。
+    ⚠️ 时间只到分钟（`3:12`），且是**已用**不是「还要」—— 后台没有 ETA（没人在看表，
+       而且 ETA 的历史是主进程写的，worker 不读它）。
+    """
+    act = list(active or [])
+    if not act:
+        return ""
+    top = act[0]
+    stage = str(top.get("stage") or "")
+    label = stage
+    try:
+        import note_progress as _np
+        label = dict(_np.STAGES).get(stage, stage)
+    except Exception:                                     # noqa: BLE001
+        label = stage
+    course = str(top.get("course") or top.get("stem") or "")
+    # `note_jobs.active()` 不带 course（记录里没有）—— 从 stem 里认（`<日期>_<时间>_<课号>`）
+    if not top.get("course") and "_" in course:
+        course = course.rsplit("_", 1)[-1]
+    used = ""
+    if now is not None and top.get("started_at") is not None:
+        try:
+            used = _elapsed_text(max(0.0, float(now) - float(top["started_at"])))
+        except (TypeError, ValueError):
+            used = ""
+    parts = [f"后台生成笔记：{course or '这节课'}", label or "准备中"]
+    if used:
+        parts.append(f"已用 {used}")
+    line = "　·　".join(parts)
+    if len(act) > 1:
+        line += f"（共 {len(act)} 节）"
+    return line
+
+
+def _elapsed_text(s: float) -> str:
+    """秒 → `3:12` / `1:02:03`（同 `note_progress.elapsed_text` 的口径，不 import 它）。"""
+    total = max(0, int(s))
+    h, m, sec = total // 3600, (total % 3600) // 60, total % 60
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
 
 
 def _short_home(p: str) -> str:
@@ -2176,7 +2228,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    `h` 与视图的 y **用的是同一组常数**，不是各写一遍（`card_height` 那条纪律）。
     # ⭐ 2026-10-16（`PLAN-396` §1）：就绪那一格并进标题行，这里**不再有它就绪条那一行**的
     #    高度（原来 `READY_H` = 40pt）。就绪项没算出来时也走这条 —— 与改前逐点相同。
-    drop_y = PAD + FOOT_H + DROP_GAP
+    # ⭐ 3.11 F：后台任务行常驻预留（`BG_H`）—— 有任务时显示文字 + 「停止」，
+    #    没有时整行隐藏但**空间保留**（理由见 `BG_H`）。y 与高度同一组常数。
+    bg_y = PAD + FOOT_H + DROP_GAP
+    drop_y = bg_y + BG_H + DROP_GAP
     sc_y = drop_y + DROP_H + DROP_GAP
     body_h = fit_body(body_h, sc_y + 8.0 + TITLE_H + PAD,
                       _vis.size.height, _card_h)
@@ -3110,6 +3165,50 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     strip_holder["view"] = strip
     _strip_bg(CARD_FILL_A)
     ve.addSubview_(strip)
+
+    # ⭐ 3.11 F：**后台任务行**（落点条上方）。有任务时显示「后台生成笔记：… · 已用 …」
+    #    + 一颗「停止」；没有时整行隐藏（空间常驻，见 `BG_H`）。
+    #    ⚠️ 数据源是 `note_jobs.active()`（pid + 心跳判活，与恢复函数同一个定义点）——
+    #       面板只读它，不改状态。刷新挂在焦点守卫那 0.5 s 的拍子上（见 `_guard_tick`），
+    #       这样任务跑完/挂掉时这一行自己会消失，不会留下「生成中」的假话。
+    bg_holder: dict = {"label": None, "btn": None, "tick": 0, "stems": [],
+                       "root": None}
+    _bg_line = panel.make_label(
+        "", NSMakeRect(PAD + CARD_PAD, bg_y + 2.0, W_IN - 56.0, 16.0), 11.0, alpha=DIM)
+    _bg_line.setHidden_(True)
+    bg_holder["label"] = _bg_line
+    ve.addSubview_(_bg_line)
+
+    def _bg_stop(_sender=None):
+        """停掉后台任务（**只对任务记录里的 pid 发信号**，判据在 `note_jobs.stop`）。"""
+        import note_jobs as _nj
+        stems = list(bg_holder.get("stems") or [])
+        done = 0
+        for st in stems:
+            try:
+                if _nj.stop(st, root=bg_holder.get("root")):
+                    done += 1
+            except Exception:                             # noqa: BLE001
+                pass
+        set_status(f"已请后台停下（{done or '已不在'} 个任务）—— 写到一半的不会丢"
+                   if done else "后台任务已经不在了")
+        _later(refresh)
+
+    _bg_btn = panel.make_button(NSMakeRect(PAD + W_IN - 52.0, bg_y + 1.0, 52.0, 20.0))
+    _bg_btn.setBordered_(False)
+    _bg_btn.setTitle_("停止")
+    _bg_btn.setAttributedTitle_(panel.tinted_title("停止", 11.0, DIM))
+    _bg_tgt = panel.make_button_target(_bg_stop)
+    _bg_btn.setTarget_(_bg_tgt)
+    _bg_btn.setAction_("act:")
+    _bg_btn.setHidden_(True)
+    bg_holder["btn"] = _bg_btn
+    strip_targets.append(_bg_tgt)                          # 留住 target（弱引用）
+    ve.addSubview_(_bg_btn)
+    # ⚠️ 读端根也跟着面板走（探针 / 判据的 `state_root` 是隔离出来的）——
+    #    不传的话隔离世界里的面板会去读真 `~/.classlive/note-jobs`。
+    bg_holder["root"] = state_root
+    S["bg"] = bg_holder
 
     # 测试模式开关在胶囊菜单里 → 提示用满宽；就绪那一格没建出来、开关退回这里 → 让出一颗的位置。
     # ⚠️ 2026-10-16：判据不再是「放不放得下」（`test_mode_fits_ready` 已删 —— 那个宽度竞争
@@ -4358,6 +4457,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             _GUARD["win"] = None
             _GUARD["gen"] = _GUARD.get("gen", 0) + 1
             _GUARD["focus"] = ()
+            _GUARD["bg"] = None
+            _bg_h = S.pop("bg", None)
+            if isinstance(_bg_h, dict):            # 断「面板 → 标签/按钮 → win」那条
+                _bg_h["label"] = None
+                _bg_h["btn"] = None
+                _bg_h["stems"] = []
             # ⚠️ 落点条（批量入口）也要断 —— 它的 `_targets` 里那个 target 的
             #    `_fn` 是 `run_batch` → `_later(refresh)` → 闭包持有 `title_lbl`/`doc`
             #    → `ve` → `win`。与卡片那条**同一条环**，只是入口不同。
@@ -4851,7 +4956,39 @@ def _guard_start(win, focus_fields=()) -> None:
     """
     _GUARD["gen"] = _GUARD.get("gen", 0) + 1
     _GUARD.update(win=win, waits=0, focus=tuple(focus_fields))
+    _GUARD["bg"] = S.get("bg")
+    _GUARD["bg_tick"] = 0
     _guard_tick(_GUARD, _GUARD["gen"])
+
+
+def _bg_paint(holder) -> None:
+    """把后台任务行刷成当前状态（**模块级 + 只碰传进来的那几个视图**）。
+
+    ⚠️ 数据源 `note_jobs.active()`（pid + 心跳判活）—— 与恢复函数**同一个定义点**；
+       面板这里只读，不改任何任务状态。
+    ⚠️ 任务跑完/挂掉 → 文字为空 → 整行隐藏。**不许留下「生成中」的假话**
+       （那正是这个功能要消灭的东西）。
+    ⚠️ 任何异常都只让这一拍不生效（`try` 在调用方）—— 面板不能因为读任务记录而坏。
+    """
+    if not holder:
+        return
+    lb, btn = holder.get("label"), holder.get("btn")
+    if lb is None or btn is None:
+        return
+    try:
+        import note_jobs as _nj
+        act = _nj.active(root=holder.get("root"))
+    except Exception:                                         # noqa: BLE001
+        act = []
+    text = bg_row_text(act, now=time.time())
+    holder["stems"] = [str(x.get("stem") or "") for x in act if x.get("stem")]
+    try:
+        lb.setStringValue_(text)
+        lb.setHidden_(not text)
+        btn.setHidden_(not text)
+        holder["tick"] = holder.get("tick", 0) + 1
+    except Exception:                                         # noqa: BLE001
+        pass
 
 
 def _guard_tick(state: dict, gen: int) -> None:
@@ -4874,6 +5011,11 @@ def _guard_tick(state: dict, gen: int) -> None:
         visible = False
     if visible:
         state["waits"] = 0
+        # ⭐ 3.11 F：后台任务行跟着这一拍刷新（2 拍 ≈ 1 s —— 不用自己再起一条链子）。
+        #    判据全在 `_bg_paint`；这里只负责"什么时候看"。
+        state["bg_tick"] = state.get("bg_tick", 0) + 1
+        if state["bg_tick"] % 2 == 0:
+            _bg_paint(state.get("bg"))
         try:
             if win.isKeyWindow() and not _win_is_editing(win):
                 _win_release_focus(win)

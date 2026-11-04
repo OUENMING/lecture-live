@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import pathlib
 import sys
+import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
@@ -78,6 +79,23 @@ def main() -> int:
           E.card_title(R(course="SOC10020", title="SOC10020 Introduction to Sociology(社会学导论)")))
     check("纯英文括号不动", E.card_title(R(title="ECON10740 Economics (Part 2)"))
           == "ECON10740 Economics (Part 2)")
+
+    print("\n--- ①b 后台任务行（3.11 F）---")
+    _act = [{"stem": "2026-11-04_160000_ECON10790", "course": "ECON10790",
+             "stage": "review", "started_at": 1000.0}]
+    _txt = E.bg_row_text(_act, now=1192.0)
+    check("⭐⭐ 有任务 -> 课号 + 阶段 + 已用时间",
+          "ECON10790" in _txt and "复习层" in _txt and "3:12" in _txt, _txt)
+    check("⭐ 没有任务 -> 空串（整行隐藏，不留假话）", E.bg_row_text([], now=1.0) == "")
+    check("⭐⭐ 认不出的阶段也显示原文，不许空白",
+          E.bg_row_text([{"stem": "x_ECON1", "stage": "weird"}]) .find("weird") >= 0,
+          E.bg_row_text([{"stem": "x_ECON1", "stage": "weird"}]))
+    check("⭐ 多节 -> 末尾标共几节", "共 2 节" in E.bg_row_text(_act + [{"stem": "a"}]))
+    check("⭐ 没有 course 字段 -> 从 stem 尾段认课号",
+          "ECON10790" in E.bg_row_text([{"stem": "2026-11-04_160000_ECON10790",
+                                         "stage": "base"}]),
+          E.bg_row_text([{"stem": "2026-11-04_160000_ECON10790", "stage": "base"}]))
+    check("⭐ 时间格式：小时位", E._elapsed_text(3723) == "1:02:03", E._elapsed_text(3723))
 
     print("\n--- ② ⭐「未知」与「零」必须显示成两样 ---")
     zero = E.readiness_line(R(terms=0, materials=0))
@@ -1069,10 +1087,21 @@ def _chip_helpers():
         return out
 
     def chip_of(h):
-        """标题行那颗胶囊 = 面板上唯一一颗 y > 60 的 `NSButton`（搜索框不是 `NSButton`）。"""
+        """标题行那颗胶囊 = 面板上唯一一颗**贴着窗口顶部**的 `NSButton`。
+
+        ⚠️ 原来判的是 `y > 60`（绝对坐标）—— 2026-11-04 加了「后台任务」行
+           （落点条上方那颗「停止」，y ≈ 75），于是面板上有**两颗**都满足，
+           这条判据当场把所有胶囊断言变成「没有胶囊」。
+           → 改成**相对窗口高度**：标题行在 `h - PAD - TITLE_H + 2.75`
+             （≈ 顶边往下 51pt），底部那几颗永远到不了。
+        """
+        try:
+            top = float(h.window.frame().size.height)
+        except Exception:                                     # noqa: BLE001
+            top = 1e9
         got = [v for v in walk(h.window.contentView(), [])
                if isinstance(v, NSButton) and not isinstance(v, NSSearchField)
-               and float(v.frame().origin.y) > 60.0]
+               and float(v.frame().origin.y) > top - 80.0]
         return got[0] if len(got) == 1 else None
 
     def items_of(menu):
@@ -3256,6 +3285,60 @@ def _add_wiring_section() -> None:
                 h.close()
             except Exception:                                 # noqa: BLE001
                 pass
+
+    _bg_row_section()
+
+
+def _bg_row_section() -> None:
+    """㉔ 后台任务行（3.11 F）：真建窗，钉**接线**（读任务 → 显示 → 停止按钮）。"""
+    try:
+        from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
+                            NSButton)
+    except Exception as e:                                        # noqa: BLE001
+        check("AppKit 可用（这一节要真窗口）", False, f"{type(e).__name__}: {e}")
+        return
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory)
+    import note_jobs as NJ
+
+    print("\n--- ㉔ 后台任务行 ---")
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        stem = "2026-11-04_160000_ECON10790"
+        NJ.claim(stem, root=root, spec={"course": "ECON10790"})
+        h = E.build(glossary=root / "g.txt", sessions_dir=root / "s",
+                    state_root=root, on_start=lambda c: None,
+                    on_test_mode=lambda on: True, on_cloud_asr=lambda on: True,
+                    cloud_asr=True)
+        try:
+            check("面板建起来了", h is not None)
+            bg = E.S.get("bg")
+            check("⭐ 面板持有后台行（label + 停止按钮）",
+                  bool(bg) and bg.get("label") is not None and bg.get("btn") is not None)
+            E._bg_paint(bg)
+            check("⭐⭐ 有活任务 -> 这一行显示课号（不是空白）",
+                  not bg["label"].isHidden()
+                  and "ECON10790" in (bg["label"].stringValue() or ""),
+                  repr(bg["label"].stringValue()))
+            check("⭐ 「停止」按钮同时出现", not bg["btn"].isHidden())
+            check("⭐ 停止按钮的 target 活着（弱引用坑：没挂住 = 点了没反应）",
+                  bg["btn"].target() is not None)
+            # 点停止：记录里是本进程 pid -> `note_jobs.stop` 拒绝发信号（见它的判据），
+            # 只把状态收成 stopped。这里不真点按钮（那要事件循环），直接打桩点 _bg_stop。
+            bg["btn"].target().clicked_(bg["btn"])
+            E._bg_paint(bg)
+            check("⭐⭐ 停止之后这一行**自己消失**（不许留下「生成中」的假话）",
+                  bg["label"].isHidden() and bg["btn"].isHidden(),
+                  repr(bg["label"].stringValue()))
+            check("⭐ 停止按钮真的调到了 `note_jobs.stop`（状态落了 stopped）",
+                  NJ.read(stem, root=root).get("state") in (NJ.STOPPED, NJ.FAILED),
+                  str(NJ.read(stem, root=root).get("state")))
+        finally:
+            try:
+                h.close()
+            except Exception:                                     # noqa: BLE001
+                pass
+        check("关掉面板后不残留后台行（跨面板的模块级状态）", E.S.get("bg") is None)
 
 
 if __name__ == "__main__":

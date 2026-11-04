@@ -256,10 +256,17 @@ class Segmenter:
         #                `SileroVad.reset`）。正常为个位数/节；很高 = 状态漂移频繁。
         #   blind_dropped 因"判非语音而从没起段"被丢掉的块数（**只统计有语音窗的块**）：
         #                这是 `dropped` **看不见**的那一类真实丢内容（见 `accept`）。
+        # ⭐ 3.11：`cuts` 这个名字会被读成「总切段数」，实际只是**静音断句**。
+        #   旧键照发（一个版本的新旧并存），另给两个说人话的：
+        #   silence_cuts   = 静音断句（同 `cuts`）
+        #   total_cuts     = silence_cuts + hard_cuts（11-03：175 + 165 = 340）
+        #   blind_dropped_blocks = 同 `blind_dropped`（`dropped=0` 不等于没丢）
         self.diag = {"cuts": 0, "hard_cuts": 0, "dropped": 0,
                      "dropped_s": 0.0, "weak_blocks": 0,
                      "vad_resets": 0, "blind_dropped": 0,
-                     "valley_back_s": 0.0, "sentence_cuts": 0}
+                     "valley_back_s": 0.0, "sentence_cuts": 0,
+                     "silence_cuts": 0, "total_cuts": 0,
+                     "blind_dropped_blocks": 0}
 
     @property
     def dur(self) -> float:
@@ -361,6 +368,7 @@ class Segmenter:
                     _oc, _or = self._pre_roll.popleft()
                     if _or > 0.0:
                         self.diag["blind_dropped"] += 1
+                        self.diag["blind_dropped_blocks"] += 1
                 self._blind_s += CHUNK_DUR
                 if self._blind_s >= RESET_AFTER_SILENCE_S:
                     self._blind_s = 0.0
@@ -405,6 +413,8 @@ class Segmenter:
                 self.diag["hard_cuts"] += 1
             else:
                 self.diag["cuts"] += 1
+                self.diag["silence_cuts"] += 1
+            self.diag["total_cuts"] += 1
             buf = self._buf().copy()
             rest = buf[:0]
             cut = None

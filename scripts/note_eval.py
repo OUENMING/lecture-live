@@ -134,20 +134,75 @@ def arith_equations(text: str) -> list:
     return out
 
 
+def _div_wrong(text: str) -> bool:
+    """文本里的除法/口播断言有没有**真算错**的（`note_math._DIV` 同一只正则 + half-up）。"""
+    try:
+        import note_math as nm
+    except Exception:                                          # noqa: BLE001
+        return False
+    s = str(text or "")
+    for m in nm._DIV.finditer(s):
+        if nm.is_sum_term(s, m.start("a")):
+            continue
+        try:
+            a, b, c = float(m.group("a")), float(m.group("b")), float(m.group("c"))
+        except ValueError:
+            continue
+        if not b:
+            continue
+        d_s = m.group("d")
+        if d_s:
+            try:
+                d = float(d_s)
+            except ValueError:
+                continue
+            if not d:
+                continue
+            claim_v = c / d
+            if abs(claim_v - a / b) > 1e-3 * max(1.0, abs(claim_v)):
+                return True
+            continue
+        dec = len(m.group("c").split(".")[1]) if "." in m.group("c") else 0
+        if abs(nm._round_half_up(a / b, dec) - c) > 1e-9:
+            return True
+    return False
+
+
 def correction_audit(checks: list) -> dict:
     """「已修正」（`status == "mismatch"`）逐条复核 → 分级 + 明细。
 
     分级（机械能判的那部分）：
+      · `corrected`    —— 三道核回改过正文（`note_guards.correct_mismatches` 落的
+                          `corrected`）→ 单列，不混进下面三种（它已被算法处理过）；
       · `wrong`        —— 断言里的等式**算得对**（模型没算错），却被改了 → 假修正；
       · `justified`    —— 断言里有一条等式算错了 → 改得有理；
       · `unverifiable` —— 提不出等式（纯文字断言）→ **列出来给人看**，不假装判过。
     """
     rows: list = []
-    n = {"wrong": 0, "justified": 0, "unverifiable": 0}
+    n = {"wrong": 0, "justified": 0, "unverifiable": 0, "corrected": 0}
     for c in (checks or []):
         if not isinstance(c, dict) or c.get("status") != "mismatch":
             continue
         claim = str(c.get("claim") or "")
+        if c.get("corrected"):
+            # ⭐ 复核**回改本身**：断言里得真有算错的式子 —— 否则就是「假更正」
+            #    （把对的改坏，例如把 `50/100=50%` 的 50 换成 0.5）。
+            eqs = arith_equations(claim)
+            div_wrong = _div_wrong(claim)
+            wrong = div_wrong or any(not e["ok"] for e in eqs)
+            if not eqs and not div_wrong:
+                verdict = "unverifiable"          # 提不出等式：列给人看，不假装判过
+            elif wrong:
+                verdict = "corrected"             # 断言里真有算错的式子 → 回改有理
+            else:
+                verdict = "wrong"                 # 本来算得对却被改 → 假更正
+            n[verdict] += 1
+            rows.append({"verdict": verdict, "claim": claim,
+                         "recomputed": str(c.get("recomputed") or ""),
+                         "original": str(c.get("original") or ""),
+                         "replacement": str(c.get("replacement") or ""),
+                         "equations": [e["expr"] for e in eqs]})
+            continue
         eqs = arith_equations(claim)
         if not eqs:
             verdict = "unverifiable"
@@ -633,6 +688,8 @@ def score(key: str, d: pathlib.Path, *, one: dict, data, entries: list, elapsed:
                    "wrong_correction": aud["wrong"],
                    "justified": aud["justified"],
                    "unverifiable": aud["unverifiable"],
+                   # ⭐ C5（2026-11-03）：三道核**回改过正文**的条数（单列，不算"未修正"）。
+                   "corrected": aud["corrected"],
                    # ⭐ 收窄挡下的条数（作者第六轮第 1 条）：模型本想把它们判成
                    #   「已修正」/「通过」，被口径降成未核对。**基线没有这一栏**
                    #   （那时代码不降级），所以这列非 0 = 收窄真的在起作用。

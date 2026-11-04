@@ -9,7 +9,10 @@
 import json
 import os
 import re
+import subprocess
 import sys
+import textwrap
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -165,7 +168,9 @@ class ReviewCall(unittest.TestCase):
         seen = []
         nv.review(entries(nv.REVIEW_CHUNK * 2), chat=lambda s, u, m: {},
                   on_progress=lambda st, d, t: seen.append((st, d, t)))
-        self.assertEqual(seen, [("review", 0, 2), ("review", 1, 2)])
+        # ⭐ 3.10.6：先报 0/total，之后按**完成数**递增（不是"正在等第几块"）。
+        self.assertEqual(seen[0], ("review", 0, 2))
+        self.assertEqual(sorted(seen[1:]), [("review", 1, 2), ("review", 2, 2)])
 
 
 class Align(unittest.TestCase):
@@ -656,6 +661,37 @@ class ChunkBudget(unittest.TestCase):
         self.assertEqual(int(m.group(1)), 720)      # 默认按 3 分钟
 
 
+class ReviewBudgetExit(unittest.TestCase):
+    """⭐ 3.11：`review` 预算到点返回后，卡在 `chat` 里的块不许把**进程退出**拖住。
+
+    ⚠️ 红证据（改前实测）：预算 0.3 s、chat 睡 3 s → `review` 0.31 s 返回，进程
+       3.10 s 才退出（标准库退出时 join 工作线程）。生产里 `chat` 单次上限 90 s。
+    """
+
+    def test_到点返回后进程不被睡眠线程拖住(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        code = textwrap.dedent(f"""
+            import sys, time
+            sys.path.insert(0, {root!r})
+            import note_v2 as nv
+            nv.REVIEW_TOTAL_BUDGET_S = 0.3
+            def chat(system, user, max_tokens):
+                time.sleep(3)
+                return {{}}
+            t0 = time.monotonic()
+            nv.review([{{"ts": "13:00:0%d" % i, "en": "sentence %d." % i}}
+                       for i in range(3)], chat=chat)
+            print("RETURNED", round(time.monotonic() - t0, 2))
+        """)
+        t0 = time.monotonic()
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                           text=True, timeout=30)
+        dt = time.monotonic() - t0
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn("RETURNED", p.stdout)
+        self.assertLess(dt, 2.5, f"进程退出被卡住的块拖住了：{dt:.1f}s（chat 睡 3 s）")
+
+
 class QaTiers(unittest.TestCase):
     """三档自测（F7②）：基础/中等/挑战 各取 ≤2，档序固定，`tier` 归一落到数据上。"""
 
@@ -885,6 +921,32 @@ class AnnounceTerms(unittest.TestCase):
         rev = {"sections": [{"prose": ["随便说点什么。"]}]}
         self.assertEqual(nv.announce_terms_in_review(rev), rev)
 
+    def test_review没术语时纲要仍会自己括注(self):
+        """⚠️ 3.10.6 回归：review 没产出术语时 `state["terms"]` 必须是**空表**——
+        纲要渲染据此退回自带的 `_inline_terms`；若硬传 `terms_done=True`，
+        纲要里一个术语括注都不会有（review 空 = 常见：只拿到转录的会话）。"""
+        st: dict = {}
+        nv.announce_terms_in_review({"sections": [{"prose": ["随便说点什么。"]}]},
+                                    en_first=True, state=st)
+        self.assertEqual([], st.get("terms"))
+
+    def test_纲要也英文化_与讲解共用seen(self):
+        """⭐ 3.10.6 P1-1：md 的「课堂纲要」也走同一份术语英文化，seen 与 review 共用。"""
+        rev = {"overview_long": ["先看边际成本。"],
+               "sections": [{"prose": ["再说边际成本。"],
+                             "terms": [{"en": "marginal cost", "zh": "边际成本"}]}]}
+        st: dict = {}
+        got = nv.announce_terms_in_review(rev, en_first=True, state=st)
+        self.assertIn("marginal cost", got["overview_long"][0])
+        out = nv.announce_terms_in_outline(
+            {"chapters": [{"title_zh": "边际成本",
+                           "sentences": [{"zh": "边际成本决定价格。"}]}]},
+            state=st, en_first=True)
+        self.assertIn("marginal cost", out["chapters"][0]["title_zh"])
+        self.assertIn("marginal cost", out["chapters"][0]["sentences"][0]["zh"])
+        self.assertNotIn("（边际成本）", out["chapters"][0]["sentences"][0]["zh"],
+                         "seen 共用：纲要里不许再括注一次")
+
 
 class Anki(unittest.TestCase):
     def test_只导术语_自测与公式(self):
@@ -933,6 +995,22 @@ class RenderShape(unittest.TestCase):
         self.assertLess(i_quick, i_kc)
         self.assertLess(i_kc, i_term)
         self.assertLess(i_term, i_misc)
+
+    def test_review没术语时纲要自己括注(self):
+        """⚠️ 3.10.6 回归（端到端）：review 为空时，纲要里仍要有「中文（English）」——
+        走的是 `_render_outline_section` 自带的 `_inline_terms`，不是 review 那份。"""
+        d = self._data(
+            review={},
+            chapter_items={"windows": [], "deadlines": [], "atoms": [],
+                           "chapters": [{"status": "final", "id": 0,
+                                         "title_zh": "成本函数",
+                                         "t0": "13:16:28", "t1": "13:20:00",
+                                         "sentences": [{
+                                             "zh": "影子价格决定配置。",
+                                             "en": "The shadow price decides allocation.",
+                                             "terms": [["shadow price", "影子价格"]]}]}]})
+        out = nr.render(d)
+        self.assertIn("影子价格（shadow price）", out)
 
     def test_详细版里那几层一件不少(self):
         """⭐ 作者第六轮第 6 条：md 变简版，**丢掉的那几层必须在 HTML 里**。
@@ -1092,6 +1170,31 @@ class RenderShape(unittest.TestCase):
     def test_checks_headline_空台账不印(self):
         self.assertEqual("", nv.checks_headline([]))
         self.assertEqual("", nv.checks_headline(None))
+
+    def test_已更正与对不上分开计数_页头同一口径(self):
+        """⭐ C5（2026-11-03）：已回改正文的（corrected）不算「对不上」；两档分开报。"""
+        checks = [{"claim": "a+b=3", "how": "x", "status": "ok"},
+                  {"claim": "5.3÷3=2.89", "how": "y", "status": "mismatch",
+                   "recomputed": "5.3/3 ≈ 1.767", "corrected": True,
+                   "original": "2.89", "replacement": "1.767"},
+                  {"claim": "AC(5)=28", "how": "z", "status": "mismatch"},
+                  {"claim": "q", "how": "w", "status": "unchecked"}]
+        s = nv.checks_summary(checks)
+        self.assertEqual(1, s["n_fixed"])
+        self.assertEqual(1, s["n_bad"])
+        self.assertEqual(3, s["n_checked"])
+        head = nv.checks_headline(checks)
+        self.assertIn("1 处已更正", head)
+        self.assertIn("1 处对不上", head)
+        self.assertIn("3 处已核", head)
+
+    def test_同一claim两行已更正只算一处(self):
+        """机械核 / 模型核各一行、同一句 —— 台账按 claim 去重（一处正文只算一处）。"""
+        checks = [{"claim": "5.3÷3=2.89", "how": "x", "status": "mismatch",
+                   "corrected": True, "original": "2.89", "replacement": "1.767"},
+                  {"claim": "5.3÷3=2.89", "how": "y", "status": "mismatch",
+                   "corrected": True, "original": "2.89", "replacement": "1.767"}]
+        self.assertEqual(1, nv.checks_summary(checks)["n_fixed"])
 
     def test_自测列几题就说列了几题(self):
         """F13 #3：列 6 题却说"上面列了 5 题"（列表用 6、计数用 5）。"""
@@ -2177,6 +2280,34 @@ class AnnounceTermsEn(unittest.TestCase):
     def test_默认不改变旧行为(self):
         got = nv.announce_terms("先讲泻流。", [("泻流", "effusion")], set())
         self.assertEqual(got, "先讲泻流（effusion）。", "en_first 未开 = 2026-10-18 口径")
+
+
+class ReviewStats(unittest.TestCase):
+    """⭐ 3.11：复习层成败账（`blocks.review`）—— 全失败时 `review()` 返回 `{}`，
+    总块数只能从进度回调（`_prog("review", 0, N)`）留下的 `review_total` 取。"""
+
+    def _w(self):
+        import obsidian_writer as ow
+        return ow.ObsidianWriter(None, "ECON10730", mode="no")
+
+    def test_全失败时用进度总块数(self):
+        w = self._w()
+        w._note_stats["review_total"] = 8
+        w._record_review_stats({})
+        self.assertEqual(w.note_stats(), {"review_total": 8, "review_ok": 0,
+                                          "review_failed": 8, "review_generated": False})
+
+    def test_部分失败按_chunk_stats_算(self):
+        w = self._w()
+        w._note_stats["review_total"] = 8
+        w._record_review_stats({"sections": [{"id": 1}],
+                                "chunk_stats": {"n": 8, "failed": [2, 5]}})
+        self.assertEqual(w.note_stats(), {"review_total": 8, "review_ok": 6,
+                                          "review_failed": 2, "review_generated": True})
+
+    def test_没跑复习层是全零(self):
+        self.assertEqual(self._w().note_stats(), {"review_total": 0, "review_ok": 0,
+                                                  "review_failed": 0, "review_generated": False})
 
 
 if __name__ == "__main__":

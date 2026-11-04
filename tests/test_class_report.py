@@ -492,7 +492,8 @@ class StreamBlock(unittest.TestCase):
         return ev
 
     def test_block_is_surfaced_and_rendered(self):
-        st = {"engine": "soniox", "fallback_reason": "", "sealed_n": 2,
+        st = {"engine": "soniox", "model": "stt-rt-v6", "fallback_reason": "", "sealed_n": 2,
+              "endpoints_n": 7, "endpoints_between_n": 3,
               "seal_latency_s": {"p50": 0.9, "p90": 1.4, "n": 2},
               "terms_n": 100, "terms_dropped": 3}
         res = CR.build_report(_write(self._ev(st)), ks=(None,))
@@ -500,6 +501,8 @@ class StreamBlock(unittest.TestCase):
         txt = CR.render(res)
         self.assertIn("Soniox 流", txt)
         self.assertIn("未退回", txt)
+        self.assertIn("model=stt-rt-v6", txt)
+        self.assertIn("端点 7 个（句间 3）", txt)
         self.assertIn("封口 2 句", txt)
         self.assertIn("p50 0.9", txt)
         self.assertIn("截 3", txt)

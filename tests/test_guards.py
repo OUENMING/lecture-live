@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import note_guards as ng          # noqa: E402
 import note_ledger as nl          # noqa: E402
 import note_math as nm            # noqa: E402
+import note_v2 as nv              # noqa: E402
 
 
 class Speculation(unittest.TestCase):
@@ -543,6 +544,11 @@ class Wiring(unittest.TestCase):
             self.assertIn(key, src, f"{key} 没接线")
         self.assertLess(src.index("引用逐字核对"), src.index("核算结果落正文"),
                         "annotate 必须在清理链的最末（标注不许进串讲/scrub 的输入）")
+        # ⭐ C5（2026-11-03）：回改必须早于清理链 —— 速览/串讲/跨节矛盾照改后的正文写。
+        self.assertIn("note_guards.correct_mismatches", src, "C5 回改没接线")
+        self.assertLess(src.index("note_guards.correct_mismatches"),
+                        src.index("例题返修"),
+                        "correct_mismatches 必须在清理链之前（速览/跨节矛盾照改后的正文写）")
 
     def test_prompt_里有两条纪律(self):
         import note_v2
@@ -566,8 +572,11 @@ class Wiring(unittest.TestCase):
 
 
 class AnnotateMismatch(unittest.TestCase):
-    """2026-10-18 Δ：三道核的 mismatch 必须**落到正文原位**（作者看截图抓的）——
-    原来只进文末折叠清单，正文照样把错算术当事实印；清单里还写着"已修正"。"""
+    """2026-10-18 Δ ①：三道核的 mismatch 必须**落到正文原位**（作者看截图抓的）——
+    原来只进文末折叠清单，正文照样把错算术当事实印；清单里还写着"已修正"。
+
+    ⭐ C5（2026-11-03）：拆成两步 —— `correct_mismatches`（早跑，只回改能算准的）+
+    `annotate_mismatches`（链尾，只标没改掉的 ⚠）。这里按产线顺序两步一起跑。"""
 
     REAL = ("首先，我们计算了某个数值：5.3除以3，得到约2.89。这个数值是平均成本在特定产量下的值。"
             "具体来说，平均成本函数为AC(q)= (60q+500)/q？但课上只给了片段："
@@ -575,44 +584,80 @@ class AnnotateMismatch(unittest.TestCase):
     MECH = {"claim": REAL, "status": "mismatch", "recomputed": "5.3/3 ≈ 1.767",
             "how": "5.3÷3=1.767，不是2.89"}
 
-    def test_错除法那一段在句子后面原位标出(self):
-        out, _, warns = ng.annotate_mismatches({"sections": [{"prose": [self.REAL]}],
-                                                "checks": [dict(self.MECH)]})
-        got = out["sections"][0]["prose"][0]
-        self.assertIn("得到约2.89。（⚠ 数字对不上：5.3÷3=1.767，不是2.89）这个数值", got)
-        self.assertTrue(out["checks"][0].get("annotated"))
-        self.assertEqual(1, got.count("数字对不上"))
-        self.assertTrue(warns and "1 处" in warns[0], warns)
+    def _run(self, rev):
+        """产线顺序：先回改（早），再标 ⚠（链尾）。返回 (review, warns)。"""
+        out, _, w1 = ng.correct_mismatches(rev)
+        out, _, w2 = ng.annotate_mismatches(out)
+        return out, list(w1) + list(w2)
 
-    def test_机械核与模型核同一句只标一次(self):
-        """同一条断言可能同时有机械核行与模型核行（两行 how 不同）—— 页面上只许一个 ⚠。"""
+    def test_错除法那一段在正文原位改成正确值(self):
+        out, warns = self._run({"sections": [{"prose": [self.REAL]}],
+                                "checks": [dict(self.MECH)]})
+        got = out["sections"][0]["prose"][0]
+        # ⭐ C5（2026-11-03）：能算准的回改正文；原写值留在括注里，读者看得到改了什么。
+        self.assertIn("得到约1.767", got)
+        self.assertIn("（已更正：原写 2.89 → 1.767）", got)
+        self.assertTrue(out["checks"][0].get("corrected"))
+        self.assertEqual("2.89", out["checks"][0].get("original"))
+        self.assertEqual("1.767", out["checks"][0].get("replacement"))
+        self.assertEqual(1, got.count("已更正"))
+        self.assertTrue(any("1 处" in w for w in warns), warns)
+
+    def test_机械核与模型核同一句只改一次(self):
+        """同一条断言可能同时有机械核行与模型核行（两行 how 不同）—— 正文只许改一次。"""
         rows = [dict(self.MECH),
                 {"claim": self.REAL, "status": "mismatch", "recomputed": "5.3/3≈1.767",
                  "how": "5.3除以3约1.77，不是2.89"}]
-        out, _, _ = ng.annotate_mismatches({"sections": [{"prose": [self.REAL]}], "checks": rows})
+        out, _ = self._run({"sections": [{"prose": [self.REAL]}], "checks": rows})
         got = out["sections"][0]["prose"][0]
-        self.assertEqual(1, got.count("数字对不上"))
+        self.assertEqual(1, got.count("已更正"))
         self.assertTrue(all(r.get("annotated") for r in out["checks"]))
+        self.assertTrue(all(r.get("corrected") for r in out["checks"]),
+                        "同一句的第二行也记 corrected（台账按 claim 去重）")
 
     def test_机械核与标注是一条链(self):
-        """从真句子出发：机械核出 `mismatch` → 标注落进正文（端到端，不起模型）。"""
+        """从真句子出发：机械核出 `mismatch` → 正文回改（端到端，不起模型）。"""
         rev = {"sections": [{"prose": [self.REAL]}]}
         rows = [r for r in nm.check_review(rev) if "5.3" in r["claim"]]
         self.assertEqual(["mismatch"], [r["status"] for r in rows])
-        out, _, _ = ng.annotate_mismatches({**rev, "checks": rows})
-        self.assertIn("数字对不上：5.3÷3=1.767，不是2.89", out["sections"][0]["prose"][0])
+        out, _ = self._run({**rev, "checks": rows})
+        self.assertIn("得到约1.767", out["sections"][0]["prose"][0])
+
+    def test_减法错值也回改(self):
+        """⭐ C5：`0.160−0.667=0.33`（应为 −0.507）—— 正文改成重算值，原写留在括注里。"""
+        rev = {"sections": [{"prose": ["先算这个：0.160−0.667=0.33。后面继续。"]}],
+               "checks": [{"claim": "0.160−0.667=0.33", "status": "mismatch",
+                           "recomputed": "0.16-0.667 ≈ -0.507",
+                           "how": "0.16−0.667=-0.507，不是0.33"}]}
+        out, warns = self._run(rev)
+        got = out["sections"][0]["prose"][0]
+        self.assertIn("0.160−0.667=-0.507", got)
+        self.assertIn("（已更正：原写 0.33 → -0.507）", got)
+        self.assertTrue(out["checks"][0].get("corrected"))
+        self.assertTrue(any("更正" in w for w in warns), warns)
+
+    def test_重算值没说清就不改正文(self):
+        """C5 的边界：重算值里没有数（`x`）→ 退回标 ⚠，绝不猜。"""
+        rev = {"sections": [{"prose": ["先算这个：0.160−0.667=0.33。"]}],
+               "checks": [{"claim": "0.160−0.667=0.33", "status": "mismatch",
+                           "recomputed": "x", "how": "不知道"}]}
+        out, _ = self._run(rev)
+        got = out["sections"][0]["prose"][0]
+        self.assertIn("0.33", got)
+        self.assertIn("数字对不上", got)
+        self.assertFalse(out["checks"][0].get("corrected"))
 
     def test_没问题的行一个字不动(self):
         rev = {"sections": [{"prose": [self.REAL]}],
                "checks": [{"claim": self.REAL, "status": "ok", "how": "一致"},
                           {"claim": self.REAL, "status": "unchecked", "how": "核不了"}]}
-        out, _, warns = ng.annotate_mismatches(rev)
+        out, warns = self._run(rev)
         self.assertEqual(self.REAL, out["sections"][0]["prose"][0])
         self.assertEqual([], warns)
         self.assertNotIn("annotated", out["checks"][0])
 
     def test_找不到承载字段也不许炸(self):
-        out, _, warns = ng.annotate_mismatches(
+        out, warns = self._run(
             {"sections": [{"prose": ["完全不相干的一段。"]}],
              "checks": [dict(self.MECH)]})
         self.assertEqual("完全不相干的一段。", out["sections"][0]["prose"][0])
@@ -627,7 +672,7 @@ class AnnotateMismatch(unittest.TestCase):
                  "prose": ["把 Q=4 代进去：课上报的是 28 和 20，但 20 与式子对不上。"]},
                 {"heading": "H2", "ts": "13:40", "prose": ["无关的一节。"]}],
                "checks": [{"claim": "课上报的 20", "status": "mismatch", "how": "应为 12"}]}
-        out, _, warns = ng.annotate_mismatches(rev)
+        out, warns = self._run(rev)
         self.assertNotIn("数字对不上", str(out["sections"][0]["faded"]))
         self.assertNotIn("数字对不上", out["sections"][0]["prose"][0])
         self.assertFalse(out["checks"][0].get("annotated"))
@@ -646,22 +691,169 @@ class AnnotateMismatch(unittest.TestCase):
                "checks": [{"claim": dup[:160], "status": "mismatch",
                            "recomputed": "5.3/3 ≈ 1.767", "how": "5.3除以3约1.77，不是2.89"}]}
         ded, _, _ = ng.dedupe_sentences(rev)
-        out, _, warns = ng.annotate_mismatches(ded)
+        out, warns = self._run(ded)
         got = out["sections"][0]["prose"][0]
-        self.assertIn("数字对不上：5.3除以3约1.77，不是2.89", got)
-        self.assertTrue(out["checks"][0].get("annotated"))
-        self.assertTrue(warns and "1 处" in warns[0], warns)
+        self.assertIn("得到约1.767", got)
+        self.assertIn("（已更正：原写 2.89 → 1.767）", got)
+        self.assertTrue(out["checks"][0].get("corrected"))
+        self.assertTrue(any("1 处" in w for w in warns), warns)
 
     def test_how_里的全角括号不切坏标注(self):
         """剥 marker 的正则靠"第一个 `）` 收口"——`how` 里的括号换成半角才切得干净。"""
         row = {"claim": self.REAL, "status": "mismatch", "recomputed": "x",
                "how": "数值二阶导（正）与结论矛盾"}
-        out, _, _ = ng.annotate_mismatches({"sections": [{"prose": [self.REAL]}],
-                                            "checks": [row]})
+        out, _ = self._run({"sections": [{"prose": [self.REAL]}], "checks": [row]})
         got = out["sections"][0]["prose"][0]
         self.assertIn("数字对不上：数值二阶导(正)与结论矛盾）", got)
-        out2, _, _ = ng.annotate_mismatches(out)         # 幂等：再来一遍不插第二个
+        out2, _ = self._run(out)                         # 幂等：再来一遍不插第二个
         self.assertEqual(1, out2["sections"][0]["prose"][0].count("数字对不上"))
+
+
+class C5Safety(unittest.TestCase):
+    """C5 安全化（2026-11-03 对抗审查）：五种「把算对的式子改成算错」的形状全部挡住。
+
+    改错比标错坏得多 —— 拿不准一律退回 ⚠（`annotate_mismatches`），绝不猜。"""
+
+    def _row(self, v, rec, how="重算对不上"):
+        return {"claim": v, "status": "mismatch", "recomputed": rec, "how": how}
+
+    def test_重算值带括注不改正文(self):
+        """`5.3/3 ≈ 1.767（保留 2 位）` 的最后一个数是 2 —— 旧版会把 2.89 改成 2。"""
+        v = "先算：5.3除以3，得到约2.89。"
+        rev = {"sections": [{"prose": [v]}], "checks": [self._row(v, "5.3/3 ≈ 1.767（保留 2 位）")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        got = out["sections"][0]["prose"][0]
+        self.assertIn("2.89", got)
+        self.assertNotIn("已更正", got)
+        self.assertFalse(out["checks"][0].get("corrected"))
+        out2, _, _ = ng.annotate_mismatches(out)
+        self.assertIn("数字对不上", out2["sections"][0]["prose"][0], "拿不准要退回 ⚠")
+
+    def test_和式里的除法项不回改(self):
+        """`15+225/15=30` 是对的；重算值只说其中除法项 —— 改 30 会把整条式子改错。"""
+        v = "先看这个：15+225/15=30。"
+        rev = {"sections": [{"prose": [v]}], "checks": [self._row(v, "225/15 ≈ 15")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        self.assertEqual(v, out["sections"][0]["prose"][0])
+        self.assertFalse(out["checks"][0].get("corrected"))
+
+    def test_乘加混算不回改(self):
+        """`2+3×4=14` 按优先级是对的；正则抓到的 `3×4=14` 只是它的子式，不许改。"""
+        v = "按优先级：2+3×4=14。"
+        rev = {"sections": [{"prose": [v]}], "checks": [self._row(v, "3×4 = 12")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        self.assertEqual(v, out["sections"][0]["prose"][0])
+        self.assertFalse(out["checks"][0].get("corrected"))
+
+    def test_链式分数不回改(self):
+        """`500/60=30/3` 是链式写法（`_DIV` 的 d 组）—— 不知道错在分子还是整条，不许改。"""
+        v = "效率写作 500/60=30/3。"
+        rev = {"sections": [{"prose": [v]}], "checks": [self._row(v, "500/60 ≈ 8.3333")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        self.assertEqual(v, out["sections"][0]["prose"][0])
+        self.assertFalse(out["checks"][0].get("corrected"))
+
+    def test_同段同式两处_否定语境不改(self):
+        """`5.3÷3≈1.77`（对的）与 `=2.89 是错的`（否定语境）同段 —— 两个都不许改。
+
+        ⚠️ 对抗验证抓到：改 2.89 → 1.767 会把句子变成假话（`5.3÷3=1.767 是错的`）。
+        现在错值后面跟着「是错的」→ 不认候选，退回 ⚠。
+        """
+        v = "5.3÷3≈1.77。而 5.3÷3=2.89 是错的。"
+        rev = {"sections": [{"prose": [v]}], "checks": [self._row(v, "5.3/3 ≈ 1.767")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        got = out["sections"][0]["prose"][0]
+        self.assertEqual(v, got, "否定语境里改数字 = 把句子改成假话")
+        self.assertFalse(out["checks"][0].get("corrected"))
+        out2, _, _ = ng.annotate_mismatches(out)
+        self.assertIn("数字对不上", out2["sections"][0]["prose"][0], "拿不准要退回 ⚠")
+
+    def test_纯符号短式也能定位并回改(self):
+        """对抗验证：`-2-3=-1` 归一化后只剩 `2 3 1`，旧门槛够不着 → 既不回改也不标 ⚠。"""
+        v = "-2-3=-1。"
+        rev = {"sections": [{"prose": [v]}],
+               "checks": [self._row(v, "-2-3 = -5")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        self.assertEqual("-2-3=-5。", out["sections"][0]["prose"][0].split("（已更正")[0])
+        self.assertTrue(out["checks"][0].get("corrected"))
+
+    def test_除以与乘以不是同一句(self):
+        """`5.3除以3` 与 `5.3乘以3` 是两条语义不同的断言：第二条改不了就只标 ⚠，
+        不许跟着第一条记 corrected（对抗验证：剥 CJK 的归一化会把两者撞成同一句）。"""
+        a = "5.3除以3，得到约2.89。"
+        b = "5.3乘以3，得到约2.89。"
+        rev = {"sections": [{"prose": [a, b]}],
+               "checks": [self._row(a, "5.3/3 ≈ 1.767"),
+                          self._row(b, "5.3*3 ≈ 15.9")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        self.assertIn("得到约1.767", out["sections"][0]["prose"][0])
+        self.assertFalse(out["checks"][1].get("corrected"),
+                         "第二条是两个语义不同的断言，不许跟着记 corrected")
+        out2, _, _ = ng.annotate_mismatches(out)
+        self.assertIn("数字对不上", out2["sections"][0]["prose"][1])
+
+    def test_带单位的结果不回改(self):
+        """`50/100=50%` 的 50 是百分数 —— 换成裸比值 0.5 会把对的改成「0.5%」。"""
+        v = "占比 50/100=50%。"
+        rev = {"sections": [{"prose": [v]}],
+               "checks": [self._row(v, "50/100 ≈ 0.5")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        self.assertEqual(v, out["sections"][0]["prose"][0])
+        self.assertFalse(out["checks"][0].get("corrected"))
+
+    def test_排版减号的和式不回改(self):
+        """`15－225/15=0`（全角减号）是求和：连接词表不认 `－` 会把对的改成错的。"""
+        v = "先看：15－225/15=0。"
+        rev = {"sections": [{"prose": [v]}],
+               "checks": [self._row(v, "225/15 ≈ 15")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        self.assertEqual(v, out["sections"][0]["prose"][0])
+        self.assertFalse(out["checks"][0].get("corrected"))
+
+    def test_半入舍入不算错(self):
+        """`5.35÷2≈2.68` 是正确舍入（half-up）；`round(float)` 会误判成错再改坏。"""
+        v = "5.35÷2≈2.68。"
+        rev = {"sections": [{"prose": [v]}],
+               "checks": [self._row(v, "5.35/2 ≈ 2.675")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        self.assertEqual(v, out["sections"][0]["prose"][0])
+        self.assertFalse(out["checks"][0].get("corrected"))
+
+    def test_同一句两条断言各改一处(self):
+        """`5.3÷3=2.89，再算 7.2÷2=4.1` —— 两行 claim 相同、recomputed 不同，两处都要改。"""
+        v = "先算 5.3÷3=2.89，再算 7.2÷2=4.1。"
+        rev = {"sections": [{"prose": [v]}],
+               "checks": [self._row(v, "5.3/3 ≈ 1.767"),
+                          self._row(v, "7.2/2 ≈ 3.6")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        got = out["sections"][0]["prose"][0]
+        self.assertIn("5.3÷3=1.767", got)
+        self.assertIn("7.2÷2=3.6", got)
+        self.assertNotIn("4.1", got.split("（已更正")[0])
+        self.assertTrue(all(r.get("corrected") for r in out["checks"]))
+        s = nv.checks_summary(out["checks"])
+        self.assertEqual(2, s["n_fixed"], "两处不同的修正点各算一处")
+        self.assertIn("2 处已更正", nv.checks_headline(out["checks"]))
+
+    def test_同一claim两个section都改(self):
+        """同一句抄进两节 → 两处都改（不许只改一处还标 corrected）。"""
+        v = "先算：5.3除以3，得到约2.89。"
+        rev = {"sections": [{"prose": [v]}, {"prose": [v]}],
+               "checks": [self._row(v, "5.3/3 ≈ 1.767")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        for sec in out["sections"]:
+            self.assertIn("得到约1.767", sec["prose"][0])
+            self.assertIn("已更正", sec["prose"][0])
+        self.assertTrue(out["checks"][0].get("corrected"))
+
+    def test_algebra_只改数字不缀括注(self):
+        """F15-E：公式行里缀中文括注会被读成式子的一部分 —— 只换数字。"""
+        v = "5.3÷3=2.89"
+        rev = {"sections": [{"algebra": [v]}], "checks": [self._row(v, "5.3/3 ≈ 1.767")]}
+        out, _, _ = ng.correct_mismatches(rev)
+        got = out["sections"][0]["algebra"][0]
+        self.assertEqual("5.3÷3=1.767", got)
+        self.assertTrue(out["checks"][0].get("corrected"))
 
 
 class DedupeSentences(unittest.TestCase):

@@ -232,7 +232,9 @@ def r2_ingest(get=None, sessions_dir=None, ledger=None) -> dict:
 #: 而 `dropped_s` / `weak_blocks` / `vad_resets` / `blind_dropped` 正是查「丢句」的关键量。
 REPORT_BLOCKS = ("stream", "region_probe", "duty", "device", "energy", "capture",
                  "merge", "backfill", "system", "ui", "terms", "live", "deps",
-                 "vad", "norm")
+                 "vad", "norm",
+                 # ⭐ 3.11：以前采集了却没进白名单 —— 面板连「采没采到」都不知道。
+                 "semantic_seal", "jev", "counts", "review")
 
 
 def _num(v):
@@ -282,22 +284,56 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list,
     st = _block(rep, "stream") or None
     if st is not None:
         sl = st.get("seal_latency_s") if isinstance(st.get("seal_latency_s"), dict) else {}
+        # ⭐ 3.11：`fallback_detail` 已改名 `last_close_detail`（它记的是**最近一次断线**，
+        # 不是「已退回」的证据）。老报告只有旧名 —— 双读。
+        _detail = st.get("last_close_detail")
+        if _detail is None:
+            _detail = st.get("fallback_detail")
+        _fs = st.get("final_session") if isinstance(st.get("final_session"), dict) else {}
+        # 新键优先，旧键兜底（同一份报告新旧并存一个版本）。
+        _down = _num(st.get("reconnect_downtime_s"))
+        if _down is None:
+            _down = _num(st.get("down_s"))
         st = {"engine": _enum(st.get("engine"), 24), "reason": _enum(st.get("fallback_reason")),
               # 3.10.1 起：退回时的异常**类型**（只留冒号前那段，如 `ModuleNotFoundError`；后面的话不要）
-              "detail": _enum(str(st.get("fallback_detail") or "").split(":", 1)[0], 40),
+              "detail": _enum(str(_detail or "").split(":", 1)[0], 40),
               "sealed_n": _num(st.get("sealed_n")), "p50": _num(sl.get("p50")), "p90": _num(sl.get("p90")),
-              "lat_n": _num(sl.get("n")), "terms_n": _num(st.get("terms_n")), "terms_dropped": _num(st.get("terms_dropped"))}
+              "lat_n": _num(sl.get("n")), "terms_n": _num(st.get("terms_n")), "terms_dropped": _num(st.get("terms_dropped")),
+              # ⭐ 3.11：流健康（上海那 6 次重连以前在面板上等于没发生）。
+              "reconnects": _num(st.get("reconnects")),
+              "connect_attempts": _num(st.get("connect_attempts")),
+              "connections": _num(st.get("connections")),
+              "failed_sessions": _num(st.get("failed_sessions")),
+              "final_why": _enum(_fs.get("why"), 24),
+              "down_s": _down, "skipped_s": _num(st.get("skipped_s")),
+              "dropped_s": _num(st.get("dropped_s")),
+              "msg_gap_max_s": _num(st.get("msg_gap_max_s")),
+              "drain_gap_max_s": _num(st.get("drain_gap_max_s")),
+              "backlog_max_s": _num(st.get("backlog_max_s")),
+              "model": _enum(st.get("model"), 16),
+              "model_fallback": st.get("model_fallback")
+              if isinstance(st.get("model_fallback"), bool) else None,
+              "endpoints_n": _num(st.get("endpoints_n")),
+              # ⭐ 3.11：「落在两句之间」才是 v5/v6 对比量（`class_report` 用的也是它）。
+              "endpoints_between_n": _num(st.get("endpoints_between_n"))}
 
     rp = _block(rep, "region_probe") or None
     if rp is not None:
         regions = rp.get("regions") if isinstance(rp.get("regions"), dict) else {}
+        _atts = rp.get("attempts") if isinstance(rp.get("attempts"), list) else None
         rp = {"default": _enum(rp.get("default"), 8), "selected": _enum(rp.get("selected"), 8),
               "switched": rp.get("switched") if isinstance(rp.get("switched"), bool) else None,
               "reason": _enum(rp.get("reason")), "cached": rp.get("cached") if isinstance(rp.get("cached"), bool) else None,
               "ms": _num(rp.get("ms")), "timeout": rp.get("timeout") if isinstance(rp.get("timeout"), bool) else None,
               "regions": {k: {"connect_ms": _num((v or {}).get("connect_ms")), "rtt_ms": _num((v or {}).get("rtt_ms")),
                               "error": _enum((v or {}).get("error"), 24)}
-                          for k, v in list(regions.items())[:6] if isinstance(v, dict)}}
+                          for k, v in list(regions.items())[:6] if isinstance(v, dict)},
+              # ⭐ 3.11：领 key 尝试（含默认地区失败）—— 有界 + 枚举化，不整份透传。
+              "attempts": [{"ask": _enum(x.get("ask"), 8), "region": _enum(x.get("region"), 8),
+                            "ok": x.get("ok") if isinstance(x.get("ok"), bool) else None,
+                            "error": _enum(x.get("error"), 24)}
+                           for x in (_atts or [])[:8] if isinstance(x, dict)]
+              if _atts is not None else None}
 
     dt_ = _block(rep, "duty") or None
     if dt_ is not None:
@@ -371,13 +407,43 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list,
     lv = _block(rep, "live") or None
     if lv is not None:
         lv = {"calls_total": _num(lv.get("calls_total")), "failed_calls": _num(lv.get("failed_calls")),
-              "chapters": _num(lv.get("chapters")), "atoms": _num(lv.get("atoms"))}
+              "chapters": _num(lv.get("chapters")), "atoms": _num(lv.get("atoms")),
+              # ⭐ 3.11：`chapters` 是**尝试数**；真写进文件的看 `chapters_written`。
+              "chapters_attempted": _num(lv.get("chapters_attempted")),
+              "chapters_written": _num(lv.get("chapters_written")),
+              "chapters_nonempty": _num(lv.get("chapters_nonempty")),
+              "failed_atom_calls": _num(lv.get("failed_atom_calls")),
+              "failed_chapter_calls": _num(lv.get("failed_chapter_calls")),
+              "finish_truncated": lv.get("finish_truncated")
+              if isinstance(lv.get("finish_truncated"), bool) else None}
     vd = _block(rep, "vad") or None
     if vd is not None:
         # 断句 / 丢句的关键量：`dropped_s`（丢了多少秒）、`weak_blocks`（有语音却没过阈值）、
         # `vad_resets`（清状态漂移）、`blind_dropped`（盲丢）、`hard_cuts`（撞 12 s 上限，只能硬切）。
         vd = {k: _num(vd.get(k)) for k in ("cuts", "hard_cuts", "dropped", "dropped_s", "weak_blocks",
-                                            "vad_resets", "blind_dropped", "sentence_cuts")}
+                                            "vad_resets", "blind_dropped", "sentence_cuts",
+                                            # ⭐ 3.11：cuts 只是静音断句；总数 = silence + hard
+                                            "silence_cuts", "total_cuts", "blind_dropped_blocks")}
+    ss = _block(rep, "semantic_seal") or None
+    if ss is not None:
+        # ⭐ 3.11：语意封口 —— 3.10.6 已在采集，但白名单一直没放行（11-03 还有 bad_block）。
+        ss = {k: _num(ss.get(k)) for k in ("calls", "errors", "semantic", "cap", "no_cut", "stale")}
+    jv = _block(rep, "jev") or None
+    if jv is not None:
+        # ⭐ 3.11：调用数 / 失败数 + 最后一次失败（错误串只留类型那一段）。
+        jv = {"calls": _num(jv.get("calls")), "fail": _num(jv.get("fail")),
+              "provider": _enum(jv.get("provider"), 24),
+              "error": _enum(str(jv.get("error") or "").split(":", 1)[0], 32)}
+    ct = _block(rep, "counts") or None
+    if ct is not None:
+        ct = {k: _num(ct.get(k)) for k in ("entries_raw", "entries_after_merge",
+                                           "entries_rendered", "merged")}
+    rv = _block(rep, "review") or None
+    if rv is not None:
+        # ⭐ 3.11：复习层 0/N 失败在报告里原来一个字都没有。
+        _gen = rv.get("review_generated")
+        rv = {k: _num(rv.get(k)) for k in ("review_total", "review_ok", "review_failed")}
+        rv["review_generated"] = _gen if isinstance(_gen, bool) else None
     nm_ = _block(rep, "norm") or None
     if nm_ is not None:
         # 收音电平归一：capped / clamped 是「有多少块被削顶/被钳住」—— 麦克风太响或增益太狠的信号。
@@ -389,6 +455,8 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list,
         "id": sid, "name": name, "files": sorted(str(x) for x in files)[:8], "updated": str(updated or ""),
         "report_at": str(report_at or updated or ""),
         "generated": gen, "duration_s": _num(rep.get("duration_s")),
+        # ⭐ 3.11：schema 版本（老报告没有 = None，前端按「旧版」处理）。
+        "report_version": _num(rep.get("report_version")),
         "audio_saved": rep.get("audio_saved") if isinstance(rep.get("audio_saved"), bool) else None,
         "provisional": bool(rep.get("provisional")),          # 课中临时快照（收尾那份没这个键）
         "blocks": [k for k in REPORT_BLOCKS if k in blocks],  # 采到了哪几块
@@ -403,7 +471,7 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list,
                "first_p50": _num((tl.get("zh_first_ms") or {}).get("p50")) if isinstance(tl.get("zh_first_ms"), dict) else None},
         "stream": st, "region": rp, "duty": dt_, "device": dv, "energy": en, "capture": cp,
         "merge": mg, "backfill": bf, "system": sys_, "ui": ui, "terms": tm, "live": lv, "deps": dp,
-        "vad": vd, "norm": nm_,
+        "vad": vd, "norm": nm_, "semantic_seal": ss, "jev": jv, "counts": ct, "review": rv,
     }
 
 

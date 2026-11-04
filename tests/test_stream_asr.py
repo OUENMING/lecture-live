@@ -452,7 +452,8 @@ def t_metrics_seal_counts_and_latency() -> None:
         son.to_send.put({"tokens": [tok(" Bye", 400, 900), tok(".", 900, 1000)]})
         assert wait_until(lambda: not got.empty()), "P_stable 0.3 s 后该封口"
         m = s.metrics()
-        assert m["engine"] == "soniox" and m["fallback_reason"] == "", m
+        assert m["engine"] == "soniox" and m["model"] == "stt-rt-v6" \
+            and m["fallback_reason"] == "", m
         assert m["sealed_n"] == 2, m
         lat = m["seal_latency_s"]
         assert lat and lat["n"] == 2, lat
@@ -508,7 +509,7 @@ def t_transport_happy_path() -> None:
         second = got.get_nowait()
         assert second.text == "Bye.", second
         cfg = son.connections[0]["config"]
-        assert cfg["model"] == "stt-rt-v5" and cfg["audio_format"] == "pcm_s16le"
+        assert cfg["model"] == "stt-rt-v6" and cfg["audio_format"] == "pcm_s16le"
         assert cfg["sample_rate"] == 16000 and cfg["num_channels"] == 1
         assert cfg["language_hints"] == ["en"] and cfg["enable_endpoint_detection"] is True
         assert cfg["context"]["terms"] == ["OLS", "regression"]
@@ -532,6 +533,32 @@ def t_transport_happy_path() -> None:
     assert not s.alive() and s.reason() == "", (s.alive(), s.reason())
 
 
+def t_transport_model_not_available_retries_v5() -> None:
+    """⭐ 3.11：v6 回 `model_not_available` → 自动换 v5 重连一次（不整课退回本地）。
+
+    报告里 `model` 变成 v5、`model_fallback=True` —— 回退不许藏着。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son)
+    try:
+        assert wait_until(s.alive)
+        son.to_send.put({"error_type": "model_not_available"})
+        son.to_send.put(("close", 1008, "policy violation"))
+        assert wait_until(lambda: len(son.connections) >= 2
+                          and son.connections[1]["config"] is not None), \
+            "model_not_available 该换 v5 重连，而不是整课退回"
+        assert son.connections[0]["config"]["model"] == "stt-rt-v6"
+        assert son.connections[1]["config"]["model"] == "stt-rt-v5"
+        m = s.metrics()
+        assert m["model"] == "stt-rt-v5" and m["model_fallback"] is True, m
+        assert s.reason() == "", "回退成功时不许报退回"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
 def t_transport_fatal_error_no_retry() -> None:
     """致命错误（403/会话过期那类）→ 立即退回，**不重连**。
 
@@ -549,6 +576,13 @@ def t_transport_fatal_error_no_retry() -> None:
         assert s.reason() == "error", s.reason()
         assert len(wk.requests) == 1, "致命类不许重连（key 是 single_use，重连=白烧）"
         assert len(son.connections) == 1
+        # ⭐ 3.11：致命会话**也要进账**（原来在 `_attempts` 里 return "error" 早退，
+        #    failed_sessions=0 / final_session=null，报告是假绿灯）。
+        m = s.metrics()
+        assert (m["connections"], m["connect_attempts"]) == (1, 1), m
+        assert m["failed_sessions"] == 1, m
+        assert m["final_session"] and m["final_session"]["why"] == "error", m
+        assert len(m["sessions"]) == 1, m["sessions"]
         s.feed(silence(1000))                     # 死了之后喂音频不许抛
         assert "本地识别" in s.notice_text()
     finally:
@@ -576,8 +610,11 @@ def t_transport_fatal_error_code_only_no_retry() -> None:
 
 
 def t_transport_missing_websockets_records_detail() -> None:
-    """⭐ 3.10.1：本机缺 `websockets`（补依赖没成）→ 退回 `error`，且 `fallback_detail`
-    写出异常类型 —— 那位测试者的报告里只有一个 `error`，原因靠猜。"""
+    """⭐ 3.10.1：本机缺 `websockets`（补依赖没成）→ 退回 `error`，且 `last_close_detail`
+    写出异常类型 —— 那位测试者的报告里只有一个 `error`，原因靠猜。
+
+    ⭐ 3.11：字段从 `fallback_detail` 改名（它记的是最近断线原因，不是「已退回」的证据）。
+    """
     son = FakeSoniox()
     wk = FakeWorker(son.url)
     import ws_compat
@@ -587,7 +624,7 @@ def t_transport_missing_websockets_records_detail() -> None:
         try:
             assert wait_until(lambda: not s.alive() and s.reason() != ""), "该退回"
             assert s.reason() == "error", s.reason()
-            d = s.metrics()["fallback_detail"]
+            d = s.metrics()["last_close_detail"]
             assert d.startswith(("ImportError", "ModuleNotFoundError")), d
         finally:
             s.stop()
@@ -735,10 +772,39 @@ def t_transport_second_drop_still_reconnects() -> None:
         assert wait_until(lambda: len(son.connections) >= 3 and s.alive(), 8.0), \
             "第二次掉线也该重连，而不是退回本地"
         assert s.reason() == "", s.reason()
-        assert s.metrics()["reconnects"] == 2, s.metrics()["reconnects"]
+        m = s.metrics()
+        assert m["reconnects"] == 2, m["reconnects"]
+        # ⭐ 3.11：重连的分母/分子 —— 旧键只数握手成功，整节连不上时是 0。
+        assert m["connect_attempts"] == m["connections"] == 3, m
+        assert m["failed_sessions"] >= 2, m
+        assert m["final_session"] and m["final_session"]["why"] == "disconnected", m
+        assert m["reconnect_downtime_s"] == m["down_s"], m
+        assert "drain_gap_max_s" in m and m["drain_gap_max_s"] >= 0, m
     finally:
         s.stop()
         son.close()
+        wk.close()
+
+
+def t_metrics_down_s_accumulates_across_failed_connects() -> None:
+    """⭐ 3.11：连续多次握手失败，`down_s` 要把**每一段**退避都算上。
+
+    旧实现每次退避直接覆盖 `_down_since`，只剩最后一段 —— 11-03 那节 66 次连接全失败，
+    报告里的掉线时间被严重低估。这里服务器一开始就不在，两次 0.2 s 退避 ≈ 0.4 s。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    son.close()                                   # 建连即失败
+    s = make_asr(wk, son, retry_delays_s=(0.2, 0.2), retry_reset_s=60.0)
+    try:
+        assert wait_until(lambda: s.reason() != "", 15.0), "预算用完该退回"
+        m = s.metrics()
+        assert m["connect_attempts"] == 3, m
+        assert m["connections"] == 0, m
+        assert m["failed_sessions"] >= 3, m
+        assert m["down_s"] >= 0.35, f"两段退避被吞了：{m['down_s']}"
+    finally:
+        s.stop()
         wk.close()
 
 
@@ -1074,7 +1140,7 @@ def t_transport_stop_interrupts_backoff() -> None:
 
 
 def t_transport_close_code_in_detail() -> None:
-    """退回时 `fallback_detail` 带服务端的 close code + 原因（10-23 那次是空的）。"""
+    """退回时 `last_close_detail` 带服务端的 close code + 原因（10-23 那次是空的）。"""
     son = FakeSoniox()
     wk = FakeWorker(son.url)
     s = make_asr(wk, son, retry_delays_s=())
@@ -1084,7 +1150,7 @@ def t_transport_close_code_in_detail() -> None:
         assert wait_until(lambda: s.reason() != "", 8.0)
         m = s.metrics()
         assert m["fallback_reason"] == "disconnected", m
-        assert "1011" in m["fallback_detail"], m["fallback_detail"]
+        assert "1011" in m["last_close_detail"], m["last_close_detail"]
     finally:
         s.stop()
         son.close()
@@ -1464,6 +1530,31 @@ def t_transport_stop_clean() -> None:
         wk.close()
 
 
+def t_metrics_down_s_freezes_after_stop() -> None:
+    """⭐ 3.11：掉线段在 `stop()` 收口 —— 否则下课后 `down_s` 还在涨（11-03 报告）。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, retry_delays_s=(0.0, 5.0))
+    try:
+        assert wait_until(s.alive)
+        son.to_send.put(("close", 1011, "a"))
+        assert wait_until(lambda: len(son.connections) >= 2 and s.alive())
+        son.to_send.put(("close", 1011, "b"))
+        assert wait_until(lambda: not s.alive(), 3.0)
+        time.sleep(0.15)
+        before = s.metrics()["down_s"]
+        assert before >= 0.1, before
+        s.stop()
+        a = s.metrics()["down_s"]
+        time.sleep(0.25)
+        b = s.metrics()["down_s"]
+        assert a == b, (a, b, "stop 之后 down_s 不许继续涨")
+        assert b >= before, (before, b)
+    finally:
+        son.close()
+        wk.close()
+
+
 def t_transport_stop_flushes_half_sentence() -> None:
     """下课收尾：还没等到句号的半句也要送出去（不然老师最后那半句整句丢）。"""
     son = FakeSoniox()
@@ -1593,6 +1684,7 @@ def main() -> int:
         ("transport: 重连也失败 → 退回", t_transport_reconnect_fails_fallback),
         ("transport: 第二次掉线仍重连", t_transport_second_drop_still_reconnects),
         ("transport: 重连前按退避等待", t_transport_backoff_waits_between_retries),
+        ("量具: 连续失败 down_s 不丢段", t_metrics_down_s_accumulates_across_failed_connects),
         ("transport: 稳定跑过后预算还原", t_transport_budget_resets_after_stable_session),
         ("transport: 发送卡死 → 看门狗重连", t_transport_send_stuck_watchdog_reconnects),
         ("transport: config 帧卡死 → 看门狗重连", t_transport_config_send_stuck_covered),
@@ -1619,9 +1711,11 @@ def main() -> int:
         ("transport: 队列满丢旧不阻塞", t_transport_queue_full_drops_oldest),
         ("transport: 静音时 keepalive", t_transport_keepalive_when_idle),
         ("transport: stop() 干净收尾", t_transport_stop_clean),
+        ("量具: stop 后 down_s 冻结", t_metrics_down_s_freezes_after_stop),
         ("transport: stop() flush 半句", t_transport_stop_flushes_half_sentence),
         ("transport: 默认领 key 客户端（真头）", t_transport_default_key_client),
         ("transport: region= 进领 key 请求体", t_transport_region_goes_to_worker),
+        ("transport: model_not_available → 换 v5 重连一次", t_transport_model_not_available_retries_v5),
         ("transport: 段号映射", t_transport_segments),
         ("stream: 丢包逐窗口记账（2026-11-02）", t_drop_windows),
     ]:

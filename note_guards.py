@@ -678,6 +678,8 @@ _QUOTE_HOW = {"tr": "转录里没找到这句原话", "mat": "材料里没找到
 #: 任何已落地的标注（幂等 + 剥离共用；旧文案一起认，历史产物里还有）。
 _ANY_MARK = re.compile(r"（⚠ (?:核算对不上|数字对不上|转录里没找到这句原话|"
                        r"材料里没找到这句原话)[^）]*）")
+#: C5 回改正文后落的标（幂等：同一句不再插第二个）。
+_CORRECT_MARK = re.compile(r"（已更正：原写 [^）]*）")
 
 
 def is_quote_row(row: dict) -> bool:
@@ -728,75 +730,397 @@ def _div_bad_sentence_end(text: str):
         if not b:
             continue
         dec = len(m.group("c").split(".")[1]) if "." in m.group("c") else 0
-        if abs(round(a / b, dec) - c) > 1e-9:
+        if abs(_round_half_up(a / b, dec) - c) > 1e-9:
             j = min([x for x in (text.find(p, m.end()) for p in "。！？") if x >= 0]
                     or [len(text)])
             return j + 1
     return None
 
 
-def annotate_mismatches(review: dict) -> tuple:
-    """三道核里 `status == "mismatch"` 的断言 → **正文原位标 ⚠**（就地，不改数字）。
+#: 简单算式 `a op b = c`（符号四则：+ − × *；**除法不走这里** —— 除法的口播/链式写法
+#: 全归 `note_math._DIV`，两处各写一套判据迟早漂移）。用于 C5 的正文回改。
+_EQ = re.compile(r"(?P<a>-?\d+(?:\.\d+)?)\s*(?P<op>[+\-−×*])\s*"
+                 r"(?P<b>-?\d+(?:\.\d+)?)\s*[=＝≈]\s*(?P<c>-?\d+(?:\.\d+)?)")
+#: 重算值里出现这些词 = 那个数**不是**"这条算式的正确结果"（答案值 / 取点 / 程序中间量 /
+#: 引语 p 值 / 极限判定），照抄回去会张冠李戴 → C5 拒绝回改。
+_RESULT_BAD = ("答案值", "取点", "程序值", "support p=", "最值")
+_RESULT_SPLIT = re.compile(r"[=＝≈→]")
+_NUM_ONLY = re.compile(r"-?\d+(?:\.\d+)?")
+#: 候选式子**紧挨着**这些字符 = 它是更大算式 / 链式写法的一部分，不是一条独立断言：
+#: `2+3×4=14` 里的 `3×4=14`、`500/60=30/3` 里的 `500/60=30` 都不许改。
+_NB_PRE = set("+-−×*／/÷(（^=＝≈")
+_NB_POST = set("+-−×*／/÷)）^=＝≈")
+#: 错值后面紧跟这些词 = 这句话在**否定/引用**它（「…=2.89 是错的」）——
+#: 回改成正确值会把句子变成假话（「=1.767 是错的」）→ 不认这个候选，退回 ⚠
+#: （对抗验证抓到：`5.3÷3≈1.77。而 5.3÷3=2.89 是错的` 改完成了自相矛盾的句子）。
+_NEG_AFTER = re.compile(r"^\s*[（(]?\s*(?:是错的|是错误|不对|有误|写错|算错|错误的)")
 
-    ⚠️ 为什么不能只进"修正说明"（2026-10-18 Δ 的根因）：三段核的 mismatch 只落在
-       文末折叠的核对清单与「修正记录」里，而 §1 正文照样写着"5.3除以3，得到约2.89"——
-       读者把错算术当事实读 4 遍；清单那行还写着"已修正"（其实正文一个字没动）。
-       **核算结果必须跟着那句话走**；改不了（不知道哪个数是口播错的）就标 ⚠，不许静默。
-    ⚠️ 定位：claim 前 60 字在哪个字段里出现就标哪个字段；能定位到"哪一句"（除法）
-       就插在句号后，定位不到就缀在段尾（位置宁糙，不许不标）。
-    ⚠️ 幂等：字段里已有"核算对不上"就不再插（同一句可能同时有机械核与模型核两行）。
+
+#: 结果后面跟着这些 = 值**带单位**（百分比 / 千分比 / 分 / 成 / 折）——
+#: `50/100=50%` 的 `50` 是百分数，改成裸比值 `0.5` 会把对的改成"0.5%"。
+_UNIT_AFTER = re.compile(r"^\s*(?:[%％‰‱]|个百分点|分|成|折)")
+#: 运算符号的**排版变体** → ASCII（只做 1:1 字符替换，position 与原文一一对应，
+#: 匹配出来的 span 可以直接回写原串）。`15－225/15`、`2·225/15` 旧版都认不出。
+_OP_TRANS = str.maketrans({
+    "−": "-", "–": "-", "—": "-", "﹣": "-", "－": "-",
+    "·": "×", "⋅": "×", "∙": "×", "＊": "*", "✕": "×", "✖": "×",
+    "／": "/",
+})
+
+
+def _round_half_up(x, dec: int) -> float:
+    """按**十进制定点**四舍五入（half-up）。**纯函数。**
+
+    ⚠️ 不能用内置 `round(float)`：二进制误差把 `2.675` 舍成 `2.67` ——
+       `5.35÷2≈2.68` 这种**对的**断言会被判成"错值"，C5 反过来把它改坏。
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+    try:
+        q = Decimal(1).scaleb(-int(dec))
+        return float(Decimal(str(x)).quantize(q, rounding=ROUND_HALF_UP))
+    except Exception:                                     # noqa: BLE001
+        try:
+            return float(x)
+        except Exception:                                 # noqa: BLE001
+            return float("nan")
+
+
+def _same_rounded(x, y, dec_text: str) -> bool:
+    """按 `dec_text` 的小数位比 `x`（重算值）与 `y`（重算值原样）。**纯函数。**"""
+    dec = len(dec_text.split(".")[1]) if "." in str(dec_text) else 0
+    try:
+        return abs(_round_half_up(x, dec) - float(y)) <= 1e-9
+    except Exception:                                     # noqa: BLE001
+        return False
+
+
+def _result_text(recomputed) -> str:
+    """`recomputed` 里**可信的正确值**原样（保留它自己的小数位 / 负号）；拿不到 → `""`。
+
+    ⭐ C5 安全化（2026-11-03 审查；五种改错形状的第一种就出在这里）：
+      旧版 `_last_num_text` 取"最后一个数"——`5.3/3 ≈ 1.767（保留 2 位）` 会取到 **2**
+      （`保留 2 位` 的 2），把正文改成一个毫不相干的数。现在只认：
+        · 最后一个 `≈ / = ＝ / →` **之后**紧跟一个纯数字（允许尾随空白）；
+        · 带 `答案值 / 取点 / 程序值 / support p= / 最值` 的 → 直接拒（不是这条算式的值）；
+        · 数字后面还缀着别的（`（保留 2 位）`、单位、中文）→ 拒。
+    """
+    s = str(recomputed or "").replace("−", "-").replace("–", "-").strip()
+    if not s or any(b in s for b in _RESULT_BAD):
+        return ""
+    tail = _RESULT_SPLIT.split(s)[-1].strip()
+    return tail if _NUM_ONLY.fullmatch(tail) else ""
+
+
+def _wrong_at(c_text: str, want: float) -> bool:
+    """断言值按**它自己的小数位**与真值比 —— 对不上才算"真错"（与 note_math 同一容差）。
+
+    ⚠️ 这一条防的是"把正确值改成更精确的写法"：`5.3÷3≈1.77` 是对的（保留两位），
+       重算值 `1.767` 不是"另一个答案"，不能拿它去改 1.77。
+    """
+    dec = len(str(c_text).split(".")[1]) if "." in str(c_text) else 0
+    try:
+        return abs(_round_half_up(want, dec) - float(c_text)) > 1e-9
+    except Exception:                                     # noqa: BLE001
+        return False
+
+
+def _claim_has(m, claim: str) -> bool:
+    """式子的三个数都在 claim 里 —— 防止把正文里**另一处**式子改成这条的重算值。"""
+    for k in ("a", "b", "c"):
+        if not re.search(r"(?<![\d.])" + re.escape(m[k]) + r"(?![\d.])", claim):
+            return False
+    return True
+
+
+def _correction(row: dict, v: str):
+    """在**原始**正文 `v` 里找这条断言**唯一**的错值位置 → `(start, end, 原写, 更正后)`。
+
+    改不了 → `None`（调用方整条不动，留给链尾标 ⚠）。边界（2026-11-03 两轮对抗审查；
+    改错比标错坏得多）：
+      · 重算值必须能由 `_result_text` 唯一读出来；
+      · 候选 = 符号四则 `a +·- × b = c` 或 `note_math._DIV` 那套除法写法（口播/符号）；
+      · **恰好一个**「当前 c 真算错、重算值又对得上」的候选，两个 → 一律不改；
+      · 错值 `c` 按**它自己的小数位**（十进制定点、half-up）必须真算错 ——
+        `1.77` 是 `1.767` 的正确舍入、`2.68` 是 `2.675` 的正确舍入 → 不算错；
+      · 重算值按**它自己的小数位**必须对得上 want（这条重算值确实在说这个式子）；
+      · 结果后面带单位（`%‰分/成/折`）→ 不认（`50/100=50%` 的 50 不是错的）；
+      · 错值后跟「是错的/不对/有误…」→ 否定/引用语境，改了就变成假话 → 不认；
+      · 邻字符是运算符/括号、`is_sum_term` 判成和式/积式的一项、`_DIV` 命中链式分数
+        （`d` 组）→ 不认；
+      · 匹配前把排版变体（`－ – · ／` 等）1:1 换成 ASCII —— span 与原文一一对应。
+    """
+    right = _result_text(row.get("recomputed"))
+    if not right:
+        return None
+    try:
+        rec = float(right)
+    except ValueError:
+        return None
+    claim = str(row.get("claim") or "")
+    v2 = v.translate(_OP_TRANS)       # 只用于匹配；替换逐字符 1:1，span 对 v 同样成立
+    import note_math
+
+    found: list = []          # [(c 起点, c 终点, 原写)] —— 每一处「真算错且重算值对得上」的候选
+    for m in _EQ.finditer(v2):
+        if not _claim_has(m, claim):
+            continue
+        before = v2[m.start() - 1] if m.start() else ""
+        after = v2[m.end()] if m.end() < len(v2) else ""
+        if before in _NB_PRE or after in _NB_POST:
+            continue
+        tail = v2[m.end():]
+        if _UNIT_AFTER.match(tail) or _NEG_AFTER.match(tail):
+            continue
+        try:
+            a, b = float(m["a"]), float(m["b"])
+        except ValueError:
+            continue
+        op = m["op"]
+        want = a + b if op == "+" else (a - b if op in ("-", "−") else a * b)
+        if _wrong_at(m["c"], want) and _same_rounded(want, rec, right):
+            found.append((m.start("c"), m.end("c"), m["c"]))
+    for m in note_math._DIV.finditer(v2):
+        if m.group("d"):                      # 链式分数：不知道错在哪一段
+            continue
+        if note_math.is_sum_term(v2, m.start("a")):
+            continue
+        if not _claim_has(m, claim):
+            continue
+        after = v2[m.end()] if m.end() < len(v2) else ""
+        if after in _NB_POST:
+            continue
+        tail = v2[m.end():]
+        if _UNIT_AFTER.match(tail) or _NEG_AFTER.match(tail):
+            continue
+        try:
+            a, b = float(m["a"]), float(m["b"])
+        except ValueError:
+            continue
+        if not b:
+            continue
+        if _wrong_at(m["c"], a / b) and _same_rounded(a / b, rec, right):
+            found.append((m.start("c"), m.end("c"), m["c"]))
+    if len(found) != 1:
+        return None
+    start, end, orig = found[0]
+    return start, end, orig, right
+
+
+def _locate_fields(review: dict, raw: str) -> list:
+    """claim 能在哪些正文字段里找到 → `[(si, path)]`（ctx 前缀优先，其次剥-CJK 前缀）。
+
+    ⭐ A3.6（2026-11-03）：**命中长度并列的全部返回** —— 同一 claim 抄进两节时两处都要
+       处理（旧版只挑"最长前缀"的一个字段，另一处的错值没人管）；弱命中（更短的前缀）
+       丢掉，防止拿一句泛泛的话去改别的节。
+    """
+    ctx = [p for p in (_norm_ctx(raw[:n]) for n in (90, 64, 40, 24)) if len(p) >= 6]
+    keys = [p for p in (_norm(raw[:n]) for n in (90, 64, 40, 24))
+            if len(p) >= 8 and any(c.isalpha() for c in p)]
+    for pool, normf in ((ctx, _norm_ctx), (keys, _norm)):
+        if not pool:
+            continue
+        scored: list = []                  # [(命中长度, si, path)]
+        for si, s in enumerate(review.get("sections") or []):
+            if not isinstance(s, dict):
+                continue
+            for path in paths_of(s):
+                if not path or _field_name(path) not in _MARK_FIELDS:
+                    continue
+                v = _get(s, path)
+                if not isinstance(v, str) or not v:
+                    continue
+                bare = normf(_ANY_MARK.sub("", v))
+                hits = [len(p) for p in pool if p in bare]
+                if hits:
+                    scored.append((max(hits), si, path))
+        if scored:
+            top = max(h[0] for h in scored)
+            return [(si, path) for h, si, path in scored if h == top]
+    # ③ **原文逐字**兜底：纯符号短式（`-2-3=-1`）归一化后只剩 `2 3 1`（<6 字），
+    #    上面两把钥匙都够不着 —— 结果既不回改也不标 ⚠（对抗验证实测）。逐字出现是
+    #    最强的定位证据，不怕短；`raw` 本身或它里面的算式**原样**在字段里出现才算。
+    import note_math
+    lits = [str(raw or "").strip()]
+    for rx in (_EQ, note_math._DIV):
+        lits += [m.group(0).strip() for m in rx.finditer(raw)]
+    scored = []
+    for lit in lits:
+        if len(lit) < 4:                      # `2` 这种不成式子的片段不许当钥匙
+            continue
+        for si, s in enumerate(review.get("sections") or []):
+            if not isinstance(s, dict):
+                continue
+            for path in paths_of(s):
+                if not path or _field_name(path) not in _MARK_FIELDS:
+                    continue
+                v = _get(s, path)
+                if isinstance(v, str) and lit in _ANY_MARK.sub("", v):
+                    scored.append((len(lit), si, path))
+    if scored:
+        top = max(h[0] for h in scored)
+        return [(si, path) for h, si, path in scored if h == top]
+    return []
+
+
+def correct_mismatches(review: dict) -> tuple:
+    """⭐ C5 早段（2026-11-03）：能算准的 `mismatch` → **正文原位回改**成重算值。
+
+    为什么单独一步（而不是留在链尾的 `annotate_mismatches` 里）：回改必须发生在
+    `_with_overview`（速览/串讲）与 `flag_conflicts`（跨节矛盾）**之前** —— 这两层都
+    照正文写，改晚了它们会把旧错值抄进总结。`obsidian_writer` 在 `verify_numbers`
+    之后立刻调这里；链尾的 `annotate_mismatches` 只收尾没改掉的 ⚠。
+
+    边界：见 `_correction`。另外：
+      · 同一 claim 命中多个字段 → **全部改或全部不改**（不许只改一处还标 corrected）；
+      · 按**修正点**（字段 + c 的区间）记账，不按 claim：同一句里两条断言各修正一处，
+        两处都改、各记一处；机械核/模型核两行指向同一点时共享 `corrected_id`；
+      · 同一字段里有多个修正点时，正文只缀**一个**合并括注（`原写 A → B；C → D`）；
+      · `algebra`（式子行）只改数字、**不缀**「（已更正：…）」括注（F15-E：括注会被
+        读成式子的一部分）；改了哪几处由核对表 / 修正记录交代；
+      · 幂等：已有 ⚠ / 已更正 标注的字段不再动。
+
+    返回 `(review, extra, warns)`；`extra=[{"corrected": N}]`（回放/守卫台账按它计数）。
     """
     out = copy.deepcopy(review)
     rows = [c for c in (out.get("checks") or [])
-            if isinstance(c, dict) and c.get("status") == "mismatch"]
+            if isinstance(c, dict) and c.get("status") == "mismatch"
+            and not c.get("corrected") and not is_quote_row(c)]
+    if not rows:
+        return out, [], []
+
+    # ① 规划：**先在原始正文上**把每条断言的修正点全部算出来（一个字都不改）。
+    #    ⚠️ 不能边改边找：同一句里有两条断言（`5.3÷3=2.89，再算 7.2÷2=4.1`）时，
+    #       改掉第一条后第二条的 claim 前缀就对不上了 —— 旧版因此只改一条、
+    #       两行却都标 corrected，正文留下 4.1（2026-11-03 代码评审抓的阻断项）。
+    plans: dict = {}          # (si, path, start, end) -> {"orig","right","rows":[],"ok":True}
+    row_plan: list = []       # [(row, [修正点 key, ...])]
+    for row in rows:
+        raw = str(row.get("claim") or "")
+        if not raw:
+            continue
+        fields = _locate_fields(out, raw)
+        if not fields:
+            continue
+        fixes: list = []      # [(si, path, start, end, 原写, 更正后)]
+        for si, path in fields:
+            v = _get(out["sections"][si], path)
+            if not isinstance(v, str) or not v:
+                fixes = []
+                break
+            if _ANY_MARK.search(v) or _CORRECT_MARK.search(v):
+                fixes = []                    # 这一处已经标/改过（幂等）→ 整条不重复动
+                break
+            fix = _correction(row, v)
+            if fix is None:
+                fixes = []                    # 任一字段改不了 → 整条全不改（A3.6）
+                break
+            fixes.append((si, path) + tuple(fix))
+        if not fixes:
+            continue
+        keys: list = []
+        for si, path, start, end, orig, right in fixes:
+            key = (si, path, start, end)
+            p = plans.setdefault(key, {"orig": orig, "right": right,
+                                       "rows": [], "ok": True})
+            if p["orig"] != orig or p["right"] != right:
+                p["ok"] = False               # 同一位置两条断言结论不同 → 谁都不信
+            p["rows"].append(row)
+            keys.append(key)
+        row_plan.append((row, keys))
+
+    # ② 同一字段里两个修正点相交 → 该字段的这几个点都不做（span 重叠必有一处被改坏）。
+    by_field: dict = {}
+    for (si, path, start, end), p in plans.items():
+        by_field.setdefault((si, path), []).append((start, end, p))
+    for items in by_field.values():
+        spans = sorted((s, e) for s, e, _ in items)
+        for (s1, e1), (s2, _e2) in zip(spans, spans[1:]):
+            if s2 < e1:
+                for _s, _e, p in items:
+                    p["ok"] = False
+
+    applied = {k for k, p in plans.items() if p["ok"]}
+
+    # ③ 应用：同一字段**从后往前**改（span 不漂）；一处字段一个合并括注。
+    for (si, path), items in by_field.items():
+        good = [(s, e, p) for s, e, p in items if p["ok"]]
+        if not good:
+            continue
+        v = _get(out["sections"][si], path)
+        new = v
+        for s, e, p in sorted(good, key=lambda x: x[0], reverse=True):
+            new = new[:s] + p["right"] + new[e:]
+        if _field_name(path) != "algebra":    # 公式行不缀中文括注（F15-E）
+            parts = [f"{p['orig']} → {p['right']}"
+                     for _s, _e, p in sorted(good, key=lambda x: x[0])]
+            new = new.rstrip() + "（已更正：原写 " + "；".join(parts) + "）"
+        _set(out["sections"][si], path, new)
+
+    # ④ 记 row：**它的全部修正点都成立**才记 corrected（不许只改一处还标 corrected）。
+    #    同一修正点被机械核/模型核两行引用 → 共享 `corrected_id`，台账/计数都只算一处。
+    n_fixed = 0
+    fixed_ids: set = set()
+    for row, keys in row_plan:
+        if not keys or any(k not in applied for k in keys):
+            continue
+        first = keys[0]
+        p = plans[first]
+        row["annotated"] = True
+        row["corrected"] = True
+        row["original"] = p["orig"]
+        row["replacement"] = p["right"]
+        row["corrected_id"] = ":".join(str(x) for x in first)
+        if first not in fixed_ids:
+            fixed_ids.add(first)
+            n_fixed += 1
+    warns: list = []
+    if n_fixed:
+        warns.append(f"{n_fixed} 处已按重算结果更正")
+    return out, ([{"corrected": n_fixed}] if n_fixed else []), warns
+
+
+def annotate_mismatches(review: dict) -> tuple:
+    """三道核里**还没处理**的 `mismatch` → 正文原位标 ⚠（能算准的已由 `correct_mismatches` 早段回改）。
+
+    ⚠️ 为什么必须落到正文（2026-10-18 Δ 的根因）：三段核的 mismatch 只落在文末折叠的
+       核对清单与「修正记录」里时，正文照样写着"5.3除以3，得到约2.89"——读者把错算术
+       当事实读 4 遍；**核算结果必须跟着那句话走**。改不了（不知道哪个数是口播错的）
+       就标 ⚠，不许静默。
+    ⚠️ 必须留在清理链的最末：标注要落在**已经清完**的正文上，也不能再进串讲/scrub 的输入。
+    ⚠️ 定位：claim 前缀在哪个字段里出现就标哪个字段（并列取第一个）；能定位到"哪一句"
+       （除法）就插在句号后，定位不到就缀在段尾（位置宁糙，不许不标）。
+    ⚠️ 幂等：字段里已有 ⚠ / 已更正就不再插（同一句可能同时有机械核与模型核两行）。
+    """
+    out = copy.deepcopy(review)
+    rows = [c for c in (out.get("checks") or [])
+            if isinstance(c, dict) and c.get("status") == "mismatch"
+            and not c.get("corrected") and not c.get("annotated")]
     if not rows:
         return out, [], []
     n_num = 0
     n_quote = 0
+    _done_claims: set = set()
     for row in rows:
         raw = str(row.get("claim") or "")
-        # ⚠️ 前缀长度取在**原串**上再归一化：`_norm` 把 CJK 全剥掉，先归一化再截 60 字
-        #    ≈ 原串 250 字 —— 去重/清时间戳正好动在那一段，这句话在去重后就找不回来了
-        #    （2026-10-18 实测：真实产线顺序 dedupe → annotate 全灭）。渐进缩短兜底。
-        # ⭐ F9（作者点名）：短数字 claim（`课上报的 20`）不许乱挂 —— 两把钥匙：
-        #    ① 带 CJK 上下文的前缀（保留中文；先试，最长者赢）；
-        #    ② 旧的剥-CJK 前缀只当**兜底**，且要够长、含字母（`20` 这种纯数字不许当钥匙）。
-        ctx = [p for p in (_norm_ctx(raw[:n]) for n in (90, 64, 40, 24)) if len(p) >= 6]
-        keys = [p for p in (_norm(raw[:n]) for n in (90, 64, 40, 24))
-                if len(p) >= 8 and any(c.isalpha() for c in p)]
+        if raw in _done_claims:
+            row["annotated"] = True
+            continue
         # ⚠️ marker 里的 `how` 先把全角括号换成半角：剥 marker 的正则靠"第一个 `）` 收口"，
         #    括号留在 how 里会把标注切成残渣（幂等判断与 claim 比对都靠它）。
         how = str(row.get("how") or "").strip().rstrip("。；;，,")
         how = how.replace("（", "(").replace("）", ")")
-        if (not ctx and not keys) or not how:
+        if not how:
             continue
-        best = None                     # (前缀长度, section 下标, path) —— 更长的主人更可信
-        for mode in ("ctx", "keys"):
-            pool = ctx if mode == "ctx" else keys
-            if not pool:
-                continue
-            for si, s in enumerate(out.get("sections") or []):
-                if not isinstance(s, dict):
-                    continue
-                for path in paths_of(s):
-                    if not path or _field_name(path) not in _MARK_FIELDS:
-                        continue
-                    v = _get(s, path)
-                    if not isinstance(v, str) or not v:
-                        continue
-                    clean = _ANY_MARK.sub("", v)
-                    bare = _norm_ctx(clean) if mode == "ctx" else _norm(clean)
-                    hits = [len(p) for p in pool if p in bare]
-                    if hits and (best is None or max(hits) > best[0]):
-                        best = (max(hits), si, path)
-            if best is not None:
-                break
-        if best is None:
+        fields = _locate_fields(out, raw)
+        if not fields:
             continue
-        _, si, path = best
+        si, path = fields[0]
         v = _get(out["sections"][si], path)
-        if _ANY_MARK.search(v):
-            row["annotated"] = True      # 这一处已经有 ⚠（别行标的）
+        if not isinstance(v, str) or not v:
+            continue
+        if _ANY_MARK.search(v) or _CORRECT_MARK.search(v):
+            row["annotated"] = True      # 这一处已经有 ⚠ / 已更正（别行标的）
+            _done_claims.add(raw)
             continue
         if is_quote_row(row):
             # ⭐ F14 ③：引语没找到 → 用**说清是哪件事**的标签，且台账里也换同一句人话
@@ -808,6 +1132,7 @@ def annotate_mismatches(review: dict) -> tuple:
         _set(out["sections"][si], path, (v.rstrip() + mark) if where is None
              else (v[:where] + mark + v[where:]))
         row["annotated"] = True
+        _done_claims.add(raw)
         if is_quote_row(row):
             n_quote += 1
         else:
@@ -817,7 +1142,7 @@ def annotate_mismatches(review: dict) -> tuple:
         bits.append(f"{n_num} 处数字对不上")
     if n_quote:
         bits.append(f"{n_quote} 处归属性引语没找到原话")
-    warns = ["、".join(bits) + "，已在正文原位标 ⚠"] if bits else []
+    warns = ["、".join(bits) + "，已在正文原位处理"] if bits else []
     return out, [], warns
 
 
@@ -2536,7 +2861,16 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
         instrs = [instr_tpl.format(claim=c["claim"]) for c in part]
         try:
             ps = list(ask(state, instrs))
-        except Exception:                                      # noqa: BLE001
+        except Exception as e:                                # noqa: BLE001
+            # ⭐ 3.10.6：失败要留下原因（provider + 异常文本），别再只剩一句
+            #    「没找到」—— 401 / 429 / 连不上 / 空 token 原来长得一模一样。
+            try:
+                import keypoints as _kp
+                _kp._remember_failure(e)
+            except Exception:                                 # noqa: BLE001
+                pass
+            print(f"⚠ 支持性核对：判官调用失败（{type(e).__name__}: "
+                  f"{str(e)[:120]}）", flush=True)
             ps = []
         how = "材料里没找到这句（核对）" if kind == "mat" else "转录里没找到这句（核对）"
         for k, c in enumerate(part):
@@ -2589,7 +2923,16 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
     #    说"全部找到" —— 那是"闸门坏了"与"闸门正常工作"长得一模一样的那个静默面，
     #    而这层核对的全部价值就是拦住没出处的 claim。`ask_batch` 也会往终端打一行。
     if used and not n_scored:
-        bits.append(f"⚠ 一条都没判成（{used} 批判官都没回执）—— 这一层这次没起作用")
+        _detail = ""
+        try:
+            import keypoints as _kp
+            _lf = _kp.last_failure()
+            if _lf:
+                _detail = f"（{_lf.get('provider') or '?'}: {_lf.get('error') or '?'}）"
+        except Exception:                                      # noqa: BLE001
+            pass
+        bits.append(f"⚠ 一条都没判成（{used} 批判官都没回执）{_detail}"
+                    f"—— 这一层这次没起作用")
     msgs = [f"支持性核对：查了 {used} 批（上限 {tries} 次请求）"
             + ("；" + "；".join(bits) if bits else "；全部找到")]
     return out, [{"downgraded": downgraded}], msgs

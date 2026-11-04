@@ -1065,6 +1065,7 @@ class AE310(unittest.TestCase):
 
 
 REPORT = {
+    "report_version": 2,
     "generated": "2026-10-18 17:21:45",
     "session_file": "/Users/owen/SECRET-session.md",
     "note_file": "/Users/owen/Lectures/SECRET-note.md",
@@ -1072,9 +1073,17 @@ REPORT = {
     "duration_s": 1234.5, "audio_saved": True,
     "blocks": {
         "stream": {"engine": "soniox", "fallback_reason": "manual", "sealed_n": 12,
-                   "seal_latency_s": {"p50": 0.9, "p90": 1.7, "n": 12}, "terms_n": 5, "terms_dropped": 2},
+                   "seal_latency_s": {"p50": 0.9, "p90": 1.7, "n": 12}, "terms_n": 5, "terms_dropped": 2,
+                   "reconnects": 6, "connect_attempts": 7, "connections": 7, "failed_sessions": 6,
+                   "final_session": {"why": "stale"}, "last_close_detail": "TimeoutError: boom",
+                   "down_s": 12.5, "reconnect_downtime_s": 12.5, "skipped_s": 36.7,
+                   "dropped_s": 0.0, "msg_gap_max_s": 5.2, "drain_gap_max_s": 0.4,
+                   "backlog_max_s": 3.1, "model": "stt-rt-v6", "model_fallback": False,
+                   "endpoints_n": 88, "endpoints_between_n": 11},
         "region_probe": {"default": "us", "selected": "us", "switched": False, "reason": "cache", "cached": True,
                          "ms": 210, "timeout": False,
+                         "attempts": [{"ask": "", "region": "us", "ok": True, "error": ""},
+                                      {"ask": "jp", "region": "jp", "ok": False, "error": "timeout"}],
                          "regions": {"us": {"connect_ms": 90, "rtt_ms": 200, "error": ""},
                                      "jp": {"connect_ms": 300, "rtt_ms": 500, "error": "timeout"}}},
         "duty": {"items": 4, "pending": 1, "saved": 2, "ignored": 1, "inferred": 0},
@@ -1094,10 +1103,17 @@ REPORT = {
         "ui": {"submit": 1, "hide": 1, "show": 1, "hidden_s": 18.3, "zh_overflow": {"overflow": 0, "seen": 598},
                "streamq_dwell_ms": {"n": 871, "p50": 4.1, "p90": 10.8}},
         "terms": {"calls": 58, "picked": 480, "empty": 0},
-        "live": {"calls_total": 2, "failed_calls": 0, "chapters": 0, "atoms": 7},
+        "live": {"calls_total": 2, "failed_calls": 0, "chapters": 0, "atoms": 7,
+                 "chapters_attempted": 1, "chapters_written": 0, "chapters_nonempty": 0,
+                 "failed_atom_calls": 0, "failed_chapter_calls": 1, "finish_truncated": True},
         "vad": {"cuts": 55, "hard_cuts": 158, "dropped": 0, "dropped_s": 0.0, "weak_blocks": 33,
-                "vad_resets": 82, "blind_dropped": 0, "sentence_cuts": 0},
+                "vad_resets": 82, "blind_dropped": 1, "sentence_cuts": 0,
+                "silence_cuts": 55, "total_cuts": 213, "blind_dropped_blocks": 1},
         "norm": {"blocks": 22279, "capped": 3230, "clamped": 4619, "gain_db_max": 29.8},
+        "semantic_seal": {"calls": 9, "errors": 1, "semantic": 7, "cap": 1, "no_cut": 0, "stale": 0},
+        "jev": {"calls": 26, "fail": 20, "provider": "worker", "error": "RuntimeError: 451"},
+        "counts": {"entries_raw": 598, "entries_after_merge": 590, "entries_rendered": 590, "merged": 8},
+        "review": {"review_total": 8, "review_ok": 0, "review_failed": 8, "review_generated": False},
     },
     "asr": {"segments": 410, "words": 5000, "empty_pct": 1.2, "final_empty_pct": 0.5, "fell_back_pct": 3.0,
             "source_pct": {"groq": 90.0, "local-whisper": 10.0}},
@@ -1122,11 +1138,21 @@ class ReportSummary(unittest.TestCase):
         r = self._sum()
         self.assertEqual(r["duration_s"], 1234.5)
         self.assertTrue(r["audio_saved"])
-        self.assertEqual(r["stream"], {"engine": "soniox", "reason": "manual", "detail": "", "sealed_n": 12, "p50": 0.9,
-                                       "p90": 1.7, "lat_n": 12, "terms_n": 5, "terms_dropped": 2})
+        self.assertEqual(r["report_version"], 2)
+        self.assertEqual(r["stream"], {"engine": "soniox", "reason": "manual", "detail": "TimeoutError",
+                                       "sealed_n": 12, "p50": 0.9, "p90": 1.7, "lat_n": 12,
+                                       "terms_n": 5, "terms_dropped": 2,
+                                       "reconnects": 6, "connect_attempts": 7, "connections": 7,
+                                       "failed_sessions": 6, "final_why": "stale",
+                                       "down_s": 12.5, "skipped_s": 36.7, "dropped_s": 0.0,
+                                       "msg_gap_max_s": 5.2, "drain_gap_max_s": 0.4,
+                                       "backlog_max_s": 3.1, "model": "stt-rt-v6",
+                                       "model_fallback": False, "endpoints_n": 88,
+                                       "endpoints_between_n": 11})
         self.assertEqual(r["region"]["default"], "us")
         self.assertEqual(r["region"]["regions"]["jp"]["error"], "timeout")
         self.assertEqual(r["region"]["regions"]["us"]["connect_ms"], 90)
+        self.assertEqual(r["region"]["attempts"][1]["error"], "timeout")
         self.assertEqual(r["duty"]["saved"], 2)
         self.assertEqual(r["device"]["model"], "MacBookPro18,3")
         self.assertEqual((r["device"]["sessions_mb"], r["device"]["classlive_mb"], r["device"]["partial"]),
@@ -1149,6 +1175,19 @@ class ReportSummary(unittest.TestCase):
         self.assertEqual(r["vad"]["vad_resets"], 82)
         self.assertEqual((r["norm"]["capped"], r["norm"]["clamped"]), (3230, 4619))
         self.assertEqual(r["norm"]["gain_db_max"], 29.8, "最大增益 dB 以前被覆盖成恒 None")
+        # ⭐ 3.11：以前采集了却没进白名单的四块 + 分层的失败数。
+        for k in ("semantic_seal", "jev", "counts", "review"):
+            self.assertIn(k, r["blocks"])
+        self.assertEqual((r["vad"]["silence_cuts"], r["vad"]["total_cuts"]), (55, 213))
+        self.assertEqual(r["vad"]["blind_dropped_blocks"], 1)
+        self.assertEqual((r["live"]["chapters_attempted"], r["live"]["chapters_written"]), (1, 0))
+        self.assertTrue(r["live"]["finish_truncated"])
+        self.assertEqual(r["live"]["failed_chapter_calls"], 1)
+        self.assertEqual((r["jev"]["calls"], r["jev"]["fail"]), (26, 20))
+        self.assertEqual(r["jev"]["error"], "RuntimeError")
+        self.assertEqual((r["review"]["review_ok"], r["review"]["review_total"]), (0, 8))
+        self.assertFalse(r["review"]["review_generated"])
+        self.assertEqual(r["counts"]["entries_rendered"], 590)
 
     def test_绝不漏文本路径或逐段明细(self):
         out = json.dumps(self._sum(), ensure_ascii=False)
@@ -1163,6 +1202,26 @@ class ReportSummary(unittest.TestCase):
         self.assertEqual(r["stream"]["reason"], "")
         self.assertIsNone(r["duty"], "没采到的块是 None，不是空 dict")
         self.assertEqual(U._report_summary([], "s", "", "", [])["id"], "s", "非 dict 输入不许炸")
+
+    def test_老报告缺新字段为_None_且双读旧名(self):
+        """⭐ 3.11：新旧并存一个版本 —— 老报告缺的格子是 None；`fallback_detail` 兜底。"""
+        import cl_admin_ui as U
+        r = U._report_summary({"blocks": {"stream": {
+            "fallback_detail": "ModuleNotFoundError: no websockets", "down_s": 3.0}}}, "s", "", "", [])
+        self.assertEqual(r["stream"]["detail"], "ModuleNotFoundError")
+        self.assertEqual(r["stream"]["down_s"], 3.0, "旧报告只有 down_s → 读它")
+        self.assertIsNone(r["stream"]["reconnects"])
+        self.assertIsNone(r["stream"]["connect_attempts"])
+        self.assertIsNone(r["stream"]["drain_gap_max_s"])
+        self.assertIsNone(r["report_version"], "没有版本号 = 旧报告，不是 0")
+
+    def test_新键优先_旧名只是兜底(self):
+        import cl_admin_ui as U
+        r = U._report_summary({"blocks": {"stream": {
+            "fallback_detail": "OLD: x", "last_close_detail": "NewError: y",
+            "reconnect_downtime_s": 9.0, "down_s": 3.0}}}, "s", "", "", [])
+        self.assertEqual(r["stream"]["detail"], "NewError")
+        self.assertEqual(r["stream"]["down_s"], 9.0, "新键优先")
 
     def test_report_at_用报告自己的上传时刻(self):
         """告警的「多久以前」锚在 report.json 的上传时刻，不是组里最后文件的 mtime。"""

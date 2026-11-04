@@ -167,6 +167,13 @@ ENDPOINT = "https://asr.bldcam.page/v1/soniox/key"
 WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
 #: 引擎名（进 `drafts` 元组第 7 项；草稿译文 / 现场采集按它分组）。
 ENGINE = "soniox"
+#: 生产发送的模型名（`region_route.MODEL` 是探测发送那一份，两处要一起改）。
+#: ⭐ 3.10.6：进 `metrics()` —— 收尾报告里要能分清这一节是 v5 还是 v6 跑的，
+#:    否则换模型前后没法对比（官方 v5 于 2026-12-15 下线）。
+MODEL = "stt-rt-v6"
+#: ⭐ 3.11：v6 的兜底 —— 服务端回 `model_not_available` 时自动换 v5 重连一次，
+#:    课程不因此退回本地（v5 在 2026-12-15 前仍可用；之后旧名自动路由到 v6）。
+MODEL_FALLBACK = "stt-rt-v5"
 
 #: 句末标点（与 `draft_engine.END_PUNCT` 同口径）。
 END_PUNCT = (".", "?", "!")
@@ -762,6 +769,11 @@ class StreamASR:
         self._proc_sent_ms = 0.0
         self._last_msg_at = 0.0
         self._msg_gap_max = 0.0
+        #: ⭐ 3.11：`msg_gap_max_s` 实为「客户端排空间隔」（`_drain_events` 两次调用之间
+        #: 隔着多久），不是服务端消息间隔。另记一份**只算排空调用**的间隔（同一口径，
+        #: 名字说人话）：`drain_gap_max_s`。两次都发，看板读新键。
+        self._last_drain_at = 0.0
+        self._drain_gap_max = 0.0
         #: 带 `total_audio_proc_ms` 的消息序号 / 起计那条的序号。hold 必须等到**新读数**
         #: 仍落后才动作 —— 只拿一条冻结读数等时间过去，会把「服务端已追平但下一条消息
         #: 还没到」误判成持续落后（OCR 2026-10-21 第 3 条）。
@@ -780,6 +792,14 @@ class StreamASR:
         self._skipped_s = 0.0
         self._sess_n = 0
         self._reconnects = 0
+        #: ⭐ 3.11：`_reconnects` 只数**握手成功**的新会话（11-03 66 次连接全失败时它仍是 0）。
+        #: 这三个是它的分母/分子补丁：
+        #:   `_connect_attempts` = 每次 `_session()` 进来就 +1（含领 key / 握手失败）；
+        #:   `_failed_sessions`  = 会话结束了但带着死因（`why` 非空）；
+        #:   `_last_sess`        = 最近一条会话记录（不受 `SESS_LOG_MAX` 截断影响）。
+        self._connect_attempts = 0
+        self._failed_sessions = 0
+        self._last_sess: dict = {}
         self._events: "queue.Queue[tuple]" = queue.Queue()
         self._dropped = 0
         self._dropped_samples = 0                   # 队列满丢掉的样本数（算 dropped_s 用）
@@ -798,6 +818,10 @@ class StreamASR:
         self._stopped = False
         self._finished = False
         self._fatal = False
+        #: ⭐ 3.11：v6 不可用（`model_not_available`）→ 下次连接换 `MODEL_FALLBACK`。
+        #:    只试一次（`_v5_tried`）：v5 也说不支持 = 服务端整体不可用，退回本地。
+        self._force_v5 = False
+        self._v5_tried = False
         self._reason = ""
         #: ⭐ 3.10.1：退回原因是 `error` / `network` 时的**异常类型 + 一句话**（只进报告，
         #: 不上屏）。那次 `websockets` 没装上，报告里只有一个 `error`，猜了半天。
@@ -830,10 +854,16 @@ class StreamASR:
         """这一节课的只读快照（启动日志与收尾报告共用）。**随时可调、永不抛**。
 
         形状 = 收尾报告里的 `stream` 块（`.live.jsonl` 的 summary 行 / testmode 的
-        `blocks.stream`）：`engine` / `fallback_reason`（`""` = 没退回）/ `sealed_n`
-        （从 `_fire` 出去的封口句数）/ `seal_latency_s`（`{p50, p90, n}`，秒；`None` = 一句
+        `blocks.stream`）：`engine` / `model` / `model_fallback`（v6→v5 回退过 = True）/
+        `fallback_reason`（`""` = 没退回）/ `sealed_n`
+        （从 `_fire` 出去的封口句数）/ `endpoints_n`、`endpoints_between_n`（语义端点总数 /
+        落在两句之间的数量）/ `seal_latency_s`（`{p50, p90, n}`，秒；`None` = 一句
         都没封）/ `reconnects` / `skipped_s` / `backlog_max_s` / `msg_gap_max_s` /
         `down_s` / `dropped_chunks` / `dropped_s` / `terms_n` / `terms_dropped`。
+        ⭐ 3.11 追加（除 `fallback_detail` 改名外，旧键都照发）：`connect_attempts` /
+        `connections` / `failed_sessions` / `final_session`（重连的分母与最后一节）、
+        `reconnect_downtime_s`（= `down_s` 的新名字）、`drain_gap_max_s`
+        （`msg_gap_max_s` 的实际口径）、`last_close_detail`（原 `fallback_detail`）。
         ⚠️ 只记**事实** —— 指标怎么算归读的人（`scripts/class_report.py`）。
         """
         with self._lock:
@@ -848,21 +878,59 @@ class StreamASR:
             dropped = self._dropped
             dropped_samples = self._dropped_samples
             buckets = dict(self._drop_buckets)
-            down_s = self._down_s + (time.monotonic() - self._down_since
-                                     if self._down_since is not None else 0.0)
+            # ⚠️ 掉线段必须在 `stop()` / `_finish()` 收口；这里再判一次 stopped/finished ——
+            #    收口之前就查报告的路径（probe）拿到的是**冻结值**，不是无限涨的数
+            #    （11-03 报告里 `down_s` 在下课后还在涨，就是这条）。
+            down_s = self._down_s
+            if (self._down_since is not None and not self._stopped
+                    and not self._finished):
+                down_s += time.monotonic() - self._down_since
             sessions = [dict(x) for x in self._sess_log]
+            last_sess = dict(self._last_sess)
+            connect_attempts = self._connect_attempts
+            failed_sessions = self._failed_sessions
+            connections = self._sess_n
+            drain_gap_max_s = self._drain_gap_max
+            # ⭐ 3.11：模型名也在锁内取快照（v5 回退可能发生在读报告的同时）。
+            model_name = MODEL_FALLBACK if self._force_v5 else MODEL
+            model_fb = bool(self._force_v5)
+            ep_n = self._ep_n
+            ep_between = self._ep_between
         st = self._ctx_stats
         return {"engine": ENGINE,
+                #: ⭐ 3.10.6：模型名 —— 报告要能分清 v5 / v6（换模型前后对比用）。
+                #: ⭐ 3.11：回退过就是 v5（`model_fallback=True`，别把回退藏起来）。
+                "model": model_name,
+                "model_fallback": model_fb,
                 "fallback_reason": reason,
-                "fallback_detail": detail,
+                #: ⭐ 3.11：`fallback_detail` 直接改名 —— 它记的是**最近一次断线的异常**，
+                #:    不是「已退回本地」的证据（没退回时也常有值）。旧报告仍叫旧名，
+                #:    看板做 `last_close_detail or fallback_detail` 双读。
+                "last_close_detail": detail,
                 "sealed_n": n,
                 "seal_latency_s": _pcts(lat),
+                #: ⭐ 3.11：Soniox 语义端点（`<end>`）总数 / 其中落在两句之间的数量。
+                #:    后者 ≈ 「本来是一句、被端点切开」的可测量代理；v5/v6 对比就看这一对。
+                "endpoints_n": int(ep_n),
+                "endpoints_between_n": int(ep_between),
                 #: ⭐ 2026-10-21：卡顿/断流的可观测性（报告里直接看得到）
                 "reconnects": int(reconnects),
+                #: ⭐ 3.11：重连的三个分母/分子 —— 旧键照发（一个版本的新旧并存）。
+                #: `reconnects` 只数**握手成功**的新会话；整节连不上时它是 0。
+                "connect_attempts": int(connect_attempts),
+                "connections": int(connections),
+                "failed_sessions": int(failed_sessions),
+                #: 最近一条会话记录（`why` = 怎么结束的）。`SESS_LOG_MAX` 只截 `sessions[]`，
+                #: 截断后仍要知道**最后一节**是怎么死的。
+                "final_session": last_sess or None,
                 "down_s": round(float(down_s), 1),      # 掉线期间 Soniox 没出词的累计秒数
+                #: ⭐ 3.11：同一口径的新名字（`down_s` 语义没变；旧键至少留一个版本）。
+                "reconnect_downtime_s": round(float(down_s), 1),
                 "skipped_s": round(float(skipped_s), 1),
                 "backlog_max_s": round(float(backlog_max_s), 1),
                 "msg_gap_max_s": round(float(msg_gap_max_s), 2),
+                #: ⭐ 3.11：`msg_gap_max_s` 的实际口径（客户端排空间隔）—— 另给一个明确名字。
+                "drain_gap_max_s": round(float(drain_gap_max_s), 2),
                 "dropped_chunks": int(dropped),
                 "dropped_s": round(float(dropped_samples) / float(SR), 1),
                 #: ⭐ 2026-11-02：丢在哪一段。`sess`=第几次连接，`at`=开课第几秒起的这一分钟。
@@ -875,6 +943,18 @@ class StreamASR:
                 "terms_dropped": int(st.get("terms_dropped") or 0),
                 #: 每个会话一条：`at` 开始于第几秒 / `ran_s` 跑了多久 / `why` 怎么结束的 / `detail` close code 等
                 "sessions": sessions}
+
+    def _close_down_segment(self) -> None:
+        """把当前这一段「Soniox 没出词」的时间累加进 `_down_s` 并收口（幂等）。
+
+        ⚠️ 三处必须调：① 新一段退避开始前（**连续失败不许把上一段丢掉** —— 原来直接
+        覆盖 `_down_since`）；② 建连成功（`_alive` 置真）；③ `stop()` / `_finish()`
+        （否则下课后 `metrics()` 还在把「现在 - 上次断线」算进去，见 11-03 报告）。
+        调用方负责持锁（本文件三处都在 `with self._lock` 里）。
+        """
+        if self._down_since is not None:
+            self._down_s += max(0.0, time.monotonic() - self._down_since)
+            self._down_since = None
 
     def feed(self, samples) -> None:
         """音频回调：float32 样本 → 有界队列。**绝不阻塞**，满了丢最旧。"""
@@ -1008,6 +1088,8 @@ class StreamASR:
         """收尾：发空文本帧，最多等 `finish_wait_s` 收 final，再关。可重复调。"""
         with self._lock:
             self._stopped = True
+            # ⭐ 3.11：收口掉线段 —— 否则 `metrics()["down_s"]` 在下课后还会继续涨。
+            self._close_down_segment()
         # ⚠️ 已经停过也要等：暗号切回本地（`force_local`）的那条后台线程可能还在收尾，
         #    下课这一下直接返回的话，最后半句的 `on_sealed` 会落在 `sealedq` 判空之后（丢句）。
         self._thread.join(timeout=self._finish_wait_s + 2.0)
@@ -1062,25 +1144,59 @@ class StreamASR:
             t0 = time.monotonic()
             err = self._session()
             ran = time.monotonic() - t0
+            retry_v5 = False
+            terminal = ""
             with self._lock:
+                why = err
+                detail = self._detail
                 if self._stopped:
+                    # ⭐ 3.11：正常收尾也记一条（`why=""`）—— 否则 `final_session`
+                    #    永远是「最后一次**失败**」，把已自愈的旧故障当成下课原因。
+                    self._last_sess = {"at": round(t0 - self._t_start, 1),
+                                       "ran_s": round(ran, 1), "why": "", "detail": ""}
                     return ""
                 if self._fatal:
-                    return "error"
-                if not err:
-                    return "disconnected"           # 收线程死了但会话没报错
-                if err == "disconnected" and self._pending:
-                    err = self._pending
+                    # ⭐ 3.11：v6 在这个区没上线 → 换 v5 重连一次（课程不因此退回本地）。
+                    #    v5 也失败（或本来就是别的致命类）→ 照旧退回。
+                    if self._force_v5 and not self._v5_tried:
+                        self._v5_tried = True
+                        self._fatal = False
+                        retry_v5 = True
+                        why = "model_not_available"
+                    else:
+                        terminal = "error"
+                        why = err or "error"
+                elif not err:
+                    # 收线程死了但会话没报错 —— 也是一节失败的会话，**先记账再退**。
+                    terminal = "disconnected"
+                    why = "disconnected"
+                else:
+                    if err == "disconnected" and self._pending:
+                        err = why = self._pending
+                    else:
+                        why = err
+                entry = {"at": round(t0 - self._t_start, 1), "ran_s": round(ran, 1),
+                         "why": why, "detail": detail[:40]}
+                # ⭐ 3.11：`_last_sess` 不受 `SESS_LOG_MAX` 截断 —— 长课 30 节以后
+                #    `sessions[]` 不再追加，但「最后一节怎么死的」仍然要答得出。
+                self._last_sess = entry
+                if why:
+                    self._failed_sessions += 1
                 if len(self._sess_log) < SESS_LOG_MAX:
-                    self._sess_log.append({"at": round(t0 - self._t_start, 1), "ran_s": round(ran, 1),
-                                           "why": err, "detail": self._detail[:40]})
+                    self._sess_log.append(entry)
                 n_sess = len(self._sess_log)
+            if retry_v5:
+                continue                            # 下一圈 `_config()` 会用 v5
+            if terminal:
+                # ⚠️ 致命 / 收线程死的会话**已经记进 sessions[] / failed_sessions** 了；
+                #    这里只早退（旧行为不出 drop log）。
+                return terminal
             if self._drop_log:
                 # ⚠️ 锁外打（stdout 可能阻塞；别让它占着状态锁）。
                 try:
                     print(self._drop_log.format(
                         ran=f"{ran:.0f}", why=err,
-                        detail=f" · {self._detail[:40]}" if self._detail else "",
+                        detail=f" · {detail[:40]}" if detail else "",
                         n=n_sess), flush=True)
                 except Exception:                   # noqa: BLE001
                     pass
@@ -1093,6 +1209,9 @@ class StreamASR:
             base = self._retry_delays_s[fails]
             fails += 1
             with self._lock:
+                # ⚠️ 先把**正在算的那一段**收口再加新的 —— 连续失败时原来直接覆盖
+                #    `_down_since`，前一段的掉线时间就凭空消失了（11-03 那几个 66 次连接）。
+                self._close_down_segment()
                 self._down_since = time.monotonic()
                 if base >= RETRY_SKIP_AFTER_S:
                     self._skip_next = True          # 等这么久，旧音频没必要续传
@@ -1114,6 +1233,12 @@ class StreamASR:
 
     def _session(self) -> str:
         """一次完整会话。返回 `""`（正常收尾）或失败原因。"""
+        # ⭐ 3.11：连接**尝试**数（旧 `reconnects` 只数握手成功后新开的会话）。
+        #    ⚠️ `_detail` 每次尝试先清空 —— 上一次的死因（如两个 `close 1006`）会串到
+        #    这一次报告里，读的人分不清是哪个会话断的。
+        with self._lock:
+            self._connect_attempts += 1
+            self._detail = ""
         try:
             key = self._key(self._passcode)
         except _KeyError as e:
@@ -1150,6 +1275,7 @@ class StreamASR:
             self._zero_proc_since = None
             self._zero_proc_seq = 0
             self._last_msg_at = time.monotonic()
+            self._last_drain_at = 0.0
             self._send_since = None
         if skip:
             dropped = 0
@@ -1188,9 +1314,7 @@ class StreamASR:
             self._timed_send(ws, json.dumps(self._config()))
             with self._lock:
                 self._alive = True
-                if self._down_since is not None:
-                    self._down_s += time.monotonic() - self._down_since
-                    self._down_since = None
+                self._close_down_segment()
             err = self._send_loop(ws)
         except Exception:                           # noqa: BLE001
             err = "disconnected"
@@ -1241,9 +1365,9 @@ class StreamASR:
             return
 
     def _note_close(self, ws, err: str) -> None:
-        """服务端关连接的 close code + 原因记进 `fallback_detail`（只在掉线类原因时）。永不抛。
+        """服务端关连接的 close code + 原因记进 `last_close_detail`（只在掉线类原因时）。永不抛。
 
-        10-23 那次 `fallback_detail` 是空的，只知道「被掐了」，不知道是谁掐的、为什么。
+        10-23 那次这个字段是空的，只知道「被掐了」，不知道是谁掐的、为什么。
         """
         if err not in ("disconnected", "timeout", "stale"):
             return
@@ -1269,7 +1393,8 @@ class StreamASR:
         从前是 30 000 字符的客户端上限（≈ 官方 3 倍）—— 词表一大就会踩 `invalid_request`
         （= 整节课退回本地）。被拿掉的条数在 `metrics()` 里记账，启动日志/报告都会写出来。
         """
-        cfg: dict = {"model": "stt-rt-v5", "audio_format": "pcm_s16le",
+        cfg: dict = {"model": (MODEL_FALLBACK if self._force_v5 else MODEL),
+                     "audio_format": "pcm_s16le",
                      "sample_rate": SR, "num_channels": 1,
                      "language_hints": ["en"], "enable_endpoint_detection": True}
         if self._ctx:
@@ -1393,6 +1518,15 @@ class StreamASR:
         返回会让退回原因记成 `disconnected` 而不是真正的致命类。
         """
         fatal = False
+        # ⭐ 3.11：排空调用本身的间隔（`msg_gap_max_s` 的真实口径）。只在本会话内量 ——
+        #    跨会话会把退避/握手时间算进来（那是 `down_s` 的事）。
+        now = time.monotonic()
+        with self._lock:
+            if self._last_drain_at > 0:
+                gap = now - self._last_drain_at
+                if gap > self._drain_gap_max:
+                    self._drain_gap_max = gap
+            self._last_drain_at = now
         while True:
             try:
                 kind, payload = self._events.get_nowait()
@@ -1407,6 +1541,20 @@ class StreamASR:
                     self._msg_gap_max = max(self._msg_gap_max, got - self._last_msg_at)
                 self._last_msg_at = got
             if kind == "err":
+                # ⭐ 3.11：模型不存在（官方错误目录）→ 下次连接换 v5。
+                #    ⚠️ 只改「用哪个模型」，不当成区域/网络问题：`_fatal` 照旧置位，
+                #    由 `_attempts` 决定"换模型重来一次"而不是整课退回。
+                if str(payload).strip().lower() == "model_not_available" and not self._force_v5:
+                    with self._lock:
+                        self._force_v5 = True
+                        self._detail = (f"model_not_available: {MODEL} 不可用，"
+                                        f"回退 {MODEL_FALLBACK}")
+                elif str(payload).strip().lower() == "model_not_available":
+                    # ⭐ 3.11：v5 兜底也被拒时**也要留下证据**（原来第二次不写 detail，
+                    #    报告只剩「v6 不可用」，分不清是 v5 不可用还是 v5 连不上）。
+                    with self._lock:
+                        self._detail = (f"model_not_available: {MODEL_FALLBACK} 不可用"
+                                        f"（兜底模型也不可用）")
                 if classify_error(payload) == "fatal":
                     fatal = True
             elif kind == "msg":
@@ -1544,6 +1692,7 @@ class StreamASR:
                 return
             self._finished = True
             self._alive = False
+            self._close_down_segment()
             if self._stopped:
                 self._reason = "manual" if self._manual else ""
             else:

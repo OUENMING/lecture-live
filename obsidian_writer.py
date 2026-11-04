@@ -39,6 +39,12 @@ SESSIONS = Path(__file__).with_name("sessions")
 #: ⭐ F11 §0（作者 2026-10-18）：**课后笔记**那条链统一用 DeepSeek 思考模式的 low 档。
 #: ⚠️ 只给笔记生成用（`_chat` / `_chat_meta` 两个出口）；作者选了 low、不是 high，别调高。
 NOTE_EFFORT = "low"
+#: ⭐ 3.10.6：笔记链每次调用的**硬墙钟上限**。原来吃 `llm_client` 的默认 300 秒，
+#:    而 `note_v2.one()` 还会重试 2 次（共 3 次尝试）—— 单块最坏 15 分钟，
+#:    整段复习层能拖到十几分钟。现在单块最坏 4.5 分钟，整段还有 5 分钟总预算。
+#:    ⚠️ 只给课后笔记这三条出口（review/align/overview/repair/verify 都走它们）；
+#:       翻译 / 实时摘要仍是原来的超时，别顺手改。
+NOTE_DEADLINE_S = 90.0
 
 
 def resolve_vault(cli: str | None = None, *, env=None, root=None) -> str | None:
@@ -530,8 +536,11 @@ def _duty_section_md(items: list, *, day=None) -> list:
 
 
 def _render_outline_section(items: dict, *, review: dict | None = None,
-                            decisions=None) -> list:
+                            decisions=None, terms_done: bool = False) -> list:
     """课堂纲要 -> 笔记里那一节。**纯函数**（不起窗口、不联网、可单测）。
+
+    ⭐ `terms_done`（3.10.6 P1-1）：调用方已经在 `note_v2.announce_terms_in_outline`
+       里做过术语英文化 → 这里**跳过**自带的 `_inline_terms`，否则会双括注。
 
     ⚠️ **返回空列表 = 这一节什么都不该写**（既没课务也没正式章）——
        调用方据此**整节跳过**，不是写一个空标题。
@@ -627,7 +636,11 @@ def _render_outline_section(items: dict, *, review: dict | None = None,
 
         ⚠️ 作者 2026-10-17 第四轮：「课堂纲要」还是「一行中文 + 一行英文整句 + 词串」，
            明确不要那种版式 —— 中文为主，术语（英文）就地括注。
+        ⚠️ 3.10.6：`terms_done=True` 时**原样返回** —— 术语英文化已经在
+           `note_v2.announce_terms_in_outline` 里做过，不能再括一遍。
         """
+        if terms_done:
+            return zh
         out = zh
         for t in (terms or ()):
             if not (isinstance(t, (list, tuple)) and len(t) >= 2):
@@ -731,6 +744,11 @@ class ObsidianWriter:
         self._guard_counts: dict = {"repaired": 0, "dropped": 0, "flagged": 0,
                                      "downgraded": 0}
         self._guard_summary: str = ""
+        #: ⭐ 3.11：复习层的成败账 —— 进报告 `blocks.review`。总块数从进度回调拿
+        #: （`on_progress("review", 0, N)`），因为**全部失败时** `note_v2.review()`
+        #: 返回 `{}`，`chunk_stats` 根本没挂上（11-03 8/8 失败在报告里完全看不见）。
+        self._note_stats: dict = {"review_total": 0, "review_ok": 0,
+                                  "review_failed": 0, "review_generated": False}
         self._polish = polish               # 落笔前二次精修(见 polish.py)
         self._polish_model = polish_model or model
         #: 🎯 Jev 的重点句：`[(概率, 句子, [原始行下标]), …]`。
@@ -1242,7 +1260,7 @@ class ObsidianWriter:
         import llm_client
         obj = llm_client.chat_json(self._key, self._model, system, user,
                                    max_tokens=max_tokens, temperature=0.3, timeout=300,
-                                   effort=NOTE_EFFORT)
+                                   effort=NOTE_EFFORT, deadline=NOTE_DEADLINE_S)
         return obj if isinstance(obj, dict) else {}
 
     def _chat_plain(self, system: str, user: str, max_tokens: int) -> dict:
@@ -1254,7 +1272,8 @@ class ObsidianWriter:
         """
         import llm_client
         obj = llm_client.chat_json(self._key, self._model, system, user,
-                                   max_tokens=max_tokens, temperature=0.3, timeout=300)
+                                   max_tokens=max_tokens, temperature=0.3, timeout=300,
+                                   deadline=NOTE_DEADLINE_S)
         return obj if isinstance(obj, dict) else {}
 
     def _chat_meta(self, system: str, user: str, max_tokens: int):
@@ -1265,7 +1284,8 @@ class ObsidianWriter:
         obj, finish, nchars = llm_client.chat_json(self._key, self._model, system, user,
                                                    max_tokens=max_tokens, temperature=0.3,
                                                    timeout=300, return_meta=True,
-                                                   effort=NOTE_EFFORT)
+                                                   effort=NOTE_EFFORT,
+                                                   deadline=NOTE_DEADLINE_S)
         return (obj if isinstance(obj, dict) else {}), finish, nchars
 
     def _with_overview(self, review: dict) -> tuple:
@@ -1296,18 +1316,41 @@ class ObsidianWriter:
         import note_v2
         return note_v2.shorten_overlimit(review, chat=self._chat)
 
+    def _record_review_stats(self, review) -> None:
+        """把一次复习层的结果记进 `_note_stats`（`blocks.review` 的唯一写入口）。
+
+        ⚠️ 总块数优先用 `_prog("review", 0, N)` 留下的值 —— **全部失败时**
+        `note_v2.review()` 返回 `{}`，`chunk_stats` 根本不存在；这时
+        `review_failed = review_total`。
+        """
+        st = review.get("chunk_stats") if isinstance(review, dict) else None
+        failed = len((st or {}).get("failed") or []) if isinstance(st, dict) else 0
+        total = int(self._note_stats.get("review_total") or
+                    (isinstance(st, dict) and st.get("n")) or 0)
+        if not review:
+            failed = total                        # 整层没回来 = 已起的分块全失败
+        self._note_stats.update(
+            {"review_total": total, "review_ok": max(0, total - failed),
+             "review_failed": failed,
+             "review_generated": bool(review.get("sections")) if isinstance(review, dict) else False})
+
     def _review_v2(self, entries: list[dict], on_progress=None) -> dict:
         """v2 复习层：课件索引 → 分块 review → 覆盖度对齐 → 数字三道核 → 术语库。
 
         三步的**顺序不能换**（每一步都吃前一步的产物）：
           ① `review` 带课件片段逐块写讲解（并发、按块序合并）
           ② `align` 拿"教授知识点清单 × 笔记小节"做覆盖度（便宜：只喂标题）
-          ③ `verify_numbers` 重算数字断言（**错了写进修正说明，不改正文**）
+          ③ `verify_numbers` 重算数字断言（**核对本身不改正文**：能算准的由
+             `note_guards.correct_mismatches` 在速览之前回改，算不准的链尾标 ⚠）
           ④ 术语库追加（作者硬要求；**失败不影响笔记**）
           ⑤ Anki CSV（纯本地）
 
         ⚠️ 每一步都 fail-soft：少了哪一步都只少那一层，**绝不抛给 `close()`**。
         """
+        # ⚠️ 没有 key 就别发请求 —— 原来 `_chat` 会带着空 key 打一次网络：401 快的时候
+        #    看不出，断网时会挂满 connect 超时（judge 的 300 秒超时就是这么来的）。
+        if not self._key:
+            return {}
         import note_v2
         self._materials = self._build_materials()
         try:
@@ -1341,6 +1384,9 @@ class ObsidianWriter:
         review = note_v2.review(entries, chat=self._chat, domain=domain,
                                materials=self._materials, on_progress=on_progress,
                                extra=block, skeleton=sk)
+        # ⭐ 3.11：先把复习层的成败账落地（**再**早退）—— 全失败时 `review == {}`，
+        #    但「8 块里失败 8 块」正是报告最该说出来的那件事（11-03 完全没有痕迹）。
+        self._record_review_stats(review)
         if not review:
             return {}
         st = review.get("chunk_stats") or {}
@@ -1382,7 +1428,18 @@ class ObsidianWriter:
                 exercise_flags=flags)
             if checks:
                 review["checks"] = checks
-                self._corr_extra = note_v2.corrections_from_mismatch(checks)
+                # ⭐ C5（2026-11-03）：能算准的 mismatch **先回改正文** —— 必须在
+                #    `_with_overview` / `flag_conflicts` 之前：速览与跨节矛盾照改后的
+                #    正文写。算不准的留给链尾 `annotate_mismatches` 标 ⚠。
+                try:
+                    review, _, _corr_warns = note_guards.correct_mismatches(review)
+                    for _w in _corr_warns:
+                        self._note_warns.append(str(_w))
+                        print(f"   🧮 核算回改正文：{_w}", flush=True)
+                except Exception as e:                        # noqa: BLE001
+                    print(f"⚠ 核算回改失败({str(e)[:60]}); 退回只标不改", flush=True)
+                self._corr_extra = note_v2.corrections_from_mismatch(
+                    review.get("checks") or [])
                 # ⚠️ F13 #2：终端那行**不再在这里打** —— 这里只是半场的数字
                 #    （后面返修、正文核对还会加减行）。统一在链条跑完后按**最终**
                 #    `review["checks"]` 打，与 md/HTML 页头读同一个计数。
@@ -1504,13 +1561,18 @@ class ObsidianWriter:
         #    ⚠️ 旧版在 `verify_numbers` 之后立刻打，那是半场数字（后面返修/支持性核对
         #    还会加减行）→ 终端 72 项、页头 48 处，两套数。
         _cs = note_v2.checks_summary(review.get("checks") or [])
+        _bits = []
+        if _cs.get("n_fixed"):
+            _bits.append(f"{_cs['n_fixed']} 处已更正")
+        if _cs["n_bad"]:
+            _bits.append(f"{_cs['n_bad']} 处对不上")
         print(f"🥉 数字三道核：{_cs['n_checked']} 处已核"
-              f"（{_cs['n_bad']} 处对不上）· {_cs['n_un']} 处未核对 · 共 {_cs['total']} 条",
+              + (f"（{' · '.join(_bits)}）" if _bits else "")
+              + f" · {_cs['n_un']} 处未核对 · 共 {_cs['total']} 条",
               flush=True)
         # 🧮 F9c：守卫台账行（批量审计：一批笔记 `grep guards:` 就能看谁被动过）。
-        self._guard_counts["flagged"] = len(
-            [c for c in (review.get("checks") or [])
-             if isinstance(c, dict) and c.get("status") == "mismatch"])
+        #    ⭐ C5：`flagged` 只数**还没处理**的（已更正的由 🥉 那行的「已更正」交代）。
+        self._guard_counts["flagged"] = _cs["n_bad"]
         self._guard_summary = (
             f"guards: repaired {self._guard_counts['repaired']}, "
             f"dropped {self._guard_counts['dropped']}, "
@@ -1754,6 +1816,14 @@ class ObsidianWriter:
         """
         return dict(getattr(self, "_entry_counts", {}) or {})
 
+    def note_stats(self) -> dict:
+        """复习层的只读成败账（`blocks.review`）：`review_total / review_ok / review_failed / review_generated`。
+
+        ⚠️ `review_total` 来自进度回调（0/N 那次），**不是** `chunk_stats.n` ——
+        全部失败时后者根本不存在（`note_v2.review()` 返回 `{}`）。
+        """
+        return dict(getattr(self, "_note_stats", {}) or {})
+
     def _note_data(self, entries: list[dict], review: dict, qa_items: list,
                    polish_state: str, lost_items: list, keypoint_items: list,
                    chapter_items: dict, review_missing: bool):
@@ -1929,6 +1999,14 @@ class ObsidianWriter:
         #    `--ui terminal` 那条没有 UI，而 UI 那条也不该逼人回头看终端。
         #    ⚠️ 转发那步包 try：一个坏的回调不该把整节课的笔记带下水。
         def _prog(stage, done, total):
+            # ⭐ 3.11：复习层**总块数**只在这里拿得到（`review()` 全失败时返回 `{}`，
+            #    连 `chunk_stats` 都没有）。失败数在 `_review_v2` 回来时补。
+            if stage == "review":
+                try:
+                    self._note_stats["review_total"] = max(
+                        int(self._note_stats.get("review_total") or 0), int(total or 0))
+                except Exception:                         # noqa: BLE001
+                    pass
             from polish import progress_text
             print(f"  {progress_text(stage, done, total)}", flush=True)
             if on_progress is not None:

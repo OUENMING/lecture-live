@@ -375,6 +375,11 @@ def _set_background_qos() -> bool:
         return False
 
 
+#: ⭐ 3.11：`report.json` 的 schema 版本。字段改名/改口径时 +1 —— 下次不用靠字段嗅探
+#: 去猜「这份报告是哪一代的」。v2 = 3.11 的重连/掉线/复习层/Jev 计数那一批。
+REPORT_VERSION = 2
+
+
 #: `TestSession.note_block()` 认的名字（见那个方法的 docstring）。
 #: ⚠️ **多一格就在这儿加一行** —— 名字打错**不会**静默建键，会进 `events` 报一声。
 #: 每一项都是「一整份快照」，与 `note_event` 的时间轴事件分工不同。
@@ -396,7 +401,13 @@ BLOCKS = frozenset({
     #          术语进 context 数与被截数（`stream_asr.StreamASR.metrics()` 的产物）。
     #          没建流（`stream is None`）时这一块**缺席** = 这节课没用 Soniox。
     "stream",
+    "semantic_seal",  # ⭐ 3.10.6：语意封口计数 `{calls, errors, semantic, cap, no_cut, stale}`
+                      #             （`semantic_seal.SemanticSealer.stats`，`main.py:4092` 已在传）
     "duty",     # 「一些事儿」计数（`main._duty_stats()`：认出 / 记下 / 忽略 / 漏处理）
+    "jev",      # ⭐ 3.10.6：Jev 最后一次失败 `{provider, error, at}` +
+                #             ⭐ 3.11：`{calls, fail}`（`keypoints.stats()`）—— 全失败时靠它区分 401/429/连不上
+    "review",   # ⭐ 3.11：复习层分块成败 `{review_total, review_ok, review_failed, review_generated}`
+                #             （`obsidian_writer.note_stats()`）—— 0/N 失败从这里一眼看出来
     "deps",     # ⭐ 3.10.1：依赖现状（`update.deps_diag()`：缺哪些包 / uv 在不在 / 指纹戳）
     "device",   # ⭐ 3.10：设备/环境画像 —— `{start, end, samples}`（磁盘/供电/机器/
                 #           显示器/音频/网络/语言 + 我们自己的体积）。见 `device_start`
@@ -2396,6 +2407,8 @@ class TestSession:
             _audio_files = ([p for p in self._wav_paths if p.exists()]
                             + [p for p in self._transcode.finished() if p.exists()])
         report = {
+            # ⭐ 3.11：schema 版本（见 `REPORT_VERSION`）。
+            "report_version": REPORT_VERSION,
             "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
             "session_file": str(self.session_path) if self.session_path else None,
             "note_file": note_path,

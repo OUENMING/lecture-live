@@ -178,7 +178,7 @@ class Wiring(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, _on(), \
                 mock.patch.object(ow, "SESSIONS", pathlib.Path(d) / "sessions"):   # ⚠️ 写端也换
             w = ow.ObsidianWriter(d, "TESTX", mode="yes", api_key="k", polish=False)
-            w._review = lambda *a, **k: {}
+            w._review_v2 = lambda *a, **k: {}
             w._keypoint_items = lambda *a, **k: []
             sp = pathlib.Path(d) / "s.md"
             sp.write_text(self.SESSION, encoding="utf-8")
@@ -194,7 +194,7 @@ class Wiring(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, _on(), \
                 mock.patch.object(ow, "SESSIONS", pathlib.Path(d) / "sessions"):   # ⚠️ 写端也换
             w = ow.ObsidianWriter(d, "TESTX", mode="yes", api_key="k", polish=False)
-            w._review = lambda *a, **k: {}
+            w._review_v2 = lambda *a, **k: {}
             w._keypoint_items = lambda *a, **k: []
             sp = pathlib.Path(d) / "s.md"
             sp.write_text(self.SESSION, encoding="utf-8")

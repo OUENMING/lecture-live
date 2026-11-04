@@ -169,8 +169,14 @@ def main() -> int:
           f"keys={sorted(t._extra)} events={t.events}")
 
     check("⭐ `BLOCKS` 覆盖计划里那七格对应的五块",
-          {"norm", "vad", "live", "terms", "ui"} <= set(tm.BLOCKS),
+          {"norm", "vad", "live", "terms", "ui", "semantic_seal", "jev"} <= set(tm.BLOCKS),
           str(sorted(tm.BLOCKS)))
+    # ⭐ 3.11：块名写错只会进 `events`（bad_block），不会红 —— 这里钉住两个新块的生产端。
+    _main_src = (pathlib.Path(__file__).resolve().parent.parent / "main.py").read_text(
+        encoding="utf-8")
+    check("⭐ 收尾真的写了 jev / review 两块（不是只登记了名字）",
+          'note_block("jev"' in _main_src and 'note_block("review"' in _main_src,
+          "main.py 里找不到 note_block(\"jev\"/\"review\")")
 
     print("\n--- T6 ⭐⭐ 两级矫正对：`note_correction(fixed, raw)` ---")
     # ⚠️ 变异验证：把 `if not fixed: no_fix += 1; return` 那两行删掉
@@ -1041,14 +1047,23 @@ def main() -> int:
             return o, ""
 
         _wk = tm._TranscodeWorker(transcode=_fake_tc)
-        _wavs23 = []
-        for _i in (1, 2, 3):
-            _p = _d23 / f"w{_i}.wav"
-            _mk_wav(_p)
-            _wavs23.append(_p)
-        for _p in _wavs23:
-            _wk.submit(_p)
-        _wk.drain(10.0)
+        # ⚠️ 这一段测的是「一次一段 / 按提交顺序 / 记账」，不是 QoS。工人线程会把自己降到
+        #    background QoS（生产上对），但整仓 8 个测试进程并行时它可能被饿住十几秒
+        #    → `drain(10)` 假红（2026-11-03 实测：全量跑红、单跑绿）。这里把降级关掉，
+        #    判据只留顺序语义。
+        _saved_qos = tm._set_background_qos
+        tm._set_background_qos = lambda: False
+        try:
+            _wavs23 = []
+            for _i in (1, 2, 3):
+                _p = _d23 / f"w{_i}.wav"
+                _mk_wav(_p)
+                _wavs23.append(_p)
+            for _p in _wavs23:
+                _wk.submit(_p)
+            _wk.drain(30.0)
+        finally:
+            tm._set_background_qos = _saved_qos
         # ⚠️ 变异验证：把 `_run` 改成开线程池并行 -> 这条红（上课期间跟 ASR 抢核）。
         check("⭐⭐ 后台工人：**一次只转一段**（并行会把字幕拖慢）",
               _state["max"] == 1, f"max={_state['max']}")
@@ -1165,6 +1180,10 @@ def main() -> int:
               str(sorted(_t24._extra)))
         _t24._merge_items.append({"tail_ts": "10:00:09", "next_ts": "10:00:12"})
         _f24 = _t24.report_payload()
+        # ⭐ 3.11：报告 schema 版本（字段改名/改口径时靠它，不靠嗅探）。
+        check("⭐ `report_version` 顶层键 = REPORT_VERSION",
+              _f24.get("report_version") == tm.REPORT_VERSION == 2,
+              str(_f24.get("report_version")))
         # ⚠️ 变异验证：把 `if provisional:` 那两行删掉 -> 这条红。
         check("⭐⭐ 快照载荷标 `provisional` + `snapshot_at`；正式那份不带",
               _p24.get("provisional") is True and _p24.get("snapshot_at")

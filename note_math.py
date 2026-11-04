@@ -662,7 +662,9 @@ def unit_of_claim(section: dict, claim: str) -> str:
 def check_review(review: dict, *, transcript: str = "") -> list:
     """笔记 JSON → 机械核对行（`{claim, how, status, recomputed}`）。
 
-    status：`ok` / `mismatch`（**正文不改**，进"修正说明"）/ `unchecked`（判不了）。
+    status：`ok` / `mismatch` / `unchecked`（判不了）。
+    ⭐ C5（2026-11-03）：`mismatch` 不在这里改正文 —— 能算准的由
+       `note_guards.correct_mismatches` 回改（边界严格），算不准的原位标 ⚠。
     """
     rows: list = []
     for s in (review.get("sections") or []):
@@ -728,7 +730,27 @@ _DIV = re.compile(r"(?P<a>(?<![0-9A-Za-z_.)])-?\d+(?:\.\d+)?)"
 #:    报假 ⚠（note_math）、把纲要里算对的数字改错（note_outline）。
 #: ⚠️ `加上`/`减去`/`乘以` 的末字不是连接词字，必须各列一条（`"加上".endswith("加")` 为假）。
 _SUM_CONNECTORS = ("+", "＋", "×", "*", "−", "-",
+                   # ⭐ 2026-11-03：排版变体也算连接词 —— 少了它们，`15－225/15` 的除法项
+                   #    会被当成独立断言（对的是 0，被判成 15），C5 会把对的改成错的。
+                   "－", "–", "—", "﹣", "·", "⋅", "∙", "＊", "✕", "✖",
                    "加上", "加", "减去", "减", "乘以", "乘")
+#: 结果后面的**单位**（百分号 / 千分号 / 分 / 成 / 折）：断言写的是"百分数/分数"，
+#: 拿裸比值核必然误报（`50/100=50%` 是对的）—— 不核，也不让 C5 去改。
+_RESULT_UNIT = re.compile(r"\s*(?:[%％‰‱]|个百分点|分|成|折)")
+
+
+def _round_half_up(x, dec: int) -> float:
+    """按**十进制定点**四舍五入（half-up）。**纯函数。**
+
+    ⚠️ 不能用内置 `round(float)`：二进制误差把 `2.675` 舍成 `2.67` ——
+       `5.35÷2≈2.68` 这种**对的**断言会被判成 mismatch（C5 再把它改坏）。
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+    try:
+        return float(Decimal(str(x)).quantize(Decimal(1).scaleb(-int(dec)),
+                                              rounding=ROUND_HALF_UP))
+    except Exception:                                     # noqa: BLE001
+        return float(x)
 
 
 def is_sum_term(t: str, start: int) -> bool:
@@ -795,6 +817,8 @@ def _rows_for_text(t: str, fdefs: dict) -> list:
         #    （还因此把 §0 的题块按"复检仍错"撤了）。判据 = `is_sum_term`（与纲要共用）。
         if is_sum_term(t, m.start("a")):
             continue
+        if _RESULT_UNIT.match(t[m.end():]):
+            continue                                # 带单位的结果不核（`50/100=50%` 是对的）
         try:
             a, b, c = float(m.group("a")), float(m.group("b")), float(m.group("c"))
         except ValueError:
@@ -816,7 +840,7 @@ def _rows_for_text(t: str, fdefs: dict) -> list:
             continue
         # 容差按断言写的小数位算（`约等于 3.3` 不许判成"错"）
         dec = len(m.group("c").split(".")[1]) if "." in m.group("c") else 0
-        if abs(round(want, dec) - c) <= 1e-9:
+        if abs(_round_half_up(want, dec) - c) <= 1e-9:
             rows.append({"claim": t, "status": "ok", "recomputed": f"{a:g}/{b:g} ≈ {_fmt(want)}",
                          "how": f"{a:g}÷{b:g} = {c:g}（一致）"})
         else:

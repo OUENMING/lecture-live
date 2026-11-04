@@ -1842,6 +1842,14 @@ def run(args) -> None:
             echo("   要停掉那一个：点它悬浮窗右上角的 ✕，或在它的终端按 Ctrl+C。")
             return
 
+    # ⭐ 3.11：Jev 失败记录是模块级的 —— 开课先清，上一课的 401/429 不许算到这一课头上
+    #    （这一课一次 Jev 都没调时 `blocks.jev` 必须是 `{}`，不是上一课的残留）。
+    try:
+        import keypoints as _kp_reset
+        _kp_reset.reset_failure()
+    except Exception:                                       # noqa: BLE001
+        pass
+
     # ---- 3.9.3 的一次性搬家：把老的翻译 key 挪到旁边 ----
     # ⚠️ 必须在**任何一处读 key 之前**（`setkey` / `load_translator` / 就绪条都算）。
     # ⚠️ 幂等：版本标记挡着第二次；而且它**从不碰 `cl-` 通行码**，
@@ -4423,6 +4431,26 @@ def run(args) -> None:
                 # ⭐ 一些事儿（2026-10-17）：认到几条 / 记下几条 / 忽略几条 / 推算几条。
                 #    ⚠️ 只读快照，不参与任何判定（同 `live` 那一格）。
                 tester.note_block("duty", _duty_stats())
+                # ⭐ 3.10.6：Jev 最后一次失败的原因（provider + 异常）—— 全失败时
+                #    笔记页脚与 report 都能回答「是 401、429 还是连不上」。
+                try:
+                    import keypoints as _kpmod
+                    # ⭐ 3.11：除「最后一次失败」外，带**调用数 / 失败数** ——
+                    #    11-03 那节 20 条失败，只有这一格能说明「是全都失败还是偶发」。
+                    #    ⚠️ 一次都没调 → `{}`，**不建空块**（缺席 = 这一课没用到 Jev，
+                    #    与「调了 0 次」在面板上同义）。
+                    _jev_st = _kpmod.stats()
+                    if _jev_st:
+                        tester.note_block("jev", _jev_st)
+                except Exception:                     # noqa: BLE001
+                    pass
+                # ⭐ 3.11：复习层（`note_v2.review`）的分块成败 —— 11-03 8 块全失败，
+                #    成品层直接消失，报告里却一个字都没有。`review_ok/total` 从
+                #    进度回调拿总块数，成败从 `chunk_stats` 拿（见 `note_stats()`）。
+                try:
+                    tester.note_block("review", writer.note_stats())
+                except Exception:                     # noqa: BLE001
+                    pass
                 # ⭐ 三档句数（2026-11-02）：页脚「N 句」与转录块数对不上时，差额在这一格里。
                 try:
                     tester.note_block("counts", writer.entry_counts())
@@ -4524,10 +4552,18 @@ def run(args) -> None:
                         #    等不到就留着，下次启动 `pump` 接着传。
                         _th = _u.get("thread")
                         if _th is not None:
-                            _th.join(timeout=UPLOAD_JOIN_S)
-                            if _th.is_alive():
-                                echo(f"   📤 还没传完（超过 {UPLOAD_JOIN_S:.0f} 秒）"
-                                     f" —— 留着，下次启动接着传")
+                            # ⚠️ 3.10.6：**不许在主线程上裸 join** —— 那几秒窗口是死的
+                            #    （`_spin` 才是"不冻主线程"本身）。等完再复查队列：
+                            #    原来只看 `is_alive()`，而它常常在打印后 3 秒就传完了
+                            #    → 朋友看到一句假警报（P2-3）。
+                            _t_ul = time.monotonic() + UPLOAD_JOIN_S
+                            _spin(lambda: (not _th.is_alive())
+                                  or time.monotonic() >= _t_ul)
+                            _q = _shared_upload_queue()
+                            _all, _left = _q.status(tester.stem.name)
+                            if _left > 0:
+                                echo(f"   📤 已传 {_all - _left}/{_all}，"
+                                     f"剩余下次启动接着传")
                         # ⭐⭐ 3.10：**上传排完了才撤 journal**（见 `journal_upload_done`）。
                         #    在这之前被杀 / 断电 —— 下次启动的 `recover_pending` 接得住
                         #    （原来是 `finish()` 一进门就撤：那之后被杀 = 音频与报告
@@ -4584,11 +4620,27 @@ def run(args) -> None:
 
             # ⭐ 3.10.1：诊断包（日志 / 依赖 / 崩溃报告 / 旁路文件 / 笔记）—— 放在现场采集
             #    收尾**之后**，`live.jsonl` 的 summary 行才在里面。并进同一节课的上传条目。
+            # ⚠️ 3.10.6：整段进 worker —— `make_extras`（读日志 / 4 个 git 子进程 / gzip）
+            #    加它内部的 `join` 原来都在主线程上，点完「完成」窗口要僵 5 秒。
+            _ux: dict = {}
+
+            def _extras_worker():
+                try:
+                    _ux["r"] = start_upload_extras(
+                        tester, note_path=str(getattr(writer, "vault_path", "") or ""))
+                except Exception as e:                    # noqa: BLE001
+                    _ux["err"] = e
+
             try:
                 if tester is not None and getattr(tester, "stem", None) is not None:
-                    _ux = start_upload_extras(
-                        tester, note_path=str(getattr(writer, "vault_path", "") or ""))
-                    if _ux.get("queued"):
+                    _tx = threading.Thread(target=_extras_worker, daemon=True,
+                                           name="cl-upload-extras")
+                    _tx.start()
+                    _spin(lambda: not _tx.is_alive())
+                    if "err" in _ux:
+                        echo(f"   ⚠ 诊断包没排上（{type(_ux['err']).__name__}）"
+                             f"—— 不影响其余")
+                    elif (_ux.get("r") or {}).get("queued"):
                         echo("   📤 诊断包（日志 / 依赖 / 现场采集）已排队上传")
             except Exception as _e:                       # noqa: BLE001
                 echo(f"   ⚠ 诊断包没排上（{type(_e).__name__}）—— 不影响其余")

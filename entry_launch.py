@@ -242,6 +242,10 @@ def main() -> int:
             _pk = load_api_key(None)
             if _pk:
                 region_route.warm(passcode=_pk, endpoint=stream_asr.endpoint())
+            else:
+                # ⭐ 3.10.6 P1-2：取不到 key 时**说一声** —— 原来整段静默，下次还是瞎猜
+                #    「预热到底跑没跑」。
+                print("· 地区预热跳过：没有通行码 / API key", flush=True)
         except Exception:                       # noqa: BLE001  预热失败不影响开课
             pass
 

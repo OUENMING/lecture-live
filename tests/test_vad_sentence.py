@@ -107,9 +107,20 @@ class SegmenterWiring(unittest.TestCase):
         _feed(seg, self.Y)
         self.assertTrue(5.0 <= len(got[0]) / SR <= 5.3, len(got[0]) / SR)
         self.assertEqual((seg.diag["hard_cuts"], seg.diag["sentence_cuts"]), (1, 1))
+        # ⭐ 3.11：`cuts` 只是静音断句；总切段数 = silence + hard。
+        self.assertEqual((seg.diag["silence_cuts"], seg.diag["total_cuts"]), (0, 1))
         seg.flush()
         self.assertEqual(sum(len(g) for g in got), len(self.Y) // vad_mod.CHUNK * vad_mod.CHUNK,
                          "挪回去的那截要接到下一段，一个样本都不能丢")
+
+    def test_silence_cut_counts_as_silence_and_total(self):
+        """⭐ 3.11：静音断句单列，总数 = silence_cuts + hard_cuts。"""
+        seg, _got = _segmenter(None)
+        zeros = np.zeros(3 * SR, dtype=np.float32)
+        _feed(seg, np.concatenate([_tone(2.0), zeros]))
+        self.assertEqual(seg.diag["silence_cuts"], 1)
+        self.assertEqual(seg.diag["hard_cuts"], 0)
+        self.assertEqual(seg.diag["total_cuts"], 1)
 
     def test_no_hint_or_empty_hint_keeps_old_cut(self):
         for hint in (None, lambda: ()):

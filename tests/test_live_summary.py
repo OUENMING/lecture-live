@@ -330,6 +330,25 @@ def main() -> int:
                   len(on_disk["chapters"]) == 1
                   and on_disk["chapters"][0]["status"] == "final",
                   str([(c["id"], c["status"]) for c in on_disk["chapters"]]))
+            st = s.stats()
+            check("⭐ 3.11：章数分清「尝试」与「真写进文件」+ 收尾未截断",
+                  st["chapters_attempted"] == 1 and st["chapters_written"] == 1
+                  and st["chapters_nonempty"] == 1
+                  and st["finish_truncated"] is False
+                  and st["failed_atom_calls"] == 0 and st["failed_chapter_calls"] == 0,
+                  str(st))
+
+        # ───────────────────────────── ⑦c 收尾被截断（3.11）
+        print("\n--- ⑦c 收尾拿不到锁 → finish_truncated ---")
+        with tempfile.TemporaryDirectory() as d:
+            _s2, _, _ = make(d, ["A"])
+            _s2._step_lock.acquire()
+            try:
+                _s2.finish(timeout_s=0.3)
+            finally:
+                _s2._step_lock.release()
+            _st2 = _s2.stats()
+            check("⭐ 拿不到锁 → finish_truncated=True", _st2["finish_truncated"] is True, str(_st2))
 
         # ─────────────────────────────────────── ⑧ 章节机械闸门
         print("\n--- ⑧ `chapter.parse_reply` 的机械闸门 ---")

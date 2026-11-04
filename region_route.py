@@ -72,11 +72,14 @@ PROBE_TIMEOUT_S = 3.0
 SILENCE_MS = 200
 SR = 16000
 #: 探测 config 的模型名（与 `stream_asr._config` 同一个；那两处是「生产发送」与「探测发送」的分工）。
-MODEL = "stt-rt-v5"
+MODEL = "stt-rt-v6"
 #: 客户端能点名的地区（= Worker `/v1/soniox/key` 的 `region=` 合法值，见 soniox-core.REGIONS）。
 REGIONS = ("us", "jp", "eu")
 #: 缓存里最多留几个网络（防文件无限长大）。
 CACHE_NETS = 8
+#: ⭐ 3.11：一轮探测最多记多少次**领 key 尝试**（含失败的默认地区和重复区）——
+#:    报告体积有界；正常一轮 ≤ 4 次（默认 + 3 个区）。
+ATTEMPTS_MAX = 8
 #: 探测请求在 Worker 报的用途（Worker 事件里带 `:probe`，与真上课分开算）。
 PURPOSE = "probe"
 
@@ -96,19 +99,22 @@ def probe_mode(env_value: str | None) -> str:
 
 
 def state_for(state, version: str) -> dict:
-    """读出来的状态文件 -> 本版本的状态。**版本对不上（或形状不对）整个重置**（计数与缓存都清）。
+    """读出来的状态文件 -> 本版本的状态。**版本对不上只重置计数，缓存留着。**
 
-    ⚠️ 重置是全量的：「每个新版本前 3 节课」是一条实验纪律 —— 换了版本就从头开始采，
-       不拿上一个版本的缓存接着做决定（那样新版本的第一节课就没有干净的数据）。
+    ⚠️ 3.10.6 P1-2：原来版本一变**整份重置**（含 cache）。3.10.5 更新后 13 秒就开课，
+       缓存被清 → 第一节 `cached=false / ordinal=1`，预热结果还没落盘，只能记 `late=true`。
+       缓存是**网络测量**（按 `net` 指纹 + TTL 失效），不是版本实验数据 —— 换代不该丢。
+       计数 `n` 仍然重置（「每个新版本前 3 节课」那条实验纪律只针对计数）。
     """
     s = state if isinstance(state, dict) else {}
-    if s.get("v") != version:
-        return {"v": version, "n": 0, "cache": {}}
-    n = s.get("n")
     cache = s.get("cache")
+    cache = cache if isinstance(cache, dict) else {}
+    if s.get("v") != version:
+        return {"v": version, "n": 0, "cache": cache}
+    n = s.get("n")
     return {"v": version,
             "n": n if isinstance(n, int) and not isinstance(n, bool) and n >= 0 else 0,
-            "cache": cache if isinstance(cache, dict) else {}}
+            "cache": cache}
 
 
 def should_run(mode_v: str, state: dict) -> tuple[bool, int | None]:
@@ -368,7 +374,13 @@ def _ws_probe(ws_url: str, api_key: str, budget_s: float) -> dict:
                 break
             et = msg.get("error_type") or msg.get("error_code")
             if et:
-                out["error"] = f"upstream: {et}"
+                # ⭐ 3.11：「模型不存在」不是「这个地区不可用」—— v6 尚未在某区上线时，
+                #    别把该区记成坏区（那会把用户推去更远的地区 / 更差的路径）。
+                if str(et).strip().lower() == "model_not_available":
+                    out["error"] = f"model_error: {et}"
+                    out["model_error"] = True
+                else:
+                    out["error"] = f"upstream: {et}"
                 break
     except Exception as e:                                         # noqa: BLE001
         if not out["error"] and out["rtt_ms"] is None:
@@ -390,26 +402,43 @@ def run_probe(*, endpoint: str, passcode: str, fetch_key: Callable | None = None
       ① 不带 region 问一次 Worker —— 这条回的 `region` 就是**默认地区**，顺便量它；
       ② 其余地区并行问；**没配的区会回默认地区** —— 按**回的 region** 去重：
          同一个地区永远只量一次、只开一条流（旧 Worker 不认 region，这一条也天然成立）。
-    回 `{default, regions: {区: {connect_ms, rtt_ms, error}}, ms, timeout}`。
+    回 `{default, regions: {区: {connect_ms, rtt_ms, error}}, attempts, ms, timeout}`。
+
+    ⭐ 3.11：`attempts` 是**独立**的一次次领 key 记录（含默认地区失败 / 没配的区 / 重复区），
+    不进 `regions` —— `decide()` 只认完整测量，`regions=={}` 的既有判据不能变。
+    从前 default 领 key 失败（CN→jp 502）时 us/eu 根本没被测，报告里却只剩一个空 `regions`。
     """
     t0 = clock()
     deadline = t0 + float(timeout_s)
     got: dict = {}
+    attempts: list = []
     lock = threading.Lock()
     fetch = fetch_key or (lambda region, budget: fetch_probe_key(endpoint, passcode, region, timeout=budget))
     probe_ws = ws_probe or _ws_probe
+
+    def note_attempt(ask: str, reg: str, err: str) -> None:
+        """记一条领 key 尝试（`err` 空 = 拿到 key 且量完）。有界；锁内调用。"""
+        if len(attempts) >= ATTEMPTS_MAX:
+            return
+        attempts.append({"ask": str(ask or "")[:8], "region": str(reg or "")[:8],
+                         "ok": not err, "error": str(err or "")[:40]})
 
     def attempt(ask: str) -> str:
         """问一次 Worker（`ask=""` 问默认）并按**回的 region**去重、量到。返回量到的地区（"" = 放弃）。"""
         try:
             key = fetch(ask, max(0.05, deadline - clock()))
         except Exception:                                          # noqa: BLE001
+            with lock:
+                note_attempt(ask, "", "key_failed")
             return ""
         reg = str((key or {}).get("region") or "")
         if reg not in REGIONS:
+            with lock:
+                note_attempt(ask, reg, "bad_region" if reg else "no_region")
             return ""
         with lock:
             if reg in got:
+                note_attempt(ask, reg, "duplicate")
                 return reg
             got[reg] = {"connect_ms": None, "rtt_ms": None, "error": "pending"}
         try:
@@ -417,10 +446,13 @@ def run_probe(*, endpoint: str, passcode: str, fetch_key: Callable | None = None
                          max(0.05, deadline - clock())) or {}
             res = {"connect_ms": m.get("connect_ms"), "rtt_ms": m.get("rtt_ms"),
                    "error": str(m.get("error") or "")}
+            if m.get("model_error"):
+                res["model_error"] = True
         except Exception as e:                                     # noqa: BLE001
             res = {"connect_ms": None, "rtt_ms": None, "error": type(e).__name__}
         with lock:
             got[reg] = res
+            note_attempt(ask, reg, res["error"])
         return reg
 
     default = attempt("")                                          # ① 默认地区（同步：它决定后面问哪些）
@@ -434,11 +466,12 @@ def run_probe(*, endpoint: str, passcode: str, fetch_key: Callable | None = None
             th.join(timeout=max(0.0, deadline - clock()))          # 到点就放（线程是守护的）
     with lock:
         regs = {k: dict(v) for k, v in got.items()}
+        atts = [dict(x) for x in attempts]
     for v in regs.values():
         if v.get("error") == "pending":                            # 到点了还没写回的：当超时
             v["error"] = "timeout"
     timeout = bool(regs) and any(v["connect_ms"] is None or v["rtt_ms"] is None for v in regs.values())
-    return {"default": default or None, "regions": regs,
+    return {"default": default or None, "regions": regs, "attempts": atts,
             "ms": round((clock() - t0) * 1000), "timeout": timeout or not regs}
 
 
@@ -523,6 +556,10 @@ class Router:
         snap["late"] = False
         if probe is not None:
             snap["regions"] = probe.get("regions") or {}
+            # ⭐ 3.11：领 key 的每一次尝试（含 default 失败）—— 独立于 `regions`
+            #    （决策只认完整测量；这里回答「为什么某区没数」）。
+            snap["attempts"] = [dict(x) for x in (probe.get("attempts") or [])
+                                if isinstance(x, dict)][:ATTEMPTS_MAX]
             snap["ms"] = probe.get("ms")
             snap["timeout"] = bool(probe.get("timeout"))
             # ⭐ 2026-11-02：`selected`/`reason` 说的是**开课那一刻**的决策。探测跑完时

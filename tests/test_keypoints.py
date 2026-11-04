@@ -169,6 +169,54 @@ def t_http_error_keeps_body():
         urllib.request.urlopen = orig
 
 
+@case("⭐ Jev 失败留原因：provider + 异常文本进 `last_failure`（3.10.6 P1-3）")
+def t_last_failure_records_provider():
+    kp._LAST_FAILURE.clear()
+
+    def boom(state, questions):
+        raise RuntimeError("401 unauthorized")
+
+    kp.score(["a"], ask=boom)
+    lf = kp.last_failure()
+    assert lf.get("error", "").startswith("RuntimeError"), lf
+    assert "401" in lf.get("error", ""), lf
+    assert "provider" in lf and "at" in lf, lf
+
+
+@case("⭐ reset_failure：开课前清掉上一课的失败（3.11）")
+def t_reset_failure_clears():
+    kp._LAST_FAILURE.clear()
+    kp._remember_failure(RuntimeError("上一课的 429"))
+    assert kp.last_failure().get("error"), "先得有失败记录"
+    kp.reset_failure()
+    assert kp.last_failure() == {}, f"上一课的失败串到这一课了：{kp.last_failure()}"
+
+
+@case("⭐ stats：Jev 调用数 / 失败数（3.11，报告 `blocks.jev`）")
+def t_stats_counts_calls_and_fail():
+    kp.reset_failure()
+    orig = kp.urllib.request.urlopen
+
+    def boom(*a, **k):
+        raise kp.urllib.error.URLError("网络断了")
+
+    kp.urllib.request.urlopen = boom
+    try:
+        try:
+            kp.ask_commandcode("s", {"S1": {"type": "noul", "instructions": "x"}},
+                               token="t", endpoint="http://x", model="m")
+        except RuntimeError:
+            pass
+    finally:
+        kp.urllib.request.urlopen = orig
+    st = kp.stats()
+    assert (st["calls"], st["fail"]) == (1, 1), st
+    kp._remember_failure(RuntimeError("Jev 连不上（网络断了）"))
+    assert "连不上" in kp.stats().get("error", ""), kp.stats()
+    kp.reset_failure()
+    assert kp.stats() == {}, "没调用也没失败 → 空（报告里 = 这一课没用到 Jev）"
+
+
 @case("⭐⭐ `score`：单批失败不许连坐（29 批里挂一批 = 只有那批记 None）")
 def t_score_survives_one_bad_batch():
     # 动机（2026-10-01 实测）：一节 50 分钟的课要打 29 批，任何一批网络抖一下

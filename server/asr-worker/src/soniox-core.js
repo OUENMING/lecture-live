@@ -18,7 +18,10 @@
 // ⚠️ **key 绝不进日志 / 事件**：本模块只回 {status, api_key} 两个字段，调用方只许用 status 与「有没有 key」，
 //    别把回包整体 print / 记进 Analytics Engine。
 
-export const STT_RT_MODEL = "stt-rt-v5";       // 客户端 start 消息里的模型名（官方 websocket-api 的默认示例）
+// ⭐ 2026-11-04：客户端 3.11 起默认发 v6（v5 只在 `model_not_available` 时兜底）。
+// 这个常量只用于**用量事件的标签**（`handler.js` 的 `ev.model`）—— 真实模型由客户端
+// 在 start 消息里带；v5 兜底的那几节会被标成 v6，误差可接受（v5 是少数）。
+export const STT_RT_MODEL = "stt-rt-v6";       // 客户端 start 消息里的模型名（当前生产默认）
 export const KEY_TTL_S = 60;                   // 能用来「开新流」的时长；官方 1–3600，开一条流 60 s 足够
 export const DEFAULT_MAX_SESSION_S = 10800;    // 单次会话上限 3 h（一节课的量）；官方上限 18000
 export const MAX_SESSION_S = 18000;

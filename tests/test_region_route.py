@@ -133,7 +133,9 @@ def t_cache_hit_expired() -> None:
 def t_state_version_reset() -> None:
     old = {"v": "3.9.6", "n": 3, "cache": {"n1": {"at": NOW, "default": "us", "regions": {}}}}
     st = RR.state_for(old, "3.9.7")
-    assert st == {"v": "3.9.7", "n": 0, "cache": {}}, "版本变了要整个重置"
+    # ⭐ 3.10.6 P1-2：版本变了只重置计数；缓存是网络测量，留着（否则更新后第一节吃不到）。
+    assert st["n"] == 0, "版本变了要重置计数"
+    assert st["cache"] == old["cache"], "版本变了不该丢网络缓存"
     same = RR.state_for(old, "3.9.6")
     assert same["n"] == 3 and "n1" in same["cache"]
     assert RR.state_for("坏形状", "3.9.7") == {"v": "3.9.7", "n": 0, "cache": {}}
@@ -149,10 +151,11 @@ def t_plan_counter_version_env() -> None:
         assert (p["run"], p["ordinal"]) == (want_run, want_ord), (n, p)
     p = RR.plan(state=cached, version="3.9.7", net="n1", env_value="", now=NOW)
     assert (p["selected"], p["switched"], p["reason"], p["cached"]) == ("jp", True, "faster", True), p
-    # 版本变：计数与缓存都重置 -> 第 1 节、没缓存
+    # 版本变：计数重置，但缓存留着（3.10.6 P1-2）-> 第 1 节、缓存仍命中
     p = RR.plan(state={"v": "3.9.6", "n": 3, "cache": cached["cache"]},
                 version="3.9.7", net="n1", env_value="", now=NOW)
-    assert (p["run"], p["ordinal"], p["cached"], p["selected"], p["reason"]) == (True, 1, False, "", "not_ready"), p
+    assert (p["run"], p["ordinal"], p["cached"], p["selected"], p["reason"]) \
+        == (True, 1, True, "jp", "faster"), p
     # 缓存过期：探测照跑、本节不带 region
     p = RR.plan(state={**cached, "cache": {"n1": {"at": NOW - 25 * 3600, "default": "us", "regions": regions}}},
                 version="3.9.7", net="n1", env_value="", now=NOW)
@@ -232,6 +235,11 @@ def t_probe_dedup_and_measures() -> None:
         return {"connect_ms": 1.0, "rtt_ms": 1.0, "error": ""}
     out2 = RR.run_probe(endpoint="x", passcode="p", fetch_key=fetch_down, ws_probe=ws_never, timeout_s=2.0)
     assert out2["default"] is None and out2["regions"] == {} and calls2["n"] == 0 and out2["timeout"] is True
+    # ⭐ 3.11：`attempts` 独立记账 —— 默认地区领 key 失败也要看得见，不能只剩一个空 regions。
+    assert out2["attempts"] == [{"ask": "", "region": "", "ok": False,
+                                 "error": "key_failed"}], out2["attempts"]
+    assert any(a["error"] == "duplicate" for a in out["attempts"]), out["attempts"]
+    assert {a["region"] for a in out["attempts"] if a["ok"]} == {"us", "jp"}, out["attempts"]
 
 
 def t_probe_hard_deadline() -> None:
@@ -358,9 +366,12 @@ def t_snapshot_late_and_net() -> None:
     assert "late" not in snap or snap["late"] is False, "没探测时不该有 late=True"
     # 模拟「探测在开课 3 秒后回来，但开课那一刻只有默认地区」
     r._probe = {"default": "jp", "regions": {"jp": {"connect_ms": 640.3, "rtt_ms": 304.9, "error": ""}},
+                "attempts": [{"ask": "", "region": "jp", "ok": True, "error": ""}],
                 "ms": 3022, "timeout": False}
     snap = r.snapshot()
     assert snap["late"] is True, snap
+    # ⭐ 3.11：attempts 跟着 snapshot 进报告（含默认地区失败的那条）。
+    assert snap["attempts"] == [{"ask": "", "region": "jp", "ok": True, "error": ""}], snap
     assert snap["if_ready"]["reason"] == "no_other", snap
     assert snap["if_ready"]["selected"] == "jp", snap
     assert snap["reason"] == "off", "决策那一格仍是开课那一刻的（不许改写历史）"
@@ -395,16 +406,66 @@ def t_warm_once() -> None:
                        clock=lambda: NOW, env_value="auto", net_key_fn=lambda: "netA")
     assert r_auto.needs_probe is True
 
+def t_probe_model_error_not_region_down() -> None:
+    """⭐ 3.11：v6 在该区没上线 → 记 `model_error`，不当作「地区不可用」。"""
+    def fetch(region, budget):
+        reg = {"": "us", "us": "us", "jp": "jp", "eu": "us"}.get(region, "us")
+        return {"api_key": "k", "ws_url": f"w{reg}", "region": reg}
+
+    def ws(ws_url, key, budget):
+        if ws_url == "wjp":
+            return {"connect_ms": 200.0, "rtt_ms": 150.0,
+                    "error": "model_error: model_not_available", "model_error": True}
+        return {"connect_ms": 300.0, "rtt_ms": 200.0, "error": ""}
+
+    out = RR.run_probe(endpoint="x", passcode="p", fetch_key=fetch, ws_probe=ws, timeout_s=2.0)
+    assert out["regions"]["jp"].get("model_error") is True, out
+    assert out["regions"]["jp"]["error"].startswith("model_error"), out
+
+
+def t_ws_probe_marks_model_error() -> None:
+    """`_ws_probe` 收到 `model_not_available` 帧 → 错误文本带 `model_error` 标记。"""
+    import ws_compat
+
+    class FakeWS:
+        def __init__(self):
+            self.closed = False
+
+        def send(self, _x):
+            pass
+
+        def recv(self, timeout=None):                 # noqa: ARG002
+            return json.dumps({"error_type": "model_not_available"})
+
+        def close(self):
+            self.closed = True
+
+    class FakeClient:
+        def connect(self, *a, **k):                   # noqa: ARG002
+            return FakeWS()
+
+    orig = ws_compat.client
+    ws_compat.client = lambda: FakeClient()
+    try:
+        out = RR._ws_probe("ws://x", "k", 1.0)
+    finally:
+        ws_compat.client = orig
+    assert out["error"].startswith("model_error"), out
+    assert out.get("model_error") is True, out
+
+
 def main() -> int:
     print("region_route 判据（全部离线）")
     for name, fn in [
         ("decide: 差 79 不改 / 差 80 改 / 超时不比", t_decide_edge_79_80),
         ("decide: not_ready / 默认缺数 / 只配一区 / 多区取最快", t_decide_not_ready_timeout_single),
         ("cache: 24 h 命中、过期不认、倒时钟不认、形状坏不认", t_cache_hit_expired),
-        ("state: 版本变了计数与缓存重置", t_state_version_reset),
+        ("state: 版本变了只重置计数、缓存留着", t_state_version_reset),
         ("plan: 前 3 节 / 第 4 节 done / 版本重置 / 开关 auto·off·force", t_plan_counter_version_env),
         ("network_key: 只回哈希（MAC 优先、SSID 兜底、拿不到回空）", t_network_key_hashes_only),
         ("run_probe: 按回的 region 去重、阶段一失败即止", t_probe_dedup_and_measures),
+        ("run_probe: model_not_available 记 model_error（不拉黑地区）", t_probe_model_error_not_region_down),
+        ("ws_probe: model_not_available → model_error 标记", t_ws_probe_marks_model_error),
         ("run_probe: 硬截止（阶段二卡住也不超）", t_probe_hard_deadline),
         ("Router: 第 1 节起 3 节的完整故事（缓存/改道/on_done）", t_router_first_three_classes),
         ("Router: off / force / 状态文件坏掉不抛", t_router_off_force_and_corrupt_state),

@@ -1293,6 +1293,14 @@ def note_page(d) -> str:
         for c in all_corr:
             fixed = inline(c.get("fixed"))
             if c.get("kind") == "check":
+                if c.get("corrected"):
+                    # ⭐ C5（2026-11-03）：三道核回改过正文 —— 写清原写值与改后值。
+                    extra += (f"<div>· <b>✅ 三道核已更正</b>：{inline(c.get('spoken'))}"
+                              f" —— 原写 <b>{inline(c.get('original'))}</b> → "
+                              f"<b>{inline(c.get('replacement'))}</b>"
+                              + (f"（{inline(c.get('basis'))}）" if c.get("basis") else "")
+                              + "</div>")
+                    continue
                 extra += (f"<div>· <b>⚠ 三道核</b>：{inline(c.get('spoken'))}"
                           + (f" —— 重算：<b>{fixed}</b>" if fixed else "")
                           + (f"（{inline(c.get('basis'))}）" if c.get("basis") else "") + "</div>")
@@ -1386,13 +1394,19 @@ def note_page(d) -> str:
                 # ⭐ 2026-10-18 Δ：`mismatch` 现在会被 `note_guards.annotate_mismatches`
                 #    **原位标进正文**（"已修正"只有在别处真改过字才配得上 —— 原来一律写
                 #    "已修正"，而正文一个字没动，读者读到的是假话）。
-                st = {"ok": "✅ 一致",
-                      "mismatch": ("⚠ 正文已标注" if c.get("annotated") else "⚠ 有出入"),
-                      "unchecked": "⬜ 未核对"}.get(str(c.get("status")), "⬜ 未核对")
+                # ⭐ C5（2026-11-03）：能算准的由 `note_guards.correct_mismatches` 早段
+                #    回改（行上 `corrected`）→ 显示「已更正 + 原写」；剩下标 ⚠ 的才是
+                #    "只标不改"。
+                if c.get("corrected"):
+                    st = f"✅ 已更正（原写 {inline(c.get('original'))}）"
+                else:
+                    st = {"ok": "✅ 一致",
+                          "mismatch": ("⚠ 正文已标注" if c.get("annotated") else "⚠ 有出入"),
+                          "unchecked": "⬜ 未核对"}.get(str(c.get("status")), "⬜ 未核对")
                 rec = c.get("recomputed")
                 body += (f"<tr><td>{inline(c.get('claim'))}</td><td>{inline(c.get('how'))}</td>"
                          f"<td>{st}" + (f"（应为 {inline(rec)}）" if c.get('status') == 'mismatch'
-                                       and rec else "") + "</td></tr>")
+                                       and rec and not c.get("corrected") else "") + "</td></tr>")
             body += "</table>"
         extra += (f'<details id="checks" class="internal">'
                   f"<summary>核对清单（覆盖度 · 数字三道核）</summary>{body}</details>")

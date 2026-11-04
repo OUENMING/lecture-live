@@ -44,6 +44,8 @@ DeepSeek 便宜得多、也快得多（实测一次 20 问 ≈ 1550 input / 355 
 from __future__ import annotations
 
 import json
+import threading
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -210,22 +212,24 @@ def ask_batch(state: str, instructions: list, *, token: str | None = None,
         qs = {f"S{i + 1}": {"type": "noul", "instructions": t}
               for i, t in enumerate(part)}
         payload = None
+        last_exc = None
         for k in range(max(1, int(tries))):
             try:
                 payload = ask_commandcode(state, qs, token=token, timeout=timeout)
                 break
             except Exception as e:                                # noqa: BLE001
+                last_exc = e
                 msg = str(e)
                 transient = any(x in msg for x in ("429", "529", "500", "502", "503",
                                                    "连不上", "timed out", "timeout"))
                 if transient and k + 1 < max(1, int(tries)):
-                    import time
                     time.sleep(1.5 * (2 ** k))
                     continue
                 payload = None
                 break
         if payload is None:
             n_failed += 1
+            _remember_failure(last_exc)
         got = parse_answers(payload, len(part))
         for i, p in enumerate(got):
             out[base + i] = p
@@ -258,7 +262,8 @@ def score(sents, *, ask) -> list:
         #    「`None` = 这次没拿到」（见 docstring），其余批次照常。
         try:
             return parse_answers(ask(build_state(part), build_questions(len(part))), len(part)), False
-        except Exception:                                     # noqa: BLE001
+        except Exception as e:                                # noqa: BLE001
+            _remember_failure(e)
             return [None] * len(part), True
 
     # ⭐ 批与批互不依赖 → 并发（3.9.4）。实测官方一批 20 题 0.24–0.43 s（2026-10-12），
@@ -293,6 +298,77 @@ def top_k(scores, sents, k: int = 12) -> list:
 
 # ------------------------------------------------------------------ 生产那条路
 _PROVIDER: dict | None = None
+
+#: ⭐ 3.10.6：**最后一次失败的原因**（provider + 异常文本）。原来只打「N 批没拿到」，
+#:    401 / 429 / 连不上 / 空 token 在全失败时长得一模一样，下次还是瞎猜。
+#:    `main` 收尾时把它写进 report（`note_block("jev", …)`），日志里也各打一行。
+_LAST_FAILURE: dict = {}
+
+#: ⭐ 3.11：Jev 调用计数（打了几次网络 / 失败几次）。只读快照进 `blocks.jev`。
+#: 原来只有「最后一次失败」——「26 次调用失败 20 次」和「只调了 1 次也失败」分不清。
+_STATS: dict = {"calls": 0, "fail": 0}
+#: ⚠️ `RLock`：`stats()` 持锁时还会调 `last_failure()`（同一个锁，需可重入）。
+_STATS_LOCK = threading.RLock()
+
+
+def _bump(key: str) -> None:
+    """计数 +1（线程安全，永不抛）。"""
+    try:
+        with _STATS_LOCK:
+            _STATS[key] = int(_STATS.get(key) or 0) + 1
+    except Exception:                                     # noqa: BLE001
+        pass
+
+
+def stats() -> dict:
+    """Jev 的只读计数 + 最近一次失败（`{calls, fail, provider, error, at}`）。
+
+    ⚠️ 一次都没调、也没有失败记录 → 返回 `{}`（**不是** `{"calls": 0}`）：
+       报告 `blocks.jev` 缺席/空 = 这一课没用到 Jev，与「调了 0 次」在面板上同义；
+       而上一课的失败已被 `reset_failure()` 清掉，不许冒充这一课。
+    """
+    with _STATS_LOCK:
+        out = {"calls": int(_STATS.get("calls") or 0),
+               "fail": int(_STATS.get("fail") or 0)}
+        if not out["calls"] and not out["fail"] and not _LAST_FAILURE:
+            return {}
+        out.update(_LAST_FAILURE)
+    return out
+
+
+def _remember_failure(exc: BaseException | None) -> None:
+    """记下最后一次失败（永不抛）。`exc=None` 表示"没有异常，但上游没回执"。"""
+    try:
+        name = str((_provider() or {}).get("name") or "")
+    except Exception:                                     # noqa: BLE001
+        name = ""
+    try:
+        text = (f"{type(exc).__name__}: {str(exc)[:200]}" if exc is not None
+                else "没有异常，但上游没有回执")
+    except Exception:                                     # noqa: BLE001
+        text = "?"
+    with _STATS_LOCK:
+        _LAST_FAILURE.clear()
+        _LAST_FAILURE.update({"provider": name, "error": text,
+                              "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+
+
+def last_failure() -> dict:
+    """最近一次 Jev 失败（只读副本）；没失败过是 `{}`。"""
+    with _STATS_LOCK:
+        return dict(_LAST_FAILURE)
+
+
+def reset_failure() -> None:
+    """开课前清掉上一课的失败记录（`_LAST_FAILURE` 是模块级的，跨节会串味）。
+
+    ⚠️ 3.11：不改的话，这一课一节 Jev 都没调、`blocks.jev == {}`，报告里却还挂着
+       上一课的 401/429 —— 上一课的问题被算到这一课头上（诊断时最坏的一种串）。
+    """
+    with _STATS_LOCK:
+        _LAST_FAILURE.clear()
+        _STATS["calls"] = 0
+        _STATS["fail"] = 0
 
 
 def _provider(*, root=None) -> dict:
@@ -374,21 +450,28 @@ def ask_commandcode(state: str, questions: dict, *, token: str, timeout: float =
     import llm_client
     hdr = {**llm_client.headers(token), **hdr}   # 通行码时多一个安装号（Worker 按它数设备）；别的 key 不带
     req = urllib.request.Request(ep, data=body, headers=hdr)
+    _bump("calls")                                        # ⭐ 3.11：真发出去才算一次调用
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
+        _bump("fail")
         # ⚠️ **把响应体带出来** —— 这个 API 的错误信息全在 body 里
         #    （`at most 20 questions per call` 那种），只报状态码等于没说。
         detail = e.read().decode("utf-8", "replace")[:300]
         raise RuntimeError(f"Jev {e.code}: {detail}") from e
     except urllib.error.URLError as e:
+        _bump("fail")
         # ⚠️ **`URLError` 不是 `HTTPError` 的父类，反过来才对** ——
         #    原来只接 `HTTPError`，于是断网 / DNS 失败 / 连接被拒 / 读超时
         #    一律**裸 traceback 崩掉**（2026-09-29 修）。CLI 那条路
         #    （`main()` 里 `score(sents, ask=ask)` 直连本函数）没有任何兜底，
         #    所以用户看到的就是一个栈，而不是"连不上"。
         raise RuntimeError(f"Jev 连不上（{e.reason}）—— 检查网络或代理") from e
+    except Exception:
+        # 回执不是合法 JSON 等：也算一次失败（否则 `calls` 有、`fail` 没有，账对不上）。
+        _bump("fail")
+        raise
 
 
 def sentences(path, *, with_index: bool = False) -> list:

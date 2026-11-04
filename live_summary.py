@@ -242,8 +242,19 @@ class LiveSummarizer:
         self._atom_calls = 0          # 里面 `_calls` 是**总**调用数（原子+章节）
         self._chapter_calls = 0
         self._failed = 0
+        #: ⭐ 3.11：`failed_calls` 是原子+章节的合计，报告里看不出是哪一层。分开记。
+        self._failed_atoms = 0
+        self._failed_chapters = 0
         self._empty_windows = 0
-        self._chapters_final = 0
+        self._chapters_final = 0      # ⚠️ 名不副实：这是**尝试合成**的章数，不是写成的
+        #: ⭐ 3.11：真正写进 `.chapters.jsonl` 的**正式章**数（`ChapterWriter.append`
+        #:    返回非 0 才算）—— 11-03 `chapters=5` 而笔记只落 4 章，就是差这一格。
+        self._chapters_written = 0
+        #: ⭐ 3.11：其中**有内容**的（`sents` 非空）—— 合成全失败时仍会写一条空壳记录，
+        #:    只看 `chapters_written == attempted` 会误以为 5 章都落盘了。
+        self._chapters_nonempty = 0
+        #: ⭐ 3.11：收尾被截断（拿不到锁 / 超时 / 异常）。`finish()` 之后才有效。
+        self._finish_truncated = False
         self._chapters_interim = 0
         self._deadlines_regex = 0
         self._deadlines_model = 0
@@ -306,8 +317,16 @@ class LiveSummarizer:
             "chapter_calls": self._chapter_calls,
             "calls_total": self._calls,
             "failed_calls": self._failed,
+            # ⭐ 3.11：分开原子/章节的失败数 + 「尝试合成」vs「真写进文件」的章数。
+            "failed_atom_calls": self._failed_atoms,
+            "failed_chapter_calls": self._failed_chapters,
             "chapters": self._chapters_final,
+            "chapters_attempted": self._chapters_final,
+            "chapters_written": self._chapters_written,
+            "chapters_nonempty": self._chapters_nonempty,
             "chapters_interim": self._chapters_interim,
+            # ⭐ 3.11：收尾有没有被截断（线程没回来 / 拿不到锁 / 异常）。
+            "finish_truncated": bool(self._finish_truncated),
             "empty_window_ratio": round(self._empty_windows / w, 3),
             "deadlines_regex": self._deadlines_regex,
             "deadlines_model": self._deadlines_model,
@@ -396,6 +415,7 @@ class LiveSummarizer:
                 #    ⚠️ 别把它换成 `_stopped.wait()` —— 那是靠时序成立的：
                 #       同一份代码连跑 12 次有 2 次仍然重复投递，而加锁后 12/12 干净。
                 if not self._step_lock.acquire(timeout=timeout_s):
+                    self._finish_truncated = True         # ⭐ 3.11：收尾被截断，报告要能看出来
                     print(f"⚠ 实时总结的 worker 还在跑（超过 {timeout_s:.0f} 秒拿不到锁）"
                           f"—— 收尾只关文件，不再提交残余窗口")
                     return
@@ -404,6 +424,7 @@ class LiveSummarizer:
                 finally:
                     self._step_lock.release()
             except Exception as e:                        # noqa: BLE001
+                self._finish_truncated = True             # ⭐ 3.11
                 print(f"⚠ 实时总结收尾失败({type(e).__name__}: {str(e)[:60]})")
             finally:
                 self._stopped.set()
@@ -412,6 +433,7 @@ class LiveSummarizer:
         th.start()
         th.join(timeout_s)
         if th.is_alive():
+            self._finish_truncated = True                 # ⭐ 3.11：剩下的步骤已放弃
             print(f"⚠ 实时总结收尾超过 {timeout_s:.0f} 秒 —— 剩下的步骤已放弃"
                   f"（已写下的章节记录不受影响）")
         self.close()
@@ -421,6 +443,7 @@ class LiveSummarizer:
         if cancel is not None and cancel.is_set():
             return
         if self._closed:
+            self._finish_truncated = True                 # ⭐ 3.11：文件已关 = 剩下的步骤没做
             # ⚠️⚠️ **`close()` 已经跑过 = 这半步白跑**（2026-10-12 全仓审查核实）。
             #    走得通的路径只有一条：`finish()` 在 `timeout_s` 内没等到 work 线程
             #    → 主线程 `close()` 关文件 → 而被放弃的 work 线程**还在**这里接着走。
@@ -578,6 +601,7 @@ class LiveSummarizer:
         except Exception as e:                            # noqa: BLE001
             # ⚠️ 提不出来是"少几条要点"，**不是"课跑不下去"**（同 `mark_lost` 的纪律）。
             self._failed += 1                             # ⭐ 采集面 ⑤
+            self._failed_atoms += 1                       # ⭐ 3.11：按层分开
             print(f"⚠ atom 提取失败({str(e)[:50]}); 课堂不受影响")
             return None
 
@@ -758,6 +782,7 @@ class LiveSummarizer:
                                  ch.MAX_TOKENS, ch.TEMPERATURE)
             except Exception as e:                        # noqa: BLE001
                 self._failed += 1                         # ⭐ 采集面 ⑤
+                self._failed_chapters += 1                # ⭐ 3.11：按层分开
                 print(f"⚠ 章节合成失败({str(e)[:50]}); 第 {attempt} 次")
                 obj = None
             if obj is not None:
@@ -768,7 +793,11 @@ class LiveSummarizer:
                          title=title or c["title"], title_zh=title_zh or c["title_zh"],
                          t0=c["t0"], t1=c.get("t1", c["t0"]),
                          lo=c["lo"], hi=c["hi"], sentences=sents, version=c["ver"])
-        self._write(chp)
+        n_written = self._write(chp)
+        if status == "final" and n_written:
+            self._chapters_written += 1
+            if sents:
+                self._chapters_nonempty += 1
         self._emit_p({"kind": "chapter", "chapter": chp.as_json()})
 
     # ------------------------------------------------------------ 课务
@@ -817,8 +846,9 @@ class LiveSummarizer:
                                               "changed")}})
 
     # ------------------------------------------------------------ 杂项
-    def _write(self, rec) -> None:
-        self._writer.append([rec])
+    def _write(self, rec) -> int:
+        """追加一条记录，返回**写成了几条**（`ChapterWriter.append` 的约定；关文件后是 0）。"""
+        return int(self._writer.append([rec]) or 0)
 
     def _emit_p(self, payload: dict) -> None:
         """⚠️ 推给界面。**调用方负责 `stopping` 守卫** —— 这里只做「有没有人接」。"""

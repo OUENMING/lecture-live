@@ -69,6 +69,9 @@ def guard_chain(review: dict, *, entries: list) -> tuple:
     counts: dict = {"repaired": 0, "dropped": 0, "flagged": 0, "downgraded": 0}
     known = lambda t: str(t).strip().lower() in _lecture_terms(out)   # noqa: E731
     steps = (
+        # ⭐ C5（2026-11-03）：能算准的 mismatch 先回改正文（与写作层同一位置：
+        #    速览/串讲/跨节矛盾之前；链尾 annotate 只标没改掉的 ⚠）。
+        (lambda r: note_guards.correct_mismatches(r), "核算回改正文"),
         (lambda r: note_guards.retime_components(r), "组件错挂"),
         (lambda r: note_v2.clamp_components(r), "组件上限"),
         (lambda r: note_v2.dedupe_components(r), "组件去重"),
@@ -114,6 +117,13 @@ def guard_chain(review: dict, *, entries: list) -> tuple:
             counts["dropped"] += 1           # 守卫台账里的非 dict 小标记 = 一处删
     for label, where in LLM_STEPS:
         would.append(f"{label}（{where}）")
+    # ⚠️ C5（2026-11-03）：`flagged` 与生产同一个口径 —— 数**最终 checks 里还没处理**的
+    #    mismatch（`n_bad`），不是把各守卫自报的 flagged 加起来（两者会对不上：
+    #    生产终端读 `checks_summary()['n_bad']`）。回改数单列在 `corrected`。
+    try:
+        counts["flagged"] = int(note_v2.checks_summary(out.get("checks") or [])["n_bad"])
+    except Exception:                                             # noqa: BLE001
+        pass
     return out, warns, would, counts
 
 

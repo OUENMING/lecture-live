@@ -191,9 +191,13 @@ def render(d: NoteData) -> str:
     """`NoteData` -> **简版** Markdown（作者第六轮第 6 条）。"""
     import note_v2
     # ⭐ 术语就地括注：与 HTML 共用同一份实现（作者 2026-10-18）；F7-e 带上标准拼写表。
+    #    ⭐ 3.10.6：`state` 把 `terms` / `seen` 带出去，给下面的「课堂纲要」共用 ——
+    #    否则同一个术语会在纲要和讲解里各括注一次（P1-1）。
+    _term_state: dict = {}
     review = note_v2.announce_terms_in_review(d.review or {},
                                               canon=getattr(d, "term_pairs", None),
-                                              en_first=note_v2._term_en_enabled())
+                                              en_first=note_v2._term_en_enabled(),
+                                              state=_term_state)
     d = dataclasses.replace(d, review=review)
     entries = d.entries
     ts0 = entries[0]["ts"] if entries else "—"
@@ -285,8 +289,19 @@ def render(d: NoteData) -> str:
     try:
         import obsidian_writer as _ow
         if d.chapter_items:
-            _sec = _ow._render_outline_section(d.chapter_items, review=d.review,
-                                               decisions=d.duty_items or None)
+            _ch = d.chapter_items
+            # ⚠️ 只有 review 真的产出了术语表，纲要才算「已经英文化过」；
+            #    否则要让 `_render_outline_section` 自带的 `_inline_terms` 兜底
+            #    （review 为空时 `_term_state` 里没有 terms，硬传 True 会让纲要一个括注都没有）。
+            _terms_done = bool(_term_state.get("terms")) and note_v2._term_en_enabled()
+            if _terms_done:
+                # ⭐ 3.10.6 P1-1：纲要也走同一份术语英文化，`seen` 与 review 共用。
+                _ch = note_v2.announce_terms_in_outline(
+                    _ch, state=_term_state,
+                    canon=getattr(d, "term_pairs", None), en_first=True)
+            _sec = _ow._render_outline_section(_ch, review=d.review,
+                                               decisions=d.duty_items or None,
+                                               terms_done=_terms_done)
             if _sec:
                 L += _sec
     except Exception:                                          # noqa: BLE001
@@ -384,16 +399,28 @@ def render(d: NoteData) -> str:
           #    就是**假话**（本仓库对"假话"的容忍度是零：读者会拿它当"这条没被改过"的凭据）。
           _polish_line(d.polish_state), ""]
     all_corr = list(review.get("corrections") or []) + list(d.corrections_extra or [])
-    # ⚠️ 两类要**分开数**（`test_三道核的_mismatch_措辞不同_它是发现不是口误`）：
+    # ⚠️ 三类要**分开数**（`test_三道核的_mismatch_措辞不同_它是发现不是口误`）：
     #    · 「修正」= 课上原话 → 修正值（模型给的 `corrections`，是口误/ASR 听错）；
-    #    · 「三道核发现」= 机械/模型重算出的不一致（`kind == "check"`）——
+    #    · 「三道核回改」= 机械/模型重算发现算错、**正文已按重算值改**（C5，2026-11-03）；
+    #    · 「三道核另有发现」= 重算不一致但**没改**（算不准，留给读者自己看）。
     #      把它并进"修正 N 处"是**改了笔记的账**：那处原话没错，是笔记核出来的发现。
     n_fix = sum(1 for c in all_corr if c.get("kind") != "check")
-    n_find = len(all_corr) - n_fix
-    if all_corr:
+    # ⭐ C5：已更正数**从 checks 派生**（`checks_summary.n_fixed` 按修正点去重）——
+    #    与页头/终端同一个数；没 checks 的老数据才退回数台账条目。
+    if checks:
+        import note_v2 as _nv
+        n_fixed = _nv.checks_summary(checks)["n_fixed"]
+    else:
+        n_fixed = sum(1 for c in all_corr
+                      if c.get("kind") == "check" and c.get("corrected"))
+    n_find = sum(1 for c in all_corr
+                 if c.get("kind") == "check" and not c.get("corrected"))
+    if n_fix or n_fixed or n_find:
         bits = []
         if n_fix:
             bits.append(f"修正 {n_fix} 处（课上原话 → 修正值 + 依据）")
+        if n_fixed:
+            bits.append(f"三道核回改正文 {n_fixed} 处（原写值 → 重算值）")
         if n_find:
             bits.append(f"三道核另有发现 {n_find} 处（重算不一致，不是口误）")
         L += ["- **" + " · ".join(bits) + "**（逐条记录在详细版里）。", ""]

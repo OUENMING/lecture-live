@@ -296,6 +296,15 @@ class UploadQueue:
         except Exception:                                     # noqa: BLE001
             return local
 
+    def status(self, stem: str) -> tuple[int, int]:
+        """某节课的 `(文件总数, 还没传成的数)`；队列里没有它 → `(0, 0)`。"""
+        with self._lock:
+            for it in self._items:
+                if str(it.get("stem") or "") == str(stem):
+                    total = len(it.get("files") or [])
+                    return total, total - len(set(it.get("sent_files") or []))
+        return 0, 0
+
     def pump(self, max_items: int = 1) -> dict:
         """试一轮。返回 `{sent, failed, expired, pending}`。
 

@@ -32,9 +32,50 @@ import json
 import os
 import note_math
 import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 REVIEW_CHUNK = 70           # 每块喂多少句（同旧版：块太大 JSON 会被截断）
 REVIEW_WORKERS = 5
+#: ⭐ 3.10.6：复习层**整段**的硬预算。到点还没回来的块丢掉，笔记照写（标部分生成）。
+#:    原来没有总预算，单块 300 秒 × 3 次 = 最坏 15 分钟 —— 下课卡住的主要来源之一。
+REVIEW_TOTAL_BUDGET_S = 300.0
+
+
+class _DaemonExecutor(ThreadPoolExecutor):
+    """工作线程是 **daemon**、且不登记进 `_threads_queues` 的线程池（3.11 退出用）。
+
+    ⚠️ 为什么不能直接用 `ThreadPoolExecutor`（2026-11-03 实测）：预算到点 `review()`
+       已经返回、笔记也落盘了，但一条还卡在 `chat`（单次上限 `NOTE_DEADLINE_S=90` s）里的
+       工作线程会把**进程退出**拖满 —— `concurrent.futures.thread._python_exit` 退出时
+       join `_threads_queues` 里的**所有**线程（daemon 也 join），`threading._shutdown`
+       再 join 非 daemon。实测：预算 0.3 s、chat 睡 3 s → 进程退出用了 3.1 s。
+    ⚠️ 方法体抄自 CPython 3.12.13 的 `ThreadPoolExecutor._adjust_thread_count`，只改两处：
+       `daemon=True`、不写 `_threads_queues`。仓库运行时固定在
+       `ClassLive.app/Contents/`（3.12.13）—— 升级 Python 时要重新对一遍；
+       行为由 `tests/test_note_v2.py::ReviewBudgetExit` 的退出计时判据盯着。
+    """
+
+    def _adjust_thread_count(self):
+        import concurrent.futures.thread as _cft
+        import weakref
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            t = threading.Thread(
+                name="%s_%d" % (self._thread_name_prefix or self, num_threads),
+                target=_cft._worker,
+                args=(weakref.ref(self, weakref_cb), self._work_queue,
+                      self._initializer, self._initargs),
+                daemon=True)
+            t.start()
+            self._threads.add(t)
 REVIEW_MAX_TOKENS = 6000    # 关思考时的每块上限（旧口径，保留）
 # ⭐ F11-9：**思考 low 档**的每类预算 —— 实测（test key，7 次真调用）：
 #   review 块最大 content≈3964 / reasoning=4483（合计 7943）；repair 2332；verify 532；overview 223。
@@ -1282,6 +1323,11 @@ def repair_exercises(review: dict, *, chat, entries: list | None = None,
             if not isinstance(c, dict):
                 continue
             claim = str(c.get("claim") or "")
+            # ⭐ C5：回改过正文的行**留着** —— 正文里的「已更正」括注还在，
+            #    台账丢了它，页头/修正记录就和实际改过的东西对不上。
+            if c.get("corrected"):
+                keep.append(c)
+                continue
             if any(note_math.unit_of_claim(snap, claim) for snap, _ in snaps):
                 continue                                           # 旧文本的行，过期
             keep.append(c)
@@ -1736,8 +1782,16 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
         return {}
     chunks = chunk_lines(lines)
     meta: dict = {}
-    from concurrent.futures import ThreadPoolExecutor
     from materials import snippets_block
+
+    # ⭐ 3.10.6：整段预算在这里落定 —— `one()` 每次重试前先看它，到点就不再发新请求
+    #    （原来只有 `fut.result(timeout=…)` 在收的时候刹车，已经在跑的块还会继续重试）。
+    _budget_end = time.monotonic() + REVIEW_TOTAL_BUDGET_S
+    #: 进度闸：`review()` 返回后还在收尾的块不许再报进度，否则会盖掉后面阶段的文字。
+    _progress_open = [True]
+    #: ⭐ 3.11：取消闸 —— `review()` 已返回（预算到点），还在跑的块**不许再发起下一次重试**
+    #:    （只靠 `_budget_end` 挡不住"刚好卡在边界"的那一次；显式闸更直白）。
+    _cancel = threading.Event()
 
     def one(chunk: list, ex_base: str) -> dict:
         """一块 → 一次调用；**失败要退一步**。
@@ -1752,12 +1806,17 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
         sk_block = note_cover.block_for(skeleton, chunk) if skeleton else ""
         hits = materials.search("\n".join(chunk)) if materials is not None else []
         m_block = snippets_block(hits)
+        # ⚠️ 3.10.6：次数保持 3（截断 / 去骨架两条兜底都要），真正的刹车是
+        #    `NOTE_DEADLINE_S=90`（每次调用）与 `REVIEW_TOTAL_BUDGET_S=300`（整段）。
+        #    单块最坏 4.5 分钟，整段最多 5 分钟 —— 原来单块就能拖 15 分钟。
         tries = [(ex_base + sk_block, max_tokens),
                  (ex_base + sk_block, int(max_tokens * 1.5)),
                  (ex_base, int(max_tokens * 1.5))]
         sys_text = (REVIEW_SYS.replace("__PLOTS__", _plots_menu())
                     .replace("__CALIBER__", _caliber_block(materials)))
         for ex2, mt in tries:
+            if _cancel.is_set() or time.monotonic() >= _budget_end:
+                break
             try:
                 user = _user_content(chunk, domain=domain, materials_block=m_block, extra=ex2)
                 got = _clean(chat(sys_text, user, mt))
@@ -1769,22 +1828,52 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
 
     failed: list = []
 
-    ex = ThreadPoolExecutor(min(workers, len(chunks)))
+    ex = _DaemonExecutor(min(workers, len(chunks)))
+    # ⭐ 3.10.6：进度按**完成数**报，不按"正在等第几块"报。
+    #    ⚠️ 原来在 `fut.result()` 之前发 `ci` —— 卡上写「2/5」时真实状态是
+    #       「正在等第 3 块」，另外 4 块可能早完成了（假进度，比没有更糟）。
+    _done = [0]
+    _done_lock = threading.Lock()
+
+    def _one_counted(chunk, ex_base):
+        try:
+            return one(chunk, ex_base)
+        finally:
+            with _done_lock:
+                _done[0] += 1
+                n = _done[0]
+                open_ = _progress_open[0]
+            if open_ and on_progress is not None:
+                try:
+                    on_progress("review", n, len(chunks))
+                except Exception:                             # noqa: BLE001
+                    pass
+
+    if on_progress is not None:
+        try:
+            on_progress("review", 0, len(chunks))
+        except Exception:                                     # noqa: BLE001
+            pass
     # ⭐ 每一块带上**自己的**字数上限（≈240 CJK 字/分钟；第七轮 H）——上限不是目标，
     #    "宁少勿多"写进了提示词；生成后还有超限压缩兜底。
-    futs = [ex.submit(one, c, extra + chunk_budget_line(c)) for c in chunks]
+    futs = [ex.submit(_one_counted, c, extra + chunk_budget_line(c)) for c in chunks]
     ex.shutdown(wait=False)
+    import concurrent.futures as _cf
+    # ⭐ 3.10.6：**一次等全部**到预算点，再按块序取结果 —— 原来按块序 `fut.result(timeout)`
+    #    会让一块慢块把后面早完成的块全堵住（笔记要等最慢的那块才合并）。
+    _cf.wait(futs, timeout=max(0.0, _budget_end - time.monotonic()))
+    _progress_open[0] = False       # 之后还在收尾的块不再报进度
+    _cancel.set()                   # ⭐ 3.11：还在跑的块不再发起新的重试
     blocks = []
     for ci, fut in enumerate(futs):
-        if on_progress is not None:
-            try:
-                on_progress("review", ci, len(chunks))
-            except Exception:                                 # noqa: BLE001
-                pass
-        try:
-            b = fut.result()
-        except Exception:                                     # noqa: BLE001
+        if not fut.done():
+            fut.cancel()            # 未开始的能取消；已在跑的靠 `one()` 的预算闸收尾
             b = {}
+        else:
+            try:
+                b = fut.result()
+            except Exception:                                 # noqa: BLE001
+                b = {}
         if not b:
             failed.append(ci)
         blocks.append(b)
@@ -1939,30 +2028,63 @@ _NUM = re.compile(r"\d+(?:\.\d+)?")
 def checks_summary(checks) -> dict:
     """三道核台账 → 计数。**唯一定义点**：md 页头、HTML 页头、终端那一行都读它。
 
-    · `n_checked` = **真的复算过**的（`ok` + `mismatch`）；
-    · `n_bad` = 复算发现**对不上**的（`mismatch`；⚠️ 正文不改，只标出来）；
+    · `n_checked` = **真的复算过**的（`ok` + 全部 `mismatch`，含已更正的）；
+    · `n_fixed` = 复算发现对不上、且**正文已按重算值回改**的**修正点**数（`corrected`；
+      由 `note_guards.correct_mismatches` 在速览之前做掉）—— 按 `corrected_id`
+      （字段 + 被替换区间）去重：机械核/模型核两行说同一处只算一处；
+      同一句里两条断言各改一处 → 算两处。老数据没有 id → 按 claim 去重兜底。
+    · `n_bad` = 复算发现**对不上、正文没改**的（`mismatch` 且非 `corrected`）；
     · `n_un` = 核不了、**待读者确认**的（`unchecked`）。
     """
     rows = [c for c in (checks or []) if isinstance(c, dict)]
     n_ok = sum(1 for c in rows if c.get("status") == "ok")
-    n_bad = sum(1 for c in rows if c.get("status") == "mismatch")
     n_un = sum(1 for c in rows if c.get("status") == "unchecked")
-    return {"total": len(rows), "n_ok": n_ok, "n_bad": n_bad, "n_un": n_un,
-            "n_checked": n_ok + n_bad}
+    fixed_rows = [c for c in rows
+                  if c.get("status") == "mismatch" and c.get("corrected")]
+    n_bad = sum(1 for c in rows
+                if c.get("status") == "mismatch" and not c.get("corrected"))
+    seen_ids: set = set()
+    seen: list = []
+    n_fixed = 0
+    for c in fixed_rows:
+        cid = c.get("corrected_id")
+        if cid is not None:
+            if cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+            n_fixed += 1
+            continue
+        nc = note_math._norm_claim(str(c.get("claim") or ""))
+        # 老数据（没有 corrected_id）：同一句的机械核/模型核两行按 claim 去重；
+        # 前缀匹配只对够长的 claim 成立（短 claim 归一化后会缩水 —— F9 的同一个坑）。
+        dup = any(nc == p or (nc and p and min(len(nc), len(p)) >= 8
+                              and (nc.startswith(p) or p.startswith(nc)))
+                  for p in seen)
+        if dup:
+            continue
+        seen.append(nc)
+        n_fixed += 1
+    return {"total": len(rows), "n_ok": n_ok, "n_bad": n_bad, "n_fixed": n_fixed,
+            "n_un": n_un, "n_checked": n_ok + n_bad + len(fixed_rows)}
 
 
 def checks_headline(checks) -> str:
     """页头那一句（md 与 HTML **共用** → 两处不可能不一样）。空表 → 空串。
 
-    ⚠️ F13 #2：旧文案写「（其中 N 处按 📖/📚 **改过**）」—— 而 `mismatch` 的口径是
-       **正文不改**（`note_math.check_review` 的 docstring 明写），那是句假话。
-       现在只说"对不上"，改没改正文由各处的修正记录（`corrections`）负责说。
+    ⚠️ F13 #2：旧文案写「（其中 N 处按 📖/📚 **改过**）」—— 那时 `mismatch` 的口径是
+       **正文不改**，那是句假话。C5（2026-11-03）起「已更正」只数真的回改过正文的
+       （行上 `corrected`，由 `note_guards.correct_mismatches` 落的）。
     """
     s = checks_summary(checks)
     if not (s["n_checked"] or s["n_un"]):
         return ""
+    bits = []
+    if s["n_fixed"]:
+        bits.append(f"{s['n_fixed']} 处已更正")
+    if s["n_bad"]:
+        bits.append(f"{s['n_bad']} 处对不上")
     return (f"✅ 数字核对：{s['n_checked']} 处已核"
-            + (f"（{s['n_bad']} 处对不上）" if s["n_bad"] else "")
+            + (f"（{' · '.join(bits)}）" if bits else "")
             + f" · {s['n_un']} 处待你确认")
 
 
@@ -2174,8 +2296,10 @@ def verify_numbers(review_data: dict, *, chat, materials=None,
                    exercise_flags: list | None = None) -> list:
     """数字/公式第三道核（1 次调用）→ 规范化后的 `checks` 列表（不是 dict）。
 
-    ⚠️ `mismatch` **不改正文**：它进「修正说明」清单由渲染层显示 ——
-       静默改数字是这份笔记最不能做的事（读者用它对答案）。
+    ⚠️ 这里**不改正文**：`mismatch` 的处置分两步 —— 能算准的由
+       `note_guards.correct_mismatches` 在速览之前回改（边界严格，见那个函数）；
+       算不准的由 `note_guards.annotate_mismatches` 在链尾原位标 ⚠。
+       核对本身只出「证据」；改字的决定留给守卫，静默改数字仍是这份笔记最不能做的事。
     ⭐ 第六轮：`mismatch` 只留给**讲解里那些来自 🎙 转录 / 📖 课件的断言**；
        例题解答 / 变式 / 补全题 / 自测是模型自己出的题，最多标未核对。
     ⭐ F8-b：`exercise_flags`（调用方给的 list）会把**降级之前**题块里的 mismatch 行
@@ -2259,15 +2383,32 @@ def _finish(det: list, llm_rows: list, review_data: dict) -> list:
 
 
 def corrections_from_mismatch(checks: list) -> list:
-    """`mismatch` -> 修正说明条目（渲染层与附录共用一条口径）。"""
+    """`mismatch` -> 修正说明条目（渲染层与附录共用一条口径）。
+
+    ⭐ C5（2026-11-03）：已回改正文的行（`corrected`）带 `original/replacement`，
+    修正记录写成「已更正：原写 X → Y」（读者能回源核对改了哪一处）。
+    """
     out = []
+    seen_ids: set = set()
     for c in checks or []:
         if c.get("status") == "mismatch":
-            out.append({"kind": "check",
-                        "where": "三道核",
-                        "spoken": c.get("claim", ""),
-                        "fixed": c.get("recomputed", ""),
-                        "basis": c.get("how", "")})
+            if c.get("corrected"):
+                # 同一修正点被机械核/模型核两行引用 → 修正记录只留一条（页头同口径）。
+                cid = c.get("corrected_id")
+                if cid is not None:
+                    if cid in seen_ids:
+                        continue
+                    seen_ids.add(cid)
+            e = {"kind": "check",
+                 "where": "三道核",
+                 "spoken": c.get("claim", ""),
+                 "fixed": c.get("recomputed", ""),
+                 "basis": c.get("how", "")}
+            if c.get("corrected"):
+                e["corrected"] = True
+                e["original"] = c.get("original", "")
+                e["replacement"] = c.get("replacement", "")
+            out.append(e)
     return out
 
 
@@ -2543,7 +2684,30 @@ def canon_fix_parens(text: str, canon_map: dict) -> str:
     return _PAREN_EN.sub(repl, s)
 
 
-def announce_terms_in_review(review: dict, *, canon=None, en_first: bool = False) -> dict:
+def _canon_map(canon) -> dict:
+    """术语表 `[(en, zh)]` → `{zh: en}`；坏对子跳过，重复以第一个为准。**纯函数。**"""
+    out: dict = {}
+    for pair in (canon or []):
+        try:
+            en, zh = _one_line(pair[0]), _one_line(pair[1])
+        except Exception:                                      # noqa: BLE001
+            continue
+        if zh and en:
+            out.setdefault(zh, en)
+    return out
+
+
+def _set_path(obj, path, value) -> None:
+    """按 `_walk_strings` 给的 path 原位写回（path 为空时不动）。"""
+    if not path:
+        return
+    for k in path[:-1]:
+        obj = obj[k]
+    obj[path[-1]] = value
+
+
+def announce_terms_in_review(review: dict, *, canon=None, en_first: bool = False,
+                             state: dict | None = None) -> dict:
     """渲染前的一次性标注（返回**副本**）。
 
     ⚠️ walk 顺序 = **阅读顺序**：`overview_long`（页首速览）先走，然后才轮到大字典里
@@ -2552,16 +2716,12 @@ def announce_terms_in_review(review: dict, *, canon=None, en_first: bool = False
     ⭐ `en_first`（2026-11-02）：关键术语英文化 —— 首次 `English（中文）`、后续直接英文。
     ⭐ `canon`（F7-e）：术语表的 `[(en, zh)]` 对 —— 有标准拼写就**盖过**模型/转录写法
        （`shutting down price` → `shutdown price`）。
+    ⭐ `state`（3.10.6）：传一个 dict 进来，本函数会把 `terms` 与 `seen` 放进去，
+       好让「课堂纲要」那条渲染路径（`announce_terms_in_outline`）**共用同一份**
+       首次出现记录 —— 同一个术语不会在纲要和讲解里各括注一次。
     """
     out = copy.deepcopy(review)
-    canon_map: dict = {}
-    for pair in (canon or []):
-        try:
-            en, zh = _one_line(pair[0]), _one_line(pair[1])
-        except Exception:                                      # noqa: BLE001
-            continue
-        if zh and en:
-            canon_map.setdefault(zh, en)
+    canon_map = _canon_map(canon)
     # ⭐ F8-e：标题里已经写着的「中文（English）」也统一成术语表拼写（没有标准拼写的照旧）。
     #    `title` 也走：覆盖度表的行标题 = 小节标题的再一次出现 —— 实测 F8 econ 的覆盖表
     #    里还留着 `（Shutting Down Price）`，一处没换就等于页面上有两种拼写。
@@ -2573,14 +2733,17 @@ def announce_terms_in_review(review: dict, *, canon=None, en_first: bool = False
         if en_first:
             new = flip_head(new)
         if new != v:
-            obj = out
-            for k in path[:-1]:
-                obj = obj[k]
-            obj[path[-1]] = new
+            _set_path(out, path, new)
     terms = [(zh, (canon_en(zh, canon_map) or en)) for zh, en in collect_terms(out)]
     if not terms:
+        if isinstance(state, dict):
+            state["terms"] = []     # 显式空表：调用方据此判断纲要要不要自己括注
         return out
-    seen: set = set()
+    if isinstance(state, dict):
+        state["terms"] = terms
+        seen = state.setdefault("seen", set())
+    else:
+        seen = set()
 
     def _done() -> bool:
         # 英文化模式下每个字段都要走（后面的字段还要把残留的中文换成英文）。
@@ -2610,13 +2773,52 @@ def announce_terms_in_review(review: dict, *, canon=None, en_first: bool = False
             continue
         new = _tidy(announce_terms(v, terms, seen, en_first=en_first))
         if new != v:
-            obj = out
-            for k in path[:-1]:
-                obj = obj[k]
-            obj[path[-1]] = new
+            _set_path(out, path, new)
         if _done():
             break
     return _tidy_all(out)
+
+
+#: 「课堂纲要」里会被渲染成正文的字段（`_render_outline_section` 的 `_pair_md` / 标题）。
+_OUTLINE_TERM_FIELDS = {"zh", "title", "title_zh", "text"}
+
+
+def announce_terms_in_outline(items: dict, *, state: dict | None = None,
+                              canon=None, en_first: bool = False) -> dict:
+    """「课堂纲要」也走同一份术语英文化（与 review 共用 `state` 里的 seen）。**返回副本。**
+
+    ⚠️ 3.10.6 P1-1：md 的纲要走 `_render_outline_section`，原来只有 review 过了
+       `announce_terms` → HTML 对、md 仍是中文在前。这里补上同一条路径。
+    ⚠️ `state` 必须与 `announce_terms_in_review` 用的是同一个 dict；否则同一术语
+       会在纲要与讲解里各括注一次。
+    ⚠️ 调用方之后必须用 `terms_done=True` 调 `_render_outline_section`，否则它自带的
+       `_inline_terms` 会再括一遍（两份实现叠在一起 = 双重括注）。
+    ⚠️ 但 `state["terms"]` 为空时（review 没产出术语）本函数原样返回 —— 这时调用方
+       **不能**传 `terms_done=True`，否则纲要一个括注都没有。
+    """
+    out = copy.deepcopy(items or {})
+    st = state if isinstance(state, dict) else {}
+    terms = list(st.get("terms") or [])
+    seen = st.setdefault("seen", set()) if state is not None else set()
+    if not terms or not en_first:
+        return out
+    canon_map = _canon_map(canon)
+    import note_guards
+    for path, v in list(_walk_strings(out)):
+        if not isinstance(v, str) or not v:
+            continue
+        name = _field_name(path)
+        if name not in _OUTLINE_TERM_FIELDS:
+            continue
+        new = v
+        if name in ("title", "title_zh", "heading"):
+            new = canon_fix_parens(new, canon_map)
+            new = flip_head(new)
+        new = announce_terms(new, terms, seen, en_first=True)
+        new = note_guards.collapse_dup_gloss(new)
+        if new != v:
+            _set_path(out, path, new)
+    return out
 
 
 def term_en_residue(review: dict) -> list:
@@ -2655,10 +2857,7 @@ def _tidy_all(review: dict) -> dict:
             continue
         new = note_guards.collapse_dup_gloss(v)
         if new != v:
-            obj = review
-            for k in path[:-1]:
-                obj = obj[k]
-            obj[path[-1]] = new
+            _set_path(review, path, new)
     return review
 
 

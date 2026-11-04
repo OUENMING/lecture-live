@@ -384,12 +384,17 @@ def _fmt_stream(st: dict) -> str:
     parts = []
     if st.get("engine"):
         parts.append(f"engine={st['engine']}")
+    if st.get("model"):
+        parts.append(f"model={st['model']}")
     if st.get("fallback_reason"):
         parts.append(f"退回={st['fallback_reason']}")
     else:
         parts.append("未退回")
     if st.get("sealed_n") is not None:
         parts.append(f"封口 {st['sealed_n']} 句")
+    if st.get("endpoints_n") is not None:
+        _b = st.get("endpoints_between_n") or 0
+        parts.append(f"端点 {st['endpoints_n']} 个" + (f"（句间 {_b}）" if _b else ""))
     lat = st.get("seal_latency_s")
     if isinstance(lat, dict) and lat.get("n"):
         parts.append(f"seal p50 {_fmt(lat.get('p50'))}s / p90 {_fmt(lat.get('p90'))}s")

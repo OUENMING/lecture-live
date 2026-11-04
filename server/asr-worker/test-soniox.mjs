@@ -31,7 +31,7 @@ const J = (status, obj) => new Response(JSON.stringify(obj), { status, headers: 
 const doStub = (core) => ({ idFromName: (n) => n, get: () => ({ fetch: async (u, init) => core.handle(new Request(u, init)) }) });
 
 // 假 Soniox 用量日志的一条（字段名与官方 get_usage_logs 的 schema 一致）。
-const logRec = ({ uuid, name, end, ms, model = "stt-rt-v5" }) => ({
+const logRec = ({ uuid, name, end, ms, model = "stt-rt-v6" }) => ({
   uuid, request_scope: "api", client_reference_id: name, model,
   start_time: new Date(Date.parse(end) - 60000).toISOString(), end_time: end,
   input_text_tokens: 0, input_audio_tokens: 0, input_audio_duration_ms: ms,
@@ -221,7 +221,7 @@ test("S6 上游 5xx / 缺 key 的 2xx / 网络错 -> 502 soniox_upstream", () =>
 }));
 
 // ---------- 7. AE ----------
-test("S7 AE：路径进白名单，model=stt-rt-v5，up=soniox-<区>:<状态>；事件里没有 key", () => withHarness({}, async (h) => {
+test("S7 AE：路径进白名单，model=stt-rt-v6，up=soniox-<区>:<状态>；事件里没有 key", () => withHarness({}, async (h) => {
   const { code } = await newCode(h, "amy");
   const jp = { ...h.env, SONIOX_KEY_JP: "soniox-jp-key" };
   await h.call(h.keyReq(`Bearer ${code}`));
@@ -231,7 +231,7 @@ test("S7 AE：路径进白名单，model=stt-rt-v5，up=soniox-<区>:<状态>；
   assert.equal(h.calls.ae.length, 4);
   const [us, jpEv, nokey, pub] = h.calls.ae;
   assert.deepEqual([us.blobs[0], us.blobs[1], us.blobs[2], us.blobs[3], us.doubles[0]],
-    ["/v1/soniox/key", "amy", "stt-rt-v5", "soniox-us:201", 200]);
+    ["/v1/soniox/key", "amy", "stt-rt-v6", "soniox-us:201", 200]);
   assert.deepEqual([jpEv.blobs[0], jpEv.blobs[3]], ["/v1/soniox/key", "soniox-jp:201"]);
   assert.deepEqual([nokey.blobs[3], nokey.doubles[0]], ["", 503], "没配 key：没调上游，up 留空");
   assert.deepEqual([pub.blobs[1], pub.doubles[0]], ["public", 401]);

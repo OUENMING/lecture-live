@@ -6,9 +6,9 @@
 
 | 设计 | 实际 | 备注 |
 |---|---|---|
-| 按 `X-ClassLive-Call` 路由 | ✅ 代码就绪，**但客户端还没发这个头** | 生产实际按"`max_tokens >= 4000` 当 note"运行；atom 900 / chapter 1400 因此回 DeepSeek |
-| atom / chapter 回 DeepSeek | ✅ | 已线上核验：`atom` 类 5 次全部 `deepseek:200` |
-| 笔记类留 CC | ⚠️ 部分 | 只有 ≥4000 的走 CC；1500–3000 的笔记子调用现在也回 DeepSeek（更快、且 402 有救援兜底） |
+| 按 `X-ClassLive-Call` 路由 | ✅ 客户端已发（`08c497a`） | 类名与 Worker `CMD_CHAT_CLASSES` 由测试 `n1` 对表；老客户端仍走 ≥4000 的 legacy 兜底 |
+| atom / chapter / note-build / recap 回 DeepSeek | ✅ | 线上核验：`atom` 6 次、`note-build` 1 次全 `deepseek:200` |
+| note / polish / prep 走 CC | ✅ | 线上核验：三类各 1–3 次全 `cmd:200` |
 | DeepSeek 4xx → CC 救援、预算 ×2 | ✅ | `chat()` 的 `DS_RESCUE_STATUS` 分支 |
 | Worker 内容级校验 | ✅ | `cmdContentTag`：空 / length / 非 JSON 一律回退且不记成功 |
 | 冷却补 timeout / 5xx | ✅ | 60 s 短冷却；`cmdCoolDown` 取 max，不再互相覆盖 |

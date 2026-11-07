@@ -123,6 +123,97 @@ const FAST_LLM_COOLDOWN_STATUS = new Set([401, 402, 403]);
 let fastLlmDownUntil = 0;                    // 本 isolate 内存：跟 lease 一样，回收就丢
 // 测试用：清掉冷却。
 export function _resetFastLlm() { fastLlmDownUntil = 0; }
+
+// ---- 长调用主通道：CommandCode（2026-11-05 作者定）----
+// 课后笔记 / 实时总结（max_tokens > FAST_LLM_MAX_TOKENS）先走 CommandCode 的 OpenAI 兼容端
+// （`/provider/v1/chat/completions`，同一把 CMD key，模型钉死 `deepseek/deepseek-v4.1-flash`）；
+// 非 2xx / 响应头超时 / 断流 → **退回原来的 DeepSeek 直连**。
+// 为什么要这条：2026-11-05 06:59Z DeepSeek 余额归零，直连长调用全 402（笔记 / 章节 / atom 全灭），
+// 而短翻译有 OpenRouter 兜着。这条给长调用也加一条独立记账的上游。
+// ⚠️ 短翻译（stream 且 ≤400 tokens）**不走这里**：CC 首字实测 1.3 s，OpenRouter 只要 ~0.46 s。
+// ⚠️ 实测 CC 收 `thinking` / `reasoning_effort` / `response_format` / `max_tokens=16384`，body 不用改，
+//    只把 `model` 换成 CC 的 ID（两家模型 ID 不通用）。
+const CMD_CHAT_URL = "https://api.commandcode.ai/provider/v1/chat/completions";
+const CMD_CHAT_MODEL_DEFAULT = "deepseek/deepseek-v4.1-flash";
+const CMD_CHAT_HEADER_MS = 10_000;           // 只等响应头；正文另有「断流 = 失败」兜底（见 cmdChatAttempt）
+const CMD_CHAT_UA = "ClassLive/0.0 (+https://github.com/OUENMING/lecture-live)";
+//: CC 的准入线。**故意不和 `FAST_LLM_MAX_TOKENS` 共用**：那个是快速通道的口径，改它会静默改这里。
+const CMD_CHAT_MIN_TOKENS = 400;
+//: 401/402/403/429 冷却 10 分钟 —— CC 下线时别让每次笔记 / 每个窗口都先白打一次（同 fastLLM 的理由）。
+const CMD_CHAT_COOLDOWN_MS = 10 * 60_000;
+const CMD_CHAT_COOLDOWN_STATUS = new Set([401, 402, 403, 429]);
+let cmdChatDownUntil = 0;
+export function _resetCmdChat() { cmdChatDownUntil = 0; }
+
+// 走 CC 吗：配了 key（单独一把优先，没有就复用 Jev 那把 CMD key）+ **非流式**长调用。
+// ⚠️ `stream` 真值一律不走（作者 2026-11-05 定：**实时翻译不走 CommandCode**）——
+//    实时翻译 220 / 草稿 120 / 讲解 1400 都是流式，全是用户盯着屏幕等的；CC 首字 1.3 s 比直连慢。
+//    只有后台的非流式长调用（实时总结 atom 700 / 章节 1400 / 笔记几千）走 CC。
+export function useCmdChat(env, body) {
+  if (!(env.CMD_CHAT_KEY || env.JEV_CC_KEY)) return false;
+  if (body?.stream) return false;                     // 真值即流式（与下游 `if (body.stream)` 同口径）
+  if (Date.now() < cmdChatDownUntil) return false;
+  return Number(body?.max_tokens) > CMD_CHAT_MIN_TOKENS;
+}
+
+function cmdChatBody(env, body) {
+  return { ...body, model: env.CMD_CHAT_MODEL || CMD_CHAT_MODEL_DEFAULT };
+}
+
+async function fetchCmdChat(env, body) {
+  const ms = Number(env.CMD_CHAT_HEADER_MS) || CMD_CHAT_HEADER_MS;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    return await fetch(CMD_CHAT_URL, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${env.CMD_CHAT_KEY || env.JEV_CC_KEY}`,
+        "content-type": "application/json",
+        "user-agent": CMD_CHAT_UA,
+      },
+      body: JSON.stringify(cmdChatBody(env, body)),
+      signal: ac.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 非流式打一次 CC：**响应头到了不算数** —— 正文断流 / 不是 JSON / 没有 choices 都当失败（退回 DeepSeek）。
+// 回 `{ r, tag }`：`r === null` 表示这次别用；`tag` 进 `ev.up`（`cmd:200:bad` 这种能看出是哪一段坏的）。
+async function cmdChatAttempt(env, body) {
+  let r;
+  try {
+    r = await fetchCmdChat(env, body);
+  } catch (e) {
+    return { r: null, tag: `cmd:${e?.name === "AbortError" ? "timeout" : "err"}` };
+  }
+  if (!r.ok || !r.body) {
+    if (CMD_CHAT_COOLDOWN_STATUS.has(r.status)) cmdChatDownUntil = Date.now() + CMD_CHAT_COOLDOWN_MS;
+    try { await r.body?.cancel(); } catch { /* 错误响应体不要了 */ }
+    return { r: null, tag: `cmd:${r.status}` };
+  }
+  let text;
+  try {
+    text = await r.text();                              // 200 之后正文断流会在这里 reject
+  } catch {
+    return { r: null, tag: `cmd:${r.status}:body` };
+  }
+  try {
+    const j = JSON.parse(text);
+    if (!Array.isArray(j?.choices) || j.choices.length === 0) throw new Error("no choices");
+  } catch {
+    return { r: null, tag: `cmd:${r.status}:bad` };
+  }
+  return {
+    r: new Response(text, {
+      status: r.status,
+      headers: { "content-type": r.headers.get("content-type") || "application/json" },
+    }),
+    tag: `cmd:${r.status}`,
+  };
+}
 // 只放行客户端真用的模型（`main.py --cloud-model` / `keyentry` 的默认值），别让码变成任意模型的代付。
 const LLM_MODELS = new Set(["deepseek-flash", "deepseek-chat"]);
 const LLM_MAX_TOKENS = 16384;  // 笔记开思考（low）：实测讲解块 正文≈3964 + 推理 4483 = 7943，客户端预算 11000；留到 16384 余量（DeepSeek 上限 384K，按实用量计费，封顶不加钱）（2026-10-18）
@@ -314,8 +405,13 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
   body.max_tokens = Math.min(Number(body.max_tokens) || LLM_MAX_TOKENS, LLM_MAX_TOKENS);
   ev.max_tok = body.max_tokens;   // 面板据此分「实时翻译」（几十）和「课后笔记 / 精修」（上千）
   if (body.stream) body.stream_options = { ...(body.stream_options || {}), include_usage: true };
-  let up = null, fast = "";
-  if (useFastLlm(env, body, ev.country)) {
+  let up = null, fast = "", cmd = "";
+  if (useCmdChat(env, body)) {
+    const a = await cmdChatAttempt(env, body);
+    cmd = a.tag;
+    up = a.r;
+  }
+  if (!up && useFastLlm(env, body, ev.country)) {
     try {
       const r = await fetchFastLlm(env, body);
       fast = `openrouter:${r.status}`;
@@ -334,9 +430,10 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
       headers: { authorization: `Bearer ${env.DEEPSEEK_KEY}`, "content-type": "application/json" },
       body: JSON.stringify(body),   // 原 body：退回必须与不配 OPENROUTER_KEY 时逐字一致
     });
-    ev.up = fast ? `${fast}>deepseek:${up.status}` : `deepseek:${up.status}`;
+    const pre = [cmd, fast].filter(Boolean).join(">");   // cmd:402>deepseek:200 / cmd:timeout>deepseek:200
+    ev.up = pre ? `${pre}>deepseek:${up.status}` : `deepseek:${up.status}`;
   } else {
-    ev.up = fast;   // openrouter:<status>
+    ev.up = cmd || fast;   // cmd:<status> / openrouter:<status>
   }
   const headers = { "content-type": up.headers.get("content-type") || "application/json" };
   if (!up.ok || !up.body) {

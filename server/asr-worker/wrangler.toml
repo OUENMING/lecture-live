@@ -14,6 +14,11 @@
 #                                         #   不配 = 这些访客全走美国区。
 #   wrangler secret put SONIOX_KEY_EU     # 可选：欧盟区项目的 key（欧洲/非洲访客走 api.eu.*）。不配 = 走美国区。
 #                                         #   两个可选 key 都不配，代码不需要改 —— 全走美国（fail-safe）。
+#   wrangler secret put JEV_KEY           # 可选：Jev 官方 key（非中国区默认走它）
+#   wrangler secret put JEV_CC_KEY        # 可选：CommandCode key —— Jev 中国区默认走它（2026-11-04）
+#   wrangler secret put CMD_CHAT_KEY      # 可选：CommandCode key，**长调用主通道**（课后笔记 / 实时总结，
+#                                         #   2026-11-05）。不配就复用 JEV_CC_KEY；两把都不配 = 长调用全走 DeepSeek。
+#                                         #   ⚠️ 建议单独配一把：笔记量大，和 Jev 共用会把 Jev 额度一起打满。
 #   wrangler deploy
 #
 # 实时转写的会话上限默认 3 h。要改就加一段 [vars]（可选，不写就用默认）：

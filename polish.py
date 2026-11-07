@@ -82,7 +82,7 @@ def _chat(key: str, model: str, system: str, user: str,
           max_tokens: int, timeout: float) -> dict:
     import llm_client
     obj = llm_client.chat_json(key, model, system, user, max_tokens=max_tokens,
-                               temperature=0.2, timeout=timeout)
+                               temperature=0.2, timeout=timeout, call_class="polish")
     return obj if isinstance(obj, dict) else {}
 
 

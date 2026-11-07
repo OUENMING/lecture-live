@@ -129,7 +129,7 @@ def validate_deepseek(key: str, *, model: str = "deepseek-flash") -> tuple[bool,
         # ⚠️ 15 秒（2026-10-01 审查 F9）：面板上有个框在等人 —— 默认 180 秒
         #    意味着「正在验证…」最多转 3 分钟。校验只需回一个词。
         got = _chat_json(key, model, 'Reply with JSON: {"ok": true}', "ping", 16,
-                         0.0, timeout=15.0)
+                         0.0, timeout=15.0, call_class="keyentry")
         return (True, "可用") if got is not None else (False, "没回内容")
     except Exception as e:                                    # noqa: BLE001
         why = _passcode_reason(e)

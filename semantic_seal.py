@@ -205,7 +205,7 @@ def llm_decide(key: str, model: str, *, timeout: float = 15.0) -> Callable[[list
     def decide(words: list[str]) -> list[int]:
         user = " ".join(f"{i}:{w}" for i, w in enumerate(words))
         r = llm_client.chat_json(key, model, _SYSTEM, user, max_tokens=100, temperature=0.0,
-                                 timeout=timeout, deadline=timeout + 5.0)
+                                 timeout=timeout, deadline=timeout + 5.0, call_class="seal")
         ends = r.get("ends", []) if isinstance(r, dict) else []
         return [int(i) for i in ends if isinstance(i, int) and not isinstance(i, bool)]
 

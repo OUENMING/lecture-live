@@ -3966,8 +3966,11 @@ def run(args) -> None:
         # ⚠️ 短超时（2026-10-01 审查 F9 / 计划 D16）：默认 180 秒会让 worker 攥着
         #    `_step_lock` 最长 3 分钟 —— `finish(25s)` 拿不到锁就"只关文件"，
         #    残余窗口和最后一章的正式合成全丢。20 秒对正常调用绰绰有余。
+        # ⭐ 调用类（2026-11-07）：实时摘要这两条都**不走 CC**（预算小、必须严格 JSON、
+        #    失败就丢要点）。共享一个 callable，所以按预算区分：章节 1400 / 原子 900。
+        cls = "chapter" if max_tokens >= ch.MAX_TOKENS else "atom"
         return _chat_json(api_key_val, atom.MODEL, sysp, block,
-                          max_tokens, temperature, timeout=20.0)
+                          max_tokens, temperature, timeout=20.0, call_class=cls)
 
     def _summ_emit(payload: dict) -> None:
         """推给界面 **+ 打终端那一行**。**两件事都由产出方负责**（见 `summary_log_line`）。

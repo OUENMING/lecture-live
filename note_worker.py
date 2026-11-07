@@ -101,7 +101,7 @@ def build_callbacks(spec: dict) -> dict:
                 import llm_client
                 return llm_client.chat_json(_cloud_key(), model, system, user,
                                             max_tokens=max_tokens, temperature=0.3,
-                                            timeout=120.0)
+                                            timeout=120.0, call_class="recap")
 
             return _recap_mod.build(
                 course=data.get("course") or course, date=data.get("date") or "",

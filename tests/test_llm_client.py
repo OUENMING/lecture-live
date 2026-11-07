@@ -355,6 +355,26 @@ class T(unittest.TestCase):
             want["X-ClassLive-Tz"] = tz
         self.assertEqual(c["headers"], want)
 
+    def test_call_class_goes_as_header_only_for_passcode(self):
+        """⭐ 2026-11-07：Worker 按 `X-ClassLive-Call` 选上游（atom 回 DeepSeek、note 走 CC）。
+
+        ⚠️ 直连 DeepSeek 时**不发**这个头 —— 头是给自家 Worker 的路由信号，不是给第三方的。
+        """
+        import final_asr
+        orig = final_asr.install_id
+        final_asr.install_id = lambda **kw: "ab" * 16
+        try:
+            build_notes._chat_json("cl-ying-0123456789abcdef", "m", "s", "u", 900,
+                                   call_class="atom")
+            build_notes._chat_json("sk-x", "m", "s", "u", 900, call_class="atom")
+            build_notes._chat_json("cl-ying-0123456789abcdef", "m", "s", "u", 900)
+        finally:
+            final_asr.install_id = orig
+        a, b, c = self.rec.calls[0], self.rec.calls[1], self.rec.calls[2]
+        self.assertEqual(a["headers"].get("X-ClassLive-Call"), "atom")
+        self.assertNotIn("X-ClassLive-Call", b["headers"], "直连 DeepSeek 不许带")
+        self.assertNotIn("X-ClassLive-Call", c["headers"], "没传类就不带（Worker 走 legacy 兜底）")
+
     def test_native_key_never_sends_install_id(self):
         self.assertEqual(llm_client.headers("sk-abc"), {"Authorization": "Bearer sk-abc"})
         self.assertEqual(llm_client.base_for("sk-abc"), llm_client.BASE)

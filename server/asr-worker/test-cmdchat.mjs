@@ -328,6 +328,19 @@ test("u DeepSeek 402 且 CC 也挂 -> 原样回 DeepSeek 的错误体", async ()
   } finally { h.restore(); }
 });
 
+// ---------- n1. 默认白名单 = 客户端真正会发的那些类名（和 llm_client 对表） ----------
+test("n1 默认白名单：note / polish / prep 进 CC，其余全回 DeepSeek", () => {
+  _resetCmdChat();                                    // 前面的用例可能留了冷却（模块级状态）
+  const env = { CMD_CHAT_KEY: "k" };
+  for (const c of ["note", "polish", "prep"]) {
+    assert.equal(useCmdChat(env, { max_tokens: 4000 }, c), true, `${c} 应该在白名单里`);
+  }
+  for (const c of ["atom", "chapter", "note-build", "recap", "classify", "seal", "merge",
+                   "term", "keyentry", "live", "glossary"]) {
+    assert.equal(useCmdChat(env, { max_tokens: 4000 }, c), false, `${c} 不许进 CC`);
+  }
+});
+
 // ---------- l. atom / 章节：预算小 + 必须严格 JSON -> 一律回 DeepSeek ----------
 test("l atom(700) / 章节(1400) 不回 CC —— 11-06 事故的直接判据", async () => {
   const h = harness({ env: { CMD_CHAT_KEY: "cmd-key" } });

@@ -30,9 +30,16 @@ def base_for(key: str | None) -> str:
     return BASE
 
 
-def headers(key: str) -> dict:
-    """请求头。通行码另外带安装号、客户端版本与**本机时区**（Worker 按前者数设备、按后者统计版本分布、
-    按时区显示「他常在几点上课」）—— 直连 DeepSeek 时**都不带**（别把安装号发给第三方）。"""
+def headers(key: str, call_class: str = "") -> dict:
+    """请求头。通行码另外带安装号、客户端版本、**本机时区**与**调用类**
+    （Worker 按安装号数设备、按版本统计分布、按时区显示「他常在几点上课」、按调用类选上游）
+    —— 直连 DeepSeek 时**都不带**（别把安装号发给第三方）。
+
+    ⭐ `call_class`（2026-11-07）：`note` / `polish` / `prep` 这几个在 Worker 白名单里，
+    会先走 CommandCode（防 DeepSeek 余额 402）；其余（atom / chapter / classify / seal / merge…）
+    一律 DeepSeek 直连 —— 那条更快，且 4xx 时 Worker 自己会用 CC 救一次。
+    ⚠️ 这个名字必须和 `handler.js` 的 `CMD_CHAT_CLASSES` 对得上，否则该走 CC 的会静默回 DeepSeek。
+    """
     h = {"Authorization": f"Bearer {key}"}
     if is_passcode(key):
         import asr_endpoint
@@ -42,6 +49,8 @@ def headers(key: str) -> dict:
         tz = asr_endpoint.tz_header()
         if tz:
             h["X-ClassLive-Tz"] = tz
+        if call_class:
+            h["X-ClassLive-Call"] = str(call_class)[:20]
     return h
 
 
@@ -93,7 +102,8 @@ def _post_deadline(url: str, *, headers: dict, payload: dict, timeout: float,
 
 def chat_json(key: str, model: str, system: str, user: str, *, max_tokens,
               temperature: float = 0.2, timeout: float = 180.0, return_meta: bool = False,
-              effort: str | None = None, deadline: float | None = None):
+              effort: str | None = None, deadline: float | None = None,
+              call_class: str = ""):
     """非流式、`response_format=json_object`；返回模型给的 JSON（**原样**，可能不是 dict）。
 
     ⚠️ 失败一律抛（`httpx.HTTPError` / `KeyError` / `json.JSONDecodeError`…）—— 吞不吞、吞成什么，
@@ -133,7 +143,7 @@ def chat_json(key: str, model: str, system: str, user: str, *, max_tokens,
             payload["thinking"] = {"type": "disabled"}
         url = f"{base_for(key)}/chat/completions"
         status, body = _post_deadline(
-            url, headers=headers(key), payload=payload, timeout=timeout,
+            url, headers=headers(key, call_class), payload=payload, timeout=timeout,
             deadline=CALL_DEADLINE_S if deadline is None else deadline)
         resp = httpx.Response(status, content=body,
                               request=httpx.Request("POST", url))

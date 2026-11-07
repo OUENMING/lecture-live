@@ -93,7 +93,8 @@ def _chat(key, model, system, user, max_tokens, timeout):
     import llm_client
     # ⭐ F11 §0：碎句合并也属于「课后笔记」那条链（作者 2026-10-18）→ 走思考 low 档。
     obj = llm_client.chat_json(key, model, system, user, max_tokens=max_tokens,
-                               temperature=0.2, timeout=timeout, effort="low")
+                               temperature=0.2, timeout=timeout, effort="low",
+                               call_class="merge")
     return obj if isinstance(obj, dict) else {}
 
 

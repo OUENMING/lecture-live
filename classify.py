@@ -216,7 +216,8 @@ def make_ask(key: str, *, model: str = MODEL):
     from build_notes import _chat_json
 
     def ask(prompt: str):
-        return _chat_json(key, model, SYS, prompt, MAX_TOKENS, TEMPERATURE)
+        return _chat_json(key, model, SYS, prompt, MAX_TOKENS, TEMPERATURE,
+                          call_class="classify")
 
     return ask
 

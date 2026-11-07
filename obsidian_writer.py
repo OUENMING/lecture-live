@@ -1267,7 +1267,8 @@ class ObsidianWriter:
         import llm_client
         obj = llm_client.chat_json(self._key, self._model, system, user,
                                    max_tokens=max_tokens, temperature=0.3, timeout=300,
-                                   effort=NOTE_EFFORT, deadline=NOTE_DEADLINE_S)
+                                   effort=NOTE_EFFORT, deadline=NOTE_DEADLINE_S,
+                                   call_class="note")
         return obj if isinstance(obj, dict) else {}
 
     def _chat_plain(self, system: str, user: str, max_tokens: int) -> dict:
@@ -1280,7 +1281,7 @@ class ObsidianWriter:
         import llm_client
         obj = llm_client.chat_json(self._key, self._model, system, user,
                                    max_tokens=max_tokens, temperature=0.3, timeout=300,
-                                   deadline=NOTE_DEADLINE_S)
+                                   deadline=NOTE_DEADLINE_S, call_class="note")
         return obj if isinstance(obj, dict) else {}
 
     def _chat_meta(self, system: str, user: str, max_tokens: int):
@@ -1292,7 +1293,8 @@ class ObsidianWriter:
                                                    max_tokens=max_tokens, temperature=0.3,
                                                    timeout=300, return_meta=True,
                                                    effort=NOTE_EFFORT,
-                                                   deadline=NOTE_DEADLINE_S)
+                                                   deadline=NOTE_DEADLINE_S,
+                                                   call_class="note")
         return (obj if isinstance(obj, dict) else {}), finish, nchars
 
     def _with_overview(self, review: dict) -> tuple:

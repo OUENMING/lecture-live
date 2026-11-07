@@ -231,7 +231,7 @@ def collect_terms(course: str | None = None) -> list[str]:
 
 def _chat_json(key: str, model: str, system: str, user: str,
                max_tokens: int, temperature: float = 0.2,
-               timeout: float = 180.0) -> dict | None:
+               timeout: float = 180.0, call_class: str = "") -> dict | None:
     """⚠️ `timeout` 可选、默认 180（2026-10-01 审查 F9 / 计划 D16(b)）：
 
     7 个既有调用方**一个都不用改**；要短超时的自己传 —— `main._summ_chat` 传 20
@@ -240,7 +240,8 @@ def _chat_json(key: str, model: str, system: str, user: str,
     """
     import llm_client
     obj = llm_client.chat_json(key, model, system, user, max_tokens=max_tokens,
-                               temperature=temperature, timeout=timeout)
+                               temperature=temperature, timeout=timeout,
+                               call_class=call_class)
     return obj if isinstance(obj, dict) else None
 
 
@@ -290,7 +291,7 @@ def build(course: str | None = None, api_key: str | None = None,
         chunk = todo_cls[i:i + BATCH_CLASSIFY]
         try:
             obj = _chat_json(key, model, SYS_CLASSIFY, "\n".join(chunk),
-                             1600, 0.2)
+                             1600, 0.2, call_class="note-build")
             miss = 0
             for t in chunk:
                 lv = _pick(obj or {}, t)
@@ -322,7 +323,7 @@ def build(course: str | None = None, api_key: str | None = None,
         chunk = todo_exp[i:i + BATCH_EXPAND]
         try:
             obj = _chat_json(key, model, SYS_EXPAND, "\n".join(chunk),
-                             MAX_TOKENS_EXPAND, 0.3)
+                             MAX_TOKENS_EXPAND, 0.3, call_class="note-build")
             got = 0
             for t in chunk:
                 v = _pick(obj or {}, t)
@@ -341,7 +342,7 @@ def build(course: str | None = None, api_key: str | None = None,
         chunk = todo_short[i:i + BATCH_EXPAND]
         try:
             obj = _chat_json(key, model, SYS_EXPAND_SHORT, "\n".join(chunk),
-                             1200, 0.2)
+                             1200, 0.2, call_class="note-build")
             got = 0
             for t in chunk:
                 v = _pick(obj or {}, t)
@@ -470,7 +471,7 @@ def lookup_term(term: str, api_key: str,
                 model: str = "deepseek-flash") -> dict | None:
     """即时查一个术语。返回 {"known","type","note"}; 不确定/编造风险 -> None。"""
     try:
-        obj = _chat_json(api_key, model, SYS_LOOKUP, term, 400, 0.2)
+        obj = _chat_json(api_key, model, SYS_LOOKUP, term, 400, 0.2, call_class="term")
     except Exception:                                     # noqa: BLE001
         return None
     if not obj or not obj.get("known"):

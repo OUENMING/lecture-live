@@ -946,7 +946,8 @@ def _save_state(path: pathlib.Path, appended: dict) -> None:
 def _default_chat(api_key: str, model: str):
     """默认实现：窄包装 `build_notes._chat_json`（它已带 json_object + thinking=disabled）。"""
     from build_notes import _chat_json
-    return lambda system, user: _chat_json(api_key, model, system, user, 4000, 0.2)
+    return lambda system, user: _chat_json(api_key, model, system, user, 4000, 0.2,
+                                            call_class="prep")
 
 
 def prepare(course: str, files: list, *, glossary_dir, state_path,

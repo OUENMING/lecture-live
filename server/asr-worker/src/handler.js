@@ -147,7 +147,11 @@ const CMD_CHAT_UA = "ClassLive/0.0 (+https://github.com/OUENMING/lecture-live)";
 //       700 的预算被吃穿 → content 空（JSON mode 洗成空格）或半截 JSON。
 //       11-06 实测：44 次 CC 调用 25 次 content 坏；同一 prompt 直连 DeepSeek 最大只用 564 token、0 失败。
 //    只有"生成式长文、能容忍一次重来"的调用适合 CC（思考对它反而是加分）。
-const CMD_CHAT_CLASSES_DEFAULT = "note";
+//: 走 CC 主通道的调用类。**必须和 `llm_client.headers(call_class=…)` 传的名字对得上**：
+//    note = 课后笔记链（`obsidian_writer` 三个出口）；polish = 整课精修；prep = 课前准备。
+//    其余（atom / chapter / classify / seal / merge / term / note-build / recap / keyentry）
+//    一律 DeepSeek 直连 —— 更快，且 DeepSeek 4xx 时下面的救援会兜住。
+const CMD_CHAT_CLASSES_DEFAULT = "note,polish,prep";
 //: 老客户端不发 `X-ClassLive-Call` 时的兜底判据：只有 ≥ 这个数才当笔记。低于它一律回 DeepSeek。
 //    ⚠️ 这条只是**向后兼容**，不是路由规则本身；新客户端必须显式发 header。
 const CMD_CHAT_LEGACY_NOTE_TOKENS = 4000;

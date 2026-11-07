@@ -59,6 +59,10 @@ CALL_DEADLINE_S = 300.0
 #: 超了会被 Worker 直接 clamp 回去，等于白打一次。
 _MAX_TOKENS_CAP = 16384
 
+#: 翻倍重试的**上限门槛**：只有预算比它小才翻倍。越过它 Worker 会把这次调用判成 `note`
+#: （`handler.js` 的 `CMD_CHAT_LEGACY_NOTE_TOKENS`），换上游 —— 一次"重试"不该偷偷换通道。
+_RETRY_DOUBLE_BELOW = 4000
+
 
 def _post_deadline(url: str, *, headers: dict, payload: dict, timeout: float,
                    deadline: float) -> tuple:
@@ -141,10 +145,13 @@ def chat_json(key: str, model: str, system: str, user: str, *, max_tokens,
     if finish == "length" and effort:
         # 思考把 token 吃光（实测 review 块：推理吃掉大半预算 → content 被截）→ 关思考重来一次。
         choice, finish = _once(None, max_tokens)
-    if finish == "length" and max_tokens < _MAX_TOKENS_CAP:
-        # ⭐ 2026-11-07：**不再只对带 `effort` 的调用做这件事**。
-        #    atom / 章节这类不传 effort 的调用，预算被吃穿时过去是静默变成 JSONDecodeError
-        #    （11-06 实测 25/44 次）。现在：翻倍预算再要一次（封顶 Worker 的 16384）。
+    if finish == "length" and effort is None and max_tokens < _RETRY_DOUBLE_BELOW:
+        # ⭐ 2026-11-07：**不传 effort 的调用**（atom / 章节这类短结构化调用）预算被吃穿时，
+        #    过去是静默变成 JSONDecodeError（11-06 实测 25/44 次）。现在翻倍再要一次。
+        #    ⚠️ 只在小预算时翻倍：翻到 ≥4000 会让 Worker 把它判成 note 而换上游，
+        #       "重试一次"变成"换一条更容易截断的通道"，方向是反的。
+        #    ⚠️ 带 effort 的（笔记链）**不在这里翻倍** —— 它们上面已经关思考重来过一次，
+        #       再叠一层会和 `note_v2` 的块级重试乘出 7 个请求。
         choice, finish = _once(None, min(_MAX_TOKENS_CAP, max_tokens * 2))
     if finish == "length":
         # 半截 JSON 有时还能解析出来 —— 那种"能解析"比失败更坏（会静默丢尾巴）。

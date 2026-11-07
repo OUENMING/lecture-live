@@ -279,16 +279,52 @@ test("i CC 429 -> 退回 DeepSeek，冷却期内下一次不再白打 CC", async
   } finally { h.restore(); }
 });
 
-// ---------- j. 没传 max_tokens：clamp 到 16384 -> 走 CC ----------
-test("j 非流式没传 max_tokens -> clamp 16384，走 CC", async () => {
+// ---------- j. 没传 max_tokens：**不许**被 clamp 成 16384 再当 note（fail-open） ----------
+test("j 老客户端没传 max_tokens -> legacy -> DeepSeek（缺失 ≠ 16384）", async () => {
   const h = harness({ env: { CMD_CHAT_KEY: "cmd-key" } });
   try {
     const b = BODY(); delete b.max_tokens;
-    const res = await h.call(b);
+    const res = await h.call(b, "IE", "");            // "" = 不发 X-ClassLive-Call
     await res.text();
     await h.settle();
-    assert.equal(h.calls.cc.length, 1);
-    assert.equal(h.calls.cc[0].body.max_tokens, 16384);
+    assert.equal(h.calls.cc.length, 0, "缺字段不能推成 note");
+    assert.equal(h.calls.deepseek.length, 1);
+    assert.equal(h.calls.deepseek[0].body.max_tokens, 16384, "发给上游的仍是 clamp 后的值");
+  } finally { h.restore(); }
+});
+
+// ---------- t. DeepSeek 4xx -> CC 救援（预算 ×2） ----------
+test("t DeepSeek 402 -> 用 CC 救一次，预算 ×2", async () => {
+  const h = harness({
+    deepseek: () => J(402, { error: "Insufficient Balance" }),
+    cc: () => completion("cc", 10, 5),
+    env: { CMD_CHAT_KEY: "cmd-key" },
+  });
+  try {
+    const res = await h.call(BODY({ max_tokens: 700 }), "IE", "atom");
+    assert.equal(res.status, 200);
+    await res.text();
+    await h.settle();
+    assert.equal(h.calls.deepseek.length, 1);
+    assert.equal(h.calls.cc.length, 1, "atom 平时不走 CC，但 402 时必须有救援");
+    assert.equal(h.calls.cc[0].body.max_tokens, 1400, "救援那次要翻倍");
+    assert.equal(h.calls.ae[0].blobs[3], "deepseek:402>cmd:200");
+  } finally { h.restore(); }
+});
+
+// ---------- u. 救援也失败 -> 原样回 DeepSeek 的 402 ----------
+test("u DeepSeek 402 且 CC 也挂 -> 原样回 DeepSeek 的错误体", async () => {
+  const h = harness({
+    deepseek: () => J(402, { error: "Insufficient Balance" }),
+    cc: () => J(402, { error: "no credit" }),
+    env: { CMD_CHAT_KEY: "cmd-key" },
+  });
+  try {
+    const res = await h.call(BODY({ max_tokens: 700 }), "IE", "atom");
+    assert.equal(res.status, 402);
+    assert.deepEqual(await res.json(), { error: "Insufficient Balance" }, "客户端要看到最初那个错");
+    await h.settle();
+    assert.equal(h.calls.ae[0].blobs[3], "deepseek:402>cmd:402");
   } finally { h.restore(); }
 });
 

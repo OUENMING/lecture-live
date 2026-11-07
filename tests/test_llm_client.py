@@ -299,6 +299,25 @@ class T(unittest.TestCase):
         self.assertEqual(len(calls), 2, "翻倍重来一次")
         self.assertEqual([c["max_tokens"] for c in calls], [10, 20])
 
+    def test_effort_truncation_does_not_double_budget(self):
+        """带 effort 的调用不许再翻倍：它上面已经"关思考重来一次"，再乘一层会和块级重试叠成 7 个请求。"""
+        calls = []
+
+        def fake(url, *, headers=None, payload=None, timeout=None, deadline=None):
+            calls.append(payload)
+            return 200, json.dumps({"choices": [
+                {"message": {"content": ""}, "finish_reason": "length"}]}).encode()
+
+        orig = llm_client._post_deadline
+        llm_client._post_deadline = fake
+        try:
+            with self.assertRaises(ValueError):
+                llm_client.chat_json("sk-x", "m", "S", "U", max_tokens=1500, effort="low")
+        finally:
+            llm_client._post_deadline = orig
+        self.assertEqual(len(calls), 2, "开思考 + 关思考各一次，不翻倍")
+        self.assertEqual([c["thinking"]["type"] for c in calls], ["enabled", "disabled"])
+
     def test_truncated_json_that_parses_is_still_rejected(self):
         """半截 JSON 有时还能解析出来 —— 那种"能解析"比失败更坏（静默丢尾巴）。"""
         calls = []

@@ -161,6 +161,8 @@ const CMD_CHAT_BAD_STREAK = 2;
 //: 正文预算（响应头已经到了之后）。⚠️ 只有响应头超时的话，慢滴流能把正文无限拖住。
 const CMD_CHAT_BODY_MS = 30_000;
 const CMD_CHAT_COOLDOWN_STATUS = new Set([401, 402, 403, 429]);
+//: DeepSeek 回这些状态 = 这条通道当下不可用（余额 / 额度 / key），用 CC 救一次。
+const DS_RESCUE_STATUS = new Set([401, 402, 403, 429]);
 let cmdChatDownUntil = 0;
 let cmdChatBadStreak = 0;
 export function _resetCmdChat() { cmdChatDownUntil = 0; cmdChatBadStreak = 0; }
@@ -170,12 +172,15 @@ export function _resetCmdChat() { cmdChatDownUntil = 0; cmdChatBadStreak = 0; }
 //    实时翻译 220 / 草稿 120 / 讲解 1400 都是流式，全是用户盯着屏幕等的；CC 首字 1.3 s 比直连慢。
 // `callClass` 由客户端用 `X-ClassLive-Call` 显式声明（atom / chapter / note / polish / prep …）；
 // 不发的老客户端按 `max_tokens >= 4000` 兜底当 note，其余一律回 DeepSeek（fail-safe）。
-export function useCmdChat(env, body, callClass = "") {
+// ⚠️ `rawMaxTok` 是 **clamp 之前**的值（`chat()` 里 `Number(x) || 16384` 会把缺失 / 非数字
+//    变成 16384，按它判"这是笔记"是 fail-open —— 缺字段的老客户端会被推进 CC）。
+export function useCmdChat(env, body, callClass = "", rawMaxTok = undefined) {
   if (!(env.CMD_CHAT_KEY || env.JEV_CC_KEY)) return false;
   if (body?.stream) return false;                     // 真值即流式（与下游 `if (body.stream)` 同口径）
   if (Date.now() < cmdChatDownUntil) return false;
+  const raw = Number(rawMaxTok === undefined ? body?.max_tokens : rawMaxTok);
   const cls = String(callClass || "").trim().toLowerCase()
-    || (Number(body?.max_tokens) >= CMD_CHAT_LEGACY_NOTE_TOKENS ? "note" : "legacy");
+    || (Number.isFinite(raw) && raw >= CMD_CHAT_LEGACY_NOTE_TOKENS ? "note" : "legacy");
   const allow = String(env.CMD_CHAT_CLASSES ?? CMD_CHAT_CLASSES_DEFAULT)
     .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
   return allow.includes(cls);
@@ -236,7 +241,9 @@ async function fetchCmdChat(env, body) {
   }
 }
 
-function cmdCoolDown(ms) { cmdChatDownUntil = Date.now() + ms; }
+// ⚠️ 取 max，不是覆盖：并发下 60 s 的短冷却会盖掉 10 分钟的长冷却（反之亦然），
+//    最后写入者赢 → 冷却形同虚设。
+function cmdCoolDown(ms) { cmdChatDownUntil = Math.max(cmdChatDownUntil, Date.now() + ms); }
 
 // 非流式打一次 CC：**响应头到了不算数** —— 正文断流 / 不是 JSON / 没有 choices 都当失败（退回 DeepSeek）。
 // 回 `{ r, tag }`：`r === null` 表示这次别用；`tag` 进 `ev.up`（`cmd:200:bad` 这种能看出是哪一段坏的）。
@@ -487,7 +494,8 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
   try { body = JSON.parse(raw); } catch { return json(400, { error: "bad_json" }); }
   if (!body || !LLM_MODELS.has(body.model)) return json(400, { error: "model_not_allowed" });
   ev.model = body.model;
-  body.max_tokens = Math.min(Number(body.max_tokens) || LLM_MAX_TOKENS, LLM_MAX_TOKENS);
+  const rawMaxTok = Number(body.max_tokens);          // clamp 之前的值 —— legacy 判据要用（缺失 ≠ 16384）
+  body.max_tokens = Math.min(Math.max(1, Number(body.max_tokens) || LLM_MAX_TOKENS), LLM_MAX_TOKENS);
   ev.max_tok = body.max_tokens;   // 面板据此分「实时翻译」（几十）和「课后笔记 / 精修」（上千）
   if (body.stream) body.stream_options = { ...(body.stream_options || {}), include_usage: true };
   // ⭐ 调用类由客户端显式声明（`X-ClassLive-Call: atom|chapter|note|polish|prep|…`）。
@@ -495,7 +503,7 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
   const callClass = String(request.headers.get("x-classlive-call") || "").trim().toLowerCase().slice(0, 20);
   ev.call_class = callClass || "legacy";
   let up = null, fast = "", cmd = "";
-  if (useCmdChat(env, body, callClass)) {
+  if (useCmdChat(env, body, callClass, rawMaxTok)) {
     const a = await cmdChatAttempt(env, body);
     cmd = a.tag;
     up = a.r;
@@ -519,8 +527,27 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
       headers: { authorization: `Bearer ${env.DEEPSEEK_KEY}`, "content-type": "application/json" },
       body: JSON.stringify(body),   // 原 body：退回必须与不配 OPENROUTER_KEY 时逐字一致
     });
-    const pre = [cmd, fast].filter(Boolean).join(">");   // cmd:402>deepseek:200 / cmd:timeout>deepseek:200
-    ev.up = pre ? `${pre}>deepseek:${up.status}` : `deepseek:${up.status}`;
+    const dsStatus = up.status;
+    // ⭐ 4xx 救援（2026-11-07）：DeepSeek 余额 / 额度挂了时，再用 CC 试一次，预算 ×2。
+    //    ⚠️ 没有这条的话，"atom / 章节改回 DeepSeek" 等于把 11-05 的整层全灭又装回去了 ——
+    //       旧代码是 >400 全先走 CC，所以那时 DeepSeek 402 也伤不到 atom。
+    //    只救 4xx：5xx / 超时让客户端自己的重试处理，别在这里叠。
+    if (DS_RESCUE_STATUS.has(dsStatus) && !cmd && (env.CMD_CHAT_KEY || env.JEV_CC_KEY)) {
+      const dsText = await up.text();
+      const a = await cmdChatAttempt(env, {
+        ...body,
+        max_tokens: Math.min(LLM_MAX_TOKENS, body.max_tokens * 2),
+      });
+      cmd = `deepseek:${dsStatus}>${a.tag}`;
+      up = a.r || new Response(dsText, {
+        status: dsStatus,
+        headers: { "content-type": up.headers.get("content-type") || "application/json" },
+      });
+      ev.up = cmd;
+    } else {
+      const pre = [cmd, fast].filter(Boolean).join(">");   // cmd:402>deepseek:200 / cmd:timeout>deepseek:200
+      ev.up = pre ? `${pre}>deepseek:${dsStatus}` : `deepseek:${dsStatus}`;
+    }
   } else {
     ev.up = cmd || fast;   // cmd:<status> / openrouter:<status>
   }

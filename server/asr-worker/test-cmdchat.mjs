@@ -75,11 +75,13 @@ function harness({ cc, deepseek, openrouter, env: extraEnv = {} } = {}) {
   };
   const pending = [];
   const ctx = { waitUntil: (p) => pending.push(p) };
-  const call = (body, country = "IE") => {
+  // ⭐ 调用类走显式 header（2026-11-07 起 Worker 按它选路，不再看 max_tokens）。
+  //    默认 "note"；传 "" 模拟不发 header 的老客户端。第三个参数是 country。
+  const call = (body, country = "IE", cls = "note") => {
+    const headers = { authorization: `Bearer ${CODE}`, "x-classlive-install": INSTALL, "content-type": "application/json" };
+    if (cls) headers["x-classlive-call"] = cls;
     const r = new Request("https://asr.bldcam.page/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: `Bearer ${CODE}`, "x-classlive-install": INSTALL, "content-type": "application/json" },
-      body: JSON.stringify(body),
+      method: "POST", headers, body: JSON.stringify(body),
     });
     if (country) Object.defineProperty(r, "cf", { value: { country, colo: "DUB" } });
     return worker.fetch(r, env, ctx);
@@ -90,14 +92,22 @@ function harness({ cc, deepseek, openrouter, env: extraEnv = {} } = {}) {
 }
 
 // ---------- 选路判据 ----------
-test("useCmdChat：只有非流式长调用 + 配了 key 才走 CC", () => {
-  assert.equal(useCmdChat({}, { max_tokens: 3000 }), false, "没 key 不走");
-  assert.equal(useCmdChat({ CMD_CHAT_KEY: "k" }, { max_tokens: 3000 }), true);
-  assert.equal(useCmdChat({ JEV_CC_KEY: "k" }, { max_tokens: 3000 }), true, "没有单独 key 时复用 Jev 那把");
-  assert.equal(useCmdChat({ CMD_CHAT_KEY: "k" }, { max_tokens: 400 }), false, "短翻译不动");
-  assert.equal(useCmdChat({ CMD_CHAT_KEY: "k" }, { max_tokens: 401 }), true);
-  assert.equal(useCmdChat({ CMD_CHAT_KEY: "k" }, { max_tokens: 3000, stream: true }), false,
+test("useCmdChat：按调用类选路，不按 max_tokens 上限", () => {
+  assert.equal(useCmdChat({}, { max_tokens: 3000 }, "note"), false, "没 key 不走");
+  assert.equal(useCmdChat({ CMD_CHAT_KEY: "k" }, { max_tokens: 3000 }, "note"), true);
+  assert.equal(useCmdChat({ JEV_CC_KEY: "k" }, { max_tokens: 3000 }, "note"), true, "没有单独 key 时复用 Jev 那把");
+  // ⭐ 这条是 11-06 事故的要害：atom / 章节 预算小、必须严格 JSON，不能在会偷偷开思考的通道上跑。
+  assert.equal(useCmdChat({ CMD_CHAT_KEY: "k" }, { max_tokens: 700 }, "atom"), false, "atom 回 DeepSeek");
+  assert.equal(useCmdChat({ CMD_CHAT_KEY: "k" }, { max_tokens: 1400 }, "chapter"), false, "章节回 DeepSeek");
+  assert.equal(useCmdChat({ CMD_CHAT_KEY: "k" }, { max_tokens: 400, stream: true }, "note"), false,
+    "短翻译不动（流式一律不走）");
+  // 老客户端不发 header：只有 ≥4000 才兜底当 note，其余一律 legacy → DeepSeek（fail-safe）
+  assert.equal(useCmdChat({ CMD_CHAT_KEY: "k" }, { max_tokens: 4000 }), true, "老客户端 ≥4000 当 note");
+  assert.equal(useCmdChat({ CMD_CHAT_KEY: "k" }, { max_tokens: 3000 }), false, "老客户端 <4000 → legacy");
+  assert.equal(useCmdChat({ CMD_CHAT_KEY: "k" }, { max_tokens: 4000, stream: true }, "note"), false,
     "实时类（讲解 1400 也是流式）不走 CC");
+  assert.equal(useCmdChat({ CMD_CHAT_KEY: "k", CMD_CHAT_CLASSES: "note,atom" }, { max_tokens: 700 }, "atom"), true,
+    "白名单可配（出事时能一键把某类挪回去）");
 });
 
 // ---------- a. 长调用命中：只调 CC，模型 ID 换成 CC 的 ----------
@@ -279,6 +289,124 @@ test("j 非流式没传 max_tokens -> clamp 16384，走 CC", async () => {
     await h.settle();
     assert.equal(h.calls.cc.length, 1);
     assert.equal(h.calls.cc[0].body.max_tokens, 16384);
+  } finally { h.restore(); }
+});
+
+// ---------- l. atom / 章节：预算小 + 必须严格 JSON -> 一律回 DeepSeek ----------
+test("l atom(700) / 章节(1400) 不回 CC —— 11-06 事故的直接判据", async () => {
+  const h = harness({ env: { CMD_CHAT_KEY: "cmd-key" } });
+  try {
+    for (const [cls, mt] of [["atom", 700], ["chapter", 1400]]) {
+      const res = await h.call(BODY({ max_tokens: mt }), "IE", cls);
+      await res.text();
+      await h.settle();
+      assert.equal(h.calls.cc.length, 0, `${cls} 不许走 CC（思考会吃掉 ${mt} 的预算）`);
+    }
+    assert.equal(h.calls.deepseek.length, 2);
+  } finally { h.restore(); }
+});
+
+// ---------- m. 老客户端（不发 header）的兼容口径 ----------
+test("m 老客户端不发 header：700 回 DeepSeek，4000 当 note 走 CC", async () => {
+  const h = harness({ env: { CMD_CHAT_KEY: "cmd-key" } });
+  try {
+    const r1 = await h.call(BODY({ max_tokens: 700 }), "IE", "");
+    await r1.text();
+    await h.settle();
+    assert.equal(h.calls.cc.length, 0, "小预算的老调用不许进 CC");
+    const r2 = await h.call(BODY({ max_tokens: 4000 }), "IE", "");
+    await r2.text();
+    await h.settle();
+    assert.equal(h.calls.cc.length, 1, "4000+ 仍按 note 兜底（旧版本不至于失去 402 保护）");
+  } finally { h.restore(); }
+});
+
+// ---------- n. content 空 -> 当失败（原来是记成 cmd:200 的成功） ----------
+test("n CC 200 但 content 空 -> cmd:200:nocontent>deepseek:200", async () => {
+  const h = harness({
+    cc: () => J(200, { choices: [{ message: { role: "assistant", content: "" }, finish_reason: "stop" }],
+                       usage: { prompt_tokens: 900, completion_tokens: 700 } }),
+    deepseek: () => completion("ds", 7, 3),
+    env: { CMD_CHAT_KEY: "cmd-key" },
+  });
+  try {
+    const res = await h.call(BODY({ response_format: { type: "json_object" } }));
+    await res.text();
+    await h.settle();
+    assert.equal(h.calls.deepseek.length, 1);
+    assert.equal(h.calls.ae[0].blobs[3], "cmd:200:nocontent>deepseek:200");
+  } finally { h.restore(); }
+});
+
+// ---------- o. finish_reason=length -> 当失败（截断的 JSON 不许往下走） ----------
+test("o CC 200 但 finish_reason=length -> cmd:200:length>deepseek:200", async () => {
+  const h = harness({
+    cc: () => J(200, { choices: [{ message: { role: "assistant", content: '{"points":[{"text":"被截' },
+                            finish_reason: "length" }], usage: { prompt_tokens: 900, completion_tokens: 700 } }),
+    env: { CMD_CHAT_KEY: "cmd-key" },
+  });
+  try {
+    const res = await h.call(BODY({ response_format: { type: "json_object" } }));
+    await res.text();
+    await h.settle();
+    assert.equal(h.calls.ae[0].blobs[3], "cmd:200:length>deepseek:200");
+    // ⚠️ blob9 记的是**最终服务的那家**的 finish_reason（这里是 DeepSeek 的 stop）——
+    //    CC 那次的 length 只能从 `ev.up` 的标签看出来（上面那条断言就是它）。
+  } finally { h.restore(); }
+});
+
+// ---------- p. 要 json_object 却回了散文 -> 当失败 ----------
+test("p CC 200 但 content 不是 JSON（要了 json_object）-> cmd:200:notjson>deepseek:200", async () => {
+  const h = harness({
+    cc: () => completion("好的，以下是这段课的要点：……"),
+    env: { CMD_CHAT_KEY: "cmd-key" },
+  });
+  try {
+    const res = await h.call(BODY({ response_format: { type: "json_object" } }));
+    await res.text();
+    await h.settle();
+    assert.equal(h.calls.ae[0].blobs[3], "cmd:200:notjson>deepseek:200");
+  } finally { h.restore(); }
+});
+
+// ---------- q. 5xx -> 短冷却（原来永不冷却，章节每次白等 10 s） ----------
+test("q CC 5xx -> 退回 + 短冷却，下一次不再白打 CC", async () => {
+  const h = harness({
+    cc: () => J(502, { error: "bad gateway" }),
+    env: { CMD_CHAT_KEY: "cmd-key" },
+  });
+  try {
+    const r1 = await h.call(BODY());
+    await r1.text();
+    await h.settle();
+    assert.equal(h.calls.cc.length, 1);
+    assert.equal(h.calls.ae[0].blobs[3], "cmd:502>deepseek:200");
+    const r2 = await h.call(BODY());
+    await r2.text();
+    await h.settle();
+    assert.equal(h.calls.cc.length, 1, "5xx 之后必须进冷却");
+  } finally { h.restore(); }
+});
+
+// ---------- r. AE 新列：finish / 可见字数 / 推理 token / 调用类 ----------
+test("r AE 记 finish_reason、可见字数、推理 token、调用类", async () => {
+  const h = harness({
+    cc: () => J(200, {
+      choices: [{ message: { role: "assistant", content: '{"points":[]}' }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 900, completion_tokens: 700,
+               completion_tokens_details: { reasoning_tokens: 512 } },
+    }),
+    env: { CMD_CHAT_KEY: "cmd-key" },
+  });
+  try {
+    const res = await h.call(BODY({ response_format: { type: "json_object" } }));
+    await res.text();
+    await h.settle();
+    const dp = h.calls.ae[0];
+    assert.equal(dp.blobs[8], "stop");
+    assert.equal(dp.blobs[9], "note");
+    assert.equal(dp.doubles[11], '{"points":[]}'.length, "可见字数 = 12");
+    assert.equal(dp.doubles[12], 512, "推理 token 要能看见");
   } finally { h.restore(); }
 });
 

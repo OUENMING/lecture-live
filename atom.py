@@ -52,7 +52,10 @@ ATOM_TAIL = ".atoms.jsonl"
 #:    （`build_notes.build()` 的默认模型就是它，`:283` 把它传进 `_chat_json`），
 #:    而 `_chat_json` 里 `"thinking": {"type": "disabled"}` 已经关了思考模式。
 MODEL = "deepseek-flash"
-MAX_TOKENS = 700
+#: ⚠️ 2026-11-07：700 → 900。直连 DeepSeek 的 52 次调用最大只用到 564，但经 CommandCode
+#:    （会偷偷开思考，推理 token 计入预算）700 会被吃穿，11-06 实测 25/44 次内容坏。
+#:    路由那半边已经在 Worker 改回 DeepSeek（`useCmdChat` 按调用类），这里再留 60% 余量。
+MAX_TOKENS = 900
 TEMPERATURE = 0.0
 MAX_POINTS = 5
 

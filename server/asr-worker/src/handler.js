@@ -124,48 +124,100 @@ let fastLlmDownUntil = 0;                    // 本 isolate 内存：跟 lease �
 // 测试用：清掉冷却。
 export function _resetFastLlm() { fastLlmDownUntil = 0; }
 
-// ---- 长调用主通道：CommandCode（2026-11-05 作者定）----
-// 课后笔记 / 实时总结（max_tokens > FAST_LLM_MAX_TOKENS）先走 CommandCode 的 OpenAI 兼容端
+// ---- 长文生成通道：CommandCode（2026-11-05 作者定；2026-11-07 收窄到「笔记类」）----
+// **只有生成式长文**（课后笔记 / 精修 / prep）先走 CommandCode 的 OpenAI 兼容端
 // （`/provider/v1/chat/completions`，同一把 CMD key，模型钉死 `deepseek/deepseek-v4.1-flash`）；
 // 非 2xx / 响应头超时 / 断流 → **退回原来的 DeepSeek 直连**。
 // 为什么要这条：2026-11-05 06:59Z DeepSeek 余额归零，直连长调用全 402（笔记 / 章节 / atom 全灭），
 // 而短翻译有 OpenRouter 兜着。这条给长调用也加一条独立记账的上游。
 // ⚠️ 短翻译（stream 且 ≤400 tokens）**不走这里**：CC 首字实测 1.3 s，OpenRouter 只要 ~0.46 s。
-// ⚠️ 实测 CC 收 `thinking` / `reasoning_effort` / `response_format` / `max_tokens=16384`，body 不用改，
-//    只把 `model` 换成 CC 的 ID（两家模型 ID 不通用）。
+// ⚠️ body 不用改，只把 `model` 换成 CC 的 ID（两家模型 ID 不通用）—— **但"收"不等于"照做"**：
+//    CC 会忽略 `thinking:{"type":"disabled"}`（其 issue #697，2026-09-09 复测仍未修），DeepSeek
+//    V4.1-Flash 因此默认开思考；推理 token 计入 `completion_tokens` 并吃 `max_tokens`。
+//    `response_format` 也不保证生效（issue #685 曾直接 400，仍 open）。所以走这条通道的调用
+//    **必须能在预算被吃掉时重来**，见 `useCmdChat` 的调用类白名单与 `cmdContentTag`。
 const CMD_CHAT_URL = "https://api.commandcode.ai/provider/v1/chat/completions";
 const CMD_CHAT_MODEL_DEFAULT = "deepseek/deepseek-v4.1-flash";
 const CMD_CHAT_HEADER_MS = 10_000;           // 只等响应头；正文另有「断流 = 失败」兜底（见 cmdChatAttempt）
 const CMD_CHAT_UA = "ClassLive/0.0 (+https://github.com/OUENMING/lecture-live)";
-//: CC 的准入线。**故意不和 `FAST_LLM_MAX_TOKENS` 共用**：那个是快速通道的口径，改它会静默改这里。
-const CMD_CHAT_MIN_TOKENS = 400;
+//: **按调用类路由，不按 token 上限路由**（2026-11-07）。
+//    ⚠️ 原来的判据是 `max_tokens > 400`，把 700 的 atom / 1400 的章节也送进了 CC。而 CC 不认
+//       `thinking:{"type":"disabled"}`（其 issue #697，2026-09-09 复测仍未修）—— DeepSeek V4.1-Flash
+//       默认开思考，推理 token 计入 `completion_tokens` 并吃掉 `max_tokens`：
+//       700 的预算被吃穿 → content 空（JSON mode 洗成空格）或半截 JSON。
+//       11-06 实测：44 次 CC 调用 25 次 content 坏；同一 prompt 直连 DeepSeek 最大只用 564 token、0 失败。
+//    只有"生成式长文、能容忍一次重来"的调用适合 CC（思考对它反而是加分）。
+const CMD_CHAT_CLASSES_DEFAULT = "note";
+//: 老客户端不发 `X-ClassLive-Call` 时的兜底判据：只有 ≥ 这个数才当笔记。低于它一律回 DeepSeek。
+//    ⚠️ 这条只是**向后兼容**，不是路由规则本身；新客户端必须显式发 header。
+const CMD_CHAT_LEGACY_NOTE_TOKENS = 4000;
 //: 401/402/403/429 冷却 10 分钟 —— CC 下线时别让每次笔记 / 每个窗口都先白打一次（同 fastLLM 的理由）。
 const CMD_CHAT_COOLDOWN_MS = 10 * 60_000;
+//: 超时 / 5xx 只短冷却：这两种多半是抖动，10 分钟太长会把好通道一起关掉。
+//    ⚠️ 不冷却的话，章节那种"每次白等 10 s"的失败会一节重复十几次（11-06 实测 10/10）。
+const CMD_CHAT_SHORT_COOLDOWN_MS = 60_000;
+//: content 连续坏到这个次数 → 按长冷却处理（说明这条通道的输出契约已经不成立）。
+const CMD_CHAT_BAD_STREAK = 2;
+//: 正文预算（响应头已经到了之后）。⚠️ 只有响应头超时的话，慢滴流能把正文无限拖住。
+const CMD_CHAT_BODY_MS = 30_000;
 const CMD_CHAT_COOLDOWN_STATUS = new Set([401, 402, 403, 429]);
 let cmdChatDownUntil = 0;
-export function _resetCmdChat() { cmdChatDownUntil = 0; }
+let cmdChatBadStreak = 0;
+export function _resetCmdChat() { cmdChatDownUntil = 0; cmdChatBadStreak = 0; }
 
-// 走 CC 吗：配了 key（单独一把优先，没有就复用 Jev 那把 CMD key）+ **非流式**长调用。
+// 走 CC 吗：配了 key（单独一把优先，没有就复用 Jev 那把 CMD key）+ **非流式** + **调用类在白名单里**。
 // ⚠️ `stream` 真值一律不走（作者 2026-11-05 定：**实时翻译不走 CommandCode**）——
 //    实时翻译 220 / 草稿 120 / 讲解 1400 都是流式，全是用户盯着屏幕等的；CC 首字 1.3 s 比直连慢。
-//    只有后台的非流式长调用（实时总结 atom 700 / 章节 1400 / 笔记几千）走 CC。
-export function useCmdChat(env, body) {
+// `callClass` 由客户端用 `X-ClassLive-Call` 显式声明（atom / chapter / note / polish / prep …）；
+// 不发的老客户端按 `max_tokens >= 4000` 兜底当 note，其余一律回 DeepSeek（fail-safe）。
+export function useCmdChat(env, body, callClass = "") {
   if (!(env.CMD_CHAT_KEY || env.JEV_CC_KEY)) return false;
   if (body?.stream) return false;                     // 真值即流式（与下游 `if (body.stream)` 同口径）
   if (Date.now() < cmdChatDownUntil) return false;
-  return Number(body?.max_tokens) > CMD_CHAT_MIN_TOKENS;
+  const cls = String(callClass || "").trim().toLowerCase()
+    || (Number(body?.max_tokens) >= CMD_CHAT_LEGACY_NOTE_TOKENS ? "note" : "legacy");
+  const allow = String(env.CMD_CHAT_CLASSES ?? CMD_CHAT_CLASSES_DEFAULT)
+    .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  return allow.includes(cls);
+}
+
+// 内容级合格判定（`response_format=json_object` 时）：坏形状**不许当成功记账** ——
+//   11-06 的 25 次坏响应过去全记成 `cmd:200`、照扣额度、面板看不见。
+// 返回空串 = 合格；否则是 `ev.up` 的后缀。
+export function cmdContentTag(body, j) {
+  const c = j?.choices?.[0];
+  const content = c?.message?.content;
+  if (typeof content !== "string" || !content.trim()) return "nocontent";
+  if (c?.finish_reason === "length") return "length";
+  if (body?.response_format?.type === "json_object") {
+    const s = content.trim();
+    if (!s.startsWith("{")) return "notjson";
+    try { JSON.parse(s); } catch { return "content"; }
+  }
+  return "";
 }
 
 function cmdChatBody(env, body) {
   return { ...body, model: env.CMD_CHAT_MODEL || CMD_CHAT_MODEL_DEFAULT };
 }
 
+// 两段预算：先等响应头，拿到头之后换成正文预算。
+// ⚠️ 原来只有头那一段，`r.text()` 没有上限 —— 慢滴流能把整条笔记链拖死（同 `llm_client.CALL_DEADLINE_S` 的理由）。
+// 回 `{ r, done, phase }`：`done()` 必须调（清定时器）；`phase()` 给 catch 用，区分是头超时还是正文超时。
 async function fetchCmdChat(env, body) {
-  const ms = Number(env.CMD_CHAT_HEADER_MS) || CMD_CHAT_HEADER_MS;
+  const headerMs = Number(env.CMD_CHAT_HEADER_MS) || CMD_CHAT_HEADER_MS;
+  const bodyMs = Number(env.CMD_CHAT_BODY_MS) || CMD_CHAT_BODY_MS;
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), ms);
+  let phase = "header";
+  let timer = setTimeout(() => { phase = "header"; ac.abort(); }, headerMs);
+  const done = () => clearTimeout(timer);
+  const toBodyPhase = () => {
+    clearTimeout(timer);
+    phase = "body";
+    timer = setTimeout(() => ac.abort(), bodyMs);
+  };
   try {
-    return await fetch(CMD_CHAT_URL, {
+    const r = await fetch(CMD_CHAT_URL, {
       method: "POST",
       headers: {
         authorization: `Bearer ${env.CMD_CHAT_KEY || env.JEV_CC_KEY}`,
@@ -175,44 +227,71 @@ async function fetchCmdChat(env, body) {
       body: JSON.stringify(cmdChatBody(env, body)),
       signal: ac.signal,
     });
-  } finally {
-    clearTimeout(timer);
+    toBodyPhase();
+    return { r, done, phase: () => phase };
+  } catch (e) {
+    done();
+    e.cmdPhase = phase;
+    throw e;
   }
 }
+
+function cmdCoolDown(ms) { cmdChatDownUntil = Date.now() + ms; }
 
 // 非流式打一次 CC：**响应头到了不算数** —— 正文断流 / 不是 JSON / 没有 choices 都当失败（退回 DeepSeek）。
 // 回 `{ r, tag }`：`r === null` 表示这次别用；`tag` 进 `ev.up`（`cmd:200:bad` 这种能看出是哪一段坏的）。
 async function cmdChatAttempt(env, body) {
-  let r;
+  let r, done = () => {}, phase = () => "header";
   try {
-    r = await fetchCmdChat(env, body);
+    ({ r, done, phase } = await fetchCmdChat(env, body));
   } catch (e) {
-    return { r: null, tag: `cmd:${e?.name === "AbortError" ? "timeout" : "err"}` };
-  }
-  if (!r.ok || !r.body) {
-    if (CMD_CHAT_COOLDOWN_STATUS.has(r.status)) cmdChatDownUntil = Date.now() + CMD_CHAT_COOLDOWN_MS;
-    try { await r.body?.cancel(); } catch { /* 错误响应体不要了 */ }
-    return { r: null, tag: `cmd:${r.status}` };
-  }
-  let text;
-  try {
-    text = await r.text();                              // 200 之后正文断流会在这里 reject
-  } catch {
-    return { r: null, tag: `cmd:${r.status}:body` };
+    if (e?.name === "AbortError") {
+      cmdCoolDown(CMD_CHAT_SHORT_COOLDOWN_MS);          // 超时多半是抖动：短冷却，别把好通道一起关掉
+      return { r: null, tag: `cmd:${phase() === "body" ? "bodytimeout" : "timeout"}` };
+    }
+    cmdCoolDown(CMD_CHAT_SHORT_COOLDOWN_MS);
+    return { r: null, tag: "cmd:err" };
   }
   try {
-    const j = JSON.parse(text);
-    if (!Array.isArray(j?.choices) || j.choices.length === 0) throw new Error("no choices");
-  } catch {
-    return { r: null, tag: `cmd:${r.status}:bad` };
+    if (!r.ok || !r.body) {
+      if (CMD_CHAT_COOLDOWN_STATUS.has(r.status)) cmdCoolDown(CMD_CHAT_COOLDOWN_MS);
+      else if (r.status >= 500) cmdCoolDown(CMD_CHAT_SHORT_COOLDOWN_MS);   // 5xx 原来永不冷却
+      try { await r.body?.cancel(); } catch { /* 错误响应体不要了 */ }
+      return { r: null, tag: `cmd:${r.status}` };
+    }
+    let text;
+    try {
+      text = await r.text();                            // 正文断流 / 正文超时都会在这里 reject
+    } catch (e) {
+      cmdCoolDown(CMD_CHAT_SHORT_COOLDOWN_MS);
+      return { r: null, tag: `cmd:${r.status}:${e?.name === "AbortError" ? "bodytimeout" : "body"}` };
+    }
+    let j;
+    try {
+      j = JSON.parse(text);
+      if (!Array.isArray(j?.choices) || j.choices.length === 0) throw new Error("no choices");
+    } catch {
+      cmdCoolDown(CMD_CHAT_SHORT_COOLDOWN_MS);
+      return { r: null, tag: `cmd:${r.status}:bad` };
+    }
+    // ⭐ 内容级判定：外层信封对 ≠ 这次能用（11-06 的 25 次坏响应全记成了 cmd:200）。
+    const bad = cmdContentTag(body, j);
+    if (bad) {
+      cmdChatBadStreak += 1;
+      cmdCoolDown(cmdChatBadStreak >= CMD_CHAT_BAD_STREAK ? CMD_CHAT_COOLDOWN_MS : CMD_CHAT_SHORT_COOLDOWN_MS);
+      return { r: null, tag: `cmd:${r.status}:${bad}` };
+    }
+    cmdChatBadStreak = 0;
+    return {
+      r: new Response(text, {
+        status: r.status,
+        headers: { "content-type": r.headers.get("content-type") || "application/json" },
+      }),
+      tag: `cmd:${r.status}`,
+    };
+  } finally {
+    done();
   }
-  return {
-    r: new Response(text, {
-      status: r.status,
-      headers: { "content-type": r.headers.get("content-type") || "application/json" },
-    }),
-    tag: `cmd:${r.status}`,
-  };
 }
 // 只放行客户端真用的模型（`main.py --cloud-model` / `keyentry` 的默认值），别让码变成任意模型的代付。
 const LLM_MODELS = new Set(["deepseek-flash", "deepseek-chat"]);
@@ -297,9 +376,13 @@ const clientTz = (request) => {
 //   index  = 码的名字段（`cl-<名字>-…` 的 <名字>；公开令牌 "public"；没认证 "-"）—— **不写完整码**
 //   blobs  = [路径, 码名, 模型, 上游尝试（"groq:200,qwen3-asr-flash:timeout"）, 客户端版本, 国家两字母, 节点三字母,
 //             时区（blob8，2026-10-21 加：客户端自报优先，没有就按 Cloudflare 判的 `request.cf.timezone`；
-//             目的是面板按**他自己那边**的钟显示「他常在几点上课」——国家只能猜到时区，猜不细到美东/美西）]
+//             目的是面板按**他自己那边**的钟显示「他常在几点上课」——国家只能猜到时区，猜不细到美东/美西）,
+//             finish_reason（blob9，2026-11-07 加：`length` 就是被预算截断，坏内容的主要形状）,
+//             调用类（blob10，2026-11-07 加：`X-ClassLive-Call` 或 "legacy"）]
 //   doubles= [状态码, 毫秒, 音频秒, 输入 token, 输出 token, 缓存命中 token, Jev 题数,
-//             转写词数, 首字毫秒, 整段完成毫秒, 请求的 max_tokens]（后四列 2026-10-15 加：速度面板用；首字 / 完成只对翻译有）
+//             转写词数, 首字毫秒, 整段完成毫秒, 请求的 max_tokens,
+//             可见字数, 推理 token]（后四列 2026-10-15 加：速度面板用；首字 / 完成只对翻译有。
+//             末两列 2026-11-07 加：`status=200 但内容坏` 只有这两列 + blob9 分得清）
 // ⚠️ 不写文本、音频、IP、完整码。列的顺序是 SQL 的 blob1… / double1…，改了要连 scripts/cl_admin_ui.py 一起改。
 const AE_PATHS = new Set(["/v1/transcribe", "/v1/chat/completions", "/v1/jev", "/v1/soniox/key"]);
 function newEvent(request, path, t0 = Date.now()) {
@@ -309,15 +392,17 @@ function newEvent(request, path, t0 = Date.now()) {
     tz: clientTz(request) || String(request.cf?.timezone || "").slice(0, 40),
     status: 0, ms: 0, audio_s: 0, tokens_in: 0, tokens_out: 0, cache_hit: 0, jev_q: 0, pending: null,
     words: 0, first_ms: 0, done_ms: 0, max_tok: 0, t0,
+    finish: "", visible_chars: 0, reasoning_tok: 0, call_class: "legacy",
   };
 }
 function track(env, ev) {
   try {
     env.AE?.writeDataPoint({
       indexes: [ev.name],
-      blobs: [ev.path, ev.name, ev.model, ev.up.slice(0, 200), ev.ver, ev.country, ev.colo, ev.tz],
+      blobs: [ev.path, ev.name, ev.model, ev.up.slice(0, 200), ev.ver, ev.country, ev.colo, ev.tz,
+              ev.finish, ev.call_class],
       doubles: [ev.status, ev.ms, ev.audio_s, ev.tokens_in, ev.tokens_out, ev.cache_hit, ev.jev_q,
-                ev.words, ev.first_ms, ev.done_ms, ev.max_tok],
+                ev.words, ev.first_ms, ev.done_ms, ev.max_tok, ev.visible_chars, ev.reasoning_tok],
     });
   } catch { /* 记账失败不影响请求 */ }
 }
@@ -405,8 +490,12 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
   body.max_tokens = Math.min(Number(body.max_tokens) || LLM_MAX_TOKENS, LLM_MAX_TOKENS);
   ev.max_tok = body.max_tokens;   // 面板据此分「实时翻译」（几十）和「课后笔记 / 精修」（上千）
   if (body.stream) body.stream_options = { ...(body.stream_options || {}), include_usage: true };
+  // ⭐ 调用类由客户端显式声明（`X-ClassLive-Call: atom|chapter|note|polish|prep|…`）。
+  //    老客户端不发 → 按 max_tokens ≥ 4000 兜底当 note，其余回 DeepSeek。
+  const callClass = String(request.headers.get("x-classlive-call") || "").trim().toLowerCase().slice(0, 20);
+  ev.call_class = callClass || "legacy";
   let up = null, fast = "", cmd = "";
-  if (useCmdChat(env, body)) {
+  if (useCmdChat(env, body, callClass)) {
     const a = await cmdChatAttempt(env, body);
     cmd = a.tag;
     up = a.r;
@@ -454,9 +543,16 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
   }
   const text = await up.text();
   ev.first_ms = ev.done_ms = Date.now() - ev.t0;   // 非流式：整段一起到
-  let u = null;
-  try { u = JSON.parse(text).usage; } catch { /* 非 JSON 照样回 */ }
+  let u = null, jr = null;
+  try { jr = JSON.parse(text); u = jr?.usage; } catch { /* 非 JSON 照样回 */ }
   Object.assign(ev, usageFields(u));
+  // ⭐ 观测（2026-11-07）：只看 status 分不清"200 但内容坏了"。这三列是那条的判断依据。
+  if (jr) {
+    const c = jr?.choices?.[0];
+    ev.finish = String(c?.finish_reason || "").slice(0, 16);
+    ev.visible_chars = String(c?.message?.content ?? "").length;
+  }
+  ev.reasoning_tok = Number(u?.completion_tokens_details?.reasoning_tokens ?? 0) || 0;
   ctx?.waitUntil?.(ok.then((y) => { if (y) reportUsage(env, ctx, { code, ver: clientVer(request), ...usageFields(u) }); }));
   return new Response(text, { status: up.status, headers });
 }

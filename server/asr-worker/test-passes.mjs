@@ -613,9 +613,14 @@ test("事件（Analytics Engine）：每个非管理请求一条，只有码名�
     assert.deepEqual(chat.blobs.slice(0, 5), ["/v1/chat/completions", "amy", "deepseek-flash", "deepseek:200", "3.9.6"]);
     assert.deepEqual([chat.doubles[0], ...chat.doubles.slice(2, 7)], [200, 0, 100, 20, 64, 0]);
     // 速度列（10-15）：词数 / 首字 / 完成 / max_tokens。非流式首字 = 完成；转写记词数（假 Groq 回 "hi" = 1 词）。
-    assert.equal(chat.doubles.length, 11);
+    assert.equal(chat.doubles.length, 13);
     assert.equal(chat.doubles[10], 50);
     assert.equal(chat.doubles[8], chat.doubles[9]);
+    // 11-07 新增两列：可见字数 / 推理 token（`status=200 但内容坏` 只有这两列分得清）
+    assert.equal(chat.doubles[11], "秘密译文".length);
+    assert.equal(chat.doubles[12], 0);
+    assert.equal(chat.blobs[8], "", "假上游没给 finish_reason -> 空串");
+    assert.equal(chat.blobs[9], "legacy", "这个请求没发 X-ClassLive-Call");
     assert.equal(asr.doubles[7], 1);
     assert.ok(stream.doubles[8] <= stream.doubles[9], "流式：首字不晚于完成");
     assert.deepEqual([asr.blobs[0], asr.blobs[2], asr.blobs[3], asr.doubles[0], asr.doubles[2]],

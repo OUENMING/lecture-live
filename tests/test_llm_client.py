@@ -272,8 +272,15 @@ class T(unittest.TestCase):
         self.assertEqual(calls[1]["thinking"], {"type": "disabled"}, "重来那次必须关思考")
         self.assertNotIn("reasoning_effort", calls[1])
 
-    def test_no_effort_never_falls_back(self):
-        """不带 effort 时行为逐字不变：截断照样抛（一次性，不重来）。"""
+    def test_no_effort_truncation_retries_with_bigger_budget(self):
+        """⭐ 2026-11-07：不带 effort 的截断不再静默变成 JSONDecodeError。
+
+        过去只有带 `effort` 的调用会重来；atom / 章节这种不传 effort 的，预算被吃穿时
+        （CommandCode 会忽略 `thinking:disabled`，推理 token 计入预算）只能抛 JSONDecodeError ——
+        从异常上分不清"被截断"和"模型回了废话"。11-06 实测这类占 25/44。
+
+        现在的契约：先把预算翻倍再要一次（封顶 16384），仍截断才抛 ValueError 并说明原因。
+        """
         calls = []
 
         def fake(url, *, headers=None, payload=None, timeout=None, deadline=None):
@@ -284,11 +291,31 @@ class T(unittest.TestCase):
         orig = llm_client._post_deadline
         llm_client._post_deadline = fake
         try:
-            with self.assertRaises(json.JSONDecodeError):
+            with self.assertRaises(ValueError) as cm:
                 llm_client.chat_json("sk-x", "m", "S", "U", max_tokens=10)
         finally:
             llm_client._post_deadline = orig
-        self.assertEqual(len(calls), 1, "不带 effort 不许重来")
+        self.assertIn("截断", str(cm.exception))
+        self.assertEqual(len(calls), 2, "翻倍重来一次")
+        self.assertEqual([c["max_tokens"] for c in calls], [10, 20])
+
+    def test_truncated_json_that_parses_is_still_rejected(self):
+        """半截 JSON 有时还能解析出来 —— 那种"能解析"比失败更坏（静默丢尾巴）。"""
+        calls = []
+
+        def fake(url, *, headers=None, payload=None, timeout=None, deadline=None):
+            calls.append(payload)
+            return 200, json.dumps({"choices": [
+                {"message": {"content": '{"a": 1}'}, "finish_reason": "length"}]}).encode()
+
+        orig = llm_client._post_deadline
+        llm_client._post_deadline = fake
+        try:
+            with self.assertRaises(ValueError):
+                llm_client.chat_json("sk-x", "m", "S", "U", max_tokens=16384)
+        finally:
+            llm_client._post_deadline = orig
+        self.assertEqual(len(calls), 1, "已经到上限就不要再翻倍了")
 
     def test_passcode_goes_to_worker_with_install_id(self):
         import final_asr

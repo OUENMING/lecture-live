@@ -55,6 +55,10 @@ def headers(key: str) -> dict:
 #:    重试 / 兜底 / 「这块失败」记录都能接）。
 CALL_DEADLINE_S = 300.0
 
+#: Worker 侧的单次输出上限（`handler.js` 的 `LLM_MAX_TOKENS`）。截断重试不许超过它 ——
+#: 超了会被 Worker 直接 clamp 回去，等于白打一次。
+_MAX_TOKENS_CAP = 16384
+
 
 def _post_deadline(url: str, *, headers: dict, payload: dict, timeout: float,
                    deadline: float) -> tuple:
@@ -112,8 +116,8 @@ def chat_json(key: str, model: str, system: str, user: str, *, max_tokens,
     """
     import httpx
 
-    def _once(eff: str | None):
-        payload = {"model": model, "stream": False, "max_tokens": max_tokens,
+    def _once(eff: str | None, budget: int):
+        payload = {"model": model, "stream": False, "max_tokens": budget,
                    "response_format": {"type": "json_object"},
                    "messages": [{"role": "system", "content": system},
                                 {"role": "user", "content": user}]}
@@ -133,10 +137,20 @@ def chat_json(key: str, model: str, system: str, user: str, *, max_tokens,
         ch = (resp.json().get("choices") or [{}])[0]
         return ch, str(ch.get("finish_reason") or "")
 
-    choice, finish = _once(effort)
-    if effort and finish == "length":
+    choice, finish = _once(effort, max_tokens)
+    if finish == "length" and effort:
         # 思考把 token 吃光（实测 review 块：推理吃掉大半预算 → content 被截）→ 关思考重来一次。
-        choice, finish = _once(None)
+        choice, finish = _once(None, max_tokens)
+    if finish == "length" and max_tokens < _MAX_TOKENS_CAP:
+        # ⭐ 2026-11-07：**不再只对带 `effort` 的调用做这件事**。
+        #    atom / 章节这类不传 effort 的调用，预算被吃穿时过去是静默变成 JSONDecodeError
+        #    （11-06 实测 25/44 次）。现在：翻倍预算再要一次（封顶 Worker 的 16384）。
+        choice, finish = _once(None, min(_MAX_TOKENS_CAP, max_tokens * 2))
+    if finish == "length":
+        # 半截 JSON 有时还能解析出来 —— 那种"能解析"比失败更坏（会静默丢尾巴）。
+        raise ValueError(
+            f"输出被截断（finish_reason=length, max_tokens={max_tokens}；"
+            "推理 token 也计入预算 —— 走 CommandCode 时 `thinking:disabled` 不生效）")
     content = choice["message"]["content"]
     obj = json.loads(content)
     if return_meta:

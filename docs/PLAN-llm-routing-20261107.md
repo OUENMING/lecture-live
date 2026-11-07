@@ -1,6 +1,22 @@
 # PLAN · LLM 路由重做（CommandCode 长调用通道）· 2026-11-07
 
-状态：待拍板
+状态：**已落地（2026-11-07）** —— 提交 `ad566cc` + `e726a55`，Worker 版本 `680e2a65-bbf9-4bf2-926a-635ab6d71159`
+
+### 落地状态（与下文设计的差异，读设计前先看这段）
+
+| 设计 | 实际 | 备注 |
+|---|---|---|
+| 按 `X-ClassLive-Call` 路由 | ✅ 代码就绪，**但客户端还没发这个头** | 生产实际按"`max_tokens >= 4000` 当 note"运行；atom 900 / chapter 1400 因此回 DeepSeek |
+| atom / chapter 回 DeepSeek | ✅ | 已线上核验：`atom` 类 5 次全部 `deepseek:200` |
+| 笔记类留 CC | ⚠️ 部分 | 只有 ≥4000 的走 CC；1500–3000 的笔记子调用现在也回 DeepSeek（更快、且 402 有救援兜底） |
+| DeepSeek 4xx → CC 救援、预算 ×2 | ✅ | `chat()` 的 `DS_RESCUE_STATUS` 分支 |
+| Worker 内容级校验 | ✅ | `cmdContentTag`：空 / length / 非 JSON 一律回退且不记成功 |
+| 冷却补 timeout / 5xx | ✅ | 60 s 短冷却；`cmdCoolDown` 取 max，不再互相覆盖 |
+| 观测三列 | ✅ | `blob9` finish、`blob10` 调用类、`double12` 可见字数、`double13` 推理 token |
+| 客户端 `length` 一律当失败 | ✅ | 只在"没传 effort 且预算 <4000"时翻倍重试（不跨 4000、不与块级重试相乘） |
+
+线上核验（AE 聚合，`test1`）：`atom` 900 → `deepseek:200`；`legacy` 700 → `deepseek:200`；`note` 4000 → `cmd:200`。
+⚠️ AE 是抽样采集，**明细 SELECT 会漏行**，对账要用 `GROUP BY ... SUM(_sample_interval)`。
 触发：11-06 美国用户一节 atom 提取 59 次调用失败 28 次（47.5%），25 次是内容坏，不是断网。
 
 ## 0. 一句话

@@ -330,6 +330,8 @@ def stats() -> dict:
     with _STATS_LOCK:
         out = {"calls": int(_STATS.get("calls") or 0),
                "fail": int(_STATS.get("fail") or 0)}
+        if _STATS.get("region_fallback"):
+            out["region_fallback"] = int(_STATS["region_fallback"])
         if not out["calls"] and not out["fail"] and not _LAST_FAILURE:
             return {}
         out.update(_LAST_FAILURE)
@@ -369,6 +371,7 @@ def reset_failure() -> None:
         _LAST_FAILURE.clear()
         _STATS["calls"] = 0
         _STATS["fail"] = 0
+        _STATS.pop("region_fallback", None)
 
 
 def _provider(*, root=None) -> dict:
@@ -401,6 +404,28 @@ def resolve(official: str, cc: str, translate_key: str | None) -> dict:
         return {"name": "classlive", "endpoint": llm_client.base_for(translate_key) + "/jev",
                 "model": OFFICIAL_MODEL, "token": translate_key}
     return {"name": "commandcode", "endpoint": ENDPOINT, "model": MODEL, "token": ""}
+
+
+def _is_region_block(code: int, detail: str) -> bool:
+    """官方 Jev 的「本地区不可用」回执？**纯函数。**
+
+    2026-11-05 实测（中国大陆、3.11.0）：官方 `api.typesafe.ai` 回 451
+    `Typesafe is not available in your region`，两节课 18/18、50/50 全失败。
+    """
+    return code == 451 or "not available in your region" in (detail or "").lower()
+
+
+def _region_fallback() -> dict | None:
+    """官方被地区挡住时改走哪家：去掉官方 key 再解析一次（CommandCode → 通行码 Worker）。
+
+    ⭐ Worker `/v1/jev` 对中国区默认走 CommandCode（df2a2f0），所以通行码那条在大陆能用。
+    ⚠️ 两家都没有（token 为空）→ `None`，调用方照旧抛原来的错（fail-soft 不变）。
+    """
+    try:
+        alt = resolve("", token(), _translate_key())
+    except Exception:                                     # noqa: BLE001
+        return None
+    return alt if alt.get("token") else None
 
 
 def _translate_key() -> str:
@@ -442,6 +467,11 @@ def ask_commandcode(state: str, questions: dict, *, token: str, timeout: float =
     ⚠️ `endpoint` / `model` 不传就用 `provider()` 解析出来的那家（见模块头那张表）。
        ⚠️ **`User-Agent` 两家都发**：官方不需要但也不介意，CommandCode 缺了就被挡。
     """
+    global _PROVIDER
+    if endpoint is None and _STATS.get("region_fallback") and _PROVIDER is not None:
+        # ⭐ 已因 451 切到别家：调用方开课时缓存的仍是官方 token（`score` 只取一次），
+        #    这里换成新那家的 —— 否则拿官方 key 去敲 Worker = 401。
+        token = _PROVIDER["token"]
     ep = endpoint or _provider()["endpoint"]
     md = model or _provider()["model"]
     body = json.dumps({"model": md, "state": state,
@@ -459,6 +489,15 @@ def ask_commandcode(state: str, questions: dict, *, token: str, timeout: float =
         # ⚠️ **把响应体带出来** —— 这个 API 的错误信息全在 body 里
         #    （`at most 20 questions per call` 那种），只报状态码等于没说。
         detail = e.read().decode("utf-8", "replace")[:300]
+        # ⭐ 官方被地区挡（451）→ 本进程改走 CommandCode / 通行码 Worker，并重发这一次。
+        #    只在「没显式指定 endpoint、当前就是官方那家」时切；显式 endpoint 的调用方（keyentry 验 key）不动。
+        if (endpoint is None and _PROVIDER is not None and _PROVIDER.get("name") == "typesafe"
+                and _is_region_block(e.code, detail)):
+            alt = _region_fallback()
+            if alt is not None:
+                _PROVIDER = alt
+                _bump("region_fallback")
+                return ask_commandcode(state, questions, token=alt["token"], timeout=timeout)
         raise RuntimeError(f"Jev {e.code}: {detail}") from e
     except urllib.error.URLError as e:
         _bump("fail")

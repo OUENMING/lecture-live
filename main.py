@@ -263,9 +263,9 @@ def _terminal_usable(stream=None) -> bool:
 
 
 def _open_note(path: str) -> None:
-    """生成完自动打开详细版笔记（macOS `open` → 默认浏览器）。不等它、不抛到收尾里。"""
-    import subprocess
-    subprocess.Popen(["open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """生成完自动打开详细版笔记。实现见 `obsidian_writer.open_in_browser`（唯一定义点）。"""
+    import obsidian_writer
+    obsidian_writer.open_in_browser(path)
 
 
 def _wrapup_plan(enabled: bool, writes_notes: bool, mode: str) -> str:

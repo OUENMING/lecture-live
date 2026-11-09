@@ -483,5 +483,31 @@ class ChipText(unittest.TestCase):
         self.assertIn("考试", duty.chip_text(its), "最新的那条在显示位")
 
 
+
+
+class 引语类型(unittest.TestCase):
+    """`quote_kind`：正则路径是原话，模型路径是摘要（3.11.1）。"""
+
+    def test_正则原话(self):
+        it = duty.candidate(payload("The problem set is due Friday."), day=MON)
+        self.assertEqual(it["quote_kind"], "verbatim")
+
+    def test_落盘带上_quote_kind(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d, "x.duty.jsonl")
+            b = duty.Board(day=MON, path=path)
+            b.offer(payload("Next Wednesday we will talk more about change.",
+                            source="model"))
+            recs = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            item = next(r for r in recs if r.get("kind") == "item")
+            self.assertEqual(item.get("quote_kind"), "paraphrase",
+                             "落盘白名单漏了字段 -> 重启/补笔记后只能按 source 猜")
+
+    def test_模型摘要(self):
+        it = duty.candidate(payload("Next Wednesday we will talk more about change.",
+                                    source="model"), day=MON)
+        self.assertEqual(it["quote_kind"], "paraphrase")
+
+
 if __name__ == "__main__":
     unittest.main()

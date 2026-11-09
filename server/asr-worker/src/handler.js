@@ -536,7 +536,11 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
     //    ⚠️ 没有这条的话，"atom / 章节改回 DeepSeek" 等于把 11-05 的整层全灭又装回去了 ——
     //       旧代码是 >400 全先走 CC，所以那时 DeepSeek 402 也伤不到 atom。
     //    只救 4xx：5xx / 超时让客户端自己的重试处理，别在这里叠。
-    if (DS_RESCUE_STATUS.has(dsStatus) && !cmd && (env.CMD_CHAT_KEY || env.JEV_CC_KEY)) {
+    // ⭐ 3.11.1：**流式请求不救**。`cmdChatAttempt` 只解析 JSON，收 SSE 一定判 `cmd:200:bad`
+    //    —— 每次 402 都白烧一次 CC；更坏的是 CC 若忽略 stream 回 200 JSON，客户端拿不到
+    //    `data:` 行，会把英文原文当中文正文显示。CN 直连 DeepSeek，402 就回 402。
+    if (DS_RESCUE_STATUS.has(dsStatus) && !cmd && !body.stream
+        && (env.CMD_CHAT_KEY || env.JEV_CC_KEY)) {
       const dsText = await up.text();
       const a = await cmdChatAttempt(env, {
         ...body,

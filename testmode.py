@@ -2457,6 +2457,13 @@ class TestSession:
                 "logprob_mean": round(float(np.mean([s["logprob"] for s in segs
                                                      if s["logprob"] is not None])), 3)
                 if any(s["logprob"] is not None for s in segs) else None,
+                # ⭐ 3.11.1：Soniox 一上线，`segments` 就**只**收"没走流"的本地兜底段了
+                #    （`note_segment` 只在 final_worker 里调）。不标作用域的话，
+                #    `fell_back_pct=100` / `source_pct=local-parakeet` 会被读成"整节都退回了"。
+                "scope": ("local-fallback"
+                          if int((extra.get("stream") or {}).get("sealed_n") or 0) > len(segs)
+                          else "final"),
+                "stream_sealed_n": int((extra.get("stream") or {}).get("sealed_n") or 0),
             },
             "correction": {
                 # ⭐ 「两级矫正到底改了什么」—— 在那之前这一格完全瞎。
@@ -2471,6 +2478,9 @@ class TestSession:
             #    ⚠️ 放这儿（与 `correction` 并列）—— 两格都是**逐句聚合**。
             "translation_latency": latency_summary(self._tr),
             "notes": [
+                "⭐ asr 块的 segments **只含没走 Soniox 流的定稿段**（本地兜底）。"
+                "scope=local-fallback 时它与整节 ASR 质量无关 —— 整节看 blocks.stream "
+                "（sealed_n / down_s / dropped_s）。",
                 "logprob 只有 **Parakeet** 会填 —— Whisper 的 result.ys_log_probs 是空的。"
                 "云端来源(groq / qwen)也没有 logprob; 定稿主要走云端时这个字段通常是 null, 不是采集失败。",
                 "cpu_pct_of_walltime 在 --speed>1 的回放里会被放大;"

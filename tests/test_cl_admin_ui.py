@@ -1435,5 +1435,38 @@ class HabitsOf(unittest.TestCase):
         self.assertEqual(U.habits_of(rows)["people"]["a"]["sessions"], 1)
 
 
+class PillCase(unittest.TestCase):
+    """断线 / 丢音 pill：数字必须来自报告自己的字段，且三种事分开说。
+
+    2026-11-09：作者报「断了看不出断了几次、断了多久」。判据直接喂今日那种
+    `stream` 块，断言**文案里的数字**，不是「有没有出 chip」。
+    """
+
+    @unittest.skipUnless(shutil.which("node"), "没有 node —— 判据住在 HTML 里")
+    def test_断线与丢音出数字(self):
+        js = (_js_funcs(["classIssues", "fmtDur", "num", "ms"]) + """
+const mk = (st) => ({stream: st});
+const txt = (s) => classIssues(s).map(x => x.txt);
+process.stdout.write(JSON.stringify({
+  fail: txt(mk({failed_sessions: 6, connect_attempts: 7})),
+  down: txt(mk({down_s: 67})),
+  downSmall: txt(mk({down_s: 8})),
+  drop: txt(mk({dropped_s: 58.5})),
+  dropSmall: txt(mk({dropped_s: 2})),
+  clean: txt(mk({failed_sessions: 0, down_s: 0, dropped_s: 0})),
+  noStream: txt({}),
+}));""")
+        p = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, f"node 报错：{p.stderr[:400]}")
+        g = json.loads(p.stdout)
+        self.assertIn("连接失败 6 次", g["fail"])
+        self.assertTrue(any("断线累计" in t and ("67" in t or "1m" in t) for t in g["down"]), g["down"])
+        self.assertTrue(any("实时丢音" in t and ("58" in t or "59" in t or "1m" in t) for t in g["drop"]), g["drop"])
+        for k in ("downSmall", "dropSmall", "clean"):
+            self.assertFalse(any(("断线累计" in t or "实时丢音" in t or "连接失败" in t) for t in g[k]),
+                             f"{k} 不该出 pill：{g[k]}")
+        self.assertIn("没采流", g["noStream"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

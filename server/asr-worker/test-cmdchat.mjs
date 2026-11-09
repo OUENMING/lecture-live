@@ -312,6 +312,41 @@ test("t DeepSeek 402 -> 用 CC 救一次，预算 ×2", async () => {
   } finally { h.restore(); }
 });
 
+// ---------- v. 流式 402 -> 不许去救（救了也一定空转） ----------
+test("v 流式 DeepSeek 402 -> 不试 CC，原样回 402（CN 直连）", async () => {
+  const h = harness({
+    deepseek: () => J(402, { error: "Insufficient Balance" }),
+    // 就算 CC 忽略 stream 回一把 200 JSON，也不许被拿去当流式正文
+    cc: () => completion("cc"),
+    env: { CMD_CHAT_KEY: "cmd-key" },
+  });
+  try {
+    const res = await h.call(BODY({ stream: true, max_tokens: 220 }), "CN", "");
+    assert.equal(res.status, 402, "流式请求救不了，就老实回 402");
+    assert.deepEqual(await res.json(), { error: "Insufficient Balance" });
+    await h.settle();
+    assert.equal(h.calls.cc.length, 0, "SSE 一定判 cmd:200:bad，白烧一次 CC 没意义");
+    assert.equal(h.calls.ae[0].blobs[3], "deepseek:402");
+  } finally { h.restore(); }
+});
+
+// ---------- v2. 流式标记是 truthy 非布尔（stream: 1）-> 同样不救 ----------
+// 下游按 `if (body.stream)` 判流式；救援判据必须用同一口径，否则 `stream: 1`
+// 会走进「把 CC 的 JSON 当 SSE」那条路（2026-11-09 OCR 审查抓到）。
+test("v2 流式标记 truthy 非布尔 -> 不试 CC", async () => {
+  const h = harness({
+    deepseek: () => J(402, { error: "Insufficient Balance" }),
+    cc: () => completion("cc"),
+    env: { CMD_CHAT_KEY: "cmd-key" },
+  });
+  try {
+    const res = await h.call(BODY({ stream: 1, max_tokens: 220 }), "CN", "");
+    assert.equal(res.status, 402);
+    await h.settle();
+    assert.equal(h.calls.cc.length, 0);
+  } finally { h.restore(); }
+});
+
 // ---------- u. 救援也失败 -> 原样回 DeepSeek 的 402 ----------
 test("u DeepSeek 402 且 CC 也挂 -> 原样回 DeepSeek 的错误体", async () => {
   const h = harness({

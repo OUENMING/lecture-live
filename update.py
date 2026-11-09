@@ -1608,6 +1608,43 @@ def download_model(model, *, say=None) -> dict:
     return {"ok": True, "error": ""}
 
 
+def _pip_install_cmd() -> tuple[list[str] | None, str]:
+    """装依赖的命令：**uv 优先，没有 uv 就用内置 python 的 ensurepip 造一个 pip**。
+
+    ⭐ 3.11.1：这里原来写死 `uv pip install ...` —— 没装 uv 的用户（`.app` 自带
+    python 那些人）每次更新都在这一步 `FileNotFoundError`，而卡片只会说
+    「依赖没装上」，看不出是「没有 uv」。
+    ⚠️ **不重建 `.app`**：构建指纹不含 `requirements.txt` / `update.py`
+    （`.claude/rules/shell-and-build.md`）。
+    ⚠️ ensurepip 会往 `.app` 的 python 里装 pip（幂等，可接受）；失败要把最后三行带出来。
+    返回 `(命令, "")` 或 `(None, 原因)`。原因会进 `update.log` —— 那是远程排查的唯一线索。
+    """
+    req = str(HERE / "requirements.txt")
+    env = _child_env()
+    if shutil.which("uv", path=env.get("PATH")):
+        return (["uv", "pip", "install", "--python", sys.executable, "-q", "-r", req], "")
+    # ⭐ 已经有 pip 就不动 ensurepip：被裁剪过的解释器可能装了 pip 却没有 ensurepip，
+    #    而无条件 ensurepip 对每个 venv / Homebrew python 都要白起一次子进程（最多 300 s）。
+    try:
+        has_pip = subprocess.run([sys.executable, "-m", "pip", "--version"],
+                                 cwd=HERE, env=env, capture_output=True, text=True,
+                                 timeout=60).returncode == 0
+    except Exception:                                     # noqa: BLE001
+        has_pip = False
+    if not has_pip:
+        try:
+            boot = subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"],
+                                  cwd=HERE, env=env, capture_output=True, text=True,
+                                  timeout=300)
+        except Exception as e:                            # noqa: BLE001
+            return None, f"无 uv；ensurepip 起不来：{type(e).__name__}: {str(e)[:120]}"
+        if boot.returncode != 0:
+            err = (boot.stderr or boot.stdout or "").strip().splitlines()
+            return None, "无 uv；ensurepip 失败：" + (" | ".join(err[-3:]) if err else "未知原因")
+    return ([sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+             "-q", "-r", req], "")
+
+
 def run_step(key: str, on_line=None) -> dict:
     """执行一个 `pending_steps()` 里的步骤。返回 `{"ok", "error"}`。
 
@@ -1625,10 +1662,11 @@ def run_step(key: str, on_line=None) -> dict:
         if key == "deps":
             # ⚠️ 用 sys.executable —— 本模块自己就跑在那个解释器里，永远是对的；
             #    写死路径在布局变动时会变成一句误导。
-            r = subprocess.run(
-                ["uv", "pip", "install", "--python", sys.executable, "-q",
-                 "-r", str(HERE / "requirements.txt")],
-                cwd=HERE, env=_child_env(), capture_output=True, text=True, timeout=900)
+            cmd, why = _pip_install_cmd()
+            if cmd is None:
+                return {"ok": False, "error": why}
+            r = subprocess.run(cmd, cwd=HERE, env=_child_env(),
+                               capture_output=True, text=True, timeout=900)
             if r.returncode != 0:
                 # ⚠️ 3.10.1：留**最后三行**（原来只留一行）—— uv 的真原因常在倒数第二三行，
                 #    最后一行只是「hint: …」，而 `update.log` 是远程排查的唯一线索。

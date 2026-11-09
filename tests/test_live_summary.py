@@ -1334,6 +1334,95 @@ def main() -> int:
         check("⚠️ 而**不是**退化成整屏只有一句功能名（那等于没说清为什么没有）",
               not any("会自动出现" in b for b in _off), str(_off))
 
+        # ─────────────────────────────────────── ㊱b 模型课务的时间锚（3.11.1）
+        print("\n--- ㊱b 模型路径的课务：`t` 用来源句的时刻 ---")
+        with tempfile.TemporaryDirectory() as d:
+            emits_b: list = []
+
+            def _atom_b():
+                return {"topic": "A", "topic_zh": "A中", "points": [
+                    {"text": "Next Wednesday we will talk more about change.",
+                     "zh": "下周三我们会更多地讨论变化", "kind": "课务",
+                     "src": [0], "terms": []}]}
+
+            def _chat_b(sysp, block, max_tokens, temperature):
+                if sysp is atom.SYS:
+                    return _atom_b()
+                assert sysp is ch.SYS_CHAPTER
+                return dict(CHAP_REPLY)
+
+            s_b = L.LiveSummarizer(
+                chat=_chat_b, append_atoms=lambda a: len(a),
+                chapter_path=ch.chapter_path_for(pathlib.Path(d) / "S.md"),
+                emit=emits_b.append, deadline_gate=lambda text: 1.0)
+            s_b.feed((1, "10:00:00", "Next Wednesday we will talk more about change.",
+                      "下周三我们会更多地讨论变化"))
+            s_b.step(0.0)
+            s_b.step(190.0)                       # 停顿 -> 提交窗口 -> 模型路径
+            ds_b = [e for e in emits_b if e.get("kind") == "deadline"]
+            check("⭐⭐ 模型路径的 `t` 是**句子**时刻（`10:00:00`），不是原子生成时刻",
+                  bool(ds_b) and ds_b[0]["t"] == "10:00:00", str(ds_b))
+            check("⭐ 模型路径的 `source=model`（卡片据此写「转述」）",
+                  bool(ds_b) and ds_b[0]["source"] == "model", str(ds_b))
+
+        # ─────────────────────────────────────── ㊲ 账户级失败熔断（3.11.1）
+        print("\n--- ㊲ 账户级失败熔断：401/402/403 一节只试一次 ---")
+
+        class _HttpErr(Exception):
+            def __init__(self, code):
+                super().__init__("HTTP %s" % code)
+                self.response = type("R", (), {"status_code": code})()
+
+        def _run_dead(code):
+            d = pathlib.Path(tempfile.mkdtemp(prefix="cl_dead_"))
+            n = {"chat": 0}
+
+            def atom_fn():
+                n["chat"] += 1
+                raise _HttpErr(code)
+
+            s, emits, _calls = make(str(d), atom_fn=atom_fn)
+            drive(s, 4)                      # 4 个窗口 = 4 次本来会重试的机会
+            return s, n["chat"], emits
+
+        s_dead, hits, emits_dead = _run_dead(402)
+        check("⭐⭐ 402：一节只打一次模型（后面 3 个窗口不再白试）", hits == 1, "hits=%d" % hits)
+        check("⭐ 402：熔断状态记的是状态码（诊断/报告能读）", s_dead._model_down == "402", s_dead._model_down)
+        check("⭐⭐ 402：熔断后不再排队重试（积压清空、只留下触发那次失败）",
+              s_dead._retries == 1 and not s_dead._pend,
+              "retries=%d pend=%d" % (s_dead._retries, len(s_dead._pend)))
+        check("⭐ 报告能看出熔断原因（stats.model_down）",
+              s_dead.stats().get("model_down") == 402, str(s_dead.stats().get("model_down")))
+        class _Bare(Exception):
+            code = 402
+
+        check("⭐ `_http_code` 认三种形状（httpx / .status_code / .code）",
+              L._http_code(type("E", (), {"response": type("R", (), {"status_code": 402})()})()) == 402
+              and L._http_code(type("E2", (), {"status_code": 403})()) == 403
+              and L._http_code(_Bare()) == 402,
+              "shapes")
+        check("⭐ 熔断清队时发 gap（不静默丢窗）",
+              any(e.get("kind") == "gap" and e.get("state") == "failed" for e in emits_dead),
+              str([e for e in emits_dead if e.get("kind") == "gap"]))
+        # ⚠️ 直接对着 `_synthesize`：`drive()` 的失败路径不会留下**有句子**的当前章，
+        #    走 `finish()` 根本进不到合成循环（变异验证过：删掉修复仍然绿）。
+        _d2 = pathlib.Path(tempfile.mkdtemp(prefix="cl_dead_chap_"))
+        _s2, _, _ = make(str(_d2))
+        _s2._cur = {"id": 1, "title": "", "title_zh": "", "t0": 0.0, "lo": 0,
+                    "hi": 0, "sents": [(0, "hello")], "atoms": [], "ver": 0,
+                    "t_open": 0.0}
+        _s2._model_down = "402"
+        _b = _s2.stats()
+        _s2._synthesize("final")
+        _a = _s2.stats()
+        check("⭐ 熔断后收尾不再把「本地预检失败」记成模型调用",
+              _a["calls_total"] == _b["calls_total"]
+              and _a["failed_calls"] == _b["failed_calls"],
+              "before=%r after=%r" % (_b, _a))
+        s_429, hits2, _ = _run_dead(429)
+        check("⭐ 429 是限流不是账户级失败 -> 不熔断，该重试还重试",
+              hits2 > 1 and s_429._model_down == "", "hits=%d down=%r" % (hits2, s_429._model_down))
+
     except BaseException as e:                            # noqa: BLE001
         # ⚠️⚠️ **一条判据自己抛了，不许把整个文件带崩。**
         #    崩了的话：后面的组**一条都不跑**、只留一个 traceback、**没有 ❌ 行** ——

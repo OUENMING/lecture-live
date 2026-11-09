@@ -233,6 +233,9 @@ def candidate(payload, *, day) -> dict | None:
         "inferred": bool(when),                # ⭐ 卡片上标「推算」（PassAI 先例）
         "phrase": when.phrase if when else "",
         "undecided": False if when else duty_when.undecided(quote),
+        #: ⭐ 3.11.1：`quote` 在两条路上语义不同 —— 正则路径是**原句**，模型路径是
+        #:    `atom.text` 的**摘要**。UI/笔记据此决定写「原话」还是「转述」。
+        "quote_kind": "verbatim" if str(p.get("source") or "") == "regex" else "paraphrase",
     }
 
 
@@ -294,7 +297,7 @@ def load(path) -> list[dict]:
             out[rid].update({k: rec[k] for k in
                              ("t", "quote", "zh", "src", "source", "changed", "type",
                               "title", "date", "time", "inferred", "phrase",
-                              "undecided") if k in rec})
+                              "undecided", "quote_kind") if k in rec})
         elif rid in out:
             if rec.get("kind") == "decision":
                 out[rid].update({k: rec[k] for k in
@@ -494,7 +497,8 @@ class Board:
             rec = {"kind": "item", **{k: it[k] for k in
                                       ("id", "t", "quote", "zh", "src", "source",
                                        "changed", "type", "title", "date", "time",
-                                       "inferred", "phrase", "undecided")}}
+                                       "inferred", "phrase", "undecided",
+                                       "quote_kind")}}
         append(self._path, rec)
         return dict(it)
 

@@ -1604,6 +1604,21 @@ function classIssues(s){
   else if(st && st.detail && !st.reason) out.push({lv:"", txt:"断过 " + st.detail,
     why:"实时流断开过，但已重连续上；这条只说明过程，不算这节出了问题"});
   else if(!st) out.push({lv:"warn", txt:"没采流"});
+  /* ⭐ 3.11.1：断线 / 丢音要**给数字**。原来只有一句「断过」，用户报「字幕停了」时
+     分不清是连了几次没连上、断了多久、还是本机实时队列把音频丢了 —— 三件事口径不同：
+     失败次数 ≠ 丢音，丢音 ≠ 转录缺失（定稿另走一条路）。分开报，阈值 10/60 与 5/30 秒。 */
+  if(st){
+    var fs = Number(st.failed_sessions || 0), ds = Number(st.down_s || 0), dr = Number(st.dropped_s || 0);
+    if(fs > 0) out.push({lv:"warn", txt:"连接失败 " + fs + " 次",
+      why:"共尝试 " + (st.connect_attempts == null ? "未知" : st.connect_attempts) +
+          " 次；重连成功后已恢复，失败次数本身不等于丢音"});
+    if(ds >= 10) out.push({lv: ds >= 60 ? "bad" : "warn",
+      txt:"断线累计 " + (ds < 60 ? Math.round(ds) + " 秒" : fmtDur(ds)),
+      why:"实时流断开期间 Soniox 没出词；定稿可能已由本地兜底补上"});
+    if(dr >= 5) out.push({lv: dr >= 30 ? "bad" : "warn",
+      txt:"实时丢音 " + (dr < 60 ? Math.round(dr) + " 秒" : fmtDur(dr)),
+      why:"本机实时队列丢的音频，不等于转录缺失（定稿另走一条路）"});
+  }
   /* deps.missing 里只有 websockets = 假警报：3.10.1 起用仓库里的 vendor 兜底。 */
   var miss = (s.deps && s.deps.missing) || [];
   var real = miss.filter(function(m){ return m !== "websockets"; });

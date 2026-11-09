@@ -820,8 +820,30 @@ def main() -> int:
               str(_rep21["blocks"].get("stream")))
         check("⭐ `stream` 在 `block_names` 清单里（该有哪几块）",
               "stream" in _rep21["block_names"], str(_rep21["block_names"]))
+        # ⭐ 3.11.1：`asr.scope` 的两条分支都要钉住 —— 这一节 sealed_n=1 而本地兜底段=0，
+        #    segments 只收兜底段，所以必须标「local-fallback」，不能读成整节退回了。
+        check("⭐ `asr.scope`：sealed_n 大于本地段数 → local-fallback",
+              _rep21["asr"].get("scope") == "local-fallback"
+              and _rep21["asr"].get("stream_sealed_n") == 1,
+              str({k: _rep21["asr"].get(k)
+                   for k in ("scope", "stream_sealed_n", "segments")}))
     finally:
         shutil.rmtree(_d11, ignore_errors=True)
+
+    print("\n--- T21b ⭐ `asr.scope`：sealed_n 不大于本地段数 → final ---")
+    _d11b = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_scope_"))
+    try:
+        _t21b = tm.TestSession(_d11b / "final.md", wall_clock=time.time)
+        _t21b.note_block("stream", {"engine": "soniox", "sealed_n": 0})
+        _rep21b = json.loads(pathlib.Path(_t21b.finish(bundle=False)).read_text(
+            encoding="utf-8"))
+        check("⭐ `asr.scope` 另一条分支（sealed_n=0）→ final",
+              _rep21b["asr"].get("scope") == "final"
+              and _rep21b["asr"].get("stream_sealed_n") == 0,
+              str({k: _rep21b["asr"].get(k)
+                   for k in ("scope", "stream_sealed_n", "segments")}))
+    finally:
+        shutil.rmtree(_d11b, ignore_errors=True)
 
     print("\n--- T22 ⭐⭐ 3.10 `device` 块：pmset / 磁盘 / 体积 / 全炸 / ⏱ tick ---")
     # ⚠️ 这一节的语料全是合成的（文本样本 / tmp 目录 / fake），不碰真盘、不联网、

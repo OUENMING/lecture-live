@@ -132,25 +132,15 @@ update_classlive() {
   if "$PY" update.py --steps 2>/dev/null | grep -q '^deps'; then
     echo
     echo "🔧 正在补依赖…"
-    if command -v uv >/dev/null 2>&1; then
-      uv pip install --python "$PY" -q -r requirements.txt 2>&1 | tail -3
-    else
-      "$PY" -m pip install -q -r requirements.txt 2>&1 | tail -3
-    fi
-    # ⚠️⚠️ **管道会吞掉退出码**（2026-09-28 审查指出）：`cmd | tail -3` 的 `$?` 是
-    #    `tail` 的（恒 0）—— 于是**安装失败也照样往下走**，还顺手把 requirements
-    #    标记成"已装好"，更新卡片**再也不提示补依赖**（静默失败里最贵的一种：
-    #    用户以为环境是全的）。`PIPESTATUS[0]` 是管道里第一条命令的退出码
-    #    （bash 专有；本脚本 shebang 就是 `#!/bin/bash`）。
-    if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    # ⭐ 3.11.1：**装法只有一份** —— `update.py` 的 deps 步骤（uv 优先；没有 uv 就
+    #    `ensurepip` 造一个 pip）。这里原来自己抄了一套 uv/pip 分支，那套没有
+    #    ensurepip：`.app` 里的 python **没有 pip**，于是没装 uv 的机器直接失败。
+    #    ⚠️ 戳记也由那一步自己写（`mark_reqs_installed()`），终端不再单独 `--mark-reqs`。
+    if ! "$PY" update.py --run-step deps; then
       echo "❌ 依赖没装上（上面是最后几行输出）—— 这次**不**标记已装好，下次还会提示。" >&2
-      echo "   排查：uv 在不在（~/.local/bin）？网络通不通？" >&2
+      echo "   排查：uv 在不在（~/.local/bin）？ensurepip 能不能跑？网络通不通？" >&2
       return 1
     fi
-    # ⚠️ 告诉 update.py「这份 requirements 已经装好了」——
-    #    卡片上的「立即更新」按钮靠这个标记判断还要不要提示补依赖。
-    #    不记的话终端这边装完了、卡片那边还会一直让你再装一次。
-    "$PY" update.py --mark-reqs
   fi
 
   echo

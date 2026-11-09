@@ -3691,9 +3691,14 @@ class Overlay:
         import duty as _duty
         self._duty_card_sig = self._duty_sig(item)
         course = str(getattr(self, "_session_course", "") or "")
+        # ⭐ 3.11.1：模型路径给的是一句**摘要**（`atom` 的 `text`），不是逐字原话。
+        #    卡片上再写「原话」就是把转述冒充引用 —— 标签与引号都跟着 `quote_kind` 走。
+        _kind = str(item.get("quote_kind") or
+                    ("paraphrase" if item.get("source") == "model" else "verbatim"))
+        _ts = str(item.get("t") or "")
         sub = " · ".join(x for x in (
             course or "这节",
-            f"原话 {item.get('t')}" if item.get("t") else "",
+            ((f"原话 {_ts}" if _kind == "verbatim" else f"说于 {_ts}") if _ts else ""),
             f"来源 {item.get('source') or '—'}") if x)
         self._card_reset("一些事儿", sub, action=("收起", self._duty_shut))
         # 类型（四选一，点一下立刻生效；可再点回来）
@@ -3714,10 +3719,11 @@ class Overlay:
         conv = self._duty_conv_line(item)
         if conv:
             self._card_note(conv)
-        # 原话（只读 + 时间戳）
-        self._card_label("原话（只读）")
+        # 原话 / 转述（只读 + 时间戳）
+        self._card_label("原话（只读）" if _kind == "verbatim" else "转述（模型 · 只读）")
         src_ids = ", ".join(str(x) for x in (item.get("src") or []))
-        self._card_quote(f"“{item.get('quote') or ''}”",
+        _q = str(item.get("quote") or "")
+        self._card_quote((f"“{_q}”" if _kind == "verbatim" else _q),
                          " · ".join(x for x in (
                              str(item.get("t") or ""),
                              f"来源 {item.get('source') or '—'}",

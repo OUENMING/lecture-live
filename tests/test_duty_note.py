@@ -196,5 +196,44 @@ class RecapLayer(unittest.TestCase):
         self.assertFalse(paths.recap_state("ECON10790").exists())
 
 
+
+
+class 转述不冒充原话(unittest.TestCase):
+    """模型路径的 `quote` 是摘要（`atom.text`），笔记里不许加引号冒充原话（3.11.1）。"""
+
+    def test_模型摘要写转述(self):
+        items = [{"id": "d1", "action": "pending", "type": "其他",
+                  "title": "下周三讨论变化", "date": "2026-11-11", "inferred": False,
+                  "t": "11:34:49", "quote": "Next Wednesday we will talk more about change.",
+                  "source": "model", "quote_kind": "paraphrase"}]
+        text = "\n".join(ow._duty_section_md(items))
+        self.assertIn("转述：Next Wednesday", text)
+        self.assertNotIn("“Next Wednesday", text)
+
+    def test_正则原话仍加引号(self):
+        items = [{"id": "d2", "action": "saved", "type": "作业截止",
+                  "title": "习题集周五截止", "date": "2026-10-16", "inferred": True,
+                  "t": "10:00:03", "quote": "The problem set is due Friday.",
+                  "source": "regex", "quote_kind": "verbatim", "reminders": "ok"}]
+        text = "\n".join(ow._duty_section_md(items))
+        self.assertIn("“The problem set is due Friday.”", text)
+        self.assertNotIn("转述：", text)
+
+    def test_老条目合并来源不冒充引用(self):
+        # 3.11.1 之前落盘的记录没有 `quote_kind`；`Board.offer()` 会把两路来源
+        # 用 `/` 合并成 `model/regex`。只要模型路径参与过，就按转述（2026-11-09 OCR 审查）。
+        merged = [{"id": "d3", "action": "pending", "type": "其他",
+                   "title": "下周三讨论", "date": "2026-11-11", "inferred": False,
+                   "t": "11:34:49", "quote": "Next Wednesday we will talk more.",
+                   "source": "model/regex"}]
+        text = "\n".join(ow._duty_section_md(merged))
+        self.assertIn("转述：Next Wednesday", text)
+        self.assertNotIn("“Next Wednesday", text)
+
+        pure = [dict(merged[0], source="regex")]
+        text = "\n".join(ow._duty_section_md(pure))
+        self.assertIn("“Next Wednesday", text)
+
+
 if __name__ == "__main__":
     unittest.main()

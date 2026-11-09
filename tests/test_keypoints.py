@@ -667,6 +667,265 @@ def t_ask_batch_backfill():
     assert got == [0.8, 0.2, None], f"得到 {got!r}"
 
 
+class _Resp:
+    def __init__(self, body: bytes):
+        self._b = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self._b
+
+
+def _http_err(code: int, body: bytes):
+    return kp.urllib.error.HTTPError("http://x", code, "x", {}, io.BytesIO(body))
+
+
+def _with_region(fake_open, translate_key="cl-bldcn-abc", cc=""):
+    """装上「本机有官方 key」的供应商 + 假 urlopen，跑完全还原。返回 (请求日志, 恢复函数)。"""
+    import llm_client
+    saved = (kp.urllib.request.urlopen, kp._PROVIDER, kp._translate_key, kp.token,
+             llm_client.headers, llm_client.base_for)
+    kp.reset_failure()
+    kp._PROVIDER = kp.resolve("OFFICIAL-K", "", translate_key)
+    kp._translate_key = lambda: translate_key
+    kp.token = lambda root=None: cc
+    llm_client.headers = lambda key: {}
+    llm_client.base_for = lambda key: "https://asr.example/v1"
+    kp.urllib.request.urlopen = fake_open
+
+    def restore():
+        (kp.urllib.request.urlopen, kp._PROVIDER, kp._translate_key, kp.token,
+         llm_client.headers, llm_client.base_for) = saved
+        kp.reset_failure()
+    return restore
+
+
+def _region_open(log):
+    def fake(req, timeout=None):
+        log.append((req.full_url, req.get_header("Authorization")))
+        if req.full_url == kp.OFFICIAL_ENDPOINT:
+            raise _http_err(451, b'{"error":"Typesafe is not available in your region"}')
+        return _Resp(b'{"ok": 1}')
+    return fake
+
+
+_Q = {"S1": {"type": "noul", "instructions": "x"}}
+
+
+@case("⭐ 官方 451 → 改走通行码 Worker 并重发这一次（2026-11-05 中国区）")
+def t_region_451_falls_back_to_worker():
+    log: list = []
+    restore = _with_region(_region_open(log))
+    try:
+        got = kp.ask_commandcode("s", _Q, token="OFFICIAL-K")
+        st = kp.stats()
+        prov = dict(kp._PROVIDER)
+    finally:
+        restore()
+    assert got == {"ok": 1}, got
+    assert [u for u, _ in log] == [kp.OFFICIAL_ENDPOINT, "https://asr.example/v1/jev"], log
+    assert log[1][1] == "Bearer cl-bldcn-abc", f"重发用的不是通行码：{log[1]}"
+    assert prov["name"] == "classlive", prov
+    assert st.get("region_fallback") == 1 and st["calls"] == 2 and st["fail"] == 1, st
+
+
+@case("⭐ 切过之后整节课直接走 Worker，调用方缓存的官方 token 也换掉")
+def t_region_switch_sticks():
+    log: list = []
+    restore = _with_region(_region_open(log))
+    try:
+        kp.ask_commandcode("s", _Q, token="OFFICIAL-K")
+        log.clear()
+        kp.ask_commandcode("s", _Q, token="OFFICIAL-K")      # score() 开课时缓存的 token
+    finally:
+        restore()
+    assert log == [("https://asr.example/v1/jev", "Bearer cl-bldcn-abc")], log
+
+
+@case("⭐ _PROVIDER 已切但计数还没 bump：token 与 endpoint 也必须同源（不混用官方 token）")
+def t_region_snapshot_consistent():
+    log: list = []
+    restore = _with_region(_region_open(log))
+    try:
+        # 模拟「别的线程刚把 _PROVIDER 换成备用家，但本线程还没看到 region_fallback」。
+        kp._PROVIDER = kp.resolve("", "", "cl-bldcn-abc")
+        kp._STATS.pop("region_fallback", None)
+        kp.ask_commandcode("s", _Q, token="OFFICIAL-K")     # 调用方缓存的官方 token
+    finally:
+        restore()
+    assert log == [("https://asr.example/v1/jev", "Bearer cl-bldcn-abc")], log
+
+
+@case("⭐ 两个线程同时撞 451：region_fallback 只记一次")
+def t_region_fallback_bump_once():
+    import threading
+    log: list = []
+    restore = _with_region(_region_open(log))
+    orig_fb = kp._region_fallback
+    barrier = threading.Barrier(2)
+
+    def slow_fb():
+        # 卡住到两个线程都过了「当前还是官方」那一步，否则先到的线程切完，
+        # 后到的线程看到的就是备用家，竞态窗口根本不复现。
+        barrier.wait(timeout=10)
+        return orig_fb()
+
+    kp._region_fallback = slow_fb
+    try:
+        ts = [threading.Thread(target=kp.ask_commandcode,
+                               args=("s", _Q), kwargs={"token": "OFFICIAL-K"})
+              for _ in range(2)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        st = kp.stats()
+    finally:
+        kp._region_fallback = orig_fb
+        restore()
+    assert st.get("region_fallback") == 1, st
+
+
+@case("⭐ provider 的 token 为空时，不许把调用方显式传入的 token 洗成空串")
+def t_empty_provider_token_keeps_caller():
+    # `resolve("", "", "sk-deepseek")` 解析不出凭证 → commandcode 的 token = ""。
+    # 无条件覆盖会变成 `Authorization: Bearer `，CLI 的 cc-switch 取值口直接失效
+    # （2026-11-09 OCR 审查抓到）。
+    log: list = []
+    restore = _with_region(_region_open(log))
+    try:
+        kp._PROVIDER = kp.resolve("", "", "sk-deepseek")
+        kp.ask_commandcode("s", _Q, token="CALLER-TOK")
+    finally:
+        restore()
+    assert log == [(kp.ENDPOINT, "Bearer CALLER-TOK")], log
+
+
+@case("⭐ 451 但没有通行码 / CommandCode → 照旧抛，不切")
+def t_region_no_fallback_raises():
+    log: list = []
+    restore = _with_region(_region_open(log), translate_key="sk-deepseek")
+    try:
+        try:
+            kp.ask_commandcode("s", _Q, token="OFFICIAL-K")
+        except RuntimeError as e:
+            msg = str(e)
+        else:
+            msg = ""
+        prov = kp._PROVIDER["name"]
+        st = kp.stats()
+    finally:
+        restore()
+    assert "451" in msg, msg
+    assert prov == "typesafe" and "region_fallback" not in st, (prov, st)
+    assert len(log) == 1, log
+
+
+@case("⭐ 官方 500 不是地区问题 → 不切、不重发")
+def t_region_500_does_not_switch():
+    log: list = []
+
+    def fake(req, timeout=None):
+        log.append(req.full_url)
+        raise _http_err(500, b"oops")
+    restore = _with_region(fake)
+    try:
+        try:
+            kp.ask_commandcode("s", _Q, token="OFFICIAL-K")
+        except RuntimeError:
+            pass
+        prov = kp._PROVIDER["name"]
+    finally:
+        restore()
+    assert log == [kp.OFFICIAL_ENDPOINT] and prov == "typesafe", (log, prov)
+
+
+@case("⭐ 显式 endpoint 的调用方（keyentry 验 key）遇 451 不改道")
+def t_region_explicit_endpoint_untouched():
+    log: list = []
+    restore = _with_region(_region_open(log))
+    try:
+        try:
+            kp.ask_commandcode("s", _Q, token="OFFICIAL-K", endpoint=kp.OFFICIAL_ENDPOINT, model="m")
+        except RuntimeError:
+            pass
+        prov = kp._PROVIDER["name"]
+    finally:
+        restore()
+    assert len(log) == 1 and prov == "typesafe", (log, prov)
+
+
+@case("_is_region_block：451 或回执写明地区不可用")
+def t_is_region_block():
+    assert kp._is_region_block(451, "")
+    assert kp._is_region_block(403, "Typesafe is NOT available in your region")
+    assert not kp._is_region_block(403, "forbidden")
+    assert not kp._is_region_block(500, "")
+
+
+@case("⭐⭐ 开课复位：451 切走后 reset_failure() 复位供应商（防跨节/跨进程残留）")
+def t_reset_provider_after_region_fallback():
+    log: list = []
+    restore = _with_region(_region_open(log))
+    saved_read = kp._read_key
+    kp._read_key = lambda name, root=None: "OFFICIAL-K"      # 官方 key 一直在机器上
+    try:
+        kp.ask_commandcode("s", _Q, token="OFFICIAL-K")
+        assert dict(kp._PROVIDER)["name"] == "classlive", "前提：这一节已经切到备用"
+        kp.reset_failure()
+        assert kp._PROVIDER is None, "reset 之后不许留着上一节的备用供应商"
+        assert kp._provider()["name"] == "typesafe", "下一节课必须重新先试官方"
+    finally:
+        kp._read_key = saved_read
+        restore()
+
+
+@case("⭐⭐ 并发 451：别的线程已经切过 -> 本线程直接用新那家重发（不丢这批）")
+def t_region_race_already_switched():
+    log: list = []
+    restore = _with_region(_region_open(log))
+    try:
+        def racing(req, timeout=None):
+            log.append((req.full_url, req.get_header("Authorization")))
+            if req.full_url == kp.OFFICIAL_ENDPOINT:
+                # 模拟另一个线程先到：它已经把供应商换成通行码 Worker
+                kp._PROVIDER = kp.resolve("", "", "cl-bldcn-abc")
+                raise _http_err(451, b'{"error":"not available in your region"}')
+            return _Resp(b'{"ok": 1}')
+        kp.urllib.request.urlopen = racing
+        got = kp.ask_commandcode("s", _Q, token="OFFICIAL-K")
+    finally:
+        restore()
+    assert got == {"ok": 1}, got
+    assert [u for u, _ in log] == [kp.OFFICIAL_ENDPOINT,
+                                   "https://asr.example/v1/jev"], log
+
+
+@case("⭐ 备用家也 451 -> 只重试一次，不死循环")
+def t_region_alt_451_no_loop():
+    log: list = []
+    restore = _with_region(_region_open(log))
+
+    def always451(req, timeout=None):
+        log.append(req.full_url)
+        raise _http_err(451, b'{"error":"not available in your region"}')
+
+    kp.urllib.request.urlopen = always451
+    msg = ""
+    try:
+        try:
+            kp.ask_commandcode("s", _Q, token="OFFICIAL-K")
+        except RuntimeError as e:
+            msg = str(e)
+    finally:
+        restore()
+    assert "451" in msg, msg
+    assert len(log) == 2, f"只该试官方 + 备用各一次：{log}"
+
+
 def main_() -> int:
     print("=" * 60)
     fail: list[str] = []

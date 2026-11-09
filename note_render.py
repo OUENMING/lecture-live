@@ -225,7 +225,7 @@ def render(d: NoteData) -> str:
     if cv.get("rows"):
         # ⭐ 第六轮：覆盖度**按时间窗算**（要点/小节都有时间戳，不再看模型的对齐回执）。
         cov_line = (f"覆盖度：章节 {cv['n_ok']}/{cv['n_chapters']} 都有讲解 · "
-                    f"实时要点 {cv['n_covered']}/{cv['n_points']} 条落进笔记")
+                    f"实时要点 {cv['n_covered']}/{cv['n_points']} 条落在章节时间段内")
         if cv["n_points"] > cv["n_covered"]:
             cov_line += f"（缺 {cv['n_points'] - cv['n_covered']}，明细见详细版）"
     elif pts:

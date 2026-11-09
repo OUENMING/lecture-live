@@ -161,6 +161,18 @@ def _pretty_path(p) -> str:
     return "~" + s[len(home):] if s.startswith(home + os.sep) else s
 
 
+def open_in_browser(path: str) -> None:
+    """生成完自动打开详细版笔记（macOS `open` → 默认浏览器）。不等它、不抛到收尾里。
+
+    ⭐ 3.11.1：唯一定义点。进程内收尾（`main._open_note`）与后台收尾
+    （`note_worker.build_writer`）都必须接上它 —— 拆进程那次漏了 worker 这一头，
+    表现是「笔记生成了但不再自动打开」（2026-11-09 作者报）。
+    """
+    import subprocess
+    subprocess.Popen(["open", str(path)],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def desk_note_path(date: str, course: str, *, home=None) -> Path:
     """桌面笔记库里这节课的 HTML 路径（`~/Desktop/烤菠萝的笔记库/<课号>/<日期>_<课号>.html`）。
 
@@ -525,10 +537,20 @@ def _duty_section_md(items: list, *, day=None) -> list:
                 bits.append(f"⚠ 提醒事项没写成（{d.get('reason') or '未知'}，已备份本机）")
         out.append(f"- **{title}**")
         quote = str(d.get("quote") or "").strip()
+        # ⭐ 3.11.1：模型路径给的是摘要（`atom.text`），不是逐字原话 ——
+        #    加引号就是在冒充引用。按 `quote_kind` 决定写法；老条目按 `source` 推。
+        _kind = str(d.get("quote_kind") or "")
+        if not _kind:
+            # 老条目没有 `quote_kind`：`source` 可能被 `Board.offer()` 合并成
+            # `model/regex`。只有**纯正则**才是逐字原话；有任何模型路径参与就按转述 ——
+            # 宁可降级，也不把摘要加引号冒充引用（2026-11-09 OCR 审查抓到）。
+            _src = {p for p in str(d.get("source") or "").split("/") if p}
+            _kind = "verbatim" if _src == {"regex"} else "paraphrase"
+        _q = (f"“{quote}”" if _kind == "verbatim" else f"转述：{quote}") if quote else ""
         tail = " · ".join(x for x in (
             str(d.get("t") or ""),
             f"来源 {d.get('source')}" if d.get("source") else "",
-            f"“{quote}”" if quote else "") if x)
+            _q) if x)
         out.append(f"  · {' · '.join(bits)}")
         if tail:
             out.append(f"  · {tail}")
@@ -1421,7 +1443,7 @@ class ObsidianWriter:
             review["cover"] = note_cover.report(sk, review.get("sections") or [])
             cv = review["cover"]
             line = (f"🧭 覆盖度：章节 {cv['n_ok']}/{cv['n_chapters']} 都有讲解 · "
-                    f"实时要点 {cv['n_covered']}/{cv['n_points']} 条落到节里")
+                    f"实时要点 {cv['n_covered']}/{cv['n_points']} 条落在章节时间段内")
             if cv["n_covered"] < cv["n_points"]:
                 line += f"（缺 {cv['n_points'] - cv['n_covered']} 条，见 §9）"
             print("   " + line, flush=True)
@@ -1867,21 +1889,22 @@ class ObsidianWriter:
     def _review_term_hits(self, review: dict, entries: list) -> list:
         """复习层讲到的术语 -> 术语表行（带**首次出现时间戳**）。
 
-        ⚠️ 时间戳是**搜出来的**（`compile_term` 在转录里找第一句命中的），
+        ⚠️ 时间戳是**搜出来的**（`build_notes.find_term_ts`：去填充词、按词干找第一句），
            不是让模型编一个 —— 出处那一列必须能回源（审计 §2b 结论 4）。
+           搜不到时**不写时间**、来源标「本课（未定位）」（3.11.1）。
         """
         out = []
         try:
-            from build_notes import compile_term
+            from build_notes import find_term_ts
         except Exception:                                       # noqa: BLE001
-            compile_term = None
-        tagged: list = [(t, _one_line(s.get("ts")))
+            find_term_ts = None
+        tagged: list = [t
                         for s in (review.get("sections") or [])
                         for t in (s.get("terms") or [])]
-        tagged += [(t, "") for t in (review.get("terms") or [])]
+        tagged += list(review.get("terms") or [])
         seen: set = set()
         n_filtered = 0
-        for t, sec_ts in tagged:
+        for t in tagged:
             en, zh = _one_line(t.get("en")), _one_line(t.get("zh"))
             if not en or en.lower() in seen:
                 continue
@@ -1890,6 +1913,9 @@ class ObsidianWriter:
             #    `minimum/maximum` 一律算泛词；`substitution/derivative/…` 是某些课的
             #    正词（化学的取代反应/衍生物）→ **本课材料里出现过就留**（Materials.verify）。
             #    **术语库真有这个词也留**（规则原文："unless the glossary has them"）。
+            if note_terms.hard_common(en):
+                n_filtered += 1
+                continue
             why = note_terms.drop_reason(en, type_="", source=note_terms.SRC_LECTURE)
             try:
                 in_course = bool(self._materials is not None
@@ -1901,22 +1927,17 @@ class ObsidianWriter:
                 n_filtered += 1
                 continue
             ts = ""
-            if compile_term is not None:
+            if find_term_ts is not None:
                 try:
-                    rx = compile_term(en)
-                    for e in entries:
-                        if rx.search(e.get("en") or e.get("asr") or ""):
-                            ts = e.get("ts", "")
-                            break
+                    ts = find_term_ts(entries, en)
                 except Exception:                               # noqa: BLE001
                     ts = ""
-            # ⚠️ 转录里搜不到（ASR 把词听碎了、或原话用了别的说法）时退到**它所在小节的
-            #    时间戳** —— 出处那一列宁可粗一点（"这一节在 13:23"），也不能空着：
-            #    空的出处 = 读者没法回源（审计 §2b 结论 4 要的正是"双锚点"）。
-            if not ts and sec_ts:
-                ts = sec_ts
+            # ⭐ 3.11.1：搜不到就**不写时间**（也不退到小节时间段）。
+            #    `11:13:52–11:31:14` 这种写法读者会当成"这个词这时说过"，而实际可能
+            #    整节课都没说（2026-11-09 核到 11 条）。出处宁可空着，也不能假精确。
             out.append(note_terms.Hit(term=en, gloss=zh or "（本课术语）", ts=ts,
-                                      source=note_terms.SRC_LECTURE))
+                                      source=(note_terms.SRC_LECTURE if ts
+                                              else note_terms.SRC_UNLOCATED)))
         if n_filtered:
             print(f"   ⚠ 术语表过滤：{n_filtered} 条泛词/常识词"
                   f"（术语库里没有的才丢，F8-f）", flush=True)

@@ -154,6 +154,9 @@ def build_writer(spec: dict, *, callbacks: dict | None = None):
         desk=bool(spec.get("desk", True)),
         desk_home=spec.get("desk_home") or None,
         base_note=False,                             # 后台模式：只写完整版（§4.4）
+        # ⭐ 3.11.1：拆进程之后漏了这一头 —— 笔记照写，但不再自动打开详细版。
+        #    （2026-11-09 作者报；实现与进程内收尾共用 `open_in_browser`。）
+        open_fn=ow.open_in_browser,
         **cb)
     w.enabled = True
     w.mode = "yes"

@@ -163,6 +163,32 @@ MAX_CHAPTER_S = 600.0     # 10 分钟：到点强制切开（与计划「一章 
 #:    落点在 `_process_pending`：给每个窗口算一个「本该在什么时刻被消化」的有效时钟。
 
 
+#: ⭐ 3.11.1：**账户级**失败 —— 这一节再试也不会好（座席没余额 / key 错 / 被禁）。
+#:    ⚠️ 429 不在里面（限流是暂时的）；5xx 也不在（可能是一次抖动）。
+DEAD_STATUS = (401, 402, 403)
+
+
+def _http_code(e) -> int | None:
+    """异常里能不能读出 HTTP 状态码。读不出 → `None`（**不许猜**）。
+
+    兼容三种形状：`httpx.HTTPStatusError`（`.response.status_code`）、
+    自带 `.status_code` 的异常、以及 `urllib` 那种 `.code`。
+    """
+    for obj, attr in ((getattr(e, "response", None), "status_code"),
+                      (e, "status_code"), (e, "code")):
+        try:
+            v = getattr(obj, attr, None) if obj is not None else None
+        except Exception:                                  # noqa: BLE001
+            continue
+        if v is None:
+            continue
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _span_s(a, b) -> float:
     """两个 `HH:MM:SS` 之间**跨越的课堂秒数**（`b - a`，跨零点取模）。解不出返回 `0.0`。
 
@@ -210,7 +236,12 @@ class LiveSummarizer:
     def __init__(self, chat, append_atoms=None, chapter_path=None, emit=None,
                  clock=time.monotonic, stamp=atom.now_stamp,
                  chapters_enabled: bool = True, deadline_gate=None):
-        self._chat = chat
+        #: ⭐ 3.11.1：**账户级失败熔断**。401/402/403 是确定性失败（key 错 / 余额没了 /
+        #:    被禁），不是抖动 —— 每 30 s 重试、一节课几百次全是白花钱，报告里只剩
+        #:    「AI 调用失败 N 次」。第一次撞上就本节停用并**出声一次**。
+        #:    ⚠️ 429 不在此列：那是限流，等一会儿就会好（11-05 的 402 则不会）。
+        self._model_down = ""
+        self._chat = self._guarded(chat)
         self._append_atoms = append_atoms
         self._emit = emit
         self._clock = clock
@@ -336,6 +367,11 @@ class LiveSummarizer:
             "retries": self._retries,
             "atoms": self._atom_n,
             "chapters_enabled": self._chapters_on,
+            # ⭐ 3.11.1：账户级失败熔断（401/402/403）后本节停用 —— 报告要能看出
+            #    "atoms=0" 是因为 402，而不是模型一直空转。
+            #    ⚠️ 存**状态码**（0 = 没熔断）：`stats()` 的约定是"全是计数器/比例"，
+            #    塞字符串会破坏那条不变量（`test_testmode.py` 的 T9 钉着）。
+            "model_down": int(self._model_down or 0),
         }
 
     def feed(self, item) -> None:
@@ -537,6 +573,16 @@ class LiveSummarizer:
         ⚠️ **只有一个窗口时 `now_eff == now`**，行为与改动前**逐字一样** ——
            正常上课永远走那一支，这条改动只对积压生效。
         """
+        if self._model_down:
+            # ⭐ 3.11.1：账户级失败之后，积压的窗口**再也补不回来**（模型不会自己好）。
+            #    清队、不重试 —— 第一次撞上时已经出过声；留在这里只会每 30 秒白试一次。
+            #    ⚠️ 清队要**发 gap**（`state="failed"`），否则这些窗口静默消失，
+            #       笔记覆盖度会低估丢量（第二轮核实指出）。
+            for _item in self._pend:
+                self._emit_gap(_item[1], "failed")
+            self._pend.clear()
+            self._retry_at = 0.0
+            return
         if self._pending_blocked(now, force):
             return
         #: 这批里**最新的**那个窗口的内容时刻 —— 它对应 `now`（它就是「现在」）。
@@ -589,6 +635,27 @@ class LiveSummarizer:
         if not force and self._retry_at and now < self._retry_at:
             return True
         return False
+
+    def _guarded(self, chat):
+        """包一层：账户级失败（401/402/403）**第一次**就把本节关掉，并出声一次。
+
+        ⚠️ 关掉之后**不抛新的网络请求**：直接 raise 一个本地 RuntimeError，
+           让上面既有的 `except` 照旧记账（`failed_calls` 还是真的失败次数），
+           但一个字节都不会再发出去。
+        """
+        def call(*a, **k):
+            if self._model_down:
+                raise RuntimeError(f"实时总结已停用（HTTP {self._model_down}）")
+            try:
+                return chat(*a, **k)
+            except Exception as e:                        # noqa: BLE001
+                code = _http_code(e)
+                if code in DEAD_STATUS and not self._model_down:
+                    self._model_down = str(code)
+                    print(f"⚠ 实时总结已停用（HTTP {code}）：本节不再调用模型；"
+                          f"字幕与笔记不受影响", flush=True)
+                raise
+        return call
 
     def _call_atoms(self, buf: list):
         """一次原子提取。**抛异常 / 返回 None 都算失败**（同今天的取舍）。"""
@@ -651,11 +718,15 @@ class LiveSummarizer:
         self._emit_p({"kind": "window", **{k: rec[k] for k in
                                            ("t", "topic", "topic_zh", "lo", "hi", "n_points")}})
 
+        _when_by_gid = {it[0]: it[1] for it in buf}
         for a in got:
             if a.kind == KIND_DEADLINE and self._deadline_ok(a.text):
                 # ⭐ `a.zh` = **这次原子调用本来就给的中文**（`Atom.zh`，2026-09-30 加的）
                 #    —— 摘要用它，**没有新增调用**。
-                self._emit_deadline(a.t, a.text, a.src, "model", False, zh=a.zh)
+                # ⭐ 3.11.1：`t` 用**来源句**的时刻（`a.src[0]`），不是原子生成时刻 ——
+                #    模型窗口可能比原句晚 1–2 分钟，卡片/提醒事项里的时间会被读成"老师说这话的时间"。
+                _t = _when_by_gid.get(a.src[0]) if a.src else None
+                self._emit_deadline(_t or a.t, a.text, a.src, "model", False, zh=a.zh)
 
         self._maybe_force_split(now)                      # ⭐ 太长的章先切开
         self._advance(topic, topic_zh, buf, got, now)
@@ -774,6 +845,11 @@ class LiveSummarizer:
         else:
             self._chapters_interim += 1
         for attempt in (1, 2):
+            if self._model_down:
+                # ⭐ 3.11.1：熔断后 `_chat` 是**本地抛**（一个字节都不发）——
+                #    再记 calls/failed 会让报告写成「调了 N 次、全失败」，
+                #    与实际请求数对不上。直接收手，章节按空章落盘。
+                break
             try:
                 self._calls += 1
                 self._chapter_calls += 1                  # ⭐ 采集面 ⑤
@@ -783,7 +859,8 @@ class LiveSummarizer:
             except Exception as e:                        # noqa: BLE001
                 self._failed += 1                         # ⭐ 采集面 ⑤
                 self._failed_chapters += 1                # ⭐ 3.11：按层分开
-                print(f"⚠ 章节合成失败({str(e)[:50]}); 第 {attempt} 次")
+                if not self._model_down:                  # 停用后每章两次都很吵，只记数
+                    print(f"⚠ 章节合成失败({str(e)[:50]}); 第 {attempt} 次")
                 obj = None
             if obj is not None:
                 break

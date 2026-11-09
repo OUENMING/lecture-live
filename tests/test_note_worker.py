@@ -193,6 +193,33 @@ def t_writer_skips_base_note_when_asked() -> None:
           isinstance(w._html_name, str), str(type(w._html_name)))
 
 
+def t_worker_opens_note_after_close() -> None:
+    """后台收尾也必须自动打开详细版 —— 3.11 拆进程时漏过这一头（2026-11-09 作者报）。"""
+    import obsidian_writer as ow
+    seen: dict = {}
+
+    class _Fake:
+        _parse = staticmethod(lambda text: [{"en": "x"}])
+
+        def __init__(self, **kw):
+            seen.update(kw)
+
+    orig = ow.ObsidianWriter
+    ow.ObsidianWriter = _Fake                                        # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            sess = pathlib.Path(d, "2026-11-09_SOC10020.md")
+            sess.write_text("x", encoding="utf-8")
+            NW.build_writer({**SPEC, "session": str(sess), "use_cloud": False})
+    finally:
+        ow.ObsidianWriter = orig                                     # type: ignore[assignment]
+    check("⭐⭐ worker 把 `open_fn` 接上了（拆进程后丢过一次）",
+          seen.get("open_fn") is ow.open_in_browser, str(seen.get("open_fn")))
+    check("⭐ 主路径与 worker 共用同一个定义点（`main._open_note` 就是它）",
+          main._open_note.__doc__ is not None
+          and "open_in_browser" in (main._open_note.__doc__ or ""))
+
+
 def t_worker_enabled_switch() -> None:
     saved = os.environ.get("CLASSLIVE_NOTE_WORKER")
     try:
@@ -416,6 +443,7 @@ def main_() -> int:
         ("会话文件不在", t_run_missing_session_fails_cleanly),
         ("outbox", t_outbox_written_only_on_success),
         ("跳过基础版", t_writer_skips_base_note_when_asked),
+        ("写完自动打开", t_worker_opens_note_after_close),
         ("开关", t_worker_enabled_switch),
         ("通知 best-effort", t_notify_is_best_effort),
         ("派生分岔判据", t_spawn_decision_wrapper),

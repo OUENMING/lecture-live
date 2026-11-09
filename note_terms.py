@@ -32,6 +32,9 @@ import re
 SRC_CURATED = "术语库"
 SRC_AUTO = "自动缓存"
 SRC_LECTURE = "本课"
+#: ⭐ 3.11.1：复习层列了这条，但转录里**定位不到**它（复数/口语填充词/换了说法）。
+#:    原来这里退到「小节时间段」，读者会当成"这时说过"—— 见 `obsidian_writer._review_term_hits`。
+SRC_UNLOCATED = "本课（未定位）"
 
 #: 「常识词」的小名单。⚠️ 刻意**保持小**：它只收审计实测出现过、且**任何课都不该
 #: 解释**的那种词（日常英语 + 办公软件 + 温度单位）。真正的大头由下面两条规则兜：
@@ -140,6 +143,22 @@ minimum maximum
 TOO_COMMON_UNLESS_VERIFIED = frozenset("""
 substitute substitution marginal derivative
 """.split())
+
+
+#: ⭐ 3.11.1：**只挡复习层的术语表**，不要塞进 `_DISCOURSE` ——
+#: 那份名单还会影响 `note_glossary` / `live_terms`（环境经济学里 environment 是正词）。
+HARD_COMMON_REVIEW = frozenset("""
+environment social
+""".split())
+
+
+def hard_common(term: str) -> bool:
+    """复习层术语表里**无条件挡掉**的通用词（不看术语库有没有）。
+
+    `Environment` / `Social` 已经被自动缓存收进 `term_notes_auto.json`，若还走
+    `_in_term_store` 的豁免，它们会一直出现（且带着百科式解释）。
+    """
+    return (term or "").strip().lower() in HARD_COMMON_REVIEW
 
 
 def too_common(term: str, *, verified: bool = False) -> bool:
@@ -328,7 +347,30 @@ def final_rows(sel: "Selection", *, extra: list | None = None) -> list:
         a_store, h_store = a.term.lower() in store_terms, h.term.lower() in store_terms
         if (h_store and not a_store) or (h_store == a_store and len(h.term) < len(a.term)):
             merged[cur] = h
-    return merged
+    # ⭐ 3.11.1：被更长术语**整词包含**的短词不单独出行 —— 但**只在两种情况下**：
+    #    ① 短词是占位释义（"（本课术语）"）；② 短词的释义来自术语库/缓存（通用词典义）。
+    #    ⚠️ 不能无条件删：`price`（价格，术语库）与 `price elasticity`（占位）同表时，
+    #       正确释义会被占位行顶掉（2026-11-09 第二轮核实抓到）。
+    def _placeholder(g: str) -> bool:
+        g = (g or "").strip()
+        return (not g) or g.startswith("（")
+
+    def _inside(short: str, long: str) -> bool:
+        a, b = short.strip().lower(), long.strip().lower()
+        return a != b and re.search(r"(?<![a-z])" + re.escape(a) + r"(?![a-z])", b) is not None
+
+    def _outranked(short, long) -> bool:
+        if not _inside(short.term, long.term):
+            return False
+        if _placeholder(long.gloss):
+            return False                       # 长词自己都没真释义，不夺位
+        # 只删「通用义」的短词：术语库 / 自动缓存的释义是词典义；
+        # 本课复习层给的释义（`SRC_LECTURE`）和「本课（未定位）」（`SRC_UNLOCATED`）
+        # 都是这节课真讲过的意思 —— 后者只是没在转录里搜到时间，不是别的意思。
+        return _placeholder(short.gloss) or short.source in (SRC_CURATED, SRC_AUTO)
+
+    return [h for h in merged
+            if not any(_outranked(h, o) for o in merged if o is not h)]
 
 
 def render_table(sel: "Selection", *, extra: list | None = None) -> list:

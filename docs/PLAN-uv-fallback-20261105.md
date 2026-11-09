@@ -1,6 +1,7 @@
 # PLAN · 没有 uv 的机器，自动更新也能补依赖（2026-11-05）
 
-> 状态：**待做（周末统一更新）** · 不重建 `.app` · 只改 Python / bash
+> 状态：**已实现（2026-11-09，未发版）** —— `update.py::_pip_install_cmd`（uv → ensurepip → pip）+ `cl` 改走 `--run-step deps`；判据 `tests/test_update.py` G2/G3。
+> 不重建 `.app` · 只改 Python / bash
 > 起因：美国用户 `bldus666666` 的 `update.log` 每个版本都是
 > `补依赖没成：FileNotFoundError: [Errno 2] No such file or directory: 'uv'`
 > 相关记忆：`classlive-update-without-uv`、`classlive-311-errors-20261104`

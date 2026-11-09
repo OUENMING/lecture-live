@@ -493,6 +493,76 @@ def compile_term(term: str) -> re.Pattern:
     return re.compile(r"\b" + esc + r"(?:s|'s)?\b", re.IGNORECASE)
 
 
+#: 口语填充词 —— ASR 会把它们塞进术语中间（"stable patterns of, uh, activity"），
+#: 逐字正则因此永远失配，最后退到"小节时间戳"给了个假出处（2026-11-09 核到 11 条）。
+_FILLER_TOKENS = frozenset("uh um er ah hmm mm uhh umm".split())
+
+
+def _term_tokens(text) -> list[str]:
+    """术语/句子的词序列：去标点、去口语填充词、去撇号（不做词干化）。
+
+    ⚠️ 撇号必须**去掉而不是留成词的一部分**：`consumer's` / `consumers'` 去撇号后
+       分别落到 `consumers` —— 正好在 `_term_forms("consumer")` 的复数集合里。
+       旧 `compile_term` 的 `(?:s|'s)?` 也能命中；3.11.1 换成词序列后曾漏掉所有格
+       （2026-11-09 复核抓到）。
+    """
+    raw = re.sub(r"[^a-z' ]", " ", str(text or "").lower()).split()
+    out = []
+    for w in raw:
+        w = w.replace("'", "")
+        if w and w not in _FILLER_TOKENS:
+            out.append(w)
+    return out
+
+
+def _term_forms(w: str) -> set[str]:
+    """**术语词**的复数扩张集合；转录里的词落在集合里就算同一词。
+
+    ⚠️ 方向很重要：只从术语词往外扩张，再问"转录里的词在不在里面"。
+       两边对称地砍 `-s` 会让 `status` 命中 `statues`、`goods` 命中 `good`
+       （2026-11-09 第二轮核实抓到）。
+    ⚠️ `-is → -es` 要单独记：`analysis -> analyses`、`crisis -> crises`，
+       否则这几类整类失配。
+    """
+    forms = {w, w + "s", w + "es"}
+    if len(w) > 1 and w.endswith("y"):
+        forms.add(w[:-1] + "ies")
+    if w.endswith("is"):
+        forms.add(w[:-2] + "es")
+    # 术语本身已经是复数（`social institutions`）：允许转录里出现单数。
+    # ⚠️ 长度 >5 且不是 `-ss`：`goods` 不该因此命中 `good`。
+    # ⚠️ `-ics/-us/-is` 结尾是**单数**（economics / status / analysis），
+    #    砍掉一个 s 得到的是形容词或词干（economic / statu / analysi），
+    #    讲义里出现频率远高于术语本身 → 假精确。宁可未定位
+    #    （2026-11-09 OCR 审查抓到）。
+    if (len(w) > 5 and w.endswith("s")
+            and not w.endswith(("ss", "ics", "us", "is"))):
+        forms.add(w[:-1])
+    return forms
+
+
+def find_term_ts(entries, term: str) -> str:
+    """术语在转录里**第一次**出现的时刻；找不到返回 `""`（**不猜**）。
+
+    ⭐ 3.11.1：替代原来的 `compile_term` 整句正则 —— 它跨不过 `, uh,`、也不认 `-ies`，
+       失配后调用方会退到"这一节的时间段"，读者会把它当成"这个词这时说过"。
+    ⚠️ 只认**连续**词干序列：`natural relatives` 不匹配 `natural and legal relatives`
+       （那是另一句话，宁可标"未定位"）。
+    """
+    want = [_term_forms(w) for w in _term_tokens(term)]
+    if not want:
+        return ""
+    n = len(want)
+    for e in entries or []:
+        if not isinstance(e, dict):
+            continue
+        have = _term_tokens(e.get("en") or e.get("asr") or "")
+        for i in range(len(have) - n + 1):
+            if all(have[i + k] in want[k] for k in range(n)):
+                return str(e.get("ts") or "")
+    return ""
+
+
 class TermNotes:
     """运行时查表: 句子命中哪些术语 -> 取它们的分层解析。零延迟(无网络)。
 

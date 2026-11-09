@@ -298,6 +298,9 @@ def top_k(scores, sents, k: int = 12) -> list:
 
 # ------------------------------------------------------------------ 生产那条路
 _PROVIDER: dict | None = None
+#: ⭐ 3.11.1：`_PROVIDER` 被多个线程读（`score()` 4 路并发）、被 451 回退与
+#:    `reset_failure()` 写。原来是 check-then-set，慢线程可能把刚切好的备用家覆盖回官方。
+_PROVIDER_LOCK = threading.Lock()
 
 #: ⭐ 3.10.6：**最后一次失败的原因**（provider + 异常文本）。原来只打「N 批没拿到」，
 #:    401 / 429 / 连不上 / 空 token 在全失败时长得一模一样，下次还是瞎猜。
@@ -330,6 +333,8 @@ def stats() -> dict:
     with _STATS_LOCK:
         out = {"calls": int(_STATS.get("calls") or 0),
                "fail": int(_STATS.get("fail") or 0)}
+        if _STATS.get("region_fallback"):
+            out["region_fallback"] = int(_STATS["region_fallback"])
         if not out["calls"] and not out["fail"] and not _LAST_FAILURE:
             return {}
         out.update(_LAST_FAILURE)
@@ -364,11 +369,20 @@ def reset_failure() -> None:
 
     ⚠️ 3.11：不改的话，这一课一节 Jev 都没调、`blocks.jev == {}`，报告里却还挂着
        上一课的 401/429 —— 上一课的问题被算到这一课头上（诊断时最坏的一种串）。
+
+    ⭐ 3.11.1：**`_PROVIDER` 也要复位**。451 地区回退会把模块级 `_PROVIDER` 换到备用家，
+       而这里原来只清计数 —— 同一进程里第二节就再也不会试官方。
+       （今天「一节一进程」时摸不到，但这是模块级状态，不能靠调用方的进程模型兜。）
+       复位的代价只是每节重读一次 key；**同一节课内的粘性不受影响**（451 后本节仍走备用）。
     """
+    global _PROVIDER
+    with _PROVIDER_LOCK:
+        _PROVIDER = None
     with _STATS_LOCK:
         _LAST_FAILURE.clear()
         _STATS["calls"] = 0
         _STATS["fail"] = 0
+        _STATS.pop("region_fallback", None)
 
 
 def _provider(*, root=None) -> dict:
@@ -379,9 +393,10 @@ def _provider(*, root=None) -> dict:
     ⚠️ 解析一次就缓存：跑一节 50 分钟的课要调十几次，而 key 文件不会中途变。
     """
     global _PROVIDER
-    if _PROVIDER is None:
-        _PROVIDER = resolve(_read_key("jev_key", root=root), token(root=root), _translate_key())
-    return _PROVIDER
+    with _PROVIDER_LOCK:
+        if _PROVIDER is None:
+            _PROVIDER = resolve(_read_key("jev_key", root=root), token(root=root), _translate_key())
+        return _PROVIDER
 
 
 def resolve(official: str, cc: str, translate_key: str | None) -> dict:
@@ -401,6 +416,28 @@ def resolve(official: str, cc: str, translate_key: str | None) -> dict:
         return {"name": "classlive", "endpoint": llm_client.base_for(translate_key) + "/jev",
                 "model": OFFICIAL_MODEL, "token": translate_key}
     return {"name": "commandcode", "endpoint": ENDPOINT, "model": MODEL, "token": ""}
+
+
+def _is_region_block(code: int, detail: str) -> bool:
+    """官方 Jev 的「本地区不可用」回执？**纯函数。**
+
+    2026-11-05 实测（中国大陆、3.11.0）：官方 `api.typesafe.ai` 回 451
+    `Typesafe is not available in your region`，两节课 18/18、50/50 全失败。
+    """
+    return code == 451 or "not available in your region" in (detail or "").lower()
+
+
+def _region_fallback() -> dict | None:
+    """官方被地区挡住时改走哪家：去掉官方 key 再解析一次（CommandCode → 通行码 Worker）。
+
+    ⭐ Worker `/v1/jev` 对中国区默认走 CommandCode（df2a2f0），所以通行码那条在大陆能用。
+    ⚠️ 两家都没有（token 为空）→ `None`，调用方照旧抛原来的错（fail-soft 不变）。
+    """
+    try:
+        alt = resolve("", token(), _translate_key())
+    except Exception:                                     # noqa: BLE001
+        return None
+    return alt if alt.get("token") else None
 
 
 def _translate_key() -> str:
@@ -436,14 +473,31 @@ def _read_key(attr: str, *, root=None) -> str:
 
 
 def ask_commandcode(state: str, questions: dict, *, token: str, timeout: float = 60.0,
-                    endpoint: str | None = None, model: str | None = None):
+                    endpoint: str | None = None, model: str | None = None,
+                    _switched: bool = False):
     """真发一次请求。⚠️ **`User-Agent` 必须有** —— 见模块头那条 403。
 
     ⚠️ `endpoint` / `model` 不传就用 `provider()` 解析出来的那家（见模块头那张表）。
        ⚠️ **`User-Agent` 两家都发**：官方不需要但也不介意，CommandCode 缺了就被挡。
     """
-    ep = endpoint or _provider()["endpoint"]
-    md = model or _provider()["model"]
+    global _PROVIDER
+    with _PROVIDER_LOCK:
+        _prov = dict(_PROVIDER) if _PROVIDER else None
+    if _prov is None:
+        _prov = dict(_provider())
+    # ⚠️ token / endpoint / model 必须来自**同一份快照**。原来 token 看
+    #    `_STATS["region_fallback"]`（锁外读）、endpoint 又调一次 `_provider()` ——
+    #    中间别的线程把 `_PROVIDER` 换成备用家，就成了「官方 token 敲备用 endpoint」
+    #    的 401，那一批请求白丢（2026-11-09 复核抓到）。
+    #    `_PROVIDER` 一旦不是官方那家，调用方缓存的官方 token 就必须一起换。
+    #    ⚠️ 只在备用家 token **非空**时换：`resolve("", "", "sk-deepseek")` 这类
+    #       解析不出凭证的 provider token 是空串，无条件覆盖会把调用方显式传进来的
+    #       有效 token（CLI 的 cc-switch 取值口）洗成 `Bearer ` → 必然 401。
+    _prov_tok = str(_prov.get("token") or "")
+    if endpoint is None and _prov.get("name") != "typesafe" and _prov_tok:
+        token = _prov_tok
+    ep = endpoint or _prov["endpoint"]
+    md = model or _prov["model"]
     body = json.dumps({"model": md, "state": state,
                        "questions": questions}).encode("utf-8")
     hdr = {"Authorization": "Bearer " + token, "Content-Type": "application/json", "User-Agent": UA}
@@ -459,6 +513,41 @@ def ask_commandcode(state: str, questions: dict, *, token: str, timeout: float =
         # ⚠️ **把响应体带出来** —— 这个 API 的错误信息全在 body 里
         #    （`at most 20 questions per call` 那种），只报状态码等于没说。
         detail = e.read().decode("utf-8", "replace")[:300]
+        # ⭐ 官方被地区挡（451）→ 本进程改走 CommandCode / 通行码 Worker，并重发这一次。
+        #    只在「没显式指定 endpoint、当前就是官方那家」时切；显式 endpoint 的调用方（keyentry 验 key）不动。
+        # ⭐ 3.11.1：`score()` 是 4 线程并发的（`WORKERS`），第一波会同时撞 451。
+        #    先到的线程已经把 `_PROVIDER` 换成备用；后到的线程若还要求 name=="typesafe"
+        #    就会直接抛错，那批请求白丢。所以这里两种都处理：
+        #      · 还是官方 → 切过去并记一次 `region_fallback`；
+        #      · 已经换成备用 → 直接用现在这家重发（不再重复记账）。
+        #    `_switched` 兜住"备用家也 451"：只重试一次，绝不自己递归成死循环。
+        with _PROVIDER_LOCK:
+            _cur = dict(_PROVIDER) if _PROVIDER else None
+        alt = None
+        switched_now = False
+        if (not _switched and endpoint is None and _cur is not None
+                and _is_region_block(e.code, detail)):
+            if _cur.get("name") == "typesafe":
+                cand = _region_fallback()
+                if cand is not None:
+                    # ⚠️ CAS：只有仍是官方那家时才切 —— 两个线程同时撞 451 时，
+                    #    否则 `region_fallback` 会被记两次（复核抓到）。
+                    with _PROVIDER_LOCK:
+                        if (_PROVIDER is not None
+                                and _PROVIDER.get("name") == "typesafe"):
+                            _PROVIDER = cand
+                            switched_now = True
+            # 重发一律用**当前** provider 的整份配置（token 也要换）；别的线程刚切过时
+            # 这里取到的就是备用家。仍是官方 = 没有备用家，照旧抛原来的错。
+            with _PROVIDER_LOCK:
+                cur = dict(_PROVIDER) if _PROVIDER else None
+            if cur is not None and cur.get("name") != "typesafe":
+                alt = cur
+        if switched_now:
+            _bump("region_fallback")
+        if alt is not None and alt.get("token"):
+            return ask_commandcode(state, questions, token=alt["token"],
+                                   timeout=timeout, _switched=True)
         raise RuntimeError(f"Jev {e.code}: {detail}") from e
     except urllib.error.URLError as e:
         _bump("fail")

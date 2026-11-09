@@ -956,8 +956,8 @@ def _cl_run(sand_home) -> str:
 
 
 _out2 = _cl_run(_sand_home)
-check("⭐⭐ 报了 deps -> `cl update` **真的去装了**（并写了戳记）",
-      "FAKEPY update.py --mark-reqs" in _out2, _out2.strip()[-260:])
+check("⭐⭐ 报了 deps -> `cl update` 走 `update.py --run-step deps`（装法与卡片同源）",
+      "FAKEPY update.py --run-step deps" in _out2, _out2.strip()[-260:])
 check("⚠️ 前置：那次也确实重建了 .app（否则上一条可能只是空转）",
       "FAKEPY update.py --run-step app" in _out2, _out2.strip()[-260:])
 
@@ -966,7 +966,86 @@ _fake2.write_text('#!/bin/sh\necho "FAKEPY $@"\nexit 0\n', encoding="utf-8")
 _fake2.chmod(0o755)
 _out3 = _cl_run(_sand_home)
 check("⚠️ 对照：没报 deps -> **不装**（不许每次 cl update 都白等一次）",
-      "FAKEPY update.py --mark-reqs" not in _out3, _out3.strip()[-260:])
+      "FAKEPY update.py --run-step deps" not in _out3, _out3.strip()[-260:])
+
+# ============== G3 ⭐ 没有 uv 也能装依赖（2026-11-09）====================
+# 为什么单列：`.app` 里的 python **没有 pip**，所以"没有 uv 就 `python -m pip`"那条
+# 兜底在真实环境里根本不存在 —— 必须在 deps 步骤里先 `ensurepip` 造一个 pip。
+# 判据只看**命令的顺序和形状**，不联网。
+print("\n--- G3 uv 兜底：ensurepip + pip ---")
+_orig_which = update.shutil.which
+_orig_run = update.subprocess.run
+_orig_mark = update.mark_reqs_installed
+_orig_pip = update._pip_install_cmd
+
+
+class _R:
+    def __init__(self, rc=0, out="", err=""):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+_seen: list = []
+try:
+    update.shutil.which = lambda name, path=None: "/usr/local/bin/uv"
+    update.subprocess.run = lambda cmd, **k: (_seen.append(list(cmd)), _R())[1]
+    _cmd, _why = update._pip_install_cmd()
+    check("⭐ 有 uv -> 用 uv，不碰 ensurepip",
+          _cmd and _cmd[0] == "uv" and _why == "" and len(_seen) == 0, f"{_cmd} {_seen}")
+
+    _seen.clear()
+    update.shutil.which = lambda name, path=None: None
+
+    def _run_nopip(cmd, **k):
+        _seen.append(list(cmd))
+        # 没有 pip 的解释器：`pip --version` 失败，ensurepip / 安装成功
+        return _R(rc=1) if list(cmd)[1:3] == ["-m", "pip"] else _R()
+
+    update.subprocess.run = _run_nopip
+    _cmd, _why = update._pip_install_cmd()
+    check("⭐⭐ 无 uv 且无 pip -> 先探 pip、再 ensurepip、最后用 pip 装",
+          len(_seen) == 2
+          and _seen[0][1:3] == ["-m", "pip"]
+          and _seen[1][1:4] == ["-m", "ensurepip", "--upgrade"]
+          and _cmd and _cmd[1:3] == ["-m", "pip"] and _why == "",
+          f"{_seen} / {_cmd}")
+
+    _seen.clear()
+
+    def _run_haspip(cmd, **k):
+        _seen.append(list(cmd))
+        return _R()                       # pip --version 成功
+
+    update.subprocess.run = _run_haspip
+    _cmd, _why = update._pip_install_cmd()
+    check("⭐⭐ 无 uv 但已有 pip -> 跳过 ensurepip（别每次白起一次，最长 300 s）",
+          len(_seen) == 1 and _seen[0][1:3] == ["-m", "pip"]
+          and _cmd and _cmd[1:3] == ["-m", "pip"] and _why == "",
+          f"{_seen} / {_cmd}")
+
+    update.subprocess.run = lambda cmd, **k: _R(rc=1, err="no ensurepip here")
+    _cmd, _why = update._pip_install_cmd()
+    check("⭐ ensurepip 失败 -> 不装，原因带出来（进 update.log）",
+          _cmd is None and "ensurepip" in _why, f"{_cmd} / {_why}")
+
+    # deps 步骤本身：拿不到命令就不许写戳记
+    _marks: list = []
+    update.mark_reqs_installed = lambda: _marks.append(1)
+    update._pip_install_cmd = lambda: (None, "无 uv；ensurepip 失败：boom")
+    _r = update.run_step("deps")
+    check("⭐⭐ deps 拿不到命令 -> ok=False、错误带原因、**不写戳记**",
+          _r.get("ok") is False and "boom" in str(_r.get("error")) and not _marks, f"{_r} {_marks}")
+
+    update._pip_install_cmd = lambda: (["true"], "")
+    update.subprocess.run = lambda cmd, **k: _R()
+    _r = update.run_step("deps")
+    check("⭐ deps 真跑成功 -> 写戳记（卡片下次不再提示补依赖）",
+          _r.get("ok") is True and len(_marks) == 1, f"{_r} {_marks}")
+finally:
+    update.shutil.which = _orig_which
+    update.subprocess.run = _orig_run
+    update.mark_reqs_installed = _orig_mark
+    update._pip_install_cmd = _orig_pip
+
 
 # ============== B13 ⭐ 构建指纹**不该**被 VERSION 触发（2026-10-04）==============
 # 为什么单列：`VERSION` **每版都变**，而它唯一的落点（Info.plist 的

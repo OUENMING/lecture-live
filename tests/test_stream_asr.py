@@ -36,7 +36,8 @@ import numpy as np  # noqa: E402
 import websockets.sync.server as wss  # noqa: E402
 
 import stream_asr  # noqa: E402
-from stream_asr import SR, Sealed, StreamASR, StreamCore, classify_error, notice_for  # noqa: E402
+from stream_asr import (SR, Sealed, StreamASR, StreamCore, Tok, classify_error,  # noqa: E402
+                        notice_for)
 
 FAILED: list[str] = []
 
@@ -131,6 +132,8 @@ class FakeSoniox:
                         first = False
                     elif isinstance(js, dict) and js.get("type") == "keepalive":
                         rec["keepalives"] += 1
+                    elif isinstance(js, dict) and js.get("type") == "finalize":
+                        rec["finalize"] = rec.get("finalize", 0) + 1
                     else:
                         break                        # 空文本帧 = 客户端收尾
         except Exception:                            # noqa: BLE001
@@ -531,6 +534,196 @@ def t_transport_happy_path() -> None:
         son.close()
         wk.close()
     assert not s.alive() and s.reason() == "", (s.alive(), s.reason())
+
+
+def t_no_token_stall_reconnects() -> None:
+    """⭐ 3.11.1：连接活着、进度在涨、但一条 token 都没有 → 判 stale 重连。
+
+    2026-11-09 美国用户课的真实形状：空进度消息每 1.5 s 一条，`msg_gap` / backlog /
+    `total!=0` 三条全绿，客户端白等 12 分钟。这里把阈值压到 0.5 s 复现。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, no_token_s=0.5, no_token_hold_s=0.2)
+    stop = threading.Event()
+
+    def progress():
+        n = 0
+        while not stop.is_set():
+            n += 200
+            son.to_send.put({"tokens": [], "total_audio_proc_ms": n,
+                             "final_audio_proc_ms": 0})
+            time.sleep(0.1)
+
+    th = threading.Thread(target=progress, daemon=True)
+    try:
+        assert wait_until(s.alive)
+        th.start()
+        for _ in range(30):
+            s.feed(np.full(SR // 10, 0.2, dtype="float32"))   # 有信号：本该出词
+            time.sleep(0.05)
+        assert wait_until(lambda: s.metrics()["reconnects"] >= 1 or s.reason() == "stale",
+                          timeout=6), (s.reason(), s.metrics())
+    finally:
+        stop.set()
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_core_seal_open() -> None:
+    """⭐ 3.11.1：手动收口要把半句封出去，并把水位线推过去（不能重复封）。"""
+    core = StreamCore(clock=lambda: 0.0, stable_s=0.3)
+    # Soniox 的 token 文本自带前导空格（真实形状）—— 直接拼接就是原句。
+    core.feed([Tok("Hello", 0, 200, True)], [Tok(" world", 200, 400, False)])
+    out = core.seal_open()
+    assert len(out) == 1 and out[0].text == "Hello world", out
+    assert core.draft_text() == "", core.draft_text()
+    core.feed([Tok(" Again", 400, 600, True)], [])
+    assert core.seal_open()[0].text == " Again"
+
+
+def t_finalize_sent_when_pending() -> None:
+    """⭐ 3.11.1：手里有未封口 token 时，定期发官方 `{"type":"finalize"}`。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, finalize_s=0.3, response_timeout_s=10.0)
+    try:
+        assert wait_until(s.alive)
+        son.to_send.put({"tokens": [{"text": "Hello", "start_ms": 0,
+                                     "end_ms": 200, "is_final": False}]})
+        for _ in range(20):
+            s.feed(np.full(SR // 10, 0.2, dtype="float32"))
+            time.sleep(0.05)
+        assert wait_until(lambda: son.connections[0].get("finalize", 0) >= 1,
+                          timeout=5), son.connections[0]
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_finalize_timer_not_stale_after_silence() -> None:
+    """⭐ 3.11.1：没有待封口 token 时也要重置 finalize 计时器。
+
+    否则静音超过 `finalize_s` 后计时器一直过期：老师一开口、第一个 token 到手就
+    立刻 finalize，把刚出口的几个词切成独立一句（OCR 第三轮第 3 条）。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, finalize_s=0.5, response_timeout_s=10.0)
+    try:
+        assert wait_until(s.alive)
+        for _ in range(30):                       # 1.5 s 静音：没有 token，不该发 finalize
+            s.feed(np.full(SR // 10, 0.2, dtype="float32"))
+            time.sleep(0.05)
+        assert son.connections[0].get("finalize", 0) == 0, son.connections[0]
+        # 旧代码：`_fin_at` 停在握手那一刻，这里会 ≈1.5 s（> 0.5 s 间隔）
+        gap = time.monotonic() - s._fin_at
+        assert gap <= 0.7, f"静音后 finalize 计时器没重置：{gap:.2f}s 前"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_fin_seals_open_sentence() -> None:
+    """⭐ 3.11.1：`<fin>` 到达时把手上没有标点的半句也封出去（手动收口的另一半）。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    got: queue.Queue = queue.Queue()
+    # ⚠️ `response_timeout_s` 要放大：本条没有进度消息，默认 1.5 s 会把会话判死重连，
+    #    `<fin>` 落到新会话上就测不到（这条测试自己踩过）。
+    s = make_asr(wk, son, on_sealed=got.put, response_timeout_s=10.0)
+    try:
+        assert wait_until(s.alive)
+        # ⚠️ 必须是 **non-final**：final token 会被 `_seal_final_ends` 直接封掉，
+        #    那样这条判据就测不到 `<fin>`（变异验证发现过这个假绿）。
+        son.to_send.put({"tokens": [{"text": " Hi", "start_ms": 0,
+                                     "end_ms": 100, "is_final": False}]})
+        time.sleep(0.5)                       # 等过 P_stable：没有标点，不该自己封
+        assert got.empty(), "没有句末标点不该自己封口"
+        son.to_send.put({"tokens": [{"text": "<fin>", "is_final": True}]})
+        assert wait_until(lambda: not got.empty(), timeout=3), "`<fin>` 该强制封口"
+        assert got.get_nowait().text == " Hi"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_progress_only_does_not_clear_open_sentence() -> None:
+    """⭐ 3.11.1：只有进度、没有 token 的消息不许清掉手里的半句。
+
+    官方每条响应都带 `total_audio_proc_ms`；旧写法 `if parsed or tot is not None`
+    仍会把「空 token + 有 total」的消息喂给 core，`feed([], [])` 清空 `_nonfinal`，
+    紧跟的 `<fin>` 就封不出东西（OCR 第二轮第 1 条）。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    got: queue.Queue = queue.Queue()
+    s = make_asr(wk, son, on_sealed=got.put, response_timeout_s=10.0)
+    try:
+        assert wait_until(s.alive)
+        son.to_send.put({"tokens": [{"text": " Hi", "start_ms": 0,
+                                     "end_ms": 100, "is_final": False}]})
+        time.sleep(0.5)                       # 过 P_stable：没有标点，不该自己封
+        son.to_send.put({"tokens": [], "total_audio_proc_ms": 500})
+        son.to_send.put({"tokens": [], "total_audio_proc_ms": 600})
+        son.to_send.put({"tokens": [{"text": "<fin>", "is_final": True}],
+                         "total_audio_proc_ms": 700})
+        assert wait_until(lambda: not got.empty(), timeout=3), "进度消息清掉了半句"
+        assert got.get_nowait().text == " Hi"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_output_stalled_waits_for_hold() -> None:
+    """⭐ 3.11.1：闸门 `output_stalled()` 不能只看单次快照 —— 要比 stale 判据早开。
+
+    早开 `hold_s` 秒会让本地草稿/定稿先跑，Soniox 在 hold 窗口内恢复就出现两份
+    （OCR 第二轮第 2 条）。
+    """
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son, no_token_s=0.3, no_token_hold_s=3.0, response_timeout_s=10.0)
+    stop = threading.Event()
+
+    def progress():
+        n = 0
+        while not stop.is_set():
+            n += 200
+            son.to_send.put({"tokens": [], "total_audio_proc_ms": n,
+                             "final_audio_proc_ms": 0})
+            time.sleep(0.1)
+
+    th = threading.Thread(target=progress, daemon=True)
+    try:
+        assert wait_until(s.alive)
+        th.start()
+        for _ in range(20):                              # ~1 s 有信号、无 token
+            s.feed(np.full(SR // 10, 0.2, dtype="float32"))
+            time.sleep(0.05)
+        assert not s.output_stalled(), "闸门比 stale 判据（hold）早开"
+    finally:
+        stop.set()
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_no_token_stalled_requires_hold() -> None:
+    """⭐ 3.11.1：stale 判据必须「lag + hold + 新读数」三者同时成立（闸门共用）。"""
+    kw = dict(proc_ms=61_000.0, tok_ms=0.0, sent=16000, loud_at=100.0,
+              since=100.0, since_seq=1, seq=2, no_token_s=60.0, hold_s=5.0)
+    assert not stream_asr.no_token_stalled(103.0, **kw), "hold 没到就判死"
+    assert stream_asr.no_token_stalled(106.0, **kw)
+    assert not stream_asr.no_token_stalled(106.0, **{**kw, "seq": 1}), "没有新读数"
+    assert not stream_asr.no_token_stalled(106.0, **{**kw, "loud_at": 90.0}), "静音不该判死"
+    assert not stream_asr.no_token_stalled(106.0, **{**kw, "since": None}), "还没起计"
+    assert not stream_asr.no_token_stalled(106.0, **{**kw, "proc_ms": 59_000.0}), "差不够"
 
 
 def t_transport_model_not_available_retries_v5() -> None:
@@ -1716,6 +1909,14 @@ def main() -> int:
         ("transport: 默认领 key 客户端（真头）", t_transport_default_key_client),
         ("transport: region= 进领 key 请求体", t_transport_region_goes_to_worker),
         ("transport: model_not_available → 换 v5 重连一次", t_transport_model_not_available_retries_v5),
+        ("transport: 有连接无出词 → 判 stale 重连（11-09）", t_no_token_stall_reconnects),
+        ("core: 手动收口 seal_open（11-09）", t_core_seal_open),
+        ("transport: 有待封口 token → 定期 finalize（11-09）", t_finalize_sent_when_pending),
+        ("transport: 无待封口 token 也重置 finalize 计时（11-09）", t_finalize_timer_not_stale_after_silence),
+        ("transport: <fin> 强制封口半句（11-09）", t_fin_seals_open_sentence),
+        ("transport: 进度消息不清半句（11-09 OCR2）", t_progress_only_does_not_clear_open_sentence),
+        ("transport: 闸门等 hold 后才放行（11-09 OCR2）", t_output_stalled_waits_for_hold),
+        ("core: stale 判据需要 hold + 新读数（11-09 OCR2）", t_no_token_stalled_requires_hold),
         ("transport: 段号映射", t_transport_segments),
         ("stream: 丢包逐窗口记账（2026-11-02）", t_drop_windows),
     ]:

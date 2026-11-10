@@ -95,6 +95,20 @@ BACKLOG_HOLD_S = 3.0
 #: 服务端一直回 `total_audio_proc_ms=0`（消息在来、但一毫秒音频都没处理）的兜底。
 #: 开流/大 context 就绪时 0 是合法的；但持续这么久仍是 0 → 判 `stale` 重连。
 ZERO_PROC_TIMEOUT_S = 15.0
+#: ⭐ 3.11.1：**有连接、有进度、没有词**。服务端一直在推进 `total_audio_proc_ms`、
+#: 消息也在到（所以上面三条判据全被绕开），但连续这么久没有新 token → 判 `stale` 重连。
+#: 2026-11-09 美国用户 CHE002A：10:36 起 12 分钟只回空进度，`msg_gap=1.8 s`、
+#: `backlog=1.8 s`、`total≠0`，三条全绿，整条流水线静默（复盘见 Obsidian 11-09 复盘）。
+NO_TOKEN_S = 60.0
+#: 无 token 持续这么久才动作 —— 挡掉「一句话很长、半分钟没标点」的正常情形。
+NO_TOKEN_HOLD_S = 5.0
+#: 只有近期**有信号**才算「本该出词」：静音课堂里没有 token 是正常的。
+NO_TOKEN_LOUD_WINDOW_S = 10.0
+#: 16 kHz PCM 的平均绝对幅度阈值（课堂实测 0.02–0.1；静音底噪 < 0.002）。
+NO_TOKEN_LOUD_MEAN = 0.004
+#: 手动收口：手上还有未封口 token 时，每隔这么久发一次 `{"type":"finalize"}`。
+#: 官方文档：可多次调用，别太频繁；`finalize` 后 token 以 `is_final` 返回并带 `<fin>`。
+FINALIZE_S = 25.0
 #: ⭐ 2026-10-26 掉线自愈：第 n 次重连**之前**等多久（秒）；长度 = 预算（一段「连续不稳」里最多重连几次）。
 #: 第一次立刻重连（短暂抖动不该多等）；之后逐步放慢，免得网络刚掉时
 #: 连着撞墙（具体档位见下面 2026-10-29 的改动）。等待期间 Soniox 不出词，本地草稿 / 定稿照常接手（`allow_local()` 看 `alive()`），
@@ -360,6 +374,28 @@ class StreamCore:
             self._cand_key, self._cand_at = None, None
         return self.take_sentences()
 
+    def seal_open(self) -> list[Sealed]:
+        """**手动收口**：把手上的半句封出去并推水位线（`{"type":"finalize"}` / `<fin>` 用）。
+
+        ⚠️ 与 `flush()` 的区别：这条走**会话中间**，必须推 `_wm_ms` —— 否则下一条
+           non-final 快照会把刚封过的词再带回来，同一句进两次笔记。
+        ⚠️ 代价是可能在句中切开（没有标点）。这是有意的取舍：2026-11-09 美国用户课
+           连续 12 分钟没有 endpoint，宁可切段也不整段丢。
+        """
+        self._maybe_seal()
+        if self._final or self._nonfinal:
+            toks = self._final + self._nonfinal
+            end = max(t.end_ms for t in toks)
+            self._sentences.append(Sealed(
+                "".join(t.text for t in toks),
+                min(t.start_ms for t in toks) / 1000.0,
+                end / 1000.0))
+            self._wm_ms = max(self._wm_ms, end)
+            self._final = [t for t in self._final if t.end_ms > self._wm_ms]
+            self._nonfinal = [t for t in self._nonfinal if t.end_ms > self._wm_ms]
+            self._cand_key, self._cand_at = None, None
+        return self.take_sentences()
+
     # ---- 语意封口（`semantic_seal.py` 用）
 
     def unsealed_words(self) -> list[str]:
@@ -470,6 +506,27 @@ class StreamCore:
 # ══════════════════════════════════════════════════════════════════════
 
 # ── 生产量具（纯函数）──
+
+def no_token_stalled(now: float, *, proc_ms: float, tok_ms: float, sent: int,
+                     loud_at: float, since: float | None, since_seq: int, seq: int,
+                     no_token_s: float, hold_s: float,
+                     loud_window_s: float = NO_TOKEN_LOUD_WINDOW_S) -> bool:
+    """「有连接、有进度、**没有词**」的完整判据 —— `reason()` 与 `output_stalled()` 共用。
+
+    ⭐ 3.11.1：三条老判据（timeout / backlog / total=0）都会被空进度消息骗过。
+    这里要求：服务端处理进度比最近一条 token 至少多 `no_token_s` 秒、近期有信号
+    （静音课堂里没有 token 是正常的）、且这个状态持续 `hold_s` 秒、期间还有**新读数**。
+
+    ⚠️ 闸门（`output_stalled`）必须用同一口径：只看单次快照会比 stale 判据早
+       `hold_s` 秒放行本地，Soniox hold 窗口内恢复出词时又关掉 → 两份草稿/定稿上屏
+       （OCR 第二轮第 2 条）。
+    """
+    return bool(proc_ms > 0 and sent > 0
+                and proc_ms - tok_ms > no_token_s * 1000.0
+                and now - loud_at <= loud_window_s
+                and since is not None and now - since >= hold_s
+                and seq > since_seq)
+
 
 def seal_latency_s(now: float, audio_t0: float | None, end_s: float) -> float | None:
     """封口延迟（秒）= 上移墙钟 − 句尾的音频时刻 —— 与离线评估「句号词尾→上移」同口径。
@@ -701,6 +758,8 @@ class StreamASR:
                  response_timeout_s: float = RESPONSE_TIMEOUT_S,
                  backlog_s: float = BACKLOG_S, backlog_hold_s: float = BACKLOG_HOLD_S,
                  zero_proc_timeout_s: float = ZERO_PROC_TIMEOUT_S,
+                 no_token_s: float = NO_TOKEN_S, no_token_hold_s: float = NO_TOKEN_HOLD_S,
+                 finalize_s: float = FINALIZE_S,
                  finish_wait_s: float = FINISH_WAIT_S, audio_max_s: float = QUEUE_MAX_S,
                  chunk_s: float = CHUNK_S, ws_url: str = WS_URL, region: str = "",
                  context_text: str = "", terms_max: int = TERMS_MAX,
@@ -726,6 +785,9 @@ class StreamASR:
         self._backlog_s = float(backlog_s)
         self._backlog_hold_s = float(backlog_hold_s)
         self._zero_proc_timeout_s = float(zero_proc_timeout_s)
+        self._no_tok_s = float(no_token_s)
+        self._no_tok_hold_s = float(no_token_hold_s)
+        self._finalize_s = float(finalize_s)
         self._finish_wait_s = float(finish_wait_s)
         self._retry_delays_s = tuple(max(0.0, float(d)) for d in retry_delays_s)
         self._retry_reset_s = float(retry_reset_s)
@@ -786,6 +848,19 @@ class StreamASR:
         #: 起计时那条消息的序号；兜底也必须等到**新读数**仍为 0，
         #: 否则后续缺 `total` 字段的消息会让 0 冻结、15s 后误判（OCR 第三轮第 1 条）。
         self._zero_proc_seq = 0
+        #: ⭐ 3.11.1：**最近一条 token 的 `end_ms`（会话相对）**。与
+        #: `total_audio_proc_ms` 相减 = 服务端「处理到哪儿」与「出词到哪儿」的差。
+        #: 空进度消息不更新它 —— 这正是「有连接无出词」能被抓住的原因。
+        self._last_tok_ms = 0
+        #: 无 token 起计时刻 / 起计那条进度消息的序号（要等到新读数仍无 token）。
+        self._no_tok_since: float | None = None
+        self._no_tok_seq = 0
+        #: 本课最大「处理进度 − 出词进度」（毫秒），进报告当诊断。
+        self._tok_lag_max_ms = 0.0
+        #: 最近一次发出**有信号**音频的墙钟时刻（静音课堂里本来就没 token）。
+        self._loud_at = 0.0
+        #: 最近一次发 `{"type":"finalize"}` 的墙钟时刻（每会话重置）。
+        self._fin_at = 0.0
         #: 这次重连要不要「跳到实时」（丢弃积压音频）。timeout / stale 置位；
         #: 普通断线不清，按原样续传（10 s 队列内的短缺口不丢内容）。
         self._skip_next = False
@@ -846,6 +921,28 @@ class StreamASR:
         with self._lock:
             return self._reason
 
+    def output_stalled(self) -> bool:
+        """连接还活着，但**已经很久没有新 token**（本地兜底该接手）。
+
+        ⭐ 3.11.1：`alive()` 只表示握手成功 —— 「有连接无出词」时它仍为真，
+        `stream_gate.allow_local()` 就一直是假，本地草稿/定稿整条被闸住。
+        这里只回答「现在这个状态是不是该让本地接手」，不改 `alive()` 的语义。
+        """
+        with self._lock:
+            if not (self._alive and not self._finished and not self._stopped):
+                return False
+            proc, tok = self._proc_rel_ms, self._last_tok_ms
+            sent = self._sent_samples
+            loud_at = self._loud_at
+            since, since_seq, seq = self._no_tok_since, self._no_tok_seq, self._proc_seq
+        # ⚠️ 和 `reason()` 共用同一份判据：只看单次快照会让闸门比 stale 早 5 s
+        #    打开，Soniox 在 hold 窗口内恢复出词时又关掉 → 两份草稿/定稿都可能上屏
+        #    （OCR 第二轮第 2 条）。
+        return no_token_stalled(
+            time.monotonic(), proc_ms=proc, tok_ms=tok, sent=sent, loud_at=loud_at,
+            since=since, since_seq=since_seq, seq=seq,
+            no_token_s=self._no_tok_s, hold_s=self._no_tok_hold_s)
+
     def notice_text(self) -> str:
         """给人看的一行（`reason()` 的文案）；**没退回时是空串**（别报假警）。"""
         return notice_for(self.reason()) if self.reason() else ""
@@ -891,6 +988,9 @@ class StreamASR:
             failed_sessions = self._failed_sessions
             connections = self._sess_n
             drain_gap_max_s = self._drain_gap_max
+            #: ⭐ 3.11.1：服务端「处理到哪」与「出词到哪」的最大差（秒）。
+            #: 这个数大、`reconnects` 又是 0 → 出现过「有连接无出词」但没被重连救掉。
+            tok_lag_max_s = self._tok_lag_max_ms / 1000.0
             # ⭐ 3.11：模型名也在锁内取快照（v5 回退可能发生在读报告的同时）。
             model_name = MODEL_FALLBACK if self._force_v5 else MODEL
             model_fb = bool(self._force_v5)
@@ -928,6 +1028,7 @@ class StreamASR:
                 "reconnect_downtime_s": round(float(down_s), 1),
                 "skipped_s": round(float(skipped_s), 1),
                 "backlog_max_s": round(float(backlog_max_s), 1),
+                "token_lag_max_s": round(float(tok_lag_max_s), 1),
                 "msg_gap_max_s": round(float(msg_gap_max_s), 2),
                 #: ⭐ 3.11：`msg_gap_max_s` 的实际口径（客户端排空间隔）—— 另给一个明确名字。
                 "drain_gap_max_s": round(float(drain_gap_max_s), 2),
@@ -980,7 +1081,7 @@ class StreamASR:
                 try:
                     old = self._audio.get_nowait()
                 except queue.Empty:
-                    pass
+                    pass                                    # 消费者刚好取走了最后一块
                 dropped_item = None
                 try:
                     self._audio.put_nowait(item)
@@ -1081,7 +1182,7 @@ class StreamASR:
             ok = self._core.seal_through_word(k, expect)
             sealed = self._core.take_sentences() if ok else []
         for s in sealed:
-            self._fire(s, record_lat=False)
+            self._fire(s, record_lat=False, semantic=True)
         return ok
 
     def stop(self) -> None:
@@ -1280,6 +1381,10 @@ class StreamASR:
             self._backlog_since = None
             self._zero_proc_since = None
             self._zero_proc_seq = 0
+            self._last_tok_ms = 0
+            self._no_tok_since = None
+            self._no_tok_seq = 0
+            self._fin_at = time.monotonic()
             self._last_msg_at = time.monotonic()
             self._last_drain_at = 0.0
             self._send_since = None
@@ -1495,6 +1600,33 @@ class StreamASR:
                     return "stale"
             else:
                 self._zero_proc_since = None
+            # ⭐ 3.11.1：「有连接、有进度、**没有词**」。上面三条判据都会被空进度消息骗过：
+            #    消息在来（msg_gap 正常）、total 在涨（backlog 正常）、也不为 0。
+            #    只有近期**有信号**才算异常 —— 静音课堂里没有 token 是正常的。
+            if (self._proc_rel_ms > 0 and self._sent_samples > 0
+                    and time.monotonic() - self._loud_at <= NO_TOKEN_LOUD_WINDOW_S):
+                lag = self._proc_rel_ms - self._last_tok_ms
+                if lag > self._tok_lag_max_ms:
+                    self._tok_lag_max_ms = lag
+                if lag > self._no_tok_s * 1000.0:
+                    if self._no_tok_since is None:
+                        self._no_tok_since = now
+                        self._no_tok_seq = self._proc_seq
+                else:
+                    self._no_tok_since = None
+            else:
+                self._no_tok_since = None
+            # 与闸门 `output_stalled()` 同一份判据（见模块级 `no_token_stalled`）
+            if no_token_stalled(
+                    now, proc_ms=self._proc_rel_ms, tok_ms=self._last_tok_ms,
+                    sent=self._sent_samples, loud_at=self._loud_at,
+                    since=self._no_tok_since, since_seq=self._no_tok_seq,
+                    seq=self._proc_seq, no_token_s=self._no_tok_s,
+                    hold_s=self._no_tok_hold_s):
+                with self._lock:
+                    self._pending = "stale"
+                    self._skip_next = True
+                return "stale"
             if dead:                                # 收线程死了
                 return "disconnected"
             try:
@@ -1515,6 +1647,10 @@ class StreamASR:
                 buf = np.frombuffer(pcm, dtype="<i2")
                 if carry.size:
                     buf = np.concatenate((carry, buf))
+                # ⭐ 3.11.1：「近期有没有信号」—— 静音课堂里没有 token 是正常的，
+                #    只有有声的时候「60 s 没词」才说明服务端卡了。
+                if buf.size and float(np.abs(buf).mean()) >= NO_TOKEN_LOUD_MEAN * 32768.0:
+                    self._loud_at = time.monotonic()
                 i = 0
                 while i + chunk_samples <= buf.size:
                     self._timed_send(ws, buf[i:i + chunk_samples].tobytes())
@@ -1522,6 +1658,20 @@ class StreamASR:
                     last_send = time.monotonic()
                     i += chunk_samples
                 carry = buf[i:].copy()
+                # ⭐ 3.11.1：手动收口。官方 `{"type":"finalize"}` 会把手上音频全部
+                #    标 final 并回 `<fin>`；没有它，Soniox 的 endpoint 一直不来时
+                #    整段永远封不了口（2026-11-09 美国用户课 12 分钟全丢）。
+                if (self._finalize_s > 0 and self._fin_at > 0
+                        and time.monotonic() - self._fin_at >= self._finalize_s):
+                    with self._lock:
+                        pend = self._core.pending()
+                    if pend:
+                        self._timed_send(ws, json.dumps({"type": "finalize"}))
+                    # ⚠️ **没有 pending 也要重置**：否则静音超过 `finalize_s` 后计时一直
+                    #    处于过期状态，老师一开口、第一个 token 到手就立刻 finalize，
+                    #    把刚出口的几个词切成独立一句（OCR 第三轮第 3 条）；顺带避免
+                    #    过期后每块音频都抢一次锁。
+                    self._fin_at = time.monotonic()
             except Exception:                       # noqa: BLE001
                 return "disconnected"              # `_timed_send` 的 finally 已经清了 `_send_since`
         return self._finish_stream(ws)
@@ -1578,6 +1728,14 @@ class StreamASR:
                 else:                               # 兼容旧事件形状（收线程现在恒发 3 元组）
                     fin, nf = payload
                     tot = None
+                # ⭐ 3.11.1：「服务端出词到哪一刻」—— **空进度消息不更新它**，
+                #    所以 `total_audio_proc_ms` 与它的差能抓住「有连接无出词」。
+                #    ⚠️ 用**会话相对**的原始 end_ms（加 `_sess_off_ms` 之前）。
+                if fin or nf:
+                    with self._lock:
+                        last = max(t.end_ms for t in fin + nf)
+                        if last > self._last_tok_ms:
+                            self._last_tok_ms = last
                 off = self._sess_off_ms
                 if off is None:                     # 没发过音频就来了词（只有假服务会）：按当前流位置
                     with self._lock:
@@ -1592,9 +1750,15 @@ class StreamASR:
                         self._proc_rel_ms = float(tot)
                         self._proc_sent_ms = self._sent_samples * 1000.0 / SR
                         self._proc_seq += 1
-                with self._lock:
-                    self._core.feed(fin, nf)
-                    sealed = self._core.take_sentences()
+                # ⚠️ 只有**带 token** 的消息才动 core 的快照：官方每条响应都自带
+                #    `total_audio_proc_ms`，空 token 的进度消息 / `<fin>` 回执若照喂，
+                #    `feed([], [])` 会把手里未封口的半句和 P_stable 计时一起清掉，
+                #    紧随其后的 `seal_open()` 就没词可封（OCR 第二轮第 1 条）。
+                sealed = []
+                if fin or nf:
+                    with self._lock:
+                        self._core.feed(fin, nf)
+                        sealed = self._core.take_sentences()
                 for s in sealed:
                     self._fire(s)
             elif kind == "end":
@@ -1608,6 +1772,13 @@ class StreamASR:
                         cb(between)
                     except Exception:               # noqa: BLE001
                         pass                        # 调用方的错不该打死收线程
+            elif kind == "fin":
+                # ⭐ 3.11.1：`{"type":"finalize"}` 的回执 —— 把手上的半句强制封出去。
+                #    不计 seal_latency：这是我们主动收口，不是「等服务端出词」的延迟。
+                with self._lock:
+                    sealed = self._core.seal_open()
+                for s in sealed:
+                    self._fire(s, record_lat=False)
         self._tick()
         if fatal:
             with self._lock:
@@ -1651,11 +1822,19 @@ class StreamASR:
                 tot = msg.get("total_audio_proc_ms")
                 if not isinstance(tot, (int, float)) or isinstance(tot, bool):
                     tot = None
+                # ⚠️ 只有控制帧（`<end>` / `<fin>`）、且没有内容/进度的消息**不要**喂给 core：
+                #    空 non-final 快照会把当前半句清掉（`<fin>` 那条会先把词擦掉再封口）。
+                # 进度读数也要进队（`_proc_rel_ms` / `_proc_seq` 靠它），
+                # 但「空 token 不喂 core」的判据在 `_drain_events` 里（OCR 第二轮第 1 条）。
                 self._events.put(("msg", (fin, nf, tot)))
                 # ⭐ 3.11：`<end>` 在 `parse_tokens` 里被当控制帧丢了 —— 这里单独报一声
                 #    （排在这条消息的词之后：先吃完它之前的词，再判是不是在两句之间）。
                 if any(isinstance(t, dict) and t.get("text") == "<end>" for t in toks):
                     self._events.put(("end", None))
+                # ⭐ 3.11.1：手动收口完成的标记 `<fin>`（`{"type":"finalize"}` 的回复）。
+                #    同样先吃完词再封口；`<fin>` 之前那批 token 已经是 final。
+                if any(isinstance(t, dict) and t.get("text") == "<fin>" for t in toks):
+                    self._events.put(("fin", None))
         except Exception:                           # noqa: BLE001
             pass
         finally:
@@ -1683,10 +1862,13 @@ class StreamASR:
 
     # ---- 状态
 
-    def _fire(self, s: Sealed, *, record_lat: bool = True) -> None:
+    def _fire(self, s: Sealed, *, record_lat: bool = True, semantic: bool = False) -> None:
         # ⭐ 3.10 量具：计数 + 上移延迟（墙钟 − 句尾音频时刻）。锁内只做加法，微秒级。
         #    语意封口（`record_lat=False`）不进延迟分布：它的「延迟」是我们故意等的，
         #    混进去会把 `seal_latency_s` 这个健康指标拉歪。
+        # ⚠️ `semantic` 必须单独给：11-09 起手动 finalize 也走 `record_lat=False`，
+        #    再用 `not record_lat` 推「是不是语意封口」会把 finalize 错记成 semantic
+        #    （OCR 第三轮第 1 条）。
         with self._lock:
             self._sealed_n += 1
             if record_lat and len(self._seal_lat) < SEAL_LAT_MAX:
@@ -1702,7 +1884,7 @@ class StreamASR:
                       {"audio_s": round(max(0.0, float(s.end_s) - float(s.start_s)), 2),
                        "char_bucket": ("0" if n == 0 else "1-20" if n <= 20
                                        else "21-100" if n <= 100 else ">100"),
-                       "semantic": not record_lat},
+                       "semantic": bool(semantic)},
                       component="asr")
         except Exception:                           # noqa: BLE001
             pass

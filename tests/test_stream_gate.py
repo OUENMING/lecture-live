@@ -131,6 +131,16 @@ class GateFlags(unittest.TestCase):
         self.assertTrue(g.on)
         self.assertFalse(g.allow_local())
 
+    def test_连接活着但很久没出词时放行本地(self):
+        """⭐ 3.11.1：`alive()` 只表示握手成功。Soniox 只回空进度时（11-09 美国用户课），
+        本地草稿/定稿必须接手，否则整条流水线静默。"""
+        class _Stalled(FakeStream):
+            def output_stalled(self) -> bool:
+                return True
+
+        g = StreamGate(_Stalled(alive=True))
+        self.assertTrue(g.allow_local())
+
     def test_建连中照喂音频但本地照跑(self):
         """`alive()` 还是假（还没接上）时：本地不许停 —— 不然这几秒没有任何字幕。"""
         s = FakeStream(alive=False)

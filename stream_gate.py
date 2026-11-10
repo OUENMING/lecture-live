@@ -65,6 +65,7 @@ class StreamGate:
         self._noticed = False
         self._freed = False
         self._stopped = False
+        self._stall_err = False      # `output_stalled()` 抛过异常没（只报一次）
 
     # ---- 开课 / 收尾
 
@@ -166,10 +167,33 @@ class StreamGate:
                 and not self._stream.reason())
 
     def allow_local(self) -> bool:
-        """本地草稿 / 定稿要不要照跑。Soniox 在出词时 -> False（两道闸同时关）。"""
+        """本地草稿 / 定稿要不要照跑。Soniox 在出词时 -> False（两道闸同时关）。
+
+        ⭐ 3.11.1：**「连接活着但很久没出词」也要放行**。`alive()` 只表示握手成功；
+        2026-11-09 美国用户课 Soniox 只回空进度 12 分钟，`alive()` 一直为真，
+        本地兜底整条被闸住。`output_stalled()` 是“连接还在、但该出词却不出”的判据。
+        ⚠️ 老版本 / 假对象没有这个方法时退回原语义（`try/except` 兜底，别让闸门抛；
+           抛过一次会记一条 `asr.gate_stall_error` 遥测，只记一次）。
+        """
         if self._stream is None or self._freed:
             return True
-        return not self._stream.alive()
+        if not self._stream.alive():
+            return True
+        try:
+            return bool(self._stream.output_stalled())
+        except Exception:                                    # noqa: BLE001
+            # 老版本 / 假对象没有这个方法 → 退回原语义（不放行）。但**不能静默**：
+            # 真出 bug 时闸门会一直 fail-closed，本地兜底永远不接管还查不到原因。
+            # 只报一次，别在每份音频上都刷遥测。
+            if not self._stall_err:
+                self._stall_err = True
+                try:
+                    import telemetry as _tel
+                    _tel.emit("asr.gate_stall_error", {"where": "allow_local"},
+                              component="asr", severity="warn")
+                except Exception:                            # noqa: BLE001
+                    pass
+            return False
 
     # ---- 草稿（Soniox 这半边）
 

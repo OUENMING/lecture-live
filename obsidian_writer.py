@@ -187,6 +187,30 @@ def desk_note_path(date: str, course: str, *, home=None) -> Path:
     return p
 
 
+def review_state(stats: dict, *, expected: bool = True,
+                 cancelled: bool = False) -> str:
+    """复习层的**五态**判据（`off / cancelled / failed / partial / ok`）—— 只此一处。
+
+    · `off`       —— 没配 key / raw 档：本来就不该跑，**不算降级**；
+    · `cancelled` —— 用户主动停（复习层还没开始）：不是残次品，别报假警；
+    · `failed`    —— 配了（`expected`）或尝试过，但一块都没回来；
+    · `partial`   —— 有成功也有失败（3/8 也是残次品，不能当「写好了」）；
+    · `ok`        —— 全成。
+    ⚠️ 旧的二值判据（`total > 0 and ok == 0`）会把 3/8 判成成功，漏得最彻底。
+    """
+    st = stats or {}
+    total = int(st.get("review_total") or 0)
+    ok = int(st.get("review_ok") or 0)
+    attempted = bool(st.get("review_attempted"))
+    if cancelled and not attempted and total <= 0:
+        return "cancelled"
+    if not attempted and total <= 0:
+        return "failed" if expected else "off"
+    if total <= 0 or ok <= 0:
+        return "failed"
+    return "partial" if ok < total else "ok"
+
+
 def note_path_for(vault, date: str, course: str) -> Path:
     """今天这门课的笔记路径。**同日同课已有一份就加时间戳并存，绝不覆盖。**
 
@@ -735,8 +759,8 @@ class ObsidianWriter:
         #       —— 将来的「打包成 MD/PDF」导出的也就是它。
         self.enabled = mode != "no"
         #: ⭐ 3.11：要不要在复习层**之前**先落一版基础笔记（`close()` 里那一步）。
-        #: 后台 worker 派生时置 False —— 生成在另一个进程里，用户看盘上那份只会看到
-        #: 半成品；详情见 `close()` 里那一段。
+        #: 默认 True；后台 worker 也保持 True —— 面板「停止」6 s 就 SIGKILL，
+        #: 关掉基础版会让用户一按停止就一个字节都不剩。详情见 `close()` 那段。
         self._base_note = bool(base_note)
         self._vault = os.path.expanduser(vault) if vault else None
         self._course = course or DEFAULT_COURSE
@@ -760,7 +784,7 @@ class ObsidianWriter:
         #: 🗓 间隔复习日期（`note_v2.review_dates`）。
         self._review_dates: list = []
         #: 🔁 Anki CSV / 交互 HTML 的**文件名**（渲染时写进笔记的说明那几行）。
-        #: ⭐ 3.11：后台模式（`base_note=False`）跳过基础版那一步、而 `close()` 有两处
+        #: ⭐ 3.11：`base_note=False` 会跳过基础版那一步、而 `close()` 有两处
         #: 读它 —— 必须**先是个字符串**，否则 `if self._html_name` 为真、拼路径时炸。
         self._anki_name = ""
         self._html_name = ""
@@ -777,7 +801,10 @@ class ObsidianWriter:
         #: （`on_progress("review", 0, N)`），因为**全部失败时** `note_v2.review()`
         #: 返回 `{}`，`chunk_stats` 根本没挂上（11-03 8/8 失败在报告里完全看不见）。
         self._note_stats: dict = {"review_total": 0, "review_ok": 0,
-                                  "review_failed": 0, "review_generated": False}
+                                  "review_failed": 0, "review_generated": False,
+                                  #: 「复习层**尝试过**」—— 没 key/raw 档是 False（正常关闭），
+                                  #: 有 key 但早退/抛异常是 True + total 0（**失败**）。
+                                  "review_attempted": False}
         self._polish = polish               # 落笔前二次精修(见 polish.py)
         self._polish_model = polish_model or model
         #: 🎯 Jev 的重点句：`[(概率, 句子, [原始行下标]), …]`。
@@ -1382,6 +1409,10 @@ class ObsidianWriter:
         #    看不出，断网时会挂满 connect 超时（judge 的 300 秒超时就是这么来的）。
         if not self._key:
             return {}
+        # 过了 key 闸门就算「尝试过」（哪怕下面 `_build_materials` 立刻抛异常）：
+        # 这样「配了 key 却整层没回来」能被判成失败，而不是当成「没配、正常跳过」。
+        if entries:
+            self._note_stats["review_attempted"] = True
         import note_v2
         self._materials = self._build_materials()
         try:
@@ -2193,11 +2224,10 @@ class ObsidianWriter:
         import note_render
         base_stem = self.vault_path.with_suffix("")
         self._html_name = base_stem.name + ".html"
-        # ⭐ 3.11 后台收尾（`note_worker`）：生成在**另一个进程**里跑，盘上那份「基础版」
-        #    没有意义 —— 用户这次打开时要么还没有，要么就是完整版（计划 §4.4「只能打开
-        #    完整笔记」）。置 `base_note=False` 就跳过这一步，只在完整版结束时原子写一次。
-        #    ⚠️ 默认 True = **今天的行为一个字不变**：开关没开（`CLASSLIVE_NOTE_WORKER=0`）
-        #       时仍然有中间笔记兜底（崩溃时盘上至少有一份可读）。
+        # ⭐ 3.11 后台收尾曾用 `base_note=False`（只写完整版）；2026-11-10 修正：
+        #    面板「停止」等 6 s 就 SIGKILL，而复习层收不到 cancel —— 用户一点停止，
+        #    盘上会**一个字节都没有**。保留基础版兜底，完整版结束时再原子覆盖。
+        #    `base_note=False` 仍然可用（只给明确不要中间产物的调用方）。
         if self._base_note:
             base_data = self._note_data(entries, {}, [], polish_state, base_lost, [],
                                         base_chapters, bool(self._key))

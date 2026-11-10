@@ -480,7 +480,8 @@ def _session_course_date(sess, text: str) -> tuple:
     return "", ""
 
 
-def rebuild_note_for(session_path, *, vault=None, polish=False, log=None, desk_home=None) -> dict:
+def rebuild_note_for(session_path, *, vault=None, polish=False, log=None, desk_home=None,
+                     raw=False) -> dict:
     """给一节课补一份 Obsidian 笔记（**in-process 版**的 `scripts/rebuild_note.py`）。
     返回 `{ok, note, error, msg}`。**永不抛**。
 
@@ -496,7 +497,8 @@ def rebuild_note_for(session_path, *, vault=None, polish=False, log=None, desk_h
     ⚠️ `polish=False` 是**跟 app 现在的默认走**（`--polish` 默认 off，2026-10-12
        起精修默认不跑）：补笔记是"把缺的补上"，不该在下次开机时偷偷跑十几分钟精修。
     """
-    out = {"ok": False, "note": "", "error": "", "msg": ""}
+    out = {"ok": False, "note": "", "error": "", "msg": "",
+           "review_total": 0, "review_ok": 0, "degraded": False}
 
     def _say(s: str) -> None:
         if log is not None:
@@ -522,11 +524,14 @@ def rebuild_note_for(session_path, *, vault=None, polish=False, log=None, desk_h
         import keypoints as _kp
         from cloud_translator import load_api_key
         w = _ow.ObsidianWriter(vault=v, course=course, mode="no",
-                               api_key=load_api_key(None), model="deepseek-flash",
+                               # raw 纯转录档：恢复时也不许发模型请求（复习层/Jev）。
+                               api_key=(None if raw else load_api_key(None)),
+                               model="deepseek-flash",
                                glossary_path=str(pathlib.Path(__file__).with_name(
                                    "glossary.txt")),
-                               polish=polish, keypoints_fn=_kp.pick, desk=True,
-                               desk_home=desk_home)
+                               polish=polish,
+                               keypoints_fn=(None if raw else _kp.pick),
+                               desk=True, desk_home=desk_home)
         # 接管成「已跑完的一节」——同脚本：不新建会话文件，指到既有那份上。
         w.enabled = True
         w.mode = "yes"
@@ -541,6 +546,19 @@ def rebuild_note_for(session_path, *, vault=None, polish=False, log=None, desk_h
         out["ok"] = bool(note) and pathlib.Path(note).is_file()
         if not out["ok"]:
             out["error"] = "close() 没写出笔记（看输出：多半是没设库）"
+        # ⭐ 2026-11-10：复习层 0/N 时笔记是「残次品」，要能看出来（同 note_worker）。
+        try:
+            _st = w.note_stats()
+            out["review_total"] = int(_st.get("review_total") or 0)
+            out["review_ok"] = int(_st.get("review_ok") or 0)
+            out["review_state"] = _ow.review_state(
+                _st, expected=bool(getattr(w, "_key", None)))
+        except Exception:                                 # noqa: BLE001
+            pass
+        out["degraded"] = out.get("review_state") in ("failed", "partial")
+        if out["degraded"]:
+            _say(f"⚠ 笔记降级：复习层 {out['review_ok']}/{out['review_total']}"
+                 f"（{out['review_state']}）")
         return out
     except Exception as e:                                # noqa: BLE001
         return {**out, "error": f"{type(e).__name__}: {str(e)[:160]}"}
@@ -675,7 +693,10 @@ def _spawn_note_worker(*, writer, ui, stem, qa_snapshot, live_pool, course,
             cloud_model=str(getattr(writer, "_model", "") or "deepseek-flash"),
             polish_model=getattr(writer, "_polish_model", None),
             glossary=getattr(writer, "_glossary_path", None),
-            use_cloud=bool(api_key_val),
+            # ⚠️ 纯转录档（raw）不许发任何模型请求（DESIGN 契约）。父进程无条件
+            #    读了 key，直接 `bool(api_key_val)` 会让 worker 跑复习层 + Jev。
+            use_cloud=(bool(api_key_val)
+                       and str((trans or {}).get("mode") or "both") != "raw"),
             trans_mode=str((trans or {}).get("mode") or "both"),
             ever_off=bool((trans or {}).get("ever_off")),
             qa=qa)
@@ -704,7 +725,7 @@ def resume_stale_note_jobs(sessions_dir, *, rebuild=None, log=None, jobs_root=No
     ⚠️ 永不抛（跑在开机那条路上）。
     """
     import note_jobs as _nj
-    out = {"found": 0, "done": 0, "failed": 0}
+    out = {"found": 0, "done": 0, "failed": 0, "skipped": 0}
 
     def _say(s: str) -> None:
         if log is not None:
@@ -723,6 +744,19 @@ def resume_stale_note_jobs(sessions_dir, *, rebuild=None, log=None, jobs_root=No
             stem = p.stem
             j = _nj.read(stem, root=jobs_root)
             if str(j.get("state") or "") != _nj.RUNNING:
+                # ⭐ 上一轮「笔记写好了、票没写成」的收尾：DONE 记录正常不会再扫，
+                #    只有 `note_upload` 没成功时才回来补一张票（publish 是幂等的）。
+                # ⚠️ 只补「显式 False」的记录；字段缺席 = 旧版本写的，别再上传历史笔记。
+                if (str(j.get("state") or "") == _nj.DONE
+                        and j.get("note_upload") is False):
+                    _nf0 = str(j.get("note") or "")
+                    if _nf0 and pathlib.Path(_nf0).is_file():
+                        _pub0 = _publish_rebuilt_note(
+                            stem, sd / (stem + ".md"), _nf0, jobs_root=jobs_root,
+                            log=_say)
+                        if _pub0.get("outbox"):
+                            _nj.finish(stem, _nj.DONE, root=jobs_root,
+                                       note=_nf0, note_upload=True)
                 continue
             if _nj.alive(stem, root=jobs_root):
                 continue                                  # 还在跑，别动
@@ -735,46 +769,72 @@ def resume_stale_note_jobs(sessions_dir, *, rebuild=None, log=None, jobs_root=No
             # 已经有笔记了（worker 写完、只是没来得及记状态）→ 直接收工。
             nf = str(j.get("note") or "")
             if nf and pathlib.Path(nf).is_file():
-                _nj.finish(stem, _nj.DONE, root=jobs_root, note=nf)
+                _pub = _publish_rebuilt_note(stem, sess, nf, jobs_root=jobs_root, log=_say)
+                _nj.finish(stem, _nj.DONE, root=jobs_root, note=nf,
+                           note_upload=bool(_pub.get("outbox")))
                 out["done"] += 1
                 continue
-            _say(f"· {stem}：后台任务没跑完，补生成")
-            r = rb(sess, log=_say)
-            if r.get("ok"):
-                _nj.finish(stem, _nj.DONE, root=jobs_root,
-                           note=str(r.get("note") or ""))
-                out["done"] += 1
-                _say(f"✅ 笔记补好了 → {r.get('note')}")
-            else:
-                _nj.finish(stem, _nj.FAILED, root=jobs_root, error=str(r.get("error") or ""))
-                out["failed"] += 1
+            # ⭐ per-stem 锁：拿不到 = 另一进程（旧 worker / 另一个恢复线程）正在做
+            #    这一节。只读 `alive()` 是 check-then-act，挡不住这种撞车。
+            _lk = _nj.try_lock(stem, root=jobs_root)
+            if _lk is None:
+                out["skipped"] += 1
+                _say(f"· {stem}：另一进程正在生成 —— 不重复补")
+                continue
+            try:
+                _say(f"· {stem}：后台任务没跑完，补生成")
+                _raw = str(((j.get("spec") or {}).get("trans_mode")) or "") == "raw"
+                r = rb(sess, log=_say, raw=_raw)
+                if r.get("ok"):
+                    note = str(r.get("note") or "")
+                    # ⭐ 先出箱、再记 done：反过来的话，崩在中间会让这一节**永远不再补票**
+                    #    （下次启动看到 note 文件在 → 记 done 跳过，note.html 一直没上传）。
+                    _pub = _publish_rebuilt_note(stem, sess, note, jobs_root=jobs_root, log=_say)
+                    _nj.finish(stem, _nj.DONE, root=jobs_root, note=note,
+                               degraded=bool(r.get("degraded")),
+                               review_state=str(r.get("review_state") or ""),
+                               review_total=int(r.get("review_total") or 0),
+                               review_ok=int(r.get("review_ok") or 0),
+                               note_upload=bool(_pub.get("outbox")))
+                    out["done"] += 1
+                    _say(f"✅ 笔记补好了 → {note}")
+                else:
+                    _nj.finish(stem, _nj.FAILED, root=jobs_root,
+                               error=str(r.get("error") or ""))
+                    out["failed"] += 1
+            finally:
+                try:
+                    _lk.close()                           # 释放 per-stem 锁
+                except Exception:                         # noqa: BLE001
+                    pass
     except Exception:                                     # noqa: BLE001
         return out
     return out
 
 
-def _note_looks_written(sessions_dir, stem: str, sess, log=None) -> bool:
+def _note_looks_written(sessions_dir, stem: str, sess, log=None):
     """这节课**看起来**已经有笔记了吗（保守判据，只用来**跳过**补写）。
 
     判据：`Lectures/` 下同日同课有一份笔记，且它的 mtime **不早于**会话文件 ——
     那多半就是这节课自己的笔记（`writer.close()` 写完、收尾还没记上就被杀了）。
+    返回那份笔记的 `Path`（调用方还要拿它补出箱票），没有则 `None`。
     ⚠️ 宁可漏补（日志里说清楚，手动跑脚本还能补），**绝不**生成第二份。
     """
     import obsidian_writer as _ow
     try:
         course, date = _session_course_date(sess, "")
         if not course or not date:
-            return False
+            return None
         v = _ow.resolve_vault(None)
         if not v:
-            return False
+            return None
         lectures = pathlib.Path(v) / "Lectures"
         if not lectures.is_dir():
-            return False
+            return None
         try:
             s_mtime = sess.stat().st_mtime
         except OSError:
-            return False
+            return None
         for p in lectures.glob(f"{date}_*{course}.md"):
             try:
                 if p.stat().st_mtime >= s_mtime:
@@ -783,16 +843,31 @@ def _note_looks_written(sessions_dir, stem: str, sess, log=None) -> bool:
                             log(f"· 已有 {p.name}（不早于会话文件）—— 当成这节课的笔记，跳过")
                         except Exception:                 # noqa: BLE001
                             pass
-                    return True
+                    return p
             except OSError:
                 continue
     except Exception:                                     # noqa: BLE001
-        return False
-    return False
+        return None
+    return None
+
+
+def _publish_rebuilt_note(stem: str, sess, note: str, *, jobs_root=None,
+                          log=None) -> dict:
+    """补出来的笔记也要「出箱 + 对齐 journal」—— 与 `note_worker` 收尾同一套出口。
+
+    返回 `publish_note` 的 `{outbox, journal}`；**永不抛**。调用方要读返回值 ——
+    `outbox=False` 表示票没落盘，必须让 journal/job 知道（否则以后不会再补票）。
+    """
+    try:
+        import note_worker as _nw
+        return _nw.publish_note(stem, note, session=sess, root=jobs_root,
+                                log=log) or {}
+    except Exception:                                     # noqa: BLE001
+        return {}
 
 
 def resume_pending_notes(sessions_dir, *, online=None, rebuild=None, log=None,
-                         jobs_root=None) -> dict:
+                         jobs_root=None, threads=None) -> dict:
     """开机扫 journal，把**还欠的笔记**在后台补出来。返回 `{found, attempted, done, skipped, failed}`。
 
     ## 判据（顺序即优先级）
@@ -849,7 +924,11 @@ def resume_pending_notes(sessions_dir, *, online=None, rebuild=None, log=None,
             sess = sd / (stem + ".md")
             nf = str(j.get("note_file") or "")
             if nf and pathlib.Path(nf).is_file():
-                _tm.journal_update(mk, steps={"note": "done"})
+                # ⭐ 文件在、但票可能没写上（上次崩在 publish 与 journal 之间）——
+                #    重写一张票是幂等的，然后才记 done。
+                _pub = _publish_rebuilt_note(stem, sess, nf, jobs_root=jobs_root, log=_say)
+                _tm.journal_update(mk, steps={"note": "done"},
+                                   note_upload=bool(_pub.get("outbox")))
                 out["done"] += 1
                 _say(f"· 笔记其实已经写好了（{pathlib.Path(nf).name}）—— 记一笔")
                 continue
@@ -858,8 +937,14 @@ def resume_pending_notes(sessions_dir, *, online=None, rebuild=None, log=None,
                 out["failed"] += 1
                 _say(f"⚠ {stem}：没有会话文件，笔记补不了")
                 continue
-            if _note_looks_written(sd, stem, sess, log=_say):
-                _tm.journal_update(mk, steps={"note": "done"})
+            _found = _note_looks_written(sd, stem, sess, log=_say)
+            if _found:
+                # ⭐ 笔记在、票可能没写成 —— 补票后再记 done（幂等）。
+                _pub = _publish_rebuilt_note(stem, sess, str(_found),
+                                             jobs_root=jobs_root, log=_say)
+                _tm.journal_update(mk, steps={"note": "done"},
+                                   note_file=str(_found),
+                                   note_upload=bool(_pub.get("outbox")))
                 out["done"] += 1
                 continue
             try:
@@ -871,19 +956,42 @@ def resume_pending_notes(sessions_dir, *, online=None, rebuild=None, log=None,
                 pass                                      # 探不到 -> 当在线，试一次
             out["attempted"] += 1
 
-            def _job(mk=mk, sess=sess) -> None:
-                r = rb(sess, log=_say)
-                if r.get("ok"):
-                    _tm.journal_update(mk, steps={"note": "done"},
-                                       note_file=str(r.get("note") or ""))
-                    _say(f"✅ 笔记补好了 → {r.get('note')}")
-                else:
-                    _tm.journal_update(mk, steps={"note": "failed"})
-                    _say(f"⚠ {sess.name} 的笔记没补成：{r.get('error')}")
+            _raw2 = str(((_nj.read(stem, root=jobs_root).get("spec") or {})
+                         .get("trans_mode"))
+                        or j.get("trans_mode") or "") == "raw"
+
+            def _job(mk=mk, sess=sess, stem=stem, _raw2=_raw2) -> None:
+                # ⭐ per-stem 锁：恢复线程之间/与旧 worker 之间互斥（只读 alive 挡不住）。
+                _lk = _nj.try_lock(stem, root=jobs_root)
+                if _lk is None:
+                    _say(f"· {stem}：另一进程正在生成 —— 不重复补")
+                    return
+                try:
+                    r = rb(sess, log=_say, raw=_raw2)
+                    if r.get("ok"):
+                        note = str(r.get("note") or "")
+                        # 先出箱、再记 done（顺序反了会在崩溃窗口永久丢上传）。
+                        _pub = _publish_rebuilt_note(stem, sess, note,
+                                                     jobs_root=jobs_root, log=_say)
+                        _tm.journal_update(mk, steps={"note": "done"},
+                                           note_file=note,
+                                           note_upload=bool(_pub.get("outbox")))
+                        _say(f"✅ 笔记补好了 → {note}")
+                    else:
+                        _tm.journal_update(mk, steps={"note": "failed"})
+                        _say(f"⚠ {sess.name} 的笔记没补成：{r.get('error')}")
+                finally:
+                    try:
+                        _lk.close()
+                    except Exception:                     # noqa: BLE001
+                        pass
 
             try:
-                threading.Thread(target=_job, daemon=True,
-                                 name="cl-note-resume").start()
+                _th = threading.Thread(target=_job, daemon=True,
+                                       name="cl-note-resume")
+                _th.start()
+                if threads is not None:
+                    threads.append(_th)
             except Exception:                             # noqa: BLE001
                 out["failed"] += 1
         except Exception:                                 # noqa: BLE001
@@ -2467,8 +2575,12 @@ def run(args) -> None:
             echo(f"⚠ 课前回顾没生成（笔记照写）：{type(e).__name__}: {str(e)[:60]}")
             return {}
 
+    # ⚠️ raw 档判据放在**使用时刻**（同 `_keypoints_for` / 收尾清 key），不在这里冻结：
+    #    档位课中可以切换，「raw 开课 → 切回双语」的课不该永久失去复习层。
+    _cloud_notes = bool(api_key_val)
     writer = ObsidianWriter(vault, args.course, mode=args.save_notes,
-                            api_key=api_key_val, model=args.cloud_model,
+                            api_key=(api_key_val if _cloud_notes else None),
+                            model=args.cloud_model,
                             glossary_path=args.glossary,
                             polish=args.polish != "off",
                             polish_model=args.polish_model or None,
@@ -2516,24 +2628,56 @@ def run(args) -> None:
                 echo(f"📝 后台生成的笔记已并入上传队列（{_ob['merged']} 节）")
         except Exception:                                 # noqa: BLE001
             pass
-        # ⭐ 3.11 F：**后台 worker 死了但没留下 journal** 的那几节（更新脚本杀掉 /
-        #    强杀 / 重启）—— 照样用 `sessions/` 里的逐句记录补出来。判据是
-        #    `note_jobs.alive()`，不是 journal（普通课根本不写 journal）。
+        # ⭐ 3.11 F：**补笔记全部放后台** —— 两条恢复路径按 stale → pending 顺序串行。
+        #    ⚠️⚠️ 2026-11-10 事故：这两条原来在**启动主线程**同步跑，补一节 1371 句的
+        #    笔记卡了 394.8 s —— 用户点「开始上课」后 6.63 分钟才开始录音。
+        #    ⚠️ 顺序不能变：stale 写完会同步 journal（`_publish_rebuilt_note`），
+        #       pending 才会跳过；反过来会生成第二份。
+        #    ⚠️ 主线程先开课；这里慢多少都不再挡 overlay / 采集。
+        def _resume_notes_bg() -> None:
+            try:
+                _sj = resume_stale_note_jobs(_owmod.SESSIONS,
+                                             log=lambda m: echo("   " + m))
+                if _sj.get("found"):
+                    echo(f"📝 有 {_sj['found']} 节后台笔记没跑完 —— 补生成中")
+            except Exception:                             # noqa: BLE001
+                pass
+            _ths: list = []
+            try:
+                _nr = resume_pending_notes(_owmod.SESSIONS,
+                                           log=lambda m: echo("   " + m),
+                                           threads=_ths)
+                if _nr.get("attempted"):
+                    echo(f"📝 有一节课的笔记没写成 —— 后台补生成中"
+                         f"（{_nr['attempted']} 节）")
+            except Exception:                             # noqa: BLE001
+                pass
+            # ⭐ pending 路径是**起线程就返回**的；不等它们跑完就 drain，票根本还没写。
+            #    等（这本身就是后台线程，不挡开课），再 drain 才真的把这次补的推出去。
+            _still = False
+            for _th in _ths:
+                try:
+                    _th.join(timeout=1200)            # 实测最坏收尾 15:49 → 留 20 min
+                    _still = _still or _th.is_alive()
+                except Exception:                         # noqa: BLE001
+                    pass
+            if _still:
+                echo("   ⚠ 笔记还在补 —— 这次生成的票等下次启动再推")
+            # 补出来的笔记刚写进 outbox；上面的 drain 在它们之前 —— 这里再 drain 一次
+            # 并把它们推出去（仍然不阻塞开课）。
+            try:
+                _ob2 = _upmod.drain_note_outbox(queue=_q)
+                if _ob2.get("merged") and _upmod.upload_enabled():
+                    _pn2 = _q.pending
+                    if _pn2:
+                        threading.Thread(target=lambda: _q.pump(max_items=_pn2),
+                                         daemon=True, name="cl-note-upload").start()
+            except Exception:                             # noqa: BLE001
+                pass
+
         try:
-            _sj = resume_stale_note_jobs(_owmod.SESSIONS,
-                                         log=lambda m: echo("   " + m))
-            if _sj.get("found"):
-                echo(f"📝 有 {_sj['found']} 节后台笔记没跑完 —— 补生成中")
-        except Exception:                                 # noqa: BLE001
-            pass
-        # ⭐ 3.10：**笔记那一步的补生成**（journal 的 `note` 步）—— 收尾要是没跑到
-        #    writer.close()（合盖 / 被杀），这里在后台把它补出来：要在线、每节一次、
-        #    绝不覆盖已有笔记（同日同课已有一份就当它写过了，见 `_note_looks_written`）。
-        try:
-            _nr = resume_pending_notes(_owmod.SESSIONS, log=lambda m: echo("   " + m))
-            if _nr.get("attempted"):
-                echo(f"📝 有一节课的笔记没写成 —— 后台补生成中"
-                     f"（{_nr['attempted']} 节）")
+            threading.Thread(target=_resume_notes_bg, daemon=True,
+                             name="cl-note-backfill").start()
         except Exception:                                 # noqa: BLE001
             pass
         # ⭐ **启动时把积压的队列推一把** —— 这才是「攒着下次发」的正主。
@@ -4367,6 +4511,14 @@ def run(args) -> None:
         # 与"落盘才是不能丢的事"这条核心约定直接冲突。
         # 上面 probe 阶段的 probe_src.close() 就是包了 try/except 的(作者已知它会抛)。
         # (2026-09-24 OCR 全量审计发现。)
+        # ⭐ 先冻结「停采时刻」再关采集源：`capture_block()`（收尾时写报告）要拿
+        #    这段时间戳算尾部缺口。用写报告的时刻会把正常收尾（flush/定稿排空，
+        #    15–25 s，失败时无上限）算成录音缺口。
+        try:
+            if tester is not None:
+                tester.note_capture_stop()
+        except Exception:                           # noqa: BLE001
+            pass
         try:
             src.close()
         except Exception:                           # noqa: BLE001
@@ -4619,10 +4771,34 @@ def run(args) -> None:
                         except BaseException as e:        # noqa: BLE001
                             echo(f"⚠ 实时总结收尾失败（笔记照写）："
                                  f"{type(e).__name__}: {str(e)[:80]}")
+                        # ⚠️ 档位课中可以切换：构造 writer 时算的 `_cloud_notes` 会过期。
+                        #    收尾这一刻是 raw，就清掉 key —— 否则复习层仍会发请求。
+                        try:
+                            if str(trans.get("mode") or "") == "raw":
+                                writer._key = None
+                        except Exception:             # noqa: BLE001
+                            pass
                         _box["msg"] = writer.close(ask=lambda n: save,
                                                    qa=qa_snapshot,
                                                    on_progress=_ui_progress,
                                                    cancel=_cancel)
+                        # ⭐ 2026-11-10：进程内路径（`CLASSLIVE_NOTE_WORKER=0`）也要
+                        #    说出「笔记是残次的」—— 否则回滚开关一开，降级判据整体失效。
+                        try:
+                            # 没写出笔记（没设库 / close 早退）就谈不上「降级」。
+                            if getattr(writer, "vault_path", ""):
+                                _st = writer.note_stats()
+                                _rs = _owmod.review_state(
+                                    _st, expected=bool(getattr(writer, "_key", None)),
+                                    cancelled=bool(_cancel.is_set()))
+                                if _rs in ("failed", "partial"):
+                                    _box["msg"] = (str(_box["msg"] or "")
+                                                   + f"\n   ⚠ 笔记降级：复习层 "
+                                                     f"{int(_st.get('review_ok') or 0)}/"
+                                                     f"{int(_st.get('review_total') or 0)}"
+                                                     f"（{_rs}）")
+                        except Exception:                 # noqa: BLE001
+                            pass
                         # ⭐2：本课候选词池那一行也走**现成通道**（收尾卡/终端串）——
                         # 不新建 UI。⚠️ 追加而不是新 print：收尾卡里只有这一段文字，
                         # 分开 print 在终端会跟卡片错位。**失败绝不影响收尾**。
@@ -4863,6 +5039,8 @@ def run(args) -> None:
                             #    `close()` 真正写出笔记时记下的落点。报告里的 `note_file`
                             #    与 journal 的「笔记那一步」都读它（3.10）。
                             note_path=str(getattr(writer, "vault_path", "") or ""),
+                            # raw 档补笔记要靠它（worker 关闭时没有 job spec）。
+                            trans_mode=str(trans.get("mode") or ""),
                             # ⚠️ `--no-bundle` 原来只声明、没人读（2026-09-28
                             #    OCR 审计发现）—— README 写明它能「不打包，只写报告」，
                             #    不接上线这个开关就是个谎。
@@ -4912,8 +5090,18 @@ def run(args) -> None:
                             _q = _shared_upload_queue()
                             _all, _left = _q.status(tester.stem.name)
                             if _left > 0:
-                                echo(f"   📤 已传 {_all - _left}/{_all}，"
-                                     f"剩余下次启动接着传")
+                                # ⭐ 2026-11-10：这句是 10 秒 join 的**中途快照**，
+                                #    而且退出时还有独立 drainer 继续传 —— 写「下次启动」
+                                #    对 BUSI3222 那种 11 秒传完的课是假话。
+                                try:
+                                    import upload as _upm
+                                    _tail = ("可以关窗口，剩下的会在后台继续传"
+                                             "（传不完的下次启动自动补）"
+                                             if _upm.exit_uploader_allowed() else
+                                             "剩余留在本机队列，下次启动接着传（后台补传已关）")
+                                except Exception:     # noqa: BLE001
+                                    _tail = "剩余留在本机队列，下次启动接着传"
+                                echo(f"   📤 截至目前已传 {_all - _left}/{_all} 个文件；{_tail}")
                         # ⭐⭐ 3.10：**上传排完了才撤 journal**（见 `journal_upload_done`）。
                         #    在这之前被杀 / 断电 —— 下次启动的 `recover_pending` 接得住
                         #    （原来是 `finish()` 一进门就撤：那之后被杀 = 音频与报告
@@ -5052,6 +5240,18 @@ _SILENCE_WATCH = {
 }
 
 
+def _fmt_gap_s(s: float) -> str:
+    """人看的间隔（避免「录音中断约 28800 秒」）。"""
+    n = int(round(max(0.0, s)))
+    if n < 60:
+        return f"{n} 秒"
+    m, sec = divmod(n, 60)
+    if m < 60:
+        return f"{m} 分 {sec} 秒" if sec else f"{m} 分"
+    h, mn = divmod(m, 60)
+    return f"{h} 小时 {mn} 分" if mn else f"{h} 小时"
+
+
 def check_clock_and_device(src, source_name: str, notify, state: dict, on_wake=None) -> None:
     """上课中途的定时保安: ① 系统睡过一觉就打一条 ② 默认输入设备变了就跟着换。
 
@@ -5072,8 +5272,32 @@ def check_clock_and_device(src, source_name: str, notify, state: dict, on_wake=N
     """
     import time as _t
     now_wall = _t.time()
-    if now_wall - state.get("wall", now_wall) > SLEEP_GAP_S:
-        notify(f"[系统休眠唤醒 {_t.strftime('%H:%M:%S')}]", warn=True)
+    # ⚠️ `0.0` 也是合法值（判据会传 `{"wall": 0.0}` 模拟睡过一觉）—— 别用 `or` 兜底。
+    try:
+        gap_s = now_wall - float(state.get("wall", now_wall))
+    except (TypeError, ValueError):
+        gap_s = 0.0
+    if gap_s > SLEEP_GAP_S:
+        # ⚠️ `gap_s` 是**两次 2 s 轮询之间的墙钟差**，不是「音频缺了多久」：
+        #    真睡过一觉时它≈睡眠时长，但主线程被弹窗/写盘/断点占住时也会很大，
+        #    而音频回调线程可能一直在收（队列 20 s 才丢）。所以文案只说量到的事实
+        #    （「距上次检查」），不断言「录音中断」—— 后者是没测量过的结论。
+        #    真正准确的音频缺口在音频侧，本函数不冒充它。
+        # 冷却：多次 dark wake / 反复睡醒别刷屏、别让菜单栏 ⚠️ 反复点亮。
+        _last_n = state.get("notified_at")
+        _quiet = (isinstance(_last_n, (int, float))
+                  and 0 <= now_wall - float(_last_n) < 60)
+        if not _quiet:
+            state["notified_at"] = now_wall
+            _src = source_name.lower()
+            if _src == "file":
+                _what = "回放暂停约 {g}；若这段本该在播，请检查文件或输出设备"
+            elif _src == "system":
+                _what = "距上次检查约 {g}；系统声音可能中断，请确认设备还在"
+            else:
+                _what = "距上次检查约 {g}；若这段没有声音，请确认麦克风/设备还在"
+            notify(f"[系统休眠唤醒 {_t.strftime('%H:%M:%S')}] "
+                   + _what.format(g=_fmt_gap_s(gap_s)), warn=True)
         if on_wake is not None:
             try:
                 on_wake()

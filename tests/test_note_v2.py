@@ -2295,7 +2295,8 @@ class ReviewStats(unittest.TestCase):
         w._note_stats["review_total"] = 8
         w._record_review_stats({})
         self.assertEqual(w.note_stats(), {"review_total": 8, "review_ok": 0,
-                                          "review_failed": 8, "review_generated": False})
+                                          "review_failed": 8, "review_generated": False,
+                                          "review_attempted": False})
 
     def test_部分失败按_chunk_stats_算(self):
         w = self._w()
@@ -2303,11 +2304,13 @@ class ReviewStats(unittest.TestCase):
         w._record_review_stats({"sections": [{"id": 1}],
                                 "chunk_stats": {"n": 8, "failed": [2, 5]}})
         self.assertEqual(w.note_stats(), {"review_total": 8, "review_ok": 6,
-                                          "review_failed": 2, "review_generated": True})
+                                          "review_failed": 2, "review_generated": True,
+                                          "review_attempted": False})
 
     def test_没跑复习层是全零(self):
         self.assertEqual(self._w().note_stats(), {"review_total": 0, "review_ok": 0,
-                                                  "review_failed": 0, "review_generated": False})
+                                                  "review_failed": 0, "review_generated": False,
+                                                  "review_attempted": False})
 
 
 if __name__ == "__main__":

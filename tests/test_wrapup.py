@@ -912,9 +912,12 @@ def t_note_resume_skips_live_worker():
         d = tempfile.mkdtemp()
         _journal_fixture(d, stem)
         calls = []
+        _ths: list = []
         r = main.resume_pending_notes(
-            d, online=lambda: True, jobs_root=jd,
+            d, online=lambda: True, jobs_root=jd, threads=_ths,
             rebuild=lambda *a, **k: (calls.append(1), {"ok": True})[1])
+        for _t in _ths:
+            _t.join(5)
         return r, calls
 
     with tempfile.TemporaryDirectory() as jd:
@@ -948,7 +951,11 @@ def t_note_resume_recovered_tail():
             out_note.write_text("note", encoding="utf-8")
             return {"ok": True, "note": str(out_note), "error": ""}
 
-        r = main.resume_pending_notes(d, online=lambda: True, rebuild=_fake_rebuild)
+        _ths: list = []
+        r = main.resume_pending_notes(d, online=lambda: True, rebuild=_fake_rebuild,
+                                      jobs_root=d, threads=_ths)
+        for _t in _ths:
+            _t.join(5)
         # ⚠️ 变异验证：`main.resume_pending_notes` 的 glob 改回只认 `PENDING_TAIL`
         #    -> found==0、一个都不补（D25 的原症状）。
         assert r["found"] == 1 and r["attempted"] == 1 and seen, (r, seen)
@@ -964,7 +971,7 @@ def t_note_resume_already_written():
         _sess, mk = _journal_fixture(d, "2026-10-14_160000_ECON10790", note_file=str(note))
         calls = []
         r = main.resume_pending_notes(
-            d, online=lambda: True,
+            d, online=lambda: True, jobs_root=d,
             rebuild=lambda *a, **k: (calls.append(1), {"ok": True})[1])
         # 改坏：把 `if nf and pathlib.Path(nf).is_file():` 那段删掉 -> 这条红（会重建）。
         assert r["done"] == 1 and r["attempted"] == 0 and not calls, (r, calls)
@@ -997,7 +1004,11 @@ def t_note_resume_rebuild_ok():
             out_note.write_text("note", encoding="utf-8")
             return {"ok": True, "note": str(out_note), "error": ""}
 
-        r = main.resume_pending_notes(d, online=lambda: True, rebuild=_fake_rebuild)
+        _ths: list = []
+        r = main.resume_pending_notes(d, online=lambda: True, rebuild=_fake_rebuild,
+                                      jobs_root=d, threads=_ths)
+        for _t in _ths:
+            _t.join(5)
         assert r["attempted"] == 1 and seen and seen[0].endswith("ECON10790.md"), (r, seen)
         _wait(lambda: _journal_steps(mk).get("note") == "done")
         import json
@@ -1012,9 +1023,12 @@ def t_note_resume_rebuild_ok():
 def t_note_resume_rebuild_fail():
     with tempfile.TemporaryDirectory() as d:
         _sess, mk = _journal_fixture(d, "2026-10-14_160000_ECON10790")
+        _ths: list = []
         r = main.resume_pending_notes(
-            d, online=lambda: True,
+            d, online=lambda: True, jobs_root=d, threads=_ths,
             rebuild=lambda *a, **k: {"ok": False, "error": "没设库"})
+        for _t in _ths:
+            _t.join(5)
         assert r["attempted"] == 1, r
         _wait(lambda: _journal_steps(mk).get("note") == "failed")
         r2 = main.resume_pending_notes(d, online=lambda: True,
@@ -1035,9 +1049,12 @@ def t_note_resume_existing_note():
         ow.resolve_vault = lambda cli=None, **k: str(vault)
         calls = []
         try:
+            _ths: list = []
             r = main.resume_pending_notes(
-                d, online=lambda: True,
+                d, online=lambda: True, jobs_root=d, threads=_ths,
                 rebuild=lambda *a, **k: (calls.append(1), {"ok": True})[1])
+            for _t in _ths:
+                _t.join(5)
         finally:
             ow.resolve_vault = saved
         # 改坏：把 `_note_looks_written` 那段删掉 -> 这条红（会多出一份笔记）。
@@ -1049,9 +1066,12 @@ def t_note_resume_existing_note():
         calls2 = []
         ow.resolve_vault = lambda cli=None, **k: str(vault)
         try:
+            _ths2: list = []
             r2 = main.resume_pending_notes(
-                d, online=lambda: True,
+                d, online=lambda: True, jobs_root=d, threads=_ths2,
                 rebuild=lambda *a, **k: (calls2.append(1), {"ok": False, "error": "x"})[1])
+            for _t in _ths2:
+                _t.join(5)
         finally:
             ow.resolve_vault = saved
         assert r2["attempted"] == 1 and calls2, (r2, calls2)

@@ -746,6 +746,32 @@ def main() -> int:
               f"total={_g2.get('total_s')}")
         check("⭐ 一块音频都没收到 → `available: false`（不是一堆零）",
               tm.TestSession(_d9 / "c2.md").capture_block()["available"] is False)
+        # ⭐ 2026-11-10：**尾部缺口**也要结算 —— 下一块音频永远不会来（睡眠/停摆）。
+        #    尾部缺口只进 `tail_s`，**不**改 `gaps.n / total_s` 的既有语义
+        #    （那两个只数「相邻块之间」的断档）。
+        _clk[0] += 10.0
+        _cb3 = _t19.capture_block()
+        _g3 = _cb3["gaps"]
+        check("⭐⭐ 尾部缺口单独结算（`tail_s`），不改 `n/total_s`",
+              _g3["n"] == 61 and abs(_g3.get("total_s", 0) - _g2.get("total_s", -1)) < 0.01
+              and abs(_g3.get("tail_s", 0) - 10.0) < 0.01, str(_g3))
+        # ⭐ 停采时刻冻结后，之后不管写报告拖多久（含失败无上限），尾部缺口不再涨。
+        _t19.note_capture_stop()
+        _clk[0] += 600.0
+        _cb4 = _t19.capture_block()
+        check("⭐⭐ `note_capture_stop()` 冻结尾部缺口（墙钟继续走，tail_s 不涨）",
+              abs(_cb4["gaps"].get("tail_s", 0) - 10.0) < 0.01
+              and _cb4["wall_s"] > 600.0, str(_cb4))
+        # ⭐ 正常收尾（最后一块后立刻停采，再花 20 s 写报告）**不算**尾部缺口。
+        _clk2 = [100.0]
+        _t19b = tm.TestSession(_d9 / "c3.md", wall_clock=lambda: _clk2[0])
+        _t19b.note_chunk(_blk)
+        _t19b.note_capture_stop()
+        _clk2[0] += 20.0
+        _cb5 = _t19b.capture_block()
+        check("⭐⭐ 正常收尾 20 s → `tail_s`/`deficit_s` 都是 0（只算停采前的缺口）",
+              _cb5["gaps"]["tail_s"] == 0.0 and _cb5["deficit_s"] == 0.0
+              and _cb5["wall_s"] == 20.0, str(_cb5))
     finally:
         shutil.rmtree(_d9, ignore_errors=True)
 

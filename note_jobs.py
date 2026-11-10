@@ -149,6 +149,32 @@ def claim(stem: str, *, root=None, now=time.time, pid=None, **fields) -> bool:
         return False
 
 
+def try_lock(stem: str, *, root=None):
+    """非阻塞拿这一节的 **per-stem flock**；拿不到返回 `None`。
+
+    为什么不用 `claim()` 当互斥：`claim()` 只是写一条记录，进程死了记录还留着，
+    而 `alive()` 又依赖 pid/心跳 —— 父进程退出后「还在跑的 worker」会被误判成死的，
+    两条 restore 路径就会和真 worker 同时重建同一节。flock 由内核托管，进程怎么死
+    都会自动释放（同 `instance_lock` 的理由）。
+
+    ⚠️ 返回值**必须一直被调用方持有**：GC / `close()` 一收，文件描述符关闭，锁就没了。
+    """
+    try:
+        import fcntl
+        p = path(stem, root=root).with_suffix(".lock")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        f = open(p, "a+", encoding="utf-8")
+    except (OSError, ValueError, ImportError):
+        # ImportError = 非 POSIX；ValueError = 非法 stem —— 都遵守「永不抛」契约。
+        return None
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    return f
+
+
 def heartbeat(stem: str, *, root=None, now=time.time, **fields) -> bool:
     """打一次心跳（顺便带上 `stage` / `done` / `total` 这些进度字段）。
 

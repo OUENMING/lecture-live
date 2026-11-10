@@ -1555,6 +1555,10 @@ class TestSession:
         self._cap_gaps: list[dict] = []
         self._cap_gap_n = 0
         self._cap_gap_total = 0.0
+        #: ⭐ 2026-11-10：**停采时刻**（`src.close()` 之前冻结）。尾部缺口必须用
+        #: `stop - last_block` 算；用「写报告时」会把笔记收尾 / 用户确认（可能几分钟）
+        #: 也算成录音缺口 —— 正常课反而每节多一条假断档。
+        self._cap_stop_wall: float | None = None
         #: ⑤ 字幕视图按时间加权：各档可见行数 / 中文档位行数各累计了多少秒 + 面板宽样本。
         self._view_rows_s: dict[int, float] = {}
         self._view_lines_s: dict[int, float] = {}
@@ -2054,6 +2058,17 @@ class TestSession:
         except Exception as e:                            # noqa: BLE001
             return {"available": False, "reason": f"{type(e).__name__}: {str(e)[:80]}"}
 
+    @_safe
+    def note_capture_stop(self) -> None:
+        """收音**真正停止**的时刻（`src.close()` 之前调一次）。只冻结参照点，不结算。
+
+        ⚠️ 2026-11-10：`capture_block()` 在收尾里被调用的位置晚于「问存不存笔记 /
+        总结收尾 / 写笔记」——用它当时的 `now` 算尾部缺口，会把正常收尾（15–25 s，
+        失败路径无上限）全算成录音断档。尾部缺口只能用「停采 - 最后一块」。
+        """
+        if self._cap_stop_wall is None:
+            self._cap_stop_wall = self._wall()
+
     def capture_block(self) -> dict:
         """④ 收音断档块（收尾调一次）。**永不抛**。"""
         try:
@@ -2061,16 +2076,26 @@ class TestSession:
             if first is None:
                 return {"available": False, "reason": "一块音频都没收到"}
             now = self._wall()
+            end = self._cap_stop_wall if self._cap_stop_wall is not None else now
+            # ⚠️ `wall_s` 保持既有口径（写报告时刻 − 首块，含收尾等待）；
+            #    `deficit_s` 改用**停采时刻** —— 面板把它叫「断档秒」，正常收尾
+            #    的 15–25 s 不该算进去，最后一块之后的真空则要算进去。
             wall = max(0.0, now - first)
+            cap_wall = max(0.0, end - first)
             audio_s = self._n_samples / SR
+            tail_s = 0.0
+            if self._cap_last_wall is not None:
+                tail = max(0.0, end - self._cap_last_wall)
+                if tail > CAPTURE_GAP_S:
+                    tail_s = tail
             return {
                 "available": True,
                 "wall_s": round(wall, 1),
                 "audio_s": round(audio_s, 1),
-                #: 墙钟比实际音频长了多少 —— > ~0.2 s/块 就是"中间没在听"。
-                "deficit_s": round(wall - audio_s, 1),
+                #: 停采前墙钟比音频长了多少 —— > ~0.2 s/块 就是"中间没在听"。
+                "deficit_s": round(max(0.0, cap_wall - audio_s), 1),
                 "gaps": {"n": self._cap_gap_n, "total_s": round(self._cap_gap_total, 1),
-                         "items": list(self._cap_gaps)},
+                         "items": list(self._cap_gaps), "tail_s": round(tail_s, 1)},
                 "first_block_epoch": round(first, 3),
                 "last_block_epoch": (None if self._cap_last_wall is None
                                      else round(self._cap_last_wall, 3)),
@@ -2251,9 +2276,13 @@ class TestSession:
     #    什么都没有 —— 静默吞掉等于"跑了测试模式但没有报告"，且查不出为什么。
     @_safe_loud
     def finish(self, vad_report: str = "", note_path: str = "",
-               bundle: bool = True) -> str | None:
+               bundle: bool = True, trans_mode: str = "") -> str | None:
         # ⚠️ 第一件事：**关掉快照**（`_finishing`）—— 之后任何迟到的快照都不许写。
         self._finishing = True
+        # 把**收尾时**的翻译档位写进 journal：raw 档的补笔记恢复要靠它，
+        # 而 worker 关闭 / 派生失败时没有 note_jobs spec 可读。
+        if trans_mode:
+            self._journal(trans_mode=str(trans_mode))
         if self._wav is not None:
             self._close_wav()
         if self.stem is None:
@@ -2494,8 +2523,9 @@ class TestSession:
                 "billed_energy 那三个计数器是**只读**系统调用, 实测有些机器在一段忙循环里"
                 "根本不涨(0) —— 0 是「这一档没记到能量」, 不是「没耗电」。cpu_s 可拿"
                 "resource.getrusage 对拍。",
-                "blocks.capture.deficit_s = 墙钟 - 实际音频秒; 文件回放(--speed≠1) 或"
-                "断档两者都会把它推大, 断档明细看 gaps.items。系统/屏幕睡眠进 events。",
+                "blocks.capture.deficit_s = 停采时刻 - 首块 - 实际音频秒（不含写报告/收尾等待；"
+                "文件回放(--speed≠1) 或断档会把它推大）。gaps.tail_s = 最后一块音频到停采"
+                "之间的缺口（正常收尾不算）；断档明细看 gaps.items。系统/屏幕睡眠进 events。",
                 "blocks.ui.streamq_dwell_ms = streamq 每条 item 从 put 到 drain 的停留"
                 "时间(唤醒延迟); 空闲档 0.1 s / 隐藏档 0.25 s 若把字幕拖慢, 这里会看到 p90/p99 变大。",
             ],

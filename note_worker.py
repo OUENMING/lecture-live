@@ -150,10 +150,14 @@ def build_writer(spec: dict, *, callbacks: dict | None = None):
         glossary_path=spec.get("glossary") or None,
         polish=bool(spec.get("polish")),
         polish_model=spec.get("polish_model") or None,
-        keypoints_fn=kp.pick,
+        # ⚠️ 纯转录档（raw）不许发模型请求；Jev 用自己的 token，与笔记 key 无关。
+        keypoints_fn=(None if str(spec.get("trans_mode") or "") == "raw" else kp.pick),
         desk=bool(spec.get("desk", True)),
         desk_home=spec.get("desk_home") or None,
-        base_note=False,                             # 后台模式：只写完整版（§4.4）
+        # ⚠️ 保留基础版：面板「停止」只等 6 s 就 SIGKILL，而复习层收不到 cancel。
+        #    只写完整版的话，这 6 s 里被杀 = 盘上一个字节都没有（还有一条路径：
+        #    用户主动停止本就是想保住已拿到的内容）。
+        base_note=True,
         # ⭐ 3.11.1：拆进程之后漏了这一头 —— 笔记照写，但不再自动打开详细版。
         #    （2026-11-09 作者报；实现与进程内收尾共用 `open_in_browser`。）
         open_fn=ow.open_in_browser,
@@ -176,7 +180,9 @@ def run(stem: str, *, root=None, log=None, heartbeat_s: float | None = None,
     放弃精修 / 复习层，**但笔记照写**（用已经拿到的部分）—— 与 Ctrl+C 的语义逐字相同
     （`obsidian_writer.close(cancel=…)` 的 docstring）。不传 = 不取消。
     """
-    out = {"ok": False, "note": "", "error": ""}
+    out = {"ok": False, "note": "", "error": "",
+           "review_total": 0, "review_ok": 0, "degraded": False,
+           "review_state": "off"}
 
     def _say(s: str) -> None:
         if log is not None:
@@ -192,6 +198,19 @@ def run(stem: str, *, root=None, log=None, heartbeat_s: float | None = None,
         _jobs.finish(stem, _jobs.FAILED, root=root, error=out["error"])
         return out
 
+    # ⭐ 2026-11-10：**per-stem 持有式锁**。`claim()` 只是写一条记录，进程死了记录还在；
+    #    flock 由内核托管，进程不管怎么死都会释放。没有它，下面这条现实路径会撞车：
+    #    上一节的 worker 还在写 → 用户重开 app → 启动恢复看到「父 pid 已死」→ 两条
+    #    rebuild 同时写同一节（重复调用 + 两份笔记 + 撞 `.tmp`）。
+    _lock = _jobs.try_lock(stem, root=root)
+    if _lock is None:
+        out["error"] = "拿不到 per-stem 锁（被别的进程占用，或 note-jobs 目录不可写）"
+        _say(f"· {stem}：{out['error']} —— 跳过")
+        return out
+    # ⭐ pid 必须记成**本进程**：父进程 `claim()` 写的是父 pid，父进程一退
+    #    `alive()` 就会把还在跑的 worker 判成死的（下一节课启动时误补第二份）。
+    _jobs.write(stem, {"pid": os.getpid(), "state": _jobs.RUNNING}, root=root)
+
     # 心跳线程：判活只看它（§12-10）。`stage` 由 writer 的 on_progress 推进。
     stop = threading.Event()
     stage_now = {"stage": "start"}
@@ -202,7 +221,17 @@ def run(stem: str, *, root=None, log=None, heartbeat_s: float | None = None,
             _jobs.heartbeat(stem, root=root, stage=stage_now["stage"])
 
     beat = threading.Thread(target=_beat, name="cl-note-beat", daemon=True)
-    beat.start()
+    try:
+        beat.start()
+    except BaseException as e:                        # noqa: BLE001
+        # 线程起不来时锁还没交给后面的 finally —— 不放会自锁到进程退出。
+        try:
+            _lock.close()
+        except Exception:                             # noqa: BLE001
+            pass
+        out["error"] = f"心跳线程起不来：{type(e).__name__}: {str(e)[:120]}"
+        _jobs.finish(stem, _jobs.FAILED, root=root, error=out["error"])
+        return out
 
     def _progress(stage: str, done: int = 0, total: int = 0) -> None:
         try:
@@ -225,21 +254,114 @@ def run(stem: str, *, root=None, log=None, heartbeat_s: float | None = None,
             out["ok"] = bool(note) and pathlib.Path(note).is_file()
             if not out["ok"]:
                 out["error"] = "close() 没写出笔记（多半是没设库 / 渲染失败）"
+            # ⭐ 2026-11-10：**降级要看得出来**。复习层 0/N 时笔记仍然「写出来了」，
+            #    但那是残次品（2026-11-10 本机合盖睡眠实测：Jev 全失败 + 复习层 0/8）。
+            #    以前这里照样 `finish(DONE)`、日志一句不提，用户只能翻笔记才发现。
+            try:
+                import obsidian_writer as _ow
+                _st = w.note_stats()
+                out["review_total"] = int(_st.get("review_total") or 0)
+                out["review_ok"] = int(_st.get("review_ok") or 0)
+                # ⭐ 五态：off / cancelled / failed / partial / ok。`partial`（3/8）也是残次品，
+                #    以前只抓 0/N，最常发生的「部分成功」反而被当成了成功。
+                out["review_state"] = _ow.review_state(
+                    _st, expected=(bool(spec.get("use_cloud"))
+                                   and str(spec.get("trans_mode") or "") != "raw"),
+                    cancelled=bool(cancel is not None and cancel.is_set()))
+                out["degraded"] = out["review_state"] in ("failed", "partial")
+            except Exception as e:                        # noqa: BLE001
+                _say(f"⚠ {stem}：复习层统计取数失败，按未降级处理："
+                     f"{type(e).__name__}: {str(e)[:80]}")
             _say(str(msg or ""))
     except BaseException as e:                            # noqa: BLE001
         out["error"] = f"{type(e).__name__}: {str(e)[:200]}"
     finally:
         stop.set()
+        # 等在途的那一拍落地：`heartbeat()` 是「先查 ended、再 write」的两步，
+        # 不 join 的话它可能在我们写 `note` / `finish(DONE)` 之后把 state 盖回 running。
+        try:
+            beat.join(timeout=2.0)
+        except Exception:                                 # noqa: BLE001
+            pass
 
-    if out["ok"]:
-        _outbox(stem, out["note"], root=root)
-        _mark_journal(spec, out["note"])
-        # ⭐ 用户可能已经走了（这正是拆进程的意义）—— 完成后给一条系统通知。
-        _notify("笔记写好了",
-                f"{spec.get('course') or ''} · {pathlib.Path(out['note']).stem}")
-        _jobs.finish(stem, _jobs.DONE, root=root, note=out["note"])
-    else:
-        _jobs.finish(stem, _jobs.FAILED, root=root, error=out["error"])
+    try:
+        if out["ok"]:
+            # ⭐ 先把落点记进 job：笔记已写完、还没 publish/finish 就被杀时，下次启动
+            #    stale 能看到 `note` 直接收工，不会再生成第二份（窗口里有 sidecar/通知）。
+            _jobs.write(stem, {"note": out["note"]}, root=root)
+            # 与两条恢复路径**同一个出口**（出箱 + 对齐 journal），避免以后漂移。
+            _pub = bool(publish_note(stem, out["note"],
+                                     session=spec.get("session"), root=root,
+                                     log=_say).get("outbox"))
+            if not _pub:
+                _say(f"⚠ {stem}：outbox 票没写成（note.html 这次不会上传，下次启动会重试）")
+            _state = str(out.get("review_state") or "off")
+            _course = str(spec.get("course") or "")
+            _total, _ok = int(out["review_total"]), int(out["review_ok"])
+            if out["degraded"]:
+                _say(f"⚠ 笔记降级（{_state}）：复习层 {_ok}/{_total} —— 已保存残次版")
+            # ⭐ 通知要**准确**，不能因为降级就静默：交接卡片承诺过「写好后会通知你」。
+            #    也不能既发「写好了」又发「降级」（同一件事只发一条）。
+            _title, _body = {
+                "ok":        ("笔记写好了", f"{_course} · {pathlib.Path(out['note']).stem}"),
+                "partial":   ("笔记已保存（部分）",
+                              f"{_course} · 复习层 {_ok}/{_total}，缺 {_total - _ok} 段"),
+                "failed":    ("笔记已保存（降级）",
+                              f"{_course} · 复习层 0/{_total}，只含逐句转录"),
+                "off":       ("笔记写好了", f"{_course} · {pathlib.Path(out['note']).stem}"),
+                "cancelled": ("笔记已保存（已停止）",
+                              f"{_course} · 复习层未生成；逐句转录完整"),
+            }.get(_state, ("笔记写好了", _course))
+            _notify(_title, _body)
+            _jobs.finish(stem, _jobs.DONE, root=root, note=out["note"],
+                         degraded=bool(out["degraded"]),
+                         review_state=_state,
+                         review_total=_total, review_ok=_ok,
+                         note_upload=bool(_pub))
+        else:
+            _jobs.finish(stem, _jobs.FAILED, root=root, error=out["error"])
+    finally:
+        try:
+            _lock.close()                            # 释放 per-stem 锁
+        except Exception:                            # noqa: BLE001
+            pass
+    return out
+
+
+def publish_note(stem: str, note: str, *, session=None, root=None,
+                 log=None) -> dict:
+    """把**已经写好的**笔记送进 outbox，并（可选）对齐 journal —— 与 worker 同一套出口。
+
+    ⚠️ 2026-11-10 事故：进程内恢复路径（`main.resume_stale_note_jobs` /
+    `resume_pending_notes`）补出来的笔记**既不写 outbox、也不更新 journal** ——
+    作者永远拿不到 `note.html`，下一次启动还会再补一份。这里把 worker 已有的两条
+    出口收成一个函数，三个调用方共用，避免第三套实现。
+    ⚠️ 只认**真的存在**的笔记文件：测试里的假 `note=""` 不许往真 `~/.classlive/` 写票。
+    ⚠️ `log`：失败时**必须留痕**（journal 没对齐 → 下次启动会再生成一份），调用方传 `_say`。
+    """
+    out = {"outbox": False, "journal": False, "error": ""}
+
+    def _l(msg: str) -> None:
+        if log is not None:
+            try:
+                log(msg)
+            except Exception:                         # noqa: BLE001
+                pass
+
+    try:
+        p = pathlib.Path(str(note or ""))
+        if not note or not p.is_file():
+            return out
+        out["outbox"] = bool(_outbox(stem, str(p), root=root))
+        if not out["outbox"]:
+            _l(f"⚠ {stem}：note-outbox 票没写成（上传会等下次启动重试）")
+        if session is not None:
+            out["journal"] = bool(_mark_journal({"session": str(session)}, str(p)))
+            if not out["journal"]:
+                _l(f"⚠ {stem}：journal 没对齐（下次启动可能再生成一份笔记）")
+    except Exception as e:                            # noqa: BLE001
+        out["error"] = f"{type(e).__name__}: {str(e)[:80]}"
+        _l(f"⚠ {stem}：publish 失败：{out['error']}")
     return out
 
 
@@ -300,7 +422,11 @@ def _outbox(stem: str, note: str, *, root=None) -> bool:
         d.mkdir(parents=True, exist_ok=True)
         files = [p for p in (pathlib.Path(note),
                              pathlib.Path(note).with_suffix(".html")) if p.is_file()]
+        if not files:
+            # ⚠️ 空票 = drainer 挪进 `sent/` 后永不再试、且什么都没上传。宁可不写。
+            return False
         payload = {"stem": stem, "files": [str(p) for p in files], "at": _now()}
+        # ⚠️ tmp 名带 pid：旧实现固定 `.tmp`，两个写者会互相覆盖。
         tmp = d / f"{stem}.tmp{os.getpid()}"
         tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, d / f"{stem}.json")

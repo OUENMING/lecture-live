@@ -880,6 +880,10 @@ def drain_note_outbox(queue=None, *, root=None, sessions_dir=None) -> dict:
     """
     import json as _json
     out = {"found": 0, "merged": 0, "kept": 0}
+    # ⚠️ 上传关着时**不许消费票**：票据挪进 `sent/` 后队列条目会在 14 天后过期，
+    #    这张票就永远不会重来。对齐 `recover_pending` 的纪律：关着就原样留着。
+    if not upload_enabled():
+        return out
     try:
         if root is not None:
             d = pathlib.Path(root) / "note-outbox"
@@ -888,24 +892,70 @@ def drain_note_outbox(queue=None, *, root=None, sessions_dir=None) -> dict:
             d = paths.STATE_ROOT / "note-outbox"
         if not d.is_dir():
             return out
+        # 回收孤儿：上次 drain 崩在「领取后、入队/挪走前」会留下 `.processing.*`。
+        # 超过 5 分钟改回 `.json`，否则这张票永远不会再被扫到。
+        for c in d.glob("*.processing.*"):
+            try:
+                if time.time() - c.stat().st_mtime > 300:
+                    tgt = d / (c.name.split(".processing.")[0] + ".json")
+                    if tgt.exists():
+                        # 新票已经在了：孤儿是旧的，删掉即可（不能反过来覆盖新票）。
+                        c.unlink()
+                    else:
+                        c.replace(tgt)
+            except OSError:
+                pass
         q = queue
+
+        def _put_back(claim, p) -> None:
+            """把没消费成的票放回；**期间已写出新票就丢弃旧票**（绝不覆盖新票）。"""
+            try:
+                if p.exists():
+                    claim.unlink()
+                else:
+                    claim.replace(p)
+            except OSError:
+                pass
+
         for p in sorted(d.glob("*.json")):
             out["found"] += 1
+            # ⭐ 原子领取：先 rename 成 `.processing.<pid>`，抢到的才处理。
+            #    否则「读旧票 → 别的进程换上新票 → 这里把新票挪走」会静默吞掉新票。
+            claim = p.with_name(f"{p.stem}.processing.{os.getpid()}")
             try:
-                info = _json.loads(p.read_text(encoding="utf-8")) or {}
+                p.replace(claim)
+            except OSError:
+                continue
+            n = 0
+            try:
+                info = _json.loads(claim.read_text(encoding="utf-8")) or {}
                 stem = str(info.get("stem") or p.stem)
                 files = [str(f) for f in (info.get("files") or [])]
+                if not files:
+                    # 空票：不挪 `sent/`、不静默吞掉；留一行日志下次再看。
+                    _put_back(claim, p)
+                    out["kept"] += 1
+                    print(f"⚠ note-outbox 空票：{p.name}（留着重试）", flush=True)
+                    continue
                 if q is None:
                     q = UploadQueue(None, root=root)
-                n = q.add_files(files, stem) if files else 0
+                n = q.add_files(files, stem)
+                # ⚠️ 列了文件、但一个都不在（vault 没挂载 / iCloud 没下载）：
+                #    不能挪 `sent/`，否则这条笔记永远不再试。留着下轮。
+                if not any(pathlib.Path(f).is_file() for f in files):
+                    _put_back(claim, p)
+                    out["kept"] += 1
+                    print(f"⚠ note-outbox 文件都不在：{p.name}（留着重试）", flush=True)
+                    continue
             except Exception:                                     # noqa: BLE001
+                _put_back(claim, p)                               # 坏票放回，下轮再试
                 out["kept"] += 1
                 continue
             out["merged"] += 1 if n else 0
             try:
                 sent = d / "sent"
                 sent.mkdir(exist_ok=True)
-                p.replace(sent / p.name)
+                claim.replace(sent / p.name)
             except Exception:                                     # noqa: BLE001
                 out["kept"] += 1
     except Exception:                                             # noqa: BLE001
@@ -985,6 +1035,16 @@ def _wait_lock_free(lock: "DrainLock", timeout: float) -> bool:
         time.sleep(0.05)
 
 
+def exit_uploader_allowed() -> bool:
+    """退出后**允许**起独立补传进程吗（只判开关，不看队列空 / Popen 成败）。
+
+    ⚠️ 唯一定义点：`CLASSLIVE_NO_AUTO_UPDATE` 与自动更新共用同一道闸 ——
+       用户为了关更新设了它，退出补传也不会起。文案与 `spawn_exit_uploader`
+       必须读这一处，别在第三处再写一遍 env 判断（2026-11-10 用户看到假承诺）。
+    """
+    return upload_enabled() and not os.environ.get("CLASSLIVE_NO_AUTO_UPDATE")
+
+
 def spawn_exit_uploader() -> bool:
     """在**独立的后台进程**里把队列传完（仿 `update.spawn_auto_update`）。返回"起没起"。
 
@@ -998,9 +1058,7 @@ def spawn_exit_uploader() -> bool:
        App 内存里那份共享实例是一致的；这里不去碰共享实例，是为了让
        `entry_launch`（面板那条路，没有共享队列）也能用同一个入口。
     """
-    if not upload_enabled():
-        return False
-    if os.environ.get("CLASSLIVE_NO_AUTO_UPDATE"):
+    if not exit_uploader_allowed():
         return False
     try:
         if not UploadQueue(make_prod_send()).pending:

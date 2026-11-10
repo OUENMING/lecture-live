@@ -12,6 +12,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
@@ -263,12 +264,18 @@ def t_resume_stale_note_jobs() -> None:
         calls = []
 
         def _rb(sess, *, log=None, **k):
+            note = pathlib.Path(sess).with_name("out.md")
+            note.write_text("note", encoding="utf-8")
             calls.append(str(sess))
-            return {"ok": True, "note": str(sd / "out.md"), "error": ""}
+            return {"ok": True, "note": str(note), "error": ""}
 
         r = main.resume_stale_note_jobs(str(sd), rebuild=_rb, jobs_root=jobs)
         check("⭐⭐ 死掉的后台任务会被补出来（判据是 pid/心跳，不是 journal）",
               r["found"] == 1 and r["done"] == 1 and calls, (r, calls))
+        # ⭐ 2026-11-10：恢复路径补出的笔记也要出箱 —— 否则作者永远拿不到 note.html。
+        _ob = pathlib.Path(jobs) / "note-outbox" / f"{stem}.json"
+        check("⭐⭐ 恢复补出的笔记写进 note-outbox（不上传的老 bug）",
+              _ob.is_file() and "out.md" in _ob.read_text(encoding="utf-8"), str(_ob))
         check("⭐ 每节只补一次：收工状态落到 done，再扫就不动了",
               NJ.read(stem, root=jobs).get("state") == NJ.DONE
               and main.resume_stale_note_jobs(str(sd), rebuild=_rb,
@@ -280,11 +287,73 @@ def t_resume_stale_note_jobs() -> None:
         calls.clear()
         r2 = main.resume_stale_note_jobs(str(sd), rebuild=_rb, jobs_root=jobs)
         check("⭐⭐ 还活着的任务一个都不碰", r2["found"] == 0 and not calls, (r2, calls))
+        # ⭐ 锁被占（另一进程正在补）→ 跳过并计数，**不许 KeyError 中断整轮扫描**。
+        stem3 = "2026-11-04_180000_ECON10790"
+        (sd / f"{stem3}.md").write_text("x", encoding="utf-8")
+        NJ.claim(stem3, root=jobs, spec={**SPEC, "session": str(sd / f"{stem3}.md")},
+                 pid=999_999_999)
+        _lk = NJ.try_lock(stem3, root=jobs)
+        calls.clear()
+        r3 = main.resume_stale_note_jobs(str(sd), rebuild=_rb, jobs_root=jobs)
+        check("⭐⭐ 锁被占 → skipped 计数且不重建（KeyError 回归）",
+              r3["skipped"] == 1 and not calls, (r3, calls))
+        _lk.close()
+
+
+def t_review_state_and_locks() -> None:
+    """降级判据是**五态**（off/cancelled/failed/partial/ok）+ per-stem 锁真的互斥。"""
+    import obsidian_writer as ow
+    check("⭐ 没配 key → off（正常，不算降级）",
+          ow.review_state({"review_total": 0, "review_ok": 0},
+                          expected=False) == "off")
+    check("⭐ 配了 key 但一块没回来 → failed",
+          ow.review_state({"review_total": 8, "review_ok": 0,
+                           "review_attempted": True}) == "failed")
+    check("⭐⭐ 3/8 也是残次品 → partial（旧判据会漏）",
+          ow.review_state({"review_total": 8, "review_ok": 5,
+                           "review_attempted": True}) == "partial")
+    check("⭐ 8/8 → ok",
+          ow.review_state({"review_total": 8, "review_ok": 8,
+                           "review_attempted": True}) == "ok")
+    check("⭐⭐ 有 key 但早退/抛异常（attempted 但 total 0）→ failed，不当成 off",
+          ow.review_state({"review_total": 0, "review_ok": 0,
+                           "review_attempted": True}) == "failed")
+    check("⭐ 用户主动取消（复习层没开始）→ cancelled，不报降级",
+          ow.review_state({"review_total": 0, "review_ok": 0},
+                          expected=True, cancelled=True) == "cancelled")
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        stem = "2026-11-04_160000_ECON10790"
+        a = NJ.try_lock(stem, root=root)
+        b = NJ.try_lock(stem, root=root)
+        check("⭐⭐ per-stem 锁：同一节第二个拿不到（跨线程/进程互斥）",
+              a is not None and b is None)
+        a.close()
+        c = NJ.try_lock(stem, root=root)
+        check("⭐ 释放后能再拿到（进程死了内核也会自动放）", c is not None)
+        c.close()
+        note = root / "n.md"
+        note.write_text("n", encoding="utf-8")
+        note.unlink()
+        check("⭐⭐ 笔记不存在 → 不写空票（空票会被 drainer 挪走、永不再试）",
+              NW._outbox(stem, str(note), root=str(root)) is False)
+    src = pathlib.Path(NW.__file__).read_text(encoding="utf-8")
+    check("⭐⭐ worker 启动后把 pid 改成**自己**（否则父进程一退就被判死）",
+          '_jobs.write(stem, {"pid": os.getpid(), "state": _jobs.RUNNING}' in src)
 
 
 def t_drain_note_outbox() -> None:
     """worker 的笔记出箱由**主进程**入队（§12-4：跨进程只有一个写者）。"""
     import upload
+    _saved_up = upload.upload_enabled
+    upload.upload_enabled = lambda: True          # 判据环境可能设了 CLASSLIVE_UPLOAD=0
+    try:
+        _t_drain_note_outbox_body(upload)
+    finally:
+        upload.upload_enabled = _saved_up
+
+
+def _t_drain_note_outbox_body(upload) -> None:
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d, "state")
         note = pathlib.Path(d, "Lectures", "2026-11-04_ECON10790.md")
@@ -305,6 +374,26 @@ def t_drain_note_outbox() -> None:
               str([p.name for p in (root / "note-outbox").iterdir()]))
         check("⭐ 空目录 / 没有票都不抛",
               upload.drain_note_outbox(root=str(root))["found"] == 0)
+        # ⭐ 上传关着时**不消费票**（否则票进 sent、队列条目 14 天后过期 → 永久丢）。
+        assert NW._outbox("2026-11-04_170000_ECON10790", str(note), root=str(root))
+        upload.upload_enabled = lambda: False
+        got_off = upload.drain_note_outbox(root=str(root))
+        check("⭐⭐ 上传关闭 → 票原样留着，found=0",
+              got_off["found"] == 0
+              and (root / "note-outbox" / "2026-11-04_170000_ECON10790.json").is_file(),
+              str(got_off))
+        upload.upload_enabled = lambda: True
+        # ⭐ 上次 drain 崩在领取后留下的 `.processing.*` 要能回收，不能变孤儿。
+        d = root / "note-outbox"
+        orphan = d / "2026-11-04_180000_ECON10790.processing.999"
+        orphan.write_text((d / "2026-11-04_170000_ECON10790.json").read_text(
+            encoding="utf-8"), encoding="utf-8")
+        old = time.time() - 3600
+        os.utime(orphan, (old, old))
+        got_orphan = upload.drain_note_outbox(root=str(root))
+        check("⭐⭐ 孤儿 `.processing.*` 超时回收并正常入队",
+              got_orphan["merged"] >= 1 and not list(d.glob("*.processing.*")),
+              str(got_orphan))
 
 
 def t_notify_is_best_effort() -> None:
@@ -431,6 +520,45 @@ def t_wrapup_card_never_claims_saved() -> None:
           "")
 
 
+def t_startup_backfill_is_threaded() -> None:
+    """启动补笔记必须在**后台线程**里 —— 2026-11-10 事故：同步跑卡了 6.63 分钟。"""
+    import ast
+    tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
+    bg = [n for n in ast.walk(tree)
+          if isinstance(n, ast.FunctionDef) and n.name == "_resume_notes_bg"]
+    check("⭐⭐ 两条恢复路径都在 `_resume_notes_bg` 里（顺序 stale → pending）",
+          bool(bg), "找不到 _resume_notes_bg")
+    names = set()
+    if bg:
+        for n in ast.walk(bg[0]):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                names.add(n.func.id)
+    check("⭐⭐ 它真的调了两条恢复路径",
+          {"resume_stale_note_jobs", "resume_pending_notes"} <= names, names)
+    if bg:
+        _lines = {}
+        for n in ast.walk(bg[0]):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                _lines.setdefault(n.func.id, n.lineno)
+        check("⭐⭐ 顺序是先 stale 再 pending",
+              _lines.get("resume_stale_note_jobs", 10**9)
+              < _lines.get("resume_pending_notes", 10**9), _lines)
+    started = False
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "start"):
+            continue
+        inner = n.func.value
+        if not isinstance(inner, ast.Call):
+            continue
+        for kw in inner.keywords:
+            if (kw.arg == "target" and isinstance(kw.value, ast.Name)
+                    and kw.value.id == "_resume_notes_bg"):
+                started = True
+    check("⭐⭐ `_resume_notes_bg` 真的 `.start()` 了（不是只构造 Thread）",
+          started, "没找到 Thread(target=_resume_notes_bg).start()")
+
+
 def main_() -> int:
     print("note_worker 判据（派生用替身）")
     for name, fn in [
@@ -449,7 +577,9 @@ def main_() -> int:
         ("派生分岔判据", t_spawn_decision_wrapper),
         ("卡片不说假话", t_wrapup_card_never_claims_saved),
         ("开机补死任务", t_resume_stale_note_jobs),
+        ("启动补笔记在后台", t_startup_backfill_is_threaded),
         ("笔记出箱入队", t_drain_note_outbox),
+        ("降级五态与节锁", t_review_state_and_locks),
         ("开关登记", t_handbook_registers_switch),
     ]:
         print(f"\n--- {name} ---")

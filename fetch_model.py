@@ -52,10 +52,13 @@ PINS = {
     # GitHub release API 的 `digest`（2026-10-09 取）；560 ms 版。1120 ms 版是 840c48de…
     "nemotron": "78e2b79fcf7271553a74402a76b771b09ea40117a39566a79f52235b23db6358",
     # HuggingFace LFS 文件（HF 官方 API 的 lfs.sha256；tokens.txt 非 LFS，取本机已装那份）
+    # ⚠️ 2026-11-10 重取：上游把 encoder / decoder / joiner 都换了一版（同仓同路径）。
+    #    旧钉值会让走 hf-mirror 的人下完被判「校验不对」→ 整目录删掉、永远装不上
+    #    （直连不校 sha，所以直连的人一直没暴露）。换上游文件时**这三个值要一起更新**。
     "parakeet": {
-        "encoder.int8.onnx": "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247",
-        "decoder.int8.onnx": "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e",
-        "joiner.int8.onnx": "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3",
+        "encoder.int8.onnx": "1afbe69c1ffdabee94755f42e4daf1d93549131a3da11356bda84fcef0f2c479",
+        "decoder.int8.onnx": "0222a86147299d4dee90edf95b6d13827edb42ad8b7c9cf0b2582f030937c0b5",
+        "joiner.int8.onnx": "cbd02f3696e9944970111fb439d9c3fd365a80374565f13f2b9c7007d253fc98",
         "tokens.txt": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
     },
     "llm": {

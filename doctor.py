@@ -70,6 +70,13 @@ def model_present(path: str) -> bool:
     """
     p = pathlib.Path(os.path.expanduser(path))
     if p.is_dir():
+        # ⚠️ `models.REQUIRED_FILES`：目录型模型必须**那几个文件都在**。
+        #    只看「非空」会在缺 encoder 时假绿（2026-11-10 实锤：起课抛 FileNotFoundError，
+        #    doctor 仍报 ✅）。不认识的目录（如 Whisper）仍走原来的宽松判据。
+        import models as _models
+        need = _models.required_files_for(str(p))
+        if need:
+            return all((p / n).is_file() and (p / n).stat().st_size > 0 for n in need)
         return any(f.is_file() and f.stat().st_size > 0 for f in p.rglob("*"))
     return p.is_file() and p.stat().st_size > 0
 
@@ -322,7 +329,17 @@ def main() -> int:
         elif incomplete:
             word = "缓存不完整（下了一半）"
         else:
-            word = ("空目录/空文件" if os.path.exists(os.path.expanduser(m.path)) else "缺失")
+            # ⚠️ 别一律说「空目录/空文件」：缺一个 encoder 时目录里有 3 个文件，
+            #    那句话会把人往「整个模型没下」带（2026-11-10 实锤）。能点名就点名。
+            _p = pathlib.Path(os.path.expanduser(m.path))
+            if not _p.exists():
+                word = "缺失"
+            else:
+                import models as _models
+                _need = _models.required_files_for(m.path)
+                _miss = [n for n in _need
+                         if not (_p / n).is_file() or (_p / n).stat().st_size == 0]
+                word = ("缺 " + "、".join(_miss)) if _miss else "空目录/空文件"
         print(f"{_mark(ok) if ok else ('❌' if m.required else '⚪')} {m.label:<30}{word}")
         if incomplete:
             print("   ⚠️ 文件在、但 HF 缓存缺件 —— **现在用不了**（不会自动下）")

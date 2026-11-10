@@ -278,7 +278,8 @@ case "${1:-}" in
       :
     else
       "$PY" entry_launch.py
-      case $? in
+      _panel_rc=$?
+      case $_panel_rc in
         0) COURSE="$(cat "${CFG}" 2>/dev/null || true)"
            echo "▶ 课程 = ${COURSE:-未设置}" ;;
         1) echo "（面板被关掉了 —— 不录课）"; exit 0 ;;
@@ -293,6 +294,12 @@ case "${1:-}" in
            export CL_RESTARTS=$(( ${CL_RESTARTS:-0} + 1 ))
            echo "↻ 更新好了 —— 重开面板"
            exec /bin/bash "$PWD/cl" ;;
+        # ⚠️ 2026-11-10：**没被列出来的退出码一律不录**。
+        #    实测：面板被信号杀掉（kill / 强退）时 `$?` 是 143 —— 原来 case 没有分支，
+        #    于是**直接掉到下面开麦**：app.log 里只剩「▶ ClassLive … 测试模式=开」，
+        #    用户以为关掉了面板，实际开始录音（排查「启动不了」时真踩到）。
+        #    宁可少录一次（当场能发现），也不静默录一段。
+        *) echo "（面板异常退出（${_panel_rc}）—— 不录课）"; exit 0 ;;
       esac
     fi ;;
   # ⚠️ 这条是**没有图形界面时的填 key 入口** —— `notice.ask_text` 弹不出来时

@@ -142,6 +142,30 @@ MODELS: tuple[Model, ...] = (PARAKEET, VAD, WHISPER, QWEN, NEMOTRON)
 
 REQUIRED: tuple[Model, ...] = tuple(m for m in MODELS if m.required)
 
+#: 目录型模型「缺了就一定跑不起来」的文件（相对模型目录）。
+#: ⚠️ `doctor.model_present()` 里「目录非空、有大小 > 0 的文件」那条会在**缺 encoder** 时
+#:    假绿 —— 2026-11-10 实锤：两个模型的 `encoder.int8.onnx` 进了回收站，Parakeet 起课
+#:    直接抛 `FileNotFoundError`，而 `cl doctor` 仍报「✅ 就位」。
+#: ⚠️ 这里只断言**存在且非空**，不算 sha（下载中断留下的半截文件仍可能漏过；完整校验在
+#:    `fetch_model.PINS`，只在镜像路径跑）。
+REQUIRED_FILES: dict[str, tuple[str, ...]] = {
+    "parakeet": ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"),
+    "nemotron": ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"),
+}
+
+
+def required_files_for(path: str) -> tuple[str, ...]:
+    """这个目录是注册表里的哪个目录型模型？返回它必须有的文件；不认识 -> `()`。
+
+    ⚠️ 纯路径比较（`expanduser` + `normpath`），不碰磁盘 —— 本文件「只有数据没有 I/O」
+       的约定不变。
+    """
+    want = os.path.normpath(os.path.expanduser(str(path)))
+    for m in MODELS:
+        if os.path.normpath(os.path.expanduser(m.path)) == want:
+            return REQUIRED_FILES.get(m.key, ())
+    return ()
+
 
 def by_key(key: str) -> Model | None:
     """按 `key` 取一条。取不到给 `None`（**不抛** —— 调用点多半有默认值要退回）。

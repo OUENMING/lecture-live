@@ -398,6 +398,13 @@ def start_upload(tester) -> dict:
     q = _shared_upload_queue()
     n = q.enqueue(files, tester.stem.name)
     pending = q.pending
+    try:
+        import client_events as _ce
+        _ce.emit(getattr(tester, "session_path", None),
+                 "upload_queued", n=int(n), pending=int(pending),
+                 files=len(files))
+    except Exception:                                 # noqa: BLE001
+        pass
     th = None
     if n:
         th = threading.Thread(target=q.pump, kwargs={"max_items": 1}, daemon=True,
@@ -708,6 +715,13 @@ def _spawn_note_worker(*, writer, ui, stem, qa_snapshot, live_pool, course,
                 ui.wrapup_handed_off()                    # 卡片换成「后台生成中」
             except Exception:                             # noqa: BLE001
                 pass
+        try:
+            import client_events as _ce
+            _ce.emit(sess, "note_handoff", has_course=bool(course),
+                     use_cloud=bool(spec.get("use_cloud")),
+                     trans_mode=str(spec.get("trans_mode") or ""))
+        except Exception:                                 # noqa: BLE001
+            pass
         echo("🔁 笔记交给后台生成 —— 现在可以关窗口，下一节课随时能开")
         return True
     except Exception:                                     # noqa: BLE001
@@ -2590,6 +2604,20 @@ def run(args) -> None:
                             recap_fn=_recap_for,
                             desk=True, open_fn=_open_note)
     notes = TermNotes()                                 # 术语通俗解析(查表)
+    # ⭐ 2026-11-11：轻量事件时间线（只记事件名/标量，随诊断包上传）。
+    try:
+        import client_events as _ce
+        try:
+            _ver = pathlib.Path(__file__).with_name("VERSION").read_text(
+                encoding="utf-8").strip()
+        except OSError:
+            _ver = ""
+        _ce.emit(writer.session_path, "session_start",
+                 version=_ver, source=str(getattr(args, "source", "") or ""),
+                 trans_mode=str(trans.get("mode") or ""),
+                 test_mode=bool(getattr(args, "test_mode", False)))
+    except Exception:                                 # noqa: BLE001
+        pass
 
     # 测试模式: 采一份完整报告 + 留音频。**任何采集失败都不能影响上课** ——
     # ⭐ 开机扫**上次没收尾**的测试模式（`.pending` 标记）——
@@ -5065,6 +5093,14 @@ def run(args) -> None:
                 _repfile = (str(tester.stem) + ".report.json"
                             if getattr(tester, "stem", None) is not None else "")
                 _wrote = bool(_repfile) and os.path.exists(_repfile)
+                try:
+                    import client_events as _ce
+                    _ce.emit(writer.session_path, "session_report_ready",
+                             report=bool(_wrote),
+                             note=bool(getattr(writer, "vault_path", "") or ""),
+                             upload=bool(_upmod.upload_enabled()))
+                except Exception:                     # noqa: BLE001
+                    pass
                 if _wrote:
                     echo(f"\n🧪 测试报告: {_repfile}")
                     # ⭐ 阶段 3：排进上传队列 + 后台试一次（**不阻塞收尾**）。

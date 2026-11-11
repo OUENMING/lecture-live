@@ -325,6 +325,15 @@ def run(stem: str, *, root=None, log=None, heartbeat_s: float | None = None,
             _lock.close()                            # 释放 per-stem 锁
         except Exception:                            # noqa: BLE001
             pass
+    try:
+        import client_events as _ce
+        _ce.emit(spec.get("session"), "note_done", ok=bool(out["ok"]),
+                 degraded=bool(out["degraded"]),
+                 state=str(out.get("review_state") or ""),
+                 review_ok=int(out["review_ok"]),
+                 review_total=int(out["review_total"]))
+    except Exception:                                 # noqa: BLE001
+        pass
     return out
 
 
@@ -420,8 +429,9 @@ def _outbox(stem: str, note: str, *, root=None) -> bool:
     try:
         d = _outbox_dir(root=root)
         d.mkdir(parents=True, exist_ok=True)
-        files = [p for p in (pathlib.Path(note),
-                             pathlib.Path(note).with_suffix(".html")) if p.is_file()]
+        # ⚠️ 只传 HTML：笔记 `.md` 与逐字转录在远端都叫 `transcript.md`，
+        #    会把 transcript 覆盖掉（旧 bug）。markdown 版本留在本机/诊断包里。
+        files = [p for p in (pathlib.Path(note).with_suffix(".html"),) if p.is_file()]
         if not files:
             # ⚠️ 空票 = drainer 挪进 `sent/` 后永不再试、且什么都没上传。宁可不写。
             return False

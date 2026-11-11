@@ -99,6 +99,34 @@ class KeepAwake(unittest.TestCase):
         self.assertEqual((pi.begins, pi.ends), (1, 1))
 
 
+class DisplayAwake(unittest.TestCase):
+    """悬浮窗可见才保持显示器常亮；隐藏就释放（系统睡眠断言不受影响）。"""
+
+    def test_可见持有_隐藏释放_幂等(self):
+        pi = FakeProcessInfo()
+        try:
+            power.set_display_awake(False, process_info=pi)
+            self.assertTrue(power.set_display_awake(True, process_info=pi))
+            self.assertEqual(pi.options, power.IDLE_DISPLAY_SLEEP_DISABLED)
+            self.assertTrue(power.set_display_awake(True, process_info=pi))
+            self.assertEqual(pi.begins, 1, "重复可见不许重复拿断言")
+            self.assertFalse(power.set_display_awake(False, process_info=pi))
+            self.assertEqual(pi.ends, 1)
+            self.assertEqual(pi.ended, pi.tokens)
+        finally:
+            power.set_display_awake(False, process_info=pi)
+
+    def test_拿不上不缓存_下次可见还能重试(self):
+        try:
+            power.set_display_awake(False)
+            self.assertFalse(power.set_display_awake(True, process_info=FakeBoom()))
+            pi = FakeProcessInfo()
+            self.assertTrue(power.set_display_awake(True, process_info=pi),
+                            "首次失败后单例被缓存，整节课不再重试")
+        finally:
+            power.set_display_awake(False, process_info=FakeProcessInfo())
+
+
 class Wiring(unittest.TestCase):
     """`main.main()` 是录课进程的入口；断言必须套着 `run(args)`。"""
 
@@ -123,6 +151,25 @@ class Wiring(unittest.TestCase):
         calls = [ast.unparse(n) for w in guarded for n in ast.walk(w)]
         self.assertTrue(any(c.startswith("run(args") for c in calls),
                         f"`run(args)` 没被那个 `with` 包住：{calls}")
+
+    def test_悬浮窗可见性真的切换显示器断言(self):
+        tree = ast.parse((HERE / "overlay.py").read_text(encoding="utf-8"))
+        fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+        def _calls(name):
+            fn = fns.get(name)
+            self.assertIsNotNone(fn, f"overlay.py 里找不到 {name}")
+            return [ast.unparse(n) for n in ast.walk(fn) if isinstance(n, ast.Call)]
+
+        refresh = _calls("_refresh_visibility")
+        self.assertTrue(any("_sync_display_awake(vis)" in c for c in refresh),
+                        "可见性变化没按实际 vis 同步显示器断言")
+        show = _calls("show")
+        self.assertTrue(any("_sync_display_awake(True)" in c for c in show),
+                        "首屏 show 没显式持有显示器断言（_visible 初值会吃掉第一次变化）")
+        close = _calls("close")
+        self.assertTrue(any("_sync_display_awake(False)" in c for c in close),
+                        "close 没显式释放显示器断言")
 
 
 class WakeWatchCase(unittest.TestCase):

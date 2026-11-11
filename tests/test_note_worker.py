@@ -170,10 +170,11 @@ def t_outbox_written_only_on_success() -> None:
         (note.with_suffix(".html")).write_text("<html>", encoding="utf-8")
         root = pathlib.Path(d, "state")
         ok = NW._outbox("s1", str(note), root=str(root))
-        check("⭐ 成功 -> 写 outbox（md + html 两条）", ok is True)
+        check("⭐ 成功 -> 写 outbox（只传 HTML，避免与 transcript.md 同名）", ok is True)
         got = json.loads((root / "note-outbox" / "s1.json").read_text(encoding="utf-8"))
         check("⭐⭐ outbox 只有**文件清单**，不碰上传队列（§12-4：跨进程只有一个写者）",
-              len(got["files"]) == 2 and "queue" not in json.dumps(got),
+              len(got["files"]) == 1 and got["files"][0].endswith(".html")
+              and "queue" not in json.dumps(got),
               str(got["files"]))
         check("⭐ 原子写不留 .tmp",
               not [p for p in (root / "note-outbox").iterdir() if ".tmp" in p.name])
@@ -266,6 +267,7 @@ def t_resume_stale_note_jobs() -> None:
         def _rb(sess, *, log=None, **k):
             note = pathlib.Path(sess).with_name("out.md")
             note.write_text("note", encoding="utf-8")
+            note.with_suffix(".html").write_text("<html>", encoding="utf-8")
             calls.append(str(sess))
             return {"ok": True, "note": str(note), "error": ""}
 
@@ -275,7 +277,7 @@ def t_resume_stale_note_jobs() -> None:
         # ⭐ 2026-11-10：恢复路径补出的笔记也要出箱 —— 否则作者永远拿不到 note.html。
         _ob = pathlib.Path(jobs) / "note-outbox" / f"{stem}.json"
         check("⭐⭐ 恢复补出的笔记写进 note-outbox（不上传的老 bug）",
-              _ob.is_file() and "out.md" in _ob.read_text(encoding="utf-8"), str(_ob))
+              _ob.is_file() and "out.html" in _ob.read_text(encoding="utf-8"), str(_ob))
         check("⭐ 每节只补一次：收工状态落到 done，再扫就不动了",
               NJ.read(stem, root=jobs).get("state") == NJ.DONE
               and main.resume_stale_note_jobs(str(sd), rebuild=_rb,
@@ -359,6 +361,7 @@ def _t_drain_note_outbox_body(upload) -> None:
         note = pathlib.Path(d, "Lectures", "2026-11-04_ECON10790.md")
         note.parent.mkdir(parents=True)
         note.write_text("n", encoding="utf-8")
+        note.with_suffix(".html").write_text("<html>", encoding="utf-8")
         NJ.write("x", {}, root=root)                       # 建一次目录，免得手写路径
         assert NW._outbox("2026-11-04_160000_ECON10790", str(note), root=str(root))
         q = upload.UploadQueue(lambda *a: True, root=root)
@@ -367,7 +370,7 @@ def _t_drain_note_outbox_body(upload) -> None:
               got["found"] == 1 and got["merged"] == 1, str(got))
         names = [pathlib.Path(f).name for i in q.items() for f in i["files"]]
         check("⭐ 队列里真的有一条笔记",
-              any(n.endswith(".md") for n in names), str(names))
+              any(n.endswith(".html") for n in names), str(names))
         check("⭐ 票挪进 `sent/`（不删 —— 同「要清理就挪不删」）",
               (root / "note-outbox" / "sent").is_dir()
               and not list((root / "note-outbox").glob("*.json")),

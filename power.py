@@ -34,6 +34,7 @@ macOS 在整机没有输入、又没别的大活时会**空闲睡眠**。ClassLi
 from __future__ import annotations
 
 import contextlib
+import threading
 import time
 
 #: 墙钟一次跳这么多 = 系统睡过一觉。⚠️ **唯一定义点** ——
@@ -49,10 +50,15 @@ IDLE_SYSTEM_SLEEP_DISABLED = 1 << 20
 #: 省时间在退出/登出时把进程"直接砍掉"（收尾正在写盘，宁可慢一点也要写完）。
 SUDDEN_TERMINATION_DISABLED = 1 << 14
 
+#: `NSActivityIdleDisplaySleepDisabled`（实测 1<<40）。**只关显示器睡眠**，
+#: 不拦系统空闲睡眠；由悬浮窗可见性单独持有（见 `set_display_awake`）。
+IDLE_DISPLAY_SLEEP_DISABLED = 1 << 40
+
 OPTIONS = IDLE_SYSTEM_SLEEP_DISABLED | SUDDEN_TERMINATION_DISABLED
 
 #: 理由串会出现在 `pmset -g assertions` / 活动监视器里，写清楚是谁在持着。
 REASON = "ClassLive 正在录课并生成课后笔记"
+REASON_DISPLAY = "ClassLive 字幕窗口可见，保持屏幕常亮"
 
 
 def process_info():
@@ -71,9 +77,12 @@ class Activity:
     没拿到的 token，也不重复喊同一句警告。
     """
 
-    def __init__(self, process_info=None, log=None):
+    def __init__(self, process_info=None, log=None, *,
+                 options: int = OPTIONS, reason: str = REASON):
         self._process_info = process_info
         self._log = log
+        self._options = int(options)
+        self._reason = str(reason)
         self._token = None
         self._began = False
         self._ended = False
@@ -95,25 +104,63 @@ class Activity:
             return self._token is not None
         self._began = True
         try:
-            self._token = self._pi().beginActivityWithOptions_reason_(OPTIONS, REASON)
+            self._token = self._pi().beginActivityWithOptions_reason_(
+                self._options, self._reason)
         except Exception as e:                    # noqa: BLE001
             self._token = None
             self._warn(f"⚠ 防空闲睡眠断言没拿上（不影响录课/笔记）："
                        f"{type(e).__name__}: {e}")
         return self._token is not None
 
-    def end(self) -> None:
-        """释放。幂等；没拿过（或拿失败）就什么都不做。永不抛。"""
+    def end(self) -> bool:
+        """释放。幂等；没拿过（或拿失败）就什么都不做。返回**是否已释放**。永不抛。"""
         if self._ended:
-            return
-        self._ended = True
+            return True
         if self._token is None:
-            return
-        token, self._token = self._token, None
+            self._ended = True
+            return True
+        token = self._token
         try:
             self._pi().endActivity_(token)
         except Exception as e:                    # noqa: BLE001
+            # ⚠️ 释放失败**别清 token**：留着还能再试一次；清了就永远放不掉了。
             self._warn(f"⚠ 防空闲睡眠断言没释放掉：{type(e).__name__}: {e}")
+            return False
+        self._token = None
+        self._ended = True
+        return True
+
+
+_display_lock = threading.Lock()
+_display_act: Activity | None = None
+
+
+def set_display_awake(on: bool, *, process_info=None, log=None) -> bool:
+    """悬浮窗**可见**时保持显示器常亮；隐藏/完全遮挡时释放，恢复正常熄屏。
+
+    只持有 `NSActivityIdleDisplaySleepDisabled`（不碰系统睡眠）。幂等、永不抛。
+    返回当前是否持有显示器断言。
+    ⚠️ 它**不唤醒**已经睡着的屏幕，也挡不住合盖；只是不让系统因空闲关屏。
+    """
+    global _display_act
+    with _display_lock:
+        try:
+            if on:
+                if _display_act is None:
+                    a = Activity(process_info, log=log,
+                                 options=IDLE_DISPLAY_SLEEP_DISABLED,
+                                 reason=REASON_DISPLAY)
+                    if not a.begin():
+                        return False                  # 没拿上就别缓存，下次可见再试
+                    _display_act = a
+                return _display_act._token is not None
+            if _display_act is not None:
+                if not _display_act.end():            # 释放失败：保留对象，下次再试
+                    return False
+                _display_act = None
+        except Exception:                             # noqa: BLE001
+            pass
+    return False
 
 
 @contextlib.contextmanager

@@ -1280,6 +1280,64 @@ def collect_diag() -> dict:
     return out
 
 
+def make_upload_manifest(stem: pathlib.Path, *, note_path: str = "") -> str | None:
+    """这一节**本地有哪些产物、各自会不会上传**（`<stem>.upload_manifest.json`）。
+
+    只写文件名（去掉课程/时间前缀）、字节数、去向，不含绝对路径与课号。
+    随诊断包一起上传；远端名固定为 `upload_manifest.json`。
+    """
+    try:
+        stem = pathlib.Path(stem)
+        rows: list = []
+        for p in sorted(stem.parent.glob(stem.name + ".*")):
+            if not p.is_file():
+                continue
+            full = p.name
+            if full.endswith(".upload_manifest.json"):
+                continue
+            n = full[len(stem.name) + 1:] or "transcript.md"
+            if full == stem.name + ".md":
+                n = "transcript.md"                  # 去掉前缀后只剩 "md"
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+            if full.endswith(".bundle.zip"):
+                where, note = "local_only", "人类可读打包，不上传（内容与单独文件重复）"
+            elif full.endswith((".report.json", ".opus", ".wav", ".extra.tar.gz", ".md")):
+                where, note = "separate", "逐字转录" if full.endswith(".md") else ""
+            elif full.endswith((".pending.json", ".recovered.json", ".tmp", ".scrubbed")):
+                where, note = "local_only", "崩溃 journal / 临时文件，不进诊断包"
+            elif size > EXTRA_FILE_MAX:
+                where, note = "local_only", f"超过 {EXTRA_FILE_MAX // 1024 // 1024} MB，诊断包会跳过"
+            else:
+                where, note = "extra", "随 extra.tar.gz 上传"
+            rows.append({"name": n, "bytes": size, "where": where, "note": note})
+        if note_path:
+            np = pathlib.Path(str(note_path))
+            for q in (np, np.with_suffix(".html")):
+                try:
+                    if q.is_file():
+                        _html = q.suffix == ".html"
+                        rows.append({"name": "note.html" if _html else "note.md",
+                                     "bytes": q.stat().st_size,
+                                     "where": "separate" if _html else "extra",
+                                     "note": "课后笔记（HTML 单独传 / md 进诊断包）"})
+                except OSError:
+                    pass
+        out = stem.with_name(stem.name + ".upload_manifest.json")
+        ok = _atomic_json(str(out), {
+            "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+            # ⚠️ 这份清单在诊断包**封包前**生成：extra.tar.gz 与后台笔记可能更晚才有。
+            "scope": "收尾时本地清单；extra.tar.gz / 后台笔记可能在其后生成",
+            "files": rows,
+            "counts": {k: sum(1 for r in rows if r["where"] == k)
+                       for k in ("separate", "extra", "local_only")}})
+        return str(out) if ok else None
+    except Exception:                                 # noqa: BLE001
+        return None
+
+
 def make_extras(stem: pathlib.Path, *, note_path: str = "",
                 diag=collect_diag) -> str | None:
     """把这节课**还没单独上传**的东西打成 `<stem>.extra.tar.gz`。返回路径；失败 None。
@@ -2340,6 +2398,9 @@ class TestSession:
         if bundle:
             self.bundle_path = make_bundle(self.stem, out, self.session_path,
                                            audio_paths=getattr(self, "audio_files", []))
+        # ⭐ 2026-11-11：上传清单（哪些文件传、哪些只留本机）—— 随诊断包上传。
+        if not make_upload_manifest(self.stem, note_path=note_path):
+            print("⚠ 上传清单没写成（不影响报告/音频）", flush=True)
         # ⚠️ 上传**关着**时没人会来调 `journal_upload_done()` —— 那时在这里自己撤。
         #    ⚠️ 判据与 `main.start_upload` **同一个**（`upload.upload_enabled()`），
         #       不许各写一份 env 判断。

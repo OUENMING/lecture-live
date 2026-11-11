@@ -2907,6 +2907,9 @@ class Overlay:
         self._panel.orderFrontRegardless()
         self._presented = True        # 从这一刻起 occlusionState 才有意义（见 _compute_visible）
         self._presented_t = time.monotonic()
+        # ⭐ 首屏必须显式同步一次：`_visible` 初值就是 True，第一次
+        #    `_refresh_visibility()` 会发现「没变化」直接 return，断言永远拿不上。
+        self._sync_display_awake(True)
         self._hide_traffic_lights()   # 红绿灯会自己回来(社区实证), 每次显示都再藏一遍
         # ⚠️ 必须显式清掉 first responder。实测: orderFrontRegardless 之后 AppKit 会
         # **自动**把输入框的 field editor 装成 first responder —— 于是 `_is_editing()`
@@ -3007,12 +3010,23 @@ class Overlay:
             return True
         return (time.monotonic() - self._presented_t) < _OCCLUSION_SETTLE_S
 
+    def _sync_display_awake(self, vis: bool) -> None:
+        """按悬浮窗可见性持有/释放显示器断言。幂等、永不抛（`power` 自己兜底）。"""
+        try:
+            import power as _power
+            ok = _power.set_display_awake(bool(vis))
+            if vis and not ok:
+                print("⚠ 显示器常亮断言没拿上（不影响录音/字幕）", flush=True)
+        except Exception:                             # noqa: BLE001
+            pass
+
     def _refresh_visibility(self) -> None:
         """现算可见性；变化时记时并处理「恢复」。pump 每轮调（通知只是提前）。"""
         vis = self._compute_visible()
         if vis == self._visible:
             return
         self._visible = vis
+        self._sync_display_awake(vis)
         # ⭐ 3.9.8 ①：可见性**刚变**才回调一次（不是每轮）—— 能耗分桶就挂在这里。
         if self._on_vis is not None:
             try:
@@ -3120,6 +3134,8 @@ class Overlay:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        # ⭐ 显式释放显示器断言 —— 不依赖 orderOut 的遮挡通知是否恰好派发。
+        self._sync_display_awake(False)
         # 先收一次尺寸再落盘: 用户拖完**立刻**按 ✕ 时, pump 可能还没来得及轮询到。
         self._sync_panel_size()
         if self._user_resized:

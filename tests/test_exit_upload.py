@@ -275,7 +275,10 @@ def _case_lock(tmp: pathlib.Path) -> None:
 
 def _pending_queue(state_root: pathlib.Path) -> pathlib.Path:
     state_root.mkdir(parents=True, exist_ok=True)
-    f = state_root / "x.md"
+    # ⚠️ 文件名必须**符合会话文件的真实命名** `<stem>.md` ——
+    #    `UploadQueue` 会剔掉「不是这一节逐字转录的 .md」（笔记 md 与转录远端同名，
+    #    会覆盖 transcript.md，2026-11-11 实锤）。用 `x.md` 会把它当成笔记 md 丢掉。
+    f = state_root / "sess-spawn.md"
     f.write_text("x", encoding="utf-8")
     # ⚠️ `enqueue` 会顺手写台账（同目录），判据不关心，但路径必须在 root 下。
     upload.UploadQueue(lambda *a: True, root=state_root).enqueue([f], "sess-spawn")
@@ -553,6 +556,94 @@ def _case_wiring() -> None:
           f"spawn={[c.lineno for c in el_spawn]} auto={[c.lineno for c in el_auto]}")
 
 
+def _case_foreign_md(tmp: pathlib.Path) -> None:
+    """⭐⭐ 2026-11-11：**笔记 md 不许进上传队列**。
+
+    实测背景：`_remote_name` 把任意 `.md` 映射成 `transcript.md`，而笔记 md 与逐字
+    转录同名 → 笔记覆盖真转录（全桶 85 份里 9 份中招）。3.11.2 只修了**写票**那一步，
+    盘上已有的**旧票 / 旧队列条目**还得在读的一端挡。
+    """
+    print("\n--- E6 ⭐⭐ 队列层：笔记 md 不许上传（会覆盖 transcript.md）---")
+    root = tmp / "foreign-md"
+    root.mkdir(parents=True, exist_ok=True)
+    sess = root / "2026-11-05_100000_ECON10790.md"        # 真转录：<stem>.md
+    sess.write_text("# 会话日志\n", encoding="utf-8")
+    note = root / "2026-11-05_ECON10790.md"               # 笔记：<日期>_<课号>.md
+    note.write_text("---\ntype: lecture-notes\n---\n", encoding="utf-8")
+    note_html = note.with_suffix(".html")
+    note_html.write_text("<html>", encoding="utf-8")
+
+    # ① 入口挡：enqueue / add_files
+    q = upload.UploadQueue(lambda *a: True, root=root)
+    n = q.enqueue([sess, note, note_html], "2026-11-05_100000_ECON10790")
+    items = q.items()
+    files = [f for i in items for f in i["files"]]
+    check("⭐⭐ enqueue 收下真转录 + note.html，丢掉笔记 md",
+          n == 2 and str(note) not in files and str(sess) in files,
+          str([pathlib.Path(f).name for f in files]))
+
+    added = q.add_files([note], "2026-11-05_100000_ECON10790")
+    files2 = [f for i in q.items() for f in i["files"]]
+    check("⭐⭐ add_files 同样不收笔记 md", added == 0 and str(note) not in files2,
+          f"added={added}")
+
+    # ② 存量挡：盘上已经有一条带 md 的旧队列（升级前写下的）
+    stale = {
+        "_v": 1,
+        "items": [{"stem": "2026-11-06_090000_ECON10790",
+                   "key": upload.session_key("2026-11-06_090000_ECON10790"),
+                   "files": [str(note), str(note_html)],
+                   "tries": 0, "next_at": 0.0, "created": 0.0}],
+    }
+    (root / "upload-queue.json").write_text(json.dumps(stale), encoding="utf-8")
+    q2 = upload.UploadQueue(lambda *a: True, root=root)
+    files3 = [f for i in q2.items() for f in i["files"]]
+    check("⭐⭐ 旧队列里的笔记 md 在读入时被剔掉，note.html 保留",
+          str(note) not in files3 and str(note_html) in files3,
+          str([pathlib.Path(f).name for f in files3]))
+
+    # ③ 整条只有笔记 md -> 这条没东西可传，不该留
+    stale2 = {
+        "_v": 1,
+        "items": [{"stem": "2026-11-07_090000_ECON10790",
+                   "key": upload.session_key("2026-11-07_090000_ECON10790"),
+                   "files": [str(note)], "tries": 0, "next_at": 0.0, "created": 0.0}],
+    }
+    (root / "upload-queue.json").write_text(json.dumps(stale2), encoding="utf-8")
+    q3 = upload.UploadQueue(lambda *a: True, root=root)
+    check("⭐⭐ 整条只有笔记 md -> 条目被丢掉（不重复重试）", q3.pending == 0,
+          str(q3.pending))
+
+    # ④ 真转录不能被误伤
+    stale3 = {
+        "_v": 1,
+        "items": [{"stem": "2026-11-05_100000_ECON10790",
+                   "key": upload.session_key("2026-11-05_100000_ECON10790"),
+                   "files": [str(sess)], "tries": 0, "next_at": 0.0, "created": 0.0}],
+    }
+    (root / "upload-queue.json").write_text(json.dumps(stale3), encoding="utf-8")
+    q4 = upload.UploadQueue(lambda *a: True, root=root)
+    files4 = [f for i in q4.items() for f in i["files"]]
+    check("⭐⭐ 真转录 `<stem>.md` 原样保留（不误伤）", str(sess) in files4,
+          str([pathlib.Path(f).name for f in files4]))
+
+    # ⑤ `sent_files` 里的 `transcript.md` 也要跟着剔 —— 否则 status() 算出 left=0，
+    #    面板/收尾以为传完了，note.html 永远不重试。
+    stale4 = {
+        "_v": 1,
+        "items": [{"stem": "2026-11-05_100000_ECON10790",
+                   "key": upload.session_key("2026-11-05_100000_ECON10790"),
+                   "files": [str(note), str(note_html)],
+                   "sent_files": ["transcript.md"],
+                   "tries": 0, "next_at": 0.0, "created": 0.0}],
+    }
+    (root / "upload-queue.json").write_text(json.dumps(stale4), encoding="utf-8")
+    q5 = upload.UploadQueue(lambda *a: True, root=root)
+    total, left = q5.status("2026-11-05_100000_ECON10790")
+    check("⭐⭐ 剔 md 后 sent_files 同步清掉，note.html 仍算「待传」",
+          total == 1 and left == 1, f"total={total} left={left}")
+
+
 def main() -> int:
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="cl_exitup_"))
     try:
@@ -561,6 +652,7 @@ def main() -> int:
         _case_spawn(tmp)
         _case_e2e(tmp)
         _case_wiring()
+        _case_foreign_md(tmp)
         bad = [n for n, ok, _ in RESULTS if not ok]
         print("\n" + "=" * 60)
         print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")

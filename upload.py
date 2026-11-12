@@ -143,6 +143,27 @@ def scrub(obj):
     return obj
 
 
+def _foreign_md(files, stem: str) -> list:
+    """挑出**不是这一节逐字转录**的 `.md`（笔记 md 是唯一已知来源）。
+
+    ⚠️⚠️ 2026-11-11 实锤：`_remote_name` 把**任意** `.md` 映射成 `transcript.md`，
+       而笔记 md 与逐字转录**同名** → 笔记覆盖掉真转录（全桶 85 份里 9 份）。
+       会话文件的本地名固定是 `<stem>.md`（`testmode.upload_files` 的
+       `session_path`），笔记是 `<日期>_<课号>.md`，两者不可能同名 —— 所以这条
+       判据既不误伤转录，也能挡住笔记。
+    ⚠️ 用**同一套** `endswith(".md")`（大小写敏感）与 `_remote_name` 对齐：
+       `.MD` 不会被映射成 `transcript.md`，这里也就不该动它。
+    ⚠️ `stem` 为空（条目坏了）→ **不筛**，宁可留着也不误删一节真转录。
+    """
+    if not stem:
+        return []
+    # ⚠️ 只比 **basename**：万一某个调用方把整条路径当 stem 传进来（`…/<stem>`），
+    #    拿它拼 `.md` 去和 `Path(f).name` 比会**永远不相等** → 真转录被误删。
+    want = pathlib.Path(str(stem)).name + ".md"
+    return [f for f in files
+            if str(f).endswith(".md") and pathlib.Path(str(f)).name != want]
+
+
 class UploadQueue:
     """待上传的东西 + 退避状态。**线程不安全**（调用方自己串行化）。"""
 
@@ -168,9 +189,36 @@ class UploadQueue:
     def _load(self) -> list:
         try:
             got = json.loads(self._path.read_text(encoding="utf-8"))
-            return list(got.get("items") or [])
+            items = list(got.get("items") or [])
         except Exception:                                     # noqa: BLE001
             return []                                         # 没有/坏了 -> 空队列
+        # ⚠️⚠️ **队列入场时清掉「不是这一节逐字转录的 .md」**（2026-11-11 实锤 9 节被覆盖）。
+        #    旧版 drain 已经把笔记 md 写进这份文件，光修票读不回来；而 `_remote_name`
+        #    把任意 `.md` 映射成 `transcript.md` → pump 一跑就覆盖真转录。
+        #    这里只改内存，磁盘上的旧条目等下一次 `_save` 自然落地 —— 不在这里写盘
+        #    （`_load` 跑在 `__init__` 里，那时 `_lock` 还没建）。
+        out = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            stem = str(it.get("stem") or "")
+            files = list(it.get("files") or [])
+            bad = _foreign_md(files, stem)
+            if bad:
+                files = [f for f in files if f not in bad]
+                print(f"⚠ 上传队列里剔掉 {len(bad)} 个笔记 md（会覆盖 transcript.md）："
+                      f"{stem or '?'}", flush=True)
+                if not files:
+                    continue                                  # 整条都是笔记 md -> 这条没东西可传
+                it = {**it, "files": files}
+                # ⚠️ `sent_files` 里可能还留着那个 `transcript.md`（笔记 md 刚传成功、
+                #    html 失败的那条）。不一起剔的话，`status()` 会算出「left=0」
+                #    —— 面板/收尾以为这节传完了，而 note.html 永远不重试。
+                keep_remote = {_remote_name(pathlib.Path(f)) for f in files}
+                it["sent_files"] = [r for r in (it.get("sent_files") or [])
+                                    if r in keep_remote]
+            out.append(it)
+        return out
 
     def _save(self) -> None:
         """⚠️ **tmp → rename** —— 半截文件不进队列。"""
@@ -211,6 +259,12 @@ class UploadQueue:
         """
         key = session_key(stem)
         paths_ok = [str(p) for p in files if pathlib.Path(p).is_file()]
+        # ⚠️ 笔记 md 不许进队列（见 `_foreign_md`）—— 入口就挡，别等 pump 再发现。
+        _bad = _foreign_md(paths_ok, str(stem))
+        if _bad:
+            paths_ok = [p for p in paths_ok if p not in _bad]
+            print(f"⚠ 入队时剔掉 {len(_bad)} 个笔记 md（会覆盖 transcript.md）：{stem}",
+                  flush=True)
         if not paths_ok:
             return 0
         with self._lock:                                      # ⚠️ F25：见 `_lock` 的说明
@@ -235,6 +289,12 @@ class UploadQueue:
         """
         key = session_key(stem)
         add = [str(p) for p in files if pathlib.Path(p).is_file()]
+        # ⚠️ 同 `enqueue`：笔记 md 在入口就挡掉（见 `_foreign_md`）。
+        _bad = _foreign_md(add, str(stem))
+        if _bad:
+            add = [p for p in add if p not in _bad]
+            print(f"⚠ add_files 剔掉 {len(_bad)} 个笔记 md（会覆盖 transcript.md）：{stem}",
+                  flush=True)
         if not add:
             return 0
         with self._lock:
@@ -877,9 +937,11 @@ def drain_note_outbox(queue=None, *, root=None, sessions_dir=None) -> dict:
     ⭐ 用 `add_files` 而不是 `enqueue`：这一节的条目多半已经在队列里了（收尾时
     `start_upload` 排过报告 / 音频），`enqueue` 会按 key 直接返回 0，笔记就永远排不进去。
     ⚠️ 成功的票**挪到 `sent/`** 而不是删（同"要清理就挪不删"的既有做法）。
+    ⚠️ 票里**只有笔记 md** 的（旧版写的、与逐字转录远端同名会覆盖它）挪到
+       `skipped/` —— 什么都没传，不该混进 `sent/`。
     """
     import json as _json
-    out = {"found": 0, "merged": 0, "kept": 0}
+    out = {"found": 0, "merged": 0, "kept": 0, "dropped_md": 0}
     # ⚠️ 上传关着时**不许消费票**：票据挪进 `sent/` 后队列条目会在 14 天后过期，
     #    这张票就永远不会重来。对齐 `recover_pending` 的纪律：关着就原样留着。
     if not upload_enabled():
@@ -930,12 +992,43 @@ def drain_note_outbox(queue=None, *, root=None, sessions_dir=None) -> dict:
             try:
                 info = _json.loads(claim.read_text(encoding="utf-8")) or {}
                 stem = str(info.get("stem") or p.stem)
-                files = [str(f) for f in (info.get("files") or [])]
-                if not files:
+                raw = [str(f) for f in (info.get("files") or [])]
+                if not raw:
                     # 空票：不挪 `sent/`、不静默吞掉；留一行日志下次再看。
                     _put_back(claim, p)
                     out["kept"] += 1
                     print(f"⚠ note-outbox 空票：{p.name}（留着重试）", flush=True)
+                    continue
+                # ⚠️⚠️ **`.md` 一律不上传**（2026-11-11 实锤：全桶 9 节被覆盖）。
+                #    `_remote_name` 把**任意** `.md` 映射成 `transcript.md`，而笔记 md
+                #    与逐字转录**同名** → 笔记覆盖掉真转录（作者本机也中了 3 节）。
+                #    3.11.2 起 `note_worker._outbox` 只写 `.html`，但**旧票已经落在盘上**
+                #    （写票的代码改不动它），drain 这里必须再挡一道。
+                files = [f for f in raw if not f.endswith(".md")]
+                if len(files) != len(raw) and files:
+                    # 混合票：md 被剔、`.html` 照传。只记日志 —— 笔记仍会到云端，
+                    # 只是不再有覆盖转录的那份 md。
+                    print(f"⚠ note-outbox 剔掉 {len(raw) - len(files)} 个笔记 md"
+                          f"（会覆盖 transcript.md），其余照传：{p.name}", flush=True)
+                if not files:
+                    # 票里**只有** `.md` —— 按设计丢弃（挪 `skipped/`，不是 `sent/`：
+                    # `sent/` 的语义是「真的传成了」，这里什么都没传；也不是"留着重试"：
+                    # 留着的话每次开机都会重扫、重报，且永远没有可传的东西）。
+                    # ⚠️ 挪失败就**不算 dropped**（票还在原地，下次会再扫到）——
+                    #    计数必须与磁盘状态一致，否则会谎报一次"已处理"。
+                    try:
+                        skipd = d / "skipped"
+                        skipd.mkdir(exist_ok=True)
+                        claim.replace(skipd / p.name)
+                    except Exception:                             # noqa: BLE001
+                        _put_back(claim, p)
+                        out["kept"] += 1
+                        print(f"⚠ note-outbox 只有 md 的票挪不动，放回重试：{p.name}",
+                              flush=True)
+                        continue
+                    out["dropped_md"] += 1
+                    print(f"⚠ note-outbox 票里只有笔记 md（会覆盖 transcript.md）"
+                          f"—— 按设计不上传：{p.name}", flush=True)
                     continue
                 if q is None:
                     q = UploadQueue(None, root=root)

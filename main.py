@@ -2654,6 +2654,10 @@ def run(args) -> None:
             _ob = _upmod.drain_note_outbox(queue=_q)
             if _ob.get("merged"):
                 echo(f"📝 后台生成的笔记已并入上传队列（{_ob['merged']} 节）")
+            if _ob.get("dropped_md"):
+                # 旧票（3.11.1 及更早写的）里带笔记 `.md`，与逐字转录远端同名会覆盖它。
+                echo(f"   ⚠️ {_ob['dropped_md']} 张笔记票只列了 md（会上传成 "
+                     f"transcript.md 覆盖逐字转录）—— 已跳过，这节不会传笔记")
         except Exception:                                 # noqa: BLE001
             pass
         # ⭐ 3.11 F：**补笔记全部放后台** —— 两条恢复路径按 stale → pending 顺序串行。

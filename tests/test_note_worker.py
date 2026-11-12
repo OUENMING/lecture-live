@@ -397,6 +397,46 @@ def _t_drain_note_outbox_body(upload) -> None:
         check("⭐⭐ 孤儿 `.processing.*` 超时回收并正常入队",
               got_orphan["merged"] >= 1 and not list(d.glob("*.processing.*")),
               str(got_orphan))
+        # ⭐⭐ 2026-11-11：**旧票里的笔记 `.md` 不许上传** —— `_remote_name` 把任意 `.md`
+        #    映射成 `transcript.md`，与逐字转录同名会把它覆盖（实锤 9/85 节）。
+        #    新票（3.11.2 起）只写 `.html`，但盘上的旧票照样会被读到 → drain 必须挡。
+        # ⚠️ `d` 上面已被重绑成 `root/"note-outbox"` —— 笔记要写回**临时目录**里。
+        _base = pathlib.Path(root.parent)
+        md_note = _base / "Lectures" / "2026-11-05_ECON10790.md"
+        md_note.write_text("old note md", encoding="utf-8")
+        md_note.with_suffix(".html").write_text("<html>", encoding="utf-8")
+        # 手工写一张**旧形状**的票（绕过 `_outbox`，它是 3.11.2 之后的代码）
+        (d / "2026-11-05_100000_ECON10790.json").write_text(
+            json.dumps({"stem": "2026-11-05_100000_ECON10790",
+                         "files": [str(md_note), str(md_note.with_suffix(".html"))],
+                         "at": 0}), encoding="utf-8")
+        q2 = upload.UploadQueue(lambda *a: True, root=root)
+        got_md = upload.drain_note_outbox(queue=q2, root=str(root))
+        names2 = [pathlib.Path(f).name for i in q2.items() for f in i["files"]]
+        # ⚠️ 必须按**本票自己的 key** 查，且钉住 found/merged —— 只看 `any(.html)`
+        #    会被前面几条用例遗留的队列条目满足（drain 整张票不处理也会绿）。
+        _k2 = upload.session_key("2026-11-05_100000_ECON10790")
+        mine2 = [pathlib.Path(f).name for i in q2.items()
+                 if i.get("key") == _k2 for f in i["files"]]
+        check("⭐⭐ 旧票的 .md 被过滤，只入队 .html",
+              got_md["found"] == 1 and got_md["merged"] == 1
+              and mine2 and not any(n.endswith(".md") for n in mine2)
+              and all(n.endswith(".html") for n in mine2), str((got_md, mine2)))
+        # 票里**只有** .md（没有 html）→ 按设计丢弃，挪 sent/，不无限重试
+        (d / "2026-11-05_110000_ECON10790.json").write_text(
+            json.dumps({"stem": "2026-11-05_110000_ECON10790",
+                         "files": [str(md_note)], "at": 0}), encoding="utf-8")
+        q3 = upload.UploadQueue(lambda *a: True, root=root)
+        got_only = upload.drain_note_outbox(queue=q3, root=str(root))
+        check("⭐⭐ 只有 md 的票 → 丢弃并挪 skipped/（不每次开机重报）",
+              got_only["dropped_md"] == 1
+              and not (d / "2026-11-05_110000_ECON10790.json").exists()
+              and (d / "skipped" / "2026-11-05_110000_ECON10790.json").is_file(),
+              str(got_only))
+        check("⭐ 丢弃 md 后队列里没有 transcript.md 覆盖源",
+              not any(n.endswith(".md") for i in q3.items()
+                      if i.get("key") == upload.session_key("2026-11-05_110000_ECON10790")
+                      for n in [pathlib.Path(f).name for f in i["files"]]))
 
 
 def t_notify_is_best_effort() -> None:

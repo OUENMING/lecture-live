@@ -239,6 +239,13 @@ def plan(*, state, version: str, net: str, env_value: str | None, now: float,
 # 网络指纹（只回哈希；明文不落盘）
 # ══════════════════════════════════════════════════════════════════════
 
+def proxy_tag(url: str = "wss://stt-rt.soniox.com/transcribe-websocket") -> str:
+    """连 Soniox 时**第一条**会走的代理（`ws_compat.routes`）；直连 → `""`。只进指纹的哈希，不落明文。"""
+    import ws_compat
+    kind, purl = ws_compat.routes(url)[0]
+    return "" if kind == "direct" else f"{kind}:{purl}"
+
+
 def network_key(*, run: Callable = subprocess.run, timeout: float = 0.8,
                 budget: float = 1.0) -> str:
     """「同一个网络」的指纹：默认网关 MAC 优先，取不到退 Wi-Fi SSID —— 一律 sha256 前 16 位。
@@ -346,15 +353,16 @@ def _ws_probe(ws_url: str, api_key: str, budget_s: float) -> dict:
     结束帧协议见文件头（官方原文 + 本机实测）；`budget_s` = 从现在到硬截止还剩多少。
     """
     import ws_compat
-    wsc = ws_compat.client()
     out: dict = {"connect_ms": None, "rtt_ms": None, "error": ""}
     t0 = time.monotonic()
     # ⚠️ `close_timeout` 特意小：真机实测服务端在 `finished` 之后**自己先关**（官方示例也这么写），
     #    这时客户端的关闭握手要空等满 `close_timeout`（1.0 s -> 探测量到 1.5 s）。探测不是会话，
     #    收完 `finished` 就可以走 —— 0.2 s 关不掉就放弃（连接随线程回收）。
-    ws = wsc.connect(ws_url, additional_headers={"Authorization": f"Bearer {api_key}"},
-                     open_timeout=max(0.2, budget_s), close_timeout=0.2, ping_interval=20.0,
-                     legacy=True)
+    # ⭐ 3.11.5：与实时流同一条挑路逻辑（`ws_compat.connect`）—— 测的必须是课上真会走的那条路。
+    ws, route = ws_compat.connect(ws_url, additional_headers={"Authorization": f"Bearer {api_key}"},
+                                  open_timeout=max(0.2, budget_s), close_timeout=0.2, ping_interval=20.0,
+                                  legacy=True)
+    out["route"] = route
     try:
         out["connect_ms"] = round((time.monotonic() - t0) * 1000, 1)
         ws.send(json.dumps({"model": MODEL, "audio_format": "pcm_s16le",
@@ -457,8 +465,12 @@ def run_probe(*, endpoint: str, passcode: str, fetch_key: Callable | None = None
                    "error": str(m.get("error") or "")}
             if m.get("model_error"):
                 res["model_error"] = True
+            if m.get("route"):
+                res["route"] = str(m["route"])
         except Exception as e:                                     # noqa: BLE001
             res = {"connect_ms": None, "rtt_ms": None, "error": type(e).__name__}
+            if getattr(e, "ws_route", ""):
+                res["route"] = str(e.ws_route)[:100]                 # type: ignore[attr-defined]
         with lock:
             got[reg] = res
             note_attempt(ask, reg, res["error"])
@@ -510,7 +522,7 @@ class Router:
                  state_path=None, env_value: str | None = None,
                  clock: Callable[[], float] = time.time, net_key_fn: Callable | None = None,
                  fetch_key: Callable | None = None, ws_probe: Callable | None = None,
-                 probe_id: str | None = None,
+                 probe_id: str | None = None, proxy_tag_fn: Callable | None = None,
                  timeout_s: float = PROBE_TIMEOUT_S) -> None:
         self._passcode = str(passcode or "")
         self._endpoint = str(endpoint or "")
@@ -529,6 +541,16 @@ class Router:
             self._net = str((net_key_fn or network_key)() or "")
         except Exception:                                          # noqa: BLE001
             self._net = ""
+        # ⭐ 3.11.5：开着代理时测到的是「代理出口 → 各区」，关掉代理时是「本机 → 各区」——
+        #    两种结果不能共用一份缓存。网关一样（同一个 Wi-Fi）时指纹原来分不开，这里把
+        #    **当下会走的那个代理**掺进去；没代理时指纹不变（老用户的缓存照旧命中）。
+        if self._net:
+            try:
+                tag = (proxy_tag_fn or proxy_tag)()
+            except Exception:                                      # noqa: BLE001
+                tag = ""
+            if tag:
+                self._net = hashlib.sha256(f"{self._net}|{tag}".encode()).hexdigest()[:16]
         self._plan = plan(state=self._state, version=self._version, net=self._net,
                           env_value=(env_value if env_value is not None
                                      else os.environ.get(ENV, "")),

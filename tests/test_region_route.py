@@ -387,6 +387,37 @@ def t_snapshot_late_and_net() -> None:
     assert snap["reason"] == "off", "决策那一格仍是开课那一刻的（不许改写历史）"
 
 
+def t_proxy_splits_cache_key() -> None:
+    """⭐ 3.11.5：同一个 Wi-Fi，开代理 / 关代理 / 换代理 → 三份缓存键；不开代理时键与旧版一样。
+
+    ⚠️ 变异验证：删掉 `Router.__init__` 里掺代理的那段 → 「开了代理」与「没代理」同键、这条红。
+    """
+    state = pathlib.Path(_TMP.name) / "rp-proxy.json"
+
+    def key(tag):
+        return RR.Router(passcode="p", endpoint="e", version="3.9.7", state_path=state,
+                         clock=lambda: NOW, env_value="off", net_key_fn=lambda: "gw1",
+                         proxy_tag_fn=lambda: tag)._net
+    plain, a, b = key(""), key("http:http://127.0.0.1:7890"), key("socks:socks5h://127.0.0.1:1080")
+    assert plain == "gw1", plain                       # 没代理：老用户缓存照旧命中
+    assert a != plain and b != plain and a != b, (plain, a, b)
+    assert key("http:http://127.0.0.1:7890") == a      # 同一个代理：稳定
+    assert "7890" not in a and len(a) == 16, a         # 只进哈希
+
+    def boom():
+        raise RuntimeError("x")
+    assert RR.Router(passcode="p", endpoint="e", version="3.9.7", state_path=state, clock=lambda: NOW,
+                     env_value="off", net_key_fn=lambda: "gw1", proxy_tag_fn=boom)._net == "gw1"
+    # 默认实现：系统里有 HTTP + SOCKS 代理 → 认 HTTP 那条（与实时流第一条路一致）
+    import ws_compat
+    orig = ws_compat.routes
+    ws_compat.routes = lambda _u: [("http", "http://127.0.0.1:7890"), ("direct", None)]
+    try:
+        assert RR.proxy_tag() == "http:http://127.0.0.1:7890"
+    finally:
+        ws_compat.routes = orig
+
+
 def t_warm_once() -> None:
     """2026-11-02：开课前预热 —— 该跑就跑一次，同进程第二次不再建 Router。"""
     state = pathlib.Path(_TMP.name) / "rp-warm.json"
@@ -509,6 +540,7 @@ def main() -> int:
         ("Router: off / force / 状态文件坏掉不抛", t_router_off_force_and_corrupt_state),
         ("Router: 探测晚到时的 late / if_ready / net_ok", t_snapshot_late_and_net),
         ("预热：warm() 只跑一次 / needs_probe 判据", t_warm_once),
+        ("网络键：开 / 关 / 换代理分开缓存，没代理时不变", t_proxy_splits_cache_key),
     ]:
         check(name, fn)
     print(f"\n{'❌ 失败 ' + str(len(FAILED)) + '：' + '、'.join(FAILED) if FAILED else '✅ 全部通过'}")

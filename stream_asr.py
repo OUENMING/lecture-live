@@ -1406,13 +1406,19 @@ class StreamASR:
         ws_url = str(key.get("ws_url") or self._ws_url)
 
         import ws_compat
-        wsc = ws_compat.client()
+        ws_compat.client()                          # 缺 websockets → 照旧在这里抛（致命，不重试）
         try:
-            ws = wsc.connect(ws_url, additional_headers={
+            # ⭐ 3.11.5：自己挑路（HTTP 代理 > SOCKS 代理 > 直连）—— 见 `ws_compat.connect`。
+            #    从前 `proxy=True` 默认选 SOCKS、缺 python-socks → 开代理的中国用户整节课 0 次连上。
+            ws, route = ws_compat.connect(ws_url, additional_headers={
                 "Authorization": f"Bearer {key['api_key']}"}, open_timeout=5.0,
                 close_timeout=1.0, ping_interval=20.0, legacy=True)
         except Exception as e:                      # noqa: BLE001
             self._note_detail(e)
+            tried = str(getattr(e, "ws_route", "") or "")
+            if tried:
+                with self._lock:
+                    self._sp["route"] = tried
             return "network"
         host = urllib.parse.urlparse(ws_url).hostname or ""
         try:
@@ -1426,6 +1432,7 @@ class StreamASR:
         except Exception:                           # noqa: BLE001
             lan = ""
         with self._lock:
+            self._sp["route"] = route               # direct / http / socks（走代理时 peer、lan 是本机代理口，不是网路）
             self._sp["peer"] = peer
             self._sp["lan"] = lan
             self._sp_host = host

@@ -293,6 +293,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `wall` | 这条连接开始时的**本地**时刻（判「坏时段」按当地几点看） |
 | `peer` | 连到的 IP（Cloudflare 任播地址，不是用户的 IP） |
 | `lan` | 本机这一侧地址的 6 位指纹（不存 IP 本身）。相邻连接指纹不同 = 中途换了网络 / 重新拿了地址 |
+| `route` | ⭐ 3.11.5 这条连接走的路：`direct` / `http`（系统 HTTP 代理）/ `socks`（系统 SOCKS 代理）；前面没走通的写在前头，如 `socks:ProxyConnectionError>direct`。⚠️ 走代理时 `peer` / `lan` 是**本机代理口**（127.0.0.1），不代表网路，换网判断只在 `direct` 时有效。挑路逻辑见 `ws_compat.connect`（HTTP > SOCKS > 直连；直连一定显式 `proxy=None`，否则 websockets 会自己再读系统代理、选回 SOCKS） |
 | `sent_s` | 这条连接推了几秒音频（未压缩 PCM，× 32 000 = 字节） |
 | `msg_age_s` / `proc_lag_s` | 结束那一刻：多久没收到服务端消息 / 服务端处理进度落后已发送多少秒 |
 | `stuck_s` | 结束时卡在 `ws.send` 里多久（看门狗掐的那种 ≈ `SEND_STUCK_S`） |
@@ -304,6 +305,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | 长连接卡死时 `side.ok` 为真、`ms` ≈ `side0.ms` | 网路是通的，**只有这条长连接**被掐（中间设备针对长连接 / 流量） |
 | `side.ok` 为假或 `ms` 远大于 `side0.ms` | 整条网路那几秒都断了 / 塞了（不是只针对长连接） |
 | `lan` 在断线前后变了 | 用户那头换了网络（Wi-Fi 切换 / 热点 / 重新拿地址），不是被掐 |
+| 同一用户 `route=http/socks` 的节断得比 `direct` 少 | 掐长连接的在本机 → 代理出口那一段（跨境），不是 Soniox；`route` 全是 `…>direct` = 代理软件开着系统代理却没在跑 |
 | `rtt_max_ms` 偶尔明显高于平时 | 只能当「可能先拥塞」的旁证（读数太少，见上） |
 
 ⚠️ **分不出「按时长掐」还是「按流量掐」**：客户端一直按固定码率推未压缩 PCM（静音也推），`sent_s` 与 `ran_s` 同步涨。要分开得变码率（Opus / 只发保活）—— 那是下一版的第二层实验。

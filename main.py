@@ -307,6 +307,27 @@ def _wrapup_hold(ok: bool, plan: str, msg: str) -> bool:
     return (not ok) or (plan == "notice" and bool(msg))
 
 
+#: ⭐ 笔记交给后台 worker 之后，收尾卡上**最后一屏**的文案（用户合盖前看到的就是它）。
+#: ⚠️ 只在「真的交给了后台」时才带第二行（进程内生成那条路没有 `note-jobs`，
+#:    「下次打开会接着生成」对它不成立）。第二行的依据：
+#:    · 开盖后 worker 进程自己继续（合盖 = 系统睡眠，进程被挂起而不是被杀；本仓没实测，属 OS 行为）；
+#:    · 被打断（进程没了 / 心跳 ≥ 180 s 没动）的，下次启动由 `resume_stale_note_jobs` 补
+#:      （`note_jobs.alive()` 判死 → 重跑）。⚠️ worker **自己记了 failed** 的不在此列（不会重跑）。
+HANDOFF_LINE = "🔁 笔记已交给后台生成 —— 可以关窗口，写好后会通知你"
+LID_HINT = "笔记还在后台生成：合盖会暂停，开盖后继续；若被打断，下次打开 ClassLive 会接着生成"
+
+
+def handoff_msg() -> str:
+    """交给后台时的收尾文案（两行）。放在**状态行**里 —— 它折行且按实测高度重排
+    （`wrapup.measure_text_h`），不是单行截断的 hint 行。"""
+    return HANDOFF_LINE + "\n" + LID_HINT
+
+
+def wrapup_dwell_s(handed_off: bool) -> float:
+    """成功收尾后结论在屏上留几秒（之后自动退）。交给后台那句多一行提示，3 秒读不完。"""
+    return 8.0 if handed_off else 3.0
+
+
 def _wrapup_route(ui, ui_gone: bool, terminal: bool | None = None) -> str:
     """收尾那句「存不存」走哪条路：`"ui"` 还是 `"terminal"`。
 
@@ -4917,8 +4938,7 @@ def run(args) -> None:
                     # ⚠️ 必须给一句文案：`wrapup_done(_ok, msg or "收尾结束")` 在没有 msg
                     #    时会把卡片上的「已交给后台」**覆盖成「收尾结束」** —— 而笔记
                     #    其实还没写出来（假话）。见下面 `_done_ui` 那个调用点。
-                    _box["msg"] = ("🔁 笔记已交给后台生成 —— 可以关窗口，"
-                                   "写好后会通知你")
+                    _box["msg"] = handoff_msg()
                 # ⚠️⚠️ **Ctrl+C 打不到 worker 上** —— Python 的信号 handler 只在主线程跑
                 #    （PEP 475），所以中断永远落在这一句 `_spin` 里。不接住的话异常从这里
                 #    穿出去，进程立刻退出，**把正在写盘的 daemon worker 连同写到一半的
@@ -5003,7 +5023,7 @@ def run(args) -> None:
             _hold = _wrapup_hold(_ok, _plan, msg)
             if not _hold:
                 # 让「已写入 …」在屏上留 3 秒 —— 一闪而过等于没说。
-                _t3 = time.monotonic() + 3.0
+                _t3 = time.monotonic() + wrapup_dwell_s(bool(_spawned))
                 _spin(lambda: time.monotonic() >= _t3)
             else:
                 # ⚠️ **失败不自动退**（作者 2026-09-28 定的口径）：留到他看见为止。

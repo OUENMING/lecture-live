@@ -2185,6 +2185,8 @@ def run(args) -> None:
             echo("   同时跑两个会抢同一个麦克风、叠两个悬浮窗、翻译费用也翻倍。")
             echo("   要停掉那一个：点它悬浮窗右上角的 ✕，或在它的终端按 Ctrl+C。")
             return
+    _tp["lock"] = time.monotonic()                  # U2-A：单实例锁结束
+    _trace("lock")
 
     # ⭐ 3.11：Jev 失败记录是模块级的 —— 开课先清，上一课的 401/429 不许算到这一课头上
     #    （这一课一次 Jev 都没调时 `blocks.jev` 必须是 `{}`，不是上一课的残留）。
@@ -2193,6 +2195,8 @@ def run(args) -> None:
         _kp_reset.reset_failure()
     except Exception:                                       # noqa: BLE001
         pass
+    _tp["reset"] = time.monotonic()                 # U2-A：开课清理结束
+    _trace("reset")
 
     # ---- 3.9.3 的一次性搬家：把老的翻译 key 挪到旁边 ----
     # ⚠️ 必须在**任何一处读 key 之前**（`setkey` / `load_translator` / 就绪条都算）。
@@ -2202,6 +2206,8 @@ def run(args) -> None:
     if _moved:
         echo("🔑 翻译的 Key 换新了 —— 旧的已经挪到旁边（" + "、".join(_moved) + "）")
         echo("   找作者拿一个新 Key，在开课面板上点「翻译引擎」填进去。")
+    _tp["keymove"] = time.monotonic()               # U2-A：老 key 搬家结束
+    _trace("keymove")
 
     # ---- 麦克风权限：三条路径都要说人话 ----
     # ⚠️ 为什么必须做：Apple 原文 —— 被拒时**录音里只有静音**（不是报错、不是崩溃）。
@@ -2232,11 +2238,24 @@ def run(args) -> None:
                 "接下来系统会弹一个授权框，请点「允许」。\n\n"
                 "没有麦克风权限的话，ClassLive 录到的会是一片安静 —— "
                 "程序看着在跑，但字幕一直是空的。")
+    _tp["mic"] = time.monotonic()                   # U2-A：麦克风权限结束（含可能的弹窗等待）
+    _trace("mic")
 
     # ⭐ 2026-10-21 P0：慢初始化之前先给一个看得见的小窗。实测首跑 23.0 s
     #    （开麦试探 8.5 + 翻译/术语 13.7 + 悬浮窗 0.3）期间屏幕全空；
     #    先把“正在准备…”显示出来，真悬浮窗建好后关掉。只在 overlay 路径建。
     #    ⚠️ 放在麦克风权限检查之后：第一次要弹系统授权框时，不该先挂一个 HUD 在弹窗后面。
+    # U2-A：把「import 完成」与「窗口显示」拆成两个点。预先 import 的正是 `StartupHUD()` 里
+    #    会 import 的那两个模块（之后 `open_if_enabled` 里再 import 是命中缓存），不改行为；
+    #    import 失败也不拦（`StartupHUD` 自己会兜底成 None）。
+    if startup_hud.enabled(args.ui):
+        try:
+            import panel as _panel_pre  # noqa: F401
+            import AppKit as _appkit_pre  # noqa: F401
+        except Exception:                             # noqa: BLE001
+            pass
+    _tp["hud_import"] = time.monotonic()
+    _trace("hud_import")
     hud = startup_hud.open_if_enabled(args.ui)
     if hud is not None:
         # 兜底：开麦/模型失败会先弹模态框再 return，未捕获异常也可能穿出去；
@@ -5391,6 +5410,14 @@ def startup_timing(tp: dict, wall0: float, click_wall: float | None) -> dict:
         _hd = tp["hud"] - tp["run"]
         fields["hud_s"] = round(_hd, 3)
         parts.append(f"首屏 {_hd:.1f}")
+        # ⭐ U2-A：首屏之前这段再拆六项（相邻差值，缺的打点跳过，所以六项之和恒等于 hud_s）。
+        _pp = tp["run"]
+        for _k, _f in (("lock", "pre_lock_s"), ("reset", "pre_reset_s"),
+                       ("keymove", "pre_keymove_s"), ("mic", "pre_mic_s"),
+                       ("hud_import", "hud_import_s"), ("hud", "hud_show_s")):
+            if _k in tp:
+                fields[_f] = round(tp[_k] - _pp, 3)
+                _pp = tp[_k]
         # 首屏已单列；后续各段从它起算，否则 HUD 的建窗时间会被重复算进“开麦试探”。
         prev = tp["hud"]
     for k, label in order:

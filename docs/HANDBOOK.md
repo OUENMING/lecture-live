@@ -306,7 +306,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_DEBUG` | 空 | 面板 / 悬浮窗的调试日志 | 运维开关，长期 |
 | `CLASSLIVE_FROM_APP` | `.app` 启动时为 `1` | 标记「从 `.app` 起的、没有终端」→ `notice` 据此弹框而不是只打印 | 内部标记，不是给人设的 |
 | `CLASSLIVE_NO_STARTUP_HUD` | 空（开） | `1` = 不建起步首屏小窗（探针 / 无窗口环境 / 只想拍终端时用）；`0` / 未设 = 照常建 —— `startup_hud.enabled` | 运维开关，长期 |
-| `CLASSLIVE_STARTUP_TRACE` | 空（关） | `1` = `main.run` 每步打一行 `⏱ trace ...`（hud / audio / draft / corpus / term_zh / local / cloud / warmup / overlay），定位首跑慢在哪一子步；默认零输出 | 排查开关，长期（默认关，零输出） |
+| `CLASSLIVE_STARTUP_TRACE` | 空（关） | `1` = `main.run` 每步打一行 `⏱ trace ...`（lock / reset / keymove / mic / hud_import / hud / audio / draft / corpus / term_zh / local / cloud / warmup / overlay），定位首跑慢在哪一子步；默认零输出 | 排查开关，长期（默认关，零输出）。`startup` 事件另有六项把「run 开头 → 首屏」拆开：`pre_lock_s`（单实例锁）/ `pre_reset_s`（开课清理）/ `pre_keymove_s`（老 key 搬家）/ `pre_mic_s`（麦克风权限，含弹窗等待）/ `hud_import_s`（panel + AppKit import）/ `hud_show_s`（建窗 + 显示），六项之和 = `hud_s` |
 | `CLASSLIVE_PYVER` | `3.12` | `make-app.sh` 建运行环境用的 Python 版本 | 构建参数，长期 |
 | `CLASSLIVE_LOCK_DIR` | `~/Library/Logs/ClassLive` | `make-app.sh` 查单实例锁的位置（只为验收隔离） | 测试接缝，长期 |
 | `CL_NO_PANEL` | 空 | `cl` 零参数时跳过课程面板、回老行为 | 运维开关，长期 |

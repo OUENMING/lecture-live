@@ -65,6 +65,43 @@ class StartupTiming(unittest.TestCase):
 
 
 
+class PreHudSplit(unittest.TestCase):
+    """U2-A：首屏之前那段拆成六项，之和 = hud_s。"""
+    SIX = ("pre_lock_s", "pre_reset_s", "pre_keymove_s", "pre_mic_s", "hud_import_s", "hud_show_s")
+
+    def test_六项齐全_之和等于_hud_s(self):
+        tp = {"run": 100.0, "lock": 100.004, "reset": 100.005, "keymove": 100.021,
+              "mic": 100.120, "hud_import": 100.470, "hud": 100.612, "audio": 101.0}
+        f = main.startup_timing(tp, 1000.0, None)["fields"]
+        for k in self.SIX:
+            self.assertIn(k, f)
+        self.assertLess(abs(sum(f[k] for k in self.SIX) - f["hud_s"]), 0.05)
+        self.assertEqual(f["hud_import_s"], 0.35)
+        self.assertEqual(f["hud_show_s"], 0.142)
+
+    def test_某步没打上点_缺项但不抛_之和仍对(self):
+        """某一步抛异常 → 它的点没记；打点只跳过那一项，其余照常，总和仍等于 hud_s。"""
+        tp = {"run": 5.0, "lock": 5.01, "keymove": 5.05, "hud_import": 5.3, "hud": 5.4}
+        r = main.startup_timing(tp, 1000.0, None)
+        f = r["fields"]
+        self.assertNotIn("pre_reset_s", f)
+        self.assertNotIn("pre_mic_s", f)
+        self.assertLess(abs(sum(f[k] for k in self.SIX if k in f) - f["hud_s"]), 0.05)
+        self.assertEqual(f["run_s"], 0.4)
+
+    def test_没有首屏_不出这六项(self):
+        f = main.startup_timing({"run": 0.0, "lock": 0.1, "overlay": 1.0}, 5.0, None)["fields"]
+        for k in self.SIX:
+            self.assertNotIn(k, f)
+
+    def test_run_里六个打点都在_且按序(self):
+        src = open(main.__file__, encoding="utf-8").read()
+        body = src[src.index("def run(args)"):]
+        pos = [body.index(f'_tp["{k}"] = time.monotonic()') for k in ("lock", "reset", "keymove", "mic", "hud_import")]
+        self.assertEqual(pos, sorted(pos))
+        self.assertLess(pos[-1], body.index('_tp["hud"] = time.monotonic()'))
+
+
 class ClickStamp(unittest.TestCase):
     """面板留的点按戳：读到就删 —— 第二次起（从终端起 `cl`）不许捡到旧的。读写都在临时目录。"""
 

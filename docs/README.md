@@ -48,6 +48,9 @@
 | `PLAN-per-user-tz-20261021.md` | 面板按**各自时区**显示时刻（实测优先：客户端头 → AE blob8）+ 面板不脱敏的原文入口 + Cloudflare 侧数据盘点 | 动 `cl_admin_ui.py` 的时区/原文入口、动 Worker 的 `track()` 列之前 |
 | `PLAN-semantic-seal-20261029.md` | Soniox 标点崩塌时按「语意」封口（`semantic_seal.py`）：数据依据、取舍、已做 / 未验证 | 动封口 / `stream_asr.seal_through_word` / 无标点长草稿之前 |
 | `PLAN-stream-reconnect-20261029.md` | 流式识别**重连策略**（退避档位 / 预算还原 / 发送卡死看门狗 / 逐次掉线日志）：10-29 中国用户数据的依据、社区与官方来源表、**故意没做**与未验证项 | 动 `stream_asr` 的 `RETRY_*` / `RESPONSE_TIMEOUT_S` / `SEND_STUCK_S` / `metrics()["sessions"]` 之前 |
+| `PLAN-web-cloud-20261114.md` | **重构 + 网页版（全云端）总计划**：先重构到哪为止、4 个穿刺、P0–P6 各阶段的步骤 / 完成判据 / 闸门、要作者拍板的 8 项、止损线 | 动 `main.run()` 的结构、UI 端口、笔记流水线的调用方式，或开始做网页版 / 服务端 runner 之前 |
+| `PLAN-drop-parakeet-20261110.md` | 去掉 Parakeet、Nemotron 改必需 + 断网整段重解码定稿：两处占位、要动的文件、先量 WER 再切（**未实施**） | 动 `models.py` 的 required、`draft_engine.choose()`、`final_asr.load_final()` 之前 |
+| `TASKS-web-cloud-20261114.md` | 上面那份计划的**逐张任务单**（给实现的 AI 照着做）：通用规矩、交回格式、U 桌面体验线 / S 穿刺 / P0–P6 每张的前置、只许改的文件、步骤、完成判据 | 要派活或接活时：读「通用规矩」+ 对应那一张 |
 | `ANALYSIS-术语误听-20261021.md` | 美国用户两节课的**严重错误复盘**：ASR 把术语听错 → 笔记照抄（`volume mass` / `RLM` / `CLM`）+ 修法三档 | 谈 3.11 正确率、改术语注入 / 笔记层术语一致性之前 |
 
 ### 调研（`RESEARCH-*`）
@@ -56,6 +59,7 @@
 
 | 文件 | 主题 | 什么时候读 |
 |---|---|---|
+| `RESEARCH-web-cloud-20261114.md` | 重构 + 网页版的事实底稿：代码基线、上云容量实测、浏览器 / Soniox / Cloudflare / InstaBox 的结论表（带来源与置信度）、未核清单 | 读 `PLAN-web-cloud-20261114.md` 时；引用浏览器能力或额度数字之前（先看口径日期） |
 | `RESEARCH-macos-aesthetic.md` | macOS 视觉语言 | ⭐ 动 `overlay.py` 外观前 |
 | `RESEARCH-live-caption-rollup.md` | 2 行 roll-up 的台账 | ⭐ 动草稿或字幕行前 |
 | `RESEARCH-stream-eval.md` | ⭐ **流式字幕量具 + 2026-10-08 夜间改动 + 现场采集**（回改率/延迟/WER 的口径与全部数字）| 改草稿/ASR/音源前 · **上课采数前** |

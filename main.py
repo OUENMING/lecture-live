@@ -47,7 +47,7 @@ from cloud_translator import (DEFAULT_CTX_CHUNK, load_api_key,
                               answer_user_content)
 from obsidian_writer import ObsidianWriter, resolve_vault, remember_vault
 from build_notes import (TermNotes, format_gloss, detect_proper_nouns, lookup_term)
-from testmode import TestSession, system_info, transcode_one
+from testmode import LOOP_STALL_S, TestSession, system_info, transcode_one
 import changelog
 import keyentry
 import instance_lock
@@ -4477,8 +4477,18 @@ def run(args) -> None:
         _silence_cfg = _SILENCE_WATCH.get(args.source)
         _silence = (SilenceWatch(_silence_cfg[0])
                     if _silence_cfg is not None and callable(_last_block) else None)
+        # U1-A 卡顿探针：`tester is None` 时下面所有 `_lp` 守卫都是一次布尔判断，什么都不取。
+        _lp = tester is not None
+        _tm = time.monotonic
+        if _lp:
+            tester.set_capture_probe(getattr(src, "cb_probe", None))
         while running.is_set() and not stopping.is_set():
+            if _lp:
+                _l0 = _tm()
+                _lfeed = 0.0
             chunk = src.poll()
+            if _lp:
+                _l1 = _tm()
             if chunk is not None and len(chunk):
                 _layers["capture"] = True            # ⭐ 3.11 E：心跳里的收音层
                 # ⚠️ 喂音频**排在 `seg.accept()` 之前**：段尾那一刻 `_utterance_end` 会
@@ -4486,7 +4496,11 @@ def run(args) -> None:
                 #    段界少这一块，边界附近那句就会归错段（见 `stream_gate.mark`）。
                 #    还没退回才喂（`can_feed`）；**建连中也喂**（Soniox 就靠这段接上话）。
                 if gate.can_feed():
+                    if _lp:
+                        _lf0 = _tm()
                     stream.feed(chunk)       # 非阻塞：有界队列，满了丢最旧
+                    if _lp:
+                        _lfeed = _tm() - _lf0
                 seg.accept(chunk)
                 if _hear is not None:
                     _hear(seg.is_speaking)        # 顶栏「在听」小点; 只在变了时才动
@@ -4508,11 +4522,15 @@ def run(args) -> None:
             _rt = gate.take_notice()
             if _rt:
                 streamq.put(("notice", (_rt, False, "")))
+            if _lp:
+                _l2 = _tm()
             #    退回后屏上也回到本地的样子：本地按 VAD 段出句，短尾巴并行会把本地短句并掉。
             if _tail["on"] and gate.fell_back:
                 _tail["on"] = False
                 ui.set_tail_merge(False)
             drain()
+            if _lp:
+                _l3 = _tm()
             if src.is_done():
                 break
             if time.monotonic() >= _dev["next"]:
@@ -4529,10 +4547,29 @@ def run(args) -> None:
             #    `TerminalUI()`，那时 args 还写着 overlay → 每轮调一个空 pump、
             #    **一次 sleep 都没有 → 整节课纯烧 CPU**。（2026-09-28 OCR 审计发现；
             #    收尾那处当天已改，主循环这处漏了。）
+            if _lp:
+                _l4 = _tm()
             if getattr(ui, "drives_appkit", False):
                 ui.pump()
+                if _lp:
+                    # 「派发 + 干活」算 pump；刻意让步那段（`loop_times[2]`）不算
+                    _l5 = _tm()
+                    _lt = getattr(ui, "loop_times", None)
+                    _ly = _lt[2] if _lt is not None else 0.0
+                    _lpump = max(0.0, (_l5 - _l4) - _ly)
+                    _lev = getattr(ui, "loop_event", None)
             else:
                 time.sleep(0.005)
+                if _lp:
+                    _lpump = 0.0
+                    _lev = None
+            if _lp:
+                # 各步 = 相邻时间戳之差（accept 含 chunk 分支里除 feed 外的全部）；pump 不含让步
+                _lacc = max(0.0, (_l2 - _l1) - _lfeed)
+                _ltot = (_l1 - _l0) + _lfeed + _lacc + (_l3 - _l2) + (_l4 - _l3) + _lpump
+                if _ltot >= LOOP_STALL_S:
+                    tester.note_loop(_ltot, ((_l1 - _l0), _lfeed, _lacc, (_l3 - _l2),
+                                             (_l4 - _l3), _lpump), _lev)
     except KeyboardInterrupt:
         echo("\n⏹ 手动停止")
     finally:

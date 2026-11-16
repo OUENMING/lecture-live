@@ -268,6 +268,24 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
   改那个垫片时**连带改正文里所有 `ROOT / "…"` 的资源路径**。
 - **任何"会写盘"的探针先把写端指到临时目录**。
 
+### 6.0 测试报告里的卡顿探针字段（U1-A，测试模式才有）
+
+- `blocks.ui.loop_stalls`：主循环**一轮**（不含刻意让步的 0.1/0.25 s）≥ 0.3 s 的记录。
+  `n_ge_0.3s` / `n_ge_1s` / `n_ge_3s` 三档次数、`total_s` 卡住总秒数、`items` 最长的 50 条。
+  每条 `{t_s, total_s, phases:{poll, feed, accept, drain, device, pump}, pump_event:{type, s}}`：
+  `poll`=`src.poll()`；`feed`=喂 Soniox；`accept`=分段器 + chunk 分支其余；`drain`=`drain()` 等；
+  `device`=设备/时钟检查；`pump`=`ui.pump()` 的「派发 + 干活」（让步不算）；
+  `pump_event`=这一轮 pump 里最慢（≥ 10 ms）事件的 NSEvent 类型码与派发秒（没有则 null）。
+- `capture.gaps.items[*]` 多两项：`cb_age_s`（读到停顿时距上一次声卡回调）、`q_depth`（此刻缓冲排着几块）；文件回放两项 null。
+
+| 看到 | 判读 |
+|---|---|
+| `q_depth` ≈ 停顿秒数 × 10 | 主循环卡住，音频在 20 s 缓冲里等着，没丢 |
+| `q_depth` ≈ 0（`cb_age_s` 也小） | 主循环没卡，是声卡那头没送块，这段可能没录到 |
+| `loop_stalls` 里 `pump` 占大头 + `pump_event.type` 是鼠标类（1/2 按下松开、6 拖动…） | 事件派发被 AppKit 的跟踪循环拖住（拖窗 / 菜单 / 按住按钮） |
+| `phases` 里别的步占大头 | 那一步本身慢（feed / accept / drain / device） |
+
+
 ### 6.1 环境变量开关（唯一登记处）
 
 代码里每读一个 `CLASSLIVE_*`，这张表就要有一行（`test_audit_regressions` R30 钉着）。

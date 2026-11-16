@@ -236,6 +236,11 @@ class _NormalizedSource:
         """刚 `poll()` 出来那一块的 `(原始峰值, 实际增益)`（只读，见 `PeakNormalizer.last_peak`）。"""
         return self._norm.last_peak, self._norm.last_gain
 
+    def cb_probe(self):
+        """透传内层的 `cb_probe`（U1-A）；文件源没有声卡回调与缓冲 → `None`。"""
+        fn = getattr(self._inner, "cb_probe", None)
+        return fn() if callable(fn) else None
+
     def set_waker(self, fn) -> None:
         """透传「新块到达就叫我」给内层实时源（3.9.7 省电，见 `CallbackSource.set_waker`）。"""
         f = getattr(self._inner, "set_waker", None)
@@ -258,7 +263,14 @@ class CallbackSource:
         self._device_name = device_name
         self._stream = None
         self._waker = None
+        #: U1-A 卡顿探针：声卡回调**只赋值**这一个时间戳（单调钟）；读它的是 `cb_probe()`。
+        self._cb_t: float | None = None
         self._open()
+
+    def cb_probe(self):
+        """U1-A：`(距上一次声卡回调多少秒, 缓冲里还排着几块)`；还没来过回调则 age 为 None。只读。"""
+        t = self._cb_t
+        return (None if t is None else time.monotonic() - t), self._q.qsize()
 
     def set_waker(self, fn) -> None:
         """新块到达时叫一声（3.9.7 省电）。
@@ -338,6 +350,7 @@ class CallbackSource:
             pass
 
     def _cb(self, indata, frames, time_info, status):
+        self._cb_t = time.monotonic()               # U1-A：只赋值，回调必须立刻返回
         blk = _mono(indata).copy()
         try:
             self._q.put_nowait(blk)

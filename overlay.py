@@ -300,6 +300,7 @@ PUMP_ACTIVE_S = 0.15             # 距上次事件在此窗口内 = 手势进行
 #      `_wait_interruptible()` 里的 `nextEventMatchingMask_untilDate_` 会立刻返回）。
 PUMP_IDLE_LONG_S = 0.1           # 空闲（没有任何逐帧推进的东西在跑）的让步
 PUMP_HIDDEN_S = 0.25             # 窗口不可见（收起 / 完全被遮挡 / 屏幕睡眠）的让步；仍靠 wake() 收数据
+LOOP_EV_MIN_S = 0.01            # U1-A 卡顿探针：派发慢于它的事件才记类型（噪声不记）
 # ⭐ 3.9.7 追加（2026-10-16，作者）：热档让步**跟随窗口所在屏幕的刷新率**，别再写死 8 ms。
 #   上面那行 `PUMP_IDLE_S = 0.008` 是 120 Hz 周期（8.33 ms）的近似。作者发现有人用
 #   60 Hz 的 MacBook Air：8 ms 让步让 pump 跑 ~125 Hz —— 比面板快一倍，白烧 CPU，
@@ -5751,6 +5752,39 @@ class Overlay:
         self._last_flush = time.monotonic()
         self._render()
 
+    # ---- U1-A 卡顿探针：这一轮 pump 里「派发 / 让步」各占多少、最慢的事件是谁 ----
+    #      只在主线程读写；类属性给默认值，旧测试 `__new__` 出来的对象也安全。
+    _lp_dispatch = 0.0
+    _lp_yield = 0.0
+    _lp_total = 0.0
+    _lp_ev = None
+
+    @property
+    def loop_times(self) -> tuple:
+        """上一次 `pump()` 的 `(派发事件秒, 干活秒, 让步秒)`。主循环把「派发 + 干活」算进 pump，
+        刻意让步那段不算。只读，无分配以外的副作用。"""
+        d, y = self._lp_dispatch, self._lp_yield
+        return d, max(0.0, self._lp_total - d - y), y
+
+    @property
+    def loop_event(self):
+        """上一次 `pump()` 里最慢（≥ `LOOP_EV_MIN_S`）的事件 `(NSEvent 类型, 秒)`；没有则 None。"""
+        return self._lp_ev
+
+    def _send_timed(self, app, ev) -> None:
+        """`app.sendEvent_(ev)` 加两次时钟：累加派发秒，并记最慢的那个事件。异常照旧外抛。"""
+        t0 = time.monotonic()
+        try:
+            app.sendEvent_(ev)
+        finally:
+            dt = time.monotonic() - t0
+            self._lp_dispatch += dt
+            if dt >= LOOP_EV_MIN_S and (self._lp_ev is None or dt > self._lp_ev[1]):
+                try:
+                    self._lp_ev = (int(ev.type()), dt)
+                except Exception:                         # noqa: BLE001
+                    self._lp_ev = (-1, dt)
+
     def pump(self):
         """驱动 AppKit。⚠️ 必须显式排空 NSApplication 事件队列并 sendEvent_,
         否则真实鼠标点击会一直积压在 NSApp 队列里, 永远到不了窗口/按钮
@@ -5779,8 +5813,13 @@ class Overlay:
         #    视图数始终不变 = 不是视图泄漏, 是池没排空。剩下那 8 MB 来自 pump 之外
         #    (drain 里的 finalize 等), 量级小, 没去动 main.py 的主循环。
         import objc
+        self._lp_dispatch = 0.0
+        self._lp_yield = 0.0
+        self._lp_ev = None
+        _t0 = time.monotonic()
         with objc.autorelease_pool():
             self._pump_once()
+        self._lp_total = time.monotonic() - _t0
 
     def _motion_active(self) -> bool:
         """窗口可见时, 此刻有**逐帧推进**的东西在跑吗。
@@ -5890,7 +5929,7 @@ class Overlay:
         if ev is None or _is_wake_event(ev):
             return
         try:
-            app.sendEvent_(ev)
+            self._send_timed(app, ev)
             self._last_ev_t = time.monotonic()            # 真实事件 = 用户刚动过 → 下一轮热档
         except Exception:                                 # noqa: BLE001
             pass
@@ -5905,6 +5944,7 @@ class Overlay:
         """
         from AppKit import NSRunLoop, NSDate
         tier = self._pump_tier(now)
+        _y0, _d0 = time.monotonic(), self._lp_dispatch    # U1-A：让步秒要扣掉其间派发的事件
         _t0 = time.monotonic() if self._on_wait is not None else 0.0
         rl = NSRunLoop.currentRunLoop()
         if tier == WAIT_GESTURE:
@@ -5915,6 +5955,7 @@ class Overlay:
             rl.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(self._tier_wait_s(tier)))
         else:
             self._wait_interruptible(app, mode, self._tier_wait_s(tier))
+        self._lp_yield += max(0.0, (time.monotonic() - _y0) - (self._lp_dispatch - _d0))
         if self._on_wait is not None:
             try:
                 self._on_wait(tier, time.monotonic() - _t0)
@@ -5938,7 +5979,7 @@ class Overlay:
                 break
             if _is_wake_event(ev):
                 continue                  # 唤醒令牌不是用户事件
-            app.sendEvent_(ev)
+            self._send_timed(app, ev)
             busy = True
         return busy
 

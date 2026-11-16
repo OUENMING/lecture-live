@@ -102,6 +102,13 @@ DWELL_MAX = 50000
 TEXT_ITEMS_MAX = 300
 #: ④ 相邻两块音频的墙钟间隔超过它就记一次**断档**。
 CAPTURE_GAP_S = 1.0
+#: U1-A 主循环卡顿探针：一轮（不含刻意让步）≥ 这么久算一次卡顿；再按 1 s / 3 s 分档计数。
+LOOP_STALL_S = 0.3
+LOOP_STALL_BANDS = (0.3, 1.0, 3.0)
+#: U1-A 卡顿明细只留最长的这么多条（计数与总秒数始终如实累加）。
+LOOP_STALLS_MAX = 50
+#: U1-A 主循环各步的固定顺序（`note_loop` 收元组时按它配名字）。
+LOOP_PHASES = ("poll", "feed", "accept", "drain", "device", "pump")
 #: ④ 断档列表的条数上限（总数与总时长不受它限制，始终如实累加）。
 CAPTURE_GAPS_MAX = 50
 #: ⑥ `by_idle` 的分界（毫秒）：`< 7 s` = 上一句刚翻完没多久（长连接多半还热着）；
@@ -1613,6 +1620,12 @@ class TestSession:
         self._cap_gaps: list[dict] = []
         self._cap_gap_n = 0
         self._cap_gap_total = 0.0
+        #: U1-A：停顿时读「声卡回调多久前 / 缓冲排了几块」的探针（main 装；文件回放为 None）。
+        self._cap_probe = None
+        #: U1-A：主循环卡顿（`note_loop`）。
+        self._loop_n = [0, 0, 0]
+        self._loop_total_s = 0.0
+        self._loop_items: list[dict] = []
         #: ⭐ 2026-11-10：**停采时刻**（`src.close()` 之前冻结）。尾部缺口必须用
         #: `stop - last_block` 算；用「写报告时」会把笔记收尾 / 用户确认（可能几分钟）
         #: 也算成录音缺口 —— 正常课反而每节多一条假断档。
@@ -2055,6 +2068,56 @@ class TestSession:
         if self.energy is not None:
             self.energy.add_wait(tier, seconds)
 
+    def set_capture_probe(self, fn) -> None:
+        """U1-A：装「读声卡回调时间戳 + 缓冲深度」的函数（`src.cb_probe`）。"""
+        self._cap_probe = fn if callable(fn) else None
+
+    def _cap_probe_fields(self) -> dict:
+        """U1-A：停顿条目多带的两项。无探针 / 文件回放 / 探针出错 → 两项 `None`。**绝不抛**。"""
+        out = {"cb_age_s": None, "q_depth": None}
+        try:
+            r = self._cap_probe() if self._cap_probe is not None else None
+            if r is not None:
+                age, depth = r
+                out["cb_age_s"] = None if age is None else round(float(age), 3)
+                out["q_depth"] = int(depth)
+        except Exception:                                 # noqa: BLE001
+            pass
+        return out
+
+    @_safe
+    def note_loop(self, total_s: float, phases, pump_event=None) -> None:
+        """U1-A：主循环**一轮**（不含刻意让步）的耗时。⚠️ 每轮都调 → 快路径必须只是一次比较。
+
+        `phases`：`LOOP_PHASES` 顺序的 6 元组（主循环用，免得每轮建 dict）或同名 dict；
+        `pump_event`：这一轮 pump 里最慢事件的 `(类型, 秒)`，没有则 None。
+        只在 ≥ `LOOP_STALL_S` 时才建明细；明细留最长的 `LOOP_STALLS_MAX` 条。
+        """
+        if total_s < LOOP_STALL_S:
+            return
+        for i, th in enumerate(LOOP_STALL_BANDS):
+            if total_s >= th:
+                self._loop_n[i] += 1
+        self._loop_total_s += total_s
+        ph = phases if isinstance(phases, dict) else dict(zip(LOOP_PHASES, phases))
+        item = {"t_s": round(time.monotonic() - self.t0, 2), "total_s": round(total_s, 3),
+                "phases": {k: round(float(v), 3) for k, v in ph.items()},
+                "pump_event": (None if pump_event is None else
+                               {"type": pump_event[0], "s": round(float(pump_event[1]), 3)})}
+        if len(self._loop_items) < LOOP_STALLS_MAX:
+            self._loop_items.append(item)
+        else:
+            j = min(range(len(self._loop_items)), key=lambda k: self._loop_items[k]["total_s"])
+            if item["total_s"] > self._loop_items[j]["total_s"]:
+                self._loop_items[j] = item
+
+    def _loop_block(self) -> dict:
+        """U1-A：进报告 `blocks.ui.loop_stalls`。"""
+        n = list(self._loop_n)
+        return {"n_ge_0.3s": n[0], "n_ge_1s": n[1], "n_ge_3s": n[2],
+                "total_s": round(self._loop_total_s, 2),
+                "items": sorted(list(self._loop_items), key=lambda d: -d["total_s"])}
+
     def _capture_tick(self, w: float) -> None:
         """④ 一块音频到达：记第一块时刻、算与上一块的墙钟间隔。纯记账（被 `note_chunk` 包着）。"""
         if self._cap_first_wall is None:
@@ -2065,7 +2128,7 @@ class TestSession:
             self._cap_gap_total += gap
             if len(self._cap_gaps) < CAPTURE_GAPS_MAX:
                 self._cap_gaps.append({"t_wall_offset_s": round(w - self._cap_first_wall, 3),
-                                       "gap_s": round(gap, 3)})
+                                       "gap_s": round(gap, 3), **self._cap_probe_fields()})
         self._cap_last_wall = w
 
     def _view_close(self, now: float | None = None) -> None:
@@ -2469,6 +2532,7 @@ class TestSession:
             _ui = dict(extra.get("ui") or {})
             _ui.setdefault("streamq_dwell_ms", dwell_summary(self._sq_ms))
             _ui.setdefault("view", self._view_block())
+            _ui.setdefault("loop_stalls", self._loop_block())
             extra["ui"] = _ui
             _mg = dict(extra.get("merge") or {})
             _mg.setdefault("items", list(self._merge_items))
@@ -2483,6 +2547,7 @@ class TestSession:
             if isinstance(_ui, dict):
                 _ui.setdefault("streamq_dwell_ms", dwell_summary(self._sq_ms))
                 _ui.setdefault("view", self._view_block())
+                _ui.setdefault("loop_stalls", self._loop_block())
             _mg = self._extra.setdefault("merge", {})
             if isinstance(_mg, dict):
                 _mg.setdefault("items", list(self._merge_items))
@@ -2589,6 +2654,9 @@ class TestSession:
                 "之间的缺口（正常收尾不算）；断档明细看 gaps.items。系统/屏幕睡眠进 events。",
                 "blocks.ui.streamq_dwell_ms = streamq 每条 item 从 put 到 drain 的停留"
                 "时间(唤醒延迟); 空闲档 0.1 s / 隐藏档 0.25 s 若把字幕拖慢, 这里会看到 p90/p99 变大。",
+                "blocks.ui.loop_stalls = 主循环一轮(不含刻意让步) ≥ 0.3 s 的次数/总秒数/最长 50 条明细"
+                "(phases 各步耗时 + pump_event 最慢事件); gaps.items 的 q_depth ≈ 停顿秒数×10 → 主循环卡住、"
+                "音频没丢; q_depth ≈ 0 → 声卡没送块, 这段可能没录到(文件回放两项为 null)。",
             ],
             "vad_report": vad_report,
             # ⭐ 七格采集面里那些「整块快照」（`note_block` 收的）。

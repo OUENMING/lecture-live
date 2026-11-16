@@ -1084,7 +1084,7 @@ class StreamASR:
                 "terms_n": int(st.get("terms_n") or 0),
                 "terms_dropped": int(st.get("terms_dropped") or 0),
                 #: 每个会话一条：`at` 开始于第几秒 / `ran_s` 跑了多久 / `why` 怎么结束的 / `detail` close code 等
-                #: ⭐ 11-16 断线探针另加 wall / peer / sent_s / msg_age_s / proc_lag_s / stuck_s / rtt_ms /
+                #: ⭐ 11-16 断线探针另加 wall / peer / lan / sent_s / msg_age_s / proc_lag_s / stuck_s / rtt_ms /
                 #:    rtt_max_ms / side0 / side / side_why（字段与判读表在 HANDBOOK §6.0）
                 "sessions": sessions}
 
@@ -1419,8 +1419,15 @@ class StreamASR:
             peer = str(ws.socket.getpeername()[0])  # 连到的是哪个 IP（Cloudflare 任播；不是用户的 IP）
         except Exception:                           # noqa: BLE001
             peer = ""
+        try:
+            # 本机这一侧的地址只留**指纹**（不存 IP 本身）：相邻两条连接指纹不同 = 中途换了网络 / 重新拿了地址
+            import hashlib
+            lan = hashlib.sha256(str(ws.socket.getsockname()[0]).encode()).hexdigest()[:6]
+        except Exception:                           # noqa: BLE001
+            lan = ""
         with self._lock:
             self._sp["peer"] = peer
+            self._sp["lan"] = lan
             self._sp_host = host
         self._fire_side_probe("side0")              # 刚连上时的基线：这条网路平时多快
 

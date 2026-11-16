@@ -1211,6 +1211,7 @@ def t_probe_fields_on_send_stuck() -> None:
             assert e["why"] == "stale", e
             assert re.fullmatch(r"\d\d:\d\d:\d\d", e["wall"]), e
             assert e["peer"] == "127.0.0.1", e
+            assert re.fullmatch(r"[0-9a-f]{6}", e["lan"]) and "127.0.0.1" not in str(e["lan"]), e
             assert e["sent_s"] > 0, e
             assert e["stuck_s"] >= 2.5, f"拍现场时还卡在 send 里，应 ≈ send_stuck_s: {e}"
             assert e["side_why"] == "send", e

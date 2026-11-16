@@ -137,6 +137,37 @@ RETRY_JITTER = 0.2
 SEND_STUCK_S = 5.0
 #: `metrics()["sessions"]` 最多记这么多条（30 s 一次的长期重连也撑得住一整天，不会无限长）。
 SESS_LOG_MAX = 120
+#: ⭐ 2026-11-16 断线探针（中国用户：7 节课 28 次断线、12 次死在连上 112–128 s）。
+#: 发送卡住这么久 / 这么久没收到服务端消息 → **另开一条短连接**去碰同一个主机（`side`）。
+#: 判读：短连接通、长连接卡 → 掐的是这条长连接（不是整条网路）；短连接也不通 → 整条网路断了。
+#: 都比判死早（`SEND_STUCK_S` 5 s / `RESPONSE_TIMEOUT_S` 8 s），探针结果才赶得上进这一条会话记录。
+SIDE_PROBE_STALL_S = 2.0
+SIDE_PROBE_MSG_S = 3.0
+#: 旁路探针的超时（秒）。只是一次 TLS 握手 + HEAD，正常几百 ms。
+SIDE_PROBE_TIMEOUT_S = 4.0
+
+
+def side_probe(host: str, timeout: float = SIDE_PROBE_TIMEOUT_S) -> dict:
+    """新开一条 HTTPS 短连接 `HEAD https://<host>/`，量通不通、多久。永不抛。
+
+    只为分辨「掐长连接」还是「整条网路断」：任何 HTTP 状态（含 404）都算**通**（到了对端），
+    只有连不上 / 超时 / TLS 失败才算不通。不带任何凭证、不发音频。
+    """
+    import urllib.error
+    import urllib.request
+    t0 = time.monotonic()
+    out: dict = {"ok": False, "ms": 0, "code": None, "err": ""}
+    try:
+        req = urllib.request.Request(f"https://{host}/", method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout) as r:      # noqa: S310  固定 https
+            out["code"] = int(r.status)
+        out["ok"] = True
+    except urllib.error.HTTPError as e:                              # 有 HTTP 状态 = 到了对端
+        out["ok"], out["code"] = True, int(e.code)
+    except Exception as e:                                           # noqa: BLE001
+        out["err"] = type(e).__name__[:40]
+    out["ms"] = int((time.monotonic() - t0) * 1000)
+    return out
 #: 丢包逐窗口账的上限（窗口 = 当前连接 × 分钟）。超了并进一个溢出桶 —— 记账不许无界增长。
 DROP_WINDOW_MAX = 240
 #: 每次掉线往 stdout 打一行。⚠️ 为什么要有：`sessions[]` 只进测试报告与 `.live.jsonl`，**两者平时都关** ——
@@ -765,7 +796,8 @@ class StreamASR:
                  context_text: str = "", terms_max: int = TERMS_MAX,
                  retry_delays_s: Iterable[float] = RETRY_DELAYS_S,
                  retry_reset_s: float = RETRY_RESET_S, retry_jitter: float = RETRY_JITTER,
-                 send_stuck_s: float = SEND_STUCK_S, drop_log: str = DROP_LOG) -> None:
+                 send_stuck_s: float = SEND_STUCK_S, drop_log: str = DROP_LOG,
+                 side_probe: Callable[[str], dict] | None = side_probe) -> None:
         self._passcode = (passcode or "").strip()
         self._terms = tuple(str(t).strip() for t in terms if str(t).strip())
         self._general = general or ""
@@ -798,6 +830,13 @@ class StreamASR:
         #: ⭐ 逐会话记录（P3）：每个会话结束记一条，进 `metrics()["sessions"]`。
         #: 以前只留最后一次的 close code，4 次重连各自为什么掉、跑了多久全不知道。
         self._sess_log: list[dict] = []
+        #: ⭐ 2026-11-16 断线探针：**这一个**连接的现场（`wall` / `peer` / `rtt_ms` / `side0` / `side` …）。
+        #: 会话结束时**就是**那条 `sessions[]` 记录本身（不是拷贝）—— 旁路探针晚到的结果照样落进去。
+        #: 只在 `self._lock` 下读写。`None` = 关掉旁路探针（判据默认关，生产默认开）。
+        self._side_probe = side_probe
+        self._sp: dict = {}
+        self._sp_host = ""
+        self._side_fired = False
         #: 掉线一行话的模板（`""` = 不往 stdout 打）。见 `DROP_LOG` 的 why。
         self._drop_log = drop_log
         self._t_start = time.monotonic()
@@ -982,8 +1021,10 @@ class StreamASR:
             if (self._down_since is not None and not self._stopped
                     and not self._finished):
                 down_s += time.monotonic() - self._down_since
-            sessions = [dict(x) for x in self._sess_log]
-            last_sess = dict(self._last_sess)
+            # ⚠️ 记录里的 side0 / side 是旁路线程写进来的嵌套 dict：拷两层，别把活对象交出去
+            sessions = [{k: (dict(v) if isinstance(v, dict) else v) for k, v in x.items()}
+                        for x in self._sess_log]
+            last_sess = {k: (dict(v) if isinstance(v, dict) else v) for k, v in self._last_sess.items()}
             connect_attempts = self._connect_attempts
             failed_sessions = self._failed_sessions
             connections = self._sess_n
@@ -1043,6 +1084,8 @@ class StreamASR:
                 "terms_n": int(st.get("terms_n") or 0),
                 "terms_dropped": int(st.get("terms_dropped") or 0),
                 #: 每个会话一条：`at` 开始于第几秒 / `ran_s` 跑了多久 / `why` 怎么结束的 / `detail` close code 等
+                #: ⭐ 11-16 断线探针另加 wall / peer / sent_s / msg_age_s / proc_lag_s / stuck_s / rtt_ms /
+                #:    rtt_max_ms / side0 / side / side_why（字段与判读表在 HANDBOOK §6.0）
                 "sessions": sessions}
 
     def _close_down_segment(self) -> None:
@@ -1253,8 +1296,11 @@ class StreamASR:
                 if self._stopped:
                     # ⭐ 3.11：正常收尾也记一条（`why=""`）—— 否则 `final_session`
                     #    永远是「最后一次**失败**」，把已自愈的旧故障当成下课原因。
-                    self._last_sess = {"at": round(t0 - self._t_start, 1),
-                                       "ran_s": round(ran, 1), "why": "", "detail": ""}
+                    # ⭐ 断线探针：记录**就是** `_sp` 这个对象（探针晚到的结果也落进来）。
+                    sp = self._sp
+                    sp.update({"at": round(t0 - self._t_start, 1),
+                               "ran_s": round(ran, 1), "why": "", "detail": ""})
+                    self._last_sess = sp
                     return ""
                 if self._fatal:
                     # ⭐ 3.11：v6 在这个区没上线 → 换 v5 重连一次（课程不因此退回本地）。
@@ -1276,8 +1322,9 @@ class StreamASR:
                         err = why = self._pending
                     else:
                         why = err
-                entry = {"at": round(t0 - self._t_start, 1), "ran_s": round(ran, 1),
-                         "why": why, "detail": detail[:40]}
+                entry = self._sp                    # 同上：同一个对象，不拷贝
+                entry.update({"at": round(t0 - self._t_start, 1), "ran_s": round(ran, 1),
+                              "why": why, "detail": detail[:40]})
                 # ⭐ 3.11：`_last_sess` 不受 `SESS_LOG_MAX` 截断 —— 长课 30 节以后
                 #    `sessions[]` 不再追加，但「最后一节怎么死的」仍然要答得出。
                 self._last_sess = entry
@@ -1340,6 +1387,9 @@ class StreamASR:
         with self._lock:
             self._connect_attempts += 1
             self._detail = ""
+            # ⭐ 断线探针：新的一条记录（本地墙钟时刻 —— 判「坏时段」要按当地几点看）。
+            self._sp = {"wall": time.strftime("%H:%M:%S")}
+            self._side_fired = False
         # ⭐ 3.11 E：每次连接尝试一条宽事件（含领 key / 握手失败）。
         try:
             import telemetry as _tel
@@ -1364,6 +1414,15 @@ class StreamASR:
         except Exception as e:                      # noqa: BLE001
             self._note_detail(e)
             return "network"
+        host = urllib.parse.urlparse(ws_url).hostname or ""
+        try:
+            peer = str(ws.socket.getpeername()[0])  # 连到的是哪个 IP（Cloudflare 任播；不是用户的 IP）
+        except Exception:                           # noqa: BLE001
+            peer = ""
+        with self._lock:
+            self._sp["peer"] = peer
+            self._sp_host = host
+        self._fire_side_probe("side0")              # 刚连上时的基线：这条网路平时多快
 
         # ⭐ 2026-10-21：timeout / stale 之后的重连要**跳到实时**，不是把积压续传。
         #    实时字幕慢 8.6 s 比丢几秒更糟；丢掉的几秒留给课后补译（音频还在）。
@@ -1430,6 +1489,7 @@ class StreamASR:
         except Exception:                           # noqa: BLE001
             err = "disconnected"
         finally:
+            self._snap_death()                  # ⚠️ 先拍现场：下面的收尾要等收线程，最多 2 s
             wd_stop.set()                       # 任何出口都别留一条挂着 0.5 s 一轮的线程
             self._send_since = None
             with self._lock:
@@ -1463,6 +1523,75 @@ class StreamASR:
         finally:
             self._send_since = None
 
+    def _fire_side_probe(self, key: str) -> None:
+        """在**另一条线程**里跑一次旁路探针，结果写进这一个连接的记录 `self._sp[key]`。永不抛、不阻塞。
+
+        ⚠️ 写的是**发起时**那条记录的对象：探针晚于会话结束才回来也落在对的那一条上
+        （`_attempts` 把同一个 dict 放进 `sessions[]`，不拷贝）。
+        """
+        probe = self._side_probe
+        with self._lock:
+            host, rec = self._sp_host, self._sp
+        if probe is None or not host:
+            return
+
+        def run() -> None:
+            try:
+                res = dict(probe(host))
+            except Exception as e:                  # noqa: BLE001  注入的探针也不许把线程弄死
+                res = {"ok": False, "ms": 0, "code": None, "err": type(e).__name__[:40]}
+            with self._lock:
+                rec[key] = res
+        threading.Thread(target=run, name="stream-asr-side", daemon=True).start()
+
+    def _snap_death(self) -> None:
+        """会话结束那一刻的现场 → 这一个连接的记录。永不抛。
+
+        `sent_s` 这条连接一共推了几秒音频（未压缩 PCM：× 32 000 = 字节）· `msg_age_s` 多久没收到
+        服务端消息 · `proc_lag_s` 服务端处理进度落后已发送多少 · `stuck_s` 此刻卡在 `ws.send` 里多久。
+        """
+        try:
+            now = time.monotonic()
+            since = self._send_since
+            with self._lock:
+                sp = self._sp
+                sent = self._sent_samples / float(SR)
+                sp["sent_s"] = round(sent, 1)
+                if self._last_msg_at > 0:
+                    sp["msg_age_s"] = round(now - self._last_msg_at, 1)
+                if self._proc_rel_ms > 0:
+                    sp["proc_lag_s"] = round(sent - self._proc_rel_ms / 1000.0, 1)
+                # 看门狗掐的那种：它动手时已经记了（发送线程出 send 时 `_send_since` 已清）
+                sp.setdefault("stuck_s", round(now - since, 1) if since is not None else 0.0)
+        except Exception:                           # noqa: BLE001
+            pass
+
+    def _watch_probe(self, ws, since: float | None) -> None:
+        """看门狗每 0.5 s 顺手记一次：库测的 ping 往返（`rtt_ms` 最近 / `rtt_max_ms` 最大），
+        以及「开始卡了」那一刻发一次旁路探针（`side`，每个连接最多一次）。永不抛。
+
+        ⚠️ `ws.latency` 是库自己每 20 s ping 一次量出来的（读属性，不发东西）；没量过时是 0。
+        """
+        try:
+            lat = float(getattr(ws, "latency", 0.0) or 0.0)
+            now = time.monotonic()
+            with self._lock:
+                if lat > 0:
+                    ms = int(lat * 1000)
+                    self._sp["rtt_ms"] = ms
+                    self._sp["rtt_max_ms"] = max(ms, int(self._sp.get("rtt_max_ms") or 0))
+                if self._side_fired:
+                    return
+                stuck = since is not None and now - since >= SIDE_PROBE_STALL_S
+                quiet = self._last_msg_at > 0 and now - self._last_msg_at >= SIDE_PROBE_MSG_S
+                if not (stuck or quiet):
+                    return
+                self._side_fired = True
+                self._sp["side_why"] = "send" if stuck else "quiet"
+            self._fire_side_probe("side")
+        except Exception:                           # noqa: BLE001
+            pass
+
     def _send_watchdog(self, ws, stop: threading.Event) -> None:
         """发送线程在 `ws.send` 里卡超过 `send_stuck_s` → 掐掉 socket，让会话按 `stale` 重连。
 
@@ -1472,12 +1601,14 @@ class StreamASR:
         """
         while not stop.wait(0.5):
             since = self._send_since
+            self._watch_probe(ws, since)
             if since is None or time.monotonic() - since < self._send_stuck_s:
                 continue
             with self._lock:
                 self._pending = "stale"
                 self._skip_next = True
                 self._detail = f"send stuck >{self._send_stuck_s:g}s"
+                self._sp["stuck_s"] = round(time.monotonic() - since, 1)   # 断线探针：卡了多久才掐
             try:
                 ws.close_socket()
             except Exception:                       # noqa: BLE001

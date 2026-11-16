@@ -285,6 +285,26 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `loop_stalls` 里 `pump` 占大头 + `pump_event.type` 是鼠标类（1/2 按下松开、6 拖动…） | 事件派发被 AppKit 的跟踪循环拖住（拖窗 / 菜单 / 按住按钮） |
 | `phases` 里别的步占大头 | 那一步本身慢（feed / accept / drain / device） |
 
+**断线探针（2026-11-16，`stream_asr`，所有报告都有）**：`blocks.stream.sessions[*]`（每条 Soniox 连接一条，`final_session` 同形）
+在 `at / ran_s / why / detail` 之外多这些：
+
+| 字段 | 含义 |
+|---|---|
+| `wall` | 这条连接开始时的**本地**时刻（判「坏时段」按当地几点看） |
+| `peer` | 连到的 IP（Cloudflare 任播地址，不是用户的 IP） |
+| `sent_s` | 这条连接推了几秒音频（未压缩 PCM，× 32 000 = 字节） |
+| `msg_age_s` / `proc_lag_s` | 结束那一刻：多久没收到服务端消息 / 服务端处理进度落后已发送多少秒 |
+| `stuck_s` | 结束时卡在 `ws.send` 里多久（看门狗掐的那种 ≈ `SEND_STUCK_S`） |
+| `rtt_ms` / `rtt_max_ms` | 库每 20 s ping 一次量的往返：最近一次 / 这条连接里最大 |
+| `side0` / `side` | 旁路探针 `{ok, ms, code, err}`：另开一条 HTTPS 短连接 HEAD 同一主机。`side0` 刚连上时（基线）；`side` 在发送卡住 ≥ 2 s 或 ≥ 3 s 没消息时发一次（`side_why` = `send` / `quiet`） |
+
+| 看到 | 判读 |
+|---|---|
+| 长连接卡死时 `side.ok` 为真、`ms` ≈ `side0.ms` | 网路是通的，**只有这条长连接**被掐（中间设备针对长连接 / 流量） |
+| `side.ok` 为假或 `ms` 远大于 `side0.ms` | 整条网路那几秒都断了 / 塞了（不是只针对长连接） |
+| 死前 `rtt_max_ms` 明显高于平时 | 网路先变慢再断（拥塞型） |
+| `ran_s` 扎堆在同一个值、与 `sent_s` 无关 | 按**时长**掐；`ran_s` 随码率变而 `sent_s` 扎堆 → 按**流量**掐 |
+
 
 ### 6.1 环境变量开关（唯一登记处）
 

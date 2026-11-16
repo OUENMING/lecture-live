@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import queue
+import re
 import sys
 import tempfile
 import threading
@@ -204,6 +205,7 @@ def make_asr(worker: FakeWorker, soniox: FakeSoniox, *, on_sealed=None, **kw) ->
     kw.setdefault("retry_delays_s", (0.0, 0.1, 0.1, 0.1))   # 生产见 stream_asr.RETRY_DELAYS_S，测试压到 0.1 s
     kw.setdefault("retry_jitter", 0.0)                        # 既有判据量精确退避时间；抖动单独有一条
     kw.setdefault("drop_log", "")                             # 默认关：别让几十条判据的输出被掉线行淹掉
+    kw.setdefault("side_probe", None)                         # 旁路探针默认关（真探针会去连 https://127.0.0.1/）；专门的判据自己注入
     return StreamASR(passcode="cl-test", terms=["OLS", "regression"],
                      general="ECON10730 Data Analysis", on_sealed=on_sealed, **kw)
 
@@ -1150,6 +1152,121 @@ def t_transport_config_send_stuck_covered() -> None:
             wk.close()
 
 
+def t_probe_fields_on_send_stuck() -> None:
+    """⭐ 2026-11-16 断线探针：发送卡死那条连接的记录里要有现场。
+
+    `wall` 当地时刻 · `peer` 连到的 IP · `sent_s` 推了几秒音频 · `stuck_s` 卡在 send 里多久 ·
+    `side0` 刚连上的旁路基线 · `side` 卡住时的旁路探针（`side_why="send"`）。旁路探针注入假的，
+    断言它被叫到的是 ws 地址的主机，且结果落在**卡死的那一条**记录上（不是下一条）——
+    卡住那次的探针故意**晚于会话结束**才回来，记录必须是同一个对象才收得到。
+    """
+    import websockets.sync.client as wsc
+    real_connect = wsc.connect
+    unblock = threading.Event()
+    calls = {"n": 0}
+    probed: list[str] = []
+
+    def fake_probe(host: str) -> dict:
+        probed.append(host)
+        if len(probed) == 2:                                  # 卡住时那次：故意晚于掐线才回来
+            time.sleep(1.8)
+        return {"ok": True, "ms": 7, "code": 404, "err": ""}
+
+    def connect(*a, **kw):
+        ws = real_connect(*a, **kw)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            real_send, real_close = ws.send, ws.close_socket
+            sent = {"n": 0}
+
+            def send(data, *aa, **kk):
+                if isinstance(data, bytes):
+                    sent["n"] += 1
+                    if sent["n"] > 3:
+                        unblock.wait(30.0)
+                        raise OSError("socket closed under a blocked send")
+                return real_send(data, *aa, **kk)
+
+            def close_socket():
+                unblock.set()
+                real_close()
+            ws.send, ws.close_socket = send, close_socket
+        return ws
+
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    with mock.patch.object(wsc, "connect", connect):
+        # send_stuck_s 3.0 > SIDE_PROBE_STALL_S 2.0：卡 2 s 时先发旁路探针，3 s 才掐
+        s = make_asr(wk, son, response_timeout_s=60.0, send_stuck_s=3.0, retry_delays_s=(0.0,),
+                     side_probe=fake_probe)
+        try:
+            assert wait_until(s.alive)
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 10.0 and len(son.connections) < 2:
+                s.feed(silence(1600))
+                time.sleep(0.02)
+            assert len(son.connections) >= 2, "该被看门狗重连"
+            assert wait_until(lambda: "side" in (s.metrics()["sessions"] or [{}])[0], 3.0), s.metrics()["sessions"]
+            e = s.metrics()["sessions"][0]
+            assert e["why"] == "stale", e
+            assert re.fullmatch(r"\d\d:\d\d:\d\d", e["wall"]), e
+            assert e["peer"] == "127.0.0.1", e
+            assert e["sent_s"] > 0, e
+            assert e["stuck_s"] >= 2.5, f"拍现场时还卡在 send 里，应 ≈ send_stuck_s: {e}"
+            assert e["side_why"] == "send", e
+            assert e["side"] == {"ok": True, "ms": 7, "code": 404, "err": ""}, e
+            assert e["side0"]["ok"] is True, e
+            assert set(probed) == {"127.0.0.1"}, probed
+        finally:
+            unblock.set()
+            s.stop()
+            son.close()
+            wk.close()
+
+
+def t_probe_off_and_raising_probe_safe() -> None:
+    """旁路探针 `None` = 一次都不发、记录里没有 side 字段；注入的探针抛异常也不许弄死会话。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son)                                     # 判据默认 side_probe=None
+    try:
+        assert wait_until(s.alive)
+        s.feed(silence(3200))
+        time.sleep(0.3)
+    finally:
+        s.stop()
+    last = s.metrics()["final_session"]
+    assert last and "side0" not in last and "side" not in last, last
+    assert "wall" in last, last
+
+    def boom(host: str) -> dict:
+        raise RuntimeError("probe exploded")
+    s = make_asr(wk, son, side_probe=boom)
+    try:
+        assert wait_until(s.alive)
+        assert wait_until(lambda: "side0" in (s.metrics()["final_session"] or {})
+                          or "side0" in s._sp, 3.0)
+        assert s._sp["side0"]["ok"] is False and s._sp["side0"]["err"] == "RuntimeError", s._sp
+        assert s.alive(), "探针抛错不该影响连接"
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
+
+
+def t_side_probe_real_counts_http_error_as_reached() -> None:
+    """默认探针：有 HTTP 状态（含 404）= 到了对端；连不上 = 不通。用本机端口，不出网。"""
+    import stream_asr as sa
+    import urllib.error
+    with mock.patch("urllib.request.urlopen",
+                    side_effect=urllib.error.HTTPError("u", 404, "nf", {}, None)):
+        r = sa.side_probe("example.invalid")
+    assert r["ok"] is True and r["code"] == 404, r
+    with mock.patch("urllib.request.urlopen", side_effect=TimeoutError()):
+        r = sa.side_probe("example.invalid")
+    assert r["ok"] is False and r["err"] == "TimeoutError", r
+
+
 def t_transport_keepalive_send_stuck_covered() -> None:
     """⭐ 静音时 keepalive 那条 `ws.send` 卡死 → 也要被看门狗救（MUT8 曾漏过）。"""
     import websockets.sync.client as wsc
@@ -1880,6 +1997,9 @@ def main() -> int:
         ("量具: 连续失败 down_s 不丢段", t_metrics_down_s_accumulates_across_failed_connects),
         ("transport: 稳定跑过后预算还原", t_transport_budget_resets_after_stable_session),
         ("transport: 发送卡死 → 看门狗重连", t_transport_send_stuck_watchdog_reconnects),
+        ("探针: 卡死那条记录带现场 + 旁路探针（11-16）", t_probe_fields_on_send_stuck),
+        ("探针: 关掉 / 抛错都安全（11-16）", t_probe_off_and_raising_probe_safe),
+        ("探针: 默认旁路探针 404 算通（11-16）", t_side_probe_real_counts_http_error_as_reached),
         ("transport: config 帧卡死 → 看门狗重连", t_transport_config_send_stuck_covered),
         ("transport: keepalive 卡死 → 看门狗重连", t_transport_keepalive_send_stuck_covered),
         ("transport: 看门狗线程不泄漏", t_transport_watchdog_thread_does_not_leak),

@@ -65,6 +65,35 @@
 （`_whatsnew_body` 从最新往下数到「你上次看过的版本」为止），多版本时每行前面标版本号。
 所以**每个版本的看点都要能独立看懂**，不要写"同上""见上一条"。
 
+## [3.11.4] - 2026-11-16
+
+### 更新方式
+
+auto
+
+### 更新看点
+- [改进] 优化了一些东西
+- 中国区的朋友，近几个版本可能断连的问题正在测试解决。。。
+- 需要一些虾饺，肠粉，蒸排骨
+
+### 升级须知（3.11.3 → 3.11.4）
+- 没有新依赖、没有要手动下的模型；开课面板上自动更新。
+- 没有开关变化，不需要改配置。
+
+### Added
+- **断线现场**（`stream_asr`）：`blocks.stream.sessions[*]` 每条 Soniox 连接多记 `wall` / `peer` /
+  `lan`（本机地址 6 位指纹，不存 IP）/ `sent_s` / `msg_age_s` / `proc_lag_s` / `stuck_s` /
+  `rtt_ms` / `rtt_max_ms`；发送卡住 ≥ 2 s 或 ≥ 3 s 没消息时另开一条 HTTPS 短连接 HEAD 同一主机
+  （`side`，刚连上时测一次基线 `side0`）。只记录，不改连接行为。判读表见 HANDBOOK §6.0。
+- **主循环卡顿探针**（测试模式）：`blocks.ui.loop_stalls` 记一轮 ≥ 0.3 s 的停顿与各步耗时
+  （poll / feed / accept / drain / device / pump）和最慢的 NSEvent；`capture.gaps` 每条多
+  `cb_age_s` / `q_depth`，分辨「主循环卡住」还是「声卡没送块」。
+- **启动打点**：`startup` 事件把「点击 → 首屏小窗」拆成六项
+  （`pre_lock_s` / `pre_reset_s` / `pre_keymove_s` / `pre_mic_s` / `hud_import_s` / `hud_show_s`）。
+
+### Changed
+- 笔记交给后台 worker 时，收尾卡状态行多一行合盖提示，结论停留 3 s → 8 s（读得完）。
+
 ## [3.11.3] - 2026-11-12
 
 ### 更新方式

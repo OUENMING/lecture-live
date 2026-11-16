@@ -300,6 +300,7 @@ PUMP_ACTIVE_S = 0.15             # 距上次事件在此窗口内 = 手势进行
 #      `_wait_interruptible()` 里的 `nextEventMatchingMask_untilDate_` 会立刻返回）。
 PUMP_IDLE_LONG_S = 0.1           # 空闲（没有任何逐帧推进的东西在跑）的让步
 PUMP_HIDDEN_S = 0.25             # 窗口不可见（收起 / 完全被遮挡 / 屏幕睡眠）的让步；仍靠 wake() 收数据
+LOOP_YIELD_TOL_S = 0.005        # U1-A：让步实际耗时超出计划多少以内仍算让步（调度抖动）
 LOOP_EV_MIN_S = 0.01            # U1-A 卡顿探针：派发慢于它的事件才记类型（噪声不记）
 # ⭐ 3.9.7 追加（2026-10-16，作者）：热档让步**跟随窗口所在屏幕的刷新率**，别再写死 8 ms。
 #   上面那行 `PUMP_IDLE_S = 0.008` 是 120 Hz 周期（8.33 ms）的近似。作者发现有人用
@@ -5947,15 +5948,19 @@ class Overlay:
         _y0, _d0 = time.monotonic(), self._lp_dispatch    # U1-A：让步秒要扣掉其间派发的事件
         _t0 = time.monotonic() if self._on_wait is not None else 0.0
         rl = NSRunLoop.currentRunLoop()
+        _plan = self._tier_wait_s(tier)                   # 这一档**计划**让多久（手势档 0）
         if tier == WAIT_GESTURE:
             # 手势中: 立刻返回, 但**仍跑完一轮 run loop** —— 不能真跳过,
             # 否则 CA 不提交、画面冻住(见常量说明的实测)。
             rl.runUntilDate_(NSDate.distantPast())
         elif tier == WAIT_HOT:
-            rl.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(self._tier_wait_s(tier)))
+            rl.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(_plan))
         else:
-            self._wait_interruptible(app, mode, self._tier_wait_s(tier))
-        self._lp_yield += max(0.0, (time.monotonic() - _y0) - (self._lp_dispatch - _d0))
+            self._wait_interruptible(app, mode, _plan)
+        # U1-A：只有**计划内**的那段（+ 容差）算让步，超出的算干活 —— AppKit 可能在
+        #    `runUntilDate_` 里跑 timer / CA 提交 / 跟踪循环，3 秒卡在那里不能被记成「刻意让步」。
+        self._lp_yield += min(max(0.0, (time.monotonic() - _y0) - (self._lp_dispatch - _d0)),
+                              _plan + LOOP_YIELD_TOL_S)
         if self._on_wait is not None:
             try:
                 self._on_wait(tier, time.monotonic() - _t0)

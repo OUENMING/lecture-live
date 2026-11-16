@@ -171,6 +171,45 @@ class OverlayDispatchTiming(unittest.TestCase):
             ov._send_timed(App(), object())
 
 
+class OverlayYieldCap(unittest.TestCase):
+    """让步只算到「计划时长 + 容差」，超出的算干活（否则 runUntilDate_ 里的卡顿会被当成让步藏掉）。"""
+
+    def _run(self, elapsed: float, planned: float = 0.008):
+        import types
+        from unittest import mock
+        import AppKit
+        import overlay
+        now = [1000.0]
+        fake_time = types.SimpleNamespace(monotonic=lambda: now[0], sleep=time.sleep)
+
+        class RL:
+            def runUntilDate_(self, d):
+                now[0] += elapsed
+
+        ov = overlay.Overlay.__new__(overlay.Overlay)
+        ov._on_wait = None
+        ov._pump_tier = lambda n: overlay.WAIT_HOT
+        ov._tier_wait_s = lambda tier: planned
+        with mock.patch.object(overlay, "time", fake_time), \
+                mock.patch.object(AppKit, "NSRunLoop", types.SimpleNamespace(currentRunLoop=lambda: RL()), create=True):
+            ov._lp_dispatch = 0.0
+            ov._lp_yield = 0.0
+            ov._yield_to_runloop(None, None, 0.0)
+        ov._lp_total = elapsed                      # 这一轮 pump 里除让步外没别的
+        return ov.loop_times
+
+    def test_让步里卡了3秒_让步只记计划值_其余算干活(self):
+        d, work, y = self._run(3.0)
+        self.assertAlmostEqual(y, 0.008 + 0.005, places=6)
+        self.assertAlmostEqual(work, 3.0 - y, places=6)
+        self.assertGreater(work, 2.9)
+
+    def test_正常让步_约等于计划_仍算让步(self):
+        d, work, y = self._run(0.0083)
+        self.assertAlmostEqual(y, 0.0083, places=6)
+        self.assertAlmostEqual(work, 0.0, places=6)
+
+
 class MainWiring(unittest.TestCase):
     def test_主循环调_note_loop_且受_tester_守卫(self):
         import main

@@ -35,6 +35,7 @@ import threading
 import time
 
 import note_jobs as _jobs
+import lang_gate
 
 #: 问答快照最多带多少条过进程边界（spec 文件要小；超出的截断并记在 `qa_truncated`）。
 QA_MAX = 200
@@ -65,7 +66,7 @@ def build_callbacks(spec: dict) -> dict:
     polish_model = spec.get("polish_model") or None
 
     def _lost_explain(blocks):
-        if not use_cloud or tmode == "raw":
+        if not use_cloud or lang_gate.no_llm(tmode):
             return []
         try:
             import polish
@@ -90,7 +91,7 @@ def build_callbacks(spec: dict) -> dict:
             return entries, {"need": 0, "done": 0}
 
     def _recap(payload: dict) -> dict:
-        if not use_cloud or tmode == "raw":
+        if not use_cloud or lang_gate.no_llm(tmode):
             return {}
         try:
             import recap as _recap_mod
@@ -150,8 +151,9 @@ def build_writer(spec: dict, *, callbacks: dict | None = None):
         glossary_path=spec.get("glossary") or None,
         polish=bool(spec.get("polish")),
         polish_model=spec.get("polish_model") or None,
-        # ⚠️ 纯转录档（raw）不许发模型请求；Jev 用自己的 token，与笔记 key 无关。
-        keypoints_fn=(None if str(spec.get("trans_mode") or "") == "raw" else kp.pick),
+        # ⚠️ 不调模型的档（`raw` 纯转录 / `zh` 中文课只转录）不许发模型请求；Jev 用自己的 token，
+        #    与笔记 key 无关。→ `lang_gate.no_llm`（双保险，不只靠 `main.py` 的 `use_cloud`）。
+        keypoints_fn=(None if lang_gate.no_llm(spec.get("trans_mode")) else kp.pick),
         desk=bool(spec.get("desk", True)),
         desk_home=spec.get("desk_home") or None,
         # ⚠️ 保留基础版：面板「停止」只等 6 s 就 SIGKILL，而复习层收不到 cancel。
@@ -266,7 +268,7 @@ def run(stem: str, *, root=None, log=None, heartbeat_s: float | None = None,
                 #    以前只抓 0/N，最常发生的「部分成功」反而被当成了成功。
                 out["review_state"] = _ow.review_state(
                     _st, expected=(bool(spec.get("use_cloud"))
-                                   and str(spec.get("trans_mode") or "") != "raw"),
+                                   and not lang_gate.no_llm(spec.get("trans_mode"))),
                     cancelled=bool(cancel is not None and cancel.is_set()))
                 out["degraded"] = out["review_state"] in ("failed", "partial")
             except Exception as e:                        # noqa: BLE001

@@ -517,6 +517,7 @@ def t_transport_happy_path() -> None:
         assert cfg["model"] == "stt-rt-v6" and cfg["audio_format"] == "pcm_s16le"
         assert cfg["sample_rate"] == 16000 and cfg["num_channels"] == 1
         assert cfg["language_hints"] == ["en"] and cfg["enable_endpoint_detection"] is True
+        assert cfg["enable_language_identification"] is True
         assert cfg["context"]["terms"] == ["OLS", "regression"]
         g = {e["key"]: e["value"] for e in cfg["context"]["general"]}
         assert g["topic"] == "ECON10730 Data Analysis"
@@ -571,6 +572,52 @@ def t_no_token_stall_reconnects() -> None:
         s.stop()
         son.close()
         wk.close()
+
+
+def _zh_feed(core, text_parts, lang="zh"):
+    t = 0
+    for i, x in enumerate(text_parts):
+        core.feed([Tok(x, t, t + 200, True, lang)], [])
+        t += 200
+
+
+def t_core_zh_fullwidth_seal_lang() -> None:
+    """L-1：全角 `。？！` 能封口，句子带 `lang == "zh"`；`at_boundary` 认全角。"""
+    core = StreamCore(clock=lambda: 0.0, stable_s=0.3)
+    _zh_feed(core, ["今天", "我们", "讲", "需求", "曲线", "。", "它", "向", "下", "倾斜", "吗", "？"])
+    out = core.take_sentences()
+    assert [x.text for x in out] == ["今天我们讲需求曲线。", "它向下倾斜吗？"], out
+    assert all(x.lang == "zh" for x in out), out
+    core.feed([Tok("好", 3000, 3100, True, "zh")], [])
+    assert not core.at_boundary()
+    core.feed([Tok("！", 3100, 3200, True, "zh")], [])
+    assert core.take_sentences()[0].text == "好！"
+    core.feed([], [Tok("真的", 4000, 4100, False, "zh"), Tok("。", 4100, 4200, False, "zh")])
+    assert core.at_boundary()
+    # 标签是 zh 但文本没有汉字 → 不记；英文 / 无标签 → 不记
+    c2 = StreamCore(clock=lambda: 0.0, stable_s=0.3)
+    c2.feed([Tok("OK", 0, 100, True, "zh"), Tok(".", 100, 150, True, "zh")], [])
+    assert c2.take_sentences()[0].lang == ""
+
+
+def t_core_en_seal_unchanged_with_lang() -> None:
+    """L-1：英文 token（带 / 不带 language）封口文本与时间逐字不变；lang 只反映标签。"""
+    parts = [" How", " are", " you", "?", " I", " am", " fine", ".", " Bye", "!"]
+    outs = []
+    for lg in ("", "en"):
+        core = StreamCore(clock=lambda: 0.0, stable_s=0.3)
+        t = 0
+        for x in parts:
+            core.feed([Tok(x, t, t + 100, True, lg)], [])
+            t += 100
+        outs.append([(x.text, x.start_s, x.end_s, x.lang) for x in core.take_sentences()])
+    # 文本与时间逐字不变；lang：没标签 → ""（不知道），标 en → "en"（下游别把 "" 当英文）
+    want = [(" How are you?", 0.0, 0.4), (" I am fine.", 0.4, 0.8), (" Bye!", 0.8, 1.0)]
+    assert [o[:3] for o in outs[0]] == [o[:3] for o in outs[1]] == want, outs
+    assert [o[3] for o in outs[0]] == ["", "", ""], outs
+    assert [o[3] for o in outs[1]] == ["en", "en", "en"], outs
+    assert StreamCore(clock=lambda: 0.0)._final == []
+    assert stream_asr.parse_tokens([{"text": "好", "start_ms": 0, "end_ms": 1, "language": "zh"}])[0].lang == "zh"
 
 
 def t_core_seal_open() -> None:
@@ -2032,6 +2079,8 @@ def main() -> int:
         ("transport: region= 进领 key 请求体", t_transport_region_goes_to_worker),
         ("transport: model_not_available → 换 v5 重连一次", t_transport_model_not_available_retries_v5),
         ("transport: 有连接无出词 → 判 stale 重连（11-09）", t_no_token_stall_reconnects),
+        ("core: 中文全角句末封口 + lang（L-1）", t_core_zh_fullwidth_seal_lang),
+        ("core: 英文封口不变（L-1）", t_core_en_seal_unchanged_with_lang),
         ("core: 手动收口 seal_open（11-09）", t_core_seal_open),
         ("transport: 有待封口 token → 定期 finalize（11-09）", t_finalize_sent_when_pending),
         ("transport: 无待封口 token 也重置 finalize 计时（11-09）", t_finalize_timer_not_stale_after_silence),

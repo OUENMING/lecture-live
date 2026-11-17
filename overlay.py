@@ -29,6 +29,7 @@ import panel
 import objc_own
 import text_diff
 import caption_flow
+import lang_gate
 
 try:
     from AppKit import NSRunLoop, NSDate
@@ -220,11 +221,18 @@ TRACK_TIMEOUT_S = 1.0
 #   both  双语     —— DeepSeek 矫正英文错听 + 出中文
 #   en    只英·校  —— 只矫正英文, 不出中文(旧"译 关"的行为)
 #   raw   纯转录   —— ASR 直出, 一个 LLM 请求都不发
-TRANS_MODE_TITLE = {"both": "双语", "en": "只英·校", "raw": "纯转录"}
+#   zh    只转录   —— **中文课自动切过来的档**（L-2：连着 3 句中文 → 切这里）。
+#                   行为与 `raw` 完全同形（`lang_gate.no_llm`），**但它照常上云识别**
+#                   （Soniox 要认中文，关了就退回本地英文模型）；也不进胶囊循环 ——
+#                   用户只能从它点回「双语」。
+TRANS_MODE_TITLE = {"both": "双语", "en": "只英·校", "raw": "纯转录", "zh": "中文"}
+# ⚠️ zh 胶囊写「中文」而不是「只转录」（Claude 11-17 定）：和「纯转录」只差一个字、一眼分不开；
+#    「中文」两个字与「双语」同宽，直接说出这节课的样子（屏上只有中文原文）。
 TRANS_MODE_DESC = {
     "both": "DeepSeek 矫正英文错听 + 出中文",
     "en": "只矫正英文, 不出中文",
     "raw": "完全不调 LLM, ASR 直出",
+    "zh": "中文课(自动识别): 只出原文, 不翻译",
 }
 # 模式按钮做成「状态胶囊」：字是中性白，强调放在**底**上（浅白半透明胶囊），三档同一个样子、只换字。
 # 为什么不按档上色（2026-10-11 作者嫌「双语」的绿色不好看）—— HIG 原话：
@@ -264,7 +272,24 @@ MODE_CHIP_HOVER_S = motion.FEEDBACK_S
 CHIP_FRAME_DELAY_S = 0.04
 #: 档位小图标（SF Symbols）。默认关 —— 作者看了有/无两版对比图再定。
 MODE_CHIP_ICONS = False
-TRANS_MODE_SYMBOL = {"both": "character.bubble", "en": "textformat", "raw": "waveform"}
+TRANS_MODE_SYMBOL = {"both": "character.bubble", "en": "textformat", "raw": "waveform",
+                     "zh": "waveform"}          # zh 与 raw 同一个图标（行为同形，只差「上不上云识别」）
+
+#: 胶囊点一下的**下一档**。纯函数（不碰 AppKit）—— `tests/test_lang_gate.py` 直接测它。
+#: ⚠️ `zh` **不在循环里**：它是「自动语种」切出来的**一次性入口态**，用户点一下只能
+#:    回 `both`（再从 both 走既有的 both → en → raw → both）。把 `zh` 塞进循环就得回答
+#:    「手动进 zh 算不算手动换档（要不要置 `ever_off`）」，那是另一个决定，本单不做。
+#: ⚠️ 原来直接 `order.index(self._trans_mode)` —— `zh` 不在元组里就是 **ValueError**（点一下就崩）。
+# ⚠️ 2026-11-17 Owen：「纯转录」从胶囊里拿掉，只剩双语 ↔ 只英·校。`raw` 档本身**还在**
+#    （`clctl mode:raw`、测试、旧调用方都能用，判据照旧），只是用户点胶囊到不了。
+_TRANS_CYCLE = ("both", "en")
+
+
+def next_trans_mode(mode: str) -> str:
+    """胶囊轮换：`both ↔ en`；不在循环里的档（`zh` 自动切、`raw` 已从胶囊拿掉）点一下回 `both`。"""
+    if mode not in _TRANS_CYCLE:
+        return "both"
+    return _TRANS_CYCLE[(_TRANS_CYCLE.index(mode) + 1) % len(_TRANS_CYCLE)]
 
 
 def _reduce_motion() -> bool:
@@ -922,12 +947,12 @@ def build_outline_rows(outline, seen_t, mode, fold) -> list:
        ⚠️ `en` 和 `src` **一个都没丢**：可追溯性靠小字那行。
        ⚠️ **没有 `zh` 时退回英文当大字** —— `zh` 缺失不该让内容消失。
 
-    ⚠️ `mode == "raw"`（纯转录档）→ **空列表**。
+    ⚠️ 不调模型的档（`raw` 纯转录 / `zh` 中文课只转录）→ **空列表**。
     ⚠️ `mode == "en"`（只英·校）→ **所有中文小字留空**，大字也退回英文。
     ⚠️ 行一律是 `(大字, 小字)` **二元组**；折行之后**只有第一行挂小字**
        （小字是这条的注解，重复挂等于刷屏）。
     """
-    if mode == "raw":
+    if lang_gate.no_llm(mode):
         return []
     only_en = (mode == "en")
     out: list = []          # [(大字, 小字)]
@@ -1760,14 +1785,13 @@ class Overlay:
         # 鼠标穿透不能放在面板上: 开启后窗口忽略所有鼠标事件, 按钮会集体失效(单向死锁),
         # 所以穿透只从菜单栏 🎧 切换。
         self._through = False
-        self._trans_mode = "both"        # both | en | raw, 见 _cycle_translate
+        self._trans_mode = "both"        # both | en | raw | zh, 见 next_trans_mode / TRANS_MODE_TITLE
         self._engine_warn = False        # 云端翻译降级中(菜单栏图标提示用)
         self._btn_trans = self._button(
             TRANS_MODE_TITLE["both"], self._cycle_translate,
-            "点一下循环三种模式:\n"
-            "  双语     —— DeepSeek 矫正英文错听 + 出中文\n"
-            "  只英·校  —— 只矫正英文, 不出中文\n"
-            "  纯转录   —— 完全不调 LLM, ASR 直出(零 API、零延迟、最省电)")
+            "点一下切换:\n"
+            "  双语     —— 矫正英文错听 + 出中文\n"
+            "  只英·校  —— 只矫正英文, 不出中文")
         self._chip_anim = False          # 下一次 _layout 是否把胶囊宽度变化做成过渡（只有用户点击才置位）
         self._chip_frame_gen = 0         # A7: 延迟 frame 过渡的代数号 —— 旧的批次到点后自动作废
         self._style_mode_chip()
@@ -2380,7 +2404,8 @@ class Overlay:
             self._gloss_lbl.setFrame_(NSMakeRect(_gx, _gy, _gw, _glh))
             self._gloss_hit.setFrame_(((_gx, self._height - 28), (_gw, 24)))
             avail -= _gw + (8.0 if _gw else 0.0)
-        _cshow = bool(_ctext) and avail >= CHAPTER_MIN_W and self._trans_mode != "raw"
+        _cshow = (bool(_ctext) and avail >= CHAPTER_MIN_W
+                  and not lang_gate.no_llm(self._trans_mode))
         if self._chapter_lbl is not None:
             self._chapter_lbl.setHidden_(not _cshow)
         if self._chapter_hit is not None:
@@ -5229,10 +5254,10 @@ class Overlay:
     def _toggle_outline(self) -> None:
         """纲要的主入口（章节条 / 菜单栏都调它）。
 
-        ⚠️ **纯转录档直接返回** —— 和章节条隐藏、菜单项置灰是**同一个判据**，
+        ⚠️ **不调模型的档直接返回** —— 和章节条隐藏、菜单项置灰是**同一个判据**，
            三处必须一致；否则点了没反应，用户会以为功能坏了。
         """
-        if self._trans_mode == "raw":
+        if lang_gate.no_llm(self._trans_mode):
             return
         self._note("outline")          # ⭐ 采集面 ⑦：纲要被打开/关掉了几次
         if self._outline_on:
@@ -6360,22 +6385,29 @@ class Overlay:
                 pass
 
     def _cycle_translate(self):
-        """在三种模式间循环: 双语 → 只英文(矫正) → 纯转录 → 双语。
+        """在两种模式间切换: 双语 ↔ 只英文(矫正)（纯转录 11-17 起不在胶囊里）。
 
         单按钮循环而不是两个独立开关: 顶栏宽度不增, 且三态互斥本就是一个枚举,
         拆成两个布尔会造出一个无意义组合(译开 + AI 关 = 要中文但不调模型, 做不到)。
-        想从双语直达纯转录要点两下 —— 那是低频操作, 换来的是永远看得见全部三态。"""
-        order = ("both", "en", "raw")
+
+        ⚠️ `zh`（中文课自动切出来的只转录档）**不在循环里** —— 当前是它时点一下回到
+        「双语」（下一档的计算在 `next_trans_mode`，纯函数，测试钉着）。"""
         self._chip_anim = True               # 只有用户点击才做过渡（程序改档、启动恢复都直接落位）
-        self.set_trans_mode(order[(order.index(self._trans_mode) + 1) % len(order)])
+        self.set_trans_mode(next_trans_mode(self._trans_mode))
 
     def _toggle_translate(self):
         """[已弃用] 旧的两态切换。保留以免外部调用点报错, 内部改走 _cycle_translate。"""
         self._cycle_translate()
 
+    @property
+    def trans_mode(self) -> str:
+        """当前**显示着的**翻译档。`main.drain()` 拿它跟 `trans["mode"]` 比 ——
+        不一致就是「自动切 zh 了，屏幕该跟上」（AppKit 只在主线程碰）。"""
+        return self._trans_mode
+
     def set_trans_mode(self, mode: str) -> None:
-        """三种模式(见 TRANS_MODE_TITLE)。旧接口 set_translating(bool) 仍可用, 会映射成
-        both/en —— 保持向后兼容, 调用方不必一次改完。"""
+        """四档（见 `TRANS_MODE_TITLE`；`zh` = 中文课自动切的只转录档，不进胶囊循环）。
+        旧接口 set_translating(bool) 仍可用, 会映射成 both/en —— 保持向后兼容。"""
         if mode not in TRANS_MODE_TITLE:
             return
         self._trans_mode = mode
@@ -6387,11 +6419,11 @@ class Overlay:
             self._pinned_term = None
             # ⚠️ 答案缓冲(_answer_*)刻意**不在这里清**: 讲解是独立入口, 不被这个开关
             # 替代、也不依赖它。往这个清理块里加答案状态就是把"译关仍可用"打掉。
-        # ⭐ **纯转录档：纲要是死的**（`DESIGN.md:187`「纯转录 | 一个模型请求都不发」，
+        # ⭐ **不调模型的档（`raw` / `zh`）：纲要是死的**（`DESIGN.md:187`「纯转录 | 一个模型请求都不发」，
         #    那一档下 `drain()` 根本不喂数据 → 纲要永远是空的）。
         #    → 关掉已经开着的纲要，并把**章节条隐藏、菜单项置灰**，
         #      三处判据必须一致 —— 否则用户点了没反应，会以为功能坏了（计划 §9.9/§9.10）。
-        if mode == "raw":
+        if lang_gate.no_llm(mode):
             if self._outline_on:
                 self._close_outline()
         if self._mi_outline is not None:
@@ -6404,7 +6436,7 @@ class Overlay:
             #    ⚠️ 不用 `menu.setAutoenablesItems_(False)` —— 那会连**其余三项**一起
             #       变成"必须显式 enable"，等于为了这一项改了整张菜单的规则。
             self._mi_outline.setAction_(
-                None if mode == "raw" else "clicked:")
+                None if lang_gate.no_llm(mode) else "clicked:")
         self._sync_trans_button()
         self._apply_row_metrics(self._width)   # 只英 / 纯转录档行高收起英文那格（换回双语再放开）
         # ⚠️ 换字后胶囊宽度要跟着重算：原来切档不重排，「双语」那份宽度装「纯转录」会少约 4pt

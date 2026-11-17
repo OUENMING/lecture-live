@@ -19,7 +19,10 @@
    · 仓库根的 `.update-seen` —— 每次跑都写当前 `VERSION`，**那是正常行为**，无害。
    → 前者靠 `backup-20260930-pre-ai-panel/` 里那份原值救回来的。
 
-⚠️ **key 不显式给会静默没有**：`load_api_key()` 那条链最后落到 `<仓库>/.deepseek_key`，
+⚠️ **key 一律是 test key**（`load_test_key()`，在改 `STATE_ROOT` 之前读）；调试通道默认开
+   （`CLASSLIVE_DEBUG_CTL=1`），启动后会打印 `⏱ __CTL__ <socket 路径>`，`tools/clctl.py --sock <路径>` 连它。
+
+⚠️ **（旧）key 不显式给会静默没有**：`load_api_key()` 那条链最后落到 `<仓库>/.deepseek_key`，
    而它是 **gitignored** 的 —— 跑 `git worktree` 那种隔离副本时，那边**没有这个文件**
    → atom 不提取、翻译退回本地引擎，而**两边的结果就没有可比性了**
    （2026-09-30 实测踩到：第一次「接线前/后」对拍，接线前那版一条 atoms 都没写，
@@ -74,20 +77,38 @@ if outdir.exists():
 for d in ("sessions", "classlive", "vault"):
     (outdir / d).mkdir(parents=True)
 
-# ⚠️ key 从**主仓库**读，再塞进环境变量 —— 命令行里不会出现它（`ps` 看不到）。
-_key = pathlib.Path("/Users/owen/lecture-live/.deepseek_key")
-if _key.exists():
-    os.environ.setdefault("DEEPSEEK_API_KEY", _key.read_text(encoding="utf-8").strip())
-
 sys.path.insert(0, str(repo))
 os.chdir(repo)
 
 import capture                                                     # noqa: E402
+import cloud_translator                                           # noqa: E402
 import obsidian_writer                                             # noqa: E402
 import paths                                                       # noqa: E402
 
+# ⚠️ **必须在改 `paths.STATE_ROOT` 之前读**（改了之后 `~/.classlive/` 就指到隔离目录了）：
+#    · key 一律用 **test key**（`cloud_translator.load_test_key()`，test1 通行码；不回落到作者自己的码
+#      —— 2026-10-14 一次实验在作者名下记了 1755 次请求）。读不到就退出，**不许**悄悄换成别的 key。
+#    · install-id 用作者机器上已有的那个，抄进隔离目录 —— 否则每次跑都是新设备，会撞 test1 的设备上限。
+#    key 只进环境变量（`ps` 看不到）。直接覆盖、不用 setdefault：环境里若已有作者的码也要顶掉。
+try:
+    _tkey = cloud_translator.load_test_key()
+except SystemExit as _e:
+    sys.exit(f"❌ {_e}")
+os.environ["DEEPSEEK_API_KEY"] = _tkey
+_iid_src = paths.install_id()
+_iid_txt = _iid_src.read_text(encoding="utf-8").strip() if _iid_src.exists() else ""
+os.environ["CLASSLIVE_DEBUG_CTL"] = "1"       # 隔离运行默认开调试通道（socket 落在隔离目录里）
+# 子进程不认下面改的 `paths.STATE_ROOT`：后台收尾 worker 会写真 `~/.classlive/note-jobs/`
+# （2026-11-17 D-2 实测留下 4 个 TESTISO.json）→ 收尾留在进程内。测试包也一律不上传。
+os.environ["CLASSLIVE_NOTE_WORKER"] = "0"
+os.environ["CLASSLIVE_UPLOAD"] = "0"
+
 obsidian_writer.SESSIONS = outdir / "sessions"                     # ① 写端
 paths.STATE_ROOT = outdir / "classlive"                            # ② 写端
+if _iid_txt:
+    _iid_dst = paths.install_id()                                  # 此时已指向隔离目录
+    _iid_dst.write_text(_iid_txt + "\n", encoding="utf-8")
+    os.chmod(_iid_dst, 0o600)
 
 T0 = time.time()
 MARK: dict = {}

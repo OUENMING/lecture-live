@@ -49,8 +49,10 @@ from obsidian_writer import ObsidianWriter, resolve_vault, remember_vault
 from build_notes import (TermNotes, format_gloss, detect_proper_nouns, lookup_term)
 from testmode import LOOP_STALL_S, TestSession, system_info, transcode_one
 import changelog
+import debug_ctl
 import keyentry
 import instance_lock
+import lang_gate
 import models
 import notice
 import power
@@ -721,10 +723,11 @@ def _spawn_note_worker(*, writer, ui, stem, qa_snapshot, live_pool, course,
             cloud_model=str(getattr(writer, "_model", "") or "deepseek-flash"),
             polish_model=getattr(writer, "_polish_model", None),
             glossary=getattr(writer, "_glossary_path", None),
-            # ⚠️ 纯转录档（raw）不许发任何模型请求（DESIGN 契约）。父进程无条件
-            #    读了 key，直接 `bool(api_key_val)` 会让 worker 跑复习层 + Jev。
+            # ⚠️ 不调模型的档（`raw` 纯转录 / `zh` 中文课只转录）不许发任何模型请求
+            #    （DESIGN 契约）。父进程无条件读了 key，直接 `bool(api_key_val)` 会让
+            #    worker 跑复习层 + Jev。判据统一走 `lang_gate.no_llm`。
             use_cloud=(bool(api_key_val)
-                       and str((trans or {}).get("mode") or "both") != "raw"),
+                       and not lang_gate.no_llm((trans or {}).get("mode") or "both")),
             trans_mode=str((trans or {}).get("mode") or "both"),
             ever_off=bool((trans or {}).get("ever_off")),
             qa=qa)
@@ -818,7 +821,7 @@ def resume_stale_note_jobs(sessions_dir, *, rebuild=None, log=None, jobs_root=No
                 continue
             try:
                 _say(f"· {stem}：后台任务没跑完，补生成")
-                _raw = str(((j.get("spec") or {}).get("trans_mode")) or "") == "raw"
+                _raw = lang_gate.no_llm((j.get("spec") or {}).get("trans_mode"))
                 r = rb(sess, log=_say, raw=_raw)
                 if r.get("ok"):
                     note = str(r.get("note") or "")
@@ -991,9 +994,9 @@ def resume_pending_notes(sessions_dir, *, online=None, rebuild=None, log=None,
                 pass                                      # 探不到 -> 当在线，试一次
             out["attempted"] += 1
 
-            _raw2 = str(((_nj.read(stem, root=jobs_root).get("spec") or {})
-                         .get("trans_mode"))
-                        or j.get("trans_mode") or "") == "raw"
+            _raw2 = lang_gate.no_llm(((_nj.read(stem, root=jobs_root).get("spec") or {})
+                                      .get("trans_mode"))
+                                     or j.get("trans_mode"))
 
             def _job(mk=mk, sess=sess, stem=stem, _raw2=_raw2) -> None:
                 # ⭐ per-stem 锁：恢复线程之间/与旧 worker 之间互斥（只读 alive 挡不住）。
@@ -2119,6 +2122,9 @@ def cloud_asr_off_reason(*, cfg_enabled: bool, engine: str, mode: str,
         return "云端转写开关已关"
     if engine == "local":
         return "--engine local"
+    # ⚠️⚠️ 这一行是**全仓唯一一个 `zh` 与 `raw` 不同**的档位判据，**不许**换成
+    #     `lang_gate.no_llm`：`raw` 要关掉云端定稿 ASR，`zh`（中文课只转录）**必须照常上云**
+    #     —— 关了 Soniox 就退回本地英文模型，中文全乱（任务单开头那条）。
     if mode == "raw":
         return "纯转录档"
     if source == "file" and speed > 1:
@@ -2154,6 +2160,73 @@ def resolve_cloud_asr_enabled(*, read=final_asr.read_config, write=final_asr.wri
 #    `run(args)` 是很多判据/替身直接接管的签名，加形参会把它们全打断
 #    （`test_wrapup` 的 `--polish` 默认值那条就是这么红的）。
 TEL_CTX: dict = {}
+
+#: 送翻计数 —— 经调试通道暴露成 `trans.requests`（`clctl --wait 'trans.requests == N'`）。
+#: 只记**次数**，不记文本。用途：验「切到 `zh` 档之后翻译请求不再增加」。
+#: ⚠️ **模块级**而不是 `run()` 的局部变量：`_wire_debug_ctl(...)` 的签名被很多判据直接接管，
+#:    加形参会把它们全打断（与 `TEL_CTX` 同一个理由）。`run()` 开头清零。
+TR_STATS: dict = {"requests": 0}
+
+
+def _wire_debug_ctl(ctl, *, args, version, running, stopping, trans, queues,
+                    get_src, get_seg, get_stream, get_tester, set_mode) -> None:
+    """把调试通道（`debug_ctl.py`，开关 `CLASSLIVE_DEBUG_CTL=1`）的状态分区和命令挂上去。
+
+    ⚠️ 只**读**、只返回数字 / 状态字，**不碰** key / 通行码 / install-id（`tests/test_debug_ctl.py`
+       的哨兵用例钉着）；各 `get_*` 是晚绑定的取值函数（对象还没建 / 已不在 → `None`，不抛）。
+    ⚠️ 状态分区函数和命令都**只在主线程**（`Ctl.poll()` 的调用者）上被调。
+    """
+    def _build():
+        return {"version": version, "pid": os.getpid(), "source": getattr(args, "source", None),
+                "ui": getattr(args, "ui", None), "course": getattr(args, "course", None),
+                "speed": getattr(args, "speed", None)}
+
+    def _listen():
+        src, seg = get_src(), get_seg()
+        return {"running": running.is_set(), "stopping": stopping.is_set(),
+                "source": getattr(args, "source", None),
+                "audio_done": None if src is None else bool(src.is_done()),
+                "speaking": None if seg is None else bool(seg.is_speaking)}
+
+    def _stream():
+        st = get_stream()
+        return None if st is None else st.metrics()
+
+    def _queues():
+        return {k: q.qsize() for k, q in queues.items()}
+
+    def _loop():
+        t = get_tester()
+        if t is None:
+            return None
+        b = dict(t._loop_block())
+        b.pop("items", None)
+        return b
+
+    ctl.register_state("build", _build)
+    ctl.register_state("listen", _listen)
+    ctl.register_state("stream", _stream)
+    # ⭐ L-2：`trans` 里多一个 `requests` = 这一节「送翻次数」（含只英·校那一档的矫正）——
+    #    验「切到 zh 档之后翻译请求不再增加」就靠它（`clctl --wait 'trans.requests == N'`）。
+    #    ⚠️ 折进 `trans` 而不是另开一个 `translate` 分区：分区名是 D-2 的契约
+    #       （`tests/test_debug_ctl.py::test_state_sections` 钉着整份集合）。
+    ctl.register_state("trans", lambda: {**trans, "requests": int(TR_STATS.get("requests") or 0)})
+    ctl.register_state("queues", _queues)
+    ctl.register_state("loop", _loop)
+
+    def _mode(a):
+        a = (a or "").strip()
+        if a not in ("both", "en", "raw", "zh"):
+            raise debug_ctl.CtlError("bad_args", "mode:<both|en|raw|zh>")
+        set_mode(a)
+        return {"mode": trans.get("mode")}
+
+    def _stop(_a):
+        stopping.set()          # 与悬浮窗「下课 / ✕」（on_quit=stopping.set）同一个入口
+        return {"stopping": True}
+
+    ctl.register_command("mode", _mode, "mode:<both|en|raw|zh> 切翻译档（同悬浮窗胶囊，显示跟着变）")
+    ctl.register_command("stop", _stop, "stop 下课（等于点了悬浮窗下课 / 终端 Ctrl-C）")
 
 
 def run(args) -> None:
@@ -2458,7 +2531,11 @@ def run(args) -> None:
     # 15s deadline**(独立验证实测 15.02s, 而且**完全不提问也一样**)。
     # 现在 ✕ 只置这个标志(主循环据此退出), running 留到收尾真正结束才清。
     stopping = threading.Event()
-    trans = {"mode": "both"}                            # 🌐 三档: both 双语 / en 只英·校 / raw 纯转录
+    trans = {"mode": "both"}                            # 🌐 四档: both 双语 / en 只英·校 / raw 纯转录 / zh 中文课只转录
+    # ⭐ L-2 自动语种：连着 3 句中文 → 自动切 `zh`（只转录）。纯状态机，判据在 `lang_gate.py`。
+    #    ⚠️ 只有 Soniox 封口句带 `lang`（L-1）—— 本地识别那段没有语种，永不自动切。
+    gate_zh = lang_gate.LangGate()
+    TR_STATS["requests"] = 0                          # 调试通道 `trans.requests`（本次课从零开始）
     # ⭐ 定稿 ASR: 云端优先、本地兜底(`final_asr.py` 文件头)。
     #    ⚠️ 必须在 `trans` 之后: `_cloud_asr_ok` 读 `trans["mode"]`; 也必须在**开始采音之前**
     #       (首次告知要先于第一段音频发出)。
@@ -2535,7 +2612,7 @@ def run(args) -> None:
     # ⚠️ 没配 token → 空表（= 功能关着，不是错误）。同 `polish` 的 fail-soft。
     # ⚠️ 同步跑，一节课实测约 6 秒 —— 收尾可以接受（那一步本来就在等复习层）。
     def _keypoints_for(sents):
-        if args.save_notes == "no" or trans.get("mode") == "raw":
+        if args.save_notes == "no" or lang_gate.no_llm(trans.get("mode")):
             return []
         try:
             import keypoints as _kp
@@ -2546,7 +2623,8 @@ def run(args) -> None:
     # ❓ 课后讲解卡（计划 §G2）—— 同 `_keypoints_for`：收尾那一步才跑、fail-soft、
     #    纯转录档 / 没 key 一个请求都不发（writer 那边另外挡了 `cancel`）。
     def _lost_explain_for(blocks):
-        if args.save_notes == "no" or trans.get("mode") == "raw" or not api_key_val:
+        if (args.save_notes == "no" or lang_gate.no_llm(trans.get("mode"))
+                or not api_key_val):
             return []
         try:
             import polish
@@ -2602,7 +2680,7 @@ def run(args) -> None:
     def _recap_for(payload: dict) -> dict:
         import recap as _recap
         try:
-            if args.save_notes == "no" or trans.get("mode") == "raw":
+            if args.save_notes == "no" or lang_gate.no_llm(trans.get("mode")):
                 return {}
             data = payload if isinstance(payload, dict) else {}
             prev = _recap.load(args.course or "")
@@ -2644,6 +2722,10 @@ def run(args) -> None:
                             recap_fn=_recap_for,
                             desk=True, open_fn=_open_note)
     notes = TermNotes()                                 # 术语通俗解析(查表)
+    try:
+        _VERSION_TXT = pathlib.Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        _VERSION_TXT = ""
     # ⭐ 2026-11-11：轻量事件时间线（只记事件名/标量，随诊断包上传）。
     try:
         import client_events as _ce
@@ -3073,6 +3155,9 @@ def run(args) -> None:
         except Exception:                                     # noqa: BLE001
             return {}
 
+    def _on_translate_mode(mode):
+        trans.update(mode=mode, ever_off=trans.get("ever_off") or mode != "both")
+
     ui = TerminalUI() if args.ui == "terminal" else _load_overlay(
         on_quit=stopping.set,
         # ❓ 要的是**按下那一刻** —— 所以它不设标志位, 直接落盘一个时间戳。
@@ -3081,7 +3166,7 @@ def run(args) -> None:
         #    那样要绕一圈到 `drain()` 里去补标志位。
         #    （⭐ 已于 2026-09-29 并进 ❓ —— 两个按钮记的是同一件事。）
         on_lost=_on_lost_pressed,
-        on_translate=lambda mode: trans.update(mode=mode, ever_off=trans.get("ever_off") or mode != "both"),
+        on_translate=_on_translate_mode,
         on_submit=submit_question,
         on_ask=ask_about_this,
         # late binding: start_new_topic 定义在下面的问答状态块里, 这里只是把回调
@@ -3532,9 +3617,11 @@ def run(args) -> None:
             return
         final_gen["n"] += 1                      # 通知草稿线程: 重置节流
         for sent in split_sentences(text, max_words=max_words):
-            if trans["mode"] == "raw":
-                # 纯转录: 一个 LLM 请求都不发。ASR 原样上屏、原样落盘。
+            if lang_gate.no_llm(trans["mode"]):
+                # 纯转录（`raw`）/ 中文课只转录（`zh`）: 一个 LLM 请求都不发。ASR 原样上屏、原样落盘。
                 # 这是给"不需要翻译、也不想联 API"的场景 —— 离线、零成本、零首字延迟。
+                # ⚠️ `zh` 与 `raw` 在这里**完全同形**（拍板 6: 不另开一格）：中文课的原文
+                #    本身就是中文，没有矫正可流式、也不需要译文。
                 # ⚠️ 与下面两档的关键差别: 不产出 `en` 流(没有矫正可流式), 直接给
                 #    ("final", "", "", sent), 让 en 走 final 那一趟。
                 finals.append(sent)
@@ -3543,6 +3630,7 @@ def run(args) -> None:
             if trans["mode"] == "en":
                 # 只矫正英文: 中文不出, 但 ASR 错听照修(仍要联模型)。
                 # 失败则回退原始 ASR —— 与翻译路径同规矩, 绝不因模型问题丢转录。
+                TR_STATS["requests"] = int(TR_STATS.get("requests") or 0) + 1   # 调试通道计数
                 try:
                     fixed = translator.fix_stream(
                         sent, finals,
@@ -3573,6 +3661,9 @@ def run(args) -> None:
             #    与引擎注入共用同一个纯函数 + 同一份表（`select_term_zh` 内置开关）——
             #    注入与记账不可能各算各的。翻译失败（异常）→ 0：模型什么都没看到。
             _zh_n = 0
+            # ⭐ L-2：送翻计数（调试通道 `trans.requests`）—— 切到 zh 之后必须不再涨。
+            #    ⚠️ 只数**定稿句**：草稿译文（`draft_tr`）与课后补译不在这条路上。
+            TR_STATS["requests"] = int(TR_STATS.get("requests") or 0) + 1
             try:
                 res = translator.fix_and_translate_stream(
                     sent, finals,
@@ -3634,7 +3725,7 @@ def run(args) -> None:
             streamq.put(("terms", hits))
             # 术语表没覆盖的专有名词(人名/机构/地名) -> 第 2 次出现才后台查一次并缓存
             # (一次性的 ASR 误听往往只出现一次, 2 次门槛把它们挡在门外)
-            if not hits and api_key_val and trans["mode"] != "raw":
+            if not hits and api_key_val and not lang_gate.no_llm(trans["mode"]):
                 for pn in detect_proper_nouns(sent, notes.known()):
                     seen_proper[pn] += 1
                     if seen_proper[pn] == 2:
@@ -3685,6 +3776,18 @@ def run(args) -> None:
                         break
                     if not _s.text:
                         continue
+                    # ⭐ L-2 自动语种：连着 3 句中文 → 切 `zh`（只转录）。纯状态机在 `lang_gate.py`。
+                    #    ⚠️ 只有 Soniox 封口句带 `lang`（L-1）；`ever_off` 一起传 —— 用户手动
+                    #       换过档就永不再自动切（那是他的决定，不该被机器覆盖）。
+                    #    ⚠️ 收到 true 时**不取消**已经送翻的句子（它们在另一条路上跑完，拍板 5）。
+                    #    ⚠️ 这里就写 `trans`（不等主线程）：否则这一句自己会按旧档送翻 ——
+                    #       `_emit` 就在下面几行（走与胶囊**同一个写点**，`ever_off` 一起置真）。
+                    if gate_zh.observe(getattr(_s, "lang", ""),
+                                       ever_off=bool(trans.get("ever_off"))):
+                        _on_translate_mode("zh")        # 与悬浮窗胶囊同一个写点（含 ever_off）
+                        # 胶囊的显示由 `drain()` 跟 `trans` 走（不新增 streamq tag）。
+                        streamq.put(("notice", ("识别到中文课：只转录、不翻译（点胶囊回双语）", False,
+                                                 "\n".join(_engine_warns.values()))))  # 带上还挂着的告警，别把 ⚠️ 清掉
                     # ⭐ 3.10.1「连着讲就并成一段」：与上一句之间的**音频停顿**（词时间戳），
                     #    悬浮窗据此决定并不并进上一行（`caption_flow.is_join`）。先于 `_emit` 入队。
                     _gap = (_s.start_s - _sent_end["s"]) if _sent_end["s"] is not None else None
@@ -3927,7 +4030,7 @@ def run(args) -> None:
                 break
             if term in queried_proper:
                 continue
-            if trans["mode"] == "raw":       # 纯转录: 不联模型, 专有名词查询整条跳过
+            if lang_gate.no_llm(trans["mode"]):   # 纯转录 / 中文课只转录: 不联模型, 专有名词查询整条跳过
                 continue
             queried_proper.add(term)
             try:
@@ -4250,7 +4353,31 @@ def run(args) -> None:
         except Exception:                                  # noqa: BLE001
             return ("", "", 0.0, 0.0, 0, 0.0, "", 0)      # ⚠️ 与上一行同形（8 项），否则 drain 拆包就抛
 
+    ctl = debug_ctl.Ctl()       # 开关没开 = 什么都不起；`emit` / `poll` 第一行就是一次布尔判断
+    atexit.register(ctl.close)  # 异常退出的兜底（幂等）；正常路径在收尾末尾显式 close
+
+    def _ctl_ev(item) -> None:
+        """drain 逐条分发时记一条调试事件（kind = streamq tag）。⚠️ 绝不抛；正文只在
+        `CLASSLIVE_DEBUG_CTL_TEXT=1` 时才会被 `Ctl.emit` 留下。"""
+        try:
+            tag = item[0]
+            txt = None
+            if tag == "final":
+                txt = {"en": item[1], "zh": item[2]}
+            elif tag in ("en", "zh"):
+                txt = {tag: item[1]}
+            ctl.emit(str(tag), text=txt)
+        except Exception:                           # noqa: BLE001
+            pass
+
     def drain():
+        # ⭐ L-2 自动语种：「档位显示」跟着 `trans["mode"]` 走（只在主线程改 AppKit）。
+        #    ⚠️ 不新增 `streamq` tag：自动切 zh 发生在 `final_worker`（后台线程），
+        #       而它只写 `trans`；两者不一致时就是「显示该跟上了」。终端的 UI 没有胶囊
+        #       （`trans_mode` 属性不存在 → `getattr` 回落到 `_want`，视为已同步）。
+        _want = str(trans.get("mode") or "")
+        if _want and _want != getattr(ui, "trans_mode", _want):
+            _ctl_set_mode(_want)
         # ⭐ 3.11 E：让心跳带上「这节课到底出了几句」—— 崩溃后不必翻 sessions/。
         if TEL_CTX:
             try:
@@ -4298,6 +4425,7 @@ def run(args) -> None:
                 item = streamq.get_nowait()
             except queue.Empty:
                 break
+            _ctl_ev(item)
             if item[0] == "zh":                     # ("zh"/"en", 增量, seg)
                 draft_view.on_stream(item[2] if len(item) > 2 else None)
                 ui.stream_zh(item[1])
@@ -4444,7 +4572,7 @@ def run(args) -> None:
                 #    `drain()` 在主循环里，这里是「不阻塞不变量」管着的地方。
                 #    ⚠️ 档位判在**这里**，不是启动时 —— 三档课中可切（见 worker 那段）。
                 #    ⚠️ 整段包 `try`：转不过去只是少几条，绝不能让 drain 抛。
-                if trans["mode"] != "raw":
+                if not lang_gate.no_llm(trans["mode"]):
                     try:
                         summ.feed((writer._n, time.strftime("%H:%M:%S"),
                                    item[1] or item[3], item[2]))
@@ -4486,6 +4614,27 @@ def run(args) -> None:
         _over = getattr(ui, "draft_over_stream", None)
         if callable(_over):
             _over(draft_view.over_stream())
+
+    def _ctl_set_mode(mode: str) -> None:
+        """`mode:` 命令 = 点了悬浮窗那颗胶囊：浮窗的 setter 会重画胶囊并回调 `_on_translate_mode`；
+        终端没有胶囊，直接走同一个回调。"""
+        fn = getattr(ui, "set_trans_mode", None)
+        if callable(fn):
+            fn(mode)
+        else:
+            _on_translate_mode(mode)
+
+    try:
+        _wire_debug_ctl(ctl, args=args, version=_VERSION_TXT, running=running, stopping=stopping,
+                        trans=trans, queues={"streamq": streamq, "sealedq": sealedq, "finalq": finalq},
+                        get_src=lambda: src, get_seg=lambda: seg, get_stream=lambda: stream,
+                        get_tester=lambda: tester, set_mode=_ctl_set_mode)
+        if ctl.start():
+            echo(f"⏱ __CTL__ {ctl.sock_path}")
+        elif debug_ctl.enabled():
+            echo(f"⚠ 调试通道没起来：{ctl.error}")
+    except Exception as e:                          # noqa: BLE001 —— 调试通道绝不挡上课
+        echo(f"⚠ 调试通道没起来：{type(e).__name__}: {e}")
 
     _hear = getattr(ui, "hearing", None)      # 顶栏「在听」小点; 定义在 try 外 —— finally 要用
     _hear = _hear if callable(_hear) else None
@@ -4550,6 +4699,7 @@ def run(args) -> None:
                 _tail["on"] = False
                 ui.set_tail_merge(False)
             drain()
+            ctl.poll()      # 调试通道：命令只在这里（主线程）执行；耗时算进 `drain` 那一步
             if _lp:
                 _l3 = _tm()
             if src.is_done():
@@ -4670,6 +4820,7 @@ def run(args) -> None:
             #    （`gate.on` 为假时它恒为空，判据与改前逐字一致）。
             while time.monotonic() < deadline:
                 drain()
+                ctl.poll()                 # 收尾等待里调试通道也要有人取命令
                 if (all_settled(finalq, streamq, drafts,
                                 busy["on"] or merge_pending(), carry["text"])
                         and sealedq.empty()):
@@ -4772,6 +4923,7 @@ def run(args) -> None:
                         ui.pump()
                     else:
                         time.sleep(0.02)
+                    ctl.poll()             # 收尾等待里调试通道也要有人取命令
                     # ⭐ 3.10：每轮看一眼**墙钟跳变**（睡过一觉就跳一大截）——
                     #    睡过去再醒来时，收尾里那些网络步骤多半已经失败/超时了，
                     #    这里立刻把它们（有界地）补推一把。机制与
@@ -4881,9 +5033,9 @@ def run(args) -> None:
                             echo(f"⚠ 实时总结收尾失败（笔记照写）："
                                  f"{type(e).__name__}: {str(e)[:80]}")
                         # ⚠️ 档位课中可以切换：构造 writer 时算的 `_cloud_notes` 会过期。
-                        #    收尾这一刻是 raw，就清掉 key —— 否则复习层仍会发请求。
+                        #    收尾这一刻是 raw / zh，就清掉 key —— 否则复习层仍会发请求。
                         try:
-                            if str(trans.get("mode") or "") == "raw":
+                            if lang_gate.no_llm(trans.get("mode")):
                                 writer._key = None
                         except Exception:             # noqa: BLE001
                             pass
@@ -5312,6 +5464,7 @@ def run(args) -> None:
             _close_ui = getattr(ui, "close", None)
             if callable(_close_ui):
                 _close_ui()
+            ctl.close()          # 调试通道：删 socket / ctl.path（幂等；异常路径靠 atexit 兜底）
             # ⭐ **先把剩下的上传交出去**（独立进程，零退出延迟）—— 必须在
             #    `_auto_update_on_exit()` **之前**：更新器会 `git pull` 换代码，
             #    而 drainer 要的是**这一版**的 `upload.py` 与队列格式。

@@ -413,3 +413,12 @@ def telemetry_dir(*, root=None) -> pathlib.Path:
     ⚠️ 与 `sessions/` 分开：这是**诊断数据**，不是笔记契约；按会话前缀可整节删除。
     """
     return _root(root) / "telemetry"
+
+
+def ctl_dir(*, root=None) -> pathlib.Path:
+    """调试通道的 socket 目录 —— `<根>/run/`（权限 0700 由 `debug_ctl` 建）。
+
+    ⚠️ 只在 `CLASSLIVE_DEBUG_CTL=1` 时才有东西住在这里；路径超 macOS 的 socket 上限时
+       真 socket 改放 `/tmp/classlive-ctl-<uid>/`，这里只留一个 `ctl.path` 指过去。
+    """
+    return _root(root) / "run"

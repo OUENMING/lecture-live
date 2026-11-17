@@ -73,6 +73,16 @@ def t_callbacks_respect_trans_mode() -> None:
           and cb["backfill_fn"]([]) == ([], {"need": 0, "done": 0})
           and cb["recap_fn"]({}) == {})
 
+    # ⭐ L-2：`zh`（中文课只转录）与 `raw` **同规矩** —— 连 key 都给了也不许发请求。
+    #    ⚠️ 双保险：`main` 那侧已经把 `use_cloud` 压成 False；这一段验 worker 自己那条闸。
+    cb = NW.build_callbacks({**SPEC, "trans_mode": "zh"})
+    check("⭐⭐ zh 档（中文课只转录）-> 同上：整节一个模型请求都不发",
+          cb["lost_explain_fn"]([{}]) == []
+          and cb["backfill_fn"]([]) == ([], {"need": 0, "done": 0})
+          and cb["recap_fn"]({}) == {})
+    # Jev 重点句 / 复习层那两处判据不在 `build_callbacks` 的返回值里（它们直接进 writer），
+    # 行为测不到 → 在 `tests/test_lang_gate.py` 用「源码里不许再有 `"raw"` 字面量」钉住。
+
 
 def t_callbacks_degrade_not_raise() -> None:
     # 真有 key 但网络 / 依赖坏掉：回调必须 fail-soft 返回空，不许把 note 那层带走。

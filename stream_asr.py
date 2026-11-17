@@ -221,7 +221,7 @@ MODEL = "stt-rt-v6"
 MODEL_FALLBACK = "stt-rt-v5"
 
 #: 句末标点（与 `draft_engine.END_PUNCT` 同口径）。
-END_PUNCT = (".", "?", "!")
+END_PUNCT = (".", "?", "!", "。", "？", "！")
 #: 控制 token：不是词，别进文本。
 CONTROL = ("<end>", "<fin>")
 
@@ -281,6 +281,8 @@ class Tok(NamedTuple):
     start_ms: int
     end_ms: int
     is_final: bool = False
+    #: Soniox `language`（开 `enable_language_identification` 后逐 token 给；没有 → `""`）。
+    lang: str = ""
 
 
 class Sealed(NamedTuple):
@@ -288,6 +290,23 @@ class Sealed(NamedTuple):
     text: str
     start_s: float
     end_s: float
+    #: 句内 token 的多数语种：`"zh"` 要求文本里确有汉字；没开语种识别 / 没标签 → `""`。
+    lang: str = ""
+
+
+_HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+
+
+def _sent_lang(toks: Sequence["Tok"]) -> str:
+    """一句的语种：多数 token 标 `zh` 且文本里确有汉字 → `"zh"`；否则取最多的非空标签；都没有 → `""`。
+
+    `""` 与 `"en"` 分开：`""` 是「不知道」（老配置 / 退回 v5 / 消息没带标签），下游别当成英文。
+    """
+    zh = sum(1 for t in toks if t.lang == "zh")
+    if zh * 2 > len(toks) and _HAN.search("".join(t.text for t in toks)):
+        return "zh"
+    tags = [t.lang for t in toks if t.lang and t.lang != "zh"]
+    return max(set(tags), key=tags.count) if tags else ""
 
 
 def parse_tokens(raw) -> list[Tok]:
@@ -309,7 +328,9 @@ def parse_tokens(raw) -> list[Tok]:
         if isinstance(st, bool) or isinstance(en, bool) or not isinstance(st, (int, float)) \
                 or not isinstance(en, (int, float)):
             continue
-        out.append(Tok(text, int(st), int(en), bool(t.get("is_final"))))
+        lg = t.get("language")
+        out.append(Tok(text, int(st), int(en), bool(t.get("is_final")),
+                       lg if isinstance(lg, str) else ""))
     return out
 
 
@@ -376,7 +397,7 @@ class StreamCore:
         `snx/REPORT_ep.md`）—— 只有落在句与句之间的才算「讲完一口气」。
         """
         tail = (self.draft_text() or "").rstrip().rstrip("\"')\u201d\u2019")
-        return not tail or tail[-1] in ".?!"
+        return not tail or tail[-1] in END_PUNCT
 
     def pending(self) -> bool:
         """手上还有没有 token（收尾时判「还要不要等 final」用）。"""
@@ -400,7 +421,7 @@ class StreamCore:
             self._sentences.append(Sealed(
                 "".join(t.text for t in toks),
                 min(t.start_ms for t in toks) / 1000.0,
-                max(t.end_ms for t in toks) / 1000.0))
+                max(t.end_ms for t in toks) / 1000.0, _sent_lang(toks)))
             self._final, self._nonfinal = [], []
             self._cand_key, self._cand_at = None, None
         return self.take_sentences()
@@ -420,7 +441,7 @@ class StreamCore:
             self._sentences.append(Sealed(
                 "".join(t.text for t in toks),
                 min(t.start_ms for t in toks) / 1000.0,
-                end / 1000.0))
+                end / 1000.0, _sent_lang(toks)))
             self._wm_ms = max(self._wm_ms, end)
             self._final = [t for t in self._final if t.end_ms > self._wm_ms]
             self._nonfinal = [t for t in self._nonfinal if t.end_ms > self._wm_ms]
@@ -525,7 +546,7 @@ class StreamCore:
             self._sentences.append(Sealed(
                 "".join(t.text for t in toks),
                 min(t.start_ms for t in toks) / 1000.0,
-                max(t.end_ms for t in toks) / 1000.0))
+                max(t.end_ms for t in toks) / 1000.0, _sent_lang(toks)))
         self._wm_ms = max(self._wm_ms, end.end_ms)
         self._final = [t for t in self._final if t.end_ms > self._wm_ms]
         self._nonfinal = [t for t in self._nonfinal if t.end_ms > self._wm_ms]
@@ -1661,7 +1682,8 @@ class StreamASR:
         cfg: dict = {"model": (MODEL_FALLBACK if self._force_v5 else MODEL),
                      "audio_format": "pcm_s16le",
                      "sample_rate": SR, "num_channels": 1,
-                     "language_hints": ["en"], "enable_endpoint_detection": True}
+                     "language_hints": ["en"], "enable_endpoint_detection": True,
+                     "enable_language_identification": True}
         if self._ctx:
             cfg["context"] = self._ctx
         return cfg

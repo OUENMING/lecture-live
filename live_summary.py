@@ -78,6 +78,17 @@ ATOM_PAUSE_S = 30.0
 #: 一章开多久之后才值得给它做第一次**临时**合成。依据：一章的量级是 10 分钟。
 INTERIM_AFTER_S = 480.0
 
+#: ⭐ **首段**的临时合成门槛，比 `INTERIM_AFTER_S` 短得多。
+#:
+#: ❓ 为什么：开课头 **480 秒**（一章的典型量级）内右栏是空的 —— 而作者 2026-11-17 定的
+#:    目标是「**第一段开课 3 分钟就出**」。8 分钟出第一段在体验上等于「这个功能没开」。
+#:    → 首段 180 秒（= `MIN_CHAPTER_S`，即一章最短有效长度：再短的话那次合成
+#:    很可能马上被后面 3 分钟的内容顶掉，钱花了但用户看不到结果）。
+#: ⚠️ **只管第一次**：第二次起回到 `INTERIM_AFTER_S`（180s 一次地刷新会直接把
+#:    一节课的合成次数抬三倍，而一章本来也就 5–10 分钟）。
+#: ⚠️ 它是**墙钟秒数**（与 `INTERIM_AFTER_S` 同域，用 `step(now)` 的 `now` 算）。
+FIRST_INTERIM_AFTER_S = 180.0      # ⚠️ 与下面 `MIN_CHAPTER_S` 同值是有意的（理由见上）—— 改其一要一起看另一个
+
 #: 临时合成之间的最小间隔。一章只花一次合成的钱，所以可以比正式版勤。
 INTERIM_EVERY_S = 240.0
 
@@ -307,8 +318,13 @@ class LiveSummarizer:
         self._cur = None              # 当前章（dict）；`title` 为空 = 还没定题
         self._cid = 0
         self._prior: list = []        # 已经定稿的章标题（给下一章的 prompt）
+        #: ⭐ 与 `_prior` **按下标对齐**的各章结论句（`para.lead.zh`；没有就是空串）。
+        #: 光给标题拦不住「换个说法把上一章的结论再写一遍」（`chapter.build_prompt`）。
+        self._prior_leads: list = []
         self._interim_at = 0.0        # 上次临时合成的时刻
         self._interim_n = -1          # 上次临时合成时这一章有几句（没新句就别再合）
+        #: ⭐ 当前章还没做过临时合成吗（首段用更短的 `FIRST_INTERIM_AFTER_S`）。
+        self._interim_first = True
 
         # ---- 杂项 ----
         self._window_n = 0
@@ -791,6 +807,7 @@ class LiveSummarizer:
                          "t_open": now}
             self._cid += 1
             self._interim_at = now
+            self._interim_first = True     # ⭐ 新章：首段重新享受 180 秒那一档
             self._interim_n = -1          # 新章：上一章的句数不作数（撞上同一个数会白等 8 分钟）
         c = self._cur
         if title:                                         # 定题（开场那些空主题的窗口
@@ -802,12 +819,18 @@ class LiveSummarizer:
         c["atoms"].extend(atoms)
 
     def _maybe_interim(self, now: float) -> None:
-        """临时合成：章开够久了、且距上次临时超过间隔。"""
+        """临时合成：章开够久了、且距上次临时超过间隔。
+
+        ⚠️ **首段用 `FIRST_INTERIM_AFTER_S`（180 s），之后才回到 `INTERIM_AFTER_S`（480 s）**
+           —— 作者 2026-11-17：首段开课 3 分钟就要出来（原来 8 分钟，头几分钟右栏是空的）。
+           实现上就一个每章重置的开关（`_interim_first`），**不新开状态机**。
+        """
         if not self._chapters_on or self._closed or self._cur is None:
             return
         if not self._cur["sents"]:
             return
-        if now - self._interim_at < INTERIM_AFTER_S:
+        need = FIRST_INTERIM_AFTER_S if self._interim_first else INTERIM_AFTER_S
+        if now - self._interim_at < need:
             return
         self._interim_at = now
         # ⚠️ 没有新句子就不再合成（2026-10-17 美国用户实测）: 下课后 app 没退出,
@@ -817,27 +840,43 @@ class LiveSummarizer:
         if n == self._interim_n:
             return
         self._interim_n = n
+        # ⚠️ 先落下开关再合成：即使模型报错（`_synthesize` 内部已重试一次），也不该
+        #    在 180 秒后再发一遍 —— 那一档是给「首段快点出」的，不是给重试的。
+        self._interim_first = False
         self._synthesize("interim")
 
     def _finalize_current(self, now: float) -> None:
-        """给当前章做**正式**合成并封章。没有内容就什么都不做。"""
+        """给当前章做**正式**合成并封章。没有内容就什么都不做。
+
+        ⭐ 封章时把这一章的 `para.lead.zh` 记进 `_prior_leads` —— 下一章的 prompt 要
+           它（光有标题拦不住重复，见 `chapter.build_prompt`）。
+        """
         if self._cur is None:
             return
         c = self._cur
         if not c["sents"]:
             self._cur = None
             return
+        para = None
         if self._chapters_on and not self._closed:
-            self._synthesize("final")
+            para = self._synthesize("final")
         if c["title"]:
             self._prior.append(c["title"])
+            #: ⚠️ **只在这一个分支里追加** —— 两个列表必须按下标对齐，
+            #: 分两处追加迟早錯位（而错位的表现是「上一章的结论跑到这一章头上」）。
+            self._prior_leads.append(str(((para or {}).get("lead") or {}).get("zh") or ""))
         self._cur = None
 
-    def _synthesize(self, status: str) -> None:
-        """一次章节合成。**失败重试一次**；仍失败就写一条空的（界面退回原子要点）。"""
+    def _synthesize(self, status: str) -> dict | None:
+        """一次章节合成。**失败重试一次**；仍失败就写一条空的（界面退回原子要点）。
+
+        返回这次的 `para`（`dict` 或 `None`）—— 调用方 `_finalize_current` 要它的
+        `lead.zh` 给下一章当「已经写过什么」。⚠️ 不再另存一个 `_last_lead` 字段：
+        那是把同一个值存两份，迟早两份不一样。
+        """
         c = self._cur
         if c is None:
-            return
+            return None
         c["ver"] += 1
         obj = None
         if status == "final":                             # ⭐ 采集面 ⑤
@@ -854,7 +893,8 @@ class LiveSummarizer:
                 self._calls += 1
                 self._chapter_calls += 1                  # ⭐ 采集面 ⑤
                 obj = self._chat(ch.SYS_CHAPTER,
-                                 ch.build_prompt(c["sents"], c["atoms"], self._prior),
+                                 ch.build_prompt(c["sents"], c["atoms"],
+                                                 self._prior, self._prior_leads),
                                  ch.MAX_TOKENS, ch.TEMPERATURE)
             except Exception as e:                        # noqa: BLE001
                 self._failed += 1                         # ⭐ 采集面 ⑤
@@ -865,17 +905,21 @@ class LiveSummarizer:
             if obj is not None:
                 break
         title, title_zh = ch.title_of(obj or {})
-        sents = ch.parse_reply(obj, c["lo"], c["hi"]) if obj is not None else []
+        parsed = (ch.parse_chapter(obj, c["lo"], c["hi"]) if obj is not None
+                  else {"sentences": [], "para": None})
+        sents, para = parsed["sentences"], parsed["para"]
         chp = ch.Chapter(id=c["id"], status=status,
                          title=title or c["title"], title_zh=title_zh or c["title_zh"],
                          t0=c["t0"], t1=c.get("t1", c["t0"]),
-                         lo=c["lo"], hi=c["hi"], sentences=sents, version=c["ver"])
+                         lo=c["lo"], hi=c["hi"], sentences=sents,
+                         para=para, version=c["ver"])
         n_written = self._write(chp)
         if status == "final" and n_written:
             self._chapters_written += 1
             if sents:
                 self._chapters_nonempty += 1
         self._emit_p({"kind": "chapter", "chapter": chp.as_json()})
+        return para
 
     # ------------------------------------------------------------ 课务
     def _deadline_ok(self, text: str) -> bool:

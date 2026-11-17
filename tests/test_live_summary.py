@@ -272,17 +272,23 @@ def main() -> int:
             drive(s, 2)
             s.finish(timeout_s=5.0)
             cs = chapters(emits)
+            # ⚠️ 2026-11-17 起首段临时合成在 **180 秒**（`FIRST_INTERIM_AFTER_S`）就出，
+            #    而 `drive()` 的默认窗格是 190 秒 → 这几条会多一条 **interim** 记录。
+            #    判据要问的是「最终切了几章」，所以只看 `status == "final"`。
+            #    ⚠️ 别把 `chapters()` 改成只返 final —— ④ 要靠全部记录看 `status`。
+            fin = [c for c in cs if c["status"] == "final"]
             check("⭐⭐ 开场那个空主题窗口**并入第一章**（不是自己成一章）",
-                  len(cs) == 1 and cs[0]["lo"] == 1 and cs[0]["hi"] == 2,
-                  str([(c["lo"], c["hi"]) for c in cs]))
+                  len(fin) == 1 and fin[0]["lo"] == 1 and fin[0]["hi"] == 2,
+                  str([(c["status"], c["lo"], c["hi"]) for c in cs]))
         with tempfile.TemporaryDirectory() as d:
             s, emits, _ = make(d, ["A", "", "A"])
             drive(s, 3)
             s.finish(timeout_s=5.0)
             cs = chapters(emits)
+            fin = [c for c in cs if c["status"] == "final"]   # 同上：interim 不算一章
             check("中途的空主题也并入当前章（**不新开**）",
-                  len(cs) == 1 and cs[0]["lo"] == 1 and cs[0]["hi"] == 3,
-                  str([(c["lo"], c["hi"]) for c in cs]))
+                  len(fin) == 1 and fin[0]["lo"] == 1 and fin[0]["hi"] == 3,
+                  str([(c["status"], c["lo"], c["hi"]) for c in cs]))
 
         print("\n--- ⑥ A B A -> 三章（**不解冻**旧章）---")
         with tempfile.TemporaryDirectory() as d:
@@ -636,8 +642,9 @@ def main() -> int:
             drive(s, 2)
             s.finish(timeout_s=5.0)
             cs = chapters(emits)
+            fin = [c for c in cs if c["status"] == "final"]   # 同上：interim 不算一章
             check("⭐⭐ 大小写/尾随空格不同 -> **还是同一章**（否则凭空多一章 + 多花一次合成）",
-                  len(cs) == 1, str([(c["id"], c["lo"], c["hi"]) for c in cs]))
+                  len(fin) == 1, str([(c["id"], c["status"], c["lo"], c["hi"]) for c in cs]))
 
         print("\n--- ⑲ 机械闸门对**非容器**输入不许抛（闸门自己炸掉比放过脏数据糟）---")
         # 改坏：把 `chapter.parse_reply` 里 `raw_sents` / `raw_src` 的 isinstance 守卫去掉

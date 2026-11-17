@@ -680,6 +680,8 @@ CHAPTER_ICON_PT = 12.0
 CHAPTER_ICON_GAP = 6.0
 #: 术语胶囊（稿 `.term`）：术语名与解析之间的分隔 / 没钉住时的提示 / 胶囊的底、边与内边距。
 GLOSS_SEP = "   "
+#: 右栏「收起」按钮的字号（与右栏标题同一档的小字）。
+PANE_CLOSE_PT = 12.0
 GLOSS_OPEN = "点开解析"
 GLOSS_PILL_BG = 0.07
 GLOSS_PILL_BORDER = 0.10
@@ -1787,6 +1789,16 @@ class Overlay:
         self._pane = _sp.SummaryPane(ve, self._shadow, _ui_font)
         self._pane_w = 0.0
         self._split_on = False
+        # 右栏右上角的「收起」（11-17 Owen：「实时总结那里应该有一个收回的地方」）。
+        # 和顶栏章节条同一个开关（`_toggle_split`）；只在右栏开着时显示，不进 `_bar`（不跟着鼠标淡出）。
+        self._btn_pane_close = self._button("收起", self._toggle_split, "收起实时总结")
+        try:
+            self._btn_pane_close.setFont_(_ui_font(PANE_CLOSE_PT))
+            self._btn_pane_close.setContentTintColor_(
+                NSColor.whiteColor().colorWithAlphaComponent_(uitokens.TEXT_2))
+        except Exception:                                 # noqa: BLE001
+            pass
+        self._btn_pane_close.setHidden_(True)
 
         # ---- 「在听」小点 ----
         # 顶栏最左一颗 6pt 圆点: 听到人声(VAD 判有声)时亮、安静时暗。为的是开课头几秒 ——
@@ -2495,12 +2507,17 @@ class Overlay:
             #    按钮宽」累减得到的，**几乎必然是小数**；不取整会让标签和点击区落在
             #    **半像素**上 → 文字发虚（`RESEARCH-macos-aesthetic.md §7` 的指纹表）。
             #    ⚠️ 取整之后标签与点击区**用同一个数**（同框），别各算各的。
-            _cw = float(math.floor(avail))
             _shown = CHAPTER_LEAD.strip() if self._split_on else _ctext   # 右栏开着：标题在右栏里了，只留功能名
             if self._chapter_lbl.stringValue() != _shown:
                 motion.fade_swap(self._chapter_lbl)      # 新章节换标题：淡换，不跳（2026-10-14）
                 self._chapter_lbl.setStringValue_(_shown)
                 self._chapter_attr(_shown)
+            # ⚠️ 标签 / 点击区只占**文字实际宽度**（11-17 Owen：点顶栏空白处也弹出总结 —— 范围太大）。
+            try:
+                _fit = float(math.ceil(self._chapter_lbl.attributedStringValue().size().width)) + 4.0
+            except Exception:                             # noqa: BLE001
+                _fit = avail
+            _cw = float(math.floor(min(avail, _fit)))
             # ⚠️ 标签**不能**和按钮一样给 24 高的框: NSTextField 把文字**贴顶**画,
             #    NSButton 把标题**竖直居中** —— 同一个 24 高的行里, 12pt 的章节字
             #    会比右边按钮字高出 5pt(2026-10-13 拍图量墨迹中心: 35.25 vs 40.25pt)。
@@ -2530,7 +2547,7 @@ class Overlay:
                 parts = [(text, uitokens.TEXT)]
             elif text.startswith(CHAPTER_LEAD):
                 parts = [(CHAPTER_LEAD, uitokens.TEXT_3), (text[len(CHAPTER_LEAD):], uitokens.TEXT_2)]
-            elif lead in text:                            # 占位「AI 实时总结 · 点这里」：功能名亮、动作暗
+            elif lead in text:                            # 占位「实时总结」：功能名亮一档
                 i = text.index(lead) + len(lead)
                 parts = [(text[:i], uitokens.TEXT_2), (text[i:], uitokens.TEXT_3)]
             else:
@@ -2899,6 +2916,15 @@ class Overlay:
         if getattr(self, "_pane", None) is not None and self._pane_w > 0:
             self._pane.set_frame(self._width, BOTTOM_PAD, self._pane_w,
                                  max(0.0, self._height - BOTTOM_PAD - 10))
+        _pc = getattr(self, "_btn_pane_close", None)
+        if _pc is not None:
+            _pc.setHidden_(not (self._split_on and self._pane_w > 0))
+            if not _pc.isHidden():
+                import summary_pane as _sp
+                _pcw = 40.0
+                # 与右栏标题那一行（「实时总结 · N 段」）同高，右边缘对齐正文右缘
+                _pc.setFrame_(NSMakeRect(self._width + self._pane_w - _sp.GUTTER - _pcw,
+                                         self._height - 32, _pcw, 22))
         y = BOTTOM_PAD
         gh = self._gloss_h()
         # ⌨ 输入行钉在面板最底部。y 从这里往上走, 与 _pinned() 的加和顺序必须
@@ -5373,7 +5399,8 @@ class Overlay:
         ⭐ 三档（作者 2026-09-30 拍板的「实时总结」）：
            有章节 → `实时总结  最新一章标题 · since 开始时间`
            有窗口没章节 → `实时总结  当前主题 · since 时间`
-           什么都没有 → `AI 实时总结 · 点这里`（**占位入口**，别让开课头几分钟找不到它）
+           什么都没有 → `实时总结`（**占位入口**，别让开课头几分钟找不到它；左边分栏小图标说明它能点。
+           11-17 Owen：「点这里那三个字可以不要」—— 能简洁就简洁）
         ⭐ 2026-11-17 换皮：`▸` 换成左边的分栏小图标（`_split_icon`）；开头「实时总结」画暗一档
            （`_chapter_attr`），标题亮一档 —— 照 Owen 认可的稿。
         ⚠️ 第三档那句是**用户指引**，不是信息（作者 2026-09-30 追加）：
@@ -5397,7 +5424,7 @@ class Overlay:
             #    ⚠️ 它是**入口**，不是"信息" —— 入口的第一职责是**能被找到**。
             #    ⚠️ 面板窄时会被尾部截断（`▸ AI 实时总…`）—— 那是**既有行为**
             #       （有标题那两档一样会截），不单独为它放宽 90px 的门槛。
-            return f"{dot}AI 实时总结 · 点这里"
+            return f"{dot}{CHAPTER_LEAD.strip()}"
         return f"{dot}{CHAPTER_LEAD}{topic} · since {wins[-1].get('t') or ''}"
 
     def _on_chapter_click(self) -> None:

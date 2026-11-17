@@ -73,12 +73,19 @@ def main() -> int:
         draw(o, 0.4)
         shot(o, "3-term-pinned")
         o._on_gloss_click()
+        cf, hf = o._chapter_lbl.frame(), o._chapter_hit.frame()
+        print(f"章节条：标签 x={cf.origin.x:.0f} w={cf.size.width:.0f} · 点击区 x={hf.origin.x:.0f} w={hf.size.width:.0f}"
+              f" · 文字「{o._chapter_lbl.stringValue()}」")
         o._on_chapter_click()                    # 开右栏
         draw(o, 0.6)
         o._set_bar_shown(False)
         draw(o, 0.6)
         shot(o, "4-split-idle")
-        o._on_chapter_click()
+        b = o._btn_pane_close
+        print(f"「收起」可见={not b.isHidden()} frame={tuple(round(v) for v in (b.frame().origin.x, b.frame().origin.y, b.frame().size.width))}")
+        b.target().clicked_(None)                # 点「收起」= 关右栏
+        draw(o, 0.4)
+        print(f"点「收起」后右栏关了={not o._split_on} 按钮藏了={b.isHidden()}")
         draw(o, 0.4)
         bg = getattr(o, "_backdrop", None)
         if bg is not None:                       # 浅色底（白 PPT）：看描边 + scrim 撑不撑得住

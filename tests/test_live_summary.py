@@ -1302,8 +1302,9 @@ def main() -> int:
                         "deadlines": [], "atoms": []}
 
         _bare = _ov.Overlay._chapter_bar_text(_Bare())
-        check("⭐⭐ 章节条空档要**写清功能名 + 可点**（光写「实时总结」看不出它可点）",
-              "AI 实时总结" in _bare and "点这里" in _bare, repr(_bare))
+        # 11-17 Owen：「点这里那三个字可以不要」—— 可点由左边的分栏小图标说明，字只留功能名
+        check("⭐⭐ 章节条空档也有入口（功能名，不是空串）",
+              _bare.strip() == "实时总结", repr(_bare))
 
         class _Live(_Bare):
             _outline = {"chapters": {"0": {"id": 0, "status": "final", "title": "T1",
@@ -1313,7 +1314,7 @@ def main() -> int:
 
         _live = _ov.Overlay._chapter_bar_text(_Live())
         check("⭐ 有章节之后那句占位**被替换掉**（作者原话：「直到有总结信息再替换掉」）",
-              "点这里" not in _live and "T1" in _live, repr(_live))
+              _live.strip() != "实时总结" and "T1" in _live, repr(_live))
 
         # ⚠️ 同一个假 `fits` 的坑：夹具放宽到 60 字符，否则空状态那行会被折成两行
         _fold3 = lambda t: _ov.fold_rows(t, lambda x: len(x) <= 60, lambda w: w[:60])  # noqa: E731

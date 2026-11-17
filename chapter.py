@@ -337,13 +337,19 @@ class Chapter:
 
 
 # ---------------------------------------------------------------- 纯函数
-def build_prompt(sentences, atoms, prior_titles, prior_leads=None) -> str:
+def build_prompt(sentences, atoms, prior_titles, prior_leads=None,
+                 prev_para=None) -> str:
     """本章的原料 → 给模型的 block。**纯函数。**
 
     `sentences` = `[(全局句号, 英文), …]`。
     `prior_titles` = 前面几章的**英文标题**（老参数，照旧可用）。
     `prior_leads` = 与 `prior_titles` **按下标对齐**的各章结论句（`para.lead.zh`）。
     `None` / 短了 / 那一项是空串 → 那一章**只给标题**（不编、不留空行）。
+    `prev_para` = ⭐ 本章**上一版**的 `para`（形状同 `parse_para` 的返回值：
+    `{"lead": {"en", …}, "body": [{"en", …}]}`）—— 让模型在上一版基础上**补新内容**，
+    而不是每分钟从零重写一遍（渲染端会看起来一直在跳，arXiv 2502.03111）。
+    ⚠️ `None` / 不是 dict / `lead.en` 为空 / 没有一句可用 → **一个字都不加**，
+      与不传这个参数**逐字相同**（`test_chapter_prev_para` 钉着）。
 
     ⚠️ 光给标题拦不住重复（R2 §5.1 第 6 条）：一章的原料是 3–10 分钟窗口，**相邻窗
        天然重叠**，于是模型会**换个说法把上一章写过的结论再写一遍** —— 它看标题
@@ -372,7 +378,58 @@ def build_prompt(sentences, atoms, prior_titles, prior_leads=None) -> str:
         parts.append("")
         parts.append("这一章已经提取出的要点（供你判断重点，**不要照抄**）：")
         parts.extend(rows)
+    block = _prev_para_block(prev_para)
+    if block:
+        parts.extend(block)
     return "\n".join(parts)
+
+
+#: `prev_para` 那一节的**唯一入口**。返回空表 = prompt 与不传 `prev_para` 时**逐字相同**。
+#:
+#: ⚠️ 规矩（为什么这么写）：
+#: · **不改 `SYS_CHAPTER`** —— 改它要重新标定，而且会让所有调用的缓存前缀失效。
+#: · 只给**英文原句**（`en`）：模型要在自己的英文上改写，给 `zh` 只会多花 token 并诱发
+#:   「照抄中文再把英文重译一遍」。
+#: · **坏形状一律当 None**（fail-open，同本模块其他闸门）：`prev_para` 是上一次模型输出
+#:   过闸门后的东西，但它可能来自旧版本 / 别处拼的 dict —— 闸门自己炸掉比少一节 prompt 糟得多。
+#: · 「最不具体的那句」那句规则是**故意的**：不定这条，模型会**追加**，段落就越写越长
+#:   （`MAX_PARA_WORDS=90` 的闸门会从尾巴丢依据句 = 新内容反而被丢掉）。
+def _prev_para_block(prev_para) -> list:
+    if not isinstance(prev_para, dict):
+        return []
+    lead = prev_para.get("lead")
+    if not isinstance(lead, dict):
+        return []
+    # ⚠️ `lead.en` 空 = **没有上一版**，后面 `body` 里就算有东西也不给：
+    #    「第一句是结论」是这段的定义（`parse_para` ①）。缺了它，剩下几句是**没有主句的碎片**，
+    #    拿它们当「上一版」反而会拉着模型沿碎片往下写。
+    lead_en = str(lead.get("en") or "").strip().replace("\n", " ")
+    if not lead_en:
+        return []
+    body = prev_para.get("body")
+    if body is None:
+        body = ()                                       # 只有 lead 也算有上一版
+    if not isinstance(body, (list, tuple)):
+        return []                                       # 坏形状 → 当 None
+    ens = [lead_en]
+    for s in body:
+        if not isinstance(s, dict):
+            continue
+        en = str(s.get("en") or "").strip().replace("\n", " ")
+        if en:
+            ens.append(en)
+    lines = ["", "这一章还在进行中。下面是你**上一版**写的段落（学生已经在看）："]
+    lines.extend(f"- {en}" for en in ens)
+    lines += [
+        "这一版怎么写（在上一版基础上**补**新内容，不要从零重写）：",
+        "· 新内容**没有推翻**本章主结论 → `lead` 保持原意，最多补一个更具体的数字或条件。",
+        "· 有了**新的具体论点** → 让它替换上一版里**最不具体的那一句**，不是往后追加。",
+        "  ⚠️ 反例：把新论点接成第 5 句 —— 上一版 3 句已经写满 55–80 词，追加只会被超词数闸门从尾巴丢掉。",
+        "· **没变的句子不许改写** —— 只为换措辞的改写等于让学生重新读一遍。",
+        "· `para` 仍守原来的规矩：`lead` + `body` 共 3 句（最多 4 句），55–80 个英文词（硬上限 90），",
+        "  每句至少一个具体项。",
+    ]
+    return lines
 
 
 def parse_reply(obj, lo: int, hi: int) -> list:

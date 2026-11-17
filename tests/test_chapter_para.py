@@ -27,8 +27,16 @@
 | `MAX_BOLD` 3 → 99 | ③「每句最多 3 处加粗」 |
 | `words = sum(...)` → 用模型自报的 `words` | ④「`words` 由代码重算」 |
 | `para_over` 恒 `False` | ④「超 90 词只标记、不截断」 |
-| `FIRST_INTERIM_AFTER_S` 180 → 480 | ⑤「179 秒不出、181 秒出」 |
-| `_absorb` 里去掉 `self._interim_first = True` | ⑤「新章重新享受 180 秒」 |
+| `FIRST_INTERIM_AFTER_S` 0 → 480 | ⑧「开章那一窗立刻出首段」 |
+| `_absorb` 里去掉 `self._interim_first = True` | ⑧「新章在它开张那一窗立刻出首段」 |
+| `_absorb_window` 里去掉 `self._maybe_interim(now)` | ⑨b「吸收窗口那一瞬间就刷新」 |
+| `REFRESH_GAP_S` 60 → 600 | ⑨「60 秒那一档才刷新」 |
+| `REFRESH_MIN_NEW` 3 → 1 | ⑨「只多 2 句不刷新」 |
+| `MAX_CHAPTER_S` 900 → 600 | ⑩「899 秒不强切、901 秒强切」 |
+| `_synthesize` 里 `interim` 失败也照写空章 | ⑪「interim 失败不 emit」 |
+| `_synthesize` 里 `final` 失败写空章（不用上一版） | ⑪「final 失败用上一版」 |
+| 去掉 `_synthesize` 开头「句数没变就重写上次结果」 | ⑫「封章无新句不调模型」 |
+| `build_prompt(..., prev_para=None)` 写死 `None` | ⑬「第二次合成带上一版段落」 |
 """
 from __future__ import annotations
 
@@ -365,35 +373,45 @@ def t_prompt() -> None:
           "前面几章" not in ch.build_prompt([], [], []))
 
 
-# ---------------------------------------------------------------- ⑧ 首段 180 秒
+# ---------------------------------------------------------------- ⑧ 刷新节奏
 class Harness:
     """`LiveSummarizer` + 假模型（按 **system prompt 身份** 分发，别按文本前缀）。"""
 
-    def __init__(self, tmp: str, topics, chap_fn=None, on_chap=None):
+    def __init__(self, tmp: str, topics, chap_fn=None, on_chap=None, fail_chap=0):
         self.calls: list[str] = []
         self.emits: list[dict] = []
+        self.blocks: list[str] = []
         self._topics = iter(topics)
         self._chap_fn = chap_fn
         self._on_chap = on_chap
+        #: 前 `fail_chap` 次章节调用直接抛（模拟网络抖动）；之后恢复正常。
+        self._fail_left = fail_chap
+        self._base = None
 
-        def chat(sysp, block, max_tokens, temperature):
-            if sysp is atom.SYS:
-                self.calls.append("atom")
-                t = next(self._topics)
-                return {"topic": t, "topic_zh": t + "中",
-                        "points": [{"text": "p", "kind": "要点", "src": [1], "terms": []}]}
-            assert sysp is ch.SYS_CHAPTER, "只该有两种 system prompt"
-            self.calls.append("chap")
-            if self._on_chap is not None:
-                self._on_chap(block)
-            return self._chap_fn(block) if self._chap_fn else default_chap(block)
+    def chat(self, sysp, block, max_tokens, temperature):
+        if sysp is atom.SYS:
+            self.calls.append("atom")
+            t = next(self._topics)
+            return {"topic": t, "topic_zh": t + "中",
+                    "points": [{"text": "p", "kind": "要点", "src": [1], "terms": []}]}
+        assert sysp is ch.SYS_CHAPTER, "只该有两种 system prompt"
+        self.calls.append("chap")
+        self.blocks.append(block)
+        if self._on_chap is not None:
+            self._on_chap(block)
+        if self._fail_left > 0:
+            self._fail_left -= 1
+            raise RuntimeError("offline")
+        return self._chap_fn(block) if self._chap_fn else default_chap(block)
 
+    def build(self):
         self.s = L.LiveSummarizer(
-            chat=chat, append_atoms=lambda a: len(a),
-            chapter_path=ch.chapter_path_for(pathlib.Path(tmp) / "S.md"),
+            chat=self.chat, append_atoms=lambda a: len(a),
+            chapter_path=ch.chapter_path_for(pathlib.Path(self._tmp) / "S.md"),
             emit=self.emits.append)
+        return self.s
 
-    def say(self, gid: int, flush_at: float) -> None:
+    def say(self, gid: int, flush_at: float, step_first: float | None = None) -> None:
         """喂一句，并让它**在 `flush_at` 这一刻收窗**。
 
         ⚠️ 收窗要 `flush_at - 最后一句的时刻 >= ATOM_PAUSE_S`（30 秒），所以内部
@@ -401,69 +419,278 @@ class Harness:
            不会自己触发临时合成（否则判据就测不准边界了）。
         """
         self.s.feed((gid, "10:00:%02d" % gid, "sentence %d" % gid, "中%d" % gid))
-        self.s.step(flush_at - 31.0)
+        self.s.step(flush_at - 31.0 if step_first is None else step_first)
         self.s.step(flush_at)
 
     def chap_calls(self) -> int:
         return self.calls.count("chap")
 
+    def chapters(self) -> list:
+        return [e["chapter"] for e in self.emits if e.get("kind") == "chapter"]
+
+
+def _harness(d: str, topics, **kw) -> Harness:
+    h = Harness(d, topics, **kw)
+    h._tmp = d
+    h.build()
+    return h
+
 
 def t_first_interim() -> None:
-    print("\n--- ⑧ 首段临时合成：180 秒就出（之后回到 480 秒）---")
-    check("门槛常量就是 180（Owen 11-17：首段 3 分钟出）",
-          L.FIRST_INTERIM_AFTER_S == 180.0 and L.INTERIM_AFTER_S == 480.0
-          and L.FIRST_INTERIM_AFTER_S < L.INTERIM_AFTER_S)
-    # ⚠️ 这两个数的**相互作用**：一章最多 600 秒（`MAX_CHAPTER_S`），而首段 180 秒后
-    #    再等 480 秒 = 660 > 600 → **真实参数下同一章只会出一次临时合成**。
-    #    这不是 bug，是要说清楚的账（钱花得比以前少）；下面把 `MAX_CHAPTER_S` 抬高
-    #    才能单独把 480 那一档测出来。
-    check("⭐ 真实参数下：180 + 480 > 一章上限 600（所以一章只出一次临时版）",
-          L.FIRST_INTERIM_AFTER_S + L.INTERIM_AFTER_S > L.MAX_CHAPTER_S,
-          f"{L.FIRST_INTERIM_AFTER_S} + {L.INTERIM_AFTER_S} > {L.MAX_CHAPTER_S}")
+    print("\n--- ⑧ 首段临时合成：开章那一窗吸收完就出（0 秒）---")
+    check("门槛常量就是 0（2026-11-17 test key 重放实测：真正首段延迟 165–185 s，"
+          "因为章是第一个窗口吸收时才开的）",
+          L.FIRST_INTERIM_AFTER_S == 0.0
+          and L.REFRESH_GAP_S == 60.0 and L.REFRESH_MIN_NEW == 3)
 
     with tempfile.TemporaryDirectory() as d:
-        h = Harness(d, ["A"] * 8)
-        h.say(1, 190.0)                         # 章在这一刻开张（t_open = 190）
-        h.say(2, 369.0)                         # 章龄 179 秒
-        check("⭐⭐ 179 秒**不出**首段", h.chap_calls() == 0, f"calls={h.calls}")
-        h.say(3, 371.0)                         # 章龄 181 秒
-        check("⭐⭐ 181 秒**出**首段（临时版）", h.chap_calls() == 1, f"calls={h.calls}")
-        cs = [e["chapter"] for e in h.emits if e.get("kind") == "chapter"]
+        h = _harness(d, ["A"] * 8)
+        h.say(1, 190.0)                         # 开章那一窗（t_open = 190）→ 立刻出首段
+        check("⭐⭐ 开章那一窗吸收完**立刻**有一次章节调用",
+              h.chap_calls() == 1, f"calls={h.calls}")
+        cs = h.chapters()
         check("出的是 `interim` 而不是正式章",
               len(cs) == 1 and cs[0]["status"] == "interim", str([c["status"] for c in cs]))
+        h.say(2, 200.0)                         # 距上次 10 s、新增 1 句 -> 两道闸都不够
+        check("⭐ 紧接着那一窗不刷新（60 s + 3 句那两道闸）",
+              h.chap_calls() == 1, f"calls={h.calls}")
 
     with tempfile.TemporaryDirectory() as d:
-        # ⚠️ 把一章上限抬高，否则 180+480 > 600 永远到不了第二档（见上面那条检查）。
-        old_max = L.MAX_CHAPTER_S
-        L.MAX_CHAPTER_S = 5000.0
-        try:
-            h = Harness(d, ["A"] * 8)
-            h.say(1, 190.0)
-            h.say(2, 371.0)                     # 首段（章龄 181）
-            h.say(3, 671.0)                     # 距上次临时 300 秒
-            check("⭐ 第二次仍按 480 秒：300 秒不出", h.chap_calls() == 1, f"calls={h.calls}")
-            h.say(4, 847.0)                     # 距上次临时 476 秒
-            check("⭐ 476 秒仍不出", h.chap_calls() == 1, f"calls={h.calls}")
-            h.say(5, 851.0)                     # 480 秒
-            check("⭐⭐ 480 秒出（回到 `INTERIM_AFTER_S`）", h.chap_calls() == 2,
-                  f"calls={h.calls}")
-        finally:
-            L.MAX_CHAPTER_S = old_max
-
-    with tempfile.TemporaryDirectory() as d:
-        # 换题 → 新章 → 首段**重新**享受 180 秒（`_absorb` 里那个开关）
-        h = Harness(d, ["A", "A", "B", "B", "B"])
-        h.say(1, 190.0)                         # 章 1 开张
-        h.say(2, 371.0)                         # 章 1 首段在章龄 181 秒出
+        # 换题 → **新章**同样在它开张那一窗就出首段（`_absorb` 里那个开关跟着重置）
+        h = _harness(d, ["A", "A", "B", "B", "B"])
+        h.say(1, 190.0)                         # 章 1 开张 + 立刻首段
+        check("章 1 开张即出首段", h.chap_calls() == 1, f"calls={h.calls}")
+        h.say(2, 281.0)                         # 章龄 91、新增 1 句 -> 不刷（第二道闸）
         n1 = h.chap_calls()
-        h.say(3, 374.0)                         # 换题 → 章 1 正式合成 + 章 2 开张
+        h.say(3, 375.0)                         # 换题（章龄 185 > MIN 180）→ 章 1 封章 + 章 2 开张
+        check("⭐ 换题时把章 1 封成 `final`",
+              any(c["status"] == "final" for c in h.chapters()),
+              str([(c["id"], c["status"]) for c in h.chapters()]))
         n2 = h.chap_calls()
-        check("⭐ 换题时做了正式合成（章 1 封章）", n2 == n1 + 1, f"{n1} -> {n2}")
-        h.say(4, 553.0)                         # 章 2 章龄 179 秒
-        check("⭐⭐ 新章重来：179 秒不出", h.chap_calls() == n2, f"calls={h.calls}")
-        h.say(5, 556.0)                         # 章 2 章龄 182 秒
-        check("⭐⭐ 新章 182 秒出（首段那一档跟着章重置）",
-              h.chap_calls() == n2 + 1, f"calls={h.calls}")
+        # ⚠️ 这一下有两笔：`_finalize_current` 真调了一次（章 1 有 2 句、上次成功合成时
+        #    只有 1 句 -> 句数变了，不走“省一次调用”）+ 新章开张那一窗立刻补一次临时合成。
+        new_ch = [c for c in h.chapters() if c["id"] == max(x["id"] for x in h.chapters())]
+        check("⭐⭐ 新章在它开张那一窗**立刻**出首段（不是等 90 秒）",
+              n2 == n1 + 2 and bool(new_ch) and new_ch[0]["status"] == "interim",
+              f"{n1} -> {n2} · 新章={[(c['status'], c['version']) for c in new_ch]}")
+        h.say(4, 464.0)                         # 距新章首段 89 s、新增 1 句 -> 不刷
+        check("⭐ 新章之后照旧走两道闸：89 秒但没新增 3 句 -> 不刷",
+              h.chap_calls() == n2, f"calls={h.calls}")
+
+    with tempfile.TemporaryDirectory() as d:
+        # ⭐ 开章**之前**（开场那些空主题的窗口还在攒，`_cur` 已经开但没定题 / 或者
+        #    一个窗口都没吸收）不许有章节调用 —— 没内容可写。
+        h = _harness(d, [""] * 6)
+        h.say(1, 100.0)                         # 空主题的第一窗：照样开章收下 -> 立刻出首段
+        check("⭐ 空主题的第一窗也算开章（照样立刻出首段；没内容才不合成）",
+              h.chap_calls() == 1, f"calls={h.calls}")
+        h.s.feed((2, "10:00:02", "s2", "中")); h.s.step(101.0)
+        n = h.chap_calls()
+        check("⭐⭐ 只是喂句、窗口还没闭合时**不**合成", h.chap_calls() == n and n == 1,
+              f"calls={h.calls}")
+
+
+# ---------------------------------------------------------------- ⑨ 刷新两道闸
+_ROWS = [(int(x), float(t)) for x, t in
+         [(1, 190.0), (2, 200.0), (3, 210.0), (4, 270.0),
+          (5, 330.0), (6, 350.0), (7, 360.0), (8, 370.0)]]
+
+
+def _drive(h: Harness, rows) -> None:
+    """直接按 `(句号, 收窗时刻)` 推进 —— 要精确控「吸收在哪一刻」。"""
+    prev = None
+    for gid, t in rows:
+        if prev is None:
+            h.say(gid, t)
+        else:
+            h.say(gid, t, step_first=t - 1.0)   # 喂的时刻紧跟上一刻，不会被 75 s 切窗
+        prev = t
+
+
+def t_refresh() -> None:
+    print("\n--- ⑨ 刷新：吸收窗口后 60 s + 3 句（两道闸都要满足）---")
+    with tempfile.TemporaryDirectory() as d:
+        h = _harness(d, ["A"] * 20)
+        # ⚠️ 2026-11-17 起**开章那一窗就出首段**（`FIRST_INTERIM_AFTER_S`=0），所以
+        #    基准点变成「开章那一下」。下面每条 check 的秒数是算过的，不是猜的。
+        h.say(1, 190.0)                         # 开章那一窗（1 句）→ 首段
+        check("前置：开章那一窗就出了首段（1 次调用）", h.chap_calls() == 1,
+              f"calls={h.calls}")
+        h.say(2, 200.0)                         # 距上次 10 s，2 句
+        check("⭐ 距上次只 10 秒 → 不刷新（第一道闸）", h.chap_calls() == 1,
+              f"calls={h.calls}")
+        h.say(3, 210.0)                         # 距上次 20 s，3 句
+        check("⭐ 新增 2 句但只过 20 秒 → 仍不刷新", h.chap_calls() == 1,
+              f"calls={h.calls}")
+        h.say(4, 270.0)                         # 距上次 80 s，4 句（新增 3）
+        check("⭐⭐ 够 60 秒 + 新增 3 句 → 刷新", h.chap_calls() == 2, f"calls={h.calls}")
+        h.say(5, 320.0)                         # 距上次 50 s，5 句
+        check("⭐ 距上次只 50 秒（虽然又多了 1 句）→ 不刷新", h.chap_calls() == 2,
+              f"calls={h.calls}")
+        h.say(6, 340.0)                         # 距上次 70 s，6 句（新增 2）
+        check("⭐⭐ 够 60 秒但只新增 2 句 → 不刷新（第二道闸）", h.chap_calls() == 2,
+              f"calls={h.calls}")
+        h.say(7, 350.0)                         # 距上次 80 s，7 句（新增 3）
+        check("⭐⭐ 60 秒 + 新增 3 句 → 刷新", h.chap_calls() == 3, f"calls={h.calls}")
+        h.say(8, 360.0)                         # 距上次 10 s → 不刷
+        check("⭐ 又只过 10 秒 → 不刷新（3 次为终值）", h.chap_calls() == 3,
+              f"calls={h.calls}")
+        st = h.s.stats()
+        check("采集面：`chapter_calls` == 真调的次数",
+              st["chapter_calls"] == 3, str({k: st[k] for k in
+                                            ("chapter_calls", "chapters_interim")}))
+        check("两版共用一个 id（右栏按 id 覆盖）",
+              len({c["id"] for c in h.chapters()}) == 1,
+              str([(c["id"], c["status"], c["version"]) for c in h.chapters()]))
+
+
+def t_absorb_hook() -> None:
+    """⭐ 刷新必须挂在**吸收窗口**那一刻（`step` 里那道只是兜底）。
+
+    ⚠️ 为什么要直接对着 `_absorb_window` 测：正常路径下 `step` 紧接着也会调一次
+       `_maybe_interim(now)`，两道口子效果一样 —— 只测 `step` 的话，把吸收那一行删掉
+       测试照样绿（变异验证抓到过一次）。
+    """
+    print("\n--- ⑨b 吸收窗口就刷新（不靠 `step` 的兜底）---")
+    obj = {"topic": "A", "topic_zh": "A中",
+           "points": [{"text": "p", "kind": "要点", "src": [3], "terms": []}]}
+
+    def buf(*gids):
+        return [(g, "10:00:%02d" % g, "sentence %d" % g, "中%d" % g) for g in gids]
+
+    with tempfile.TemporaryDirectory() as d:
+        h = _harness(d, ["A"] * 20)
+        h.say(1, 190.0)                          # 开章那一窗 -> 立刻首段
+        n = h.chap_calls()
+        h.s._absorb_window(buf(2, 3, 4), obj, 250.0)     # 距上次 60 s、新增 3 句
+        check("⭐⭐ 吸收窗口那一瞬间就刷新（同一调用里完成）",
+              h.chap_calls() == n + 1, f"{n} -> {h.chap_calls()}")
+
+    with tempfile.TemporaryDirectory() as d:
+        h = _harness(d, ["A"] * 20)
+        h.say(1, 190.0)                          # 开章那一窗 -> 立刻首段
+        n = h.chap_calls()
+        h.s._absorb_window(buf(2, 3), obj, 200.0)        # 距上次 10 s、新增 2 句 -> 两道闸都不够
+        check("⭐⭐ 闸门不满足时吸收也不刷新", h.chap_calls() == n, f"{n} -> {h.chap_calls()}")
+
+
+# ---------------------------------------------------------------- ⑩ 强切阈值
+def t_max_chapter() -> None:
+    print("\n--- ⑩ `MAX_CHAPTER_S` = 900：主题粘住时 15 分钟兜一刀 ---")
+    check("常量就是 900（15 分钟）", L.MAX_CHAPTER_S == 900.0, str(L.MAX_CHAPTER_S))
+
+    def run_at(age: float, d: str) -> int:
+        """章龄 = `age` 那一刻：封了几个 `final`（强切才封）。"""
+        h = _harness(d, ["A"] * 4)
+        h.say(1, 190.0)
+        h.say(2, 190.0 + age)
+        return sum(1 for c in h.chapters() if c["status"] == "final")
+
+    with tempfile.TemporaryDirectory() as d:
+        check("⭐⭐ 章龄 899 秒**不**强切", run_at(899.0, d) == 0)
+    with tempfile.TemporaryDirectory() as d:
+        check("⭐⭐ 章龄 901 秒强切（多一条 final）", run_at(901.0, d) == 1)
+
+
+# ---------------------------------------------------------------- ⑪ 失败不清屏
+def t_fail() -> None:
+    print("\n--- ⑪ 合成失败：interim 不清屏 / final 用上一版 ---")
+    with tempfile.TemporaryDirectory() as d:
+        # 首段成功一次 → 之后三条新句（过两闸）→ 两次尝试都抛 → 不许 emit 空章
+        h = _harness(d, ["A"] * 20)
+        h.say(1, 190.0)
+        h.say(2, 281.0)                          # 首段成功（章内 2 句）
+        ok_chap = len(h.chapters())
+        first = h.chapters()[-1]
+        h._fail_left = 2                         # ⚠️ 失败后重试一次，所以两次都挂
+        h.say(3, 360.0)                          # 距上次 79 s，新增 1 句 -> 不刷
+        h.say(4, 370.0)                          # 新增 2 -> 不刷
+        h.say(5, 380.0)                          # 新增 3 -> 尝试（失败×2）
+        cs = h.chapters()
+        check("⭐⭐ interim 失败**不 emit**（上一版段落仍是最后一条）",
+              len(cs) == ok_chap and cs[-1]["id"] == first["id"],
+              f"{ok_chap} -> {len(cs)}")
+        check("⭐ 失败数照记（failed_chapter_calls 增加）",
+              h.s.stats()["failed_chapter_calls"] > 0, str(h.s.stats()["failed_chapter_calls"]))
+
+    with tempfile.TemporaryDirectory() as d:
+        h = _harness(d, ["A"] * 20)
+        h.say(1, 190.0)
+        h.say(2, 281.0)                          # 距开章 91 s、新增 1 句 -> 不刷
+        h.say(3, 290.0)
+        h.say(4, 300.0)
+        h.say(5, 310.0)                          # 距开章 120 s、新增 4 句 -> **会**刷一次
+        ok_para = h.chapters()[-1]["para"]
+        # ⚠️ 必须让句数**变了**（相对上次成功合成），否则封章走「省一次调用」那条路、
+        #    根本不调模型（Claude 上一轮抓到的假绿就是这么来的）。
+        h.say(6, 320.0)                          # 距上次合成 10 s -> 不刷，只多一句
+        n_before = h.chap_calls()
+        check("前置：最后那句没有触发临时合成（距上次不足 60 秒）",
+              h.chap_calls() == n_before, f"{n_before} -> {h.chap_calls()}")
+        h._fail_left = 2
+        h.s.finish(timeout_s=2.0)                # 封章两次尝试都挂
+        fin = [c for c in h.chapters() if c["status"] == "final"]
+        check("⭐⭐ final 失败 → 用上一版内容写 final（不是空章）",
+              bool(fin) and fin[-1]["para"] == ok_para and bool(fin[-1]["sentences"]),
+              str([(c["status"], bool(c.get("para")), len(c["sentences"]))
+                   for c in h.chapters()]))
+
+
+# ---------------------------------------------------------------- ⑫ 封章省一次调用
+def t_finalize_free() -> None:
+    print("\n--- ⑫ 封章无新句：不调模型，仍写出 final ---")
+    with tempfile.TemporaryDirectory() as d:
+        h = _harness(d, ["A"] * 20)
+        h.say(1, 190.0)                          # 开章那一窗就出首段（1 句）
+        n = h.chap_calls()
+        check("前置：开章那一窗出了首段", n == 1, f"calls={h.calls}")
+        h.s.finish(timeout_s=2.0)                # 句数没变 → 不调模型
+        check("⭐⭐ 封章没有新句 → chat 调用次数不增加", h.chap_calls() == n,
+              f"{n} -> {h.chap_calls()}")
+        fin = [c for c in h.chapters() if c["status"] == "final"]
+        check("⭐⭐ 但仍然写出 `final`（version + 1）",
+              bool(fin) and fin[-1]["version"] > h.chapters()[-2]["version"]
+              if len(h.chapters()) >= 2 else False,
+              str([(c["status"], c["version"]) for c in h.chapters()]))
+        cs = h.chapters()
+        check("⭐ 省调用那版 final 的标题 = 上一版模型给的标题（不退回窗口主题）",
+              len(cs) >= 2 and cs[-1]["title"] == cs[-2]["title"]
+              and cs[-1]["title_zh"] == cs[-2]["title_zh"],
+              str([(c["status"], c["title"], c["title_zh"]) for c in cs]))
+        st = h.s.stats()
+        check("采集面：写了 1 章但只调了 1 次模型",
+              st["chapters_written"] == 1 and st["chapter_calls"] == n, str(st))
+
+
+# ---------------------------------------------------------------- ⑬ prev_para
+def t_prev_para() -> None:
+    print("\n--- ⑬ 第二次合成把上一版 `para` 传给模型 ---")
+    if not _has_prev_para():
+        RESULTS.append(("⚠ chapter.build_prompt 还没有 `prev_para`（另一个 pi 在改）",
+                        False, ""))
+        print("  ❌ chapter.build_prompt 还没有 `prev_para` 关键字（另一个 pi 在改）")
+        return
+    with tempfile.TemporaryDirectory() as d:
+        blocks: list[str] = []
+        h = _harness(d, ["A"] * 20, on_chap=blocks.append)
+        h.say(1, 190.0)
+        h.say(2, 281.0)                          # 首段（第一版）
+        lead1 = h.chapters()[-1]["para"]["lead"]["en"]      # ⚠️ `build_prompt` 带的是 en
+        h.say(3, 360.0)                          # 新增 1
+        h.say(4, 370.0)                          # 新增 2
+        h.say(5, 380.0)                          # 新增 3 -> 第二版
+        check("前置：做了两次合成", len(blocks) >= 2, str(len(blocks)))
+        check("⭐⭐ 第二次的 prompt 里带上一版的段落",
+              len(blocks) >= 2 and lead1 in blocks[1],
+              (blocks[1][:200] if len(blocks) >= 2 else "没有第二次"))
+        check("⭐ 第一次的 prompt 里没有上一版的结论句（没东西可带）",
+              len(blocks) >= 2 and lead1 not in blocks[0], blocks[0][:120])
+
+
+def _has_prev_para() -> bool:
+    import inspect
+    return "prev_para" in inspect.signature(ch.build_prompt).parameters
+
 
 
 # ---------------------------------------------------------------- ⑨ 端到端
@@ -472,12 +699,12 @@ def t_end_to_end() -> None:
     seen_blocks: list[str] = []
 
     with tempfile.TemporaryDirectory() as d:
-        h = Harness(d, ["A", "A", "B", "B", "B"], on_chap=seen_blocks.append)
+        h = _harness(d, ["A", "A", "B", "B", "B"], on_chap=seen_blocks.append)
         h.say(1, 190.0)
-        h.say(2, 371.0)                         # 章 1 首段（interim）
-        h.say(3, 374.0)                         # 换题 → 章 1 正式 + 章 2 开张
-        h.say(4, 553.0)
-        h.say(5, 556.0)                         # 章 2 用带前章结论的 prompt 合成
+        h.say(2, 281.0)                         # 章 1 首段（interim）
+        h.say(3, 375.0)                         # 换题 → 章 1 封章 + 章 2 开张
+        h.say(4, 470.0)
+        h.say(5, 473.0)                         # 章 2 首段（章龄 98）→ 带前章结论
         cs = [e["chapter"] for e in h.emits if e.get("kind") == "chapter"]
         fin = [c for c in cs if c["status"] == "final"]
         check("⭐⭐ 正式章带 `para`", bool(fin) and fin[0].get("para") is not None,
@@ -500,6 +727,12 @@ def main() -> int:
     t_dataclass()
     t_prompt()
     t_first_interim()
+    t_refresh()
+    t_absorb_hook()
+    t_max_chapter()
+    t_fail()
+    t_finalize_free()
+    t_prev_para()
     t_end_to_end()
     n = len(RESULTS)
     ok = sum(1 for _, o, _ in RESULTS if o)

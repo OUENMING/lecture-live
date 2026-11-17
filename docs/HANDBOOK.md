@@ -70,6 +70,9 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 - **`sessions/<会话>.md` 是三方共享契约**：`obsidian_writer` 写它、`_parse` 读回它、
   `cl last` 用 grep 匹配它。**抬头格式一个字节都不许动**；新数据一律走**旁路文件**
   （`.lost.jsonl` / `.atoms.jsonl` / `.chapters.jsonl`）。
+- **实时总结的段落跟着窗口刷新**（3.11 起）：首段 `FIRST_INTERIM_AFTER_S`=0（开章那一窗吸收完就出），
+  之后每吸收一个窗口，满足 `REFRESH_GAP_S`=60 s 且新增 `REFRESH_MIN_NEW`=3 句就临时合成一次；
+  一章上限 `MAX_CHAPTER_S`=900 s（15 分钟：窗口主题偶尔「粘住」不换题，硬切是防「前一组被覆盖丢掉」的保险）。
 - **定稿 ASR 在 `final_asr.py`**（3.9.0 起）：`main.final_worker` 只调 `FinalASR.transcribe(buf)`（永不抛），
   云端（Groq → 千问，经作者的 Worker）优先，失败 / 熔断 / 退化 / 超时（平时 6 s、收尾 2 s）回本地。
   `main.cloud_asr_off_reason` 是「这一段该不该上云」的唯一判据（配置 / `CLASSLIVE_CLOUD_ASR=0` / `--engine local` /

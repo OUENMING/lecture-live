@@ -193,6 +193,7 @@ const openCodeHashes = new Map();   // install -> sha256 前 8 位（isolate 内
 // isolate 缓存 60 s：DO 在欧洲，一次来回约 200 ms，不能让每个请求都先垫上它。
 // ⚠️ 宁可旧 60 s 也不能把选路搬到请求路径上阻塞（同文件头「短租」的理由）。
 const ROUTES_TTL_MS = 60_000;
+const ROUTES_FAIL_TTL_MS = 5_000;
 let routesCache = { at: 0, table: null };
 export function _resetRoutes() { routesCache = { at: 0, table: null }; }
 
@@ -200,13 +201,15 @@ const envRoutes = (env) => parseRoutes(env?.CHAT_ROUTES);
 
 async function chatRoutes(env) {
   if (routesCache.table && Date.now() - routesCache.at < ROUTES_TTL_MS) return routesCache.table;
-  let stored = null;
+  let stored = null, failed = false;
   try {
     const r = await passes(env, "/admin/routes/get", {});
     if (r.ok) stored = parseRoutes((await r.json())?.routes);   // 形状不合 -> 当没有（回 env / 默认）
-  } catch { /* DO 不可用：用 env / 默认，60 s 后再试 */ }
+    else failed = true;
+  } catch { failed = true; }
   const table = mergeRoutes(defaultRoutes(env), envRoutes(env), stored);
-  routesCache = { at: Date.now(), table };
+  // DO 读失败：兜底表只缓存 5 s（OCR 11-17：缓存满 60 s = 刚设的路由被一次抖动压一分钟）
+  routesCache = { at: Date.now() - (failed ? ROUTES_TTL_MS - ROUTES_FAIL_TTL_MS : 0), table };
   return table;
 }
 
@@ -254,7 +257,8 @@ async function openCodeInstallTag(install) {
 
 //: `classlive-<调用类>-<install 前 8 位 | anon>`：同一安装同一调用类稳定（官方说对路由与缓存有利）。
 export async function openCodeSession(install, callClass) {
-  const cls = String(callClass || "").trim().toLowerCase().slice(0, 20) || "legacy";
+  // 只留 [a-z0-9._-]：调用类来自客户端 header，带空格 / 中文会让 fetch 的 header 校验抛错
+  const cls = String(callClass || "").trim().toLowerCase().replace(/[^a-z0-9._-]/g, "_").slice(0, 20) || "legacy";
   return `classlive-${cls}-${await openCodeInstallTag(install)}`;
 }
 
@@ -668,7 +672,7 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
         status: dsStatus,
         headers: { "content-type": up.headers.get("content-type") || "application/json" },
       });
-      ev.up = cmd;
+      ev.up = [oc, cmd].filter(Boolean).join(">");   // opencode:402>deepseek:402>cmd:200（OCR 11-17）
     } else {
       const pre = [oc, cmd, fast].filter(Boolean).join(">");   // opencode:402>deepseek:200 / cmd:timeout>deepseek:200
       ev.up = pre ? `${pre}>deepseek:${dsStatus}` : `deepseek:${dsStatus}`;
@@ -835,7 +839,7 @@ async function admin(request, env, path) {
     return new Response("unauthorized", { status: 401 });
   }
   const body = await request.json().catch(() => ({}));
-  if (path === "/v1/admin/routes/get") return json(200, await routesSnapshot(env));
+  if (path === "/v1/admin/routes/get") { const snap = await routesSnapshot(env); return json(snap.error ? 502 : 200, snap); }
   // 额度快照住在另一个 DO 上（Passes 那边没有这些计数），所以这一条单独分流。
   const res = path === "/v1/admin/quota"
     ? await quota(env, "/admin/state", body)
@@ -848,11 +852,16 @@ async function admin(request, env, path) {
 // 生效表的全貌：默认（env.CMD_CHAT_CLASSES）< env.CHAT_ROUTES < DO 存的那张。
 // `effective` 是马上就要用的那张；前三个字段给 `cl_admin route` 标「来自哪里」。
 async function routesSnapshot(env) {
-  let stored = {};
+  // ⚠️ DO 读不到就**报错**，不能装成「stored 是空的」（OCR 11-17）：`cl_admin route <类> <上游>`
+  //    是「读 stored → 改一条 → 整张写回」，把空表当真会把线上已设的整张表抹掉。
+  let stored;
   try {
     const r = await passes(env, "/admin/routes/get", {});
-    if (r.ok) stored = (await r.json())?.routes || {};
-  } catch { /* DO 不可用：只回 env / 默认，stored 当空 */ }
+    if (!r.ok) return { error: `DO 读路由表失败（${r.status}）` };
+    stored = (await r.json())?.routes || {};
+  } catch (e) {
+    return { error: `DO 读路由表失败（${String(e?.message || e).slice(0, 80)}）` };
+  }
   const envTable = envRoutes(env) || {};
   const defaults = defaultRoutes(env);
   return { upstreams: [...UPSTREAMS], stored, env: envTable, defaults,

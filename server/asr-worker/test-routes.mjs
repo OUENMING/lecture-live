@@ -473,10 +473,10 @@ test("10c 调用类里带大写 / 空格也认（客户端头不保证干净）"
 });
 
 
-// ---------- 9. 单请求指定上游：只给测试码（A/B 不动全局表）----------
+// ---------- 11. 单请求指定上游：只给测试码（A/B 不动全局表）----------
 const TEST1 = "cl-test1-0123456789abcdef";
 
-test("9 test1 带 X-ClassLive-Route: opencode -> 走 opencode（全局表没动）", async () => {
+test("11 test1 带 X-ClassLive-Route: opencode -> 走 opencode（全局表没动）", async () => {
   const h = harness({ env: { OPENCODE_GO_KEY: "oc-key" } });
   try {
     const res = await h.call(BODY(), { cls: "chapter", code: TEST1, route: "opencode" });
@@ -487,7 +487,7 @@ test("9 test1 带 X-ClassLive-Route: opencode -> 走 opencode（全局表没动�
   } finally { h.restore(); }
 });
 
-test("9b 普通用户带同一个头 -> 不认，照表走（chapter 默认 deepseek）", async () => {
+test("11b 普通用户带同一个头 -> 不认，照表走（chapter 默认 deepseek）", async () => {
   const h = harness({ env: { OPENCODE_GO_KEY: "oc-key" } });
   try {
     const res = await h.call(BODY(), { cls: "chapter", route: "opencode" });
@@ -498,7 +498,7 @@ test("9b 普通用户带同一个头 -> 不认，照表走（chapter 默认 deep
   } finally { h.restore(); }
 });
 
-test("9c test1 指定 cc 但没配 cc key / 指定未知值 -> 回 deepseek（闸照过）", async () => {
+test("11c test1 指定 cc 但没配 cc key / 指定未知值 -> 回 deepseek（闸照过）", async () => {
   const h = harness({ env: { OPENCODE_GO_KEY: "oc-key" } });
   try {
     await h.call(BODY(), { cls: "chapter", code: TEST1, route: "cc" });
@@ -510,21 +510,33 @@ test("9c test1 指定 cc 但没配 cc key / 指定未知值 -> 回 deepseek（�
   } finally { h.restore(); }
 });
 
-test("9d test1 + 流式 + 指定 opencode -> 不走 opencode", async () => {
+test("11d test1 + 流式 + 指定 opencode -> 不走 opencode", async () => {
   const h = harness({ env: { OPENCODE_GO_KEY: "oc-key" } });
   try {
-    await h.call(BODY({ stream: true, max_tokens: 220 }), { cls: "translate", code: TEST1, route: "opencode", country: "CN" });
+    const res = await h.call(BODY({ stream: true, max_tokens: 220 }), { cls: "translate", code: TEST1, route: "opencode", country: "CN" });
+    assert.equal(res.status, 200, "流式 + 指定 opencode 不能把请求打挂");
     await h.settle();
     assert.equal(h.calls.oc.length, 0);
+    assert.equal(h.calls.deepseek.length, 1, "真的落到 DeepSeek 直连");
   } finally { h.restore(); }
 });
 
-test("4d opencode：客户端没写 thinking -> 补 disabled（Go 默认开推理会吃光 max_tokens）", async () => {
+test("11e opencode：客户端没写 thinking -> 补 disabled（Go 默认开推理会吃光 max_tokens）", async () => {
   const h = harness({ env: { OPENCODE_GO_KEY: "oc-key", CHAT_ROUTES: "*=opencode" } });
   try {
     const b = BODY(); delete b.thinking;
     await h.call(b);
     await h.settle();
     assert.deepEqual(h.calls.oc[0].body.thinking, { type: "disabled" });
+  } finally { h.restore(); }
+});
+
+test("12 admin routes/get：DO 读失败 -> 502，绝不装成空表（cl_admin 读改写会抹掉整张表）", async () => {
+  const h = harness({ routesFail: true });
+  try {
+    const r = await h.admin("routes/get");
+    assert.equal(r.status, 502);
+    assert.ok(r.json.error);
+    assert.equal("stored" in r.json, false);
   } finally { h.restore(); }
 });

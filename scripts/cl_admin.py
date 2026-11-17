@@ -104,7 +104,10 @@ def _route_rows(info: dict) -> list[tuple[str, str, str]]:
     layers = {k: (info.get(k) or {}) for k, _ in _SOURCE}
     rows = []
     for cls in sorted(eff, key=lambda c: (c == "*", c)):
-        src = next((label for key, label in _SOURCE if cls in layers[key]), "默认")
+        # ⚠️ 与 Worker 的 `mergeRoutes` 同一语义：**上层的 `*` 会盖掉下层点名的类** ——
+        #    所以来源 = 从上往下第一个「点名了它、或者写了 `*`」的层（OCR 11-17：原来只看点名，标错过）。
+        src = next((label for key, label in _SOURCE
+                    if cls in layers[key] or "*" in layers[key]), "默认")
         rows.append((cls, str(eff[cls]), src))
     if "*" not in eff:
         rows.append(("*", "deepseek", "内置（没写 `*` 就是 deepseek）"))
@@ -112,9 +115,12 @@ def _route_rows(info: dict) -> list[tuple[str, str, str]]:
 
 
 def _route_cmd(ns) -> int:
+    if ns.reset and (ns.cls is not None or ns.upstream is not None):
+        # OCR 11-17：原来 `route chapter cc --reset` 会静默丢掉 `chapter cc`、把整张表清空
+        sys.exit("--reset 会清空整张表，不能和「<调用类> <上游>」一起用。")
     if ns.reset:
         _post("routes/set", {"routes": {}})
-        print("✅ 路由表已清空，回默认表（约 60 秒内生效）。")
+        print("✅ 已清空 cl_admin 写的那张表 —— 回到 env CHAT_ROUTES / 默认表（约 60 秒内生效）。")
         return 0
     if (ns.cls is None) != (ns.upstream is None):
         sys.exit("要么两个都给（route <调用类> <上游>），要么都不给（只看）；清空用 --reset。")
@@ -135,7 +141,7 @@ def _route_cmd(ns) -> int:
     print("对话调用的上游路由（deepseek 直连 / cc = CommandCode / opencode = OpenCode Go）")
     for cls, up, src in _route_rows(info):
         print(f"  {cls:<14} {up:<9} ← {src}")
-    print("⚠️ 约 60 秒内生效（Worker 每个 isolate 缓存 60 秒）。设 `*` 管「其余所有类」。")
+    print("⚠️ 约 60 秒内生效（Worker 每个 isolate 缓存 60 秒）。`*` 会盖掉下面各层点名的类（同一层里点名的优先）。")
     return 0
 
 

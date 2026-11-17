@@ -21,7 +21,7 @@ const CMD_CHAT_CLASSES_DEFAULT = "note,polish,prep";
 const LEGACY_NOTE_TOKENS = 4000;
 
 //: 调用类名：小写字母数字开头，最长 20（与 `X-ClassLive-Call` 的截断一致），外加 `*`。
-const CLASS_RE = /^(\*|[a-z0-9][a-z0-9._-]{0,19})$/;
+export const CLASS_RE = /^(\*|[a-z0-9][a-z0-9._-]{0,19})$/;
 
 /** 上游名归一：不认识的一律 deepseek（fail-safe —— 表写错了不能把调用打没）。 */
 export function normalizeUpstream(v) {

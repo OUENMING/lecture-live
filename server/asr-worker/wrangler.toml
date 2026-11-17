@@ -26,6 +26,7 @@
 #                                         #   `deepseek-v4.1-flash`（2026-11-17 实查 /zen/go/v1/models 有这个 id）。
 #   CHAT_ROUTES                           # 可选：不带 DO 表时的上游路由（`chapter=deepseek,note=cc,*=deepseek`）。
 #                                         #   **只在没写 DO 表时才看得出**：`cl_admin.py route …` 写进 DO 的那张表优先级更高。
+#   ROUTE_OVERRIDE_PASSES（可选，默认 "test1"）：哪些码名能用 X-ClassLive-Route 单请求指定上游（A/B 用；逗号分隔）
 #   wrangler deploy
 #
 # 实时转写的会话上限默认 3 h。要改就加一段 [vars]（可选，不写就用默认）：

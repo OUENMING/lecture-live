@@ -129,6 +129,21 @@ class RouteCMD(unittest.TestCase):
                 cl_admin.main(["route", "note"])
         self.assertEqual(self.calls, [])
 
+    def test_reset_带位置参数_拒绝且一个字节都没发(self):
+        with self.assertRaises(SystemExit) as e:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cl_admin.main(["route", "chapter", "cc", "--reset"])
+        self.assertIn("--reset", str(e.exception))
+        self.assertEqual(self.calls, [], "不能静默清空整张表")
+
+    def test_上层星号盖掉默认点名的类_来源标上层(self):
+        # Worker 语义：stored 的 `*` 会盖掉 defaults 里点名的 note（OCR 11-17：原来标成「默认」）
+        snap = snapshot({"*": "opencode"})
+        snap["effective"] = {"note": "opencode", "polish": "opencode", "prep": "opencode",
+                             "chapter": "opencode", "*": "opencode"}
+        rows = {c: src for c, _up, src in cl_admin._route_rows(snap)}
+        self.assertEqual(rows["note"], "你设的")
+
     # ---------- 5. 表里已经有 `*` 时只打一行（别重复） ----------
     def test_星号只打一行(self):
         self.state["stored"] = {"*": "opencode"}

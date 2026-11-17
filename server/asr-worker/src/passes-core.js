@@ -29,7 +29,7 @@
 // ⚠️「哪些区合法」的唯一定义点在 `soniox-core.REGIONS`（这里 import REGION_NAMES，**别再抄一份 us/jp**）。
 
 import { REGION_NAMES } from "./soniox-core.js";
-import { UPSTREAMS, normalizeUpstream } from "./routes.js";
+import { UPSTREAMS, normalizeUpstream, CLASS_RE } from "./routes.js";
 
 const DAY_MS = 86400000;
 export const DEFAULT_DAYS = 120;
@@ -71,7 +71,7 @@ const VER_MAX_KEYS = 8;
 // 只存「用户显式改过的那些类」，没写的类回落到 env / 默认（见 routes.js）。
 // 键名与值的校验权都在这里（存储不变量归这个模块管，同 VER_RE 的理由）；`{}` = 清空回默认。
 const ROUTES_KEY = "chat-routes";
-const ROUTE_CLASS_RE = /^(\*|[a-z0-9][a-z0-9._-]{0,19})$/;
+const ROUTE_CLASS_RE = CLASS_RE;   // ⚠️ 唯一定义点在 routes.js（OCR 11-17：两份正则会静默分叉）
 
 // ---- 实时转写（rt）的用量回收：窗口与去重 ----
 // Worker 看不到音频流，用量只能从 Soniox 的日志事后回收（日志是**请求完成**才有，见官方 usage-logs 指南）。

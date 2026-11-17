@@ -140,9 +140,11 @@ def truncate_head_to_height(text: str, measure, max_h: float, *,
 #      `_grapheme-reveal`（opacity 0→1 + blur→0, 不位移）。新行晚 `D_ENTER_DELAY_S` 起跑,
 #      等被顶上去的那一行先让开（原型实测不等会叠 20–57px）。
 #   （原型还有一块垫在最底那一行后面的固定底板; 10-17 真窗口 A/B 后作者定: 不要。）
-#: 按**视觉层号**（层号减去还没走完的位移）给整行降亮度: 当前 1.0 → 上一句 0.72 → 更早 0.56。
-#: 数值取自原型的颜色表（中文 .98 / .68 / .55 的相对比例）。只在跟随态生效 —— 往回翻时全亮。
-D_DIM = (1.0, 0.72, 0.56)
+#: 按**视觉层号**（层号减去还没走完的位移）给整行降亮度: 当前 1.0 → 0.78 → 0.56 → 0.34。
+#: 2026-11-17 换皮（Owen 认可的稿：旧字幕逐行退后、最新一行最亮）把原来的三档（.72 / .56 封底）
+#: 延成每行一档，数值在 `uitokens.AGE_DIM`。只在跟随态生效 —— 往回翻时全亮。
+import uitokens as _tok  # noqa: E402
+D_DIM = _tok.AGE_DIM
 #: 当前行是**草稿**时中文再暗一档（原型 plainZh .72 / 定稿 .98）; 升级为定稿时按 STATE_S 提亮。
 D_DRAFT_ZH_DIM = 0.74
 D_ENTER_DELAY_S = 0.08
@@ -214,11 +216,10 @@ def d_dim(x: float) -> float:
     """视觉层号 → 亮度倍数（分段线性, 位移途中连续变化 —— 不跳亮度）。纯函数。"""
     if x <= 0.0:
         return D_DIM[0]
-    if x < 1.0:
-        return D_DIM[0] + (D_DIM[1] - D_DIM[0]) * x
-    if x < 2.0:
-        return D_DIM[1] + (D_DIM[2] - D_DIM[1]) * (x - 1.0)
-    return D_DIM[2]
+    i = int(x)
+    if i >= len(D_DIM) - 1:
+        return D_DIM[-1]
+    return D_DIM[i] + (D_DIM[i + 1] - D_DIM[i]) * (x - i)
 
 
 # ---- 双语行的竖排顺序 ----

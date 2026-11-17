@@ -463,7 +463,7 @@ class TranscriptView:
 
     def _add_slot(self) -> None:
         zh = self._make_label(18.0, self._font_zh[1], self._lines, self._font_zh[2])
-        en = self._make_label(11.0, self._font_en[1], 1, self._font_en[2])
+        en = self._make_label(_tok.EN_PT, self._font_en[1], 1, self._font_en[2])
         # 英文小字可能借中文那格的空行排成两行(见 _en_two_lines)。行尾省略号靠这个开关:
         # TruncatingTail 会**强制单行**, 所以换成「按词折 + 最后一行截断」。
         try:

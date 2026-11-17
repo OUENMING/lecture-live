@@ -66,7 +66,7 @@ WIDTH = uitokens.DEFAULT_WIDTH                    # 860（11-17 换皮前 660；
 PAD = 16.0
 #: 每行英文小字那一格：一行 18（11pt 实测行高 14 + 余量 4）+ 再一行 14 = 两行
 #: （3.11，Owen 10-19；`transcript_view.EN_SLOT_LINES`）。
-ROW_EN_H = 18.0 + 14.0 + 12.0                     # 末项 = `transcript_view.EN_SLOT_TOP`（段间距）
+ROW_EN_H = 19.0 + 15.0 + 12.0                     # 一行 15（12pt 实测）+ 余量 4、再一行 15、段间距 12（11-17 前 11pt：18+14+12）
 #: 英文 → 自己的中文。3.11 拍图量墨迹（Owen 10-19「不要拥挤、要高级优雅」）：间距要分三级 ——
 #: 中文行内 ≈3pt < 英文贴中文 ≈8pt < 段与段 ≈21pt（≥ 2×，分组一眼可读）。原来 5.0 时英文→中文 12pt、
 #: 段间 17.5pt，两级只差 1.5×，英文看着像挂在上一段下面。
@@ -75,7 +75,7 @@ ROW_GAP = 1.0
 #: 不收的话每行底下空 44 pt。
 ROW_EN_H_SOLO = 12.0
 ROW_ZH_H = 52.0                                   # 每行中文两行 = 2 × LINE_H(23.5) + 5（3.11 前 47）
-ROW_H = ROW_EN_H + ROW_GAP + ROW_ZH_H             # 97.0（3.11 前 70.0）
+ROW_H = ROW_EN_H + ROW_GAP + ROW_ZH_H             # 99.0（11-17 英文 12pt 前 97.0；3.11 前 70.0）
 GLOSS_H = 20.0                                    # 💡 解析: 收回态 = 一行(尾部省略)
 #: 术语行在**最后一次命中**之后留多久（秒）就自己收起（钉住的不收）。3.10.1：Owen 10-19
 #: 「出现术语的时候它不会自动隐藏」。⚠️ 不能短到「名字只活 1 句」（`terms()` 那条老教训：
@@ -1645,7 +1645,7 @@ class Overlay:
         self._expanded_h = self._expanded_scroll_h()
         f_zh = (_ui_font(18.0),
                 NSColor.whiteColor(), NSLineBreakByWordWrapping)
-        f_en = (_ui_font(11.0),
+        f_en = (_ui_font(uitokens.EN_PT),
                 NSColor.whiteColor().colorWithAlphaComponent_(0.80), self._trunc)
         f_big = (_ui_font(18.0),
                  NSColor.whiteColor(), NSLineBreakByWordWrapping)

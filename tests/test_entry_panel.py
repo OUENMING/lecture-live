@@ -993,6 +993,8 @@ def main() -> int:
     check("⚠️ 而且确实扫到了调用点（一条都没扫到会让上面两条恒真）",
           _n_seen >= 20, f"只扫到 {_n_seen} 处")
 
+    _auto_install_section()
+
     bad = [n for n, ok, _ in RESULTS if not ok]
     print(f"{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")
     for n in bad:
@@ -3339,6 +3341,185 @@ def _bg_row_section() -> None:
             except Exception:                                     # noqa: BLE001
                 pass
         check("关掉面板后不残留后台行（跨面板的模块级状态）", E.S.get("bg") is None)
+
+
+def _auto_install_section() -> None:
+    # ═══════════════════════════════════════════════════════════════════
+    #  I. 面板接线：开课前查出新版本 → 走**同一条** apply、20 s 上限、失败恢复按钮
+    #
+    #  ⚠️ 这一节要建窗口，但**不跑事件循环**：把 `entry_panel._later` 换成队列、
+    #     在测试线程里手动泵 —— 正是 `_later` 本来的语义（"下一轮 runloop 再做"）。
+    #     写端全隔离在 tempdir（`glossary` / `state_root` / `sessions`）。
+    # ═══════════════════════════════════════════════════════════════════
+    print("\n--- ㉕ 开课前自动安装：接线真的通（建窗口，不跑事件循环）---")
+
+
+    def _panel_case(*, offer, steps=(), apply_result=None, env=None,
+                    budget=None, apply_sleep=0.0):
+        """建一次面板、泵完 `_later`，返回观测到的 (status 行列表, apply 的调用, restart 次数)。"""
+        import shutil
+        import threading as _th
+        import time as _t
+
+        import entry_panel as _E
+        import update as _upd
+
+        calls, status, restarted, logs = [], [], [], []
+        targets, updating = [], []
+        q, lock = [], _th.Lock()
+
+        def fake_later(fn, *a):
+            with lock:
+                q.append((fn, a))
+
+        def fake_apply(on_line=None, *, models=True):
+            calls.append({"models": models, "on_line": on_line is not None})
+            if apply_sleep:
+                _t.sleep(apply_sleep)
+            return apply_result or {"ok": True, "pulled": True, "after": "9.9.9", "user_msg": ""}
+
+        class _H:
+            pass
+
+        def _pump(wait_s=3.0):
+            """手动泵 runloop：把 `_later` 排下的活按顺序跑掉，直到**安静 0.5 s** 或到点。
+
+            ⚠️ 不能"跑一轮就停"：超时那条路是**另一个线程**在预算到点后才 `_later` 进来的
+               —— 跑一轮就收工等于永远测不到它。
+            """
+            end = _t.monotonic() + wait_s
+            quiet = None
+            while _t.monotonic() < end:
+                with lock:
+                    items, q[:] = list(q), []
+                for fn, a in items:
+                    fn(*a)
+                if items:
+                    quiet = None
+                elif calls and quiet is not None and _t.monotonic() - quiet > 0.5:
+                    break
+                elif quiet is None:
+                    quiet = _t.monotonic()
+                _t.sleep(0.02)
+
+        root = pathlib.Path(tempfile.mkdtemp(prefix="cl_panel_"))
+        (root / "glossary.txt").write_text("# ECON10740\n", encoding="utf-8")
+        try:
+            from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+            app = NSApplication.sharedApplication()
+            app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        except Exception as e:                                    # noqa: BLE001
+            shutil.rmtree(root, ignore_errors=True)
+            return None, f"AppKit 不可用：{type(e).__name__}: {e}"
+
+        saved = (_E._later, _upd.offer, _upd.pending_steps, _upd.apply, _upd._log,
+                 _E.AUTO_INSTALL_BUDGET_S)
+        if budget is not None:
+            _E.AUTO_INSTALL_BUDGET_S = budget
+        _E._later = fake_later
+        _upd.offer = lambda: dict(offer)
+        _upd.pending_steps = lambda: list(steps)
+        _upd.apply = fake_apply
+        _upd._log = lambda m: logs.append(m)
+        # ⚠️ `S` 是**模块级**的：前面几节点过「开始上课」，`started` 还留着 ——
+        #    不清掉的话这一节永远走「已经在开课了」那一格（第一次跑就是这个红）。
+        #    ⚠️ 必须**在建面板之前**清：查更新那个线程是 `build()` 里起的。
+        for _k in ("started", "update_target", "updating"):
+            _E.S.pop(_k, None)
+        h = None
+        try:
+            h = _E.build(glossary=root / "glossary.txt", sessions_dir=root / "sessions",
+                         state_root=root / "state", on_start=lambda c: None,
+                         on_restart=lambda: restarted.append(1))
+
+            # ⚠️ `_status` 写的是 `S["panel"]`（当前那个面板）—— 换成一个记账的替身，
+            #    这样状态行文字成为**可断言的观测**，不用去窗口里挖 label。
+            #    必须**在泵之前**换，否则装的过程中那几句「正在更新到 X…」就记不到了。
+            class _Rec:
+                def set_status(self, text):
+                    status.append(text)
+                    targets.append(_E.S.get("update_target") or "")
+
+            if h is not None:
+                _E.S["panel"] = _Rec()
+            _pump()
+            updating.append(bool(_E.S.get("updating")))
+        finally:
+            (_E._later, _upd.offer, _upd.pending_steps, _upd.apply, _upd._log,
+             _E.AUTO_INSTALL_BUDGET_S) = saved
+            if h is not None:
+                try:
+                    h.close()
+                except Exception:                                 # noqa: BLE001
+                    pass
+        shutil.rmtree(root, ignore_errors=True)
+        return {"calls": calls, "status": status, "restarted": restarted,
+                "logs": logs, "built": h is not None,
+                "targets": targets, "updating": updating}, ""
+
+
+    _offer = {"kind": "available", "current": "0.0.1", "latest": "9.9.9",
+              "summary": "看点", "message": "", "quiet": True, "mode": "auto",
+              "groups": []}
+
+    # ⚠️⭐ `check.py` 跑测试时**故意设着 `CLASSLIVE_NO_AUTO_UPDATE`**（不让测试去戳网络）。
+    #    而那正是条件③本身 —— 不在这里清掉，这一节永远测的是「关掉了自动更新」那条路，
+    #    看上去红得莫名其妙（第一次在 check.py 里跑就是这样）。用完手动还原。
+    import os as _os
+    _saved_env = _os.environ.pop("CLASSLIVE_NO_AUTO_UPDATE", None)
+    try:
+        _obs, _err = _panel_case(offer=_offer)
+        if _obs is None:
+            check("I0 面板这一节能跑（要 AppKit）", False, _err)
+        else:
+            check("I1 面板建起来了", _obs["built"])
+            check("⭐⭐ I2 开课前查到 auto+无额外步骤 -> **直接走 apply**（同一条路，models=False）",
+                  len(_obs["calls"]) == 1 and _obs["calls"][0]["models"] is False,
+                  str(_obs["calls"]))
+            check("⭐⭐ I3 装成功后**照旧走 on_restart**（重开面板，然后出「已更新到 X」卡）",
+                  len(_obs["restarted"]) == 1, f"restart={_obs['restarted']}")
+            check("⭐ I3b 装的过程中状态行说「正在更新到 9.9.9…」，且 `update_target` 记着那个版本",
+                  any("正在更新到 9.9.9" in s for s in _obs["status"])
+                  and "9.9.9" in _obs["targets"],
+                  f"status={_obs['status'][:3]} target={_obs['targets']}")
+
+        _obs5, _ = _panel_case(
+            offer=_offer,
+            apply_result={"ok": False, "pulled": False, "after": "0.0.1",
+                          "user_msg": "网络好像不通，这次先不更新了。"})
+        if _obs5 is not None:
+            check("⭐ I5 自动装失败 -> 一句「没更新成（…）—— 照常上课，下课后再装」，不重开",
+                  any("没更新成" in s and "照常上课" in s for s in _obs5["status"])
+                  and _obs5["restarted"] == [] and not any(_obs5["updating"]),
+                  f"status={_obs5['status'][:3]} restart={_obs5['restarted']}")
+
+        _obs6, _ = _panel_case(offer=_offer, budget=0.2, apply_sleep=1.0)
+        if _obs6 is not None:
+            check("⭐⭐ I6 超过预算（20 s 那条）-> 按失败收、按钮恢复、不重开",
+                  any("没更新成" in s and "秒没装完" in s for s in _obs6["status"])
+                  and _obs6["restarted"] == [] and not any(_obs6["updating"]),
+                  f"status={_obs6['status'][:3]}")
+
+        _obs2, _ = _panel_case(offer={**_offer, "quiet": False})
+        if _obs2 is not None:
+            check("⭐ I4 条件不满足（quiet=False）-> **一个字节都不动**，只出「有新版本」卡",
+                  _obs2["calls"] == [] and _obs2["restarted"] == [] and any(
+                      "没自动装" in x for x in _obs2["logs"]),
+                  f"apply={_obs2['calls']} logs={_obs2['logs']}")
+
+        # ③ 端到端：环境变量设了 -> 面板**不动**（判据层有 H3，接线这一层也得对着）
+        _os.environ["CLASSLIVE_NO_AUTO_UPDATE"] = "1"
+        try:
+            _obs7, _ = _panel_case(offer=_offer)
+        finally:
+            _os.environ.pop("CLASSLIVE_NO_AUTO_UPDATE", None)
+        if _obs7 is not None:
+            check("⭐ I7 环境里有 CLASSLIVE_NO_AUTO_UPDATE -> 面板一个字节都不动",
+                  _obs7["calls"] == [] and any("关掉了自动更新" in x for x in _obs7["logs"]),
+                  f"apply={_obs7['calls']} logs={_obs7['logs']}")
+    finally:
+        if _saved_env is not None:
+            _os.environ["CLASSLIVE_NO_AUTO_UPDATE"] = _saved_env
 
 
 if __name__ == "__main__":

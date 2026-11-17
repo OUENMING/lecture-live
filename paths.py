@@ -318,6 +318,20 @@ def timetable(*, root=None) -> pathlib.Path:
     return _root(root) / "timetable.json"
 
 
+def update_check(*, root=None) -> pathlib.Path:
+    """开课前那次**更新检查**的结论 —— `~/.classlive/update-check.json`。
+
+    形状 `{check_ok, error, behind, current, latest, route, mode, checked_at}`（写端唯一：
+    `update._write_check_state`；读端 `update.check_state`、报告里的 `blocks.update`）。
+    它回答的是原来**没有任何痕迹**的那件事：「面板到底查过更新没有、走的哪条路、为什么没成」
+    —— 中国区用户 2026-11-17 停在 3.11.4 时，日志里一条线索都没有。
+
+    ⚠️ 住 `~/.classlive/` 的理由同 `ready_state`：这是**要留着的数据**（下一节课的测试报告
+       还要读它），不能住会被清理工具扫掉的 `Logs/`，也不能住会被 `git pull` 重写的安装目录。
+    """
+    return _root(root) / "update-check.json"
+
+
 def jev_token(*, root=None) -> pathlib.Path:
     """Jev（TypeSafe System One）的 token —— 纯文本一行，权限 600。
 

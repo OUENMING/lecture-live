@@ -33,6 +33,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import re
 import threading
 import time
 
@@ -40,35 +41,190 @@ HERE = pathlib.Path(__file__).resolve().parent
 # 网络操作的上限。fetch 在慢网下可能很久，但**不能无限等** —— 卡片是后台线程，
 # 卡住会让人以为按钮坏了。超时当"没查到"处理，不算失败。
 TIMEOUT = 45
+# ⚠️ 这是**整条命令**的上限，不是每条路由的上限 —— 多条路由逐条降级时按剩余时间切（见 `_git`）。
 DRAFT_MODEL = "draft_model"   # 更新步骤 key：可选的流式草稿模型（`pending_steps` ②b）
 
 
-def _git(*args: str, timeout: int = TIMEOUT) -> tuple[int, str, str]:
-    """跑一条 git。返回 (返回码, stdout, stderr)。异常统一成返回码 -1。"""
+#: ⭐ 3.11.6：**只有联网的 git 命令**才注入代理（`-c http.proxy=…`）。
+#  其余命令（`status` / `rev-parse` / `show` …）在本地跑，套一层代理没意义，也拖慢
+#  每一次脏检查（`classify_dirt` 会跑十几条）。
+NET_SUBCOMMANDS = frozenset({"fetch", "pull", "push", "ls-remote", "clone"})
+
+#: 这几种失败**不是路不通**（同一份仓库状态，换条路结论一样），换路重试纯属白花时间。
+#  ⚠️ 少了它，一个**分叉**的仓库在国内网络下会先跑完 fetch、merge 失败，再被当成
+#     「可能只是代理不通」逐条重试 —— 用户干等 45 s 才看到一句「分叉」。
+_ROUTE_IRRELEVANT = ("would be overwritten", "not possible to fast-forward",
+                     "non-fast-forward", "diverged", "conflict",
+                     "index.lock", "not a git repository", "no such remote",
+                     "couldn't find remote ref", "does not appear to be a git")
+
+#: 本线程**最近一条**联网 git 用了哪条路（进日志 / 报告）。
+#  ⚠️ 用线程本地：面板在后台线程查、退出路径在自己的进程里查；一个模块级变量
+#     会把 A 的路由写到 B 的日志上。
+_LAST = threading.local()
+
+
+def git_env() -> dict:
+    """所有 git 子进程的环境：**GUI 下没人能输密码**，交互提示一律关掉。
+
+    ⚠️ 不设它的后果（真实形状）：从 `.app` 双击起的那条路没有终端，
+       `git fetch` 撞上要凭据的 remote 会**挂在提示上直到 TIMEOUT**，
+       用户看到的是「更新按钮转 45 秒然后什么都没发生」。
+    """
+    return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+
+def _git_run(argv, *, timeout: float = TIMEOUT,
+             text: bool = True) -> tuple[int, object, str]:
+    """跑**一次** git 子进程（不带任何代理注入）。返回 (返回码, stdout, stderr)。
+
+    异常统一成返回码 -1；`env` 由 `git_env()` 统一提供（`GIT_TERMINAL_PROMPT=0`）。
+    """
     try:
-        r = subprocess.run(["git", *args], cwd=HERE, capture_output=True,
-                           text=True, timeout=timeout)
-        return r.returncode, r.stdout.strip(), r.stderr.strip()
+        r = subprocess.run(["git", *argv], cwd=HERE, capture_output=True,
+                           text=text, timeout=timeout, env=git_env())
     except subprocess.TimeoutExpired:
-        return -1, "", f"超时（>{timeout}s）"
+        return -1, ("" if text else b""), f"超时（>{timeout:.0f}s）"
     except Exception as e:                                # noqa: BLE001
-        return -1, "", str(e)
+        return -1, ("" if text else b""), str(e)
+    if text:
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    return r.returncode, r.stdout, r.stderr.decode("utf-8", "replace").strip()
 
 
-def _git_raw(*args: str, timeout: int = TIMEOUT) -> tuple[int, bytes, str]:
+def _subcommand(args) -> str:
+    """`git` 之后的第一个**子命令**（跳过 `-c x=y` / `--no-pager` 这类全局选项）。"""
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a in ("-c", "--git-dir", "--work-tree", "-C"):
+            skip = True
+            continue
+        if a.startswith("-"):
+            continue
+        return a
+    return ""
+
+
+def _remote_url() -> str:
+    """`origin` 的地址 —— **只用来问「这个主机要不要走代理」**，不参与别的判断。
+
+    ⚠️ 本地路径的 remote（测试里的裸库、拷贝安装）解析不出主机 → `ws_compat.routes()`
+       直接返回直连，正是想要的。
+    """
+    rc, out, _ = _git_run(["remote", "get-url", "origin"], timeout=5)
+    return str(out) if rc == 0 else ""
+
+
+def net_routes(url: str | None = None) -> list[tuple[str, str | None]]:
+    """联网的 git 该按什么顺序试哪几条路。**判定复用 `ws_compat.routes()`（唯一真源）**。
+
+    顺序就是系统代理的优先级：HTTP(S) 代理 > SOCKS 代理 > 直连（与 websockets 那条一致）。
+    ⚠️ `ws_compat` 的 import / 读系统设置**任何异常都降级成直连** —— 本模块会在
+       `.app` 的独立子进程、面板后台线程里跑，为了一个代理判定把**整个更新**搞挂不值得。
+    """
+    try:
+        import ws_compat
+        rs = ws_compat.routes(url if url is not None else _remote_url())
+    except Exception:                                     # noqa: BLE001
+        return [("direct", None)]
+    return list(rs) or [("direct", None)]
+
+
+def proxy_args(route: tuple[str, str | None]) -> list[str]:
+    """一条路 → git 的参数。直连**不带任何参数**（不覆盖用户自己的 git 配置）。
+
+    ⚠️ SOCKS 一律写成 `socks5h://`：`h` = 域名交给代理解析。
+    """
+    kind, purl = route
+    purl = (purl or "").strip()
+    if kind == "direct" or not purl:
+        return []
+    if kind == "socks":
+        purl = "socks5h://" + purl.split("://", 1)[-1]
+    return ["-c", f"http.proxy={purl}"]
+
+
+def route_label(route: tuple[str, str | None]) -> str:
+    """日志/报告里写的那一行：**只留 scheme + host:port**。
+
+    ⚠️⚠️ 代理地址里常带用户名密码（`http://user:pass@host:port`）—— 原文进日志 /
+       进测试报告（后者会自动上传）= 把凭据传出去。所以这里**逐段重建**，不 echo 原串。
+    """
+    import urllib.parse
+    kind, purl = route
+    purl = (purl or "").strip()
+    if kind == "direct" or not purl:
+        return "direct"
+    try:
+        p = urllib.parse.urlparse(purl if "://" in purl else "http://" + purl)
+        if p.hostname:
+            scheme = p.scheme or kind
+            return f"{scheme}://{p.hostname}:{p.port}" if p.port else f"{scheme}://{p.hostname}"
+    except Exception:                                     # noqa: BLE001
+        pass
+    return kind
+
+
+def last_route() -> str:
+    """本线程最近一次联网 git 走成的路（含试过但没成的，`a>b`）。没跑过 → `"?"`。"""
+    return getattr(_LAST, "route", "") or "?"
+
+
+def _irrelevant(text: str) -> bool:
+    """这个失败是不是「换条路也一样」（见 `_ROUTE_IRRELEVANT`）。"""
+    low = (text or "").lower()
+    return any(k in low for k in _ROUTE_IRRELEVANT)
+
+
+def _git(*args: str, timeout: float = TIMEOUT) -> tuple[int, str, str]:
+    """跑一条 git。返回 (返回码, stdout, stderr)。异常统一成返回码 -1。
+
+    ⭐ 3.11.6：**联网的那几条**（`NET_SUBCOMMANDS`）按 `net_routes()` 的顺序逐条降级 ——
+       第一条失败（非 0 / 超时）就换下一条，直到用完或到点。
+    ⚠️ **总时长仍受 `timeout` 管**：每次分到的是**剩余时间**，不会叠成 `45 s × N`。
+    """
+    return _git_dispatch(args, timeout=timeout, text=True)
+
+
+def _git_raw(*args: str, timeout: float = TIMEOUT) -> tuple[int, bytes, str]:
     """同 `_git`，但 **stdout 原样是字节**（不 strip）。
 
     ⚠️ 只为 `-z` 的路径解析存在：`_git` 会 `.strip()`，而 `git status --porcelain`
     的首行形如 ` M a.py` —— 那个前导空格正是状态码的第一位，洗掉就把路径切错。
     """
-    try:
-        r = subprocess.run(["git", *args], cwd=HERE, capture_output=True,
-                           timeout=timeout)
-        return r.returncode, r.stdout, r.stderr.decode("utf-8", "replace").strip()
-    except subprocess.TimeoutExpired:
-        return -1, b"", f"超时（>{timeout}s）"
-    except Exception as e:                                # noqa: BLE001
-        return -1, b"", str(e)
+    return _git_dispatch(args, timeout=timeout, text=False)
+
+
+def _git_dispatch(args, *, timeout: float, text: bool):
+    """`_git` / `_git_raw` 的共同实现：联网命令走路由降级，其余原样跑一次。"""
+    if _subcommand(args) not in NET_SUBCOMMANDS:
+        return _git_run(list(args), timeout=timeout, text=text)
+    deadline = time.monotonic() + timeout
+    tried: list[str] = []
+    res: tuple = (-1, "" if text else b"", "没有可用的路")
+    routes = net_routes()
+    for i, route in enumerate(routes):
+        left = deadline - time.monotonic()
+        if tried and left < 1.0:
+            break                                         # 剩余时间不够再试一条了
+        # OCR 11-17：按**剩余路数**平分剩余时间 —— 坏代理常是「接了连接不回话」，
+        #    第一条吃满整个 timeout 的话，后面的直连永远轮不到。最后一条拿走全部剩余。
+        share = left / (len(routes) - i)
+        rc, out, err = _git_run([*proxy_args(route), *args],
+                               timeout=max(share, 1.0), text=text)
+        label = route_label(route)
+        if rc == 0:
+            _LAST.route = ">".join(tried + [label])
+            return rc, out, err
+        tried.append(label)
+        res = (rc, out, err)
+        if _irrelevant(f"{err}{out}"):
+            break                     # 换条路结论一样（分叉 / 撞车 / 锁）-> 不再重试
+    _LAST.route = ">".join(tried) or "?"
+    return res
 
 
 def _z_paths(rc: int, raw: bytes) -> set:
@@ -442,8 +598,10 @@ def update_mode_in(text: str, version: str) -> str:
 def check() -> dict:
     """只 `fetch` + 看落后几个提交，**不动工作区**。适合启动时/按钮点下去先探一下。
 
-    返回 `{ok, error, dirty, behind, current, ahead, detached, branch, upstream,
-    default, on_default}`。
+    返回 `{ok, error, dirty, behind, current, latest, mode, route, ahead, detached,
+    branch, upstream, default, on_default}`。
+    ⭐ 3.11.6：`latest` / `mode`（远端那个版本的「更新方式」）/ `route`（这次走的代理路）
+      是新加的 —— 它们 + 写盘的 `check_state()` 一起让「查过没查、为什么没成」有据可查。
     `ok=False` 表示"查不到"（断网/无 git/无 upstream）—— 调用方应当**静默降级**，
     不要当成错误弹给用户。
 
@@ -453,30 +611,186 @@ def check() -> dict:
     """
     bs = branch_state()
     out = {"ok": False, "error": "", "dirty": False, "behind": 0,
-           "current": version(), "ahead": 0, "detached": bs["detached"],
+           "current": version(), "latest": "", "mode": "", "route": "-",   # "-" = 这次没联网
+           "ahead": 0, "detached": bs["detached"],
            "branch": bs["branch"], "upstream": bs["upstream"],
            "default": bs["default"], "on_default": bs["on_default"]}
     if not is_repo():
         out["error"] = "不是 git 仓库"
-        return out
+        return _note_check(out)
     if not bs["upstream"]:
         out["error"] = ("不在任何分支上" if bs["detached"]
                         else f"`{bs['branch']}` 没有上游")
-        return out
+        return _note_check(out)
     out["dirty"] = bool(_dirty_report())          # ⚠️ 与 `pull()` **同一个定义点**
 
     rc, _, err = _git("fetch", "--quiet")
+    out["route"] = last_route()                   # ⭐ 用了哪条路（含降级链）
     if rc != 0:
         # 断网 ≠ 失败。本地远端 ref 可能还是旧的，但先告诉调用方"这次没查到"。
+        # ⚠️⭐ 3.11.6：**必须留痕** —— 中国区用户 2026-11-17 停在 3.11.4，
+        #    而「面板查过没查、为什么没成」在日志里一条线索都没有，只能靠猜。
         out["error"] = f"fetch 失败: {err or rc}"
-        return out
+        return _note_check(out)
 
     rc, b, _ = _git("rev-list", "--count", "HEAD..@{u}")
     rc2, a, _ = _git("rev-list", "--count", "@{u}..HEAD")
     out["behind"] = int(b) if b.isdigit() else 0
     out["ahead"] = int(a) if a.isdigit() else 0
     out["ok"] = True
+    if out["behind"] > 0:
+        # 远端 `VERSION` / 该版本声明的「更新方式」—— 都在**已经 fetch 过的 ref** 上，
+        # 纯本地读，不再联网。报告（`blocks.update`）要的就是这两格。
+        _ref = upstream_ref()
+        out["latest"] = remote_file("VERSION", _ref).strip()
+        if out["latest"]:
+            out["mode"] = update_mode_in(remote_file("CHANGELOG.md", _ref),
+                                         out["latest"])
+    return _note_check(out)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ⭐ 3.11.6：「查更新」这件事本身要留痕（日志一行 + 一份状态文件）
+#
+# 背景（Owen 2026-11-17）：中国区用户那台 11-17 的课还停在 3.11.4，而 3.11.5 是
+#   11-16 19:30（北京）发的。**面板查更新失败时没有任何痕迹** —— 分不清是
+#   「没查」「查了没通」还是「查到了但没装」，只能靠猜。
+# 所以两层：
+#   ① `_log()` 一行（`~/Library/Logs/ClassLive/update.log`）：成功失败都写，带代理路由；
+#   ② `update-check.json`（`~/.classlive/`，走 `paths.py`）：给测试报告 `blocks.update` 读。
+# ══════════════════════════════════════════════════════════════════════
+
+#: `check_state()` 住的根（**测试注入点**）。`None` = `paths` 的默认（`~/.classlive`）。
+#  ⚠️ 做成函数而不是常量：常量在 import 那一刻绑死，测试换沙盒后仍然写用户的真目录
+#     —— 正是 `_reqs_stamp()` 那条注释里写过的形状。
+STATE_ROOT = None
+
+#: 面板置位 = 「别再换代码了」（开课前自动安装超时）。`pull()` 在写 journal 之前看它。
+APPLY_CANCEL = threading.Event()
+#: 正在换工作区（`merge --ff-only` 那一两秒）。面板据此暂挡「开始上课」。
+APPLYING = threading.Event()
+#: 这一轮已经把代码换成新的了（面板超时收尾据此不说「没更新成」—— 那是假话，见 entry_panel）。
+SWAPPED = threading.Event()
+
+
+def check_state_path() -> pathlib.Path:
+    """`~/.classlive/update-check.json` —— **唯一定义点在 `paths.py`**。"""
+    import paths
+    return paths.update_check(root=STATE_ROOT)
+
+
+_CRED_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s:]+(?::[^/@\s]*)?@")
+
+
+def redact(text: str) -> str:
+    """把 `scheme://user:pass@host` 里的凭据换成 `***`（OCR 11-17）：git 的报错会回显 remote 地址，
+    remote 里内嵌 token 很常见 —— 原样进日志 / 进会上传的测试报告就是把凭据传出去。"""
+    return _CRED_RE.sub(r"\1***@", text or "")
+
+
+def _write_check_state(out: dict) -> None:
+    """把这次检查的结论落盘（**永不抛**：写不了就只丢这份快照）。"""
+    try:
+        p = check_state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps({
+            "check_ok": bool(out.get("ok")),
+            "error": redact(out.get("error") or "")[:300],
+            "behind": int(out.get("behind") or 0),
+            "current": out.get("current") or version(),
+            "latest": out.get("latest") or "",
+            "route": (out.get("route") or "-")[:120],
+            "mode": out.get("mode") or "",
+            "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, p)       # 跨进程读（开课那个进程的 blocks.update）：别让它读到半份
+    except Exception:                                     # noqa: BLE001
+        pass
+
+
+def check_state() -> dict:
+    """最近一次检查的结论 —— 报告里 `blocks.update` 那一块。**纯本地读，不联网**。
+
+    没查过 / 读不了 → `{"check_ok": None}`（`None` 与 `False` **意思不同**：
+    前者是「这节课开课前没查」，后者是「查了、没查成」—— 混成一个数，报告就答不了
+    「到底是没查还是不通」）。
+    """
+    try:
+        st = json.loads(check_state_path().read_text(encoding="utf-8"))
+    except Exception:                                     # noqa: BLE001
+        return {"check_ok": None}
+    if not isinstance(st, dict):
+        return {"check_ok": None}
+    base = {"check_ok": None, "error": "", "behind": 0, "current": "",
+            "latest": "", "route": "", "mode": "", "checked_at": ""}
+    base.update({k: st[k] for k in base if k in st})
+    return base
+
+
+def _note_check(out: dict) -> dict:
+    """检查收尾的**唯一出口**：写日志一行 + 落盘快照，然后原样返回 `out`。
+
+    ⚠️ 成功也写（「已是最新 / 落后 N 个提交」）—— 只有这样「面板到底查过没有」
+       才有答案；只记失败的话，日志寂静既可以解释成"没查"也可以解释成"查了没事"。
+    """
+    route = out.get("route") or "-"           # 没联网的提前返回别借上一次的路（OCR 11-17）
+    if out.get("ok"):
+        if out.get("behind"):
+            _log(f"检查：落后 {out['behind']} 个提交（{out.get('current')} → "
+                 f"远端 {out.get('latest') or '?'}，更新方式 {out.get('mode') or '?'}）"
+                 f" 路由={route}")
+        else:
+            _log(f"检查：已是最新（{out.get('current')}） 路由={route}")
+    else:
+        # ⚠️ 原文保留（截 300 字）：`fetch 失败: fatal: unable to access …` 那半句
+        #    正是「代理不通 / 证书 / DNS」之间唯一的分辨依据。
+        _log(f"检查失败：{redact(out.get('error') or '')[:300]} 路由={route}")
+    _write_check_state(out)
     return out
+
+
+#: 开课前「查到新版本就当场装」时**不能**顺带跑的步骤 —— 它们要么改用户环境（装依赖），
+#: 要么下模型（几百 MB）。这两样都得用户自己点头，所以有它们就退回「出新版本卡」。
+#  ⚠️ `app`（重建 .app）**不在**里面：这条路本来就不重建它，而且它不影响新代码能不能跑。
+#  ⚠️ `draft_model`（可选草稿模型，`soft`）也不在：这条路一个模型都不下。
+BLOCKING_STEPS = ("deps", "models")
+
+
+def panel_auto_install(offer: dict, *, steps=None, env=None,
+                       started: bool = False) -> dict:
+    """开课前面板查到的更新，能不能**当场自动装**（不弹卡，直接走「立即更新」那条路）。
+
+    Owen 2026-11-17 定的四条，**全中才装**：
+      ① `update_mode` 是 `auto` —— `offer["quiet"]` 已经把它连同「远端依赖/模型有没有变」
+         一起算过（见 `_quiet_ok`），所以这里认 `quiet` 就够了；单看 `mode` 会漏掉
+         「跨了好几版、中间有一版是 manual」那种。
+      ② 没有 deps / models 这类额外步骤（`pending_steps()` 现在就说有 → 装完还得再装）。
+      ③ `CLASSLIVE_NO_AUTO_UPDATE` 没设（与退出时那条路**同一道闸**）。
+      ④ 用户还没点「开始上课」。
+
+    返回 `{"go": bool, "why": str}` —— `why` 是给状态行 / 日志看的一句人话（不弹窗）。
+    **纯函数**：不读文件、不看时钟、不起线程，条件逐条单测。
+    """
+    env = os.environ if env is None else env
+    if env.get("CLASSLIVE_NO_AUTO_UPDATE"):
+        return {"go": False, "why": "关掉了自动更新（CLASSLIVE_NO_AUTO_UPDATE）"}
+    if started:
+        return {"go": False, "why": "已经在开课了"}
+    if offer.get("kind") != "available":
+        return {"go": False, "why": ""}
+    if offer.get("mode") and offer["mode"] != "auto":
+        return {"go": False, "why": f"{offer.get('latest', '')} 标了 manual"}
+    if not offer.get("quiet"):
+        return {"go": False, "why": "这几版要多做一步（依赖 / 模型），留给人点"}
+    if steps is None:
+        # OCR 11-17：「算不出有哪些步骤」≠「没有步骤」—— 拿不准就留给人点（fail-closed）
+        return {"go": False, "why": "算不出还要不要补依赖 / 模型，留给人点"}
+    heavy = [s.get("key") for s in steps
+             if s.get("key") in BLOCKING_STEPS]
+    if heavy:
+        return {"go": False, "why": f"还要{'、'.join(heavy)}，不能开课前装"}
+    return {"go": True, "why": f"正在更新到 {offer.get('latest', '')}…"}
 
 
 def _friendly(out: dict) -> str:
@@ -532,7 +846,7 @@ def pull() -> dict:
     `skipped=True` 表示"本来就没啥可更新"（不是失败）。
     """
     out = {"ok": False, "error": "", "skipped": False, "blocked": False,
-           "before": version(), "after": version(), "commits": 0, "log": [],
+           "route": "", "before": version(), "after": version(), "commits": 0, "log": [],
            "reqs_changed": False, "models_changed": False, "user_msg": ""}
     if not is_repo():
         out["error"] = "这不是 git 仓库，没法更新。"
@@ -596,6 +910,8 @@ def pull() -> dict:
     rc, _, err = _git("fetch", "--quiet")
     if rc != 0:
         out["error"] = f"拉取失败（网络？）：{err or rc}"
+        out["route"] = last_route()
+        _log(f"更新失败（fetch）：{redact(out['error'])[:300]} 路由={out['route']}")
         return {**out, "user_msg": _friendly(out)}
 
     rc, b, _ = _git("rev-list", "--count", "HEAD..@{u}")
@@ -611,6 +927,13 @@ def pull() -> dict:
     #     `_cli()` → 本函数，全程不抢锁 —— 于是"活着的换代码过程一定持着 update.lock"
     #     这个前提**并不成立**：修复可能拿到空闲的锁、看到 index.lock 就删掉另一个 git
     #     进程正在持有的它。没有就自己抢；抢不到（busy）**连 journal 都不写**。
+    # ⭐ 3.11.6：开课前那次自动安装**超过 20 s** 时面板会置 `APPLY_CANCEL` —— 还没换代码就别换了：
+    #    按钮已经恢复，用户随时可能开课；这时再换工作区 = 录课进程读到一半新一半旧的文件。
+    if APPLY_CANCEL.is_set():
+        out["error"] = "已取消（开课前那次超时，下课后再装）"
+        _log(f"更新取消：{out['error']}")
+        return {**out, "user_msg": out["error"]}
+
     _mine_pull = False
     if not _LOCK_MINE:
         _lk = _acquire_lock()
@@ -622,7 +945,25 @@ def pull() -> dict:
         _mine_pull = _lk == "held"        # "error" -> 无锁继续（`_acquire_lock` 已记日志）
     try:
         _write_apply_journal(_git("rev-parse", "HEAD")[1], _git("rev-parse", "@{u}")[1])
-        rc, so, se = _git("pull", "--ff-only", timeout=TIMEOUT * 2)
+        # ⭐ 3.11.6：上面刚 fetch 过 → 换代码用**本地** `merge --ff-only @{u}`，不再联网第二趟
+        #    （原来 `pull --ff-only` 会再 fetch 一次：中国那条慢路上白付一次往返，也让「换代码」
+        #    这一段的时长不可控）。闸门不变：同一把锁、同一份 journal、同样只许快进、同一套失败分类
+        #    （`would be overwritten` / `Not possible to fast-forward` 两条原文 merge 与 pull 一样）。
+        if APPLY_CANCEL.is_set():
+            # OCR 11-17：fetch 赶在 20 s 边界上回来 → 上面那道没拦住；换代码前再看一次
+            rc, so, se = 1, "", "已取消（开课前那次超时）"
+        else:
+            APPLYING.set()
+            try:
+                rc, so, se = _git("merge", "--ff-only", "@{u}", timeout=TIMEOUT)
+            finally:
+                APPLYING.clear()
+            if rc == 0:
+                SWAPPED.set()
+        out["route"] = last_route()
+        if rc != 0:
+            # ⚠️ 失败也要留痕（含超时）—— 只写进日志不弹窗；`user_msg` 那条是给卡片的。
+            _log(f"更新失败（merge）：{redact(str(se or so or rc))} 路由={out['route']}")
         if rc == 0:
             _rm_journal(apply_journal_path())             # 换完了 -> journal 使命结束
     finally:
@@ -663,6 +1004,12 @@ def pull() -> dict:
     out["models_changed"] = _models_changed(head_before, head_after)
     out["log"] = _git("log", "--oneline", f"{head_before}..{head_after}")[1].splitlines()
     out["ok"] = True
+    _log(f"更新成功：{out['before']} → {out['after']} 提交={out['commits']}"
+         f" 路由={out['route'] or last_route()}")
+    if out["reqs_changed"]:
+        _log("  ⚠️ 依赖清单有变化（本模块不装，交给调用方 / 用户）")
+    if out["models_changed"]:
+        _log("  ⚠️ 模型清单有变化")
     return out
 
 
@@ -1882,15 +2229,19 @@ def offer() -> dict:
     """
     import changelog
     out = {"kind": "none", "current": version(), "latest": "", "summary": "", "message": "",
-           "quiet": False, "groups": []}
+           "quiet": False, "mode": "", "route": "", "groups": []}
     if os.environ.get("CLASSLIVE_NO_UPDATE_CHECK"):
         return out
     try:
         bs = branch_state()
         if bs["detached"] or not bs["upstream"] or not bs["on_default"]:
             return out
-        st = check()
+        st = check()                       # ⚠️ 它自己会写日志 + 落盘快照（`_note_check`）
+        out["route"] = st.get("route") or last_route()
         if not st["ok"]:
+            # ⚠️ **再写一行**（`check` 那行说的是 git 怎么失败的，这行说的是「面板这次
+            #    开就没查出东西」）—— 排查时先看哪行、谁也没法从一行里分出来。
+            _log(f"offer：这次没查到（{st.get('error', '')[:200]}）")
             return out
         if st["behind"] <= 0:
             steps = [s for s in pending_steps() if s["key"] in ("deps", "models")]
@@ -1912,7 +2263,10 @@ def offer() -> dict:
                 {"ok": False, "blocked": True, "error": "dirty", "dirty_files": stuck}))
             return out
         out["kind"] = "available"
+        out["mode"] = update_mode_in(remote_log, out["latest"])
         out["quiet"] = _quiet_ok(out["current"], remote_log)
+        _log(f"offer：有新版本 {out['latest']}（更新方式 {out['mode'] or '?'}，"
+             f"可后台装={out['quiet']}） 路由={out['route']}")
         return out
     except Exception as e:                                # noqa: BLE001
         _log(f"offer 异常：{type(e).__name__}: {e}")

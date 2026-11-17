@@ -410,6 +410,9 @@ BLOCKS = frozenset({
     "stream",
     "semantic_seal",  # ⭐ 3.10.6：语意封口计数 `{calls, errors, semantic, cap, no_cut, stale}`
                       #             （`semantic_seal.SemanticSealer.stats`，`main.py:4092` 已在传）
+    "update",   # ⭐ 3.11.6：开课前那次更新检查 `{check_ok, error, behind, current, latest,
+                #             route, mode, checked_at}`（`update.check_state()`）——
+                #             答「查过没查、走的哪条代理路、为什么没装」。没查过 = `{"check_ok": null}`
     "duty",     # 「一些事儿」计数（`main._duty_stats()`：认出 / 记下 / 忽略 / 漏处理）
     "jev",      # ⭐ 3.10.6：Jev 最后一次失败 `{provider, error, at}` +
                 #             ⭐ 3.11：`{calls, fail}`（`keypoints.stats()`）—— 全失败时靠它区分 401/429/连不上

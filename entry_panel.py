@@ -517,6 +517,12 @@ S = {                              # 同进程只允许一个面板（菜单栏/
 }
 
 
+#: 开课前那次**自动安装**的总时长上限（Owen 2026-11-17 定 20 s）。
+# ⚠️ 它是"人在旁边等"的上限，不是网络的上限：到点就按失败收、按钮恢复、课照上 ——
+#    拖过 20 秒的更新不值得让人在开课前盯着。
+AUTO_INSTALL_BUDGET_S = 20.0
+
+
 def _stale(gen, key: str) -> bool:
     """「这一代的工作线程还许不许回写？」—— **统一判据**（2026-10-01 质量审查）。
 
@@ -1563,7 +1569,8 @@ def _stagger_in(views) -> None:
 def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
                entry=None, on_delete=None, on_undo=None, on_delete_course=None,
                hinted=False, why=None, on_select=None, index=None,
-               on_export=None, show_skipped=False, on_toggle_skipped=None):
+               on_export=None, show_skipped=False, on_toggle_skipped=None,
+               start_note=""):
     """一张卡 = 一个落点 + 两行内容（+ 跑过之后的结果列表）。
 
     `hinted` = **选中的那张**（课表猜的，或用户点过的）：只有它画「开始上课」。
@@ -1658,7 +1665,11 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
         #    选中的那张上；纠错（HAX G9「efficient correction」）= 直接点别的卡，一下就换过去。
         #    理由从按钮文案挪到卡片第二行（HAX G11「make clear why」—— 离它说的那张卡最近）。
         #    ⚠️ 开课是重操作（立刻开录），所以「点卡片」只选中、**不**开课。
-        if hinted:
+        if hinted and start_note:
+            # ⭐ 3.11.6：开课前**正在自动装新版本**时，那颗主按钮换成不可点的状态行
+            #    —— 「正在更新到 X…」。`action=None` = 只画不接（`mk` 里据此 `setEnabled_(False)`）。
+            acts.append((start_note, 150.0, None))
+        elif hinted:
             acts.append(("开始上课", 92.0, lambda: on_start(r.course)))
         elif on_select is not None:
             view._on_click = lambda: on_select(r.course)
@@ -1701,6 +1712,12 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
             panel.style_primary(b, title, size=12.0)
         else:
             panel.style_secondary(b, title, size=12.0)
+        if action is None:
+            # 「正在更新到 X…」这类**状态按钮**：只画不接。⚠️ 不设 action 就是不可点，
+            # 但还得说清楚为什么点不动 —— 灰掉 + tooltip。
+            b.setEnabled_(False)
+            b.setToolTip_("更新装完面板会自己重开")
+            return b
         t = _target(action)
         b.setTarget_(t)                                 # ⚠️ 弱引用 —— 靠 _targets 留住
         b.setAction_("act:")
@@ -2099,9 +2116,23 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
         def on_start(course):
             # ⚠️ 更新进行中（拉代码 / 装依赖）不许开课：录课进程会读到一半新一半旧的文件。
-            if S.get("updating"):
-                _status("正在更新 —— 装完会自动重开面板，再点「开始上课」（约 1–3 分钟）")
+            try:
+                import update as _upd
+                _swapping = _upd.APPLYING.is_set()
+            except Exception:                          # noqa: BLE001
+                _swapping = False
+            if _swapping:
+                # ⚠️ 超时恢复了按钮，但换代码那一两秒刚好在进行 —— 这时开课会读到半新半旧的文件
+                _status("正在换代码，几秒后再点「开始上课」")
                 return
+            if S.get("updating"):
+                _tgt = S.get("update_target") or ""
+                _status(f"正在更新到 {_tgt}…装完会自己重开，再点「开始上课」" if _tgt
+                        else "正在更新 —— 装完会自动重开面板，再点「开始上课」（约 1–3 分钟）")
+                return
+            # ⭐ 3.11.6：点了「开始上课」= 用户已经决定要上课 —— 开课前那次**自动安装**
+            #    必须立刻作废（它写在判断里：`update.panel_auto_install(..., started=…)`）。
+            S["started"] = True
             _close_offer()                 # 「有新版本」卡跟着开课一起收掉（不理它 = 下课后自动装）
             _start_now(course)
 
@@ -2626,21 +2657,141 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             _status(f"好 —— 下课退出时自动装 {latest}" if ok
                     else "没记下来（写不进 ~/.classlive）—— 下次打开面板再点一次")
 
-    def _run_update() -> None:
+    def _run_update(*, auto_target: str = "", budget_s: float | None = None) -> None:
+        """装新版本 —— 卡片上「立即更新」和开课前的**自动安装**走的是**同一条**路。
+
+        `auto_target` 非空 = 开课前查到新版本后自动触发（Owen 2026-11-17）：
+          · 状态行说「正在更新到 X…」，卡片上那颗「开始上课」换成不可点的同一句话；
+          · **不装依赖、不下模型**（那条路已经保证没有这类步骤，见 `update.BLOCKING_STEPS`）；
+          · **总时长 `budget_s`（20 s）**：到点按失败收，按钮恢复，课照上。
+        ⚠️ 超时 → 置 `update.APPLY_CANCEL`：后台线程若还在 fetch，`pull()` 写 journal 前看到它就不换代码；
+           若已经在换（`update.APPLYING`，本地 merge 一两秒），「开始上课」暂挡到换完。
+        """
+        prev = S.get("apply_thread")
+        if prev is not None and prev.is_alive():
+            # OCR 11-17：上一轮（超时那次）的线程还在跑 —— 这时清掉取消标记，它就会把代码换了
+            #    却没人收尾。等它自己结束（git 有超时，最多一两分钟）。
+            _status("上一次更新还在收尾，过一会儿再点「立即更新」")
+            return
         S["updating"] = True
+        try:
+            import update as _upd
+            _upd.APPLY_CANCEL.clear()                      # 上一轮确实结束了，才从「没取消」开始
+            _upd.SWAPPED.clear()
+        except Exception:                                  # noqa: BLE001
+            pass
+        if auto_target:
+            S["update_target"] = auto_target
         _set_item("update", {"key": "update", "state": "busy"})
-        _status("正在更新 —— 别关面板，装好会自己重开")
+        _status(f"正在更新到 {auto_target}…" if auto_target
+                else "正在更新 —— 别关面板，装好会自己重开")
+        if auto_target:
+            # 主按钮那一行换成不可点的「正在更新到 X…」（`_make_card` 的 `start_note`）。
+            # ⚠️ 必须 `_later`：这里正处在按钮/卡片自己的回调里，同步重建卡会把它拆掉。
+            _later(refresh)
+        done = threading.Event()
 
         def work() -> None:
             try:
                 import update as update_mod
-                r = update_mod.apply(on_line=lambda s: _later(_status, s))
+                r = update_mod.apply(on_line=lambda s: _later(_status, s),
+                                     models=not auto_target)
             except Exception as e:                         # noqa: BLE001
                 r = {"ok": False, "pulled": False,
                      "user_msg": f"更新出错：{type(e).__name__}: {str(e)[:60]}"}
-            _later(_update_done, r)
+            if not claim():                                # 已经按超时收过了
+                return
+            _later(_auto_update_done if auto_target else _update_done, r)
 
-        threading.Thread(target=work, daemon=True).start()
+        claim_lock = threading.Lock()
+
+        def claim() -> bool:
+            """收尾只许一方认领（OCR 11-17：is_set 再 set 不是原子的，到点那一瞬两边都会收尾）。"""
+            with claim_lock:
+                if done.is_set():
+                    return False
+                done.set()
+                return True
+
+        th = threading.Thread(target=work, daemon=True)
+        S["apply_thread"] = th
+        th.start()
+        if auto_target and budget_s:
+            def guard() -> None:
+                if done.wait(budget_s):
+                    return
+                try:
+                    import update as _upd
+                    swapped = _upd.SWAPPED.is_set()
+                except Exception:                          # noqa: BLE001
+                    swapped = False
+                if swapped:
+                    # OCR 11-17：代码已经换成新的、只是收尾超时 —— 这时说「没更新成」是假话，
+                    #    还会让人在收尾跑着时开课。不认领，等 work() 自己收（成功就照常重开面板）。
+                    _later(_status, f"新版本 {auto_target} 已换上，正在收尾…")
+                    return
+                if not claim():
+                    return
+                try:
+                    import update as _upd
+                    _upd.APPLY_CANCEL.set()                # 还没换代码 -> 别换了（见 `update.pull`）
+                except Exception:                          # noqa: BLE001
+                    pass
+                _later(_auto_update_timeout, auto_target, budget_s)
+            threading.Thread(target=guard, name="auto-update-budget", daemon=True).start()
+
+    def _auto_update_done(r: dict) -> None:
+        """开课前那次自动安装的收尾：成功 → 照旧重开面板（重开后出「已更新到 X」卡）；
+        失败 → **恢复「开始上课」**、说一句人话，「有新版本」卡照旧出。"""
+        S["updating"] = False
+        S.pop("update_target", None)
+        _refresh_chip()
+        _later(refresh)                                   # 主按钮变回「开始上课」
+        if not r.get("ok"):
+            _status(f"没更新成（{_why_short(r)}）—— 照常上课，下课后再装")
+            _offer_after_failed_auto()
+            return
+        msg, item, restart = update_outcome(r, on_restart is not None)
+        _status(msg)
+        if restart and on_restart is not None:
+            on_restart()
+            return
+        if item is not None:
+            ready_by_key["update"] = item
+        _refresh_chip()
+
+    def _auto_update_timeout(latest: str, budget_s: float) -> None:
+        S["updating"] = False
+        S.pop("update_target", None)
+        _refresh_chip()
+        _later(refresh)
+        _status(f"没更新成（超过 {budget_s:g} 秒没装完）—— 照常上课，下课后再装 {latest}")
+        _offer_after_failed_auto()
+
+    def _offer_after_failed_auto() -> None:
+        """自动装没成 → 「有新版本」卡照旧出（它一出来就记了「下课后自动装」的同意）。"""
+        if S.get("update_gen") is None:
+            return                                         # 面板已经关了（do_close 置 None）—— 别往空面板上排卡
+        offer = S.get("update_offer") or {}
+        # OCR 11-17：`_run_update` 把「更新」那格改成了 busy —— 失败 / 超时要放回「有新版本 X」，
+        #    不然胶囊一直写「更新中…」，和状态行「没更新成」打架。
+        try:
+            it = ready.update_item(offer) if offer else None
+        except Exception:                                  # noqa: BLE001
+            it = None
+        if it is not None:
+            ready_by_key["update"] = it
+        else:
+            ready_by_key.pop("update", None)
+        _refresh_chip()
+        if offer.get("kind") == "available":
+            _later(_offer_card, offer, S.get("update_gen"))
+
+    def _why_short(r: dict) -> str:
+        """失败原因**一句**（状态行只放得下一句）。取 `user_msg` 第一行，实在没有就说「没连上」。"""
+        line = ((r.get("user_msg") or r.get("error") or "").strip().splitlines() or [""])[0]
+        line = line.strip().strip("。.、 ")
+        return line[:40] or "没连上"
 
     def _update_done(r: dict) -> None:
         S["updating"] = False
@@ -3091,8 +3242,34 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 return
             if offer.get("kind", "none") != "none":
                 _later(_show_update, offer, upd_gen)      # 就绪条末尾那一格（先接上：卡片的「现在更新」要用它）
-            if offer.get("kind") == "available":
+            if offer.get("kind") != "available":
+                return
+            # ⭐⭐ 3.11.6（Owen 2026-11-17）：**开课前面板查出新版本 → 条件满足就当场装**。
+            #    原来只在退出时装，而作者/朋友的版本常常发在两节课之间 —— 开课那次根本不触发。
+            #    判据是纯函数（`update.panel_auto_install`），逐条可单测；这里只负责接线。
+            try:
+                steps = update_mod.pending_steps()
+            except Exception:                              # noqa: BLE001
+                steps = None                               # 算不出 -> 不自动装（fail-closed）
+            plan = update_mod.panel_auto_install(offer, steps=steps,
+                                                started=bool(S.get("started")))
+            if not plan["go"]:
+                if plan.get("why"):
+                    # 没自动装也要留一句（「查到了、为什么没装」同样是排查要的痕迹）
+                    try:
+                        update_mod._log(f"面板没自动装：{plan['why']}")
+                    except Exception:                  # noqa: BLE001
+                        pass
                 _later(_offer_card, offer, upd_gen)
+                return
+            _later(_auto_install, offer, upd_gen)
+
+        def _auto_install(offer: dict, gen) -> None:
+            """主线程：开课前的自动安装。⚠️ 绝不在这里干活 —— 装是后台线程（`_run_update`）。"""
+            if _stale(gen, "update_gen") or S.get("started"):
+                return
+            _run_update(auto_target=offer.get("latest", ""),
+                        budget_s=AUTO_INSTALL_BUDGET_S)
 
         threading.Thread(target=_probe_update, daemon=True).start()
 
@@ -4241,6 +4418,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                               on_export=lambda c=r.course: export_not_added_list(c),
                               show_skipped=(r.course in (S.get("expanded") or ())),
                               on_toggle_skipped=lambda c=r.course: toggle_skipped(c),
+                              # ⭐ 3.11.6：开课前的自动安装进行中 → 主按钮变状态行
+                              start_note=(f"正在更新到 {S['update_target']}…"
+                                          if S.get("update_target") else ""),
                               # ⚠️ **课号要在这里绑好。** `_make_card` 只传词
                               #    （它不知道也不该知道课号之外的上下文）——
                               #    第一版直接传 `do_delete`（两个参数），调用点只给一个，

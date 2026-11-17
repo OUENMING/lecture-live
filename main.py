@@ -2876,6 +2876,14 @@ def run(args) -> None:
             tester.note_block("deps", _upd.deps_diag())
         except Exception:                                 # noqa: BLE001
             pass
+        # ⭐ 3.11.6：**开课前那次更新检查**的结论（面板查的、上次查的）—— 一节都没查过的
+        #    机器也能看出来（`check_ok` 是 `None` 而不是 `False`）。
+        #    ⚠️ 纯本地读 `~/.classlive/update-check.json`（`update.check_state`），不联网。
+        try:
+            import update as _upd2
+            tester.note_block("update", _upd2.check_state())
+        except Exception:                                 # noqa: BLE001
+            pass
         # ⚠️ 提醒**放在启动时**：收尾才说就晚了，那时整节课已经录完。
         #    （2026-09-30 起测试模式下默认录 —— 见上面 `_rec` 那段。）
         if tester.record_audio:
@@ -4362,10 +4370,11 @@ def run(args) -> None:
         try:
             tag = item[0]
             txt = None
-            if tag == "final":
-                txt = {"en": item[1], "zh": item[2]}
-            elif tag in ("en", "zh"):
-                txt = {tag: item[1]}
+            if tag == "final":                      # 不调模型那条路 en/zh 是空串 → 回落原始 ASR（同 drain 的 live.final）
+                txt = {"en": item[1] or (item[3] if len(item) > 3 else ""), "zh": item[2]}
+            elif tag in ("en", "zh"):               # 逐 token 增量：只计数，不进环
+                ctl.emit(str(tag), ring=False)
+                return
             ctl.emit(str(tag), text=txt)
         except Exception:                           # noqa: BLE001
             pass

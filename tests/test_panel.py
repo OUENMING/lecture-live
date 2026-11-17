@@ -493,6 +493,11 @@ def main() -> int:
                 check(f"⭐⭐ 宽 {_w:.1f} 时章节条宽度是**整数**（`floor` 生效；不取整文字会发虚）",
                       float(_lb.frame().size.width).is_integer(),
                       str(_lb.frame().size.width))
+                # ⭐ 11-17 Owen：点顶栏空白也开右栏 —— 标签（= 点击区右段）只能和文字一样宽
+                _txt_w = float(_lb.attributedStringValue().size().width)
+                check(f"⭐ 宽 {_w:.1f} 时章节条点击区不超出文字（+8pt 以内）",
+                      _lb.frame().size.width <= _txt_w + 8.0,
+                      f"lbl={_lb.frame().size.width} txt={_txt_w:.1f}")
                 # 点击区 = 小图标 + 标签（右边缘与标签同一个数；左边缘让到图标起点）
                 check(f"⭐ 宽 {_w:.1f} 时点击区与标签**同框**（同一个数，别各算各的）",
                       ov._chapter_hit.frame().size.width == _lb.frame().size.width + _icon_w

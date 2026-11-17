@@ -2511,6 +2511,9 @@ class Overlay:
             if self._chapter_lbl.stringValue() != _shown:
                 motion.fade_swap(self._chapter_lbl)      # 新章节换标题：淡换，不跳（2026-10-14）
                 self._chapter_lbl.setStringValue_(_shown)
+            # 上色按（字, 右栏开没开）缓存：占位「实时总结」开 / 关右栏时字不变、颜色要变
+            if getattr(self, "_chapter_attr_key", None) != (_shown, self._split_on):
+                self._chapter_attr_key = (_shown, self._split_on)
                 self._chapter_attr(_shown)
             # ⚠️ 标签 / 点击区只占**文字实际宽度**（11-17 Owen：点顶栏空白处也弹出总结 —— 范围太大）。
             try:

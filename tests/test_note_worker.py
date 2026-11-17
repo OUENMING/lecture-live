@@ -560,9 +560,12 @@ def t_wrapup_card_never_claims_saved() -> None:
     """
     src = pathlib.Path(main.__file__).read_text(encoding="utf-8")
     i = src.index("if _spawned is None:")
-    seg = src[i:i + 1500]
+    seg = src[i:src.index("while True:", i)]           # 到 `_spin(_done…)` 那个循环为止 = 整个分岔
     check("⭐⭐ 后台分支给了「已交给后台」的文案（不许落到『收尾结束』那条默认值）",
-          '_box["msg"]' in seg and "后台" in seg, seg[:160])
+          '_box["msg"] = handoff_msg()' in seg and "后台" in seg, seg[:160])
+    check("⭐ 后台分支的实时总结收尾不在主线程同步跑（11-17：点完保存卡冻 18 s）",
+          "summ.finish(" not in seg.split("def _summ_finish")[0].split("else:")[-1]
+          and "_spin(lambda: not _thsf.is_alive())" in seg, seg[:160])
     j = src.index("_npf = (locals().get(\"_np_say\")")
     seg2 = src[j:j + 400]
     check("⭐⭐ 后台模式不写 ETA 假样本（`_spawned is None` 才收口）",

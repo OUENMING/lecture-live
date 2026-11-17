@@ -5091,11 +5091,26 @@ def run(args) -> None:
                     #    · 失败的兜底是 `note_jobs` 的收工状态 + 下次启动
                     #      `resume_pending_notes`（§4.3 表里那一格）。
                     _done.set()
+                    # ⚠️ 不许在主线程上同步跑：最后一章的合成要调模型，11-17 实测 18 s
+                    #    （16:16:09 交给后台 → 16:16:27 写完 chapters），这期间窗口不 pump
+                    #    = 点完「保存」整张卡冻住。丢进线程 + `_spin`，同测试报告那段。
+                    def _summ_finish():
+                        try:
+                            summ.finish(timeout_s=SUMMARY_FINISH_S, cancel=_cancel)
+                        except BaseException as e:        # noqa: BLE001
+                            echo(f"⚠ 实时总结收尾失败（笔记照写）："
+                                 f"{type(e).__name__}: {str(e)[:80]}")
+                    _thsf = threading.Thread(target=_summ_finish, daemon=True,
+                                             name="summary-finish")
+                    _thsf.start()
                     try:
-                        summ.finish(timeout_s=SUMMARY_FINISH_S, cancel=_cancel)
-                    except BaseException as e:            # noqa: BLE001
-                        echo(f"⚠ 实时总结收尾失败（笔记照写）："
-                             f"{type(e).__name__}: {str(e)[:80]}")
+                        _spin(lambda: not _thsf.is_alive())
+                    except KeyboardInterrupt:             # 第一次 Ctrl+C：让总结在批次边界停，不丢笔记
+                        _cancel.set()
+                        _spin(lambda: not _thsf.is_alive())
+                    # `_spin` 在窗口被关时会提前返回 —— 那时主线程不用 pump 了，
+                    # 直接等它写完（有界：finish 自带 SUMMARY_FINISH_S），别让 daemon 线程随进程退出被掐断。
+                    _thsf.join(SUMMARY_FINISH_S + 5)
                     # ⚠️ 必须给一句文案：`wrapup_done(_ok, msg or "收尾结束")` 在没有 msg
                     #    时会把卡片上的「已交给后台」**覆盖成「收尾结束」** —— 而笔记
                     #    其实还没写出来（假话）。见下面 `_done_ui` 那个调用点。

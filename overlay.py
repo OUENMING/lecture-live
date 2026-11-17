@@ -1628,7 +1628,7 @@ class Overlay:
         self._NSFont, self._NSTF = NSFont, NSTextField
         # 答案折行的实测字体: 必须与转录区大字位用的是**同一个** 18pt Medium,
         # 否则量出来的行高与标签实际排版对不上, 折行判据就是假的。
-        self._answer_font = _ui_font(18.0)
+        self._answer_font = _ui_font(uitokens.ZH_PT)
         # 存成实例属性而不靠局部作用域: 后面 _set_rule_focus / _on_input_focus
         # 是**方法**, 那里没有 __init__ 的局部名 —— 早先直接写 NSColor 会 NameError,
         # 且被 except 吞掉, 症状是"细线永远不上色"这种完全静默的失败。
@@ -1645,11 +1645,11 @@ class Overlay:
         self._scroll_h = self._collapsed_scroll_h
         self._pinned = PINNED_H
         self._expanded_h = self._expanded_scroll_h()
-        f_zh = (_ui_font(18.0),
+        f_zh = (_ui_font(uitokens.ZH_PT),
                 NSColor.whiteColor(), NSLineBreakByWordWrapping)
         f_en = (_ui_font(uitokens.EN_PT),
-                NSColor.whiteColor().colorWithAlphaComponent_(0.80), self._trunc)
-        f_big = (_ui_font(18.0),
+                NSColor.whiteColor().colorWithAlphaComponent_(uitokens.TEXT_EN), self._trunc)
+        f_big = (_ui_font(uitokens.ZH_PT),
                  NSColor.whiteColor(), NSLineBreakByWordWrapping)
         #: 「↓ N 句新的」（往回翻时浮在转录区右下角）。⚠️ 先置 None: TranscriptView 的
         #: `on_follow_change` 回调可能在 `_btn_new` 建好之前就被调（构造期的
@@ -1673,14 +1673,14 @@ class Overlay:
         # ⚠️ maxLines 必须给 ROLL_LINES(=2): 原先是 1, 而 1 + WordWrapping 正是本
         # 文件头说的"静默吞行、不给省略号"那套配置 —— 两个草稿标签一直是那个状态,
         # 所以长草稿被裁得无声无息。见 rollup_lines 的 docstring。
-        self._draft_lbl = self._label(11.0, NSColor.whiteColor().colorWithAlphaComponent_(0.50),
+        self._draft_lbl = self._label(11.0, NSColor.whiteColor().colorWithAlphaComponent_(uitokens.DRAFT_EN),
                                       ROLL_LINES)
         ve.addSubview_(self._draft_lbl)
         self._draft_base_len = None       # 上一帧底行长度 -> rollup_lines 的断点滞回
         self._draft_box_y_en = self._draft_box_y_zh = 0.0    # 盒底边, 由 _layout 填
         self._draft_cache = {}            # 每槽的 (键 -> 折行结果), 见 _roll_into
         # 草稿的即时中文译文(尽早可见; 定稿后被正式卡片取代)
-        self._draft_zh = self._label(12.5, NSColor.whiteColor().colorWithAlphaComponent_(0.78),
+        self._draft_zh = self._label(12.5, NSColor.whiteColor().colorWithAlphaComponent_(uitokens.DRAFT_ZH),
                                      ROLL_LINES)
         self._draft_zh_val = ""
         self._draft_zh_base_len = None
@@ -2926,7 +2926,7 @@ class Overlay:
                 import summary_pane as _sp
                 _pcw = 40.0
                 # 与右栏标题那一行（「实时总结 · N 段」）同高，右边缘对齐正文右缘
-                _pc.setFrame_(NSMakeRect(self._width + self._pane_w - _sp.GUTTER - _pcw,
+                _pc.setFrame_(NSMakeRect(self._width + self._pane_w - _sp.GUTTER - _sp.SCROLLER_ROOM - _pcw,
                                          self._height - 32, _pcw, 22))
         y = BOTTOM_PAD
         gh = self._gloss_h()
@@ -2951,6 +2951,9 @@ class Overlay:
             self._gloss_lbl.setMaximumNumberOfLines_(1 if self._collapsed else 3)
             self._gloss_lbl.setLineBreakMode_(
                 self._trunc if self._collapsed else self._wrap)
+            if getattr(self, "_gloss_attr_collapsed", None) is not self._collapsed:
+                self._gloss_attr_collapsed = self._collapsed
+                self._gloss_attr()                     # 收起 / 展开切换：富文本的换行方式跟着换
             self._gloss_lbl.setFrame_(NSMakeRect(pad, y, w, gh))
             self._gloss_hit.setFrame_(NSMakeRect(pad, y, w, gh))     # 点击区与术语行同框
         # ⚠️ 草稿标签的 frame **只有 `_roll_into` 一个写者**(贴底 + 按实际行数收缩)。
@@ -3408,7 +3411,8 @@ class Overlay:
                                 NSParagraphStyleAttributeName, NSShadowAttributeName)
             W = self._NSColor.whiteColor()
             ps = NSMutableParagraphStyle.alloc().init()
-            ps.setLineBreakMode_(self._trunc)
+            # 老布局展开态的术语行是三行折行（`_layout`）—— 富文本的段落样式会盖掉标签自己的设置，得跟它一致
+            ps.setLineBreakMode_(self._trunc if (LAYOUT_D or self._collapsed) else self._wrap)
             f = self._gloss_lbl.font()
             fb = _ui_font(f.pointSize(), 0.3)                                   # Semibold
             if self._hint is not None or GLOSS_SEP not in text:

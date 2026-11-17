@@ -19,6 +19,13 @@
 #   wrangler secret put CMD_CHAT_KEY      # 可选：CommandCode key，**长调用主通道**（课后笔记 / 实时总结，
 #                                         #   2026-11-05）。不配就复用 JEV_CC_KEY；两把都不配 = 长调用全走 DeepSeek。
 #                                         #   ⚠️ 建议单独配一把：笔记量大，和 Jev 共用会把 Jev 额度一起打满。
+#   wrangler secret put OPENCODE_GO_KEY   # 可选：OpenCode Go 的 key（第三家上游，2026-11-17）。只有路由表把某个
+#                                         #   调用类指到 opencode 时才用；不配 = 那一类静默回 DeepSeek（fail-safe）。
+#                                         # ⚠️ 它要的是 zen/go/v1 那把 key，不是本地 `opencode` CLI 的登录态。
+#   OPENCODE_GO_MODEL                     # 可选（普通变量即可，`wrangler secret put` 也行）：不写就是
+#                                         #   `deepseek-v4.1-flash`（2026-11-17 实查 /zen/go/v1/models 有这个 id）。
+#   CHAT_ROUTES                           # 可选：不带 DO 表时的上游路由（`chapter=deepseek,note=cc,*=deepseek`）。
+#                                         #   **只在没写 DO 表时才看得出**：`cl_admin.py route …` 写进 DO 的那张表优先级更高。
 #   wrangler deploy
 #
 # 实时转写的会话上限默认 3 h。要改就加一段 [vars]（可选，不写就用默认）：

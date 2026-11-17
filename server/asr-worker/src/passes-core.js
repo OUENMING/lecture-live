@@ -5,6 +5,7 @@
 // 键（DO 的 KV 接口；SQLite 后端的 DO 同样支持，免费档可用）：
 //   code:<码>              {name, created, expires, revoked, max_devices, daily_asr_s, daily_tokens, daily_rt_s}
 //   dev:<码>               {<install_id>: {first, last}}
+//   chat-routes            {<调用类|*>: deepseek|cc|opencode}（对话上游路由表，2026-11-17；`cl_admin.py route` 写）
 //   use:<YYYY-MM-DD>:<码>  {asr_s, asr_reqs, llm_reqs, tokens_in, tokens_out, cache_hit, jev_reqs, jev_q,
 //                           models:{v3|turbo|qwen|other: 段数}, vers:{<客户端版本>: 次数},
 //                           rt_s, rt_reqs}
@@ -28,6 +29,7 @@
 // ⚠️「哪些区合法」的唯一定义点在 `soniox-core.REGIONS`（这里 import REGION_NAMES，**别再抄一份 us/jp**）。
 
 import { REGION_NAMES } from "./soniox-core.js";
+import { UPSTREAMS, normalizeUpstream } from "./routes.js";
 
 const DAY_MS = 86400000;
 export const DEFAULT_DAYS = 120;
@@ -64,6 +66,12 @@ const addDays = (d, n) =>
 // 每请求加一个新键，把 use:<日>:<码> 这一格撑大；那个 put 一旦失败，reportUsage 的
 // catch 会把它吞掉 -> 当天的 asr_s / tokens 全部静默停更。所以这里限最多 VER_MAX_KEYS 个键。
 const VER_MAX_KEYS = 8;
+
+// ---- 对话上游路由表（`cl_admin.py route …` 写，handler.chatRoutes 读）----
+// 只存「用户显式改过的那些类」，没写的类回落到 env / 默认（见 routes.js）。
+// 键名与值的校验权都在这里（存储不变量归这个模块管，同 VER_RE 的理由）；`{}` = 清空回默认。
+const ROUTES_KEY = "chat-routes";
+const ROUTE_CLASS_RE = /^(\*|[a-z0-9][a-z0-9._-]{0,19})$/;
 
 // ---- 实时转写（rt）的用量回收：窗口与去重 ----
 // Worker 看不到音频流，用量只能从 Soniox 的日志事后回收（日志是**请求完成**才有，见官方 usage-logs 指南）。
@@ -115,6 +123,9 @@ export class PassCore {
       // 实时转写的用量回收：游标读 / 一批日志落账（handler.js 的 scheduled 调，面板也能只读地看进度）
       case "/admin/rt/cursor": return json(await this.#rtCursor(body));
       case "/admin/rt/import": return json(await this.#rtImport(body));
+      // 对话上游路由表（2026-11-17）：一个 key-value 小格子，跟用量不相干
+      case "/admin/routes/get": return json(await this.routesGet());
+      case "/admin/routes/set": return json(await this.routesSet(body));
       default: return json({ error: "not found" }, 404);
     }
   }
@@ -323,6 +334,35 @@ export class PassCore {
       if ("daily_rt_s" in body) c.daily_rt_s = r;
       if (Number.isInteger(body.max_devices) && body.max_devices > 0) c.max_devices = body.max_devices;
     });
+  }
+
+  // 路由表：`chat-routes` = `{<调用类|*>: deepseek|cc|opencode}`，**只存显式改过的类**。
+  // 没写过的类由 Worker 回落到 env.CHAT_ROUTES / 默认表（routes.js），所以这里不写默认值 ——
+  // 写下来就等于把当时那份默认冻结了，换 `CMD_CHAT_CLASSES` 也改不动。
+  async routesGet() {
+    const r = await this.storage.get(ROUTES_KEY);
+    return { routes: r && typeof r === "object" ? r : {}, upstreams: [...UPSTREAMS] };
+  }
+
+  // 整体覆盖（不是逐条合并）：调用方先 get、改一条、再 set —— 这样「清空」与「只改一条」是同一个动作。
+  // 校验全在这里：类名形状 + 值必须在三家里。看到不合法的就整批拒，**不半写**。
+  async routesSet({ routes }) {
+    if (!routes || typeof routes !== "object" || Array.isArray(routes)) {
+      return { error: "routes 必须是 {调用类: 上游} 对象（{} = 清空回默认）" };
+    }
+    const out = {};
+    for (const [k, v] of Object.entries(routes)) {
+      const c = String(k).trim().toLowerCase();
+      if (!ROUTE_CLASS_RE.test(c)) return { error: `调用类名不合法：${String(k).slice(0, 32)}` };
+      const u = String(v ?? "").trim().toLowerCase();
+      if (!UPSTREAMS.includes(u)) {
+        return { error: `上游只能是 ${UPSTREAMS.join(" / ")}，收到「${String(v).slice(0, 32)}」` };
+      }
+      out[c] = normalizeUpstream(u);
+    }
+    if (Object.keys(out).length) await this.storage.put(ROUTES_KEY, out);
+    else await this.storage.delete(ROUTES_KEY);
+    return { ok: true, routes: out };
   }
 
   // ---- 实时转写的用量回收（见文件头）----

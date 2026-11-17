@@ -393,6 +393,16 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | 音频 | **正常上课从不落盘**；唯一例外 = 测试模式（开课前要跟同学说明） | |
 
 隐私红线（3.9.0 起改口径）：**定稿云端转写默认开、可关**——开着时每段音频（Opus）经作者的 Worker 发给 Groq / 阿里云百炼；要保证音频不出机器只有两个办法：面板「语音模型」菜单里取消勾选「云端转写」（10-12 起不再是落点条上的开关）、或 `CLASSLIVE_CLOUD_ASR=0`。**不能**对用户说「用纯转录档就不出本机」（每节课都从翻译档开始，切换前的几段已发出，R13）。首次启动告知：`.app` 弹窗点过才记 `acknowledged`，终端只打一行提示、不记（R14）。
+
+**对话上游（Worker 自己换道，作者本机操作）**——课后笔记 / 精修 / 课前准备这些长调用，三家可切：`deepseek`（官方直连）/ `cc`（CommandCode）/ `opencode`（OpenCode Go）。
+
+```
+ClassLive.app/Contents/MacOS/python scripts/cl_admin.py route                 # 看当前生效表（标出每条来自 DO / env / 默认）
+ClassLive.app/Contents/MacOS/python scripts/cl_admin.py route note opencode   # 让一类改走 OpenCode Go（'*' = 其余全部）
+ClassLive.app/Contents/MacOS/python scripts/cl_admin.py route --reset         # 清空回默认（note/polish/prep → cc，其余 → deepseek）
+```
+
+⚠️ 约 60 秒内生效（Worker 按 isolate 缓存路由表 60 s；写表那台请求里立即生效）。要切上游的 key 是 Worker secret：`CMD_CHAT_KEY` / `OPENCODE_GO_KEY`；没配的那家会自动回 DeepSeek，不会把调用打没。
 测试模式传出去的包含真实课堂内容（可能含同学声音）
 ——README 有原文警告，别弱化它。
 

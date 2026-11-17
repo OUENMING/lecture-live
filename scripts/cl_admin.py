@@ -11,6 +11,11 @@
     ClassLive.app/Contents/MacOS/python scripts/cl_admin.py limit liming --tokens 2000000 --asr-s none --devices 3
     ClassLive.app/Contents/MacOS/python scripts/cl_admin.py delete cl-test-1778295d5eb5c1b0 --yes
                                                        # ⚠️ 不可逆：码 + 设备 + 全部用量一起没了
+    ClassLive.app/Contents/MacOS/python scripts/cl_admin.py route                  # 看当前生效的对话上游表
+    ClassLive.app/Contents/MacOS/python scripts/cl_admin.py route chapter opencode # 让某一类改走 OpenCode Go
+    ClassLive.app/Contents/MacOS/python scripts/cl_admin.py route '*' cc          # 其余类全走 CommandCode
+    ClassLive.app/Contents/MacOS/python scripts/cl_admin.py route --reset          # 清空回默认表
+                                                       # 上游只有三家：deepseek / cc / opencode（~60 秒内生效）
 
 名字对应多个码时（同名重发过）改用码本身。管理令牌读 `~/.classlive/asr-admin-token`（600），
 与 Worker 的 `wrangler secret put ADMIN_TOKEN` 同值；**本脚本从不打印它**。
@@ -89,6 +94,51 @@ def _limit_arg(v: str | None):
     return None if v.lower() in ("none", "null", "不限") else float(v)
 
 
+UPSTREAMS = ("deepseek", "cc", "opencode")
+_SOURCE = (("stored", "你设的"), ("env", "env CHAT_ROUTES"), ("defaults", "默认"))
+
+
+def _route_rows(info: dict) -> list[tuple[str, str, str]]:
+    """生效表 -> [(类, 上游, 来自哪里)]。`*` 排在最后当「其余」。"""
+    eff = info.get("effective") or {}
+    layers = {k: (info.get(k) or {}) for k, _ in _SOURCE}
+    rows = []
+    for cls in sorted(eff, key=lambda c: (c == "*", c)):
+        src = next((label for key, label in _SOURCE if cls in layers[key]), "默认")
+        rows.append((cls, str(eff[cls]), src))
+    if "*" not in eff:
+        rows.append(("*", "deepseek", "内置（没写 `*` 就是 deepseek）"))
+    return rows
+
+
+def _route_cmd(ns) -> int:
+    if ns.reset:
+        _post("routes/set", {"routes": {}})
+        print("✅ 路由表已清空，回默认表（约 60 秒内生效）。")
+        return 0
+    if (ns.cls is None) != (ns.upstream is None):
+        sys.exit("要么两个都给（route <调用类> <上游>），要么都不给（只看）；清空用 --reset。")
+    # ⭐ 校验放在联网之前（一个字节都不发）：写错就报错，别先读一次再退出。
+    cls = upstream = None
+    if ns.cls is not None:
+        upstream = ns.upstream.strip().lower()
+        if upstream not in UPSTREAMS:
+            sys.exit(f"上游只能是 {' / '.join(UPSTREAMS)}，收到「{ns.upstream}」。")
+        cls = ns.cls.strip().lower()
+    info = _post("routes/get", {})
+    if cls is not None:
+        stored = dict(info.get("stored") or {})
+        stored[cls] = upstream
+        _post("routes/set", {"routes": stored})
+        info = _post("routes/get", {})          # 重新拉一遍：打印的是合并后的生效表
+        print(f"✅ {cls} → {upstream}")
+    print("对话调用的上游路由（deepseek 直连 / cc = CommandCode / opencode = OpenCode Go）")
+    for cls, up, src in _route_rows(info):
+        print(f"  {cls:<14} {up:<9} ← {src}")
+    print("⚠️ 约 60 秒内生效（Worker 每个 isolate 缓存 60 秒）。设 `*` 管「其余所有类」。")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="一人一码管理")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -102,8 +152,14 @@ def main(argv=None) -> int:
     lim = sub.add_parser("limit"); lim.add_argument("who")
     lim.add_argument("--tokens"); lim.add_argument("--asr-s"); lim.add_argument("--devices", type=int)
     dl = sub.add_parser("delete"); dl.add_argument("code"); dl.add_argument("--yes", action="store_true")
+    rt = sub.add_parser("route")
+    rt.add_argument("cls", nargs="?", help="调用类（note / polish / prep / chapter / * …）")
+    rt.add_argument("upstream", nargs="?", help="/".join(UPSTREAMS))
+    rt.add_argument("--reset", action="store_true", help="清空存过的表，回默认")
     ns = ap.parse_args(argv)
 
+    if ns.cmd == "route":
+        return _route_cmd(ns)
     if ns.cmd == "add":
         body = {"name": ns.name}
         if ns.days:

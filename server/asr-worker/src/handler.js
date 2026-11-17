@@ -98,6 +98,7 @@ function toBase64(buf) {
 
 import { TURBO, V3 } from "./quota-core.js";
 import { CODE_RE } from "./passes-core.js";
+import { UPSTREAMS, defaultRoutes, mergeRoutes, parseRoutes, resolveRoute } from "./routes.js";
 import { KEY_TTL_S, PROBE_MAX_SESSION_S, REGION_NAMES, STT_RT_MODEL, configuredRegions, collectUsage,
          maxSessionS, mintTempKey, pickRegion, regionKey, wsUrl } from "./soniox-core.js";
 
@@ -124,10 +125,12 @@ let fastLlmDownUntil = 0;                    // 本 isolate 内存：跟 lease �
 // 测试用：清掉冷却。
 export function _resetFastLlm() { fastLlmDownUntil = 0; }
 
-// ---- 长文生成通道：CommandCode（2026-11-05 作者定；2026-11-07 收窄到「笔记类」）----
-// **只有生成式长文**（课后笔记 / 精修 / prep）先走 CommandCode 的 OpenAI 兼容端
+// ---- 长文生成通道：CommandCode（2026-11-05 作者定；2026-11-07 收窄到「笔记类」；2026-11-17 变成可切）----
+// **只有生成式长文**（课后笔记 / 精修 / prep）默认先走 CommandCode 的 OpenAI 兼容端
 // （`/provider/v1/chat/completions`，同一把 CMD key，模型钉死 `deepseek/deepseek-v4.1-flash`）；
 // 非 2xx / 响应头超时 / 断流 → **退回原来的 DeepSeek 直连**。
+// ⭐ 2026-11-17 起「哪个调用类走哪家」由**路由表**决定（唯一定义点 `routes.js`，三家：deepseek / cc / opencode）：
+//    一条命令就能切（`scripts/cl_admin.py route note opencode`），不用改代码、不用重新部署。
 // 为什么要这条：2026-11-05 06:59Z DeepSeek 余额归零，直连长调用全 402（笔记 / 章节 / atom 全灭），
 // 而短翻译有 OpenRouter 兜着。这条给长调用也加一条独立记账的上游。
 // ⚠️ 短翻译（stream 且 ≤400 tokens）**不走这里**：CC 首字实测 1.3 s，OpenRouter 只要 ~0.46 s。
@@ -135,7 +138,7 @@ export function _resetFastLlm() { fastLlmDownUntil = 0; }
 //    CC 会忽略 `thinking:{"type":"disabled"}`（其 issue #697，2026-09-09 复测仍未修），DeepSeek
 //    V4.1-Flash 因此默认开思考；推理 token 计入 `completion_tokens` 并吃 `max_tokens`。
 //    `response_format` 也不保证生效（issue #685 曾直接 400，仍 open）。所以走这条通道的调用
-//    **必须能在预算被吃掉时重来**，见 `useCmdChat` 的调用类白名单与 `cmdContentTag`。
+//    **必须能在预算被吃掉时重来**，见 `routes.js` 的路由表与 `cmdContentTag`。
 const CMD_CHAT_URL = "https://api.commandcode.ai/provider/v1/chat/completions";
 const CMD_CHAT_MODEL_DEFAULT = "deepseek/deepseek-v4.1-flash";
 const CMD_CHAT_HEADER_MS = 10_000;           // 只等响应头；正文另有「断流 = 失败」兜底（见 cmdChatAttempt）
@@ -147,14 +150,12 @@ const CMD_CHAT_UA = "ClassLive/0.0 (+https://github.com/OUENMING/lecture-live)";
 //       700 的预算被吃穿 → content 空（JSON mode 洗成空格）或半截 JSON。
 //       11-06 实测：44 次 CC 调用 25 次 content 坏；同一 prompt 直连 DeepSeek 最大只用 564 token、0 失败。
 //    只有"生成式长文、能容忍一次重来"的调用适合 CC（思考对它反而是加分）。
-//: 走 CC 主通道的调用类。**必须和 `llm_client.headers(call_class=…)` 传的名字对得上**：
+//: 走长调用主通道的默认调用类 —— **表本身在 `routes.js` 的 `defaultRoutes`**（唯一定义点），
+//    这里只留注释：**必须和 `llm_client.headers(call_class=…)` 传的名字对得上**：
 //    note = 课后笔记链（`obsidian_writer` 三个出口）；polish = 整课精修；prep = 课前准备。
 //    其余（atom / chapter / classify / seal / merge / term / note-build / recap / keyentry）
-//    一律 DeepSeek 直连 —— 更快，且 DeepSeek 4xx 时下面的救援会兜住。
-const CMD_CHAT_CLASSES_DEFAULT = "note,polish,prep";
-//: 老客户端不发 `X-ClassLive-Call` 时的兜底判据：只有 ≥ 这个数才当笔记。低于它一律回 DeepSeek。
-//    ⚠️ 这条只是**向后兼容**，不是路由规则本身；新客户端必须显式发 header。
-const CMD_CHAT_LEGACY_NOTE_TOKENS = 4000;
+//    默认一律 DeepSeek 直连 —— 更快，且 DeepSeek 4xx 时下面的救援会兜住。
+//    要改就 `cl_admin.py route note opencode`（或 env `CHAT_ROUTES`），别改这张默认表。
 //: 401/402/403/429 冷却 10 分钟 —— CC 下线时别让每次笔记 / 每个窗口都先白打一次（同 fastLLM 的理由）。
 const CMD_CHAT_COOLDOWN_MS = 10 * 60_000;
 //: 超时 / 5xx 只短冷却：这两种多半是抖动，10 分钟太长会把好通道一起关掉。
@@ -167,27 +168,103 @@ const CMD_CHAT_BODY_MS = 30_000;
 const CMD_CHAT_COOLDOWN_STATUS = new Set([401, 402, 403, 429]);
 //: DeepSeek 回这些状态 = 这条通道当下不可用（余额 / 额度 / key），用 CC 救一次。
 const DS_RESCUE_STATUS = new Set([401, 402, 403, 429]);
-let cmdChatDownUntil = 0;
-let cmdChatBadStreak = 0;
-export function _resetCmdChat() { cmdChatDownUntil = 0; cmdChatBadStreak = 0; }
+//: 每家长调用上游一份冷却状态（本 isolate 内存，回收就丢）。`down` = 冷却到哪个时刻，`bad` = content 连坏几次。
+const cmdState = { down: 0, bad: 0 };
+const ocState = { down: 0, bad: 0 };
+export function _resetCmdChat() { cmdState.down = 0; cmdState.bad = 0; }
+export function _resetOpenCode() { ocState.down = 0; ocState.bad = 0; }
 
-// 走 CC 吗：配了 key（单独一把优先，没有就复用 Jev 那把 CMD key）+ **非流式** + **调用类在白名单里**。
-// ⚠️ `stream` 真值一律不走（作者 2026-11-05 定：**实时翻译不走 CommandCode**）——
-//    实时翻译 220 / 草稿 120 / 讲解 1400 都是流式，全是用户盯着屏幕等的；CC 首字 1.3 s 比直连慢。
-// `callClass` 由客户端用 `X-ClassLive-Call` 显式声明（atom / chapter / note / polish / prep …）；
-// 不发的老客户端按 `max_tokens >= 4000` 兜底当 note，其余一律回 DeepSeek（fail-safe）。
+// ---- 第三家上游：OpenCode Go（2026-11-17 作者定；`cl_admin route note opencode` 才会用上）----
+// 同一套体量：OpenAI 兼容端、模型 `deepseek-v4.1-flash`（2026-11-17 实查 `/zen/go/v1/models` 有这个 id）。
+// ⚠️ **必须带 `x-opencode-session`**（不带回 400 MissingSessionID）：官方说稳定的 session 有利于路由与缓存，
+//    所以取 `classlive-<调用类>-<install 头前 8 位 sha256 或 "anon">` —— 同一安装同一调用类稳定。
+// ⚠️ `user-agent` 用 `CMD_CHAT_UA`（官方要求自报 UA，别用通用库名）。
+// ⚠️ **只走非流式**（与 cc 同一条闸，见 `pickChatUpstream`）：实时翻译 / 草稿首字等不起。
+// ⭐ 与 cc 不同：Go **认** `thinking`（实测 disabled → 推理 0），所以原样转发、缺省补 disabled（见 `openCodeBody`）。
+const OPENCODE_URL = "https://opencode.ai/zen/go/v1/chat/completions";
+const OPENCODE_MODEL_DEFAULT = "deepseek-v4.1-flash";
+//: 口径同 CC：先等响应头，再换正文预算；超时 / 断流都算失败（退回 DeepSeek）。
+const OPENCODE_HEADER_MS = 10_000;
+const OPENCODE_BODY_MS = 30_000;
+const openCodeHashes = new Map();   // install -> sha256 前 8 位（isolate 内复用，别每个请求算一遍）
+
+// ---- 上游路由表（唯一定义点是 routes.js；这里只负责「表从哪来」和「闸在哪」）----
+// 来源优先级：Passes DO 里存的表（`cl_admin route …` 写）> env.CHAT_ROUTES > 默认表（routes.defaultRoutes）。
+// isolate 缓存 60 s：DO 在欧洲，一次来回约 200 ms，不能让每个请求都先垫上它。
+// ⚠️ 宁可旧 60 s 也不能把选路搬到请求路径上阻塞（同文件头「短租」的理由）。
+const ROUTES_TTL_MS = 60_000;
+let routesCache = { at: 0, table: null };
+export function _resetRoutes() { routesCache = { at: 0, table: null }; }
+
+const envRoutes = (env) => parseRoutes(env?.CHAT_ROUTES);
+
+async function chatRoutes(env) {
+  if (routesCache.table && Date.now() - routesCache.at < ROUTES_TTL_MS) return routesCache.table;
+  let stored = null;
+  try {
+    const r = await passes(env, "/admin/routes/get", {});
+    if (r.ok) stored = parseRoutes((await r.json())?.routes);   // 形状不合 -> 当没有（回 env / 默认）
+  } catch { /* DO 不可用：用 env / 默认，60 s 后再试 */ }
+  const table = mergeRoutes(defaultRoutes(env), envRoutes(env), stored);
+  routesCache = { at: Date.now(), table };
+  return table;
+}
+
+//: 表里说哪家 + 三道闸（流式 / key / 冷却）。**纯函数**：表从参数来，方便判据直接喂。
+//  任何一条不满足都回 deepseek —— 表写错、key 没配、上游在冷却，都只是「这条路不通」，不是错误。
+export function chatUpstream(env, routes, body, callClass = "", rawMaxTok = undefined) {
+  if (body?.stream) return "deepseek";      // 流式（实时翻译 / 草稿）永远不走 cc / opencode
+  const want = resolveRoute(routes, callClass, { max_tokens: rawMaxTok === undefined ? body?.max_tokens : rawMaxTok });
+  if (want === "cc") {
+    return (env.CMD_CHAT_KEY || env.JEV_CC_KEY) && Date.now() >= cmdState.down ? "cc" : "deepseek";
+  }
+  if (want === "opencode") {
+    return env.OPENCODE_GO_KEY && Date.now() >= ocState.down ? "opencode" : "deepseek";
+  }
+  return "deepseek";
+}
+
+//: 生产路径：等一下表（60 s 一次），再过闸。
+//   ⚠️ 流式在**读表之前**就短路：实时翻译 / 草稿一个字都不用表（永远不走 cc / opencode），
+//      没必要为首字去问一次 DO（同文件头「短租」的理由）。
+async function pickChatUpstream(env, body, callClass, rawMaxTok) {
+  if (body?.stream) return "deepseek";
+  return chatUpstream(env, await chatRoutes(env), body, callClass, rawMaxTok);
+}
+
+//: 哪些码能用 `X-ClassLive-Route` 单请求指定上游（只给测试码；真用户不行）。
+export function routeOverrideAllowed(env, name) {
+  const allow = String(env?.ROUTE_OVERRIDE_PASSES ?? "test1")
+    .split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  return !!name && allow.includes(String(name).toLowerCase());
+}
+
+//: install 头 -> session 里的那 8 位（sha256 前 4 字节；缺失 / 形状不合就是 "anon"）。
+async function openCodeInstallTag(install) {
+  const s = String(install || "");
+  if (!INSTALL_OK.test(s)) return "anon";
+  const hit = openCodeHashes.get(s);
+  if (hit) return hit;
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  const tag = [...new Uint8Array(buf).slice(0, 4)].map((x) => x.toString(16).padStart(2, "0")).join("");
+  if (openCodeHashes.size >= 512) openCodeHashes.clear();   // isolate 长命时不无限长
+  openCodeHashes.set(s, tag);
+  return tag;
+}
+
+//: `classlive-<调用类>-<install 前 8 位 | anon>`：同一安装同一调用类稳定（官方说对路由与缓存有利）。
+export async function openCodeSession(install, callClass) {
+  const cls = String(callClass || "").trim().toLowerCase().slice(0, 20) || "legacy";
+  return `classlive-${cls}-${await openCodeInstallTag(install)}`;
+}
+
+// 走 CC 吗 = `chatUpstream` 的同步视图（**不含 DO 那张表**，因为这里不能 await）。
+// 生产路径走 `pickChatUpstream`；这个只为旧判据与「本机快速自检」留一个纯同步的入口。
+// ⚠️ 路由规则（哪个类走哪家）只在 `routes.resolveRoute` 里定义一处，这里不重复。
 // ⚠️ `rawMaxTok` 是 **clamp 之前**的值（`chat()` 里 `Number(x) || 16384` 会把缺失 / 非数字
-//    变成 16384，按它判"这是笔记"是 fail-open —— 缺字段的老客户端会被推进 CC）。
+//    变成 16384，按它判“这是笔记”是 fail-open —— 缺字段的老客户端会被推进 CC）。
 export function useCmdChat(env, body, callClass = "", rawMaxTok = undefined) {
-  if (!(env.CMD_CHAT_KEY || env.JEV_CC_KEY)) return false;
-  if (body?.stream) return false;                     // 真值即流式（与下游 `if (body.stream)` 同口径）
-  if (Date.now() < cmdChatDownUntil) return false;
-  const raw = Number(rawMaxTok === undefined ? body?.max_tokens : rawMaxTok);
-  const cls = String(callClass || "").trim().toLowerCase()
-    || (Number.isFinite(raw) && raw >= CMD_CHAT_LEGACY_NOTE_TOKENS ? "note" : "legacy");
-  const allow = String(env.CMD_CHAT_CLASSES ?? CMD_CHAT_CLASSES_DEFAULT)
-    .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
-  return allow.includes(cls);
+  return chatUpstream(env, mergeRoutes(defaultRoutes(env), envRoutes(env)), body, callClass, rawMaxTok) === "cc";
 }
 
 // 内容级合格判定（`response_format=json_object` 时）：坏形状**不许当成功记账** ——
@@ -210,12 +287,20 @@ function cmdChatBody(env, body) {
   return { ...body, model: env.CMD_CHAT_MODEL || CMD_CHAT_MODEL_DEFAULT };
 }
 
-// 两段预算：先等响应头，拿到头之后换成正文预算。
+// opencode 的 body：模型换成 Go 的 ID；**`thinking` 原样转发**（2026-11-17 用真 key 实测：
+// Go 认 `{"type":"disabled"}` → reasoning_tokens 0；与 cc 不同，cc 那家会忽略它）。
+// 客户端没写 `thinking` 时补成 disabled：Go 默认开推理，120 个 max_tokens 实测被推理全吃光、正文为空。
+function openCodeBody(env, body) {
+  const out = { ...body, model: env.OPENCODE_GO_MODEL || OPENCODE_MODEL_DEFAULT };
+  if (!out.thinking) out.thinking = { type: "disabled" };
+  delete out.reasoning;
+  return out;
+}
+
+// 两段预算：先等响应头，拿到头之后换成正文预算。**cc / opencode 共用这一份**。
 // ⚠️ 原来只有头那一段，`r.text()` 没有上限 —— 慢滴流能把整条笔记链拖死（同 `llm_client.CALL_DEADLINE_S` 的理由）。
 // 回 `{ r, done, phase }`：`done()` 必须调（清定时器）；`phase()` 给 catch 用，区分是头超时还是正文超时。
-async function fetchCmdChat(env, body) {
-  const headerMs = Number(env.CMD_CHAT_HEADER_MS) || CMD_CHAT_HEADER_MS;
-  const bodyMs = Number(env.CMD_CHAT_BODY_MS) || CMD_CHAT_BODY_MS;
+async function fetchTwoPhase(url, headers, payload, headerMs, bodyMs) {
   const ac = new AbortController();
   let phase = "header";
   let timer = setTimeout(() => { phase = "header"; ac.abort(); }, headerMs);
@@ -226,84 +311,103 @@ async function fetchCmdChat(env, body) {
     timer = setTimeout(() => ac.abort(), bodyMs);
   };
   try {
-    const r = await fetch(CMD_CHAT_URL, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${env.CMD_CHAT_KEY || env.JEV_CC_KEY}`,
-        "content-type": "application/json",
-        "user-agent": CMD_CHAT_UA,
-      },
-      body: JSON.stringify(cmdChatBody(env, body)),
-      signal: ac.signal,
-    });
+    const r = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload), signal: ac.signal });
     toBodyPhase();
     return { r, done, phase: () => phase };
   } catch (e) {
     done();
-    e.cmdPhase = phase;
     throw e;
   }
 }
 
+async function fetchCmdChat(env, body) {
+  return fetchTwoPhase(CMD_CHAT_URL, {
+    authorization: `Bearer ${env.CMD_CHAT_KEY || env.JEV_CC_KEY}`,
+    "content-type": "application/json",
+    "user-agent": CMD_CHAT_UA,
+  }, cmdChatBody(env, body),
+  Number(env.CMD_CHAT_HEADER_MS) || CMD_CHAT_HEADER_MS,
+  Number(env.CMD_CHAT_BODY_MS) || CMD_CHAT_BODY_MS);
+}
+
+async function fetchOpenCode(env, body, session) {
+  return fetchTwoPhase(OPENCODE_URL, {
+    authorization: `Bearer ${env.OPENCODE_GO_KEY}`,
+    "content-type": "application/json",
+    "user-agent": CMD_CHAT_UA,
+    "x-opencode-session": session,
+  }, openCodeBody(env, body),
+  Number(env.OPENCODE_HEADER_MS) || OPENCODE_HEADER_MS,
+  Number(env.OPENCODE_BODY_MS) || OPENCODE_BODY_MS);
+}
+
 // ⚠️ 取 max，不是覆盖：并发下 60 s 的短冷却会盖掉 10 分钟的长冷却（反之亦然），
 //    最后写入者赢 → 冷却形同虚设。
-function cmdCoolDown(ms) { cmdChatDownUntil = Math.max(cmdChatDownUntil, Date.now() + ms); }
+function downFor(state, ms) { state.down = Math.max(state.down, Date.now() + ms); }
 
-// 非流式打一次 CC：**响应头到了不算数** —— 正文断流 / 不是 JSON / 没有 choices 都当失败（退回 DeepSeek）。
-// 回 `{ r, tag }`：`r === null` 表示这次别用；`tag` 进 `ev.up`（`cmd:200:bad` 这种能看出是哪一段坏的）。
-async function cmdChatAttempt(env, body) {
+// 非流式打一次长聊天上游（cc / opencode 同一套判据）：**响应头到了不算数** ——
+//   正文断流 / 不是 JSON / 没有 choices / `cmdContentTag` 不合格都当失败（退回 DeepSeek）。
+// 回 `{ r, tag }`：`r === null` 表示这次别用；`tag` 进 `ev.up`（`opencode:200:bad` 这种能看出哪一段坏的）。
+async function attemptLongChat({ body, prefix, state, send }) {
   let r, done = () => {}, phase = () => "header";
   try {
-    ({ r, done, phase } = await fetchCmdChat(env, body));
+    ({ r, done, phase } = await send());
   } catch (e) {
     if (e?.name === "AbortError") {
-      cmdCoolDown(CMD_CHAT_SHORT_COOLDOWN_MS);          // 超时多半是抖动：短冷却，别把好通道一起关掉
-      return { r: null, tag: `cmd:${phase() === "body" ? "bodytimeout" : "timeout"}` };
+      downFor(state, CMD_CHAT_SHORT_COOLDOWN_MS);        // 超时多半是抖动：短冷却，别把好通道一起关掉
+      return { r: null, tag: `${prefix}:${phase() === "body" ? "bodytimeout" : "timeout"}` };
     }
-    cmdCoolDown(CMD_CHAT_SHORT_COOLDOWN_MS);
-    return { r: null, tag: "cmd:err" };
+    downFor(state, CMD_CHAT_SHORT_COOLDOWN_MS);
+    return { r: null, tag: `${prefix}:err` };
   }
   try {
     if (!r.ok || !r.body) {
-      if (CMD_CHAT_COOLDOWN_STATUS.has(r.status)) cmdCoolDown(CMD_CHAT_COOLDOWN_MS);
-      else if (r.status >= 500) cmdCoolDown(CMD_CHAT_SHORT_COOLDOWN_MS);   // 5xx 原来永不冷却
+      if (CMD_CHAT_COOLDOWN_STATUS.has(r.status)) downFor(state, CMD_CHAT_COOLDOWN_MS);
+      else if (r.status >= 500) downFor(state, CMD_CHAT_SHORT_COOLDOWN_MS);   // 5xx 原来永不冷却
       try { await r.body?.cancel(); } catch { /* 错误响应体不要了 */ }
-      return { r: null, tag: `cmd:${r.status}` };
+      return { r: null, tag: `${prefix}:${r.status}` };
     }
     let text;
     try {
       text = await r.text();                            // 正文断流 / 正文超时都会在这里 reject
     } catch (e) {
-      cmdCoolDown(CMD_CHAT_SHORT_COOLDOWN_MS);
-      return { r: null, tag: `cmd:${r.status}:${e?.name === "AbortError" ? "bodytimeout" : "body"}` };
+      downFor(state, CMD_CHAT_SHORT_COOLDOWN_MS);
+      return { r: null, tag: `${prefix}:${r.status}:${e?.name === "AbortError" ? "bodytimeout" : "body"}` };
     }
     let j;
     try {
       j = JSON.parse(text);
       if (!Array.isArray(j?.choices) || j.choices.length === 0) throw new Error("no choices");
     } catch {
-      cmdCoolDown(CMD_CHAT_SHORT_COOLDOWN_MS);
-      return { r: null, tag: `cmd:${r.status}:bad` };
+      downFor(state, CMD_CHAT_SHORT_COOLDOWN_MS);
+      return { r: null, tag: `${prefix}:${r.status}:bad` };
     }
     // ⭐ 内容级判定：外层信封对 ≠ 这次能用（11-06 的 25 次坏响应全记成了 cmd:200）。
     const bad = cmdContentTag(body, j);
     if (bad) {
-      cmdChatBadStreak += 1;
-      cmdCoolDown(cmdChatBadStreak >= CMD_CHAT_BAD_STREAK ? CMD_CHAT_COOLDOWN_MS : CMD_CHAT_SHORT_COOLDOWN_MS);
-      return { r: null, tag: `cmd:${r.status}:${bad}` };
+      state.bad += 1;
+      downFor(state, state.bad >= CMD_CHAT_BAD_STREAK ? CMD_CHAT_COOLDOWN_MS : CMD_CHAT_SHORT_COOLDOWN_MS);
+      return { r: null, tag: `${prefix}:${r.status}:${bad}` };
     }
-    cmdChatBadStreak = 0;
+    state.bad = 0;
     return {
       r: new Response(text, {
         status: r.status,
         headers: { "content-type": r.headers.get("content-type") || "application/json" },
       }),
-      tag: `cmd:${r.status}`,
+      tag: `${prefix}:${r.status}`,
     };
   } finally {
     done();
   }
 }
+
+const cmdChatAttempt = (env, body) =>
+  attemptLongChat({ body, prefix: "cmd", state: cmdState, send: () => fetchCmdChat(env, body) });
+
+const openCodeAttempt = (env, body, session) =>
+  attemptLongChat({ body, prefix: "opencode", state: ocState, send: () => fetchOpenCode(env, body, session) });
+
 // 只放行客户端真用的模型（`main.py --cloud-model` / `keyentry` 的默认值），别让码变成任意模型的代付。
 const LLM_MODELS = new Set(["deepseek-flash", "deepseek-chat"]);
 const LLM_MAX_TOKENS = 16384;  // 笔记开思考（low）：实测讲解块 正文≈3964 + 推理 4483 = 7943，客户端预算 11000；留到 16384 余量（DeepSeek 上限 384K，按实用量计费，封顶不加钱）（2026-10-18）
@@ -506,10 +610,23 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
   //    老客户端不发 → 按 max_tokens ≥ 4000 兜底当 note，其余回 DeepSeek。
   const callClass = String(request.headers.get("x-classlive-call") || "").trim().toLowerCase().slice(0, 20);
   ev.call_class = callClass || "legacy";
-  let up = null, fast = "", cmd = "";
-  if (useCmdChat(env, body, callClass, rawMaxTok)) {
+  // ⭐ 选上游：表（DO > env > 默认）+ 三道闸（流式 / key / 冷却）。见 `routes.js` 与 `chatUpstream`。
+  // ⭐ 单请求指定上游（2026-11-17）：只给**测试码**（默认 `test1`，env `ROUTE_OVERRIDE_PASSES` 可改）——
+  //    A/B 三家时不用动全局表，正在上课的别人不受影响。三道闸（流式 / key / 冷却）照样过。
+  const override = String(request.headers.get("x-classlive-route") || "").trim().toLowerCase();
+  const target = override && UPSTREAMS.includes(override) && routeOverrideAllowed(env, ev.name)
+    ? chatUpstream(env, { "*": override }, body, callClass, rawMaxTok)
+    : await pickChatUpstream(env, body, callClass, rawMaxTok);
+  let up = null, fast = "", cmd = "", oc = "";
+  if (target === "cc") {
     const a = await cmdChatAttempt(env, body);
     cmd = a.tag;
+    up = a.r;
+  } else if (target === "opencode") {
+    // session 只要「同一安装同一调用类稳定」，install 缺失 / 形状不合 → anon。
+    const a = await openCodeAttempt(env, body,
+      await openCodeSession(request.headers.get("x-classlive-install") || "", callClass));
+    oc = a.tag;
     up = a.r;
   }
   if (!up && useFastLlm(env, body, ev.country)) {
@@ -553,11 +670,11 @@ async function chat(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
       });
       ev.up = cmd;
     } else {
-      const pre = [cmd, fast].filter(Boolean).join(">");   // cmd:402>deepseek:200 / cmd:timeout>deepseek:200
+      const pre = [oc, cmd, fast].filter(Boolean).join(">");   // opencode:402>deepseek:200 / cmd:timeout>deepseek:200
       ev.up = pre ? `${pre}>deepseek:${dsStatus}` : `deepseek:${dsStatus}`;
     }
   } else {
-    ev.up = cmd || fast;   // cmd:<status> / openrouter:<status>
+    ev.up = oc || cmd || fast;   // opencode:<status> / cmd:<status> / openrouter:<status>
   }
   const headers = { "content-type": up.headers.get("content-type") || "application/json" };
   if (!up.ok || !up.body) {
@@ -709,17 +826,37 @@ async function reclaimUsage(env, region, nowMs) {
 }
 
 // 管理接口：只认 ADMIN_TOKEN（fail-closed：没配就谁都不认）。路径 /v1/admin/x -> DO 的 /admin/x。
+// ⚠️ 路由表那两条（routes/get|set）：set 原样转给 DO 校验/落盘，get 由 Worker 拼上「默认表 / env 表」
+//    —— 只在 Worker 里知道的 `CMD_CHAT_CLASSES` / `CHAT_ROUTES` 得跟 DO 表一起回，否则 `cl_admin route`
+//    只能看到半张表，标不出「这条来自哪里」。
 async function admin(request, env, path) {
   const expected = env.ADMIN_TOKEN ? `Bearer ${env.ADMIN_TOKEN}` : null;
   if (!expected || (request.headers.get("authorization") || "") !== expected) {
     return new Response("unauthorized", { status: 401 });
   }
   const body = await request.json().catch(() => ({}));
+  if (path === "/v1/admin/routes/get") return json(200, await routesSnapshot(env));
   // 额度快照住在另一个 DO 上（Passes 那边没有这些计数），所以这一条单独分流。
   const res = path === "/v1/admin/quota"
     ? await quota(env, "/admin/state", body)
     : await passes(env, path.slice(3), body);
+  // 写了一新张表就作废本 isolate 的缓存（其余 isolate 仍要等 ~60 s，这就是 cl_admin 提示那句的来源）。
+  if (path === "/v1/admin/routes/set" && res.ok) _resetRoutes();
   return new Response(res.body, { status: res.status, headers: { "content-type": "application/json" } });
+}
+
+// 生效表的全貌：默认（env.CMD_CHAT_CLASSES）< env.CHAT_ROUTES < DO 存的那张。
+// `effective` 是马上就要用的那张；前三个字段给 `cl_admin route` 标「来自哪里」。
+async function routesSnapshot(env) {
+  let stored = {};
+  try {
+    const r = await passes(env, "/admin/routes/get", {});
+    if (r.ok) stored = (await r.json())?.routes || {};
+  } catch { /* DO 不可用：只回 env / 默认，stored 当空 */ }
+  const envTable = envRoutes(env) || {};
+  const defaults = defaultRoutes(env);
+  return { upstreams: [...UPSTREAMS], stored, env: envTable, defaults,
+           effective: mergeRoutes(defaults, envTable, stored) };
 }
 
 // ---- Quota DO ----

@@ -408,6 +408,7 @@ class ChineseWords(unittest.TestCase):
     def test_english_unchanged(self):
         self.assertEqual(C.n_words("the price of coffee"), 4)
         self.assertEqual(C.n_words("Okay?"), 1)
+        self.assertEqual(C.n_words("他说：“好。”"), 3)     # OCR 11-17：全角标点不进分母，短中文句不被当尾巴
         self.assertFalse(C.is_tail("a b c", 1.0))      # 3 词：自成一行
         self.assertEqual(C.n_words(""), 0)
 

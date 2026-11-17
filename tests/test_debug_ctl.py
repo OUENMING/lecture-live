@@ -213,6 +213,20 @@ class Commands(Base):
         self.assertEqual(d["counts"]["x"], debug_ctl.RING + 50)
         self.assertEqual(d["lost"], 50)
 
+    def test_ring_false_counts_but_stays_out_of_ring(self):
+        self.ctl.emit("final")
+        for _ in range(debug_ctl.RING + 10):
+            self.ctl.emit("zh", ring=False)
+        _, out, _ = run_clctl("--sock", self.s, "events:since=0,limit=5000")
+        d = json.loads(out)
+        self.assertEqual([e["kind"] for e in d["items"]], ["final"])
+        self.assertEqual(d["counts"]["zh"], debug_ctl.RING + 10)
+
+    def test_reserved_state_names(self):
+        for n in ("schema", "at"):
+            with self.assertRaises(ValueError):
+                self.ctl.register_state(n, lambda: {})
+
     def test_events_carry_no_text_by_default(self):
         self.ctl.emit("final", text={"en": "hello", "zh": "你好"})
         _, out, _ = run_clctl("--sock", self.s, "events")

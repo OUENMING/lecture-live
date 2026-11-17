@@ -103,6 +103,8 @@ def request(sock_path: str, cmd: str, args: str = "", timeout: float = DEFAULT_R
                     reply = json.loads(line)
                 except ValueError as e:
                     raise NoReply(f"回复不是 JSON：{e}") from None
+                if not isinstance(reply, dict):          # --sock 指到别的服务上：null / 数组 / 字符串
+                    raise NoReply("回复不是 JSON 对象")
                 if reply.get("id") == rid:
                     return reply
             chunk = s.recv(65536)
@@ -216,7 +218,14 @@ def wait_for(sock_path: str, cond: str, timeout: float, err, interval: float = 0
     last = _MISSING
     while True:
         left = deadline - time.monotonic()
-        r, last = _fetch(sock_path, path, max(0.5, min(DEFAULT_REQ_TIMEOUT, left + 1)))
+        try:                                     # 一次瞬时没回复（主线程正忙）≠ 条件不成立到底：接着轮询到 deadline
+            r, last = _fetch(sock_path, path, max(DEFAULT_REQ_TIMEOUT, left + 1) if left > 0 else DEFAULT_REQ_TIMEOUT)
+        except NoReply as e:
+            if time.monotonic() >= deadline:
+                err.write(f"clctl: 超时，{e}\n")
+                return EXIT_NOREPLY
+            time.sleep(interval)
+            continue
         if not r.get("ok"):
             err.write(f"clctl: {(r.get('error') or {}).get('msg', '命令失败')}\n")
             return exit_code(r)
@@ -234,14 +243,19 @@ def wait_for(sock_path: str, cond: str, timeout: float, err, interval: float = 0
 def record(sock_path: str, out_path: str, every: float, total: float, err) -> int:
     n = 0
     t_end = time.monotonic() + total
-    with open(out_path, "w", encoding="utf-8") as f:
+    try:
+        f = open(out_path, "w", encoding="utf-8")
+    except OSError as e:
+        err.write(f"clctl: 写不了 {out_path}：{e}\n")
+        return EXIT_USAGE
+    with f:
         while True:
             t = time.time()
             try:
                 r = request(sock_path, "state", "", DEFAULT_REQ_TIMEOUT)
             except NoReply as e:
-                err.write(f"clctl: 取样中断：{e}\n")
-                return EXIT_OK if n else EXIT_NOREPLY
+                err.write(f"clctl: 取样中断（已写 {n} 条）：{e}\n")
+                return EXIT_NOREPLY                  # 截断的记录不能冒充成功
             if not r.get("ok"):
                 err.write(f"clctl: {(r.get('error') or {}).get('msg', '命令失败')}\n")
                 return exit_code(r)

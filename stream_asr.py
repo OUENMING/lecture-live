@@ -53,6 +53,7 @@ non-final 里句末标点**连续存在** 0.3 s 即判一句结束；先变 fina
 """
 from __future__ import annotations
 
+import collections
 import json
 import os
 import queue
@@ -306,7 +307,10 @@ def _sent_lang(toks: Sequence["Tok"]) -> str:
     if zh * 2 > len(toks) and _HAN.search("".join(t.text for t in toks)):
         return "zh"
     tags = [t.lang for t in toks if t.lang and t.lang != "zh"]
-    return max(set(tags), key=tags.count) if tags else ""
+    if not tags:
+        return ""
+    cnt = collections.Counter(tags)                       # 并列取先出现的那个 —— 不随 PYTHONHASHSEED 变
+    return max(cnt, key=lambda k: (cnt[k], -tags.index(k)))
 
 
 def parse_tokens(raw) -> list[Tok]:
@@ -396,7 +400,7 @@ class StreamCore:
         ⭐ 3.11 端点换行：Soniox 的 `<end>` 约 38% 落在一句话中间（老师说到一半停顿，
         `snx/REPORT_ep.md`）—— 只有落在句与句之间的才算「讲完一口气」。
         """
-        tail = (self.draft_text() or "").rstrip().rstrip("\"')\u201d\u2019")
+        tail = (self.draft_text() or "").rstrip().rstrip("\"')\u201d\u2019\u300d\u300f\uff09\u3011")   # 中文右引号 / 括号也剥
         return not tail or tail[-1] in END_PUNCT
 
     def pending(self) -> bool:

@@ -118,7 +118,7 @@ def n_words(text: str) -> int:
     ⚠️ 中英混排（汉字不过半）仍按空格切：那时候它确实是以英文为主的句子。
     """
     t = text or ""
-    chars = [c for c in t if not c.isspace()]
+    chars = [c for c in t if c.isalnum()]   # 只数字母 / 数字 / 汉字：全角标点多的短中文句（「他说：“好。”」）别被标点稀释成「不过半」
     if chars:
         han = sum(1 for c in chars if _HAN_RE.match(c))
         if han * 2 >= len(chars):        # ≥ 50%

@@ -130,6 +130,8 @@ class Ctl:
 
     # ---------- 注册 ----------
     def register_state(self, name: str, fn) -> None:
+        if name in ("schema", "at"):                      # 与 `_state()` 回复的固定字段同层，同名会把它们盖掉
+            raise ValueError(f"分区名保留：{name!r}")
         self._states[name] = fn
 
     def register_command(self, name: str, fn, help: str = "") -> None:
@@ -142,10 +144,15 @@ class Ctl:
         return self._sock_path
 
     # ---------- 事件（任意线程） ----------
-    def emit(self, kind: str, n: int | None = None, text=None) -> None:
+    def emit(self, kind: str, n: int | None = None, text=None, ring: bool = True) -> None:
+        """`ring=False`：只计数不进环形缓冲 —— 逐 token 的草稿增量一节课上万条，
+        进环会在几分钟内把 final / notice / gap 这些要回放的事件全挤掉（OCR 11-17）。"""
         if not self._on:
             return
         with self._ev_lock:
+            self._counts[kind] = self._counts.get(kind, 0) + 1
+            if not ring:
+                return
             self._seq += 1
             ev: dict = {"seq": self._seq, "t": round(time.time(), 3), "kind": kind}
             if n is not None:
@@ -156,7 +163,6 @@ class Ctl:
                     if k in ("en", "zh") and v:
                         ev[k] = str(v)[:TEXT_MAX]
             self._ring.append(ev)
-            self._counts[kind] = self._counts.get(kind, 0) + 1
 
     # ---------- 主线程 ----------
     def poll(self) -> None:
@@ -411,6 +417,8 @@ class Ctl:
                 raise TypeError
         except (ValueError, KeyError, TypeError, AttributeError):
             return self._pack(rid, False, None, {"code": "bad_request", "msg": "要 {id, cmd, args}"})
+        if not self._on:                                  # close() 已排空队列：再入队就没人取，白等 5 s
+            return self._pack(rid, False, None, {"code": "closed", "msg": "通道已关闭"})
         req = _Req(cmd, args)
         self._q.put(req)
         if not req.started.wait(self._timeout_s) and req.fut.cancel():

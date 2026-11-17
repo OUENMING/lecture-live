@@ -97,6 +97,13 @@ ROLL_LINES = 2
 ROLL_BREAK_WINDOW = 0.30      # 断点只在这段"理想点之前"的区间里挑
 ROLL_HYSTERESIS = 8           # 底行长度与上一帧相差在此以内 -> 沿用旧断点(字符)
 _CLAUSE_CHARS = ",;:，；：、—–"   # 从句边界锚点(中英都收: 草稿译文是中文)
+#: 「讲一下」按钮（Owen 2026-11-17：段落总结做成了，按钮删掉；「提问或追问…」输入框与问答**保留**）。
+#: ⚠️ 只拿掉按钮这个入口；问答线程 / 答案接管照常，由输入框触发。
+ASK_BTN = False
+#: 档位胶囊的悬停说明（zh 档另有一句，见 `_sync_trans_button`）。
+TRANS_TIP = ("点一下切换:\n"
+             "  双语     —— 矫正英文错听 + 出中文\n"
+             "  只英·校  —— 只矫正英文, 不出中文")
 INPUT_H = 26.0                                    # ⌨ 单行输入框(含下方 1px 细线)
 INPUT_GAP = 6.0                                   # 输入框与它上面那行(💡)的间隔
 #: D 布局：鼠标进窗时字幕整体上让这么多，给输入框腾地方（不盖住最新一行）。
@@ -1727,10 +1734,12 @@ class Overlay:
         self._focus_look_on = None          # 未知 -> 第一次 _sync_focus_look 必然生效
         self._set_rule_focus(False)
         ve.addSubview_(self._input_rule)
-        # 术语行(命中术语表时显示, 暖黄色); 钉在面板底部, 不随句子滚动。
+        # 术语行(命中术语表时显示); 钉在面板底部, 不随句子滚动。
         # 默认**只列术语名**, 完整解析要点击才展开(见 _on_gloss_click)。
+        # 颜色: 2026-11-17 Owen 定「统一成白色, 不要琥珀色」→ 白 α0.86 (比正文中文 α1.0 退半档,
+        # 靠字号 11.5 与钉底位置区分, 不靠色相)。
         self._gloss_lbl = self._label(
-            11.5, NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.83, 0.45, 0.95), 1,
+            11.5, NSColor.whiteColor().colorWithAlphaComponent_(0.86), 1,
             self._trunc)
         ve.addSubview_(self._gloss_lbl)
         self._terms: list = []        # 当前句命中的 (术语, 解析), 不随 finalize 清空
@@ -1742,6 +1751,15 @@ class Overlay:
         # 透明点击区盖在术语行上(最后加入 = 在最上层)。
         self._gloss_hit = _make_click_view(self._on_gloss_click)
         ve.addSubview_(self._gloss_hit)
+
+        # ---- 右栏「实时总结」（2026-11-17 Owen：左字幕 · 分割线 · 右总结，一章一段）----
+        # 打开时面板**往右长** `summary_pane.PANE_W`，`self._width` 始终是**左边字幕栏**的宽度
+        # （`_sync_panel_size` 减掉 `_pane_w`）—— 于是字幕、顶栏、行高、存窗口尺寸的 31 处 `_width`
+        # 一处都不用改。⚠️ 右栏不读写 `_answer_*` / `_outline_*`，和答案接管、纲要互不相踩。
+        import summary_pane as _sp
+        self._pane = _sp.SummaryPane(ve, self._shadow, _ui_font)
+        self._pane_w = 0.0
+        self._split_on = False
 
         # ---- 「在听」小点 ----
         # 顶栏最左一颗 6pt 圆点: 听到人声(VAD 判有声)时亮、安静时暗。为的是开课头几秒 ——
@@ -1788,10 +1806,7 @@ class Overlay:
         self._trans_mode = "both"        # both | en | raw | zh, 见 next_trans_mode / TRANS_MODE_TITLE
         self._engine_warn = False        # 云端翻译降级中(菜单栏图标提示用)
         self._btn_trans = self._button(
-            TRANS_MODE_TITLE["both"], self._cycle_translate,
-            "点一下切换:\n"
-            "  双语     —— 矫正英文错听 + 出中文\n"
-            "  只英·校  —— 只矫正英文, 不出中文")
+            TRANS_MODE_TITLE["both"], self._cycle_translate, TRANS_TIP)
         self._chip_anim = False          # 下一次 _layout 是否把胶囊宽度变化做成过渡（只有用户点击才置位）
         self._chip_frame_gen = 0         # A7: 延迟 frame 过渡的代数号 —— 旧的批次到点后自动作废
         self._style_mode_chip()
@@ -1849,6 +1864,9 @@ class Overlay:
         #    （原来那份宽度被一个不可点的隐藏按钮吃掉 —— 见下面 `_layout` 的注释）。
         self._bar = [self._btn_recap, self._btn_lost, self._btn_ask, self._btn_topic,
                      self._btn_trans, self._btn_hide, self._btn_close]
+        if not ASK_BTN:
+            self._btn_ask.setHidden_(True)
+            self._bar.remove(self._btn_ask)          # 不进顶栏 = 不占位、不跟着淡入
         # ---- 「↓ N 句新的」（往回翻时的提示，2026-10-17）----
         # ⭐ 为什么要有它: 「闲置 6s 自动回底」删了（见 `transcript_view` 文件头
         #    「视口归谁」）—— 新内容在下面**静默累积**，读者得有个**看得见**的出口:
@@ -2046,7 +2064,9 @@ class Overlay:
             # ⚠️ 名字与顶栏那个入口**必须一致** —— 同一个功能两个名字，
             #    用户会以为是两件事（作者 2026-09-30：「入口标签写成实时总结」）。
             "实时总结", None, "")
-            t4 = _make_button_target(self._toggle_outline)
+            # ⭐ 2026-11-17 Owen：纲要并进右栏 → 菜单项和章节条开的是**同一个**右栏
+            #    （课务 / 断档 / ❓ 都在右栏里了）。旧纲要的代码还在，只是不再有入口。
+            t4 = _make_button_target(self._toggle_split)
             self._targets.append(t4)
             mi_outline.setTarget_(t4); mi_outline.setAction_("clicked:")
             self._mi_outline = mi_outline        # ⚠️ 常驻：置灰 / 恢复要按它
@@ -2499,7 +2519,7 @@ class Overlay:
         self._programmatic_resize = True
         try:
             self._panel.setFrame_display_(
-                ((f.origin.x, oy), (self._width, new_h)), True)
+                ((f.origin.x, oy), (self._width + self._pane_w, new_h)), True)
         finally:
             self._programmatic_resize = False
         # ⚠️ 必须回写轮询缓存: 这是**我们自己**改的 frame, 不是用户拖的。
@@ -2584,7 +2604,7 @@ class Overlay:
         self._tv.set_row_metrics(zh_h, lines, ROW_EN_H_SOLO if solo else ROW_EN_H)
         # 行高变了 -> 最小高度也变了, 得同步给窗口, 否则缩不到新下限
         try:
-            self._panel.setContentMinSize_((MIN_WIDTH, self._min_height()))
+            self._panel.setContentMinSize_((MIN_WIDTH + getattr(self, "_pane_w", 0.0), self._min_height()))
         except Exception:                     # noqa: BLE001
             pass
 
@@ -2630,7 +2650,9 @@ class Overlay:
         sx, sy = start.origin.x, start.origin.y
         sw, sh = start.size.width, start.size.height
         right, top = sx + sw, sy + sh
-        w = max(MIN_WIDTH, sw + dx if "r" in zone else (sw - dx if "l" in zone else sw))
+        # 右栏开着时最小宽 = 字幕栏最小宽 + 右栏（这里是自己 setFrame，AppKit 的 contentMinSize 管不到）
+        w = max(MIN_WIDTH + getattr(self, "_pane_w", 0.0),
+                sw + dx if "r" in zone else (sw - dx if "l" in zone else sw))
         h = sh + dy if "t" in zone else (sh - dy if "b" in zone else sh)
         h = max(self._min_height(), h)
         x = right - w if "l" in zone else sx
@@ -2730,7 +2752,7 @@ class Overlay:
             return
         old_w = self._width                   # ⚠️ 必须在覆盖 _width **之前**取
         self._last_panel_size = size
-        self._width, self._height = size
+        self._width, self._height = max(MIN_WIDTH, size[0] - getattr(self, "_pane_w", 0.0)), size[1]
         scroll_h = max(self._row_h, self._height - BOTTOM_PAD - self._pinned - 8 - HEADER_H)
         self._scroll_h = scroll_h
         # ⚠️ 只有**用户拖出来的**尺寸才值得记。没有这个守卫的话，光是构造 + close()
@@ -2781,6 +2803,9 @@ class Overlay:
         from AppKit import NSMakeRect
         pad = PAD
         w = self._width - 2 * pad
+        if getattr(self, "_pane", None) is not None and self._pane_w > 0:
+            self._pane.set_frame(self._width, BOTTOM_PAD, self._pane_w,
+                                 max(0.0, self._height - BOTTOM_PAD - 10))
         y = BOTTOM_PAD
         gh = self._gloss_h()
         # ⌨ 输入行钉在面板最底部。y 从这里往上走, 与 _pinned() 的加和顺序必须
@@ -2880,7 +2905,8 @@ class Overlay:
         #       那会**多算一个 gap、少算 pad** → 章节条压到最左那个按钮上。
         self._hdr_left = x + gap           # 最左按钮的左边缘（章节条 / 术语只能摆在它左边）
         self._place_header_text()
-        self._drag_layer.setFrame_(((0.0, 0.0), (self._width, self._height)))
+        # 右栏开着时拖拽 / 缩放层也铺到右栏底下：否则右边缘与右上/右下角拖不动（右栏的视图仍压在它上面）
+        self._drag_layer.setFrame_(((0.0, 0.0), (self._width + getattr(self, "_pane_w", 0.0), self._height)))
         self._ve.setFrame_(self._panel.contentView().bounds())
         self._scrim.setFrame_(self._ve.bounds())
         # ---- 角落小卡（一些事儿）与接管卡片 -------------------------------------
@@ -3506,7 +3532,8 @@ class Overlay:
             # ⚠️ **按 `id` 覆盖** —— 正式版要能顶掉同 id 的临时版（§6.2 的 `version` 约定）
             self._outline["chapters"][c["id"]] = c
             # ⭐ **只认正式章**：临时版每 4 分钟一刷，拿它点亮小圆点 = 一直亮着
-            if c.get("status") == "final" and not self._outline_on:
+            if (c.get("status") == "final" and not self._outline_on
+                    and not getattr(self, "_split_on", False)):     # 右栏开着 = 正看着，不亮点
                 self._outline_new = True
         elif k == "deadline":
             self._merge_deadline(p)
@@ -3516,6 +3543,10 @@ class Overlay:
             self._outline["atoms"].extend(p.get("items") or [])
         elif k == "window":
             self._outline["windows"].append(dict(p))
+        # 右栏吃整份纲要（章节 + 课务 + 断档 + ❓，2026-11-17 Owen：纲要并进右栏）→ 哪种 payload 都刷一次；
+        # 内容没变 `SummaryPane.update` 自己早退（比签名），不会白重排。
+        if getattr(self, "_split_on", False):
+            self._pane.update(self._outline)
         # ⚠️⚠️ **必须自己补一次 `_layout()`**（2026-09-30 实测，**不补章节条永远不出现**）：
         #    章节条那一行是**布局**的一部分（文字 + 显隐 + 宽度都算在 `_layout` 里），
         #    而 `_layout` **只在尺寸/档位变化时**才被调 —— `_sync_panel_size` 是**轮询**，
@@ -5246,10 +5277,57 @@ class Overlay:
     def _on_chapter_click(self) -> None:
         """章节条被点 → 开关纲要。**主入口**（计划 §9.9）。
 
-        ⚠️ 走 `_toggle_outline` 而不是 `_open_outline` —— 再点一下要能收起来，
-           否则用户被关在纲要里出不去（唯一的出口就剩菜单栏了）。
+        ⚠️ 走 toggle 而不是 open —— 再点一下要能收起来，否则用户被关在里面出不去。
+        ⭐ 2026-11-17 起章节条开关的是**右栏实时总结**（Owen：纲要并进总结）。
+           课务 / 断档 / ❓ 标记都已进右栏；菜单栏那一项也改成开右栏。旧纲要代码还在，但已没有入口。
         """
-        self._toggle_outline()
+        self._toggle_split()
+
+    def _toggle_split(self) -> None:
+        """开 / 关右栏。面板往右长 `PANE_W`（放不下就整体左移；屏太窄就压右栏）。"""
+        import summary_pane as _sp
+        if lang_gate.no_llm(self._trans_mode) and not self._split_on:
+            return                       # 不调模型的档没有总结 —— 与纲要同一判据
+        self._note("split")
+        from AppKit import NSScreen
+        f = self._panel.frame()
+        cap_w = self._width
+        if not self._split_on:
+            pane_w = _sp.PANE_W
+            x = f.origin.x
+            scr = self._panel.screen() or NSScreen.mainScreen()
+            if scr is not None:
+                vis = scr.visibleFrame()
+                room = vis.size.width - 40
+                pane_w = max(200.0, min(pane_w, room - cap_w))
+                right = vis.origin.x + vis.size.width - 20
+                if x + cap_w + pane_w > right:
+                    x = max(vis.origin.x + 20, right - cap_w - pane_w)
+            self._split_x0 = f.origin.x             # 关上时还原（贴右边被左移过的话）
+            self._split_on, self._pane_w = True, pane_w
+            self._outline_new = False               # 章节条的小圆点 = 「有没看过的新章」→ 打开即看过
+            self._pane.update(self._outline)
+        else:
+            # 打开时被左移过 → 回到原位；期间用户自己拖过窗口就尊重新位置（只在没动过时还原）
+            x0 = getattr(self, "_split_x0", None)
+            moved = getattr(self, "_split_x_open", None)
+            x = x0 if (x0 is not None and moved is not None and abs(f.origin.x - moved) < 0.5) else f.origin.x
+            self._split_on, self._pane_w = False, 0.0
+        self._pane.set_visible(self._split_on)
+        self._programmatic_resize = True
+        try:
+            self._panel.setContentMinSize_((MIN_WIDTH + self._pane_w, self._min_height()))   # 先放宽下限再缩
+            self._panel.setFrame_display_(((x, f.origin.y), (cap_w + self._pane_w, f.size.height)), True)
+        finally:
+            self._programmatic_resize = False
+        _fa = self._panel.frame()
+        self._split_x_open = _fa.origin.x if self._split_on else None
+        self._last_panel_size = (_fa.size.width, _fa.size.height)
+        self._width = _fa.size.width - self._pane_w
+        self._layout()
+        if self._split_on:
+            self._pane.text.scrollToEndOfDocument_(None)
+        self._mark_dirty(urgent=True)
 
     def _toggle_outline(self) -> None:
         """纲要的主入口（章节条 / 菜单栏都调它）。
@@ -6125,6 +6203,11 @@ class Overlay:
         # ⚠️ 放在 `_on_lost()` **之前**：那一步写盘失败也不该让纲要少一个标记
         #    （两者互不依赖，而且纲要这边是纯内存操作、不会抛）。
         self._outline["marks"].append(time.strftime("%H:%M:%S"))
+        if getattr(self, "_split_on", False):               # 右栏开着 → 标记当场出现在段尾
+            try:                                            # ⚠️ AppKit 排版会抛；右栏刷不出来也不能挡住下面落盘
+                self._pane.update(self._outline)
+            except Exception:                               # noqa: BLE001
+                pass
         self._note("lost")
         # 回调返回真 = 已排队去提炼一句点拨(main 的 `_on_lost_pressed`); 默认回调返回 None。
         # 按下当场就有反馈 —— 10-09 那节 ❓ 0 次的原因之一就是按了没有任何动静。
@@ -6371,6 +6454,10 @@ class Overlay:
             except Exception:                             # noqa: BLE001
                 pass
         b.setTitle_(TRANS_MODE_TITLE[self._trans_mode])
+        if self._trans_mode == "zh":                      # 唯一不是用户自己选的档（自动识别到中文课切过来）→ 悬停要说清怎么出去
+            b.setToolTip_("中文 —— 识别到这是中文课, 只出原文\n点一下回双语")
+        else:
+            b.setToolTip_(TRANS_TIP)
         if MODE_CHIP_ICONS:
             try:
                 from AppKit import NSImage, NSImageLeading, NSImageSymbolConfiguration
@@ -6426,6 +6513,8 @@ class Overlay:
         if lang_gate.no_llm(mode):
             if self._outline_on:
                 self._close_outline()
+            if getattr(self, "_split_on", False):      # 右栏同理：没有模型就没有总结，开着只剩一块空板
+                self._toggle_split()
         if self._mi_outline is not None:
             # ⚠️⚠️ **光 `setEnabled_(False)` 没用 —— 实测（判据 T25）被 `autoenable` 覆盖掉了。**
             #    `NSMenu` 默认 `autoenablesItems = True`：它**按 target 响不响应 action

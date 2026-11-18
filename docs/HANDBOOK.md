@@ -354,6 +354,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_ASR_TOKEN` | 内置 | 云端定稿的公开令牌（测试用） | 测试接缝，长期 |
 | `CLASSLIVE_NO_AUTO_UPDATE` | 空 | 关自动更新**两条路**：退出时那条，以及 3.11.6 起「开课前面板查出新版本就当场装」那条（`update.panel_auto_install` 条件③）。日志在 `~/Library/Logs/ClassLive/update.log`；最近一次检查的结论在 `~/.classlive/update-check.json` | 运维开关，长期 |
 | `CLASSLIVE_NO_UPDATE_CHECK` | 空 | 连更新检查也不做 | 运维开关，长期 |
+| `CLASSLIVE_NO_MIRROR` | 空 | 关「中国区更新镜像」：GitHub 不通时不再改走 `asr.bldcam.page/git/`（`update.mirror_routes`；Worker 侧 `server/asr-worker/src/git-mirror.js`） | 运维开关，长期 |
 | `CLASSLIVE_DEBUG` | 空 | 面板 / 悬浮窗的调试日志 | 运维开关，长期 |
 | `CLASSLIVE_FROM_APP` | `.app` 启动时为 `1` | 标记「从 `.app` 起的、没有终端」→ `notice` 据此弹框而不是只打印 | 内部标记，不是给人设的 |
 | `CLASSLIVE_NO_STARTUP_HUD` | 空（开） | `1` = 不建起步首屏小窗（探针 / 无窗口环境 / 只想拍终端时用）；`0` / 未设 = 照常建 —— `startup_hud.enabled` | 运维开关，长期 |

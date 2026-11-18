@@ -298,3 +298,28 @@ _git("-c", f'url.{MIRROR}/.insteadOf={UPSTREAM_PREFIX}/',
 - Sparkle 文档（EdDSA/ed25519 签名、binary delta updates、签名私钥不得放在托管服务器上）https://sparkle-project.org/documentation/ ｜ 2026-11-17 取
 - Cloudflare China Network（中国大陆网络为独立企业产品，"built with strategic partners"；免费版不经境內节点为推断，未见官方逐字表述）https://www.cloudflare.com/network/china/ ｜ 2026-11-17 取
 - 实测：`curl -I https://asr.bldcam.page` → `server: cloudflare`、`cf-ray: …-DUB`（都柏林）；`cl_admin.py stats --days 7`；11-17 报告 `blocks.stream` / `blocks.region_probe`。
+
+---
+
+## 10. 2026-11-18 落地：3.12.1 走 Worker 转发（P1 改选 B），附中国大陆实测
+
+**做了什么**：`update.mirror_routes` —— GitHub 各路失败后补一条 `-c url.https://asr.bldcam.page/git/OUENMING/.insteadOf=https://github.com/OUENMING/`；
+Worker `src/git-mirror.js` 只读转发。仓库是 PUBLIC，不需要凭据（§6.5 的凭据顾虑不成立）。
+
+**为什么先选 B 而不是 A（VPS）**：朋友那台的真实数据 —— AE 30 天 country=CN / colo=HKG，每节课几千次、错误 ≈ 0；
+同期 GitHub 4 次 `Could not resolve host`。B 零运维、零同步延迟。
+
+**Globalping 中国大陆探针（2026-11-18，HTTPS GET info/refs，各轮 10–20 个探针）**：
+
+| 目标 | 成功 | p50 |
+|---|---|---|
+| asr.bldcam.page/git/…（Cloudflare） | 6/10、14/20、19/20 = 39/50（78%） | 1.9–2.6 s |
+| github.com/…/info/refs | 9/10、14/20 = 23/30（77%） | 0.4–0.7 s |
+| 43.131.13.220（腾讯云国际·法兰克福，**明文 HTTP**） | 20/20 | 562 ms |
+| gitee.com / cnb.cool | 20/20 / 20/20 | 249 / 190 ms |
+
+失败形状：Cloudflare 一侧多是联通（AS4837）TLS 握手超时 / ECONNRESET。⚠️ 探针是机房 + 各家 ISP 混合，不等于朋友那台的网络；
+但它说明 **B 不是「中国一定通」**，只是一条和 GitHub 失败方式不同的路。
+
+**下一步（待 Owen 定）**：加一条 VPS 路（`git.bldcam.page` 只 DNS、不走 Cloudflare 代理，Let's Encrypt + nginx `git-http-backend` + 每 5 分钟从 GitHub 同步），
+顺序 GitHub → VPS → Worker。CNB / Gitee 最快，但要实名账号、Gitee 有公开仓审核风险（§3.2 / 2022-05 事件）。

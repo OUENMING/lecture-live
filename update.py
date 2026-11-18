@@ -58,6 +58,19 @@ _ROUTE_IRRELEVANT = ("would be overwritten", "not possible to fast-forward",
                      "index.lock", "not a git repository", "no such remote",
                      "couldn't find remote ref", "does not appear to be a git")
 
+#: ⭐ 3.12.1：**中国区更新镜像**。GitHub 那几条路全失败后，最后再试一条「镜像」路：
+#  `git -c url.<MIRROR_TO>.insteadOf=<MIRROR_FROM> fetch` —— 同一个 remote（`origin`）、同一套
+#  `@{u}` / journal / ff-only，只是这一次请求改发给我们自己的 Worker，由它（Cloudflare 香港节点）去 GitHub 拿。
+#  为什么是它：朋友那台（中国大陆）10-05 / 10-29 / 11-12 / 11-17 四次 `Could not resolve host: github.com`，
+#  而同一台机器连 asr.bldcam.page 30 天里每节课都通（AE：country=CN、colo=HKG，错误 ≈ 0）。
+#  ⚠️ 只读、只此一仓（Worker `server/asr-worker/src/git-mirror.js` 只放行 upload-pack）。内容就是 GitHub
+#     那份：git 用对象哈希校验每个对象，转发的人改不了代码而不被发现。
+#  ⚠️ 只做运行时参数（`-c`），**不写用户的 .gitconfig**；`CLASSLIVE_NO_MIRROR=1` 关掉。
+MIRROR_FROM = "https://github.com/OUENMING/"
+MIRROR_TO = "https://asr.bldcam.page/git/OUENMING/"
+#: 走镜像的子命令（只读的那几条；`push` / `clone` 永远不走）。
+MIRROR_SUBCOMMANDS = frozenset({"fetch", "pull", "ls-remote"})
+
 #: 本线程**最近一条**联网 git 用了哪条路（进日志 / 报告）。
 #  ⚠️ 用线程本地：面板在后台线程查、退出路径在自己的进程里查；一个模块级变量
 #     会把 A 的路由写到 B 的日志上。
@@ -133,12 +146,53 @@ def net_routes(url: str | None = None) -> list[tuple[str, str | None]]:
     return list(rs) or [("direct", None)]
 
 
+def _origin_url_raw() -> str:
+    """`origin` 的地址（直接跑 git，**不经 `_git_run`**）。
+
+    ⚠️ 为什么不复用 `_remote_url()`：测试会把 `_git_run` 换成计数的假货，判「试了几条路」——
+       判要不要加镜像这一步若也走它，就把一次本地查询算成一条路。
+    """
+    try:
+        r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=HERE, capture_output=True,
+                           text=True, timeout=5, env=git_env())
+    except Exception:                                     # noqa: BLE001
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def mirror_routes(args, url: str | None = None) -> list[tuple[str, str | None]]:
+    """这条 git 要不要在最后补一条「镜像」路（见 `MIRROR_FROM` 那段注释）。
+
+    三条全中才补：只读子命令；origin 是 GitHub 上的这个仓（https）；没设 `CLASSLIVE_NO_MIRROR`。
+    """
+    if os.environ.get("CLASSLIVE_NO_MIRROR"):
+        return []
+    if _subcommand(args) not in MIRROR_SUBCOMMANDS:
+        return []
+    u = _origin_url_raw() if url is None else url
+    if not u.startswith(MIRROR_FROM):
+        return []
+    return [("mirror", None)]
+
+
+def _mirror_won_last() -> bool:
+    """最近一次检查（`update-check.json`）是不是走镜像成的。读不了 → False（照常先试 GitHub）。"""
+    try:
+        st = check_state()
+        return bool(st.get("check_ok")) and str(st.get("route") or "").endswith("mirror")
+    except Exception:                                     # noqa: BLE001
+        return False
+
+
 def proxy_args(route: tuple[str, str | None]) -> list[str]:
     """一条路 → git 的参数。直连**不带任何参数**（不覆盖用户自己的 git 配置）。
 
     ⚠️ SOCKS 一律写成 `socks5h://`：`h` = 域名交给代理解析。
+    ⭐ 3.12.1：`mirror` = 把 GitHub 的地址就地改写成镜像（`url.<to>.insteadOf=<from>`，只这一条命令有效）。
     """
     kind, purl = route
+    if kind == "mirror":
+        return ["-c", f"url.{MIRROR_TO}.insteadOf={MIRROR_FROM}"]
     purl = (purl or "").strip()
     if kind == "direct" or not purl:
         return []
@@ -155,6 +209,8 @@ def route_label(route: tuple[str, str | None]) -> str:
     """
     import urllib.parse
     kind, purl = route
+    if kind == "mirror":
+        return "mirror"
     purl = (purl or "").strip()
     if kind == "direct" or not purl:
         return "direct"
@@ -205,7 +261,12 @@ def _git_dispatch(args, *, timeout: float, text: bool):
     deadline = time.monotonic() + timeout
     tried: list[str] = []
     res: tuple = (-1, "" if text else b"", "没有可用的路")
+    # ⭐ 3.12.1：GitHub 那几条（代理 / 直连）都不通时，最后再试镜像（中国区，见 `MIRROR_FROM`）。
+    #    上一次检查是**靠镜像成的** → 这次镜像先试（中国那台别每次先等 GitHub 失败）；
+    #    镜像哪天不通、GitHub 通了，记下的路就变回 GitHub，下次自动换回来。
     routes = net_routes()
+    _mr = mirror_routes(args)
+    routes = (_mr + routes) if (_mr and _mirror_won_last()) else (routes + _mr)
     for i, route in enumerate(routes):
         left = deadline - time.monotonic()
         if tried and left < 1.0:

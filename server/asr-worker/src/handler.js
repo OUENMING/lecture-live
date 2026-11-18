@@ -96,6 +96,7 @@ function toBase64(buf) {
   return btoa(s);
 }
 
+import { gitMirror, isGitPath } from "./git-mirror.js";
 import { TURBO, V3 } from "./quota-core.js";
 import { CODE_RE } from "./passes-core.js";
 import { UPSTREAMS, defaultRoutes, mergeRoutes, parseRoutes, resolveRoute } from "./routes.js";
@@ -1052,7 +1053,9 @@ export default {
     const path = new URL(request.url).pathname;
     if (request.method === "POST" && path.startsWith("/v1/admin/")) return admin(request, env, path);   // 管理调用不进事件
     const ev = newEvent(request, path, t0);
-    const res = await route(request, env, ctx, ev, path, t0);
+    // ⭐ 中国区更新镜像（2026-11-18）：git 只读协议转发 GitHub，见 git-mirror.js 文件头。不走下面的认证 / 查码。
+    const res = isGitPath(path) ? await gitMirror(request, env, ev)
+      : await route(request, env, ctx, ev, path, t0);
     ev.status = res.status;
     ev.ms = Date.now() - t0;   // 流式翻译：到响应头为止（首包），不是整段流
     if (ev.pending) ctx?.waitUntil?.(ev.pending.then(() => track(env, ev)));

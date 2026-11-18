@@ -65,6 +65,23 @@
 （`_whatsnew_body` 从最新往下数到「你上次看过的版本」为止），多版本时每行前面标版本号。
 所以**每个版本的看点都要能独立看懂**，不要写"同上""见上一条"。
 
+## [3.12.1] - 2026-11-18
+
+### 更新方式
+
+auto
+
+### 更新看点
+- [改进] 优化中国大陆更新
+
+### 升级须知（3.12.0 → 3.12.1）
+- 没有新依赖、没有要手动下的模型；开课面板上自动更新。
+- 3.11.x 在中国大陆连不上 GitHub 时，这一次要手动拉一下（之后不用）：`git -C ~/lecture-live -c url."https://asr.bldcam.page/git/OUENMING/".insteadOf="https://github.com/OUENMING/" pull --ff-only`
+
+### Added
+- 中国区更新镜像：GitHub 各条路（代理 / 直连）都失败后，最后再试 `asr.bldcam.page/git/`（`update.mirror_routes`，`-c url.<镜像>.insteadOf=<GitHub>`，只这一条命令有效、不写 .gitconfig）；上次靠镜像成功则镜像先试；`CLASSLIVE_NO_MIRROR=1` 关。依据：中国用户 30 天里 4 次 `Could not resolve host: github.com`，同一台机器连 asr.bldcam.page 每节课都通（country=CN、colo=HKG、错误 ≈ 0）。
+- Worker：`/git/OUENMING/lecture-live(.git)/{info/refs,git-upload-pack}` 只读转发 GitHub（`src/git-mirror.js`），push 一律 404，按 IP 限流，不需要凭据（仓库公开）。
+
 ## [3.12.0] - 2026-11-18
 
 ### 更新方式

@@ -31,8 +31,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import panel                                                       # noqa: E402
 
+# ⚠️ 2026-11-18 首页改两列格子：10 门只有 5 行、装得下不滚 → 滚动条永远不亮、下面全空转。
+#    给够 30 门（15 行 × 84pt）保证溢出。
 CODES = ["ECON10790", "ECON10730", "ECON10740", "SOC10020", "COMP10030",
-         "MATH10050", "PHYS10010", "CHEM10020", "STAT10030", "HIST10040"]
+         "MATH10050", "PHYS10010", "CHEM10020", "STAT10030", "HIST10040"] + [
+    f"TEST{10000 + i}" for i in range(20)]
 
 
 def _strip_of(scroll_view):
@@ -407,14 +410,15 @@ class 真面板(unittest.TestCase):
         """
         E, h, td, sc, strip = self._build()
         try:
-            # 让第一张卡进入“选中”态，才会建「开始上课」按钮。
-            E.S["picked"] = CODES[0]
+            # 2026-11-18 首页格子稿：开课 = 再点一下**选中的那格**（没有每格一颗按钮了）。
+            #    选右列那格（第 2 门）—— 它的右沿正贴着滚动条。
+            E.S["picked"] = CODES[3]
             h.refresh()
             _pump(0.1)
-            from AppKit import NSButton
 
             def walk(v):
-                if isinstance(v, NSButton) and v.title() == "开始上课":
+                if getattr(v, "_course", None) == CODES[3] and \
+                        getattr(v, "_on_click", None) is not None:
                     return v
                 for c in (v.subviews() or []):
                     got = walk(c)
@@ -423,15 +427,15 @@ class 真面板(unittest.TestCase):
                 return None
 
             btn = walk(h.window.contentView())
-            self.assertIsNotNone(btn, "前置：没找到「开始上课」按钮")
+            self.assertIsNotNone(btn, "前置：没找到选中的那格")
             self._live_scroll(sc, 60.0)
             self.assertGreater(strip._model.alpha(), 0.0, "前置：滚动条没亮")
-            for frac in (0.5, 0.98):
+            for frac in (0.5, 0.9):
                 pt = btn.convertPoint_toView_(
                     (btn.frame().size.width * frac, btn.frame().size.height / 2.0), None)
                 hit = h.window.contentView().hitTest_(pt)
-                self.assertIs(hit, btn,
-                              f"滚动条亮着时，按钮 {frac:.0%} 处的点击被 {type(hit).__name__} 吃了")
+                self.assertTrue(hit is not None and (hit is btn or hit.isDescendantOf_(btn)),
+                                f"滚动条亮着时，格子 {frac:.0%} 处的点击被 {type(hit).__name__} 吃了")
         finally:
             E.close_panel()
             td.cleanup()

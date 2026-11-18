@@ -46,6 +46,7 @@ import panel
 import paths
 import ready
 import timetable as T
+import uitokens
 
 # ── 尺寸（每条都有出处，见模块头）────────────────────────────────────
 PAD = 20.0             # 面板内边距（实测：System Settings 20pt）
@@ -66,16 +67,20 @@ CARD_RADIUS = 5.0      # 卡片圆角（实测 5pt）
 #    `motion.ENTER_STAGGER_S`(35ms)。**一次性、不循环**; `motion.reduce_motion()`
 #    为真时整条跳过、直接落位（HIG「Make motion optional」）。
 CARD_ENTER_DY = 6.0
-TOUR_BTN_W = 72.0      # 底栏「功能介绍」（无边框淡字）
 HAIRLINE = 0.5         # 描边（实测 0.5pt；scale 2 上正好 1 设备像素）
 TITLE_H = 34.0
-PANEL_TITLE = "烤菠萝"      # 面板标题（2026-10-14 作者改名；菜单栏那项仍叫「开课前的准备…」，说的是它干什么）
-FOOT_H = 46.0
+PANEL_TITLE = "Pineapple"  # 面板标题（2026-11-18 对外名 Pineapple + 菠萝图标；内部仍叫 ClassLive。原「烤菠萝」2026-10-14）
+BRAND_ICON = 18.0     # 标题前菠萝图标的边长
+#: 标题行最右两颗图标按钮（导入课件 / 关闭）：各 `HEAD_BTN` 见方、间隔 4，离搜索框 8。
+HEAD_BTN = 24.0
+HEAD_TOOLS_W = 2 * HEAD_BTN + 4.0 + 8.0
+HEAD_TOOL_A = 0.5     # 图标按钮的白（不抢课号；悬停不另做 —— 系统按下态够用）
 #: 后台任务行（3.11 F）：有后台笔记在生成时，落点条上方多这一行。
 #: ⚠️ 高度是**预留的**（没有任务时整行隐藏、但空间还在）—— 面板高度在 build 时
 #:    就定死了，运行中长高/缩高要重排整棵树（`refresh()` 只重画卡片，不动窗口）。
 #:    宁可常驻 22pt 空白，也不要一个会在用户眼下跳动的窗口。
 BG_H = 22.0
+BG_LINE_W = 300.0     # 状态行右半：后台任务那句（左半是状态字，2026-11-18 页脚并进来）
 WIDTH = 680.0
 # 卡片区高度：**长到装下为止，但最多占屏幕 60%**。
 # ⚠️ 原来写死 420（= 4.3 张卡），于是「5 门课」就必有半张卡被切在边上 ——
@@ -128,8 +133,6 @@ IMPORT_HEAD = 20.0     # 导入确认卡的标题行
 ADD_TITLE = "＋ 新增课程"
 ADD_PLACEHOLDER = "课号，如 ECON10740"
 ADD_HINT = "回车建课 · Esc 取消"
-ADD_W = 116.0          # 「＋ 新增课程」按钮宽
-PICK_W = 104.0         # 「选择文件…」按钮宽
 # ── 测试模式开关（2026-09-30，`docs/PLAN-test-mode.md` §13.3）──────────
 # ⭐ 2026-10-12 Owen：挪到就绪条上、紧跟「笔记库」（它也是一项全局设置，落点条只管「拖课件」这一件事）。
 #    就绪条没建出来（`ready.items` 抛了）时才退回落点条右侧的老位置 —— 开关不许因此消失。
@@ -145,16 +148,6 @@ ADD_REPLY_Y = ADD_ROW_Y - 3.0 - 17.0     # 反馈那一行（`plan_add` 的 `tex
 #: 「＋新建课程」那个输入框的聚焦指示圆角（同 `SEARCH_FOCUS_RADIUS` 的理由，
 #: 框高 `BTN_H`；`NSTextField` 的 bezel 圆角同为 ≈ 6pt）。
 ADD_FOCUS_RADIUS = 6.0
-# 落点条里提示文字的宽度：右边要给**三颗**控件让位
-# （测试模式开关 +「＋ 新增课程」+「选择文件…」）。
-# ⚠️ 算式与右边那三颗的位置是同一件事 —— 改任何一颗的宽度都得改它。
-# ⚠️⚠️ **余量不多**：标题「把课件全拖到这里 · 自动分到各课」实测 **220.6pt**（15pt），
-#    这个式子给出 274.0。再多塞一颗按钮，提示会**折行 + 第二行被静默吃掉**
-#    （`panel.make_label` 的默认换行行为，没有省略号）。
-#    → 判据在 `tests/test_entry_panel.py` 那一节，**加控件前先看它**。
-HINT_W = WIDTH - 2 * PAD - (CARD_PAD + PICK_W + 8.0 + ADD_W + 16.0)
-#: 退回老位置（开关在落点条上）时的提示宽 —— 右边多让一颗开关。
-HINT_W_TIGHT = HINT_W - (TEST_W + 8.0)
 # ── 就绪胶囊（2026-10-16，`docs/PLAN-396.md` §1）──────────────────
 # ⭐ 原来**单占一行**的那条就绪条（`READY_H` = 40pt）并进标题行 —— 面板直接矮一行。
 #    标题 2026-10-14 改名「烤菠萝」之后那行左轻右重（43pt vs 搜索框 218pt），
@@ -654,9 +647,20 @@ SOON_MIN = 20.0
 
 
 class Likely(typing.NamedTuple):
-    """「最可能那门」+ 为什么。`why` 画在**选中那张卡**的第二行（`_make_card` 的 `why`）。"""
+    """「最可能那门」+ 为什么。`why` 画在**选中那张卡**的第二行（`_make_card` 的 `why`）。
+
+    `tier` 是**证据强度**，不是排序（2026-11-18 首页改版加的，给 `home_model` 用）：
+      · `"now"`  —— 课表上**正开着**（强证据，可以出顶部条并给「开始」按钮）；
+      · `"soon"` —— 课表上 `SOON_MIN` 分钟内要开（强证据，同上）；
+      · `"last"` —— 只是**上次上过**那门（弱证据：只在那格标「上次」，**不许**重排、
+                   **不许**出顶部条 —— 顶部条要「现在就该上」才成立）。
+    `start` 是①②档那节的**开始时刻**（`Suggest` 的钟点来源）；③档 `None`。
+    ⚠️ 两个字段都是**纯加字段**，`why` 文案与取值口径一字未动 —— 现有调用方不受影响。
+    """
     course: str
     why: str
+    tier: str = ""
+    start: datetime.datetime | None = None
 
 
 def likely_course(entries, when, *, last_used=None, soon_min=SOON_MIN) -> Likely | None:
@@ -668,6 +672,9 @@ def likely_course(entries, when, *, last_used=None, soon_min=SOON_MIN) -> Likely
       ② 课表里 **`soon_min` 分钟内**要开的时段（取最近的那个）；
       ③ 都没有 → `last_used`（最近一次真上过课的那门）；
       ④ `last_used` 也没有 → `None`（**没有证据就不猜**：回车什么都不做，不挑第一张卡）。
+    ⚠️ 每一档同时报到 `Likely.tier`（`now` / `soon` / `last`）与 `Likely.start` ——
+       首页要区分**强证据**（①②，可以出顶部条）与**弱证据**（③，只标「上次」）。
+       那两档的判据本身没变，只是**多报了一个字段**。
     ⚠️ 双周课 / 停课日走 `Slot.on_week()` —— 那条规则的唯一定义点在 `timetable.Slot`。
     ⚠️ 并列时取**更晚开始**的那个（同时段两门时，"刚开的那节"更可能是现在这节），
        再并列按课号排 —— 同一个输入永远给同一个答案。
@@ -687,12 +694,14 @@ def likely_course(entries, when, *, last_used=None, soon_min=SOON_MIN) -> Likely
                 covering.append((start, code, s))
     if covering:
         _start, _code, _s = max(covering, key=lambda x: (x[0], x[1]))
-        return Likely(_code, f"课表上 {_s.hh:02d}:{_s.mm:02d} 是这门")
+        return Likely(_code, f"课表上 {_s.hh:02d}:{_s.mm:02d} 是这门",
+                      "now", _start)
     if soon:
         _start, _code, _s = min(soon, key=lambda x: (x[0], x[1]))
-        return Likely(_code, f"课表上 {_s.hh:02d}:{_s.mm:02d} 就要上这门")
+        return Likely(_code, f"课表上 {_s.hh:02d}:{_s.mm:02d} 就要上这门",
+                      "soon", _start)
     if last_used:
-        return Likely(str(last_used), "上次上的是这门")
+        return Likely(str(last_used), "上次上的是这门", "last")
     return None
 
 
@@ -1469,7 +1478,7 @@ def _sever(card) -> None:
        `gc` 收不回（实测：只 `setContentView_(None)` 时 3 轮后仍有 16 个 DropTarget）。
     """
     for attr, val in (("_targets", []), ("_on_enter", None),
-                      ("_on_drop", None), ("_on_exit", None)):
+                      ("_on_drop", None), ("_on_exit", None), ("_on_click", None)):
         try:
             setattr(card, attr, val)
         except Exception:                                     # noqa: BLE001
@@ -1857,6 +1866,358 @@ def _make_card(r: courses.Readiness, *, on_start, on_drop_files, width,
     return view
 
 
+# ── 首页「格子」稿（2026-11-18 Owen 定「1 · 格子」；原型 `classlive-web-spike` `/home4`）──────
+# ⭐ 三条从原型带过来的规矩：
+#    ① **格子顺序永不因为猜测而变**（数字键 = 位置；NN/g 空间记忆：建议另放一处，原位照旧）；
+#    ② 顶部那块「现在该上」**只在强证据**（课表 now / soon）时出现；弱证据（上次那门）只在原格亮一档；
+#    ③ 一屏只有**一块实心白**：顶部块里的「开始上课」。其余全靠白的不同透明度分层。
+CELL_H = 84.0          # 一格：课号 / 课名 / 一条事实，三行（原型 84px）
+CELL_PX, CELL_PY = 16.0, 12.0
+SHEET_RADIUS = 12.0
+SHEET_FILL_A = 0.035   # 整张表一块底，格与格之间只有发丝线 —— 不是 N 张一模一样的圆角卡
+SHEET_LINE_A = 0.07
+CELL_HOT_A = 0.06      # 选中 / 课表那门 / 上次那门
+CELL_DROP_A = 0.10     # 拖拽悬停
+FEAT_H = 76.0
+FEAT_FILL_A = 0.07
+FEAT_BTN_W, FEAT_BTN_H = 96.0, 32.0
+HOME_GAP = 12.0
+GUIDE_H = 64.0
+KEY_A = 0.22           # 数字键提示：在，但不抢
+CELL_DROP_TEXT = "松手，加到这门课"
+
+
+def home_body_height(n: int, *, feat: bool, guide: bool) -> float:
+    """首页卡片区的**自然**高度（不含课后结果卡）：顶部块 + 引导块 + ⌈n/2⌉ 行格子。
+
+    ⚠️ 与 `refresh()` 里的排版**同一组常数**（`card_height` 那条纪律）。
+    """
+    rows = max(0, int(n)) // 2 + 1          # 末尾永远有一格「＋ 新增课程」
+    h = rows * CELL_H
+    if feat:
+        h += FEAT_H + HOME_GAP
+    if guide:
+        h += GUIDE_H + HOME_GAP
+    return h
+
+
+def tile_sub(tile, *, selected: bool, picked: bool, can_start: bool,
+             start_note: str = "") -> tuple[str, bool]:
+    """格子第三行：`(文字, 是否提亮)`。**一格只说一件事。**
+
+    选中且能开课 → 说下一步怎么做（再点一下 / 回车）；否则给一条事实：
+    下次课（有课表）→ 上次上过（没课表）→ 空。
+    """
+    if selected and can_start:
+        if start_note:
+            return start_note, True
+        if picked:
+            return "再点一下开始上课", True
+        if tile.mark == "last":
+            return "上次上的这门，回车继续", True
+    fact = tile.next_slot or (f"{tile.last_text}上过" if tile.last_text else "")
+    return fact, bool(selected or tile.mark)
+
+
+def _layer_fill(view, alpha, *, radius=0.0, animate=False):
+    """白 × alpha 的底色（可选圆角）。悬停 / 拖拽的变化走 `motion.FEEDBACK_S`（同课卡 `_bg`）。"""
+    from AppKit import NSColor
+    try:
+        view.setWantsLayer_(True)
+        lay = view.layer()
+        if radius:
+            lay.setCornerRadius_(radius)
+        if animate:
+            motion.fade_property(lay, "backgroundColor", motion.FEEDBACK_S)
+        lay.setBackgroundColor_(NSColor.whiteColor().colorWithAlphaComponent_(alpha).CGColor())
+    except Exception:                                  # noqa: BLE001 底色是锦上添花
+        pass
+
+
+def _attach_delete_menu(view, course, on_delete_course):
+    """右键「删除课程…」—— 同 `_make_card` 那段（⚠️ target 弱引用，必须挂进 `view._targets`）。"""
+    if on_delete_course is None:
+        return
+    from AppKit import NSMenu, NSMenuItem
+    _mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("删除课程…", "act:", "")
+    _t = _target(lambda: on_delete_course(course))
+    _mi.setTarget_(_t)
+    view._targets.append(_t)
+    _menu = NSMenu.alloc().init()
+    _menu.addItem_(_mi)
+    view.setMenu_(_menu)
+
+
+def _make_cell(tile, *, width, sub, strong, hot, on_click, on_drop_files,
+               show_key=True, on_delete_course=None, add_cell=False):
+    """一个格子 = 一个落点 + 三行字。点击走 `view._on_click`（`panel.make_drop_target` 的 mouseDown）。
+
+    `add_cell=True` = 奇数门课时补齐的那一格「＋ 新增课程」（不是落点）。
+    """
+    from AppKit import NSMakeRect
+    base_a = CELL_HOT_A if hot else 0.0
+    holder: dict = {}
+
+    def _enter(pb):
+        ok = acceptable(panel.file_paths(pb) or [])
+        _layer_fill(holder["view"], CELL_DROP_A if ok else base_a, animate=True)
+        if ok and holder.get("sub") is not None:
+            holder["sub"].setStringValue_(CELL_DROP_TEXT)
+        return ok
+
+    def _exit():
+        _layer_fill(holder["view"], base_a, animate=True)
+        if holder.get("sub") is not None:
+            holder["sub"].setStringValue_(sub)
+
+    def _drop(paths):
+        _exit()
+        return on_drop_files(tile.code, paths)
+
+    if add_cell:
+        view = panel.make_drop_target(lambda pb: False, lambda paths: False)
+    else:
+        view = panel.make_drop_target(_enter, _drop, _exit)
+    holder["view"] = view
+    view.setFrame_(NSMakeRect(0.0, 0.0, width, CELL_H))
+    view._course = "" if add_cell else tile.code
+    view._tag = view._course
+    view._targets = []
+    _layer_fill(view, base_a)
+    if on_click is not None:
+        view._on_click = on_click
+    inner = width - 2 * CELL_PX
+    top = CELL_H - CELL_PY
+    if add_cell:
+        view.addSubview_(panel.make_label(
+            ADD_TITLE, NSMakeRect(CELL_PX, top - L1_H, inner, L1_H), 13.0,
+            alpha=uitokens.TEXT_3, truncate=True))
+        return view
+    key_w = 16.0 if show_key else 0.0
+    _t = panel.make_label(tile.code, NSMakeRect(CELL_PX, top - L1_H, inner - key_w, L1_H),
+                          13.0, bold=True, truncate=True)
+    view.addSubview_(_t)
+    if show_key and tile.key is not None:
+        _k = panel.make_label(str(tile.key), NSMakeRect(width - CELL_PX - key_w, top - L1_H,
+                                                        key_w, L1_H), 11.0, alpha=KEY_A)
+        try:
+            _k.setAlignment_(2)                        # NSTextAlignmentRight
+        except Exception:                              # noqa: BLE001
+            pass
+        view.addSubview_(_k)
+    title = _CJK_PARENS.sub(lambda m: f"（{m[1].strip()}）", tile.title or "")
+    if title.startswith(tile.code):
+        title = title[len(tile.code):].strip()
+    view.addSubview_(panel.make_label(
+        title, NSMakeRect(CELL_PX, top - L1_H - 2.0 - L2_H, inner, L2_H), 12.0,
+        alpha=uitokens.TEXT_2, truncate=True))
+    _s = panel.make_label(sub, NSMakeRect(CELL_PX, CELL_PY - 2.0, inner, L2_H), 11.0,
+                          alpha=uitokens.TEXT_2 if strong else uitokens.TEXT_3, truncate=True)
+    holder["sub"] = _s
+    view.addSubview_(_s)
+    _attach_delete_menu(view, tile.code, on_delete_course)
+    return view
+
+
+def _make_sheet(cells, *, width):
+    """两列格子拼成**一整张表**：一块底、圆角在外框、格间 0.5pt 发丝线。返回 `NSView`（未翻转）。"""
+    from AppKit import NSMakeRect, NSView
+    n_rows = max(1, (len(cells) + 1) // 2)
+    h = n_rows * CELL_H
+    col_w = width / 2.0
+    sheet = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, h))
+    _layer_fill(sheet, SHEET_FILL_A, radius=SHEET_RADIUS)
+    try:
+        sheet.layer().setMasksToBounds_(True)
+    except Exception:                                  # noqa: BLE001
+        pass
+    for i, c in enumerate(cells):
+        row, col = divmod(i, 2)
+        c.setFrame_(NSMakeRect(col * col_w, h - (row + 1) * CELL_H, col_w, CELL_H))
+        sheet.addSubview_(c)
+    lines = [NSMakeRect(col_w - HAIRLINE / 2.0, 0.0, HAIRLINE, h)]
+    lines += [NSMakeRect(0.0, h - r * CELL_H - HAIRLINE / 2.0, width, HAIRLINE)
+              for r in range(1, n_rows)]
+    for rect in lines:
+        ln = NSView.alloc().initWithFrame_(rect)
+        _layer_fill(ln, SHEET_LINE_A)
+        sheet.addSubview_(ln)
+    return sheet
+
+
+def _make_feat(sug, title, *, width, on_start, start_note, on_drop_files):
+    """顶部「现在该上」那块：课号 + 课名 | 相对时间 + 唯一一颗实心白「开始上课」。整块也是落点。"""
+    from AppKit import NSMakeRect
+    holder: dict = {}
+
+    def _enter(pb):
+        ok = acceptable(panel.file_paths(pb) or [])
+        _layer_fill(holder["view"], CELL_DROP_A + 0.04 if ok else FEAT_FILL_A, animate=True)
+        if ok:
+            holder["rel"].setStringValue_(CELL_DROP_TEXT)
+        return ok
+
+    def _exit():
+        _layer_fill(holder["view"], FEAT_FILL_A, animate=True)
+        holder["rel"].setStringValue_(sug.rel)
+
+    def _drop(paths):
+        _exit()
+        return on_drop_files(sug.code, paths)
+
+    view = panel.make_drop_target(_enter, _drop, _exit)
+    holder["view"] = view
+    view.setFrame_(NSMakeRect(0.0, 0.0, width, FEAT_H))
+    view._course = sug.code
+    view._tag = "feat"
+    view._targets = []
+    _layer_fill(view, FEAT_FILL_A, radius=SHEET_RADIUS)
+    pad = 16.0
+    btn_w = (150.0 if start_note else FEAT_BTN_W) if on_start is not None else 0.0
+    rel_w = 120.0
+    text_w = width - 2 * pad - btn_w - rel_w - 24.0
+    view.addSubview_(panel.make_label(sug.code, NSMakeRect(pad, FEAT_H - pad - 24.0, text_w, 24.0),
+                                      20.0, bold=True, truncate=True))
+    t = _CJK_PARENS.sub(lambda m: f"（{m[1].strip()}）", title or "")
+    if t.startswith(sug.code):
+        t = t[len(sug.code):].strip()
+    view.addSubview_(panel.make_label(t, NSMakeRect(pad, pad - 1.0, text_w, L1_H), 13.0,
+                                      alpha=uitokens.TEXT_2, truncate=True))
+    x_btn = width - pad - btn_w
+    rel = panel.make_label(sug.rel, NSMakeRect(x_btn - 12.0 - rel_w, (FEAT_H - L2_H) / 2.0 - 1.0,
+                                               rel_w, L2_H), 12.0, alpha=uitokens.TEXT_2,
+                           truncate=True)
+    try:
+        rel.setAlignment_(2)                           # 右对齐，贴着按钮
+    except Exception:                                  # noqa: BLE001
+        pass
+    holder["rel"] = rel
+    view.addSubview_(rel)
+    if on_start is not None:
+        b = panel.make_button(NSMakeRect(x_btn, (FEAT_H - FEAT_BTN_H) / 2.0, btn_w, FEAT_BTN_H))
+        if start_note:
+            panel.style_secondary(b, start_note, size=12.0)
+            b.setEnabled_(False)
+            b.setToolTip_("更新装完面板会自己重开")
+        else:
+            panel.style_primary(b, "开始上课", size=13.0)
+            t_ = _target(lambda: on_start(sug.code))
+            b.setTarget_(t_)
+            b.setAction_("act:")
+            view._targets.append(t_)
+        view.addSubview_(b)
+    return view
+
+
+def _make_guide(*, width):
+    """全新用户（一门课什么都没有）那块引导：一句做什么 + 一句淡的「再拖课表会怎样」。"""
+    from AppKit import NSMakeRect, NSView
+    v = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, GUIDE_H))
+    _layer_fill(v, CELL_HOT_A, radius=SHEET_RADIUS)
+    pad = 16.0
+    v.addSubview_(panel.make_label("先把这学期的课件拖进来，会自动分到各门课。",
+                                   NSMakeRect(pad, GUIDE_H / 2.0 + 1.0, width - 2 * pad, L1_H),
+                                   13.0, truncate=True))
+    v.addSubview_(panel.make_label("再拖一份课表 .ics，到点就会把要上的那门放在最上面。",
+                                   NSMakeRect(pad, GUIDE_H / 2.0 - L2_H - 3.0, width - 2 * pad, L2_H), 12.0,
+                                   alpha=uitokens.TEXT_3, truncate=True))
+    return v
+
+
+def _icon_button(rect, symbol: str, title: str):
+    """标题行的图标按钮（SF Symbol，只画图）。**标题照设**：它是无障碍名，判据也按它找。"""
+    from AppKit import NSColor, NSImage
+    b = panel.make_button(rect)
+    b.setBordered_(False)
+    b.setTitle_(title)
+    b.setToolTip_(title)
+    try:
+        img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, title)
+        if img is not None:
+            try:
+                from AppKit import NSImageSymbolConfiguration
+                img = img.imageWithSymbolConfiguration_(
+                    NSImageSymbolConfiguration.configurationWithPointSize_weight_(13.0, 0.0))
+            except Exception:                          # noqa: BLE001
+                pass
+            b.setImage_(img)
+            b.setImagePosition_(1)                     # NSImageOnly
+        b.setContentTintColor_(NSColor.whiteColor().colorWithAlphaComponent_(HEAD_TOOL_A))
+    except Exception:                                  # noqa: BLE001 没有 SF Symbols → 退回文字
+        pass
+    return b
+
+
+DROP_ALL_TEXT = "松手，自动分到各门课"
+DROP_ALL_SUB = "拖到某一门上，就只加给那门"
+
+
+def _drop_overlay(view):
+    """整窗落点的那层提示（拖到空白处时出现）：深底 + 内缩 8pt 的虚线框 + 居中两行字。
+
+    ⚠️ 是 **CALayer**（挂在整窗落点视图的层上、`zPosition` 顶到最上），**不是视图** ——
+       视图会参与拖拽的命中查找，盖在格子上面时拖到格子上的文件就被它截走了。层不参与命中。
+    画不出来回 `None`（拖拽照样能收，只是没有这层提示）。
+    """
+    try:
+        from AppKit import NSColor, NSFont
+        from Quartz import CALayer, CAShapeLayer, CATextLayer, CGPathCreateWithRoundedRect
+        view.setWantsLayer_(True)
+        b = view.bounds()
+        w, h = float(b.size.width), float(b.size.height)
+        scale = 2.0
+        try:
+            scale = float(view.window().backingScaleFactor()) if view.window() else 2.0
+        except Exception:                              # noqa: BLE001
+            pass
+        ov = CALayer.layer()
+        ov.setFrame_(b)
+        ov.setZPosition_(1000.0)
+        ov.setBackgroundColor_(NSColor.colorWithWhite_alpha_(0.11, 0.93).CGColor())
+        dash = CAShapeLayer.layer()
+        dash.setFrame_(b)
+        dash.setPath_(CGPathCreateWithRoundedRect(((8.0, 8.0), (w - 16.0, h - 16.0)),
+                                                  SHEET_RADIUS, SHEET_RADIUS, None))
+        dash.setFillColor_(None)
+        dash.setStrokeColor_(NSColor.whiteColor().colorWithAlphaComponent_(0.35).CGColor())
+        dash.setLineWidth_(1.0)
+        dash.setLineDashPattern_([6.0, 4.0])
+        ov.addSublayer_(dash)
+        for text, size, alpha, dy, weight in ((DROP_ALL_TEXT, 15.0, 1.0, 4.0, 0.3),
+                                              (DROP_ALL_SUB, 12.0, 0.55, -22.0, 0.0)):
+            t = CATextLayer.layer()
+            t.setString_(text)
+            t.setFont_(NSFont.systemFontOfSize_weight_(size, weight))
+            t.setFontSize_(size)
+            t.setForegroundColor_(NSColor.whiteColor().colorWithAlphaComponent_(alpha).CGColor())
+            t.setAlignmentMode_("center")
+            t.setContentsScale_(scale)
+            t.setFrame_(((0.0, h / 2.0 + dy), (w, size + 6.0)))
+            ov.addSublayer_(t)
+        ov.setHidden_(True)
+        view.layer().addSublayer_(ov)
+        return ov
+    except Exception:                                  # noqa: BLE001
+        return None
+
+
+def _brand_icon(rect):
+    """标题前的菠萝（菜单栏同一个模板图，染白）。画不出来 → `None`，标题照常只有字。"""
+    try:
+        import overlay
+        from AppKit import NSColor, NSImageView
+        img = overlay._pineapple_icon(pt=rect.size.width, scale=2)
+        if img is None:
+            return None
+        iv = NSImageView.alloc().initWithFrame_(rect)
+        img.setTemplate_(True)
+        iv.setImage_(img)
+        iv.setContentTintColor_(NSColor.whiteColor())
+        return iv
+    except Exception:                                  # noqa: BLE001
+        return None
+
+
 def _make_batch_card(verdicts, *, width, course_names):
     """待确认的映射表。返回 `(view, rows)`，`rows = [(路径, 选择器), …]`。
 
@@ -2150,13 +2511,18 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
            ⚠️ 修法是接住**并出声**，不是把坏文件当空（后者会让下次写入覆盖真内容）。
         """
         import store
+        _at = datetime.datetime.now()
+        # ⭐ 首页（`home_model.build`）要用**同一份**课表和**同一个时刻** —— 存下来，
+        #    否则顶部块（home_model 算）和回车开的那门（这里算）可能跨过一个边界而分叉。
+        S["tt"] = ([], _at)
         try:
             ent = T.load(store.load_json(paths.timetable(root=state_root), {}))
         except (store.StoreError, OSError) as e:
             print(f"⚠ 课表读不出来（{type(e).__name__}: {str(e)[:70]}）"
                   f"—— 这次不做课表预选", flush=True)
             return None
-        return likely_course(ent, datetime.datetime.now(), last_used=last_course_of(rs))
+        S["tt"] = (ent, _at)
+        return likely_course(ent, _at, last_used=last_course_of(rs))
 
     S["likely"] = _likely()
 
@@ -2234,8 +2600,18 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
 
     # ⚠️ 用 `visibleFrame`（去掉菜单栏 / Dock），不是 `frame` —— 后者会让面板钻到 Dock 底下。
     _vis = NSScreen.mainScreen().visibleFrame()
-    _card_h = card_height() if rs else empty_card_height()
-    body_h = body_height(len(rs), _vis.size.height, card_h=_card_h)
+    _card_h = CELL_H if rs else empty_card_height()
+    if rs:
+        # ⭐ 首页格子稿：⌈n/2⌉ 行格子 + 顶部块（强证据才有）+ 引导块（全新用户）。
+        #    超过屏幕 60% 才滚 —— 同 `body_height` 的封顶。
+        import home_model as _hm
+        _lk0 = S.get("likely")
+        _nat = home_body_height(
+            len(rs), feat=bool(_lk0 and getattr(_lk0, "tier", "") in ("now", "soon")),
+            guide=_hm._first_run(rs))
+        body_h = min(_nat, max(_card_h, _vis.size.height * BODY_SCREEN_FRACTION))
+    else:
+        body_h = body_height(len(rs), _vis.size.height, card_h=_card_h)
     # ── 就绪条（2026-09-28）──────────────────────────────────────────
     # ⚠️ 算它要问权限、stat 四个模型目录 —— 都在本地、没网络。实测 ~85ms
     #    （其中 Qwen3 那条走 HF cache 的 `try_to_load_from_cache`，占大头）。
@@ -2261,9 +2637,17 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    高度（原来 `READY_H` = 40pt）。就绪项没算出来时也走这条 —— 与改前逐点相同。
     # ⭐ 3.11 F：后台任务行常驻预留（`BG_H`）—— 有任务时显示文字 + 「停止」，
     #    没有时整行隐藏但**空间保留**（理由见 `BG_H`）。y 与高度同一组常数。
-    bg_y = PAD + FOOT_H + DROP_GAP
+    # ⭐⭐ 2026-11-18 首页格子稿：**没有页脚、没有常驻虚线框**。
+    #    从下往上：状态行（`BG_H`，状态字 + 后台任务）→ 卡片区 → 标题行。
+    #    动作条（原落点条：批量确认 / 搜索 / 新增课程那一行）**只在那几种模式下出现**，
+    #    出现时**占卡片区底部** `DROP_H + DROP_GAP`（`_layout_modes` 把滚动区抬上去）——
+    #    所以窗口高度按「正常模式」算，正常模式不留一条空着的动作条。
+    bg_y = 10.0                          # 状态行贴底：多数时候是空的，别让它撑出一大截空白
     drop_y = bg_y + BG_H + DROP_GAP
-    sc_y = drop_y + DROP_H + DROP_GAP
+    sc_y = drop_y
+    if rs:
+        # 动作条出现时卡片区还得剩下至少一行格子
+        body_h = max(body_h, CELL_H + DROP_H + DROP_GAP)
     body_h = fit_body(body_h, sc_y + 8.0 + TITLE_H + PAD,
                       _vis.size.height, _card_h)
     h = sc_y + body_h + 8.0 + TITLE_H + PAD
@@ -2271,6 +2655,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     mask = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
     fp = panel.build(NSMakeRect(0.0, 0.0, WIDTH, h), mask)
     win, ve = fp.window, fp.glass
+    _glass_base = len(ve.subviews())     # scrim + 拖窗层：整窗落点不收它们（见 `drop_all`）
     # ⚠️ borderless 默认没有阴影（Titled 的 overlay 才有）—— 同 whatsnew 的处理，
     #    留在调用点、不进 panel.py 的配方。
     win.setHasShadow_(True)
@@ -2290,10 +2675,29 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     title_lbl = panel.make_label(
         # ⚠️ 竖直位置是**量出来的**：原来 `+6 / 高 28` 让字的中线比搜索框高 8.25pt（拍图量墨迹，
         #    2026-10-14）。现在与搜索框同一条中线（同法复量 ≤0.5pt）。
-        PANEL_TITLE, NSMakeRect(PAD, h - PAD - TITLE_H + 1.75,
-                                 WIDTH - 2 * PAD - SEARCH_W - 10.0, 24.0),
+        PANEL_TITLE, NSMakeRect(PAD + BRAND_ICON + 6.0, h - PAD - TITLE_H + 1.75,
+                                 WIDTH - 2 * PAD - SEARCH_W - HEAD_TOOLS_W - 16.0 - BRAND_ICON, 24.0),
         15.0, bold=True)
     ve.addSubview_(title_lbl)
+    # ⭐ 菠萝图标（对外名 Pineapple，2026-11-18）。竖直位置与标题字同一条中线（拍图量过再调）。
+    _brand = _brand_icon(NSMakeRect(PAD, h - PAD - TITLE_H + 1.75 + 3.0, BRAND_ICON, BRAND_ICON))
+    if _brand is not None:
+        ve.addSubview_(_brand)
+    # ⭐ 品牌（菠萝 + Pineapple）本身是菜单入口：模型 / 更新 / 云端转写 / 测试模式 / 功能介绍。
+    #    全都就绪时**不另挂一颗「✓ 已就绪」胶囊**（状态只在要处理时出现，`_refresh_chip`）。
+    _bp = panel.make_label(PANEL_TITLE, NSMakeRect(0.0, 0.0, 10.0, 24.0), 15.0, bold=True)
+    _bp.sizeToFit()
+    brand_btn = panel.make_button(NSMakeRect(
+        PAD - 4.0, h - PAD - TITLE_H + 2.0, BRAND_ICON + 6.0 + float(_bp.frame().size.width) + 8.0,
+        28.0))
+    brand_btn.setBordered_(False)
+    brand_btn.setTitle_("")
+    brand_btn.setToolTip_("状态与设置")
+    _brand_t = _target(lambda: _chip_menu(anchor=brand_btn))
+    brand_btn.setTarget_(_brand_t)
+    brand_btn.setAction_("act:")
+    S["brand_target"] = _brand_t
+    ve.addSubview_(brand_btn)
 
     # ── 标题行右侧：全局搜索（`find.search()`，plan §2.3）──────────────
     # ⚠️⚠️ **这是本面板第一个文本输入控件** —— 在此之前它从不变成 key window。
@@ -2312,7 +2716,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    就抢 key」——那是本段的主题（guard 那条不变量）。环交给 `panel` 了。
     search_field, _search_focus = panel.focus_field(
         NSSearchField,
-        NSMakeRect(PAD + WIDTH - 2 * PAD - SEARCH_W, h - PAD - TITLE_H + 4.0,
+        NSMakeRect(PAD + WIDTH - 2 * PAD - SEARCH_W - HEAD_TOOLS_W, h - PAD - TITLE_H + 4.0,
                    SEARCH_W, TITLE_H - 10.0),
         radius=SEARCH_FOCUS_RADIUS, key="EntrySearch")
     search_field.setPlaceholderString_("搜索转录 / 笔记…")
@@ -2430,6 +2834,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #    ⚠️ 摆 width / setFrame_ / render_status 三者的**顺序**在 `chip_apply` 里，
         #       别在这里拆开（D12：先渲染后改宽 = 三颗点按旧宽度定位）。
         chip_apply(btn, title, running=_running, max_w=chip["max_w"])
+        # ⭐ 2026-11-18：全都正常 → 胶囊不出现（「✓ 已就绪」是噪音）；菜单从品牌那里进。
+        btn.setHidden_(kind == "ok")
 
     def _set_item(key: str, it: dict) -> None:
         """换掉某一项的状态并重画胶囊（主线程）。**改的是 `ready_by_key` 那份**。"""
@@ -2849,14 +3255,14 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             sub.addItem_(mi)
         return sub
 
-    def _chip_menu() -> None:
+    def _chip_menu(anchor=None) -> None:
         """点胶囊：弹**原生 `NSMenu`** —— 每一项一行 + 分隔线 + 两个勾选项。**主线程**。
 
         点哪一项就做它现在做的事（`on_ready_click` 原样复用 —— 那四条路一个都没重写）。
         ⚠️ 菜单项的 target 是**弱引用**：不挂住就是「点了没反应，也不报错」→ 挂到 `S` 上。
         """
         from AppKit import NSMenu, NSMenuItem
-        b = chip.get("btn")
+        b = anchor if anchor is not None else chip.get("btn")
         if b is None:
             return
         menu = NSMenu.alloc().init()
@@ -2898,6 +3304,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             ti.setTarget_(tg)
             keep.append(tg)
             menu.addItem_(ti)
+        _tt = S.get("tour_target")
+        if _tt is not None:
+            menu.addItem_(NSMenuItem.separatorItem())
+            tri = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("功能介绍", "act:", "")
+            tri.setTarget_(_tt)
+            menu.addItem_(tri)
         S["chip_menu_targets"] = keep      # ⚠️ 弱引用：得活到菜单关掉之后
         popup_menu(menu, b)
 
@@ -2953,11 +3365,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _probe_lbl = panel.make_label(PANEL_TITLE, NSMakeRect(0.0, 0.0, 10.0, 24.0),
                                       15.0, bold=True)
         _probe_lbl.sizeToFit()
-        chip_x = PAD + float(_probe_lbl.frame().size.width) + CHIP_GAP
+        chip_x = PAD + BRAND_ICON + 6.0 + float(_probe_lbl.frame().size.width) + CHIP_GAP
         # ⚠️ 右沿必须停在搜索框左边再留 10pt —— 胶囊再长也不许挤到搜索框上去
         #    （`chip_fit` 就按这个上限裁）。
         chip["max_w"] = max(CHIP_MIN_W,
-                            (PAD + WIDTH - 2 * PAD - SEARCH_W - 10.0) - chip_x)
+                            (PAD + WIDTH - 2 * PAD - SEARCH_W - HEAD_TOOLS_W - 10.0) - chip_x)
         _btn = panel.make_button(
             NSMakeRect(chip_x, h - PAD - TITLE_H + 2.75, CHIP_MIN_W, CHIP_H))
         _btn.setBordered_(False)
@@ -3351,7 +3763,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     bg_holder: dict = {"label": None, "btn": None, "tick": 0, "stems": [],
                        "root": None}
     _bg_line = panel.make_label(
-        "", NSMakeRect(PAD + CARD_PAD, bg_y + 2.0, W_IN - 56.0, 16.0), 11.0, alpha=DIM)
+        "", NSMakeRect(PAD + W_IN - 56.0 - BG_LINE_W, bg_y + 2.0, BG_LINE_W, 16.0), 11.0,
+        alpha=DIM, truncate=True)
+    try:
+        _bg_line.setAlignment_(2)        # 右对齐：贴着「停止」；左半行留给状态字
+    except Exception:                    # noqa: BLE001
+        pass
     _bg_line.setHidden_(True)
     bg_holder["label"] = _bg_line
     ve.addSubview_(_bg_line)
@@ -3387,41 +3804,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     bg_holder["root"] = state_root
     S["bg"] = bg_holder
 
-    # 测试模式开关在胶囊菜单里 → 提示用满宽；就绪那一格没建出来、开关退回这里 → 让出一颗的位置。
-    # ⚠️ 2026-10-16：判据不再是「放不放得下」（`test_mode_fits_ready` 已删 —— 那个宽度竞争
-    #    随就绪条一起没了），而是「**有没有那颗胶囊**」。胶囊在 → 开关进菜单；不在 → 退这儿。
-    _tm_in_strip = on_test_mode is not None and not ready_items
-    _hint_w = HINT_W_TIGHT if _tm_in_strip else HINT_W
-    # ⚠️ 两行（2026-10-12 从三行并来）：「认不出的会让你核对」挪给了拖进来之后的批量确认卡 ——
-    #    那张卡本来就会让你核对，在这里预告一遍是多占一行。
-    strip_holder["hint"] = [
-        # 13pt（原 15）：落点条是次要入口，字不该比课名还大（2026-10-14 评审）
-        panel.make_label("把课件全拖到这里 · 自动分到各课",
-                         NSMakeRect(CARD_PAD, DROP_H - 28.0, _hint_w, 18.0), 13.0),
-        panel.make_label("PDF / PPTX / DOCX · 课表 .ics · 文件夹也行",
-                         NSMakeRect(CARD_PAD, DROP_H - 48.0, _hint_w, 16.0),
-                         11.0, alpha=DIM),
-    ]
-    for _v in strip_holder["hint"]:
-        strip.addSubview_(_v)
-
-    # ⭐ 虚线描边 —— macOS 里「这是拖拽落点」的通用画法（实线读起来像卡片）。
-    # ⚠️ `CAShapeLayer` 包 try：画不出虚线不该让整个面板起不来，退回上面那圈实线。
-    try:
-        from Quartz import CGPathCreateWithRoundedRect, CAShapeLayer
-        _dash = CAShapeLayer.layer()
-        _dash.setFrame_(strip.bounds())
-        _dash.setPath_(CGPathCreateWithRoundedRect(
-            NSMakeRect(0.5, 0.5, W_IN - 1.0, DROP_H - 1.0), CARD_RADIUS, CARD_RADIUS, None))
-        _dash.setFillColor_(None)
-        _dash.setStrokeColor_(NSColor.whiteColor()
-                              .colorWithAlphaComponent_(0.22).CGColor())
-        _dash.setLineWidth_(1.0)
-        _dash.setLineDashPattern_([5.0, 4.0])
-        strip.layer().addSublayer_(_dash)
-        strip.layer().setBorderWidth_(0.0)         # 实线让位给虚线，别叠着
-    except Exception:                                  # noqa: BLE001
-        pass
+    # ⭐ 2026-11-18 首页格子稿：这一条不再是常驻的虚线落点框 —— 它只是**动作条**
+    #    （批量确认 / 搜索 / 新增课程那一行），只在那几种模式下出现（`_layout_modes`）。
+    #    「拖到空白处 = 自动分到各课」交给整窗那层（`_drop_overlay`）；「选择文件…」挪到
+    #    标题行的导入图标；「＋ 新增课程」挪到格子末尾那一格；测试模式只在品牌菜单里。
+    strip_holder["hint"] = []
 
     # ── 新增课程：底部那条**自己换成**输入行（2026-09-28）────────────────
     # ⭐ 形状是 **inline row**（提醒事项那种）：点「＋」让**同一块地方**变成输入行，
@@ -3586,64 +3973,15 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if p.runModal() == 1:                             # NSModalResponseOK
             run_batch([str(u.path()) for u in p.URLs()])
 
-    _pick_btn = panel.make_button(
-        NSMakeRect(W_IN - CARD_PAD - PICK_W, (DROP_H - BTN_H) / 2.0, PICK_W, BTN_H))
-    panel.style_secondary(_pick_btn, "选择文件…", size=12.0)
+    # ⭐ 导入（选一堆课件 / 课表 → 批量归档）：标题行，搜索框右边、关闭左边。
+    _pick_btn = _icon_button(
+        NSMakeRect(WIDTH - PAD - 2 * HEAD_BTN - 4.0, h - PAD - TITLE_H + 4.0, HEAD_BTN, HEAD_BTN),
+        "doc.badge.plus", "导入课件 / 课表…")
     _pick_t = _target(_pick_batch_files)
     _pick_btn.setTarget_(_pick_t)                         # ⚠️ 弱引用 —— 靠这里留
     _pick_btn.setAction_("act:")
     strip_targets.append(_pick_t)
-    strip.addSubview_(_pick_btn)
-    strip_holder["hint"].append(_pick_btn)
-
-    # ⭐ 「＋ 新增课程」（2026-09-28）—— **就放在这里，不放右上角**。
-    #    理由：点了之后出现的那一行输入框**就在它下面**（底部那条自己换成输入行）。
-    #    放在标题行右侧的话，用户在面板顶上点一下、输入框在面板最底下冒出来，
-    #    中间隔着四百点且**没有任何动效** —— 那是一处静默的可发现性失败。
-    #    （`docs/PLAN-entry-panel.md` 的草图把它画在右上角；本轮的实现挪到了这里。）
-    _add_btn = panel.make_button(
-        NSMakeRect(W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W, (DROP_H - BTN_H) / 2.0,
-                   ADD_W, BTN_H))
-    panel.style_secondary(_add_btn, ADD_TITLE, size=12.0)
-    _add_t = _target(open_add)
-    _add_btn.setTarget_(_add_t)                           # ⚠️ 弱引用 —— 靠这里留
-    _add_btn.setAction_("act:")
-    strip_targets.append(_add_t)
-    strip.addSubview_(_add_btn)
-    strip_holder["hint"].append(_add_btn)
-
-    # ⭐ 测试模式开关的**退路**（2026-10-16 起正路是胶囊菜单里的勾选项）──────────
-    # ⚠️ 走到这儿只有一个原因：**就绪那一格没建出来**（`ready.items` 抛了 / 用户
-    #    先前把就绪那一条关掉了 `ready.dismissed()`）→ 那时没有胶囊，开关不能跟着消失。
-    #    📌 原来的判据是「接在就绪条最后一项后面放不放得下」（`test_mode_fits_ready`，
-    #    2026-10-16 随就绪条一起删）—— 那条宽度竞争已经不存在了。
-    # ⚠️ `on_test_mode is None` = 这个面板不是"开课前"那条路起的（上课中从菜单栏开的）
-    #    —— 那时**这节课早在录了**，开关没有意义 → **不建**（同 `on_start` 那条纪律）。
-    # ⚠️ 放这儿不放卡片上：作者 2026-09-28 删过卡片上的「选择文件…」（原话「卡片看着太繁杂」），
-    #    而这是个**全局**状态（这节课录不录、传不传），底部那条正是全局控件的位置。
-    if _tm_in_strip:
-        tm_btn = panel.make_button(
-            NSMakeRect(W_IN - CARD_PAD - PICK_W - 8.0 - ADD_W - 8.0 - TEST_W,
-                       switch_y(0, 1), TEST_W, BTN_H))
-        tm_btn.setTitle_(test_mode_title(tm_on[0]))    # 两态同宽（判据钉着）
-        tm_btn.setBordered_(False)                     # ⚠️ 见 `TEST_W` 那段：状态→无边框
-        tm_btn.setFont_(NSFont.systemFontOfSize_(12.0))
-        try:
-            # ⚠️ 只是深色玻璃上的可读性，**两态同一个值** —— 不许拿颜色表达状态。
-            tm_btn.setContentTintColor_(
-                NSColor.whiteColor().colorWithAlphaComponent_(0.92))
-        except Exception:                              # noqa: BLE001
-            pass
-        tm_holder["btn"] = tm_btn                      # ⚠️ 开关回调靠它改标题
-        tm_t = _target(toggle_test_mode)
-        tm_btn.setTarget_(tm_t)                        # ⚠️ 弱引用 —— 靠 `strip_targets` 留它
-        tm_btn.setAction_("act:")
-        strip_targets.append(tm_t)
-        strip.addSubview_(tm_btn)
-        # ⚠️ 也进 `hint` 那组：**批量/搜索/新增那几档会把它藏起来**
-        #    （`refresh()` 按 `strip_holder["hint"]` 逐个 `setHidden_`）——
-        #    那些档下右下角是「取消/确认」，多一颗开关会挤在同一块地方。
-        strip_holder["hint"].append(tm_btn)
+    ve.addSubview_(_pick_btn)
 
     # ⚠️ **一次性挂上**（见 `strip_targets` 的说明）—— 别在上面每一处各写一遍。
     strip._targets = strip_targets
@@ -4252,6 +4590,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         b = S.get("batch")
         s = S.get("search")
         a = S.get("add")
+        # ⭐ 动作条只在模式里出现，出现时占卡片区底部（窗口高度不变，见 `bg_y` 那段）。
+        _mode = (b is not None or s is not None or a is not None
+                 or S.get("ics") is not None)
+        strip.setHidden_(not _mode)
+        _cut = (DROP_H + DROP_GAP) if _mode else 0.0
+        sc.setFrame_(((PAD, drop_y + _cut), (WIDTH - 2 * PAD, body_h - _cut)))
         for _v in strip_holder["hint"]:
             _v.setHidden_(b is not None or s is not None or a is not None
                           or S.get("ics") is not None)
@@ -4369,17 +4713,16 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #       认错课 = 整节课术语表全错，而作者拍的是「预选 + 显式纠错入口」）。
         _lk = S.get("likely")
         _hint = _lk.course if _lk else None
-        if _hint:
-            rows.sort(key=lambda r: (r.course != _hint,))
+        # ⚠️⚠️ **不再把预选那门排到第一**（2026-11-18 首页格子稿）：格子位置 = 数字键，
+        #    猜测一变位置就跳 —— NN/g 空间记忆那条。预选改由顶部块（强证据）/ 原格亮一档（弱证据）表达。
         # 数字键的顺序**与屏幕上显示的顺序同源**（就是这一份 rows）。
         S["order"] = [r.course for r in rows]
         # 选中的那张：用户点过的优先，否则预选的那张。⚠️ 点选**不重排** —— 卡片在手底下跳走更糟。
         # ⚠️ 与 `_selected_course`（回车走的那条）**同一个式子**，别只改一处。
         _sel = S.get("picked") or _hint
-        _why = _lk.why if (_lk and _sel == _hint) else None
         if on_start is not None and rows and not _sel:
             # ⚠️ 只在「没有选中」时说话：有选中时理由已经在卡上，别盖掉状态行里别的消息
-            set_status("点一门课选中它，再按「开始上课」")
+            set_status("点一门课选中，再点一下开始上课")
         if not rows:
             # ⭐ 零课程的空状态（2026-09-28）—— 原来这里是**一片空白**。
             from AppKit import NSColor, NSMakeRect, NSView
@@ -4405,40 +4748,65 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             doc.addSubview_(card)
             doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, _eh)))
             return
-        _cards: list = []
-        for _i, r in enumerate(rows):
+        import home_model
+        _tt, _at = S.get("tt") or ([], datetime.datetime.now())
+        hm = home_model.build(rows, _tt, _at, last_used=last_course_of(rows))
+        by_code = {r.course: r for r in rows}
+        _W = WIDTH - 2 * PAD
+        _note = (f"正在更新到 {S['update_target']}…" if S.get("update_target") else "")
+        _picked = S.get("picked")
+        _views: list = []
+        if hm.suggest is not None and hm.suggest.code in by_code:
+            _views.append(_make_feat(
+                hm.suggest, getattr(by_code[hm.suggest.code], "title", "") or "",
+                width=_W, on_start=on_start, start_note=_note, on_drop_files=run_prep))
+        if hm.first_run:
+            _views.append(_make_guide(width=_W))
+        _cells: list = []
+        for t in hm.tiles:
+            _is_sel = (t.code == _sel)
+            _sub, _strong = tile_sub(t, selected=_is_sel, picked=(_is_sel and _picked == t.code),
+                                     can_start=on_start is not None, start_note=_note)
+            if on_start is None:
+                _click = None
+            elif _is_sel:
+                # 选中的那格再点一下 = 开课。⚠️ `_later`：这是 mouseDown 里调的，开课会拆面板。
+                _click = (None if _note else (lambda c=t.code: _later(on_start, c)))
+            else:
+                _click = (lambda c=t.code: pick(c))
+            _cells.append(_make_cell(
+                t, width=_W / 2.0, sub=_sub, strong=_strong,
+                hot=(_is_sel or bool(t.mark)), on_click=_click, on_drop_files=run_prep,
+                show_key=(t.key is not None and t.key <= DIGIT_SLOTS),
+                on_delete_course=delete_course))
+        # 末尾永远一格「＋ 新增课程」（奇数门补齐那一格；偶数门另起一行，右边留空）
+        _cells.append(_make_cell(
+            hm.tiles[0], width=_W / 2.0, sub="", strong=False, hot=False,
+            on_click=(lambda: _later(open_add)), on_drop_files=run_prep, add_cell=True))
+        _views.append(_make_sheet(_cells, width=_W))
+        # 课后结果（跑完 prep / 删词 / 撤销）：格子放不下列表 → 在表下面给那门一张整宽结果卡。
+        for r in rows:
             entry = S["result"].get(r.course)
-            card = _make_card(r, on_start=on_start,
-                              on_drop_files=run_prep, width=WIDTH - 2 * PAD,
-                              entry=entry,
-                              hinted=(r.course == _sel),
-                              why=_why,
-                              on_select=pick,
-                              index=_i + 1,
-                              on_export=lambda c=r.course: export_not_added_list(c),
-                              show_skipped=(r.course in (S.get("expanded") or ())),
-                              on_toggle_skipped=lambda c=r.course: toggle_skipped(c),
-                              # ⭐ 3.11.6：开课前的自动安装进行中 → 主按钮变状态行
-                              start_note=(f"正在更新到 {S['update_target']}…"
-                                          if S.get("update_target") else ""),
-                              # ⚠️ **课号要在这里绑好。** `_make_card` 只传词
-                              #    （它不知道也不该知道课号之外的上下文）——
-                              #    第一版直接传 `do_delete`（两个参数），调用点只给一个，
-                              #    于是 TypeError 被 AppKit 吞掉、点「删」静默无效。
-                              on_delete=lambda t, c=r.course: do_delete(c, t),
-                              on_undo=lambda c=r.course: do_undo(c),
-                              on_delete_course=delete_course)
-            card.setFrameOrigin_((0.0, y))
-            doc.addSubview_(card)
-            _cards.append(card)
-            y += card_height(entry) + CARD_GAP
-        doc.setFrameSize_((WIDTH - 2 * PAD, max(y, body_h)))
-        # ⭐ A6: 课卡列表**一次性**错位入场。旗子挂在 `doc` 上（它随每次 build
-        #    新建），所以「面板出现时做一次」；之后每次 `refresh()`（跑完 prep /
-        #    删词 / 撤销）直接落位, 不重放。
+            if entry is None:
+                continue
+            _views.append(_make_card(
+                r, on_start=None, on_drop_files=run_prep, width=_W, entry=entry,
+                on_export=lambda c=r.course: export_not_added_list(c),
+                show_skipped=(r.course in (S.get("expanded") or ())),
+                on_toggle_skipped=lambda c=r.course: toggle_skipped(c),
+                on_delete=lambda t, c=r.course: do_delete(c, t),
+                on_undo=lambda c=r.course: do_undo(c),
+                on_delete_course=delete_course))
+        y = 0.0
+        for v in _views:
+            v.setFrameOrigin_((0.0, y))
+            doc.addSubview_(v)
+            y += v.frame().size.height + HOME_GAP
+        y -= HOME_GAP
+        doc.setFrameSize_((_W, max(y, body_h)))
         if not getattr(doc, "_enter_done", False):
             doc._enter_done = True
-            _stagger_in(_cards)
+            _stagger_in(_views)
         # ⚠️ 滚**必须在重画之后**：上面那圈把旧卡片全 `removeFromSuperview` 了，
         #    所以只能拿**新**卡片的 `_undo_lbl`。意图是**一次性**的（`pop` 掉）。
         _want = S.pop("_undo_scroll", None)
@@ -4625,8 +4993,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         #     每张卡的 `_targets` → `_fn` = refresh/do_delete/do_undo → 持有 doc/ve/win。
         #     面板每次「开课前的准备」都要开关 → 一学期累积**无上界**。
         try:
+            # ⚠️ 首页格子稿起格子嵌在 sheet 里（不是 `doc` 的直接子视图）→ 往下走一层。
+            _sever(S.get("drop_all"))        # 整窗落点：回调 → run_batch → … → 面板
+            S["drop_all"] = None
             for _card in doc.subviews():
                 _sever(_card)                # ⚠️ 逐条各自 try —— 见 `_sever` 的说明
+                for _cell in (_card.subviews() or ()):
+                    _sever(_cell)
             win._entry_targets = []          # 断关闭按钮那条
             status_holder["label"] = None    # 断 `set_status` → 标签 → `ve` 那条
             # ⭐ 断焦点守卫那条（可能还有一拍在排队）：清窗口 + 换代号，双保险。
@@ -4696,6 +5069,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             S["update_gen"] = None           # 后台查更新回来时认得出「面板已经关了」
             S["card_gen"] = None             # 排在下一轮 runloop 的小卡同理
             S["search_target"] = None
+            S["brand_target"] = None         # 品牌菜单 / 功能介绍的 target 也持着本面板的闭包
+            S["tour_target"] = None
             S.pop("queue", None)
             # ⚠️ 映射表那批选择器也要断 —— 它们自己抓着菜单，而菜单抓着 target。
             #    与卡片 `_targets` 是**同一类**孤岛（那次实测：只 setContentView_(None)
@@ -4873,23 +5248,17 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             return
         set_status(f"{course}：清单已存到 {_short_home(str(p))}（已在访达里显示）")
 
+    # ⭐ 2026-11-18：页脚拆了 —— 状态字并进最底下那条状态行的左半（右半是后台任务）。
+    #    默认**不说话**（原来那句「拖到某张卡上 = … · 拖到下面那个虚线框 = …」是说明书；
+    #    拖进来时整窗那层会自己说，见 `_drop_overlay`）。
     status_holder["label"] = panel.make_label(
-        "拖课件到某张卡上 = 加到那门课　·　拖到下面那个虚线框 = 自动分到各课",
-        # 原来 `PAD + 6` 比右边按钮里的字高 2pt（拍图量墨迹，2026-10-14）
-        NSMakeRect(PAD, PAD + 4.0, WIDTH - 2 * PAD - 100.0 - TOUR_BTN_W - 8.0, 18.0), 11.0, alpha=DIM)
+        "", NSMakeRect(PAD, bg_y + 2.0, W_IN - BG_LINE_W - 64.0, 18.0), 11.0, alpha=DIM,
+        truncate=True)
     ve.addSubview_(status_holder["label"])
 
-    # 「功能介绍」：随时重看那张介绍卡（Owen 2026-10-13 要的入口）。逃生口那一档的分量 ——
-    # 无边框淡字，不跟「关闭」抢；放在「关闭」左边，底栏只此两颗。
+    # 「功能介绍」：随时重看那张介绍卡（Owen 2026-10-13 要的入口）—— 2026-11-18 起在品牌菜单里。
     tour_tgt = _target(lambda: show_tour(root=state_root))
-    tour_btn = panel.make_button(
-        NSMakeRect(WIDTH - PAD - 76.0 - 8.0 - TOUR_BTN_W, PAD + 2.0, TOUR_BTN_W, 26.0))
-    tour_btn.setBordered_(False)
-    tour_btn.setTitle_("功能介绍")
-    tour_btn.setAttributedTitle_(panel.tinted_title("功能介绍", 12.0, DIM))
-    tour_btn.setTarget_(tour_tgt)
-    tour_btn.setAction_("act:")
-    ve.addSubview_(tour_btn)
+    S["tour_target"] = tour_tgt
 
     # ⚠️⚠️ **关闭按钮曾两次踩同一个坑**（2026-09-26 作者实测「关闭无反应」）：
     #   1. 第一版是 `objc_own.own("EntryClose", …, {"close_": lambda …: do_close()})`
@@ -4908,9 +5277,9 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         do_close()
 
     btn_tgt = _target(_close_clicked)
-    btn = panel.make_button(
-        NSMakeRect(WIDTH - PAD - 76.0, PAD + 2.0, 76.0, 26.0))
-    panel.style_secondary(btn, "关闭", size=12.0)
+    # ⭐ 2026-11-18：关闭从页脚挪到标题行最右（✕）。与搜索框同一条中线。
+    btn = _icon_button(NSMakeRect(WIDTH - PAD - HEAD_BTN, h - PAD - TITLE_H + 4.0,
+                                  HEAD_BTN, HEAD_BTN), "xmark", "关闭")
     btn.setTarget_(btn_tgt)                             # ⚠️ 弱引用 —— 靠下面那行留住
     btn.setAction_("act:")
     ve.addSubview_(btn)
@@ -4989,12 +5358,43 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         set_status(delete_msg(course, res))
         _later(refresh)
 
+    # ⭐⭐ 整窗落点（2026-11-18 首页格子稿，取代常驻虚线框）：拖到**任何不是格子的地方** =
+    #    自动分到各课（`run_batch`）。做法：一个铺满玻璃的落点视图，把之后加进来的视图**全收进来**
+    #    当子视图 —— 拖拽的落点按「命中的视图 → 往上找注册了类型的祖先」查，所以
+    #    格子（自己是落点）优先，空白处 / 标题行 / 滚动区空白都落到这一层。
+    #    ⚠️ 玻璃最底下那两层（scrim、拖窗层）留在原处 —— 那是 `panel.build` 的载荷性顺序。
+    _ov_holder: dict = {"ov": None}
+
+    def _all_enter(pb):
+        ok = acceptable(panel.file_paths(pb) or [])
+        if ok and _ov_holder["ov"] is not None:
+            _ov_holder["ov"].setHidden_(False)
+        return ok
+
+    def _all_exit():
+        if _ov_holder["ov"] is not None:
+            _ov_holder["ov"].setHidden_(True)
+
+    def _all_drop(paths):
+        _all_exit()
+        return run_batch(paths)
+
+    drop_all = panel.make_drop_target(_all_enter, _all_drop, _all_exit)
+    drop_all.setFrame_(ve.bounds())
+    drop_all._targets = []
+    for _v in list(ve.subviews())[_glass_base:]:
+        _v.removeFromSuperview()
+        drop_all.addSubview_(_v)
+    ve.addSubview_(drop_all)
+    S["drop_all"] = drop_all
+
     refresh()
 
     # 位置：屏幕中上（AppKit 左下原点）
     win.setFrameOrigin_((_vis.origin.x + (_vis.size.width - WIDTH) / 2.0,
                          panel_y(h, _vis.origin.y, _vis.size.height)))
     win.orderFrontRegardless()
+    _ov_holder["ov"] = _drop_overlay(drop_all)          # 上屏之后再画：要拿到真的 backingScale
     # ⭐ 开课面板：数字键 `1`–`5` 选课；**回车 = 用选中的那门直接开课**（与卡片按钮同一条路，
     #    2026-10-18 起；以前回车只是选中）。只在有「开始上课」的那一档挂 ——
     #    上课中从菜单栏打开的面板不选课，别抢键。

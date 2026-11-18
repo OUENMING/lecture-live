@@ -80,6 +80,38 @@ def main() -> int:
     check("纯英文括号不动", E.card_title(R(title="ECON10740 Economics (Part 2)"))
           == "ECON10740 Economics (Part 2)")
 
+    print("\n--- ①a 首页格子稿：第三行只说一件事 / 高度与排版同一组常数（2026-11-18）---")
+    import home_model as _HM
+    _T = lambda **k: _HM.Tile(**{**dict(code="AA10010", title="x", key=1, meta=None,  # noqa: E731
+                                        next_slot=None, last_text=None, mark=None), **k})
+    check("⭐ 有课表 -> 下次课", E.tile_sub(_T(next_slot="周四 10:00", last_text="昨天"),
+                                     selected=False, picked=False, can_start=True)
+          == ("周四 10:00", False))
+    check("⭐ 没课表 -> 上次上过", E.tile_sub(_T(last_text="6 天前"), selected=False,
+                                       picked=False, can_start=True)[0] == "6 天前上过")
+    check("什么都没有 -> 空（不编一句话出来）",
+          E.tile_sub(_T(), selected=False, picked=False, can_start=True) == ("", False))
+    check("⭐⭐ 用户点选的那格 -> 告诉他「再点一下」",
+          E.tile_sub(_T(next_slot="今天 14:00"), selected=True, picked=True, can_start=True)
+          == ("再点一下开始上课", True))
+    check("⭐ 上次那门（弱证据预选）-> 回车继续",
+          E.tile_sub(_T(mark="last"), selected=True, picked=False, can_start=True)[0]
+          == "上次上的这门，回车继续")
+    check("⭐ 上课中打开的面板（不能开课）-> 只给事实，不教人开课",
+          E.tile_sub(_T(mark="last", last_text="昨天"), selected=True, picked=True,
+                     can_start=False)[0] == "昨天上过")
+    check("正在自动更新 -> 选中格说更新那句",
+          E.tile_sub(_T(), selected=True, picked=True, can_start=True,
+                     start_note="正在更新到 9.9…")[0] == "正在更新到 9.9…")
+    check("⭐ 高度：5 门课 = 3 行格子", E.home_body_height(5, feat=False, guide=False)
+          == 3 * E.CELL_H)
+    check("⭐ 高度：偶数门课 -> 多一行放「＋ 新增课程」", E.home_body_height(4, feat=False, guide=False)
+          == 3 * E.CELL_H)
+    check("⭐ 高度：顶部块 + 间距另算", E.home_body_height(5, feat=True, guide=False)
+          == 3 * E.CELL_H + E.FEAT_H + E.HOME_GAP)
+    check("0 门也至少一行（不塌成 0 高）", E.home_body_height(0, feat=False, guide=False)
+          == E.CELL_H)
+
     print("\n--- ①b 后台任务行（3.11 F）---")
     _act = [{"stem": "2026-11-04_160000_ECON10790", "course": "ECON10790",
              "stage": "review", "started_at": 1000.0}]
@@ -1101,10 +1133,17 @@ def _chip_helpers():
             top = float(h.window.frame().size.height)
         except Exception:                                     # noqa: BLE001
             top = 1e9
+        # ⚠️ 2026-11-18 首页格子稿：标题行多了三颗**不是胶囊**的按钮 —— 品牌（无标题，点开菜单）、
+        #    导入、关闭；胶囊在「全都就绪」时**藏起来**（状态只在要处理时出现）→ 藏着的不算。
         got = [v for v in walk(h.window.contentView(), [])
                if isinstance(v, NSButton) and not isinstance(v, NSSearchField)
-               and float(v.frame().origin.y) > top - 80.0]
-        return got[0] if len(got) == 1 else None
+               and float(v.frame().origin.y) > top - 80.0
+               and (v.title() or "") not in ("", "关闭", "导入课件 / 课表…")
+               and not v.isHidden()]
+        if len(got) == 1:
+            return got[0]
+        # 胶囊藏着（全都就绪）/ 没有胶囊（就绪项没算出来）→ 菜单的入口是品牌按钮
+        return _brand_of(h) if not got else None
 
     def items_of(menu):
         return [menu.itemAtIndex_(i) for i in range(menu.numberOfItems())]
@@ -1113,6 +1152,17 @@ def _chip_helpers():
         return [(i.title() or "") for i in items_of(menu)]
 
     return walk, chip_of, items_of, titles
+
+
+def _brand_of(h):
+    """标题行的品牌按钮（菠萝 + Pineapple，无标题）—— 2026-11-18 起菜单的常驻入口。"""
+    from AppKit import NSButton
+    walk, _c, _i, _t = _chip_helpers()
+    top = float(h.window.frame().size.height)
+    got = [v for v in walk(h.window.contentView(), [])
+           if isinstance(v, NSButton) and (v.title() or "") == ""
+           and float(v.frame().origin.y) > top - 80.0]
+    return got[0] if len(got) == 1 else None
 
 
 class _ReadyAccess:
@@ -1135,8 +1185,9 @@ class _ReadyAccess:
            点下去是**直接修那一项**（比如「语音模型 缺 2 件 · 下载」会**真的开始下载**）。
            没带尾巴时这里**绝不点它**，返回 None（`label`/`click` 跟着变保守）。
         """
-        chip = self._chip_of(h)
-        if chip is None or not (chip.title() or "").endswith(E.CHIP_TAIL):
+        chip = self._chip_of(h)          # 胶囊藏着时它返回品牌按钮（标题空，点开 = 菜单）
+        if chip is None or not ((chip.title() or "").endswith(E.CHIP_TAIL)
+                                or (chip.title() or "") == ""):
             return None
         self.menus.clear()
         chip.performClick_(None)
@@ -1319,10 +1370,11 @@ def _chip_section() -> None:
             try:
                 check("面板建起来了（㉓ 要真窗口）", h is not None)
                 chip = _chip_of(h) if h is not None else None
-                check("⭐ 标题行有且只有一颗胶囊", chip is not None)
+                check("⭐ 标题行有菜单入口", chip is not None)
                 if chip is not None:
-                    check("⭐⭐ 全正常 → 胶囊文字**逐字**是「✓  已就绪  ▾」（字面量）",
-                          (chip.title() or "") == "✓  已就绪  ▾", repr(chip.title()))
+                    # ⭐ 2026-11-18：全正常 → **不挂胶囊**（「已就绪」是噪音），菜单从品牌进
+                    check("⭐⭐ 全正常 → 胶囊藏起来，入口是品牌按钮（菠萝 + Pineapple）",
+                          chip is _brand_of(h), repr(chip.title()))
                     menus.clear()
                     chip.performClick_(None)
                     check("⭐⭐ 点一下 → **弹菜单**（桩收到一次 popup）", len(menus) == 1,
@@ -1332,7 +1384,7 @@ def _chip_section() -> None:
                         check("⭐ 菜单里四项各一行（点了做它现在的事）+ 分隔线 + 两个勾选项",
                               _t == ["✓  麦克风", "✓  语音模型", "✓  云端翻译",
                                      "✓  笔记库", "", "云端转写 · 英文更准",
-                                     "测试模式：关"], str(_t))
+                                     "测试模式：关", "", "功能介绍"], str(_t))
                         check("⭐ 那几行的 target 都活着（弱引用坑：没挂住 = 点了没反应）"
                               "（「语音模型」那一行是灰的状态行、没有 target，是**故意**的）",
                               all(i.target() is not None for i in _items_of(menus[-1])
@@ -1443,13 +1495,20 @@ def _chip_section() -> None:
                 _hb = float(h5b.window.frame().size.height) if h5b else 0.0
                 check("⭐⭐ 有就绪项 / 没有就绪项 → 面板**一样高**（就绪那一行已经并进标题行）",
                       _ha > 0 and abs(_ha - _hb) < 0.01, f"{_ha} vs {_hb}")
-                check("⭐ 而且没有就绪项时**没有胶囊**（不是画一颗空的）",
-                      h5b is not None and _chip_of(h5b) is None)
-                check("⭐ 没有就绪项时，测试模式退回落点条那颗按钮（不许跟着胶囊一起消失）",
-                      h5b is not None
-                      and len([v for v in _walk(h5b.window.contentView(), [])
-                               if isinstance(v, NSButton)
-                               and (v.title() or "").startswith("测试模式：")]) == 1)
+                check("⭐ 而且没有就绪项时**没有胶囊**（不是画一颗空的）—— 入口只剩品牌",
+                      h5b is not None and _chip_of(h5b) is _brand_of(h5b))
+                # ⭐ 2026-11-18：测试模式不再退回落点条（那条已经没了）—— 品牌菜单里一直有
+                _m5: list = []
+                _p5 = E.popup_menu
+                E.popup_menu = lambda menu, view: _m5.append(menu)
+                try:
+                    if h5b is not None and _brand_of(h5b) is not None:
+                        _brand_of(h5b).performClick_(None)
+                finally:
+                    E.popup_menu = _p5
+                check("⭐ 没有就绪项时，测试模式在品牌菜单里（不许跟着胶囊一起消失）",
+                      bool(_m5) and any((i.title() or "").startswith("测试模式：")
+                                        for i in _items_of(_m5[-1])))
                 check("⚠️ 而 `READY_H` 这个常数**已经不在了**（没留一条没人用的就绪行高度）",
                       not hasattr(E, "READY_H"))
 
@@ -1927,43 +1986,21 @@ def _test_mode_section() -> None:
             finally:
                 h2.close()
 
-            # ── ⚠️ 退路：就绪那一格没建出来 → 落点条上那颗按钮（原样子）────
-            # 这一档 = `ready.items` 抛了 / 用户先前把就绪那一条关掉了（`dismissed()`）。
+            # ── ⚠️ 就绪那一格没建出来（`ready.items` 抛了 / 用户关掉了就绪那一条）──────
+            # 2026-11-18 首页格子稿：落点条没了 → 开关**不退回**任何按钮，品牌菜单里一直有它。
             c3: list = []
             h3 = _mk("3", [], on_test_mode=lambda on: (c3.append(on), True)[1],
                      test_mode=False)
             try:
-                sw3 = _toggles(h3)
-                check("⭐⭐ 就绪那一格没建出来 → 开关**退回落点条**（不许跟着一起消失）",
-                      len(sw3) == 1, f"命中 {len(sw3)} 颗")
-                if len(sw3) == 1:
-                    strip3 = _strip_of(h3)
-                    check("⭐ 而且它就挂在落点条上",
-                          strip3 is not None and sw3[0].superview() is strip3)
-                    sw3[0].performClick_(None)
-                    check("⭐ 点一下 → 文案变「测试模式：开」、回调收到 True",
-                          (sw3[0].title() or "") == ON and c3 == [True],
-                          f"{sw3[0].title()!r} {c3}")
-                # ── ⭐⭐ 提示文字塞得下 ───────────────────────────────────
-                # ⚠️ 这一档（开关退回落点条）是**最紧**的一档：`HINT_W_TIGHT` 要比
-                #    `HINT_W` 多让一颗开关的位置。文字超框 → `panel.make_label`
-                #    默认就是换行 + **第二行被静默吃掉**（没有省略号，看着像句子就到这儿）。
-                strip3 = _strip_of(h3)
-                over, measured = [], 0
-                for v in (strip3.subviews() if strip3 is not None else []):
-                    if v.isHidden() or not isinstance(v, NSTextField):
-                        continue
-                    t = v.stringValue() or ""
-                    if not t:
-                        continue
-                    measured += 1
-                    w = _text_w(t, v.font())
-                    if w > float(v.frame().size.width) + 0.01:
-                        over.append((t, round(w, 1), round(float(v.frame().size.width), 1)))
-                check("⭐⭐ 条上每条提示文字**实测宽度 ≤ 它的框宽**（超了就被静默吃掉）",
-                      not over, str(over))
-                check("⚠️ 而且真的量到了那几行（量到 0 行会让上一条恒真）",
-                      measured >= 2, f"量到 {measured} 行")
+                check("⭐ 就绪项没算出来 → 面板上没有常驻开关", not _toggles(h3),
+                      f"命中 {len(_toggles(h3))} 颗")
+                ti3 = _tm_item(h3)
+                check("⭐⭐ …而开关在品牌菜单里（不许跟着胶囊一起消失）",
+                      ti3 is not None and (ti3.title() or "") == OFF,
+                      f"{ti3 and ti3.title()}")
+                if ti3 is not None:
+                    ti3.target().act_(ti3)
+                    check("⭐ 点一下 → 回调收到 True", c3 == [True], str(c3))
             finally:
                 h3.close()
 
@@ -2680,13 +2717,14 @@ def _digit_hint_section() -> None:
         if h is None:
             return
         try:
+            # 2026-11-18 首页格子稿：数字键提示 = 格子右上角 11pt、低对比、右对齐
             labels = [v for v in walk(h.window.contentView(), [])
-                      if isinstance(v, NSTextField)
-                      and float(v.font().pointSize()) == 10.0]
+                      if isinstance(v, NSTextField) and v.stringValue().isdigit()
+                      and float(v.font().pointSize()) == 11.0]
             got = sorted(v.stringValue() for v in labels)
-            check("⭐ 两张卡分别有 1 / 2（小号 10pt）", got == ["1", "2"], str(got))
-            check("⭐ 而且它们不是标题/准备度那种 11–13pt 的字",
-                  all(float(v.font().pointSize()) < 11.0 for v in labels))
+            check("⭐ 两个格子分别有 1 / 2（小号 11pt）", got == ["1", "2"], str(got))
+            check("⭐ 而且它们右对齐、不是 13pt 课号那种字",
+                  all(int(v.alignment()) == 2 for v in labels))
         finally:
             h.close()
 
@@ -2832,13 +2870,25 @@ def _enter_section() -> None:
                     walk(c, out)
                 return out
 
+            # 2026-11-18 首页格子稿：弱证据（上次那门）不出顶部块、**没有**「开始上课」按钮；
+            #    开课 = 再点一下**选中的那格**（`_on_click`）。对拍它与回车是同一门。
             btns = [v for v in walk(h.window.contentView())
                     if isinstance(v, NSButton) and v.title() == "开始上课"]
-            check("⚠️ 前置：卡片上恰好一颗「开始上课」（否则下一条空转）",
-                  len(btns) == 1, f"{len(btns)} 颗")
-            if btns:
-                btns[0].performClick_(None)
-            check("⭐⭐ 点按钮 -> 同一个 `on_start`、同一门课（与回车逐字对上）",
+            check("⭐ 弱证据不出顶部块（屏上没有「开始上课」按钮）", len(btns) == 0,
+                  f"{len(btns)} 颗")
+            cells = [v for v in walk(h.window.contentView())
+                     if getattr(v, "_course", None) == "BB20020"
+                     and getattr(v, "_on_click", None) is not None]
+            check("⚠️ 前置：选中那格挂着点击（否则下一条空转）", len(cells) == 1,
+                  f"{len(cells)} 格")
+            _rl = E._later
+            E._later = lambda fn, *a: fn(*a)
+            try:
+                if cells:
+                    cells[0]._on_click()
+            finally:
+                E._later = _rl
+            check("⭐⭐ 点选中那格 -> 同一个 `on_start`、同一门课（与回车逐字对上）",
                   started == ["BB20020", "BB20020"], str(started))
 
             # 正在编辑（任何 field editor）时，回车与数字键都不许被抢

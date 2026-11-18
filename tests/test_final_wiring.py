@@ -181,12 +181,48 @@ class TestWiringShape(unittest.TestCase):
             self.assertTrue({"steps", "trace"} <= kws)
 
     def test_emit_skips_after_giving_up(self):
-        m = re.search(r"def _emit\(text: str, seg: int \| None = None[^)]*\) -> None:\n(.*?)final_gen\[", SRC, re.S)
+        # ⚠️ `[^)]*` 不行了：`speaker` 的默认值里带括号（S3）—— 改成非贪婪 DOTALL
+        m = re.search(r"def _emit\(text: str.*?\) -> None:\n(.*?)final_gen\[", SRC, re.S)
         self.assertIsNotNone(m)
         self.assertIn("running.is_set()", m.group(1), "R25: _emit 前要判 running")
 
     def test_final_worker_uses_final_transcribe(self):
         self.assertIn("final.transcribe(buf)", SRC)
+
+    # ---- ⭐ S3 说话人（接线形状；行为判据在 `tests/test_speaker_wiring.py`）----
+    def test_speaker_labeler_is_built_and_fed(self):
+        # 一个 `SpeakerLabeler`（与 `gate_zh` 同寿），只在 `final_worker` 的封口句那里喂
+        self.assertIn("speaker_label.SpeakerLabeler()", SRC)
+        worker = SRC[SRC.index("def final_worker"):]
+        self.assertIn("labeler.observe(", worker)
+        self.assertIn('getattr(_s, "speaker", "")', worker)
+
+    def test_speaker_emit_shape_is_additive(self):
+        # 三个 `("final", …)` 产出点都带下标 7 = (原始编号, 字母)；纯转录 / 只英·校补 None
+        fins = re.findall(r'streamq\.put\(\("final",[^\n]*\)\)', SRC)
+        self.assertEqual(len(fins), 3, fins)
+        for line in fins:
+            self.assertTrue(line.endswith("speaker))"), line)
+        self.assertEqual(sum("None, None, speaker)" in x for x in fins), 2, fins)
+
+    def test_new_speaker_tag_has_a_drain_branch(self):
+        # 新 tag 必须在 `drain()` 有分支（R28 也钉着），且走 getattr 守卫（终端没这一槽）
+        self.assertIn('streamq.put(("speaker", _lbl))', SRC)
+        self.assertIn('elif item[0] == "speaker":', SRC)
+        self.assertIn('getattr(ui, "set_live_speaker", None)', SRC)
+
+    def test_drain_forwards_speaker_to_live_and_ui_but_not_writer(self):
+        drain = SRC[SRC.index("    def drain():"):]
+        self.assertIn("speaker=_raw_spk", drain)
+        self.assertIn("speaker_label=_lbl", drain)
+        self.assertIn("speaker=_lbl", drain)          # ui.finalize(…, speaker=…)
+        self.assertNotIn("writer.append(item[1], item[2], raw=item[3],", drain)
+        self.assertIn("writer.append(item[1], item[2], raw=item[3])", drain)
+
+    def test_terminal_finalize_accepts_speaker(self):
+        sig = inspect.signature(main_mod.TerminalUI.finalize).parameters
+        self.assertIn("speaker", sig)
+        self.assertEqual(sig["speaker"].default, "")
 
     def test_breaker_notice_reaches_ui_with_still_active(self):
         # 定稿转写的熔断走 notify(src="转写") → streamq ("notice", (msg, warn, still)) → ui.notice

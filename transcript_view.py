@@ -145,6 +145,9 @@ def truncate_head_to_height(text: str, measure, max_h: float, *,
 #: 延成每行一档，数值在 `uitokens.AGE_DIM`。只在跟随态生效 —— 往回翻时全亮。
 import uitokens as _tok  # noqa: E402
 D_DIM = _tok.AGE_DIM
+#: 说话人标注的文字与它和字幕之间的空隙（pt）。
+SPEAKER_FMT = "说话人 {}"
+SPEAKER_GAP = 8.0
 #: 当前行是**草稿**时中文再暗一档（原型 plainZh .72 / 定稿 .98）; 升级为定稿时按 STATE_S 提亮。
 D_DRAFT_ZH_DIM = 0.74
 D_ENTER_DELAY_S = 0.08
@@ -292,17 +295,21 @@ class LineLog:
     def __init__(self) -> None:
         self.rows: list[tuple[str, str]] = []
         self.ids: list[int] = []
+        #: 每行的说话人字母（`""` = 主讲 / 不标），与 `rows` 等长同序。不放进 `rows` 的元组：
+        #: `rows` 就是 `Overlay._history`，下游几十处按 `(en, zh)` 拆它。
+        self.labels: list[str] = []
         self._seq = 0
         #: 上一次 `replace_pair` **删掉**的那一行在**调用前**的索引（失败 = `None`）。
         #: ⭐ 给半句合并的过渡用：被吞掉那一行的**层号**只能由这个索引 + 当时的行数算
         #: 出来（`Overlay._render` 拿不到索引，它只看得见 `rows` 的内容）。
         self.last_deleted: int | None = None
 
-    def append(self, en: str, zh: str) -> int:
+    def append(self, en: str, zh: str, speaker: str = "") -> int:
         """追加一行 → 返回它的身份号。"""
         self._seq += 1
         self.rows.append((en, zh))
         self.ids.append(self._seq)
+        self.labels.append(str(speaker or ""))
         return self._seq
 
     def amend_last(self, en: str, zh: str) -> int | None:
@@ -337,6 +344,8 @@ class LineLog:
         self.rows[i] = (en, zh)
         del self.rows[j]
         del self.ids[j]
+        if j < len(self.labels):
+            del self.labels[j]
         self.last_deleted = j
         return True
 
@@ -449,6 +458,10 @@ class TranscriptView:
         # 池: 一次建好, 按展开态最大视口定初始容量(K = ceil(max_h/row_h)+2)。
         # ⚠️ 这只是**初始**容量 —— 若之后换到更大的外接屏, 展开后视口会比 K 高,
         # 顶部就会露空白行。所以 _paint 每轮按实际视口高度调 _ensure_pool 兜底。
+        # 说话人标注（`set_speakers`）：与 `_items` 逐行对齐的字母 + 实时行的字母。
+        # 必须在建池之前：`_add_slot` 要建每个槽位的标注标签。
+        self._spk_items: list[str] = []
+        self._spk_live = ""
         self._slots = []
         self._cache = []
         # ⭐ **当前档位的行数上限, 池里每个槽位都得用它** —— 构造参数给的那套
@@ -474,7 +487,17 @@ class TranscriptView:
         zh.setHidden_(True); en.setHidden_(True)
         self._doc.addSubview_(zh)
         self._doc.addSubview_(en)
-        self._slots.append({"zh": zh, "en": en, "level": None, "hidden": True,
+        spk = self._make_label(_tok.EN_PT, self._font_en[1], 1)
+        try:
+            from AppKit import NSFont, NSLineBreakByClipping
+            spk.setFont_(NSFont.systemFontOfSize_weight_(_tok.EN_PT, _tok.SPEAKER_WEIGHT))
+            spk.setLineBreakMode_(NSLineBreakByClipping)
+        except Exception:                                   # noqa: BLE001 字重是锦上添花
+            pass
+        spk.setHidden_(True)
+        self._doc.addSubview_(spk)
+        self._slots.append({"zh": zh, "en": en, "spk": spk, "spk_t": "", "spk_w": 0.0,
+                            "level": None, "hidden": True,
                             "en_top": None, "en2": False, "ghost": False})
         self._cache.append({})
 
@@ -908,10 +931,83 @@ class TranscriptView:
             at[NSShadowAttributeName] = sh
         return at
 
+    # ---- 说话人标注（2026-11-18）----
+    # 主讲不标；别人在他那一行的**行首**挂一个小标注「说话人 B」（Teams / Meet 的
+    # 惯例是名字放在字幕前面；LecSync 放在段首）。挂在每一行最上面那一行字的行首：
+    # 双语行 → 英文小字前；只有大字的行（只英·校 / 纯转录）→ 大字前。
+    # 标注是独立标签，不进 `_items` 的文本 —— 截断 / 打字机 / `.md` / 统计都不受影响。
+
+    def set_speakers(self, items, live: str = "") -> None:
+        """与 `set_content` 的 `items` 逐行对齐的说话人字母（`""` = 不标），`live` = 实时行的。
+
+        不触发绘制：紧跟着的 `set_content` / `replace_items` 会画。比 `items` 短时，
+        多出来的行（定稿行 / 实时行）都算 `live` 的。
+        """
+        self._spk_items = [str(x or "") for x in (items or ())]
+        self._spk_live = str(live or "")
+
+    def _spk_text(self, r: int) -> str:
+        if self._verbatim:
+            return ""                                  # 答案 / 纲要接管：行不是谁说的话
+        lab = self._spk_items[r] if r < len(self._spk_items) else self._spk_live
+        return SPEAKER_FMT.format(lab) if lab else ""
+
+    def _spk_apply(self, s: dict, big: str, sub: str, is_zh: bool) -> None:
+        """写标注的文字、量宽度。几何在 `_spk_geom`（`_geom` 每帧都走它）。"""
+        t = s.get("spk_t") or ""
+        lbl = s["spk"]
+        if not t or not (big or sub):
+            if s.get("spk_w"):
+                lbl.setHidden_(True)
+            s["spk_w"] = 0.0
+            return
+        if lbl.stringValue() != t:
+            lbl.setStringValue_(t)
+        try:
+            w = float(lbl.cell().cellSize().width)
+        except Exception:                              # noqa: BLE001
+            w = 0.0
+        s["spk_w"] = math.ceil(w) if w > 0 else 0.0
+        lbl.setHidden_(not s["spk_w"])
+
+    def _spk_en_inset(self, s: dict) -> float:
+        """英文小字那一格要让出的行首宽度（标注挂在英文前时）。"""
+        if not s.get("spk_w") or not s.get("en_top"):
+            return 0.0
+        return s["spk_w"] + SPEAKER_GAP
+
+    def _spk_geom(self, s: dict) -> None:
+        """把行首那一格往右让出标注的位置，标注贴在它第一行的基线上。"""
+        w = s.get("spk_w") or 0.0
+        if not w:
+            return
+        top = s["en"] if s.get("en_top") else s["zh"]
+        (x0, y0), (fw, fh) = top.frame()
+        if fh <= 0.0:                                  # 英文那格没地方（只英档收了行高）→ 挂到大字上
+            top = s["zh"]
+            (x0, y0), (fw, fh) = top.frame()
+        ins = w + SPEAKER_GAP
+        top.setFrame_(((x0 + ins, y0), (max(0.0, fw - ins), fh)))
+        lh = self._en_line_h()
+        if top is s["en"]:
+            # 同字号同字体：顶对齐就是同基线
+            yl = y0 + fh - lh
+        else:
+            # 大字（18pt，中文带固定行高）：按两种字体的基线差往下挪
+            try:
+                f_big, f_s = top.font(), s["spk"].font()
+                lh_big = (self._zh_line_h if (self._zh_line_h and top is s["zh"]) else self._lh(f_big))
+                base_big = lh_big - abs(float(f_big.descender()))
+                base_s = lh - abs(float(f_s.descender()))
+                yl = y0 + fh - lh - (base_big - base_s)
+            except Exception:                          # noqa: BLE001
+                yl = y0 + fh - lh
+        s["spk"].setFrame_(((x0, yl), (w + 2.0, lh)))
+
     def _en_line_h(self) -> float:
         return self._lh(self._font_en[0])
 
-    def _en_two_lines(self, big: str, sub: str, is_zh: bool) -> int:
+    def _en_two_lines(self, big: str, sub: str, is_zh: bool, inset: float = 0.0) -> int:
         """这一行的英文排几行（0 = 不适用，走老的单格）。
 
         英文那一格本身就有 `EN_SLOT_LINES` 行；还装不下时，中文比档位少用至少一行 →
@@ -919,12 +1015,13 @@ class TranscriptView:
         """
         if not (EN_LINE_ON_TOP and is_zh and sub) or self._doc_w < 40.0:
             return 0
-        key = (sub, big, self._doc_w, self._lines)
+        key = (sub, big, self._doc_w, self._lines, inset)
         hit = self._en2_cache.get(key)
         if hit is not None:
             return hit
         w = self._doc_w - 4.0
-        en_n = max(1, round(self._measure(sub, w, self._font_en[0]) / self._en_line_h()))
+        # 说话人标注占着英文那一格的行首：英文按扣掉标注后的宽度折行（中文那格不受影响）
+        en_n = max(1, round(self._measure(sub, w - inset, self._font_en[0]) / self._en_line_h()))
         if "\n" in big:
             zh_n = big.count("\n") + 1
         else:
@@ -1219,6 +1316,7 @@ class TranscriptView:
     def _place(self, j: int, level: int, count: int, doc_w: float) -> None:
         """把第 level 层(＝第 count-1-level 行)摆进槽位 j。"""
         big, sub, is_zh = self._row_texts(count - 1 - level)
+        self._slots[j]["spk_t"] = self._spk_text(count - 1 - level)
         self._layout(j, level, doc_w, big, sub, is_zh)
 
     def _layout(self, j: int, level: int, doc_w: float,
@@ -1232,7 +1330,8 @@ class TranscriptView:
         # 只有大字、没有小字（只英·校 / 纯转录 / 译文失败）：整格给大字，英文那格不留空带
         s["solo"] = bool(self._d and not is_zh and not sub and not self._verbatim)
         s["w"] = doc_w
-        s["en2"] = self._en_two_lines(big, sub, is_zh)
+        self._spk_apply(s, big, sub, is_zh)
+        s["en2"] = self._en_two_lines(big, sub, is_zh, self._spk_en_inset(s))
         s["en"].setMaximumNumberOfLines_(max(1, int(s["en2"] or 1)))
         self._geom(j)
         self._set_text(j, "zh", big, self._font_zh[0] if is_zh else self._font_en_big[0])
@@ -1278,6 +1377,7 @@ class TranscriptView:
             x = self._en_line_h()
             s["en"].setFrame_(((0.0, y + self._zh_h + self._gap - x), (w, self._en_h - EN_SLOT_TOP + x)))
             s["zh"].setFrame_(((0.0, y), (w, self._zh_h - x)))
+        self._spk_geom(s)
         entering = False
         if s.get("ghost"):
             # 幽灵: α 1→0（与尾句新文字 0→1 同一个时长、同一个起跑时刻 = 一次交叉淡换）。
@@ -1302,6 +1402,9 @@ class TranscriptView:
         if s.get("alpha_vis", (1.0, 1.0)) != (a_en, a_zh):
             s["zh"].setAlphaValue_(a_zh); s["en"].setAlphaValue_(a_en)
             s["alpha_vis"] = (a_en, a_zh)
+        if s.get("spk_w"):
+            # 标注跟它挂着的那一行同亮同暗（逐行退后 / 入场淡入都跟着走）
+            s["spk"].setAlphaValue_(a_en if s.get("en_top") else a_zh)
         if s.get("blur", 0.0) != blur:
             self._set_blur(s, blur)
 
@@ -1451,6 +1554,9 @@ class TranscriptView:
         if not s["hidden"]:
             s["zh"].setHidden_(True); s["en"].setHidden_(True)
             s["hidden"] = True
+        if s.get("spk_w") or s.get("spk_t"):
+            s["spk"].setHidden_(True)
+            s["spk_t"], s["spk_w"] = "", 0.0
         s["level"] = None
         s["en_top"] = None
         # ⚠️ 幽灵标记必须清掉: 槽位会被改派给别的行, 带着它下一行就永远不参与位移了
@@ -1614,8 +1720,15 @@ class TranscriptView:
             # 竖排顺序会随内容变(实时行从"还没译文"变成"有译文")。变了必须重摆:
             # _place 只在槽位**新进入**时调用, 光刷文本会把 frame 留在旧顺序上,
             # 同屏于是出现"有的英文在上、有的在下"。
+            _spk_t = self._spk_text(count - 1 - lv)
+            if _spk_t != self._slots[j].get("spk_t"):
+                # 说话人是后到的（实时行先上屏、字母随后才来）：重摆这一格，英文要让出行首
+                self._slots[j]["spk_t"] = _spk_t
+                self._layout(j, lv, doc_w, big, sub, is_zh)
+                continue
             if (self._slots[j].get("en_top") != (EN_LINE_ON_TOP and is_zh)
-                    or self._slots[j].get("en2") != self._en_two_lines(big, sub, is_zh)):
+                    or self._slots[j].get("en2") != self._en_two_lines(
+                        big, sub, is_zh, self._spk_en_inset(self._slots[j]))):
                 # 英文一行 / 两行也随内容变(流式中文长到占满档位时英文要让回一行)
                 self._layout(j, lv, doc_w, big, sub, is_zh)
                 continue

@@ -56,6 +56,7 @@ import lang_gate
 import models
 import notice
 import power
+import speaker_label
 import startup_hud
 
 PARTIAL_MAX_S = 10          # 草稿只转写最近 N 秒, 限制单次耗时
@@ -1570,8 +1571,11 @@ class TerminalUI:
     def stream_en(self, delta: str):
         self._en += delta
 
-    def finalize(self, en: str, zh: str, *, clear_draft: bool = True):   # clear_draft 终端无草稿槽, 忽略
-        echo(f"[{now()}] ✅ {en}\n         🌐 {zh}")
+    def finalize(self, en: str, zh: str, *, clear_draft: bool = True,  # clear_draft 终端无草稿槽, 忽略
+                 speaker: str = ""):
+        # speaker = 说话人字母，显示由后续 UI 改版做（这里只收下不用）
+        _tag = f"[{speaker}] " if speaker else ""      # 终端至少让人看得出这句是谁说的
+        echo(f"[{now()}] ✅ {_tag}{en}\n         🌐 {zh}")
         self._zh = self._en = ""
 
     def show_hint(self, text: str, ttl: float):
@@ -2535,6 +2539,9 @@ def run(args) -> None:
     # ⭐ L-2 自动语种：连着 3 句中文 → 自动切 `zh`（只转录）。纯状态机，判据在 `lang_gate.py`。
     #    ⚠️ 只有 Soniox 封口句带 `lang`（L-1）—— 本地识别那段没有语种，永不自动切。
     gate_zh = lang_gate.LangGate()
+    # ⭐ S3 说话人：本节唯一的字母状态机（与 `gate_zh` 同处建、同寿）。只在 `final_worker` 里喂。
+    #    规则（主讲不标、别人发 B/C/D…、发出永不回收）全在 `speaker_label.py`。
+    labeler = speaker_label.SpeakerLabeler()
     TR_STATS["requests"] = 0                          # 调试通道 `trans.requests`（本次课从零开始）
     # ⭐ 定稿 ASR: 云端优先、本地兜底(`final_asr.py` 文件头)。
     #    ⚠️ 必须在 `trans` 之后: `_cloud_asr_ok` 读 `trans["mode"]`; 也必须在**开始采音之前**
@@ -3610,8 +3617,16 @@ def run(args) -> None:
     _tr_idle: "collections.deque" = collections.deque()
     _tr_last = {"end": None}
 
+    #: 上一句定稿的字母（`""` = 主讲 / 没开分离）—— 换人时不让悬浮窗把两句并成一行。
+    _spk_last = {"lbl": ""}
+
     def _emit(text: str, seg: int | None = None, max_words: int = 25,
-              seg_t0: float | None = None) -> None:
+              seg_t0: float | None = None, speaker: tuple[str, str] = ("", "")) -> None:
+        # ⭐ `speaker` = `(Soniox 原始编号, 屏上字母)` 二元组；不给 = 没开分离。
+        #    为什么是二元组：原始编号进 `.live.jsonl`（课后对真值）、字母进界面（屏上），
+        #    两者不可互相推导（主讲拿 `""` 但编号仍在）。
+        #    ⚠️ `split_sentences` 切出的每一小句带同一个二元组 —— 一句封口内部不换人
+        #       （`stream_asr` 已在换人处劈开），所以不必逐小句重算。
         # ⭐ `seg` = 这段文本属于哪一段缓冲（`livemetrics` 的分组键；一段 VAD → N 句定稿，
         #    **不是 1:1**）。定稿那条路由 `finalq` 带过来（**音频结束那一刻**定的）；
         #    carry 兜底那条路没得带，取当前段。
@@ -3624,7 +3639,11 @@ def run(args) -> None:
         if not running.is_set():
             return
         final_gen["n"] += 1                      # 通知草稿线程: 重置节流
+        _raw_spk, _lbl = speaker
         for sent in split_sentences(text, max_words=max_words):
+            # ⭐ S3：先告诉界面「这一句是谁说的」—— 流式期悬浮窗就知道，不用等定稿。
+            #    只放字母（原始编号是量具用的，界面不关心）。
+            streamq.put(("speaker", _lbl))
             if lang_gate.no_llm(trans["mode"]):
                 # 纯转录（`raw`）/ 中文课只转录（`zh`）: 一个 LLM 请求都不发。ASR 原样上屏、原样落盘。
                 # 这是给"不需要翻译、也不想联 API"的场景 —— 离线、零成本、零首字延迟。
@@ -3633,7 +3652,7 @@ def run(args) -> None:
                 # ⚠️ 与下面两档的关键差别: 不产出 `en` 流(没有矫正可流式), 直接给
                 #    ("final", "", "", sent), 让 en 走 final 那一趟。
                 finals.append(sent)
-                streamq.put(("final", "", "", sent, seg))
+                streamq.put(("final", "", "", sent, seg, None, None, speaker))
                 continue
             if trans["mode"] == "en":
                 # 只矫正英文: 中文不出, 但 ASR 错听照修(仍要联模型)。
@@ -3647,7 +3666,7 @@ def run(args) -> None:
                     echo(f"⚠ 英文矫正失败({str(e)[:50]}); 保留原始转录")
                     fixed = ""
                 finals.append(fixed or sent)
-                streamq.put(("final", fixed, "", sent, seg))
+                streamq.put(("final", fixed, "", sent, seg, None, None, speaker))
                 continue
             # 翻译失败也要保住转录: LLM 挂了不代表这节课没听到东西。
             # 先把 ASR 原句交给悬浮窗当英文行的占位：模型先吐 ZH 后吐 EN，不占位的话
@@ -3726,7 +3745,7 @@ def run(args) -> None:
                              component="translate")
             except Exception:                       # noqa: BLE001
                 pass
-            streamq.put(("final", en, zh, sent, seg, _lat, _zh_n))
+            streamq.put(("final", en, zh, sent, seg, _lat, _zh_n, speaker))
             # 术语/专有名词: 命中术语表就把 (术语, 解析) 交给 UI —— 由 UI 决定
             # 什么时候展开(悬浮窗默认只列术语名, 点击才显示解析)。
             hits = notes.match(sent)
@@ -3796,10 +3815,24 @@ def run(args) -> None:
                         # 胶囊的显示由 `drain()` 跟 `trans` 走（不新增 streamq tag）。
                         streamq.put(("notice", ("识别到中文课：只转录、不翻译（点胶囊回双语）", False,
                                                  "\n".join(_engine_warns.values()))))  # 带上还挂着的告警，别把 ⚠️ 清掉
+                    # ⭐ S3 说话人：Soniox 这句子是谁说的 —— `observe` 返回屏上字母（`""` = 主讲）。
+                    #    ⚠️ 包 `try` 且坏了当 `""`：状态机再怎么样也不许打死定稿线程
+                    #       （那等于整节课定稿全空）。原始编号只用来记账，不参与判断。
+                    _spk, _lbl = "", ""
+                    try:
+                        _spk = str(getattr(_s, "speaker", "") or "")
+                        _lbl = labeler.observe(_spk, _s.text) or ""
+                    except Exception:           # noqa: BLE001
+                        _spk, _lbl = "", ""
                     # ⭐ 3.10.1「连着讲就并成一段」：与上一句之间的**音频停顿**（词时间戳），
                     #    悬浮窗据此决定并不并进上一行（`caption_flow.is_join`）。先于 `_emit` 入队。
+                    #    ⭐ S3：**换人不并行** —— `_lbl` 与上一句不同时投 `None`（`is_join` 对 None
+                    #    返回假），否则两个人的话会被并成一行。
                     _gap = (_s.start_s - _sent_end["s"]) if _sent_end["s"] is not None else None
                     _sent_end["s"] = _s.end_s
+                    if _lbl != _spk_last["lbl"]:
+                        _gap = None
+                    _spk_last["lbl"] = _lbl
                     streamq.put(("gap", _gap))
                     busy["on"] = True        # 冲刷等待要看它（`all_settled` 的 busy）
                     # ⭐ 3.11 E：封口句原文进 content.jsonl（只记 ASR 出来的那一刻）。
@@ -3818,7 +3851,8 @@ def run(args) -> None:
                         _emit(_s.text, gate.seg_of(_s.end_s),
                               max_words=STREAM_MAX_WORDS,
                               seg_t0=(stream.sentence_wall_t0(_s.end_s)
-                                      if stream is not None else None))
+                                      if stream is not None else None),
+                              speaker=(_spk, _lbl))
                     finally:
                         busy["on"] = False
             # 1) 定稿优先
@@ -4187,6 +4221,10 @@ def run(args) -> None:
     merge_tracker = (fragment_merge.MergeTracker(_merge_gap)
                      if callable(getattr(ui, "replace_merge", None)) else None)
 
+    #: ⭐ S3：上一行定稿的说话人字母（`drain()` 记）—— 换人时跨段半句合并必须停手。
+    #:    ⚠️ 与 `final_worker` 那个 `_spk_last` 不是同一件事：那个判 `gap`，这个判跨段合并。
+    _row_lbl = {"lbl": ""}
+
     def merge_worker():
         """重翻「尾句 + 首句」→ `("replace", job, en, zh)`。失败/超时 → 空串，屏上原样。
 
@@ -4523,34 +4561,54 @@ def run(args) -> None:
                         fn("💡 " + item[1], 15)
                     else:
                         fn("❓ 已标记 · 课后笔记里能找到这几句", 6)
-            elif item[0] == "final":                # ("final", en, zh, asr_raw[, seg[, lat[, term_zh_n]]])
-                # ⚠️ `item[4]` / `item[5]` / `item[6]` 都用 `len` 守卫：`("final", …)` 这条 tag
+            elif item[0] == "speaker":             # ("speaker", 字母) 正在流式的这句是谁说的
+                # ⭐ S3：**只放字母**（`""` = 主讲 / 没开分离）。悬浮窗先知道、不用等定稿。
+                #    ⚠️ `getattr` + `try`：终端没这一槽，AppKit 那边出事也不能打死主循环。
+                fn = getattr(ui, "set_live_speaker", None)
+                if callable(fn):
+                    try:
+                        fn(item[1])
+                    except Exception:           # noqa: BLE001
+                        pass
+            elif item[0] == "final":                # ("final", en, zh, asr_raw[, seg[, lat[, term_zh_n[, speaker]]]])
+                # ⚠️ `item[4]` … `item[7]` 都用 `len` 守卫：`("final", …)` 这条 tag
                 #    有 3 个产出点，加字段是**加法**（下标 1–3 一个没动），老形状照样能读。
                 #    `item[5]` = 译文延迟 4 元组 `(zh_first_ms, zh_done_ms, seg_to_zh_ms,
                 #    tr_model)`（`tr_latency.TrTimer.done()` 的产物）——
                 #    ⚠️ **只有双语档那个产出点给**（见 `_emit`），其余两个是 `None`。
                 #    ⭐ #4 B2：`item[6]` = 这句注入的译名条数（`term_zh_n`）—— 同样只有双语档给。
+                #    ⭐ S3：`item[7]` = `(Soniox 原始编号, 屏上字母)`；没开分离时是 `("", "")`。
                 _lat = item[5] if len(item) > 5 else None
                 _tzn = item[6] if len(item) > 6 else None
+                _spk = item[7] if len(item) > 7 else ("", "")
+                try:                                    # 形状不对当没事发生，绝不打死 drain
+                    _raw_spk, _lbl = (str(_spk[0] or ""), str(_spk[1] or ""))
+                except Exception:                       # noqa: BLE001
+                    _raw_spk, _lbl = "", ""
                 if live is not None:
                     live.final(item[1] or item[3], item[2], item[3],
                                seg=int(item[4]) if len(item) > 4 else 0, lat=_lat,
-                               term_zh_n=_tzn)
+                               term_zh_n=_tzn, speaker=_raw_spk,
+                               speaker_label=_lbl)
                 # 先更新 fin_seg 再算 clear_draft: 屏上已是更新一段的草稿时, 旧段定稿不碰草稿槽
                 _clr = draft_view.on_final(item[4] if len(item) > 4 else None)
                 _seg_n = int(item[4]) if len(item) > 4 else 0
                 # ⭐ 返回值 = 这一行的**身份号**（悬浮窗铸；终端返回 None）—— 跨段半句合并
                 #    靠它定位"尾句那一行"，不靠行号（见 fragment_merge / transcript_view.LineLog）。
                 _tok = ui.finalize(item[1] or item[3], item[2],   # 翻译失败时至少显示转录
-                                   clear_draft=_clr)
+                                   clear_draft=_clr, speaker=_lbl)
                 if _clr:
                     last_draft["en"] = ""           # 草稿已被这句定稿取代 -> ❓ 点拨别再带上它（否则同一句出现两次）
                 _ts = writer.append(item[1], item[2], raw=item[3])
                 # ⭐ 跨段半句合并（第 4 项，design.md §4）：把这一行喂给记账器；它在本行恰是
                 #    某段**首行**且上一段尾句是碎句、gap 又够近时回一份 job。
                 #    ⚠️ 走**独立 worker**（不阻塞下面几句）；结果走新 tag `replace`。
+                #    ⭐ S3：**换人不并行** —— 这一行的字母与上一行不同就不喂（不同人的话
+                #    不许拼成一句）。字母相同时行为逐字不变。
+                _same_spk = (_lbl == _row_lbl["lbl"])
+                _row_lbl["lbl"] = _lbl
                 if (merge_tracker is not None and _tok is not None
-                        and trans["mode"] == "both"):
+                        and _same_spk and trans["mode"] == "both"):
                     try:
                         _job = merge_tracker.on_line(
                             _seg_n, _tok, item[1] or item[3], item[2], _ts,

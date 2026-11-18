@@ -1,0 +1,173 @@
+[
+  {
+    "name": "one_word_first_then_lecturer_takes_over",
+    "note": "先开口的人只说一个词（1 单位）；老师第一句 11 词就超过 1，直接成为主讲，不标。",
+    "steps": [
+      {"speaker": "1", "text": "Yes.", "expect": ""},
+      {"speaker": "2", "text": "So today we are going to talk about marginal revenue and pricing.", "expect": ""},
+      {"speaker": "2", "text": "Right.", "expect": ""},
+      {"speaker": "1", "text": "Mm-hmm.", "expect": ""},
+      {"speaker": "1", "text": "Could you go back to that slide again please.", "expect": "B"},
+      {"speaker": "2", "text": "Sure.", "expect": ""}
+    ]
+  },
+  {
+    "name": "intro_narration_then_lecturer_only_one_wrong",
+    "note": "片头旁白 3 句共 22 单位；老师第 1 句 10 单位拿 B（最多错这 1 句），第 2 句 14 单位 → 24 > 22 成主讲，之后永远空。",
+    "steps": [
+      {"speaker": "1", "text": "This lecture is from MIT OpenCourseWare.", "expect": ""},
+      {"speaker": "1", "text": "It is shared under a Creative Commons license.", "expect": ""},
+      {"speaker": "1", "text": "Your support keeps these courses free for everyone.", "expect": ""},
+      {"speaker": "2", "text": "Okay so let us get started with the material for today.", "expect": "B"},
+      {"speaker": "2", "text": "We will begin by looking at how a firm decides how much to produce.", "expect": ""},
+      {"speaker": "2", "text": "Good.", "expect": ""},
+      {"speaker": "2", "text": "Here is the same idea written as a formula on the board.", "expect": ""}
+    ]
+  },
+  {
+    "name": "student_one_long_question_gets_b_immediately",
+    "note": "老师先说两句共 14 单位；学生唯一的 7 词长句不够主讲，立刻 B。",
+    "steps": [
+      {"speaker": "1", "text": "Today we cover elasticity of demand.", "expect": ""},
+      {"speaker": "1", "text": "Here is the formula you need to remember.", "expect": ""},
+      {"speaker": "2", "text": "Could you give another example of that?", "expect": "B"}
+    ]
+  },
+  {
+    "name": "student_okay_first_letter_only_on_long_sentence",
+    "note": "「Okay.」1 单位不够长不发字母；同一人后来 8 词才发 B；已有字母后短句仍带 B。",
+    "steps": [
+      {"speaker": "1", "text": "We start with the definition of a competitive market.", "expect": ""},
+      {"speaker": "1", "text": "A firm in this market is a price taker.", "expect": ""},
+      {"speaker": "2", "text": "Okay.", "expect": ""},
+      {"speaker": "2", "text": "So does that mean price equals marginal cost?", "expect": "B"},
+      {"speaker": "2", "text": "Mm-hmm.", "expect": "B"},
+      {"speaker": "1", "text": "Exactly.", "expect": ""}
+    ]
+  },
+  {
+    "name": "main_switches_mid_lecture_and_old_main_gets_letter",
+    "note": "主讲 1(7)→2(10)→1(11)→2(16)。易主两次都不标；1 最后一次不再是主讲，4 词长句才拿 B，之后短句仍带 B。",
+    "expect_main": "2",
+    "expect_labels": {"1": "B"},
+    "steps": [
+      {"speaker": "1", "text": "Let me start with a short story.", "expect": ""},
+      {"speaker": "2", "text": "I have a question about the reading for this week.", "expect": ""},
+      {"speaker": "1", "text": "Go ahead and ask.", "expect": ""},
+      {"speaker": "2", "text": "It is about the elasticity chapter.", "expect": ""},
+      {"speaker": "1", "text": "Go ahead and ask.", "expect": "B"},
+      {"speaker": "1", "text": "Sure.", "expect": "B"}
+    ]
+  },
+  {
+    "name": "tie_keeps_old_main",
+    "note": "sp1 7 → sp2 追到 7 恰好并列，主讲仍是 1，sp2 拿 B；sp2 9 > 7 才易主（不标）；sp1 15 > 9 又回去当主讲（不标）。",
+    "expect_main": "1",
+    "expect_labels": {"2": "B"},
+    "steps": [
+      {"speaker": "1", "text": "Good morning class.", "expect": ""},
+      {"speaker": "1", "text": "Let us begin now.", "expect": ""},
+      {"speaker": "2", "text": "Can I ask about the reading now", "expect": "B"},
+      {"speaker": "2", "text": "actually why", "expect": ""},
+      {"speaker": "1", "text": "Okay.", "expect": ""},
+      {"speaker": "1", "text": "Because the market clears at that price.", "expect": ""}
+    ]
+  },
+  {
+    "name": "empty_speaker_is_ignored",
+    "note": "speaker 为空：返回空、不计数、不抢主讲（主讲最后仍是 1）。",
+    "expect_main": "1",
+    "expect_labels": {"2": "B"},
+    "steps": [
+      {"speaker": "", "text": "This is a long unlabeled sentence about nothing at all.", "expect": ""},
+      {"speaker": "1", "text": "Welcome to today's lecture.", "expect": ""},
+      {"speaker": "2", "text": "Hello there friend", "expect": "B"},
+      {"speaker": "", "text": "And another unlabeled sentence that is also long.", "expect": ""}
+    ]
+  },
+  {
+    "name": "chinese_three_han_not_enough",
+    "note": "3 个汉字（为什么）不发字母；9 个汉字才发 B。",
+    "steps": [
+      {"speaker": "1", "text": "今天我们先讲需求的价格弹性和消费者剩余。", "expect": ""},
+      {"speaker": "2", "text": "为什么？", "expect": ""},
+      {"speaker": "2", "text": "这个例子我还没听懂", "expect": "B"},
+      {"speaker": "2", "text": "嗯。", "expect": "B"}
+    ]
+  },
+  {
+    "name": "chinese_four_han_exactly_enough",
+    "note": "「听不懂」3 汉字不够；「我听不懂」4 汉字刚好够 → B。",
+    "steps": [
+      {"speaker": "1", "text": "今天我们讲需求的价格弹性", "expect": ""},
+      {"speaker": "2", "text": "听不懂", "expect": ""},
+      {"speaker": "2", "text": "我听不懂", "expect": "B"}
+    ]
+  },
+  {
+    "name": "lecturer_first_speaks_never_labeled",
+    "note": "老师先开口就是最长的人，全程空；学生一句长句 B。",
+    "expect_main": "1",
+    "steps": [
+      {"speaker": "1", "text": "Welcome to the first lecture of this course.", "expect": ""},
+      {"speaker": "1", "text": "Today we look at how prices are formed.", "expect": ""},
+      {"speaker": "2", "text": "What happens when demand shifts left?", "expect": "B"},
+      {"speaker": "1", "text": "Good question.", "expect": ""}
+    ]
+  },
+  {
+    "name": "empty_text_and_punctuation_never_long_enough",
+    "note": "空串 / 只有标点：0–1 单位，都不够长，不发字母。",
+    "expect_main": "1",
+    "steps": [
+      {"speaker": "1", "text": "Welcome to the first lecture.", "expect": ""},
+      {"speaker": "2", "text": "", "expect": ""},
+      {"speaker": "2", "text": "...", "expect": ""},
+      {"speaker": "2", "text": "What time is it", "expect": "B"}
+    ]
+  },
+  {
+    "name": "three_word_boundary_is_long_enough",
+    "note": "正好 3 词就算够长（下限含等号）。",
+    "steps": [
+      {"speaker": "1", "text": "Let me explain the whole model step by step here.", "expect": ""},
+      {"speaker": "2", "text": "Is it true", "expect": "B"},
+      {"speaker": "3", "text": "Is it now", "expect": "C"}
+    ]
+  },
+  {
+    "name": "letters_exhaust_at_26_speakers",
+    "note": "B–Z 共 25 个字母（主讲不占字母），第 27 个人起不再发新字母。主讲 1 开头就 7 单位，其他人每句只有 3，并列一律不换主讲。",
+    "expect_main": "1",
+    "steps": [
+      {"speaker": "1", "text": "Yes I do agree with this and also that", "expect": ""},
+      {"speaker": "2", "text": "Yes I do", "expect": "B"},
+      {"speaker": "3", "text": "Yes I do", "expect": "C"},
+      {"speaker": "4", "text": "Yes I do", "expect": "D"},
+      {"speaker": "5", "text": "Yes I do", "expect": "E"},
+      {"speaker": "6", "text": "Yes I do", "expect": "F"},
+      {"speaker": "7", "text": "Yes I do", "expect": "G"},
+      {"speaker": "8", "text": "Yes I do", "expect": "H"},
+      {"speaker": "9", "text": "Yes I do", "expect": "I"},
+      {"speaker": "10", "text": "Yes I do", "expect": "J"},
+      {"speaker": "11", "text": "Yes I do", "expect": "K"},
+      {"speaker": "12", "text": "Yes I do", "expect": "L"},
+      {"speaker": "13", "text": "Yes I do", "expect": "M"},
+      {"speaker": "14", "text": "Yes I do", "expect": "N"},
+      {"speaker": "15", "text": "Yes I do", "expect": "O"},
+      {"speaker": "16", "text": "Yes I do", "expect": "P"},
+      {"speaker": "17", "text": "Yes I do", "expect": "Q"},
+      {"speaker": "18", "text": "Yes I do", "expect": "R"},
+      {"speaker": "19", "text": "Yes I do", "expect": "S"},
+      {"speaker": "20", "text": "Yes I do", "expect": "T"},
+      {"speaker": "21", "text": "Yes I do", "expect": "U"},
+      {"speaker": "22", "text": "Yes I do", "expect": "V"},
+      {"speaker": "23", "text": "Yes I do", "expect": "W"},
+      {"speaker": "24", "text": "Yes I do", "expect": "X"},
+      {"speaker": "25", "text": "Yes I do", "expect": "Y"},
+      {"speaker": "26", "text": "Yes I do", "expect": "Z"},
+      {"speaker": "27", "text": "Yes I do", "expect": ""},
+      {"speaker": "27", "text": "Yes I do", "expect": ""}
+    ]
+  }
+]

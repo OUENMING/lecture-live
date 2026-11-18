@@ -221,6 +221,13 @@ MODEL = "stt-rt-v6"
 #:    课程不因此退回本地（v5 在 2026-12-15 前仍可用；之后旧名自动路由到 v6）。
 MODEL_FALLBACK = "stt-rt-v5"
 
+#: ⭐ S2：给 Soniox 发 `enable_speaker_diarization`（端点检测 / 语种识别 / hints 一律不动）。
+#: 关掉 = 消息里不带这个键 = 与加说话人之前逐字相同的 config。
+DIARIZE = True
+#: ⭐ S2：换人就断句。只看 **final** token（Soniox 实时会临时换人随后稳定；non-final 里
+#: 的临时换人不许切句）。关掉 = 与加说话人之前逐字相同的切句行为。
+SPLIT_ON_SPEAKER = True
+
 #: 句末标点（与 `draft_engine.END_PUNCT` 同口径）。
 END_PUNCT = (".", "?", "!", "。", "？", "！")
 #: 控制 token：不是词，别进文本。
@@ -284,6 +291,9 @@ class Tok(NamedTuple):
     is_final: bool = False
     #: Soniox `language`（开 `enable_language_identification` 后逐 token 给；没有 → `""`）。
     lang: str = ""
+    #: Soniox `speaker`（开 `enable_speaker_diarization` 后逐 token 给；没有 → `""`）。
+    #: 原始编号字符串（`"1"` / `"2"`…），显示用字母是下游的事（`speaker_label`）。
+    speaker: str = ""
 
 
 class Sealed(NamedTuple):
@@ -293,6 +303,8 @@ class Sealed(NamedTuple):
     end_s: float
     #: 句内 token 的多数语种：`"zh"` 要求文本里确有汉字；没开语种识别 / 没标签 → `""`。
     lang: str = ""
+    #: 句内多数说话人（按词数，并列取先出现的）；没开分离 / 没标签 → `""`。
+    speaker: str = ""
 
 
 _HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
@@ -311,6 +323,23 @@ def _sent_lang(toks: Sequence["Tok"]) -> str:
         return ""
     cnt = collections.Counter(tags)                       # 并列取先出现的那个 —— 不随 PYTHONHASHSEED 变
     return max(cnt, key=lambda k: (cnt[k], -tags.index(k)))
+
+
+def _sent_speaker(toks: Sequence["Tok"]) -> str:
+    """一句的说话人：按**词数**（`len(text.split())`，汉字 token 算 1 个词）取多数，
+    并列取先出现的那个（`Counter.most_common` 同计数下按插入顺序 → 不随 PYTHONHASHSEED 变）。
+
+    为什么按词数不按 token 数：Soniox 把中文切成单字 token、英文切成词，按 token 数会让
+    汉字说话人的票数虚高（同一句话里 zh token 数量约是 en 的三倍）。
+    都没有 → `""`（没开分离 / 没标签）；`""` 不是说话人，不参与投票。
+    """
+    cnt: collections.Counter[str] = collections.Counter()
+    for t in toks:
+        w = len(t.text.split())
+        if t.speaker and w:
+            cnt[t.speaker] += w
+    # 一句全空 / 全是纯标点 token → 没人得分 → ""
+    return cnt.most_common(1)[0][0] if cnt else ""
 
 
 def parse_tokens(raw) -> list[Tok]:
@@ -333,8 +362,10 @@ def parse_tokens(raw) -> list[Tok]:
                 or not isinstance(en, (int, float)):
             continue
         lg = t.get("language")
+        sp = t.get("speaker")
         out.append(Tok(text, int(st), int(en), bool(t.get("is_final")),
-                       lg if isinstance(lg, str) else ""))
+                       lg if isinstance(lg, str) else "",
+                       sp if isinstance(sp, str) else ""))
     return out
 
 
@@ -425,7 +456,7 @@ class StreamCore:
             self._sentences.append(Sealed(
                 "".join(t.text for t in toks),
                 min(t.start_ms for t in toks) / 1000.0,
-                max(t.end_ms for t in toks) / 1000.0, _sent_lang(toks)))
+                max(t.end_ms for t in toks) / 1000.0, _sent_lang(toks), _sent_speaker(toks)))
             self._final, self._nonfinal = [], []
             self._cand_key, self._cand_at = None, None
         return self.take_sentences()
@@ -445,7 +476,7 @@ class StreamCore:
             self._sentences.append(Sealed(
                 "".join(t.text for t in toks),
                 min(t.start_ms for t in toks) / 1000.0,
-                end / 1000.0, _sent_lang(toks)))
+                end / 1000.0, _sent_lang(toks), _sent_speaker(toks)))
             self._wm_ms = max(self._wm_ms, end)
             self._final = [t for t in self._final if t.end_ms > self._wm_ms]
             self._nonfinal = [t for t in self._nonfinal if t.end_ms > self._wm_ms]
@@ -510,12 +541,36 @@ class StreamCore:
         self._final.append(t)
 
     def _seal_final_ends(self) -> None:
-        """final 里出现句末标点 → 立刻封到那里（不用等 P_stable）；一条消息里可能有几句。"""
+        """final 里出现句末标点 / 换人 → 立刻封到那里（不用等 P_stable）；一条消息里可能有几句。
+
+        先到先封：`_seal` 会推水位线，下一次循环自然从新位置往后看，一条消息里的多处
+        断点全部处理完。
+        """
         while True:
             end = next((t for t in self._final if _is_end(t.text)), None)
+            sw = self._switch_mark()
+            if sw is not None and (end is None or sw.end_ms < end.end_ms):
+                end = sw                             # 换人比句末标点更早 → 先在换人处断
             if end is None:
                 return
             self._seal(end)
+
+    def _switch_mark(self) -> Tok | None:
+        """封口位置：**最后一个属于上一个说话人的 final token**（下一个 token 换人了）。
+
+        ⚠️ 返回的是新说话人**前面那个** token，因为 `_seal(end)` 封的是「到 end 为止」
+        —— 返回新人第一个 token 会把他的第一个词一起封进别人那句。
+        ⚠️ 只看 final：Soniox 实时会临时换人随后稳定（官方说明），拿 non-final 的标签切句会
+        把老师一句切成好几截。任一侧 speaker 为空（没开分离 / 该 token 没标签）不算换人。
+        """
+        if not SPLIT_ON_SPEAKER:
+            return None
+        prev: Tok | None = None
+        for t in self._final:
+            if prev is not None and prev.speaker and t.speaker and t.speaker != prev.speaker:
+                return prev
+            prev = t
+        return None
 
     def _update_candidate(self) -> None:
         end = next((t for t in self._nonfinal if _is_end(t.text)), None)
@@ -550,7 +605,7 @@ class StreamCore:
             self._sentences.append(Sealed(
                 "".join(t.text for t in toks),
                 min(t.start_ms for t in toks) / 1000.0,
-                max(t.end_ms for t in toks) / 1000.0, _sent_lang(toks)))
+                max(t.end_ms for t in toks) / 1000.0, _sent_lang(toks), _sent_speaker(toks)))
         self._wm_ms = max(self._wm_ms, end.end_ms)
         self._final = [t for t in self._final if t.end_ms > self._wm_ms]
         self._nonfinal = [t for t in self._nonfinal if t.end_ms > self._wm_ms]
@@ -1688,6 +1743,8 @@ class StreamASR:
                      "sample_rate": SR, "num_channels": 1,
                      "language_hints": ["en"], "enable_endpoint_detection": True,
                      "enable_language_identification": True}
+        if DIARIZE:
+            cfg["enable_speaker_diarization"] = True
         if self._ctx:
             cfg["context"] = self._ctx
         return cfg

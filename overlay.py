@@ -1464,6 +1464,8 @@ class Overlay:
         #    `_log` 原地改它（追加 / 按身份替换），所以这里**不许再给它赋新 list**。
         self._log = LineLog()
         self._history: list = self._log.rows
+        #: 正在流式的这一句的说话人字母（`set_live_speaker`；定稿后清空）。
+        self._live_spk = ""
         self._dirty = False
         self._urgent = False
         self._last_flush = 0.0
@@ -3452,6 +3454,8 @@ class Overlay:
         decided, self._draft_join = self._draft_join, None
         if not (self._tail_merge and self._log.rows):
             return False, False
+        if self._live_spk != (self._log.labels[-1] if self._log.labels else ""):
+            return False, False            # 换了人：不同人的话不并成一行（草稿阶段并过也拆开）
         if decided is not None:            # 草稿阶段已经定了（已经照这个上过屏）—— 不改，改了就是跳
             return decided, decided
         if caption_flow.is_tail(en, since):
@@ -3472,6 +3476,8 @@ class Overlay:
         ep, self._ep_since = self._ep_since, False
         if not (self._join_on and self._tail_merge and self._log.rows):
             return False
+        if self._log.labels and self._log.labels[-1]:
+            return False                   # 上一行是别人（说话人 B…）说的：下一句草稿另起一行
         pe, pz = self._log.rows[-1]
         # 没有中文（只英·校 / 纯转录 / 译文失败）：英文提成大字，按**英文大字**的行数判写满。
         # ⚠️ 不能拿 `zh_lines("")`（= 0 → 永远没满 → 一整段并成一行被截，10-19 只英档实测）；
@@ -3563,6 +3569,13 @@ class Overlay:
             pass
         lay.setOpacity_(to)
 
+    def set_live_speaker(self, label: str) -> None:
+        """正在流式的这一句是谁说的（`""` = 主讲 / 没开分离；"B"、"C"… = 别人）。"""
+        label = str(label or "")
+        if label != self._live_spk:
+            self._live_spk = label
+            self._mark_dirty(urgent=True)
+
     def draft_over_stream(self, flag: bool):
         """`main` 判的：定稿流式期间屏上草稿是不是更新一段的（是 → 草稿栏不藏）。只在变了时重画。"""
         flag = bool(flag)
@@ -3570,7 +3583,8 @@ class Overlay:
             self._draft_over = flag
             self._mark_dirty(urgent=True)
 
-    def finalize(self, en: str, zh: str, *, clear_draft: bool = True) -> int | None:
+    def finalize(self, en: str, zh: str, *, clear_draft: bool = True,
+                 speaker: str = "") -> int | None:
         """`clear_draft=False`: 屏上已是**更新一段**的草稿(旧段定稿晚到), 别擦掉它。
 
         返回这一行的**身份号**（给跨段半句合并定位用；`fragment_merge` 的 `tail_tok` /
@@ -3582,14 +3596,18 @@ class Overlay:
         if self._final_t0 is None:            # 没流式就直接定稿（只英档 / 失败兜底）：此刻判
             since = (now - self._last_final_t) if self._last_final_t is not None else None
             self._merge_live, self._merge_join = self._merge_decide(en, since, zh)
+        spk = str(speaker or "")
+        if self._merge_live and self._log.rows and spk != (self._log.labels[-1] if self._log.labels else ""):
+            self._merge_live = False         # 换了人：另起一行（`_merge_decide` 时字母可能还没到）
         if self._merge_live and self._log.rows:
             # 短尾巴（"Okay?"）/ 连着讲的下一句接在上一行后面 —— 与流式期 `caption_rows` 的显示逐字一致
             pe, pz = self._log.rows[-1]
             tok = self._log.amend_last(f"{pe} {en}".strip(), f"{pz}{zh}")
             self._row_n += 1
         else:
-            tok = self._log.append(en, zh)
+            tok = self._log.append(en, zh, spk)
             self._row_n = 1
+        self._live_spk = ""
         self._final_t0, self._merge_live, self._seed_zh = None, False, ""
         self._merge_join = False
         self._last_final_t = now
@@ -7326,6 +7344,7 @@ class Overlay:
             self._tv.set_rows_verbatim(False)
             self._apply_row_metrics(self._width)
             self._tv.set_scroll_hold(False)
+            self._tv.set_speakers(self._log.labels, self._live_spk)
             self._tv.replace_items(self._history)
             self._tv.scroll_to_bottom()
         else:
@@ -7353,10 +7372,12 @@ class Overlay:
                     self._draft_join = False
                 self._flow_due = r.recheck_at
                 self._tv.set_zh_expected(self._trans_mode == "both")
+                self._tv.set_speakers(self._log.labels, self._live_spk)
                 self._tv.set_content(r.items, r.live_en, r.live_zh, r.live_visible,
                                      r.live_kind)
             else:
                 _en = (self._cur_en_seed or self._cur_en) if self._streaming else self._cur_en
+                self._tv.set_speakers(self._log.labels, self._live_spk)
                 self._tv.set_content(
                     self._history, _en, self._cur_zh,
                     bool(self._streaming or self._cur_zh or self._cur_en))

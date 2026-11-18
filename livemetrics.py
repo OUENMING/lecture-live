@@ -21,6 +21,7 @@
     log.draft(raw, shown, buf_s=b, compute_s=c)     # 一次草稿上屏
     log.draft_zh(zh)                                # 一段草稿译文增量
     log.final(en, zh, raw, lat=…)                   # 一句定稿（`lat` = 译文延迟 4 元组）
+                                                    # speaker= / speaker_label=（空串不写）
     log.event("tap_probe", ok=True)                 # 任何别的观测
     log.block(peak, gain, vad, n)                   # 每个音频块一次（不进 JSONL，见下）
     log.close(echo_retries=3)                       # 冲刷 + 写一行 summary（+ `.blocks.npz`）
@@ -221,7 +222,8 @@ class LiveLog:
             pass
 
     def final(self, en: str, zh: str = "", raw: str = "", *, seg: int = 0,
-              lat: tuple | None = None, term_zh_n: int | None = None) -> None:
+              lat: tuple | None = None, term_zh_n: int | None = None,
+              speaker: str = "", speaker_label: str = "") -> None:
         """一句定稿上屏 —— 同时把句号推进（`utt` 只是"第几句"，**分组看 `seg`**）。
 
         ⭐ `lat` = 这一句的**译文延迟** 4 元组 `(zh_first_ms, zh_done_ms, seg_to_zh_ms,
@@ -233,6 +235,10 @@ class LiveLog:
         ⭐ #4 B2：`term_zh_n` = 这一句**注入 prompt 的译名条数**（`translator.select_term_zh`
         数的，与注入共用同一把尺子）—— 同样**不给就不写**。真课复查用它回答
         "译名到底有没有命中、命中多少"。
+
+        ⭐ 说话人：`speaker` = Soniox 原始编号（`"1"` / `"2"`…），`speaker_label` = 屏上那个
+        字母（`""` = 主讲 / 没开分离，`"B"`、`"C"`… = 别人）。**空串就不写那个键** ——
+        同 `lat` / `term_zh_n` 的规矩（没开说话人分离的课多写两个空字段只会让老读端困惑）。
         """
         try:
             extra = ({}
@@ -242,6 +248,10 @@ class LiveLog:
             # ⭐ #4 B2：这一句注入的译名条数 —— **不给就不写**（同上面 lat 的规矩）。
             if term_zh_n is not None:
                 extra["term_zh_n"] = int(term_zh_n)
+            if speaker:
+                extra["speaker"] = str(speaker)
+            if speaker_label:
+                extra["speaker_label"] = str(speaker_label)
             self._put("final", utt=self._utt, seg=seg, text=en or "", zh=zh or "",
                       raw=raw or "", n_draft=self._n_draft, **extra)
             self._utt += 1

@@ -338,7 +338,7 @@ class Chapter:
 
 # ---------------------------------------------------------------- 纯函数
 def build_prompt(sentences, atoms, prior_titles, prior_leads=None,
-                 prev_para=None) -> str:
+                 prev_para=None, prev_hi=None) -> str:
     """本章的原料 → 给模型的 block。**纯函数。**
 
     `sentences` = `[(全局句号, 英文), …]`。
@@ -378,7 +378,9 @@ def build_prompt(sentences, atoms, prior_titles, prior_leads=None,
         parts.append("")
         parts.append("这一章已经提取出的要点（供你判断重点，**不要照抄**）：")
         parts.extend(rows)
-    block = _prev_para_block(prev_para)
+    new_ids = [g for g, _ in sentences if prev_hi is not None and g > prev_hi]
+    block = _prev_para_block(prev_para,
+                             (new_ids[0], new_ids[-1]) if new_ids else None)
     if block:
         parts.extend(block)
     return "\n".join(parts)
@@ -394,7 +396,11 @@ def build_prompt(sentences, atoms, prior_titles, prior_leads=None,
 #:   过闸门后的东西，但它可能来自旧版本 / 别处拼的 dict —— 闸门自己炸掉比少一节 prompt 糟得多。
 #: · 「最不具体的那句」那句规则是**故意的**：不定这条，模型会**追加**，段落就越写越长
 #:   （`MAX_PARA_WORDS=90` 的闸门会从尾巴丢依据句 = 新内容反而被丢掉）。
-def _prev_para_block(prev_para) -> list:
+#: · ⭐⭐ `new_range` =（上一版之后**新增**原文的首句号, 末句号）。2026-11-18 Claude 拿 5 门课
+#:   40 分钟重放量出来：只说「在上一版基础上补」时，相邻两版 lead 相似度中位 0.93–1.0，
+#:   14–16 分钟的章终版 `src` 常常只落在本章**前 20–50%** —— 模型守着上一版，后面讲的
+#:   东西进不来。→ 告诉它**哪几句是新的**，并要求有新论点时至少一句依据来自那里。
+def _prev_para_block(prev_para, new_range=None) -> list:
     if not isinstance(prev_para, dict):
         return []
     lead = prev_para.get("lead")
@@ -420,10 +426,15 @@ def _prev_para_block(prev_para) -> list:
             ens.append(en)
     lines = ["", "这一章还在进行中。下面是你**上一版**写的段落（学生已经在看）："]
     lines.extend(f"- {en}" for en in ens)
+    if new_range:
+        lines.append(f"上一版之后**新增**的原文是第 {new_range[0]}–{new_range[1]} 句。")
     lines += [
         "这一版怎么写（在上一版基础上**补**新内容，不要从零重写）：",
-        "· 新内容**没有推翻**本章主结论 → `lead` 保持原意，最多补一个更具体的数字或条件。",
-        "· 有了**新的具体论点** → 让它替换上一版里**最不具体的那一句**，不是往后追加。",
+        "· 新内容**没有推翻**本章主结论 → `lead` 保持原意，最多补一个更具体的数字或条件；",
+        "  新内容给出了这一章**更大的结论**（讲者讲到了新的论点 / 推论 / 政策建议）→ 改写 `lead`。",
+        "· 新增部分里有**新的具体论点**（数字、定义、推导、例子、建议）→ **至少一句**的 `src` 要落在新增范围里，",
+        "  让它替换上一版里**最不具体、或已被后面内容取代**的那一句，不是往后追加。",
+        "  ⚠️ 反例：新增 3 分钟讲了一个新模型，这一版仍只写开头的定义 —— 学生看右栏会以为还在讲开头。",
         "  ⚠️ 反例：把新论点接成第 5 句 —— 上一版 3 句已经写满 55–80 词，追加只会被超词数闸门从尾巴丢掉。",
         "· **没变的句子不许改写** —— 只为换措辞的改写等于让学生重新读一遍。",
         "· `para` 仍守原来的规矩：`lead` + `body` 共 3 句（最多 4 句），55–80 个英文词（硬上限 90），",

@@ -248,8 +248,28 @@ def t_replay() -> None:
     check("⭐ 没出过 para 的章写「—」，不写 `None`", "| 3 |" in md and "None" not in md)
 
 
+
+# ---------------------------------------------------------------- ④ prev_hi：告诉模型哪几句是新的
+def t_new_range() -> None:
+    print("\n--- ④ `prev_hi`：上一版之后新增的句号范围（2026-11-18 Claude 加） ---")
+    base = _plain()
+    check("⭐⭐ 没有 `prev_para` 时给 `prev_hi` 也**逐字相同**",
+          _plain(prev_hi=12) == base)
+    p = _plain(prev_para=PREV, prev_hi=12)
+    check("⭐⭐ 有上一版 + `prev_hi=12` → 写明新增是第 13–13 句",
+          "新增**的原文是第 13–13 句" in p, p[-300:])
+    check("⭐ 要求新论点至少一句 `src` 落在新增范围",
+          "**至少一句**的 `src` 要落在新增范围里" in p)
+    p2 = _plain(prev_para=PREV, prev_hi=13)
+    check("⭐ 没有新句（prev_hi = 末句）→ 不写范围那行",
+          "新增**的原文是第" not in p2, p2[-200:])
+    check("⭐ `prev_hi=None` → 不写范围那行（旧调用方式不变）",
+          "新增**的原文是第" not in _plain(prev_para=PREV))
+
+
 def main() -> int:
     t_none_identical()
+    t_new_range()
     t_prev_content()
     t_replay()
     bad = [n for n, ok, _ in RESULTS if not ok]

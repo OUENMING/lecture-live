@@ -963,7 +963,8 @@ class LiveSummarizer:
                 obj = self._chat(ch.SYS_CHAPTER,
                                  ch.build_prompt(c["sents"], c["atoms"],
                                                  self._prior, self._prior_leads,
-                                                 prev_para=c.get("para")),
+                                                 prev_para=c.get("para"),
+                                                 prev_hi=c.get("para_hi")),
                                  ch.MAX_TOKENS, ch.TEMPERATURE)
             except Exception as e:                        # noqa: BLE001
                 self._failed += 1                         # ⭐ 采集面 ⑤
@@ -996,6 +997,7 @@ class LiveSummarizer:
         if not keep:
             if para is not None:
                 c["para"] = para                         # ⭐ 上一版段落（失败不覆盖）
+                c["para_hi"] = c["hi"]                   # ⭐ 上一版写到第几句（下一版告诉模型哪些是新的）
                 #: ⭐ 合成成功时记下“这一章当时有多少句” —— 封章省一次调用靠它比。
                 #: ⚠️ 与 `_interim_n`（“上次尝试时的句数”）不是同一个数、不能合。
                 self._interim_ok_n = len(c["sents"])

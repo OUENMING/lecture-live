@@ -683,6 +683,9 @@ def t_prev_para() -> None:
         check("⭐⭐ 第二次的 prompt 里带上一版的段落",
               len(blocks) >= 2 and lead1 in blocks[1],
               (blocks[1][:200] if len(blocks) >= 2 else "没有第二次"))
+        check("⭐⭐ 第二次的 prompt 写明上一版之后新增的句号范围（第 2–4 句：首版只有句 1，句 4 时攒够 3 句新增）",
+              len(blocks) >= 2 and "新增**的原文是第 2–4 句" in blocks[1],
+              (re.findall(r"新增.{0,30}句", blocks[1]) if len(blocks) >= 2 else "没有第二次"))
         check("⭐ 第一次的 prompt 里没有上一版的结论句（没东西可带）",
               len(blocks) >= 2 and lead1 not in blocks[0], blocks[0][:120])
 

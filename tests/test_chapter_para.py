@@ -37,6 +37,7 @@
 | `_synthesize` 里 `final` 失败写空章（不用上一版） | ⑪「final 失败用上一版」 |
 | 去掉 `_synthesize` 开头「句数没变就重写上次结果」 | ⑫「封章无新句不调模型」 |
 | `build_prompt(..., prev_para=None)` 写死 `None` | ⑬「第二次合成带上一版段落」 |
+| `_shift_rules` 不在首版拦截（首次合成也带 `"shift"`） | ⑬「有新增的那次带换题规则、首次合成不带」 |
 """
 from __future__ import annotations
 
@@ -688,6 +689,9 @@ def t_prev_para() -> None:
               (re.findall(r"新增.{0,30}句", blocks[1]) if len(blocks) >= 2 else "没有第二次"))
         check("⭐ 第一次的 prompt 里没有上一版的结论句（没东西可带）",
               len(blocks) >= 2 and lead1 not in blocks[0], blocks[0][:120])
+        # ⭐ 3.12：同一个 `new_range` 还让模型顺带判换题点（拆章行为钉在 `test_live_shift.py`）。
+        check("⭐⭐ 有新增的那次刷新带换题规则、首次合成不带",
+              len(blocks) >= 2 and '"shift"' in blocks[1] and '"shift"' not in blocks[0])
 
 
 def _has_prev_para() -> bool:

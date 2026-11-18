@@ -366,9 +366,15 @@ def build_prompt(sentences, atoms, prior_titles, prior_leads=None,
             lead = str((leads[i] if i < len(leads) else "") or "").strip()
             parts.append(f"- {t}｜结论：{lead}" if lead else f"- {t}")
         parts.append("")
+    # ⚠️ `new_range` 在这函数里只用在**原句清单的换题标记**上（`_sentence_rows`），
+    #    判换题本身在 `_prev_para_block` 那一节。
+    new_range = new_range_of(sentences, prev_hi)
+    block = _prev_para_block(prev_para, new_range)
+    # ⭐ 换题提示**只在真的有上一版时**才标（`block` 非空）：没有上一版就没有
+    #   「新增范围」这回事，prompt 必须与改动前**逐字相同**（冻结判据 ① 钉着）。
     # ⭐ 句数直接告诉模型 —— 「短章写短」那条规则要靠它判断（模型自己数长列表不可靠）
     parts.append(f"这一章的英文原句（共 {len(sentences or ())} 句；`全局句号. 句子`）：")
-    parts.extend(f"{gid}. {en}" for gid, en in (sentences or ()))
+    parts.extend(_sentence_rows(sentences, new_range if block else None))
     rows = []
     for a in (atoms or ()):
         text = str(getattr(a, "text", "") or "")
@@ -378,9 +384,6 @@ def build_prompt(sentences, atoms, prior_titles, prior_leads=None,
         parts.append("")
         parts.append("这一章已经提取出的要点（供你判断重点，**不要照抄**）：")
         parts.extend(rows)
-    new_ids = [g for g, _ in sentences if prev_hi is not None and g > prev_hi]
-    block = _prev_para_block(prev_para,
-                             (new_ids[0], new_ids[-1]) if new_ids else None)
     if block:
         parts.extend(block)
     return "\n".join(parts)
@@ -400,6 +403,55 @@ def build_prompt(sentences, atoms, prior_titles, prior_leads=None,
 #:   40 分钟重放量出来：只说「在上一版基础上补」时，相邻两版 lead 相似度中位 0.93–1.0，
 #:   14–16 分钟的章终版 `src` 常常只落在本章**前 20–50%** —— 模型守着上一版，后面讲的
 #:   东西进不来。→ 告诉它**哪几句是新的**，并要求有新论点时至少一句依据来自那里。
+#:
+#: ⭐ 3.12：同一个 `new_range` 还让模型**顺带判换题点**（`shift`，见 `_shift_rules`），
+#:   并在原句清单里给命中信号正则的新增句加一行提示（`_sentence_rows`）。
+
+#: 换题信号正则。⚠️ 只是给模型的**提示**，不是判据 —— 判不判换题由模型自己决定。
+#: 取自真课里讲者换组 / 换题的那些说法（`Next up, group 4.` / `Any questions?` …）。
+SHIFT_HINT_RE = re.compile(
+    r"(?i)\b(next (group|up|topic|section|part|slide|question)|"
+    r"moving on|move on|let'?s (turn|move|go|look) (to|at|on)|"
+    r"thank you|any (more )?questions|to (sum|wrap) up|in summary|"
+    r"that'?s (it|all) for|last group|group \w+ (is|are) up|first group)\b")
+
+#: 原句清单里那句提示的**唯一**拼法。
+SHIFT_HINT_MARK = " ←可能的换题信号"
+
+
+def new_range_of(sentences, prev_hi) -> tuple | None:
+    """`(首句号, 末句号)` = 上一版（写到第 `prev_hi` 句）之后**新增**的原文范围。
+
+    ⚠️ **唯一定义点**（2026-11-18）：`build_prompt` 拿它写提示词、
+       `live_summary._new_range` 拿它判 `shift` —— 两边差一个数就会出现
+       「prompt 说新增是第 12–14 句，本地却按 13–14 去闸 `at`」，
+       而症状是换题点**静默永不命中**（不报错，只是不拆章）。
+    """
+    if prev_hi is None:
+        return None
+    ids = [g for g, _ in (sentences or ()) if g > prev_hi]
+    return (ids[0], ids[-1]) if ids else None
+
+
+def _sentence_rows(sentences, new_range=None) -> list:
+    """`sentences` → 原句清单的行。**纯函数。**
+
+    ⚠️ **没有 `new_range` 时与 `[f"{gid}. {en}" …]` 逐字相同**（冻结判据 ① 钉着）：
+       多一个空格、多一次 `strip` 都会让所有真课调用的缓存前缀失效。
+    ⚠️ 标记**只加在新增范围里**命中信号的那几行：旧句早就在上一版的 prompt 里
+       出现过（那时没有标记）—— 回头给它加标记反而会让前缀缓存不命中，
+       并且等于叫模型重判「已经讲完的部分」。
+    """
+    rows: list = []
+    lo, hi = new_range if new_range else (0, -1)
+    for gid, en in (sentences or ()):
+        row = f"{gid}. {en}"
+        if lo <= gid <= hi and SHIFT_HINT_RE.search(str(en or "")):
+            row += SHIFT_HINT_MARK
+        rows.append(row)
+    return rows
+
+
 def _prev_para_block(prev_para, new_range=None) -> list:
     if not isinstance(prev_para, dict):
         return []
@@ -440,7 +492,40 @@ def _prev_para_block(prev_para, new_range=None) -> list:
         "· `para` 仍守原来的规矩：`lead` + `body` 共 3 句（最多 4 句），55–80 个英文词（硬上限 90），",
         "  每句至少一个具体项。",
     ]
+    lines += _shift_rules(new_range)
     return lines
+
+
+def _shift_rules(new_range) -> list:
+    """`shift` 这一节的规则。**只在有新增范围时出现**（没有新增 = 没东西可判）。
+
+    ⚠️ 为什么放在**这个**调用里（2026-11-18 作者：「要特别注意语义相关的逻辑 —— 怎么
+       判断老师这一小段讲完了、该让学生知道现在讲到了什么，实用最主要」）：窗口换章
+       只看 75 秒的主题字符串，真课重放里它会**粘住** —— 一组讲完、下一组已经讲了
+       1–4 分钟才换章，有时后一组把前一组的段落盖掉。而这一次调用手里有整章原文 +
+       上一版段落 + 新增句号范围，判断「新增里有没有换题点」比主题标签多得多。
+       参考 arXiv 2502.03111（摘要单元对齐话题边界质量最好）与 LecSync digest
+       （说话人转到下一话题时确认上一节、开新节）。
+    """
+    if not new_range:
+        return []
+    return [
+        "",
+        "⭐ 另外顺带判一件事（只判新增范围，前面的不用说）：新增的那几句里，"
+        "讲者有没有**明显转到另一个话题 / 另一组展示 / 课的另一部分**？",
+        "有的话多给一个字段 `shift`，`at` = **新话题的第一句**（全局句号，必须落在"
+        f"第 {new_range[0]}–{new_range[1]} 句里）：",
+        '{"shift": {"at": 42, "title": "production function", "title_zh": "生产函数"}}',
+        "没有就给 `\"shift\": null`。",
+        "· ✅ 正例：`Next up, group 4.` 之后开始讲另一个题目 → `at` 就是这句或下一句；"
+        "`OK, let's move on to the production function.` 同理。",
+        "· ❌ 不算：同一话题里**举例**（讲完定义开始举例子）、**下一个小点**、"
+        "**学生提问与回答**（Q&A 在问刚才那一组的内容）、讲者**重复前面**说过的内容。",
+        f"· 原句清单里标了「{SHIFT_HINT_MARK.strip()}」的那几行只是**提示**，"
+        "不是判据 —— 讲师说 `thank you` 也可能只是讲完一个例子。",
+        "· ⚠️ **拿不准一律 `null`** —— 判错的代价是学生在右栏看到一章莫名其妙的标题。",
+        "  这一版的 `para` 本身不用改（`lead` / `body` 照上面的规矩写）。",
+    ]
 
 
 def parse_reply(obj, lo: int, hi: int) -> list:
@@ -625,6 +710,35 @@ def parse_para(obj, lo: int, hi: int) -> dict | None:
             "terms": atom.terms_of(raw), "flag": flag,
             #: ④超词数：先丢尾句（④'），仍超才标记；不半句截断、不重试（省钱）。
             "para_over": bool(words > MAX_PARA_WORDS)}
+
+
+def parse_shift(obj, lo: int, hi: int) -> dict | None:
+    """模型回的 `shift` → `{"at": int, "title": str, "title_zh": str}`；不可用 → `None`。
+
+    `[lo, hi]` = **新增范围**（上一版之后那几句）。
+
+    ⚠️ 闸门（同 `parse_reply` / `parse_para` 那条纪律：不猜、不修剪）：
+      · `at` 必须是 `int`（`bool` **不算** —— 它是 `int` 的子类，`True` 会变成句号 1）
+        且落在 `[lo, hi]`；给了 `"42"` 或越界的数 = **引用不实** → 整个 `shift` 丢，
+        绝不把它挪到「最接近的那一句」（那是替模型编引用）。
+      · 标题走 `atom._label_of`（与 `atom.topic_of` / `title_of` **同一套截断**）；
+        两个都空 → `None`（没标题的换题点在右栏没东西可显示）。
+    """
+    if not isinstance(obj, dict):
+        return None
+    raw = obj.get("shift")
+    if not isinstance(raw, dict):
+        return None                                      # `null` / 缺 / 坏形状
+    at = raw.get("at")
+    if isinstance(at, bool) or not isinstance(at, int):
+        return None
+    if not (lo <= at <= hi):
+        return None
+    title = atom._label_of(raw, "title", atom.TOPIC_MAX)
+    title_zh = atom._label_of(raw, "title_zh", atom.TOPIC_ZH_MAX)
+    if not title and not title_zh:
+        return None
+    return {"at": at, "title": title, "title_zh": title_zh}
 
 
 def parse_chapter(obj, lo: int, hi: int) -> dict:

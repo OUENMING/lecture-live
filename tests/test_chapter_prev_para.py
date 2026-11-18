@@ -265,6 +265,12 @@ def t_new_range() -> None:
           "新增**的原文是第" not in p2, p2[-200:])
     check("⭐ `prev_hi=None` → 不写范围那行（旧调用方式不变）",
           "新增**的原文是第" not in _plain(prev_para=PREV))
+    # ⭐ 3.12：同一个 `new_range` 也用来让模型顺带判换题点（细则与拆章行为钉在
+    #    `tests/test_live_shift.py`；这里只钉「prompt 里真的出现了」与「没新增就不出现」）。
+    check("⭐⭐ 有新增 → 多一节判 `shift`（换题点）的规则",
+          '"shift"' in p and "新话题的第一句" in p)
+    check("⭐⭐ 没有新增（或没上一版）→ 一个字都不出现（冻结前缀不变）",
+          "shift" not in p2 and "shift" not in base)
 
 
 def main() -> int:

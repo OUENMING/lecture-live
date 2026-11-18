@@ -326,6 +326,18 @@ def main() -> int:
         print("❌ build 返回 None")
         return 1
 
+    # `PROBE_RESIZE=900x560` —— 1.5 s 后把窗口拖成这个尺寸（顶边不动），看缩放后的排版。
+    if os.environ.get("PROBE_RESIZE"):
+        def _rs():
+            try:
+                _w, _h = (float(x) for x in os.environ["PROBE_RESIZE"].lower().split("x"))
+                f = h.window.frame()
+                h.window.setFrame_display_(((f.origin.x, f.origin.y + f.size.height - _h), (_w, _h)), True)
+                print(f"PROBE_RESIZE → {_w:.0f}×{_h:.0f}")
+            except Exception as e:                                  # noqa: BLE001
+                print(f"PROBE_RESIZE 失败：{e}")
+        AppHelper.callLater(1.5, _rs)
+
     # `PROBE_BATCH=1` —— 一上来就把批量那条链路整个跑一遍（映射卡直接上屏），
     # 不用手拖。⚠️ 走的是 `Handles.start_batch` 那个**程序化入口**，因为
     # 真拖拽进不了验收跑器（`test_panel.py` 第 ⑨ 组有同样的说明）。

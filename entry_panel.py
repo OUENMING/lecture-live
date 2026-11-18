@@ -107,6 +107,12 @@ DROP_H = 56.0          # ⚠️ 2026-09-28 从 44 抬到 96（作者：「那个
                        #    —— 44pt 的页脚条读起来像说明文字，不像可操作的东西）；
                        #    2026-10-12 面板瘦身压回 56（= 一张卡那么高，提示 3 行并成 2 行）。
 DROP_GAP = 8.0
+#: 状态行露出来时窗口从底边多长的那一截（= 有状态行时卡片区的底 `bg_y + BG_H + DROP_GAP` − `PAD`，
+#: `bg_y` = 10）。2026-11-18：状态行不常驻，没字时卡片区底边距与左右同为 `PAD`。
+FOOT_EXTRA = 10.0 + BG_H + DROP_GAP - PAD
+#: 开课面板比通用磨砂多压的那层黑、外沿描边的白（`_frame_polish`）。
+FRAME_EXTRA_SCRIM = 0.22
+FRAME_EDGE_A = 0.12
 BATCH_ROW = 24.0       # 映射表一行
 BATCH_HEAD = 18.0      # 组标题（「已认出归属」/「认不出来的」）
 BATCH_SEP = 15.0       # 两组之间的分隔
@@ -2029,6 +2035,11 @@ def _make_sheet(cells, *, width):
     _layer_fill(sheet, SHEET_FILL_A, radius=SHEET_RADIUS)
     try:
         sheet.layer().setMasksToBounds_(True)
+        # ⭐ 外沿一圈与格间同色的发丝线（2026-11-18）：表的边靠线定住，不靠背景透出来的明暗。
+        from AppKit import NSColor
+        sheet.layer().setBorderWidth_(HAIRLINE)
+        sheet.layer().setBorderColor_(
+            NSColor.whiteColor().colorWithAlphaComponent_(SHEET_LINE_A).CGColor())
     except Exception:                                  # noqa: BLE001
         pass
     for i, c in enumerate(cells):
@@ -2150,6 +2161,76 @@ def _icon_button(rect, symbol: str, title: str):
 
 DROP_ALL_TEXT = "松手，自动分到各门课"
 DROP_ALL_SUB = "拖到某一门上，就只加给那门"
+
+
+def _frame_polish(fp) -> None:
+    """开课面板的底：比通用磨砂**更实**一档 + 一圈 0.5pt 白描边（2026-11-18 Owen「边框颜色过渡诡异」）。
+
+    ⚠️ 病根：通用 scrim 0.38 压在 HUD 材质上，窗口后面是什么颜色就透出什么 —— 卡片表四周那圈
+       边距里，后面终端的亮字 / 暗处被糊成**一块一块的渐变**，读起来像边框在变色。
+       → 这一个面板额外压一层黑（`FRAME_EXTRA_SCRIM`），边距读成均匀的一块深色；
+       外沿补 0.5pt 白描边（`FRAME_EDGE_A`），窗口轮廓靠线而不是靠背景对比。
+    ⚠️ 只改本面板（`panel.SCRIM_ALPHA` 是悬浮窗 / 介绍卡共用的常量，别动）。
+    """
+    try:
+        from AppKit import (NSColor, NSView, NSViewHeightSizable, NSViewWidthSizable)
+        glass = fp.glass
+        extra = NSView.alloc().initWithFrame_(glass.bounds())
+        extra.setWantsLayer_(True)
+        extra.layer().setBackgroundColor_(
+            NSColor.blackColor().colorWithAlphaComponent_(FRAME_EXTRA_SCRIM).CGColor())
+        extra.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        # 紧贴通用 scrim 之上、拖窗层之下（drag 要留在最上面收空白处的点击）
+        glass.addSubview_positioned_relativeTo_(extra, -1, fp.drag)   # NSWindowBelow
+        for v in (glass, fp.scrim, fp.drag):
+            v.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        lay = glass.layer()
+        lay.setBorderWidth_(HAIRLINE)
+        lay.setBorderColor_(NSColor.whiteColor().colorWithAlphaComponent_(FRAME_EDGE_A).CGColor())
+    except Exception:                                          # noqa: BLE001 观感层，失败照常用
+        pass
+
+
+def _apply_resize_masks(fp, root, *, sc, strip, h) -> None:
+    """窗口可缩放后各视图怎么跟（2026-11-18）。规则只看**建好时的位置**，不逐个点名：
+
+    · 卡片区 `sc` → 宽高都跟（重排由 `_layout()` 管）；动作条 → 宽跟、贴底；
+    · 其余：上半截的（标题行）贴顶、下半截的（状态行）贴底；
+      右半边的（搜索框 / 导入 / 关闭 / 后台任务）贴右，左边的贴左；横跨过半宽的跟着变宽。
+    """
+    try:
+        from AppKit import (NSViewHeightSizable, NSViewMaxXMargin, NSViewMaxYMargin,
+                            NSViewMinXMargin, NSViewMinYMargin, NSViewWidthSizable)
+    except Exception:                                          # noqa: BLE001
+        return
+
+    def _rule(v, W, H):
+        f = v.frame()
+        x, y, w, hh = f.origin.x, f.origin.y, f.size.width, f.size.height
+        m = NSViewMinYMargin if (y + hh / 2.0) > H / 2.0 else NSViewMaxYMargin
+        if w > W * 0.5:
+            m |= NSViewWidthSizable
+        elif x + w / 2.0 > W / 2.0:
+            m |= NSViewMinXMargin
+        else:
+            m |= NSViewMaxXMargin
+        v.setAutoresizingMask_(m)
+
+    try:
+        root.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        W = float(root.bounds().size.width)
+        for v in list(root.subviews()):
+            if v is sc:
+                v.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+            elif v is strip:
+                v.setAutoresizingMask_(NSViewWidthSizable | NSViewMaxYMargin)
+                sw = float(v.bounds().size.width)
+                for c in list(v.subviews()):
+                    _rule(c, sw, float(v.bounds().size.height) * 2.0)   # 条内只分左右，竖直贴底
+            else:
+                _rule(v, W, float(h))
+    except Exception:                                          # noqa: BLE001
+        pass
 
 
 def _drop_overlay(view):
@@ -2643,8 +2724,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    出现时**占卡片区底部** `DROP_H + DROP_GAP`（`_layout_modes` 把滚动区抬上去）——
     #    所以窗口高度按「正常模式」算，正常模式不留一条空着的动作条。
     bg_y = 10.0                          # 状态行贴底：多数时候是空的，别让它撑出一大截空白
+    # ⭐⭐ 2026-11-18 Owen「底下太宽」：状态行**不常驻**。没字时卡片区直接落到 `PAD`
+    #    （与左右同宽）；有状态字 / 后台任务时窗口从底边长出 `FOOT_EXTRA`、状态行露出来
+    #    （`_foot_sync`）。`drop_y` 是**有状态行时**的卡片区底；没有时是 `PAD`（`_bottom()`）。
     drop_y = bg_y + BG_H + DROP_GAP
-    sc_y = drop_y
+    sc_y = PAD
     if rs:
         # 动作条出现时卡片区还得剩下至少一行格子
         body_h = max(body_h, CELL_H + DROP_H + DROP_GAP)
@@ -2652,9 +2736,19 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                       _vis.size.height, _card_h)
     h = sc_y + body_h + 8.0 + TITLE_H + PAD
 
-    mask = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
-    fp = panel.build(NSMakeRect(0.0, 0.0, WIDTH, h), mask)
+    # ⭐ 2026-11-18 Owen：窗口要能拖边缩放。borderless + Resizable = 四边可拖（同悬浮窗）。
+    from AppKit import NSWindowStyleMaskResizable
+    mask = (NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+            | NSWindowStyleMaskResizable)
+    _rz: dict = {"cb": None}
+    # ⚠️⚠️ `S` 是**模块级**的（同进程只一个面板，但会反复开/关）—— 本面板这几个状态键
+    #    每次建面板都要清回初值，否则上一个面板留下的 `foot=True` / `closed=True` 会带进来。
+    S.update(foot=False, foot_anim=False, closed=False, mode=False)
+    fp = panel.build(NSMakeRect(0.0, 0.0, WIDTH, h), mask,
+                     on_resize=lambda: _rz["cb"] and _rz["cb"]())
     win, ve = fp.window, fp.glass
+    S["resize_delegate"] = fp.resize_delegate     # ⚠️ setDelegate_ 是弱引用：留住，否则回调静默失效
+    _frame_polish(fp)
     _glass_base = len(ve.subviews())     # scrim + 拖窗层：整窗落点不收它们（见 `drop_all`）
     # ⚠️ borderless 默认没有阴影（Titled 的 overlay 才有）—— 同 whatsnew 的处理，
     #    留在调用点、不进 panel.py 的配方。
@@ -4029,8 +4123,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    淡入（交叉淡换）；「还在跑」（尾部「…」）的状态词尾巴挂三颗静默点。
             #    ⚠️ 判据（⑲c）钉着本函数**只许一个实参** —— 别加 `running=` 之类的参数。
             motion.render_status(lb, text)
+            lb.setHidden_(not str(text or "").strip())   # 空着时别挡住最底一行格子的点击
         except Exception:                                 # noqa: BLE001
             pass
+        _fs = S.get("foot_sync")
+        if _fs is not None:
+            _fs()
 
     # ── 键盘焦点：**只允许在真的编辑时持有**（不变量，抄 overlay）────────
     # ⚠️ 判据本体在模块级 `_win_is_editing` / `_win_release_focus`（见文件末尾那段：守卫的
@@ -4571,6 +4669,101 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     strip.addSubview_(_clr)
     strip_holder["search_btns"] = [(_clr, _clr_t)]
 
+    # ── 几何：窗口能缩放之后，宽高一律**从当前窗口现算**（2026-11-18）────────
+    #    ⚠️ build 时那组 `h` / `body_h` 只是**初始**尺寸；`refresh()` 与缩放回调都走这里，
+    #       同一组常数（标题行 `8 + TITLE_H + PAD`、底 `_bottom()`、动作条 `DROP_H + DROP_GAP`）。
+    _TOP_RESERVE = 8.0 + TITLE_H + PAD
+
+    def _bottom() -> float:
+        return drop_y if S.get("foot") else PAD
+
+    def _cw() -> float:
+        return float(ve.bounds().size.width) - 2 * PAD
+
+    def _bh() -> float:
+        return float(sc.frame().size.height)
+
+    def _layout() -> None:
+        """卡片区 / 动作条按当前窗口摆好。⚠️ 只动 frame，不重建卡片（那是 `refresh()`）。"""
+        H = float(ve.bounds().size.height)
+        bot = _bottom()
+        cut = (DROP_H + DROP_GAP) if S.get("mode") else 0.0
+        sc.setFrame_(((PAD, bot + cut), (_cw(), max(CELL_H / 2.0, H - bot - cut - _TOP_RESERVE))))
+        _st = strip_holder.get("view")
+        if _st is not None:
+            _st.setFrame_(((PAD, bot), (_cw(), DROP_H)))
+
+    def _on_resize() -> None:
+        if S.get("foot_anim") or S.get("closed"):
+            return                       # 状态行伸缩动画期间交给 autoresizing，结束后统一摆一次
+        try:
+            _w = round(float(ve.bounds().size.width), 1)
+            if _w != S.get("_last_w"):
+                S["_last_w"] = _w
+                refresh()                # 宽变了：格子按新宽重建（一共十来个视图，拖动中也跟得上）
+            else:
+                _layout()
+            _ovh = S.get("ov_holder") or {}
+            _dall = S.get("drop_all")
+            if _dall is not None and _ovh.get("ov") is not None:
+                _ovh["ov"].removeFromSuperlayer()
+                _ovh["ov"] = _drop_overlay(_dall)
+        except Exception as _e:                               # noqa: BLE001
+            # ⚠️ 别让异常逃回 AppKit 的缩放回调（PyObjC 会留着回溯 → 回溯帧攥着整棵视图树）
+            if os.environ.get("CLASSLIVE_DEBUG"):
+                print(f"⚠ 面板缩放重排失败：{type(_e).__name__}: {_e}", flush=True)
+
+    _rz["cb"] = _on_resize
+
+    def _foot_sync() -> None:
+        """状态行要不要露出来：有状态字或后台任务 → 窗口从底边长出 `FOOT_EXTRA`；都没了 → 收回。
+
+        ⚠️ 顶边不动（标题行不跳），只动底边；动画期间卡片区不跟着缩（`foot_anim` 挡掉重排），
+           结束后 `_layout()` 一次摆正。
+        """
+        if S.get("closed"):
+            return
+        import objc as _objc
+        with _objc.autorelease_pool():
+            _foot_sync_body()
+
+    def _foot_sync_body() -> None:
+        _lb = status_holder.get("label")
+        _bgl = (S.get("bg") or {}).get("label")
+        want = bool(_lb is not None and str(_lb.stringValue() or "").strip()) or bool(
+            _bgl is not None and not _bgl.isHidden())
+        if want == bool(S.get("foot")):
+            return
+        S["foot"] = want
+        d = FOOT_EXTRA if want else -FOOT_EXTRA
+        try:
+            f = win.frame()
+            new = ((f.origin.x, f.origin.y - d), (f.size.width, f.size.height + d))
+            S["foot_anim"] = True
+            from AppKit import NSViewMinYMargin, NSViewWidthSizable
+            sc.setAutoresizingMask_(NSViewMinYMargin | NSViewWidthSizable)
+            # ⚠️ 只在 App 的 run loop 真在跑时做动画：没在跑（判据 / 探针）时 AppKit 会把动画挂起、
+            #    窗口被动画攥住不释放（⑧ 开/关面板实测漏）。
+            from AppKit import NSApp
+            _anim = (bool(win.isVisible()) and not motion.reduce_motion()
+                     and NSApp() is not None and bool(NSApp().isRunning()))
+            win.setFrame_display_animate_(new, True, _anim)
+        except Exception:                                     # noqa: BLE001
+            pass
+        finally:
+            S["foot_anim"] = False
+            try:
+                from AppKit import NSViewHeightSizable, NSViewWidthSizable
+                sc.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+            except Exception:                                 # noqa: BLE001
+                pass
+            _layout()
+
+    # ⚠️ **同步**跑，不推迟：推迟（`callAfter`）的那一拍会把闭包连同整棵视图树钉在 run loop 上，
+    #    开/关面板就漏（⑧ 实测 3 轮→9 轮多 9 个对象）。改窗口尺寸不拆视图树，没有 `_later` 那条重入顾虑。
+    S["foot_sync"] = _foot_sync
+    bg_holder["foot_sync"] = S["foot_sync"]
+
     def refresh():
         """重画（跑完 prep / 删词 / 撤销 / 批量扫描完 都走它）。
 
@@ -4594,8 +4787,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _mode = (b is not None or s is not None or a is not None
                  or S.get("ics") is not None)
         strip.setHidden_(not _mode)
-        _cut = (DROP_H + DROP_GAP) if _mode else 0.0
-        sc.setFrame_(((PAD, drop_y + _cut), (WIDTH - 2 * PAD, body_h - _cut)))
+        S["mode"] = _mode
+        _layout()
         for _v in strip_holder["hint"]:
             _v.setHidden_(b is not None or s is not None or a is not None
                           or S.get("ics") is not None)
@@ -4627,19 +4820,19 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             # ── 导入确认模式：**确认之前一个字节都不落盘** ──────────────
             title_lbl.setStringValue_("导入课表")
             if _i.get("busy"):
-                doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, 120.0)))
+                doc.setFrameSize_((_cw(), max(_bh(), 120.0)))
                 return
             if _i.get("err"):
                 set_status(f"读课表失败：{_i['err']}")
             card, _imp_t = _make_import_card(
-                _i.get("rows") or [], width=WIDTH - 2 * PAD,
+                _i.get("rows") or [], width=_cw(),
                 warn=_i.get("warn") or [], on_confirm=confirm_import,
                 on_cancel=cancel_import, targets=[])
             strip_holder["import_rows"] = _imp_t
             card.setFrameOrigin_((0.0, 0.0))
             doc.addSubview_(card)
-            doc.setFrameSize_((WIDTH - 2 * PAD,
-                               max(body_h, card.frame().size.height)))
+            doc.setFrameSize_((_cw(),
+                               max(_bh(), card.frame().size.height)))
             return
 
         if s is not None:
@@ -4650,19 +4843,19 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             #    所以上面那两圈 hidden 是**分开判**的（各按各的）。
             title_lbl.setStringValue_(f"搜索：{s.get('q', '')}")
             if s.get("busy"):
-                doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, 120.0)))
+                doc.setFrameSize_((_cw(), max(_bh(), 120.0)))
                 return
             # ⚠️ 回来的 targets **必须留住** —— `setTarget_` 是弱引用，
             #    GC 掉就是「点了没反应，也不报错」（本轮就绪条踩过同一形状）。
             card, _rows_t = _make_search_card(
-                s.get("hits") or [], width=WIDTH - 2 * PAD,
+                s.get("hits") or [], width=_cw(),
                 open_idx=s.get("open"), open_text=s.get("open_text"),
                 on_open=toggle_hit, targets=[])
             strip_holder["search_rows"] = _rows_t
             card.setFrameOrigin_((0.0, 0.0))
             doc.addSubview_(card)
-            doc.setFrameSize_((WIDTH - 2 * PAD,
-                               max(body_h, card.frame().size.height)))
+            doc.setFrameSize_((_cw(),
+                               max(_bh(), card.frame().size.height)))
             return
 
         if b is not None:
@@ -4672,11 +4865,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 # ⭐ **零课程：一次模型都没跑过。** 画说明卡，而不是一张
                 #    N 行全是「未分类」的映射表（那样用户以为"分过了，都认不出"）。
                 _pc = _pending_card(b.get("pending") or [], b.get("matched") or {},
-                                    width=WIDTH - 2 * PAD)
+                                    width=_cw())
                 _pc.setFrameOrigin_((0.0, 0.0))
                 doc.addSubview_(_pc)
-                doc.setFrameSize_((WIDTH - 2 * PAD,
-                                   max(body_h, _pc.frame().size.height)))
+                doc.setFrameSize_((_cw(),
+                                   max(_bh(), _pc.frame().size.height)))
                 return
             if b.get("busy") or not b.get("verdicts"):
                 # ⚠️⚠️ **早退之前必须把映射表清空。** 映射表不在屏上时，
@@ -4687,10 +4880,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 #    （2026-09-28 OCR 审计发现；`_confirm_batch`/`_cancel_batch` 都不清它，
                 #    只有 `do_close` 清。）
                 batch_rows.clear()
-                doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, 120.0)))
+                doc.setFrameSize_((_cw(), max(_bh(), 120.0)))
                 return
             card, rows = _make_batch_card(
-                b["verdicts"], width=WIDTH - 2 * PAD,
+                b["verdicts"], width=_cw(),
                 course_names=courses.list_courses(glossary, state_root=state_root))
             # ⚠️ **原地改 `batch_rows`，不要重新绑定** —— `_confirm_batch` 闭包抓的是
             #    同一个列表对象。写 `batch_rows = rows` 会让它变成 `refresh` 的局部变量，
@@ -4698,8 +4891,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             batch_rows[:] = rows
             card.setFrameOrigin_((0.0, 0.0))
             doc.addSubview_(card)
-            doc.setFrameSize_((WIDTH - 2 * PAD,
-                               max(body_h, card.frame().size.height)))
+            doc.setFrameSize_((_cw(),
+                               max(_bh(), card.frame().size.height)))
             return
 
         # ── 正常模式：课程卡片 ────────────────────────────────────────
@@ -4728,7 +4921,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             from AppKit import NSColor, NSMakeRect, NSView
             _eh = empty_card_height()
             card = NSView.alloc().initWithFrame_(
-                NSMakeRect(0.0, 0.0, WIDTH - 2 * PAD, _eh))
+                NSMakeRect(0.0, 0.0, _cw(), _eh))
             card.setWantsLayer_(True)
             card.layer().setCornerRadius_(CARD_RADIUS)
             # ⚠️ 虚线感的弱描边：它是**提示**不是内容，别长得和课程卡一样实
@@ -4742,17 +4935,17 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 _ly -= (L1_H if _i == 0 else L2_H)
                 card.addSubview_(panel.make_label(
                     _txt,
-                    NSMakeRect(CARD_PAD, _ly, WIDTH - 2 * PAD - 2 * CARD_PAD, L1_H),
+                    NSMakeRect(CARD_PAD, _ly, _cw() - 2 * CARD_PAD, L1_H),
                     13.0 if _i == 0 else 12.0, bold=(_i == 0),
                     alpha=1.0 if _i == 0 else DIM))
             doc.addSubview_(card)
-            doc.setFrameSize_((WIDTH - 2 * PAD, max(body_h, _eh)))
+            doc.setFrameSize_((_cw(), max(_bh(), _eh)))
             return
         import home_model
         _tt, _at = S.get("tt") or ([], datetime.datetime.now())
         hm = home_model.build(rows, _tt, _at, last_used=last_course_of(rows))
         by_code = {r.course: r for r in rows}
-        _W = WIDTH - 2 * PAD
+        _W = _cw()
         _note = (f"正在更新到 {S['update_target']}…" if S.get("update_target") else "")
         _picked = S.get("picked")
         _views: list = []
@@ -4803,7 +4996,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             doc.addSubview_(v)
             y += v.frame().size.height + HOME_GAP
         y -= HOME_GAP
-        doc.setFrameSize_((_W, max(y, body_h)))
+        doc.setFrameSize_((_W, max(y, _bh())))
         if not getattr(doc, "_enter_done", False):
             doc._enter_done = True
             _stagger_in(_views)
@@ -4969,6 +5162,18 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    选完在批量卡上指定课号即可。
 
     def do_close():
+        S["closed"] = True
+        # ⚠️ 缩放 / 状态行这几条闭包都攥着 win / ve / sc —— 关面板时一并断掉（⑧ 不许漏面板）
+        _rz["cb"] = None
+        S.pop("foot_sync", None)
+        bg_holder.pop("foot_sync", None)
+        _rd = S.pop("resize_delegate", None)
+        try:
+            win.setDelegate_(None)
+            if _rd is not None:
+                _rd._cb = None
+        except Exception:                                 # noqa: BLE001
+            pass
         try:
             win.orderOut_(None)
         except Exception:                                 # noqa: BLE001
@@ -5364,6 +5569,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     #    格子（自己是落点）优先，空白处 / 标题行 / 滚动区空白都落到这一层。
     #    ⚠️ 玻璃最底下那两层（scrim、拖窗层）留在原处 —— 那是 `panel.build` 的载荷性顺序。
     _ov_holder: dict = {"ov": None}
+    S["ov_holder"] = _ov_holder
 
     def _all_enter(pb):
         ok = acceptable(panel.file_paths(pb) or [])
@@ -5387,6 +5593,14 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         drop_all.addSubview_(_v)
     ve.addSubview_(drop_all)
     S["drop_all"] = drop_all
+    _apply_resize_masks(fp, drop_all, sc=sc, strip=strip_holder.get("view"), h=h)
+    try:
+        # 最窄 = 设计宽（标题行放得下搜索框）；最矮 = 标题行 + 一行格子；最宽到 1100（两列再宽就散了）
+        win.setContentMinSize_((WIDTH, PAD + CELL_H + _TOP_RESERVE))
+        win.setContentMaxSize_((1100.0, float(_vis.size.height)))
+    except Exception:                                         # noqa: BLE001
+        pass
+    S["_last_w"] = round(float(ve.bounds().size.width), 1)
 
     refresh()
 
@@ -5563,10 +5777,13 @@ def _bg_paint(holder) -> None:
     text = bg_row_text(act, now=time.time())
     holder["stems"] = [str(x.get("stem") or "") for x in act if x.get("stem")]
     try:
+        was = not lb.isHidden()
         lb.setStringValue_(text)
         lb.setHidden_(not text)
         btn.setHidden_(not text)
         holder["tick"] = holder.get("tick", 0) + 1
+        if was != bool(text) and holder.get("foot_sync") is not None:
+            holder["foot_sync"]()        # 后台任务行出现 / 消失 → 状态行伸缩
     except Exception:                                         # noqa: BLE001
         pass
 

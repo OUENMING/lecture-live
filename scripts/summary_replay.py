@@ -199,12 +199,15 @@ def main() -> int:
     s = live.LiveSummarizer(chat=chat, append_atoms=None, chapter_path=None,
                             emit=emit, chapters_enabled=True, deadline_gate=None)
     items = load_items(pathlib.Path(a.md), a.minutes, a.start_min)
+    if not items:
+        raise SystemExit(f"这个时间段里没有句子（--start-min {a.start_min:g} 超过日志长度？）")
     print(f"{len(items)} 句，{items[-1][4] / 60:.1f} 分钟")
     t0 = time.monotonic()
     for gid, hms, en, zh, rel in items:
         clock[0] = float(rel)
         s.feed((gid, hms, en, zh))
         s.step(float(rel))
+    clock[0] = float(items[-1][4]) + 5           # 收尾两次推进的 emit 也记到这个时刻
     s.step(float(items[-1][4]) + 5)
     s.finish(timeout_s=120.0)
     last: dict = {}
@@ -222,11 +225,13 @@ def main() -> int:
     (out / "emits.jsonl").write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in emit_rows), encoding="utf-8")
     title = "段落总结重放" + (f" · {a.label}" if a.label else "")
-    lines = [f"# {title} · {pathlib.Path(a.md).name} · 前 {a.minutes:.0f} 分钟",
+    lines = [f"# {title} · {pathlib.Path(a.md).name} · "
+             + (f"第 {a.start_min:.0f}–{a.start_min + a.minutes:.0f} 分钟" if a.start_min
+                else f"前 {a.minutes:.0f} 分钟"),
              f"调用：章节 {calls['chapter']} / 原子 {calls['atom']} / 失败 {calls['fail']} · 墙钟 {time.monotonic() - t0:.0f}s",
              f"chapter 事件 {sum(1 for e in emits if e.get('kind') == 'chapter')} 条；首个 chapter 事件的课内时间见下", ""]
     first_t = next((e["chapter"]["t1"] for e in emits if e.get("kind") == "chapter"), None)
-    lines.append(f"第一条总结（任何 status）覆盖到 {first_t}（开课 {items[0][1]}）")
+    lines.append(f"第一条总结（任何 status）覆盖到 {first_t}（{'片段起点' if a.start_min else '开课'} {items[0][1]}）")
     lines.append(f"章节调用耗时：max {max(lat or [0]):.1f}s · p50 {sorted(lat or [0])[len(lat or [0]) // 2]:.1f}s（超时 20 s）\n")
     lines.append("出章时间线（假时钟 = 课内时刻）：")
     lines += [f"- {x}" for x in timeline] + [""]

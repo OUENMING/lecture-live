@@ -508,6 +508,58 @@ def t_api() -> None:
           isinstance(L.LiveSummarizer.stats.__doc__, str))
 
 
+
+# ---------------------------------------------------------------- ⑦ OCR 复审修的三处
+def t_ocr_fixes() -> None:
+    print("\n--- ⑦ OCR 复审：积压只刷一次 / 拆章留中文标题 / 拆点在句号空洞里仍过时长闸 ---")
+    with tempfile.TemporaryDirectory() as d:
+        h = _harness(d, ["A"] * 40)
+        # 断网攒下 4 个窗口（每窗 8 句 = 160 s；共 640 s < MAX_CHAPTER_S，不触发硬切），恢复那一刻一起消化
+        for k in range(4):
+            buf = [(g, _ts(g), "sentence %d" % g, "中%d" % g) for g in range(8 * k + 1, 8 * k + 9)]
+            h.s._pend.append([0, buf])
+        h._now = 1000.0
+        h.s._process_pending(1000.0, force=True)
+        n = h.calls.count("chap")
+        check("⭐⭐ 积压 4 窗一起消化 → 段落只合成 1 次（不是每窗一次）",
+              n == 1 and len({c["id"] for c in h.chapters()}) == 1, str(h.calls))
+    with tempfile.TemporaryDirectory() as d:
+        global _chap_reply
+        orig = _chap_reply
+
+        def _en_only(block, n):                       # 模型只给英文标题（真课常见）
+            o = orig(block, n)
+            o["title_zh"] = ""
+            return o
+        _chap_reply = _en_only
+        try:
+            h = _harness(d, ["A"] * 40, shift_at=17)
+            _windows(h, 10)
+        finally:
+            _chap_reply = orig
+        fin = [c for c in h.chapters() if c["status"] == "final"]
+        check("⭐ 拆章：旧章 final 的中文标题不被清空（模型只给英文时退回窗口主题的中文）",
+              bool(fin) and bool(fin[0]["title_zh"]), str([(c["title"], c["title_zh"]) for c in fin]))
+    with tempfile.TemporaryDirectory() as d:
+        old = L.SHIFT_MIN_S
+        L.SHIFT_MIN_S = 400.0
+        try:
+            # 拆点落在丢窗留下的句号空洞里：合成调用发出去时把 `at` 那句的时刻抹掉
+            # （真实情形是那一窗被 `_gap_dropped` 丢了，句号区间里留了洞）。
+            # 旧章 1–18 = 18 句 ≥ SHIFT_MIN_KEEP，讲了 340 s < 400 → 该拦。
+            box = {}
+
+            def _hole(block):
+                if "新增**的原文是第 19" in block and box.get("h"):
+                    box["h"].s._cur["times"].pop(19, None)
+            h = _harness(d, ["A"] * 40, shift_at=19, on_chap=_hole)
+            box["h"] = h
+            _windows(h, 11)                           # 第 11 窗那次刷新的新增范围 = 19–22
+            check("⭐⭐ 拆点不在 `times` 里 → 退到旧章末句的时刻，时长闸照样拦（不 fail-open）",
+                  h.s.stats()["shift_splits"] == 0, str(h.s.stats()["shift_splits"]))
+        finally:
+            L.SHIFT_MIN_S = old
+
 def main() -> int:
     t_prompt()
     t_parse_shift()
@@ -515,6 +567,7 @@ def main() -> int:
     t_no_split()
     t_retired()
     t_api()
+    t_ocr_fixes()
     bad = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(bad)}/{len(RESULTS)} 通过")
     if bad:

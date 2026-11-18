@@ -331,8 +331,8 @@ class LiveSummarizer:
         #: ⭐ 3.12：段落刷新里判出换题点、**就地拆章**的次数（
         #: 窗口主题那条路换的章不算）。采集面用。
         self._shift_splits = 0
-        self._shift_now = 0.0
-        self._forced_next = False      # 下一章是不是 `MAX_CHAPTER_S` 硬切出来的          # `_maybe_interim` 记下的 step 域时刻（拆章用）
+        self._shift_now = 0.0          # `_maybe_interim` 记下的 step 域时刻（拆章用）
+        self._forced_next = False      # 下一章是不是 `MAX_CHAPTER_S` 硬切出来的
         self._deadlines_regex = 0
         self._deadlines_model = 0
         self._retries = 0
@@ -684,7 +684,9 @@ class LiveSummarizer:
             self._pend.pop(0)
             # ⭐ 越旧的窗口，有效时刻越早（最新的那窗差值为 0，原样是 `now`）。
             now_eff = now - _span_s(buf[-1][1], newest_c)
-            self._absorb_window(buf, obj, now_eff)
+            # ⭐ OCR 复审（a2c222f）：积压恢复时一口气消化十几窗，每窗都过两道闸 → 一次性
+            #    十几次段落合成（钱 + worker 卡住）。积压里只有**最后一窗**刷新段落。
+            self._absorb_window(buf, obj, now_eff, refresh=not self._pend)
         self._retry_at = 0.0
 
     def _pending_blocked(self, now: float, force: bool) -> bool:
@@ -743,7 +745,7 @@ class LiveSummarizer:
         """
         return self._prev_topic
 
-    def _absorb_window(self, buf: list, obj, now: float) -> None:
+    def _absorb_window(self, buf: list, obj, now: float, refresh: bool = True) -> None:
         """窗口提交成功之后：写原子 → 推 `atoms` → 写窗口记录 → 喂章节状态机。"""
         base = buf[0][0]                                  # 窗口第一句的**全局句号**
         # ⚠️⚠️ `base_id` 必须**跨窗口递增**（原 `main.py` 用 `atom_st["n"]` 记的就是这个）。
@@ -793,7 +795,8 @@ class LiveSummarizer:
         #    ⚠️ 必须用 `now`（不是 `self._clock()`）—— 否则两道闸恒成立/恒不成立。
         # ⚠️ 3.12：`_synthesize` 里判出换题点时会就地拆章（`_split_at_shift`），
         #    拆完的**新章**已经自己合过首段了，这里不会重复合成。
-        self._maybe_interim(now)
+        if refresh:
+            self._maybe_interim(now)
 
     # ------------------------------------------------------------ 章节状态机
     def _maybe_force_split(self, now: float) -> None:
@@ -1072,14 +1075,16 @@ class LiveSummarizer:
         old_sents = [s for s in c["sents"] if s[0] < at]
         if len(old_sents) < SHIFT_MIN_KEEP:
             return False
-        t_a = c["times"].get(at)
+        # ⚠️ OCR 复审（41599e3）：`at` 可能落在丢窗留下的句号空洞里、不在 `times` 里 →
+        #    时长闸被静默跳过。退到「旧章最后一句」的时刻（拆点之前最近的那句）。
+        t_a = c["times"].get(at) or c["times"].get(old_sents[-1][0])
         t_b = c["times"].get(old_sents[0][0])
         if t_a and t_b and not c.get("forced") and _span_s(t_b, t_a) < SHIFT_MIN_S:
             return False                              # 旧章讲得太短（见 `SHIFT_MIN_S`）
         new_sents = [s for s in c["sents"] if s[0] >= at]
         if not new_sents:
             return False                              # `at` 落在末句之后= 没新章可言
-        prev_para, prev_sents = c.get("para"), c.get("sentences") or []
+        prev_para = c.get("para")
         #: 旧章的窗口主题（拆出来的新章要先把它当「粘住的主题」防一手）。
         #: ⚠️ 必须在 `_finalize_current` **之前**取：它清 `_cur`，但 `atoms` 那边不改；
         #:    这里先把旧章快照下来，后面的归属计算也读得快。
@@ -1097,7 +1102,8 @@ class LiveSummarizer:
         #    模型标题（`_write_chapter` 里 `title or c["title"]` 那条已经这么用了）。
         #    新章的 `syn_title` 更不能带过去（否则旧章的 final 记录顶着新话题的标题）。
         c["title"] = str((c.get("syn_title") or ("", ""))[0] or retired)
-        c["title_zh"] = str((c.get("syn_title") or ("", ""))[1] or "")
+        # ⚠️ OCR 复审（7db4c13）：模型常只给英文标题 → 别把窗口主题给的中文清掉。
+        c["title_zh"] = str((c.get("syn_title") or ("", ""))[1] or c.get("title_zh") or "")
         c["sents"] = list(old_sents)               # 旧章的句数就是 `at` 之前那些
         c["hi"] = max(g for g, _ in old_sents)
         c["t1"] = old_times.get(c["hi"]) or c.get("t1", c["t0"])

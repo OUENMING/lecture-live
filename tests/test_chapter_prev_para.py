@@ -149,9 +149,16 @@ def t_prev_content() -> None:
           p.count("- ") >= 3 + 1, "含前章标题那一行")
     check("⭐ 给的是英文原句，不是中文（中文只在原段落里，不另抄）",
           PREV["lead"]["zh"] not in p)
-    check("⭐ 明写「还在进行中」", "还在进行中" in p)
+    check("⭐ 措辞与状态无关：不写「还在进行中」（final 合成也走这里，OCR 复审 a2c222f）",
+          "还在进行中" not in p)
+    check("⭐⭐ 上一版每句带它引用的句号（沿用旧句时 `src` 照抄，不让模型猜）",
+          "- [12] " + PREV["lead"]["en"] in p and "- [13] " + PREV["body"][0]["en"] in p, p[-400:])
+    check("⭐ 没有新增范围 → 不出现「落在新增范围里」（指向不存在的范围，OCR 复审 b570577）",
+          "落在新增范围里" not in p)
     check("⭐ 规则一：没推翻结论 → `lead` 保持原意", "保持原意" in p)
-    check("⭐ 规则二：新论点替换**最不具体**的那句，不是追加", "最不具体" in p and "追加" in p)
+    p_new = _plain(prev_para=PREV, prev_hi=12)
+    check("⭐ 规则二（有新增范围时）：新论点替换**最不具体**的那句，不是追加",
+          "最不具体" in p_new and "追加" in p_new)
     check("⭐ 规则三：没变的句子不许改写", "不许改写" in p or "不许换" in p)
     check("⭐ 带反例（⚠️ 开头那一行）", "⚠️ 反例" in p)
     check("⭐ 仍交代 55–80 词 / 每句至少一个具体项", "55–80" in p and "具体项" in p)

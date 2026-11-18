@@ -76,11 +76,12 @@ auto
 
 ### 升级须知（3.12.0 → 3.12.1）
 - 没有新依赖、没有要手动下的模型；开课面板上自动更新。
-- 3.11.x 在中国大陆连不上 GitHub 时，这一次要手动拉一下（之后不用）：`git -C ~/lecture-live -c url."https://asr.bldcam.page/git/OUENMING/".insteadOf="https://github.com/OUENMING/" pull --ff-only`
+- 3.11.x 在中国大陆连不上 GitHub 时，这一次要在终端手动拉一下（之后不用）：`cd ~/lecture-live && for m in https://git.bldcam.page/OUENMING/ https://asr.bldcam.page/git/OUENMING/ https://github.com/OUENMING/; do git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 -c url."$m".insteadOf=https://github.com/OUENMING/ pull --ff-only && break; done; cat VERSION`
 
 ### Added
 - 中国区更新镜像：GitHub 各条路（代理 / 直连）都失败后，最后再试 `asr.bldcam.page/git/`（`update.mirror_routes`，`-c url.<镜像>.insteadOf=<GitHub>`，只这一条命令有效、不写 .gitconfig）；上次靠镜像成功则镜像先试；`CLASSLIVE_NO_MIRROR=1` 关。依据：中国用户 30 天里 4 次 `Could not resolve host: github.com`，同一台机器连 asr.bldcam.page 每节课都通（country=CN、colo=HKG、错误 ≈ 0）。
 - Worker：`/git/OUENMING/lecture-live(.git)/{info/refs,git-upload-pack}` 只读转发 GitHub（`src/git-mirror.js`），push 一律 404，按 IP 限流，不需要凭据（仓库公开）。
+- 更新镜像之二：`git.bldcam.page`（VPS 只读裸库，每 5 分钟从 GitHub 同步；nginx + git-http-backend，push 404；DNS 只解析、不走 Cloudflare）。镜像顺序 GitHub 各路 → vps → cf，上次靠哪个镜像成就先试哪个；路由串写成 `mirror:vps` / `mirror:cf`。依据：2026-11-18 Globalping 中国大陆探针 VPS 19/20（p50 474 ms），Cloudflare 39/50（p50 约 2 s）。
 
 ## [3.12.0] - 2026-11-18
 

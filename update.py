@@ -59,7 +59,7 @@ _ROUTE_IRRELEVANT = ("would be overwritten", "not possible to fast-forward",
                      "couldn't find remote ref", "does not appear to be a git")
 
 #: ⭐ 3.12.1：**中国区更新镜像**。GitHub 那几条路全失败后，最后再试一条「镜像」路：
-#  `git -c url.<MIRROR_TO>.insteadOf=<MIRROR_FROM> fetch` —— 同一个 remote（`origin`）、同一套
+#  `git -c url.<镜像>.insteadOf=<MIRROR_FROM> fetch` —— 同一个 remote（`origin`）、同一套
 #  `@{u}` / journal / ff-only，只是这一次请求改发给我们自己的 Worker，由它（Cloudflare 香港节点）去 GitHub 拿。
 #  为什么是它：朋友那台（中国大陆）10-05 / 10-29 / 11-12 / 11-17 四次 `Could not resolve host: github.com`，
 #  而同一台机器连 asr.bldcam.page 30 天里每节课都通（AE：country=CN、colo=HKG，错误 ≈ 0）。
@@ -67,7 +67,12 @@ _ROUTE_IRRELEVANT = ("would be overwritten", "not possible to fast-forward",
 #     那份：git 用对象哈希校验每个对象，转发的人改不了代码而不被发现。
 #  ⚠️ 只做运行时参数（`-c`），**不写用户的 .gitconfig**；`CLASSLIVE_NO_MIRROR=1` 关掉。
 MIRROR_FROM = "https://github.com/OUENMING/"
-MIRROR_TO = "https://asr.bldcam.page/git/OUENMING/"
+#: ⭐ 3.12.2：镜像按顺序试（名字进日志 / 报告的路由串，如 `direct>mirror:vps`）。
+#  ① `vps`：腾讯云国际站（法兰克福）上的只读裸库，每 5 分钟从 GitHub 同步（nginx + git-http-backend，
+#     DNS 只解析、不走 Cloudflare）。2026-11-18 Globalping 中国大陆探针 info/refs 19/20、p50 474 ms。
+#  ② `cf`：asr Worker 转发 GitHub（3.12.1）。同一批探针 39/50、p50 约 2 s —— 联通线路常卡 TLS 握手。
+MIRRORS = [("vps", "https://git.bldcam.page/OUENMING/"),
+           ("cf", "https://asr.bldcam.page/git/OUENMING/")]
 #: 走镜像的子命令（只读的那几条；`push` / `clone` 永远不走）。
 MIRROR_SUBCOMMANDS = frozenset({"fetch", "pull", "ls-remote"})
 
@@ -172,16 +177,25 @@ def mirror_routes(args, url: str | None = None) -> list[tuple[str, str | None]]:
     u = _origin_url_raw() if url is None else url
     if not u.startswith(MIRROR_FROM):
         return []
-    return [("mirror", None)]
+    return [("mirror", name) for name, _ in MIRRORS]
 
 
-def _mirror_won_last() -> bool:
-    """最近一次检查（`update-check.json`）是不是走镜像成的。读不了 → False（照常先试 GitHub）。"""
+def _mirror_won_last() -> str:
+    """最近一次检查（`update-check.json`）是靠哪个镜像成的 → 它的名字；不是镜像 / 读不了 → ""。"""
     try:
         st = check_state()
-        return bool(st.get("check_ok")) and str(st.get("route") or "").endswith("mirror")
+        last = str(st.get("route") or "").rsplit(">", 1)[-1]
+        if st.get("check_ok") and last.startswith("mirror:"):
+            return last.split(":", 1)[1]
     except Exception:                                     # noqa: BLE001
-        return False
+        pass
+    return ""
+
+
+def _order_routes(gh: list, mirrors: list, won: str) -> list:
+    """GitHub 各路在前、镜像垫后；上次靠镜像 `won` 成的 → 它挪到最前（其余顺序不变）。"""
+    first = [r for r in mirrors if r[1] == won] if won else []
+    return first + gh + [r for r in mirrors if r not in first]
 
 
 def proxy_args(route: tuple[str, str | None]) -> list[str]:
@@ -192,7 +206,8 @@ def proxy_args(route: tuple[str, str | None]) -> list[str]:
     """
     kind, purl = route
     if kind == "mirror":
-        return ["-c", f"url.{MIRROR_TO}.insteadOf={MIRROR_FROM}"]
+        to = dict(MIRRORS).get(purl or "", "")
+        return ["-c", f"url.{to}.insteadOf={MIRROR_FROM}"] if to else []
     purl = (purl or "").strip()
     if kind == "direct" or not purl:
         return []
@@ -210,7 +225,7 @@ def route_label(route: tuple[str, str | None]) -> str:
     import urllib.parse
     kind, purl = route
     if kind == "mirror":
-        return "mirror"
+        return f"mirror:{purl}"
     purl = (purl or "").strip()
     if kind == "direct" or not purl:
         return "direct"
@@ -266,7 +281,7 @@ def _git_dispatch(args, *, timeout: float, text: bool):
     #    镜像哪天不通、GitHub 通了，记下的路就变回 GitHub，下次自动换回来。
     routes = net_routes()
     _mr = mirror_routes(args)
-    routes = (_mr + routes) if (_mr and _mirror_won_last()) else (routes + _mr)
+    routes = _order_routes(routes, _mr, _mirror_won_last() if _mr else "")
     for i, route in enumerate(routes):
         left = deadline - time.monotonic()
         if tried and left < 1.0:

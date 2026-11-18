@@ -2219,8 +2219,8 @@ print("\nM. 中国区更新镜像（3.12.1）：GitHub 不通 → 改写到镜�
 import os as _os                                                   # noqa: E402
 _os.environ.pop("CLASSLIVE_NO_MIRROR", None)
 _gh = update.MIRROR_FROM + "lecture-live.git"
-check("M1 GitHub 上的这个仓 + fetch → 补一条 mirror 路",
-      update.mirror_routes(["fetch", "--quiet"], url=_gh) == [("mirror", None)])
+check("M1 GitHub 上的这个仓 + fetch → 按顺序补 vps、cf 两条镜像路",
+      update.mirror_routes(["fetch", "--quiet"], url=_gh) == [("mirror", "vps"), ("mirror", "cf")])
 check("M1b push / clone **永远不走**镜像（镜像只读）",
       update.mirror_routes(["push"], url=_gh) == [] and update.mirror_routes(["clone", _gh], url=_gh) == [])
 check("M1c 不是这个仓（别的 remote / 本地路径）→ 不补",
@@ -2229,9 +2229,16 @@ check("M1c 不是这个仓（别的 remote / 本地路径）→ 不补",
 _os.environ["CLASSLIVE_NO_MIRROR"] = "1"
 check("M1d CLASSLIVE_NO_MIRROR=1 → 不补", update.mirror_routes(["fetch"], url=_gh) == [])
 _os.environ.pop("CLASSLIVE_NO_MIRROR", None)
-check("M2 mirror 路 = 只这一条命令有效的 insteadOf 改写；日志里叫 mirror",
-      update.proxy_args(("mirror", None)) == ["-c", f"url.{update.MIRROR_TO}.insteadOf={update.MIRROR_FROM}"]
-      and update.route_label(("mirror", None)) == "mirror")
+check("M2 mirror 路 = 只这一条命令有效的 insteadOf 改写；日志里叫 mirror:<名>",
+      update.proxy_args(("mirror", "vps")) == ["-c", f"url.https://git.bldcam.page/OUENMING/.insteadOf={update.MIRROR_FROM}"]
+      and update.proxy_args(("mirror", "cf")) == ["-c", f"url.https://asr.bldcam.page/git/OUENMING/.insteadOf={update.MIRROR_FROM}"]
+      and update.route_label(("mirror", "vps")) == "mirror:vps")
+_gh2 = [("http", "http://p:1"), ("direct", None)]
+_m2 = [("mirror", "vps"), ("mirror", "cf")]
+check("M2b 默认顺序：GitHub 各路 → vps → cf",
+      update._order_routes(_gh2, _m2, "") == _gh2 + _m2)
+check("M2c 上次靠 cf 成的 → cf 最先，其余照旧（GitHub → vps）",
+      update._order_routes(_gh2, _m2, "cf") == [("mirror", "cf")] + _gh2 + [("mirror", "vps")])
 
 # M3：真 git。origin 指向一个解析不了的地址（= 中国那台连不上 GitHub 的形状），
 #     镜像指向本地裸库 —— check() 必须靠镜像查到落后 1 个提交，pull() 必须真的装上。
@@ -2240,9 +2247,10 @@ release(seed, "0.0.2")
 _mdir = tmp / "m" / "OUENMING"
 _mdir.mkdir(parents=True)
 (_mdir / "lecture-live.git").symlink_to(tmp / "origin")
-_saved_m = (update.MIRROR_FROM, update.MIRROR_TO)
+_saved_m = (update.MIRROR_FROM, list(update.MIRRORS))
 update.MIRROR_FROM = "https://mirror-test.invalid/OUENMING/"
-update.MIRROR_TO = f"file://{_mdir}/"
+# 第一个镜像也连不上（= vps 那天不通）→ 必须继续试第二个
+update.MIRRORS[:] = [("vps", "https://vps-test.invalid/OUENMING/"), ("cf", f"file://{_mdir}/")]
 sh("git", "remote", "set-url", "origin", update.MIRROR_FROM + "lecture-live.git", cwd=clone)
 try:
     with _Patch(net_routes=lambda url=None: [("direct", None)]):
@@ -2250,8 +2258,8 @@ try:
         check("M3 GitHub 不通 → 镜像查到「落后 1 个提交」、新版本号读得到",
               _st["ok"] and _st["behind"] == 1 and _st["latest"] == "0.0.2",
               f"ok={_st['ok']} behind={_st['behind']} latest={_st['latest']} err={_st['error'][:80]}")
-        check("M3b 路由记成 direct>mirror（日志 / 报告看得出是镜像救的）",
-              _st["route"] == "direct>mirror", _st["route"])
+        check("M3b 路由记成 direct>mirror:vps>mirror:cf（第一个镜像不通就试下一个；日志看得出是谁救的）",
+              _st["route"] == "direct>mirror:vps>mirror:cf", _st["route"])
         check("M3c remote 地址**没被改**（只是运行时参数，不写用户配置）",
               sh("git", "remote", "get-url", "origin", cwd=clone).strip() == update.MIRROR_FROM + "lecture-live.git")
         # M4：上次靠镜像成的 → 这次镜像先试
@@ -2263,14 +2271,15 @@ try:
         finally:
             update._git_run = _saved_run
         check("M4 上次靠镜像成的 → 这次**镜像先试**（别每次先等 GitHub 失败）",
-              len(_seen4) == 1 and _seen4[0]["argv"][:2] == update.proxy_args(("mirror", None)),
+              len(_seen4) == 1 and _seen4[0]["argv"][:2] == update.proxy_args(("mirror", "cf")),
               str([s["argv"][:2] for s in _seen4]))
         _p = update.pull()
         check("M5 pull() 也走得通镜像：真的装上 0.0.2",
               _p["ok"] and not _p["skipped"] and (clone / "VERSION").read_text().strip() == "0.0.2",
               f"ok={_p['ok']} err={_p.get('error', '')[:80]}")
 finally:
-    update.MIRROR_FROM, update.MIRROR_TO = _saved_m
+    update.MIRROR_FROM = _saved_m[0]
+    update.MIRRORS[:] = _saved_m[1]
 
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]

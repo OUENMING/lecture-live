@@ -71,6 +71,9 @@ HAIRLINE = 0.5         # 描边（实测 0.5pt；scale 2 上正好 1 设备像�
 TITLE_H = 34.0
 PANEL_TITLE = "Pineapple"  # 面板标题（2026-11-18 对外名 Pineapple + 菠萝图标；内部仍叫 ClassLive。原「烤菠萝」2026-10-14）
 BRAND_ICON = 18.0     # 标题前菠萝图标的边长
+#: 菠萝图标框的左边 / 竖直微调（量墨迹定的，见 `_brand_icon` 调用处）：图标框自带 ~4.5pt 留白。
+BRAND_X = PAD - 4.5
+BRAND_DY = 6.5
 #: 标题行最右两颗图标按钮（导入课件 / 关闭）：各 `HEAD_BTN` 见方、间隔 4，离搜索框 8。
 HEAD_BTN = 24.0
 HEAD_TOOLS_W = 2 * HEAD_BTN + 4.0 + 8.0
@@ -2769,12 +2772,15 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     title_lbl = panel.make_label(
         # ⚠️ 竖直位置是**量出来的**：原来 `+6 / 高 28` 让字的中线比搜索框高 8.25pt（拍图量墨迹，
         #    2026-10-14）。现在与搜索框同一条中线（同法复量 ≤0.5pt）。
-        PANEL_TITLE, NSMakeRect(PAD + BRAND_ICON + 6.0, h - PAD - TITLE_H + 1.75,
+        PANEL_TITLE, NSMakeRect(BRAND_X + BRAND_ICON + 6.0, h - PAD - TITLE_H + 1.75,
                                  WIDTH - 2 * PAD - SEARCH_W - HEAD_TOOLS_W - 16.0 - BRAND_ICON, 24.0),
         15.0, bold=True)
     ve.addSubview_(title_lbl)
     # ⭐ 菠萝图标（对外名 Pineapple，2026-11-18）。竖直位置与标题字同一条中线（拍图量过再调）。
-    _brand = _brand_icon(NSMakeRect(PAD, h - PAD - TITLE_H + 1.75 + 3.0, BRAND_ICON, BRAND_ICON))
+    # ⭐ 2026-11-18 Owen「菠萝跟字没对齐」：量墨迹（2x 截图）—— 原来菠萝墨迹中线比「Pineapple」
+    #    大写字中线低 3.5pt、左边墨迹比格子表外沿往里 4.5pt。现在：竖直按**大写字中线**对齐
+    #    （`BRAND_DY`），左边墨迹与格子表外沿同一条竖线（`BRAND_X`）。
+    _brand = _brand_icon(NSMakeRect(BRAND_X, h - PAD - TITLE_H + 1.75 + BRAND_DY, BRAND_ICON, BRAND_ICON))
     if _brand is not None:
         ve.addSubview_(_brand)
     # ⭐ 品牌（菠萝 + Pineapple）本身是菜单入口：模型 / 更新 / 云端转写 / 测试模式 / 功能介绍。
@@ -2782,7 +2788,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
     _bp = panel.make_label(PANEL_TITLE, NSMakeRect(0.0, 0.0, 10.0, 24.0), 15.0, bold=True)
     _bp.sizeToFit()
     brand_btn = panel.make_button(NSMakeRect(
-        PAD - 4.0, h - PAD - TITLE_H + 2.0, BRAND_ICON + 6.0 + float(_bp.frame().size.width) + 8.0,
+        BRAND_X - 4.0, h - PAD - TITLE_H + 2.0, BRAND_ICON + 6.0 + float(_bp.frame().size.width) + 8.0,
         28.0))
     brand_btn.setBordered_(False)
     brand_btn.setTitle_("")

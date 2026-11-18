@@ -1109,6 +1109,18 @@ class LiveSummarizer:
               "syn_title": (shift["title"], shift["title_zh"]),
               "t0": old_times.get(at) or old_times.get(new_sents[0][0]) or c["t0"],
               "lo": new_sents[0][0], "hi": new_sents[-1][0],
+              #: ⚠️⚠️ **`t1` 必须显式给**（2026-11-18 独立核查复现）：这一章是**一次性**塞进
+              #:    dict 的，绕过了 `_absorb`（唯一写 `t1` 的地方，见它那个循环）。少了这个键，
+              #:    `_write_chapter` 的 `t1=c.get("t1", c["t0"])` 会取到 `t0` → **零时长**：
+              #:    · 平时只有一条 interim（下一个窗口 `_absorb` 就补上），寿命 <75 s，代价是
+              #:      那半个窗口的 ❓ 归属挂不上；
+              #:    · **坏档是拆章后即收尾** —— final 也零时长，而 `note_cover.skeleton` 只认
+              #:      final，`t1 == t0` 会让这一章的 `points` 变成空数组（实测），
+              #:      即课后笔记概览里**最后一章的要点整段丢掉**。
+              #:    ⚠️ 取值只能来自 `old_times`（它是拆章那一刻的快照）：`c` 已被改写成旧章，
+              #:    此刻从 `c["times"]` 读会拿到旧章的。`new_sents[-1][0]` 必然在里面 ——
+              #:    `times` 与 `sents` 在 `_absorb` 同一个循环写，拆章时两侧又按同一条 `at` 过滤。
+              "t1": old_times.get(new_sents[-1][0]) or old_times.get(at) or c["t0"],
               "sents": list(new_sents), "atoms": self._atoms_from(old_atoms, at),
               "ver": 0,
               #: ⚠️⚠️ 新章**从零写**（Claude 验收改）：拿旧章段落当「上一版」会触发

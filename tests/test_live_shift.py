@@ -315,6 +315,15 @@ def t_split() -> None:
         check("⭐ 新章 `t0` = 换题点那一句的时刻（_ts(17)，不是窗口首句）",
               bool(new) and new[0]["t0"] == _ts(17),
               str([(c["id"], c["t0"]) for c in new]))
+        #: ⚠️⚠️ **`t1` 必须显式建**（2026-11-18 独立核查复现的那个零时长洞）：新章是
+        #:    一次性塞进 dict 的，绕过 `_absorb`（唯一写 `t1` 的地方）。少了它，
+        #:    `_write_chapter` 的 `t1=c.get("t1", c["t0"])` 会取到 `t0`：平时只有一条
+        #:    interim、下一个窗口就补上（代价小），但**拆章后即收尾**那档 final 也零时长，
+        #:    而 `note_cover.skeleton` 只认 final —— `t1 == t0` 会让这一章的 `points` 变空
+        #:    （即课后笔记概览里最后一章的要点整段丢掉）。
+        check("⭐⭐ 新章 `t1` ≠ `t0`（零时长洞），且 = 末句那一刻 _ts(18)",
+              bool(new) and new[0]["t1"] == _ts(18) and new[0]["t1"] != new[0]["t0"],
+              str([(c["id"], c["t0"], c["t1"]) for c in new]))
         check("⭐ `stats()['shift_splits'] == 1`", h.s.stats()["shift_splits"] == 1,
               str(h.s.stats()["shift_splits"]))
         check("⭐⭐ 拆章那次混合段落**没写**（旧章 final 的段落里没有新增那几句）",

@@ -36,7 +36,7 @@ META_ALPHA = 0.50
 INTERIM_ALPHA = 0.55
 #: ❓ 标记那行比元信息亮一档 —— 那是**你自己**留的记号，回看时要一眼找得到。
 MARK_ALPHA = 0.72
-EMPTY_TEXT = "开课约 3 分钟后出第一段"
+EMPTY_TEXT = "开课约 1–2 分钟后出第一段"
 
 
 def bold_segments(text: str, bolds: typing.Iterable[str]) -> list[tuple[str, bool]]:

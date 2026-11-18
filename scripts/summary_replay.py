@@ -39,12 +39,17 @@ from cloud_translator import load_test_key  # noqa: E402
 BLOCK = re.compile(r"> \[!abstract\] (\d\d:\d\d:\d\d)\n> \*\*EN\*\*: (.*)\n> \*\*ZH\*\*: (.*)")
 
 
-def load_items(md: pathlib.Path, minutes: float) -> list:
+def load_items(md: pathlib.Path, minutes: float, start_min: float = 0.0) -> list:
+    """`start_min`：从开课后第几分钟开始取（只重放中段，省调用 —— 2026-11-18 余额事故后加）。"""
     out = []
     t_first = None
+    t_class = None
     for m in BLOCK.finditer(md.read_text(encoding="utf-8")):
         hh, mm, ss = map(int, m.group(1).split(":"))
         t = hh * 3600 + mm * 60 + ss
+        t_class = t if t_class is None else t_class
+        if t - t_class < start_min * 60:
+            continue
         t_first = t if t_first is None else t_first
         if t - t_first > minutes * 60:
             break
@@ -158,6 +163,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("md")
     ap.add_argument("--minutes", type=float, default=40.0)
+    ap.add_argument("--start-min", type=float, default=0.0, help="从开课后第几分钟开始取（只测中段）")
     ap.add_argument("--out")
     ap.add_argument("--label", default="", help="写进报告标题，方便改前 / 改后对比")
     a = ap.parse_args()
@@ -192,7 +198,7 @@ def main() -> int:
     timeline: list = []
     s = live.LiveSummarizer(chat=chat, append_atoms=None, chapter_path=None,
                             emit=emit, chapters_enabled=True, deadline_gate=None)
-    items = load_items(pathlib.Path(a.md), a.minutes)
+    items = load_items(pathlib.Path(a.md), a.minutes, a.start_min)
     print(f"{len(items)} 句，{items[-1][4] / 60:.1f} 分钟")
     t0 = time.monotonic()
     for gid, hms, en, zh, rel in items:

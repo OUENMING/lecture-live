@@ -177,6 +177,13 @@ def t_parse_shift() -> None:
 
 
 # ================================================================ ③ 拆章
+def _ts(gid: int) -> str:
+    """句号 → `HH:MM:SS`（每句 20 秒，从 10:00:00 起）。⚠️ 句间隔必须够大：
+    `SHIFT_MIN_S`(240 s) 按句子时刻算旧章讲了多久，1 秒一句的夹具永远拆不了。"""
+    t = 36000 + 20 * gid
+    return "%02d:%02d:%02d" % (t // 3600, t % 3600 // 60, t % 60)
+
+
 class Harness:
     """`LiveSummarizer` + 假模型。**按 system prompt 身份分发**。
 
@@ -227,7 +234,7 @@ class Harness:
 
     def say(self, gid: int, flush_at: float, step_first: float | None = None) -> None:
         self._now = flush_at
-        self.s.feed((gid, "10:00:%02d" % gid, "sentence %d" % gid, "中%d" % gid))
+        self.s.feed((gid, _ts(gid), "sentence %d" % gid, "中%d" % gid))
         self.s.step(flush_at - 31.0 if step_first is None else step_first)
         self._now = flush_at
         self.s.step(flush_at)
@@ -276,12 +283,12 @@ def _windows(h: Harness, n: int, *, first: int = 1) -> None:
 
     ⚠️ 为什么每窗两句、而不是一句：一节可有 20 句但必须**短于 `MAX_CHAPTER_S`(900 s)**，
        否则 `_maybe_force_split` 先切一刀，拆章那一段永远进不了（夹具自己把被测行为掩盖掉）。
-       句号 = 窗口序号×2−1 / ×2，`t` 列仍按句号（`10:00:<句号>`）—— `t0` 判据靠它。
+       句号 = 窗口序号×2−1 / ×2，`t` 列按句号（`_ts`：每句 20 秒）—— `t0` 判据与 `SHIFT_MIN_S` 都靠它。
     """
     for k in range(first, first + n):
         t = 80.0 * k
         for gid in (2 * k - 1, 2 * k):
-            h.s.feed((gid, "10:00:%02d" % gid, "sentence %d" % gid, "中%d" % gid))
+            h.s.feed((gid, _ts(gid), "sentence %d" % gid, "中%d" % gid))
         h.s.step(t - 31.0)
         h._now = t
         h.s.step(t)
@@ -305,8 +312,8 @@ def t_split() -> None:
               str([(c["id"], c["lo"], c["hi"]) for c in new]))
         check("⭐⭐ 新章**立刻**出了首段（interim），不等下一窗",
               bool(new) and new[0]["status"] == "interim", str([c["status"] for c in new]))
-        check("⭐ 新章 `t0` = 换题点那一句的时刻（10:00:17，不是窗口首句）",
-              bool(new) and new[0]["t0"] == "10:00:17",
+        check("⭐ 新章 `t0` = 换题点那一句的时刻（_ts(17)，不是窗口首句）",
+              bool(new) and new[0]["t0"] == _ts(17),
               str([(c["id"], c["t0"]) for c in new]))
         check("⭐ `stats()['shift_splits'] == 1`", h.s.stats()["shift_splits"] == 1,
               str(h.s.stats()["shift_splits"]))
@@ -382,6 +389,30 @@ def t_split() -> None:
 
 def t_no_split() -> None:
     print("\n--- ④ 不拆：旧章太短 / 越界 / 非 interim ---")
+    check("常量 `SHIFT_MIN_S` 就是 240（同组换人讲不拆）", L.SHIFT_MIN_S == 240.0, str(L.SHIFT_MIN_S))
+    with tempfile.TemporaryDirectory() as d:
+        # 句数够（16 句）但旧章只讲了 16×20=320 s 的话会拆；把 `SHIFT_MIN_S` 临时抬到 400 → 不拆
+        old = L.SHIFT_MIN_S
+        L.SHIFT_MIN_S = 400.0
+        try:
+            h = _harness(d, ["A"] * 40, shift_at=17)
+            _windows(h, 10)
+            check("⭐⭐ 旧章讲得不够 `SHIFT_MIN_S` 秒 → 不拆（句数够也不拆）",
+                  h.s.stats()["shift_splits"] == 0, str(h.s.stats()["shift_splits"]))
+        finally:
+            L.SHIFT_MIN_S = old
+    with tempfile.TemporaryDirectory() as d:
+        # ⭐ 硬切出来的章（`forced`）不受 `SHIFT_MIN_S` 限制
+        old = L.SHIFT_MIN_S
+        L.SHIFT_MIN_S = 400.0
+        try:
+            h = _harness(d, ["A"] * 40, shift_at=17)
+            h.s._forced_next = True                   # 等价于上一章刚被 `MAX_CHAPTER_S` 切开
+            _windows(h, 10)
+            check("⭐⭐ 硬切出来的章：讲得不够 `SHIFT_MIN_S` 也照样按换题点拆",
+                  h.s.stats()["shift_splits"] == 1, str(h.s.stats()["shift_splits"]))
+        finally:
+            L.SHIFT_MIN_S = old
     check("常量就是 15（太少句的章拆出来没纲要价值）", L.SHIFT_MIN_KEEP == 15,
           str(L.SHIFT_MIN_KEEP))
     with tempfile.TemporaryDirectory() as d:

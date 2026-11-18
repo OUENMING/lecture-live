@@ -108,6 +108,11 @@ REFRESH_MIN_NEW = 3
 #: ⚠️ 15 句 ≈ 3–4 分钟的正常语速发言（一窗 13–20 句），也是离线量具里
 #:    「一章至少有一句话讲得清」的下限。
 SHIFT_MIN_KEEP = 15
+#: ⭐ 同时要求旧章**至少讲了这么多秒**（按 `c["times"]`，拆点那句 − 旧章首句）。
+#: ⚠️ 2026-11-18 重放（145925 后半 33 分钟）：只有句数闸时一节拆出 11 章、中位 3 分钟 ——
+#:    模型把同一组里「下一个人讲下一部分」当成换题。小组展示每组 12–18 分钟、讲课一段
+#:    5–15 分钟，4 分钟以下拆出来的章既不是「一组一段」也没有纲要价值。
+SHIFT_MIN_S = 240.0
 
 #: 模型调用失败后多久重试。
 RETRY_S = 30.0
@@ -326,7 +331,8 @@ class LiveSummarizer:
         #: ⭐ 3.12：段落刷新里判出换题点、**就地拆章**的次数（
         #: 窗口主题那条路换的章不算）。采集面用。
         self._shift_splits = 0
-        self._shift_now = 0.0          # `_maybe_interim` 记下的 step 域时刻（拆章用）
+        self._shift_now = 0.0
+        self._forced_next = False      # 下一章是不是 `MAX_CHAPTER_S` 硬切出来的          # `_maybe_interim` 记下的 step 域时刻（拆章用）
         self._deadlines_regex = 0
         self._deadlines_model = 0
         self._retries = 0
@@ -804,6 +810,10 @@ class LiveSummarizer:
         if now - self._cur["t_open"] < MAX_CHAPTER_S:
             return
         self._finalize_current(now)
+        #: ⭐ 下一章是**到点硬切**出来的（不是讲者换题）→ 它对语义换题不设 `SHIFT_MIN_S` 门槛。
+        #: ⚠️ 2026-11-18 重放：第五组讲 + 问答 18 分钟，15 分钟那刀切在问答中间，3 分钟后
+        #:    最后一组上台时新章「才讲了 3 分钟」被 `SHIFT_MIN_S` 拦住 → 问答和下一组并成一章。
+        self._forced_next = True
 
     def _advance(self, topic, topic_zh, buf, atoms, now: float) -> None:
         if not topic:
@@ -856,6 +866,8 @@ class LiveSummarizer:
                          #: ⭐ 3.12：`全局句号 → "HH:MM:SS"`。拆章时新章的 `t0` 要取
                          #: **换题点那一句**的时刻（拿窗口首句或 `now` 都不对）。
                          "times": {},
+                         #: ⭐ 这章是不是 `MAX_CHAPTER_S` 硬切出来的（见 `_maybe_force_split`）。
+                         "forced": self._forced_next,
                          #: ⭐ 上一版（成功的）段落 —— 下次合成时喂给模型当 `prev_para`，
                          #: 失败**不覆盖**（见 `_synthesize`）。
                          "para": None,
@@ -864,6 +876,7 @@ class LiveSummarizer:
                          #:    两个域混用会让判据**恒不成立**（2026-09-30 栽过一次，判据 ⑦）。
                          "t_open": now}
             self._cid += 1
+            self._forced_next = False
             self._interim_at = now
             self._interim_first = True     # ⭐ 新章：首段重新回到「开章那一窗就出」那一档
             self._interim_n = -1          # 新章：上一章的句数不作数（撞上同一个数会白等 60 秒）
@@ -1059,6 +1072,10 @@ class LiveSummarizer:
         old_sents = [s for s in c["sents"] if s[0] < at]
         if len(old_sents) < SHIFT_MIN_KEEP:
             return False
+        t_a = c["times"].get(at)
+        t_b = c["times"].get(old_sents[0][0])
+        if t_a and t_b and not c.get("forced") and _span_s(t_b, t_a) < SHIFT_MIN_S:
+            return False                              # 旧章讲得太短（见 `SHIFT_MIN_S`）
         new_sents = [s for s in c["sents"] if s[0] >= at]
         if not new_sents:
             return False                              # `at` 落在末句之后= 没新章可言

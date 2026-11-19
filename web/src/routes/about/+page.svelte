@@ -10,10 +10,8 @@
 		startDemo();
 	});
 
-	const install = `git clone https://github.com/OUENMING/lecture-live.git
-cd lecture-live
-./install.sh`;
-	const uv = 'curl -LsSf https://astral.sh/uv/install.sh | sh';
+	// 一行装好：脚本在 static/mac（没 uv 先装 uv → 拉仓库到 ~/lecture-live → 跑 install.sh）
+	const install = 'curl -fsSL https://class.bldcam.page/mac | sh';
 
 	let copied = $state('');
 	async function copy(id: string, text: string) {
@@ -149,27 +147,19 @@ cd lecture-live
 					<p>打开网址就能用，什么都不用装。Mac 和 Windows 都行，用电脑上的 Chrome 或 Edge 打开。置顶小窗可以盖在 PPT 放映上面。</p>
 				</div>
 				<div>
-					<h3>Mac 桌面版</h3>
+					<h3>Mac 桌面版<span class="rec">推荐</span></h3>
 					<p>字幕窗能盖在任何全屏程序上面，全屏的 Zoom 也行。另外还有「讲一下」、实时总结、课前回顾，还能从课上认出作业截止日期，一键记进提醒事项。要用 Apple Silicon（M1 或更新）的 Mac。</p>
 				</div>
 			</div>
 		</section>
 
 		<section class="mac" id="mac">
-			<h2>安装 Mac 桌面版</h2>
-			<p class="sub">要 macOS 13 或更新，芯片是 Apple Silicon（M1 或更新）。前后大概 5 分钟，多数时间在等它自己装。</p>
+			<h2>安装 Mac 桌面版<span class="rec">推荐</span></h2>
+			<p class="sub">要 macOS 13 或更新，芯片是 Apple Silicon（M1 或更新）。字幕能盖在全屏 Zoom 上，功能也比网页版多。前后大概 5 分钟，多数时间在等它自己装。</p>
 			<ol>
 				<li>
-					<h3>装 uv（Python 工具）</h3>
-					<p>打开「终端」，把这一行粘进去，回车。装过的话跳过这步。</p>
-					<div class="code">
-						<pre><code>{uv}</code></pre>
-						<button type="button" onclick={() => copy('uv', uv)}>{copied === 'uv' ? '已复制' : '复制'}</button>
-					</div>
-				</li>
-				<li>
-					<h3>下载并安装 ClassLive</h3>
-					<p>还是在终端里，把这三行粘进去。它会自己构建好放进「应用程序」，Python 和依赖都带着。</p>
+					<h3>粘一行命令</h3>
+					<p>打开「终端」，把这一行粘进去，回车。它会自己装好放进「应用程序」，Python 和依赖都带着。如果弹窗要装「开发者工具」，点安装，装完再粘一次。</p>
 					<div class="code">
 						<pre><code>{install}</code></pre>
 						<button type="button" onclick={() => copy('install', install)}>{copied === 'install' ? '已复制' : '复制'}</button>
@@ -492,6 +482,20 @@ cd lecture-live
 	.code button:focus-visible {
 		outline: 2px solid var(--on-glass);
 		outline-offset: 2px;
+	}
+	/* 「推荐」角标：墨色实底小字，和页面黑白基调一致 */
+	.rec {
+		display: inline-block;
+		margin-left: 10px;
+		padding: 2px 8px;
+		border-radius: 999px;
+		background: var(--ink);
+		color: var(--paper);
+		font: 500 var(--fs-xs) / 1.5 var(--cl-font);
+		letter-spacing: 0.02em;
+		vertical-align: middle;
+		position: relative;
+		top: -2px;
 	}
 	.more {
 		margin-top: 32px;

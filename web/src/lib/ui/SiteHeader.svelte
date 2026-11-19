@@ -10,7 +10,7 @@
 	<nav>
 		<a href="/after" aria-current={current === 'after' ? 'page' : undefined}>我的课</a>
 		<a href="/about" aria-current={current === 'about' ? 'page' : undefined}>功能介绍</a>
-		<a href="/about#mac">Mac 桌面版</a>
+		<a href="/about#mac" class="mac">Mac 桌面版<span class="rec">推荐</span></a>
 		<span class="links">
 			<a class="icon" href="https://bldcam.page" target="_blank" rel="noopener" aria-label="菠萝丁的摄影集" title="菠萝丁的摄影集">
 				<svg viewBox="0 0 24 24" aria-hidden="true"
@@ -106,6 +106,15 @@
 		outline: 2px solid var(--ink);
 		outline-offset: 4px;
 		border-radius: var(--radius-xs);
+	}
+	.rec {
+		margin-left: 6px;
+		padding: 1px 6px;
+		border-radius: 999px;
+		border: 1px solid currentColor;
+		font-size: 11px;
+		line-height: 1.4;
+		vertical-align: 1px;
 	}
 	/* 窄屏让出「Mac 桌面版」，「我的课」是回到字幕的唯一入口，不能藏 */
 	@media (max-width: 520px) {

@@ -11,7 +11,7 @@ import { QuotaCore } from "./src/quota-core.js";
 
 const TOKEN = "tok-public";
 const INSTALL = "0123456789abcdef0123456789abcdef";
-const CHAIN3 = ["qwen3-asr-flash", "qwen-audio-3.1-asr-flash", "qwen-audio-3.0-asr-flash"];
+const CHAIN3 = ["qwen-audio-3.1-asr-flash", "qwen-audio-3.0-asr-flash"];   // 2026-11-19 起 qwen3-asr-flash 移出链（名字沿用）
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 返回在 ms 后兑现的响应；signal abort 时像真 fetch 一样 reject。
@@ -175,12 +175,11 @@ test("6b Groq 0.5 s 回 -> 千问没被调（对冲不误触发）", () => withH
   await sleep(1400);   // 越过 1.2 s 对冲点，确认定时器已被清掉
   assert.equal(h.calls.qwen.length, 0);
 }));
-test("6c 千问请求体：两种模型各按实测格式", () => withHarness({ groq: () => J(500, {}), qwen: (m) => (m === CHAIN3[2] ? qwenOk() : J(500, {})) }, async (h) => {
+test("6c 千问请求体：qwen-audio 按实测格式", () => withHarness({ groq: () => J(500, {}), qwen: (m) => (m === CHAIN3[1] ? qwenOk() : J(500, {})) }, async (h) => {
   await h.call(req());
   assert.deepEqual(h.calls.qwen.map((c) => c.model), CHAIN3);
-  const b0 = h.calls.qwen[0].body, b1 = h.calls.qwen[1].body;
-  assert.match(b0.input.messages[0].content[0].audio, /^data:audio\/ogg;base64,/);
-  assert.deepEqual(b0.parameters, { asr_options: { language: "en", enable_itn: false } });
+  const b1 = h.calls.qwen[1].body;
+  assert.equal(h.calls.qwen[0].body.input.messages[0].content[0].type, "input_audio");
   assert.match(b1.input.messages[0].content[0].input_audio.data, /^data:audio\/ogg;base64,/);
   assert.equal(b1.input.messages[0].content[0].type, "input_audio");
   assert.deepEqual(b1.parameters, { format: "opus", sample_rate: "16000", language_hints: ["en"] });
@@ -207,6 +206,15 @@ test("7 千问第一个 403 FreeTierOnly -> report exhausted、第二个成功�
 test("8 千问 400 ASR_RESPONSE_HAVE_NO_WORDS -> 200 空文本", () => withHarness({
   groq: () => J(500, {}),
   qwen: () => J(400, { code: "ASR_RESPONSE_HAVE_NO_WORDS", message: "" }),
+}, async (h) => {
+  const res = await h.call(req());
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).text, "");
+  assert.equal(h.calls.qwen.length, 1);
+}));
+test("8b 千问 400 {code:CLIENT_ERROR, message:NO_WORDS}（国际站实测形状）-> 200 空文本、不试下一个", () => withHarness({
+  groq: () => J(500, {}),
+  qwen: () => J(400, { request_id: "x", code: "CLIENT_ERROR", message: "ASR_RESPONSE_HAVE_NO_WORDS" }),
 }, async (h) => {
   const res = await h.call(req());
   assert.equal(res.status, 200);

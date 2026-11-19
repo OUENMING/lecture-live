@@ -84,3 +84,16 @@
 | 花费 | 一节课约 60 次 DeepSeek 调用（11-18 重放口径），走同一个 4 h 额度之外的 token 额度 | — |
 
 结论：中等难度，约 2 天（含验收）。**建议 T1 跑稳以后再做**：先保证字幕和翻译在国内不掉，再加总结。
+
+## 10. 经 Cloudflare 为主、失败直连 VPS（Owen 11-19 定方向，**先记录，未做**）
+
+现状（11-19）：Owen 把 class.bldcam.page 切成橙色云（经 Cloudflare）。国内 CF 探针 78%，所以要补一条直连兜底：
+
+| 环节 | 主路 | 兜底 |
+|---|---|---|
+| 网页本身 | class.bldcam.page（CF） | 首次打开失败只能重试（没有代码可跑）；之后靠 Service Worker 缓存外壳，再开不依赖网络。**网页地址只能一个**：通行码 / 术语 / 本机字幕都按 origin 存，换地址数据会散 |
+| 识别核心 15 MB | 同源（CF） | 超时 → 直连备用地址（如 direct.bldcam.page，灰云 → VPS，只放 /vendor 与 /v1 转发，带 CORS）→ 最后 jsDelivr |
+| Worker 接口 | asr.bldcam.page（CF） | 失败 → 备用地址 /v1（VPS 反代 Worker）；Worker 按 IP 的限流 / 统计改读 X-Forwarded-For / CF-Connecting-IP |
+| Soniox | 直连 | 不变 |
+
+要做（约半天）：备用地址 DNS + 证书 + nginx；loader 与 http.ts 加中间档（超时按国内实测定）；Service Worker 只缓存外壳不缓存数据；Worker 读真实 IP；下课报告记「这节走了哪条路」。

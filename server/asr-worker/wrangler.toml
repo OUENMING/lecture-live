@@ -171,3 +171,8 @@ persist = true
 
 [observability.issues]
 enabled = true
+
+# 网页版上线（2026-11-19 Owen 定）：只放行 class.bldcam.page；网页实时转写每天 4 h
+[vars]
+WEB_ORIGIN = "https://class.bldcam.page"
+WEB_DAILY_RT_S = "14400"

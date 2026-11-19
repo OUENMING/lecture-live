@@ -2532,9 +2532,7 @@ def run(args) -> None:
     # 现在 ✕ 只置这个标志(主循环据此退出), running 留到收尾真正结束才清。
     stopping = threading.Event()
     trans = {"mode": "both"}                            # 🌐 四档: both 双语 / en 只英·校 / raw 纯转录 / zh 中文课只转录
-    # ⭐ L-2 自动语种：连着 3 句中文 → 自动切 `zh`（只转录）。纯状态机，判据在 `lang_gate.py`。
-    #    ⚠️ 只有 Soniox 封口句带 `lang`（L-1）—— 本地识别那段没有语种，永不自动切。
-    gate_zh = lang_gate.LangGate()
+    # 3.12.2：L-2 自动语种（连 3 句中文切 `zh`）已撤回 —— 11-18 英文课被环境中文误切，后 96 分钟没翻译。
     TR_STATS["requests"] = 0                          # 调试通道 `trans.requests`（本次课从零开始）
     # ⭐ 定稿 ASR: 云端优先、本地兜底(`final_asr.py` 文件头)。
     #    ⚠️ 必须在 `trans` 之后: `_cloud_asr_ok` 读 `trans["mode"]`; 也必须在**开始采音之前**
@@ -3784,18 +3782,6 @@ def run(args) -> None:
                         break
                     if not _s.text:
                         continue
-                    # ⭐ L-2 自动语种：连着 3 句中文 → 切 `zh`（只转录）。纯状态机在 `lang_gate.py`。
-                    #    ⚠️ 只有 Soniox 封口句带 `lang`（L-1）；`ever_off` 一起传 —— 用户手动
-                    #       换过档就永不再自动切（那是他的决定，不该被机器覆盖）。
-                    #    ⚠️ 收到 true 时**不取消**已经送翻的句子（它们在另一条路上跑完，拍板 5）。
-                    #    ⚠️ 这里就写 `trans`（不等主线程）：否则这一句自己会按旧档送翻 ——
-                    #       `_emit` 就在下面几行（走与胶囊**同一个写点**，`ever_off` 一起置真）。
-                    if gate_zh.observe(getattr(_s, "lang", ""),
-                                       ever_off=bool(trans.get("ever_off"))):
-                        _on_translate_mode("zh")        # 与悬浮窗胶囊同一个写点（含 ever_off）
-                        # 胶囊的显示由 `drain()` 跟 `trans` 走（不新增 streamq tag）。
-                        streamq.put(("notice", ("识别到中文课：只转录、不翻译（点胶囊回双语）", False,
-                                                 "\n".join(_engine_warns.values()))))  # 带上还挂着的告警，别把 ⚠️ 清掉
                     # ⭐ 3.10.1「连着讲就并成一段」：与上一句之间的**音频停顿**（词时间戳），
                     #    悬浮窗据此决定并不并进上一行（`caption_flow.is_join`）。先于 `_emit` 入队。
                     _gap = (_s.start_s - _sent_end["s"]) if _sent_end["s"] is not None else None

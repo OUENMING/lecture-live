@@ -219,12 +219,16 @@ def main() -> int:
         put_idx = [i for i, ln in enumerate(lines) if CALL in ln]
         check(f"找得到 `{CALL}` 那一行（否则下面那条是空的）", bool(put_idx),
               str(len(put_idx)))
+        # ⚠️ 2026-11-16（L-2 自动语种）：闸门换成了 `lang_gate.no_llm(trans["mode"])` ——
+        #    `zh`（中文课只转录）与 `raw` 同规矩，一个请求都不发。判据不变：
+        #    **就在这一行上面**，不是"整个文件里有没有"。
+        _GATES = ('!= "raw"', "lang_gate.no_llm(")
         gate_ok = False
         for i in put_idx:
             window = "\n".join(lines[max(0, i - 6):i])
-            if '!= "raw"' in window:
+            if any(g in window for g in _GATES):
                 gate_ok = True
-        check(f'⭐ `{CALL}` **上面几行**有 `trans["mode"] != "raw"` 那道闸', gate_ok)
+        check(f'⭐ `{CALL}` **上面几行**有「别发模型请求」那道闸（raw/zh）', gate_ok)
         # ⭐ 非阻塞那半 —— 钉实现，不钉"调用点上写没写 `put_nowait`"。
         src_ls = (HERE / "live_summary.py").read_text(encoding="utf-8")
         body = src_ls[src_ls.index("    def feed(self"):]

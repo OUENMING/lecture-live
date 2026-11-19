@@ -75,6 +75,9 @@ def new_world():
     sh("git", "clone", str(origin), str(clone), cwd=tmp)
     update.HERE = clone
     update.STATE_DIR = tmp / "logs"
+    # ⭐ 3.11.6：`check()` 现在会落一份快照到 `~/.classlive/update-check.json`
+    #    —— 写端必须一起隔离，否则测试往**用户真目录**里写（`paths.update_check`）。
+    update.STATE_ROOT = tmp / "classlive"
     return tmp, seed, clone
 
 
@@ -123,6 +126,22 @@ check("A5 requirements 变化被检出", r["reqs_changed"], f"reqs_changed={r['r
 c = update.check()
 check("A6 check() 不动工作区（只报 dirty）", c["ok"] and c["dirty"],
       f"ok={c['ok']} dirty={c['dirty']}")
+
+print("\n--- A7 开课前那次超时 -> APPLY_CANCEL：不换代码（3.11.6）---")
+tmp, seed, clone = new_world()
+release(seed, "0.0.2")
+update.APPLY_CANCEL.set()
+try:
+    r = update.pull()
+finally:
+    update.APPLY_CANCEL.clear()
+check("A7 APPLY_CANCEL 置位 -> 不换代码（VERSION 仍 0.0.1、没有 journal）",
+      (not r["ok"]) and (clone / "VERSION").read_text().strip() == "0.0.1"
+      and not update.apply_journal_path().exists(),
+      f"ok={r['ok']} err={r.get('error')} VERSION={(clone / 'VERSION').read_text().strip()}")
+r = update.pull()
+check("A7b 清掉之后照常装上（换代码走本地 merge --ff-only @{u}）",
+      r["ok"] and r["after"] == "0.0.2", f"{r}")
 
 print("\n--- A2 脏工作区 ---")
 tmp, seed, clone = new_world()
@@ -1917,6 +1936,350 @@ check("F9 D20 journal 里有 repair_failed + 工作区干净 -> 保留 journal�
       and update.apply_journal_path().exists()
       and (_cloneD20 / "VERSION").read_text().strip() == "0.0.1", str(_r20))
 update._rm_journal(update.apply_journal_path())
+
+# ═══════════════════════════════════════════════════════════════════
+#  G. ⭐ 3.11.6：git 走代理、失败不卡、留痕
+# ═══════════════════════════════════════════════════════════════════
+print("\nG. 代理注入 / 路由降级 / 留痕\n")
+
+
+class _Patch:
+    """临时换掉 update 里的一两个模块级函数，退出时**一定**还原（测试自己要干净）。"""
+
+    def __init__(self, **kw):
+        self.kw = kw
+        self.saved = {}
+
+    def __enter__(self):
+        for k, v in self.kw.items():
+            self.saved[k] = getattr(update, k)
+            setattr(update, k, v)
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self.saved.items():
+            setattr(update, k, v)
+        return False
+
+
+def _recorder(answers):
+    """造一个假的 `_git_run`：逐次返回 `answers` 里的 (rc, out, err)，并记下每次的 argv。
+
+    ⚠️ 每次也记下 `timeout` —— 「总时长受 TIMEOUT 管」那条判据要靠它。
+    """
+    seen: list = []
+
+    def run(argv, *, timeout=update.TIMEOUT, text=True):
+        seen.append({"argv": list(argv), "timeout": timeout})
+        i = min(len(seen) - 1, len(answers) - 1)
+        return answers[i]
+    return run, seen
+
+
+print("--- G1 假 socks 口 + 活 http 口 → 落到活的 http 上 ---")
+import socket                                                    # noqa: E402
+
+_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+_srv.bind(("127.0.0.1", 0))
+_srv.listen(1)                       # 真的在 listen（"活的口"），但不说代理协议 —— 只当端口用
+_live = _srv.getsockname()[1]
+_dead = 1                            # 没人监听（"假 socks 口"）
+_fake, _seen = _recorder([(-1, "", "socks connect failed"), (0, "", "")])
+with _Patch(net_routes=lambda url=None: [("socks", f"socks5h://127.0.0.1:{_dead}"),
+                                         ("http", f"http://127.0.0.1:{_live}")],
+            _git_run=_fake):
+    _rc, _out, _err = update._git("fetch", "--quiet")
+check("G1 第一次带 socks5h 代理、第二次带**活的那个** http 代理，最终成功",
+      _rc == 0 and len(_seen) == 2
+      and _seen[0]["argv"][:2] == ["-c", f"http.proxy=socks5h://127.0.0.1:{_dead}"]
+      and _seen[1]["argv"][:2] == ["-c", f"http.proxy=http://127.0.0.1:{_live}"],
+      f"attempts={[s['argv'][:2] for s in _seen]}")
+check("G1b 记账里能看出**哪条路成的**（含降级链）",
+      update.last_route().startswith("socks5h://127.0.0.1") and update.last_route().endswith(f"http://127.0.0.1:{_live}"),
+      update.last_route())
+_srv.close()
+
+print("--- G2 没代理 → 不带 `-c`，而且真能 fetch（本地裸库）---")
+tmp, seed, clone = new_world()
+release(seed, "0.0.2")
+_real = update._git_run
+_rec, _seen2 = _recorder([(0, "", "")])
+
+
+def _delegate(argv, *, timeout=update.TIMEOUT, text=True):
+    _rec(argv, timeout=timeout, text=text)
+    return _real(argv, timeout=timeout, text=text)
+
+
+with _Patch(net_routes=lambda url=None: [("direct", None)], _git_run=_delegate):
+    _st = update.check()
+# ⚠️ 判据只盯 `http.proxy`：`-c core.quotePath=false` 是 `_dirty_report` 本来就有的，
+#    把 `-c` 一概禁掉会把一条**正常的**现有行为判成红。
+check("G2 直连时**不注入任何 http.proxy**（不覆盖用户自己的 git 配置）",
+      all(not any(str(a).startswith("http.proxy=") for a in s["argv"]) for s in _seen2)
+      and _st["ok"] and _st["behind"] == 1,
+      f"argv={[s['argv'][:3] for s in _seen2]} behind={_st['behind']}")
+
+print("--- G3 逐条降级 / 总时长受 timeout 管 ---")
+import time as _time                                              # noqa: E402
+
+
+def _slow(argv, *, timeout=update.TIMEOUT, text=True):
+    _time.sleep(0.4)
+    return -1, "", "connection refused"
+
+
+_calls = {"n": 0}
+_orig_slow = _slow
+
+
+def _counting(argv, *, timeout=update.TIMEOUT, text=True):
+    _calls["n"] += 1
+    return _orig_slow(argv, timeout=timeout, text=text)
+
+
+with _Patch(net_routes=lambda url=None: [("http", "http://127.0.0.1:1"),
+                                         ("socks", "socks5h://127.0.0.1:2"),
+                                         ("http", "http://127.0.0.1:3"),
+                                         ("direct", None)],
+            _git_run=_counting):
+    _t0 = _time.monotonic()
+    _r3 = update._git("fetch", timeout=2.5)
+    _e3 = _time.monotonic() - _t0
+check("G3 四条路全试过（都失败 -> 返回最后一条的错误）",
+      _r3[0] != 0 and _calls["n"] == 4 and "connection refused" in _r3[2],
+      f"attempts={_calls['n']} err={_r3[2][:40]!r}")
+check("G3b 总时长没被乘成 4 × timeout（4 × 2.5 s 会 > 10 s）",
+      _e3 < 2.6, f"elapsed={_e3:.2f}s")
+check("G3c 降级链记全了（报告/日志里看得出试过哪几条）",
+      update.last_route().count(">") == 3, update.last_route())
+
+_calls["n"] = 0
+with _Patch(net_routes=lambda url=None: [("http", "http://127.0.0.1:1"),
+                                         ("socks", "socks5h://127.0.0.1:2"),
+                                         ("http", "http://127.0.0.1:3"),
+                                         ("direct", None)],
+            _git_run=_counting):
+    _t0 = _time.monotonic()
+    update._git("fetch", timeout=1.0)
+    _e4 = _time.monotonic() - _t0
+check("G3d 剩余时间不够就不再试下一条（timeout=1 s 时只跑一条）",
+      _calls["n"] == 1 and _e4 < 1.6, f"attempts={_calls['n']} elapsed={_e4:.2f}s")
+
+print("--- G3e 分叉 / 撞车**不**换路重试（换条路结论一样，别让人干等）---")
+_calls["n"] = 0
+
+
+def _diverged(argv, *, timeout=update.TIMEOUT, text=True):
+    _calls["n"] += 1
+    return -1, "", "Not possible to fast-forward, aborting."
+
+
+with _Patch(net_routes=lambda url=None: [("http", "http://127.0.0.1:1"),
+                                         ("socks", "socks5h://127.0.0.1:2"),
+                                         ("direct", None)],
+            _git_run=_diverged):
+    _r5 = update._git("pull", "--ff-only")
+check("G3e 分叉只试一条就收手（错误原文原样带回）",
+      _calls["n"] == 1 and "fast-forward" in _r5[2], f"attempts={_calls['n']}")
+
+print("--- G4 所有 git 都带 GIT_TERMINAL_PROMPT=0 ---")
+_envs: list = []
+_real_run = update.subprocess.run
+
+
+def _spy_run(*a, **kw):
+    _envs.append(kw.get("env") or {})
+    return _real_run(*a, **kw)
+
+
+update.subprocess.run = _spy_run
+try:
+    update._git("status", "--porcelain")
+    with _Patch(net_routes=lambda url=None: [("direct", None)]):
+        update._git("fetch", "--quiet")
+finally:
+    update.subprocess.run = _real_run
+check("G4 本地命令与联网命令都带 GIT_TERMINAL_PROMPT=0（GUI 下没人能输密码）",
+      len(_envs) >= 2 and all(e.get("GIT_TERMINAL_PROMPT") == "0" for e in _envs),
+      f"{len(_envs)} 次调用，值={[e.get('GIT_TERMINAL_PROMPT') for e in _envs]}")
+check("G4b `git_env()` 是从 os.environ **派生**的（PATH 等一个都不丢）",
+      update.git_env().get("PATH") == __import__("os").environ.get("PATH"),
+      "PATH 丢了" if update.git_env().get("PATH") != __import__("os").environ.get("PATH") else "")
+
+print("--- G5/G6 检查成功、失败都写一行日志 ---")
+tmp, seed, clone = new_world()
+_log = update.STATE_DIR / "update.log"
+update.check()
+_txt1 = _log.read_text(encoding="utf-8") if _log.exists() else ""
+check("G6 ✅ 成功的检查也留痕（「已是最新」+ 路由）",
+      "检查：已是最新" in _txt1 and "路由=" in _txt1, _txt1.strip().splitlines()[-1:] or "")
+release(seed, "0.0.2", mode="auto")
+_st = update.check()
+_txt2 = _log.read_text(encoding="utf-8")
+check("G6b 落后时写「落后 N 个提交」+ 远端版本 + 更新方式",
+      "落后 1 个提交" in _txt2 and "0.0.2" in _txt2 and "auto" in _txt2
+      and _st["latest"] == "0.0.2" and _st["mode"] == "auto",
+      f"latest={_st.get('latest')} mode={_st.get('mode')}")
+
+sh("git", "remote", "set-url", "origin", str(tmp / "没有这个仓库"), cwd=clone)
+_txt3_before = len(_log.read_text(encoding="utf-8"))
+_bad = update.check()
+_txt3 = _log.read_text(encoding="utf-8")[_txt3_before:]
+check("G5 ❌ 检查失败留痕：带 git 原文（截 300 字）+ 路由",
+      (not _bad["ok"]) and "检查失败" in _txt3 and "路由=" in _txt3
+      and ("没有这个仓库" in _txt3 or "does not appear" in _txt3 or "not found" in _txt3),
+      _txt3.strip()[:160])
+check("G5b 日志里**不出现**密码那种形状（代理只写 scheme+host:port）",
+      "@" not in _txt3, _txt3.strip()[:80])
+
+print("--- G7 `blocks.update` 那份快照的形状 ---")
+import json as _json                                                # noqa: E402
+_snap = update.check_state()
+_want = {"check_ok", "error", "behind", "current", "latest", "route", "mode", "checked_at"}
+check("G7 快照有全部八格（报告 `blocks.update` 直接吃它）",
+      _want <= set(_snap), f"缺 {_want - set(_snap)}")
+check("G7b 失败的检查 -> `check_ok` 是 False（不是 None：**查了**，没查成）",
+      _snap["check_ok"] is False and _snap["route"] != "", str(_snap)[:120])
+_p = update.check_state_path()
+_p.unlink()
+check("G7c 没查过 -> `{\"check_ok\": None}`（`None` ≠ `False`：没查 vs 查失败）",
+      update.check_state() == {"check_ok": None}, str(update.check_state()))
+_p.write_text("{坏的 json", encoding="utf-8")
+check("G7d 快照坏了也降级成 `None`（报告不能因为一个坏文件写不出来）",
+      update.check_state() == {"check_ok": None}, str(update.check_state()))
+check("G7e 快照住 `~/.classlive`（走 paths.py，同一个根）",
+      str(_p).startswith(str(update.STATE_ROOT)), str(_p))
+
+print("--- G8 报告登记的块名 ---")
+import testmode as _tm                                              # noqa: E402
+check("G8 `update` 已在 `testmode.BLOCKS` 里（否则 `note_block` 会当错名丢掉）",
+      "update" in _tm.BLOCKS, f"{len(_tm.BLOCKS)} 块")
+
+# ═══════════════════════════════════════════════════════════════════
+#  H. ⭐ 3.11.6：开课前的自动安装 —— 判据是纯函数，逐条件单测
+# ═══════════════════════════════════════════════════════════════════
+print("\nH. 开课时段的自动安装（panel_auto_install）\n")
+
+_OK = {"kind": "available", "latest": "9.9.9", "quiet": True, "mode": "auto"}
+_CLEAN = {}
+
+
+def _go(offer=None, **kw):
+    kw.setdefault("env", _CLEAN)
+    kw.setdefault("started", False)
+    kw.setdefault("steps", [])
+    return update.panel_auto_install(_OK if offer is None else offer, **kw)
+
+
+_cases = [
+    ("H0 四条全中 -> 装", _go(), True),
+    ("H1 ① 更新方式是 manual -> 不装", _go({"kind": "available", "latest": "9.9.9",
+                                            "quiet": True, "mode": "manual"}), False),
+    ("H1b ① 跨多版里夹了 manual（`quiet=False`）-> 不装",
+     _go({"kind": "available", "latest": "9.9.9", "quiet": False, "mode": "auto"}), False),
+    ("H2 ② 还有 deps -> 不装",
+     _go(steps=[{"key": "deps", "label": "补依赖"}]), False),
+    ("H2b ② 还有 models -> 不装",
+     _go(steps=[{"key": "models", "label": "下载模型"}]), False),
+    ("H2c ② 只有可选的草稿模型 / 重建 .app -> **照装**（这两步本条路本来就不做）",
+     _go(steps=[{"key": "draft_model", "label": "草稿"}, {"key": "app", "label": "重建"}]), True),
+    ("H3 ③ CLASSLIVE_NO_AUTO_UPDATE 设了 -> 不装",
+     _go(env={"CLASSLIVE_NO_AUTO_UPDATE": "1"}), False),
+    ("H4 ④ 已经点了「开始上课」-> 不装", _go(started=True), False),
+    ("H5 没有新版本（kind=none）-> 不装", _go({"kind": "none"}), False),
+    ("H7 算不出步骤（steps=None）-> 不装（fail-closed，OCR 11-17）", _go(steps=None), False),
+    ("H5b 有新版本但装不上（kind=blocked）-> 不装", _go({"kind": "blocked"}), False),
+]
+for _name, _r, _want in _cases:
+    check(_name, _r["go"] is _want, f"go={_r['go']} why={_r.get('why', '')[:40]}")
+check("H6 六条不同条件的 `why` **互不相同**（否则报告/日志里分不出是哪一条挡的）",
+      len({c[1].get("why") for c in _cases if not c[1]["go"]}) >= 5,
+      str({c[1].get("why") for c in _cases if not c[1]["go"]})[:160])
+
+print("\nH8. 凭据不进日志 / 报告（OCR 11-17）\n")
+_e = "fatal: unable to access 'https://bob:ghp_SECRET123@github.com/x/y.git/': timeout"
+check("H8 redact 抹掉 remote 里的 user:token", "ghp_SECRET123" not in update.redact(_e)
+      and "github.com" in update.redact(_e), update.redact(_e))
+check("H8b 不带凭据的原样不动", update.redact("fatal: x https://github.com/a") == "fatal: x https://github.com/a")
+
+print("\nH9. 降级按剩余路数平分时间（OCR 11-17：慢挂代理别吃光直连的时间）\n")
+_seen = []
+_orig_run, _orig_routes = update._git_run, update.net_routes
+update.net_routes = lambda url=None: [("http", "http://127.0.0.1:9"), ("direct", None)]
+update._git_run = lambda argv, timeout=0, text=True: (_seen.append(timeout), (-1, "", "超时"))[1]
+try:
+    update._git("fetch", timeout=40)
+finally:
+    update._git_run, update.net_routes = _orig_run, _orig_routes
+check("H9 两条路：第一条最多分到一半时间，直连也轮得到", len(_seen) == 2 and _seen[0] <= 20.5 and _seen[1] >= 19,
+      f"timeouts={[round(x, 1) for x in _seen]}")
+
+print("\nM. 中国区更新镜像（3.12.1）：GitHub 不通 → 改写到镜像再试一次\n")
+import os as _os                                                   # noqa: E402
+_os.environ.pop("CLASSLIVE_NO_MIRROR", None)
+_gh = update.MIRROR_FROM + "lecture-live.git"
+check("M1 GitHub 上的这个仓 + fetch → 按顺序补 vps、cf 两条镜像路",
+      update.mirror_routes(["fetch", "--quiet"], url=_gh) == [("mirror", "vps"), ("mirror", "cf")])
+check("M1b push / clone **永远不走**镜像（镜像只读）",
+      update.mirror_routes(["push"], url=_gh) == [] and update.mirror_routes(["clone", _gh], url=_gh) == [])
+check("M1c 不是这个仓（别的 remote / 本地路径）→ 不补",
+      update.mirror_routes(["fetch"], url="https://github.com/someone/else.git") == []
+      and update.mirror_routes(["fetch"], url="/tmp/x.git") == [])
+_os.environ["CLASSLIVE_NO_MIRROR"] = "1"
+check("M1d CLASSLIVE_NO_MIRROR=1 → 不补", update.mirror_routes(["fetch"], url=_gh) == [])
+_os.environ.pop("CLASSLIVE_NO_MIRROR", None)
+check("M2 mirror 路 = 只这一条命令有效的 insteadOf 改写；日志里叫 mirror:<名>",
+      update.proxy_args(("mirror", "vps")) == ["-c", f"url.https://git.bldcam.page/OUENMING/.insteadOf={update.MIRROR_FROM}"]
+      and update.proxy_args(("mirror", "cf")) == ["-c", f"url.https://asr.bldcam.page/git/OUENMING/.insteadOf={update.MIRROR_FROM}"]
+      and update.route_label(("mirror", "vps")) == "mirror:vps")
+_gh2 = [("http", "http://p:1"), ("direct", None)]
+_m2 = [("mirror", "vps"), ("mirror", "cf")]
+check("M2b 默认顺序：GitHub 各路 → vps → cf",
+      update._order_routes(_gh2, _m2, "") == _gh2 + _m2)
+check("M2c 上次靠 cf 成的 → cf 最先，其余照旧（GitHub → vps）",
+      update._order_routes(_gh2, _m2, "cf") == [("mirror", "cf")] + _gh2 + [("mirror", "vps")])
+
+# M3：真 git。origin 指向一个解析不了的地址（= 中国那台连不上 GitHub 的形状），
+#     镜像指向本地裸库 —— check() 必须靠镜像查到落后 1 个提交，pull() 必须真的装上。
+tmp, seed, clone = new_world()
+release(seed, "0.0.2")
+_mdir = tmp / "m" / "OUENMING"
+_mdir.mkdir(parents=True)
+(_mdir / "lecture-live.git").symlink_to(tmp / "origin")
+_saved_m = (update.MIRROR_FROM, list(update.MIRRORS))
+update.MIRROR_FROM = "https://mirror-test.invalid/OUENMING/"
+# 第一个镜像也连不上（= vps 那天不通）→ 必须继续试第二个
+update.MIRRORS[:] = [("vps", "https://vps-test.invalid/OUENMING/"), ("cf", f"file://{_mdir}/")]
+sh("git", "remote", "set-url", "origin", update.MIRROR_FROM + "lecture-live.git", cwd=clone)
+try:
+    with _Patch(net_routes=lambda url=None: [("direct", None)]):
+        _st = update.check()
+        check("M3 GitHub 不通 → 镜像查到「落后 1 个提交」、新版本号读得到",
+              _st["ok"] and _st["behind"] == 1 and _st["latest"] == "0.0.2",
+              f"ok={_st['ok']} behind={_st['behind']} latest={_st['latest']} err={_st['error'][:80]}")
+        check("M3b 路由记成 direct>mirror:vps>mirror:cf（第一个镜像不通就试下一个；日志看得出是谁救的）",
+              _st["route"] == "direct>mirror:vps>mirror:cf", _st["route"])
+        check("M3c remote 地址**没被改**（只是运行时参数，不写用户配置）",
+              sh("git", "remote", "get-url", "origin", cwd=clone).strip() == update.MIRROR_FROM + "lecture-live.git")
+        # M4：上次靠镜像成的 → 这次镜像先试
+        _rec4, _seen4 = _recorder([(0, "", "")])
+        _saved_run = update._git_run
+        update._git_run = _rec4
+        try:
+            update._git("fetch", "--quiet")
+        finally:
+            update._git_run = _saved_run
+        check("M4 上次靠镜像成的 → 这次**镜像先试**（别每次先等 GitHub 失败）",
+              len(_seen4) == 1 and _seen4[0]["argv"][:2] == update.proxy_args(("mirror", "cf")),
+              str([s["argv"][:2] for s in _seen4]))
+        _p = update.pull()
+        check("M5 pull() 也走得通镜像：真的装上 0.0.2",
+              _p["ok"] and not _p["skipped"] and (clone / "VERSION").read_text().strip() == "0.0.2",
+              f"ok={_p['ok']} err={_p.get('error', '')[:80]}")
+finally:
+    update.MIRROR_FROM = _saved_m[0]
+    update.MIRRORS[:] = _saved_m[1]
 
 # ======================= 汇总 =======================
 bad = [n for n, ok in RESULTS if not ok]

@@ -5,18 +5,16 @@
 
 面板浮在屏幕中上。可以做的：
 
-    1. 往**任意一张卡**上拖一个文件（Finder 里随便什么文件都行）
-    2. 点底部那条上的「选择文件…」（选一堆课件 → 批量归档）
-    3. 点底部那条上的「＋ 新增课程」→ 输个课号 → 回车 / Esc
-       ⚠️ 卡片上的「选择文件…」**2026-09-28 已删**（作者：看着太繁）——
-          那条路现在只有底部这一个入口。
+    1. 往**任意一格**上拖一个文件（Finder 里随便什么文件都行）= 只加给那门
+    1b. 拖到**格子以外的任何地方**（标题行 / 空白）→ 整窗出现「松手，自动分到各门课」→ 批量归档
+    2. 点标题行右边的导入图标（选一堆课件 → 批量归档）
+    3. 点格子末尾那格「＋ 新增课程」→ 底部出现输入行 → 输个课号 → 回车 / Esc
     4. 跑完之后，点结果里某一条右边的「删」，再点「撤销」
-    5. ⭐ **右键任意一张卡 → 「删除课程…」** —— 会弹确认框（全部删除 / 只删课号 / 取消）
+    5. ⭐ **右键任意一格 → 「删除课程…」** —— 会弹确认框（全部删除 / 只删课号 / 取消）
        ⚠️ 确认框只在 `CLASSLIVE_FROM_APP=1` 时弹（`notice.alert` 的既有判据）——
           跑器默认**不弹**，那时会看到状态行说「要在 ClassLive.app 里确认」。
-          想看弹框就这样起：`CLASSLIVE_FROM_APP=1 … probe_entry_panel.py`
        ⚠️ 删的是 **`/tmp` 那份副本**；但「全部删除」会把副本文件真的送进你的废纸篓。
-    6. 点右下角「关闭」
+    6. 点左上角「🍍 Pineapple」→ 状态与设置菜单；点右上角 ✕ 关闭
 
 环境变量（不进交互）：
 
@@ -327,6 +325,18 @@ def main() -> int:
     if h is None:
         print("❌ build 返回 None")
         return 1
+
+    # `PROBE_RESIZE=900x560` —— 1.5 s 后把窗口拖成这个尺寸（顶边不动），看缩放后的排版。
+    if os.environ.get("PROBE_RESIZE"):
+        def _rs():
+            try:
+                _w, _h = (float(x) for x in os.environ["PROBE_RESIZE"].lower().split("x"))
+                f = h.window.frame()
+                h.window.setFrame_display_(((f.origin.x, f.origin.y + f.size.height - _h), (_w, _h)), True)
+                print(f"PROBE_RESIZE → {_w:.0f}×{_h:.0f}")
+            except Exception as e:                                  # noqa: BLE001
+                print(f"PROBE_RESIZE 失败：{e}")
+        AppHelper.callLater(1.5, _rs)
 
     # `PROBE_BATCH=1` —— 一上来就把批量那条链路整个跑一遍（映射卡直接上屏），
     # 不用手拖。⚠️ 走的是 `Handles.start_batch` 那个**程序化入口**，因为

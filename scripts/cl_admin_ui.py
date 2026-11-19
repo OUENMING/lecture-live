@@ -234,7 +234,9 @@ REPORT_BLOCKS = ("stream", "region_probe", "duty", "device", "energy", "capture"
                  "merge", "backfill", "system", "ui", "terms", "live", "deps",
                  "vad", "norm",
                  # ⭐ 3.11：以前采集了却没进白名单 —— 面板连「采没采到」都不知道。
-                 "semantic_seal", "jev", "counts", "review")
+                 "semantic_seal", "jev", "counts", "review",
+                 # ⭐ 3.11.6：开课前那次查更新的结论（update.check_state）
+                 "update")
 
 
 def _num(v):

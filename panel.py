@@ -46,8 +46,10 @@ except ImportError:
 
 # 白底可读性：材质之上压的半透明黑。可读性其实由文字的紧凑描边承担
 # （见 overlay.py 顶部那段），这一层只负责把白底压到让描边有依托。
-SCRIM_ALPHA = 0.38
-CORNER_RADIUS = 16.0
+import uitokens as _tok  # noqa: E402  观感参数的唯一定义点（与网页 tokens.css 同源）
+
+SCRIM_ALPHA = _tok.SCRIM_ALPHA            # 0.38
+CORNER_RADIUS = _tok.CORNER_RADIUS        # 16.0
 
 
 def _panel_class() -> type:

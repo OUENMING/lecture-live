@@ -111,6 +111,12 @@ class BarHover(unittest.TestCase):
     def _alphas(self):
         return [round(b.alphaValue(), 2) for b in self.ov._bar]
 
+    def _idle(self):
+        """鼠标不在时每颗按钮该退到的 alpha（2026-11-17 换皮：按钮退到 ~35%、档位胶囊不退）。"""
+        import uitokens
+        return [round(uitokens.CHIP_IDLE_ALPHA if b is self.ov._btn_trans else uitokens.BAR_IDLE_ALPHA, 2)
+                for b in self.ov._bar]
+
     def _input_alphas(self):
         return {round(self.ov._input.alphaValue(), 2), round(self.ov._input_rule.alphaValue(), 2)}
 
@@ -142,7 +148,7 @@ class BarHover(unittest.TestCase):
         with mock.patch.object(self.ov, "_mouse_in_panel", return_value=False):
             self.ov._bar_tick(time.monotonic() + 3.1)
             spin(0.5)
-        self.assertEqual(set(self._alphas()), {0.0})
+        self.assertEqual(self._alphas(), self._idle())
         self.assertFalse(self.ov._ear.isHidden())
         self.assertEqual(self.ov._ear.layer().opacity(), ear)
 
@@ -159,7 +165,7 @@ class BarHover(unittest.TestCase):
             self.assertEqual(set(self._alphas()), {1.0}, "擦边划过不许闪")
             self.ov._bar_tick(time.monotonic() + 0.5)
             spin(0.5)
-        self.assertEqual(set(self._alphas()), {0.0})
+        self.assertEqual(self._alphas(), self._idle())
 
     def test_到点但鼠标其实在窗内_不藏(self):
         with mock.patch.object(self.ov, "_mouse_in_panel", return_value=True):

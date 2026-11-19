@@ -44,7 +44,33 @@ class 真窗口(unittest.TestCase):
             c = o._chapter_lbl.frame()
             self.assertLessEqual(c.origin.x + c.size.width, g.origin.x + 0.5, "章节条压到术语上了")
         hit = o._gloss_hit.frame()
-        self.assertEqual((hit.origin.x, hit.size.width), (g.origin.x, g.size.width), "点击区与术语不同框")
+        # 2026-11-17 换皮：术语画成胶囊，点击区 = 胶囊（同一组数），且整条术语文字都在里面
+        pill = o._gloss_pill.frame()
+        self.assertFalse(o._gloss_pill.isHidden())
+        self.assertEqual((hit.origin.x, hit.size.width), (pill.origin.x, pill.size.width), "点击区与胶囊不同框")
+        self.assertLessEqual(hit.origin.x, g.origin.x)
+        self.assertGreaterEqual(hit.origin.x + hit.size.width + 6.5, g.origin.x + g.size.width, "术语字出了胶囊")
+        self.assertLessEqual(hit.origin.x + hit.size.width, o._hdr_left + 0.5, "胶囊压到按钮上了")
+
+    def test_右栏开着_拖到最小_字幕栏不小于下限(self):
+        """OCR 11-17：右栏开着时缩放下限只按整宽算 → 字幕栏宽变负数。"""
+        o = self._overlay()
+        o._pane_w = 340.0
+        start = o._panel.frame()
+        (_, _), (w, _) = o._resized_frame("l", start, 5000.0, 0.0)
+        self.assertGreaterEqual(w, O.MIN_WIDTH + 340.0)
+        (_, _), (w, _) = o._resized_frame("r", start, -5000.0, 0.0)
+        self.assertGreaterEqual(w, O.MIN_WIDTH + 340.0)
+
+    def test_删了讲一下按钮_输入框照留(self):
+        """Owen 11-17：「讲一下」按钮删掉；「提问或追问…」输入框和问答保留。"""
+        if O.ASK_BTN:
+            self.skipTest("ASK_BTN 开着")
+        o = self._overlay()
+        self.assertNotIn(o._btn_ask, o._bar)
+        self.assertTrue(o._btn_ask.isHidden())
+        self.assertFalse(o._input.isHidden())
+        self.assertIn(o._input, o._bar_views())
 
     def test_输入框进出_字幕底边让开又落回(self):
         o = self._overlay()

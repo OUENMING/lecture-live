@@ -386,5 +386,41 @@ class Pacing(unittest.TestCase):
         self.assertIsNone(r.recheck_at)
 
 
+#: 12 个汉字（含标点 13 个非空白字符 —— 标点**不算**词，这点也钉着）。
+ZH12 = "这是十二个汉字的整句话啊。"        # 12 字 + 1 个句号
+
+
+class ChineseWords(unittest.TestCase):
+    """L-2 第 5 步：汉字占非空白字符 ≥ 50% 时按**汉字数**计词。
+
+    ⚠️ 不改这一条：整句中文 `split()` 只得 1 个词 → `is_tail` 把它当「Okay?」并进
+       上一行（`TAIL_WORDS=3`、`GAP_S=3.0`），中文课每句都拼到上一句里，屏上永远只有一行在长。
+    """
+
+    def test_zh_sentence_is_not_a_tail(self):
+        self.assertEqual(sum(1 for c in ZH12 if not c.isspace()), 13)
+        self.assertEqual(C.n_words(ZH12), 12)          # 句号不算词
+        self.assertFalse(C.is_tail(ZH12, 1.0))
+
+    def test_okay_is_still_a_tail(self):
+        self.assertTrue(C.is_tail("Okay?", 1.0))       # 改前行为一字不改
+
+    def test_english_unchanged(self):
+        self.assertEqual(C.n_words("the price of coffee"), 4)
+        self.assertEqual(C.n_words("Okay?"), 1)
+        self.assertEqual(C.n_words("他说：“好。”"), 3)     # OCR 11-17：全角标点不进分母，短中文句不被当尾巴
+        self.assertFalse(C.is_tail("a b c", 1.0))      # 3 词：自成一行
+        self.assertEqual(C.n_words(""), 0)
+
+    def test_exactly_half_counts_as_zh(self):
+        self.assertEqual(C.n_words("中文 ab"), 2)       # 2/4 = 50% -> 按汉字数
+        self.assertEqual(C.n_words("中文中 abc"), 3)    # 3/6 = 50% -> 按汉字数
+
+    def test_mostly_english_still_splits(self):
+        self.assertEqual(C.n_words("middle 中文"), 2)   # 2/8 = 25% -> 空格切
+
+    def test_full_width_punct_and_latin_do_not_inflate(self):
+        self.assertEqual(C.n_words("这是一个「测试」，OK"), 6)   # 汉字 6 / 非空白 13
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

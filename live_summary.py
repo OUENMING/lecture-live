@@ -75,11 +75,44 @@ ATOM_EVERY_S = 75.0
 #: 阶段 2 的探针要量「窗口间隔中位数」。
 ATOM_PAUSE_S = 30.0
 
-#: 一章开多久之后才值得给它做第一次**临时**合成。依据：一章的量级是 10 分钟。
-INTERIM_AFTER_S = 480.0
+#: ⭐ **首段**的临时合成门槛：**0 秒 = 开章后不再额外等**，开章那一窗吸收完就出第一段。
+#:
+#: ❓ 为什么是 0（2026-11-17 真课 ECON10740 实测 + test key 重放验收）：
+#:    旧值 180 / 480 时，一组开讲 3.5–4 分钟才出第一段、之后同一组 7 分钟不更新。
+#:    改成 90 后重放量出**真正的延迟是 165–185 s，不是 90** —— 因为**章是在第一个窗口
+#:    被吸收时**才开张（`ATOM_EVERY_S`=75 / `ATOM_PAUSE_S`=30，一窗 30–75 秒才闭合），
+#:    `_interim_at` 从那一刻起算，再等 90 → 实际 **75 + 90**。
+#:    → 首段不该再叠一层等待：**窗口一吸收就合成**（开章那一窗已经有 13–20 句）。
+#:    ⚠️ 会不会太短？`chapter.build_prompt` 本来就有「本章不到 30 句只写 1–2 句」那条规则，
+#:    1–2 句的段落正是开局该有的样子；下一窗起按 `REFRESH_GAP_S` 继续长。
+#: ⚠️ 它仍是**墙钟秒数**，用 `step(now)` 的 `now` 算（见文件头「两个域别混」）。
+#: ⚠️ 调大它就退回旧行为（开章后等 N 秒），不是死常数。
+FIRST_INTERIM_AFTER_S = 0.0
 
-#: 临时合成之间的最小间隔。一章只花一次合成的钱，所以可以比正式版勤。
-INTERIM_EVERY_S = 240.0
+#: ⭐⭐ **之后每次刷新的两道闸**（作者原话：「可以多调用几次都没关系」）。
+#:
+#: 触发点在 `_absorb_window` 之后（每个窗口被吸收进当前章就检查一次，`step` 里另有一道
+#: 兜底检查）—— 所以「有新内容」是**结构上保证**的，不再靠「章开够久了」。
+#:   · `REFRESH_GAP_S`：距本章上次合成（临时或正式）至少 60 秒；
+#:   · `REFRESH_MIN_NEW`：本章**新增**原文句至少 3 句。
+#: 两条都满足才花一次调用。60 秒 ≈ Chief / LecSync 的重写节奏，也刚好比一个窗口
+#: （`ATOM_EVERY_S`=75 / `ATOM_PAUSE_S`=30）略短，不会每窗都触发、也不会几天一刷。
+REFRESH_GAP_S = 60.0
+REFRESH_MIN_NEW = 3
+
+#: ⭐⭐ **段落刷新里顺带判出的换题点要拆章，旧章至少留这么多句才拆**。
+#:
+#: ⚠️ 为什么不是「主题变了就拆」：重放里 2–3 句就拆出来的「章」没有纲要价值
+#:    （跟 `MIN_CHAPTER_S` 那条「太短就并进邻居」同一个意思，只是这里按**句数**而不是
+#:    按秒 —— 拆章时手里只有句子，秒数在 `c["times"]` 里、能用但不该当主锁）。
+#: ⚠️ 15 句 ≈ 3–4 分钟的正常语速发言（一窗 13–20 句），也是离线量具里
+#:    「一章至少有一句话讲得清」的下限。
+SHIFT_MIN_KEEP = 15
+#: ⭐ 同时要求旧章**至少讲了这么多秒**（按 `c["times"]`，拆点那句 − 旧章首句）。
+#: ⚠️ 2026-11-18 重放（145925 后半 33 分钟）：只有句数闸时一节拆出 11 章、中位 3 分钟 ——
+#:    模型把同一组里「下一个人讲下一部分」当成换题。小组展示每组 12–18 分钟、讲课一段
+#:    5–15 分钟，4 分钟以下拆出来的章既不是「一组一段」也没有纲要价值。
+SHIFT_MIN_S = 240.0
 
 #: 模型调用失败后多久重试。
 RETRY_S = 30.0
@@ -152,7 +185,15 @@ DEADLINE_INSTRUCTION = (
 #:    只加 `MIN` → 模型保守时整节课只有一章（实测过）；
 #:    只加 `MAX` → 模型换得勤时照样碎成十几章。
 MIN_CHAPTER_S = 180.0     # 3 分钟：比这短的「换题」一律并进当前章
-MAX_CHAPTER_S = 600.0     # 10 分钟：到点强制切开（与计划「一章 ≈ 10 分钟」一致）
+#: ⭐ 15 分钟（原 1200 = 20 分钟；更早是 600 = 10 分钟）。**三次调参的实测账**：
+#:    · 600：一组 **12–18 分钟**的轮流讲 PPT，正好在组讲到一半被切成两段（右栏凭空
+#:      多出一个前半组的半截章）。
+#:    · 1200：**有副作用、实测抓到了** —— 窗口主题模型偶尔「粘住」不换题（test key
+#:      重放里一次把**赌博组 + 最低工资组并成一章 20 分钟**），而段落每分钟重写：
+#:      **前一组的总结被后一组覆盖，丢了**。600 那道切章至少是个保险。
+#:    · 900 是折中：一组 15 分钟恰是一段；偶尔在 16–18 分钟那组的**末尾**被切一刀，
+#:      代价可接受 —— 段落跟着窗口刷新，切开后的新章**第一窗就出段落**，不再久等。
+MAX_CHAPTER_S = 900.0
 
 #: ⚠️⚠️ **积压里的窗口要按「它自己的内容时刻」消化，不能一律按 `now`**（2026-09-30 修）。
 #:    断网 25 分钟攒下的窗口会在**恢复那一刻被一口气消化**，它们**共享同一个 `now`**
@@ -287,6 +328,11 @@ class LiveSummarizer:
         #: ⭐ 3.11：收尾被截断（拿不到锁 / 超时 / 异常）。`finish()` 之后才有效。
         self._finish_truncated = False
         self._chapters_interim = 0
+        #: ⭐ 3.12：段落刷新里判出换题点、**就地拆章**的次数（
+        #: 窗口主题那条路换的章不算）。采集面用。
+        self._shift_splits = 0
+        self._shift_now = 0.0          # `_maybe_interim` 记下的 step 域时刻（拆章用）
+        self._forced_next = False      # 下一章是不是 `MAX_CHAPTER_S` 硬切出来的
         self._deadlines_regex = 0
         self._deadlines_model = 0
         self._retries = 0
@@ -307,8 +353,16 @@ class LiveSummarizer:
         self._cur = None              # 当前章（dict）；`title` 为空 = 还没定题
         self._cid = 0
         self._prior: list = []        # 已经定稿的章标题（给下一章的 prompt）
-        self._interim_at = 0.0        # 上次临时合成的时刻
-        self._interim_n = -1          # 上次临时合成时这一章有几句（没新句就别再合）
+        #: ⭐ 与 `_prior` **按下标对齐**的各章结论句（`para.lead.zh`；没有就是空串）。
+        #: 光给标题拦不住「换个说法把上一章的结论再写一遍」（`chapter.build_prompt`）。
+        self._prior_leads: list = []
+        self._interim_at = 0.0        # 上次合成的时刻（临时或正式）
+        self._interim_n = -1          # 上次合成时这一章有几句（没新句就别再合）
+        #: ⭐ 当前章还没做过临时合成吗（首段用更短的 `FIRST_INTERIM_AFTER_S`）。
+        self._interim_first = True
+        #: ⭐ 上次合成成功时的**章内句数**（`-1` = 本章还没成功过）。
+        #: `REFRESH_MIN_NEW` 与「封章省一次调用」都拿它比（见 `_synthesize`）。
+        self._interim_ok_n = -1
 
         # ---- 杂项 ----
         self._window_n = 0
@@ -352,10 +406,14 @@ class LiveSummarizer:
             "failed_atom_calls": self._failed_atoms,
             "failed_chapter_calls": self._failed_chapters,
             "chapters": self._chapters_final,
+            #: ⚠️ 口径（2026-11-17 起）：**不是**“调了几次模型”，而是“封了几章”。
+            #: 封章省一次调用那条路（句数没变）**不增加** `chapter_calls`，但仍算一章。
             "chapters_attempted": self._chapters_final,
             "chapters_written": self._chapters_written,
             "chapters_nonempty": self._chapters_nonempty,
             "chapters_interim": self._chapters_interim,
+            #: ⭐ 3.12：段落刷新里的**语义拆章**次数（窗口主题换章的不算）。
+            "shift_splits": self._shift_splits,
             # ⭐ 3.11：收尾有没有被截断（线程没回来 / 拿不到锁 / 异常）。
             "finish_truncated": bool(self._finish_truncated),
             "empty_window_ratio": round(self._empty_windows / w, 3),
@@ -626,7 +684,9 @@ class LiveSummarizer:
             self._pend.pop(0)
             # ⭐ 越旧的窗口，有效时刻越早（最新的那窗差值为 0，原样是 `now`）。
             now_eff = now - _span_s(buf[-1][1], newest_c)
-            self._absorb_window(buf, obj, now_eff)
+            # ⭐ OCR 复审（a2c222f）：积压恢复时一口气消化十几窗，每窗都过两道闸 → 一次性
+            #    十几次段落合成（钱 + worker 卡住）。积压里只有**最后一窗**刷新段落。
+            self._absorb_window(buf, obj, now_eff, refresh=not self._pend)
         self._retry_at = 0.0
 
     def _pending_blocked(self, now: float, force: bool) -> bool:
@@ -685,7 +745,7 @@ class LiveSummarizer:
         """
         return self._prev_topic
 
-    def _absorb_window(self, buf: list, obj, now: float) -> None:
+    def _absorb_window(self, buf: list, obj, now: float, refresh: bool = True) -> None:
         """窗口提交成功之后：写原子 → 推 `atoms` → 写窗口记录 → 喂章节状态机。"""
         base = buf[0][0]                                  # 窗口第一句的**全局句号**
         # ⚠️⚠️ `base_id` 必须**跨窗口递增**（原 `main.py` 用 `atom_st["n"]` 记的就是这个）。
@@ -730,6 +790,13 @@ class LiveSummarizer:
 
         self._maybe_force_split(now)                      # ⭐ 太长的章先切开
         self._advance(topic, topic_zh, buf, got, now)
+        # ⭐⭐ **段落跟着窗口刷新**（2026-11-17）：每个窗口被吸收进当前章之后就检查一次，
+        #    后面两路闸在 `_maybe_interim`（有测试钉住“不满足任一条不合成”）。
+        #    ⚠️ 必须用 `now`（不是 `self._clock()`）—— 否则两道闸恒成立/恒不成立。
+        # ⚠️ 3.12：`_synthesize` 里判出换题点时会就地拆章（`_split_at_shift`），
+        #    拆完的**新章**已经自己合过首段了，这里不会重复合成。
+        if refresh:
+            self._maybe_interim(now)
 
     # ------------------------------------------------------------ 章节状态机
     def _maybe_force_split(self, now: float) -> None:
@@ -746,6 +813,10 @@ class LiveSummarizer:
         if now - self._cur["t_open"] < MAX_CHAPTER_S:
             return
         self._finalize_current(now)
+        #: ⭐ 下一章是**到点硬切**出来的（不是讲者换题）→ 它对语义换题不设 `SHIFT_MIN_S` 门槛。
+        #: ⚠️ 2026-11-18 重放：第五组讲 + 问答 18 分钟，15 分钟那刀切在问答中间，3 分钟后
+        #:    最后一组上台时新章「才讲了 3 分钟」被 `SHIFT_MIN_S` 拦住 → 问答和下一组并成一章。
+        self._forced_next = True
 
     def _advance(self, topic, topic_zh, buf, atoms, now: float) -> None:
         if not topic:
@@ -761,8 +832,18 @@ class LiveSummarizer:
             self._absorb(buf, atoms, now)
             return
         if self._cur is not None and not self._cur["title"]:
-            # ⭐⭐ **当前章还没定题**（开场那几个空主题的窗口攒在这里）→
-            #    让这一章**认领**这个主题，**不是**封章另起。
+            # ⭐⭐ 3.12：**刚拆出来的新章不认领「旧组的粘住主题」**。
+            #    段落刷新里拆章后，窗口主题还粘在前一组上（重放里它 1–4 分钟才换）——
+            #    如果让新章认领它，新章会被标回旧题，`MIN_CHAPTER_S`(180 s) 一过
+            #    窗口主题再变一次 → **又切一刀**（同一组被拆成两章）。
+            #    → 只吸收、不认领，等一个**其他**主题的窗口进来再定题。
+            #    ⚠️ 比较方式与下面那条完全一致（去空格 + 不分大小写），否则就成了另一种判据。
+            retired = (self._cur.get("retired") or "").strip().lower()
+            if retired and topic.strip().lower() == retired:
+                self._absorb(buf, atoms, now)
+                return
+            # ⭐⭐ **当前章还没定题**（开场那几个空主题的窗口攒在这里，
+            #    或者是刚拆出来的新章）→ 让这一章**认领**这个主题，**不是**封章另起。
             #    ⚠️ 少了这一条，一节 50 分钟的课会**多出一章**：开场那 30 秒
             #       （点名/调试/闲聊，模型给空主题）自己成一章，正文另起一章。
             #       （2026-09-30 实测抓到，判据 T5。）
@@ -785,59 +866,139 @@ class LiveSummarizer:
             self._cur = {"id": self._cid, "title": "", "title_zh": "",
                          "t0": buf[0][1], "lo": buf[0][0], "hi": buf[-1][0],
                          "sents": [], "atoms": [], "ver": 0,
+                         #: ⭐ 3.12：`全局句号 → "HH:MM:SS"`。拆章时新章的 `t0` 要取
+                         #: **换题点那一句**的时刻（拿窗口首句或 `now` 都不对）。
+                         "times": {},
+                         #: ⭐ 这章是不是 `MAX_CHAPTER_S` 硬切出来的（见 `_maybe_force_split`）。
+                         "forced": self._forced_next,
+                         #: ⭐ 上一版（成功的）段落 —— 下次合成时喂给模型当 `prev_para`，
+                         #: 失败**不覆盖**（见 `_synthesize`）。
+                         "para": None,
                          #: ⭐ 这一章**开张**的模拟时刻 —— `MIN/MAX_CHAPTER_S` 算的就是它。
                          #: ⚠️ 用 `now`（**模拟时钟**），不是 `self._clock()`：
                          #:    两个域混用会让判据**恒不成立**（2026-09-30 栽过一次，判据 ⑦）。
                          "t_open": now}
             self._cid += 1
+            self._forced_next = False
             self._interim_at = now
-            self._interim_n = -1          # 新章：上一章的句数不作数（撞上同一个数会白等 8 分钟）
+            self._interim_first = True     # ⭐ 新章：首段重新回到「开章那一窗就出」那一档
+            self._interim_n = -1          # 新章：上一章的句数不作数（撞上同一个数会白等 60 秒）
+            self._interim_ok_n = -1       # 新章：还没成功合成过（“封章省一次调用”看它）
         c = self._cur
         if title:                                         # 定题（开场那些空主题的窗口
             c["title"], c["title_zh"] = title, title_zh    # 早就攒在里面了）
         for gid, t, en, _zh in buf:
             c["sents"].append((gid, en))
+            c["times"][gid] = t
             c["hi"] = max(c["hi"], gid)
             c["t1"] = t
         c["atoms"].extend(atoms)
 
     def _maybe_interim(self, now: float) -> None:
-        """临时合成：章开够久了、且距上次临时超过间隔。"""
+        """临时合成（段落刷新）：**开章那一窗就出首段** / **之后每吸收一窗过两道闸**。
+
+        ⭐⭐ 两条路（2026-11-17 作者定「跟着窗口刷新」）：
+          1. **首段**：`FIRST_INTERIM_AFTER_S` = 0 —— 开章那一窗吸收完就合成。
+             `_absorb` 里 `self._interim_at = now`，所以 `now - _interim_at ≡ 0` ≥ 0。
+             ⚠️ 不再叠等待：实测（test key 重放）真正的首段延迟是 **165–185 s**，
+                因为**章是第一个窗口吸收时才开的**（窗 75/30 秒才闭合）+ 那 90 秒。
+             ⚠️ 不要求「新增 3 句」—— 开章那一刻章里所有句子都是新的，且
+                `build_prompt` 有「不到 30 句只写 1–2 句」那条规则。
+          2. **之后**：每吸收一个窗口就检查一次（`_absorb_window` 里调），这里是
+             `step` 里的**兜底**（窗口被闭合但没吸收、或时间在走）。两道闸：
+             距上次合成 ≥ `REFRESH_GAP_S` **且** 章内新增原文句 ≥ `REFRESH_MIN_NEW`。
+        ⚠️ 两路都要先过「没有新句就不合成」——那是**结构不变量**，不是优化。
+        ⚠️ 时间一律用 `step(now)` 的 `now` 域（文件头「两个域别混」）。
+        """
         if not self._chapters_on or self._closed or self._cur is None:
             return
-        if not self._cur["sents"]:
+        #: ⭐ `_split_at_shift` 只会从这里（经 `_synthesize("interim")`）进来 —— 它要的
+        #: 「现在」必须是 `step(now)` 的域，不是 `self._clock()`（文件头「两个域别混」；
+        #: Claude 验收时抓到 pi 第一版用了 `self._clock()`：假时钟/积压窗口下新章的 `t_open`
+        #: 会落在另一个时间轴上，`MIN/MAX_CHAPTER_S` 对新章恒成立或恒不成立）。
+        self._shift_now = now
+        n = len(self._cur["sents"])
+        if not n:
             return
-        if now - self._interim_at < INTERIM_AFTER_S:
-            return
-        self._interim_at = now
         # ⚠️ 没有新句子就不再合成（2026-10-17 美国用户实测）: 下课后 app 没退出,
         #    同一章、同一份 859 token 的输入每 8 分钟（醒着的时间）合成一次, 7 小时里
         #    白发 15 次 —— 结果和上一次一模一样。面板上看着像「一分钟的在线」。
-        n = len(self._cur["sents"])
         if n == self._interim_n:
             return
+        if self._interim_first:
+            if now - self._interim_at < FIRST_INTERIM_AFTER_S:
+                return
+        elif (now - self._interim_at < REFRESH_GAP_S
+              or n - max(self._interim_ok_n, 0) < REFRESH_MIN_NEW):
+            return
+        # ⚠️ 先落下开关再合成：即使模型报错（`_synthesize` 内部已重试一次），也不该
+        #    在 60 秒后再发一遍 —— 那一档是给「快点出」的，不是给重试的。
+        self._interim_at = now
         self._interim_n = n
+        self._interim_first = False
         self._synthesize("interim")
 
     def _finalize_current(self, now: float) -> None:
-        """给当前章做**正式**合成并封章。没有内容就什么都不做。"""
+        """给当前章做**正式**合成并封章。没有内容就什么都不做。
+
+        ⭐ 封章时把这一章的 `para.lead.zh` 记进 `_prior_leads` —— 下一章的 prompt 要
+           它（光有标题拦不住重复，见 `chapter.build_prompt`）。
+        ⭐⭐ **封章省一次调用**（2026-11-17）：段落现在每 60 秒就刷一次，段落已经是最终
+           内容之后再花一次调用只能拿到同样的结果。→ 章内句数与上次**成功**合成时相同
+           就不调模型，直接把上次结果重写成 `status="final"`（`version+1`）。
+           ⚠️ 计数口径：`chapter_calls` / `calls_total` **不增加**（确实一次模型都没调）；
+           `chapters_attempted`（= `chapters`）/ `chapters_written` / `chapters_nonempty`
+           照旧算一章（确实封了一章）。`chapters_interim` 也不动（这次不是临时合成）。
+        """
         if self._cur is None:
             return
         c = self._cur
         if not c["sents"]:
             self._cur = None
             return
+        para = None
         if self._chapters_on and not self._closed:
-            self._synthesize("final")
+            para = self._synthesize("final")
+        elif c.get("para") is not None:
+            # ⭐ 章节关掉 / 已关文件时，至少把已有的那一版段落作为本章的结论交出去
+            #   （不调模型、不写文件）。
+            para = c["para"]
         if c["title"]:
             self._prior.append(c["title"])
+            #: ⚠️ **只在这一个分支里追加** —— 两个列表必须按下标对齐，
+            #: 分两处追加迟早錯位（而错位的表现是「上一章的结论跑到这一章头上」）。
+            self._prior_leads.append(str(((para or {}).get("lead") or {}).get("zh") or ""))
         self._cur = None
 
-    def _synthesize(self, status: str) -> None:
-        """一次章节合成。**失败重试一次**；仍失败就写一条空的（界面退回原子要点）。"""
+    def _synthesize(self, status: str) -> dict | None:
+        """一次章节合成。**失败重试一次**。
+
+        返回这次的 `para`（`dict` 或 `None`）—— 调用方 `_finalize_current` 要它的
+        `lead.zh` 给下一章当「已经写过什么」。⚠️ 不再另存一个 `_last_lead` 字段：
+        那是把同一个值存两份，迟早两份不一样。
+
+        ⭐⭐ 失败时的行为（2026-11-17，作者：右栏不能因为一次网络抖动清屏）：
+          · `interim` 失败 → **什么都不写、不 emit**（只记失败数）—— 界面上一次那一版
+            段落**保持原样**，等下一次刷新。
+          · `final` 失败 → 本章有上一版成功的 `para` / `sentences` 就拿它们写 final
+            （不是空章 —— 空壳记录会让课后笔记里这一章变成空的）。
+          · 两者都没有上一版 → 照旧写一条空章（**只有这种情况**：从没成功过）。
+        """
         c = self._cur
         if c is None:
-            return
+            return None
+        #: ⭐ 这一段有没有新增原文的范围（`_prev_para_block` 只在它非空时才让模型判 `shift`）。
+        new_range = self._new_range(c)
+        #: ⭐ 封章省一次调用：句数与上次**成功**合成时相同 -> 重写上次结果即可。
+        #: ⚠️ 只有 `final` 省；`interim` 走不到这里（`_maybe_interim` 已经拦了「没新句」）。
+        if (status == "final" and self._interim_ok_n >= 0
+                and self._interim_ok_n == len(c["sents"])
+                and c.get("para") is not None):
+            c["ver"] += 1
+            self._chapters_final += 1                     # ⚠️ 口径：仍是“尝试封章”，但这一条
+                                                         #    **没有** 消耗模型调用（见下）
+            return self._write_chapter(c, status, c["para"], c.get("sentences") or [],
+                                       keep=True)
         c["ver"] += 1
         obj = None
         if status == "final":                             # ⭐ 采集面 ⑤
@@ -854,7 +1015,10 @@ class LiveSummarizer:
                 self._calls += 1
                 self._chapter_calls += 1                  # ⭐ 采集面 ⑤
                 obj = self._chat(ch.SYS_CHAPTER,
-                                 ch.build_prompt(c["sents"], c["atoms"], self._prior),
+                                 ch.build_prompt(c["sents"], c["atoms"],
+                                                 self._prior, self._prior_leads,
+                                                 prev_para=c.get("para"),
+                                                 prev_hi=c.get("para_hi")),
                                  ch.MAX_TOKENS, ch.TEMPERATURE)
             except Exception as e:                        # noqa: BLE001
                 self._failed += 1                         # ⭐ 采集面 ⑤
@@ -864,18 +1028,177 @@ class LiveSummarizer:
                 obj = None
             if obj is not None:
                 break
-        title, title_zh = ch.title_of(obj or {})
-        sents = ch.parse_reply(obj, c["lo"], c["hi"]) if obj is not None else []
+        if obj is None:
+            # ⭐⭐ 失败：**不清屏**（见 docstring 那张表）。
+            if status == "interim":
+                return None                               # 不写、不 emit —— 上一版段落呼吸照旧
+            prev_para, prev_sents = c.get("para"), c.get("sentences") or []
+            if prev_para is not None or prev_sents:
+                return self._write_chapter(c, status, prev_para, prev_sents, keep=True)
+            return self._write_chapter(c, status, None, [])   # 从没成功过 -> 空壳（老行为）
+        title, title_zh = ch.title_of(obj)
+        parsed = ch.parse_chapter(obj, c["lo"], c["hi"])
+        if status == "interim":
+            #: ⭐⭐ 3.12：**换题点**（只在这个刷新调用里判，见 `chapter._shift_rules`）。
+            #: ⚠️ 取不到、越界、旧章不够长 → `None`，照旧只写段落（原行为）。
+            #: ⚠️ `final` 里的 `shift` **一律忽略**（那时章已封，拿它拆一个不写的章没意义）。
+            shift = ch.parse_shift(obj, *new_range) if new_range else None
+            if shift is not None and self._split_at_shift(c, shift):
+                return None                           # 混合段落**丢弃不写**（见 `_split_at_shift`）
+        return self._write_chapter(c, status, parsed["para"], parsed["sentences"],
+                                   title=title, title_zh=title_zh)
+
+    # ------------------------------------------------------------ 拆章
+    def _new_range(self, c: dict) -> tuple | None:
+        """本章**上一版之后新增**的原文范围 `(首句号, 末句号)`；没有 → `None`。
+
+        ⚠️ 与 `chapter.build_prompt` 那句提示**同一个定义点**（`chapter.new_range_of`）：
+           两边各算一遍的话，模型收到的「新增是第 X–Y 句」与本地拿来闸 `shift.at`
+           的范围会错开一句，症状是换题点**静默永不命中**。
+        """
+        return ch.new_range_of(c["sents"], c.get("para_hi"))
+
+    def _split_at_shift(self, c: dict, shift: dict) -> bool:
+        """按段落刷新里判出的换题点**就地拆章**。拆了返回 `True`（调用方丢掉这次的段落）。
+
+        ⭐ 为什么该在**这里**拆（而不是等窗口主题）：真课重放里主题标签会**粘住** ——
+           一组讲完、下一组已经讲了 1–4 分钟才换章；有时后一组把前一组的段落盖掉。
+           而这一次调用手里有整章原文 + 上一版段落 + 新增范围，`shift` 就是它给出的
+           语义边界（arXiv 2502.03111 / LecSync digest 的做法）。
+
+        ⚠️⚠️ **这次合成退回的段落不能写**：它把旧组和新组的要点混成了一段，
+           两边都写不准。旧章用**上一版**（`para_hi < at`，恰好只盖旧组），
+           新章用旧章的段落当底稿**立刻重合一版**。
+        ⚠️ 旧章句数不够 `SHIFT_MIN_KEEP` → 不拆（三五句拆出来的章没有纲要价值）。
+        """
+        at = shift["at"]
+        old_sents = [s for s in c["sents"] if s[0] < at]
+        if len(old_sents) < SHIFT_MIN_KEEP:
+            return False
+        # ⚠️ OCR 复审（41599e3）：`at` 可能落在丢窗留下的句号空洞里、不在 `times` 里 →
+        #    时长闸被静默跳过。退到「旧章最后一句」的时刻（拆点之前最近的那句）。
+        t_a = c["times"].get(at) or c["times"].get(old_sents[-1][0])
+        t_b = c["times"].get(old_sents[0][0])
+        if t_a and t_b and not c.get("forced") and _span_s(t_b, t_a) < SHIFT_MIN_S:
+            return False                              # 旧章讲得太短（见 `SHIFT_MIN_S`）
+        new_sents = [s for s in c["sents"] if s[0] >= at]
+        if not new_sents:
+            return False                              # `at` 落在末句之后= 没新章可言
+        prev_para = c.get("para")
+        #: 旧章的窗口主题（拆出来的新章要先把它当「粘住的主题」防一手）。
+        #: ⚠️ 必须在 `_finalize_current` **之前**取：它清 `_cur`，但 `atoms` 那边不改；
+        #:    这里先把旧章快照下来，后面的归属计算也读得快。
+        retired = str(c.get("title") or "")
+        old_atoms = list(c["atoms"])
+        old_times = dict(c["times"])
+        # ⚠️⚠️ 旧章**不许再调一次模型**：这次合成返回的段落虽然混了新组的要点，
+        #    但上一版段落（`para_hi < at`）正好只盖旧组，它就是旧章的定稿。
+        #    `_synthesize("final")` 的「封章省一次调用」看 `_interim_ok_n`，所以把
+        #    它按旧章句数对上 —— 这是在**声明**「上一版段落就是这一章的终稿」，
+        #    不是偷数字（`keep=True` 那条路不改 `para_hi`，段落盖到第几句仍是事实）。
+        #    ⚠️ 没有上一版（从没成功过）才真的调一次 final（`-1` 那条路）。
+        self._interim_ok_n = len(old_sents) if prev_para is not None else -1
+        # ⚠️ `_finalize_current` 会拿 `c["title"]` 当 `_prior` —— 但那个位置该是**旧章的**
+        #    模型标题（`_write_chapter` 里 `title or c["title"]` 那条已经这么用了）。
+        #    新章的 `syn_title` 更不能带过去（否则旧章的 final 记录顶着新话题的标题）。
+        c["title"] = str((c.get("syn_title") or ("", ""))[0] or retired)
+        # ⚠️ OCR 复审（7db4c13）：模型常只给英文标题 → 别把窗口主题给的中文清掉。
+        c["title_zh"] = str((c.get("syn_title") or ("", ""))[1] or c.get("title_zh") or "")
+        c["sents"] = list(old_sents)               # 旧章的句数就是 `at` 之前那些
+        c["hi"] = max(g for g, _ in old_sents)
+        c["t1"] = old_times.get(c["hi"]) or c.get("t1", c["t0"])
+        c["atoms"] = [a for a in old_atoms if a not in self._atoms_from(old_atoms, at)]
+        c["times"] = {g: t for g, t in old_times.items() if g < at}
+        now = self._shift_now
+        self._finalize_current(now)
+        cc = {"id": self._cid, "title": "", "title_zh": "",
+              "syn_title": (shift["title"], shift["title_zh"]),
+              "t0": old_times.get(at) or old_times.get(new_sents[0][0]) or c["t0"],
+              "lo": new_sents[0][0], "hi": new_sents[-1][0],
+              #: ⚠️⚠️ **`t1` 必须显式给**（2026-11-18 独立核查复现）：这一章是**一次性**塞进
+              #:    dict 的，绕过了 `_absorb`（唯一写 `t1` 的地方，见它那个循环）。少了这个键，
+              #:    `_write_chapter` 的 `t1=c.get("t1", c["t0"])` 会取到 `t0` → **零时长**：
+              #:    · 平时只有一条 interim（下一个窗口 `_absorb` 就补上），寿命 <75 s，代价是
+              #:      那半个窗口的 ❓ 归属挂不上；
+              #:    · **坏档是拆章后即收尾** —— final 也零时长，而 `note_cover.skeleton` 只认
+              #:      final，`t1 == t0` 会让这一章的 `points` 变成空数组（实测），
+              #:      即课后笔记概览里**最后一章的要点整段丢掉**。
+              #:    ⚠️ 取值只能来自 `old_times`（它是拆章那一刻的快照）：`c` 已被改写成旧章，
+              #:    此刻从 `c["times"]` 读会拿到旧章的。`new_sents[-1][0]` 必然在里面 ——
+              #:    `times` 与 `sents` 在 `_absorb` 同一个循环写，拆章时两侧又按同一条 `at` 过滤。
+              "t1": old_times.get(new_sents[-1][0]) or old_times.get(at) or c["t0"],
+              "sents": list(new_sents), "atoms": self._atoms_from(old_atoms, at),
+              "ver": 0,
+              #: ⚠️⚠️ 新章**从零写**（Claude 验收改）：拿旧章段落当「上一版」会触发
+              #:    `_prev_para_block` 的「结论没被推翻就保持 lead」—— 新一组的首段会被
+              #:    旧一组的结论拽住。「别重写旧章内容」由 `_prior_leads` 管（`_finalize_current`
+              #:    已把旧章 lead 记进去，`build_prompt` 会要求删掉与它重复的句子）。
+              "para": None,
+              "para_hi": None,
+              "sentences": [],
+              "times": {g: t for g, t in old_times.items() if g >= at},
+              "t_open": now,
+              #: ⭐ 旧章的窗口主题 —— `_advance` 靠它不认领（标签还粘在旧组上）。
+              "retired": retired}
+        self._cid += 1
+        self._cur = cc
+        #: ⚠️ 新章的开启闸门要跟 `_absorb` 一样**重置**：不重置的话 `_interim_n` /
+        #:    `_interim_ok_n` 还挂在**旧章**的句数上，两道闸对新章算的就是另一章的数。
+        #:    `_interim_first=False`：首段就在下面这一行里出，不该再走「开章那一窗」。
+        #:    `_interim_ok_n` 落到 `-1` 是因为新章还没**成功**合过（下一版真有新句就该真调）。
+        self._interim_at = now
+        self._interim_first = False
+        self._interim_n = len(new_sents)
+        self._interim_ok_n = -1
+        #: ⚠️ 计数口径：`chapters_interim` 由 `_synthesize` 自己记（这次确实调了模型）。
+        self._shift_splits += 1
+        self._synthesize("interim")
+        return True
+
+    @staticmethod
+    def _atoms_from(atoms: list, at: int) -> list:
+        """`at` 及之后的原子归新章。**没有 `src` 的留旧章**（归属不明 → 不抢）。
+
+        ⚠️ 只在 `_split_at_shift` 一处用两次（新旧两边互补），同一个判法不抄两份 ——
+           抄两份迟早两边加起来不等于全体，那批原子就**静默消失**了。
+        """
+        return [a for a in atoms if a.src and min(a.src) >= at]
+
+    def _write_chapter(self, c: dict, status: str, para, sents: list,
+                       *, title: str = "", title_zh: str = "", keep: bool = False) -> dict | None:
+        """把一版章节写进旁路文件 + emit。**`_synthesize` 里唯一的落盘出口。**
+
+        `keep=True` = 用的是**上一版**的 `para` / `sentences`（封章省一次调用，或者失败
+        回退）—— 那就不用再拷回 `c`，但也**不算一次成功合成**（`_interim_ok_n` 不动）。
+        """
+        if not keep:
+            if para is not None:
+                c["para"] = para                         # ⭐ 上一版段落（失败不覆盖）
+                c["para_hi"] = c["hi"]                   # ⭐ 上一版写到第几句（下一版告诉模型哪些是新的）
+                #: ⭐ 合成成功时记下“这一章当时有多少句” —— 封章省一次调用靠它比。
+                #: ⚠️ 与 `_interim_n`（“上次尝试时的句数”）不是同一个数、不能合。
+                self._interim_ok_n = len(c["sents"])
+            if sents:
+                c["sentences"] = sents                   # ⭐ final 失败时拿它回退
+            if title or title_zh:
+                c["syn_title"] = (title, title_zh)       # ⭐ 模型给的标题，复用上一版时一起带上
+        else:
+            # ⚠️ 复用上一版时标题也要用上一版**模型**给的那个 —— 否则 final 记录会退回
+            #    窗口主题当标题，右栏标题在封章那一刻无故变一下（Claude 验收时发现）。
+            title, title_zh = c.get("syn_title") or ("", "")
+
         chp = ch.Chapter(id=c["id"], status=status,
                          title=title or c["title"], title_zh=title_zh or c["title_zh"],
                          t0=c["t0"], t1=c.get("t1", c["t0"]),
-                         lo=c["lo"], hi=c["hi"], sentences=sents, version=c["ver"])
+                         lo=c["lo"], hi=c["hi"], sentences=sents,
+                         para=para, version=c["ver"])
         n_written = self._write(chp)
         if status == "final" and n_written:
             self._chapters_written += 1
             if sents:
                 self._chapters_nonempty += 1
         self._emit_p({"kind": "chapter", "chapter": chp.as_json()})
+        return para
 
     # ------------------------------------------------------------ 课务
     def _deadline_ok(self, text: str) -> bool:

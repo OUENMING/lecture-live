@@ -109,8 +109,8 @@ def drive(s, n_items: int, *, gap_s: float = 190.0) -> None:
     ⚠️ **默认 190 秒不是随便取的**：`MIN_CHAPTER_S = 180`（太短的章不许换），
        所以夹具**必须推过 180 秒**，否则「换题」会被并进当前章 —— 那是**对的**行为，
        但会让「A→B 该开两章」这类判据假红。
-    ⚠️ 又必须**停在 `MAX_CHAPTER_S = 600` 以下**（到点会强制切）——
-       190 × 3 窗 = 573 秒，正好夹在两者中间。
+    ⚠️ 又必须**停在 `MAX_CHAPTER_S = 900` 以下**（到点会强制切）——
+       190 × 3 窗 = 573 秒，在两者中间（㉗ 那条判据专门测 900）。
     """
     col = 0.0
     for g in range(1, n_items + 1):
@@ -123,6 +123,16 @@ def drive(s, n_items: int, *, gap_s: float = 190.0) -> None:
 
 def chapters(emits) -> list:
     return [e["chapter"] for e in emits if e.get("kind") == "chapter"]
+
+
+def atoms_only(calls) -> list:
+    """只留## atom 调用**（`calls` 是 `["atom"/"chap", …]` 的混合序）。
+
+    ⚠️ 2026-11-17 起段落跟着窗口刷新：**开章那一窗就会多一次章节调用**，所以
+       「窗口提交了几次」这类判据必须数原子调用，不能数 `len(calls)`
+       （否则窗口规则那几条会假红）。
+    """
+    return [c for c in calls if c == "atom"]
 
 
 def main() -> int:
@@ -139,7 +149,8 @@ def main() -> int:
             s.step(39.0)
             check("39 秒仍不提交（`ATOM_PAUSE_S`=30 从**最后一句**算）", not calls)
             s.step(40.0)
-            check("⭐ 40 秒（最后一句 + 30）提交一次", len(calls) == 1, f"calls={len(calls)}")
+            check("⭐ 40 秒（最后一句 + 30）提交一次",
+                  len(atoms_only(calls)) == 1, f"calls={calls}")
         with tempfile.TemporaryDirectory() as d:
             s, _, calls = make(d, ["A"])
             t = 0.0
@@ -148,7 +159,7 @@ def main() -> int:
                 s.step(t)
                 t += 5.0
             check("⭐ 每 5 秒进一句时不触发停顿，到 **75 秒上限**才提交",
-                  len(calls) == 1, f"calls={len(calls)}")
+                  len(atoms_only(calls)) == 1, f"calls={calls}")
         with tempfile.TemporaryDirectory() as d:
             s, _, calls = make(d, ["A"])
             s.feed((1, "10:00:00", "a", "甲"))
@@ -156,7 +167,7 @@ def main() -> int:
             s.step(29.9)
             check("⚠️ 29.9 秒不提交（**差 0.1 秒也不行**）", not calls)
             s.step(30.0)
-            check("30.0 秒提交（边界是闭的）", len(calls) == 1)
+            check("30.0 秒提交（边界是闭的）", len(atoms_only(calls)) == 1, f"calls={calls}")
 
         # ─────────────────────────────────────── ② 失败重试
         print("\n--- ② 模型失败**不丢窗口**，`RETRY_S` 后重试 ---")
@@ -164,9 +175,13 @@ def main() -> int:
             wrote: list = []
             calls: list = []
 
+            boom = {"left": 1}
+
             def flaky(sysp, block, mt, tp):
-                calls.append(1)
-                if len(calls) == 1:
+                # ⚠️ 按身份记账（不是一律 append 1）：开章那一窗会多一次**章节**调用
+                calls.append("atom" if sysp is atom.SYS else "chap")
+                if sysp is atom.SYS and boom["left"] > 0:
+                    boom["left"] -= 1
                     raise RuntimeError("boom")
                 return atom_reply("A")
 
@@ -181,7 +196,8 @@ def main() -> int:
             check("差 `RETRY_S` 不重试", len(calls) == 1, f"calls={len(calls)}")
             s.step(71.0)
             check("⭐ `RETRY_S`(30) 后重试成功、原子写入",
-                  len(calls) == 2 and len(wrote) == 1, f"calls={len(calls)} wrote={len(wrote)}")
+                  len(atoms_only(calls)) == 2 and len(wrote) == 1,
+                  f"atom_calls={len(atoms_only(calls))} wrote={len(wrote)}")
             check("⭐⭐ 原子的 `src` 是**全局句号**（base=1 -> `[1]`，不是窗口内的 0）",
                   [a.src for a in wrote] == [[1]], str([a.src for a in wrote]))
 
@@ -272,17 +288,23 @@ def main() -> int:
             drive(s, 2)
             s.finish(timeout_s=5.0)
             cs = chapters(emits)
+            # ⚠️ 2026-11-17 起首段临时合成是**开章那一窗就出**（`FIRST_INTERIM_AFTER_S`=0），
+            #    而 `drive()` 的默认窗格是 190 秒 → 这几条会多出 **interim** 记录。
+            #    判据要问的是「最终切了几章」，所以只看 `status == "final"`。
+            #    ⚠️ 别把 `chapters()` 改成只返 final —— ④ 要靠全部记录看 `status`。
+            fin = [c for c in cs if c["status"] == "final"]
             check("⭐⭐ 开场那个空主题窗口**并入第一章**（不是自己成一章）",
-                  len(cs) == 1 and cs[0]["lo"] == 1 and cs[0]["hi"] == 2,
-                  str([(c["lo"], c["hi"]) for c in cs]))
+                  len(fin) == 1 and fin[0]["lo"] == 1 and fin[0]["hi"] == 2,
+                  str([(c["status"], c["lo"], c["hi"]) for c in cs]))
         with tempfile.TemporaryDirectory() as d:
             s, emits, _ = make(d, ["A", "", "A"])
             drive(s, 3)
             s.finish(timeout_s=5.0)
             cs = chapters(emits)
+            fin = [c for c in cs if c["status"] == "final"]   # 同上：interim 不算一章
             check("中途的空主题也并入当前章（**不新开**）",
-                  len(cs) == 1 and cs[0]["lo"] == 1 and cs[0]["hi"] == 3,
-                  str([(c["lo"], c["hi"]) for c in cs]))
+                  len(fin) == 1 and fin[0]["lo"] == 1 and fin[0]["hi"] == 3,
+                  str([(c["status"], c["lo"], c["hi"]) for c in cs]))
 
         print("\n--- ⑥ A B A -> 三章（**不解冻**旧章）---")
         with tempfile.TemporaryDirectory() as d:
@@ -292,8 +314,11 @@ def main() -> int:
             cs = chapters(emits)
             check("⭐⭐ 三个**不同**的 id", len({c["id"] for c in cs}) == 3,
                   str([c["id"] for c in cs]))
-            check("三章的 lo 分别是 1/2/3", sorted(c["lo"] for c in cs) == [1, 2, 3],
-                  str(sorted(c["lo"] for c in cs)))
+            # ⚠️ 数**正式章**的 lo：2026-11-17 起每章还会 emit 临时版（同一个 `id`、同 `lo`），
+            #    数全部记录会变成 1/1/2/2/3/3（开头就是这么假红的）。
+            check("三章的 lo 分别是 1/2/3",
+                  sorted(c["lo"] for c in cs if c["status"] == "final") == [1, 2, 3],
+                  str(sorted(c["lo"] for c in cs if c["status"] == "final")))
 
         print("\n--- ⑦ 临时合成：同 `id`，正式版顶掉临时版 ---")
         with tempfile.TemporaryDirectory() as d:
@@ -305,9 +330,10 @@ def main() -> int:
                 col += 1.0
                 s.step(col + 40.0)
                 col += 40.0
-            # ⚠️ 把时钟推过 `INTERIM_AFTER_S`(480) —— 但**必须停在
-            #    `MAX_CHAPTER_S`(600) 以下**，否则会被强制切章（那是另一条判据 ㉗）。
-            s.step(s._cur["t_open"] + L.INTERIM_AFTER_S + 5.0)
+            # ⚠️ 首段（`FIRST_INTERIM_AFTER_S`=0）在上面那几窗就出过了；这里再推一点时间
+            #    确认「没有新句就不重复合成」。**必须停在 `MAX_CHAPTER_S`(900) 以下**，
+            #    否则会被强制切章（那是另一条判据 ㉗）。
+            s.step(s._cur["t_open"] + L.FIRST_INTERIM_AFTER_S + 5.0)
             cs = chapters(emits)
             check("⭐ 出现了 `interim`", any(c["status"] == "interim" for c in cs),
                   str([(c["id"], c["status"]) for c in cs]))
@@ -316,8 +342,8 @@ def main() -> int:
             n_interim = sum(c["status"] == "interim" for c in chapters(emits))
             # 下课后 app 没退: 没有新句子, 时钟继续走 —— 不许再拿同一份内容合成（美国用户 10-16 实测）
             # ⚠️ 停在 MAX_CHAPTER_S 以下（再往后是强制切章, 另一条判据）
-            s._interim_at -= L.INTERIM_AFTER_S             # 等价于又过了一个间隔（醒着的时间）
-            s.step(s._cur["t_open"] + L.INTERIM_AFTER_S + 100.0)
+            s._interim_at -= L.FIRST_INTERIM_AFTER_S       # 等价于又过了一个间隔（醒着的时间）
+            s.step(s._cur["t_open"] + L.FIRST_INTERIM_AFTER_S + 100.0)
             check("⭐⭐ 没有新句子 → 不重复临时合成",
                   sum(c["status"] == "interim" for c in chapters(emits)) == n_interim,
                   str([(c["id"], c["status"]) for c in chapters(emits)]))
@@ -496,9 +522,12 @@ def main() -> int:
             s.finish(timeout_s=5.0)
             check("⭐⭐ 残余窗口被**提交**了（不是随线程退出一起丢）", "atom" in calls,
                   f"calls={calls}")
+            # ⚠️ 2026-11-17 起开章那一窗会先 emit 一条 `interim`（段落跟着窗口刷新），
+            #    所以「有没有正式合成」= 最后一条是 final，不是「只有一条」。
             check("⭐⭐ 当前章做了**正式**合成",
-                  [c["status"] for c in chapters(emits)] == ["final"],
-                  str([c["status"] for c in chapters(emits)]))
+                  [c["status"] for c in chapters(emits)][-1:] == ["final"]
+                  and len({c["id"] for c in chapters(emits)}) == 1,
+                  str([(c["id"], c["status"]) for c in chapters(emits)]))
         with tempfile.TemporaryDirectory() as d:
             s, _, calls = make(d, ["A"])
             s.feed((1, "10:00:00", "a", "甲"))
@@ -636,8 +665,9 @@ def main() -> int:
             drive(s, 2)
             s.finish(timeout_s=5.0)
             cs = chapters(emits)
+            fin = [c for c in cs if c["status"] == "final"]   # 同上：interim 不算一章
             check("⭐⭐ 大小写/尾随空格不同 -> **还是同一章**（否则凭空多一章 + 多花一次合成）",
-                  len(cs) == 1, str([(c["id"], c["lo"], c["hi"]) for c in cs]))
+                  len(fin) == 1, str([(c["id"], c["status"], c["lo"], c["hi"]) for c in cs]))
 
         print("\n--- ⑲ 机械闸门对**非容器**输入不许抛（闸门自己炸掉比放过脏数据糟）---")
         # 改坏：把 `chapter.parse_reply` 里 `raw_sents` / `raw_src` 的 isinstance 守卫去掉
@@ -821,8 +851,10 @@ def main() -> int:
             cs = chapters(emits)
             # 改坏：把 `_advance` 里那句 `now - self._cur["t_open"] < MIN_CHAPTER_S` 删掉
             #       -> A/B/C 各成一章（3 章）。
+            # ⚠️ 数**不同 id**（临时版与正式版同 id，emit 会有两条）。
             check("⭐⭐ 三次换题都不足 180 秒 -> **只有一章**（换题被并进当前章）",
-                  len(cs) == 1, str([(c["id"], c["lo"], c["hi"]) for c in cs]))
+                  len({c["id"] for c in cs}) == 1,
+                  str([(c["id"], c["status"], c["lo"], c["hi"]) for c in cs]))
 
         print("\n--- ㉗ `MAX_CHAPTER_S`：太长的章**强制切** ---")
         with tempfile.TemporaryDirectory() as d:
@@ -843,8 +875,13 @@ def main() -> int:
             #     emit 里混着**临时合成**（同一 id 会 emit 很多次），
             #     所以删掉 force-split 之后照样 ≥4。→ **必须数不同的 `id`。**
             #     （2026-09-30 变异验证抓到的。）
-            check(f"⭐⭐ 同一主题讲了 {col / 60:.0f} 分钟 -> 被 `MAX_CHAPTER_S` 切成**多个不同的章**",
-                  len(ids) >= 4, f"{len(ids)} 个 id（emit 共 {len(cs)} 条）")
+            # ⚠️ 2026-11-17：`MAX_CHAPTER_S` 600 → 1200 → **900**（A2 验收：1200 时窗口
+            #    主题模型「粘住」不换题，一次把两组并成 20 分钟、前一组的总结被覆盖丢掉；
+            #    900 是折中：一组 15 分钟一段）。所以「~60 分钟 → **多个不同的章**」，
+            #    同时钉上界（不许退化成 1 章、也不许碎成十几章）。
+            check(f"⭐⭐ 同一主题讲了 {col / 60:.0f} 分钟 -> 被 `MAX_CHAPTER_S`(900) 切成"
+                  f"**多个不同的章**（4..=5，不是 1）",
+                  4 <= len(ids) <= 5, f"{len(ids)} 个 id（emit 共 {len(cs)} 条）")
 
         print("\n--- ㉘ `_topic_prev` 必须是**上一窗**主题，不是章标题 ---")
         # ⚠️⚠️ 2026-09-30 实测：喂**章标题**会让模型**一开章就沿用** →
@@ -866,7 +903,8 @@ def main() -> int:
                 # ⚠️ **在调用那一刻快照章标题** —— 不能等跑完再看：
                 #    第三次调用**之后**才发生的换章会把 `_cur` 变成 C，
                 #    于是「章标题还是 A」这个前置条件看起来不成立（第一版就这么红的）。
-                seen.append((block, (s._cur or {}).get("title")))
+                if sysp is atom.SYS:      # ⭐ 只看原子调用：章节临时合成会插进来打乱序号
+                    seen.append((block, (s._cur or {}).get("title")))
                 return base_chat(sysp, block, mt, tp)
 
             s._chat = spy
@@ -875,18 +913,22 @@ def main() -> int:
             s.feed((2, "10:00:01", "s2", "中")); s.step(201.0)
             s.step(300.0)                    # w2 提交：主题 B，但离 t_open 只 100s < 180 -> 被并
             s.feed((3, "10:00:02", "s3", "中")); s.step(301.0)
-            s.step(600.0)                    # w3 提交
+            s.step(478.0)                    # w3 提交（A）；章龄 278 -> **临时合成**
+            s.feed((4, "10:00:03", "s4", "中")); s.step(479.0)
+            s.step(600.0)                    # w4 提交（b，空主题）-> 第 3 次章节调用
             # ⚠️ 前置：**在第三次调用那一刻**，章标题还是 A（B 那次换题真的被拦了）
+            # ⚠️ 2026-11-17 起段落跟着窗口刷新，所以中间会多出**临时合成**的章节调用。
+            #    `seen` 只收**原子调用**（spy 里按 `sysp is atom.SYS` 过滤），所以序号不变。
             check("⚠️ 前置：第二次那次换题**真的被 `MIN_CHAPTER_S` 拦下了**"
-                  "（第三次调用时章标题还是 A）",
+                  "（第三次原子调用时章标题还是 A）",
                   len(seen) >= 3 and seen[2][1] == "A",
-                  f"第三次调用时的章标题={seen[2][1]!r}" if len(seen) >= 3
-                  else f"只拿到 {len(seen)} 次")
+                  f"第三次原子调用时章标题={seen[2][1]!r}"
+                  if len(seen) >= 3 else f"只拿到 {len(seen)} 次")
             # 改坏：把 `_topic_prev` 改回 `self._cur["title"] if self._cur else ""`
             #       -> 这时它会给出 **A**（章标题），而不是 **B**（上一窗主题）。
-            check("⭐⭐ 第三次调用拿到的 prev 是**上一窗**的主题 B（不是章标题 A）",
+            check("⭐⭐ 第三次原子调用拿到的是**上一窗**主题 B（不是章标题 A）",
                   len(seen) >= 3 and "上一段的主题是「B」" in seen[2][0],
-                  f"第 3 个 block：{seen[2][0][:44]!r}" if len(seen) >= 3
+                  f"第 3 个原子 block：{seen[2][0][:44]!r}" if len(seen) >= 3
                   else f"只拿到 {len(seen)} 次")
 
         print("\n--- ㉙ 模型报的 `课务` 必须过 Jev 打分闸门 ---")
@@ -1101,7 +1143,7 @@ def main() -> int:
         # ⚠️⚠️ 复刻 2026-09-30 `--fail-window` 实测的形状：断网期间积压 N 个窗口，
         #    恢复那一刻被**一口气**消化 —— 它们**共享同一个 `now`**
         #    → 那一刻开的章 `t_open = now`，后面每个窗口算 `now - t_open` 都是 0
-        #    → `MAX_CHAPTER_S = 600` **一次都不再触发** → **一章盖了 34.4 分钟的课**。
+        #    → `MAX_CHAPTER_S`（当时 600）**一次都不再触发** → **一章盖了 34.4 分钟的课**。
         # ⚠️ 那批真数据里 19 个积压窗口**主题完全没变** —— 所以「放行换题」那类
         #    修法救不了它，必须让**先后次序在时钟上体现出来**。
         #
@@ -1295,8 +1337,9 @@ def main() -> int:
                         "deadlines": [], "atoms": []}
 
         _bare = _ov.Overlay._chapter_bar_text(_Bare())
-        check("⭐⭐ 章节条空档要**写清功能名 + 可点**（光写「实时总结」看不出它可点）",
-              "AI 实时总结" in _bare and "点这里" in _bare, repr(_bare))
+        # 11-17 Owen：「点这里那三个字可以不要」—— 可点由左边的分栏小图标说明，字只留功能名
+        check("⭐⭐ 章节条空档也有入口（功能名，不是空串）",
+              _bare.strip() == "实时总结", repr(_bare))
 
         class _Live(_Bare):
             _outline = {"chapters": {"0": {"id": 0, "status": "final", "title": "T1",
@@ -1306,7 +1349,7 @@ def main() -> int:
 
         _live = _ov.Overlay._chapter_bar_text(_Live())
         check("⭐ 有章节之后那句占位**被替换掉**（作者原话：「直到有总结信息再替换掉」）",
-              "点这里" not in _live and "T1" in _live, repr(_live))
+              _live.strip() != "实时总结" and "T1" in _live, repr(_live))
 
         # ⚠️ 同一个假 `fits` 的坑：夹具放宽到 60 字符，否则空状态那行会被折成两行
         _fold3 = lambda t: _ov.fold_rows(t, lambda x: len(x) <= 60, lambda w: w[:60])  # noqa: E731

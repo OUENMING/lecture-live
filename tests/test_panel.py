@@ -479,8 +479,11 @@ def main() -> int:
                         if not b.isHidden() and b.frame().origin.x < _bx]
                 check(f"⭐⭐ 宽 {_w:.1f} 时章节条**不压到任何可见按钮**", not _hit, str(_hit))
                 # 2026-10-13 起最左是「在听」小点, 章节条紧跟它(边距 + 点径 + 间隙)
+                # 2026-11-17 换皮：小点和字之间多了分栏小图标（取不到符号时没有它）
+                _icon_w = (overlay.CHAPTER_ICON_PT + 2.0 + overlay.CHAPTER_ICON_GAP
+                           if getattr(ov, "_split_icon", None) is not None else 0.0)
                 check(f"⭐ 宽 {_w:.1f} 时章节条紧跟「在听」小点",
-                      _lb.frame().origin.x == overlay.PAD + overlay.EAR_D + overlay.EAR_GAP,
+                      _lb.frame().origin.x == overlay.PAD + overlay.EAR_D + overlay.EAR_GAP + _icon_w,
                       str(_lb.frame().origin.x))
                 _ef = ov._ear.frame()
                 check(f"⭐ 宽 {_w:.1f} 时「在听」小点在左边距、不与章节条重叠",
@@ -490,9 +493,15 @@ def main() -> int:
                 check(f"⭐⭐ 宽 {_w:.1f} 时章节条宽度是**整数**（`floor` 生效；不取整文字会发虚）",
                       float(_lb.frame().size.width).is_integer(),
                       str(_lb.frame().size.width))
+                # ⭐ 11-17 Owen：点顶栏空白也开右栏 —— 标签（= 点击区右段）只能和文字一样宽
+                _txt_w = float(_lb.attributedStringValue().size().width)
+                check(f"⭐ 宽 {_w:.1f} 时章节条点击区不超出文字（+8pt 以内）",
+                      _lb.frame().size.width <= _txt_w + 8.0,
+                      f"lbl={_lb.frame().size.width} txt={_txt_w:.1f}")
+                # 点击区 = 小图标 + 标签（右边缘与标签同一个数；左边缘让到图标起点）
                 check(f"⭐ 宽 {_w:.1f} 时点击区与标签**同框**（同一个数，别各算各的）",
-                      ov._chapter_hit.frame().size.width == _lb.frame().size.width
-                      and ov._chapter_hit.frame().origin.x == _lb.frame().origin.x,
+                      ov._chapter_hit.frame().size.width == _lb.frame().size.width + _icon_w
+                      and ov._chapter_hit.frame().origin.x == _lb.frame().origin.x - _icon_w,
                       f"hit={ov._chapter_hit.frame()} lbl={_lb.frame()}")
         finally:
             ov._width, ov._height = _w0, _h0

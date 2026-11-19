@@ -65,6 +65,61 @@
 （`_whatsnew_body` 从最新往下数到「你上次看过的版本」为止），多版本时每行前面标版本号。
 所以**每个版本的看点都要能独立看懂**，不要写"同上""见上一条"。
 
+## [3.12.1] - 2026-11-18
+
+### 更新方式
+
+auto
+
+### 更新看点
+- [改进] 优化中国大陆更新
+
+### 升级须知（3.12.0 → 3.12.1）
+- 没有新依赖、没有要手动下的模型；开课面板上自动更新。
+- 3.11.x 在中国大陆连不上 GitHub 时，这一次要在终端手动拉一下（之后不用）：`cd ~/lecture-live && for m in https://git.bldcam.page/OUENMING/ https://asr.bldcam.page/git/OUENMING/ https://github.com/OUENMING/; do git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 -c url."$m".insteadOf=https://github.com/OUENMING/ pull --ff-only && break; done; cat VERSION`
+
+### Added
+- 中国区更新镜像：GitHub 各条路（代理 / 直连）都失败后，最后再试 `asr.bldcam.page/git/`（`update.mirror_routes`，`-c url.<镜像>.insteadOf=<GitHub>`，只这一条命令有效、不写 .gitconfig）；上次靠镜像成功则镜像先试；`CLASSLIVE_NO_MIRROR=1` 关。依据：中国用户 30 天里 4 次 `Could not resolve host: github.com`，同一台机器连 asr.bldcam.page 每节课都通（country=CN、colo=HKG、错误 ≈ 0）。
+- Worker：`/git/OUENMING/lecture-live(.git)/{info/refs,git-upload-pack}` 只读转发 GitHub（`src/git-mirror.js`），push 一律 404，按 IP 限流，不需要凭据（仓库公开）。
+- 更新镜像之二：`git.bldcam.page`（VPS 只读裸库，每 5 分钟从 GitHub 同步；nginx + git-http-backend，push 404；DNS 只解析、不走 Cloudflare）。镜像顺序 GitHub 各路 → vps → cf，上次靠哪个镜像成就先试哪个；路由串写成 `mirror:vps` / `mirror:cf`。依据：2026-11-18 Globalping 中国大陆探针 VPS 19/20（p50 474 ms），Cloudflare 39/50（p50 约 2 s）。
+
+## [3.12.0] - 2026-11-18
+
+### 更新方式
+
+auto
+
+### 更新看点
+- ⚠️ [变更] 「讲一下」按钮下线：没听懂直接在字幕窗底部输入框问
+- [新增] 悬浮窗右栏「实时总结」
+- [改进] UI 优化
+- [修复] 修复了一些 bug
+
+### 升级须知（3.11.5 → 3.12.0）
+- 没有新依赖、没有要手动下的模型；开课面板上自动更新。
+- 「纯转录」档还在，只是不在胶囊里了；中文课会自动切过去。
+
+### Added
+- 右栏实时总结（`summary_pane.py`，纲要并入）：一章一段、结论先行；开章那一窗出首段，之后每约 75 s 增量重写（告诉模型新增的是哪几句，新论点至少一句来自新增），一章上限 15 分钟。真课重放：首段约 80 s，间隔 ≤ 166 s。
+- 语义换章（`chapter.py` / `live_summary.py`）：段落刷新时顺带判新增里有没有换题点，有就当场拆章；同组换人讲不算换题，旧章至少 4 分钟才拆，硬切出来的章不受此限。真课 6/6，换题后 38–64 s 拆出。
+- 自动语种（`lang_gate.py`）：识别层带出每句语种，中文句也能封口；连续 3 句 `zh` → 切 `zh` 档（只转录，不发翻译请求），切过不再切回；用户手动换过档后不再自动切。
+- 调试通道 `tools/clctl.py` / `debug_ctl.py`（D-1/D-2）：开发用，用户看不到。
+- 更新可观测：每次检查写一行 `update.log`（含路由）、`update-check.json`，报告加 `blocks.update`；错误里的代理凭据打码。
+- 开课前面板查到新版且为 `auto`、没有额外步骤、没禁用 → 20 s 内本地 ff-only 装好；装不上照常上课。
+
+### Changed
+- 联网的 git（fetch / pull / ls-remote）按 `ws_compat.routes()` 逐条试 HTTP 代理 > SOCKS（`socks5h://`，由代理解析域名）> 直连，时间按剩余路数均分；一律 `GIT_TERMINAL_PROMPT=0`。实测：死代理 0.5 s 内回落直连。
+- 悬浮窗换皮（`overlay.py` / `uitokens.py`）：控件闲置退到 35%、旧字幕逐行退后、术语胶囊、章节条图标；英文小字 11 → 12 pt；章节条点击区只罩文字；右栏可「收起」。顶栏 ❓ 暂时拿掉。
+- 删「讲一下」按钮；胶囊去掉「纯转录」（`raw` 档本身保留）。
+- 开课面板首页改格子稿（`entry_panel.py` + 纯函数数据层 `home_model.py`）：标题行 Pineapple 菜单（状态 / 设置 / 功能介绍）；顶部块只在课表强证据（now/soon）时出现；两列格子顺序固定、末尾「＋ 新增课程」、预选不再重排；再点一次选中格 = 开课；拆掉常驻虚线框与页脚，拖到格子外任何地方 = 自动分课。
+- 开课面板：底边距与左右同为 20pt（状态行只在有字 / 有后台任务时从底边长出）；底色多压一层黑 + 0.5pt 白描边，边距不再透出后面窗口的明暗；四边可拖缩放（680–1100 宽），格子按新宽重排。
+- Worker：对话上游可切换（DeepSeek 官方 / CommandCode / OpenCode Go），11-17 已部署。
+
+### Fixed
+- 收尾：实时总结收尾移出主线程（点完「保存」卡冻 18 s）。
+- 拆章出来的新章补 `t1`（少了会零时长）；拆章留住中文标题；拆点落在句号空洞也过时长闸；积压恢复只刷一次段落。
+- 路由切换 OCR 复核六处（读改写抹表 / 来源标错 / `--reset` 吞参数等）。
+
 ## [3.11.5] - 2026-11-16
 
 ### 更新方式

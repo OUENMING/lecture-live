@@ -72,6 +72,7 @@ Soniox 封口后约 0.5 s 下一句就出字，而译文要 ~1 s 才写完 —�
 """
 from __future__ import annotations
 
+import re
 import typing
 
 #: 草稿桥的换手点：定稿中文长到草稿译文的这个比例之前，中文槽继续显示草稿译文。
@@ -104,8 +105,25 @@ JOIN_ON = True
 HOLD_MAX_S = 2.5
 
 
+#: 汉字区间（CJK 统一表意文字 + 扩展 A + 兼容表意文字）。⚠️ **不是**「所有含汉字的字符」——
+#: 全角标点、拉丁字母、数字都不算词，否则一句尾部的「，」也能把占比抬上去。
+_HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
 def n_words(text: str) -> int:
-    return len((text or "").split())
+    """这句算几个「词」。**汉字占非空白字符 ≥ 50%** 就按汉字数计（一个汉字 = 一个词）。
+
+    ⚠️ 不改这一条的话，整句中文 `split()` 只得 **1** 个词 —— `is_tail` 会把它当「Okay?」
+       一类短尾巴并进上一行（`TAIL_WORDS=3`、`GAP_S=3.0`），中文课每句都拼到上一行里。
+    ⚠️ 中英混排（汉字不过半）仍按空格切：那时候它确实是以英文为主的句子。
+    """
+    t = text or ""
+    chars = [c for c in t if c.isalnum()]   # 只数字母 / 数字 / 汉字：全角标点多的短中文句（「他说：“好。”」）别被标点稀释成「不过半」
+    if chars:
+        han = sum(1 for c in chars if _HAN_RE.match(c))
+        if han * 2 >= len(chars):        # ≥ 50%
+            return han
+    return len(t.split())
 
 
 def is_tail(en: str, since_last_final: float | None) -> bool:

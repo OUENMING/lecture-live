@@ -40,6 +40,7 @@
 | `PLAN-paragraph-panel.md` | 段落侧栏（按段整合、整段重译、可展开收起）· 只有计划 · 顺带判掉的两条提速提议 | 做课上段落视图 / 动定稿翻译链路前 |
 | `PLAN-p3-prep.md` | P3 第一批 · 课件 → 候选术语 | 改 `prep.py` / `extract.py` 前 |
 | `PLAN-update-mechanism.md` | 分级更新 / 引导式更新 | 改 `update.py` / `whatsnew.py` 前 |
+| `PLAN-update-distribution-cn.md` | 更新分发复核 + 中国可达性：git 分发仍最优；缺口=单源 GitHub / fetch 不走系统代理 / 检查失败无痕；P0 代理注入+日志+报告（3.12.0 已做）、P1 VPS 镜像（未做） | 改 `update.py` 的联网 / 换源 / 迁移存量客户端之前 |
 | `PLAN-panel-ux.md` | 面板启用逻辑 · UX 定案 | 做新面板前 |
 | `PLAN-notes-and-ui.md` | 笔记复习层重做 + UI 动效 | ⚠️ **§0 是病根诊断**（「知识点详解」像复述），其余设计已被现实现代 |
 | `PLAN-ai-explain-qa.md` | 按需讲解 + 追问线程 | 改问答链路前 |
@@ -60,6 +61,9 @@
 | 文件 | 主题 | 什么时候读 |
 |---|---|---|
 | `RESEARCH-web-cloud-20261114.md` | 重构 + 网页版的事实底稿：代码基线、上云容量实测、浏览器 / Soniox / Cloudflare / InstaBox 的结论表（带来源与置信度）、未核清单 | 读 `PLAN-web-cloud-20261114.md` 时；引用浏览器能力或额度数字之前（先看口径日期） |
+| `TASKS-auto-lang-20261116.md` | 自动语种任务单（L-1 识别层带出语种、中文能封口；L-2 连续 3 句中文就切纯转录档）：Owen 11-16 定中文只做转录 | 派这两张活时；动句末标点判据之前 |
+| `TASKS-debug-ctl-20261117.md` | 调试通道（`clctl`）任务单 D-1/D-2：学 cicada `lsctl`，开发用 | 动 `debug_ctl.py` / `tools/clctl.py` 之前 |
+| `RESEARCH-speaker-multilang-20261116.md` | 说话人分离 / 多语言插在网页版计划的哪一步：代码现状、以前三次「不做」的理由还成不成立、Soniox 与开源项目的结论表、分档改动量、第一步穿刺 | 动 Soniox 配置的语种 / 分离开关之前；给 P1 契约加字段时 |
 | `RESEARCH-macos-aesthetic.md` | macOS 视觉语言 | ⭐ 动 `overlay.py` 外观前 |
 | `RESEARCH-live-caption-rollup.md` | 2 行 roll-up 的台账 | ⭐ 动草稿或字幕行前 |
 | `RESEARCH-stream-eval.md` | ⭐ **流式字幕量具 + 2026-10-08 夜间改动 + 现场采集**（回改率/延迟/WER 的口径与全部数字）| 改草稿/ASR/音源前 · **上课采数前** |

@@ -3,15 +3,19 @@
 // 设计：docs/PLAN-passkey.md §2–§6（Owen 2026-10-11 拍板：默认不限额、设备 2 台、有效期 120 天）。
 //
 // 键（DO 的 KV 接口；SQLite 后端的 DO 同样支持，免费档可用）：
-//   code:<码>              {name, created, expires, revoked, max_devices, daily_asr_s, daily_tokens, daily_rt_s}
-//   dev:<码>               {<install_id>: {first, last}}
+//   code:<码>              {name, created, expires, revoked, max_devices, max_web_devices,
+//                           daily_asr_s, daily_tokens, daily_rt_s, daily_web_rt_s}
+//   dev:<码>               {<install_id>: {first, last}}                    （桌面）
+//   devweb:<码>            {<install_id>: {first, last}}                    （网页；老码没有这键 -> 空）
 //   chat-routes            {<调用类|*>: deepseek|cc|opencode}（对话上游路由表，2026-11-17；`cl_admin.py route` 写）
 //   use:<YYYY-MM-DD>:<码>  {asr_s, asr_reqs, llm_reqs, tokens_in, tokens_out, cache_hit, jev_reqs, jev_q,
 //                           models:{v3|turbo|qwen|other: 段数}, vers:{<客户端版本>: 次数},
-//                           rt_s, rt_reqs}
+//                           rt_s, rt_reqs, rt_web_s}
 //                          ⚠️ rt_s / rt_reqs（实时转写：Soniox 音频秒 / 会话数）是 2026-10-17 加的，
 //                             **老记录没有这两键**，读的一律过 num() 兜（见 check / #addRt）；老码也没有
 //                             daily_rt_s，当「不限」（见 check 里那条 ?? null）。
+//                          ⚠️ rt_web_s（网页领的临时 key 那部分，2026-11-17）同理：老记录没有这键，一律 num() 兜。
+//                             分账靠 client_reference_id 的后缀（`<码名>-web`，见 soniox-core.webRef / splitRef）。
 //                          ⚠️ models / vers 是 2026-10-14 加的。**老记录没有这两键**，读的时候按空对象兜。
 //                          mins:{<UTC 当日第几分钟 0–1439>: [转写段, 转写秒, 翻译次, token 进+出, Jev 次]}
 //                          ⚠️ mins 是 2026-10-14 晚加的（作者：「面板能不能精确到分钟」）。键是当天分钟号，
@@ -28,12 +32,24 @@
 //
 // ⚠️「哪些区合法」的唯一定义点在 `soniox-core.REGIONS`（这里 import REGION_NAMES，**别再抄一份 us/jp**）。
 
-import { REGION_NAMES } from "./soniox-core.js";
+import { REGION_NAMES, splitRef, webRef } from "./soniox-core.js";
 import { UPSTREAMS, normalizeUpstream, CLASS_RE } from "./routes.js";
 
 const DAY_MS = 86400000;
 export const DEFAULT_DAYS = 120;
-export const DEFAULT_DEVICES = 2;
+export const DEFAULT_DEVICES = 2;          // 桌面
+export const DEFAULT_WEB_DEVICES = 2;      // 网页另算 2 台（接口草案 §7「2 + 2」）；桌面名额不被挤掉
+export const WEB_DEVICE_PREFIX = "devweb:";  // 键的唯一拼法（check() 写，devices 读）
+// 网页领的实时转写每天默认多少秒（Owen 2026-11-17 定：5 h）。env `WEB_DAILY_RT_S` 可改全局默认，
+// 配成 `none` = 不限；单个码的 `daily_web_rt_s` 覆盖它（null / 缺省 = 跟随全局）。
+export const DEFAULT_WEB_RT_S = 18000;
+export function webRtS(env) {
+  const raw = env?.WEB_DAILY_RT_S;
+  if (raw === undefined || raw === null || String(raw).trim() === "") return DEFAULT_WEB_RT_S;
+  if (String(raw).trim().toLowerCase() === "none") return null;      // 不限
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_WEB_RT_S;          // 写错就回默认，别把整条路打死
+}
 export const CODE_RE = /^cl-[a-z0-9]{1,16}-[0-9a-f]{16}$/;
 const NAME_RE = /^[a-z0-9]{1,16}$/;
 const INSTALL_RE = /^[0-9a-f]{32}$/;
@@ -44,6 +60,15 @@ const json = (obj, status = 200) =>
 const day = (now) => new Date(now).toISOString().slice(0, 10);
 const num = (v) => (Number.isFinite(v) && v >= 0 ? v : 0);
 const limitOrNull = (v) => (v === null || v === undefined ? null : Number.isFinite(v) && v >= 0 ? v : undefined);
+// 网页实时转写的日额度多一个状态（2026-11-17）：
+//   null / 缺省 = **跟随全局**（env `WEB_DAILY_RT_S`）；数字 = 这个码自己的上限；`"none"` = **不限**。
+// ⚠️ 不把 `"none"` 塞给 limitOrNull：那三个额度只有「数字 / null=不限」两态，混在一起会把
+//    「跟随全局」和「不限」这两件事消成同一个值（全局默认一改，所有码就偷偷变成不限了）。
+const webRtLimit = (v) => {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "string" && ["none", "unlimited", "不限"].includes(v.trim().toLowerCase())) return "none";
+  return Number.isFinite(v) && v >= 0 ? v : undefined;
+};
 
 // 模型名 -> 统计用的桶。名字由 Worker 自己挑（不是客户端给的），兜底 other 让新模型上线不炸。
 const modelBucket = (m) => {
@@ -85,7 +110,7 @@ const RT_MAX_SEEN = 1000;                // seen 条数上限（1000 条约 55 K
 // JSON 里 NaN 会写成 null，那一格用量就废了）。
 const USE0 = () => ({
   asr_s: 0, asr_reqs: 0, llm_reqs: 0, tokens_in: 0, tokens_out: 0, cache_hit: 0,
-  jev_reqs: 0, jev_q: 0, rt_s: 0, rt_reqs: 0, models: {}, vers: {},
+  jev_reqs: 0, jev_q: 0, rt_s: 0, rt_reqs: 0, rt_web_s: 0, models: {}, vers: {},
 });
 
 function randomHex(bytes) {
@@ -95,9 +120,12 @@ function randomHex(bytes) {
 }
 
 export class PassCore {
-  constructor(storage, now = () => Date.now()) {
+  constructor(storage, now = () => Date.now(), env = undefined) {
     this.storage = storage;
     this.now = now;
+    // DO 实例的 env（passes.js 传进来的）：现在只用到 `WEB_DAILY_RT_S`（网页实时转写的全局日默认）。
+    // 不传 = 用内置默认（5 h）—— Node 测试与 ?env` 缺失的路径都走这条。
+    this.env = env;
   }
 
   async handle(request) {
@@ -131,8 +159,10 @@ export class PassCore {
   }
 
   // 能不能用：码在、没吊销、没过期、设备没超、当日额度没超（null = 不限）。新设备在名额内就登记。
-  // 返回 {ok:true, name} 或 {ok:false, reason: unknown|revoked|expired|devices|quota}。
-  async check({ code, install, kind }) {
+  // 返回 {ok:true, name, web_rt_left_s?} 或 {ok:false, reason: unknown|revoked|expired|devices|quota}。
+  // `client: "web"`（只有这个值算）-> 走独立的 `devweb:<码>` 键与 `max_web_devices`；其他 / 缺省 = 桌面，逐字不变。
+  // `web_rt_left_s` 只在 kind="rt" 时回（网页那把临时 key 的会话上限要压到它，handler.sonioxKey 读）。
+  async check({ code, install, kind, client }) {
     if (!CODE_RE.test(code || "")) return { ok: false, reason: "unknown" };
     const c = await this.storage.get(`code:${code}`);
     if (!c) return { ok: false, reason: "unknown" };
@@ -155,20 +185,38 @@ export class PassCore {
     // 实时转写：额度按**已回收的**秒数判。⚠️ 是软闸 —— 用量由 Cron 每小时补记（还叠加 Soniox 日志自身的延迟），
     // 所以「刚开的课」在记上账之前是拦不住的；这里挡的是「今天已经明显超了还接着开」。
     // 老码没有 daily_rt_s -> 当「不限」（?? null）；老记录没有 rt_s -> num() 当 0。
-    if (kind === "rt" && (c.daily_rt_s ?? null) !== null && num(u.rt_s) >= num(c.daily_rt_s)) {
+    // ⚠️ 桌面与网页**先叠加判**，再把网页那一档单独判一遭（2026-11-17）：网页是后加的闸，
+    //    不叠加的话网页会成桌面额度的一个后门（两边各自 4 h / 5 h，一天就能上 9 h）。
+    //    「叠加」与「逐字不变」不矛盾：桌面只要 rt_s 没超就照旧放行，多出来的网页秒数拦不住桌面。
+    const rtCap = c.daily_rt_s ?? null;
+    if (kind === "rt" && rtCap !== null && num(u.rt_s) >= num(rtCap)) {
       return { ok: false, reason: "quota", name: c.name };
     }
+    // 网页日额度（默认 5 h）：`daily_web_rt_s` 缺省 / null = 跟随全局 `WEB_DAILY_RT_S`（配成 none = 不限）。
+    let webLeft;
+    if (kind === "rt" && client === "web") {
+      const cap = webRtLimit(c.daily_web_rt_s) === null ? webRtS(this.env)
+        : c.daily_web_rt_s === "none" ? null
+        : c.daily_web_rt_s;
+      const used = num(u.rt_web_s);
+      if (cap !== null && used >= cap) return { ok: false, reason: "quota", name: c.name };
+      webLeft = cap === null ? null : Math.max(0, cap - used);
+    }
     if (INSTALL_RE.test(install || "")) {
-      const devs = (await this.storage.get(`dev:${code}`)) || {};
+      const web = client === "web";
+      const devKey = web ? `${WEB_DEVICE_PREFIX}${code}` : `dev:${code}`;
+      // 名额：老码没有 max_web_devices -> 用默认值（与 max_devices 同一个兼底思路）
+      const cap = web ? c.max_web_devices ?? DEFAULT_WEB_DEVICES : c.max_devices;
+      const devs = (await this.storage.get(devKey)) || {};
       if (!devs[install]) {
-        if (Object.keys(devs).length >= c.max_devices) return { ok: false, reason: "devices", name: c.name };
+        if (Object.keys(devs).length >= cap) return { ok: false, reason: "devices", name: c.name };
         devs[install] = { first: now, last: now };
       } else {
         devs[install].last = now;
       }
-      await this.storage.put(`dev:${code}`, devs);
+      await this.storage.put(devKey, devs);
     }
-    return { ok: true, name: c.name };
+    return webLeft === undefined ? { ok: true, name: c.name } : { ok: true, name: c.name, web_rt_left_s: webLeft };
   }
 
   async usage({ code, asr_s, tokens_in, tokens_out, cache_hit, jev_q, model, ver }) {
@@ -211,7 +259,8 @@ export class PassCore {
     const rec = {
       name: n, created: now, expires: now + num(days || DEFAULT_DAYS) * DAY_MS, revoked: false,
       max_devices: Number.isInteger(max_devices) && max_devices > 0 ? max_devices : DEFAULT_DEVICES,
-      daily_asr_s: null, daily_tokens: null, daily_rt_s: null,
+      max_web_devices: DEFAULT_WEB_DEVICES,
+      daily_asr_s: null, daily_tokens: null, daily_rt_s: null, daily_web_rt_s: null,
     };
     await this.storage.put(`code:${code}`, rec);
     return { code, ...rec };
@@ -219,17 +268,21 @@ export class PassCore {
 
   async list() {
     const out = [];
+    const today = day(this.now());
     for (const [k, c] of await this.storage.list({ prefix: "code:" })) {
       const code = k.slice(5);
       const devs = (await this.storage.get(`dev:${code}`)) || {};
+      // 今日网页实时转写已用秒（面板 / cl_admin list 要看得见那个 “软闸” 离上限还有多远）。
+      // 老记录没这键 -> num() 当 0。
+      const u = (await this.storage.get(`use:${today}:${code}`)) || {};
       out.push({ code, ...c, devices: Object.keys(devs).length,
-                 last_seen: Math.max(0, ...Object.values(devs).map((d) => d.last)) });
+                 last_seen: Math.max(0, ...Object.values(devs).map((d) => d.last)),
+                 rt_web_s: num(u.rt_web_s), rt_s: num(u.rt_s) });
     }
     return { codes: out };
   }
 
-  // 用量查询。请求侧收三种写法（`{day}` 单日 / `{days:N}` 最近 N 天 / `{from,to}` 闭区间），
-  // 但**返回形状只有一个**：{days: [{day, rows}], from, to} —— 单日就是长度 1 的数组。
+  // 用量查询。请求侧收三种写法（`{day}` 单日 / `{days:N}` 最近 N 天 / `{from,to}` 闭区间），  // 但**返回形状只有一个**：{days: [{day, rows}], from, to} —— 单日就是长度 1 的数组。
   // ⚠️ 2026-10-14 起统一（原来单日回 `{day, rows}`）；两个调用方（cl_admin.py / test-passes.mjs）同步改过。
   async stats({ day: d, days, from, to }) {
     const today = day(this.now());
@@ -257,7 +310,10 @@ export class PassCore {
       const c = await this.storage.get(`code:${code}`);
       if (!byDay.has(dd)) byDay.set(dd, []);
       const { mins, ...rest2 } = u;                     // 逐分钟太大，不随 stats 回（走 /admin/minutes）
-      byDay.get(dd).push({ name: c?.name ?? "?", code, ...rest2, active_min: mins ? Object.keys(mins).length : null });
+      // rt_web_s 也要显式给个 0：老记录没这键，...rest2 里就什么都没有，面板 / cl_admin stats 会拿到 undefined。
+      byDay.get(dd).push({ name: c?.name ?? "?", code, ...rest2,
+                           rt_web_s: num(u.rt_web_s),
+                           active_min: mins ? Object.keys(mins).length : null });
     }
     // **区间里每一天都出现**（没记录的给空数组）—— 面板画趋势时不用自己补零。
     const out = [];
@@ -275,11 +331,13 @@ export class PassCore {
   }
 
   // 某码的设备：**只回 install_id 前 6 位**（够区分两台，不把完整 id 交出去）+ 首次 / 最近（毫秒）。
+  // 桌面与网页分开回两张表（键不同，见 WEB_DEVICE_PREFIX）。
   async devices({ code }) {
     if (!CODE_RE.test(code || "")) return { error: "devices 只认完整码" };
-    const devs = (await this.storage.get(`dev:${code}`)) || {};
-    return { code, devices: Object.entries(devs).map(([id, d]) => ({ id: id.slice(0, 6), first: d.first, last: d.last }))
-      .sort((a, b) => b.last - a.last) };
+    const pick = async (key) => Object.entries((await this.storage.get(key)) || {})
+      .map(([id, d]) => ({ id: id.slice(0, 6), first: d.first, last: d.last }))
+      .sort((a, b) => b.last - a.last);
+    return { code, devices: await pick(`dev:${code}`), web_devices: await pick(`${WEB_DEVICE_PREFIX}${code}`) };
   }
 
   // 按码或名字找到唯一一条再改；名字对应多条（同名重发过）时要求给码。
@@ -313,7 +371,7 @@ export class PassCore {
     if (yes !== true) return { error: "delete 要带 yes:true 才动手（不可逆）" };
     const c = await this.storage.get(`code:${code}`);
     if (!c) return { error: "unknown code" };
-    const keys = [`code:${code}`, `dev:${code}`];
+    const keys = [`code:${code}`, `dev:${code}`, `${WEB_DEVICE_PREFIX}${code}`];
     let days = 0;
     for (const [k] of await this.storage.list({ prefix: "use:" })) {
       // 冒号是分隔符。⚠️ 实测过：这里换成 `k.includes(code)` 在**当前**的键形状下是等价的
@@ -327,12 +385,17 @@ export class PassCore {
 
   async #limit(body) {
     const a = limitOrNull(body.daily_asr_s), t = limitOrNull(body.daily_tokens), r = limitOrNull(body.daily_rt_s);
-    if (a === undefined || t === undefined || r === undefined) return { error: "限额要么是非负数，要么是 null（不限）" };
+    const w = webRtLimit(body.daily_web_rt_s);
+    if (a === undefined || t === undefined || r === undefined || w === undefined) {
+      return { error: "限额要么是非负数，要么是 null（网页日额度 null = 跟随全局 WEB_DAILY_RT_S，\"none\" = 不限）" };
+    }
     return this.#edit(body, (c) => {
       if ("daily_asr_s" in body) c.daily_asr_s = a;
       if ("daily_tokens" in body) c.daily_tokens = t;
       if ("daily_rt_s" in body) c.daily_rt_s = r;
+      if ("daily_web_rt_s" in body) c.daily_web_rt_s = w;
       if (Number.isInteger(body.max_devices) && body.max_devices > 0) c.max_devices = body.max_devices;
+      if (Number.isInteger(body.max_web_devices) && body.max_web_devices > 0) c.max_web_devices = body.max_web_devices;
     });
   }
 
@@ -389,6 +452,8 @@ export class PassCore {
   }
 
   // 一批用量日志落账。入参 records = [{uuid, name, end_ms, ms}]（soniox-core.collectUsage 规范化过）。
+  // ⚠️ `name` 可能是网页领的 key 的回参（`<码名>-web`）：先用 splitRef() 拆回码名，再按是否网页分账
+  //    （桌面 -> rt_s，网页 -> rt_web_s）。拆不回来（不在码表里的后缀）就当成一个普通名字 —— 结局一样是记不下。
   // 一个调用里做完四件事 —— 去重 / 找码 / 按天累加 / 推游标。DO 的 input gate 保证同一实例串行，
   // 所以要么整批生效、要么整批不动：崩在中间不会落半个账，也不会把游标推过去把数据甩掉。
   // 回 {ok, region, since_ms, seen, new_n, new_s, dup_n, lost:[{name, s, n}]}；lost = 去重后仍记不下的
@@ -400,7 +465,7 @@ export class PassCore {
     if (!Number.isFinite(until) || until <= 0) return { error: "bad_until" };
     if (!Array.isArray(records)) return { error: "bad_records" };
     let dup_n = 0, new_n = 0;
-    const per = new Map();   // `${名字}\n${日}` -> {name, dd, ms, n}：**按天**分桶（会话可以跨 UTC 午夜）
+    const per = new Map();   // `${网页?1:0}|${名字}\n${日}` -> {name, web, dd, ms, n}：**按天**分桶（会话可以跨 UTC 午夜）
     for (const rec of records) {
       const uuid = rec && typeof rec.uuid === "string" ? rec.uuid : "";
       const end = Number(rec?.end_ms);
@@ -409,9 +474,10 @@ export class PassCore {
       if (uuid in st.seen) { dup_n += 1; continue; }     // ⭐ 同一条日志只记一次：重叠窗口全靠这里兜
       st.seen[uuid] = end;                               // 立刻标上 —— 同一批里重复出现的也只会算一次
       const ms = Number(rec?.ms);
-      const name = String(rec?.name ?? ""), dd = day(end);
-      const k = `${name}\n${dd}`;
-      const a = per.get(k) || { name, dd, ms: 0, n: 0 };
+      const { name, web } = splitRef(rec?.name);
+      const dd = day(end);
+      const k = `${web ? 1 : 0}|${name}\n${dd}`;
+      const a = per.get(k) || { name, web, dd, ms: 0, n: 0 };
       a.ms += Number.isFinite(ms) && ms > 0 ? ms : 0;
       a.n += 1;
       per.set(k, a);
@@ -424,9 +490,13 @@ export class PassCore {
     for (const a of per.values()) {
       if (!codeOf.has(a.name)) codeOf.set(a.name, (await this.#find({ name: a.name })).code ?? null);
       const code = codeOf.get(a.name);
-      if (!code) { lost.push({ name: a.name, s: Math.round(a.ms / 100) / 10, n: a.n }); continue; }
+      // ⚠️ lost 的形状不改（name / s / n）：网页那部分是靠 name 上的 `-web` 后缀看出来的，
+      //    多一个 `web` 键会把老断言（deepEqual）静默打破。
+      // ⚠️ lost 的形状不改（name / s / n）：名字回**原来的引用**（网页那条带着 `-web`），
+      //    面板 / 人去 Soniox 日志里 grep 时才找得到。
+      if (!code) { lost.push({ name: a.web ? webRef(a.name) : a.name, s: Math.round(a.ms / 100) / 10, n: a.n }); continue; }
       new_s += a.ms / 1000;
-      await this.#addRt(code, a.dd, a.ms, a.n);
+      await this.#addRt(code, a.dd, a.ms, a.n, a.web);
     }
     // 游标：只许往前走，但也不许跳进未来 —— 一次坏 until 会让中间那段永远落在窗口外（再也没人拉它）。
     st.since_ms = Math.min(Math.max(st.since_ms, until), this.now() + 60000);
@@ -452,11 +522,14 @@ export class PassCore {
   // 按天记 rt 用量。键与 usage() 完全相同（use:<日>:<码>），所以 stats / 面板 / 限额一眼就能看到。
   // ⚠️ rt_s 走 num() 兜老记录（`u.rt_s += x` 在 undefined 上会变 NaN）。ms -> 秒后按 0.1 s 归档，
   //    免得面板上出现 1234.5670000000001。
-  async #addRt(code, dd, ms, n) {
+  // ⚠️ 桌面与网页**都累加**进 rt_s（防两头凑，见 check），网页那部分**另外**再记进 rt_web_s。
+  //    网页这一格是老记录里没有的新键，同样 num() 兜。
+  async #addRt(code, dd, ms, n, web = false) {
     const k = `use:${dd}:${code}`;
     const u = { ...USE0(), ...(await this.storage.get(k)) };
     u.rt_s = Math.round((num(u.rt_s) + ms / 1000) * 10) / 10;
     u.rt_reqs = num(u.rt_reqs) + num(n);
+    if (web) u.rt_web_s = Math.round((num(u.rt_web_s) + ms / 1000) * 10) / 10;
     await this.storage.put(k, u);
   }
 }

@@ -79,14 +79,38 @@ export function maxSessionS(env) {
 // 发 key 的请求体（官方 create_temporary_api_key）。
 // client_reference_id = 码名（`cl-<名字>-…` 的 <名字>）—— **绝不放完整码**：Soniox 侧与用量日志里
 // 只该看到名字，看到完整码就等于把一把能换成额度的凭据写进了别人的库。
-export function tempKeyBody({ name, maxSessionS: cap }) {
+// `ref` 给了就用它（网页版传 `webRef(名字)`，见下）；不给就退回名字（桌面那条路逐字不变）。
+export function tempKeyBody({ name, maxSessionS: cap, ref }) {
   return {
     usage_type: "transcribe_websocket",
     expires_in_seconds: KEY_TTL_S,
     single_use: true,               // 一把 key 只许开一条流（官方 single_use 就是干这个的）
     max_session_duration_seconds: cap,
-    client_reference_id: name,
+    client_reference_id: ref ?? name,
   };
+}
+
+// ---- 网页与桌面的实时转写怎么分账（2026-11-17）----
+// Worker 看不到音频流，用量只能靠 client_reference_id 回收；网页与桌面发的是同一把主 key 签的临时 key，
+// 唯一的区别就是这个字段。所以网页领的 key 在后面接一个 `-web` 后缀（`amy` -> `amy-web`），
+// 回收时按后缀拆回码名并记进另一个格（passes-core 的 `rt_web_s`）。
+// ⚠️ 撞车：码名形状是 NAME_RE = `[a-z0-9]{1,16}`，**不含 `-`**（passes-core 的 /admin/add 只收这个形状），
+//    所以 `amy` 与 `amy-web` 不可能同时是码名 —— 后缀在码名空间里是空的，拆得回来。
+//    加了 `-` 也不行（`amy-web` 的码名本身就带后缀，两边都指向 `amy`）。
+// ⚠️ 字符 / 长度：官方文档只说 client_reference_id 是个 string，**没写字符集与长度上限**；
+//    本仓没有它的本地缓存（docs/RESEARCH-soniox-v6-20261103.md §7.3 只记了「临时 key 下会被忽略」，
+//    而实测回收是能对上的，那条结论不正确）。所以按「只含 [a-z0-9-]」选后缀，最长 = 16 + 4 = 20 字符，
+//    不靠任何没核过的字符集假设。
+export const WEB_REF_SUFFIX = "-web";
+export const webRef = (name) => `${name}${WEB_REF_SUFFIX}`;
+
+// `amy-web` -> {name:"amy", web:true}；`amy` -> {name:"amy", web:false}。
+// 一律小写去空白（我们发出去的就是小写；上游回包若有大小写漂移也不至于把那一格记成一堆碎片名字）。
+export function splitRef(ref) {
+  const s = String(ref ?? "").trim().toLowerCase();
+  return s.endsWith(WEB_REF_SUFFIX)
+    ? { name: s.slice(0, -WEB_REF_SUFFIX.length), web: true }
+    : { name: s, web: false };
 }
 
 // 带超时的 fetch + JSON 解析：**响应体也算在超时里**（对方挂住不回包时不能一直等）。
@@ -109,11 +133,11 @@ async function fetchJson(timeoutMs, url, init) {
 
 // 发一把临时 key。回 {status, api_key}：api_key 只在「2xx 且回包里真有它」时非空，其余（上游 4xx/5xx、
 // 超时、回包缺字段）都是空串 —— 调用方据此回 502，**fail-closed**。
-export async function mintTempKey({ region, apiKey, name, maxSessionS: cap, timeoutMs = MINT_TIMEOUT_MS }) {
+export async function mintTempKey({ region, apiKey, name, ref, maxSessionS: cap, timeoutMs = MINT_TIMEOUT_MS }) {
   const r = await fetchJson(timeoutMs, `${apiBase(region)}/v1/auth/temporary-api-key`, {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-    body: JSON.stringify(tempKeyBody({ name, maxSessionS: cap })),
+    body: JSON.stringify(tempKeyBody({ name, ref, maxSessionS: cap })),
   });
   const api_key = r.ok && typeof r.body?.api_key === "string" ? r.body.api_key : "";
   return { status: r.status, api_key };

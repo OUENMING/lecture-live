@@ -9,6 +9,8 @@
     ClassLive.app/Contents/MacOS/python scripts/cl_admin.py revoke liming          # 吊销（unrevoke 恢复）
     ClassLive.app/Contents/MacOS/python scripts/cl_admin.py renew liming [--days 120]
     ClassLive.app/Contents/MacOS/python scripts/cl_admin.py limit liming --tokens 2000000 --asr-s none --devices 3
+    ClassLive.app/Contents/MacOS/python scripts/cl_admin.py limit liming --web-rt-s 7200
+                                                       # 网页日实时转写秒数（默认 5 h）；none = 不限，default = 跟随全局
     ClassLive.app/Contents/MacOS/python scripts/cl_admin.py delete cl-test-1778295d5eb5c1b0 --yes
                                                        # ⚠️ 不可逆：码 + 设备 + 全部用量一起没了
     ClassLive.app/Contents/MacOS/python scripts/cl_admin.py route                  # 看当前生效的对话上游表
@@ -94,6 +96,15 @@ def _limit_arg(v: str | None):
     return None if v.lower() in ("none", "null", "不限") else float(v)
 
 
+def _web_rt(v):
+    """网页日额度的三种状态 -> 人看的字：数字 / `none`=不限 / None=跟随全局。"""
+    if v == "none":
+        return "不限"
+    if v is None:
+        return "跟随全局"
+    return f"{v / 3600:.1f} 小时"
+
+
 UPSTREAMS = ("deepseek", "cc", "opencode")
 _SOURCE = (("stored", "你设的"), ("env", "env CHAT_ROUTES"), ("defaults", "默认"))
 
@@ -157,6 +168,8 @@ def main(argv=None) -> int:
     r = sub.add_parser("renew"); r.add_argument("who"); r.add_argument("--days", type=int, default=120)
     lim = sub.add_parser("limit"); lim.add_argument("who")
     lim.add_argument("--tokens"); lim.add_argument("--asr-s"); lim.add_argument("--devices", type=int)
+    # 网页实时转写的日额度：数字 = 秒；`none` = 不限；`default` = 跟随全局 WEB_DAILY_RT_S。
+    lim.add_argument("--web-rt-s", help="网页日实时转写秒数：数字 / none（不限）/ default（跟随全局）")
     dl = sub.add_parser("delete"); dl.add_argument("code"); dl.add_argument("--yes", action="store_true")
     rt = sub.add_parser("route")
     rt.add_argument("cls", nargs="?", help="调用类（note / polish / prep / chapter / * …）")
@@ -247,11 +260,16 @@ def main(argv=None) -> int:
             body["daily_tokens"] = _limit_arg(ns.tokens)
         if ns.asr_s is not None:
             body["daily_asr_s"] = _limit_arg(ns.asr_s)
+        if ns.web_rt_s is not None:
+            # 与另三项不同：`null` 在这里是「跟随全局」，`none` 才是「不限」（见 passes-core.webRtLimit）。
+            v = ns.web_rt_s.strip().lower()
+            body["daily_web_rt_s"] = None if v in ("default", "null", "全局", "跟随") else (
+                "none" if v in ("none", "unlimited", "不限") else float(v))
         if ns.devices:
             body["max_devices"] = ns.devices
         out = _post("limit", body)
         print(f"✅ {out['name']}：每天 token {out['daily_tokens'] or '不限'} · 转写秒 {out['daily_asr_s'] or '不限'}"
-              f" · 设备 {out['max_devices']}")
+              f" · 网页转写 {_web_rt(out.get('daily_web_rt_s'))} · 设备 {out['max_devices']}")
     return 0
 
 

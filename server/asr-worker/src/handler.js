@@ -19,7 +19,9 @@
 
 // ⚠️ **CHAIN 只在这里定义一处**；DO 从 /plan 请求里收，避免两处列表漂移。
 // 前提（2026-10-11 用 Owen 的 key 实测）：这三个能调通；带日期的快照 404；fun-asr-flash 要 format 参数没调通 -> 不进链。
-const CHAIN = ["qwen3-asr-flash", "qwen-audio-3.1-asr-flash", "qwen-audio-3.0-asr-flash"];
+// 2026-11-19：`qwen3-asr-flash` 国际站免费额度用完（403 FreeTierOnly，11-17 07:11Z 起），移出链；
+//   3.1 / 3.0 同日实测 200。DO 的 qwen_exhausted 早已跳过它，这里删掉是为了 DO 不可用的兜底路径也不白打一次。
+const CHAIN = ["qwen-audio-3.1-asr-flash", "qwen-audio-3.0-asr-flash"];
 const DO_NAME = "quota-v1";   // 要重置额度状态就改这个名字再部署
 
 const MAX_BYTES = 512 * 1024;                 // 12 s 段约 42 KB
@@ -985,7 +987,9 @@ async function tryQwen({ env, audio, sig, deadline, tried, report }, models) {
     if (r.status === 200) {
       const text = qwenText(r.body);
       if (typeof text === "string") return { text: text.trim(), model };
-    } else if (r.status === 400 && code === NO_WORDS) {
+    } else if (r.status === 400 && (code === NO_WORDS || r.body?.message === NO_WORDS)) {
+      // ⚠️ 实测（2026-11-19 国际站）：静音回 `{code:"CLIENT_ERROR", message:"ASR_RESPONSE_HAVE_NO_WORDS"}`，
+      //    只比 code 会把静音当失败 → 再试 3.0（静音回 400 {}）→ 整段 503。
       return { text: "", model };
     } else if (r.status === 403) {
       if (code === FREE_TIER_ONLY) { report({ exhausted: model }); continue; }   // 额度用完：永久跳过

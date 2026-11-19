@@ -337,6 +337,7 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_NOTE_WORKER` | `1` | 下课收尾**拆进程**：把笔记生成交给脱离父进程的 `note_worker`，主进程写完 `sessions/` 就退、放掉单实例锁（`note_worker.py`；所有权与判活在 `note_jobs.py`，`~/.classlive/note-jobs/`）。`0` = 退回进程内收尾 | 发布开关（2026-11-04）：本机自用验过、一版没出事后评估去开关 |
 | `CLASSLIVE_DEBUG_CTL` | 空（关） | **调试通道**（`debug_ctl.py` + `tools/clctl.py`）：Unix socket 一行一个 JSON，在**正在跑**的一节课上问状态 / 等条件（状态字段或事件计数）/ 发控制命令，拿结构化回复和退出码。关着时不起线程、不建 socket；`run_isolated.py` 默认开（D-2 接线）。socket 在 `<STATE_ROOT>/run/`（路径过长改放 `/tmp/classlive-ctl-<uid>/`，`ctl.path` 指过去） | 调试开关，长期；正式上课默认关 |
 | `CLASSLIVE_DEBUG_CTL_TEXT` | 空（关） | 调试通道的事件里带 `en` / `zh` 前 200 字（默认只有 `{seq,t,kind,n}`，不带正文；2026-11-17 作者已授权）—— `debug_ctl.emit` | 调试开关，长期 |
+| `CLASSLIVE_LLM_DIRECT` | `1` | 系统代理开着时，**翻译请求先直连** Worker，建连失败才走系统代理并冷却 5 分钟（Soniox 实时流不受影响）—— `direct_route.py` / `cloud_translator.CloudTranslator._make_direct`；`0` = 一律跟随系统代理（旧行为） | 发布开关（2026-11-19）：中国区真课验过、一版没出事后评估去开关 |
 | `CLASSLIVE_LIVE_SUMMARY` | `1` | 实时总结（章节合成 / 纲要落盘 / 发 streamq） | 运维开关，长期 |
 | `CLASSLIVE_LIVE_TERMS_MAX` | `40` | **课上候选词池**的上限（链路体检 ⭐2：已定稿文本里反复出现、过门的词进翻译候选池）—— `live_terms.LivePool`；撞上限按「本课出现句数 + 新近度」淘汰最少的/最旧的 | 运维开关，长期（调大 = 池子更全也更占上下文） |
 | `CLASSLIVE_JEV_TERMS` | `1` | **术语闸门**（链路体检 ⭐2 第五道门，E2 离线实验 AUC 0.976）：新候选词过一遍 Jev「像不像本课术语」，低于 `live_terms.JUDGE_MIN_P` 的砍掉（判过的不重问、硬超时 4 s）—— `main.make_term_judge`；`0` = 完全不装闸门 | 发布开关：真课过闸、一版没出事后评估去留 |

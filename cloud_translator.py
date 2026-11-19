@@ -12,6 +12,7 @@
 from __future__ import annotations
 import json, os, pathlib
 
+import direct_route
 import llm_client
 from translator import (Result, _StreamParser, _clean_fix, domain_block,
                         select_term_parts, term_zh_block)
@@ -298,6 +299,15 @@ class CloudTranslator:
         # Client 对并发请求线程安全(官方文档保证); 断网时池中陈旧连接会抛错,
         # 由 EngineRouter 降级 -> 探针恢复, 语义与每次新建连接一致。
         self._client = httpx.Client(timeout=self._timeout, limits=_pool_limits())
+        #: ⭐ 2026-11-19：系统代理开着时翻译先直连（`direct_route` 文件头）。没代理 / 开关关 → None，行为不变。
+        self._route = direct_route.DirectFirst()
+        self._direct = self._make_direct()
+
+    def _make_direct(self):
+        import httpx
+        if not direct_route.enabled() or not direct_route.system_proxy_for(self._base):
+            return None
+        return httpx.Client(timeout=self._timeout, limits=_pool_limits(), trust_env=False)
 
     def warmup(self) -> None:
         pass                                   # 云端无需预热
@@ -307,6 +317,7 @@ class CloudTranslator:
         旧池不关 —— 可能有请求正在用它; 没人引用后由 GC 收。"""
         import httpx
         self._client = httpx.Client(timeout=self._timeout, limits=_pool_limits())
+        self._direct = self._make_direct()        # 醒来可能换了网络 / 代理开关
 
     # ---- 工具 ----
     def _headers(self):
@@ -325,9 +336,9 @@ class CloudTranslator:
         if self._collect_usage:
             # usage 只在流末尾那个 choices 为空的块里返回, 由下面的循环接住。
             payload["stream_options"] = {"include_usage": True}
-        with self._client.stream("POST", f"{self._base}/chat/completions",
-                                 headers=self._headers(), json=payload,
-                                 timeout=self._timeout) as r:
+        with self._route.stream(self._direct, self._client, "POST", f"{self._base}/chat/completions",
+                                headers=self._headers(), json=payload,
+                                timeout=self._timeout) as r:
             r.raise_for_status()
             for line in r.iter_lines():
                 if not line or not line.startswith("data:"):

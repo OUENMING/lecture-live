@@ -176,3 +176,7 @@ enabled = true
 [vars]
 WEB_ORIGIN = "https://class.bldcam.page"
 WEB_DAILY_RT_S = "14400"
+# 2026-11-19 试验：中国 / 港澳的实时翻译也走 OpenRouter 快速通道（默认 CN,HK,MO 跳过）。
+#   依据：AE 首 token（double9）HKG→DeepSeek 官方 605–786 ms，OpenRouter（DUB/SJC）281–349 ms；
+#   「离 DeepSeek 近、绕美国反而慢」只在都柏林测过。回退：删掉这一行再部署（回到代码默认 CN,HK,MO）。
+FAST_LLM_SKIP = ""

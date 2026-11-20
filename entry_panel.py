@@ -187,6 +187,16 @@ def chip_apply(btn, title: str, *, running: bool, max_w: float) -> None:
     motion.render_status(btn, title, running=running)
 
 
+def no_captions(it: dict) -> bool:
+    """「语音模型」那一格：云端转写关了、本机又没有识别模型 = **上课完全没有字幕**。**纯函数**。
+
+    ⚠️ 2026-11-20（桌面 D1）删掉 Parakeet / Whisper 之后才有这一档：原来关云端 = 「全本地」，
+       现在没装 Nemotron 时关云端就什么都没有 —— 必须画成警告，不许写「全本地」。
+    """
+    return (it.get("key") == "models" and it.get("state") == "ok"
+            and bool(it.get("cloud_off")) and bool(it.get("no_local")))
+
+
 def ready_item_bad(it: dict) -> bool:
     """这一项算不算「要处理」。**纯函数**。
 
@@ -195,7 +205,7 @@ def ready_item_bad(it: dict) -> bool:
     ⚠️ `unknown` 也算（麦克风查不到 / 笔记库未设 / 翻译引擎没配 key）：它们是**入口**，
        不进这一档用户就没地方点（`_CHIP_VERB` 那个动词说清了点它会干嘛）。
     """
-    return it.get("state") != "ok" or bool(it.get("offer_draft"))
+    return it.get("state") != "ok" or bool(it.get("offer_draft")) or no_captions(it)
 
 
 #: 只有一项不正常时，胶囊在它后面补的那个动词 = 点了会干嘛。
@@ -271,6 +281,8 @@ def ready_item_text(it: dict) -> str:
        两者都不能省（见上面 HIG 那条）。
     """
     mark = _MARK.get(it.get("state", "unknown"), "—")
+    if no_captions(it):
+        mark = _MARK["warn"]             # 状态是 ok（模型清单齐），但上课会没字幕 → 警告
     if it.get("key") == "update" and it.get("state") == "todo":
         mark = "↑"                       # 「有东西可以装」，不是「没做完的待办」
     name = _READY_NAME.get(it.get("key", ""), it.get("key", ""))
@@ -279,7 +291,7 @@ def ready_item_text(it: dict) -> str:
     #    「✓」已经说了「没问题」，再跟一个状态词是重复。⚠️ 不正常时状态词**照留** ——
     #    `○ / ⚠ / —` 加一个词才说得清哪里不对、点了会干嘛（上面 HIG 那条：不只靠形状）。
     #    「更新」那格不省：它的「已是最新 / 已装好」是点完之后的回话。
-    if it.get("state") == "ok" and it.get("key") != "update":
+    if it.get("state") == "ok" and it.get("key") != "update" and not no_captions(it):
         if it.get("key") == "engine":
             name, short = f"{short}翻译", ""                 # 「翻译引擎  云端」→「云端翻译」
         elif it.get("key") == "models":
@@ -310,6 +322,8 @@ def ready_short(it: dict) -> str:
         if st == "busy":
             return "下载中…"
         if it.get("cloud_off"):
+            if it.get("no_local"):
+                return "云端已关 · 上课没字幕"   # 没本地模型时关云端 = 什么都没有（不许写「全本地」）
             return "已就绪 · 全本地"         # 关了云端转写要看得见（它不再是常驻开关）
         return "已就绪 · 识别模型未装（推荐）" if it.get("offer_draft") else "已就绪"
     if it.get("key") == "update":
@@ -384,7 +398,7 @@ def test_mode_title(on: bool) -> str:
 #: 「云端转写」不再是落点条上的常驻开关（2026-10-12 Owen：默认就是开，不必摆一颗关的按钮），
 #: 2026-10-16 起它是**标题行胶囊菜单**顶层那颗勾选项（`PLAN-396` §1）—— 要关的人点一下就找得到。
 CLOUD_ASR_TITLE = "云端转写 · 英文更准"
-CLOUD_ASR_TIP = "音频会发给 Soniox / Groq / 阿里云转写，换更准的英文；取消勾选 = 全本地"
+CLOUD_ASR_TIP = "音频会发给 Soniox / Groq / 阿里云转写，换更准的英文；取消勾选 = 全本地（要先下本地识别模型）"
 
 
 def cloud_item(*, cloud_on: bool, locked: bool) -> dict:
@@ -3122,7 +3136,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 _later(_status, f"下载失败：{str(e)[:70]}")
             finally:
                 S["downloading"] = False
-                _later(lambda: _set_models(state=_prev_state, offer_draft=not ok))
+                _later(lambda: _set_models(state=_prev_state, offer_draft=not ok,
+                                           **({"no_local": False} if ok else {})))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -3316,6 +3331,19 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         if cloud_asr_locked or on_cloud_asr is None:
             return
         on = not ca_on[0]
+        if not on and (ready_by_key.get("models") or {}).get("no_local"):
+            # ⚠️ 没本地模型时关云端 = 上课完全没字幕 → 先问；问不到人（fallback）= 保持开着
+            import notice
+            pick = notice.alert(
+                "关掉云端转写前，先下本地识别模型",
+                "这台 Mac 上还没有本地识别模型。现在关掉云端转写，上课会完全没有字幕。\n\n"
+                "本地模型 464 MB，下好后可以关掉云端（音频不出机器），断网时也有英文转录。",
+                buttons=("保持云端开", "下载本地模型"), fallback="保持云端开", gui=True)
+            if pick == "下载本地模型":
+                _download_draft()
+            else:
+                _status("云端转写保持开着")
+            return
         try:
             ok = on_cloud_asr(on) is not False
         except Exception:                                  # noqa: BLE001
@@ -3325,7 +3353,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             return
         ca_on[0] = on
         _set_models(cloud_off=not on)
-        _status("云端转写已开 —— 定稿英文更准" if on else "云端转写已关 —— 这台机器上全本地")
+        _status("云端转写已开 —— 定稿英文更准" if on else "云端转写已关 —— 这台机器上全本地")  # 没本地模型时上面已拦下
 
     def _models_submenu(keep: list):
         """「语音模型」那一行的子菜单 —— 模型的事（下载缺的 / 下载草稿）。

@@ -191,7 +191,7 @@ def main() -> int:
         import final_asr
         ok = final_asr.write_config(on)
         if ok:
-            print(f"云端转写{'已开 —— 定稿音频片段会发给云端识别' if on else '已关 —— 全本地'}")
+            print(f"云端转写{'已开 —— 定稿音频片段会发给云端识别' if on else '已关 —— 全本地（本地识别模型）'}")
         return ok
 
     def on_restart() -> None:

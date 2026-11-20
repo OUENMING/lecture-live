@@ -100,6 +100,10 @@ def models_item(states: dict, *, draft_wanted: bool = False) -> dict:
        **任何时候都不自动下**（Owen 2026-11-20 选 B）：只在用户点「现在下载」/ 菜单那一项时下。
     """
     out = _models_item(states)
+    # `no_local` = 这台机器上**没有本地识别**（没装 Nemotron，或草稿被开关关了）。
+    #   面板用它防「关掉云端转写 = 上课完全没字幕」那一档撒谎（原文案写「全本地」）。
+    if out["state"] == OK and (not draft_wanted or states.get(models.NEMOTRON.path) == "missing"):
+        out["no_local"] = True
     if (draft_wanted and out["state"] == OK
             and states.get(models.NEMOTRON.path) == "missing"):
         out["offer_draft"] = True

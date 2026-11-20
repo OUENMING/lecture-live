@@ -1585,6 +1585,19 @@ def _cloud_asr_section() -> None:
     check("⭐ 关了云端 → 那一格写「已就绪 · 全本地」（不再有常驻开关，状态要看得见）",
           E.ready_item_text({**_ok, "cloud_off": True}) == "✓  语音模型  全本地",
           E.ready_item_text({**_ok, "cloud_off": True}))
+    # ── ⭐⭐ 2026-11-20（D1）：没本地模型时关云端 = 上课没字幕，不许写「全本地」 ──
+    _nc = {**_ok, "cloud_off": True, "no_local": True}
+    check("⭐⭐ 关了云端 + 没本地模型 → 「⚠ 语音模型  云端已关 · 上课没字幕」（不是 ✓ 全本地）",
+          E.ready_item_text(_nc) == "⚠  语音模型  云端已关 · 上课没字幕", E.ready_item_text(_nc))
+    check("⭐⭐ 这一档算「要处理」（胶囊不能写「✓ 已就绪」）",
+          E.ready_item_bad(_nc) and E.ready_chip([_nc])[1] == "one", str(E.ready_chip([_nc])))
+    check("⭐ 云端开着、没本地模型 → 不算没字幕（全走云端照常）",
+          not E.no_captions({**_ok, "no_local": True}) and E.no_captions(_nc))
+    import ready as _ready_pure
+    import models as _models_pure
+    check("⭐ ready.models_item：Nemotron 缺 → no_local；装了 → 没有 no_local",
+          _ready_pure.models_item({_models_pure.NEMOTRON.path: "missing"}, draft_wanted=True).get("no_local") is True
+          and not _ready_pure.models_item({_models_pure.NEMOTRON.path: "ok"}, draft_wanted=True).get("no_local"))
     check("只有一颗开关（测试模式）时 y = 垂直居中",
           abs(E.switch_y(0, 1) - (E.DROP_H - E.BTN_H) / 2.0) < 1e-9, str(E.switch_y(0, 1)))
 
@@ -1691,6 +1704,32 @@ def _cloud_asr_section() -> None:
             finally:
                 if h is not None:
                     h.close()
+
+            # ── ⭐⭐ 没本地模型时点「关云端」→ 先弹框；选「保持云端开」= 不翻、回调不调 ──
+            import notice as _notice
+            _asked: list = []
+            _orig_alert = _notice.alert
+            _notice.alert = lambda title, *a, **k: (_asked.append((title, k.get("fallback"))), "保持云端开")[1]
+            _nl = [dict(i) for i in _OK4]
+            _nl[1] = {"key": "models", "state": "ok", "no_local": True}
+            calls2: list = []
+            h2 = _build("nl", _nl, on_test_mode=lambda on: True, test_mode=False,
+                        on_cloud_asr=lambda on: (calls2.append(on), True)[1], cloud_asr=True)
+            try:
+                _, m_a = _open_menu(h2) if h2 is not None else (None, None)
+                c_a = _row(m_a, "云端转写") if m_a is not None else None
+                if c_a is not None:
+                    _act(c_a)
+                _, m_b = _open_menu(h2) if h2 is not None else (None, None)
+                c_b = _row(m_b, "云端转写") if m_b is not None else None
+                check("⭐⭐ 没本地模型 → 点「云端转写」先弹框（问不到人 = 保持云端开），选保持 → 不关、回调没调",
+                      len(_asked) == 1 and _asked[0][1] == "保持云端开" and calls2 == []
+                      and c_b is not None and c_b.state() == 1,
+                      f"asked={_asked} calls={calls2} state={c_b and c_b.state()}")
+            finally:
+                _notice.alert = _orig_alert
+                if h2 is not None:
+                    h2.close()
 
             # ── ⭐ 缺模型那一档：「语音模型」行给子菜单，里面能点「下载缺的模型」 ──
             #    ⚠️ **不点它**（会真下模型）—— 只钉「有这一项、可点、target 活着」。

@@ -3635,9 +3635,10 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         import whatsnew
         _queue_card("draft", lambda: whatsnew.build(
             "推荐下载：识别模型（464 MB）", "断网时也能有英文转录",
-            body=(f"平时字幕走云端，装上这个之后**断网 / 云端识别失败时也还有英文转录**；"
-                  f"顺带课上的中文草稿基本不再改来改去（实测回改 5.7% → 0.6%），也更省电。"
-                  f"下载{size}，最好连着 Wi-Fi 下。"),
+            # ⚠️ body 是纯文本，不渲染 Markdown —— 别写 `**`（11-20 截图里星号原样露出来）。
+            body=(f"平时字幕走云端。装上之后，断网或云端识别出问题时也还有英文转录；"
+                  f"课上的中文草稿也基本不再改来改去（实测回改 5.7% → 0.6%）。"
+                  f"下载{size.replace(' MB', '\u00a0MB')}，最好连着 Wi-Fi。"),   # 不间断空格：数字和 MB 不折开
             note="不装也能正常上课（全走云端）。关掉 ClassLive 后会在后台自动下好，下节课生效。",
             buttons=[("稍后", _card_done(lambda: _status("好 —— 关掉 ClassLive 后在后台下识别模型")),
                       "secondary"),

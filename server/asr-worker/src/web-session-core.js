@@ -130,3 +130,18 @@ export function endDecision(meta, job, { lines_total, level } = {}) {
   }
   return { dedupe: false };
 }
+
+// 任务状态同步（W22，契约 CONTRACT-runner-20261120.md §2）：全局 RunnerHub 在 complete / 变 failed 时
+// 回写每码账本。只改列出的这几个字段，别的一个都不动（queued_at / lines_total 不许被覆盖）；
+// job_id 不符（这枚码下没有这条任务）-> 409。不做 I/O，返回新 job 或 {error}。
+export const JOB_STATUS = new Set(["queued", "running", "done", "failed"]);
+export function jobUpdate(job, { job_id, status, attempt, objects, reason } = {}) {
+  if (!job) return { error: "not_found" };
+  if (job.job_id !== job_id) return { error: "job_mismatch" };
+  if (!JOB_STATUS.has(status)) return { error: "bad_body", detail: "status" };
+  const next = { ...job, status };
+  if (Number.isInteger(attempt)) next.attempts = attempt;
+  if (objects !== undefined) next.objects = Array.isArray(objects) ? objects : null;
+  if (reason !== undefined) next.reason = typeof reason === "string" ? reason : null;
+  return { job: next };
+}

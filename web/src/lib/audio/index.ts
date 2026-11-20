@@ -15,6 +15,8 @@ export interface AudioSource {
 	stop(): void;
 	/** 0..1 电平，给「6 秒没声音提示检查麦克风」用（E1） */
 	readonly level: number;
+	/** 正在采的流（课堂录音克隆它；换麦后会变成新流）。可选 —— 磁带源没有。 */
+	readonly stream?: MediaStream | null;
 	/**
 	 * 上课中途换输入设备：只换流与源节点，帧序号 / 回调 / 下游连接全保留（W14）。
 	 * 可选 —— 磁带源等实现没有。resolve false = 换失败，原设备还在采。

@@ -102,7 +102,9 @@ export function memoryStore(opts: MemoryOptions = {}): LineStore {
 			const floor = now() - days * 86_400_000;
 			let removed = 0;
 			for (const s of [...sessions.values()]) {
-				if (s.ended_at !== null && s.ended_at < floor) {
+				// 还有没传上去的句子（离线下课、一直没补传成功）不删 —— 删了就再也找不回（OCR B）
+				const maxSeq = Math.max(0, ...[...(lines.get(s.session_id)?.keys() ?? [])].map(Number));
+				if (s.ended_at !== null && s.ended_at < floor && maxSeq <= s.acked_seq) {
 					sessions.delete(s.session_id);
 					lines.delete(s.session_id);
 					removed++;

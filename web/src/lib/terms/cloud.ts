@@ -159,9 +159,11 @@ export async function retryPendingTerms(api: TermsPutApi): Promise<number> {
 /** 一门课的处理结果：本机赢就要补推，服务端赢就直接落本机 */
 type Verdict = 'local' | 'remote' | 'same';
 
-function decide(course: string, remoteAt: number): Verdict {
+function decide(course: string, remoteAt: number, remoteText: string): Verdict {
 	const local = metaOf(course);
 	if (hasPending(course)) return 'local';
+	// OCR B：本机有内容但从没和服务端对齐过（meta=0，例如老版本留下的）→ 别拿远端盖掉（localStorage 盖了找不回），本机赢、补推
+	if (local === 0 && termsText(course).trim() && termsText(course) !== remoteText) return 'local';
 	if (remoteAt > local) return 'remote';
 	return 'same';
 }
@@ -185,7 +187,7 @@ export async function pullTerms(api: TermsApi): Promise<{ updated: number }> {
 		const c = course.trim();
 		if (!c || !entry || typeof entry.text !== 'string') continue;
 		const remoteAt = typeof entry.updated_at === 'number' ? entry.updated_at : 0;
-		const verdict = decide(c, remoteAt);
+		const verdict = decide(c, remoteAt, entry.text);
 		if (verdict === 'local') {
 			// 本机赢：把本机这份补推上去（失败它会自己排队）
 			await pushTerms(api, c, termsText(c));

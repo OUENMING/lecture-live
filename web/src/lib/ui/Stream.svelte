@@ -54,14 +54,42 @@
 
 	let vp: HTMLDivElement;
 	let col: HTMLDivElement;
+	let track: HTMLDivElement;
 	const DUR = 420;
+
+	/**
+	 * 上一句译完才让位（桌面 `caption_flow` ② 的同一条，HOLD_MAX_S=2.5）：刚封口、定稿译文还在来的那句
+	 * 留在最底下那格原地升级；下一句的草稿先不上屏。不挡的话每句都「译到一半就被顶上去」，
+	 * 眼睛一边看下一句、一边被上面还在改字的那句拽回去（2026-11-20 Owen：焦点反复跳、上一句仍在改）。
+	 */
+	const HOLD_MS = 2500;
+	let heldId = $state<number | null>(null);
+	let heldSeen = -1;
+	let holdTimer: ReturnType<typeof setTimeout> | undefined;
+	$effect(() => {
+		const l = rows.at(-1);
+		if (!l?.pending) {
+			heldId = null;
+			return;
+		}
+		if (l.id === heldSeen) return;
+		heldSeen = l.id;
+		heldId = l.id;
+		clearTimeout(holdTimer);
+		holdTimer = setTimeout(() => {
+			if (heldId === l.id) heldId = null;
+		}, HOLD_MS);
+	});
+	const holding = $derived(heldId !== null && latest?.id === heldId && !!latest?.pending);
+	/** 草稿行在不在：没英文（只剩上一句的中文）/ 上一句还没译完 → 不占行，最新那句贴底 */
+	const showDraft = $derived(!!draftEn && !holding);
 
 	/** 跳到某一句（侧栏里点标记 / 时间轴用） */
 	export function jumpTo(id: number) {
 		const el = col.querySelector<HTMLElement>(`[data-id="${id}"]`);
 		if (!el) return;
 		following = false;
-		el.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+		el.scrollIntoView({ block: 'center', behavior: winOf().matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
 		el.classList.remove('flash');
 		void el.offsetWidth;
 		el.classList.add('flash');
@@ -71,20 +99,40 @@
 		vp.scrollTop = vp.scrollHeight;
 	}
 
+	/**
+	 * 这列字幕所在的窗口。⚠️ 置顶小窗（Document PiP）是另一个 document：ResizeObserver / matchMedia /
+	 * getComputedStyle 必须用**小窗自己的** window 造 —— 用主页面的 ResizeObserver 观察小窗里的元素，
+	 * 回调只在主页面渲染时才派发；主页面在后台（学生正盯着小窗）时就不派发，字幕不跟到底、卡住，
+	 * 等主页面偶尔渲染一次才一下跳到最新（2026-11-20 Owen 实测「卡 7–8 秒再跳」）。
+	 */
+	function winOf(): Window & typeof globalThis {
+		return (vp?.ownerDocument?.defaultView ?? window) as Window & typeof globalThis;
+	}
+
+	// 兜底：每次字幕变了都在 DOM 更新后贴底一次，不靠 ResizeObserver 有没有派发（小窗 / 后台都成立）
+	$effect(() => {
+		void rows.length;
+		void rows.at(-1)?.zh;
+		void draftEn;
+		void draftZh;
+		if (following && vp) vp.scrollTop = vp.scrollHeight;
+	});
+
 	onMount(() => {
-		const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+		const win = winOf();
+		const reduce = win.matchMedia('(prefers-reduced-motion: reduce)').matches;
 		let anchor: HTMLElement | null = null;
 		let anchorDist = 0;
-		const dist = (el: HTMLElement) => col.offsetHeight - el.offsetTop;
+		const dist = (el: HTMLElement) => track.offsetHeight - el.offsetTop;
 		const pickAnchor = () => {
-			const rowsEls = col.querySelectorAll<HTMLElement>('.row[data-id]');
+			const rowsEls = track.querySelectorAll<HTMLElement>('.row[data-id]');
 			anchor = rowsEls[rowsEls.length - 1] ?? null;
 			anchorDist = anchor ? dist(anchor) : 0;
 		};
 		pickAnchor();
 		vp.scrollTop = vp.scrollHeight;
 
-		const ro = new ResizeObserver(() => {
+		const ro = new win.ResizeObserver(() => {
 			if (!following) {
 				pickAnchor();
 				return;
@@ -94,15 +142,18 @@
 			pickAnchor();
 			if (!d || reduce) return;
 			// 还在滑的话，从此刻的位置接着滑，不会顿一下
-			const now = new DOMMatrixReadOnly(getComputedStyle(col).transform).m42;
-			col.style.transition = 'none';
-			col.style.transform = `translate3d(0, ${now + d}px, 0)`;
-			void col.offsetHeight;
-			col.style.transition = `transform ${DUR}ms var(--ease)`;
-			col.style.transform = 'translate3d(0, 0, 0)';
+			const now = new win.DOMMatrixReadOnly(win.getComputedStyle(track).transform).m42;
+			track.style.transition = 'none';
+			track.style.transform = `translate3d(0, ${now + d}px, 0)`;
+			void track.offsetHeight;
+			track.style.transition = `transform ${DUR}ms var(--ease)`;
+			track.style.transform = 'translate3d(0, 0, 0)';
 		});
-		ro.observe(col);
-		return () => ro.disconnect();
+		ro.observe(track);
+		return () => {
+			ro.disconnect();
+			clearTimeout(holdTimer);
+		};
 	});
 
 	// 只有用户往上的意图才停止跟随；滚到底自动恢复
@@ -134,15 +185,19 @@
 		{ontouchmove}
 		{onscroll}
 	>
+		<!-- 位移只做在 .track 上、.col 把它剪掉：transform 会撑大滚动区，贴底代码一追 scrollTop，
+		     FLIP 就被抵消成「先错位一帧、再一下跳到位」（2026-11-20 逐帧量：切句 88 次单帧跳 >20px） -->
 		<div class="col" bind:this={col}>
+			<div class="track" bind:this={track}>
 			{#each rows as row, i (row.id)}
 				<!-- svelte-ignore a11y_no_noninteractive_tabindex -- 只有传了 onmark 时才有 role=button 和 tabindex -->
 				<div
 					class="row"
 					class:marked={marked.has(row.id)}
+					class:pending={row.pending}
 					class:markable={!!onmark}
 					data-id={row.id}
-					style:--age={rows.length - 1 - i}
+					style:--age={rows.length - 1 - i + (showDraft ? 1 : 0)}
 					role={onmark ? 'button' : undefined}
 					tabindex={onmark ? (i === rows.length - 1 ? 0 : -1) : undefined}
 					aria-pressed={onmark ? marked.has(row.id) : undefined}
@@ -151,12 +206,16 @@
 					onkeydown={onmark ? (e) => rowKey(e, row) : undefined}
 				>
 					<p class="en" lang="en">{row.en}</p>
-					<p class="zh" lang="zh-CN">{row.zh || row.en}</p>
+					<!-- 英文顶替中文只给「翻译失败」的句子；还在译的留空行（高度已预留），不闪英文 -->
+					<p class="zh" lang="zh-CN">{row.zh || (row.pending ? '' : row.en)}</p>
 				</div>
 			{/each}
-			<div class="row draft" class:empty={!draftEn && !draftZh}>
-				<p class="en" lang="en"><Grow text={draftEn} /></p>
-				<p class="zh" lang="zh-CN"><Grow text={draftZh} /></p>
+			{#if showDraft}
+				<div class="row draft">
+					<p class="en" lang="en"><Grow text={draftEn} /></p>
+					<p class="zh" lang="zh-CN"><Grow text={draftZh} /></p>
+				</div>
+			{/if}
 			</div>
 		</div>
 	</div>
@@ -201,17 +260,23 @@
 		display: flex;
 		flex-direction: column;
 		justify-content: flex-end;
-		gap: calc(var(--z) * 0.9);
 		/* 左右留出悬停底色和标记竖线的位置，不然会被滚动容器切掉 */
 		padding: 0 calc(var(--z) * 0.75) 2px;
+		overflow: clip;
+	}
+	.track {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		gap: calc(var(--z) * 0.9);
 		will-change: transform;
 	}
 	.row {
 		position: relative;
 		max-width: 34em;
 		font-size: var(--z);
-		/* 越旧越淡：最新定稿 1，往上每行降一档，最淡 --age-floor；回看时全部恢复 */
-		opacity: max(var(--age-floor, 0.5), calc(1 - var(--age) * 0.14));
+		/* 越旧越淡：最底那句（草稿或刚封口的）1，往上每行降一档（桌面 AGE_DIM 1/.78/.56），最淡 --age-floor；回看时全部恢复 */
+		opacity: max(var(--age-floor, 0.5), calc(1 - var(--age) * 0.22));
 		transition: opacity var(--move) var(--ease);
 	}
 	.reviewing .row {
@@ -236,6 +301,9 @@
 		letter-spacing: 0.012em;
 		color: var(--on-glass);
 		font-feature-settings: 'palt';
+		/* 空着也占一行：草稿译文来 / 走、定稿译文到之前，行高都不变 —— 行高一变，整列就跳一行 */
+		min-height: calc(1em * 1.42);
+		transition: color var(--move) var(--ease);
 	}
 	[data-mode='zh'] .en,
 	[data-mode='en'] .zh {
@@ -253,14 +321,18 @@
 		opacity: 1;
 	}
 	.draft .en {
-		color: var(--draft-en);
+		color: var(--on-glass-2);
 	}
 	.draft .zh {
 		color: var(--draft-zh);
 		font-weight: 400;
 	}
-	.draft.empty {
-		visibility: hidden;
+	/* 占位只换颜色、不换字重：字重一变宽度就变，换行跟着变，行高又跳 */
+	.pending .zh {
+		color: var(--draft-zh);
+	}
+	.en {
+		min-height: calc(1em * 1.45);
 	}
 	.draft p:empty::before {
 		content: '\200b';

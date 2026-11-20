@@ -34,7 +34,11 @@ function memStorage() {
     map: m,
     get: async (k) => (m.has(k) ? structuredClone(m.get(k)) : undefined),
     put: async (k, v) => { m.set(k, structuredClone(v)); },
-    delete: async (k) => { for (const kk of [].concat(k)) m.delete(kk); },
+    // 平台真规矩：多键 delete 一次最多 128 个，超了抛（OCR D2 —— 假件原来不拦，删除路径的 bug 测不出来）
+    delete: async (k) => {
+      if (Array.isArray(k) && k.length > 128) throw new Error("delete: max 128 keys");
+      for (const kk of [].concat(k)) m.delete(kk);
+    },
     list: async ({ prefix = "" } = {}) => new Map([...m].filter(([k]) => k.startsWith(prefix))),
   };
 }
@@ -380,6 +384,21 @@ test("S9 删除：先账本后 R2；GET 410（tombstone）/ PUT 410；再删一�
   assert.deepEqual(again.deleted, { sessions: 0, jobs: 0, objects: 0 }, "幂等：第二次各计数为 0");
 });
 
+test("S9b OCR D2：一节 300 句的课也删得掉（DO 多键 delete 上限 128）", async () => {
+  const h = harness();
+  const code = await h.addCode();
+  const { session_id } = await (await h.send(h.web("/v1/web/session", { code, body: { course: "X" } }))).json();
+  for (let b = 0; b < 3; b++) {
+    const lines = Array.from({ length: 100 }, (_, i) => L(b * 100 + i + 1));
+    const r = await h.send(h.web(`/v1/web/session/${session_id}/lines`, { code, method: "PUT", body: { lines } }));
+    assert.equal(r.status, 200);
+  }
+  const del = await h.send(h.web("/v1/web/data", { code, method: "DELETE", body: { confirm: "delete-all-my-data" } }));
+  assert.equal(del.status, 200);
+  const gone = await h.send(h.web(`/v1/web/session/${session_id}`, { code, method: "GET" }));
+  assert.equal(gone.status, 410);
+});
+
 // ---------- 5. 桌面不变 ----------
 test("S10 桌面不变：老四条路由照旧、GET / 未知路径仍 404、/v1/web/* 用桌面身份 403", async () => {
   const h = harness();
@@ -412,4 +431,26 @@ test("S11 预检：新路径（session / lines / data）仍回 204 + 回显那�
     assert.equal(res.headers.get("access-control-allow-origin"), ORIGIN, path);
     assert.equal(res.headers.get("vary"), "Origin", path);
   }
+});
+
+// 2026-11-20 01:21:23 UTC：下课时浏览器并发推了一批同样的句子，几十个 PUT 落到同一个 R2 键 lines-<起始seq>.json，
+// R2 对同一对象的并发写回 10058（Reduce your concurrent request rate for the same object）→ Worker 抛异常记 500。
+// 判据：同一键并发写时 R2 会拒（桩照真 R2 的规矩），但 Worker 不该因此回 5xx，最后对象内容正确。
+test("S5b 同一批并发重放：R2 同键 10058 不冒成 5xx（同键串行 + 退避重试）", async () => {
+  const h = harness();
+  const busy = new Set();
+  const realPut = h.env.WEB_DATA.put;
+  h.env.WEB_DATA.put = async (k, v) => {
+    if (busy.has(k)) throw new Error("put: Reduce your concurrent request rate for the same object. (10058)");
+    busy.add(k);
+    try { await new Promise((r) => setTimeout(r, 5)); await realPut(k, v); } finally { busy.delete(k); }
+  };
+  const code = await h.addCode();
+  const { session_id } = await (await h.send(h.web("/v1/web/session", { code, body: { course: "X" } }))).json();
+  const put = () => h.send(h.web(`/v1/web/session/${session_id}/lines`, { code, method: "PUT", body: { lines: [L(1), L(2), L(3)] } }));
+  const rs = await Promise.all(Array.from({ length: 12 }, () => put().catch((e) => ({ status: 599, err: e }))));
+  const bad = rs.filter((r) => r.status >= 500).map((r) => r.status);
+  assert.deepEqual(bad, [], `并发同批不该有 5xx：${bad.join(",")}`);
+  const keys = [...h.env.WEB_DATA.map.keys()].filter((k) => k.includes(session_id));
+  assert.equal(keys.length, 1);
 });

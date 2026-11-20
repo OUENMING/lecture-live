@@ -129,12 +129,40 @@ export function createSyncer(deps: SyncDeps): Syncer {
 		arm(st.next_at);
 	};
 
-	/** 发一轮；成功且还有剩就接着发（每次至少前进一句，pending 有限 → 必然收敛） */
-	const send = async (): Promise<void> => {
-		if (stopped || st.in_flight) return;
+	/** 正在跑的那一轮（含 `await pending()` 那一拍）；非 null 时别的调用只标 dirty 并等它 */
+	let running: Promise<void> | null = null;
+
+	/**
+	 * 单飞：任何时刻最多一轮在跑。闸必须在**第一个 await 之前**同步关上 —— 以前只靠 `st.in_flight`，
+	 * 而它在 `await pending()` 之后才置位，下课时 connect.end() 连推几十次 push，每次都从这道缝钻进来，
+	 * 一秒并发 95 个 PUT 打同一个 Durable Object（2026-11-20 01:21:23 UTC，10058）。
+	 * 并发进来的调用拿到的是同一个 promise：flush() 因此真的等到推完，而不是看到在飞就直接返回。
+	 */
+	const send = (): Promise<void> => {
+		if (stopped) return Promise.resolve();
+		if (running) {
+			dirty = true;
+			return running;
+		}
+		running = (async () => {
+			try {
+				for (;;) {
+					dirty = false;
+					const more = await sendOnce();
+					if (stopped || !(more || dirty)) break;
+				}
+			} finally {
+				running = null;
+			}
+		})();
+		return running;
+	};
+
+	/** 发一批；返回 true = 有进展且还有剩（或在飞时又来了句子），该接着发 */
+	const sendOnce = async (): Promise<boolean> => {
 		if (st.next_at > clock.now()) {
 			arm(st.next_at);
-			return;
+			return false;
 		}
 
 		let pending: Line[];
@@ -143,13 +171,13 @@ export function createSyncer(deps: SyncDeps): Syncer {
 		} catch (e) {
 			st.last_error = e;
 			scheduleFailure();
-			return;
+			return false;
 		}
 		if (pending.length === 0) {
 			pushes = 0;
 			firstPushAt = 0;
 			emit();
-			return;
+			return false;
 		}
 
 		const batch = pending.slice(0, maxBatch);
@@ -167,7 +195,7 @@ export function createSyncer(deps: SyncDeps): Syncer {
 			st.in_flight = false;
 			st.last_error = e;
 			scheduleFailure();
-			return;
+			return false;
 		}
 
 		st.in_flight = false;
@@ -182,31 +210,27 @@ export function createSyncer(deps: SyncDeps): Syncer {
 			pushes = 0;
 			firstPushAt = 0;
 			emit();
-			// 在飞期间又来了句子：那些还没发过
-			if (dirty) {
-				dirty = false;
-				await send();
-			}
-			return;
+			// 在飞期间又来了句子：由 send() 的循环看 dirty 再跑一轮
+			return false;
 		}
 		if (confirmed <= prevAcked) {
 			// 服务器一句都没确认（没进展）：当失败退避，不让它空转
 			scheduleFailure();
-			return;
+			return false;
 		}
 
 		st.failures = 0;
 		st.next_at = 0;
 		pushes = rest.length;
 		emit();
-		await send();
+		return true;
 	};
 
 	return {
 		push() {
 			if (stopped) return;
-			if (st.in_flight) {
-				dirty = true; // 这一批收尾后会再跑一轮
+			if (running) {
+				dirty = true; // 这一轮收尾后会再跑一轮
 				return;
 			}
 			if (st.next_at > clock.now()) return; // 退避中：重试定时器会一次补齐

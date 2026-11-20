@@ -16,8 +16,13 @@ const methodsFor = (path) => (path.startsWith(WEB_PREFIX) ? WEB_ALLOW_METHODS : 
 const ALLOW_HEADERS = [
   "Authorization", "Content-Type", "X-ClassLive-Install", "X-ClassLive-Version",
   "X-ClassLive-Tz", "X-ClassLive-Call", "X-ClassLive-Client",
+  // 网页版开课带它（web-session.ts：24 h 内重复提交回同一 session_id）；漏了它预检必挂（2026-11-20 生产 e2e 实测 CORS 拦截）
+  "Idempotency-Key",
 ].join(", ");
 const MAX_AGE = "600";
+// W20：`/v1/web/telemetry` 与 `PUT /v1/web/audio/…` 会回 `x-cl-telemetry: off`（开关关掉时的 204）。
+// 自定义响应头浏览器默认**不给 JS 看**，不 expose 的话网页侧读不到「这次到底收没收到」。只对 /v1/web/* 加。
+const EXPOSE_HEADERS = "x-cl-telemetry";
 
 const webPath = (path) => PATHS.has(path) || path.startsWith(WEB_PREFIX);
 
@@ -58,5 +63,6 @@ export function withCors(request, env, res) {
   const h = new Headers(res.headers);
   h.set("access-control-allow-origin", origin);
   h.append("vary", "Origin");
+  if (web) h.set("access-control-expose-headers", EXPOSE_HEADERS);
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
 }

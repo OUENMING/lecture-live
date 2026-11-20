@@ -28,7 +28,8 @@
 		"test:after": "node --import tsx --test tests/after/*.test.ts",
 		"test:terms": "node --import tsx --test tests/terms/*.test.ts",
 		"test:translate": "node tests/translate/run.mjs",
-		"test:prep": "node --import tsx --test tests/prep/*.test.ts"
+		"test:prep": "node --import tsx --test tests/prep/*.test.ts",
+		"test:telemetry": "node --import tsx --test tests/telemetry/*.test.ts"
 	},
 	"devDependencies": {
 		"@lucide/svelte": "^1.74.0",

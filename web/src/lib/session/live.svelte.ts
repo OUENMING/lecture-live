@@ -24,6 +24,8 @@ export interface CapRow {
 	zh: string;
 	/** 这句的音频起点（秒） */
 	t: number;
+	/** 定稿译文还没到：zh 是草稿译文占位（或空），界面按草稿样式显示，且不拿英文顶替中文那行 */
+	pending?: boolean;
 }
 
 /** 一份译文的一次变化（`Translator` 的回调；本模块只负责落进行和打点）。 */
@@ -39,6 +41,8 @@ export interface TranslationEvent {
 export const SILENCE_FRAMES = 60;
 /** 「有声」的电平下限：与桌面 vad 的 `min_rms` 同口径，不做 dB 换算。 */
 export const LOUD_LEVEL = 0.008;
+/** 草稿桥换手点：定稿中文长到占位（封口时的草稿译文）的这个比例就换上（桌面 caption_flow.BRIDGE_RATIO） */
+export const BRIDGE_RATIO = 0.6;
 
 export interface LiveDeps {
 	audio: AudioSource;
@@ -95,7 +99,10 @@ export class LiveSession {
 	#waiters: Waiter[] = [];
 	#tr: Translator | null = null;
 	/** 每句的译文与打点（`latency()` 的唯一来源；界面不读）。 */
-	#trRows = new Map<number, { zh: string; en: string; state: 'none' | 'draft' | 'final' | 'failed' }>();
+	#trRows = new Map<
+		number,
+		{ zh: string; en: string; state: 'none' | 'draft' | 'final' | 'failed'; /** 封口那一刻的草稿译文 */ ph: string }
+	>();
 	#samples = new Map<number, LatencySample & { tAudioEnd: number | null }>();
 	/** 每句的音频起点（秒），接 `t_s` 与打点用 */
 	#sealedAt = new Map<number, number>();
@@ -104,6 +111,8 @@ export class LiveSession {
 	#draftStartAt = new Map<number, number>();
 	/** 草稿送翻节流（桌面 `draft_policy` 的 novel 档）：不然每变一个词就发一次请求 */
 	#gate = new DraftGate();
+	/** 草稿槽此刻显示的中文（普通字段：封口时要读，别去读 $state 那份） */
+	#shownDraftZh = '';
 
 	constructor(deps: LiveDeps) {
 		this.#deps = deps;
@@ -276,7 +285,11 @@ export class LiveSession {
 	/** 一句刚封口：记打点、排进翻译队列（串行，一句接一句）。 */
 	#newFinal(seg: number, en: string, t_s: number): void {
 		this.#sealedAt.set(seg, t_s);
-		this.#trRows.set(seg, { zh: '', en, state: 'none' });
+		// 封口时把正在看的草稿译文接过来当占位：中文那行不消失、不先变英文再重打（2026-11-20 实测每句都闪）。
+		// 草稿槽同时清空，免得同一句中文上下各一份。
+		const ph = this.#shownDraftZh.trim();
+		this.#trRows.set(seg, { zh: '', en, state: 'none', ph });
+		if (ph) this.#onDraftZh('');
 		this.#samples.set(seg, {
 			// 段尾 → 封口：最后一次看到这句还是草稿的时刻（桌面 `seg_to_zh` 的拆分口径）
 			tAudioEnd: this.#draftStartAt.get(seg) ?? null,
@@ -292,7 +305,11 @@ export class LiveSession {
 	#render(): void {
 		const out: CapRow[] = [];
 		for (const [seg, r] of [...this.#trRows].sort((a, b) => a[0] - b[0])) {
-			out.push({ id: seg, en: r.en, zh: r.zh, t: this.#sealedAt.get(seg) ?? 0 });
+			const settled = r.state === 'final' || r.state === 'failed';
+			// 定稿译文逐字流进来时，长到占位的 BRIDGE_RATIO 之前继续显示占位：整句只换一次，不从一两个字重新长。
+			// 比例同桌面 `caption_flow.BRIDGE_RATIO`：原来要追满占位长度，定稿比草稿短时旧草稿一直挂到译完（Owen：译文滞留）
+			const zh = settled || r.zh.length >= BRIDGE_RATIO * r.ph.length ? r.zh : r.ph;
+			out.push({ id: seg, en: r.en, zh, t: this.#sealedAt.get(seg) ?? 0, pending: !settled });
 		}
 		this.rows = out;
 	}
@@ -312,6 +329,7 @@ export class LiveSession {
 	}
 
 	#onDraftZh(zh: string): void {
+		this.#shownDraftZh = zh;
 		this.draftZh = zh;
 	}
 
@@ -334,6 +352,15 @@ export class LiveSession {
 	 */
 	latency(): LatencyReport {
 		return latencyOf([...this.#samples.values()]);
+	}
+
+	/** 一句的延迟拆分（毫秒；遥测逐句打点用，对齐桌面 `.live.jsonl`）。没这句 / 没译出的字段为 null。 */
+	sampleOf(seg: number): { seal_ms: number | null; zh_ms: number | null; total_ms: number | null } | null {
+		const s = this.#samples.get(seg);
+		if (!s) return null;
+		const zh = s.tZhFirst === null ? null : s.tZhFirst - s.tSealed;
+		const seal = s.tAudioEnd === null || s.tAudioEnd === undefined ? null : s.tSealed - s.tAudioEnd;
+		return { seal_ms: seal, zh_ms: zh, total_ms: zh === null ? null : zh + (seal ?? 0) };
 	}
 
 	#awaitRev(before: number, ms: number): Promise<void> {

@@ -75,6 +75,8 @@
 		-webkit-font-smoothing: antialiased;
 	}
 	.body {
+		/* 钉在第 2 行（1fr）：没告警时它不该落进 auto 行，否则高度退成内容高、字幕不贴底（OCR C） */
+		grid-row: 2;
 		min-height: 0;
 	}
 	.warn {
@@ -105,6 +107,7 @@
 		background: var(--glass-ground);
 		box-shadow: inset 0 0 0 1px var(--glass-line);
 		opacity: 0;
+		pointer-events: none; /* 看不见就点不到：别让点字幕误触「回到大窗」 */
 		transform: translateY(-4px);
 		transition:
 			opacity var(--fast) var(--ease),
@@ -113,7 +116,15 @@
 	.pip:hover .ctl,
 	.ctl:focus-within {
 		opacity: 1;
+		pointer-events: auto;
 		transform: none;
+	}
+	@media (hover: none) {
+		.ctl {
+			opacity: 1;
+			pointer-events: auto;
+			transform: none;
+		}
 	}
 	.ctl button {
 		width: 28px;

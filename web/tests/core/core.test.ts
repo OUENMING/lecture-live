@@ -113,3 +113,19 @@ test('dispose 之后不再转发、Worker 被 terminate', () => {
 	f.reply({ type: 'snapshot', snap: snap({ draft: 'ignored' }) });
 	assert.equal(views.length, 0, 'dispose 之后到的快照要丢掉');
 });
+
+// OCR 11-20：Worker 脚本加载失败不回任何消息 → ready 必须失败，不能让开课永远停在「启动中」
+test('Worker onerror → ready rejects + notice; dispose settles pending ready', async () => {
+	const w: CoreWorker = { postMessage() {}, terminate() {}, onmessage: null, onerror: null };
+	const core = createCore({ makeWorker: () => w });
+	let notice = '';
+	core.onView((vs) => (notice = vs.status.notice ?? ''));
+	w.onerror?.({ message: 'worker.ts 404' });
+	await assert.rejects(core.ready(), /404/);
+	assert.match(notice, /404/);
+
+	const w2: CoreWorker = { postMessage() {}, terminate() {}, onmessage: null };
+	const c2 = createCore({ makeWorker: () => w2 });
+	c2.dispose();
+	await assert.rejects(c2.ready(), /disposed/);
+});

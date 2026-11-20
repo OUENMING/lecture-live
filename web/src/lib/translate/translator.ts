@@ -28,6 +28,25 @@ export interface TranslatorDeps {
 	onFinal: (ev: { seg: number; zh: string; en: string; done: boolean; failed: boolean }) => void;
 	/** 草稿译文变化（整段覆盖，空串 = 清掉） */
 	onDraft: (ev: { zh: string }) => void;
+	/** 排障打点（可选，旁路）：每次请求一条。抛错被吞，不影响翻译 */
+	onTrace?: (ev: TraceEvent) => void;
+}
+
+/** 一次翻译请求的结局（遥测用；对齐桌面 `.live.jsonl` 的逐句打点，外加失败原因） */
+export interface TraceEvent {
+	kind: 'final' | 'draft';
+	seg: number;
+	attempt?: number;
+	/** ok / stale（草稿过期丢弃）/ empty / echo / error / aborted / prompt（拼请求失败） */
+	outcome: 'ok' | 'stale' | 'empty' | 'echo' | 'error' | 'aborted' | 'prompt';
+	/** 封口 → 发出请求（定稿排队等了多久） */
+	wait_ms?: number;
+	/** 发出 → 第一个增量 */
+	first_ms?: number | null;
+	/** 发出 → 结束 */
+	ms: number;
+	status?: number;
+	err?: string;
 }
 
 interface Queued {
@@ -57,6 +76,7 @@ export class Translator {
 	/** 已定稿的修正英文（桌面 `finals`）：下一句的前文窗口从这里取 */
 	#finals: string[] = [];
 	#q: Queued[] = [];
+	#trace: (ev: TraceEvent) => void;
 	#running = false;
 	#closed = false;
 	#draft: DraftJob | null = null;
@@ -70,6 +90,16 @@ export class Translator {
 		this.#deps = deps;
 		this.#now = deps.now ?? (() => Date.now());
 		this.#chat = deps.chat ?? streamChat;
+		const tr = deps.onTrace;
+		this.#trace = tr
+			? (ev) => {
+					try {
+						tr(ev);
+					} catch {
+						/* 打点永不影响翻译 */
+					}
+				}
+			: () => {};
 	}
 
 	/** 已定稿句的修正英文序列（前文窗口的唯一来源）。 */
@@ -155,9 +185,21 @@ export class Translator {
 	async #runDraft(job: DraftJob): Promise<void> {
 		const ctx = this.#finals.slice(-1);
 		let prompt: { system: string; user: string };
+		const t0 = this.#now();
+		let first: number | null = null;
+		const done = (outcome: TraceEvent['outcome'], e?: unknown) =>
+			this.#trace({
+				kind: 'draft',
+				seg: job.seg,
+				outcome,
+				first_ms: first === null ? null : first - t0,
+				ms: this.#now() - t0,
+				...(e !== undefined ? errOf(e) : {})
+			});
 		try {
 			prompt = await this.#deps.prompt.draft(job.en, ctx, this.#deps.cfg);
-		} catch {
+		} catch (e) {
+			done('prompt', e);
 			return; // 拼请求失败不值得打扰用户：草稿是锦上添花
 		}
 		const { url, headers } = this.#deps.endpoint();
@@ -168,18 +210,35 @@ export class Translator {
 				headers,
 				prompt,
 				maxTokens: MAX_TOKENS.draft,
-				signal: job.ctl.signal
+				signal: job.ctl.signal,
+				onDelta: () => {
+					if (first === null) first = this.#now();
+				}
 			});
-		} catch {
+		} catch (e) {
+			done((e as ChatError)?.aborted === true ? 'aborted' : 'error', e);
 			return; // 草稿失败不重试（下一份草稿马上就会来），也不上屏错误
 		}
-		if (this.#draft !== job || !text.trim()) return;
-		// 过期判据：段已定稿 / 已有更新的草稿 / 更新的译文已显示 → 丢
-		try {
-			if ((await this.#deps.prompt.draftAccept(job.seq, job.seg, job.gen)) !== true) return;
-		} catch {
+		if (this.#draft !== job || !text.trim()) {
+			done(text.trim() ? 'stale' : 'empty');
 			return;
 		}
+		// 过期判据：段已定稿 / 已有更新的草稿 / 更新的译文已显示 → 丢
+		try {
+			if ((await this.#deps.prompt.draftAccept(job.seq, job.seg, job.gen)) !== true) {
+				done('stale');
+				return;
+			}
+		} catch (e) {
+			done('prompt', e);
+			return;
+		}
+		// OCR B：draftAccept 是一次 Worker 往返，期间可能已换成更新的草稿 → 这份过期，别上屏、也别把新 job 抹掉
+		if (this.#draft !== job) {
+			done('stale');
+			return;
+		}
+		done('ok');
 		this.#draft = null;
 		this.#draftZh = text.trim();
 		this.#deps.onDraft({ zh: this.#draftZh });
@@ -212,7 +271,21 @@ export class Translator {
 			if (this.#closed) return;
 			zh = '';
 			enFixed = '';
+			const t0 = this.#now();
+			let first: number | null = null;
+			const trace = (outcome: TraceEvent['outcome'], e?: unknown) =>
+				this.#trace({
+					kind: 'final',
+					seg: job.seg,
+					attempt: job.attempt,
+					outcome,
+					wait_ms: job.attempt === 1 ? t0 - job.tSealed : undefined,
+					first_ms: first === null ? null : first - t0,
+					ms: this.#now() - t0,
+					...(e !== undefined ? errOf(e) : {})
+				});
 			const parser = new TwoLineParser((d) => {
+				if (first === null) first = this.#now();
 				// 增量只去掉行首空白：`ZH: ` 后面那个空格属于第一个 delta，
 				// 留着会让首字位置漂一下；末尾不清（下一块可能接着同一个词）
 				zh += d;
@@ -228,14 +301,17 @@ export class Translator {
 					maxTokens: MAX_TOKENS.final,
 					onDelta: (d) => parser.feed(d)
 				});
-				if (!text.trim() && !zh) throw Object.assign(new Error('空回包'), { aborted: false });
+				if (!text.trim() && !zh) throw Object.assign(new Error('空回包'), { aborted: false, outcome: 'empty' });
 				const res: TwoLineResult = parser.result(job.en);
-				if (looksLikeEcho(res.zh, job.en)) throw Object.assign(new Error('回显'), { aborted: false });
+				if (looksLikeEcho(res.zh, job.en)) throw Object.assign(new Error('回显'), { aborted: false, outcome: 'echo' });
 				this.#finals.push(res.en);
 				patch(res.zh, res.en, true);
+				trace('ok');
 				return;
 			} catch (e) {
 				const aborted = (e as ChatError)?.aborted === true;
+				const oc = (e as { outcome?: TraceEvent['outcome'] })?.outcome;
+				trace(aborted ? 'aborted' : (oc ?? 'error'), e);
 				if (aborted) {
 					patch(zh, enFixed || job.en, true, true);
 					return;
@@ -248,4 +324,13 @@ export class Translator {
 		this.#finals.push(job.en);
 		patch('', job.en, true, true);
 	}
+}
+
+/** 失败原因（截短；只取 message 与 HTTP 状态，不带请求体） */
+function errOf(e: unknown): { err: string; status?: number } {
+	const st = (e as { status?: unknown })?.status;
+	return {
+		err: String((e as Error)?.message ?? e).slice(0, 200),
+		...(typeof st === 'number' && st > 0 ? { status: st } : {})
+	};
 }

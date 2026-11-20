@@ -134,7 +134,7 @@ test("W1 预检：来源对 + 名单路径 -> 204，回显那一个来源（不�
         path.startsWith("/v1/web/") ? "GET, POST, PUT, PATCH, DELETE, OPTIONS" : "POST, OPTIONS", path);
       assert.equal(res.headers.get("access-control-allow-headers"),
         "Authorization, Content-Type, X-ClassLive-Install, X-ClassLive-Version, "
-        + "X-ClassLive-Tz, X-ClassLive-Call, X-ClassLive-Client", path);
+        + "X-ClassLive-Tz, X-ClassLive-Call, X-ClassLive-Client, Idempotency-Key", path);
       assert.equal(res.headers.get("access-control-max-age"), "600", path);
       assert.equal(res.headers.get("vary"), "Origin", path);
     }
@@ -272,41 +272,41 @@ test("W6 老路由不加 CORS 头：transcribe / jev / admin 即使来源对也�
 });
 
 // ---------- 7. 网页设备分账 ----------
-test("W7 分账：桌面占满 2 台后网页仍能进；网页第 3 台 403 devices；两张设备表互不挤占", async () => {
+test("W7 合计名额：桌面 + 网页一共 max_devices（2）台（Owen 11-20）；已登记的照用；调大名额才放新的", async () => {
   const h = harness();
   try {
     const created = await (await h.send(h.adminReq("add", { name: "amy" }))).json();
     const code = created.code;
     assert.equal(created.max_devices, 2);
-    assert.equal(created.max_web_devices, 2, "新码带网页名额（默认 2）");
+    assert.equal(created.max_web_devices, undefined);
 
-    assert.equal((await h.send(h.chatReq({ code, install: INSTALL }))).status, 200);
-    assert.equal((await h.send(h.chatReq({ code, install: INSTALL2 }))).status, 200);
-    const deskThird = await h.send(h.chatReq({ code, install: INSTALL3 }));
-    assert.equal(deskThird.status, 403, "桌面第 3 台照旧被拒");
-    assert.equal((await deskThird.json()).error, "devices");
+    const go = async (install, web) => {
+      const res = await h.send(h.chatReq({ code, install, web }));
+      const st = res.status; const b = await res.text();
+      return { st, b };
+    };
+    assert.equal((await go(INSTALL)).st, 200, "桌面 1");
+    assert.equal((await go(INSTALL2, "web")).st, 200, "网页 1（合计第 2 台）");
+    const w3 = await go(INSTALL3, "web");
+    assert.equal(w3.st, 403, "网页第 2 台 = 合计第 3 台，拒");
+    assert.equal(JSON.parse(w3.b).error, "devices");
+    assert.equal((await go(INSTALL4)).st, 403, "桌面第 2 台 = 合计第 3 台，也拒");
+    assert.equal((await go(INSTALL)).st, 200, "已登记的桌面照用");
+    assert.equal((await go(INSTALL2, "web")).st, 200, "已登记的网页照用");
 
-    // 桌面已满，网页从第 1 台开始算
-    for (const install of [INSTALL, INSTALL2]) {
-      const res = await h.send(h.chatReq({ code, install, web: "web" }));
-      assert.equal(res.status, 200, `网页 ${install.slice(0, 4)} 不该被桌面名额挤掉`);
-      await res.text();
-    }
-    const webThird = await h.send(h.chatReq({ code, install: INSTALL4, web: "web" }));
-    assert.equal(webThird.status, 403, "网页第 3 台被拒");
-    assert.equal((await webThird.json()).error, "devices");
+    let dv = await (await h.send(h.adminReq("devices", { code }))).json();
+    assert.equal(dv.devices.length, 1);
+    assert.equal(dv.web_devices.length, 1);
 
-    // 桌面老设备照用（网页那两台的登记不改 dev:<码>）
-    assert.equal((await h.send(h.chatReq({ code, install: INSTALL }))).status, 200);
-    const dv = await (await h.send(h.adminReq("devices", { code }))).json();
-    // 假时钟下 last 全相等，排序保持插入序：桌面先 INSTALL 后 INSTALL2，网页也是
-    assert.deepEqual(dv.devices.map((d) => d.id), [INSTALL.slice(0, 6), INSTALL2.slice(0, 6)]);
-    assert.deepEqual(dv.web_devices.map((d) => d.id), [INSTALL.slice(0, 6), INSTALL2.slice(0, 6)]);
+    // 调到 3：再放 1 台（不论桌面还是网页）
+    assert.equal((await h.send(h.adminReq("limit", { code, max_devices: 3 }))).status, 200);
+    assert.equal((await go(INSTALL3, "web")).st, 200);
+    assert.equal((await go(INSTALL4)).st, 403, "第 4 台拒");
   } finally { h.restore(); }
 });
 
 // ---------- 8. 无头 / 其它值 = 桌面，行为不变 ----------
-test("W8 X-ClassLive-Client 只认 web：缺省 / desktop / 大小写不同的值都走桌面那 2 台", async () => {
+test("W8 X-ClassLive-Client 只认 web：缺省 / desktop / 大小写不同的值都走桌面表", async () => {
   const h = harness();
   try {
     const { code } = await (await h.send(h.adminReq("add", { name: "amy" }))).json();
@@ -321,7 +321,9 @@ test("W8 X-ClassLive-Client 只认 web：缺省 / desktop / 大小写不同的�
     // 桌面名额照旧 2 台
     assert.equal((await h.send(h.chatReq({ code, install: INSTALL2 }))).status, 200);
     assert.equal((await h.send(h.chatReq({ code, install: INSTALL3 }))).status, 403);
-    // devweb 只在网页请求作用下出现
+    // devweb 只在网页请求作用下出现（合计名额已满 2 台 → 先调到 3）
+    assert.equal((await h.send(h.chatReq({ code, install: INSTALL4, web: "web" }))).status, 403, "合计满了");
+    assert.equal((await h.send(h.adminReq("limit", { code, max_devices: 3 }))).status, 200);
     assert.equal((await h.send(h.chatReq({ code, install: INSTALL4, web: "web" }))).status, 200);
     const dv2 = await (await h.send(h.adminReq("devices", { code }))).json();
     assert.deepEqual(dv2.web_devices.map((d) => d.id), [INSTALL4.slice(0, 6)]);
@@ -367,5 +369,20 @@ test("W10 网页请求照样过额度闸：daily_tokens 用完 -> 429 quota_exce
     assert.equal(denied.headers.get("access-control-allow-origin"), ORIGIN, "限流响应也带头");
     const dv = await (await h.send(h.adminReq("devices", { code }))).json();
     assert.deepEqual(dv.web_devices, [], "额度拒掉的请求不登记网页设备");
+  } finally { h.restore(); }
+});
+
+test("W-DEV 绑定时记下设备是什么（浏览器 / 系统 / 手机），admin devices 回传；不存完整 UA", async () => {
+  const h = harness();
+  try {
+    const { code } = await (await h.send(h.adminReq("add", { name: "amy" }))).json();
+    const r = h.chatReq({ code, web: "web" });
+    const UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1";
+    const hdr = new Headers(r.headers); hdr.set("user-agent", UA);
+    const res = await h.send(new Request(r, { headers: hdr }));
+    assert.equal(res.status, 200); await res.text();
+    const dv = await (await h.send(h.adminReq("devices", { code }))).json();
+    assert.deepEqual(dv.web_devices[0].info, { os: "iOS", br: "Safari 18", mobile: true, ver: "", country: "" });
+    assert.ok(!JSON.stringify(dv).includes("AppleWebKit"), "完整 UA 不落盘");
   } finally { h.restore(); }
 });

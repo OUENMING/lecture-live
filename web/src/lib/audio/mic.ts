@@ -130,8 +130,15 @@ export function createMicSource(opts: MicOptions = {}): AudioSource {
 			s.getTracks().forEach((t) => t.stop());
 			return false;
 		}
-		const next = ctx.createMediaStreamSource(s);
-		next.connect(node);
+		let next: MediaStreamAudioSourceNode;
+		try {
+			next = ctx.createMediaStreamSource(s);
+			next.connect(node);
+		} catch {
+			// OCR A：ctx 已关 / 连接失败 → 新流退掉、原链路不动（不然音轨泄漏、且冒成未处理的拒绝）
+			s.getTracks().forEach((t) => t.stop());
+			return false;
+		}
 		const old = source;
 		const oldStream = stream;
 		source = next;
@@ -152,7 +159,13 @@ export function createMicSource(opts: MicOptions = {}): AudioSource {
 		onFrame = cb;
 		ready = false;
 
+		const my = gen;
 		const s = await gum(micConstraints(wanted ?? undefined));
+		// OCR A：权限弹窗期间被 stop()（开课后马上下课）→ 这条流没人要了，关掉；不然麦克风灯一直亮、再也 stop 不掉
+		if (my !== gen) {
+			s.getTracks().forEach((t) => t.stop());
+			return;
+		}
 		stream = s;
 		adopt(s);
 		try {
@@ -219,6 +232,9 @@ export function createMicSource(opts: MicOptions = {}): AudioSource {
 		stop,
 		get level() {
 			return level;
+		},
+		get stream() {
+			return stream;
 		},
 		async switchDevice(deviceId: string): Promise<boolean> {
 			return reroute(deviceId || null);

@@ -7,10 +7,12 @@
 //   POST /rename {session_id, course}                         -> 课后改课名（W18），账本只改 course 一个字段
 //   GET  /state?session_id=…   /  GET /list?limit=&before=
 //   POST /delete {hash}                                       -> 先删账本（标 deleted），再按前缀删 R2
+//   POST /job_update {session_id, job_id, status, attempt, objects?, reason?}（W22）
+//      —— RunnerHub 回写任务终态；只改这几个字段，#state 里的 note.state 随之变（规则在 core 的 jobUpdate）
 // 规则全在 web-session-core.js（幂等 / confirmed_seq / seq_too_far / 批大小 / 状态机），这里只做 I/O。
 // ⚠️ 30 天生命周期配在桶上（`wrangler r2 bucket lifecycle add …`），代码里不删 —— 未部署。
 import {
-  SessionLedger, endDecision, newSession, newId, renameCourse, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT,
+  SessionLedger, endDecision, jobUpdate, newSession, newId, renameCourse, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT,
 } from "./web-session-core.js";
 
 // ⚠️ **动态** import 而不是静态：本文件的测试（test-web-session.mjs）要直接 new 这个类、喂内存 storage
@@ -24,6 +26,20 @@ try {
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
 const DAY_MS = 86400000;
+
+// R2 10058 = 同一对象并发写过快。只对它重试；别的错照旧抛。
+const R2_SAME_OBJECT = /\(10058\)/;
+const R2_RETRY_MS = [250, 1000];
+async function putRetry(bucket, key, body, sleep = (ms) => new Promise((r) => setTimeout(r, ms))) {
+  for (let i = 0; ; i++) {
+    try {
+      return await bucket.put(key, body, { httpMetadata: { contentType: "application/x-ndjson" } });
+    } catch (e) {
+      if (i >= R2_RETRY_MS.length || !R2_SAME_OBJECT.test(String(e?.message || e))) throw e;
+      await sleep(R2_RETRY_MS[i]);
+    }
+  }
+}
 const TOMBSTONE_READ_MS = 12 * 3600000;   // 12 h 内回 tombstone，之后一律 410（契约 §3.4、§6.3）
 
 export class WebSessions extends DurableObjectBase {
@@ -49,6 +65,7 @@ export class WebSessions extends DurableObjectBase {
       case "/rename": return this.#rename(body);
       case "/state": return this.#state(url.searchParams.get("session_id"));
       case "/list": return this.#list(url.searchParams);
+      case "/job_update": return this.#jobUpdate(body);
       case "/delete": return this.#delete(body);
       default: return json({ error: "not_found" }, 404);
     }
@@ -94,13 +111,30 @@ export class WebSessions extends DurableObjectBase {
       .map((l) => JSON.stringify({ seq: l.seq, t: l.t ?? 0, en: l.en, zh: l.zh, src: l.src || "asr" }))
       .join("\n") + "\n";
     const key = `web/${meta.hash}/sessions/${meta.session_id}/lines-${sorted[0].seq}.json`;
-    await this.env.WEB_DATA.put(key, nd, { httpMetadata: { contentType: "application/x-ndjson" } });
+    // 同一键在本实例里串行写：R2 对同一对象并发写回 10058（2026-11-20 01:21:23 UTC，同批重放 95 个 PUT
+    // 撞上 → Worker 抛异常记 500）。一个通行码只有一个 DO 实例，这条队列看得见这个码的全部写。
+    // 跨实例（极少：DO 迁移瞬间）仍可能撞，所以 10058 再退避重试两次（250 ms → 1 s）。
+    const prev = this.#r2q.get(key) || Promise.resolve();
+    const run = prev.catch(() => {}).then(() => putRetry(this.env.WEB_DATA, key, nd));
+    this.#r2q.set(key, run);
+    try { await run; } finally { if (this.#r2q.get(key) === run) this.#r2q.delete(key); }
   }
 
-  async #end({ session_id, ended_at, lines_total, level }) {
+  #r2q = new Map();   // R2 键 → 正在写的那个 promise（同键串行）
+
+  async #end({ session_id, ended_at, lines_total, level, idle }) {
     const meta = await this.storage.get(`meta:${session_id}`);
     if (!meta) return this.#gone();
     const job = await this.storage.get(`job:${session_id}`);
+    // idle = cron 发现这课 3 h 没新句子（关页没下课）。只处理还在 live 的；已下课 / 已删的不动。
+    // 一句都没有 -> 只标已结束、不建笔记任务（空壳课不值得跑笔记）。
+    if (idle) {
+      if (meta.state !== "live") return json({ skipped: true, state: meta.state }, 200);
+      if (!meta.lines_total) {
+        await this.storage.put(`meta:${session_id}`, { ...meta, state: "ended", ended_at: ended_at || new Date().toISOString(), abandoned: true });
+        return json({ abandoned: true }, 200);
+      }
+    }
     const d = endDecision(meta, job, { lines_total, level });
     if (d.error) return json({ error: d.error }, d.error === "session_deleted" ? 410 : 400);
     // 一节课只对应一条任务：job:<session_id> 写一次，之后重复 /end 走 dedupe（不产生第二份笔记）。
@@ -145,6 +179,21 @@ export class WebSessions extends DurableObjectBase {
     });
   }
 
+  // W22：全局 RunnerHub 回写任务状态（done / failed / 回 queued）。会话不在 / 已删 -> 同 GET 的判据；
+  // job 不在 -> 404；job_id 不是这节课那条任务 -> 409（谁也不能拿别节课的 job_id 改这条账）。
+  async #jobUpdate({ session_id, job_id, status, attempt, objects, reason }) {
+    const meta = await this.storage.get(`meta:${session_id}`);
+    if (!meta) return this.#gone();
+    const job = await this.storage.get(`job:${session_id}`);
+    const r = jobUpdate(job, { job_id, status, attempt, objects, reason });
+    if (r.error) {
+      return json({ error: r.error, ...(r.detail ? { detail: r.detail } : {}) },
+        r.error === "not_found" ? 404 : r.error === "job_mismatch" ? 409 : 400);
+    }
+    await this.storage.put(`job:${session_id}`, r.job);
+    return json({ ok: true });
+  }
+
   // 删过之后：12 h 内回 tombstone 时间（前端能解释「刚删的」），之后一律 410。
   async #gone() {
     const t = await this.storage.get("tombstone");
@@ -183,7 +232,9 @@ export class WebSessions extends DurableObjectBase {
     const jobs = [...(await this.storage.list({ prefix: "job:" })).keys()];
     const seqs = [...(await this.storage.list({ prefix: "seq:" })).keys()];
     const ids = [...(await this.storage.list({ prefix: "idem:" })).keys()];
-    await this.storage.delete([...metas, ...jobs, ...seqs, ...ids, "tombstone"]);
+    // DO 的多键 delete 一次最多 128 个，超了直接抛（OCR D2）—— 一节课的 seq: 就有几百个，分片删
+    const all = [...metas, ...jobs, ...seqs, ...ids, "tombstone"];
+    for (let i = 0; i < all.length; i += 128) await this.storage.delete(all.slice(i, i + 128));
     await this.storage.put("tombstone", { at: Date.now() });
     try {
       const objects = await this.#purge(`web/${String(hash || "")}/`);

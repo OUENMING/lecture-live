@@ -406,3 +406,44 @@ test('服务器一句都没确认（acked_seq 没前进）→ 按失败退避，
 	assert.equal(sync.state().failures, 1);
 	assert.ok(clk.pendingAt()[0]! - clk.now() === 1000);
 });
+
+// 2026-11-20 01:21:23 UTC 事故：下课时 connect.end() 对每一行都 persist → push()，
+// push 在 `await store.pending()` 那一拍里看到 in_flight 仍是 false，于是一秒并发 95 个 PUT，
+// 打到同一个 Durable Object 撞 10058（Reduce your concurrent request rate）。判据：任何时刻最多一个批次在飞。
+test('并发 push（在 pending() 还没回来时连推 100 次）也只有一个批次在飞', async () => {
+	const base = memoryStore({ now: () => 0 });
+	for (let s = 1; s <= 100; s++) await base.append(line('s_a', s));
+	// pending() 慢一拍（IndexedDB 真实形状：跨事件循环才回）
+	const store = {
+		pending: async (id: string) => {
+			await new Promise((r) => setTimeout(r, 1));
+			return base.pending(id);
+		},
+		ack: base.ack.bind(base)
+	};
+	let inFlight = 0;
+	let peak = 0;
+	let puts = 0;
+	const sync = createSyncer({
+		store,
+		putLines: async (_id, lines) => {
+			puts += 1;
+			inFlight += 1;
+			peak = Math.max(peak, inFlight);
+			await new Promise((r) => setTimeout(r, 2));
+			inFlight -= 1;
+			return { acked_seq: lines[lines.length - 1].seq };
+		},
+		session_id: 's_a',
+		clock: fakeClock().clock,
+		params: { batchLines: 10, flushMs: 30_000, maxBatch: 50 }
+	});
+	for (let i = 0; i < 100; i++) sync.push();
+	await sync.flush();
+	for (let i = 0; i < 50 && (inFlight > 0 || (await base.pending('s_a')).length); i++) {
+		await new Promise((r) => setTimeout(r, 5));
+	}
+	assert.equal(peak, 1, `同一时刻在飞的批次应 ≤1，实际峰值 ${peak}`);
+	assert.ok(puts <= 3, `100 句按 50 一批应 ≤3 个 PUT，实际 ${puts}`);
+	assert.deepEqual(await base.pending('s_a'), []);
+});

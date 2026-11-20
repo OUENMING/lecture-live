@@ -202,3 +202,73 @@ test('草稿：这段定稿后，在途的草稿译文不许再贴回来', async
 	await new Promise<void>((r) => setTimeout(r, 120));
 	assert.deepEqual(drafts.filter((d) => d !== ''), [], '定稿之后草稿译文不许上屏');
 });
+
+// 11-20 排障打点：每次请求一条 trace（结局 / HTTP 状态 / 耗时），且 onTrace 抛错不影响翻译
+test('onTrace：失败带状态码、重试带 attempt、成功带首字耗时；回调抛错照常翻', async () => {
+	const p = await prompt();
+	const ff = fakeFetch([{ status: 503 }, { sse: finalSse() }]);
+	const traces: import('../../src/lib/translate/translator.ts').TraceEvent[] = [];
+	const events: { done: boolean; failed: boolean; zh: string }[] = [];
+	const tr = new Translator({
+		prompt: p,
+		endpoint: () => ({ url: 'https://example.test/v1/chat/completions', headers: {} }),
+		chat: (opts) => streamChat({ ...opts, fetch: ff.fetch }),
+		onFinal: (ev) => events.push(ev),
+		onDraft: () => {},
+		onTrace: (ev) => {
+			traces.push(ev);
+			throw new Error('打点坏了');
+		}
+	});
+	await tr.final(1, 'the midterm covers chapters one to three.');
+	assert.equal(traces.length, 2);
+	assert.equal(traces[0].outcome, 'error');
+	assert.equal(traces[0].status, 503);
+	assert.equal(traces[0].attempt, 1);
+	assert.equal(typeof traces[0].wait_ms, 'number');
+	assert.equal(traces[1].outcome, 'ok');
+	assert.equal(traces[1].attempt, 2);
+	assert.equal(typeof traces[1].first_ms, 'number');
+	const last = events[events.length - 1];
+	assert.equal(last.done && !last.failed && last.zh, ZH, 'onTrace 抛错不许拦住译文');
+});
+
+test('OCR B：draftAccept 往返期间换成了更新的草稿 → 旧的不上屏、新的不被抹掉', async () => {
+	const p = await prompt();
+	const ff = fakeFetch([{ sse: sseText(['旧草稿译文']) }, { sse: sseText(['新草稿译文']) }]);
+	let release!: () => void;
+	const gate = new Promise<void>((r) => (release = r));
+	let first = true;
+	const wrapped = new Proxy(p, {
+		get(t, k, r) {
+			if (k === 'draftAccept')
+				return async (...a: Parameters<PromptBuilder['draftAccept']>) => {
+					const ok = await t.draftAccept(...a);
+					if (first) {
+						first = false;
+						await gate; // 模拟：Worker 判完「接受」、回包还在路上
+						return true;
+					}
+					return ok;
+				};
+			const v = Reflect.get(t, k, r);
+			return typeof v === 'function' ? v.bind(t) : v;
+		}
+	}) as PromptBuilder;
+	const drafts: string[] = [];
+	const tr = new Translator({
+		prompt: wrapped,
+		endpoint: () => ({ url: 'https://example.test/v1/chat/completions', headers: {} }),
+		chat: (opts) => streamChat({ ...opts, fetch: ff.fetch }),
+		onFinal: () => {},
+		onDraft: (ev) => drafts.push(ev.zh)
+	});
+	tr.draft(90, 'The midterm covers');
+	await new Promise<void>((r) => setTimeout(r, 60)); // 旧的已卡在 accept
+	tr.draft(90, 'The midterm covers chapters one to three.'); // 段号用 90：rt 的 DraftView 跨用例共享，前面的用例已定稿 1
+	await new Promise<void>((r) => setTimeout(r, 20));
+	release();
+	await new Promise<void>((r) => setTimeout(r, 200));
+	assert.deepEqual(drafts.filter((d) => d !== '').slice(-1), ['新草稿译文'], '最后上屏的必须是新草稿');
+	assert.ok(!drafts.includes('旧草稿译文'), '旧草稿不该上屏');
+});

@@ -107,6 +107,23 @@ class_name = "WebTermsPool"
 tag = "v4"
 new_sqlite_classes = ["WebTerms", "WebTermsPool"]
 
+# 全局任务队列（W22，docs/CONTRACT-runner-20261120.md §2）：单实例 DO —— 代码里固定 idFromName("hub") 取。
+# 存 job:<id>（笔记任务状态机：租约 90 s / attempts 上限 3 / complete 幂等）与 live:<hash>:<sid>
+# （正在上的课，3 h 无逐句即算停）。runner 路由（/v1/runner/*）在 runner-routes.js。
+#   wrangler secret put RUNNER_TOKEN     # runner 令牌，形如 rn_<32 hex>；/v1/runner/* 只认它，
+#                                         # fail-closed：没配 = 一律 401（同 upload-worker 的 INGEST_TOKEN）。
+#   RUNNER_PASS_NAME                     # 可选（普通变量即可，不写就是 "runner"）：runner 调模型用的专用
+#                                         # 通行码名；只有这个码的 /v1/chat/completions、/v1/jev 才认
+#                                         # X-ClassLive-Bill-To（16 hex），记进 AE 事件 blob11 —— 只记账，
+#                                         # 今天不扣任何人的额度。
+[[durable_objects.bindings]]
+name = "RUNNER_HUB"
+class_name = "RunnerHub"
+
+[[migrations]]
+tag = "v5"
+new_sqlite_classes = ["RunnerHub"]
+
 # 按安装限流：30 次 / 60 s（每个 Cloudflare 节点各自计数）。
 # ⚠️ Rate Limiting binding 需要 wrangler >= 4.36.0；period 只能是 10 或 60；
 #    限流参数写在 [ratelimits.simple] 子表里（官方文档格式，同上传 Worker）。
@@ -176,6 +193,9 @@ enabled = true
 [vars]
 WEB_ORIGIN = "https://class.bldcam.page"
 WEB_DAILY_RT_S = "14400"
+# 网页版测试数据（W20，2026-11-20）：遥测事件 + 课堂录音分段，默认**开**（不写这两行就是开，只有写 "off" 才关）。
+#   WEB_TELEMETRY     = "off"   # 总闸：遥测与录音一起关（两条都回 204 + `x-cl-telemetry: off`，不写 R2）
+#   WEB_AUDIO_UPLOAD  = "off"   # 只关录音分段（遥测照收）
 # 2026-11-19 试验：中国 / 港澳的实时翻译也走 OpenRouter 快速通道（默认 CN,HK,MO 跳过）。
 #   依据：AE 首 token（double9）HKG→DeepSeek 官方 605–786 ms，OpenRouter（DUB/SJC）281–349 ms；
 #   「离 DeepSeek 近、绕美国反而慢」只在都柏林测过。回退：删掉这一行再部署（回到代码默认 CN,HK,MO）。

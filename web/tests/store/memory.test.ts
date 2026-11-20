@@ -25,7 +25,11 @@ test('purgeOlderThan 与 IndexedDB 版同规矩：只删已下课且逾期的', 
 	const store = memoryStore({ now: () => now });
 	await store.openSession('s_gone', 'ECON10740');
 	await store.append(line('s_gone', 1));
+	await store.ack('s_gone', 1);
 	await store.closeSession('s_gone');
+	await store.openSession('s_unsent'); // 没传完：过期也不删（OCR B）
+	await store.append(line('s_unsent', 1));
+	await store.closeSession('s_unsent');
 	await store.openSession('s_live');
 	await store.append(line('s_live', 1));
 
@@ -34,8 +38,8 @@ test('purgeOlderThan 与 IndexedDB 版同规矩：只删已下课且逾期的', 
 	now = t0 + 31 * DAY;
 	assert.equal(await store.purgeOlderThan(30), 1);
 	assert.deepEqual(
-		(await store.listSessions()).map((s) => s.session_id),
-		['s_live']
+		(await store.listSessions()).map((s) => s.session_id).sort(),
+		['s_live', 's_unsent']
 	);
 	assert.deepEqual(await store.linesOf('s_gone'), []);
 	assert.equal((await store.linesOf('s_live')).length, 1);

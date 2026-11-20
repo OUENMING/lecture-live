@@ -224,13 +224,23 @@ export async function openStore(opts: OpenOptions = {}): Promise<LineStore> {
 				let removed = 0;
 				const all = sessions.getAll() as IDBRequest<SessionMeta[]>;
 				all.onsuccess = () => {
-					for (const meta of all.result) {
-						if (meta.ended_at === null || meta.ended_at >= floor) continue;
-						sessions.delete(meta.session_id);
-						lines.delete(IDBKeyRange.bound([meta.session_id, 0], [meta.session_id, SEQ_MAX]));
-						removed++;
+					const old = all.result.filter((m) => m.ended_at !== null && m.ended_at < floor);
+					let left = old.length;
+					if (left === 0) return finish(0);
+					for (const meta of old) {
+						// 还有没传上去的句子（离线下课、一直没补传成功）不删 —— 删了就再也找不回（OCR B）
+						const range = IDBKeyRange.bound([meta.session_id, 0], [meta.session_id, SEQ_MAX]);
+						const last = lines.openKeyCursor(range, 'prev');
+						last.onsuccess = () => {
+							const k = last.result?.key as [string, number] | undefined;
+							if (!k || k[1] <= meta.acked_seq) {
+								sessions.delete(meta.session_id);
+								lines.delete(range);
+								removed++;
+							}
+							if (--left === 0) finish(removed);
+						};
 					}
-					finish(removed);
 				};
 			});
 		}

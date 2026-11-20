@@ -46,6 +46,7 @@ fi
 
 # ---- 发版 ----
 cd "$HERE"
+export CL_GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet 2>/dev/null || echo +dirty)"   # 进遥测的构建号（vite.config buildId）
 run npm run build
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"

@@ -31,7 +31,11 @@
 	// 换了课就换成那门课存着的术语表；课名为空 = 下一节的草稿。用户输入直接覆盖（可写的 $derived）
 	// 云端术语拉回来以后 bump 一下，让下面的 $derived 重读本机
 	let termsRev = $state(0);
-	let terms = $derived((void termsRev, termsText(course.trim())));
+	// 本机存的那份跟着课名走；用户一动手（敲字 / 从课件生成）就以他的为准，
+	// 之后改课名、云端拉回都不再盖掉正在编辑的内容（OCR C：原来改一个字课名就把刚敲的术语清空）
+	let typed = $state<string | null>(null);
+	const stored = $derived((void termsRev, termsText(course.trim())));
+	const terms = $derived(typed ?? stored);
 	let share = $state(true);
 	// 门面回放里点一句 = 标成没听懂（和上课页同一个手势，只在这台电脑这次打开有效）
 	let demoMarked = $state.raw<ReadonlySet<number>>(new Set());
@@ -107,7 +111,7 @@
 			const r = await termsFromFiles(files, c || '这节课', (p) => (prepNote = `正在从课件里挑术语（${p.done}/${p.total}）…`));
 			const before = parseTerms(terms).length;
 			const merged = parseTerms([terms, ...r.terms].join('\n'));
-			terms = merged.join('\n');
+			typed = merged.join('\n');
 			void saveTermsSynced(api, c, terms);
 			const added = merged.length - before;
 			const bad = r.failed.map((f) => `${f.name}：${f.reason}`).join('；');
@@ -290,7 +294,7 @@
 									spellcheck="false"
 									placeholder={TERMS_PLACEHOLDER}
 									value={terms}
-									oninput={(e) => (terms = e.currentTarget.value)}
+									oninput={(e) => (typed = e.currentTarget.value)}
 									disabled={verdict !== 'ok'}
 								></textarea>
 								<div class="prep">

@@ -1068,10 +1068,49 @@ function liveNow(){
   var sx = D("soniox"), rn = D("runner"), cur = 0, lim = 0;
   if(sx && sx.concurrency_by_region) Object.keys(sx.concurrency_by_region).forEach(function(r){ var c = sx.concurrency_by_region[r] || {}; cur += +c.current || 0; lim += +c.limit || 0; });
   else if(sx && sx.concurrency){ cur = +sx.concurrency.current || 0; lim = +sx.concurrency.limit || 0; }
-  var web = rn ? (rn.live || []).filter(function(x){ return !x.stale; }) : [];
-  return {soniox: sx ? cur : null, limit: lim, web: web, stale: rn ? (rn.live || []).filter(function(x){ return x.stale; }) : []};
+  var wl = webLive(rn);
+  return {soniox: sx ? cur : null, limit: lim, web: wl.active, quiet: wl.quiet, dup: wl.dup, stale: wl.stale};
 }
-function onlineNow(){ return liveCodes().filter(function(c){ return Date.now() - lastSeen(c) < 5 * 60000; }); }
+/* 服务器账本里「正在上」的网页课，分四类（只有 active 算「在上」）：
+   active = 15 分钟内有新句子（刚开课还没句子时看开课时间）；quiet = 15 分钟~3 小时没新句子（多半关页了，3 h 后服务器自己收尾）；
+   dup = 同一个码、同一个课名下还有更新的一节 → 刷新残留（老版本刷新会新开一节），不重复计数；stale = 超 3 小时。 */
+var LIVE_ACTIVE_MS = 15 * 60000;
+function webLive(rn){
+  var out = {active: [], quiet: [], dup: [], stale: []}; if(!rn) return out;
+  var all = (rn.live || []).slice(), now = Date.now(), newest = {};
+  all.forEach(function(x){ var k = x.hash + "|" + (x.course || ""), t = Date.parse(x.started_at) || 0; if(!(k in newest) || t > newest[k].t) newest[k] = {t: t, sid: x.session_id}; });
+  all.forEach(function(x){
+    var k = x.hash + "|" + (x.course || "");
+    if(x.stale) out.stale.push(x);
+    else if(newest[k].sid !== x.session_id) out.dup.push(x);
+    else if(now - Date.parse(x.last_line_at) < LIVE_ACTIVE_MS) out.active.push(x);
+    else out.quiet.push(x);
+  });
+  return out;
+}
+/* runner = VPS 上的笔记 / 实时总结 runner 自己的码，每几秒轮询一次，永远「刚刚在线」—— 不是人，不算在线人数 */
+var SERVICE_CODES = {runner: 1};
+/* 现在谁在上课：把三路信号合成「一人一行」。
+   网页课 = 服务器账本里的 live（有码名、课名、开课时间、句数）；
+   桌面版 = 面板只知道「这个码 5 分钟内有请求」，课本身读不到（只有 Soniox 总并发数），所以只能标「桌面在线」；
+   其余 5 分钟内有请求的 = 在线但没开课（在首页 / 刚下课 / 开页没点开始）。runner 是服务码，不是人。 */
+function whoNow(){
+  var rn = D("runner"), wl = webLive(rn), now = Date.now(), seen = {}, rows = [];
+  function nm(x){ return x.name || "未知"; }
+  wl.active.forEach(function(x){ seen[nm(x)] = 1; rows.push({name: nm(x), st: "live", chip: "在上课", via: "网页", course: x.course, started: Date.parse(x.started_at), last: Date.parse(x.last_line_at), lines: x.high_water, sid: x.session_id}); });
+  wl.quiet.forEach(function(x){ if(seen[nm(x)]) return; seen[nm(x)] = 1; rows.push({name: nm(x), st: "quiet", chip: "没新句子", via: "网页", course: x.course, started: Date.parse(x.started_at), last: Date.parse(x.last_line_at), lines: x.high_water, sid: x.session_id}); });
+  liveCodes().forEach(function(c){
+    if(SERVICE_CODES[c.name] || seen[c.name]) return;
+    var d = now - (+c.last_seen || 0) < 5 * 60000, w = now - (+c.web_last_seen || 0) < 5 * 60000;
+    if(!d && !w) return;
+    seen[c.name] = 1;
+    rows.push(d ? {name: c.name, st: "desk", chip: "桌面在线", via: "桌面", last: +c.last_seen} : {name: c.name, st: "idle", chip: "在线 · 没开课", via: "网页", last: +c.web_last_seen});
+  });
+  var order = {live: 0, desk: 1, idle: 2, quiet: 3};
+  rows.sort(function(a, b){ return order[a.st] - order[b.st] || (b.last || 0) - (a.last || 0); });
+  return {rows: rows, dup: wl.dup.length, soniox: liveNow().soniox};
+}
+function onlineNow(){ return liveCodes().filter(function(c){ return !SERVICE_CODES[c.name] && Date.now() - lastSeen(c) < 5 * 60000; }); }
 function fastStats(ae3){
   var rows = (ae3 && ae3.fast) || []; if(!rows.length) return null;
   var s = {hit:0, back:0, direct:0, other:0, to:0, fOr:0, orN:0, fDs:0, dsN:0};
@@ -1128,6 +1167,7 @@ function classIssues(s){
 /* 一节网页课的状态：没正常下课（report=null）本身就是信号 */
 function webLevel(s){
   var r = s.report, recent = Date.now() - (s.last_t || 0) < 20 * 60000;
+  if(!r && s.replaced_by) return {lv:"mute", txt:"刷新后换了新会话", why:"这一节没有下课总账，但同一个人紧接着开了新的一节（刷新页面会这样；新版会接回同一节）"};
   if(!r) return recent ? {lv:"live", txt:"进行中？", why:"20 分钟内还有事件、还没交下课总账"} : {lv:"bad", txt:"没正常下课", why:"没有下课总账：关页 / 崩了 / 断网没回来"};
   if((r.sent_failed || 0) > 0 || (s.bad || 0) > 0) return {lv: (r.sent_failed || 0) > 2 || (s.bad || 0) > 5 ? "bad" : "warn", txt: (r.sent_failed ? r.sent_failed + " 句没中文" : "") + (r.sent_failed && s.bad ? " · " : "") + (s.bad ? s.bad + " 个异常" : "")};
   return {lv:"ok", txt:"正常"};
@@ -1162,7 +1202,7 @@ function alerts(){
   if(rn){ (rn.jobs || []).forEach(function(j){
       if(j.state === "failed" && Date.now() - Date.parse(j.updated) < 86400000) put(must, "bad", "job-" + j.job_id, "笔记任务失败：" + (j.course || j.session_id), String(j.reason || "没给原因") + " · 试了 " + j.attempts + " 次", ago(Date.parse(j.updated)), "queue");
       if(j.state === "running" && j.lease_until && Date.parse(j.lease_until) < Date.now() - 60000) put(must, "warn", "stuck-" + j.job_id, "笔记任务卡住：" + (j.course || j.session_id), "running 但租约 " + ago(Date.parse(j.lease_until)) + " 就过期了 —— runner 可能挂了。", "", "queue"); });
-    (rn.live || []).filter(function(x){ return x.stale; }).forEach(function(x){ put(know, "warn", "stale-" + x.session_id, "「" + (x.course || x.session_id) + "」3 小时没新句子", "多半关页没下课；服务器 30 天后自己清。", ""); }); }
+    (rn.live || []).filter(function(x){ return x.stale; }).forEach(function(x){ put(know, "warn", "stale-" + x.session_id, "「" + (x.course || x.session_id) + "」3 小时没新句子", "多半关页没下课；服务器每小时的定时任务会把它标成结束，有句子的补跑一份笔记。", ""); }); }
   var ds429 = grp(function(r){ return /deepseek:429/.test(r.up); });
   if(ds429.n) put(know, "warn", "ds429", "DeepSeek 限流 " + num(ds429.n) + " 次", "偶发不用管；持续出现说明并发太高。", whenIn(ds429.last, ds429.who[0]));
   var d403 = grp(function(r){ return +r.status === 403; });
@@ -1203,7 +1243,7 @@ function renderStatus(al){
   function part(node, tipFn, click){ if(tipFn) hover(node, tipFn); if(click){ node.style.cursor = "pointer"; node.addEventListener("click", click); } parts.push(node); }
   var nLive = Math.max(ln.soniox || 0, ln.web.length);
   part(h("span", null, h("span.live-dot" + (nLive ? "" : ".off")), nLive ? h("span", null, h("b", null, String(nLive)), " 节在上") : "没人在上课"),
-    function(){ return tipBox("Soniox 实时连接（桌面 + 网页）", [["Soniox 并发", (ln.soniox == null ? "—" : ln.soniox) + " / " + (ln.limit || "—")], ["网页课（服务器在收句子）", String(ln.web.length)]]); }, function(){ go("queue"); });
+    function(){ return tipBox("Soniox 实时连接（桌面 + 网页）", [["Soniox 并发", (ln.soniox == null ? "—" : ln.soniox) + " / " + (ln.limit || "—")], ["网页课（15 分钟内有新句子）", String(ln.web.length)], ["网页课 · 没新句子（多半关页了）", String(ln.quiet.length)], ["网页课 · 刷新残留（已并入上一行）", String(ln.dup.length)]]); }, function(){ go("queue"); });
   if(D("list")) part(h("span", null, h("b", null, String(on.length)), " 人在线"), function(){ return tipBox("近 5 分钟有请求的码", on.length ? on.map(function(c){ return [c.name, whenIn(lastSeen(c), c.name)]; }) : [["没有", ""]]); }, function(){ go("people"); });
   var sp = spendToday(); if(sp != null) part(h("span", null, "今日 ", h("b", null, money(sp))), function(){ var od = spendDaily().filter(function(d){ return d.day === utcToday(); })[0];
     return tipBox("今日实付（UTC 日）", [["Soniox", money(sonioxToday())], ["OpenRouter", money(od ? od.or : 0)], ["DeepSeek 直连", "只能按 token 估，见「平台」"]]); });
@@ -1278,6 +1318,27 @@ function swimlane(){
   box.appendChild(h("div.axis", null, h("span"), ax, h("span")));
   return box;
 }
+function whoCard(){
+  return card({span: 12, flush: true, title: "现在谁在上课", sub: "一人一行 · 网页课看得到课名和句数，桌面版只看得到在线", src: ["runner", "list"], soft: ["list"], body: function(){
+    var w = whoNow(), now = Date.now();
+    if(!w.rows.length) return empty("现在没人在线", "最近 5 分钟没有任何人的请求。");
+    var l = h("div.list");
+    w.rows.forEach(function(r){
+      var dot = r.st === "live" ? "live" : r.st === "quiet" ? "warn" : r.st === "desk" ? "blue" : "";
+      var sub = r.st === "live" || r.st === "quiet"
+        ? [r.via, r.course && r.course !== "未命名" ? r.course : "未命名的课", "开课 " + since(now - r.started)].join(" · ")
+        : r.st === "desk" ? "桌面版 · 课本身面板看不到" + (w.soniox ? "（Soniox 现有 " + w.soniox + " 路实时连接）" : "") : "网页 · 在首页 / 刚下课 / 还没点开始";
+      var right = r.st === "live" || r.st === "quiet"
+        ? h("div.r", null, h("div", {style:{fontWeight:500}}, fmtDur((now - r.started) / 1000)), h("div.mut", {style:{fontSize:"11.5px"}}, num(r.lines || 0) + " 句 · 最后一句 " + since(now - r.last)))
+        : h("div.r", null, h("div.mut", {style:{fontSize:"11.5px"}}, "最近请求 " + since(now - r.last)));
+      l.appendChild(h("div.row", null, h("span.dot" + (dot ? "." + dot : "")), avatar(r.name, 30),
+        h("div.main", null, h("div.t", null, r.name, h("span.chip" + (r.st === "live" ? ".ok" : r.st === "quiet" ? ".warn" : r.st === "desk" ? ".blue" : ""), {style:{marginLeft:"8px"}}, r.chip), isLab(r.name) ? h("span.chip", {style:{marginLeft:"5px"}}, "测试码") : null), h("div.s", null, sub)),
+        right));
+    });
+    if(w.dup) l.appendChild(h("div.row", null, h("div.main", null, h("div.s", null, "另有 " + w.dup + " 节是刷新留下的旧会话，已并入上面的同一个人，不重复计数。"))));
+    return l;
+  }});
+}
 function hero(al){
   var c = h("section.card.hero.s12"), pr = periods(), st = D("stats");
   if(!st && !(S.stats && S.stats.err)){ c.appendChild(h("div.sk-blk", {style:{height:"170px"}})); return c; }
@@ -1290,7 +1351,8 @@ function hero(al){
   var sd = spendDaily(), sdPrev = sd.filter(function(d){ return d.day < utcToday(); }).slice(-7), avgSp = sdPrev.length ? sdPrev.reduce(function(a, d){ return a + d.sx + d.or; }, 0) / sdPrev.length : 0;
   var sp = spendToday();
   var last = liveCodes().map(lastSeen).sort(function(x, y){ return y - x; })[0];
-  var title = nLive ? "现在有 " + nLive + " 节课在上。" : on.length ? "有 " + on.length + " 个人刚刚还在用。" : "现在没人在上课。";
+  var who = whoNow(), liveNames = who.rows.filter(function(r){ return r.st === "live"; }).map(function(r){ return r.name; });
+  var title = nLive ? "现在有 " + nLive + " 节课在上" + (liveNames.length ? "：" + liveNames.slice(0, 3).join("、") + (liveNames.length > 3 ? " 等" : "") : "") + "。" : on.length ? "有 " + on.length + " 个人刚刚还在用。" : "现在没人在上课。";
   var say = "今天（UTC）" + (Object.keys(ppl).length ? Object.keys(ppl).length + " 人上了 " + fmtDur(td.x_s) + " 课" : "还没人上课") + (sp != null ? "，花了 " + money(sp) : "") + "。" +
     (!nLive && last ? "最近一次有请求是 " + since(Date.now() - last) + "。" : "") + (al.must.length ? " 有 " + al.must.length + " 件事要你处理。" : al.loading ? "" : " 没有要你动手的事。");
   var f = function(a, b){ return b > 0 ? a / b : a > 0 ? 1 : 0; };
@@ -1407,6 +1469,7 @@ function viewOverview(){
   var wrap = h("div"), g0 = h("div.grid"), pr = periods(), al = alerts();
   if(al.must.length) g0.appendChild(h("section.card.flush.s12.must", null, h("div.ch", null, h("h3", null, "要你处理"), h("span.sub", null, al.must.length + " 件")), h("div.alerts", null, al.must.map(alertRow))));
   g0.appendChild(hero(al));
+  g0.appendChild(whoCard());
   wrap.appendChild(g0);
   /* 用量 */
   wrap.appendChild(sec("用量", rangeName()));
@@ -1690,7 +1753,7 @@ function webSheet(sh){
   if(r.sentences == null && zhEv.length){ r = Object.assign({}, r, {sentences: zhEv.length, sent_failed: zhEv.filter(function(e){ return e.failed; }).length,
     total_p50: median(zhEv.map(function(e){ return e.total_ms; }).filter(function(x){ return x != null; })), total_p90: zhEv.map(function(e){ return e.total_ms; }).filter(function(x){ return x != null; }).sort(function(a, b){ return a - b; })[Math.floor(zhEv.length * .9)] });
     lat = {sealP50: median(zhEv.map(function(e){ return e.seal_ms; }).filter(function(x){ return x != null; })), zhP50: median(zhEv.map(function(e){ return e.zh_ms; }).filter(function(x){ return x != null; }))}; }
-  if(!s.report) ck(w.lv === "live" ? "ok" : "warn", w.lv === "live" ? "这节课还在上，下课后才有完整总账" : "这节课没正常结束，下面的数是从零散事件里算的", w.why || null);
+  if(!s.report) ck(w.lv === "live" || w.lv === "mute" ? "ok" : "warn", w.lv === "live" ? "这节课还在上，下课后才有完整总账" : w.lv === "mute" ? "刷新后换了新会话：这一节停在刷新那一刻，后面的在新的一节里" : "这节课没正常结束，下面的数是从零散事件里算的", w.why || null);
   var nS = r.sentences || 0, nF = r.sent_failed || 0;
   if(r.sentences != null) ck(nF ? "warn" : "ok", nF ? nF + " 句没出中文（共 " + nS + " 句）" : nS + " 句全部出了中文");
   if(fin.ok != null) ck(fin.retry ? "warn" : "ok", fin.retry ? "翻译重试了 " + fin.retry + " 次才成功" : "每句翻译都一次成功", fin.wait_p90 ? "排队最久的那批等了 " + ms(fin.wait_p90) : null);
@@ -1783,8 +1846,13 @@ function viewQueue(){
   g.appendChild(card({span: 12, flush: true, title: "正在上的网页课", sub: "服务器在收句子的会话（hash 对不上码名，看课名认人）", src: ["runner"], body: function(){
     var lv = D("runner").live || [];
     if(!lv.length) return empty("现在没有网页课在上");
-    var l = h("div.list"); lv.forEach(function(x){ l.appendChild(h("div.row", null, h("span.dot." + (x.stale ? "warn" : "live")), h("div.main", null, h("div.t", null, x.course || "（没课名）"), h("div.s.mono", null, x.session_id)),
-      h("div.r", null, h("div", null, num(x.high_water) + " 句"), h("div.mut", {style:{fontSize:"11.5px"}}, (x.stale ? "3 h 没新句子 · " : "") + since(Date.now() - Date.parse(x.last_line_at)))))); });
+    var wl = webLive(D("runner")), kind = {};
+    wl.dup.forEach(function(x){ kind[x.session_id] = "刷新残留 · "; });
+    wl.quiet.forEach(function(x){ kind[x.session_id] = "没新句子，多半关页了 · "; });
+    wl.stale.forEach(function(x){ kind[x.session_id] = "3 h 没新句子 · "; });
+    var l = h("div.list"); lv.forEach(function(x){ var k = kind[x.session_id] || "";
+      l.appendChild(h("div.row", null, h("span.dot." + (k ? "warn" : "live")), h("div.main", null, h("div.t", null, x.course || "（没课名）"), h("div.s.mono", null, x.session_id)),
+      h("div.r", null, h("div", null, num(x.high_water) + " 句"), h("div.mut", {style:{fontSize:"11.5px"}}, k + since(Date.now() - Date.parse(x.last_line_at)))))); });
     return l;
   }}));
   g.appendChild(card({span: 12, flush: true, title: "最近的任务", sub: "新 → 旧 · 最多 100 条", src: ["runner"], body: function(){

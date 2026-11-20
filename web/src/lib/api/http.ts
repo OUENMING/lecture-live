@@ -123,6 +123,56 @@ export async function request<T = unknown>(
 	body: unknown,
 	opts: RequestOptions = {}
 ): Promise<T> {
+	const t0 = Date.now();
+	try {
+		const out = await requestOnce<T>(path, body, opts);
+		observe({ path, method: opts.method ?? 'POST', call: opts.call, ms: Date.now() - t0, ok: true });
+		return out;
+	} catch (e) {
+		const ae = e instanceof ApiError ? e : null;
+		observe({
+			path,
+			method: opts.method ?? 'POST',
+			call: opts.call,
+			ms: Date.now() - t0,
+			ok: false,
+			status: ae?.status,
+			kind: ae?.kind,
+			reason: ae?.reason ?? String((e as Error)?.message ?? e).slice(0, 80)
+		});
+		throw e;
+	}
+}
+
+/** 一次 API 调用的结局（遥测旁路用；不含请求体 / 通行码） */
+export interface RequestOutcome {
+	path: string;
+	method: string;
+	call?: string;
+	ms: number;
+	ok: boolean;
+	status?: number;
+	kind?: string;
+	reason?: string;
+}
+
+let observer: ((o: RequestOutcome) => void) | null = null;
+/** 装一个观察者（遥测用，同时只有一个）；返回卸载函数。观察者抛错被吞。 */
+export function observeRequests(fn: (o: RequestOutcome) => void): () => void {
+	observer = fn;
+	return () => {
+		if (observer === fn) observer = null;
+	};
+}
+function observe(o: RequestOutcome): void {
+	try {
+		observer?.(o);
+	} catch {
+		/* 遥测永不影响请求 */
+	}
+}
+
+async function requestOnce<T>(path: string, body: unknown, opts: RequestOptions): Promise<T> {
 	const deadline = opts.deadlineMs ?? DEFAULT_DEADLINE_MS;
 	const doFetch: FetchLike = opts.fetch ?? ((url, init) => fetch(url, init));
 	const deadlineError = () =>

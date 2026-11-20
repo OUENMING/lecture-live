@@ -137,22 +137,29 @@ test('purgeOlderThan 只删逾期的已下课会话，没下课的与 30 天内�
 	const store = await open(name, () => t0);
 	await store.openSession('s_gone');
 	await store.append(line('s_gone', 1));
+	await store.ack('s_gone', 1);
 	await store.closeSession('s_gone'); // ended_at = t0
+	await store.openSession('s_unsent'); // OCR B：下课了但句子没传上去 → 过期也不删
+	await store.append(line('s_unsent', 1));
+	await store.append(line('s_unsent', 2));
+	await store.ack('s_unsent', 1);
+	await store.closeSession('s_unsent');
 	await store.openSession('s_live'); // 没下课 → 永不按天数删
 	await store.append(line('s_live', 1));
 
 	// 29 天后：还在窗口内，一条不删
 	const at29 = await open(name, () => t0 + 29 * DAY);
 	assert.equal(await at29.purgeOlderThan(30), 0);
-	assert.equal((await at29.listSessions()).length, 2);
+	assert.equal((await at29.listSessions()).length, 3);
 
 	// 31 天后：只删 s_gone 和它的句子
 	const at31 = await open(name, () => t0 + 31 * DAY);
 	assert.equal(await at31.purgeOlderThan(30), 1);
 	assert.deepEqual(
-		(await at31.listSessions()).map((s) => s.session_id),
-		['s_live']
+		(await at31.listSessions()).map((s) => s.session_id).sort(),
+		['s_live', 's_unsent']
 	);
+	assert.equal((await at31.linesOf('s_unsent')).length, 2, '没传完的句子一条不丢');
 	assert.deepEqual(await at31.linesOf('s_gone'), []);
 	assert.equal((await at31.linesOf('s_live')).length, 1);
 });

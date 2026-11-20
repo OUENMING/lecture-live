@@ -112,6 +112,8 @@ import {
 } from "./web-session-core.js";
 import { UPSTREAMS, defaultRoutes, mergeRoutes, parseRoutes, resolveRoute } from "./routes.js";
 import { TERMS_KINDS, matchTermsPath, termsRoute } from "./web-terms.js";
+import { DATA_KINDS, adminWeb, dataRoute, matchDataPath, purgeTestData } from "./web-telemetry.js";
+import { artifactRoute, hubSend, hubFetch, matchArtifactPath, runnerRoute, withTimeout } from "./runner-routes.js";
 import { KEY_TTL_S, PROBE_MAX_SESSION_S, REGION_NAMES, STT_RT_MODEL, configuredRegions, collectUsage,
          maxSessionS, mintTempKey, pickRegion, regionKey, webRef, wsUrl } from "./soniox-core.js";
 
@@ -462,8 +464,9 @@ async function passes(env, path, payload) {
 // 码能不能用 -> {deny} 或 {deny:null, left}。DO 不可用 -> 503（不放行：码模式下钱是 Owen 付的）。
 // `left` 只在 kind="rt" + 网页时是数字 / null（null = 不限；数字 = 今天还剩多少秒），其余情况 undefined ——
 // 只有 /v1/soniox/key 要它（把临时 key 的会话上限压到剩余额度）。
-async function checkPassInfo(env, code, install, kind, web = false) {
+async function checkPassInfo(env, code, install, kind, web = false, dev = undefined) {
   const payload = web ? { code, install, kind, client: "web" } : { code, install, kind };
+  if (dev) payload.dev = dev;
   let r = null;
   try { r = await (await passes(env, "/check", payload)).json(); } catch { r = null; }
   if (!r) return { deny: json(503, { error: "passes_unavailable" }), left: undefined };
@@ -476,7 +479,7 @@ async function checkPassInfo(env, code, install, kind, web = false) {
 }
 
 // 这条请求算不算「网页版」（`X-ClassLive-Client: web`）。只认 `web`，别的值 / 没有 = 桌面：
-// 网页版有独立的设备键 `devweb:<码>` 与名额 `max_web_devices`，桌面那 2 台不受影响（接口草案 §7、§8-4）。
+// 网页版登记在独立的设备键 `devweb:<码>`，名额与桌面合计 `max_devices`（Owen 11-20）。
 const isWeb = (request) => request.headers.get("x-classlive-client") === "web";
 
 // 调用类（`X-ClassLive-Call`）的解析口径 —— 提示词闸（`checkWebPrompt`）与计量（`ev.call_class`）共用，
@@ -484,11 +487,46 @@ const isWeb = (request) => request.headers.get("x-classlive-client") === "web";
 const callClassOf = (request) =>
   String(request.headers.get("x-classlive-call") || "").trim().toLowerCase().slice(0, 20);
 
+// 计费头（W22，契约 §6）：只对 runner 专用码名（env `RUNNER_PASS_NAME`，默认 "runner"）读
+// `X-ClassLive-Bill-To`（16 hex，即目标用户码的 hash）；其他码一律忽略这个头（客户端伪造也无效）。
+// **今天只记账**：进 AE 事件的 blob11（scripts/cl_admin_ui.py 要另同步，不在本任务改动面）；不动任何额度。
+const BILL_TO_RE = /^[0-9a-f]{16}$/;
+const billToOf = (request, env, name) => {
+  const passName = String(env?.RUNNER_PASS_NAME || "runner").trim().toLowerCase();
+  if (!name || name !== passName) return "";
+  const v = String(request.headers.get("x-classlive-bill-to") || "").trim().toLowerCase();
+  return BILL_TO_RE.test(v) ? v : "";
+};
+
+// 这台设备是什么（Owen 11-20：「记录这个设备是什么，并且回传」→ 管理面板 devices 里看）。
+// 只取**粗粒度**：浏览器 + 大版本 / 系统 / 是否手机 / 客户端版本 / 国家 —— 不存 IP、不存完整 UA。
+// 全部来自请求头（客户端可伪造），只当显示用的提示，不参与任何判定。
+export function deviceOf(request) {
+  const h = (k) => String(request.headers.get(k) || "");
+  const ua = h("user-agent");
+  const unq = (v) => v.replace(/^"|"$/g, "");
+  let os = unq(h("sec-ch-ua-platform"));
+  if (!os) {
+    os = /iPhone/.test(ua) ? "iOS" : /iPad/.test(ua) ? "iPadOS" : /Android/.test(ua) ? "Android"
+      : /Windows/.test(ua) ? "Windows" : /CrOS/.test(ua) ? "ChromeOS" : /Mac OS X|Macintosh|Darwin/.test(ua) ? "macOS"
+      : /Linux/.test(ua) ? "Linux" : "";
+  }
+  const m = ua.match(/(Edg|OPR|SamsungBrowser|Firefox|CriOS|FxiOS|Chrome|Version)\/(\d+)/);
+  let br = m ? ({ Edg: "Edge", OPR: "Opera", CriOS: "Chrome", FxiOS: "Firefox", Version: "Safari" }[m[1]] || m[1]) + " " + m[2] : "";
+  if (!br && /python-httpx|python-requests|urllib/i.test(ua)) br = "桌面 app";
+  const mobile = h("sec-ch-ua-mobile") === "?1" || /Mobi|iPhone|Android.+Mobile/.test(ua);
+  const out = {
+    os: os.slice(0, 20), br: br.slice(0, 24), mobile,
+    ver: clientVer(request), country: String(request.cf?.country || "").slice(0, 2),
+  };
+  return out.os || out.br || out.ver || out.country ? out : undefined;
+}
+
 // 查码闸：没放行过的码先查后调（deny 非空就直接回）；租期内放行过的不等，`late` 是还在路上的查码结果，
 // 调用方回包前必须 await 它（见文件头「短租」）。租约键带 kind：翻译 / 转写 / 打分的额度是分开判的。
-async function passGate(env, code, install, kind, web = false) {
+async function passGate(env, code, install, kind, web = false, dev = undefined) {
   const key = `${code}|${install}|${kind}|${web ? "web" : "dev"}`;
-  const checkP = checkPassInfo(env, code, install, kind, web).then((r) => {
+  const checkP = checkPassInfo(env, code, install, kind, web, dev).then((r) => {
     if (r.deny) lease.pass.delete(key); else lease.pass.set(key, Date.now());
     return r;
   });
@@ -547,7 +585,7 @@ function newEvent(request, path, t0 = Date.now()) {
     tz: clientTz(request) || String(request.cf?.timezone || "").slice(0, 40),
     status: 0, ms: 0, audio_s: 0, tokens_in: 0, tokens_out: 0, cache_hit: 0, jev_q: 0, pending: null,
     words: 0, first_ms: 0, done_ms: 0, max_tok: 0, t0,
-    finish: "", visible_chars: 0, reasoning_tok: 0, call_class: "legacy",
+    finish: "", visible_chars: 0, reasoning_tok: 0, call_class: "legacy", bill_to: "",
   };
 }
 function track(env, ev) {
@@ -555,7 +593,7 @@ function track(env, ev) {
     env.AE?.writeDataPoint({
       indexes: [ev.name],
       blobs: [ev.path, ev.name, ev.model, ev.up.slice(0, 200), ev.ver, ev.country, ev.colo, ev.tz,
-              ev.finish, ev.call_class],
+              ev.finish, ev.call_class, ev.bill_to],
       doubles: [ev.status, ev.ms, ev.audio_s, ev.tokens_in, ev.tokens_out, ev.cache_hit, ev.jev_q,
                 ev.words, ev.first_ms, ev.done_ms, ev.max_tok, ev.visible_chars, ev.reasoning_tok],
     });
@@ -824,7 +862,7 @@ async function jev(request, env, ctx, code, ev, ok = Promise.resolve(true)) {
 // 额度按已回收的 rt_s 判）；晚到的拒绝照 settleGate 的语义 —— key 已经发出来了但**不给**，上游最多白花一把。
 // 上游不配合（非 2xx / 超时 / 回包没 key）一律 502，客户端按「云端不可用」降级。出处见 soniox-core.js 文件头。
 async function sonioxKey(env, code, install, ev, request, web = false) {
-  const gate = await passGate(env, code, install, "rt", web);
+  const gate = await passGate(env, code, install, "rt", web, deviceOf(request));
   if (gate.deny) return gate.deny;
   if (!env.SONIOX_KEY) return json(503, { error: "soniox_not_configured" });   // fail-closed：没配就谁都不给
   // 可参数（客户端探测 / 联调用；老客户端不发 body，逐字退回改前行为）：
@@ -904,6 +942,14 @@ async function admin(request, env, path) {
     return new Response("unauthorized", { status: 401 });
   }
   const body = await request.json().catch(() => ({}));
+  // 测试数据（W20）：遥测 / 录音存在 R2（WEB_DATA），不进 Passes DO —— 直接在这一层读。
+  if (path === "/v1/admin/web/list" || path === "/v1/admin/web/get") return adminWeb(env, path, body);
+  // 笔记 / 实时总结任务队列的现状（看板用，Claude 11-20）：job 计数 + 最近任务 + 正在上的课
+  if (path === "/v1/admin/runner/state") {
+    const r = await hubFetch(env, "/admin_state", { limit: body?.limit });
+    if (!r) return json(503, { error: "runner_hub_missing" });
+    return json(r.status, await r.json().catch(() => ({ error: "upstream" })));
+  }
   if (path === "/v1/admin/routes/get") { const snap = await routesSnapshot(env); return json(snap.error ? 502 : 200, snap); }
   // 额度快照住在另一个 DO 上（Passes 那边没有这些计数），所以这一条单独分流。
   const res = path === "/v1/admin/quota"
@@ -1141,13 +1187,22 @@ export default {
     await Promise.all(configuredRegions(env).map((region) =>
       reclaimUsage(env, region, nowMs).catch((e) =>
         console.log(JSON.stringify({ soniox: "reclaim_threw", region, msg: String(e).slice(0, 120) })))));
+    // W22（契约 §2）：顺手扫一遍全局 hub —— 超 3 h 没逐句的 live 删掉、租约过期的任务回收。
+    // 同 cron 自己的立场：挂了只记一行，不抛。
+    try {
+      await withTimeout(hubFetch(env, "/sweep", {}), 5000);
+    } catch (e) {
+      console.log(JSON.stringify({ runner_hub: "sweep_failed", msg: String(e).slice(0, 120) }));
+    }
   },
 };
 
 async function route(request, env, ctx, ev, path, t0) {
   // 网页版会话账本（/v1/web/*，docs/API-web-v0-20261117.md §3）：方法不止 POST，所以排在白名单之前。
   // ⚠️ 老的四条路由与「未知路径 404」逐字不变（那一行白名单一个字都没动）。
-  if (path === "/v1/web/" || path.startsWith("/v1/web/")) return webRoute(request, env, ev, path);
+  if (path === "/v1/web/" || path.startsWith("/v1/web/")) return webRoute(request, env, ctx, ev, path);
+  // runner 接口（W22，契约 CONTRACT-runner-20261120.md §3）：只认 RUNNER_TOKEN，不吃通行码、不进 passGate。
+  if (path.startsWith("/v1/runner/")) return runnerRoute(request, env, path);
   if (request.method !== "POST"
       || !(path === "/v1/transcribe" || path === "/v1/chat/completions" || path === "/v1/jev"
            || path === "/v1/soniox/key")) {
@@ -1165,6 +1220,8 @@ async function route(request, env, ctx, ev, path, t0) {
     return new Response("unauthorized", { status: 401 });
   }
   ev.name = code === null ? "public" : code.split("-")[1];   // 码已过 CODE_RE：中间段就是名字
+  // 计费头（W22 契约 §6）：chat / jev 两条代付路径都走这里 —— 只对 runner 码名认 X-ClassLive-Bill-To。
+  if (path === "/v1/chat/completions" || path === "/v1/jev") ev.bill_to = billToOf(request, env, ev.name);
   if ((path === "/v1/chat/completions" || path === "/v1/jev" || path === "/v1/soniox/key") && code === null) {
     return new Response("unauthorized", { status: 401 });   // 公开令牌不代付翻译 / 打分 / 实时转写的 key
   }
@@ -1177,7 +1234,7 @@ async function route(request, env, ctx, ev, path, t0) {
   // 翻译首字：中国用户落 HKG，查码那一趟 DO 约 210 ms，原来全压在首字前面（10-15：CN p50 395 ms vs IE 343 ms）。
   if (path === "/v1/chat/completions" || path === "/v1/jev") {
     const kind = path === "/v1/jev" ? "jev" : "llm";
-    const gate = await passGate(env, code, install, kind, web);
+    const gate = await passGate(env, code, install, kind, web, deviceOf(request));
     if (gate.deny) return gate.deny;
     const ok = gate.late ? gate.late.then((r) => !r.deny) : Promise.resolve(true);
     const res = kind === "llm" ? await chat(request, env, ctx, code, ev, ok, web) : await jev(request, env, ctx, code, ev, ok);
@@ -1211,7 +1268,7 @@ async function route(request, env, ctx, ev, path, t0) {
   const planP = planFor(env, ctx, seconds, ev.country);   // 永不 reject（DO 不可用时自己退回开放）
   let gate = { deny: null, late: null };
   if (code !== null) {
-    gate = await passGate(env, code, install, "asr", web);
+    gate = await passGate(env, code, install, "asr", web, deviceOf(request));
     if (gate.deny) return gate.deny;
   }
   ev.audio_s = seconds;
@@ -1243,6 +1300,14 @@ function webMatch(method, path) {
   // 它不碰 WebSessions（个人术语走 WEB_TERMS），所以排在「这个 DO 有没有绑」那道检查之前。
   const t = matchTermsPath(method, path);
   if (t) return { kind: t };
+  // 测试数据（W20）：遥测事件 + 课堂录音分段，处理函数在 web-telemetry.js。
+  // 浏览器读产物（W22，契约 §4）：note / summary，鉴权同其他 /v1/web/*。
+  const a = matchArtifactPath(method, path);   // 已是 {kind, id}（terms 返回字符串才要包一层）
+  if (a) return a;
+  return matchDataPath(method, path) || matchSessionPath(method, path);
+}
+
+function matchSessionPath(method, path) {
   let m = path.match(WEB_LINES);
   if (m) return method === "PUT" ? { kind: "lines", id: m[1] } : null;
   m = path.match(WEB_END);
@@ -1260,9 +1325,10 @@ const DO_ERROR_STATUS = {
   too_large: 413, bad_body: 400, upstream: 502,
 };
 
-async function webRoute(request, env, ev, path) {
+async function webRoute(request, env, ctx, ev, path) {
   const hit = webMatch(request.method, path);
   if (!hit) return new Response("not found", { status: 404 });
+  // 浏览器读产物（W22 §4）：只读 R2，不碰会话账本 —— 但鉴权 / 查码照全套过。
   // ① 通行码（**不接受**公开令牌 / runner 令牌）
   const auth = request.headers.get("authorization") || "";
   const code = auth.startsWith("Bearer cl-") ? auth.slice(7) : null;
@@ -1278,9 +1344,13 @@ async function webRoute(request, env, ev, path) {
   // `hash` 就是这枚码在存储里的身份（不明文进键，同 web-session 的分片方式）
   const hash = await codeHashHex(code, 16);
   const terms = TERMS_KINDS.includes(hit.kind);
-  if (!terms && !env.WEB_SESSIONS) return json(503, { error: "upstream", detail: "web_sessions" });
+  const data = DATA_KINDS.includes(hit.kind);
+  const artifact = hit.kind === "note" || hit.kind === "summary";
+  // 测试数据只写 R2（WEB_DATA），不碰会话账本：没绑 WEB_SESSIONS 也照收（它不影响上课，少收才是损失）。
+  if (!terms && !data && !artifact && !env.WEB_SESSIONS) return json(503, { error: "upstream", detail: "web_sessions" });
+  if ((data || artifact) && !env.WEB_DATA) return json(503, { error: "upstream", detail: "web_data" });
   ev.name = code.split("-")[1];
-  ev.call_class = terms ? "web-terms" : "web-session";
+  ev.call_class = terms ? "web-terms" : data ? "web-data" : "web-session";
 
   // 码能不能用（吊销 / 过期 / 网页设备名额 / 当日额度）：复用老路的查码，只是 kind=rt + client=web。
   // ⚠️ 用哪个 kind 判额度**待 Owen 确认**：这里按「网页上课 = 实时转写那档」判（与 /v1/soniox/key 同一把闸）。
@@ -1289,6 +1359,12 @@ async function webRoute(request, env, ev, path) {
     const b = await gate.deny.clone().json().catch(() => ({}));
     return json(gate.deny.status, { error: b.error === "passes_unavailable" ? "upstream" : (b.error || "forbidden") });
   }
+
+  // 浏览器读产物（W22）：鉴权与查码已过，这里只读 R2（未出 -> 404 not_ready）。
+  if (artifact) return artifactRoute(env, hash, hit, new URL(request.url).searchParams);
+
+  // 测试数据（W20）：判完码就直接落 R2（不碰会话账本、不需要 WEB_SESSIONS 绑定）。
+  if (data) return dataRoute(request, env, hit, ev.name);
 
   // 术语上云（W19，契约 CONTRACT-terms.md / 文档 §3.9）：路径匹配在 web-terms.matchTermsPath（"shared" 排前），
   // 存储与规则都在那一族里（个人术语不碰 WebSessions）。
@@ -1313,11 +1389,19 @@ async function webRoute(request, env, ev, path) {
     const course = normalizeCourse(body.json?.course);
     if (course === null) return json(400, { error: "bad_body", detail: "course" });   // 待 Owen 确认：契约是 ^[A-Z0-9]{2,16}$
     const idem = (request.headers.get("idempotency-key") || "").trim().slice(0, 64);
+    // 网页把时区放在 X-ClassLive-TZ 头里、不在 body（Claude 11-20 runner 上线时发现笔记全按 UTC 记时间）
+    const tz = String(body.json?.tz || request.headers.get("x-classlive-tz") || "").slice(0, 40);
     const r = await relay(await call("/open", {
-      hash, course, started_at: body.json?.started_at, tz: body.json?.tz, install, idem,
+      hash, course, started_at: body.json?.started_at, tz, install, idem,
     }));
     if (r.status !== 201 && r.status !== 200) return r;
     const { session_id } = await r.json();
+    // hub 通知点①（契约 §2 表）：**新建**开课成功才通知（幂等重放的 200 不算），不阻塞。
+    if (r.status === 201) {
+      ctx?.waitUntil?.(hubSend(env, "/register", {
+        hash, session_id, course, tz, started_at: body.json?.started_at,
+      }));
+    }
     // 幂等命中回 200（契约 §3.1），新建回 201
     return json(r.status, {
       session_id, server_time: new Date().toISOString(),
@@ -1329,16 +1413,36 @@ async function webRoute(request, env, ev, path) {
     const body = await readWebBody(request);
     if (body.error) return json(413, { error: body.error });
     if (!Array.isArray(body.json?.lines)) return json(400, { error: "bad_body" });
-    return relay(await call("/lines", { session_id: hit.id, lines: body.json.lines }));
+    const dr = await call("/lines", { session_id: hit.id, lines: body.json.lines });
+    const jb = await dr.json().catch(() => ({ error: "upstream" }));
+    if (jb.error) return json(DO_ERROR_STATUS[jb.error] ?? 502, jb);
+    // hub 通知点②（§2 表）：逐句写成功就 touch（实时总结 runner 靠 live 表知道这课还活着），不阻塞。
+    ctx?.waitUntil?.(hubSend(env, "/touch", { hash, session_id: hit.id, high_water: jb.high_water }));
+    return json(dr.status, jb);
   }
 
   if (hit.kind === "end") {
     const body = await readWebBody(request);
     if (body.error) return json(413, { error: body.error });
-    return relay(await call("/end", {
+    const dr = await call("/end", {
       session_id: hit.id, ended_at: body.json?.ended_at,
       lines_total: body.json?.lines_total, level: body.json?.level,
-    }));
+    });
+    const jb = await dr.json().catch(() => ({ error: "upstream" }));
+    if (jb.error) return json(DO_ERROR_STATUS[jb.error] ?? 502, jb);
+    // hub 通知点③（§2 表）：**新建**了任务（202）才入队 + 删 live（dedupe 的 200 不动）。
+    // await 最多 2 s；失败只记日志，照常回 202 —— cron 的 /sweep 只补 live，丢 enqueue 的补救不做（记账）。
+    if (dr.status === 202) {
+      try {
+        await withTimeout(hubFetch(env, "/enqueue", {
+          hash, session_id: hit.id, job_id: jb.job_id,
+          ended_at: body.json?.ended_at, lines_total: body.json?.lines_total, level: body.json?.level,
+        }), 2000);
+      } catch (e) {
+        console.log(JSON.stringify({ runner_hub: "enqueue_failed", session_id: hit.id, msg: String(e).slice(0, 120) }));
+      }
+    }
+    return json(dr.status, jb);
   }
 
   if (hit.kind === "state") {
@@ -1351,7 +1455,10 @@ async function webRoute(request, env, ev, path) {
     // course 校验与开课同一套（normalizeCourse），这里只挑出一层 400 的 detail，不另写规则。
     const course = normalizeCourse(body.json?.course);
     if (course === null) return json(400, { error: "bad_body", detail: "course" });
-    return relay(await call("/rename", { session_id: hit.id, course }));
+    const rr = await call("/rename", { session_id: hit.id, course });
+    // hub 通知点⑤（Claude 11-20）：课名「下课再起」，排队中的笔记要用新名字；不阻塞，丢了 claim 时还会从账本补
+    if (rr.status === 200) ctx?.waitUntil?.(hubSend(env, "/rename", { hash, session_id: hit.id, course }));
+    return relay(rr);
   }
 
   if (hit.kind === "list") {
@@ -1366,6 +1473,14 @@ async function webRoute(request, env, ev, path) {
   if (raw.json?.confirm !== "delete-all-my-data") return json(400, { error: "bad_body", detail: "confirm" });
   const r = await relay(await call("/delete", { hash }));
   if (r.status !== 200) return r;
+  // hub 通知点④（§2 表）：删掉该 hash 的 live 与未完成的 job（对齐「删了不再长回来」）；失败只记日志。
+  try {
+    await withTimeout(hubFetch(env, "/purge", { hash }), 2000);
+  } catch (e) {
+    console.log(JSON.stringify({ runner_hub: "purge_failed", hash, msg: String(e).slice(0, 120) }));
+  }
+  // 测试数据（遥测 / 录音）按码名存，不在 web/<hash>/ 下 —— 一并删（OCR D）；对象可能上百个，放后台
+  ctx?.waitUntil?.(purgeTestData(env, ev.name));
   const { deleted } = await r.json();
   return json(200, { deleted, tombstone_until: new Date(Date.now() + WEB_GONE_MS).toISOString() });
 }

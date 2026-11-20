@@ -12,6 +12,8 @@ export interface CoreWorker {
 	postMessage(msg: WorkerIn): void;
 	terminate(): void;
 	onmessage: ((ev: MessageEvent<WorkerOut>) => void) | null;
+	/** 脚本加载失败 / 崩溃（真 Worker 有；测试假件可以没有） */
+	onerror?: ((ev: { message?: string }) => void) | null;
 }
 
 export interface PyodideCoreOptions {
@@ -49,7 +51,26 @@ export function createCore(opts: PyodideCoreOptions = {}): Core {
 	function emit(next: { state: ProjState; view: ViewState }): void {
 		proj = next.state;
 		last = next.view;
-		for (const cb of [...cbs]) cb(next.view);
+		for (const cb of [...cbs]) {
+			try {
+				cb(next.view);
+			} catch {
+				/* 一个订阅者出错不拦别的订阅者 */
+			}
+		}
+	}
+
+	/** 出错：挂提示（不清屏）；还没 ready 就让 ready 失败，免得开课永远停在「启动中」 */
+	function failWith(message: string): void {
+		try {
+			emit(noticeView(proj, message));
+		} catch {
+			/* 提示也挂不上就只走 reject */
+		}
+		if (settle) {
+			settle.reject(new Error(message));
+			settle = null;
+		}
 	}
 
 	worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
@@ -61,14 +82,22 @@ export function createCore(opts: PyodideCoreOptions = {}): Core {
 			return;
 		}
 		if (msg.type === 'snapshot') {
-			emit(project(proj, msg.snap, { course: opts.course }));
+			let next;
+			try {
+				next = project(proj, msg.snap, { course: opts.course });
+			} catch (e) {
+				failWith(`识别核心回了看不懂的数据：${e instanceof Error ? e.message : String(e)}`);
+				return;
+			}
+			emit(next);
 			return;
 		}
-		emit(noticeView(proj, msg.message));
-		if (settle) {
-			settle.reject(new Error(msg.message));
-			settle = null;
-		}
+		failWith(msg.message);
+	};
+	// Worker 脚本 404 / 被拦 / boot 时崩：不会回任何消息，没有这条 ready 会永远挂着（OCR 11-20 指出，已核）
+	worker.onerror = (ev) => {
+		if (disposed) return;
+		failWith(`识别核心崩了${ev?.message ? `：${ev.message}` : ''}`);
 	};
 
 	worker.postMessage({ type: 'init' });
@@ -90,6 +119,10 @@ export function createCore(opts: PyodideCoreOptions = {}): Core {
 		},
 		dispose: () => {
 			disposed = true;
+			if (settle) {
+				settle.reject(new Error('disposed'));
+				settle = null;
+			}
 			cbs.clear();
 			worker.terminate();
 		}

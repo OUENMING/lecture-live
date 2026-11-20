@@ -3,7 +3,7 @@
 // 设计：docs/PLAN-passkey.md §2–§6（Owen 2026-10-11 拍板：默认不限额、设备 2 台、有效期 120 天）。
 //
 // 键（DO 的 KV 接口；SQLite 后端的 DO 同样支持，免费档可用）：
-//   code:<码>              {name, created, expires, revoked, max_devices, max_web_devices,
+//   code:<码>              {name, created, expires, revoked, max_devices,
 //                           daily_asr_s, daily_tokens, daily_rt_s, daily_web_rt_s}
 //   dev:<码>               {<install_id>: {first, last}}                    （桌面）
 //   devweb:<码>            {<install_id>: {first, last}}                    （网页；老码没有这键 -> 空）
@@ -38,7 +38,15 @@ import { UPSTREAMS, normalizeUpstream, CLASS_RE } from "./routes.js";
 const DAY_MS = 86400000;
 export const DEFAULT_DAYS = 120;
 export const DEFAULT_DEVICES = 2;          // 桌面
-export const DEFAULT_WEB_DEVICES = 2;      // 网页另算 2 台（接口草案 §7「2 + 2」）；桌面名额不被挤掉
+// 网页设备不再单独设名额：与桌面**合计** max_devices 台（Owen 2026-11-20 定）。网页的「设备」= 一个浏览器的安装号，
+// 清缓存 / 无痕 / 换浏览器都会算新设备 —— 被拦了由 Owen 在面板里清设备或调 `limit max_devices`。
+// 设备描述（handler 的 deviceOf 拼的）：只收这几个短字段，别的丢 —— DO 存储形状归这里管。
+function devInfo(dev) {
+  if (!dev || typeof dev !== "object") return null;
+  const str = (v, n) => String(v ?? "").replace(/[\u0000-\u001f]/g, "").slice(0, n);
+  const o = { os: str(dev.os, 20), br: str(dev.br, 24), mobile: dev.mobile === true, ver: str(dev.ver, 16), country: str(dev.country, 2) };
+  return o.os || o.br || o.ver || o.country ? o : null;
+}
 export const WEB_DEVICE_PREFIX = "devweb:";  // 键的唯一拼法（check() 写，devices 读）
 // 网页领的实时转写每天默认多少秒（Owen 2026-11-17 定：5 h）。env `WEB_DAILY_RT_S` 可改全局默认，
 // 配成 `none` = 不限；单个码的 `daily_web_rt_s` 覆盖它（null / 缺省 = 跟随全局）。
@@ -160,9 +168,9 @@ export class PassCore {
 
   // 能不能用：码在、没吊销、没过期、设备没超、当日额度没超（null = 不限）。新设备在名额内就登记。
   // 返回 {ok:true, name, web_rt_left_s?} 或 {ok:false, reason: unknown|revoked|expired|devices|quota}。
-  // `client: "web"`（只有这个值算）-> 走独立的 `devweb:<码>` 键与 `max_web_devices`；其他 / 缺省 = 桌面，逐字不变。
+  // `client: "web"`（只有这个值算）-> 登记进 `devweb:<码>` 键；名额与桌面合计 `max_devices`。
   // `web_rt_left_s` 只在 kind="rt" 时回（网页那把临时 key 的会话上限要压到它，handler.sonioxKey 读）。
-  async check({ code, install, kind, client }) {
+  async check({ code, install, kind, client, dev }) {
     if (!CODE_RE.test(code || "")) return { ok: false, reason: "unknown" };
     const c = await this.storage.get(`code:${code}`);
     if (!c) return { ok: false, reason: "unknown" };
@@ -205,15 +213,22 @@ export class PassCore {
     if (INSTALL_RE.test(install || "")) {
       const web = client === "web";
       const devKey = web ? `${WEB_DEVICE_PREFIX}${code}` : `dev:${code}`;
-      // 名额：老码没有 max_web_devices -> 用默认值（与 max_devices 同一个兼底思路）
-      const cap = web ? c.max_web_devices ?? DEFAULT_WEB_DEVICES : c.max_devices;
+      // 名额：**桌面 + 网页合计** `max_devices` 台（Owen 2026-11-20：「一个码最多两个设备，合计」）。
+      // 两张表分开存（面板分开显示），判名额时加起来；已登记的设备永远照用，只拦新的。
+      const other = web ? `dev:${code}` : `${WEB_DEVICE_PREFIX}${code}`;
+      const cap = c.max_devices;
       const devs = (await this.storage.get(devKey)) || {};
       if (!devs[install]) {
-        if (Object.keys(devs).length >= cap) return { ok: false, reason: "devices", name: c.name };
+        const n = Object.keys(devs).length + Object.keys((await this.storage.get(other)) || {}).length;
+        if (cap !== null && cap !== undefined && n >= cap) {
+          return { ok: false, reason: "devices", name: c.name };
+        }
         devs[install] = { first: now, last: now };
       } else {
         devs[install].last = now;
       }
+      const info = devInfo(dev);
+      if (info) devs[install].info = info;          // 这台是什么（最近一次看到的样子）
       await this.storage.put(devKey, devs);
     }
     return webLeft === undefined ? { ok: true, name: c.name } : { ok: true, name: c.name, web_rt_left_s: webLeft };
@@ -259,7 +274,6 @@ export class PassCore {
     const rec = {
       name: n, created: now, expires: now + num(days || DEFAULT_DAYS) * DAY_MS, revoked: false,
       max_devices: Number.isInteger(max_devices) && max_devices > 0 ? max_devices : DEFAULT_DEVICES,
-      max_web_devices: DEFAULT_WEB_DEVICES,
       daily_asr_s: null, daily_tokens: null, daily_rt_s: null, daily_web_rt_s: null,
     };
     await this.storage.put(`code:${code}`, rec);
@@ -275,8 +289,13 @@ export class PassCore {
       // 今日网页实时转写已用秒（面板 / cl_admin list 要看得见那个 “软闸” 离上限还有多远）。
       // 老记录没这键 -> num() 当 0。
       const u = (await this.storage.get(`use:${today}:${code}`)) || {};
+      // 网页设备另算（2026-11-20：只在网页上课的码，面板曾显示「0 台 · 从没用过」）。
+      // `devices` / `last_seen` 仍只数桌面 —— cl_admin list 与老面板按这个口径读，别改它的含义。
+      const webDevs = (await this.storage.get(`${WEB_DEVICE_PREFIX}${code}`)) || {};
       out.push({ code, ...c, devices: Object.keys(devs).length,
                  last_seen: Math.max(0, ...Object.values(devs).map((d) => d.last)),
+                 web_devices: Object.keys(webDevs).length,
+                 web_last_seen: Math.max(0, ...Object.values(webDevs).map((d) => d.last)),
                  rt_web_s: num(u.rt_web_s), rt_s: num(u.rt_s) });
     }
     return { codes: out };
@@ -335,7 +354,7 @@ export class PassCore {
   async devices({ code }) {
     if (!CODE_RE.test(code || "")) return { error: "devices 只认完整码" };
     const pick = async (key) => Object.entries((await this.storage.get(key)) || {})
-      .map(([id, d]) => ({ id: id.slice(0, 6), first: d.first, last: d.last }))
+      .map(([id, d]) => ({ id: id.slice(0, 6), first: d.first, last: d.last, ...(d.info ? { info: d.info } : {}) }))
       .sort((a, b) => b.last - a.last);
     return { code, devices: await pick(`dev:${code}`), web_devices: await pick(`${WEB_DEVICE_PREFIX}${code}`) };
   }
@@ -379,7 +398,7 @@ export class PassCore {
       //   写 endsWith 是把意图钉死，不是因为已知反例。键形状一变（比如名字允许 `-`）这条就要重看。
       if (k.endsWith(`:${code}`)) { keys.push(k); days += 1; }
     }
-    await this.storage.delete(keys);
+    for (let i = 0; i < keys.length; i += 128) await this.storage.delete(keys.slice(i, i + 128));   // DO 多键 delete 上限 128
     return { ok: true, code, name: c.name, removed: keys.length, usage_days: days };
   }
 
@@ -395,7 +414,6 @@ export class PassCore {
       if ("daily_rt_s" in body) c.daily_rt_s = r;
       if ("daily_web_rt_s" in body) c.daily_web_rt_s = w;
       if (Number.isInteger(body.max_devices) && body.max_devices > 0) c.max_devices = body.max_devices;
-      if (Number.isInteger(body.max_web_devices) && body.max_web_devices > 0) c.max_web_devices = body.max_web_devices;
     });
   }
 

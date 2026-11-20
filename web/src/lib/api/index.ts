@@ -5,7 +5,7 @@
 // `uploadSlides` 仍是 v0 待确认（§3.6 只收抽取好的文字，接口形状未定）。
 // `api` 这个对象只是给界面一个「一个名字对应一个接口」的入口，实现全在各自模块，这里不写逻辑。
 
-export { ApiError, request, apiBase, type ApiErrorKind, type RequestOptions } from './http';
+export { ApiError, request, apiBase, observeRequests, type ApiErrorKind, type RequestOptions, type RequestOutcome } from './http';
 export {
 	installId,
 	passcode,

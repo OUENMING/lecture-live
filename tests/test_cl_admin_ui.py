@@ -1468,5 +1468,109 @@ process.stdout.write(JSON.stringify({
         self.assertIn("没采流", g["noStream"])
 
 
+class WebLiveClassify(unittest.TestCase):
+    """`webLive`：服务器账本里「正在上」的网页课怎么分类（刷新残留不许算成第二节课在上）。喂页面里的真源码。"""
+
+    def _run(self, live, now):
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("没有 node，跳过（大声）")
+        prog = (_js_funcs(["webLive"]).replace("function webLive", "var LIVE_ACTIVE_MS = 15 * 60000;\nfunction webLive", 1)
+                + f"\nDate.now = () => {now};\nconst R = webLive({{live: {json.dumps(live)}}});"
+                + "\nconsole.log(JSON.stringify({a: R.active.map(x=>x.session_id), q: R.quiet.map(x=>x.session_id), d: R.dup.map(x=>x.session_id), s: R.stale.map(x=>x.session_id)}));")
+        out = subprocess.run([node, "-e", prog], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def _live(self, sid, started, last, course="ECON", h="h1", stale=False):
+        iso = lambda ms: datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        return {"hash": h, "session_id": sid, "course": course, "started_at": iso(started), "last_line_at": iso(last), "stale": stale}
+
+    def test_刷新残留只算一节在上(self):
+        now = 10_000_000_000
+        live = [self._live("old", now - 600_000, now - 500_000), self._live("new", now - 100_000, now - 5_000)]
+        r = self._run(live, now)
+        self.assertEqual((r["a"], r["d"], r["q"]), (["new"], ["old"], []))
+
+    def test_没新句子超15分钟归_quiet_不算在上(self):
+        now = 10_000_000_000
+        r = self._run([self._live("a", now - 3_600_000, now - 20 * 60_000)], now)
+        self.assertEqual((r["a"], r["q"]), ([], ["a"]))
+
+    def test_不同人或不同课名各算各的_过期的归_stale(self):
+        now = 10_000_000_000
+        live = [self._live("a", now - 1000, now - 1000, h="h1"), self._live("b", now - 1000, now - 1000, h="h2"),
+                self._live("c", now - 2000, now - 2000, course="OTHER", h="h1"), self._live("s", now - 9e6, now - 9e6, stale=True)]
+        r = self._run(live, now)
+        self.assertEqual(sorted(r["a"]), ["a", "b", "c"])
+        self.assertEqual(r["s"], ["s"])
+
+
+class RunnerNames(unittest.TestCase):
+    """`runner_state` 给 live / jobs 补码名（账本只存 sha256(码)[:16]），面板才能说「谁在上课」。"""
+
+    def test_补上码名_读不到码表就不补(self):
+        import hashlib
+        from unittest import mock
+        import cl_admin_ui
+        code = "cl-amy-0123456789abcdef"
+        h = hashlib.sha256(code.encode()).hexdigest()[:16]
+        st = {"live": [{"hash": h, "session_id": "s_1"}, {"hash": "f" * 16}], "jobs": [{"hash": h}]}
+
+        def fake(ep, body=None):
+            return {"codes": [{"name": "amy", "code": code}]} if ep == "list" else dict(st)
+        with mock.patch.object(cl_admin_ui.cl_admin, "admin_post", side_effect=fake):
+            out = cl_admin_ui.runner_state()
+        self.assertEqual(out["live"][0].get("name"), "amy")
+        self.assertNotIn("name", out["live"][1], "对不上的 hash 不乱猜")
+        self.assertEqual(out["jobs"][0].get("name"), "amy")
+
+        def boom(ep, body=None):
+            if ep == "list":
+                raise RuntimeError("down")
+            return {"live": [{"hash": h}], "jobs": []}
+        with mock.patch.object(cl_admin_ui.cl_admin, "admin_post", side_effect=boom):
+            out2 = cl_admin_ui.runner_state()
+        self.assertNotIn("name", out2["live"][0])
+
+
+class WhoNow(unittest.TestCase):
+    """`whoNow`：一人一行。服务码不算人；网页课 > 桌面在线 > 在线没开课；刷新残留并进同一个人。"""
+
+    def _run(self, data):
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("没有 node，跳过（大声）")
+        prog = ("var LIVE_ACTIVE_MS = 15 * 60000; var SERVICE_CODES = {runner: 1};\n"
+                f"var DATA = {json.dumps(data)}; Date.now = () => {data['now']};\n"
+                "function D(n){ return DATA[n] || null; } function liveCodes(){ return DATA.codes; } function liveNow(){ return {soniox: DATA.soniox}; }\n"
+                + _js_funcs(["webLive", "whoNow"])
+                + "\nconst R = whoNow(); console.log(JSON.stringify({rows: R.rows.map(r => [r.name, r.st]), dup: R.dup}));")
+        out = subprocess.run([node, "-e", prog], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_一人一行_排序_服务码不算(self):
+        now = 10_000_000_000
+        iso = lambda ms: datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        live = [
+            {"hash": "h1", "name": "amy", "session_id": "old", "course": "A", "started_at": iso(now - 900_000), "last_line_at": iso(now - 800_000), "stale": False},
+            {"hash": "h1", "name": "amy", "session_id": "new", "course": "A", "started_at": iso(now - 100_000), "last_line_at": iso(now - 5_000), "stale": False},
+            {"hash": "h2", "name": "bob", "session_id": "q", "course": "B", "started_at": iso(now - 7_200_000), "last_line_at": iso(now - 3_600_000), "stale": False},
+        ]
+        codes = [{"name": "amy", "last_seen": now - 1000, "web_last_seen": now - 1000},
+                 {"name": "runner", "last_seen": now - 1000},
+                 {"name": "cat", "last_seen": now - 60_000},
+                 {"name": "dan", "web_last_seen": now - 120_000},
+                 {"name": "eve", "last_seen": now - 3_600_000}]
+        r = self._run({"now": now, "runner": {"live": live}, "codes": codes, "soniox": 1})
+        self.assertEqual(r["rows"], [["amy", "live"], ["cat", "desk"], ["dan", "idle"], ["bob", "quiet"]])
+        self.assertEqual(r["dup"], 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

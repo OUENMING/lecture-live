@@ -193,7 +193,7 @@ def main(argv=None) -> int:
         print(f"{'名字':<10} {'状态':<6} {'设备':<6} {'到期':<11} {'最后在线':<11} 码")
         for c in sorted(rows, key=lambda c: c["name"]):
             st = "吊销" if c["revoked"] else "有效"
-            print(f"{c['name']:<10} {st:<6} {c['devices']}/{c['max_devices']:<4} {_date(c['expires']):<11} "
+            print(f"{c['name']:<10} {st:<6} {str(c['devices'] + c.get('web_devices', 0)) + '/' + str(c['max_devices'] if c['max_devices'] is not None else '∞'):<6} {_date(c['expires']):<11} "
                   f"{_date(c['last_seen']):<11} {c['code']}")
     elif ns.cmd == "stats":
         # Worker 侧 2026-10-14 起只回一种形状：{days: [{day, rows}], from, to}（单日就是长度 1）。

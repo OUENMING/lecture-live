@@ -170,7 +170,31 @@ def summarize(name: str, sid: str, evs: list) -> dict:
         "platform": env.get("platform"), "mobile": env.get("mobile"),
         "report": rep and {k: v for k, v in rep.items() if k not in ("t", "mono", "n", "type")},
         "bad": len(bad), "bad_kinds": kinds,
+        # 刷新 / 重开接回：同一节课被打开过几次（class_open 每页一条）、其中几次是「接回」
+        "pages": sum(1 for e in evs if e.get("type") == "class_open"),
+        "resumed": sum(1 for e in evs if e.get("type") == "resumed"),
     }
+
+
+# 老版本（接回上线前）刷新一次就开一节新课，旧的那节没下课总账、看板上像「还在上」。
+# 判据：同一个人（码名）、旧的没有 class_report、新的在旧的最后一条事件之后这么久之内开始 → 旧的被新的接替。
+REPLACE_GAP_S = 180
+
+
+def mark_replaced(rows: list) -> None:
+    """就地给被刷新接替的会话加 `replaced_by`（新会话号）。只看现有字段，不碰原始事件。"""
+    by_name: dict = {}
+    for r in rows:
+        by_name.setdefault(r.get("name"), []).append(r)
+    for rs in by_name.values():
+        for old in rs:
+            if old.get("report") or old.get("first_t") is None or old.get("last_t") is None:
+                continue
+            nxt = [n for n in rs if n is not old and n.get("first_t") is not None
+                   and n["first_t"] > old["first_t"]
+                   and old["last_t"] - 5000 <= n["first_t"] <= old["last_t"] + REPLACE_GAP_S * 1000]
+            if nxt:
+                old["replaced_by"] = min(nxt, key=lambda n: n["first_t"])["session"]
 
 
 def sessions_summary(days: int = 2, *, max_sessions: int = 60) -> dict:
@@ -192,6 +216,7 @@ def sessions_summary(days: int = 2, *, max_sessions: int = 60) -> dict:
         dest.write_bytes(data)
     by = _load(root, [o["key"] for o in rows])
     out = [summarize(n, s, e) for (n, s), e in by.items()]
+    mark_replaced(out)
     out.sort(key=lambda r: r.get("first_t") or 0, reverse=True)
     return {"days": sorted(wanted), "sessions": out[:max_sessions], "total": len(out)}
 

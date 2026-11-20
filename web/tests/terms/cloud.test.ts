@@ -289,3 +289,13 @@ test('mergeForContext：个人在前，按上限截断', () => {
 	assert.equal(mergeForContext(many, []).length, CONTEXT_TERMS_MAX);
 	assert.equal(mergeForContext([], many).length, CONTEXT_TERMS_MAX);
 });
+
+test('OCR B：本机有术语但从没对齐过（meta=0、无 pending）→ 不被远端盖掉，补推', async () => {
+	localStorage.setItem('cl.terms.econ10770', 'legacy local');
+	const { api, puts } = fakeApi({ courses: { ECON10770: { text: 'theirs', updated_at: 200 } } });
+	const res = await pullTerms(api);
+	assert.deepEqual(res, { updated: 0 });
+	assert.equal(termsText('ECON10770'), 'legacy local');
+	assert.equal(puts.length, 1);
+	assert.equal(puts[0].text, 'legacy local');
+});

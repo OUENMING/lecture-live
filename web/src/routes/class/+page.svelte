@@ -13,7 +13,7 @@
 	import { demo, startDemo, type CapRow } from '#lib/demo/player.svelte.ts';
 	import { connectLive, type LiveHandle } from '#lib/live/connect.ts';
 	import { ApiError } from '#lib/api/index.ts';
-	import { saveMarks } from '#lib/env.ts';
+	import { marksOf, saveMarks } from '#lib/env.ts';
 	import { holdWakeLock, watchHidden, type WakeLockHandle } from '#lib/live/wake.ts';
 	import { downloadMarkdown } from '#lib/after/export.ts';
 	import ChapterList from '#lib/ui/ChapterList.svelte';
@@ -117,7 +117,12 @@
 
 	function toggleMark(row: CapRow) {
 		marks = markedIds.has(row.id) ? marks.filter((m) => m.id !== row.id) : [...marks, row].sort((a, b) => a.id - b.id);
-		if (live) saveMarks(live.session_id, marks.map((m) => m.id));
+		if (live) {
+			// 接回过的课：页内句号 + seq_base 才是服务端 / 课后页认的序号；接回前标的（≤ seq_base）原样保留
+			const base = live.seq_base;
+			const kept = base ? marksOf(live.session_id).filter((x) => x <= base) : [];
+			saveMarks(live.session_id, [...kept, ...marks.map((m) => m.id + base)]);
+		}
 	}
 	function markLatest() {
 		const last = src.rows.at(-1);
@@ -245,6 +250,7 @@
 						return;
 					}
 					live = h;
+					if (h.resumed) micNote = '已接回刚才这节课。刷新前的字幕存在本机，课后页里能看到。';
 					h.audio.onDeviceLost?.(() => (micNote = '刚才的麦克风断开了，已换回系统默认麦克风'));
 					// 只在 dev：给 scripts/e2e-live.mjs 读延迟（`__clLive.session.latency()`）
 					if (import.meta.env.DEV) (globalThis as unknown as { __clLive?: LiveHandle }).__clLive = h;
@@ -384,9 +390,11 @@
 		demo.pause();
 		if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
 		if (live) {
+			if (ending) return; // 确认后连点：只收一次尾
 			ending = true;
 			const h = live;
-			await h.end();
+			// OCR C：end 抛了（断网 / 写盘失败）也要接着下载 + 进课后页，别卡在「正在收尾…」
+			await h.end().catch((e: unknown) => console.warn('下课收尾出错', e));
 			// 下课自动下载一份 Markdown（Owen 2026-11-19）：本机和服务器之外，用户手里再有一份，换电脑、清浏览器都不怕
 			let saved = false;
 			try {

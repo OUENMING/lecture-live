@@ -268,3 +268,15 @@ test("Q10 短租内连领两次：都拿到 web_rt_left_s 且第二次仍按剩�
     } finally { h.restore(); _leaseForTests(0); }
   })();
 });
+
+// 2026-11-20：boluo 只在网页上过课，面板却显示「0/2 台 · 从没用过」——list 只数桌面 dev:<码>。
+test("Q11 list 分开给桌面 / 网页设备数与最后使用；桌面字段逐字不变", () => withHarness({}, async (h) => {
+  const { code } = await h.pass.add({ name: "amy" });
+  assert.equal((await h.call(h.keyReq(code, { web: true }))).status, 200);
+  const r = (await h.list()).codes[0];
+  assert.equal(r.devices, 0, "桌面没用过");
+  assert.equal(r.last_seen, 0);
+  assert.equal(r.web_devices, 1, "网页那台要数到");
+  assert.ok(r.web_last_seen > 0, "网页最后使用要有时间");
+  assert.equal(r.max_web_devices, undefined, "网页不再单独设名额（与桌面合计）");
+}));

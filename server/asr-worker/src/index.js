@@ -5,3 +5,6 @@ export { Passes } from "./passes.js";
 export { WebSessions } from "./web-session.js";
 // 术语上云（W19）：每码一个实例 + 共享池一个全局实例（契约 CONTRACT-terms.md、文档 §3.9）。
 export { WebTerms, WebTermsPool } from "./web-terms.js";
+// 全局任务队列（W22，契约 CONTRACT-runner-20261120.md）：单实例 idFromName("hub")，
+// job 状态机在 runner-hub-core.js，/v1/runner/* 的接线和 hub 调用助手在 runner-routes.js。
+export { RunnerHub } from "./runner-hub.js";

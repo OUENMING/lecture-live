@@ -155,3 +155,23 @@ test('换设备途中被 stop：晚到的新流被退掉', async () => {
 	assert.equal(await pending, false);
 	assert.equal(farm.streams[1].tracks[0].stopped, true, '迟到的新流要 stop');
 });
+
+test('OCR A：权限弹窗期间 stop() → 拿到的流立刻被关，start 正常返回、不重开麦', async () => {
+	installWorkletGlobal();
+	const farm = micFarm();
+	let release!: () => void;
+	const gate = new Promise<void>((r) => (release = r));
+	const source = createMicSource({
+		getUserMedia: async (c) => {
+			await gate;
+			return farm.getUserMedia(c);
+		},
+		createContext: () => new FakeAudioContext()
+	});
+	const started = source.start(() => {});
+	source.stop();
+	release();
+	await started;
+	assert.equal(farm.streams[0].tracks[0].stopped, true, '迟到的流要被关');
+	assert.equal(source.stream, null, '不该记成正在采音');
+});

@@ -43,7 +43,7 @@ export function createPrompt(opts: PromptClientOptions = {}): PromptBuilder & { 
 	const waiters = new Map<number, Waiter>();
 	let nextId = 1;
 	let disposed = false;
-	const { promise: ready, resolve: booted } = Promise.withResolvers<PromptBuilder>();
+	const { promise: ready, resolve: booted, reject: bootFailed } = Promise.withResolvers<PromptBuilder>();
 	ready.catch(() => {});
 
 	const rejectAll = (msg: string): void => {
@@ -62,6 +62,7 @@ export function createPrompt(opts: PromptClientOptions = {}): PromptBuilder & { 
 			return;
 		}
 		if (msg?.type === 'error' && msg.id === 0) {
+			bootFailed(new Error(msg.message));   // OCR B：ready() 原来永不 reject
 			rejectAll(msg.message);
 			return;
 		}
@@ -81,7 +82,10 @@ export function createPrompt(opts: PromptClientOptions = {}): PromptBuilder & { 
 			w.reject(new Error(msg.message));
 		}
 	};
-	worker.onerror = () => rejectAll('提示词 Worker 挂了（Pyodide 没起来）');
+	worker.onerror = () => {
+		bootFailed(new Error('提示词 Worker 挂了（Pyodide 没起来）'));
+		rejectAll('提示词 Worker 挂了（Pyodide 没起来）');
+	};
 
 	const call = (name: string, args: readonly unknown[]): Promise<unknown> => {
 		if (disposed) return Promise.reject(new Error('提示词 Worker 已关闭'));
@@ -109,6 +113,7 @@ export function createPrompt(opts: PromptClientOptions = {}): PromptBuilder & { 
 		draftFinal: (seg: number) => call('draft_final', [seg]).then((r) => Boolean(r)),
 		dispose: () => {
 			disposed = true;
+			bootFailed(new Error('提示词 Worker 已关闭'));
 			rejectAll('提示词 Worker 已关闭');
 			worker.terminate();
 		}

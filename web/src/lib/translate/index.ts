@@ -3,7 +3,7 @@
 // `createPrompt` 或 `pyPromptFromPyodide`（造请求体工厂）、`streamChat`（流式请求的唯一出口）。
 // 界面不直接用它：`lib/session` 负责接线与打点，界面只读那里投影出来的 rows / draftZh。
 
-export { Translator, type ChatFn, type TranslatorDeps } from './translator';
+export { Translator, type ChatFn, type TranslatorDeps, type TraceEvent } from './translator';
 export {
 	pyPrompt,
 	pyPromptFromPyodide,

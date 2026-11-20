@@ -860,8 +860,11 @@ class R23_BuildArtifactsMustNotBeTracked(unittest.TestCase):
                  ".onnx", ".npy", ".tar", ".gz")
         # `docs/images/` 是 README 的静态截图（2026-10-19 起）：手工拍、不由构建生成，
         # 所以不会像 assets/icon 那样「一构建就脏」—— 只放这一个目录。
+        # `web/static/favicon.png`：网页版的站点图标，手工放进去、不由构建生成（同 docs/images 的理由），
+        # 浏览器标签页图标要 png/ico/svg 才稳（webp 在老 Safari 上不认）—— 只放这一个文件。
+        _hand_made = {"web/static/favicon.png"}
         bad = [p for p in r.stdout.split()
-               if p.lower().endswith(_exts) and not p.startswith("docs/images/")]
+               if p.lower().endswith(_exts) and not p.startswith("docs/images/") and p not in _hand_made]
         self.assertEqual(bad, [],
                          f"仓库里有被跟踪的二进制/产物：{bad}\n"
                          f"—— 构建/下载出来的东西**一律不入库**（见 R23）")

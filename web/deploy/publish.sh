@@ -40,7 +40,7 @@ if [ "$mode" = rollback ]; then
 		echo "publish: 只有一版，没有可回滚的" >&2; exit 1
 	fi
 	run ssh "$HOST" "ln -sfn $ROOT/releases/$prev $ROOT/current.tmp && mv -Tf $ROOT/current.tmp $ROOT/current"
-	echo "publish: 回滚到 $prev（nginx 不用 reload，静态文件按路径读）"
+	echo "publish: 回滚到 ${prev}（nginx 不用 reload，静态文件按路径读）"
 	exit 0
 fi
 

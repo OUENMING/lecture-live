@@ -34,6 +34,11 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import whatsnew as _whatsnew  # noqa: E402
+
+# ⚠️ 面板 build 会写仓库根的 `.update-seen`（「已更新到 X」卡的判据）→ 指到临时目录，别吃掉作者本机那张卡
+_whatsnew.seen_flag_path = lambda: pathlib.Path(tempfile.mkdtemp(prefix="cl-test-seen-")) / ".update-seen"
+
 import panel                                                       # noqa: E402
 
 

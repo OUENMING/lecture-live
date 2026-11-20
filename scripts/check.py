@@ -140,6 +140,16 @@ def snapshot() -> dict:
             snap[f"根目录/{_rel}"] = {_rel: _f.stat().st_size}
     if (ROOT / "glossary").is_dir():
         snap["glossary/"] = _tree(ROOT / "glossary", 1)
+    # ⚠️ `.update-seen` / `.update-skip` 也被 `.gitignore` 挡着，而它们决定「已更新到 X」卡弹不弹。
+    #    2026-11-20 发 3.13.0 时 test_entry_panel 把真 `.update-seen` 写成新版本 → 作者本机那张卡被测试吃掉。
+    #    记**内容**（不是字节数：3.12.2 → 3.13.0 长度一样）。
+    for _rel in (".update-seen", ".update-skip"):
+        _f = ROOT / _rel
+        if _f.exists():
+            try:
+                snap[f"根目录/{_rel}"] = {_f.read_text(encoding="utf-8").strip(): 0}
+            except OSError:
+                pass
     return snap
 
 

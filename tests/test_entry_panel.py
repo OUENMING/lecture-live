@@ -34,6 +34,12 @@ sys.path.insert(0, str(HERE))
 
 import courses                                                     # noqa: E402
 import entry_panel as E                                            # noqa: E402
+import whatsnew as _whatsnew                                       # noqa: E402
+
+# ⚠️ 面板 build 会跑「已更新到 X」那张卡的判据并**写** `.update-seen`（仓库根、被 .gitignore 挡着）。
+#    不隔离 = 跑一次测试就把作者本机那张卡吃掉（2026-11-20 发 3.13.0 时真发生了）。
+_SEEN_DIR = tempfile.mkdtemp(prefix="cl-test-seen-")
+_whatsnew.seen_flag_path = lambda: pathlib.Path(_SEEN_DIR) / ".update-seen"
 
 RESULTS: list[tuple[str, bool, str]] = []
 

@@ -1,0 +1,116 @@
+/* ClassLive 网页版 token —— 全站唯一的字号 / 圆角 / 动效 / 颜色来源（2026-11-19 拉齐）。
+   两个面：纸（门面 / 说明页）与玻璃（上课 / 课后 / 置顶小窗，桌面版同款深色 + 白字）。
+   不用彩色（Owen 2026-11-17）：强调 = 更深的墨 / 更亮的白 + 字重；提醒也不用琥珀，用玻璃底 + 字重。
+   页面里不许再写死 px 字号、圆角、时长和颜色；缺档先在这里加。 */
+
+@font-face {
+	/* 思源宋体子集，只含静态标题的字（scripts/serif-subset.sh 重新生成）；动态文字不用它 */
+	font-family: 'CL Serif';
+	src: url('/fonts/serif-display.woff2') format('woff2');
+	font-weight: 400 700;
+	font-display: swap;
+}
+
+:root {
+	--cl-font: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI',
+		'Microsoft YaHei', 'Noto Sans SC', 'Segoe UI', sans-serif;
+	--cl-serif: 'CL Serif', 'Songti SC', 'Noto Serif SC', 'Source Han Serif SC', serif;
+	--cl-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace;
+
+	/* 字号：五档 + 门面一档展示字。字幕另走 --cap-*。 */
+	--fs-xs: 12px; /* 时间码、角标、键帽 */
+	--fs-s: 13.5px; /* 提示、次要说明、工具条 */
+	--fs-m: 15px; /* 正文、按钮、输入 */
+	--fs-l: 20px; /* 区块标题、卡片标题 */
+	--fs-xl: clamp(28px, 3vw, 40px); /* 页面标题 */
+	--fs-display: clamp(44px, 5.4vw, 80px); /* 只给门面主标题 */
+	--lh-body: 1.7; /* 中文正文行高（Typotheque / W3C clreq） */
+	--lh-tight: 1.15;
+
+	/* 纸：带一点暖的白，墨是暖近黑 */
+	--paper: oklch(0.985 0.003 85);
+	--paper-2: oklch(0.962 0.005 80);
+	--ink: oklch(0.2 0.01 60);
+	--ink-2: oklch(0.42 0.01 60);
+	--ink-press: oklch(0.12 0.01 60); /* 墨色按钮悬停 */
+	--ink-3: oklch(0.52 0.008 60); /* 0.56 → 0.52：13.5px 提示字在纸上过 4.5:1 */
+	--rule: oklch(0.2 0.01 60 / 0.1);
+	--field-line: oklch(0.2 0.01 60 / 0.16);
+	--field-line-hover: oklch(0.2 0.01 60 / 0.3);
+	--focus-ring: oklch(0.2 0.01 60 / 0.1);
+
+	/* 玻璃：桌面版悬浮窗 */
+	--glass-ground: oklch(0.17 0.008 60);
+	--glass: oklch(0.18 0.008 60 / 0.82);
+	--glass-blur: blur(28px) saturate(1.35);
+	--glass-line: oklch(1 0 0 / 0.09);
+	--glass-shadow: 0 30px 60px -20px oklch(0.2 0.02 60 / 0.45), 0 10px 20px -10px oklch(0.2 0.02 60 / 0.3);
+	--on-glass: oklch(0.97 0.006 80 / 0.94);
+	--on-glass-2: oklch(0.97 0.006 80 / 0.66);
+	--on-glass-3: oklch(0.97 0.006 80 / 0.56); /* 0.44 → 0.56：小字在玻璃上过 4.5:1 */
+	--draft-en: oklch(0.97 0.006 80 / 0.5);
+	--draft-zh: oklch(0.97 0.006 80 / 0.78);
+	--glass-hover: oklch(1 0 0 / 0.08);
+	--glass-raise: oklch(1 0 0 / 0.12);
+	--age-floor: 0.5; /* 字幕越旧越淡的下限（0.32 时最旧英文只有 1.8:1） */
+
+	/* 圆角：只有四档。小件（键帽、时间轴格）6；输入 / 按钮 / 菜单 10；窗口 / 面板 16；胶囊只给状态标签和分段开关 */
+	--radius-xs: 6px;
+	--radius-s: 10px;
+	--radius: 16px;
+	--radius-pill: 999px;
+
+	/* 动效：反馈 120 ms、移动 200 ms；门面 → 上课的那一次过渡 350 ms（Owen 2026-11-17 只给这一处放宽） */
+	--ease: cubic-bezier(0.16, 1, 0.3, 1);
+	--fast: 120ms;
+	--move: 200ms;
+	--stage: 350ms;
+
+	/* 字幕字号按 --cap-scale 缩放 */
+	--cap-scale: 1;
+	--cap-zh: calc(18px * var(--cap-scale));
+	--cap-en: calc(12px * var(--cap-scale));
+}
+
+/* 玻璃面可切亮色：同一套结构，玻璃换成纸 */
+[data-cap='light'] {
+	--glass-ground: oklch(0.975 0.004 85);
+	--glass: oklch(0.99 0.003 85 / 0.92);
+	--glass-line: oklch(0.2 0.01 60 / 0.1);
+	--on-glass: oklch(0.2 0.01 60);
+	--on-glass-2: oklch(0.2 0.01 60 / 0.68);
+	--on-glass-3: oklch(0.2 0.01 60 / 0.58);
+	--draft-en: oklch(0.2 0.01 60 / 0.45);
+	--draft-zh: oklch(0.2 0.01 60 / 0.7);
+	--glass-hover: oklch(0.2 0.01 60 / 0.06);
+	--glass-raise: oklch(0.2 0.01 60 / 0.1);
+}
+
+/* 纸面的深色版（课后页默认深色，Owen 2026-11-19）：同一套 --paper / --ink 名字，换成玻璃的值，页面代码不用分两份 */
+[data-surface='dark'] {
+	color-scheme: dark;
+	--paper: oklch(0.17 0.008 60);
+	--paper-2: oklch(0.215 0.008 60);
+	--ink: oklch(0.96 0.006 80);
+	--ink-2: oklch(0.82 0.006 80);
+	--ink-3: oklch(0.7 0.006 80);
+	--rule: oklch(1 0 0 / 0.1);
+	--field-line: oklch(1 0 0 / 0.16);
+	--field-line-hover: oklch(1 0 0 / 0.3);
+	--focus-ring: oklch(1 0 0 / 0.14);
+}
+
+::selection {
+	background: oklch(0.2 0.01 60 / 0.16);
+}
+[data-cap] ::selection {
+	background: var(--glass-raise);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	:root {
+		--fast: 0ms;
+		--move: 0ms;
+		--stage: 0ms;
+	}
+}

@@ -1,0 +1,24 @@
+{
+  "buildPath": "code",
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "helvetica",
+        "createdAt": "2026-11-17T17:37:19.132Z",
+        "reason": "Claude: 门面示例课件卡 .slide 故意仿真实大学课件字体（Owen 11-17 要求课件卡做真），不是界面字体"
+      },
+      {
+        "rule": "overused-font",
+        "value": "helvetica",
+        "files": [
+          "src/routes/+page.svelte"
+        ],
+        "createdAt": "2026-11-17T23:39:36.921Z",
+        "reason": "Claude: 门面上的假课件卡片在模仿真实大学讲义幻灯片，Helvetica/Arial 是这类课件的常见字体，用来增加真实感，不是界面主字体"
+      }
+    ]
+  }
+}

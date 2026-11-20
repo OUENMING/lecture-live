@@ -1,0 +1,30 @@
+node_modules
+
+# Output
+.output
+.vercel
+.netlify
+.wrangler
+/.svelte-kit
+/build
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.test
+!.env.development
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# 课堂回放：作者自己的课，只在本机，不进仓库
+/static/demo/
+
+# 自托管的识别核心（Pyodide / pdf.js）：约 14 MB，`npm run vendor`（prebuild 自动跑）下载，别进仓库
+/static/vendor/

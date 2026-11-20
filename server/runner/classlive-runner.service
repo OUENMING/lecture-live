@@ -1,0 +1,29 @@
+# classlive-runner.service —— systemd unit（2026-11-20 已装到 bldcam；装法见同目录 README.md）。
+# 环境变量走 Environment= / EnvironmentFile（token 不进 unit 文件）。
+[Unit]
+Description=ClassLive web note runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ⚠ 跑在本仓库的 checkout 里（桌面 .py 在仓库根，runner import 它们）
+WorkingDirectory=/opt/classlive
+# venv 只装 httpx + numpy（python3 -m venv /opt/classlive/.venv && .venv/bin/pip install httpx numpy）
+ExecStart=/opt/classlive/.venv/bin/python -m server.runner.loop
+# 不用 root 跑；VPS 只有 2 GB，给个内存上限，别把同机的网页 / 网关挤死
+User=ubuntu
+MemoryMax=700M
+# token 放 /etc/classlive/runner.env（RUNNER_TOKEN=rn_…，chmod 600）
+EnvironmentFile=/etc/classlive/runner.env
+Environment=RUNNER_BASE=https://asr.bldcam.page
+Environment=RUNNER_HOME=/var/lib/classlive-runner
+Environment=RUNNER_NAME=vps-note-runner
+Restart=always
+RestartSec=5
+# 日志走 stdout → journald（`journalctl -u classlive-runner -f`）
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

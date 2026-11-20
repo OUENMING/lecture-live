@@ -1,0 +1,9 @@
+// 网页版：只有静态文件的 Worker（PLAN C9）——没有脚本，改网页不会重新部署桌面版在用的接口 Worker。
+{
+	"name": "classlive-web",
+	"compatibility_date": "2026-10-01",
+	"assets": {
+		"directory": "./build",
+		"not_found_handling": "single-page-application"
+	}
+}

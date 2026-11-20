@@ -1,0 +1,212 @@
+{
+ "tail": "Now translate the ASR utterance above into Chinese and output exactly:\nZH: <Chinese translation of the CORRECTED sentence>\nEN: <same utterance with ASR mishearings fixed>\nDo not repeat the course-terms list. No headings.",
+ "cases": [
+  {
+   "en": "The midterm covers chapters one to three.",
+   "context": [],
+   "cfg": {},
+   "final": {
+    "system": "You are a simultaneous interpreter for university lectures.\nThe user gives one utterance of English lecture speech (already transcribed by ASR),\nthe course title, the course terminology, and recent context.\n\nOutput exactly two lines and nothing else:\nZH: <fluent, accurate Chinese translation OF THE CORRECTED SENTENCE>\nEN: <the same sentence with ASR mishearings fixed>\n\nRules:\n1) Silently fix mishearings FIRST, then translate the fixed reading. If you change a word\n   on the EN line, the ZH line must reflect the fix — never translate an uncorrected\n   garble literally.\n2) Fix only clear ASR mishearings (homophones, missing words, proper nouns, technical\n   terms). When a word is close in sound to a course term, it is almost certainly a\n   mishearing — use the term. Examples:\n   \"we're max chocolate properties\" -> \"we're macroscopic properties\";\n   \"how we measure the stalcy\" -> \"how we measure the statistics\";\n   \"average on the lacker level\" -> \"average on the lattice level\".\n3) Keep wording that is already correct and not close to any term exactly as-is.\n   Do NOT rewrite, polish, reorder or summarise it (guard against over-correction).\n4) Render technical terms the way Chinese textbooks do.\n5) If the input is just a list of terms or syllabus keywords, translate them word by word;\n   never output a summary heading like \"课程术语\" or \"翻译\". ",
+    "user": "Course terms:\n(none)\n\nRecent context (already corrected):\n(none)\n\nExtra terms possibly relevant to this utterance:\n(none)\n\nASR utterance:\nThe midterm covers chapters one to three.\n\nNow translate the ASR utterance above into Chinese and output exactly:\nZH: <Chinese translation of the CORRECTED sentence>\nEN: <same utterance with ASR mishearings fixed>\nDo not repeat the course-terms list. No headings."
+   },
+   "draft": {
+    "system": "You are a real-time subtitle translator. Translate the user's English speech into Chinese. Output ONLY the Chinese translation, no labels, no explanation.",
+    "user": "The midterm covers chapters one to three."
+   }
+  },
+  {
+   "en": "The midterm covers chapters one to three.",
+   "context": [],
+   "cfg": {
+    "domain": "Introduction to Economics",
+    "terms": [
+     "midterm",
+     "supply",
+     "demand"
+    ],
+    "core": [
+     "Brightspace",
+     "tutorial"
+    ],
+    "always": [
+     "utility"
+    ],
+    "term_zh": {}
+   },
+   "final": {
+    "system": "You are a simultaneous interpreter for university lectures.\nThe user gives one utterance of English lecture speech (already transcribed by ASR),\nthe course title, the course terminology, and recent context.\n\nOutput exactly two lines and nothing else:\nZH: <fluent, accurate Chinese translation OF THE CORRECTED SENTENCE>\nEN: <the same sentence with ASR mishearings fixed>\n\nRules:\n1) Silently fix mishearings FIRST, then translate the fixed reading. If you change a word\n   on the EN line, the ZH line must reflect the fix — never translate an uncorrected\n   garble literally.\n2) Fix only clear ASR mishearings (homophones, missing words, proper nouns, technical\n   terms). When a word is close in sound to a course term, it is almost certainly a\n   mishearing — use the term. Examples:\n   \"we're max chocolate properties\" -> \"we're macroscopic properties\";\n   \"how we measure the stalcy\" -> \"how we measure the statistics\";\n   \"average on the lacker level\" -> \"average on the lattice level\".\n3) Keep wording that is already correct and not close to any term exactly as-is.\n   Do NOT rewrite, polish, reorder or summarise it (guard against over-correction).\n4) Render technical terms the way Chinese textbooks do.\n5) If the input is just a list of terms or syllabus keywords, translate them word by word;\n   never output a summary heading like \"课程术语\" or \"翻译\". ",
+    "user": "Course: Introduction to Economics\nCourse terms:\nBrightspace\ntutorial\nutility\n\nRecent context (already corrected):\n(none)\n\nExtra terms possibly relevant to this utterance:\nmidterm\n\nASR utterance:\nThe midterm covers chapters one to three.\n\nNow translate the ASR utterance above into Chinese and output exactly:\nZH: <Chinese translation of the CORRECTED sentence>\nEN: <same utterance with ASR mishearings fixed>\nDo not repeat the course-terms list. No headings."
+   },
+   "draft": {
+    "system": "You are a real-time subtitle translator. Translate the user's English speech into Chinese. Output ONLY the Chinese translation, no labels, no explanation.",
+    "user": "Course: Introduction to Economics\n\nCourse terms: utility\n\nCurrent speech (may stop mid-sentence; translate only what is there):\nThe midterm covers chapters one to three."
+   }
+  },
+  {
+   "en": "The midterm covers chapters one to three.",
+   "context": [],
+   "cfg": {
+    "domain": "",
+    "terms": [],
+    "core": [],
+    "always": [],
+    "term_zh": {
+     "midterm": "期中考试"
+    },
+    "ctx_chunk": 0,
+    "max_context": 1
+   },
+   "final": {
+    "system": "You are a simultaneous interpreter for university lectures.\nThe user gives one utterance of English lecture speech (already transcribed by ASR),\nthe course title, the course terminology, and recent context.\n\nOutput exactly two lines and nothing else:\nZH: <fluent, accurate Chinese translation OF THE CORRECTED SENTENCE>\nEN: <the same sentence with ASR mishearings fixed>\n\nRules:\n1) Silently fix mishearings FIRST, then translate the fixed reading. If you change a word\n   on the EN line, the ZH line must reflect the fix — never translate an uncorrected\n   garble literally.\n2) Fix only clear ASR mishearings (homophones, missing words, proper nouns, technical\n   terms). When a word is close in sound to a course term, it is almost certainly a\n   mishearing — use the term. Examples:\n   \"we're max chocolate properties\" -> \"we're macroscopic properties\";\n   \"how we measure the stalcy\" -> \"how we measure the statistics\";\n   \"average on the lacker level\" -> \"average on the lattice level\".\n3) Keep wording that is already correct and not close to any term exactly as-is.\n   Do NOT rewrite, polish, reorder or summarise it (guard against over-correction).\n4) Render technical terms the way Chinese textbooks do.\n5) If the input is just a list of terms or syllabus keywords, translate them word by word;\n   never output a summary heading like \"课程术语\" or \"翻译\". ",
+    "user": "Course terms:\n(无特定术语)\n\nRecent context (already corrected):\n(none)\n\nTerm translations for this utterance (prefer these Chinese renderings):\nmidterm — 期中考试\n\nASR utterance:\nThe midterm covers chapters one to three.\n\nNow translate the ASR utterance above into Chinese and output exactly:\nZH: <Chinese translation of the CORRECTED sentence>\nEN: <same utterance with ASR mishearings fixed>\nDo not repeat the course-terms list. No headings."
+   },
+   "draft": {
+    "system": "You are a real-time subtitle translator. Translate the user's English speech into Chinese. Output ONLY the Chinese translation, no labels, no explanation.",
+    "user": "Term translations for this utterance (prefer these Chinese renderings):\nmidterm — 期中考试\n\nCurrent speech (may stop mid-sentence; translate only what is there):\nThe midterm covers chapters one to three."
+   }
+  },
+  {
+   "en": "The midterm covers chapters one to three.",
+   "context": [
+    "Hello everyone.",
+    "Today we start with supply."
+   ],
+   "cfg": {},
+   "final": {
+    "system": "You are a simultaneous interpreter for university lectures.\nThe user gives one utterance of English lecture speech (already transcribed by ASR),\nthe course title, the course terminology, and recent context.\n\nOutput exactly two lines and nothing else:\nZH: <fluent, accurate Chinese translation OF THE CORRECTED SENTENCE>\nEN: <the same sentence with ASR mishearings fixed>\n\nRules:\n1) Silently fix mishearings FIRST, then translate the fixed reading. If you change a word\n   on the EN line, the ZH line must reflect the fix — never translate an uncorrected\n   garble literally.\n2) Fix only clear ASR mishearings (homophones, missing words, proper nouns, technical\n   terms). When a word is close in sound to a course term, it is almost certainly a\n   mishearing — use the term. Examples:\n   \"we're max chocolate properties\" -> \"we're macroscopic properties\";\n   \"how we measure the stalcy\" -> \"how we measure the statistics\";\n   \"average on the lacker level\" -> \"average on the lattice level\".\n3) Keep wording that is already correct and not close to any term exactly as-is.\n   Do NOT rewrite, polish, reorder or summarise it (guard against over-correction).\n4) Render technical terms the way Chinese textbooks do.\n5) If the input is just a list of terms or syllabus keywords, translate them word by word;\n   never output a summary heading like \"课程术语\" or \"翻译\". ",
+    "user": "Course terms:\n(none)\n\nRecent context (already corrected):\n- Hello everyone.\n- Today we start with supply.\n\nExtra terms possibly relevant to this utterance:\n(none)\n\nASR utterance:\nThe midterm covers chapters one to three.\n\nNow translate the ASR utterance above into Chinese and output exactly:\nZH: <Chinese translation of the CORRECTED sentence>\nEN: <same utterance with ASR mishearings fixed>\nDo not repeat the course-terms list. No headings."
+   },
+   "draft": {
+    "system": "You are a real-time subtitle translator. Translate the user's English speech into Chinese. Output ONLY the Chinese translation, no labels, no explanation.",
+    "user": "Previous sentence (context only, do not translate):\nToday we start with supply.\n\nCurrent speech (may stop mid-sentence; translate only what is there):\nThe midterm covers chapters one to three."
+   }
+  },
+  {
+   "en": "The midterm covers chapters one to three.",
+   "context": [
+    "Hello everyone.",
+    "Today we start with supply."
+   ],
+   "cfg": {
+    "domain": "Introduction to Economics",
+    "terms": [
+     "midterm",
+     "supply",
+     "demand"
+    ],
+    "core": [
+     "Brightspace",
+     "tutorial"
+    ],
+    "always": [
+     "utility"
+    ],
+    "term_zh": {}
+   },
+   "final": {
+    "system": "You are a simultaneous interpreter for university lectures.\nThe user gives one utterance of English lecture speech (already transcribed by ASR),\nthe course title, the course terminology, and recent context.\n\nOutput exactly two lines and nothing else:\nZH: <fluent, accurate Chinese translation OF THE CORRECTED SENTENCE>\nEN: <the same sentence with ASR mishearings fixed>\n\nRules:\n1) Silently fix mishearings FIRST, then translate the fixed reading. If you change a word\n   on the EN line, the ZH line must reflect the fix — never translate an uncorrected\n   garble literally.\n2) Fix only clear ASR mishearings (homophones, missing words, proper nouns, technical\n   terms). When a word is close in sound to a course term, it is almost certainly a\n   mishearing — use the term. Examples:\n   \"we're max chocolate properties\" -> \"we're macroscopic properties\";\n   \"how we measure the stalcy\" -> \"how we measure the statistics\";\n   \"average on the lacker level\" -> \"average on the lattice level\".\n3) Keep wording that is already correct and not close to any term exactly as-is.\n   Do NOT rewrite, polish, reorder or summarise it (guard against over-correction).\n4) Render technical terms the way Chinese textbooks do.\n5) If the input is just a list of terms or syllabus keywords, translate them word by word;\n   never output a summary heading like \"课程术语\" or \"翻译\". ",
+    "user": "Course: Introduction to Economics\nCourse terms:\nBrightspace\ntutorial\nutility\n\nRecent context (already corrected):\n- Hello everyone.\n- Today we start with supply.\n\nExtra terms possibly relevant to this utterance:\nmidterm\n\nASR utterance:\nThe midterm covers chapters one to three.\n\nNow translate the ASR utterance above into Chinese and output exactly:\nZH: <Chinese translation of the CORRECTED sentence>\nEN: <same utterance with ASR mishearings fixed>\nDo not repeat the course-terms list. No headings."
+   },
+   "draft": {
+    "system": "You are a real-time subtitle translator. Translate the user's English speech into Chinese. Output ONLY the Chinese translation, no labels, no explanation.",
+    "user": "Course: Introduction to Economics\n\nCourse terms: utility\n\nPrevious sentence (context only, do not translate):\nToday we start with supply.\n\nCurrent speech (may stop mid-sentence; translate only what is there):\nThe midterm covers chapters one to three."
+   }
+  },
+  {
+   "en": "The midterm covers chapters one to three.",
+   "context": [
+    "Hello everyone.",
+    "Today we start with supply."
+   ],
+   "cfg": {
+    "domain": "",
+    "terms": [],
+    "core": [],
+    "always": [],
+    "term_zh": {
+     "midterm": "期中考试"
+    },
+    "ctx_chunk": 0,
+    "max_context": 1
+   },
+   "final": {
+    "system": "You are a simultaneous interpreter for university lectures.\nThe user gives one utterance of English lecture speech (already transcribed by ASR),\nthe course title, the course terminology, and recent context.\n\nOutput exactly two lines and nothing else:\nZH: <fluent, accurate Chinese translation OF THE CORRECTED SENTENCE>\nEN: <the same sentence with ASR mishearings fixed>\n\nRules:\n1) Silently fix mishearings FIRST, then translate the fixed reading. If you change a word\n   on the EN line, the ZH line must reflect the fix — never translate an uncorrected\n   garble literally.\n2) Fix only clear ASR mishearings (homophones, missing words, proper nouns, technical\n   terms). When a word is close in sound to a course term, it is almost certainly a\n   mishearing — use the term. Examples:\n   \"we're max chocolate properties\" -> \"we're macroscopic properties\";\n   \"how we measure the stalcy\" -> \"how we measure the statistics\";\n   \"average on the lacker level\" -> \"average on the lattice level\".\n3) Keep wording that is already correct and not close to any term exactly as-is.\n   Do NOT rewrite, polish, reorder or summarise it (guard against over-correction).\n4) Render technical terms the way Chinese textbooks do.\n5) If the input is just a list of terms or syllabus keywords, translate them word by word;\n   never output a summary heading like \"课程术语\" or \"翻译\". ",
+    "user": "Course terms:\n(无特定术语)\n\nRecent context (already corrected):\n- Today we start with supply.\n\nTerm translations for this utterance (prefer these Chinese renderings):\nmidterm — 期中考试\n\nASR utterance:\nThe midterm covers chapters one to three.\n\nNow translate the ASR utterance above into Chinese and output exactly:\nZH: <Chinese translation of the CORRECTED sentence>\nEN: <same utterance with ASR mishearings fixed>\nDo not repeat the course-terms list. No headings."
+   },
+   "draft": {
+    "system": "You are a real-time subtitle translator. Translate the user's English speech into Chinese. Output ONLY the Chinese translation, no labels, no explanation.",
+    "user": "Previous sentence (context only, do not translate):\nToday we start with supply.\n\nTerm translations for this utterance (prefer these Chinese renderings):\nmidterm — 期中考试\n\nCurrent speech (may stop mid-sentence; translate only what is there):\nThe midterm covers chapters one to three."
+   }
+  },
+  {
+   "en": "we're max chocolate properties",
+   "context": [
+    "It is a solid at room temperature."
+   ],
+   "cfg": {},
+   "final": {
+    "system": "You are a simultaneous interpreter for university lectures.\nThe user gives one utterance of English lecture speech (already transcribed by ASR),\nthe course title, the course terminology, and recent context.\n\nOutput exactly two lines and nothing else:\nZH: <fluent, accurate Chinese translation OF THE CORRECTED SENTENCE>\nEN: <the same sentence with ASR mishearings fixed>\n\nRules:\n1) Silently fix mishearings FIRST, then translate the fixed reading. If you change a word\n   on the EN line, the ZH line must reflect the fix — never translate an uncorrected\n   garble literally.\n2) Fix only clear ASR mishearings (homophones, missing words, proper nouns, technical\n   terms). When a word is close in sound to a course term, it is almost certainly a\n   mishearing — use the term. Examples:\n   \"we're max chocolate properties\" -> \"we're macroscopic properties\";\n   \"how we measure the stalcy\" -> \"how we measure the statistics\";\n   \"average on the lacker level\" -> \"average on the lattice level\".\n3) Keep wording that is already correct and not close to any term exactly as-is.\n   Do NOT rewrite, polish, reorder or summarise it (guard against over-correction).\n4) Render technical terms the way Chinese textbooks do.\n5) If the input is just a list of terms or syllabus keywords, translate them word by word;\n   never output a summary heading like \"课程术语\" or \"翻译\". ",
+    "user": "Course terms:\n(none)\n\nRecent context (already corrected):\n- It is a solid at room temperature.\n\nExtra terms possibly relevant to this utterance:\n(none)\n\nASR utterance:\nwe're max chocolate properties\n\nNow translate the ASR utterance above into Chinese and output exactly:\nZH: <Chinese translation of the CORRECTED sentence>\nEN: <same utterance with ASR mishearings fixed>\nDo not repeat the course-terms list. No headings."
+   },
+   "draft": {
+    "system": "You are a real-time subtitle translator. Translate the user's English speech into Chinese. Output ONLY the Chinese translation, no labels, no explanation.",
+    "user": "Previous sentence (context only, do not translate):\nIt is a solid at room temperature.\n\nCurrent speech (may stop mid-sentence; translate only what is there):\nwe're max chocolate properties"
+   }
+  },
+  {
+   "en": "we're max chocolate properties",
+   "context": [
+    "It is a solid at room temperature."
+   ],
+   "cfg": {
+    "domain": "Introduction to Economics",
+    "terms": [
+     "midterm",
+     "supply",
+     "demand"
+    ],
+    "core": [
+     "Brightspace",
+     "tutorial"
+    ],
+    "always": [
+     "utility"
+    ],
+    "term_zh": {}
+   },
+   "final": {
+    "system": "You are a simultaneous interpreter for university lectures.\nThe user gives one utterance of English lecture speech (already transcribed by ASR),\nthe course title, the course terminology, and recent context.\n\nOutput exactly two lines and nothing else:\nZH: <fluent, accurate Chinese translation OF THE CORRECTED SENTENCE>\nEN: <the same sentence with ASR mishearings fixed>\n\nRules:\n1) Silently fix mishearings FIRST, then translate the fixed reading. If you change a word\n   on the EN line, the ZH line must reflect the fix — never translate an uncorrected\n   garble literally.\n2) Fix only clear ASR mishearings (homophones, missing words, proper nouns, technical\n   terms). When a word is close in sound to a course term, it is almost certainly a\n   mishearing — use the term. Examples:\n   \"we're max chocolate properties\" -> \"we're macroscopic properties\";\n   \"how we measure the stalcy\" -> \"how we measure the statistics\";\n   \"average on the lacker level\" -> \"average on the lattice level\".\n3) Keep wording that is already correct and not close to any term exactly as-is.\n   Do NOT rewrite, polish, reorder or summarise it (guard against over-correction).\n4) Render technical terms the way Chinese textbooks do.\n5) If the input is just a list of terms or syllabus keywords, translate them word by word;\n   never output a summary heading like \"课程术语\" or \"翻译\". ",
+    "user": "Course: Introduction to Economics\nCourse terms:\nBrightspace\ntutorial\nutility\n\nRecent context (already corrected):\n- It is a solid at room temperature.\n\nExtra terms possibly relevant to this utterance:\n(none)\n\nASR utterance:\nwe're max chocolate properties\n\nNow translate the ASR utterance above into Chinese and output exactly:\nZH: <Chinese translation of the CORRECTED sentence>\nEN: <same utterance with ASR mishearings fixed>\nDo not repeat the course-terms list. No headings."
+   },
+   "draft": {
+    "system": "You are a real-time subtitle translator. Translate the user's English speech into Chinese. Output ONLY the Chinese translation, no labels, no explanation.",
+    "user": "Course: Introduction to Economics\n\nCourse terms: utility\n\nPrevious sentence (context only, do not translate):\nIt is a solid at room temperature.\n\nCurrent speech (may stop mid-sentence; translate only what is there):\nwe're max chocolate properties"
+   }
+  },
+  {
+   "en": "we're max chocolate properties",
+   "context": [
+    "It is a solid at room temperature."
+   ],
+   "cfg": {
+    "domain": "",
+    "terms": [],
+    "core": [],
+    "always": [],
+    "term_zh": {
+     "midterm": "期中考试"
+    },
+    "ctx_chunk": 0,
+    "max_context": 1
+   },
+   "final": {
+    "system": "You are a simultaneous interpreter for university lectures.\nThe user gives one utterance of English lecture speech (already transcribed by ASR),\nthe course title, the course terminology, and recent context.\n\nOutput exactly two lines and nothing else:\nZH: <fluent, accurate Chinese translation OF THE CORRECTED SENTENCE>\nEN: <the same sentence with ASR mishearings fixed>\n\nRules:\n1) Silently fix mishearings FIRST, then translate the fixed reading. If you change a word\n   on the EN line, the ZH line must reflect the fix — never translate an uncorrected\n   garble literally.\n2) Fix only clear ASR mishearings (homophones, missing words, proper nouns, technical\n   terms). When a word is close in sound to a course term, it is almost certainly a\n   mishearing — use the term. Examples:\n   \"we're max chocolate properties\" -> \"we're macroscopic properties\";\n   \"how we measure the stalcy\" -> \"how we measure the statistics\";\n   \"average on the lacker level\" -> \"average on the lattice level\".\n3) Keep wording that is already correct and not close to any term exactly as-is.\n   Do NOT rewrite, polish, reorder or summarise it (guard against over-correction).\n4) Render technical terms the way Chinese textbooks do.\n5) If the input is just a list of terms or syllabus keywords, translate them word by word;\n   never output a summary heading like \"课程术语\" or \"翻译\". ",
+    "user": "Course terms:\n(无特定术语)\n\nRecent context (already corrected):\n- It is a solid at room temperature.\n\nASR utterance:\nwe're max chocolate properties\n\nNow translate the ASR utterance above into Chinese and output exactly:\nZH: <Chinese translation of the CORRECTED sentence>\nEN: <same utterance with ASR mishearings fixed>\nDo not repeat the course-terms list. No headings."
+   },
+   "draft": {
+    "system": "You are a real-time subtitle translator. Translate the user's English speech into Chinese. Output ONLY the Chinese translation, no labels, no explanation.",
+    "user": "Previous sentence (context only, do not translate):\nIt is a solid at room temperature.\n\nCurrent speech (may stop mid-sentence; translate only what is there):\nwe're max chocolate properties"
+   }
+  }
+ ]
+}

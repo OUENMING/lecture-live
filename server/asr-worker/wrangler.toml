@@ -33,6 +33,23 @@
 #   [vars]
 #   SONIOX_MAX_SESSION_S = "10800"        # 秒；官方上限 18000
 #
+# 网页版（web/）的 CORS 白名单（2026-11-17，docs/API-web-v0-20261117.md §8-2）：#   WEB_ORIGIN  = 网页版那**一个**来源（如 `https://<子域>`，带协议、不带结尾斜杠）。
+#                 **不配 = 一个来源都不放行**（fail-closed）：`/v1/soniox/key`、`/v1/chat/completions`、
+#                 `/v1/web/*` 的 OPTIONS 预检一律 404，也不会给任何响应加 CORS 头。
+#                 ⚠️ 绝不用 `*`；`/v1/transcribe`、`/v1/jev`、`/v1/admin/*` 永远不加 CORS 头。
+#                 两种配法任选：`wrangler secret put WEB_ORIGIN`（值不进仓库）或下面 [vars] 里写
+#                 WEB_ORIGIN = "https://…"（值是公开的，写这里也行）。真实值不要写进本地文件。
+#
+# 网页版的日实时转写额度（2026-11-17，P4-b；Owen 定「默认每天 5 小时」）：
+#   WEB_DAILY_RT_S = "18000"              # 秒，= 5 h。不写就是 18000。
+#                                         # 配成 "none" = 网页**不限**（与桌面同）。
+#                                         # 单个码可盖（优先级更高）：`cl_admin.py limit <名字> --web-rt-s <秒|none|default>`，
+#                                         #   `default` / 不设 = 跟随这里的全局值。
+#                                         # 写入 [vars] 即可（非 secret）。
+#   ⚠️ 这是**软闸**：网页自己连 Soniox，Worker 看不到音频流，秒数靠每小时 Cron 从用量日志回收
+#     （client_reference_id 后缀 `-web` 分账）；领临时 key 时会按「今天还剩多少」压 max_session_duration，
+#     挡得住一天内反复领 key，但挡不住「刚开课还没记上账」的那一段。
+#
 # ⚠️ 与上传 Worker 分开：那个是「只写、PUT-only」的安全立场，转写放进去会改性质。
 # ⚠️ 设计见 ../../docs/PLAN-r2-cloud-final-asr.md §W。
 
@@ -64,6 +81,49 @@ class_name = "Passes"
 tag = "v2"
 new_sqlite_classes = ["Passes"]
 
+# 网页版会话账本（W12，docs/API-web-v0-20261117.md §5）：**每个通行码一个实例**，
+# idFromName 用 sha256(通行码) 前 16 hex，**明文码不当 DO 名字**。元数据 / seq 水位 / 任务队列存在它的 SQLite 里。
+[[durable_objects.bindings]]
+name = "WEB_SESSIONS"
+class_name = "WebSessions"
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["WebSessions"]
+
+# 术语上云（W19，docs/API-web-v0-20261117.md §3.9）：**每通行码一个实例**（idFromName(codeHash16)，
+# 同 WebSessions 的分片方式）：`course:<课名>` = {text, updated_at}。
+[[durable_objects.bindings]]
+name = "WEB_TERMS"
+class_name = "WebTerms"
+
+# 同课共享池：**全局一个实例**（代码里固定用 idFromName("terms-pool-v1") 取），`share:<课号>:<hash>` = {text}。
+# 要跨码汇总人数，所以不能按码分片；写入是读-改-写（覆盖贡献），要 DO 的串行 —— 不用 R2。
+[[durable_objects.bindings]]
+name = "WEB_TERMS_POOL"
+class_name = "WebTermsPool"
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["WebTerms", "WebTermsPool"]
+
+# 全局任务队列（W22，docs/CONTRACT-runner-20261120.md §2）：单实例 DO —— 代码里固定 idFromName("hub") 取。
+# 存 job:<id>（笔记任务状态机：租约 90 s / attempts 上限 3 / complete 幂等）与 live:<hash>:<sid>
+# （正在上的课，3 h 无逐句即算停）。runner 路由（/v1/runner/*）在 runner-routes.js。
+#   wrangler secret put RUNNER_TOKEN     # runner 令牌，形如 rn_<32 hex>；/v1/runner/* 只认它，
+#                                         # fail-closed：没配 = 一律 401（同 upload-worker 的 INGEST_TOKEN）。
+#   RUNNER_PASS_NAME                     # 可选（普通变量即可，不写就是 "runner"）：runner 调模型用的专用
+#                                         # 通行码名；只有这个码的 /v1/chat/completions、/v1/jev 才认
+#                                         # X-ClassLive-Bill-To（16 hex），记进 AE 事件 blob11 —— 只记账，
+#                                         # 今天不扣任何人的额度。
+[[durable_objects.bindings]]
+name = "RUNNER_HUB"
+class_name = "RunnerHub"
+
+[[migrations]]
+tag = "v5"
+new_sqlite_classes = ["RunnerHub"]
+
 # 按安装限流：30 次 / 60 s（每个 Cloudflare 节点各自计数）。
 # ⚠️ Rate Limiting binding 需要 wrangler >= 4.36.0；period 只能是 10 或 60；
 #    限流参数写在 [ratelimits.simple] 子表里（官方文档格式，同上传 Worker）。
@@ -87,6 +147,16 @@ namespace_id = "2002"
 # ⚠️ 免费档的 Cron 就是定时调这个 Worker 的 scheduled()，不额外收费；:17 起跑，避开整点。
 [triggers]
 crons = ["17 * * * *"]
+
+# 网页版逐句文本（W12）：单独一个桶，**不复用上传桶**（上传桶里有真课的 report / transcript）。
+# 键：`web/<码hash16>/sessions/<session_id>/lines-<起始seq>.json`；桶里不出现完整码、不出现名字段。
+# ⚠️ **待 Owen 确认**：分桶 vs 与 `classlive-ingest` 同桶（契约 §6.1 留的两选）。
+# ⚠️ 30 天生命周期在桶上配（Dashboard 不支持，要 CLI）：
+#      `wrangler r2 bucket lifecycle add classlive-web web-expire-30 --expire-days 30 --prefix web/`
+#      —— **未部署**，代码里不删任何对象（只靠 DELETE /v1/web/data 与桶规则）。
+[[r2_buckets]]
+binding = "WEB_DATA"
+bucket_name = "classlive-web"
 
 # 逐请求事件：handler.js 的 track() 每个非管理请求写一条（码名 + 数字，不写文本 / 音频 / IP / 完整码）。
 # 保留 3 个月；免费档每天 10 万条写入、1 万次查询（2026-10-14 官方 pricing / limits 页）。
@@ -118,3 +188,15 @@ persist = true
 
 [observability.issues]
 enabled = true
+
+# 网页版上线（2026-11-19 Owen 定）：只放行 class.bldcam.page；网页实时转写每天 4 h
+[vars]
+WEB_ORIGIN = "https://class.bldcam.page"
+WEB_DAILY_RT_S = "14400"
+# 网页版测试数据（W20，2026-11-20）：遥测事件 + 课堂录音分段，默认**开**（不写这两行就是开，只有写 "off" 才关）。
+#   WEB_TELEMETRY     = "off"   # 总闸：遥测与录音一起关（两条都回 204 + `x-cl-telemetry: off`，不写 R2）
+#   WEB_AUDIO_UPLOAD  = "off"   # 只关录音分段（遥测照收）
+# 2026-11-19 试验：中国 / 港澳的实时翻译也走 OpenRouter 快速通道（默认 CN,HK,MO 跳过）。
+#   依据：AE 首 token（double9）HKG→DeepSeek 官方 605–786 ms，OpenRouter（DUB/SJC）281–349 ms；
+#   「离 DeepSeek 近、绕美国反而慢」只在都柏林测过。回退：删掉这一行再部署（回到代码默认 CN,HK,MO）。
+FAST_LLM_SKIP = ""

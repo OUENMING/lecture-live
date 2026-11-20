@@ -5,7 +5,7 @@ import { PassCore } from "./passes-core.js";
 export class Passes extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
-    this.core = new PassCore(ctx.storage);
+    this.core = new PassCore(ctx.storage, undefined, env);
   }
   fetch(request) { return this.core.handle(request); }
 }

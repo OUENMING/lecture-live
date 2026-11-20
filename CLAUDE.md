@@ -112,3 +112,8 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
     `check.py --changed` 会列出该跑哪个。
   - 真网络下载：隔离 `HOME` 再跑（`HOME=/tmp/x …`），别写进真 `~/models/`。
 - 报「可用」之前先跑上面命中的那条、贴出输出，再下结论。
+
+## 网页版 `web/`（Svelte MCP）
+- 改 `web/` 下的 `.svelte` / `.svelte.ts` 先用 Svelte MCP（`.mcp.json` 里的 `svelte`，远程 https://mcp.svelte.dev/mcp）：`list-sections` → `get-documentation` 查文档；写完每个组件跑 `svelte-autofixer` 到零问题再交。
+- 只用 runes（`$state` / `$derived` / `$props` / `onclick`），不写 `export let`、`on:click`、store。
+- 模块边界与命令见 `web/README.md`。

@@ -93,3 +93,6 @@ server/*/node_modules/
 # 在仓库根跑 wrangler 时也会生成一份（含 wrangler-account.json = 账号 ID/名），同样不入库
 /.wrangler/
 
+
+# 网页版设计评审的截图（本地产物，不入库；R23）
+web/.impeccable/review/

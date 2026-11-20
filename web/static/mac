@@ -1,0 +1,40 @@
+#!/bin/sh
+# ClassLive Mac 桌面版一行安装：curl -fsSL https://class.bldcam.page/mac | sh
+# 做三件事：没有 uv 就装 uv → 拉仓库到 ~/lecture-live（已有就 git pull）→ 跑 install.sh。
+# 全包在 main 里、最后一行才调用：下载半截断开时什么都不会执行。
+set -e
+
+main() {
+	if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
+		echo "ClassLive 桌面版只支持 Apple Silicon（M1 或更新）的 Mac。其他电脑请用网页版：https://class.bldcam.page" >&2
+		exit 1
+	fi
+
+	if ! command -v uv >/dev/null 2>&1; then
+		echo "==> 安装 uv（Python 工具）"
+		curl -LsSf https://astral.sh/uv/install.sh | sh
+		[ -f "$HOME/.local/bin/env" ] && . "$HOME/.local/bin/env"
+		PATH="$HOME/.local/bin:$PATH"
+	fi
+
+	if ! git --version >/dev/null 2>&1; then
+		echo "需要先装「开发者工具」：弹窗里点「安装」，装完再粘一次这行命令。" >&2
+		xcode-select --install >/dev/null 2>&1 || true
+		exit 1
+	fi
+
+	dir="$HOME/lecture-live"
+	if [ -d "$dir/.git" ]; then
+		echo "==> 已下载过，更新到最新"
+		git -C "$dir" pull --ff-only
+	else
+		echo "==> 下载 ClassLive"
+		git clone https://github.com/OUENMING/lecture-live.git "$dir"
+	fi
+
+	cd "$dir"
+	# 管道里 stdin 是脚本本身，交还给终端，免得 install.sh 以后要问问题时读到空
+	./install.sh </dev/tty
+}
+
+main "$@"

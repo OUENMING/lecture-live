@@ -37,7 +37,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 音频采集、电平归一化、上课中途换设备（`resolve_input_device` 唯一定义点） | `capture.py` |
 | 断句、VAD、静音阈值、硬切找低谷 | `vad.py` |
 | ASR 共用件（按精确名取模型文件 `_find_file`、复读判定 `is_degenerate`） | `asr.py`（2026-11-20 起没有识别器类了） |
-| 本地定稿兜底：流式模型拿**整段**重新解码（喂整段 + 补 `TAIL_PAD_S` 静音 + `input_finished`；含"为什么不能用同一个 recognizer 的两条流"的线程理由） | `nemotron_final.py`、`tests/test_nemotron_final.py` |
+| 本地定稿兜底 = **草稿引擎段尾那份转录**（`SegmentTail`：草稿线程 `put`、定稿线程 `take`，有界 32 段、短等 ≤0.5 s；D1b 起不再整段重解码） | `draft_engine.py`、`tests/test_draft_engine.py` 的 `Handoff` 组 |
 | 定稿 ASR 深模块（云端 Groq/千问优先、本地兜底、熔断、总截止；`main.final_worker` 只调 `FinalASR.transcribe`）；开关 / 告知 / 配置 `read_config` | `final_asr.py`、`asr_endpoint.py`、`tests/test_final_asr.py` |
 | 翻译 prompt / 术语选取 / 流式解析 / 译文闸门（纯函数，本地 mlx 引擎 2026-11-20 已删）、DeepSeek 云端、连败暂停与探针；对话模型地址与非流式 JSON 调用的唯一出口 | `translator.py`、`cloud_translator.py`、`llm_client.py` |
 | 云端翻译的前文窗口（块对齐 / 前缀缓存）—— 动 `cloud_translator._user_content` 前读 | `docs/experiments/context_ab.md` |

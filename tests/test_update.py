@@ -1535,15 +1535,13 @@ check("⭐ 该下的时候**真的下**（别把下载整个弄没了）", _g.ge
 _REPO = pathlib.Path(__file__).resolve().parent.parent
 _src_main = (_REPO / "main.py").read_text(encoding="utf-8")
 _src_el = (_REPO / "entry_launch.py").read_text(encoding="utf-8")
-# ⚠️ 判的是**先后**，不是"两行紧挨着" —— 中间本来就有注释（第一版钉死换行相邻，假红）。
-check("⭐ `main` 在**下课之后**那条路调它（排在 `_auto_update_on_exit()` 之后）",
-      _src_main.index("_auto_update_on_exit()\n") < _src_main.index("            _draft_model_on_exit()"))
-# 改坏：把 `rc["code"] == CANCELLED` 放宽成"关面板就下" -> 上课途中也会下 464 MB。
-check("⭐⭐ `entry_launch` 只在**关掉面板没开课**（CANCELLED）时下 —— 上课那条路绝不下",
-      'rc["code"] == CANCELLED' in _src_el and "spawn_draft_model_download()" in _src_el)
-check("⭐⭐ 两处都挂 `CLASSLIVE_NO_AUTO_UPDATE` 那道闸（否则跑一次判据就真去下 464 MB）",
-      _src_main.count("CLASSLIVE_NO_AUTO_UPDATE") >= 2
-      and "CLASSLIVE_NO_AUTO_UPDATE" in _src_el)
+# ⭐⭐ Owen 2026-11-20 选 B：识别模型是可选的，**只在用户点「现在下载」时才下** ——
+#    下课退出（`main`）和关面板（`entry_launch`）两条路都**不许**再静默下 464 MB。
+# 改坏：把任何一处的 `spawn_draft_model_download()` / `_draft_model_on_exit()` 调用加回来 -> 这两条红。
+check("⭐⭐ `entry_launch` 关面板时不再静默下识别模型",
+      "spawn_draft_model_download()" not in _src_el)
+check("⭐⭐ `main` 下课退出时不再静默下识别模型",
+      "_draft_model_on_exit()" not in _src_main.replace("def _draft_model_on_exit()", ""))
 
 # ======================= E. 面板开着时的后台安装 / 退出前先修产物（2026-10-13） =======================
 print("\nE. 后台安装与自修\n")

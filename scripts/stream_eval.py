@@ -35,7 +35,7 @@ import models
 
 #: 定稿有哪几种（`load_final_engine` 认的就是这两个）—— 与它挨着定义，两个 CLI 共用。
 #: ⚠️ 2026-11-20（桌面 D1）：`whisper` / `parakeet` 两档随模型一起删了；
-#:    本地那条现在是 `nemotron`（流式模型拿整段重新解码，`nemotron_final.NemotronFinal`）。
+#:    本地那条现在是 `nemotron`（`final_asr` 读草稿引擎算好的**段尾转录**，D1b 起不再整段重解码）。
 FINAL_MODES = ("nemotron", "cloud")
 
 PARTIAL_MAX_S = 10        # 与 main.PARTIAL_MAX_S 一致（不 import main：它拖一堆 UI 依赖）

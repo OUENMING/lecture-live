@@ -3,7 +3,7 @@
 ⚠️ **2026-11-20（桌面 D1）**：Parakeet / Whisper 已从代码里删掉，本地识别只剩流式模型
 Nemotron 一个：
 
-- 整段重新解码（云端失败时的定稿兜底）→ `nemotron_final.NemotronFinal`
+- 段尾转录（云端失败时的定稿兜底）→ `draft_engine.SegmentTail`（D1b 起不再整段重解码）
 - 实时草稿 → `draft_engine.NemotronDrafter`
 
 所以本文件**不再有**任何识别器类。留下的两件东西仍然被两边共用，所以还叫 asr.py：
@@ -29,7 +29,7 @@ def _find_file(dirname: str, patterns) -> str:
     2) 通配("*.txt")命中多个时**不许猜** —— 猜错会静默用错词表(README.txt 也是
        .txt), 或 int8 与非 int8 混用, 而识别结果是"看起来正常但全错"。报出来
        让调用方决定。精确名(无通配)最多命中一个, 不受此限。
-    ⚠️ 所以**一律只传精确名**给这个函数（`draft_engine` / `nemotron_final` 就是这么调的）。
+    ⚠️ 所以**一律只传精确名**给这个函数（`draft_engine` 就是这么调的）。
     """
     for pat in patterns:
         hits = sorted(glob.glob(os.path.join(dirname, pat)))

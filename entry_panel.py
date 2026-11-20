@@ -3618,8 +3618,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         ⚠️ **2026-11-20（桌面 D1）之后它是可选的**（Owen 改口）：没装也能上课，全走云端。
            所以这张卡的口气是「推荐」，不是「必装」—— 好处一句话说清：
            **断网 / 云端识别失败时仍有英文转录**（草稿不再回改是附带的）。
-        ⚠️ 可以先关掉：下课退出 / 不开课关面板时后台会静默下好
-           （`update.spawn_draft_model_download`，这条路 3.9.3 起就在）。
+        ⚠️ 「稍后」= 真的不下（Owen 2026-11-20 选 B）：下课退出 / 关面板时**不再**静默下 464 MB；
+           下次打开面板还没装就再提一次。
         ⚠️ `CLASSLIVE_DRAFT_ENGINE=off` 的人不提醒（`ready.draft_wanted` → `_draft_wanted`）。
         """
         if S.get("downloading"):
@@ -3639,8 +3639,8 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             body=(f"平时字幕走云端。装上之后，断网或云端识别出问题时也还有英文转录；"
                   f"课上的中文草稿也基本不再改来改去（实测回改 5.7% → 0.6%）。"
                   f"下载{size.replace(' MB', '\u00a0MB')}，最好连着 Wi-Fi。"),   # 不间断空格：数字和 MB 不折开
-            note="不装也能正常上课（全走云端）。关掉 ClassLive 后会在后台自动下好，下节课生效。",
-            buttons=[("稍后", _card_done(lambda: _status("好 —— 关掉 ClassLive 后在后台下识别模型")),
+            note="不装也能正常上课（全走云端）。点「现在下载」才会下，下节课生效。",
+            buttons=[("稍后", _card_done(lambda: _status("好，先不下（顶上「语音模型」那格随时能下）")),
                       "secondary"),
                      ("现在下载", _card_done(_download_draft), "primary")],
             over=win))

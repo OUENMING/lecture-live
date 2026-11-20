@@ -97,8 +97,7 @@ def models_item(states: dict, *, draft_wanted: bool = False) -> dict:
        （Owen 改口：没装也能上课，全走云端）。所以这一格**照旧 OK**、不拦开课，
        只是把「推荐下载」那句话带上 —— 好处是一句话能说清的：
        **断网 / 云端识别失败时仍有英文转录**（草稿不再回改是附带的）。
-       **开课前不自动下**（464 MB 会和上课抢 Wi-Fi），关掉面板 / 下课退出后由
-       `update.spawn_draft_model_download` 在后台静默下。
+       **任何时候都不自动下**（Owen 2026-11-20 选 B）：只在用户点「现在下载」/ 菜单那一项时下。
     """
     out = _models_item(states)
     if (draft_wanted and out["state"] == OK

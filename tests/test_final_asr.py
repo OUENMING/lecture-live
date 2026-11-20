@@ -7,10 +7,10 @@
 
  1. 云端 200 → source=groq, 本地没被调        7. allow_cloud False → 不发请求, "off", fell_back=False
  2. 服务器挂住 → 6 s 内回本地, 收尾 2 s       8. 编码失败 → 本地, "encode"
- 3. 503 → 本地                                9. 没装 Nemotron → 没有本地兜底（不抛）
+ 3. 503 → 段尾转录                          9. 交接处没这一段 → 没有本地兜底（不抛）
  4. 熔断: 3 次失败 → 不发 → 61 s 后试探 → 恢复   10. 请求头 + body 以 OggS 开头
  5. 云端退化文本 → 本地                      11. install_id 一次生成、600
- 6. 云端空串: 短段接受、≥2 s 补跑本地(R5)   12. （并发那条移到 `tests/test_nemotron_final.py`）
+ 6. 云端空串: 短段接受、≥2 s 补问段尾转录(R5)
  R7. CLASSLIVE_CLOUD_ASR=0 → 不发请求、不写任何文件
 
 ⚠️ 本机 `http.server` 当 Worker, **不联网**; HOME 与 `paths.STATE_ROOT` 都指向临时目录
@@ -176,8 +176,8 @@ class TestCloudPath(Base):
         r = f.transcribe(audio(3))
         dt = time.monotonic() - t
         self.assertTrue(5.5 <= dt < 6.8, dt)                # 总截止 6 s
-        self.assertEqual(r.steps, ("cloud:timeout", "local:nemotron"))
-        self.assertEqual((r.text, r.source, r.fell_back), ("draft text", "local-nemotron", True))
+        self.assertEqual(r.steps, ("cloud:timeout", "local:tail"))
+        self.assertEqual((r.text, r.source, r.fell_back), ("draft text", "local-tail", True))
 
     def test_02b_stopping_uses_short_deadline(self):
         self.serve(sleep=7.0)
@@ -191,8 +191,8 @@ class TestCloudPath(Base):
     def test_03_503_goes_local(self):
         self.serve(status=503, body={"error": "all_failed"})
         r = self.make().transcribe(audio(3))
-        self.assertEqual(r.steps, ("cloud:http-503", "local:nemotron"))
-        self.assertEqual((r.source, r.fell_back), ("local-nemotron", True))
+        self.assertEqual(r.steps, ("cloud:http-503", "local:tail"))
+        self.assertEqual((r.source, r.fell_back), ("local-tail", True))
         self.assertEqual(r.trace["fallback_text"], "draft text")
 
     def test_04_breaker(self):
@@ -249,7 +249,7 @@ class TestCloudPath(Base):
         from unittest import mock
         with mock.patch.object(f, "_encode", lambda _s: None):
             r = f.transcribe(audio(3))                  # 探测到手，但**不发请求**
-        self.assertEqual(r.steps, ("encode", "local:nemotron"))
+        self.assertEqual(r.steps, ("encode", "local:tail"))
         self.assertEqual(srv.n, 3, "这条路上本来就不该发请求")
 
         clk.t += 61
@@ -275,7 +275,7 @@ class TestCloudPath(Base):
     def test_05_cloud_degenerate_goes_local(self):
         self.serve(body={"text": "... ... ...", "provider": "groq"})
         r = self.make().transcribe(audio(3))
-        self.assertEqual(r.steps, ("cloud:degenerate", "local:nemotron"))
+        self.assertEqual(r.steps, ("cloud:degenerate", "local:tail"))
         self.assertEqual(r.text, "draft text")
         self.assertTrue(r.trace["primary_degenerate"])
 
@@ -289,8 +289,8 @@ class TestCloudPath(Base):
     def test_06b_empty_long_reruns_draft(self):                      # R5
         self.serve(body={"text": "", "provider": "groq"})
         r = self.make().transcribe(audio(3.0))
-        self.assertEqual((r.text, r.source), ("draft text", "local-nemotron"))
-        self.assertEqual(r.steps, ("cloud:groq", "cloud-empty", "local:nemotron"))
+        self.assertEqual((r.text, r.source), ("draft text", "local-tail"))
+        self.assertEqual(r.steps, ("cloud:groq", "cloud-empty", "local:tail"))
         self.assertEqual(self.local.calls, 1)
 
     def test_06c_empty_long_draft_also_empty(self):
@@ -309,7 +309,7 @@ class TestCloudPath(Base):
     def test_08_encode_failure(self):
         srv = self.serve()
         r = self.make(encode=lambda s: None).transcribe(audio(3))
-        self.assertEqual(r.steps, ("encode", "local:nemotron"))
+        self.assertEqual(r.steps, ("encode", "local:tail"))
         self.assertEqual((srv.n, r.fell_back), (0, True))
 
     def test_10_headers_and_body(self):
@@ -352,37 +352,51 @@ class TestLocalPath(Base):
     def test_07_allow_false(self):
         srv = self.serve()
         r = self.make(allow=lambda: False).transcribe(audio(3))
-        self.assertEqual(r.steps, ("off", "local:nemotron"))
+        self.assertEqual(r.steps, ("off", "local:tail"))
         self.assertEqual((srv.n, r.fell_back), (0, False))
         self.assertEqual(r.logprob, -0.3)
 
     def test_09_local_degenerate_is_reported(self):
-        """本地整段解码吐退化文本 → 照样用它（没有第二个模型可退），但 `steps` 要说出来。"""
+        """段尾转录是退化的（流式模型偶尔也会）→ 照样用它（没有第二个来源可退），但 `steps` 要说出来。"""
         r = self.make(local=Stub("... ... ..."), allow=lambda: False).transcribe(audio(3))
-        self.assertEqual(r.steps, ("off", "local:nemotron", "degenerate"))
-        self.assertEqual((r.source, r.text), ("local-nemotron", "... ... ..."))
+        self.assertEqual(r.steps, ("off", "local:tail", "degenerate"))
+        self.assertEqual((r.source, r.text), ("local-tail", "... ... ..."))
         self.assertTrue(r.trace["primary_degenerate"])
 
     def test_09c_local_ok(self):
         r = self.make(local=Stub("local text", -0.1), allow=lambda: False).transcribe(audio(3))
-        self.assertEqual((r.source, r.text, r.logprob), ("local-nemotron", "local text", -0.1))
+        self.assertEqual((r.source, r.text, r.logprob), ("local-tail", "local text", -0.1))
         self.assertIsNone(r.trace["fallback_text"])
 
     def test_09d_no_local_model(self):
-        """`local=None` = **没有本地兜底**（Nemotron 可选、没装就是这种）。云端关着 → 这段空。"""
+        """`local=None` = **没有本地兜底**（交接处没这一段就是这种）。云端关着 → 这段空。"""
         f = final_asr.FinalASR(None, lambda: False)
         r = f.transcribe(audio(1))
         self.assertEqual((r.text, r.source, r.fell_back), ("", "none", False))
         self.assertEqual(r.steps, ("off", "local:absent"))
 
-    def test_load_final_without_nemotron_is_not_fatal(self):
-        """Nemotron 没装是**合法状态** —— `load_final` 不许抛，只是没有本地兜底。"""
-        f = final_asr.load_final("/nonexistent/nemotron", lambda: False, preload_local=True)
+    def test_load_final_without_tails_is_not_fatal(self):
+        """`tails=None` = **没有段尾转录可兜底** —— `load_final` 不许抛，课照上。"""
+        f = final_asr.load_final(None, lambda: False)
         self.assertEqual(f.transcribe(audio(1)).source, "none")
-        self.assertTrue(any("没有本地兜底" in e for e in self.echoes),
-                        f"该说一句「没有本地兜底」：{self.echoes}")
-        f2 = final_asr.load_final("/nonexistent/nemotron", lambda: False, preload_local=False)
-        self.assertEqual(f2.transcribe(audio(1)).source, "none")
+        self.assertTrue(any("没有段尾转录" in e for e in self.echoes),
+                        f"该说一句「没有段尾转录」：{self.echoes}")
+        self.assertTrue(any("段尾转录" in e for e in self.echoes), self.echoes)
+
+    def test_per_call_local_overrides_the_default(self):
+        """⭐ D1b 的接线：`transcribe(buf, local=tails.handle(tag))` 每段传一次。
+
+        段号是交接处的键，所以它必须**跟着这一次调用**走，不能是实例上的可变字段
+        （`final_worker` 是唯一调用方，它手里才有段号）。
+        """
+        import draft_engine as de
+        tails = de.SegmentTail(wait_s=0.0)
+        tails.put(3, "第三段的话")
+        f = final_asr.FinalASR(None, lambda: False)            # 默认没有本地兜底
+        self.assertEqual(f.transcribe(audio(1)).source, "none")
+        r = f.transcribe(audio(1), local=tails.handle(3))
+        self.assertEqual((r.text, r.source), ("第三段的话", "local-tail"))
+        self.assertEqual(tails.handle(4).transcribe_lp(audio(1)), ("", None))
 
 
 class TestEnvSwitch(Base):
@@ -390,7 +404,7 @@ class TestEnvSwitch(Base):
         srv = self.serve()
         os.environ["CLASSLIVE_CLOUD_ASR"] = "0"
         r = self.make().transcribe(audio(3))
-        self.assertEqual(r.steps, ("off", "local:nemotron"))
+        self.assertEqual(r.steps, ("off", "local:tail"))
         self.assertEqual(srv.n, 0)
         self.assertFalse(final_asr.write_config(False))
         cfg = final_asr.read_config()

@@ -1818,26 +1818,6 @@ def _auto_update_on_exit() -> None:
         pass                                              # 绝不因为自动更新影响退出
 
 
-def _draft_model_on_exit() -> None:
-    """**下课之后**在独立进程里下那个可选的流式草稿模型（464 MB）。父进程立刻返回。
-
-    ⚠️ 为什么是"下课之后"而不是"上课途中"（Owen 2026-10-12 定）：464 MB 会和云端定稿的
-       音频上传抢同一条教室 Wi-Fi —— 正好压在最不该压的时刻。所以只在收尾的最末起，
-       而且 `start_new_session=True`：用户下一句就退出程序，它照样在后台下完。
-    ⚠️ 与自动更新**共用** `CLASSLIVE_NO_AUTO_UPDATE` 那道闸 —— 两者都是「退出时自己在后台
-       去做的大活」，判据里必须一起关掉（否则跑一次测试就真去下 464 MB）。
-       复用而不是新开一个开关，也是为了让 `docs/HANDBOOK.md` §6.1 的登记表不增项。
-    ⚠️ 「该不该下」不在这里判 —— 子进程里的 `run_step(DRAFT_MODEL)` 自己会判（幂等）。
-    """
-    if os.environ.get("CLASSLIVE_NO_AUTO_UPDATE"):
-        return
-    try:
-        import update as _u
-        _u.spawn_draft_model_download()
-    except Exception:                                     # noqa: BLE001
-        pass                                              # 绝不因为这件事影响退出
-
-
 def _whatsnew_body(seen: str, cur: str, max_lines: int = 7) -> str:
     """该给用户看的内容 —— **`(seen, cur]` 这个区间**。规则（跨版本合并、上界是 cur）见 `changelog.between`。"""
     return changelog.between(_changelog_text(), seen, cur, max_lines)
@@ -2376,8 +2356,12 @@ def run(args) -> None:
         _tp.setdefault("draft_ready", time.monotonic())
 
     draft = draft_engine.load_draft_engine_async(on_ready=_draft_ready)
+    #: 段尾转录交接处：草稿线程放（`partial_worker` 的 `_end` 那条路）、定稿线程取
+    #: （`final_worker` 的 `tails.handle(tag)`）。有界 32 段、取不到短等 ≤0.5 s。
+    tails = draft_engine.SegmentTail()
     if draft.name == "none":
-        echo(f"⌨️ 本节没有实时草稿（{draft.reason or '流式模型不可用'}）；英文定稿照常")
+        echo(f"⌨️ 本节没有实时草稿（{draft.reason or '流式模型不可用'}）；"
+             f"云端定稿失败时这一段也就没有英文")
         # 没有后台加载那一段 → 就绪时刻就是现在（测试模式那一项要有个数）
         _tp.setdefault("draft_ready", time.monotonic())
     _tp["draft"] = time.monotonic()
@@ -2489,15 +2473,17 @@ def run(args) -> None:
         return _cloud_asr_off_reason() is None
 
     _why_off = _cloud_asr_off_reason()
-    # ⚠️ 本地兜底与草稿**同一个模型目录**（2026-11-20 桌面 D1 之前是两份）
-    final = final_asr.load_final(args.model_dir, allow_cloud=_cloud_asr_ok,
-                                 preload_local=_why_off is not None,  # R4: 云端开着就不加载本地模型
+    # ⭐⭐ 2026-11-20（桌面 D1b）：定稿的本地兜底 = **草稿引擎这一段段尾就算好的转录**。
+    #    草稿线程（`partial_worker`）在 `draft.finish()` 之后 `tails.put(tag, text)`，
+    #    `final_worker` 按段号 `tails.handle(tag)` 取（取不到短等 ≤0.5 s）。
+    #    所以这里**不加载第二份模型**（D1 曾为此多花 ~886 MB、慢 3.4 倍）。
+    final = final_asr.load_final(tails, allow_cloud=_cloud_asr_ok,
                                  is_stopping=stopping.is_set,         # 收尾冲刷时云端截止更短
                                  passcode=api_key_val,                # 通行码 `cl-…` 才会用上（一人一码）
                                  # `notify` 在下面才定义; 熔断只会在开课后说话, 那时早已定义好
                                  notify=lambda m, w: notify(m, w, src="转写"))
-    echo("☁ 定稿: 云端(Groq → 千问)" if _why_off is None
-         else f"💻 定稿: 本地 Nemotron({_why_off})")
+    echo("☁ 定稿: 云端(Groq → 千问)；云端不通时用草稿引擎的段尾转录" if _why_off is None
+         else f"💻 定稿: 段尾转录({_why_off})")
     _trace("final_asr")
     # ⚠️ 库路径在这里**收口**（`resolve_vault` 是唯一定义点）：`--vault` → `$OBSIDIAN_VAULT`
     #    → 上次用过的。**没有兜底目录** —— 拿不到就不写 Obsidian，绝不凭空造一个。
@@ -3437,6 +3423,12 @@ def run(args) -> None:
                 #    段尾那一刻 finalq 里正好躺着这一段，让开就等于永远不收。
                 _t_end = time.monotonic()
                 t = draft.finish(*_end)
+                # ⭐⭐ D1b：**先交接给定稿线程**，再管屏上要不要重放一遍。
+                #    定稿那侧（`final_worker`）按段号取；取不到就短等 ≤0.5 s，
+                #    还没有 = 这一段没有本地兜底（照实告警，不假装）。
+                #    ⚠️ 放在去重判据**之前**：下面那条 `continue` 只是"屏上不用再放一遍"，
+                #       而定稿仍然**要**这份文本（云端失败时它就是这一段的定稿）。
+                tails.put(_end[1], t)
                 # 收尾解出来的和这一段上一份草稿**一字不差**（尾词早就解全了，10-12 回放约 2/15 段）
                 # → 屏上不用再放一遍，也不用再花一次草稿翻译。
                 if t and not (_end[1] == last_gen and t == prev_text):
@@ -3465,7 +3457,7 @@ def run(args) -> None:
                     continue
                 _skip_seg = None                 # 新段到了 → 恢复正常
             # 定稿与草稿**不共用模型**（草稿 = `draft_engine` 那条流；定稿 = 云端，或
-            # 云端不通时 `nemotron_final` 自己那份 recognizer），所以草稿这一轮**不必给
+            # 云端不通时读的是 `tails` 里已算好的文本），所以草稿这一轮**不必给
             # 定稿让路**：让开只会把段尾那一刻 `Segmenter` 给新段的那份缓冲（硬切挪回的
             # 3–6 s）白白丢掉 —— 实测新段第一份草稿因此晚到 ~2 s。
             # （原来的 `if draft.name == "parakeet" and not finalq.empty(): continue`
@@ -3816,7 +3808,9 @@ def run(args) -> None:
                 # 云端优先 / 本地兜底 / 退化与空串的补救都在 `final_asr` 里(永不抛)。
                 # ⭐ 测试模式要的「第一个来源的原文 / 判决 / 兜底原文」在 `r.trace` 里 ——
                 #    少记它的代价是实打实的(2026-10-07: 主模型空与兜底模型空分不开)。
-                r = final.transcribe(buf)
+                # ⭐⭐ D1b：本地兜底 = **这一段段尾那份草稿转录**（`partial_worker` 已经放好）。
+                #    `handle(tag)` 绑段号、忽略音频；取不到时它会短等 ≤0.5 s。
+                r = final.transcribe(buf, local=tails.handle(_fseg))
                 text = r.text
                 # ⭐ 「这段定稿来自云端」记一笔（进程内）—— 下课收尾时用它决定要不要给
                 #    `whisper_card` 数一节（那张卡要求「本版本上 ≥3 节云端定稿的课」）。
@@ -4842,6 +4836,10 @@ def run(args) -> None:
             except Exception:                            # noqa: BLE001
                 pass
             try:
+                tails.clear()                            # 段尾转录交接处：下课就丢，别留到下一节
+            except Exception:                            # noqa: BLE001
+                pass
+            try:
                 draft_tr.stop()                          # 叫醒草稿译文线程的 `step()`
             except Exception:                            # noqa: BLE001
                 pass
@@ -5470,8 +5468,7 @@ def run(args) -> None:
             #    而 drainer 要的是**这一版**的 `upload.py` 与队列格式。
             _upload_on_exit()
             _auto_update_on_exit()
-            # ⭐ 下课了 —— 这才把那个可选的草稿模型放后台下（上课途中绝不下，见它的 docstring）
-            _draft_model_on_exit()
+            # ⚠️ 识别模型（Nemotron）**不再**在下课时静默下（Owen 2026-11-20 选 B：只在用户点「现在下载」时下）。
             # ⚠️ 原来这里会给「旧的本地 Whisper 还能清掉」那张卡记一节；2026-11-20
             #    桌面 D1 把 Whisper 从代码里删了，那张卡也一起删了（`whisper_card.py`）。
 

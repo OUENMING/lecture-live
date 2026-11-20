@@ -31,7 +31,7 @@
    唯一例外是 `sentence_ends`：它只读草稿线程**整个替换**的一个元组（不碰 sherpa），
    给 `vad.Segmenter` 在音频线程里读（3.9.4 句末切段）。
 ⚠️ 熔断后**本节课不再试**（不来回抖）：退成「无草稿」，直到进程结束。**定稿不受影响**
-   （它走 `final_asr` / `nemotron_final`，与这里不是同一份实例）。
+   （D1b 起它**读的正是这里算好的段尾转录**，见文件末尾 `SegmentTail`）。
 ⚠️ 段中间**不补静音、不调 `input_finished`**：那会结束这条流，后面再喂的样本全丢。
    段**尾**才补（`finish`，3.9.4）：这条流本来就要扔了，补一截静音让前瞻里那几个词解出来。
 
@@ -445,3 +445,122 @@ def _notify(on_ready, ok: bool) -> None:
     except Exception:                            # noqa: BLE001
         pass
 
+
+
+# ---------------------------------------------------------------- 段尾转录交接处（D1b）
+#: 只留最近这么多段。段号是**单调递增**的，所以「保留最近 N 段」= 丢掉比 `最新-N+1` 小的那些。
+#: 32 段约等于 2–4 分钟的课 —— 定稿线程只会迟到几秒（云端总截止 6 s / 收尾 2 s），
+#: 留 32 是给「云端超时 + 队列积压 + 收尾冲刷」叠加留的余量，同时把内存钉在几十 KB。
+HANDOFF_KEEP = 32
+#: 段尾文本**最多等**这么久。定稿在段尾那一刻往往已经排在 `finalq` 里了（草稿线程与
+#: 音频线程是两条），正常情况下是一两毫秒；等 0.5 s 是给「音频线程刚 put_end、
+#: 草稿线程还没转到」那一小段窗口留余量。之后就是真没有 —— **绝不拖慢定稿**。
+HANDOFF_WAIT_S = 0.5
+
+
+class SegmentTail:
+    """**段尾转录交接处** —— 草稿线程放、定稿线程取。跨线程唯一的那一个洞。
+
+    ## 为什么要有它（2026-11-20 桌面 D1b，Owen 拍板）
+
+    D1 的本地定稿是「流式模型拿整段**重新解码**」：WER 只差 2.5%，但要多一份 recognizer
+    （实测 +886 MB）而且慢 3.4 倍（p50 1262 ms vs 371 ms）。而**同一段话的转录，草稿线程
+    在段尾那一刻已经算好了**（`DraftEngine.finish`：剩余样本 + 0.8 s 静音 + `input_finished`
+    → 本段完整假设）。再解一遍纯属重复劳动 —— 等待≈0、内存 0、还不用赌两份 recognizer
+    并发 decode 的线程安全。
+
+    ## 契约
+
+        tails.put(tag, text)              # 草稿线程（partial_worker），段尾调一次
+        text = tails.take(tag, timeout=…)# 定稿线程（final_worker）；没有 → None
+        tails.clear()                     # 下课 / 停机
+
+    - **取不到就短等**（`Condition.wait(timeout)`，不轮询 `sleep`）：定稿往往比草稿早几毫秒
+      排进队列，等这一下能把「同一次段尾」对上。超时 = 真没有 → `None`
+      （调用方据此走「这一段没有定稿」那条既有告警路径，**不假装有本地兜底**）。
+    - **有界**：只留最近 `keep` 段（默认 32）。段号单调，所以淘汰就是删掉最小的那些。
+    - `text` 为空串**不入账**：空草稿不是转录，给它等于让定稿拿到一句空话。
+    - ⚠️ 本类**只做交接**，不碰 sherpa、不抛异常（两个线程谁都不该被对方带下水）。
+    """
+
+    def __init__(self, keep: int = HANDOFF_KEEP, wait_s: float = HANDOFF_WAIT_S):
+        self._keep = max(1, int(keep))
+        self._wait_s = max(0.0, float(wait_s))
+        self._tails: dict = {}
+        self._cv = threading.Condition()
+        #: 只读计数（测试 / 报告用）：放了几次、取到几次、等空了几次。
+        self.puts = 0
+        self.hits = 0
+        self.misses = 0
+
+    def put(self, tag, text) -> None:
+        """草稿线程：本段完整假设。空串 / `tag` 为 `None` → 不入账。**永不抛**。"""
+        if tag is None or not text:
+            return
+        try:
+            with self._cv:
+                self._tails[tag] = text
+                self.puts += 1
+                while len(self._tails) > self._keep:
+                    del self._tails[min(self._tails)]
+                self._cv.notify_all()          # 叫醒正在为**同一段**短等的定稿线程
+        except Exception:                       # noqa: BLE001
+            pass
+
+    def take(self, tag, *, timeout: float | None = None):
+        """定稿线程：拿 `tag` 这 段的段尾转录；`timeout` 内没有 → `None`。**永不抛**。
+
+        ⚠️ 取到之后**不从字典里删** —— 定稿那边 `FinalASR` 的 R5 复核 / 重试可能问两次，
+           而删掉会让第二次变成「没有本地兜底」。反正有界（`keep` 段）。
+        """
+        if tag is None:
+            return None
+        wait = self._wait_s if timeout is None else max(0.0, float(timeout))
+        try:
+            with self._cv:
+                if tag not in self._tails and wait > 0:
+                    self._cv.wait_for(lambda: tag in self._tails, timeout=wait)
+                text = self._tails.get(tag)
+                if text is None:
+                    self.misses += 1
+                else:
+                    self.hits += 1
+                return text
+        except Exception:                       # noqa: BLE001
+            return None
+
+    def handle(self, tag, timeout: float | None = None):
+        """给 `final_asr` 用的适配器：`handle(tag).transcribe_lp(_samples) -> (text, None)`。
+
+        ⚠️ **按段号取、忽略音频**：这份文本就是草稿引擎按同一段音频算出来的（`finish`）。
+           再拿音频解一遍正是 D1b 要删掉的「整段重新解码」。
+        ⚠️ `tag` 为 `None`（不知道是哪一段）→ 返回一个永远给空的适配器，
+           定稿那边就老实走「这一段没有本地兜底」。
+        """
+        return _TailHandle(self, tag, timeout)
+
+    def clear(self) -> None:
+        """下课 / 停机。**永不抛**。"""
+        try:
+            with self._cv:
+                self._tails.clear()
+                self._cv.notify_all()
+        except Exception:                       # noqa: BLE001
+            pass
+
+
+class _TailHandle:
+    """`SegmentTail.handle()` 的产物。形状同 `ParakeetASR`：两个方法、都不抛。"""
+
+    __slots__ = ("_tails", "_tag", "_timeout")
+
+    def __init__(self, tails: SegmentTail, tag, timeout: float | None):
+        self._tails, self._tag, self._timeout = tails, tag, timeout
+
+    def transcribe_lp(self, _samples=None) -> tuple[str, float | None]:
+        if self._tag is None:
+            return "", None
+        return self._tails.take(self._tag, timeout=self._timeout) or "", None
+
+    def transcribe(self, samples=None) -> str:
+        return self.transcribe_lp(samples)[0]

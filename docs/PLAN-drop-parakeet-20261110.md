@@ -119,3 +119,64 @@
   `auto|parakeet|nemotron` 变成 `auto|off`）—— 不在这次允许改的清单里。
 - `~/.classlive/eval/` 里那些**历史报告**留着（它们记的是当年的 Parakeet/Whisper 数字，
   是历史数据，不是现役值）。
+
+---
+
+## 2026-11-20 D1b 实施（Owen 当天下午改口：**不整段重解码了**）
+
+D1 的做法（下面「2026-11-20 实施」里那条）是「云端不通 → 流式模型拿**整段**重新解码」。
+量下来 WER 只差 2.5%，但代价是**多一份 recognizer**（实测 +886 MB）且**慢 3.4 倍**
+（p50 1262 ms vs Parakeet 371 ms）。而同一段话的转录，**草稿线程在段尾那一刻已经算好了** ——
+再解一遍纯属重复劳动。
+
+### 改成了什么
+
+| 位置 | D1 | D1b（现役） |
+|---|---|---|
+| 本地定稿兜底的来源 | `nemotron_final.NemotronFinal`：整段重新解码 | ⭐ `draft_engine.SegmentTail`：**读草稿引擎段尾那份 `finish()` 的结果** |
+| 额外内存 | 第二份 recognizer，+886 MB（懒加载，云端失败才建） | **0**（不建任何东西） |
+| 段尾之后还要花多久 | 1270 ms（p50，整段重解） | **76 ms**（p50；只有「剩余样本 + 0.8 s 静音 + `finish` + 交接」） |
+| `nemotron_final.py` / `tests/test_nemotron_final.py` | 存在 | **删掉**（没有别的读者） |
+
+### 新增的 seam：`draft_engine.SegmentTail`
+
+```
+tails = draft_engine.SegmentTail()          # main.run() 里一个
+tails.put(tag, text)                        # 草稿线程（partial_worker），段尾 finish 之后
+r = final.transcribe(buf, local=tails.handle(tag))   # 定稿线程（final_worker）
+```
+
+- **有界**：只留最近 `HANDOFF_KEEP = 32` 段（段号单调递增 → 淘汰就是丢掉最小的）。
+  32 段 ≈ 2–4 分钟课，定稿线程只会迟到几秒（云端截止 6 s / 收尾 2 s）。
+- **取不到短等** `HANDOFF_WAIT_S = 0.5 s`，用 `Condition.wait_for`（**不**轮询 `sleep`）。
+  定稿往往比草稿早几毫秒排进队列，等这一下能把同一次段尾对上；超时 = 真没有 → `None`。
+- 空串 / 没段号**不入账**（空草稿不是转录）。取到后**不删**（R5 复核可能问第二次）。
+- 草稿引擎熔断 / 没装模型 / 本段没喂到 → 没有这一条 → 该段**无定稿**，走现有
+  「云端失败」告警路径照实说，不假装有本地兜底。
+- `handle(tag)` 是个**忽略音频**的适配器：音频在这个 seam 里只是段号的载体。段号作为
+  `transcribe(buf, local=…)` 的**每次调用**参数传，不做成实例上的可变字段 ——
+  「哪一段」这件事于是只在一个地方（`main` 的接线处）。
+
+### 三列量具（`scripts/nemotron_final_eval.py`，OCW 322 段）
+
+```
+engine             segs      WER      空段率       S       D       I     单位       p50       p95
+parakeet            322    14.3%     1.2%     5.7%     5.0%     3.6%     ms       368       532
+nemotron-final      322    14.7%     2.5%     5.9%     6.1%     2.7%     ms      1270      1615
+stream-tail         322    14.7%     2.5%     5.9%     6.1%     2.7%   段尾ms       76       152
+
+Nemotron 整段重解码相对 Parakeet: +2.5% → 可以切
+段尾转录相对整段重解码: +0.0% → 块边界没切坏
+```
+
+⚠️ **两个"毫秒"不是一个口径**：前两列是**这一段的全部识别墙钟**，`stream-tail` 只量
+**段尾那一截**（前缀在上课途中早就一块一块解完了，那笔算力本来就要花）。
+所以这不是"快 16 倍"，而是"**段尾只剩这么点活**"。
+`stream-tail` 与 `nemotron-final` 的 WER **逐位相同**（14.7%）—— 同一模型、同一段音频，
+区别只在「逐块喂 + `finish`」vs「一次喂整段」，块边界没切坏任何词。
+
+### 另外改的
+
+- `docs/HANDBOOK.md` §6.1：`CLASSLIVE_DRAFT_ENGINE` 那行改成 `auto` / `off`（D1 之后就已经不对了）。
+- `scripts/test_pipeline.py`：改成走真草稿引擎的 `finish()`（原来调的是已删的 `NemotronFinal`）。
+- `CLAUDE.md` / `ARCHITECTURE.md` 的文件地图与 seam 表同步。

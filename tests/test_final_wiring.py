@@ -163,8 +163,28 @@ class TestWiringShape(unittest.TestCase):
         i_load = SRC.index("final_asr.load_final(")
         self.assertGreater(i_load, i_trans, "allow_cloud 要读 trans[\"mode\"], 必须在它之后装配")
         call = SRC[i_load:i_load + 400]
-        self.assertIn("preload_local=", call)
         self.assertIn("is_stopping=stopping.is_set", call)
+        # ⚠️ 2026-11-20（D1b）：本地兜底是**段尾转录交接处**，所以传给 `load_final` 的是
+        #    `tails`（不是模型目录、也不再 `preload_local`）。
+        self.assertIn("final_asr.load_final(tails,", call)
+        self.assertNotIn("preload_local=", call, "整段重解码的开关已随 `NemotronFinal` 一起删了")
+
+    def test_handoff_is_wired_on_both_threads(self):
+        """⭐⭐ D1b 的三处接线，少一处就等于「有交接处但没人用」：
+
+        ① `main.run` 里建一个 `SegmentTail`；
+        ② **草稿线程**段尾 `finish()` 之后 `put`（这是在去重判据**之前**——屏上不用重放
+           不等于定稿不要这份文本）；
+        ③ **定稿线程**每段 `transcribe(buf, local=tails.handle(_fseg))`。
+        """
+        self.assertIn("tails = draft_engine.SegmentTail()", SRC)
+        self.assertIn("final_asr.load_final(tails,", SRC)
+        i_put = SRC.index("tails.put(_end[1], t)")
+        i_dedup = SRC.index("if t and not (_end[1] == last_gen and t == prev_text):")
+        self.assertLess(i_put, i_dedup, "`put` 被放到去重判据之后了 —— 屏上不重放的那几段会丢定稿")
+        self.assertIn("final.transcribe(buf, local=tails.handle(_fseg))", SRC)
+        # 下课要清掉（别把上一节的段号带到下一节）
+        self.assertIn("tails.clear()", SRC)
 
     def test_note_segment_keywords_match_signature(self):
         sig = inspect.signature(testmode.TestSession.note_segment).parameters
@@ -186,7 +206,8 @@ class TestWiringShape(unittest.TestCase):
         self.assertIn("running.is_set()", m.group(1), "R25: _emit 前要判 running")
 
     def test_final_worker_uses_final_transcribe(self):
-        self.assertIn("final.transcribe(buf)", SRC)
+        # ⚠️ D1b 起定稿那张 `final` 要随每段传 `local=`（段号绑的段尾转录）。
+        self.assertIn("final.transcribe(buf, local=tails.handle(_fseg))", SRC)
 
     # ---- ⭐ S3 说话人（接线形状；行为判据在 `tests/test_speaker_wiring.py`）----
     def test_speaker_labeler_is_built_and_fed(self):

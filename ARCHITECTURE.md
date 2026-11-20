@@ -51,7 +51,7 @@ ClassLive 是一个**跑在作者自己 Mac 上的实时英译中课堂字幕工
 | 层 | 选型 | 说明 |
 |---|---|---|
 | 语言/运行时 | Python 3.12（住在 `ClassLive.app/Contents/` 里） | ⚠️ **2026-09-25 更正**：`requirements.txt` **已有**（v3.4.0 起）；`pyproject.toml` / `setup.py` / `uv.lock` 仍无。⚠️ **2026-09-26 更正**：原写 `uv venv .venv`，那个布局已弃用、目录已删 —— 见下方「入口与启动链」的说明 |
-| ASR | `sherpa-onnx` + **Nemotron Speech Streaming EN 0.6B int8**（2026-11-20 桌面 D1 起是**唯一**本地识别模型：流式出草稿 + 拿整段重新解码当定稿兜底） | CPU; 模型在 `~/models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25`；**可选**，没装就全走云端 |
+| ASR | `sherpa-onnx` + **Nemotron Speech Streaming EN 0.6B int8**（2026-11-20 桌面 D1 起是**唯一**本地识别模型：流式出草稿，**段尾那份假设兼作定稿兜底**；D1b 起不再整段重解码） | CPU; 模型在 `~/models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25`；**可选**，没装就全走云端 |
 | VAD | `sherpa-onnx` + **Silero VAD** | 缺失时回退 `_EnergyVad`(能量阈值) |
 | 本地翻译 | **已删**（原 `mlx-lm` + `Qwen3-1.7B-4bit`，2026-11-20 桌面 D1 移除） | 断网 / 云端连不上 = 那几句没有中文，英文字幕照常 |
 | 云端翻译 | **DeepSeek** OpenAI 兼容接口(`httpx`) | 默认 `deepseek-flash`; 必须显式 `thinking:{type:disabled}` |
@@ -86,6 +86,7 @@ cl → main.run()
         │
         ├─ on_partial  → latest.put(buf)   [_Latest: latest-wins 槽]
         │     └ 草稿线程 partial_worker: draft_engine.transcribe(整段流) → drafts
+        │           └ 段尾 draft.finish() → tails.put(段号, 文本) → 定稿线程 take
         │           └ 节流(≥2.5s 且新增 ≥6 词)→ draftq → 定稿线程 → drafts_zh
         │
         └─ on_utterance_end → finalq
@@ -132,8 +133,8 @@ cl → main.run()
 |---|---|---|
 | `capture.py` | `load_source(source, path, speed) -> src`; src 必须提供 `poll() -> chunk｜None` / `is_done()` / `close()`; 块 = 1600 采样 float32 单声道; poll 非阻塞; **内部已套电平归一化**; 另 `load_file(path)`, `PeakNormalizer.process(chunk)` | **深**。3 个 adapter(mic 的 `CallbackSource`、系统声的 `CallbackSource`、`FileSource`)加一层 `_NormalizedSource` decorator, 全部藏在 3 个方法后面 |
 | `vad.py` | `Segmenter(on_partial, on_utterance_end)`; `accept(chunk)` / `flush()` / `dur`; **回调必须立刻返回**; 隐含语义「什么时候算说完一句」 | **深**。梯级静音阈值 + 12s 硬上限 + 300ms pre-roll + 2 个 VAD adapter 全在身后 |
-| `asr.py` | 现在只剩两个**共用件**（2026-11-20 起识别器类都删了）：`_find_file(dir, patterns)`（按精确名取模型文件）与 `is_degenerate(text)`（复读/幻觉判定） | **浅**。它曾经是「ASR 抽象」，但只有一个真 adapter 时就退化成两个纯函数 —— 识别本身在 `draft_engine.py`（流式）与 `nemotron_final.py`（整段）里 |
-| `nemotron_final.py` | `NemotronFinal(model_dir)`；`transcribe_lp(samples) -> (text, None)`；**懒加载**（第一次调用才建 recognizer）；线程安全 | **深**。「喂整段 + 补尾 + input_finished + 解码」这一串藏在 2 个方法后面，且它自带一份 recognizer（与草稿线程分开） |
+| `asr.py` | 现在只剩两个**共用件**（2026-11-20 起识别器类都删了）：`_find_file(dir, patterns)`（按精确名取模型文件）与 `is_degenerate(text)`（复读/幻觉判定） | **浅**。它曾经是「ASR 抽象」，但只有一个真 adapter 时就退化成两个纯函数 —— 识别本身在 `draft_engine.py`（流式草稿 + 段尾转录交接）里 |
+| `draft_engine.SegmentTail`（同 `draft_engine.py`） | `put(tag, text)`（草稿线程，段尾）／`take(tag, timeout=…)`（定稿线程，取不到短等 ≤0.5 s）／`handle(tag).transcribe_lp(音频)`（`final_asr` 认的形状，**按段号取、忽略音频**） | **深**。「跨线程交接 + 有界 + 短等」全在这三个方法后面；`Condition` 而不是轮询 `sleep`。⚠️ D1 那份 `NemotronFinal`（整段重解码、第二份 recognizer）已删 —— 同一段话草稿线程在段尾早就解完了 |
 | `translator.py` | **只剩纯函数**（2026-11-20 起实例类 `Translator` 已删）: `Result` / `_StreamParser` / `_clean_fix` / `guard_zh_result` + 术语那一组: `load_terms` / `course_term_list` / `course_title` / `core_terms` / `course_terms_path` / `select_terms` / `select_term_zh` / `term_zh_block` / `domain_block` | **混合**。共用件被 `cloud_translator` 与判据 import；术语部分是一组扁平自由函数, 大 interface、薄实现 → **浅** |
 | `cloud_translator.py` | `warmup()` / `fix_and_translate_stream(en, ctx, on_zh, on_en) -> Result` / `fix_stream(en, ctx, on_en) -> str` / `translate_draft(en, on_zh) -> str` / `probe() -> bool`; 模块级 `load_api_key()`。⚠️ 2026-11-20 起它是**唯一**的翻译实现（本地那份删了） | **深**(240 行实现藏在 4 个方法后), 但**契约靠约定维护**, 没有任何地方写下这个 interface |
 | `main.py` | 对外的 interface 只有「命令行参数 + stdout」。内部: `EngineRouter`、`TerminalUI`、`_Latest` 三个 class + `is_incomplete` / `split_sentences` / `all_settled` 三个纯函数 | **run() 是一个 ~380 行、8 个 queue、4 个线程的闭包**。实现极深, interface 却不可调用——测不进流水线 |
@@ -162,7 +163,7 @@ cl → main.run()
 |---|---|---|---|
 | A | **音源** | `capture.load_source()` → `poll()/is_done()/close()` | **真实**(3 个 adapter: mic / 系统声 / 文件) |
 | B | **VAD** | `vad._make_vad()` → `is_speech(chunk)` | **真实**(`SileroVad` + `_EnergyVad`), 但它是**私有** seam, 由 try/except 兜底选出来, 不是设计出来的 |
-| C | **ASR** | `draft_engine.load_draft_engine*()`（流式，永不抛）+ `nemotron_final.NemotronFinal`（整段，永不抛） | **退化成一个 adapter**（2026-11-20 起本地只有 Nemotron）→ 按定义是**假想 seam**；留着是因为两条使用方式（流 vs 整段）确实不同 |
+| C | **ASR** | `draft_engine.load_draft_engine*()`（流式草稿，永不抛）+ `draft_engine.SegmentTail`（段尾转录交接，永不抛） | **退化成一个 adapter**（2026-11-20 起本地只有 Nemotron）→ 按定义是**假想 seam**；留着是因为两条使用方式（每秒一次 vs 段尾一次）确实不同 |
 | D | **翻译引擎** | `fix_and_translate_stream` / `fix_stream` / `translate_draft` / `warmup` | **曾是真实**（mlx 本地 + DeepSeek 云端）；2026-11-20 删掉本地那份后只剩云端一个 adapter → 现在是**假想 seam**，`Main.EngineRouter` 仍在用它的形状（含 `probe()`） |
 | E | **UI** | `main.drain()` 调 `ui.*` | **真实**(`TerminalUI` + `Overlay`), 但契约不成文: `TerminalUI` 没有 `close`(靠 `getattr` 兜), `notice` 是本次 diff 才给 `TerminalUI` 补上的 |
 | F | **LLM / HTTP 调用** | —— | **不存在**。见下 |

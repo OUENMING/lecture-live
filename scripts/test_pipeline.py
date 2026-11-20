@@ -3,34 +3,37 @@
 
 用法: ClassLive.app/Contents/MacOS/python scripts/test_pipeline.py <m4a> [start_s] [dur_s] [speed]
 
-⚠️ 2026-11-20（桌面 D1）：本地识别只剩流式模型 Nemotron、本地翻译引擎已删。
-   所以这条链路现在是「Nemotron 整段解码 → 只出英文」；中文要云端，不在这里试
-   （它是**离线**量具，不许偷偷打云端 API）。
+⚠️ 2026-11-20（桌面 D1/D1b）：本地识别只剩流式模型 Nemotron（草稿 + 段尾转录）、
+   本地翻译引擎已删。所以这条链路现在是「Nemotron 逐块喂 → 段尾 finish → 只出英文」；
+   中文要云端，不在这里试（它是**离线**量具，不许偷偷打云端 API）。
 """
 import sys, time, os
 sys.path.insert(0, ".")
 from capture import load_file, PeakNormalizer, SR
 from vad import Segmenter
-from nemotron_final import NemotronFinal
+import models
+from draft_engine import DraftEngine, NemotronDrafter
 
 path = sys.argv[1]
 start = float(sys.argv[2]) if len(sys.argv) > 2 else 120.0
 dur = float(sys.argv[3]) if len(sys.argv) > 3 else 40.0
 speed = float(sys.argv[4]) if len(sys.argv) > 4 else 3.0
 
-import models
-asr = NemotronFinal(os.path.expanduser(models.path_of("nemotron")))
+# 生产同一个草稿引擎（D1b 起它算出来的**段尾转录**就是云端失败时的定稿）。
+asr = DraftEngine(NemotronDrafter(models.path_of("nemotron")))
+_tag = {"n": 0}
 
 finals = []
 
 def on_partial(buf):
-    t = asr.transcribe(buf)
+    t, _eng = asr.transcribe(buf, _tag["n"])
     if t:
         print(f"[{time.strftime('%H:%M:%S')}] ▸ {t}", flush=True)
 
 def on_utterance_end(buf):
     t0 = time.time()
-    text = asr.transcribe(buf)
+    text = asr.finish(buf, _tag["n"])          # 段尾：剩余样本 + 静音 + input_finished
+    _tag["n"] += 1
     if not text:
         return
     finals.append(text)

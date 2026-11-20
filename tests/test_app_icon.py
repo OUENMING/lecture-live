@@ -78,6 +78,15 @@ def main() -> int:
         msg = app_icon.refresh(app, gen=gen, built=built, run=explode)
         check("意外异常 → 不抛、给一句话", msg.startswith("图标没换成"), msg)
 
+    # 接线：三条更新路（面板立即更新 / 开课前自动装 / 下课退出自动装）都走 `update.finish`
+    import inspect
+    import update
+    src = inspect.getsource(update.finish)
+    check("⭐⭐ update.finish 调 _refresh_icon（不重建 .app 也换图标）", "_refresh_icon(" in src)
+    src2 = inspect.getsource(update._refresh_icon)
+    check("⭐ 路径从 update.HERE 算（测试沙盒里不碰真 .app）",
+          'HERE / "ClassLive.app"' in src2 and 'HERE / "tools" / "make_icon.py"' in src2)
+
     print(f"\n{'OK' if not FAILS else '❌ ' + ', '.join(FAILS)}")
     return 1 if FAILS else 0
 

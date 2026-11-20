@@ -377,6 +377,101 @@ class Wiring(unittest.TestCase):
 
 
 
+class Handoff(unittest.TestCase):
+    """⭐ D1b：**段尾转录交接处** —— 草稿线程放、定稿线程取。
+
+    它替代了 D1 的「拿整段重新解码」（`nemotron_final.NemotronFinal`，已删）：
+    同一段话草稿线程在段尾那一刻就解完了，再解一遍纯属重复劳动（多 886 MB、慢 3.4 倍）。
+    """
+
+    def test_put_then_take_same_segment(self):
+        t = de.SegmentTail()
+        t.put(7, "hello there")
+        self.assertEqual(t.take(7), "hello there")
+        self.assertEqual((t.puts, t.hits, t.misses), (1, 1, 0))
+
+    def test_empty_text_is_not_a_transcript(self):
+        t = de.SegmentTail()
+        t.put(3, "")                                  # 没喂到 / 熔断 → 空串
+        t.put(4, None)
+        t.put(None, "x")
+        self.assertEqual(t.puts, 0, "空串 / 没段号被当成转录入账了")
+        self.assertIsNone(t.take(3, timeout=0))
+
+    def test_take_waits_for_a_late_put(self):
+        """定稿往往比草稿早几毫秒排进队列 —— 短等一次能把「同一次段尾」对上。"""
+        import threading
+        import time
+        t = de.SegmentTail(wait_s=0.5)
+        th = threading.Thread(target=lambda: (time.sleep(0.05), t.put(5, "late")))
+        th.start()
+        got = t.take(5)                               # 默认用构造时的 wait_s
+        th.join(2)
+        self.assertEqual(got, "late", "短等没等到后到的 put")
+
+    def test_take_gives_up_and_says_miss(self):
+        import time
+        t = de.SegmentTail(wait_s=0.05)
+        t0 = time.monotonic()
+        self.assertIsNone(t.take(9))
+        dt = time.monotonic() - t0
+        self.assertLess(dt, 0.35, f"等了 {dt:.2f}s —— 不许拖慢定稿")
+        self.assertEqual(t.misses, 1)
+
+    def test_keep_is_bounded(self):
+        """段号单调递增 → 「只留最近 N 段」就是丢掉最小的那些。"""
+        t = de.SegmentTail(keep=3)
+        for i in range(6):
+            t.put(i, f"t{i}")
+        self.assertEqual(sorted(t._tails), [3, 4, 5], "有界没生效（内存会随课时长涨）")
+        self.assertIsNone(t.take(0, timeout=0), "最老的段不该还在")
+
+    def test_survives_concurrent_put_take(self):
+        import threading
+        # ⚠️ `keep` 必须 >= 总段数：否则生产者一口气放完 200 段，最老的那些**先被淘汰**，
+        #    消费者再来等就是「段号已过期」——那是淘汰该有的行为，不是并发串了。
+        #    （第一版写成 keep=64 就在这儿假红过一次。）
+        t = de.SegmentTail(keep=256, wait_s=0.5)
+        bad: list = []
+
+        def producer():
+            for i in range(200):
+                t.put(i, f"t{i}")
+
+        def consumer():
+            for i in range(200):
+                got = t.take(i)
+                if got != f"t{i}":
+                    bad.append((i, got))
+
+        ths = [threading.Thread(target=producer), threading.Thread(target=consumer)]
+        [x.start() for x in ths]
+        [x.join(5) for x in ths]
+        self.assertEqual(bad[:3], [], f"并发下丢了/取错了：{bad[:3]}")
+
+    def test_clear(self):
+        t = de.SegmentTail()
+        t.put(1, "a")
+        t.clear()
+        self.assertIsNone(t.take(1, timeout=0))
+
+    def test_handle_pins_the_segment_and_ignores_audio(self):
+        """`final_asr` 认的形状：`handle(tag).transcribe_lp(音频)` —— **按段号取，忽略音频**。"""
+        t = de.SegmentTail()
+        t.put(12, "that segment")
+        h = t.handle(12)
+        self.assertEqual(h.transcribe_lp(buf(99999)), ("that segment", None))
+        self.assertEqual(h.transcribe(buf(1)), "that segment")
+        # 没这一段 → 空（调用方据此走「这一段没有定稿」那条告警路径）
+        self.assertEqual(t.handle(13).transcribe_lp(buf(1600)), ("", None))
+        # 不知道段号 → 永远给空，别猜
+        self.assertEqual(t.handle(None).transcribe_lp(buf(1600)), ("", None))
+
+    def test_never_raises(self):
+        t = de.SegmentTail()
+        t.put(1, "x")
+        self.assertIsNotNone(t.take(1))
+
 class LatestEnd(unittest.TestCase):
     """`main._Latest.put_end`：段尾那份**不被后来的逐秒缓冲顶掉**，并叫醒等着的 `take()`。"""
 

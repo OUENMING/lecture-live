@@ -8,7 +8,7 @@
 | 模型 | 原来写在哪 |
 |---|---|
 | VAD | 这里 · **`vad.py` 的 `VAD_MODEL` 常量** · `testmode.py` |
-| Nemotron | 这里 · `main.py` 的 `--model-dir` 默认值 · `final_asr` / `nemotron_final.py` |
+| Nemotron | 这里 · `main.py` 的 `--model-dir` 默认值 · `draft_engine.py`（草稿 + 段尾转录） |
 
 现在所有消费者都从这里读。
 
@@ -98,7 +98,7 @@ VAD = Model(
     _fetch_cmd("vad"),
     0.61, src=VAD_URL)
 
-#: 本地**唯一**的识别模型（2026-11-20 桌面 D1）：流式（草稿）+ 整段重新解码（云端失败时的定稿兜底）。
+#: 本地**唯一**的识别模型（2026-11-20 桌面 D1/D1b）：流式出草稿，**段尾那份假设兼作定稿兜底**。
 #:
 #: ⚠️ **仍是可选**（`required=False`，Owen 2026-11-20 改口）：没装也能正常上课 —— 全走云端；
 #:    装了才有「断网 / 云端识别失败时仍有英文转录」。`doctor` / 就绪条 / 更新卡片按

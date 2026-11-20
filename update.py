@@ -1756,10 +1756,9 @@ def spawn_auto_update() -> bool:
 def spawn_draft_model_download() -> bool:
     """在**独立的后台进程**里下那个可选的流式草稿模型（464 MB）。父进程立刻返回。
 
-    ⚠️ 时机（Owen 2026-10-12 定，按我的建议）：**只在下课之后 / 关掉面板之后**开，
-       **绝不在上课途中** —— 464 MB 会和云端定稿的音频上传抢同一条教室 Wi-Fi，
-       而那正好压在最不该压的时刻。两个调用点就是这两处（`main._draft_model_on_exit`
-       与 `entry_launch` 关面板那条）。
+    ⚠️ 2026-11-20 起**没有自动调用点**（Owen 选 B：可选模型只在用户点「现在下载」时下）。
+       原来下课退出 / 关面板两处会静默调它，已删；函数留着给以后显式「后台下」用，
+       **别在上课途中调** —— 464 MB 会和云端定稿的音频上传抢同一条教室 Wi-Fi。
     ⚠️ `start_new_session=True`：用户下一句就退出程序，它照样下完 ——
        与 `spawn_auto_update` 同一条纪律（实测：父进程 `os._exit` / SIGKILL /
        SIGHUP 打整个进程组，三种死法它都活到了最后）。
@@ -2280,8 +2279,9 @@ def _finish_in_child(*, models: bool, on_line=None, timeout: float | None = None
 def finish(*, models: bool, say=print) -> int:
     """`update.py --finish [--no-models]`：把该补的补齐（依赖；`models=True` 时再加必下模型）。
 
-    `.app` 重建与可选模型（Nemotron / Qwen3）**不在这里**：前者不能在 `.app` 里的 python 正在跑时做，
-    后者要用户自己点。最后一行是 `FINISH ok` / `FINISH fail <原因>`（给 `_finish_in_child` 读）。
+    `.app` 重建与可选模型（Nemotron）**不在这里**：前者不能在 `.app` 里的 python 正在跑时做，
+    后者要用户自己点。⭐ 但**图标**在这里单独换（`_refresh_icon`，2026-11-20）——
+    不然图标改动只有终端 `cl update` 才生效。最后一行是 `FINISH ok` / `FINISH fail <原因>`（给 `_finish_in_child` 读）。
     """
     keys = ("deps", "models") if models else ("deps",)
     for s in pending_steps():
@@ -2292,8 +2292,25 @@ def finish(*, models: bool, say=print) -> int:
         if not r["ok"]:
             say(f"FINISH fail {s['label']}没成：{r['error']}")
             return 1
+    _refresh_icon(say)
     say("FINISH ok")
     return 0
+
+
+def _refresh_icon(say=print) -> None:
+    """图标生成器变了就单独换图标（不重建 .app；`app_icon.py` 文件头）。软失败：一句话、不影响更新结果。
+
+    ⚠️ 路径一律从 `HERE` 算（测试把 `HERE` 指到沙盒 clone —— 那里没有 `.app`，于是什么都不碰）。
+    """
+    try:
+        import app_icon
+        msg = app_icon.refresh(HERE / "ClassLive.app", gen=HERE / "tools" / "make_icon.py",
+                               built=HERE / "assets" / "icon" / "ClassLive.icns")
+        if msg:
+            say(msg)
+            _log(msg)
+    except Exception as e:                                # noqa: BLE001
+        _log(f"图标没换成：{type(e).__name__}: {e}")
 
 
 def offer() -> dict:

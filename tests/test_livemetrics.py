@@ -469,5 +469,47 @@ class TermZhN(unittest.TestCase):
         self.assertNotIn("term_zh_n", _lines(p)[-2])
 
 
+class SpeakerFields(unittest.TestCase):
+    """⭐ S3：`final(speaker=…, speaker_label=…)` —— 给了就落盘、空串就不写那个键。
+
+    为什么要两把尺子：`speaker` 是 Soniox 原始编号（课后对真值）、`speaker_label` 是屏上字母。
+    主讲拿到的字母是 `""` 但编号仍在 —— 两个键各写各的，不能捆在一起判。
+    """
+
+    def test_both_written_when_given(self):
+        log, p = _mk_log()
+        log.final("hello", "你好", "hello", speaker="2", speaker_label="B")
+        log.close()
+        rec = _lines(p)[-2]
+        self.assertEqual((rec["speaker"], rec["speaker_label"]), ("2", "B"))
+
+    def test_main_speaker_keeps_the_raw_id_only(self):
+        # 主讲不标字母，但原始编号要留下（否则课后分不出“主讲说的”与“没开分离”）
+        log, p = _mk_log()
+        log.final("hello", "你好", "hello", speaker="1", speaker_label="")
+        log.close()
+        rec = _lines(p)[-2]
+        self.assertEqual(rec["speaker"], "1")
+        self.assertNotIn("speaker_label", rec)
+
+    def test_absent_by_default(self):
+        log, p = _mk_log()
+        log.final("hello", "你好", "hello")
+        log.close()
+        rec = _lines(p)[-2]
+        self.assertNotIn("speaker", rec)
+        self.assertNotIn("speaker_label", rec)
+
+    def test_does_not_disturb_the_existing_keys(self):
+        # 加了两个键，老读端看到的其余字段一个不少
+        log, p = _mk_log()
+        log.final("hello", "你好", "hello", seg=2, speaker="2", speaker_label="C")
+        log.close()
+        rec = _lines(p)[-2]
+        for k in ("kind", "utt", "seg", "text", "zh", "raw", "n_draft", "t"):
+            self.assertIn(k, rec)
+        self.assertEqual(rec["seg"], 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

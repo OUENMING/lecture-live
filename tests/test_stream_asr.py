@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import queue
+import random
 import re
 import sys
 import tempfile
@@ -618,6 +619,156 @@ def t_core_en_seal_unchanged_with_lang() -> None:
     assert [o[3] for o in outs[1]] == ["en", "en", "en"], outs
     assert StreamCore(clock=lambda: 0.0)._final == []
     assert stream_asr.parse_tokens([{"text": "好", "start_ms": 0, "end_ms": 1, "language": "zh"}])[0].lang == "zh"
+
+
+def t_speaker_parse_with_and_without() -> None:
+    """S2：`parse_tokens` 读 Soniox 的 `speaker`；没有 / 非字符串 → `""`。"""
+    toks = stream_asr.parse_tokens([
+        {"text": "Hi", "start_ms": 0, "end_ms": 100, "speaker": "1"},
+        {"text": " there", "start_ms": 100, "end_ms": 200},
+        {"text": "!", "start_ms": 200, "end_ms": 250, "speaker": 2},
+        {"text": ".", "start_ms": 250, "end_ms": 300, "speaker": None},
+    ])
+    assert [t.speaker for t in toks] == ["1", "", "", ""], toks
+    assert [t.text for t in toks] == ["Hi", " there", "!", "."], toks
+    # 位置兼容：老的四 / 五个位置参数照旧能用，`speaker` 默认空
+    assert Tok("x", 0, 1, True, "en").speaker == ""
+    assert Tok("x", 0, 1).speaker == "" and Sealed("x", 0.0, 1.0).speaker == ""
+
+
+def _ref_speaker(toks: list[Tok]) -> str:
+    """参考实现（与 `_sent_speaker` **写法故意不同**：用字符串计数表而非 Counter）。"""
+    score: dict[str, int] = {}
+    order: list[str] = []
+    for tk in toks:
+        if tk.speaker and tk.text.split():
+            if tk.speaker not in score:
+                score[tk.speaker] = 0
+                order.append(tk.speaker)
+            score[tk.speaker] += len(tk.text.split())
+    live = [k for k in order if score[k] > 0]
+    return max(live, key=lambda k: (score[k], -order.index(k))) if live else ""
+
+
+def t_speaker_sent_majority_and_tie() -> None:
+    """S2：`_sent_speaker` 按**词数**取多数；并列取先出现的；全没有 → `""`。
+
+    除了例句，还跑一条性质：结果一定等于「词数最多、并列最先出现」那个的参考实现
+    （随机 200 组，含纯标点 / 空标签 / 汉字 token）。
+    """
+    def T(text: str, sp: str) -> Tok:
+        return Tok(text, 0, 100, True, "", sp)
+
+    sent = stream_asr._sent_speaker
+    # 词数多数："1" 五个词 vs "2" 一个词
+    assert sent([T(" Yeah", "1"), T(" We", "1"), T(" will", "1"), T(" now", "1"),
+                 T(" okay", "2"), T(" so", "1"), T(" what", "1")]) == "1"
+    assert sent([T(" Yeah", "1"), T(" one", "2"), T(" two", "2"), T(" three", "2")]) == "2"
+    # 汉字 token 算 1 个词（不是按字符 / 不算 0）
+    assert sent([T("好", "1"), T("我", "2"), T("们", "2")]) == "2"
+    # 并列取先出现的（两种顺序的答案不同 → 真的按先出现）
+    assert sent([T(" a", "2"), T(" b", "1")]) == "2"
+    assert sent([T(" a", "1"), T(" b", "2")]) == "1"
+    # 空 / 纯标点不投票
+    assert sent([T(" Hello", "1"), T(".", "")]) == "1"
+    assert sent([T(" Hello", ""), T(".", "")]) == ""
+    assert sent([]) == ""
+    # 性质：结果 ∈ {""} ∪ {非空 speaker}，且 = 按（词数, 先出现）算出的参考值
+    rnd = random.Random(20261118)
+    words = [" a", " b", " c", " 两个词", "。", ""]
+    for _ in range(200):
+        toks = [T(rnd.choice(words), rnd.choice(["", "1", "2", "3"]))
+                for _ in range(rnd.randrange(0, 7))]
+        assert sent(toks) == _ref_speaker(toks), (toks, sent(toks))
+    # 封口句带上去
+    core = StreamCore(clock=lambda: 0.0, stable_s=0.3)
+    core.feed([Tok(" Hi", 0, 100, True, "", "1"), Tok(".", 100, 150, True, "", "1")], [])
+    got = core.take_sentences()
+    assert got == [Sealed(" Hi.", 0.0, 0.15, "", "1")], got
+
+
+def t_speaker_split_on_change() -> None:
+    """S2：相邻两 final speaker 不同 → 在新人第一个 token 前封一句（没标点也切）。"""
+    core = StreamCore(clock=lambda: 0.0, stable_s=0.3)
+    core.feed([Tok(" Explain", 0, 100, True, "", "1"),
+               Tok(" the", 100, 200, True, "", "1"),
+               Tok(" slope", 200, 300, True, "", "1"),
+               Tok(" sorry", 300, 400, True, "", "2")], [])
+    got = core.take_sentences()
+    assert [x.text for x in got] == [" Explain the slope"], got
+    assert got[0].speaker == "1", got
+    assert core.draft_text() == " sorry", core.draft_text()
+    # 接话的人说完 → 封他自己那句，speaker 跟着换
+    core.feed([Tok(" what", 400, 500, True, "", "2"), Tok("?", 500, 550, True, "", "2")], [])
+    got = core.take_sentences()
+    assert [x.text for x in got] == [" sorry what?"], got
+    assert got[0].speaker == "2", got
+    # 换人断句走的是水位线：同一条句子的 non-final 快照不许把封过的词带回来
+    core.feed([], [Tok(" Explain", 0, 100, False, "", "1"),
+                   Tok(" the", 100, 200, False, "", "1"),
+                   Tok(" slope", 200, 300, False, "", "1"),
+                   Tok(" sorry", 300, 400, False, "", "2")])
+    assert core.draft_text() == "", core.draft_text()
+    assert core.take_sentences() == [], "封过的词不许再封一遍"
+
+
+def t_speaker_split_ignores_nonfinal_and_empty() -> None:
+    """S2：non-final 里的临时换人不切；空 speaker 不算换人。"""
+    core = StreamCore(clock=lambda: 0.0, stable_s=0.3)
+    core.feed([Tok(" Hello", 0, 100, True, "", "1"), Tok(" world", 100, 200, True, "", "1")], [])
+    core.feed([], [Tok(" and", 200, 300, False, "", "2")])
+    assert core.take_sentences() == [], "non-final 换人不许切句"
+    assert core.draft_text() == " Hello world and", core.draft_text()
+    # 上一个 final 没标签 → 不算换人
+    core.feed([Tok(" and", 200, 300, True, "", ""), Tok(" more", 300, 400, True, "", "2")], [])
+    assert core.take_sentences() == [], "空 speaker 不算换人"
+    assert core.draft_text() == " Hello world and more", core.draft_text()
+    # 同一个说话人内部不切
+    core.feed([Tok(" still", 400, 500, True, "", "2"), Tok(" same", 500, 600, True, "", "2")], [])
+    assert core.take_sentences() == [], core.take_sentences()
+
+
+def t_speaker_off_is_byte_identical() -> None:
+    """S2：`SPLIT_ON_SPEAKER = False` 时切句行为与加说话人之前逐字相同（不切）。
+
+    同一串 token（带 speaker）在开关开 / 关下的对比：关掉时只剩一句（到句号为止）。
+    """
+    def run() -> list[tuple[str, float, float]]:
+        core = StreamCore(clock=lambda: 0.0, stable_s=0.3)
+        t = 0
+        for x, sp in ((" Explain", "1"), (" it", "1"), (" sorry", "2"),
+                      (" what", "2"), ("?", "2")):
+            core.feed([Tok(x, t, t + 100, True, "", sp)], [])
+            t += 100
+        return [(s.text, s.start_s, s.end_s) for s in core.take_sentences()]
+
+    on = run()
+    with mock.patch.object(stream_asr, "SPLIT_ON_SPEAKER", False):
+        off = run()
+    assert on == [(" Explain it", 0.0, 0.2), (" sorry what?", 0.2, 0.5)], on
+    assert off == [(" Explain it sorry what?", 0.0, 0.5)], off   # 只有句号切，换人不切
+
+
+def t_speaker_config_switch() -> None:
+    """S2：`DIARIZE` 开 → config 带 `enable_speaker_diarization`；关 → 整个键都不出现。"""
+    son = FakeSoniox()
+    wk = FakeWorker(son.url)
+    s = make_asr(wk, son)
+    try:
+        cfg = s._config()
+        assert cfg["enable_speaker_diarization"] is True, cfg
+        assert cfg["enable_endpoint_detection"] is True, cfg
+        assert cfg["enable_language_identification"] is True, cfg
+        assert cfg["language_hints"] == ["en"], cfg
+        with mock.patch.object(stream_asr, "DIARIZE", False):
+            off = s._config()
+        assert "enable_speaker_diarization" not in off, off
+        assert off == {k: v for k, v in cfg.items()
+                       if k != "enable_speaker_diarization"}, off
+    finally:
+        s.stop()
+        son.close()
+        wk.close()
 
 
 def t_core_seal_open() -> None:
@@ -2082,6 +2233,12 @@ def main() -> int:
         ("core: 中文全角句末封口 + lang（L-1）", t_core_zh_fullwidth_seal_lang),
         ("core: 英文封口不变（L-1）", t_core_en_seal_unchanged_with_lang),
         ("core: 手动收口 seal_open（11-09）", t_core_seal_open),
+        ("core: 说话人 parse（S2）", t_speaker_parse_with_and_without),
+        ("core: 句说话人多数 / 并列 / 性质（S2）", t_speaker_sent_majority_and_tie),
+        ("core: 换人断句（S2）", t_speaker_split_on_change),
+        ("core: non-final / 空 speaker 不切（S2）", t_speaker_split_ignores_nonfinal_and_empty),
+        ("core: 开关关掉逐字相同（S2）", t_speaker_off_is_byte_identical),
+        ("transport: config 开关说话人分离（S2）", t_speaker_config_switch),
         ("transport: 有待封口 token → 定期 finalize（11-09）", t_finalize_sent_when_pending),
         ("transport: 无待封口 token 也重置 finalize 计时（11-09）", t_finalize_timer_not_stale_after_silence),
         ("transport: <fin> 强制封口半句（11-09）", t_fin_seals_open_sentence),

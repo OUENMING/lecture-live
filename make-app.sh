@@ -523,6 +523,8 @@ _icon_out="$("$APP/Contents/MacOS/python" "$HERE/tools/make_icon.py" 2>&1)" \
 $_icon_out"
 cp "$HERE/assets/icon/ClassLive.icns" "$RES/AppIcon.icns"
 say "   Resources/AppIcon.icns  $(du -h "$RES/AppIcon.icns" | cut -f1)"
+# 戳记 = 生成器的 sha256：不重建 .app 的更新路径靠它判断要不要单独换图标（`app_icon.py`）。
+shasum -a 256 "$HERE/tools/make_icon.py" | cut -d' ' -f1 > "$RES/.icon-stamp"
 # ⚠️ LaunchServices 会**缓存**图标。换完之后不碰 .app 的话，Finder/Dock 上可能
 #    还显示旧图标（甚至系统通用图标），让人以为没生效。touch 一下逼它重读。
 touch "$APP"

@@ -1425,7 +1425,18 @@ def habits(post=None) -> dict:
     return out
 
 
-SLOW = {"habits": habits, "cf": cf_summary, "r2": r2_ingest, "health": cf_health, "logs": worker_logs, "ae": ae_events,
+def web_sessions() -> dict:
+    """网页版每节课一行（近 2 天）：构建号 / 浏览器 / 时区 / 下课总账 / 异常计数。见 `cl_web_data.sessions_summary`。"""
+    import cl_web_data
+    return cl_web_data.sessions_summary(2)
+
+
+def runner_state() -> dict:
+    """笔记 / 实时总结任务队列：各状态计数、最近 100 条任务、正在上的课（Worker `/v1/admin/runner/state`）。"""
+    return cl_admin.admin_post("runner/state", {"limit": 100})
+
+
+SLOW = {"web": web_sessions, "runner": runner_state, "habits": habits, "cf": cf_summary, "r2": r2_ingest, "health": cf_health, "logs": worker_logs, "ae": ae_events,
         "ae310": ae_310, "reports": r2_reports, "soniox": soniox_account, "openrouter": openrouter_account}
 FRESH_S = 55                                                          # 这么新：直接给
 STALE_S = 15 * 60                                                     # 这么旧以内：先给旧的，后台重取；再旧就同步等
@@ -1558,6 +1569,17 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(b, dict):
                 return self._json(400, {"error": "body 要是对象"})
             return self._json(200, r2_raw(b.get("id"), str(b.get("what") or "report.json")))
+        if name == "websession":                                      # 一节网页课的全部事件（先有 web 那张卡才有缓存）
+            raw = self.rfile.read(int(self.headers.get("content-length") or 0))
+            try:
+                b = json.loads(raw or b"{}")
+                who, sid = str(b["name"]), str(b["session"])
+            except (ValueError, KeyError, TypeError):
+                return self._json(400, {"error": "要 {name, session}"})
+            if not (re.fullmatch(r"[a-z0-9]{1,16}", who) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sid)):
+                return self._json(400, {"error": "name / session 形状不对"})
+            import cl_web_data
+            return self._json(200, cl_web_data.session_detail(who, sid))
         if name == "cfwin":                                           # 某一段时间的 Worker 延迟（抽屉里每个时段一行）
             raw = self.rfile.read(int(self.headers.get("content-length") or 0))
             try:

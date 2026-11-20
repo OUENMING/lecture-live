@@ -1,7 +1,8 @@
 <script lang="ts">
 	// 课后页：这节课的双语字幕（从本机 IndexedDB 读）+ 下载 + 起名。`?session=` 指定一节；不给就列出本机存着的课。
 	// 默认深色（和上课页同一个面，Owen 2026-11-19），可切亮色。课名可以下课再起：起名时把这节用过的术语并进那门课。
-	// 课后 AI 笔记要服务端跑（PLAN B 片），这一版先把字幕完整交到用户手里。
+	// 课后 AI 笔记由服务端 runner 跑：下课后轮询会话状态，出了就在「笔记」页里读（sandbox iframe）；
+	// 没出之前先给这节课的实时总结（服务端每 20 s 写的那份章节）垫着。服务端会话号存在 `cl.srv.<本机会话 id>`。
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import SiteHeader from '#lib/ui/SiteHeader.svelte';
@@ -10,6 +11,11 @@
 	import { api } from '#lib/api/index.ts';
 	import { renameCourse, retryPendingRenames, COURSE_MAX } from '#lib/after/rename.ts';
 	import { downloadMarkdown, downloadText } from '#lib/after/export.ts';
+	import { ApiError, type LiveSummary } from '#lib/api/index.ts';
+	import { pollEvery } from '#lib/summary/poll.ts';
+	import { portableNote } from '#lib/after/note-frame.ts';
+	import ChapterList from '#lib/ui/ChapterList.svelte';
+	import NoteFrame from '#lib/ui/NoteFrame.svelte';
 
 	let store = $state<LineStore | null>(null);
 	let sessions = $state<SessionMeta[]>([]);
@@ -123,6 +129,127 @@
 
 	const downloadMd = () => downloadMarkdown(meta, lines, marked);
 	const downloadTxt = () => downloadText(meta, lines);
+
+	// ---- 课后笔记 ----
+	/** none = 没传到服务器；waiting = 服务器还没开始写（含下课还没送达）；writing = 正在写 */
+	type NoteStatus = 'loading' | 'none' | 'waiting' | 'writing' | 'done' | 'failed' | 'missing' | 'gone';
+	const srvOf = (local: string): string | null => {
+		try {
+			const v = localStorage.getItem(`cl.srv.${local}`);
+			return v && /^s_[0-9a-f]{12}$/.test(v) ? v : null;
+		} catch {
+			return null;
+		}
+	};
+	const serverId = $derived(meta ? srvOf(meta.session_id) : null);
+	const hasMeta = $derived(!!meta);
+	let noteStatus = $state<NoteStatus>('loading');
+	let noteHtml = $state('');
+	let noteExpires = $state<number | null>(null);
+	let noteSummary = $state<LiveSummary | null>(null);
+	let noteError = $state('');
+	let view = $state<'note' | 'lines'>('note');
+	/** 用户自己点过「字幕」就别再替他切回来 */
+	let viewPicked = false;
+	function pickView(v: 'note' | 'lines') {
+		view = v;
+		viewPicked = true;
+	}
+	function viewKey(e: KeyboardEvent) {
+		if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+		e.preventDefault();
+		const next = view === 'note' ? 'lines' : 'note';
+		pickView(next);
+		(e.currentTarget as HTMLElement).querySelector<HTMLElement>(`[data-view="${next}"]`)?.focus();
+	}
+
+	interface NotePoll {
+		status: NoteStatus;
+		html?: string;
+		expires?: number | null;
+		summary?: LiveSummary | null;
+	}
+	$effect(() => {
+		const id = serverId;
+		noteHtml = '';
+		noteSummary = null;
+		noteError = '';
+		noteExpires = null;
+		if (!hasMeta) return;
+		if (!id) {
+			noteStatus = 'none';
+			if (!viewPicked) view = 'lines';
+			return;
+		}
+		noteStatus = 'loading';
+		let htmlFetched = false;
+		const p = pollEvery<NotePoll>({
+			everyMs: 10_000,
+			maxMs: 60_000,
+			load: async () => {
+				try {
+					const s = await api.getSession(id);
+					const n = s.note;
+					const expires = n?.expires_at ? Date.parse(n.expires_at) || null : null;
+					if (n?.state === 'done' && !htmlFetched) {
+						const html = await api.getNote(id, 'html');
+						// 账本说 done、对象还没到 R2（极短的窗口）：当作还在写，下轮再取
+						if (!html) return { value: { status: 'writing', expires } };
+						htmlFetched = true;
+						return { value: { status: 'done', html, expires }, done: true };
+					}
+					const summary = await api.getSummary(id).catch(() => null);
+					if (n?.state === 'failed') return { value: { status: 'failed', summary, expires }, done: true };
+					return { value: { status: n?.state === 'running' ? 'writing' : 'waiting', summary, expires } };
+				} catch (e) {
+					if (e instanceof ApiError && e.kind === 'not_found') return { value: { status: 'missing' }, done: true };
+					if (e instanceof ApiError && e.kind === 'gone') return { value: { status: 'gone' }, done: true };
+					throw e;
+				}
+			},
+			onchange: (st) => {
+				noteError = st.error;
+				const v = st.value;
+				// 一次都没拿到就失败（断网）：别一直转圈，按「还没出」说，底下再挂一句连不上
+				if (!v) {
+					if (st.error && noteStatus === 'loading') noteStatus = 'waiting';
+					return;
+				}
+				noteStatus = v.status;
+				if (v.html) noteHtml = v.html;
+				if (v.expires !== undefined) noteExpires = v.expires;
+				if (v.summary) noteSummary = v.summary;
+			}
+		});
+		return () => p.stop();
+	});
+	const keepUntil = $derived(
+		noteExpires ? new Date(noteExpires).toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' }) : ''
+	);
+	const noteName = $derived(`${courseLabel(meta?.course ?? '')} ${meta ? new Date(meta.started_at).toLocaleDateString('sv-SE') : ''} 笔记`.trim());
+	function saveBlob(text: string, type: string, ext: string) {
+		const url = URL.createObjectURL(new Blob([text], { type }));
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = `${noteName.replace(/[\\/:*?"<>|]+/g, '-')}.${ext}`;
+		a.click();
+		setTimeout(() => URL.revokeObjectURL(url), 1000);
+	}
+	let mdBusy = $state(false);
+	async function downloadNoteMd() {
+		if (!serverId || mdBusy) return;
+		mdBusy = true;
+		try {
+			const md = await api.getNote(serverId, 'md');
+			if (md) saveBlob(md, 'text/markdown;charset=utf-8', 'md');
+		} catch (e) {
+			noteError = e instanceof Error ? e.message : String(e);
+		} finally {
+			mdBusy = false;
+		}
+	}
+	const downloadNoteHtml = () => noteHtml && saveBlob(portableNote(noteHtml), 'text/html;charset=utf-8', 'html');
+	const noteWorking = $derived(noteStatus === 'loading' || noteStatus === 'waiting' || noteStatus === 'writing');
 </script>
 
 <svelte:head><title>{meta ? `${courseLabel(meta.course)} · 课后` : '我的课'} · ClassLive</title></svelte:head>
@@ -189,17 +316,99 @@
 					{#if !unnamed && !naming}· <button class="link" type="button" onclick={startNaming}>改名</button>{/if}
 				</p>
 				{#if nameNote}<p class="hint" role="status">{nameNote}</p>{/if}
-				<div class="actions">
-					<button class="btn primary" type="button" onclick={downloadMd} disabled={lines.length === 0}>下载 Markdown</button>
-					<button class="btn" type="button" onclick={downloadTxt} disabled={lines.length === 0}>下载纯文本</button>
-					<a class="btn quiet" href="/">再上一节</a>
-				</div>
 				<p class="hint">
-					{#if justSaved}下课时已经下载了一份 Markdown，在「下载」文件夹。{/if}字幕存在这台电脑，也同步到服务器存 30 天。课后 AI 笔记网页版还在做。
+					{#if justSaved}下课时已经把字幕下载了一份 Markdown，在「下载」文件夹。{/if}字幕存在这台电脑；{serverId
+						? `字幕和笔记也存在服务器上${keepUntil ? `，保留到 ${keepUntil}` : ' 30 天'}。`
+						: '这节没传到服务器。'}
 				</p>
 			</header>
 
-			<div class="body" class:has-marks={markedLines.length > 0}>
+			<div class="viewbar">
+				<div
+					class="views"
+					role="tablist"
+					aria-label="看哪一样"
+					tabindex="-1"
+					style:--i={view === 'note' ? 0 : 1}
+					onkeydown={viewKey}
+				>
+					<span class="thumb" aria-hidden="true"></span>
+					<button
+						type="button"
+						role="tab"
+						id="tab-note"
+						data-view="note"
+						aria-controls="panel-note"
+						aria-selected={view === 'note'}
+						tabindex={view === 'note' ? 0 : -1}
+						onclick={() => pickView('note')}
+						>笔记{#if noteWorking && serverId}<span class="busy" aria-label="正在写"></span>{/if}</button
+					>
+					<button
+						type="button"
+						role="tab"
+						id="tab-lines"
+						data-view="lines"
+						aria-controls="panel-lines"
+						aria-selected={view === 'lines'}
+						tabindex={view === 'lines' ? 0 : -1}
+						onclick={() => pickView('lines')}>字幕<span class="n">{lines.length}</span></button
+					>
+				</div>
+				<div class="actions">
+					{#if view === 'note'}
+						{#if noteStatus === 'done'}
+							<button class="btn" type="button" onclick={downloadNoteHtml}>下载笔记</button>
+							<button class="btn quiet" type="button" onclick={downloadNoteMd} disabled={mdBusy}>{mdBusy ? '正在取…' : 'Markdown'}</button>
+						{/if}
+					{:else}
+						<button class="btn" type="button" onclick={downloadMd} disabled={lines.length === 0}>下载字幕</button>
+						<button class="btn quiet" type="button" onclick={downloadTxt} disabled={lines.length === 0}>纯文本</button>
+					{/if}
+					<a class="btn quiet" href="/">再上一节</a>
+				</div>
+			</div>
+
+			<div class="panel-note" id="panel-note" role="tabpanel" aria-labelledby="tab-note" hidden={view !== 'note'}>
+				{#if noteStatus === 'done' && noteHtml}
+					<NoteFrame html={noteHtml} dark={theme === 'dark'} title={noteName} />
+				{:else if noteStatus === 'none' || noteStatus === 'missing' || noteStatus === 'gone'}
+					<div class="state">
+						<h2>{noteStatus === 'gone' ? '这节课在服务器上已经删除' : '这节课没有笔记'}</h2>
+						<p class="muted">
+							{noteStatus === 'gone'
+								? '笔记跟着服务器上的数据一起删了。字幕还在这台电脑上。'
+								: noteStatus === 'missing'
+									? '服务器上找不到这节课，多半是换过通行码。字幕还在这台电脑上，可以下载。'
+									: '笔记要服务器整理，这节课没传上去（开课时网络不通，或这个浏览器不让存）。字幕都在这台电脑上，可以下载。'}
+						</p>
+						<div class="state-actions"><button class="btn" type="button" onclick={() => pickView('lines')}>看字幕</button></div>
+					</div>
+				{:else if noteStatus === 'failed'}
+					<div class="state">
+						<h2>笔记没写成</h2>
+						<p class="muted">服务器整理这节课时出错了。字幕都在，可以下载；{noteSummary?.chapters.length ? '下面是课上的实时总结。' : ''}</p>
+					</div>
+				{:else}
+					<div class="state writing" aria-live="polite">
+						<div class="track" aria-hidden="true"><span></span></div>
+						<h2>{noteStatus === 'writing' ? '笔记正在写' : noteStatus === 'loading' ? '正在问服务器…' : '笔记排上队了'}</h2>
+						<p class="muted">
+							服务器把整节课的字幕整理成笔记：速览、知识点、例题、自测。一般几分钟，好了这里自动出来，不用刷新，也可以先关掉页面晚点再来。
+						</p>
+						{#if noteError}<p class="hint">这会儿连不上服务器，稍后自动再试。</p>{/if}
+					</div>
+				{/if}
+
+				{#if noteStatus !== 'done' && noteSummary?.chapters.length}
+					<div class="interim">
+						<h2>课上的实时总结 <span class="muted">· {noteSummary.chapters.length} 章</span></h2>
+						<ChapterList chapters={noteSummary.chapters} ended />
+					</div>
+				{/if}
+			</div>
+
+			<div class="body" id="panel-lines" role="tabpanel" aria-labelledby="tab-lines" hidden={view !== 'lines'} class:has-marks={markedLines.length > 0}>
 				{#if markedLines.length}
 					<aside class="marked" aria-label="没听懂的地方">
 						<h2>没听懂的地方 · {markedLines.length}</h2>
@@ -315,8 +524,181 @@
 	}
 	.head {
 		max-width: 720px;
+		padding-bottom: 24px;
+	}
+	/* 会话页里 head 下面紧跟 viewbar（自带分隔线）；列表页的 head 仍要自己那条线 */
+	.head:not(:has(+ .viewbar)) {
 		padding-bottom: 28px;
 		border-bottom: 1px solid var(--rule);
+	}
+
+	/* 笔记 / 字幕：滑块分段（同上课页工具条），往下读时吸在顶上，下载跟着当前那一页走 */
+	.viewbar {
+		position: sticky;
+		top: 0;
+		z-index: 2;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px 16px;
+		margin: 0 calc(var(--gutter) * -1);
+		padding: 10px var(--gutter);
+		background: oklch(from var(--paper) l c h / 0.86);
+		backdrop-filter: blur(16px) saturate(1.2);
+		-webkit-backdrop-filter: blur(16px) saturate(1.2);
+		border-bottom: 1px solid var(--rule);
+	}
+	.views {
+		position: relative;
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		padding: 3px;
+		border-radius: var(--radius-pill);
+		box-shadow: inset 0 0 0 1px var(--field-line);
+	}
+	.views .thumb {
+		position: absolute;
+		top: 3px;
+		bottom: 3px;
+		left: 3px;
+		width: calc((100% - 6px) / 2);
+		border-radius: var(--radius-pill);
+		background: var(--paper-2);
+		box-shadow: inset 0 0 0 1px var(--field-line);
+		transform: translateX(calc(var(--i) * 100%));
+		transition: transform var(--move) var(--ease);
+	}
+	.views button {
+		position: relative;
+		z-index: 1;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 7px;
+		height: 32px;
+		min-width: 88px;
+		padding: 0 16px;
+		border: 0;
+		background: none;
+		color: var(--ink-2);
+		font: 500 var(--fs-s) / 1 var(--cl-font);
+		cursor: pointer;
+		transition: color var(--fast) var(--ease);
+	}
+	.views button[aria-selected='true'] {
+		color: var(--ink);
+		font-weight: 600;
+	}
+	.views button:hover {
+		color: var(--ink);
+	}
+	.views button:focus-visible {
+		outline: 2px solid var(--ink);
+		outline-offset: -2px;
+		border-radius: var(--radius-pill);
+	}
+	.views .n {
+		font-size: var(--fs-xs);
+		font-weight: 400;
+		color: var(--ink-3);
+		font-variant-numeric: tabular-nums;
+	}
+	/* 笔记还在写：标签旁一个慢慢呼吸的点（不用颜色，只用明暗） */
+	.busy {
+		width: 6px;
+		height: 6px;
+		border-radius: var(--radius-pill);
+		background: var(--ink);
+		animation: busy 1.6s ease-in-out infinite;
+	}
+	@keyframes busy {
+		50% {
+			opacity: 0.25;
+		}
+	}
+	.viewbar .actions {
+		margin: 0;
+	}
+	.viewbar .btn {
+		height: 36px;
+	}
+
+	.panel-note,
+	.body {
+		padding-top: 28px;
+	}
+	.panel-note {
+		max-width: 920px;
+		--cl-sum-1: var(--ink);
+		--cl-sum-2: var(--ink-2);
+		--cl-sum-3: var(--ink-3);
+		--cl-sum-line: var(--rule);
+		--cl-sum-hover: var(--paper-2);
+		--cl-sum-ground: var(--paper);
+	}
+	.panel-note[hidden],
+	.body[hidden] {
+		display: none;
+	}
+	.state {
+		max-width: 620px;
+		padding: 8px 0 8px;
+	}
+	.state h2,
+	.interim h2 {
+		margin: 0 0 8px;
+		font-size: var(--fs-l);
+		font-weight: 600;
+		line-height: 1.35;
+	}
+	.state-actions {
+		margin-top: 18px;
+	}
+	/* 正在写：一条细线上一段亮光来回走；减弱动效时只留静止的半截 */
+	.track {
+		position: relative;
+		width: 160px;
+		height: 2px;
+		margin-bottom: 22px;
+		overflow: hidden;
+		border-radius: var(--radius-pill);
+		background: var(--rule);
+	}
+	.track span {
+		position: absolute;
+		inset: 0 auto 0 0;
+		width: 40%;
+		border-radius: inherit;
+		background: var(--ink);
+		animation: sweep 1.8s var(--ease) infinite;
+	}
+	@keyframes sweep {
+		from {
+			transform: translateX(-100%);
+		}
+		to {
+			transform: translateX(250%);
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.track span,
+		.busy {
+			animation: none;
+		}
+	}
+	.interim {
+		max-width: 680px;
+		margin-top: 40px;
+		padding-top: 28px;
+		border-top: 1px solid var(--rule);
+	}
+	.interim h2 {
+		margin-bottom: 18px;
+	}
+	.interim h2 .muted {
+		font-size: var(--fs-s);
+		font-weight: 400;
 	}
 	h1 {
 		margin: 0 0 8px;

@@ -35,6 +35,16 @@ export {
 } from './web-session';
 
 export {
+	getSummary,
+	getNote,
+	type ArtifactOptions,
+	type LiveSummary,
+	type SummaryChapter
+} from './web-artifacts';
+import { getSummary, getNote } from './web-artifacts';
+import type { ArtifactOptions, LiveSummary } from './web-artifacts';
+
+export {
 	getTerms,
 	putTerms,
 	sharedTerms,
@@ -109,5 +119,9 @@ export const api = {
 		putTerms(course, text, share, opts),
 	/** GET /v1/web/terms/shared?course= —— 同课共享池（≥2 枚码写过的词） */
 	sharedTerms: (course: string, opts?: WebTermsOptions): Promise<SharedTermsResult> =>
-		sharedTerms(course, opts)
+		sharedTerms(course, opts),
+	/** GET /v1/web/session/:id/summary —— 实时总结（没出 = null） */
+	getSummary: (id: string, opts?: ArtifactOptions): Promise<LiveSummary | null> => getSummary(id, opts),
+	/** GET /v1/web/session/:id/note?fmt= —— 课后笔记原文（没出 = null） */
+	getNote: (id: string, fmt?: 'html' | 'md', opts?: ArtifactOptions): Promise<string | null> => getNote(id, fmt, opts)
 };

@@ -78,6 +78,8 @@ export interface RequestOptions {
 	method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 	/** 额外请求头（`Idempotency-Key` 这类）；调用方给，这里只合并 */
 	headers?: Record<string, string>;
+	/** 回原文不解析 JSON（课后笔记 HTML / Markdown 这类产物） */
+	raw?: boolean;
 }
 
 function byStatus(status: number, reason: string): { kind: ApiErrorKind; say: string } {
@@ -164,6 +166,7 @@ export async function request<T = unknown>(
 	}
 
 	if (!res.ok) throw fail(res.status, text);
+	if (opts.raw) return text as T;
 	if (!text.trim()) return {} as T;
 	try {
 		return JSON.parse(text) as T;

@@ -16,6 +16,9 @@
 	import { saveMarks } from '#lib/env.ts';
 	import { holdWakeLock, watchHidden, type WakeLockHandle } from '#lib/live/wake.ts';
 	import { downloadMarkdown } from '#lib/after/export.ts';
+	import ChapterList from '#lib/ui/ChapterList.svelte';
+	import { api, type LiveSummary } from '#lib/api/index.ts';
+	import { pollEvery } from '#lib/summary/poll.ts';
 
 	type Phase = 'live' | 'demo' | 'listening' | 'nomic' | 'reconnect';
 	const SCALES = [1.15, 1.35, 1.6, 1.9, 2.25];
@@ -111,20 +114,6 @@
 		for (const r of src.rows) if (!arrived.has(r.id)) arrived.set(r.id, live ? r.t : elapsed);
 	});
 	const fmt = (t: number) => `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
-	/** 时间轴一分钟一格（一节课 50–90 格，侧栏放得下；一句一格的话一小时七百多格会把标记列表挤出去）。
-	 *  格高 = 这分钟说了多少句；有标记的格亮；点一格跳到这分钟第一句 */
-	const minutesAxis = $derived.by(() => {
-		const buckets: { m: number; first: CapRow; n: number; marked: boolean }[] = [];
-		for (const r of src.rows) {
-			const m = Math.floor(at(r.id) / 60);
-			let b = buckets.at(-1);
-			if (!b || b.m !== m) buckets.push((b = { m, first: r, n: 0, marked: false }));
-			b.n++;
-			if (markedIds.has(r.id)) b.marked = true;
-		}
-		const peak = Math.max(1, ...buckets.map((b) => b.n));
-		return buckets.map((b) => ({ ...b, len: b.n / peak }));
-	});
 
 	function toggleMark(row: CapRow) {
 		marks = markedIds.has(row.id) ? marks.filter((m) => m.id !== row.id) : [...marks, row].sort((a, b) => a.id - b.id);
@@ -137,6 +126,74 @@
 	function jump(id: number) {
 		if (src.rows.some((r) => r.id === id)) stream?.jumpTo(id);
 	}
+
+	// 实时总结：服务器（VPS runner）每 20 s 看一眼这节课、写一版章节；这里同节奏去读。
+	// 要等同步开成、拿到服务端会话号才有得读；读失败不清掉旧的，只在底下说一句。
+	type RailTab = 'sum' | 'marks';
+	let railTab = $state<RailTab>('sum');
+	let summary = $state<LiveSummary | null>(null);
+	let sumLoaded = $state(false);
+	let sumError = $state('');
+	let sumAt = $state(0);
+	// 只在 dev：`?demo=1&srv=s_…` 让示例回放也去读某节课的总结，给设计稿 / 截图看侧栏
+	const devSrv = import.meta.env.DEV ? page.url.searchParams.get('srv') : null;
+	const serverId = $derived(devSrv ?? syncView?.server_id ?? null);
+	const sumOn = $derived(phase === 'live' || !!devSrv);
+	$effect(() => {
+		const id = serverId;
+		if (!sumOn || !id) return;
+		const p = pollEvery({
+			load: async () => ({ value: await api.getSummary(id) }),
+			everyMs: 20_000,
+			onchange: (st) => {
+				summary = st.value;
+				sumLoaded = st.loaded;
+				sumError = st.error;
+				if (st.at) sumAt = st.at;
+			}
+		});
+		return () => p.stop();
+	});
+	const chapters = $derived(summary?.chapters ?? []);
+	/** 「刚刚更新 / 3 分钟前更新」—— 跟着每秒的计时一起重算 */
+	const sumAge = $derived.by(() => {
+		void elapsed;
+		if (!sumAt) return '';
+		const m = Math.floor((Date.now() - sumAt) / 60_000);
+		return m < 1 ? '刚刚更新' : `${m} 分钟前更新`;
+	});
+	const syncTrouble = $derived(
+		live?.store?.persistent === false
+			? '这个浏览器不让存，关掉标签页字幕就没了'
+			: syncView?.phase === 'offline'
+				? '服务器暂时连不上：字幕已存本机，连上后自动补传'
+				: syncView?.phase === 'error'
+					? '同步到服务器出错了：字幕已存本机，下课会自动下载一份'
+					: ''
+	);
+	const rowTime = (seq: number) => (arrived.has(seq) ? fmt(arrived.get(seq) ?? 0) : null);
+	const rowOnScreen = (seq: number) => src.rows.some((r) => r.id === seq);
+	function setRailTab(t: RailTab) {
+		railTab = t;
+	}
+	function tabKey(e: KeyboardEvent) {
+		if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+		e.preventDefault();
+		const next: RailTab = railTab === 'sum' ? 'marks' : 'sum';
+		setRailTab(next);
+		(e.currentTarget as HTMLElement).querySelector<HTMLElement>(`[data-tab="${next}"]`)?.focus();
+	}
+	// 新的一章进来：用户本来就停在底部就跟到底，往上翻着看就不拽他
+	let sumBox = $state<HTMLElement>();
+	let sumPinned = true;
+	const onSumScroll = () => {
+		if (sumBox) sumPinned = sumBox.scrollHeight - sumBox.scrollTop - sumBox.clientHeight < 40;
+	};
+	$effect(() => {
+		void chapters.length;
+		void chapters.at(-1)?.summary;
+		if (sumBox && sumPinned) queueMicrotask(() => sumBox?.scrollTo({ top: sumBox.scrollHeight, behavior: 'smooth' }));
+	});
 
 	const pipSupported = typeof globalThis !== 'undefined' && 'documentPictureInPicture' in globalThis;
 	const clock = $derived(
@@ -527,44 +584,60 @@
 
 	{#if rail && (phase === 'demo' || phase === 'live')}
 		<aside class="rail" aria-label="这节课">
-			<section>
-				<h2>这节课</h2>
-				<dl class="stats">
-					<div><dt>已上</dt><dd>{clock}</dd></div>
-					<div><dt>字幕</dt><dd>{src.rows.length} 句</dd></div>
-					<div><dt>标记</dt><dd>{marks.length} 处</dd></div>
-				</dl>
-				{#if phase === 'live'}
-					<p class="saved">
-						{live?.store?.persistent === false
-							? '这个浏览器不让存，关掉标签页字幕就没了'
-							: syncView?.phase === 'synced'
-								? `已存本机，已同步 ${syncView.acked} 句`
-								: syncView?.phase === 'offline'
-									? '已存本机；服务器暂时连不上，连上后自动补传'
-									: syncView?.phase === 'error'
-										? '已存本机；同步到服务器出错了，下课会自动下载一份'
-										: '字幕逐句存在这台电脑里'}
+			<div
+				class="tabs"
+				role="tablist"
+				aria-label="侧栏内容"
+				tabindex="-1"
+				style:--i={railTab === 'sum' ? 0 : 1}
+				onkeydown={tabKey}
+			>
+				<span class="seg-thumb" aria-hidden="true"></span>
+				<button
+					type="button"
+					role="tab"
+					id="tab-sum"
+					data-tab="sum"
+					aria-controls="rail-sum"
+					aria-selected={railTab === 'sum'}
+					tabindex={railTab === 'sum' ? 0 : -1}
+					onclick={() => setRailTab('sum')}>实时总结{#if chapters.length}<span class="n">{chapters.length}</span>{/if}</button
+				>
+				<button
+					type="button"
+					role="tab"
+					id="tab-marks"
+					data-tab="marks"
+					aria-controls="rail-marks"
+					aria-selected={railTab === 'marks'}
+					tabindex={railTab === 'marks' ? 0 : -1}
+					onclick={() => setRailTab('marks')}>没听懂{#if marks.length}<span class="n">{marks.length}</span>{/if}</button
+				>
+			</div>
+
+			<div class="summary" id="rail-sum" role="tabpanel" aria-labelledby="tab-sum" hidden={railTab !== 'sum'}>
+				{#if !sumOn}
+					<p class="hint">示例回放没有实时总结。真上课时，这里每讲完一个话题就多一章：标题、这一章讲了什么、要点。</p>
+				{:else if chapters.length === 0}
+					<div class="sum-empty">
+						<p class="lead">{sumError && sumLoaded ? '总结暂时取不到' : '讲一会儿就有第一章'}</p>
+						<p class="hint">
+							{sumError && sumLoaded
+								? '字幕不受影响，稍后自动再试。'
+								: '服务器每 20 秒读一次这节课的字幕，话题一收口就把这一章写出来：标题、讲了什么、要点。'}
+						</p>
+					</div>
+				{:else}
+					<div class="sum-scroll" bind:this={sumBox} onscroll={onSumScroll}>
+						<ChapterList {chapters} timeOf={rowTime} onjump={jump} canJump={rowOnScreen} />
+					</div>
+					<p class="sum-foot" role="status">
+						{sumError ? '这会儿连不上服务器，显示的是上一版' : sumAge}
 					</p>
 				{/if}
-				<!-- 时间轴：一分钟一格，有标记的那格亮；点一格跳到那分钟回看 -->
-				<div class="ticks" role="group" aria-label="时间轴（一分钟一格）">
-					{#each minutesAxis as b (b.m)}
-						<button
-							type="button"
-							class="tick"
-							class:on={b.marked}
-							style:--len={b.len}
-							title={`第 ${b.m + 1} 分钟 · ${b.n} 句`}
-							aria-label={`第 ${b.m + 1} 分钟，${b.n} 句${b.marked ? '，有标记' : ''}`}
-							onclick={() => jump(b.first.id)}
-						></button>
-					{/each}
-				</div>
-			</section>
+			</div>
 
-			<section class="marks">
-				<h2>没听懂的地方</h2>
+			<div class="marks" id="rail-marks" role="tabpanel" aria-labelledby="tab-marks" hidden={railTab !== 'marks'}>
 				{#if marks.length === 0}
 					<p class="hint">点一下哪句字幕，或按 <kbd>M</kbd> 标记最新一句。标记会列在这里，点它就跳回那句。</p>
 				{:else}
@@ -582,7 +655,12 @@
 						{/each}
 					</ol>
 				{/if}
-			</section>
+			</div>
+
+			<!-- 同步正常就不占地方；只有出岔子（存不住 / 连不上 / 出错）才说，失败不许静默 -->
+			{#if phase === 'live' && syncTrouble}
+				<p class="saved" role="status">{syncTrouble}</p>
+			{/if}
 
 			<footer class="keys">
 				<span><kbd>M</kbd> 标记</span>
@@ -869,7 +947,7 @@
 		gap: 28px;
 		padding: 76px 22px 22px;
 		border-left: 1px solid var(--glass-line);
-		background: oklch(from var(--glass-ground) calc(l + 0.015) c h);
+		background: var(--rail-bg);
 		font-size: var(--fs-s);
 		transition: opacity var(--move) var(--ease);
 		animation: rail-in var(--move) var(--ease) both;
@@ -886,60 +964,95 @@
 	.room {
 		--rail-w: clamp(260px, 22vw, 340px);
 	}
-	.rail h2 {
-		margin: 0 0 12px;
-		font-size: var(--fs-xs);
-		font-weight: 600;
-		color: var(--on-glass-2);
+	.rail {
+		--rail-bg: oklch(from var(--glass-ground) calc(l + 0.015) c h);
+		--cl-sum-ground: var(--rail-bg);
 	}
-	.stats {
+	/* 侧栏下半：实时总结 / 没听懂 两页，同工具条那种滑块分段 */
+	.tabs {
+		position: relative;
+		flex: none;
 		display: grid;
-		grid-template-columns: repeat(3, 1fr);
-		margin: 0 0 16px;
+		grid-template-columns: 1fr 1fr;
+		margin-bottom: -12px;
+		padding: 3px;
+		border-radius: var(--radius-pill);
+		box-shadow: inset 0 0 0 1px var(--glass-line);
 	}
-	.stats dt {
-		font-size: var(--fs-xs);
-		color: var(--on-glass-3);
+	.tabs .seg-thumb {
+		width: calc((100% - 6px) / 2);
 	}
-	.stats dd {
-		margin: 3px 0 0;
-		font-size: var(--fs-l);
-		font-weight: 600;
+	.tabs button {
+		position: relative;
+		z-index: 1;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		height: 28px;
+		padding: 0 10px;
+		border: 0;
+		background: none;
+		color: var(--on-glass-2);
+		font: 500 var(--fs-xs) / 1 var(--cl-font);
+		cursor: pointer;
+		transition: color var(--fast) var(--ease);
+	}
+	.tabs button[aria-selected='true'] {
+		color: var(--on-glass);
+	}
+	.tabs button:hover {
+		color: var(--on-glass);
+	}
+	.tabs button:focus-visible {
+		outline: 2px solid var(--on-glass);
+		outline-offset: -2px;
+		border-radius: var(--radius-pill);
+	}
+	.tabs .n {
+		min-width: 16px;
+		padding: 0 4px;
+		border-radius: var(--radius-pill);
+		background: var(--glass-raise);
+		font-size: 11px;
+		line-height: 16px;
 		font-variant-numeric: tabular-nums;
 	}
-	.ticks {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: flex-end;
-		gap: 3px;
-		min-height: 26px;
-	}
-	.tick {
-		width: 6px;
-		height: calc(6px + var(--len) * 20px);
-		padding: 0;
-		border: 0;
-		border-radius: var(--radius-pill);
-		background: var(--on-glass-3);
-		opacity: 0.45;
-		cursor: pointer;
-		transition:
-			opacity var(--fast) var(--ease),
-			transform var(--fast) var(--ease);
-	}
-	.tick:hover {
-		opacity: 1;
-		transform: scaleY(1.15);
-	}
-	.tick.on {
-		background: var(--on-glass);
-		opacity: 1;
-	}
+	.summary,
 	.marks {
 		flex: 1;
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
+	}
+	.summary[hidden],
+	.marks[hidden] {
+		display: none;
+	}
+	.sum-scroll {
+		flex: 1;
+		min-height: 0;
+		margin: 0 -8px;
+		padding: 4px 8px 0;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		scrollbar-width: thin;
+		scrollbar-color: var(--glass-raise) transparent;
+		/* 上下缘淡出，长列表不像被刀切 */
+		mask-image: linear-gradient(to bottom, transparent, #000 10px, #000 calc(100% - 18px), transparent);
+	}
+	.sum-empty .lead {
+		margin: 0 0 6px;
+		font-size: var(--fs-m);
+		font-weight: 600;
+		color: var(--on-glass);
+	}
+	.sum-foot {
+		flex: none;
+		margin: 8px 0 0;
+		font-size: var(--fs-xs);
+		color: var(--on-glass-3);
+		font-variant-numeric: tabular-nums;
 	}
 	.hint {
 		margin: 0;
@@ -1063,9 +1176,12 @@
 		box-shadow: inset 0 0 0 1.5px currentColor;
 	}
 	.saved {
-		margin: 10px 0 0;
+		flex: none;
+		margin: -12px 0 0;
 		font-size: var(--fs-xs);
-		color: var(--on-glass-3);
+		line-height: 1.6;
+		font-weight: 600;
+		color: var(--on-glass-2);
 	}
 	.empty {
 		height: 100%;

@@ -3,13 +3,13 @@
 
 用法（用 App 自带的 python，从仓库根目录）：
   ClassLive.app/Contents/MacOS/python scripts/stream_eval.py <音频> [--ref ref.txt]
-      [--start S] [--dur D] [--final whisper|parakeet|cloud] [--draft auto|parakeet|nemotron]
+      [--start S] [--dur D] [--final nemotron|cloud] [--draft auto|off]
       [--pace-rpm N] [--jsonl out.jsonl] [--json out.json]
 
 回放方式（与生产的差别要看清）：
   · 复用生产的 `Segmenter`（VAD 切句 + 每 1s 一次 on_partial）和 `PeakNormalizer`；
-  · 草稿 = **生产那一套草稿引擎**（`draft_engine.load_draft_engine`：R3 之后是 Nemotron 流式，
-    缺模型 / 内存不够 / 熔断才退回 Parakeet 滑窗）；定稿 = 整句转写（`--final`）；
+  · 草稿 = **生产那一套草稿引擎**（`draft_engine.load_draft_engine`：Nemotron 流式；
+    缺模型 / 熔断 = 本节没有草稿）；定稿 = 整句转写（`--final`：Nemotron 整段解码 / 云端链）；
     ⚠️ 2026-10-11 之前这里写死 Parakeet 滑窗、注释还写着"同生产"—— R3 P1 落地后那句话就不成立了，
        R3 之后的回改率差着几十倍（0.69% vs 36.6%），拿旧引擎的数字说现在的体验会得出反的结论。
   · **同步回放、不排队**：生产里草稿线程与定稿线程抢同一把 ASR 锁，会有排队延迟，
@@ -33,8 +33,10 @@ import stream_metrics as M
 import draft_engine
 import models
 
-#: 定稿有哪几种（`load_final_engine` 认的就是这三个）—— 与它挨着定义，两个 CLI 共用
-FINAL_MODES = ("whisper", "parakeet", "cloud")
+#: 定稿有哪几种（`load_final_engine` 认的就是这两个）—— 与它挨着定义，两个 CLI 共用。
+#: ⚠️ 2026-11-20（桌面 D1）：`whisper` / `parakeet` 两档随模型一起删了；
+#:    本地那条现在是 `nemotron`（流式模型拿整段重新解码，`nemotron_final.NemotronFinal`）。
+FINAL_MODES = ("nemotron", "cloud")
 
 PARTIAL_MAX_S = 10        # 与 main.PARTIAL_MAX_S 一致（不 import main：它拖一堆 UI 依赖）
 
@@ -56,8 +58,8 @@ def pace_for(final_engine: str, rpm: float) -> float:
     return 60.0 / min(rpm, RPM_LIMIT)
 
 
-def load_drafter(which: str, parakeet):
-    """装配**草稿**层：`auto` = 生产行为（Nemotron 流式优先，缺模型/内存不够/熔断退 Parakeet）。
+def load_drafter(which: str):
+    """装配**草稿**层：`auto` = 生产行为（Nemotron 流式；缺模型 / 熔断 = 没有草稿）。
 
     与 `load_final_engine` 并排 —— 这是「引擎怎么装配」的唯一定义点；两个调用方
     （本文件的 CLI 与实验 runner）都走它，别各写一份（写两份就会漂：一边用 `SR`、
@@ -67,12 +69,11 @@ def load_drafter(which: str, parakeet):
     import draft_engine
     from capture import SR
     return draft_engine.load_draft_engine(
-        parakeet, window_samples=PARTIAL_MAX_S * SR,
         env={**os.environ, draft_engine.ENV: which})
 
 
-def load_final_engine(which: str, model_dir: str, draft_asr):
-    """按名字装配**定稿**那一层：`whisper` / `parakeet` / `cloud`（生产那条链）。
+def load_final_engine(which: str, model_dir: str):
+    """按名字装配**定稿**那一层：`nemotron`（整段解码）/ `cloud`（生产那条链）。
 
     ⭐ 唯一接线处 —— CLI 与实验脚本都走它，免得两边各写一份（云端那层写两遍就会漂）。
     `cloud` 返回的对象多一个 `last_source`（每段走的哪条路），`replay` 会记进 utterances。
@@ -83,28 +84,26 @@ def load_final_engine(which: str, model_dir: str, draft_asr):
         # ⚠️ 云端开关**尊重用户的配置**（`~/.classlive/cloud-asr.json` 与 `CLASSLIVE_CLOUD_ASR=0`），
         #    不写死 `lambda: True` —— 否则用户在面板里关掉云端，回放照样把音频发出去。
         #    （生产的完整判据在 `main.cloud_asr_off_reason`；那两个门函数理想上该挪进 `final_asr`。）
-        fin = final_asr.load_final(model_dir, draft_asr,
+        fin = final_asr.load_final(model_dir,
                                    lambda: bool(final_asr.read_config()["enabled"]),
                                    preload_local=False)
 
         return _text_only(fin)
-    if which == "whisper":
-        # 走生产那层装配：Whisper 缺失 / 加载失败会**退回 Parakeet 并说一句**（自己写会漏掉这个容错）
-        import final_asr
-        fin = final_asr.load_final(model_dir, draft_asr, lambda: False, preload_local=True)
-        return _text_only(fin)
-    return draft_asr
+    # `nemotron`：走生产那层装配（本地整段解码，云端永远不开）。
+    import final_asr
+    fin = final_asr.load_final(model_dir, lambda: False, preload_local=True)
+    return _text_only(fin)
 
 
 def _text_only(fin):
     """把 `final_asr` 那层收成「`transcribe(buf) -> str`」—— `replay` 只吃文本。
 
     ⚠️⚠️ **两个分支都必须过这一层**（2026-10-12 全仓审查，已复现）：
-       原来只有 `cloud` 分支包了，`whisper` 分支**直接返 `FinalASR`** ——
+       当年只有 `cloud` 分支包了，本地那个分支**直接返 `FinalASR`** ——
        而 `FinalASR.transcribe()` 返的是 `FinalResult`（`final_asr.py:295`），不是 str。
        `replay.on_end` 拿它当定稿文本存进 `u["final"]`，收尾 `evaluate()` 里
        `" ".join(u["final"] …)` 就 `TypeError: expected str instance, FinalResult found`。
-    ⚠️ 而 `--final` 的**默认值就是 `whisper`**（`real_class_slices.sh` 也不覆盖）
+    ⚠️ 当年 `--final` 的**默认值是本地那一档**（`real_class_slices.sh` 也不覆盖）
        → **默认那条路必崩**，且回放跑完好几分钟才在收尾处炸，量具白跑。
     ⚠️ `last_source` / `last_fell_back` / `last_steps` 是事后要回答"这段发出去没"用的，
        用生产现成的字段，别拿 `source` 字符串去猜。
@@ -215,7 +214,8 @@ def replay(audio: np.ndarray, drafter, asr_final, *, draft_filter=None, progress
 def _slid(d) -> bool:
     """这份草稿的窗口滑了没有。只有**窗口型**引擎（parakeet：只看最近 10 s）会滑；
     流式引擎（R3 nemotron）看整段，不滑 —— 照剔会把它的长段草稿整批丢掉，回改率被**低估**。
-    没有 `engine` 字段（R3 之前的文件 / 离线回放）= parakeet，数字逐位不变。"""
+    ⚠️ 没有 `engine` 字段（R3 之前的文件 / 离线回放）= 老 Parakeet 滑窗，数字逐位不变；
+       2026-11-20 之后生产只会写 `nemotron` / `none`，这条判据只对**历史数据**还有意义。"""
     return (d.get("engine") or "parakeet") == "parakeet" and d["buf_s"] > PARTIAL_MAX_S
 
 
@@ -280,11 +280,11 @@ def evaluate(utts, ref_text: str | None, k: int = M.DEFAULT_K,
             srcs[u["final_source"]] = srcs.get(u["final_source"], 0) + 1
     out = {
         "utterances": len(utts), "drafts": n_draft,
-        # 定稿各条路的段数（`{"groq": 58, "local-parakeet": 2}`）；本地单测回放时为空
+        # 定稿各条路的段数（`{"groq": 58, "local-nemotron": 2}`）；本地单测回放时为空
         "final_sources": srcs,
         # ⭐ **云端给的**段数与秒数：按来源判（见 `_is_cloud_source`）。
-        #    ⚠️ 别写成「有 source 且没 fell_back」——`--final whisper`（**默认值**）走
-        #    `allow_cloud=False`，每段都是 `local-whisper` 且 `fell_back=False`，
+        #    ⚠️ 别写成「有 source 且没 fell_back」——`--final nemotron` 走
+        #    `allow_cloud=False`，每段都是 `local-nemotron` 且 `fell_back=False`，
         #    那样一节课会被算成"云端 100%"（2026-10-12 全仓审查核实）。
         "cloud_segments": sum(1 for u in utts if _is_cloud_source(u.get("final_source"))),
         "cloud_audio_s": round(sum(u["dur"] for u in utts
@@ -320,14 +320,13 @@ def main():
     ap.add_argument("--ref")
     ap.add_argument("--start", type=float, default=0.0)
     ap.add_argument("--dur", type=float, default=0.0, help="0 = 到结尾")
-    ap.add_argument("--final", choices=list(FINAL_MODES), default="whisper",
-                    help="cloud = 生产那条云端定稿链（Worker → Groq/千问，失败退本地）")
+    ap.add_argument("--final", choices=list(FINAL_MODES), default="nemotron",
+                    help="nemotron = 本地整段解码（默认）；cloud = 生产那条云端定稿链")
     ap.add_argument("--pace-rpm", type=float, default=0.0, metavar="N",
                     help="云端定稿的节流：每分钟最多 N 次请求（Worker 限 20/分；0 = 不节流）")
     ap.add_argument("--draft", choices=list(draft_engine.MODES), default="auto",
                     help="草稿引擎，与生产同一个开关 CLASSLIVE_DRAFT_ENGINE（默认 auto = 生产行为）")
-    ap.add_argument("--model-dir", default=models.path_of("parakeet", "~/models/parakeet-tdt-0.6b-v3-int8"))
-    ap.add_argument("--final-model-dir", default=models.path_of("whisper", "~/models/sherpa-onnx-whisper-turbo"))
+    ap.add_argument("--model-dir", default=models.path_of("nemotron"))
     ap.add_argument("--k", type=int, default=M.DEFAULT_K,
                     help="hold-back 词数（只影响 beyond_k 指标）")
     ap.add_argument("--stabilize", type=int, default=None, metavar="K",
@@ -337,14 +336,12 @@ def main():
     a = ap.parse_args()
 
     from capture import load_file
-    from asr import load_asr
     # `-ss`/`-t` 走**输入定位**（`capture.load_file` 的 docstring 就是为这个写的）：
     # 从 40 分钟的源里取 5 分钟不必解完再切（实测 9.5 s → 1.0 s，峰值内存也少一大截）。
     # 样本与"先全解再切"逐位相同（本轮实测过：rms 比 1.0、峰值与位置一致）。
     audio = load_file(a.audio, start=a.start, dur=a.dur)
-    asr_d = load_asr(a.model_dir)
-    asr_f = load_final_engine(a.final, a.final_model_dir, asr_d)
-    drafter = load_drafter(a.draft, asr_d)
+    asr_f = load_final_engine(a.final, a.model_dir)
+    drafter = load_drafter(a.draft)
     print(f"草稿引擎：{drafter.name}" + (f"（{drafter.reason}）" if drafter.reason else ""),
           file=sys.stderr, flush=True)
     t0 = time.time()

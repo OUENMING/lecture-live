@@ -7,8 +7,9 @@
 
 1. `CloudTranslator.hint`：多行只取第一行、去首尾引号、超长截断 —— 它的结果要塞进
    悬浮窗**术语行那一格**（单行、截尾），多行 / 带引号 / 过长都会把那一格撑坏。
-2. ⭐ `EngineRouter.hint`：本地引擎 → `""`；云端抛错 → `""` **且 `_use_cloud` 仍为真**。
-   和 `answer` 同一个决定：一次点拨失败不能把整节课的翻译降到本地。
+2. ⭐ `EngineRouter.hint`：云端停用 / 抛错 → `""` **且 `_use_cloud` 不受影响**。
+   和 `answer` 同一个决定：一次点拨失败不能把整节课的翻译停掉。
+   ⚠️ 2026-11-20（桌面 D1）：本地引擎已删，`EngineRouter(cloud, mode)` 少了一个参数。
 3. `Overlay`：`show_hint` 占术语行、到期自动回来、点术语行时只收 hint 不钉术语、
    `_lost()` 按 `on_lost` 的返回值显示两种字。
 
@@ -63,10 +64,10 @@ class CloudHint(unittest.TestCase):
 
 class RouterHint(unittest.TestCase):
     def _router(self, cloud, mode="cloud"):
-        return main_mod.EngineRouter(object(), cloud, mode)
+        return main_mod.EngineRouter(cloud, mode)
 
-    def test_local_returns_empty(self):
-        r = self._router(None, mode="local")
+    def test_no_cloud_returns_empty(self):
+        r = self._router(None, mode="cloud")
         self.assertFalse(r.uses_cloud)
         self.assertEqual(r.hint(["a"]), "")
 
@@ -77,7 +78,7 @@ class RouterHint(unittest.TestCase):
         r = self._router(Boom())
         self.assertTrue(r.uses_cloud)
         self.assertEqual(r.hint(["a"]), "")
-        self.assertTrue(r.uses_cloud, "点拨失败把整节课的翻译降级到本地了")
+        self.assertTrue(r.uses_cloud, "点拨失败把整节课的翻译停掉了")
 
     def test_cloud_success_passes_through(self):
         class Ok:

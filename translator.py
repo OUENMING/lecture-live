@@ -4,13 +4,17 @@
     ZH: <中文译文>
     EN: <修正后的英文>
 
-用 mlx-lm 的 stream_generate 逐 token 出字: 中文一出现就推给 UI(打字机效果),
-英文随后补齐。解析用状态机, 不做正则匹配(流式文本上正则不可靠)。
+## ⚠️ 2026-11-20（桌面 D1）：本地翻译引擎（mlx-lm / Qwen3-1.7B）**已删**
 
-用一把锁保证串行生成(GPU 上顺序执行)。
+这个文件现在**只剩共用的纯函数**（术语选取 / prompt 段落 / 流式解析 / 译文闸门），
+**没有** `Translator` 类、没有 `mlx_lm`、没有本地模型。生产只有一条翻译路：云端
+(`cloud_translator.CloudTranslator`)。云端连续失败 → 那句话没有中文（字幕的英文照常）。
+
+`Result` / `_StreamParser` / `_clean_fix` / `guard_zh_result` 仍在这里，因为
+`cloud_translator` 与判据都 import 它们 —— 它们与"用哪个模型"无关。
 """
 from __future__ import annotations
-import difflib, os, pathlib, re, threading
+import difflib, os, pathlib, re
 
 
 # 常驻核心词(高频概念): 无论句子内容都注入, 约 15 token。
@@ -505,47 +509,9 @@ def term_zh_block(sentence: str, zh_map, *, max_n: int | None = None) -> str:
     return TERM_ZH_HEADER + "\n" + "\n".join(hits) + "\n\n"
 
 
-DRAFT_SYSTEM = "你是实时字幕翻译器。把用户给的英文口语快速译成中文, 只输出中文译文。"
-
-# 只矫正、不翻译(关闭翻译时用): 同一个模型、同一份上下文, 只是不要中文。
-FIX_SYSTEM = """你是英文课堂字幕校正助手。给你一句 ASR 转写的英文、课程领域、本课术语表, 以及最近几句上下文。
-请只修正明显的语音识别错听(音近词、漏词、专有名词、术语)。**优先采纳课程术语表里的词**:
-当某个词音近术语表条目时, 几乎可以断定是听错, 直接改成该术语。例如:
-"we're max chocolate properties" -> "we're macroscopic properties";
-"how we measure the stalcy" -> "how we measure the statistics";
-"average on the lacker level" -> "average on the lattice level"。
-本来就正确、也不音近任何术语的词句**原样保留**, 不要改写、润色、缩写或调整语序(防范过度矫正)。
-只输出修正后的那一句英文, 不要任何前缀、标签、解释或中文。"""
-
 # 模型偶尔给结果加标签(EN: / 修正后: …), 或干脆跑偏去翻译/概括。清一遍。
 _FIX_LABELS = ("EN:", "EN：", "FIXED:", "CORRECTED:", "OUTPUT:",
                "英文:", "英文：", "修正后:", "修正后：", "矫正后:")
-
-
-# ---- 本地小模型的输出后处理（思路来自 six-ddc/livecaption 的读码，按本项目数据重新量过阈值）----
-_META_PREFIX = re.compile(
-    r"^\s*(?:好的[，,。！!]?\s*)?(?:以下是|下面是|这是|这句的)?"
-    r"(?:中文)?(?:译文|翻译结果|翻译|中文)\s*[：:]\s*")
-
-
-def clean_local_zh(zh: str) -> str:
-    """剥掉小模型爱加的「以下是译文：」之类的元话；其余原样。只认"前缀 + 冒号"，不会动正文。"""
-    out = _META_PREFIX.sub("", zh or "", count=1).strip()
-    return out or (zh or "").strip()
-
-
-#: 译文与**上一句译文**的字符二元组重合 ≥ 此值 → 判为"模型翻的是上下文，不是这一句"。
-#: 0.45 取自 livecaption；本项目的真实数据复核（2026-10-08，39 节课 4780 对相邻句，只读）：
-#: 0.45 误伤 0.54%（26/4780，多是讲师真的重复）；0.35 为 1.1%；0.25 为 3.5%。所以沿用 0.45。
-ECHO_BIGRAM = 0.45
-
-
-def zh_echoes_previous(zh: str, prev: str) -> bool:
-    if len(prev) < 16 or len(zh) < 2:
-        return False
-    a = {prev[i:i + 2] for i in range(len(prev) - 1)}
-    b = {zh[i:i + 2] for i in range(len(zh) - 1)}
-    return len(a & b) >= ECHO_BIGRAM * len(a)
 
 
 def _clean_fix(text: str, raw: str) -> str:
@@ -564,21 +530,6 @@ def _clean_fix(text: str, raw: str) -> str:
     if len(t.split()) > 1.8 * len(raw.split()) + 3:
         return raw
     return t
-
-
-def _apply_chat_generic(toks, user_content: str, system: str) -> str:
-    """套 chat template(带 enable_thinking=False 的兼容回退)。"""
-    if getattr(toks, "chat_template", None):
-        msgs = [{"role": "system", "content": system},
-                {"role": "user", "content": user_content}]
-        try:
-            return toks.apply_chat_template(
-                msgs, tokenize=False, add_generation_prompt=True,
-                enable_thinking=False)
-        except TypeError:
-            return toks.apply_chat_template(
-                msgs, tokenize=False, add_generation_prompt=True)
-    return user_content
 
 
 class _StreamParser:
@@ -665,257 +616,3 @@ class _StreamParser:
         if not en or self._has_cjk(en):
             en = en_raw
         return Result(en_fixed=en, zh=zh or en_raw)
-
-
-def _configure_mlx() -> None:
-    """给 MLX 设**宽松**的缓冲缓存上限, 减少 Metal 缓冲的释放/重建次数。
-
-    Why: 2026-09-10 本机发生过一次 IOGPUFamily 驱动断言内核崩溃
-    (panic-full-2026-09-10-004444, 肇事进程即本程序), 特征是**内存记账状态损坏**
-    而非 OOM(压缩器仅 11%、swap 正常)。已知 MLX 触发同类驱动 panic 的 issue
-    (mlx-lm#883 / mlx#3186) 指向 Metal 缓冲的 load/unload 竞态。
-    因此: 缓存上限设**宽松**(缓冲复用而非反复释放), 且**不主动 clear_cache**。
-    """
-    try:
-        import mlx.core as mx
-        mx.set_memory_limit(6 * 1024 ** 3)       # 仅作上限保护
-        mx.set_cache_limit(2 * 1024 ** 3)        # 宽松: 鼓励复用, 减少释放/重建
-    except Exception:                             # noqa: BLE001
-        pass
-
-
-def local_model_present() -> bool:
-    """本地 Qwen 兜底模型**在不在** —— `doctor.model_present` 的薄包装（判据只此一份）。
-
-    ⚠️ 惰性 import：`doctor` 与 `update`/`ready` 之间有已知的惰性环（模块地图有记），
-       模块级 import 会把 translator 拖进去 —— 函数内 import 没这个问题。
-    ⚠️ **任何异常都当「在」**（返回 True）—— 同 `doctor.model_present` 那条
-       「不确定就别报缺」的纪律：判据自己坏了宁可按原样去试 load，也不许拿它拦人。
-    """
-    try:
-        import doctor
-        import models
-        return doctor.model_present(models.QWEN.path)
-    except Exception:                             # noqa: BLE001
-        return True
-
-
-class Translator:
-    """懒加载 mlx-lm 模型; 生成用锁串行; chat template 提升指令遵循。"""
-
-    def __init__(self, model: str, glossary_path: str | None, max_context: int = 2,
-                 course: str | None = None, extra_terms: list | None = None,
-                 term_zh: dict | None = None):
-        self._model = None
-        self._tokenizer = None
-        #: ⭐ 本地加载的**失败闩锁**（2026-10-01 审查 F2）：一旦确定「装不了 / 装不上」，
-        #:   之后每次调用都**立刻**抛同一句原因，不再重试 `load()` —— 原来云端失败后
-        #:   每一句都去 `mlx_lm.load()`（在线 = 隐式拉 938 MB 把定稿线程卡住；离线 =
-        #:   每句白等一次失败）。进程重启才清（中途装好模型需要重开，可接受）。
-        self._load_err: str | None = None
-        # ⚠️⚠️ **`extra_terms` 只进「候选池」，绝不进 `course_terms`**（2026-09-29）。
-        #    池子里的词按相似度**动态召回**（`select_terms` 的 `scored[:max_dyn]`），
-        #    而 `course_terms` 是**每句全量注入**的。
-        #    实测（作者的 ECON10770/10740，各 448/1003 句真实课堂）：
-        #      · 池子 +25 个转录词 → 注入结果**变了 63–74% 的句子**（新词真被召回）
-        #      · ⚠️ 但手写术语**只被挤掉 3–4%** → **名额不用改**
-        #    而如果把词**写进术语表文件**（走全量注入），120 条时术语块占整条
-        #    prompt 的 **60%**（实测 1544 字符 / 总 ~2582 字符）→ 那条路会过量。
-        self._terms = merge_terms(load_terms(glossary_path, course), extra_terms)
-        self._course_terms = course_term_list(glossary_path, course)
-        #: ⭐ #4 B2：本课「英文 → 中文」译名表（`term_zh_map` 建好后由工厂传进来）。
-        #:    命中的条目按 `select_term_zh` 注入每句 prompt 的**变化段**（不注入全表）。
-        self._term_zh = dict(term_zh or {})
-        #: ⭐ 术语注入的**只读计数**（`select_terms` 填）。
-        #: ⚠️ 名字与 `cloud_translator.CloudTranslator.term_stats` **必须一致** ——
-        #:    `main.py` 收尾时两个引擎各读一次再合并（它俩本来就各有一份）。
-        self.term_stats: dict = {}
-        self._domain = course_title(glossary_path, course)
-        self._core = core_terms(course)
-        self._max_ctx = max_context
-        self._lock = threading.Lock()
-        self._load_lock = threading.Lock()   # 保护 _ensure 的懒加载(见该处说明)
-        self._model_name = model
-        self._last_zh = ""                   # 上一句最终译文（回显检测用）
-        self.echo_retries = 0                # 只读计数：因"翻成上一句"重试过几次
-
-    def _ensure(self) -> None:
-        """懒加载(双重检查加锁)。
-
-        ⚠️ 必须自己加锁: 4 个调用点(fix_and_translate_stream / fix_stream /
-        translate_draft / warmup)都在 `with self._lock` **之外**调它, 而草稿线程与
-        定稿线程会并发进来。原先只做 check-then-act: 两线程可能同时看到
-        `_model is None` 而**重复 load()**(显存翻倍); 更糟的是
-        `self._model, self._tokenizer = load(...)` 是两条 STORE_ATTR, 另一线程可能
-        读到 `_model` 已赋值而 `_tokenizer` 仍是 None -> `_apply_chat` 里
-        `apply_chat_template` 抛 AttributeError。
-        (2026-09-24 OCR 全量审计发现。)"""
-        if self._model is None:
-            with self._load_lock:
-                if self._model is None:
-                    # ⚠️⚠️ 两道**不联网就能答**的闸（2026-10-01 审查 F2）：
-                    #    ① 闩锁：已经确定装不上 → 立刻抛同一句，不再试 `load()`；
-                    #    ② 在不在：**先问 `doctor.model_present`** —— 没装就闩住
-                    #       「本地不可用」。绝不让 `mlx_lm.load()` 顺手去 HF 隐式
-                    #       下载 938 MB（「模型绝不自动下」那条铁律在运行期的缺口；
-                    #       离线时更是**每一句**都白等一次 load 失败）。
-                    if self._load_err is not None:
-                        raise RuntimeError(self._load_err)
-                    if not local_model_present():
-                        self._load_err = (
-                            "本地模型没装（可选）；跑 `cl doctor` 看怎么装")
-                        raise RuntimeError(self._load_err)
-                    _configure_mlx()
-                    # ⚠️ **赋值顺序是这里的关键**: 必须先 tokenizer、后 model。
-                    # 上面那句 `if self._model is None` 是**无锁**读的 —— 它把
-                    # `_model` 当成就绪标志。原来写成 `self._model, self._tokenizer
-                    # = load(...)`, 是两条 STORE_ATTR 且 **model 在前**: 另一线程可能
-                    # 恰在两条之间读到 `_model` 已非 None, 于是跳过整段、拿着还是 None
-                    # 的 `_tokenizer` 去 `apply_chat_template` → AttributeError。
-                    # 换成 tokenizer 先落地, 则"看到 _model 有值"就等于"两样都齐了"。
-                    try:
-                        # ⚠️ 取数期间**强制离线**（2026-10-01 深度审查）：上面那道
-                        #    「在不在」是启发式（目录里任一非空文件就算在），半截缓存
-                        #    它能放行，然后 `load()` 对着 HF 的 repo id **联网补全**
-                        #    —— 「绝不自动下」真正的关门点在**会下载的那一层**。
-                        #    模型齐 → 离线可加载；不齐 → 立刻失败进闩（消息会出声）。
-                        #    ⚠️ 只影响本进程：`cl doctor` 的下载走独立子进程，不受影响。
-                        import os as _os
-                        _os.environ.setdefault("HF_HUB_OFFLINE", "1")
-                        from mlx_lm import load
-                        _m, _tok = load(self._model_name)
-                    except Exception as e:                    # noqa: BLE001
-                        # ⚠️ 失败也上闩（2026-10-01 审查 F2）：原来每次调用都重试
-                        # `load()` —— 云端挂着的时候那是**每一句**一次失败尝试。
-                        self._load_err = (f"本地模型加载失败({type(e).__name__}: "
-                                          f"{str(e)[:80]})")
-                        raise
-                    self._tokenizer = _tok
-                    self._model = _m
-
-    def warmup(self) -> None:
-        self._ensure()
-
-    def local_ready(self) -> bool:
-        """本地引擎**现在**能不能用（只看在不在 / 闩没闩，**不加载**）。
-
-        ⚠️ `EngineRouter._fallback` 的广播用它说实话（2026-10-01 审查 F2）：
-           本地模型是**可选**的，没装还说「已降级本地引擎」会让用户以为有兜底。
-        """
-        if self._load_err is not None:
-            return False
-        return local_model_present()
-
-    def _apply_chat(self, user_content: str, system: str = SYSTEM_PROMPT) -> str:
-        return _apply_chat_generic(self._tokenizer, user_content, system)
-
-    def add_terms(self, words) -> list:
-        """把**课上现出现的候选词**并进候选池（链路体检 ⭐2）。返回真加进去的那些。
-
-        ⚠️ 走 `merge_terms` —— 池子的**唯一定义点**（理由见它的 docstring：外面拼
-           会绕过 `load_terms` 的去重，重复条目白占一个 `max_dyn` 名额）。
-        ⚠️ 只进候选池（`dyn` 那一档），**不进 `course_terms`**（每句全量注入那档）——
-           这条纪律 2026-09-29 就定了（见 `__init__` 里那段实测）。
-        ⚠️ 每句都会读 `self._terms`，所以**中途追加立刻生效**，不需要重启引擎。
-        """
-        new = [w for w in merge_terms(words) if w.lower() not in
-               {t.lower() for t in self._terms}]
-        if new:
-            self._terms = merge_terms(self._terms, new)
-        return new
-
-    def _terms_context(self, en: str, context: list[str], zh: bool = True) -> str:
-        ctx = context[-self._max_ctx:] if self._max_ctx > 0 else []
-        ctx_block = "\n".join(f"- {c}" for c in ctx) if ctx else "(无)"
-        terms = select_terms(en, self._terms, core=self._core,
-                             always=self._course_terms, stats=self.term_stats)
-        # ⭐ #4 B2：译名段 = 逐句变化的内容 → 放在上下文之后、待处理这句之前。
-        #    `zh=False`（只矫正英文那些调用点）：EN-only 模式没有译文，不注入译名（白占 token）。
-        zblock = term_zh_block(en, self._term_zh) if zh else ""
-        return (f"{domain_block(self._domain)}"
-                f"课程术语:\n{terms}\n\n"
-                f"最近上下文(已校正):\n{ctx_block}\n\n"
-                f"{zblock}"
-                f"待处理这句 ASR:\n{en}")
-
-    def _user_content(self, en: str, context: list[str]) -> str:
-        return self._terms_context(en, context)
-
-    # ---- 流式(主用) ----
-    def fix_and_translate_stream(self, en: str, context: list[str],
-                                 on_zh=None, on_en=None, _retried: bool = False) -> Result:
-        from mlx_lm import stream_generate
-        from mlx_lm.sample_utils import make_sampler
-        self._ensure()          # auto 模式下云端首次失败才走到这里, 那时模型还没加载
-        prev_zh = self._last_zh                  # 回显检测的参照：进来时的"上一句"，重试也比这个
-        parser = _StreamParser(on_zh or (lambda s: None), on_en or (lambda s: None))
-        prompt = self._apply_chat(self._user_content(en, context))
-        with self._lock:
-            for resp in stream_generate(
-                    self._model, self._tokenizer, prompt=prompt,
-                    max_tokens=220, sampler=make_sampler(temp=0.2, top_p=0.9)):
-                parser.feed(getattr(resp, "text", "") or "")
-            # 刻意**不**调用 mx.clear_cache(): 频繁释放/重建 Metal 缓冲是
-            # IOGPUFamily 驱动断言的已知竞态窗口(见 _configure_mlx 注释)。
-        res = guard_zh_result(parser.result(en), en)
-        res = Result(res.en_fixed, clean_local_zh(res.zh))
-        # 翻成了上一句 → 不带上下文重来一次（只重试一次；仍是回显就保留，宁可有译文）。
-        # 屏上已流出的那版会被定稿覆盖，这里只管最终 res。
-        if context and not _retried and zh_echoes_previous(res.zh, prev_zh):
-            retry = self.fix_and_translate_stream(en, [], None, None, _retried=True)
-            self.echo_retries += 1
-            if retry.zh and not zh_echoes_previous(retry.zh, prev_zh):
-                res = retry
-        if not _retried:
-            self._last_zh = res.zh or self._last_zh
-        return res
-
-    # ---- 只矫正英文(关闭中文翻译时用): 不出译文, 但仍吃上下文修 ASR 错听 ----
-    def fix_stream(self, en: str, context: list[str], on_en=None) -> str:
-        """返回上下文矫正后的英文。失败由调用方兜底(保留原始 ASR)。"""
-        from mlx_lm import stream_generate
-        from mlx_lm.sample_utils import make_sampler
-        self._ensure()
-        prompt = self._apply_chat(self._terms_context(en, context, zh=False), FIX_SYSTEM)
-        buf: list[str] = []
-        with self._lock:
-            for resp in stream_generate(
-                    self._model, self._tokenizer, prompt=prompt,
-                    max_tokens=180, sampler=make_sampler(temp=0.1, top_p=0.9)):
-                d = getattr(resp, "text", "") or ""
-                if d:
-                    buf.append(d)
-                    if on_en:
-                        on_en(d)
-        return _clean_fix("".join(buf), en)
-
-    # ---- 非流式封装(测试/兼容) ----
-    def fix_and_translate(self, en: str, context: list[str]) -> Result:
-        return self.fix_and_translate_stream(en, context)
-
-    # ---- 草稿轻量翻译(无术语表/无上下文, 只为尽早给一版中文) ----
-    def translate_draft(self, en: str, on_zh=None) -> str:
-        from mlx_lm import stream_generate
-        from mlx_lm.sample_utils import make_sampler
-        self._ensure()
-        # ⭐ #4 B2：命中的译名放在这句之前（草稿 prompt 只有一句，译名段就是它的"变化段"）。
-        #    无命中 → ""（与旧行为逐字相同）。
-        user = term_zh_block(en, self._term_zh) + en
-        prompt = _apply_chat_generic(self._tokenizer, user, DRAFT_SYSTEM)
-        buf: list[str] = []
-        with self._lock:
-            for resp in stream_generate(self._model, self._tokenizer, prompt=prompt,
-                                        max_tokens=120,
-                                        sampler=make_sampler(temp=0.1, top_p=0.9)):
-                buf.append(getattr(resp, "text", "") or "")
-        text = "".join(buf).strip()
-        if on_zh and text and _has_cjk(text):    # 英文回显不是译文, 不上屏
-            on_zh(text)
-        return text
-
-
-def load_translator(model: str, glossary_path: str | None, max_context: int = 2,
-                    course: str | None = None, extra_terms: list | None = None,
-                    term_zh: dict | None = None):
-    return Translator(model, glossary_path, max_context, course=course,
-                      extra_terms=extra_terms, term_zh=term_zh)

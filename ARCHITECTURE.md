@@ -18,7 +18,7 @@
 |---|---|---|
 | **A 未提交状态** | 13 条未提交，`polish.py`/`tests/` **不在 HEAD** | ✅ **已解决** —— 两者都已入库（`git ls-files` 可验） |
 | **B 环境不可复现** | 无 `requirements.txt`/`pyproject.toml`/`uv.lock` | ✅ **已解决** —— `requirements.txt` 已存在（v3.4.0 加的） |
-| **C GPU 驱动崩溃** | `IOGPUFamily` 断言 panic 历史 | ⚠️ **仍成立** —— 历史未消，`translator._configure_mlx` 仍是缓解措施 |
+| **C GPU 驱动崩溃** | `IOGPUFamily` 断言 panic 历史 | ⚠️ **已随之消失** —— 2026-11-20 删掉本地 mlx 引擎后程序不再碰 GPU 推理；历史记录见 `docs/DESIGN.md` |
 | **D `_use_cloud` 无锁** | 未声明的不变量 | ✅ **已解决** —— 已加 `_state_lock`，把"判断+翻转"并成一步 |
 | **E 错误吞噬面大** | 大量 `except Exception` | ⚠️ **仍成立，且是刻意的**（上课不能崩）。后来加了 `CLASSLIVE_DEBUG=1` 开关 |
 | **F 测试的形状** | R1/R4 **复刻**实现逻辑 | ⚠️ **一半成立**（2026-10-11 核对）—— R4 已改调生产 `note_path_for`；R1 的并发用例仍是手抄 `fake_worker` |
@@ -51,9 +51,9 @@ ClassLive 是一个**跑在作者自己 Mac 上的实时英译中课堂字幕工
 | 层 | 选型 | 说明 |
 |---|---|---|
 | 语言/运行时 | Python 3.12（住在 `ClassLive.app/Contents/` 里） | ⚠️ **2026-09-25 更正**：`requirements.txt` **已有**（v3.4.0 起）；`pyproject.toml` / `setup.py` / `uv.lock` 仍无。⚠️ **2026-09-26 更正**：原写 `uv venv .venv`，那个布局已弃用、目录已删 —— 见下方「入口与启动链」的说明 |
-| ASR | `sherpa-onnx` + NVIDIA **Parakeet-TDT-0.6B-v3 int8** | CPU, 实测 ~28× 实时; 模型在 `~/models/parakeet-tdt-0.6b-v3-int8` |
+| ASR | `sherpa-onnx` + **Nemotron Speech Streaming EN 0.6B int8**（2026-11-20 桌面 D1 起是**唯一**本地识别模型：流式出草稿 + 拿整段重新解码当定稿兜底） | CPU; 模型在 `~/models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25`；**可选**，没装就全走云端 |
 | VAD | `sherpa-onnx` + **Silero VAD** | 缺失时回退 `_EnergyVad`(能量阈值) |
-| 本地翻译 | **`mlx-lm`** + `Qwen3-1.7B-4bit`(GPU) | 断网兜底; 已实测 3B/4B 必 OOM |
+| 本地翻译 | **已删**（原 `mlx-lm` + `Qwen3-1.7B-4bit`，2026-11-20 桌面 D1 移除） | 断网 / 云端连不上 = 那几句没有中文，英文字幕照常 |
 | 云端翻译 | **DeepSeek** OpenAI 兼容接口(`httpx`) | 默认 `deepseek-flash`; 必须显式 `thinking:{type:disabled}` |
 | 音频采集 | `sounddevice`(回调式) + `ffmpeg`(子进程解码文件) + `numpy` | 16kHz mono float32 |
 | UI | **PyObjC / AppKit / Quartz**(`NSPanel` + `NSVisualEffectView` + `NSScrollView`) | 无 GUI 会话时回退 `TerminalUI` |
@@ -77,15 +77,15 @@ ClassLive 是一个**跑在作者自己 Mac 上的实时英译中课堂字幕工
 cl → main.run()
   ├ load_source()            capture.py      音源(最先打开, 失败就友好退出)
   │     └ _NormalizedSource  capture.py      PeakNormalizer 滑动峰值补电平
-  ├ load_asr()               asr.py          Parakeet(内部带锁)
-  ├ load_translator() ×2     translator.py / cloud_translator.py   本地 + 云端
+  ├ load_draft_engine_async  draft_engine.py Nemotron(后台线程建; 缺模型 = 本节无草稿)
+  ├ load_cloud_translator()  cloud_translator.py   只有云端（本地引擎已删）
   ├ ObsidianWriter()         obsidian_writer.py   立刻建 sessions/<日期>_<时>_<课>.md
   └ Segmenter()              vad.py          回调: on_partial / on_utterance_end
         │
         │  主线程 while running:  src.poll() → seg.accept(chunk) → drain() → ui.pump()
         │
         ├─ on_partial  → latest.put(buf)   [_Latest: latest-wins 槽]
-        │     └ 草稿线程 partial_worker: asr.transcribe(最近 10s) → drafts
+        │     └ 草稿线程 partial_worker: draft_engine.transcribe(整段流) → drafts
         │           └ 节流(≥2.5s 且新增 ≥6 词)→ draftq → 定稿线程 → drafts_zh
         │
         └─ on_utterance_end → finalq
@@ -132,9 +132,10 @@ cl → main.run()
 |---|---|---|
 | `capture.py` | `load_source(source, path, speed) -> src`; src 必须提供 `poll() -> chunk｜None` / `is_done()` / `close()`; 块 = 1600 采样 float32 单声道; poll 非阻塞; **内部已套电平归一化**; 另 `load_file(path)`, `PeakNormalizer.process(chunk)` | **深**。3 个 adapter(mic 的 `CallbackSource`、系统声的 `CallbackSource`、`FileSource`)加一层 `_NormalizedSource` decorator, 全部藏在 3 个方法后面 |
 | `vad.py` | `Segmenter(on_partial, on_utterance_end)`; `accept(chunk)` / `flush()` / `dur`; **回调必须立刻返回**; 隐含语义「什么时候算说完一句」 | **深**。梯级静音阈值 + 12s 硬上限 + 300ms pre-roll + 2 个 VAD adapter 全在身后 |
-| `asr.py` | `load_asr(dir) -> asr`; `asr.transcribe(samples) -> str`; 线程安全; <0.1s 返回 `""` | **深而窄**。只有 1 个 adapter(Parakeet)→ 按定义这是**假想 seam**(docstring 自己说「便于替换成 whisper」) |
-| `translator.py` | 实例: `warmup()` / `fix_and_translate_stream(en, ctx, on_zh, on_en) -> Result` / `fix_stream(en, ctx, on_en) -> str` / `translate_draft(en, on_zh) -> str`。**另有 7 个模块级自由函数**: `load_terms` / `course_term_list` / `course_title` / `core_terms` / `course_terms_path` / `select_terms` / `domain_block` | **混合**。实例 interface 深;术语部分是一组扁平自由函数, 大 interface、薄实现 → **浅** |
-| `cloud_translator.py` | 与上表**逐方法同名**(鸭子类型, 无 `Protocol`/ABC), 外加 `probe() -> bool`; 模块级 `load_api_key()` | **深**(240 行实现藏在 4 个方法后), 但**契约靠约定维护**, 没有任何地方写下这个 interface |
+| `asr.py` | 现在只剩两个**共用件**（2026-11-20 起识别器类都删了）：`_find_file(dir, patterns)`（按精确名取模型文件）与 `is_degenerate(text)`（复读/幻觉判定） | **浅**。它曾经是「ASR 抽象」，但只有一个真 adapter 时就退化成两个纯函数 —— 识别本身在 `draft_engine.py`（流式）与 `nemotron_final.py`（整段）里 |
+| `nemotron_final.py` | `NemotronFinal(model_dir)`；`transcribe_lp(samples) -> (text, None)`；**懒加载**（第一次调用才建 recognizer）；线程安全 | **深**。「喂整段 + 补尾 + input_finished + 解码」这一串藏在 2 个方法后面，且它自带一份 recognizer（与草稿线程分开） |
+| `translator.py` | **只剩纯函数**（2026-11-20 起实例类 `Translator` 已删）: `Result` / `_StreamParser` / `_clean_fix` / `guard_zh_result` + 术语那一组: `load_terms` / `course_term_list` / `course_title` / `core_terms` / `course_terms_path` / `select_terms` / `select_term_zh` / `term_zh_block` / `domain_block` | **混合**。共用件被 `cloud_translator` 与判据 import；术语部分是一组扁平自由函数, 大 interface、薄实现 → **浅** |
+| `cloud_translator.py` | `warmup()` / `fix_and_translate_stream(en, ctx, on_zh, on_en) -> Result` / `fix_stream(en, ctx, on_en) -> str` / `translate_draft(en, on_zh) -> str` / `probe() -> bool`; 模块级 `load_api_key()`。⚠️ 2026-11-20 起它是**唯一**的翻译实现（本地那份删了） | **深**(240 行实现藏在 4 个方法后), 但**契约靠约定维护**, 没有任何地方写下这个 interface |
 | `main.py` | 对外的 interface 只有「命令行参数 + stdout」。内部: `EngineRouter`、`TerminalUI`、`_Latest` 三个 class + `is_incomplete` / `split_sentences` / `all_settled` 三个纯函数 | **run() 是一个 ~380 行、8 个 queue、4 个线程的闭包**。实现极深, interface 却不可调用——测不进流水线 |
 | `overlay.py` | 构造参数 = 3 个回调(`on_quit`/`on_flag`/`on_translate`);方法 13 个(`show`/`close`/`add_draft`/`draft_zh`/`terms`/`stream_zh`/`stream_en`/`finalize`/`notice`/`pump`/`set_translating` + 按钮回调) | **浅**。interface 大, 且 AppKit 细节(panel/scrim/弱引用 `_targets`/菜单栏)与 interface 处在同一层 |
 | `transcript_view.py` | 13 个方法(`set_content`/`set_items`/`set_live`/`set_frame`/`set_collapsed`/`is_at_bottom`/`scroll_to_bottom`/`following`/`mark_dirty`/`flush_if_due`/`tick`/…), 池化槽位靠构造参数注入尺寸 | **浅**。跟随状态机 + 视图回收确有价值, 但 interface 与实现**等比**, 测试无法从 interface 驱动 |
@@ -161,8 +162,8 @@ cl → main.run()
 |---|---|---|---|
 | A | **音源** | `capture.load_source()` → `poll()/is_done()/close()` | **真实**(3 个 adapter: mic / 系统声 / 文件) |
 | B | **VAD** | `vad._make_vad()` → `is_speech(chunk)` | **真实**(`SileroVad` + `_EnergyVad`), 但它是**私有** seam, 由 try/except 兜底选出来, 不是设计出来的 |
-| C | **ASR** | `asr.load_asr()` → `transcribe(samples)` | **假想**(只有 Parakeet 一个 adapter) |
-| D | **翻译引擎** | `fix_and_translate_stream` / `fix_stream` / `translate_draft` / `warmup` | **真实**(mlx 本地 + DeepSeek 云端)。证据: `tests/test_audit_regressions.py` 里已经出现 `FakeLocal` / `FakeCloud` —— 测试已经在用这个 seam 了, 却没有一个地方写下它的形状 |
+| C | **ASR** | `draft_engine.load_draft_engine*()`（流式，永不抛）+ `nemotron_final.NemotronFinal`（整段，永不抛） | **退化成一个 adapter**（2026-11-20 起本地只有 Nemotron）→ 按定义是**假想 seam**；留着是因为两条使用方式（流 vs 整段）确实不同 |
+| D | **翻译引擎** | `fix_and_translate_stream` / `fix_stream` / `translate_draft` / `warmup` | **曾是真实**（mlx 本地 + DeepSeek 云端）；2026-11-20 删掉本地那份后只剩云端一个 adapter → 现在是**假想 seam**，`Main.EngineRouter` 仍在用它的形状（含 `probe()`） |
 | E | **UI** | `main.drain()` 调 `ui.*` | **真实**(`TerminalUI` + `Overlay`), 但契约不成文: `TerminalUI` 没有 `close`(靠 `getattr` 兜), `notice` 是本次 diff 才给 `TerminalUI` 补上的 |
 | F | **LLM / HTTP 调用** | —— | **不存在**。见下 |
 | G | **持久化** | `ObsidianWriter.append()` 写的 Markdown ↔ `_parse()` 读的同一份文本 | **真实的隐式 seam**: 文件格式同时是崩溃日志、解析输入、`cl last` 的显示格式(`cl` 里 grep `^> \[!abstract\]`) |
@@ -262,9 +263,12 @@ cl → main.run()
 
 仓库里没有 `requirements.txt` / `pyproject.toml` / `setup.py` / `uv.lock`(实测四者皆无), 依赖只存在于 `docs/DESIGN.md` 的安装片段里。换机、重装、或一年后回来看, 装不回来。对一个要开源的仓库来说, 这是比任何模块划分都更靠前的债。
 
-### C. GPU 驱动崩溃(可用性风险) —— ⚠️ **仍成立（2026-09-25 核实）**
+### C. GPU 驱动崩溃(可用性风险) —— ✅ **已随本地 mlx 引擎一起消失（2026-11-20）**
 
-`docs/DESIGN.md` 记录 2026-09-10 本程序触发过一次 `IOGPUFamily` 驱动断言**内核崩溃**(非 OOM)。缓解措施已写在 `translator._configure_mlx`(`set_cache_limit(2GB)` + 不主动 `clear_cache`), 但根因指向上游 MLX 的已知 bug 族。一个正在上课用的工具带着内核崩溃风险, 是这份债里唯一会直接打断课堂的一条。
+`docs/DESIGN.md` 记录 2026-09-10 本程序触发过一次 `IOGPUFamily` 驱动断言**内核崩溃**(非 OOM)，
+当时的缓解是 `translator._configure_mlx`。2026-11-20（桌面 D1）本地翻译引擎（mlx-lm）整个删掉，
+程序不再做任何 GPU 推理 → 这条路的风险源没了，`_configure_mlx` 也一起删了。
+⚠️ 历史记录留在 `docs/DESIGN.md`（别删，它是"为什么曾经不敢频繁 `clear_cache`"的唯一解释）。
 
 ### D. `EngineRouter._use_cloud` 无锁 —— ✅ **已解决（2026-09-25 核实）**
 

@@ -67,12 +67,14 @@ def t_unknown_dir_stays_lenient():
         assert not doctor.model_present(str(d))
 
 
-@case("注册表里 parakeet / nemotron 都声明了四个文件")
+@case("注册表里那个目录型识别模型声明了四个文件")
 def t_registry_declared():
-    for m in (models.PARAKEET, models.NEMOTRON):
+    # ⚠️ 2026-11-20（桌面 D1）：只剩 Nemotron 一条（Parakeet 已从注册表删掉）。
+    for m in (models.NEMOTRON,):
         req = models.required_files_for(m.path)
         assert req == ("encoder.int8.onnx", "decoder.int8.onnx",
                        "joiner.int8.onnx", "tokens.txt"), (m.key, req)
+    assert models.by_key("parakeet") is None, "Parakeet 还在注册表里（应该已经删了）"
 
 
 def main() -> int:

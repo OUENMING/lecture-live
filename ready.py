@@ -3,8 +3,8 @@
 
 ## 它解决的问题
 
-新用户今天要走 **6 条终端命令**（`README.md:200-247`：`./install.sh` → 下 Parakeet →
-下 VAD → 拷术语表 → 下 Whisper）。**中间任何一步失败，双击进去的界面什么都不说** ——
+新用户今天要走 **几条终端命令**（`./install.sh` → 下 VAD → 拷术语表；
+Nemotron 可选、面板上一点就下）。**中间任何一步失败，双击进去的界面什么都不说** ——
 面板今天**根本没有模型概念**。缺模型时 `doctor.py` 只在终端打印命令。
 
 这个模块算「三项就绪」，面板把它画成顶部一条就绪条。
@@ -17,9 +17,8 @@
    那条「把读失败显示成 0，等于跟用户谎报」。
 2. ⚠️ **`stale` 不自动换。** 换版是**用户的决定**（与 `doctor.py` / `update.py`
    那两处「大模型要不要下是用户的决定」一致）。只说出来，给按钮。
-3. ⚠️ **Qwen3（本地翻译模型）绝不自动下。** 它是**可选的**，由用户点才下。
-   而它今天恰恰是**静默下**的（`mlx_lm.load()` 隐式 `snapshot_download` 938 MB）——
-   本模块把它搬到明面上。
+3. ⚠️ **可选模型（Nemotron，464 MB）绝不自动下。** 由用户点才下 —— 本模块把它
+   摆在就绪条上（`offer_draft`），而不是等他在课上发现草稿没了。
 
 ## ⚠️ 纯逻辑，不碰 AppKit
 
@@ -74,10 +73,9 @@ def required_left(states: dict) -> list:
     ⚠️ **只有 `missing` 算缺。** `unknown`（老用户没戳）与 `stale`（版本对不上）
        都**不算** —— 它们能用，重下是白烧流量（纪律 1、2）。
 
-    ⚠️ `doctor.model_state()` 的词表比本文件用到的多一个 **`incomplete`**（HF 缓存
-       下了一半 = 文件在但**用不了**，2026-10-12 加）。它只可能出现在 `at_hf` 的模型
-       （Qwen3，**可选**）上，所以既不进"还差"清单、也不影响本条判据；
-       而 `engine_item` 按 `local_state != "ok"` 判 → 会照常给出下载入口。
+    ⚠️ `doctor.model_state()` 的词表比本文件用到的多一个 **`incomplete`**（缓存下了
+       一半 = 文件在但**用不了**）。它只可能出现在目录型模型上 —— Nemotron 是**可选**
+       的，所以既不进"还差"清单、也不影响本条判据。
 
     ⚠️⚠️ **查不到的那一项按 `unknown` 算，不许按 `missing` 算**（2026-09-29 修）。
        `states` 可能是**部分字典**（上游 `model_states` 失败 / 调用方漏填），
@@ -92,11 +90,15 @@ def required_left(states: dict) -> list:
 def models_item(states: dict, *, draft_wanted: bool = False) -> dict:
     """第二项。`states` = `{path: state}`，由 `model_states()` 算。
 
-    `draft_wanted` = 这台机器装了流式草稿模型会不会用上（`draft_engine.want_model()`，
-    调用方算）。必下的都齐了、它又还没装 → 结果带 `offer_draft=True`，点这一项就下它。
-    ⚠️ 2026-10-14 起它算**必装**（作者），但**不拦开课**：状态照旧 OK（缺它只是草稿退回 Parakeet），
-       面板另弹一张「还没装」小卡；**开课前不自动下**（464 MB 会和上课抢 Wi-Fi），关掉面板 /
-       下课退出后由 `update.spawn_draft_model_download` 在后台静默下。
+    `draft_wanted` = 用户还想不想要草稿（`draft_engine.want_model()`，调用方算）。
+    必下的都齐了、Nemotron 又还没装 → 结果带 `offer_draft=True`，点这一项就下它。
+
+    ⚠️ **2026-11-20（桌面 D1）**：Nemotron 是本地**唯一**的识别模型，但仍是**可选**
+       （Owen 改口：没装也能上课，全走云端）。所以这一格**照旧 OK**、不拦开课，
+       只是把「推荐下载」那句话带上 —— 好处是一句话能说清的：
+       **断网 / 云端识别失败时仍有英文转录**（草稿不再回改是附带的）。
+       **开课前不自动下**（464 MB 会和上课抢 Wi-Fi），关掉面板 / 下课退出后由
+       `update.spawn_draft_model_download` 在后台静默下。
     """
     out = _models_item(states)
     if (draft_wanted and out["state"] == OK
@@ -129,26 +131,20 @@ def _models_item(states: dict) -> dict:
             "detail": "齐了", "left": [], "mb": 0.0}
 
 
-def engine_item(*, has_key: bool, local_state: str) -> dict:
-    """第三项 —— ⭐ **这是个选择，不是一个状态**。
+def engine_item(*, has_key: bool) -> dict:
+    """第三项 —— 翻译引擎。**只有云端**（2026-11-20 桌面 D1 删了本地 mlx 引擎）。
 
-    ⚠️ 两边都**不选也能上课**：没配 key 时现状就回退本地。所以这一项永远
-       不返回 TODO（那会让整条就绪条看起来"没准备好"，而实际上可以上课）。
-    ⚠️ **本地模型绝不自动下**（纪律 3）—— 只给一个 [下载] 动作。
+    ⚠️ 永远不返回 TODO：没 key 也能上课（只是没中文），标成 todo 会让整条就绪条
+       看起来"没准备好"。这一项是**入口**，不是门槛。
+    ⚠️ 这里**不再有 `offer_local`** —— 没有本地引擎可下，别给一个按了没反应的按钮。
     """
     if has_key:
         return {"key": ENGINE, "state": OK, "label": "翻译引擎",
-                "detail": "云端翻译（推荐）", "offer_local": local_state != "ok"}
-    if local_state == "ok":
-        return {"key": ENGINE, "state": OK, "label": "翻译引擎",
-                "detail": "本地模型（免费 · 离线可用 · 质量不如云端）",
-                "offer_local": False}
+                "detail": "云端翻译"}
     return {"key": ENGINE, "state": UNKNOWN, "label": "翻译引擎",
-            # ⚠️ 2026-09-30 改的措辞：原来写「云端翻译（推荐）· 或下载本地模型」——
-            #    读起来像**说明**；改成「点一下填 key」才像**入口**
-            #    （那一项现在真的能点了，见 `entry_panel.on_ready_click`）。
-            "detail": "点一下填 key（推荐）· 或下本地模型",
-            "offer_local": True}
+            # ⚠️ 2026-09-30 改的措辞：原来写「云端翻译（推荐）」读起来像**说明**；
+            #    「点一下填 key」才像**入口**（见 `entry_panel.on_ready_click`）。
+            "detail": "点一下填 key（推荐）"}
 
 
 def vault_item(vault: str | None) -> dict:
@@ -198,18 +194,8 @@ def items(*, perm: str, states: dict, has_key: bool,
     """
     return [mic_item(perm),
             models_item(states, draft_wanted=draft_wanted),
-            engine_item(has_key=has_key,
-                        local_state=states.get(_local_path(), "missing")),
+            engine_item(has_key=has_key),
             vault_item(vault)]
-
-
-def _local_path() -> str:
-    """本地翻译模型（Qwen3）那一条的 `path`。**取自注册表，不在这里写死。**
-
-    ⚠️ 不能写成「第一个 `required=False` 的」—— Whisper 3.9.0 起也是可选的，
-       而且排在 Qwen3 前面，那样「本地引擎」状态会去看 Whisper（R11）。
-    """
-    return models.QWEN.path
 
 
 def _mb(v: float) -> str:

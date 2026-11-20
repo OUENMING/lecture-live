@@ -1224,38 +1224,83 @@ with _mock.patch.object(_doctor, "model_present", lambda p: False):
           "models" in [s["key"] for s in update.pending_steps()],
           str([s["key"] for s in update.pending_steps()]))
 
-# ============== B15 ⭐ 流式草稿模型：缺了且用得上 -> 卡片列一条 soft 步骤 ==============
-# 作者 2026-10-11 拍板：Nemotron 可选但更新卡片主动提（不提的话 .app 用户永远拿不到 R3）。
-# 内存不够 / 手动 parakeet 的机器装了也用不上 -> 不提。下不成不算更新失败（soft）。
-print("\n--- B15 流式草稿模型进更新卡片 ---")
+# ============== B15 ⭐ 识别模型（Nemotron）：缺了且想要 -> 卡片列一条 soft 步骤 ==============
+# 作者 2026-10-11 拍板：Nemotron 可选但更新卡片主动提（不提的话 .app 用户永远拿不到它）。
+# ⭐ 2026-11-20（桌面 D1）：它仍是**可选**（没装也能全走云端），推荐理由改成
+#    「断网时也能有英文转录」；内存门已删，只剩开关 `CLASSLIVE_DRAFT_ENGINE=off`。
+#    下不成不算更新失败（soft）。
+print("\n--- B15 识别模型进更新卡片 ---")
 import os                                                                   # noqa: E402
 import draft_engine as _de                                                  # noqa: E402
 import models as _models                                                    # noqa: E402
 _NEM = _models.NEMOTRON.path
 _keys = lambda: [s["key"] for s in update.pending_steps()]                 # noqa: E731
-_GB = 2**30
 with _mock.patch.object(_doctor, "model_present", lambda p: p != _NEM), \
-        _mock.patch.object(_de, "_ram_bytes", lambda: 16 * _GB), \
         _mock.patch.dict(os.environ, {}, clear=False):
     os.environ.pop(_de.ENV, None)
-    _st = [s for s in update.pending_steps() if s["key"] == update.DRAFT_MODEL]
-    check("⭐⭐ 缺 Nemotron、16 GB、auto -> 列「下载流式草稿模型」且 soft", len(_st) == 1 and _st[0].get("soft") is True,
+    _st = [s for s in update.pending_steps() if s["key"] == update.DRAFT_MODEL]  # noqa: E501
+    check("⭐⭐ 缺 Nemotron、auto -> 列一条 soft 推荐步骤", len(_st) == 1 and _st[0].get("soft") is True,
           str(_keys()))
+    check("⭐ 推荐的语气：标题/理由里说的是「断网也能有英文转录」",
+          bool(_st) and "断网" in (_st[0].get("label", "") + _st[0].get("why", "")),
+          str(_st[:1]))
     check("⭐ 只缺可选的 -> 「下载模型」（必装那条）仍不列", "models" not in _keys(), str(_keys()))
-    with _mock.patch.object(_de, "_ram_bytes", lambda: 8 * _GB):
-        check("⭐ 8 GB 机器（auto 会选 Parakeet）-> 不提", update.DRAFT_MODEL not in _keys(), str(_keys()))
-    with _mock.patch.dict(os.environ, {_de.ENV: "parakeet"}):
-        check("⭐ 手动指定 parakeet -> 不提", update.DRAFT_MODEL not in _keys(), str(_keys()))
-with _mock.patch.object(_doctor, "model_present", lambda p: True), \
-        _mock.patch.object(_de, "_ram_bytes", lambda: 16 * _GB):
+    # ⭐ 内存门已删（2026-11-20）：算力小的机器也该装上 —— 没有第二个模型可退。
+    with _mock.patch.dict(os.environ, {_de.ENV: "off"}):
+        check("⭐ 手动关掉草稿（=off）-> 不提", update.DRAFT_MODEL not in _keys(), str(_keys()))
+with _mock.patch.object(_doctor, "model_present", lambda p: True):
     check("⚠️ 对照：Nemotron 已在 -> 不提", update.DRAFT_MODEL not in _keys(), str(_keys()))
 _calls = []
 # ⚠️ 要把「没装 + 用得上」钉住：不钉的话装过 Nemotron 的机器上 run_step 直接跳过、这条假红（2026-10-13 撞到）。
 with _mock.patch.object(update, "download_model", lambda m, say=None: _calls.append(m.key) or {"ok": False, "error": "x"}), \
-        _mock.patch.object(_doctor, "model_present", lambda p: False), \
-        _mock.patch.object(_de, "_ram_bytes", lambda: 16 * _GB):
+        _mock.patch.object(_doctor, "model_present", lambda p: False):
     _r = update.run_step(update.DRAFT_MODEL)
 check("⭐ run_step(draft_model) 只下 Nemotron、失败原样回报", _calls == ["nemotron"] and _r["ok"] is False, f"{_calls} {_r}")
+
+# ============== B16 ⭐⭐ 老版本升上来：必下名单变了（Parakeet → 没它，Nemotron 可选）==============
+# ⚠️ 2026-11-20（桌面 D1）：`models.MODELS` 从 (PARAKEET 必需, VAD, WHISPER, QWEN, NEMOTRON)
+#    变成 (VAD 必需, NEMOTRON 可选)。下面钉的是**老用户升级那一刻**的三件事：
+#      ① `models.py` 动了 → `models_changed=True`（面板 / 日志会说「模型清单有变化」）；
+#      ② `run_step("models")` **不再**去下 Parakeet —— 它已不在注册表里，下不了；
+#      ③ `offer()` 的「静默装」判据（`_quiet_ok`）在 `models.py` 变过时给 `False`
+#         —— 宁可退回「更新」那一格让用户点，也别在他背后换模型。
+print("\n--- B16 老版本升上来：必下名单变了 ---")
+check("⚠️ 前提：注册表里已经没有 parakeet / whisper / llm",
+      not ({"parakeet", "whisper", "llm"} & {m.key for m in _doctor.MODELS}),
+      str([m.key for m in _doctor.MODELS]))
+check("⭐⭐ 必下的只剩 VAD（Nemotron 是可选）",
+      [m.key for m in _doctor.MODELS if m.required] == ["vad"],
+      str([(m.key, m.required) for m in _doctor.MODELS]))
+
+# ② 真跑一遍「下载缺的模型」这一步：一个 key 都不该是 parakeet/whisper/llm。
+_dl_calls: list = []
+with _mock.patch.object(_doctor, "model_present", lambda _p: False), \
+        _mock.patch.object(update, "download_model",
+                           lambda m, say=None: _dl_calls.append(m.key) or {"ok": True, "error": ""}):
+    _r16 = update.run_step("models", on_line=lambda _s: None)
+check("⭐⭐ 升级后「下载模型」只下 VAD —— 不会再去下已删掉的 Parakeet",
+      bool(_r16.get("ok")) and _dl_calls == ["vad"], f"{_dl_calls} {_r16}")
+
+# ① `_models_changed` 说真话：两次提交之间碰过 models.py → True
+_tmp16, _seed16, _clone16 = new_world()
+release(_seed16, "0.0.2")
+(_seed16 / "models.py").write_text("MODELS = ()\n", encoding="utf-8")
+release(_seed16, "0.0.3")
+with _mock.patch.object(update, "pending_steps", lambda: []):
+    _o16 = update.offer()
+_pulled16 = update.pull()
+check("⭐⭐ models.py 动过 -> `models_changed=True`（升级会出声）",
+      bool(_pulled16.get("ok")) and _pulled16.get("models_changed") is True,
+      f"{_pulled16.get('ok')} {_pulled16.get('models_changed')!r}")
+
+# ③ `_quiet_ok`：models.py 在 HEAD..上游 之间动过 -> 不许静默装
+_head16 = update._git("rev-parse", "HEAD")[1]
+(_seed16 / "models.py").write_text("MODELS = ()\n# 再改一次\n", encoding="utf-8")
+release(_seed16, "0.0.4", "auto")
+sh("git", "fetch", "origin", cwd=_clone16)
+check("⭐⭐ models.py 在上游动过 -> 面板不静默装（退回让用户点）",
+      update._quiet_ok(_head16, update._git("log", "origin/main")[1]) is False,
+      "models.py 变过却判成可以静默装")
 
 # ======================= D. 开课前的更新入口（2026-10-12） =======================
 # offer() / apply() / defer_to_exit() / finish()。收尾子进程一律桩掉 —— 真跑会往**真的** .app python
@@ -1478,8 +1523,8 @@ check("⭐⭐ 已经装过 -> 跳过，不重下",
       "dl" not in _g and _g["r"]["ok"], str(_g))
 _g = _step(present=False, want=False)
 # 改坏：把那句 `if not draft_engine.want_model()` 去掉 -> 这条红
-#（内存不够 / 手动指定 parakeet 的机器会被下 464 MB 用不上的东西）。
-check("⭐⭐ 这台机器用不上（内存不够 / 手动 parakeet）-> 跳过",
+#（关掉了草稿的人会被下 464 MB 用不上的东西）。
+check("⭐⭐ 这台机器用不上（CLASSLIVE_DRAFT_ENGINE=off）-> 跳过",
       "dl" not in _g and _g["r"]["ok"], str(_g))
 _g = _step(present=False, want=True)
 check("⭐ 该下的时候**真的下**（别把下载整个弄没了）", _g.get("dl") is True, str(_g))

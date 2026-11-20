@@ -5,14 +5,17 @@
 
 ## ⚠️ 本文件钉住一个**已复现**的真缺陷（2026-10-12 全仓 OCR 审查）
 
-`load_final_engine("whisper", …)` 原来**直接返回 `FinalASR`**，而 `FinalASR.transcribe()`
-返的是 `FinalResult`（`final_asr.py:295`）—— **不是 `str`**。
+`load_final_engine("<本地那一档>", …)` 原来**直接返回 `FinalASR`**，而 `FinalASR.transcribe()`
+返的是 `FinalResult` —— **不是 `str`**。
 `replay.on_end` 拿它当定稿文本存进 `u["final"]`，收尾 `evaluate()` 里
 `" ".join(u["final"] …)` 就 `TypeError: expected str instance, FinalResult found`。
 
-⚠️ 而 **`--final` 的默认值就是 `whisper`**（`scripts/real_class_slices.sh` 也不覆盖）
+⚠️ 而 **`--final` 的默认值就是本地那一档**（`scripts/real_class_slices.sh` 也不覆盖）
 → **默认那条路必崩**，且回放要跑完好几分钟才在收尾处炸，量具白跑一趟。
-旁边的 `cloud` 分支早就用一层适配做了 `r.text` 提取 —— 缺的只是把 `whisper` 也走同一层。
+旁边的 `cloud` 分支早就用一层适配做了 `r.text` 提取 —— 缺的只是把本地那档也走同一层。
+
+⚠️ 2026-11-20（桌面 D1）：本地那档从 `whisper` / `parakeet` 变成 `nemotron`
+（流式模型拿整段重新解码）。判据本身（**必须过 `_text_only`**）一个字没变。
 
 ## 为什么能测（不加载真模型）
 
@@ -53,7 +56,7 @@ def main() -> int:
     SE = _load_stream_eval()
     calls: list = []
 
-    def _fake_load_final(model_dir, draft_asr, allow_cloud, **kw):
+    def _fake_load_final(model_dir, allow_cloud, **kw):
         calls.append({"model_dir": model_dir,
                       "allow_cloud": bool(allow_cloud()) if callable(allow_cloud) else None})
         calls[-1].update(kw)
@@ -61,24 +64,24 @@ def main() -> int:
         class _FakeASR:
             def transcribe(self, buf):
                 # ⭐ 生产形状：返 FinalResult，**不是 str**
-                return FinalResult("定稿文本", "local-whisper", None, 1.0, False,
-                                   ("local:whisper",))
+                return FinalResult("定稿文本", "local-nemotron", None, 1.0, False,
+                                   ("local:nemotron",))
         return _FakeASR()
 
     orig = final_asr.load_final
     final_asr.load_final = _fake_load_final
     try:
-        got = SE.load_final_engine("whisper", "/tmp/不存在的模型目录", draft_asr=None)
+        got = SE.load_final_engine("nemotron", "/tmp/不存在的模型目录")
     finally:
         final_asr.load_final = orig
 
-    check("⭐ whisper 分支确实走了 `final_asr.load_final`（那层容错不能自己重写）",
+    check("⭐ 本地那档确实走了 `final_asr.load_final`（那层容错不能自己重写）",
           len(calls) == 1 and calls[0]["model_dir"] == "/tmp/不存在的模型目录", str(calls))
-    check("⭐ whisper 分支给的是 `allow_cloud=lambda: False`（回放不许偷偷上云）",
+    check("⭐ 本地那档给的是 `allow_cloud=lambda: False`（回放不许偷偷上云）",
           calls and calls[0]["allow_cloud"] is False, str(calls[:1]))
 
     r = got.transcribe(None)
-    # 改坏：把 `whisper` 分支改回 `return final_asr.load_final(...)`（不走 `_text_only`）-> 这两条红。
+    # 改坏：把本地那档改回 `return final_asr.load_final(...)`（不走 `_text_only`）-> 这两条红。
     check("⭐⭐ `transcribe()` 返回的是 **str**（不是 `FinalResult`）",
           isinstance(r, str), f"{type(r).__name__}: {r!r}")
 
@@ -90,16 +93,14 @@ def main() -> int:
     check("⭐⭐ `\" \".join(...)` 不炸 —— `evaluate()` 里逐字就是这么用的",
           join_ok, joined)
     check("⭐ 顺手记下 `last_source`（事后要能回答「这段走的是哪条路」）",
-          getattr(got, "last_source", None) == "local-whisper",
+          getattr(got, "last_source", None) == "local-nemotron",
           repr(getattr(got, "last_source", None)))
     check("⭐ `last_fell_back` 也在（用生产现成的字段，别拿 source 字符串猜）",
           getattr(got, "last_fell_back", None) is False)
 
-    # ⚠️ `parakeet` 分支是**直通**（返草稿 ASR 本身），别顺手也包一层 ——
-    #    它的 `transcribe` 返的就是 str，包了反而多一层。
-    sentinel = object()
-    check("⭐ `parakeet` 分支保持直通（不额外包）",
-          SE.load_final_engine("parakeet", "/x", draft_asr=sentinel) is sentinel)
+    # ⚠️ 两个档位都得过 `_text_only` —— 2026-11-20 之后没有"直通"那一档了。
+    check("⭐ 只有两档（nemotron / cloud）—— 旧的 whisper / parakeet 已删",
+          SE.FINAL_MODES == ("nemotron", "cloud"), str(SE.FINAL_MODES))
 
     # ── ⭐ 云端那两条判据（2026-10-12 全仓审查核实，两条都是实测过的错数）──
     # ⚠️ 「这段的文本是谁给的」与「这段发没发过请求」是**两个问题**，
@@ -109,19 +110,19 @@ def main() -> int:
             self.__dict__.update(kw)
 
     for _src, _want in (("groq", True), ("qwen", True), ("cloud", True),
-                        ("local-whisper", False), ("local-parakeet", False),
+                        ("local-nemotron", False), ("local-whisper", False), ("local-parakeet", False),
                         ("none", False), (None, False), ("", False)):
         _r = SE._is_cloud_source(_src)
         check(f"⭐ cloud 来自判据：{_src!r} -> {_want}", _r is _want, repr(_r))
 
-    # ⚠️ 默认那条路（`--final whisper` → `allow_cloud=False`）每段都是
-    #    `local-whisper` 且 `fell_back=False`。旧判据（有 source 且没 fell_back）
+    # ⚠️ 默认那条路（`--final nemotron` → `allow_cloud=False`）每段都是
+    #    `local-nemotron` 且 `fell_back=False`。旧判据（有 source 且没 fell_back）
     #    会把**整节课**算成云端 —— 报告里的"云端占比"正好反了。
     _whisper_utts = [{"dur": 10.0, "start_t": 0.0, "end_t": 10.0, "final": "hi",
                       "final_compute_s": 1.0, "drafts": [],
-                      "final_source": "local-whisper", "final_fell_back": False}]
+                      "final_source": "local-nemotron", "final_fell_back": False}]
     _ev = SE.evaluate(_whisper_utts, None)
-    check("⭐⭐ `--final whisper`（默认）不许被算成云端",
+    check("⭐⭐ `--final nemotron`（默认）不许被算成云端",
           _ev["cloud_segments"] == 0 and _ev["cloud_audio_s"] == 0.0,
           f"{_ev['cloud_segments']} 段 / {_ev['cloud_audio_s']} s")
     _cloud_utts = [dict(_whisper_utts[0], final_source="groq"),
@@ -140,7 +141,7 @@ def main() -> int:
     for _steps in (("off", "local:whisper"), ("breaker", "local:parakeet"),
                    ("encode", "local:whisper"), ("local:whisper",)):
         check(f"⭐ 一次网络都没发（{_steps[0]}）-> 不空等", SE._sent_request(_Stub(last_steps=_steps)) is False)
-    check("⭐ 没有 `last_steps`（parakeet 直通）-> 不当成发过",
+    check("⭐ 没有 `last_steps` -> 不当成发过",
           SE._sent_request(_Stub()) is False)
 
     # ── ⭐⭐ 节流真的「请求到请求」≥ pace_s（2026-10-17 模拟课堂 A/B 抓到：原来只隔一次生效，

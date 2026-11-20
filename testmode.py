@@ -432,9 +432,11 @@ _DATA_MAX_KEYS = 8
 def system_info(draft_name: str = "", draft_reason: str = "") -> dict:
     """机器画像（3.9.7）：内存 / 芯片 / 系统版本 + 实际用的草稿引擎与理由。**永不抛**。
 
-    为什么要：草稿引擎按内存分档（`draft_engine.MIN_RAM_BYTES` = 12 GB），低内存机退回
-    每秒重解整窗的 Parakeet —— 那是本地最耗电的一档。没有这块就答不了「用户里有没有
-    低内存 Mac、值不值得为它优化」（2026-10-16：7 节用户报告里一条都查不到）。
+    为什么要：本地识别模型（Nemotron）装了没有 / 用没用上 / 为什么没用上，是判断
+    「云端失败时有没有本地兜底」的唯一线索。没有这块就答不了「用户里有没有没装模型的
+    机器、值不值得为它优化」（2026-10-16：7 节用户报告里一条都查不到）。
+    ⚠️ 2026-11-20（桌面 D1）：内存门已删、本地也只剩这一个模型 —— `draft_reason` 现在说的
+       是「没装 / 关了 / 加载失败」，不再是「内存不够」。（字段名保留，老报告照样能读。）
     只有硬件型号与版本号，没有序列号 / 主机名 / 用户名。
     """
     import platform
@@ -1861,12 +1863,12 @@ class TestSession:
                      draft_text: str | None = None,
                      steps=(), trace: dict | None = None) -> None:
         """一段的定稿结果。`final_*` = **第一个被尝试的来源**（云端，或云端关着时的本地主模型）
-        在兜底之前的原文与判决；`draft_text` = 真回退时**兜底模型**（Parakeet）的原文；
-        都不是就传 `None`。`model` = 最终文本的来源（`FinalResult.source`）。
+        在兜底之前的原文与判决；`draft_text` = 真回退时**兜底模型**（Nemotron 整段解码）
+        的原文；都不是就传 `None`。`model` = 最终文本的来源（`FinalResult.source`）。
 
         R9：必须带 `@_safe` —— 它在 `main.final_worker` 的 try 里、排在 `_emit` 前，
         抛任何异常这一段都会被吞成「定稿失败」而**丢掉**。
-        `steps` = 按发生顺序的每一步（`("cloud:timeout", "local:parakeet")`）；
+        `steps` = 按发生顺序的每一步（`("cloud:timeout", "local:nemotron")`）；
         `trace` = `FinalResult.trace`，目前只用 `local_text`（R10）。
 
         ⭐ **`probe` 那一格为什么要加**（2026-10-07）：原来只记"最终用了哪个模型"一格 ——
@@ -2604,10 +2606,13 @@ class TestSession:
                 "no_end_punct_pct": pct(lambda s: s["words"] and not s["end_punct"]),
                 # 语义(定稿上云后): 「想上云但最终没用上云的文本」(网络 / 熔断 / 退化 / 云端空串被补救)。
                 "fell_back_pct": pct(lambda s: s["fell_back"]),
-                # 最终文本来自谁(groq / qwen / local-whisper / local-parakeet / none)
+                # 最终文本来自谁(groq / qwen / local-nemotron / none)
+                # ⚠️ 2026-11-20 之前的老报告里还会看到 local-whisper / local-parakeet —— 那是**历史值**，
+                #    读旧数据时照旧认（这两个模型已从代码里删掉，不会再产出这两个值）。
                 "source_pct": {k: round(v / n * 100, 1) for k, v in
                                collections.Counter(s["model"] for s in segs).items()},
-                # 每一步出现的段数(同一段里同一步只算一次): cloud:timeout / local:parakeet / degenerate …
+                # 每一步出现的段数(同一段里同一步只算一次): cloud:timeout / local:nemotron / degenerate …
+                # ⚠️ 老报告里的 local:parakeet / local:whisper 同理：读旧数据的兼容，不是现役值。
                 "steps_counts": dict(collections.Counter(
                     st for s in segs for st in set(s.get("steps") or ()))),
                 "asr_ms_p50": round(float(np.median([s["asr_ms"] for s in segs])), 1) if segs else None,
@@ -2617,7 +2622,7 @@ class TestSession:
                 if any(s["logprob"] is not None for s in segs) else None,
                 # ⭐ 3.11.1：Soniox 一上线，`segments` 就**只**收"没走流"的本地兜底段了
                 #    （`note_segment` 只在 final_worker 里调）。不标作用域的话，
-                #    `fell_back_pct=100` / `source_pct=local-parakeet` 会被读成"整节都退回了"。
+                #    `fell_back_pct=100` / `source_pct=local-nemotron` 会被读成"整节都退回了"。
                 "scope": ("local-fallback"
                           if int((extra.get("stream") or {}).get("sealed_n") or 0) > len(segs)
                           else "final"),

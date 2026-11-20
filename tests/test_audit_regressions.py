@@ -162,18 +162,21 @@ class R1_Settle(unittest.TestCase):
 
 
 class R2_EngineRouter(unittest.TestCase):
-    """降级要广播 + 起探针; 探针成功要切回云端。"""
+    """⚠️ 2026-11-20（桌面 D1）：本地翻译引擎已删 —— `EngineRouter` 只剩云端一条路。
+
+    那些"降级到本地"的判据随本地引擎一起改写：现在降级的真实含义是**翻译停了**
+    （字幕只有英文），过一阵探针回来再恢复。
+    """
 
     def _router(self, cloud_probe=lambda: False):
         import main as m
         notices = []
+
         class FakeCloud:
             def probe(self):
                 return cloud_probe()
-        class FakeLocal:
-            def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
-                return Result(en, "")
-        r = m.EngineRouter(FakeLocal(), FakeCloud(), "auto",
+
+        r = m.EngineRouter(FakeCloud(), "auto",
                            notify=lambda msg, warn=False: notices.append((msg, warn)))
         return r, notices
 
@@ -184,6 +187,9 @@ class R2_EngineRouter(unittest.TestCase):
         self.assertEqual(len(notices), 1)
         self.assertTrue(notices[0][1])                       # warn=True
         self.assertIn("Errno 60", notices[0][0])
+        # ⭐ 说真话：不许再提「已降级本地引擎」（没有本地引擎了）
+        self.assertNotIn("降级本地", notices[0][0])
+        self.assertIn("字幕照常", notices[0][0])
 
     def test_probe_recovers_cloud(self):
         r, notices = self._router(cloud_probe=lambda: True)
@@ -195,65 +201,33 @@ class R2_EngineRouter(unittest.TestCase):
         self.assertTrue(r._use_cloud, "探针成功后应自动切回云端")
         self.assertTrue(any(not warn for _, warn in notices), "恢复应有非警告通知")
 
-    def test_probe_stays_local_on_failure(self):
+    def test_probe_keeps_off_on_failure(self):
         r, notices = self._router(cloud_probe=lambda: False)
         r._fallback(RuntimeError("x"))
         time.sleep(0.2)
         self.assertFalse(r._use_cloud)
         self.assertEqual(len(notices), 1)                    # 只有降级通知
 
-    def test_local_mode_never_uses_cloud(self):
+    def test_cloud_stopped_means_no_translation(self):
+        """云端停用之后**没有本地可退** —— 调用方拿到异常，字幕只有英文。"""
         import main as m
-        class FakeLocal:
-            def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
-                return Result(en, "zh")
-        r = m.EngineRouter(FakeLocal(), None, "local")
-        res = r.fix_and_translate_stream("hello", [])
-        self.assertEqual(res.zh, "zh")
 
-    def test_cloud_exception_falls_back_same_call(self):
-        import main as m
         class FakeCloud:
-            def probe(self): return False
-            def fix_and_translate_stream(self, *a, **k):
-                raise RuntimeError("boom")
-        class FakeLocal:
-            def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
-                return Result(en, "本地译文")
-        notices = []
-        r = m.EngineRouter(FakeLocal(), FakeCloud(), "auto",
-                           notify=lambda msg, warn=False: notices.append(msg))
-        res = r.fix_and_translate_stream("hello", [])
-        self.assertEqual(res.zh, "本地译文")
+            def probe(self):
+                return False
+
+        r = m.EngineRouter(FakeCloud(), "auto")
+        r._fallback(RuntimeError("x"))
+        with self.assertRaises(RuntimeError):
+            r.fix_and_translate_stream("hello", [])
+
+    def test_local_mode_is_not_a_valid_engine_any_more(self):
+        """`--engine local` 已退休 → 构造出来就是「一条路都没有」，第一句就抛。"""
+        import main as m
+        r = m.EngineRouter(None, "auto")
         self.assertFalse(r._use_cloud)
-        self.assertEqual(len(notices), 1)
-
-    def test_midstream_failure_does_not_concatenate_local_deltas(self):
-        """云端吐了半句中文后断流 → 本地兜底**不再流式上屏**（2026-10-11）。
-
-        原来本地的增量直接接在云端那半句后面（屏上「云端半句本地整句」拼一起），要等
-        `final` 整句替换才恢复。现在：半句冻住，本地结果只走返回值（`final` 那一趟上屏）。
-        没吐过东西就失败 → 本地照常流式（上一条 `test_cloud_exception_falls_back_same_call` 的情形）。"""
-        import main as m
-        class FakeCloud:
-            def probe(self): return False
-            def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
-                on_en("Hel"); on_zh("云端半")
-                raise RuntimeError("stream reset")
-        class FakeLocal:
-            def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
-                if on_en: on_en("hello")
-                if on_zh: on_zh("本地译文")
-                return Result("hello", "本地译文")
-        zh, en = [], []
-        r = m.EngineRouter(FakeLocal(), FakeCloud(), "auto")
-        res = r.fix_and_translate_stream("hello", [], on_zh=zh.append, on_en=en.append)
-        self.assertEqual(res.zh, "本地译文")
-        self.assertEqual((zh, en), (["云端半"], ["Hel"]))
-        r2 = m.EngineRouter(FakeLocal(), None, "local")
-        zh2 = []
-        r2.fix_and_translate_stream("hello", [], on_zh=zh2.append)
-        self.assertEqual(zh2, ["本地译文"])                 # 纯本地照常流式
+        with self.assertRaises(RuntimeError):
+            r.fix_and_translate_stream("hello", [])
 
 
 class R31_TranslateCircuitBreaker(unittest.TestCase):
@@ -358,11 +332,11 @@ class R31_TranslateCircuitBreaker(unittest.TestCase):
 
     def _mk(self, stream=None, *, draft=None, fix=None, local=None,
             notify=None, note=None):
-        """默认: **本地不可用** + 云端成功。`note` 只在不为 None 时传(兼容旧签名)。"""
+        """默认: 云端成功。⚠️ `local=` 已无意义（本地翻译引擎 2026-11-20 删除），
+        留着这个关键字只为让旧调用点不用全改；传进来会被忽略。"""
         c = self._Cloud(stream, draft, fix)
         kw = {} if note is None else {"note": note}
-        r = main_mod.EngineRouter(local if local is not None else self._NoLocal(), c,
-                                  "auto",
+        r = main_mod.EngineRouter(c, "auto",
                                   notify=notify or (lambda msg, warn=False: None), **kw)
         return r, c
 
@@ -490,11 +464,9 @@ class R31_TranslateCircuitBreaker(unittest.TestCase):
         self.assertEqual(r.translate_draft("hi"), "", "本地不可用时草稿译文只能是空串")
         self.assertTrue(r._use_cloud, "草稿译文失败不许改 _use_cloud")
 
-        loc = self._Local("本地草稿译文")
-        r2, _ = self._mk(draft=draft, local=loc)
-        self.assertEqual(r2.translate_draft("hi"), "本地草稿译文")
-        self.assertTrue(r2._use_cloud)
-        self.assertEqual(loc.calls, 1)
+        # ⚠️ 没有本地引擎了 → 草稿译文失败就是 `""`（这一句没有中文草稿），不降级。
+        self.assertEqual(r.translate_draft("hi"), "")
+        self.assertTrue(r._use_cloud)
 
     # ---- D: 事件进测试报告 ----
 
@@ -545,34 +517,30 @@ class R31_TranslateCircuitBreaker(unittest.TestCase):
         self.assertTrue(r._use_cloud, "断在半句上也不许一句就降级")
         self.assertEqual(r._fail_streak, 1)
 
-    def test_T7b_midstream_failure_with_local_available_still_falls_back(self):
-        """本地可用时行为不变（B）: 云端断在半句上 → 降级, 本地结果只走返回值。"""
+    def test_T7b_midstream_failure_after_deltas_never_concatenates(self):
+        """云端断在半句上 → 屏上那半句冻住，**不许**接上任何别的增量（没有本地了）。"""
         def stream(n, en, on_zh, on_en):
             on_en("Hel")
             on_zh("云端半")
             return RuntimeError("stream reset")
 
-        loc = self._Local("本地译文")
-        r, c = self._mk(stream, local=loc)
+        r, c = self._mk(stream)
         zh, en = [], []
-        res = r.fix_and_translate_stream("hello", [], on_zh=zh.append, on_en=en.append)
-        self.assertEqual(res.zh, "本地译文")
-        self.assertFalse(r._use_cloud)
+        with self.assertRaises(RuntimeError):
+            r.fix_and_translate_stream("hello", [], on_zh=zh.append, on_en=en.append)
         self.assertEqual(c.calls, 1)
-        self.assertEqual((zh, en), (["云端半"], ["Hel"]), "本地不许再接在云端半句后面")
+        self.assertEqual((zh, en), (["云端半"], ["Hel"]))
 
     # ---- 3.9.7 第 4 项：跨段半句合并的重翻不许连坐定稿翻译 ----
 
     def test_T8_merge_failure_never_trips_or_falls_back(self):
-        """合并重翻连败 FAIL_TRIP+1 次 → 不降级、不计连败、不重试、不碰本地。"""
-        loc = self._Local()
-        r, c = self._mk(lambda n, en, z, e: RuntimeError("boom"), local=loc)
+        """合并重翻连败 FAIL_TRIP+1 次 → 不降级、不计连败、不重试。"""
+        r, c = self._mk(lambda n, en, z, e: RuntimeError("boom"))
         for _ in range(r.FAIL_TRIP + 1):
             self.assertIsNone(r.merge_translate("a b", []))
         self.assertTrue(r._use_cloud, "合并失败把整节课的定稿翻译降级了")
         self.assertEqual(r._fail_streak, 0)
         self.assertEqual(c.calls, r.FAIL_TRIP + 1, "合并失败不许重试")
-        self.assertEqual(loc.calls, 0, "合并不许退本地（本地正被定稿线程用着）")
 
     def test_T8b_merge_skipped_when_degraded_and_success_does_not_clear_streak(self):
         r, c = self._mk()

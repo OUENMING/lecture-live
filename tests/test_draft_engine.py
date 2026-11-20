@@ -77,46 +77,41 @@ class FakeRec:
         return f" n{sum(len(x) for x in s.fed)} "
 
 
-class FakeParakeet:
-    def __init__(self):
-        self.seen: list[int] = []
-
-    def transcribe(self, samples):
-        self.seen.append(len(samples))
-        return f"p{len(samples)}"
-
-
 def buf(n: int) -> np.ndarray:
     return np.arange(n, dtype=np.float32)
 
 
 class Choose(unittest.TestCase):
     def test_full_table(self):
-        big, small = 16 * GB, 8 * GB
+        """⚠️ 2026-11-20（桌面 D1）：只剩 `{"nemotron", "none"}` 两个答案。
+        内存门（`MIN_RAM_BYTES`）与 `parakeet` 分支一起删了 —— 没有第二个模型可退，
+        卡内存等于让云端失败的人只剩零字幕。
+        """
         cases = [
-            # mode,       present, ram,   expect
-            ("parakeet", True, big, "parakeet"),
-            ("parakeet", False, None, "parakeet"),
-            ("nemotron", True, small, "nemotron"),    # 明说要 → 不看内存
-            ("nemotron", True, None, "nemotron"),
-            ("nemotron", False, big, "parakeet"),
-            ("auto", True, big, "nemotron"),
-            ("auto", True, small, "parakeet"),
-            ("auto", True, None, "nemotron"),
-            ("auto", False, big, "parakeet"),
-            ("bogus", True, small, "parakeet"),       # 非法 → 当 auto
-            ("bogus", True, big, "nemotron"),
-            ("", True, big, "nemotron"),
+            # mode,     present, expect
+            ("auto", True, "nemotron"),
+            ("auto", False, "none"),
+            ("nemotron", True, "nemotron"),
+            ("nemotron", False, "none"),
+            ("off", True, "none"),
+            ("off", False, "none"),
+            ("bogus", True, "nemotron"),       # 非法 → 当 auto
+            ("bogus", False, "none"),
+            ("", True, "nemotron"),
         ]
-        for mode, present, ram, want in cases:
-            with self.subTest(mode=mode, present=present, ram=ram):
-                self.assertEqual(de.choose(mode, present, ram)[0], want)
+        for mode, present, want in cases:
+            with self.subTest(mode=mode, present=present):
+                self.assertEqual(de.choose(mode, present)[0], want)
 
     def test_reasons_say_why(self):
-        self.assertIn("未下载", de.choose("auto", False, 16 * GB)[1])
-        self.assertIn("内存", de.choose("auto", True, 8 * GB)[1])
-        self.assertIn("内存未知", de.choose("auto", True, None)[1])
-        self.assertEqual(de.choose("auto", True, 16 * GB)[1], "")
+        self.assertIn("未下载", de.choose("auto", False)[1])
+        self.assertIn("关闭", de.choose("off", True)[1])
+        self.assertEqual(de.choose("auto", True)[1], "")
+
+    def test_no_ram_gate_any_more(self):
+        """内存门必须**真的**不在了 —— 留一个 `MIN_RAM_BYTES` 常量在就是一种暗示。"""
+        self.assertFalse(hasattr(de, "MIN_RAM_BYTES"),
+                         "MIN_RAM_BYTES 还在 —— 内存门没删干净")
 
 
 class Drafter(unittest.TestCase):
@@ -191,34 +186,35 @@ class Finish(unittest.TestCase):
         self.assertEqual(d.update(buf(8000), 5), "n8000")     # 下一段照常
         self.assertEqual(len(rec.streams), 2)
 
-    def test_engine_parakeet_or_error_returns_empty(self):
-        pk = FakeParakeet()
-        self.assertEqual(de.DraftEngine(pk, window_samples=WIN).finish(buf(100), 0), "")
+    def test_engine_no_model_finish_is_empty(self):
+        self.assertEqual(de.DraftEngine().finish(buf(100), 0), "")
         rec = FakeRec(fail_on=2)
-        eng = de.DraftEngine(pk, de.NemotronDrafter("", rec=rec), window_samples=WIN)
+        eng = de.DraftEngine(de.NemotronDrafter("", rec=rec))
         eng.transcribe(buf(16000), 0)
         self.assertEqual(eng.finish(buf(16000), 0), "")       # get_result 抛 → 不抛、熔断
-        self.assertEqual(eng.name, "parakeet")
+        self.assertEqual(eng.name, "none")
 
 
 class Engine(unittest.TestCase):
-    def test_error_falls_back_same_call_and_never_retries(self):
-        rec, pk = FakeRec(fail_on=2), FakeParakeet()
-        eng = de.DraftEngine(pk, de.NemotronDrafter("", rec=rec), window_samples=WIN)
+    def test_error_trips_to_no_draft_and_never_retries(self):
+        """⭐⭐ 熔断 → **本节无草稿**（2026-11-20 之前是"退 Parakeet"，那个退路已删）。"""
+        rec = FakeRec(fail_on=2)
+        eng = de.DraftEngine(de.NemotronDrafter("", rec=rec))
         self.assertEqual(eng.transcribe(buf(16000), 1), ("n16000", "nemotron"))
-        self.assertEqual(eng.transcribe(buf(32000), 1), ("p32000", "parakeet"))
-        self.assertEqual(eng.name, "parakeet")
+        self.assertEqual(eng.transcribe(buf(32000), 1), ("", "none"))
+        self.assertEqual(eng.name, "none")
         self.assertIn("boom", eng.fallback_reason)
         calls = rec.calls
-        self.assertEqual(eng.transcribe(buf(48000), 1), ("p48000", "parakeet"))
+        self.assertEqual(eng.transcribe(buf(48000), 1), ("", "none"))
         self.assertEqual(rec.calls, calls)           # 熔断后不再碰流式
 
-    def test_parakeet_sees_only_the_window(self):
-        pk = FakeParakeet()
-        eng = de.DraftEngine(pk, window_samples=WIN)
-        self.assertEqual(eng.transcribe(buf(WIN + 5000), 1), (f"p{WIN}", "parakeet"))
-        self.assertEqual(eng.name, "parakeet")
+    def test_no_model_means_no_draft(self):
+        eng = de.DraftEngine(reason="流式模型未下载")
+        self.assertEqual(eng.transcribe(buf(WIN + 5000), 1), ("", "none"))
+        self.assertEqual(eng.name, "none")
+        self.assertEqual(eng.reason, "流式模型未下载")
         self.assertEqual(eng.fallback_reason, "")
+        self.assertTrue(eng.ready)
 
     def _clocked(self, durations):
         ts = []
@@ -231,20 +227,20 @@ class Engine(unittest.TestCase):
 
     def test_slow_trips_after_three_strikes(self):
         slow = de.SLOW_S + 0.1
-        rec, pk = FakeRec(), FakeParakeet()
-        eng = de.DraftEngine(pk, de.NemotronDrafter("", rec=rec), window_samples=WIN,
+        rec = FakeRec()
+        eng = de.DraftEngine(de.NemotronDrafter("", rec=rec),
                              clock=self._clocked([slow, slow, slow]))
         for i in range(3):
             _, used = eng.transcribe(buf(16000 * (i + 1)), 1)
             self.assertEqual(used, "nemotron")       # 第 3 份照用
-        self.assertEqual(eng.name, "parakeet")
+        self.assertEqual(eng.name, "none")
         self.assertIn("太慢", eng.fallback_reason)
-        self.assertEqual(eng.transcribe(buf(64000), 1)[1], "parakeet")
+        self.assertEqual(eng.transcribe(buf(64000), 1)[1], "none")
 
     def test_fast_call_resets_strikes(self):
         slow, fast = de.SLOW_S + 0.1, 0.1
-        eng = de.DraftEngine(FakeParakeet(), de.NemotronDrafter("", rec=FakeRec()),
-                             window_samples=WIN, clock=self._clocked([slow, slow, fast, slow, slow]))
+        eng = de.DraftEngine(de.NemotronDrafter("", rec=FakeRec()),
+                             clock=self._clocked([slow, slow, fast, slow, slow]))
         for i in range(5):
             self.assertEqual(eng.transcribe(buf(16000 * (i + 1)), 1)[1], "nemotron")
         self.assertEqual(eng.name, "nemotron")
@@ -255,14 +251,13 @@ class Load(unittest.TestCase):
         self.model = tempfile.mkdtemp(dir=_TMP_HOME)
         pathlib.Path(self.model, "tokens.txt").write_text("x")
 
-    def _load(self, env, ram=16 * GB, make=None):
+    def _load(self, env, make=None):
         made = []
 
         def default_make(d):
             made.append(d)
             return de.NemotronDrafter("", rec=FakeRec())
-        eng = de.load_draft_engine(FakeParakeet(), window_samples=WIN, env=env, ram_bytes=lambda: ram,
-                                   make_drafter=make or default_make)
+        eng = de.load_draft_engine(env=env, make_drafter=make or default_make)
         return eng, made
 
     def test_auto_with_model_picks_nemotron(self):
@@ -270,27 +265,27 @@ class Load(unittest.TestCase):
         self.assertEqual(eng.name, "nemotron")
         self.assertEqual(made, [self.model])
 
-    def test_env_parakeet(self):
-        eng, made = self._load({de.ENV: "parakeet", de.ENV_MODEL_DIR: self.model})
-        self.assertEqual(eng.name, "parakeet")
+    def test_env_off_means_no_draft(self):
+        eng, made = self._load({de.ENV: "off", de.ENV_MODEL_DIR: self.model})
+        self.assertEqual(eng.name, "none")
         self.assertEqual(made, [])
+        self.assertIn("关闭", eng.reason)
 
-    def test_missing_dir_is_parakeet(self):
-        eng, _ = self._load({de.ENV: "nemotron", de.ENV_MODEL_DIR: "/nonexistent/x"})
-        self.assertEqual(eng.name, "parakeet")
+    def test_missing_dir_is_no_draft(self):
+        eng, _ = self._load({de.ENV: "auto", de.ENV_MODEL_DIR: "/nonexistent/x"})
+        self.assertEqual(eng.name, "none")
         self.assertIn("未下载", eng.reason)
 
-    def test_constructor_raises_is_parakeet_not_raise(self):
+    def test_constructor_raises_is_no_draft_not_raise(self):
         def bad(_):
             raise ImportError("no sherpa")
         eng, _ = self._load({de.ENV_MODEL_DIR: self.model}, make=bad)
-        self.assertEqual(eng.name, "parakeet")
+        self.assertEqual(eng.name, "none")
         self.assertIn("no sherpa", eng.reason)
 
-    def test_real_constructor_on_incomplete_dir_is_parakeet(self):
-        eng = de.load_draft_engine(FakeParakeet(), window_samples=WIN,
-                                   env={de.ENV_MODEL_DIR: self.model}, ram_bytes=lambda: 16 * GB)
-        self.assertEqual(eng.name, "parakeet")
+    def test_real_constructor_on_incomplete_dir_is_no_draft(self):
+        eng = de.load_draft_engine(env={de.ENV_MODEL_DIR: self.model})
+        self.assertEqual(eng.name, "none")
         self.assertIn("加载失败", eng.reason)
 
     def test_default_dir_comes_from_registry(self):
@@ -298,7 +293,7 @@ class Load(unittest.TestCase):
         self.assertTrue(models.path_of("nemotron"))
         eng, made = self._load({})
         # 临时 HOME 下注册表路径不存在 → 未下载；关键是没抛、没构造
-        self.assertEqual((eng.name, made), ("parakeet", []))
+        self.assertEqual((eng.name, made), ("none", []))
 
 
 class SentenceEnds(unittest.TestCase):
@@ -323,16 +318,16 @@ class SentenceEnds(unittest.TestCase):
 
     def test_update_publishes_ends_for_its_tag(self):
         rec = self._rec([" a", ".", " B"], [0.5, 3.1, 3.3])
-        eng = de.DraftEngine(FakeParakeet(), de.NemotronDrafter("", rec=rec), window_samples=WIN)
+        eng = de.DraftEngine(de.NemotronDrafter("", rec=rec))
         eng.transcribe(buf(1600), 7)
         self.assertEqual(eng.sentence_ends(7), (3.1,))
         self.assertEqual(eng.sentence_ends(8), (), "别把上一段的句号当成这一段的（时刻是相对各自段首的）")
 
-    def test_no_timestamps_or_parakeet_is_empty_not_raise(self):
-        eng = de.DraftEngine(FakeParakeet(), de.NemotronDrafter("", rec=FakeRec()), window_samples=WIN)
+    def test_no_timestamps_or_no_model_is_empty_not_raise(self):
+        eng = de.DraftEngine(de.NemotronDrafter("", rec=FakeRec()))
         eng.transcribe(buf(1600), 0)                 # FakeRec 没有 get_result_all → 草稿照出、提示为空
         self.assertEqual(eng.sentence_ends(0), ())
-        self.assertEqual(de.DraftEngine(FakeParakeet(), window_samples=WIN).sentence_ends(0), ())
+        self.assertEqual(de.DraftEngine().sentence_ends(0), ())
 
     def test_main_asks_with_the_current_segment(self):
         src = (HERE / "main.py").read_text(encoding="utf-8")

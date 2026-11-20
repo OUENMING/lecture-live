@@ -1,6 +1,6 @@
 """定稿 ASR 深模块: 云端优先、本地兜底, 对调用方只有一个 `transcribe(samples)`。
 
-    final = load_final(final_model_dir, draft_asr, allow_cloud, preload_local=...)
+    final = load_final(nemotron_final_asr, allow_cloud, preload_local=...)
     r = final.transcribe(buf)          # 永不抛; r.text / r.source / r.steps ...
 
 ## 调用方不用知道的事(都在这个模块里)
@@ -10,8 +10,11 @@
   这里用线程池 + `future.result(timeout=剩余)` 卡**总时长**: 平时 6 s, 收尾阶段(`is_stopping()`)
   2 s —— 收尾冲刷有 15 s 上限, 云端拖慢不能把最后几段拖没。
 - 熔断: 连续 3 次失败 → 开 60 s(期间直接本地)→ 半开放 1 段试探。状态变化只说一次(`notify`, 默认 echo)。
-- 云端空串(R5): 段长 ≥2 s 时补跑一次草稿模型, 有字就用它 —— 防 Groq no_speech 规则 /
-  千问 NO_WORDS 把有声段误判成静音而**静默丢句**。
+- 云端空串(R5): 段长 ≥2 s 时补跑一次**本地整段解码**, 有字就用它 —— 防 Groq no_speech
+  规则 / 千问 NO_WORDS 把有声段误判成静音而**静默丢句**。
+- 本地兜底 = `nemotron_final.NemotronFinal`（流式模型拿整段重新解码）。**2026-11-20 桌面 D1**
+  之后本地只有这一个识别模型；没装它 → 本模块**没有本地兜底**，云端失败就是这一段没定稿
+  （`source="none"` / `source="cloud-*"`），照实告警，不假装有本地。
 - 退化检测: 云端或本地返回 `is_degenerate` 的文本一律当失败, 换下一个来源。
 - 开关语义(R7): `CLASSLIVE_CLOUD_ASR=0` → 不发请求、不写 `cloud-asr.json`、不写 `install-id`、
   不弹告知(`read_config` 返回「已告知 + 关」)。
@@ -65,8 +68,7 @@ OPUS_KW: dict = {"compression_level": 0.8}
 
 ENV_SWITCH = "CLASSLIVE_CLOUD_ASR"
 
-#: `FinalResult.source` 里属于**云端**的那几个 —— `main` 用它记「这节课的定稿用过云端」
-#: （那张「旧的本地 Whisper 还能清掉」的卡按它数课数，见 `whisper_card.py`）。
+#: `FinalResult.source` 里属于**云端**的那几个 —— 给统计 / 报告用。
 CLOUD_SOURCES = ("groq", "qwen")
 
 
@@ -220,11 +222,11 @@ def reset_connections() -> None:
 @dataclass(frozen=True)
 class FinalResult:
     text: str
-    source: str            # "groq" / "qwen" / "local-whisper" / "local-parakeet" / "none"
+    source: str            # "groq" / "qwen" / "local-nemotron" / "none"
     logprob: float | None  # 只有本地模型会填
     ms: float
     fell_back: bool        # 想上云但最终没用上云的文本(网络 / 熔断 / 退化 / 云端空串被补救)
-    steps: tuple[str, ...]  # 按发生顺序, 如 ("cloud:timeout", "local:parakeet")
+    steps: tuple[str, ...]  # 按发生顺序, 如 ("cloud:timeout", "local:nemotron")
     #: 测试模式要的原文: primary_text(第一个来源的原文) / primary_degenerate /
     #: fallback_text(真回退时兜底模型的原文, 没回退 = None) / local_text(本地主模型原文)
     trace: dict = field(default_factory=dict)
@@ -289,22 +291,23 @@ class _Breaker:
 
 
 class FinalASR:
-    """`local` 可为 None(= 没有 Whisper, 本地就用 `draft`)。`allow_cloud()` 每段问一次。
+    """`local` 可为 None(= **没有本地兜底**，云端失败就是这一段没定稿)。`allow_cloud()` 每段问一次。
+
+    ⚠️ 2026-11-20（桌面 D1）去掉了 `draft` 那个参数：原来它是「Whisper 不在就用草稿模型
+       Parakeet」的退路，两个模型现在都没了。本地只有一个来源，`local=None` 就是没有。
 
     测试缝: `post`(替换 HTTP)、`encode`(替换编码)、`clock`(熔断时钟)、`is_stopping`、`deadlines`。
     """
 
-    def __init__(self, local, draft, allow_cloud: Callable[[], bool], *,
+    def __init__(self, local, allow_cloud: Callable[[], bool], *,
                  post=None, encode=None, clock=time.monotonic,
                  is_stopping: Callable[[], bool] | None = None,
                  deadlines: tuple[float, float] = (NORMAL_DEADLINE_S, STOP_DEADLINE_S),
                  notify: Callable[[str, bool], None] | None = None,
                  passcode: str | None = None):
-        self._local = local if local is not None else draft
+        self._local = local
         # 一人一码：用户填的是通行码 `cl-…` 就拿它当令牌（`asr_endpoint.token`），不是就用公开令牌。
         self._passcode = passcode
-        self._local_is_draft = local is None or local is draft
-        self._draft = draft
         self._allow = allow_cloud
         self._post = post or _http_post
         self._encode = encode or _encode_opus
@@ -364,12 +367,17 @@ class FinalASR:
                 steps.append(f"cloud:{provider}")
                 return "", provider, None, True
             else:
-                # R5: 云端说是静音, 但段不短 —— 让草稿模型复核一次, 防静默丢句。
-                steps.extend((f"cloud:{provider}", "cloud-empty", "local:parakeet"))
-                t, lp = self._draft.transcribe_lp(samples)
+                # R5: 云端说是静音, 但段不短 —— 让本地整段解码复核一次, 防静默丢句。
+                # ⚠️ 没有本地模型时**不做这段复核**（原来会去调草稿模型 Parakeet）：
+                #    没得复核就老实按云端说的走，别为了"有动作"去调一个不存在的东西。
+                if self._local is None:
+                    steps.extend((f"cloud:{provider}", "cloud-empty"))
+                    return "", provider, None, True
+                steps.extend((f"cloud:{provider}", "cloud-empty", "local:nemotron"))
+                t, lp = self._local.transcribe_lp(samples)
                 if t and not is_degenerate(t):
                     trace["fallback_text"] = t
-                    return t, "local-parakeet", lp, True
+                    return t, "local-nemotron", lp, True
                 return "", provider, None, True
         return (*self._fallback(samples, steps, trace), True)
 
@@ -414,39 +422,41 @@ class FinalASR:
         return js["text"].strip(), prov if prov in ("groq", "qwen") else "cloud"
 
     def _local_chain(self, samples, steps, trace):
-        """本地主模型; 空或退化且主模型不是草稿 → 草稿模型。返回 (text, source, lp)。"""
-        name = "parakeet" if self._local_is_draft else "whisper"
-        steps.append(f"local:{name}")
+        """本地整段解码。返回 `(text, source, lp)`；**没有本地模型时**返回空 + `"none"`。"""
+        if self._local is None:
+            steps.append("local:absent")
+            return "", "none", None
+        steps.append("local:nemotron")
         text, lp = self._local.transcribe_lp(samples)
         degen = is_degenerate(text)
         trace["local_text"] = text
         if trace["primary_text"] is None:
             trace["primary_text"], trace["primary_degenerate"] = text, degen
-        if (text and not degen) or self._local_is_draft:
-            return text, f"local-{name}", lp
-        steps.append("degenerate" if text else "empty-local")
-        steps.append("local:parakeet")
-        text2, lp2 = self._draft.transcribe_lp(samples)
-        trace["fallback_text"] = text2
-        return text2, "local-parakeet", lp2
+        if text and degen:
+            steps.append("degenerate")
+        elif not text:
+            steps.append("empty-local")
+        return text, "local-nemotron", lp
 
 
-def load_final(final_model_dir: str, draft_asr, allow_cloud: Callable[[], bool], *,
+def load_final(nemotron_dir: str, allow_cloud: Callable[[], bool], *,
                preload_local: bool, **kw) -> FinalASR:
-    """装配 FinalASR。`preload_local` 为真才加载 Whisper(R4: 云端开着时省约 1 GB 内存)。
+    """装配 FinalASR。`preload_local` 为真才加载本地模型(R4: 云端开着时省内存)。
 
-    Whisper 缺失 / 加载失败**不退出**: 本地兜底改用草稿模型(Parakeet), 启动时说一句。
+    ⚠️ **2026-11-20（桌面 D1）**：本地兜底只有一个来源 —— 流式模型 Nemotron 拿整段重新解码
+       (`nemotron_final.NemotronFinal`)。没有 Whisper、也没有 Parakeet 可退。
+       模型**没装 / 没预加载 / 加载失败** → `local=None`：本模块**没有本地兜底**，
+       云端失败就是这一段没定稿（照实报 `source="none"` + 一行启动说明）。
+       ⚠️ 这里**不抛**：没装 Nemotron 是**合法状态**（它是可选模型），课照上。
     """
     local = None
-    if preload_local and not os.path.isdir(os.path.expanduser(final_model_dir or "")):
-        echo("💻 本地定稿: Parakeet(没装可选的 Whisper)")
-    elif preload_local:
+    if preload_local:
         try:
-            from asr import load_final_asr
-            local = load_final_asr(final_model_dir)
-            echo("💻 本地定稿: Whisper(云端不可用时用)")
+            from nemotron_final import NemotronFinal
+            local = NemotronFinal(os.path.expanduser(nemotron_dir))
+            echo("💻 本地定稿: Nemotron 整段解码(云端不可用时用)")
         except Exception as e:                           # noqa: BLE001
-            echo(f"⚠ 本地 Whisper 没加载成功, 定稿兜底改用 Parakeet({str(e).splitlines()[0]})")
+            echo(f"⚠ 本地定稿模型没加载成功, 本节没有本地兜底({str(e).splitlines()[0]})")
     else:
-        echo("💻 本地定稿兜底: Parakeet(启动时云端可用, 没预加载 Whisper)")
-    return FinalASR(local, draft_asr, allow_cloud, **kw)
+        echo("☁ 定稿: 只走云端(本地兜底没有预加载)")
+    return FinalASR(local, allow_cloud, **kw)

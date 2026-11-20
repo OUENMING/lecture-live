@@ -708,7 +708,6 @@ def main() -> int:
     _digit_hint_section()
     _result_actions_section()
     _enter_section()
-    _whisper_card_section()
     _target_liveness_section()
     _chip_section()
     _test_mode_section()
@@ -1566,9 +1565,9 @@ def _cloud_asr_section() -> None:
     check("⭐ 缺模型 → 第一项「下载缺的模型」可点",
           _mm({"key": "models", "state": "todo"})[0]
           == {"key": "required", "title": "下载缺的模型", "enabled": True, "checked": False})
-    check("⭐ 可加草稿模型 → 「下载流式草稿模型（464 MB）」",
+    check("⭐ 可加识别模型 → 「推荐下载识别模型（464 MB）」",
           _mm({**_ok, "offer_draft": True}, draft_mb="464 MB")[0]["title"]
-          == "下载流式草稿模型（464 MB）")
+          == "推荐下载识别模型（464 MB）")
     check("正在下载 → 下载项不可点",
           _mm({"key": "models", "state": "todo"}, downloading=True)[0]["enabled"] is False)
     # ⭐ 反方向：云端转写**不许**再出现在模型子菜单里（两处会打架）
@@ -2334,9 +2333,9 @@ def _vault_section() -> None:
           [E.update_click_plan({"kind": k}, u) for k, u in
            (("available", True), ("unfinished", False), ("blocked", False), ("available", False))]
           == ["busy", "unfinished", "blocked", "available"])
-    check("草稿模型没装 → `✓  语音模型  已就绪 · 缺草稿模型`",
+    check("识别模型没装 → `✓  语音模型  可加识别模型`（短版；原来的「缺草稿模型」读着自相矛盾）",
           _t({"key": "models", "state": "ok", "offer_draft": True})
-          == "✓  语音模型  已就绪 · 缺草稿模型")
+          == "✓  语音模型  可加识别模型")
 
     # ---- 翻译引擎那一格（2026-10-04）：「未配」→「没配 key」，说清楚要做什么 ----
     check("翻译引擎没配 → `—  翻译引擎  没配 key`（字面量）",
@@ -2349,10 +2348,11 @@ def _vault_section() -> None:
           repr(_t({"key": "engine", "state": "ok", "detail": "云端翻译（推荐）"})))
     # ⭐ 正常时只写名字、不正常时状态词照留（2026-10-14 瘦身）
     _slim = [_t({"key": "mic", "state": "ok"}), _t({"key": "mic", "state": "warn"}),
-             _t({"key": "models", "state": "ok"}), _t({"key": "engine", "state": "ok", "detail": "本地模型"}),
+             _t({"key": "models", "state": "ok"}), _t({"key": "engine", "state": "ok", "detail": "云端翻译"}),
              _t({"key": "update", "state": "ok", "kind": "done", "detail": "已是最新"})]
-    check("瘦身：麦克风 / 被拒 / 语音模型 / 本地翻译 / 更新回话（字面量）",
-          _slim == ["✓  麦克风", "⚠  麦克风  被拒", "✓  语音模型", "✓  本地翻译", "✓  更新  已是最新"],
+    # ⚠️ 2026-11-20：本地翻译引擎删了 → 这一格只可能是「云端翻译」。
+    check("瘦身：麦克风 / 被拒 / 语音模型 / 云端翻译 / 更新回话（字面量）",
+          _slim == ["✓  麦克风", "⚠  麦克风  被拒", "✓  语音模型", "✓  云端翻译", "✓  更新  已是最新"],
           repr(_slim))
     # key 对话框的提示不许再说「退回本地模型」：本地模型是可选的、默认没装，
     # 对新用户那句话是假的（没 key + 没本地模型 = 只有英文字幕）
@@ -2916,84 +2916,6 @@ def _enter_section() -> None:
                 h.close()
             except Exception:                                 # noqa: BLE001
                 pass
-
-
-def _whisper_card_section() -> None:
-    """⑧e 「旧的 Whisper」那张卡的**接线**：该出时真的排出来、按钮接到真回调。
-
-    ⚠️ 四个出卡条件在 `tests/test_whisper_card.py` 里逐条钉着（那是它的家）；
-       这一节只钉「条件为真时，开课面板真的把它排出来、两颗按钮接对了」——
-       排卡这条线坏掉时不出声（卡片静默不出现），纯函数判据全绿也照样发生。
-    """
-    print("\n--- ⑧e Whisper 卡：接线（条件为真 -> 真的排、按钮接对）---")
-    import tempfile
-
-    try:
-        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
-    except Exception as e:                                    # noqa: BLE001
-        check("AppKit 可用（这一节要真面板）", False, f"{type(e).__name__}: {e}")
-        return
-    import whatsnew as _WN
-    import whisper_card as _WC
-    NSApplication.sharedApplication().setActivationPolicy_(
-        NSApplicationActivationPolicyAccessory)
-    with tempfile.TemporaryDirectory() as td:
-        root = pathlib.Path(td)
-        gl = root / "glossary.txt"
-        gl.write_text("# public table\n", encoding="utf-8")
-        (root / "glossary").mkdir()
-        (root / "glossary" / "AA10010.txt").write_text("# AA10010\n", encoding="utf-8")
-        built: list = []
-        _real_later, _real_build = E._later, _WN.build
-        _real_offer, _real_remove = _WC.should_offer, _WC.remove
-        E._later = lambda fn, *a: fn(*a)          # 把排下一轮 runloop 的那几步同步跑掉
-        _WN.build = (lambda title, subtitle="", **kw:
-                     built.append((title, subtitle, kw)) or None)
-        _WC.should_offer = lambda **kw: True      # 条件那半由 test_whisper_card 钉
-        h = None
-        try:
-            h = E.build(glossary=gl, sessions_dir=root / "sessions",
-                        state_root=root / "state", on_start=lambda c: None)
-            check("面板建起来了", h is not None)
-            _wk = [b for b in built if b[0] == _WC.card_texts("")[0]]
-            check("⭐⭐ 条件为真 -> 真的排了一张 Whisper 卡（标题对上）",
-                  len(_wk) == 1, f"built={[b[0] for b in built]}")
-            if _wk:
-                _kw = _wk[0][2]
-                _labels = [t for t, _f, _k in (_kw.get("buttons") or [])]
-                check("⭐⭐ 两颗按钮都在、顺序是 保留 / 移到废纸篓（主按钮在右）",
-                      _labels == ["保留", "移到废纸篓"], str(_labels))
-                _kinds = {t: k for t, _f, k in (_kw.get("buttons") or [])}
-                # ⭐ 作者 2026-10-18：这张卡是来建议清理的 → 「移到废纸篓」是主按钮
-                check("⭐⭐「移到废纸篓」是 primary、「保留」是 secondary",
-                      _kinds == {"移到废纸篓": "primary", "保留": "secondary"}, str(_kinds))
-                _by = {t: f for t, f, _k in (_kw.get("buttons") or [])}
-                if set(_by) == {"保留", "移到废纸篓"}:
-                    # 点「保留」-> 真的写进 whisper_card 的状态（隔离在 tempdir）
-                    _by["保留"]()
-                    check("⭐「保留」-> 真的记下了（`whisper_card.answer`）",
-                          _WC.answered(root=root / "state") == "keep",
-                          repr(_WC.answered(root=root / "state")))
-                    # 点「移到废纸篓」-> 接到 `whisper_card.remove` 且传的是注册表路径
-                    # ⚠️ 换成桩再点 —— **绝不在判据里碰真的 ~/models**
-                    _rm: list = []
-                    _WC.remove = (lambda p, **kw:
-                                  (_rm.append(str(p)),
-                                   {"ok": True, "refused": False, "error": ""})[1])
-                    try:
-                        _by["移到废纸篓"]()
-                    finally:
-                        _WC.remove = _real_remove
-                    check("⭐「移到废纸篓」-> 接到 `whisper_card.remove`（注册表路径）",
-                          _rm == [_WC.whisper_path()], str(_rm))
-        finally:
-            E._later, _WN.build = _real_later, _real_build
-            _WC.should_offer, _WC.remove = _real_offer, _real_remove
-            if h is not None:
-                try:
-                    h.close()
-                except Exception:                             # noqa: BLE001
-                    pass
 
 
 def _add_wiring_section() -> None:

@@ -2,7 +2,7 @@
 
 ## 这是什么
 
-ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音频 → 转写 → 逐句修正并翻译 → 悬浮字幕 → 实时落盘、课后渲染双层 Obsidian 笔记。零参数 `cl` 启动；草稿/兜底识别跑在本机；翻译只发文本；识别默认走云端（实时字幕 Soniox 直连、3.10.0 起；定稿 Groq / 阿里云，3.9.0 起；可关：面板开关或 `CLASSLIVE_CLOUD_ASR=0`），关掉后音频不出机器。收件方名单变了要同步四处告知（README 隐私段、`final_asr.consent_text`（首次弹窗；收件方变了不重弹，Owen 10-18 定：以 GitHub 为准）、`entry_panel.CLOUD_ASR_TIP`、`main.resolve_cloud_asr_enabled` 终端那行）。MIT 开源，已脱敏。
+ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音频 → 转写 → 逐句修正并翻译 → 悬浮字幕 → 实时落盘、课后渲染双层 Obsidian 笔记。零参数 `cl` 启动；草稿与兜底识别跑在本机（**只有一个模型** Nemotron，可选装上；2026-11-20 桌面 D1 删掉了 Parakeet / Whisper / 本地翻译 Qwen3-1.7B）；翻译只发文本、**只有云端一条路**（没 key / 连不上 = 那几句没中文，英文字幕照常）；识别默认走云端（实时字幕 Soniox 直连、3.10.0 起；定稿 Groq / 阿里云，3.9.0 起；可关：面板开关或 `CLASSLIVE_CLOUD_ASR=0`），关掉后音频不出机器。收件方名单变了要同步四处告知（README 隐私段、`final_asr.consent_text`（首次弹窗；收件方变了不重弹，Owen 10-18 定：以 GitHub 为准）、`entry_panel.CLOUD_ASR_TIP`、`main.resolve_cloud_asr_enabled` 终端那行）。MIT 开源，已脱敏。
 
 ## 文件地图
 
@@ -36,9 +36,10 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | 面向用户的提示：弹窗 / 麦克风权限三态 / 跳系统设置 | `notice.py` |
 | 音频采集、电平归一化、上课中途换设备（`resolve_input_device` 唯一定义点） | `capture.py` |
 | 断句、VAD、静音阈值、硬切找低谷 | `vad.py` |
-| 转写、ASR、Parakeet、听错修正 | `asr.py` |
+| ASR 共用件（按精确名取模型文件 `_find_file`、复读判定 `is_degenerate`） | `asr.py`（2026-11-20 起没有识别器类了） |
+| 本地定稿兜底：流式模型拿**整段**重新解码（喂整段 + 补 `TAIL_PAD_S` 静音 + `input_finished`；含"为什么不能用同一个 recognizer 的两条流"的线程理由） | `nemotron_final.py`、`tests/test_nemotron_final.py` |
 | 定稿 ASR 深模块（云端 Groq/千问优先、本地兜底、熔断、总截止；`main.final_worker` 只调 `FinalASR.transcribe`）；开关 / 告知 / 配置 `read_config` | `final_asr.py`、`asr_endpoint.py`、`tests/test_final_asr.py` |
-| 翻译、prompt、DeepSeek 云端、mlx 本地、引擎降级；对话模型地址与非流式 JSON 调用的唯一出口 | `translator.py`、`cloud_translator.py`、`llm_client.py` |
+| 翻译 prompt / 术语选取 / 流式解析 / 译文闸门（纯函数，本地 mlx 引擎 2026-11-20 已删）、DeepSeek 云端、连败暂停与探针；对话模型地址与非流式 JSON 调用的唯一出口 | `translator.py`、`cloud_translator.py`、`llm_client.py` |
 | 云端翻译的前文窗口（块对齐 / 前缀缓存）—— 动 `cloud_translator._user_content` 前读 | `docs/experiments/context_ab.md` |
 | 草稿译文：过期判据 `DraftView` + 只译最新的线程 `DraftTranslator`（依赖全注入，`step()` 可单测）；触发判据 | `draft_translate.py`、`draft_policy.py` |
 | CHANGELOG 解析（版本号、看点、更新方式；纯函数只吃文本 —— 本地卡片 / 远端分级 / 面板确认框共用） | `changelog.py` |
@@ -55,7 +56,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
 | `.app` 构建 / 装进 `/Applications` | `make-app.sh`、`install.sh`（先读注释） |
 | ⭐ 流式字幕量具（回改率 / 延迟 / WER）+ 现场采集 + 课堂报告 —— 改草稿 / ASR / 音源前读 | `docs/HANDOFF-20261009-stream-eval.md`、`scripts/stream_eval.py`、`livemetrics.py`、`scripts/class_report.py` |
 | ⭐ **模拟课堂语料**（阶梯教室 / 小班 · 人群噪声 + 远场 + 短时高噪事件；24 份带真值）—— 调 VAD / ASR / 增益 / 降噪前先拿它量 | `docs/experiments/classroom_sim_20261011/README.md`、`scripts/eval_corpus/{fetch,make}_classroom_sim.py`、`scripts/eval_corpus/acoustics.py` |
-| 草稿引擎（Nemotron 流式优先 / Parakeet 滑窗兜底；选择、喂流、熔断）；R3 计划与 P0 实测 | `draft_engine.py`、`tests/test_draft_engine.py`；`docs/PLAN-streaming-asr.md` |
+| 草稿引擎（只剩 Nemotron 流式；选择、喂流、熔断后 = 本节无草稿）；R3 计划与 P0 实测 | `draft_engine.py`、`tests/test_draft_engine.py`；`docs/PLAN-streaming-asr.md` |
 | 分支上课入口 `./cl-x`（现场采集 + `--freeze` / `--trigger`）；worktree 补运行态软链 | `cl-x`、`scripts/link-runtime.sh` |
 | 回归测试 R1–R30（清单在文件头） | `tests/test_audit_regressions.py` |
 | 面向用户的说明、开源与脱敏须知 / 环境与选型 | `README.md` / `docs/DESIGN.md` |
@@ -82,7 +83,7 @@ ClassLive —— 作者自用的**实时英译中课堂字幕**工具：采音�
   纲要落盘 / 发 streamq；「失败留窗重试」「下课残余窗口补提交」有意不在开关后面。
 - **镜像名单会腐坏，校验不会**：镜像来的文件必须过 sha256；`ghfast.top` 换证书，不在名单里，也不用 `-k` 绕。
 - **环境**：只有 `requirements.txt`（下界、无 lock）。运行环境在 `ClassLive.app/Contents/`（细则见 `.claude/rules/shell-and-build.md`）。
-- **`IOGPUFamily` 内核崩溃史**（2026-09-10，GPU 驱动断言）：`translator._configure_mlx` 是缓解措施，动 mlx / 本地模型时留意。
+- **`IOGPUFamily` 内核崩溃史**（2026-09-10，GPU 驱动断言）：2026-11-20 删掉本地 mlx 引擎后程序不再做 GPU 推理，风险源已消失（`translator._configure_mlx` 一并删除）。历史留在 `docs/DESIGN.md`。
 - **用户数据**：`sessions/` 只追加（曾误删一节真课，不可恢复；`*_TEST.md` 也留着）。测试必须**同时**隔离读端和写端，
   包括 `~/.classlive/`（探针曾把 `~/.classlive/vault` 改成临时目录）。子代理不跑 `main.py` / `cl`（hook 拦着）。
 - **实验 / A/B / 探针要花 key 的，一律 `cloud_translator.load_test_key()`**（`~/.classlive/test-key` = test1 通行码，不回落）。

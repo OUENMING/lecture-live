@@ -7,12 +7,14 @@
 
 | 模型 | 原来写在哪 |
 |---|---|
-| Parakeet | 这里 · `main.py` 的 `--model-dir` 默认值 · `testmode.py` 的目录名元组 |
-| Whisper | 这里 · `main.py` 的 `--final-model-dir` 默认值 · `testmode.py` |
 | VAD | 这里 · **`vad.py` 的 `VAD_MODEL` 常量** · `testmode.py` |
-| Qwen3 | 这里 · `main.py` 的 `--llm` 默认值 |
+| Nemotron | 这里 · `main.py` 的 `--model-dir` 默认值 · `final_asr` / `nemotron_final.py` |
 
 现在所有消费者都从这里读。
+
+⚠️ **2026-11-20（桌面 D1）**：本地识别模型只留 Nemotron 一个。Parakeet / Whisper /
+本地翻译 Qwen3-1.7B 已从**代码**里删掉（不再下载、不再加载、不再出现在 doctor / 就绪条）。
+用户机器上已有的旧目录**不动**（不删用户数据），`doctor.py` 末尾只提一句「可以手动删」。
 
 ## ⚠️ 这个文件**只有数据，没有 I/O**
 
@@ -67,12 +69,8 @@ class Model(NamedTuple):
         return f"约 {self.mb:g} MB{self.extra}"
 
 
-PARAKEET_SRC = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 VAD_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
            "asr-models/silero_vad.onnx")
-WHISPER_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-               "asr-models/sherpa-onnx-whisper-turbo.tar.bz2")
-QWEN_SRC = "mlx-community/Qwen3-1.7B-4bit"
 # ⚠️ 换 chunk（560 ms ↔ 1120 ms）改三处：这里的 URL、下面的目录名、`fetch_model.PINS["nemotron"]`。
 NEMOTRON_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
                 "sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25.tar.bz2")
@@ -92,14 +90,6 @@ def _fetch_cmd(key: str) -> str:
     return f"{shlex.quote(sys.executable)} {shlex.quote(script)} {key}"
 
 
-PARAKEET = Model(
-    "parakeet", f"{MODELS_ROOT}/parakeet-tdt-0.6b-v3-int8",
-    "Parakeet ASR 模型(必需)", True,
-    # ⚠️ 命令走 `fetch_model.py`（直连 → hf-mirror → sha256）。解释器与脚本路径都 `shlex.quote`
-    #    （2026-10-01 审查 F27：仓库在含空格的路径下不引号会被 shell 切开）。
-    _fetch_cmd("parakeet"),
-    640.0, src=PARAKEET_SRC)
-
 VAD = Model(
     "vad", f"{MODELS_ROOT}/vad/silero_vad.onnx", "Silero VAD(必需)", True,
     # ⚠️ 原来是裸 `curl -fsSL`：`-f` 不能漏（404/5xx 时 curl 照样以 0 退出，错误页会被原样写成
@@ -108,48 +98,31 @@ VAD = Model(
     _fetch_cmd("vad"),
     0.61, src=VAD_URL)
 
-WHISPER = Model(
-    "whisper", f"{MODELS_ROOT}/sherpa-onnx-whisper-turbo",
-    "本地定稿 Whisper（可选，断网时更准）", False,
-    # ⚠️ 临时文件、`-f`、解压都在 `fetch_model.py` 里（原来的 `mktemp` 防预置符号链接那条
-    #    用的是 `tempfile.mkdtemp`，同样不可预测）。tar 只在临时目录里，解完即删。
-    _fetch_cmd("whisper"),
-    538.0, src=WHISPER_URL, extra="（解开后 989 MB）")
-
-# ⚠️ **可选**，但它是「没配 API key 时唯一的翻译引擎」，所以必须让人**看得见**。
-#    它今天完全在 doctor 视野之外：`mlx_lm.load()` 会在第一次翻译时**隐式**
-#    `snapshot_download` 938 MB —— 而 README 和 doctor 都写着「模型不会自动下」。
-#    （2026-09-28 查出。）
-#    ⚠️ **它住在 HF 的 cache 里**（`~/.cache/huggingface/hub/models--…`），
-#       不是 `~/models/` —— `mlx_lm` 就是从那儿读的。搬走 = 制造"两份"。
-QWEN = Model(
-    "llm", "~/.cache/huggingface/hub/models--mlx-community--Qwen3-1.7B-4bit",
-    "本地翻译模型 Qwen3-1.7B(可选)", False,
-    _fetch_cmd("llm"),
-    938.0, src=QWEN_SRC, at_hf=True)
-
-# 流式草稿（R3，`draft_engine.py`）。**可选**：不在 → 草稿照旧用 Parakeet。
-# ⚠️ 目录名必须**等于 tar 包里的顶层目录名**（`fetch_model.fetch_tarball` 是「整体挪进 models_root」）。
+#: 本地**唯一**的识别模型（2026-11-20 桌面 D1）：流式（草稿）+ 整段重新解码（云端失败时的定稿兜底）。
+#:
+#: ⚠️ **仍是可选**（`required=False`，Owen 2026-11-20 改口）：没装也能正常上课 —— 全走云端；
+#:    装了才有「断网 / 云端识别失败时仍有英文转录」。`doctor` / 就绪条 / 更新卡片按
+#:    「推荐下载（464 MB）」的语气提它，但**不拦开课**，也**绝不自动下**。
+#: ⚠️ 目录名必须**等于 tar 包里的顶层目录名**（`fetch_model.fetch_tarball` 是「整体挪进 models_root」）。
 NEMOTRON = Model(
     "nemotron",
     f"{MODELS_ROOT}/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
-    "流式草稿模型 Nemotron(可选，草稿不再回改)", False,
+    "流式识别模型 Nemotron(可选，推荐)", False,
     _fetch_cmd("nemotron"),
     464.0, src=NEMOTRON_URL, extra="（解开后约 630 MB）")
 
 # 注册表本体。⚠️ 是 `tuple` 不是 `list` —— **冻结**，不给任何人 append 的机会。
-MODELS: tuple[Model, ...] = (PARAKEET, VAD, WHISPER, QWEN, NEMOTRON)
+MODELS: tuple[Model, ...] = (VAD, NEMOTRON)
 
 REQUIRED: tuple[Model, ...] = tuple(m for m in MODELS if m.required)
 
 #: 目录型模型「缺了就一定跑不起来」的文件（相对模型目录）。
 #: ⚠️ `doctor.model_present()` 里「目录非空、有大小 > 0 的文件」那条会在**缺 encoder** 时
-#:    假绿 —— 2026-11-10 实锤：两个模型的 `encoder.int8.onnx` 进了回收站，Parakeet 起课
+#:    假绿 —— 2026-11-10 实锤：某个模型的 `encoder.int8.onnx` 进了回收站，起课
 #:    直接抛 `FileNotFoundError`，而 `cl doctor` 仍报「✅ 就位」。
 #: ⚠️ 这里只断言**存在且非空**，不算 sha（下载中断留下的半截文件仍可能漏过；完整校验在
 #:    `fetch_model.PINS`，只在镜像路径跑）。
 REQUIRED_FILES: dict[str, tuple[str, ...]] = {
-    "parakeet": ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"),
     "nemotron": ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"),
 }
 
@@ -193,8 +166,8 @@ def basename_of(key: str, default: str = "") -> str:
     """某一条**在 `~/models/` 下的那个顶层条目名**（给 `testmode` 报体积用）。
 
     ⚠️⚠️ **别用 `Path.suffix` 猜「是文件还是目录」**（2026-09-28 审查指出）：
-       `parakeet-tdt-0.6b-v3-int8` 这种**目录名里带点**的，`suffix` 是
-       `.6b-v3-int8`（真值）→ 会被当成文件 → 取到父目录名 `models`
+       目录名里带点的（如 `sherpa-onnx-…-560ms-int8-2026-04-25` 的同类写法），`suffix` 会
+       取到 `.int8` 之类（真值）→ 被当成文件 → 取到父目录名 `models`
        → 报出来的体积指向一个**根本不存在**的路径。
        改成「相对 `MODELS_ROOT` 取第一段」：既不用 stat 硬盘（本模块不碰 I/O
        这条不变），也对带点的名字免疫。

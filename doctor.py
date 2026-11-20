@@ -34,7 +34,6 @@ REQUIRED = [
 OPTIONAL = [
     ("httpx", "云端翻译 / 云端定稿转写"),
     ("soundfile", "云端定稿前把音频压成 Opus; 缺了定稿走本地"),
-    ("mlx_lm", "断网时的本地翻译兜底"),
     ("AppKit", "悬浮窗(缺了回退终端)"),
     ("huggingface_hub", "首次下模型用"),
 ]
@@ -87,7 +86,7 @@ def hf_cached(repo_id: str, *, must: tuple = ("config.json",),
     """HF cache 里**跑得起来**的那几个文件在不在。`True` / `False` / ⚠️ `None`。
 
     ⚠️⚠️ **不要用 `snapshot_download(local_files_only=True)` 当判据** ——
-       它问的是「整个 repo 的文件全不全」，而 `mlx_lm.load()` **只下它要用的那些**。
+       它问的是「整个 repo 的文件全不全」，而加载器**只下它要用的那些**。
        实测（2026-09-28，本机）它抛 `IncompleteSnapshotError`，缺的是
        **`.gitattributes` 和 `README.md`** —— 两个文档文件，而
        `model.safetensors`（938 MB 权重）、`config.json`、tokenizer **全都在**。
@@ -145,7 +144,7 @@ def model_state(model, *, root=None) -> str:
         # ⚠️⚠️ **`False`（确定缺件）与 `None`（问不出来）绝不能折叠成一个 `unknown`**
         #    （2026-10-12 全仓审查核实）：折叠之后，一个 HF 缓存**下了一半**的模型
         #    会一路显示成「就位 / 齐了」——`cl doctor` 打 ✅、就绪条说「齐了」，
-        #    而它其实**跑不起来**（`mlx_lm.load()` 到用的时候才炸）。
+        #    而它其实**跑不起来**（加载到用的时候才炸）。
         #    `try_to_load_from_cache` 是**离线**的，答不出来只有一种原因：没装
         #    `huggingface_hub` —— 那才是真的"问不出来"。
         cached = hf_cached(model.src)
@@ -255,6 +254,45 @@ def _branch_note() -> str | None:
     return f"分支 {bs['branch']}（正式版线）"
 
 
+#: 2026-11-20（桌面 D1）从代码里删掉的那几个模型目录 —— **只报告、不删**。
+#: ⚠️ 「不删用户数据」是硬规矩：这些目录是用户自己的磁盘内容（有人还拿它们跑别的
+#:    工具），我们只告诉他「不再使用了、可以自己删」。体积按目录大小现算。
+#: ⚠️ 名字写死而不是从注册表读 —— 注册表里已经没有它们了，这正是要提醒的原因。
+LEGACY_MODEL_DIRS = (
+    ("parakeet-tdt-0.6b-v3-int8", "Parakeet（原草稿 / 兜底识别）"),
+    ("sherpa-onnx-whisper-turbo", "Whisper（原本地定稿）"),
+)
+
+
+def _dir_mb(p: pathlib.Path) -> float:
+    """目录大小（MB）。⚠️ 走不动某个子项就跳过 —— 体积只是提示，不是判据。"""
+    total = 0
+    for root, _dirs, files in os.walk(p):
+        for n in files:
+            try:
+                total += os.path.getsize(os.path.join(root, n))
+            except OSError:
+                pass
+    return total / 1e6
+
+
+def _report_legacy_models() -> None:
+    """本地模型那一段之后的**一行信息**：旧模型不再使用，可手动删（不代劳）。"""
+    found = []
+    for name, what in LEGACY_MODEL_DIRS:
+        p = pathlib.Path(os.path.expanduser("~/models")) / name
+        if p.is_dir():
+            found.append((p, what, _dir_mb(p)))
+    if not found:
+        return
+    total = sum(mb for _p, _w, mb in found)
+    print()
+    print(f"⚪ 旧模型不再使用（本版只剩一个识别模型）—— 可手动删，约 {total / 1000:.1f} GB 腾出来：")
+    for p, what, mb in found:
+        print(f"   · {what}：{p}（{mb / 1000:.1f} GB）")
+    print("   (ClassLive 不会替你删 —— 这些是你磁盘上的文件)")
+
+
 def main() -> int:
     hard_missing = 0
     print(f"\nClassLive {version()} · 自检\n" + "─" * 46)
@@ -354,6 +392,13 @@ def main() -> int:
             #    这里也报出来，两边口径才不会漂。
             print(f"   → 要下 {m.size}：")
             print(f"     {m.cmd}")
+        if (not m.required) and not ok:
+            # ⭐ 2026-11-20（桌面 D1）：本地只剩一个识别模型，它是**可选**的。
+            #    缺了不拦上课（全走云端），只说清它是干什么的 —— 别让人以为坏了。
+            if m.key == "nemotron":
+                print("   (可选：不装也能上课，全走云端；装了断网时也有英文转录)")
+
+    _report_legacy_models()
 
     # ---- 数据文件 ----
     print()

@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
-"""集成测试: 把一段真实课程录音喂进 分段→ASR→LLM 全链路, 打印草稿/定稿/中文。
+"""集成测试: 把一段真实课程录音喂进 分段→ASR→LLM 全链路, 打印草稿/定稿。
+
 用法: ClassLive.app/Contents/MacOS/python scripts/test_pipeline.py <m4a> [start_s] [dur_s] [speed]
+
+⚠️ 2026-11-20（桌面 D1）：本地识别只剩流式模型 Nemotron、本地翻译引擎已删。
+   所以这条链路现在是「Nemotron 整段解码 → 只出英文」；中文要云端，不在这里试
+   （它是**离线**量具，不许偷偷打云端 API）。
 """
 import sys, time, os
 sys.path.insert(0, ".")
 from capture import load_file, PeakNormalizer, SR
 from vad import Segmenter
-from asr import load_asr
-from translator import load_translator
+from nemotron_final import NemotronFinal
 
 path = sys.argv[1]
 start = float(sys.argv[2]) if len(sys.argv) > 2 else 120.0
 dur = float(sys.argv[3]) if len(sys.argv) > 3 else 40.0
 speed = float(sys.argv[4]) if len(sys.argv) > 4 else 3.0
 
-asr = load_asr(os.path.expanduser("~/models/parakeet-tdt-0.6b-v3-int8"))
-tr = load_translator("mlx-community/Qwen3-1.7B-4bit",
-                     "glossary.txt", max_context=2)
-tr.warmup()
+import models
+asr = NemotronFinal(os.path.expanduser(models.path_of("nemotron")))
 
 finals = []
 
@@ -31,11 +33,9 @@ def on_utterance_end(buf):
     text = asr.transcribe(buf)
     if not text:
         return
-    res = tr.fix_and_translate(text, finals)
     finals.append(text)
     dt = time.time() - t0
-    print(f"[{time.strftime('%H:%M:%S')}] ✅ {res.en_fixed}   (ASR+LLM {dt:.1f}s)", flush=True)
-    print(f"[{time.strftime('%H:%M:%S')}]    🌐 {res.zh}", flush=True)
+    print(f"[{time.strftime('%H:%M:%S')}] ✅ {text}   (ASR {dt:.1f}s)", flush=True)
 
 seg = Segmenter(on_partial, on_utterance_end)
 s = load_file(path)

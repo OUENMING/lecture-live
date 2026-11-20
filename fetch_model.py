@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """下载一个模型：**直连 → 镜像 → 校验**。
 
-    python fetch_model.py <vad | whisper | parakeet | llm | nemotron>
+    python fetch_model.py <vad | nemotron>
 
 `models.py` 里每个模型的 `cmd` 都指向这里 —— 面板上的「语音模型」、`cl update`、
 `cl doctor` 打出来的命令走**同一条路**。
 
 ## 为什么要有它（2026-10-04 一位国内新用户的实测）
 
-原来的 `cmd` 是一条裸 `curl -fsSL` / `snapshot_download`：
+原来的 `cmd` 是一条裸 `curl -fsSL`：
 - GitHub 直连在国内会**一直不动**（curl 没有连接超时；面板只显示「正在下…」，
   直到 `update.download_model` 那一小时的总超时才报错）；
 - 没有任何回退，用户只能自己去找镜像、自己拼命令。
@@ -17,7 +17,8 @@
 
 1. **直连先试**，连接 8 秒连不上、或持续 60 秒低于 5 KB/s 就放弃（`curl --connect-timeout` /
    `--speed-limit`）。同一来源最多续传 3 次（`-C -`）。
-2. 直连不行 → 依次换**镜像**：GitHub 资产走前缀代理，HuggingFace 走 `hf-mirror.com`。
+2. 直连不行 → 依次换**镜像**：GitHub 资产走第三方前缀代理，最后兜我们自己放在
+   `git.bldcam.page/models/` 的那份（原名，不是前缀代理）。
 3. ⚠️ **镜像是第三方，凡是从镜像来的文件必须过 sha256**（下面的 `PINS`）。对不上就删掉、换下一个。
    直连来的（TLS 直达官方）**不强制**校验 —— 上游哪天重传了文件，我们的钉死值会过期，
    那不该把直连的人拦住。
@@ -42,29 +43,15 @@ from typing import Callable, NamedTuple
 
 #: 前缀代理（拼成 `<前缀><原始 URL>`）。⚠️ gh-proxy.com 不支持 Range（续传会被拒 → 我们会退成整段重下）。
 GH_MIRRORS = ("https://ghproxy.net/", "https://gh-proxy.com/")
-HF_MIRROR = "https://hf-mirror.com"
 
 #: 钉死的 sha256。**只对镜像来的文件强制**（见模块说明第 3 条）。
 PINS = {
     # GitHub release 资产（2026-10-04 下完整文件算的）
     "vad": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
-    "whisper": "b11acbbcd660b44a8e0df33724feb5aaa709cf65668f2823d59f656312544f22",
     # GitHub release API 的 `digest`（2026-10-09 取）；560 ms 版。1120 ms 版是 840c48de…
     "nemotron": "78e2b79fcf7271553a74402a76b771b09ea40117a39566a79f52235b23db6358",
-    # HuggingFace LFS 文件（HF 官方 API 的 lfs.sha256；tokens.txt 非 LFS，取本机已装那份）
-    # ⚠️ 2026-11-10 重取：上游把 encoder / decoder / joiner 都换了一版（同仓同路径）。
-    #    旧钉值会让走 hf-mirror 的人下完被判「校验不对」→ 整目录删掉、永远装不上
-    #    （直连不校 sha，所以直连的人一直没暴露）。换上游文件时**这三个值要一起更新**。
-    "parakeet": {
-        "encoder.int8.onnx": "1afbe69c1ffdabee94755f42e4daf1d93549131a3da11356bda84fcef0f2c479",
-        "decoder.int8.onnx": "0222a86147299d4dee90edf95b6d13827edb42ad8b7c9cf0b2582f030937c0b5",
-        "joiner.int8.onnx": "cbd02f3696e9944970111fb439d9c3fd365a80374565f13f2b9c7007d253fc98",
-        "tokens.txt": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
-    },
-    "llm": {
-        "model.safetensors": "0e86d9677e519323849eac1bc272caae88567a481ff188c431f70be543d9995f",
-        "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-    },
+    # ⚠️ 模型换了上游文件（同仓同路径）时要跟着改这里，否则走镜像的人下完被判
+    #    「校验不对」→ 永远装不上（直连不校 sha，直连的人不暴露）。
 }
 
 
@@ -92,9 +79,17 @@ def looks_like_html(path: pathlib.Path) -> bool:
     return head.startswith((b"<!doctype", b"<html", b"<?xml", b"<head", b"<body"))
 
 
+#: 我们自己的镜像站（2026-11-20 加）。它**不是**前缀代理：文件按**原名**放在 `/models/` 下，
+#: 所以只看 URL 的最后一段 —— 上游哪天换文件名，这里自动跟着走，不用改名单。
+#: ⚠️ `mirror=True` → **强制**过 `PINS` 的 sha256（第三方镜像一律不信）。
+VPS_MIRROR = "https://git.bldcam.page/models/"
+
+
 def gh_sources(url: str) -> list[Source]:
-    return [Source("直连", url, False)] + [
-        Source(m.split("//", 1)[1].rstrip("/"), m + url, True) for m in GH_MIRRORS]
+    """一份 GitHub release 资产的来源清单：直连 → 前缀代理 → 我们自己的 VPS。"""
+    return ([Source("直连", url, False)]
+            + [Source(m.split("//", 1)[1].rstrip("/"), m + url, True) for m in GH_MIRRORS]
+            + [Source("git.bldcam.page", VPS_MIRROR + url.rsplit("/", 1)[-1], True)])
 
 
 # ---------------------------------------------------------------- 下载一个文件
@@ -164,9 +159,9 @@ def download_file(sources: list[Source], dest: pathlib.Path, sha: str | None, *,
 
 
 # ---------------------------------------------------------------- 各模型
-def fetch_tarball(models_root: pathlib.Path, url: str, *, pin: str = PINS["whisper"],
+def fetch_tarball(models_root: pathlib.Path, url: str, *, pin: str,
                   say: Callable[[str], None] = print) -> tuple[bool, str]:
-    """下 tar.bz2（`pin` 是该包的 sha256；Whisper、Nemotron 都走这里） → 校验 → 在临时目录里解开 → **整体**挪进 `models_root/`。
+    """下 tar.bz2（`pin` 是该包的 sha256；Nemotron 走这里） → 校验 → 在临时目录里解开 → **整体**挪进 `models_root/`。
 
     ⚠️ 先解到临时目录再挪：解压中途出错不会在模型目录里留下半截（`doctor.model_present`
        只看「目录非空」，半截目录会被当成已就位）。路径穿越由 `filter="data"` 拦（并只解压一遍）。
@@ -197,28 +192,6 @@ def fetch_tarball(models_root: pathlib.Path, url: str, *, pin: str = PINS["whisp
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _hf_download(repo: str, local_dir: str | None, endpoint: str | None) -> int:
-    """在**子进程**里跑 snapshot_download —— `HF_ENDPOINT` 要在 import 之前进环境才生效。"""
-    env = dict(os.environ)
-    env.setdefault("HF_HUB_ETAG_TIMEOUT", "10")
-    env.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
-    # ⚠️ **显式**覆盖，而不是「endpoint 非空才设」：用户环境里常有
-    #    `HF_ENDPOINT=https://hf-mirror.com`（国内惯例），`setdefault` 语义会让这条
-    #    「直连」偷偷走第三方镜像，却因为 `mirror=False` **免过 sha256 校验** ——
-    #    正好绕过本文件第 3 条「镜像来的必须过校验」。
-    env["HF_ENDPOINT"] = endpoint or "https://huggingface.co"
-    code = ("import sys; from huggingface_hub import snapshot_download; "
-            "snapshot_download(sys.argv[1], local_dir=sys.argv[2] or None)")
-    return subprocess.run([sys.executable, "-c", code, repo, local_dir or ""], env=env).returncode
-
-
-def _hf_snapshot_dir(repo: str, filename: str) -> pathlib.Path | None:
-    """HF 缓存里某个文件所在的 snapshot 目录（离线查，和 `doctor.hf_cached` 同一个入口）。"""
-    from huggingface_hub import try_to_load_from_cache
-    p = try_to_load_from_cache(repo, filename)
-    return pathlib.Path(p).parent if isinstance(p, str) else None
-
-
 def _verify_pins(root: pathlib.Path | None, pins: dict[str, str]) -> str | None:
     """返回 None = 全对；否则一句话说哪个不对。"""
     for name, sha in pins.items():
@@ -230,40 +203,7 @@ def _verify_pins(root: pathlib.Path | None, pins: dict[str, str]) -> str | None:
     return None
 
 
-def fetch_hf(repo: str, local_dir: pathlib.Path | None, pins: dict[str, str], *,
-             find_dir: Callable[[], pathlib.Path | None], purge: pathlib.Path,
-             download: Callable[[str, str | None, str | None], int] = _hf_download,
-             say: Callable[[str], None] = print) -> tuple[bool, str]:
-    """先直连（短超时），不行换 hf-mirror；**镜像来的必须过 pins**，不对就整个 `purge` 掉。
-
-    `find_dir()` = 下完之后「那几个文件所在的目录」；`purge` = 校验失败时要删掉的目录。
-    """
-    for label, endpoint, mirror in (("直连 HuggingFace", None, False),
-                                    ("hf-mirror.com", HF_MIRROR, True)):
-        say(f"· 从 {label} 下载 {repo} …")
-        rc = download(repo, str(local_dir) if local_dir else None, endpoint)
-        if rc != 0:
-            say(f"  ✗ {label} 失败（退出码 {rc}）")
-            continue
-        if mirror:
-            bad = _verify_pins(find_dir(), pins)
-            if bad:
-                say(f"  ✗ {label} 的文件 {bad} —— 镜像被改动，或上游换了文件；已丢弃")
-                shutil.rmtree(purge, ignore_errors=True)
-                continue
-            say("  ✓ sha256 校验通过")
-        return True, label
-    # ⚠️ 两路都没成：`local_dir` 那种下法（parakeet）会把**半截**文件留在目标目录里，
-    #    而 `doctor.model_present` 只看「目录非空、有大小 > 0 的文件」→ 下次开面板时
-    #    它被当成「已就位」，**再也不会被挑中重下**，一跑就炸。这正是本 PR 给 Whisper
-    #    修掉的那一类（那里用「临时目录 + 整体挪走」避开）。这里收尾时按 pins 复核：
-    #    对不上 = 半截 → 删掉重来；对得上 = 目录里本来就有完好的一份 → **留着**（别误删）。
-    if local_dir is not None and _verify_pins(find_dir(), pins):
-        shutil.rmtree(purge, ignore_errors=True)
-    return False, "直连和镜像都没下成"
-
-
-KEYS = ("vad", "whisper", "parakeet", "llm", "nemotron")
+KEYS = ("vad", "nemotron")
 
 
 def fetch(key: str, *, say: Callable[[str], None] = print) -> tuple[bool, str]:
@@ -272,16 +212,8 @@ def fetch(key: str, *, say: Callable[[str], None] = print) -> tuple[bool, str]:
     path = pathlib.Path(models.path_of(key))
     if key == "vad":
         return download_file(gh_sources(models.VAD_URL), path, PINS["vad"], say=say)
-    if key == "whisper":
-        return fetch_tarball(path.parent, models.WHISPER_URL, say=say)
     if key == "nemotron":
         return fetch_tarball(path.parent, models.NEMOTRON_URL, pin=PINS["nemotron"], say=say)
-    if key == "parakeet":
-        return fetch_hf(models.PARAKEET_SRC, path, PINS["parakeet"],
-                        find_dir=lambda: path, purge=path, say=say)
-    if key == "llm":
-        return fetch_hf(models.QWEN_SRC, None, PINS["llm"], purge=path, say=say,
-                        find_dir=lambda: _hf_snapshot_dir(models.QWEN_SRC, "model.safetensors"))
     # ⚠️ **响亮失败，别兜底成 llm**：原来最后一句是无条件 `return`，任何不认识的 key
     #    都会去下 938 MB 的 Qwen3 —— 将来给 MODELS 加第 5 个模型却忘了在这里加分支时，
     #    就是「静默下一份最大的」。`main()` 的 KEYS 只挡命令行，`fetch()` 是公开入口。
@@ -290,7 +222,7 @@ def fetch(key: str, *, say: Callable[[str], None] = print) -> tuple[bool, str]:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2 or argv[1] not in KEYS:
-        # ⚠️ 前两段一起打：第 1 段只有标题那一行，带 `<vad | whisper | parakeet | llm | nemotron>`
+        # ⚠️ 前两段一起打：第 1 段只有标题那一行，带 `<vad | nemotron>`
         #    的用法在第 2 段 —— 只打第 1 段等于不告诉用户有哪些 key。
         print("\n\n".join(__doc__.split("\n\n")[:2]))
         return 2

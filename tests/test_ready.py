@@ -8,7 +8,7 @@
 1. ⭐⭐ **`unknown` ≠ `missing`** —— 老用户 / 手动装的模型没有戳，**它们能用**。
    判成缺失就是白烧 **1.2 GB** 流量重下一份。同族错误：`readiness_line` 那条
    「把读失败显示成 0，等于跟用户谎报」。
-2. ⭐⭐ **Qwen3（本地翻译模型）绝不自动下** —— 它是可选的，由用户点才下。
+2. ⭐⭐ **可选模型（Nemotron，464 MB）绝不自动下** —— 由用户点才下。
 3. ⭐ **`stale` 不自动换** —— 换版是用户的决定（`doctor.py` / `update.py` 两处都写着）。
 4. ⭐ **麦克风 `unknown` 不拦人**（`notice.mic_permission` 那条：查不出来要按老行为继续）。
 5. **翻译引擎那一项永远不把就绪条变成「没准备好」** —— 两边都不选也能上课。
@@ -41,10 +41,9 @@ def case(name: str):
     return deco
 
 
-REQ = [m for m in doctor.MODELS if m.required]        # 必下的（Whisper 3.9.0 起可选）
-# ⚠️ 按 key 取，不按「第一个可选」：Whisper 改可选后 `[not required][0]` 会变成 Whisper（R11）
-OPT = [m for m in doctor.MODELS if m.key == "llm"]    # Qwen3
-WHISPER = next(m for m in doctor.MODELS if m.key == "whisper")
+REQ = [m for m in doctor.MODELS if m.required]        # 必下的（现在只有 VAD）
+# ⚠️ 按 key 取，不按「第一个可选」：可选模型换过几次，位置不能当身份（R11）
+OPT = [m for m in doctor.MODELS if m.key == "nemotron"]   # 唯一的可选识别模型
 
 _ALL_UNKNOWN = {m.path: "unknown" for m in doctor.MODELS}
 _ALL_MISSING = {m.path: "missing" for m in doctor.MODELS}
@@ -71,7 +70,11 @@ def t_partial_dict_is_unknown():
     ⚠️ 对 `qwen3` 那种 1GB 级的东西，误报一次就是白烧一遍流量 ——
        而上面那条纪律「`unknown` ≠ `missing`」说的**就是这个**。
     """
-    partial = {m.path: "ok" for m in doctor.MODELS[:1]}      # 只有一个键
+    # ⚠️ 只填**可选那条**的键，必下那条的键**根本不在** —— 那正是要盖的形态。
+    #    （原来拿 `MODELS[:1]` 当夹具；改成「只填必下那条」会让这条判据与变异验证
+    #      失去区分能力：变异体在"必下那条是 ok"时返回的也是空表。）
+    assert REQ and OPT, "注册表要么没有必下的、要么没有可选的模型"
+    partial = {OPT[0].path: "ok"}
     got = ready.required_left(partial)
     assert got == [], (
         f"键缺失被判成「缺」了 —— 会重下 {sum(m.mb for m in got):.0f} MB。"
@@ -79,6 +82,8 @@ def t_partial_dict_is_unknown():
     # 反面：**真的**写 missing 时仍然算缺（别把这条修成"永远不缺"）
     assert ready.required_left(_ALL_MISSING) != [], \
         "全 missing 却一个都不算缺 —— 修过头了，那用户永远补不上模型"
+    assert ready.required_left({REQ[0].path: "missing"}) != [], \
+        "只有必下那条 missing 也不算缺 —— 修过头了"
 
 
 @case("⭐⭐ 戳文件读不出来时 -> **放弃写入**（不许拿空壳抹掉别的模型的记录）")
@@ -219,65 +224,30 @@ def t_hf_incomplete_is_not_unknown():
     assert got_ok == "unknown", f"缓存齐但没戳 -> {got_ok!r}（不该报缺）"
 
 
-@case("⭐⭐ Qwen3 绝不出现在「还差」里（它是可选的）")
-def t_qwen_never_in_left():
+@case("⭐⭐ 可选模型（Nemotron）绝不出现在「还差」里")
+def t_optional_never_in_left():
     for states in (_ALL_MISSING, _ALL_UNKNOWN, _ALL_OK):
         left = [m.path for m in ready.required_left(states)]
         assert OPT[0].path not in left, (
-            "Qwen3 被算进必下了 —— 它是**可选**的，由用户点才下")
+            "Nemotron 被算进必下了 —— 它是**可选**的（没装也能上课，全走云端）")
     # 逐字断言：整条就绪条的输出里都不许出现它的路径
     for states in (_ALL_MISSING, _ALL_OK):
         txt = repr(ready.items(perm="authorized", states=states, has_key=False))
-        assert OPT[0].path not in txt, "就绪条里出现了 Qwen3 的路径"
+        assert OPT[0].path not in txt, "就绪条里出现了 Nemotron 的路径"
 
 
-@case("⭐⭐ R11 Whisper 是可选的：不进「还差」、不算必下（新用户不再下 538 MB）")
-def t_whisper_optional():
-    assert WHISPER.required is False, "Whisper 还标着必需"
+@case("⭐⭐ R11 唯一的可选模型（Nemotron）不进「还差」、不算必下")
+def t_optional_model_not_required():
+    assert OPT[0].required is False, "Nemotron 被标成必需了（2026-11-20 起它是可选的）"
     for states in (_ALL_MISSING, _ALL_UNKNOWN):
-        assert WHISPER.path not in [m.path for m in ready.required_left(states)], \
-            "Whisper 被算进必下了"
+        assert OPT[0].path not in [m.path for m in ready.required_left(states)], \
+            "Nemotron 被算进必下了"
     st = dict(_ALL_OK)
-    st[WHISPER.path] = "missing"
+    st[OPT[0].path] = "missing"
     assert ready.models_item(st)["state"] == ready.OK, \
-        "只缺可选的 Whisper，语音模型一项却不是就绪"
-    assert WHISPER.path not in repr(ready.models_item(_ALL_MISSING)), \
-        "「还差」清单里出现了 Whisper 的路径"
-
-
-@case("⭐⭐ R11 Whisper 可选时，本地翻译引擎状态只看 Qwen（不看 Whisper）")
-def t_local_path_is_qwen():
-    assert ready._local_path() == OPT[0].path, (
-        f"`_local_path()` 指向 {ready._local_path()!r}，不是 Qwen3 —— "
-        f"「第一个可选模型」现在是 Whisper")
-    st = dict(_ALL_OK)
-    st[WHISPER.path] = "missing"                     # Whisper 缺、Qwen 在
-    ok_item = ready.items(perm="authorized", states=st, has_key=False)[2]
-    assert ok_item == ready.engine_item(has_key=False, local_state="ok"), \
-        f"Whisper 缺失把本地引擎状态拖坏了：{ok_item}"
-    st = dict(_ALL_OK)
-    st[OPT[0].path] = "missing"                      # Qwen 缺、Whisper 在
-    bad_item = ready.items(perm="authorized", states=st, has_key=False)[2]
-    assert bad_item == ready.engine_item(has_key=False, local_state="missing"), \
-        f"Qwen 缺失没反映到本地引擎上：{bad_item}"
-
-
-@case("⭐⭐ 没配 key 时只报状态，**不触发任何下载动作**")
-def t_no_key_no_download():
-    it = ready.engine_item(has_key=False, local_state="missing")
-    assert it["state"] != ready.TODO, (
-        "没配 key 被标成 todo —— 两边都不选**也能上课**（回退本地），"
-        "标成 todo 会让整条就绪条看起来没准备好")
-    assert it["offer_local"] is True, "该给一个「下载本地模型」的入口"
-    # ⚠️ 返回值里**不许**有任何"已经在下"的语义 —— 下载只能由点击触发
-    assert "busy" not in str(it), f"engine_item 不该自己开始下：{it}"
-
-
-@case("配了 key → 不再劝他下本地模型（但也不假装没有）")
-def t_has_key_hides_offer():
-    assert ready.engine_item(has_key=True, local_state="ok")["offer_local"] is False
-    assert ready.engine_item(has_key=True,
-                             local_state="missing")["offer_local"] is True
+        "只缺可选的 Nemotron，语音模型一项却不是就绪"
+    assert OPT[0].path not in repr(ready.models_item(_ALL_MISSING)), \
+        "「还差」清单里出现了 Nemotron 的路径"
 
 
 @case("⭐ 笔记库三态：没设 = UNKNOWN（**不是** todo）· 在 = OK · 路径没了 = WARN")
@@ -404,14 +374,16 @@ def t_stale_no_autoswap():
     assert it["left"] == [], "stale 不该进 left（那是「要下」的清单）"
 
 
-@case("三件全 ok → 就绪；缺一件 → todo 且报出体积")
+@case("必下的全 ok → 就绪；缺一件 → todo 且报出体积")
 def t_models_item_states():
     assert ready.models_item(_ALL_OK)["state"] == ready.OK
     st = dict(_ALL_OK)
     st[REQ[0].path] = "missing"
     it = ready.models_item(st)
     assert it["state"] == ready.TODO
-    assert "640 MB" in it["detail"], f"该报出体积，得到 {it['detail']!r}"
+    # ⚠️ 别写死体积：必下的那条 2026-11-20 之后只剩 VAD（约 0.61 MB）。
+    assert f"{REQ[0].mb:g} MB" in it["detail"] or "GB" in it["detail"], \
+        f"该报出体积，得到 {it['detail']!r}"
 
 
 @case("⭐ 草稿模型：只在「必下的齐了 + 机器用得上 + 还没装」时才提议，状态照旧 OK")
@@ -451,16 +423,16 @@ def t_size_text():
     assert ready._mb(640) == "640 MB"
     assert ready._mb(1179) == "1.2 GB"
     total = sum(m.mb for m in REQ)
-    assert 600 < total < 700, (
-        f"必下合计 {total:.0f} MB —— 与实测的约 641 MB（Parakeet + VAD）差太远，"
-        f"要么模型换了要么 mb 填错了")
-    total_all = total + WHISPER.mb                  # 3.9.0 前的「必下三件」≈ 1.18 GB
-    assert 1100 < total_all < 1250, f"加上可选的 Whisper 共 {total_all:.0f} MB，与实测约 1.18 GB 差太远"
+    assert 0 < total < 10, (
+        f"必下合计 {total:.0f} MB —— 2026-11-20 之后必下的只剩 VAD（约 1 MB），"
+        f"多出来的那条要么 mb 填错了，要么有模型被误标成必需")
+    total_all = total + OPT[0].mb
+    assert 400 < total_all < 550, f"加上可选的 Nemotron 共 {total_all:.0f} MB，与实测约 464 MB 差太远"
 
 
 @case("⭐ `Model.size` 是从 `mb` 派生的，不是第二个定义点")
 def t_size_is_derived():
-    m = WHISPER                                    # Whisper：带 extra 那句
+    m = OPT[0]                                     # Nemotron：带 extra 那句
     assert f"{m.mb:g}" in m.size, f"size 里该有 mb 那个数：{m.size!r}"
     assert "解开后" in m.size, "extra 那句该跟在后面"
     # ⚠️ 判据要指向**那个位置**：是 `Model` 上的 property，不是一个同名字段
@@ -476,32 +448,6 @@ def t_hf_cached_absent():
         f"该是 False，得到 {got!r} —— `None` 的倒向是 unknown（当成有），"
         f"那会让「没下过」显示成「可能有了」")
     assert doctor.hf_cached("classlive-does-not-exist/nope-xyz", must=("config.json",)) is False
-
-
-@case("⭐⭐ 本机 Qwen3 缓存按 HF 的定义「不完整」，但**能用** → 必须说 True")
-def t_hf_cached_usable():
-    """⚠️ 2026-09-28 实测踩到的真缺陷，形状如下：
-
-    `snapshot_download(local_files_only=True)` 对一份**完全可用**的 Qwen3 抛
-    `IncompleteSnapshotError` —— 缺的是 `.gitattributes` 和 `README.md`
-    **两个文档文件**，而 `model.safetensors`（938 MB）、`config.json`、tokenizer
-    **全都在**。原因：`mlx_lm.load()` 只下它要用的那几个。
-
-    拿「整个 repo 全不全」当判据，就会给一个能用的模型报「缓存可能不完整」——
-    正是本仓库最忌讳的那种**谎报**。判据问的必须是「**跑得起来的文件在不在**」。
-    """
-    cache = (pathlib.Path.home() / ".cache/huggingface/hub"
-             / "models--mlx-community--Qwen3-1.7B-4bit")
-    if not cache.is_dir():
-        # ⚠️ **用 `_Skip`，不要 `return`**（2026-09-28 审查指出）：运行器把
-        #    「正常返回」打成 ✅，于是没有这个缓存的干净机器/CI 上，这条**关键回归**
-        #    （「可用但 HF 判为不完整 → 必须 True」）会被计成"通过"，其实一次都没跑。
-        raise _Skip("这台机器没下过 Qwen3 的 HF 缓存")
-    assert OPT[0].at_hf, "（夹具自检：Qwen3 那条该标了 at_hf）"
-    got = doctor.hf_cached(OPT[0].src)
-    assert got is True, (
-        f"得到 {got!r} —— 把能用的模型报成不可用。缺的只是 .gitattributes/README.md "
-        f"两个文档文件；权重与 config 都在")
 
 
 class _Skip(Exception):

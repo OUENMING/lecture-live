@@ -11,8 +11,9 @@
    `sentence_ends` 返回 `()`，`name` 先照选中的报 `nemotron`。
    定稿那一路**根本不碰这个引擎**，所以"等模型"只影响草稿字样。
 3. ⭐ **就绪后草稿开始工作**：`transcribe` 从后台建好的那个引擎出字。
-4. ⭐ **加载失败退 Parakeet**（不抛、不带水下任何人）：`name` 改口、`fallback_reason`
-   有话说、`transcribe` 从 Parakeet 出，原样是既有兜底那条路。
+4. ⭐ **加载失败 → 本节无草稿**（不抛、不带水下任何人）：`name` 报 `none`、
+   `fallback_reason` 有话说、`transcribe` 返回空。⚠️ 2026-11-20（桌面 D1）之后
+   没有第二个模型可退 —— 定稿照常，那才是关键路径。
 5. `on_ready` 恰好一次（成功 True / 失败 False），坏回调不带水加载线程。
 6. `main.py` 真的走的是异步那条（源码扫；同步版留给离线量具）。
 
@@ -41,10 +42,6 @@ import numpy as np                                                    # noqa: E4
 
 import draft_engine as de                                             # noqa: E402
 
-GB = 2**30
-WIN = 10 * 16000
-
-
 def tearDownModule():
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
@@ -66,15 +63,6 @@ class FakeDrafter:
     def finish(self, buf, tag):
         self.finishes += 1
         return self.TEXT
-
-
-class FakeParakeet:
-    def __init__(self):
-        self.seen: list[int] = []
-
-    def transcribe(self, samples):
-        self.seen.append(len(samples))
-        return f"p{len(samples)}"
 
 
 class Gate:
@@ -110,8 +98,7 @@ class _Base(unittest.TestCase):
 
     def load(self, gate, on_ready=True, **kw):
         return de.load_draft_engine_async(
-            FakeParakeet(), window_samples=WIN, env=self.env, ram_bytes=lambda: 16 * GB,
-            make_drafter=gate.make(**kw),
+            env=self.env, make_drafter=gate.make(**kw),
             on_ready=(self.ready_calls.append if on_ready else None))
 
     def drain(self, eng):
@@ -131,21 +118,17 @@ class NotBlocking(_Base):
         self.assertFalse(eng.ready)
         self.assertFalse(g.release.is_set())
 
-    def test_就绪前不出草稿也不用Parakeet(self):
+    def test_就绪前不出草稿(self):
         g = Gate()
-        pk = FakeParakeet()
-        eng = de.load_draft_engine_async(pk, window_samples=WIN, env=self.env,
-                                         ram_bytes=lambda: 16 * GB,
-                                         make_drafter=g.make(result=FakeDrafter()))
+        eng = self.load(g, result=FakeDrafter())
         self.assertTrue(g.started.wait(2))
         self.assertEqual(eng.name, "nemotron", "还没失败就先改口了")
         self.assertEqual(eng.transcribe(buf(1600), 1), ("", "nemotron"))
         self.assertEqual(eng.finish(buf(1600), 1), "")
         self.assertEqual(eng.sentence_ends(1), ())
-        self.assertEqual(pk.seen, [], "就绪前偷偷用了 Parakeet 出草稿（行为变了）")
         g.release.set()
         self.drain(eng)
-        self.assertEqual(pk.seen, [], "就绪之后更不该走 Parakeet")
+        self.assertEqual(eng.name, "nemotron")
 
     def test_就绪后草稿开始工作(self):
         g = Gate()
@@ -160,15 +143,15 @@ class NotBlocking(_Base):
 
 
 class LoadFailure(_Base):
-    def test_失败退Parakeet_不外抛(self):
+    def test_加载失败_本节无草稿_不外抛(self):
         g = Gate()
         eng = self.load(g, error=ImportError("没有 sherpa"))
         self.assertTrue(g.started.wait(2))
         g.release.set()
         self.drain(eng)
-        self.assertEqual(eng.name, "parakeet")
+        self.assertEqual(eng.name, "none")
         text, used = eng.transcribe(buf(1600), 1)
-        self.assertEqual((text, used), ("p1600", "parakeet"))
+        self.assertEqual((text, used), ("", "none"))
         self.assertIn("没有 sherpa", eng.fallback_reason, "降级了却不说为什么")
         self.assertEqual(eng.finish(buf(1600), 1), "")
         self.assertEqual(eng.sentence_ends(1), ())
@@ -193,8 +176,7 @@ class LoadFailure(_Base):
         def boom(_ok):
             raise RuntimeError("回调坏了")
         g = Gate()
-        eng = de.load_draft_engine_async(FakeParakeet(), window_samples=WIN, env=self.env,
-                                         ram_bytes=lambda: 16 * GB,
+        eng = de.load_draft_engine_async(env=self.env,
                                          make_drafter=g.make(result=FakeDrafter()), on_ready=boom)
         self.assertTrue(g.started.wait(2))
         g.release.set()
@@ -202,19 +184,18 @@ class LoadFailure(_Base):
         self.assertEqual(eng.transcribe(buf(1600), 1), (FakeDrafter.TEXT, "nemotron"))
 
 
-class PicksParakeet(_Base):
-    def test_选中parakeet时没有后台那一段(self):
+class PicksModelOrOff(_Base):
+    def test_关掉草稿时没有后台那一段(self):
         made = []
 
         def _make(d):
             made.append(d)
             return FakeDrafter()
         eng = de.load_draft_engine_async(
-            FakeParakeet(), window_samples=WIN, env={de.ENV: "parakeet"}, ram_bytes=lambda: 16 * GB,
-            make_drafter=_make, on_ready=self.ready_calls.append)
+            env={de.ENV: "off"}, make_drafter=_make, on_ready=self.ready_calls.append)
         self.assertTrue(eng.ready)
-        self.assertEqual(eng.name, "parakeet")
-        self.assertEqual(made, [], "选 Parakeet 还去建流式模型")
+        self.assertEqual(eng.name, "none")
+        self.assertEqual(made, [], "关掉草稿还去建流式模型")
         self.assertEqual(self.ready_calls, [], "没走后台 → 就绪时刻由调用方自己记")
 
     def test_同步版行为不变(self):
@@ -224,8 +205,7 @@ class PicksParakeet(_Base):
         def _make(d):
             made.append(d)
             return FakeDrafter()
-        eng = de.load_draft_engine(FakeParakeet(), window_samples=WIN, env=self.env,
-                                   ram_bytes=lambda: 16 * GB, make_drafter=_make)
+        eng = de.load_draft_engine(env=self.env, make_drafter=_make)
         self.assertTrue(eng.ready)
         self.assertEqual(eng.name, "nemotron")
         self.assertEqual(made, [self.model])
@@ -233,22 +213,19 @@ class PicksParakeet(_Base):
 
 
 class ThreadWontStart(_Base):
-    """⭐ 2026-10-16 OCR：契约是「永不抛」——起不了后台线程也得立刻退回 Parakeet。"""
+    """⭐ 2026-10-16 OCR：契约是「永不抛」——起不了后台线程也得立刻退成「无草稿」。"""
 
-    def test_线程起不来也不抛_退回Parakeet(self):
+    def test_线程起不来也不抛_本节无草稿(self):
         def bad_thread(*a, **k):
             raise RuntimeError("can't start new thread")
-        pk = FakeParakeet()
-        eng = de.load_draft_engine_async(pk, window_samples=WIN, env=self.env,
-                                         ram_bytes=lambda: 16 * GB,
+        eng = de.load_draft_engine_async(env=self.env,
                                          make_drafter=Gate().make(result=FakeDrafter()),
                                          thread_factory=bad_thread,
                                          on_ready=self.ready_calls.append)
-        self.assertEqual(eng.name, "parakeet")
+        self.assertEqual(eng.name, "none")
         self.assertIn("加载线程没起来", eng.fallback_reason)
         self.assertEqual(self.ready_calls, [False])
-        eng.transcribe(buf(1600), 1)
-        self.assertTrue(pk.seen, "退回之后没用 Parakeet 出草稿")
+        self.assertEqual(eng.transcribe(buf(1600), 1), ("", "none"))
 
 
 class Wiring(unittest.TestCase):

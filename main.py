@@ -38,10 +38,9 @@ import livemetrics
 import feature_usage
 import tr_latency
 import fragment_merge
-from asr import load_asr
 import draft_engine
 import final_asr
-from translator import load_translator, select_term_zh, term_zh_map
+from translator import select_term_zh, term_zh_map
 from cloud_translator import (DEFAULT_CTX_CHUNK, load_api_key,
                               load_translator as load_cloud_translator,
                               answer_user_content)
@@ -1054,8 +1053,8 @@ def summary_log_line(payload) -> str | None:
     return f"📑 {c.get('title', '')}"
 
 
-NO_CLOUD_ANSWER = ("⚠ 讲解需要云端引擎(DeepSeek): 本地的 1.7B 模型只会翻译, 没有讲解能力。"
-                   "用 --engine auto/cloud 并配好 API key 后可用。")
+NO_CLOUD_ANSWER = ("⚠ 讲解需要云端引擎(DeepSeek) —— 配好 API key 后可用"
+                   "（本地翻译引擎 2026-11-20 已移除，没有离线讲解）。")
 
 # 「讲一下」按钮的固定问题(作者锁定: "讲清楚刚讲的这段")。
 # 可以是常量 —— 转录底座由 answer_worker 快照后经 answer_user_content 附在同一
@@ -1064,29 +1063,29 @@ ASK_QUESTION = "讲清楚刚讲的这段: 核心是什么、教授为什么现�
 
 
 class EngineRouter:
-    """翻译引擎路由: cloud 优先, 失败自动降级本地(断网兜底)。
+    """翻译引擎路由：**只有云端**。云端连续失败 → 那句话没有中文（英文字幕照常）。
 
-    降级**不是永久的**: 一堂 2h 的课 Wi-Fi 抖一次就全程困在本地小模型上
-    (实测一次瞬时 Errno 60 就触发过, 且本地回退质量明显更差)。
-    降级后探针从 `RETRY_PROBE_MIN_S` 秒起、每失败一次**翻倍**(封顶 `RETRY_PROBE_S`)
-    用 1-token 探针试云端, 通了自动切回。
+    ⚠️ **2026-11-20（桌面 D1）**：本地翻译引擎（mlx / Qwen3-1.7B）已从代码里删掉。
+       这个类的名字、`_use_cloud` 与探针机制**留着**，因为它们今天不再是"换引擎"，
+       而是「**云端还通不通**」这一个问题：
+       - 连败 `FAIL_TRIP` 句才翻 `_use_cloud`（同一句先重试一次，见 `_retry_cloud`）；
+       - 翻下去之后**不再有本地兜底** —— 调用方拿到异常就照旧走「只有 ASR」，
+         屏上是英文字幕、没有中文；`_fallback` 的提示语明说这一点，不再提「已降级本地引擎」；
+       - 探针从 `RETRY_PROBE_MIN_S` 起、每失败一次翻倍、封顶 `RETRY_PROBE_S`，通了自动切回。
+
+    ⚠️ **没有 `--engine local` 了**：`local` 现在等同于「一条路都没有」，会照实告警。
+
     状态变化通过 notify(msg, warn) 广播(经 streamq 转主线程, 可进 UI);
     `note(kind, detail)` 是测试模式的事件出口(`testmode.TestSession.note_event`)。
-
-    ⭐⭐ **2026-10-15: 降级不再由「任何一次云端异常」触发**。本地模型是**可选**的
-    (大多数用户没装), 而原来一次异常就翻 `_use_cloud` → 之后每句只抛 RuntimeError
-    → 调用方「只有 ASR」直到探针回来。实测: 中国用户 8 节课 16 个洞, 每个 77–89 秒。
-    现在(见 `_sentence_failed`): 本地不可用时**同一句先重试一次**, 仍失败才按**句**计;
-    **连续** `FAIL_TRIP` 句失败才降级。本地可用时行为不变(它本来就有真兜底)。"""
+    """
 
     RETRY_PROBE_S = 90.0
     #: 降级后探针的**起点**(秒); 每失败一次翻倍, 封顶 `RETRY_PROBE_S`。
     RETRY_PROBE_MIN_S = 5.0
-    #: **按句**计的连续失败阈值 —— 本地不可用时连败这么多句才降级。
+    #: **按句**计的连续失败阈值 —— 连败这么多句才降级。
     FAIL_TRIP = 3
 
-    def __init__(self, local, cloud, mode: str, notify=None, note=None):
-        self._local = local
+    def __init__(self, cloud, mode: str, notify=None, note=None):
         self._cloud = cloud
         self._mode = mode
         self._notify = notify or (lambda msg, warn=False: None)
@@ -1102,27 +1101,16 @@ class EngineRouter:
         self._probe_lock = threading.Lock()   # 防降级→恢复→再降级重复起探针线程
         # 降级是一条**状态迁移**, 不是一次赋值。Phase 2 起有第二条并发路径会进来
         # (问答 worker 与常驻翻译 worker 同时在跑), 两个线程可能同时读到 True,
-        # 各自广播一次"已降级本地" —— 用户看到两条重复通知, 且两次都去起探针。
+        # 各自广播一次 —— 用户看到两条重复通知, 且两次都去起探针。
         # 加锁把"判断 + 翻转"并成一步。只护这一处, _use_cloud 本身仍是普通 bool。
         self._state_lock = threading.Lock()
 
     def warmup(self) -> None:
-        if self._mode == "local":
-            self._local.warmup()
-        elif self._mode == "cloud":
-            pass                                  # 云端无需预热
-        # auto: 不预热本地, 省内存/启动时间; 真降级时再懒加载
+        """云端无需预热（本地引擎已删 → 这个钩子只剩兼容，什么都不做）。"""
 
-    def _local_usable(self) -> bool:
-        """本地引擎**现在**能不能用（只看在不在 / 闩没闩，不加载）。
-
-        ⚠️ 桩没有这个方法（AttributeError）/ 判据自己坏了 → 都按「可用」算 ——
-           `_fallback` 的广播一直就是这个规矩（2026-10-01 审查 F2），这里保持一致。
-        """
-        try:
-            return bool(self._local.local_ready())
-        except Exception:                         # noqa: BLE001
-            return True
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     @staticmethod
     def _why(e: Exception) -> str:
@@ -1145,8 +1133,7 @@ class EngineRouter:
         """重试那次的失败 —— 记一条事件 + 按**句**计一次连续失败。
 
         （首试那次由调用点自己记，见 `fix_and_translate_stream` —— 「含重试那次」的
-        意思是**两次都要留下痕迹**。）连败 `FAIL_TRIP` 句才降级；本地可用时**不走
-        这里**（那条路行为不变）。
+        意思是**两次都要留下痕迹**。）连败 `FAIL_TRIP` 句才降级。
         """
         self._event("translate_fail", self._why(e))
         self._count_failure(e)
@@ -1165,7 +1152,7 @@ class EngineRouter:
             self._fail_streak = 0
 
     def _retry_cloud(self, call):
-        """本地不可用 + 屏上还没吐过增量时，**同一句重试一次**云端。
+        """屏上还没吐过增量时，**同一句重试一次**云端。
 
         成功 → 返回结果并清零；再失败 → 记一次「这一句失败了」，够 `FAIL_TRIP` 句时
         `_sentence_failed` 会把它降级，最后**把异常抛回调用方**（它照旧走「只有 ASR」）。
@@ -1180,25 +1167,21 @@ class EngineRouter:
         return res
 
     def _fallback(self, e: Exception) -> None:
+        """连败到阈值：停用云端 + 广播 + 起探针。
+
+        ⚠️ **提示语必须说实话**（这里改过一次）：2026-11-20 之后**没有本地引擎**了，
+           所以`已降级本地引擎`是假话 —— 真实情况是"这段翻译没了，英文字幕照常"。
+        """
         with self._state_lock:                    # 见 __init__: 迁移只能发生一次
             if not self._use_cloud:
                 return
             self._use_cloud = False
             self._fail_streak = 0                 # 降级后不再走云端, 计数从恢复起重数
         self._event("translate_fallback", self._why(e))
-        # ⭐⭐ **广播要说实话**（2026-10-01 审查 F2）：本地模型是**可选**的，大多数人
-        #    没装 —— 没装还说「已降级本地引擎」，用户会以为有兜底，实际每句都失败。
-        #    `local_ready()` 只看在不在、不加载（桩/测试没有这个方法就按可用算）。
-        local_ok = self._local_usable()
-        if local_ok:
-            self._notify(
-                f"云端翻译失败({str(e)[:60]}); 已降级本地引擎, "
-                f"{self.RETRY_PROBE_MIN_S:.0f}s 后自动重试", warn=True)
-        else:
-            self._notify(
-                f"云端翻译失败({str(e)[:60]}); 本地模型不可用（没装，或加载失败）"
-                f"—— 只保留转录（跑 cl doctor 看看）。{self.RETRY_PROBE_MIN_S:.0f}s 后自动重试云端",
-                warn=True)
+        self._notify(
+            f"云端翻译失败({str(e)[:60]}); 翻译暂时失败，字幕照常（英文）"
+            f". {self.RETRY_PROBE_MIN_S:.0f}s 后自动重试云端",
+            warn=True)
         self._start_probe()
 
     def _start_probe(self) -> None:
@@ -1249,71 +1232,54 @@ class EngineRouter:
             en, context, self._tap(on_zh, seen), self._tap(on_en, seen))
 
     def fix_and_translate_stream(self, en, context, on_zh=None, on_en=None):
-        if self._use_cloud:
-            seen: list = []
-            try:
-                res = self._cloud_stream(en, context, on_zh, on_en, seen)
-            except Exception as e:                # noqa: BLE001
-                self._event("translate_fail", self._why(e))
-                if not self._local_usable():
-                    # ⭐⭐ 本地没装（大多数用户）时, **一次瞬时失败不许把这一句吃掉**：
-                    #    屏上还没吐过增量 → 同一句立刻重试一次云端（见 `_retry_cloud`）。
-                    if not seen:
-                        return self._retry_cloud(
-                            lambda: self._cloud_stream(en, context, on_zh, on_en, seen))
-                    # 已吐过半句：不重试（屏上会重复），这句照旧失败，但只计一次 ——
-                    # 降级也要连败 `FAIL_TRIP` 句（降到没装的本地 = 整段只剩 ASR）。
-                    self._count_failure(e)
-                    raise
-                self._fallback(e)
-            else:
-                self._cloud_ok()
-                return res
-            # ⚠️ 云端断在半句上时屏上已有半句：本地的增量再接上去就是「两份拼一起」。
-            #    这时本地**不流式**，结果只走返回值（`final` 那一趟整句替换）。
-            if seen:
-                return self._local.fix_and_translate_stream(en, context, None, None)
-        return self._local.fix_and_translate_stream(en, context, on_zh, on_en)
+        """定稿翻译。⚠️ 没有本地兜底：云端不通就把异常抛给调用方（它照旧走「只有 ASR」）。"""
+        if not self._use_cloud:
+            raise RuntimeError("没有可用的翻译引擎（云端已停用）")
+        seen: list = []
+        try:
+            res = self._cloud_stream(en, context, on_zh, on_en, seen)
+        except Exception as e:                # noqa: BLE001
+            self._event("translate_fail", self._why(e))
+            # ⭐⭐ 一次瞬时失败不许把这一句吃掉：屏上还没吐过增量 → 同一句立刻重试一次云端。
+            if not seen:
+                return self._retry_cloud(
+                    lambda: self._cloud_stream(en, context, on_zh, on_en, seen))
+            # 已吐过半句：不重试（屏上会重复），这句照旧失败，但只计一次 ——
+            # 降级也要连败 `FAIL_TRIP` 句。
+            self._count_failure(e)
+            raise
+        self._cloud_ok()
+        return res
 
     def fix_stream(self, en, context, on_en=None) -> str:
-        """只矫正英文(翻译关闭时)。走同一个模型与同一份上下文, 只是不要中文。"""
-        if self._use_cloud:
-            seen: list = []
-            try:
-                res = self._cloud.fix_stream(en, context, self._tap(on_en, seen))
-            except Exception as e:                # noqa: BLE001
-                self._event("translate_fail", self._why(e))
-                if not self._local_usable():       # 同 `fix_and_translate_stream` 那段
-                    if not seen:
-                        return self._retry_cloud(
-                            lambda: self._cloud.fix_stream(en, context, self._tap(on_en, seen)))
-                    self._count_failure(e)
-                    raise
-                self._fallback(e)
-            else:
-                self._cloud_ok()
-                return res
-            if seen:                              # 同上：半句已上屏，本地不再接
-                return self._local.fix_stream(en, context, None)
-        return self._local.fix_stream(en, context, on_en)
+        """只矫正英文(翻译关闭时)。走同一份上下文, 只是不要中文。"""
+        if not self._use_cloud:
+            raise RuntimeError("没有可用的翻译引擎（云端已停用）")
+        seen: list = []
+        try:
+            res = self._cloud.fix_stream(en, context, self._tap(on_en, seen))
+        except Exception as e:                # noqa: BLE001
+            self._event("translate_fail", self._why(e))
+            if not seen:
+                return self._retry_cloud(
+                    lambda: self._cloud.fix_stream(en, context, self._tap(on_en, seen)))
+            self._count_failure(e)
+            raise
+        self._cloud_ok()
+        return res
 
     def add_terms(self, words) -> list:
-        """把课上候选词并进**两个**引擎的候选池（链路体检 ⭐2）。
+        """把课上候选词并进云端引擎的候选池（链路体检 ⭐2）。
 
-        ⚠️ 两个都喂：`_fallback` 一次降级之后，后面那些句子读的是**本地**那份池子；
-           只喂当前在用的那个 = 一降级就把这节课的词全丢了（而本文件头写着降级是
-           **常态**：中国用户 8 节课 16 个洞）。
-        ⚠️ 任一引擎报错**不影响另一个**，也绝不抛给调用方 —— 它只是锦上添花。
+        ⚠️ 只剩一个引擎了（2026-11-20 删了本地那份），所以这里就是直调 + 吞异常 ——
+           它只是锦上添花，绝不抛给调用方。
         """
-        new: list = []
-        for eng in (self._cloud, self._local):
-            if eng is None or not hasattr(eng, "add_terms"):
-                continue
-            try:
-                new += list(eng.add_terms(words) or ())
-            except Exception:                                 # noqa: BLE001
-                continue
-        return new
+        if self._cloud is None or not hasattr(self._cloud, "add_terms"):
+            return []
+        try:
+            return list(self._cloud.add_terms(words) or ())
+        except Exception:                                 # noqa: BLE001
+            return []
 
     @property
     def uses_cloud(self) -> bool:
@@ -1325,30 +1291,23 @@ class EngineRouter:
 
         草稿每几秒一条，一次失败就翻 `_use_cloud` 会把**定稿**那条路也一起降级 ——
         而草稿失败完全说明不了定稿链路有问题（同 `answer` / `hint` 的那个决定）。
-        本地可用就退本地；本地不可用（大多数用户）返回 `""`：调用方
+        没有本地引擎了，所以失败就返回 `""`：调用方
         `draft_translate.DraftTranslator` 把 `translate` 当「往回调里吐增量」的接口，
         返回值只有 `_once` 用、而它自己就把空当「这轮没译出来」（不落屏、不计数）。
         """
-        if self._use_cloud:
-            try:
-                return self._cloud.translate_draft(en, on_zh, context=context)   # 本地版不收 context
-            except Exception:                     # noqa: BLE001
-                if not self._local_usable():
-                    return ""
-        return self._local.translate_draft(en, on_zh)
+        if not self._use_cloud:
+            return ""
+        try:
+            return self._cloud.translate_draft(en, on_zh, context=context)
+        except Exception:                         # noqa: BLE001
+            return ""
 
     def answer(self, question, transcript, history, on_delta=None,
                context: str = "") -> str:
         """按需讲解 / 追问。形状照抄 fix_stream: 云端优先, 异常降级。
 
-        ⚠️ 降级目标**不是** `self._local.answer_stream(...)`: `translator.Translator`
-        的方法到 `translate_draft` 就结束了, 本地根本没有 answer_stream, 那样写
-        在 `--engine local` / 没配 key 时是 AttributeError —— 会把问答线程直接
-        打死(而且是在 daemon 线程里, 表现成"点了没反应")。改成**显式守卫**,
-        返回一句能直接上屏的说明。
-        为什么不补一个本地实现: 1.7B 的翻译模型解释课堂内容只会编, 而且生成期间
-        要抢 `translator.py` 那条本地全局锁, 会把正在进行的翻译整段卡住 ——
-        宁可不做, 也不能给一个会撒谎的答案。
+        ⚠️ 没有本地兜底（那条本地实现 2026-11-20 已不需要了）: 云端不可用时返回一句
+        能直接上屏的说明（`NO_CLOUD_ANSWER`），而不是让问答线程抛异常。
         """
         if self._use_cloud:
             try:
@@ -1356,8 +1315,8 @@ class EngineRouter:
                                                  on_delta, context=context)
             except Exception as e:                # noqa: BLE001
                 # ⚠️ **刻意不走 `_fallback`**。`_fallback` 会把 `_use_cloud` 翻成
-                # False —— 于是**一次纯问答的失败会把整节课的翻译也降级到本地**
-                # (独立验证实测: 问答抛错后下一句翻译真的走了本地)。问答失败
+                # False —— 于是**一次纯问答的失败会把整节课的翻译也停掉**
+                # (独立实测: 问答抛错后下一句翻译真的没了)。问答失败
                 # (例如上下文超限)完全不能说明翻译链路有问题。
                 # 而且 `_fallback` 的提示语写死是"云端翻译失败", 在这里是**误导**;
                 # 它还会起一个 90s 探针线程去计费的 ping。翻译路径下一句自己会发现
@@ -1371,7 +1330,7 @@ class EngineRouter:
 
         ⚠️ 和 `hint` 同一个决定：**不走 `_fallback`、不进连败计数、不重试**。合并是锦上添花，
         它失败一次就把整节课的定稿翻译降级 / 起计费探针，是拿主路给支路陪葬。
-        ⚠️ 也**不退本地**：本地 mlx 模型此刻正被定稿线程用着，两个线程并发推理会互相卡住。
+        ⚠️ 也**不退本地**（本地翻译引擎 2026-11-20 已删）。
         回调一律不给（合并结果是原子替换，不流式）。
         """
         if not self._use_cloud:
@@ -1382,10 +1341,10 @@ class EngineRouter:
             return None
 
     def hint(self, lines) -> str:
-        """❓ 一行点拨。本地 / 失败一律返回 `""`(= 调用方改显示「课后笔记里能找到」)。
+        """❓ 一行点拨。云端不可用 / 失败一律返回 `""`(= 调用方改显示「课后笔记里能找到」)。
 
-        ⚠️ 和 `answer` 同一个决定: 本地 1.7B 只会编, 不讲; 云端抛错也**不走 `_fallback`** ——
-        一次点拨失败不能把整节课的翻译降级到本地(`_fallback` 会翻 `_use_cloud`、
+        ⚠️ 和 `answer` 同一个决定: 云端不可用 / 抛错都**不走 `_fallback`** ——
+        一次点拨失败不能把整节课的翻译停掉(`_fallback` 会翻 `_use_cloud`、
         起 90s 计费探针, 提示语还写死"云端翻译失败", 在这里是误导)。"""
         if not self._use_cloud:
             return ""
@@ -2124,8 +2083,6 @@ def cloud_asr_off_reason(*, cfg_enabled: bool, engine: str, mode: str,
         return "CLASSLIVE_CLOUD_ASR=0"
     if not cfg_enabled:
         return "云端转写开关已关"
-    if engine == "local":
-        return "--engine local"
     # ⚠️⚠️ 这一行是**全仓唯一一个 `zh` 与 `raw` 不同**的档位判据，**不许**换成
     #     `lang_gate.no_llm`：`raw` 要关掉云端定稿 ASR，`zh`（中文课只转录）**必须照常上云**
     #     —— 关了 Soniox 就退回本地英文模型，中文全乱（任务单开头那条）。
@@ -2407,42 +2364,22 @@ def run(args) -> None:
     _trace("audio_probe")
     _hud_note(startup_hud.TEXT_AUDIO)
 
-    # 草稿/兜底用 Parakeet, **必需**: 缺了在这里说清楚然后退出, 不在课上静默降质。
-    # 定稿(云端优先, Whisper 只是可选的本地兜底)在 `trans` 定义之后装配, 见下面 `final_asr.load_final`。
-    # ⚠️ 先只核对文件（`lazy=True`）：草稿走 Nemotron 时 Parakeet 只是兜底，用到才加载（省 ~1.1 GB）。
-    try:
-        asr = load_asr(args.model_dir, lazy=True)
-    except Exception as e:                       # noqa: BLE001
-        _close_hud()
-        notice.alert("模型没装好",
-                     f"{e}\n\n装好再跑 —— `cl doctor` 会列出缺哪个、该跑哪条命令。")
-        return
-    # 草稿引擎（R3）：流式 Nemotron 优先，缺模型 / 内存不够 / 加载失败 → 照旧 Parakeet 滑窗。
-    # ⚠️ 放在上面那个 try **之外**：它永不抛，失败也不该 `return`。Parakeet 仍是
-    #    定稿的本地兜底（下面装配定稿时传进去），也是草稿熔断后的退路 —— 只是晚点加载。
+    # 本地识别模型只有 Nemotron 一个，**可选**（2026-11-20 桌面 D1，Owen 改口）。
+    # ⚠️ 缺了不拦开课 —— 云端（Soniox 实时 / Groq·千问定稿）才是主路；Nemotron 只提供
+    #    「断网 / 云端识别失败时仍有英文转录」这一层。它不在时草稿也是「没有」。
+    # ⚠️ 草稿引擎**永不抛**：任何一步失败都只是本节没有草稿，定稿照常。
     # ⭐⭐ 3.9.7 第 5c 项：**流式模型在后台线程建**（约 1.28 s 原来卡在这里，悬浮窗 /
     #    采音 / 定稿都得等它）。就绪前的草稿一律跳过（`partial_worker` 那边 `not t →
-    #    continue`），**定稿不受任何影响**（它不走草稿引擎）。加载失败 → 既有兜底
-    #    （Parakeet），`partial_worker` 会照「流式草稿已停用」那条路出声一次。
+    #    continue`），**定稿不受任何影响**（它不走草稿引擎）。
     def _draft_ready(ok: bool) -> None:
         """⏱「草稿模型就绪」的时刻。⚠️ **从加载线程被调** —— 只许记一个时刻。"""
         _tp.setdefault("draft_ready", time.monotonic())
 
-    draft = draft_engine.load_draft_engine_async(
-        asr, window_samples=PARTIAL_MAX_S * SR, on_ready=_draft_ready)
-    if draft.name == "parakeet":
-        # 草稿每秒都要它 → 现在就加载；文件坏在这里说清楚，别拖到课上。
-        try:
-            asr.get()
-        except Exception as e:                   # noqa: BLE001
-            _close_hud()
-            notice.alert("模型没装好",
-                         f"{e}\n\n装好再跑 —— `cl doctor` 会列出缺哪个、该跑哪条命令。")
-            return
-        # Parakeet 没有被后台加载那一段 —— 它的就绪时刻就是刚才这一下。
+    draft = draft_engine.load_draft_engine_async(on_ready=_draft_ready)
+    if draft.name == "none":
+        echo(f"⌨️ 本节没有实时草稿（{draft.reason or '流式模型不可用'}）；英文定稿照常")
+        # 没有后台加载那一段 → 就绪时刻就是现在（测试模式那一项要有个数）
         _tp.setdefault("draft_ready", time.monotonic())
-    else:
-        echo("💤 Parakeet 用到再加载（草稿走 Nemotron；云端失败时第一次兜底多等约 1 秒）")
     _tp["draft"] = time.monotonic()
     _trace("draft")
     _hud_note(startup_hud.TEXT_TRANSLATOR)
@@ -2493,19 +2430,17 @@ def run(args) -> None:
     # ⭐ #4 B2（2026-10-17 作者拍板）：译名表 = `term_notes.json` 的 **basic 档** ∩ 本课术语表
     #    （数据源与闸的全文说明见 `translator.term_zh_map`）。命中的「英文 — 中文」由
     #    同一个纯函数（`translator.select_term_zh`）注入每句 prompt 的**变化段**：
-    #    云端定稿（两种布局）/ 云端草稿 / 本地定稿 / 本地草稿四处。不注入全表（A/B 结论）。
+    #    云端定稿（两种布局）/ 云端草稿两处。不注入全表（A/B 结论）。
     #    ⚠️ **fail-soft**：拿不到就空表（= 不注入，行为与开关关掉一致）；绝不影响开课。
-    #    ⚠️ 两个引擎喂**同一份**表 —— 降级到本地后译名不丢（同 `extra_terms` 那条纪律）。
     term_zh = term_zh_map(args.glossary, args.course)
     _trace("term_zh")
     if term_zh:
         echo(f"🔤 译名表：{len(term_zh)} 条（命中才注入；CLASSLIVE_TERM_ZH=0 可关）")
 
-    local_tr = load_translator(args.llm, args.glossary, args.context,
-                               course=args.course, extra_terms=extra_terms,
-                               term_zh=term_zh)
-    _trace("local_translator")
-    cloud_tr = None
+    # ⚠️ **2026-11-20（桌面 D1）**：本地翻译引擎（mlx / Qwen3-1.7B）已删 ——
+    #    现在只有云端一条翻译路。没 key / 云端连不上 = 那句话没有中文（英文字幕照常），
+    #    不再"降级到本地小模型"。
+    _trace("translator_local_removed")
     api_key_val = load_api_key(args.api_key)
     _trace("api_key")
     if args.engine in ("auto", "cloud"):
@@ -2520,9 +2455,9 @@ def run(args) -> None:
             echo(f"☁ 引擎: {args.engine} (云端 {args.cloud_model})")
         else:
             echo("⚠ 未找到 DeepSeek API key(--api-key / DEEPSEEK_API_KEY / "
-                 "~/.classlive/credentials); 回退本地引擎")
+                 "~/.classlive/credentials); 只有英文字幕")
     else:
-        echo(f"💻 引擎: local ({args.llm})")
+        echo("⚠ --engine local 已退休(本地翻译引擎 2026-11-20 移除); 只有英文字幕")
 
     _tp["translator"] = time.monotonic()
     _trace("translator_done")
@@ -2554,14 +2489,15 @@ def run(args) -> None:
         return _cloud_asr_off_reason() is None
 
     _why_off = _cloud_asr_off_reason()
-    final = final_asr.load_final(args.final_model_dir, asr, allow_cloud=_cloud_asr_ok,
-                                 preload_local=_why_off is not None,  # R4: 云端开着就不加载 Whisper
+    # ⚠️ 本地兜底与草稿**同一个模型目录**（2026-11-20 桌面 D1 之前是两份）
+    final = final_asr.load_final(args.model_dir, allow_cloud=_cloud_asr_ok,
+                                 preload_local=_why_off is not None,  # R4: 云端开着就不加载本地模型
                                  is_stopping=stopping.is_set,         # 收尾冲刷时云端截止更短
                                  passcode=api_key_val,                # 通行码 `cl-…` 才会用上（一人一码）
                                  # `notify` 在下面才定义; 熔断只会在开课后说话, 那时早已定义好
                                  notify=lambda m, w: notify(m, w, src="转写"))
-    echo("☁ 定稿: 云端(Groq → 千问 → 本地 Parakeet)" if _why_off is None
-         else f"💻 定稿: 本地({_why_off})")
+    echo("☁ 定稿: 云端(Groq → 千问)" if _why_off is None
+         else f"💻 定稿: 本地 Nemotron({_why_off})")
     _trace("final_asr")
     # ⚠️ 库路径在这里**收口**（`resolve_vault` 是唯一定义点）：`--vault` → `$OBSIDIAN_VAULT`
     #    → 上次用过的。**没有兜底目录** —— 拿不到就不写 Obsidian，绝不凭空造一个。
@@ -2965,7 +2901,7 @@ def run(args) -> None:
             _engine_warns.pop(src, None)
         streamq.put(("notice", (msg, warn, "\n".join(_engine_warns.values()))))
 
-    translator = EngineRouter(local_tr, cloud_tr, args.engine, notify=notify,
+    translator = EngineRouter(cloud_tr, args.engine, notify=notify,
                               # 🧪 测试模式：翻译失败 / 降级 / 恢复进 `report.json` 的 events。
                               #    ⚠️ `tester` 为 None（测试模式关）时传 None —— EngineRouter
                               #    默认就是空 lambda，**零开销零行为**（与 Overlay 的 `note` 同规矩）。
@@ -3398,7 +3334,7 @@ def run(args) -> None:
     #    身份**，不该由"开没开日志"决定 —— 长在日志器里的话，日志一关整条流水线的
     #    段号恒为 0。日志器只是个 sink（`live.segment_end(k)` 只记一行）。
     # ⚠️ 它必须在 **`Segmenter` 的 `on_utterance_end`（音频真正结束那一刻）** 递增，
-    #    **不能**挂到定稿上屏 —— 那条路要先跑 Whisper + LLM，晚 2–4 秒，
+    #    **不能**挂到定稿上屏 —— 那条路要先跑 ASR + LLM，晚 2–4 秒，
     #    新段前几份草稿会带着上一段的号（实测把 `草稿→定稿` 从 10.7% 顶到 65%）。
     seg_gen = {"n": 0}
     #: ⭐ 第 3 项：`seg -> 那一段音频结束的时刻`（`time.monotonic()`）。`seg_to_zh_ms`
@@ -3429,9 +3365,8 @@ def run(args) -> None:
     # ---- 草稿线程 ----
     # 每定稿一句 +1; 草稿线程据此重置节流(见 partial_worker 里的说明)。
     final_gen = {"n": 0}
-    #: ⭐ 这节课的定稿**用过云端**吗 —— 下课收尾时靠它给那张「旧的本地 Whisper
-    #: 还能清掉」的卡记一节（`whisper_card.note_cloud_class`）。只在本进程里数，
-    #: 不落盘、不影响任何判定；写盘只在收尾那一处。
+    #: ⭐ 这节课的定稿**用过云端**吗 —— 只在本进程里数，不落盘、不影响任何判定。
+    #: （原来给 `whisper_card` 用，那张卡 2026-11-20 已删；留着当统计口径。）
     cloud_final = {"used": False}
     #: ⭐ 3.9.7 省电：窗口**不可见**期间跳过的草稿份数（收尾进测试模式 ui 块
     #: `draft_skipped_hidden` / `draft_zh_skipped_hidden`）。`zh` 那一格由草稿译文
@@ -3477,7 +3412,7 @@ def run(args) -> None:
                 break
             _end = latest.take_end()
             if _ui_invisible():
-                # ⭐ 3.9.7 省电：窗口不可见 → **停草稿识别**（Nemotron / Parakeet 推理）。
+                # ⭐ 3.9.7 省电：窗口不可见 → **停草稿识别**（Nemotron 推理）。
                 #    定稿转写 / 翻译 / 落盘**一条都不许少**（它们不走这条路）。
                 #    ⚠️ 恢复后从**下一个段**重开 —— 见下面 `_skip_seg` 那一段。
                 if (buf is not None and len(buf)) or _end is not None:
@@ -3529,23 +3464,20 @@ def run(args) -> None:
                 if _seg == _skip_seg:
                     continue
                 _skip_seg = None                 # 新段到了 → 恢复正常
-            # 定稿是关键路径(决定你多久看到中文)。定稿走 Whisper 时两边是两把不同的
-            # ASR 锁, 不互抢; 只有 Parakeet 兜底(定稿退化回草稿模型)时才共用一把。
-            # 有定稿在排队时让草稿这一轮退开: 草稿迟到 1s 无感, 定稿迟到直接
-            # 拖慢首字。草稿译文另有独立线程(DraftTranslator), 不再排在定稿之后。
-            # ⚠️ 3.9.4 起**只有草稿也是 Parakeet 时才让**：Nemotron 草稿和定稿不共用模型，让开只会把
-            #    段尾那一刻 `Segmenter` 给新段的那份缓冲（硬切挪回的 3–6 s）白白丢掉 —— 实测新段第一份
-            #    草稿因此晚到 ~2 s（让开 → 等下一拍 1 s → 再从头解一整截）。
-            if draft.name == "parakeet" and not finalq.empty():
-                continue
+            # 定稿与草稿**不共用模型**（草稿 = `draft_engine` 那条流；定稿 = 云端，或
+            # 云端不通时 `nemotron_final` 自己那份 recognizer），所以草稿这一轮**不必给
+            # 定稿让路**：让开只会把段尾那一刻 `Segmenter` 给新段的那份缓冲（硬切挪回的
+            # 3–6 s）白白丢掉 —— 实测新段第一份草稿因此晚到 ~2 s。
+            # （原来的 `if draft.name == "parakeet" and not finalq.empty(): continue`
+            #   随 Parakeet 一起删了，2026-11-20。）
             try:
                 _t_draft = time.monotonic()
-                t, _eng = draft.transcribe(buf, _seg)      # 永不抛；流式坏了这一份就改走 Parakeet
+                t, _eng = draft.transcribe(buf, _seg)      # 永不抛；熔断后这一份就是空的（无草稿）
                 _dt_draft = time.monotonic() - _t_draft
                 if _eng != last_eng:
                     last_eng = _eng
                     if draft.fallback_reason:
-                        echo(f"⚠ 流式草稿已停用，本节课改回 Parakeet：{draft.fallback_reason}")
+                        echo(f"⚠ 本节实时草稿已停用（英文定稿照常）：{draft.fallback_reason}")
                         if live is not None:
                             live.event("draft_engine_fallback", reason=draft.fallback_reason)
                 if not t:
@@ -3707,7 +3639,7 @@ def run(args) -> None:
             #    ⚠️ **只有这一条产出点给**：纯转录 / 只英·校两条路没送过翻译，报一个
             #       引擎名会让人以为它们翻出来了（`drain()` 用 `len` 守卫，老形状照样能读）。
             #    ⚠️ 引擎名看「送进去**前后**云端都开着」—— `_fallback` 会把 `_use_cloud`
-            #       翻掉，只在返回后读一次会把"降级到本地"误报成云端。
+            #       翻掉，只在返回后读一次会把"没翻成"误报成云端。
             #    ⭐ 3.9.8 ⑥：`_tr_last["end"]` 在这儿落（= 这次调用的结束时刻），`_tr_idle`
             #       与这条 `("final", …)` 一一对应（`drain()` 侧成对取走）。
             #       ⚠️ 测试模式关时**一次都不做**（连一次 `time.monotonic()` 都不花）。
@@ -3719,7 +3651,7 @@ def run(args) -> None:
             _lat = _lt.done(seg_t0=(seg_t0 if seg_t0 is not None
                                     else seg_ended_at.get(seg)),
                             model=args.cloud_model if (_cloud0 and translator.uses_cloud)
-                            else "local")
+                            else "none")
             # ⭐ 3.11 E：翻译批次一条（延迟数字 + 引擎名，**不记文本**）。
             try:
                 import telemetry as _tel
@@ -4034,7 +3966,7 @@ def run(args) -> None:
     seg = Segmenter(
         on_partial=_on_partial,
         # ⭐ 段落**真正结束**的那一刻就取段号，随 `finalq` 一路带到定稿 —— 现场采集的分组靠它。
-        #    ⚠️ 不这么做就得等定稿上屏才自增，那比段落结束晚 2–4 秒（Whisper + LLM）。
+        #    ⚠️ 不这么做就得等定稿上屏才自增，那比段落结束晚 2–4 秒（ASR + LLM）。
         on_utterance_end=_utterance_end,
         # ⭐ 撞 12s 上限时切在本段最后一个句号前的停顿上（3.9.4，`vad.find_sentence_cut`）。
         #    只读草稿线程最近一次放下的元组，音频线程里调也不阻塞；段号不对（草稿还没跟上新段）→ ()。
@@ -5264,7 +5196,7 @@ def run(args) -> None:
                 #    合并起来 —— 谁跑的就在谁那份上累加，另一份是空的。
                 #    ⚠️ 用 `getattr` 而不是直接取：老引擎对象/替身可能没有这个属性。
                 _tm = {}
-                for _t in (cloud_tr, local_tr):
+                for _t in (cloud_tr,):
                     for _k, _v in (getattr(_t, "term_stats", None) or {}).items():
                         _tm[_k] = _tm.get(_k, 0) + _v
                 tester.note_block("terms", _tm)
@@ -5484,10 +5416,10 @@ def run(args) -> None:
                     except Exception:                     # noqa: BLE001
                         _stream_m = None
                 live.close(
-                    echo_retries=local_tr.echo_retries,   # 本地小模型回显重试次数（只读计数）
+                    echo_retries=0,                        # 本地小模型回显重试已随本地引擎一起删
                     mode=translator._mode,
                     source=args.source,
-                    draft_engine=draft.name,               # 收尾时生效的（熔断过就是 parakeet）
+                    draft_engine=draft.name,               # 收尾时生效的（熔断过就是 none）
                     draft_fallback=draft.fallback_reason,
                     **({} if _stream_m is None else {"stream": _stream_m}))
                 echo(f"🎥 现场采集已收尾: {live.path}")
@@ -5540,18 +5472,16 @@ def run(args) -> None:
             _auto_update_on_exit()
             # ⭐ 下课了 —— 这才把那个可选的草稿模型放后台下（上课途中绝不下，见它的 docstring）
             _draft_model_on_exit()
-            # ⭐ 这节课的定稿用过云端 → 记一节（那张「旧的本地 Whisper 还能清掉」的卡
-            #    要「本版本上已上完 ≥3 节云端定稿的课」；计数失败不拦任何事）。
-            if _class_used_cloud_asr(cloud_final["used"], stream):
-                try:
-                    import whisper_card
-                    whisper_card.note_cloud_class()
-                except Exception:                         # noqa: BLE001
-                    pass
+            # ⚠️ 原来这里会给「旧的本地 Whisper 还能清掉」那张卡记一节；2026-11-20
+            #    桌面 D1 把 Whisper 从代码里删了，那张卡也一起删了（`whisper_card.py`）。
 
 
 def _class_used_cloud_asr(final_used: bool, stream) -> bool:
-    """这节课的识别用过云端吗（给 Whisper 卡数课）。
+    """这节课的识别用过云端吗。
+
+    ⚠️ 唯一的读者（`whisper_card`）2026-11-20 已删；函数留着是因为它同时是
+       「这节课到底走没走云端」的**可测判据**（`tests/test_audit_regressions.py` 用它）。
+
 
     ⚠️ 3.10 起 Soniox 在跑时本地定稿那条路整个不走（`allow_local()` 为假）→
        `cloud_final["used"]` 一直是假；只看它的话，用 Soniox 上课的人永远攒不够 3 节，
@@ -5776,8 +5706,8 @@ def main():
     p.add_argument("--path", help="--source file 时的音频路径")
     p.add_argument("--speed", type=float, default=1.0, help="file 模式回放倍速(测试用)")
     p.add_argument("--ui", choices=["terminal", "overlay"], default="terminal")
-    p.add_argument("--model-dir", default=models.path_of("parakeet"),
-                   help="草稿+兜底的 ASR 模型目录(要求够快, 每秒要出一份草稿)")
+    p.add_argument("--model-dir", default=models.path_of("nemotron"),
+                   help="本地识别模型(流式; 草稿 + 云端失败时的定稿兜底)")
     p.add_argument("--test-mode", action="store_true",
                    help="测试模式: 采集一份完整指标报告(逐段 ASR 耗时/电平/置信度/"
                         "资源占用), 并在会话文件旁留一份音频, 供以后优化用")
@@ -5800,10 +5730,9 @@ def main():
                    help="这一节不存原信号快照（覆盖测试模式的默认）")
     p.add_argument("--no-bundle", action="store_true",
                    help="测试模式下不打包成可发送的单个 zip")
-    p.add_argument("--final-model-dir",
-                   default=models.path_of("whisper"),
-                   help="本地定稿模型(Whisper)目录(可选; 云端不可用时才用, 没有就用 Parakeet)")
-    p.add_argument("--llm", default=models.by_key("llm").src)
+    p.add_argument("--final-model-dir", default="", help=argparse.SUPPRESS)
+    # ⚠️ `--final-model-dir`（原 Whisper 目录）**已退休**：本地定稿就是 `--model-dir`
+    #    那个流式模型。旗标留着只为不让老脚本 / 老别名炸掉（参数被忽略）。
     p.add_argument("--glossary", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "glossary.txt"))
     p.add_argument("--context", type=int, default=5,
@@ -5811,8 +5740,9 @@ def main():
     p.add_argument("--cloud-context", type=int, default=DEFAULT_CTX_CHUNK,
                    help="云端翻译的前文块大小(默认 %(default)s: 窗口 10–19 句、块对齐以命中 DeepSeek 前缀缓存); "
                         "0 = 老的「最近 --context 句」滑动窗口。本地引擎不受影响(仍用 --context)")
-    p.add_argument("--engine", choices=["auto", "cloud", "local"], default="auto",
-                   help="翻译引擎: auto(云端优先,失败降级)/cloud/local")
+    p.add_argument("--engine", choices=["auto", "cloud"], default="auto",
+                   help="翻译引擎: 只有云端(本地引擎 2026-11-20 已移除); "
+                        "auto 会在连败后暂停并自动重试")
     p.add_argument("--cloud-model", default="deepseek-flash",
                    help="云端模型名")
     p.add_argument("--api-key", help="DeepSeek API key(默认读 DEEPSEEK_API_KEY 或 ~/.classlive/credentials)")

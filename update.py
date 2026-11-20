@@ -1950,18 +1950,20 @@ def pending_steps() -> list[dict]:
                 "detail": total,
                 "why": "缺模型的话课上会直接起不来（不是降质，是跑不了）。",
             })
-        # ②b 流式草稿模型：**可选，但卡片主动提**（作者 2026-10-11 拍板 —— 不提的话用 .app 的人
-        #    永远拿不到 R3：草稿回改 5.7% → 0.6%）。和 Qwen3 不同：它**列在卡片上、由用户点「现在做」**，
-        #    不是静默下；内存不够 / 手动指定 parakeet 的机器装了也用不上，不提（`draft_engine.want_model`）。
-        #    `soft`：下不成**不算更新失败**（草稿照旧用 Parakeet），后面的步骤照跑。
+        # ②b 识别模型 Nemotron：**可选，但卡片主动提**（作者 2026-10-11 拍板 —— 不提的话用 .app 的人
+        #    永远拿不到它）。它**列在卡片上、由用户点「现在做」**，不是静默下。
+        #    ⭐ 2026-11-20（桌面 D1）：本地只剩这一个识别模型，但它仍是**可选**的
+        #       （没装也能上课，全走云端）。好处一句话：**断网 / 云端识别失败时仍有英文转录**
+        #       （草稿不再回改是附带的）。`CLASSLIVE_DRAFT_ENGINE=off` 的人不提。
+        #    `soft`：下不成**不算更新失败**（课照上），后面的步骤照跑。
         import draft_engine
         import models
         if not doctor.model_present(models.NEMOTRON.path) and draft_engine.want_model():
             steps.append({
                 "key": DRAFT_MODEL,
-                "label": "下载流式草稿模型",
+                "label": "推荐下载：识别模型（464 MB）",
                 "detail": models.NEMOTRON.size,
-                "why": "装上后中文草稿基本不再改来改去（实测回改 5.7% → 0.6%）；下不成也照常上课。",
+                "why": "断网时也能有英文转录（草稿顺带不再回改：实测 5.7% → 0.6%）；下不成也照常上课。",
                 "soft": True,
             })
     except Exception as e:                                # noqa: BLE001
@@ -2102,12 +2104,14 @@ def run_step(key: str, on_line=None) -> dict:
         if key == "models":
             import doctor
             for m in doctor.MODELS:
-                # ⚠️⚠️ **只下必下的。** 可选的（Qwen3-1.7B，938 MB）**必须由用户点**
+                # ⚠️⚠️ **只下必下的。** 可选的（Nemotron，464 MB）**必须由用户点**
                 #    —— 作者 2026-09-28 拍的口径，也正是 doctor/update 那条
                 #    「大模型要不要下是用户的决定」。
                 #    ⚠️ 2026-09-28 给 `MODELS` 加那条**可选**条目时，这个循环会
                 #       **连它一起下** —— 当场引入的静默下载，正是要防的事。
                 #    要下某一条可选的，用下面的 `download_model(m)` 显式点。
+                # ⚠️ 2026-11-20（桌面 D1）：老用户升上来时必下名单只剩 VAD —— 这一圈
+                #    不会再碰 Parakeet（它已经不在注册表里了）。
                 if not m.required:
                     continue
                 if doctor.model_present(m.path):
@@ -2127,14 +2131,14 @@ def run_step(key: str, on_line=None) -> dict:
             #   （`spawn_draft_model_download`），所以判断只有落在这里**一份**，
             #   别让两个调用方各写一遍（同 `app` 那一步「先问一次戳记」的取法）。
             if doctor.model_present(models.NEMOTRON.path):
-                say("流式草稿模型已经装过了，跳过")
+                say("识别模型已经装过了，跳过")
                 return {"ok": True, "error": ""}
             if not draft_engine.want_model():
-                say("这台机器用不上流式草稿模型（内存不够，或手动指定了 parakeet），跳过")
+                say("识别模型被手动关掉了（CLASSLIVE_DRAFT_ENGINE=off），跳过")
                 return {"ok": True, "error": ""}
             r = download_model(models.NEMOTRON, say=say)
             if r["ok"]:
-                say("流式草稿模型装好了（下次上课生效）")
+                say("识别模型装好了（下次上课生效）")
             return r
 
         if key == "app":

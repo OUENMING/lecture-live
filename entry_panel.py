@@ -190,7 +190,7 @@ def chip_apply(btn, title: str, *, running: bool, max_w: float) -> None:
 def ready_item_bad(it: dict) -> bool:
     """这一项算不算「要处理」。**纯函数**。
 
-    ⚠️ **不许只看 `state`**：`models` 齐了但缺草稿模型时 `state` 是 `ok`，
+    ⚠️ **不许只看 `state`**：`models` 齐了但缺识别模型（Nemotron，可选）时 `state` 是 `ok`，
        而那时点击**是有动作的**（再下 464 MB）—— 胶囊写「已就绪」就是撒谎。
     ⚠️ `unknown` 也算（麦克风查不到 / 笔记库未设 / 翻译引擎没配 key）：它们是**入口**，
        不进这一档用户就没地方点（`_CHIP_VERB` 那个动词说清了点它会干嘛）。
@@ -283,8 +283,9 @@ def ready_item_text(it: dict) -> str:
         if it.get("key") == "engine":
             name, short = f"{short}翻译", ""                 # 「翻译引擎  云端」→「云端翻译」
         elif it.get("key") == "models":
-            # 「✓ … 缺草稿模型」读着自相矛盾（拍图看过）→ 那一种照留「已就绪 · 缺草稿模型」
-            short = {"已就绪": "", "已就绪 · 全本地": "全本地"}.get(short, short)
+            # 「✓ … 缺识别模型」读着自相矛盾（拍图看过）→ 那一种照留一句更短的
+            short = {"已就绪": "", "已就绪 · 全本地": "全本地",
+                     "已就绪 · 识别模型未装（推荐）": "可加识别模型"}.get(short, short)
         else:
             short = ""
     return f"{mark}  {name}  {short}" if short else f"{mark}  {name}"
@@ -310,7 +311,7 @@ def ready_short(it: dict) -> str:
             return "下载中…"
         if it.get("cloud_off"):
             return "已就绪 · 全本地"         # 关了云端转写要看得见（它不再是常驻开关）
-        return "已就绪 · 缺草稿模型" if it.get("offer_draft") else "已就绪"
+        return "已就绪 · 识别模型未装（推荐）" if it.get("offer_draft") else "已就绪"
     if it.get("key") == "update":
         if st == "busy":
             return "更新中…"
@@ -322,8 +323,8 @@ def ready_short(it: dict) -> str:
             return it.get("detail") or "已是最新"
         return (it.get("detail", "").split()[-1:] or ["有新版"])[0]
     if it.get("key") == "engine":
-        return "云端" if st == "ok" and "云端" in it.get("detail", "") else (
-            "本地" if st == "ok" else "没配 key")
+        # ⚠️ 只有云端一条路了（本地 mlx 引擎 2026-11-20 删掉）→ 不存在"本地"这个状态。
+        return "云端" if st == "ok" else "没配 key"
     if it.get("key") == "vault":
         # ⚠️ 「未设」不是错误 —— 笔记照写 `sessions/`（`ready.vault_item` 那条）
         return {"ok": "已设", "warn": "找不到了"}.get(st, "未设")
@@ -407,8 +408,8 @@ def models_menu(it: dict, *, downloading: bool = False, draft_mb: str = "") -> l
     if it.get("state") == "todo":
         first = {"key": "required", "title": "下载缺的模型", "enabled": not downloading}
     elif it.get("offer_draft"):
-        first = {"key": "draft", "title": f"下载流式草稿模型（{draft_mb}）" if draft_mb
-                 else "下载流式草稿模型", "enabled": not downloading}
+        first = {"key": "draft", "title": f"推荐下载识别模型（{draft_mb}）" if draft_mb
+                 else "推荐下载识别模型", "enabled": not downloading}
     elif it.get("state") == "busy" or downloading:
         first = {"key": "info", "title": "正在下载…", "enabled": False}
     else:
@@ -3100,13 +3101,13 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _status(f"笔记库设好了：{got}{hint}")
 
     def _download_draft() -> None:
-        """下可选的流式草稿模型（Nemotron，464 MB）。**只在用户点了之后**（纪律 3 的同族）。"""
+        """下可选的识别模型（Nemotron，464 MB）。**只在用户点了之后**（纪律 3 的同族）。"""
         if S.get("downloading"):
             return
         S["downloading"] = True
         _prev_state = (ready_by_key.get("models") or {}).get("state", "ok")
         _set_models(state="busy")
-        _status("正在下流式草稿模型（464 MB）—— 下完下节课草稿就不再回改")
+        _status("正在下识别模型（464 MB）—— 下完断网也有英文转录")
 
         def work() -> None:
             ok = False
@@ -3116,7 +3117,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                 r = update_mod.download_model(
                     models_mod.NEMOTRON, say=lambda s: _later(_status, s))
                 ok = bool(r["ok"])
-                _later(_status, "草稿模型装好了 —— 下节课生效" if ok else r["error"])
+                _later(_status, "识别模型装好了 —— 下节课生效" if ok else r["error"])
             except Exception as e:                         # noqa: BLE001
                 _later(_status, f"下载失败：{str(e)[:70]}")
             finally:
@@ -3517,7 +3518,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             except Exception:                              # noqa: BLE001
                 pass
 
-    # ── 开课面板上的小卡（「已更新到 X」/「有新版本」/「草稿模型还没装」）──────────
+    # ── 开课面板上的小卡（「已更新到 X」/「有新版本」/「推荐下载识别模型」）──────────
     #    ⭐ 2026-10-14 作者定：三张卡同一个画法（`whatsnew.build`），**一次只出一张**，排队；
     #       关掉一张再出下一张。开课 / 关面板时整队收掉（`_close_offer`）。
     def _close_offer() -> None:
@@ -3612,10 +3613,14 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
                      ("知道了", _card_done(lambda: None), "primary")], over=win))
 
     def _draft_card() -> None:
-        """流式草稿模型没装 → 提醒一次（2026-10-14 起它是必装的）。主线程。
+        """本地识别模型（Nemotron）没装 → **推荐**一次。主线程。
 
-        可以先关掉：下课退出 / 不开课关面板时后台会静默下好（`update.spawn_draft_model_download`，
-        这条路 3.9.3 起就在）。⚠️ 用不上它的机器（内存不够 / 指定了 parakeet）不提醒。
+        ⚠️ **2026-11-20（桌面 D1）之后它是可选的**（Owen 改口）：没装也能上课，全走云端。
+           所以这张卡的口气是「推荐」，不是「必装」—— 好处一句话说清：
+           **断网 / 云端识别失败时仍有英文转录**（草稿不再回改是附带的）。
+        ⚠️ 可以先关掉：下课退出 / 不开课关面板时后台会静默下好
+           （`update.spawn_draft_model_download`，这条路 3.9.3 起就在）。
+        ⚠️ `CLASSLIVE_DRAFT_ENGINE=off` 的人不提醒（`ready.draft_wanted` → `_draft_wanted`）。
         """
         if S.get("downloading"):
             return
@@ -3629,11 +3634,12 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             return
         import whatsnew
         _queue_card("draft", lambda: whatsnew.build(
-            "流式草稿模型还没装", "这一版起它是必装的",
-            body=(f"装上后课上的中文草稿基本不再改来改去（实测回改 5.7% → 0.6%），"
-                  f"也更省电：草稿识别每秒要算的时间约 0.36 秒 → 0.15 秒。下载{size}，最好连着 Wi-Fi 下。"),
-            note="现在不方便也没关系：关掉 ClassLive 后会在后台自动下好，下节课生效。",
-            buttons=[("稍后", _card_done(lambda: _status("好 —— 关掉 ClassLive 后在后台下草稿模型")),
+            "推荐下载：识别模型（464 MB）", "断网时也能有英文转录",
+            body=(f"平时字幕走云端，装上这个之后**断网 / 云端识别失败时也还有英文转录**；"
+                  f"顺带课上的中文草稿基本不再改来改去（实测回改 5.7% → 0.6%），也更省电。"
+                  f"下载{size}，最好连着 Wi-Fi 下。"),
+            note="不装也能正常上课（全走云端）。关掉 ClassLive 后会在后台自动下好，下节课生效。",
+            buttons=[("稍后", _card_done(lambda: _status("好 —— 关掉 ClassLive 后在后台下识别模型")),
                       "secondary"),
                      ("现在下载", _card_done(_download_draft), "primary")],
             over=win))
@@ -3666,52 +3672,7 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
             buttons=[("稍后", _card_done(lambda: _status(f"好 —— 下课关掉后自动装 {latest}")),
                       "secondary"),
                      ("立即更新", _card_done(now), "primary")],
-            over=win), preempt=("updated", "draft", "whisper"))
-
-    def _keep_whisper() -> None:
-        """「保留」—— 记住这个回答，以后不再问（记不上就说出来）。"""
-        import whisper_card as wc
-        if wc.answer("keep", root=state_root):
-            _status("好 —— 本地 Whisper 留着，以后不再问")
-        else:
-            _status("⚠ 这个选择没记住（写不进 ~/.classlive）—— 下次还会问一次")
-
-    def _remove_whisper() -> None:
-        """「移到废纸篓」—— 安全判据全在 `whisper_card.remove`（只认注册表那条路径）。
-
-        ⚠️ 成功才记「删过」；没删成（判据不过 / 废纸篓搬不动）就**别装作问过了** ——
-           下次打开还会问，用户照样能再点一次。
-        """
-        import whisper_card as wc
-        r = wc.remove(wc.whisper_path(), root=state_root)
-        if r["ok"]:
-            _status("已把本地 Whisper 移到废纸篓（Finder 里可还原）"
-                    "—— 想装回来：cl doctor")
-        else:
-            _status(f"⚠ 没删：{r['error']}")
-
-    def _whisper_card() -> None:
-        """旧的本地 Whisper 还在盘上 → 问一次删不删（云端正稿已经接替它）。主线程。
-
-        ⚠️ 四个条件全中才出（`whisper_card.should_offer`）：**没答过** ·
-           本版本上 ≥3 节云端定稿的课 · 目录还在 · 云端转写开着。答过就永不再问。
-        ⚠️ 与其它小卡共用同一条队列（一次只出一张，关掉一张再出下一张）。
-        """
-        try:
-            import whisper_card as wc
-            if not wc.should_offer(root=state_root):
-                return
-            title, body, note = wc.card_texts(wc.size_text_now())
-        except Exception:                                  # noqa: BLE001
-            return
-        import whatsnew
-        _queue_card("whisper", lambda: whatsnew.build(
-            title, "", body=body, note=note,
-            # ⭐ 主次（作者 2026-10-18）：这张卡就是来建议清理的 → 「移到废纸篓」是主按钮
-            #    （进废纸篓可还原，不算不可逆）；「保留」退为次级。
-            buttons=[("保留", _card_done(_keep_whisper), "secondary"),
-                     ("移到废纸篓", _card_done(_remove_whisper), "primary")],
-            over=win))
+            over=win), preempt=("updated", "draft"))
 
     def _show_update(offer: dict, gen) -> None:
         """后台查完新版本，回到主线程把「更新」接进胶囊（它自己会写进那一行 / 菜单里）。
@@ -3734,12 +3695,11 @@ def _build(*, on_start, glossary, sessions_dir, state_root, on_close,
         _refresh_chip()
 
     if on_start is not None:
-        # 「已更新到 X」/「草稿模型还没装」/「旧的本地 Whisper 还能清掉」：
+        # 「已更新到 X」/「识别模型还没装（推荐）」：
         # 本地就能判断，面板一出来就排上（下一轮 runloop，面板先上屏）
         card_gen = S["card_gen"] = object()
         _later(lambda: None if _stale(card_gen, "card_gen") else _updated_card())
         _later(lambda: None if _stale(card_gen, "card_gen") else _draft_card())
-        _later(lambda: None if _stale(card_gen, "card_gen") else _whisper_card())
 
     if on_start is not None and ready_items:
         # ⚠️ 只在**开课前**的面板上查（上课中从菜单栏打开的那档 `on_start=None` 不查：课在录，不该更新）。

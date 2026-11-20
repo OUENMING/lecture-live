@@ -247,7 +247,7 @@ case "${1:-}" in
     esac
     [ -f "$_AUDIO" ] || { echo "❌ 找不到音频文件: $2" >&2; exit 1; }
     SRC=file; UI=terminal; ARGS+=(--path "$_AUDIO"); shift 2 ;;
-  local) ENGINE=local; shift ;;
+  local) echo "⚠ --engine local 已退休(本地翻译引擎 2026-11-20 移除) —— 只看云端" >&2; shift ;;
   doctor) "$PY" doctor.py; exit $? ;;
   # 开课前的准备。照 doctor 的形状：转发 + 透传退出码（prep.py 用非零表示失败）。
   # ⚠️ 课号在这里解析一次（`$COURSE` 来自上面读的 .course），prep.py 不自己去读环境。
@@ -336,11 +336,12 @@ if [ "$SRC" != "file" ] && [ "$(cat "$TMCFG" 2>/dev/null || true)" = "1" ]; then
   TM_TAG=" · 测试模式=开"
 fi
 
-# 草稿引擎（R3）：App 启动没有环境变量，`.draft-engine` 是 App 用户唯一的开关。
-# 内容 auto | parakeet | nemotron；不存在 / 非法 = 不设（main 里默认 auto）。已设环境变量时不覆盖。
+# 草稿开关：App 启动没有环境变量，`.draft-engine` 是 App 用户唯一的开关。
+# 内容 auto | off；不存在 / 非法 = 不设（main 里默认 auto）。已设环境变量时不覆盖。
+# ⚠️ 2026-11-20：本地只剩一个识别模型（Nemotron），"换成哪个模型"这一档已没有意义。
 if [ -z "${CLASSLIVE_DRAFT_ENGINE:-}" ]; then
   _de="$(cat .draft-engine 2>/dev/null || true)"
-  case "$_de" in auto|parakeet|nemotron) export CLASSLIVE_DRAFT_ENGINE="$_de" ;; esac
+  case "$_de" in auto|off) export CLASSLIVE_DRAFT_ENGINE="$_de" ;; esac
 fi
 
 echo "▶ ClassLive · 音源=$SRC · 引擎=$ENGINE · 课程=${COURSE:-(未设置, 默认 LECTURE)}${TM_TAG}"

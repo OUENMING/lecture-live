@@ -3,8 +3,8 @@
 
 ## 契约（`main.partial_worker` 只依赖这一个方法）
 
-    eng = load_draft_engine(parakeet_asr, window_samples=PARTIAL_MAX_S * SR)   # 永不抛
-    text, used = eng.transcribe(buf, tag)     # used ∈ {"nemotron", "parakeet"}；永不抛
+    eng = load_draft_engine(window_samples=PARTIAL_MAX_S * SR)   # 永不抛
+    text, used = eng.transcribe(buf, tag)     # used ∈ {"nemotron", "none"}；永不抛
     tail = eng.finish(buf, tag)               # 段尾：本段完整假设；没有 → ""；永不抛
     ends = eng.sentence_ends(tag)             # 本段已封口的句末时刻（秒，相对段首）；没有 → ()；永不抛
     eng.name / eng.reason / eng.fallback_reason                               # 只读
@@ -15,8 +15,8 @@
 
 - `transcribe` / `finish` 返回空（**这一份不要草稿**），`sentence_ends` 返回 `()`
   —— `main.partial_worker` 那边 `if not t: continue`，屏上就是还没有草稿；
-- `name` 先照**选中的那个**报（`nemotron`），加载失败才改口 `parakeet`
-  （`fallback_reason` 写清原因，`partial_worker` 会照既有那条路出声一次）；
+- `name` 先报 `nemotron`；**加载失败 / 熔断** → 改口 `none`（`fallback_reason` 写清原因，
+  `partial_worker` 会照既有那条路出声一次）；⚠️ 没有第二个模型可退 —— 就这一份；
 - **定稿一个字节都不受影响**：它根本不走这个引擎（`final_asr.load_final`）。
 
 ⚠️ 就绪前到达的音频**不缓存**（选简单的那条路）：草稿是 latest-wins 的，
@@ -25,18 +25,22 @@
 
 - `buf` 是**本段从段首累积的**样本（`Segmenter._buf()`），`tag` 是 put 那一刻的段号。
   流式引擎每段一条流、只喂新增样本 —— latest-wins 丢掉中间几份也不丢样本，下一份 `buf` 里全有。
-- Parakeet（窗口型）只看最近 `window_samples`，与 R3 之前的行为逐字相同。
 
 ⚠️ 线程：**只能在一个线程里用**（partial_worker）。sherpa 的 OnlineStream 非线程安全；
    本类不加锁 —— 加了也挡不住第二个线程造成的「流状态错乱」，所以干脆规定单线程。
    唯一例外是 `sentence_ends`：它只读草稿线程**整个替换**的一个元组（不碰 sherpa），
    给 `vad.Segmenter` 在音频线程里读（3.9.4 句末切段）。
-⚠️ 熔断后**本节课不再试**（不来回抖）：退回 Parakeet，直到进程结束。
+⚠️ 熔断后**本节课不再试**（不来回抖）：退成「无草稿」，直到进程结束。**定稿不受影响**
+   （它走 `final_asr` / `nemotron_final`，与这里不是同一份实例）。
 ⚠️ 段中间**不补静音、不调 `input_finished`**：那会结束这条流，后面再喂的样本全丢。
    段**尾**才补（`finish`，3.9.4）：这条流本来就要扔了，补一截静音让前瞻里那几个词解出来。
 
+⭐ **2026-11-20（桌面 D1）**：本地只留 Nemotron 一个模型（Parakeet 已删）。所以这里
+   **没有"退回哪个模型"这件事**了 —— 熔断 / 加载失败 / 模型没装 = 本节无草稿。
+   这对课堂是可接受的：草稿只是「抢先看一眼」，定稿照常出。
+
 为什么单独成模块：`partial_worker` 是 `main.run()` 里的嵌套闭包，默认闸门够不到；
-选择、喂流、熔断、回退全放这里，用假识别器做毫秒级判据（`tests/test_draft_engine.py`）。
+选择、喂流、熔断全放这里，用假识别器做毫秒级判据（`tests/test_draft_engine.py`）。
 """
 from __future__ import annotations
 
@@ -47,10 +51,11 @@ from typing import Any, Callable, Mapping
 
 import models
 
-ENV = "CLASSLIVE_DRAFT_ENGINE"                # auto | parakeet | nemotron（默认 auto）
+#: 开关只留两档：`auto`（默认，模型在就用）/ `off`（这节课不要草稿）。
+#: ⚠️ 2026-11-20 桌面 D1 之后没有「换哪个模型」可选了 —— 本地只剩 Nemotron 一个。
+ENV = "CLASSLIVE_DRAFT_ENGINE"                # auto | off
 ENV_MODEL_DIR = "CLASSLIVE_DRAFT_MODEL_DIR"   # 只给测试 / 排查用：指向别的模型目录
-MODES = ("auto", "parakeet", "nemotron")
-MIN_RAM_BYTES = 12 * 2**30    # auto 的内存门：模型常驻实测 +1073 MB（P0，OCW 全课）
+MODES = ("auto", "off")
 SLOW_S, SLOW_STRIKES = 0.9, 3  # 连续 3 次单次更新 > 0.9 s 熔断（P0 实测 p95 0.15 s）
 NUM_THREADS = 2
 TAIL_PAD_S = 0.8               # 段尾补的静音（见 `NemotronDrafter.finish`）
@@ -70,25 +75,23 @@ def sealed_ends(tokens, timestamps) -> tuple:
                  if toks[i].strip() in END_PUNCT and toks[i + 1].startswith(" "))
 
 
-def choose(mode: str, model_present: bool, ram_bytes: int | None) -> tuple[str, str]:
-    """纯函数：`(引擎名, 理由)`。理由空串 = 没什么要说的。
+def choose(mode: str, model_present: bool) -> tuple[str, str]:
+    """纯函数：`(引擎名, 理由)`。引擎名 ∈ `{"nemotron", "none"}`；理由空串 = 没什么要说的。
 
     - `mode` 非法 → 当 auto
-    - parakeet → 手动指定
-    - nemotron → 模型在就用（**不看内存**，用户明说要）；不在 → parakeet
-    - auto → 模型不在 / 内存已知且不足 → parakeet；内存未知 → 放行并写明
+    - `off` → `none`（用户明说这节课不要草稿）
+    - 模型不在 → `none`，理由「流式模型未下载」
+    - 其余 → `nemotron`
+
+    ⚠️ 原来这里还有一道**内存门**（`MIN_RAM_BYTES`，12 GB）和一个 `parakeet` 分支。
+       内存门是给 Parakeet 留的（小模型也能跑）；现在没有第二个模型可选，卡内存等于
+       让「云端失败就只剩零字幕」—— 不做。模型自带的 464 MB 下载体积也由用户自己点。
     """
     mode = mode if mode in MODES else "auto"
-    if mode == "parakeet":
-        return "parakeet", "手动指定"
+    if mode == "off":
+        return "none", "手动关闭"
     if not model_present:
-        return "parakeet", "流式模型未下载"
-    if mode == "nemotron":
-        return "nemotron", "手动指定"
-    if ram_bytes is None:
-        return "nemotron", "内存未知"
-    if ram_bytes < MIN_RAM_BYTES:
-        return "parakeet", f"内存 {ram_bytes / 2**30:.0f} GB < {MIN_RAM_BYTES // 2**30} GB"
+        return "none", "流式模型未下载"
     return "nemotron", ""
 
 
@@ -231,13 +234,18 @@ class _Pending:
 
 
 class DraftEngine:
-    def __init__(self, parakeet, streaming=None, *, window_samples: int, reason: str = "",
+    """草稿引擎。**只有一份模型**（Nemotron）—— 熔断 / 加载失败 = 「本节无草稿」。
+
+    ⚠️ 2026-11-20（桌面 D1）删掉了 `parakeet` 这个退路。留下的空位不是"随便找个模型补"，
+       而是**明确不出草稿**：`name` 报 `none`、`transcribe` 返回空串、`fallback_reason`
+       照实写原因。`partial_worker` 那边 `if not t: continue`，屏上就是没有草稿 —— 干净。
+    """
+
+    def __init__(self, streaming=None, *, reason: str = "",
                  clock: Callable[[], float] = time.monotonic, pending=None):
-        self._parakeet = parakeet
         self._streaming = streaming
         #: 后台加载中的流式模型（`load_draft_engine_async` 才会给）；就绪前一律不出草稿。
         self._pending = pending
-        self._window = int(window_samples)
         self._clock = clock
         self._strikes = 0
         self.reason = reason
@@ -245,15 +253,14 @@ class DraftEngine:
 
     @property
     def ready(self) -> bool:
-        """**后台那一份尘埃落定**了没有（成功或失败都算落定）。⚠️ 选的是 Parakeet 时恒为真。"""
+        """**后台那一份尘埃落定**了没有（成功或失败都算落定）。⚠️ 没有后台那一段时恒为真。"""
         p = self._pending
         return p is None or p.done
 
     def _adopt(self) -> None:
         """把后台加载的结果接过来。⚠️ 只在草稿线程调（它会改 `_streaming`）。
 
-        失败 → 改口 Parakeet（`fallback_reason` 说清），**这一份**就从 Parakeet 出
-        —— 同"流式坏了退 Parakeet"那条既有路径，只不过原因是加载。
+        失败 → `fallback_reason` 说清，之后**本节不出草稿**（没有第二个模型可退）。
         """
         p = self._pending
         if p is None:
@@ -269,15 +276,20 @@ class DraftEngine:
 
     @property
     def name(self) -> str:
-        """当前生效（或**将要**生效）的引擎。⚠️ 与 `ready` 不同：加载中先报**选中的**
-        那个（`nemotron`），只有**加载失败**才改口 `parakeet`。"""
+        """当前生效（或**将要**生效）的引擎：`nemotron` / `none`。
+
+        ⚠️ 与 `ready` 不同：加载中先报 `nemotron`（打算用它），只有**加载失败 / 熔断**
+           才改口 `none`。
+        """
         if self._streaming is not None:
             return "nemotron"
         if self._pending is not None:
-            return "parakeet" if self._pending.error is not None else "nemotron"
-        return "parakeet"
+            return "none" if self._pending.error is not None else "nemotron"
+        # 剩下的只可能是：没模型 / 关了 / 加载失败了 / 熔断了 —— 一律如实报「没有草稿」。
+        return "none"
 
     def transcribe(self, buf, tag) -> tuple[str, str]:
+        """`(文本, 实际用的引擎)`。**永不抛**；没有引擎 → `("", "none")`。"""
         if self._pending is not None:
             self._adopt()
             if self._pending is not None:         # 还在后台加载 → 这一份不要草稿（定稿照常）
@@ -291,11 +303,11 @@ class DraftEngine:
                     self._trip(f"太慢：连续 {SLOW_STRIKES} 次 > {SLOW_S}s")
                 return text, "nemotron"          # 这一份照常用（已经算出来了）
             except Exception as e:               # noqa: BLE001
-                self._trip(f"出错：{e!r}")        # 落到下面的 Parakeet，**这一份不丢**
-        return self._parakeet.transcribe(buf[-self._window:]), "parakeet"
+                self._trip(f"出错：{e!r}")        # 本节无草稿，**这一份不再补**
+        return "", "none"
 
     def finish(self, buf, tag) -> str:
-        """段尾收一次（见 `NemotronDrafter.finish`）。Parakeet / 熔断后 / 出错 → `""`（= 不补，旧行为）。**永不抛。**
+        """段尾收一次（见 `NemotronDrafter.finish`）。没有引擎 / 熔断后 / 出错 → `""`。**永不抛。**
 
         ⚠️ 不计入「太慢」熔断：这一下本来就要多解 0.8 s 静音，与逐秒草稿不是一个量级。
         ⚠️ 后台还在加载 → `""`（没跑过这一段的草稿，本来也不该收尾）。
@@ -313,7 +325,7 @@ class DraftEngine:
             return ""
 
     def sentence_ends(self, tag) -> tuple:
-        """本段（`tag`）最近一次草稿里已封口的句末时刻。Parakeet / 熔断后 / 不是这一段 → `()`。**永不抛**。"""
+        """本段（`tag`）最近一次草稿里已封口的句末时刻。熔断后 / 不是这一段 → `()`。**永不抛**。"""
         try:
             got_tag, ends = self._streaming.ends if self._streaming is not None else (None, ())
             return ends if got_tag == tag else ()
@@ -329,7 +341,7 @@ class DraftEngine:
 
         窗口重新可见时用（3.9.7 省电）：「草稿流干净重开，从下一个段开始」——
         隐藏期间没喂过音频，流停在旧位置上，直接接着喂就是**喂半截**。
-        Parakeet（窗口型、每次重解整窗）/ 后台还在加载 → 空操作。**永不抛。**
+        后台还在加载 / 没有引擎 → 空操作。**永不抛。**
         """
         try:
             r = getattr(self._streaming, "reset", None)
@@ -339,33 +351,24 @@ class DraftEngine:
             pass
 
 
-def _ram_bytes() -> int | None:
-    try:
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    except (ValueError, OSError, AttributeError):
-        return None
-
-
 def _mode(env: Mapping[str, str]) -> str:
     return (env.get(ENV) or "auto").strip().lower()
 
 
-def want_model(env: Mapping[str, str] = os.environ,
-               ram_bytes: Callable[[], int | None] | None = None) -> bool:
-    """这台机器装了 Nemotron 会不会用上？给更新卡片问「要不要提议下载」。
+def want_model(env: Mapping[str, str] = os.environ) -> bool:
+    """用户是不是**想要**草稿？给更新卡片 / 就绪条问「要不要提议下载 Nemotron」。
 
-    与 `load_draft_engine` 走**同一个** `choose`（假设模型已在）—— 内存不够 / 手动指定 parakeet
-    的机器装了也用不上，就别让它下 464 MB。**永不抛**（出错当「不要」）。
+    ⚠️ 2026-11-20 之后它不再看内存（内存门已删）、也不看装没装 —— 只看开关：
+       `CLASSLIVE_DRAFT_ENGINE=off` 的人就别再给他推 464 MB。**永不抛**（出错当「要」）。
     """
     try:
-        return choose(_mode(env), True, (ram_bytes or _ram_bytes)())[0] == "nemotron"
+        return _mode(env) != "off"
     except Exception:                            # noqa: BLE001
-        return False
+        return True
 
 
-def _prepare(env: Mapping[str, str],
-             ram_bytes: Callable[[], int | None] | None) -> tuple[str, str, str | None]:
-    """`(引擎名, 理由, 模型目录)`。`引擎名 == "parakeet"` 时目录为 `None`。**永不抛**。
+def _prepare(env: Mapping[str, str]) -> tuple[str, str, str | None]:
+    """`(引擎名, 理由, 模型目录)`。`引擎名 == "none"` 时目录为 `None`。**永不抛**。
 
     把「选哪个」与「真的去构造」拆开 —— 前者便宜（同步做完），后者贵（见
     `load_draft_engine_async`）。两条加载路径共用这一份判据。
@@ -374,35 +377,29 @@ def _prepare(env: Mapping[str, str],
     try:
         import doctor
         model_dir = env.get(ENV_MODEL_DIR) or models.path_of("nemotron")
-        ram = (ram_bytes or _ram_bytes)()
-        name, why = choose(_mode(env), bool(model_dir) and doctor.model_present(model_dir), ram)
+        name, why = choose(_mode(env), bool(model_dir) and doctor.model_present(model_dir))
         return name, why, model_dir
     except Exception as e:                       # noqa: BLE001
-        return "parakeet", f"流式模型加载失败：{e!r}", None
+        return "none", f"流式模型加载失败：{e!r}", None
 
 
-def load_draft_engine(parakeet, *, window_samples: int, env: Mapping[str, str] = os.environ,
-                      ram_bytes: Callable[[], int | None] | None = None,
+def load_draft_engine(*, env: Mapping[str, str] = os.environ,
                       make_drafter: Callable[[str], Any] = NemotronDrafter) -> DraftEngine:
-    """**永不抛**。任何一步失败 → Parakeet 引擎，`reason` 写清楚。**同步**加载（约 1.28 s）。
+    """**永不抛**。没有模型 / 构造失败 → 「无草稿」引擎，`reason` 写清楚。**同步**加载（约 1.28 s）。
 
     ⚠️ 生产走 `load_draft_engine_async`（不卡启动）；这个同步版留给离线量具
     （`scripts/stream_eval.py` 要拿真模型量 WER，那本来就没有"启动"要救）。
     """
-    name, why, model_dir = _prepare(env, ram_bytes)
-    if name == "parakeet":
-        return DraftEngine(parakeet, window_samples=window_samples, reason=why)
+    name, why, model_dir = _prepare(env)
+    if name != "nemotron" or model_dir is None:
+        return DraftEngine(reason=why)
     try:
-        return DraftEngine(parakeet, make_drafter(model_dir),
-                           window_samples=window_samples, reason=why)
+        return DraftEngine(make_drafter(model_dir), reason=why)
     except Exception as e:                       # noqa: BLE001
-        return DraftEngine(parakeet, window_samples=window_samples,
-                           reason=f"流式模型加载失败：{e!r}")
+        return DraftEngine(reason=f"流式模型加载失败：{e!r}")
 
 
-def load_draft_engine_async(parakeet, *, window_samples: int,
-                            env: Mapping[str, str] = os.environ,
-                            ram_bytes: Callable[[], int | None] | None = None,
+def load_draft_engine_async(*, env: Mapping[str, str] = os.environ,
                             make_drafter: Callable[[str], Any] = NemotronDrafter,
                             thread_factory: Callable[..., Any] = threading.Thread,
                             on_ready: Callable[[bool], None] | None = None) -> DraftEngine:
@@ -413,12 +410,11 @@ def load_draft_engine_async(parakeet, *, window_samples: int,
 
     `on_ready(ok)` 在后台**尘埃落定**时被调一次（成功 `True` / 失败 `False`），
     用来记「草稿模型就绪」那一项起步计时。⚠️ 它跑在**加载线程**上 —— 只许做
-    「记一个时刻」这种立刻返回的事。⚠️ 选中 Parakeet（没有后台那一段）时**不调**：
-    那条路的就绪时刻是调用方等 `asr.get()` 的那一下，由它自己记。
+    「记一个时刻」这种立刻返回的事。
     """
-    name, why, model_dir = _prepare(env, ram_bytes)
-    if name == "parakeet":
-        return DraftEngine(parakeet, window_samples=window_samples, reason=why)
+    name, why, model_dir = _prepare(env)
+    if name != "nemotron" or model_dir is None:
+        return DraftEngine(reason=why)           # 没模型 / 关了 → 不调 on_ready（没有那一项要记）
 
     def _build():
         try:
@@ -436,12 +432,10 @@ def load_draft_engine_async(parakeet, *, window_samples: int,
     except Exception as e:                       # noqa: BLE001 —— 起不了线程也不许把开课带下水
         if on_ready is not None:
             _notify(on_ready, False)
-        eng = DraftEngine(parakeet, window_samples=window_samples, reason=why)
+        eng = DraftEngine(reason=why)
         eng.fallback_reason = f"出错：加载线程没起来（{e!r}）"
         return eng
-    return DraftEngine(parakeet, window_samples=window_samples, reason=why,
-                       pending=pending)
-
+    return DraftEngine(reason=why, pending=pending)
 
 
 def _notify(on_ready, ok: bool) -> None:

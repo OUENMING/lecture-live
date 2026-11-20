@@ -145,7 +145,7 @@ cd lecture-live
 <details>
 <summary><b>Windows / Intel Mac 能用吗？</b></summary>
 
-不能。本地推理依赖 Apple Silicon 的 MLX，悬浮窗用的是 macOS 原生界面（AppKit）。
+不能。悬浮窗用的是 macOS 原生界面（AppKit），本地识别模型（sherpa-onnx）也按 macOS arm64 打的包。
 
 </details>
 
@@ -166,7 +166,7 @@ cd lecture-live
 <details>
 <summary><b>断网了会怎样？</b></summary>
 
-英文字幕不会断：云端识别不可用时退回本地识别。翻译失败时，装了本地兜底模型（可选，938 MB，`cl doctor` 里装）就降级到本地翻译，每 90 秒探测一次，云端恢复后自动切回；没装就只出英文。
+英文字幕看有没有装本地识别模型：装了（可选，464 MB，面板上一点就下）→ 云端识别不可用时自动退回本机识别，字幕照常；没装 → 云端不通时这一段就没有英文。翻译只有云端一条路：云端连续失败会停下并每几秒起翻倍地重试（最长 90 秒一次），期间**字幕只有英文**，恢复后自动接上。
 
 </details>
 

@@ -97,6 +97,18 @@ def t_fallback_to_mirror_ok():
         srv.close()
 
 
+@case("⭐ 我们自己的 VPS 镜像：按**原名**放在 /models/ 下，且强制过 sha")
+def t_vps_mirror_in_sources():
+    url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+    srcs = F.gh_sources(url)
+    labels = [s.label for s in srcs]
+    assert labels[0] == "直连" and labels[-1] == "git.bldcam.page", labels
+    vps = srcs[-1]
+    # ⚠️ 它不是前缀代理：只拼 URL 的**文件名**
+    assert vps.url == "https://git.bldcam.page/models/silero_vad.onnx", vps.url
+    assert vps.mirror is True, "自家镜像也必须过 sha —— 第三方存哪儿都一样不可全信"
+
+
 @case("⭐⭐ 镜像给的文件 sha 对不上 → 拒收：不落盘、不留 `.part`、说清原因")
 def t_mirror_wrong_bytes_rejected():
     srv = _Srv({"/m": OTHER})
@@ -210,77 +222,37 @@ def _tar_bytes(members: dict) -> bytes:
     return buf.getvalue()
 
 
-@case("Whisper：下 tar → 解到模型目录 → 不留 tar / 临时目录")
-def t_whisper_extracts_and_cleans():
-    tb = _tar_bytes({"sherpa-onnx-whisper-turbo/turbo-tokens.txt": b"tok",
-                     "sherpa-onnx-whisper-turbo/turbo-encoder.int8.onnx": b"enc"})
+@case("Nemotron：下 tar → 解到模型目录 → 不留 tar / 临时目录")
+def t_tarball_extracts_and_cleans():
+    tb = _tar_bytes({"sherpa-onnx-nemotron-x/tokens.txt": b"tok",
+                     "sherpa-onnx-nemotron-x/encoder.int8.onnx": b"enc"})
     srv = _Srv({"/wt.tar.bz2": tb})
     try:
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td) / "models"
-            ok, why = F.fetch_tarball(root, srv.url + "/wt.tar.bz2", say=quiet)
+            ok, why = F.fetch_tarball(root, srv.url + "/wt.tar.bz2",
+                                      pin=hashlib.sha256(tb).hexdigest(), say=quiet)
             assert ok, why
-            assert (root / "sherpa-onnx-whisper-turbo" / "turbo-tokens.txt").read_bytes() == b"tok"
+            assert (root / "sherpa-onnx-nemotron-x" / "tokens.txt").read_bytes() == b"tok"
             left = [p.name for p in root.iterdir()]
-            assert left == ["sherpa-onnx-whisper-turbo"], f"该只剩模型目录：{left}"
+            assert left == ["sherpa-onnx-nemotron-x"], f"该只剩模型目录：{left}"
     finally:
         srv.close()
 
 
-@case("⭐ Whisper：tar 里有越界路径（../evil）→ 拒收，模型目录之外什么都没写")
-def t_whisper_path_traversal():
+@case("⭐ Nemotron：tar 里有越界路径（../evil）→ 拒收，模型目录之外什么都没写")
+def t_tarball_path_traversal():
     tb = _tar_bytes({"../evil.txt": b"x"})
     srv = _Srv({"/wt.tar.bz2": tb})
     try:
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td) / "models"
-            ok, why = F.fetch_tarball(root, srv.url + "/wt.tar.bz2", say=quiet)
+            ok, why = F.fetch_tarball(root, srv.url + "/wt.tar.bz2",
+                                      pin=hashlib.sha256(tb).hexdigest(), say=quiet)
             assert not ok and "越界" in why, (ok, why)
             assert not (pathlib.Path(td) / "evil.txt").exists(), "越界文件被写出去了"
     finally:
         srv.close()
-
-
-@case("⭐⭐ HF：直连失败 → hf-mirror；镜像文件 pins 对 → 成功")
-def t_hf_mirror_ok():
-    log = []
-
-    def dl(repo, local, endpoint):
-        log.append(endpoint); return 7 if endpoint is None else 0
-    with tempfile.TemporaryDirectory() as td:
-        d = pathlib.Path(td); (d / "a.bin").write_bytes(PAYLOAD)
-        ok, why = F.fetch_hf("r/x", None, {"a.bin": SHA}, find_dir=lambda: d, purge=d,
-                             download=dl, say=quiet)
-        assert ok and why == "hf-mirror.com", (ok, why)
-        assert log == [None, F.HF_MIRROR], log
-        assert (d / "a.bin").exists(), "校验通过不该删东西"
-
-
-@case("⭐⭐ HF：镜像文件 pins 对不上 → 整个 `purge` 目录删掉、判失败")
-def t_hf_mirror_tampered():
-    with tempfile.TemporaryDirectory() as td:
-        d = pathlib.Path(td) / "model"; d.mkdir(); (d / "a.bin").write_bytes(OTHER)
-        ok, why = F.fetch_hf("r/x", None, {"a.bin": SHA}, find_dir=lambda: d, purge=d,
-                             download=lambda r, l, e: 7 if e is None else 0, say=quiet)
-        assert not ok and not d.exists(), (ok, why, d.exists())
-
-
-@case("HF：镜像下完却找不到那几个文件（`find_dir()` 返回 None）→ 判失败，不放行")
-def t_hf_mirror_files_missing():
-    with tempfile.TemporaryDirectory() as td:
-        ok, why = F.fetch_hf("r/x", None, {"a.bin": SHA}, find_dir=lambda: None,
-                             purge=pathlib.Path(td) / "nope",
-                             download=lambda r, l, e: 7 if e is None else 0, say=quiet)
-        assert not ok, (ok, why)
-
-
-@case("HF：直连成功 → **不碰**镜像、也不校验")
-def t_hf_direct_ok_no_mirror():
-    log = []
-    ok, why = F.fetch_hf("r/x", None, {"a.bin": SHA}, find_dir=lambda: None,
-                         purge=pathlib.Path("/nonexistent-purge"),
-                         download=lambda r, l, e: (log.append(e), 0)[1], say=quiet)
-    assert ok and log == [None], (ok, why, log)
 
 
 # ---------------------------------------------- 2026-10-04 OCR 审查补的三条
@@ -288,103 +260,61 @@ def t_hf_direct_ok_no_mirror():
 #    而代价是「下错一份 938 MB」或「永远重下不了」。
 
 
-@case("⭐⭐ HF：两路都失败 → `local_dir` 里的**半截**文件要清掉（否则 doctor 当它「已就位」，再也不会重下）")
-def t_hf_partial_purged_on_total_failure():
-    with tempfile.TemporaryDirectory() as td:
-        d = pathlib.Path(td) / "model"; d.mkdir()
-        (d / "a.bin").write_bytes(OTHER)                     # 半截：pins 对不上
-        ok, why = F.fetch_hf("r/x", d, {"a.bin": SHA}, find_dir=lambda: d, purge=d,
-                             download=lambda r, l, e: 7, say=quiet)     # 两路都失败
-        assert not ok and not d.exists(), f"半截模型没清掉：{d.exists()}（{why}）"
-
-
-@case("⭐ 上面那条的**反面**：目录里本来就有一份完好的（pins 对得上）→ 失败时不许误删")
-def t_hf_good_dir_kept_on_total_failure():
-    with tempfile.TemporaryDirectory() as td:
-        d = pathlib.Path(td) / "model"; d.mkdir()
-        (d / "a.bin").write_bytes(PAYLOAD)                   # 完好：pins 对得上
-        ok, why = F.fetch_hf("r/x", d, {"a.bin": SHA}, find_dir=lambda: d, purge=d,
-                             download=lambda r, l, e: 7, say=quiet)
-        assert not ok and (d / "a.bin").exists(), f"把一份完好的模型删了（{why}）"
-
-
-@case("⭐ `fetch()` 见到不认识的 key 要**响亮失败** —— 不许兜底去下 938 MB 的 Qwen3")
+@case("⭐ `fetch()` 见到不认识的 key 要**响亮失败** —— 不许兜底去下最大的那个")
 def t_fetch_unknown_key_raises():
     try:
         F.fetch("bogus", say=quiet)
     except ValueError as e:
         assert "bogus" in str(e), str(e)
     else:
-        raise AssertionError("未知 key 没报错 —— 会静默去下 llm")
+        raise AssertionError("未知 key 没报错 —— 会静默去下一个别的东西")
 
 
-@case("⭐ 「直连」必须显式指回官方端点：环境里的 HF_ENDPOINT（国内常用镜像）不许偷换来源")
-def t_direct_endpoint_pinned_to_official():
-    import os
-    import types
-    seen: list = []
-    real, old = F.subprocess.run, os.environ.get("HF_ENDPOINT")
-    try:
-        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"          # 用户环境里常见的镜像
-        F.subprocess.run = lambda cmd, env=None, **kw: (           # noqa: ARG005
-            seen.append(env.get("HF_ENDPOINT")),
-            types.SimpleNamespace(returncode=1))[1]
-        F._hf_download("r/x", None, None)                            # 「直连」
-        F._hf_download("r/x", None, F.HF_MIRROR)                     # 镜像
-    finally:
-        F.subprocess.run = real
-        if old is None:
-            os.environ.pop("HF_ENDPOINT", None)
-        else:
-            os.environ["HF_ENDPOINT"] = old
-    # ⚠️ 老写法（`if endpoint:` 才覆盖）在第一条断言上就红 —— 直连会沿用环境里那个镜像，
-    #    白拿 `mirror=False` 的免校验待遇。
-    assert seen == ["https://huggingface.co", F.HF_MIRROR], seen
-
-
-@case("⭐ Whisper：压缩包被截断 → 失败，模型目录里**没有**半截模型、没有临时目录")
-def t_whisper_truncated_leaves_nothing():
-    tb = _tar_bytes({"sherpa-onnx-whisper-turbo/turbo-tokens.txt": b"tok" * 5000})
+@case("⭐ 压缩包被截断 → 失败，模型目录里**没有**半截模型、没有临时目录")
+def t_tarball_truncated_leaves_nothing():
+    tb = _tar_bytes({"sherpa-onnx-nemotron-x/tokens.txt": b"tok" * 5000})
     srv = _Srv({"/wt.tar.bz2": tb[: len(tb) // 2]})
     try:
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td) / "models"
-            ok, why = F.fetch_tarball(root, srv.url + "/wt.tar.bz2", say=quiet)
+            ok, why = F.fetch_tarball(root, srv.url + "/wt.tar.bz2",
+                                      pin=hashlib.sha256(tb).hexdigest(), say=quiet)
             assert not ok, why
             assert list(root.iterdir()) == [], f"不该留下任何东西：{list(root.iterdir())}"
     finally:
         srv.close()
 
 
-@case("Whisper：目标位置已有一份半截目录 → 被完整的那份整体替换（不是合并）")
-def t_whisper_replaces_stale_dir():
-    tb = _tar_bytes({"sherpa-onnx-whisper-turbo/turbo-tokens.txt": b"tok"})
+@case("目标位置已有一份半截目录 → 被完整的那份整体替换（不是合并）")
+def t_tarball_replaces_stale_dir():
+    tb = _tar_bytes({"sherpa-onnx-nemotron-x/tokens.txt": b"tok"})
     srv = _Srv({"/wt.tar.bz2": tb})
     try:
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td) / "models"
-            stale = root / "sherpa-onnx-whisper-turbo"; stale.mkdir(parents=True)
+            stale = root / "sherpa-onnx-nemotron-x"; stale.mkdir(parents=True)
             (stale / "leftover.bin").write_bytes(b"x")
-            ok, why = F.fetch_tarball(root, srv.url + "/wt.tar.bz2", say=quiet)
+            ok, why = F.fetch_tarball(root, srv.url + "/wt.tar.bz2",
+                                      pin=hashlib.sha256(tb).hexdigest(), say=quiet)
             assert ok, why
-            assert sorted(p.name for p in stale.iterdir()) == ["turbo-tokens.txt"], "旧的残留应被整体替换"
+            assert sorted(p.name for p in stale.iterdir()) == ["tokens.txt"], "旧的残留应被整体替换"
     finally:
         srv.close()
 
 
-@case("⭐ 目的地**取自注册表**：`fetch()` 不再手写第二份路径（vad / whisper 的父目录）")
+@case("⭐ 目的地**取自注册表**：`fetch()` 不再手写第二份路径（vad / nemotron 的父目录）")
 def t_fetch_destinations_come_from_registry():
     import models
     seen = {}
     orig_dl, orig_w = F.download_file, F.fetch_tarball
     F.download_file = lambda srcs, dest, sha, **kw: (seen.__setitem__("vad", dest), (True, "x"))[1]
-    F.fetch_tarball = lambda root, url, **kw: (seen.__setitem__("whisper", root), (True, "x"))[1]
+    F.fetch_tarball = lambda root, url, **kw: (seen.__setitem__("nemotron", root), (True, "x"))[1]
     try:
-        F.fetch("vad", say=quiet); F.fetch("whisper", say=quiet)
+        F.fetch("vad", say=quiet); F.fetch("nemotron", say=quiet)
     finally:
         F.download_file, F.fetch_tarball = orig_dl, orig_w
     assert str(seen["vad"]) == models.path_of("vad"), seen
-    assert str(seen["whisper"]) == str(pathlib.Path(models.path_of("whisper")).parent), seen
+    assert str(seen["nemotron"]) == str(pathlib.Path(models.path_of("nemotron")).parent), seen
 
 
 @case("⭐ `models.py` 里每个模型的 `cmd` 都是「解释器 fetch_model.py <key>」恰好 3 段（路径含空格也不被切开）")
@@ -402,7 +332,7 @@ def t_cmds_point_to_fetch_model():
 @case("钉死的 sha256 都是 64 位小写十六进制；未知参数 → 退出码 2")
 def t_pins_shape_and_usage():
     import re
-    flat = [F.PINS["vad"], F.PINS["whisper"], *F.PINS["parakeet"].values(), *F.PINS["llm"].values()]
+    flat = [F.PINS["vad"], F.PINS["nemotron"]]
     assert all(re.fullmatch(r"[0-9a-f]{64}", h) for h in flat), "有 sha 形状不对"
     assert F.main(["fetch_model.py", "bogus"]) == 2
 

@@ -196,13 +196,14 @@ class LiveLog:
            （只是转写那一下）更接近"用户等了多久"。实时音源下
            **首字延迟 ≈ 该段第一份草稿的 `buf_s + lag_s`**（`class_report` 那么算）。
 
-        ⭐ `engine` = 出这份草稿的引擎（`nemotron` 流式 / `parakeet` 10 s 滑窗）。
-           量具据它判「窗口滑没滑」：只有 parakeet 会滑（`stream_eval._slid`）。
+        ⭐ `engine` = 出这份草稿的引擎（`nemotron` 流式 / `none` = 本节没有草稿）。
+           ⚠️ 2026-11-20 之后本地只有 Nemotron 一个；老 `.live.jsonl` 里的 `parakeet`
+           是**历史数据**，量具读旧文件时仍按它判「窗口滑没滑」（`stream_eval._slid`）。
         """
         try:
             self._n_draft += 1
             extra = {} if lag_s is None else {"lag_s": round(lag_s, 3)}
-            if engine:            # 哪个引擎出的（R3）。不给不写 → 旧文件 / 读端都视为 parakeet
+            if engine:            # 哪个引擎出的（R3）。不给不写 → 旧文件 / 读端都视为 parakeet（历史值）
                 extra["engine"] = engine
             self._put("draft", utt=self._utt, seg=seg, n=self._n_draft,
                       text=shown if shown is not None else raw,

@@ -286,14 +286,14 @@ class EngineSeam(unittest.TestCase):
                                          tr._terms)
         self.assertIn("shutdown price", dyn)
 
-    def test_本地引擎同名接口(self):
+    def test_本地引擎已删(self):
+        """⚠️ 2026-11-20（桌面 D1）：`translator.Translator` 随本地翻译引擎一起删了。
+        这条钉的是**它真的不在**（否则会有人以为还有本地兜底）。"""
         import translator as T
-        tr = T.Translator.__new__(T.Translator)          # 不加载 mlx 模型
-        tr._terms = ["linear function"]
-        self.assertEqual(tr.add_terms(["shutdown price", "linear function"]),
-                         ["shutdown price"])
+        self.assertFalse(hasattr(T, "Translator"), "本地 Translator 还在？")
+        self.assertFalse(hasattr(T, "load_translator"), "本地 load_translator 还在？")
 
-    def test_路由器两个引擎都喂(self):
+    def test_路由器只喂云端那一个(self):
         import main as M
 
         class Eng:
@@ -304,12 +304,11 @@ class EngineSeam(unittest.TestCase):
                 self.got += list(words)
                 return list(words)
 
-        cloud, local = Eng(), Eng()
+        cloud = Eng()
         r = M.EngineRouter.__new__(M.EngineRouter)       # 不跑 __init__（要 notify 等）
-        r._cloud, r._local = cloud, local
+        r._cloud = cloud
         r.add_terms(["shutdown price"])
         self.assertEqual(cloud.got, ["shutdown price"])
-        self.assertEqual(local.got, ["shutdown price"], "降级后读的是本地那份池子")
 
     def test_引擎报错不抛给上课(self):
         import main as M
@@ -318,7 +317,7 @@ class EngineSeam(unittest.TestCase):
         class Boom:
             def add_terms(self, w):
                 raise RuntimeError("engine down")
-        r._cloud, r._local = Boom(), Boom()
+        r._cloud = Boom()
         self.assertEqual(r.add_terms(["x"]), [])
 
 

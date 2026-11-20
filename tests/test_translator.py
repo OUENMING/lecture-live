@@ -48,17 +48,22 @@ def t_core_and_always_always_injected():
     assert "CC1" in got and "AA1" in got, f"常驻档没注入：{got}"
 
 
-@case("⭐⭐ `extra_terms` 进**池子**、不进 `always`")
+@case("⭐⭐ `extra_terms` 进**池子**、不进 `always`（在云端引擎上验）")
 def t_extra_terms_go_to_pool_not_always():
     """本次改动的**核心不变量**。
 
     `extra_terms`（转录里挖的词）必须走**动态召回**那一档 —— 那样成本是常数；
     一旦混进 `always`，它就变成**每句全量注入**，成本随词数线性涨。
+
+    ⚠️ 2026-11-20（桌面 D1）：本地 `translator.Translator` 已删，这条不变量现在
+       只有云端引擎一处实现（`cloud_translator.CloudTranslator`）。
     """
-    w = T.Translator("m", None, course=None, extra_terms=["monopoly", "oligopoly"])
+    import cloud_translator as CT
+    w = CT.CloudTranslator("k", "m", glossary_terms=["monopoly", "oligopoly"],
+                           course_terms=[])
     assert "monopoly" in w._terms, "extra_terms 没进池子"
     assert "monopoly" not in w._course_terms, (
-        "extra_terms 混进了 `_course_terms` —— 那档是**每句全量注入**的，"
+        "extra_terms 混进了 `course_terms` —— 那档是**每句全量注入**的，"
         "成本会随词数线性涨（实测 120 条时占整条 prompt 60%）")
 
 
@@ -179,41 +184,6 @@ def t_load_terms_dedup():
         assert raw == ["Alpha", "alpha", "Beta"], f"它只该跳注释与空行：{raw}"
         dedup = T.load_terms(str(p))          # 公共表那条路走 load_terms
         assert dedup == ["Alpha", "Beta"], f"去重保序有问题：{dedup}"
-
-
-# ---------------------------------------------------------------- F2：本地闩锁
-@case("⭐⭐ 本地模型没装 -> `_ensure` 闩住、**立刻**抛（不许每句重试 load）（F2）")
-def t_local_missing_latches():
-    """动机（2026-10-01 审查 F2）：auto 模式云端失败会切本地，而本地模型是**可选**的
-    —— 没装时原来**每一句**都再试一次 `mlx_lm.load()`（在线 = 隐式拉 938 MB
-    把定稿线程卡死；离线 = 每句白等一次）。现在：先问在不在 → 闩住 → 立刻抛。
-
-    改坏哪行会红：删掉 `_ensure` 里 `if not local_model_present():` 那段 →
-    第一条断言红（会去真 `load()`，异常文本不是「没装」）。
-    """
-    orig = T.local_model_present
-    calls = {"n": 0}
-
-    def fake_present():
-        calls["n"] += 1
-        return False
-
-    T.local_model_present = fake_present
-    try:
-        w = T.Translator("m", None, course=None)
-        errs = []
-        for _ in range(2):                     # 第二次也必须「立刻」抛、同一句
-            try:
-                w.fix_and_translate_stream("hello", [])
-                errs.append(None)
-            except RuntimeError as e:
-                errs.append(str(e))
-        assert errs[0] and "没装" in errs[0], f"第一句应抛「没装」：{errs[0]!r}"
-        assert errs[1] == errs[0], f"闩锁后每次都应抛同一句：{errs}"
-        assert calls["n"] == 1, f"闩锁之后不该再问在不在（问了 {calls['n']} 次）"
-        assert w.local_ready() is False, "闩锁后 local_ready() 应为 False"
-    finally:
-        T.local_model_present = orig
 
 
 # ---------------------------------------------------------------- select_term_parts（2026-10-04）
@@ -520,22 +490,22 @@ def t_cloud_term_zh_draft():
         os.environ.pop("CLASSLIVE_TERM_ZH", None)
 
 
-@case("⭐ 本地定稿：`_terms_context` 有命中才加译名段；`zh=False`（EN-only）不加")
-def t_local_term_zh():
-    w = T.Translator("m", None, course=None, term_zh={"policy": "政策"})
-    ctx = w._terms_context("the policy changed", [])
-    assert "policy — 政策" in ctx and \
-        ctx.index("policy — 政策") < ctx.index("待处理这句 ASR:"), ctx
-    assert "Term translations" not in w._terms_context("the policy changed", [], zh=False), \
-        "EN-only 不该注入译名"
-    assert "Term translations" not in w._terms_context("nothing relevant here", []), \
-        "不命中不该加段"
+@case("⭐ 译名段：有命中才加；`zh=False`（EN-only）不加（纯函数那一层）")
+def t_term_zh_block():
+    zh = {"policy": "政策"}
+    blk = T.term_zh_block("the policy changed", zh)
+    assert "policy — 政策" in blk and blk.startswith(T.TERM_ZH_HEADER), blk
+    assert T.term_zh_block("nothing relevant here", zh) == "", "不命中不该加段"
+    # ⚠️ `zh=False`（EN-only）那条现在是云端引擎自己的分支 —— 它直接不调 term_zh_block。
+    import cloud_translator as CT
+    src = (HERE / "cloud_translator.py").read_text(encoding="utf-8")
+    assert "term_zh_block" in src, "云端引擎要用同一个纯函数（别各写一份标题/排版）"
 
 
 @case("⭐ main 接线（源检查）：两个引擎同一份表；量具与注入同一把尺子；drain 转发 term_zh_n")
 def t_main_wiring_term_zh():
     src = (HERE / "main.py").read_text(encoding="utf-8")
-    assert src.count("term_zh=term_zh") == 2, "两个引擎工厂都要拿到译名表（降级后不丢）"
+    assert src.count("term_zh=term_zh") == 1, "云端引擎工厂要拿到译名表（本地引擎已删）"
     assert "term_zh_map(args.glossary, args.course)" in src, "译名表要从本课术语建"
     assert "select_term_zh(sent, term_zh)" in src, "量具必须与注入同一把尺子"
     assert "term_zh_n=_tzn" in src, "drain 要把 term_zh_n 转发给 live.final"

@@ -2,9 +2,9 @@
 """用 `final_asr.FinalASR` 跑 OCW 切段, 出 hyp 文本 + source/steps 分布 + 延迟 p50/p95 (R22)。
 
     ClassLive.app/Contents/MacOS/python scripts/final_asr_eval.py <输出目录> [--cloud] [--limit N]
-        [--local-whisper] [--min-interval 3.2] [--segs ~/.classlive/eval/ocw]
+        [--min-interval 3.2] [--segs ~/.classlive/eval/ocw]
 
-为什么要有它: `scripts/test_pipeline.py` 只用 Parakeet、不经过 `final_worker`, 验不了定稿 WER。
+为什么要有它: `scripts/test_pipeline.py` 不经过 `final_worker`, 验不了定稿 WER。
 这里走的是**生产同一条** `FinalASR.transcribe`(编码 / 熔断 / 截止 / 退化 / R5 补跑全在里面)。
 
 - 默认**纯本地**(不发请求); 加 `--cloud` 才打 Worker(要它已部署; 端点 / 令牌可用
@@ -42,11 +42,9 @@ def main() -> int:
     ap.add_argument("out", help="输出目录(不要指向 ~/.classlive/)")
     ap.add_argument("--segs", default=str(pathlib.Path.home() / ".classlive/eval/ocw"))
     ap.add_argument("--cloud", action="store_true", help="真的打云端 Worker(默认不打)")
-    ap.add_argument("--local-whisper", action="store_true", help="预加载本地 Whisper 作兜底(默认只用 Parakeet)")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 段")
     ap.add_argument("--min-interval", type=float, default=3.2, help="--cloud 时请求最小间隔秒数")
-    ap.add_argument("--model-dir", default=models.path_of("parakeet"))
-    ap.add_argument("--final-model-dir", default=models.path_of("whisper"))
+    ap.add_argument("--model-dir", default=models.path_of("nemotron"))
     a = ap.parse_args()
 
     out = pathlib.Path(a.out).expanduser().resolve()
@@ -62,9 +60,9 @@ def main() -> int:
     paths.STATE_ROOT = out / "state"            # 读完输入再改: 之后任何 ~/.classlive 写入都落到输出目录
 
     import final_asr
-    from asr import load_asr
-    final = final_asr.load_final(a.final_model_dir, load_asr(a.model_dir), lambda: a.cloud,
-                                 preload_local=a.local_whisper)
+    # ⚠️ 2026-11-20（桌面 D1）：本地兜底只有 Nemotron 整段解码；没有 Whisper 可选。
+    #    `--cloud` 才打 Worker；不开它 = 纯本地。
+    final = final_asr.load_final(a.model_dir, lambda: a.cloud, preload_local=True)
 
     hyps: list[str] = []
     src, stp, lat = collections.Counter(), collections.Counter(), []

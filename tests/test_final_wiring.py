@@ -4,7 +4,8 @@
     ClassLive.app/Contents/MacOS/python tests/test_final_wiring.py
 
 钉住了什么(docs/PLAN-r2-cloud-final-asr.md R6 / R14 / R25 / §X1):
- 1. `cloud_asr_off_reason`: 配置关 / 环境变量 / `--engine local` / 纯转录 / 文件倍速回放 都关云端
+ 1. `cloud_asr_off_reason`: 配置关 / 环境变量 / 纯转录 / 文件倍速回放 都关云端
+    ⚠️ 2026-11-20（桌面 D1）：`--engine local` 那一档随本地翻译引擎一起删了。
  2. `resolve_cloud_asr_enabled`: 首次告知 —— `.app` 弹窗点过才写 `acknowledged`;
     终端打印路径**不写**(否则终端启动一次就等于替 `.app` 用户同意了)
  3. 接线形状: 没有残留的 `last_logprob` / `load_final_asr`; `note_segment` 的每个关键字
@@ -65,7 +66,6 @@ class TestOffReason(unittest.TestCase):
 
     def test_each_switch_turns_it_off(self):
         self.assertIsNotNone(off(cfg_enabled=False))
-        self.assertIsNotNone(off(engine="local"))
         self.assertIsNotNone(off(mode="raw"))
         self.assertIsNotNone(off(source="file", speed=2.0))
 
@@ -83,9 +83,8 @@ class TestOffReason(unittest.TestCase):
             os.environ.pop("CLASSLIVE_CLOUD_ASR")
 
     def test_reasons_are_distinct_text(self):
-        rs = {off(cfg_enabled=False), off(engine="local"), off(mode="raw"),
-              off(source="file", speed=2.0)}
-        self.assertEqual(len(rs), 4)
+        rs = {off(cfg_enabled=False), off(mode="raw"), off(source="file", speed=2.0)}
+        self.assertEqual(len(rs), 3)
 
 
 class TestConsent(unittest.TestCase):

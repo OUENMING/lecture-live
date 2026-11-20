@@ -526,17 +526,17 @@ def main() -> int:
 
     # ---- ⭐⭐ 逐段探针：主模型 / 兜底模型**分开**记 ----
     # ⚠️ 2026-10-07 的教训：原来只记"最终用了哪个模型"一格，把两条信息压成了一个 ——
-    #    「主模型（Whisper）空了几次」与「兜底模型（Parakeet）空了几次」分不开，
+    #    「主模型空了几次」与「兜底模型空了几次」分不开，
     #    于是拿兜底模型离线跑出来的空被当成了"空转写"去查（那是幽灵）。
     print("--- ⭐⭐ 逐段探针（主模型 vs 兜底模型）+ 异常段原信号 ---")
     _d5 = pathlib.Path(tempfile.mkdtemp(prefix="cl_tm_probe_"))
     _t5 = tm.TestSession(_d5 / "p.md", record_audio=False, record_float=True)
     _b = np.zeros(tm.SR, dtype=np.float32)
-    _t5.note_segment(_b, "正常一段", 100.0, "whisper",
+    _t5.note_segment(_b, "正常一段", 100.0, "local-nemotron",
                      final_text="正常一段", final_degenerate=False)
-    _t5.note_segment(_b, "兜底救回来的", 120.0, "local-parakeet", fell_back=True,
+    _t5.note_segment(_b, "兜底救回来的", 120.0, "local-nemotron", fell_back=True,
                      final_text="", final_degenerate=False, draft_text="兜底救回来的",
-                     steps=("off", "local:whisper", "empty-local", "local:parakeet"),
+                     steps=("off", "local:nemotron", "empty-local"),
                      trace={"local_text": ""})   # R10: 最后一个本地主模型的结果是空的
     _p0 = _t5.segments[0]["probe"]
     _p1 = _t5.segments[1]["probe"]
@@ -555,7 +555,7 @@ def main() -> int:
           f"p0={_p0['float_saved']!r} p1={_p1['float_saved']!r}")
     # ⚠️ 变异敏感：把 `record_float` 那个开关去掉（无条件写），这条红。
     _t6 = tm.TestSession(_d5 / "q.md", record_audio=False, record_float=False)
-    _t6.note_segment(_b, "x", 1.0, "parakeet", fell_back=True, final_text="",
+    _t6.note_segment(_b, "x", 1.0, "local-nemotron", fell_back=True, final_text="",
                      trace={"local_text": ""})
     check("⚠️ `record_float=False` 时快照目录**根本不该建**",
           _t6.segments[0]["probe"]["float_saved"] == ""
@@ -579,18 +579,18 @@ def main() -> int:
     _t8.note_segment(_b, "cloud", 5.0, "groq", steps=("cloud:groq",),
                      trace={"local_text": None, "primary_text": "cloud"})
     # 2) 整节课断网: 本地正常出了字 → 不存（旧逻辑 fell_back 会每段都存）
-    _t8.note_segment(_b, "local ok", 5.0, "local-parakeet", fell_back=True,
-                     steps=("cloud:timeout", "local:parakeet"),
+    _t8.note_segment(_b, "local ok", 5.0, "local-nemotron", fell_back=True,
+                     steps=("cloud:timeout", "local:nemotron"),
                      trace={"local_text": "local ok"})
     # 3) 本地主模型退化 → 存
-    _t8.note_segment(_b, "fb", 5.0, "local-parakeet", fell_back=True,
-                     steps=("off", "local:whisper", "degenerate", "local:parakeet"),
+    _t8.note_segment(_b, "fb", 5.0, "local-nemotron", fell_back=True,
+                     steps=("off", "local:nemotron", "degenerate"),
                      trace={"local_text": "... ... ... ... ... ..."})
     _fs = [s["probe"]["float_saved"] for s in _t8.segments]
     check("R10 float 只在「最后一个本地主模型空/退化」时存（云端成功/断网回退出了字 都不存）",
           (not _fs[0]) and (not _fs[1]) and bool(_fs[2]), repr(_fs))
     check("R9 `steps` 原样落进段记录",
-          _t8.segments[1]["steps"] == ["cloud:timeout", "local:parakeet"],
+          _t8.segments[1]["steps"] == ["cloud:timeout", "local:nemotron"],
           repr(_t8.segments[1].get("steps")))
     _t8.note_ui("outline")
     _t8.note_ui_value("zh_overflow", {"overflow": 2, "seen": 40, "lines": 3})
@@ -600,10 +600,10 @@ def main() -> int:
           and _rep["blocks"]["ui"].get("outline") == 1, repr(_rep["blocks"].get("ui")))
     _asr = _rep["asr"]
     check("报告 `asr.source_pct` 是 {source: 占比}",
-          _asr.get("source_pct") == {"groq": 33.3, "local-parakeet": 66.7}, repr(_asr.get("source_pct")))
+          _asr.get("source_pct") == {"groq": 33.3, "local-nemotron": 66.7}, repr(_asr.get("source_pct")))
     check("报告 `asr.steps_counts` 逐步计数",
           _asr.get("steps_counts", {}).get("cloud:timeout") == 1
-          and _asr["steps_counts"].get("local:parakeet") == 2
+          and _asr["steps_counts"].get("local:nemotron") == 2
           and _asr["steps_counts"].get("degenerate") == 1,
           repr(_asr.get("steps_counts")))
     check("报告 notes 不再说「定稿默认走 Whisper, 所以 logprob 通常是 null」那句过期的话",
@@ -611,7 +611,7 @@ def main() -> int:
     # R12: 体积统计看「实际在盘上的」（读端换到临时 HOME）
     import models as _models
     _home12 = _d5 / "home12"
-    _wd = _home12 / "models" / _models.basename_of("whisper")
+    _wd = _home12 / "models" / _models.basename_of("nemotron")
     _wd.mkdir(parents=True)
     (_wd / "w.bin").write_bytes(b"x" * 2_000_000)
     _old_home = os.environ.get("HOME")
@@ -620,11 +620,11 @@ def main() -> int:
         _mb = tm.collect_env()["models_mb"]
     finally:
         os.environ["HOME"] = _old_home or ""
-    _wk = _models.basename_of("whisper")
-    check("R12 `models_mb` 把盘上的可选 Whisper 也算进去（原来只数 REQUIRED）",
+    _wk = _models.basename_of("nemotron")
+    check("R12 `models_mb` 把盘上的可选 Nemotron 也算进去（原来只数 REQUIRED）",
           _mb.get(_wk, 0) and _mb[_wk] > 0, repr(_mb))
     check("R12 必需模型不在盘上仍报 None（如实说「没有」）",
-          _mb.get(_models.basename_of("parakeet"), "缺键") is None, repr(_mb))
+          _mb.get(_models.basename_of("vad"), "缺键") is None, repr(_mb))
     check("R12 collect_env 的包列表含 soundfile",
           "soundfile" in tm.collect_env()["packages"])
 

@@ -90,7 +90,7 @@ test('定稿句：请求体、请求头、增量上屏、最终两行都对', as
 	assert.equal(rec.headers['X-ClassLive-Call'], undefined, '翻译不带调用类（与桌面 llm_client.headers(key) 同）');
 	assert.equal(rec.body.stream, true);
 	assert.equal(rec.body.model, 'deepseek-flash');
-	assert.equal(rec.body.max_tokens, 220);
+	assert.equal(rec.body.max_tokens, 220, '短句仍是 220');
 	assert.deepEqual(rec.body.thinking, { type: 'disabled' });
 	const want = await p.final('the midterm covers chapters one to three.', [], undefined);
 	assert.equal(rec.body.messages[0].content, want.system);
@@ -271,4 +271,17 @@ test('OCR B：draftAccept 往返期间换成了更新的草稿 → 旧的不上�
 	await new Promise<void>((r) => setTimeout(r, 200));
 	assert.deepEqual(drafts.filter((d) => d !== '').slice(-1), ['新草稿译文'], '最后上屏的必须是新草稿');
 	assert.ok(!drafts.includes('旧草稿译文'), '旧草稿不该上屏');
+});
+
+test('定稿 max_tokens 按原文长度加，封顶 400', async () => {
+	const { finalMaxTokens } = await import('../../src/lib/translate/stream.ts');
+	assert.equal(finalMaxTokens('short sentence.'), 220);
+	assert.equal(finalMaxTokens('x'.repeat(488)), 366);   // 2026-11-20 那句长句：220 不够
+	assert.equal(finalMaxTokens('x'.repeat(2000)), 400);  // Worker 网页封顶 400
+	const p = await prompt();
+	const longEn = 'word '.repeat(100).trim() + '.';
+	const { tr, calls } = make(p, [{ sse: finalSse(), cuts: [] }]);
+	await tr.final(1, longEn, 1.5);
+	assert.equal(calls[0].body.max_tokens, finalMaxTokens(longEn));
+	assert.ok(calls[0].body.max_tokens > 220);
 });

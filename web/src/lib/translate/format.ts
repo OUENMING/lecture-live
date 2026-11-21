@@ -16,6 +16,28 @@ const hasCjk = (s: string): boolean => {
 	return false;
 };
 
+const EN_END = ['.', '?', '!', '。', '？', '！'];
+const stripTail = (s: string): string => s.trimEnd().replace(/["')\u201d\u2019]+$/, '');
+
+/**
+ * 修正后的英文是不是被**截断**了（输出额度用完，EN 段写到一半）。是 → 用 ASR 原文。
+ *
+ * ⭐ 2026-11-20 网页用户课：488 字符的长句，ZH 先写吃掉大半 220 token，EN 写到半句就停，
+ * 截断的 EN 覆盖了完整原文 —— 中文完整、英文丢了约 20 s。
+ * 判据（任一）：① 原文有句末标点、修正版没有，且修正版词更少；② 原文 ≥ 8 词而修正版不到一半。
+ * 桌面 `translator.en_fix_truncated` 同口径。
+ */
+export function enFixTruncated(fixed: string, raw: string): boolean {
+	const fw = fixed.split(/\s+/).filter(Boolean);
+	const rw = raw.split(/\s+/).filter(Boolean);
+	if (!rw.length) return false;
+	if (rw.length >= 8 && fw.length < 0.5 * rw.length) return true;
+	const r = stripTail(raw);
+	const f = stripTail(fixed);
+	const ends = (x: string): boolean => EN_END.some((p) => x.endsWith(p));
+	return r !== '' && ends(r) && !ends(f) && fw.length < rw.length;
+}
+
 export class TwoLineParser {
 	#state: 'wait_zh' | 'in_zh' | 'in_en' = 'wait_zh';
 	#zh: string[] = [];
@@ -117,6 +139,7 @@ export class TwoLineParser {
 		const zh = (this.#zh.join('') + this.#pre.join('')).trim().replace(/^[：: ]+/, '').trim();
 		let en = this.#en.join('').trim();
 		if (!en || hasCjk(en)) en = enRaw;
+		else if (enFixTruncated(en, enRaw)) en = enRaw; // 额度用完、EN 写到一半 → 原文完整，用原文
 		return { en, zh: zh || enRaw };
 	}
 }

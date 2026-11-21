@@ -13,6 +13,17 @@ export const MODEL = 'deepseek-flash';
 /** 桌面 `fix_and_translate_stream` / `translate_draft` 的 max_tokens。 */
 export const MAX_TOKENS = { final: 220, draft: 120 } as const;
 
+/** 定稿输出预算的上限：Worker 把网页请求封顶在 400（也是快路由的门槛）。 */
+export const FINAL_MAX_TOKENS_MAX = 400;
+
+/**
+ * 定稿（ZH + EN 两段）的 max_tokens：短句 220，长句按原文长度加（0.75 token/字符），封顶 400。
+ * ⭐ 2026-11-20：488 字符的句子 220 不够，EN 段被截断。桌面 `cloud_translator.final_max_tokens` 同口径。
+ */
+export function finalMaxTokens(en: string): number {
+	return Math.max(MAX_TOKENS.final, Math.min(FINAL_MAX_TOKENS_MAX, Math.round((en || '').length * 0.75)));
+}
+
 /** 一次调用的总墙钟（毫秒）：桌面 `TIMEOUT_S = 30`，但首字等不到就该放弃，后面不许卡住。 */
 export const DEADLINE_MS = 20_000;
 

@@ -8,7 +8,7 @@
 import type { TwoLineResult } from './format';
 import { TwoLineParser, looksLikeEcho } from './format';
 import type { PromptBuilder, TermConfig } from './prompt';
-import { MAX_TOKENS, streamChat, type ChatError } from './stream';
+import { MAX_TOKENS, finalMaxTokens, streamChat, type ChatError } from './stream';
 
 /** 一次流式请求的注入面（真链路是 `streamChat`，测试里是假 fetch 塞进 `streamChat`）。 */
 export type ChatFn = typeof streamChat;
@@ -298,7 +298,7 @@ export class Translator {
 					url,
 					headers,
 					prompt,
-					maxTokens: MAX_TOKENS.final,
+					maxTokens: finalMaxTokens(job.en),
 					onDelta: (d) => parser.feed(d)
 				});
 				if (!text.trim() && !zh) throw Object.assign(new Error('空回包'), { aborted: false, outcome: 'empty' });

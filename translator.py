@@ -532,6 +532,30 @@ def _clean_fix(text: str, raw: str) -> str:
     return t
 
 
+_EN_END = (".", "?", "!", "。", "？", "！")
+_EN_TAIL_STRIP = "\"')\u201d\u2019"
+
+
+def en_fix_truncated(fixed: str, raw: str) -> bool:
+    """修正后的英文是不是被**截断**了（输出额度用完，EN 段写到一半）。是 → 调用方用 ASR 原文。
+
+    ⭐ 2026-11-20 网页用户课：488 字符的长句，ZH 先写吃掉大半 220 token 预算，EN 写到半句
+    就停，截断的 EN 覆盖了完整原文 —— 中文完整、英文丢了约 20 s。
+    判据（两条任一）：
+      ① 原文以句末标点结尾、修正版没有，且修正版词更少（正常矫正不会删掉句末标点）；
+      ② 原文 ≥ 8 词而修正版不到一半（矫正只改词，不会砍掉一半）。
+    网页 `web/src/lib/translate/format.ts` 的 `enFixTruncated` 同口径。
+    """
+    fw, rw = fixed.split(), raw.split()
+    if not rw:
+        return False
+    if len(rw) >= 8 and len(fw) < 0.5 * len(rw):
+        return True
+    r = raw.rstrip().rstrip(_EN_TAIL_STRIP)
+    f = fixed.rstrip().rstrip(_EN_TAIL_STRIP)
+    return bool(r) and r.endswith(_EN_END) and not f.endswith(_EN_END) and len(fw) < len(rw)
+
+
 class _StreamParser:
     """把流式文本按 ZH: / EN: 切段, 逐段回调。
     容错: 标记被 token 切开、模型不按格式输出(无标记)、英文段混入中文。"""
@@ -614,5 +638,7 @@ class _StreamParser:
         en = "".join(self._en).strip()
         # 英文段混入中文(模型跑偏) -> 用 ASR 原文兜底
         if not en or self._has_cjk(en):
+            en = en_raw
+        elif en_fix_truncated(en, en_raw):         # 额度用完、EN 写到一半 -> 原文完整, 用原文
             en = en_raw
         return Result(en_fixed=en, zh=zh or en_raw)

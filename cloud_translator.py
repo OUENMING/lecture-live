@@ -165,6 +165,19 @@ DEFAULT_BASE = llm_client.BASE
 _ECHO_MARKERS = ("课程术语", "术语表", "术语解析", "以下翻译", "翻译如下", "校正及翻译")
 
 
+#: 定稿（ZH + EN 两段）的输出预算：短句 220（原值），长句按原文长度加，封顶 400 ——
+#: Worker 只把 ≤400 的请求走快路由，网页请求也被封顶在 400。
+#: ⭐ 2026-11-20：488 字符的句子 220 不够，EN 段被截断（见 translator.en_fix_truncated）。
+FINAL_MAX_TOKENS_MIN = 220
+FINAL_MAX_TOKENS_MAX = 400
+
+
+def final_max_tokens(en: str) -> int:
+    """中文约 0.45 字/英文字符、DeepSeek 约 0.6 token/汉字，英文约 4 字符/token → 合计约 0.53 token/字符；
+    取 0.75 留余量。网页 `web/src/lib/translate/stream.ts` 的 `finalMaxTokens` 同口径。"""
+    return max(FINAL_MAX_TOKENS_MIN, min(FINAL_MAX_TOKENS_MAX, round(len(en or "") * 0.75)))
+
+
 def _looks_like_echo(zh: str, en: str) -> bool:
     z = (zh or "").strip()
     if not z:
@@ -439,7 +452,7 @@ class CloudTranslator:
         msgs = [{"role": "system", "content": SYSTEM_PROMPT_CLOUD},
                 {"role": "user", "content": user}]
         parser = _StreamParser(on_zh or (lambda s: None), on_en or (lambda s: None))
-        for delta in self._stream_chat(msgs, max_tokens=220):
+        for delta in self._stream_chat(msgs, max_tokens=final_max_tokens(en)):
             parser.feed(delta)
         res = parser.result(en)
         if _looks_like_echo(res.zh, en):
@@ -543,7 +556,7 @@ class CloudTranslator:
         # 中文时用 `zh or en_raw` 兜底, 会安静地把**英文原文当译文**上屏; 而且异常
         # 不外抛 -> EngineRouter 的 `except -> _fallback` 永不触发 -> 本地降级也不发生。
         # 让异常上抛, 走既有的降级路径(与 fix_and_translate_stream 的主路径一致)。
-        for delta in self._stream_chat(msgs, max_tokens=220):
+        for delta in self._stream_chat(msgs, max_tokens=final_max_tokens(en)):
             parser.feed(delta)
         return parser.result(en)
 

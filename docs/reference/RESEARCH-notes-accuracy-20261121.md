@@ -101,3 +101,20 @@
 - 30,600 这条转录对照打不到：原话本身就说 30,600（源头错）。要靠课件对照（§4 第 4 条）或「先列方程再算」。
 - 纯中文、没数字的断言（「方法论是食谱」）词面找不到原话，仍待确认 —— 这类是写作块自己出的 checks，不是数字，页头却算进「数字核对」，口径待理。
 - 中途改了 `ground_unchecked` 返回值，导致第一批 3 节「数字核对失败」→ 那批作废（r3bad/），重跑全部 5 节。
+
+## 8. 可视化下一步调研（2026-11-22）
+
+现有：3 种「固定图形」（`PLOT_SPECS`：cost_curves / function_cubic / supply_demand，模型只给参数、代码画、带滑块）、T 对比表、F 步骤图、markmap 导图、例题逐步展开。
+
+| 结论 | 来源 | 日期 | 置信度 |
+|---|---|---|---|
+| 动画相对静态图的总体优势小：d=0.37（76 对比）、g=0.226（140 对比）、g=0.23（82 对比） | Höffler & Leutner 2007 https://www.sciencedirect.com/science/article/abs/pii/S0959475207001077 ；Berney & Bétrancourt 2016 https://www.sciencedirect.com/science/article/pii/S0360131516301336 ；Ploetzner 2020 综述 | 2007/2016/2020 | 高（canonical，摘要已读） |
+| 「要学的就是变化本身」时动画明显更好（再分析 + 实验）；空间结构用静态图更好 | Ploetzner et al. 2020 JCAL https://onlinelibrary.wiley.com/doi/full/10.1111/jcal.12476 ；Instructional Science 2021 https://link.springer.com/article/10.1007/s11251-021-09541-w | 2020/2021 | 高 |
+| Clark & Mayer：除非有充分理由，用静态图 | 转引自上条 2021 | 2021 | 中（转引） |
+| 经济学教学的主流互动是「拖曲线看移动」（MRU：供需移动、外部性、剩余） | https://learn.mru.org/interactives | 2026-08 | 中（verified 教学站，无效果数据） |
+| 让 LLM 直接写 Mermaid 语法错误频发，维护者认为没有可靠办法，要靠解析闸门 + 回修 | gitdiagram issue #29 https://github.com/ahmedkhaleel2004/gitdiagram/issues/29 ；GenAIScript 2025-05-16 | 2025–2026 | 中（community，多源一致） |
+
+收敛（按收益/成本）：
+1. **扩充固定图形种类**（推荐）：剩余与无谓损失阴影、外部性 MPC/MSC、公地「平均 vs 边际捕获」、垄断 MR=MC；滑块拖动时平滑过渡。打的正是「变化本身要学」的那类内容；模型只给参数，没有语法失败风险。约 1 天。
+2. **2×2 分类矩阵**（排他性×竞争性 → 四类物品这种）：约 2–3 小时。
+3. 不做：让模型写 Mermaid；装饰性/滚动动画（证据显示收益小、增加负荷）。

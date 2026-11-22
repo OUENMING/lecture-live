@@ -1712,6 +1712,10 @@ def _merged_prose(members: list) -> list:
 
 #: 一个单元只放得下一份的图件（并单元时两边都有 → 不并）。
 _UNIT_ONE_OF = ("compare", "flow", "diagram", "why")
+# ⚠️ 只有「图件」撞了才拆单元。「想一想」(why) 76% 的小节都带（第六轮实测 148/195），
+#    把它算进来几乎每对同主干小节都不并 → 页面上同一标题连出两三张卡（11-22 第六轮
+#    97→195 节、104 对重复标题）。想一想只是一句自问提示，单元留第一个就够。
+_UNIT_CLASH = ("compare", "flow", "diagram")
 
 
 def merge_units(review: dict, *, end_ts: str = "") -> dict:
@@ -1723,7 +1727,8 @@ def merge_units(review: dict, *, end_ts: str = "") -> dict:
       · `prose` 顺序拼接；`q/cues/conclusion/algebra/intuition/prereq*` 取第一个非空；
       · `example` 只留**第一个**（讲同一个道理的重复例子不留两份）；
       · `variants/faded/compare/flow/diagram/why` 取第一个非空；`pitfalls/terms/sources` 去重并起来；
-      · 两节带同一种图件（compare/flow/diagram/why）→ 不并成一个单元（只放得下一个）。
+      · 两节带同一种图件（compare/flow/diagram）→ 不并成一个单元（只放得下一个）；
+        想一想（why）不算，撞了照并、留第一个。
     """
     secs = [s for s in (review.get("sections") or []) if isinstance(s, dict)]
     if not secs:
@@ -1745,10 +1750,10 @@ def merge_units(review: dict, *, end_ts: str = "") -> dict:
     for i, s in enumerate(secs):
         stem = _stem(s.get("heading"))
         # ⚠️ 单元里每种图件只放得下一个：这一节和单元里已有成员**都**带同一种图件
-        #    （对照表/流程/图/想一想）→ 另起一个单元，不并（原来并完只留第一个，后面
+        #    （对照表/流程/图；想一想不算）→ 另起一个单元，不并（原来并完只留第一个，后面
         #    几段的图静默丢掉，OCR 11-22）。
         clash = groups and any(s.get(k) and any(secs[j].get(k) for j in groups[-1])
-                               for k in _UNIT_ONE_OF)
+                               for k in _UNIT_CLASH)
         if groups and stem and not clash \
                 and stem == _stem(secs[groups[-1][-1]].get("heading")):
             groups[-1].append(i)

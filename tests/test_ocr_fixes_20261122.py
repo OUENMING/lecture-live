@@ -199,6 +199,18 @@ class MergeUnitsKeepsComponents(unittest.TestCase):
         self.assertEqual(len(out["sections"]), 1)
         self.assertEqual(out["sections"][0].get("compare"), cmp2)
 
+    def test_why_clash_still_merges(self):
+        # 第六轮：想一想几乎每节都有，算进撞件会让同主干小节全拆开、标题重复。
+        import note_v2 as nv
+        w1 = {"q": "为什么一？", "a": "因为一"}
+        w2 = {"q": "为什么二？", "a": "因为二"}
+        rv = {"sections": [
+            {"heading": "需求弹性：一", "ts": "10:00", "prose": ["a"], "why": w1},
+            {"heading": "需求弹性：二", "ts": "10:05", "prose": ["b"], "why": w2}]}
+        out = nv.merge_units(rv, end_ts="10:10")
+        self.assertEqual(len(out["sections"]), 1)
+        self.assertEqual(out["sections"][0].get("why"), w1)
+
 
 class MathFixes(unittest.TestCase):
     def test_frac_inside_bare_cases_no_nested_dollar(self):

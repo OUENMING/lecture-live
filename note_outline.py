@@ -32,7 +32,7 @@ import re
 import note_math
 
 #: 数字（带不带小数、正负号；Unicode 负号 `−` 也算）。
-_NUM = r"-?\d+(?:\.\d+)?"
+_NUM = r"[-−]?\d+(?:\.\d+)?"   # ⚠️ 原来只认 `-`，`−5.3÷3` 整条静默跳过、`AC(4)=−12` 读成 12（OCR 11-22）
 #: 「像式子」的一段：变量只认 q/Q/x（本课的数学就这三类），允许中间夹空格。
 _MATH_RUN = re.compile(r"[0-9\s.+\-−qQx²³⁴¹⁰⁵⁶⁷⁸⁹^*()/÷×]+")
 _EQ = re.compile(r"[=＝]")
@@ -51,6 +51,11 @@ _MARKED = re.compile(r"（已更正：|（⚠ 重算：")
 
 
 # ---------------------------------------------------------------- 小工具
+def _f(n: str) -> float:
+    """数字串 → float（Unicode 负号 `−` 先归一）。"""
+    return float(str(n).replace("−", "-"))
+
+
 def _fmt(v: float) -> str:
     """数值 → 展示（3 位小数内，去掉尾零）：1.7666… → `1.767`、24.0 → `24`。"""
     s = f"{v:.3f}".rstrip("0").rstrip(".")
@@ -80,8 +85,9 @@ def _numbers(s: str) -> list:
     """字符串里的数（去重、保序）—— 账本配对用。"""
     out: list = []
     for m in re.finditer(_NUM, s):
-        if m.group(0) not in out:
-            out.append(m.group(0))
+        n = m.group(0).replace("−", "-")          # 两种负号同一个数（账本配对按字面比）
+        if n not in out:
+            out.append(n)
     return out
 
 
@@ -95,12 +101,25 @@ def _is_precise(n: str) -> bool:
 
 def _replace_number(text: str, wrong: str, right: str) -> str:
     """只替换**独立**的那个数（`2.89` 不许动到 `12.89`）。"""
-    pat = re.compile(r"(?<![\d.])" + re.escape(wrong) + r"(?![\d.])")
-    return pat.sub(right, text)
+    pat = _num_pat(wrong)
+
+    def rep(m):
+        # 换成负数时前面已经有负号（`−2.89` 里的 `2.89`）→ 不换，免得出 `−-1.767`
+        if right.startswith("-") and text[max(0, m.start() - 1):m.start()] in ("-", "−"):
+            return m.group(0)
+        return right
+    return pat.sub(rep, text)
+
+
+def _num_pat(n: str):
+    """独立的那个数；`-2.89` 也认 `−2.89`。"""
+    body = re.escape(n[1:]) if n.startswith("-") else re.escape(n)
+    sign = "[-−]" if n.startswith("-") else ""
+    return re.compile(r"(?<![\d.])" + sign + body + r"(?![\d.])")
 
 
 def _has_number(text: str, n: str) -> bool:
-    return re.search(r"(?<![\d.])" + re.escape(n) + r"(?![\d.])", text) is not None
+    return _num_pat(n).search(text) is not None
 
 
 def _var_of(s: str) -> str | None:
@@ -308,7 +327,7 @@ def _claims(text: str, eq: dict) -> list:
     for m in _CLAIM.finditer(text):
         if m.group("var") != eq["var"] or m.start() < eq["end"]:
             continue
-        v = float(m.group("v"))
+        v = _f(m.group("v"))
         key = round(v, 6)
         if key in seen:
             continue
@@ -362,7 +381,7 @@ def _check_text(text: str, course: dict, ledger: list) -> tuple:
         if note_math.is_sum_term(t, m.start("a")):
             continue
         try:
-            a, b, c = float(m.group("a")), float(m.group("b")), float(m.group("c"))
+            a, b, c = _f(m.group("a")), _f(m.group("b")), _f(m.group("c"))
         except ValueError:
             continue
         if not b or _same(a / b, c):
@@ -377,7 +396,7 @@ def _check_text(text: str, course: dict, ledger: list) -> tuple:
         lst = course.get(m.group("name"))
         if not lst:
             continue
-        x, v = float(m.group("x")), float(m.group("v"))
+        x, v = _f(m.group("x")), _f(m.group("v"))
         vals = [sum(c * (x ** k) for k, c in fn["poly"].t.items()) for fn in lst]
         if any(_same(want, v) for want in vals):
             continue                      # 有一个形状对得上 → 算对，不动

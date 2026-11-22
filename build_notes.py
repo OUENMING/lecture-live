@@ -310,7 +310,13 @@ def build(course: str | None = None, api_key: str | None = None,
             print(f"  [{i + len(chunk)}/{len(todo_cls)}] 分类完成"
                   + (f"（{miss} 条模型没给可识别档位, 按有无 detail 兜底）" if miss else ""))
         except Exception as e:                            # noqa: BLE001
-            print(f"  ⚠ 分类批次失败: {str(e)[:80]}")
+            # 本批还空着的条目不落盘：空 `{}` 写回去，下次 `normalize_entry` 会归成 skip →
+            # 一次网络/限流故障就让这些词永远不解释（OCR 11-22）。拿掉后下次照常重分类。
+            empty = [t for t in chunk if not terms.get(t)]
+            for t in empty:
+                terms.pop(t, None)
+            print(f"  ⚠ 分类批次失败: {str(e)[:80]}"
+                  + (f"（{len(empty)} 条下次重试）" if empty else ""))
 
     for t in KEEP_EXTRA:                      # 人工保留项强制 gloss, 不被模型降级
         if t in terms:

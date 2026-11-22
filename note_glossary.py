@@ -211,6 +211,11 @@ def append(terms: list, *, course: str, glossary_txt, state_path=None,
             tomb = {k.lower() for k in (state or {})}
         except Exception:                                 # noqa: BLE001
             state, tomb = None, set()
+        if state is None:
+            # 墓碑读不出 = 不知道作者删过哪些词 → 这次不加（fail-closed）。原来带着空墓碑照加，
+            # 删过的词复活（OCR 11-22）。
+            return Outcome([], [], [], aborted=f"{state_path.name} 读不出，本次不加术语"
+                                                "（免得删过的词复活）")
         asked = [t for t in terms if t.strip()]
         fresh = [t for t in asked if t.strip().lower() not in tomb]
         blocked = [t for t in asked if t.strip().lower() in tomb]

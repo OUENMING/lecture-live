@@ -229,5 +229,60 @@ class ChemistryAsciiCharge(unittest.TestCase):
         self.assertTrue(nm._check_equation("Fe → Fe2+ + e-"))
 
 
+class BuildNotesBatchFailure(unittest.TestCase):
+    def test_failed_classify_batch_not_saved_as_skip(self):
+        import json
+        import build_notes as bn
+        with tempfile.TemporaryDirectory() as tmp:
+            nf = Path(tmp) / "term_notes.json"
+            nf.write_text(json.dumps({"terms": {}}), encoding="utf-8")
+
+            def boom(*a, **k):
+                raise RuntimeError("429")
+            with mock.patch.object(bn, "NOTES_FILE", nf), \
+                    mock.patch.object(bn, "collect_terms", lambda c: ["elasticity"]), \
+                    mock.patch.object(bn, "KEEP_EXTRA", []), \
+                    mock.patch.object(bn, "_chat_json", boom), \
+                    mock.patch("cloud_translator.load_api_key", lambda k=None: "k"), \
+                    mock.patch("builtins.print"):
+                bn.build()
+            saved = json.loads(nf.read_text(encoding="utf-8")).get("terms", {})
+            self.assertNotEqual(bn.normalize_entry(saved.get("elasticity", None)).get("level")
+                                if "elasticity" in saved else None, "skip")
+
+
+class WorkerRecapDuties(unittest.TestCase):
+    def test_split_process_recap_uses_sidecar_duties(self):
+        import note_worker as nw
+        import recap
+        got = {}
+
+        def fake_build(**kw):
+            got.update(kw)
+            return {"ok": 1}
+        item = {"id": "a", "kind": "item", "type": "作业", "title": "交 PS3",
+                "date": "2026-11-25", "action": "saved"}
+        with mock.patch.object(recap, "build", fake_build), \
+                mock.patch.object(recap, "load", lambda c, root=None: {}):
+            cb = nw.build_callbacks({"use_cloud": True, "trans_mode": "both",
+                                     "course": "X", "duties": []})
+            cb["recap_fn"]({"course": "X", "date": "2026-11-22", "duties": [item]})
+        self.assertEqual([d["title"] for d in got.get("duties") or []], ["交 PS3"])
+
+
+class OutlineUnicodeMinus(unittest.TestCase):
+    def test_unicode_minus_division_checked(self):
+        import note_outline as no
+        t, fixes, _ = no._check_text("−5.3 除以 3 等于 −2.89。", {}, [])
+        self.assertTrue(fixes)
+        self.assertIn("-1.767", t)
+        t2, fixes2, _ = no._check_text("−5.3 除以 3 等于 −1.767。", {}, [])
+        self.assertEqual(fixes2, [])
+
+    def test_no_double_sign(self):
+        import note_outline as no
+        self.assertEqual(no._replace_number("结果是 −2.89", "2.89", "-1.767"), "结果是 −2.89")
+
+
 if __name__ == "__main__":
     unittest.main()

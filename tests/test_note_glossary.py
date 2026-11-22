@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import note_glossary as ng          # noqa: E402
@@ -177,6 +178,16 @@ class Append(unittest.TestCase):
         # 而且墓碑真的在盘上（下次 `cl prep` 撞的也是它）
         self.assertIn("marginal cost", json.loads(
             self.state.read_text(encoding="utf-8"))["appended"])
+
+    def test_墓碑读不出_这次不加(self):
+        """OCR 11-22：state 读不出（坏 JSON）原来带着空墓碑照加 → 删过的词复活。"""
+        self.state.write_text("{坏了", encoding="utf-8")
+        with mock.patch("builtins.print"):
+            out = self._append(["marginal cost"])
+        self.assertEqual(out.added, [])
+        self.assertTrue(out.aborted)
+        self.assertNotIn("marginal cost", self.glossary.read_text(encoding="utf-8"))
+        self.assertEqual(self.state.read_text(encoding="utf-8"), "{坏了", "坏墓碑不许被覆盖")
 
     def test_state_写失败不出声也不炸(self):
         """state 是"删过的词别复活"的凭据；写不进去时要**出声**，但不能炸掉笔记。"""

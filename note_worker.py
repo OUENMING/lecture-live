@@ -96,7 +96,18 @@ def build_callbacks(spec: dict) -> dict:
         try:
             import recap as _recap_mod
             data = payload if isinstance(payload, dict) else {}
-            duties = spec.get("duties") or []
+            # 一些事儿：用 writer 从旁路文件读回的真实条目（payload），与主进程 `main._recap_for`
+            # 同口径 —— 按天合并上一节留下的。原来取 `spec["duties"]`（恒 `[]`）→ 拆进程路径
+            # 课前回顾的「一些事儿」永远是空的（OCR 11-22）。
+            import datetime as _dt
+            try:
+                day = _dt.date.fromisoformat(str(data.get("date") or "")[:10])
+            except ValueError:
+                day = _dt.date.today()
+            items = data.get("duties") or spec.get("duties") or []
+            duties = _recap_mod.merge_duties(
+                (_recap_mod.load(data.get("course") or course) or {}).get("duties"),
+                _recap_mod.duties_from_items(items, day=day), day=day)
 
             def _chat(system, user, max_tokens):
                 import llm_client

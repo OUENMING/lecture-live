@@ -212,6 +212,23 @@ class MergeUnitsKeepsComponents(unittest.TestCase):
         self.assertEqual(out["sections"][0].get("why"), w1)
 
 
+class CanonShortTermNotWidened(unittest.TestCase):
+    def test_short_zh_not_mapped_to_longer_glossary_term(self):
+        import note_v2 as nv
+        cm = {"需求价格弹性": "price elasticity of demand", "停产价": "shutdown price"}
+        self.assertEqual(nv.canon_en("价格", cm), "")
+        self.assertEqual(nv.canon_en("停产价格", cm), "shutdown price")
+        self.assertEqual(nv.canon_en("需求价格弹性", cm), "price elasticity of demand")
+
+    def test_review_price_not_rewritten_as_elasticity(self):
+        import note_v2 as nv
+        rev = {"sections": [{"heading": "垄断", "prose": ["垄断让价格更高、产量更低。"],
+                             "terms": [{"zh": "价格", "en": "price"}]}]}
+        got = nv.announce_terms_in_review(
+            rev, canon=[["price elasticity of demand", "需求价格弹性"]], en_first=True)
+        self.assertNotIn("elasticity", str(got))
+
+
 class MathFixes(unittest.TestCase):
     def test_frac_inside_bare_cases_no_nested_dollar(self):
         import note_math as nm

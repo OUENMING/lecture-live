@@ -2951,7 +2951,8 @@ def _same_en(inner: str, en: str) -> bool:
 
 
 def canon_en(zh: str, canon) -> str:
-    """标准拼写查询（F7-e）：全等优先；否则**包含**匹配取最长（`停产价格` 命中 `停产价`）。
+    """标准拼写查询（F7-e）：全等优先；否则**包含**匹配取最长（`停产价格` 命中 `停产价`；
+    反过来 `价格` 不命中 `需求价格弹性`）。
 
     `canon` = `{zh: en}`（由术语表的 `(en, zh)` 对折成；同 zh 首见者赢）。
     """
@@ -2960,9 +2961,12 @@ def canon_en(zh: str, canon) -> str:
         return ""
     if zh in canon:
         return canon[zh]
+    # ⚠️ 只许「术语表词 ⊂ 模型写的词」这一个方向。反过来（模型写的短词 ⊂ 术语表长词）
+    #    会把 `价格` 认成 `需求价格弹性` → 全篇每个「价格」都换成 price elasticity of
+    #    demand（11-22 第六轮 BUSI3193 71 处，判官记了 6.5 个重大错）。
     best_len, best_en = 0, ""
     for zh_c, en_c in canon.items():
-        if zh_c and (zh_c in zh or zh in zh_c) and len(zh_c) > best_len:
+        if zh_c and zh_c in zh and len(zh_c) > best_len:
             best_len, best_en = len(zh_c), en_c
     return best_en
 

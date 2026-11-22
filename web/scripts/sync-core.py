@@ -33,6 +33,7 @@ WHOLE_FILES = (
     "fragment_merge.py",
     "linebreak.py",
     "prompt_core.py",
+    "speaker_label.py",
     "text_diff.py",
     "vendor/budoux/zh-hans.json",
 )
@@ -87,6 +88,7 @@ STREAM_SLICE = Slice("stream_core.py", "stream_asr.py", (
     "CONTEXT_TEXT_MAX",
     "TERMS_MAX",
     "_CONTEXT_SERIAL_MARGIN",
+    "SPLIT_ON_SPEAKER",
     "END_PUNCT",
     "CONTROL",
     "_is_end",
@@ -94,6 +96,7 @@ STREAM_SLICE = Slice("stream_core.py", "stream_asr.py", (
     "Sealed",
     "_HAN",
     "_sent_lang",
+    "_sent_speaker",
     "parse_tokens",
     "StreamCore",
     "_DOMAINS",

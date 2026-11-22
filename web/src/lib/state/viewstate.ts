@@ -16,6 +16,8 @@ export interface Row {
 	t_s: number;
 	/** 命中的术语 [原文, 译法] */
 	terms: [string, string][];
+	/** 说话人字母（主讲不标 → 没有这个键）；界面显示「说话人 B」 */
+	spk?: string;
 }
 
 export interface Status {

@@ -1,5 +1,5 @@
 {
-	"note": "Pyodide 要 stage 的文件（路径相对本目录）。除 rt.py（实时核心胶水）/ prep_rt.py（开课前的准备胶水）外，其余 .py 都由 scripts/sync-core.py 生成：整文件原样拷贝（caption_flow / draft_policy / draft_stable / draft_translate / fragment_merge / linebreak / prompt_core / text_diff），按名字切片的三份是 stream_core.py ← stream_asr.py、extract.py ← extract.py（PPTX/DOCX 那半）、prep.py ← prep.py（候选术语的提示词与判据）。⚠️ prompt_core.py（翻译提示词）今天是**临时来源**：只在桌面 lecture-live-prompt 分支里，sync-core.py 的 TEMPORARY_FROM 让它从 /Users/owen/lecture-live-prompt 取 —— 那个分支合进 main 后删掉那条，其余不变。有没有走样以 scripts/sync-core.py --check 为准（tests/core/drift.test.ts 与 tests/prep/python-drift.test.ts 跑它）；改清单要过 tests/core/manifest.test.ts。",
+	"note": "Pyodide 要 stage 的文件（路径相对本目录）。除 rt.py（实时核心胶水）/ prep_rt.py（开课前的准备胶水）外，其余 .py 都由 scripts/sync-core.py 生成：整文件原样拷贝（caption_flow / draft_policy / draft_stable / draft_translate / fragment_merge / linebreak / prompt_core / speaker_label / text_diff），按名字切片的三份是 stream_core.py ← stream_asr.py、extract.py ← extract.py（PPTX/DOCX 那半）、prep.py ← prep.py（候选术语的提示词与判据）。⚠️ prompt_core.py（翻译提示词）今天是**临时来源**：只在桌面 lecture-live-prompt 分支里，sync-core.py 的 TEMPORARY_FROM 让它从 /Users/owen/lecture-live-prompt 取 —— 那个分支合进 main 后删掉那条，其余不变。有没有走样以 scripts/sync-core.py --check 为准（tests/core/drift.test.ts 与 tests/prep/python-drift.test.ts 跑它）；改清单要过 tests/core/manifest.test.ts。",
 	"files": [
 		"stream_core.py",
 		"caption_flow.py",
@@ -9,6 +9,7 @@
 		"fragment_merge.py",
 		"linebreak.py",
 		"prompt_core.py",
+		"speaker_label.py",
 		"text_diff.py",
 		"extract.py",
 		"prep.py",

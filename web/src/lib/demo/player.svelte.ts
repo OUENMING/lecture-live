@@ -4,7 +4,16 @@
 
 type Ev = [number, 'd' | 'dz' | 'f', string, string?];
 /** t：这句定稿时离开课多少秒（演示里按回放时间算） */
-export type CapRow = { id: number; en: string; zh: string; t: number; /** 定稿译文还没到（见 session/live 的同名字段） */ pending?: boolean };
+export type CapRow = {
+	id: number;
+	en: string;
+	zh: string;
+	t: number;
+	/** 定稿译文还没到（见 session/live 的同名字段） */
+	pending?: boolean;
+	/** 说话人字母（主讲不标 → 没有）；Stream 在行首显示「说话人 B」 */
+	spk?: string;
+};
 
 export class DemoPlayer {
 	rows = $state.raw<CapRow[]>([]);

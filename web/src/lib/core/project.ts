@@ -12,6 +12,10 @@ export interface SealedLine {
 	lang: string;
 	start: number;
 	end: number;
+	/** Soniox 原始说话人编号（没开分离 → 空串 / 旧快照没有这个键） */
+	speaker?: string;
+	/** 界面显示的字母（`speaker_label.SpeakerLabeler`：主讲 / 不够长 → 空串） */
+	spk?: string;
 }
 
 /** `rt.py` 一拍输出的快照。 */
@@ -85,7 +89,9 @@ export function project(
 			en: s.text,
 			...blankZh(),
 			seg,
-			t_s: ms(s.start)
+			t_s: ms(s.start),
+			// 只有别人说的才带（主讲不标）：没有这个键 = 不标，旧磁带的投影逐字不变
+			...(s.spk ? { spk: s.spk } : {})
 		});
 	}
 	const rows = finals.slice();

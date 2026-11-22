@@ -101,7 +101,15 @@ export class LiveSession {
 	/** 每句的译文与打点（`latency()` 的唯一来源；界面不读）。 */
 	#trRows = new Map<
 		number,
-		{ zh: string; en: string; state: 'none' | 'draft' | 'final' | 'failed'; /** 封口那一刻的草稿译文 */ ph: string }
+		{
+			zh: string;
+			en: string;
+			state: 'none' | 'draft' | 'final' | 'failed';
+			/** 封口那一刻的草稿译文 */
+			ph: string;
+			/** 说话人字母（主讲 → 空串） */
+			spk: string;
+		}
 	>();
 	#samples = new Map<number, LatencySample & { tAudioEnd: number | null }>();
 	/** 每句的音频起点（秒），接 `t_s` 与打点用 */
@@ -268,7 +276,7 @@ export class LiveSession {
 				draftSeg = r.seg;
 				continue;
 			}
-			if (!this.#sealedAt.has(r.seg)) this.#newFinal(r.seg, r.en, r.t_s);
+			if (!this.#sealedAt.has(r.seg)) this.#newFinal(r.seg, r.en, r.t_s, r.spk ?? '');
 		}
 		if (draftEn !== this.draftEn) {
 			this.draftEn = draftEn;
@@ -283,12 +291,12 @@ export class LiveSession {
 	}
 
 	/** 一句刚封口：记打点、排进翻译队列（串行，一句接一句）。 */
-	#newFinal(seg: number, en: string, t_s: number): void {
+	#newFinal(seg: number, en: string, t_s: number, spk = ''): void {
 		this.#sealedAt.set(seg, t_s);
 		// 封口时把正在看的草稿译文接过来当占位：中文那行不消失、不先变英文再重打（2026-11-20 实测每句都闪）。
 		// 草稿槽同时清空，免得同一句中文上下各一份。
 		const ph = this.#shownDraftZh.trim();
-		this.#trRows.set(seg, { zh: '', en, state: 'none', ph });
+		this.#trRows.set(seg, { zh: '', en, state: 'none', ph, spk });
 		if (ph) this.#onDraftZh('');
 		this.#samples.set(seg, {
 			// 段尾 → 封口：最后一次看到这句还是草稿的时刻（桌面 `seg_to_zh` 的拆分口径）
@@ -309,7 +317,14 @@ export class LiveSession {
 			// 定稿译文逐字流进来时，长到占位的 BRIDGE_RATIO 之前继续显示占位：整句只换一次，不从一两个字重新长。
 			// 比例同桌面 `caption_flow.BRIDGE_RATIO`：原来要追满占位长度，定稿比草稿短时旧草稿一直挂到译完（Owen：译文滞留）
 			const zh = settled || r.zh.length >= BRIDGE_RATIO * r.ph.length ? r.zh : r.ph;
-			out.push({ id: seg, en: r.en, zh, t: this.#sealedAt.get(seg) ?? 0, pending: !settled });
+			out.push({
+				id: seg,
+				en: r.en,
+				zh,
+				t: this.#sealedAt.get(seg) ?? 0,
+				pending: !settled,
+				...(r.spk ? { spk: r.spk } : {})
+			});
 		}
 		this.rows = out;
 	}

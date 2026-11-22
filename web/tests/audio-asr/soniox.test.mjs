@@ -23,6 +23,7 @@ const CONFIG_ORDER = [
 	'num_channels',
 	'language_hints',
 	'enable_endpoint_detection',
+	'enable_speaker_diarization',
 ];
 
 /** 4 字节的假帧，内容就是标记字符，便于看顺序 */
@@ -98,7 +99,8 @@ export async function run(report = makeReport()) {
 				cfg.num_channels === 1 &&
 				Array.isArray(cfg.language_hints) &&
 				cfg.language_hints[0] === 'en' &&
-				cfg.enable_endpoint_detection === true,
+				cfg.enable_endpoint_detection === true &&
+				cfg.enable_speaker_diarization === true,
 			cfg ? `${cfg.model} ${cfg.audio_format} ${cfg.sample_rate}` : '—'
 		);
 

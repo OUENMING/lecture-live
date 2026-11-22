@@ -67,6 +67,8 @@ function buildConfig(opts: SonioxOptions): Record<string, unknown> {
 		num_channels: 1,
 		language_hints: ['en'],
 		enable_endpoint_detection: true,
+		// 说话人分离（桌面 `stream_asr.DIARIZE`，3.13.0）：实测不加延迟；换人断句、字母在 rt.py 发
+		enable_speaker_diarization: true,
 	};
 	if (opts.context) cfg.context = opts.context;
 	return cfg;

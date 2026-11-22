@@ -205,9 +205,11 @@
 					onclick={onmark ? () => onmark(row) : undefined}
 					onkeydown={onmark ? (e) => rowKey(e, row) : undefined}
 				>
-					<p class="en" lang="en">{row.en}</p>
+					<!-- 说话人：主讲不标，别人在这一行最上面那行字的行首挂「说话人 B」（桌面 transcript_view 同口径）；
+					     两行各放一份，只显示看得见的那行里的（双语 / 只英 → 英文行，只中 → 中文行） -->
+					<p class="en" lang="en">{#if row.spk}<span class="spk" lang="zh-CN">说话人 {row.spk}</span>{/if}{row.en}</p>
 					<!-- 英文顶替中文只给「翻译失败」的句子；还在译的留空行（高度已预留），不闪英文 -->
-					<p class="zh" lang="zh-CN">{row.zh || (row.pending ? '' : row.en)}</p>
+					<p class="zh" lang="zh-CN">{#if row.spk}<span class="spk zh-spk" aria-hidden="true">说话人 {row.spk}</span>{/if}{row.zh || (row.pending ? '' : row.en)}</p>
 				</div>
 			{/each}
 			{#if showDraft}
@@ -316,6 +318,22 @@
 	}
 	[data-mode='zh'] .zh {
 		margin-top: 0;
+	}
+	/* 说话人标注：英文小字同字号、半粗、同色（桌面 SPEAKER_WEIGHT / font_en），与正文隔 0.5em */
+	.spk {
+		display: inline-block;
+		margin-right: 0.5em;
+		font-size: calc(var(--z) * var(--en-ratio, 0.58));
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		color: var(--on-glass-2);
+		vertical-align: baseline;
+	}
+	.zh-spk {
+		display: none;
+	}
+	[data-mode='zh'] .zh-spk {
+		display: inline-block;
 	}
 	.draft {
 		opacity: 1;

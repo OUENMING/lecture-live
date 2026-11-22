@@ -29,6 +29,7 @@ import json
 import time
 from typing import Any
 
+from speaker_label import SpeakerLabeler
 from stream_core import Sealed, StreamCore
 
 import prompt_core
@@ -36,8 +37,10 @@ from draft_translate import DraftView
 from prompt_core import DRAFT_SYSTEM_CLOUD, SYSTEM_PROMPT_CLOUD
 
 
-def _sealed(s: Sealed) -> dict[str, Any]:
-    return {"text": s.text, "lang": s.lang, "start": s.start_s, "end": s.end_s}
+def _sealed(s: Sealed, spk: str = "") -> dict[str, Any]:
+    """`speaker` = Soniox 原始编号（没开分离 → `""`）；`spk` = 界面显示的字母（主讲 / 没标 → `""`）。"""
+    return {"text": s.text, "lang": s.lang, "start": s.start_s, "end": s.end_s,
+            "speaker": s.speaker, "spk": spk}
 
 
 class RealtimeCore:
@@ -51,8 +54,13 @@ class RealtimeCore:
         self._notice: str | None = None
         kwargs: dict[str, Any] = {} if stable_s is None else {"stable_s": stable_s}
         self._core = StreamCore(clock=self._clock, **kwargs)
+        # 说话人字母：与桌面 `main.py` 同一个状态机，每句封口按顺序喂一次（发出的字母永不回收）。
+        self._spk = SpeakerLabeler()
 
     # ---- 时钟
+
+    def _out(self, ss) -> list[dict[str, Any]]:
+        return [_sealed(s, self._spk.observe(s.speaker, s.text)) for s in ss]
 
     def _clock(self) -> float:
         return self._tape_now if self._tape_now is not None else time.monotonic()
@@ -80,15 +88,15 @@ class RealtimeCore:
             if isinstance(wall, (int, float)) and not isinstance(wall, bool):
                 self._tape_now = float(wall)
         self._n_msgs += 1
-        sealed.extend(_sealed(s) for s in self._core.tick())   # 主循环那一拍
+        sealed.extend(self._out(self._core.tick()))   # 主循环那一拍
         self._core.feed_msg(msg)
-        sealed.extend(_sealed(s) for s in self._core.take_sentences())
+        sealed.extend(self._out(self._core.take_sentences()))
         return self._snap(sealed)
 
     def tick(self, seq: int) -> str:
         """音频帧节拍：没有新消息时也得推时钟，否则老师说完一句安静下来就永远封不了口。"""
         self._seq = int(seq)
-        return self._snap([_sealed(s) for s in self._core.tick()])
+        return self._snap(self._out(self._core.tick()))
 
     def flush(self) -> str:
         """下课收尾：手上还没封口的尾句强制定稿（桌面版 `_finish_stream` 同一条路）。
@@ -96,7 +104,7 @@ class RealtimeCore:
         `StreamCore.flush()` 自己会把 `_final` / `_nonfinal` 清空，所以调两次不会重复出句；
         这里不再加 `_wm_ms` 之类的新判据 —— 那句「不许自己发明规则」就是为了这个。
         """
-        return self._snap([_sealed(s) for s in self._core.flush()])
+        return self._snap(self._out(self._core.flush()))
 
     # ---- 输出
 

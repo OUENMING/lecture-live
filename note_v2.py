@@ -674,7 +674,11 @@ def _dcut(x, n: int) -> str:
 
 def _lh(v) -> str:
     """matrix 的 `lo|hi` 归一（容错：low/high/0/1/否/是）；认不出 → 空串。"""
-    t = str(v or "").strip().lower()
+    # ⚠️ 不能写 `str(v or "")`：数字 0 / False 会先被 `or` 变成空串 → 认不出 → 那一格缺 →
+    #    整张 matrix 被丢（OCR 11-22）。只有 None 才当空。
+    if isinstance(v, bool):
+        v = int(v)
+    t = ("" if v is None else str(v)).strip().lower()
     if t in ("lo", "low", "0", "否", "低", "no", "n"):
         return "lo"
     if t in ("hi", "high", "1", "是", "高", "yes", "y"):
@@ -1588,7 +1592,9 @@ CEILING_PER_MIN = 240
 def _ts_seconds(ts) -> int | None:
     """`13:16:28` / `13:16` → 秒；解不出返回 None（**不猜**）。"""
     try:
-        parts = str(ts).strip().split(":")
+        # 模型常照转录行的样子写 `[13:16:28]`：括号原来让整节计划解析成 None、静默并入上一节
+        # （OCR 11-22）。只剥两端的括号，中间的字不猜。
+        parts = str(ts).strip().strip("[]【】()（） ").split(":")
         if len(parts) == 2:
             h, m = int(parts[0]), int(parts[1])
             s = 0
@@ -1704,6 +1710,10 @@ def _merged_prose(members: list) -> list:
     return out
 
 
+#: 一个单元只放得下一份的图件（并单元时两边都有 → 不并）。
+_UNIT_ONE_OF = ("compare", "flow", "diagram", "why")
+
+
 def merge_units(review: dict, *, end_ts: str = "") -> dict:
     """相邻且**同一概念**（标题主干相同）的小节并成「单元」（作者 2026-10-18 第七轮 A）。
 
@@ -1712,7 +1722,8 @@ def merge_units(review: dict, *, end_ts: str = "") -> dict:
     `ts` 区间（`13:16–13:24`）。字段合并规则：
       · `prose` 顺序拼接；`q/cues/conclusion/algebra/intuition/prereq*` 取第一个非空；
       · `example` 只留**第一个**（讲同一个道理的重复例子不留两份）；
-      · `variants/faded` 取第一个非空；`pitfalls/terms/sources` 去重并起来。
+      · `variants/faded/compare/flow/diagram/why` 取第一个非空；`pitfalls/terms/sources` 去重并起来；
+      · 两节带同一种图件（compare/flow/diagram/why）→ 不并成一个单元（只放得下一个）。
     """
     secs = [s for s in (review.get("sections") or []) if isinstance(s, dict)]
     if not secs:
@@ -1733,7 +1744,13 @@ def merge_units(review: dict, *, end_ts: str = "") -> dict:
     groups: list = []
     for i, s in enumerate(secs):
         stem = _stem(s.get("heading"))
-        if groups and stem and stem == _stem(secs[groups[-1][-1]].get("heading")):
+        # ⚠️ 单元里每种图件只放得下一个：这一节和单元里已有成员**都**带同一种图件
+        #    （对照表/流程/图/想一想）→ 另起一个单元，不并（原来并完只留第一个，后面
+        #    几段的图静默丢掉，OCR 11-22）。
+        clash = groups and any(s.get(k) and any(secs[j].get(k) for j in groups[-1])
+                               for k in _UNIT_ONE_OF)
+        if groups and stem and not clash \
+                and stem == _stem(secs[groups[-1][-1]].get("heading")):
             groups[-1].append(i)
         else:
             groups.append([i])
@@ -1789,7 +1806,8 @@ def merge_units(review: dict, *, end_ts: str = "") -> dict:
             exs.append(ex)
         if exs:
             m["example"] = exs[0]
-        for key in ("variants", "faded", "diagram", "why"):
+        # compare/flow 原来只跟着 `dict(first)` 走：首成员没有、后面成员有 → 丢（OCR 11-22）
+        for key in ("variants", "faded") + _UNIT_ONE_OF:
             val = next((s2.get(key) for s2 in members if s2.get(key)), None)
             if val:
                 m[key] = val
@@ -2816,8 +2834,16 @@ def _gloss_first_zh(text: str, en: str, zh: str) -> str:
     · 是光秃的 `English` → 换成 `中文（English）`；
     · 已在括注里（`（English）`）→ 不动（已经是「中文（English）」了）。
     中英间为排版补的空格，英文换成中文后两边都是中文，一并收掉。
+    · 嵌在更长英文短语里的（`marginal cost（边际成本）` 里的 `cost`）→ 跳过这一处：
+      原来会拆成 `marginal 边际成本（cost）`（OCR 11-22）。
     """
-    m = re.search(r"(?<![A-Za-z])" + re.escape(en) + r"(?![A-Za-z])", text)
+    m = None
+    for c in re.finditer(r"(?<![A-Za-z])" + re.escape(en) + r"(?![A-Za-z])", text):
+        if (re.search(r"[A-Za-z][ \-]$", text[max(0, c.start() - 2):c.start()])
+                or re.match(r"[ \-][A-Za-z]", text[c.end():c.end() + 2])):
+            continue
+        m = c
+        break
     if not m:
         return text
     if text[max(0, m.start() - 1):m.start()] in ("（", "("):

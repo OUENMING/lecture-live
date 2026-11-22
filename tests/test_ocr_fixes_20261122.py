@@ -141,5 +141,64 @@ class GuardsFalseSourcePageSuffix(unittest.TestCase):
             self.assertEqual(out["sections"][0]["prose"][0], want)
 
 
+class LedgerSuperscripts(unittest.TestCase):
+    def test_unicode_superscripts_become_powers(self):
+        import note_ledger as L
+        self.assertEqual(L.normalize_math("TC(q) = q³ − 12q² + 60q"),
+                         "TC(q) = q^3 − 12q^2 + 60q")
+        self.assertEqual(L.normalize_math("x⁻¹"), "x^{-1}")
+
+
+class PlanBracketTimestamp(unittest.TestCase):
+    def test_bracketed_start_parses(self):
+        import note_v2 as nv
+        self.assertEqual(nv._ts_seconds("[13:16:28]"), 13 * 3600 + 16 * 60 + 28)
+        self.assertEqual(nv._ts_seconds("【13:16】"), 13 * 3600 + 16 * 60)
+        self.assertIsNone(nv._ts_seconds("13点16"))
+
+
+class MatrixZero(unittest.TestCase):
+    def test_numeric_zero_and_false_mean_lo(self):
+        import note_v2 as nv
+        self.assertEqual([nv._lh(x) for x in (0, False, 1, True, None, "0")],
+                         ["lo", "lo", "hi", "hi", "", "lo"])
+
+
+class GlossFirstZhPhrase(unittest.TestCase):
+    def test_term_inside_longer_english_phrase_untouched(self):
+        import note_v2 as nv
+        self.assertEqual(nv._gloss_first_zh("marginal cost（边际成本）随产量上升。", "cost", "成本"),
+                         "marginal cost（边际成本）随产量上升。")
+        self.assertEqual(nv._gloss_first_zh("这里的 cost 很高", "cost", "成本"),
+                         "这里的成本（cost）很高")
+
+
+class MergeUnitsKeepsComponents(unittest.TestCase):
+    def test_second_member_components_not_lost(self):
+        import note_v2 as nv
+        d1 = {"kind": "matrix", "title": "图一"}
+        d2 = {"kind": "matrix", "title": "图二"}
+        cmp2 = {"title": "对照", "cols": ["", "A", "B"], "rows": []}
+        rv = {"sections": [
+            {"heading": "需求弹性：一", "ts": "10:00", "prose": ["a"], "diagram": d1},
+            {"heading": "需求弹性：二", "ts": "10:05", "prose": ["b"], "diagram": d2,
+             "compare": cmp2}]}
+        out = nv.merge_units(rv, end_ts="10:10")
+        got = [s.get("diagram") for s in out["sections"]]
+        self.assertIn(d1, got)
+        self.assertIn(d2, got)
+        self.assertIn(cmp2, [s.get("compare") for s in out["sections"]])
+
+    def test_compare_from_later_member_survives_merge(self):
+        import note_v2 as nv
+        cmp2 = {"title": "对照", "cols": ["", "A", "B"], "rows": []}
+        rv = {"sections": [
+            {"heading": "需求弹性：一", "ts": "10:00", "prose": ["a"]},
+            {"heading": "需求弹性：二", "ts": "10:05", "prose": ["b"], "compare": cmp2}]}
+        out = nv.merge_units(rv, end_ts="10:10")
+        self.assertEqual(len(out["sections"]), 1)
+        self.assertEqual(out["sections"][0].get("compare"), cmp2)
+
+
 if __name__ == "__main__":
     unittest.main()

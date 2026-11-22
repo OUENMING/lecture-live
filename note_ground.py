@@ -142,6 +142,22 @@ def find_evidence(claim: str, lines: list, *, k: int = MAX_HITS) -> list:
     return out
 
 
+def _qnorm(t: str) -> str:
+    """引文比对口径：小写、标点当空白、空白并一（模型抄引文常丢逗号/改引号，字词不许变）。"""
+    return " ".join(re.sub(r"[^\w\s]", " ", str(t or "").lower()).split())
+
+
+def _hit_with_quote(quote: str, hits: list):
+    """整句引文出现在哪段原话里 → 那段原话；哪段都没有 → None。**纯函数。**"""
+    q = _qnorm(quote)
+    if not q:
+        return None
+    for h in hits:
+        if f" {q} " in f" {_qnorm(_body(h))} ":         # 整词对齐：`about 13` 不许配上 `about 136`
+            return h
+    return None
+
+
 def ground_unchecked(checks: list, review: dict, lines: list, *, chat,
                      max_tokens: int = 3000) -> tuple:
     """未核对的讲解类断言 → 找原话 → 一次调用判支持。返回 `(checks, n_ok, n_diff, n_sent)`。
@@ -186,9 +202,15 @@ def ground_unchecked(checks: list, review: dict, lines: list, *, chat,
         v = str(it.get("verdict") or "").strip().lower()
         quote = str(it.get("quote") or "").strip()[:120]
         ts = str(it.get("ts") or "").strip()[:12]
-        # ⚠️ 引文必须真在附的原话里（模型可能编）：对不上就当没判。
-        if quote and not any(quote.lower()[:40] in h.lower() for h in hits):
-            continue
+        # ⚠️ 引文必须**整句**真在附的原话里（模型可能编）：对不上就当没判。原来只核前 40 字，
+        #    后半句模型续写的也能以「🎙 原话」印出来；时间戳也不核（OCR 11-22）。
+        #    时间戳一律取引文所在那段原话自己的，不用模型写的。
+        if quote:
+            src = _hit_with_quote(quote, hits)
+            if src is None:
+                continue
+            m_ts = re.match(r"^\s*\[([^\]]*)\]", src)
+            ts = m_ts.group(1).strip()[:12] if m_ts else ""
         cite = f"🎙 {ts} 原话「{quote}」" if quote else "🎙 转录原话"
         if v == "supported" and quote:
             rows[j]["status"] = "ok"

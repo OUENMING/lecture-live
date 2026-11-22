@@ -72,10 +72,22 @@ _FORMULA = re.compile(r"\b(TC|AC|MC|TR|TFC|TVC|AVC)\s*\(\s*([qQx])\s*\)\s*=\s*"
                       r"([^,，。；;\n]{1,60})")
 
 
+_SUP_MAP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺", "0123456789-+")
+_SUP_RUN = re.compile(r"[⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺]+")
+
+
+def _sup(run: str) -> str:
+    t = run.translate(_SUP_MAP)
+    return f"^{t}" if len(t) == 1 else f"^{{{t}}}"
+
+
 def normalize_math(text: str) -> str:
     """材料里的数学字形 → ASCII。**实测**：UCD 的 PDF 抽出来是 `𝑇𝐶(𝑞) = 𝑞! − 12𝑞" + 60𝑞`
     （数学粗斜体字母 + `!`/`"` 当上标），不归一化的话一条官方公式都读不出来。"""
-    s = unicodedata.normalize("NFKC", str(text or ""))
+    # ⚠️ 上标数字要在 NFKC **之前**改成 `^n`：NFKC 把 `q³` 折成 `q3`，`q³−12q²` 就成了
+    #    `q3−12q2`（错的式子带进提示词，OCR 11-22）。多位上标用 `^{..}`。
+    s = _SUP_RUN.sub(lambda m: _sup(m.group(0)), str(text or ""))
+    s = unicodedata.normalize("NFKC", s)
     # ⚠️ OCR 会在变量和上标之间留空格（实测 `3q " + 4q + 2`），所以允许 0–2 个空格。
     s = re.sub(r"(?<=[A-Za-z])[ \t]{0,2}!", "^3", s)
     s = re.sub(r'(?<=[A-Za-z])[ \t]{0,2}"', "^2", s)

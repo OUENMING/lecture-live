@@ -68,6 +68,25 @@ class 判支持(unittest.TestCase):
         self.assertIn("136 clubs", rows[0]["how"])
         self.assertEqual(rv["checks"][0]["status"], "unchecked", "不许原地改输入")
 
+    def test_引文后半句是编的_不算(self):
+        # OCR 11-22：原来只核引文前 40 字，后半句模型续写的也能以「🎙 原话」印出来
+        rv = _review(["UCD 约有 136 个俱乐部"])
+        chat = lambda s, u, m: {"items": [{"i": 0, "verdict": "supported", "ts": "13:14:11",
+                                           "quote": "so UCD has a huge sports centre there are about "
+                                                    "136 clubs and every student must join three"}]}
+        rows, ok, _, _ = g.ground_unchecked(rv["checks"], rv, LINES, chat=chat)
+        self.assertEqual(ok, 0)
+        self.assertEqual(rows[0]["status"], "unchecked")
+
+    def test_时间戳取原话自己的_不用模型写的(self):
+        rv = _review(["UCD 约有 136 个俱乐部"])
+        chat = lambda s, u, m: {"items": [{"i": 0, "verdict": "supported", "ts": "09:99:99",
+                                           "quote": "there are about 136 clubs in UCD"}]}
+        rows, ok, _, _ = g.ground_unchecked(rv["checks"], rv, LINES, chat=chat)
+        self.assertEqual(ok, 1)
+        self.assertNotIn("09:99:99", rows[0]["how"])
+        self.assertIn("13:14", rows[0]["how"])
+
     def test_说法不同_仍未核_永不mismatch(self):
         rv = _review(["UCD 约有 136 个俱乐部"])
         chat = lambda s, u, m: {"items": [{"i": 0, "verdict": "different", "ts": "13:14:11",

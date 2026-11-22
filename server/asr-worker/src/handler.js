@@ -111,7 +111,7 @@ import {
   MAX_BODY_BYTES, MAX_LINES_PER_BATCH, MAX_SESSION_S, SESSION_ID_RE, codeHashHex, normalizeCourse,
 } from "./web-session-core.js";
 import { UPSTREAMS, defaultRoutes, mergeRoutes, parseRoutes, resolveRoute } from "./routes.js";
-import { TERMS_KINDS, matchTermsPath, termsRoute } from "./web-terms.js";
+import { TERMS_KINDS, adminTermsStats, matchTermsPath, termsRoute } from "./web-terms.js";
 import { DATA_KINDS, adminWeb, dataRoute, matchDataPath, purgeTestData } from "./web-telemetry.js";
 import { artifactRoute, hubSend, hubFetch, matchArtifactPath, runnerRoute, withTimeout } from "./runner-routes.js";
 import { KEY_TTL_S, PROBE_MAX_SESSION_S, REGION_NAMES, STT_RT_MODEL, configuredRegions, collectUsage,
@@ -940,7 +940,7 @@ async function reclaimUsage(env, region, nowMs) {
 // 写操作（add / revoke / renew / limit / delete / routes/set / rt/*）一律 403。没配这个 secret = 不认只读令牌。
 export const ADMIN_RO_PATHS = new Set([
   "/v1/admin/list", "/v1/admin/stats", "/v1/admin/quota", "/v1/admin/minutes", "/v1/admin/devices",
-  "/v1/admin/web/list", "/v1/admin/web/get", "/v1/admin/runner/state", "/v1/admin/routes/get",
+  "/v1/admin/web/list", "/v1/admin/web/get", "/v1/admin/runner/state", "/v1/admin/routes/get", "/v1/admin/terms/stats",
 ]);
 async function admin(request, env, path) {
   const got = request.headers.get("authorization") || "";
@@ -956,6 +956,11 @@ async function admin(request, env, path) {
     const r = await hubFetch(env, "/admin_state", { limit: body?.limit });
     if (!r) return json(503, { error: "runner_hub_missing" });
     return json(r.status, await r.json().catch(() => ({ error: "upstream" })));
+  }
+  // 术语共享池规模（只读，2026-11-22）：多少码、多少课、多少词、跨码重合的有几个
+  if (path === "/v1/admin/terms/stats") {
+    const st = await adminTermsStats(env);
+    return st ? json(200, st) : json(503, { error: "web_terms_pool_missing" });
   }
   if (path === "/v1/admin/routes/get") { const snap = await routesSnapshot(env); return json(snap.error ? 502 : 200, snap); }
   // 额度快照住在另一个 DO 上（Passes 那边没有这些计数），所以这一条单独分流。

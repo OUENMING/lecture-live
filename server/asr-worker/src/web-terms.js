@@ -7,7 +7,7 @@
 import { MAX_BODY_BYTES } from "./web-session-core.js";
 import {
   FIELD_PREFIXES, SHARED_FIELD_MAX, SHARED_LIST_MAX, SHARED_MAX, SHARED_MIN_USERS, SHARED_SUBJECT_MAX,
-  checkPut, courseKeyOf, fieldOf, mergeTiers, subjectOf,
+  checkPut, courseKeyOf, fieldOf, mergeTiers, poolStats, subjectOf,
 } from "./web-terms-core.js";
 
 export const TERMS_PREFIX = "/v1/web/terms";
@@ -259,4 +259,13 @@ export async function termsRoute(request, env, ev, path, { hash }) {
   }
 
   return new Response("not found", { status: 404 });
+}
+
+/** 管理看板（只读，`/v1/admin/terms/stats`）：共享池规模。没绑 DO → null（调用方回 503）。 */
+export async function adminTermsStats(env) {
+  const pool = stubOf(env.WEB_TERMS_POOL, POOL_NAME);
+  if (!pool) return null;
+  const r = await call(pool, `/list?pre=${encodeURIComponent("share:")}`);
+  const { entries } = await r.json();
+  return poolStats(entries);
 }

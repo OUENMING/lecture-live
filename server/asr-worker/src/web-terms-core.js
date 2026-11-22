@@ -168,3 +168,49 @@ export function mergeTiers(tiers) {
   }
   return out;
 }
+
+/**
+ * 管理看板（只读）：共享池全部贡献 `[{key: "share:<课号>:<hash>", text}]` → 规模统计。**纯函数。**
+ * 不返回 hash（谁写的），只有人数；每门课附前 `top` 个词（按人数）给作者抽看。
+ * ⚠️ 只看得见**进了池**的：自由文字课名 / 没开共享的个人术语在各码自己的 DO 里，枚举不到。
+ */
+export function poolStats(entries, { top = 8 } = {}) {
+  const byCourse = new Map();
+  const codes = new Set();
+  for (const e of entries || []) {
+    const m = /^share:([^:]+):(.+)$/.exec(String(e?.key ?? ""));
+    if (!m) continue;
+    const [, course, hash] = m;
+    codes.add(hash);
+    if (!byCourse.has(course)) byCourse.set(course, []);
+    byCourse.get(course).push({ hash, text: typeof e.text === "string" ? e.text : "" });
+  }
+  const all = [];
+  const courses = [];
+  const fields = {};
+  for (const [course, contribs] of [...byCourse].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    all.push(...contribs);
+    const terms = sharedTerms(contribs, { minUsers: 1, max: Infinity });
+    const subject = subjectOf(course);
+    const field = fieldOf(subject);
+    courses.push({
+      course, subject, field: field ?? "—",
+      users: contribs.length,
+      terms: terms.length,
+      shared: terms.filter((t) => t.users >= SHARED_MIN_USERS).length,
+      top: terms.slice(0, top),
+    });
+    const f = (fields[field ?? "未分类"] ||= { courses: 0, users: new Set(), terms: 0 });
+    f.courses++; contribs.forEach((c) => f.users.add(c.hash)); f.terms += terms.length;
+  }
+  const distinct = sharedTerms(all, { minUsers: 1, max: Infinity });
+  return {
+    contributions: all.length,
+    codes: codes.size,
+    courses: courses.length,
+    distinct_terms: distinct.length,
+    cross_code_terms: distinct.filter((t) => t.users >= SHARED_MIN_USERS).length,
+    fields: Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, { courses: v.courses, users: v.users.size, terms: v.terms }])),
+    by_course: courses,
+  };
+}

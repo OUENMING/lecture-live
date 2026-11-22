@@ -595,3 +595,24 @@ function FIELD_PREFIXES_ALL() {
   for (const p of all) (out[fieldOf(p)] ??= []).push(p);
   return out;
 }
+
+test("poolStats：按课数人数 / 词数 / 跨码重合，不回 hash", async () => {
+  const { poolStats } = await import("./src/web-terms-core.js");
+  const st = poolStats([
+    { key: "share:ECON10770:aaa", text: "game theory\nNash equilibrium" },
+    { key: "share:ECON10770:bbb", text: "Game  Theory\nsubgame" },
+    { key: "share:BUSI3193:aaa", text: "market power" },
+    { key: "junk", text: "x" },
+  ]);
+  assert.equal(st.contributions, 3);
+  assert.equal(st.codes, 2);
+  assert.equal(st.courses, 2);
+  assert.equal(st.distinct_terms, 4);
+  assert.equal(st.cross_code_terms, 1);
+  const econ = st.by_course.find((c) => c.course === "ECON10770");
+  assert.deepEqual([econ.users, econ.terms, econ.shared, econ.field], [2, 3, 1, "business"]);
+  assert.deepEqual(econ.top[0], { term: "game theory", users: 2 });
+  assert.equal(st.by_course.find((c) => c.course === "BUSI3193").field, "—");
+  assert.deepEqual(st.fields.business, { courses: 1, users: 2, terms: 3 });
+  assert.ok(!JSON.stringify(st).includes("aaa"));
+});

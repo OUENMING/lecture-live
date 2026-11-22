@@ -1175,9 +1175,18 @@ def _walk_text(node, fn, *, skip=frozenset()) -> None:
 
 
 # ---- ⑤ 没课件时，「课件/PPT 里写着」这类声称全是假的 --------------------------
-#: 材料来源词：出现它 = 声称"这是课件/讲义里写的"。
-_MAT_SRC = re.compile(r"(?:课件|讲义|PPT|ppt|幻灯片|[Ss]lides?)\s*"
-                      r"(?:末页|最后一页|第\s*\d+\s*页)?")
+#: 材料词（出处标签 `sources` 里出现它就去掉）。
+_MAT_WORD = r"(?:课件|讲义|PPT|ppt|幻灯片|[Ss]lides?)"
+_MAT_SRC = re.compile(_MAT_WORD)
+#: 正文里**引用课件内容**的说法（声称"这是课件里写的"）—— 只改这些。
+#: ⚠️ 2026-11-22 实测：老正则见「课件/slides」就换，ECS170 那节老师原话
+#:    「复习看 slides、不用看教材」被改成「复习看 📚 标准教材」——意思正好反了（13 处）。
+#:    「考试考 slides 上的东西」「课件会上传」是在**转述老师说的话**，不是出处声称，不许动。
+_MAT_CLAIM = re.compile(
+    r"(?:据|按|照|参见|见|引自|出自|来自)\s*" + _MAT_WORD
+    + r"|(?:与|和|跟)\s*" + _MAT_WORD + r"\s*(?:一致|相符|相同)"
+    + r"|" + _MAT_WORD + r"\s*(?:末页|最后一页|第\s*\d+\s*页|原文|所示|所列"
+    r"|(?:上|里|中)?\s*(?:的)?(?:公式|定义|图|表格?|写着|写的|写道|给出的?|列出的?|显示))")
 #: 没课件时的降级目标（与页脚/图例里的 `📚 标准理论` 同一口径）。
 _DOWNGRADE_SRC = "📚 标准教材"
 #: 逐字转录字段 —— 这些字**不许**被改写（它们本来就是原文）。
@@ -1198,9 +1207,14 @@ def strip_false_sources(review: dict, *, has_materials: bool) -> tuple:
     out = copy.deepcopy(review)
     n_src = n_tag = n_title = 0
 
+    def _claim(m) -> str:
+        w = re.search(_MAT_WORD, m.group(0))
+        rest = re.sub(r"^\s*(?:末页|最后一页|第\s*\d+\s*页)", "", m.group(0)[w.end():])  # 教材没有「末页」
+        return m.group(0)[:w.start()] + _DOWNGRADE_SRC + rest
+
     def fix(s: str) -> str:
         nonlocal n_src
-        new = _MAT_SRC.sub(_DOWNGRADE_SRC, s)
+        new = _MAT_CLAIM.sub(_claim, s)
         if new != s:
             n_src += 1
         return new

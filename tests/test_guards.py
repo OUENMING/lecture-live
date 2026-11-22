@@ -1047,6 +1047,15 @@ class F14FalseSources(unittest.TestCase):
         self.assertEqual("课件里说的", out["corrections"][0]["spoken"], "逐字转录字段不许改")
         self.assertTrue(extra[0]["downgraded"] >= 3 and warns)
 
+    def test_转述老师说的课件安排_不许改(self):
+        # 11-22 ECS170：「复习看 slides、不用看教材」被改成「复习看 📚 标准教材」，意思反了
+        keep = ["复习看 slides，不用看教材", "考试内容就是所有 slides 上的东西",
+                "课件会上传到 Brightspace", "把课件缩小打印带进考场"]
+        rev = {"sections": [{"heading": "H", "prose": list(keep)}]}
+        out, _, warns = ng.strip_false_sources(rev, has_materials=False)
+        self.assertEqual(keep, out["sections"][0]["prose"])
+        self.assertEqual([], warns)
+
     def test_有课件时一个字不动(self):
         rev = self._rev()
         out, extra, warns = ng.strip_false_sources(rev, has_materials=True)

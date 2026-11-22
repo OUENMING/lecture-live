@@ -175,6 +175,18 @@ def main() -> int:
         _lc.chat_json = _cj
         print(f"llm        = magpie {_mp['baseUrl']} · {args.magpie_model}（只换 chat_json）")
 
+    # ⑤b 术语库写端改指 out/glossary/（2026-11-22 实测：worktree 的 glossary/ 软链到真仓库，
+    #     一轮 A/B 给真 glossary/ 新建了 7 门别人课的术语表 → 面板课程清单被污染）。
+    import note_glossary as _ng
+    _orig_append = _ng.append
+
+    def _append(terms, *, course, glossary_txt, state_path=None, glossary_path=None):
+        g = out / "glossary"
+        return _orig_append(terms, course=course, glossary_txt=glossary_txt,
+                            state_path=g / f"{course}.prep-state.json",
+                            glossary_path=g / f"{course}.txt")
+    _ng.append = _append
+
     # ⑥ 实验旋钮（只改本进程的模块属性）
     if args.effort:
         ow.NOTE_EFFORT = args.effort

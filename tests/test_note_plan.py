@@ -170,6 +170,8 @@ class 出计划(_不等分):
         plan = np_.architect(lines(200), chat=chat, domain="ECON10790")
         self.assertEqual([p["title"] for p in plan], ["甲", "乙"])
         self.assertEqual(len(calls), 1)                   # 只调一次
+        # 11-22：4000 时长课思考 token 吃光预算 → 空计划（12 节里 3 节）；默认不许再降回去
+        self.assertGreaterEqual(calls[0][2], 12000)
         self.assertTrue(calls[0][1].startswith(f"Course: ECON10790\n{lines(200)[0]}"))
 
     def test_architect_异常或空返回空表(self):

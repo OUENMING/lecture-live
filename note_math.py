@@ -198,7 +198,9 @@ _TEX_CMD = {
     # 箭头
     "to": "→", "rightarrow": "→", "longrightarrow": "→", "leftarrow": "←", "gets": "←",
     "Rightarrow": "⇒", "Leftarrow": "⇐", "Leftrightarrow": "⇔", "mapsto": "↦",
-    "up": "↑", "down": "↓",
+    "up": "↑", "down": "↓", "leftrightarrow": "↔", "longleftrightarrow": "↔",
+    "rightleftharpoons": "⇌", "rightleftarrows": "⇄", "leftrightharpoons": "⇋",
+    "longleftarrow": "←", "uparrow": "↑", "downarrow": "↓",   # 化学平衡（CHE002A 11-22 实测漏）
     # 希腊字母（经济学里常见的）
     "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
     "varepsilon": "ε", "zeta": "ζ", "eta": "η", "theta": "θ", "kappa": "κ",
@@ -250,6 +252,8 @@ def pretty_tex(text: str) -> str:
     #    现在：数字串（不带符号）/ 单个字母 / `{…}` / `*`；其余一律留在基线 ——
     #    KaTeX 没加载时宁可露出 `x^-1` 这样的 TeX 源码，也不许显示错的数学。
     s = re.sub(r"\^\s*(\{[^{}]{1,12}\}|[0-9]+|[A-Za-z]|\*)", _sup, s)
+    # 离子电荷 `H^+` / `A^-`：符号后面不跟数字/字母才算（`x^-1` 仍原样露出，见上）。
+    s = re.sub(r"\^([+-])(?![0-9A-Za-z])", lambda m: "⁺" if m.group(1) == "+" else "⁻", s)
     s = re.sub(r"_\s*(\{[^{}]{1,12}\}|[0-9]{1,3})", _sub, s)
 
     # 带参数的命令（先长后短：`\underline{\hspace{…}}` 要整套吃掉）

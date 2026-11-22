@@ -1657,6 +1657,8 @@ class HtmlComponents(unittest.TestCase):
         # 拿不准的（`^-1` 没花括号）宁可原样露 TeX 源码，也不许写成错的数学
         self.assertEqual(note_math.pretty_tex("x^-1"), "x^-1")
         self.assertEqual(note_math.pretty_tex("x^{-1}"), "x⁻¹")
+        # 化学（CHE002A 11-22）：平衡箭头 + 不带花括号的离子电荷
+        self.assertEqual(note_math.pretty_tex(r"HA \rightleftharpoons H^+ + A^-"), "HA ⇌ H⁺ + A⁻")
         self.assertEqual(note_math.pretty_tex("q_{1} + 3q_{2}"), "q₁ + 3q₂")
         self.assertEqual(note_math.pretty_tex("f(x)=x^{3}-3x"), "f(x)=x³-3x")
         # ⚠️ `3x^2-3` 曾被上标正则写成 `3x²⁻³`（把后面的减号当成了指数的符号）

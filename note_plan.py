@@ -187,14 +187,21 @@ def _split_long(rows: list) -> list:
 
 
 # ---------------------------------------------------------------- 出计划
-def architect(lines: list, *, chat, domain: str = "", max_tokens: int = 4000) -> list:
-    """一次调用拿全课节计划。`chat(system, user, max_tokens) -> dict`；失败返回 `[]`。"""
+#: ⚠️ 2026-11-22 实测：4000 时长课（680 行 / 4 万字符）的思考 token 把预算吃光 → 空回复
+#:    → 计划静默为空（12 节里 3 节）。12000 时同样三节都出了 10 节计划（22–26 s）。
+ARCHITECT_MAX_TOKENS = 12000
+
+
+def architect(lines: list, *, chat, domain: str = "",
+              max_tokens: int = ARCHITECT_MAX_TOKENS) -> list:
+    """一次调用拿全课节计划。`chat(system, user, max_tokens) -> dict`；失败返回 `[]`（并出声）。"""
     try:
         if not lines:
             return []
         user = f"Course: {domain}\n" + "\n".join(lines)
         return validate(chat(PLAN_SYS, user, max_tokens), lines)
-    except Exception:                                     # noqa: BLE001  fail-soft
+    except Exception as e:                                # noqa: BLE001  fail-soft，但要出声
+        print(f"   ⚠ 节计划调用失败（{type(e).__name__}: {str(e)[:80]}）→ 按老路切块", flush=True)
         return []
 
 

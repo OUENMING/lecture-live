@@ -79,6 +79,17 @@ def _balanced(s: str, i: int) -> int:
 _FRAC_HEAD = re.compile(r"\\frac\s*\{")
 
 
+def _outside_spans(seg: str, fn) -> str:
+    """只对 `$…$` / `$$…$$` **之外**的片段套 `fn`（已在数学模式里的不再包）。"""
+    out, last = [], 0
+    for m in _SPAN.finditer(seg):
+        out.append(fn(seg[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(fn(seg[last:]))
+    return "".join(out)
+
+
 def _wrap_bare_frac(seg: str) -> str:
     """把**不在 `$…$` 里的** `\\frac{…}{…}` 包成 `$…$`（花括号配平扫，`\\frac{\\hat{β}}{SE(\\hat{β})}` 里套着 `{}`）。
 
@@ -147,8 +158,10 @@ def _convert_plain(seg: str) -> str:
     # ⚠️ 顺序：先包裸 `\frac{…}{…}` 与 `\begin{…}…\end{…}`（会产生新的 `$…$`），
     #    再按 `$…$` 切开做普通式子的兜底 —— 反过来会把 `\frac{x^2}{2}` 里的 `x^2`
     #    再包一层（`$\frac{$x^{2}$}{2}$`，坏的）。
-    seg = _wrap_bare_frac(seg)
-    seg = _wrap_bare_env(seg)
+    # ⚠️ OCR 11-22：先包环境、再包 frac，且两步都只动 `$…$` **之外**的片段 —— 原来先包
+    #    frac 再包整个 `\begin{cases}…\end{cases}`，分段函数里的 `\frac` 成了嵌套 `$`（公式坏）。
+    seg = _outside_spans(seg, _wrap_bare_env)
+    seg = _outside_spans(seg, _wrap_bare_frac)
     out, last = [], 0
     for m in _SPAN.finditer(seg):
         out.append(_RUN.sub(fix, seg[last:m.start()]))
@@ -943,7 +956,12 @@ def _sign_rows(t: str) -> list:
     for m in _SIGN.finditer(t):
         v, w = m.group("v"), m.group("w")
         if v is not None:
-            sign = 1 if float(v) > 0 else -1
+            fv = float(v)
+            if abs(fv) < 1e-12:
+                # 二阶导 = 0：没有方向（拐点 / 要更高阶判），不判极大极小 —— 同 `_extremum_row`。
+                # 原来 0 落进「负」：错的「极大」放过、对的「极小」挂 ⚠（OCR 11-22）。
+                continue
+            sign = 1 if fv > 0 else -1
             shown = f"{v}"
         elif w is not None:
             sign = 1 if w == "正" else -1
@@ -2077,9 +2095,21 @@ def _parse_formula(s: str) -> dict:
 
 def _parse_species(tok: str):
     """一个物种 `4H₂O` / `MnO4⁻` / `Fe^{2+}` / `e⁻` → `(元素表, 电荷)`；认不出 → `None`。**纯函数。**"""
+    alts = _species_alts(tok)
+    return alts[0] if alts else None
+
+
+def _species_alts(tok: str) -> list:
+    """同 `_parse_species`，但返回**所有读法**（`[(元素表, 电荷), …]`，第一个是默认读法）。
+
+    ⚠️ ASCII 写法 `Fe2+` / `NH4+` / `SO42-` 本质有歧义：末位数字可能是下标（NH₄⁺）也可能是
+       电荷数（Fe²⁺）。原来一律当下标 → `Fe → Fe2+ + 2e-` 被判电荷不平（OCR 11-22）。
+       现在两种读法都给，由 `_check_equation` 取能配平的那组。
+    """
     s = str(tok or "").strip()
+    alts: list = []
     if not s:
-        return None
+        return []
     s = re.sub(r"\((?:s|l|g|aq|sln|v|ppt|cr|am)\)", "", s, flags=re.I)   # 状态标 (s)(l)(g)(aq)
     s = s.replace("↑", "").replace("↓", "")                              # 气体/沉淀箭头
     m = re.match(r"^(\d+)\s*", s)
@@ -2088,7 +2118,7 @@ def _parse_species(tok: str):
     s = re.sub(r"_\s*\{([0-9]+)\}", r"\1", s)     # LaTeX 下标 `H_2O` / `H_{2}O`
     s = re.sub(r"_\s*([0-9]+)", r"\1", s)
     if s in ("e", "e-", "e⁻", "e−", "e^-", "e^−"):
-        return {"e": coeff}, -coeff
+        return [({"e": coeff}, -coeff)]
     charge = 0
     ms = re.search(rf"[{_CI_SUP}]+$", s)
     if ms:
@@ -2101,14 +2131,20 @@ def _parse_species(tok: str):
         if ml:
             s = s[:ml.start()].strip()
             charge = (int(ml.group(1)) if ml.group(1) else 1) * (1 if ml.group(2) == "+" else -1)
-        elif s.endswith("+") and len(s) > 1:
-            s, charge = s[:-1].strip(), 1
-        elif s.endswith("-") and len(s) > 1:
-            s, charge = s[:-1].strip(), -1
+        elif s[-1:] in ("+", "-") and len(s) > 1:
+            sign = 1 if s[-1] == "+" else -1
+            s = s[:-1].strip()
+            charge = sign
+            md = re.search(r"(?<=[A-Za-z)\]])(\d)$", s)
+            if md:                               # `Fe2+`：末位数字也可能是电荷数
+                alt = _parse_formula(s[:md.start()])
+                if alt:
+                    alts.append(({k: v * coeff for k, v in alt.items()},
+                                 int(md.group(1)) * sign * coeff))
     counts = _parse_formula(s)
     if not counts:
-        return None
-    return {k: v * coeff for k, v in counts.items()}, charge * coeff
+        return alts
+    return [({k: v * coeff for k, v in counts.items()}, charge * coeff)] + alts
 
 
 def _looks_chemical(eq: str) -> bool:
@@ -2133,33 +2169,52 @@ def _check_equation(eq: str) -> str:
     if len(parts) != 2:
         return "箭头两边没分成两边"
 
-    def _side(txt: str):
+    def _toks(txt: str):
         # ` + ` 是常态；没写空格的（`2H₂(g)+O₂(g)`）也要认。
+        # ⚠️ 无空格时不许切开电荷里的 `+`：`Fe^{2+}+2e-` / `Fe2++2e-`（OCR 11-22：原来切碎 →
+        #    「物种认不出」假 ⚠）。紧跟 `}`/`+`、或紧接 `^`/`{` 的 `+` 是电荷，不是分隔符。
         parts_ = re.split(r"\s+\+\s+", txt.strip()) if " + " in txt \
-            else re.split(r"\+", txt.strip())
-        toks = [t for t in parts_ if t.strip()]
+            else re.split(r"(?<![\^{])\+(?![}+]|\s*$)", txt.strip())
+        return [t for t in parts_ if t.strip()]
+
+    def _side(choice: list):
         counts: dict = {}
         charge = 0
         names: list = []
-        for t in toks:
-            sp = _parse_species(t)
-            if sp is None:
-                return None, t
-            c, ch = sp
+        for c, ch in choice:
             for k, v in c.items():
                 if k == "e":
                     continue                       # 电子不是元素：只贡献电荷，不进元素表
                 counts[k] = counts.get(k, 0) + v
             charge += ch
             names.append((tuple(sorted(c.items())), ch))
-        return (counts, charge, names), ""
+        return counts, charge, names
 
-    left, bad = _side(parts[0])
-    if left is None:
-        return f"物种 {bad!r} 认不出（配平核不了）"
-    right, bad = _side(parts[1])
-    if right is None:
-        return f"物种 {bad!r} 认不出（配平核不了）"
+    sides = []
+    for txt in parts:
+        opts = []
+        for t in _toks(txt):
+            alts = _species_alts(t)
+            if not alts:
+                return f"物种 {t!r} 认不出（配平核不了）"
+            opts.append(alts)
+        sides.append(opts)
+    import itertools
+    combos = itertools.islice(
+        itertools.product(*(sides[0] + sides[1])), 64)   # 歧义读法最多试 64 组
+    nl = len(sides[0])
+    problem = None
+    for combo in combos:
+        p = _balance_problem(_side(list(combo[:nl])), _side(list(combo[nl:])))
+        if not p:
+            return ""
+        if problem is None:
+            problem = p                          # 默认读法（第一组）的问题
+    return problem or ""
+
+
+def _balance_problem(left, right) -> str:
+    """两边 `(元素表, 电荷, 物种)` → 问题（人话）；配平则 `""`。**纯函数。**"""
     (lc, lch, ln), (rc, rch, rn) = left, right
     if lch != rch:
         return f"电荷不平（左 {lch:+d}，右 {rch:+d}）"

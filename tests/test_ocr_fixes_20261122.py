@@ -200,5 +200,34 @@ class MergeUnitsKeepsComponents(unittest.TestCase):
         self.assertEqual(out["sections"][0].get("compare"), cmp2)
 
 
+class MathFixes(unittest.TestCase):
+    def test_frac_inside_bare_cases_no_nested_dollar(self):
+        import note_math as nm
+        t = r"C(q)=\begin{cases} \frac{1}{2}q & q>0 \\ 0 & q\le 0 \end{cases} 而 t = \frac{a}{b}"
+        out = nm.auto_tex(t)
+        self.assertEqual(out, r"C(q)=$\begin{cases} \frac{1}{2}q & q>0 \\ 0 & q\le 0 \end{cases}$"
+                              r" 而 t = $\frac{a}{b}$")
+        self.assertEqual(nm.auto_tex(out), out)                    # 幂等
+
+    def test_second_derivative_zero_is_not_negative(self):
+        import note_math as nm
+        self.assertEqual(nm._sign_rows("二阶导数为 0，所以是极小值。"), [])
+        self.assertEqual(nm._sign_rows("二阶导数为 0，因此该点为极大值点。"), [])
+
+
+class ChemistryAsciiCharge(unittest.TestCase):
+    def test_balanced_equations_not_flagged(self):
+        import note_math as nm
+        for eq in ("Fe → Fe2+ + 2e-", "Fe^{2+}+2e-→Fe", "Fe2++2e-→Fe",
+                   "2Fe2+ + Cl2 → 2Fe3+ + 2Cl-", "NH3 + H+ → NH4+", "NH3+H+→NH4+",
+                   "MnO4- + 8H+ + 5e- → Mn2+ + 4H2O"):
+            self.assertEqual(nm._check_equation(eq), "", eq)
+
+    def test_unbalanced_still_flagged(self):
+        import note_math as nm
+        self.assertIn("元素不守恒", nm._check_equation("2H2 + O2 → H2O"))
+        self.assertTrue(nm._check_equation("Fe → Fe2+ + e-"))
+
+
 if __name__ == "__main__":
     unittest.main()

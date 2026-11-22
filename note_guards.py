@@ -312,7 +312,9 @@ def safe_delete(text: str, removals, *, immune=frozenset(), fix=None) -> tuple:
                 blocked.append({"span": (a, b), "why": "公式/代码里出现过这个记号",
                                 "text": s[a:b]})
                 continue
-        cand = s[:a] + s[b:]
+        # 基于 `cur`（已删过后面那几处）而不是原串 `s`：从后往前删，前面的下标仍有效。
+        # 原来每次从 `s` 起算 → 最后只剩下标最小那一处被删，台账却记全删（OCR 11-22）。
+        cand = cur[:a] + cur[b:]
         why = _bad_after(fix(cand) if fix else cand)
         if why:
             blocked.append({"span": (a, b), "why": why, "text": s[a:b]})
@@ -733,6 +735,9 @@ def _div_bad_sentence_end(text: str):
         if abs(_round_half_up(a / b, dec) - c) > 1e-9:
             j = min([x for x in (text.find(p, m.end()) for p in "。！？") if x >= 0]
                     or [len(text)])
+            # 这一句后面已经标过 → 找下一条错的除法（同段第二处错才有地方标，OCR 11-22）
+            if _ANY_MARK.match(text, j + 1) or _CORRECT_MARK.match(text, j + 1):
+                continue
             return j + 1
     return None
 
@@ -1118,17 +1123,23 @@ def annotate_mismatches(review: dict) -> tuple:
         v = _get(out["sections"][si], path)
         if not isinstance(v, str) or not v:
             continue
-        if _ANY_MARK.search(v) or _CORRECT_MARK.search(v):
-            row["annotated"] = True      # 这一处已经有 ⚠ / 已更正（别行标的）
-            _done_claims.add(raw)
-            continue
         if is_quote_row(row):
             # ⭐ F14 ③：引语没找到 → 用**说清是哪件事**的标签，且台账里也换同一句人话
             mark = _QUOTE_MARK.format(how=_quote_how(row))
-            row["how"] = _quote_how(row)
         else:
             mark = _MISMATCH_MARK.format(how=how)
         where = None if is_quote_row(row) else _div_bad_sentence_end(v)
+        # 幂等按**这一处**判，不按整个字段：原来字段里有任何一个 ⚠ 就跳过 →
+        # 同一段里第二处错的数永远不标（OCR 11-22）。现在只在「同一个标注已在」或
+        # 「要插的那一句句尾已有 ⚠ / 已更正」时跳过（机械核与模型核两行指同一句）。
+        tail = v[where:] if where is not None else ""
+        if mark in v or (where is not None and (_ANY_MARK.match(tail)
+                                                or _CORRECT_MARK.match(tail))):
+            row["annotated"] = True
+            _done_claims.add(raw)
+            continue
+        if is_quote_row(row):
+            row["how"] = _quote_how(row)
         _set(out["sections"][si], path, (v.rstrip() + mark) if where is None
              else (v[:where] + mark + v[where:]))
         row["annotated"] = True
@@ -1183,7 +1194,10 @@ _MAT_SRC = re.compile(_MAT_WORD)
 #:    「复习看 slides、不用看教材」被改成「复习看 📚 标准教材」——意思正好反了（13 处）。
 #:    「考试考 slides 上的东西」「课件会上传」是在**转述老师说的话**，不是出处声称，不许动。
 _MAT_CLAIM = re.compile(
+    # 页码后缀一并吃进来（`_claim` 再剥掉）：不然「见课件末页」只匹配到「见课件」→
+    # 「见📚 标准教材末页」（OCR 11-22）。
     r"(?:据|按|照|参见|见|引自|出自|来自)\s*" + _MAT_WORD
+    + r"(?:\s*(?:末页|最后一页|第\s*\d+\s*页))?"
     + r"|(?:与|和|跟)\s*" + _MAT_WORD + r"\s*(?:一致|相符|相同)"
     + r"|" + _MAT_WORD + r"\s*(?:末页|最后一页|第\s*\d+\s*页|原文|所示|所列"
     r"|(?:上|里|中)?\s*(?:的)?(?:公式|定义|图|表格?|写着|写的|写道|给出的?|列出的?|显示))")
@@ -1664,6 +1678,10 @@ def retime_components(review: dict) -> tuple:
             cands = [j for j in range(len(secs))
                      if ts[j] is not None and ts[j] <= start and j != i]
             if not cands:
+                # 没有哪一节比组件起点更早 → 兜底挪到第 1 节；组件本来就在第 1 节则原地不动
+                # （原来目标 = 自己 → 被当「已有同类」删掉，理由还写成挂错，OCR 11-22）。
+                if i == 0:
+                    continue
                 cands = [0]
             target = max(cands, key=lambda j: ts[j] or 0)
             if secs[target].get(key):
@@ -2911,6 +2929,7 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
     relabeled = 0
     n_flag = 0
     downgraded = 0
+    down_fail = 0
     used = 0
     n_scored = 0                    # 拿到真实概率的条数（判官真的回了值的）
 
@@ -2978,9 +2997,13 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
             # ⭐ F11 §3（作者 2026-10-18）：p<τ 但**内容正确**（非数值，或本节 program 通过）
             #    → **静默降级** 🎙→✏️（去掉「老师在课上提到/强调」这类归属引语），
             #    正文里**不挂 ⚠**；⚠ 只留给存世的数值/理论错。逐条进台账 `downgraded N`。
-            if _content_ok(sec, c["claim"]):
+            # ⚠️ 只给 🎙（转录批）：📖 降级没有落点（`_downgrade_claim` 只会去 🎙），原来非数值的
+            #    📖 claim 走这里就永远不挂 ⚠ —— 材料里找不到的「课件说过」照样当真（OCR 11-22）。
+            if kind == "tr" and _content_ok(sec, c["claim"]):
                 if _downgrade_claim(out, c):
                     downgraded += 1
+                else:
+                    down_fail += 1            # 没找到那句可降 → 不再静默，进提醒
                 continue
             rows_new.append({"claim": c["claim"], "status": "mismatch", "kind": "support",
                              "recomputed": f"support p={float(p):.2f}", "how": how})
@@ -2996,6 +3019,8 @@ def support_check(review: dict, *, entries: list, materials=None, ask=None,
         bits.append(f"{relabeled} 条例题给定没找到 → 按口述还原挂牌")
     if downgraded:
         bits.append(f"{downgraded} 条 🎙 没找到但内容没毛病 → 静默降 ✏️")
+    if down_fail:
+        bits.append(f"{down_fail} 条 🎙 没找到、内容没毛病但没找到能降级的那句（原样保留）")
     if exempt:
         bits.append(f"{exempt} 条 📖 题面豁免（没有材料）")
     if skipped:

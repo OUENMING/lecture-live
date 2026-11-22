@@ -448,6 +448,19 @@ class MaterialsJudge(unittest.TestCase):
         self.assertEqual(rows[0]["how"], "材料里没找到这句（核对）")
         self.assertTrue(any("挂 ⚠" in w for w in warns), warns)
 
+    def test_非数值题面材料里没找到也挂(self):
+        # OCR 11-22：非数值的 📖 claim 原来走「内容没毛病 → 降 ✏️」，而降级只会去 🎙 →
+        # 永不挂 ⚠，材料里找不到的「卷子原题」照样当真。
+        sec = {"heading": "例", "ts": "13:25",
+               "example": {"title": "📖 期末卷 Essay 2（🎙 13:40）",
+                           "prompt": "讨论 Cobb-Douglas 生产函数的规模报酬性质。"}}
+        out, _, _ = ng.support_check({"sections": [sec]}, entries=ENTRIES,
+                                     materials=_FakeMat("一些课件正文。"),
+                                     ask=lambda st, ins: [0.05] * len(ins))
+        rows = [r for r in (out.get("checks") or []) if r.get("status") == "mismatch"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["how"], "材料里没找到这句（核对）")
+
     def test_没材料就豁免(self):
         calls: list = []
 

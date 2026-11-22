@@ -93,5 +93,53 @@ class NoteMergeDeadline(unittest.TestCase):
         self.assertEqual(seen.get("deadline"), 20.0)
 
 
+class GuardsSafeDelete(unittest.TestCase):
+    def test_multiple_spans_all_deleted(self):
+        import note_guards as g
+        s = "第一句话。这里是噪声A。中间好句。这里是噪声B。结尾。"
+        a, b = s.index("这里是噪声A。"), s.index("这里是噪声B。")
+        out, blocked, kept = g.safe_delete(s, [(a, a + 7), (b, b + 7)])
+        self.assertEqual(out, "第一句话。中间好句。结尾。")
+        self.assertEqual(len(kept), 2)
+
+
+class GuardsAnnotateSecondMismatch(unittest.TestCase):
+    def test_second_wrong_division_in_same_field_is_marked(self):
+        import note_guards as g
+        rv = {"sections": [{"title": "t", "prose": [
+            "总量 9 除以 3 得到 4，这是第一步。然后 10 除以 2 得到 6，这是第二步。"]}],
+              "checks": [
+                  {"claim": "总量 9 除以 3 得到 4", "status": "mismatch", "how": "9/3=3"},
+                  {"claim": "然后 10 除以 2 得到 6", "status": "mismatch", "how": "10/2=5"}]}
+        out, _, _ = g.annotate_mismatches(rv)
+        p = out["sections"][0]["prose"][0]
+        self.assertIn("第一步。（⚠ 数字对不上：9/3=3）", p)
+        self.assertIn("第二步。（⚠ 数字对不上：10/2=5）", p)
+        again, _, _ = g.annotate_mismatches(
+            {**out, "checks": [{**c, "annotated": False} for c in out["checks"]]})
+        self.assertEqual(again["sections"][0]["prose"][0], p)      # 再跑一次不重复标
+
+
+class GuardsRetimeFirstSection(unittest.TestCase):
+    def test_first_section_component_earlier_than_ts_is_kept(self):
+        import note_guards as g
+        comp = {"title": "🎙 指标（09:05–09:10）", "rows": []}
+        rv = {"sections": [{"title": "a", "ts": "09:20:00", "compare": comp},
+                           {"title": "b", "ts": "09:40:00"}]}
+        out, st, _ = g.retime_components(rv)
+        self.assertEqual(out["sections"][0].get("compare"), comp)
+        self.assertEqual(st, [{"repaired": 0, "dropped": 0}])
+
+
+class GuardsFalseSourcePageSuffix(unittest.TestCase):
+    def test_jian_kejian_moye_has_no_leftover(self):
+        import note_guards as g
+        for src, want in (("公式见课件末页。", "公式见📚 标准教材。"),
+                          ("见课件第 3 页的推导", "见📚 标准教材的推导")):
+            out, _, _ = g.strip_false_sources(
+                {"sections": [{"title": "x", "prose": [src]}]}, has_materials=False)
+            self.assertEqual(out["sections"][0]["prose"][0], want)
+
+
 if __name__ == "__main__":
     unittest.main()

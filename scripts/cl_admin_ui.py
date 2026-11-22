@@ -1225,6 +1225,38 @@ def soniox_account(get=None, now=None) -> dict:
             "没配组织 key（~/.classlive/soniox-org-token）—— 余额看不到；项目 key 查余额会被拒 403", "errors": errs[:4]}
 
 
+#: DeepSeek 余额：`GET /user/balance`（账号级，任何一把同账号的 key 都行；只读，不花钱）。
+#: key 读 `~/.classlive/deepseek-key`（VPS 远程面板放这里），没有再看仓库根的老 `.deepseek_key`（Mac）。
+DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+
+
+def deepseek_account(get=None) -> dict:
+    """DeepSeek 账号余额（key 从不进响应）。回 `{"available": bool, "balances": [{currency, total, granted, topped_up}]}`。"""
+    tok = _home_secret("deepseek-key")
+    if not tok:
+        try:
+            tok = (pathlib.Path(__file__).resolve().parent.parent / ".deepseek_key").read_text(encoding="utf-8").strip()
+        except OSError:
+            tok = ""
+    if not tok:
+        return {"error": "没配 DeepSeek key（~/.classlive/deepseek-key）"}
+    try:
+        r = _get_json(DEEPSEEK_BALANCE_URL, tok, get)
+    except Exception as e:                                            # noqa: BLE001
+        return {"error": f"查不到 DeepSeek 余额：{type(e).__name__}"}
+    if "balance_infos" not in r:
+        return {"error": "DeepSeek 没回余额（key 失效？）"}
+    def f(v):                                                         # DeepSeek 回的是字符串 "4.98"
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    return {"available": bool(r.get("is_available")),
+            "balances": [{"currency": b.get("currency"), "total": f(b.get("total_balance")),
+                          "granted": f(b.get("granted_balance")), "topped_up": f(b.get("topped_up_balance"))}
+                         for b in r.get("balance_infos") or []]}
+
+
 def openrouter_account(get=None, post=None, now=None) -> dict:
     """本机 OpenRouter **管理 key** 的账户与用量（只读；key 从不进响应）。
 
@@ -1454,7 +1486,8 @@ def _name_hashes(st: dict) -> None:
 
 
 SLOW = {"web": web_sessions, "runner": runner_state, "habits": habits, "cf": cf_summary, "r2": r2_ingest, "health": cf_health, "logs": worker_logs, "ae": ae_events,
-        "ae310": ae_310, "reports": r2_reports, "soniox": soniox_account, "openrouter": openrouter_account}
+        "ae310": ae_310, "reports": r2_reports, "soniox": soniox_account, "openrouter": openrouter_account,
+        "deepseek": deepseek_account}
 FRESH_S = 55                                                          # 这么新：直接给
 STALE_S = 15 * 60                                                     # 这么旧以内：先给旧的，后台重取；再旧就同步等
 _CACHE: dict = {}                                                     # name → (取到的 monotonic 时刻, 结果)

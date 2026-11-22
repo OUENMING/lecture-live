@@ -66,6 +66,28 @@ class Pure(unittest.TestCase):
         self.assertIn("RuntimeError", md)
         self.assertNotIn("456789abcdef", md)
 
+    def test_余额三家(self):
+        cards = {"soniox": {"balance": {"available": 9.6, "used": 7.4}, "usage": {"eu": {"cost_7d": 1.3}}},
+                 "openrouter": {"credits": {"total": 21, "used": 13}},
+                 "deepseek": {"available": False, "balances": [{"currency": "USD", "total": 4.98}]}}
+        md = R.digest(lambda n: cards.get(n) or {"error": "x"}, home=pathlib.Path(_TMP_HOME) / "none")
+        self.assertIn("Soniox：剩 $9.6", md)
+        self.assertIn("OpenRouter：剩 $8.0", md)
+        self.assertIn("DeepSeek：USD 4.98，⚠️ 不可用", md)
+
+    def test_deepseek_字符串余额与不带key(self):
+        seen = {}
+        def get(url, headers):
+            seen.update(headers)
+            return {"is_available": True, "balance_infos": [{"currency": "CNY", "total_balance": "-0.15",
+                                                             "granted_balance": "0.00", "topped_up_balance": "-0.15"}]}
+        (R.HOME).mkdir(parents=True, exist_ok=True)
+        (R.HOME / "deepseek-key").write_text("sk-test\n")
+        got = R.ui.deepseek_account(get)
+        self.assertEqual(got["balances"][0]["total"], -0.15)
+        self.assertNotIn("sk-test", json.dumps(got))
+        self.assertEqual(seen["Authorization"], "Bearer sk-test")
+
     def test_code_of(self):
         codes = [{"name": "a", "code": "cl-a-1111111111111111", "created": 3, "revoked": True},
                  {"name": "a", "code": "cl-a-2222222222222222", "created": 1},

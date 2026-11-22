@@ -179,6 +179,27 @@ def digest(fetch=None, now=None, home: pathlib.Path | None = None) -> str:
     else:
         out.append(f"读不到：{h.get('error')}")
 
+    out += ["", "## 平台余额", ""]
+    so = _sec(lambda: fetch("soniox"))
+    b = so.get("balance") or {}
+    if b:
+        u7 = sum(float((v or {}).get("cost_7d") or 0) for v in (so.get("usage") or {}).values())
+        out.append(f"- Soniox：剩 ${b.get('available')}（已用 ${b.get('used')}）{'，⚠️ 已耗尽' if b.get('exhausted') else ''}；近 7 天花 ${round(u7, 4)}")
+    else:
+        out.append(f"- Soniox：读不到（{so.get('balance_error') or so.get('error') or '没回余额'}）")
+    orr = _sec(lambda: fetch("openrouter"))
+    c = orr.get("credits") or {}
+    if c:
+        out.append(f"- OpenRouter：剩 ${round(float(c.get('total') or 0) - float(c.get('used') or 0), 4)}（总 ${c.get('total')}，已用 ${c.get('used')}）")
+    else:
+        out.append(f"- OpenRouter：读不到（{orr.get('error') or '没回额度'}）")
+    ds = _sec(lambda: fetch("deepseek"))
+    if ds.get("balances"):
+        out.append("- DeepSeek：" + "，".join(f"{x['currency']} {x['total']}" for x in ds["balances"])
+                   + ("" if ds.get("available") else "，⚠️ 不可用（余额不足会让翻译 402）"))
+    else:
+        out.append(f"- DeepSeek：读不到（{ds.get('error')}）")
+
     rn = _sec(lambda: fetch("runner"))
     out += ["", "## 正在上课 / 笔记队列", ""]
     if "counts" in rn:

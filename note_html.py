@@ -725,6 +725,55 @@ table.cmp thead th.rowh{z-index:3;background:var(--code)}
 .floop span{position:absolute;top:50%;right:5px;transform:translateY(-50%);
  writing-mode:vertical-rl;font-size:12px;color:var(--c2);letter-spacing:.04em;
  background:var(--card);padding:4px 0}
+/* ---- 2026-11-22 跨学科图元（时间线 / 因果链 / 分类格 / 分类树）+ 先认识 + 想一想 ---- */
+.tl{list-style:none;margin:8px 0 4px;padding:0 0 0 18px;position:relative;max-width:560px}
+.tl::before{content:"";position:absolute;left:5px;top:6px;bottom:6px;width:2px;background:var(--muted);opacity:.35}
+.tl li{position:relative;margin:0 0 12px;padding-left:4px}
+.tl li:last-child{margin-bottom:0}
+.tl li::before{content:"";position:absolute;left:-17px;top:7px;width:10px;height:10px;border-radius:50%;
+ background:var(--card);border:2px solid var(--c2);box-sizing:border-box}
+.tl .w{display:block;font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.tl b{font-weight:600}
+.tl .d,.mx-c .d,.tree .d{display:block;color:var(--muted);font-size:13.5px;margin-top:1px}
+.chain{display:flex;flex-direction:column;align-items:flex-start;margin:8px 0 4px;max-width:560px}
+.chain .cn{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:6px 11px;
+ font-size:14.5px;line-height:1.45;display:inline-flex;align-items:center;gap:6px}
+.chain .dir{font-style:normal;font-weight:700;font-size:13px;line-height:1}
+.chain .dir.up{color:var(--c3)}
+.chain .dir.down{color:var(--c1)}
+.chain .cl{display:flex;align-items:center;gap:8px;padding:3px 0 3px 18px;min-height:30px}
+.chain .cl .ar{display:block;flex:none;width:2px;height:22px;background:var(--muted);position:relative;opacity:.7}
+.chain .cl .ar::after{content:"";position:absolute;left:-4px;bottom:-2px;border-top:7px solid var(--muted);
+ border-left:5px solid transparent;border-right:5px solid transparent}
+.chain .cl .why{font-size:12.5px;color:var(--muted);line-height:1.4}
+.mx{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,1fr);gap:6px;margin:8px 0 4px;max-width:620px}
+.mx-k{display:flex;flex-direction:column;justify-content:flex-end;font-size:12px;color:var(--muted);line-height:1.35;padding:2px 4px}
+.mx-h{font-size:13px;font-weight:600;color:var(--muted);padding:4px 6px;align-self:end;text-align:center}
+.mx-h.mx-r{align-self:center;text-align:right;max-width:7em}
+.mx-c{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:8px 11px;font-size:14.5px}
+.mx-c b{font-weight:600}
+.tree{margin:8px 0 4px;max-width:560px}
+.tree .tr-root{display:inline-block;font-weight:700;background:var(--code);border:1px solid var(--line);
+ border-radius:10px;padding:5px 11px}
+.tree ul{list-style:none;margin:0;padding:0 0 0 14px}
+.tree>ul{margin-left:14px;padding-left:0}
+.tree>ul>li{position:relative;padding:8px 0 0 18px}
+.tree>ul>li::before{content:"";position:absolute;left:0;top:19px;width:12px;height:2px;background:var(--muted);opacity:.35}
+.tree>ul>li::after{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--muted);opacity:.35}
+.tree>ul>li:last-child::after{bottom:auto;height:20px}
+.tree b{font-weight:600}
+.tree ul.leaf{display:flex;flex-wrap:wrap;gap:4px 6px;padding:4px 0 0}
+.tree ul.leaf li{font-size:13px;background:var(--code);border-radius:6px;padding:1px 8px}
+.tm{text-decoration:underline;text-decoration-color:var(--c2);text-decoration-thickness:1.5px;
+ text-underline-offset:3px;scroll-margin-top:80px}
+.tm-en{color:var(--muted)}
+.newterms{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:14px}
+.newterms .lab{margin-right:0}
+.newterms a{color:var(--fg);font-weight:600;text-decoration:none;border-bottom:1.5px solid var(--c2)}
+.newterms .en{color:var(--muted);font-size:13px;margin-left:-8px}
+details.why{border:1px solid var(--line);border-radius:10px;padding:7px 12px;background:var(--card)}
+details.why summary{cursor:pointer;font-weight:600}
+details.why p{margin:6px 0 0;color:var(--fg)}
 /* 数字对齐：时间戳 / 排程日期 / 计数 / 表格数值列（tabular-nums 的适用范围按 A3） */
 code,ul.sched li,th,td,.tick,.q .a,[data-checkmsg]{font-variant-numeric:tabular-nums}
 /* 按钮按压反馈（A7）：按下快、回弹带一点过冲；reduced-motion 下由全局规则关掉 */
@@ -1129,6 +1178,101 @@ def flow_html(fl: dict) -> str:
     return "".join(o)
 
 
+# ---------------------------------------------------------------- 2026-11-22：跨学科图元
+_ARROW = {"up": ("↑", "up"), "down": ("↓", "down")}
+
+
+def diagram_html(dg: dict) -> str:
+    """`diagram` 规格（`note_v2._clean_diagram` 校验过）→ 纯 HTML/CSS（无 SVG/JS，窄屏可读）。"""
+    kind = dg.get("kind")
+    if kind == "timeline":
+        evs = [e for e in (dg.get("events") or []) if isinstance(e, dict)]
+        return ('<ol class="tl">' + "".join(
+            f'<li><span class="w">{inline(e.get("when"))}</span>'
+            f'<b>{inline(e.get("label"))}</b>'
+            + (f'<span class="d">{inline(e.get("detail"))}</span>' if e.get("detail") else "")
+            + "</li>" for e in evs) + "</ol>")
+    if kind == "causal":
+        chain = [c for c in (dg.get("chain") or []) if isinstance(c, dict)]
+        links = list(dg.get("links") or [])
+        o = ['<div class="chain">']
+        for i, c in enumerate(chain):
+            arr = _ARROW.get(c.get("dir") or "")
+            badge = (f'<i class="dir {arr[1]}" aria-label="{"变大" if arr[1] == "up" else "变小"}">'
+                     f"{arr[0]}</i>") if arr else ""
+            o.append(f'<div class="cn">{inline(c.get("label"))}{badge}</div>')
+            if i < len(chain) - 1:
+                why = links[i] if i < len(links) else ""
+                o.append('<div class="cl"><span class="ar" aria-hidden="true"></span>'
+                         + (f'<span class="why">{inline(why)}</span>' if why else "")
+                         + "</div>")
+        o.append("</div>")
+        return "".join(o)
+    if kind == "matrix":
+        x, y = dg.get("x") or {}, dg.get("y") or {}
+        cells = {(c.get("x"), c.get("y")): c for c in (dg.get("cells") or [])
+                 if isinstance(c, dict)}
+
+        def cell(cx, cy):
+            c = cells.get((cx, cy)) or {}
+            return (f'<div class="mx-c"><b>{inline(c.get("label"))}</b>'
+                    + (f'<span class="d">{inline(c.get("detail"))}</span>' if c.get("detail") else "")
+                    + "</div>")
+        return ('<div class="mx" role="table">'
+                '<div class="mx-k"></div>'
+                f'<div class="mx-h">{inline(x.get("name"))}：{inline(x.get("lo"))}</div>'
+                f'<div class="mx-h">{inline(x.get("name"))}：{inline(x.get("hi"))}</div>'
+                f'<div class="mx-h mx-r">{inline(y.get("name"))}：{inline(y.get("hi"))}</div>{cell("lo", "hi")}{cell("hi", "hi")}'
+                f'<div class="mx-h mx-r">{inline(y.get("name"))}：{inline(y.get("lo"))}</div>{cell("lo", "lo")}{cell("hi", "lo")}'
+                "</div>")
+    if kind == "tree":
+        kids = [k for k in (dg.get("children") or []) if isinstance(k, dict)]
+        o = [f'<div class="tree"><div class="tr-root">{inline(dg.get("root"))}</div><ul>']
+        for k in kids:
+            sub = "".join(f"<li>{inline(x)}</li>" for x in (k.get("children") or []))
+            o.append(f'<li><b>{inline(k.get("label"))}</b>'
+                     + (f'<span class="d">{inline(k.get("detail"))}</span>' if k.get("detail") else "")
+                     + (f'<ul class="leaf">{sub}</ul>' if sub else "") + "</li>")
+        o.append("</ul></div>")
+        return "".join(o)
+    return ""
+
+
+DIAG_LABEL = {"timeline": "时间线", "causal": "因果链", "matrix": "分类格", "tree": "分类树"}
+
+
+def _term_pairs(review: dict) -> list:
+    """全篇术语的中文名（长的在前，免得「成本」先吃掉「边际成本」）。**纯函数。**"""
+    zhs = set()
+    for t in list(review.get("terms") or []) + [
+            t for s in (review.get("sections") or []) if isinstance(s, dict)
+            for t in (s.get("terms") or [])]:
+        if isinstance(t, dict) and str(t.get("zh") or "").strip() and t.get("en"):
+            zhs.add(str(t["zh"]).strip())
+    return sorted(zhs, key=len, reverse=True)
+
+
+def _mark_terms(para_html: str, zhs: list, idx: int, found: list) -> str:
+    """段里「中文（English）」括注（= 术语**首次出现**，`announce_terms` 只在首次括注）→
+    中文名包成 `.tm` 信号（加下划线），并记进 `found`（本节新词，给节首那一行）。
+
+    ⭐ 信号原则（Schneider et al. 2018 元分析：文字型信号 保持 g=0.53）。
+    """
+    if not zhs or "（" not in para_html:
+        return para_html
+    pat = re.compile("(" + "|".join(re.escape(html.escape(z)) for z in zhs)
+                     + r")（([A-Za-z][^（）<>]{0,48})）")
+
+    def sub(m):
+        zh, en = m.group(1), m.group(2)
+        if any(zh == f[0] for f in found):
+            return m.group(0)
+        found.append((zh, en))
+        return (f'<span class="tm" id="kp{idx}t{len(found)}">{zh}</span>'
+                f'<span class="tm-en">（{en}）</span>')
+    return pat.sub(sub, para_html)
+
+
 def _tracks_html(sec: dict, fig: str) -> str:
     """E 三种看法：**只画真的有的**（图形要真有图；代数/直觉要模型真填了）。
 
@@ -1160,7 +1304,8 @@ def _strip_ts_prefix(heading) -> str:
     return re.sub(r"^\s*(?:\[[^\]]*\]\s*)+", "", str(heading or "")).strip()
 
 
-def _section_html(sec: dict, idx: int, *, reveal: bool = True, fig: str = "") -> str:
+def _section_html(sec: dict, idx: int, *, reveal: bool = True, fig: str = "",
+                  term_zhs: list | None = None) -> str:
     cls = "reveal" if reveal else ""
     o = [f'<section class="card {cls}" id="kp{idx}">',
          f'<h3>{idx}. {inline(_strip_ts_prefix(sec.get("heading")))}'
@@ -1172,6 +1317,8 @@ def _section_html(sec: dict, idx: int, *, reveal: bool = True, fig: str = "") ->
     o.append('<div class="qec">')
     if sec.get("q"):
         o.append(f'<div><span class="lab">Q 本节回答</span>{inline(sec["q"])}</div>')
+    new_at = len(o)                       # 「先认识」那一行插在这里（讲解渲染完才知道有哪些新词）
+    found: list = []
     story = ['<div class="story heti"><span class="lab">讲解</span>']
     import note_v2
     prose = list(sec.get("prose") or [])
@@ -1186,13 +1333,19 @@ def _section_html(sec: dict, idx: int, *, reveal: bool = True, fig: str = "") ->
             continue
         # ⭐ 重点先行（作者 2026-10-18）：每段的开头句就是**断言句**（渲染器确保它被加粗，
         #    模型没写 `**` 也加粗）；第一段的那句 = **本节的重点**，再多给强调色。
-        story.append(f"<p>{_bold_lead(inline(para), keyline=(n_body == 0))}</p>")
+        story.append(f"<p>{_bold_lead(_mark_terms(inline(para), term_zhs or [], idx, found), keyline=(n_body == 0))}</p>")
         n_body += 1
     if sec.get("prereq"):
         story.append(f'<details><summary>📚 前置补课（教授没讲、但要懂）</summary>'
                      f'<p>{inline(sec["prereq"])}</p></details>')
     story.append("</div>")
     o.append("".join(story))
+    if found:
+        # ⭐ 2026-11-22「先认识这几个词」（pre-training：Mayer 2017 d≈0.46）——本节**首次**出现的术语，
+        #    点一下跳到它在正文里第一次出现的地方。
+        o.insert(new_at, '<div class="newterms"><span class="lab">先认识</span>' + "".join(
+            f'<a href="#kp{idx}t{k}">{zh}</a><span class="en">{html.escape(html.unescape(en))}</span>'
+            for k, (zh, en) in enumerate(found[:6], 1)) + "</div>")
     # ⭐ F10：对照表 / 步骤图（贴掉对照讲解的那张表就长在讲解后面）
     if sec.get("compare"):
         o.append(f'<div><span class="lab">T 对比表</span>'
@@ -1202,12 +1355,22 @@ def _section_html(sec: dict, idx: int, *, reveal: bool = True, fig: str = "") ->
         o.append(f'<div><span class="lab">F 步骤图</span>'
                  f'<span class="cmp-t">{inline(sec["flow"].get("title"))}</span>'
                  + flow_html(sec["flow"]) + "</div>")
+    if sec.get("diagram") and DIAG_LABEL.get(sec["diagram"].get("kind")):
+        dg = sec["diagram"]
+        o.append(f'<div><span class="lab">{DIAG_LABEL[dg["kind"]]}</span>'
+                 f'<span class="cmp-t">{inline(dg.get("title"))}</span>'
+                 + diagram_html(dg) + "</div>")
     tracks = _tracks_html(sec, fig)
     if tracks:
         o.append(f'<div><span class="lab">E 三种看法</span>{tracks}</div>')
     if sec.get("conclusion"):
         # ⭐ F7③：题型一句话 —— 普通段落收口（不是"考试结论"栏、无标签、不做表）。
         o.append(f'<div class="approach">{inline(sec["conclusion"])}</div>')
+    wy = sec.get("why") or {}
+    if wy.get("q") and wy.get("a"):
+        # ⭐ 2026-11-22「想一想」：自我解释提示（Bisra et al. 2018 元分析 g=0.55，跨学科）。
+        o.append(f'<details class="why"><summary><span class="lab">想一想</span>{inline(wy["q"])}'
+                 f'</summary><p>{inline(wy["a"])}</p></details>')
     o.append("</div>")
     # ── 例题梯度：W1 完整 → W2 补全（真输入框）→ W3 变式（答案折叠）─────
     ex = sec.get("example") or {}
@@ -1428,7 +1591,8 @@ def note_page(d) -> str:
         head_svg = svg(pl["kind"], pl.get("params") or {}, pid=f"plot{pid}", caption=cap)
         if head_svg:
             plots_by_idx[i] = head_svg
-    secs = [_section_html(s, i, fig=plots_by_idx.get(i - 1))
+    _zhs = _term_pairs(review)
+    secs = [_section_html(s, i, fig=plots_by_idx.get(i - 1), term_zhs=_zhs)
             for i, s in enumerate(sections, 1)]
     toc_items = [s.get("heading", "") for s in sections]
     extra = ""

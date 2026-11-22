@@ -336,6 +336,8 @@ cl setkey [key]        # 填 API key（面板就绪条点「翻译引擎」也�
 | `CLASSLIVE_NOTE_PLAN` | `1` | 课后笔记「先定计划、再按节写」：一次调用（或实时章节骨架）出全课节计划→代码校验边界→每块只写分给它的那一节（`note_plan.py`） | 发布开关（2026-11-21）：`1` = 开（骨架优先、没骨架再调模型）；`model` = 只用模型出计划；`0` = 退回固定 70 行切块的老路 |
 | `CLASSLIVE_NOTE_READER` | `1` | 课后笔记复习层提示词末尾接「读者优先」写法（一段一事、先含义后术语、短句、不复述）—— `note_v2.READER_FIRST` | 发布开关（2026-11-21）：11-22 A/B 后默认开（`0` 退回旧路） |
 | `CLASSLIVE_NOTE_GROUND` | `1` | 数字核对后，把「未核对」的讲解类断言拿去对照转录原话（代码找片段 + 1 次调用判支持）；只许 未核对→已核，永不判对不上 —— `note_ground.py` | 发布开关（2026-11-21）：11-22 A/B 后默认开（`0` 退回旧路） |
+| `CLASSLIVE_NOTE_VISUAL` | `1` | 复习层提示词末尾接跨学科图元 `diagram`（时间线 / 因果链 / 2×2 分类格 / 分类树，模型只填数据、`note_html.diagram_html` 画）和每节「想一想」`why` —— `note_v2.VISUAL_BLOCK` | 发布开关（2026-11-22）：`0` = 不让模型出这两样 |
+| `CLASSLIVE_NOTE_VGATE` | `1` | 图该不该画：每张 `diagram` / `flow` 问 Jev「这节是不是这种结构」，p<0.5 撤图；拿不到概率就保留 —— `note_vgate.py` | 发布开关（2026-11-22）：阈值是 11-22 在 18 个真节上校准的，换问法要重校 |
 | `CLASSLIVE_NOTE_DEBUG` | `0` | 课后笔记写作块出异常时打印异常类型与前 200 字（默认吞掉只记「丢块」）—— `note_v2.review` | 排查用（2026-11-21）：A/B 时查丢块原因 |
 | `CLASSLIVE_NOTE_TERM_EN` | `1` | 课后笔记正文里的关键术语用**英文原词**（首次 `中文（English）`（2026-11-22 改，原为 `English（中文）`）、后续直接英文；日常词/元话语不动）—— `note_v2.announce_terms` / `note_html` / `note_render` | 发布开关（2026-11-02）：`0` = 退回「中文（English）」一次性括注 |
 | `CLASSLIVE_NOTE_WORKER` | `1` | 下课收尾**拆进程**：把笔记生成交给脱离父进程的 `note_worker`，主进程写完 `sessions/` 就退、放掉单实例锁（`note_worker.py`；所有权与判活在 `note_jobs.py`，`~/.classlive/note-jobs/`）。`0` = 退回进程内收尾 | 发布开关（2026-11-04）：本机自用验过、一版没出事后评估去开关 |

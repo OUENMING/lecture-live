@@ -1545,6 +1545,11 @@ class ObsidianWriter:
                           (lambda r: note_v2.clamp_components(r), "组件上限"),
                           # ⭐ F11 ③：跨件重复闸（flow 复述本节例题步骤 ≥3 条 / 组件同名）。
                           (lambda r: note_v2.dedupe_components(r), "组件去重"),
+                          # ⭐ 2026-11-22：图该不该画 —— Jev 判「这节是不是这种结构」，不像就撤图
+                          #    （diagram / flow；拿不到概率就保留）。开关 CLASSLIVE_NOTE_VGATE。
+                          (lambda r: (__import__("note_vgate").gate(r)
+                                      if os.environ.get("CLASSLIVE_NOTE_VGATE", "1") == "1"
+                                      else (r, [], [])), "图该不该画"),
                           (lambda r: note_ledger.reconcile(r),
                            "更正账本核对"),
                           # ⭐ F14 ⑤：没课件时「课件/PPT 里写着」这类声称全是假的

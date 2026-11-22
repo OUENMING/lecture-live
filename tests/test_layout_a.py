@@ -357,8 +357,8 @@ class TermAnnotation(unittest.TestCase):
 
     def test_html_首次括注_只一次(self):
         h = nh.note_page(self._data())
-        self.assertEqual(h.count("边际成本（marginal cost）"), 1)
-        self.assertIn("先看边际成本（marginal cost）怎么算。", h)
+        self.assertEqual(h.count(">边际成本</span><span class=\"tm-en\">（marginal cost）"), 1)
+        self.assertIn("先看<span class=\"tm\" id=\"kp1t1\">边际成本</span><span class=\"tm-en\">（marginal cost）</span>怎么算。", h)
         self.assertIn("边际成本再出现时不括注。", h, "第一处之后的不再加")
 
     def test_标准拼写盖过模型写法(self):
@@ -445,7 +445,8 @@ class TermEn(unittest.TestCase):
         finally:
             self._restore(old)
         # ⭐ 2026-11-22：首次「中文（English）」，后续只写英文
-        self.assertIn("边际成本（marginal cost）怎么算", h)
+        # ⭐ 同日：首次出现的中文名包成 `.tm` 信号（加下划线）
+        self.assertIn('<span class="tm" id="kp1t1">边际成本</span><span class="tm-en">（marginal cost）</span>怎么算', h)
         self.assertIn("marginal cost 再出现时不括注", h)
         self.assertNotIn("marginal cost（边际成本）", h)
 

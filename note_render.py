@@ -126,6 +126,48 @@ def _polish_line(state: str) -> str:
             "逐句记录里是精修后的那版，`sessions/` 里的原始记录未动。")
 
 
+def diagram_md(dg: dict) -> list:
+    """`diagram`（2026-11-22 跨学科图元）→ md 的朴素写法。**纯函数。**"""
+    k = dg.get("kind")
+    if k == "timeline":
+        return [f"- **{_one(e.get('when'))}** {_one(e.get('label'))}"
+                + (f" —— {_one(e.get('detail'))}" if e.get("detail") else "")
+                for e in (dg.get("events") or []) if isinstance(e, dict)]
+    if k == "causal":
+        arrow = {"up": "↑", "down": "↓"}
+        parts = []
+        chain = [c for c in (dg.get("chain") or []) if isinstance(c, dict)]
+        links = list(dg.get("links") or [])
+        for i, c in enumerate(chain):
+            parts.append(_one(c.get("label")) + arrow.get(c.get("dir") or "", ""))
+            if i < len(chain) - 1:
+                w = _one(links[i]) if i < len(links) else ""
+                parts.append(f"→（{w}）→" if w else "→")
+        return [" ".join(parts)]
+    if k == "matrix":
+        x, y = dg.get("x") or {}, dg.get("y") or {}
+        cells = {(c.get("x"), c.get("y")): c for c in (dg.get("cells") or []) if isinstance(c, dict)}
+
+        def cell(cx, cy):
+            c = cells.get((cx, cy)) or {}
+            t = _one(c.get("label"))
+            return (t + (f"（{_one(c.get('detail'))}）" if c.get("detail") else "")).replace("|", "\\|")
+        hd = f"{_one(y.get('name'))} ↓ ／ {_one(x.get('name'))} →"
+        return [f"| {hd} | {_one(x.get('lo'))} | {_one(x.get('hi'))} |", "|---|---|---|",
+                f"| {_one(y.get('hi'))} | {cell('lo', 'hi')} | {cell('hi', 'hi')} |",
+                f"| {_one(y.get('lo'))} | {cell('lo', 'lo')} | {cell('hi', 'lo')} |"]
+    if k == "tree":
+        out = [f"- **{_one(dg.get('root'))}**"]
+        for c in (dg.get("children") or []):
+            if not isinstance(c, dict):
+                continue
+            out.append(f"  - {_one(c.get('label'))}"
+                       + (f" —— {_one(c.get('detail'))}" if c.get("detail") else ""))
+            out += [f"    - {_one(x)}" for x in (c.get("children") or [])]
+        return out
+    return []
+
+
 def compare_md(cmp: dict) -> list:
     """`compare` → md **管道表**（作者 F10 的 md 格式；`|` 转义成 `\\|`）。"""
     cols = [str(c) for c in (cmp.get("cols") or [])]
@@ -328,7 +370,7 @@ def render(d: NoteData) -> str:
     #    ⚠️ md 是简版（作者第六轮 6）：这里只放这两类**结构化小件**（管道表 / 编号列表），
     #       正文/例题/变式仍旧只在详细版 HTML 里。
     cards = [s for s in sections if isinstance(s, dict)
-             and (s.get("compare") or s.get("flow"))]
+             and (s.get("compare") or s.get("flow") or s.get("diagram"))]
     if cards:
         L += ["## 结构卡（对照表 / 步骤图）", ""]
         for s in cards:
@@ -341,6 +383,9 @@ def render(d: NoteData) -> str:
             if s.get("flow"):
                 fl = s["flow"]
                 L += [f"*{_one(fl.get('title'))}*", ""] + flow_md(fl) + [""]
+            if s.get("diagram"):
+                dg = s["diagram"]
+                L += [f"*{_one(dg.get('title'))}*", ""] + diagram_md(dg) + [""]
 
     # ── ⑤ 本课术语 ────────────────────────────────────────────────────
     L += ["## 本课术语", ""]

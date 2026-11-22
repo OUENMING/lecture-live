@@ -649,6 +649,127 @@ def _clean_flow(fl) -> dict | None:
             "loop_to": loop}
 
 
+#: ⭐ 2026-11-22 跨学科图元（`diagram`）：四种结构，模型只填数据。
+DIAG_KINDS = ("timeline", "causal", "matrix", "tree")
+DIAG_PER_LECTURE = 4
+DIAG_LABEL_MAX = 24
+DIAG_DETAIL_MAX = 50
+WHY_Q_MAX = 40
+WHY_A_MAX = 120
+
+
+def _dcut(x, n: int) -> str:
+    """图元文字截到 `n` 字：截断处落在英文单词中间就退回到词边界，并补「…」（实测
+    「圣三一 Economics and So」）。**纯函数。**"""
+    t = _one_line(x)
+    if len(t) <= n:
+        return t
+    cut = _cmp_cut(t, n)
+    if cut and cut[-1:].isascii() and cut[-1:].isalnum() and t[len(cut):len(cut) + 1].isalnum():
+        sp = cut.rfind(" ")
+        if sp > n // 2:
+            cut = cut[:sp]
+    return cut.rstrip(" ，,、") + "…"
+
+
+def _lh(v) -> str:
+    """matrix 的 `lo|hi` 归一（容错：low/high/0/1/否/是）；认不出 → 空串。"""
+    t = str(v or "").strip().lower()
+    if t in ("lo", "low", "0", "否", "低", "no", "n"):
+        return "lo"
+    if t in ("hi", "high", "1", "是", "高", "yes", "y"):
+        return "hi"
+    return ""
+
+
+def _clean_diagram(dg) -> dict | None:
+    """`diagram` 规格校验 + 裁剪。**纯函数**；不合规 → `None`（调用方丢掉）。"""
+    if not isinstance(dg, dict):
+        return None
+    kind = _one_line(dg.get("kind")).lower()
+    title = _one_line(dg.get("title"))
+    if kind not in DIAG_KINDS or not title:
+        return None
+    L, D = DIAG_LABEL_MAX, DIAG_DETAIL_MAX
+    out: dict = {"kind": kind, "title": _src_label(title, dg.get("src"))}
+    if kind == "timeline":
+        evs = []
+        for e in (dg.get("events") or []):
+            if not isinstance(e, dict):
+                continue
+            when, label = _dcut(e.get("when"), 12), _dcut(e.get("label"), L)
+            if when and label:
+                evs.append({"when": when, "label": label, "detail": _dcut(e.get("detail"), D)})
+        if len(evs) < 3:
+            return None
+        out["events"] = evs[:8]
+    elif kind == "causal":
+        chain = []
+        for c in (dg.get("chain") or []):
+            label = _dcut(c.get("label") if isinstance(c, dict) else c, 16)
+            if not label:
+                continue
+            d = str((c.get("dir") if isinstance(c, dict) else "") or "").strip().lower()
+            d = {"↑": "up", "增": "up", "↓": "down", "减": "down"}.get(d, d)
+            chain.append({"label": label, "dir": d if d in ("up", "down") else ""})
+        chain = chain[:6]
+        if len(chain) < 3:
+            return None
+        links = [_dcut(x, 20) for x in (dg.get("links") or [])][:len(chain) - 1]
+        links += [""] * (len(chain) - 1 - len(links))
+        out.update(chain=chain, links=links)
+    elif kind == "matrix":
+        axes = {}
+        for a in ("x", "y"):
+            ax = dg.get(a) if isinstance(dg.get(a), dict) else {}
+            name, lo, hi = (_dcut(ax.get(k), 16) for k in ("name", "lo", "hi"))
+            if not (name and lo and hi):
+                return None
+            axes[a] = {"name": name, "lo": lo, "hi": hi}
+        cells = {}
+        for c in (dg.get("cells") or []):
+            if not isinstance(c, dict):
+                continue
+            key = (_lh(c.get("x")), _lh(c.get("y")))
+            label = _dcut(c.get("label"), 16)
+            if all(key) and label and key not in cells:
+                cells[key] = {"label": label, "detail": _dcut(c.get("detail"), 40)}
+        if len(cells) != 4:
+            return None
+        out.update(axes, cells=[{"x": x, "y": y, **cells[(x, y)]}
+                                for y in ("hi", "lo") for x in ("lo", "hi")])
+    else:  # tree
+        root = _dcut(dg.get("root"), 16)
+        kids = []
+        for c in (dg.get("children") or []):
+            if not isinstance(c, dict):
+                c = {"label": c}
+            label = _dcut(c.get("label"), 16)
+            if not label:
+                continue
+            sub = [_dcut(x.get("label") if isinstance(x, dict) else x, 16)
+                   for x in (c.get("children") or [])]
+            kids.append({"label": label, "detail": _dcut(c.get("detail"), 40),
+                         "children": [x for x in sub if x][:4]})
+        if not root or len(kids) < 2:
+            return None
+        out.update(root=root, children=kids[:6])
+    return out
+
+
+def _clean_why(w) -> dict | None:
+    """`why`（想一想）：问句 + 答案都要有；问句没问号就补一个。**纯函数。**"""
+    if not isinstance(w, dict):
+        return None
+    q, a = _one_line(w.get("q")), _one_line(w.get("a"))
+    if not q or not a:
+        return None
+    q = _cmp_cut(q, WHY_Q_MAX)
+    if not q.endswith(("？", "?")):
+        q += "？"
+    return {"q": q, "a": _cmp_cut(a, WHY_A_MAX)}
+
+
 #: ⭐ F11 ③（作者裁定）：同节里 flow 与例题步骤重合 ≥3 条 → 撤 flow
 #: （"不要拿它复述某一道具体题的步骤"）；组件标题与**前面**某件同名 → 撤后来那件。
 DUP_STEP_MIN = 3
@@ -701,7 +822,7 @@ def dedupe_components(review: dict) -> tuple:
     for s in (out.get("sections") or []):
         if not isinstance(s, dict):
             continue
-        for k in ("compare", "flow"):
+        for k in ("compare", "flow", "diagram"):
             comp = s.get(k)
             if not isinstance(comp, dict):
                 continue
@@ -739,14 +860,15 @@ def clamp_components(review: dict) -> tuple:
     """
     out = copy.deepcopy(review)
     dropped: list = []
-    seen = {"compare": 0, "flow": 0}
+    seen = {"compare": 0, "flow": 0, "diagram": 0}
+    cap = {"compare": CMP_PER_LECTURE, "flow": FLOW_PER_LECTURE, "diagram": DIAG_PER_LECTURE}
     for s in (out.get("sections") or []):
         if not isinstance(s, dict):
             continue
-        for k in ("compare", "flow"):
+        for k in ("compare", "flow", "diagram"):
             if k not in s:
                 continue
-            if seen[k] >= (CMP_PER_LECTURE if k == "compare" else FLOW_PER_LECTURE):
+            if seen[k] >= cap[k]:
                 t = s.get(k) if isinstance(s.get(k), dict) else {}
                 dropped.append(f"{k}「{_one_line(t.get('title'))[:24]}」")
                 s.pop(k, None)
@@ -916,7 +1038,7 @@ def _clean_section(s) -> dict:
          "terms": _terms(s.get("terms")),
          "sources": _lines(s.get("sources")),
          "variants": [], "steps": [], "example": {}, "faded": {}, "plot": {},
-        "compare": {}, "flow": {}}
+        "compare": {}, "flow": {}, "diagram": {}, "why": {}}
     # ⚠️ 组件归一走**唯一定义点**（`_clean_example`/`_clean_variants`/`_clean_faded`）——
     #    返修回写（`repair_exercises`）复用同一套（DB 审查 D-10）。
     r["example"] = _clean_example(s.get("example"))
@@ -935,11 +1057,17 @@ def _clean_section(s) -> dict:
     fl = _clean_flow(s.get("flow"))
     if fl:
         r["flow"] = fl
+    dg = _clean_diagram(s.get("diagram"))
+    if dg:
+        r["diagram"] = dg
+    wy = _clean_why(s.get("why"))
+    if wy:
+        r["why"] = wy
     # ⭐ F9b（作者点名，代码里定不靠提示词）：
     #   · 「按口述还原」的例题 → 合标 🎙+✏️；· 空壳 example/faded/plot/compare/flow 直接摘掉。
     if r["example"].get("title"):
         r["example"]["title"] = _fold_labels(with_recon_label(r["example"]["title"]))
-    for k in ("example", "faded", "plot", "compare", "flow"):
+    for k in ("example", "faded", "plot", "compare", "flow", "diagram", "why"):
         if not r.get(k):
             r.pop(k, None)
     return r
@@ -1661,7 +1789,7 @@ def merge_units(review: dict, *, end_ts: str = "") -> dict:
             exs.append(ex)
         if exs:
             m["example"] = exs[0]
-        for key in ("variants", "faded"):
+        for key in ("variants", "faded", "diagram", "why"):
             val = next((s2.get(key) for s2 in members if s2.get(key)), None)
             if val:
                 m[key] = val
@@ -1873,6 +2001,8 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
                     .replace("__CALIBER__", _caliber_block(materials)))
         if _reader_first_enabled():
             sys_text += READER_FIRST
+        if _visual_enabled():
+            sys_text += VISUAL_BLOCK
         for ex2, mt in tries:
             if _cancel.is_set() or time.monotonic() >= _budget_end:
                 break
@@ -2550,6 +2680,32 @@ READER_FIRST = """
 - 每个意思全篇只说一次：前面讲过的定义或结论，后面要用时用半句话点名指回去，然后直接讲新的东西。
 - 节的标题写这一节回答的问题或得出的结论（读者扫一眼目录就知道整课的逻辑线），用课里真实的概念名，每个标题都独立成立。
 """
+
+
+#: ⭐ 2026-11-22 跨学科图元 + 「想一想」（Owen 11-22 定：图要对**每个学科**都通用）。
+#:    接在 REVIEW_SYS 末尾（不动基础提示词），开关 `CLASSLIVE_NOTE_VISUAL`（默认开）。
+#:    模型只填数据，结构与样式在 `note_html` 写死；不合规就丢（`_clean_diagram`）。
+VISUAL_BLOCK = """
+
+## 图元 `diagram`（每节至多一个；没有合适的就不给）与「想一想」`why`
+本节内容**本来就是**下面某种结构时，在这一节加 `diagram`，只填数据（画法由代码定）：
+- 随时间推进的事件 / 阶段（历史、人物经历、政策演变、研究进程）→
+  {"kind": "timeline", "title": "图名", "events": [{"when": "≤12 字（年份/阶段名）", "label": "≤20 字", "detail": "≤50 字（可省）"}], "src": "lecture|self"}（3–8 个事件，按时间先后）
+- 一个变化引起下一个变化的因果 / 机制链 →
+  {"kind": "causal", "title": "图名", "chain": [{"label": "≤16 字", "dir": "up|down|"}], "links": ["第 1→2 环为什么（≤20 字，可空）"], "src": "lecture|self"}（3–6 环；dir = 这一环是变大 up 还是变小 down，说不清就留空；links 比 chain 少一个）
+- 按**两个维度**把东西分成四类 →
+  {"kind": "matrix", "title": "图名", "x": {"name": "维度一", "lo": "否/低", "hi": "是/高"}, "y": {"name": "维度二", "lo": "否/低", "hi": "是/高"}, "cells": [{"x": "lo|hi", "y": "lo|hi", "label": "≤16 字", "detail": "≤40 字（可省，如例子）"}], "src": "lecture|self"}（四格都要给）
+- 一个概念分成几类 / 几部分 →
+  {"kind": "tree", "title": "图名", "root": "≤16 字", "children": [{"label": "≤16 字", "detail": "≤40 字（可省）", "children": ["≤16 字"]}], "src": "lecture|self"}（2–6 个分支，每支至多 4 个子项）
+⚠️ 只画讲解里**真讲了**的结构，图里每个字都要在本节讲解里找得到出处；已经有 `flow`/`compare` 讲同一件事就不要再画。
+`why`：在每节末尾给读者一个「为什么」的追问，逼他自己解释一遍：
+  {"q": "为什么……？（≤30 字）", "a": "答案（≤80 字，只用本节讲解里讲过的道理，不引入新数字）"}
+"""
+
+
+def _visual_enabled() -> bool:
+    """`CLASSLIVE_NOTE_VISUAL`（默认开）：复习层提示词末尾接图元 `diagram` + 「想一想」`why`。"""
+    return os.environ.get("CLASSLIVE_NOTE_VISUAL", "1").strip() == "1"
 
 
 def _reader_first_enabled() -> bool:

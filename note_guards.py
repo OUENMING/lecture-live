@@ -477,7 +477,7 @@ def _prune_empty(obj) -> None:
     """
     if isinstance(obj, dict):
         for k, v in obj.items():
-            if k == "compare":      # 对照表：串的位置就是语义
+            if k in ("compare", "diagram"):   # 对照表 / 因果链的 links：串的位置就是语义
                 continue
             _prune_empty(v)
         return
@@ -1777,10 +1777,12 @@ def drop_dangling_pointers(review: dict) -> tuple:
     for i, s in enumerate(out.get("sections") or [], 1):
         if not isinstance(s, dict):
             continue
-        if any(s.get(k) for k in ("compare", "flow", "plot")):
+        if any(s.get(k) for k in ("compare", "flow", "plot", "diagram")):
             continue                              # 本节确实有表/图 → 指路是对的
         immune = immune_from_review(out)
-        for path in paths_of(s):
+        # ⚠️ 倒序走（2026-11-22 实测 `list index out of range`）：整段是指路句时下面会
+        #    `holder.remove(v)`，正序时后面那些预先算好的路径下标全部错位一格。
+        for path in reversed(list(paths_of(s))):
             if _field_name(path) not in ("prose", "pitfalls"):
                 continue
             v = _get(s, path)

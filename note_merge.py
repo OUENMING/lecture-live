@@ -18,6 +18,7 @@ from __future__ import annotations
 import concurrent.futures as cf
 import os
 import re
+import time
 
 END = (".", "?", "!")
 MAX_LINES = 3            # 一句最多并几行（再长多半是 ASR 漏了标点，不是一句话）
@@ -92,9 +93,11 @@ def _join(parts: list[str]) -> str:
 def _chat(key, model, system, user, max_tokens, timeout):
     import llm_client
     # ⭐ F11 §0：碎句合并也属于「课后笔记」那条链（作者 2026-10-18）→ 走思考 low 档。
+    # `deadline=timeout`：单次请求的**墙钟**也压在 timeout 内。不传时走 `CALL_DEADLINE_S`
+    # 默认（300 s），滴 keep-alive 的请求会把线程池（非 daemon）一直拖住、拖长收尾（OCR 11-22）。
     obj = llm_client.chat_json(key, model, system, user, max_tokens=max_tokens,
                                temperature=0.2, timeout=timeout, effort="low",
-                               call_class="merge")
+                               deadline=timeout, call_class="merge")
     return obj if isinstance(obj, dict) else {}
 
 
@@ -118,13 +121,18 @@ def merge_entries(entries: list[dict], key: str | None, model: str, *, domain: s
     en_of = {k: _join([entries[x].get("en") or entries[x].get("asr") or ""
                        for x in range(i0, i1 + 1)]) for k, (i0, i1) in enumerate(rs)}
 
+    t0 = time.monotonic()
+
     def one(k: int) -> str:
         if cancel is not None and cancel.is_set():
+            return ""
+        left = DEADLINE_S - (time.monotonic() - t0)   # 排队等到的请求只拿剩下的总时限
+        if left <= 0:
             return ""
         i0 = rs[k][0]
         ctx = " ".join(_text(e) for e in entries[max(0, i0 - 2):i0])
         obj = chat(key, model, SYS, f"{domain_block(domain)}前文: {ctx or '(无)'}\nEN: {en_of[k]}",
-                   400, TIMEOUT_S)
+                   400, min(TIMEOUT_S, left))
         zh = obj.get("zh")
         return " ".join(zh.split()) if isinstance(zh, str) else ""
 

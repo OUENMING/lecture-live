@@ -27,7 +27,12 @@ import json
 import os
 import pathlib
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
+
+#: 同进程内 `write` 的读-改-写互斥（心跳线程与主线程会同时写同一份记录）。
+_WRITE_LOCK = threading.Lock()
 
 #: 任务状态。`running` 之外的一律不算「还在跑」。
 PENDING = "pending"
@@ -101,6 +106,11 @@ def read(stem: str, *, root=None) -> dict:
 
 def write(stem: str, fields: dict, *, root=None, now=time.time) -> bool:
     """**合并**写入（不是整份覆盖）+ 刷新 `updated`。原子；失败吞掉。返回是否写成。"""
+    with _WRITE_LOCK:
+        return _write_unlocked(stem, fields, root=root, now=now)
+
+
+def _write_unlocked(stem: str, fields: dict, *, root=None, now=time.time) -> bool:
     try:
         cur = read(stem, root=root)
         for k, v in (fields or {}).items():
@@ -109,12 +119,31 @@ def write(stem: str, fields: dict, *, root=None, now=time.time) -> bool:
         cur["updated"] = float(now())
         p = path(stem, root=root)
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(f".tmp{os.getpid()}")
+        # tmp 名带线程号：只带 pid 时心跳线程与主线程会写同一个 tmp → 半截 JSON 被 rename
+        # 过去 → `read` 当空 → 记录判死、笔记重出（OCR 11-22）。
+        tmp = p.with_suffix(f".tmp{os.getpid()}-{threading.get_ident()}")
         tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, p)
         return True
     except Exception:                                # noqa: BLE001
         return False
+
+
+@contextmanager
+def _claim_lock(p: pathlib.Path):
+    """`claim` 的临界区：`<stem>.claim` 上的阻塞 flock（只包几次文件操作，毫秒级）。
+    拿不到 fcntl（非 POSIX）就退回无锁（老行为）。"""
+    try:
+        import fcntl
+        f = open(p.with_suffix(".claim"), "a+", encoding="utf-8")
+    except (OSError, ImportError):
+        yield
+        return
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        f.close()                                    # 关 fd 即释放
 
 
 def claim(stem: str, *, root=None, now=time.time, pid=None, **fields) -> bool:
@@ -127,24 +156,27 @@ def claim(stem: str, *, root=None, now=time.time, pid=None, **fields) -> bool:
     try:
         p = path(stem, root=root)
         p.parent.mkdir(parents=True, exist_ok=True)
-        if alive(stem, root=root, now=now):
-            return False
-        # 旧记录（已结束 / 心跳过期）不该挡住新任务：先挪开，再靠 O_EXCL 抢。
-        # ⚠️ 抢不到就返回 False —— 说明另一个进程刚好也走到这里，让它跑。
-        if p.exists():
+        # 判活→挪旧→O_EXCL 三步要在**一把跨进程锁**里做：不然 A 刚抢到新记录，
+        # 同样看到旧记录的 B 会把 A 的新记录 unlink 掉再抢一次 → 两个进程做同一节（OCR 11-22）。
+        with _claim_lock(p):
+            if alive(stem, root=root, now=now):
+                return False
+            # 旧记录（已结束 / 心跳过期）不该挡住新任务：先挪开，再靠 O_EXCL 抢。
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
             try:
-                p.unlink()
-            except OSError:
-                pass
-        try:
-            fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            return False                             # 别人刚好抢先
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps({**fields, "stem": str(stem), "pid": int(pid or os.getpid()),
-                                "state": RUNNING, "started_at": float(now()),
-                                "updated": float(now())}, ensure_ascii=False))
-        return True
+                fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                return False                         # 别人刚好抢先
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps({**fields, "stem": str(stem),
+                                    "pid": int(pid or os.getpid()),
+                                    "state": RUNNING, "started_at": float(now()),
+                                    "updated": float(now())}, ensure_ascii=False))
+            return True
     except Exception:                                # noqa: BLE001
         return False
 

@@ -216,5 +216,10 @@ def run_note(client, job: dict, *, home: Path, log=None) -> None:
             _say(log, f"[{jid}] complete_fail 也失败（不重试）:"
                       f" {type(e2).__name__}: {str(e2)[:120]}")
     finally:
+        try:
+            from server.runner import billing
+            billing.clear_default()   # 任务结束就清：下一条 hash 非法时不许沿用这条的计费头、记到这位用户名下（OCR 11-22）
+        except Exception:                                 # noqa: BLE001
+            pass
         if work is not None:
             shutil.rmtree(work, ignore_errors=True)

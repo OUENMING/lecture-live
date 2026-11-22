@@ -112,6 +112,13 @@ class NoteJobTest(unittest.TestCase):
         jobs = self.home / "jobs"
         self.assertEqual(list(jobs.iterdir()) if jobs.exists() else [], [])
 
+    def test_bill_to_cleared_after_job(self):
+        # OCR 11-22：上一条任务的计费头不许留给下一条（hash 非法时会记到上一个用户名下）
+        c = FakeClient(rows=fakes.sample_lines())
+        note_job.run_note(c, self._job(), home=self.home, log=self.logs.append)
+        from server.runner import billing
+        self.assertEqual(billing._default, "")
+
     def test_bill_to_header_installed(self):
         note_job.install_bill_to("0123456789abcdef")
         h = llm_client.headers("cl-runner-testcode", "")

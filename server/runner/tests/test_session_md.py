@@ -79,6 +79,16 @@ class SessionMdTest(unittest.TestCase):
         self.assertNotEqual(p1, p2)
         self.assertEqual(p1.read_text(), p2.read_text())
 
+    def test_blank_sentence_skipped_not_fatal(self):
+        # OCR 11-22：一句 en/zh 都空 → 只写时间戳块 → 读回 3≠2 → 整份笔记失败
+        lines = self.lines + [{"seq": 9, "t": 700, "en": "  ", "zh": "", "src": "asr"}]
+        p = session_md.write_session(
+            lines, course="X", started_at="2026-11-20T09:00:00Z",
+            tz="Europe/Dublin", out_dir=self.out)
+        from obsidian_writer import ObsidianWriter
+        got = ObsidianWriter._parse(p.read_text(encoding="utf-8"))
+        self.assertEqual(len(got), len(self.lines))
+
     def test_empty_lines_rejected(self):
         with self.assertRaises(ValueError):
             session_md.write_session([], course="C", started_at="2026-11-20T09:00:00Z",

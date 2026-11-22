@@ -895,8 +895,18 @@ class ObsidianWriter:
             lines.append(f"> **ZH**: {_flat(zh)}")
         if raw:
             lines.append(f"> **ASR**: {_flat(raw)}")
-        with self.session_path.open("a", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n\n")
+        try:
+            with self.session_path.open("a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n\n")
+        except OSError as e:
+            # 磁盘满 / 目录只读：少这一句落盘，不许打断上课主循环（`drain()` 外层没包；
+            # OCR 11-22）。`_n` 不加（同 F17：句号不许越过文件）；同一种错只提示一次。
+            msg = f"{type(e).__name__}:{getattr(e, 'errno', '')}"
+            if getattr(self, "_append_err", None) != msg:
+                self._append_err = msg
+                print(f"⚠ 逐句落盘失败({str(e)[:60]}); 字幕照常，这几句不进笔记", flush=True)
+            return ""
+        self._append_err = None
         # ⚠️ `_n` 在**写成功之后**才加（2026-10-01 审查 F17）：原来先加后写，
         #    写失败时 `_n` 比文件多一格 → 之后所有 `src`/全局句号整体错位 1。
         self._n += 1

@@ -70,8 +70,14 @@ def write_session(lines: list, *, course: str, started_at: str, tz: str,
         n += 1
         path = out / f"{date}_{wall.strftime('%H%M%S')}_{n}_{safe_course(course)}.md"
 
+    # en/zh 压行后都空的句整句不写：只剩时间戳块 `_parse` 读不回，下面断言会让整份笔记失败
+    # （OCR 11-22：一句空句 → 3≠2 → 网页用户整份笔记失败）。写和读回比对用同一份列表。
+    want = [ln for ln in sorted(lines or [], key=lambda x: int(x.get("seq") or 0))
+            if flat(str(ln.get("en") or "")) or flat(str(ln.get("zh") or ""))]
+    if not want:
+        raise ValueError("逐句全是空句，拒绝生成空会话文件")
     parts = [f"# {course} · {date} · 实时会话日志", ""]
-    for ln in sorted(lines or [], key=lambda x: int(x.get("seq") or 0)):
+    for ln in want:
         ts = (wall + timedelta(seconds=int(ln.get("t") or 0))).strftime("%H:%M:%S")
         block = [f"> [!abstract] {ts}"]
         en = flat(str(ln.get("en") or ""))
@@ -89,8 +95,6 @@ def write_session(lines: list, *, course: str, started_at: str, tz: str,
 
     # ⭐ 读回断言：`_parse` 是读法唯一定义点 —— 数量、时间戳、字段逐条对上才算写成了。
     got = ow.ObsidianWriter._parse(path.read_text(encoding="utf-8"))
-    want = [ln for ln in sorted(lines or [], key=lambda x: int(x.get("seq") or 0))
-            if str(ln.get("en") or "").strip() or str(ln.get("zh") or "").strip()]
     if len(got) != len(want):
         raise AssertionError(f"_parse 读回 {len(got)} 条 ≠ 写入 {len(want)} 条")
     for g, w in zip(got, want):

@@ -437,6 +437,25 @@ test("9b admin routes/set {} = 清空回默认；鉴权缺 token 401", async () 
   } finally { h.restore(); }
 });
 
+test("9c 只读令牌 ADMIN_RO_TOKEN：读路径放行，写路径 403，没配 secret 就 401", async () => {
+  const seen = [];
+  const passesFetch = async (url) => { seen.push(new URL(url).pathname); return J(200, { ok: true, codes: [] }); };
+  const mk = (extra) => ({ ADMIN_TOKEN: "adm", PASSES: { idFromName: (n) => n, get: () => ({ fetch: passesFetch }) }, ...extra });
+  const hit = (name, env, tok) => worker.fetch(new Request(`https://asr.bldcam.page/v1/admin/${name}`, {
+    method: "POST", headers: { authorization: `Bearer ${tok}`, "content-type": "application/json" }, body: "{}",
+  }), env, { waitUntil: () => {} });
+  const env = mk({ ADMIN_RO_TOKEN: "ro" });
+  for (const n of ["list", "stats", "minutes", "devices"]) assert.equal((await hit(n, env, "ro")).status, 200, `${n} 只读应放行`);
+  const before = seen.length;
+  for (const n of ["add", "revoke", "unrevoke", "renew", "limit", "delete", "routes/set", "rt/import", "rt/cursor"]) {
+    assert.equal((await hit(n, env, "ro")).status, 403, `${n} 只读令牌必须 403`);
+  }
+  assert.equal(seen.length, before, "403 的请求一条都没进 DO");
+  assert.equal((await hit("revoke", env, "adm")).status, 200, "完整令牌照旧能写");
+  assert.equal((await hit("list", mk({}), "ro")).status, 401, "没配 ADMIN_RO_TOKEN 时 ro 不认");
+  assert.equal((await hit("list", mk({ ADMIN_RO_TOKEN: "" }), "")).status, 401, "空 secret + 空令牌不能撞上");
+});
+
 // ---------- 10. 表是坏的 / 读表挂了，都不能把调用打没 ----------
 test("10 读路由表挂了 -> 用 env + 默认兜住（默认 note 仍走 cc）", async () => {
   const h = harness({ env: { CMD_CHAT_KEY: "cc-key" }, routesFail: true });

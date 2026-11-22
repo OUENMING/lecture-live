@@ -936,11 +936,18 @@ async function reclaimUsage(env, region, nowMs) {
 // ⚠️ 路由表那两条（routes/get|set）：set 原样转给 DO 校验/落盘，get 由 Worker 拼上「默认表 / env 表」
 //    —— 只在 Worker 里知道的 `CMD_CHAT_CLASSES` / `CHAT_ROUTES` 得跟 DO 表一起回，否则 `cl_admin route`
 //    只能看到半张表，标不出「这条来自哪里」。
+// 只读令牌 ADMIN_RO_TOKEN（2026-11-22，给 VPS 上的远程只读面板 / Muse 用）：只放行下面这些**读**路径，
+// 写操作（add / revoke / renew / limit / delete / routes/set / rt/*）一律 403。没配这个 secret = 不认只读令牌。
+export const ADMIN_RO_PATHS = new Set([
+  "/v1/admin/list", "/v1/admin/stats", "/v1/admin/quota", "/v1/admin/minutes", "/v1/admin/devices",
+  "/v1/admin/web/list", "/v1/admin/web/get", "/v1/admin/runner/state", "/v1/admin/routes/get",
+]);
 async function admin(request, env, path) {
-  const expected = env.ADMIN_TOKEN ? `Bearer ${env.ADMIN_TOKEN}` : null;
-  if (!expected || (request.headers.get("authorization") || "") !== expected) {
-    return new Response("unauthorized", { status: 401 });
-  }
+  const got = request.headers.get("authorization") || "";
+  const full = env.ADMIN_TOKEN && got === `Bearer ${env.ADMIN_TOKEN}`;
+  const ro = !full && env.ADMIN_RO_TOKEN && got === `Bearer ${env.ADMIN_RO_TOKEN}`;
+  if (!full && !ro) return new Response("unauthorized", { status: 401 });
+  if (ro && !ADMIN_RO_PATHS.has(path)) return new Response("read-only token", { status: 403 });
   const body = await request.json().catch(() => ({}));
   // 测试数据（W20）：遥测 / 录音存在 R2（WEB_DATA），不进 Passes DO —— 直接在这一层读。
   if (path === "/v1/admin/web/list" || path === "/v1/admin/web/get") return adminWeb(env, path, body);

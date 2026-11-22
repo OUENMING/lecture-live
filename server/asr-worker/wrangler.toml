@@ -8,6 +8,7 @@
 #   wrangler secret put DEEPSEEK_KEY      # < ~/.classlive/credentials（一人一码：通行码用户的翻译走它；
 #                                         #   管道灌入不回显。⚠️ 不写这个写法就会被问「怎么没让我输 key」——2026-10-12）
 #   wrangler secret put ADMIN_TOKEN       # 一人一码：/v1/admin/* 只认它（scripts/cl_admin.py 读 ~/.classlive/asr-admin-token）
+#   wrangler secret put ADMIN_RO_TOKEN    # 只读管理令牌（2026-11-22）：只放行 list/stats/quota/minutes/devices/web/*/runner/state/routes/get，写操作 403；VPS 远程面板用（~/.classlive/asr-admin-token 在 VPS 上放的就是它）
 #   wrangler secret put SONIOX_KEY        # 实时转写的临时 key 由它签发（美国区项目）。⚠️ 这把主 key 的权限要有
 #                                         #   **Temporary API keys** + Speech-to-Text；临时 key 才下发，主 key 不出 Worker。
 #   wrangler secret put SONIOX_KEY_JP     # 可选：日本区项目的 key（CN/HK/MO/TW/JP/KR 访客 + 亚洲/大洋洲访客走 api.jp.*）。

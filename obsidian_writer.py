@@ -1443,9 +1443,22 @@ class ObsidianWriter:
             print(f"   🧭 章节骨架：{len(sk)} 章 · "
                   f"{sum(len(c['points']) for c in sk)} 条实时要点（粒度由它定，不由模型定）",
                   flush=True)
+        # ⭐ W1：先定计划、再按节写 —— 骨架章（有章节时）优先，其次一次调用出全课节计划。
+        #    ⚠️ 计划为空（开关关 / 骨架为空且模型没给合法 JSON）→ `review(plan=None)` 走老路。
+        import note_plan
+        lines = note_v2.transcript_lines(entries)
+        plan: list = []
+        _pm = os.environ.get("CLASSLIVE_NOTE_PLAN", "1")
+        if _pm in ("1", "model"):          # `model` = 跳过骨架、只用模型出计划（A/B 用）
+            src = "骨架"
+            plan = note_plan.from_skeleton(sk, lines) if _pm == "1" else []
+            if not plan:
+                src = "模型"
+                plan = note_plan.architect(lines, chat=self._chat, domain=domain)
+            print(f"   🗺 节计划：{len(plan)} 节（来源 {src}）", flush=True)
         review = note_v2.review(entries, chat=self._chat, domain=domain,
                                materials=self._materials, on_progress=on_progress,
-                               extra=block, skeleton=sk)
+                               extra=block, skeleton=sk, plan=plan or None)
         # ⭐ 3.11：先把复习层的成败账落地（**再**早退）—— 全失败时 `review == {}`，
         #    但「8 块里失败 8 块」正是报告最该说出来的那件事（11-03 完全没有痕迹）。
         self._record_review_stats(review)
@@ -1488,6 +1501,16 @@ class ObsidianWriter:
                 transcript="\n".join(
                     str(e.get("en") or e.get("asr") or "") for e in entries),
                 exercise_flags=flags)
+            # ⭐ 2026-11-21 第三轮：未核对的讲解类断言 → 对照转录原话（只许 unchecked→ok，
+            #    永不出 mismatch；口径见 note_ground 文件头）。开关默认关。
+            if checks and os.environ.get("CLASSLIVE_NOTE_GROUND", "1") == "1":
+                import note_ground
+                checks, _g_ok, _g_diff, _g_n = note_ground.ground_unchecked(
+                    checks, review, note_v2.transcript_lines(entries),
+                    chat=self._chat_plain)
+                print(f"   🎙 转录对照：送 {_g_n} 条 → {_g_ok} 条原话支持 · "
+                      f"{_g_diff} 条说法不同（待你确认）",
+                      flush=True)
             if checks:
                 review["checks"] = checks
                 # ⭐ C5（2026-11-03）：能算准的 mismatch **先回改正文** —— 必须在
@@ -1535,6 +1558,7 @@ class ObsidianWriter:
                           (lambda r: note_guards.scrub(r), "猜测句清理"),
                           (lambda r: note_guards.dedupe_sentences(r), "重复句去重"),
                           (lambda r: note_guards.strip_clock_times(r), "正文时间戳清理"),
+                          (lambda r: note_guards.corner_quotes(r), "直引号规整"),
                           (lambda r: note_guards.drop_trivial_cues(r), "纯算术线索问题"),
                           (lambda r: note_guards.ensure_caliber(
                               r, materials=self._materials), "停产价格口径"),
@@ -1569,6 +1593,7 @@ class ObsidianWriter:
                           (lambda r: self._with_overview(r), "速览"),
                           # 串讲的正文也吃同一条纪律（它是 overview 层新写的散文，第一遍清完在它之前）
                           (lambda r: note_guards.strip_clock_times(r), "正文时间戳清理（串讲）"),
+                          (lambda r: note_guards.corner_quotes(r), "直引号规整（串讲）"),
                           (lambda r: note_guards.scrub(r), "猜测句清理（串讲）"),
                           (lambda r: note_guards.quote_check(
                               r, materials=self._materials,

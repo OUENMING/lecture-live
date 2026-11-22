@@ -55,6 +55,26 @@ KATEX_SRC = pathlib.Path(__file__).resolve().parent / "vendor" / "katex" / KATEX
 KATEX_DIR = f".classlive-assets/katex/{KATEX_VERSION}"
 KATEX_CSS = f"{KATEX_DIR}/katex.min.css"
 KATEX_JS = f"{KATEX_DIR}/katex.min.js"
+#: ⭐ 2026-11-21 可读性改版：中文排版增强 heti（MIT，sivan/heti）与知识点导图 markmap（MIT，
+#:    markmap-view + d3 的浏览器 UMD 包）。同 KaTeX：仓库内副本、装到笔记旁边、相对引用；
+#:    任何一个没装上，页面照样能读（heti 只是排版增强；导图退回下面那份编号目录）。
+HETI_VERSION = "0.9.6"
+HETI_SRC = pathlib.Path(__file__).resolve().parent / "vendor" / "heti" / HETI_VERSION
+HETI_DIR = f".classlive-assets/heti/{HETI_VERSION}"
+MARKMAP_VERSION = "0.18.12"
+MARKMAP_SRC = pathlib.Path(__file__).resolve().parent / "vendor" / "markmap" / MARKMAP_VERSION
+MARKMAP_DIR = f".classlive-assets/markmap/{MARKMAP_VERSION}"
+
+
+def _copy_flat(src: pathlib.Path, dst: pathlib.Path, probe: str) -> bool:
+    """把 `src` 下的文件（不含子目录）装到 `dst`（**幂等**：`probe` 在就不再拷）。"""
+    import shutil
+    if not (dst / probe).exists():
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in src.glob("*"):
+            if f.is_file():
+                shutil.copy2(f, dst / f.name)
+    return (dst / probe).exists()
 
 
 def install_assets(note_html_path) -> bool:
@@ -75,9 +95,18 @@ def install_assets(note_html_path) -> bool:
             (dst / "fonts").mkdir(exist_ok=True)
             for f in (KATEX_SRC / "fonts").glob("*.woff2"):
                 shutil.copy2(f, dst / "fonts" / f.name)
-        return (dst / "katex.min.css").exists() and (dst / "fonts").is_dir()
+        ok = (dst / "katex.min.css").exists() and (dst / "fonts").is_dir()
     except Exception:                                          # noqa: BLE001
-        return False
+        ok = False
+    # 排版增强 / 导图：装不上不影响返回值（KaTeX 才决定公式能不能渲染）。
+    base = pathlib.Path(note_html_path).parent
+    for src, rel, probe in ((HETI_SRC, HETI_DIR, "heti-addon.min.js"),
+                            (MARKMAP_SRC, MARKMAP_DIR, "markmap-view.js")):
+        try:
+            _copy_flat(src, base / rel, probe)
+        except Exception:                                      # noqa: BLE001
+            pass
+    return ok
 
 #: 三个固定图形的规范（模型只给 `kind` + `params`，画法在这里写死）。
 #: `x` = 横轴范围；`slider` = 允许拖动的参数（拖动会重画）。单位/标签都是中文。
@@ -739,6 +768,28 @@ svg.plot .cross text{fill:var(--fg);font-size:11px}
  a[href^="http"]::after{content:" (" attr(href) ")";font-size:85%;word-break:break-all}
  html.js .reveal{opacity:1!important;transform:none!important}
 }
+/* ---- 2026-11-21 可读性改版（heti + 飞书主题取值）----
+   正文行长收到 ≈40 个汉字（社区 30–40 字/行；飞书主题正文 16px、行高 26px≈1.63、栏宽 820px），
+   行高 1.8（中英混排 + 行内公式比纯中文需要更松）；段距拉开，让「一段一个意思」看得出来。
+   heti 自带 `.heti{line-height:1.5;max-width:42em}`，这里按上面的取值覆盖。 */
+.heti{line-height:1.8;max-width:40em;letter-spacing:.02em}
+/* ⚠️ 不两端对齐：笔记里夹着英文术语、文件名、行内公式（不可断的长串），
+   heti 默认的 justify 会把那一行的汉字拉出大空隙（实测截图「格 要 用 函 数」）。 */
+.heti p{text-align:start}
+.qec .story.heti p,.over .heti p{margin:0 0 .85em}
+.qec .story.heti p:last-child,.over .heti p:last-child{margin-bottom:0}
+.heti strong{font-weight:600}
+/* 节内小标题（`## 子题` 项，2026-11-21 第三轮）：比正文大一档、上方留白分组；
+   不用色条（impeccable side-tab 规则），靠字号 + 字重 + 留白区分层级。 */
+.qec .story.heti h4.sub{font-size:17px;line-height:1.5;font-weight:700;color:var(--fg);
+  margin:1.6em 0 .55em;letter-spacing:.01em}
+.qec .story.heti .lab + h4.sub{margin-top:.4em}
+.mm{margin:8px 0 6px;border-bottom:1px dashed var(--line)}
+.mm svg{width:100%;height:100%;display:block;
+ --markmap-text-color:var(--fg);--markmap-a-color:var(--fg);
+ --markmap-a-hover-color:var(--accent);--markmap-font:500 14px/20px -apple-system,"PingFang SC",sans-serif}
+.mm a{text-decoration:none}
+@media print{.mm{break-inside:avoid}}
 """
 
 _JS = r"""
@@ -912,6 +963,38 @@ _JS = r"""
   sv.addEventListener('pointerleave',function(){ cross.style.display='none'; });
  });
 })();
+/* ⭐ 2026-11-21：中文排版增强（heti：中西文间距、标点挤压）+ 知识点导图（markmap）。
+   两个库都是 defer 加载的本地副本；没加载到就什么也不做（导图容器藏起来，编号目录照常）。 */
+window.addEventListener('load',function(){
+ try{ if(window.Heti){
+  // 公式 / 代码不让 heti 插空格（它按 class 跳过整棵子树）
+  document.querySelectorAll('.heti .tex,.heti code').forEach(function(e){ e.classList.add('heti-skip'); });
+  new Heti('.heti').autoSpacing(); } }catch(e){}
+ var box=document.querySelector('.mm'), raw=document.getElementById('mm-data');
+ if(!box||!raw) return;
+ if(!(window.markmap&&window.markmap.Markmap&&window.d3)){ box.style.display='none'; return; }
+ try{
+  var data=JSON.parse(raw.textContent);
+  var mm=window.markmap.Markmap.create('#mm',{
+   autoFit:true, duration:0, maxWidth:360, initialExpandLevel:-1,
+   // 单色：彩虹分支色读起来像装饰、不传信息；层级靠缩进与粗细已经够
+   color:function(){ return getComputedStyle(document.documentElement)
+                     .getPropertyValue('--muted').trim()||'#8a8f98'; },
+   spacingVertical:6, spacingHorizontal:60, paddingX:10, zoom:false, pan:false
+  },data);
+  box.addEventListener('click',function(ev){
+   var a=ev.target.closest&&ev.target.closest('a[href^="#kp"]');
+   if(a){ ev.preventDefault(); var t=document.querySelector(a.getAttribute('href'));
+          if(t) t.scrollIntoView({behavior:'smooth'}); }
+  });
+  window.addEventListener('beforeprint',function(){ try{ mm.fit(); }catch(e){} });
+  var tb=document.getElementById('theme');   // 切主题后线色跟着变
+  if(tb) tb.addEventListener('click',function(){ setTimeout(function(){
+   try{ mm.renderData(); }catch(e){} },0); });
+  // 导图画出来了，下面那份编号目录就是重复信息 —— 藏起来（没 JS / 库失败时它照常显示）
+  var ol=box.parentNode.querySelector('ol'); if(ol) ol.style.display='none';
+ }catch(e){ box.style.display='none'; }
+});
 """
 
 
@@ -1089,11 +1172,22 @@ def _section_html(sec: dict, idx: int, *, reveal: bool = True, fig: str = "") ->
     o.append('<div class="qec">')
     if sec.get("q"):
         o.append(f'<div><span class="lab">Q 本节回答</span>{inline(sec["q"])}</div>')
-    story = ['<div class="story"><span class="lab">讲解</span>']
-    for i, para in enumerate(sec.get("prose") or []):
+    story = ['<div class="story heti"><span class="lab">讲解</span>']
+    import note_v2
+    prose = list(sec.get("prose") or [])
+    n_body = n_sub = 0
+    for j, para in enumerate(prose):
+        # ⭐ 2026-11-21 第三轮：`## 子题` 项 → 节内小标题；后面没有正文的小标题不印。
+        sub = note_v2.subhead_of(para)
+        if sub:
+            if any(not note_v2.subhead_of(x) for x in prose[j + 1:j + 2]):
+                n_sub += 1
+                story.append(f'<h4 class="sub" id="kp{idx}s{n_sub}">{inline(sub)}</h4>')
+            continue
         # ⭐ 重点先行（作者 2026-10-18）：每段的开头句就是**断言句**（渲染器确保它被加粗，
         #    模型没写 `**` 也加粗）；第一段的那句 = **本节的重点**，再多给强调色。
-        story.append(f"<p>{_bold_lead(inline(para), keyline=(i == 0))}</p>")
+        story.append(f"<p>{_bold_lead(inline(para), keyline=(n_body == 0))}</p>")
+        n_body += 1
     if sec.get("prereq"):
         story.append(f'<details><summary>📚 前置补课（教授没讲、但要懂）</summary>'
                      f'<p>{inline(sec["prereq"])}</p></details>')
@@ -1166,7 +1260,9 @@ def _overview_html(review: dict, sections: list, dates: list) -> str:
         return ""
     o = ['<div class="over" id="overview"><h3>速览</h3>']
     if paras:
-        o += [f"<p>{_link_sections(inline(p), len(sections))}</p>" for p in paras]
+        o.append('<div class="heti">'
+                 + "".join(f"<p>{_link_sections(inline(p), len(sections))}</p>" for p in paras)
+                 + "</div>")
     if sched:
         o.append('<p class="sched-line"><b>复习排程：</b>（笔记只写日期，不推送）</p>')
         o.append('<ul class="sched">' + "".join(
@@ -1176,9 +1272,69 @@ def _overview_html(review: dict, sections: list, dates: list) -> str:
     return "".join(o)
 
 
+def _map_text(v, n: int = 40) -> str:
+    """导图节点文字：去时间前缀 / `$` / `**`、压空白、截断；再 HTML 转义（markmap 把它当 HTML）。"""
+    t = _strip_ts_prefix(str(v or ""))
+    t = re.sub(r"\*\*|`|\$", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t) > n:
+        t = t[:n - 1].rstrip() + "…"
+    return html.escape(t)
+
+
+def mindmap_data(title: str, sections: list, *, terms_per: int = 3) -> dict | None:
+    """知识点导图的数据（markmap 的节点树）。**纯函数、零模型**：全部取自已生成的小节。
+
+    根 = 本课标题；一级 = 各节标题；二级 = 该节「本节回答」的问题 + 节内小标题（没有小标题才放前几个术语）。
+    少于 2 节时不画（一个点的导图没有信息量），返回 `None`。
+    """
+    kids = []
+    for i, s in enumerate(sections or [], 1):
+        if not isinstance(s, dict):
+            continue
+        head = _map_text(s.get("heading"), 40)
+        if not head:
+            continue
+        leaves = []
+        if s.get("q"):
+            leaves.append({"content": "❓ " + _map_text(s.get("q"), 44), "children": []})
+        # ⭐ 有节内小标题（`## 子题`）→ 二级用小标题（就是这一节的结构，可点跳转）；没有才用术语。
+        import note_v2
+        prose = list(s.get("prose") or [])
+        subs = []
+        for j, p in enumerate(prose):
+            sub = note_v2.subhead_of(p)
+            if sub and any(not note_v2.subhead_of(x) for x in prose[j + 1:j + 2]):
+                subs.append(sub)
+        for k, sub in enumerate(subs, 1):
+            leaves.append({"content": f'<a href="#kp{i}s{k}">{_map_text(sub, 30)}</a>',
+                           "children": []})
+        for t in ([] if subs else (s.get("terms") or [])[:terms_per]):
+            if isinstance(t, dict) and (t.get("zh") or t.get("en")):
+                lab = " · ".join(x for x in (_map_text(t.get("zh"), 16),
+                                             _map_text(t.get("en"), 28)) if x)
+                leaves.append({"content": lab, "children": []})
+        kids.append({"content": f'<a href="#kp{i}">{i}. {head}</a>', "children": leaves})
+    if len(kids) < 2:
+        return None
+    return {"content": _map_text(title, 30), "children": kids}
+
+
+def _mindmap_html(data: dict | None) -> str:
+    """导图容器 + 内嵌 JSON（JS 读它画图；库没加载就整块藏起来，下面的编号目录照常可用）。"""
+    if not data:
+        return ""
+    n = sum(1 + len(k.get("children") or []) for k in data.get("children") or [])
+    h = max(260, min(620, 40 + 24 * n))
+    js = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    return (f'<div class="mm" style="height:{h}px"><svg id="mm" aria-label="知识点导图"></svg></div>'
+            f'<script type="application/json" id="mm-data">{js}</script>')
+
+
 def page(title: str, head: list, toc_items: list, sections_html: list, qa: list,
          plots: list, extra_html: str = "", footer: str = "",
-         overview_html: str = "", closing_html: str = "") -> str:
+         overview_html: str = "", closing_html: str = "",
+         mindmap: dict | None = None) -> str:
     """整页 HTML。参数全是**已渲染好的片段** —— 这个函数只负责骨架。
 
     `toc_items` 与 `sections_html` **分开传**：目录要的是标题（知识点），
@@ -1205,8 +1361,12 @@ def page(title: str, head: list, toc_items: list, sections_html: list, qa: list,
 <title>{html.escape(title)}</title>
 <script>document.documentElement.className="js"</script>
 <link rel="stylesheet" href="{KATEX_CSS}" onerror="window.__katex_css_failed=1">
+<link rel="stylesheet" href="{HETI_DIR}/heti.min.css">
 <style>{_CSS}</style>
 <script defer src="{KATEX_JS}" onerror="window.__katex_failed=1"></script>
+<script defer src="{HETI_DIR}/heti-addon.min.js"></script>
+{(f'<script defer src="{MARKMAP_DIR}/d3.min.js"></script>'
+  f'<script defer src="{MARKMAP_DIR}/markmap-view.js"></script>') if mindmap else ''}
 </head><body>
 <div id="prog" aria-hidden="true"></div>
 <div id="topbar"><button id="theme" type="button">☾ 暗色</button></div>
@@ -1214,7 +1374,7 @@ def page(title: str, head: list, toc_items: list, sections_html: list, qa: list,
 <h1>{html.escape(title)}</h1>
 <div class="meta">{''.join(head)}</div>
 {overview_html}
-<nav class="toc"><strong>知识点地图</strong><ol>{toc}</ol></nav>
+<nav class="toc"><strong>知识点地图</strong>{_mindmap_html(mindmap)}<ol>{toc}</ol></nav>
 <p><button id="expand" type="button">展开全部步骤</button></p>
 {''.join(sections_html)}
 {('<h2>图</h2><div class="plots">' + ''.join(plots) + "</div>") if plots else ''}
@@ -1430,4 +1590,5 @@ def note_page(d) -> str:
     return page(title, head, toc_items, secs, review.get("qa") or [], [], extra,
                 footer="<p>这是<b>详细版</b>（简版是 Markdown 那一份，同目录）。</p>"
                        + warns_html,
-                overview_html=overview, closing_html=closing)
+                overview_html=overview, closing_html=closing,
+                mindmap=mindmap_data(review.get("title_zh") or title, sections))

@@ -564,7 +564,10 @@ class ConceptUnits(unittest.TestCase):
         a = got["sections"][0]
         self.assertEqual(a["ts"], "13:16–13:20")     # 单元结束时刻 = 下一节起点（不是 13:18）
         self.assertEqual(a["minutes"], 4.0)          # 13:16→13:18 + 13:18→13:20
-        self.assertEqual(a["prose"], ["[13:16] 最优化练习与停业价格：计算平均成本·讲解。",
+        # ⭐ 2026-11-21 第三轮：成员子题不同 → 每段前插 `## 子题`（节内小标题）
+        self.assertEqual(a["prose"], ["## 计算平均成本",
+                                      "[13:16] 最优化练习与停业价格：计算平均成本·讲解。",
+                                      "## 三次函数练习",
                                       "[13:18] 最优化练习与停业价格：三次函数练习·讲解。"])
         self.assertEqual(a["example"]["prompt"], "[13:16] 最优化练习与停业价格：计算平均成本·题",
                          "重复例子只留第一个")
@@ -2224,31 +2227,37 @@ class TermGlossNoDup(unittest.TestCase):
 
 
 class AnnounceTermsEn(unittest.TestCase):
-    """术语英文化（2026-11-02）：首次 `English（中文）`、同字段后续直接 `English`。"""
+    """术语英文化（2026-11-02）：同字段后续直接 `English`；首次出现 2026-11-22 起改为 `中文（English）`。"""
 
     def test_首现英文前置_后续直接英文(self):
         terms, seen = [("泻流", "effusion")], set()
         got = nv.announce_terms("泻流是气体逸出。泻流速率正比于均方根速率。",
                                 terms, seen, en_first=True)
-        self.assertEqual(got, "effusion（泻流）是气体逸出。effusion 速率正比于均方根速率。")
+        self.assertEqual(got, "泻流（effusion）是气体逸出。effusion 速率正比于均方根速率。")
 
     def test_长词优先_不劈短词(self):
         terms = [("氨", "ammonia"), ("氨基酸", "amino acid")]
         got = nv.announce_terms("氨和氨基酸都在这里。", terms, set(), en_first=True)
-        self.assertIn("amino acid（氨基酸）", got)
-        self.assertIn("ammonia（氨）", got)
+        self.assertIn("氨基酸（amino acid）", got)
+        self.assertIn("氨（ammonia）", got)
         self.assertNotIn("ammonia基酸", got)
+
+    def test_模型写的英文在前_首次对调_收空格(self):
+        terms = [("泻流", "effusion")]
+        got = nv.announce_terms("先看 effusion（泻流） 怎么算，再说 effusion 速率。", terms, set(),
+                                en_first=True)
+        self.assertEqual(got, "先看泻流（effusion）怎么算，再说 effusion 速率。")
 
     def test_日常词不英文化(self):
         terms = [("注意", "attention"), ("证据", "evidence")]
         got = nv.announce_terms("注意这里的证据。", terms, set(), en_first=True)
         self.assertEqual(got, "注意这里的证据。", "日常词/元话语词一律不动")
 
-    def test_已有的中文括注翻成英文前置(self):
-        """同一篇只许一种写法：模型/标题里已经写好的「中文（English）」也翻过来。"""
+    def test_已有的中文括注保持中文在前(self):
+        """同一篇只许一种写法：首次一律「中文（English）」（2026-11-22）。"""
         terms = [("泻流", "effusion")]
         got = nv.announce_terms("泻流（effusion）是核心。", terms, set(), en_first=True)
-        self.assertEqual(got, "effusion（泻流）是核心。")
+        self.assertEqual(got, "泻流（effusion）是核心。")
 
     def test_后面字段也换成英文(self):
         """英文化不能被 `_done()` 提前截断：下一个字段里剩下的中文也要换。"""
@@ -2256,14 +2265,14 @@ class AnnounceTermsEn(unittest.TestCase):
                "sections": [{"prose": ["再说泻流怎么算。"],
                              "terms": [{"en": "effusion", "zh": "泻流"}]}]}
         got = nv.announce_terms_in_review(rev, en_first=True)
-        self.assertEqual(got["overview_long"][0], "先看 effusion（泻流）。")
+        self.assertEqual(got["overview_long"][0], "先看泻流（effusion）。")
         self.assertEqual(got["sections"][0]["prose"][0], "再说 effusion 怎么算。")
 
-    def test_标题反过来写(self):
+    def test_标题不再翻成英文在前(self):
         rev = {"sections": [{"heading": "格雷姆定律（Graham's law）", "prose": ["看。"],
                              "terms": []}]}
         got = nv.announce_terms_in_review(rev, en_first=True)
-        self.assertEqual(got["sections"][0]["heading"], "Graham's law（格雷姆定律）")
+        self.assertEqual(got["sections"][0]["heading"], "格雷姆定律（Graham's law）")
 
     def test_开关关闭时退回旧口径(self):
         import os

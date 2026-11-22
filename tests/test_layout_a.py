@@ -417,7 +417,7 @@ class F7Display(unittest.TestCase):
 
 
 class TermEn(unittest.TestCase):
-    """2026-11-02：`CLASSLIVE_NOTE_TERM_EN=1` → 正文写英文原词，首现带中文括注。"""
+    """2026-11-02：`CLASSLIVE_NOTE_TERM_EN=1` → 正文写英文原词；首现 2026-11-22 起写「中文（English）」。"""
 
     def _env(self, val):
         old = os.environ.get("CLASSLIVE_NOTE_TERM_EN")
@@ -444,19 +444,20 @@ class TermEn(unittest.TestCase):
             h = nh.note_page(self._rev())
         finally:
             self._restore(old)
-        self.assertIn("marginal cost（边际成本）怎么算", h)
+        # ⭐ 2026-11-22：首次「中文（English）」，后续只写英文
+        self.assertIn("边际成本（marginal cost）怎么算", h)
         self.assertIn("marginal cost 再出现时不括注", h)
-        self.assertNotIn("边际成本（marginal cost）", h)
+        self.assertNotIn("marginal cost（边际成本）", h)
 
-    def test_md_不出现中文前置括注(self):
+    def test_md_不出现英文前置括注(self):
         """简版 Markdown 不渲染讲解段（只放速览/术语/一些事儿）——
-           这里钉的是「别漏出旧格式的括注」。"""
+           这里钉的是「别漏出 11-22 前的英文前置括注」。"""
         old = self._env("1")
         try:
             md = nr.render(self._rev())
         finally:
             self._restore(old)
-        self.assertNotIn("边际成本（marginal cost）", md)
+        self.assertNotIn("marginal cost（边际成本）", md)
 
 
 if __name__ == "__main__":

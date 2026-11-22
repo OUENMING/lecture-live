@@ -1493,6 +1493,7 @@ def _stem(heading: str) -> str:
     `最小化函数的两种方法` ×3 → **3 个概念单元**（作者 2026-10-18 第七轮 A）。
     """
     h = re.sub(r"^\s*(?:\[[^\]]*\]\s*)*", "", str(heading or "")).strip()
+    h = h.replace("《", "").replace("》", "").strip()   # 计划路：模型偶尔照抄书名号，主干要对得上
     return h.split("：", 1)[0].split(":", 1)[0].strip() or h
 
 
@@ -1526,6 +1527,53 @@ def unit_cjk(sec: dict) -> int:
     for x in (sec.get("pitfalls") or []):
         n += _cjk(x)
     return n
+
+
+#: 讲解里的**小标题项**：`prose` 里单独一项 `## 子题`（2026-11-21 第三轮）。
+#: 由 `merge_units` 从成员标题的「主干：子题」生成；渲染成节内小标题（HTML h4）。
+SUBHEAD = re.compile(r"^\s*#{2,4}\s+(\S.{0,29})$")
+
+
+def subhead_of(item) -> str:
+    """`prose` 的一项是小标题 → 返回标题文字；否则空串。**纯函数。**"""
+    m = SUBHEAD.match(str(item or ""))
+    return m.group(1).strip() if m else ""
+
+
+def _sub_of(heading) -> str:
+    """「主干：子题」的子题部分（没有 → 空串）。"""
+    h = re.sub(r"^\s*(?:\[[^\]]*\]\s*)*", "", str(heading or "")).strip()
+    h = h.replace("《", "").replace("》", "")
+    for sep in ("：", ":"):
+        if sep in h:
+            return h.split(sep, 1)[1].strip()
+    return ""
+
+
+def _merged_prose(members: list) -> list:
+    """同一单元的成员讲解按顺序拼接；成员标题带**不同的子题**时，在每段前插一项 `## 子题`。
+
+    ⭐ 2026-11-21 第三轮：合并前模型已经按「主干：子题」分好了小节，合并时只留主干 →
+       一节 9–25 段、没有任何路标（实测 5 节课）。子题本来就在，留下来当小标题即可，
+       不加调用。只有 ≥2 个不同子题时才插（单个子题 = 没分组，插了是噪音）。
+    """
+    subs = [_sub_of(s2.get("heading")) for s2 in members]
+    # 模型偶尔多套一层（「主干：二级主干：子题」）→ 各子题共有的「二级主干：」前缀剥掉
+    #  （2026-11-21 截图实测：4 个小标题全以「独立性、证据与政策：」开头）。
+    heads = {x.split("：", 1)[0] for x in subs if x}
+    if len(heads) == 1 and all("：" in x for x in subs if x):
+        subs = [x.split("：", 1)[1].strip() if x else x for x in subs]
+    use = len({x for x in subs if x}) >= 2
+    out: list = []
+    seen: set = set()
+    for s2, sub in zip(members, subs):
+        paras = [str(x) for x in (s2.get("prose") or []) if str(x).strip()]
+        # 同一子题再出现（等分出的后半段又起了同名小节）→ 接着写，不再插一次
+        if use and sub and sub not in seen and paras:
+            out.append(f"## {sub[:30]}")
+            seen.add(sub)
+        out.extend(paras)
+    return out
 
 
 def merge_units(review: dict, *, end_ts: str = "") -> dict:
@@ -1588,7 +1636,7 @@ def merge_units(review: dict, *, end_ts: str = "") -> dict:
                      else members[-1].get("ts"))
             m["ts"] = f"{first.get('ts')}–{end_s}"
             m["heading"] = _stem(first.get("heading")) or first.get("heading")
-        m["prose"] = [str(x) for s2 in members for x in (s2.get("prose") or []) if str(x).strip()]
+        m["prose"] = _merged_prose(members)
         cues, seen_c = [], set()
         for s2 in members:
             for c in (s2.get("cues") or []):
@@ -1771,16 +1819,25 @@ def _user_content(lines: list, *, domain: str = "", materials_block: str = "",
 def review(entries: list, *, chat, domain: str = "", materials=None,
            on_progress=None, workers: int = REVIEW_WORKERS,
            max_tokens: int = REVIEW_MAX_TOKENS_THINKING, extra: str = "",
-           skeleton: list | None = None) -> dict:
+           skeleton: list | None = None, plan: list | None = None) -> dict:
     """分块调 LLM → 合并。`chat(system, user, max_tokens) -> dict`。
 
     ⚠️ 并发发、**按块序收**（同旧版 `_review` 的取舍：串行那 4–5 块是下课→笔记
        最长的一段）。某块失败只少那一块 —— 绝不抛、绝不整体返回空。
+
+    `plan`（`note_plan.validate` 的产物）：非空时**按节切块**，每块再拿一句工作单
+    （`note_plan.work_order`），只写计划里分给它的那一节。空 → 按固定 `REVIEW_CHUNK`
+    切块、提示词与以前**逐字一致**（老路）。
     """
     lines = transcript_lines(entries)
     if not lines:
         return {}
-    chunks = chunk_lines(lines)
+    # W1：有计划就按节切块（0/1 节的计划在 `note_plan.validate` 已退回 `[]`）；
+    #     计划为空时走老路（固定 70 行/块），提示词逐字不变。
+    import note_plan                     # 函数内 import：note_plan 反过来 import 本模块
+    work_order = note_plan.work_order
+    chunks = (note_plan.chunks(lines, plan) if plan
+              else chunk_lines(lines))
     meta: dict = {}
     from materials import snippets_block
 
@@ -1814,6 +1871,8 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
                  (ex_base, int(max_tokens * 1.5))]
         sys_text = (REVIEW_SYS.replace("__PLOTS__", _plots_menu())
                     .replace("__CALIBER__", _caliber_block(materials)))
+        if _reader_first_enabled():
+            sys_text += READER_FIRST
         for ex2, mt in tries:
             if _cancel.is_set() or time.monotonic() >= _budget_end:
                 break
@@ -1822,7 +1881,9 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
                 got = _clean(chat(sys_text, user, mt))
                 if got:
                     return got
-            except Exception:                                 # noqa: BLE001
+            except Exception as e:                            # noqa: BLE001
+                if os.environ.get("CLASSLIVE_NOTE_DEBUG") == "1":   # A/B 排查用：块失败原因
+                    print(f"   ⚠ review 块失败：{type(e).__name__}: {str(e)[:200]}", flush=True)
                 continue
         return {}
 
@@ -1856,7 +1917,9 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
             pass
     # ⭐ 每一块带上**自己的**字数上限（≈240 CJK 字/分钟；第七轮 H）——上限不是目标，
     #    "宁少勿多"写进了提示词；生成后还有超限压缩兜底。
-    futs = [ex.submit(_one_counted, c, extra + chunk_budget_line(c)) for c in chunks]
+    futs = [ex.submit(_one_counted, c, extra + chunk_budget_line(c)
+                      + (work_order(plan, it) if plan else ""))
+            for c, it in zip(chunks, plan if plan else [None] * len(chunks))]
     ex.shutdown(wait=False)
     import concurrent.futures as _cf
     # ⭐ 3.10.6：**一次等全部**到预算点，再按块序取结果 —— 原来按块序 `fut.result(timeout)`
@@ -1878,6 +1941,11 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
             failed.append(ci)
         blocks.append(b)
     got = merge_blocks(blocks)
+    if plan:
+        # 计划路：工作单里的节名有时被原样连书名号抄进 heading（《甲》）→ 去掉，免得显示和并节都受影响
+        for s in got.get("sections") or []:
+            if isinstance(s, dict) and s.get("heading"):
+                s["heading"] = str(s["heading"]).replace("《", "").replace("》", "")
     if got.get("sections"):
         # ⭐ 概念单元（第七轮 A）：相邻、同主干的小节并成一个单元 ——
         #    覆盖度（ts 变成区间）、渲染、长度上限全按单元走。
@@ -1891,7 +1959,8 @@ def review(entries: list, *, chat, domain: str = "", materials=None,
     # ⚠️ 失败块**记账**（不静默）：调用方/验收日志要看得见"这半节课没生成"。
     #    ⚠️ 只有真的生成了内容才挂这个键 —— 全失败时必须还是 `{}`（调用方据此早退）。
     if got:
-        got["chunk_stats"] = {"n": len(chunks), "failed": sorted(failed)}
+        got["chunk_stats"] = {"n": len(chunks), "failed": sorted(failed),
+                             "plan": len(plan or [])}
     return got
 
 
@@ -2468,6 +2537,26 @@ def _inside_longer_term(text: str, zh: str, i: int, zhs) -> bool:
     return any(len(z) > len(zh) and text.startswith(z, i) for z in zhs if z)
 
 
+#: ⭐ 2026-11-21 可读性改版：「读者优先」写法（思路借 ysyecust/lecture-to-notes 的
+#:    reader-first-writing §2/§4/§5 与 Anthropic 提示词指南「写成应该怎样」的正向写法）。
+#:    接在 REVIEW_SYS 末尾，开关 `CLASSLIVE_NOTE_READER`（默认关，A/B 定去留）。
+READER_FIRST = """
+
+## 写法：读者优先（正文 `prose` 每一段都照这个写）
+- 一段只做一件事：讲清一个概念、走完一步推导、或点破一个坑。段首第一句直接说出这段的结论（会被加粗），后面的句子都在支撑这一句。
+- 先讲含义、再给名字：一个术语或符号第一次出现时，先用一句大白话说它是什么、管什么用，再写它的名字和式子。
+- 句子写短，一句只说一个意思（一般 50 字以内）；长的推理拆成几句，按"因为 → 所以"的顺序排。
+- 开门见山：第一个字就是内容本身（如"边际产量递减说的是……"）；用内容之间的因果、对比来衔接，下一段从上一段的结论接着往前走。
+- 每个意思全篇只说一次：前面讲过的定义或结论，后面要用时用半句话点名指回去，然后直接讲新的东西。
+- 节的标题写这一节回答的问题或得出的结论（读者扫一眼目录就知道整课的逻辑线），用课里真实的概念名，每个标题都独立成立。
+"""
+
+
+def _reader_first_enabled() -> bool:
+    """`CLASSLIVE_NOTE_READER`（默认关）：复习层系统提示词末尾接「读者优先」写法。"""
+    return os.environ.get("CLASSLIVE_NOTE_READER", "1").strip() == "1"
+
+
 def _term_en_enabled() -> bool:
     """`CLASSLIVE_NOTE_TERM_EN`（默认开）：正文关键术语用英文原词。"""
     v = os.environ.get("CLASSLIVE_NOTE_TERM_EN", "").strip().lower()
@@ -2562,6 +2651,37 @@ def _gloss_first(text: str, en: str, zh: str) -> str:
     return text[:m.end()] + f"（{zh}）" + tail
 
 
+def _gloss_first_zh(text: str, en: str, zh: str) -> str:
+    """英文化模式下术语的**第一次**出现写成「中文（English）」（作者 2026-11-22 定）。**纯函数。**
+
+    为什么：理解层靠中文、背诵层靠英文（作者 2026-09-14 定的两层）—— 第一次读到先懂意思，
+    后面每次都是英文原词，背的仍是考卷上的词。
+    · 第一次出现已经是 `English（中文）`（模型自己写的 / `_swap_bare` 翻过来的）→ 对调；
+    · 是光秃的 `English` → 换成 `中文（English）`；
+    · 已在括注里（`（English）`）→ 不动（已经是「中文（English）」了）。
+    中英间为排版补的空格，英文换成中文后两边都是中文，一并收掉。
+    """
+    m = re.search(r"(?<![A-Za-z])" + re.escape(en) + r"(?![A-Za-z])", text)
+    if not m:
+        return text
+    if text[max(0, m.start() - 1):m.start()] in ("（", "("):
+        return text
+    tail = text[m.end():]
+    g = re.match(r"\s?[（(]([^）)]{1,30})[）)]", tail)
+    if g and any(_is_cjk(c) for c in g.group(1)):
+        label, tail = g.group(1).strip(), tail[g.end():]
+    elif g:
+        return text                       # 后面跟着别的英文括注（缩写等）—— 不叠
+    else:
+        label = zh
+    head = text[:m.start()]
+    if head.endswith(" ") and len(head) > 1 and _is_cjk(head[-2]):
+        head = head[:-1]
+    if tail.startswith(" ") and len(tail) > 1 and _is_cjk(tail[1]):
+        tail = tail[1:]
+    return head + f"{label}（{en}）" + tail
+
+
 #: 标题里的「中文（English）」——英文化模式要反过来写成「English（中文）」。
 _HEAD_ZH_EN = re.compile(r"([\u4e00-\u9fff][^（）]{0,18})（([A-Za-z][^（）]{0,48})）")
 
@@ -2599,8 +2719,9 @@ def announce_terms(text: str, terms, seen: set, *, en_first: bool = False) -> st
                 continue                       # 日常词/元话语：连括注都不加
             out, swapped = _swap_bare(out, zh, en, zhs)
             if (zh, en) not in seen:
-                if swapped:
-                    out = _gloss_first(out, en, zh)
+                # 模型自己写好的「English（中文）」（没换出任何东西）也要把首次对调过来
+                if swapped or re.search(re.escape(en) + r"\s?[（(]", out):
+                    out = _gloss_first_zh(out, en, zh)
                 seen.add((zh, en))
             continue
         if (zh, en) in seen:
@@ -2730,8 +2851,7 @@ def announce_terms_in_review(review: dict, *, canon=None, en_first: bool = False
                 or not isinstance(v, str) or not v:
             continue
         new = canon_fix_parens(v, canon_map)
-        if en_first:
-            new = flip_head(new)
+        # ⭐ 2026-11-22：标题不再翻成「English（中文）」—— 首次「中文（English）」（`_gloss_first_zh`）
         if new != v:
             _set_path(out, path, new)
     terms = [(zh, (canon_en(zh, canon_map) or en)) for zh, en in collect_terms(out)]
@@ -2813,7 +2933,6 @@ def announce_terms_in_outline(items: dict, *, state: dict | None = None,
         new = v
         if name in ("title", "title_zh", "heading"):
             new = canon_fix_parens(new, canon_map)
-            new = flip_head(new)
         new = announce_terms(new, terms, seen, en_first=True)
         new = note_guards.collapse_dup_gloss(new)
         if new != v:

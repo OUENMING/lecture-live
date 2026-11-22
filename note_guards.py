@@ -2165,6 +2165,71 @@ def strip_clock_times(review: dict) -> tuple:
     return out, [], warns
 
 
+_CJK_CH = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+#: 直引号配对时要**跳过**的片段：公式、行内代码、HTML 标签（里面的 `"` 不是标点）。
+_QUOTE_PROTECT = re.compile(r"\$\$.+?\$\$|\$[^$\n]+\$|`[^`\n]+`|<[^>]+>")
+_STRAIGHT_PAIR = re.compile(r'[ \u00a0]?"([^"\n]*)"[ \u00a0]?')
+
+
+def corner_quotes_text(s: str) -> str:
+    """中文语境里的 ASCII 直引号 → 中文引号（**纯函数**，2026-11-21 第三轮）。
+
+    为什么：直引号是西文标点，heti 的中西文间距会在它两侧加空格（「" 为什么 "」）；
+    W3C clreq §5.2：直引号不是中文标点。
+    · 引号里有汉字 → `「…」`（本仓库提示词与界面全用直角引号）；
+    · 引号里是纯英文（原话引用）→ 弯引号 `“…”` —— ⚠️ 不改成「」：`_QUOTE` / quote_check
+      只认 `“”"` 来抓逐字原话，改成直角引号会让原话核对漏掉它；
+    · 直引号个数是奇数（配不上对）/ 整句没有汉字 → 原样不动；公式、代码、标签里的不碰；
+    · 内容里已有「」→ 不动（避免嵌套错位）。
+    """
+    if not isinstance(s, str) or s.count('"') < 2 or not _CJK_CH.search(s):
+        return s
+    keep: list = []
+
+    def _hide(m):
+        keep.append(m.group(0))
+        return f"\x00{len(keep) - 1}\x00"
+
+    t = _QUOTE_PROTECT.sub(_hide, s)
+    if t.count('"') % 2:
+        return s
+
+    def _swap(m):
+        inner = m.group(1).strip()
+        if "「" in inner or "」" in inner:
+            return m.group(0)
+        if _CJK_CH.search(inner):
+            return f"「{inner}」"
+        lead = " " if m.group(0)[:1] in (" ", "\u00a0") else ""
+        tail = " " if m.group(0)[-1:] in (" ", "\u00a0") else ""
+        return f"{lead}“{inner}”{tail}"
+
+    t = _STRAIGHT_PAIR.sub(_swap, t)
+    return re.sub(r"\x00(\d+)\x00", lambda m: keep[int(m.group(1))], t)
+
+
+def corner_quotes(review: dict) -> tuple:
+    """整份笔记的直引号规整（守卫链接口：返回 `(review, [], warns)`）。
+
+    ⚠️ 不碰：`ts`/`sources`/`where`/`quote`/`spoken`（证据与逐字原话）、`checks`/`corrections`
+       台账、`cover` 机器数据 —— 同 `strip_clock_times` 的豁免名单。
+    """
+    out = copy.deepcopy(review)
+    n = 0
+    for path in paths_of(out):
+        if not path or path[0] in _SKIP_TOP or path[0] in ("checks", "corrections"):
+            continue
+        if _field_name(path) in ("ts", "sources", "where", "quote", "spoken"):
+            continue
+        v = _get(out, path)
+        v2 = corner_quotes_text(v)
+        if v2 != v:
+            _set(out, path, v2)
+            n += 1
+    warns = [f"{n} 处直引号换成中文引号"] if n else []
+    return out, [], warns
+
+
 #: 纯算术问题的尾巴（"…等于多少？" / "…是多少？"）。
 _ARITH_TAIL = re.compile(r"[，,、;；：:\s]*(?:等于|是|得|为|＝|=)\s*"
                          r"(?:多少|几|什么数(?:字|值)?|什么)?[？?。！!]?\s*$")

@@ -185,3 +185,6 @@
 | 判断流程（是/否分叉） | CHE002A 盐溶液酸碱性判断；BUSI3193 SSNIP 相关市场检验；BUSI3222 选 OLS/logit/probit/有序；ECS170 视觉任务选模型 |
 | 标注样例（一行式子/代码/输出/句子，分段贴标签） | CHE002A 共轭酸碱对方程；BUSI3222/3243 Stata 输出怎么读；UG 引用句（integral vs non-integral） |
 | 演算表（ICE 表） | CHE002A pH 计算（只在化学/平衡类出现，优先级低） |
+
+**状态（Owen 11-22）：先记录、不修。** 待办：① 上表图元（刻度/区间、判断流程优先）；② 重大错没降（概念标反，如 UG integral/non-integral），还没有对策；
+③ 真 `glossary/` 里 7 个实验误建的术语表（BUSI3222、ECS170、CHE002A、BUSI3193、UG、BUSI3243、ENERGY）等 Owen 定移走/留着。

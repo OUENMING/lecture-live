@@ -284,5 +284,99 @@ class OutlineUnicodeMinus(unittest.TestCase):
         self.assertEqual(no._replace_number("结果是 −2.89", "2.89", "-1.767"), "结果是 −2.89")
 
 
+class HtmlAssetsResume(unittest.TestCase):
+    def test_half_copied_assets_get_completed(self):
+        import note_html as nh
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst = Path(tmp) / "src", Path(tmp) / "dst"
+            src.mkdir()
+            (src / "a.js").write_text("AAAA", encoding="utf-8")
+            (src / "b.css").write_text("BBBBBB", encoding="utf-8")
+            dst.mkdir()
+            (dst / "a.js").write_text("AAAA", encoding="utf-8")      # probe 在
+            (dst / "b.css").write_text("BB", encoding="utf-8")       # 半截
+            self.assertTrue(nh._copy_flat(src, dst, "a.js"))
+            self.assertEqual((dst / "b.css").read_text(encoding="utf-8"), "BBBBBB")
+            self.assertEqual(sorted(p.name for p in dst.iterdir()), ["a.js", "b.css"])
+
+    def test_install_assets_full(self):
+        import note_html as nh
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "n.html"
+            self.assertTrue(nh.install_assets(page))
+            self.assertTrue((Path(tmp) / nh.KATEX_DIR / "fonts").is_dir())
+            self.assertTrue((Path(tmp) / nh.HETI_DIR / "heti-addon.min.js").is_file())
+
+
+class HtmlSliderJs(unittest.TestCase):
+    """滑杆：多曲线 + 断点，连拖几次不抛、每条曲线按自己的 series 重画（node + 假 DOM）。"""
+
+    def test_slider_multi_series_with_breaks(self):
+        import json
+        import shutil
+        import subprocess
+        import note_html as nh
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("没有 node")
+        js = nh._JS
+        a, b = js.index(" d.querySelectorAll('.slider')"), js.index(" var bar=")
+        harness = Path(__file__).parent / "fixtures" / "js" / "slider_harness.js"
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "slider.js"
+            src.write_text(js[a:b], encoding="utf-8")
+            r = subprocess.run([node, str(harness), str(src)], capture_output=True,
+                               text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        self.assertEqual(sorted(json.loads(r.stdout)),
+                         ["c0 userline=1,1", "c0=0,1", "c2 userline=6,1", "c2=5,1"])
+
+    def test_theme_first_click_when_system_dark(self):
+        import json
+        import shutil
+        import subprocess
+        import note_html as nh
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("没有 node")
+        js = nh._JS
+        code = js[js.index(" var tbtn="):js.index(" // ---- 版式 A")]
+        h = ("const attrs={};const btn={textContent:'',l:{},addEventListener(t,f){this.l[t]=f}};"
+             "const d={documentElement:{getAttribute:k=>attrs[k]||null,"
+             "setAttribute:(k,v)=>{attrs[k]=v}},getElementById:()=>btn};"
+             "global.window={matchMedia:q=>({matches:true})};"
+             "new Function('d'," + json.dumps(code) + ")(d);"
+             "const seq=[btn.textContent];btn.l.click();seq.push(attrs['data-theme']);"
+             "console.log(JSON.stringify(seq));")
+        r = subprocess.run([node, "-e", h], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        self.assertEqual(json.loads(r.stdout), ["☀︎ 亮色", "light"])
+
+    def test_break_segments_marked_userline_in_svg(self):
+        import note_html as nh
+        out = nh.svg("function_cubic", {"a": 1.0, "b": 0.0, "c": -3.0, "d": 0.0})
+        self.assertNotIn('class="c0 userline"', out.split("<polyline", 2)[1])  # 首段不是续段
+
+
+class HtmlBoldLeadTags(unittest.TestCase):
+    def test_sentence_end_inside_tag_keeps_tags_paired(self):
+        import note_html as nh
+        self.assertEqual(nh._bold_lead("<strong>第一句。第二句</strong>后面。", keyline=False),
+                         "<strong>第一句。第二句后面。</strong>")
+        self.assertEqual(nh._bold_lead("前 <code>a。b</code> 后。尾巴。", keyline=False),
+                         "<strong>前 <code>a。b</code> 后。</strong>尾巴。")
+        self.assertEqual(nh._bold_lead("第一句。第二句。", keyline=True),
+                         '<strong class="keyline">第一句。</strong>第二句。')
+
+
+class VgateCountedInLedger(unittest.TestCase):
+    """「图该不该画」撤的图要进守卫台账的 dropped（结构判据：计数分支的标签集合里有它）。"""
+
+    def test_label_in_dropped_branch(self):
+        src = (Path(__file__).resolve().parents[1] / "obsidian_writer.py").read_text(encoding="utf-8")
+        i = src.index('elif label == "图该不该画" and isinstance(extra_items, list):')
+        self.assertIn('self._guard_counts["dropped"] += len(extra_items)', src[i:i + 300])
+
+
 if __name__ == "__main__":
     unittest.main()

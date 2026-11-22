@@ -67,13 +67,27 @@ MARKMAP_DIR = f".classlive-assets/markmap/{MARKMAP_VERSION}"
 
 
 def _copy_flat(src: pathlib.Path, dst: pathlib.Path, probe: str) -> bool:
-    """把 `src` 下的文件（不含子目录）装到 `dst`（**幂等**：`probe` 在就不再拷）。"""
+    """把 `src` 下的文件（不含子目录）装到 `dst`（**幂等**：每个文件都在、大小对得上就不再拷）。
+
+    ⚠️ 原来只看 `probe` 一个文件：拷到一半中断（probe 已拷、别的没拷 / 拷了半截）之后
+       永远不补（OCR 11-22）。现在逐个文件比大小，缺的 / 不对的重拷；先写临时名再改名，
+       半截文件不会顶着正式名字留下。
+    """
+    import os
     import shutil
-    if not (dst / probe).exists():
+    for f in src.glob("*"):
+        if not f.is_file():
+            continue
+        d = dst / f.name
+        try:
+            if d.is_file() and d.stat().st_size == f.stat().st_size:
+                continue
+        except OSError:
+            pass
         dst.mkdir(parents=True, exist_ok=True)
-        for f in src.glob("*"):
-            if f.is_file():
-                shutil.copy2(f, dst / f.name)
+        tmp = dst / f".{f.name}.part"
+        shutil.copy2(f, tmp)
+        os.replace(tmp, d)
     return (dst / probe).exists()
 
 
@@ -84,17 +98,10 @@ def install_assets(note_html_path) -> bool:
        函数、由写端（`obsidian_writer._write_sidecars`）调。装不上不算错：
        页面上公式会退回 TeX 源码（那条兜底一直在）。
     """
-    import shutil
     try:
         dst = pathlib.Path(note_html_path).parent / KATEX_DIR
-        if not (dst / "katex.min.js").exists():
-            dst.mkdir(parents=True, exist_ok=True)
-            for f in KATEX_SRC.glob("*"):
-                if f.is_file():
-                    shutil.copy2(f, dst / f.name)
-            (dst / "fonts").mkdir(exist_ok=True)
-            for f in (KATEX_SRC / "fonts").glob("*.woff2"):
-                shutil.copy2(f, dst / "fonts" / f.name)
+        _copy_flat(KATEX_SRC, dst, "katex.min.js")         # 逐个文件补齐（同 heti/markmap）
+        _copy_flat(KATEX_SRC / "fonts", dst / "fonts", "")
         ok = (dst / "katex.min.css").exists() and (dst / "fonts").is_dir()
     except Exception:                                          # noqa: BLE001
         ok = False
@@ -337,7 +344,10 @@ def svg(kind: str, params: dict, *, w: int = 460, h: int = 280, pid: str = "p",
                 parts.append(f'<circle class="dot" cx="{sx(x):.1f}" cy="{sy(y):.1f}" r="4"/>')
             continue
         for _k, seg in enumerate(path(pts)):
-            parts.append(f'<polyline class="c{idx}" points="{seg}" '
+            # 断点后的续段标 `userline`：滑杆重画时整批清掉、按 `c{idx}` 重建（JS 那边按
+            # series 下标取曲线，不按 polyline 计数 —— 续段会让计数错位）。
+            extra = " userline" if _k else ""
+            parts.append(f'<polyline class="c{idx}{extra}" points="{seg}" '
                          f'style="stroke:{colors[idx % 3]}"/>')
     # 图例：**每条曲线一个色块 + 名字**（旧版只有一行文字 —— 读者不知道哪条是哪条）。
     # ⚠️ 只画真正有曲线的那些 series（`idx` 用图例下标取名字；交点那种点系列跳过）。
@@ -473,18 +483,36 @@ def _prose_html(seg: str) -> str:
 
 
 def _first_sentence_end(h: str) -> int:
-    """在**已渲染的 HTML** 里找第一句的结束位置（。！？），跳过标签内部（属性里的标点不算）。"""
+    """在**已渲染的 HTML** 里找第一句的结束位置（。！？），跳过标签内部（属性里的标点不算）。
+
+    ⚠️ 只认**不在任何元素里面**的句号（`<strong>第一句。第二句</strong>` / `<code>a。b</code>`
+       里的不算）—— 原来切在元素中间：head 带走开标签、tail 留下孤立的 `</strong>`，
+       或外层 `<strong>` 与 `<code>` 交叉嵌套（OCR 11-22）。
+    """
     i, n = 0, len(h)
+    depth = 0
+    pending = False          # 元素里刚出现句号、且之后还没有正文字（`<strong>先说结论。</strong>`）
     while i < n:
         ch = h[i]
         if ch == "<":                       # 跳过整个标签（含 data-tex 属性里的标点）
             j = h.find(">", i)
             if j < 0:
                 return n
+            tag = h[i + 1:j]
+            if tag.startswith("/"):
+                depth = max(0, depth - 1)
+            elif not tag.endswith("/") and not re.match(r"(?i)(br|img|hr|wbr|input)\b", tag):
+                depth += 1
             i = j + 1
+            if pending and depth == 0:      # 句号正好落在元素末尾 → 切在闭合标签之后
+                return i
             continue
         if ch in "。！？":
-            return i + 1
+            if depth == 0:
+                return i + 1
+            pending = True
+        elif not ch.isspace():
+            pending = False                 # 句号后元素里还有字：那不是句界
         i += 1
     return n
 
@@ -871,15 +899,20 @@ _JS = r"""
   input.addEventListener('input',function(){
    var i=+input.value, o=opts[i]; if(!o||!svg) return;
    out.textContent=vals[i];
-   svg.querySelectorAll('polyline').forEach(function(pl,k){
-    var pts=(o[k]||[]);
+   // ⚠️ OCR 11-22：原来在每条曲线的循环里清 `.userline`（多曲线时把前面刚补的续段全删了），
+   //    且 `querySelectorAll('polyline')` 连上一轮的续段一起选中 → 下标错位、第二次拖动
+   //    insertBefore 抛 TypeError，图不再更新。现在：先清续段，只遍历主段，按 `c{idx}` 取曲线。
+   svg.querySelectorAll('polyline.userline').forEach(function(e){e.remove()});
+   svg.querySelectorAll('polyline:not(.userline)').forEach(function(pl){
+    var m=/(?:^|\s)c(\d+)(?:\s|$)/.exec(pl.getAttribute('class')||''); if(!m) return;
+    var pts=(o[+m[1]]||[]);
     var groups=[],seg=[];pts.forEach(function(s){ if(s) seg.push(s); else if(seg.length){groups.push(seg.join(' '));seg=[];} });
     if(seg.length) groups.push(seg.join(' '));
     pl.setAttribute('points',groups[0]||'');
-    var extra=pl.parentNode.querySelectorAll('polyline.userline');extra.forEach(function(e){e.remove()});
+    var at=pl;
     for(var g=1;g<groups.length;g++){
      var c=pl.cloneNode();c.setAttribute('points',groups[g]);c.classList.add('userline');
-     pl.parentNode.insertBefore(c,pl.nextSibling);
+     at.parentNode.insertBefore(c,at.nextSibling); at=c;
     }
    });
   });
@@ -913,8 +946,11 @@ _JS = r"""
  }
  if(tbtn){ themeLabel();
   tbtn.addEventListener('click',function(){
+  // 按**当前生效**的主题取反（没设 data-theme = 跟随系统）：原来没设时一律给 dark，
+  // 系统本来就是暗色 → 第一次点没反应（OCR 11-22）。
   var cur=d.documentElement.getAttribute('data-theme');
-  var next=(cur==='dark')?'light':(cur==='light'?'dark':'dark');
+  var dark=(cur==='dark')||(!cur&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);
+  var next=dark?'light':'dark';
   d.documentElement.setAttribute('data-theme',next);
   tbtn.textContent=(next==='dark')?'☀︎ 亮色':'☾ 暗色';
   });

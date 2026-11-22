@@ -1654,6 +1654,9 @@ class ObsidianWriter:
                 elif label in ("猜测句清理", "猜测句清理（串讲）", "重复句去重",
                                "纯算术线索问题", "组件上限", "组件去重") and isinstance(extra_items, list):
                     self._guard_counts["dropped"] += len(extra_items)
+                elif label == "图该不该画" and isinstance(extra_items, list):
+                    # 撤的图也进台账（原来漏了，页头「删了几处」少算，OCR 11-22）
+                    self._guard_counts["dropped"] += len(extra_items)
                 for w in warns_:
                     self._note_warns.append(w)
                     print(f"   ⚠ {label}：{w}", flush=True)

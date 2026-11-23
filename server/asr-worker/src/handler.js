@@ -457,8 +457,25 @@ const DENY = {   // 码不能用 -> HTTP 状态；客户端按「云端不可用
 };
 
 async function passes(env, path, payload) {
-  const stub = env.PASSES.get(env.PASSES.idFromName(PASSES_NAME));
+  const stub = env.PASSES.get(env.PASSES.idFromName(PASSES_NAME));   // 每次现取：Cloudflare 说抛过错的 stub 会「坏掉」，不许复用
   return stub.fetch(`https://passes${path}`, { method: "POST", body: JSON.stringify(payload) });
+}
+
+// DO 调用抛错时记一行诊断（原先 catch 后只回 503，原因全丢：2026-11-23 12:20Z 那次分不清瞬时还是过载）。
+// Cloudflare 文档（Durable Objects · Error handling / Automatic retries，2026-11 核过）：
+//   .retryable —— 瞬时错误；运行时已自动重试（默认最多 4 次、起点后 10 s 内）仍到这里，说明这么久都没连上；
+//   .overloaded —— 过载，**不许重试**（重试只会更糟）。
+// 所以这里不再自己加重试环：运行时那层已经退避过，叠上去会成倍放大（官方原话）；/check 也会写设备表，不是纯读。
+// 只记名字 / 消息前 160 字 / 三个布尔，不带通行码、请求体。
+function logPassesErr(where, e) {
+  try {
+    console.log(JSON.stringify({
+      passes_do: "threw", where,
+      name: String(e?.name ?? "").slice(0, 40),
+      msg: String(e?.message ?? e).slice(0, 160),
+      retryable: e?.retryable === true, overloaded: e?.overloaded === true, remote: e?.remote === true,
+    }));
+  } catch { /* 诊断本身不许再抛 */ }
 }
 
 // 码能不能用 -> {deny} 或 {deny:null, left}。DO 不可用 -> 503（不放行：码模式下钱是 Owen 付的）。
@@ -468,7 +485,7 @@ async function checkPassInfo(env, code, install, kind, web = false, dev = undefi
   const payload = web ? { code, install, kind, client: "web" } : { code, install, kind };
   if (dev) payload.dev = dev;
   let r = null;
-  try { r = await (await passes(env, "/check", payload)).json(); } catch { r = null; }
+  try { r = await (await passes(env, "/check", payload)).json(); } catch (e) { logPassesErr("check", e); r = null; }
   if (!r) return { deny: json(503, { error: "passes_unavailable" }), left: undefined };
   if (!r.ok) {
     console.log(JSON.stringify({ pass: r.name ?? "?", denied: r.reason, kind }));
@@ -547,7 +564,7 @@ async function settleGate(gate, res) {
 }
 
 function reportUsage(env, ctx, payload) {
-  const p = passes(env, "/usage", payload).catch(() => {});
+  const p = passes(env, "/usage", payload).catch((e) => logPassesErr("usage", e));
   ctx?.waitUntil?.(p);
 }
 

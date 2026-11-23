@@ -263,6 +263,31 @@ test("通行码模式下 DO 不可用 -> 503（不放行：钱是 Owen 付的）
   } finally { h.restore(); }
 });
 
+// 2026-11-23 12:20Z：通行码 DO 约 15 s 连不上，Worker 回了 12 个 503 passes_unavailable，但抛错原因被 catch 吞掉，
+// 事后分不清是「瞬时（retryable）」「过载（overloaded）」还是代码问题。现在每次都记一行（不带通行码 / 请求体）。
+test("DO 抛错 -> 503 之外还记一行诊断：name / msg / retryable / overloaded（不含通行码）", async () => {
+  const h = harness();
+  const logs = [];
+  const orig = console.log;
+  try {
+    const { code } = await (await h.call(h.adminReq("add", { name: "u" }))).json();
+    const err = Object.assign(new Error("Durable Object is overloaded. Too many requests queued."), { retryable: true, overloaded: true });
+    h.env.PASSES = { idFromName: (n) => n, get: () => ({ fetch: async () => { throw err; } }) };
+    console.log = (...a) => { logs.push(a.join(" ")); };
+    const res = await h.call(h.chatReq(code, body()));
+    assert.equal(res.status, 503);
+    assert.deepEqual(await res.json(), { error: "passes_unavailable" }, "对外的 503 体不变（客户端靠它认）");
+    assert.equal(h.calls.deepseek.length, 0);
+    const line = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } }).find((o) => o && o.passes_do === "threw");
+    assert.ok(line, "必须有一行 passes_do 诊断");
+    assert.equal(line.where, "check");
+    assert.equal(line.retryable, true);
+    assert.equal(line.overloaded, true);
+    assert.match(line.msg, /overloaded/);
+    assert.ok(!JSON.stringify(line).includes(code), "诊断里不许出现通行码");
+  } finally { console.log = orig; h.restore(); }
+});
+
 test("⭐ 被额度拒掉的请求**不登记设备**、也不刷新 last_seen", async () => {
   // ⚠️ 根因（2026-10-12 全仓审查）：`check()` 原来把设备登记排在额度校验**之前** ——
   //    被额度拒掉的请求照样占一个设备名额、并刷新 `last`。

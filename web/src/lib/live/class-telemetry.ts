@@ -4,7 +4,7 @@
 // 测试用户都已授权采集（2026-11-20 Owen），所以不弹任何提示；服务端可用 WEB_TELEMETRY / WEB_AUDIO_UPLOAD 一键关。
 
 import { createTelemetry, installCollectors, createClassRecorder, resumePending, type Telemetry, type ClassRecorder } from '../telemetry';
-import { observeRequests, type RequestOutcome } from '../api';
+import { isNotReady, observeRequests, type RequestOutcome } from '../api';
 import type { TraceEvent } from '../translate';
 import type { SocketLike } from '../asr/soniox';
 import type { AudioSource } from '../audio';
@@ -43,7 +43,7 @@ function newTally() {
 		final: { n: 0, ok: 0, retry: 0, failed_sent: 0, err: {} as Record<string, number>, first_ms: [] as number[], wait_ms: [] as number[] },
 		draft: { n: 0, ok: 0, stale: 0, aborted: 0, err: 0 },
 		sent: { n: 0, failed: 0, total_ms: [] as number[] },
-		api: { n: 0, fail: 0, by: {} as Record<string, number> },
+		api: { n: 0, fail: 0, pending: 0, by: {} as Record<string, number> },
 		console: { error: 0, warn: 0 },
 		ws: { opened: 0, closed: 0, errors: 0 },
 		hidden_ms: 0,
@@ -81,12 +81,16 @@ export function startClassTelemetry(p: { session_id: string; course: string }): 
 	try {
 		unobserve = observeRequests((o: RequestOutcome) => {
 			tally.api.n++;
-			if (!o.ok) {
+			// 「还没出」（404 not_ready）是正常状态：单独记 pending，不进 fail / by，事件带 expected 供面板略过
+			const expected = isNotReady(o);
+			if (expected) {
+				tally.api.pending++;
+			} else if (!o.ok) {
 				tally.api.fail++;
 				const k = `${o.status ?? 0}:${o.reason ?? o.kind ?? ''}`.slice(0, 40);
 				tally.api.by[k] = (tally.api.by[k] ?? 0) + 1;
 			}
-			safe('api', { ...o, path: o.path.slice(0, 120) });
+			safe('api', { ...o, ...(expected ? { expected: true } : {}), path: o.path.slice(0, 120) });
 		});
 	} catch {
 		/* 少一类数据 */

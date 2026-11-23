@@ -2,7 +2,7 @@
 // 全部用注入的假 fetch，不连网、不花钱；服务端那几支拒绝原因抄的是 handler.js / keyentry 的原文。
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
-import { ApiError, apiBase, request } from '../../src/lib/api/http.ts';
+import { ApiError, apiBase, isNotReady, request, type RequestOutcome } from '../../src/lib/api/http.ts';
 import { checkPasscode, createKeySource, getSonioxKey } from '../../src/lib/api/soniox-key.ts';
 import { passcode } from '../../src/lib/api/identity.ts';
 
@@ -219,4 +219,15 @@ test('没存通行码时不带 Authorization（调用方自己会先拒绝）', 
 	const { calls, fetch } = fakeFetch(() => text(401, 'unauthorized'));
 	await getSonioxKey(undefined, { fetch }).catch(() => {});
 	assert.equal('Authorization' in (calls[0].init.headers as Record<string, string>), false);
+});
+
+// 读服务端产物（summary / note）时 404 not_ready 是开课头几分钟的正常状态，不是失败：
+// 11-23 xioazhu 那节课 10 条「api 失败」里 6 条是它，把面板的异常计数和下课总账的 api.fail 都垫高了。
+test('isNotReady：只认 404 + not_ready；其余失败（含别的 404）照旧算失败', () => {
+	const base: RequestOutcome = { path: '/v1/web/session/s_0f1d8aff637d/summary', method: 'GET', ms: 120, ok: false };
+	assert.equal(isNotReady({ ...base, status: 404, reason: 'not_ready' }), true);
+	assert.equal(isNotReady({ ...base, status: 404, reason: 'not_found' }), false, '别的 404 不是「还没出」');
+	assert.equal(isNotReady({ ...base, status: 503, reason: 'upstream' }), false);
+	assert.equal(isNotReady({ ...base, status: 0, reason: 'deadline' }), false);
+	assert.equal(isNotReady({ ...base, ok: true, status: 404, reason: 'not_ready' }), false, '成功的请求谈不上');
 });

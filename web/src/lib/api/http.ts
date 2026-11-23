@@ -156,6 +156,14 @@ export interface RequestOutcome {
 	reason?: string;
 }
 
+/**
+ * 「还没出」不是失败：读服务端产物（summary / note）时 404 + not_ready 是开课头几分钟的正常状态
+ * （`web-artifacts.ts` 也把它当 null 而不是抛）。遥测据此不把它记成 api 失败。
+ */
+export function isNotReady(o: RequestOutcome): boolean {
+	return !o.ok && o.status === 404 && o.reason === 'not_ready';
+}
+
 let observer: ((o: RequestOutcome) => void) | null = null;
 /** 装一个观察者（遥测用，同时只有一个）；返回卸载函数。观察者抛错被吞。 */
 export function observeRequests(fn: (o: RequestOutcome) => void): () => void {

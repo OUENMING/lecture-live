@@ -146,10 +146,16 @@ def _load(root: pathlib.Path, keys: list[str], only: str | None = None) -> dict:
     return dict(by)
 
 
+def _expected_miss(e: dict) -> bool:
+    """「还没出」（读 summary / note 的 404 not_ready）是开课头几分钟的正常状态，不是异常。
+    新网页包会带 `expected: true`；已经在线上的老包没有这个字段，所以也认 404 + not_ready 本身。"""
+    return bool(e.get("expected")) or (e.get("status") == 404 and e.get("reason") == "not_ready")
+
+
 def bad_events(evs: list) -> list:
     """一节课里值得看的异常事件（报错 / 断线 / 失败的请求与翻译 …）。"""
     return [e for e in evs if e.get("type") in _BAD
-            or (e.get("type") == "api" and not e.get("ok"))
+            or (e.get("type") == "api" and not e.get("ok") and not _expected_miss(e))
             or (e.get("type") == "tr" and e.get("outcome") != "ok")]
 
 

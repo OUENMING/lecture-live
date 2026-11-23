@@ -64,6 +64,8 @@ export interface Scripted {
 	cuts?: number[];
 	/** 卡住不返回，直到 signal abort（测取消 / 并发上限） */
 	hang?: boolean;
+	/** fetch 直接抛 TypeError（断网 / DNS / 连接被重置，浏览器里就是 `Failed to fetch`） */
+	throw?: boolean;
 }
 
 /**
@@ -93,6 +95,7 @@ export function fakeFetch(script: Scripted[]): {
 				signal?.addEventListener('abort', () => reject(abortErr()), { once: true });
 			});
 		}
+		if (step.throw) throw new TypeError('Failed to fetch');
 		if (step.status && step.status !== 200) {
 			return new Response(JSON.stringify({ error: 'rate_limited' }), { status: step.status });
 		}

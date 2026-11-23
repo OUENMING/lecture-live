@@ -3,7 +3,8 @@
 // 状态与回调用在构造时注入，所以本模块不碰 DOM、不碰计时器全局、不认 fetch 地址。
 // 为什么这样分两条：桌面版也是两条线程 —— 定稿串行（一句接一句，`final_worker`），
 // 草稿单槽（新的顶掉旧的，`DraftTranslator`）。并发上限照桌面：定稿 1、草稿 1、互不等待。
-// 失败口径：一次失败重试一次，两次都失败就标「这句没译出」（`failed`），下一句照常，不卡队列。
+// 失败口径：软失败（回显 / 空包 / 4xx）立刻重试一次；基础设施类失败（断网 / 500 502 503 504）按「退避 + 抖动 + 限次」
+// 最多再试三次；用完预算就标「这句没译出」（`failed`），下一句照常，不卡队列（见 `BACKOFF_CAPS_MS`）。
 
 import type { TwoLineResult } from './format';
 import { TwoLineParser, looksLikeEcho } from './format';
@@ -30,6 +31,10 @@ export interface TranslatorDeps {
 	onDraft: (ev: { zh: string }) => void;
 	/** 排障打点（可选，旁路）：每次请求一条。抛错被吞，不影响翻译 */
 	onTrace?: (ev: TraceEvent) => void;
+	/** 注入的等待（退避用）；默认 setTimeout，`close()` 会让它提前醒 */
+	sleep?: (ms: number) => Promise<void>;
+	/** 注入的 [0,1) 随机数（退避抖动用）；默认 `Math.random` */
+	random?: () => number;
 }
 
 /** 一次翻译请求的结局（遥测用；对齐桌面 `.live.jsonl` 的逐句打点，外加失败原因） */
@@ -47,6 +52,8 @@ export interface TraceEvent {
 	ms: number;
 	status?: number;
 	err?: string;
+	/** 这次失败后决定退避多久再重试（毫秒）；没有重试就不带 */
+	retry_in_ms?: number;
 }
 
 interface Queued {
@@ -66,8 +73,27 @@ interface DraftJob {
 	ctl: AbortController;
 }
 
-/** 定稿句最多试几次（桌面：`fix_and_translate_stream` 失败由调用方兜底；这里多给一次重试）。 */
+/** 软失败（回显 / 空包 / 4xx / 提示词拼装失败）最多试几次（桌面：`fix_and_translate_stream` 失败由调用方兜底；这里多给一次重试）。 */
 const MAX_ATTEMPTS = 2;
+
+/**
+ * 基础设施类失败（断网 / 500 502 503 504）的退避预算：每次重试前等 `cap/2 + 随机(0~cap/2)`（equal jitter），cap 逐次拉长。
+ * 最长约 17 s、平均约 13 s —— 够盖住 2026-11-23 12:20Z 那次通行码 Durable Object 约 15 s 的不可用
+ * （旧口径两次请求隔约 20 ms，第 174–178 句整串丢译文）。
+ * 依据：AWS Builders Library「Timeouts, retries, and backoff with jitter」、Google SRE「Addressing Cascading Failures」
+ * （退避 + 抖动 + 限次）、Cloudflare DO 文档「Error handling」（瞬时错误要指数退避）。
+ */
+export const BACKOFF_CAPS_MS = [2000, 5000, 10000] as const;
+/** 降级档（上一句已用完预算、至今没成功过）：只退避一次，免得每句都等满 17 s、队列越堆越长。 */
+const DEGRADED_CAPS_MS = [2000] as const;
+
+/** 这次失败算不算「基础设施类」：断网 / 流被掐（ChatError 且 status 0）、500 / 502 / 503 / 504。取消、回显、空包、4xx 都不算。 */
+function isInfraFailure(e: unknown): boolean {
+	if (!(e instanceof Error) || e.name !== 'ChatError') return false;
+	const { aborted, status } = e as Partial<ChatError>;
+	if (aborted === true) return false;
+	return status === 0 || status === 500 || status === 502 || status === 503 || status === 504;
+}
 
 export class Translator {
 	#deps: TranslatorDeps;
@@ -79,6 +105,10 @@ export class Translator {
 	#trace: (ev: TraceEvent) => void;
 	#running = false;
 	#closed = false;
+	/** 上一句把退避预算用完、之后还没成功过 → 进降级档（见 `DEGRADED_CAPS_MS`） */
+	#degraded = false;
+	/** 正在退避等待的句子：`close()` 叫醒它们 */
+	#sleepers = new Set<() => void>();
 	#draft: DraftJob | null = null;
 	/** 最近一次上屏的草稿译文（清空时要知道上一条是不是自己发的） */
 	#draftZh = '';
@@ -173,6 +203,20 @@ export class Translator {
 	close(): void {
 		this.#closed = true;
 		this.#cancelDraft();
+		for (const wake of [...this.#sleepers]) wake();
+	}
+
+	#sleep(ms: number): Promise<void> {
+		if (this.#deps.sleep) return this.#deps.sleep(ms);
+		return new Promise<void>((resolve) => {
+			const wake = (): void => {
+				clearTimeout(timer);
+				this.#sleepers.delete(wake);
+				resolve();
+			};
+			const timer = setTimeout(wake, ms);
+			this.#sleepers.add(wake);
+		});
 	}
 
 	#cancelDraft(): void {
@@ -266,14 +310,19 @@ export class Translator {
 		};
 		let zh = '';
 		let enFixed = '';
-		while (job.attempt < MAX_ATTEMPTS) {
+		/** 软失败次数（上限 MAX_ATTEMPTS 次请求）与已用掉的退避次数（上限 caps.length）分开记 */
+		let soft = 0;
+		let backoffs = 0;
+		const caps = this.#degraded ? DEGRADED_CAPS_MS : BACKOFF_CAPS_MS;
+		const rand = this.#deps.random ?? Math.random;
+		for (;;) {
 			job.attempt += 1;
 			if (this.#closed) return;
 			zh = '';
 			enFixed = '';
 			const t0 = this.#now();
 			let first: number | null = null;
-			const trace = (outcome: TraceEvent['outcome'], e?: unknown) =>
+			const trace = (outcome: TraceEvent['outcome'], e?: unknown, retryInMs?: number) =>
 				this.#trace({
 					kind: 'final',
 					seg: job.seg,
@@ -282,7 +331,8 @@ export class Translator {
 					wait_ms: job.attempt === 1 ? t0 - job.tSealed : undefined,
 					first_ms: first === null ? null : first - t0,
 					ms: this.#now() - t0,
-					...(e !== undefined ? errOf(e) : {})
+					...(e !== undefined ? errOf(e) : {}),
+					...(retryInMs !== undefined ? { retry_in_ms: retryInMs } : {})
 				});
 			const parser = new TwoLineParser((d) => {
 				if (first === null) first = this.#now();
@@ -305,22 +355,39 @@ export class Translator {
 				const res: TwoLineResult = parser.result(job.en);
 				if (looksLikeEcho(res.zh, job.en)) throw Object.assign(new Error('回显'), { aborted: false, outcome: 'echo' });
 				this.#finals.push(res.en);
+				this.#degraded = false;
 				patch(res.zh, res.en, true);
 				trace('ok');
 				return;
 			} catch (e) {
 				const aborted = (e as ChatError)?.aborted === true;
 				const oc = (e as { outcome?: TraceEvent['outcome'] })?.outcome;
-				trace(aborted ? 'aborted' : (oc ?? 'error'), e);
 				if (aborted) {
+					trace('aborted', e);
 					patch(zh, enFixed || job.en, true, true);
 					return;
 				}
+				// 决定还试不试、等多久（先决定再打点，retry_in_ms 才能带进这一条）
+				let waitMs: number | null = null;
+				if (isInfraFailure(e)) {
+					if (backoffs < caps.length) {
+						const cap = caps[backoffs];
+						waitMs = Math.round(cap / 2 + (rand() * cap) / 2);
+						backoffs += 1;
+					} else {
+						this.#degraded = true; // 预算用完：之后的句子别再每句都等满
+					}
+				} else if ((soft += 1) < MAX_ATTEMPTS) {
+					waitMs = 0;
+				}
+				trace(oc ?? 'error', e, waitMs && waitMs > 0 ? waitMs : undefined);
+				if (waitMs === null) break;
 				// 还有下一次：把这一段已上屏的中文清掉，避免「垃圾+正文」粘连
-				if (job.attempt < MAX_ATTEMPTS && zh) patch('', job.en, false);
+				if (zh) patch('', job.en, false);
+				if (waitMs > 0) await this.#sleep(waitMs);
 			}
 		}
-		// 两次都失败：界面显示英文，中文标失败，后面照常
+		// 预算用完：界面显示英文，中文标失败，后面照常
 		this.#finals.push(job.en);
 		patch('', job.en, true, true);
 	}

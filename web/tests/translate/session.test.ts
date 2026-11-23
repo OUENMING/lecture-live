@@ -153,7 +153,10 @@ test('翻译接进会话：中文进 rows、草稿译文进 draftZh、延迟打�
 
 test('翻译失败：界面留着英文，后面那句照常（延迟只数出了中文的）', async () => {
 	const p = await prompt();
+	// 500 属基础设施类失败：首发 + 三次退避重试 = 4 次都失败才落 failed（退避不真等）
 	const ff = fakeFetch([
+		{ status: 500 },
+		{ status: 500 },
 		{ status: 500 },
 		{ status: 500 },
 		{ sse: sseText(['ZH: ', '第二句译文。', '\nEN: Second sentence.']) }
@@ -170,7 +173,8 @@ test('翻译失败：界面留着英文，后面那句照常（延迟只数出�
 				endpoint: () => ({ url: 'https://example.test/v1/chat/completions', headers: {} }),
 				chat: (opts) => streamChat({ ...opts, fetch: ff.fetch }),
 				onFinal: hooks.onFinal,
-				onDraft: hooks.onDraft
+				onDraft: hooks.onDraft,
+				sleep: async () => {}
 			})
 	});
 	await s.start();

@@ -63,8 +63,10 @@ function make(
 	calls: Recorded[];
 	events: { seg: number; zh: string; en: string; done: boolean; failed: boolean }[];
 	drafts: string[];
+	sleeps: number[];
 } {
 	const ff = fakeFetch(script);
+	const sleeps: number[] = [];
 	const events: { seg: number; zh: string; en: string; done: boolean; failed: boolean }[] = [];
 	const drafts: string[] = [];
 	const chat: ChatFn = (opts) => streamChat({ ...opts, fetch: ff.fetch });
@@ -74,9 +76,14 @@ function make(
 		endpoint: () => ({ url: 'https://example.test/v1/chat/completions', headers: {} }),
 		chat,
 		onFinal: (ev) => events.push(ev),
-		onDraft: (ev) => drafts.push(ev.zh)
+		onDraft: (ev) => drafts.push(ev.zh),
+		// 退避不真等：只记下每次要等多久；random 钉在 0.5 让时长可复现
+		sleep: async (ms) => {
+			sleeps.push(ms);
+		},
+		random: () => 0.5
 	});
-	return { tr, calls: ff.calls, events, drafts };
+	return { tr, calls: ff.calls, events, drafts, sleeps };
 }
 
 test('定稿句：请求体、请求头、增量上屏、最终两行都对', async () => {
@@ -111,11 +118,11 @@ test('定稿句：请求体、请求头、增量上屏、最终两行都对', as
 	assert.deepEqual([...tr.context], [EN]);
 });
 
-test('失败一次重试、两次都失败就标 failed，后面照常翻', async () => {
+test('4xx 失败：立刻重试一次、两次都失败就标 failed，后面照常翻（不退避）', async () => {
 	const p = await prompt();
-	const { tr, calls, events } = make(p, [
-		{ status: 500 },
-		{ status: 500 },
+	const { tr, calls, events, sleeps } = make(p, [
+		{ status: 403 },
+		{ status: 403 },
 		{ sse: finalSse('第二句译文。', 'The second sentence.') }
 	]);
 	await tr.final(1, 'the midterm covers chapters one to three.');
@@ -123,12 +130,106 @@ test('失败一次重试、两次都失败就标 failed，后面照常翻', asyn
 	assert.equal(failed.length, 1, '两次失败后必须落一条 failed');
 	assert.equal(failed[0].zh, '', '失败那句没有中文（界面显示英文）');
 	assert.equal(failed[0].en, 'the midterm covers chapters one to three.');
-	assert.equal(calls.length, 2, '只许重试一次（共两次请求）');
+	assert.equal(calls.length, 2, '4xx 不是基础设施抖动：只许立刻重试一次（共两次请求）');
+	assert.deepEqual(sleeps, [], '4xx 不退避');
 
 	await tr.final(2, 'the second sentence.');
 	const ok = events.filter((e) => e.done && !e.failed);
 	assert.equal(ok.length, 1);
 	assert.equal(ok[0].zh, '第二句译文。', '失败之后下一句照常翻');
+});
+
+// 2026-11-23 12:20Z 实测：通行码 DO 约 15 s 不可用，Worker 回 503 passes_unavailable；
+// 旧口径两次请求隔 ~20 ms，第 174–178 句整串丢译文。AWS Builders Library / Google SRE / Cloudflare DO 文档
+// 都要求：基础设施类失败（网络断 / 5xx）退避 + 抖动 + 限次。
+test('503（DO 抖动）：退避重试，恢复后这句照样译出来', async () => {
+	const p = await prompt();
+	const { tr, calls, events, sleeps } = make(p, [{ status: 503 }, { status: 503 }, { status: 503 }, { sse: finalSse() }]);
+	await tr.final(174, 'the midterm covers chapters one to three.');
+	assert.equal(calls.length, 4, '首发 + 三次退避重试');
+	// random=0.5 → equal jitter：cap/2 + 0.5 * cap/2 = 0.75 * cap
+	assert.deepEqual(sleeps, [1500, 3750, 7500], '上限 2 / 5 / 10 s，指数拉长');
+	const last = events[events.length - 1];
+	assert.ok(last.done && !last.failed && last.zh === ZH, '恢复后译文正常上屏');
+	assert.equal(events.filter((e) => e.failed).length, 0, '中途不许落 failed');
+});
+
+test('退避等待落进 onTrace.retry_in_ms，最后一次失败 / 成功没有', async () => {
+	const p = await prompt();
+	const ff = fakeFetch([{ status: 502 }, { sse: finalSse() }]);
+	const traces: import('../../src/lib/translate/translator.ts').TraceEvent[] = [];
+	const tr = new Translator({
+		prompt: p,
+		endpoint: () => ({ url: 'https://example.test/v1/chat/completions', headers: {} }),
+		chat: (opts) => streamChat({ ...opts, fetch: ff.fetch }),
+		onFinal: () => {},
+		onDraft: () => {},
+		onTrace: (ev) => traces.push(ev),
+		sleep: async () => {},
+		random: () => 0.5
+	});
+	await tr.final(1, 'the midterm covers chapters one to three.');
+	assert.equal(traces[0].status, 502);
+	assert.equal(traces[0].retry_in_ms, 1500);
+	assert.equal(traces[1].outcome, 'ok');
+	assert.equal(traces[1].retry_in_ms, undefined);
+});
+
+test('断网（fetch 抛 TypeError）也算基础设施失败：退避重试', async () => {
+	const p = await prompt();
+	const { tr, calls, events, sleeps } = make(p, [{ throw: true }, { sse: finalSse() }]);
+	await tr.final(1, 'the midterm covers chapters one to three.');
+	assert.equal(calls.length, 2);
+	assert.deepEqual(sleeps, [1500]);
+	assert.ok(events[events.length - 1].done && !events[events.length - 1].failed);
+});
+
+test('长故障：这句用完退避预算落 failed；之后的句子进降级档只退避一次，一次成功就恢复完整预算', async () => {
+	const p = await prompt();
+	const { tr, calls, events, sleeps } = make(p, [
+		{ status: 503 }, { status: 503 }, { status: 503 }, { status: 503 }, // 第 1 句：1 + 3 次全败
+		{ status: 503 }, { status: 503 },                                   // 第 2 句：降级档 1 + 1 次
+		{ sse: finalSse('第三句。', 'Third.') },                             // 第 3 句：恢复
+		{ status: 503 }, { status: 503 }, { status: 503 }, { sse: finalSse('第四句。', 'Fourth.') } // 第 4 句：又有完整预算
+	]);
+	await tr.final(1, 'first sentence.');
+	assert.equal(calls.length, 4);
+	assert.equal(events.filter((e) => e.done && e.failed).length, 1, '第 1 句落 failed');
+	assert.deepEqual(sleeps, [1500, 3750, 7500]);
+
+	sleeps.length = 0;
+	await tr.final(2, 'second sentence.');
+	assert.equal(calls.length, 6, '降级档：只多退避重试一次');
+	assert.deepEqual(sleeps, [1500]);
+	assert.equal(events.filter((e) => e.done && e.failed).length, 2);
+
+	sleeps.length = 0;
+	await tr.final(3, 'third sentence.');
+	assert.equal(calls.length, 7, '服务回来了：一次成功');
+	await tr.final(4, 'fourth sentence.');
+	assert.deepEqual(sleeps, [1500, 3750, 7500], '成功过一次 → 退出降级档，重新有完整预算');
+	assert.equal(events.filter((e) => e.done && e.failed).length, 2, '第 3、4 句都译出来了');
+});
+
+test('下课（close）时正在退避的句子立刻醒来收工，不挂着等满', async () => {
+	const p = await prompt();
+	const ff = fakeFetch([{ status: 503 }, { sse: finalSse() }]);
+	const events: { done: boolean; failed: boolean }[] = [];
+	const tr = new Translator({
+		prompt: p,
+		endpoint: () => ({ url: 'https://example.test/v1/chat/completions', headers: {} }),
+		chat: (opts) => streamChat({ ...opts, fetch: ff.fetch }),
+		onFinal: (ev) => events.push(ev),
+		onDraft: () => {},
+		random: () => 0 // 默认 sleep：cap/2 = 1000 ms
+	});
+	const t0 = Date.now();
+	const pending = tr.final(1, 'the midterm covers chapters one to three.');
+	await new Promise((r) => setTimeout(r, 50));
+	tr.close();
+	await pending;
+	assert.ok(Date.now() - t0 < 600, `close 后应立刻醒（实际 ${Date.now() - t0} ms）`);
+	assert.equal(ff.calls.length, 1, '关了就不再发请求');
 });
 
 test('并发上限：定稿串行（同时在途最多 1 个）', async () => {
@@ -218,7 +319,8 @@ test('onTrace：失败带状态码、重试带 attempt、成功带首字耗时�
 		onTrace: (ev) => {
 			traces.push(ev);
 			throw new Error('打点坏了');
-		}
+		},
+		sleep: async () => {}
 	});
 	await tr.final(1, 'the midterm covers chapters one to three.');
 	assert.equal(traces.length, 2);

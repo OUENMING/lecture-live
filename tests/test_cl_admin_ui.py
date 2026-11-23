@@ -1273,7 +1273,22 @@ class R2Reports(unittest.TestCase):
         self.assertEqual(called, [])
 
 
-def _sx_get(usage=None, conc=None, logs=None, bal=None):
+_ORG_PROJECTS = {"projects": [
+    {"id": "p-main", "name": "My First Project", "region": "main"},
+    {"id": "p-jp", "name": "jap", "region": "jp"},
+    {"id": "p-eu", "name": "eu", "region": "eu"}]}
+
+
+def _org_summary(jp_cost=("0.0001440000", "0.1535620000")):
+    day = lambda c: {"days": ["2026-10-17", "2026-10-18"], "cost_usd": list(c),
+                     "total_cost_usd": str(sum(float(x) for x in c))}
+    return {"total": day(("0.1", "0.2")), "projects": [
+        {"id": "p-jp", "name": "jap", "total": day(jp_cost),
+         "models": [{"model": "stt-rt-v6", "total_cost_usd": str(sum(float(x) for x in jp_cost))}]},
+        {"id": "p-main", "name": "My First Project", "total": day(("9.0", "9.0")), "models": []}]}
+
+
+def _sx_get(usage=None, conc=None, logs=None, bal=None, org_projects=None, org_summary=None):
     usage = usage or {"total": {"days": ["2026-10-12", "2026-10-18"], "cost_usd": ["0.0000000000", "0.0082920000"],
                                 "total_cost_usd": "1.2328580000"},
                       "models": [{"model": "stt-rt-v5", "total_cost_usd": "1.2328580000"}]}
@@ -1284,6 +1299,10 @@ def _sx_get(usage=None, conc=None, logs=None, bal=None):
         {"uuid": "u2", "end_time": "2026-10-18T10:05:00Z", "input_audio_duration_ms": 30000, "client_reference_id": "owen"}],
         "next_page_cursor": None}
     def get(url, headers):
+        if "/organization/projects" in url:       # 组织 API：先于项目 API 判（URL 里也含 /usage/summary）
+            return org_projects if org_projects is not None else _ORG_PROJECTS
+        if "/organization/usage/summary" in url:
+            return org_summary if org_summary is not None else _org_summary()
         if "/usage/summary" in url:
             return usage
         if "/concurrency-limits" in url:
@@ -1327,6 +1346,47 @@ class SonioxAccount(unittest.TestCase):
             r = U.soniox_account(get=_sx_get(bal=bal))
         self.assertEqual(r["balance"], {"available": 57.42, "free": 0, "used": 12.58, "exhausted": False, "autopay": True})
         self.assertEqual(r["balance_error"], "")
+
+    def test_缺项目key的区用组织汇总补上_jp花费不再看不见(self):
+        # 2026-11-23：Mac 上只有 us / eu 项目 key，日本区（国内用户的主力）花费面板看不见，
+        # 当天实测 $0.1536 被漏掉。组织 API（api.soniox.com/v1/organization/usage/summary）一把 org key 看全部项目。
+        import cl_admin_ui as U, datetime as dt
+        with tempfile.TemporaryDirectory() as d, _home_with(d, soniox__token="sk_US_SECRET", soniox__org__token="snx_org_SECRET"):
+            r = U.soniox_account(get=_sx_get(), now=dt.datetime(2026, 10, 18, 12, tzinfo=dt.timezone.utc))
+        self.assertEqual(r["regions"], ["jp", "us"], "组织汇总里没有 eu 项目的花费就不凭空补")
+        self.assertEqual(r["usage"]["jp"]["cost_today"], 0.1536)
+        self.assertEqual(r["usage"]["jp"]["cost_7d"], 0.1537)
+        self.assertEqual(r["usage"]["jp"]["days"], ["2026-10-17", "2026-10-18"])
+        self.assertEqual(r["usage"]["jp"]["models"], [{"model": "stt-rt-v6", "cost": 0.1537}])
+        self.assertEqual(r["usage"]["us"]["cost_today"], 0.0083, "有项目 key 的区仍走项目 API，不被组织汇总里的 main 项目覆盖")
+        self.assertEqual(r["usage"]["jp"].get("via"), "org", "标明这一区的数来自组织汇总")
+        self.assertNotIn("via", r["usage"]["us"])
+        self.assertNotIn("SECRET", json.dumps(r))
+        self.assertEqual(r["errors"], [])
+
+    def test_组织汇总读不到只记一条错_已有项目key的区不受影响(self):
+        import cl_admin_ui as U, datetime as dt
+        base = _sx_get()
+        def get(url, headers):
+            if "/organization/projects" in url:
+                raise OSError("boom")
+            return base(url, headers)
+        with tempfile.TemporaryDirectory() as d, _home_with(d, soniox__token="k", soniox__org__token="org"):
+            r = U.soniox_account(get=get, now=dt.datetime(2026, 10, 18, 12, tzinfo=dt.timezone.utc))
+        self.assertEqual(r["regions"], ["us"])
+        self.assertTrue(any("组织汇总" in e for e in r["errors"]), r["errors"])
+
+    def test_没配组织key就不查组织汇总(self):
+        import cl_admin_ui as U, datetime as dt
+        seen = []
+        base = _sx_get()
+        def get(url, headers):
+            seen.append(url)
+            return base(url, headers)
+        with tempfile.TemporaryDirectory() as d, _home_with(d, soniox__token="k"):
+            r = U.soniox_account(get=get, now=dt.datetime(2026, 10, 18, 12, tzinfo=dt.timezone.utc))
+        self.assertEqual(r["regions"], ["us"])
+        self.assertFalse(any("/organization/projects" in u or "/organization/usage/summary" in u for u in seen))
 
     def test_没key回人话不联网(self):
         import cl_admin_ui as U

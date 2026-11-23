@@ -1128,6 +1128,53 @@ def _get_json(url, tok=None, get=None, timeout=20) -> dict:
     return r if isinstance(r, dict) else {}
 
 
+#: Soniox 组织 API 里项目的区域名 → 我们的区名（`main` 是美国默认区）。
+SONIOX_ORG_REGION = {"main": "us", "us": "us", "eu": "eu", "jp": "jp"}
+
+
+def _soniox_usage_entry(total, models, now) -> dict:
+    """`/v1/usage/summary`（项目）与 `/v1/organization/usage/summary`（每个项目一条）共用的一区花费口径。"""
+    total = total if isinstance(total, dict) else {}
+    days = total.get("days") if isinstance(total.get("days"), list) else []
+    cost = total.get("cost_usd") if isinstance(total.get("cost_usd"), list) else []
+    today = cost[-1] if days and str(days[-1])[:10] == now.strftime("%Y-%m-%d") and cost else None
+    ms = [{"model": str(m.get("model") or ""), "cost": _f(m.get("total_cost_usd"))}
+          for m in (models or []) if isinstance(m, dict)][:6]
+    return {"days": [str(d)[:10] for d in days], "cost": [_f(x) for x in cost],
+            "cost_7d": _f(total.get("total_cost_usd")), "cost_today": _f(today) if today is not None else None,
+            "models": ms}
+
+
+def _soniox_org_usage(org_key, s7, u, now, get=None) -> dict:
+    """组织 API：项目表（id → 区）+ 每日每项目花费 → `{区: 花费条目}`，条目带 `via: "org"`。
+    组织接口只在 api.soniox.com 上（区域域名回 400）；同区多个项目的花费按天相加。官方 2026-11-23 核过。"""
+    base = SONIOX_REGION_API["us"]
+    pj = _get_json(f"{base}/v1/organization/projects", org_key, get)
+    region_of = {str(p.get("id")): SONIOX_ORG_REGION.get(str(p.get("region")))
+                 for p in (pj.get("projects") or []) if isinstance(p, dict)}
+    sj = _get_json(f"{base}/v1/organization/usage/summary?start_time={s7}&end_time={u}", org_key, get)
+    out: dict = {}
+    for pr in (sj.get("projects") or []):
+        region = region_of.get(str(pr.get("id"))) if isinstance(pr, dict) else None
+        if not region:
+            continue
+        e = _soniox_usage_entry(pr.get("total"), pr.get("models"), now)
+        if region not in out:
+            out[region] = {**e, "via": "org"}
+            continue
+        cur = out[region]                                              # 同区第二个项目：按天并进去
+        for d, c in zip(e["days"], e["cost"]):
+            if d in cur["days"]:
+                cur["cost"][cur["days"].index(d)] = round(cur["cost"][cur["days"].index(d)] + c, 4)
+            else:
+                cur["days"].append(d)
+                cur["cost"].append(c)
+        cur["cost_7d"] = round((cur["cost_7d"] or 0) + (e["cost_7d"] or 0), 4)
+        if e["cost_today"] is not None:
+            cur["cost_today"] = round((cur["cost_today"] or 0) + e["cost_today"], 4)
+    return out
+
+
 def soniox_account(get=None, now=None) -> dict:
     """本机 Soniox 项目 key 的用量与并发额度（只读；key 从不进响应）。
 
@@ -1150,15 +1197,18 @@ def soniox_account(get=None, now=None) -> dict:
         except Exception as e:                                        # noqa: BLE001
             errs.append(f"{region} 用量读不到：{type(e).__name__}")
             continue
-        total = j.get("total") if isinstance(j.get("total"), dict) else {}
-        days = total.get("days") if isinstance(total.get("days"), list) else []
-        cost = total.get("cost_usd") if isinstance(total.get("cost_usd"), list) else []
-        today = cost[-1] if days and days[-1][:10] == now.strftime("%Y-%m-%d") and cost else None
-        models = [{"model": str(m.get("model") or ""), "cost": _f(m.get("total_cost_usd"))}
-                  for m in (j.get("models") or []) if isinstance(m, dict)][:6]
-        usage[region] = {"days": [str(d)[:10] for d in days], "cost": [_f(x) for x in cost],
-                         "cost_7d": _f(total.get("total_cost_usd")), "cost_today": _f(today) if today is not None else None,
-                         "models": models}
+        usage[region] = _soniox_usage_entry(j.get("total"), j.get("models"), now)
+    # 没有项目 key 的区（如日本区：Worker 里配了 SONIOX_KEY_JP，Mac 上没有）→ 用组织 API 一把 org key 看全部项目的花费。
+    # 只补**花费**：用量日志 / 并发是项目作用域，没有项目 key 拿不到。
+    missing = [r for r in SONIOX_REGION_API if r not in usage]
+    org_key = _home_secret(SONIOX_ORG_FILE)                           # ⚠️ 别叫 org：下面并发那段有个同名局部变量
+    if missing and org_key:
+        try:
+            for region, entry in _soniox_org_usage(org_key, s7, u, now, get).items():
+                if region in missing:
+                    usage[region] = entry
+        except Exception as e:                                        # noqa: BLE001
+            errs.append(f"组织汇总读不到（补 {'/'.join(missing)} 区花费）：{type(e).__name__}")
     # 用量日志（`/v1/usage-logs`）：Soniox 侧的**真值** —— 每条一次会话，带音频秒与码名
     # （client_reference_id = 码名，Worker 签发临时 key 时就带上了）。这是「Worker 发了多少把 key
     # 对 Soniox 实际收了多少秒」的第三方对账口径。
@@ -1209,10 +1259,9 @@ def soniox_account(get=None, now=None) -> dict:
     first = next(iter(keys))
     concurrency = conc_by.get(first) or {"current": None, "limit": None}
     balance = None
-    org = _home_secret(SONIOX_ORG_FILE)
-    if org:
+    if org_key:
         try:
-            bj = _get_json(f"{SONIOX_REGION_API['us']}/v1/organization/balance", org, get)
+            bj = _get_json(f"{SONIOX_REGION_API['us']}/v1/organization/balance", org_key, get)
             balance = {"available": _f(bj.get("available_balance_usd")), "free": _f(bj.get("free_balance_usd")),
                        "used": _f(bj.get("used_balance_usd")),
                        "exhausted": bj.get("balance_exhausted") if isinstance(bj.get("balance_exhausted"), bool) else None,

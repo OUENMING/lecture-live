@@ -644,6 +644,8 @@ function money(v){
 }
 function fmtDur(sec){ if(sec == null || !isFinite(sec)) return "—"; sec = Math.max(0, sec);
   if(sec < 60) return Math.round(sec) + "s"; var m = Math.round(sec / 60); if(m < 60) return m + "m"; return Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0") + "m"; }
+/* 秒 → 同 ms() 的写法（report 的 seal_latency_s 是秒；以前直接喂 ms() 显示成「1 ms」） */
+function secs(v){ return v == null || !isFinite(v) ? "—" : ms(v * 1000); }
 function ms(v){ return v == null || !isFinite(v) ? "—" : v >= 1000 ? (v/1000).toFixed(v >= 10000 ? 0 : 2) + " s" : Math.round(v) + " ms"; }
 function mb(b){ b = +b || 0; return b >= 1e9 ? (b/1e9).toFixed(2) + " GB" : b >= 1e6 ? Math.round(b/1e6) + " MB" : Math.round(b/1e3) + " KB"; }
 function pct(a, b, d){ return b ? (a / b * 100).toFixed(d == null ? 1 : d) + "%" : "—"; }
@@ -684,7 +686,7 @@ function infoStr(i){ if(!i) return null;
 /* ================================================================
    数据层：每个接口独立加载、独立出错（一张卡坏了不拖垮整页）
    ================================================================ */
-var SLOW = ["cf","health","logs","ae","ae310","habits","r2","reports","soniox","openrouter","web","runner"];
+var SLOW = ["cf","health","logs","ae","ae310","habits","r2","reports","soniox","openrouter","web","runner","calls"];
 var S = {};          // name -> {data, err, at, busy}
 function api(name, body){
   return fetch("/api/" + name, {method:"POST",
@@ -1135,6 +1137,8 @@ function reportWho(s){ if(s.name && !/^\d{4}-\d{2}-\d{2}_/.test(s.name)) return 
   var t1 = Date.parse(s.report_at || s.updated), t0 = t1 - (s.duration_s || 0) * 1000; return isFinite(t1) ? whoAt(t0, t1) : null; }
 
 /* 一节桌面课的质量问题：每条 {lv, txt, why}（判据都来自报告自己的数字；沿用 3.11.1 的阈值） */
+/* 一节桌面课有多少句：3.10 起实时字幕（Soniox）封口句数才是全课；asr.words 只数走定稿 ASR 的那几段 */
+function sentN(s){ var st = s.stream || {}; return st.sealed_n != null ? st.sealed_n : (s.asr && s.asr.segments); }
 function classIssues(s){
   var out = [], st = s.stream;
   if(st && st.reason && st.reason !== "manual") out.push({lv:"bad", txt:"实时掉了 " + (st.detail || st.reason), why:"实时流断开，这节退回定稿转写"});
@@ -1152,7 +1156,7 @@ function classIssues(s){
   if((v.blind_dropped || 0) > 0) out.push({lv:"warn", txt:"盲丢 " + v.blind_dropped + " 块"});
   if((v.dropped_s || 0) > 0.5) out.push({lv:"warn", txt:"丢句 " + num(v.dropped_s, 1) + " 秒"});
   if(((s.merge || {}).failed || 0) > 0) out.push({lv:"warn", txt:"合并失败 " + s.merge.failed});
-  if(((s.asr || {}).empty_pct || 0) > 5) out.push({lv:"warn", txt:"空转写 " + num(s.asr.empty_pct, 1) + "%"});
+  if(((s.asr || {}).empty_pct || 0) > 5 && ((s.asr || {}).segments || 0) >= 10) out.push({lv:"warn", txt:"空转写 " + num(s.asr.empty_pct, 1) + "%"});
   var lv = s.live || {};
   if((lv.failed_calls || 0) > 0) out.push({lv:"warn", txt:"AI 调用失败 " + lv.failed_calls + " / " + num(lv.calls_total || 0)});
   var tl = s.tl || {};
@@ -1190,12 +1194,12 @@ function alerts(){
   var ds402 = grp(function(r){ return /deepseek:402/.test(r.up); });
   if(ds402.n) put(must, "bad", "ds402", "DeepSeek 拒了 " + num(ds402.n) + " 次（402 余额不足）", "去 DeepSeek 后台充值；不充的话之后的翻译和笔记会接着失败。", whenIn(ds402.first, ds402.who[0]) + " 起");
   var dead = grp(function(r){ return r.path === "/v1/transcribe" && +r.status >= 500; });
-  if(dead.n) put(must, "bad", "asr5xx", "转写全挂 " + num(dead.n) + " 次", "Groq 和千问都没拿到；看「平台 → 上游」。", whenIn(dead.last, dead.who[0]), "platform");
+  if(dead.n) put(must, "bad", "asr5xx", "转写全挂 " + num(dead.n) + " 次", "Groq 和千问都没拿到；看「平台 → 依赖的外部服务」。", whenIn(dead.last, dead.who[0]), "platform");
   if(sx && sx.balance && sx.balance.available != null){ var run = runwayDays(sx.balance.available, soniox7());
-    if(run != null && run < 7) put(must, "warn", "sxbal", "Soniox 余额 " + money(sx.balance.available) + "（约 " + run + " 天）", "去 console.soniox.com 充值；不充课上到一半会退回本地识别。", "", "platform"); }
+    if(run != null && run < 7) put(must, "warn", "sxbal", "Soniox 余额 " + money(sx.balance.available) + "（约 " + run + " 天）", "去 console.soniox.com 充值；不充的话实时字幕会断（桌面退回旧识别，网页版直接没字幕）。", "", "platform"); }
   if(rep) (rep.sessions || []).filter(function(s){ return s.stream && s.stream.reason && s.stream.reason !== "manual"; }).forEach(function(s){
     var at = Date.parse(s.report_at || s.updated) || 0, age = Date.now() - at; if(!at || age >= 3 * 86400000) return; var who = reportWho(s);
-    put(age < 86400000 ? must : know, "bad", "sx-" + s.id, (who || "有人") + " 的桌面课实时没连上（" + (s.stream.detail || s.stream.reason) + "）", "整节退回旧识别。看那节的诊断包 app.log。", whenIn(at, who), "desktop"); });
+    put(age < 86400000 ? must : know, "bad", "sx-" + s.id, (who || "有人") + " 的桌面课实时没连上（" + (s.stream.detail || s.stream.reason) + "）", "整节退回旧识别。看那节诊断包里的 diag.json / client_events.jsonl（app.log 在 TA 自己电脑上，不在包里）。", whenIn(at, who), "desktop"); });
   if(web) (web.sessions || []).forEach(function(s){ var w = webLevel(s);
     if(w.lv === "bad" && !s.report && (s.events || 0) > 3 && Date.now() - s.last_t < 86400000) put(isLab(s.name) ? know : must, "warn", "wnoend-" + s.session, s.name + " 的网页课没正常下课", "最后一条事件在 " + whenIn(s.last_t, s.name) + "。点开看时间线：关页 / 崩了 / 断网。", whenIn(s.first_t, s.name), "web");
     else if(s.report && (s.report.sent_failed || 0) > 0) put(know, "warn", "wfail-" + s.session, s.name + " 的网页课有 " + s.report.sent_failed + " 句没出中文", "点开看翻译请求的错误码。", whenIn(s.first_t, s.name), "web"); });
@@ -1214,11 +1218,18 @@ function alerts(){
   if(q && q.qwen && q.qwen.max && q.qwen.used / q.qwen.max >= .5) put(know, "warn", "qwen2", "千问今天已用 " + num(q.qwen.used) + " / " + num(q.qwen.max), "到上限当天就不再用千问。", "");
   if(r2){ var half = (r2.sessions || []).filter(function(g){ var a = Date.now() - Date.parse(g.last); return !g.mine && g.files.indexOf("transcript.md") < 0 && a < 2 * 86400000 && a > 30 * 60000; });
     if(half.length) put(know, "warn", "half", half.length + " 节别人的桌面课只传了一半", "多半是传到一半退出了 App；下次打开会接着传。", ago(Date.parse(half[0].last)), "desktop"); }
-  var er = errRate(); if(er && er.r > .01) put(know, er.r > .05 ? "bad" : "warn", "errrate", "云端出错率 " + (er.r * 100).toFixed(1) + "%（24 h）", "看「平台 → 延迟」哪一段、哪一版。", "", "platform");
+  var er = errRate(); if(er && er.r > .01) put(know, er.r > .05 ? "bad" : "warn", "errrate", "云端出错率 " + (er.r * 100).toFixed(1) + "%（24 h）", "看「平台 → 服务器回得多快」哪一段、哪一版；「平台 → 后台报错」有异常原文。", "", "platform");
   if(hb && hb.people){ var mm = function(v){ return verKey(v).split(".").slice(0, 2).join("."); };
     var old = Object.keys(hb.people).filter(function(nm){ var p = hb.people[nm]; if(isLab(nm) || !p.ver || p.ver === "0.0.1" || !p.last || Date.now() - p.last > 14 * 86400000) return false;
       return (hb.latest_ver && verKey(p.ver) < verKey(hb.latest_ver)) || (hb.repo_ver && mm(p.ver) < mm(hb.repo_ver)); });
-    if(old.length) put(know, "warn", "ver", old.map(function(nm){ return nm + " 还在 " + hb.people[nm].ver; }).join("、"), "下次打开开课面板会自动更新；连着两节没升上去就看 update.log。", ""); }
+    if(old.length) put(know, "warn", "ver", old.map(function(nm){ return nm + " 还在 " + hb.people[nm].ver; }).join("、"), "下次打开开课面板会自动更新；连着两节没升上去，让 TA 发 ~/Library/Logs/ClassLive/update.log。", ""); }
+  var cl = D("calls");
+  if(cl) (cl.classes || []).forEach(function(r){
+    if(r.fin_n >= 20 && r.trunc / r.fin_n >= .05) put(know, "warn", "trunc-" + r.cls, (CALL_NAME[r.cls] || r.cls) + " 有 " + pct(r.trunc, r.fin_n, 1) + " 被截断（近 7 天 " + num(r.trunc) + " 次）", "写到 max_tokens 上限被切掉，内容不完整。多半是推理吃掉了预算 —— 看「平台 → 每类 AI 调用」的推理占比。", "", "platform");
+    if(r.tout >= 20000 && r.rtok / r.tout >= .5) put(know, "warn", "think-" + r.cls, (CALL_NAME[r.cls] || r.cls) + " 写出的 " + pct(r.rtok, r.tout, 0) + " 是推理", "模型在「先想再答」，一样按写出价收钱、还更慢。看这类走哪个模型（「平台 → 模型路由」）。", "", "platform"); });
+  if(lg){ var e24 = (lg.errors || []).filter(function(x){ return Date.now() - x.last < 86400000; }), p24 = (lg.issues || []).filter(function(x){ return x.key === "passes_do" && Date.now() - x.t < 86400000; });
+    if(e24.length) put(must, "bad", "werr-" + e24[0].last, "服务器 24 h 内抛错 " + num(sumBy(e24, "n")) + " 次", e24[0].msg.slice(0, 90), ago(e24[0].last), "platform");
+    if(p24.length) put(must, "bad", "pdo-" + p24[0].t, "通行码库 24 h 内出错 " + p24.length + " 次", "这时候查码会回 503（网页那几句没翻译）。" + (p24[0].overloaded ? "过载。" : ""), ago(p24[0].t), "platform"); }
   var loading = ["ae","r2","health","web","runner"].some(function(n){ return !(S[n] && (S[n].data || S[n].err)); });
   return {must: must, know: know, loading: loading};
 }
@@ -1285,7 +1296,7 @@ function minutesOf(code, day){
 }
 function swimRows(){
   var now = Date.now(), t0 = now - 864e5, d1 = utcToday(), d0 = new Date(now - 864e5).toISOString().slice(0, 10);
-  var codes = liveCodes().concat((D("list").codes || []).filter(function(c){ return c.revoked; })).filter(function(c){ return lastSeen(c) >= t0; });
+  var codes = liveCodes().concat((D("list").codes || []).filter(function(c){ return c.revoked; })).filter(function(c){ return lastSeen(c) >= t0 && !SERVICE_CODES[c.name]; });
   var rows = [], pending = false;
   codes.forEach(function(c){
     var bins = new Array(288).fill(0), act = 0;
@@ -1525,12 +1536,13 @@ function viewPeople(){
   tools.appendChild(h("span.mut3", {style:{fontSize:"12px", marginLeft:"auto"}}, "名额 = 桌面 + 网页合计 · 大数字是" + rangeName() + "的转写"));
   wrap.appendChild(tools);
   if(!l){ wrap.appendChild(card({src: ["list"], body: function(){ return null; }})); return wrap; }
-  var codes = (l.codes || []).filter(function(c){ return RT.showRevoked || !c.revoked; }).sort(function(a, b){
+  var svc = (l.codes || []).filter(function(c){ return SERVICE_CODES[c.name] && !c.revoked; });
+  var codes = (l.codes || []).filter(function(c){ return (RT.showRevoked || !c.revoked) && !SERVICE_CODES[c.name]; }).sort(function(a, b){
     var la = isLab(a.name), lb = isLab(b.name); if(la !== lb) return la ? 1 : -1; return lastSeen(b) - lastSeen(a); });
   if(!codes.length){ wrap.appendChild(h("div.card", null, empty("还没有任何通行码", "点「发新码」给第一个人发码。"))); return wrap; }
   var grid = h("div.people"), lab = false, last14 = pr ? pr.all.slice(-14) : [];
   codes.forEach(function(c, idx){
-    if(isLab(c.name) && !lab){ lab = true; wrap.appendChild(grid); wrap.appendChild(sec("实验码 / 服务码", "不算进用量统计")); grid = h("div.people"); }
+    if(isLab(c.name) && !lab){ lab = true; wrap.appendChild(grid); wrap.appendChild(sec("实验码", "test* / public · 不算进用量统计")); grid = h("div.people"); }
     var s = pr ? sumRows(flat(pr.cur), c.code) : null, daily = last14.map(function(d){ return sumRows(d.rows, c.code).x_s; });
     var hb = D("habits"), p = hb && hb.people ? hb.people[c.name] : null, stt = statusOf(c), where = whereOf(c.name) || (p && p.country ? COUNTRY[p.country] || p.country : null);
     var col = personColor(c.name), full = (+c.devices || 0) + (+c.web_devices || 0) >= (+c.max_devices || 2);
@@ -1545,7 +1557,26 @@ function viewPeople(){
     grid.appendChild(pc);
   });
   wrap.appendChild(grid);
+  if(svc.length){ wrap.appendChild(sec("代付账户", "不是人 · 替上面的人调模型，钱算回到那个人头上")); var gg = h("div.grid"); svc.forEach(function(c){ gg.appendChild(runnerCard(c)); }); wrap.appendChild(gg); }
   return wrap;
+}
+/* runner = VPS 上做笔记 / 实时总结的服务。它用自己的码调模型，但每次都带「替谁付」（sha256(那人的码)[:16]），
+   服务器按码表反推回名字（`calls.billed`）。这里把它当一个**账户**看：替谁做了多少、估多少钱。 */
+function billedOf(name){ var c = D("calls"); return c ? (c.billed || []).filter(function(w){ return w.name === name; })[0] || null : null; }
+function billCost(w){ return cluiCost({tokens_in: w.tin, tokens_out: w.tout, cache_hit: w.hit}, RT.prices); }
+function clsChips(by){ return h("div.chips", null, Object.keys(by || {}).sort(function(a, b){ return by[b].n - by[a].n; }).map(function(k){ return h("span.chip", {title: num(by[k].n) + " 次 · 写出 " + shortNum(by[k].tout) + " token"}, (CALL_NAME[k] || k) + " " + num(by[k].n)); })); }
+function runnerCard(c){
+  return card({span: 12, flush: true, title: c.name + " · 替人做笔记和实时总结", sub: "近 7 天 · 估价按「平台」里的 DeepSeek 价（实际大多走 CommandCode）", src: ["calls"], body: function(){
+    var ws = (D("calls").billed || []).slice(); if(!ws.length) return empty("近 7 天没替谁干过活");
+    var tot = ws.reduce(function(a, w){ return a + billCost(w); }, 0), tb = h("tbody");
+    ws.forEach(function(w){ var named = w.name && !/^未知 /.test(w.name), code = named ? (codeOfName(w.name) || {}).code : null;
+      var tr = h("tr", code ? {style:{cursor:"pointer"}, on:{click: function(){ openPerson(code); }}} : null,
+        h("td", null, h("span", {style:{display:"inline-flex", alignItems:"center", gap:"8px"}}, h("span.dot", {style:{background: named ? personColor(w.name) : "var(--cx)"}}), w.name || "没标记替谁（老 runner / 非笔记任务）")),
+        h("td", null, clsChips(w.by_cls)), h("td.r", null, num(w.n)), h("td.r", null, shortNum(w.tout)), h("td.r", {title: "写出里「先想再答」的部分，一样按写出价收钱"}, w.tout ? pct(w.rtok, w.tout, 0) : "—"),
+        h("td.r", null, money(billCost(w))), h("td.r.mut", null, Object.keys(w.by_day || {}).sort().slice(-3).map(function(d){ return d.slice(5); }).join(" "))); tb.appendChild(tr); });
+    return h("div", null, h("div", {style:{padding:"4px 22px 14px", fontSize:"14px", lineHeight:1.6}}, "近 7 天替 ", h("b", null, ws.filter(function(w){ return w.name; }).length + " 个人"), " 干了 ", h("b", null, num(sumBy(ws, "n")) + " 次"), "，估 ", h("b", null, money(tot)), "。它自己不上课，所以不进「人」和「谁在上课」。"),
+      h("div.tbl-wrap", null, h("table", null, h("thead", null, h("tr", null, ["替谁", "做了什么", "次", "写出 token", "其中推理", "估价", "哪几天"].map(function(t, i){ return h("th" + (i >= 2 ? ".r" : ""), null, t); }))), tb)));
+  }});
 }
 function newCode(){
   var ni = h("input.inp", {placeholder: "码名（小写，如 xiaoming）", autocomplete: "off"}), di = h("input.inp", {type: "number", value: "120", min: "1"}), dv = h("input.inp", {type: "number", value: "2", min: "1"});
@@ -1590,6 +1621,11 @@ function personSheet(sh){
       h("div", null, "Jev 追问", h("b", null, num(s.jev_reqs))), h("div", null, "在用的分钟", h("b", null, num(s.active_min))), h("div", null, "翻译约花（按 DeepSeek 价）", h("b", null, money(cluiCost(s, RT.prices)))),
       h("div", null, "最近实时识别次数", h("b", null, sx ? num(sx.sessions) : "—")), h("div", null, "最近实时识别时长 · 其中网页", h("b", null, sx ? fmtDur(sx.audio_s) + " · " + fmtDur(sx.web_s) : "—")),
       h("div", null, "版本", h("b", null, Object.keys(s.vers).sort(function(a, b){ return s.vers[b] - s.vers[a]; }).slice(0, 2).map(function(v){ return v === "0.0.1" ? "网页" : v; }).join("、") || "—")))) : h("div.sk-line")));
+  var bw = billedOf(c.name);
+  if(bw) body.push(h("div.card", null, h("div.ch", null, h("h3", null, "runner 替 TA 做的"), h("span.sub", null, "近 7 天 · 课后笔记 / 实时总结")),
+    h("div.kv", null, h("div", null, "调用", h("b", null, num(bw.n) + " 次")), h("div", null, "读入 / 写出 token", h("b", null, shortNum(bw.tin) + " / " + shortNum(bw.tout))),
+      h("div", {title: "写出里「先想再答」的部分"}, "其中推理", h("b", null, bw.tout ? pct(bw.rtok, bw.tout, 0) : "—")), h("div", null, "估价（DeepSeek 价）", h("b", null, money(billCost(bw))))),
+    h("div", {style:{marginTop:"12px"}}, clsChips(bw.by_cls))));
   /* 一天的条带 */
   var days = pr ? pr.all.slice(-7).map(function(d){ return d.day; }).reverse() : [utcToday()];
   var dsel = h("div.seg"); days.slice(0, 5).forEach(function(d){ dsel.appendChild(h("button", {type:"button", "aria-pressed": String(d === sh.day), on:{click: function(){ sh.day = d; renderSheet(); }}}, d === utcToday() ? "今天" : d.slice(5))); });
@@ -1665,6 +1701,22 @@ function write(name, body, title, msg, danger){
 /* ================================================================
    人话：把技术名词翻成看板读者懂的话
    ================================================================ */
+var CALL_NAME = {legacy: "翻译（桌面）", translate: "翻译（网页）", seal: "语意封口", atom: "实时总结 · 要点", chapter: "实时总结 · 章节", merge: "课后碎句合并",
+  note: "课后笔记", recap: "课前回顾", prep: "课前准备", term: "术语", jev: "Jev 追问", polish: "整课精修", "note-build": "术语注释"};
+/* 后台诊断行（Workers Logs，`handler.js` 里「某一步失败了」那些 console.log）→ 一句人话。认不出的原样显示。 */
+function issueText(e){
+  var v = e.val, r = e.region ? "（" + ({us: "美国", eu: "欧洲", jp: "日本"}[e.region] || e.region) + "）" : "";
+  if(e.key === "passes_do") return ["bad", "通行码库出错（" + (e.where || "?") + "）", (e.overloaded ? "过载 · " : e.retryable ? "瞬时 · " : "") + (e.msg || e.name || "")];
+  if(e.key === "soniox") return [v === "mint_failed" ? "bad" : "warn", {mint_failed: "Soniox 发临时 key 失败", usage_failed: "Soniox 对账没拿到", cursor_unavailable: "Soniox 对账游标读不到", reclaim_threw: "Soniox 回收 key 出错"}[v] || "Soniox：" + v, r.replace(/[（）]/g, "") + (e.status != null ? " · 状态 " + e.status : "") + (e.probe ? " · 探测" : "")];
+  if(e.key === "runner_hub") return ["bad", "笔记队列：" + ({sweep_failed: "定时清理失败", enqueue_failed: "下课排笔记失败", purge_failed: "清理旧数据失败", idle_end_failed: "自动下课失败", job_update_failed: "任务状态写不进去"}[v] || v), e.msg || ""];
+  if(e.key === "runner") return ["bad", "笔记写进存储失败", (e.job_id ? "任务 " + e.job_id + " · " : "") + (e.msg || "")];
+  if(e.key === "web_data" || e.key === "web_data_write_failed") return ["bad", "网页课数据写失败", (e.key === "web_data" ? v + " · " : "") + (e.msg || "")];
+  if(e.key === "groq403") return ["info", "Groq 不服务这个地区（" + (COUNTRY[v] || v) + "）", "正常：自动换千问"];
+  if(e.key === "web_prompt") return ["warn", "网页课的提示词被挡下", e.why || ""];
+  if(e.key === "terms") return ["warn", {pool_write_failed: "术语池写失败", field_truncated: "术语字段太长被截"}[v] || "术语：" + v, e.field || e.course_key || ""];
+  if(e.key === "git") return ["warn", "代码镜像：上游出错", e.msg || ""];
+  return ["warn", e.key + "：" + v, e.msg || ""];
+}
 var PATH_NAME = {"chat/completions": "翻译", "soniox/key": "开实时识别", "transcribe": "定稿识别", "jev": "Jev 追问", "note": "笔记", "other": "其他", "rt": "实时识别", "asr": "定稿识别", "llm": "翻译"};
 function pathName(p){ p = String(p || "").replace(/^\/?v1\//, ""); return PATH_NAME[p] || p || "其他"; }
 var HOST_NAME = {"Durable Object": "课堂会话存储", "openrouter.ai": "翻译（OpenRouter）", "api.commandcode.ai": "翻译备用（CommandCode）", "api.soniox.com": "实时识别 · 美国", "api.eu.soniox.com": "实时识别 · 欧洲",
@@ -1915,7 +1967,7 @@ function viewPlatform(){
     l.appendChild(h("div.row", {style:{display:"block"}}, h("div", {style:{fontSize:"13.5px", fontWeight:500}}, bads.length ? bads.map(function(u){ return hostName(u); }).join("、") + " 有一些失败" : "全部正常")));
     ups.forEach(function(u){ var t = u.total || 1, bad = (u.c5xx || 0) + (u.c429 || 0) + (u.c4xx || 0);
       var sb = h("div.stack", {style:{height:"6px", marginTop:"6px"}}); [["ok", "var(--green-d)"], ["c4xx", "var(--orange-d)"], ["c429", "var(--c4)"], ["c5xx", "var(--red-d)"], ["unfinished", "var(--cx)"]].forEach(function(k){ if(u[k[0]]) sb.appendChild(h("i", {style:{width: u[k[0]] / t * 100 + "%", background: k[1]}})); });
-      var row = h("div.row", null, h("div.main", null, h("div.t", null, hostName(u)), sb), h("div.r", null, h("div", null, shortNum(u.total) + " 次"), h("div", {style:{fontSize:"11.5px", color: bad ? "var(--orange)" : "var(--ink3)"}}, bad ? pct(bad, t, 1) + " 失败" : "都成功")));
+      var row = h("div.row", null, h("div.main", null, h("div.t", null, hostName(u)), sb), h("div.r", null, h("div", null, shortNum(u.total) + " 次"), h("div", {style:{fontSize:"11.5px", color: bad ? "var(--orange)" : "var(--ink3)"}}, bad ? (bad / t < .001 ? num(bad) + " 次失败（<0.1%）" : pct(bad, t, 1) + " 失败") : "都成功")));
       hover(row, function(){ return tipBox(u.host || u.name, [["成功", num(u.ok), "var(--green-d)"], ["被拒（4xx）", num(u.c4xx), "var(--orange-d)"], ["太频繁（429）", num(u.c429), "var(--c4)"], ["对方出错（5xx）", num(u.c5xx), "var(--red-d)"], ["没等到结果", num(u.unfinished), "var(--cx)"]]); });
       l.appendChild(row); });
     return ups.length ? l : empty("没有数据");
@@ -1958,7 +2010,7 @@ function viewPlatform(){
     var names = Object.keys(by).sort(function(a, b){ return by[b].t - by[a].t; }).slice(0, 10), mx = by[names[0]].t, box = h("div", {style:{display:"flex", flexDirection:"column", gap:"12px"}});
     names.forEach(function(n){ var b = by[n], st = h("div.stack", {style:{width: Math.max(4, b.t / mx * 100) + "%", height:"10px"}});
       Object.keys(b.k).sort(function(x, y){ return b.k[y] - b.k[x]; }).forEach(function(k){ st.appendChild(h("i", {style:{width: b.k[k] / b.t * 100 + "%", background: KC[k] || "var(--cx)"}})); });
-      var row = h("div", null, h("div", {style:{display:"flex", justifyContent:"space-between", fontSize:"12.5px", marginBottom:"5px"}}, h("span", {style:{display:"inline-flex", alignItems:"center", gap:"6px"}}, h("span.dot", {style:{background: n === "没带码" ? "var(--cx)" : personColor(n)}}), n),
+      var row = h("div", null, h("div", {style:{display:"flex", justifyContent:"space-between", fontSize:"12.5px", marginBottom:"5px"}}, h("span", {style:{display:"inline-flex", alignItems:"center", gap:"6px"}}, h("span.dot", {style:{background: n === "没带码" ? "var(--cx)" : personColor(n)}}), n, SERVICE_CODES[n] ? h("span.chip", {style:{marginLeft:"4px"}}, "代付") : null),
         h("span", null, h("b", {style:{fontWeight:600}}, num(b.t)), " 次", b.e ? h("span", {style:{color:"var(--red)"}}, " · " + b.e + " 次失败") : null)), st);
       hover(row, function(){ return tipBox(n, Object.keys(b.k).sort(function(x, y){ return b.k[y] - b.k[x]; }).map(function(k){ return [k, num(b.k[k]) + " 次", KC[k] || "var(--cx)"]; })); });
       box.appendChild(row); });
@@ -1973,6 +2025,25 @@ function viewPlatform(){
     Object.keys(grp).forEach(function(k){ var x = grp[k];
       l.appendChild(h("div.row", null, h("span.chip." + (x.b.status >= 500 ? "bad" : "warn"), {title: "HTTP " + x.b.status}, codeName(x.b.status)), h("div.main", null, h("div.t", null, (x.b.name === "-" ? "没带码" : x.b.name) + " · " + pathName(x.b.path) + (x.n > 1 ? " · " + x.n + " 次" : "")), h("div.s", null, codeWhy(x.b.status))), h("div.r.mut", null, ago(aeTime(x.last))))); });
     return den.length || bad.length ? l : empty("没有");
+  }}));
+  g.appendChild(card({span: 6, flush: true, title: "后台报错", sub: "近 7 天 · 服务器自己记的失败 + 抛出去的异常", src: ["logs"], body: function(){
+    var lg = D("logs"), iss = (lg.issues || []).map(function(e){ return {e: e, t: issueText(e)}; }), errs = lg.errors || [], l = h("div.list");
+    var real = iss.filter(function(x){ return x.t[0] !== "info"; }), info = iss.filter(function(x){ return x.t[0] === "info"; });
+    errs.slice(0, 6).forEach(function(x){ l.appendChild(h("div.row", null, h("span.dot.bad"), h("div.main", null, h("div.t", null, "服务器抛错" + (x.n > 1 ? " · " + num(x.n) + (x.n >= 100 ? "+" : "") + " 次" : "")), h("div.s.mono", {style:{fontSize:"11.5px"}, title: x.msg + (x.trigger ? "\n← " + x.trigger : "") + "\n首次 " + ago(x.first)}, x.msg + (x.trigger ? " ← " + x.trigger : ""))), h("div.r.mut", null, ago(x.last)))); });
+    var grp = {}; real.forEach(function(x){ var k = x.t[1]; (grp[k] = grp[k] || {x: x, n: 0, last: x.e.t}).n++; });
+    Object.keys(grp).forEach(function(k){ var g0 = grp[k]; l.appendChild(h("div.row", null, h("span.dot." + (g0.x.t[0] === "bad" ? "bad" : "warn")), h("div.main", null, h("div.t", null, k + (g0.n > 1 ? " · " + g0.n + " 次" : "")), h("div.s", null, g0.x.t[2] || "")), h("div.r.mut", null, ago(g0.last)))); });
+    var gq = {}; info.forEach(function(x){ gq[COUNTRY[x.e.val] || x.e.val] = 1; });
+    if(info.length) l.appendChild(h("div.row", null, h("span.dot"), h("div.main", null, h("div.t.mut", null, "不用管：Groq 不服务" + Object.keys(gq).join("、") + "，自动换了千问（" + info.length + " 次）"))));
+    return errs.length || iss.length ? l : empty("近 7 天没有", "服务器没记下任何失败，也没抛过异常。");
+  }}));
+  g.appendChild(card({span: 6, flush: true, title: "模型路由", sub: "每类活走哪个模型 · 改用 cl_admin route", src: ["routes/get"], body: function(){
+    var rt = D("routes/get"), ef = rt.effective || {}, st = rt.stored || {}, df = rt.defaults || {}, UP = {deepseek: "DeepSeek 直连", cc: "CommandCode", opencode: "OpenCode", openrouter: "OpenRouter"}, l = h("div.list");
+    Object.keys(ef).sort(function(a, b){ return a === "*" ? 1 : b === "*" ? -1 : a < b ? -1 : 1; }).forEach(function(k){
+      var why = st[k] != null ? "手动设的" : df[k] != null ? "默认" : (rt.env || {})[k] != null ? "环境变量" : "";
+      l.appendChild(h("div.row", {style:{minHeight:"40px"}, title: k + (why ? " · " + why : "")}, h("div.main", null, h("div.t", null, k === "*" ? "其余（翻译等）" : CALL_NAME[k] || k, h("span.mono.mut3", {style:{marginLeft:"8px", fontSize:"11px"}}, k))), h("div.r", null, h("b", {style:{fontWeight:600}}, UP[ef[k]] || ef[k]), why && why !== "手动设的" ? h("span.mut", {style:{fontSize:"11.5px", marginLeft:"6px"}}, why) : null))); });
+    var ts = D("terms/stats");
+    if(ts) l.appendChild(h("div.row", null, h("div.main", null, h("div.t", null, "术语共享池"), h("div.s", null, ts.contributions ? num(ts.contributions) + " 次贡献 · " + num(ts.codes) + " 个人 · " + num(ts.courses) + " 门课 · " + num(ts.distinct_terms) + " 个词（" + num(ts.cross_code_terms) + " 个多人都有）" : "还是空的（网页课下课时才会往里放）"))));
+    return Object.keys(ef).length ? l : empty("路由表读不到");
   }}));
   g.appendChild(card({span: 6, title: "实时识别（Soniox）", sub: "按量付费 · 每天花多少", src: ["soniox"], body: function(){
     var sx = D("soniox"), b = sx.balance || {}, run = runwayDays(b.available, soniox7());
@@ -2000,7 +2071,7 @@ function viewPlatform(){
       tr ? h("div", {style:{marginTop:"10px", fontSize:"12.5px", color:"var(--orange)"}}, "有模型在「先想再答」（多出 " + shortNum(tr) + " token），又贵又慢，应该关掉。") : h("div.mut3", {style:{fontSize:"11.5px", marginTop:"8px"}}, "没有模型在「先想再答」，正常。"));
   }}));
   g.appendChild(card({span: 6, title: "服务器每天的量", sub: "近 7 天 · Cloudflare", src: ["cf"], body: function(){
-    var cf = D("cf"), days = Object.keys(cf.week || {}).sort(), scripts = {}, SN = {"classlive-asr": "识别 / 翻译", "classlive-upload": "上传"}, BN = {"classlive-ingest": "桌面课上传的文件", "classlive-web": "网页课存的文件"};
+    var cf = D("cf"), days = Object.keys(cf.week || {}).sort(), scripts = {}, SN = {"classlive-asr": "识别 / 翻译", "classlive-upload": "上传", "classlive-panel-proxy": "面板代理（Muse）"}, BN = {"classlive-ingest": "桌面课上传的文件", "classlive-web": "网页课存的文件"};
     days.forEach(function(d){ Object.keys(cf.week[d]).forEach(function(s){ scripts[s] = 1; }); });
     var series = Object.keys(scripts).map(function(s, i){ return {name: SN[s] || s, color: ["var(--c1)", "var(--c3)", "var(--c4)", "var(--c7)"][i % 4], vals: days.map(function(d){ return cf.week[d][s] || 0; })}; });
     var r2 = cf.r2 || {}, r2rows = Object.keys(r2).map(function(b){ var ds = Object.keys(r2[b]).sort(), last = r2[b][ds[ds.length - 1]] || {}; return [b, last]; });
@@ -2012,13 +2083,27 @@ function viewPlatform(){
     var KN = {asr: "定稿识别", live: "实时翻译", note: "生成笔记"};
     var sp = (D("ae").speed || []).slice().sort(function(a, b){ return a.day < b.day ? 1 : -1; }), seen = {}, tb = h("tbody");
     sp.filter(function(r){ var k = r.name + r.kind; if(seen[k]) return false; seen[k] = 1; return true; }).slice(0, 8).forEach(function(r){
-      tb.appendChild(h("tr", null, h("td", null, h("span", {style:{display:"inline-flex", alignItems:"center", gap:"8px"}}, h("span.dot", {style:{background: personColor(r.name)}}), r.name)), h("td", null, KN[r.kind] || r.kind), h("td.r", null, num(r.n)), h("td.r", null, r.first50 ? ms(r.first50) : "—"), h("td.r", null, ms(r.done50 || r.p50)), h("td.r.mut", null, ms(r.done95 || r.p95)))); });
+      tb.appendChild(h("tr", null, h("td", null, h("span", {style:{display:"inline-flex", alignItems:"center", gap:"8px"}}, h("span.dot", {style:{background: personColor(r.name)}}), r.name, SERVICE_CODES[r.name] ? h("span.chip", null, "代付") : null)), h("td", null, KN[r.kind] || r.kind), h("td.r", null, num(r.n)), h("td.r", null, r.first50 ? ms(r.first50) : "—"), h("td.r", null, ms(r.done50 || r.p50)), h("td.r.mut", null, ms(r.done95 || r.p95)))); });
     var ns = (D("ae310").notes || []).slice().sort(function(a, b){ return b.tin - a.tin; }), tb2 = h("tbody");
-    ns.forEach(function(r){ tb2.appendChild(h("tr", null, h("td", null, r.name), h("td.r", null, num(r.n)), h("td.r", null, shortNum(r.tin)), h("td.r", null, shortNum(r.tout)), h("td.r", null, pct(r.hit, r.tin, 0)))); });
+    ns.forEach(function(r){ tb2.appendChild(h("tr", null, h("td", null, r.name, SERVICE_CODES[r.name] ? h("span.chip", {style:{marginLeft:"6px"}}, "代付") : null), h("td.r", null, num(r.n)), h("td.r", null, shortNum(r.tin)), h("td.r", null, shortNum(r.tout)), h("td.r", null, pct(r.hit, r.tin, 0)))); });
     var lg = D("logs"), mods = lg ? lg.models || [] : [];
     return h("div", null, h("div.tbl-wrap", null, h("table", null, h("thead", null, h("tr", null, h("th", null, "谁"), h("th", null, "做什么"), h("th.r", null, "次"), h("th.r", null, "开始出字"), h("th.r", null, "做完（一般）"), h("th.r", null, "慢的时候"))), tb)),
       ns.length ? h("div.tbl-wrap", {style:{borderTop:".5px solid var(--sep)"}}, h("table", null, h("thead", null, h("tr", null, h("th", null, "笔记 · 近 7 天"), h("th.r", null, "次"), h("th.r", null, "读入 token"), h("th.r", null, "写出 token"), h("th.r", {title:"重复的内容不用再付全价"}, "重复内容省下"))), tb2)) : null,
       mods.length ? h("div", {style:{padding:"12px 22px 18px", borderTop:".5px solid var(--sep2)", fontSize:"12.5px", color:"var(--ink2)"}}, mods.map(function(m){ return "定稿识别用 " + m.model + "：" + num(m.count) + " 次，一般 " + ms(m.median) + "，慢的时候 " + ms(m.p90); }).join("；")) : null);
+  }}));
+  g.appendChild(card({span: 12, flush: true, title: "每类 AI 调用", sub: "近 7 天 · 真用户 + runner 代付 · 截断 = 写到上限被切掉（内容不完整）· 推理 = 模型「先想再答」写出的、看不见但要付钱的部分", src: ["calls"], body: function(){
+    var c = D("calls"), rows = (c.classes || []).slice(), tb = h("tbody"); if(!rows.length) return empty("近 7 天没有模型调用");
+    rows.forEach(function(r){ var tr = r.fin_n ? r.trunc / r.fin_n : 0, rs = r.tout ? r.rtok / r.tout : 0, er = r.n ? r.err / r.n : 0;
+      var hot = function(v, warn, bad){ return {color: v >= bad ? "var(--red)" : v >= warn ? "var(--orange)" : null, fontWeight: v >= warn ? 600 : null}; };
+      tb.appendChild(h("tr", null, h("td", null, CALL_NAME[r.cls] || r.cls, h("span.mono.mut3", {style:{marginLeft:"6px", fontSize:"11px"}}, r.cls)), h("td.r", null, num(r.n)),
+        h("td.r", {style: hot(er, .02, .1)}, r.err ? num(r.err) + " · " + pct(r.err, r.n, 1) : "—"),
+        h("td.r", {style: hot(tr, .02, .05), title: r.fin_n ? "有结束原因的 " + num(r.fin_n) + " 次里" : "这类请求不回结束原因（流式）"}, r.fin_n ? (r.trunc ? num(r.trunc) + " · " + pct(r.trunc, r.fin_n, 1) : "0") : "—"),
+        h("td.r", null, shortNum(r.tin)), h("td.r", null, shortNum(r.tout)), h("td.r", {style: hot(rs, .3, .6)}, r.tout ? pct(r.rtok, r.tout, 0) : "—"),
+        h("td.r", null, money(cluiCost({tokens_in: r.tin, tokens_out: r.tout, cache_hit: r.hit}, RT.prices))))); });
+    var lab = c.lab || {};
+    return h("div", null, h("div.tbl-wrap", null, h("table", null, h("thead", null, h("tr", null, ["做什么", "次", "失败", "被截断", "读入 token", "写出 token", "其中推理", "估价"].map(function(t, i){ return h("th" + (i ? ".r" : ""), null, t); }))), tb)),
+      h("div.mut3", {style:{padding:"10px 22px 16px", fontSize:"11.5px", lineHeight:1.6}}, "估价按下面「翻译估价用的价格」（DeepSeek 价），走 CommandCode / OpenRouter 的实际价不同。「翻译（桌面）」是桌面版没标调用类型的请求。",
+        lab.n ? " 实验码另有 " + num(lab.n) + " 次（失败 " + num(lab.err) + "），没算进来。" : ""));
   }}));
   g.appendChild(rollout());
   g.appendChild(card({span: 6, title: "翻译估价用的价格", sub: "DeepSeek 直连没有账单，只能按用量估", body: function(){
@@ -2047,11 +2132,11 @@ function viewDesktop(){
       var st = s.stream || {}, course = /^\d{4}-\d{2}-\d{2}_\d+_(.+)$/.exec(s.name || "");
       tb.appendChild(h("tr.click", {on:{click: function(){ openSheet({kind: "desk", id: s.id}); }}},
         h("td", null, h("div", {style:{display:"flex", alignItems:"center", gap:"10px"}}, who ? avatar(who, 28) : h("span.dot." + worst), h("div", null, h("div", {style:{fontWeight:500}}, (who || "?") + (course ? " · " + course[1] : "")), h("div.mut", {style:{fontSize:"11.5px"}}, whenIn(at, who))))),
-        h("td.r", null, fmtDur(s.duration_s)), h("td.r", null, num(s.asr && s.asr.words)), h("td.r", null, ms(st.p50)), h("td.r", null, ms(s.tl && s.tl.first_p50)),
+        h("td.r", null, fmtDur(s.duration_s)), h("td.r", null, num(sentN(s))), h("td.r", null, secs(st.p50)), h("td.r", null, ms(s.tl && s.tl.first_p50)),
         h("td.wrap", null, h("div.chips", null, iss.length ? iss.slice(0, 4).map(function(x){ return h("span.chip" + (x.lv ? "." + x.lv : ""), {title: x.why || ""}, x.txt); }) : h("span.chip.ok", null, "正常"))),
         h("td.mut", null, (s.system && s.system.chip) || "")));
     });
-    return h("div.tbl-wrap", null, h("table", null, h("thead", null, h("tr", null, h("th", null, "谁 · 课"), h("th.r", null, "时长"), h("th.r", null, "词"), h("th.r", null, "字幕延迟"), h("th.r", null, "中文出字"), h("th", null, "问题"), h("th", null, "机器"))), tb));
+    return h("div.tbl-wrap", null, h("table", null, h("thead", null, h("tr", null, h("th", null, "谁 · 课"), h("th.r", null, "时长"), h("th.r", {title:"实时字幕封口的句数（Soniox）；老报告用定稿段数"}, "句"), h("th.r", {title:"说完到这句字幕定下来（一般）"}, "字幕定稿"), h("th.r", null, "中文出字"), h("th", null, "问题"), h("th", null, "机器"))), tb));
   }}));
   g.appendChild(card({span: 12, title: "上传桶", sub: "classlive-ingest", src: ["r2"], body: function(){
     var r2 = D("r2"), ss = r2.sessions || [], mine = ss.filter(function(s){ return s.mine; }).length, half = ss.filter(function(s){ return s.files.indexOf("transcript.md") < 0; }).length;
@@ -2072,7 +2157,7 @@ var RK = {segments:"段数", final_empty_pct:"定稿空 %", fell_back_pct:"回�
   draft_reason:"草稿原因", arch:"架构", picked:"选中", submit:"提交", show:"显示", new_topic:"新话题", sq_p50:"追问 p50", sq_p90:"追问 p90", cuts:"切分", hard_cuts:"硬切", dropped:"丢弃", weak_blocks:"弱块",
   vad_resets:"VAD 重置", sentence_cuts:"句切", silence_cuts:"静音切", total_cuts:"总切", blind_dropped_blocks:"盲丢块"};
 var RG = {stream:"实时流", vad:"VAD 切分", capture:"采集", asr:"定稿识别", live:"实时总结", region:"Soniox 地区", ui:"字幕 UI", energy:"能耗", device:"设备", system:"系统", corr:"修正", counts:"条目",
-  merge:"合并", norm:"音量归一", semantic_seal:"语义封口", backfill:"补转", duty:"待办", terms:"术语", jev:"Jev", review:"复核", deps:"依赖", tl:"翻译", blocks:"块"};
+  merge:"合并", norm:"音量归一", semantic_seal:"语义封口", backfill:"补转", duty:"待办", terms:"术语", jev:"Jev", review:"复核", deps:"依赖", tl:"翻译", blocks:"块", features:"功能使用度", resource:"资源占用"};
 function fmtVal(k, v){ if(v == null) return "—"; if(typeof v === "boolean") return v ? "是" : "否"; if(typeof v === "number"){ if(/_ms$|^p\d+$/.test(k)) return ms(v); if(/_s$/.test(k)) return fmtDur(v); if(/_mb$/.test(k)) return num(v) + " MB"; return Math.abs(v) < 10 && v % 1 ? num(v, 2) : num(v); }
   if(Array.isArray(v)) return v.length > 4 ? v.length + " 项" : v.map(function(x){ return typeof x === "object" ? JSON.stringify(x) : x; }).join(", "); if(typeof v === "object") return Object.keys(v).length + " 项"; return String(v); }
 function reportGroups(s){
@@ -2092,15 +2177,18 @@ function deskSheet(sh){
   body.push(h("div.card", null, h("div.chips", {style:{marginBottom:"16px"}}, iss.length ? iss.map(function(x){ return h("span.chip" + (x.lv ? "." + x.lv : ""), {title: x.why || ""}, x.txt); }) : h("span.chip.ok", null, "没发现问题")),
     h("div", {style:{display:"flex", gap:"30px", marginBottom:"18px", flexWrap:"wrap"}},
       h("div", null, h("div.lbl", null, "时长"), h("div.big", {style:{fontSize:"30px", marginTop:"6px"}}, fmtDur(s.duration_s))),
-      h("div", null, h("div.lbl", null, "词"), h("div.big", {style:{fontSize:"30px", marginTop:"6px"}}, num(s.asr && s.asr.words))),
-      h("div", null, h("div.lbl", null, "字幕延迟（一般）"), h("div.big", {style:{fontSize:"30px", marginTop:"6px"}}, ms(st.p50)), h("div.mut", {style:{fontSize:"12px", marginTop:"4px"}}, "慢的时候 " + ms(st.p90)))),
+      h("div", null, h("div.lbl", null, "实时字幕句数"), h("div.big", {style:{fontSize:"30px", marginTop:"6px"}}, num(sentN(s)))),
+      h("div", null, h("div.lbl", null, "说完到字幕定下来（一般）"), h("div.big", {style:{fontSize:"30px", marginTop:"6px"}}, secs(st.p50)), h("div.mut", {style:{fontSize:"12px", marginTop:"4px"}}, "慢的时候 " + secs(st.p90)))),
     h("div.kv", null, h("div", null, "实时引擎", h("b.sm", null, (st.engine || "—") + (st.model ? " · " + st.model : ""))),
       h("div", null, "字幕断线", h("b", null, st.reconnects ? num(st.reconnects) + " 次 · 共 " + fmtDur(st.down_s) : "没断")), h("div", null, "中文开始出字（一般）", h("b", null, ms(s.tl && s.tl.first_p50))),
       h("div", null, "定稿改了实时字幕的", h("b", null, s.corr ? num(s.corr.changed_pct, 1) + "%" : "—")), h("div", null, "识别节点", h("b.sm", null, s.region ? ({us:"美国", eu:"欧洲", jp:"日本"}[s.region.selected] || s.region.selected || "—") + (s.region.switched ? "（中途换过）" : "") : "—")),
       h("div", null, "实时总结章节 写成 / 尝试", h("b", null, s.live ? num(s.live.chapters_written) + " / " + num(s.live.chapters_attempted) : "—")),
       h("div", null, "机器", h("b.sm", null, s.system ? [s.system.chip, s.system.ram_gb ? s.system.ram_gb + " GB" : "", s.system.macos].filter(Boolean).join(" · ") : "—")),
       h("div", null, "电源", h("b.sm", null, s.device ? [{battery:"用电池", ac:"插着电"}[s.device.power] || s.device.power, s.device.battery_pct != null ? "剩 " + s.device.battery_pct + "%" : "", {nominal:"温度正常", fair:"有点热", serious:"很热（会降速）", critical:"过热"}[s.device.thermal] || s.device.thermal].filter(Boolean).join(" · ") : "—")),
-      s.energy && s.energy.available && s.energy.energy_j > 36 ? h("div", null, "这节课耗电", h("b.sm", null, num(s.energy.energy_j / 3600, 1) + " Wh")) : null)));
+      s.energy && s.energy.available && s.energy.energy_j > 36 ? h("div", null, "这节课耗电", h("b.sm", null, num(s.energy.energy_j / 3600, 1) + " Wh")) : null,
+      s.resource ? h("div", {title: "整节课 ClassLive 进程的 CPU 与内存峰值"}, "CPU · 内存峰值", h("b.sm", null, (s.resource.cpu_pct_of_walltime != null ? num(s.resource.cpu_pct_of_walltime, 0) + "%" : "—") + " · " + (s.resource.rss_peak_mb != null ? num(s.resource.rss_peak_mb, 0) + " MB" : "—"))) : null,
+      s.features ? h("div", {title: "这节课里点了这些功能几次（只记次数）"}, "一些事儿 · 课前回顾", h("b.sm", null, "卡片 " + num(s.features.duty.card) + "、记下 " + num(s.features.duty.save) + " · 回顾出现 " + num(s.features.recap.shown) + "、手动收起 " + num(s.features.recap.dismiss))) : null,
+      (s.collector_errors || []).length ? h("div", {style:{color:"var(--orange)"}}, "采集器自己出错", h("b.sm", null, s.collector_errors.join("、"))) : null)));
   var out = h("div"), bar0 = h("div.actions");
   [["report.json", "report.json"], ["transcript.md", "转录"], ["extra.tar.gz", "诊断包"], ["note.html", "详细版笔记"]].forEach(function(p){
     if(s.files && s.files.indexOf(p[0]) < 0 && p[0] !== "note.html") return;
@@ -2163,7 +2251,7 @@ function render(){
   var box = document.getElementById("view"), y = scrollY; box.classList.toggle("anim", Date.now() < RT.animUntil); box.innerHTML = ""; box.appendChild(v.fn()); if(Math.abs(scrollY - y) > 2) scrollTo({top: y});
   if(RT.sheet && (RT.sheet.kind !== "web")) renderSheet();
 }
-var FAST = ["list", "quota"];
+var FAST = ["list", "quota", "routes/get", "terms/stats"];
 function loadAll(fresh){
   load("stats", bodyOf("stats"));
   FAST.forEach(function(n){ load(n); });

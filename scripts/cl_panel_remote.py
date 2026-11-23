@@ -4,13 +4,14 @@
     python3 scripts/cl_panel_remote.py --port 8772                 # 起服务（systemd: cl-panel-remote）
     python3 scripts/cl_panel_remote.py --import-local < local.json  # Mac 推来的本机会话名 + 上传台账
 
-与本机面板 `cl_admin_ui.py` 的区别：
-  · 复用它的全部取数函数（同一份代码），但**只有 GET、只有读**。
+与本机面板 `cl_admin_ui.py` 的关系（2026-11-23 Owen 定：数据与本机面板**完全一致**，只是不能写）：
+  · 复用它的全部取数函数和读操作（`ui.read_op`，同一份代码），`/ui` 直接给同一页 `cl_admin_ui.html`。
   · 管理令牌用的是 Worker 的 **ADMIN_RO_TOKEN**（VPS 的 `~/.classlive/asr-admin-token` 里放的就是它）：
-    就算这里被打穿，Worker 也只认读路径，吊销 / 加码 / 改额度一律 403。
-  · 对外鉴权：`Authorization: Bearer <key>` 或 `?key=<key>`，key 在 `~/.classlive/remote-panel-key`（600）。
-  · 完整通行码**不出这个进程**：凡是 `code` 字段都只回前缀（`cl-owen-1a2b…`）。
-  · 课堂原文（`/raw/<id>?what=transcript.md`）照本机面板的口径**不脱敏**（Owen 2026-11-22 定：远程也给）。
+    就算这里被打穿，Worker 也只认读路径，吊销 / 加码 / 改额度一律 403（这里先挡一道，回 `WRITE_MSG`）。
+  · 对外鉴权：`Authorization: Bearer <key>`、`?key=<key>` 或 cookie（`/ui?key=` 换发），key 在
+    `~/.classlive/remote-panel-key`（600）。面板页发的 POST 还要带 `X-ClassLive-Admin: 1`（同本机面板的 CSRF 闸）。
+  · 完整通行码**照给**（同本机面板）。要退回只给前缀：`touch ~/.classlive/remote-panel-mask`（不用重启）。
+  · 课堂原文 / 交互版笔记（`/raw/<id>`、`/note/<id>`）**不脱敏**（Owen 2026-11-22 定）。
   · 本机会话名 / 上传台账只在 Mac 推上来时才有（`scripts/cl_panel_push.sh`，launchd 每 10 分钟）；
     Mac 合盖期间停在最后一次推送，`/digest.md` 顶上写着推送时刻。
 
@@ -40,7 +41,7 @@ LOCAL_FILE = "remote-local.json"                                      # Mac 推�
 SESSIONS_DIR = pathlib.Path(__file__).resolve().parent.parent / "sessions"   # 只放空的标记文件（会话名）
 
 #: 只读的 Worker 管理路径（与 Worker 的 ADMIN_RO_PATHS 对齐；多放了也没用 —— Worker 会 403）。
-READ_ADMIN = {"list", "stats", "quota", "minutes", "devices", "routes/get"}
+READ_ADMIN = {"list", "stats", "quota", "minutes", "devices", "routes/get", "terms/stats"}
 NAME_RE = re.compile(r"[a-z0-9]{1,16}")
 
 
@@ -225,9 +226,12 @@ def digest(fetch=None, now=None, home: pathlib.Path | None = None) -> str:
     out += ["", "## 还能看", "",
             "- `/api/<名字>`（JSON）：" + " / ".join(sorted(set(ui.SLOW) | READ_ADMIN - {"minutes", "devices"})),
             "- `/api/minutes?who=<名字>[&day=YYYY-MM-DD]`、`/api/devices?who=<名字>`",
-            "- `/raw/<16 位 id>?what=report.json|transcript.md`：那节课的原文",
+            "- `/api/websession?who=<名字>&session=<web-…>`：一节网页课的全部事件；`/api/cfwin?s=<ISO>&u=<ISO>`：一段时间的 Worker 延迟",
+            "- `/raw/<16 位 id>?what=report.json|transcript.md|note.html|extra.tar.gz`：那节课的原文；`/note/<id>`：交互版笔记（页面）",
+            "- `/ui?key=<key>`：和 Mac 上一模一样的面板页（浏览器打开；只读，写操作会提示去 Mac）",
             "- `/local`：Mac 推上来的本机会话名 + 上传台账", ""]
-    return mask("\n".join(out))
+    md = "\n".join(out)
+    return mask(md) if _masking(home) else md
 
 
 def _code_of(who: str, codes=None) -> str:
@@ -240,11 +244,34 @@ def _code_of(who: str, codes=None) -> str:
 
 
 # ---------- HTTP ----------
+COOKIE = "clpanel"
+MASK_FLAG = "remote-panel-mask"                                       # 有这个文件 = 退回只给码前缀（不用重启）
+
+
+def _masking(home: pathlib.Path | None = None) -> bool:
+    return ((home or HOME) / MASK_FLAG).exists()
+
+
+def _out(obj):
+    return mask(obj) if _masking() else obj
+
+
 def _key(home: pathlib.Path | None = None) -> str:
     try:
         return ((home or HOME) / KEY_FILE).read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def ui_page() -> bytes:
+    """本机面板那一页原样给，只把绝对路径改成相对的（外面套着 nginx 的 `/cl/` 前缀）。"""
+    page = ui.PAGE.read_text(encoding="utf-8")
+    page = page.replace('fetch("/api/" + name', 'fetch("api/" + name').replace('href: "/note/"', 'href: "note/"')
+    page = page.replace("<small>通行码管理 · 本机</small>", "<small>通行码管理 · 远程只读</small>")
+    return page.encode("utf-8")
+
+
+WRITE_MSG = "远程面板只读：吊销 / 加码 / 续期 / 改额度 / 删除去 Mac 上的面板"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -253,32 +280,74 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *a):                                   # 不记 query（里面可能有 key）
         sys.stderr.write("%s %s\n" % (self.command, urllib.parse.urlparse(self.path).path))
 
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
+    def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
         self.send_response(code)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Robots-Tag", "noindex")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
     def _json(self, code: int, obj) -> None:
-        self._send(code, json.dumps(mask(obj), ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+        self._send(code, json.dumps(_out(obj), ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
     def _text(self, code: int, s: str, ctype="text/markdown; charset=utf-8") -> None:
         self._send(code, s.encode("utf-8"), ctype)
+
+    def _given(self, qs: dict) -> str:
+        got = (self.headers.get("authorization") or "").removeprefix("Bearer ").strip() or (qs.get("key") or [""])[0]
+        if not got:
+            for part in (self.headers.get("cookie") or "").split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == COOKIE:
+                    got = v
+        return got
 
     def _authed(self, qs: dict) -> bool:
         want = _key()
         if not want:                                                  # fail-closed：没配 key 谁都不认
             return False
-        got = (self.headers.get("authorization") or "").removeprefix("Bearer ").strip() or (qs.get("key") or [""])[0]
-        return hmac.compare_digest(got.encode(), want.encode())
+        return hmac.compare_digest(self._given(qs).encode(), want.encode())
+
+    def do_PUT(self):                                                 # noqa: N802
+        self._json(405, {"error": "只读：GET，或面板页发的 POST 读操作"})
+
+    do_DELETE = do_PATCH = do_PUT                                     # noqa: N815
 
     def do_POST(self):                                                # noqa: N802
-        self._json(405, {"error": "只读：只有 GET"})
-
-    do_PUT = do_DELETE = do_PATCH = do_POST                           # noqa: N815
+        """面板页（`/ui`）的协议：POST `/api/<名>` + 闸门头，和本机面板一样；只认读操作。"""
+        u = urllib.parse.urlparse(self.path)
+        path = u.path.rstrip("/")
+        if not path.startswith("/api/"):
+            return self._json(405, {"error": "只读"})
+        if not self._authed(urllib.parse.parse_qs(u.query)):
+            return self._json(401, {"error": "要 key"})
+        if self.headers.get(ui.GATE_HEADER) != "1":                   # 跨站表单 / fetch 带不上这个头（同本机面板）
+            return self._json(403, {"error": f"缺少 {ui.GATE_HEADER} 头"})
+        name = path[len("/api/"):]
+        raw = self.rfile.read(min(int(self.headers.get("content-length") or 0), 65536))
+        try:
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            if name not in ui.SLOW:
+                return self._json(400, {"error": "body 不是 JSON"})
+            body = {}
+        got = ui.read_op(name, body)
+        if got is not None:
+            return self._json(*got)
+        if name in READ_ADMIN and isinstance(body, dict):
+            keep = {k: body[k] for k in ("code", "day") if k in body}
+            try:
+                return self._json(200, cl_admin.admin_post(name, keep))
+            except cl_admin.AdminError as e:
+                return self._json(502, {"error": str(e)})
+        if name in ui.ALLOWED:
+            return self._json(403, {"error": WRITE_MSG})
+        return self._json(404, {"error": f"不认：{name}"})
 
     def do_GET(self):                                                 # noqa: N802
         u = urllib.parse.urlparse(self.path)
@@ -286,12 +355,27 @@ class Handler(BaseHTTPRequestHandler):
         path = u.path.rstrip("/") or "/"
         if path == "/health":
             return self._json(200, {"ok": True})
+        if path.startswith("/assets/katex/"):                         # 公开的开源库，不要 key（沙箱里的笔记页带不上 cookie）
+            got = ui.katex_asset(path[len("/assets/katex/"):])
+            if isinstance(got, dict):
+                return self._json(404, got)
+            return self._send(200, got[1], got[0], {"Access-Control-Allow-Origin": "*"})
         if not self._authed(qs):
             return self._json(401, {"error": "要 key：Authorization: Bearer <key> 或 ?key=<key>"})
+        if path == "/ui":
+            if qs.get("key"):                                         # 换成 cookie，再把 key 从地址栏拿掉
+                return self._send(302, b"", "text/plain", {
+                    "Location": "ui", "Set-Cookie": f"{COOKIE}={_key()}; HttpOnly; Secure; SameSite=Strict; Max-Age=31536000"})
+            return self._send(200, ui_page(), "text/html; charset=utf-8")
         if path in ("/", "/digest", "/digest.md"):
             return self._text(200, digest())
         if path == "/local":
             return self._json(200, local_state(HOME))
+        if path.startswith("/note/"):
+            code, body = ui.note_page(path[len("/note/"):], "../assets/katex/")
+            if code != 200:
+                return self._json(code, body)
+            return self._send(200, body, "text/html; charset=utf-8", {"Content-Security-Policy": ui.NOTE_CSP})
         if path.startswith("/raw/"):
             sid = path[len("/raw/"):]
             what = (qs.get("what") or ["report.json"])[0]
@@ -299,20 +383,25 @@ class Handler(BaseHTTPRequestHandler):
             if "error" in r:
                 return self._json(404, r)
             if what.endswith(".md") and isinstance(r.get("text"), str):
-                return self._text(200, r["text"])
+                return self._text(200, mask(r["text"]) if _masking() else r["text"])
             return self._json(200, r)
         if path.startswith("/api/"):
             name = path[len("/api/"):]
             fresh = (qs.get("fresh") or [""])[0] == "1"
             if name in ui.SLOW:
                 return self._json(200, ui.cached(name, ui.SLOW[name], fresh))
+            if name == "websession":
+                return self._json(*ui.read_op(name, {"name": (qs.get("who") or qs.get("name") or [""])[0],
+                                                     "session": (qs.get("session") or [""])[0]}))
+            if name == "cfwin":
+                return self._json(*ui.read_op(name, {"s": (qs.get("s") or [""])[0], "u": (qs.get("u") or [""])[0]}))
             if name in READ_ADMIN:
                 body = {}
                 if name in ("minutes", "devices"):
                     who = (qs.get("who") or [""])[0]
                     if not NAME_RE.fullmatch(who):
                         return self._json(400, {"error": "要 ?who=<名字>"})
-                    code = _code_of(who)                              # Worker 只认完整码；码只在本进程里，不回给调用方
+                    code = _code_of(who)                              # Worker 只认完整码
                     if not code:
                         return self._json(404, {"error": f"没有叫 {who} 的码"})
                     body = {"code": code}

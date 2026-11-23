@@ -928,11 +928,11 @@ class HealthOverall(unittest.TestCase):
 
 
 class LogsParallel(unittest.TestCase):
-    def test_四条查询同时发(self):
-        """串着发是 4 × 单条；一起发 ≈ 最慢那条。判据数「同时在飞的最多几条」，不靠墙钟（机器忙时墙钟会抖）。"""
+    def test_六条查询同时发(self):
+        """串着发是 6 × 单条；一起发 ≈ 最慢那条。判据数「同时在飞的最多几条」，不靠墙钟（机器忙时墙钟会抖）。"""
         import cl_admin_ui as U
         lock, live, peak = threading.Lock(), [0], [0]
-        gate = threading.Barrier(4, timeout=5)                          # 四条都进来了才放行 —— 串行的话这里会超时
+        gate = threading.Barrier(6, timeout=5)                          # 六条都进来了才放行 —— 串行的话这里会超时
         def post(url, headers, body):
             with lock:
                 live[0] += 1
@@ -947,8 +947,51 @@ class LogsParallel(unittest.TestCase):
             return {"success": True, "result": {"events": {"events": []}}}
         with tempfile.TemporaryDirectory() as d, _cf_home(d):
             r = U.worker_logs(post=post, now_ms=1792012000000)
-        self.assertEqual(peak[0], 4)
-        self.assertEqual(r, {"models": [], "events": []})
+        self.assertEqual(peak[0], 6)
+        self.assertEqual(r, {"models": [], "events": [], "issues": [], "errors": []})
+
+
+class IssuesAndCalls(unittest.TestCase):
+    """后台诊断行 / Worker 异常归并 / 每类调用 + runner 代付（都是纯函数）。"""
+
+    def test_issues_去掉正常对账_只回白名单字段(self):
+        import cl_admin_ui as U
+        res = {"events": {"events": [
+            {"timestamp": 3, "source": {"soniox": "usage", "region": "eu"}},
+            {"timestamp": 2, "source": {"soniox": "mint_failed", "region": "jp", "status": 503, "secret": "x"}},
+            {"timestamp": 5, "source": {"passes_do": "threw", "where": "check", "msg": "m" * 300, "overloaded": True}},
+            {"timestamp": 1, "source": {"unrelated": 1}}]}}
+        got = U.issues_of(res)
+        self.assertEqual([(x["key"], x["val"]) for x in got], [("passes_do", "threw"), ("soniox", "mint_failed")])
+        self.assertNotIn("secret", got[1])
+        self.assertEqual(len(got[0]["msg"]), 160)
+        self.assertIs(got[0]["overloaded"], True)
+
+    def test_errors_按消息归并_去引用号(self):
+        import cl_admin_ui as U
+        ev = lambda t, m: {"timestamp": t, "$metadata": {"error": m, "trigger": "POST /v1/web/data"}}
+        got = U.errors_of({"events": {"events": [ev(1, "internal error; reference = abc"), ev(4, "internal error; reference = xyz"),
+                                                 ev(2, "put: 10058"), ev(3, "")]}})
+        self.assertEqual(got[0], {"msg": "internal error; reference = …", "n": 2, "first": 1, "last": 4, "trigger": "POST /v1/web/data"})
+        self.assertEqual(len(got), 2)
+
+    def test_calls_实验码分开_runner_按码名归人(self):
+        import cl_admin_ui as U
+        rows = [{"cls": "note", "name": "owen", "n": "3", "err": "1", "trunc": "1", "fin_n": "2", "tin": 10, "tout": 5, "hit": 2, "rtok": 4},
+                {"cls": "note", "name": "runner", "n": "2", "err": "0", "trunc": "0", "fin_n": "2", "tin": 6, "tout": 2, "hit": 0, "rtok": 1},
+                {"cls": "legacy", "path": "/v1/jev", "name": "owen", "n": "1", "err": "0", "trunc": "0", "fin_n": "0", "tin": 0, "tout": 0, "hit": 0, "rtok": 0},
+                {"cls": "note", "name": "test1", "n": "100", "err": "99", "trunc": "0", "fin_n": "1", "tin": 1, "tout": 1, "hit": 0, "rtok": 0}]
+        billed = [{"bill": "aaaaaaaaaaaaaaaa", "cls": "note", "day": "2026-11-23 00:00:00", "n": "2", "err": "0", "tin": 6, "tout": 2, "hit": 0, "rtok": 1},
+                  {"bill": "bbbbbbbbbbbbbbbb", "cls": "atom", "day": "2026-11-22 00:00:00", "n": "1", "err": "0", "tin": 1, "tout": 9, "hit": 0, "rtok": 0},
+                  {"bill": "", "cls": "legacy", "day": "2026-11-22 00:00:00", "n": "4", "err": "0", "tin": 0, "tout": 0, "hit": 0, "rtok": 0}]
+        got = U.calls_of(rows, billed, {"aaaaaaaaaaaaaaaa": "xioazhu"})
+        self.assertEqual(got["classes"][0]["n"], 5.0, "真用户 + runner，不含 test1")
+        self.assertEqual(got["lab"]["err"], 99.0)
+        self.assertEqual([c["cls"] for c in got["classes"]], ["note", "jev"])
+        names = [w["name"] for w in got["billed"]]
+        self.assertEqual(names, ["未知 bbbbbb", "xioazhu", ""])
+        x = got["billed"][1]
+        self.assertEqual((x["n"], x["by_cls"]["note"]["tout"], x["by_day"]["2026-11-23"]["tin"]), (2.0, 2.0, 6.0))
 
 
 class SlowCache(unittest.TestCase):

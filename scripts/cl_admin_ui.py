@@ -35,8 +35,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import cl_admin                                                      # noqa: E402
 
-#: 只放行这几个名字 —— 别把 `/api/<任意>` 直接拼进 Worker 的 URL。
-ALLOWED = {"add", "list", "stats", "revoke", "unrevoke", "renew", "limit", "quota", "delete", "minutes", "devices"}
+#: 只放行这几个名字 —— 别把 `/api/<任意>` 直接拼进 Worker 的 URL。`routes/get` / `terms/stats` 是只读的。
+ALLOWED = {"add", "list", "stats", "revoke", "unrevoke", "renew", "limit", "quota", "delete", "minutes", "devices",
+           "routes/get", "terms/stats"}
+
+#: VPS 上笔记 / 实时总结 runner 自己的码名（Worker `RUNNER_PASS_NAME`）。它不是人，是**代付账户**：
+#: 替真用户调模型，请求带 `X-ClassLive-Bill-To: sha256(那人的码)[:16]`（AE blob11）。
+RUNNER_NAME = "runner"
 
 #: 自定义头：逼浏览器先发预检。我们**不回** CORS 头，所以预检必失败、真请求不会发出去。
 #: 没有这一条，任意网站都能用 `<form>` / `fetch` 打 http://127.0.0.1:8770/api/revoke 把你的码吊销掉。
@@ -451,6 +456,23 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list,
         # 收音电平归一：capped / clamped 是「有多少块被削顶/被钳住」—— 麦克风太响或增益太狠的信号。
         nm_ = {k: _num(nm_.get(k)) for k in ("blocks", "capped", "clamped", "gain_db_max")}
 
+    # 功能使用度（feature_usage.block）：只回计数，不回内容（它本来也只有计数）。
+    fu = rep.get("feature_usage") if isinstance(rep.get("feature_usage"), dict) else None
+    if fu is not None:
+        du = fu.get("duty") if isinstance(fu.get("duty"), dict) else {}
+        rc = fu.get("recap") if isinstance(fu.get("recap"), dict) else {}
+        fu = {"n_events": _num(fu.get("n_events")), "unknown": _num(fu.get("unknown")),
+              "duty": {k: _num(du.get(k)) for k in ("card", "save", "ignore", "next", "edit", "reminder", "reminder_ok",
+                                                    "reminder_fail", "wrapup", "wrapup_save", "wrapup_ignore", "wrapup_timeout")},
+              "recap": {k: _num(rc.get(k)) for k in ("shown", "dismiss", "auto_hide", "toggle", "toggle_open")}}
+    rs = rep.get("resource") if isinstance(rep.get("resource"), dict) else None
+    if rs is not None:
+        rs = {k: _num(rs.get(k)) for k in ("cpu_s", "cpu_s_per_audio_s", "cpu_pct_of_walltime", "rss_peak_mb")}
+    # 采集器自己吞掉的异常：`{方法名: 次数}`（testmode `_safe_bad`）；老报告是 list / 空。
+    ce_raw = rep.get("collector_errors")
+    ce = ([f"{_enum(k, 60)} ×{_num(v)}" for k, v in list(ce_raw.items())[:10]] if isinstance(ce_raw, dict)
+          else [_enum(x, 80) for x in ce_raw[:10] if isinstance(x, str)] if isinstance(ce_raw, list) else [])
+
     gen = _enum(rep.get("generated"), 24)
     blocks = rep.get("blocks") if isinstance(rep.get("blocks"), dict) else {}
     return {
@@ -474,6 +496,7 @@ def _report_summary(rep: dict, sid: str, name: str, updated: str, files: list,
         "stream": st, "region": rp, "duty": dt_, "device": dv, "energy": en, "capture": cp,
         "merge": mg, "backfill": bf, "system": sys_, "ui": ui, "terms": tm, "live": lv, "deps": dp,
         "vad": vd, "norm": nm_, "semantic_seal": ss, "jev": jv, "counts": ct, "review": rv,
+        "features": fu, "resource": rs, "collector_errors": [x for x in ce if x],
     }
 
 
@@ -559,7 +582,9 @@ KATEX_LOCAL = pathlib.Path(__file__).resolve().parent.parent / "vendor" / "katex
 
 #: 诊断包里**看**的那几个成员（文本）。其余（live.jsonl / blocks.npz / atoms.jsonl …）只列名字与大小 ——
 #: 它们是逐句/逐块数据，展开就是整节课，面板里不整段倒出来。
-R2_DIAG_MEMBERS = ("diag.json", "env.json", "note.md", "app.log")
+R2_DIAG_MEMBERS = ("diag.json", "env.json", "note.md", "app.log",
+                   "client_events.jsonl",     # 谁在什么时刻点了什么 / 哪一步失败（client_events.py，只有事件名与标量）
+                   "upload_manifest.json")    # 这节课传了哪些文件、各多大
 #: 单个成员的文本上限（`app.log` 能到几 MB，只给尾巴）。
 R2_DIAG_MAX = 200_000
 
@@ -627,7 +652,7 @@ def _diag_pack(raw) -> dict:
     为什么值得看：**面板上「他电脑上缺依赖 / 崩溃 / 日志」这些结论，现在全靠用户把包发过来**。
     包在 R2 里躺着（每节测试模式的课都有），面板能自己解开看。
 
-    ⚠️ 只给文本成员（`diag.json` / `env.json` / `note.md` / `app.log` 尾巴）——
+    ⚠️ 只给文本成员（`R2_DIAG_MEMBERS`：diag / env / note / app.log 尾巴 / client_events / upload_manifest）——
     逐句日志（`live.jsonl`）与块数据（`blocks.npz`）只列名字与大小，不整段倒出来。
     """
     import io
@@ -910,6 +935,8 @@ TELEMETRY = "https://api.cloudflare.com/client/v4/accounts/{acct}/workers/observ
 
 def worker_logs(post=None, now_ms=None) -> dict:
     """近 24 h：各 ASR 引擎的耗时分布（Cloudflare 端算 median/p90/max）+ 最近的拒绝 / 全挂 / 额度 DO 不可用。
+    另有近 7 天两张：`issues` —— `handler.js` 其余那些「某一步失败了」的诊断行（见 `ISSUE_KEYS`）；
+    `errors` —— Worker 自己抛出去的异常（`$metadata.error`，按消息归并：次数 / 最近一次 / 哪种触发）。
 
     ⚠️ 只取 `source.*`（我们自己写的那行 JSON），**不取** `$workers.event.request` —— 那里曾有 IP 与经纬度
     （invocation logs，2026-10-14 已在 wrangler.toml 关掉；旧的 3 天内仍在 Cloudflare 那边）。
@@ -927,17 +954,24 @@ def worker_logs(post=None, now_ms=None) -> dict:
     post = post or _post_json
 
     def q(body):
-        j = post(url, hdr, {"queryId": "clui", "timeframe": tf, **body})
+        j = post(url, hdr, {"queryId": "clui", "timeframe": tf, **body})   # body 里带 timeframe 就盖掉 24 h
         if not j.get("success", False):
             raise RuntimeError("；".join(str(x.get("message", ""))[:120] for x in (j.get("errors") or [])[:2]) or "telemetry 拒了")
         return j.get("result") or {}
 
+    tf7 = {"from": now_ms - 7 * 86400000, "to": now_ms}
+    issue_q = {"view": "events", "limit": 100, "timeframe": tf7, "parameters": {
+        "datasets": ["cloudflare-workers"], "filterCombination": "or",
+        "filters": [{"key": k, "operation": "exists", "type": "string"} for k in ISSUE_KEYS]
+        + [{"key": "soniox", "operation": "neq", "type": "string", "value": "usage"}]}}   # usage = 每小时正常对账
+    err_q = {"view": "events", "limit": 100, "timeframe": tf7, "parameters": {
+        "datasets": ["cloudflare-workers"], "filters": [svc, {"key": "$metadata.error", "operation": "exists", "type": "string"}]}}
     flts = ({"key": "denied", "operation": "exists", "type": "string"},
             {"key": "result", "operation": "eq", "type": "string", "value": "all_failed"},
             {"key": "quota", "operation": "exists", "type": "string"})
     try:
-        # 四条查询互不依赖，一条约 2 s —— 串着问要 9 s，一起问 ≈ 最慢那条
-        with ThreadPoolExecutor(4) as ex:
+        # 六条查询互不依赖，一条约 2 s —— 串着问要十几秒，一起问 ≈ 最慢那条
+        with ThreadPoolExecutor(6) as ex:
             calc_f = ex.submit(q, {"view": "calculations", "parameters": {
                 "datasets": ["cloudflare-workers"],
                 "filters": [svc, {"key": "provider", "operation": "exists", "type": "string"}],
@@ -945,8 +979,10 @@ def worker_logs(post=None, now_ms=None) -> dict:
                 "groupBys": [{"type": "string", "value": "model"}]}})
             ev_fs = [ex.submit(q, {"view": "events", "limit": 30, "parameters": {
                 "datasets": ["cloudflare-workers"], "filters": [svc, flt]}}) for flt in flts]
+            iss_f, err_f = ex.submit(q, issue_q), ex.submit(q, err_q)
             calc = calc_f.result()
             evs = [f.result() for f in ev_fs]
+            iss, errs = iss_f.result(), err_f.result()
         out: dict = {}
         for c in calc.get("calculations") or []:
             op = str(c.get("calculation", "")).split("(")[0]
@@ -965,7 +1001,49 @@ def worker_logs(post=None, now_ms=None) -> dict:
     except Exception as e:                                            # noqa: BLE001
         return {"error": f"Workers Logs 读不到：{str(e)[:160] or type(e).__name__}"}
     events.sort(key=lambda x: -x["t"])
-    return {"models": sorted(out.values(), key=lambda r: -r["count"]), "events": events[:40]}
+    return {"models": sorted(out.values(), key=lambda r: -r["count"]), "events": events[:40],
+            "issues": issues_of(iss), "errors": errors_of(errs)}
+
+
+#: `handler.js` 里「某一步失败了」的诊断行，按顶层键认（值 / 其余字段见各自的 console.log）。
+#: 加了新的诊断行就加到这里，面板「后台报错」那张卡才看得见。`soniox` 另算（`usage` 是正常对账，要排除）。
+ISSUE_KEYS = ("passes_do", "runner_hub", "runner", "web_data", "web_data_write_failed", "groq403",
+              "web_prompt", "terms", "git")
+#: 诊断行里允许回给面板的字段（都是枚举 / 数字 / 截短的错误串；不含码、正文、IP）。
+ISSUE_FIELDS = ("where", "name", "msg", "retryable", "overloaded", "region", "status", "probe", "err",
+                "job_id", "session_id", "why", "field", "course_key", "kind")
+
+
+def issues_of(res: dict) -> list:
+    """telemetry `events` → `[{t, key, val, …字段}]`，新 → 旧。纯函数。"""
+    out = []
+    for e in ((res or {}).get("events") or {}).get("events") or []:
+        src = e.get("source") if isinstance(e.get("source"), dict) else {}
+        key = next((k for k in ISSUE_KEYS + ("soniox",) if k in src), "")
+        if not key or (key == "soniox" and src.get("soniox") == "usage"):
+            continue
+        row = {"t": int(e.get("timestamp") or 0), "key": key, "val": str(src.get(key))[:120]}
+        row.update({k: (src[k] if isinstance(src[k], (bool, int, float)) else str(src[k])[:160])
+                    for k in ISSUE_FIELDS if k in src})
+        out.append(row)
+    return sorted(out, key=lambda x: -x["t"])
+
+
+def errors_of(res: dict) -> list:
+    """Worker 抛出去的异常 → 按消息归并 `[{msg, n, last, first, trigger}]`，次数多的在前。纯函数。
+    消息里的 Cloudflare 引用号（`reference = …`）去掉再归并，不然每条都不一样。"""
+    grp: dict = {}
+    for e in ((res or {}).get("events") or {}).get("events") or []:
+        md = e.get("$metadata") if isinstance(e.get("$metadata"), dict) else {}
+        msg = re.sub(r"reference = \w+", "reference = …", str(md.get("error") or ""))[:200]
+        if not msg:
+            continue
+        t = int(e.get("timestamp") or 0)
+        wk = e.get("$workers") if isinstance(e.get("$workers"), dict) else {}
+        g = grp.setdefault(msg, {"msg": msg, "n": 0, "first": t, "last": t, "trigger": str(md.get("trigger") or wk.get("eventType") or "")[:60]})
+        g["n"] += 1
+        g["first"], g["last"] = min(g["first"], t), max(g["last"], t)
+    return sorted(grp.values(), key=lambda x: (-x["n"], -x["last"]))
 
 
 #: Analytics Engine（`handler.js` 的 track()）。列顺序与那里的注释一一对应 —— 改一边要改另一边。
@@ -1084,6 +1162,78 @@ def ae_310(post=None) -> dict:
     `notes` 课后笔记（max_tokens > 600）按码的 token。数据集缺席 → 同 `ae_events` 回 `pending`。"""
     return _ae_sqls(post, (("soniox", _AE_310_SONIOX), ("fast", _AE_310_FAST),
                            ("rollout", _AE_310_VER), ("notes", _AE_310_NOTES)))
+
+
+# ---- 每类 AI 调用（Analytics Engine，近 7 天）----
+# blob10 = 调用类（客户端 `X-ClassLive-Call`：translate / seal / atom / chapter / merge / note / recap / prep / term …；
+#          老客户端不带 = legacy）· blob9 = finish_reason（`length` = 被 max_tokens 截断，坏内容的主要形状）·
+# double13 = 推理 token（模型「先想再答」写出的、用户看不到的那部分 —— 一样按写出价收钱）·
+# blob11 = runner 代谁付的（`sha256(码)[:16]`，只有 runner 码的请求才有，见 handler.js `billToOf`）。
+_LLM_PATHS = "('/v1/chat/completions', '/v1/jev')"
+_AE_CALLS = f"""SELECT blob10 AS cls, blob1 AS path, blob2 AS name, SUM(_sample_interval) AS n,
+ SUM(IF(double1 >= 400, _sample_interval, 0)) AS err, SUM(IF(blob9 = 'length', _sample_interval, 0)) AS trunc,
+ SUM(IF(blob9 != '', _sample_interval, 0)) AS fin_n,
+ SUM(double4 * _sample_interval) AS tin, SUM(double5 * _sample_interval) AS tout, SUM(double6 * _sample_interval) AS hit,
+ SUM(double13 * _sample_interval) AS rtok
+ FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '7' DAY AND blob1 IN {_LLM_PATHS}
+ GROUP BY cls, path, name ORDER BY n DESC LIMIT 500 FORMAT JSON"""
+_AE_BILLED = f"""SELECT blob11 AS bill, blob10 AS cls, blob1 AS path, toStartOfDay(timestamp) AS day, SUM(_sample_interval) AS n,
+ SUM(IF(double1 >= 400, _sample_interval, 0)) AS err,
+ SUM(double4 * _sample_interval) AS tin, SUM(double5 * _sample_interval) AS tout, SUM(double6 * _sample_interval) AS hit,
+ SUM(double13 * _sample_interval) AS rtok
+ FROM {AE_DATASET} WHERE timestamp > NOW() - INTERVAL '7' DAY AND blob2 = '{RUNNER_NAME}' AND blob1 IN {_LLM_PATHS}
+ GROUP BY bill, cls, path, day ORDER BY n DESC LIMIT 1000 FORMAT JSON"""
+_CALL_NUMS = ("n", "err", "trunc", "fin_n", "tin", "tout", "hit", "rtok")
+
+
+def is_lab(name) -> bool:
+    """实验码（test* / public）—— 不算真用户；与面板页 `isLab` 同口径（runner 另算：它替真用户干活）。"""
+    n = str(name or "")
+    return n.startswith("test") or n == "public"
+
+
+def _call_class(r) -> str:
+    c = str(r.get("cls") or "legacy")
+    return "jev" if c == "legacy" and r.get("path") == "/v1/jev" else c   # Jev 从没带过调用类 —— 按路径认出来
+
+
+def calls_of(rows, billed, names) -> dict:
+    """**纯函数**：AE 两张表 → `classes`（每类调用，真用户 + runner）/ `lab`（实验码合计）/ `billed`（runner 替谁付的）。
+
+    `names` = `{sha256(码)[:16]: 码名}`。runner 的请求没带 bill_to（老 runner / 非笔记任务）记在 `""`（「没标记」）。"""
+    cls: dict = {}
+    lab = {k: 0.0 for k in _CALL_NUMS}
+    for r in rows or []:
+        c = _call_class(r)
+        tgt = lab if is_lab(r.get("name")) else cls.setdefault(c, {"cls": c, **{k: 0.0 for k in _CALL_NUMS}})
+        for k in _CALL_NUMS:
+            tgt[k] += float(r.get(k) or 0)
+    who: dict = {}
+    for r in billed or []:
+        h = str(r.get("bill") or "")
+        nm = names.get(h) or ("" if not h else "未知 " + h[:6])
+        w = who.setdefault(nm, {"name": nm, "hash": h, "by_cls": {}, "by_day": {}, **{k: 0.0 for k in ("n", "err", "tin", "tout", "hit", "rtok")}})
+        c = _call_class(r)
+        day = str(r.get("day") or "")[:10]
+        for k in ("n", "err", "tin", "tout", "hit", "rtok"):
+            v = float(r.get(k) or 0)
+            w[k] += v
+            w["by_cls"].setdefault(c, {kk: 0.0 for kk in ("n", "tin", "tout", "hit", "rtok")})
+            if k in w["by_cls"][c]:
+                w["by_cls"][c][k] += v
+        w["by_day"].setdefault(day, {"n": 0.0, "tin": 0.0, "tout": 0.0, "hit": 0.0})
+        for k in ("n", "tin", "tout", "hit"):
+            w["by_day"][day][k] += float(r.get(k) or 0)
+    return {"classes": sorted(cls.values(), key=lambda x: -x["n"]), "lab": lab,
+            "billed": sorted(who.values(), key=lambda x: -x["tout"])}
+
+
+def ae_calls(post=None) -> dict:
+    """近 7 天每类 AI 调用（次数 / 失败 / 截断 / token / 推理 token）+ runner 替谁付了多少。见 `calls_of`。"""
+    got = _ae_sqls(post, (("rows", _AE_CALLS), ("billed", _AE_BILLED)))
+    if "error" in got or got.get("pending"):
+        return got
+    return calls_of(got["rows"], got["billed"], _code_names())
 
 
 # ---- 平台账号（Soniox / OpenRouter）：本机 key 只读 GET，key 从不进响应 ----
@@ -1519,15 +1669,19 @@ def runner_state() -> dict:
     return st
 
 
-def _name_hashes(st: dict) -> None:
-    """给 live / jobs 每条补上 `name`（码名）。账本里只存 sha256(码)[:16]，码名要拿码表反推 —— 面板才能说「谁在上课」。
-    码表读不到就不补（面板退回显示「未知」），不让这一项拖垮整张卡。"""
+def _code_names() -> dict:
+    """`{sha256(码)[:16]: 码名}`。账本 / bill_to 里只存这个哈希，码名要拿码表反推。读不到码表 → 空表。"""
     import hashlib
     try:
         codes = cl_admin.admin_post("list", {}).get("codes", [])
-    except Exception:                                                 # noqa: BLE001 —— 只丢名字，不丢队列
-        return
-    names = {hashlib.sha256(str(c.get("code", "")).encode()).hexdigest()[:16]: c.get("name") for c in codes if c.get("code")}
+    except Exception:                                                 # noqa: BLE001 —— 只丢名字，不丢数据
+        return {}
+    return {hashlib.sha256(str(c.get("code", "")).encode()).hexdigest()[:16]: c.get("name") for c in codes if c.get("code")}
+
+
+def _name_hashes(st: dict) -> None:
+    """给 live / jobs 每条补上 `name`（码名）—— 面板才能说「谁在上课」。码表读不到就不补（面板退回显示「未知」）。"""
+    names = _code_names()
     for k in ("live", "jobs"):
         for x in st.get(k) or []:
             if isinstance(x, dict) and x.get("hash") in names:
@@ -1536,7 +1690,7 @@ def _name_hashes(st: dict) -> None:
 
 SLOW = {"web": web_sessions, "runner": runner_state, "habits": habits, "cf": cf_summary, "r2": r2_ingest, "health": cf_health, "logs": worker_logs, "ae": ae_events,
         "ae310": ae_310, "reports": r2_reports, "soniox": soniox_account, "openrouter": openrouter_account,
-        "deepseek": deepseek_account}
+        "deepseek": deepseek_account, "calls": ae_calls}
 FRESH_S = 55                                                          # 这么新：直接给
 STALE_S = 15 * 60                                                     # 这么旧以内：先给旧的，后台重取；再旧就同步等
 _CACHE: dict = {}                                                     # name → (取到的 monotonic 时刻, 结果)
@@ -1578,6 +1732,67 @@ def prewarm() -> None:
         threading.Thread(target=cached, args=(name, fn, True), daemon=True).start()
 
 
+#: 笔记 HTML 是任何持公开 token 的人都能传的 → 当不可信内容发：sandbox（无 allow-same-origin）
+#: 让它拿不到面板这个 origin（管理 API 同源）；脚本可跑（交互图要用）但碰不到面板。
+NOTE_CSP = "sandbox allow-scripts"
+
+
+def katex_asset(rest: str):
+    """仓库 `vendor/katex/` 里的一个文件 → `(content-type, bytes)`；不在里面 / 读不到 → `{"error"}`。"""
+    f = KATEX_LOCAL / rest
+    try:
+        if not f.is_file() or not f.resolve().is_relative_to(KATEX_LOCAL.resolve()):
+            return {"error": "没有这个资产"}
+        ctype = "font/woff2" if f.suffix == ".woff2" else (
+            "text/css" if f.suffix == ".css" else "application/javascript")
+        return ctype, f.read_bytes()
+    except OSError as e:
+        return {"error": f"资产读不到：{e}"}
+
+
+def note_page(sid: str, assets: str, raw=None) -> tuple[int, object]:
+    """交互版笔记 → `(200, html bytes)` 或 `(404, {"error"})`。`assets` = 页面里 KaTeX 资产改指到哪
+    （本机面板 `/assets/katex/`，远程面板在 nginx 前缀底下用相对的 `../assets/katex/`）。发的时候配 `NOTE_CSP`。"""
+    got = (raw or r2_raw)(sid.strip("/"), "note.html")
+    if "error" in got:
+        return 404, {"error": got["error"]}
+    page = re.sub(r"\.classlive-assets/katex/", assets, str(got.get("text") or ""))   # 否则公式退回 TeX 源码
+    return 200, page.encode("utf-8")
+
+
+#: 面板里的**读**操作（没有一个碰 Worker 的写路径）。本机面板与远程面板（`cl_panel_remote`）共用。
+READ_OPS = frozenset(SLOW) | {"raw", "websession", "cfwin"}
+
+
+def read_op(name: str, body) -> tuple[int, dict] | None:
+    """面板 POST `/api/<name>` 里的**读**操作 → `(状态码, JSON)`；不是读操作 → `None`（交给 ALLOWED 那条）。
+
+    cf：Cloudflare 用量 · r2：上传桶清单 · health：延迟/上游/部署/节点/站点 · logs：Workers Logs 里我们写的事件 ·
+    ae：Analytics Engine 逐请求事件 · ae310：3.10 的新量具（Soniox key / OpenRouter 快速通道 / 版本 / 笔记）·
+    reports：上传桶里 report.json 的只读摘要 · soniox / openrouter / deepseek：平台账号额度。都不经 Worker。
+    raw：某节课的原文（不脱敏、不落盘）· websession：一节网页课的全部事件 · cfwin：某段时间的 Worker 延迟。
+    """
+    if name not in READ_OPS:
+        return None
+    b = body if isinstance(body, dict) else {}
+    if name in SLOW:
+        return 200, cached(name, SLOW[name], bool(b.get("fresh")))
+    if name == "raw":
+        if not isinstance(body, dict):
+            return 400, {"error": "body 要是对象"}
+        return 200, r2_raw(b.get("id"), str(b.get("what") or "report.json"))
+    if name == "websession":                                          # 先有 web 那张卡才有缓存
+        who, sid = str(b.get("name") or ""), str(b.get("session") or "")
+        if not (re.fullmatch(r"[a-z0-9]{1,16}", who) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sid)):
+            return 400, {"error": "要 {name, session}，形状要对"}
+        import cl_web_data
+        return 200, cl_web_data.session_detail(who, sid)
+    s, u = str(b.get("s") or ""), str(b.get("u") or "")              # cfwin：抽屉里每个时段一行
+    if not (re.fullmatch(ISO_Z, s) and re.fullmatch(ISO_Z, u)):
+        return 400, {"error": "要 {s, u} 两个 ISO 时刻，格式 2026-10-14T17:00:00Z"}
+    return 200, cf_window(s, u)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ClassLiveAdminUI"
 
@@ -1614,29 +1829,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": f"读不到模板 {PAGE.name}：{e}"})
         elif path.startswith("/assets/katex/"):
             # 交互版 HTML 里的 KaTeX 资产是相对引用 → 改指到**本机**副本（仓库 vendor/katex/）。
-            rest = path[len("/assets/katex/"):]
-            f = KATEX_LOCAL / rest
-            try:
-                if not f.is_file() or not f.resolve().is_relative_to(KATEX_LOCAL.resolve()):
-                    return self._json(404, {"error": "没有这个资产"})
-                ctype = "font/woff2" if f.suffix == ".woff2" else (
-                    "text/css" if f.suffix == ".css" else "application/javascript")
-                self._send(200, f.read_bytes(), ctype)
-            except OSError as e:
-                self._json(404, {"error": f"资产读不到：{e}"})
+            got = katex_asset(path[len("/assets/katex/"):])
+            if isinstance(got, dict):
+                return self._json(404, got)
+            self._send(200, got[1], got[0])
         elif path.startswith("/note/"):
             # 交互版（详细版）笔记：当页面打开。⚠️ 只在本机环回、只读、不落盘。
-            sid = path[len("/note/"):].strip("/")
-            got = r2_raw(sid, "note.html")
-            if "error" in got:
-                return self._json(404, {"error": got["error"]})
-            page = str(got.get("text") or "")
-            # 把相对资产路径改成面板自己的（否则公式退回 TeX 源码）
-            page = re.sub(r"\.classlive-assets/katex/", "/assets/katex/", page)
-            # ⚠️ 桶里的 HTML 是任何持公开 token 的人都能传的 → 当不可信内容发：sandbox（无 allow-same-origin）
-            #    让它拿不到面板这个 origin（管理 API 同源）；脚本可跑（交互图要用）但碰不到面板。
-            self._send(200, page.encode("utf-8"), "text/html; charset=utf-8",
-                       {"content-security-policy": "sandbox allow-scripts"})
+            code, body = note_page(path[len("/note/"):], "/assets/katex/")
+            if code != 200:
+                return self._json(code, body)
+            self._send(200, body, "text/html; charset=utf-8", {"content-security-policy": NOTE_CSP})
         else:
             self._json(404, {"error": "not found"})
 
@@ -1649,53 +1851,18 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get(GATE_HEADER) != "1":
             return self._json(403, {"error": "缺少 %s 头（本机页面对任意网站的第一道闸）" % GATE_HEADER})
         name = path[len("/api/"):]
-        # cf：Cloudflare 用量 · r2：上传桶清单 · health：延迟/上游/部署/节点/站点 · logs：Workers Logs 里我们写的事件 ·
-        # ae：Analytics Engine 逐请求事件 · ae310：3.10 的新量具（Soniox key / OpenRouter 快速通道 / 版本 / 笔记）·
-        # reports：上传桶里 report.json 的只读摘要 · soniox / openrouter：平台账号额度。都不经 Worker。
-        if name in SLOW:
-            raw = self.rfile.read(int(self.headers.get("content-length") or 0))
-            try:
-                fresh = bool(json.loads(raw or b"{}").get("fresh"))
-            except (ValueError, AttributeError):
-                fresh = False
-            return self._json(200, cached(name, SLOW[name], fresh))
-        if name == "raw":                                             # 看某节课的原文（本机自用，不脱敏、不落盘）
-            raw_body = self.rfile.read(int(self.headers.get("content-length") or 0))
-            try:
-                b = json.loads(raw_body or b"{}")
-            except ValueError:
-                return self._json(400, {"error": "body 不是 JSON"})
-            if not isinstance(b, dict):
-                return self._json(400, {"error": "body 要是对象"})
-            return self._json(200, r2_raw(b.get("id"), str(b.get("what") or "report.json")))
-        if name == "websession":                                      # 一节网页课的全部事件（先有 web 那张卡才有缓存）
-            raw = self.rfile.read(int(self.headers.get("content-length") or 0))
-            try:
-                b = json.loads(raw or b"{}")
-                who, sid = str(b["name"]), str(b["session"])
-            except (ValueError, KeyError, TypeError):
-                return self._json(400, {"error": "要 {name, session}"})
-            if not (re.fullmatch(r"[a-z0-9]{1,16}", who) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sid)):
-                return self._json(400, {"error": "name / session 形状不对"})
-            import cl_web_data
-            return self._json(200, cl_web_data.session_detail(who, sid))
-        if name == "cfwin":                                           # 某一段时间的 Worker 延迟（抽屉里每个时段一行）
-            raw = self.rfile.read(int(self.headers.get("content-length") or 0))
-            try:
-                b = json.loads(raw or b"{}")
-                s, u = str(b["s"]), str(b["u"])
-            except (ValueError, KeyError, TypeError):
-                return self._json(400, {"error": "要 {s, u} 两个 ISO 时刻"})
-            if not (re.fullmatch(ISO_Z, s) and re.fullmatch(ISO_Z, u)):
-                return self._json(400, {"error": "时刻格式要 2026-10-14T17:00:00Z"})
-            return self._json(200, cf_window(s, u))
-        if name not in ALLOWED:
-            return self._json(404, {"error": f"不认这个操作：{name}"})
         raw = self.rfile.read(int(self.headers.get("content-length") or 0))
         try:
             body = json.loads(raw or b"{}")
         except ValueError:
-            return self._json(400, {"error": "body 不是 JSON"})
+            if name not in SLOW:                                      # 慢卡片 body 坏了当没要 fresh（老行为）
+                return self._json(400, {"error": "body 不是 JSON"})
+            body = {}
+        got = read_op(name, body)
+        if got is not None:
+            return self._json(*got)
+        if name not in ALLOWED:
+            return self._json(404, {"error": f"不认这个操作：{name}"})
         if not isinstance(body, dict):
             return self._json(400, {"error": "body 要是对象"})
         try:

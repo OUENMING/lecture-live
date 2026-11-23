@@ -1,0 +1,6 @@
+# 远程面板的只读 CORS 代理（Muse 的看板用）。secret：PANEL_KEY（= VPS ~/.classlive/remote-panel-key）、PROXY_KEY（给调用方的）。
+name = "classlive-panel-proxy"
+main = "worker.js"
+compatibility_date = "2026-11-01"
+workers_dev = false
+routes = [{ pattern = "cl-proxy.bldcam.page/*", zone_name = "bldcam.page" }]
